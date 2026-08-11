@@ -19,7 +19,9 @@
 1. **レイヤリング**: 一方向依存 **HAL/CMSIS/ThreadX（`lib/`）← port（ボード別）← shell ← app**。
    shell コアはボード非依存 — `#ifdef <BOARD>` やペリフェラル直叩きを shell の core/cmds に
    入れない。ボード差は transport 抽象（`struct cli_transport_api`）と port 側グルーで吸収する。
-   **`boot/`（Wio の DFU ブートローダ）は独立ツリー**で、app / shell とソースを共有しない。
+   ボード固有物は `boards/<board>/`（port/ ldscript/ src/）に置く。
+   **Wio の DFU ブートローダ（`boards/wio-lite-ai/boot/`）は独立ツリー**で、app / shell と
+   ソースを共有しない。
 
 2. **共有コアに触れる変更は全対応ボードで成立すること。** 片方のボードだけを見て LGTM しない。
 
@@ -30,15 +32,16 @@
    `_Static_assert` を通すこと。
 
 5. **Wio Lite AI: app はクロックツリーを再設定しない。**
-   DFU ブートローダ（本リポジトリの `boot/`）が構成した 550 MHz / PLL3Q 48 MHz USB /
+   DFU ブートローダ（本リポジトリの `boards/wio-lite-ai/boot/`）が構成した 550 MHz / PLL3Q 48 MHz USB /
    FLASH latency 3 を継承する。app が RCC/PLL/FLASH ACR/PWR を書き換えると全部壊れる
    （HSI 64 MHz に落ちるのに latency は 550 MHz 用のまま）。`SystemInit` は
    **FPU + VTOR + ITCM ロードのみ**。VTOR はリンカの `g_pfnVectors` から取る（ハードコード不可）。
 
-6. **Wio Lite AI: `boot/` と `ldscript/STM32H725AEIx_ROM.ld` は不変。**
+6. **Wio Lite AI: boot ツリー（`boards/wio-lite-ai/boot/`）と ROM リンカスクリプト
+   （`STM32H725AEIx_ROM.ld`）は不変。**
    内蔵 Flash セクタ0 `0x08000000`（128KB）に DFU ブートローダが常駐する。ここを焼き直す
    操作はブリック本番で、**現存する実機は 1 枚しかない**（board #1 は恒久文鎮化済み）。
-   **`boot/iflash.c` の書込先セクタ範囲チェックはセクタ0 を守る唯一の砦**で、緩める変更は不可。
+   **boot の `iflash.c` の書込先セクタ範囲チェックはセクタ0 を守る唯一の砦**で、緩める変更は不可。
    app は `0x08020000`（セクタ1-3, 384KB）から実行し、書込は DFU 経由のみ。
    **書換え耐久 ~10k サイクル** — 自動ループで焼く提案は不可。DFU フォールバック
    （erased/invalid app は必ず DFU モードに入る）を app 側から壊す変更も不可。

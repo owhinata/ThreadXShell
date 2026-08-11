@@ -136,7 +136,7 @@ HAL/CMSIS/ThreadX ← port ← shell ← app。**発生ボードを明記する�
   コンソール = VCP USART1 PA9/PB7 115200。メモリ: Flash 1MB @ 0x08000000 / ITCM 16KB /
   DTCM 64KB @ 0x20000000 / SRAM 256KB @ 0x20010000。
 - **Wio Lite AI**: STM32H725AEI6 / Cortex-M7 @ 550 MHz。DFU ブートローダ（内蔵 Flash セクタ0
-  `0x08000000`、本リポジトリ `boot/`・**不変**）が構成したクロックを app が継承し、**RCC を
+  `0x08000000`、本リポジトリ `boards/wio-lite-ai/boot/`・**不変**）が構成したクロックを app が継承し、**RCC を
   再設定しない**。app は内蔵 Flash `0x08020000`（セクタ1-3, 384KB）から実行。RAM は AXI-SRAM
   320KB @ 0x24000000（DMA が見える唯一の RAM）/ DTCM 128KB @ 0x20000000 / ITCM 64KB。
   コンソール = USB CDC（USB1_OTG_HS を FS 内蔵 PHY 動作、TinyUSB、`0483:5740`）。

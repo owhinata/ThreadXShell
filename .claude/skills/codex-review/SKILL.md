@@ -123,7 +123,7 @@ touch ~/.claude/.threadx-shell-plan-codex-reviewed
   エイリアス（`tud_int_handler(0)`）。GPIO = PA11/PA12 `GPIO_AF10_OTG1_FS`、
   USB クロック PLL3Q 48 MHz、app の VID/PID = `0483:5740`
 - **メモリ配置と実行元**: app は内蔵 Flash `0x08020000`（セクタ1-3, 384KB）から実行。
-  セクタ0 `0x08000000` は DFU ブートローダ専用（不可侵。`boot/` は本リポジトリにあるが**不変**）
+  セクタ0 `0x08000000` は DFU ブートローダ専用（不可侵。boot は本リポジトリ `boards/wio-lite-ai/boot/` にあるが**不変**）
 - ピンの AF 番号が schematic / RM0468 と一致するか（LED0=PC13, LED1=PF0, USER=PF1）
 
 ### 観点 3: HW リソース競合レビュー
@@ -145,8 +145,8 @@ touch ~/.claude/.threadx-shell-plan-codex-reviewed
     新しいバッファを足す plan は必ずこの表で行き先を決めさせる
 - [!] **リンカスクリプトの `ASSERT` は LTO 下で空振りする**。配置を変える plan はポストリンクの
   residency チェック（`check_itcm_residency.py` / `check_dtcm_residency.py` 相当）を通るか
-- **Wio boot 境界**: 変更が `boot/`・`ldscript/STM32H725AEIx_ROM.ld`・内蔵 Flash セクタ0 に
-  波及していないか。**`boot/iflash.c` の範囲チェックはセクタ0 を守る唯一の砦**で、
+- **Wio boot 境界**: 変更が boot ツリー（`boards/wio-lite-ai/boot/`）・
+  `STM32H725AEIx_ROM.ld`・内蔵 Flash セクタ0 に波及していないか。**boot の `iflash.c` の範囲チェックはセクタ0 を守る唯一の砦**で、
   緩める変更は不可。boot に触れる plan はそれだけで最厳格レビュー対象
 - **ビルド入力**: `_ref/`（および `../*/_ref/`）は git 管理外なので、CMake / スクリプトが
   読む plan は「クローンしただけでは configure できないリポジトリ」を作る（wio-lite-ai#58）
@@ -165,6 +165,6 @@ HW 依存の設計には、LGTM 前に成立性の証拠を要求する:
 
 - `../stm32f746g-disco/_ref/` — RM0385 / UM1907 / STM32Cube_FW_F7（ST 公式デモ）
 - `../wio-lite-ai/_ref/` — RM0468 / PM0253 / Wio Lite AI schematic / STM32Cube_FW_H7
-- `boot/README.md` — ブートローダが app へ渡す実測クロック値と boot 書込手順
+- `boards/wio-lite-ai/boot/README.md` — ブートローダが app へ渡す実測クロック値と boot 書込手順
   （boot 統合完了までは `../wio-lite-ai/boot/README.md`）
 - 統合元の実装: `../stm32f746g-disco/shell/` `../wio-lite-ai/shell/`（および両 `port/`）

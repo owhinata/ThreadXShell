@@ -19,17 +19,35 @@ HAL/CMSIS/ThreadX 等は upstream ミラー submodule、ARM GNU ツールチェ�
 
 ## 現行の作業目標
 
-**両リポジトリの shell（`shell/core` `shell/cmds` `shell/backend` `shell/include`）を
-ボード非依存コアとして統合し、STM32F746G-DISCO と Wio Lite AI の 2 ポートで動かす。**
-**Wio Lite AI の DFU ブートローダ（`boot/`）も本リポジトリに統合する**（移植元
-`../wio-lite-ai/boot/`）。boot は app とソースを共有しない独立ツリーとして持ち込み、
-**統合後も不変扱い**（下記「ボード固有ルール」参照）。
-ディレクトリ構成・CMake 構成は最初の移植 Issue の plan で確定する（plan は codex-review
-ゲート対象）。それまでビルド/フラッシュの正は各元リポジトリ。
+**両リポジトリの shell をボード非依存コアとして統合し、STM32F746G-DISCO と Wio Lite AI の
+2 ポートで動かす。** 確定済みの方針（2026-08-11 ユーザー決定）:
+
+- **shell 統合のベースは wio-lite-ai**（最新実装。core の差分は `cli_core.c` 63 行 /
+  `cli_parse.c` 105 行のみで、乖離の本体は cmds と backend）。F746 側の uart backend と
+  F746 専用 cmds（fs/gui/qspi/sdram 等）は移植で追加する。
+- **移植順**: M1 = 骨組み + Wio Lite AI ポート（USB CDC で shell 起動）→ M2 = F746 ポート →
+  M3 = boot ツリー取り込み（ビルドのみ、焼かない）→ M4 = 全ボードビルドのスクリプト/CI 化。
+- **Wio Lite AI の DFU ブートローダも本リポジトリに統合する**（移植元 `../wio-lite-ai/boot/`）。
+  app とソースを共有しない独立ツリーとして持ち込み、**統合後も不変扱い**
+  （下記「ボード固有ルール」参照）。
+
+CMake の詳細（ボード選択方式・cmds 取捨機構）は各移植 Issue の plan で確定する（plan は
+codex-review ゲート対象）。移植完了までビルド/フラッシュの正は各元リポジトリ。
 
 ## アーキテクチャ / レイヤリング
 
 一方向依存を守る: **HAL/CMSIS/ThreadX（`lib/`）← port（ボード別グルー）← shell ← app**。
+
+リポジトリ構成（確定。ボード固有物は `boards/<board>/` に集約する）:
+
+```
+shell/            # ボード非依存: core/ cmds/ backend/ include/ test/
+lib/              # upstream submodules (f7 系と h7 系が同居)
+cmake/
+boards/
+  f746g-disco/    # port/ ldscript/ src/
+  wio-lite-ai/    # port/ ldscript/ src/ boot/
+```
 
 - **shell コアはボード非依存**。`#ifdef <BOARD>` やペリフェラル直叩きを shell の core/cmds に
   入れない。ボード差は transport 抽象（`struct cli_transport_api` の backend）と port 側グルーで
@@ -39,7 +57,7 @@ HAL/CMSIS/ThreadX 等は upstream ミラー submodule、ARM GNU ツールチェ�
 - shell は静的割当（ヒープ非使用）。スタックサイズ・スレッド優先度は `cli_config.h` の既定を
   踏襲し、`_Static_assert` を必ず通す。
 - upstream submodule（`lib/` 配下）は read-only。編集せず、必要な調整は port 側で吸収する。
-- **`boot/`（Wio Lite AI の DFU ブートローダ）は独立ツリー**。app / shell とソースを
+- **boot ツリー（`boards/wio-lite-ai/boot/`）は独立**。app / shell とソースを
   共有しない。shell 側の都合で boot に依存を張らない。
 
 ## 開発ワークフロー
@@ -71,7 +89,7 @@ HAL/CMSIS/ThreadX 等は upstream ミラー submodule、ARM GNU ツールチェ�
 - 新規ペリフェラル採用、DMA・キャッシュ構成、リンカスクリプト/起動フローの変更
 - 複数レイヤ（HW + HAL + RTOS + shell）に跨る変更
 - Wio Lite AI のクロック継承・メモリ配置・USB CDC に関わる変更（ブリックリスク。特に厳格に）
-- **`boot/` に触れる一切の変更**（原則やらない。やるなら最優先で厳格 review）
+- **boot ツリー（`boards/wio-lite-ai/boot/`）に触れる一切の変更**（原則やらない。やるなら最優先で厳格 review）
 
 ゲートのタイミング:
 
@@ -206,13 +224,14 @@ git branch -d feat/<N>-short-description
 ### Wio Lite AI（[!] ブリック安全則あり）
 
 - **現存する実機は board #2 のみ**（board #1 は恒久文鎮化）。焼き直し・実験のコストを常に意識する。
-- [!] **`boot/`（DFU ブートローダ）と `ldscript/STM32H725AEIx_ROM.ld` は不変**。
+- [!] **boot ツリー（`boards/wio-lite-ai/boot/`）と ROM リンカスクリプト
+  （`STM32H725AEIx_ROM.ld`）は不変**。
   内蔵 Flash セクタ0 `0x08000000`（128KB）に boot が常駐し、ここを焼き直す操作は
   **ブリック本番**。boot は本リポジトリに統合するが（移植元 `../wio-lite-ai/boot/`）、
   app 開発で boot 側を変更する必要は原則ない。もし触る必要が生じたら **必ず**
   codex-review（3 面）+ objdump 監査 + バックアップを経てから、良品 ST-Link（mode=UR）
-  接続下でユーザーに実機書込を依頼する（手順は `boot/README.md`）。
-  **`boot/iflash.c` の書込先セクタ範囲チェックはセクタ0 を守る唯一の砦**で、緩める変更は
+  接続下でユーザーに実機書込を依頼する（手順は `boards/wio-lite-ai/boot/README.md`）。
+  **boot の `iflash.c` の書込先セクタ範囲チェックはセクタ0 を守る唯一の砦**で、緩める変更は
   絶対にしない。ST-Link での内蔵 Flash 書込は boot をセクタ0 に焼く用だけ（通常やらない）。
 - **DFU フォールバックの安全網を app 側から壊さない**: erased/invalid app では必ず DFU モード
   に入る（中断した DFU 転送も、先頭 32B を最後に書く vector-last commit により必ずここに落ちる）。
@@ -247,7 +266,7 @@ git branch -d feat/<N>-short-description
   :3333。SCS 読みが安定）か `st-util`（:4242）。
 - コンソール（picocom 等）と `st-flash`/読み出しは `/dev/ttyACM0` を奪い合うと文字化けする。
   SWD とコンソールは別系統。
-- Wio Lite AI の boot 書込/復旧手順は `boot/README.md`（統合後）。焼き/復旧用 ST-Link の
+- Wio Lite AI の boot 書込/復旧手順は `boards/wio-lite-ai/boot/README.md`（統合後）。焼き/復旧用 ST-Link の
   個体情報は `../wio-lite-ai/CLAUDE.md` を参照（良品 Discovery ST-Link のみ mode=UR 可）。
 
 ## リファレンス（`_ref/`）

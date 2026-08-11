@@ -1,0 +1,33 @@
+[submodule "lib/cmsis_device_h7"]
+	path = lib/cmsis_device_h7
+	url = https://github.com/STMicroelectronics/cmsis_device_h7
+[submodule "lib/stm32h7xx_hal_driver"]
+	path = lib/stm32h7xx_hal_driver
+	url = https://github.com/STMicroelectronics/stm32h7xx_hal_driver
+[submodule "lib/cmsis_core"]
+	path = lib/cmsis_core
+	url = https://github.com/STMicroelectronics/cmsis-core
+	branch = cm7
+[submodule "lib/tinyusb"]
+	path = lib/tinyusb
+	url = https://github.com/hathach/tinyusb.git
+[submodule "lib/threadx"]
+	path = lib/threadx
+	url = https://github.com/eclipse-threadx/threadx.git
+[submodule "lib/coremark"]
+	path = lib/coremark
+	url = https://github.com/eembc/coremark
+[submodule "lib/netxduo"]
+	path = lib/netxduo
+	url = https://github.com/eclipse-threadx/netxduo
+[submodule "lib/filex"]
+	path = lib/filex
+	url = https://github.com/eclipse-threadx/filex
+[submodule "lib/flashdb"]
+	path = lib/flashdb
+	url = https://github.com/armink/FlashDB.git
+[submodule "lib/mlperf-tiny"]
+	path = lib/mlperf-tiny
+	url = https://github.com/mlcommons/tiny.git
+	branch = v1p4_rc
+	shallow = true

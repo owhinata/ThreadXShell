@@ -54,8 +54,11 @@ boards/
   吸収する。
 - **共有コアに触れる変更は、全対応ボードのビルドが通ることを確認してからコミットする**
   （全ボードビルドのスクリプト/CI は統合初期に整備する）。
-- shell は静的割当（ヒープ非使用）。スタックサイズ・スレッド優先度は `cli_config.h` の既定を
-  踏襲し、`_Static_assert` を必ず通す。
+- **shell の常設状態は静的割当**。共有 shell コア（インスタンス / スタック / ジョブプール）と
+  transport の常設状態は静的割当で、init / dispatch / 出力経路は heap を要求しない。board 固有
+  コマンドのペイロードは、board が bounded heap・排他（`malloc_lock`）・失敗処理を明示的に
+  提供する場合に限り heap を使用できる（wio の coremark が実例）。スタックサイズ・スレッド
+  優先度は `cli_config.h` の既定を踏襲し、`_Static_assert` を必ず通す。
 - upstream submodule（`lib/` 配下）は read-only。編集せず、必要な調整は port 側で吸収する。
 - **boot ツリー（`boards/wio-lite-ai/boot/`）は独立**。app / shell とソースを
   共有しない。shell 側の都合で boot に依存を張らない。
@@ -240,11 +243,19 @@ git branch -d feat/<N>-short-description
   **PF1（USER）保持リセット**で DFU モード（`0483:df11`）→
   `dfu-util -d 0483:df11 -a 0 -D <app>.bin` → 自動 reboot。
   [!] **内蔵 Flash の書換え耐久は ~10k サイクル**。自動ループで焼き直さない。
-- [!] **app はクロックツリーを再設定しない**。boot が構成した 550 MHz / PLL3Q 48 MHz USB /
-  FLASH latency 3 を継承する。`SystemInit` は **FPU + VTOR + ITCM ロードのみ**のカスタム版
-  （stock CMSIS `SystemInit` / `SystemClock_Config` は呼ばない）。VTOR はリンカの
-  `g_pfnVectors` から取る。SysTick reload は継承した `SystemCoreClock`（550 MHz）から計算し、
-  その過程で RCC は触らない。
+- [!] **app はクロックツリーを再設定しない**。app は boot から継承した system/PLL クロック
+  ツリー（クロックソース、D1/D2/D3 プリスケーラ、PLL1/PLL2、および下記例外以外の PLL3 設定）、
+  FLASH ACR、電源供給選択（SMPS/LDO）・VOS を再設定しない。ペリフェラルの bus clock gate と
+  kernel clock mux の設定は許可する。**例外は次の 2 つのみ**:
+  (a) `ltdc_clock_init()` が USB クロック供給前に行う 3 フィールド・成功パス計 4 書込み
+  （`RCC_CR.PLL3ON` clear / `RCC_PLL3DIVR.DIVR3` 更新 / `RCC_PLLCFGR.DIVR3EN` set /
+  `RCC_CR.PLL3ON` set。RM0468 §8.7.1 / §8.7.11 / §8.7.16）、
+  (b) `HAL_PWREx_EnableUSBVoltageDetector()` による `PWR_CR3.USB33DEN` set（RM0468 §6.8.4）。
+  継承値は 550 MHz / PLL3Q 48 MHz USB / FLASH latency 3。`SystemInit` は
+  **FPU + VTOR + TCM 初期化のみ**のカスタム版（ECC 有効化・ゼロ充填・`.itcm` ロード・MSP fill。
+  RCC / PWR / FLASH ACR は触らない。stock CMSIS `SystemInit` / `SystemClock_Config` は
+  呼ばない）。VTOR はリンカの `g_pfnVectors` から取る。SysTick reload は継承した
+  `SystemCoreClock`（550 MHz）から計算し、その過程で RCC は触らない。
 - [!] **RAM 配置ポリシー**（wio-lite-ai#46）: **AXI-SRAM（320KB @ 0x24000000）= バスマスタから
   見える必要があるものだけ / DTCM（128KB @ 0x20000000）= CPU 専用のホットなもの /
   ITCM（64KB）= ISR コード**。**DMA1/DMA2・SDMMC1 IDMA は TCM に届かない**

@@ -28,14 +28,26 @@
 3. **upstream submodule（`lib/` 配下）は read-only。** HAL / CMSIS / ThreadX 系 / TinyUSB /
    CoreMark ほか。編集は不可、調整は port 側で。
 
-4. **shell は静的割当（ヒープ非使用）。** スタックサイズ・優先度は `cli_config.h`、
-   `_Static_assert` を通すこと。
+4. **shell の常設状態は静的割当。** 共有 shell コア（インスタンス / スタック / ジョブプール）と
+   transport の常設状態は静的割当で、init / dispatch / 出力経路は heap を要求しない。
+   board 固有コマンドのペイロードは、board が bounded heap・排他（`malloc_lock`）・失敗処理を
+   明示的に提供する場合に限り heap を使用できる（wio の coremark が実例）。
+   スタックサイズ・優先度は `cli_config.h`、`_Static_assert` を通すこと。
 
 5. **Wio Lite AI: app はクロックツリーを再設定しない。**
-   DFU ブートローダ（本リポジトリの `boards/wio-lite-ai/boot/`）が構成した 550 MHz / PLL3Q 48 MHz USB /
-   FLASH latency 3 を継承する。app が RCC/PLL/FLASH ACR/PWR を書き換えると全部壊れる
-   （HSI 64 MHz に落ちるのに latency は 550 MHz 用のまま）。`SystemInit` は
-   **FPU + VTOR + ITCM ロードのみ**。VTOR はリンカの `g_pfnVectors` から取る（ハードコード不可）。
+   app は boot から継承した system/PLL クロックツリー（クロックソース、D1/D2/D3 プリスケーラ、
+   PLL1/PLL2、および下記例外以外の PLL3 設定）、FLASH ACR、電源供給選択（SMPS/LDO）・VOS を
+   再設定しない。書き換えると全部壊れる（HSI 64 MHz に落ちるのに latency は 550 MHz 用のまま）。
+   ペリフェラルの bus clock gate と kernel clock mux の設定は許可する。
+   **例外は次の 2 つのみ**:
+   (a) `ltdc_clock_init()` が USB クロック供給前に行う 3 フィールド・成功パス計 4 書込み
+   （`RCC_CR.PLL3ON` clear / `RCC_PLL3DIVR.DIVR3` 更新 / `RCC_PLLCFGR.DIVR3EN` set /
+   `RCC_CR.PLL3ON` set。RM0468 §8.7.1 / §8.7.11 / §8.7.16）、
+   (b) `HAL_PWREx_EnableUSBVoltageDetector()` による `PWR_CR3.USB33DEN` set（RM0468 §6.8.4）。
+   継承値は 550 MHz / PLL3Q 48 MHz USB / FLASH latency 3（DFU ブートローダ =
+   本リポジトリの `boards/wio-lite-ai/boot/` が構成）。`SystemInit` は
+   **FPU + VTOR + TCM 初期化のみ**（RCC / PWR / FLASH ACR は触らない）。
+   VTOR はリンカの `g_pfnVectors` から取る（ハードコード不可）。
 
 6. **Wio Lite AI: boot ツリー（`boards/wio-lite-ai/boot/`）と ROM リンカスクリプト
    （`STM32H725AEIx_ROM.ld`）は不変。**

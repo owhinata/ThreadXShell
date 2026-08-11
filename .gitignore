@@ -56,3 +56,24 @@ dkms.conf
 
 # Local reference material (never read by cmake/scripts; see CLAUDE.md)
 _ref/
+
+# Build output.  One build directory per board under build/ (build/wio-lite-ai,
+# build/f746g-disco, ...), plus the variant trees the feature toggles want kept
+# side by side -- build/wio-lite-ai-tflm for CONFIG_NN_BACKEND=tflm, which
+# additionally holds the fetched tflite-micro + CMSIS-NN source tree and is
+# several hundred MB.  The build-*/ pattern also catches strays from the old
+# flat naming.
+/build/
+/build-*/
+
+# Downloaded ARM GNU toolchain (fetched by cmake/arm-none-eabi-toolchain.cmake)
+/tools/
+
+# Python
+__pycache__/
+
+# Virtualenvs created at configure time -- .venv by the boards' tflite-micro.cmake
+# (CONFIG_NN_BACKEND=tflm) to hold numpy/Pillow for the tflite-micro tree
+# generation, and the -mlperf variants for the host side of a benchmark run.  All
+# reproducible from a requirements.txt, so none of them belong in git.
+/.venv*/

@@ -1,0 +1,360 @@
+/*
+ * Wio Lite AI (STM32H725AEI6) -- ThreadX shell app entry (Phase 2).
+ *
+ * Runs from the internal flash app partition at 0x08020000 (issue #25), launched
+ * by the DFU bootloader.  It INHERITS the bootloader's 550 MHz clock tree and must
+ * NOT reprogram the RCC: src/system_stm32h7xx.c gives a clock-free SystemInit (FPU
+ * + VTOR + TCM initialisation only).  HAL_Init() only sets the
+ * NVIC priority grouping and SysTick (reload = SystemCoreClock/1000 = 550000 for a
+ * 1 ms tick); it does not touch the PLLs.
+ *
+ * Starts ThreadX with the interactive shell over USB CDC, a USB device pump thread
+ * and an LED heartbeat.  The shell instance (cdc_sh) is bound to the CDC transport
+ * (cdc_tr); the usb thread bridges the CDC FIFOs to that transport's rings.
+ */
+#include <stdio.h>
+#include "stm32h7xx_hal.h"
+#include "tx_api.h"
+#include "tx_glue.h"
+#include "cli.h"
+#include "cli_instance.h"
+#include "cli_backend_usbcdc.h"
+#include "timebase.h"   /* timebase_init: DWT cycle counter for udelay (usleep) */
+#include "log.h"        /* log_init: reset-persistent RAM log (dmesg / crash record) */
+#include "iwdg.h"       /* IWDG petter (issue #4): armed from its own thread entry */
+#include "rtl8720.h"    /* onboard RTL8720DN CHIP_EN hold-off (issue #17) */
+#include "erpc.h"       /* eRPC link service thread (issue #21 increment 8) */
+#include "rtl_link.h"   /* coarse RTL8720 link mutex + UART refcount (same) */
+#include "net_shell.h"  /* telnet shell console over WiFi (issue #21 increment 9) */
+#include "nx_net.h"     /* NetX Duo over the RTL8720 L2 bridge (issue #23 U3) */
+#include "app.h"
+#if BSP_PSRAM_INIT_IN_APP
+#include "psram.h"      /* app-first OCTOSPI1 APS6408 bring-up (issue #3) */
+#endif
+#if BSP_ENABLE_SD
+#include "sd_card.h"    /* microSD block driver over SDMMC1 + IDMA (issue #6) */
+#include "sd_fs_glue.h" /* FileX lazy-mount singleton for the card (issue #6) */
+#endif
+#if BSP_ENABLE_LCD
+#include "ltdc_display.h" /* FPC-40 RGB panel over LTDC + DMA2D (issue #7) */
+#endif
+#if BSP_ENABLE_KV
+#include "nor_flash.h"  /* external W25Q128 NOR on OCTOSPI2 (issue #37) */
+#include "kv.h"         /* configuration key-value store on that NOR (issue #37) */
+#endif
+#if BSP_ENABLE_CAMERA
+#include "camera.h"     /* FPC-24 DVP camera: XCLK + SCCB bring-up (issue #8) */
+#if BSP_ENABLE_LCD
+#include "cam_preview.h" /* live camera preview on the LCD (issue #8 phase 3c) */
+#endif
+#endif
+/* 🔴 UNCONDITIONAL, and it has to be (issue #50).  usb_stack and iwdg_stack
+ * below are DTCM_BSS in every configuration, so this include cannot sit inside
+ * the camera/LCD guards it used to -- BSP_ENABLE_CAMERA=OFF then left DTCM_BSS
+ * undefined and the build failed on a stack that has nothing to do with either
+ * option.  Which defeated the point of the switch: it exists to produce a
+ * firmware that leaves a peripheral alone while bisecting a suspicion, and it
+ * was unusable exactly when something was already wrong. */
+#include "mem_sections.h"  /* DTCM_BSS: CPU-only data out of AXI-SRAM (issue #46) */
+
+/* --- interactive shell over USB CDC ------------------------------------- */
+CLI_BACKEND_USBCDC_DEFINE(cdc_tr);
+CLI_INSTANCE_DEFINE(cdc_sh, &cdc_tr, "wio> ");
+
+/* --- second console: telnet over the RTL8720DN (issue #21) --------------- */
+/* Statically defined and started at boot like the CDC one (cli_init is one-shot, so an
+ * instance cannot be created per client): app/net_shell.c drops its output until a client
+ * is actually connected, and posts CLI_EVT_CONN on accept so each client gets a fresh
+ * session.  The listening socket itself is armed later, when an IP address comes up. */
+CLI_INSTANCE_DEFINE(net_sh, &net_shell_transport, "wio-net> ");
+
+/* --- LED (PC13, red): driven off ---------------------------------------- */
+/* The bring-up heartbeat blink was removed on request; the LED is now held off
+ * (PC13 low; the bootloader uses PC13 high = on for the DFU indicator). */
+#define LED_PORT   GPIOC
+#define LED_PIN    GPIO_PIN_13
+
+static void led_init_off(void);
+
+/* Static ThreadX objects + stacks (no byte pool; each thread owns its stack).
+ * The shell instance's own thread/stack come from CLI_INSTANCE_DEFINE. */
+static TX_THREAD usb_thread;
+static UCHAR     usb_stack[4096] DTCM_BSS __attribute__((aligned(8)));  /* tud_task + printf headroom */
+
+#if BSP_ENABLE_IWDG
+/* IWDG petter (issue #4).  Static objects; the thread only refreshes -- the watchdog
+ * is armed by iwdg_init() in tx_application_define (issue #12), after this thread is
+ * created.  H7 HAL_IWDG_Init() polls the PR/RLR update with a HAL_GetTick() timeout,
+ * so SysTick must be live: it is, because tx_application_define now runs with
+ * interrupts enabled (no __disable_irq) and SysTick_Handler calls HAL_IncTick()
+ * unconditionally.  Priority 5 preempts usb(8)/cli(16)/bg(17), so the petter keeps
+ * feeding through a ~12 s CoreMark run and only stops on a whole-system stall
+ * (scheduler/tick death, IRQ-off lockup, a stalled external-memory access) -> the IWDG then
+ * resets the board. */
+static TX_THREAD iwdg_thread;
+static UCHAR     iwdg_stack[IWDG_PETTER_STACK_SIZE] DTCM_BSS __attribute__((aligned(8)));
+
+static void iwdg_entry(ULONG arg)
+{
+  (void) arg;
+  iwdg_refresh();   /* pet before the first sleep: minimise the arm->pet window */
+  for (;;) {
+    tx_thread_sleep(IWDG_PETTER_PERIOD_MS);
+    iwdg_refresh();
+  }
+}
+#endif
+
+void tx_application_define(void *first_unused_memory)
+{
+  (void) first_unused_memory;
+
+  /* Make the newlib heap thread-safe before any thread runs: membench/coremark/bg
+   * jobs and per-thread printf(%f) all allocate, and the stock malloc lock is a
+   * no-op (see app/malloc_lock.c).  Created here (single-threaded, pre-scheduler) so
+   * the mutex exists before the first concurrent malloc. */
+  malloc_lock_init();
+
+  /* Shell instance: create its ThreadX objects + backend, then spawn its thread.
+   * Fail-soft -- a failed cli_init just skips the shell; the usb/led threads and
+   * the rest still run. */
+  if (cli_init(&cdc_sh) == 0)
+    cli_start(&cdc_sh);
+  if (cli_init(&net_sh) == 0)   /* telnet console; idle until net_shell arms a socket */
+    cli_start(&net_sh);
+  cli_job_pool_init();          /* background-job worker pool (`cmd &`) */
+
+  /* USB device pump thread (priority 8): the sole owner of tud_task()/tud_cdc_*.
+   * Above the shell instance thread (CLI_INSTANCE_PRIORITY=16) so USB stays
+   * responsive; arg carries the shell's CDC transport for cli_usbcdc_pump(). */
+  tx_thread_create(&usb_thread, "usb", usb_thread_entry, (ULONG)(void *)&cdc_tr,
+                   usb_stack, sizeof(usb_stack),
+                   8, 8, TX_NO_TIME_SLICE, TX_AUTO_START);
+
+  led_init_off();               /* configure PC13 and hold the red LED off */
+
+  /* Hold the onboard RTL8720DN in power-off (CHIP_EN=PC3 driven low) before any
+   * `wifi` command runs, so the module never floats after reset (issue #17).
+   * Register-only GPIO; safe here (pre-scheduler), like led_init_off(). */
+  rtl8720_init();
+
+#if BSP_ENABLE_KV
+  /* External NOR mutex (issue #37).  Pure ThreadX object creation, like the two
+   * calls below it: the controller and the device itself were already brought up
+   * by nor_flash_init() in main(), which runs before there is a scheduler and
+   * therefore takes no lock.  Everything that erases or programs happens after
+   * this point, under this mutex.  Fail-soft: without it the `nor` command
+   * reports the device down and nothing else changes. */
+  (void) nor_flash_lock_init();
+  /* Configuration thread.  Creation only -- opening the store is the FIRST thing
+   * that thread does, not something that happens here, because a first boot on a
+   * blank partition formats it and an erase waits by sleeping.  Fail-soft: without
+   * the thread the store simply never opens and `kv` says so. */
+  (void) kv_boot_init();
+#endif
+
+  /* RTL8720DN link ownership (issue #21 increment 8): the coarse mutex that serialises
+   * whole `wifi`/`net` flows, then the resident eRPC service thread that owns USART1
+   * and multiplexes requests by sequence number.  Both are pure ThreadX object
+   * creation -- no HAL_GetTick dependency, so they are safe here (issue #12) -- and the
+   * service thread only becomes READY; it parks on its event flag as soon as it runs.
+   * Fail-soft: if either fails the `wifi`/`net` commands report an error and the rest
+   * of the firmware still runs. */
+  (void) rtl_link_core_init();
+  (void) erpc_service_init();
+
+#if BSP_ENABLE_SD
+  /* microSD block driver (issue #6): creates its mutex/semaphore and configures the
+   * SDMMC1 pins, kernel-clock mux and NVIC.  It performs NO card I/O -- the card is
+   * identified lazily by the first `sd` command -- so nothing here waits on
+   * HAL_GetTick and it is safe pre-scheduler (issue #12), like rtl8720_init() above.
+   * Fail-soft: on failure the `sd` commands report "driver not initialized". */
+  (void) sd_card_init();
+  /* FileX mount singleton: creates its mutexes and runs fx_system_initialize().
+   * Object creation only -- the media is mounted lazily by the first `sd` command
+   * that needs a filesystem, so a boot with no card (or no FAT on it) costs
+   * nothing and cannot fail here. */
+  sd_fs_glue_init();
+#endif
+
+#if BSP_ENABLE_LCD
+  /* LCD over LTDC + DMA2D (issue #7).  Creates its ThreadX objects, pulses the
+   * panel reset, wakes the ST7789 over its serial link and configures the
+   * controller.  It waits on no ThreadX object and runs no DMA2D transfer (the
+   * frame buffers are cleared by a CPU loop), which is what makes it safe here;
+   * it does spend ~255 ms in HAL_Delay for the reset pulse and the ST7789's two
+   * mandatory 120 ms settles (issue #43), which is fine because SysTick is already feeding
+   * HAL_IncTick and the IWDG is not armed until further down.
+   * The frame buffers live in the OCTOSPI1 PSRAM, so the
+   * bring-up is gated on psram_ready() HERE rather than inside the driver --
+   * port/ltdc must not depend on app/psram, because app/psram.c depends on it
+   * (it refuses to retune OCTOSPI1 while scanout is live).  Fail-soft: without a
+   * display the `lcd` commands report it down. */
+#if BSP_PSRAM_INIT_IN_APP
+  if (psram_ready())
+    (void) ltdc_init();   /* ~255 ms: reset pulse + the ST7789's two 120 ms settles */
+  else
+    LOG_WRN("PSRAM down -- LCD not started (frame buffers live there)");
+#endif
+#endif
+
+#if BSP_ENABLE_CAMERA
+  /* DVP camera bring-up (issue #8 phase 1).  Creates its mutex, gates the clocks
+   * and configures PA2 (XCLK, parked low), PE7/PH12 (PWDN/RESETB, both asserted)
+   * and I2C4.  It runs NO sensor traffic, waits on nothing, spends no time in
+   * HAL_Delay and enables no interrupt -- the module stays exactly as its own
+   * power-on reset left it until `camera on` / `camera probe`.  That is what
+   * makes it safe here; anything that had to sleep would have to move to a
+   * thread entry.  Fail-soft: without it the `camera` commands report it down. */
+  (void) camera_init();
+#if BSP_ENABLE_LCD
+  /* Preview thread, parked until `camera preview on`.  Creation only -- it
+   * blocks on its first sleep, so it is safe here like every other service. */
+  (void) cam_preview_init();
+#endif
+#endif
+
+  /* Telnet console service (issue #21 increment 9): owns the module's listening/session
+   * sockets and feeds the net_sh instance above.  Object creation only -- the thread parks
+   * on its event flags until an IP address comes up (`wifi connect` / `net dhcp` arm it, or
+   * `net shell start` does explicitly).  Fail-soft like the two above. */
+  (void) net_shell_init();
+
+  /* The host's own IP stack (issue #23 U3): NetX Duo plus the thread that owns a bridge
+   * session.  Object creation only -- the IP instance comes up with address 0.0.0.0 and
+   * the link DOWN, and nothing touches the RTL8720 until `wifi connect`.  Fail-soft: without
+   * it `net` keeps working through the module's lwIP exactly as before. */
+  (void) nx_net_init();
+
+#if BSP_ENABLE_IWDG
+  /* IWDG petter thread (priority 5), then arm the watchdog (issue #12: arm here, not
+   * in the entry, matching f746).  HAL_IWDG_Init()'s HAL_GetTick() timeout works
+   * because interrupts are enabled and SysTick is ticking (HAL_IncTick) throughout
+   * tx_application_define.  Fail-soft: arm ONLY if the petter was created -- an armed
+   * watchdog with nothing to refresh it would just reset the board. */
+  UINT iwdg_rc = tx_thread_create(&iwdg_thread, "iwdg", iwdg_entry, 0,
+                                  iwdg_stack, sizeof(iwdg_stack),
+                                  IWDG_PETTER_PRIORITY, IWDG_PETTER_PRIORITY,
+                                  TX_NO_TIME_SLICE, TX_AUTO_START);
+  if (iwdg_rc == TX_SUCCESS)
+    iwdg_init();                /* arm now; the petter (above) will refresh it */
+#endif
+
+  /* Timer lists exist now -> let the SysTick ISR drive the ThreadX scheduler. */
+  tx_glue_timer_enable();
+}
+
+/* Drive PC13 as a push-pull output at the LED-off level (low).  Register-only
+ * (RCC clock enable + GPIO config); no ThreadX API, safe from tx_application_define. */
+static void led_init_off(void)
+{
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  GPIO_InitTypeDef led = {0};
+  led.Pin   = LED_PIN;
+  led.Mode  = GPIO_MODE_OUTPUT_PP;
+  led.Pull  = GPIO_NOPULL;
+  led.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LED_PORT, &led);
+  HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_RESET);   /* PC13 low = LED off */
+}
+
+int main(void)
+{
+  /* Caches on: the app executes from the internal flash and keeps its working data
+   * in AXI-SRAM, both slow uncached.  Enable I-cache (read-only instruction memory ->
+   * no coherency concern) then D-cache.  Neither touches the RCC/clock.
+   *
+   * D-cache needs no blanket mitigation for ordinary app memory: the app is
+   * single-CPU, and one CPU behind one D-cache is self-coherent across threads and
+   * ISRs.  USB dwc2 runs slave/FIFO (the CPU copies buffer<->FIFO by MMIO;
+   * app/tusb_config.h pins CFG_TUD_DWC2_DMA_ENABLE=0), so it is not an exception.
+   * The one real bus master (SDMMC1 IDMA) is handled per-buffer -- see the DMA
+   * coherency note below.  The reset-persistent crash log lives in DTCM, which
+   * bypasses the D-cache, so it stays coherent and survives a reset.  CMSIS
+   * invalidates each cache before enabling; .data/.bss were written to SRAM with
+   * the caches off, so there are no stale lines.  A reset (DFU reboot / crash)
+   * disables the caches in HW, and the app persists no cacheable-SRAM state across
+   * a reset, so the boot handoff is unchanged.
+   *
+   * DMA coherency: there IS a bus master now (issue #6) -- the SDMMC1 IDMA, once a
+   * card is probed -- so the "one CPU behind one D-cache, self-coherent" reading of
+   * the paragraph above stops holding for the memory that master touches.  Two
+   * mechanisms cover it, and new DMA peripherals should pick one deliberately:
+   *   - mpu_config() (below, between the two cache enables) marks the OCTOSPI1 PSRAM
+   *     window at 0x90000000 Normal non-cacheable, so buffers placed there are
+   *     coherent with no per-transfer maintenance.  Bulk buffers (a camera
+   *     framebuffer) belong here.
+   *   - port/sd/sd_card.c instead keeps one small bounce buffer in ordinary cacheable
+   *     AXI-SRAM (its own .axi_dma section, so no neighbour shares a cache line) and
+   *     cleans/invalidates around each transfer.  A 4 KB scratch does not justify
+   *     spending an MPU region, and the caller's buffer never reaches the DMA.
+   * USB stays outside both: dwc2 is slave/FIFO here (CFG_TUD_DWC2_DMA_ENABLE=0). */
+  SCB_EnableICache();
+  mpu_config();       /* PSRAM non-cacheable region; MUST sit between I- and D-cache
+                       * enable (PM0253 sec 4.6.8 barriers).  See app/mpu.c. */
+  SCB_EnableDCache();
+
+  /* RAM log first: validate the reset-persistent DTCM ring and record the reset
+   * cause before anything else can log, so a fault during the rest of bring-up is
+   * captured.  log_init() only reads RCC->RSR + HAL_GetTick() (0 pre-HAL_Init) --
+   * neither needs HAL_Init().  fault_init() arms the classified faults right after,
+   * so the handler always finds a valid ring. */
+  log_init();
+  fault_init();
+
+  HAL_Init();   /* NVIC grouping + SysTick from SystemCoreClock (550 MHz); no PLL touch */
+  timebase_init();   /* DWT cycle counter for usleep's udelay (CoreDebug/DWT only, no RCC) */
+
+#if BSP_ENABLE_LCD
+  /* LTDC pixel clock (issue #7).  MUST run here: it briefly stops PLL3 to retune
+   * DIVR3 (RM0468 sec 8.7.16 -- the field is writable only with PLL3 off), and
+   * PLL3Q is the 48 MHz that clocks the USB CDC console.  Before usb_hw_init()
+   * nothing has enumerated and OTG_HS is not even clocked, so the outage is
+   * invisible; anywhere later it would take the console down.  This is the one
+   * place the app touches the clock tree, and it writes back every field it did
+   * not mean to change bit-for-bit as read.  Fail-soft: on failure the shell
+   * still comes up and `lcd` reports the display down. */
+  (void) ltdc_clock_init();
+#endif
+
+  usb_hw_init();   /* OTG_HS pins/clock only; the device stack (tusb_init, which
+                    * enables OTG_HS_IRQn) comes up later in the usb thread entry so
+                    * no interrupt is armed before its ThreadX objects exist (#12). */
+
+#if BSP_PSRAM_INIT_IN_APP
+  /* OCTOSPI1 APS6408 PSRAM bring-up (issue #3): register-only, touches neither the
+   * OCTOSPIM routing nor the RCC.  Fail-soft -- a failed bring-up just leaves
+   * `psram` reporting "not ready".  This stays app-side: since issue #25 the
+   * bootloader owns no external memory at all, so the app is the natural owner. */
+  psram_hw_init();
+  /* mmapscan (issue #16): if a DLYB sweep is in progress, test the next unit
+   * against real mmap access and either record + reset, or (on a hang) let the
+   * IWDG reset -- headless, before the shell.  No-op when no sweep is active. */
+  psram_mmapscan_boot();
+#endif
+
+#if BSP_ENABLE_KV
+  /* OCTOSPI2 W25Q128 NOR bring-up (issue #37).  Same shape as the PSRAM above --
+   * register-only, per-pin GPIO RMW, no RCC write, fail-soft -- and it sits here
+   * for the same reason: it needs no lock (nothing else runs yet) and it performs
+   * no erase or program, so it never has to sleep.  It does NOT enter the
+   * memory-mapped window: the driver is indirect-only and the MPU keeps its fence
+   * over 0x70000000 (see port/nor/nor_flash.h).  Deliberately outside the PSRAM
+   * block above: these are two different OCTOSPIs owning two disjoint pin sets, so
+   * a build with the PSRAM bring-up turned off must still get the NOR.  Fail-soft:
+   * a failed bring-up just leaves `nor info` reporting the device down. */
+  (void) nor_flash_init();
+#endif
+
+  setvbuf(stdout, NULL, _IONBF, 0);   /* unbuffered so printf reaches _write */
+
+  /* No __disable_irq() here (issue #12): interrupts stay enabled through ThreadX
+   * init, matching f746.  This is safe because every interrupt source is gated until
+   * its ThreadX objects exist -- SysTick only calls HAL_IncTick() until
+   * tx_glue_timer_enable() opens the tx_timer_active gate, and OTG_HS_IRQn stays
+   * disabled at the NVIC until the usb thread calls tusb_init().  Threads created in
+   * tx_application_define() are merely READY; the scheduler does not run them until
+   * _tx_thread_schedule() after define returns. */
+  tx_kernel_enter();   /* does not return */
+  return 0;
+}

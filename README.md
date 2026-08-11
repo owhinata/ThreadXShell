@@ -28,14 +28,65 @@ HAL / CMSIS / ThreadX (lib/, upstream submodules, read-only)
   <- app
 ```
 
-The Wio Lite AI DFU bootloader (`boot/`) is an independent tree that shares no
-sources with the app/shell layers and is treated as immutable.
+The Wio Lite AI DFU bootloader is an independent tree that shares no sources with
+the app/shell layers and is treated as immutable.
+
+## Repository layout
+
+```
+CMakeLists.txt        project, board selection, submodule bootstrap, cli_version.h
+cmake/                toolchain file (fetches ARM GNU on first configure), version template
+shell/                board-independent: core/ include/ backend/ cmds/ test/
+svc/                  board-independent services (fmt, ymodem, frame pipeline, gfx)
+lib/                  upstream mirror submodules (read-only)
+boards/<board>/       board.cmake, src/ port/ cmds/ backend/ svc/ include/ ldscript/ cmake/
+```
+
+Anything that reaches for the HAL, a peripheral or a specific memory map lives
+under `boards/<board>/`; `shell/` and `svc/` carry no board conditionals.
+
+## Building
+
+One build directory per board, `build/<board>/` by convention (variant trees of
+the same board take a suffix, e.g. `build/wio-lite-ai-tflm`). The board is chosen
+at configure time and there is no default. The first configure downloads the
+pinned ARM GNU toolchain (~155 MB) into `tools/`, so it needs network access.
+
+```bash
+cmake -B build/wio-lite-ai -G Ninja \
+      -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi-toolchain.cmake \
+      -DBOARD=wio-lite-ai
+cmake --build build/wio-lite-ai        # -> shell.{elf,bin,hex}, blink.{elf,bin,hex}
+```
+
+Configuring without `-DBOARD` fails with the list of available boards.
+
+## Flashing
+
+Wio Lite AI is **DFU only**. Put the board in DFU mode by holding USER (PF1)
+during reset, then:
+
+```bash
+cmake --build build/wio-lite-ai --target dfu-shell
+# or: dfu-util -d 0483:df11 -a 0 -D build/wio-lite-ai/shell.bin
+```
+
+The app is programmed to the internal flash app partition at `0x08020000`. The
+bootloader in sector 0 is never written by this build. Internal flash endurance
+is about 10k cycles, so do not reflash in an automated loop.
+
+## Host tests
+
+The board-independent core has a host-gcc test suite that needs no hardware:
+
+```bash
+sh shell/test/run_host_tests.sh
+```
 
 ## Status
 
-Early stage: project rules are in place (see `CLAUDE.md` / `AGENTS.md`); the
-shell core and board ports are being migrated from the source repositories.
-Build instructions will be added once the CMake configuration lands.
+Wio Lite AI is ported and builds; the STM32F746G-DISCO port and the bootloader
+tree are next. Project rules are in `CLAUDE.md` / `AGENTS.md`.
 
 ## License
 

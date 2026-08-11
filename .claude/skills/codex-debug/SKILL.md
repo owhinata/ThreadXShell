@@ -89,8 +89,8 @@ Codex に以下を求める:
 - HardFault の有無（`CFSR`/`HFSR`/`BFAR`、スタックフレーム）。ハンドラ未定義で
   `Default_Handler` の無限ループに落ちていないか
 - スタックサイズ不足（ThreadX スレッドスタック / MSP）
-- ST 公式デモ（`../stm32f746g-disco/_ref/STM32Cube_FW_F7_V1.17.0/.../STemWin/` /
-  `../wio-lite-ai/_ref/STM32Cube_FW_H7_V1.13.0/.../STM32H735G-DK/`）の同等設定と突き合わせ
+- ST 公式デモ（`_ref/f746g-disco/_ref/STM32Cube_FW_F7_V1.17.0/.../STemWin/` /
+  `_ref/wio-lite-ai/STM32Cube_FW_H7_V1.13.0/.../STM32H735G-DK/`）の同等設定と突き合わせ
 
 **Wio Lite AI 固有（最優先で疑う）:**
 

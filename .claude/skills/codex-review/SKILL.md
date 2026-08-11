@@ -163,8 +163,8 @@ HW 依存の設計には、LGTM 前に成立性の証拠を要求する:
 
 ## リファレンス（git 管理外・読む専用）
 
-- `../stm32f746g-disco/_ref/` — RM0385 / UM1907 / STM32Cube_FW_F7（ST 公式デモ）
-- `../wio-lite-ai/_ref/` — RM0468 / PM0253 / Wio Lite AI schematic / STM32Cube_FW_H7
+- `_ref/f746g-disco/_ref/` — RM0385 / UM1907 / STM32Cube_FW_F7（ST 公式デモ）
+- `_ref/wio-lite-ai/` — RM0468 / PM0253 / Wio Lite AI schematic / STM32Cube_FW_H7
 - `boards/wio-lite-ai/boot/README.md` — ブートローダが app へ渡す実測クロック値と boot 書込手順
   （boot 統合完了までは `../wio-lite-ai/boot/README.md`）
 - 統合元の実装: `../stm32f746g-disco/shell/` `../wio-lite-ai/shell/`（および両 `port/`）

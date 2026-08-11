@@ -219,7 +219,7 @@ git branch -d feat/<N>-short-description
   SRAM 256KB @ 0x20010000。
 - フラッシュ書込: ST-Link（`cmake --build <builddir> --target flash`）。
 - 教訓: I/D-cache 有効時は ITCM 配置の効果 ~0.6%（キャッシュが flash WS を隠蔽済み）。
-- リファレンス: RM0385 / UM1907 / ST 公式デモ（`../stm32f746g-disco/_ref/`、read-only）。
+- リファレンス: RM0385 / UM1907 / ST 公式デモ（`_ref/f746g-disco/_ref/`、read-only）。
 
 ### Wio Lite AI（[!] ブリック安全則あり）
 
@@ -257,7 +257,7 @@ git branch -d feat/<N>-short-description
   `/dev/ttyACM0`。
 - LED0（赤）= PC13 / LED1（黄）= PF0 / USER ボタン = PF1（active-low）。
 - **オプションバイト / RDP / DBGMCU / SWD 端子（PA13/PA14）は絶対に触らない。**
-- リファレンス: RM0468 / PM0253 / 基板 schematic（`../wio-lite-ai/_ref/`、read-only）。
+- リファレンス: RM0468 / PM0253 / 基板 schematic（`_ref/wio-lite-ai/`、read-only）。
 
 ## SWD デバッグ（共通）
 
@@ -271,12 +271,17 @@ git branch -d feat/<N>-short-description
 
 ## リファレンス（`_ref/`）
 
-- `_ref/` は git 管理外の「読むための資料」専用。**ビルド（CMake / スクリプト）は `_ref/` を
-  一切読まない** — 参照した瞬間、クローンしただけでは configure できないリポジトリになる
+- `_ref/` は git 管理外（`.gitignore` 済）の「ローカルで読むための資料」専用。
+  **公開環境に含めない — ビルド（CMake）・`scripts/`・git 管理下のファイルから `_ref/` を
+  一切参照しない**。参照した瞬間、クローンしただけでは configure できないリポジトリになる
   （wio-lite-ai#58 の教訓）。C コード中の `_ref/...` 言及は出典コメントのみ可。
-- このリポジトリに `_ref/` を作るまでは、隣接リポジトリの `_ref/` を参照する:
-  - `../stm32f746g-disco/_ref/` — RM0385、UM1907、STM32Cube_FW_F7（ST 公式デモ）
-  - `../wio-lite-ai/_ref/` — RM0468、PM0253、Wio Lite AI schematic、STM32Cube_FW_H7
+- 構成（2026-08-11 に両元リポジトリからコピー済み）:
+  - `_ref/f746g-disco/` — stm32f746g-disco リポジトリ全体のコピー。資料はその中の
+    `_ref/f746g-disco/_ref/`（RM0385、UM1907、STM32Cube_FW_F7 の ST 公式デモ、
+    出荷時デモの `backup_full.bin`）
+  - `_ref/wio-lite-ai/` — wio-lite-ai の資料一式（RM0468、PM0253、H72x/73x errata、
+    基板 schematic、W25Q128 / PSRAM / RTL872xD datasheet、STM32Cube_FW_H7、
+    tinyuf2 / tinyusb 参照、実機フラッシュバックアップ類）
 
 ## ドキュメント
 

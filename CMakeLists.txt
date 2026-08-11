@@ -15,7 +15,8 @@
 #  Build:
 #    cmake --build build/wio-lite-ai
 #  Flash: board-specific -- see boards/<board>/board.cmake and the board README.
-#    wio-lite-ai: cmake --build build/wio-lite-ai --target dfu-shell   (DFU only)
+#    wio-lite-ai:  cmake --build build/wio-lite-ai  --target dfu-shell  (DFU only)
+#    f746g-disco:  cmake --build build/f746g-disco  --target flash      (ST-Link)
 #
 #  The build directory is build/<board>/ by convention; variant trees of the same
 #  board get a suffix (build/wio-lite-ai-tflm).  All of build/ is git-ignored.
@@ -63,31 +64,34 @@ set(CMAKE_EXECUTABLE_SUFFIX ".elf")
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 # --- Submodule bootstrap ----------------------------------------------------
-# Sentinel files, not directory existence: an uninitialised submodule is an
-# EMPTY directory that exists, so testing the directory would never fire.
+# The list of sentinels is the SELECTED BOARD's, from boards/<board>/
+# submodules.cmake, and the fetch pathspec below is derived from it -- so there
+# is no second list to keep in step, and a board only ever pays for the mirrors
+# it compiles.  One shared list would make `-DBOARD=wio-lite-ai` clone the F7
+# side as well (lib/guix alone is ~1.5 GB) for sources it never opens.
 #
-# lib/mlperf-tiny is deliberately absent from this list, and the update below is
-# given EXPLICIT paths because of it.  It is a ~340 MB shallow mirror behind
-# CONFIG_MLPERF_TINY (OFF by default) whose own fetch-on-demand lives in the
-# board's mlperf-tiny.cmake, so an ordinary default configure must neither be
-# triggered by its absence nor drag it in -- and a bare `git submodule update
-# --init` would do the latter, since git's default pathspec is every registered
-# submodule.
+# The update is given EXPLICIT paths for a second reason: lib/mlperf-tiny is a
+# ~340 MB shallow mirror behind CONFIG_MLPERF_TINY (OFF by default) with its own
+# fetch-on-demand in the board's mlperf-tiny.cmake, and a bare `git submodule
+# update --init` would drag it in -- git's default pathspec is every registered
+# submodule.  It appears in no board's sentinel list.
 #
-# The list covers every submodule the ported boards build against.  Adding a
-# board that needs a new one (M2: the F7 HAL and CMSIS device) means adding its
-# sentinel here -- the fetch list is derived from these, so there is no second
-# list to keep in step.
-set(_submodule_sentinels
-    "lib/stm32h7xx_hal_driver/Src/stm32h7xx_hal.c"
-    "lib/cmsis_core/Include/core_cm7.h"
-    "lib/cmsis_device_h7/Include/stm32h725xx.h"
-    "lib/tinyusb/src/tusb.h"
-    "lib/threadx/common/src/tx_thread_create.c"
-    "lib/coremark/core_main.c"
-    "lib/netxduo/common/src/nx_ip_create.c"
-    "lib/flashdb/src/fdb_kvdb.c"
-    "lib/filex/common/src/fx_media_open.c")
+# Adding a board means writing its boards/<board>/submodules.cmake; there is no
+# central list to edit.
+set(_board_submodules "${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD}/submodules.cmake")
+if(NOT EXISTS "${_board_submodules}")
+    message(FATAL_ERROR
+        "BOARD=${BOARD} has no boards/${BOARD}/submodules.cmake.\n"
+        "  Every board declares the upstream mirrors it builds against there;\n"
+        "  see boards/wio-lite-ai/submodules.cmake for the format.")
+endif()
+include("${_board_submodules}")
+if(NOT _submodule_sentinels)
+    message(FATAL_ERROR
+        "boards/${BOARD}/submodules.cmake set no _submodule_sentinels.\n"
+        "  An empty list would silently skip the bootstrap and fail later as a\n"
+        "  missing header, so it is rejected here instead.")
+endif()
 set(_need_submodules FALSE)
 set(_submodule_paths "")
 foreach(_s IN LISTS _submodule_sentinels)

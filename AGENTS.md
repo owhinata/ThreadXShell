@@ -66,6 +66,30 @@
 
 8. **リンカスクリプトの `ASSERT` は LTO 下で空振りする。** 配置保証はポストリンクの
    residency チェックスクリプトで行う。配置を変える変更はこのゲートを維持すること。
+   - **wio-lite-ai** は LTO を使うので、`check_itcm_residency.py` /
+     `check_dtcm_residency.py` / `check_psram_ai_residency.py` が唯一の砦。
+   - **f746g-disco** は逆に **LTO を禁止**する（`board.cmake` が `-flto` /
+     `CMAKE_INTERPROCEDURAL_OPTIMIZATION` を per-config 変種込みで FATAL_ERROR にする）。
+     ldscript の ASSERT 群が invariant の本体だから。加えて `check_f746_layout.py` が
+     シンボル常駐 / ベクタ / float ランタイムを実イメージで検査する。
+     **どちらのボードでも、この 2 系統のゲートを外す・弱める変更は不可。**
+
+8b. **f746g-disco: メモリ配置ポリシー**: DTCM 64KB @ 0x20000000 = D-cache を経由しない
+   もの（reset 跨ぎのログリング `g_log`、membench の DTCM 行）/ SRAM1 = D-cache 管理を
+   1 バッファに閉じ込める SDMMC DMA バウンス（`sd_bounce`）/ SDRAM 8MB @ 0xC0000000 は
+   MPU Normal non-cacheable で、FMC 内部バンクごとに用途が固定されている
+   （bank0 = LTDC スキャンアウト面と固定居住者 / bank1 = カメラ DMA アリーナ 2MB /
+   bank2 = ETH ディスクリプタ + プール / bank3 = NN アリーナ、上半分 1MB は reloc モデルの
+   実行窓 0xC0700000）。**バンクをまたぐ配置変更は FE / キャッシュコヒーレンシに直結する**。
+   `.sdram` は単一出力セクションで境界シンボルが常設されるため、ASSERT だけでは
+   属性の脱落を検出できない — だから `check_f746_layout.py` のシンボル常駐検査がある。
+
+8c. **f746g-disco: 3 つの割込みハンドラは強シンボルでなければならない**
+   （`PendSV_Handler` / `SysTick_Handler` / `USART1_IRQHandler`）。stock CMSIS startup は
+   3 つとも `.weak` + `Default_Handler`（無限ループ）エイリアスを供給するので、
+   実装が落ちてもリンクは通り「定義されている」ようにも見える。
+   `check_f746_layout.py` が strong `T` / `Default_Handler` 非同値 / `.isr_vector` の
+   該当 slot 一致の 3 条件で検査する。
 
 9. **ビルドは `_ref/` を読まない。** `_ref/`（および `../*/_ref/`）は git 管理外の資料置き場。
    CMake / スクリプトが参照するとクローンしただけでは configure できなくなる。
@@ -78,6 +102,15 @@
 - ThreadX が自前で `PendSV_Handler` を供給（`stm32xxxx_it.c` のものと競合させない）。
 - クリティカルセクションは **PRIMASK ベース**（`TX_PORT_USE_BASEPRI` 未定義）。
 - `__disable_irq` 下の `tx_application_define` で `HAL_GetTick` 依存の init を呼ばない。
+  **ただし前提を確認してから適用すること**: 現在どちらのボードも `tx_kernel_enter()` の前で
+  割込みをマスクしていない（wio は `src/main.c` で明示的に「`__disable_irq()` を置かない」と
+  記録している）。ThreadX の `tx_initialize_kernel_enter.c` も `tx_application_define()` を
+  TX_DISABLE で囲まない。SysTick は `HAL_Init()` 以降走り続け、両ボードの `SysTick_Handler` は
+  `tx_timer_active` ゲートより**前**で `HAL_IncTick()` を無条件に呼ぶ。
+  ∴ `tx_application_define` 内で `HAL_GetTick` ベースのタイムアウトは正常に期限切れする
+  （f746g-disco の `eth_init()` / MDIO がこれに依存して fail-soft する）。
+  この規則が効くのは「誰かが実際に割込みをマスクした場合」であって、マスクの有無を
+  確認せずに違反と判定しない。
 - 割込みは TX オブジェクト生成後に有効化。
 
 ## ボード要点
@@ -86,6 +119,12 @@
   **PA9 は VCP_TX と OTG_FS_VBUS の共用**（UM1907 ソルダーブリッジ）。LED LD1 = PI1。
   メモリ: Flash 1MB @ 0x08000000 / ITCM 16KB / DTCM 64KB @ 0x20000000 / SRAM 256KB @ 0x20010000。
   I/D-cache 有効時、ITCM 配置の効果は ~0.6%。
+  **udelay は DWT ではなく TIM2（2×PCLK1 = 108 MHz）** — コアは 216 MHz だが
+  `CLI_CPU_CYCLES_PER_US=108` が正（EPK の time source と共用）。
+  **`CLI_INSTANCE_TIME_SLICE=0`（TX_NO_TIME_SLICE）を維持する** — VCP + telnet の 2 インスタンスが
+  同一優先度で並ぶが、coremark / membench / nn_run が静的状態と DWT CYCCNT を共有していて
+  多重実行に非再入なため（ThreadXShell#4）。スライス有効化は再入ガード整備とセットで行う。
+  FPU は**単精度のみ**（fpv5-sp-d16）— double は `__aeabi_d*` 経由。
 - **Wio Lite AI**: USB は単一で **USB1_OTG_HS を FS（内蔵 PHY）動作**。CMSIS に
   `USB2_OTG_FS` / `OTG_FS_IRQn` は無く、TinyUSB(dwc2) は rhport0 を OTG_HS base +
   `OTG_HS_IRQHandler` にエイリアス（`tud_int_handler(0)`）。GPIO = PA11/PA12
@@ -104,11 +143,15 @@
 
 ## ビルド / フラッシュ
 
-CMake 構成は統合の最初の Issue で確定する（それまでの正は各元リポジトリ）。確定後の想定:
+1 ビルドディレクトリ = 1 ボード。`-DBOARD` に既定は無い（誤ったボードのイメージを黙って
+作らせないため）。各ボードが必要とする submodule は `boards/<board>/submodules.cmake` が
+宣言し、fetch はそこから導出される（wio の configure が F7 系 5 本を引かないための分割）。
 
 ```bash
-cmake -B <builddir> -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi-toolchain.cmake <board 選択>
-cmake --build <builddir>
-# F746: cmake --build <builddir> --target flash   (ST-Link)
-# Wio : dfu-util -d 0483:df11 -a 0 -D <app>.bin   (PF1 保持リセットで DFU モードに入ってから)
+cmake -B build/<board> -G Ninja \
+      -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi-toolchain.cmake -DBOARD=<board>
+cmake --build build/<board>
+# f746g-disco: cmake --build build/f746g-disco --target flash   (ST-Link)
+# wio-lite-ai: cmake --build build/wio-lite-ai --target dfu-shell
+#              (PF1 保持リセットで DFU モードに入ってから)
 ```

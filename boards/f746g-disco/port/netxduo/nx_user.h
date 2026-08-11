@@ -1,0 +1,73 @@
+/*
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 ThreadX Shell Project
+ */
+/**
+ * @file    nx_user.h
+ * @brief   NetX Duo build configuration for this project (issue #49 P2).
+ *
+ * Pulled in by every NetX Duo translation unit via the Cortex-M7/GNU port
+ * (ports/cortex_m7/gnu/inc/nx_port.h includes this when NX_INCLUDE_USER_DEFINE_FILE
+ * is defined -- the same mechanism as ThreadX tx_user.h / FileX fx_user.h / GUIX
+ * gx_user.h).  nx_port.h includes us BEFORE applying its own #ifndef defaults, so
+ * every value here wins.
+ *
+ * DHCP-specific knobs (NX_DHCP_THREAD_PRIORITY, NX_DHCP_CLIENT_USER_CREATE_PACKET_POOL)
+ * are passed as -D on the build target instead (they only affect the addon).
+ */
+#ifndef NX_USER_H
+#define NX_USER_H
+
+/*
+ * ★ CRITICAL: the Cortex-M7/GNU nx_port.h hard-defaults NX_IP_PERIODIC_RATE to
+ * 100, but this project's ThreadX runs at 1000 Hz (port/threadx/tx_user.h,
+ * TX_TIMER_TICKS_PER_SECOND = 1000, 1 tick = 1 ms).  NetX derives ALL of its time
+ * bases (ARP retransmit/aging, TCP timeouts, ICMP, DHCP lease/renew) from this
+ * rate, so leaving it at 100 makes every NetX timer run 10x slow.  It MUST match
+ * the ThreadX tick rate.  After this override, wait_option values are in ms.
+ */
+#define NX_IP_PERIODIC_RATE          1000
+
+/* IPv4-only.  Neutralises every *ipv6* / *icmpv6* / *_nd_* source file (they are
+ * wrapped in #ifdef FEATURE_NX_IPV6, which nx_api.h only sets when this is unset),
+ * so they compile to empty objects and --gc-sections drops them. */
+#define NX_DISABLE_IPV6
+
+/* Ethernet L2 framing room reserved in each packet: 14-byte MAC header padded to
+ * 16 (keeps the IP header 32-bit aligned), 4-byte trailer (FCS). */
+#define NX_PHYSICAL_HEADER           16
+#define NX_PHYSICAL_TRAILER          4
+
+/* Align packet header + payload to a Cortex-M7 cache line.  The shared pool lives
+ * in MPU non-cacheable SDRAM and its payloads are handed straight to the ETH MAC
+ * DMA (zero-copy driver), so 32-byte alignment keeps DMA buffers cleanly placed. */
+#define NX_PACKET_ALIGNMENT          32
+
+/* The ETH ISR only sets a deferred event; the NetX IP helper thread runs the
+ * driver bottom-half (RX drain / TX reclaim) via NX_LINK_DEFERRED_PROCESSING. */
+#define NX_DRIVER_DEFERRED_PROCESSING
+
+/* Enable nx_tcp_socket_queue_depth_notify_set (issue #49 P4): the network shell
+ * backend waits on it (+ window_update) to resume output after TCP back-pressure
+ * instead of timing out.  Without this the API returns NX_NOT_SUPPORTED. */
+#define NX_ENABLE_TCP_QUEUE_DEPTH_UPDATE_NOTIFY
+
+/* Enable per-interface hardware offload capability (issue #98).  Lets the ETH
+ * driver report the STM32 MAC's TX checksum insertion (IPv4 header + TCP), so
+ * NetX skips the matching SW checksum (a redundant read pass over non-cacheable
+ * SDRAM) and instead leaves the field 0 + flags the packet; the driver maps that
+ * per-packet flag to the TDES0 CIC field.  Adds a ULONG to NX_PACKET/NX_INTERFACE
+ * and enables the capability branches in the nx_* checksum paths.  We do NOT
+ * define NX_ENABLE_TCPIP_OFFLOAD (that would require a full offload driver) and
+ * report no RX capability, so RX checksums stay SW-verified. */
+#define NX_ENABLE_INTERFACE_CAPABILITY
+
+/* DHCP client thread stack (issue #93).  nxd_dhcp_client.h declares
+ * nx_dhcp_thread_stack[NX_DHCP_THREAD_STACK_SIZE] as a member of the NX_DHCP
+ * control block with a #ifndef-guarded 4096 default; measured high-water-mark is
+ * 436 B (`thread` peak), so 2048 keeps ~4.7x margin.  Overriding here (reached by
+ * the addon via nx_api.h -> nx_port.h -> nx_user.h) shrinks the member without
+ * editing the read-only lib/netxduo submodule. */
+#define NX_DHCP_THREAD_STACK_SIZE    2048
+
+#endif /* NX_USER_H */

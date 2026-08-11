@@ -15,7 +15,9 @@ HAL/CMSIS/ThreadX 等は upstream ミラー submodule、ARM GNU ツールチェ�
 
 ボードはこの先追加していく。**ボード追加時に必ず更新するもの**: この表 /「ボード固有ルール」節 /
 `AGENTS.md` / `.claude/settings.json` の upstream ブロックリスト /
-`.claude/skills/codex-{review,debug}` のボード別観点。
+`.claude/skills/codex-{review,debug}` のボード別観点 /
+**`boards/<board>/submodules.cmake`（そのボードが必要とする submodule の sentinel 一覧。
+トップの fetch はここから導出される。共有リストは無い）**。
 
 ## 現行の作業目標
 
@@ -25,14 +27,16 @@ HAL/CMSIS/ThreadX 等は upstream ミラー submodule、ARM GNU ツールチェ�
 - **shell 統合のベースは wio-lite-ai**（最新実装。core の差分は `cli_core.c` 63 行 /
   `cli_parse.c` 105 行のみで、乖離の本体は cmds と backend）。F746 側の uart backend と
   F746 専用 cmds（fs/gui/qspi/sdram 等）は移植で追加する。
-- **移植順**: M1 = 骨組み + Wio Lite AI ポート（USB CDC で shell 起動）→ M2 = F746 ポート →
-  M3 = boot ツリー取り込み（ビルドのみ、焼かない）→ M4 = 全ボードビルドのスクリプト/CI 化。
+- **移植順**: M1 = 骨組み + Wio Lite AI ポート（USB CDC で shell 起動、完了 #2）→
+  **M2 = F746 ポート（完了 #3）** → M3 = boot ツリー取り込み（ビルドのみ、焼かない）→
+  M4 = 全ボードビルドのスクリプト/CI 化。
 - **Wio Lite AI の DFU ブートローダも本リポジトリに統合する**（移植元 `../wio-lite-ai/boot/`）。
   app とソースを共有しない独立ツリーとして持ち込み、**統合後も不変扱い**
   （下記「ボード固有ルール」参照）。
 
-CMake の詳細（ボード選択方式・cmds 取捨機構）は各移植 Issue の plan で確定する（plan は
-codex-review ゲート対象）。移植完了までビルド/フラッシュの正は各元リポジトリ。
+ビルドは `-DBOARD=<board>` で 1 ビルドディレクトリ = 1 ボード（既定なし）。ボードごとの
+submodule 一覧は `boards/<board>/submodules.cmake`。M1/M2 完了により、両ボードのビルド/
+フラッシュの正は**本リポジトリ**（元リポジトリではない）。
 
 ## アーキテクチャ / レイヤリング
 
@@ -216,11 +220,26 @@ git branch -d feat/<N>-short-description
 ### STM32F746G-DISCO
 
 - **216 MHz**（HSE 25 MHz → PLL M25 N432 P2、VOS1 + over-drive、Flash 7WS）。FPU / I$ / D$ on。
+  FPU は**単精度のみ**（`-mfpu=fpv5-sp-d16`）— CoreMark の `%f` スコア行は `__aeabi_d*` +
+  `_printf_float` 経由（`-u _printf_float` でリンク）。
 - VCP: USART1、TX=PA9 / RX=PB7、115200 8N1 → `/dev/ttyACM0`。**PA9 は OTG_FS_VBUS と共用**
   （既定ソルダーブリッジで VCP 有効、UM1907）。LED LD1（緑）= PI1。
 - メモリ: Flash 1MB @ 0x08000000 / ITCM 16KB @ 0x00000000 / DTCM 64KB @ 0x20000000 /
   SRAM 256KB @ 0x20010000。
-- フラッシュ書込: ST-Link（`cmake --build <builddir> --target flash`）。
+- フラッシュ書込: ST-Link（`cmake --build build/f746g-disco --target flash`）。
+- **timebase = TIM2 @ 108 MHz**（2×PCLK1、APB1 /4 で TIMPRE=0。RM0385）。EPK の time source と
+  udelay で共用するため **`CLI_CPU_CYCLES_PER_US=108`**（コアクロックの 216 ではない）。
+- **`CLI_INSTANCE_TIME_SLICE=0`（TX_NO_TIME_SLICE）を維持**する。VCP + telnet の 2 インスタンスが
+  同一優先度に並ぶが、coremark / membench / nn_run が静的状態と DWT CYCCNT を共有していて
+  多重実行に非再入（#4）。CPU-bound コマンド実行中に他コンソールが応答しないのが**期待挙動**。
+- **LTO 禁止**。ldscript の ASSERT 群が配置 invariant の本体で、LTO はその ASSERT が
+  依拠するシンボル / 入力セクション名を改名してしまう（`board.cmake` が per-config 変種込みで
+  FATAL_ERROR にする）。加えて POST_BUILD の `cmake/check_f746_layout.py` が
+  シンボル常駐・ベクタテーブル・float ランタイムを実イメージで検査する。
+- **SDRAM は FMC 内部バンクで用途固定**: bank0 = LTDC スキャンアウト面 + 固定居住者 /
+  bank1 = カメラ DMA アリーナ 2MB / bank2 = ETH ディスクリプタ + プール /
+  bank3 = NN アリーナ（上半分 1MB @ 0xC0700000 は reloc モデルの実行窓）。
+  バンクをまたぐ配置変更は FE とキャッシュコヒーレンシに直結する。
 - 教訓: I/D-cache 有効時は ITCM 配置の効果 ~0.6%（キャッシュが flash WS を隠蔽済み）。
 - リファレンス: RM0385 / UM1907 / ST 公式デモ（`_ref/f746g-disco/_ref/`、read-only）。
 

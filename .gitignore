@@ -72,6 +72,16 @@ _ref/
 # Python
 __pycache__/
 
+# On-device NN artifacts for boards/f746g-disco (CONFIG_NN_BACKEND=stedgeai /
+# stedgeai_reloc).  The X-CUBE-AI generator output and the relocatable network
+# blob are ST-SLA licensed and the models themselves are model-zoo licensed, so
+# none of them may be committed to a public repository.
+/boards/f746g-disco/port/nn/generated/
+/boards/f746g-disco/port/nn/reloc-out/
+*.tflite
+*.onnx
+*_rel.bin
+
 # Virtualenvs created at configure time -- .venv by the boards' tflite-micro.cmake
 # (CONFIG_NN_BACKEND=tflm) to hold numpy/Pillow for the tflite-micro tree
 # generation, and the -mlperf variants for the host side of a benchmark run.  All

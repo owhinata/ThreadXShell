@@ -218,10 +218,16 @@
 #ifndef CLI_USLEEP_MAX_US
 #define CLI_USLEEP_MAX_US 10000u          /* 10 ms */
 #endif
-/* DWT cycles per microsecond = the core clock in MHz.  usleep's busy-wait
- * multiplies its argument by this, and the assert below is what keeps that
- * product inside a uint32 -- so the value has to follow the board.  Boards whose
- * core clock is not the default pass their own with -D (M2's F746: 216).
+/* Counts per microsecond in whatever the board's udelay() busy-waits on.  For a
+ * DWT-based udelay that is the core clock in MHz (wio-lite-ai: 550); for a
+ * timer-based one it is the TIMER's clock in MHz, which need not be the core
+ * clock at all -- the f746g-disco port counts a free-running TIM2 at 2*PCLK1 =
+ * 108 MHz while the core runs at 216, and passes 108.
+ *
+ * usleep's busy-wait multiplies its argument by this, and the assert below is
+ * what keeps that product inside a uint32 -- so the value has to follow the
+ * board's actual time source.  Boards that are not the default pass their own
+ * with -D.
  *
  * It lives here, in the shared config, rather than in a board header, because
  * the assert that consumes it is a property of the SHARED usleep code: moving

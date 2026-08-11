@@ -1,25 +1,98 @@
 ThreadX Shell -- third-party notices
 =====================================
 
-This project is MIT-licensed (see LICENSE).  Its dependencies are fetched as git
-submodules under lib/ and keep their own licenses; that code is not redistributed
-in this repository, only referenced.
+This project is MIT-licensed (see LICENSE).
 
-One exception is vendored directly into the tree and IS redistributed in both
-source and binary form, so its notice is reproduced here as its license requires.
 
---------------------------------------------------------------------------------
-boards/wio-lite-ai/port/camera/ov2640_regs.c -- OV2640 QVGA RGB565 register sequence
+Clean-room notice
 --------------------------------------------------------------------------------
 
-The register table in this file is data taken verbatim from STMicroelectronics'
-OV2640 camera component driver:
+The interactive CLI shell under shell/ is a clean-room implementation.
 
-    https://github.com/STMicroelectronics/stm32-ov2640  (v1.0.3, ov2640.c)
+Its design was informed only by the *concepts* and the *public API behaviour* of
+the Zephyr RTOS shell (a Linux Foundation project, Apache-2.0) and -- for the
+line editor -- by the behaviour of GNU readline / linenoise / bash.  No source
+code, comments, or specific wording from Zephyr (or any of those projects) was
+copied.  Zephyr was used as a design reference only; none of its code is present
+in this repository.
 
-Only the `OV2640_QVGA[][2]` array is reused.  None of that driver's code is:
-boards/wio-lite-ai/port/camera/camera.c walks the table with its own
-error-checked SCCB writes.
+All shell sources (shell/, svc/, and the per-board glue under boards/) are
+original work under the MIT License, carrying the header:
+
+    SPDX-License-Identifier: MIT
+    Copyright (c) 2026 ThreadX Shell Project
+
+
+Third-party components fetched as submodules
+--------------------------------------------------------------------------------
+
+The firmware is built from, and at runtime incorporates, the components below.
+They are git submodules under lib/ (fetched at configure time) and keep their own
+licenses -- that code is NOT redistributed in this repository, only referenced.
+See each submodule's own LICENSE for the authoritative terms.
+
+Which of them a given image contains depends on the board; boards/<board>/
+submodules.cmake is the list that board builds against.
+
+- STMicroelectronics STM32F7xx HAL driver  -- BSD-3-Clause
+    lib/stm32f7xx_hal_driver/LICENSE.md    (f746g-disco)
+- STMicroelectronics STM32H7xx HAL driver  -- BSD-3-Clause
+    lib/stm32h7xx_hal_driver/LICENSE.md    (wio-lite-ai)
+- STMicroelectronics CMSIS Device F7       -- Apache-2.0
+    lib/cmsis_device_f7/LICENSE.md         (startup, system_*, device headers)
+- STMicroelectronics CMSIS Device H7       -- Apache-2.0
+    lib/cmsis_device_h7/LICENSE.md         (device headers; the wio-lite-ai port
+    supplies its own SystemInit)
+- ARM CMSIS-Core                           -- Apache-2.0
+    lib/cmsis_core/LICENSE.txt             (both boards)
+- Eclipse ThreadX                          -- MIT
+    lib/threadx/LICENSE.txt
+    A project of the Eclipse Foundation (donated by Microsoft from Azure RTOS);
+    the sources carry both Microsoft and Eclipse copyrights.
+- Eclipse ThreadX FileX / LevelX / GUIX / NetX Duo  -- MIT
+    lib/filex/LICENSE.txt, lib/levelx/LICENSE.txt, lib/guix/LICENSE.txt,
+    lib/netxduo/LICENSE.txt
+- STMicroelectronics OV5640 BSP component  -- BSD-3-Clause
+    lib/ov5640/LICENSE.md
+    Sensor register driver for the B-CAMS-OMV camera module on f746g-disco,
+    driven by the clean-room glue under boards/f746g-disco/port/camera/.
+- TinyUSB                                  -- MIT
+    lib/tinyusb/LICENSE                    (wio-lite-ai USB CDC console)
+- FlashDB                                  -- Apache-2.0
+    lib/flashdb/LICENSE                    (wio-lite-ai key/value store)
+- EEMBC CoreMark                           -- Apache-2.0
+    lib/coremark/LICENSE.md
+    Run as the shell `coremark` command.  CoreMark(R) is a registered trademark
+    of EEMBC; see lib/coremark/LICENSE.md (CoreMark Acceptable Use Agreement) for
+    the trademark terms.
+- MLCommons Tiny (MLPerf Tiny)             -- Apache-2.0
+    lib/mlperf-tiny/LICENSE                (wio-lite-ai, opt-in benchmark harness)
+
+The ARM GNU (arm-none-eabi) toolchain is downloaded into ./tools at build time
+and is not redistributed as part of this repository.  The same is true of the
+tflite-micro tree fetched by the optional tflm NN backend.
+
+
+Third-party material vendored into this repository
+--------------------------------------------------------------------------------
+
+Two things are in the tree and ARE redistributed in both source and binary form,
+so their notices are reproduced here as their licenses require.
+
+1. boards/<board>/port/coremark/core_portme.{c,h}
+   Derived from EEMBC's barebones CoreMark port (Apache-2.0, lib/coremark).  Each
+   board adapts the timing and reporting hooks; the benchmark itself is compiled
+   from the submodule.
+
+2. boards/wio-lite-ai/port/camera/ov2640_regs.c -- OV2640 QVGA RGB565 registers
+   The register table in this file is data taken verbatim from STMicroelectronics'
+   OV2640 camera component driver:
+
+       https://github.com/STMicroelectronics/stm32-ov2640  (v1.0.3, ov2640.c)
+
+   Only the `OV2640_QVGA[][2]` array is reused.  None of that driver's code is:
+   boards/wio-lite-ai/port/camera/camera.c walks the table with its own
+   error-checked SCCB writes.  Its license requires the following.
 
 Copyright (c) 2017 STMicroelectronics.
 All rights reserved.

@@ -1,0 +1,6 @@
+# TFLM backend build (CONFIG_NN_BACKEND=tflm): the tflite-micro Makefile
+# is evaluated by create_tflm_tree.py at CMake configure time, and its example
+# generate_cc_arrays.py step imports these.  Only needed when building the tflm
+# variant; the default (null/stedgeai) firmware never uses them.
+numpy
+Pillow

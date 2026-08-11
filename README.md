@@ -57,14 +57,32 @@ cmake -B build/wio-lite-ai -G Ninja \
       -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi-toolchain.cmake \
       -DBOARD=wio-lite-ai
 cmake --build build/wio-lite-ai        # -> shell.{elf,bin,hex}, blink.{elf,bin,hex}
+
+cmake -B build/f746g-disco -G Ninja \
+      -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi-toolchain.cmake \
+      -DBOARD=f746g-disco
+cmake --build build/f746g-disco        # -> shell.{elf,bin,hex}
 ```
 
-Configuring without `-DBOARD` fails with the list of available boards.
+Configuring without `-DBOARD` fails with the list of available boards. Each board
+declares the upstream mirrors it needs in `boards/<board>/submodules.cmake`, and
+only those are fetched -- the first `f746g-disco` configure is heavy (GUIX alone
+is about 1.5 GB) and none of it is pulled in for a `wio-lite-ai` build.
 
 ## Flashing
 
-Wio Lite AI is **DFU only**. Put the board in DFU mode by holding USER (PF1)
-during reset, then:
+### STM32F746G-DISCO (ST-Link)
+
+```bash
+cmake --build build/f746g-disco --target flash
+# or: st-flash --connect-under-reset --reset write build/f746g-disco/shell.bin 0x08000000
+```
+
+The console is the on-board ST-Link VCP: 115200 8N1 on `/dev/ttyACM0`.
+
+### Wio Lite AI (DFU only)
+
+Put the board in DFU mode by holding USER (PF1) during reset, then:
 
 ```bash
 cmake --build build/wio-lite-ai --target dfu-shell
@@ -85,8 +103,8 @@ sh shell/test/run_host_tests.sh
 
 ## Status
 
-Wio Lite AI is ported and builds; the STM32F746G-DISCO port and the bootloader
-tree are next. Project rules are in `CLAUDE.md` / `AGENTS.md`.
+Both boards are ported and build from the shared shell core. The Wio Lite AI DFU
+bootloader tree is next. Project rules are in `CLAUDE.md` / `AGENTS.md`.
 
 ## License
 

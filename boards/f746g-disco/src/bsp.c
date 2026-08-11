@@ -1,0 +1,289 @@
+/**
+ * @file    bsp.c
+ * @brief   Board support: 216 MHz clock, caches, VCP UART, printf retarget.
+ *
+ *   - FPU    : enabled (CMSIS SystemInit + hard-float build flags)
+ *   - I-Cache: enabled
+ *   - D-Cache: enabled
+ *   - SYSCLK : 216 MHz from 25 MHz HSE (PLL: M=25, N=432, P=2)
+ *   - VCP    : USART1, TX=PA9 / RX=PB7, 115200 8N1 (ST-Link Virtual COM Port)
+ */
+#include "bsp.h"
+#include "iwdg.h"        /* BSP_ENABLE_IWDG gate (LSI enable / DBGMCU freeze) */
+#include "timebase.h"    /* timebase_init(): TIM2 free-run (issue #43) */
+#include <stdio.h>
+
+#define LOG_TAG "bsp"
+#include "log.h"
+
+UART_HandleTypeDef huart1;
+
+static void SystemClock_Config(void);
+static void VCP_UART_Init(void);
+static void mpu_config_sdram(void);
+
+void bsp_init(void)
+{
+    /* MPU first: the SDRAM window must be Normal non-cacheable before the
+       D-cache turns on, so no SDRAM access can ever allocate a cache line. */
+    mpu_config_sdram();
+
+    /* Caches on before HAL_Init so all later accesses are cached.
+       The FPU is already enabled by SystemInit() in the startup path. */
+    SCB_EnableICache();
+    SCB_EnableDCache();
+
+    /* RAM log first: validate the reset-persistent ring (and record the reset
+       cause) before anything else can log, so a fault during the rest of
+       bring-up is captured.  log_init() reads RCC->CSR / HAL_GetTick(), neither
+       of which needs HAL_Init().  fault_init() (issue #28, src/fault.c) is added
+       right after, once present, so the fault handler always finds a valid ring. */
+    log_init();
+    fault_init();   /* enable Mem/Bus/Usage faults before the rest of bring-up */
+
+    HAL_Init();
+#if BSP_ENABLE_IWDG
+    /* Freeze the IWDG counter when the core is halted by the debugger (RM0385
+       §40.16.5 DBGMCU_APB1_FZ.DBG_IWDG_STOP), so a SWD breakpoint does not let the
+       watchdog reset the board out from under the debug session (issue #38).  The
+       IWDG itself is armed late, at the end of tx_application_define(). */
+    __HAL_DBGMCU_FREEZE_IWDG();
+#endif
+    SystemClock_Config();
+    VCP_UART_Init();
+    timebase_init();   /* TIM2 free-run = ThreadX exec-profile time source (issue #19) */
+
+    /* Unbuffered stdout so each printf reaches the VCP immediately. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+}
+
+/**
+ * @brief  MPU region for the 8 MB FMC SDRAM window (issue #40).
+ *
+ * The ARMv7-M default memory map types 0xA0000000..0xDFFFFFFF as Device, so
+ * without an MPU region the SDRAM would be uncached-but-Device (strongly
+ * ordered accesses, XN).  Region 0 remaps the 8 MB at 0xC0000000 as **Normal,
+ * non-cacheable, RW, XN**:
+ *
+ *   - Normal: the compiler/bus may merge and reorder plain data accesses
+ *     (Device semantics would serialize every word).
+ *   - Non-cacheable (TEX=1, C=0, B=0): the region holds large DMA-target
+ *     buffers (camera frames, #41).  With no cache lines ever allocated, DMA
+ *     writes and CPU reads are coherent by construction -- no
+ *     clean/invalidate choreography, no dirty-eviction races.  The cost is
+ *     slower CPU access; switch to WBWA + explicit maintenance later if a
+ *     consumer needs bandwidth (documented in docs/hardware/sdram.md).
+ *   - XN: no code execution from SDRAM.
+ *
+ * PRIVDEFENA keeps the default map for every other address, so flash/SRAM/
+ * peripheral behaviour is unchanged.  Runs before SCB_EnableDCache() so no
+ * SDRAM line can be cached even transiently.  The FMC itself is configured
+ * later (port/sdram/sdram.c, from tx_application_define).
+ */
+static void mpu_config_sdram(void)
+{
+    MPU_Region_InitTypeDef r = {0};
+
+    HAL_MPU_Disable();
+
+    r.Enable           = MPU_REGION_ENABLE;
+    r.Number           = MPU_REGION_NUMBER0;
+    r.BaseAddress      = 0xC0000000u;
+    r.Size             = MPU_REGION_SIZE_8MB;
+    r.SubRegionDisable = 0x00;
+    r.TypeExtField     = MPU_TEX_LEVEL1;          /* TEX=1, C=0, B=0: Normal, */
+    r.IsCacheable      = MPU_ACCESS_NOT_CACHEABLE;/* non-cacheable            */
+    r.IsBufferable     = MPU_ACCESS_NOT_BUFFERABLE;
+    r.IsShareable      = MPU_ACCESS_NOT_SHAREABLE;
+    r.AccessPermission = MPU_REGION_FULL_ACCESS;
+    r.DisableExec      = MPU_INSTRUCTION_ACCESS_DISABLE;
+    HAL_MPU_ConfigRegion(&r);
+
+    /* Region 1: FMC internal bank3 (.sdram.ai, 0xC0600000, 2 MB) as Normal
+     * cacheable Write-Back/Write-Allocate (TEX=1,C=1,B=1).  A higher region
+     * number wins on overlap (ARMv7-M PMSAv7), so this overrides region0's
+     * non-cacheable attribute for bank3 only.  The NN inference arena (activations
+     * + camera->model staging) lives here and is CPU-only -- NO DMA writes into
+     * bank3 (camera DMA targets bank1, ETH bank2, LTDC bank0) -- so D-cache is
+     * coherent without any maintenance.  Non-cacheable SDRAM activations were
+     * ~20x slower for NN inference (issue #81 #6, measured on MNIST). */
+    r.Number           = MPU_REGION_NUMBER1;
+    r.BaseAddress      = 0xC0600000u;
+    r.Size             = MPU_REGION_SIZE_2MB;
+    r.SubRegionDisable = 0x00;
+    r.TypeExtField     = MPU_TEX_LEVEL1;           /* TEX=1, C=1, B=1: Normal WBWA */
+    r.IsCacheable      = MPU_ACCESS_CACHEABLE;
+    r.IsBufferable     = MPU_ACCESS_BUFFERABLE;
+    r.IsShareable      = MPU_ACCESS_NOT_SHAREABLE;
+    r.AccessPermission = MPU_REGION_FULL_ACCESS;
+    r.DisableExec      = MPU_INSTRUCTION_ACCESS_DISABLE;
+    HAL_MPU_ConfigRegion(&r);
+
+    /* Region 2: bank3 UPPER half (0xC0700000, 1 MB) -- same Normal WBWA cacheable as
+     * region1 but INSTRUCTION-FETCH ENABLED (higher region number wins on PMSAv7
+     * overlap, so this un-XNs just the upper 1 MB; the lower 1 MB stays XN under
+     * region1).  This is the .sdram.ai.model window (ldscript), where the X-CUBE-AI
+     * relocatable backend loads a position-independent network_rel.bin from SD and
+     * runs it XIP -- instruction fetch out of external FMC SDRAM (RM0385 s2.1.3 AXIM).
+     * Executing code from cacheable SDRAM needs a D-cache clean + I-cache invalidate
+     * of the freshly-written .bin before first fetch; the backend does that itself
+     * (the ST loader does none in XIP mode).  Note the model slots themselves are
+     * RWX here (FULL_ACCESS + exec) -- data buffers stay XN in the lower half, so W^X
+     * holds for the arena, but the loaded code region is not strictly W^X (existing
+     * P5 design).  Issue #92 (Epic #80 P5).
+     *
+     * REGION 2 IS RELOC-ONLY (issue #95): only CONFIG_NN_BACKEND=stedgeai_reloc emits
+     * .sdram.ai.model.  For non-reloc builds (null/stedgeai/tflm) the ldscript lets
+     * .sdram.ai (data) grow into bank3's upper 1 MB (TFLM needs ~1.9 MB), so an exec
+     * window there would make data executable (W^X break) -- instead we leave the
+     * whole 2 MB governed by region1 (XN cacheable) and explicitly disable region2. */
+#ifdef CONFIG_NN_BACKEND_STEDGEAI_RELOC
+    r.Number           = MPU_REGION_NUMBER2;
+    r.BaseAddress      = 0xC0700000u;
+    r.Size             = MPU_REGION_SIZE_1MB;
+    r.SubRegionDisable = 0x00;
+    r.TypeExtField     = MPU_TEX_LEVEL1;           /* TEX=1, C=1, B=1: Normal WBWA */
+    r.IsCacheable      = MPU_ACCESS_CACHEABLE;
+    r.IsBufferable     = MPU_ACCESS_BUFFERABLE;
+    r.IsShareable      = MPU_ACCESS_NOT_SHAREABLE;
+    r.AccessPermission = MPU_REGION_FULL_ACCESS;
+    r.DisableExec      = MPU_INSTRUCTION_ACCESS_ENABLE;   /* XIP: allow code fetch */
+    HAL_MPU_ConfigRegion(&r);
+#else
+    /* HAL_MPU_Disable() clears only MPU->CTRL, not the per-region enable bit, so
+     * explicitly disable region2 in case a warm boot / bootloader jump left it set. */
+    HAL_MPU_DisableRegion(MPU_REGION_NUMBER2);
+#endif
+
+    HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
+}
+
+/**
+ * @brief  System clock: 216 MHz from a 25 MHz HSE crystal (F746 max).
+ *
+ *   VCO in  = HSE / PLLM = 25 MHz / 25 = 1 MHz
+ *   VCO out = VCO in * PLLN = 1 MHz * 432 = 432 MHz
+ *   SYSCLK  = VCO out / PLLP = 432 MHz / 2 = 216 MHz
+ *   HCLK    = 216 MHz, PCLK1 = 54 MHz (<=54), PCLK2 = 108 MHz (<=108)
+ *
+ * Over-drive + VOS scale 1 + 7 flash wait states are required at 216 MHz.
+ */
+static void SystemClock_Config(void)
+{
+    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+    __HAL_RCC_PWR_CLK_ENABLE();
+    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+    RCC_OscInitStruct.HSEState       = RCC_HSE_ON;
+#if BSP_ENABLE_IWDG
+    /* Also bring up the LSI: the IWDG (issue #38) is clocked from it.  OR it into
+       the oscillator set so HSE/PLL stay untouched; HAL_RCC_OscConfig() waits for
+       LSIRDY.  LSI is independent of the HSE+PLL 216 MHz tree (RM0385 5.2). */
+    RCC_OscInitStruct.OscillatorType |= RCC_OSCILLATORTYPE_LSI;
+    RCC_OscInitStruct.LSIState        = RCC_LSI_ON;
+#endif
+    RCC_OscInitStruct.PLL.PLLState   = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL.PLLSource  = RCC_PLLSOURCE_HSE;
+    RCC_OscInitStruct.PLL.PLLM       = 25;
+    RCC_OscInitStruct.PLL.PLLN       = 432;
+    RCC_OscInitStruct.PLL.PLLP       = RCC_PLLP_DIV2;
+    RCC_OscInitStruct.PLL.PLLQ       = 9;   /* 48 MHz; usable for USB/SDMMC */
+    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+    {
+        Error_Handler();
+    }
+
+    if (HAL_PWREx_EnableOverDrive() != HAL_OK)
+    {
+        Error_Handler();
+    }
+
+    RCC_ClkInitStruct.ClockType      = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
+                                       RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    RCC_ClkInitStruct.SYSCLKSource   = RCC_SYSCLKSOURCE_PLLCLK;
+    RCC_ClkInitStruct.AHBCLKDivider  = RCC_SYSCLK_DIV1;   /* HCLK  = 216 MHz */
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;     /* PCLK1 =  54 MHz */
+    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;     /* PCLK2 = 108 MHz */
+    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_7) != HAL_OK)
+    {
+        Error_Handler();
+    }
+}
+
+/**
+ * @brief  USART1 on the ST-Link Virtual COM Port (PA9=TX, PB7=RX), 115200 8N1.
+ */
+static void VCP_UART_Init(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    __HAL_RCC_USART1_CLK_ENABLE();
+
+    /* PA9 -> USART1_TX */
+    GPIO_InitStruct.Pin       = GPIO_PIN_9;
+    GPIO_InitStruct.Mode      = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull      = GPIO_NOPULL;
+    GPIO_InitStruct.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF7_USART1;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    /* PB7 -> USART1_RX */
+    GPIO_InitStruct.Pin       = GPIO_PIN_7;
+    GPIO_InitStruct.Alternate = GPIO_AF7_USART1;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    huart1.Instance          = USART1;
+    huart1.Init.BaudRate     = 115200;
+    huart1.Init.WordLength   = UART_WORDLENGTH_8B;
+    huart1.Init.StopBits     = UART_STOPBITS_1;
+    huart1.Init.Parity       = UART_PARITY_NONE;
+    huart1.Init.Mode         = UART_MODE_TX_RX;
+    huart1.Init.HwFlowCtl    = UART_HWCONTROL_NONE;
+    huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+    if (HAL_UART_Init(&huart1) != HAL_OK)
+    {
+        Error_Handler();
+    }
+}
+
+/**
+ * @brief  Retarget newlib stdout/stderr to the VCP UART so printf works.
+ *
+ * Weak so a backend can override it: the interrupt-driven UART shell backend
+ * (shell/backend/cli_backend_uart.c, issue #7) supplies a strong _write that,
+ * once the console is up, routes printf through the same TX ring as the shell so
+ * USART1 has a single owner.  Apps that do not link that backend (blink /
+ * coremark / threadx demo / thread_metric / exec_profile) keep this blocking
+ * polling path unchanged.
+ */
+__attribute__((weak)) int _write(int file, char *ptr, int len)
+{
+    (void)file;
+    HAL_UART_Transmit(&huart1, (uint8_t *)ptr, (uint16_t)len, HAL_MAX_DELAY);
+    return len;
+}
+
+void Error_Handler(void)
+{
+    /* Record before halting: a clock/HAL bring-up failure is then visible in
+       `dmesg` after the next reset (the ring is reset-persistent, issue #28). */
+    LOG_ERR("Error_Handler trapped");
+    __disable_irq();
+    while (1)
+    {
+    }
+}
+
+#ifdef USE_FULL_ASSERT
+void assert_failed(uint8_t *file, uint32_t line)
+{
+    (void)file;
+    (void)line;
+    Error_Handler();
+}
+#endif

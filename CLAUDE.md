@@ -103,9 +103,20 @@ boards/
 1. **Plan 確定前**（実装着手前）: plan を **`codex-review` skill** で 3 面（設計 / MCU 実機能
    （対象ボードの RM 照合）/ HW リソース競合）review。BLOCKING / CONCERN を全解消してから
    `ExitPlanMode`。
-2. **実装後**（commit 前）: branch の diff を **`/codex:review`** で review。観点を絞りたい・
-   設計判断そのものを疑いたいときは `/codex:adversarial-review [--base <ref>] <focus>`。
+2. **実装後**（commit 前）: branch の diff を review。
    BLOCKING 解消 → user に実機 verify 依頼 → commit。
+
+   [!] **1 つの diff に掛けるレビューは 1 本だけ。** `/codex:review` と
+   `/codex:adversarial-review` を同じ diff に両方掛けない — 後者は前者を含むので、
+   重複するのは待ち時間だけ（実測: 4,871 行の diff で 11 分 + 15 分）。**どちらか一方を選ぶ**:
+   - **既定は `/codex:review`**（focus を取らない内蔵レビュアー）
+   - **`/codex:adversarial-review <focus>` を選ぶのは、変更がチェック機構・ゲート・安全機構
+     そのものを足す/変えるとき**。汎用レビュアーは「コードが正しいか」を見るが、
+     「この検査は騙せるか（fail open するか）」は見ない。M3 では実際に前者が findings ゼロ、
+     後者が実在する fail-open を 2 件出した
+   - **focus は 1〜2 問に絞る。** 観点を並べるほど時間が伸びる（M3 の 5 観点のうち
+     当たったのは 2 つ）。「この検査を通過したまま X できるか」の形で、
+     疑っている fail-open 面を名指しする
 
 **Codex 呼び出しは codex plugin（`codex@openai-codex`）のランタイムに一本化**（wio-lite-ai の
 方式を踏襲。MCP server は使わない）。入口の使い分け:
@@ -113,8 +124,8 @@ boards/
 | 対象 | 使うもの |
 |---|---|
 | **plan（会話中の設計・実装計画）** | **`codex-review` skill**（marker を更新する唯一の経路） |
-| 実装後の差分 | `/codex:review` |
-| 差分＋観点指定 / 設計判断への異議 | `/codex:adversarial-review <focus>` |
+| 実装後の差分（既定） | `/codex:review` |
+| 検査機構・ゲート・安全機構を足す/変える差分、設計判断への異議 | `/codex:adversarial-review <focus>` |
 | 不具合の原因追跡 | `codex-debug` skill、または `/codex:rescue` |
 
 `/codex:review` は git 差分専用で plan をレビューできず marker も更新しない。だから plan

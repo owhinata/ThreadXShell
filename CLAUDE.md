@@ -28,15 +28,15 @@ HAL/CMSIS/ThreadX 等は upstream ミラー submodule、ARM GNU ツールチェ�
   `cli_parse.c` 105 行のみで、乖離の本体は cmds と backend）。F746 側の uart backend と
   F746 専用 cmds（fs/gui/qspi/sdram 等）は移植で追加する。
 - **移植順**: M1 = 骨組み + Wio Lite AI ポート（USB CDC で shell 起動、完了 #2）→
-  **M2 = F746 ポート（完了 #3）** → M3 = boot ツリー取り込み（ビルドのみ、焼かない）→
-  M4 = 全ボードビルドのスクリプト/CI 化。
-- **Wio Lite AI の DFU ブートローダも本リポジトリに統合する**（移植元 `../wio-lite-ai/boot/`）。
-  app とソースを共有しない独立ツリーとして持ち込み、**統合後も不変扱い**
-  （下記「ボード固有ルール」参照）。
+  M2 = F746 ポート（完了 #3）→ **M3 = boot ツリー取り込み（ビルドのみ、焼かない。完了 #11）**
+  → M4 = 全ボードビルドのスクリプト/CI 化。
+- **Wio Lite AI の DFU ブートローダは本リポジトリに統合済み**（`boards/wio-lite-ai/boot/`、
+  移植元 `owhinata/wio-lite-ai` @ `09468bb`）。app とソースを共有しない独立ツリーで、
+  **統合後も不変扱い**（下記「ボード固有ルール」参照）。
 
 ビルドは `-DBOARD=<board>` で 1 ビルドディレクトリ = 1 ボード（既定なし）。ボードごとの
-submodule 一覧は `boards/<board>/submodules.cmake`。M1/M2 完了により、両ボードのビルド/
-フラッシュの正は**本リポジトリ**（元リポジトリではない）。
+submodule 一覧は `boards/<board>/submodules.cmake`。M1/M2/M3 完了により、両ボードのビルド/
+フラッシュ、および boot ツリーの正は**本リポジトリ**（元リポジトリではない）。
 
 ## アーキテクチャ / レイヤリング
 
@@ -249,12 +249,28 @@ git branch -d feat/<N>-short-description
 - [!] **boot ツリー（`boards/wio-lite-ai/boot/`）と ROM リンカスクリプト
   （`STM32H725AEIx_ROM.ld`）は不変**。
   内蔵 Flash セクタ0 `0x08000000`（128KB）に boot が常駐し、ここを焼き直す操作は
-  **ブリック本番**。boot は本リポジトリに統合するが（移植元 `../wio-lite-ai/boot/`）、
-  app 開発で boot 側を変更する必要は原則ない。もし触る必要が生じたら **必ず**
-  codex-review（3 面）+ objdump 監査 + バックアップを経てから、良品 ST-Link（mode=UR）
-  接続下でユーザーに実機書込を依頼する（手順は `boards/wio-lite-ai/boot/README.md`）。
+  **ブリック本番**。boot は本リポジトリに統合済み（`boards/wio-lite-ai/boot/`、移植元
+  `owhinata/wio-lite-ai` @ `09468bb`）だが、app 開発で boot 側を変更する必要は原則ない。
+  もし触る必要が生じたら **必ず** codex-review（3 面）+ 監査 + バックアップを経てから、
+  良品 ST-Link（mode=UR）接続下でユーザーに実機書込を依頼する
+  （手順は `boards/wio-lite-ai/boot/README.md`）。
   **boot の `iflash.c` の書込先セクタ範囲チェックはセクタ0 を守る唯一の砦**で、緩める変更は
   絶対にしない。ST-Link での内蔵 Flash 書込は boot をセクタ0 に焼く用だけ（通常やらない）。
+- **boot は「参照ビルド」としてのみビルドする**（`boot` ターゲット → `boot-reference/`）。
+  **セクタ0 に書けるターゲットも `dfu-boot` も作らない**（後者は boot を app パーティションに
+  焼くターゲットになる）。ビルドする理由はビルド継続性 — HAL / TinyUSB / toolchain /
+  board.cmake の変更が boot を黙って壊さないことの確認。
+  ゲートは **`cmake/check_boot_safety.py`**（`boot_precheck` = ソース manifest + compile
+  command 監査、POST_BUILD = ベクタ配置 / セクタ0 収容 / option-byte・DBGMCU 経路の不在 /
+  flash 書込の呼び出しグラフ / DFU クラス / ELF↔bin 結合 / **各オブジェクトの LTO IR 不在** /
+  golden hash）。**LTO の保証はコマンドライン走査ではなくオブジェクト（`.gnu.lto_*`
+  セクション）で取る** — specs ファイル・compiler launcher・ninja 外で作り直した
+  オブジェクトはコマンドラインに痕跡を残さない。flash 書込 API のアドレスは
+  データワードだけでなく **`movw`/`movt` 対**でも検出する（間接呼び出しは辺を残さない）。
+  **`boot_image` は毎ビルド再リンクする**（`boot_precheck` の stamp を `LINK_DEPENDS` に
+  入れてある）ので、up-to-date による迂回経路は存在しない。
+  golden hash は donor `09468bb` の**再現性ベースライン**であって実機イメージの証明ではない。
+  ゲートの negative test は `cmake/fixtures/run_fixture_tests.py`。
 - **DFU フォールバックの安全網を app 側から壊さない**: erased/invalid app では必ず DFU モード
   に入る（中断した DFU 転送も、先頭 32B を最後に書く vector-last commit により必ずここに落ちる）。
   boot の DFU 判定条件に影響する変更を app 側から入れない。
@@ -296,7 +312,7 @@ git branch -d feat/<N>-short-description
   :3333。SCS 読みが安定）か `st-util`（:4242）。
 - コンソール（picocom 等）と `st-flash`/読み出しは `/dev/ttyACM0` を奪い合うと文字化けする。
   SWD とコンソールは別系統。
-- Wio Lite AI の boot 書込/復旧手順は `boards/wio-lite-ai/boot/README.md`（統合後）。焼き/復旧用 ST-Link の
+- Wio Lite AI の boot 書込/復旧手順は `boards/wio-lite-ai/boot/README.md`。焼き/復旧用 ST-Link の
   個体情報は `../wio-lite-ai/CLAUDE.md` を参照（良品 Discovery ST-Link のみ mode=UR 可）。
 
 ## リファレンス（`_ref/`）

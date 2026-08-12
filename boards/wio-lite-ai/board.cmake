@@ -12,10 +12,15 @@
 #      `dfu-util -d 0483:df11 -a 0 -D <fw>.bin` while the bootloader is in DFU
 #      mode (hold USER/PF1 at reset); convenience targets `dfu-shell`/`dfu-blink`.
 #
-#  [!] The DFU bootloader at internal flash 0x08000000 is NOT built here.  It is
-#  a separate, independent tree (boards/wio-lite-ai/boot/, arriving in M3) that
-#  shares no source with the app, and flashing sector 0 is the one operation
-#  that can brick the board.  LDSCRIPT_ROM and the `boot` target come with it.
+#  [!] The DFU bootloader at internal flash 0x08000000 IS built here (`boot`),
+#  but only as a REFERENCE BUILD -- into boot-reference/, and with no target that
+#  can write it anywhere.  It is a separate, independent tree
+#  (boards/wio-lite-ai/boot/) that shares no source and no header with the app;
+#  flashing sector 0 is the one operation that can brick the board, and the only
+#  surviving board is #2.  The point of building it is CONTINUITY: a HAL, TinyUSB,
+#  toolchain or board.cmake change must not silently break the bootloader tree.
+#  boot-reference/boot.bin is checked against a golden hash and put through
+#  cmake/check_boot_safety.py -- see the bootloader section further down.
 #
 #  [!] This app does NOT configure the clock tree.  It inherits the 550 MHz /
 #  PLL3Q 48 MHz USB / FLASH latency 3 the bootloader set up; src/system_stm32h7xx.c
@@ -35,6 +40,7 @@ set(HAL_DIR    "${CMAKE_SOURCE_DIR}/lib/stm32h7xx_hal_driver")
 set(CMSIS_DEV  "${CMAKE_SOURCE_DIR}/lib/cmsis_device_h7")
 set(CMSIS_CORE "${CMAKE_SOURCE_DIR}/lib/cmsis_core")
 set(LDSCRIPT_APP "${BOARD_DIR}/ldscript/STM32H725AEIx_IROM.ld") # app (internal 0x08020000)
+set(LDSCRIPT_ROM "${BOARD_DIR}/ldscript/STM32H725AEIx_ROM.ld")  # bootloader (0x08000000)
 
 # stm32h7xx_hal_conf.h from the upstream template (its default HSE_VALUE of
 # 25 MHz already matches the board crystal).
@@ -62,9 +68,285 @@ target_link_options(bsp_iface INTERFACE
 file(GLOB HAL_SOURCES "${HAL_DIR}/Src/*.c")
 list(FILTER HAL_SOURCES EXCLUDE REGEX "_template\\.c$")
 
-# TinyUSB's source root.  The bootloader (M3) uses it too; the app's own subset
-# of it is APP_TINYUSB_SOURCES further down.
+# TinyUSB's source root.  The bootloader uses it too; the app's own subset of it
+# is APP_TINYUSB_SOURCES further down.
 set(TUSB_DIR "${CMAKE_SOURCE_DIR}/lib/tinyusb/src")
+
+# ============================================================================
+#  Bootloader: the DFU bootloader that owns internal flash sector 0
+#  (0x08000000, 128 KB).  REFERENCE BUILD ONLY -- nothing here can flash it.
+# ============================================================================
+# The bootloader tree (boot/) is INDEPENDENT of the app: it shares no source and
+# no header with it, it configures the clock tree the app then inherits, and it
+# is what survives a bad app image.  It is built here for exactly one reason --
+# so that a HAL, TinyUSB, toolchain or board.cmake change cannot break it
+# unnoticed.  Its bytes are frozen against a golden hash and the linked image is
+# put through cmake/check_boot_safety.py.
+#
+# [!] There is deliberately NO target that writes this image anywhere:
+#   - no `flash-boot`.  An ST-Link write into sector 0 is the one operation that
+#     bricks the board, and the only surviving board is #2.  A build system that
+#     CAN brick eventually will; the recovery procedure stays prose, in
+#     boot/README.md.
+#   - no `dfu-boot`.  That target would flash the BOOTLOADER into the APP
+#     partition.  Measured against this tree, what it would actually do:
+#     iflash.c's range check keeps it out of sector 0; the erase in
+#     dfu_callbacks.c runs only when offset % IFLASH_SECTOR_SIZE (0x20000) == 0,
+#     and a 30,524 B transfer only ever reaches offset 0 -- so sector 1 alone is
+#     erased (not 2 or 3), the boot payload minus its first 32 B is written
+#     there, and the vector-last commit is REFUSED because a bootloader reset
+#     vector lies outside the app window.  Net result: the app stops booting, DFU
+#     still recovers it, and one erase cycle of a ~10k budget is spent.  Cheap to
+#     write down here, expensive to discover on the bench.
+#
+# The artifacts land in boot-reference/ instead of next to shell.bin so that a
+# tab-completed `dfu-util -D ...` in the build directory cannot reach them, and
+# so the directory name itself says what the image is for.
+set(BOOT_DIR     "${BOARD_DIR}/boot")
+set(BOOT_OUT_DIR "${CMAKE_BINARY_DIR}/boot-reference")
+# objcopy will not create a parent directory, and neither will the linker's -Map.
+file(MAKE_DIRECTORY "${BOOT_OUT_DIR}")
+
+# --- boot_iface: the bootloader's usage requirements ------------------------
+# Deliberately NOT bsp_iface.  This is the same set minus ${BOARD_DIR}/include --
+# the app's headers -- so that a bootloader source which reaches for one fails to
+# COMPILE.  That is the mechanical form of "the boot tree shares nothing with the
+# app" (AGENTS.md invariant 6); a comment saying so would not survive a hurried
+# edit.  All five bootloader translation units compile warning-free without it,
+# and the -I ORDER is otherwise the donor's, which is part of why the image comes
+# out bit-identical.
+#
+# ${BOOT_DIR} must come BEFORE ${TUSB_DIR}: TinyUSB resolves
+# #include "tusb_config.h" along -I order and the app has a competing one in
+# src/ with CFG_TUD_DFU=0.  Picking that one up compiles AND links, and yields a
+# bootloader with no DFU class -- a failure that only a flashed board would show.
+# (check_boot_safety.py C5 looks for the class in the image as well.)
+add_library(boot_iface INTERFACE)
+target_include_directories(boot_iface INTERFACE
+    "${BOOT_DIR}"
+    "${TUSB_DIR}"
+    "${GEN_DIR}"
+    "${HAL_DIR}/Inc"
+    "${CMSIS_DEV}/Include"
+    "${CMSIS_CORE}/Include")
+target_compile_definitions(boot_iface INTERFACE
+    USE_HAL_DRIVER STM32H725xx
+    CFG_TUSB_MCU=OPT_MCU_STM32H7)     # selects the dwc2 port inside TinyUSB
+target_compile_options(boot_iface INTERFACE
+    ${MCU_OPTS} -Wall -fdata-sections -ffunction-sections -g -gdwarf-2)
+target_link_options(boot_iface INTERFACE
+    ${MCU_OPTS} -specs=nano.specs -specs=nosys.specs
+    -Wl,--gc-sections -Wl,--print-memory-usage)  # ldscript (-T) comes from rom_finalize
+
+# --- rom_finalize: the bootloader's counterpart to firmware_finalize --------
+# Kept structurally parallel to firmware_finalize() further down so the two stay
+# diffable.  It differs in exactly four ways, and every one of them is
+# load-bearing:
+#
+#  1. -T${LDSCRIPT_ROM}: 0x08000000 / 128 KB.  Spilling into sector 1 (the app
+#     partition) is a LINK ERROR rather than a runtime surprise.
+#  2. It creates NO flash target.  firmware_finalize's dfu-${tgt} would become
+#     "flash the bootloader into the app partition" -- the damage estimate is in
+#     the section header above, and it is why this function exists at all.
+#  3. The artifacts go to boot-reference/, not next to the app images.
+#  4. The artifact stem is the fixed string "boot", not ${tgt}.  The logical
+#     target is boot_image (the user-facing `boot` is a phony wrapper), so
+#     deriving names from ${tgt} would leave boot.elf -- which comes from
+#     OUTPUT_NAME -- sitting next to boot_image.bin/.hex/.map.
+#
+# Single-config Ninja only: Ninja Multi-Config appends a per-config subdirectory
+# to RUNTIME_OUTPUT_DIRECTORY, which would make every path below (including the
+# ones handed to the safety gate) depend on $<CONFIG>.  Every board in this
+# repository is configured with -G Ninja.
+function(rom_finalize tgt)
+    target_link_options(${tgt} PRIVATE
+        "-T${LDSCRIPT_ROM}" "-Wl,-Map=${BOOT_OUT_DIR}/boot.map,--cref")
+    set_target_properties(${tgt} PROPERTIES
+        LINK_DEPENDS             "${LDSCRIPT_ROM}"
+        OUTPUT_NAME              "boot"
+        RUNTIME_OUTPUT_DIRECTORY "${BOOT_OUT_DIR}")
+    add_custom_command(TARGET ${tgt} POST_BUILD
+        COMMAND "${CMAKE_OBJCOPY}" -O binary -S $<TARGET_FILE:${tgt}> "${BOOT_OUT_DIR}/boot.bin"
+        COMMAND "${CMAKE_OBJCOPY}" -O ihex     $<TARGET_FILE:${tgt}> "${BOOT_OUT_DIR}/boot.hex"
+        COMMAND "${CMAKE_SIZE}" $<TARGET_FILE:${tgt}>
+        BYPRODUCTS "${BOOT_OUT_DIR}/boot.bin" "${BOOT_OUT_DIR}/boot.hex"
+                   "${BOOT_OUT_DIR}/boot.map"
+        COMMENT "objcopy -> boot-reference/boot.bin/.hex (REFERENCE build -- do NOT flash)")
+endfunction()
+
+# --- boot_image: the bootloader executable ----------------------------------
+# The donor's source list in the donor's ORDER.  That order is the linker's input
+# order, and this image is required to come out bit-identical to the donor's
+# build of the same commit -- so it is not free to be tidied.
+#
+# The stock CMSIS system_stm32h7xx.c, NOT the app's src/system_stm32h7xx.c: the
+# bootloader is the thing that CONFIGURES the clock tree (HSI -> 550 MHz, PLL3Q
+# 48 MHz for USB, FLASH latency 3), while the app's custom SystemInit
+# deliberately leaves RCC/PWR/FLASH alone because it INHERITS that tree.
+#
+# BOOT_TINYUSB_SOURCES is APP_TINYUSB_SOURCES plus the DFU class.  The two lists
+# are spelled out separately on purpose: the app and the bootloader are allowed
+# to diverge, and one shared list is how they would lose that freedom.
+set(BOOT_TINYUSB_SOURCES
+    "${TUSB_DIR}/tusb.c"
+    "${TUSB_DIR}/common/tusb_fifo.c"
+    "${TUSB_DIR}/device/usbd.c"
+    "${TUSB_DIR}/class/dfu/dfu_device.c"
+    "${TUSB_DIR}/class/cdc/cdc_device.c"
+    "${TUSB_DIR}/portable/synopsys/dwc2/dcd_dwc2.c"
+    "${TUSB_DIR}/portable/synopsys/dwc2/dwc2_common.c")
+
+# HAL_SOURCES is shared with the app targets, and that is fine: it is a list of
+# upstream submodule files, and each target recompiles them into its own objects
+# with its own flags.  Do NOT "optimise" that into a shared OBJECT library -- it
+# is the one refactor that would put a single set of flags into both images and
+# turn this separation back into coupling, and its commit message would say
+# "build time".
+set(BOOT_SOURCES
+    "${BOOT_DIR}/main.c"
+    "${BOOT_DIR}/clock.c"
+    "${BOOT_DIR}/iflash.c"
+    "${BOOT_DIR}/usb_descriptors.c"
+    "${BOOT_DIR}/dfu_callbacks.c"
+    "${CMSIS_DEV}/Source/Templates/system_stm32h7xx.c"
+    "${CMSIS_DEV}/Source/Templates/gcc/startup_stm32h725xx.s"
+    ${BOOT_TINYUSB_SOURCES}
+    ${HAL_SOURCES})
+add_executable(boot_image ${BOOT_SOURCES})
+target_link_libraries(boot_image PRIVATE boot_iface)
+target_compile_options(boot_image PRIVATE -O2)
+
+# LTO is forbidden for this target, not merely "not requested".  The safety gate
+# reads the call graph out of the LINKED image, and cross-translation-unit
+# inlining of the HAL flash writers into iflash.c would delete the very edges it
+# checks.  -flto can arrive from CMAKE_INTERPROCEDURAL_OPTIMIZATION (including
+# its per-config variants, which OVERRIDE the generic property), from a
+# directory-level add_compile_options(), or from CMAKE_C_FLAGS.
+#
+# -fno-lto is deliberately NOT used: it would change the compile command line and
+# put the donor bit-identity requirement at risk.  Instead the property is forced
+# off generically AND per configuration, and check_boot_safety.py then reads the
+# REAL commands out of compile_commands.json -- because a property is not a
+# command line, and only the command line decides.  (The app's `shell` target
+# uses LTO on purpose, so this is a boot-only rule, not a board-wide ban.)
+set_property(TARGET boot_image PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+foreach(_cfg IN LISTS CMAKE_CONFIGURATION_TYPES ITEMS "${CMAKE_BUILD_TYPE}")
+    if(_cfg)
+        string(TOUPPER "${_cfg}" _cfg_up)
+        set_property(TARGET boot_image PROPERTY
+                     INTERPROCEDURAL_OPTIMIZATION_${_cfg_up} FALSE)
+    endif()
+endforeach()
+unset(_cfg)
+unset(_cfg_up)
+# Per-target compile-command export (a CMake 3.20 addition, which is exactly this
+# repository's minimum).  It only writes JSON -- it does not change what is
+# compiled -- and it is what lets the gate audit the actual flags.
+set_property(TARGET boot_image PROPERTY EXPORT_COMPILE_COMMANDS ON)
+
+rom_finalize(boot_image)
+
+# --- The sector-0 safety gate (cmake/check_boot_safety.py) ------------------
+# The golden image.  This is the REPRODUCIBILITY BASELINE for donor
+# owhinata/wio-lite-ai @ 09468bb -- established by rebuilding the donor in a
+# fresh build directory, not read off a stale artefact.  It is NOT a claim about
+# the byte string currently in board #2's sector 0: the only readback-verified
+# log the donor left behind belongs to the pre-#25 XIP build (30,332 B), and no
+# readback hash was ever recorded for this image.  M3 asserts nothing about
+# hardware behaviour.
+set(BOOT_GOLDEN_SHA256
+    "97ba7060d3fcd45aa3c1f585746add46e047240c7c0440c6514e50f6d0337bdf")
+set(BOOT_GOLDEN_SIZE 30524)          # text 30328 / data 192 / bss 4424
+
+# The escape hatch for a deliberate re-freeze (a HAL, TinyUSB or toolchain bump
+# genuinely changes the image).  It excuses the golden hash and NOTHING else:
+# every other check still runs, the ELF<->bin join included -- which is what
+# stops the override from being usable to smuggle in a different binary.  A cache
+# entry outlives the reason it was set, so the gate warns on every build while
+# this is on.
+option(BOOT_ALLOW_IMAGE_DRIFT
+       "Allow boot.bin to differ from the golden hash (deliberate re-freeze)" OFF)
+set(_boot_drift_flag "")
+if(BOOT_ALLOW_IMAGE_DRIFT)
+    set(_boot_drift_flag --allow-image-drift)
+endif()
+
+# The translation units the compile-command audit must find, written from the
+# very list that was handed to add_executable().  Generated rather than
+# hand-maintained on purpose: a hand-written list would drift and this one
+# cannot.  What it buys is not "nobody deleted a source" -- the golden hash
+# covers that -- but "the compile database really does describe this target", so
+# the LTO audit can never inspect an empty set and report a pass.
+string(REPLACE ";" "\n" _boot_tu_list "${BOOT_SOURCES}")
+file(WRITE "${BOOT_OUT_DIR}/boot_translation_units.txt" "${_boot_tu_list}\n")
+unset(_boot_tu_list)
+
+set(BOOT_PRECHECK_STAMP "${BOOT_OUT_DIR}/boot_precheck.stamp")
+
+# boot_precheck reads SOURCES ONLY.  Never a build artefact, and in particular
+# never $<TARGET_FILE:boot_image> -- CMake adds a dependency on any target named
+# by TARGET_FILE, which would close the cycle boot_image -> boot_precheck ->
+# boot_image.
+#
+# It always runs, and on success it rewrites the stamp.  boot_image lists that
+# stamp in LINK_DEPENDS, so the stamp is always newer than the previous image and
+# boot_image RELINKS ON EVERY BUILD.  That is the whole mechanism: build events
+# fire only when a target is actually rebuilt, so this is what makes the
+# POST_BUILD checks below unconditional -- there is no up-to-date state for a
+# default build, `--target boot` or `--target boot_image` to slip through.
+# (add_dependencies alone would NOT do this: it orders the two targets but gives
+# Ninja no reason to consider the link dirty.)
+#
+# The cost is one link of a 30 KB image per build; the objects are reused, so
+# nothing recompiles.  That is the deliberate trade -- rebuilding from inputs we
+# trust beats verifying artefacts that may already have been tampered with.
+add_custom_target(boot_precheck ALL
+    COMMAND "${Python3_EXECUTABLE}"
+            "${BOARD_DIR}/cmake/check_boot_safety.py" precheck
+            --board-dir "${BOARD_DIR}"
+            --boot-dir "${BOOT_DIR}"
+            --manifest "${BOARD_DIR}/cmake/boot_manifest.sha256"
+            --compile-commands "${CMAKE_BINARY_DIR}/compile_commands.json"
+            --object-dir "boot_image.dir"
+            --translation-units "${BOOT_OUT_DIR}/boot_translation_units.txt"
+            --stamp "${BOOT_PRECHECK_STAMP}"
+            ${_boot_drift_flag}
+    BYPRODUCTS "${BOOT_PRECHECK_STAMP}"
+    COMMENT "check the frozen bootloader sources and compile commands"
+    VERBATIM)
+
+# APPEND, not set: rom_finalize() already put the ROM linker script in this
+# property, and replacing it would drop the "relink when the linker script
+# changes" edge.  The stamp is a DEPENDENCY only -- it is never handed to the
+# linker, because a new link input would change the image and break the
+# bit-identity requirement.
+set_property(TARGET boot_image APPEND PROPERTY
+             LINK_DEPENDS "${BOOT_PRECHECK_STAMP}")
+add_dependencies(boot_image boot_precheck)
+
+# POST_BUILD, attached AFTER rom_finalize's: build events run in the order they
+# were added, and this one reads the boot.bin that one produces.
+add_custom_command(TARGET boot_image POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}"
+            "${BOARD_DIR}/cmake/check_boot_safety.py" postlink
+            --elf $<TARGET_FILE:boot_image>
+            --bin "${BOOT_OUT_DIR}/boot.bin"
+            --object-dir "${CMAKE_BINARY_DIR}/CMakeFiles/boot_image.dir"
+            --translation-units "${BOOT_OUT_DIR}/boot_translation_units.txt"
+            --nm "${CMAKE_NM}" --objdump "${CMAKE_OBJDUMP}"
+            --objcopy "${CMAKE_OBJCOPY}"
+            --golden-sha256 "${BOOT_GOLDEN_SHA256}"
+            --golden-size "${BOOT_GOLDEN_SIZE}"
+            ${_boot_drift_flag}
+    COMMENT "check sector-0 safety of the bootloader image"
+    VERBATIM)
+unset(_boot_drift_flag)
+
+# `boot` is what a person types.  A phony wrapper, so that the name people reach
+# for cannot be the one that is up to date and silent.
+add_custom_target(boot ALL
+    COMMENT "bootloader REFERENCE build -> boot-reference/ (not flashable from here)")
+add_dependencies(boot boot_image)
 
 # ============================================================================
 #  Apps: blink and the ThreadX shell

@@ -57,6 +57,7 @@ cmake -B build/wio-lite-ai -G Ninja \
       -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi-toolchain.cmake \
       -DBOARD=wio-lite-ai
 cmake --build build/wio-lite-ai        # -> shell.{elf,bin,hex}, blink.{elf,bin,hex}
+                                       #    + boot-reference/boot.{elf,bin,hex}
 
 cmake -B build/f746g-disco -G Ninja \
       -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi-toolchain.cmake \
@@ -89,9 +90,36 @@ cmake --build build/wio-lite-ai --target dfu-shell
 # or: dfu-util -d 0483:df11 -a 0 -D build/wio-lite-ai/shell.bin
 ```
 
-The app is programmed to the internal flash app partition at `0x08020000`. The
-bootloader in sector 0 is never written by this build. Internal flash endurance
-is about 10k cycles, so do not reflash in an automated loop.
+The app is programmed to the internal flash app partition at `0x08020000`.
+Internal flash endurance is about 10k cycles, so do not reflash in an automated
+loop.
+
+### The Wio Lite AI bootloader is built, never flashed
+
+`boards/wio-lite-ai/boot/` is the DFU bootloader that owns internal flash sector
+0 (`0x08000000`). It is an independent tree: it shares no source and no header
+with the app, and it is the code that recovers a board from a bad app image.
+This build produces it, into `build/wio-lite-ai/boot-reference/`, and **no target
+in this repository can write it anywhere**:
+
+- no `flash-boot`. Writing sector 0 is the one operation that can brick the
+  board, and exactly one board is left. The recovery procedure stays prose, in
+  [`boards/wio-lite-ai/boot/README.md`](boards/wio-lite-ai/boot/README.md).
+- no `dfu-boot`. That would flash the bootloader into the *app* partition: it
+  would erase sector 1 (only sector 1 -- a 30,524 B transfer only reaches offset
+  0, and the erase runs on 128 KB boundaries), write the boot payload there minus
+  its first 32 B, and then have the commit refused because a bootloader reset
+  vector is outside the app window. The app would stop booting, DFU would still
+  recover it, and one erase cycle of a ~10k budget would be gone.
+
+The reason to build it at all is continuity: a HAL, TinyUSB, toolchain or
+`board.cmake` change must not break the bootloader unnoticed. `boot.bin` is
+therefore checked against a golden hash, and the linked image goes through
+`boards/wio-lite-ai/cmake/check_boot_safety.py` on every build (vector placement,
+sector-0 containment, no option-byte/RDP/DBGMCU path, the flash-writing call
+graph, the DFU class, and the frozen source hashes). The image is a
+*reproducibility baseline* for the bootloader's source commit -- it has never
+been run on hardware from this repository, and nothing here claims otherwise.
 
 ## Host tests
 
@@ -103,8 +131,9 @@ sh shell/test/run_host_tests.sh
 
 ## Status
 
-Both boards are ported and build from the shared shell core. The Wio Lite AI DFU
-bootloader tree is next. Project rules are in `CLAUDE.md` / `AGENTS.md`.
+Both boards are ported and build from the shared shell core, and the Wio Lite AI
+DFU bootloader tree is in and building (reference build only -- see above).
+Project rules are in `CLAUDE.md` / `AGENTS.md`.
 
 ## License
 

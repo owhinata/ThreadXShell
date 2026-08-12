@@ -58,6 +58,13 @@
    **書換え耐久 ~10k サイクル** — 自動ループで焼く提案は不可。DFU フォールバック
    （erased/invalid app は必ず DFU モードに入る）を app 側から壊す変更も不可。
    オプションバイト / RDP / DBGMCU / SWD 端子（PA13/PA14）に触れる提案も不可。
+   boot は **参照ビルドとしてのみ**ビルドする（`boot` → `boot-reference/`）。
+   **セクタ0 に書けるターゲットの新設は不可。`dfu-boot` の新設も不可**（boot を app
+   パーティションに焼くターゲットになる）。boot は app のヘッダを一切 include しない
+   （`boot_iface` が `${BOARD_DIR}/include` を持たないので include すればコンパイルエラー）。
+   boot ターゲットの LTO 有効化も不可（ゲートが読む呼び出しグラフの辺が消える）。
+   boot ソース / ROM ldscript の変更は `cmake/boot_manifest.sha256` と golden hash の
+   両方の更新を伴い、レビュー済み例外を要する。
 
 7. **Wio Lite AI: RAM 配置ポリシー**: AXI-SRAM（320KB @ 0x24000000）= バスマスタから見える
    必要があるものだけ（**DMA が届く唯一の RAM**）/ DTCM（128KB @ 0x20000000）= CPU 専用 /
@@ -73,6 +80,12 @@
      ldscript の ASSERT 群が invariant の本体だから。加えて `check_f746_layout.py` が
      シンボル常駐 / ベクタ / float ランタイムを実イメージで検査する。
      **どちらのボードでも、この 2 系統のゲートを外す・弱める変更は不可。**
+   - **wio-lite-ai の boot ツリー**は `check_boot_safety.py`（不変条件 6）。
+     `boot_precheck`（ソース manifest + compile command 監査）と POST_BUILD（リンク済み
+     イメージ検査）の 2 段で、`boot_image` は毎ビルド再リンクさせて迂回経路を消してある。
+     この always-relink（`boot_precheck` の stamp → `boot_image` の `LINK_DEPENDS`）を
+     外す変更は、ゲートを無効化するのと同じ。negative test は
+     `cmake/fixtures/run_fixture_tests.py`。
 
 8b. **f746g-disco: メモリ配置ポリシー**: DTCM 64KB @ 0x20000000 = D-cache を経由しない
    もの（reset 跨ぎのログリング `g_log`、membench の DTCM 行）/ SRAM1 = D-cache 管理を

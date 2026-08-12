@@ -1,0 +1,18 @@
+# SHA256 of the frozen bootloader tree (AGENTS.md invariant 6), relative to
+# boards/wio-lite-ai/.  Checked on every build by cmake/check_boot_safety.py.
+#
+# Sources: donor owhinata/wio-lite-ai @ 09468bb, byte-identical.  boot/README.md
+# is deliberately absent -- it is the one file that was translated (this
+# repository writes documentation in English), so it cannot be hash-frozen; the
+# gate still requires it to exist as a regular file.
+#
+# A change here is not a routine edit.  It needs a reviewed exception AND a new
+# golden image hash in board.cmake -- see boot/README.md.
+904cedc3cf61e7c44b27c68c9a048688a29696592b231aeeac818631d517e859  boot/main.c
+450a1d3f92af9c0253598dbd64939649326edd83a0fb386d0b14cad58859a6fe  boot/clock.c
+314173d93d97edeff908122a8c34c8a64607ebf8efb3a83051a23f491fb3d400  boot/iflash.c
+d053bd712fc7ac845458eac7da57bde768cbad50ac509538a927bcbcb053c208  boot/iflash.h
+dfab0f7a14bf944d6047559b22bced6bacb2d89823946ec83a40961bb1801d12  boot/dfu_callbacks.c
+b0834409777f2be341ed40428863c7dc6e01a080124a545589d5d8956b2233a4  boot/usb_descriptors.c
+5d2a58b4ed94540e39015cf6e7714104f40187d3acf171f76c6c5ec2e58d981b  boot/tusb_config.h
+30688909658d8e1adc075e2302c9434b62a8cb01b99613d0eda790934a53f1a5  ldscript/STM32H725AEIx_ROM.ld

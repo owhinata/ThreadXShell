@@ -237,6 +237,15 @@ SECTIONS
         __sram_bench_end = .;
     } > CM55M_S_SRAM
 
+    /* High-water mark of the SRAM window, for the `free` command (issue #26).
+     * MUST stay after every section assigned to CM55M_S_SRAM -- the location
+     * counter here still belongs to that region, and the next output section
+     * switches it back to DTCM.  Order-sensitive by nature, so
+     * check_placement_budget.py fails the build if any allocated section ever
+     * extends past this symbol; that is what stops the report going stale the
+     * way it did when .sram_bench was added and `free` kept printing 0. */
+    __sram_end = .;
+
     .bss :
     {
         . = ALIGN(4);

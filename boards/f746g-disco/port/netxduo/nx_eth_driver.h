@@ -40,6 +40,25 @@ struct nx_eth_stats {
 };
 VOID nx_eth_driver_get_stats(struct nx_eth_stats *out);
 
+/**
+ * Poll-complete hook (issue #13): run at the END of every PHY poll the driver is
+ * notified of, on the `eth-link` monitor thread, holding NO lock -- neither
+ * eth_lock nor any NetX mutex -- and after the driver's own link-status /
+ * deferred-processing events have been posted.
+ *
+ * This exists so work that must NOT run on the NetX IP thread has a thread to run
+ * on.  The IP thread invokes the link-status callback while holding
+ * nx_ip_protection, so anything it calls that takes the DHCP mutex closes an AB-BA
+ * cycle against the DHCP thread (which holds that mutex and waits for
+ * nx_ip_protection).  The glue registers its DHCP autostart here instead.
+ *
+ * Registration follows the same dependency inversion as eth_link_set_callback():
+ * the driver never names a glue symbol.  Register from nx_net_init(); the hook may
+ * block (the caller holds nothing), but a long one delays the next PHY poll.
+ */
+typedef void (*nx_eth_poll_hook_t)(void *arg);
+VOID nx_eth_set_poll_hook(nx_eth_poll_hook_t hook, void *arg);
+
 #ifdef __cplusplus
 }
 #endif

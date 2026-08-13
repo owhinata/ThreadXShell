@@ -14,6 +14,7 @@
  */
 #include "nx_api.h"
 #include "nxd_dhcp_client.h"
+#include "stm32f7xx_hal.h"    /* __get_PRIMASK / __disable_irq / __set_PRIMASK   */
 
 #include "nx_glue.h"
 #include "nx_eth_driver.h"
@@ -57,28 +58,45 @@ static bool static_mode;
 #define NXG_IFACE  0u
 
 /*
- * Serialises the glue's own state (dhcp_started / static_mode / link_up) together
- * with the NetX DHCP calls that move it.  Without it, `net dhcp` from the shell
- * races the link-status callback on the NetX IP thread, and the pair can leave the
- * flags describing a client that is in a different state.
+ * Serialises the glue's own state (dhcp_started / static_mode) together with the
+ * NetX DHCP calls that move it.  Without it, `net dhcp` from the shell races the
+ * link-status callback on the NetX IP thread, and the pair can leave the flags
+ * describing a client that is in a different state.
  *
  * ORDER: this mutex is always taken BEFORE any NetX internal mutex, never after.
- * The link-status callback runs on the IP helper thread holding nx_ip_protection,
- * so it takes this one with TX_NO_WAIT only -- it must never block there.  When it
- * cannot get it, the shell thread that holds it is by definition mid-way through a
- * DHCP operation, so the callback leaves `link_start_pending` for it to finish
- * (nxg_unlock), rather than dropping the link-up event.
+ * The whole lock graph on this board is
  *
- * NOTE (issue for the follow-up, NOT fixed here): NetX itself has a latent
- * IP-mutex/DHCP-mutex cycle -- the IP thread calls this callback while holding
- * nx_ip_protection and the callback calls into DHCP, while the DHCP thread holds
- * the DHCP mutex and calls nx_ip_interface_address_set().  This mutex neither
- * creates nor widens that cycle (the callback never blocks on it); breaking it
- * needs the DHCP start moved off the IP thread entirely.
+ *     nxg_lock -> nx_dhcp_mutex -> nx_ip_protection -> eth_lock
+ *
+ * and it is acyclic only because NOTHING takes this mutex while holding a NetX
+ * mutex or eth_lock.  The one edge that used to violate it was
+ * nx_ip_protection -> nx_dhcp_mutex: the IP thread calls the link-status callback
+ * while holding nx_ip_protection, and that callback used to start DHCP, whose
+ * first act is to take the DHCP mutex -- while the DHCP thread holds that mutex
+ * across its whole loop body and calls nx_ip_interface_address_set(), which waits
+ * for nx_ip_protection.  Both threads stopping takes the entire stack down, not
+ * just DHCP (issue #13).  The callback therefore no longer calls NetX at all: it
+ * publishes the link state and the autostart request, and the work runs on the
+ * eth-link poll thread, which holds nothing (see nxg_poll_hook).
  */
-static TX_MUTEX     nxg_lock;
+static TX_MUTEX nxg_lock;
+
+/*
+ * The link handshake: written by the IP thread in the link-status callback, read
+ * and cleared by the two consumers below.  `volatile` is not what makes this safe
+ * -- it stops the compiler caching the loads, but it is not an inter-thread
+ * synchronisation primitive and gives no ordering.  Every access is inside a short
+ * save/restore-PRIMASK section (NXG_CRIT_*), which on this single-core part is
+ * what actually excludes the producer from a consumer's snapshot.
+ */
 static volatile bool link_up;              /* last state the callback reported  */
-static volatile bool link_start_pending;   /* callback deferred a DHCP start    */
+static volatile bool link_start_pending;   /* a link-up wants DHCP started      */
+
+/* PRIMASK critical section, as in nx_shell.c / backend/cli_backend_uart.c.  Nests
+   safely inside ThreadX's own PRIMASK sections, and restores the previous mask
+   rather than enabling unconditionally. */
+#define NXG_CRIT_ENTER()  do { uint32_t _pm = __get_PRIMASK(); __disable_irq()
+#define NXG_CRIT_EXIT()   __set_PRIMASK(_pm); } while (0)
 
 extern VOID nx_eth_driver(NX_IP_DRIVER *driver_req_ptr);
 
@@ -89,15 +107,29 @@ static void nxg_lock_acquire(void)
 	(void)tx_mutex_get(&nxg_lock, TX_WAIT_FOREVER);
 }
 
-/* Start DHCP if the link is up and nothing else owns the address.  CALL WITH THE
-   GLUE LOCK HELD.  Clears the pending flag either way: when the preconditions do
-   not hold there is nothing left to defer. */
-static void nxg_dhcp_autostart_locked(void)
+/*
+ * Consume a published link-up: start DHCP if nothing else owns the address.  CALL
+ * WITH THE GLUE LOCK HELD, and never from the IP thread (issue #13).
+ *
+ * The snapshot and the clear happen together under PRIMASK so the producer cannot
+ * land between them; everything that can block or take a lock -- the DHCP call and
+ * its logging -- runs afterwards, with interrupts back on.  The edge is consumed
+ * even if the preconditions turn out to be false: that matches the previous
+ * behaviour, where a start that fails is retried on the next qualifying link event
+ * or a manual `net dhcp`, not five times a second.
+ */
+static void nxg_run_link_pending_locked(void)
 {
+	bool pending, up;
 	UINT s;
 
+	NXG_CRIT_ENTER();
+	pending            = link_start_pending;
+	up                 = link_up;
 	link_start_pending = false;
-	if (!link_up || !dhcp_created || static_mode || dhcp_started)
+	NXG_CRIT_EXIT();
+
+	if (!pending || !up || !dhcp_created || static_mode || dhcp_started)
 		return;
 
 	s = nx_dhcp_interface_start(&eth_dhcp, NXG_IFACE);
@@ -107,39 +139,64 @@ static void nxg_dhcp_autostart_locked(void)
 		LOG_ERR("dhcp start failed (0x%02x)", (unsigned)s);
 }
 
-/* Release the glue lock, first finishing any start the link callback had to defer
-   because this thread was holding it. */
+/* Release the glue lock, first finishing any start published while this thread
+   held it -- so a link-up during a shell command starts DHCP at once instead of
+   waiting for the next PHY poll. */
 static void nxg_unlock(void)
 {
-	if (link_start_pending)
-		nxg_dhcp_autostart_locked();
+	nxg_run_link_pending_locked();
 	tx_mutex_put(&nxg_lock);
 }
 
-/* NetX link-status callback (IP helper thread context, under nx_ip_protection):
-   update the interface link flag and kick DHCP on the first link-up. */
+/*
+ * Poll-complete hook, registered with the ETH driver and run on the `eth-link`
+ * thread (issue #13).  This is where the DHCP autostart actually happens: that
+ * thread holds no lock at all when it gets here, so taking the glue lock -- and
+ * through it the DHCP and IP mutexes -- follows the documented order.  Waiting
+ * here delays only the next PHY poll.
+ */
+static void nxg_poll_hook(void *arg)
+{
+	(void)arg;
+	nxg_lock_acquire();
+	nxg_run_link_pending_locked();
+	tx_mutex_put(&nxg_lock);
+}
+
+/*
+ * NetX link-status callback -- IP helper thread, WITH nx_ip_protection HELD.
+ *
+ * Everything here must be non-blocking and NetX-free: taking the DHCP mutex from
+ * this context is the deadlock in issue #13, and taking the glue lock would put a
+ * NetX mutex above it in the order.  So this only publishes: NetX's own link flag
+ * (a byte store, on the thread NetX itself would have written it -- upstream's
+ * deferred link-status processing never assigns it, and route lookup reads it
+ * outside the IP mutex), then the glue's copy plus the autostart request.
+ *
+ * The request is published on every callback reporting up, not only on a
+ * down -> up transition, because NetX raises this callback for a speed or duplex
+ * change too and the old code started DHCP on those as well.  It cannot become a
+ * busy loop: the driver only raises the event when the PHY state actually changed.
+ */
 static void nx_link_status_cb(NX_IP *ip, UINT iface_index, UINT up)
 {
 	ip->nx_ip_interface[iface_index].nx_interface_link_up = (UCHAR)up;
-	link_up = (up != 0u);
 
-	/* TX_NO_WAIT is mandatory here: this runs on the IP thread with
-	   nx_ip_protection held, so blocking would stall the whole stack. */
-	if (tx_mutex_get(&nxg_lock, TX_NO_WAIT) != TX_SUCCESS) {
-		link_start_pending = true;      /* nxg_unlock() picks it up */
-		LOG_INF("link-cb up=%u (glue busy; start deferred)", (unsigned)up);
-		return;
-	}
-	nxg_dhcp_autostart_locked();
-	tx_mutex_put(&nxg_lock);
+	NXG_CRIT_ENTER();
+	link_up = (up != 0u);
+	if (up != 0u)
+		link_start_pending = true;
+	NXG_CRIT_EXIT();
 }
 
 int nx_net_init(void)
 {
 	UINT s;
 
-	/* Before anything can change the glue's state (the link callback fires as
-	   soon as nx_ip_create runs the driver). */
+	/* Before anything can change the glue's state.  This whole function runs from
+	   tx_application_define(), i.e. with the scheduler not yet started, so neither
+	   the IP thread nor the eth-link thread can observe a half-built glue -- but
+	   the mutex still has to exist before the first user of it is created. */
 	if (tx_mutex_create(&nxg_lock, "nxglue", TX_INHERIT) != TX_SUCCESS) {
 		LOG_ERR("glue mutex create failed");
 		return NXG_ERR;
@@ -154,8 +211,9 @@ int nx_net_init(void)
 		return NXG_ERR;
 	}
 
-	/* Bind the RX pool to the driver BEFORE nx_ip_create (which runs the driver
-	   INITIALIZE on the IP thread) -- it measures the packet<->payload offset. */
+	/* Bind the RX pool to the driver BEFORE nx_ip_create, which creates the IP
+	   thread that later runs the driver's INITIALIZE -- it measures the
+	   packet<->payload offset. */
 	nx_eth_driver_set_pool(&eth_pool);
 
 	s = nx_ip_create(&eth_ip, "eth", 0, 0xFFFFFF00UL, &eth_pool, nx_eth_driver,
@@ -172,14 +230,20 @@ int nx_net_init(void)
 
 	nx_ip_link_status_change_notify_set(&eth_ip, nx_link_status_cb);
 
-	/* DHCP is the boot default (user choice).  Created here, started by the
-	   link-up callback; reuse the shared non-cacheable pool. */
+	/* DHCP is the boot default (user choice).  Created here; the link-status
+	   callback publishes the request and the eth-link poll thread does the start
+	   (issue #13).  Reuses the shared non-cacheable pool. */
 	if (nx_dhcp_create(&eth_dhcp, &eth_ip, "eth") == NX_SUCCESS) {
 		nx_dhcp_packet_pool_set(&eth_dhcp, &eth_pool);
 		dhcp_created = true;
 	} else {
 		LOG_WRN("dhcp create failed; use 'net ip' for a static address");
 	}
+
+	/* Last, so every precondition the hook reads is already final.  Ordering is
+	   not what makes this safe -- nothing runs until the scheduler starts -- but
+	   it keeps the hook from being readable as "may run mid-init". */
+	nx_eth_set_poll_hook(nxg_poll_hook, NULL);
 
 	nx_up = true;
 	LOG_INF("NetX Duo up (IPv4); pool %u B, IP thread prio %u",

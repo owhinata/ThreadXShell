@@ -1245,7 +1245,10 @@ int nx_net_dhcp_renew(void)
 	 * looked exactly like a right one.  Clearing here is also what "renew" means.
 	 */
 	(void)nx_ip_address_set(&nxn_ip, 0u, 0u);
-	nx_ip_gateway_address_set(&nxn_ip, 0u);
+	/* CLEAR, not set-to-zero: NetX rejects 0.0.0.0 as a gateway address, so the
+	 * set() this used to call always failed and the old gateway survived the
+	 * switch to DHCP -- the same trap as issue #19, at a second call site. */
+	(void)nx_ip_gateway_address_clear(&nxn_ip);
 	nxn_lease_stale = false;         /* whatever we get next is by definition fresh */
 	s = nx_dhcp_start(&nxn_dhcp);
 	/* ALREADY_STARTED means the state we wanted is the state we have -- that is a

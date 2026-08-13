@@ -121,6 +121,25 @@ static UINT nxg_gateway_apply(uint32_t gw)
 }
 
 /*
+ * Give up the address we currently hold, BEFORE starting the DHCP client, so that
+ * "the interface has an address" means "a lease arrived" and nothing else (issue
+ * #20).  The client zeroes it itself on the way into INIT, but it does that on its
+ * OWN thread, so a caller that starts the client and then watches for an address
+ * (cmd_net.c) races it and can read the previous one: `net ip 192.168.11.100/24`
+ * followed by `net dhcp` printed "192.168.11.100 (dhcp)" at once while the real
+ * lease landed later -- a wrong answer that looks exactly like a right one.  The
+ * wio-lite-ai port already does this for the same reason.
+ *
+ * CALL WITH THE GLUE LOCK HELD, and only where there is no lease to lose: never on
+ * the force-renew path, whose entire point is that the lease stays valid (#9).
+ */
+static void nxg_drop_address(void)
+{
+	(void)nx_ip_address_set(&eth_ip, 0u, 0u);
+	(void)nxg_gateway_apply(0u);
+}
+
+/*
  * Consume a published link-up: start DHCP if nothing else owns the address.  CALL
  * WITH THE GLUE LOCK HELD, and never from the IP thread (issue #13).
  *
@@ -408,6 +427,7 @@ int nx_net_dhcp_renew(void)
 	static_mode = false;
 
 	if (!dhcp_started) {
+		nxg_drop_address();
 		s = nx_dhcp_interface_start(&eth_dhcp, NXG_IFACE);
 		if (s != NX_SUCCESS) {
 			LOG_ERR("dhcp start failed (0x%02x)", (unsigned)s);
@@ -438,6 +458,8 @@ int nx_net_dhcp_renew(void)
 		goto out;
 	}
 	dhcp_started = false;              /* the link callback may restart it now */
+
+	nxg_drop_address();
 
 	s = nx_dhcp_interface_reinitialize(&eth_dhcp, NXG_IFACE);
 	if (s != NX_SUCCESS) {

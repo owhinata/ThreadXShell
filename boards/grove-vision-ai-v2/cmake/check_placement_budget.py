@@ -272,6 +272,29 @@ def main():
             errors.append(f"sections {n1} [0x{lo1:08x},0x{hi1:08x}) and {n2} "
                           f"[0x{lo2:08x},0x{hi2:08x}) overlap")
 
+    # 7. the `free` command's region accounting still covers everything
+    #    (issue #26).  `free` reports SRAM usage as __sram_end - ORIGIN and
+    #    DTCM statics as __HeapBase - ORIGIN.  Both are high-water marks that
+    #    only stay honest while nothing is placed past them -- and the bug this
+    #    check exists to prevent is exactly that: a section was added to a
+    #    region and `free` went on reporting the old number (0 B of a 64 KB
+    #    SRAM reservation) with nothing to catch it.
+    sram_end = by_name.get("__sram_end")
+    heap_base = by_name.get("__HeapBase")
+    if sram_end is None:
+        errors.append("__sram_end missing; `free` cannot report SRAM usage")
+    if heap_base is None:
+        errors.append("__HeapBase missing; `free` cannot report DTCM statics")
+    for lo, hi, name in placed:
+        if sram_end is not None and inside(SRAM, lo, hi) and hi > sram_end:
+            errors.append(f"section {name} ends at 0x{hi:08x}, past __sram_end "
+                          f"0x{sram_end:08x} -- `free` would under-report SRAM")
+        if (heap_base is not None and inside(DTCM, lo, hi)
+                and lo < heap_base < hi):
+            errors.append(f"section {name} [0x{lo:08x},0x{hi:08x}) straddles "
+                          f"__HeapBase 0x{heap_base:08x} -- `free` would "
+                          "mis-report DTCM statics")
+
     if errors:
         print("check_placement_budget: FAIL", file=sys.stderr)
         for e in errors:

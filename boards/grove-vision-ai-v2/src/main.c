@@ -36,6 +36,7 @@
 #define LOG_TAG "main"
 #include "log.h"
 #include "timebase.h"
+#include "malloc_lock.h"
 
 #include <stdio.h>
 
@@ -92,6 +93,12 @@ int main(void)
 	LOG_INF("platform init: done, core=%lu Hz",
 	        (unsigned long)SystemCoreClock);
 
+	/* Unbuffered stdout so each printf reaches _write immediately -- and so
+	 * stdio never allocates a stream buffer behind our back (issue #25: the
+	 * heap here is 8 KB and, since `coremark` pulled in newlib's float
+	 * printf, is reached from more than one thread). */
+	setvbuf(stdout, NULL, _IONBF, 0);
+
 	/* ThreadX: _tx_initialize_low_level (port/threadx/tx_glue.c) programs
 	 * SysTick from the read-back SystemCoreClock; tx_application_define below
 	 * creates the shell; then the scheduler starts.  Does not return. */
@@ -104,6 +111,10 @@ int main(void)
 void tx_application_define(void *first_unused_memory)
 {
 	(void)first_unused_memory;
+
+	/* Serialise the newlib heap before anything can allocate from a thread
+	 * (issue #25).  Fail-stops on its own if the mutex cannot be created. */
+	malloc_lock_init();
 
 	/* Shell instance: create its ThreadX objects + backend, then spawn its
 	 * thread.  Fail-soft: a failed cli_init just skips the shell.  The

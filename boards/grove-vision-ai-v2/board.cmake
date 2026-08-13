@@ -180,15 +180,25 @@ set(LIBPWRMGMT "${SDK}/prebuilt_libs/gnu/libpwrmgmt.a")
 # (TX_INCLUDE_USER_DEFINE_FILE + port/threadx on the include path) so the
 # ThreadX core, the shell core and the app agree on the TX_THREAD layout (ABI).
 # tx_user.h defines TX_SINGLE_MODE_SECURE, which also compiles the port's six
-# secure-stack sources down to empty objects.  No EPK on this board (M-G1):
-# the outermost UART ISR lives inside the prebuilt libdriver.a, where EPK
-# enter/exit hooks cannot be placed, so its ISR accounting would be wrong.
+# secure-stack sources down to empty objects.
 set(TX_DIR  "${CMAKE_SOURCE_DIR}/lib/threadx")
 set(TX_PORT "${TX_DIR}/ports/cortex_m55/gnu")
 file(GLOB TX_CORE "${TX_DIR}/common/src/*.c")
 list(FILTER TX_CORE EXCLUDE REGEX "tx_misra\\.c$")
 file(GLOB TX_ASM  "${TX_PORT}/src/*.S")
 list(FILTER TX_ASM  EXCLUDE REGEX "tx_misra\\.S$")
+# Execution Profile Kit (`thread` cpu%, issue #25).  It lives under utility/,
+# not common/src, so the TX_CORE glob above does not pick it up -- add it
+# explicitly.  Its time source is Himax TIMER2, brought up and owned by
+# port/threadx/tx_glue.c (see tx_user.h).
+set(TX_EPK "${TX_DIR}/utility/execution_profile_kit/tx_execution_profile.c")
+
+# ThreadX idle WFI sleep (TX_ENABLE_WFI in tx_user.h).  Default ON; build with
+# -DBSP_ENABLE_WFI=OFF for a busy-idle variant that is easier to attach over
+# SWD (a WFI-sleeping core needs connect-under-reset).  The define has to reach
+# the port ASSEMBLY too -- tx_thread_schedule.S is what contains the WFI --
+# which is why it rides on the `shell` target rather than on one source file.
+option(BSP_ENABLE_WFI "Enable ThreadX idle WFI power saving" ON)
 
 # --- Shell sources ----------------------------------------------------------
 # Board-independent files come from the shared shell/ and svc/ trees; the ones
@@ -215,26 +225,74 @@ set(SHELL_SOURCES
     "${BOARD_DIR}/cmds/cmd_devmem.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_dmesg.c"
     "${BOARD_DIR}/cmds/cmd_crash.c"
+    "${BOARD_DIR}/cmds/bench_gate.c"
+    "${BOARD_DIR}/cmds/cmd_coremark.c"
+    "${BOARD_DIR}/cmds/cmd_membench.c"
+    "${BOARD_DIR}/cmds/cmd_epk.c"
     "${CMAKE_SOURCE_DIR}/svc/fmt.c"
     "${BOARD_DIR}/svc/timebase.c"
     "${BOARD_DIR}/svc/log.c")
+
+# --- CoreMark object library (run as the shell `coremark` command) ----------
+# Built once at -O3 -funroll-loops and linked into the shell firmware below;
+# cmd_coremark.c calls coremark_main().  core_main.c is compiled with
+# -Dmain=coremark_main so its main() does not clash with the app main() in
+# src/main.c.  MEM_METHOD=MEM_STATIC puts the 2 KB working set in .bss (DTCM):
+# the newlib heap here is only 8 KB (ldscript __HEAP_SIZE) while DTCM has
+# ~180 KB spare, so the wio port's malloc-per-run trade does not apply.
+# ITERATIONS=0 -> CoreMark auto-calibrates the run time.
+#
+# [!] -fno-tree-vectorize is load-bearing, not tuning: -mcpu=cortex-m55 enables
+# MVE, and at -O3 the auto-vectoriser emits PREDICATED MVE (VCTP/VPST) for
+# exactly the kind of loops CoreMark is made of.  The ThreadX Cortex-M55 port
+# does not save/restore VPR across a context switch, so such code is unsafe in
+# a preemptible thread -- check_mve_predication.py fails the build on it.  The
+# published score is therefore a SCALAR score; core_portme.h says so in the
+# report's own flags line.
+set(CMK_DIR "${CMAKE_SOURCE_DIR}/lib/coremark")
+add_library(coremark_obj OBJECT
+    "${CMK_DIR}/core_list_join.c"
+    "${CMK_DIR}/core_main.c"
+    "${CMK_DIR}/core_matrix.c"
+    "${CMK_DIR}/core_state.c"
+    "${CMK_DIR}/core_util.c"
+    "${BOARD_DIR}/port/coremark/core_portme.c")
+target_link_libraries(coremark_obj PUBLIC bsp_iface)
+target_include_directories(coremark_obj PRIVATE
+    "${CMK_DIR}" "${BOARD_DIR}/port/coremark"
+    "${BOARD_DIR}/port/threadx"                 # tx_user.h (tick rate)
+    "${TX_DIR}/common/inc" "${TX_PORT}/inc"     # tx_time_get()
+    "${TX_DIR}/utility/execution_profile_kit")  # tx_api.h pulls it under EPK
+target_compile_definitions(coremark_obj PRIVATE
+    TX_INCLUDE_USER_DEFINE_FILE
+    ITERATIONS=0 MEM_METHOD=MEM_STATIC)
+target_compile_options(coremark_obj PRIVATE -O3 -funroll-loops -fno-tree-vectorize)
+# Rename the benchmark entry so it does not collide with the app main().
+set_source_files_properties("${CMK_DIR}/core_main.c" PROPERTIES
+    COMPILE_DEFINITIONS "main=coremark_main")
 
 # --- The shell firmware ------------------------------------------------------
 add_executable(shell
     "${BOARD_DIR}/src/main.c"
     "${BOARD_DIR}/src/fault.c"
     "${BOARD_DIR}/src/retarget.c"
+    "${BOARD_DIR}/src/malloc_lock.c"
     "${BOARD_DIR}/src/xprintf_shim.c"
     "${BOARD_DIR}/port/threadx/tx_glue.c"
     ${SHELL_SOURCES}
     ${SDK_SOURCES}
-    ${TX_CORE} ${TX_ASM})
-target_link_libraries(shell PRIVATE bsp_iface
+    ${TX_CORE} ${TX_ASM} ${TX_EPK})
+target_link_libraries(shell PRIVATE bsp_iface coremark_obj
     -Wl,--start-group "${LIBDRIVER}" "${LIBPWRMGMT}" -Wl,--end-group)
+# CoreMark's canonical report prints its score with %f; pull in newlib's float
+# printf (newlib-nano omits it by default).  This is also why src/malloc_lock.c
+# exists: that conversion allocates from the heap, now from several threads.
+target_link_options(shell PRIVATE -u _printf_float)
 target_include_directories(shell PRIVATE
     "${BOARD_DIR}/src"
     "${BOARD_DIR}/port/threadx"
     "${BOARD_DIR}/backend"
+    "${BOARD_DIR}/cmds"         # bench_gate.h: shared by coremark + membench
     "${CMAKE_SOURCE_DIR}/shell/include"
     "${CMAKE_SOURCE_DIR}/shell/core"
     "${CMAKE_SOURCE_DIR}/shell/backend"
@@ -244,9 +302,11 @@ target_include_directories(shell PRIVATE
                                 # which the shared cmd_dmesg.c / cmd_sleep.c
                                 # consume
     "${TX_DIR}/common/inc"
+    "${TX_DIR}/utility/execution_profile_kit"   # tx_execution_profile.h
     "${TX_PORT}/inc")
 target_compile_definitions(shell PRIVATE
     TX_INCLUDE_USER_DEFINE_FILE        # -> port/threadx/tx_user.h
+    BSP_ENABLE_WFI=$<BOOL:${BSP_ENABLE_WFI}>   # gates TX_ENABLE_WFI (tx_user.h)
     CLI_ENABLE_DANGEROUS_CMDS=1        # reboot / devmem / crash
     CLI_INSTANCE_STACK_SIZE=4096       # headroom for cli_print (wio parity)
     CLI_BG_JOB_STACK_SIZE=4096

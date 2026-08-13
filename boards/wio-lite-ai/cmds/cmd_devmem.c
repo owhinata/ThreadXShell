@@ -318,9 +318,12 @@ static int cmd_devmem_dump(struct cli_instance *sh, int argc, char **argv)
 }
 
 CLI_SUBCMD_SET_CREATE(devmem_subcmds,
-	CLI_CMD_ARG(peek, NULL, "read  <addr> [8|16|32]",       cmd_devmem_peek, 2, 1),
-	CLI_CMD_ARG(poke, NULL, "write <addr> <val> [8|16|32]", cmd_devmem_poke, 3, 1),
-	CLI_CMD_ARG(dump, NULL, "hexdump <addr> [len]",         cmd_devmem_dump, 2, 1),
+	CLI_CMD_ARG_USAGE(peek, NULL, "read  <addr> [8|16|32]",
+	                  "<addr> [8|16|32]", cmd_devmem_peek, 2, 1),
+	CLI_CMD_ARG_USAGE(poke, NULL, "write <addr> <val> [8|16|32]",
+	                  "<addr> <val> [8|16|32]", cmd_devmem_poke, 3, 1),
+	CLI_CMD_ARG_USAGE(dump, NULL, "hexdump <addr> [len]",
+	                  "<addr> [len]", cmd_devmem_dump, 2, 1),
 	CLI_SUBCMD_SET_END);
 
 CLI_CMD_REGISTER(devmem, devmem_subcmds,

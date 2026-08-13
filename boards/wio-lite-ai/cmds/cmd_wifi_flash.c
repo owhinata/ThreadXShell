@@ -799,15 +799,15 @@ out:
 const struct cli_cmd wifi_flash_subcmds[] = {
 	CLI_CMD_ARG(info,    NULL, "identify the chip: capacity / status regs / checksum",
 	            cmd_flash_info,    1, 0),
-	CLI_CMD_ARG(read,    NULL, "survey sectors <offset> [nsectors] (non-destructive)",
-	            cmd_flash_read,    2, 1),
-	CLI_CMD_ARG(backup,  NULL, "back the flash up to the PC over YMODEM [offset] [len]",
-	            cmd_flash_backup,  1, 2),
+	CLI_CMD_ARG_USAGE(read,   NULL, "survey sectors <offset> [nsectors] (non-destructive)",
+	                  "<offset> [nsectors]", cmd_flash_read, 2, 1),
+	CLI_CMD_ARG_USAGE(backup, NULL, "back the flash up to the PC over YMODEM [offset] [len]",
+	                  "[offset] [len]", cmd_flash_backup, 1, 2),
 	CLI_CMD_ARG(imgload, NULL, "receive a firmware image from the PC into PSRAM (YMODEM `sb`)",
 	            cmd_flash_imgload, 1, 0),
 	CLI_CMD_ARG(imginfo, NULL, "show + re-verify the staged firmware image",
 	            cmd_flash_imginfo, 1, 0),
-	CLI_CMD_ARG(write,   NULL, "DESTRUCTIVE program staged image: write <offset> confirm",
-	            cmd_flash_write,   2, 1),
+	CLI_CMD_ARG_USAGE(write,  NULL, "DESTRUCTIVE program staged image: write <offset> confirm",
+	                  "<offset> confirm", cmd_flash_write, 2, 1),
 	CLI_SUBCMD_SET_END
 };

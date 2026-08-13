@@ -412,13 +412,19 @@ static int cmd_kv_format(struct cli_instance *sh, int argc, char **argv)
 }
 
 CLI_SUBCMD_SET_CREATE(kv_subcmds,
-	CLI_CMD_ARG(list,   NULL, "list keys and values [prefix]",        cmd_kv_list,   1, 1),
-	CLI_CMD_ARG(get,    NULL, "print one entry <key>",                cmd_kv_get,    2, 0),
-	CLI_CMD_ARG(set,    NULL, "store <key> <value> [str|u32|bool|bytes]", cmd_kv_set, 3, 1),
-	CLI_CMD_ARG(desc,   NULL, "describe <key> <text...>",             cmd_kv_desc,   3, CLI_ARG_RAW),
-	CLI_CMD_ARG(del,    NULL, "delete <key>",                         cmd_kv_del,    2, 0),
+	CLI_CMD_ARG_USAGE(list,   NULL, "list keys and values [prefix]",
+	                  "[prefix]", cmd_kv_list, 1, 1),
+	CLI_CMD_ARG_USAGE(get,    NULL, "print one entry <key>",
+	                  "<key>", cmd_kv_get, 2, 0),
+	CLI_CMD_ARG_USAGE(set,    NULL, "store <key> <value> [str|u32|bool|bytes]",
+	                  "<key> <value> [str|u32|bool|bytes]", cmd_kv_set, 3, 1),
+	CLI_CMD_ARG_USAGE(desc,   NULL, "describe <key> <text...>",
+	                  "<key> <text ...>", cmd_kv_desc, 3, CLI_ARG_RAW),
+	CLI_CMD_ARG_USAGE(del,    NULL, "delete <key>",
+	                  "<key>", cmd_kv_del, 2, 0),
 	CLI_CMD_ARG(info,   NULL, "state, partition geometry, usage",     cmd_kv_info,   1, 0),
-	CLI_CMD_ARG(format, NULL, "erase every setting -- confirm 'yes'", cmd_kv_format, 1, 1),
+	CLI_CMD_ARG_USAGE(format, NULL, "erase every setting -- confirm 'yes'",
+	                  "yes", cmd_kv_format, 1, 1),
 	CLI_SUBCMD_SET_END);
 
 CLI_CMD_REGISTER(kv, kv_subcmds,

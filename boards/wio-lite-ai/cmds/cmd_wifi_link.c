@@ -988,11 +988,11 @@ static int cmd_link_dbench(struct cli_instance *sh, int argc, char **argv)
 const struct cli_cmd wifi_link_subcmds[] = {
 	CLI_CMD_ARG(info,  NULL, "both ends' UART counters + the current rate",
 	            cmd_link_info,  1, 0),
-	CLI_CMD_ARG(baud,  NULL, "change the link rate <2000000|3000000|4000000|6000000>",
-	            cmd_link_baud,  2, 0),
-	CLI_CMD_ARG(bench, NULL, "measured traffic [bytes] [secs] [rx|tx|both|all]",
-	            cmd_link_bench, 1, 3),
-	CLI_CMD_ARG(dbench, NULL, "free-running DATA channel [bytes] [secs] [rx|tx|both]",
-	            cmd_link_dbench, 1, 3),
+	CLI_CMD_ARG_USAGE(baud,  NULL, "change the link rate <2000000|3000000|4000000|6000000>",
+	                  "2000000|3000000|4000000|6000000", cmd_link_baud, 2, 0),
+	CLI_CMD_ARG_USAGE(bench, NULL, "measured traffic [bytes] [secs] [rx|tx|both|all]",
+	                  "[bytes] [secs] [rx|tx|both|all]", cmd_link_bench, 1, 3),
+	CLI_CMD_ARG_USAGE(dbench, NULL, "free-running DATA channel [bytes] [secs] [rx|tx|both]",
+	                  "[bytes] [secs] [rx|tx|both]", cmd_link_dbench, 1, 3),
 	CLI_SUBCMD_SET_END
 };

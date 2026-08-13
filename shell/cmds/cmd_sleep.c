@@ -51,6 +51,7 @@ static int cmd_usleep(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-CLI_CMD_REGISTER(sleep, NULL, "sleep N seconds (Ctrl+C cancels)", cmd_sleep, 2, 0);
-CLI_CMD_REGISTER(usleep, NULL, "busy-wait N microseconds (not interruptible)",
-                 cmd_usleep, 2, 0);
+CLI_CMD_REGISTER_USAGE(sleep, NULL, "sleep N seconds (Ctrl+C cancels)", "<seconds>",
+                       cmd_sleep, 2, 0);
+CLI_CMD_REGISTER_USAGE(usleep, NULL, "busy-wait N microseconds (not interruptible)",
+                       "<microseconds>", cmd_usleep, 2, 0);

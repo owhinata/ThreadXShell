@@ -57,6 +57,15 @@ typedef int (*cli_cmd_handler_t)(struct cli_instance *sh, int argc, char **argv)
 struct cli_cmd {
 	const char           *name;     /**< command name; NULL marks a sentinel */
 	const char           *help;     /**< one-line help text */
+	/**
+	 * Argument spelling shown after the command path when the argument count is
+	 * wrong (issue #10), e.g. "<addr> [count]" -- the arguments ONLY, without the
+	 * command path, which the dispatcher prepends.  NULL falls back to printing
+	 * the one-line .help instead, which is what a command taking no arguments
+	 * wants (it can never produce a wrong-argument-count error anyway).
+	 * Convention: <required>, [optional], a|b|c for a fixed choice.
+	 */
+	const char           *usage;
 	const struct cli_cmd *subcmds;  /**< sentinel-terminated subcommand array, or NULL */
 	cli_cmd_handler_t     handler;  /**< handler, or NULL for a pure parent command */
 	uint8_t               mandatory;/**< required argc (command name included) */
@@ -106,9 +115,20 @@ struct cli_cmd {
  * collide with the identically named designated-initializer field below (the
  * preprocessor would otherwise rewrite `.name` into `.<arg>`). */
 #define CLI_CMD_REGISTER(_name, _subcmds, _help, _handler, _mandatory, _optional) \
+	CLI_CMD_REGISTER_USAGE(_name, _subcmds, _help, NULL, _handler, \
+	                       _mandatory, _optional)
+
+/**
+ * Register a root command that takes arguments, with the argument spelling shown
+ * on a wrong-argument-count error (issue #10).  Same as CLI_CMD_REGISTER plus
+ * @p _usage, the arguments only -- "<addr> [count]", not "devmem <addr> [count]".
+ */
+#define CLI_CMD_REGISTER_USAGE(_name, _subcmds, _help, _usage, _handler, \
+                               _mandatory, _optional) \
 	static const struct cli_cmd __cli_cmd_##_name CLI_SECTION_ATTR(#_name) = { \
 		.name      = #_name, \
 		.help      = (_help), \
+		.usage     = (_usage), \
 		.subcmds   = (_subcmds), \
 		.handler   = (_handler), \
 		.mandatory = (_mandatory), \
@@ -124,8 +144,13 @@ struct cli_cmd {
 
 /** A subcommand-set entry with explicit mandatory/optional argument counts. */
 #define CLI_CMD_ARG(_name, _subcmds, _help, _handler, _mandatory, _optional) \
-	{ .name = #_name, .help = (_help), .subcmds = (_subcmds), .handler = (_handler), \
-	  .mandatory = (_mandatory), .optional = (_optional) }
+	CLI_CMD_ARG_USAGE(_name, _subcmds, _help, NULL, _handler, _mandatory, _optional)
+
+/** A subcommand-set entry with an argument spelling (issue #10); see
+ *  CLI_CMD_REGISTER_USAGE for what @p _usage holds. */
+#define CLI_CMD_ARG_USAGE(_name, _subcmds, _help, _usage, _handler, _mandatory, _optional) \
+	{ .name = #_name, .help = (_help), .usage = (_usage), .subcmds = (_subcmds), \
+	  .handler = (_handler), .mandatory = (_mandatory), .optional = (_optional) }
 
 /** A subcommand-set entry with the default argument counts (mandatory=1, optional=0). */
 #define CLI_CMD(_name, _subcmds, _help, _handler) \

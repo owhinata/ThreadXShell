@@ -509,5 +509,5 @@ done:
 	return rc;
 }
 
-CLI_CMD_REGISTER(membench, NULL, "memory bandwidth + latency benchmark",
-                 cmd_membench, 1, 1);
+CLI_CMD_REGISTER_USAGE(membench, NULL, "memory bandwidth + latency benchmark",
+                       "[dtcm|sram|sdram|flash|all]", cmd_membench, 1, 1);

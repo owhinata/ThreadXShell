@@ -75,4 +75,5 @@ static int cmd_kill(struct cli_instance *sh, int argc, char **argv)
 }
 
 CLI_CMD_REGISTER(jobs, NULL, "list background jobs", cmd_jobs, 1, 0);
-CLI_CMD_REGISTER(kill, NULL, "kill %N: stop background job N", cmd_kill, 2, 0);
+CLI_CMD_REGISTER_USAGE(kill, NULL, "kill %N: stop background job N", "%<job>",
+                       cmd_kill, 2, 0);

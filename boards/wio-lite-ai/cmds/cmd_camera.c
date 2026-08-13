@@ -860,8 +860,10 @@ static int cmd_camera_stream(struct cli_instance *sh, int argc, char **argv)
 }
 
 CLI_SUBCMD_SET_CREATE(camera_stream_subcmds,
-	CLI_CMD_ARG(start, NULL, "begin continuous capture (test, --frames N, --secs S)",
-	            cmd_stream_start, 1, 5),
+	CLI_CMD_ARG_USAGE(start, NULL,
+	                  "begin continuous capture (test, --frames N, --secs S)",
+	                  "[test] [--frames <n>] [--secs <s>]",
+	                  cmd_stream_start, 1, 5),
 	CLI_CMD(stop,  NULL, "stop the running stream", cmd_stream_stop),
 	CLI_CMD(stats, NULL, "frame / fps / overrun counters", cmd_stream_stats),
 	CLI_SUBCMD_SET_END);
@@ -945,22 +947,24 @@ CLI_SUBCMD_SET_CREATE(camera_subcmds,
 	CLI_CMD(info, NULL, "driver / sensor / XCLK / SCCB state", cmd_camera_info),
 	CLI_CMD(scan, NULL, "list SCCB addresses that ACK (0x08..0x77)",
 	        cmd_camera_scan),
-	CLI_CMD_ARG(capture, NULL, "snapshot one frame + channel stats ('test' = colorbar)",
-	            cmd_camera_capture, 1, 1),
+	CLI_CMD_ARG_USAGE(capture, NULL,
+	                  "snapshot one frame + channel stats ('test' = colorbar)",
+	                  "[test]", cmd_camera_capture, 1, 1),
 #if BSP_ENABLE_SD
-	CLI_CMD_ARG(save, NULL, "write the frame raw to the microSD <path>",
-	            cmd_camera_save, 2, 0),
+	CLI_CMD_ARG_USAGE(save, NULL, "write the frame raw to the microSD <path>",
+	                  "<path>", cmd_camera_save, 2, 0),
 #endif
-	CLI_CMD_ARG(send, NULL, "stream the frame to the PC over YMODEM [name]",
-	            cmd_camera_send, 1, 1),
-	CLI_CMD_ARG(stream, camera_stream_subcmds,
-	            "continuous capture (start/stop/stats)", cmd_camera_stream, 1, 1),
+	CLI_CMD_ARG_USAGE(send, NULL, "stream the frame to the PC over YMODEM [name]",
+	                  "[name]", cmd_camera_send, 1, 1),
+	CLI_CMD_ARG_USAGE(stream, camera_stream_subcmds,
+	                  "continuous capture (start/stop/stats)",
+	                  "[start|stop|stats]", cmd_camera_stream, 1, 1),
 #if BSP_ENABLE_LCD
-	CLI_CMD_ARG(preview, NULL, "live camera on the LCD <on|off> [test]",
-	            cmd_camera_preview, 2, 1),
+	CLI_CMD_ARG_USAGE(preview, NULL, "live camera on the LCD <on|off> [test]",
+	                  "on|off [test]", cmd_camera_preview, 2, 1),
 #endif
-	CLI_CMD_ARG(reg, NULL, "raw SCCB access <addr> <reg> [value] [-16]",
-	            cmd_camera_reg, 3, 2),
+	CLI_CMD_ARG_USAGE(reg, NULL, "raw SCCB access <addr> <reg> [value] [-16]",
+	                  "<addr> <reg> [value] [-16]", cmd_camera_reg, 3, 2),
 	CLI_SUBCMD_SET_END);
 
 CLI_CMD_REGISTER(camera, camera_subcmds,

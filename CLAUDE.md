@@ -17,6 +17,7 @@ HAL/CMSIS/ThreadX 等は upstream ミラー submodule、ARM GNU ツールチェ�
 ボードはこの先追加していく。**ボード追加時に必ず更新するもの**: この表 /「ボード固有ルール」節 /
 `AGENTS.md` / `.claude/settings.json` の upstream ブロックリスト /
 `.claude/skills/codex-{review,debug}` のボード別観点 /
+**`boards/<board>/README.md`（下記のとおり必須。そのボードの説明はここが正）** /
 **`boards/<board>/submodules.cmake`（そのボードが必要とする submodule の sentinel 一覧。
 トップの fetch はここから導出される。共有リストは無い）** /
 `boards/<board>/test/host_tests.sh`（そのボードが持つ board-pinned ホストテスト。
@@ -393,3 +394,19 @@ git branch -d feat/<N>-short-description
 - **`README.md` と各モジュールの README は英語で書く**。変更と同時に更新する。
 - リポジトリ内ファイルの記号は **基本 ASCII**。絵文字は使わない（強調マーカーは `[!]`）。
 - mkdocs / GitHub Pages（stm32f746g-disco 方式）への移行は将来 Issue で判断。
+
+### [!] ボード固有の説明は `boards/<board>/README.md` に書く
+
+**各ボードは `README.md` を持ち、そのボードの説明の正とする。** ここに書くもの:
+ビルド/書込/コンソールの手順、ピン配置・メモリマップ、ブート経路、ボード固有の
+ハマりどころ（例: Grove の「シリアルを開くとリセットする」= RTS が 220nF で
+RESETN に結合されている件）、復旧手順、そのボードのゲートと未確認事項。
+
+**分担**: 「そのボードがどう動くか」は board README。「エージェントが破ってはいけない
+不変条件」は CLAUDE.md /「ボード固有ルール」節と `AGENTS.md`（ここは要点と禁止事項に
+留め、詳細は board README を指す）。ルートの `README.md` は対応ボード表と共通手順のみで、
+ボードの詳細は board README へリンクする。**同じ事実を 3 箇所に写経しない** — 増えるほど
+食い違って、どれが正か分からなくなる。
+
+現状: `boards/grove-vision-ai-v2/README.md` のみ存在。f746g-disco と wio-lite-ai は
+CLAUDE.md 側に説明が残っているので、別 Issue で board README へ移す。

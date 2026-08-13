@@ -10,9 +10,10 @@
  *  - The ring lives in .noinit.log (matched by the ldscript's *(.noinit*)),
  *    i.e. DTCM at 0x30000000.  The Himax 2nd bootloader loads only the ELF
  *    LOAD segments, so it does not touch .noinit; the DTCM content was
- *    confirmed to survive the system reset that ends an xmodem flash
- *    (hardware 2026-08-13).  Power-cycle behaviour is untested, so
- *    log_init()'s magic/validity check still handles a lost ring.
+ *    confirmed to survive a RESETN-pin reset (hardware 2026-08-13 -- the
+ *    reset the board fires when a host opens the serial port, see the board
+ *    README).  Power-cycle behaviour is untested, so log_init()'s
+ *    magic/validity check still handles a lost ring.
  *  - Timestamps come from the ThreadX tick (1 ms; 0 before the scheduler),
  *    not HAL_GetTick() -- there is no HAL here.
  *  - No reset-cause decode: the HX6538 reset-cause register has not been

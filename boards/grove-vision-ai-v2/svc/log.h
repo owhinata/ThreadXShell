@@ -13,12 +13,14 @@
  *
  * Persistence: every boot on this board goes through the Himax 2nd
  * bootloader, which reloads the ELF segments -- .noinit is in no LOAD segment
- * so the loader leaves it alone.  Reset persistence is CONFIRMED for the
- * system reset that ends the xmodem flash (hardware, 2026-08-13: after the
- * reboot `dmesg` still showed the previous boot's records and boot_count had
- * incremented).  Other reset kinds (power cycle in particular) are untested,
- * which is why log_init() still validates the ring and rebuilds it when the
- * magic is gone.
+ * so the loader leaves it alone.  Surviving a RESETN-pin reset is CONFIRMED
+ * (hardware, 2026-08-13: boot_count reached 2 with the first boot's records
+ * still readable).  The reset in question was the board's UART auto-reset --
+ * opening the serial port pulses RESETN through the CH343P's RTS line, see
+ * this board's README.md -- NOT, as an earlier revision of this comment
+ * claimed, the reboot at the end of an xmodem flash.  Other reset kinds
+ * (power cycle in particular) remain untested, which is why log_init() still
+ * validates the ring and rebuilds it when the magic is gone.
  *
  * Usage -- define LOG_TAG before including this header, then call the macros:
  *     #define LOG_TAG "uart"

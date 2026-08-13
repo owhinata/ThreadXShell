@@ -59,12 +59,16 @@ static int h_args(struct cli_instance *sh, int argc, char **argv)
 
 CLI_SUBCMD_SET_CREATE(sub_thing, CLI_CMD_ARG(list, NULL, "list", h_ok, 1, 0),
 	CLI_CMD_ARG(put, NULL, "put <key>", h_args, 2, 0),   /* issue #37: sub w/ mandatory>1 */
+	/* issue #10: a subcommand that spells its arguments out. */
+	CLI_CMD_ARG_USAGE(set, NULL, "store a value", "<key> <value>", h_args, 3, 0),
 	CLI_SUBCMD_SET_END);
 
 CLI_CMD_REGISTER(hello, NULL,      "say hi",       h_ok,   1, 0);
 CLI_CMD_REGISTER(echo2, NULL,      "echo arg",     h_args, 1, 1);
 CLI_CMD_REGISTER(thing, sub_thing, "parent only",  NULL,   1, 0);
 CLI_CMD_REGISTER(need2, NULL,      "needs 2 args", h_args, 2, 0);
+/* issue #10: a root command that spells its arguments out. */
+CLI_CMD_REGISTER_USAGE(fill, NULL, "flood with a colour", "<colour>", h_args, 2, 0);
 
 /* issue #16: a compute loop that polls cli_cancel_requested(); optionally drops a
  * 0x03 into its own RX at iteration inject_at (async-arrival model). */
@@ -330,6 +334,18 @@ static void test_arg_errors(void)
 	assert(has(&tr0, "put: invalid number of arguments"));
 	assert(has(&tr0, "usage: thing put  (put <key>)"));
 	assert(sh0.last_result == CLI_DISPATCH_ERR);
+
+	/* issue #10: with a .usage the line shows the ARGUMENTS, not the prose help --
+	 * no parentheses, since it is a spelling and not a description. */
+	reset(&sh0, &tr0);
+	run_line(&sh0, "fill\r");                      /* mandatory 2, got 1 */
+	assert(has(&tr0, "usage: fill <colour>"));
+	assert(!has(&tr0, "flood with a colour"));     /* help NOT reused */
+
+	reset(&sh0, &tr0);
+	run_line(&sh0, "thing set k\r");               /* sub mandatory 3, got 2 */
+	assert(has(&tr0, "usage: thing set <key> <value>"));
+	assert(!has(&tr0, "store a value"));
 
 	reset(&sh0, &tr0);
 	run_line(&sh0, "hello a b c d\r");             /* > CLI_MAX_ARGC tokens */

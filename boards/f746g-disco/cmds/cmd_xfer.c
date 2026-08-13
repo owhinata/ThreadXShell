@@ -166,8 +166,8 @@ static int cmd_xfer_send(struct cli_instance *sh, int argc, char **argv)
 }
 
 CLI_SUBCMD_SET_CREATE(xfer_subcmds,
-	CLI_CMD_ARG(send, NULL, "stream a file to the PC over YMODEM <sd|fs> <path>",
-	            cmd_xfer_send, 3, 0),
+	CLI_CMD_ARG_USAGE(send, NULL, "stream a file to the PC over YMODEM <sd|fs> <path>",
+	                  "sd|fs <path>", cmd_xfer_send, 3, 0),
 	CLI_SUBCMD_SET_END);
 
 CLI_CMD_REGISTER(xfer, xfer_subcmds,

@@ -138,5 +138,7 @@ static int cmd_echo(struct cli_instance *sh, int argc, char **argv)
 	return cli_print(sh, "%s\r\n", argc > 1 ? argv[1] : "");
 }
 
-CLI_CMD_REGISTER(help, NULL, "list commands", cmd_help, 1, CLI_MAX_SUBCMD_DEPTH + 1);
-CLI_CMD_REGISTER(echo, NULL, "echo the rest of the line", cmd_echo, 1, CLI_ARG_RAW);
+CLI_CMD_REGISTER_USAGE(help, NULL, "list commands", "[command [subcommand ...]]",
+                       cmd_help, 1, CLI_MAX_SUBCMD_DEPTH + 1);
+CLI_CMD_REGISTER_USAGE(echo, NULL, "echo the rest of the line", "[text ...]",
+                       cmd_echo, 1, CLI_ARG_RAW);

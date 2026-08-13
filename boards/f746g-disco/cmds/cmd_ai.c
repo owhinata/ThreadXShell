@@ -484,22 +484,22 @@ static int cmd_ai_model(struct cli_instance *sh, int argc, char **argv)
 }
 
 CLI_SUBCMD_SET_CREATE(ai_stream_subcmds,
-	CLI_CMD_ARG(start, NULL, "start live inference [qqvga|qvga]",
-	            cmd_ai_stream_start, 1, 1),
+	CLI_CMD_ARG_USAGE(start, NULL, "start live inference [qqvga|qvga]",
+	                  "[qqvga|qvga]", cmd_ai_stream_start, 1, 1),
 	CLI_CMD(stop,  NULL, "stop live inference", cmd_ai_stream_stop),
 	CLI_CMD(stats, NULL, "inference rate / latency / drops", cmd_ai_stream_stats),
 	CLI_SUBCMD_SET_END);
 
 CLI_SUBCMD_SET_CREATE(ai_subcmds,
 	CLI_CMD(info, NULL, "backend / model / tensor shapes / arena", cmd_ai_info),
-	CLI_CMD_ARG(bench, NULL, "run inference [n] times, report latency",
-	            cmd_ai_bench, 1, 1),
+	CLI_CMD_ARG_USAGE(bench, NULL, "run inference [n] times, report latency",
+	                  "[count]", cmd_ai_bench, 1, 1),
 	CLI_CMD(run, NULL, "single-shot inference on one camera frame", cmd_ai_run),
 	CLI_CMD(stream, ai_stream_subcmds, "live camera inference", NULL),
-	CLI_CMD_ARG(model, NULL, "runtime model: load <sd-path> | builtin | (status)",
-	            cmd_ai_model, 1, 2),
-	CLI_CMD_ARG(norm, NULL, "float input norm <0|1> (1=[-1,1], 0=[0,1])",
-	            cmd_ai_norm, 1, 1),
+	CLI_CMD_ARG_USAGE(model, NULL, "runtime model: load <sd-path> | builtin | (status)",
+	                  "[load <sd-path> | builtin]", cmd_ai_model, 1, 2),
+	CLI_CMD_ARG_USAGE(norm, NULL, "float input norm <0|1> (1=[-1,1], 0=[0,1])",
+	                  "[0|1]", cmd_ai_norm, 1, 1),
 	CLI_SUBCMD_SET_END);
 
 CLI_CMD_REGISTER(ai, ai_subcmds,

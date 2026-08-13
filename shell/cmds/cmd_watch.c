@@ -132,5 +132,5 @@ static int cmd_watch(struct cli_instance *sh, int argc, char **argv)
 	return 0;   /* on cancel the dispatcher prints "^C" via cancel_req */
 }
 
-CLI_CMD_REGISTER(watch, NULL, "watch [-n SEC] CMD... (re-run; Ctrl+C stops)",
-                 cmd_watch, 1, CLI_ARG_RAW);
+CLI_CMD_REGISTER_USAGE(watch, NULL, "watch [-n SEC] CMD... (re-run; Ctrl+C stops)",
+                       "[-n <sec>] <command> [args ...]", cmd_watch, 1, CLI_ARG_RAW);

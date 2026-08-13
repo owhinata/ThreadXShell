@@ -421,11 +421,16 @@ out:
 
 CLI_SUBCMD_SET_CREATE(blob_subcmds,
 	CLI_CMD_ARG(list,   NULL, "every slot: state, size, crc32, name",       cmd_blob_list,   1, 0),
-	CLI_CMD_ARG(info,   NULL, "one slot in detail <slot>",                  cmd_blob_info,   2, 0),
-	CLI_CMD_ARG(write,  NULL, "ERASE <slot> then receive a file (YMODEM `sb`)", cmd_blob_write, 2, 0),
-	CLI_CMD_ARG(verify, NULL, "re-read and check against the crc32 <slot>", cmd_blob_verify, 2, 0),
-	CLI_CMD_ARG(erase,  NULL, "erase a slot <slot> -- destructive",         cmd_blob_erase,  2, 0),
-	CLI_CMD_ARG(read,   NULL, "hexdump payload <slot> <off> [len]",         cmd_blob_read,   3, 1),
+	CLI_CMD_ARG_USAGE(info,   NULL, "one slot in detail <slot>",
+	                  "<slot>", cmd_blob_info,   2, 0),
+	CLI_CMD_ARG_USAGE(write,  NULL, "ERASE <slot> then receive a file (YMODEM `sb`)",
+	                  "<slot>", cmd_blob_write,  2, 0),
+	CLI_CMD_ARG_USAGE(verify, NULL, "re-read and check against the crc32 <slot>",
+	                  "<slot>", cmd_blob_verify, 2, 0),
+	CLI_CMD_ARG_USAGE(erase,  NULL, "erase a slot <slot> -- destructive",
+	                  "<slot>", cmd_blob_erase,  2, 0),
+	CLI_CMD_ARG_USAGE(read,   NULL, "hexdump payload <slot> <off> [len]",
+	                  "<slot> <off> [len]", cmd_blob_read, 3, 1),
 	CLI_SUBCMD_SET_END);
 
 CLI_CMD_REGISTER(blob, blob_subcmds,

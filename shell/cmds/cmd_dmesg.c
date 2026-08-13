@@ -88,5 +88,5 @@ static int cmd_dmesg(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-CLI_CMD_REGISTER(dmesg, NULL, "show RAM log (-c clear, -n <lvl> set level)",
-                 cmd_dmesg, 1, 2);
+CLI_CMD_REGISTER_USAGE(dmesg, NULL, "show RAM log (-c clear, -n <lvl> set level)",
+                       "[-c] [-n err|wrn|inf|dbg]", cmd_dmesg, 1, 2);

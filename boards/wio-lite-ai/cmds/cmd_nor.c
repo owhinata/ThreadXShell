@@ -460,11 +460,15 @@ static int cmd_nor_test(struct cli_instance *sh, int argc, char **argv)
 
 CLI_SUBCMD_SET_CREATE(nor_subcmds,
 	CLI_CMD_ARG(info,  NULL, "bring-up state, JEDEC id, geometry, clock", cmd_nor_info,  1, 0),
-	CLI_CMD_ARG(read,  NULL, "hexdump <addr> [len]",                      cmd_nor_read,  2, 1),
-	CLI_CMD_ARG(erase, NULL, "erase 4 KB sector(s) <addr> [len]",         cmd_nor_erase, 2, 1),
-	CLI_CMD_ARG(write, NULL, "program <addr> <hex> (erase first)",        cmd_nor_write, 3, 0),
-	CLI_CMD_ARG(test,  NULL, "partial-page-program acceptance test [addr] (defaults to "
-	                         NOR_TEST_DEFAULT_STR ", above kv+blob)", cmd_nor_test, 1, 1),
+	CLI_CMD_ARG_USAGE(read,  NULL, "hexdump <addr> [len]",
+	                  "<addr> [len]", cmd_nor_read, 2, 1),
+	CLI_CMD_ARG_USAGE(erase, NULL, "erase 4 KB sector(s) <addr> [len]",
+	                  "<addr> [len]", cmd_nor_erase, 2, 1),
+	CLI_CMD_ARG_USAGE(write, NULL, "program <addr> <hex> (erase first)",
+	                  "<addr> <hex>", cmd_nor_write, 3, 0),
+	CLI_CMD_ARG_USAGE(test,  NULL, "partial-page-program acceptance test [addr] (defaults to "
+	                               NOR_TEST_DEFAULT_STR ", above kv+blob)",
+	                  "[addr]", cmd_nor_test, 1, 1),
 	CLI_SUBCMD_SET_END);
 
 CLI_CMD_REGISTER(nor, nor_subcmds,

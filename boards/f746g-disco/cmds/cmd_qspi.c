@@ -315,10 +315,13 @@ static int cmd_qspi_test(struct cli_instance *sh, int argc, char **argv)
 CLI_SUBCMD_SET_CREATE(qspi_subcmds,
 	CLI_CMD_ARG(probe, NULL, "read JEDEC ID",                cmd_qspi_probe, 1, 0),
 	CLI_CMD_ARG(info,  NULL, "geometry/clock/status",        cmd_qspi_info,  1, 0),
-	CLI_CMD_ARG(read,  NULL, "hexdump <addr> [len]",         cmd_qspi_read,  2, 1),
+	CLI_CMD_ARG_USAGE(read, NULL, "hexdump <addr> [len]",
+	                  "<addr> [len]", cmd_qspi_read, 2, 1),
 #if CLI_ENABLE_DANGEROUS_CMDS
-	CLI_CMD_ARG(erase, NULL, "erase 4KB subsector <addr>",   cmd_qspi_erase, 2, 0),
-	CLI_CMD_ARG(test,  NULL, "destructive self-test <addr>", cmd_qspi_test,  2, 0),
+	CLI_CMD_ARG_USAGE(erase, NULL, "erase 4KB subsector <addr>",
+	                  "<addr>", cmd_qspi_erase, 2, 0),
+	CLI_CMD_ARG_USAGE(test, NULL, "destructive self-test <addr>",
+	                  "<addr>", cmd_qspi_test, 2, 0),
 #endif
 	CLI_SUBCMD_SET_END);
 

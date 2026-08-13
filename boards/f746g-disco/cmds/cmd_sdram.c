@@ -230,8 +230,8 @@ restore:
 
 CLI_SUBCMD_SET_CREATE(sdram_subcmds,
 	CLI_CMD(info, NULL, "FMC SDRAM window / config / state", cmd_sdram_info),
-	CLI_CMD_ARG(test, NULL, "DESTRUCTIVE write/read-back memtest [bytes]",
-	            cmd_sdram_test, 1, 1),
+	CLI_CMD_ARG_USAGE(test, NULL, "DESTRUCTIVE write/read-back memtest [bytes]",
+	                  "[bytes]", cmd_sdram_test, 1, 1),
 	CLI_SUBCMD_SET_END);
 
 CLI_CMD_REGISTER(sdram, sdram_subcmds, "external FMC SDRAM (8 MB @0xC0000000)",

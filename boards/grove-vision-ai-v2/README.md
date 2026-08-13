@@ -15,8 +15,9 @@ cmake -B build/grove-vision-ai-v2 -G Ninja \
 cmake --build build/grove-vision-ai-v2
 # close any terminal on the serial port first, then:
 cmake --build build/grove-vision-ai-v2 --target flash
-# press the board's RESET button when the script says
-#   "Please press reset button!!"
+# the script prints "Please press reset button!!" -- press the board's RESET
+# button if the transfer does not start on its own (opening the port already
+# resets the board, see below, so it often does)
 picocom -b 921600 /dev/ttyACM0
 ```
 
@@ -26,6 +27,40 @@ The first configure fetches the Himax SDK (~480 MB) into
 checkout at the same commit instead).  The serial device defaults to
 `/dev/ttyACM0` (`-DGROVE_SERIAL_PORT=` to override); note the CH343P can
 enumerate as `/dev/ttyUSB*` depending on the host driver.
+
+## [!] Opening the serial port RESETS the board
+
+This is board wiring, not a bug in the firmware, and it surprises everyone
+once: **every time a host opens the serial port, the board reboots.**  Connect
+with `picocom` and you will see the Himax bootloader banner scroll past before
+the shell prompt, and the shell's uptime starts from zero.
+
+From the board schematic (`_ref/grove-vision-ai-v2/`), the reset path is:
+
+```
+CH343P RTS (pin 13) --| |-- RST ---- RESETN (HX6538 pin E5)
+                      C16              |
+                     220nF             +-- R7 10k --- VCC_3V3
+```
+
+`DTR` (pin 12) is **not connected at all**, and neither are DCD/RI/CTS/DSR/ACT
+-- RTS is the only modem-control line that goes anywhere.  The coupling is
+capacitive, so it is the *transition* that resets: any RTS edge is passed to
+RESETN as a pulse (RC = 220 nF x 10 k = 2.2 ms, comfortably longer than a
+reset needs).  The board enumerates through Linux's `cdc_acm` driver, which
+asserts DTR and RTS when the port is opened, and CH343P's RTS# pin is
+active-low -- so an open produces a falling edge, and the falling edge is the
+reset.  (Closing produces the opposite edge, which is harmless.)
+
+**Do not try to defeat this globally.**  It is also what makes flashing work:
+the bootloader only listens for the xmodem handshake for about 100 ms after
+reset, and the flash tool opening the port is what puts the board there.
+
+If the reboot-on-connect is a nuisance for console work, the direction to try
+is keeping RTS from ever changing state -- e.g. `stty -F <port> -hupcl` so
+that closing the port stops dropping the line, after which the next open
+re-asserts an already-asserted line and produces no edge.  **Untested here**;
+the settings are also lost when the USB device re-enumerates.
 
 ## How this port works
 

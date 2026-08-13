@@ -126,8 +126,15 @@ been run on hardware from this repository, and nothing here claims otherwise.
 The board-independent core has a host-gcc test suite that needs no hardware:
 
 ```bash
-sh shell/test/run_host_tests.sh
+sh shell/test/run_host_tests.sh              # core + every board that pins tests
+sh shell/test/run_host_tests.sh wio-lite-ai  # core + one board
 ```
+
+`shell/test/` holds the board-independent tests and always runs them. A test that
+compiles board-owned code against the board's real headers belongs to that board
+and lives in `boards/<board>/test/host_tests.sh`, which the runner invokes with
+the same toolchain flags (Wio Lite AI pins three: CRC-32, BlazeFace, MLPerf Tiny;
+f746g-disco pins none).
 
 ## Status
 

@@ -22,6 +22,9 @@
    ボード固有物は `boards/<board>/`（port/ ldscript/ src/）に置く。
    **Wio の DFU ブートローダ（`boards/wio-lite-ai/boot/`）は独立ツリー**で、app / shell と
    ソースを共有しない。
+   `shell/test/` も同じ規律の下にある — ボード所有のコードを実ヘッダ込みでホストコンパイル
+   するテストは `boards/<board>/test/host_tests.sh`（`shell/test/run_host_tests.sh` が
+   同じフラグで呼ぶ）に置き、`shell/test/` にボード参照を持ち込まない。
 
 2. **共有コアに触れる変更は全対応ボードで成立すること。** 片方のボードだけを見て LGTM しない。
 

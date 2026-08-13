@@ -303,11 +303,16 @@ static int cmd_net_dhcp(struct cli_instance *sh, int argc, char **argv)
 	(void)argv;
 	if (!net_ip_ready(sh))
 		return 1;
-	if (nx_net_dhcp_renew() != NXG_OK) {
+	int rc = nx_net_dhcp_renew();
+
+	if (rc < 0) {                       /* NXG_RENEWED is a success (issue #9) */
 		cli_error(sh, "net: DHCP start failed\r\n");
 		return 1;
 	}
-	cli_print(sh, "net: acquiring via DHCP (up to 10 s, Ctrl+C to stop)...\r\n");
+	if (rc == NXG_RENEWED)
+		cli_print(sh, "net: renewing the existing lease (kept meanwhile)...\r\n");
+	else
+		cli_print(sh, "net: acquiring via DHCP (up to 10 s, Ctrl+C to stop)...\r\n");
 	for (int i = 0; i < 100; i++) {
 		struct nx_net_info ni;
 

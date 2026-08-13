@@ -23,9 +23,13 @@ extern "C" {
 #endif
 
 #define NXG_OK         0
+#define NXG_RENEWED    1   /* dhcp: existing lease kept, renew sent (issue #9)  */
 #define NXG_ERR_STATE -1   /* NetX not up                                       */
 #define NXG_ERR       -2   /* a NetX call failed                                */
 #define NXG_TIMEOUT   -3   /* ping: no reply                                    */
+
+/* Callers test `rc < 0` for failure: NXG_RENEWED is a success that carries extra
+   information, not an error.  Nothing here returns a positive value otherwise. */
 
 /**
  * One-time bring-up from tx_application_define() (after eth_init()): NetX system
@@ -47,10 +51,18 @@ struct nx_net_info {
 };
 int  nx_net_info_get(struct nx_net_info *out);
 
-/** Switch to a static address (stops DHCP). */
+/**
+ * Switch to a static address (stops DHCP).  Transactional: on failure the previous
+ * address, gateway and DHCP state are restored and NXG_ERR is returned.
+ */
 int  nx_net_set_static(uint32_t ip, uint32_t mask, uint32_t gw);
 
-/** (Re)acquire an address via DHCP (leaves static mode). */
+/**
+ * (Re)acquire an address via DHCP (leaves static mode).  Returns NXG_RENEWED when
+ * the client was already BOUND -- the existing lease is KEPT and a renew request
+ * is sent, so the address never disappears (issue #9) -- NXG_OK when a fresh
+ * acquisition was started, or a negative code on failure.
+ */
 int  nx_net_dhcp_renew(void);
 
 /**

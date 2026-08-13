@@ -43,6 +43,11 @@ void cli_out_flush(struct cli_instance *sh)
 	sh->out_len = 0;
 }
 
+void cli_out_discard(struct cli_instance *sh)
+{
+	sh->out_len = 0;
+}
+
 void cli_out_putc(struct cli_instance *sh, char c)
 {
 	if (sh->tx_failed)
@@ -166,9 +171,14 @@ int cli_hexdump_base(struct cli_instance *sh, const void *data, size_t len,
 
 	for (size_t off = 0; off < len; off += 16) {
 		/* Ctrl+C between rows: stop before emitting the next 16-byte line
-		 * (issue #16).  Drop the staged tail and release the lock; the
-		 * dispatcher detects cancel_req and prints "^C". */
+		 * (issue #16).  Drop the staged tail BEFORE releasing the lock, then
+		 * let the dispatcher detect cancel_req and print "^C".  The discard is
+		 * not cosmetic (issue #17): staging auto-flushes every 32 B but a row
+		 * is 77 B, so up to 31 B of the last row are still staged here, and a
+		 * caller that ignores this -1 and keeps printing would emit them as
+		 * the head of its next line. */
 		if (cli_cancel_requested(sh)) {
+			cli_out_discard(sh);
 			cli_out_end(sh);
 			return -1;
 		}

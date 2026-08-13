@@ -1020,6 +1020,20 @@ endif()
 
 firmware_finalize(shell)
 
+# `flash`: the target name BOTH boards answer to, so the flash step in the docs and
+# in the development cycle is one command with the build directory swapped, not a
+# per-board incantation to remember.  Here it is an alias for `dfu-shell` -- the
+# shell app is what "flash this board" means; blink stays reachable as `dfu-blink`.
+#
+# It cannot reach sector 0.  It runs exactly the dfu-util command `dfu-shell` runs,
+# into the app partition at 0x08020000, over the bootloader that lives in sector 0
+# and is never a target of this build (no flash-boot, no dfu-boot -- see the boot
+# tree's README).  The name is deliberately NOT the f746 meaning of `flash`: there
+# is no ST-Link path here, and internal-flash endurance is ~10k cycles, so this is
+# a hand-run command and never a loop.
+add_custom_target(flash)
+add_dependencies(flash dfu-shell)
+
 # The last line of defence for the ITCM residency of the interrupt paths.
 # The linker-script ASSERTs cannot do this job under LTO -- see the
 # comment on them in ldscript/STM32H725AEIx_IROM.ld -- because LTO renames the very

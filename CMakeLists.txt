@@ -15,7 +15,8 @@
 #  Build:
 #    cmake --build build/wio-lite-ai
 #  Flash: board-specific -- see boards/<board>/board.cmake and the board README.
-#    wio-lite-ai:  cmake --build build/wio-lite-ai  --target dfu-shell  (DFU only)
+#    wio-lite-ai:  cmake --build build/wio-lite-ai  --target flash      (DFU only,
+#                  alias of dfu-shell; hold USER/PF1 at reset first)
 #    f746g-disco:  cmake --build build/f746g-disco  --target flash      (ST-Link)
 #
 #  The build directory is build/<board>/ by convention; variant trees of the same

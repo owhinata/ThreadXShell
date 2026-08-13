@@ -11,7 +11,7 @@ HAL/CMSIS/ThreadX 等は upstream ミラー submodule、ARM GNU ツールチェ�
 | ボード | MCU | クロック | コンソール | フラッシュ書込 |
 |---|---|---|---|---|
 | STM32F746G-DISCO | STM32F746NGH6 / Cortex-M7 | 216 MHz（自前設定） | VCP: USART1 PA9/PB7 115200 | ST-Link（`--target flash`） |
-| Wio Lite AI | STM32H725AEI6 / Cortex-M7 | 550 MHz（**DFU boot から継承**） | USB CDC（USB1_OTG_HS を FS 動作 / TinyUSB） | **DFU のみ**（`dfu-util`） |
+| Wio Lite AI | STM32H725AEI6 / Cortex-M7 | 550 MHz（**DFU boot から継承**） | USB CDC（USB1_OTG_HS を FS 動作 / TinyUSB） | **DFU のみ**（`--target flash` = `dfu-shell`） |
 
 ボードはこの先追加していく。**ボード追加時に必ず更新するもの**: この表 /「ボード固有ルール」節 /
 `AGENTS.md` / `.claude/settings.json` の upstream ブロックリスト /
@@ -291,7 +291,10 @@ git branch -d feat/<N>-short-description
   boot の DFU 判定条件に影響する変更を app 側から入れない。
 - app は**内蔵 Flash `0x08020000`（セクタ1-3、384KB）から実行**。書込は **DFU のみ**:
   **PF1（USER）保持リセット**で DFU モード（`0483:df11`）→
-  `dfu-util -d 0483:df11 -a 0 -D <app>.bin` → 自動 reboot。
+  `cmake --build build/wio-lite-ai --target flash`（= `dfu-shell` のエイリアス。素の
+  `dfu-util -d 0483:df11 -a 0 -D <app>.bin` と同じ）→ 自動 reboot。
+  **`flash` は app パーティション専用**でセクタ0 には届かない（両ボードで同じ
+  コマンド形にするためのエイリアスであって、ST-Link 経路を足したものではない）。
   [!] **内蔵 Flash の書換え耐久は ~10k サイクル**。自動ループで焼き直さない。
 - [!] **app はクロックツリーを再設定しない**。app は boot から継承した system/PLL クロック
   ツリー（クロックソース、D1/D2/D3 プリスケーラ、PLL1/PLL2、および下記例外以外の PLL3 設定）、

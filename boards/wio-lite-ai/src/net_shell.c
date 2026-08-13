@@ -311,10 +311,12 @@ static int nsh_tx_put_raw(const uint8_t *p, size_t n)
 }
 
 /*
- * Store one SHELL byte, telnet-encoded: a literal 0xFF must go out as IAC IAC or the client
- * reads it as the start of a command (f746's nx_shell strips IAC on receive but never
- * escaped its output, which corrupts any binary the shell prints).  The pair goes in inside
- * ONE critical section, so another producer can never be interleaved between the halves.
+ * Store one SHELL byte, telnet-encoded: a literal 0xFF must go out as IAC IAC (RFC 854) or
+ * the client reads it as the start of a command and eats the byte after it, which corrupts
+ * any binary the shell prints.  The pair goes in inside ONE critical section, so another
+ * producer can never be interleaved between the halves.  (f746's nx_shell stripped IAC on
+ * receive from the start but did not escape its output until issue #15 -- the asymmetry is
+ * easy to reintroduce, since only binary output shows it.)
  *
  * NOT for the telnet negotiation in nsh_charmode: those bytes ARE IAC sequences and must go
  * through nsh_tx_put_raw() unescaped.

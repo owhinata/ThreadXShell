@@ -239,6 +239,15 @@ static void tcp_tx_kick(void)
  * torn down.  Several threads reach it (the CLI thread, a bg-job worker sharing
  * this transport, printf handed over by the UART backend), so the ring is MPSC and
  * the append runs under a PRIMASK critical section.
+ *
+ * The bytes are telnet-ENCODED on the way in, not on the way out: a literal 0xFF
+ * goes on the wire as IAC IAC (RFC 854), because a lone 0xFF is the command
+ * introducer and a strict client would eat it plus whatever follows.  Encoding
+ * here rather than in the drain keeps the drain a straight ring->packet copy that
+ * can still hand nx_packet_data_append() a contiguous slice, and it means the
+ * ring holds what the wire holds -- so the free-space check, the hiwater mark and
+ * st_tx_bytes all measure the same thing.  The receive side has stripped IAC since
+ * the beginning (iac_consume); only the send side was asymmetric (issue #15).
  */
 static int tcp_write(struct cli_transport *tr, const uint8_t *data, size_t len)
 {
@@ -257,8 +266,25 @@ static int tcp_write(struct cli_transport *tr, const uint8_t *data, size_t len)
 
 	NSH_CRIT_ENTER();
 	if (c->connected) {                 /* re-read under the gate; see the note */
-		while (i < len && cli_uart_ring_put(&c->tx_ring, data[i]))
+		while (i < len) {
+			uint8_t b = data[i];
+
+			if (b == 0xFFu) {
+				/* Both halves or neither.  Storing one and reporting the
+				   input byte as accepted would put a bare IAC on the wire
+				   the moment the ring filled here, which is exactly the
+				   corruption this escaping exists to prevent.  Refusing it
+				   whole leaves it to the caller's next attempt, where the
+				   drain has made room. */
+				if (cli_uart_ring_free(&c->tx_ring) < 2u)
+					break;
+				(void)cli_uart_ring_put(&c->tx_ring, 0xFFu);
+				(void)cli_uart_ring_put(&c->tx_ring, 0xFFu);
+			} else if (!cli_uart_ring_put(&c->tx_ring, b)) {
+				break;
+			}
 			i++;
+		}
 	}
 	count = cli_uart_ring_count(&c->tx_ring);
 	NSH_CRIT_EXIT();
@@ -310,7 +336,14 @@ static void tcp_flush(struct cli_transport *tr)
    character-at-a-time mode (no local echo / no line buffering), which is what the
    CLI's interactive line editor needs.  IAC WILL ECHO (server echoes) + IAC WILL
    SUPPRESS-GO-AHEAD.  (A raw `nc` client shows these 6 bytes as harmless garbage
-   before the prompt -- the session is telnet-first per the issue.) */
+   before the prompt -- the session is telnet-first per the issue.)
+
+   These go into the ring RAW, NOT through tcp_write(): they ARE IAC sequences.
+   Escaping them would put IAC IAC WILL ECHO on the wire and the client would
+   print an 0xFF instead of negotiating.  session_begin below is the only writer
+   allowed to bypass the encoding, and it is why the six bytes are stored under
+   the same critical section as the gate -- indivisibly, so no other producer can
+   land between the halves of a command. */
 static const uint8_t telnet_charmode[] = {
 	0xFFu, 0xFBu, 0x01u,   /* IAC WILL ECHO                  */
 	0xFFu, 0xFBu, 0x03u,   /* IAC WILL SUPPRESS_GO_AHEAD     */

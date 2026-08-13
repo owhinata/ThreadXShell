@@ -168,6 +168,6 @@ cmake -B build/<board> -G Ninja \
       -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi-toolchain.cmake -DBOARD=<board>
 cmake --build build/<board>
 # f746g-disco: cmake --build build/f746g-disco --target flash   (ST-Link)
-# wio-lite-ai: cmake --build build/wio-lite-ai --target dfu-shell
-#              (PF1 保持リセットで DFU モードに入ってから)
+# wio-lite-ai: cmake --build build/wio-lite-ai --target flash    (DFU のみ。
+#              dfu-shell のエイリアス。PF1 保持リセットで DFU モードに入ってから)
 ```

@@ -86,9 +86,14 @@ The console is the on-board ST-Link VCP: 115200 8N1 on `/dev/ttyACM0`.
 Put the board in DFU mode by holding USER (PF1) during reset, then:
 
 ```bash
-cmake --build build/wio-lite-ai --target dfu-shell
+cmake --build build/wio-lite-ai --target flash
+# `flash` is an alias for `dfu-shell`; `dfu-blink` programs the blink firmware
 # or: dfu-util -d 0483:df11 -a 0 -D build/wio-lite-ai/shell.bin
 ```
+
+`--target flash` means the same thing on both boards -- program THIS board's shell
+firmware the only way this board can be programmed. On Wio Lite AI that is DFU into
+the app partition; it has no ST-Link path and nothing here can write sector 0.
 
 The app is programmed to the internal flash app partition at `0x08020000`.
 Internal flash endurance is about 10k cycles, so do not reflash in an automated

@@ -1170,6 +1170,14 @@ int nx_net_set_static(uint32_t ip, uint32_t mask, uint32_t gw)
 	if (!nxn_ready)
 		return NXN_ERR_STATE;
 
+	/* NetX accepts a gateway only if it sits on an interface's subnet
+	 * (nx_ip_gateway_address_set.c), and the address has to be set BEFORE the
+	 * gateway -- so a gateway off the new subnet fails only after the address has
+	 * already moved, and this function has no rollback.  Reject it up front, while
+	 * nothing has been touched (issue #19). */
+	if (gw != 0u && (gw & mask) != (ip & mask))
+		return NXN_ERR;
+
 	nxn_addr_take();
 	/* Re-checked HERE, under the lock, not by the caller: between a CLI thread's
 	 * nx_net_is_up() and this call the owner may have started taking the interface
@@ -1184,10 +1192,19 @@ int nx_net_set_static(uint32_t ip, uint32_t mask, uint32_t gw)
 	}
 	nxn_static_mode = true;
 	nxn_lease_stale = false;         /* the operator just said what the address is */
-	if (nx_ip_address_set(&nxn_ip, ip, mask) != NX_SUCCESS)
+	if (nx_ip_address_set(&nxn_ip, ip, mask) != NX_SUCCESS) {
 		rc = NXN_ERR;
-	else
-		nx_ip_gateway_address_set(&nxn_ip, gw);
+	} else {
+		/* gw == 0 means "no gateway" and has to CLEAR it: NetX refuses 0.0.0.0 as
+		 * a gateway address outright (nxe_ip_gateway_address_set.c), so passing it
+		 * through failed -- and the status was discarded, so `net ip <a.b.c.d/mask>`
+		 * reported success while silently keeping the previous gateway, which after
+		 * DHCP is a lease-derived one (issue #19). */
+		UINT s = (gw != 0u) ? nx_ip_gateway_address_set(&nxn_ip, (ULONG)gw)
+		                    : nx_ip_gateway_address_clear(&nxn_ip);
+		if (s != NX_SUCCESS)
+			rc = NXN_ERR;
+	}
 	nxn_addr_give();
 	return rc;
 }

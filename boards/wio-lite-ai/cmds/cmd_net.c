@@ -80,14 +80,24 @@ static void net_print_nx_ip(struct cli_instance *sh, const struct nx_net_info *n
 	          (unsigned)((ni->ip >> 24) & 0xFFu), (unsigned)((ni->ip >> 16) & 0xFFu),
 	          (unsigned)((ni->ip >> 8) & 0xFFu),  (unsigned)(ni->ip & 0xFFu),
 	          cli_ipv4_mask_bits(ni->mask));
-	cli_print(sh, "gw:    %u.%u.%u.%u (%s)%s\r\n",
-	          (unsigned)((ni->gw >> 24) & 0xFFu), (unsigned)((ni->gw >> 16) & 0xFFu),
-	          (unsigned)((ni->gw >> 8) & 0xFFu),  (unsigned)(ni->gw & 0xFFu),
-	          ni->dhcp_mode ? "dhcp" : "static",
-	          /* The link dropped while this address was live and nothing renews it
-	           * automatically (issue #30 B2a) -- say so where the address is shown,
-	           * because everything above it still LOOKS configured. */
-	          ni->lease_stale ? "  <-- STALE (link went down; run `net dhcp`)" : "");
+	/* The link dropped while this address was live and nothing renews it
+	 * automatically (issue #30 B2a) -- say so where the address is shown, because
+	 * everything above it still LOOKS configured. */
+	const char *stale = ni->lease_stale
+	                  ? "  <-- STALE (link went down; run `net dhcp`)" : "";
+
+	/* gw 0 is "no gateway", not an address (issue #19): printing 0.0.0.0 reads as
+	 * a configured one. */
+	if (ni->gw == 0u)
+		cli_print(sh, "gw:    none (%s)%s\r\n",
+		          ni->dhcp_mode ? "dhcp" : "static", stale);
+	else
+		cli_print(sh, "gw:    %u.%u.%u.%u (%s)%s\r\n",
+		          (unsigned)((ni->gw >> 24) & 0xFFu),
+		          (unsigned)((ni->gw >> 16) & 0xFFu),
+		          (unsigned)((ni->gw >> 8) & 0xFFu),
+		          (unsigned)(ni->gw & 0xFFu),
+		          ni->dhcp_mode ? "dhcp" : "static", stale);
 }
 
 /*

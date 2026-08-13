@@ -108,6 +108,19 @@ static void nxg_lock_acquire(void)
 }
 
 /*
+ * Apply a gateway, where 0 means "no gateway" (issue #19).  NetX refuses
+ * 0.0.0.0 as a gateway address outright (nxe_ip_gateway_address_set.c), so the
+ * two cases are different calls -- passing 0 through fails, and because the
+ * static path is transactional that failure rolled the whole thing back, which
+ * is what made `net ip <a.b.c.d/mask>` impossible to use without a gateway.
+ */
+static UINT nxg_gateway_apply(uint32_t gw)
+{
+	return (gw != 0u) ? nx_ip_gateway_address_set(&eth_ip, (ULONG)gw)
+	                  : nx_ip_gateway_address_clear(&eth_ip);
+}
+
+/*
  * Consume a published link-up: start DHCP if nothing else owns the address.  CALL
  * WITH THE GLUE LOCK HELD, and never from the IP thread (issue #13).
  *
@@ -303,6 +316,14 @@ int nx_net_set_static(uint32_t ip, uint32_t mask, uint32_t gw)
 	if (!nx_up)
 		return NXG_ERR_STATE;
 
+	/* NetX accepts a gateway only if it sits on an interface's subnet
+	   (nx_ip_gateway_address_set.c), and the address has to be set BEFORE the
+	   gateway -- so a gateway off the new subnet fails only after the address has
+	   already moved.  Reject it here, before anything changes; the rollback below
+	   stays as the backstop for failures that cannot be predicted (issue #19). */
+	if (gw != 0u && (gw & mask) != (ip & mask))
+		return NXG_ERR;
+
 	nxg_lock_acquire();
 
 	nx_ip_address_get(&eth_ip, &old_ip, &old_mask);
@@ -323,7 +344,7 @@ int nx_net_set_static(uint32_t ip, uint32_t mask, uint32_t gw)
 		rc = NXG_ERR;
 		goto rollback;
 	}
-	if (nx_ip_gateway_address_set(&eth_ip, gw) != NX_SUCCESS) {
+	if (nxg_gateway_apply(gw) != NX_SUCCESS) {
 		rc = NXG_ERR;
 		goto rollback;
 	}
@@ -341,8 +362,7 @@ rollback:
 	if (old_started)
 		(void)nx_dhcp_interface_reinitialize(&eth_dhcp, NXG_IFACE);
 	(void)nx_ip_address_set(&eth_ip, old_ip, old_mask);
-	if (old_gw != 0u)                  /* 0 == there was no gateway to restore */
-		(void)nx_ip_gateway_address_set(&eth_ip, old_gw);
+	(void)nxg_gateway_apply((uint32_t)old_gw);   /* 0 restores "no gateway" */
 	static_mode = old_static;
 	if (old_started) {
 		if (nx_dhcp_interface_start(&eth_dhcp, NXG_IFACE) == NX_SUCCESS) {

@@ -159,7 +159,12 @@ static void net_print_ip(struct cli_instance *sh, const struct nx_net_info *ni)
 	if (ni->ip_valid) {
 		print_octets(sh, "ip:    ", ni->ip);
 		cli_print(sh, "/%u ", mask_bits(ni->mask));
-		print_octets(sh, "gw ", ni->gw);
+		/* 0 is "no gateway", not an address (issue #19): printing 0.0.0.0 reads
+		   as a configured one. */
+		if (ni->gw != 0u)
+			print_octets(sh, "gw ", ni->gw);
+		else
+			cli_print(sh, "gw none");
 		cli_print(sh, " (%s)\r\n", ni->dhcp_mode ? "dhcp" : "static");
 	} else {
 		cli_print(sh, "ip:    none (%s)\r\n",

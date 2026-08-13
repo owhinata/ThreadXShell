@@ -1,0 +1,369 @@
+# ============================================================================
+#  Grove Vision AI V2 (Himax HX6538 WiseEye2) board definition.
+#
+#  Included by the top-level CMakeLists.txt with BOARD=grove-vision-ai-v2.
+#  It owns everything board-specific: the SDK acquisition, the MCU flags, the
+#  linker script, the one firmware and the post-build gates.
+#
+#  Firmware:
+#    shell -- ThreadX + the interactive CLI console on UART0 (the board's USB-C
+#             is a CH343P USB-UART bridge into PB0/PB1; 921600 8N1).
+#
+#  The chip has NO USB device controller: flashing goes over the same UART --
+#  reset the board, the flash-resident Himax bootloader offers an xmodem menu,
+#  and `--target flash` drives it (a manual step: press reset when prompted).
+#  The flashed .img is a FULL image (bootloader + 2nd bootloader + memory
+#  descriptors + signed app); rewriting the bootloader region every flash is
+#  the vendor-standard flow.  Recovery from a corrupted flash: the in-chip
+#  64 KB boot ROM + the BOOT_OPT strap -- see this board's README.md.
+#
+#  [!] This app does NOT configure the clock tree (same doctrine as the Wio):
+#  it runs on whatever the bootloader programmed and reads the frequency back
+#  through the SCU driver.  It runs entirely in the TrustZone SECURE state
+#  (SDK "SEC_ONLY": SAU disabled, whole address space secure), which is why
+#  ThreadX is built with TX_SINGLE_MODE_SECURE (port/threadx/tx_user.h).
+#
+#  The app is NOT XIP: the 2nd bootloader loads the ELF into ITCM (code,
+#  0x10000000 secure alias) and DTCM (data, 0x30000000); see ldscript/.
+# ============================================================================
+
+# The name the `system` command prints; substituted into cmake/cli_version.h.in
+# by the top-level CMakeLists.txt AFTER this file has been included.
+set(BOARD_FW_NAME "Grove Vision AI V2 ThreadX Shell")
+
+# The SDK startup file is C++ (startup_WE2_ARMCM55.cc).  The toolchain file
+# already names CMAKE_CXX_COMPILER precisely so that this works (see the
+# comment there); the top-level project() declares C and ASM only.
+enable_language(CXX)
+
+# --- Himax SDK (configure-time pinned fetch; NOT a submodule) ---------------
+# Provides GROVE_SDK_ROOT / GROVE_SDK_APP_DIR, FATALs on any fetch problem.
+include("${BOARD_DIR}/cmake/himax_sdk.cmake")
+set(SDK "${GROVE_SDK_APP_DIR}")
+
+# --- Target / common build options -----------------------------------------
+# Cortex-M55 hard-float.  No explicit -mfpu: -mcpu=cortex-m55 enables the full
+# FP + MVE (Helium) extension set, which is what the prebuilt driver archives
+# were built against.  These flags MUST reach the ASM sources too (they gate
+# __ARM_FP, which the ThreadX port asm uses to decide whether s16-s31 are part
+# of a thread's context) -- hence they ride on the INTERFACE target.
+set(MCU_OPTS -mcpu=cortex-m55 -mthumb -mfloat-abi=hard)
+
+set(LDSCRIPT_APP "${BOARD_DIR}/ldscript/HX6538_CM55M_S.ld")
+
+set(GEN_DIR "${CMAKE_BINARY_DIR}/gen")
+file(MAKE_DIRECTORY "${GEN_DIR}")
+
+# The SDK's peripheral-IP configuration: which IP blocks exist (IP_<ip>) and
+# which instances are populated (IP_INST_<inst>).  Copied verbatim from the
+# SDK's drv_onecore_cm55m_s_only.mk via the donor build; the prebuilt
+# libdriver.a and the SDK headers were built against exactly this set, so it
+# is not a menu -- treat it as part of the ABI.
+set(SDK_IP_LIST
+    scu uart spi i3c_mst isp iic mb timer watchdog rtc
+    cdm edm jpeg xdma dp inp tpg inp1bitparser sensorctrl
+    gpio i2s pdm i3c_slv vad swreg_aon swreg_lsc dma
+    ppc pmu mpc hxautoi2c_mst csirx csitx adcc pwm
+    inpovparser adcc_hv u55 2x2 5x5)
+set(SDK_IP_INSTANCES
+    RTC0 RTC1 RTC2
+    TIMER0 TIMER1 TIMER2 TIMER3 TIMER4 TIMER5 TIMER6 TIMER7 TIMER8
+    WDT0 WDT1
+    DMA0 DMA1 DMA2 DMA3
+    UART0 UART1 UART2
+    IIC_HOST_SENSOR IIC_HOST IIC_HOST_MIPI
+    IIIC_SLAVE0 IIIC_SLAVE1
+    SSPI_HOST QSPI_HOST OSPI_HOST SSPI_SLAVE
+    GPIO_G0 GPIO_G1 GPIO_G2 GPIO_G3 SB_GPIO AON_GPIO
+    I2S_HOST I2S_SLAVE
+    PWM0 PWM1 PWM2 ADCC ADCC_HV)
+set(SDK_IP_DEFINES "")
+foreach(_ip IN LISTS SDK_IP_LIST)
+    list(APPEND SDK_IP_DEFINES "IP_${_ip}")
+endforeach()
+foreach(_inst IN LISTS SDK_IP_INSTANCES)
+    list(APPEND SDK_IP_DEFINES "IP_INST_${_inst}")
+endforeach()
+
+# Usage requirements shared by the target (includes, defs, MCU flags, link).
+add_library(bsp_iface INTERFACE)
+target_include_directories(bsp_iface INTERFACE
+    "${BOARD_DIR}/include"
+    "${GEN_DIR}"
+    # SDK header surface, donor-identical.  The SDK bundles its own CMSIS
+    # (core_cm55.h etc.), so no lib/ CMSIS mirror is involved.
+    "${SDK}/CMSIS"
+    "${SDK}/CMSIS/Driver/Include"
+    "${SDK}/device"
+    "${SDK}/device/inc"
+    "${SDK}/device/clib"
+    "${SDK}/drivers"
+    "${SDK}/drivers/inc"
+    "${SDK}/drivers/seconly_inc"
+    "${SDK}/board"
+    "${SDK}/board/epii_evb"
+    "${SDK}/board/epii_evb/config"
+    "${SDK}/interface"
+    "${SDK}/library/common"
+    "${SDK}/library/pwrmgmt"
+    "${SDK}/library/pwrmgmt/seconly_inc"
+    "${SDK}/customer/sec_inc/seeed"
+    "${SDK}/trustzone"
+    "${SDK}/trustzone/tz_cfg")
+target_compile_definitions(bsp_iface INTERFACE
+    # Toolchain / core selection (SDK cmsis_core layer)
+    __GNU__ __NEWLIB__ ARMCM55 CM55_BIG
+    # Device (SDK device layer): silicon rev 3.0, WLCSP65 (the Grove board's
+    # package), 0.9 V core -- donor-identical.
+    IC_VERSION=30 IC_PACKAGE_WLCSP65 COREV_0P9V
+    # Board flavour + libraries the compiled SDK sources expect
+    seeed EPII_EVB LIB_COMMON LIB_PWRMGMT
+    # TrustZone: whole app secure, SAU disabled (trustzone_cfg.c SEC_ONLY path)
+    TRUSTZONE TRUSTZONE_CFG TRUSTZONE_SEC TRUSTZONE_SEC_ONLY
+    # [!] The RTOS seam: removes the SDK's strong SysTick_Handler/SVC_Handler
+    # and its SysTick_Config() calls (device/system_WE2_ARMCM55.c,
+    # device/WE2_core.c) so ThreadX can own the tick and the vectors.
+    ENABLE_OS
+    ${SDK_IP_DEFINES})
+target_compile_options(bsp_iface INTERFACE
+    ${MCU_OPTS} -Wall -fdata-sections -ffunction-sections -g -gdwarf-2
+    # CMSE intrinsics: SystemInit and trustzone_cfg.c compile TZ paths under
+    # __ARM_FEATURE_CMSE == 3, which only -mcmse provides.  C/C++ only -- the
+    # assembler has no such option.
+    $<$<COMPILE_LANGUAGE:C,CXX>:-mcmse>
+    # The SDK startup is C++; keep it freestanding like the donor build.
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti -fno-exceptions -fno-threadsafe-statics>)
+target_link_options(bsp_iface INTERFACE
+    ${MCU_OPTS} -specs=nano.specs -specs=nosys.specs
+    # Donor parity: the secure-only build carries --cmse-implib even though no
+    # import library is consumed; kept identical to reduce bring-up variables.
+    -Wl,--cmse-implib
+    # The 2nd bootloader loads code into ITCM (RAM), so the image inherently
+    # has a "RWX" LOAD segment; the donor build silences the same warning.
+    -Wl,--no-warn-rwx-segments
+    -Wl,--gc-sections -Wl,--print-memory-usage)
+
+# --- SDK sources compiled from source ---------------------------------------
+# The peripheral drivers themselves are PREBUILT (prebuilt_libs/gnu/libdriver.a
+# -- no sources exist in the SDK).  What compiles from source is the thin layer
+# the archive links back into: the device core (runtime vector install +
+# cache/TCM helpers), startup, SystemInit, the driver/timer interface shims and
+# the TrustZone SEC_ONLY configuration.
+#
+# Deliberately NOT compiled (reviewed decision, see the board README):
+#  - board/epii_evb/board.c        -- calls console_setup(), which lives in the
+#                                     SDK clib we do not link
+#  - device/clib/*                 -- console + printf retarget; this port owns
+#                                     _write/_sbrk (src/retarget.c)
+#  - library/common/xprintf.c      -- includes console_io.h; libdriver's one
+#                                     unresolved x* symbol (xprintf) is
+#                                     satisfied by src/xprintf_shim.c instead,
+#                                     which routes into the dmesg log ring
+set(SDK_SOURCES
+    "${SDK}/device/WE2_core.c"
+    "${SDK}/device/system_WE2_ARMCM55.c"
+    "${SDK}/device/startup_WE2_ARMCM55.cc"
+    "${SDK}/interface/driver_interface.c"
+    "${SDK}/interface/timer_interface.c"
+    "${SDK}/trustzone/tz_cfg/trustzone_cfg.c"
+    "${SDK}/board/epii_evb/pinmux_init.c"
+    "${SDK}/board/epii_evb/platform_driver_init.c")
+
+set(LIBDRIVER  "${SDK}/prebuilt_libs/gnu/libdriver.a")
+set(LIBPWRMGMT "${SDK}/prebuilt_libs/gnu/libpwrmgmt.a")
+
+# --- ThreadX ----------------------------------------------------------------
+# Core sources + the Cortex-M55/GNU port asm.  The port ships its example
+# _tx_initialize_low_level in example_build/ (outside the src/ glob), so the
+# board supplies its own in port/threadx/tx_glue.c -- same pattern as the
+# other two boards.  ONE executable compiled uniformly
+# (TX_INCLUDE_USER_DEFINE_FILE + port/threadx on the include path) so the
+# ThreadX core, the shell core and the app agree on the TX_THREAD layout (ABI).
+# tx_user.h defines TX_SINGLE_MODE_SECURE, which also compiles the port's six
+# secure-stack sources down to empty objects.  No EPK on this board (M-G1):
+# the outermost UART ISR lives inside the prebuilt libdriver.a, where EPK
+# enter/exit hooks cannot be placed, so its ISR accounting would be wrong.
+set(TX_DIR  "${CMAKE_SOURCE_DIR}/lib/threadx")
+set(TX_PORT "${TX_DIR}/ports/cortex_m55/gnu")
+file(GLOB TX_CORE "${TX_DIR}/common/src/*.c")
+list(FILTER TX_CORE EXCLUDE REGEX "tx_misra\\.c$")
+file(GLOB TX_ASM  "${TX_PORT}/src/*.S")
+list(FILTER TX_ASM  EXCLUDE REGEX "tx_misra\\.S$")
+
+# --- Shell sources ----------------------------------------------------------
+# Board-independent files come from the shared shell/ and svc/ trees; the ones
+# that reach for the SDK drivers or the HX6538 memory map live under this
+# board's own backend/, cmds/ and svc/.
+set(SHELL_SOURCES
+    "${CMAKE_SOURCE_DIR}/shell/core/cli_core.c"
+    "${CMAKE_SOURCE_DIR}/shell/core/cli_complete.c"
+    "${CMAKE_SOURCE_DIR}/shell/core/cli_edit.c"
+    "${CMAKE_SOURCE_DIR}/shell/core/cli_history.c"
+    "${CMAKE_SOURCE_DIR}/shell/core/cli_job.c"
+    "${CMAKE_SOURCE_DIR}/shell/core/cli_parse.c"
+    "${CMAKE_SOURCE_DIR}/shell/core/cli_printf.c"
+    "${CMAKE_SOURCE_DIR}/shell/core/cli_session.c"
+    "${BOARD_DIR}/backend/cli_backend_uart.c"
+    "${CMAKE_SOURCE_DIR}/shell/backend/cli_backend_dummy.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_builtin.c"
+    "${BOARD_DIR}/cmds/cmd_system.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_thread.c"
+    "${BOARD_DIR}/cmds/cmd_free.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_sleep.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_watch.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_jobs.c"
+    "${BOARD_DIR}/cmds/cmd_devmem.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_dmesg.c"
+    "${BOARD_DIR}/cmds/cmd_crash.c"
+    "${CMAKE_SOURCE_DIR}/svc/fmt.c"
+    "${BOARD_DIR}/svc/timebase.c"
+    "${BOARD_DIR}/svc/log.c")
+
+# --- The shell firmware ------------------------------------------------------
+add_executable(shell
+    "${BOARD_DIR}/src/main.c"
+    "${BOARD_DIR}/src/fault.c"
+    "${BOARD_DIR}/src/retarget.c"
+    "${BOARD_DIR}/src/xprintf_shim.c"
+    "${BOARD_DIR}/port/threadx/tx_glue.c"
+    ${SHELL_SOURCES}
+    ${SDK_SOURCES}
+    ${TX_CORE} ${TX_ASM})
+target_link_libraries(shell PRIVATE bsp_iface
+    -Wl,--start-group "${LIBDRIVER}" "${LIBPWRMGMT}" -Wl,--end-group)
+target_include_directories(shell PRIVATE
+    "${BOARD_DIR}/src"
+    "${BOARD_DIR}/port/threadx"
+    "${BOARD_DIR}/backend"
+    "${CMAKE_SOURCE_DIR}/shell/include"
+    "${CMAKE_SOURCE_DIR}/shell/core"
+    "${CMAKE_SOURCE_DIR}/shell/backend"
+    "${CMAKE_SOURCE_DIR}/shell/cmds"
+    "${CMAKE_SOURCE_DIR}/svc"
+    "${BOARD_DIR}/svc"          # log.h / timebase.h: the board's services,
+                                # which the shared cmd_dmesg.c / cmd_sleep.c
+                                # consume
+    "${TX_DIR}/common/inc"
+    "${TX_PORT}/inc")
+target_compile_definitions(shell PRIVATE
+    TX_INCLUDE_USER_DEFINE_FILE        # -> port/threadx/tx_user.h
+    CLI_ENABLE_DANGEROUS_CMDS=1        # reboot / devmem / crash
+    CLI_INSTANCE_STACK_SIZE=4096       # headroom for cli_print (wio parity)
+    CLI_BG_JOB_STACK_SIZE=4096
+    # CM55M core clock as configured by the bootloader: 400 MHz, CONFIRMED on
+    # hardware 2026-08-13 (the banner prints the runtime SCU read-back and
+    # warns on any mismatch with this constant -- it printed 400000000 Hz and
+    # no warning).  The compile-time SDK config is a 24 MHz placeholder and
+    # must never be used for this; udelay() reads SystemCoreClock directly.
+    CLI_CPU_CYCLES_PER_US=400)
+target_compile_options(shell PRIVATE -Os)
+target_link_options(shell PRIVATE
+    "-T${LDSCRIPT_APP}" -Wl,-Map=shell.map,--cref)
+set_target_properties(shell PROPERTIES LINK_DEPENDS "${LDSCRIPT_APP}")
+
+# --- Image generation --------------------------------------------------------
+# The Himax image generator turns the ELF into the flashable .img (bootloader +
+# 2nd bootloader + memory descriptors + signed app; signed with the dev keys
+# the tool ships).  The whole tool tree is copied into the build dir once at
+# configure time because the tool writes into its own directory.
+set(IMAGE_GEN_DIR "${CMAKE_BINARY_DIR}/image_gen")
+if(NOT EXISTS "${IMAGE_GEN_DIR}/we2_local_image_gen")
+    file(COPY "${GROVE_SDK_ROOT}/we2_image_gen_local/" DESTINATION "${IMAGE_GEN_DIR}")
+endif()
+
+add_custom_command(TARGET shell POST_BUILD
+    COMMAND "${CMAKE_SIZE}" "$<TARGET_FILE:shell>"
+    # Remove every prior output FIRST: the vendor tool is a black box, and a
+    # run that failed partway while exiting 0 must not leave a stale
+    # output.img + JSON pair for the copy below and the coherence gate to
+    # accept.  After this rm, an output.img can only exist because THIS run
+    # produced it (the copy fails the build otherwise).
+    COMMAND "${CMAKE_COMMAND}" -E rm -rf "${IMAGE_GEN_DIR}/output_case1_sec_wlcsp"
+    COMMAND "${CMAKE_COMMAND}" -E rm -f
+            "${IMAGE_GEN_DIR}/input_case1_secboot/EPII_CM55M_gnu_epii_evb_WLCSP65_s.elf"
+    # The tool's input path/name is fixed by its project json.
+    COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:shell>"
+            "${IMAGE_GEN_DIR}/input_case1_secboot/EPII_CM55M_gnu_epii_evb_WLCSP65_s.elf"
+    COMMAND ./we2_local_image_gen project_case1_blp_wlcsp.json
+    COMMAND "${CMAKE_COMMAND}" -E copy
+            "${IMAGE_GEN_DIR}/output_case1_sec_wlcsp/output.img"
+            "${CMAKE_BINARY_DIR}/shell.img"
+    WORKING_DIRECTORY "${IMAGE_GEN_DIR}"
+    BYPRODUCTS "${CMAKE_BINARY_DIR}/shell.img"
+    COMMENT "we2_local_image_gen -> shell.img")
+
+# --- Post-build gates --------------------------------------------------------
+# 1. Image coherence: everything the linker placed must actually be inside the
+#    generated image (the tool processes sections individually and silently
+#    drops names it does not know), and the shell command registry must sit
+#    inside the .rodata coverage.  Runs AFTER the image generation above --
+#    POST_BUILD commands execute in declaration order.
+add_custom_command(TARGET shell POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/check_image_coherence.py"
+            --objdump "${CMAKE_OBJDUMP}" --nm "${CMAKE_NM}"
+            --objcopy "${CMAKE_OBJCOPY}"
+            --preprocess-json "${IMAGE_GEN_DIR}/output_case1_sec_wlcsp/DEBUG_APP_PREPROCESS.json"
+            --image-gen-dir "${IMAGE_GEN_DIR}"
+            --img "${CMAKE_BINARY_DIR}/shell.img"
+            "$<TARGET_FILE:shell>"
+    COMMENT "check_image_coherence.py (ELF sections vs generated .img)")
+# 2. Placement / budget: ITCM/DTCM usage + headroom, vector table residency,
+#    static stacks in DTCM, and no references to the SDK's SysTick-touching or
+#    console APIs (they must have been dead-stripped / never called).
+add_custom_command(TARGET shell POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/check_placement_budget.py"
+            --nm "${CMAKE_NM}" --objdump "${CMAKE_OBJDUMP}"
+            "$<TARGET_FILE:shell>"
+    COMMENT "check_placement_budget.py (ITCM/DTCM budget + forbidden refs)")
+# 3. MVE predication scan: the ThreadX Cortex-M55 port does not save/restore
+#    VPR across context switches, so predicated MVE (VCTP/VPST blocks) must not
+#    appear in the linked image.  (Plain unpredicated MVE loads in the prebuilt
+#    driver are fine -- q4-q7 alias s16-s31, which the port does save.)
+add_custom_command(TARGET shell POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/check_mve_predication.py"
+            --objdump "${CMAKE_OBJDUMP}"
+            "$<TARGET_FILE:shell>"
+    COMMENT "check_mve_predication.py (no VPR-dependent MVE in the image)")
+
+# --- Flash target ------------------------------------------------------------
+# xmodem upload to the Himax bootloader: run the target, press the board's
+# reset button when the script asks, and it drives the menu + transfer + reboot.
+# The same serial device is the console -- close the terminal first.
+# [!] Manual target only: every flash rewrites the whole image including the
+# bootloader region of the external NOR (W25Q128JW, ~100k cycle endurance).
+# Never wire this into an automatic loop.
+set(GROVE_SERIAL_PORT "/dev/ttyACM0" CACHE STRING
+    "Serial device of the board's CH343P bridge (console + flash channel)")
+set(GROVE_SERIAL_BAUDRATE "921600" CACHE STRING
+    "Baudrate for the xmodem flash upload")
+
+# The flash script needs pyserial + xmodem; a build-local venv keeps that out
+# of the host Python.  Created once at configure time.
+set(GROVE_VENV "${CMAKE_BINARY_DIR}/venv")
+if(NOT EXISTS "${GROVE_VENV}/bin/python")
+    message(STATUS "Creating flash-tool venv (pyserial, xmodem) ...")
+    execute_process(
+        COMMAND "${Python3_EXECUTABLE}" -m venv "${GROVE_VENV}"
+        RESULT_VARIABLE _rc)
+    if(NOT _rc EQUAL 0)
+        message(FATAL_ERROR "python3 -m venv failed (${GROVE_VENV})")
+    endif()
+    execute_process(
+        COMMAND "${GROVE_VENV}/bin/python" -m pip install --quiet
+                -r "${BOARD_DIR}/requirements.txt"
+        RESULT_VARIABLE _rc)
+    if(NOT _rc EQUAL 0)
+        message(FATAL_ERROR
+            "pip install -r boards/grove-vision-ai-v2/requirements.txt failed")
+    endif()
+endif()
+
+add_custom_target(flash
+    COMMAND "${GROVE_VENV}/bin/python" "${GROVE_SDK_ROOT}/xmodem/xmodem_send.py"
+            --port=${GROVE_SERIAL_PORT}
+            --baudrate=${GROVE_SERIAL_BAUDRATE}
+            --protocol=xmodem
+            --file=${CMAKE_BINARY_DIR}/shell.img
+    DEPENDS shell
+    USES_TERMINAL
+    COMMENT "xmodem -> shell.img over ${GROVE_SERIAL_PORT} (press reset when asked)")

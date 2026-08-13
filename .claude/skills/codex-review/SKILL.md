@@ -1,6 +1,6 @@
 ---
 name: codex-review
-description: Codex による plan（実装計画）レビュー。ExitPlanMode ゲートの marker を更新する唯一の経路。ThreadX Shell（マルチボード: STM32F746G-DISCO / Wio Lite AI）の shell コア構造 / transport 抽象 / ThreadX 統合 / ボードポート / メモリ配置に関わる計画に使う。実装後の diff レビューは codex plugin の /codex:review・/codex:adversarial-review を使う（この skill ではない）。
+description: Codex による plan（実装計画）レビュー。ExitPlanMode ゲートの marker を更新する唯一の経路。ThreadX Shell（マルチボード: STM32F746G-DISCO / Wio Lite AI / Grove Vision AI V2）の shell コア構造 / transport 抽象 / ThreadX 統合 / ボードポート / メモリ配置に関わる計画に使う。実装後の diff レビューは codex plugin の /codex:review・/codex:adversarial-review を使う（この skill ではない）。
 argument-hint: <plan | 設計説明>
 ---
 
@@ -126,11 +126,32 @@ touch ~/.claude/.threadx-shell-plan-codex-reviewed
   セクタ0 `0x08000000` は DFU ブートローダ専用（不可侵。boot は本リポジトリ `boards/wio-lite-ai/boot/` にあるが**不変**）
 - ピンの AF 番号が schematic / RM0468 と一致するか（LED0=PC13, LED1=PF0, USER=PF1）
 
+**Grove Vision AI V2 (Himax HX6538):**
+
+- **公開 TRM が無い**: レジスタ/能力の根拠は SDK 同梱 `WE2_S.svd` と SDK 実装
+  （`boards/grove-vision-ai-v2/sdk/EPII_CM55M_APP_S/`、read-only）で取る。
+  推測は推測と明示させる
+- **クロック継承**: app は PLL/クロックツリーを設定しない。SCU 読み戻し →
+  `SystemCoreClockUpdate` が唯一の真実（コンパイル時 config は 24 MHz プレースホルダ）。
+  SysTick reload は実行時値から計算し起動前に assert しているか
+- **TrustZone SEC_ONLY**: 全空間 Secure（SAU 無効）。ThreadX は
+  **`TX_SINGLE_MODE_SECURE` 必須**（無いと初回 PendSV の EXC_RETURN が Non-secure 向け）。
+  `-mcmse` 維持。優先度 3-bit（PendSV=7 / SysTick=6。M7 の 15/14 流用は誤り）
+- **非 XIP**: 2nd bootloader が ELF を ITCM 256KB @0x10000000 / DTCM 256KB
+  @0x30000000 へ展開。SRAM0 窓（0x3401F000〜）は明示配置専用。イメージ生成ツールは
+  セクションを個別処理する — 新セクションを足す plan は `.img` 収録の保証
+  （`check_image_coherence.py`）とセットか
+- **プリビルトドライバ**: libdriver.a が実行時に ISR をベクタテーブルへ登録し IRQ を
+  勝手に開き得る。init は PRIMASK 下 + カーネル入場前の IRQ 0..200 disable/clear を
+  維持しているか。UART0 IRQ=90 / fallback の DMA3 combined IRQ=69（67/68 不可）
+- **書込**: 毎回の flash が bootloader 領域も書く（Himax 標準）。W25Q128JW ~100k 耐久、
+  自動ループ焼き提案は不可。コンソールと flash は同一シリアル
+
 ### 観点 3: HW リソース競合レビュー
 
-- **割込み優先度 (NVIC/SCB)**: F746/H725 とも優先度 4 bit。ThreadX 使用時は PendSV=最低、
-  **SysTick > PendSV**。ThreadX クリティカルセクションは **PRIMASK ベース**
-  （`TX_PORT_USE_BASEPRI` 未定義）。HAL ISR と競合しないか
+- **割込み優先度 (NVIC/SCB)**: F746/H725 は優先度 4 bit、**HX6538 は 3 bit**。
+  ThreadX 使用時は PendSV=最低、**SysTick > PendSV**。ThreadX クリティカルセクションは
+  **PRIMASK ベース**（`TX_PORT_USE_BASEPRI` 未定義）。HAL/SDK ISR と競合しないか
 - **タイマ / DMA**: 使用ストリーム/チャネルの競合、DMA と D-Cache のコヒーレンシ
   （DMA 共有バッファは両端 32B align）
 - **GPIO / AF**: ピンの多重割当（F746: VCP=PA9/PB7, LD1=PI1 / Wio: USB=PA11/PA12,
@@ -151,6 +172,10 @@ touch ~/.claude/.threadx-shell-plan-codex-reviewed
 - **ビルド入力**: `_ref/`（および `../*/_ref/`）は git 管理外なので、CMake / スクリプトが
   読む plan は「クローンしただけでは configure できないリポジトリ」を作る（wio-lite-ai#58）
 - **Wio 書換え耐久**: 内蔵 Flash は ~10k サイクル。自動ループで焼き直す plan は不可
+- **Grove メモリ領域**（Secure alias）: ITCM 256KB @0x10000000 / DTCM 256KB @0x30000000 /
+  SRAM0+1 2MB @0x34000000 / SRAM2 384KB @0x36000000。ThreadX M55 ポートは **MVE の VPR を
+  保存しない** — 述語 MVE を持ち込む plan は `check_mve_predication.py` と矛盾しないか。
+  EPK はこのボードでは無効（プリビルト内 ISR を計測できない）
 
 ## 成立性の証拠
 
@@ -165,6 +190,8 @@ HW 依存の設計には、LGTM 前に成立性の証拠を要求する:
 
 - `_ref/f746g-disco/_ref/` — RM0385 / UM1907 / STM32Cube_FW_F7（ST 公式デモ）
 - `_ref/wio-lite-ai/` — RM0468 / PM0253 / Wio Lite AI schematic / STM32Cube_FW_H7
+- `_ref/grove-vision-ai-v2/` — HX6538 datasheet / 回路図 / M55 TRM / WE2_S.svd
+  （SDK 実物は `boards/grove-vision-ai-v2/sdk/`、こちらはビルド入力なので参照可）
 - `boards/wio-lite-ai/boot/README.md` — ブートローダが app へ渡す実測クロック値と boot 書込手順
   （boot 統合完了までは `../wio-lite-ai/boot/README.md`）
 - 統合元の実装: `../stm32f746g-disco/shell/` `../wio-lite-ai/shell/`（および両 `port/`）

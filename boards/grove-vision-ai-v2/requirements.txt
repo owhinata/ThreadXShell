@@ -1,0 +1,4 @@
+# Flash-tool venv for the Grove Vision AI V2 (see board.cmake).
+# Same pins as the donor build environment / the SDK's xmodem/requirements.txt.
+pyserial==3.5
+xmodem==0.4.7

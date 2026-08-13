@@ -1,0 +1,474 @@
+/*
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 ThreadX Shell Project
+ */
+/**
+ * @file    log.c
+ * @brief   DTCM RAM log ring: ISR/fault-safe.  Grove Vision AI V2 port.
+ *
+ * Port of the wio-lite-ai svc/log.c.  Differences on this platform:
+ *  - The ring lives in .noinit.log (matched by the ldscript's *(.noinit*)),
+ *    i.e. DTCM at 0x30000000.  The Himax 2nd bootloader loads only the ELF
+ *    LOAD segments, so it does not touch .noinit; the DTCM content was
+ *    confirmed to survive the system reset that ends an xmodem flash
+ *    (hardware 2026-08-13).  Power-cycle behaviour is untested, so
+ *    log_init()'s magic/validity check still handles a lost ring.
+ *  - Timestamps come from the ThreadX tick (1 ms; 0 before the scheduler),
+ *    not HAL_GetTick() -- there is no HAL here.
+ *  - No reset-cause decode: the HX6538 reset-cause register has not been
+ *    identified (no public TRM).  log_reset_cause() returns "?".
+ *  - The wio original's DTCM write read-backs (persist_*) are KEPT: they were
+ *    required on the H7's TCM and are harmless-cheap here, where this DTCM's
+ *    write posting behaviour is unknown.
+ *
+ * Layout: a 32-byte header (magic/version/size/head/tail/seq/boot_count) then
+ * a power-of-two data[] of variable-length records.  head/tail are
+ * free-running 32-bit byte offsets (indexed with & (size-1)); empty ==
+ * head==tail, full == head-tail==size.  A record never straddles the physical
+ * end of data[]: when it would, a SKIP record fills the tail fragment and the
+ * record wraps to offset 0.  Oldest-overwrite evicts whole records from tail
+ * until the new one fits.
+ *
+ * Concurrency: the ring update runs under a PRIMASK critical section (no tx_*
+ * call), so thread, ISR and fault context all share it safely.  Formatting
+ * into a stack buffer happens before the section.
+ *
+ * Clean-room: concept from NuttX ramlog / Zephyr logging; no code reused.
+ */
+#include "log.h"
+
+#include <stddef.h>
+#include <string.h>
+
+#include "fmt.h"
+#include "WE2_device.h"
+
+/* ThreadX tick counter (1 kHz; see port/threadx).  Referenced directly so this
+ * file stays callable from fault context without the tx_api surface; zero
+ * until the kernel starts ticking. */
+extern unsigned long _tx_timer_system_clock;
+
+/* ---- on-DTCM ring ------------------------------------------------------ */
+
+#define LOG_MAGIC       0x474F4C31u     /* "1LOG" */
+#define LOG_VERSION     1u
+#define LOG_REC_MAGIC   0xA5u           /* per-record sanity byte */
+#define LOG_LEVEL_SKIP  0xFFu           /* fills the tail fragment on wrap */
+
+#ifndef LOG_RING_DATA_SIZE
+#define LOG_RING_DATA_SIZE 8192u        /* power of two: see below */
+#endif
+
+/* Fixed header preceding the text of every (non-SKIP) record.  Naturally
+ * packed to exactly 20 bytes; built on the stack then memcpy'd into the ring. */
+struct log_rec_hdr {
+	uint16_t total_len;     /* whole record incl. header, multiple of 4 */
+	uint8_t  level;
+	uint8_t  rmagic;        /* LOG_REC_MAGIC; sanity for the boot walk */
+	uint32_t ts_ms;
+	uint32_t seq;
+	char     tag[LOG_TAG_MAX];      /* NUL-padded, not necessarily terminated */
+};
+
+#define LOG_HDR_SIZE  ((uint32_t)sizeof(struct log_rec_hdr))     /* 20 */
+#define LOG_REC_MIN   (LOG_HDR_SIZE + 4u)                        /* 24 */
+/* Largest record: header + padded (text + NUL). */
+#define LOG_REC_MAX   (LOG_HDR_SIZE + (((LOG_MSG_MAX + 1u) + 3u) & ~3u))
+
+_Static_assert(LOG_HDR_SIZE == 20u, "log_rec_hdr must be 20 bytes");
+_Static_assert((LOG_RING_DATA_SIZE & (LOG_RING_DATA_SIZE - 1u)) == 0u,
+               "LOG_RING_DATA_SIZE must be a power of two");
+_Static_assert(LOG_RING_DATA_SIZE >= 2u * LOG_REC_MAX,
+               "ring must hold a SKIP fragment plus a max record");
+
+struct log_ring {
+	uint32_t magic;
+	uint32_t version;
+	uint32_t size;          /* == sizeof(data); detects a build-time resize */
+	uint32_t head;          /* free-running write offset */
+	uint32_t tail;          /* free-running oldest-record offset */
+	uint32_t seq;           /* next record's sequence number */
+	uint32_t boot_count;
+	uint32_t reserved;      /* pad header to 32 bytes */
+	uint8_t  data[LOG_RING_DATA_SIZE];
+};
+
+_Static_assert(offsetof(struct log_ring, data) == 32u,
+               "ring header must be 32 bytes");
+
+static struct log_ring g_log __attribute__((section(".noinit.log"), aligned(4)));
+
+/* Writes are dropped until log_init() validates the ring; clears the
+ * early-fault window (a fault before log_init() must not touch an unverified
+ * ring). */
+static volatile uint8_t  log_ready;
+static volatile uint8_t  log_level = LOG_LEVEL_INF;     /* run-time threshold */
+
+/* ---- PRIMASK critical section (same shape as the UART backend) ---------- */
+
+#define LOG_CRIT_ENTER()  do { uint32_t _pm = __get_PRIMASK(); __disable_irq()
+#define LOG_CRIT_EXIT()   __set_PRIMASK(_pm); } while (0)
+
+/* ---- straddle-safe ring copy (data[] is circular) ---------------------- */
+
+static void ring_put(uint32_t off, const void *src, uint32_t len)
+{
+	uint32_t p = off & (LOG_RING_DATA_SIZE - 1u);
+	uint32_t first = LOG_RING_DATA_SIZE - p;
+	if (first >= len) {
+		memcpy(&g_log.data[p], src, len);
+	} else {
+		memcpy(&g_log.data[p], src, first);
+		memcpy(&g_log.data[0], (const uint8_t *)src + first, len - first);
+	}
+}
+
+static void ring_get(uint32_t off, void *dst, uint32_t len)
+{
+	uint32_t p = off & (LOG_RING_DATA_SIZE - 1u);
+	uint32_t first = LOG_RING_DATA_SIZE - p;
+	if (first >= len) {
+		memcpy(dst, &g_log.data[p], len);
+	} else {
+		memcpy(dst, &g_log.data[p], first);
+		memcpy((uint8_t *)dst + first, &g_log.data[0], len - first);
+	}
+}
+
+/* Read just the leading length word of the record at free-running @p off. */
+static uint16_t rec_total_at(uint32_t off)
+{
+	uint16_t total;
+	ring_get(off, &total, sizeof total);
+	return total;
+}
+
+/* ---- DTCM write read-back (inherited from the wio port) ----------------- */
+
+/* On the H7 the TCM required every store to be read back to durably land.
+ * Whether this DTCM behaves the same is unknown; the read-backs are cheap and
+ * bounded, so they are kept rather than gambled away. */
+
+typedef uint32_t log_word_t __attribute__((may_alias));
+
+static void persist_words(const void *addr, uint32_t len)
+{
+	uintptr_t p   = (uintptr_t)addr;
+	uintptr_t end = p + ((len + 3u) & ~(uint32_t)3u);
+	for (; p < end; p += 4u)
+		(void)*(const volatile log_word_t *)p;
+}
+
+/* Read back the 32-byte ring header (magic..boot_count, incl. head/tail/seq). */
+static void persist_hdr(void)
+{
+	persist_words(&g_log, offsetof(struct log_ring, data));
+}
+
+/* Read back @p len bytes of data[] from free-running offset @p off
+ * (straddle-safe, mirrors ring_put). */
+static void persist_ring(uint32_t off, uint32_t len)
+{
+	uint32_t p = off & (LOG_RING_DATA_SIZE - 1u);
+	uint32_t first = LOG_RING_DATA_SIZE - p;
+	if (first >= len) {
+		persist_words(&g_log.data[p], len);
+	} else {
+		persist_words(&g_log.data[p], first);
+		persist_words(&g_log.data[0], len - first);
+	}
+}
+
+/* ---- init / reset cause ------------------------------------------------ */
+
+void log_init(void)
+{
+	int valid = (g_log.magic == LOG_MAGIC) &&
+	            (g_log.version == LOG_VERSION) &&
+	            (g_log.size == LOG_RING_DATA_SIZE) &&
+	            ((g_log.head & 3u) == 0u) && ((g_log.tail & 3u) == 0u) &&
+	            ((uint32_t)(g_log.head - g_log.tail) <= g_log.size);
+
+	if (valid) {
+		/* Walk tail->head; truncate head at the first malformed record so a
+		 * write interrupted by the reset costs only its own trailing record. */
+		uint32_t pos = g_log.tail;
+		while (pos != g_log.head) {
+			if ((uint32_t)(g_log.head - pos) > g_log.size)
+				break;                          /* safety: runaway */
+			uint32_t w0;
+			ring_get(pos, &w0, sizeof w0);
+			uint16_t total = (uint16_t)(w0 & 0xFFFFu);
+			uint8_t  level = (uint8_t)((w0 >> 16) & 0xFFu);
+			uint8_t  rmag  = (uint8_t)((w0 >> 24) & 0xFFu);
+			uint32_t p     = pos & (LOG_RING_DATA_SIZE - 1u);
+
+			if (rmag != LOG_REC_MAGIC || (total & 3u))
+				break;
+			if (level == LOG_LEVEL_SKIP) {
+				if (total < 4u || (p + total) != LOG_RING_DATA_SIZE)
+					break;                      /* SKIP must reach the end */
+			} else {
+				if (total < LOG_REC_MIN || total > LOG_REC_MAX ||
+				    (p + total) > LOG_RING_DATA_SIZE)
+					break;
+			}
+			pos += total;
+		}
+		g_log.head = pos;
+		g_log.boot_count += 1u;
+	} else {
+		memset(&g_log, 0, sizeof g_log);
+		g_log.magic      = LOG_MAGIC;
+		g_log.version    = LOG_VERSION;
+		g_log.size       = LOG_RING_DATA_SIZE;
+		g_log.boot_count = 1u;
+	}
+
+	__DSB();
+	persist_hdr();
+	__DSB();
+
+	log_level = LOG_LEVEL_INF;
+	log_ready = 1u;                 /* enable writes BEFORE the boot marker */
+
+	log_write(LOG_LEVEL_INF, "boot", "#%lu reset cause: %s",
+	          (unsigned long)g_log.boot_count, log_reset_cause());
+}
+
+const char *log_reset_cause(void)
+{
+	/* Not identified on the HX6538 (no public TRM); see log.h. */
+	return "?";
+}
+
+/* ---- append ------------------------------------------------------------ */
+
+void log_vwrite(unsigned level, const char *tag, const char *fmt, va_list ap)
+{
+	if (level > LOG_LEVEL_DBG)
+		level = LOG_LEVEL_DBG;
+	if (!log_ready || level > log_level)
+		return;
+
+	char text[LOG_MSG_MAX + 1];
+	int  n = fmt_vsnformat(text, sizeof text, fmt, ap);
+	uint32_t stored  = (uint32_t)(n < 0 ? 0 : n) + 1u;      /* incl. NUL */
+	uint32_t padded  = (stored + 3u) & ~3u;
+	uint32_t rec_len = LOG_HDR_SIZE + padded;               /* 24..LOG_REC_MAX */
+
+	struct log_rec_hdr h;
+	h.total_len = (uint16_t)rec_len;
+	h.level     = (uint8_t)level;
+	h.rmagic    = LOG_REC_MAGIC;
+	h.ts_ms     = (uint32_t)_tx_timer_system_clock;
+	memset(h.tag, 0, sizeof h.tag);
+	for (uint32_t i = 0; i < LOG_TAG_MAX && tag && tag[i]; i++)
+		h.tag[i] = tag[i];
+
+	LOG_CRIT_ENTER();
+	{
+		h.seq = g_log.seq;
+
+		uint32_t o    = g_log.head & (LOG_RING_DATA_SIZE - 1u);
+		uint32_t skip = (o + rec_len > LOG_RING_DATA_SIZE)
+		                    ? (LOG_RING_DATA_SIZE - o) : 0u;
+		uint32_t need = skip + rec_len;
+		uint32_t start = g_log.head;   /* span written this call (SKIP+record) */
+
+		/* Evict whole records from tail until the new one (plus any SKIP)
+		 * fits. */
+		while ((uint32_t)(g_log.size - (g_log.head - g_log.tail)) < need &&
+		       g_log.tail != g_log.head) {
+			uint16_t tl = rec_total_at(g_log.tail);
+			if (tl < 4u || (tl & 3u)) {     /* corrupt: drop everything */
+				g_log.tail = g_log.head;
+				break;
+			}
+			g_log.tail += tl;
+		}
+
+		if (skip) {
+			uint32_t sw = (uint32_t)skip
+			            | ((uint32_t)LOG_LEVEL_SKIP << 16)
+			            | ((uint32_t)LOG_REC_MAGIC << 24);
+			ring_put(g_log.head, &sw, sizeof sw);
+			__DMB();
+			g_log.head += skip;
+		}
+
+		ring_put(g_log.head, &h, LOG_HDR_SIZE);
+		ring_put(g_log.head + LOG_HDR_SIZE, text, stored);
+		if (padded > stored) {
+			static const uint8_t zeros[4] = { 0, 0, 0, 0 };
+			ring_put(g_log.head + LOG_HDR_SIZE + stored, zeros, padded - stored);
+		}
+		/* Bump seq before committing head: a reset between the two then leaves
+		 * a gap in the sequence (the lost record is invisible), never a
+		 * duplicate. */
+		g_log.seq = h.seq + 1u;
+		__DMB();                                /* body + seq visible before head */
+		g_log.head += rec_len;
+
+		__DSB();
+		persist_ring(start, need);              /* SKIP fragment + record body */
+		persist_hdr();                          /* tail / seq / head / boot_count */
+		__DSB();
+	}
+	LOG_CRIT_EXIT();
+}
+
+void log_write(unsigned level, const char *tag, const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	log_vwrite(level, tag, fmt, ap);
+	va_end(ap);
+}
+
+/* ---- query / control --------------------------------------------------- */
+
+void log_clear(void)
+{
+	LOG_CRIT_ENTER();
+	g_log.tail = g_log.head;        /* seq keeps counting across a clear */
+	__DSB();
+	persist_hdr();
+	__DSB();
+	LOG_CRIT_EXIT();
+}
+
+void log_set_level(unsigned level)
+{
+	if (level > LOG_LEVEL_DBG)
+		level = LOG_LEVEL_DBG;
+	log_level = (uint8_t)level;
+}
+
+unsigned log_get_level(void)
+{
+	return log_level;
+}
+
+/* ---- dmesg iterator ---------------------------------------------------- */
+
+void log_iter_start(struct log_iter *it)
+{
+	LOG_CRIT_ENTER();
+	it->pos = g_log.tail;
+	it->end = g_log.head;           /* snapshot: do not chase a live tail */
+	LOG_CRIT_EXIT();
+}
+
+int log_iter_next(struct log_iter *it, struct log_record *out)
+{
+	int got = 0;
+
+	LOG_CRIT_ENTER();
+	for (;;) {
+		/* Resync if eviction overtook us since the last record. */
+		if ((int32_t)(it->pos - g_log.tail) < 0)
+			it->pos = g_log.tail;
+		/* Stop once we reach the snapshot end (or run past it). */
+		if ((int32_t)(it->pos - it->end) >= 0)
+			break;
+
+		uint32_t w0;
+		ring_get(it->pos, &w0, sizeof w0);
+		uint16_t total = (uint16_t)(w0 & 0xFFFFu);
+		uint8_t  level = (uint8_t)((w0 >> 16) & 0xFFu);
+		uint8_t  rmag  = (uint8_t)((w0 >> 24) & 0xFFu);
+		uint32_t p     = it->pos & (LOG_RING_DATA_SIZE - 1u);
+
+		/* Validate as strictly as the boot walk: never trust the length
+		 * blindly (a stray total < LOG_HDR_SIZE would underflow tlen below). */
+		if (rmag != LOG_REC_MAGIC || total < 4u || (total & 3u))
+			break;                              /* corrupt: end the pass */
+		if (level == LOG_LEVEL_SKIP) {
+			if ((p + total) != LOG_RING_DATA_SIZE)
+				break;
+			it->pos += total;
+			continue;
+		}
+		if (total < LOG_REC_MIN || total > LOG_REC_MAX ||
+		    (p + total) > LOG_RING_DATA_SIZE)
+			break;
+
+		struct log_rec_hdr h;
+		ring_get(it->pos, &h, LOG_HDR_SIZE);
+		out->ts_ms = h.ts_ms;
+		out->seq   = h.seq;
+		out->level = h.level;
+		memcpy(out->tag, h.tag, LOG_TAG_MAX);
+		out->tag[LOG_TAG_MAX] = '\0';
+
+		uint32_t tlen = total - LOG_HDR_SIZE;
+		if (tlen > sizeof out->text)
+			tlen = sizeof out->text;
+		ring_get(it->pos + LOG_HDR_SIZE, out->text, tlen);
+		out->text[sizeof out->text - 1] = '\0';
+
+		it->pos += total;
+		got = 1;
+		break;
+	}
+	LOG_CRIT_EXIT();
+	return got;
+}
+
+/* ------------------------------------------------------------------ *
+ *  Line assembler (see log.h)
+ * ------------------------------------------------------------------ */
+
+void log_line_init(struct log_line *l)
+{
+	l->used = 0u;
+	l->esc = 0u;
+}
+
+void log_line_flush(struct log_line *l, const char *tag)
+{
+	if (l->used == 0u)
+		return;
+	l->buf[l->used] = '\0';
+	l->used = 0u;
+	log_write(LOG_LEVEL_INF, tag, "%s", l->buf);
+}
+
+void log_line_feed(struct log_line *l, const char *tag, const void *data,
+                   size_t len)
+{
+	const unsigned char *p = (const unsigned char *)data;
+	size_t i;
+
+	for (i = 0u; i < len; i++) {
+		unsigned char c = p[i];
+
+		/* Escape sequences are consumed, not stored.  The state lives in the
+		 * assembler rather than in a local loop because a sequence can be
+		 * split across two feeds. */
+		if (l->esc) {
+			if (l->esc == 1u) {
+				l->esc = (c == '[') ? 2u : 0u;   /* only CSI is a sequence */
+				continue;
+			}
+			/* Parameter/intermediate bytes 0x20-0x3F continue it; anything
+			 * else is the final byte and ends it. */
+			if (c < 0x20u || c > 0x3Fu)
+				l->esc = 0u;
+			continue;
+		}
+		if (c == 0x1Bu) {
+			l->esc = 1u;
+			continue;
+		}
+		if (c == '\n' || c == '\r') {
+			log_line_flush(l, tag);
+			continue;
+		}
+		/* An overlong line is flushed in pieces rather than truncated. */
+		if (l->used >= LOG_LINE_ASM_MAX - 1u)
+			log_line_flush(l, tag);
+		l->buf[l->used++] = (char)c;
+	}
+}

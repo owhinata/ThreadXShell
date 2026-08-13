@@ -1,7 +1,8 @@
 # ThreadXShell
 
 A multi-board firmware project providing an interactive shell console on top of
-Eclipse ThreadX, using the ST HAL and built with CMake + Ninja.
+Eclipse ThreadX, built with CMake + Ninja (vendor layers: ST HAL on the STM32
+boards, the Himax WiseEye2 SDK on the Grove Vision AI V2).
 
 This repository unifies the shell implementations grown separately in
 [stm32f746g-disco](https://github.com/owhinata/stm32f746g-disco) and
@@ -14,6 +15,7 @@ board-independent shell core with per-board ports.
 |---|---|---|---|---|
 | STM32F746G-DISCO | STM32F746NGH6 (Cortex-M7) | 216 MHz | VCP (USART1, 115200) | ST-Link |
 | Wio Lite AI | STM32H725AEI6 (Cortex-M7) | 550 MHz (inherited from DFU bootloader) | USB CDC (TinyUSB) | DFU (`dfu-util`) |
+| Grove Vision AI V2 | Himax HX6538 WiseEye2 (dual Cortex-M55 + Ethos-U55; app on CM55M) | 400 MHz (inherited from the Himax bootloader) | UART0 via CH343P bridge, 921600 | UART xmodem to the Himax bootloader |
 
 More boards are planned.
 
@@ -70,6 +72,18 @@ declares the upstream mirrors it needs in `boards/<board>/submodules.cmake`, and
 only those are fetched -- the first `f746g-disco` configure is heavy (GUIX alone
 is about 1.5 GB) and none of it is pulled in for a `wio-lite-ai` build.
 
+The Grove Vision AI V2 additionally fetches the Himax WiseEye2 SDK (~480 MB, a
+pinned commit) into `boards/grove-vision-ai-v2/sdk/` on first configure -- not a
+submodule, git-ignored, treated read-only; `-DGROVE_SDK_DIR=<path>` points at an
+existing checkout instead:
+
+```bash
+cmake -B build/grove-vision-ai-v2 -G Ninja \
+      -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi-toolchain.cmake \
+      -DBOARD=grove-vision-ai-v2
+cmake --build build/grove-vision-ai-v2 # -> shell.elf + shell.img (signed flash image)
+```
+
 ## Flashing
 
 ### STM32F746G-DISCO (ST-Link)
@@ -91,9 +105,25 @@ cmake --build build/wio-lite-ai --target flash
 # or: dfu-util -d 0483:df11 -a 0 -D build/wio-lite-ai/shell.bin
 ```
 
-`--target flash` means the same thing on both boards -- program THIS board's shell
-firmware the only way this board can be programmed. On Wio Lite AI that is DFU into
-the app partition; it has no ST-Link path and nothing here can write sector 0.
+### Grove Vision AI V2 (UART xmodem)
+
+Close any terminal on the serial port, run the target, and press the board's
+RESET button when the script asks:
+
+```bash
+cmake --build build/grove-vision-ai-v2 --target flash
+# xmodem upload of shell.img (a FULL flash image incl. the Himax bootloader --
+# the vendor-standard flow) at 921600 on /dev/ttyACM0 (-DGROVE_SERIAL_PORT=...)
+```
+
+The console is the same serial device at 921600 8N1. Recovery and endurance
+notes are in
+[`boards/grove-vision-ai-v2/README.md`](boards/grove-vision-ai-v2/README.md).
+
+`--target flash` means the same thing on every board -- program THIS board's
+shell firmware the only way this board can be programmed. On Wio Lite AI that is
+DFU into the app partition; it has no ST-Link path and nothing here can write
+sector 0.
 
 The app is programmed to the internal flash app partition at `0x08020000`.
 Internal flash endurance is about 10k cycles, so do not reflash in an automated
@@ -143,9 +173,9 @@ f746g-disco pins none).
 
 ## Status
 
-Both boards are ported and build from the shared shell core, and the Wio Lite AI
-DFU bootloader tree is in and building (reference build only -- see above).
-Project rules are in `CLAUDE.md` / `AGENTS.md`.
+All three boards are ported and build from the shared shell core, and the Wio
+Lite AI DFU bootloader tree is in and building (reference build only -- see
+above). Project rules are in `CLAUDE.md` / `AGENTS.md`.
 
 ## License
 

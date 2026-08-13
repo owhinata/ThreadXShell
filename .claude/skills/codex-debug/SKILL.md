@@ -1,6 +1,6 @@
 ---
 name: codex-debug
-description: Codex による不具合解析。根本原因の仮説列挙、検証方法の提案、関連コード特定を依頼する。症状・再現手順・観測結果を入力として受け取る。ThreadX Shell（マルチボード: STM32F746G-DISCO / Wio Lite AI）の組込み不具合向け。
+description: Codex による不具合解析。根本原因の仮説列挙、検証方法の提案、関連コード特定を依頼する。症状・再現手順・観測結果を入力として受け取る。ThreadX Shell（マルチボード: STM32F746G-DISCO / Wio Lite AI / Grove Vision AI V2）の組込み不具合向け。
 argument-hint: <Issue number, symptom description, or file path>
 ---
 
@@ -72,7 +72,7 @@ Codex に以下を求める:
 | MCU ペリフェラル | レジスタ設定ミス、クロック/PLL/Flash WS、キャッシュコヒーレンシ、割込み優先度、DMA 到達性 |
 | CMSIS / startup | ベクタテーブル、`SystemInit`、`_estack`/`.data`/`.bss` 初期化、リンカスクリプト、ITCM/DTCM 配置 |
 | ST HAL | HAL 初期化順序、`HAL_GetTick`/timebase、周辺ドライバ |
-| コンソール backend | F746: USART1 VCP / Wio: TinyUSB USB CDC（OTG_HS FS、`tud_int_handler(0)`、enumerate、RX/TX リング） |
+| コンソール backend | F746: USART1 VCP / Wio: TinyUSB USB CDC（OTG_HS FS、`tud_int_handler(0)`、enumerate、RX/TX リング） / Grove: hx_drv_uart UART0（RXCB=DATA_AVAIL コールバック、TXINT_BUF チャンク、IRQ90。fallback = read_udma + DMA3 IRQ69） |
 | RTOS (ThreadX) | スケジューラ/PendSV、tick 供給、優先度、スタックオーバーフロー、クリティカルセクション |
 | shell / port | shell core・cmds、port 側統合コード。**片ボードのみで出るか両方で出るかがここの一次切り分け** |
 
@@ -140,3 +140,11 @@ HAL/CMSIS/ThreadX ← port ← shell ← app。**発生ボードを明記する�
   再設定しない**。app は内蔵 Flash `0x08020000`（セクタ1-3, 384KB）から実行。RAM は AXI-SRAM
   320KB @ 0x24000000（DMA が見える唯一の RAM）/ DTCM 128KB @ 0x20000000 / ITCM 64KB。
   コンソール = USB CDC（USB1_OTG_HS を FS 内蔵 PHY 動作、TinyUSB、`0483:5740`）。
+- **Grove Vision AI V2**: Himax HX6538 WiseEye2 / dual Cortex-M55（app は CM55M / **全部
+  Secure**、TrustZone SEC_ONLY = SAU 無効）。**公開 TRM 無し** — レジスタの正は SDK 同梱
+  `WE2_S.svd` と SDK 実装（`boards/grove-vision-ai-v2/sdk/`、read-only。ドライバは
+  プリビルト libdriver.a）。クロックは bootloader 継承（SCU 読み戻し、400 MHz 級）。
+  **非 XIP**: 2nd bootloader が ELF を ITCM 256KB @0x10000000 / DTCM 256KB @0x30000000 へ
+  展開。コンソール = UART0（CH343P ブリッジ、921600、IRQ90）で書込（xmodem）と同一ワイヤ。
+  ThreadX = cortex_m55/gnu + `TX_SINGLE_MODE_SECURE`、優先度 3-bit（PendSV=7/SysTick=6）、
+  EPK 無効。fault は src/fault.c（SFSR/SFAR 込みで dmesg リングへ記録 → リセット）。

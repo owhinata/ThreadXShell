@@ -58,11 +58,12 @@ dkms.conf
 _ref/
 
 # Build output.  One build directory per board under build/ (build/wio-lite-ai,
-# build/f746g-disco, ...), plus the variant trees the feature toggles want kept
-# side by side -- build/wio-lite-ai-tflm for CONFIG_NN_BACKEND=tflm, which
-# additionally holds the fetched tflite-micro + CMSIS-NN source tree and is
-# several hundred MB.  The build-*/ pattern also catches strays from the old
-# flat naming.
+# build/f746g-disco, build/grove-vision-ai-v2, ...), plus the variant trees the
+# feature toggles want kept side by side -- build/wio-lite-ai-tflm for
+# CONFIG_NN_BACKEND=tflm, which additionally holds the fetched tflite-micro +
+# CMSIS-NN source tree and is several hundred MB.  The build-*/ pattern also
+# catches strays from the old flat naming.  (The Himax SDK checkout is ignored
+# separately, by boards/grove-vision-ai-v2/.gitignore.)
 /build/
 /build-*/
 

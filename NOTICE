@@ -44,7 +44,8 @@ submodules.cmake is the list that board builds against.
     lib/cmsis_device_h7/LICENSE.md         (device headers; the wio-lite-ai port
     supplies its own SystemInit)
 - ARM CMSIS-Core                           -- Apache-2.0
-    lib/cmsis_core/LICENSE.txt             (both boards)
+    lib/cmsis_core/LICENSE.txt             (both STM32 boards; the Grove board
+    uses the CMSIS bundled inside the Himax SDK instead)
 - Eclipse ThreadX                          -- MIT
     lib/threadx/LICENSE.txt
     A project of the Eclipse Foundation (donated by Microsoft from Azure RTOS);
@@ -67,6 +68,17 @@ submodules.cmake is the list that board builds against.
     the trademark terms.
 - MLCommons Tiny (MLPerf Tiny)             -- Apache-2.0
     lib/mlperf-tiny/LICENSE                (wio-lite-ai, opt-in benchmark harness)
+
+The grove-vision-ai-v2 board additionally fetches (NOT as a submodule) the
+Himax WiseEye2 SDK at a pinned commit into boards/grove-vision-ai-v2/sdk/:
+
+- HimaxWiseEyePlus Seeed_Grove_Vision_AI_Module_V2  -- MIT
+    boards/grove-vision-ai-v2/sdk/LICENSE  (fetched by
+    boards/grove-vision-ai-v2/cmake/himax_sdk.cmake; git-ignored, read-only.
+    The firmware compiles its device/board/interface/trustzone sources, links
+    its prebuilt driver archives (libdriver.a, libpwrmgmt.a) and bundled CMSIS
+    (Apache-2.0), and uses its image-generation and xmodem flashing tools.
+    None of it is redistributed in this repository, only referenced.)
 
 The ARM GNU (arm-none-eabi) toolchain is downloaded into ./tools at build time
 and is not redistributed as part of this repository.  The same is true of the

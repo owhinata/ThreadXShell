@@ -16,7 +16,7 @@
  *
  *   region   start        total      used      free  use%
  *   Flash    0x08000000  1048576    294752    753824   28%   .isr/.text/.rodata/.data(load)
- *   DTCM     0x20000000    65536      8224     57312   12%   .log_noinit (reset-persistent ring)
+ *   DTCM     0x20000000    65536     24608     40928   37%   .log_noinit + .dtcm_bench
  *   SRAM     0x20010000   262144     ......    ......  ..%   .data/.bss/.sram1_dma + heap
  *   SDRAM    0xC0000000  8388608   ........  ........  ..%   .sdram banks0-3 (LTDC/cam/eth/NN NOLOAD)
  *
@@ -24,7 +24,10 @@
  *   Flash  used = LOADADDR(.data) + sizeof(.data) - ORIGIN(FLASH).  .data's load
  *          image is the last thing placed in FLASH, so this is the whole footprint
  *          (== `size`'s text+data).
- *   DTCM   used = .log_noinit (_elog_noinit - _slog_noinit), the only resident.
+ *   DTCM   used = .log_noinit + .dtcm_bench, summed individually (issue #5) so the
+ *          32-byte alignment hole between them is not counted, exactly as the
+ *          SDRAM row does.  Both residents are unconditional: the linker defines
+ *          their boundary symbols whether or not the input section is empty.
  *   SRAM   static = _end - ORIGIN(RAM) (.data + .bss + .sram1_dma); the heap then
  *          grows up from _end and the main/ISR stack grows down from _estack, so
  *          used = (heap break) - ORIGIN(RAM) and free = _estack - (heap break).
@@ -79,6 +82,7 @@
 extern uint8_t _sdata[], _edata[];          /* .data run image in SRAM        */
 extern uint8_t _sidata[];                   /* .data load image in FLASH      */
 extern uint8_t _slog_noinit[], _elog_noinit[]; /* DTCM reset-persistent ring  */
+extern uint8_t _sdtcm_bench[], _edtcm_bench[]; /* DTCM membench buffer (#5)   */
 /* .sdram is split into bank-aligned sub-regions separated by alignment holes
  * (issues #65/#81/#92); each resident is summed individually so the holes are
  * not counted.  All boundary symbols are defined unconditionally by the linker
@@ -117,7 +121,11 @@ static int cmd_free(struct cli_instance *sh, int argc, char **argv)
 
 	uint32_t flash_used = (sym(_sidata) - FLASH_ORIGIN)
 	                    + (sym(_edata) - sym(_sdata));
-	uint32_t dtcm_used  = sym(_elog_noinit) - sym(_slog_noinit);
+	/* Both DTCM residents, summed individually so the 32-byte alignment hole
+	 * between them is not counted (issue #5): the log ring, and membench's
+	 * benchmark buffer -- 16 KB that the old accounting left out entirely. */
+	uint32_t dtcm_used  = (sym(_elog_noinit) - sym(_slog_noinit))
+	                    + (sym(_edtcm_bench) - sym(_sdtcm_bench));
 	uint32_t sdram_used = (sym(_esdram_fixed)    - sym(_ssdram_fixed))     /* bank0 fixed    */
 	                    + (sym(_esdram_cam)      - sym(_ssdram_cam))       /* bank1 cam      */
 	                    + (sym(_esdram_eth)      - sym(_ssdram_eth))       /* bank2 eth      */
@@ -137,7 +145,7 @@ static int cmd_free(struct cli_instance *sh, int argc, char **argv)
 	print_region(sh, "Flash", FLASH_ORIGIN, FLASH_LENGTH, flash_used,
 	             ".isr/.text/.rodata/.data");
 	print_region(sh, "DTCM",  DTCM_ORIGIN,  DTCM_LENGTH,  dtcm_used,
-	             ".log_noinit (reset-persistent)");
+	             ".log_noinit (persistent) + .dtcm_bench");
 	print_region(sh, "SRAM",  SRAM_ORIGIN,  SRAM_LENGTH,  sram_used,
 	             ".data/.bss/.sram1_dma + heap");
 	print_region(sh, "SDRAM", SDRAM_ORIGIN, SDRAM_LENGTH, sdram_used,

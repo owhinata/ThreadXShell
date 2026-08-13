@@ -92,14 +92,76 @@ static ULONG stack_peak_used(const TX_THREAD *t)
 	return size - freeb;
 }
 
+/*
+ * Single-run guard.  The cpu% snapshot below is process-wide static state with
+ * no locking of its own, so two concurrent runs (`thread` at the prompt while a
+ * `thread &` background job walks the same table) would interleave their reads
+ * and their commit and produce garbage windows for both.  Board-independent:
+ * TX_DISABLE/TX_RESTORE are the same PRIMASK critical section on all three
+ * ports, so no CMSIS header is needed here.
+ *
+ * Only reachable where the snapshot exists, i.e. under EPK -- on a board
+ * without it the command is a pure read of ThreadX-owned state.
+ */
+#ifdef TX_EXECUTION_PROFILE_ENABLE
+static volatile UINT thread_busy;
+
+static int thread_try_acquire(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+	int ok;
+
+	TX_DISABLE
+	ok = (thread_busy == 0u);
+	if (ok)
+		thread_busy = 1u;
+	TX_RESTORE
+	return ok;
+}
+
+static void thread_release(void)
+{
+	thread_busy = 0u;
+}
+#else
+/* No snapshot to protect without the kit: the command is then a pure read of
+ * ThreadX-owned state, so concurrent runs stay allowed exactly as before. */
+static int  thread_try_acquire(void) { return 1; }
+static void thread_release(void)     { }
+#endif
+
 #ifdef TX_EXECUTION_PROFILE_ENABLE
 /*
+ * Board hook: can the cpu% numbers be believed on THIS port?
+ *
+ * The Execution Profile Kit is a COMPILE-TIME switch -- once built in, it
+ * cannot be turned off at runtime, and its ISR accounting depends on every ISR
+ * on the board calling the kit's enter/exit hooks.  Where that plumbing can
+ * fail at runtime (the Grove port wraps a vendor-installed vector and brings up
+ * a dedicated timer, either of which can refuse), the board overrides this weak
+ * default so the command can print "--" plus a reason instead of numbers that
+ * look right and are not.
+ *
+ * Default: available.  Boards that do not override are unaffected.
+ * Contract: return 1 to trust the numbers; return 0 and, when `why` is
+ * non-NULL, point *why at a one-line static reason.
+ */
+__attribute__((weak)) int cli_thread_cpu_source_ok(const char **why)
+{
+	(void)why;
+	return 1;
+}
+
+/*
  * "top"-style cpu% (issue #2).  The ThreadX Execution Profile Kit accumulates,
- * per thread and globally, busy time in TIM2 ticks (see tx_user.h / port/threadx/tx_glue.c).  We
- * show each thread's share of the *window since the previous `thread` run*:
- * cpu% = delta_thread / window, where window = delta(all threads + isr + idle).
- * The previous snapshot lives here (threads are static and never deleted, so a
- * small pointer-keyed table suffices); the first run has no prior and prints "--".
+ * per thread and globally, busy time in the ticks of whatever free-running
+ * counter that board's TX_EXECUTION_TIME_SOURCE names (see its tx_user.h /
+ * port/threadx/tx_glue.c).  Only the RATIO matters here, so the counter's rate
+ * never enters the arithmetic: cpu% = delta_thread / window, where window =
+ * delta(all threads + isr + idle) over the window since the previous `thread`
+ * run.  The previous snapshot lives here (threads are static and never deleted,
+ * so a small pointer-keyed table suffices); the first run has no prior and
+ * prints "--".
  */
 #define THREAD_CPU_PREV_MAX 16
 struct cpu_snap { TX_THREAD *t; EXECUTION_TIME prev; };
@@ -115,6 +177,20 @@ static EXECUTION_TIME cpu_prev_lookup(const TX_THREAD *t)
 		if (cpu_prev[i].t == t)
 			return cpu_prev[i].prev;
 	return 0;   /* unseen thread -> baseline 0 (its first window may read high once) */
+}
+
+/* This run's snapshot, keyed the same way.  Returns 0 when the thread was not
+ * sampled (more threads exist than the table holds). */
+static int cpu_cur_lookup(const struct cpu_snap *snap, UINT n,
+                          const TX_THREAD *t, EXECUTION_TIME *out)
+{
+	UINT i;
+	for (i = 0; i < n; i++)
+		if (snap[i].t == t) {
+			*out = snap[i].prev;
+			return 1;
+		}
+	return 0;
 }
 
 /* Render delta/window as "NN.N%" clamped to 0..100.0, or "--" when there is no
@@ -144,18 +220,50 @@ static int cmd_thread(struct cli_instance *sh, int argc, char **argv)
 	EXECUTION_TIME tt = 0, it = 0, id = 0, window;
 	struct cpu_snap next_prev[THREAD_CPU_PREV_MAX];
 	UINT next_count = 0;
-	int  have = cpu_have_prev;
+	const char *cpu_why = NULL;
+	int  cpu_ok;
+	int  have;
 	char cpubuf[8];
 #endif
 
 	(void)argc;
 	(void)argv;
 
+	/* Taken after argument validation (there is none to do here) and before
+	 * any state is read, so the whole snapshot-walk-commit sequence is
+	 * serialised.  Every exit below funnels through `done`. */
+	if (!thread_try_acquire()) {
+		cli_error(sh, "thread: already running\r\n");
+		return 1;
+	}
+
+#ifdef TX_EXECUTION_PROFILE_ENABLE
+	/* A board can declare its ISR accounting untrustworthy; keep the column
+	 * layout and blank the values rather than silently printing wrong ones. */
+	cpu_ok = cli_thread_cpu_source_ok(&cpu_why);
+	have   = cpu_have_prev && cpu_ok;
+	if (!cpu_ok)
+		cli_warn(sh, "thread: cpu%% unavailable (%s)\r\n",
+		         (cpu_why != NULL) ? cpu_why : "board reported no source");
+#endif
+
 	/* Atomically snapshot the created-list head + count (and, for cpu%, the
-	 * global busy totals -- 64-bit, so read inside the same critical section for
-	 * a coherent window).  The nodes are static (nothing is ever deleted), so we
-	 * walk the list afterwards with interrupts on -- cli_print waits on a mutex
-	 * and must not run in a critical section. */
+	 * global busy totals AND every per-thread total -- 64-bit, so read inside
+	 * the same critical section for a coherent window).  The nodes are static
+	 * (nothing is ever deleted while we look), so we walk the list afterwards
+	 * with interrupts on -- cli_print waits on a mutex and must not run in a
+	 * critical section.
+	 *
+	 * [!] The per-thread totals MUST be captured here rather than read during
+	 * the walk.  The window is derived from the global totals taken at this
+	 * instant, but the running thread keeps accumulating while the table is
+	 * being printed: every SysTick flushes its elapsed slice into both its own
+	 * total and the global one (tx_execution_profile.c, _tx_execution_isr_enter).
+	 * Reading a thread's total later therefore compares a NEWER numerator
+	 * against an OLDER denominator, and at 921600 baud a table takes long
+	 * enough that the busy thread's share visibly exceeds 100% and the column
+	 * stops summing to 100.  Sampling everything at one instant makes the rows
+	 * add up by construction. */
 	TX_DISABLE
 	t     = _tx_thread_created_ptr;
 	count = _tx_thread_created_count;
@@ -163,6 +271,17 @@ static int cmd_thread(struct cli_instance *sh, int argc, char **argv)
 	_tx_execution_thread_total_time_get(&tt);
 	_tx_execution_isr_time_get(&it);
 	_tx_execution_idle_time_get(&id);
+	{
+		TX_THREAD *p = t;
+		ULONG      n;
+
+		for (n = 0; n < count && next_count < THREAD_CPU_PREV_MAX;
+		     n++, p = p->tx_thread_created_next) {
+			next_prev[next_count].t    = p;
+			next_prev[next_count].prev = p->tx_thread_execution_time_total;
+			next_count++;
+		}
+	}
 #endif
 	TX_RESTORE
 
@@ -177,7 +296,7 @@ static int cmd_thread(struct cli_instance *sh, int argc, char **argv)
 
 	if (t == TX_NULL || count == 0) {
 		cli_print(sh, "(no threads)\r\n");
-		return 0;
+		goto done;
 	}
 
 	for (i = 0; i < count; i++, t = t->tx_thread_created_next) {
@@ -186,7 +305,7 @@ static int cmd_thread(struct cli_instance *sh, int argc, char **argv)
 		 * transport and must not run with interrupts disabled.  The dispatcher
 		 * detects cancel_req and prints "^C", so just return. */
 		if (cli_cancel_requested(sh))
-			return 0;
+			goto done;
 
 		ULONG size  = t->tx_thread_stack_size;
 		ULONG peak  = stack_peak_used(t);
@@ -194,22 +313,14 @@ static int cmd_thread(struct cli_instance *sh, int argc, char **argv)
 		const char *name = t->tx_thread_name ? t->tx_thread_name : "(unnamed)";
 #ifdef TX_EXECUTION_PROFILE_ENABLE
 		EXECUTION_TIME cur, prev, delta;
+		int            sampled = cpu_cur_lookup(next_prev, next_count, t, &cur);
 
-		/* Read the 64-bit per-thread total atomically (torn reads could spike a
-		 * huge positive value that would also poison the snapshot). */
-		TX_DISABLE
-		cur = t->tx_thread_execution_time_total;
-		TX_RESTORE
-
+		/* Threads past THREAD_CPU_PREV_MAX were not in the snapshot, so there
+		 * is no coherent numerator for them: print "--" rather than mix a live
+		 * read into a window taken earlier. */
 		prev  = cpu_prev_lookup(t);
-		delta = (have && cur >= prev) ? (cur - prev) : 0;   /* clamp negative */
-		cpu_fmt(cpubuf, sizeof cpubuf, have, delta, window);
-
-		if (next_count < THREAD_CPU_PREV_MAX) {
-			next_prev[next_count].t    = t;
-			next_prev[next_count].prev = cur;
-			next_count++;
-		}
+		delta = (have && sampled && cur >= prev) ? (cur - prev) : 0;
+		cpu_fmt(cpubuf, sizeof cpubuf, have && sampled, delta, window);
 
 		cli_print(sh, "%-20s %-6s %3u %8lu %6lu %5lu %4lu%% %6s\r\n",
 		          name, state_name(t->tx_thread_state),
@@ -248,6 +359,8 @@ static int cmd_thread(struct cli_instance *sh, int argc, char **argv)
 	cpu_have_prev   = 1;
 #endif
 
+done:
+	thread_release();   /* single cleanup point: guard cleared on every exit */
 	return 0;
 }
 

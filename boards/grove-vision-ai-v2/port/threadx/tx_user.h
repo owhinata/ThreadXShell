@@ -30,12 +30,82 @@
  */
 #define TX_SINGLE_MODE_SECURE
 
-/* The Execution Profile Kit is deliberately NOT enabled on this board (M-G1):
- * the outermost UART ISR lives inside the prebuilt libdriver.a where the EPK
- * isr_enter/exit hooks cannot be placed, so its ISR accounting would be
- * silently wrong.  The `thread` command's cpu%% columns are #ifdef-guarded and
- * simply absent.  Re-enabling it later means wrapping the vendor-installed
- * vectors (see the board README, "future work"). */
+/*
+ * Execution Profile Kit -- the `thread` command's cpu% column (M-G2, #25).
+ *
+ * Defined here (not via CMake -D) so every translation unit that sees
+ * TX_THREAD agrees on its layout: the kit adds
+ * tx_thread_execution_time_total / _last_start to TX_THREAD, and tx_api.h
+ * auto-includes tx_execution_profile.h -- both only when this is defined.
+ * tx_user.h is included by the port asm (tx_thread_schedule.S,
+ * tx_thread_context_{save,restore}.S) and by the C core + shell, so all stay
+ * ABI-consistent and the port asm emits the _tx_execution_thread_enter/exit
+ * hooks.
+ *
+ * [!] This is a COMPILE-TIME switch with no runtime off-ramp.  M-G1 deferred
+ * the kit because the outermost console ISR lives inside the prebuilt
+ * libdriver.a; M-G2 solves that by wrapping the vendor-installed vector at
+ * runtime (backend/cli_backend_uart.c).  When that wrap -- or the TIMER2
+ * bring-up below -- fails, the kit still runs; what the firmware can do is
+ * SAY SO, which is why port/threadx/tx_glue.c exports an availability hook
+ * that the shared `thread` command reads (cli_thread_cpu_source_ok).
+ */
+#define TX_EXECUTION_PROFILE_ENABLE
+
+/* Use the Cortex-M execution-profile path (nest counter) for ISR accounting.
+ * Mandatory here: this port's TX_THREAD_GET_SYSTEM_STATE() ORs in the IPSR
+ * (tx_port.h), so inside an ISR it is never == 1; the non-EPK "== 1" guard in
+ * tx_execution_profile.c would drop all ISR time.  The EPK path guards on
+ * "truthy && nest_counter == 1", which works once our plain-C ISRs (SysTick +
+ * the wrapped UART0 vector) call _tx_execution_isr_enter/exit (via
+ * tx_glue_isr_enter/exit). */
+#define TX_CORTEX_M_EPK
+
+/*
+ * Execution-profile time source = Himax TIMER2, free-running.
+ *
+ * TIMER2 is a CMSDK-style DOWN counter (CTRL/VALUE/RELOAD/INTSTATUS at +0/+4/
+ * +8/+0xC; WE2_S.svd), while the kit assumes a monotonically INCREASING
+ * source -- so the source is the bitwise complement of VALUE.  That identity
+ * only holds because port/threadx/tx_glue.c programs RELOAD to all-ones: with
+ * RELOAD == 0xFFFFFFFF the counter sweeps the whole 32-bit range, so ~VALUE
+ * is an exact mod-2^32 up-counter.  Any other RELOAD would make ~VALUE jump
+ * at each reload (see the small-RELOAD self-test in tx_glue.c, which is
+ * deliberately NOT written as a continuity check for that reason).
+ *
+ * Chosen over the kit default DWT->CYCCNT because DWT freezes when the core
+ * clock is gated by WFI (TX_ENABLE_WFI below): TIMER2 lives on the SB APB1
+ * clock and keeps counting while the core sleeps, so cpu%/idle stay correct.
+ * DWT stays the udelay/membench time base (both busy-wait in the foreground
+ * and never run while the core is in WFI).  Each EPK delta is bounded to
+ * <= 1 ms by the SysTick isr hook, far below the 32-bit wrap.
+ * TX_EXECUTION_MAX_TIME_SOURCE keeps its 0xFFFFFFFF default (full 32-bit).
+ *
+ * The address is a literal because this header is also preprocessed into the
+ * port assembly and cannot include the SDK's C headers; tx_glue.c carries a
+ * _Static_assert tying it back to HX_TIMER2_BASE.
+ */
+#define TX_GLUE_EPK_TIMER_VALUE_ADDR 0x5500C004UL
+#define TX_EXECUTION_TIME_SOURCE \
+    ((EXECUTION_TIME_SOURCE_TYPE)(~(*(volatile ULONG *)TX_GLUE_EPK_TIMER_VALUE_ADDR)))
+
+/* Idle power saving: when no thread is ready the Cortex-M55 port inserts
+ * DSB;WFI;ISB (tx_thread_schedule.S __tx_ts_wait) instead of busy-spinning, so
+ * the core sleeps until an interrupt.  Build-gated by BSP_ENABLE_WFI (CMake,
+ * default ON) so an SWD-debug build can be made with -DBSP_ENABLE_WFI=OFF (a
+ * WFI-sleeping core is hard to attach without connect-under-reset).
+ *
+ * [!] Also a compile-time switch: the firmware cannot "detect a problem and
+ * fall back to spinning".  So its two preconditions are ENFORCED before the
+ * scheduler starts rather than merely checked -- tx_glue.c clears
+ * SCB->SCR.SLEEPDEEP and .SLEEPONEXIT, reads them back, and fail-stops if
+ * they did not take.  With those clear, WFI is a plain CPU-clock gate: the SB
+ * APB1 clock (TIMER2), SysTick and the UART0 IRQ all keep running, and WFI
+ * wakes on any enabled IRQ regardless of PRIMASK.  TX_LOW_POWER is NOT used
+ * (it would call vendor PM entry/exit hooks around the WFI). */
+#if defined(BSP_ENABLE_WFI) && (BSP_ENABLE_WFI)
+#define TX_ENABLE_WFI
+#endif
 
 /* TX_PORT_USE_BASEPRI is left undefined so the Cortex-M55 GNU port uses
  * PRIMASK critical sections: a driver ISR calling tx_event_flags_set can then

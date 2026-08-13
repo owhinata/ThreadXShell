@@ -158,6 +158,24 @@ SECTIONS
         __zero_table_end__ = .;
     } > CM55M_S_APP_ROM
 
+    /* membench's ITCM working set (issue #25).  NOLOAD: it must occupy ITCM
+     * address space without adding 4 KB of zeros to the flashed image, and
+     * NOBITS sections carry no CONTENTS so check_image_coherence.py does not
+     * expect to find them in the generated .img.  Placed after every
+     * PROGBITS section in this region, so the reservation lands in the ITCM
+     * TAIL and cannot move code, rodata or the copy/zero tables.
+     *
+     * KEEP because --gc-sections would otherwise drop the buffer as unused
+     * (nothing outside cmd_membench.c references it), and the point of a
+     * dedicated section is that check_placement_budget.py can assert the
+     * measurement buffer really is IN the memory whose name it prints. */
+    .itcm_bench (NOLOAD) : ALIGN(32)
+    {
+        __itcm_bench_start = .;
+        KEEP(*(.itcm_bench))
+        __itcm_bench_end = .;
+    } > CM55M_S_APP_ROM
+
     . = ALIGN(32);
     __unprivileged_flash_end__ = (. - 1);
 
@@ -200,10 +218,23 @@ SECTIONS
        __data_end__ = .;
     } > CM55M_S_APP_DATA
 
-    /* SRAM0 window: explicit placement only, empty in M-G1 (see header). */
+    /* SRAM0 window: explicit placement only (see header).  Both sections here
+     * are content-free -- .pic has no members yet, and the membench buffer is
+     * NOLOAD -- so this region still contributes nothing to the image. */
     .pic : ALIGN(4)
     {
         *(.sdio_arena)
+    } > CM55M_S_SRAM
+
+    /* membench's SRAM0 working set (issue #25).  64 KB, the only bench buffer
+     * big enough to overflow the L1 D-cache, and the only user of the SRAM0
+     * window in this milestone.  NOLOAD + KEEP for the same reasons as
+     * .itcm_bench above. */
+    .sram_bench (NOLOAD) : ALIGN(32)
+    {
+        __sram_bench_start = .;
+        KEEP(*(.sram_bench))
+        __sram_bench_end = .;
     } > CM55M_S_SRAM
 
     .bss :
@@ -227,6 +258,17 @@ SECTIONS
         _end_noinit = .;
         PROVIDE(__end_noinit_RAM = .) ;
         PROVIDE(__end_noinit_SRAM = .) ;
+    } > CM55M_S_APP_DATA
+
+    /* membench's DTCM working set (issue #25).  NOLOAD + KEEP, same reasoning
+     * as .itcm_bench; placed before .heap so it only pushes the heap base up
+     * (DTCM has ~180 KB of slack between __HeapLimit and __StackLimit, which
+     * check_placement_budget.py enforces a floor on). */
+    .dtcm_bench (NOLOAD) : ALIGN(32)
+    {
+        __dtcm_bench_start = .;
+        KEEP(*(.dtcm_bench))
+        __dtcm_bench_end = .;
     } > CM55M_S_APP_DATA
 
     /* newlib heap (retarget.c _sbrk walks __HeapBase..__HeapLimit). */

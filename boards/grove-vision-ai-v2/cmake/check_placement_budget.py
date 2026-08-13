@@ -11,10 +11,11 @@
   2. Vector table residency: .table at the very start of ITCM, 496 * 4 bytes.
   3. Static stacks: every *_stack-named data/bss symbol lives in DTCM.
   4. Forbidden survivors: with -ffunction-sections + --gc-sections, an
-     uncalled function is dropped -- so if EPII_Set_Systick_* (the SDK's
-     SysTick pokers) or console_getchar/console_putchar (the SDK clib console
-     this port does not link) are PRESENT in the image, something references
-     them, which violates the port's design.
+     uncalled function is dropped -- so if any FORBIDDEN name is PRESENT in
+     the image, something references it, which violates the port's design.
+  5. Measurement-buffer residency (issue #25): each benchmark buffer must sit
+     in the memory whose name `membench` prints beside its numbers, in a
+     NOBITS section.
 
 Stdlib-only; POST_BUILD.
 """
@@ -34,11 +35,78 @@ DTCM_MIN_HEADROOM = 8 * 1024      # gap between __HeapLimit and __StackLimit
 VECTORS = 496 * 4
 
 FORBIDDEN = [
+    # SDK SysTick pokers: ThreadX owns SysTick on this port.
     "EPII_Set_Systick_load",
     "EPII_Set_Systick_enable",
+    # SDK clib console: this port supplies its own _write.
     "console_getchar",
     "console_putchar",
 ]
+
+# Whole vendor APIs that must not appear, matched by prefix.  The optional
+# third element is the set of names inside the prefix that ARE allowed.
+FORBIDDEN_PREFIXES = [
+    # [!] TIMER2 belongs to the execution profile kit (issue #25).
+    # port/threadx/tx_glue.c programs it directly over MMIO as a free-running
+    # all-ones-reload counter with its interrupt disabled, and it is the only
+    # code in the firmware that may touch that timer.
+    #
+    # Blocking the whole vendor timer API rather than the TIMER_ID_2 wrappers
+    # (hx_drv_timer_cm55m_*) is deliberate.  A name list would leave the
+    # GENERIC entry points open -- hx_drv_timer_hw_start(TIMER_ID_2, ...) does
+    # the same damage as hx_drv_timer_cm55m_start(): it recomputes RELOAD from
+    # a period in milliseconds and sets the CTRL interrupt-enable bit, breaking
+    # both the up-counter identity the kit's time source depends on and the
+    # "no TIMER2 IRQ" property -- and no name-based check can tell which timer
+    # id an argument carries.  Nothing in this port calls any of them, so the
+    # whole prefix can simply be barred.
+    #
+    # hx_drv_timer_init is the one exception: the SDK's platform_driver_init()
+    # calls it for all nine timers and it only records a base address and
+    # derives g_timer_clk[] -- it starts nothing and writes no timer register.
+    #
+    # This is build-time defence in depth, not the only defence:
+    # tx_glue_profile_ok() re-reads TIMER2's configuration on every query, so
+    # a timer clobbered at runtime (by anything, named or not) downgrades cpu%
+    # to "--" rather than producing a plausible wrong number.
+    ("hx_drv_timer_", "Himax timer", {"hx_drv_timer_init"}),
+
+    # [!] Power management (issue #25).  TX_ENABLE_WFI makes the idle path a
+    # plain WFI, and tx_glue.c enforces SCR.SLEEPDEEP == 0 so that WFI gates
+    # only the CPU clock -- which is what keeps SysTick ticking and TIMER2
+    # (the cpu% time source) counting through idle.  Anything driving the
+    # Himax PMU could put the part into a state where those assumptions stop
+    # holding, silently and only while idle.  libpwrmgmt.a is linked but
+    # nothing references it, so --gc-sections keeps the image clean.
+    ("hx_lib_pm_", "Himax power management", set()),
+]
+
+# Benchmark buffers -- issue #25.  membench labels every row with a memory
+# name; a buffer that silently landed somewhere else (a section-attribute typo,
+# a linker script edit, a truncated array) would make the command measure that
+# other memory and report it under the old label, which is worse than not
+# measuring at all.
+#
+# So the binding is checked all the way down, not just "the address is in the
+# right region": symbol -> exact size -> the whole [addr, addr+size) span lies
+# inside the named section -> that section is NOBITS and lies in the named
+# region.  Sizes come from the command's own #defines and CoreMark's
+# TOTAL_DATA_SIZE; a mismatch here means the two have drifted apart.
+#
+# (symbol, size, section or None, region name, region)
+RESIDENCY = [
+    ("itcm_bench_buf",  4 * 1024, ".itcm_bench", "ITCM", ITCM),
+    ("dtcm_bench_buf",  4 * 1024, ".dtcm_bench", "DTCM", DTCM),
+    ("sram_bench_buf", 64 * 1024, ".sram_bench", "SRAM", SRAM),
+    # CoreMark MEM_STATIC working set: a plain .bss array, so there is no
+    # dedicated section to pin it to -- only the region matters.
+    ("static_memblk",   2 * 1000, None,          "DTCM", DTCM),
+]
+
+# The benchmark buffers must stay NOBITS: they are sized in tens of kilobytes
+# and a LOADable one would be flashed as that many bytes of zeros (and would
+# then also have to satisfy the image-coherence gate).
+NOBITS_SECTIONS = [".itcm_bench", ".dtcm_bench", ".sram_bench"]
 
 
 def run(cmd):
@@ -69,6 +137,17 @@ def nm_all(nm, elf):
         if len(parts) == 3:
             syms.append((int(parts[0], 16), parts[1], parts[2]))
     return syms
+
+
+def nm_sizes(nm, elf):
+    """{name: (addr, size)} for defined symbols that carry a size."""
+    out = run([nm, "-S", "--defined-only", elf])
+    sized = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 4:
+            sized[parts[3]] = (int(parts[0], 16), int(parts[1], 16))
+    return sized
 
 
 def inside(region, lo, hi):
@@ -140,6 +219,58 @@ def main():
         if bad in by_name:
             errors.append(f"forbidden symbol {bad} survived gc-sections "
                           "(something references it)")
+    for prefix, what, allowed in FORBIDDEN_PREFIXES:
+        hits = sorted(n for n in by_name
+                      if n.startswith(prefix) and n not in allowed)
+        if hits:
+            errors.append(f"{what} API is linked in ({len(hits)} symbol(s), "
+                          f"e.g. {hits[0]}); nothing in this port may drive it")
+
+    # 5. measurement buffers live where their labels claim, whole and alone
+    sized = nm_sizes(args.nm, args.elf)
+    for sym, want_size, sec_name, region_name, region in RESIDENCY:
+        if sym not in sized:
+            errors.append(f"benchmark buffer {sym} is missing from the image")
+            continue
+        addr, size = sized[sym]
+        end = addr + size
+        if size != want_size:
+            errors.append(f"benchmark buffer {sym} is {size} B, expected "
+                          f"{want_size} B -- the gate and the command have "
+                          "drifted apart")
+        if not (region[0] <= addr and end <= region[0] + region[1]):
+            errors.append(f"benchmark buffer {sym} [0x{addr:08x},0x{end:08x}) "
+                          f"is not entirely in {region_name} -- it would "
+                          "measure the wrong memory under that name")
+        if sec_name is not None:
+            sec = secs.get(sec_name)
+            if sec is None:
+                errors.append(f"section {sec_name} is missing")
+            elif not (sec[0] <= addr and end <= sec[0] + sec[1]):
+                errors.append(f"benchmark buffer {sym} "
+                              f"[0x{addr:08x},0x{end:08x}) is not inside its "
+                              f"own section {sec_name} "
+                              f"[0x{sec[0]:08x},0x{sec[0] + sec[1]:08x})")
+    for name in NOBITS_SECTIONS:
+        sec = secs.get(name)
+        if sec is None:
+            errors.append(f"section {name} is missing")
+        elif "CONTENTS" in sec[2]:
+            errors.append(f"section {name} is LOADable ({sec[1]} B); benchmark "
+                          "buffers must stay NOLOAD")
+
+    # 6. no two allocated sections overlap.  A NOLOAD reservation that shares
+    #    address space with something else still passes every per-section check
+    #    above while the benchmark quietly measures (and overwrites) whatever
+    #    the other tenant is.
+    placed = sorted(((vma, vma + size, name)
+                     for name, (vma, size, flags) in secs.items()
+                     if "ALLOC" in flags and size > 0),
+                    key=lambda s: s[0])
+    for (lo1, hi1, n1), (lo2, hi2, n2) in zip(placed, placed[1:]):
+        if lo2 < hi1:
+            errors.append(f"sections {n1} [0x{lo1:08x},0x{hi1:08x}) and {n2} "
+                          f"[0x{lo2:08x},0x{hi2:08x}) overlap")
 
     if errors:
         print("check_placement_budget: FAIL", file=sys.stderr)

@@ -124,9 +124,43 @@
    領域も書く**（Himax 標準。W25Q128JW ~100k 耐久、自動ループ焼き不可。復旧 =
    boot ROM + BOOT_OPT + factory image）。ポストリンクゲート 3 本
    （`check_image_coherence.py` = 生成 .img と ELF の突き合わせ + .rodata 内
-   コマンドレジストリ / `check_placement_budget.py` / `check_mve_predication.py` =
-   ThreadX M55 ポートが VPR を保存しないため述語 MVE を禁止）を外す・弱める変更は不可。
-   EPK はこのボードでは無効（プリビルト内 ISR を計測できない）。LTO 不使用。
+   コマンドレジストリ / `check_placement_budget.py` = 配置・予算・ベンチバッファの
+   常駐・禁止シンボル / `check_mve_predication.py` = ThreadX M55 ポートが VPR を
+   保存しないため述語 MVE を禁止）を外す・弱める変更は不可。LTO 不使用。
+
+8e. **grove-vision-ai-v2: TIMER2 は EPK 専有、WFI の前提は強制する（#25）。**
+   `thread` の cpu%（Execution Profile Kit）の時間源は **Himax TIMER2**。
+   **触ってよいのは `port/threadx/tx_glue.c` の bring-up 1 箇所だけ**で、SCU
+   （クロック許可 / 分周 / CPU 所有）と TIMER2 の 4 レジスタを MMIO 直叩きし、
+   **RELOAD 全 1・割込み不許可の自由走行**にする。RELOAD が全 1 なのは時間源の要件
+   （ダウンカウンタの反転が mod 2^32 アップカウンタになるのは全 1 のときだけ）。
+   **ベンダの `hx_drv_timer_*` は API 丸ごと禁止シンボル**（例外は
+   `hx_drv_timer_init` のみ — SDK の platform init が全 9 個に対して呼ぶが base を
+   記録するだけ）。名前リストでは `hx_drv_timer_hw_start(TIMER_ID_2, ...)` が抜けるので
+   接頭辞で塞ぐ。加えて **`tx_glue_profile_ok()` が毎回実行時に再検証する**
+   （TIMER2 の CTRL/RELOAD と計数、ラップしたベクタの同一性、
+   会計対象以外の IRQ が有効になっていないこと、EPK ネストカウンタが 0）。
+   ビルド時ゲートは唯一の砦ではなく多層防御の一枚。
+   時間源の分担: EPK = TIMER2（スリープ中も進む必要がある）/ udelay と membench =
+   DWT CYCCNT / CoreMark = `tx_time_get()`。混ぜない。
+   **`TX_ENABLE_WFI` も `TX_EXECUTION_PROFILE_ENABLE` もコンパイル時スイッチ**で
+   実行時に降りられない。だから WFI は前提を**強制**する（カーネル入場前に
+   `SCB->SCR` の SLEEPDEEP / SLEEPONEXIT を clear → 読み戻し → 駄目なら fail-stop。
+   `TX_LOW_POWER` は使わない）。`hx_lib_pm_*`（Himax PM）は禁止シンボル接頭辞。
+   EPK 側は「信用できない」ことを**言える**ようにするのが唯一の手段 —
+   ベンダ UART0 ベクタのラップに失敗したら**ベクタを戻してコンソールを生かし**、
+   共有 `thread` が `--` と理由を出す（`cli_thread_cpu_source_ok` 弱シンボル）。
+   ベンチマークは絶対値を出すので、入口で ThreadX tick と SCU の CM55M 周波数を
+   検査して駄目なら実行拒否し、実行後に再読み出しして動いていたら警告する
+   （`cmds/bench_gate.c`）。DWT を tick で較正するのは循環（SysTick reload が同じ値
+   由来）なので採らない。**SCU の値が「正しい」ことは証明できない**（独立した時間源が
+   このボードには無い）ので、結果は「検証済みの絶対値」ではなく
+   「明示したクロックの下での実測値」として出す。
+   ベンチマークの翻訳単位は `-fno-tree-vectorize`（自動ベクトル化が述語 MVE を出す）。
+   membench のバッファは NOLOAD セクションなので **測定前に明示的に全書き込み**が要る
+   （startup の copy/zero を通らない。TCM の ECC 未初期化読み出しも避ける）。
+   MPU / キャッシュ属性は firmware で decode せず**生レジスタをダンプ**する
+   （継承状態で TRM も無い。SRAM 行を cacheable と断定しない）。
 
 9. **ビルドは `_ref/` を読まない。** `_ref/`（および `../*/_ref/`）は git 管理外の資料置き場。
    CMake / スクリプトが参照するとクローンしただけでは configure できなくなる。
@@ -173,9 +207,12 @@
   メモリ（Secure alias）: ITCM 256KB @0x10000000 / DTCM 256KB @0x30000000 /
   SRAM0+1 2MB @0x34000000 / SRAM2 384KB @0x36000000 / FLASH XIP 窓 @0x3A000000
   （M-G1 では devmem からも触らない — XIP 経路の残存状態が未検証）。
-  UART0 IRQ=90、fallback 用 DMA3 combined IRQ=69。`__NVIC_PRIO_BITS=3`。
+  UART0 IRQ=90、fallback 用 DMA3 combined IRQ=69、TIMER2 IRQ=36（EPK が専有し、
+  割込みは常に無効）。`__NVIC_PRIO_BITS=3`。
   udelay = DWT CYCCNT + 実行時 SystemCoreClock。`CLI_CPU_CYCLES_PER_US=400` は
   実機確認済み（起動バナーが読み戻し値との不一致を常時警告する）。
+  詳細（時間源の分担 / cpu% とベンダ ISR ラップ / WFI / ベンチの読み方）は
+  `boards/grove-vision-ai-v2/README.md`。
 
 ## レビュー時の作法
 

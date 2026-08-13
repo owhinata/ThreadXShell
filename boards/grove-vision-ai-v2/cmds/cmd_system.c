@@ -22,6 +22,7 @@
 #include "WE2_device.h"
 #include "tx_api.h"
 #include "tx_glue.h"
+#include "cli_backend_uart.h"   /* cli_grove_uart_stats (console health) */
 
 #include <stdint.h>
 
@@ -46,6 +47,19 @@ static int cmd_version(struct cli_instance *sh, int argc, char **argv)
 	          (unsigned long)SystemCoreClock, (unsigned long)tx_glue_core_hz());
 	cli_print(sh, "App:      ITCM 0x10000000 + DTCM 0x30000000 "
 	              "(loaded by the 2nd bootloader; not XIP)\r\n");
+
+	/* Console health (issue #25).  The UART0 vector is wrapped at runtime for
+	 * the cpu% accounting; these two counters are how you tell whether that
+	 * wrapper is costing bytes.  Both should stay at 0 across heavy paste. */
+	{
+		uint32_t rx_dropped = 0u, err_events = 0u;
+
+		if (cli_grove_uart_stats(&rx_dropped, &err_events))
+			cli_print(sh, "Console:  UART0 921600, rx_dropped %lu, "
+			              "err_events %lu\r\n",
+			          (unsigned long)rx_dropped,
+			          (unsigned long)err_events);
+	}
 	return 0;
 }
 

@@ -355,10 +355,30 @@ git branch -d feat/<N>-short-description
   BOOT_OPT ストラップ + factory image（手順は `boards/grove-vision-ai-v2/README.md`）。
   コンソールと flash は同一シリアルデバイス（ターミナルを閉じてから焼く。
   CH343P は環境により `/dev/ttyUSB*` に見える）。
-- **EPK は無効**（M-G1）。UART ISR の最外周がプリビルト内にあり計測が正しくならない。
-  ベンダ ISR ラッパで復活させるのは将来 Issue。**MVE**: ThreadX M55 ポートは VPR を
-  保存しない — 自作コードで MVE intrinsics/自動ベクトル化を使わない
-  （ポストリンクの `check_mve_predication.py` が検査）。
+- **EPK は有効**（M-G2 / #25）。時間源は **Himax TIMER2**（RELOAD 全 1・割込み無効の
+  自由走行。**触るのは `port/threadx/tx_glue.c` の bring-up 1 箇所だけ** — ベンダの
+  `hx_drv_timer_*` は `hx_drv_timer_init` を除き API 丸ごと禁止シンボル）。
+  最外周の UART0 ISR はプリビルト内なので、**ITCM 上のベクタを実行時にラップ**して
+  enter/exit を挟む（`backend/cli_backend_uart.c`）。**失敗してもコンソールは生かし**、
+  共有 `thread` が `--` と理由を出す（`cli_thread_cpu_source_ok` 弱シンボル）。
+  信用判定は boot 時ラッチではなく **`tx_glue_profile_ok()` が毎回再検証**する
+  （TIMER2 の CTRL/RELOAD と計数 / ラップしたベクタ / 会計対象外の IRQ が
+  有効でないこと / EPK ネストカウンタ 0）。
+  時間源の分担: **EPK = TIMER2 / udelay と membench = DWT CYCCNT /
+  CoreMark = `tx_time_get()`**。
+- **WFI 有効**（`BSP_ENABLE_WFI`、既定 ON）。コンパイル時スイッチなので前提は検査ではなく
+  **強制** — カーネル入場前に `SCB->SCR` の SLEEPDEEP / SLEEPONEXIT を clear → 読み戻し →
+  駄目なら fail-stop。`TX_LOW_POWER` は使わない。`hx_lib_pm_*` は禁止シンボル接頭辞。
+  「TIMER2 がスリープ中も進む」ことの実測は **`epk sleep <ms>`**（`(idle)` の観察では不十分）。
+- **ベンチマーク**（`coremark` / `membench`）は入口で ThreadX tick と SCU の CM55M 周波数を
+  検査し、駄目なら実行拒否、実行後に再読み出しして動いていたら警告（`cmds/bench_gate.c`）。
+  SCU の値自体の正しさは検証できない（独立した時間源が無い。DWT を tick で較正するのは
+  循環）ので、結果は「明示したクロックの下での実測値」。スコアは MEM_STATIC / TCM 配置 /
+  スカラビルドとセットでのみ比較可能。membench のバッファは NOLOAD なので測定前に
+  明示初期化が要る。MPU / キャッシュ属性は decode せず生ダンプ。
+- **MVE**: ThreadX M55 ポートは VPR を保存しない — 自作コードで MVE intrinsics/自動
+  ベクトル化を使わない（ベンチの TU は `-fno-tree-vectorize`。ポストリンクの
+  `check_mve_predication.py` が検査）。
 - ポストビルドゲート 3 本（`boards/grove-vision-ai-v2/cmake/`）: イメージ整合
   （生成 `.img` と ELF の突き合わせ + `.rodata` 内のコマンドレジストリ検証）/
   配置・予算（ITCM/DTCM headroom、ベクタ常駐、静的スタック、禁止シンボル残存）/

@@ -14,8 +14,10 @@
 #  with prebuilt driver archives, and mirroring it as a submodule would tax
 #  every clone for sources only this board opens.
 #
-#  So the only mirror this board compiles from lib/ is Eclipse ThreadX itself
-#  (ports/cortex_m55/gnu + common core).
+#  So the mirrors this board compiles from lib/ are Eclipse ThreadX itself
+#  (ports/cortex_m55/gnu + common core + the execution profile kit) and EEMBC
+#  CoreMark (the `coremark` command, issue #25).
 # ============================================================================
 set(_submodule_sentinels
-    "lib/threadx/common/src/tx_thread_create.c")
+    "lib/threadx/common/src/tx_thread_create.c"
+    "lib/coremark/core_main.c")

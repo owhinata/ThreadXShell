@@ -21,10 +21,14 @@
 #include "cli_internal.h"    /* cli_out_begin/cli_out_end + cli_xfer_active */
 
 #include "WE2_device.h"
+#include "WE2_core.h"        /* EPII_NVIC_SetVector (cache-maintaining) */
 #include "hx_drv_uart.h"
+#include "tx_glue.h"         /* EPK ISR accounting hooks (issue #25) */
 
 #define LOG_TAG "uart"
 #include "log.h"
+
+void Default_Handler(void);  /* SDK startup; the unclaimed-vector trap */
 
 /* The one active UART console (set in init).  The driver callbacks and _write
  * reach the context through this; NULL until the first cli_init(). */
@@ -147,6 +151,106 @@ static void uart_err_cb(void *arg)
 	u->err_events++;                /* overrun/framing/parity: counted only */
 }
 
+/* ---- vendor ISR wrapping (EPK ISR accounting, issue #25) ---------------- */
+
+/*
+ * The UART0 interrupt handler lives inside the prebuilt libdriver.a: the
+ * driver installs it into the (writable, ITCM-resident) vector table from
+ * uart_open() via EPII_NVIC_SetVector, and there is no source to add the
+ * ThreadX Execution Profile Kit's enter/exit hooks to.  Without those hooks
+ * every microsecond spent servicing the console is billed to whichever thread
+ * happened to be running, so a busy console silently inflates that thread's
+ * cpu% and the (isr) row reads near zero -- which is why M-G1 left the kit off
+ * entirely.
+ *
+ * The way in is that the table is RAM we can read back: save the vendor entry,
+ * install a wrapper that brackets a call to it, and verify the swap actually
+ * landed.  The wrapper is the outermost frame of the interrupt, so the kit's
+ * nesting rules hold.
+ *
+ * FAILING IS NOT FATAL.  The console is the only way anyone talks to this
+ * board, so every failure path restores the vendor vector and returns with the
+ * console fully functional; what is lost is the cpu% accuracy, and that loss is
+ * REPORTED (tx_glue_profile_fail -> the `thread` command prints "--" and the
+ * reason) rather than papered over.
+ */
+static void (*g_uart_vendor_isr)(void);
+
+static void uart_isr_wrapper(void)
+{
+	tx_glue_isr_enter();
+	g_uart_vendor_isr();
+	tx_glue_isr_exit();
+}
+
+/*
+ * Swap the vendor UART0 vector for the wrapper above.  MUST be called with the
+ * UART0 IRQ disabled at the NVIC (an interrupt taken between the read and the
+ * write would run whichever half-installed vector it found).  Returns 1 when
+ * the wrapper is installed and verified, 0 when the vector was left exactly as
+ * the vendor set it.
+ */
+static int uart_wrap_vendor_isr(void)
+{
+	uint32_t vendor  = NVIC_GetVector(UART0_intr_IRQn);
+	uint32_t wrapper = (uint32_t)(void (*)(void))uart_isr_wrapper;
+	uint32_t rb;
+
+	if (vendor == wrapper)
+		return 1;               /* already wrapped: enable() re-run */
+	if (vendor == 0u ||
+	    vendor == (uint32_t)(void (*)(void))Default_Handler) {
+		/* uart_open() did not install a handler (or the slot is still the
+		 * startup trap).  Wrapping that would turn every RX interrupt into
+		 * a hang, so leave the table alone. */
+		LOG_ERR("uart0 vector not installed by the driver (%08lx)",
+		        (unsigned long)vendor);
+		tx_glue_profile_fail("UART0 vendor vector missing; ISR time unattributed");
+		return 0;
+	}
+
+	g_uart_vendor_isr = (void (*)(void))vendor;
+	EPII_NVIC_SetVector(UART0_intr_IRQn, wrapper);
+	__DSB();
+	__ISB();
+
+	rb = NVIC_GetVector(UART0_intr_IRQn);
+	if (rb != wrapper) {
+		/* Put back exactly what was there and keep the console. */
+		EPII_NVIC_SetVector(UART0_intr_IRQn, vendor);
+		__DSB();
+		__ISB();
+		g_uart_vendor_isr = NULL;
+		LOG_ERR("uart0 vector swap read back %08lx, wanted %08lx",
+		        (unsigned long)rb, (unsigned long)wrapper);
+		tx_glue_profile_fail("UART0 vector swap did not take");
+		return 0;
+	}
+
+	LOG_INF("uart0 isr wrapped (vendor %08lx)", (unsigned long)vendor);
+	return 1;
+}
+
+/*
+ * Console health counters, for `version`.  Replacing a vendor interrupt vector
+ * at runtime is the riskiest thing this port does, and "the console still
+ * seems fine" is a weak way to check it: a wrapper that adds enough latency to
+ * overflow the RX FIFO, or that loses an interrupt, shows up first as dropped
+ * bytes and driver error events -- both of which were being counted and never
+ * shown.  Now they are, so "paste a long line, look at the numbers" is an
+ * actual test.  Returns 0 when no console is bound.
+ */
+int cli_grove_uart_stats(uint32_t *rx_dropped, uint32_t *err_events)
+{
+	struct cli_grove_uart *u = g_uart_console;
+
+	if (u == NULL)
+		return 0;
+	*rx_dropped = u->rx_dropped_ring;
+	*err_events = u->err_events;
+	return 1;
+}
+
 /* ---- transport vtable -------------------------------------------------- */
 
 static int uart_init(struct cli_transport *tr)
@@ -187,6 +291,17 @@ static int uart_enable(struct cli_transport *tr)
 		return -1;
 	}
 	u->dev = dev;
+
+	/* Wrap the vector uart_open() just installed, while the line is still
+	 * shut at the NVIC (main()'s pre-kernel sweep disabled every external
+	 * IRQ; re-assert it here so this holds no matter what uart_open() did).
+	 * Only after a verified swap are the kit's ISR hooks armed. */
+	NVIC_DisableIRQ(UART0_intr_IRQn);
+	__DSB();
+	__ISB();
+	if (uart_wrap_vendor_isr())
+		tx_glue_profile_arm((int)UART0_intr_IRQn,
+		                    (uint32_t)(void (*)(void))uart_isr_wrapper);
 
 	/* RX mode: NULL RX buffer + RXCB => callback on DATA_AVAIL
 	 * (hx_drv_uart.h UART_CMD_SET_RXCB).  Verified interactively on hardware.

@@ -187,6 +187,50 @@ static void test_write_and_hexdump(void)
 	assert(strstr(cli_dummy_output_str(&tr), "08000010  47 ") != NULL);  /* 'G' */
 }
 
+/* TX-wait hook used by test_hexdump_cancel: the only lever the host harness has for
+ * making a Ctrl+C land *in the middle* of an output call.  It unstalls the send (so
+ * the row that is going out actually completes) and drops a 0x03 into RX, which the
+ * next row's cli_cancel_requested() then latches. */
+static void unstall_and_ctrl_c(struct cli_instance *s, void *arg)
+{
+	(void)arg;
+	cli_dummy_free_tx(s->tr, 4096);
+	cli_dummy_inject(s->tr, "\x03", 1);
+}
+
+/*
+ * Issue #17: a hexdump cancelled between rows must not leave staged bytes behind.
+ * A row is 77 B and staging auto-flushes every 32 B, so at the cancel point the tail
+ * of the last completed row is still in out_buf.  The staging buffer is per-instance
+ * and outlives the call, so those bytes would be flushed as the head of whatever is
+ * printed next -- which is exactly what happens with the real callers that ignore
+ * cli_hexdump's return value and keep printing (cmd_camera.c, cmd_nor.c, ...).
+ */
+static void test_hexdump_cancel(void)
+{
+	char buf[32];
+	size_t at_cancel, n;
+
+	for (int i = 0; i < 32; i++) buf[i] = (char)('a' + i % 26);
+
+	setup();
+	cli_dummy_set_tx_cap(&tr, 8);           /* stall the first flush ... */
+	cli_test_set_tx_wait_hook(unstall_and_ctrl_c, NULL);   /* ... to time the 0x03 */
+
+	assert(cli_hexdump(&sh, buf, sizeof buf) < 0);   /* cancelled: negative result */
+	assert(sh.cancel_req == 1);
+	assert(sh.tx_failed == 0);              /* the hook freed space: no TX failure */
+	cli_dummy_output(&tr, &at_cancel);
+	assert(at_cancel > 0 && at_cancel < 77);/* stopped mid-row: a tail WAS staged */
+
+	/* Now print as a return-value-ignoring caller would: the next output must start
+	 * with its own first byte, not with the abandoned hex tail. */
+	cli_test_set_tx_wait_hook(NULL, NULL);
+	assert(cli_print(&sh, "EOI\r\n") == 0);
+	const char *o = cli_dummy_output(&tr, &n);
+	assert(n == at_cancel + 5 && memcmp(o + at_cancel, "EOI\r\n", 5) == 0);
+}
+
 /* Immediate transport failure: the call returns <0, tx_failed sticks and drops
  * further output, and recovery resumes once the flag is cleared.  Per the real
  * cli_core.c contract a write()<0 sets tx_failed but does NOT count tx_dropped
@@ -259,9 +303,10 @@ int main(void)
 	test_autoflush();
 	test_color();
 	test_write_and_hexdump();
+	test_hexdump_cancel();
 	test_tx_failure();
 	test_flush_signal();
-	printf("OK: formatter / boundaries / autoflush / colour / hexdump / tx-fail / "
-	       "flush pass\n");
+	printf("OK: formatter / boundaries / autoflush / colour / hexdump / cancel / "
+	       "tx-fail / flush pass\n");
 	return 0;
 }

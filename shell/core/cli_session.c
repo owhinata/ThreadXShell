@@ -223,7 +223,7 @@ void cli_dispatch_line(struct cli_instance *sh)
 		uint8_t b;
 		sh->cancel_req = 0;
 		sh->tx_failed  = 0;
-		sh->out_len    = 0;
+		cli_out_discard(sh);
 		while (sh->tr->api->read(sh->tr, &b, 1) > 0)
 			;                          /* discard residual RX */
 		cli_write(sh, "^C\r\n", 4);

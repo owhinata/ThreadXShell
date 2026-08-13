@@ -217,10 +217,15 @@ extern volatile uint8_t cli_xfer_active;
 int  cli_out_begin(struct cli_instance *sh);
 void cli_out_end(struct cli_instance *sh);
 
-/* Staging primitives (cli_printf.c): append one byte (autoflush when full) and
- * flush the staging buffer through cli_tx_send_blocking. */
+/* Staging primitives (cli_printf.c): append one byte (autoflush when full),
+ * flush the staging buffer through cli_tx_send_blocking, and drop whatever is
+ * staged WITHOUT sending it (issue #17).  Discard is what an abandoned output
+ * call owes the next one: the staging buffer is per-instance and outlives the
+ * call, so a partial line left behind by a Ctrl+C would otherwise be flushed as
+ * the head of somebody else's output. */
 void cli_out_putc(struct cli_instance *sh, char c);
 void cli_out_flush(struct cli_instance *sh);
+void cli_out_discard(struct cli_instance *sh);
 
 #ifdef __cplusplus
 }

@@ -14,22 +14,57 @@
 # svc/ymodem.c came over with issue #19 M4 (the RTL8720DN flash backup streams
 # over the console with YMODEM), so its test is ported too.  (The donor's
 # frame_pipeline test covers a camera module that has no counterpart here.)
+#
+# Usage: run_host_tests.sh [board ...]
+#
+# Everything in THIS file is board-independent (shell/ + svc/ only) and always
+# runs.  A test that compiles board-owned code against the REAL board headers --
+# which is the point of such a test, since a shimmed copy could drift -- belongs
+# to that board and lives in boards/<board>/test/host_tests.sh, sourced below.
+# With no argument every board that has one runs; name boards to narrow it down.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
+repo=$(cd "$here/../.." && pwd)
 inc="$here/../include"
 core="$here/../core"
 svc="$here/../../svc"       # freestanding service layer (fmt.c / fmt.h)
 backend="$here/../backend"
-fdb="$here/../../lib/flashdb"   # third-party FlashDB (its CRC-32 is used by src/blob.c)
-# Most of this suite is board-independent (shell/ + svc/ only).  Three tests are
-# not: the CRC-32, BlazeFace and MLPerf ones build board-owned but pure code
-# (port/flashdb, port/nn, port/mlperf) against the REAL board headers, which is the
-# point of them -- a shimmed copy could drift.  They are pinned to one board here;
-# per-board test selection arrives with the second port.
-board="$here/../../boards/wio-lite-ai"
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
+
+# Board selection: named boards, or every board that owns host tests.
+#
+# What decides "owns host tests" is the boards/<board>/test DIRECTORY, not the
+# host_tests.sh inside it.  Keying off the script would make this suite fail open:
+# rename or delete one board's dispatcher and its tests stop running while the run
+# still ends in "host tests passed" -- less coverage, same green.  A board with
+# test sources but no dispatcher is therefore an error, and a board with no test
+# directory at all genuinely pins nothing (f746g-disco today).
+boards=""
+if [ $# -gt 0 ]; then
+    for b in "$@"; do
+        if [ ! -d "$repo/boards/$b" ]; then
+            echo "run_host_tests: no such board '$b'; available:" >&2
+            ls "$repo/boards" >&2
+            exit 1
+        fi
+        boards="$boards $b"
+    done
+else
+    for d in "$repo"/boards/*/test; do
+        [ -d "$d" ] || continue
+        boards="$boards $(basename "$(dirname "$d")")"
+    done
+fi
+
+for b in $boards; do
+    if [ -d "$repo/boards/$b/test" ] && [ ! -f "$repo/boards/$b/test/host_tests.sh" ]; then
+        echo "run_host_tests: boards/$b/test exists but has no host_tests.sh --" \
+             "its tests would silently not run" >&2
+        exit 1
+    fi
+done
 
 # Flags mirror the target link so the tests exercise the real retention path:
 #   -ffunction-sections -fdata-sections + -Wl,--gc-sections : same GC as the
@@ -180,21 +215,6 @@ gcc $CFLAGS -I "$svc" \
     $LDFLAGS -pthread -o "$out/test_ymodem_recv"
 "$out/test_ymodem_recv"
 
-# issue #10 (#9 P2b) -- the CRC-32 the blob region stamps assets with.  app/blob.c
-# does not implement one: it reuses FlashDB's fdb_calc_crc32(), which is already in
-# the build and already accumulating.  Two properties it relies on are invisible in
-# that function's signature -- that starting from 0 gives standard CRC-32/ISO-HDLC
-# (so the board and the PC agree) and that feeding the result back in continues the
-# same CRC (so a file arriving as ~185 YMODEM blocks lands on the one-call value).
-# Pinned here because it is the only part of the blob work verifiable off the board.
-# Built against port/flashdb (fdb_cfg.h) exactly as the firmware is; the FlashDB
-# sources are third-party, hence the one relaxed warning.
-gcc $CFLAGS -Wno-unused-parameter \
-    -I "$board/port/flashdb" -I "$fdb/inc" -I "$fdb/port/fal/inc" \
-    "$here/test_crc32.c" "$fdb/src/fdb_utils.c" \
-    $LDFLAGS -o "$out/test_crc32"
-"$out/test_crc32"
-
 # issue #8 phase 3a -- camera frame pipeline core (svc/frame_pipeline.c): ring slot
 # acquire/publish, refcount pin/put, DROP/LATEST policy + pending transfer, detach
 # in-flight count, read_latest generation, and an N=4 ring cycling under a counting
@@ -207,63 +227,29 @@ gcc $CFLAGS -I "$svc" \
     $LDFLAGS -o "$out/test_frame_pipeline"
 "$out/test_frame_pipeline"
 
-# issue #9 phase 3 -- the BlazeFace decoder (port/nn/models/blazeface.c): SSD anchor
-# decode + NMS + the score-threshold knob.  This is the one piece of new arithmetic
-# whose failure is silent -- a wrong anchor scale or an off-by-512 into the second
-# anchor group draws a plausible rectangle in the wrong place, and on the board that
-# is indistinguishable from bad exposure or a wrong normalization.  Here the expected
-# box is computed by hand.  The decoder depends on nn.h alone (no HAL, no ThreadX, no
-# libm), and struct nn_model is opaque, so the test supplies its own nn_output_count()
-# / nn_output() and runs the real decoder unmodified.  Built against the REAL
-# boards/<board>/include/mem_sections.h so the PSRAM_AI attribute on the host is
-# the same one the firmware uses -- a shimmed copy could drift from it without
-# anything noticing.
-gcc $CFLAGS -I "$board/include" -I "$board/port/nn" \
-    -I "$board/port/nn/models" \
-    "$here/test_blazeface.c" "$board/port/nn/models/blazeface.c" \
-    $LDFLAGS -lm -o "$out/test_blazeface"
-"$out/test_blazeface"
+# ---- board-pinned tests --------------------------------------------------- *
+# Same toolchain flags and the same scratch dir, exported so a board test is built
+# exactly like a core one and cannot quietly diverge.  A board with no
+# test/host_tests.sh simply has none (f746g-disco today) -- that is reported, not
+# an error, so the suite stays green on a board that pins nothing.
+export HOST_TEST_REPO="$repo"
+export HOST_TEST_OUT="$out"
+export HOST_TEST_CFLAGS="$CFLAGS"
+export HOST_TEST_LDFLAGS="$LDFLAGS"
+export HOST_TEST_INC="$inc"
+export HOST_TEST_CORE="$core"
+export HOST_TEST_SVC="$svc"
+export HOST_TEST_BACKEND="$backend"
+export HOST_TEST_SHELL_TEST="$here"
 
-# issue #55 -- the MLPerf Tiny harness (port/mlperf/mlperf_th.cc), driven through
-# UPSTREAM'S OWN PARSER (lib/mlperf-tiny/benchmark/api/internally_implemented.cpp,
-# unmodified).  So what is under test is the protocol itself, fed the way the host's
-# runner feeds it -- `db load N`, 31-byte hex chunks, `infer N W` -- and what is
-# asserted is the bytes the board would put on the wire.
-#
-# It earns its place because all three things this layer can get wrong are SILENT on
-# hardware: the per-benchmark input transform (shift by 128 / pass through / quantize
-# from float) still produces confident scores when it is wrong, the three-decimal
-# formatting is assembled from integers because svc/fmt.c has no %f, and the benchmark
-# identification is what decides which test the host runs at all.  None of them
-# announce themselves; they come back as accuracy that is quietly a few points low.
-#
-# Skipped rather than failed when the submodule is absent: it is ~340 MB and only
-# fetched for CONFIG_MLPERF_TINY builds, so a plain checkout must still run the suite.
-# g++ links it -- upstream's half is C++ and declares no linkage, which is the whole
-# reason mlperf_th is C++ too (see its header).
-mlperf="$here/../../lib/mlperf-tiny/benchmark"
-if [ -f "$mlperf/api/internally_implemented.cpp" ]; then
-    gcc $CFLAGS -c -I "$svc" "$svc/fmt.c" -o "$out/fmt.o"
-    gcc $CFLAGS -I "$board/port/nn" -I "$board/port/mlperf" \
-        -c "$here/test_mlperf.c" -o "$out/test_mlperf.o"
-    # -std=gnu++17 to match the firmware, which passes no -std and so gets the GNU
-    # dialect by default: the test should compile the shared headers the same way the
-    # board does.  (This is also where cli_config.h's C11 _Static_assert was caught --
-    # GCC only accepts that spelling in C++ from version 14, the ARM toolchain is 15
-    # and this host's g++ is 13.  The header now uses CLI_STATIC_ASSERT and works in
-    # both, but the dialect match is what made the difference visible.)
-    g++ -std=gnu++17 -Wall -Wextra -ffunction-sections -fdata-sections -no-pie \
-        -I "$mlperf" -I "$board/port/mlperf" -I "$board/port/nn" \
-        -I "$inc" -I "$svc" -I "$board/port/threadx" \
-        -fno-exceptions -fno-rtti \
-        -include "$board/port/mlperf/mlperf_th.h" \
-        "$mlperf/api/internally_implemented.cpp" \
-        "$board/port/mlperf/mlperf_th.cc" \
-        "$out/test_mlperf.o" "$out/fmt.o" \
-        -Wl,--gc-sections -lm -o "$out/test_mlperf"
-    "$out/test_mlperf"
-else
-    echo "test_mlperf: SKIP (lib/mlperf-tiny not checked out)"
-fi
+for b in $boards; do
+    script="$repo/boards/$b/test/host_tests.sh"
+    if [ -f "$script" ]; then
+        echo "--- board tests: $b"
+        sh "$script"
+    else
+        echo "--- board tests: $b (none)"
+    fi
+done
 
 echo "host tests passed"

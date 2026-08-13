@@ -17,7 +17,11 @@ HAL/CMSIS/ThreadX 等は upstream ミラー submodule、ARM GNU ツールチェ�
 `AGENTS.md` / `.claude/settings.json` の upstream ブロックリスト /
 `.claude/skills/codex-{review,debug}` のボード別観点 /
 **`boards/<board>/submodules.cmake`（そのボードが必要とする submodule の sentinel 一覧。
-トップの fetch はここから導出される。共有リストは無い）**。
+トップの fetch はここから導出される。共有リストは無い）** /
+`boards/<board>/test/host_tests.sh`（そのボードが持つ board-pinned ホストテスト。
+`shell/test/run_host_tests.sh` が同じフラグで呼ぶ。**`test/` ディレクトリを作ったなら
+`host_tests.sh` は必須** — 無いとランナーが fail する（dispatcher の消失で
+テストが黙って走らなくなるのを防ぐため）。pin するものが無いボードは `test/` ごと作らない）。
 
 ## 現行の作業目標
 

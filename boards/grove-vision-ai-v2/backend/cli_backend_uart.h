@@ -63,12 +63,6 @@ extern "C" {
 #endif
 
 /** Backend-private context (the `ctx` of a UART transport). */
-/**
- * Console RX-drop and driver-error counts, for the `version` command.
- * @return 1 with both outputs written; 0 if no console is bound yet.
- */
-int cli_grove_uart_stats(uint32_t *rx_dropped, uint32_t *err_events);
-
 struct cli_grove_uart {
 	void                *dev;     /**< DEV_UART_PTR, bound in enable() */
 	struct cli_instance *sh;      /**< owning instance (cached from tr->sh) */

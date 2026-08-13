@@ -40,14 +40,16 @@
 
 static void epk_print_status(struct cli_instance *sh)
 {
-	const char *why = NULL;
-	int ok = tx_glue_profile_ok(&why);
 	uint32_t scr = SCB->SCR;
+	/* Called once: tx_glue_profile_ok() re-validates the hardware on every
+	 * call (MMIO reads plus an NVIC sweep), so it is not a free predicate. */
+	int ok = tx_glue_profile_ok(NULL);
 
-	cli_print(sh, "cpu%% accounting : %s\r\n", ok ? "live" : "NOT trustworthy");
-	if (!ok)
-		cli_print(sh, "  reason        : %s\r\n",
-		          (why != NULL) ? why : "(unknown)");
+	/* Verdict only.  `thread` prints the reason next to the cpu% column it
+	 * blanks, which is where it is actually needed; repeating it here was
+	 * duplication (issue #27). */
+	cli_print(sh, "cpu%% accounting : %s\r\n",
+	          ok ? "live" : "NOT trustworthy (run `thread` for the reason)");
 
 	cli_print(sh, "TIMER2 rate     : %lu Hz  (SCU ref %lu Hz / div %lu)\r\n",
 	          (unsigned long)tx_glue_epk_timer_hz(),

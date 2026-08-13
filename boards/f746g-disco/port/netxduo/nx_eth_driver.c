@@ -351,6 +351,18 @@ static void apply_mac_state(void)        /* call under eth_lock */
 	}
 }
 
+/* Poll-complete hook (issue #13); see nx_eth_driver.h.  Written once during
+   nx_net_init(), i.e. inside tx_application_define() with no thread running yet,
+   and read afterwards only by the eth-link thread. */
+static nx_eth_poll_hook_t g_poll_hook;
+static void              *g_poll_hook_arg;
+
+VOID nx_eth_set_poll_hook(nx_eth_poll_hook_t hook, void *arg)
+{
+	g_poll_hook     = hook;
+	g_poll_hook_arg = arg;
+}
+
 static void nx_eth_on_link(void *arg, bool up, int mbps, bool full_duplex)
 {
 	int changed;
@@ -375,6 +387,13 @@ static void nx_eth_on_link(void *arg, bool up, int mbps, bool full_duplex)
 		   watchdog (HAL_ETH_ReadData re-arms starved descriptors). */
 		_nx_ip_driver_deferred_processing(g.ip);
 	}
+
+	/* LAST, and deliberately so (issue #13): the hook may block on the glue lock,
+	   and everything above must be past that point -- eth_lock is released, and
+	   both NetX events are already posted, so a wait here can delay the next poll
+	   but can neither hold eth_lock nor retract the starvation watchdog. */
+	if (g_poll_hook != NULL)
+		g_poll_hook(g_poll_hook_arg);
 }
 
 /* ---- NetX driver entry ---------------------------------------------------- */

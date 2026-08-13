@@ -12,6 +12,7 @@ HAL/CMSIS/ThreadX 等は upstream ミラー submodule、ARM GNU ツールチェ�
 |---|---|---|---|---|
 | STM32F746G-DISCO | STM32F746NGH6 / Cortex-M7 | 216 MHz（自前設定） | VCP: USART1 PA9/PB7 115200 | ST-Link（`--target flash`） |
 | Wio Lite AI | STM32H725AEI6 / Cortex-M7 | 550 MHz（**DFU boot から継承**） | USB CDC（USB1_OTG_HS を FS 動作 / TinyUSB） | **DFU のみ**（`--target flash` = `dfu-shell`） |
+| Grove Vision AI V2 | Himax HX6538 WiseEye2 / dual Cortex-M55 + Ethos-U55（app は CM55M / Secure） | 400 MHz（**bootloader から継承**。SCU 読み戻しで実測確認済み） | UART0（CH343P ブリッジ経由）921600 | **UART xmodem のみ**（`--target flash`。リセットボタン押下が要る手動フロー） |
 
 ボードはこの先追加していく。**ボード追加時に必ず更新するもの**: この表 /「ボード固有ルール」節 /
 `AGENTS.md` / `.claude/settings.json` の upstream ブロックリスト /
@@ -322,6 +323,46 @@ git branch -d feat/<N>-short-description
 - LED0（赤）= PC13 / LED1（黄）= PF0 / USER ボタン = PF1（active-low）。
 - **オプションバイト / RDP / DBGMCU / SWD 端子（PA13/PA14）は絶対に触らない。**
 - リファレンス: RM0468 / PM0253 / 基板 schematic（`_ref/wio-lite-ai/`、read-only）。
+
+### Grove Vision AI V2
+
+- **公開 TRM が無い**。レジスタの正は SDK 同梱 `WE2_S.svd`、資料は
+  `_ref/grove-vision-ai-v2/`（HX6538 datasheet / 回路図 / M55 TRM）。
+  レジスタ/能力の主張は SVD と SDK 実装で裏を取る。
+- **Himax SDK は submodule ではない**。configure 時に pin した SHA（933810cc、donor と同一）を
+  `boards/grove-vision-ai-v2/sdk/` へ直接 fetch（`cmake/himax_sdk.cmake`。
+  `-DGROVE_SDK_DIR=` で既存チェックアウトを指定可）。**SDK ツリーは lib/ と同じ read-only 扱い**。
+  ペリフェラルドライバはプリビルト（`prebuilt_libs/gnu/libdriver.a`、ソース非公開）で、
+  実行時に `EPII_NVIC_SetVector` で ITCM 上の書込可能ベクタテーブルへ ISR を登録する。
+- **app は XIP ではない**。`.img`（bootloader + 2nd bootloader + 記述子 + 署名済み app）を
+  UART xmodem で焼き、2nd bootloader が ELF を ITCM 256KB @0x10000000（ベクタ+コード+rodata）/
+  DTCM 256KB @0x30000000（データ+スタック）へ展開する。SRAM0 窓（0x3401F000〜）は
+  明示配置専用で M-G1 では空。**ITCM 溢れはリンクエラー**（SRAM0 へは逃げない）。
+- **クロック継承**: app は PLL を設定しない。SCU 読み戻し → `SystemCoreClockUpdate` が唯一の
+  真実（コンパイル時 config は 24 MHz プレースホルダ。**実測 400 MHz**）。SysTick reload は
+  実行時値から計算し、起動前に妥当性 assert（`port/threadx/tx_glue.c`）。
+- **全部 Secure（TrustZone SEC_ONLY）**: SAU 無効・全空間 Secure。ThreadX は
+  **`TX_SINGLE_MODE_SECURE` 必須**（tx_user.h。無いと初回 PendSV の EXC_RETURN が
+  Non-secure 向けで即死）。優先度は 3-bit: **PendSV=7 / SysTick=6**（M7 ボードの 15/14 を
+  流用しない）。SDK の `ENABLE_OS` define が SDK 側 SysTick/SVC 強シンボルを外す seam。
+- **IRQ 衛生**: `platform_driver_init()`（TZ 設定 + プリビルト init が IRQ を有効化し得る）は
+  PRIMASK 下で実行し、カーネル入場前に IRQ 0..200 を disable + pending clear。コンソール
+  UART IRQ は backend の enable()（shell スレッド上）でのみ開く。fallback の
+  `uart_read_udma` を使う場合は **DMA3 combined IRQ（69）も** enable（67/68 は不可）。
+- [!] **毎回の flash は bootloader 領域も書き直す**（Himax 標準フロー、donor 実績多数）。
+  外付け W25Q128JW の耐久 ~100k。**自動ループで焼かない**。復旧 = チップ内 boot ROM +
+  BOOT_OPT ストラップ + factory image（手順は `boards/grove-vision-ai-v2/README.md`）。
+  コンソールと flash は同一シリアルデバイス（ターミナルを閉じてから焼く。
+  CH343P は環境により `/dev/ttyUSB*` に見える）。
+- **EPK は無効**（M-G1）。UART ISR の最外周がプリビルト内にあり計測が正しくならない。
+  ベンダ ISR ラッパで復活させるのは将来 Issue。**MVE**: ThreadX M55 ポートは VPR を
+  保存しない — 自作コードで MVE intrinsics/自動ベクトル化を使わない
+  （ポストリンクの `check_mve_predication.py` が検査）。
+- ポストビルドゲート 3 本（`boards/grove-vision-ai-v2/cmake/`）: イメージ整合
+  （生成 `.img` と ELF の突き合わせ + `.rodata` 内のコマンドレジストリ検証）/
+  配置・予算（ITCM/DTCM headroom、ベクタ常駐、静的スタック、禁止シンボル残存）/
+  MVE 述語命令スキャン。**外す・弱める変更は不可**（f746/wio のゲートと同格）。
+- LTO は使わない（M-G1。導入するならゲート再設計とセット）。
 
 ## SWD デバッグ（共通）
 

@@ -13,6 +13,7 @@
 |---|---|---|---|---|
 | STM32F746G-DISCO | STM32F746NGH6 (M7, 216 MHz 自前設定) | VCP: USART1 PA9/PB7 115200 | ST-Link |
 | Wio Lite AI | STM32H725AEI6 (M7, 550 MHz **DFU boot から継承**) | USB CDC (OTG_HS FS / TinyUSB, `0483:5740`) | **DFU のみ** |
+| Grove Vision AI V2 | Himax HX6538 WiseEye2 (dual M55 + U55; app = CM55M / **Secure**, 400 MHz **bootloader から継承**) | UART0 (CH343P ブリッジ) 921600 | **UART xmodem のみ** |
 
 ## [!] 不変条件（違反はそれだけで BLOCKING）
 
@@ -107,6 +108,23 @@
    `check_f746_layout.py` が strong `T` / `Default_Handler` 非同値 / `.isr_vector` の
    該当 slot 一致の 3 条件で検査する。
 
+8d. **grove-vision-ai-v2: Himax SDK は read-only、ThreadX は Secure 単一モード、
+   ゲート 3 本を外さない。**
+   SDK は submodule ではなく configure 時の pin fetch（`cmake/himax_sdk.cmake`、
+   933810cc）。`boards/grove-vision-ai-v2/sdk/` は lib/ と同じ read-only。ドライバは
+   プリビルト（libdriver.a）で ISR を実行時にベクタテーブルへ登録する。
+   app は **XIP ではない**（2nd bootloader が ITCM/DTCM へ展開）、クロックは継承
+   （SCU 読み戻しが唯一の真実）、**全空間 Secure（SEC_ONLY、SAU 無効）で
+   `TX_SINGLE_MODE_SECURE` 必須**。優先度は 3-bit（PendSV=7 / SysTick=6）。
+   `platform_driver_init()` は PRIMASK 下 + カーネル入場前に IRQ 0..200 を
+   disable/clear（プリビルトが IRQ を勝手に開くため）。**毎回の flash は bootloader
+   領域も書く**（Himax 標準。W25Q128JW ~100k 耐久、自動ループ焼き不可。復旧 =
+   boot ROM + BOOT_OPT + factory image）。ポストリンクゲート 3 本
+   （`check_image_coherence.py` = 生成 .img と ELF の突き合わせ + .rodata 内
+   コマンドレジストリ / `check_placement_budget.py` / `check_mve_predication.py` =
+   ThreadX M55 ポートが VPR を保存しないため述語 MVE を禁止）を外す・弱める変更は不可。
+   EPK はこのボードでは無効（プリビルト内 ISR を計測できない）。LTO 不使用。
+
 9. **ビルドは `_ref/` を読まない。** `_ref/`（および `../*/_ref/`）は git 管理外の資料置き場。
    CMake / スクリプトが参照するとクローンしただけでは configure できなくなる。
    C コード中の言及は出典コメントのみ可。
@@ -147,11 +165,20 @@
   `GPIO_AF10_OTG1_FS`、USB クロック PLL3Q 48 MHz。LED0 = PC13 / LED1 = PF0 / USER = PF1
   （active-low、保持リセットで DFU）。`.axi_dma` 等 DMA 共有バッファは両端 32B align
   （D-Cache コヒーレンシ）。
+- **Grove Vision AI V2**: USB-C は **CH343P USB-UART ブリッジ**（チップに USB は無い）で
+  UART0（RX=PB0/TX=PB1、921600）へ。コンソールと xmodem 書込が同一ワイヤ。
+  メモリ（Secure alias）: ITCM 256KB @0x10000000 / DTCM 256KB @0x30000000 /
+  SRAM0+1 2MB @0x34000000 / SRAM2 384KB @0x36000000 / FLASH XIP 窓 @0x3A000000
+  （M-G1 では devmem からも触らない — XIP 経路の残存状態が未検証）。
+  UART0 IRQ=90、fallback 用 DMA3 combined IRQ=69。`__NVIC_PRIO_BITS=3`。
+  udelay = DWT CYCCNT + 実行時 SystemCoreClock。`CLI_CPU_CYCLES_PER_US=400` は
+  実機確認済み（起動バナーが読み戻し値との不一致を常時警告する）。
 
 ## レビュー時の作法
 
 - **「コンパイルが通る」は根拠にならない。** レジスタ/能力の主張は対象ボードの RM
-  （F746 = RM0385 / H725 = RM0468）の節番号で、配線の主張は UM1907 / schematic で裏を取る。
+  （F746 = RM0385 / H725 = RM0468。**Grove は公開 TRM が無い — SDK の WE2_S.svd と
+  SDK 実装が正**）の節番号等で、配線の主張は UM1907 / schematic で裏を取る。
   裏が取れない推測は推測として明示する。
 - 存在しないファイル・行・レジスタ・実機挙動を作らない。Wio の実機は 1 枚しかないので
   「焼いて試せばわかる」は安いコストではない。
@@ -170,4 +197,7 @@ cmake --build build/<board>
 # f746g-disco: cmake --build build/f746g-disco --target flash   (ST-Link)
 # wio-lite-ai: cmake --build build/wio-lite-ai --target flash    (DFU のみ。
 #              dfu-shell のエイリアス。PF1 保持リセットで DFU モードに入ってから)
+# grove-vision-ai-v2: cmake --build build/grove-vision-ai-v2 --target flash
+#              (UART xmodem のみ。ターミナルを閉じ、プロンプトでリセットボタン押下。
+#               初回 configure は Himax SDK ~480 MB を pin fetch する)
 ```

@@ -1,0 +1,5 @@
+# The Himax WiseEye2 SDK checkout, fetched at configure time by
+# cmake/himax_sdk.cmake (pinned commit, see that file).  Deliberately NOT a git
+# submodule -- project decision 2026-08-13.  The tree is treated read-only,
+# like the lib/ mirrors: adjustments live in the port, never in sdk/.
+/sdk/

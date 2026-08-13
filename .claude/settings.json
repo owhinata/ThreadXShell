@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "jq -r '.tool_input.command' | { read -r cmd; if echo \"$cmd\" | grep -qE '\\bgh\\b'; then if echo \"$cmd\" | grep -qE 'STMicroelectronics/(stm32f7xx_hal_driver|stm32h7xx_hal_driver|cmsis_device_f7|cmsis_device_h7|cmsis-core|stm32-ov5640)|hathach/tinyusb|eclipse-threadx/(threadx|filex|levelx|netxduo|guix)|eembc/coremark|armink/FlashDB|mlcommons/tiny'; then if echo \"$cmd\" | grep -qE '(create|comment|close|reopen|edit|delete|merge|review|transfer|pin|unpin|lock|unlock|-X (POST|PUT|PATCH|DELETE)|--method (POST|PUT|PATCH|DELETE))'; then echo '{\"decision\":\"block\",\"reason\":\"Upstream submodule repo (HAL / CMSIS / ThreadX / TinyUSB / CoreMark ほか) への書き込み操作はブロックされています。fork/別repoで作業してください。\"}'; exit 2; fi; fi; fi; }",
+            "command": "jq -r '.tool_input.command' | { read -r cmd; if echo \"$cmd\" | grep -qE '\\bgh\\b'; then if echo \"$cmd\" | grep -qE 'STMicroelectronics/(stm32f7xx_hal_driver|stm32h7xx_hal_driver|cmsis_device_f7|cmsis_device_h7|cmsis-core|stm32-ov5640)|hathach/tinyusb|eclipse-threadx/(threadx|filex|levelx|netxduo|guix)|eembc/coremark|armink/FlashDB|mlcommons/tiny|HimaxWiseEyePlus/Seeed_Grove_Vision_AI_Module_V2'; then if echo \"$cmd\" | grep -qE '(create|comment|close|reopen|edit|delete|merge|review|transfer|pin|unpin|lock|unlock|-X (POST|PUT|PATCH|DELETE)|--method (POST|PUT|PATCH|DELETE))'; then echo '{\"decision\":\"block\",\"reason\":\"Upstream submodule repo (HAL / CMSIS / ThreadX / TinyUSB / CoreMark ほか) への書き込み操作はブロックされています。fork/別repoで作業してください。\"}'; exit 2; fi; fi; fi; }",
             "statusMessage": "Checking gh upstream write..."
           }
         ]

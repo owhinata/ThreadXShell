@@ -231,26 +231,6 @@ static int uart_wrap_vendor_isr(void)
 	return 1;
 }
 
-/*
- * Console health counters, for `version`.  Replacing a vendor interrupt vector
- * at runtime is the riskiest thing this port does, and "the console still
- * seems fine" is a weak way to check it: a wrapper that adds enough latency to
- * overflow the RX FIFO, or that loses an interrupt, shows up first as dropped
- * bytes and driver error events -- both of which were being counted and never
- * shown.  Now they are, so "paste a long line, look at the numbers" is an
- * actual test.  Returns 0 when no console is bound.
- */
-int cli_grove_uart_stats(uint32_t *rx_dropped, uint32_t *err_events)
-{
-	struct cli_grove_uart *u = g_uart_console;
-
-	if (u == NULL)
-		return 0;
-	*rx_dropped = u->rx_dropped_ring;
-	*err_events = u->err_events;
-	return 1;
-}
-
 /* ---- transport vtable -------------------------------------------------- */
 
 static int uart_init(struct cli_transport *tr)

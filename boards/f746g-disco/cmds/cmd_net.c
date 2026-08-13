@@ -21,6 +21,7 @@
 #include "eth_link.h"
 #include "nx_glue.h"
 #include "nx_mjpeg.h"
+#include "nx_shell.h"   /* telnet console output statistics (issue #6) */
 
 #include <stddef.h>   /* size_t / NULL */
 #include <stdint.h>
@@ -188,6 +189,7 @@ static int cmd_net_info(struct cli_instance *sh, int argc, char **argv)
 	if (nx_net_is_up()) {
 		struct nx_net_info ni;
 		struct nx_mjpeg_stats ms;
+		struct nx_shell_stats ts;
 
 		if (nx_net_info_get(&ni) == NXG_OK)
 			net_print_ip(sh, &ni);
@@ -195,6 +197,20 @@ static int cmd_net_info(struct cli_instance *sh, int argc, char **argv)
 			cli_print(sh, "mjpeg: http://board:80 (%s, %lu frames)\r\n",
 			          ms.client ? "streaming" : "idle",
 			          (unsigned long)ms.sent_frames);
+		/* Telnet console output health (issue #6).  The refusal reasons are
+		 * reported apart because they mean different things: qdepth is the
+		 * designed back-pressure, win means the peer is not reading, and nobuf
+		 * says the shared packet pool was the constraint. */
+		if (nx_shell_stats_get(&ts))
+			cli_print(sh, "telnet: :23 (%s, %lu sessions), tx %lu seg / %lu B, "
+			              "ring peak %lu B, refused q%lu w%lu buf%lu err%lu, "
+			              "dropped %lu B\r\n",
+			          ts.connected ? "client attached" : "idle",
+			          (unsigned long)ts.sessions,
+			          (unsigned long)ts.tx_segs, (unsigned long)ts.tx_bytes,
+			          (unsigned long)ts.tx_hiwater, (unsigned long)ts.tx_qdepth,
+			          (unsigned long)ts.tx_win, (unsigned long)ts.tx_nobuf,
+			          (unsigned long)ts.tx_err, (unsigned long)ts.tx_dropped);
 	}
 	return 0;
 }

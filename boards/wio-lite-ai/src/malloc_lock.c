@@ -26,6 +26,10 @@
  *
  * Clean-room glue.
  */
+#define LOG_TAG "heap"
+#include "log.h"
+
+#include "stm32h7xx_hal.h"   /* __disable_irq (fail-stop halt) */
 #include "tx_api.h"
 #include "app.h"
 
@@ -35,10 +39,28 @@ struct _reent;
 static TX_MUTEX      g_heap_mutex;
 static volatile UINT g_heap_lock_ready;
 
+/*
+ * Called from tx_application_define(), i.e. single-threaded and before the
+ * scheduler runs.
+ *
+ * FAIL-STOP on tx_mutex_create() failure (issue #8).  Creating a statically
+ * allocated mutex before the scheduler can only fail on a caller error -- a
+ * corrupted control block, a double create -- so continuing would mean running the
+ * rest of the firmware with an unserialised heap that LOOKS fine and corrupts its
+ * arena under concurrency.  There is no Error_Handler() on this board, so stop
+ * here: log_init() has already run (main.c, well before tx_kernel_enter), so the
+ * record survives into the reset-persistent DTCM ring and `dmesg` shows it after
+ * the next reset.
+ */
 void malloc_lock_init(void)
 {
-	if (tx_mutex_create(&g_heap_mutex, "heap", TX_INHERIT) == TX_SUCCESS)
-		g_heap_lock_ready = 1u;
+	if (tx_mutex_create(&g_heap_mutex, "heap", TX_INHERIT) != TX_SUCCESS) {
+		LOG_ERR("malloc lock mutex create failed -- halting");
+		__disable_irq();
+		for (;;)
+			;
+	}
+	g_heap_lock_ready = 1u;
 }
 
 /* True only in genuine post-scheduler THREAD context.  IPSR==0 excludes ISR/exception

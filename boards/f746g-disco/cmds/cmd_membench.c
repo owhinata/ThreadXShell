@@ -13,9 +13,15 @@
  * goal is to make the L1 D$(16KB) -> SRAM -> SDRAM latency step visible on the
  * board (input for #65 .sdram layout and #49 NetX buffer sizing).
  *
- * Timing: DWT CYCCNT (enabled locally; DWT is otherwise unused -- the ThreadX
- * exec-profile uses TIM2 because DWT freezes in WFI, but the bench never sleeps).
+ * Timing: DWT CYCCNT (enabled locally; the ThreadX exec-profile and udelay use
+ * TIM2 because DWT freezes in WFI, but the bench never sleeps).  The counter is
+ * SHARED with port/nn/nn.c, which times nn_run() with it, so this file only ever
+ * enables and READS it -- see dwt_enable() for why it must never be reset (#4).
  * Clock is read from HAL_RCC_GetHCLKFreq() (not a hardcoded 216 MHz).
+ *
+ * Reentrancy (#4): one run at a time, enforced by a PRIMASK test-and-set below.
+ * The bench buffers and the calibration state are file-static, so a second
+ * concurrent run (VCP + telnet, or `membench &` twice) would corrupt both.
  *
  * Preemption: each timed run is sized to ~0.3 ms (< one 1 kHz SysTick period) via
  * a calibration pass, then run up to MEMBENCH_TRIALS times; runs during which the
@@ -107,23 +113,54 @@ static int dwt_enable(void)
 	 * debug power domain can need a moment, and on M7 the DWT software lock must
 	 * be cleared (CYCCNT stays frozen at 0 otherwise, e.g. no debugger attached).
 	 * If it never advances, abort cleanly rather than let calibration see a zero
-	 * delta -> reps clamped to the max -> a multi-minute hang with all-zero results. */
+	 * delta -> reps clamped to the max -> a multi-minute hang with all-zero results.
+	 *
+	 * NEVER write DWT->CYCCNT (issue #4).  It is a free-running counter SHARED
+	 * with port/nn/nn.c, which samples it either side of nn_run() for
+	 * nn_last_cycles(); a reset from here lands inside that window and reports a
+	 * garbage inference time (a huge value, since c1 - c0 wraps).  Nothing needs
+	 * the counter to start at zero: every reader here takes a difference, which
+	 * is wrap-safe as long as one measured span is under 2^32 cycles -- 19.9 s at
+	 * 216 MHz, against the ~0.3 ms this bench times per run.  So the self-test
+	 * below checks the DELTA rather than comparing against a known-zero start. */
 	for (attempt = 0; attempt < 3; attempt++) {
 		volatile uint32_t spin = 64u;
 		uint32_t a;
 
 		CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
 		*((volatile uint32_t *)DWT_LAR_ADDR) = DWT_LAR_KEY;   /* unlock (M7) */
-		DWT->CYCCNT = 0u;
-		DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+		DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;   /* idempotent */
 
 		a = DWT->CYCCNT;
 		while (spin--)
 			__NOP();
-		if (DWT->CYCCNT != a)
+		if ((uint32_t)(DWT->CYCCNT - a) != 0u)
 			return 0;           /* counting */
 	}
 	return -1;
+}
+
+/*
+ * Single-run guard (issue #4).  membench owns .dtcm_bench / the SDRAM bench buffer
+ * and calibrates against the shared DWT, none of which survive two runs at once
+ * (VCP + telnet, or `membench &` twice).  A plain flag test-set under a brief
+ * PRIMASK critical section: interrupt-safe, needs no one-time init, and acquire /
+ * release may run on different threads.  Same shape as the CoreMark guard and as
+ * nn_session_try_acquire() in port/nn/nn.c.
+ */
+static volatile uint8_t membench_busy;
+
+static int membench_try_acquire(void)
+{
+	uint32_t pm = __get_PRIMASK();
+	int ok;
+
+	__disable_irq();
+	ok = !membench_busy;
+	if (ok)
+		membench_busy = 1u;
+	__set_PRIMASK(pm);
+	return ok;
 }
 
 /* ---- timed harness ---------------------------------------------------------- */
@@ -359,6 +396,7 @@ static int cmd_membench(struct cli_instance *sh, int argc, char **argv)
 	int do_dtcm = 1, do_sram = 1, do_sdram = 1, do_flash = 1;
 	uint32_t hclk, i;
 	int sdram_ok;
+	int rc = 0;                  /* every exit past the guard goes through `done` */
 	void     *sram_raw = NULL;   /* malloc base (freed on every exit via `done`) */
 	uint32_t *sram_bench_buf = NULL;   /* 32-byte-aligned working pointer         */
 
@@ -377,9 +415,16 @@ static int cmd_membench(struct cli_instance *sh, int argc, char **argv)
 		}
 	}
 
+	/* Taken AFTER argument parsing so a bad region name never has to release it. */
+	if (!membench_try_acquire()) {
+		cli_error(sh, "membench: already running\r\n");
+		return 1;
+	}
+
 	if (dwt_enable() != 0) {
 		cli_error(sh, "membench: DWT CYCCNT unavailable on this core\r\n");
-		return 1;
+		rc = 1;
+		goto done;
 	}
 	hclk = HAL_RCC_GetHCLKFreq();
 	sdram_ok = sdram_is_up();
@@ -460,7 +505,8 @@ static int cmd_membench(struct cli_instance *sh, int argc, char **argv)
 
 done:
 	free(sram_raw);   /* NULL when SRAM was not benched (free(NULL) is a no-op) */
-	return 0;
+	membench_busy = 0u;   /* single cleanup point: guard cleared on every exit */
+	return rc;
 }
 
 CLI_CMD_REGISTER(membench, NULL, "memory bandwidth + latency benchmark",

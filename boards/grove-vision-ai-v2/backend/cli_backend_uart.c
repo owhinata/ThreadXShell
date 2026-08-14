@@ -279,9 +279,10 @@ static int uart_enable(struct cli_transport *tr)
 	NVIC_DisableIRQ(UART0_intr_IRQn);
 	__DSB();
 	__ISB();
-	if (uart_wrap_vendor_isr())
-		tx_glue_profile_arm((int)UART0_intr_IRQn,
-		                    (uint32_t)(void (*)(void))uart_isr_wrapper);
+	if (uart_wrap_vendor_isr() &&
+	    tx_glue_profile_register_irq((int)UART0_intr_IRQn,
+	                                 (uint32_t)(void (*)(void))uart_isr_wrapper))
+		tx_glue_profile_arm();
 
 	/* RX mode: NULL RX buffer + RXCB => callback on DATA_AVAIL
 	 * (hx_drv_uart.h UART_CMD_SET_RXCB).  Verified interactively on hardware.

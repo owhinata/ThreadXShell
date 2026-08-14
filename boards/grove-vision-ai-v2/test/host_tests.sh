@@ -1,0 +1,80 @@
+#!/usr/bin/env sh
+#
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 ThreadX Shell Project
+#
+# Board-pinned host tests for Grove Vision AI V2.  These compile code this board
+# OWNS against as much of its REAL source as a host compiler can take -- which
+# is the point of them: a re-implemented copy of the logic would drift from the
+# firmware's without anything noticing.
+#
+# Invoked by shell/test/run_host_tests.sh, which owns the toolchain flags and
+# the scratch directory and passes them in the environment; there is no separate
+# set of flags here, so a board test is built exactly like a core one.  Run the
+# whole suite (or `run_host_tests.sh grove-vision-ai-v2` for this board alone)
+# rather than executing this file directly.
+set -eu
+
+: "${HOST_TEST_OUT:?run via shell/test/run_host_tests.sh}"
+: "${HOST_TEST_CFLAGS:?}" "${HOST_TEST_LDFLAGS:?}"
+: "${HOST_TEST_INC:?}" "${HOST_TEST_SVC:?}" "${HOST_TEST_REPO:?}"
+
+here=$(cd "$(dirname "$0")" && pwd)
+board=$(cd "$here/.." && pwd)
+out="$HOST_TEST_OUT"
+CFLAGS="$HOST_TEST_CFLAGS"
+LDFLAGS="$HOST_TEST_LDFLAGS"
+sdk="$board/sdk/EPII_CM55M_APP_S"
+
+# issue #30 -- the vendor timer API seam (port/sdk_seam/timer_seam.c).  Its
+# refusal path is the one part of this board that CANNOT be reached on hardware
+# in M-G3a: the camera archives are not linked yet, so every wrapper is
+# garbage-collected out of the firmware.  cmake/check_timer_seam.py proves the
+# link-level claim (no vendor timer code survives the --wrap); this proves the
+# behavioural one -- that a call for any timer other than TIMER_ID_0 is refused
+# without writing a single register, TIMER2 (the cpu% time source) above all.
+#
+# The REAL timer_seam.c is compiled, against the REAL SDK hx_drv_timer.h so the
+# TIMER_CFG_T layout and the enum ABI are the firmware's.  Only the device
+# layer is shimmed (test/shim), because the real WE2_device.h is a Cortex-M55
+# register map a host compiler cannot use; the register block is redirected to
+# a plain array so "wrote nothing" is a memcmp rather than an argument.
+#
+# The SDK is fetched at configure time, so skip rather than fail when no build
+# tree has ever been configured -- a missing SDK is not a test result.
+if [ -f "$sdk/drivers/inc/hx_drv_timer.h" ]; then
+    # -Wno-pointer-to-int-cast: the seam stores an ISR address in the uint32_t
+    # the vector table takes.  Exact on the 32-bit target, lossy-looking to a
+    # 64-bit host compiler -- the truncation is harmless here because the mock
+    # NVIC only ever compares the value with itself.
+    gcc $CFLAGS -Wno-pointer-to-int-cast \
+        -DGROVE_TIMER_SEAM_T0_BASE='((uint32_t)(uintptr_t)seam_host_env.regs)' \
+        -I "$here" -I "$here/shim" \
+        -I "$board/port/sdk_seam" -I "$board/port/threadx" -I "$board/svc" \
+        -I "$sdk/drivers/inc" \
+        "$here/test_timer_seam.c" "$here/seam_host_env.c" \
+        "$board/port/sdk_seam/timer_seam.c" \
+        $LDFLAGS -o "$out/test_timer_seam"
+    "$out/test_timer_seam"
+else
+    echo "  (skipped test_timer_seam: no Himax SDK at $sdk --" \
+         "configure a grove-vision-ai-v2 build tree first)"
+fi
+
+# issue #30 -- the measure-then-wrap IRQ accounting (port/sdk_seam/epk_irq_wrap.c).
+# The wrap is a TRANSACTION over hardware, and its failure mode is invisible: a
+# bring-up that wrapped two lines and then failed on the third used to leave them
+# enabled and registered while the caller closed the device underneath, which
+# made cpu% permanently untrustworthy with nothing to show for it.  Reproducing
+# that on hardware means engineering a driver failure, so the NVIC (enable bits
+# AND the writable vector table) is modelled in test/shim and the real
+# epk_irq_wrap.c is compiled against it.  The sweep the tests run after every
+# step is the invariant AGENTS.md states: every line is either DISABLED, or
+# wrapped AND registered -- never a third thing.
+gcc $CFLAGS -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast \
+    -I "$here" -I "$here/shim" \
+    -I "$board/port/sdk_seam" -I "$board/port/threadx" -I "$board/svc" \
+    "$here/test_epk_irq_wrap.c" "$here/seam_host_env.c" \
+    "$board/port/sdk_seam/epk_irq_wrap.c" \
+    $LDFLAGS -o "$out/test_epk_irq_wrap"
+"$out/test_epk_irq_wrap"

@@ -159,15 +159,53 @@ target_link_options(bsp_iface INTERFACE
 #                                     unresolved x* symbol (xprintf) is
 #                                     satisfied by src/xprintf_shim.c instead,
 #                                     which routes into the dmesg log ring
+#  - interface/timer_interface.c   -- issue #30.  Its only content is
+#                                     hx_drv_timer_cm55x_delay_ms/_us, which
+#                                     forward to the TIMER_ID_3 vendor entry
+#                                     points; port/sdk_seam/timer_seam.c owns
+#                                     those two symbols now (see the --wrap
+#                                     block below).  Compiling it too would
+#                                     leave a shadow definition of a name the
+#                                     placement gate bars, kept alive only by
+#                                     --gc-sections; dropping it makes a
+#                                     removed --wrap flag a LINK ERROR instead.
 set(SDK_SOURCES
     "${SDK}/device/WE2_core.c"
     "${SDK}/device/system_WE2_ARMCM55.c"
     "${SDK}/device/startup_WE2_ARMCM55.cc"
     "${SDK}/interface/driver_interface.c"
-    "${SDK}/interface/timer_interface.c"
     "${SDK}/trustzone/tz_cfg/trustzone_cfg.c"
     "${SDK}/board/epii_evb/pinmux_init.c"
     "${SDK}/board/epii_evb/platform_driver_init.c")
+
+# --- Vendor timer API seam (issue #30) --------------------------------------
+# The prebuilt camera archives call four hx_drv_timer_* entry points.  This
+# port bars that whole prefix from the image (check_placement_budget.py, and
+# AGENTS.md records it as an invariant) because TIMER2 is the execution-profile
+# time source and no name-based check can tell which timer id a generic call
+# carries -- so linking those archives unchanged would fail the build.
+#
+# The seam redirects the four references to board-owned implementations
+# (port/sdk_seam/timer_seam.c) that never call __real_*.  Disassembly of
+# libsensordp.a shows all 41 hw_start/hw_stop call sites pass a constant
+# TIMER_ID_0 and the delays resolve to TIMER_ID_3, so this is a GATE conflict,
+# not a hardware conflict -- and after the wrap no hx_drv_timer_* symbol except
+# the permitted hx_drv_timer_init survives, which leaves the gate and the
+# invariant untouched.  __wrap_-prefixed names do not match the barred prefix.
+#
+# An argument-inspecting gate was considered and rejected: AGENTS.md makes both
+# the blanket ban AND "do not weaken the gate" invariants, and a general
+# argument analysis would be a brittle whole-program binary pass (tail calls,
+# address-taken relocations, function pointers, linker veneers).
+set(SDK_TIMER_WRAP_SYMBOLS
+    hx_drv_timer_hw_start
+    hx_drv_timer_hw_stop
+    hx_drv_timer_cm55x_delay_ms
+    hx_drv_timer_cm55x_delay_us)
+set(SDK_TIMER_WRAP_FLAGS "")
+foreach(_sym IN LISTS SDK_TIMER_WRAP_SYMBOLS)
+    list(APPEND SDK_TIMER_WRAP_FLAGS "-Wl,--wrap=${_sym}")
+endforeach()
 
 set(LIBDRIVER  "${SDK}/prebuilt_libs/gnu/libdriver.a")
 set(LIBPWRMGMT "${SDK}/prebuilt_libs/gnu/libpwrmgmt.a")
@@ -272,25 +310,34 @@ set_source_files_properties("${CMK_DIR}/core_main.c" PROPERTIES
     COMPILE_DEFINITIONS "main=coremark_main")
 
 # --- The shell firmware ------------------------------------------------------
-add_executable(shell
+# The sources compile into an OBJECT library rather than straight into the
+# executable so the seam probe below can link the SAME objects a second time
+# without recompiling them (issue #30).  Nothing else changes: `shell` still
+# links exactly this object set in exactly this order.
+add_library(shell_objs OBJECT
     "${BOARD_DIR}/src/main.c"
     "${BOARD_DIR}/src/fault.c"
     "${BOARD_DIR}/src/retarget.c"
     "${BOARD_DIR}/src/malloc_lock.c"
     "${BOARD_DIR}/src/xprintf_shim.c"
     "${BOARD_DIR}/port/threadx/tx_glue.c"
+    "${BOARD_DIR}/port/sdk_seam/timer_seam.c"
+    "${BOARD_DIR}/port/sdk_seam/epk_irq_wrap.c"
     ${SHELL_SOURCES}
     ${SDK_SOURCES}
     ${TX_CORE} ${TX_ASM} ${TX_EPK})
+
+add_executable(shell $<TARGET_OBJECTS:shell_objs>)
 target_link_libraries(shell PRIVATE bsp_iface coremark_obj
     -Wl,--start-group "${LIBDRIVER}" "${LIBPWRMGMT}" -Wl,--end-group)
 # CoreMark's canonical report prints its score with %f; pull in newlib's float
 # printf (newlib-nano omits it by default).  This is also why src/malloc_lock.c
 # exists: that conversion allocates from the heap, now from several threads.
-target_link_options(shell PRIVATE -u _printf_float)
-target_include_directories(shell PRIVATE
+target_link_options(shell PRIVATE -u _printf_float ${SDK_TIMER_WRAP_FLAGS})
+target_include_directories(shell_objs PRIVATE
     "${BOARD_DIR}/src"
     "${BOARD_DIR}/port/threadx"
+    "${BOARD_DIR}/port/sdk_seam"
     "${BOARD_DIR}/backend"
     "${BOARD_DIR}/cmds"         # bench_gate.h: shared by coremark + membench
     "${CMAKE_SOURCE_DIR}/shell/include"
@@ -304,7 +351,8 @@ target_include_directories(shell PRIVATE
     "${TX_DIR}/common/inc"
     "${TX_DIR}/utility/execution_profile_kit"   # tx_execution_profile.h
     "${TX_PORT}/inc")
-target_compile_definitions(shell PRIVATE
+target_link_libraries(shell_objs PRIVATE bsp_iface)
+target_compile_definitions(shell_objs PRIVATE
     TX_INCLUDE_USER_DEFINE_FILE        # -> port/threadx/tx_user.h
     BSP_ENABLE_WFI=$<BOOL:${BSP_ENABLE_WFI}>   # gates TX_ENABLE_WFI (tx_user.h)
     CLI_ENABLE_DANGEROUS_CMDS=1        # reboot / devmem / crash
@@ -316,10 +364,62 @@ target_compile_definitions(shell PRIVATE
     # no warning).  The compile-time SDK config is a 24 MHz placeholder and
     # must never be used for this; udelay() reads SystemCoreClock directly.
     CLI_CPU_CYCLES_PER_US=400)
-target_compile_options(shell PRIVATE -Os)
+target_compile_options(shell_objs PRIVATE -Os)
 target_link_options(shell PRIVATE
     "-T${LDSCRIPT_APP}" -Wl,-Map=shell.map,--cref)
 set_target_properties(shell PROPERTIES LINK_DEPENDS "${LDSCRIPT_APP}")
+
+# --- Vendor timer seam probe (issue #30) -------------------------------------
+# The seam only earns its keep once the camera archives are in the link, and
+# M-G3a does not link them -- every wrapper is garbage-collected out of `shell`.
+# So the property is proven on a PROBE link instead: the same objects, plus
+# libsensordp.a / libextdevice.a, plus forced references to the datapath entry
+# points that reach the vendor timer API.  check_timer_seam.py then asserts on
+# that ELF that the wrap actually severed every vendor timer reference.
+#
+# Cheap: the objects are already compiled (shell_objs), so this is one extra
+# link.  It is a build target, not an artifact -- nothing flashes it.
+set(SEAM_PROBE_FORCED
+    sensordplib_set_hxcsc_wdma3
+    sensordplib_set_hw5x5_wdma3
+    sensordplib_set_raw_wdma2
+    sensordplib_retrigger_capture
+    sensordplib_start_swreset
+    sensordplib_set_sensorctrl_inp_wi_crop
+    sensordplib_set_rtc_start
+    hx_drv_cis_init
+    hx_drv_cis_set_reg
+    hx_drv_cis_setRegTable)
+set(SEAM_PROBE_FORCE_FLAGS "")
+foreach(_sym IN LISTS SEAM_PROBE_FORCED)
+    list(APPEND SEAM_PROBE_FORCE_FLAGS "-Wl,-u,${_sym}")
+endforeach()
+
+set(LIBSENSORDP  "${SDK}/prebuilt_libs/gnu/libsensordp.a")
+set(LIBEXTDEVICE "${SDK}/prebuilt_libs/gnu/libextdevice.a")
+
+add_executable(seam_probe $<TARGET_OBJECTS:shell_objs>)
+target_link_libraries(seam_probe PRIVATE bsp_iface coremark_obj
+    -Wl,--start-group "${LIBDRIVER}" "${LIBPWRMGMT}"
+                      "${LIBSENSORDP}" "${LIBEXTDEVICE}" -Wl,--end-group)
+target_link_options(seam_probe PRIVATE
+    -u _printf_float ${SDK_TIMER_WRAP_FLAGS} ${SEAM_PROBE_FORCE_FLAGS}
+    "-T${LDSCRIPT_APP}" -Wl,-Map=seam_probe.map,--cref)
+set_target_properties(seam_probe PROPERTIES LINK_DEPENDS "${LDSCRIPT_APP}")
+
+# Gate 4: the seam severed every vendor timer reference.  Runs on the probe,
+# and on `shell` too once the archives move into the firmware proper (M-G3b) --
+# the script takes whichever ELF it is given.
+add_custom_command(TARGET seam_probe POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/check_timer_seam.py"
+            --nm "${CMAKE_NM}" --objdump "${CMAKE_OBJDUMP}"
+            --require-archives
+            "$<TARGET_FILE:seam_probe>"
+    COMMENT "check_timer_seam.py (no vendor timer code survives the --wrap)")
+
+# Make the probe part of the default build: a seam that is only checked when
+# somebody remembers to ask is not a gate.
+add_dependencies(shell seam_probe)
 
 # --- Image generation --------------------------------------------------------
 # The Himax image generator turns the ELF into the flashable .img (bootloader +

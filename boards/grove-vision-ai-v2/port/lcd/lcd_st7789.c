@@ -57,15 +57,28 @@
 /* ---- configuration ------------------------------------------------------ */
 
 /*
- * Requested SPI clock.  The SSPI master's output is always the reference
- * divided by an EVEN divider and the controller caps at 50 MHz; the SDK's
- * default low-speed source (RC96M48M) therefore lands around 24 MHz, which is
- * ~51 ms for a full frame.  That is the M-G3a target: the plan explicitly does
- * NOT chase frame rate here, and re-sourcing SSPIM from a PLL is a separate
- * issue.  The real number is read back after open() and printed by `lcd`.
+ * Requested SPI clock.
+ *
+ * The SSPI master's output is the reference divided by an EVEN divider, so it
+ * is at most reference/2 (hx_drv_spi.h), and the controller itself caps at
+ * 50 MHz.  On the SDK's default source -- RC96M48M at 96 MHz, which is what the
+ * bootloader leaves selected -- the only outputs below the cap are 48, 24, 16,
+ * 12 MHz: there is nothing between 24 and 48.
+ *
+ * M-G3a shipped 24 MHz (measured 19.5 fps).  48 MHz is the next step and halves
+ * the wire time, and it costs NO clock-tree change: the SSPIM source mux and its
+ * SCU divider are left exactly as inherited and only the controller's own BAUDR
+ * moves.  That matters -- re-sourcing SSPIM from the PLL, which is what #32
+ * originally proposed, would have to bend the "the app does not reconfigure the
+ * inherited clock tree" rule to buy 48 -> 50 MHz, i.e. 4%.  Not worth it.
+ *
+ * The panel is out of spec above ~15 MHz at either setting; 24-60 MHz is in
+ * universal use for ST7789 writes.  What actually limits this is signal quality
+ * on the jumper wires, which is why the achieved clock is read back from the
+ * controller after open() and printed by `lcd` rather than assumed.
  */
 #ifndef LCD_SPI_HZ
-#define LCD_SPI_HZ 24000000u
+#define LCD_SPI_HZ 48000000u
 #endif
 
 /* ST7789 datasheet is specified to ~15 MHz; 24-60 MHz is out of spec and in
@@ -75,7 +88,9 @@
 _Static_assert(LCD_SPI_HZ <= LCD_SPI_HZ_MAX,
                "LCD_SPI_HZ exceeds the SSPI master's 50 MHz ceiling");
 
-/* A frame at ~24 MHz is ~51 ms; a whole second is a fault, not slack. */
+/* A frame is ~26 ms at 48 MHz (~51 ms at 24); a whole second is a fault, not
+ * slack.  Left at one second so the timeout does not have to be re-tuned every
+ * time the clock moves -- it is there to catch a dead DMA, not a slow one. */
 #define LCD_DMA_TIMEOUT_TICKS ((ULONG)TX_TIMER_TICKS_PER_SECOND)
 /* Poll granularity while a burst is in flight, in ticks (1 ms each here). */
 #define LCD_DMA_POLL_TICKS    ((ULONG)1)
@@ -201,7 +216,7 @@ static uint32_t     lcd_objects_ok;
  * driver's busy flag for good.
  *
  * Contenders FAIL rather than queue (TX_NO_WAIT): a background job quietly
- * blocking the console for 51 ms a frame is not better than being told the
+ * blocking the console for a frame time is not better than being told the
  * panel is busy.  ThreadX mutexes are recursive, so a command that holds the
  * guard across a whole loop still nests fine through lcd_fill()/lcd_blit().
  */
@@ -424,7 +439,7 @@ static int lcd_madctl_apply(uint8_t v)
 	 * preempted this function midway would see a byte that does not match
 	 * the geometry beside it -- and `lcd` would print a combination that
 	 * never existed.  The panel guard does not help: readers deliberately
-	 * do not take it, so that a report still answers while a 51 ms frame is
+	 * do not take it, so that a report still answers while a frame is
 	 * on the wire.  Four scalar stores under a critical section is the
 	 * whole cost.
 	 */
@@ -630,6 +645,7 @@ static int lcd_spi_open(void)
 	int      wrapped_ok, primed = 0;
 	int32_t  rc = -1;
 	uint32_t val = 0u;
+	uint32_t want = LCD_SPI_HZ;
 
 	TX_DISABLE
 	grove_epk_irq_snapshot(&snap);
@@ -638,7 +654,31 @@ static int lcd_spi_open(void)
 	if (hx_drv_spi_mst_init(USE_DW_SPI_MST_S, DW_SPI_S_RELBASE) == 0) {
 		lcd_spi = hx_drv_spi_mst_get_dev(USE_DW_SPI_MST_S);
 		if (lcd_spi != NULL) {
-			rc = lcd_spi->spi_open(DEV_MASTER_MODE, LCD_SPI_HZ);
+			/* Have the driver re-read the SCU and report the fastest
+			 * output this reference can give.  LCD_SPI_HZ is chosen
+			 * for the source the bootloader actually leaves
+			 * selected, but asking a driver we only have as a binary
+			 * for more than it says it can do is not something to
+			 * discover on the wire -- so take the lower of the two.
+			 *
+			 * Verified in libdriver.a rather than assumed, because
+			 * the clamp could otherwise silently cost speed: the
+			 * command dispatches to dw_spi_update_system_clk(), and
+			 * for device id 1 (USE_DW_SPI_MST_S) that reads
+			 * SCU_CLK_FREQ_TYPE_LSC_SSPIM and returns freq >> 1, so
+			 * 96 MHz -> 48 MHz and the clamp is a no-op here.  The
+			 * freq >> 3 branch in that function belongs to id 3, the
+			 * SSPI *slave*, not to us.  It is a pure SCU register
+			 * read plus a shift -- no wait, no delay -- which is why
+			 * it is safe to call with interrupts masked, and it must
+			 * be called inside this window so that anything it were
+			 * to enable is still covered by the EPK accounting. */
+			if (lcd_spi->spi_control(SPI_CMD_MST_UPDATE_SYSCLK,
+			                         (SPI_CTRL_PARAM)&val) == 0 &&
+			    val != 0u && val < want)
+				want = val;
+
+			rc = lcd_spi->spi_open(DEV_MASTER_MODE, want);
 			if (rc == 0) {
 				/* A re-open must not inherit a count from the
 				 * driver's previous life. */
@@ -1036,9 +1076,9 @@ static void lcd_dma_abort_quiesce(void)
  * the panel mid-RAMWR with no way back.
  *
  * [!] The wait is SLICED rather than one long block, so @p stop can abort a
- * transfer that is still on the wire.  A whole frame is a single 51 ms
- * descriptor chain here, so waiting it out and only then noticing Ctrl+C would
- * mean the abort never actually exercises the in-flight path -- which is
+ * transfer that is still on the wire.  A whole frame is a single descriptor
+ * chain here (~26 ms at 48 MHz), so waiting it out and only then noticing
+ * Ctrl+C would mean the abort never exercises the in-flight path -- which is
  * precisely the path M-G3b's Ctrl+C handling will depend on.
  *
  * Returns 0 on completion, 1 when @p stop asked to stop (the chain is halted

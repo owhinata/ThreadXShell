@@ -61,6 +61,13 @@ static const struct devmem_region devmem_map[] = {
 	{ 0x34000000u, 0x00200000u, 1, 1, WALL, "SRAM01"}, /* SRAM0+SRAM1 2 MB   */
 	{ 0x36000000u, 0x00060000u, 1, 1, WALL, "SRAM2" }, /* 384 KB             */
 	{ 0xE0000000u, 0x00100000u, 1, 1, W32,  "PPB"   }, /* SCB/NVIC/SysTick/DWT */
+	/* Peripheral registers, secure aliases (issue #30).  READ ONLY and
+	 * 32-bit only: this window covers the SCU, the timers, every GPIO group
+	 * and the SPI/DMA controllers, and a stray write there could reprogram
+	 * the clock tree this app is contractually forbidden to touch.  Reading
+	 * is how a bring-up gets diagnosed without a debugger -- and this board
+	 * has no public TRM, so a raw dump is often the only honest answer. */
+	{ 0x50000000u, 0x07000000u, 1, 0, W32,  "PERIPH"}, /* AHB/APB aliases    */
 };
 
 /* "8"/"16"/"32" -> access width in bytes (1/2/4). */

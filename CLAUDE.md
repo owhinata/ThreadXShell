@@ -385,6 +385,21 @@ git branch -d feat/<N>-short-description
 - **MVE**: ThreadX M55 ポートは VPR を保存しない — 自作コードで MVE intrinsics/自動
   ベクトル化を使わない（ベンチの TU は `-fno-tree-vectorize`。ポストリンクの
   `check_mve_predication.py` が検査）。
+- **SPI LCD**（Waveshare 2inch / ST7789VW、M-G3a / #30）: SSPIM を **PB7(DO)/PB8(CLK)**
+  へ mux、**CS=PB11 / DC=PB6 / RST=PA0 / BL=PA2 は GPIO**。
+  **[!] 配線は pad 番号で数える。刻印は XIAO のピン位置ラベルで HX6538 の信号名ではない** —
+  `CLK`/`MISO`/`MOSI` は microSD バス（PB4/PB3/PB2）、さらに **`TXD` は pad 7 (PB6) /
+  `RXD` は pad 8 (PB7) で機能名と逆**（実際に DIN と DC を入れ替えて配線し 1 セッション溶かした）。
+  pad 番号の確認は **`lcd backlight off`**（PA2 だけが無計測で導通を確認できる。
+  点灯しているだけでは 2.2k プルアップのせいで何の証明にもならない）。
+  CS を GPIO にするのは RAMWR 中に CS を保持するため。フレームは `spi_write_ptl()` 1 発
+  （内部で DMA の circular LLI に落ちる。`spi_write_dma` の 4095B 上限は回避）。
+  **[!] DMA 完了コールバックは「FIFO に渡した」であって「ワイヤに出した」ではない** —
+  DC/CS を動かす前に `SR.BUSY==0 && SR.TFE==1` を待つ。
+  フレームバッファとコマンドのバウンスバッファは **SRAM の `.lcd_fb`（NOLOAD）**
+  — TCM は DMA から見えない（スタックも .rodata も不可）。**fps は完了条件にしない**。
+  GPIO は **PL061 系**（`+0x000`〜`+0x3FC` はアドレスがビットマスクのデータレジスタ、
+  方向は `+0x400`）。詳細は board README。
 - ポストビルドゲート 4 本（`boards/grove-vision-ai-v2/cmake/`）: イメージ整合
   （生成 `.img` と ELF の突き合わせ + `.rodata` 内のコマンドレジストリ検証）/
   配置・予算（ITCM/DTCM headroom、ベクタ常駐、静的スタック、禁止シンボル残存、

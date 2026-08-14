@@ -237,6 +237,25 @@ SECTIONS
         __sram_bench_end = .;
     } > CM55M_S_SRAM
 
+    /* The ST7789 framebuffer (issue #30).  240x320 RGB565 = 150 KB, in SRAM
+     * because that is the memory the DMA controller reaches -- ITCM and DTCM
+     * are CPU-private on this part, and a framebuffer placed there would not
+     * fault, it would simply never appear on the panel.
+     *
+     * NOLOAD for the same reason as the bench buffers, but the stake is bigger:
+     * 150 KB of zeros in the image would be 150 KB written to the external NOR
+     * on every flash, on the part this project deliberately does not wear out.
+     * Because it is NOLOAD its contents survive a reset and start undefined --
+     * every producer writes every pixel it claims.  KEEP so --gc-sections
+     * cannot drop the reservation and let something else land on top.
+     * check_placement_budget.py pins symbol -> size -> section -> SRAM. */
+    .lcd_fb (NOLOAD) : ALIGN(32)
+    {
+        __lcd_fb_start = .;
+        KEEP(*(.lcd_fb))
+        __lcd_fb_end = .;
+    } > CM55M_S_SRAM
+
     /* High-water mark of the SRAM window, for the `free` command (issue #26).
      * MUST stay after every section assigned to CM55M_S_SRAM -- the location
      * counter here still belongs to that region, and the next output section

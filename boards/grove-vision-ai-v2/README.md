@@ -160,12 +160,116 @@ asks:
   still counting down;
 - the wrapped vector still holds our wrapper (a vendor call that reinstalled
   its own handler downgrades to `--`);
-- **no interrupt other than the accounted one is enabled at the NVIC** -- an
-  unwrapped ISR does not corrupt anything, it just bills its own runtime to
-  whichever thread it interrupted, which is exactly the misattribution this
-  machinery exists to prevent;
+- **every interrupt enabled at the NVIC is one of the REGISTERED ones, and
+  every registered one still carries the wrapper we installed** -- an unwrapped
+  ISR does not corrupt anything, it just bills its own runtime to whichever
+  thread it interrupted, which is exactly the misattribution this machinery
+  exists to prevent;
 - the profile kit's ISR nesting counter is zero when read from a thread, i.e.
   every enter had its exit.
+
+### The accounted-interrupt registry
+
+UART0 was the only interrupt in M-G2, so the check was "exactly this one line
+is enabled".  From issue #30 the registry holds a **set**
+(`tx_glue_profile_register_irq()`), because the LCD -- and the camera after it
+-- add lines whose numbers are not known until the prebuilt driver has been
+brought up.
+
+There is deliberately **no "enabled but unwrapped" category.**  A line the
+firmware enables is either wrapped and registered, or it is left disabled and
+its status polled instead.  Anything else re-opens the fail-open that #25
+closed: the interrupt bills its runtime to an innocent thread while
+`tx_glue_profile_ok()` still answers 1.
+
+For a peripheral whose interrupt set is a property of the vendor binary rather
+than of any header, that set is **measured, not guessed**
+(`port/sdk_seam/epk_irq_wrap.c`): snapshot `NVIC->ISER`, run the vendor
+bring-up with interrupts masked, then wrap and register every line that
+appeared.  A line that cannot be wrapped or registered stays disabled and the
+whole bring-up is abandoned -- losing the peripheral is the cheap failure.
+
+## The vendor timer API seam
+
+The prebuilt camera archives (`libsensordp.a`, `libextdevice.a`, and
+`libdriver.a`'s own PWM object) call four vendor timer entry points:
+`hx_drv_timer_hw_start`, `hx_drv_timer_hw_stop`, and
+`hx_drv_timer_cm55x_delay_ms`/`_us`.  This port bars the whole `hx_drv_timer_*`
+prefix from the image -- TIMER2 is the profile-kit time source and no
+name-based check can tell which timer id a generic call carries -- so linking
+those archives unchanged would fail the build.
+
+**This is a gate conflict, not a hardware conflict.**  Disassembly of
+`sensor_dp_lib.o` shows all 41 `hw_start`/`hw_stop` call sites passing a
+constant `TIMER_ID_0`, and the delay entry points resolve (via the SDK's
+`interface/timer_interface.c`, under `CM55_BIG` + non-`TRUSTZONE_NS`) to the
+`TIMER_ID_3` wrappers.  Nothing asks for TIMER2.
+
+The fix is a board-owned seam rather than a weaker gate: `board.cmake` passes
+`-Wl,--wrap` for the four symbols and `port/sdk_seam/timer_seam.c` implements
+them, **never calling `__real_*`**.  After the wrap, no `hx_drv_timer_*` symbol
+except the one permitted `hx_drv_timer_init` reaches the ELF, so the placement
+gate and the `AGENTS.md` invariant stay exactly as they were.  (An
+argument-inspecting gate was considered and rejected: `AGENTS.md` makes both the
+blanket ban and "do not weaken the gate" invariants, and general argument
+analysis would be a brittle whole-program binary pass -- tail calls,
+address-taken relocations, function pointers, linker veneers.)
+
+The seam's own rules:
+
+- `hw_start()` is **thread context only** (it talks to the SCU and installs a
+  vector), `hw_stop()` is **ISR-safe** -- the vendor reaches it from its own
+  Timer0 callback, so it does MMIO and NVIC only: no logging, no mutex, no
+  ThreadX call, no fail-stop loop.
+- Any id other than `TIMER_ID_0`, and any configuration the seam does not
+  reproduce exactly, is **refused without writing a single register**.  The
+  reason is latched (a string literal) and `epk` prints it.
+- A `hw_start()` whose interrupt cannot be registered with the accounting
+  registry is refused outright rather than started with an unaccounted line.
+- The delays spend DWT cycles (`udelay()`), not a Himax timer.
+
+Three independent things hold this down:
+
+| what | where |
+|---|---|
+| no vendor timer code survives the wrap | `cmake/check_timer_seam.py`, run on the `seam_probe` link (the firmware objects **plus** the camera archives) |
+| the gate actually fails when it should | `cmake/fixtures/run_fixture_tests.py` -- F1 removes one `--wrap`, F2 leaves the archives out, F3 proves the pristine link passes |
+| the refusal path writes nothing | `test/test_timer_seam.c`, a host test that compiles the real `timer_seam.c` against the real SDK headers with the register block pointed at an array |
+
+```sh
+python3 boards/grove-vision-ai-v2/cmake/fixtures/run_fixture_tests.py \
+    --build-dir build/grove-vision-ai-v2 --board-dir boards/grove-vision-ai-v2
+sh shell/test/run_host_tests.sh grove-vision-ai-v2
+```
+
+`seam_probe` is a build target, not an artifact -- nothing flashes it.  It
+exists because M-G3a does not link the camera archives, so every wrapper is
+garbage-collected out of `shell` and the claim would otherwise go unchecked
+until M-G3b.
+
+### [!] Carried forward to M-G3b: the Timer0 interrupt path is unverified
+
+`hw_start()` proves the counter RUNS -- four windows timed by `udelay()` (DWT
+cycles, independent of the timer under test), each required to show motion, and
+the amount checked against the rate Timer0's own clock predicts wherever a
+window cannot contain a whole cycle.  That closes "armed but stationary" and
+"armed but running at some other rate".
+
+It does **not** prove the interrupt gets delivered.  A Timer0 whose counter is
+fine while `IRQEN` produces no `INTSTATUS`, or whose NVIC path is dead, would
+still be accepted, and the datapath's 500 ms frame watchdog would then never
+fire a callback -- armed, believed, and useless.  The registry cannot catch it
+either, since registered-but-disabled is a state it deliberately permits.
+
+Nothing in M-G3a executes this code (the camera archives are not linked, so the
+whole seam is garbage-collected out of `shell`), which is exactly why it is left
+here rather than guessed at: the probe wants designing against real behaviour.
+**When M-G3b links the archives, verify before relying on the watchdog:** arm a
+short reload, confirm `INTSTATUS` asserts on its own, restore the requested
+reload, read `NVIC->ISER` back after `NVIC_EnableIRQ`, and ideally confirm the
+seam's ISR is reached once before the vendor callback is exposed.  There is no
+public TRM and the vendor's `CTRL` bit 2 is still unexplained (see
+`timer_seam.c`), so this is not a hazard to reason away.
 
 ## WFI
 
@@ -260,6 +364,189 @@ attributes are.  So it dumps `SCB->CCR`, `MEMSYSCTL` (`MSCR` including FORCEWT
 / DCACTIVE / ICACTIVE / ECCEN, `PFCR`, `ITCMCR`, `DTCMCR`), the MPU type,
 control, MAIR pair and every enabled region, and lets you decide.  The SRAM
 rows are labelled "as the CPU sees it", never "cached".
+
+## SPI LCD (Waveshare 2inch, ST7789VW)
+
+`lcd` drives a 240x320 RGB565 panel on the 2x7 XIAO footprint on the board's
+underside (issue #30, M-G3a).
+
+```
+lcd                    state, read-back SCLK, ideal frame time
+lcd init               bring the panel up (the other subcommands do it for you)
+lcd bar                colour bars -- the wiring AND byte-order test
+lcd fill <rgb565>      one flat colour, e.g. `lcd fill 0xF800`
+lcd loop [n]           repeated full-frame DMA writes, Ctrl+C to stop
+lcd backlight on|off   PA2
+```
+
+### [!] Wiring: count pads, do not read the silkscreen
+
+**Wire by PAD NUMBER.**  The silkscreen on this footprint is the generic XIAO
+pin-position labelling and does NOT name the HX6538 signal on the pad.  Two
+traps, both of which have already cost a debugging session:
+
+- The pads marked `CLK` / `MISO` / `MOSI` are **PB4 / PB3 / PB2 -- the microSD
+  bus**, not a free SPI port.
+- **`TXD` is pad 7 (PB6) and `RXD` is pad 8 (PB7)** -- the labels follow the
+  XIAO convention (pin 7 = TX, pin 8 = RX) while this chip's own function names
+  run the other way (PB6 is UART1_RX, PB7 is UART1_TX).  Wiring DIN to the pad
+  that *says* `TXD` puts it on PB6, i.e. on DC, and swaps the two.  The failure
+  is silent and total: the SPI controller clocks out every byte correctly, every
+  call returns success, and the panel sits at its power-on sleep-in/display-off
+  state with the backlight lit.
+
+Pad numbers below are from the PCB netlist in
+`_ref/grove-vision-ai-v2/Grove_Vision_AI_Module_V2_Layout`:
+
+| LCD | pad | HX6538 | pinmux |
+|---|---|---|---|
+| RST | 1 | PA0 | 2 = `AON_GPIO0` |
+| CS | 2 | PB11 | 2 = `GPIO2` (driven by hand) |
+| CLK | 3 | PB8 | 8 = `SPI_M_CLK` |
+| BL | 6 | PA2 | 2 = `SB_GPIO0` |
+| DC | 7 | PB6 | 1 = `GPIO0` |
+| DIN (MOSI) | 8 | PB7 | 8 = `SPI_M_DO` |
+| VCC | 12 | - | |
+| GND | 13 | - | |
+
+Pads 4, 5, 9, 10, 11, 14 are not used by the panel: 4 is the **board's own
+RESETN** (not the panel's), 5 is PA3, 9/10/11 are the microSD bus, and 14 is USB
+VBUS -- not a supply for a 3.3 V panel.
+
+**Finding pad 6 without counting:** `lcd backlight off` / `on`.  PA2 is the
+backlight pin, so the panel responds only if that wire is on the right pad --
+which also confirms the numbering for every other wire.  It is the one signal
+whose connectivity can be checked with no instrument at all, and it is worth
+doing FIRST: a lit backlight alone proves nothing, because PA2 carries a 2.2k
+pull-up to 3V3 and the panel lights up from that whether or not the wire exists.
+- **The header has exactly one 3V3 pad and one GND pad.**  That is why `BL` is
+  a GPIO rather than a second wire into 3V3: PA2 carries a 2.2k pull-up to 3V3
+  (`R1`), so the backlight is on from power-up, and driving it low sinks about
+  4 mA (2.2k on the 3V3 side plus the Grove connector's 2.2k to 5 V through
+  `Q4`'s body diode).
+- **[!] `lcd backlight off` holds the Grove connector's I2C SCL low**, through
+  that same level shifter.  A Grove I2C device and a dimmed backlight are
+  mutually exclusive.
+- **microSD and the LCD share the SSPI master** and cannot be used at once.
+- **[!] While the LCD is enabled, SWD is not available on PB7/PB8** (their
+  reset-default mux is SWCLK/SWDIO, and PB6 can be SRSTN).  Flashing and
+  recovery are unaffected -- the pinmux returns to its defaults at reset, so
+  attach-under-reset still works -- but the alternative SWD mux on PA2/PA3 is
+  also gone once PA2 drives the backlight.
+
+### Why CS is a GPIO
+
+The ST7789 ends a memory write when CS goes high.  Nothing documents whether
+this controller holds its hardware `SPI_M_CS` low across a DMA descriptor
+chain, and the failure mode if it does not is a torn frame every time.  Driving
+PB11 by hand makes the question irrelevant: CS goes low before `RAMWR` and high
+after the last pixel.
+
+At reset PB11 has no pull-up and PB pins come up low, i.e. CS reads *asserted*
+before software runs.  That window is harmless only because the panel is held
+in reset (PA0 is also low) and no clock is toggling; `lcd_pins_init()` is what
+ends it, driving CS high before the reset pulse is released.
+
+### One DMA burst per frame
+
+A full frame is 153,600 bytes and the SSPI master's plain `spi_write_dma()`
+tops out at 4095 -- 38 chunks if the chaining were done in this port.  It is
+not: `spi_write_ptl()` lands on the DMA controller's
+`dmac_peritransfer_prerolling()`, a **circular linked list walked by the
+hardware** and refilled by the vendor's own `dw_spi_s_tx_ptl_isr`, with a
+documented ceiling of 256*4095 bytes.  One call per frame, one completion, no
+chunk-boundary state machine.  The vendor entry point also cleans the D-cache
+over the buffer, so the framebuffer needs no maintenance here.
+
+The framebuffer lives in **SRAM** (`.lcd_fb`, NOLOAD, 32-byte aligned): ITCM and
+DTCM are CPU-private on this part, so a framebuffer placed there would not
+fault -- the panel would just stay blank while every call reported success.
+`check_placement_budget.py` pins symbol -> size -> section -> SRAM.
+
+### [!] A DMA completion is not a transfer completion
+
+The completion callback fires when the last byte reaches the SPI **TX FIFO**,
+not when it leaves the pin.  For a one-byte command that is effectively
+immediate, so raising DC to "data" straight after the callback puts the command
+byte on the wire *as data*: the panel then treats every command as data, nothing
+is ever configured, and it sits in its power-on sleep-in/display-off state --
+while the pixel DMA keeps reporting success and the timing keeps looking right.
+The same hazard releases CS mid-pixel at the end of a frame.
+
+`lcd_spi_wait_idle()` therefore polls `SR.BUSY == 0 && SR.TFE == 1` after every
+burst, before any caller touches DC or CS.  This cost one debugging session; it
+is not optional.
+
+### Speed and interruption
+
+The SSPI master's output is always the reference divided by an **even** divider
+and the controller caps at **50 MHz**.  On the SDK's default low-speed source
+this lands on 24 MHz: **measured 19.5 fps, 100 frames in 5127 ms**, i.e. 51.3 ms
+per frame against 51.2 ms of pure wire time -- the DMA adds essentially nothing,
+because a whole frame is one descriptor chain.
+
+**Frame rate is not a completion condition for M-G3a** and the numbers `lcd`
+prints are labelled as ceilings: even at the 50 MHz maximum the ideal ceiling
+is ~40 fps before any DMA turnaround, `RAMWR`, or inter-frame gap.  Re-sourcing
+SSPIM from a PLL is issue #32.  The achieved clock is **read back from the
+controller**, never assumed.
+
+`lcd loop` waits in 1-tick slices rather than one long block so Ctrl+C aborts a
+transfer that is still **on the wire** -- with one burst per frame, waiting the
+burst out and only then noticing the cancel would never exercise the in-flight
+path that M-G3b's Ctrl+C handling depends on.  An abort halts the chain and then
+**drains the completion semaphore**: `spi_write_ptl_halt()` races the transfer it
+stops, and a count left behind would make the next burst return before its data
+had gone out, desynchronising every transfer after it.  Verified on hardware:
+abort mid-burst, `lcd bar` immediately after, then `lcd loop 100` back at
+19.5 fps.
+
+A cancelled `lcd loop` prints nothing by design -- the shared core discards
+output produced while `cancel_req` is set, so `^C` is the feedback.
+
+An abort that cannot prove the controller stopped (`SR.BUSY` never clears) does
+not gamble: the DMA lines stay **masked**, the panel latches faulted, and
+`lcd init` refuses until the next reboot.  Clearing pending and re-enabling a
+line while the controller might still be shifting is how a completion arrives
+*after* the drain -- and a count left in the semaphore makes the next burst
+report success before its data has gone out.
+
+### The panel is single-owner
+
+The shell runs any command as a background job, so `lcd loop &` is a real second
+thread contending for the framebuffer, the command bounce buffer, the CS/DC
+pins, the vendor SPI device and the completion semaphore.  The cheapest of those
+collisions overwrites pixels a DMA is still reading; the worst has one caller
+consume another's completion, or halt another's chain during its own
+cancellation, which wedges the vendor driver's busy flag for good.
+
+A ThreadX mutex guards the whole driver.  Contenders **fail rather than queue**
+(`lcd: busy`): a background job silently blocking the console for 51 ms a frame
+is not an improvement on being told the panel is taken.  The mutex is recursive,
+so a command holding it across a whole loop still nests through
+`lcd_fill()`/`lcd_blit()`, and each of those guards itself for callers that come
+from elsewhere (M-G3b's frame sink will).
+
+### Bring-up is a transaction
+
+`lcd_teardown()` unwraps the accounted interrupts **before** closing the SPI
+device, and every failure path calls it -- including ones that happen long after
+`lcd_spi_open()` returned, such as the panel's init table failing.
+
+The order matters and so does the completeness.  `grove_epk_irq_wrap_new()` can
+wrap two lines and then fail on the third; leaving those two registered while
+the caller closes the device underneath lets `spi_close()` move a vector out
+from under a live registration, and `thread` then reads `--` until the next
+reboot.  So the wrap returns an undo log (`struct epk_irq_wrapset`) and the
+caller rolls the whole attempt back.  Wrapping a line that is already wrapped is
+refused outright, because a duplicate entry would make the unwrap restore
+whichever one it found first -- a stale vendor vector on a live interrupt.
+
+`test/test_epk_irq_wrap.c` pins this: partial failure, rollback, nine failed
+attempts followed by a successful one (more than the eight trampoline slots, so
+a leak fails the test), and a sweep after every step asserting the invariant
+`AGENTS.md` states -- **every line is either disabled, or wrapped AND
+registered**, never a third thing.
 
 ## Flashing and recovery
 

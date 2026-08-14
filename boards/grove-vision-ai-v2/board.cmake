@@ -267,6 +267,7 @@ set(SHELL_SOURCES
     "${BOARD_DIR}/cmds/cmd_coremark.c"
     "${BOARD_DIR}/cmds/cmd_membench.c"
     "${BOARD_DIR}/cmds/cmd_epk.c"
+    "${BOARD_DIR}/cmds/cmd_lcd.c"
     "${CMAKE_SOURCE_DIR}/svc/fmt.c"
     "${BOARD_DIR}/svc/timebase.c"
     "${BOARD_DIR}/svc/log.c")
@@ -323,6 +324,7 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/threadx/tx_glue.c"
     "${BOARD_DIR}/port/sdk_seam/timer_seam.c"
     "${BOARD_DIR}/port/sdk_seam/epk_irq_wrap.c"
+    "${BOARD_DIR}/port/lcd/lcd_st7789.c"
     ${SHELL_SOURCES}
     ${SDK_SOURCES}
     ${TX_CORE} ${TX_ASM} ${TX_EPK})
@@ -338,6 +340,7 @@ target_include_directories(shell_objs PRIVATE
     "${BOARD_DIR}/src"
     "${BOARD_DIR}/port/threadx"
     "${BOARD_DIR}/port/sdk_seam"
+    "${BOARD_DIR}/port/lcd"
     "${BOARD_DIR}/backend"
     "${BOARD_DIR}/cmds"         # bench_gate.h: shared by coremark + membench
     "${CMAKE_SOURCE_DIR}/shell/include"

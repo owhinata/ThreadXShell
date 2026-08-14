@@ -98,6 +98,11 @@ RESIDENCY = [
     ("itcm_bench_buf",  4 * 1024, ".itcm_bench", "ITCM", ITCM),
     ("dtcm_bench_buf",  4 * 1024, ".dtcm_bench", "DTCM", DTCM),
     ("sram_bench_buf", 64 * 1024, ".sram_bench", "SRAM", SRAM),
+    # ST7789 framebuffer (issue #30).  Same binding as the bench buffers, and
+    # for a sharper reason: a framebuffer that landed in ITCM or DTCM would not
+    # fault -- the DMA controller cannot reach TCM on this part, so the panel
+    # would simply stay blank while every call reported success.
+    ("lcd_fb", 240 * 320 * 2, ".lcd_fb", "SRAM", SRAM),
     # CoreMark MEM_STATIC working set: a plain .bss array, so there is no
     # dedicated section to pin it to -- only the region matters.
     ("static_memblk",   2 * 1000, None,          "DTCM", DTCM),
@@ -106,7 +111,7 @@ RESIDENCY = [
 # The benchmark buffers must stay NOBITS: they are sized in tens of kilobytes
 # and a LOADable one would be flashed as that many bytes of zeros (and would
 # then also have to satisfy the image-coherence gate).
-NOBITS_SECTIONS = [".itcm_bench", ".dtcm_bench", ".sram_bench"]
+NOBITS_SECTIONS = [".itcm_bench", ".dtcm_bench", ".sram_bench", ".lcd_fb"]
 
 
 def run(cmd):

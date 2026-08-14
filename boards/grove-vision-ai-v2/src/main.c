@@ -32,6 +32,7 @@
 #include "cli.h"
 #include "cli_instance.h"
 #include "cli_backend_uart.h"
+#include "lcd_st7789.h"
 
 #define LOG_TAG "main"
 #include "log.h"
@@ -123,6 +124,12 @@ void tx_application_define(void *first_unused_memory)
 	if (cli_init(&uart_sh) == 0)
 		cli_start(&uart_sh);
 	cli_job_pool_init();            /* background-job worker pool (`cmd &`) */
+
+	/* ST7789 driver objects (issue #30).  Created here, not in lcd_init():
+	 * the port's rule is that a ThreadX object exists before any interrupt
+	 * that touches it can be enabled, and lcd_init() -- which runs later, on
+	 * the shell thread -- is what enables the SPI/DMA lines. */
+	lcd_create_objects();
 
 	/* Boot banner via printf -> _write -> the UART TX ring.  Pre-scheduler
 	 * _write only enqueues (never waits); the backend flushes the ring once

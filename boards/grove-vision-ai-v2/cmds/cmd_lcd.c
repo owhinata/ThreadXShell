@@ -28,8 +28,20 @@
  *                     cannot reach: M-G3b's camera path depends on starting a
  *                     burst, finishing it, and being able to stop MID-CHAIN,
  *                     and none of that is exercised by drawing one frame.
+ *   lcd orient     -- WHERE IS (0,0) and which way do the axes run?  (issue
+ *                     #31.  The colour bars cannot answer this: transposed and
+ *                     mirrored look identical in eight vertical stripes.)
+ *   lcd rot <deg>  -- does MADCTL rotate this panel at all?
+ *   lcd madctl <b> -- the same question with the raw byte, for the four bit
+ *                     patterns that are not one of the named rotations.
  *   lcd backlight  -- PA2 on/off (the pin has a 2.2k pull-up to 3V3, so the
  *                     backlight is on from power-up until something drives it).
+ *
+ * WHY `madctl` TAKES A RAW BYTE.  Issue #31 is a measurement, and its whole
+ * cost is in the retries: if 0x60 comes back mirrored the next thing to try is
+ * 0xA0, then 0x20, then 0xE0.  Compiling the value in would spend a flash cycle
+ * per trial on an external NOR this project is explicitly rationing, so the
+ * eight MY/MX/MV combinations are reachable from the console instead.
  */
 #include "cli.h"
 #include "lcd_st7789.h"
@@ -56,14 +68,46 @@ static void lcd_reg_out(void *ctx, const char *name, uint32_t value)
 	          (unsigned long)value);
 }
 
+/*
+ * The current orientation, in the form that says the most in one line: the
+ * geometry the driver will accept, the raw byte behind it, and -- only when the
+ * byte is one of the four named rotations -- the angle.
+ *
+ * [!] Takes a SNAPSHOT, never the individual accessors.  Reading rotation,
+ * width, height and MADCTL one at a time is not atomic as a group, and the
+ * shell runs commands as background jobs, so a concurrent `lcd rot 90 &` can
+ * land between two of the reads.  The line would then report a combination that
+ * never existed -- "320x240, madctl 60 (rot 0)".  For the command whose whole
+ * purpose in issue #31 is to say what the orientation IS, a plausible-looking
+ * lie is the worst available failure.
+ */
+static void lcd_print_orientation(struct cli_instance *sh,
+                                  const struct lcd_status *st)
+{
+	cli_print(sh, "orientation: %ux%u, madctl %02x", st->width, st->height,
+	          st->madctl);
+	if (st->rotation == LCD_ROT_CUSTOM)
+		cli_print(sh, " (raw, not a named rotation)\r\n");
+	else
+		cli_print(sh, " (rot %u)\r\n", st->rotation);
+}
+
 static void lcd_report(struct cli_instance *sh)
 {
+	struct lcd_status st;
+
+	/* One snapshot for the whole report: asking twice could say "up" and
+	 * then print nothing, or print a geometry from a different instant. */
+	lcd_get_status(&st);
+
 	cli_print(sh, "panel      : ST7789VW 240x320 RGB565, 4-wire SPI\r\n");
 	cli_print(sh, "state      : %s\r\n",
-	          lcd_ready() ? "up" : "not initialised");
-	if (lcd_ready()) {
-		uint32_t hz = lcd_sclk_hz();
-		uint32_t bytes = 240u * 320u * 2u;
+	          st.ready ? "up" : "not initialised");
+	if (st.ready) {
+		uint32_t hz = st.sclk_hz;
+		uint32_t bytes = (uint32_t)st.width * st.height * 2u;
+
+		lcd_print_orientation(sh, &st);
 
 		cli_print(sh, "sclk       : %lu Hz (read back from the "
 		              "controller)\r\n", (unsigned long)hz);
@@ -203,6 +247,108 @@ static int cmd_lcd(struct cli_instance *sh, int argc, char **argv)
 		return 0;
 	}
 
+	if (strcmp(argv[1], "orient") == 0) {
+		struct lcd_status st;
+		int rc;
+
+		if (lcd_hold_ready(sh) != 0)
+			return 1;
+		rc = lcd_orient(lcd_stop_cb, sh);
+		/* Snapshot while the panel is still HELD, so the line describes
+		 * the orientation this pattern was actually drawn in rather
+		 * than whatever a background job may have set since. */
+		lcd_get_status(&st);
+		lcd_release();
+		if (rc < 0) {
+			cli_error(sh, "lcd: orient transfer failed\r\n");
+			return 1;
+		}
+		if (rc == 1)
+			return 0;               /* cancelled; output is dropped */
+		lcd_print_orientation(sh, &st);
+		cli_print(sh, "  white 32x32 square = pixel (0,0)\r\n");
+		cli_print(sh, "  red bar    = the +X axis (row 0, full width)\r\n");
+		cli_print(sh, "  green bar  = the +Y axis (column 0, full "
+		              "height)\r\n");
+		cli_print(sh, "  blue 24x24 square = the far corner "
+		              "(w-1,h-1)\r\n");
+		return 0;
+	}
+
+	if (strcmp(argv[1], "rot") == 0) {
+		struct lcd_status st;
+		unsigned long v;
+		char *end = NULL;
+
+		if (argc < 3) {
+			if (lcd_hold_ready(sh) != 0)
+				return 1;
+			lcd_get_status(&st);
+			lcd_release();
+			lcd_print_orientation(sh, &st);
+			return 0;
+		}
+		v = strtoul(argv[2], &end, 0);
+		if (end == argv[2] || *end != '\0') {
+			cli_error(sh, "lcd: rot takes 0, 90, 180 or 270\r\n");
+			return 1;
+		}
+		if (lcd_hold_ready(sh) != 0)
+			return 1;
+		if (lcd_set_rotation((unsigned)v) != 0) {
+			lcd_release();
+			cli_error(sh, "lcd: rot takes 0, 90, 180 or 270 (and "
+			              "the panel must accept the write)\r\n");
+			return 1;
+		}
+		lcd_get_status(&st);
+		lcd_release();
+		lcd_print_orientation(sh, &st);
+		cli_print(sh, "  now run `lcd orient` -- the picture is the "
+		              "measurement, not this line\r\n");
+		return 0;
+	}
+
+	if (strcmp(argv[1], "madctl") == 0) {
+		struct lcd_status st;
+		unsigned long v;
+		char *end = NULL;
+
+		if (argc < 3) {
+			if (lcd_hold_ready(sh) != 0)
+				return 1;
+			lcd_get_status(&st);
+			lcd_release();
+			lcd_print_orientation(sh, &st);
+			return 0;
+		}
+		v = strtoul(argv[2], &end, 0);
+		if (end == argv[2] || *end != '\0' || v > 0xFFu) {
+			cli_error(sh, "lcd: madctl takes one byte, e.g. "
+			              "0x60\r\n");
+			return 1;
+		}
+		if (lcd_hold_ready(sh) != 0)
+			return 1;
+		if (lcd_set_madctl((uint8_t)v) != 0) {
+			lcd_release();
+			cli_error(sh, "lcd: madctl write failed\r\n");
+			return 1;
+		}
+		lcd_get_status(&st);
+		lcd_release();
+		lcd_print_orientation(sh, &st);
+		/* MV is the only bit that changes the geometry, so it is the
+		 * only one worth restating: MX/MY move the origin around within
+		 * whichever shape MV picked. */
+		cli_print(sh, "  MY %u MX %u MV %u RGB-order %s\r\n",
+		          (unsigned)((v & LCD_MADCTL_MY) != 0u),
+		          (unsigned)((v & LCD_MADCTL_MX) != 0u),
+		          (unsigned)((v & LCD_MADCTL_MV) != 0u),
+		          (v & LCD_MADCTL_RGB) ? "BGR" : "RGB");
+		return 0;
+	}
+
 	if (strcmp(argv[1], "fill") == 0) {
 		unsigned long v;
 		char *end = NULL;
@@ -285,12 +431,14 @@ static int cmd_lcd(struct cli_instance *sh, int argc, char **argv)
 		return 0;
 	}
 
-	cli_error(sh, "lcd: usage: lcd [init|bar|fill <rgb565>|loop [n]|"
-	              "regs|backlight on|off]\r\n");
+	cli_error(sh, "lcd: usage: lcd [init|bar|orient|rot [deg]|"
+	              "madctl [byte]|fill <rgb565>|loop [n]|regs|"
+	              "backlight on|off]\r\n");
 	return 1;
 }
 
 CLI_CMD_REGISTER_USAGE(lcd, NULL,
-                       "ST7789 SPI panel: bring-up, test patterns, DMA loop",
-                       "[init|bar|fill <rgb565>|loop [n]|regs|backlight on|off]",
+                       "ST7789 SPI panel: bring-up, test patterns, rotation",
+                       "[init|bar|orient|rot [deg]|madctl [byte]|"
+                       "fill <rgb565>|loop [n]|regs|backlight on|off]",
                        cmd_lcd, 1, 3);

@@ -155,6 +155,24 @@ static DEV_SPI_PTR lcd_spi;
 static uint32_t    lcd_ready_flag;
 static uint32_t    lcd_freq_hz;
 
+/*
+ * Orientation (issue #31).
+ *
+ * lcd_w/lcd_h are the DRAWABLE geometry and follow MADCTL's MV bit; every
+ * bounds check, window and framebuffer stride in this file reads them rather
+ * than LCD_NATIVE_W/H, which now size only the buffer.  The invariant that
+ * makes one buffer serve both orientations is lcd_w * lcd_h == LCD_FB_PIXELS,
+ * and lcd_madctl_apply() is the ONLY place that assigns either, precisely so
+ * that invariant has one owner.
+ *
+ * They are the native portrait pair until a successful init, because until then
+ * nothing may draw anyway (every entry point checks lcd_ready_flag).
+ */
+static uint8_t     lcd_madctl_val;      /* 0x00 = native portrait, RGB order */
+static unsigned    lcd_rot_deg;
+static uint16_t    lcd_w = LCD_NATIVE_W;
+static uint16_t    lcd_h = LCD_NATIVE_H;
+
 /* Latched when the controller could not be proven stopped after an abort.
  * Re-opening a device in an unknown state risks inheriting a completion that
  * belongs to the previous life of the driver, which would make a later burst
@@ -282,18 +300,18 @@ static int lcd_cmd(uint8_t cmd, const uint8_t *args, uint32_t nargs)
  * (0xB1) DROPPED: those configure the RGB parallel interface this panel does
  * not use, and on a 4-wire SPI part they only invite a mode nobody tests.
  *
- * MADCTL is left at the panel's native portrait scan (0x00).  The Wio's note
- * that "MADCTL does not rotate" was measured on an RGB-interface panel, where
- * the scan comes from the controller's own timing rather than from the memory
- * write order -- it does not carry over, so rotation is re-measured here rather
- * than inherited.
+ * MADCTL is NOT in this table (issue #31).  It is the one register here whose
+ * value is a runtime choice rather than a panel constant, and duplicating it in
+ * both places is how the table and lcd_madctl_val drift apart -- a re-init after
+ * a failed bring-up would then quietly snap a rotated panel back to portrait
+ * while lcd_w/lcd_h still said landscape, and every window after that would be
+ * wrong.  lcd_init() applies it once, from the single variable that holds it.
  *
  * Encoded as {cmd, nargs, args...}, terminated by cmd == 0.
  */
 static const uint8_t lcd_init_table[] = {
 	ST_SLPOUT,   0,
 	ST_COLMOD,   1, 0x55,              /* 16 bit/pixel, RGB565            */
-	ST_MADCTL,   1, 0x00,              /* native portrait, RGB order      */
 	ST_PORCTRL,  5, 0x0C, 0x0C, 0x00, 0x33, 0x33,
 	ST_GCTRL,    1, 0x35,
 	ST_VCOMS,    1, 0x19,
@@ -332,6 +350,173 @@ static int lcd_run_init_table(void)
 	}
 	return 0;
 }
+
+/* ---- orientation (issue #31) --------------------------------------------- */
+
+/*
+ * The four named rotations, clockwise from the native portrait scan.
+ *
+ * MV alone transposes; MX/MY then choose which of the two transposed views is
+ * the one that is also rotated rather than mirrored.  These are the values every
+ * ST7789 driver in circulation uses, and `lcd orient` confirmed 0x60 on this
+ * panel: landscape, origin at the top left, a true rotation (issue #31).
+ *
+ * `lcd madctl` stays, for the four bit patterns that are not one of these and
+ * for re-checking after a rewiring -- trying a byte from the console costs
+ * nothing, while compiling one in costs a flash cycle on a NOR rated ~100k.
+ */
+static const struct {
+	unsigned degrees;
+	uint8_t  madctl;
+} lcd_rot_table[] = {
+	{   0u, 0x00u },                                  /* native portrait  */
+	{  90u, LCD_MADCTL_MX | LCD_MADCTL_MV },          /* 0x60 landscape   */
+	{ 180u, LCD_MADCTL_MY | LCD_MADCTL_MX },          /* 0xC0 portrait    */
+	{ 270u, LCD_MADCTL_MY | LCD_MADCTL_MV },          /* 0xA0 landscape   */
+};
+
+/*
+ * Program MADCTL and adopt the geometry it implies.  Internal: assumes the
+ * caller holds the guard and that the SPI is up (lcd_init() calls it before
+ * lcd_ready_flag is set, which is why the ready check lives in the public
+ * wrapper rather than here).
+ *
+ * [!] The geometry is updated only AFTER the write succeeded.  A failed MADCTL
+ * that still moved lcd_w/lcd_h would leave this driver addressing a 320-wide
+ * window on a controller still in 240-wide mode: the CASET would be out of
+ * range, the pixels would land wherever the controller decided to clamp, and
+ * every layer would report success.
+ */
+static int lcd_madctl_apply(uint8_t v)
+{
+	uint16_t w, h;
+	unsigned deg;
+	size_t   i;
+
+	if (lcd_cmd(ST_MADCTL, &v, 1u) != 0) {
+		LOG_ERR("madctl %02x write failed", v);
+		return -1;
+	}
+
+	/* MV is the whole geometry question: set means the address counter is
+	 * transposed, so the panel is addressed 320 wide by 240 tall.  The
+	 * pixel count is identical either way, which is what lets one
+	 * framebuffer serve both. */
+	if ((v & LCD_MADCTL_MV) != 0u) {
+		w = LCD_NATIVE_H;
+		h = LCD_NATIVE_W;
+	} else {
+		w = LCD_NATIVE_W;
+		h = LCD_NATIVE_H;
+	}
+
+	deg = LCD_ROT_CUSTOM;
+	for (i = 0u; i < sizeof lcd_rot_table / sizeof lcd_rot_table[0]; i++) {
+		if (lcd_rot_table[i].madctl == v) {
+			deg = lcd_rot_table[i].degrees;
+			break;
+		}
+	}
+
+	/*
+	 * [!] PUBLISHED AS A GROUP.  The four fields are only meaningful
+	 * together, and lcd_get_status() reads them together, so a reader that
+	 * preempted this function midway would see a byte that does not match
+	 * the geometry beside it -- and `lcd` would print a combination that
+	 * never existed.  The panel guard does not help: readers deliberately
+	 * do not take it, so that a report still answers while a 51 ms frame is
+	 * on the wire.  Four scalar stores under a critical section is the
+	 * whole cost.
+	 */
+	{
+		TX_INTERRUPT_SAVE_AREA
+
+		TX_DISABLE
+		lcd_madctl_val = v;
+		lcd_w          = w;
+		lcd_h          = h;
+		lcd_rot_deg    = deg;
+		TX_RESTORE
+	}
+	return 0;
+}
+
+void lcd_get_status(struct lcd_status *st)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	if (st == NULL)
+		return;
+
+	/* Paired with the publication above: one consistent set, never a mix of
+	 * before and after. */
+	TX_DISABLE
+	st->ready    = lcd_ready_flag ? 1 : 0;
+	st->madctl   = lcd_madctl_val;
+	st->rotation = lcd_rot_deg;
+	st->width    = lcd_w;
+	st->height   = lcd_h;
+	st->sclk_hz  = lcd_freq_hz;
+	TX_RESTORE
+}
+
+static void lcd_teardown(void);
+
+int lcd_set_madctl(uint8_t madctl)
+{
+	int rc;
+
+	if (lcd_acquire() != 0)
+		return -1;
+	if (!lcd_ready_flag) {
+		lcd_release();
+		return -1;
+	}
+
+	rc = lcd_madctl_apply(madctl);
+	if (rc != 0) {
+		/*
+		 * [!] The panel's orientation is now UNKNOWN, not merely
+		 * unchanged, and the difference matters.
+		 *
+		 * lcd_cmd() puts the 0x36 opcode and its parameter on the wire
+		 * as two SEPARATE bursts, so a failure between them leaves a
+		 * controller that has already seen the command; and a burst
+		 * that failed by TIMING OUT may well have shifted its byte out
+		 * regardless.  Neither case is distinguishable from here.
+		 *
+		 * Keeping the previous value would therefore be a guess, and
+		 * the cost of guessing wrong is not a failed command -- it is
+		 * every window from now on being programmed against a geometry
+		 * the controller does not have, clamped silently while every
+		 * layer reports success.  So the device is torn down instead,
+		 * exactly as every other bring-up failure in this file is: the
+		 * next lcd_init() re-establishes a known state through the
+		 * reset pulse and re-applies the orientation from the single
+		 * variable that holds it.
+		 */
+		LOG_ERR("madctl failed; orientation unknown, tearing down");
+		lcd_teardown();
+	}
+	lcd_release();
+	return rc;
+}
+
+int lcd_set_rotation(unsigned degrees)
+{
+	size_t i;
+
+	for (i = 0u; i < sizeof lcd_rot_table / sizeof lcd_rot_table[0]; i++) {
+		if (lcd_rot_table[i].degrees == degrees)
+			return lcd_set_madctl(lcd_rot_table[i].madctl);
+	}
+	return -1;
+}
+
+unsigned lcd_rotation(void) { return lcd_rot_deg; }
+uint8_t  lcd_madctl(void)   { return lcd_madctl_val; }
+uint16_t lcd_width(void)    { return lcd_w; }
+uint16_t lcd_height(void)   { return lcd_h; }
 
 /* ---- bring-up ----------------------------------------------------------- */
 
@@ -565,7 +750,12 @@ int lcd_init(void)
 	}
 
 	lcd_reset_pulse();
-	if (lcd_run_init_table() != 0) {
+	/* MADCTL is applied from lcd_madctl_val rather than from the table, so a
+	 * re-init after a failed bring-up restores the orientation that was set
+	 * rather than silently reverting to portrait behind lcd_w/lcd_h.  The
+	 * reset pulse put the controller back at 0x00, so this is a real write
+	 * even when the value has not changed. */
+	if (lcd_run_init_table() != 0 || lcd_madctl_apply(lcd_madctl_val) != 0) {
 		/* The SPI came up and its interrupts are wrapped; the PANEL is
 		 * what failed.  Roll the whole thing back rather than leaving
 		 * live wrappers around a device about to be closed. */
@@ -580,8 +770,10 @@ int lcd_init(void)
 
 	lcd_ready_flag = 1u;
 	lcd_backlight(1);
-	LOG_INF("st7789 up: sclk %lu Hz (source %lu Hz), fb %u B in SRAM",
+	LOG_INF("st7789 up: sclk %lu Hz (source %lu Hz), %ux%u madctl %02x, "
+	        "fb %u B in SRAM",
 	        (unsigned long)lcd_freq_hz, (unsigned long)src_hz,
+	        (unsigned)lcd_w, (unsigned)lcd_h, lcd_madctl_val,
 	        (unsigned)sizeof lcd_fb);
 	lcd_release();
 	return 0;
@@ -897,10 +1089,7 @@ int lcd_blit(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 	uint32_t total;
 	int rc;
 
-	if (!lcd_ready_flag || pixels == NULL)
-		return -1;
-	if (w == 0u || h == 0u ||
-	    (uint32_t)x + w > LCD_NATIVE_W || (uint32_t)y + h > LCD_NATIVE_H)
+	if (pixels == NULL)
 		return -1;
 
 	/* Exclusive for the WHOLE transaction: window, RAMWR and pixels are one
@@ -909,6 +1098,27 @@ int lcd_blit(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 	 * holding the guard (lcd_fill, or a command spanning a loop) nests. */
 	if (lcd_acquire() != 0)
 		return -1;
+
+	/*
+	 * [!] VALIDATED INSIDE THE GUARD, and it has to be.  Since issue #31
+	 * both lcd_ready_flag and the geometry are things another thread can
+	 * change -- `lcd rot 90` moves lcd_w/lcd_h, a teardown clears ready --
+	 * so anything checked before the acquire describes a panel state that
+	 * need not still hold when the window is programmed a moment later.  A
+	 * blit accepted against 320x240 and then issued to a controller since
+	 * put back to 240 wide runs CASET past its range: the controller
+	 * clamps, the pixels land somewhere else, and every layer still reports
+	 * success.  That is the silent-corruption shape this file keeps paying
+	 * for, so the check moved inside.
+	 *
+	 * The bounds are the CURRENT orientation's, not the native one --
+	 * checking against 240 would reject every legitimate landscape blit.
+	 */
+	if (!lcd_ready_flag || w == 0u || h == 0u ||
+	    (uint32_t)x + w > lcd_w || (uint32_t)y + h > lcd_h) {
+		lcd_release();
+		return -1;
+	}
 
 	if (stop != NULL && stop(stop_arg)) {
 		lcd_release();
@@ -960,17 +1170,79 @@ int lcd_fill(uint16_t rgb565, int (*stop)(void *), void *stop_arg)
 	size_t i;
 	int rc;
 
-	if (!lcd_ready_flag)
-		return -1;
 	/* Held across the FILL as well as the blit: writing the framebuffer
 	 * while another caller's DMA is reading it is the cheapest way to get
-	 * a torn frame, and the guard is what makes that impossible. */
+	 * a torn frame, and the guard is what makes that impossible.  The ready
+	 * test is inside it for the reason given in lcd_blit(). */
 	if (lcd_acquire() != 0)
 		return -1;
+	if (!lcd_ready_flag) {
+		lcd_release();
+		return -1;
+	}
 	for (i = 0u; i < LCD_FB_PIXELS; i++)
 		lcd_fb[i] = wire;
-	rc = lcd_blit(0, 0, LCD_NATIVE_W, LCD_NATIVE_H, lcd_fb,
-	              stop, stop_arg);
+	rc = lcd_blit(0, 0, lcd_w, lcd_h, lcd_fb, stop, stop_arg);
+	lcd_release();
+	return rc;
+}
+
+/*
+ * Fill a rectangle in the framebuffer, in the current orientation's
+ * coordinates.  Clipped rather than trusted: lcd_w/lcd_h are runtime values
+ * now, and a producer that assumed the other orientation would otherwise walk
+ * off the end of a buffer that is exactly one frame long.
+ *
+ * Caller holds the guard.
+ */
+static void lcd_fb_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                        uint16_t rgb565)
+{
+	uint16_t wire = lcd_wire(rgb565);
+	uint32_t xe = (uint32_t)x + w;
+	uint32_t ye = (uint32_t)y + h;
+	uint32_t xx, yy;
+
+	if (xe > lcd_w)
+		xe = lcd_w;
+	if (ye > lcd_h)
+		ye = lcd_h;
+
+	for (yy = y; yy < ye; yy++)
+		for (xx = x; xx < xe; xx++)
+			lcd_fb[(size_t)yy * lcd_w + xx] = wire;
+}
+
+/*
+ * The orientation probe -- see lcd_st7789.h for what each mark means and why
+ * the colour bars cannot answer this question.
+ */
+#define LCD_ORIENT_BAR  16u     /* thickness of the two axis bars      */
+#define LCD_ORIENT_MARK 32u     /* the origin square                   */
+#define LCD_ORIENT_FAR  24u     /* the far-corner square               */
+
+int lcd_orient(int (*stop)(void *), void *stop_arg)
+{
+	int rc;
+
+	if (lcd_acquire() != 0)
+		return -1;
+	if (!lcd_ready_flag) {
+		lcd_release();
+		return -1;
+	}
+
+	lcd_fb_rect(0u, 0u, lcd_w, lcd_h, 0x0000u);              /* black   */
+	lcd_fb_rect(0u, 0u, lcd_w, LCD_ORIENT_BAR, 0xF800u);     /* +X red  */
+	lcd_fb_rect(0u, 0u, LCD_ORIENT_BAR, lcd_h, 0x07E0u);     /* +Y green*/
+	/* Drawn last so it sits on top of both bars: the origin has to be
+	 * unmistakable even where the two overlap. */
+	lcd_fb_rect(0u, 0u, LCD_ORIENT_MARK, LCD_ORIENT_MARK, 0xFFFFu);
+	lcd_fb_rect((uint16_t)(lcd_w - LCD_ORIENT_FAR),
+	            (uint16_t)(lcd_h - LCD_ORIENT_FAR),
+	            LCD_ORIENT_FAR, LCD_ORIENT_FAR, 0x001Fu);    /* far blue*/
+
+	rc = lcd_blit(0, 0, lcd_w, lcd_h, lcd_fb, stop, stop_arg);
 	lcd_release();
 	return rc;
 }
@@ -998,18 +1270,19 @@ int lcd_bars(int (*stop)(void *), void *stop_arg)
 	uint16_t xpix, ypix;
 	int rc;
 
-	if (!lcd_ready_flag)
-		return -1;
 	if (lcd_acquire() != 0)
 		return -1;
-
-	for (ypix = 0u; ypix < LCD_NATIVE_H; ypix++) {
-		for (xpix = 0u; xpix < LCD_NATIVE_W; xpix++)
-			lcd_fb[(size_t)ypix * LCD_NATIVE_W + xpix] =
-				lcd_wire(bar[(xpix * 8u) / LCD_NATIVE_W]);
+	if (!lcd_ready_flag) {
+		lcd_release();
+		return -1;
 	}
-	rc = lcd_blit(0, 0, LCD_NATIVE_W, LCD_NATIVE_H, lcd_fb,
-	              stop, stop_arg);
+
+	for (ypix = 0u; ypix < lcd_h; ypix++) {
+		for (xpix = 0u; xpix < lcd_w; xpix++)
+			lcd_fb[(size_t)ypix * lcd_w + xpix] =
+				lcd_wire(bar[(xpix * 8u) / lcd_w]);
+	}
+	rc = lcd_blit(0, 0, lcd_w, lcd_h, lcd_fb, stop, stop_arg);
 	lcd_release();
 	return rc;
 }

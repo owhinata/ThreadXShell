@@ -39,7 +39,14 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* Panel geometry in its native (portrait) orientation. */
+/*
+ * Panel geometry in its NATIVE (portrait) orientation.
+ *
+ * These size the framebuffer and nothing else.  The drawable geometry is
+ * lcd_width()/lcd_height(), which follow MADCTL and are 320x240 once the
+ * controller is transposing -- the pixel COUNT is the same either way, so one
+ * buffer serves both and the placement gate's 153,600 bytes never move.
+ */
 #define LCD_NATIVE_W 240u
 #define LCD_NATIVE_H 320u
 
@@ -77,6 +84,123 @@ uint32_t lcd_sclk_hz(void);
 
 /** Backlight on/off (PA2).  Safe before init only after the pin is muxed. */
 void lcd_backlight(int on);
+
+/* ---- orientation (issue #31) --------------------------------------------- */
+
+/*
+ * MADCTL (0x36) bits, ST7789VW datasheet section 9.1.36.  Only the four that
+ * matter here are named; ML and MH affect the panel's own refresh order, not
+ * the address counter, and RGB selects the subpixel order (0 = RGB, which is
+ * what the colour bars proved correct on this panel).
+ */
+#define LCD_MADCTL_MY  0x80u   /* page address order  (row    mirror) */
+#define LCD_MADCTL_MX  0x40u   /* column address order (column mirror) */
+#define LCD_MADCTL_MV  0x20u   /* row/column EXCHANGE -- the landscape bit */
+#define LCD_MADCTL_RGB 0x08u   /* set = BGR subpixel order */
+
+/** Sentinel returned by lcd_rotation() for a raw MADCTL byte that is not one
+ *  of the four named rotations. */
+#define LCD_ROT_CUSTOM 0xFFFFu
+
+/**
+ * @brief  Set MADCTL and take the geometry that follows from it.
+ *
+ * [!] MEASURED, not inherited.  The Wio port concluded that MADCTL does not
+ * rotate (port/ltdc/st7789_rgb.c) -- but that was measured on the RGB PARALLEL
+ * interface, where the scan comes from the controller's own timing and the
+ * memory write order is a separate thing entirely.  On 4-wire SPI the RAMWR
+ * write order IS the address counter, which is exactly what MADCTL steers, so
+ * the two situations have nothing in common.
+ *
+ * Re-measured here with `lcd orient` (issue #31): rotation 90 (MADCTL 0x60)
+ * comes back landscape with the origin at the top left -- a true rotation, not a
+ * mirror.  The controller accepts a 320-wide window and transposes for free, so
+ * this board needs no CPU-side transpose (svc/gfx_rot) at all.
+ *
+ * The drawable width and height follow the MV bit alone: set means the address
+ * counter is transposed, so the window commands span 0..319 horizontally and
+ * 0..239 vertically and the framebuffer is walked 320 pixels to the row.  MX/MY
+ * mirror within that, which changes where the origin sits but not the shape.
+ *
+ * Panel-relative geometry is unaffected: this is a 240x320 part with no offset
+ * (unlike the 240x240 and 135x240 ST7789 modules, whose windows need a fixed
+ * shift per rotation), so no rotation needs a correction here.
+ *
+ * The panel must be up.  On failure the previous MADCTL and geometry are kept,
+ * so the driver's idea of the window never disagrees with the controller's.
+ *
+ * @return 0 on success, -1 if the panel is down, busy, or the write failed
+ */
+int lcd_set_madctl(uint8_t madctl);
+
+/**
+ * @brief  Set one of the four named rotations.
+ *
+ * @param degrees 0, 90, 180 or 270, clockwise from the native portrait scan
+ * @return 0 on success, -1 on a bad angle or any lcd_set_madctl() failure
+ */
+int lcd_set_rotation(unsigned degrees);
+
+/**
+ * @brief  A CONSISTENT snapshot of everything a report wants to print.
+ *
+ * [!] Use this, not several of the accessors below, whenever more than one
+ * field is shown at once.  The individual accessors are each a single atomic
+ * word, but reading four of them in a row is not atomic as a group: the shell
+ * runs commands as background jobs, so `lcd rot 90 &` can land between two of
+ * them and the line then reports a combination that never existed --
+ * "320x240, madctl 60 (rot 0)".  For a command whose entire job is to report
+ * what the orientation IS, that is the worst possible failure.
+ *
+ * Filled inside one critical section, paired with the equally short one in
+ * which lcd_set_madctl() publishes the group.  It does NOT take the panel
+ * guard, so it still answers while a 51 ms frame is on the wire.
+ */
+struct lcd_status {
+	int      ready;         /**< lcd_ready() at the instant of the snapshot */
+	uint8_t  madctl;        /**< the MADCTL byte programmed               */
+	unsigned rotation;      /**< degrees, or LCD_ROT_CUSTOM               */
+	uint16_t width, height; /**< drawable geometry for that MADCTL        */
+	uint32_t sclk_hz;       /**< SPI clock as the controller reports it   */
+};
+
+void lcd_get_status(struct lcd_status *st);
+
+/** Current rotation in degrees, or LCD_ROT_CUSTOM after a raw lcd_set_madctl()
+ *  whose byte is not one of the four.  Single values only -- see lcd_status. */
+unsigned lcd_rotation(void);
+
+/** The MADCTL byte currently programmed (0x00 before the first init). */
+uint8_t lcd_madctl(void);
+
+/** Drawable geometry for the CURRENT orientation.  240x320 natively, 320x240
+ *  once MV is set.  lcd_width() * lcd_height() is always
+ *  lcd_framebuffer_pixels(). */
+uint16_t lcd_width(void);
+uint16_t lcd_height(void);
+
+/**
+ * @brief  Orientation probe: which corner is the origin, and which way do the
+ *         axes run?
+ *
+ * Colour bars cannot answer this.  Eight vertical stripes look the same
+ * transposed as they do mirrored, and they say nothing at all about where (0,0)
+ * landed -- so a MADCTL that half worked would read as success.  This pattern
+ * is asymmetric in every axis instead:
+ *
+ *   - a WHITE square marks the origin, pixel (0,0)
+ *   - a RED bar runs from it along the +X axis (the top edge, full width)
+ *   - a GREEN bar runs from it along the +Y axis (the left edge, full height)
+ *   - a BLUE square marks the far corner, (w-1, h-1)
+ *
+ * All eight MY/MX/MV combinations produce a visibly different picture, and the
+ * long side of the image tells you directly whether the controller accepted a
+ * landscape window.  Read the glass, then decide.
+ *
+ * @param stop optional abort poll (Ctrl+C); may be NULL
+ * @return 0 on success, -1 on failure, 1 when @p stop asked to stop
+ */
+int lcd_orient(int (*stop)(void *), void *stop_arg);
 
 /**
  * @brief  Push RGB565 pixels into a window, blocking until the DMA completes.

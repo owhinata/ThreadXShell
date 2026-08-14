@@ -371,9 +371,12 @@ rows are labelled "as the CPU sees it", never "cached".
 underside (issue #30, M-G3a).
 
 ```
-lcd                    state, read-back SCLK, ideal frame time
+lcd                    state, read-back SCLK, orientation, ideal frame time
 lcd init               bring the panel up (the other subcommands do it for you)
 lcd bar                colour bars -- the wiring AND byte-order test
+lcd orient             origin/axis probe -- the orientation test (issue #31)
+lcd rot [0|90|180|270] read or set the rotation via MADCTL
+lcd madctl [byte]      read or set MADCTL raw, e.g. `lcd madctl 0x60`
 lcd fill <rgb565>      one flat colour, e.g. `lcd fill 0xF800`
 lcd loop [n]           repeated full-frame DMA writes, Ctrl+C to stop
 lcd backlight on|off   PA2
@@ -462,6 +465,85 @@ The framebuffer lives in **SRAM** (`.lcd_fb`, NOLOAD, 32-byte aligned): ITCM and
 DTCM are CPU-private on this part, so a framebuffer placed there would not
 fault -- the panel would just stay blank while every call reported success.
 `check_placement_budget.py` pins symbol -> size -> section -> SRAM.
+
+### Orientation: measure MADCTL, do not inherit the Wio's answer
+
+The panel is 240x320 portrait and everything worth putting on it is landscape --
+the camera (M-G3b) most of all.  Issue #31 asks whether the controller will
+transpose for free.
+
+**[!] The Wio port's "MADCTL does not rotate" finding does NOT carry over.**  That
+was measured on the **RGB parallel interface** (`boards/wio-lite-ai/port/ltdc/
+st7789_rgb.c`), where the scan is driven by the controller's own timing and has
+nothing to do with the order pixels were written in.  This panel is **4-wire
+SPI**, where the `RAMWR` write order *is* the address counter -- exactly what
+MADCTL steers.  Different question, different answer expected, so it is measured
+here rather than assumed either way.
+
+`lcd rot` sets one of four bytes, `lcd madctl` sets any of the eight MY/MX/MV
+combinations:
+
+| rot | MADCTL | geometry | measured |
+|---|---|---|---|
+| 0 | `0x00` | 240x320 portrait (native, the default) | OK |
+| 90 | `0x60` | 320x240 landscape (MX \| MV) | OK |
+| 180 | `0xC0` | 240x320 portrait (MY \| MX) | OK |
+| 270 | `0xA0` | 320x240 landscape (MY \| MV) | OK |
+
+`lcd madctl` takes a **raw byte** on purpose: the retries are the whole cost of
+this measurement, and compiling the value in would spend one flash cycle per
+trial on an external NOR rated ~100k.
+
+**MV is the only bit that changes the geometry.**  Set, the address counter is
+transposed, so the window commands span 0..319 horizontally and 0..239
+vertically and the framebuffer is walked 320 pixels to the row; MX/MY only
+mirror within whichever shape MV picked.  The pixel *count* is identical either
+way, so the same 153,600-byte buffer serves both and the placement gate never
+moves.  `lcd_madctl_apply()` is the only writer of `lcd_w`/`lcd_h`, and it
+updates them **after** the write succeeds -- a failed MADCTL that still moved
+the geometry would leave the driver addressing a 320-wide window on a controller
+still in 240-wide mode, with every layer reporting success.
+
+#### Reading `lcd orient`
+
+**The colour bars cannot answer this.**  Eight vertical stripes look the same
+transposed as they do mirrored, and they say nothing about where (0,0) landed --
+a MADCTL that half worked would read as success.  `lcd orient` is asymmetric in
+every axis instead:
+
+- a **white 32x32 square** marks the origin, pixel (0,0)
+- a **red bar** runs from it along **+X** (row 0, full width)
+- a **green bar** runs from it along **+Y** (column 0, full height)
+- a **blue 24x24 square** marks the far corner, (w-1, h-1)
+
+All eight combinations produce a visibly different picture, and the long side of
+the image says directly whether the controller accepted a landscape window.
+
+#### Measured: MADCTL rotates this panel
+
+**All four rotations work.**  With MADCTL `0x60` the probe comes back **landscape
+with the white square at the top left** -- a true 90-degree rotation, not a
+mirror -- so the controller accepts a 320-wide window and transposes the address
+counter itself.  `0xC0` and `0xA0` were checked the same way and are correct too.
+
+That settles the question issue #31 asked: **landscape costs nothing here.**  The
+CPU-side fallback (`svc/gfx_rot`, written for the Wio) is **not needed** on this
+board; it would have added a 150 KB read plus a 150 KB write per frame, which is
+not absorbable at 19.5 fps.  The Wio's RGB-parallel result really was specific to
+that interface.
+
+The default stays **rotation 0**.  Which orientation becomes the final one is
+deliberately not settled here -- it belongs with the M-G3b resolution spike,
+since the camera's own 90-degree transpose may still make portrait the cheaper
+target.  What is settled is that the choice is free either way.
+
+**[!] Re-seat the wires before believing a negative result.**  This measurement
+was first recorded as "MADCTL does nothing" with a jumper off the header.  A
+rotation that appears inert looks like a panel property and is indistinguishable
+from one at the console -- `lcd rot 180` is the cheap discriminator, because it
+changes no geometry (240x320 either way, so no window can fall out of range) and
+therefore isolates "does MADCTL reach the controller at all" from "is MV
+specifically ignored".
 
 ### [!] A DMA completion is not a transfer completion
 

@@ -528,8 +528,8 @@ counter itself.  `0xC0` and `0xA0` were checked the same way and are correct too
 
 That settles the question issue #31 asked: **landscape costs nothing here.**  The
 CPU-side fallback (`svc/gfx_rot`, written for the Wio) is **not needed** on this
-board; it would have added a 150 KB read plus a 150 KB write per frame, which is
-not absorbable at 19.5 fps.  The Wio's RGB-parallel result really was specific to
+board; it would have added a 150 KB read plus a 150 KB write per frame, which no
+frame time here can absorb.  The Wio's RGB-parallel result really was specific to
 that interface.
 
 The default stays **rotation 0**.  Which orientation becomes the final one is
@@ -561,17 +561,45 @@ is not optional.
 
 ### Speed and interruption
 
-The SSPI master's output is always the reference divided by an **even** divider
-and the controller caps at **50 MHz**.  On the SDK's default low-speed source
-this lands on 24 MHz: **measured 19.5 fps, 100 frames in 5127 ms**, i.e. 51.3 ms
-per frame against 51.2 ms of pure wire time -- the DMA adds essentially nothing,
-because a whole frame is one descriptor chain.
+The SSPI master's output is always the reference divided by an **even** divider,
+so it is at most **reference/2**, and the controller caps at **50 MHz**.  The
+reference is whatever the bootloader left selected -- the SDK default
+`RC96M48M` at 96 MHz -- so the only outputs below the cap are 48, 24, 16 and
+12 MHz.  **There is no step between 24 and 48.**
 
-**Frame rate is not a completion condition for M-G3a** and the numbers `lcd`
-prints are labelled as ceilings: even at the 50 MHz maximum the ideal ceiling
-is ~40 fps before any DMA turnaround, `RAMWR`, or inter-frame gap.  Re-sourcing
-SSPIM from a PLL is issue #32.  The achieved clock is **read back from the
-controller**, never assumed.
+M-G3a shipped 24 MHz: **measured 19.5 fps, 100 frames in 5127 ms**, i.e. 51.3 ms
+per frame against 51.2 ms of pure wire time -- the DMA adds essentially nothing,
+because a whole frame is one descriptor chain.  #32 raised the request to
+**48 MHz**: **measured 38.7 fps, 100 frames in 2583 ms** (`BAUDR` read back as 2,
+`sclk` as 48000000), 25.8 ms per frame against 25.6 ms of wire time.  The same
+result -- the wire is the whole cost, and the clock is the whole lever.
+
+**That change costs no clock-tree work.** #32 was filed assuming SSPIM had to be
+re-sourced from the PLL, which would collide with the rule that the app does not
+reconfigure the inherited clock tree.  It does not: the source mux and its SCU
+divider stay exactly as inherited and only the controller's own `BAUDR` moves,
+from 4 to 2.  Going further -- PLL at 100 MHz for the full 50 MHz -- buys 4% and
+was dropped.
+
+The panel is out of spec above ~15 MHz at either setting (24-60 MHz is in
+universal use for ST7789 writes); what actually limits this is signal quality on
+the jumper wires, and at 48 MHz the flying-wire hookup in `Wiring` shows no
+degradation -- colour bars and solid fills are clean.  The driver still **asks
+the vendor driver for the fastest output this reference can give**
+(`SPI_CMD_MST_UPDATE_SYSCLK`) and requests the lower of that and its own
+constant, and the achieved clock is **read back from the controller** and printed
+by `lcd`, never assumed.  The numbers `lcd` prints stay labelled as ceilings:
+48 MHz is a ~39 fps ideal before any DMA turnaround, `RAMWR`, or inter-frame gap,
+and the measurement lands 0.3 fps under it.
+
+That clamp is verified against `libdriver.a`, not assumed, because it could
+otherwise silently cost speed: `SPI_CMD_MST_UPDATE_SYSCLK` dispatches to
+`dw_spi_update_system_clk()`, which for device id 1 (`USE_DW_SPI_MST_S`) reads
+`SCU_CLK_FREQ_TYPE_LSC_SSPIM` and returns `freq >> 1` -- 96 MHz becomes 48 MHz
+and the clamp is a no-op.  The `freq >> 3` branch in the same function is device
+id 3, the SSPI **slave**.  The call is a register read plus a shift with no wait
+in it, so it is safe under `PRIMASK`, and it belongs inside the bring-up's masked
+window so that anything it might enable is still covered by the EPK accounting.
 
 `lcd loop` waits in 1-tick slices rather than one long block so Ctrl+C aborts a
 transfer that is still **on the wire** -- with one burst per frame, waiting the
@@ -580,8 +608,8 @@ path that M-G3b's Ctrl+C handling depends on.  An abort halts the chain and then
 **drains the completion semaphore**: `spi_write_ptl_halt()` races the transfer it
 stops, and a count left behind would make the next burst return before its data
 had gone out, desynchronising every transfer after it.  Verified on hardware:
-abort mid-burst, `lcd bar` immediately after, then `lcd loop 100` back at
-19.5 fps.
+abort mid-burst, `lcd bar` immediately after, then `lcd loop 100` back at the
+full rate.
 
 A cancelled `lcd loop` prints nothing by design -- the shared core discards
 output produced while `cancel_req` is set, so `^C` is the feedback.
@@ -603,7 +631,7 @@ consume another's completion, or halt another's chain during its own
 cancellation, which wedges the vendor driver's busy flag for good.
 
 A ThreadX mutex guards the whole driver.  Contenders **fail rather than queue**
-(`lcd: busy`): a background job silently blocking the console for 51 ms a frame
+(`lcd: busy`): a background job silently blocking the console for a frame time
 is not an improvement on being told the panel is taken.  The mutex is recursive,
 so a command holding it across a whole loop still nests through
 `lcd_fill()`/`lcd_blit()`, and each of those guards itself for callers that come

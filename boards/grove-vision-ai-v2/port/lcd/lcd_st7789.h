@@ -154,7 +154,7 @@ int lcd_set_rotation(unsigned degrees);
  *
  * Filled inside one critical section, paired with the equally short one in
  * which lcd_set_madctl() publishes the group.  It does NOT take the panel
- * guard, so it still answers while a 51 ms frame is on the wire.
+ * guard, so it still answers while a frame is on the wire.
  */
 struct lcd_status {
 	int      ready;         /**< lcd_ready() at the instant of the snapshot */

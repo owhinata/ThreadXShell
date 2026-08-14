@@ -215,6 +215,25 @@ int lcd_blit(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
              const uint16_t *pixels, int (*stop)(void *), void *stop_arg);
 
 /** Fill the whole panel with one RGB565 colour (no framebuffer needed). */
+/**
+ * @brief  As lcd_blit(), but for pixels in LITTLE-endian memory order.
+ *
+ * lcd_blit() hands the caller's buffer to the DMA unchanged, so it needs the
+ * ST7789's wire order (big-endian).  The camera's frame pipeline carries
+ * FRAME_FMT_RGB565, which is documented little-endian, so something has to
+ * swap.  That something is this function, not the producer: a slot published in
+ * wire order under a little-endian tag would be a lie that the next sink added
+ * to the pipeline discovers the hard way.
+ *
+ * Copies via the driver's own framebuffer, so @p pixels may live anywhere the
+ * CPU can read -- unlike lcd_blit(), whose buffer must be DMA-reachable SRAM.
+ *
+ * @return as lcd_blit(): 0 on success, -1 on a parameter/state error, 1 when
+ *         @p stop asked to stop.
+ */
+int lcd_blit_le(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                const uint16_t *pixels, int (*stop)(void *), void *stop_arg);
+
 int lcd_fill(uint16_t rgb565, int (*stop)(void *), void *stop_arg);
 
 /** Colour-bar test pattern: proves the wiring AND the byte order. */

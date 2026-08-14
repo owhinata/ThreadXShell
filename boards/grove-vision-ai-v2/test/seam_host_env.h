@@ -19,6 +19,18 @@
 
 #include <stdint.h>
 
+/*
+ * The modelled NVIC.  ONE struct with REAL arrays, and not two loose arrays the
+ * shim points at: epk_irq_wrap.c derives its sweep width from
+ * `sizeof NVIC->ISER / sizeof NVIC->ISER[0]`, so a pointer member here would
+ * quietly shrink 16 words to 2 and the tests would stop looking at any line
+ * above 63 -- while still passing.
+ */
+struct seam_nvic {
+	uint32_t ISER[16];  /* enable bits              */
+	uint32_t ISPR[16];  /* pending bits (issue #35) */
+};
+
 struct seam_host_env {
 	/* Timer0's four registers (CTRL/VALUE/RELOAD/INTSTATUS) plus slack, so a
 	   stray write past the block lands somewhere this test can see. */
@@ -40,7 +52,7 @@ struct seam_host_env {
 	 * statement about enable bits and vector table entries, so both are
 	 * modelled rather than stubbed.
 	 */
-	uint32_t iser[16];          /* enable bits, 512 lines                  */
+	struct seam_nvic nvic;      /* enable + pending bits, 512 lines        */
 	uint32_t vector[512];       /* the writable vector table               */
 	uint32_t registry[16];      /* lines tx_glue_profile_register_irq took */
 	int      fail_register_irqn; /* make registration refuse ONE line, -1 = none */
@@ -57,6 +69,22 @@ struct seam_host_env {
 	 */
 	uint32_t timer_step;
 	uint32_t timer_stalls;
+
+	/*
+	 * Interrupt DELIVERY, for the issue #35 probe test.  The probe waits for
+	 * its own interrupt to arrive, so a mock that only models enable bits
+	 * can never let it succeed -- and "the probe reports failure" would then
+	 * be the only outcome it could ever be tested against, which is the half
+	 * that matters least.
+	 *
+	 * deliver_after_udelays : call the installed vector once this many
+	 *                         udelay() calls have gone by (0 = never)
+	 * deliver_irqn          : which line's vector to call
+	 * deliveries            : how many times it was actually called
+	 */
+	uint32_t deliver_after_udelays;
+	int      deliver_irqn;
+	uint32_t deliveries;
 };
 
 extern struct seam_host_env seam_host_env;

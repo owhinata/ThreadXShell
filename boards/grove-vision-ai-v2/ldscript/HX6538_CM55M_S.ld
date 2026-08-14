@@ -256,6 +256,32 @@ SECTIONS
         __lcd_fb_end = .;
     } > CM55M_S_SRAM
 
+    /* The camera's WDMA3 landing buffer (issue #35).  320x240 planar B/G/R =
+     * 225 KB, written by the datapath's write-DMA and read by the CPU one
+     * frame at a time.  In SRAM for the same reason as the framebuffer above --
+     * the DMA engines cannot see TCM -- and 32-byte aligned because the CPU has
+     * to invalidate the whole buffer before reading each frame, and an
+     * invalidate that begins mid-cache-line either misses bytes or discards a
+     * neighbour's. */
+    .cam_raw (NOLOAD) : ALIGN(32)
+    {
+        __cam_raw_start = .;
+        KEEP(*(.cam_raw))
+        __cam_raw_end = .;
+    } > CM55M_S_SRAM
+
+    /* The frame pipeline's slots (issue #35).  Two 320x240 RGB565 frames, the
+     * converted output the LCD sink consumes.  Two and not one because
+     * frame_pipeline_acquire() will not hand back the slot it last published --
+     * that is what keeps a pull reader's frame from being recycled underneath
+     * it, and with a single slot the second acquire would fail for ever. */
+    .cam_slots (NOLOAD) : ALIGN(32)
+    {
+        __cam_slots_start = .;
+        KEEP(*(.cam_slots))
+        __cam_slots_end = .;
+    } > CM55M_S_SRAM
+
     /* High-water mark of the SRAM window, for the `free` command (issue #26).
      * MUST stay after every section assigned to CM55M_S_SRAM -- the location
      * counter here still belongs to that region, and the next output section

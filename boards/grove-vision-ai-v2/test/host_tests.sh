@@ -56,6 +56,30 @@ if [ -f "$sdk/drivers/inc/hx_drv_timer.h" ]; then
         "$board/port/sdk_seam/timer_seam.c" \
         $LDFLAGS -o "$out/test_timer_seam"
     "$out/test_timer_seam"
+
+    # issue #35 -- the Timer0 interrupt-DELIVERY probe, which is what M-G3a
+    # carried forward: hw_start proves the counter runs, and that is a
+    # different claim from "the interrupt arrives".  The probe is itself a
+    # check, so the case that matters is the one hardware cannot produce on
+    # demand -- a Timer0 that counts perfectly and never fires.  The mock NVIC
+    # calls the installed vector (or does not) from inside udelay(), which is
+    # where the firmware waits.
+    #
+    # Twice, with different -D: the probe latches its answer on the first call
+    # by design, so the two cases cannot share a process.  Same pattern as
+    # test_complete / test_complete_smallbuf in the core suite.
+    for _case in DELIVERED SILENT; do
+        gcc $CFLAGS -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast \
+            -DPROBE_CASE_$_case \
+            -DGROVE_TIMER_SEAM_T0_BASE='((uint32_t)(uintptr_t)seam_host_env.regs)' \
+            -I "$here" -I "$here/shim" \
+            -I "$board/port/sdk_seam" -I "$board/port/threadx" -I "$board/svc" \
+            -I "$sdk/drivers/inc" \
+            "$here/test_timer_probe.c" "$here/seam_host_env.c" \
+            "$board/port/sdk_seam/timer_seam.c" \
+            $LDFLAGS -o "$out/test_timer_probe_$_case"
+        "$out/test_timer_probe_$_case"
+    done
 else
     echo "  (skipped test_timer_seam: no Himax SDK at $sdk --" \
          "configure a grove-vision-ai-v2 build tree first)"
@@ -78,3 +102,39 @@ gcc $CFLAGS -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast \
     "$board/port/sdk_seam/epk_irq_wrap.c" \
     $LDFLAGS -o "$out/test_epk_irq_wrap"
 "$out/test_epk_irq_wrap"
+
+# issue #35 -- the planar B/G/R -> RGB565 packer (port/camera/cam_convert.c).
+# No shim and no SDK header: this translation unit is deliberately pure
+# arithmetic over memory, which is what lets it be tested here at all.  Every
+# bug it can have -- swapped R and B, the wrong endianness in the slot, a plane
+# stride off by one -- comes out of the board as a photograph that looks
+# plausible and is wrong, and each hypothesis costs a flash cycle to test.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/camera" \
+    "$here/test_cam_convert.c" "$board/port/camera/cam_convert.c" \
+    $LDFLAGS -o "$out/test_cam_convert"
+"$out/test_cam_convert"
+
+# issue #35 -- the auto exposure / white balance control laws
+# (port/camera/cam_auto.c).  A control loop's failure modes -- oscillation,
+# runaway, hunting on noise -- all look fine in a single capture and are
+# miserable in a live preview.  Running the loop against a simulated sensor for
+# a few hundred iterations catches them; staring at a panel does not.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/camera" \
+    "$here/test_cam_auto.c" "$board/port/camera/cam_auto.c" \
+    $LDFLAGS -o "$out/test_cam_auto"
+"$out/test_cam_auto"
+
+# issue #35 -- the CSI FIFO fill computation (port/camera/cam_mipi_calc.c).  The
+# firmware rewrote the SDK's double + ceil() formula in integer arithmetic
+# because this link has no libm; this checks the rewrite against the ORIGINAL
+# formula, transcribed in the test and swept over the whole parameter space,
+# rather than against numbers somebody worked out by hand.  -lm is for the
+# reference transcription's ceil() -- the host has a libm even though the board
+# does not, which is the whole reason this comparison can be made at all.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/camera" \
+    "$here/test_cam_mipi_calc.c" "$board/port/camera/cam_mipi_calc.c" \
+    $LDFLAGS -lm -o "$out/test_cam_mipi_calc"
+"$out/test_cam_mipi_calc"

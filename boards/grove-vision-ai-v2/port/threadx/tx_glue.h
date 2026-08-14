@@ -54,7 +54,12 @@ void tx_glue_isr_exit(void);
  * Both calls are thread-context only (they mutate the registry inside a
  * PRIMASK critical section; an ISR must never see a half-written entry).
  */
-#define TX_GLUE_EPK_MAX_IRQ 8
+/* Keep this equal to GROVE_EPK_WRAP_MAX (port/sdk_seam/epk_irq_wrap.h), which
+ * explains the number: every wrapped line takes one slot here.  A registry
+ * smaller than the trampoline pool would make a wrap succeed and its
+ * registration fail, which grove_epk_irq_wrap_new() correctly treats as a
+ * failed bring-up -- correct, but a self-inflicted one. */
+#define TX_GLUE_EPK_MAX_IRQ 32
 
 int  tx_glue_profile_register_irq(int irqn, uint32_t wrapper_vector);
 void tx_glue_profile_unregister_irq(int irqn);
@@ -65,6 +70,18 @@ void tx_glue_profile_unregister_irq(int irqn);
    verified -- so the armed flag flips 0->1 only in thread context and no
    single ISR invocation can see it change between its enter and its exit. */
 void tx_glue_profile_arm(void);
+
+/**
+ * @brief  Details of a replaced accounted-interrupt vector, if one was seen.
+ *
+ * "A vector was replaced" is not actionable on its own: this port wraps a
+ * couple of dozen camera lines, and what matters is WHICH one and whether the
+ * value that displaced the wrapper looks like a vendor handler (the driver
+ * re-registered) or like nothing at all (something scribbled).
+ *
+ * @return 0 if no mismatch has been observed.
+ */
+int tx_glue_profile_bad_vector(int *irqn, uint32_t *want, uint32_t *got);
 
 /* Record the first reason the cpu% accounting became untrustworthy.  `why`
    must be a string literal (it is stored by pointer, not copied).  Later calls

@@ -79,7 +79,7 @@ static void arm_registers(void)
 {
 	memset(seam_host_env.regs, 0, sizeof seam_host_env.regs);
 	memset(seam_host_env.vector, 0, sizeof seam_host_env.vector);
-	memset(seam_host_env.iser, 0, sizeof seam_host_env.iser);
+	memset(seam_host_env.nvic.ISER, 0, sizeof seam_host_env.nvic.ISER);
 	memset(seam_host_env.registry, 0, sizeof seam_host_env.registry);
 	seam_host_env.nvic_enabled = 0;
 	seam_host_env.nvic_vector  = 0u;

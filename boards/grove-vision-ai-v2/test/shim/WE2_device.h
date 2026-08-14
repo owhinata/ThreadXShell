@@ -40,24 +40,30 @@ static inline void __ISB(void) { }
  * so the enable bits and the vector table are modelled too.  Both are kept in
  * step here rather than in two shims that could disagree.
  */
-struct nvic_type { uint32_t ISER[16]; };
-#define NVIC ((struct nvic_type *)seam_host_env.iser)
+/* The modelled NVIC lives in the shared environment (seam_host_env.h), so
+ * that `NVIC->ISER[i]` and `NVIC->ISPR[i]` are spelled here exactly as the
+ * firmware spells them against CMSIS -- sizeof included. */
+#define NVIC (&seam_host_env.nvic)
 
 static inline void NVIC_EnableIRQ(IRQn_Type irq)
 {
 	seam_host_env.nvic_enabled = 1;
 	if ((int)irq >= 0 && (int)irq < 512)
-		seam_host_env.iser[(int)irq >> 5] |= 1u << ((int)irq & 31);
+		seam_host_env.nvic.ISER[(int)irq >> 5] |= 1u << ((int)irq & 31);
 }
 
 static inline void NVIC_DisableIRQ(IRQn_Type irq)
 {
 	seam_host_env.nvic_enabled = 0;
 	if ((int)irq >= 0 && (int)irq < 512)
-		seam_host_env.iser[(int)irq >> 5] &= ~(1u << ((int)irq & 31));
+		seam_host_env.nvic.ISER[(int)irq >> 5] &= ~(1u << ((int)irq & 31));
 }
 
-static inline void NVIC_ClearPendingIRQ(IRQn_Type irq) { (void)irq; }
+static inline void NVIC_ClearPendingIRQ(IRQn_Type irq)
+{
+	if ((int)irq >= 0 && (int)irq < 512)
+		seam_host_env.nvic.ISPR[(int)irq >> 5] &= ~(1u << ((int)irq & 31));
+}
 static inline void NVIC_SetPriority(IRQn_Type irq, uint32_t p)
 {
 	(void)irq; (void)p;

@@ -1204,6 +1204,54 @@ static inline uint16_t lcd_wire(uint16_t rgb565)
 	return (uint16_t)((rgb565 >> 8) | (rgb565 << 8));
 }
 
+int lcd_blit_le(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                const uint16_t *pixels, int (*stop)(void *), void *stop_arg)
+{
+	uint32_t count = (uint32_t)w * (uint32_t)h;
+	uint32_t i;
+	int rc;
+
+	if (pixels == NULL)
+		return -1;
+
+	/* Hold the panel across the copy AND the blit.  The copy's destination
+	 * is the shared framebuffer, so releasing in between would let another
+	 * caller overwrite the pixels before they are sent -- and the recursive
+	 * guard means the nested lcd_blit() below simply nests. */
+	if (lcd_acquire() != 0)
+		return -1;
+
+	/* Geometry is re-checked inside lcd_blit() against the orientation
+	 * current at that moment; this only has to know the copy fits. */
+	if (count == 0u || count > LCD_FB_PIXELS) {
+		lcd_release();
+		return -1;
+	}
+
+	/*
+	 * The swap, and the reason this entry point exists at all.
+	 *
+	 * The frame pipeline's FRAME_FMT_RGB565 is little-endian in memory, and
+	 * lcd_blit() DMAs the caller's buffer straight out, so it requires wire
+	 * order.  The two ways to reconcile that are to publish wire-order
+	 * pixels under a format tag that says little-endian, or to convert here.
+	 * The first is cheaper and is a lie that would be discovered by whatever
+	 * second sink is added later -- a network or file sink would write
+	 * byte-swapped frames and nothing would say why.  So the knowledge that
+	 * this panel wants the other order stays inside this driver, where it
+	 * already lives (see lcd_wire above).
+	 *
+	 * The cost is one 150 KB pass over the frame.  Against 25.8 ms of SPI
+	 * for the same frame at 48 MHz, it does not move the frame rate.
+	 */
+	for (i = 0u; i < count; i++)
+		lcd_fb[i] = lcd_wire(pixels[i]);
+
+	rc = lcd_blit(x, y, w, h, lcd_fb, stop, stop_arg);
+	lcd_release();
+	return rc;
+}
+
 int lcd_fill(uint16_t rgb565, int (*stop)(void *), void *stop_arg)
 {
 	uint16_t wire = lcd_wire(rgb565);

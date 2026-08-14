@@ -247,7 +247,7 @@ exists because M-G3a does not link the camera archives, so every wrapper is
 garbage-collected out of `shell` and the claim would otherwise go unchecked
 until M-G3b.
 
-### [!] Carried forward to M-G3b: the Timer0 interrupt path is unverified
+### Carried forward to M-G3b, and since closed: the Timer0 interrupt path
 
 `hw_start()` proves the counter RUNS -- four windows timed by `udelay()` (DWT
 cycles, independent of the timer under test), each required to show motion, and
@@ -257,8 +257,8 @@ window cannot contain a whole cycle.  That closes "armed but stationary" and
 
 It does **not** prove the interrupt gets delivered.  A Timer0 whose counter is
 fine while `IRQEN` produces no `INTSTATUS`, or whose NVIC path is dead, would
-still be accepted, and the datapath's 500 ms frame watchdog would then never
-fire a callback -- armed, believed, and useless.  The registry cannot catch it
+still be accepted, and the datapath's frame pacing would then never fire a
+callback -- armed, believed, and useless.  The registry cannot catch it
 either, since registered-but-disabled is a state it deliberately permits.
 
 Nothing in M-G3a executes this code (the camera archives are not linked, so the
@@ -674,6 +674,530 @@ attempts followed by a successful one (more than the eight trampoline slots, so
 a leak fails the test), and a sweep after every step asserting the invariant
 `AGENTS.md` states -- **every line is either disabled, or wrapped AND
 registered**, never a third thing.
+
+## Camera (IMX219 over MIPI CSI)
+
+```
+camera probe             power the module and read its sensor ID
+camera capture           one frame + per-channel statistics
+camera preview [frames]  live preview on the panel, Ctrl+C to stop
+camera raw               capture the Bayer mosaic and name the phase
+camera stats             producer and sink counters
+camera exposure [lines]  read/set the exposure  (there is no auto-exposure)
+camera gain [a [d]]      read/set analogue / digital gain
+camera wb [r g b]        read/set the software white balance (256 = unity)
+camera black [n]         black level subtracted before the gain (pedestal 16)
+camera sat [n]           saturation, standing in for a colour matrix
+camera auto [on|off]     auto exposure + white balance
+camera gamma [on|off]    sRGB encode (off by default)
+camera bayer [mode]      demosaic phase
+camera depth [8|10]      MIPI bits per pixel
+```
+
+A Raspberry Pi Camera v2.1 (IMX219) in the board's MIPI CSI connector.  The
+datapath is fixed, and it is the `tflm_yolov8_od` shipping configuration rather
+than one invented here:
+
+```
+IMX219 3280x2464 RAW10, 2 MIPI lanes
+  -> INP crop 3200x2400 -> 10:2 binning -> 640x480 -> 4:2 subsample -> 320x240
+  -> HW5x5 demosaic (BGGR) -> WDMA3
+  -> software pack to RGB565 -> svc/frame_pipeline -> ST7789
+```
+
+`camera preview` rotates the panel to landscape first.  320x240 then maps 1:1
+with no CPU-side transpose, because MADCTL really rotates this panel over 4-wire
+SPI (issue #31).
+
+### What the hardware gives you, and what it does not
+
+**WDMA3 output is PLANAR B/G/R**, three 320x240 byte planes back to back, B
+first -- not interleaved RGB565.  There is no hardware packer for this path:
+HXCSC, which looks like one, is an input *un*packer for already-packed data and
+has zero uses anywhere in the SDK.  So the interleave is software
+(`port/camera/cam_convert.c`), and `camera capture` reports the three planes as
+the hardware produced them rather than the packed result -- the packer has a
+host test, the camera cannot have one.
+
+**The CSI FIFO fill level is computed, not tabulated.**  The SDK writes that
+formula in `double` and finishes with `ceil()`; this firmware links no libm, so
+`port/camera/cam_mipi_calc.c` is exact integer arithmetic over the same
+rational.  `test/test_cam_mipi_calc.c` checks it against the original formula --
+transcribed into the test and swept over the whole parameter space -- rather than
+against numbers worked out by hand.
+
+**There is no way to read D-PHY lock back.**  Every SDK helper involved returns
+void.  So the rev-C workaround below cannot verify what it would like to; see
+what it settles for instead.
+
+### [!] There is no auto-exposure and no auto white balance
+
+Neither exists anywhere in this datapath.  The donor applications feed the raw
+output straight to a neural network, which does not care what it looks like, so
+the sensor simply sits at whatever fixed exposure and gain it was programmed
+with -- the donor's constants, tuned for the donor's scene.
+
+Two consequences, both of which look like bugs and are not:
+
+- **Frames come out dark** unless the exposure suits the room.
+- **Frames come out green.** A Bayer array has twice as many green photosites
+  as red or blue and its green filters pass more light, so an uncorrected frame
+  is green-heavy.  Measured here in room light: R 58 / G 66 / B 54, i.e. about
+  1.2x green -- which is exactly what the eye reads as a cast.
+
+The white balance is in SOFTWARE because it has to be: the IMX219 exposes only
+a global analogue gain and a global digital gain, and both move all three
+channels together, so neither can correct a cast.
+
+**Exposure is not capped, the FRAME stretches.**  The datasheet's rule is that
+with `frame_length_lines - 4 < coarse_integration_time` the effective frame
+length becomes `exposure + 4`, so a long exposure costs frame rate rather than
+being ignored.  The mode table never programs frame length, so it sits at the
+sensor default of 0x0AA8 (2728) and the donor's 0x0A40 (2624) is already close
+to it.  `camera exposure <lines> [frame_lines]` sets both.
+
+**Analogue gain is usually the better knob**, and the donor leaves a lot of it
+on the table: the IMX219's gain is `256 / (256 - again)`, so the shipped
+`again = 64` is only 1.33x against a usable range up to 232 (10.7x).  Roughly
+2-3x is what these measured means want, i.e. `camera gain 160`.
+
+`camera exposure` / `camera gain` / `camera wb` set all of this at runtime, and
+that is the point of them -- finding good values by editing a `#define` costs
+one flash cycle per guess on a part rated ~100k of them, with a manual
+press-the-button flow.  Once a set is known good, bake it into the defaults in
+`port/camera/cam_imx219.c` (exposure/gain) and `camera.c` (the white balance).
+`camera capture` deliberately reports the RAW planes, before the white balance,
+so its statistics stay evidence about the sensor rather than about the gains.
+
+### Auto exposure and auto white balance
+
+The datapath has NEITHER, because the applications it was built for feed the
+output to a neural network which does not care what the picture looks like.  A
+human preview does: with fixed exposure and gains, a frame is correct only in
+the one lighting condition somebody last tuned it in.
+
+**Swapping the sensor does not change this** -- the loops are missing from the
+PATH, not from the part -- which is why `port/camera/cam_auto.c` exists rather
+than a different camera module.  Both are on by default:
+
+- **Exposure**: green-plane mean toward a target, gain moved before exposure
+  (gain is free, exposure costs frame rate and motion blur), damped with a
+  deadband.  Undamped, against a sensor that applies a change a frame or two
+  later, an exposure loop is an oscillator; without a deadband it hunts for
+  ever on sensor noise.
+- **White balance**: grey world, green held as the reference so the other two
+  move toward it rather than all three drifting in brightness.  Damped and
+  clamped, because grey world is simply wrong for a frame filled with one
+  colour and the clamp is what stops being wrong from being catastrophic.
+
+`camera auto off` before any measurement that assumes the sensor is holding
+still -- comparing Bayer phases, or reading `camera capture` twice -- since a
+loop adjusting the exposure in between is a variable nobody asked for.
+
+`test/test_cam_auto.c` runs both laws against a simulated sensor for a few
+hundred iterations: convergence from six starting brightnesses, no movement at
+all once settled, and no runaway on a black frame.  Those are failure modes
+that all look fine in a single capture and are miserable in a live preview.
+
+### The sensor is linear; the panel is not
+
+This was the single biggest thing wrong with the picture, and it is not a
+tuning matter -- it is units.  A sensor measures light, so its samples are
+LINEAR.  Displays, this panel included (its init table programs gamma curves),
+expect values already encoded with roughly a 1/2.2 power law.  Sending linear
+samples to one does not fail; it produces a dark, flat picture with the
+midtones crushed toward black.  Measured here: an ordinary indoor scene
+averaged 49, which as a linear value is a normal midtone and as a display value
+is nearly black.  Through the sRGB curve it becomes 121.
+
+`port/camera/cam_convert.c` carries a 256-byte sRGB encode table (generated
+from the standard transfer function; no libm in this image) and applies it
+LAST -- after the black level and the gain, both of which are corrections to a
+linear measurement.  Encoding first would turn the gain into a contrast control
+and the black level into a crush.
+
+It is ON by default, but it took a detour to get there: an earlier build
+defaulted it OFF because the picture looked washed out encoded.  That was the
+black-level interaction below -- with the pedestal still in the data the curve
+lifts black to grey -- not a fault of the curve.  With both in place it settled
+on the bench.  `camera gamma off` compares, and **the auto-exposure target
+follows the switch**
+(CAM_AE_TARGET_ENCODED_X100 vs CAM_AE_TARGET_LINEAR_X100): the loop aims at
+what the panel shows, and the curve is the transfer function in between, so
+wiring the loop to one and the converter to the other gives a picture that is
+simply dark or simply blown while the loop reports success.
+
+**[!] Gamma and the black level are a PAIR.**  The sRGB curve has a slope of
+12.92 at the origin, so it multiplies whatever pedestal is left in the data: a
+black level of 16 encodes to 71, and the picture comes out visibly washed out
+with its blacks lifted to grey.  That is exactly what happened on hardware when
+gamma was enabled on its own.  So the black level defaults to 16 alongside it --
+and 16 is not a scene-tuned guess: the datasheet fixes the sensor's pedestal at
+64 in RAW10 (16 after the receiver takes the top eight bits) and at 16 natively
+in RAW8.
+
+### [!] There is no colour correction matrix, and it shows
+
+The single biggest reason the picture looks pale, and the one that survives
+every amount of exposure and white-balance work -- including swapping the
+sensor, which is why it took so long to name.
+
+A sensor's colour filters have broad, heavily OVERLAPPING spectral responses:
+the red pixels see a good deal of green and blue light, and so on.  A real
+imaging pipeline undoes that with a 3x3 colour correction matrix between the
+demosaic and the display encode.  This datapath has no such stage, so what
+reaches the panel is raw sensor RGB, which is inherently desaturated.  No
+exposure setting and no white balance can put the colour back, because neither
+is the missing operation.
+
+A correct matrix is per-sensor measured data this project does not have, so
+`camera sat` is the honest stand-in: it pulls each channel away from the
+pixel's own luma, restoring the LOOK of saturation without claiming to be
+colorimetric.  Default 600 (2.3x), settled on the bench and within the range a real CCM
+works out to for sensors of this class.  Applied after the white balance and before the
+gamma -- saturation is a linear-light operation, and doing it on encoded values
+distorts hue as well as amount.
+
+**It also makes phase errors obvious**, which is how the OV5647's swapped red
+and blue were caught: at unity saturation a swap is a slightly odd tint, and at
+1.8x it is a blue object rendered yellow.
+
+### Bit depth: RAW8 was tried, and is worse
+
+The 10 -> 8 reduction inside the MIPI receiver is undocumented and
+unconfigurable, so the natural suspicion is that it damages the image.  It does
+not.  `camera depth 8` switches the sensor to RAW8 -- one byte per pixel, no
+CSI-2 packing at all, with the reduction done inside the sensor as its own
+designed "10b-8b compress" -- and the result is measurably WORSE:
+
+| | RAW10 | RAW8 |
+|---|---|---|
+| means B/G/R | 43.7 / 49.6 / 49.0 | 18.0 / 22.0 / 21.5 |
+| colour separation | 6.53 | 4.42 |
+| blue minimum | 26 | 0 (clipped) |
+
+Same Bayer phase, same `mosaic` figures, about 2.3x less signal and less colour.
+If the receiver's RAW10 unpacking were mangling anything, removing the packing
+entirely would have improved matters dramatically; it did the opposite.  **The
+RAW10 path is not the problem.**  RAW10 stays the default.
+
+Switching depth takes THREE registers, not two: `CSI_DATA_FORMAT`
+(0x018C/0x018D) **and `OPPXCK_DIV` (0x0309)**, which the datasheet's clock tree
+requires to equal the bits per pixel.  Changing the format alone leaves the
+sensor clocking pixels at the 10-bit rate while announcing 8-bit ones, and the
+datapath simply fails to start.  (The upstream Linux imx219 RAW8 patch has the
+same omission; its review raised 0x0309 for this reason.)
+
+### [!] Is the demosaic right?  Two different questions
+
+`camera capture` prints two figures, and they answer different things.  Reading
+the first as an answer to the second is a mistake this port made once:
+
+| figure | question | reading |
+|---|---|---|
+| `mosaic` | did a demosaic run **at all**? | single digits yes, tens+ = still raw Bayer |
+| `colour` | was the **phase** right? | bigger is better, on a coloured scene |
+
+Neither figure is sufficient alone, and the exact limits are worth stating,
+because both were mis-stated once during bring-up:
+
+- **`mosaic` sees a MISALIGNED phase but not a swapped one.**  Getting the grid
+  alignment wrong (gbrg/grbg here) leaves phase residue and the figure jumps by
+  an order of magnitude.  Swapping red and blue (bggr vs rggb) preserves the
+  alignment perfectly, so `mosaic` cannot see it at all.
+- **`colour` sees a misaligned phase but not a swapped one either**, for the
+  same reason: an R/B swap changes which channel is which, not how far apart
+  they are.
+
+What a MISALIGNED phase does is interpolate red and blue from positions where
+they do not exist, dragging both toward the green level -- so the frame
+desaturates, and R and B collapse onto nearly the same mean.
+
+Measured on this board, one indoor scene, all four phases:
+
+| phase | mosaic | colour | B mean | G mean | R mean |
+|---|---|---|---|---|---|
+| bggr | 0.45-0.50 | 12.56 | 54.10 | 66.25 | 58.22 |
+| gbrg | 4.63-4.65 | 10.55 | 65.67 | 56.07 | 65.71 |
+| grbg | 4.66-4.68 | 10.52 | 65.70 | 56.08 | 65.66 |
+| rggb | 0.46-0.50 | 12.29 | 57.73 | 65.75 | 53.88 |
+
+gbrg and grbg are out on both counts -- and note how completely their R and B
+means collapse together (65.67 vs 65.71), which is the sharpest signature of a
+misaligned phase there is.  bggr and rggb are the R/B swap of each other and
+the metrics cannot separate them.
+
+**`camera raw` settles the family without any theory.**  It takes the demosaic
+out of the path (INP -> WDMA2) so the buffer holds the Bayer mosaic itself, and
+reads the phase off it: a Bayer tile has two green photosites on a diagonal,
+green is the most sensitive channel and carries the most light in nearly any
+scene, so the two greens come out highest and nearly equal -- and which
+diagonal they occupy names the family.  It also shows what the MIPI receiver
+made of the sensor's RAW10, which is the only direct look at that data this
+port has.
+
+**Red versus blue still needs a scene of known colour.**  Point the camera at
+something strongly RED and see which `camera bayer` setting reports the red
+mean as the high one; no amount of arithmetic on an unknown scene can do it.
+
+#### Blue coming out YELLOW means red and blue are swapped
+
+Worth knowing because it is not the symptom people expect.  A swapped R/B does
+not turn blue into red: the blue photosites read as red, green survives, and
+red plus green is **yellow**.  Seen on the bench with the OV5647 the moment
+saturation was turned up -- the phase default had come from the donor cfg's
+mirror-to-phase table and was RGGB, where the part is natively BGGR (Linux's
+ov5647 driver reports SBGGR10 for the same reason).
+
+Both sensors default to BGGR now, and `camera bayer` overrides stick across a
+re-bring-up so a bench measurement is not quietly undone by a fault recovery.
+
+#### Settled: the IMX219 module is BGGR
+
+Measured, on a scene the operator confirmed was predominantly red:
+
+```
+camera raw ->  (0,0) 43.93   (1,0) 49.69   (0,1) 49.68   (1,1) 49.25
+```
+
+A red scene must show a high red and a low blue.  Under BGGR that reads
+B 43.93 / G 49.7 / R 49.25 -- red up against the greens, blue clearly lowest,
+which is what a red scene looks like.  Under RGGB it would read R 43.93 as the
+LOWEST channel, which a red scene cannot do.  The demosaiced captures agree:
+`bayer bggr` gives R 48.91 > B 43.74, `bayer rggb` gives R 44.08 < B 49.67.
+
+It also explains why the automatic phase naming had almost no margin (0.44):
+a red scene pushes the red position right up against the greens, which is
+exactly the case the margin line warns about.
+
+And it matches the theory, which is worth stating because the two arrived
+independently: the IMX219's native order is RGGB, this port programs an HV
+mirror (0x0172 = 0x03), and mirroring RGGB in both axes gives BGGR.
+
+### Bit depth: there is nothing to configure
+
+The sensor sends RAW10 and the datapath is 8-bit from the INP onward.  That is
+architecture, not a setting left at a default: `INP_IOBIT_E` offers 8/4/1 bit
+and `INP_DATADEPTH_E` offers 8/4 bit -- **neither has a 10-bit value**.  The
+only 10-bit knobs in the whole SDK surface are the CSI receiver's and
+transmitter's `pixel_depth`, both set to 10 here (and the FIFO-fill computation
+uses the same 10).  The 10 -> 8 reduction happens inside the MIPI receiver;
+`hx_drv_csirx_set_default_tuncatecfg()` exists but **no application in the SDK
+calls it**, and the truncate register is `#define`d in four donor files and
+written in none.
+
+If that reduction ever took the wrong end of the word, `camera raw` is what
+would show it: a smooth scene would come back as noise instead of a mosaic with
+two clearly-highest green positions.
+
+The default phase (BGGR) follows the donor's mapping from the sensor's HV
+mirror setting, and that mapping deserves suspicion here: the donor's shipping
+build selects the **OV5647**, not the IMX219, and the INP does 10:2 binning and
+4:2 subsampling **before** the demosaic, either of which can move the effective
+phase.  So the phase is runtime-settable:
+
+```
+camera bayer bggr|gbrg|grbg|rggb
+```
+
+To settle it: point the camera at something strongly coloured, try all four,
+and discard the two that show a high `mosaic` and R/B means collapsed together.
+That leaves an R/B-swapped pair, which only a scene of KNOWN colour can
+separate -- see the table above.  On a grey scene every phase scores low and
+the measurement means nothing at all.
+
+### [!] Four things that produce a plausible, wrong picture
+
+1. **The DMA'd frame must be cache-invalidated before the CPU reads it.**  The
+   shipping vendor glue invalidates only the 32-byte JPEG size word and never
+   the 225 KB WDMA3 buffer, so this omission is easy to inherit.  The result is
+   a frame that is mostly right and partly the previous one.  Invalidate after
+   frame-ready (which is the statement that the write-DMA has stopped) and
+   before reading.
+2. **`lcd_blit()` wants wire order (big-endian) and the pipeline carries
+   little-endian.**  `lcd_blit_le()` exists so the driver owns that swap.
+   Publishing wire-order pixels under a `FRAME_FMT_RGB565` tag would be cheaper
+   and would be a lie the next sink discovers.
+3. **Buffers a DMA touches cannot live in TCM.**  Same rule as the framebuffer,
+   same failure: no fault, the transfer simply never happens.  `.cam_raw` and
+   `.cam_slots` are SRAM NOLOAD sections and `check_placement_budget.py` pins
+   both.
+4. **The demosaic's Bayer phase follows the sensor's mirror setting.**  BGGR
+   here because the sensor is programmed HV-mirrored; a `_Static_assert` ties
+   the two together so changing one alone is a compile error and not a colour
+   swap that looks like a software bug in the packer.
+
+### [!] Unwrap before the vendor teardown, not after
+
+`cam_imx219_full_stop()` IS the vendor's "close the device", and it moves
+interrupt vectors.  Running it while this port's wrappers are still installed
+and registered leaves the accounting registry holding pointers to vectors that
+no longer exist -- and the failure is permanent and silent until you look:
+
+```
+grove> camera preview
+^C
+grove> thread
+thread: cpu% unavailable (an accounted interrupt vector was replaced)
+```
+
+That was observed on hardware, and it is the same lesson `lcd_teardown()`
+already carried ("unwrap the accounted interrupts BEFORE closing the device").
+`cam_quiesce()` therefore masks the lines, hands the vectors back, and only then
+lets the vendor tear the datapath down.  The lines are left DOWN afterwards --
+the next start re-enables them inside a measure-then-wrap round, which is the
+only way any line may come back up.
+
+### Restarting is a barrier, not a flag
+
+The datapath callback carries a status code and nothing else -- no frame number,
+no handle, no generation.  A late event from a stream that has already been
+stopped is therefore indistinguishable at the callback from a fresh one, and a
+generation counter in the driver cannot fix that, because the event carries no
+generation to compare.
+
+So every restart quiesces first: full stop, mask this port's interrupt lines,
+*then* clear the latched peripheral status and the NVIC pending bits, drain the
+semaphore, and only then re-arm.  **Stop before clear**, exactly as the panel's
+abort path had to learn (see "A DMA completion is not a transfer completion"):
+clearing while the hardware is still running just means the next event lands
+after the clear, and on a restart it arrives as the new stream's first frame.
+
+There is one stop sequence (`cam_imx219_full_stop`) and all four ways of ending
+a stream go through it: the user's stop, a frame-timeout, a terminal datapath
+event, and a bring-up that failed part way.  The datapath configuration is
+deliberately NOT kept across it -- the stop performs a datapath software reset
+and nothing in the SDK says which registers survive one, so the next start
+reconfigures from scratch.
+
+Errors have priority over frames: the callback's error latch is sticky and is
+checked before the frame-ready flag, so a wakeup carrying both never publishes a
+frame produced by a datapath that has already failed.  Any negative status the
+port does not recognise is treated as terminal.
+
+### Chip revision C needs a per-frame MIPI bounce
+
+_(rev-C bounce)_  **The board here reports `0x8538000d` (revision D), so this path does not run
+on it and is untested on this hardware.**  It is carried because the donor
+carries it and rev-C parts exist in the field.
+
+On `0x8538000c` the receiver loses D-PHY lock across a frame boundary unless it
+and the sensor stream are cycled between frames; every donor application carries
+the same workaround gated on the same version word.  It is expensive -- a full
+receiver bring-up, including a PLL reselect and both PHY resets, per frame -- and
+it freezes the sensor's own exposure and gain loops, so it runs only where the
+version word says it is needed.  `camera probe` prints whether it applies.
+
+Since D-PHY lock itself cannot be read back, "it came back" is established from
+three weaker things, and the port says so rather than claiming otherwise:
+
+1. the sensor's I2C writes returned success (the donor's helpers are all void;
+   these are checked),
+2. the receiver's latched error status is clean under a **clear -> enable ->
+   poll** protocol -- it latches, so a poll without the clear reports the
+   *previous* link,
+3. the next frame arrives inside the bounded wait.  This is the real evidence,
+   and it is established after the fact by the producer loop.
+
+### The Timer0 interrupt path is now verified
+
+M-G3a left this open (the archives were not linked, so the seam was
+garbage-collected out of the image).  `hw_start()` proves the counter RUNS,
+which is a different claim from "the interrupt is delivered": a Timer0 whose
+IRQEN produces no INTSTATUS, or whose NVIC path is dead, passes every check it
+makes, and the datapath library paces capture with this timer.
+
+`grove_timer_seam_probe_delivery()` closes it.  It runs once, from the camera
+bring-up, in **thread context with interrupts enabled** -- outside the
+measure-then-wrap PRIMASK window, because it waits for its own interrupt and
+under PRIMASK could only ever time out.  It arms a short periodic Timer0 through
+the real wrapped entry point, reads the NVIC enable bit back, waits a bounded
+100 ms, and then stops, unregisters and checks the line went back down.  A
+failure classifies itself (never enabled / INTSTATUS asserts but nothing is
+delivered / the timer never raises it), latches the reason for `epk`, and
+**refuses the whole camera bring-up**.
+
+`test/test_timer_probe.c` pins both directions, since the failing one cannot be
+produced on demand on hardware: the mock NVIC calls the installed vector from
+inside `udelay()`, which is where the firmware waits.  It is compiled twice
+because the probe latches its answer on the first call.
+
+### Interrupt accounting: 32 wrap slots
+
+The camera brings up interrupts by the dozen and which ones is not knowable
+before the measurement, so `GROVE_EPK_WRAP_MAX` and `TX_GLUE_EPK_MAX_IRQ` are
+both 32 (they must move together; a `_Static_assert` says so).  The ceiling
+comes from the candidate set -- sensor control 20/84/85, Timer0 34, and
+INP/DP/EDM/WDMA 136..157, at most 26 lines -- plus the console UART and the
+panel's SPI/DMA.  CSIRX and CSITX are not NVIC-registered at all on this path;
+their status is polled.
+
+The measure-then-wrap protocol runs in **several rounds**, each under PRIMASK,
+with the sensor's I2C traffic in between with interrupts enabled.  One round
+would mean masking interrupts across roughly ten milliseconds of mode-table
+writes, which stalls the console and drops ThreadX ticks.  Everything that can
+turn a line on has to be inside a round -- not just the CSI receiver, but the
+INP/WDMA configuration and the sensor controller's start, which enable lines of
+their own.
+
+#### [!] The vendor re-registers ISRs on lines it already has running
+
+Measured on hardware, and it breaks the protocol's central assumption:
+
+```
+grove> epk
+  displaced irq : 143  wrapper 100019a5  now 10010d59
+```
+
+irq 143 is wrapped at start-up with one vendor handler and is carrying a
+DIFFERENT one a frame later -- the datapath's per-frame retrigger re-registers
+its ISR.  Measure-then-wrap cannot see that, because the line never changes its
+ENABLED state: the ISER diff is empty and the wrap has nothing to do, while the
+vector table quietly stops pointing at the trampoline.  The line keeps working;
+it just stops being accounted, and `thread` blanks the whole cpu% column for as
+long as the stream runs.
+
+So the wrap is **defended, not just established**: `grove_epk_irq_reassert()`
+runs once per frame and, for any line whose vector is no longer the trampoline,
+adopts the NEW vendor handler as the one the trampoline calls and puts the
+trampoline back.  Re-installing the *original* saved handler would be wrong --
+the vendor changed it for a reason.  `epk` reports how often this has been
+needed; a count that tracks the frame count means it is happening every frame.
+Measured here: 118 re-wraps in 12.2 s of preview, i.e. once per frame, and with
+the defence in place `epk` reports `cpu% accounting : live` throughout.
+
+The rounds have **two different lifetimes**, and that distinction is load
+bearing:
+
+| group | what it wraps | lifetime |
+|---|---|---|
+| bring-up | module power, the CIS layer | as long as the port is up |
+| datapath | CSI receiver, INP/WDMA, capture start | **one stream** |
+
+The datapath rounds are rebuilt by every start and every timeout retry, so they
+are unwound first -- a wrap refuses a line that is already wrapped, so without
+the unwind the second start finds no free round and the retry budget is
+decorative.  Recovering from a fault likewise unwinds everything before
+rebuilding: dropping the undo log instead would leave those lines enabled and
+registered, absent from the next ISER delta (they are no longer "fresh"), and
+impossible to unwind ever again.
+
+### Not yet answered
+
+- Frame rate.  The SPI wire time is 25.8 ms per frame at 48 MHz and the capture
+  does not overlap it, so the ceiling is well under the panel's 38.7 fps; the
+  rev-C bounce costs more again.  Overlapping capture with blit, and giving the
+  sink its own thread, are deliberately left out of this milestone.
+- The producer's stack high-water mark (4 KB allocated; `thread` reported a
+  568 B peak on the first run, so there is room to trim once the sink work is
+  settled).
+- Good default exposure / gain / white-balance values.  The runtime commands
+  exist so that finding them costs no flash cycles; nothing is baked in yet.
+  Measured with the donor's defaults, in room light: means R 58 / G 66 / B 54,
+  and `mosaic` under 0.5 on every plane -- i.e. the demosaic is working and the
+  frame is simply under-exposed and unbalanced.
+- The rev-C bounce, which this board (rev D) does not exercise.
+- Ethos-U55 inference.
 
 ## Flashing and recovery
 

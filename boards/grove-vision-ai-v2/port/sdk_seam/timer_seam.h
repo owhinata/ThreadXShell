@@ -42,4 +42,31 @@ const char *grove_timer_seam_fault(void);
 /** @brief  How many times the seam refused a call (id != 0, bad config). */
 uint32_t grove_timer_seam_refusals(void);
 
+/**
+ * @brief  Prove that Timer0's interrupt is actually DELIVERED (issue #35).
+ *
+ * The arm-time check inside hw_start() establishes that the counter runs, which
+ * is not the same claim: a Timer0 whose IRQEN produces no INTSTATUS, or whose
+ * NVIC path is dead, passes it and then never fires.  Since the datapath
+ * library paces capture with this timer, "armed and believed" is the failure
+ * that would cost the most to diagnose from the outside.
+ *
+ * Arms a short periodic Timer0 through the real wrapped entry point, waits a
+ * bounded time for one interrupt to arrive, then stops and unregisters it and
+ * verifies the line went back down.  Latched: the first call does the work, and
+ * later calls return the same answer without repeating the wait.
+ *
+ * [!] THREAD CONTEXT WITH INTERRUPTS ENABLED.  It waits for its own interrupt,
+ * so calling it with PRIMASK set -- for instance from inside the camera
+ * bring-up's measure-then-wrap window -- would burn the whole timeout and then
+ * report the hardware broken.
+ *
+ * @return non-zero if the interrupt arrived and the teardown was clean.  On
+ *         failure the reason is latched for grove_timer_seam_fault().
+ */
+int grove_timer_seam_probe_delivery(void);
+
+/** @brief  How many probe interrupts arrived (0 or more; diagnostic only). */
+uint32_t grove_timer_seam_probe_hits(void);
+
 #endif /* GROVE_TIMER_SEAM_H */

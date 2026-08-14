@@ -47,7 +47,7 @@ void Default_Handler(void) { }
 
 static int irq_enabled(int irqn)
 {
-	return (seam_host_env.iser[irqn >> 5] >> (irqn & 31)) & 1u;
+	return (seam_host_env.nvic.ISER[irqn >> 5] >> (irqn & 31)) & 1u;
 }
 
 static int irq_registered(int irqn)
@@ -65,7 +65,7 @@ static void env_reset(void)
 static void vendor_brings_up(int irqn, void (*isr)(void))
 {
 	seam_host_env.vector[irqn] = (uint32_t)(uintptr_t)isr;
-	seam_host_env.iser[irqn >> 5] |= 1u << (irqn & 31);
+	seam_host_env.nvic.ISER[irqn >> 5] |= 1u << (irqn & 31);
 }
 
 /*
@@ -130,9 +130,9 @@ static void test_double_wrap_refused(void)
 
 	/* The vendor disables and re-enables the line without anyone
 	 * unwrapping it -- a close()/open() cycle that skipped the teardown. */
-	seam_host_env.iser[105 >> 5] &= ~(1u << (105 & 31));
+	seam_host_env.nvic.ISER[105 >> 5] &= ~(1u << (105 & 31));
 	grove_epk_irq_snapshot(&snap);
-	seam_host_env.iser[105 >> 5] |= 1u << (105 & 31);
+	seam_host_env.nvic.ISER[105 >> 5] |= 1u << (105 & 31);
 
 	CHECK(grove_epk_irq_wrap_new(&snap, &second) == 0,
 	      "wrapping an already-wrapped line was accepted; unwrap would "
@@ -213,13 +213,16 @@ static void test_retry_after_failure(void)
 	env_reset();
 
 	/*
-	 * Nine failed attempts, each rolled back, then a successful one.  Nine
-	 * is deliberately more than GROVE_EPK_WRAP_MAX (8): if a failed attempt
-	 * leaked even one trampoline slot, the table would be exhausted before
-	 * this loop ended and the final attempt would fail.  That is exactly
-	 * the "repeated transient failures permanently break EPK" case.
+	 * GROVE_EPK_WRAP_MAX + 1 failed attempts, each rolled back, then a
+	 * successful one.  The count is derived, not written out: each attempt
+	 * wraps one line before the second one's registration is refused, so a
+	 * leak of a single slot per attempt exhausts the table only if the loop
+	 * runs longer than the table is deep.  That is exactly the "repeated
+	 * transient failures permanently break EPK" case, and hard-coding the
+	 * loop count would quietly stop testing for it the next time the pool
+	 * grows.
 	 */
-	for (attempt = 0; attempt < 9; attempt++) {
+	for (attempt = 0; attempt < GROVE_EPK_WRAP_MAX + 1; attempt++) {
 		grove_epk_irq_snapshot(&snap);
 		vendor_brings_up(64, vendor_isr_a);
 		vendor_brings_up(65, vendor_isr_b);
@@ -232,7 +235,7 @@ static void test_retry_after_failure(void)
 		check_invariant("between retries");
 
 		/* The vendor's own teardown: lines off, vectors as they were. */
-		seam_host_env.iser[2] = 0u;
+		seam_host_env.nvic.ISER[2] = 0u;
 	}
 
 	/* Now the driver comes up cleanly. */
@@ -242,8 +245,9 @@ static void test_retry_after_failure(void)
 	vendor_brings_up(65, vendor_isr_b);
 
 	CHECK(grove_epk_irq_wrap_new(&snap, &set) == 1,
-	      "the retry after 9 rolled-back failures could not wrap -- "
-	      "a failed attempt is leaking trampoline slots");
+	      "the retry after %d rolled-back failures could not wrap -- "
+	      "a failed attempt is leaking trampoline slots",
+	      GROVE_EPK_WRAP_MAX + 1);
 	CHECK(set.count == 2u, "the retry wrapped %lu lines, wanted 2",
 	      (unsigned long)set.count);
 	check_invariant("after a successful retry");
@@ -270,6 +274,95 @@ static void test_rollback_is_idempotent(void)
 	check_invariant("after a double rollback");
 }
 
+/* ---- 6. the pool boundary: MAX wraps, MAX+1 is refused as a whole -------- */
+
+/*
+ * The camera (issue #35) is the first consumer that brings up lines by the
+ * dozen, and how many it will actually enable is not knowable ahead of the
+ * measurement -- so "one line too many" stopped being hypothetical when
+ * GROVE_EPK_WRAP_MAX went from 8 to 32.  Test 3 already pins the SHAPE of a
+ * refusal using a mocked registry; what it cannot see is whether the real
+ * trampoline table is as deep as the constant claims.  Filling it exactly, and
+ * then overfilling it by one, is the only thing that does.
+ *
+ * The contract on overflow is the same one every other failure follows: the
+ * lines that did get through stay enabled AND registered (so the invariant
+ * holds throughout), the one that did not stays disabled, and the CALLER undoes
+ * the attempt with the returned log.  wrap_new() deliberately does not unwind
+ * itself -- the caller has a peripheral to tear down in the same breath.
+ */
+static void test_pool_exhaustion(void)
+{
+	struct epk_irq_snapshot snap;
+	struct epk_irq_wrapset set;
+	int i;
+
+	/* Fill the pool exactly.  Line numbers start at 64 to stay inside the
+	 * modelled 512-entry vector array and clear of the lines the earlier
+	 * tests leave lying around. */
+	env_reset();
+	grove_epk_irq_snapshot(&snap);
+	for (i = 0; i < GROVE_EPK_WRAP_MAX; i++)
+		vendor_brings_up(64 + i, vendor_isr_a);
+
+	CHECK(grove_epk_irq_wrap_new(&snap, &set) == 1,
+	      "wrapping exactly GROVE_EPK_WRAP_MAX (%d) lines failed -- the "
+	      "trampoline table is shallower than the constant says",
+	      GROVE_EPK_WRAP_MAX);
+	CHECK(set.count == (uint32_t)GROVE_EPK_WRAP_MAX,
+	      "the undo log has %lu entries, wanted %d",
+	      (unsigned long)set.count, GROVE_EPK_WRAP_MAX);
+	for (i = 0; i < GROVE_EPK_WRAP_MAX; i++)
+		CHECK(seam_host_env.vector[64 + i] !=
+		      (uint32_t)(uintptr_t)vendor_isr_a,
+		      "irq %d still carries the vendor vector with the pool "
+		      "exactly full", 64 + i);
+	check_invariant("with the trampoline pool exactly full");
+	grove_epk_irq_unwrap_set(&set);
+
+	/* One line more than the pool holds. */
+	env_reset();
+	grove_epk_irq_snapshot(&snap);
+	for (i = 0; i < GROVE_EPK_WRAP_MAX + 1; i++)
+		vendor_brings_up(64 + i, vendor_isr_a);
+
+	CHECK(grove_epk_irq_wrap_new(&snap, &set) == 0,
+	      "wrapping GROVE_EPK_WRAP_MAX + 1 (%d) lines reported success",
+	      GROVE_EPK_WRAP_MAX + 1);
+	CHECK(set.count == (uint32_t)GROVE_EPK_WRAP_MAX,
+	      "the undo log has %lu entries, wanted %d",
+	      (unsigned long)set.count, GROVE_EPK_WRAP_MAX);
+	/* Fail-closed: the line that found no trampoline is left disabled. */
+	CHECK(!irq_enabled(64 + GROVE_EPK_WRAP_MAX),
+	      "the line that found no trampoline was left enabled");
+	CHECK(seam_host_env.vector[64 + GROVE_EPK_WRAP_MAX] ==
+	      (uint32_t)(uintptr_t)vendor_isr_a,
+	      "the refused line's vendor vector was replaced anyway");
+	check_invariant("after the pool ran out");
+
+	/* ...and the caller can still undo everything that did get through. */
+	grove_epk_irq_unwrap_set(&set);
+	for (i = 0; i < GROVE_EPK_WRAP_MAX + 1; i++) {
+		CHECK(!irq_enabled(64 + i) && !irq_registered(64 + i),
+		      "rollback left irq %d accounted", 64 + i);
+		CHECK(seam_host_env.vector[64 + i] ==
+		      (uint32_t)(uintptr_t)vendor_isr_a,
+		      "rollback did not restore irq %d's vendor vector",
+		      64 + i);
+	}
+	CHECK(set.count == 0u, "the undo log was not emptied");
+	check_invariant("after rolling back an overflowed attempt");
+
+	/* The pool is not poisoned by the refusal: a later bring-up still fits. */
+	env_reset();
+	grove_epk_irq_snapshot(&snap);
+	vendor_brings_up(200, vendor_isr_c);
+	CHECK(grove_epk_irq_wrap_new(&snap, &set) == 1,
+	      "the attempt after an exhausted pool could not wrap -- the "
+	      "refused attempt leaked trampoline slots");
+	grove_epk_irq_unwrap_set(&set);
+}
+
 int main(void)
 {
 	test_wrap_success();
@@ -278,6 +371,7 @@ int main(void)
 	test_partial_failure_rolls_back();
 	test_retry_after_failure();
 	test_rollback_is_idempotent();
+	test_pool_exhaustion();
 
 	if (failures != 0) {
 		printf("test_epk_irq_wrap: %d failure(s)\n", failures);

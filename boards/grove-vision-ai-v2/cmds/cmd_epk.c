@@ -28,6 +28,7 @@
  */
 #include "cli.h"
 #include "timer_seam.h"
+#include "epk_irq_wrap.h"
 #include "tx_glue.h"
 
 #include "WE2_device.h"
@@ -51,6 +52,36 @@ static void epk_print_status(struct cli_instance *sh)
 	 * duplication (issue #27). */
 	cli_print(sh, "cpu%% accounting : %s\r\n",
 	          ok ? "live" : "NOT trustworthy (run `thread` for the reason)");
+
+	/*
+	 * If a wrapped vector was displaced, name it.  "A vector was replaced"
+	 * is where `thread` has to stop -- it has one line to work with -- but
+	 * this port wraps a couple of dozen camera interrupts and the whole
+	 * diagnosis is WHICH one and what took it over: an address inside a
+	 * vendor archive means the driver re-registered on a line it already
+	 * had running, anything else means something scribbled.
+	 */
+	{
+		int irqn;
+		uint32_t want, got;
+
+		/* Only while it is ACTUALLY broken.  The latch is permanent, and
+		 * a re-wrap can put the line back -- printing a historical
+		 * mismatch next to a healthy verdict reads as a live fault.
+		 * The re-wrap counter below is the record that it happened. */
+		if (!ok && tx_glue_profile_bad_vector(&irqn, &want, &got))
+			cli_print(sh, "  displaced irq : %d  wrapper %08lx  "
+			              "now %08lx\r\n", irqn,
+			          (unsigned long)want, (unsigned long)got);
+	}
+
+	/* Non-zero means a vendor driver re-registers ISRs on lines it already
+	 * has running, and this port has been taking them back.  A count that
+	 * tracks the frame count means it happens every frame. */
+	if (grove_epk_irq_reasserts() != 0u)
+		cli_print(sh, "  irq re-wraps  : %lu (a vendor driver "
+		              "re-registers its ISRs)\r\n",
+		          (unsigned long)grove_epk_irq_reasserts());
 
 	cli_print(sh, "TIMER2 rate     : %lu Hz  (SCU ref %lu Hz / div %lu)\r\n",
 	          (unsigned long)tx_glue_epk_timer_hz(),

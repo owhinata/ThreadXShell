@@ -180,9 +180,20 @@ int cam_imx219_set_gains(uint8_t again, uint16_t dgain);
  * exposure by hand on the OV5647 must also switch that loop off -- otherwise it
  * overwrites the value on its next frame and the command appears to do nothing.
  *
- * @return 0 on success; -1 asking to disable a loop the part does not have.
+ * @return 0 on success, including on a part with no on-chip loop -- there both
+ *         directions are already true and there is nothing to write.
  */
 int cam_imx219_set_sensor_auto(int on);
+
+/**
+ * @brief  Whether this sensor keeps exposure and frame length where the IMX219
+ *         does, which is what cam_imx219_set_frame_length() and
+ *         cam_imx219_read_timing() address directly.
+ *
+ * Ask before offering either: on a part that does not, they are refused rather
+ * than aimed at whatever those addresses happen to mean there.
+ */
+int cam_imx219_has_timing_regs(void);
 
 /**
  * @brief  Re-read the sensor's exposure and gain into the reported values.
@@ -209,6 +220,9 @@ void cam_imx219_get_exposure_gains(uint16_t *lines, uint8_t *again,
  * a good way to spend a session concluding the camera is broken.
  *
  * Raising it lowers the frame rate proportionally.
+ *
+ * @return 0 on success; -1 on a sensor without IMX219-layout timing registers
+ *         (see cam_imx219_has_timing_regs()).
  */
 int cam_imx219_set_frame_length(uint16_t lines);
 

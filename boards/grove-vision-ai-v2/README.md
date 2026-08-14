@@ -675,7 +675,7 @@ a leak fails the test), and a sweep after every step asserting the invariant
 `AGENTS.md` states -- **every line is either disabled, or wrapped AND
 registered**, never a third thing.
 
-## Camera (IMX219 over MIPI CSI)
+## Camera (IMX219 / OV5647 over MIPI CSI)
 
 ```
 camera probe             power the module and read its sensor ID
@@ -683,7 +683,8 @@ camera capture           one frame + per-channel statistics
 camera preview [frames]  live preview on the panel, Ctrl+C to stop
 camera raw               capture the Bayer mosaic and name the phase
 camera stats             producer and sink counters
-camera exposure [lines]  read/set the exposure  (there is no auto-exposure)
+camera exposure [lines [frame_lines]]
+                         read/set the exposure (frame_lines: IMX219 only)
 camera gain [a [d]]      read/set analogue / digital gain
 camera wb [r g b]        read/set the software white balance (256 = unity)
 camera black [n]         black level subtracted before the gain (pedestal 16)
@@ -798,6 +799,36 @@ loop adjusting the exposure in between is a variable nobody asked for.
 hundred iterations: convergence from six starting brightnesses, no movement at
 all once settled, and no runaway on a black frame.  Those are failure modes
 that all look fine in a single capture and are miserable in a live preview.
+
+### Two sensors, and what is NOT shared between them
+
+The IMX219 and the OV5647 modules fit the same connector, so the port asks over
+I2C which one is there rather than taking a build option -- a build flag would
+cost a flash cycle to swap camera, on a part rated ~100k of them.
+
+What differs is more than a register table, and the split is the reason
+`cam_imx219.c` dispatches through per-sensor function pointers:
+
+- **The OV5647 runs its own AEC/AGC on chip; the IMX219 does not.**  So
+  `camera auto` means two different things, and on the OV5647 it also has to
+  write the sensor (0x3503).  Ours stands down for the on-chip loop when there
+  is one -- two exposure loops on one sensor hunt against each other.
+- **Neither exposure nor gain has the same layout.**  The OV5647's exposure is
+  20 bits in SIXTEENTHS of a line across 0x3500..0x3502, and its gain is 10 bits
+  where 16 means 1x.  The IMX219's are 0x015a/0x015b and 0x0157..0x0159.
+- **Frame length and its read-back are IMX219-only.**  `camera exposure <lines>
+  <frame_lines>` and the `sensor says` line address 0x0160/0x0161 directly; the
+  OV5647 keeps VTS at 0x380e/0x380f.  Both are REFUSED on a sensor that does not
+  have them rather than aimed at whatever those addresses mean there -- SCCB
+  acknowledges a write to an unimplemented register, so an unguarded one would
+  report success and change something else.  Same rule as `camera depth`.
+
+**[!] The auto mode is re-applied at every bring-up, not just when asked for.**
+A bring-up writes the mode table again, and on the OV5647 that table is what
+switches its AEC back ON -- so without this an earlier `camera auto off` is
+silently undone by the next `camera preview` and manual exposure stops holding.
+The requested mode is also kept from before the first probe, when "the sensor"
+is still a default descriptor and not the fitted part.
 
 ### The sensor is linear; the panel is not
 

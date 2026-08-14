@@ -171,8 +171,20 @@ int camera_read_timing(uint16_t *exposure, uint16_t *frame_length);
  * assume the sensor is holding still -- comparing Bayer phases, or reading
  * `camera capture` statistics twice -- since a loop adjusting the exposure
  * between two captures is a variable nobody asked for.
+ *
+ * Switching this also switches the sensor's own AEC/AGC where it has one, so it
+ * writes I2C: queued for the producer while a stream runs (CAM_OK means queued,
+ * not yet applied), otherwise applied under the API mutex, bringing the camera
+ * up first so the write reaches the sensor that is actually fitted.  The mode is
+ * kept here either way and re-applied at every bring-up, so it survives a camera
+ * that is not up yet -- and survives the mode table being written again, which
+ * on a sensor with its own AEC is what would otherwise switch it back on.
+ *
+ * @return CAM_OK -- including when the camera would not come up, since the
+ *         request is kept and applied later; CAM_ERR_* only when a sensor that
+ *         IS up refused the write.
  */
-void camera_set_auto(int on);
+int camera_set_auto(int on);
 int camera_auto(void);
 
 void camera_set_wb(const struct cam_wb *wb);

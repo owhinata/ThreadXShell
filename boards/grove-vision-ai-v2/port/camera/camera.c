@@ -262,11 +262,13 @@ static volatile uint8_t  cam_tune_again;
 static volatile uint16_t cam_tune_dgain;
 static volatile uint16_t cam_tune_frame_length;
 static volatile uint8_t  cam_tune_depth;
+static volatile uint8_t  cam_tune_auto;
 
 #define CAM_TUNE_EXPOSURE  0x1u
 #define CAM_TUNE_GAINS     0x2u
 #define CAM_TUNE_FRAME_LEN 0x4u
 #define CAM_TUNE_DEPTH     0x8u
+#define CAM_TUNE_AUTO      0x10u
 
 /* Producer side: take whatever is pending and apply it.  Thread context, and
  * only ever called between frames. */
@@ -297,6 +299,11 @@ static void cam_apply_tuning(void)
 	 * when the stream is restarted. */
 	if ((req & CAM_TUNE_DEPTH) != 0u)
 		(void)cam_imx219_set_depth(cam_tune_depth);
+	/* The sensor half of `camera auto` -- taking a part's own AEC/AGC off is
+	 * an I2C write like any other, and the console may not make it itself
+	 * while this thread owns the CIS driver. */
+	if ((req & CAM_TUNE_AUTO) != 0u)
+		(void)cam_imx219_set_sensor_auto(cam_tune_auto);
 }
 
 /*
@@ -609,6 +616,19 @@ static int cam_bringup(void)
 	if (cam_imx219_sensor_init() != 0)
 		return cam_bringup_fail("the sensor did not accept its mode table",
 		                        CAM_ERR_NO_SENSOR);
+	/*
+	 * [!] Re-state the auto mode at the sensor, every bring-up.
+	 *
+	 * The mode table just went back in, and for a part that runs its own
+	 * AEC that table is what ENABLES it -- so a bring-up silently undoes an
+	 * earlier `camera auto off` and manual exposure stops holding, with
+	 * nothing said.  This is also the first point at which the request can
+	 * be honoured at all when it arrived before any probe: until detection
+	 * ran, "the sensor" was a default descriptor and not the fitted part.
+	 */
+	if (cam_imx219_set_sensor_auto((int)cam_auto_on) != 0)
+		return cam_bringup_fail("the sensor kept its own exposure loop",
+		                        CAM_ERR_HAL);
 	/* Against the DETECTED part's ID, not a hard-coded one: detection has
 	 * already established which sensor is in the connector, and re-checking
 	 * against the other one's number is how a working OV5647 gets reported
@@ -1388,6 +1408,13 @@ int camera_set_frame_length(uint16_t lines)
 {
 	int rc;
 
+	/* Before the queue, not after it: a request the sensor has no register
+	 * for must be refused to the caller's face.  Queueing it would report
+	 * success to the console and drop it in the producer, where the return
+	 * value has nobody to go to. */
+	if (!cam_imx219_has_timing_regs())
+		return CAM_ERR_HAL;
+
 	if (cam_state == CAM_ST_STREAMING) {
 		cam_tune_frame_length = lines;
 		cam_tune_req |= CAM_TUNE_FRAME_LEN;
@@ -1428,14 +1455,47 @@ void camera_set_wb(const struct cam_wb *wb)
 		cam_wb = *wb;
 }
 
-void camera_set_auto(int on)
+int camera_set_auto(int on)
 {
+	int rc;
+
 	cam_auto_on = on ? 1u : 0u;
-	/* On a part with its own AEC, "auto" means THAT loop -- ours stands
-	 * down for it.  Turning auto off therefore has to take the sensor's
-	 * loop off as well, or `camera exposure` is overwritten a frame later
-	 * and manual control silently does not exist. */
-	(void)cam_imx219_set_sensor_auto(on);
+
+	/*
+	 * On a part with its own AEC, "auto" means THAT loop -- ours stands down
+	 * for it.  Turning auto off therefore has to take the sensor's loop off
+	 * as well, or `camera exposure` is overwritten a frame later and manual
+	 * control silently does not exist.
+	 *
+	 * That is an I2C write, so it obeys the same two rules as every other
+	 * tuning setter here rather than going straight at the bus: while a
+	 * stream runs the producer owns the CIS driver and this is queued for
+	 * it, and otherwise it goes under the API mutex on a brought-up sensor.
+	 * Bringing up is also what makes the request meaningful before the first
+	 * probe -- detection runs there, so the write lands on the sensor that
+	 * is actually fitted rather than on the default descriptor.
+	 */
+	if (cam_state == CAM_ST_STREAMING) {
+		cam_tune_auto = cam_auto_on;
+		cam_tune_req |= CAM_TUNE_AUTO;
+		return CAM_OK;
+	}
+
+	/*
+	 * A camera that will not come up is NOT a failure of this command.  The
+	 * mode is held here and cam_bringup() applies it to whatever sensor is
+	 * found, so asking with nothing plugged in records a request that is
+	 * kept -- reporting an error would be telling the user to retry
+	 * something that has already taken.  Only a sensor that is up and
+	 * refuses the write has actually failed.
+	 */
+	rc = cam_api_enter_up();
+	if (rc != CAM_OK)
+		return CAM_OK;
+	rc = (cam_imx219_set_sensor_auto((int)cam_auto_on) == 0) ? CAM_OK
+	                                                         : CAM_ERR_HAL;
+	cam_api_exit();
+	return rc;
 }
 
 int camera_auto(void)

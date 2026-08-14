@@ -162,10 +162,30 @@ static uint32_t epk_hz;          /* epk_ref_hz / epk_div: the TIMER2 rate    */
  * callers pass string literals only. */
 static const char *epk_why;
 
-/* What tx_glue_profile_arm() was told to keep re-checking: the one external
- * interrupt this port accounts for, and the wrapper installed for it. */
-static int      epk_irqn = -1;
-static uint32_t epk_vector;
+/*
+ * The registry of accounted external interrupts (issue #30).
+ *
+ * Every interrupt this port ENABLES must have an accounting wrapper -- the
+ * outermost frame of the handler calling tx_glue_isr_enter/exit -- and must be
+ * listed here before it is enabled at the NVIC.  There is deliberately no
+ * "enabled but unwrapped" category: such a line bills its own runtime to
+ * whichever thread it interrupted while tx_glue_profile_ok() still returns 1,
+ * which hollows out the very guarantee this mechanism exists to provide.  A
+ * peripheral whose error/rare lines are not worth wrapping must leave them
+ * DISABLED and poll their status instead.
+ *
+ * Held as (irqn, wrapper) pairs so the re-validation below can prove both
+ * halves: that the set of enabled lines is a subset of the registry, and that
+ * every registered line still carries the wrapper we installed.  Mutated only
+ * from thread context, inside a PRIMASK critical section, so an ISR can never
+ * observe a half-written entry.
+ */
+struct epk_irq_entry {
+	int      irqn;
+	uint32_t vector;
+};
+static struct epk_irq_entry epk_irqs[TX_GLUE_EPK_MAX_IRQ];
+static uint32_t             epk_irq_count;
 
 /* EPK ISR nesting depth (tx_execution_profile.c, TX_CORTEX_M_EPK).  Read from
  * thread context it must be zero -- see tx_glue_profile_ok(). */
@@ -472,14 +492,80 @@ void tx_glue_isr_exit(void)
     }
 }
 
-void tx_glue_profile_arm(int irqn, uint32_t vector)
+/*
+ * Add (or refresh) an accounted interrupt.  MUST be called from thread context
+ * with the line still DISABLED at the NVIC, and the caller must treat a 0
+ * return as "do not enable this interrupt": leaving it disabled costs a
+ * feature, enabling it anyway costs the meaning of every cpu% number.
+ *
+ * The wrapper is verified against the vector table here as well as on every
+ * later query -- registering a vector that was never installed would make the
+ * re-validation pass on a claim that was false from the start.
+ */
+int tx_glue_profile_register_irq(int irqn, uint32_t wrapper_vector)
+{
+    TX_INTERRUPT_SAVE_AREA
+    uint32_t i;
+    int      rc = 0;
+
+    if (irqn < 0 || wrapper_vector == 0u) {
+        tx_glue_profile_fail("EPK irq registration got an invalid argument");
+        return 0;
+    }
+    if (NVIC_GetVector((IRQn_Type)irqn) != wrapper_vector) {
+        tx_glue_profile_fail("EPK irq registered a vector that is not installed");
+        return 0;
+    }
+
+    TX_DISABLE
+    for (i = 0u; i < epk_irq_count; i++) {
+        if (epk_irqs[i].irqn == irqn) {
+            epk_irqs[i].vector = wrapper_vector;   /* re-arm after a re-open */
+            rc = 1;
+            break;
+        }
+    }
+    if (rc == 0 && epk_irq_count < (uint32_t)TX_GLUE_EPK_MAX_IRQ) {
+        epk_irqs[epk_irq_count].irqn   = irqn;
+        epk_irqs[epk_irq_count].vector = wrapper_vector;
+        epk_irq_count++;
+        rc = 1;
+    }
+    TX_RESTORE
+
+    if (rc == 0)
+        tx_glue_profile_fail("EPK irq registry is full");
+    return rc;
+}
+
+/*
+ * Drop an accounted interrupt.  The caller must have DISABLED it at the NVIC
+ * first: an entry removed while its line is still enabled is exactly the
+ * "enabled but unaccounted" state the registry exists to forbid, and the next
+ * query would (correctly) fail.
+ */
+void tx_glue_profile_unregister_irq(int irqn)
+{
+    TX_INTERRUPT_SAVE_AREA
+    uint32_t i;
+
+    TX_DISABLE
+    for (i = 0u; i < epk_irq_count; i++) {
+        if (epk_irqs[i].irqn == irqn) {
+            epk_irqs[i] = epk_irqs[epk_irq_count - 1u];
+            epk_irq_count--;
+            break;
+        }
+    }
+    TX_RESTORE
+}
+
+void tx_glue_profile_arm(void)
 {
     if (epk_timer_ok == 0u) {
         tx_glue_profile_fail("TIMER2 time source unavailable");
         return;
     }
-    epk_irqn   = irqn;
-    epk_vector = vector;
     profile_active = 1u;
 }
 
@@ -530,25 +616,38 @@ static int epk_timer_still_ok(const char **why)
     return 1;
 }
 
-/* The wrapped vector is still ours, and it is still the ONLY interrupt that
-   can reach the CPU.  An unaccounted enabled IRQ does not corrupt anything --
-   it just bills its own runtime to whichever thread it interrupted, which is
-   the misattribution this whole mechanism exists to avoid. */
+/* Every registered vector is still the wrapper we installed, and every
+   interrupt ENABLED at the NVIC is one of the registered ones.  An unaccounted
+   enabled IRQ does not corrupt anything -- it just bills its own runtime to
+   whichever thread it interrupted, which is the misattribution this whole
+   mechanism exists to avoid.  (Registered but currently disabled is fine: an
+   idle peripheral is simply not billing anything.) */
 static int epk_vectors_still_ok(const char **why)
 {
+    uint32_t registered[sizeof NVIC->ISER / sizeof NVIC->ISER[0]] = {0};
     uint32_t i;
 
-    if (NVIC_GetVector((IRQn_Type)epk_irqn) != epk_vector) {
-        *why = "the accounted interrupt vector was replaced";
+    if (epk_irq_count == 0u) {
+        *why = "no accounted interrupt is registered";
         return 0;
     }
 
-    for (i = 0u; i < (sizeof NVIC->ISER / sizeof NVIC->ISER[0]); i++) {
-        uint32_t enabled = NVIC->ISER[i];
+    for (i = 0u; i < epk_irq_count; i++) {
+        uint32_t irqn = (uint32_t)epk_irqs[i].irqn;
 
-        if (i == ((uint32_t)epk_irqn >> 5))
-            enabled &= ~(1UL << ((uint32_t)epk_irqn & 0x1Fu));
-        if (enabled != 0u) {
+        if (NVIC_GetVector((IRQn_Type)epk_irqs[i].irqn) != epk_irqs[i].vector) {
+            *why = "an accounted interrupt vector was replaced";
+            return 0;
+        }
+        if ((irqn >> 5) >= (sizeof registered / sizeof registered[0])) {
+            *why = "an accounted interrupt number is out of range";
+            return 0;
+        }
+        registered[irqn >> 5] |= 1UL << (irqn & 0x1Fu);
+    }
+
+    for (i = 0u; i < (sizeof NVIC->ISER / sizeof NVIC->ISER[0]); i++) {
+        if ((NVIC->ISER[i] & ~registered[i]) != 0u) {
             *why = "an interrupt with no accounting wrapper is enabled";
             return 0;
         }

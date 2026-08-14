@@ -137,10 +137,27 @@
    **ベンダの `hx_drv_timer_*` は API 丸ごと禁止シンボル**（例外は
    `hx_drv_timer_init` のみ — SDK の platform init が全 9 個に対して呼ぶが base を
    記録するだけ）。名前リストでは `hx_drv_timer_hw_start(TIMER_ID_2, ...)` が抜けるので
-   接頭辞で塞ぐ。加えて **`tx_glue_profile_ok()` が毎回実行時に再検証する**
-   （TIMER2 の CTRL/RELOAD と計数、ラップしたベクタの同一性、
-   会計対象以外の IRQ が有効になっていないこと、EPK ネストカウンタが 0）。
+   接頭辞で塞ぐ。**この禁止を緩めてはならない。**
+   プリビルトのカメラ系アーカイブがこの 4 シンボル
+   （`hw_start` / `hw_stop` / `cm55x_delay_ms` / `_us`）を参照するが、対処は
+   **ゲートの緩和ではなくリンカ `--wrap` による board 所有の seam**
+   （`port/sdk_seam/timer_seam.c`、#30）。`__real_*` は呼ばない ので最終 ELF に
+   禁止接頭辞のシンボルは 1 つも残らず、ゲートも本項の不変条件もそのまま維持される。
+   seam は **id != TIMER_ID_0 と再現しない設定をレジスタ非書込みで拒否**し、
+   `hw_stop()` は ISR から呼ばれ得るので **ISR-safe**（ログ / mutex / TX API /
+   fail-stop ループを入れない）。**引数認識ゲートは採らない**（tail-call・
+   address-taken relocation・関数ポインタ・veneer を追う脆い全プログラム解析になる）。
+   加えて **`tx_glue_profile_ok()` が毎回実行時に再検証する**
+   （TIMER2 の CTRL/RELOAD と計数、登録した全ベクタの同一性、
+   **有効 IRQ 集合 ⊆ 登録集合**、EPK ネストカウンタが 0）。
    ビルド時ゲートは唯一の砦ではなく多層防御の一枚。
+   **EPK の会計対象 IRQ は集合**（`tx_glue_profile_register_irq()`、#30）。
+   **「有効だが未ラップ」というカテゴリを作らない** — 有効にするなら必ずラップして
+   登録し、駄目なら**無効のままステータスをポーリング**する。ベンダ由来で
+   IRQ 番号が事前に分からない周辺は、**実測して決める**
+   （`port/sdk_seam/epk_irq_wrap.c`: ISER をスナップショット →
+   PRIMASK 下でベンダ bring-up → 増えた線を全部ラップ・登録。
+   1 本でも失敗したら bring-up ごと諦める）。
    時間源の分担: EPK = TIMER2（スリープ中も進む必要がある）/ udelay と membench =
    DWT CYCCNT / CoreMark = `tx_time_get()`。混ぜない。
    **`TX_ENABLE_WFI` も `TX_EXECUTION_PROFILE_ENABLE` もコンパイル時スイッチ**で

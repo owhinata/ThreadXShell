@@ -358,6 +358,12 @@ git branch -d feat/<N>-short-description
 - **EPK は有効**（M-G2 / #25）。時間源は **Himax TIMER2**（RELOAD 全 1・割込み無効の
   自由走行。**触るのは `port/threadx/tx_glue.c` の bring-up 1 箇所だけ** — ベンダの
   `hx_drv_timer_*` は `hx_drv_timer_init` を除き API 丸ごと禁止シンボル）。
+  プリビルトのカメラ系アーカイブがこの API を参照するが、対処は**ゲート緩和ではなく
+  リンカ `--wrap` の board 所有 seam**（`port/sdk_seam/timer_seam.c` / #30。
+  `__real_*` を呼ばないので禁止シンボルは最終 ELF に残らない）。
+  **EPK の会計対象 IRQ は集合**で、「有効だが未ラップ」を作らない。ベンダ由来で
+  番号が事前に分からない周辺は **ISER スナップショットで実測**して全部ラップする
+  （`port/sdk_seam/epk_irq_wrap.c`）。
   最外周の UART0 ISR はプリビルト内なので、**ITCM 上のベクタを実行時にラップ**して
   enter/exit を挟む（`backend/cli_backend_uart.c`）。**失敗してもコンソールは生かし**、
   共有 `thread` が `--` と理由を出す（`cli_thread_cpu_source_ok` 弱シンボル）。
@@ -379,10 +385,14 @@ git branch -d feat/<N>-short-description
 - **MVE**: ThreadX M55 ポートは VPR を保存しない — 自作コードで MVE intrinsics/自動
   ベクトル化を使わない（ベンチの TU は `-fno-tree-vectorize`。ポストリンクの
   `check_mve_predication.py` が検査）。
-- ポストビルドゲート 3 本（`boards/grove-vision-ai-v2/cmake/`）: イメージ整合
+- ポストビルドゲート 4 本（`boards/grove-vision-ai-v2/cmake/`）: イメージ整合
   （生成 `.img` と ELF の突き合わせ + `.rodata` 内のコマンドレジストリ検証）/
-  配置・予算（ITCM/DTCM headroom、ベクタ常駐、静的スタック、禁止シンボル残存）/
-  MVE 述語命令スキャン。**外す・弱める変更は不可**（f746/wio のゲートと同格）。
+  配置・予算（ITCM/DTCM headroom、ベクタ常駐、静的スタック、禁止シンボル残存、
+  測定・表示バッファの常駐）/ MVE 述語命令スキャン /
+  **timer seam**（`check_timer_seam.py`。カメラアーカイブ込みの `seam_probe` リンクで
+  「ベンダ timer コードが 1 バイトも残らない」ことを検査。negative test は
+  `cmake/fixtures/run_fixture_tests.py`）。**外す・弱める変更は不可**
+  （f746/wio のゲートと同格）。
 - LTO は使わない（M-G1。導入するならゲート再設計とセット）。
 
 ## SWD デバッグ（共通）

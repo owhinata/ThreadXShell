@@ -27,6 +27,7 @@
  * control state, so a disagreement can be attributed rather than guessed at.
  */
 #include "cli.h"
+#include "timer_seam.h"
 #include "tx_glue.h"
 
 #include "WE2_device.h"
@@ -71,6 +72,21 @@ static void epk_print_status(struct cli_instance *sh)
 	          (unsigned long)scr,
 	          (unsigned long)((scr & SCB_SCR_SLEEPDEEP_Msk) ? 1u : 0u),
 	          (unsigned long)((scr & SCB_SCR_SLEEPONEXIT_Msk) ? 1u : 0u));
+
+	/* The vendor timer seam (issue #30).  Its refusal path cannot log -- it is
+	 * reachable from the vendor's own Timer0 ISR callback -- so the latch it
+	 * keeps instead is surfaced here.  Anything other than "none" means a
+	 * prebuilt archive asked for a timer configuration this port does not
+	 * reproduce, and whatever depended on that timer is not running. */
+	{
+		const char *seam = grove_timer_seam_fault();
+
+		cli_print(sh, "timer seam      : %s", (seam != NULL) ? seam : "clean");
+		if (seam != NULL)
+			cli_print(sh, " (%lu refusals)",
+			          (unsigned long)grove_timer_seam_refusals());
+		cli_print(sh, "\r\n");
+	}
 }
 
 /*

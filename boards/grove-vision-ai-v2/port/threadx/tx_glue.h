@@ -36,19 +36,35 @@ uint32_t tx_glue_core_hz(void);
 void tx_glue_isr_enter(void);
 void tx_glue_isr_exit(void);
 
-/* Arm the hooks above, and record what must STAY true for the numbers to mean
-   anything: `irqn` is the one external interrupt whose vector this port has
-   wrapped, and `vector` is the wrapper that was installed for it.
-   tx_glue_profile_ok() re-checks both on every query, so a vendor call that
-   reinstalls its own handler later, or a second interrupt source enabled
-   without an accounting wrapper, downgrades cpu% to "--" instead of silently
-   mis-billing ISR time.
+/*
+ * The accounted-interrupt registry (issue #30).
+ *
+ * EVERY external interrupt this port enables must appear here, wrapper and
+ * all -- error and rare lines included.  There is no "enabled but unwrapped"
+ * category by design: such a line bills its own runtime to whichever thread it
+ * interrupted while tx_glue_profile_ok() still answers 1, which hollows out
+ * the guarantee the check exists to give.  A peripheral line not worth
+ * wrapping must be left DISABLED and polled instead.
+ *
+ * Register BEFORE enabling the line at the NVIC, and unregister AFTER
+ * disabling it.  A 0 return from the register call means "do not enable this
+ * interrupt": losing the feature is the cheap failure, enabling it anyway
+ * costs the meaning of every cpu% number the shell prints.
+ *
+ * Both calls are thread-context only (they mutate the registry inside a
+ * PRIMASK critical section; an ISR must never see a half-written entry).
+ */
+#define TX_GLUE_EPK_MAX_IRQ 8
 
-   Called from the console backend's enable() -- i.e. on the shell thread,
-   after the swap has been verified -- so the armed flag flips 0->1 only in
-   thread context and no single ISR invocation can see it change between its
-   enter and its exit. */
-void tx_glue_profile_arm(int irqn, uint32_t vector);
+int  tx_glue_profile_register_irq(int irqn, uint32_t wrapper_vector);
+void tx_glue_profile_unregister_irq(int irqn);
+
+/* Arm the hooks above once the TIMER2 time source is up and at least one
+   accounted interrupt is registered.  Called from the console backend's
+   enable() -- i.e. on the shell thread, after its vector swap has been
+   verified -- so the armed flag flips 0->1 only in thread context and no
+   single ISR invocation can see it change between its enter and its exit. */
+void tx_glue_profile_arm(void);
 
 /* Record the first reason the cpu% accounting became untrustworthy.  `why`
    must be a string literal (it is stored by pointer, not copied).  Later calls

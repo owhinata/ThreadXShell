@@ -103,6 +103,15 @@ RESIDENCY = [
     # fault -- the DMA controller cannot reach TCM on this part, so the panel
     # would simply stay blank while every call reported success.
     ("lcd_fb", 240 * 320 * 2, ".lcd_fb", "SRAM", SRAM),
+    # Camera buffers (issue #35).  The WDMA3 landing buffer is written by the
+    # datapath's DMA and the pipeline slots are read by the SPI DMA, so both
+    # inherit the framebuffer's failure mode exactly: in TCM they would not
+    # fault, the transfer would simply never happen.  The raw buffer has a
+    # second reason to be pinned -- the CPU invalidates CAM_RAW_BYTES of cache
+    # starting at it before every frame, so a buffer shorter than the gate
+    # believes would have the driver invalidating past its end.
+    ("cam_raw_buf",   320 * 240 * 3, ".cam_raw",   "SRAM", SRAM),
+    ("cam_slot_mem",  320 * 240 * 2 * 2, ".cam_slots", "SRAM", SRAM),
     # CoreMark MEM_STATIC working set: a plain .bss array, so there is no
     # dedicated section to pin it to -- only the region matters.
     ("static_memblk",   2 * 1000, None,          "DTCM", DTCM),
@@ -111,7 +120,8 @@ RESIDENCY = [
 # The benchmark buffers must stay NOBITS: they are sized in tens of kilobytes
 # and a LOADable one would be flashed as that many bytes of zeros (and would
 # then also have to satisfy the image-coherence gate).
-NOBITS_SECTIONS = [".itcm_bench", ".dtcm_bench", ".sram_bench", ".lcd_fb"]
+NOBITS_SECTIONS = [".itcm_bench", ".dtcm_bench", ".sram_bench", ".lcd_fb",
+                   ".cam_raw", ".cam_slots"]
 
 
 def run(cmd):

@@ -125,4 +125,34 @@ void udelay(uint32_t us)
 			return;                 /* frozen from here on */
 		seam_host_env.regs[1] -= seam_host_env.timer_step;
 	}
+
+	/*
+	 * Deliver the interrupt, if the test asked for one (issue #35).  udelay()
+	 * is the hook because it is where the firmware waits: the probe polls a
+	 * flag between udelay() calls, so calling the vector from here reproduces
+	 * "the interrupt arrived during the wait" without the mock needing a
+	 * thread.  The line must be ENABLED, exactly as on hardware -- that is
+	 * what makes "the probe passed but never enabled the line" a state this
+	 * mock cannot manufacture.
+	 */
+	if (seam_host_env.deliver_after_udelays != 0u &&
+	    seam_host_env.udelay_calls >= seam_host_env.deliver_after_udelays) {
+		int irqn = seam_host_env.deliver_irqn;
+
+		if (irqn >= 0 && irqn < 512 &&
+		    (seam_host_env.nvic.ISER[irqn >> 5] &
+		     (1u << (irqn & 31))) != 0u &&
+		    seam_host_env.vector[irqn] != 0u) {
+			void (*isr)(void) =
+				(void (*)(void))(uintptr_t)seam_host_env.vector[irqn];
+
+			seam_host_env.deliver_after_udelays = 0u;  /* once */
+			seam_host_env.deliveries++;
+			/* Timer0 asserts INTSTATUS before the CPU takes the
+			 * interrupt; the seam's ISR reads it and writes 1 to
+			 * clear.  regs[3] is INTSTATUS (+0x0C). */
+			seam_host_env.regs[3] = 1u;
+			isr();
+		}
+	}
 }

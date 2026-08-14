@@ -179,6 +179,41 @@
    MPU / キャッシュ属性は firmware で decode せず**生レジスタをダンプ**する
    （継承状態で TRM も無い。SRAM 行を cacheable と断定しない）。
 
+8f. **grove-vision-ai-v2: カメラ（IMX219 / #35）。**
+   データパスは固定（3280x2464 RAW10 2 lane → INP crop 3200x2400 → 10:2 binning →
+   4:2 subsample → 320x240 → HW5x5 demosaic BGGR → WDMA3）。
+   **WDMA3 出力はプレーナ B/G/R**（インタリーブ RGB565 ではない。HXCSC は入力
+   アンパッカーであってパッカーではない）。パックはソフト
+   （`port/camera/cam_convert.c`、`-fno-tree-vectorize`）。
+   - **DMA が触るバッファを TCM に置かない**（fault せず無言で転送されない）。
+     `.cam_raw` / `.cam_slots` は SRAM NOLOAD で、`check_placement_budget.py` の
+     RESIDENCY がシンボル→サイズ→セクション→領域を pin する。**外さない。**
+   - **WDMA3 バッファは frame-ready 後・CPU 読取前に全長 invalidate する**
+     （ベンダのグルーは 32B の JPEG サイズ語しか invalidate しない。真似しない）。
+   - **停止は単一ルーチン `cam_imx219_full_stop()` に収束させる**（正常停止 /
+     timeout / terminal / bring-up 失敗の 4 経路とも）。**再開はバリア**:
+     フル停止で静止させてから clear → pending clear → semaphore drain → 再 arm。
+     **クリアの前に必ず停止**（callback は status だけで世代を持たないので、
+     走ったままクリアすると遅延イベントが新ストリームの初フレームに化ける）。
+   - **エラーはフレームより優先**（sticky ラッチを先に見る）。**未知の負値は terminal**。
+   - **DP/CSIRX 構成は swreset を跨いで信用しない** — フル停止のたびに未構成へ倒し、
+     次の start で再構成する。
+   - `lcd_blit()` は **wire order (BE)** を要求し、pipeline の `FRAME_FMT_RGB565` は
+     **LE**。swap は `lcd_blit_le()`（ドライバ所有）。**slot を wire order で publish して
+     format を偽らない。**
+   - **EPK 容量は `GROVE_EPK_WRAP_MAX` == `TX_GLUE_EPK_MAX_IRQ` == 32**
+     （`_Static_assert` で結んである。片方だけ動かさない）。
+     measure-then-wrap は **2 ラウンド**（間の I2C モードテーブルは PRIMASK 外。
+     1 ラウンドにすると ~10 ms 割込み禁止で tick を落とす）。
+   - **Timer0 の割込み到達 probe（`grove_timer_seam_probe_delivery()`）を外さない。**
+     `hw_start` は「カウンタが回る」しか証明しない。probe は **PRIMASK 外・IRQ 有効**で
+     実行し、失敗したら **camera bring-up ごと拒否**する。両方向の host test あり
+     （`test/test_timer_probe.c`、probe はラッチするので 2 プロセス）。
+   - **4 つの `__wrap_hx_drv_timer_*` は `noipa`**。`check_timer_seam.py` が名前で
+     逆アセンブルを検査するので、`.part.0` に分割されるとゲートが空振りする。
+   - SDK ツリーは read-only。IMX219 のモードテーブル `.i` は**コピーせず SDK から
+     include** する（pin した SHA に紐付けるため）。
+
 9. **ビルドは `_ref/` を読まない。** `_ref/`（および `../*/_ref/`）は git 管理外の資料置き場。
    CMake / スクリプトが参照するとクローンしただけでは configure できなくなる。
    C コード中の言及は出典コメントのみ可。

@@ -622,6 +622,24 @@ static int epk_timer_still_ok(const char **why)
    whichever thread it interrupted, which is the misattribution this whole
    mechanism exists to avoid.  (Registered but currently disabled is fine: an
    idle peripheral is simply not billing anything.) */
+/* Set when the check below finds a replaced vector, for `epk` to report. */
+static int      epk_bad_irqn = -1;
+static uint32_t epk_bad_want;
+static uint32_t epk_bad_got;
+
+int tx_glue_profile_bad_vector(int *irqn, uint32_t *want, uint32_t *got)
+{
+    if (epk_bad_irqn < 0)
+        return 0;
+    if (irqn != NULL)
+        *irqn = epk_bad_irqn;
+    if (want != NULL)
+        *want = epk_bad_want;
+    if (got != NULL)
+        *got = epk_bad_got;
+    return 1;
+}
+
 static int epk_vectors_still_ok(const char **why)
 {
     uint32_t registered[sizeof NVIC->ISER / sizeof NVIC->ISER[0]] = {0};
@@ -636,6 +654,14 @@ static int epk_vectors_still_ok(const char **why)
         uint32_t irqn = (uint32_t)epk_irqs[i].irqn;
 
         if (NVIC_GetVector((IRQn_Type)epk_irqs[i].irqn) != epk_irqs[i].vector) {
+            /* Record WHICH line and what it now points at.  "a vector was
+               replaced" on its own leaves the next reader guessing which of a
+               couple of dozen wrapped camera lines it was, and whether the new
+               value is a vendor handler or rubbish -- and that guess is the
+               whole diagnosis.  `epk` prints this. */
+            epk_bad_irqn   = (int)irqn;
+            epk_bad_want   = epk_irqs[i].vector;
+            epk_bad_got    = NVIC_GetVector((IRQn_Type)epk_irqs[i].irqn);
             *why = "an accounted interrupt vector was replaced";
             return 0;
         }

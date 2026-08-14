@@ -400,6 +400,19 @@ git branch -d feat/<N>-short-description
   — TCM は DMA から見えない（スタックも .rodata も不可）。**fps は完了条件にしない**。
   GPIO は **PL061 系**（`+0x000`〜`+0x3FC` はアドレスがビットマスクのデータレジスタ、
   方向は `+0x400`）。詳細は board README。
+- **カメラ**（IMX219 / MIPI CSI、M-G3b / #35）: データパスは固定
+  （3280x2464 RAW10 2 lane → INP crop → 10:2 binning → 4:2 subsample → 320x240 →
+  HW5x5 demosaic BGGR → WDMA3。`tflm_yolov8_od` の出荷構成）。
+  **WDMA3 はプレーナ B/G/R で、パックはソフト**（HXCSC は入力アンパッカー）。
+  **[!] DMA が触るバッファは TCM 不可**（`.cam_raw` / `.cam_slots` は SRAM NOLOAD、
+  placement gate が pin）。**WDMA3 は frame-ready 後・読取前に全長 invalidate**
+  （ベンダのグルーはやっていない）。**停止は単一ルーチン、再開はバリア
+  （静止 → クリア → 再 arm）** — callback は status しか持たないので世代番号では
+  遅延イベントを弾けない。**エラーはフレームより優先・未知の負値は terminal**。
+  `lcd_blit` は BE / pipeline は LE で、swap は `lcd_blit_le()` が持つ。
+  **EPK 容量 32**（`GROVE_EPK_WRAP_MAX` == `TX_GLUE_EPK_MAX_IRQ`）。
+  **Timer0 の割込み到達は probe で検証済み**（M-G3a 申し送りを解消。PRIMASK 外で
+  実行し、失敗したら bring-up ごと拒否）。詳細は board README。
 - ポストビルドゲート 4 本（`boards/grove-vision-ai-v2/cmake/`）: イメージ整合
   （生成 `.img` と ELF の突き合わせ + `.rodata` 内のコマンドレジストリ検証）/
   配置・予算（ITCM/DTCM headroom、ベクタ常駐、静的スタック、禁止シンボル残存、

@@ -247,6 +247,29 @@ static int t0_is_running(uint32_t ticks, uint32_t hz)
 /* ---- wrapped entry points ------------------------------------------------ */
 
 /*
+ * [!] The four __wrap_ symbols are LINKER-VISIBLE ABI BOUNDARIES, and they are
+ * also what cmake/check_timer_seam.py inspects by name: S5 walks the branch
+ * targets out of them and S6 requires __wrap_hx_drv_timer_hw_stop's own
+ * disassembly to contain Timer0's base address, which is how the gate knows the
+ * wrapper really talks to the hardware instead of quietly doing nothing.
+ *
+ * GCC is entitled to split a function into a `.part.0` clone (-fpartial-inlining
+ * is on at -Os) as soon as it has an in-image caller.  The moment the issue #35
+ * probe below started calling hw_stop, that is exactly what happened: the
+ * register writes moved into __wrap_hx_drv_timer_hw_stop.part.0 and the gate
+ * failed -- correctly, because the symbol it was told to check no longer
+ * contained what it was told to look for.
+ *
+ * `noipa` (which implies noinline and noclone, and blocks interprocedural
+ * analysis in both directions) keeps each wrapper a single whole function with
+ * its body where its name says it is.  The alternative -- teaching the gate to
+ * follow `.part.N` suffixes -- would be weakening a check to accommodate an
+ * optimisation nobody asked for on a function that is called at most a few
+ * times per stream.
+ */
+#define SEAM_WRAPPER __attribute__((noipa))
+
+/*
  * hx_drv_timer_hw_start(TIMER_ID_0, cfg, cb) -- thread context.
  *
  * Reproduces the vendor behaviour the datapath depends on: reload derived from
@@ -259,7 +282,7 @@ static int t0_is_running(uint32_t ticks, uint32_t hz)
  * bill its runtime to whichever thread it interrupted, which is precisely the
  * fail-open this port spent issue #25 closing.
  */
-TIMER_ERROR_E __wrap_hx_drv_timer_hw_start(TIMER_ID_E id, TIMER_CFG_T *cfg,
+SEAM_WRAPPER TIMER_ERROR_E __wrap_hx_drv_timer_hw_start(TIMER_ID_E id, TIMER_CFG_T *cfg,
                                            Timer_ISREvent_t cb_event)
 {
 	uint32_t vector = (uint32_t)(void (*)(void))timer0_seam_isr;
@@ -379,6 +402,167 @@ TIMER_ERROR_E __wrap_hx_drv_timer_hw_start(TIMER_ID_E id, TIMER_CFG_T *cfg,
 	return TIMER_NO_ERROR;
 }
 
+/* ---- interrupt-delivery probe (issue #35) -------------------------------- */
+
+/*
+ * WHAT M-G3a COULD NOT ANSWER.
+ *
+ * hw_start() above proves the armed counter RUNS -- four windows timed by an
+ * independent clock, each required to show motion, with the amount checked
+ * against the rate Timer0's own clock predicts.  That closes "armed but
+ * stationary" and "armed at some other rate".
+ *
+ * It does not prove the INTERRUPT is delivered.  A Timer0 whose counter is
+ * perfect while IRQEN produces no INTSTATUS, or whose NVIC path is dead, passes
+ * every check hw_start makes.  Nothing in M-G3a executed this code at all (the
+ * camera archives were not linked, so the whole seam was garbage-collected out
+ * of the firmware), which is why the question was carried forward rather than
+ * guessed at, and it matters now because the datapath library uses Timer0 as
+ * its capture pacer: a line that is armed, believed and useless is worse than
+ * one that refused.
+ *
+ * There is also no public TRM for this part and the vendor's CTRL bit 2 is
+ * still unexplained (see T0_CTRL_VENDOR), so this is not a hazard to reason
+ * away from the register map.
+ *
+ * WHY IT IS A SEPARATE ENTRY POINT AND NOT PART OF hw_start().  hw_start is
+ * reached from vendor code at arbitrary moments, sometimes with interrupts
+ * masked; a probe that waits for its own interrupt would hang there for ever.
+ * This runs once, from the camera bring-up, in thread context with interrupts
+ * ENABLED -- the caller's contract, and the reason the plan made it an explicit
+ * step outside the bring-up's PRIMASK window rather than a hidden one inside.
+ *
+ * It deliberately goes through the real __wrap_hx_drv_timer_hw_start(), rather
+ * than poking the registers itself: the code path under test is the one the
+ * vendor will take, including the vector install, the EPK registration and the
+ * priority.  A probe that armed the timer its own way would prove something
+ * nobody is going to run.
+ */
+#define T0_PROBE_PERIOD_MS   1u
+#define T0_PROBE_WAIT_US     100000u  /* 100 ms: 100 periods of headroom */
+#define T0_PROBE_POLL_US     200u
+
+/* Defined below.  The probe stops the timer through the same ISR-safe path the
+ * vendor uses, so that the teardown under test is the real one. */
+SEAM_WRAPPER TIMER_ERROR_E __wrap_hx_drv_timer_hw_stop(TIMER_ID_E id);
+
+static volatile uint32_t t0_probe_hits;
+static volatile uint32_t t0_probe_status;
+static uint8_t           t0_probe_done;    /* thread context only */
+static uint8_t           t0_probe_ok;
+
+static void t0_probe_cb(uint32_t event)
+{
+	t0_probe_status = event;
+	t0_probe_hits++;
+}
+
+int grove_timer_seam_probe_delivery(void)
+{
+	TIMER_CFG_T cfg;
+	uint32_t waited;
+	uint32_t iser_on;
+	int delivered;
+
+	/* Once per boot: the probe stops and unregisters Timer0 when it is
+	 * done, so running it again would be harmless but pointless, and a
+	 * later caller wants the LATCHED answer, not a fresh 100 ms wait. */
+	if (t0_probe_done != 0u)
+		return t0_probe_ok;
+	t0_probe_done = 1u;
+
+	t0_probe_hits   = 0u;
+	t0_probe_status = 0u;
+
+	cfg.period = T0_PROBE_PERIOD_MS;
+	cfg.mode   = TIMER_MODE_PERIODICAL;
+	cfg.ctrl   = TIMER_CTRL_CPU;
+	cfg.state  = TIMER_STATE_DC;
+
+	if (__wrap_hx_drv_timer_hw_start(TIMER_ID_0, &cfg, t0_probe_cb) !=
+	    TIMER_NO_ERROR) {
+		/* hw_start latched its own, more specific reason and already
+		 * undid everything it did. */
+		return 0;
+	}
+
+	/* The line must be ENABLED at the NVIC right now.  Read it back rather
+	 * than trusting NVIC_EnableIRQ: this is the half of the path hw_start's
+	 * counter check cannot see. */
+	iser_on = NVIC->ISER[(uint32_t)TIMER0INT_IRQn >> 5] &
+	          (1UL << ((uint32_t)TIMER0INT_IRQn & 31u));
+
+	for (waited = 0u; waited < T0_PROBE_WAIT_US && t0_probe_hits == 0u;
+	     waited += T0_PROBE_POLL_US)
+		udelay(T0_PROBE_POLL_US);
+
+	delivered = (t0_probe_hits != 0u);
+
+	/*
+	 * Classify the failure before tearing down, while the evidence is still
+	 * in the registers.  INTSTATUS still asserted with nothing delivered
+	 * separates "the timer never raises its interrupt" from "it raises it
+	 * and the NVIC never delivers it" -- two different broken things, and
+	 * the message is the only place that distinction will ever be made.
+	 */
+	if (!delivered) {
+		uint32_t pending = T0_INTSTATUS;
+
+		if (iser_on == 0u)
+			(void)seam_refuse("timer0 probe: the interrupt was not "
+			                  "enabled at the NVIC after hw_start");
+		else if (pending != 0u)
+			(void)seam_refuse("timer0 probe: INTSTATUS asserts but "
+			                  "the interrupt is never delivered");
+		else
+			(void)seam_refuse("timer0 probe: Timer0 counts but "
+			                  "never raises its interrupt");
+	}
+
+	/* Stop through the real ISR-safe path, then finish the teardown the way
+	 * only a lifecycle owner may: hw_stop deliberately leaves the registry
+	 * entry alone (it can be reached from inside a critical section), so
+	 * the probe drops it here and leaves the line exactly as it found it. */
+	(void)__wrap_hx_drv_timer_hw_stop(TIMER_ID_0);
+	tx_glue_profile_unregister_irq((int)TIMER0INT_IRQn);
+
+	/*
+	 * Verify the teardown too.  A probe that leaves Timer0 enabled, pending
+	 * or registered has broken the very invariant it exists to protect --
+	 * and it would break it in the direction that reads as success.
+	 */
+	if ((NVIC->ISER[(uint32_t)TIMER0INT_IRQn >> 5] &
+	     (1UL << ((uint32_t)TIMER0INT_IRQn & 31u))) != 0u) {
+		(void)seam_refuse("timer0 probe: the line would not go back "
+		                  "down after the probe");
+		delivered = 0;
+	}
+	if ((NVIC->ISPR[(uint32_t)TIMER0INT_IRQn >> 5] &
+	     (1UL << ((uint32_t)TIMER0INT_IRQn & 31u))) != 0u) {
+		(void)seam_refuse("timer0 probe: a pending interrupt survived "
+		                  "the probe teardown");
+		delivered = 0;
+	}
+	/*
+	 * INTSTATUS is deliberately NOT re-checked here.  hw_stop has just
+	 * written 1 to it (write-one-to-clear) with the counter already halted,
+	 * so the only way it could read back set is a timer that is asserting
+	 * while stopped -- and that state has an observable consequence which IS
+	 * checked: the NVIC pending bit above.  Asserting on the register as
+	 * well would add nothing on hardware and could not be tested at all,
+	 * since a mock backed by a plain array cannot distinguish a
+	 * write-to-clear from a write.
+	 */
+
+	t0_probe_ok = delivered ? 1u : 0u;
+	return delivered;
+}
+
+uint32_t grove_timer_seam_probe_hits(void)
+{
+	return t0_probe_hits;
+}
+
 /*
  * hx_drv_timer_hw_stop(TIMER_ID_0) -- ISR-SAFE.
  *
@@ -389,7 +573,7 @@ TIMER_ERROR_E __wrap_hx_drv_timer_hw_start(TIMER_ID_E id, TIMER_CFG_T *cfg,
  * Leaving the entry registered while the line is disabled is exactly the
  * benign case the registry allows.
  */
-TIMER_ERROR_E __wrap_hx_drv_timer_hw_stop(TIMER_ID_E id)
+SEAM_WRAPPER TIMER_ERROR_E __wrap_hx_drv_timer_hw_stop(TIMER_ID_E id)
 {
 	if (id != TIMER_ID_0)
 		return seam_refuse("timer seam refused a non-Timer0 stop");
@@ -413,7 +597,7 @@ TIMER_ERROR_E __wrap_hx_drv_timer_hw_stop(TIMER_ID_E id)
  * have used -- irrelevant to a CPU cycle counter -- so it is accepted and
  * ignored rather than refused.
  */
-TIMER_ERROR_E __wrap_hx_drv_timer_cm55x_delay_ms(uint32_t ms, TIMER_STATE_E state)
+SEAM_WRAPPER TIMER_ERROR_E __wrap_hx_drv_timer_cm55x_delay_ms(uint32_t ms, TIMER_STATE_E state)
 {
 	(void)state;
 	while (ms-- > 0u)
@@ -421,7 +605,7 @@ TIMER_ERROR_E __wrap_hx_drv_timer_cm55x_delay_ms(uint32_t ms, TIMER_STATE_E stat
 	return TIMER_NO_ERROR;
 }
 
-TIMER_ERROR_E __wrap_hx_drv_timer_cm55x_delay_us(uint32_t us, TIMER_STATE_E state)
+SEAM_WRAPPER TIMER_ERROR_E __wrap_hx_drv_timer_cm55x_delay_us(uint32_t us, TIMER_STATE_E state)
 {
 	(void)state;
 	udelay(us);

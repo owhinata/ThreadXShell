@@ -33,6 +33,18 @@ _Static_assert(ISER_WORDS <= (sizeof ((struct epk_irq_snapshot *)0)->iser /
                               sizeof ((struct epk_irq_snapshot *)0)->iser[0]),
                "epk_irq_snapshot.iser is smaller than NVIC->ISER");
 
+/* Every wrapped line needs a registry slot as well as a trampoline, so a
+ * trampoline pool larger than the registry just turns into bring-up failures
+ * once enough lines are in play.  The two constants live in different headers
+ * (one is the seam's, one is the kit's); this is what keeps them together.
+ *
+ * EQUALITY, not "fits": a registry that is merely large enough would let the
+ * two drift apart silently, and AGENTS.md states them as one number.  A
+ * one-sided edit is meant to stop the build, which is the only moment anyone
+ * will be thinking about both. */
+_Static_assert(GROVE_EPK_WRAP_MAX == TX_GLUE_EPK_MAX_IRQ,
+               "GROVE_EPK_WRAP_MAX and TX_GLUE_EPK_MAX_IRQ must be equal");
+
 /* One slot per wrapped line: the vendor entry point and which line it serves.
  * A slot is free exactly when vendor == NULL.  Slots are never compacted --
  * slot index and trampoline index are the same thing, so moving an entry would
@@ -57,19 +69,112 @@ static struct {
 		tx_glue_isr_exit();                                            \
 	}
 
-EPK_TRAMPOLINE(0)
-EPK_TRAMPOLINE(1)
-EPK_TRAMPOLINE(2)
-EPK_TRAMPOLINE(3)
-EPK_TRAMPOLINE(4)
-EPK_TRAMPOLINE(5)
-EPK_TRAMPOLINE(6)
-EPK_TRAMPOLINE(7)
+/* One list, used twice: once to define the functions and once to fill the
+ * table.  Writing the numbers out is unavoidable -- ## needs literal digits --
+ * but writing them out ONCE is not, and the _Static_assert below turns "raised
+ * GROVE_EPK_WRAP_MAX and forgot a trampoline" into a compile error.  Without
+ * it a short initialiser would leave NULL entries in a table whose values get
+ * installed into the vector table. */
+#define EPK_TRAMPOLINE_LIST                                                    \
+	X( 0) X( 1) X( 2) X( 3) X( 4) X( 5) X( 6) X( 7)                        \
+	X( 8) X( 9) X(10) X(11) X(12) X(13) X(14) X(15)                        \
+	X(16) X(17) X(18) X(19) X(20) X(21) X(22) X(23)                        \
+	X(24) X(25) X(26) X(27) X(28) X(29) X(30) X(31)
 
-static void (*const trampolines[GROVE_EPK_WRAP_MAX])(void) = {
-	epk_tramp0, epk_tramp1, epk_tramp2, epk_tramp3,
-	epk_tramp4, epk_tramp5, epk_tramp6, epk_tramp7,
+#define X(n) EPK_TRAMPOLINE(n)
+EPK_TRAMPOLINE_LIST
+#undef X
+
+static void (*const trampolines[])(void) = {
+#define X(n) epk_tramp##n,
+	EPK_TRAMPOLINE_LIST
+#undef X
 };
+
+_Static_assert(sizeof trampolines / sizeof trampolines[0] ==
+               (size_t)GROVE_EPK_WRAP_MAX,
+               "EPK_TRAMPOLINE_LIST and GROVE_EPK_WRAP_MAX disagree");
+
+/*
+ * Re-take a line the vendor has re-registered underneath us.
+ *
+ * The measure-then-wrap protocol assumes a vendor bring-up only ADDS enabled
+ * lines.  That is not the whole truth: a driver can install a fresh ISR on a
+ * line it has already got running, and then the vector table points at the
+ * vendor handler while the accounting registry still points at our trampoline.
+ * Nothing crashes -- the interrupt is simply no longer accounted, and
+ * tx_glue_profile_ok() correctly reports the whole cpu% column as untrustworthy.
+ *
+ * Re-installing the ORIGINAL saved handler would be wrong: the vendor changed
+ * it for a reason and the old one may no longer be valid.  So the new vendor
+ * vector is adopted as the handler our trampoline calls, and the trampoline
+ * goes back into the table.  The line keeps working AND stays accounted.
+ *
+ * @return 1 if every line in @p set is now wrapped, 0 if one could not be.
+ */
+static uint32_t epk_reasserts;
+
+uint32_t grove_epk_irq_reasserts(void)
+{
+	return epk_reasserts;
+}
+
+int grove_epk_irq_reassert(const struct epk_irq_wrapset *set)
+{
+	uint32_t i, slot;
+	int ok = 1;
+
+	for (i = 0u; i < set->count; i++) {
+		int irqn = set->irqn[i];
+		uint32_t cur = NVIC_GetVector((IRQn_Type)irqn);
+		uint32_t tramp;
+
+		for (slot = 0u; slot < (uint32_t)GROVE_EPK_WRAP_MAX; slot++)
+			if (wrapped[slot].vendor != NULL &&
+			    wrapped[slot].irqn == irqn)
+				break;
+		if (slot == (uint32_t)GROVE_EPK_WRAP_MAX)
+			continue;               /* already unwrapped: not ours */
+
+		tramp = (uint32_t)(void (*)(void))trampolines[slot];
+		if (cur == tramp)
+			continue;               /* still ours */
+
+		/* Refuse to adopt something that is not a handler: a null or the
+		 * unclaimed-vector trap means the line was torn down, not
+		 * re-registered, and wrapping that would turn its next interrupt
+		 * into a hang. */
+		if (cur == 0u ||
+		    cur == (uint32_t)(void (*)(void))Default_Handler) {
+			LOG_ERR("irq %d lost its vector entirely (%08lx)", irqn,
+			        (unsigned long)cur);
+			tx_glue_profile_fail("an accounted interrupt lost its "
+			                     "vector");
+			ok = 0;
+			continue;
+		}
+
+		/* Log the first few and then only count.  This can fire once per
+		 * FRAME (the datapath's retrigger re-registers), and a log line
+		 * per frame would push everything else out of the dmesg ring
+		 * within seconds -- while the count still says it is happening
+		 * and how often. */
+		if (epk_reasserts < 4u)
+			LOG_INF("irq %d re-registered by the vendor (%08lx); "
+			        "re-wrapping", irqn, (unsigned long)cur);
+		epk_reasserts++;
+		wrapped[slot].vendor = (void (*)(void))cur;
+		EPII_NVIC_SetVector((IRQn_Type)irqn, tramp);
+		__DSB();
+		__ISB();
+		if (NVIC_GetVector((IRQn_Type)irqn) != tramp) {
+			LOG_ERR("irq %d re-wrap did not take", irqn);
+			tx_glue_profile_fail("an interrupt re-wrap did not take");
+			ok = 0;
+		}
+	}
+	return ok;
+}
 
 void grove_epk_irq_snapshot(struct epk_irq_snapshot *snap)
 {

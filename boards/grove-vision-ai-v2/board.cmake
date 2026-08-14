@@ -210,6 +210,21 @@ endforeach()
 set(LIBDRIVER  "${SDK}/prebuilt_libs/gnu/libdriver.a")
 set(LIBPWRMGMT "${SDK}/prebuilt_libs/gnu/libpwrmgmt.a")
 
+# The camera datapath archives (issue #35).  libsensordp.a is the sensor
+# control / INP / demosaic / WDMA datapath library and libextdevice.a the CIS
+# (sensor I2C) layer.  Both are prebuilt -- the SDK ships no sources for them
+# and its own makefile "build" rule is a copy out of prebuilt_libs/.
+#
+# libcommon.a stays OUT of the link on purpose: it defines console_getchar /
+# console_putchar and the SysTick helpers that check_placement_budget.py bars.
+# Leaving it out costs nothing -- the two archives above resolve against
+# libdriver.a plus eight symbols this port already owns (board_delay_ms and the
+# two wrapped delays from port/sdk_seam/timer_seam.c, xprintf from
+# src/xprintf_shim.c, and four drv_interface_* from the SDK's
+# interface/driver_interface.c, which SDK_SOURCES compiles).
+set(LIBSENSORDP  "${SDK}/prebuilt_libs/gnu/libsensordp.a")
+set(LIBEXTDEVICE "${SDK}/prebuilt_libs/gnu/libextdevice.a")
+
 # --- ThreadX ----------------------------------------------------------------
 # Core sources + the Cortex-M55/GNU port asm.  The port ships its example
 # _tx_initialize_low_level in example_build/ (outside the src/ glob), so the
@@ -268,7 +283,12 @@ set(SHELL_SOURCES
     "${BOARD_DIR}/cmds/cmd_membench.c"
     "${BOARD_DIR}/cmds/cmd_epk.c"
     "${BOARD_DIR}/cmds/cmd_lcd.c"
+    "${BOARD_DIR}/cmds/cmd_camera.c"
     "${CMAKE_SOURCE_DIR}/svc/fmt.c"
+    # Camera frame ring (issue #35).  Freestanding: it depends on <stdint.h>
+    # and an injected lock vtable only, which is why the same file serves all
+    # three boards and has a host unit test (shell/test/test_frame_pipeline.c).
+    "${CMAKE_SOURCE_DIR}/svc/frame_pipeline.c"
     "${BOARD_DIR}/svc/timebase.c"
     "${BOARD_DIR}/svc/log.c")
 
@@ -325,13 +345,20 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/sdk_seam/timer_seam.c"
     "${BOARD_DIR}/port/sdk_seam/epk_irq_wrap.c"
     "${BOARD_DIR}/port/lcd/lcd_st7789.c"
+    "${BOARD_DIR}/port/camera/cam_convert.c"
+    "${BOARD_DIR}/port/camera/cam_mipi_calc.c"
+    "${BOARD_DIR}/port/camera/cam_auto.c"
+    "${BOARD_DIR}/port/camera/cam_imx219.c"
+    "${BOARD_DIR}/port/camera/camera.c"
+    "${BOARD_DIR}/port/camera/cam_lcd_sink.c"
     ${SHELL_SOURCES}
     ${SDK_SOURCES}
     ${TX_CORE} ${TX_ASM} ${TX_EPK})
 
 add_executable(shell $<TARGET_OBJECTS:shell_objs>)
 target_link_libraries(shell PRIVATE bsp_iface coremark_obj
-    -Wl,--start-group "${LIBDRIVER}" "${LIBPWRMGMT}" -Wl,--end-group)
+    -Wl,--start-group "${LIBDRIVER}" "${LIBPWRMGMT}"
+                      "${LIBSENSORDP}" "${LIBEXTDEVICE}" -Wl,--end-group)
 # CoreMark's canonical report prints its score with %f; pull in newlib's float
 # printf (newlib-nano omits it by default).  This is also why src/malloc_lock.c
 # exists: that conversion allocates from the heap, now from several threads.
@@ -341,6 +368,16 @@ target_include_directories(shell_objs PRIVATE
     "${BOARD_DIR}/port/threadx"
     "${BOARD_DIR}/port/sdk_seam"
     "${BOARD_DIR}/port/lcd"
+    "${BOARD_DIR}/port/camera"
+    # Header surface of the two camera archives (issue #35): the CIS (sensor
+    # I2C) layer and the sensor datapath library.  Not in bsp_iface because
+    # only port/camera/ has any business calling them.
+    "${SDK}/external/cis"
+    "${SDK}/library/sensordp/inc"
+    # The IMX219 mode table (.i) is included from the SDK tree rather than
+    # copied, so it stays tied to the pinned SHA (issue #35).
+    "${SDK}/app/scenario_app/tflm_yolov8_od/cis_sensor/cis_imx219"
+    "${SDK}/app/scenario_app/tflm_yolov8_od/cis_sensor/cis_ov5647"
     "${BOARD_DIR}/backend"
     "${BOARD_DIR}/cmds"         # bench_gate.h: shared by coremark + membench
     "${CMAKE_SOURCE_DIR}/shell/include"
@@ -368,17 +405,41 @@ target_compile_definitions(shell_objs PRIVATE
     # must never be used for this; udelay() reads SystemCoreClock directly.
     CLI_CPU_CYCLES_PER_US=400)
 target_compile_options(shell_objs PRIVATE -Os)
+
+# [!] -fno-tree-vectorize on the camera's pixel loops, for the same reason
+# coremark_obj carries it (see the note above that option): -mcpu=cortex-m55
+# makes MVE available, the ThreadX M55 port does not preserve VPR across a
+# context switch, and check_mve_predication.py fails the build on any
+# predicated MVE in the image.  -Os does not auto-vectorise today, which is
+# exactly why this is stated rather than relied upon -- a later -O2 or a newer
+# GCC would turn a 76,800-iteration loop over three planes into precisely the
+# code the gate bars, and the failure would surface as a build break in an
+# unrelated commit.
+set_source_files_properties(
+    "${BOARD_DIR}/port/camera/cam_convert.c"
+    TARGET_DIRECTORY shell_objs
+    PROPERTIES COMPILE_OPTIONS "-fno-tree-vectorize")
 target_link_options(shell PRIVATE
     "-T${LDSCRIPT_APP}" -Wl,-Map=shell.map,--cref)
 set_target_properties(shell PROPERTIES LINK_DEPENDS "${LDSCRIPT_APP}")
 
 # --- Vendor timer seam probe (issue #30) -------------------------------------
-# The seam only earns its keep once the camera archives are in the link, and
-# M-G3a does not link them -- every wrapper is garbage-collected out of `shell`.
-# So the property is proven on a PROBE link instead: the same objects, plus
-# libsensordp.a / libextdevice.a, plus forced references to the datapath entry
-# points that reach the vendor timer API.  check_timer_seam.py then asserts on
-# that ELF that the wrap actually severed every vendor timer reference.
+# The probe is the same objects as `shell`, plus libsensordp.a / libextdevice.a,
+# plus FORCED references to the datapath entry points that reach the vendor
+# timer API.  It was introduced in M-G3a, when `shell` did not link the archives
+# at all and every wrapper was garbage-collected out of it, so the seam's
+# property had nothing real to be asserted against.
+#
+# Since issue #35 `shell` links the archives and calls into them for real, and
+# check_timer_seam.py runs on the firmware image itself (gate 4 above).  The
+# probe is KEPT anyway, for one reason: the negative tests in
+# cmake/fixtures/run_fixture_tests.py are built by re-linking it with a --wrap
+# removed (F1) or the archives dropped (F2), and those variants only isolate the
+# GATE's behaviour as long as the link has no other reason to fail.  Re-pointing
+# them at `shell` would make F2 fail on undefined references from port/camera/
+# instead of on the gate -- a negative test that passes for the wrong reason.
+# The forced-reference list keeps the probe's coverage independent of whichever
+# entry points port/camera/ happens to call today.
 #
 # Cheap: the objects are already compiled (shell_objs), so this is one extra
 # link.  It is a build target, not an artifact -- nothing flashes it.
@@ -398,9 +459,6 @@ foreach(_sym IN LISTS SEAM_PROBE_FORCED)
     list(APPEND SEAM_PROBE_FORCE_FLAGS "-Wl,-u,${_sym}")
 endforeach()
 
-set(LIBSENSORDP  "${SDK}/prebuilt_libs/gnu/libsensordp.a")
-set(LIBEXTDEVICE "${SDK}/prebuilt_libs/gnu/libextdevice.a")
-
 add_executable(seam_probe $<TARGET_OBJECTS:shell_objs>)
 target_link_libraries(seam_probe PRIVATE bsp_iface coremark_obj
     -Wl,--start-group "${LIBDRIVER}" "${LIBPWRMGMT}"
@@ -410,9 +468,8 @@ target_link_options(seam_probe PRIVATE
     "-T${LDSCRIPT_APP}" -Wl,-Map=seam_probe.map,--cref)
 set_target_properties(seam_probe PROPERTIES LINK_DEPENDS "${LDSCRIPT_APP}")
 
-# Gate 4: the seam severed every vendor timer reference.  Runs on the probe,
-# and on `shell` too once the archives move into the firmware proper (M-G3b) --
-# the script takes whichever ELF it is given.
+# The same gate as on `shell`, on the probe link.  Both run: the probe keeps the
+# forced-reference coverage, `shell` is the image that actually ships.
 add_custom_command(TARGET seam_probe POST_BUILD
     COMMAND "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/check_timer_seam.py"
             --nm "${CMAKE_NM}" --objdump "${CMAKE_OBJDUMP}"
@@ -487,6 +544,16 @@ add_custom_command(TARGET shell POST_BUILD
             --objdump "${CMAKE_OBJDUMP}"
             "$<TARGET_FILE:shell>"
     COMMENT "check_mve_predication.py (no VPR-dependent MVE in the image)")
+# 4. Timer seam: no vendor timer code survives the --wrap.  Since issue #35 the
+#    camera archives are in THIS link, so the firmware image is now the real
+#    subject of this check -- seam_probe (below) keeps running it too, because
+#    the negative tests in cmake/fixtures/ are built by re-linking the probe.
+add_custom_command(TARGET shell POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/check_timer_seam.py"
+            --nm "${CMAKE_NM}" --objdump "${CMAKE_OBJDUMP}"
+            --require-archives
+            "$<TARGET_FILE:shell>"
+    COMMENT "check_timer_seam.py (no vendor timer code survives the --wrap)")
 
 # --- Flash target ------------------------------------------------------------
 # xmodem upload to the Himax bootloader: run the target, press the board's

@@ -138,8 +138,33 @@ def main():
     # F2: the camera archives left out (and with them the forced references that
     # would otherwise be unresolvable).  Every other check passes vacuously on
     # such a link, which is exactly why S4 exists.
+    #
+    # [!] Since issue #35 the firmware itself CALLS the archives, so removing
+    # them is no longer a link that merely lacks vendor timer references -- it is
+    # one that does not link at all.  That is a stronger guarantee than the gate
+    # gives (you cannot build this firmware without the archives, and the
+    # compiler says so), but it would leave S4 with no negative test, so the
+    # fixture drops port/camera/ and the camera command along with the archives
+    # and reaches the vacuous link the check is about.  main.c's single call to
+    # camera_create_objects() is the only reference left after that, and a
+    # --defsym is cheaper than carving up an object file: nothing in a fixture
+    # ELF is ever executed.  It aliases another void(void) rather than an
+    # address, because a bare --defsym value carries no Thumb bit and the call
+    # site's relocation needs one.
     f2 = re.sub(r"\S*lib(?:sensordp|extdevice)\.a\s+", "", base)
     f2 = re.sub(r"-Wl,-u,(?:sensordplib|hx_drv_cis)\S*\s+", "", f2)
+    f2_objs = re.sub(r"\S*shell_objs\.dir/boards/\S*/(?:port/camera/\S+|"
+                     r"cmds/cmd_camera\.c)\.obj\s+", "", f2)
+    if f2_objs == f2:
+        raise SystemExit("run_fixture_tests: the probe link names no "
+                         "port/camera objects; the fixture cannot remove them")
+    # Prepended to the COMPILER invocation, not appended to the command: the
+    # line Ninja reports ends with the POST_BUILD gate run chained on with &&,
+    # so anything added at the end becomes an argument to that instead.
+    f2 = f2_objs.replace(
+        "arm-none-eabi-g++ ",
+        "arm-none-eabi-g++ "
+        "-Wl,--defsym=camera_create_objects=lcd_create_objects ", 1)
     if f2 == base:
         raise SystemExit("run_fixture_tests: the probe link names no camera "
                          "archives; the fixture cannot remove them")

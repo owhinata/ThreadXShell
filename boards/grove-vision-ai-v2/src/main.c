@@ -33,6 +33,7 @@
 #include "cli_instance.h"
 #include "cli_backend_uart.h"
 #include "lcd_st7789.h"
+#include "camera.h"
 
 #define LOG_TAG "main"
 #include "log.h"
@@ -130,6 +131,14 @@ void tx_application_define(void *first_unused_memory)
 	 * that touches it can be enabled, and lcd_init() -- which runs later, on
 	 * the shell thread -- is what enables the SPI/DMA lines. */
 	lcd_create_objects();
+
+	/* Camera driver objects and its producer thread (issue #35).  Here for
+	 * the same reason as the panel's, and more so: the datapath callback
+	 * posts a semaphore FROM AN INTERRUPT, so the semaphore has to exist
+	 * before anything can enable a datapath line.  The thread starts
+	 * immediately and parks on its start semaphore; no hardware is touched
+	 * until `camera probe` or `camera preview` asks for it. */
+	camera_create_objects();
 
 	/* Boot banner via printf -> _write -> the UART TX ring.  Pre-scheduler
 	 * _write only enqueues (never waits); the backend flushes the ring once

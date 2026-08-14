@@ -390,7 +390,7 @@ git branch -d feat/<N>-short-description
   **[!] 配線は pad 番号で数える。刻印は XIAO のピン位置ラベルで HX6538 の信号名ではない** —
   `CLK`/`MISO`/`MOSI` は microSD バス（PB4/PB3/PB2）、さらに **`TXD` は pad 7 (PB6) /
   `RXD` は pad 8 (PB7) で機能名と逆**（実際に DIN と DC を入れ替えて配線し 1 セッション溶かした）。
-  pad 番号の確認は **`lcd backlight off`**（PA2 だけが無計測で導通を確認できる。
+  pad 番号の確認は **`lcd off`**（= バックライト PA2。PA2 だけが無計測で導通を確認できる。
   点灯しているだけでは 2.2k プルアップのせいで何の証明にもならない）。
   CS を GPIO にするのは RAMWR 中に CS を保持するため。フレームは `spi_write_ptl()` 1 発
   （内部で DMA の circular LLI に落ちる。`spi_write_dma` の 4095B 上限は回避）。

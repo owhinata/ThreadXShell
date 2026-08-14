@@ -708,8 +708,12 @@ int cam_imx219_set_gains(uint8_t again, uint16_t dgain)
 
 int cam_imx219_set_sensor_auto(int on)
 {
+	/* No on-chip AEC/AGC to hand the sensor half to, so BOTH directions are
+	 * already satisfied: "auto on" is our software loop's job and "auto off"
+	 * is the part's natural state.  Reporting a failure for one of them
+	 * would make the caller announce a fault that does not exist. */
 	if (sens->set_auto == NULL)
-		return (on != 0) ? 0 : -1;   /* nothing to hand back to */
+		return 0;
 	return sens->set_auto(on);
 }
 
@@ -753,6 +757,20 @@ uint8_t cam_imx219_depth(void)
 	return imx219_dpp;
 }
 
+/*
+ * 0x015a/0x015b (coarse exposure) and 0x0160/0x0161 (frame length) are IMX219
+ * addresses.  The OV5647 keeps neither quantity there -- its exposure is 20 bits
+ * across 0x3500..0x3502 and its frame length is the VTS pair at 0x380e/0x380f --
+ * so running these on it would write and read registers that mean something else
+ * entirely, and SCCB would acknowledge every one of them.  A write that lands
+ * somewhere unintended and reports success is worse than a refusal, so refuse:
+ * same rule, and the same test, as cam_imx219_set_depth() above.
+ */
+int cam_imx219_has_timing_regs(void)
+{
+	return sens->set_exposure == imx219_do_exposure;
+}
+
 int cam_imx219_set_frame_length(uint16_t lines)
 {
 	HX_CIS_SensorSetting_t tbl[] = {
@@ -760,6 +778,10 @@ int cam_imx219_set_frame_length(uint16_t lines)
 		{ HX_CIS_I2C_Action_W, 0x0161, lines & 0xFF },
 	};
 
+	if (!cam_imx219_has_timing_regs()) {
+		LOG_ERR("frame length is not settable on the %s", sens->name);
+		return -1;
+	}
 	return WRITE_TABLE(tbl);
 }
 
@@ -767,6 +789,8 @@ int cam_imx219_read_timing(uint16_t *exposure, uint16_t *frame_length)
 {
 	uint8_t hi, lo;
 
+	if (!cam_imx219_has_timing_regs())
+		return -1;
 	if (exposure != NULL) {
 		if (hx_drv_cis_get_reg(0x015a, &hi) != HX_CIS_NO_ERROR ||
 		    hx_drv_cis_get_reg(0x015b, &lo) != HX_CIS_NO_ERROR)

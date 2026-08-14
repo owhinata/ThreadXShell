@@ -452,7 +452,7 @@ static int cmd_camera_exposure(struct cli_instance *sh, int argc, char **argv)
 	uint16_t lines, dgain, rb_exp = 0u, rb_frame = 0u;
 	uint8_t again;
 	uint32_t v;
-	int have_rb;
+	int rb_rc;
 
 	if (argc > 1) {
 		if (cli_parse_u32(argv[1], &v) != 0 || v > 0xFFFFu) {
@@ -491,8 +491,8 @@ static int cmd_camera_exposure(struct cli_instance *sh, int argc, char **argv)
 	 * never programs frame length, so it sits at the sensor default of
 	 * 0x0AA8 (2728) and the donor's 0x0A40 (2624) is already close to it.
 	 */
-	have_rb = (camera_read_timing(&rb_exp, &rb_frame) == CAM_OK);
-	if (have_rb) {
+	rb_rc = camera_read_timing(&rb_exp, &rb_frame);
+	if (rb_rc == CAM_OK) {
 		cli_print(sh, "  sensor says : exposure %lu, frame length %lu"
 		              "\r\n",
 		          (unsigned long)rb_exp, (unsigned long)rb_frame);
@@ -501,9 +501,14 @@ static int cmd_camera_exposure(struct cli_instance *sh, int argc, char **argv)
 			              "sensor stretches it to %lu lines, so "
 			              "the frame rate drops)\r\n",
 			          (unsigned long)(lines + 4u));
-	} else {
+	} else if (rb_rc == CAM_ERR_BUSY) {
 		cli_print(sh, "  (sensor read-back needs an idle camera; stop "
 		              "the preview to see the clamped value)\r\n");
+	} else {
+		cli_print(sh, "  (the %s does not keep exposure and frame length "
+		              "where the IMX219 does,\r\n"
+		              "   so there is nothing to read back here)\r\n",
+		          cam_imx219_sensor_name());
 	}
 
 	cam_note_queued(sh, argc);
@@ -567,7 +572,12 @@ static int cmd_camera_wb(struct cli_instance *sh, int argc, char **argv)
 			return 1;
 		}
 		/* Gains only.  Everything else in the struct belongs to another
-		 * subcommand and must survive this one untouched. */
+		 * subcommand and must survive this one untouched -- which means
+		 * READING the live settings first, because camera_set_wb() takes
+		 * the whole struct.  Filling in three fields of an automatic and
+		 * handing it over posts stack garbage as the black level, the
+		 * gamma flag and the saturation. */
+		camera_get_wb(&wb);
 		wb.r = (uint16_t)r;
 		wb.g = (uint16_t)g;
 		wb.b = (uint16_t)b;
@@ -625,12 +635,23 @@ static int cmd_camera_auto(struct cli_instance *sh, int argc, char **argv)
 	struct cam_wb wb;
 
 	if (argc > 1) {
+		int on;
+
 		if (strcmp(argv[1], "on") == 0)
-			camera_set_auto(1);
+			on = 1;
 		else if (strcmp(argv[1], "off") == 0)
-			camera_set_auto(0);
+			on = 0;
 		else {
 			cli_error(sh, "camera: auto takes on or off\r\n");
+			return 1;
+		}
+		/* Reported, not discarded: on a sensor with its own AEC this
+		 * carries a register write, and a silent failure there means
+		 * `camera exposure` quietly stops holding. */
+		if (camera_set_auto(on) != CAM_OK) {
+			cli_error(sh, "camera: could not set the sensor's own "
+			              "exposure loop (is the module powered?  "
+			              "try `camera probe`)\r\n");
 			return 1;
 		}
 	}

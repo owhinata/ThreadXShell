@@ -371,16 +371,32 @@ rows are labelled "as the CPU sees it", never "cached".
 underside (issue #30, M-G3a).
 
 ```
-lcd                    state, read-back SCLK, orientation, ideal frame time
+lcd info               state, read-back SCLK, orientation, ideal frame time
 lcd init               bring the panel up (the other subcommands do it for you)
 lcd bar                colour bars -- the wiring AND byte-order test
 lcd orient             origin/axis probe -- the orientation test (issue #31)
 lcd rot [0|90|180|270] read or set the rotation via MADCTL
 lcd madctl [byte]      read or set MADCTL raw, e.g. `lcd madctl 0x60`
-lcd fill <rgb565>      one flat colour, e.g. `lcd fill 0xF800`
+lcd fill <colour>      one flat colour: a name (`red`, `cyan`, ...) or 0xF800
+lcd clear              fill black
 lcd loop [n]           repeated full-frame DMA writes, Ctrl+C to stop
-lcd backlight on|off   PA2
+lcd regs               the SSPI controller's registers, raw
+lcd on | lcd off       the backlight (PA2)
 ```
+
+`lcd` on its own is not the report -- it is a subcommand set (issue #33), like
+`lcd` on the other two boards and like `devmem` here, so `lcd` alone answers
+"missing or unknown subcommand" and the report is `lcd info`.  The point of the
+form is that the subcommands are DATA: `lcd <TAB>` completes against them and
+`help lcd` lists them, neither of which a chain of `strcmp`s inside one handler
+can offer.
+
+**`lcd on`/`lcd off` are the backlight and nothing else.**  The spelling is the
+one the other two boards use, deliberately -- one vocabulary across the three
+consoles -- but there `off` also stops the LTDC scanout, and this panel has no
+scanout to stop: it is push-driven over SPI, so `off` drives PA2 low and leaves
+the controller running with the last frame still in its GRAM.  The help text and
+the command's own output name PA2 for that reason.
 
 ### [!] Wiring: count pads, do not read the silkscreen
 
@@ -416,20 +432,21 @@ Pads 4, 5, 9, 10, 11, 14 are not used by the panel: 4 is the **board's own
 RESETN** (not the panel's), 5 is PA3, 9/10/11 are the microSD bus, and 14 is USB
 VBUS -- not a supply for a 3.3 V panel.
 
-**Finding pad 6 without counting:** `lcd backlight off` / `on`.  PA2 is the
-backlight pin, so the panel responds only if that wire is on the right pad --
-which also confirms the numbering for every other wire.  It is the one signal
-whose connectivity can be checked with no instrument at all, and it is worth
-doing FIRST: a lit backlight alone proves nothing, because PA2 carries a 2.2k
-pull-up to 3V3 and the panel lights up from that whether or not the wire exists.
+**Finding pad 6 without counting:** `lcd off` / `lcd on`, which drive the
+backlight.  PA2 is the backlight pin, so the panel responds only if that wire is
+on the right pad -- which also confirms the numbering for every other wire.  It
+is the one signal whose connectivity can be checked with no instrument at all,
+and it is worth doing FIRST: a lit backlight alone proves nothing, because PA2
+carries a 2.2k pull-up to 3V3 and the panel lights up from that whether or not
+the wire exists.
 - **The header has exactly one 3V3 pad and one GND pad.**  That is why `BL` is
   a GPIO rather than a second wire into 3V3: PA2 carries a 2.2k pull-up to 3V3
   (`R1`), so the backlight is on from power-up, and driving it low sinks about
   4 mA (2.2k on the 3V3 side plus the Grove connector's 2.2k to 5 V through
   `Q4`'s body diode).
-- **[!] `lcd backlight off` holds the Grove connector's I2C SCL low**, through
-  that same level shifter.  A Grove I2C device and a dimmed backlight are
-  mutually exclusive.
+- **[!] `lcd off` (backlight low) holds the Grove connector's I2C SCL low**,
+  through that same level shifter.  A Grove I2C device and a dimmed backlight
+  are mutually exclusive.
 - **microSD and the LCD share the SSPI master** and cannot be used at once.
 - **[!] While the LCD is enabled, SWD is not available on PB7/PB8** (their
   reset-default mux is SWCLK/SWDIO, and PB6 can be SRSTN).  Flashing and

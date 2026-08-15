@@ -446,6 +446,39 @@ git branch -d feat/<N>-short-description
   **`is_variable()` は拒否**（`AllocateVariables()` がシリアライズ済みバッファでも
   アリーナ確保で上書きする）。
   NPU bring-up は SEC_ONLY 経路に無いので自前（読み戻し + fail-closed）。詳細は board README。
+- **顔検出（`nn detect` / #45）**: BlazeFace-front 128 を Ethos-U55 で。
+  **op resolver は `<1>` のまま維持する。[!] 理由は「CPU op がキャッシュ的に危険」ではない**
+  （#46 で消えた） — **CMSIS-NN（= Helium）を持ち込まない / Vela が全面 offload していない
+  モデルを `AllocateTensors` でうるさく落とす**という設計判断。境界の型変換 5 個
+  （先頭 QUANTIZE + 末尾 DEQUANTIZE 4）は**ファイル側で剥がす**
+  （`scripts/tflite_strip_boundary.cc`。テンソルは削除せず孤児のまま = 番号の振り直しが不要）。
+  剥がすと Vela は **CPU operators = 0**。入力量子化 scale 1/255・zp -128 は
+  `nn_fill_input()` の `pixel - 128` と一致し、`nn detect` は入口でそれを**検査して拒否する**。
+  **vela は `requirements.txt` で pin**（5.1.0）し `build/<board>/venv` に同居。
+  ゲートは `scripts/verify_vela_model.cc`（**ファームの `npu_payload.c` と `npu_arena.c` を
+  そのままリンク**するので、ホストの答えと `npu_open()` の答えがずれない）。
+  実測: モデル 164,512 B / **実機 13 ms・アリーナ 394,800 B** / config word `0x00001006` は
+  実績 MobileNet と**ビット一致** / arch 1.0.6。
+  **ホストゲートのアリーナ値は実機より ~0.1% 大きく出る**（64 bit ホストはポインタが 8 B）が
+  過大＝安全側なので補正しない。
+  **[!] score が毎回 775/1000 で固定に見えるのは正常** — 8x8 群のスコアは zp 126 / scale 1.2247 で
+  `q=127` の 1.2247 が上限、`sigmoid(1.2247)=0.775`。デコーダではなくモデルの量子化の天井。
+  **[!] フラッシュ配置は「予約」で宣言し、検査する**: `GROVE_MODEL_{CLS,DET}_{FILE,ADDR,RESERVED}`
+  （1 個の無名アドレスを使い回さない。アドレスは cmd_nn.c へコンパイル定義で渡し
+  `nn open cls|det` と同一）。`cmake/check_flash_partitions.py` は**予約どうしの非重複を
+  成果物ゼロでも検査**し、**存在必須なのは今から書く成果物だけ**。
+  **[!] 全ファイルを要求してはいけない** — 検出モデルはライセンス上コミットできないので、
+  クリーンなツリーでは**ただのファーム焼き（`--target flash`）が止まる**（実際に一度そうした）。
+  比較は**ファイル範囲ではなく破壊フットプリント**（xmodem の 128 B パディング + 消去ブロック
+  丸め。ブートローダの消去粒度は不明なので **64 KB = この NOR の最大消去単位**という保守側の
+  境界）。cls 0xB7B000 と det 0xD20000 の予約は**ブロック単位でちょうど隣接**する。
+  **モデルの flash ターゲットは staging コピーに対して 検査 → `verify_vela_model` → 送信**を
+  同一ファイルで行う（検証を README の手順に残さない。ホスト C++ が無ければ skip せず拒否）。
+  デコーダは **npu シングルトン非依存**（`npu_tensor` 配列を受け取る）で、
+  **全 896 アンカーを必ず走査**し候補は上限付き top-N（donor は満杯で打ち切るため
+  ピークが前半の最大になり、後方 384 群の最強顔を落とす）。出力 4 本は **shape で探す**。
+  **4 本の scale/zp は全部違う**（8x8 のスコアは zp 126 / scale 1.22 で実質 3 値）ので
+  共有の脱量子化定数を作らない。詳細は board README。
 - **[!] SRAM 窓は 2 領域**（#29）: `CM55M_S_SRAM_LDR` 0x3401F000 = 2nd bootloader の実行窓で
   **NOLOAD 専用** / `CM55M_S_SRAM` 0x3404D000 = loadable 可。`.rodata` は後者。
   「CONTENTS を持つセクションが低位窓に降りていないか」は **ldscript には書けない規則**

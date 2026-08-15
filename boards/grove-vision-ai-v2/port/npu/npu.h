@@ -20,6 +20,7 @@
 #ifndef NPU_H
 #define NPU_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -83,11 +84,27 @@ unsigned npu_output_count(void);
  * Run one inference.  Blocks the calling thread; other shell threads keep
  * running, because the driver's semaphore is a ThreadX one (see npu_rtos.c).
  *
- * Cache maintenance around the run belongs to the CALLER: clean the input
- * before calling, invalidate the outputs after this returns.  The vendor hooks
- * that would otherwise do it are deliberately neutered -- see npu_cache.c.
+ * CACHE MAINTENANCE IS NOT THE CALLER'S (issue #46).  The whole arena changes
+ * hands at two instants inside Invoke() -- immediately before the command
+ * stream is launched and once completion is confirmed -- and the port hangs the
+ * clean and the invalidate off the driver's callbacks there (npu_cache.c).
+ * Doing anything from outside is either too early (the ethos-u kernel writes
+ * arena scratch afterwards) or too late (TFLM writes the arena before Invoke()
+ * returns).  By the time this returns, the outputs are visible.
  */
 int npu_invoke(void);
+
+/**
+ * Is @p type the int8 element type?
+ *
+ * npu_tensor::type is an opaque TfLiteType on this side of the boundary, on
+ * purpose -- no TFLite header reaches the C sources.  A model decoder still has
+ * to know that a tensor holds int8 before casting its buffer, so the question
+ * is answered by a function whose implementation asserts against the real
+ * enumerator, rather than by a public constant that would be a second copy of
+ * it waiting to disagree.
+ */
+bool npu_tensor_is_int8(int8_t type);
 
 /** Arena bytes actually used by the current layout (0 when not open). */
 size_t npu_arena_used(void);

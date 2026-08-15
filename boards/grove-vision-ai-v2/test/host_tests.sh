@@ -116,6 +116,32 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_npu_payload"
 "$out/test_npu_payload"
 
+# issue #45 -- the BlazeFace decoder (port/npu/models/blazeface.c).  The REAL
+# decoder is compiled, which is possible at all because it takes tensor
+# DESCRIPTORS instead of reaching into the NPU singleton.  Its failure modes are
+# a scale factor or an offset -- boxes that are still boxes, in the wrong place,
+# on an image nobody can see -- and each hypothesis otherwise costs a flash
+# cycle of a NOR with ~100k of them.  The case that earns the file is the
+# candidate cap: the donor implementation stops decoding when its buffer fills,
+# so a busy frame drops the strongest face if it lands in the 8x8 group, which
+# is scanned last.
+#
+# No shim: npu.h is plain C with no hardware in it, and the test supplies
+# npu_tensor_is_int8() itself (on the board it lives in npu_tflm.cc, where a
+# static_assert pins the enumerator).
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/npu" -I "$board/port/npu/models" \
+    "$here/test_blazeface.c" "$board/port/npu/models/blazeface.c" \
+    $LDFLAGS -o "$out/test_blazeface"
+"$out/test_blazeface"
+
+# issue #45 -- the flash partition check (cmake/check_flash_partitions.py).
+# A gate over a destructive, unrecoverable-in-place operation: the model and the
+# firmware are written to the same NOR by an xmodem tool that erases blocks and
+# reads nothing back.  Its cases cannot be produced on hardware without
+# destroying a partition to see whether the check would have stopped it.
+python3 "$here/test_flash_partitions.py"
+
 # issue #35 -- the planar B/G/R -> RGB565 packer (port/camera/cam_convert.c).
 # No shim and no SDK header: this translation unit is deliberately pure
 # arithmetic over memory, which is what lets it be tested here at all.  Every

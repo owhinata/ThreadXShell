@@ -1240,25 +1240,79 @@ impossible to unwind ever again.
 
 ## Ethos-U55 inference (`nn`)
 
-One-shot classification: capture a frame, run it on the NPU, print the top 5.
-91 ms for a MobileNet, and the console stays usable while it runs.  Issue #44.
+Capture a frame, run it on the NPU, print the result.  Classification (top 5,
+92 ms) since issue #44; BlazeFace face detection (13 ms) since issue #45.  The
+console stays usable while either runs.
 
 ```
-nn open                 # QSPI XIP on, NPU out of reset, model parsed in place
-nn info                 # tensors, arena use, which interrupts got wrapped
-nn run                  # one frame -> one inference
-nn run &                # the same, in the background; the prompt comes straight back
+nn open [cls|det|<addr>]  # QSPI XIP on, NPU out of reset, model parsed in place
+nn info                   # tensors, arena use, which interrupts got wrapped
+nn run                    # one frame -> classification, top 5
+nn detect                 # one frame -> face boxes
+nn thresh [<1..999>]      # the detector's score threshold, milli-probability
+nn run &                  # either, in the background; the prompt comes straight back
 nn close
 ```
 
-The model is a SEPARATE flash partition from the firmware:
+`cls` and `det` are the two model partitions below; the raw address form stays
+for checking a model somebody put somewhere else.
+
+The models are SEPARATE flash partitions from the firmware:
 
 ```
-cmake --build build/grove-vision-ai-v2 --target flash-model
+cmake --build build/grove-vision-ai-v2 --target flash-model-cls   # MobileNet
+cmake --build build/grove-vision-ai-v2 --target flash-model-det   # BlazeFace
 ```
 
-which means iterating on firmware never disturbs it, and swapping models never
+which means iterating on firmware never disturbs them, and swapping models never
 rewrites the bootloader -- worth having on a part with ~100k NOR cycles.
+
+### The flash partition map, and the checks over it
+
+| partition | write address | reserved blocks | today's artifact | flashed by |
+|---|---|---|---|---|
+| firmware | `0x000000` | `0x000000..0xB70000` | 405,504 B image | `--target flash` |
+| model-cls | `0xB7B000` | `0xB70000..0xD20000` | MobileNet, 1,704,672 B | `--target flash-model-cls` |
+| model-det | `0xD20000` | `0xD20000..0xD50000` | BlazeFace, 164,512 B | `--target flash-model-det` |
+
+Addresses live in ONE place: `GROVE_MODEL_CLS_ADDR` / `GROVE_MODEL_DET_ADDR` in
+`board.cmake`.  They are compiled into `cmd_nn.c` as well, so `nn open det` and
+`--target flash-model-det` cannot drift apart.
+
+**The layout is reservations, not files.**  `cmake/check_flash_partitions.py`
+checks that the reservations are disjoint and fit the part *with no artifacts
+present at all* -- a layout is a property of addresses.  Only the artifact
+actually being written has to exist, so updating the firmware never depends on
+having built a model.  Any other artifact that happens to be present is measured
+too, which catches a model that outgrew its slot before the flash that would
+have proved it the destructive way.
+
+[!] The first version of this required every declared file, which made plain
+`--target flash` refuse on any clean tree -- the detection model cannot be
+committed, so it is never there until somebody builds it by hand.  A gate that
+blocks the operation it is not protecting is a gate that gets deleted.
+
+It compares **destroyed footprints, not file extents** -- xmodem pads its last
+packet, and the flash is erased in blocks -- so two regions whose bytes do not
+touch can still be found to collide.  The erase block size the resident Himax
+bootloader uses is not known (it is closed, and was not disassembled to a
+conclusion), so the check rounds to **64 KB**, the largest this NOR offers: a
+conservative bound that contains whatever the bootloader actually does.
+
+`0xD20000` is the first 64 KB boundary above the classification model's extent
+(`0xB7B000 + 1,704,672 = 0xD1B2E0`), so the two reservations abut exactly.
+Host tests: `test/test_flash_partitions.py`.
+
+**Both model targets verify before they transmit.**  `flash-model-cls` and
+`flash-model-det` stage a copy, run the partition check and `verify_vela_model`
+**on that staged copy**, and then send **that same file** -- so nothing can be
+swapped in between, and a stale or malformed model never costs an erase cycle.
+With no host C++ compiler the verifier cannot be built and the targets refuse;
+skipping the check would be the fail-open the arrangement exists to prevent.
+
+The one thing no static check can bound is a receiver that erases the whole chip
+before writing.  That evidence is empirical: flash one model, then read the
+other one back with `nn open` + a run.
 
 ### One operator, and therefore no CMSIS-NN
 
@@ -1302,6 +1356,22 @@ whole window.  `nn open` brings XIP up and the same dump then reads
 `24 00 00 00 54 46 4c 33`.  `devmem`'s flash region is listed read-only for
 exactly this: without being able to dump the window, the difference between
 "nothing was flashed" and "the window is shut" is guesswork.
+
+### `nn info`'s interrupt list shrinks after the first open, and that is correct
+
+The first `nn open` after a reset reports `irq 133, 192`; every later one
+reports `irq 192`.  Nothing is being lost:
+
+- `npu_flash_xip_init()` is one-shot (`xip_ready`).  The first open calls into
+  the QSPI library, which enables IRQ 133 as a side effect (below); later opens
+  skip it because the read window is already up.
+- `nn close` unwraps, and unwrapping DISABLES -- the EPK rule is that a line is
+  either disabled or wrapped-and-registered, never a third thing.
+
+So on the second open 133 is disabled and stays disabled, which is why the
+snapshot does not see it become enabled and why nothing is "enabled but
+unaccounted".  Reads keep working because the model is fetched through the
+memory-mapped alias, not through the library's DMA path.
 
 ### [!] Bringing up the flash enables an interrupt nobody named
 
@@ -1443,14 +1513,182 @@ latch first, so it is part of configuring the read path.  On its own a latch
 cannot modify anything -- it has to be followed by a program or erase opcode, and
 every entry point that issues one is barred and gone.
 
+## Face detection (`nn detect`, BlazeFace-front 128)
+
+Issue #45.  ST model zoo's BlazeFace Front 128x128 -- a MediaPipe-derived SSD
+face detector -- on the NPU, decoded to boxes on the CPU.
+
+```
+nn open det
+nn detect
+nn thresh 500          # more sensitive; 1..999, milli-probability
+```
+
+### Building the model (it cannot be committed)
+
+The weights are model-zoo licensed, so `*.tflite` is gitignored and the pipeline
+is documented instead.  Everything it needs is in the build tree: `vela` is
+pinned in `requirements.txt` and installed into `build/<board>/venv`, and the two
+host tools come from `--target model-tools`.
+
+```
+cmake --build build/grove-vision-ai-v2 --target model-tools
+cd build/grove-vision-ai-v2
+
+./tflite_strip_boundary <path>/blazeface_front_128_int8.tflite \
+                        model/blazeface_stripped.tflite
+./venv/bin/vela --accelerator-config ethos-u55-64 \
+                --output-dir model model/blazeface_stripped.tflite
+mv model/blazeface_stripped_vela.tflite model/blazeface_vela.tflite
+./verify_vela_model model/blazeface_vela.tflite --blazeface
+```
+
+`GROVE_MODEL_DET_FILE` already points at that last path, so
+`--target flash-model-det` picks it up -- and runs `verify_vela_model` itself on
+the staged copy before transmitting, so the manual run above is for reading the
+report, not for safety.
+
+**Why the stripping step.** "An int8 model" from the model zoo means int8
+WEIGHTS and float32 I/O: the graph starts with a `QUANTIZE` and ends with four
+`DEQUANTIZE`s.  Vela offloads 93.8% of the network (75 operators) and leaves
+exactly those five on the CPU -- they are not arithmetic, they are the graph's
+edges changing type.  This port registers ONE operator and intends to keep it
+that way, so removing them from the FILE is what makes the model fit.  Nothing
+is lost: the firmware already fills the input as int8 (`nn_fill_input()`'s
+`pixel - 128` IS this model's scale 1/255, zero point -128) and the decoder reads
+int8 outputs through their own quantisation.  After stripping, Vela reports
+**CPU operators = 0**.
+
+`tflite_strip_boundary` deletes no tensors -- the ones it orphans stay in the
+table, so no index is renumbered and the tool stays short.  Vela rebuilds the
+graph and prunes them, which `verify_vela_model` checks rather than assumes.
+
+### What `verify_vela_model` proves, and what it does not
+
+Vela's "CPU operators = 0" says the graph was offloaded.  It says nothing about
+whether this firmware can run the result, so the gate answers the rest on the
+host instead of on a board at the far end of a flash cycle:
+
+- the payload passes **the firmware's own** `npu_payload.c` walk -- the file is
+  compiled into the tool, not reimplemented, so it cannot agree with itself and
+  disagree with `npu_open()`
+- `AllocateTensors()` fits **the board's own** `npu_arena.c` -- likewise compiled
+  in, so the size cannot drift from the reservation
+- one subgraph, every operator `ethos-u`, int8 in and out, no unreachable
+  tensors, an `OfflineMemoryAllocation` whose tensor count matches the subgraph
+- `--blazeface` additionally pins the four output shapes the decoder looks for
+
+Measured on the model built by the commands above:
+
+| | value |
+|---|---|
+| model size | 164,512 B |
+| arena used | 395,328 B of 460,800 (65,472 spare) |
+| optimizer config word | `0x00001006` -- 64 MACs/cc, cmd stream v0, 16 KB SHRAM |
+| arch version | 1.0.6 (vela 5.1.0) |
+| Vela cycle estimate | 4,445,266 -> 8.9 ms at 500 MHz, ~11.1 ms at 400 MHz |
+| **measured on hardware** | **13 ms**, arena **394,800 B** |
+
+[!] The host's arena figure is ~0.1% HIGHER than the board's (395,328 against
+394,800; 386,096 against 385,748 for the classification model).  The host is
+64-bit, so TFLM's persistent allocations -- which are full of pointers -- come
+out larger there.  The error is in the safe direction and the gate is left to
+over-estimate rather than corrected with a fudge factor: a model that fits on
+the host fits on the board, which is the property worth having.
+
+The config word is **bit-identical to the MobileNet** that already runs on this
+board, which is the strongest pre-hardware evidence available that the command
+stream will be accepted; the arch version differs only in the patch field, which
+`ethosu_dev_verify_optimizer_config` does not compare.  It is still only
+evidence -- the driver checks compatibility against registers at INVOKE time, so
+the first `nn detect` on hardware is the proof.
+
+### The decoder
+
+`port/npu/models/blazeface.c`: SSD anchor decode over 896 anchors (16x16 grid
+with 2 per cell, 8x8 with 6), then hard NMS.  No libm -- the threshold is
+compared as a pre-sigmoid logit and the reported confidence uses an algebraic
+sigmoid.  It takes tensor DESCRIPTORS rather than reaching into the NPU
+singleton, which is what lets `test/test_blazeface.c` compile the real decoder
+and drive it with synthetic tensors.
+
+Two things differ from the Wio/F746 implementation of the same model:
+
+- **The anchor centres are computed, not tabulated.**  The donor fills two
+  `float[896]` tables on first use behind a ready flag; the centres are
+  `(cell + 0.5) / grid`, so computing them removes 7 KB of DTCM and a piece of
+  lazily-initialised static state.
+- **The scan is never cut short.**  The donor stops decoding when its
+  64-candidate buffer fills, which makes two things wrong at once: the reported
+  peak score becomes the maximum of a PREFIX, and NMS sees the FIRST 64
+  candidates rather than the best 64 -- so a busy frame drops the strongest face
+  if it lands in the 8x8 group, which is scanned last.  Here every anchor is
+  visited and the candidate list is a bounded top-N with deterministic
+  tie-breaking.  (The same bug is still in the other two boards.)
+
+`nn detect` always prints the peak raw score, the number of anchors over the
+threshold, the number kept, and the number after NMS.  "No faces" and "the
+threshold is above everything the model produced" are different states and the
+detection count cannot tell them apart.
+
+### [!] The 8x8 group's scores are quantised very coarsely
+
+The four outputs carry four different quantisations, and they are not
+comparable:
+
+| output | shape | scale | zero point |
+|---|---|---|---|
+| box regressors, 16x16 | 1x512x16 | 0.306708 | -47 |
+| scores, 16x16 | 1x512x1 | 0.036937 | 49 |
+| box regressors, 8x8 | 1x384x16 | 1.202013 | -47 |
+| scores, 8x8 | 1x384x1 | 1.224698 | 126 |
+
+The 8x8 score tensor has zero point 126 and scale 1.2247, so of the whole int8
+range only `127` dequantises above zero -- its scores are effectively
+three-valued around the threshold, and the 8x8 layer is all-or-nothing.  The
+16x16 layer has a threshold step of about 0.037 and behaves normally.  This is
+ST's quantisation, not a decoder property, but it explains a peak score that
+jumps rather than sliding as `nn thresh` moves.
+
+**Measured, and it is the first thing anyone will ask about.**  A face filling
+the centre crop is detected by the 8x8 group at its saturated value, so:
+
+```
+peak raw 1224/1000    <- (127 - 126) * 1.2247, the largest value that tensor holds
+score     775/1000    <- sigmoid(1.2247)
+```
+
+and the reported confidence reads **775 for every such detection**, across
+different faces and positions.  That is the quantisation ceiling, not a stuck
+value: a detection from the 16x16 group can report up to sigmoid(2.88) = 871,
+and the boxes themselves move normally.  If a confidence that discriminates
+between faces is ever needed, it has to come from a differently quantised
+model -- no amount of decoder work can recover a distinction the tensor cannot
+represent.
+
+It is also why a decoder that shared one dequantisation constant across the four
+tensors would look almost right: the boxes would still be boxes.
+`test_blazeface.c` writes the same quantised bytes into both groups and requires
+the decoded sizes to differ by the ratio of the scales.
+
+### Limits worth stating with any result
+
+- **Field of view.**  The input is a CENTRE CROP of the 320x240 frame, not a
+  resize, so `nn detect` sees a 128x128 window at +96+56.  Every result prints
+  it.
+- **NMS is capped.**  At most 64 candidates survive to NMS and at most 8
+  detections come out.  Both counts are printed, so the cap is never a surprise.
+- **The threshold is refused, not clamped, outside 1..999.**  0 and 1000 are the
+  poles of the inverse sigmoid; a silently clamped threshold is a setting that
+  does not do what it says.
+
 ### Not yet answered
 
-- The input is a CENTRE CROP of the 320x240 frame, not a resize, so the field of
-  view is narrower than the preview.  The vendor's resize is a Helium routine and
-  linking it would put predicated MVE in the image; a scalar resize is the fix if
-  the crop turns out to matter.  Every result prints the caveat.
-- Real-time inference over the preview.  It needs #38 (capture, pack and blit are
-  serialised) settled first.
+- A scalar resize, so the detector sees the whole frame instead of the centre
+  crop.  The vendor's resize is a Helium routine and linking it would put
+  predicated MVE in the image.
+- Inference of either kind over the live preview.  It needs #38 (capture, pack
+  and blit are serialised) settled first.
 - Whether the U55 can reach CM55M TCM.  UNVERIFIED -- the Ethos-U55 TRM does not
   describe this SoC's interconnect and the SVD describes registers, not routing.
   The arena is in SRAM because the donor puts it there, which is evidence and not
@@ -1480,10 +1718,10 @@ terminal before running `--target flash`.
 ## Future work
 
 - LED / button / GPIO commands, SD (SPI mode), PDM microphone.
-- Object detection.  Classification landed in #44; the camera's output is
-  already in the shape the donor's `tflm_yolov8_od` expects, but that model wants
-  a 1,053 KB arena against the 450 KB reserved here, and drawing boxes on the
-  preview runs into #38.
+- General object detection.  Classification landed in #44 and face detection in
+  #45; the camera's output is already in the shape the donor's `tflm_yolov8_od`
+  expects, but that model wants a 1,053 KB arena against the 450 KB reserved
+  here, and drawing boxes on the preview runs into #38.
 - MVE.  [!] The reason it is barred is WRONG: the Armv8-M ARM's PushStack /
   PopStack save and restore VPR under `HaveMve()`, and rule RZWQX makes MVE
   execution set `CONTROL.FPCA`, so the hardware preserves it across a context

@@ -51,6 +51,47 @@ set(MCU_OPTS -mcpu=cortex-m55 -mthumb -mfloat-abi=hard)
 
 set(LDSCRIPT_APP "${BOARD_DIR}/ldscript/HX6538_CM55M_S.ld")
 
+# --- Flash partition map (issues #44, #45) -----------------------------------
+# Declared HERE, above everything that uses it, because two consumers need it:
+# the flashing targets at the bottom of this file, and the firmware itself --
+# cmd_nn.c is compiled with these offsets so that `nn open cls` and
+# `--target flash-model-cls` name one address rather than two that a comment
+# asks to agree.
+#
+# [!] ONE NAMED VARIABLE PAIR PER MODEL (issue #45).  There used to be a single
+# anonymous GROVE_MODEL_FILE/ADDR.  That was fine while there was one model and
+# became a hazard the moment there were two: "the model" stops identifying
+# anything, and the flash target writes whichever one the cache happens to
+# hold -- over whatever is at the address the cache happens to hold.
+#
+# check_flash_partitions.py turns this map into a checked property.  It runs as
+# the first command of every flashing target, so a layout mistake stops before
+# the serial port is opened.
+set(GROVE_MODEL_CLS_FILE
+    "${GROVE_SDK_ROOT}/model_zoo/tflm_mb_cls/qat_pruning_model_vela.tflite"
+    CACHE FILEPATH
+    "Vela-compiled classification model (`--target flash-model-cls`, `nn open cls`)")
+set(GROVE_MODEL_CLS_ADDR "0xB7B000" CACHE STRING
+    "Flash offset of the classification model")
+
+# The detector is NOT in the SDK and cannot be committed (the model zoo licence
+# covers the weights), so this defaults to where the documented pipeline puts
+# it: build/<board>/model/.  See the BlazeFace section of the board README for
+# the commands that produce it.
+set(GROVE_MODEL_DET_FILE
+    "${CMAKE_BINARY_DIR}/model/blazeface_vela.tflite"
+    CACHE FILEPATH
+    "Vela-compiled BlazeFace model (`--target flash-model-det`, `nn open det`)")
+# 0xD20000 is the first 64 KB boundary above the classification model's extent
+# (0xB7B000 + 1,704,672 = 0xD1B2E0), 64 KB being the largest erase block this
+# NOR offers.  The checker is what makes that a checked property rather than
+# arithmetic in a comment.
+set(GROVE_MODEL_DET_ADDR "0xD20000" CACHE STRING
+    "Flash offset of the detection model")
+
+set(GROVE_FLASH_SIZE "0x1000000" CACHE STRING
+    "External NOR size (W25Q128JW = 16 MB)")
+
 set(GEN_DIR "${CMAKE_BINARY_DIR}/gen")
 file(MAKE_DIRECTORY "${GEN_DIR}")
 
@@ -455,8 +496,13 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/npu/npu_rtos.c"
     "${BOARD_DIR}/port/npu/npu_cache.c"
     "${BOARD_DIR}/port/npu/npu_payload.c"
+    "${BOARD_DIR}/port/npu/npu_model_scan.cc"
     "${BOARD_DIR}/port/npu/npu_hw.c"
     "${BOARD_DIR}/port/npu/npu_flash.c"
+    # Model-specific post-processing (issue #45).  Above npu.h, which stays
+    # model-agnostic; it sees tensor DESCRIPTORS and not the interpreter, which
+    # is what lets the host test drive the real decoder.
+    "${BOARD_DIR}/port/npu/models/blazeface.c"
     ${SHELL_SOURCES}
     ${SDK_SOURCES}
     ${TX_CORE} ${TX_ASM} ${TX_EPK})
@@ -476,6 +522,7 @@ target_include_directories(shell_objs PRIVATE
     "${BOARD_DIR}/port/lcd"
     "${BOARD_DIR}/port/camera"
     "${BOARD_DIR}/port/npu"
+    "${BOARD_DIR}/port/npu/models"
     # Header surface of the two camera archives (issue #35): the CIS (sensor
     # I2C) layer and the sensor datapath library.  Not in bsp_iface because
     # only port/camera/ has any business calling them.
@@ -511,7 +558,14 @@ target_compile_definitions(shell_objs PRIVATE
     # warns on any mismatch with this constant -- it printed 400000000 Hz and
     # no warning).  The compile-time SDK config is a 24 MHz placeholder and
     # must never be used for this; udelay() reads SystemCoreClock directly.
-    CLI_CPU_CYCLES_PER_US=400)
+    CLI_CPU_CYCLES_PER_US=400
+    # Where the two models live, from the SAME cache variables the flash
+    # targets use (issue #45).  Compiled in rather than restated in cmd_nn.c so
+    # that `nn open cls` and `--target flash-model-cls` name one address and
+    # not two that a comment asks to agree.  Offsets, not addresses: cmd_nn.c
+    # adds the flash read alias base, which is a property of the chip.
+    NN_MODEL_CLS_OFFSET=${GROVE_MODEL_CLS_ADDR}
+    NN_MODEL_DET_OFFSET=${GROVE_MODEL_DET_ADDR})
 target_compile_options(shell_objs PRIVATE -Os)
 
 # [!] -fno-tree-vectorize on the camera's pixel loops, for the same reason
@@ -523,8 +577,13 @@ target_compile_options(shell_objs PRIVATE -Os)
 # GCC would turn a 76,800-iteration loop over three planes into precisely the
 # code the gate bars, and the failure would surface as a build break in an
 # unrelated commit.
+#
+# [!] PER TRANSLATION UNIT, and blazeface.c needs its own entry: the option on
+# tflm_obj is scoped to that target and does not reach anything here.  The
+# decoder's 896-anchor loops are precisely the shape that would vectorise.
 set_source_files_properties(
     "${BOARD_DIR}/port/camera/cam_convert.c"
+    "${BOARD_DIR}/port/npu/models/blazeface.c"
     TARGET_DIRECTORY shell_objs
     PROPERTIES COMPILE_OPTIONS "-fno-tree-vectorize")
 target_link_options(shell PRIVATE
@@ -675,17 +734,32 @@ set(GROVE_SERIAL_PORT "/dev/ttyACM0" CACHE STRING
 set(GROVE_SERIAL_BAUDRATE "921600" CACHE STRING
     "Baudrate for the xmodem flash upload")
 
-# The flash script needs pyserial + xmodem; a build-local venv keeps that out
-# of the host Python.  Created once at configure time.
+# The host tools need pyserial + xmodem (flashing) and vela (model
+# preparation, issue #45); a build-local venv keeps all of that out of the host
+# Python.  Created at configure time.
+#
+# [!] The INSTALL is keyed on the CONTENT of requirements.txt, not on the venv
+# existing.  Gating it on the directory would mean that adding a dependency --
+# which is what happened when vela arrived -- silently does nothing in every
+# build tree that already configured once, and the failure surfaces much later
+# as a missing tool.  A venv left half-installed by an interrupted run heals the
+# same way.  (Same reasoning as the Wio board's tflite-micro.cmake states for
+# its own venv.)
 set(GROVE_VENV "${CMAKE_BINARY_DIR}/venv")
 if(NOT EXISTS "${GROVE_VENV}/bin/python")
-    message(STATUS "Creating flash-tool venv (pyserial, xmodem) ...")
+    message(STATUS "Creating host-tool venv ...")
     execute_process(
         COMMAND "${Python3_EXECUTABLE}" -m venv "${GROVE_VENV}"
         RESULT_VARIABLE _rc)
     if(NOT _rc EQUAL 0)
         message(FATAL_ERROR "python3 -m venv failed (${GROVE_VENV})")
     endif()
+endif()
+file(SHA256 "${BOARD_DIR}/requirements.txt" _req_hash)
+set(GROVE_VENV_STAMP "${GROVE_VENV}/.requirements-${_req_hash}")
+if(NOT EXISTS "${GROVE_VENV_STAMP}")
+    message(STATUS "Installing host-tool venv requirements "
+                   "(pyserial, xmodem, ethos-u-vela) ...")
     execute_process(
         COMMAND "${GROVE_VENV}/bin/python" -m pip install --quiet
                 -r "${BOARD_DIR}/requirements.txt"
@@ -694,6 +768,131 @@ if(NOT EXISTS "${GROVE_VENV}/bin/python")
         message(FATAL_ERROR
             "pip install -r boards/grove-vision-ai-v2/requirements.txt failed")
     endif()
+    # Written only after pip succeeded, so a failed install is retried rather
+    # than remembered as done.
+    file(WRITE "${GROVE_VENV_STAMP}" "${_req_hash}\n")
+endif()
+
+# --- Host-side model tools (issue #45) ---------------------------------------
+# Two programs that run on the DEVELOPER'S machine, not the board:
+#
+#   tflite_strip_boundary   removes a model's leading QUANTIZE and trailing
+#                           DEQUANTIZEs, so vela has nothing left to leave on
+#                           the CPU.  Run it BEFORE vela.
+#   verify_vela_model       inspects vela's output and answers, on the host, the
+#                           questions the board would otherwise answer by
+#                           failing over a serial line after a flash cycle.
+#
+# They are custom commands driving the host compiler rather than ordinary
+# targets because this project cross-compiles: every CMake target here is built
+# for cortex-m55, and a program that runs on the developer's machine cannot be
+# one of them.  Neither is in ALL -- compiling schema_generated.h plus the
+# interpreter costs a few seconds and most builds never need it.
+#
+# [!] verify_vela_model links THE FIRMWARE'S OWN port/npu/npu_payload.c and
+# port/npu/npu_arena.c.  That is the whole design: a host checker that
+# reimplemented the payload walk could agree with itself and disagree with the
+# board, and one that hardcoded the arena size would drift from the reservation.
+# The two .c files need -x c EACH -- one -x c in front of a list applies only to
+# the first file (observed on gcc 13.3), and compiling _Static_assert as C++ is
+# how that mistake announces itself.
+find_program(HOST_CXX NAMES c++ g++ clang++)
+if(HOST_CXX)
+    set(_ethosu_drv_inc "${ETHOSU_DRV}/include")
+    # The same source set tflm_obj builds, minus the three driver .c files
+    # (ARM-only) -- Eval()'s driver calls are stubbed in verify_vela_model.cc
+    # and abort if reached.  --gc-sections for the same reason the firmware link
+    # needs it: kernel_util.cc references an int4 unpacker that nothing in this
+    # configuration calls.
+    set(_tflm_host_srcs
+        "${TFLM}/tensorflow/compiler/mlir/lite/schema/schema_utils.cc"
+        "${TFLM}/tensorflow/lite/micro/kernels/ethos_u/ethosu.cc"
+        "${TFLM}/tensorflow/lite/micro/kernels/kernel_util.cc"
+        "${TFLM}/tensorflow/lite/micro/micro_interpreter.cc"
+        "${TFLM}/tensorflow/lite/micro/micro_interpreter_graph.cc"
+        "${TFLM}/tensorflow/lite/micro/micro_interpreter_context.cc"
+        "${TFLM}/tensorflow/lite/micro/micro_allocator.cc"
+        "${TFLM}/tensorflow/lite/micro/micro_allocation_info.cc"
+        "${TFLM}/tensorflow/lite/micro/micro_context.cc"
+        "${TFLM}/tensorflow/lite/micro/micro_op_resolver.cc"
+        "${TFLM}/tensorflow/lite/micro/micro_resource_variable.cc"
+        "${TFLM}/tensorflow/lite/micro/micro_profiler.cc"
+        "${TFLM}/tensorflow/lite/micro/micro_log.cc"
+        "${TFLM}/tensorflow/lite/micro/micro_utils.cc"
+        "${TFLM}/tensorflow/lite/micro/micro_time.cc"
+        "${TFLM}/tensorflow/lite/micro/memory_helpers.cc"
+        "${TFLM}/tensorflow/lite/micro/debug_log.cc"
+        "${TFLM}/tensorflow/lite/micro/flatbuffer_utils.cc"
+        "${TFLM}/tensorflow/lite/micro/arena_allocator/single_arena_buffer_allocator.cc"
+        "${TFLM}/tensorflow/lite/micro/arena_allocator/non_persistent_arena_buffer_allocator.cc"
+        "${TFLM}/tensorflow/lite/micro/arena_allocator/persistent_arena_buffer_allocator.cc"
+        "${TFLM}/tensorflow/lite/micro/memory_planner/greedy_memory_planner.cc"
+        "${TFLM}/tensorflow/lite/micro/memory_planner/linear_memory_planner.cc"
+        "${TFLM}/tensorflow/lite/micro/tflite_bridge/flatbuffer_conversions_bridge.cc"
+        "${TFLM}/tensorflow/lite/micro/tflite_bridge/micro_error_reporter.cc"
+        "${TFLM}/tensorflow/lite/core/api/flatbuffer_conversions.cc"
+        "${TFLM}/tensorflow/lite/core/api/tensor_utils.cc"
+        "${TFLM}/tensorflow/lite/core/c/common.cc"
+        "${TFLM}/tensorflow/lite/kernels/kernel_util.cc"
+        "${TFLM}/tensorflow/lite/kernels/internal/common.cc"
+        "${TFLM}/tensorflow/lite/kernels/internal/quantization_util.cc"
+        "${TFLM}/tensorflow/lite/kernels/internal/tensor_ctypes.cc"
+        "${TFLM}/tensorflow/lite/kernels/internal/runtime_shape.cc"
+        "${TFLM}/tensorflow/compiler/mlir/lite/core/api/error_reporter.cc")
+
+    add_custom_command(
+        OUTPUT "${CMAKE_BINARY_DIR}/tflite_strip_boundary"
+        COMMAND "${HOST_CXX}" -std=c++17 -O1 -w
+                -I "${TFLM}"
+                -I "${TFLM}/third_party/flatbuffers/include"
+                # gemmlowp/ruy are reachable from micro_interpreter.h, included
+                # for TFLITE_SCHEMA_VERSION alone.
+                -I "${TFLM}/third_party/gemmlowp"
+                -I "${TFLM}/third_party/ruy"
+                "${BOARD_DIR}/scripts/tflite_strip_boundary.cc"
+                "${TFLM}/tensorflow/compiler/mlir/lite/schema/schema_utils.cc"
+                -o "${CMAKE_BINARY_DIR}/tflite_strip_boundary"
+        DEPENDS "${BOARD_DIR}/scripts/tflite_strip_boundary.cc"
+        COMMENT "host c++ -> tflite_strip_boundary (strips a model's boundary conversions)"
+        VERBATIM)
+
+    add_custom_command(
+        OUTPUT "${CMAKE_BINARY_DIR}/verify_vela_model"
+        COMMAND "${HOST_CXX}" -std=c++17 -O1 -w
+                -fno-exceptions -fno-rtti
+                -ffunction-sections -fdata-sections
+                -I "${TFLM}"
+                -I "${TFLM}/third_party/flatbuffers/include"
+                -I "${TFLM}/third_party/gemmlowp"
+                -I "${TFLM}/third_party/ruy"
+                -I "${_ethosu_drv_inc}"
+                -I "${BOARD_DIR}/port/npu"
+                -DTF_LITE_STATIC_MEMORY -DTF_LITE_MCU_DEBUG_LOG
+                -DETHOS_U -DETHOSU55 -DETHOSU_ARCH=u55
+                "${BOARD_DIR}/scripts/verify_vela_model.cc"
+                -x c "${BOARD_DIR}/port/npu/npu_payload.c"
+                -x c "${BOARD_DIR}/port/npu/npu_arena.c"
+                -x none
+                "${BOARD_DIR}/port/npu/npu_model_scan.cc"
+                ${_tflm_host_srcs}
+                -Wl,--gc-sections
+                -o "${CMAKE_BINARY_DIR}/verify_vela_model"
+        DEPENDS "${BOARD_DIR}/scripts/verify_vela_model.cc"
+                "${BOARD_DIR}/port/npu/npu_model_scan.cc"
+                "${BOARD_DIR}/port/npu/npu_model_scan.h"
+                "${BOARD_DIR}/port/npu/npu_payload.c"
+                "${BOARD_DIR}/port/npu/npu_payload.h"
+                "${BOARD_DIR}/port/npu/npu_arena.c"
+                "${BOARD_DIR}/port/npu/npu.h"
+        COMMENT "host c++ -> verify_vela_model (checks a model before it is flashed)"
+        VERBATIM)
+
+    add_custom_target(model-tools
+        DEPENDS "${CMAKE_BINARY_DIR}/tflite_strip_boundary"
+                "${CMAKE_BINARY_DIR}/verify_vela_model")
+else()
+    message(STATUS "grove: no host C++ compiler -- the `model-tools` target is "
+                   "unavailable (the firmware itself still builds)")
 endif()
 
 # --- Model flash target (issue #44) ------------------------------------------
@@ -707,14 +906,34 @@ endif()
 # This target does NOT depend on `shell`: making it rebuild or reflash the
 # firmware would defeat the point and burn cycles nobody asked for.
 #
-# GROVE_MODEL_ADDR must agree with cmds/cmd_nn.c's NN_MODEL_ADDR_DEFAULT minus
-# the flash read alias base (0x3A000000).  `nn open <addr>` overrides at
-# runtime, which is the escape hatch if they ever disagree.
-set(GROVE_MODEL_FILE
-    "${GROVE_SDK_ROOT}/model_zoo/tflm_mb_cls/qat_pruning_model_vela.tflite"
-    CACHE FILEPATH "Vela-compiled .tflite to flash with `--target flash-model`")
-set(GROVE_MODEL_ADDR "0xB7B000" CACHE STRING
-    "Flash offset for the model (0x3A000000 + this is what `nn open` wants)")
+# [!] THE LAYOUT IS RESERVATIONS, AND IT IS SEPARATE FROM WHAT IS BUILT.
+# The first version of this listed the three FILES and required all of them,
+# which made plain `--target flash` refuse on any tree where the detection model
+# -- which cannot be committed, being model-zoo licensed -- had not been built
+# by hand.  A gate that blocks the operation it is not protecting is a gate
+# somebody removes, and then nothing is protected.  So the partitions declare
+# ADDRESSES and SIZES, checked against each other with no files present at all,
+# and each flashing target names only the artifact it actually writes.
+#
+# The reservations are erase-block spans, so they are what a write can destroy
+# rather than what a file occupies.  firmware owns everything below the first
+# model; each model owns the blocks from its own start up to the next boundary.
+set(GROVE_FW_RESERVED "0xB70000" CACHE STRING
+    "Flash reserved for the firmware image (everything below the first model)")
+# 0xB7B000 + 0x1A5000 = 0xD20000, so this ends exactly on the detector's first
+# block.  Headroom over today's 1,704,672 B model: ~19 KB.
+set(GROVE_MODEL_CLS_RESERVED "0x1A5000" CACHE STRING
+    "Flash reserved for the classification model")
+# 0xD20000 + 0x30000 = 0xD50000.  Headroom over today's ~164 KB model: ~32 KB.
+set(GROVE_MODEL_DET_RESERVED "0x30000" CACHE STRING
+    "Flash reserved for the detection model")
+
+set(GROVE_FLASH_LAYOUT
+    "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/check_flash_partitions.py"
+    --flash-size "${GROVE_FLASH_SIZE}"
+    --partition "firmware:0x0:${GROVE_FW_RESERVED}"
+    --partition "model-cls:${GROVE_MODEL_CLS_ADDR}:${GROVE_MODEL_CLS_RESERVED}"
+    --partition "model-det:${GROVE_MODEL_DET_ADDR}:${GROVE_MODEL_DET_RESERVED}")
 
 # [!] The model is STAGED INTO THE BUILD DIR before being sent, and that copy is
 # not optional.  xmodem_send.py writes its preamble scratch file next to the
@@ -724,22 +943,78 @@ set(GROVE_MODEL_ADDR "0xB7B000" CACHE STRING
 # to configure the next build because the tree no longer matches the pinned
 # commit.  Found the hard way.
 set(GROVE_MODEL_STAGE "${CMAKE_BINARY_DIR}/model")
-add_custom_target(flash-model
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${GROVE_MODEL_STAGE}"
-    COMMAND "${CMAKE_COMMAND}" -E copy "${GROVE_MODEL_FILE}"
-            "${GROVE_MODEL_STAGE}/model.tflite"
-    COMMAND "${GROVE_VENV}/bin/python" "${GROVE_SDK_ROOT}/xmodem/xmodem_send.py"
-            --port=${GROVE_SERIAL_PORT}
-            --baudrate=${GROVE_SERIAL_BAUDRATE}
-            --protocol=xmodem
-            # ONE argument, quoted: the tool parses --model as a single
-            # "<file> <flash-position> <offset>" string and argparse rejects the
-            # trailing words if CMake splits them into separate argv entries.
-            "--model=${GROVE_MODEL_STAGE}/model.tflite ${GROVE_MODEL_ADDR} 0x00000"
-    USES_TERMINAL
-    COMMENT "xmodem -> model @${GROVE_MODEL_ADDR} (press reset when asked)")
 
+# [!] THE MODEL VERIFIER RUNS INSIDE THE FLASHING TARGET, not as a step the
+# README asks you to remember.  Without it a stale, malformed, partially
+# offloaded or arena-oversized model is written to the NOR -- costing an erase
+# cycle of a part rated for ~100k and leaving a feature that cannot work -- and
+# the only thing that ever notices is `nn open` refusing, on hardware, later.
+#
+# It runs on the STAGED COPY, and the staged copy is what gets sent, so there is
+# no window in which the file examined and the file transmitted could differ.
+# The layout check runs on the same staged file for the same reason.
+#
+# With no host C++ compiler the verifier cannot be built, and the target then
+# REFUSES rather than flashing unverified.  Skipping the check would be the
+# fail-open this whole arrangement exists to avoid.
+if(HOST_CXX)
+    set(GROVE_MODEL_VERIFY "${CMAKE_BINARY_DIR}/verify_vela_model")
+else()
+    set(GROVE_MODEL_VERIFY "")
+endif()
+
+function(grove_add_model_flash_target tgt part file addr verify_args what)
+    set(_staged "${GROVE_MODEL_STAGE}/${tgt}.tflite")
+
+    if(NOT GROVE_MODEL_VERIFY)
+        add_custom_target(${tgt}
+            COMMAND "${CMAKE_COMMAND}" -E echo
+                    "${tgt}: no host C++ compiler, so verify_vela_model cannot "
+                    "be built.  Refusing to flash a model this build cannot check."
+            COMMAND "${CMAKE_COMMAND}" -E false
+            COMMENT "${tgt} (unavailable: no host C++ compiler)")
+        return()
+    endif()
+
+    add_custom_target(${tgt}
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${GROVE_MODEL_STAGE}"
+        COMMAND "${CMAKE_COMMAND}" -E copy "${file}" "${_staged}"
+        # Everything below inspects and then sends exactly this one file.
+        COMMAND ${GROVE_FLASH_LAYOUT}
+                --image "firmware:${CMAKE_BINARY_DIR}/shell.img"
+                --image "${part}:${_staged}"
+                --writing "${part}"
+        COMMAND "${GROVE_MODEL_VERIFY}" "${_staged}" ${verify_args}
+        COMMAND "${GROVE_VENV}/bin/python" "${GROVE_SDK_ROOT}/xmodem/xmodem_send.py"
+                --port=${GROVE_SERIAL_PORT}
+                --baudrate=${GROVE_SERIAL_BAUDRATE}
+                --protocol=xmodem
+                # ONE argument, quoted: the tool parses --model as a single
+                # "<file> <flash-position> <offset>" string and argparse rejects
+                # the trailing words if CMake splits them into separate argv
+                # entries.
+                "--model=${_staged} ${addr} 0x00000"
+        USES_TERMINAL
+        COMMENT "verify + xmodem -> ${what} @${addr} (press reset when asked)")
+    add_dependencies(${tgt} model-tools)
+endfunction()
+
+grove_add_model_flash_target(flash-model-cls model-cls
+    "${GROVE_MODEL_CLS_FILE}" "${GROVE_MODEL_CLS_ADDR}" ""
+    "classification model")
+grove_add_model_flash_target(flash-model-det model-det
+    "${GROVE_MODEL_DET_FILE}" "${GROVE_MODEL_DET_ADDR}" "--blazeface"
+    "detection model")
+
+# `flash` names only the firmware.  The models are passed as --image so that a
+# model which has outgrown its slot is still caught here -- free coverage -- but
+# their absence is not an obstacle to updating the firmware.
 add_custom_target(flash
+    COMMAND ${GROVE_FLASH_LAYOUT}
+            --image "firmware:${CMAKE_BINARY_DIR}/shell.img"
+            --image "model-cls:${GROVE_MODEL_CLS_FILE}"
+            --image "model-det:${GROVE_MODEL_DET_FILE}"
+            --writing firmware
     COMMAND "${GROVE_VENV}/bin/python" "${GROVE_SDK_ROOT}/xmodem/xmodem_send.py"
             --port=${GROVE_SERIAL_PORT}
             --baudrate=${GROVE_SERIAL_BAUDRATE}

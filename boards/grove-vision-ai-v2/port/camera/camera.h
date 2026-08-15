@@ -102,9 +102,22 @@ const uint8_t *camera_raw_frame(void);
  * @brief  Start / stop continuous capture on the producer thread.
  *
  * camera_stream_start() returns once the first frame is on its way; it does not
- * wait for one.  camera_stream_stop() is SYNCHRONOUS: it returns only after the
- * producer has passed through the full stop sequence and gone idle, so a caller
- * that then detaches a sink cannot race an in-flight consume.
+ * wait for one.
+ *
+ * [!] camera_stream_stop() IS A SUCCESS-ONLY JOIN (issue #48).
+ *
+ * CAM_OK means the producer has been through the full stop sequence and is
+ * idle -- and only then may a caller detach a sink, free anything a sink points
+ * at, or release ownership of a device the sink was driving.
+ *
+ * ANY OTHER RETURN PROVES NOTHING, and CAM_ERR_TIMEOUT specifically means the
+ * producer is still running somewhere.  It used to be described as
+ * unconditionally synchronous, which was never quite true -- the wait is
+ * bounded -- and became actively dangerous once a sink could run an NPU
+ * inference inside consume().  On that path the camera enters an unrecoverable
+ * state and refuses everything afterwards, so the caller's job is simply to
+ * report it and hold on to whatever it owns: do NOT detach, do NOT tear down,
+ * do NOT release.
  */
 int camera_stream_start(void);
 int camera_stream_stop(void);

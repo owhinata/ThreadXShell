@@ -30,12 +30,12 @@
  * it) and invalidating outputs after it is too late (TFLM writes the arena
  * before Invoke() returns).
  *
- * FIELD OF VIEW.  The camera delivers 320x240 and the model wants a square
- * input, so the frame is CENTRE-CROPPED, not resized.  The vendor's resize is
- * a Helium routine (hx_lib_image_resize_..._helium) and linking it would put
- * predicated MVE in the image; a scalar resize is a thing to write later if the
- * crop's narrower field of view turns out to matter.  It is stated in the
- * output so nobody reads a score without knowing.
+ * FIELD OF VIEW.  The largest centred square of the frame -- 240x240 of the
+ * camera's 320x240 -- is SCALED into the input (issue #48).  It used to be a
+ * 128x128 centre CROP, a field of view so narrow the detector was nearly
+ * useless at any normal working distance.  The resize is scalar and lives in
+ * port/npu/nn_preproc.c, where it is host-tested; the vendor's is a Helium
+ * routine and linking it would put predicated MVE in the image.
  */
 #include "cli.h"
 
@@ -46,9 +46,12 @@
 
 #include "npu.h"
 #include "npu_hw.h"
+#include "nn_overlay.h"
+#include "nn_preproc.h"
 #include "blazeface.h"
 #include "camera.h"
 #include "cam_imx219.h"
+#include "cam_lcd_sink.h"
 
 #include "tx_api.h"        /* tx_time_get(): ThreadX ticks, 1 ms here */
 
@@ -102,22 +105,20 @@ static uint32_t nn_model_addr;
 /*
  * Camera frame -> input tensor.
  *
- * The frame is 320x240 PLANAR B/G/R (that is what WDMA3 writes -- see the
- * camera port); the model wants interleaved RGB.  Both conversions happen in
- * this one pass, along with the centre crop and the uint8->int8 shift the
- * quantisation asks for.
+ * The arithmetic is nn_preproc's (issue #48): crop the largest centred
+ * rectangle with the input's aspect ratio, scale it in, convert planar B/G/R to
+ * interleaved RGB, and shift uint8 to int8.  What is left here is the part that
+ * needs a shell instance to complain to.
  *
- * No vectorisation here even by accident: the file carries
- * -fno-tree-vectorize, for the reason at the top of board.cmake's tflm_obj
- * block.
+ * @param geom  filled in, because the caller needs the same geometry to report
+ *              the field of view and to map boxes back to frame pixels -- one
+ *              transform, computed once.
  */
 static int nn_fill_input(struct cli_instance *sh, const uint8_t *raw,
-                         const struct npu_tensor *in)
+                         const struct npu_tensor *in,
+                         struct nn_preproc_geom *geom)
 {
-	const uint32_t fw = CAM_FRAME_WIDTH, fh = CAM_FRAME_HEIGHT;
-	const uint32_t plane = fw * fh;
-	uint32_t w, h, x0, y0;
-	uint8_t *dst = (uint8_t *)in->data;
+	uint32_t w, h;
 
 	if (in->rank != 4 || in->dims[3] != 3) {
 		cli_error(sh, "nn: model input is not HxWx3 (rank %u)\r\n", in->rank);
@@ -125,10 +126,14 @@ static int nn_fill_input(struct cli_instance *sh, const uint8_t *raw,
 	}
 	h = (uint32_t)in->dims[1];
 	w = (uint32_t)in->dims[2];
-	if (w == 0u || h == 0u || w > fw || h > fh) {
-		cli_error(sh, "nn: %lux%lu input does not fit a %lux%lu frame\r\n",
+
+	/* No "does it fit the frame" test any more: the input is SCALED, so an
+	 * input larger than the frame is an ordinary upscale.  The old code
+	 * refused it. */
+	if (nn_preproc_geom(CAM_FRAME_WIDTH, CAM_FRAME_HEIGHT, w, h, geom) != 0) {
+		cli_error(sh, "nn: cannot fit a %lux%lu input to a %ux%u frame\r\n",
 		          (unsigned long)w, (unsigned long)h,
-		          (unsigned long)fw, (unsigned long)fh);
+		          CAM_FRAME_WIDTH, CAM_FRAME_HEIGHT);
 		return -1;
 	}
 	if (in->bytes < (size_t)w * h * 3u) {
@@ -136,26 +141,25 @@ static int nn_fill_input(struct cli_instance *sh, const uint8_t *raw,
 		return -1;
 	}
 
-	x0 = (fw - w) / 2u;
-	y0 = (fh - h) / 2u;
-
-	for (uint32_t y = 0; y < h; y++) {
-		const uint8_t *row = raw + (size_t)(y0 + y) * fw + x0;
-
-		for (uint32_t x = 0; x < w; x++) {
-			uint8_t b = row[x];
-			uint8_t g = row[x + plane];
-			uint8_t r = row[x + 2u * plane];
-
-			/* uint8 -> int8 by shifting the range, which is what an int8 model
-			 * quantised around zero expects.  Done as a wrap on purpose: the
-			 * bit pattern is the answer, the arithmetic is not. */
-			*dst++ = (uint8_t)(r - 128u);
-			*dst++ = (uint8_t)(g - 128u);
-			*dst++ = (uint8_t)(b - 128u);
-		}
+	if (nn_preproc_fill(raw, CAM_FRAME_WIDTH, CAM_FRAME_HEIGHT, geom,
+	                    (uint8_t *)in->data) != 0) {
+		cli_error(sh, "nn: preprocessing refused the frame\r\n");
+		return -1;
 	}
 	return 0;
+}
+
+/* The field of view, printed with every result: a score read without knowing
+ * what the model was shown is not a result. */
+static void nn_print_fov(struct cli_instance *sh,
+                         const struct nn_preproc_geom *g)
+{
+	cli_print(sh, "    %lux%lu centre crop of %ux%u at +%lu+%lu, scaled to "
+	              "%lux%lu\r\n",
+	          (unsigned long)g->w, (unsigned long)g->h,
+	          CAM_FRAME_WIDTH, CAM_FRAME_HEIGHT,
+	          (unsigned long)g->x, (unsigned long)g->y,
+	          (unsigned long)g->dst_w, (unsigned long)g->dst_h);
 }
 
 /* --- reporting ----------------------------------------------------------- */
@@ -361,7 +365,8 @@ static int cmd_nn_close(struct cli_instance *sh, int argc, char **argv)
  * the camera/NPU concurrency question answered by the layer that owns it.
  */
 static int nn_capture_and_fill(struct cli_instance *sh,
-                               const struct npu_tensor *in)
+                               const struct npu_tensor *in,
+                               struct nn_preproc_geom *geom)
 {
 	int rc = camera_capture();
 
@@ -369,12 +374,13 @@ static int nn_capture_and_fill(struct cli_instance *sh,
 		cli_error(sh, "nn: capture failed (%d)\r\n", rc);
 		return -1;
 	}
-	return nn_fill_input(sh, camera_raw_frame(), in);
+	return nn_fill_input(sh, camera_raw_frame(), in, geom);
 }
 
 static int cmd_nn_run(struct cli_instance *sh, int argc, char **argv)
 {
 	struct npu_tensor in, out;
+	struct nn_preproc_geom geom;
 	uint32_t t0, t1;
 	int rc;
 
@@ -396,7 +402,7 @@ static int cmd_nn_run(struct cli_instance *sh, int argc, char **argv)
 		return -1;
 	}
 
-	if (nn_capture_and_fill(sh, &in) != 0) {
+	if (nn_capture_and_fill(sh, &in, &geom) != 0) {
 		nn_release();
 		return -1;
 	}
@@ -418,10 +424,8 @@ static int cmd_nn_run(struct cli_instance *sh, int argc, char **argv)
 		return -1;
 	}
 
-	cli_print(sh, "nn: inference %lu ms (centre crop %ldx%ld of %ux%u; "
-	              "field of view is narrower than the preview)\r\n",
-	          (unsigned long)(t1 - t0), (long)in.dims[2], (long)in.dims[1],
-	          CAM_FRAME_WIDTH, CAM_FRAME_HEIGHT);
+	cli_print(sh, "nn: inference %lu ms\r\n", (unsigned long)(t1 - t0));
+	nn_print_fov(sh, &geom);
 
 	/* The outputs are already visible: the port invalidated the whole arena
 	 * once completion was confirmed, before TFLM resumed. */
@@ -480,6 +484,7 @@ static int cmd_nn_detect(struct cli_instance *sh, int argc, char **argv)
 	struct npu_tensor in;
 	struct npu_tensor outs[NN_MAX_OUTPUTS];
 	struct bf_det det[BF_MAX_DET];
+	struct nn_preproc_geom geom;
 	unsigned n_out, i;
 	uint32_t t0, t1;
 	long peak;
@@ -518,7 +523,7 @@ static int cmd_nn_detect(struct cli_instance *sh, int argc, char **argv)
 			goto out;
 		}
 
-	if (nn_capture_and_fill(sh, &in) != 0)
+	if (nn_capture_and_fill(sh, &in, &geom) != 0)
 		goto out;
 
 	/* No cache maintenance here either -- see the note in cmd_nn_run(). */
@@ -540,26 +545,28 @@ static int cmd_nn_detect(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	/* Integers only, all the way down: no %f on a path that would otherwise
-	 * drag float formatting into a detection report.  Boxes are in pixels of
-	 * the CROP, and the crop's origin in the frame is printed with them so the
-	 * two coordinate systems are never confused. */
+	 * drag float formatting into a detection report. */
 	cli_print(sh, "nn: detect %lu ms, %d face(s)\r\n",
 	          (unsigned long)(t1 - t0), nd);
-	cli_print(sh, "    %ldx%ld centre crop of %ux%u at +%lu+%lu; field of view "
-	              "is narrower than the preview\r\n",
-	          (long)in.dims[2], (long)in.dims[1],
-	          CAM_FRAME_WIDTH, CAM_FRAME_HEIGHT,
-	          (unsigned long)((CAM_FRAME_WIDTH - (uint32_t)in.dims[2]) / 2u),
-	          (unsigned long)((CAM_FRAME_HEIGHT - (uint32_t)in.dims[1]) / 2u));
+	nn_print_fov(sh, &geom);
 
 	for (int k = 0; k < nd; k++) {
-		long w = (long)(det[k].w * (float)in.dims[2]);
-		long h = (long)(det[k].h * (float)in.dims[1]);
+		struct nn_preproc_box b;
 
+		/* [!] FRAME pixels, through the same transform the overlay draws
+		 * with (issue #48).  They used to be pixels of the crop, which
+		 * made the console and the panel two coordinate systems that had
+		 * to be reconciled by hand -- and the printed numbers were the
+		 * ones that could not be checked against anything. */
+		if (nn_preproc_box(&geom, det[k].x, det[k].y, det[k].w,
+		                   det[k].h, &b) != 0) {
+			cli_print(sh, "  #%d  box off-frame  score %ld/1000\r\n",
+			          k + 1, (long)(det[k].score * 1000.0f));
+			continue;
+		}
 		cli_print(sh, "  #%d  box %ld,%ld  %ldx%ld px  score %ld/1000\r\n",
-		          k + 1,
-		          (long)(det[k].x * (float)in.dims[2]),
-		          (long)(det[k].y * (float)in.dims[1]), w, h,
+		          k + 1, (long)b.x0, (long)b.y0,
+		          (long)(b.x1 - b.x0), (long)(b.y1 - b.y0),
 		          (long)(det[k].score * 1000.0f));
 	}
 
@@ -580,6 +587,212 @@ static int cmd_nn_detect(struct cli_instance *sh, int argc, char **argv)
 out:
 	nn_release();
 	return rc;
+}
+
+/* --- live preview with boxes (issue #48) ---------------------------------- */
+
+/*
+ * `nn preview`: the camera on the panel, with the faces drawn on it.
+ *
+ * The work happens on the CAMERA PRODUCER THREAD, inside the sink's consume()
+ * (port/npu/nn_overlay.c).  This function only starts it, waits, and stops it.
+ * That is why the whole body is bracketed by the ownership gate: the gate is a
+ * lease on the NPU held by this command while another thread uses it, which is
+ * what keeps `nn close` from dismantling an interpreter mid-frame.
+ *
+ * [!] THE TEARDOWN IS NOT SYMMETRIC WITH THE SETUP, on purpose.  A stop that
+ * does not return CAM_OK means the producer is still running, so the sink is
+ * NOT detached and the gate is NOT released -- see camera.h.  Leaving `nn`
+ * leased until reboot is the correct trade against a producer executing inside
+ * a sink somebody just unlinked.
+ */
+static int cmd_nn_preview(struct cli_instance *sh, int argc, char **argv)
+{
+	struct npu_tensor in;
+	struct npu_tensor outs[NN_MAX_OUTPUTS];
+	struct nn_overlay_stats ns;
+	struct camera_stats st;
+	uint32_t frames = 0u;   /* 0 = until Ctrl+C, as `camera preview` */
+	uint32_t before;
+	unsigned n_out, i;
+	ULONG t0, t1, ticks;
+	int rc, stop_rc;
+
+	if (argc > 1 && cli_parse_u32(argv[1], &frames) != 0) {
+		cli_error(sh, "nn: bad frame count '%s'\r\n", argv[1]);
+		return -1;
+	}
+
+	if (!nn_try_acquire()) {
+		cli_error(sh, "nn: busy\r\n");
+		return -1;
+	}
+	if (!nn_open_done) {
+		cli_error(sh, "nn: no model open (nn open det)\r\n");
+		nn_release();
+		return -1;
+	}
+
+	/*
+	 * [!] EVERY CHECK BEFORE THE STREAM STARTS.
+	 *
+	 * A preview that starts and then fails on every frame is a panel
+	 * showing a live picture with no boxes and no explanation -- the exact
+	 * failure this whole command exists to make visible.  So the input
+	 * quantisation and the output shapes are settled here, where refusing
+	 * costs nothing and can say why.
+	 */
+	if (npu_input(&in) != NPU_OK) {
+		cli_error(sh, "nn: no input tensor\r\n");
+		nn_release();
+		return -1;
+	}
+	if (nn_input_quant_ok(sh, &in) != 0) {
+		nn_release();
+		return -1;
+	}
+	n_out = npu_output_count();
+	if (n_out > NN_MAX_OUTPUTS) {
+		cli_error(sh, "nn: model has %u outputs, this command reads %u\r\n",
+		          n_out, (unsigned)NN_MAX_OUTPUTS);
+		nn_release();
+		return -1;
+	}
+	for (i = 0; i < n_out; i++)
+		if (npu_output(i, &outs[i]) != NPU_OK) {
+			cli_error(sh, "nn: output %u is unreadable\r\n", i);
+			nn_release();
+			return -1;
+		}
+	if (!blazeface_shapes_ok(outs, n_out)) {
+		cli_error(sh, "nn: the open model is not BlazeFace-shaped "
+		              "(nn open det)\r\n");
+		nn_release();
+		return -1;
+	}
+
+	rc = cam_lcd_sink_attach(nn_overlay_arm());
+	if (rc == CAM_ERR_BUSY) {
+		cli_error(sh, "nn: a preview is already running\r\n");
+		nn_release();
+		return -1;
+	}
+	if (rc != CAM_OK) {
+		cli_error(sh, "nn: panel attach failed (%d)\r\n", rc);
+		nn_release();
+		return -1;
+	}
+
+	rc = camera_stream_start();
+	if (rc != CAM_OK) {
+		/*
+		 * [!] CAM_ERR_BUSY IS NOT "NOTHING HAPPENED".  It is the one
+		 * start failure that means a stream is ALREADY RUNNING -- and
+		 * this sink is attached to it, so a producer can be inside
+		 * consume() right now.  Detaching would unlink a sink mid
+		 * delivery and releasing the gate would let `nn close` dismantle
+		 * an interpreter the producer is using.  Every other failure
+		 * (bring-up, datapath) leaves no producer, so the sink comes
+		 * back off normally.
+		 *
+		 * Today the exclusive attach above makes this unreachable --
+		 * whoever owns the stream owns the sink.  It is handled anyway
+		 * because "unreachable" here rests on another module's
+		 * exclusivity rather than on anything checked at this line.
+		 */
+		cli_error(sh, "nn: stream start failed (%d)\r\n", rc);
+		if (rc != CAM_ERR_BUSY) {
+			(void)cam_lcd_sink_detach();
+			nn_release();
+		} else {
+			cli_error(sh, "nn: a stream is already running; nn stays "
+			              "held\r\n");
+		}
+		return -1;
+	}
+
+	camera_stream_stats(&st);
+	before = st.frames;
+	t0 = tx_time_get();
+
+	/* Only waiting happens here: capture, inference and the blit are all on
+	 * the producer.  One poll per tick notices Ctrl+C and costs nothing
+	 * against a ~115 ms frame. */
+	for (;;) {
+		if (cli_cancel_requested(sh))
+			break;
+		camera_stream_stats(&st);
+		if (!st.streaming)
+			break;                      /* the producer gave up */
+		if (frames != 0u && (st.frames - before) >= frames)
+			break;
+		if (cli_sleep(sh, 1u) != 0)
+			break;
+	}
+
+	t1 = tx_time_get();
+	ticks = t1 - t0;
+
+	/* [!] BEFORE the stop, always: it is what stops the frame in flight
+	 * from starting an inference the join would then have to wait for. */
+	nn_overlay_request_stop();
+	stop_rc = camera_stream_stop();
+
+	if (stop_rc != CAM_OK) {
+		/*
+		 * The producer never acknowledged.  Detaching now would unlink
+		 * a sink it may be inside, so nothing is torn down and the gate
+		 * is kept -- the camera has poisoned itself and says so.
+		 */
+		cli_error(sh, "nn: the camera did not stop (%d); it is now "
+		              "unusable until reboot, and nn stays held\r\n",
+		          stop_rc);
+		return -1;
+	}
+
+	(void)cam_lcd_sink_detach();
+	nn_release();
+
+	if (cli_cancel_requested(sh)) {
+		/* Cancelled: the shared core discards output produced while
+		 * cancel_req is set, so a summary would never arrive.  The
+		 * dispatcher's "^C" is the feedback, as in `camera preview`. */
+		return 0;
+	}
+
+	camera_stream_stats(&st);
+	nn_overlay_stats(&ns);
+
+	if (st.fault != NULL) {
+		cli_error(sh, "nn: preview stopped: %s\r\n", st.fault);
+		return -1;
+	}
+
+	{
+		uint32_t got = st.frames - before;
+		uint32_t ms = (uint32_t)((ticks * 1000u) /
+		                         TX_TIMER_TICKS_PER_SECOND);
+
+		cli_print(sh, "%lu frame(s) in %lu ms", (unsigned long)got,
+		          (unsigned long)ms);
+		if (ms != 0u)
+			cli_print(sh, " = %lu.%lu fps",
+			          (unsigned long)(got * 1000u / ms),
+			          (unsigned long)((got * 10000u / ms) % 10u));
+		cli_print(sh, "\r\n");
+		cli_print(sh, "%lu inference(s), %lu face(s) drawn, last %lu ms\r\n",
+		          (unsigned long)ns.inferences,
+		          (unsigned long)ns.detections,
+		          (unsigned long)ns.last_ms);
+		/* Both counts matter and neither is an error on its own: frames
+		 * are skipped by a pending stop, and the panel being busy is a
+		 * dropped frame rather than a failure. */
+		if (ns.skipped || ns.errors)
+			cli_print(sh, "%lu frame(s) skipped, %lu refused\r\n",
+			          (unsigned long)ns.skipped,
+			          (unsigned long)ns.errors);
+	}
+	return 0;
 }
 
 static int cmd_nn_thresh(struct cli_instance *sh, int argc, char **argv)
@@ -624,6 +837,9 @@ CLI_SUBCMD_SET_CREATE(nn_subcmds,
 	CLI_CMD(close, NULL, "release the model and the NPU",           cmd_nn_close),
 	CLI_CMD(run,   NULL, "capture one frame and classify it",       cmd_nn_run),
 	CLI_CMD(detect, NULL, "capture one frame and find faces",       cmd_nn_detect),
+	CLI_CMD_ARG_USAGE(preview, NULL,
+	                  "live preview with face boxes, Ctrl+C to stop",
+	                  "[frames]", cmd_nn_preview, 1, 1),
 	CLI_CMD_ARG_USAGE(thresh, NULL, "detection score threshold",
 	                  "[<1..999>]", cmd_nn_thresh, 1, 1),
 	CLI_SUBCMD_SET_END);

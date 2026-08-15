@@ -437,6 +437,21 @@ add_library(tflm_obj OBJECT
     "${TFLM}/tensorflow/compiler/mlir/lite/core/api/error_reporter.cc"
     "${TFLM}/tensorflow/compiler/mlir/lite/schema/schema_utils.cc")
 
+# [!] The inference timeout has ONE definition, and it is in the C header
+# (issue #48).  Parsed rather than restated so the two cannot drift: the value
+# is load-bearing for camera.c's stop join, which budgets two of these waits.
+# A configure-time FATAL_ERROR is the point -- silently falling back to a
+# default here would put the number back to being written twice.
+file(STRINGS "${BOARD_DIR}/port/npu/npu_hw.h" _npu_timeout_line
+     REGEX "^#define[ \t]+NPU_INFERENCE_TIMEOUT_TICKS[ \t]+[0-9]+u?[ \t]*$")
+if(NOT _npu_timeout_line)
+    message(FATAL_ERROR
+            "could not find NPU_INFERENCE_TIMEOUT_TICKS in port/npu/npu_hw.h; "
+            "it is the single source of truth for the ethos-u inference wait")
+endif()
+string(REGEX REPLACE "^#define[ \t]+NPU_INFERENCE_TIMEOUT_TICKS[ \t]+([0-9]+u?)[ \t]*$"
+       "\\1" GROVE_NPU_INFERENCE_TIMEOUT_TICKS "${_npu_timeout_line}")
+
 target_link_libraries(tflm_obj PUBLIC bsp_iface)
 target_include_directories(tflm_obj PUBLIC
     "${TFLM}"
@@ -453,7 +468,13 @@ target_compile_definitions(tflm_obj PUBLIC
     # Finite, in ThreadX ticks -- npu_rtos.c defines the unit.  The header
     # would otherwise default this to "wait forever" and a lost NPU interrupt
     # would suspend the calling shell job with no way back.
-    ETHOSU_SEMAPHORE_WAIT_INFERENCE=5000u)
+    #
+    # [!] PARSED from port/npu/npu_hw.h, not written here (issue #48).  The
+    # value used to exist in both places with only this one live, so the
+    # header's constant was dead and would have drifted the first time somebody
+    # tuned it -- and since #48 the number is load-bearing for the camera's
+    # stop join, which reasons about two of these waits.
+    ETHOSU_SEMAPHORE_WAIT_INFERENCE=${GROVE_NPU_INFERENCE_TIMEOUT_TICKS})
 # [!] -fno-tree-vectorize on the WHOLE set, not just the pixel loops.
 # -mcpu=cortex-m55 makes MVE available to every translation unit, so
 # auto-vectorisation can appear anywhere -- registering no CPU kernels bounds
@@ -499,6 +520,8 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/npu/npu_model_scan.cc"
     "${BOARD_DIR}/port/npu/npu_hw.c"
     "${BOARD_DIR}/port/npu/npu_flash.c"
+    "${BOARD_DIR}/port/npu/nn_preproc.c"
+    "${BOARD_DIR}/port/npu/nn_overlay.c"
     # Model-specific post-processing (issue #45).  Above npu.h, which stays
     # model-agnostic; it sees tensor DESCRIPTORS and not the interpreter, which
     # is what lets the host test drive the real decoder.
@@ -581,9 +604,21 @@ target_compile_options(shell_objs PRIVATE -Os)
 # [!] PER TRANSLATION UNIT, and blazeface.c needs its own entry: the option on
 # tflm_obj is scoped to that target and does not reach anything here.  The
 # decoder's 896-anchor loops are precisely the shape that would vectorise.
+#
+# [!] lcd_st7789.c BELONGS ON THIS LIST and was missing (issue #48).  Its
+# little-endian staging pass is a 76,800-iteration byte-swap over a uint16
+# buffer -- precisely the shape the gate bars -- and #48 adds a rectangle
+# rasteriser next to it.  Nothing unsafe ever shipped, because the scan is
+# fail-closed, but the omission was luck rather than design.
+#
+# cmd_nn.c is deliberately NOT here: its header used to claim it carried this
+# option, which was false.  The claim is made true by deletion -- #48 moved the
+# pixel loop out into nn_preproc.c, which is on the list.
 set_source_files_properties(
     "${BOARD_DIR}/port/camera/cam_convert.c"
     "${BOARD_DIR}/port/npu/models/blazeface.c"
+    "${BOARD_DIR}/port/npu/nn_preproc.c"
+    "${BOARD_DIR}/port/lcd/lcd_st7789.c"
     TARGET_DIRECTORY shell_objs
     PROPERTIES COMPILE_OPTIONS "-fno-tree-vectorize")
 target_link_options(shell PRIVATE

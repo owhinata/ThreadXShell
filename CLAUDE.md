@@ -446,14 +446,42 @@ git branch -d feat/<N>-short-description
   **`is_variable()` は拒否**（`AllocateVariables()` がシリアライズ済みバッファでも
   アリーナ確保で上書きする）。
   NPU bring-up は SEC_ONLY 経路に無いので自前（読み戻し + fail-closed）。詳細は board README。
-- **顔検出（`nn detect` / #45）**: BlazeFace-front 128 を Ethos-U55 で。
+- **ライブ推論オーバーレイ（`nn preview` / #48）**: 推論は**カメラ producer スレッド上・
+  sink の `consume()` 内**で走る（WDMA3 の再 arm は全 sink の consume 後なので raw フレームは
+  安定 = 枠は必ず表示中のフレームのもの）。順序は**推論（パネルガード無し）→ ガードを 1 回
+  取って stage/draw/present**（`lcd_blit_le_overlay()` の callback は staging と DMA の間。
+  ガードは再帰的なので再入は deadlock ではなく**進行中トランザクションの破壊**になる）。
+  [!] **`camera_stream_stop()` は成功時のみ join を保証する**（`CAM_OK` = producer 停止済み。
+  timeout は何も証明しない）。**全ての呼び出し元は `CAM_OK` の時だけ detach する**
+  （`camera preview` も同様。従来は無条件 detach で、これは既存のバグだった）。
+  未確認の join は **`CAM_ST_LOST`**（**再起動まで全ハードウェア操作を拒否**。
+  `CAM_ST_FAULTED` は「次の bring-up で作り直す」= ここでは最悪の動作なので使えない）で、
+  この経路では **detach も teardown も `nn` gate 解放もしない**（overlay/sink の状態が
+  全て静的だから成立する）。overlay の stop-pending は **join 要求より前に**立て、
+  前処理前 / invoke 直前 / 推論後の 3 点で見る（実行中の invoke は取り消せない）。
+  **推論タイムアウトの定義は `port/npu/npu_hw.h` の 1 箇所**（1000 ticks。board.cmake が
+  parse する。従来は 2 箇所に書かれ片方が dead だった）。producer スタックは **8 KiB**
+  （`Invoke()` を載せたため。実測 high-water で確認する）。
+  **[!] EPK は 31/32 に達する**（camera 26 + UART0 1 + LCD 2 + QSPI/U55 2）。
+  `nn run` はパネルを上げないので、5 者が同時に載るのは `nn preview` が初。
+- **顔検出（`nn detect` / #45, #48）**: BlazeFace-front 128 を Ethos-U55 で。
   **op resolver は `<1>` のまま維持する。[!] 理由は「CPU op がキャッシュ的に危険」ではない**
   （#46 で消えた） — **CMSIS-NN（= Helium）を持ち込まない / Vela が全面 offload していない
   モデルを `AllocateTensors` でうるさく落とす**という設計判断。境界の型変換 5 個
   （先頭 QUANTIZE + 末尾 DEQUANTIZE 4）は**ファイル側で剥がす**
   （`scripts/tflite_strip_boundary.cc`。テンソルは削除せず孤児のまま = 番号の振り直しが不要）。
   剥がすと Vela は **CPU operators = 0**。入力量子化 scale 1/255・zp -128 は
-  `nn_fill_input()` の `pixel - 128` と一致し、`nn detect` は入口でそれを**検査して拒否する**。
+  前処理の `pixel - 128` と一致し、`nn detect` / `nn preview` は入口でそれを**検査して拒否する**。
+  **[!] 入力は 240x240（フレーム中央の最大正方形）を「スケール」する**（#48。従来は 128x128 の
+  ただの中央 crop で、実用距離では検出できないほど画角が狭かった）。前処理は
+  `port/npu/nn_preproc.c`（half-pixel 中心の bilinear・固定小数・**ホストテスト必須**）。
+  **[!] サンプリングは半ピクセル項を持ち、箱の「辺」は持たない** — 同一の変換の
+  2 つの表現で、辺に sampling の規約を当てると全部の箱が半ソースピクセルずれる
+  （顔相手には見えない）。**負座標は数学的 floor**（C の 0 方向切り捨ては upscale で 1 ずれる）。
+  `nn detect` の箱は**フレーム座標**で表示する（overlay と同じ関数を通すので
+  コンソールとパネルが食い違わない）。
+  **モデルが見るのは生の planar フレームで、パネルに出ている絵ではない**
+  （WB / gamma / saturation はパネル向けの調整。gamma 付きを食わせる案は別実験）。
   **vela は `requirements.txt` で pin**（5.1.0）し `build/<board>/venv` に同居。
   ゲートは `scripts/verify_vela_model.cc`（**ファームの `npu_payload.c` と `npu_arena.c` を
   そのままリンク**するので、ホストの答えと `npu_open()` の答えがずれない）。
@@ -461,8 +489,10 @@ git branch -d feat/<N>-short-description
   実績 MobileNet と**ビット一致** / arch 1.0.6。
   **ホストゲートのアリーナ値は実機より ~0.1% 大きく出る**（64 bit ホストはポインタが 8 B）が
   過大＝安全側なので補正しない。
-  **[!] score が毎回 775/1000 で固定に見えるのは正常** — 8x8 群のスコアは zp 126 / scale 1.2247 で
-  `q=127` の 1.2247 が上限、`sigmoid(1.2247)=0.775`。デコーダではなくモデルの量子化の天井。
+  **[!] score が 775/1000 で固定に見えたら 8x8 群の天井**（zp 126 / scale 1.2247 で
+  `q=127` の 1.2247 が上限、`sigmoid(1.2247)=0.775`。デコーダではなくモデルの量子化）。
+  **#48 以降は通常こちらではない** — 画角が広がって顔が入力上で小さくなり、細かい 16x16 群
+  （scale 0.036937 / zp 49、上限 2881）が拾うのでスコアは動く（実測 peak 1292 / score 781）。
   **[!] フラッシュ配置は「予約」で宣言し、検査する**: `GROVE_MODEL_{CLS,DET}_{FILE,ADDR,RESERVED}`
   （1 個の無名アドレスを使い回さない。アドレスは cmd_nn.c へコンパイル定義で渡し
   `nn open cls|det` と同一）。`cmake/check_flash_partitions.py` は**予約どうしの非重複を

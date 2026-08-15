@@ -287,6 +287,20 @@ static int bf_decode_group(const struct npu_tensor *box,
 	return nkept;
 }
 
+int blazeface_shapes_ok(const struct npu_tensor *outs, unsigned n)
+{
+	if (outs == NULL)
+		return 0;
+	/* The same four lookups blazeface_decode() does, and deliberately the
+	 * same code path rather than a second list of shapes to keep in step:
+	 * a predicate that could disagree with the decoder would be worse than
+	 * no predicate at all. */
+	return bf_find(outs, n, BF_A512, BF_BOX_STRIDE) != NULL &&
+	       bf_find(outs, n, BF_A512, 1) != NULL &&
+	       bf_find(outs, n, BF_A384, BF_BOX_STRIDE) != NULL &&
+	       bf_find(outs, n, BF_A384, 1) != NULL;
+}
+
 int blazeface_decode(const struct npu_tensor *outs, unsigned n,
                      struct bf_det *out, int max)
 {

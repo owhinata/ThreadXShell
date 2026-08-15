@@ -294,7 +294,10 @@ static int cmd_camera_preview(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	}
 
-	rc = cam_lcd_sink_attach();
+	/* No overlay: a plain preview stays a plain preview.  It is an argument
+	 * rather than a mode so that `nn preview`'s boxes can never be inherited
+	 * by this command (issue #48). */
+	rc = cam_lcd_sink_attach(NULL);
 	if (rc == CAM_ERR_BUSY) {
 		cli_error(sh, "camera: preview already running\r\n");
 		return 1;
@@ -306,7 +309,12 @@ static int cmd_camera_preview(struct cli_instance *sh, int argc, char **argv)
 
 	rc = camera_stream_start();
 	if (rc != CAM_OK) {
-		(void)cam_lcd_sink_detach();
+		/* CAM_ERR_BUSY means a stream is already running with this sink
+		 * attached, so a producer may be inside consume() -- detaching
+		 * there would unlink a sink mid delivery.  See the same guard in
+		 * `nn preview` (issue #48). */
+		if (rc != CAM_ERR_BUSY)
+			(void)cam_lcd_sink_detach();
 		cam_report(sh, "stream start", rc);
 		return 1;
 	}
@@ -335,10 +343,21 @@ static int cmd_camera_preview(struct cli_instance *sh, int argc, char **argv)
 	t1 = tx_time_get();
 	ticks = t1 - t0;
 
-	/* Stop is SYNCHRONOUS, so by the time it returns the producer is idle
-	 * and detaching cannot race an in-flight consume. */
+	/*
+	 * [!] DETACH ONLY ON A CONFIRMED STOP (issue #48).
+	 *
+	 * This used to detach unconditionally, under a comment asserting that
+	 * the stop was synchronous.  The stop's wait is BOUNDED, so a timeout
+	 * means the producer is still running -- and unlinking a sink it may be
+	 * inside is the one thing the pipeline cannot survive, because publish()
+	 * has already pre-pinned this sink and called consume() with the lock
+	 * released.  The camera poisons itself on that path and refuses
+	 * everything afterwards, so there is nothing to clean up here and
+	 * nothing that would be safe to do.
+	 */
 	rc = camera_stream_stop();
-	(void)cam_lcd_sink_detach();
+	if (rc == CAM_OK)
+		(void)cam_lcd_sink_detach();
 
 	if (cli_cancel_requested(sh)) {
 		/* Cancelled.  Silent on purpose, as in `lcd loop`: the shared
@@ -402,6 +421,12 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 	cli_print(sh, "sink lcd : %lu shown, %lu dropped, %lu busy, %lu err\r\n",
 	          (unsigned long)sk.delivered, (unsigned long)sk.dropped,
 	          (unsigned long)sk.busy, (unsigned long)sk.errors);
+	/* Only ever non-zero after an `nn preview`: a frame whose inference was
+	 * refused is still SHOWN, just without boxes, so it counts here and not
+	 * as a sink error. */
+	if (sk.overlay_errors != 0u)
+		cli_print(sh, "overlay  : %lu frame(s) shown without boxes\r\n",
+		          (unsigned long)sk.overlay_errors);
 	if (st.fault != NULL)
 		cli_print(sh, "fault    : %s\r\n", st.fault);
 	return 0;

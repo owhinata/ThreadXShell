@@ -58,7 +58,20 @@
  * hardware before trimming it, which is why it is a named constant.
  */
 #define CAM_PRODUCER_PRIO   10u
-#define CAM_PRODUCER_STACK  4096u
+/*
+ * [!] 8 KiB, not 4, since issue #48: this thread now runs INFERENCE.
+ *
+ * A sink's consume() may call TFLM's Invoke() -- the whole interpreter plus the
+ * ethos-u driver plus the BlazeFace decoder -- and that call chain has only
+ * ever run on a 4 KiB shell or background-job stack.  The producer's own peak
+ * was measured at 568 B before this, so the old allocation was sized for a
+ * thread that did almost nothing.
+ *
+ * This is a STARTING allocation, not a proof.  `thread` reports the high-water
+ * mark from ThreadX's fill pattern; the acceptance test is that mark with real
+ * margin, measured on the success path and on both cancellation paths.
+ */
+#define CAM_PRODUCER_STACK  8192u
 
 /*
  * These stay HERE and not in shell/include/cli_config.h.  That header is the
@@ -89,6 +102,25 @@ _Static_assert(CAM_PRODUCER_STACK >= 1024u,
  * so 2 seconds is "something is wrong", not "the exposure is long".
  */
 #define CAM_FRAME_TIMEOUT_TICKS (2u * TX_TIMER_TICKS_PER_SECOND)
+
+/*
+ * How long camera_stream_stop() waits for the producer to acknowledge.
+ *
+ * [!] THIS IS NOT A CORRECTNESS PARAMETER (issue #48).  It used to be, back
+ * when a timeout was followed by an unconditional detach -- and it was already
+ * too short for that job, since a sink may now run an NPU inference inside
+ * consume().  Correctness moved to CAM_ST_LOST: whatever this number is, an
+ * unacknowledged stop poisons the camera instead of racing the producer.
+ *
+ * So it only has to be long enough that a HEALTHY system never reaches it.
+ * The producer's worst iteration after a stop request is bounded by the pieces
+ * it can wait on -- up to two NPU semaphore waits (the ethos-u driver takes it
+ * a second time on its timeout/interrupt race path) at NPU_INFERENCE_TIMEOUT_
+ * TICKS each, plus the panel's DMA timeout, plus the vendor quiesce -- and the
+ * frame wait itself is short-circuited by the semaphore the stop posts.  Six
+ * seconds clears that sum with room; a real inference is 13 ms.
+ */
+#define CAM_STOP_JOIN_TICKS (6u * TX_TIMER_TICKS_PER_SECOND)
 
 /*
  * Restart attempts after a timeout before giving up for good.  Bounded on
@@ -127,7 +159,31 @@ enum cam_state {
 	CAM_ST_READY,      /**< powered, wrapped, sensor identified       */
 	CAM_ST_STREAMING,
 	CAM_ST_FAULTED,    /**< terminal; the next open() rebuilds it all */
+	CAM_ST_LOST,       /**< [!] UNRECOVERABLE -- see below            */
 };
+
+/*
+ * [!] CAM_ST_LOST: the producer never acknowledged a stop (issue #48).
+ *
+ * Every other state describes hardware this thread controls.  This one
+ * describes hardware that MAY STILL BE IN USE by a producer thread which did
+ * not come back inside the join deadline -- so the one thing that must not
+ * happen is another command rebuilding, quiescing or powering it underneath
+ * that thread.
+ *
+ * CAM_ST_FAULTED cannot express this: it is explicitly the recoverable
+ * terminal state, and cam_bringup() treats it as "rebuild everything", which is
+ * exactly the action that would be catastrophic here.  So this is separate, and
+ * it is reached only from the join timeout.
+ *
+ * WHY REBOOT AND NOT A RETRY.  There is nothing to wait for.  The producer is
+ * blocked somewhere the deadline already proved is longer than expected -- a
+ * lost NPU interrupt, a wedged vendor driver -- and no later call can learn
+ * whether it has finished, because the acknowledgement it would have used is
+ * the very thing that did not arrive.  Refusing forever is the only honest
+ * answer, and it is cheap: this state is unreachable unless something is
+ * already badly wrong.
+ */
 
 static struct frame_pipeline cam_pipe;
 static TX_MUTEX     cam_pipe_mutex;
@@ -426,6 +482,16 @@ int camera_unsubscribe(struct frame_sink *sink)
 {
 	if (sink == NULL || !cam_objects_ok)
 		return CAM_ERR_PARAM;
+	/*
+	 * [!] REFUSED after a lost producer (issue #48).  Detaching is the one
+	 * operation that is unsafe precisely when the producer may still be
+	 * inside consume(): publish() has already pre-pinned this sink and
+	 * called it with the pipeline lock released, so unlinking it now races
+	 * a delivery in flight.  Callers are required to have a CONFIRMED stop
+	 * first; this is the backstop for the one that forgets.
+	 */
+	if (cam_state == CAM_ST_LOST)
+		return CAM_ERR_STATE;
 	(void)frame_pipeline_detach(&cam_pipe, sink);
 	return CAM_OK;
 }
@@ -1072,7 +1138,25 @@ static void cam_producer_entry(ULONG arg)
 		 * depending on why it stopped is how a peripheral ends up in a
 		 * state nobody wrote down. */
 		cam_quiesce();
-		cam_state = cam_stop_req ? CAM_ST_READY : CAM_ST_FAULTED;
+		/*
+		 * [!] CAM_ST_LOST IS NOT OVERWRITTEN HERE (issue #48).
+		 *
+		 * This line is where the poison would otherwise be laundered.
+		 * A join that timed out has already told its caller the camera
+		 * is finished -- and left the sink attached and the NPU leased
+		 * on the strength of that.  Arriving here late means this thread
+		 * finally finished; it does NOT mean any of that was undone.
+		 * Writing CAM_ST_READY would put the port back in service with
+		 * a sink nobody detached, an owner nobody released, and a
+		 * console that was told the opposite.
+		 *
+		 * It also keeps the stale cam_stopped_sem post below
+		 * unreachable: with the state pinned, every later
+		 * camera_stream_stop() is refused by cam_api_enter() before it
+		 * can consume this count and report a join that never happened.
+		 */
+		if (cam_state != CAM_ST_LOST)
+			cam_state = cam_stop_req ? CAM_ST_READY : CAM_ST_FAULTED;
 		cam_stop_req = 0u;
 		(void)tx_semaphore_put(&cam_stopped_sem);
 	}
@@ -1114,6 +1198,24 @@ void camera_create_objects(void)
 static int cam_api_enter(void)
 {
 	if (!cam_objects_ok)
+		return CAM_ERR_STATE;
+	/*
+	 * [!] THE POISON CHECK, and it is deliberately BEFORE the mutex
+	 * (issue #48).
+	 *
+	 * Every entry point that touches camera hardware comes through here, so
+	 * this one test is what makes "the producer may still be running"
+	 * safe: nothing can power the module, quiesce the datapath, unwrap an
+	 * interrupt or rebuild the port while a thread that never acknowledged
+	 * a stop is still in flight.
+	 *
+	 * Before the mutex because the lost producer may itself still hold
+	 * things; making a poisoned call queue behind anything would turn a
+	 * clear refusal into a hang.  camera_stream_stats() reads no hardware
+	 * and takes no mutex, so `camera stats` still answers and still says
+	 * what happened -- a refusal with no way to see why is not a diagnosis.
+	 */
+	if (cam_state == CAM_ST_LOST)
 		return CAM_ERR_STATE;
 	if (tx_mutex_get(&cam_api_mutex, TX_NO_WAIT) != TX_SUCCESS)
 		return CAM_ERR_BUSY;
@@ -1337,10 +1439,24 @@ int camera_stream_stop(void)
 	(void)tx_semaphore_put(&cam_frame_sem);
 
 	if (tx_semaphore_get(&cam_stopped_sem,
-	                     CAM_FRAME_TIMEOUT_TICKS * 2u) != TX_SUCCESS) {
-		LOG_ERR("the producer did not stop");
+	                     CAM_STOP_JOIN_TICKS) != TX_SUCCESS) {
+		/*
+		 * [!] THE PRODUCER IS STILL OUT THERE (issue #48).
+		 *
+		 * Not CAM_ST_FAULTED: that state means "rebuild me", and
+		 * rebuilding hardware a live producer is using is the worst
+		 * thing that could happen next.  CAM_ST_LOST refuses everything
+		 * instead, for good -- see the note on the enum.
+		 *
+		 * The caller is required to leave the sink attached and its
+		 * ownership held; camera_unsubscribe() enforces the first, and
+		 * CAM_ERR_TIMEOUT (never CAM_OK) is what tells the caller about
+		 * the second.
+		 */
+		LOG_ERR("the producer did not acknowledge a stop; camera is "
+		        "unusable until reboot");
 		cam_fault_latch("the producer thread did not acknowledge a stop");
-		cam_state = CAM_ST_FAULTED;
+		cam_state = CAM_ST_LOST;
 		cam_api_exit();
 		return CAM_ERR_TIMEOUT;
 	}
@@ -1458,6 +1574,21 @@ void camera_set_wb(const struct cam_wb *wb)
 int camera_set_auto(int on)
 {
 	int rc;
+
+	/*
+	 * [!] THE POISON CHECK HAS TO BE FIRST HERE, and only here (issue #48).
+	 *
+	 * Every other setter reaches hardware through cam_api_enter(), which
+	 * refuses.  This one is different twice over: it writes cam_auto_on
+	 * BEFORE going near the mutex, and it deliberately converts a bring-up
+	 * failure into CAM_OK (the request is kept and applied later).  Both are
+	 * right for a camera that is merely absent and wrong for one whose
+	 * producer never came back -- the flag is read by cam_auto_step() on
+	 * that very thread, and reporting success would be a lie about a device
+	 * that is finished.
+	 */
+	if (cam_state == CAM_ST_LOST)
+		return CAM_ERR_STATE;
 
 	cam_auto_on = on ? 1u : 0u;
 

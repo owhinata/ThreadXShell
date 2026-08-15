@@ -1204,8 +1204,62 @@ static inline uint16_t lcd_wire(uint16_t rgb565)
 	return (uint16_t)((rgb565 >> 8) | (rgb565 << 8));
 }
 
-int lcd_blit_le(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
-                const uint16_t *pixels, int (*stop)(void *), void *stop_arg)
+void lcd_rect_wire(uint16_t *fb, uint16_t fb_w, uint16_t fb_h,
+                   int32_t x0, int32_t y0, int32_t x1, int32_t y1,
+                   uint16_t rgb565, uint16_t stroke)
+{
+	uint16_t wire = lcd_wire(rgb565);
+	int32_t t = (int32_t)stroke;
+
+	if (fb == NULL || fb_w == 0u || fb_h == 0u || t <= 0)
+		return;
+
+	/* Clip first, so everything below indexes inside the buffer by
+	 * construction rather than by a bounds test per pixel. */
+	if (x0 < 0)
+		x0 = 0;
+	if (y0 < 0)
+		y0 = 0;
+	if (x1 > (int32_t)fb_w)
+		x1 = (int32_t)fb_w;
+	if (y1 > (int32_t)fb_h)
+		y1 = (int32_t)fb_h;
+	if (x1 <= x0 || y1 <= y0)
+		return;
+
+	/* A box thinner than two strokes becomes solid rather than drawing its
+	 * two edges over each other -- the same rendering the Wio's preview
+	 * settled on, and the honest one: at that size there is no interior to
+	 * show through. */
+	if (t > (x1 - x0) / 2)
+		t = (x1 - x0 + 1) / 2;
+	if (t > (y1 - y0) / 2)
+		t = (y1 - y0 + 1) / 2;
+	if (t <= 0)
+		t = 1;
+
+	for (int32_t y = y0; y < y1; y++) {
+		int32_t edge = (y < y0 + t) || (y >= y1 - t);
+		uint16_t *row = fb + (size_t)y * fb_w;
+
+		if (edge) {
+			for (int32_t x = x0; x < x1; x++)
+				row[x] = wire;
+		} else {
+			for (int32_t x = x0; x < x0 + t; x++)
+				row[x] = wire;
+			for (int32_t x = x1 - t; x < x1; x++)
+				row[x] = wire;
+		}
+	}
+}
+
+int lcd_blit_le_overlay(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                        const uint16_t *pixels,
+                        void (*overlay)(void *ctx, uint16_t *fb,
+                                        uint16_t fb_w, uint16_t fb_h),
+                        void *ctx,
+                        int (*stop)(void *), void *stop_arg)
 {
 	uint32_t count = (uint32_t)w * (uint32_t)h;
 	uint32_t i;
@@ -1247,9 +1301,25 @@ int lcd_blit_le(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 	for (i = 0u; i < count; i++)
 		lcd_fb[i] = lcd_wire(pixels[i]);
 
+	/*
+	 * The overlay's one moment: the frame is staged in wire order and the
+	 * DMA has not started.  Inside the guard, so nothing can slip a frame
+	 * in between the drawing and the transfer -- and see the contract in
+	 * the header for everything the callback may not do with that.
+	 */
+	if (overlay != NULL)
+		overlay(ctx, lcd_fb, w, h);
+
 	rc = lcd_blit(x, y, w, h, lcd_fb, stop, stop_arg);
 	lcd_release();
 	return rc;
+}
+
+int lcd_blit_le(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                const uint16_t *pixels, int (*stop)(void *), void *stop_arg)
+{
+	return lcd_blit_le_overlay(x, y, w, h, pixels, NULL, NULL,
+	                           stop, stop_arg);
 }
 
 int lcd_fill(uint16_t rgb565, int (*stop)(void *), void *stop_arg)

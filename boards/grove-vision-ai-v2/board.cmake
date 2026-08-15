@@ -222,6 +222,11 @@ set(LIBPWRMGMT "${SDK}/prebuilt_libs/gnu/libpwrmgmt.a")
 # two wrapped delays from port/sdk_seam/timer_seam.c, xprintf from
 # src/xprintf_shim.c, and four drv_interface_* from the SDK's
 # interface/driver_interface.c, which SDK_SOURCES compiles).
+# QSPI NOR access (issue #44): needed ONLY to enable the memory-mapped read
+# window the model is parsed through.  Its erase/write entry points are on
+# check_placement_budget.py's forbidden list -- this flash holds the
+# bootloader, and --gc-sections means their presence would mean a caller.
+set(LIBSPIEEPROM "${SDK}/prebuilt_libs/gnu/lib_spi_eeprom.a")
 set(LIBSENSORDP  "${SDK}/prebuilt_libs/gnu/libsensordp.a")
 set(LIBEXTDEVICE "${SDK}/prebuilt_libs/gnu/libextdevice.a")
 
@@ -284,6 +289,7 @@ set(SHELL_SOURCES
     "${BOARD_DIR}/cmds/cmd_epk.c"
     "${BOARD_DIR}/cmds/cmd_lcd.c"
     "${BOARD_DIR}/cmds/cmd_camera.c"
+    "${BOARD_DIR}/cmds/cmd_nn.c"
     "${CMAKE_SOURCE_DIR}/svc/fmt.c"
     # Camera frame ring (issue #35).  Freestanding: it depends on <stdint.h>
     # and an injected lock vtable only, which is why the same file serves all
@@ -330,6 +336,97 @@ target_compile_options(coremark_obj PRIVATE -O3 -funroll-loops -fno-tree-vectori
 set_source_files_properties("${CMK_DIR}/core_main.c" PROPERTIES
     COMPILE_DEFINITIONS "main=coremark_main")
 
+# --- TFLite Micro + Ethos-U55 core driver (issue #44) ------------------------
+# Built FROM SOURCE, not from prebuilt_libs/.  The only 2412-tag archive the SDK
+# ships is the CMSIS-NN variant, and CMSIS-NN is Helium code -- linking it would
+# put predicated MVE in the image and check_mve_predication.py would reject it.
+# Building from source costs nothing here because there is nothing to replace:
+# the op resolver registers AddEthosU() and NOTHING else, so not one CPU kernel
+# is linked.  A Vela-compiled model folds every conv/pool/activation into the
+# single `ethos-u` custom operator, which is why the donor's classification app
+# gets away with MicroMutableOpResolver<1>.
+#
+# The file list is the transitive closure of that configuration, derived from
+# the SDK's own tflmtag2412_u55tag2411.mk and then trimmed to what actually
+# links -- roughly a fifth of the ~130 sources the .mk names, because all the
+# reference and CMSIS-NN kernels drop out with the kernels themselves.
+set(TFLM "${SDK}/library/inference/tflmtag2412_u55tag2411")
+set(ETHOSU_DRV "${TFLM}/third_party/ethos_u_core_driver")
+
+add_library(tflm_obj OBJECT
+    # Arm Ethos-U core driver (source, unlike the peripheral drivers)
+    "${ETHOSU_DRV}/src/ethosu_driver.c"
+    "${ETHOSU_DRV}/src/ethosu_device_u55_u65.c"
+    "${ETHOSU_DRV}/src/ethosu_pmu.c"
+    # The single operator this port registers
+    "${TFLM}/tensorflow/lite/micro/kernels/ethos_u/ethosu.cc"
+    "${TFLM}/tensorflow/lite/micro/kernels/kernel_util.cc"
+    # Interpreter + allocator + memory planning
+    "${TFLM}/tensorflow/lite/micro/micro_interpreter.cc"
+    "${TFLM}/tensorflow/lite/micro/micro_interpreter_graph.cc"
+    "${TFLM}/tensorflow/lite/micro/micro_interpreter_context.cc"
+    "${TFLM}/tensorflow/lite/micro/micro_allocator.cc"
+    "${TFLM}/tensorflow/lite/micro/micro_allocation_info.cc"
+    "${TFLM}/tensorflow/lite/micro/micro_context.cc"
+    "${TFLM}/tensorflow/lite/micro/micro_op_resolver.cc"
+    "${TFLM}/tensorflow/lite/micro/micro_resource_variable.cc"
+    "${TFLM}/tensorflow/lite/micro/micro_profiler.cc"
+    "${TFLM}/tensorflow/lite/micro/micro_log.cc"
+    "${TFLM}/tensorflow/lite/micro/micro_utils.cc"
+    "${TFLM}/tensorflow/lite/micro/micro_time.cc"
+    "${TFLM}/tensorflow/lite/micro/memory_helpers.cc"
+    "${TFLM}/tensorflow/lite/micro/debug_log.cc"
+    "${TFLM}/tensorflow/lite/micro/flatbuffer_utils.cc"
+    "${TFLM}/tensorflow/lite/micro/arena_allocator/single_arena_buffer_allocator.cc"
+    "${TFLM}/tensorflow/lite/micro/arena_allocator/non_persistent_arena_buffer_allocator.cc"
+    "${TFLM}/tensorflow/lite/micro/arena_allocator/persistent_arena_buffer_allocator.cc"
+    "${TFLM}/tensorflow/lite/micro/memory_planner/greedy_memory_planner.cc"
+    "${TFLM}/tensorflow/lite/micro/memory_planner/linear_memory_planner.cc"
+    "${TFLM}/tensorflow/lite/micro/tflite_bridge/flatbuffer_conversions_bridge.cc"
+    "${TFLM}/tensorflow/lite/micro/tflite_bridge/micro_error_reporter.cc"
+    # Schema / type plumbing
+    "${TFLM}/tensorflow/lite/core/api/flatbuffer_conversions.cc"
+    "${TFLM}/tensorflow/lite/core/api/tensor_utils.cc"
+    "${TFLM}/tensorflow/lite/core/c/common.cc"
+    "${TFLM}/tensorflow/lite/kernels/kernel_util.cc"
+    "${TFLM}/tensorflow/lite/kernels/internal/common.cc"
+    "${TFLM}/tensorflow/lite/kernels/internal/quantization_util.cc"
+    "${TFLM}/tensorflow/lite/kernels/internal/tensor_ctypes.cc"
+    "${TFLM}/tensorflow/lite/kernels/internal/runtime_shape.cc"
+    "${TFLM}/tensorflow/compiler/mlir/lite/core/api/error_reporter.cc"
+    "${TFLM}/tensorflow/compiler/mlir/lite/schema/schema_utils.cc")
+
+target_link_libraries(tflm_obj PUBLIC bsp_iface)
+target_include_directories(tflm_obj PUBLIC
+    "${TFLM}"
+    "${TFLM}/third_party/flatbuffers/include"
+    "${TFLM}/third_party/gemmlowp"
+    "${TFLM}/third_party/ruy"
+    "${ETHOSU_DRV}/include")
+target_compile_definitions(tflm_obj PUBLIC
+    TFLM2412_U55TAG2411
+    TF_LITE_STATIC_MEMORY          # no dynamic tensor resizing; arena only
+    TF_LITE_MCU_DEBUG_LOG
+    ETHOS_U ETHOSU55 ETHOSU_ARCH=u55
+    ETHOSU_LOG_SEVERITY=ETHOSU_LOG_WARN
+    # Finite, in ThreadX ticks -- npu_rtos.c defines the unit.  The header
+    # would otherwise default this to "wait forever" and a lost NPU interrupt
+    # would suspend the calling shell job with no way back.
+    ETHOSU_SEMAPHORE_WAIT_INFERENCE=5000u)
+# [!] -fno-tree-vectorize on the WHOLE set, not just the pixel loops.
+# -mcpu=cortex-m55 makes MVE available to every translation unit, so
+# auto-vectorisation can appear anywhere -- registering no CPU kernels bounds
+# what RUNS on the CPU, not what the compiler emits -- and
+# check_mve_predication.py fails the build on predicated MVE.  (That gate rests
+# on a premise the Armv8-M ARM contradicts, see issue #42; it is fail-closed, so
+# this is the workaround until #42 lands, not a correctness requirement.)
+#
+# -Wno-* : the SDK's TFLM snapshot is upstream code compiled here with warnings
+# the rest of this port keeps on.  Scoped to this target only.
+target_compile_options(tflm_obj PRIVATE
+    -Os -fno-tree-vectorize
+    $<$<COMPILE_LANGUAGE:CXX>:-Wno-unused-parameter -Wno-sign-compare>)
+
 # --- The shell firmware ------------------------------------------------------
 # The sources compile into an OBJECT library rather than straight into the
 # executable so the seam probe below can link the SAME objects a second time
@@ -351,14 +448,22 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/camera/cam_imx219.c"
     "${BOARD_DIR}/port/camera/camera.c"
     "${BOARD_DIR}/port/camera/cam_lcd_sink.c"
+    # Ethos-U55 inference glue (issue #44).  The C++ interpreter is contained
+    # behind port/npu/npu.h; nothing above it sees a TFLite type.
+    "${BOARD_DIR}/port/npu/npu_tflm.cc"
+    "${BOARD_DIR}/port/npu/npu_arena.c"
+    "${BOARD_DIR}/port/npu/npu_rtos.c"
+    "${BOARD_DIR}/port/npu/npu_cache.c"
+    "${BOARD_DIR}/port/npu/npu_hw.c"
+    "${BOARD_DIR}/port/npu/npu_flash.c"
     ${SHELL_SOURCES}
     ${SDK_SOURCES}
     ${TX_CORE} ${TX_ASM} ${TX_EPK})
 
 add_executable(shell $<TARGET_OBJECTS:shell_objs>)
-target_link_libraries(shell PRIVATE bsp_iface coremark_obj
+target_link_libraries(shell PRIVATE bsp_iface coremark_obj tflm_obj
     -Wl,--start-group "${LIBDRIVER}" "${LIBPWRMGMT}"
-                      "${LIBSENSORDP}" "${LIBEXTDEVICE}" -Wl,--end-group)
+                      "${LIBSENSORDP}" "${LIBEXTDEVICE}" "${LIBSPIEEPROM}" -Wl,--end-group)
 # CoreMark's canonical report prints its score with %f; pull in newlib's float
 # printf (newlib-nano omits it by default).  This is also why src/malloc_lock.c
 # exists: that conversion allocates from the heap, now from several threads.
@@ -369,11 +474,13 @@ target_include_directories(shell_objs PRIVATE
     "${BOARD_DIR}/port/sdk_seam"
     "${BOARD_DIR}/port/lcd"
     "${BOARD_DIR}/port/camera"
+    "${BOARD_DIR}/port/npu"
     # Header surface of the two camera archives (issue #35): the CIS (sensor
     # I2C) layer and the sensor datapath library.  Not in bsp_iface because
     # only port/camera/ has any business calling them.
     "${SDK}/external/cis"
     "${SDK}/library/sensordp/inc"
+    "${SDK}/library/spi_eeprom"
     # The IMX219 mode table (.i) is included from the SDK tree rather than
     # copied, so it stays tied to the pinned SHA (issue #35).
     "${SDK}/app/scenario_app/tflm_yolov8_od/cis_sensor/cis_imx219"
@@ -391,7 +498,7 @@ target_include_directories(shell_objs PRIVATE
     "${TX_DIR}/common/inc"
     "${TX_DIR}/utility/execution_profile_kit"   # tx_execution_profile.h
     "${TX_PORT}/inc")
-target_link_libraries(shell_objs PRIVATE bsp_iface)
+target_link_libraries(shell_objs PRIVATE bsp_iface tflm_obj)
 target_compile_definitions(shell_objs PRIVATE
     TX_INCLUDE_USER_DEFINE_FILE        # -> port/threadx/tx_user.h
     BSP_ENABLE_WFI=$<BOOL:${BSP_ENABLE_WFI}>   # gates TX_ENABLE_WFI (tx_user.h)
@@ -460,9 +567,9 @@ foreach(_sym IN LISTS SEAM_PROBE_FORCED)
 endforeach()
 
 add_executable(seam_probe $<TARGET_OBJECTS:shell_objs>)
-target_link_libraries(seam_probe PRIVATE bsp_iface coremark_obj
+target_link_libraries(seam_probe PRIVATE bsp_iface coremark_obj tflm_obj
     -Wl,--start-group "${LIBDRIVER}" "${LIBPWRMGMT}"
-                      "${LIBSENSORDP}" "${LIBEXTDEVICE}" -Wl,--end-group)
+                      "${LIBSENSORDP}" "${LIBEXTDEVICE}" "${LIBSPIEEPROM}" -Wl,--end-group)
 target_link_options(seam_probe PRIVATE
     -u _printf_float ${SDK_TIMER_WRAP_FLAGS} ${SEAM_PROBE_FORCE_FLAGS}
     "-T${LDSCRIPT_APP}" -Wl,-Map=seam_probe.map,--cref)
@@ -587,6 +694,49 @@ if(NOT EXISTS "${GROVE_VENV}/bin/python")
             "pip install -r boards/grove-vision-ai-v2/requirements.txt failed")
     endif()
 endif()
+
+# --- Model flash target (issue #44) ------------------------------------------
+# SEPARATE from `flash`, and deliberately so.  The model is its own flash
+# partition -- the xmodem tool takes "<file> <position> <offset>" and writes it
+# nowhere near the firmware image -- so the two are reflashed independently.
+# That matters on a part with ~100k NOR cycles: iterating on the firmware costs
+# nothing extra once the model is down, and swapping models does not rewrite the
+# bootloader.
+#
+# This target does NOT depend on `shell`: making it rebuild or reflash the
+# firmware would defeat the point and burn cycles nobody asked for.
+#
+# GROVE_MODEL_ADDR must agree with cmds/cmd_nn.c's NN_MODEL_ADDR_DEFAULT minus
+# the flash read alias base (0x3A000000).  `nn open <addr>` overrides at
+# runtime, which is the escape hatch if they ever disagree.
+set(GROVE_MODEL_FILE
+    "${GROVE_SDK_ROOT}/model_zoo/tflm_mb_cls/qat_pruning_model_vela.tflite"
+    CACHE FILEPATH "Vela-compiled .tflite to flash with `--target flash-model`")
+set(GROVE_MODEL_ADDR "0xB7B000" CACHE STRING
+    "Flash offset for the model (0x3A000000 + this is what `nn open` wants)")
+
+# [!] The model is STAGED INTO THE BUILD DIR before being sent, and that copy is
+# not optional.  xmodem_send.py writes its preamble scratch file next to the
+# model it is given (os.path.dirname of the --model path), so pointing it
+# straight at model_zoo/ drops a _temp_model_0_preamble_data.bin inside the SDK
+# tree -- which is read-only by project invariant, and himax_sdk.cmake refuses
+# to configure the next build because the tree no longer matches the pinned
+# commit.  Found the hard way.
+set(GROVE_MODEL_STAGE "${CMAKE_BINARY_DIR}/model")
+add_custom_target(flash-model
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${GROVE_MODEL_STAGE}"
+    COMMAND "${CMAKE_COMMAND}" -E copy "${GROVE_MODEL_FILE}"
+            "${GROVE_MODEL_STAGE}/model.tflite"
+    COMMAND "${GROVE_VENV}/bin/python" "${GROVE_SDK_ROOT}/xmodem/xmodem_send.py"
+            --port=${GROVE_SERIAL_PORT}
+            --baudrate=${GROVE_SERIAL_BAUDRATE}
+            --protocol=xmodem
+            # ONE argument, quoted: the tool parses --model as a single
+            # "<file> <flash-position> <offset>" string and argparse rejects the
+            # trailing words if CMake splits them into separate argv entries.
+            "--model=${GROVE_MODEL_STAGE}/model.tflite ${GROVE_MODEL_ADDR} 0x00000"
+    USES_TERMINAL
+    COMMENT "xmodem -> model @${GROVE_MODEL_ADDR} (press reset when asked)")
 
 add_custom_target(flash
     COMMAND "${GROVE_VENV}/bin/python" "${GROVE_SDK_ROOT}/xmodem/xmodem_send.py"

@@ -41,6 +41,32 @@ DTCM_MIN_HEADROOM = 8 * 1024      # gap between __HeapLimit and __StackLimit
 VECTORS = 496 * 4
 
 FORBIDDEN = [
+    # QSPI NOR write path (issue #44).  lib_spi_eeprom.a is linked for one
+    # reason -- enabling the memory-mapped READ window the model is parsed
+    # through -- and this flash holds the bootloader and the firmware image.
+    # With -ffunction-sections + --gc-sections an uncalled function is dropped,
+    # so any of these SURVIVING means something references it, and the only
+    # thing that could is code that writes to it.  Same shape as the wio port's
+    # sector-0 rule: the read path is fine, the write path must not exist.
+    "hx_lib_spi_eeprom_erase_all",
+    "hx_lib_spi_eeprom_erase_sector",
+    "hx_lib_spi_eeprom_write",
+    "hx_lib_spi_eeprom_word_write",
+    "hx_lib_spi_eeprom_clear_write_protect",
+    # NOT barred: hx_lib_spi_eeprom_setWriteEnable.  It IS in the image, pulled
+    # in from inside the archive (spi_eeprom_peri.o) by the quad-enable path --
+    # putting a Winbond-class part into QUAD mode means writing the QE bit in
+    # its status register, and that write needs the WEL latch first.  So it is
+    # part of configuring the READ path, not of writing the array.
+    #
+    # On its own the latch cannot modify anything: it has to be followed by a
+    # program or erase opcode, and every entry point that issues one is on this
+    # list and verified absent.  Barring it would mean giving up quad reads to
+    # remove a capability that is not there.
+    "hx_lib_qspi_eeprom_erase_all",
+    "hx_lib_qspi_eeprom_erase_sector",
+    "hx_lib_qspi_eeprom_write",
+    "hx_lib_qspi_eeprom_word_write",
     # SDK SysTick pokers: ThreadX owns SysTick on this port.
     "EPII_Set_Systick_load",
     "EPII_Set_Systick_enable",
@@ -123,6 +149,13 @@ RESIDENCY = [
     # believes would have the driver invalidating past its end.
     ("cam_raw_buf",   320 * 240 * 3, ".cam_raw",   "SRAM", SRAM),
     ("cam_slot_mem",  320 * 240 * 2 * 2, ".cam_slots", "SRAM", SRAM),
+    # NN tensor arena (issue #44).  Pinned for the same reason as the camera
+    # buffers -- the Ethos-U55 is a bus master and TCM reachability is
+    # unverified -- plus one of its own: the CPU cleans and invalidates exactly
+    # this many bytes from this symbol around every inference, so an arena
+    # shorter than the gate believes would have the maintenance running off the
+    # end of it.
+    ("nn_arena", 450 * 1024, ".nn_arena", "SRAM", SRAM),
     # CoreMark MEM_STATIC working set: a plain .bss array, so there is no
     # dedicated section to pin it to -- only the region matters.
     ("static_memblk",   2 * 1000, None,          "DTCM", DTCM),
@@ -132,7 +165,7 @@ RESIDENCY = [
 # and a LOADable one would be flashed as that many bytes of zeros (and would
 # then also have to satisfy the image-coherence gate).
 NOBITS_SECTIONS = [".itcm_bench", ".dtcm_bench", ".sram_bench", ".lcd_fb",
-                   ".cam_raw", ".cam_slots"]
+                   ".cam_raw", ".cam_slots", ".nn_arena"]
 
 
 def run(cmd):

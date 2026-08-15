@@ -1270,6 +1270,13 @@ the image.  A model Vela did NOT fully offload fails at `AllocateTensors` with a
 missing-operator error rather than quietly falling back to a scalar reference
 kernel; a silent fallback would be slow in a way nobody would think to look for.
 
+This is a **policy**, not a cache constraint.  Before issue #46 a CPU operator
+running after the `ethos-u` one inside `Invoke()` would have read the NPU's
+output through a stale D-cache; since #46 the arena is invalidated before the
+kernel returns, so it would not.  Keeping the resolver at one operator is a
+choice about Helium and about failing loudly, and should be argued on those
+grounds.
+
 TFLM is built from source for the same reason: the only 2412-tag archive the SDK
 ships is the CMSIS-NN one.  Linked cost is **15,360 B** -- an order of magnitude
 under the 59 KB that summing the archive's object sizes suggests, because
@@ -1317,16 +1324,99 @@ filters are set to ERROR responses rather than the RAZ/WI default: the SDK
 exposes no violation-status read, and zeros would reach TFLM as data whereas a
 bus error becomes a recorded fault.
 
-### [!] Cache maintenance belongs to the caller, not the driver
+### [!] The arena changes hands twice, and both points are inside `Invoke()`
 
-Upstream's `ethosu_driver.c` says not to override the weak
-`ethosu_flush_dcache` / `ethosu_invalidate_dcache` because upstream's are empty.
-In THIS SDK they are not -- Himax filled them in -- so the advice inverts.  Worse,
-`ethosu_wait()` falls through from `ETHOSU_JOB_RUNNING` and invalidates the arena
-BEFORE taking the completion semaphore, i.e. while the NPU is still writing.
+The U55 is an AXI bus master and is not coherent with the CM55's D-cache, so
+every handover needs explicit maintenance.  Issue #44 did it per range from the
+shell command.  That is wrong three ways, and issue #46 replaced it.
 
-Both hooks are neutered and the order lives in the command: clean the input
-after writing it, invoke, invalidate the outputs only once the call returns.
+**Per-range maintenance cannot be made correct here.**  TFLM aligns arena
+buffers to 16 bytes; this core's cache line is 32.  Any per-range operation
+therefore rounds outward across a neighbour's half-line -- an invalidate discards
+what the CPU wrote there, a clean writes a stale half back over what the NPU
+wrote.  Measuring the model's own I/O does not help, because the boundaries that
+matter are internal: the NPU writes intermediate feature maps throughout the
+arena while the CPU writes the `ethos-u` kernel's `base_addrs` scratch (which is
+`RequestScratchBufferInArena`, i.e. in the arena) and TFLM's persistent
+allocator at the tail.
+
+**Maintenance from the command is always mistimed.**  Cleaning before the call
+is too early -- the kernel writes that scratch after it.  Invalidating after the
+call is too late -- TFLM runs `ResetTempAllocations()` immediately after the
+kernel returns and *before* it checks the kernel's status, which writes the
+arena-resident allocator.
+
+**Only one of the two vendor hooks was mistimed.**  `ethosu_flush_dcache()` is
+called after the kernel has built its base-address arrays and immediately before
+the power request and the launch -- exactly the last-writer boundary.  It was
+neutered along with `ethosu_invalidate_dcache()`, whose call site really is
+wrong (`ethosu_wait()` runs it before taking the completion semaphore, while the
+NPU may still be writing).
+
+So the port maintains the **whole arena** at two instants, which makes alignment
+structurally irrelevant -- the arena is 32-byte aligned and a whole number of
+lines by `_Static_assert`, so no partial line can be involved:
+
+| point | owner | maintenance |
+|---|---|---|
+| `ethosu_flush_dcache()` | CPU -> NPU | clean the whole arena |
+| `ethosu_inference_begin()` | NPU | arm |
+| NPU running | NPU | caller suspended on the semaphore; other threads excluded by `nn`'s ownership gate |
+| `ethosu_inference_end()`, `DONE` **and** `OK` | NPU -> CPU | invalidate the whole arena |
+| `ethosu_inference_end()`, otherwise | NPU -> CPU | soft reset, **checked**, then invalidate |
+| after `Invoke()` returns | CPU | nothing |
+
+`ethosu_inference_begin` / `_end` are weak by design, receive the driver, and sit
+at the right instants -- begin is reachable only after the power request
+succeeded, and the driver's own comment says end is "always called even in case
+of timeout".  The generic `ethosu_semaphore_take()` hook is NOT used: it is not
+inference-specific (driver reservation takes the same path) and it is never
+reached on a power-acquisition failure or a timeout, so a flag raised beside it
+would be left standing.
+
+Two details that look like paranoia and are not.  `DONE` is not success: the
+interrupt handler sets `state = DONE` and *then* sets `result`, so a fault also
+lands as `DONE`, while `result` initialises to `OK` and so does not by itself
+prove the job ran -- both are required.  And the reset is checked: on timeout or
+error the driver calls `(void)ethosu_soft_reset(drv)` and discards the result,
+but "the NPU has stopped writing" is the precondition for invalidating at all,
+so the port resets first and verifies.  If that reset fails there is no way to
+establish the precondition and the firmware halts rather than corrupt the arena
+intermittently.
+
+### [!] A payload whose actions continue past the command stream
+
+`ethosu_invoke_async()` parses driver actions in order, and the command-stream
+action *launches the NPU* in the middle of that loop.  If a later action is
+malformed the parser takes `goto err` and returns without ever calling
+`ethosu_wait()` -- so `ethosu_inference_end()` never runs, the arena is never
+handed back, and TFLM writes it while the NPU may still be running.
+
+The SDK is read-only, so this is closed at the other end: `npu_open()` refuses a
+model whose payload is not **exactly one `COMMAND_STREAM`, as the last action**.
+With nothing left to parse after the launch there is nothing left to fail on.
+Vela emits exactly this shape, but `nn open <addr>` takes an arbitrary address,
+so it is checked rather than assumed.  `npu_cache_after_invoke()` is the
+backstop: if an inference ever does return with the arena still owed, it halts.
+
+Two things about that check are easy to get wrong, and both were:
+
+- **The payload is not `custom_options`.**  The kernel reads
+  `custom_initial_data` only for a CO_TYPE marker -- 3 bytes in the models here
+  -- and hands the driver **input tensor 0** (`cms_data` from its buffer,
+  `cms_data_size` from its `bytes`).  A check on `custom_options` inspects the
+  marker and proves nothing.
+- **A variable tensor is not the buffer you validated.**
+  `MicroAllocator::AllocateVariables()` overwrites `eval_tensors[i].data.data`
+  with an arena allocation for any tensor marked `is_variable()`, *even when it
+  has a serialized buffer*.  The driver would then parse arena bytes -- which
+  another operator can write at run time -- while the check inspected the
+  constant in flash.  Variable tensors are refused.
+
+The arm is one-shot and a second one is fatal rather than counted: the driver
+runs `handle_command_stream()` once per command-stream action but waits once for
+the whole walk, so two launches would arm twice and disarm once, and a counter
+would let the backstop pass with a launch unaccounted for.
 
 ### Inference does not block the shell
 

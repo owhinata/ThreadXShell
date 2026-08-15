@@ -83,6 +83,28 @@ unsigned npu_hw_wrapped_irqs(int *out, unsigned max);
 void npu_cache_clean(const void *p, size_t bytes);
 void npu_cache_invalidate(void *p, size_t bytes);
 
+/**
+ * Hand the arena to the cache protocol, or take it back (NULL, 0).
+ *
+ * The protocol maintains the WHOLE arena at two points and never a sub-range --
+ * see npu_cache.c for why -- so it has to know where the arena is.  This is the
+ * arena npu_open() was actually given, not the static reservation, and it is
+ * cleared on close and on every failure unwind.
+ */
+void npu_cache_set_arena(void *base, size_t bytes);
+
+/**
+ * Close out one Invoke().  Called after MicroInterpreter::Invoke() returns,
+ * whatever it returned.
+ *
+ * Two jobs.  It clears the "arena was cleaned" state left by a launch that
+ * never happened -- a payload the driver rejected before it reached
+ * ethosu_inference_begin().  And it is where an inference that launched but
+ * never completed the handover is caught: that would mean the CPU is about to
+ * touch an arena the NPU may still own, so it fail-stops rather than return.
+ */
+void npu_cache_after_invoke(void);
+
 #ifdef __cplusplus
 }
 #endif

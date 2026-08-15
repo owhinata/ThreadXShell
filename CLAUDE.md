@@ -429,8 +429,22 @@ git branch -d feat/<N>-short-description
   （EPK スナップショットが実測で捕捉。番号を列挙せず測る方式の存在理由）。
   **[!] `lib_spi_eeprom.a` の erase/write 系は禁止シンボル** — このフラッシュには
   ブートローダが載る（wio のセクタ0 と同格）。`setWriteEnable` のみ QUAD 有効化に必要なので許可。
-  **[!] dcache の weak フックは no-op で上書きし、保守は呼び出し側が持つ** — この SDK の
-  weak 実装は空ではなく、しかも `ethosu_wait()` は**完了待ちの前に**アリーナを invalidate する。
+  **[!] アリーナの保守は「範囲ごと」ではなく「全体を 2 点で切り替える」**（#46）。
+  TFLM の確保は 16 B 整列 / キャッシュラインは 32 B なので、範囲ごとの外側丸めは隣の半ラインを
+  巻き込む。しかも NPU は中間 FM をアリーナ全体に書き、CPU は ethos-u カーネルのスクラッチ
+  （アリーナ内）と永続アロケータを書くので、公開 I/O を測っても境界は覆えない。
+  **潰すのは `ethosu_invalidate_dcache()` だけ**（完了セマフォより前に呼ばれる）で、
+  **`ethosu_flush_dcache()` はタイミングが正しいので本物に戻す**。引き渡しは
+  `ethosu_inference_begin/end`（weak・`drv` を受け取る）に置き、成功条件は
+  **`job.state == DONE` かつ `job.result == OK` の両方**（fault でも DONE になり、result は
+  OK で初期化される）。異常時は `ethosu_soft_reset()` の**成功を確認してから** invalidate、
+  失敗なら fail-stop。**呼び出し側でキャッシュ保守をしない**（TFLM は `Invoke()` 復帰前に
+  アリーナを書く）。実測コストは +1 ms（91→92 ms）。
+  **[!] `npu_open()` はペイロードを検査する** — `COMMAND_STREAM` が 1 個かつ最後でなければ拒否。
+  ドライバは launch 後もアクション解析を続け、失敗すると `ethosu_wait()` を通らずに戻れるため。
+  **検査対象は `custom_options` ではなく入力テンソル 0**（前者は CO_TYPE マーカー 3 B）。
+  **`is_variable()` は拒否**（`AllocateVariables()` がシリアライズ済みバッファでも
+  アリーナ確保で上書きする）。
   NPU bring-up は SEC_ONLY 経路に無いので自前（読み戻し + fail-closed）。詳細は board README。
 - **[!] SRAM 窓は 2 領域**（#29）: `CM55M_S_SRAM_LDR` 0x3401F000 = 2nd bootloader の実行窓で
   **NOLOAD 専用** / `CM55M_S_SRAM` 0x3404D000 = loadable 可。`.rodata` は後者。

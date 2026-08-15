@@ -9,14 +9,18 @@
  * (__PROGRAM_START copy/zero tables, __StackTop/__StackLimit) and the Himax
  * image generator both consume them.
  *
- * The app is NOT XIP.  The 2nd-stage bootloader loads the ELF segments:
+ * The app is NOT XIP.  The 2nd-stage bootloader loads each ELF section at its
+ * VMA (there are no AT> clauses in this file, so LMA == VMA throughout):
  *   CM55M_S_APP_ROM   ITCM  256 KB @ 0x10000000 (secure alias) -- vectors+code
  *   CM55M_S_APP_DATA  DTCM  256 KB @ 0x30000000                -- data+stack
- *   CM55M_S_SRAM      SRAM0 window from 0x3401F000 (the 2nd bootloader's own
- *                     exec address; reusing it is the SDK's protocol -- the
- *                     loader is done by the time the app runs).  EXPLICIT
- *                     placement only; nothing goes here in M-G1, and an ITCM
- *                     overflow is a link error, never a silent spill.
+ *   CM55M_S_SRAM_LDR  SRAM  188 KB @ 0x3401F000 -- the window the 2nd-stage
+ *                     bootloader itself executes from.  NOLOAD ONLY.
+ *   CM55M_S_SRAM      SRAM  1.7 MB @ 0x3404D000 -- .rodata plus the NOLOAD
+ *                     buffers.  The only region here that may hold LOADABLE
+ *                     content; see the MEMORY block for why the floor is
+ *                     where it is.
+ * Placement in both SRAM regions is EXPLICIT ONLY -- an ITCM overflow is a
+ * link error, never a silent spill.
  *
  * The vector table stays in ITCM (RAM): the prebuilt driver archive installs
  * its ISRs at runtime via EPII_NVIC_SetVector, which writes this table.
@@ -31,7 +35,25 @@ MEMORY
 {
   CM55M_S_APP_ROM  (rx)  : ORIGIN = 0x10000000, LENGTH = 0x40000  /* ITCM 256K */
   CM55M_S_APP_DATA (rwx) : ORIGIN = 0x30000000, LENGTH = 0x40000  /* DTCM 256K */
-  CM55M_S_SRAM     (rwx) : ORIGIN = 0x3401F000, LENGTH = 0x1E1000 /* SRAM0 window */
+
+  /* The SRAM window is split in two, and the split is the point (issue #29).
+   *
+   * The 2nd-stage bootloader EXECUTES from the bottom of this window while it
+   * is loading us: it lives at BOOT2NDLOADER_BASE (0x3401F000) spanning
+   * BOOT2NDLOADER_SIZE (0x18000), i.e. up to 0x34037000.  A LOADABLE section
+   * placed there would have the loader writing over the code it is running.
+   * The SDK's own NN script rounds that hazard up to 0x3404D000 and starts its
+   * loadable SRAM there; this port adopts the same floor.
+   *
+   * Expressing it as two regions rather than as a comment plus careful
+   * ordering is deliberate.  Placement here used to be safe only because the
+   * section order happened to be right -- exactly the silent failure #29 warned
+   * about -- and "put your section after the other ones" is not a property a
+   * reviewer can check at a glance.  Now the region name carries the rule, and
+   * check_placement_budget.py enforces the half a linker script cannot: that no
+   * section with CONTENTS lands below the floor. */
+  CM55M_S_SRAM_LDR (rwx) : ORIGIN = 0x3401F000, LENGTH = 0x2E000  /* NOLOAD ONLY */
+  CM55M_S_SRAM     (rwx) : ORIGIN = 0x3404D000, LENGTH = 0x1B3000 /* loadable OK */
 }
 
 __HEAP_SIZE  = 0x2000;   /* newlib heap (barely used: shell state is static) */
@@ -93,6 +115,25 @@ SECTIONS
        KEEP(*(.eh_frame*))
     } > CM55M_S_APP_ROM
 
+    /* .rodata lives in SRAM, not ITCM (issue #29).  This is the whole point of
+     * the region split above: it hands ~30 KB of ITCM back for code, which is
+     * what M-G3c's TFLM needs, and it is the answer the SDK's own NN linker
+     * script arrived at (Algo_NoTrustZone.ld puts .rodata in SRAM0).
+     *
+     * It is placed FIRST in the region so its address is the region base and
+     * does not drift every time one of the NOLOAD buffers below changes size.
+     *
+     * [!] This is the only LOADABLE section in the SRAM window, which is why
+     * #43 had to prove on hardware that the 2nd-stage bootloader actually
+     * writes one: every other section here is NOLOAD, so nothing had ever
+     * exercised that path.  It does (16 KB probes at 0x340d7c20 and in DTCM
+     * both matched the host-computed CRC32 of their ELF bytes).
+     *
+     * The stake is the command registry embedded below: it rides along inside
+     * .rodata precisely because the image generator drops output section names
+     * it does not recognise, and an empty registry would take away the console
+     * that would report it.  check_image_coherence.py byte-verifies the section
+     * reached the .img and that the registry span lies inside it. */
     .rodata : ALIGN(4)
     {
         __rodata_start = .;
@@ -122,7 +163,7 @@ SECTIONS
         . = ALIGN(4);
 
         __rodata_end = .;
-    } > CM55M_S_APP_ROM
+    } > CM55M_S_SRAM
 
     /* Exception handling/unwind -- some newlib functions use this. */
     .ARM.extab : ALIGN(4)
@@ -229,22 +270,6 @@ SECTIONS
        __data_end__ = .;
     } > CM55M_S_APP_DATA
 
-    /* TEMPORARY (issue #43): DTCM half of the loadable-placement probe.
-     * LOADABLE, unlike every other section this port adds -- that is the whole
-     * point.  DTCM itself is already proven (see the .copy.table note above:
-     * .data is a loadable DTCM section on every boot); what this tests is the
-     * remaining unknown, that the image generator carries an ADDITIONAL
-     * section whose NAME it has never seen.  The generator drops names it does
-     * not know, which is why the command registry hides inside .rodata.
-     * check_image_coherence.py fails the build if it gets dropped, so that
-     * half of the answer arrives without flashing.
-     * Removed once #29 has chosen the destination. */
-    .dtcm_probe : ALIGN(32)
-    {
-        __dtcm_probe_start = .;
-        KEEP(*(.dtcm_probe))
-        __dtcm_probe_end = .;
-    } > CM55M_S_APP_DATA
 
     /* SRAM0 window: explicit placement only (see header).  Both sections here
      * are content-free -- .pic has no members yet, and the membench buffer is
@@ -276,13 +301,23 @@ SECTIONS
      * Because it is NOLOAD its contents survive a reset and start undefined --
      * every producer writes every pixel it claims.  KEEP so --gc-sections
      * cannot drop the reservation and let something else land on top.
-     * check_placement_budget.py pins symbol -> size -> section -> SRAM. */
+     * check_placement_budget.py pins symbol -> size -> section -> SRAM.
+     *
+     * It is the resident of the loader window (issue #29).  Something had to
+     * be, or the 188,416 B the 2nd bootloader reserves would simply be lost,
+     * and the framebuffer is the best-shaped candidate: NOLOAD, so the loader
+     * never writes it; a fixed 150 KB, so it fits with room to spare; and
+     * needed only by the SPI DMA long after the loader has finished. */
     .lcd_fb (NOLOAD) : ALIGN(32)
     {
         __lcd_fb_start = .;
         KEEP(*(.lcd_fb))
         __lcd_fb_end = .;
-    } > CM55M_S_SRAM
+    } > CM55M_S_SRAM_LDR
+
+    /* High-water mark of the loader window, for `free` (issue #26's rule
+     * applied to the second region).  Same order-sensitivity as __sram_end. */
+    __sram_ldr_end = .;
 
     /* The camera's WDMA3 landing buffer (issue #35).  320x240 planar B/G/R =
      * 225 KB, written by the datapath's write-DMA and read by the CPU one
@@ -310,25 +345,6 @@ SECTIONS
         __cam_slots_end = .;
     } > CM55M_S_SRAM
 
-    /* TEMPORARY (issue #43): SRAM half of the loadable-placement probe, and
-     * the real subject of the experiment.  Every other section in this window
-     * is NOLOAD, so nothing loadable has EVER been placed in SRAM on this
-     * board -- and the 2nd-stage bootloader executes out of the bottom of this
-     * same window (from ORIGIN, spanning BOOT2NDLOADER_SIZE = 0x18000) while it
-     * runs, which is why the SDK's own NN script starts loadable SRAM no lower
-     * than 0x3404D000.
-     *
-     * Placed last, after every NOLOAD reservation, so it lands around
-     * 0x340D7C20 -- above the loader reserve, and representative of where a
-     * relocated .rodata would actually sit.  Before __sram_end so the
-     * placement gate's high-water invariant still covers it.
-     * Removed once #29 has chosen the destination. */
-    .sram_probe : ALIGN(32)
-    {
-        __sram_probe_start = .;
-        KEEP(*(.sram_probe))
-        __sram_probe_end = .;
-    } > CM55M_S_SRAM
 
     /* High-water mark of the SRAM window, for the `free` command (issue #26).
      * MUST stay after every section assigned to CM55M_S_SRAM -- the location
@@ -401,7 +417,23 @@ SECTIONS
 
     ASSERT(__StackLimit >= __HeapLimit, "region RAM overflowed with stack")
 
-    _image_start = LOADADDR(.text);
-    _image_end = LOADADDR(.data) + SIZEOF(.data);
-    _image_size = _image_end - _image_start;
+    /* The loader window must stay free of anything the loader would write.
+     * A cheap first line only -- ld can check the ONE section this file knows
+     * about, but it cannot tell a NOLOAD section from a loadable one, so it
+     * cannot state the actual rule.  check_placement_budget.py does that by
+     * reading the section flags out of the linked ELF, which is also why this
+     * ASSERT is not the thing to reach for when adding a section here. */
+    ASSERT(__sram_ldr_end <= ORIGIN(CM55M_S_SRAM_LDR) + LENGTH(CM55M_S_SRAM_LDR),
+           "loader window overflowed -- .lcd_fb no longer fits below 0x3404D000")
+    ASSERT(__rodata_start >= ORIGIN(CM55M_S_SRAM),
+           ".rodata must not start below the loadable-SRAM floor")
+
+    /* The SDK's scripts define _image_start/_image_end/_image_size here.  They
+     * are NOT carried over (issue #29 audit): nothing reads them -- not the
+     * CMSIS startup, not we2_local_image_gen, not any gate -- and they were
+     * already meaningless before .rodata moved, because .data has no AT>
+     * clause so LOADADDR(.data) is its DTCM address and the subtraction
+     * spanned two disjoint memories (_image_size read 0x20000610, ~537 MB).
+     * Moving .rodata to SRAM makes the image genuinely non-contiguous, so
+     * keeping a symbol that looks like a size but is not would be a trap. */
 }

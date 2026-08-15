@@ -27,7 +27,13 @@ import sys
 
 ITCM = (0x10000000, 0x40000)
 DTCM = (0x30000000, 0x40000)
-SRAM = (0x3401F000, 0x1E1000)
+# The SRAM window is two regions since issue #29.  SRAM_LDR is the part the
+# 2nd-stage bootloader executes from while it loads us, so it may hold NOLOAD
+# reservations only; SRAM is the part where a section with CONTENTS is safe.
+SRAM_LDR = (0x3401F000, 0x2E000)
+SRAM     = (0x3404D000, 0x1B3000)
+# Whole window, for the checks that do not care which half a section is in.
+SRAM_ALL = (SRAM_LDR[0], SRAM_LDR[1] + SRAM[1])
 
 ITCM_MIN_HEADROOM = 8 * 1024
 DTCM_MIN_HEADROOM = 8 * 1024      # gap between __HeapLimit and __StackLimit
@@ -102,7 +108,12 @@ RESIDENCY = [
     # for a sharper reason: a framebuffer that landed in ITCM or DTCM would not
     # fault -- the DMA controller cannot reach TCM on this part, so the panel
     # would simply stay blank while every call reported success.
-    ("lcd_fb", 240 * 320 * 2, ".lcd_fb", "SRAM", SRAM),
+    # Since issue #29 it is also the resident of the loader window: NOLOAD, so
+    # the loader never writes it, and it is what keeps those 188 KB from being
+    # dead space.  Pinned to that region specifically -- if it drifted up into
+    # the loadable region it would silently cost .rodata and the NN arena the
+    # room they were given.
+    ("lcd_fb", 240 * 320 * 2, ".lcd_fb", "SRAM_LDR", SRAM_LDR),
     # Camera buffers (issue #35).  The WDMA3 landing buffer is written by the
     # datapath's DMA and the pipeline slots are read by the SPI DMA, so both
     # inherit the framebuffer's failure mode exactly: in TCM they would not
@@ -189,7 +200,7 @@ def main():
         end = vma + size
         if inside(ITCM, vma, end):
             itcm_end = max(itcm_end, end)
-        elif inside(DTCM, vma, end) or inside(SRAM, vma, end):
+        elif inside(DTCM, vma, end) or inside(SRAM_ALL, vma, end):
             pass
         else:
             errors.append(f"section {name} [0x{vma:08x},0x{end:08x}) outside "
@@ -287,6 +298,35 @@ def main():
             errors.append(f"sections {n1} [0x{lo1:08x},0x{hi1:08x}) and {n2} "
                           f"[0x{lo2:08x},0x{hi2:08x}) overlap")
 
+    # 6b. nothing with CONTENTS may land in the loader window (issue #29).
+    #
+    #     This is the check the linker script cannot make.  ld knows where a
+    #     section goes but not whether it is NOBITS, so the region split can
+    #     express the intent and an ASSERT can cover the one section the script
+    #     names -- neither can state the actual rule.  Here the flags are read
+    #     back off the linked ELF, so it holds for any section anyone adds
+    #     later, including ones this file has never heard of.
+    #
+    #     The hazard is specific: the 2nd-stage bootloader executes from
+    #     0x3401F000 spanning 0x18000 while it loads the application, so a
+    #     LOADABLE section down there has the loader writing over the code it
+    #     is currently running.  A NOLOAD reservation is fine -- nothing is
+    #     written until the app runs, long after the loader is done, which is
+    #     what .lcd_fb relies on.
+    #
+    #     Checked against the whole loader region rather than the 0x18000 the
+    #     loader actually occupies: the SDK's own NN script rounds the hazard
+    #     up to 0x3404D000, and buying margin costs nothing that is not already
+    #     spent on .lcd_fb.
+    for name, (vma, size, flags) in secs.items():
+        if "ALLOC" not in flags or size == 0 or "CONTENTS" not in flags:
+            continue
+        if vma < SRAM[0] and inside(SRAM_ALL, vma, vma + size):
+            errors.append(
+                f"section {name} [0x{vma:08x},0x{vma + size:08x}) has CONTENTS "
+                f"and starts below the loadable-SRAM floor 0x{SRAM[0]:08x} -- "
+                "the 2nd bootloader executes there while loading")
+
     # 7. the `free` command's region accounting still covers everything
     #    (issue #26).  `free` reports SRAM usage as __sram_end - ORIGIN and
     #    DTCM statics as __HeapBase - ORIGIN.  Both are high-water marks that
@@ -295,15 +335,24 @@ def main():
     #    region and `free` went on reporting the old number (0 B of a 64 KB
     #    SRAM reservation) with nothing to catch it.
     sram_end = by_name.get("__sram_end")
+    sram_ldr_end = by_name.get("__sram_ldr_end")
     heap_base = by_name.get("__HeapBase")
     if sram_end is None:
         errors.append("__sram_end missing; `free` cannot report SRAM usage")
+    if sram_ldr_end is None:
+        errors.append("__sram_ldr_end missing; `free` cannot report the "
+                      "loader window")
     if heap_base is None:
         errors.append("__HeapBase missing; `free` cannot report DTCM statics")
     for lo, hi, name in placed:
         if sram_end is not None and inside(SRAM, lo, hi) and hi > sram_end:
             errors.append(f"section {name} ends at 0x{hi:08x}, past __sram_end "
                           f"0x{sram_end:08x} -- `free` would under-report SRAM")
+        if (sram_ldr_end is not None and inside(SRAM_LDR, lo, hi)
+                and hi > sram_ldr_end):
+            errors.append(f"section {name} ends at 0x{hi:08x}, past "
+                          f"__sram_ldr_end 0x{sram_ldr_end:08x} -- `free` "
+                          "would under-report the loader window")
         if (heap_base is not None and inside(DTCM, lo, hi)
                 and lo < heap_base < hi):
             errors.append(f"section {name} [0x{lo:08x},0x{hi:08x}) straddles "

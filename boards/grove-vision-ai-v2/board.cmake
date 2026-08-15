@@ -278,9 +278,6 @@ set(SHELL_SOURCES
     "${BOARD_DIR}/cmds/cmd_devmem.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_dmesg.c"
     "${BOARD_DIR}/cmds/cmd_crash.c"
-    # TEMPORARY (issue #43): the loadable-section placement probe.  Comes back
-    # out once #29 has chosen where .rodata lives.
-    "${BOARD_DIR}/cmds/cmd_placement.c"
     "${BOARD_DIR}/cmds/bench_gate.c"
     "${BOARD_DIR}/cmds/cmd_coremark.c"
     "${BOARD_DIR}/cmds/cmd_membench.c"

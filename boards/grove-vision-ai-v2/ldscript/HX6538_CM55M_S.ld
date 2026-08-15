@@ -137,8 +137,19 @@ SECTIONS
         __exidx_end = .;
     } > CM55M_S_APP_ROM
 
-    /* CMSIS __cmsis_start copy/zero tables: .data's initial values live in
-     * ITCM and are copied to DTCM by the startup, exactly as the SDK does. */
+    /* CMSIS __cmsis_start copy/zero tables, kept SDK-identical.
+     *
+     * [!] The copy table is a NO-OP here, and it is worth knowing why before
+     * anyone relies on it.  .data is placed with `> CM55M_S_APP_DATA` and no
+     * AT> clause, so its LMA equals its VMA -- there is no staging copy in
+     * ITCM.  LOADADDR(.data) == ADDR(.data) == 0x30000000, which makes the
+     * entry below a memcpy of .data onto itself.  What actually fills DTCM is
+     * the 2nd-stage bootloader, which loads each section at its VMA (the image
+     * generator records .data with vma 0x30000000).
+     *
+     * That is also the evidence that a LOADABLE section with a DTCM VMA works
+     * on this part: .data is one, on every boot.  The zero table is real work
+     * -- .bss is NOBITS and nothing else clears it. */
     .copy.table :
     {
         . = ALIGN(4);
@@ -218,6 +229,23 @@ SECTIONS
        __data_end__ = .;
     } > CM55M_S_APP_DATA
 
+    /* TEMPORARY (issue #43): DTCM half of the loadable-placement probe.
+     * LOADABLE, unlike every other section this port adds -- that is the whole
+     * point.  DTCM itself is already proven (see the .copy.table note above:
+     * .data is a loadable DTCM section on every boot); what this tests is the
+     * remaining unknown, that the image generator carries an ADDITIONAL
+     * section whose NAME it has never seen.  The generator drops names it does
+     * not know, which is why the command registry hides inside .rodata.
+     * check_image_coherence.py fails the build if it gets dropped, so that
+     * half of the answer arrives without flashing.
+     * Removed once #29 has chosen the destination. */
+    .dtcm_probe : ALIGN(32)
+    {
+        __dtcm_probe_start = .;
+        KEEP(*(.dtcm_probe))
+        __dtcm_probe_end = .;
+    } > CM55M_S_APP_DATA
+
     /* SRAM0 window: explicit placement only (see header).  Both sections here
      * are content-free -- .pic has no members yet, and the membench buffer is
      * NOLOAD -- so this region still contributes nothing to the image. */
@@ -280,6 +308,26 @@ SECTIONS
         __cam_slots_start = .;
         KEEP(*(.cam_slots))
         __cam_slots_end = .;
+    } > CM55M_S_SRAM
+
+    /* TEMPORARY (issue #43): SRAM half of the loadable-placement probe, and
+     * the real subject of the experiment.  Every other section in this window
+     * is NOLOAD, so nothing loadable has EVER been placed in SRAM on this
+     * board -- and the 2nd-stage bootloader executes out of the bottom of this
+     * same window (from ORIGIN, spanning BOOT2NDLOADER_SIZE = 0x18000) while it
+     * runs, which is why the SDK's own NN script starts loadable SRAM no lower
+     * than 0x3404D000.
+     *
+     * Placed last, after every NOLOAD reservation, so it lands around
+     * 0x340D7C20 -- above the loader reserve, and representative of where a
+     * relocated .rodata would actually sit.  Before __sram_end so the
+     * placement gate's high-water invariant still covers it.
+     * Removed once #29 has chosen the destination. */
+    .sram_probe : ALIGN(32)
+    {
+        __sram_probe_start = .;
+        KEEP(*(.sram_probe))
+        __sram_probe_end = .;
     } > CM55M_S_SRAM
 
     /* High-water mark of the SRAM window, for the `free` command (issue #26).

@@ -19,6 +19,17 @@
 static struct cam_lcd_sink_stats sink_stats;
 static int sink_attached;
 
+/*
+ * The optional overlay (issue #48).
+ *
+ * Set by attach() and cleared by detach(), so it cannot outlive the command
+ * that asked for it.  Read on the producer thread inside consume(); written on
+ * a shell thread only while no stream is running, which is what attach()'s
+ * exclusivity guarantees.
+ */
+static struct cam_lcd_overlay sink_overlay;
+static int sink_has_overlay;
+
 /* Defined below; consume() has to name it when balancing its delivery. */
 static struct frame_sink cam_lcd_sink;
 
@@ -58,11 +69,38 @@ static int cam_lcd_open(void *ctx, enum frame_format fmt, uint16_t w,
  * statement's worth of cleanup here, reached from everywhere.  Getting that
  * wrong leaks a slot per failure and the ring stops handing any out.
  */
+/* Trampoline: the LCD driver's callback signature is its own, and the sink's
+ * overlay contract is the sink's.  Only reached with sink_has_overlay set. */
+static void cam_lcd_draw(void *ctx, uint16_t *fb, uint16_t fb_w, uint16_t fb_h)
+{
+	(void)ctx;
+	sink_overlay.draw(sink_overlay.ctx, fb, fb_w, fb_h);
+}
+
 static int cam_lcd_consume(void *ctx, const struct frame_desc *f)
 {
 	int rc = 0;
+	int overlay_ok = 0;
 
 	(void)ctx;
+
+	/*
+	 * [!] BEFORE THE GUARD, and that ordering is the design (issue #48).
+	 *
+	 * This is where a whole NPU inference happens under `nn preview`.  It
+	 * runs with the panel released so that `lcd` commands on other threads
+	 * keep working, and so that a stop landing here is not waiting on the
+	 * panel as well as on the NPU.  A failure means no boxes on this frame,
+	 * not a blank preview -- the picture is worth more than the annotation.
+	 */
+	if (sink_has_overlay && sink_overlay.process != NULL) {
+		if (sink_overlay.process(sink_overlay.ctx, f->data,
+		                         (uint16_t)CAM_FRAME_WIDTH,
+		                         (uint16_t)CAM_FRAME_HEIGHT) == 0)
+			overlay_ok = 1;
+		else
+			sink_stats.overlay_errors++;
+	}
 
 	/*
 	 * TX_NO_WAIT, and a skipped frame if the panel is taken.  Blocking here
@@ -75,11 +113,16 @@ static int cam_lcd_consume(void *ctx, const struct frame_desc *f)
 		sink_stats.busy++;
 		rc = -1;
 	} else {
-		/* lcd_blit_le: the slot is little-endian RGB565 and the panel
-		 * wants wire order.  The driver owns that swap. */
-		int blit = lcd_blit_le(0u, 0u, (uint16_t)CAM_FRAME_WIDTH,
-		                       (uint16_t)CAM_FRAME_HEIGHT,
-		                       (const uint16_t *)f->data, NULL, NULL);
+		/* lcd_blit_le_overlay: the slot is little-endian RGB565 and the
+		 * panel wants wire order.  The driver owns that swap, and calls
+		 * the draw hook between the swap and the DMA. */
+		int blit = lcd_blit_le_overlay(
+			0u, 0u, (uint16_t)CAM_FRAME_WIDTH,
+			(uint16_t)CAM_FRAME_HEIGHT,
+			(const uint16_t *)f->data,
+			(overlay_ok && sink_overlay.draw != NULL)
+				? cam_lcd_draw : NULL,
+			NULL, NULL, NULL);
 		lcd_release();
 
 		if (blit == 0) {
@@ -122,7 +165,7 @@ static struct frame_sink cam_lcd_sink = {
 	.close   = cam_lcd_close,
 };
 
-int cam_lcd_sink_attach(void)
+int cam_lcd_sink_attach(const struct cam_lcd_overlay *ov)
 {
 	int rc;
 
@@ -161,14 +204,26 @@ int cam_lcd_sink_attach(void)
 		}
 	}
 
-	sink_stats.delivered = 0u;
-	sink_stats.dropped   = 0u;
-	sink_stats.errors    = 0u;
-	sink_stats.busy      = 0u;
+	sink_stats.delivered      = 0u;
+	sink_stats.dropped        = 0u;
+	sink_stats.errors         = 0u;
+	sink_stats.busy           = 0u;
+	sink_stats.overlay_errors = 0u;
+
+	/* Published before the subscribe, so the producer can never see a sink
+	 * that is attached with a half-written overlay. */
+	if (ov != NULL) {
+		sink_overlay     = *ov;
+		sink_has_overlay = 1;
+	} else {
+		sink_has_overlay = 0;
+	}
 
 	rc = camera_subscribe(&cam_lcd_sink);
-	if (rc != CAM_OK)
+	if (rc != CAM_OK) {
+		sink_has_overlay = 0;
 		return rc;
+	}
 
 	sink_attached = 1;
 	return CAM_OK;
@@ -176,9 +231,23 @@ int cam_lcd_sink_attach(void)
 
 int cam_lcd_sink_detach(void)
 {
+	int rc;
+
 	if (!sink_attached)
 		return CAM_OK;
-	return camera_unsubscribe(&cam_lcd_sink);
+	rc = camera_unsubscribe(&cam_lcd_sink);
+	/*
+	 * [!] ONLY ON SUCCESS.  A refused unsubscribe -- which is what a lost
+	 * producer gets (CAM_ST_LOST) -- means the sink is STILL ATTACHED and a
+	 * consume() may still be running in it.  Clearing the overlay there
+	 * would mutate state that a live producer reads, which is the exact race
+	 * the refusal exists to prevent: the backstop would have become the
+	 * hazard.  Leaving it set costs nothing, because the camera never
+	 * delivers another frame without a reboot.
+	 */
+	if (rc == CAM_OK)
+		sink_has_overlay = 0;
+	return rc;
 }
 
 void cam_lcd_sink_stats(struct cam_lcd_sink_stats *out)

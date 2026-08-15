@@ -77,6 +77,18 @@ int blazeface_decode(const struct npu_tensor *outs, unsigned n,
                      struct bf_det *out, int max);
 
 /**
+ * @brief  Are these tensors BlazeFace-shaped, without decoding anything?
+ *
+ * For a caller that must decide BEFORE it commits to something expensive --
+ * `nn preview` starts a camera stream, and discovering the wrong model is open
+ * on every frame would be a preview that runs and silently never annotates.
+ * Uses the same lookups blazeface_decode() does, so the two cannot disagree.
+ *
+ * @return non-zero if a decode would find all four tensors.
+ */
+int blazeface_shapes_ok(const struct npu_tensor *outs, unsigned n);
+
+/**
  * Score threshold as a milli-probability on the same scale as bf_det.score.
  * Values outside 1..999 are REJECTED (returns non-zero and changes nothing):
  * 0 and 1000 are the poles of the inverse sigmoid.

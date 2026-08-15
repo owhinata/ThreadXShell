@@ -1220,7 +1220,9 @@ impossible to unwind ever again.
   rev-C bounce costs more again.  Overlapping capture with blit, and giving the
   sink its own thread, are deliberately left out of this milestone.  Measured
   at about 10 fps, which is slower than that ceiling alone explains -- where the
-  rest of the time goes is unmeasured.  Tracked in issue #38.
+  rest of the time goes is unmeasured.  Tracked in issue #38.  `nn preview`
+  (#48) adds an inference to the same serial chain, so it is slower again by
+  about the inference time.
 - The producer's stack high-water mark (4 KB allocated; `thread` reported a
   568 B peak on the first run, so there is room to trim once the sink work is
   settled).
@@ -1241,8 +1243,9 @@ impossible to unwind ever again.
 ## Ethos-U55 inference (`nn`)
 
 Capture a frame, run it on the NPU, print the result.  Classification (top 5,
-92 ms) since issue #44; BlazeFace face detection (13 ms) since issue #45.  The
-console stays usable while either runs.
+92 ms) since issue #44; BlazeFace face detection (13 ms) since issue #45; face
+boxes on the LIVE preview (`nn preview`) since issue #48.  The console stays
+usable while any of them runs.
 
 ```
 nn open [cls|det|<addr>]  # QSPI XIP on, NPU out of reset, model parsed in place
@@ -1650,8 +1653,23 @@ three-valued around the threshold, and the 8x8 layer is all-or-nothing.  The
 ST's quantisation, not a decoder property, but it explains a peak score that
 jumps rather than sliding as `nn thresh` moves.
 
-**Measured, and it is the first thing anyone will ask about.**  A face filling
-the centre crop is detected by the 8x8 group at its saturated value, so:
+**[!] SINCE ISSUE #48 THIS IS USUALLY NOT WHAT YOU SEE.**  The wider field of
+view makes a face smaller in the input, so it is picked up by the FINE 16x16
+grid rather than the coarse 8x8 one -- and that tensor's scale is 0.036937 with
+zero point 49, giving a ceiling of 2,881/1000 and a threshold step of about
+0.037.  Measured after #48, at a normal working distance:
+
+```
+peak raw 1292/1000    <- above the 8x8 group's 1224 ceiling, so it is 16x16
+score     781/1000    <- sigmoid(1.2919), and it MOVES between faces
+```
+
+So the confidence discriminates again.  What follows is what the 8x8 group does
+when a face is large enough to reach it, which the old 128x128 centre crop made
+the common case:
+
+**Measured before #48.**  A face filling the centre crop is detected by the 8x8
+group at its saturated value, so:
 
 ```
 peak raw 1224/1000    <- (127 - 126) * 1.2247, the largest value that tensor holds
@@ -1673,26 +1691,182 @@ the decoded sizes to differ by the ratio of the scales.
 
 ### Limits worth stating with any result
 
-- **Field of view.**  The input is a CENTRE CROP of the 320x240 frame, not a
-  resize, so `nn detect` sees a 128x128 window at +96+56.  Every result prints
-  it.
+- **Field of view.**  The largest centred square of the frame -- 240x240 at
+  +40+0 -- scaled to the model's 128x128 (issue #48).  Every result prints it.
+  Until #48 it was a 128x128 CROP at +96+56, a field of view so narrow the
+  detector was nearly useless at any normal working distance.
+- **The model sees the RAW frame, not the one on the panel.**  The preview
+  carries white balance, gamma and saturation tuned by eye for the glass; the
+  detector reads the planar B/G/R the datapath wrote.  Same frame, different
+  pixels.  Feeding it the gamma-encoded image is plausibly BETTER -- the model
+  was trained on sRGB photographs -- but it is a separate experiment, and doing
+  it in the same change as the field of view would have left nothing to compare
+  against.
 - **NMS is capped.**  At most 64 candidates survive to NMS and at most 8
   detections come out.  Both counts are printed, so the cap is never a surprise.
 - **The threshold is refused, not clamped, outside 1..999.**  0 and 1000 are the
   poles of the inverse sigmoid; a silently clamped threshold is a setting that
   does not do what it says.
 
+### The resize, and why it is host-tested
+
+`port/npu/nn_preproc.c`: crop the largest centred rectangle with the INPUT's
+aspect ratio, then bilinear-scale it in, in fixed point, with no libm and no
+vectorisation.  It depends on nothing -- no hardware, no ThreadX, no camera or
+NPU singleton -- so `test/test_nn_preproc.c` compiles the real thing and drives
+it with synthetic frames.
+
+That is not ceremony.  Every bug this file can have arrives on the board as a
+plausible box in the wrong place, and each hypothesis otherwise costs a flash
+cycle of a NOR rated ~100k of them.  Three choices are pinned by tests because
+all three are invisible by eye:
+
+- **Half-pixel sample centres.**  `src = origin + (dst + 0.5) * extent /
+  dst_extent - 0.5`.  An align-corners implementation differs by half a source
+  pixel, which against a face is nothing and against a test ramp is exact.
+- **Box edges carry NO half-pixel term.**  The `- 0.5` converts a continuous
+  coordinate to a sample INDEX; an edge is already continuous.  Applying the
+  sampling convention to edges biases every box by half a source pixel.  The
+  two mappings are one transform, and `nn detect` now prints boxes in FRAME
+  pixels through the same function the overlay draws with -- so the console and
+  the panel cannot disagree.
+- **Mathematical floor, not a C cast.**  Truncation toward zero is off by one
+  for negative coordinates, and the `- 0.5` makes the first destination pixel
+  negative on any upscale.
+
+The four taps accumulate in one signed 32-bit accumulator: the Q8 weights are
+built as `w1 = f`, `w0 = 256 - f`, so they sum to exactly 256 per axis and the
+whole sum is bounded by `255 * 256 * 256` = 2^24.  The bound holds because of
+how the weights are constructed, not because the pixels happened to be small.
+
 ### Not yet answered
 
-- A scalar resize, so the detector sees the whole frame instead of the centre
-  crop.  The vendor's resize is a Helium routine and linking it would put
-  predicated MVE in the image.
-- Inference of either kind over the live preview.  It needs #38 (capture, pack
-  and blit are serialised) settled first.
+- Whether feeding the model the gamma-encoded preview pixels detects better than
+  the raw frame (see the limits above).
 - Whether the U55 can reach CM55M TCM.  UNVERIFIED -- the Ethos-U55 TRM does not
   describe this SoC's interconnect and the SVD describes registers, not routing.
   The arena is in SRAM because the donor puts it there, which is evidence and not
   proof.
+
+## Face boxes on the live preview (`nn preview`)
+
+Issue #48.  The camera on the panel with the detections drawn on it:
+
+```
+nn open det
+nn preview             # Ctrl+C to stop
+nn preview 30          # or a frame count
+```
+
+`camera preview` is unchanged and still shows a plain picture.
+
+**Measured on the board:** 100 frames in 12,500 ms = **8.0 fps**, with **100
+inferences for 100 frames** -- every published frame is inferred and shown, none
+dropped and none refused.  Against the ~10 fps of a plain preview that is about
+25 ms per frame for inference (12-13 ms), the resize and the decode together.
+The producer thread's stack high-water came out at **964 B of 8,192**: a single
+custom-operator graph really does keep the CPU-side call chain shallow, since
+the work is in the NPU.  8 KiB stays as the allocation anyway -- the margin is
+the point, and the measurement is what says it is not needed rather than an
+argument that it might be.
+
+### Inference runs on the camera producer thread
+
+Not on a worker.  The producer already serialises capture -> pack -> blit
+(issue #38), and it re-arms WDMA3 only AFTER every sink has consumed -- the SDK
+gates the next frame on `sensordplib_retrigger_capture()`.  So the raw frame is
+stable for the whole of `consume()`, and the boxes are guaranteed to belong to
+the frame being displayed.
+
+A worker thread would decouple the frame rate, at the price of drawing last
+frame's boxes on this frame.  That is the harder failure to see: at 8 fps a
+one-frame lag looks like a slightly slow tracker, not like a bug.
+
+The order inside `consume()` is the design:
+
+1. **inference, with NO panel guard held.**  It can take the whole NPU timeout
+   if an interrupt is lost, and holding the panel across that would block every
+   other `lcd` command for the duration.
+2. **acquire the panel once**, then stage, draw and present without releasing.
+   The overlay hook runs between the staging copy and the DMA
+   (`lcd_blit_le_overlay()`), so a box is never half-transferred.
+
+A failed inference means no boxes on that frame, not a blank preview -- the
+picture is worth more than the annotation.  `camera stats` counts those frames
+separately from sink errors.
+
+### [!] A stop that is not confirmed poisons the camera
+
+`camera_stream_stop()` is documented as synchronous so that callers may detach a
+sink afterwards, but its wait is BOUNDED.  Once a sink can run an inference
+inside `consume()`, that matters: the ethos-u driver waits
+`ETHOSU_SEMAPHORE_WAIT_INFERENCE` and takes the semaphore a SECOND time on its
+timeout/interrupt race path, then resets.  A Ctrl+C landing on a lost NPU
+interrupt could therefore return `CAM_ERR_TIMEOUT` while the producer was still
+inside `consume()` -- and both previews then detached the sink unconditionally,
+which is the one thing `frame_pipeline` cannot survive (publish() has already
+pre-pinned the sink and called it with the lock released).
+
+The fix is not a bigger number.  A hard timing proof is not available here: the
+tails include two NPU soft resets bounded only by iteration counts, the panel's
+abort-and-poll recovery, and a camera quiesce that ends in sensor I2C.  A design
+whose memory safety rests on arithmetic nobody can complete is wrong the first
+time a vendor path is slower than assumed.  So:
+
+- **The join is success-only.**  `CAM_OK` proves the producer is idle; anything
+  else proves nothing.  Every caller detaches only on `CAM_OK`.  The same rule
+  covers the SETUP path: `camera_stream_start()` returning `CAM_ERR_BUSY` means
+  a stream is already running with this sink attached, so that failure does not
+  detach either.  (Today the sink's exclusive attach makes that unreachable --
+  it is handled because "unreachable" rests on another module's exclusivity
+  rather than on anything checked at that line.)
+- **`cam_lcd_sink_detach()` clears its overlay only when the unsubscribe
+  succeeded.**  A refused unsubscribe means the sink is still attached and a
+  `consume()` may still be running in it; mutating overlay state there would be
+  the very race the refusal exists to prevent.
+- **An unconfirmed join enters `CAM_ST_LOST`**, which refuses every camera entry
+  point that touches hardware, for good.  `CAM_ST_FAULTED` could not express
+  this -- it is explicitly the recoverable state, and the next bring-up rebuilds
+  from it, which is exactly the catastrophic action here.
+- **Nothing is detached, torn down or released** on that path, and `nn` stays
+  leased.  It is safe only because all overlay and sink state is static.
+- `camera stats` still answers (it reads no hardware and takes no mutex), so the
+  refusal always comes with an explanation.
+
+The overlay also carries a stop-pending flag, set BEFORE the join is asked for
+and checked three times -- before preprocessing, immediately before the invoke,
+and after inference before the panel is touched.  It skips work not yet begun,
+which is what keeps an ordinary Ctrl+C from ever waiting on the NPU.  It cannot
+cancel an invoke already waiting; nothing can.  It narrows the window, and
+`CAM_ST_LOST` makes the remainder safe.
+
+The inference timeout came down from 5,000 ticks to **1,000** as part of this,
+and now has ONE definition -- `NPU_INFERENCE_TIMEOUT_TICKS` in
+`port/npu/npu_hw.h`, which `board.cmake` parses.  It used to be written in both
+places with only the CMake literal live, so the header's constant was dead and
+would have drifted the first time anyone tuned it.
+
+### The producer thread's stack
+
+Raised from 4 KiB to 8 KiB: it now carries TFLM's `Invoke()`, the ethos-u driver
+and the BlazeFace decoder, a call chain that had only ever run on a 4 KiB shell
+or background-job stack.  The producer's own measured peak before this was
+568 B, so the old allocation was sized for a thread that did almost nothing.
+8 KiB is a starting allocation, not a proof -- `thread` reports the high-water
+mark, and that is the number to check.
+
+### [!] This is the first configuration that uses five interrupt consumers
+
+Camera (up to 26 lines) + UART0 (1) + LCD SPI/DMA (2) + QSPI and U55 (2) = 31 of
+the 32 EPK wrap slots, reaching exactly 32 if the UART's DMA fallback is ever
+used.  `nn run` never brings the panel up, so nothing before `nn preview` had
+all five at once.
+
+There is no room for an unexpected vendor-enabled line.  The wrap is
+fail-closed, so the symptom would be the camera refusing to come up during
+`nn preview` rather than silent mis-accounting -- but it is worth running
+`thread` once after the first `nn open det`, when IRQ 133 is also present, to
+see the cpu% column still reported as trustworthy.
 
 ## Flashing and recovery
 
@@ -1718,10 +1892,10 @@ terminal before running `--target flash`.
 ## Future work
 
 - LED / button / GPIO commands, SD (SPI mode), PDM microphone.
-- General object detection.  Classification landed in #44 and face detection in
-  #45; the camera's output is already in the shape the donor's `tflm_yolov8_od`
-  expects, but that model wants a 1,053 KB arena against the 450 KB reserved
-  here, and drawing boxes on the preview runs into #38.
+- General object detection.  Classification landed in #44, face detection in
+  #45 and boxes on the live preview in #48; the camera's output is already in
+  the shape the donor's `tflm_yolov8_od` expects, but that model wants a
+  1,053 KB arena against the 450 KB reserved here.
 - MVE.  [!] The reason it is barred is WRONG: the Armv8-M ARM's PushStack /
   PopStack save and restore VPR under `HaveMve()`, and rule RZWQX makes MVE
   execution set `CONTROL.FPCA`, so the hardware preserves it across a context

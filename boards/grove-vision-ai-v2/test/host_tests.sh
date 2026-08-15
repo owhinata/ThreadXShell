@@ -154,6 +154,19 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_cam_convert"
 "$out/test_cam_convert"
 
+# issue #48 -- the camera frame -> input tensor resize, and the detection box ->
+# frame pixel map (port/npu/nn_preproc.c).  Two mappings that MUST be one
+# transform: sampling carries the half-pixel term and a box edge must not, and
+# getting that wrong shifts every box by half a source pixel -- invisible
+# against a face, and a flash cycle per hypothesis to chase on hardware.  Also
+# where the negative-coordinate upscale path is pinned, since C's toward-zero
+# cast is off by one exactly there.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/npu" \
+    "$here/test_nn_preproc.c" "$board/port/npu/nn_preproc.c" \
+    $LDFLAGS -o "$out/test_nn_preproc"
+"$out/test_nn_preproc"
+
 # issue #35 -- the auto exposure / white balance control laws
 # (port/camera/cam_auto.c).  A control loop's failure modes -- oscillation,
 # runaway, hunting on noise -- all look fine in a single capture and are

@@ -154,6 +154,28 @@
    **DMAC1 の IRQ 133 を有効化する** — EPK は番号を列挙せず ISER スナップショットで
    測ること。
 
+   **推論の前処理（#48）**: 入力は **240x240（フレーム中央の最大正方形）を SCALE** する
+   （従来は 128x128 の中央 crop で、実用距離では画角が狭すぎた）。実装は
+   `port/npu/nn_preproc.c` — 依存ゼロ（HW も ThreadX も singleton も無し）なので
+   **ホストテストが本体を直接叩く**。**外さない・薄めない**: この 3 つはどれも目視で
+   気付けない。(a) **half-pixel 中心**の bilinear、(b) **箱の「辺」には半ピクセル項を
+   付けない**（サンプリングの規約を辺に当てると全部の箱が半ソースピクセルずれる。
+   同一変換の 2 表現なので `nn detect` の表示も overlay と同じ関数を通す）、
+   (c) **負座標は数学的 floor**（C の 0 方向切り捨ては upscale で 1 ずれる）。
+   Q8 の重みは `w1 = f` / `w0 = 256 - f` で**構成上必ず和が 256**なので
+   累算は `255*256*256` = 2^24 に収まる（32 bit で足りる根拠がこれ）。
+   デコーダの float は clamp も finite 保証もしないので、**int 化の前に
+   非有限を弾き範囲を clamp する**。
+
+   **ライブ overlay（#48）**: 推論は **camera producer スレッド・`consume()` 内**。
+   順序は **推論（パネルガード無し）→ ガード 1 回で stage/draw/present**。
+   overlay callback は**パネルガード保持中**なので block / sleep / 推論 / 他ロック /
+   LCD API 再入は禁止（ガードは再帰的 = 再入は deadlock ではなくトランザクション破壊）。
+   唯一の例外は純関数 `lcd_rect_wire()`。stop-pending は **join 要求より前**に立て、
+   前処理前 / invoke 直前 / 推論後の 3 点で見る。
+   **推論タイムアウトの定義は `port/npu/npu_hw.h` の 1 箇所**（board.cmake が parse。
+   2 箇所に書かない — 以前は片方が dead だった）。
+
    **顔検出（#45）**: op resolver は **`MicroMutableOpResolver<1>` のまま**維持する。
    理由は「キャッシュ的に危険だから」ではない（#46 で消えた） — **CMSIS-NN（= Helium）を
    持ち込まない / Vela が全面 offload していないモデルを `AllocateTensors` で
@@ -252,8 +274,21 @@
    - `lcd_blit()` は **wire order (BE)** を要求し、pipeline の `FRAME_FMT_RGB565` は
      **LE**。swap は `lcd_blit_le()`（ドライバ所有）。**slot を wire order で publish して
      format を偽らない。**
+   - [!] **`camera_stream_stop()` は成功時のみ join を保証する（#48）。**
+     `CAM_OK` = producer 停止済み。**timeout は何も証明しない**（待ちは有界で、
+     sink は `consume()` 内で推論を回せる）。**全呼び出し元は `CAM_OK` の時だけ
+     detach する。** publish() は sink を pre-pin して lock を離してから
+     consume() を呼ぶので、走っている sink の unlink は pipeline が耐えられない。
+     未確認 join は **`CAM_ST_LOST`** = **再起動まで全ハードウェア操作を拒否**
+     （`cam_api_enter()` で、mutex を取る前に）。**`CAM_ST_FAULTED` で代用しない**
+     — あれは「次の bring-up で作り直す」状態で、ここでは最悪の動作になる。
+     この経路では detach も teardown も所有権解放もしない。
+     `camera_stream_stats()` は mutex もハードウェアも触らないので拒否理由は必ず読める。
    - **EPK 容量は `GROVE_EPK_WRAP_MAX` == `TX_GLUE_EPK_MAX_IRQ` == 32**
      （`_Static_assert` で結んである。片方だけ動かさない）。
+     **[!] `nn preview`（#48）で 31/32 に達する**（camera 26 + UART0 1 + LCD 2 +
+     QSPI/U55 2。UART の DMA fallback を使うと 32）。余裕は無い。fail-closed なので
+     症状は「camera が上がらない」であって黙った誤計上ではない。
      measure-then-wrap は **2 ラウンド**（間の I2C モードテーブルは PRIMASK 外。
      1 ラウンドにすると ~10 ms 割込み禁止で tick を落とす）。
    - **Timer0 の割込み到達 probe（`grove_timer_seam_probe_delivery()`）を外さない。**

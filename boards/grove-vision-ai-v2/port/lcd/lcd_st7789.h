@@ -234,6 +234,68 @@ int lcd_blit(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 int lcd_blit_le(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                 const uint16_t *pixels, int (*stop)(void *), void *stop_arg);
 
+/**
+ * @brief  As lcd_blit_le(), with a chance to draw ON the staged frame before it
+ *         goes out (issue #48).
+ *
+ * @p overlay is called once, after @p pixels have been converted into the
+ * driver's framebuffer and before the DMA starts, with that framebuffer and its
+ * geometry. It is how `nn preview` puts face boxes on a camera frame without a
+ * second full-frame buffer and without the caller ever holding the panel guard
+ * itself.
+ *
+ * [!] THE CALLBACK RUNS WITH THE PANEL GUARD HELD, on the caller's thread --
+ * the camera producer, in the only user today. That makes it a prohibition, not
+ * an invitation:
+ *
+ *   - it must NOT block, sleep, or wait on anything;
+ *   - it must NOT run inference or any other long operation -- it sits between
+ *     a staged frame and the wire, and everything else that wants the panel is
+ *     failing its non-blocking acquire meanwhile;
+ *   - it must NOT take the camera API or frame-pipeline lock;
+ *   - it must NOT call any other LCD entry point. The guard is RECURSIVE, so
+ *     re-entry would not deadlock -- it would quietly corrupt the transaction
+ *     in progress, which is far worse;
+ *   - it may write ONLY the framebuffer it is handed, and only within the
+ *     w * h pixels it is told about, and must not retain the pointer.
+ *
+ * The single exception, and the reason it is enough: lcd_rect_wire() below is
+ * PURE. It touches no driver state and takes no lock, so calling it from here
+ * is not re-entry in any sense that matters.
+ *
+ * @param overlay  may be NULL, which makes this exactly lcd_blit_le()
+ * @param ctx      passed back to @p overlay untouched
+ */
+int lcd_blit_le_overlay(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                        const uint16_t *pixels,
+                        void (*overlay)(void *ctx, uint16_t *fb,
+                                        uint16_t fb_w, uint16_t fb_h),
+                        void *ctx,
+                        int (*stop)(void *), void *stop_arg);
+
+/**
+ * @brief  Draw a hollow rectangle into a caller-supplied framebuffer.
+ *
+ * PURE: no driver state, no lock, no hardware -- which is what makes it the one
+ * thing an lcd_blit_le_overlay() callback may call. It is here rather than in
+ * the caller only because the wire byte order is this driver's knowledge and
+ * should stay so.
+ *
+ * Coordinates are SIGNED and the rectangle is CLIPPED, because a detection box
+ * routinely runs past the edge of the image it was found in. A rectangle that
+ * clips away entirely draws nothing.
+ *
+ * @param fb        framebuffer, @p fb_w * @p fb_h pixels, in WIRE order
+ * @param x0,y0     top-left, inclusive
+ * @param x1,y1     bottom-right, EXCLUSIVE
+ * @param rgb565    colour in normal little-endian RGB565; swapped here
+ * @param stroke    edge thickness in pixels; a box thinner than twice this
+ *                  comes out solid, which is the honest rendering of it
+ */
+void lcd_rect_wire(uint16_t *fb, uint16_t fb_w, uint16_t fb_h,
+                   int32_t x0, int32_t y0, int32_t x1, int32_t y1,
+                   uint16_t rgb565, uint16_t stroke);
+
 int lcd_fill(uint16_t rgb565, int (*stop)(void *), void *stop_arg);
 
 /** Colour-bar test pattern: proves the wiring AND the byte order. */

@@ -15,12 +15,28 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Finite inference timeout, in ThreadX ticks (1 ms).  The driver header would
+/*
+ * Finite inference timeout, in ThreadX ticks (1 ms).  The driver header would
  * otherwise define ETHOSU_SEMAPHORE_WAIT_INFERENCE as "wait forever", and a
  * lost NPU interrupt would then suspend the calling shell job permanently.
- * Generous rather than tight: a MobileNet inference on this part is
- * milliseconds, so five seconds only ever expires when something is wrong. */
-#define NPU_INFERENCE_TIMEOUT_TICKS 5000u
+ *
+ * [!] THIS LINE IS THE BUILD'S SOURCE OF TRUTH.  board.cmake PARSES it and
+ * passes the value to the ethos-u driver as ETHOSU_SEMAPHORE_WAIT_INFERENCE;
+ * configure fails if the line cannot be found.  It used to be written here as
+ * documentation AND separately as a literal in board.cmake, where only the
+ * literal was live -- so this constant was dead, and would have drifted the
+ * first time anyone tuned it.
+ *
+ * One second, down from five since issue #48.  Two things changed: inference
+ * now runs on the camera producer thread, where the wait sits inside the
+ * window camera_stream_stop() has to join; and the ethos-u driver takes this
+ * semaphore TWICE on its timeout/interrupt race path, so the budget is 2x this
+ * number.  One second is still about 11x the worst measured inference (92 ms
+ * for classification, 13 ms for the detector) -- generous enough that a model
+ * or clock change will not trip it, tight enough that two of them plus the
+ * panel's DMA timeout stay well inside CAM_STOP_JOIN_TICKS.
+ */
+#define NPU_INFERENCE_TIMEOUT_TICKS 1000u
 
 #ifdef __cplusplus
 extern "C" {

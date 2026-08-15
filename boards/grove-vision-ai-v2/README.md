@@ -1237,7 +1237,134 @@ impossible to unwind ever again.
 - The rev-C bounce, which this board (rev D) does not exercise.  Deliberately
   not tracked as an issue: it is a condition this board cannot reach, not a
   piece of work.  This section is where it lives until a rev-C board turns up.
-- Ethos-U55 inference, scoped in issue #40.
+
+## Ethos-U55 inference (`nn`)
+
+One-shot classification: capture a frame, run it on the NPU, print the top 5.
+91 ms for a MobileNet, and the console stays usable while it runs.  Issue #44.
+
+```
+nn open                 # QSPI XIP on, NPU out of reset, model parsed in place
+nn info                 # tensors, arena use, which interrupts got wrapped
+nn run                  # one frame -> one inference
+nn run &                # the same, in the background; the prompt comes straight back
+nn close
+```
+
+The model is a SEPARATE flash partition from the firmware:
+
+```
+cmake --build build/grove-vision-ai-v2 --target flash-model
+```
+
+which means iterating on firmware never disturbs it, and swapping models never
+rewrites the bootloader -- worth having on a part with ~100k NOR cycles.
+
+### One operator, and therefore no CMSIS-NN
+
+`MicroMutableOpResolver<1>` with `AddEthosU()` and nothing else.  A Vela-compiled
+model folds its whole graph into the single `ethos-u` custom operator, so there
+is no CPU kernel to register and no reason for CMSIS-NN -- which matters here
+because CMSIS-NN is Helium, and Helium is what the predication scan keeps out of
+the image.  A model Vela did NOT fully offload fails at `AllocateTensors` with a
+missing-operator error rather than quietly falling back to a scalar reference
+kernel; a silent fallback would be slow in a way nobody would think to look for.
+
+TFLM is built from source for the same reason: the only 2412-tag archive the SDK
+ships is the CMSIS-NN one.  Linked cost is **15,360 B** -- an order of magnitude
+under the 59 KB that summing the archive's object sizes suggests, because
+`--gc-sections` drops everything this narrow configuration cannot reach.
+
+### [!] The flash read window is not live at reset
+
+`nn` parses the flatbuffer in place through the memory-mapped read alias at
+`0x3A000000`, and that window does not exist until the application opens the
+QSPI master and enables XIP.  The bootloader reads the firmware through the
+controller's register interface, so nothing before us leaves XIP on.
+
+The symptom is not what unmapped memory usually looks like.  Reads do not fault
+and do not return 0xFF:
+
+```
+devmem dump 0x3AB7B000 32   ->  07 0c 40 00 00 00 00 00 ...
+devmem dump 0x3A000000 32   ->  07 0c 40 00 00 00 00 00 ...
+```
+
+Identical bytes 11 MB apart -- a controller register block aliased across the
+whole window.  `nn open` brings XIP up and the same dump then reads
+`24 00 00 00 54 46 4c 33`.  `devmem`'s flash region is listed read-only for
+exactly this: without being able to dump the window, the difference between
+"nothing was flashed" and "the window is shut" is guesswork.
+
+### [!] Bringing up the flash enables an interrupt nobody named
+
+`hx_lib_spi_eeprom_open()` turns on DMAC1's combined interrupt (133) -- the QSPI
+library moves flash data with DMA.  Nothing predicted that line.  The EPK
+snapshot wrap caught it because it measures what got enabled rather than listing
+what we expect, which is the whole argument for doing accounting that way.
+`nn info` prints the wrapped set and it reads `irq 133, 192`.
+
+### The NPU was never brought up before this
+
+`TZ_Set_ALL_Secure()` -- what SEC_ONLY runs -- configures the U55's APB side and
+stops.  The PORSL/PORPL, per-master MSC and reset->normal sequence lives in
+`TZ_Set_Secure_ByCFG()`, which this build never reaches, so the NPU sat in
+whatever state the bootloader left it in.
+
+The sequence is the donor's secure branch with every write read back; a mismatch
+aborts the bring-up and leaves a working shell without inference.  The MSC
+filters are set to ERROR responses rather than the RAZ/WI default: the SDK
+exposes no violation-status read, and zeros would reach TFLM as data whereas a
+bus error becomes a recorded fault.
+
+### [!] Cache maintenance belongs to the caller, not the driver
+
+Upstream's `ethosu_driver.c` says not to override the weak
+`ethosu_flush_dcache` / `ethosu_invalidate_dcache` because upstream's are empty.
+In THIS SDK they are not -- Himax filled them in -- so the advice inverts.  Worse,
+`ethosu_wait()` falls through from `ETHOSU_JOB_RUNNING` and invalidates the arena
+BEFORE taking the completion semaphore, i.e. while the NPU is still writing.
+
+Both hooks are neutered and the order lives in the command: clean the input
+after writing it, invoke, invalidate the outputs only once the call returns.
+
+### Inference does not block the shell
+
+The driver's default semaphore `malloc`s its objects and spins on `__WFE()`,
+which would burn the core for the length of a run -- the console would stop
+answering and Ctrl+C would not land.  A static ThreadX pool replaces it, so the
+inference thread suspends instead.  `nn run &` returns the prompt immediately.
+
+`ETHOSU_SEMAPHORE_WAIT_INFERENCE` is set to a finite 5000 ticks; the header
+would otherwise default it to "wait forever", and a lost NPU interrupt would
+suspend the calling job with no way back.
+
+### [!] The QSPI archive carries an erase path
+
+`lib_spi_eeprom.a` is linked for one reason -- enabling the read window -- but it
+also defines `erase_all`, `erase_sector`, `write` and `clear_write_protect`, on
+the flash that holds the bootloader.  All of them are on
+`check_placement_budget.py`'s forbidden list and verified absent: with
+`--gc-sections`, presence would mean a caller.
+
+`setWriteEnable` IS present and is deliberately allowed.  Putting the part into
+QUAD mode writes the QE bit in its status register and that write needs the WEL
+latch first, so it is part of configuring the read path.  On its own a latch
+cannot modify anything -- it has to be followed by a program or erase opcode, and
+every entry point that issues one is barred and gone.
+
+### Not yet answered
+
+- The input is a CENTRE CROP of the 320x240 frame, not a resize, so the field of
+  view is narrower than the preview.  The vendor's resize is a Helium routine and
+  linking it would put predicated MVE in the image; a scalar resize is the fix if
+  the crop turns out to matter.  Every result prints the caveat.
+- Real-time inference over the preview.  It needs #38 (capture, pack and blit are
+  serialised) settled first.
+- Whether the U55 can reach CM55M TCM.  UNVERIFIED -- the Ethos-U55 TRM does not
+  describe this SoC's interconnect and the SVD describes registers, not routing.
+  The arena is in SRAM because the donor puts it there, which is evidence and not
+  proof.
 
 ## Flashing and recovery
 
@@ -1263,9 +1390,15 @@ terminal before running `--target flash`.
 ## Future work
 
 - LED / button / GPIO commands, SD (SPI mode), PDM microphone.
-- Ethos-U55 inference -- the remaining half of M-G3, scoped in issue #40.  The
-  camera (MIPI CSI) half landed in #35, and its output is already in the shape
-  the donor's `tflm_yolov8_od` expects.
-- MVE: usable only once the ThreadX Cortex-M55 port preserves VPR across a
-  context switch, or only from code that cannot be preempted.  Until then the
-  predication scan keeps it out of the image and the benchmarks are scalar.
+- Object detection.  Classification landed in #44; the camera's output is
+  already in the shape the donor's `tflm_yolov8_od` expects, but that model wants
+  a 1,053 KB arena against the 450 KB reserved here, and drawing boxes on the
+  preview runs into #38.
+- MVE.  [!] The reason it is barred is WRONG: the Armv8-M ARM's PushStack /
+  PopStack save and restore VPR under `HaveMve()`, and rule RZWQX makes MVE
+  execution set `CONTROL.FPCA`, so the hardware preserves it across a context
+  switch and the ThreadX port only has to save the callee-saved s16-s31, which it
+  does.  The scan is fail-closed, so nothing unsafe shipped -- but CoreMark and
+  the camera's pixel loops are scalar for no reason.  Tracked in issue #42, which
+  also covers what removing the scan must not skip (enforcing and reading back
+  `FPCCR.ASPEN`, since this app inherits its state from a bootloader).

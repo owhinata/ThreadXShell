@@ -125,8 +125,27 @@
    boot ROM + BOOT_OPT + factory image）。ポストリンクゲート 3 本
    （`check_image_coherence.py` = 生成 .img と ELF の突き合わせ + .rodata 内
    コマンドレジストリ / `check_placement_budget.py` = 配置・予算・ベンチバッファの
-   常駐・禁止シンボル / `check_mve_predication.py` = ThreadX M55 ポートが VPR を
-   保存しないため述語 MVE を禁止）を外す・弱める変更は不可。LTO 不使用。
+   常駐・禁止シンボル / `check_mve_predication.py` = 述語 MVE を禁止。[!] この
+   ゲートの前提は誤り — Armv8-M ARM の PushStack/PopStack は `HaveMve()` の下で
+   VPR を退避・復元し、規則 RZWQX により MVE 命令は `CONTROL.FPCA` を立てるので
+   ハードウェアが保存する（issue #42）。fail-closed なので当面は維持）を
+   外す・弱める変更は不可。**LTO 不使用**（実測で ITCM が 3,616 B 増える。
+   ITCM の 63% が IR を持たないプリビルトで元が取れない）。
+
+   **SRAM 窓は 2 領域**（#29）: `0x3401F000` は 2nd bootloader の実行窓で
+   **NOLOAD 専用**、loadable は `0x3404D000` 以上。「CONTENTS を持つセクションが
+   低位窓に降りていないか」は **ldscript には書けない規則**（ld は NOBITS を
+   区別しない）ので配置ゲートが ELF のフラグで検査する。
+
+   **推論（#44）**: **`lib_spi_eeprom.a` の erase/write 系は禁止シンボル**
+   （このフラッシュにブートローダが載る。wio のセクタ0 と同格。`setWriteEnable`
+   のみ QUAD 有効化に必要なので明示的に許可）。**Ethos-U の dcache weak フックは
+   no-op で上書きしたまま**にする — この SDK の weak 実装は空ではなく、しかも
+   `ethosu_wait()` が**完了待ちの前に**アリーナを invalidate する。
+   フラッシュのメモリマップ読み出し窓は**アプリが開ける**（開けるまで窓全体が
+   同一レジスタにエイリアスし、フォルトも 0xFF も返さない）。その open は
+   **DMAC1 の IRQ 133 を有効化する** — EPK は番号を列挙せず ISER スナップショットで
+   測ること。
 
 8e. **grove-vision-ai-v2: TIMER2 は EPK 専有、WFI の前提は強制する（#25）。**
    `thread` の cpu%（Execution Profile Kit）の時間源は **Himax TIMER2**。

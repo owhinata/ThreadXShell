@@ -32,8 +32,18 @@
 #endif
 #endif
 #ifndef FLAGS_STR
+/* The placement half of this string is part of the score's provenance, not
+ * decoration: CLAUDE.md only allows comparing numbers taken under the same
+ * MEM_METHOD, the same placement and the same scalar build.
+ *
+ * "code in ITCM, working set in DTCM" is the precise claim since issue #29
+ * moved .rodata to SRAM.  It used to read "code+data in TCM", which was true of
+ * everything then.  CoreMark's own .rodata (~4.4 KB, mostly the report strings)
+ * now lives in SRAM; the measured score did not move -- 3.133 CoreMark/MHz
+ * before and after -- because the hot loop touches neither. */
 #define FLAGS_STR "-O3 -funroll-loops -fno-tree-vectorize " \
-                  "-mcpu=cortex-m55 -mfloat-abi=hard (scalar; code+data in TCM)"
+                  "-mcpu=cortex-m55 -mfloat-abi=hard " \
+                  "(scalar; code in ITCM, working set in DTCM)"
 #endif
 #ifndef COMPILER_FLAGS
 #define COMPILER_FLAGS FLAGS_STR

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 ThreadX Shell Project
-"""Negative tests for cmake/check_timer_seam.py (issue #30).
+"""Negative tests for the post-build gates that assert a LINKER property.
+
+Covers cmake/check_timer_seam.py (issue #30) and the loadable-SRAM floor in
+cmake/check_placement_budget.py (issue #29).
 
 WHY REAL LINKS AND NOT UNIT TESTS
 ---------------------------------
@@ -20,9 +23,27 @@ exactly one thing broken:
                                        -> S3 (no wrapper is referenced)
   F3  the unmodified probe             -> PASS
 
-F3 is not decoration: without it, F1 and F2 could both be failing for some
-unrelated reason that also happens to break the pristine link, and the suite
-would still look green.
+  P1  .lcd_fb made LOADABLE             -> the loader-window floor fires
+  P0  the unmodified firmware           -> PASS
+
+F3 and P0 are not decoration: without them, the fixtures above could all be
+failing for some unrelated reason that also happens to break the pristine link,
+and the suite would still look green.
+
+P1 exists because the LINKER cannot enforce this rule.  The region split
+expresses it, but ld places a section where it is told and has no notion of
+"this region takes NOBITS only", and the ASSERTs there can only speak about the
+one section the script happens to name.  With .lcd_fb loadable the link
+succeeds and both ASSERTs hold -- only a gate reading the section flags back
+off the ELF objects.
+
+[!] Un-NOLOADing .lcd_fb also trips the older NOBITS-residency check, because
+.lcd_fb is on that check's fixed list.  That is why the assertion below is on
+the floor DIAGNOSTIC and not on a non-zero exit: otherwise deleting the floor
+check would leave this fixture passing on the other check's back.  The case the
+floor check alone catches is a NEW loadable section nobody has listed --
+which is exactly the case that has no test until someone writes one, and the
+reason the check reads flags rather than names.
 
 Assertions are on the EXIT CODE and the DIAGNOSTIC IDs, never on "non-zero".  A
 fixture that starts failing for a different reason than it was built for is a
@@ -81,6 +102,39 @@ def run_gate(board_dir, build_dir, elf, nm, objdump):
         capture_output=True, text=True)
     ids = set(re.findall(r"\[([A-Z]\d)\]", r.stdout + r.stderr))
     return r.returncode, ids, (r.stdout + r.stderr)
+
+
+def run_placement_gate(board_dir, build_dir, elf, nm, objdump):
+    """check_placement_budget.py on one ELF.
+
+    That gate numbers its checks in comments rather than in its output, so the
+    assertion below matches a distinctive phrase instead of an [ID].  The intent
+    is the same as everywhere else here: a fixture that starts failing for a
+    different reason than it was built for must not read as a pass.
+    """
+    r = subprocess.run(
+        [sys.executable,
+         os.path.join(board_dir, "cmake", "check_placement_budget.py"),
+         "--nm", nm, "--objdump", objdump, os.path.join(build_dir, elf)],
+        capture_output=True, text=True)
+    text = r.stdout + r.stderr
+    ids = {"FLOOR"} if "loadable-SRAM floor" in text else set()
+    return r.returncode, ids, text
+
+
+def link_only(cmd):
+    """Just the compiler invocation, without the POST_BUILD chain.
+
+    Ninja reports the firmware link with the image generation and all four gates
+    chained on with &&.  A fixture wants the link and nothing else -- running the
+    real image generator on a deliberately broken ELF would be slow and would
+    fail for its own reasons.  (The command also STARTS with `: &&`, which is
+    why this picks the segment out rather than truncating at the first &&.)
+    """
+    for part in cmd.split(" && "):
+        if "arm-none-eabi-g++" in part and "-o shell.elf" in part:
+            return part.strip()
+    raise SystemExit("run_fixture_tests: no compiler segment in the shell link")
 
 
 def expect(name, got_rc, got_ids, want_rc, want_ids, text):
@@ -174,10 +228,44 @@ def main():
                              nm, objdump)
     ok &= expect("F2 vacuous link is caught", rc, ids, 1, {"S3", "S4"}, text)
 
+    # --- check_placement_budget.py: the loadable-SRAM floor (issue #29) -------
+    print("run_fixture_tests (check_placement_budget.py, SRAM floor):")
+
+    shell_link = link_only(ninja_link_command(build, "shell.elf"))
+
+    rc, ids, text = run_placement_gate(board, build, "shell.elf", nm, objdump)
+    ok &= expect("P0 pristine firmware passes", rc, ids, 0, set(), text)
+
+    # P1: .lcd_fb loses its NOLOAD.  It then has CONTENTS at 0x3401F000, i.e.
+    # the loader would write it over the code it is executing.  The link still
+    # succeeds and every other gate still passes -- this one must not.
+    ld_src = os.path.join(board, "ldscript", "HX6538_CM55M_S.ld")
+    ld_dst = os.path.join(outdir, "p1_loadable_low.ld")
+    with open(ld_src) as f:
+        ld = f.read()
+    ld_broken = ld.replace(".lcd_fb (NOLOAD) : ALIGN(32)", ".lcd_fb : ALIGN(32)")
+    if ld_broken == ld:
+        raise SystemExit("run_fixture_tests: .lcd_fb is not NOLOAD in the "
+                         "linker script; the fixture cannot break it")
+    with open(ld_dst, "w") as f:
+        f.write(ld_broken)
+
+    p1 = re.sub(r"-T\S*HX6538_CM55M_S\.ld", f"-T{ld_dst}", shell_link)
+    if p1 == shell_link:
+        raise SystemExit("run_fixture_tests: the firmware link names no linker "
+                         "script; the fixture cannot repoint it")
+    p1 = retarget(p1, "shell.elf", "seam-fixtures/p1_loadable_low.elf")
+    link(build, p1, "P1")
+    rc, ids, text = run_placement_gate(board, build,
+                                       "seam-fixtures/p1_loadable_low.elf",
+                                       nm, objdump)
+    ok &= expect("P1 loadable section in the loader window is caught",
+                 rc, ids, 1, {"FLOOR"}, text)
+
     if not ok:
         print("run_fixture_tests: FAIL", file=sys.stderr)
         return 1
-    print("run_fixture_tests: OK (3 fixtures)")
+    print("run_fixture_tests: OK (5 fixtures)")
     return 0
 
 

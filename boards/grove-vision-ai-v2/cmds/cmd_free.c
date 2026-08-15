@@ -37,8 +37,15 @@
 #define ITCM_LENGTH   (256u * 1024u)
 #define DTCM_ORIGIN   0x30000000u
 #define DTCM_LENGTH   (256u * 1024u)
-#define SRAM_ORIGIN   0x3401F000u
-#define SRAM_LENGTH   0x001E1000u
+/* Two SRAM regions since issue #29: the window the 2nd-stage bootloader
+ * executes from (NOLOAD reservations only) and the one above it that may hold
+ * loadable content.  Reported separately rather than as one span -- with
+ * .lcd_fb parked low and .rodata high, a single high-water number would count
+ * the hole between them as used and hide which half is actually filling up. */
+#define SRAML_ORIGIN  0x3401F000u
+#define SRAML_LENGTH  0x0002E000u
+#define SRAM_ORIGIN   0x3404D000u
+#define SRAM_LENGTH   0x001B3000u
 
 /*
  * Linker boundary symbols.  Their *addresses* carry the values -- declared as
@@ -50,6 +57,7 @@ extern uint8_t __bss_end__[];
 extern uint8_t _end_noinit[];                 /* end of .noinit (log ring) */
 extern uint8_t __HeapBase[], __HeapLimit[];
 extern uint8_t __StackLimit[], __StackTop[];  /* MSP stack (top of DTCM) */
+extern uint8_t __sram_ldr_end[];              /* after every loader-window section */
 extern uint8_t __sram_end[];                  /* after every SRAM section */
 
 static uint32_t sym(const uint8_t s[])
@@ -84,7 +92,8 @@ static int cmd_free(struct cli_instance *sh, int argc, char **argv)
 	uint32_t stack_len   = sym(__StackTop) - sym(__StackLimit);
 	uint32_t dtcm_used   = dtcm_static + (uint32_t)mi.uordblks + stack_len;
 
-	/* SRAM: explicit placement only, so the high-water mark IS the usage. */
+	/* SRAM: explicit placement only, so each high-water mark IS the usage. */
+	uint32_t sraml_used  = sym(__sram_ldr_end) - SRAML_ORIGIN;
 	uint32_t sram_used   = sym(__sram_end) - SRAM_ORIGIN;
 
 	(void)argc;
@@ -92,6 +101,7 @@ static int cmd_free(struct cli_instance *sh, int argc, char **argv)
 
 	row(sh, "ITCM", ITCM_ORIGIN, ITCM_LENGTH, itcm_used);
 	row(sh, "DTCM", DTCM_ORIGIN, DTCM_LENGTH, dtcm_used);
+	row(sh, "SRAMl", SRAML_ORIGIN, SRAML_LENGTH, sraml_used);
 	row(sh, "SRAM", SRAM_ORIGIN, SRAM_LENGTH, sram_used);
 
 	cli_print(sh, "data:   %lu B  bss+noinit: %lu B\r\n",

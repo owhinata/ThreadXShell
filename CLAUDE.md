@@ -421,7 +421,24 @@ git branch -d feat/<N>-short-description
   「ベンダ timer コードが 1 バイトも残らない」ことを検査。negative test は
   `cmake/fixtures/run_fixture_tests.py`）。**外す・弱める変更は不可**
   （f746/wio のゲートと同格）。
-- LTO は使わない（M-G1。導入するならゲート再設計とセット）。
+- **推論（`nn` / #44）**: TFLM は**ソースからビルド**（プリビルトは CMSIS-NN 版のみ＝MVE を
+  持ち込む）。op resolver は `AddEthosU()` 1 個で **CPU カーネル 0 本**。実リンク量 15,360 B。
+  **[!] フラッシュのメモリマップ読み出し窓はアプリが開ける** — リセット時は死んでおり、
+  しかもフォルトも 0xFF も返さず**窓全体が同一レジスタにエイリアス**する
+  （`hx_lib_spi_eeprom_open` + `enable_XIP`）。その open は **DMAC1 の IRQ 133 を有効化する**
+  （EPK スナップショットが実測で捕捉。番号を列挙せず測る方式の存在理由）。
+  **[!] `lib_spi_eeprom.a` の erase/write 系は禁止シンボル** — このフラッシュには
+  ブートローダが載る（wio のセクタ0 と同格）。`setWriteEnable` のみ QUAD 有効化に必要なので許可。
+  **[!] dcache の weak フックは no-op で上書きし、保守は呼び出し側が持つ** — この SDK の
+  weak 実装は空ではなく、しかも `ethosu_wait()` は**完了待ちの前に**アリーナを invalidate する。
+  NPU bring-up は SEC_ONLY 経路に無いので自前（読み戻し + fail-closed）。詳細は board README。
+- **[!] SRAM 窓は 2 領域**（#29）: `CM55M_S_SRAM_LDR` 0x3401F000 = 2nd bootloader の実行窓で
+  **NOLOAD 専用** / `CM55M_S_SRAM` 0x3404D000 = loadable 可。`.rodata` は後者。
+  「CONTENTS を持つセクションが低位窓に降りていないか」は **ldscript には書けない規則**
+  （ld は NOBITS を区別しない）なので `check_placement_budget.py` が ELF のフラグで検査する。
+  負のテストは `cmake/fixtures/`。
+- LTO は使わない（M-G1。導入するならゲート再設計とセット）。**実測（#40 Step 1.5）: LTO は ITCM を 3,616 B 増やす** —
+  ITCM の 63% が IR を持たないプリビルトで、届く範囲が狭く元が取れない。
 
 ## SWD デバッグ（共通）
 

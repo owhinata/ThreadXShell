@@ -68,6 +68,13 @@ static const struct devmem_region devmem_map[] = {
 	 * is how a bring-up gets diagnosed without a debugger -- and this board
 	 * has no public TRM, so a raw dump is often the only honest answer. */
 	{ 0x50000000u, 0x07000000u, 1, 0, W32,  "PERIPH"}, /* AHB/APB aliases    */
+	/* External QSPI NOR, memory-mapped READ alias (issue #44).  Read only --
+	 * the write alias is a different window on purpose and is deliberately NOT
+	 * listed, because that flash holds the bootloader.  Byte-granular so a
+	 * model header can actually be looked at: `nn` parses the flatbuffer in
+	 * place here, and when it refuses, the only way to tell "nothing was
+	 * flashed" from "flashed at the wrong offset" is to dump the bytes. */
+	{ 0x3A000000u, 0x01000000u, 1, 0, WALL, "FLASH-R"}, /* 16 MB, read alias  */
 };
 
 /* "8"/"16"/"32" -> access width in bytes (1/2/4). */

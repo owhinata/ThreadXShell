@@ -207,8 +207,12 @@ def main():
     # site's relocation needs one.
     f2 = re.sub(r"\S*lib(?:sensordp|extdevice)\.a\s+", "", base)
     f2 = re.sub(r"-Wl,-u,(?:sensordplib|hx_drv_cis)\S*\s+", "", f2)
+    # Every camera CONSUMER has to go with the archives, not just the camera
+    # port itself: cmd_nn.c captures a frame to feed the NPU (issue #44), so
+    # leaving it in turns this fixture into an undefined-reference failure
+    # instead of the vacuous link it is supposed to produce.
     f2_objs = re.sub(r"\S*shell_objs\.dir/boards/\S*/(?:port/camera/\S+|"
-                     r"cmds/cmd_camera\.c)\.obj\s+", "", f2)
+                     r"cmds/cmd_camera\.c|cmds/cmd_nn\.c)\.obj\s+", "", f2)
     if f2_objs == f2:
         raise SystemExit("run_fixture_tests: the probe link names no "
                          "port/camera objects; the fixture cannot remove them")

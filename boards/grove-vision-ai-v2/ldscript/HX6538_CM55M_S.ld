@@ -346,6 +346,33 @@ SECTIONS
     } > CM55M_S_SRAM
 
 
+    /* The NN tensor arena (issue #44).  450 KB, the size the SDK's own
+     * MobileNet classification app uses for this model.
+     *
+     * In SRAM because the Ethos-U55 is an AXI bus master and the arena is the
+     * memory it and the CPU share.  Whether the NPU can reach CM55M TCM at all
+     * is UNVERIFIED -- the Ethos-U55 TRM does not describe this SoC's
+     * interconnect and the SVD describes registers, not routing -- so the
+     * reason to put it here is that the donor app does, not a proof that the
+     * alternative fails.  Same failure mode as the camera and LCD buffers if
+     * that reasoning is wrong: no fault, just a transfer that never happens.
+     *
+     * NOLOAD: it is scratch, it is 450 KB, and flashing that many zeros to the
+     * external NOR every time would be a waste of a part with ~100k cycles.
+     * The interpreter writes every byte it reads.
+     *
+     * ALIGN(32) and a 32-byte multiple in size: the CPU cleans and invalidates
+     * this range around every inference, and maintenance that starts or ends
+     * mid-cache-line either misses bytes or discards a neighbour's.  The
+     * Ethos-U driver documents the same requirement for the base pointers it
+     * is handed. */
+    .nn_arena (NOLOAD) : ALIGN(32)
+    {
+        __nn_arena_start = .;
+        KEEP(*(.nn_arena))
+        __nn_arena_end = .;
+    } > CM55M_S_SRAM
+
     /* High-water mark of the SRAM window, for the `free` command (issue #26).
      * MUST stay after every section assigned to CM55M_S_SRAM -- the location
      * counter here still belongs to that region, and the next output section

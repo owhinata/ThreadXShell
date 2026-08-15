@@ -1,0 +1,393 @@
+/*
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 ThreadX Shell Project
+ */
+/**
+ * @file    cmd_nn.c
+ * @brief   `nn` command: one-shot Ethos-U55 classification (issues #44, #40).
+ *
+ *   nn info               what is loaded, and the arena budget
+ *   nn open [<addr>]      bring the NPU up and parse the model in flash
+ *   nn close              release it
+ *   nn run                capture one frame, preprocess, infer, print top-5
+ *
+ * SINGLE OWNER.  The interpreter, the driver state, the camera buffer and the
+ * arena are all static, and the shell runs foreground and background jobs
+ * concurrently (`nn run &` while another command types).  So this carries an
+ * ownership gate of exactly the shape CoreMark's does -- a PRIMASK-guarded
+ * test-and-set, not a ThreadX object, because it also has to protect the
+ * open/close transitions that create and destroy those objects.  bench_gate is
+ * not this: it checks that the clock a benchmark divides by is trustworthy,
+ * which is a different question.
+ *
+ * CACHE.  npu_invoke() does not do maintenance and the vendor hooks are
+ * neutered (npu_cache.c), so the order here is load-bearing: clean the input
+ * after writing it, invoke, and only invalidate the outputs once the call has
+ * returned -- i.e. after confirmed completion, which is precisely what the
+ * driver's own ethosu_wait() gets wrong.
+ *
+ * FIELD OF VIEW.  The camera delivers 320x240 and the model wants a square
+ * input, so the frame is CENTRE-CROPPED, not resized.  The vendor's resize is
+ * a Helium routine (hx_lib_image_resize_..._helium) and linking it would put
+ * predicated MVE in the image; a scalar resize is a thing to write later if the
+ * crop's narrower field of view turns out to matter.  It is stated in the
+ * output so nobody reads a score without knowing.
+ */
+#include "cli.h"
+
+#include <stdint.h>
+#include <string.h>
+
+#include "WE2_device.h"   /* __get_PRIMASK / __disable_irq / __set_PRIMASK */
+
+#include "npu.h"
+#include "npu_hw.h"
+#include "camera.h"
+#include "cam_imx219.h"
+
+#include "tx_api.h"        /* tx_time_get(): ThreadX ticks, 1 ms here */
+
+/* Where `nn open` looks by default: the flash offset the SDK's own model_zoo
+ * flashes classification models to, in the memory-mapped read alias.  Override
+ * per invocation with `nn open <addr>` -- the model is a separate flash
+ * partition from the firmware, so it moves independently. */
+#define NN_MODEL_ADDR_DEFAULT 0x3AB7B000u
+
+/* --- ownership ----------------------------------------------------------- */
+
+static volatile uint8_t nn_busy;
+
+static int nn_try_acquire(void)
+{
+	uint32_t pm = __get_PRIMASK();
+	int ok;
+
+	__disable_irq();
+	ok = !nn_busy;
+	if (ok)
+		nn_busy = 1u;
+	__set_PRIMASK(pm);
+	return ok;
+}
+
+static void nn_release(void)
+{
+	nn_busy = 0u;
+}
+
+/* --- state --------------------------------------------------------------- */
+
+static uint8_t  nn_open_done;
+static uint32_t nn_model_addr;
+
+/* --- preprocessing ------------------------------------------------------- */
+
+/*
+ * Camera frame -> input tensor.
+ *
+ * The frame is 320x240 PLANAR B/G/R (that is what WDMA3 writes -- see the
+ * camera port); the model wants interleaved RGB.  Both conversions happen in
+ * this one pass, along with the centre crop and the uint8->int8 shift the
+ * quantisation asks for.
+ *
+ * No vectorisation here even by accident: the file carries
+ * -fno-tree-vectorize, for the reason at the top of board.cmake's tflm_obj
+ * block.
+ */
+static int nn_fill_input(struct cli_instance *sh, const uint8_t *raw,
+                         const struct npu_tensor *in)
+{
+	const uint32_t fw = CAM_FRAME_WIDTH, fh = CAM_FRAME_HEIGHT;
+	const uint32_t plane = fw * fh;
+	uint32_t w, h, x0, y0;
+	uint8_t *dst = (uint8_t *)in->data;
+
+	if (in->rank != 4 || in->dims[3] != 3) {
+		cli_error(sh, "nn: model input is not HxWx3 (rank %u)\r\n", in->rank);
+		return -1;
+	}
+	h = (uint32_t)in->dims[1];
+	w = (uint32_t)in->dims[2];
+	if (w == 0u || h == 0u || w > fw || h > fh) {
+		cli_error(sh, "nn: %lux%lu input does not fit a %lux%lu frame\r\n",
+		          (unsigned long)w, (unsigned long)h,
+		          (unsigned long)fw, (unsigned long)fh);
+		return -1;
+	}
+	if (in->bytes < (size_t)w * h * 3u) {
+		cli_error(sh, "nn: input tensor is shorter than its own shape\r\n");
+		return -1;
+	}
+
+	x0 = (fw - w) / 2u;
+	y0 = (fh - h) / 2u;
+
+	for (uint32_t y = 0; y < h; y++) {
+		const uint8_t *row = raw + (size_t)(y0 + y) * fw + x0;
+
+		for (uint32_t x = 0; x < w; x++) {
+			uint8_t b = row[x];
+			uint8_t g = row[x + plane];
+			uint8_t r = row[x + 2u * plane];
+
+			/* uint8 -> int8 by shifting the range, which is what an int8 model
+			 * quantised around zero expects.  Done as a wrap on purpose: the
+			 * bit pattern is the answer, the arithmetic is not. */
+			*dst++ = (uint8_t)(r - 128u);
+			*dst++ = (uint8_t)(g - 128u);
+			*dst++ = (uint8_t)(b - 128u);
+		}
+	}
+	return 0;
+}
+
+/* --- reporting ----------------------------------------------------------- */
+
+static void nn_print_tensor(struct cli_instance *sh, const char *what,
+                            const struct npu_tensor *t)
+{
+	cli_print(sh, "%-6s %s", what, npu_type_name(t->type));
+	for (unsigned i = 0; i < t->rank; i++)
+		cli_print(sh, "%s%ld", i == 0u ? " [" : "x", (long)t->dims[i]);
+	cli_print(sh, "]  %lu B  scale %d/1e6  zp %ld\r\n",
+	          (unsigned long)t->bytes, (int)(t->scale * 1000000.0f),
+	          (long)t->zero_point);
+}
+
+/* Top-N over an int8 output vector, by insertion -- N is 5 and the vector is a
+ * class count, so nothing cleverer earns its code size. */
+static void nn_print_top(struct cli_instance *sh, const struct npu_tensor *out)
+{
+	enum { TOP_N = 5 };
+	int      best_i[TOP_N];
+	int8_t   best_v[TOP_N];
+	unsigned n = 0;
+	const int8_t *v = (const int8_t *)out->data;
+	size_t count = out->bytes;
+
+	for (unsigned i = 0; i < TOP_N; i++) {
+		best_i[i] = -1;
+		best_v[i] = -128;
+	}
+	for (size_t i = 0; i < count; i++) {
+		for (unsigned k = 0; k < TOP_N; k++) {
+			if (v[i] > best_v[k]) {
+				for (unsigned j = TOP_N - 1u; j > k; j--) {
+					best_v[j] = best_v[j - 1u];
+					best_i[j] = best_i[j - 1u];
+				}
+				best_v[k] = v[i];
+				best_i[k] = (int)i;
+				if (n < TOP_N)
+					n++;
+				break;
+			}
+		}
+	}
+	for (unsigned k = 0; k < n; k++) {
+		/* Dequantised score, in thousandths, so no %f is needed on a path that
+		 * would otherwise pull float printf into an inference report. */
+		long milli = (long)(((float)best_v[k] - (float)out->zero_point)
+		                    * out->scale * 1000.0f);
+
+		cli_print(sh, "  #%u  class %-4d  raw %4d  score %ld/1000\r\n",
+		          k + 1u, best_i[k], (int)best_v[k], milli);
+	}
+}
+
+/* --- subcommands --------------------------------------------------------- */
+
+static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
+{
+	struct npu_tensor t;
+
+	(void)argc;
+	(void)argv;
+
+	cli_print(sh, "npu      %s\r\n",
+	          npu_hw_ready() ? "up (secure, privileged)" : "down");
+	if (!npu_hw_ready() && npu_hw_fail_reason() != NULL)
+		cli_print(sh, "         last refusal: %s\r\n", npu_hw_fail_reason());
+	cli_print(sh, "arena    %lu B reserved @%p\r\n",
+	          (unsigned long)npu_arena_bytes(), npu_arena_base());
+
+	if (npu_hw_ready()) {
+		int lines[8];
+		unsigned n = npu_hw_wrapped_irqs(lines, 8u);
+
+		/* The EPK rule is that nothing may be enabled but unaccounted.  The
+		 * bring-up enforces it by refusing, so this is the state of that
+		 * enforcement rather than a check -- but an invariant with no readout
+		 * is one nobody verifies. */
+		cli_print(sh, "irq      ");
+		for (unsigned i = 0; i < n; i++)
+			cli_print(sh, "%s%d", i ? ", " : "", lines[i]);
+		cli_print(sh, "%s (wrapped for cpu%% accounting)\r\n",
+		          n ? "" : "none");
+	}
+
+	if (!nn_open_done) {
+		cli_print(sh, "model    not open (nn open [<addr>])\r\n");
+		return 0;
+	}
+	cli_print(sh, "model    0x%08lx\r\n", (unsigned long)nn_model_addr);
+	cli_print(sh, "arena    %lu B used by this layout\r\n",
+	          (unsigned long)npu_arena_used());
+	if (npu_input(&t) == NPU_OK)
+		nn_print_tensor(sh, "input", &t);
+	for (unsigned i = 0; i < npu_output_count(); i++)
+		if (npu_output(i, &t) == NPU_OK)
+			nn_print_tensor(sh, "output", &t);
+	return 0;
+}
+
+static int cmd_nn_open(struct cli_instance *sh, int argc, char **argv)
+{
+	uint32_t addr = NN_MODEL_ADDR_DEFAULT;
+	int rc;
+
+	if (argc > 1) {
+		if (cli_parse_u32(argv[1], &addr) != 0) {
+			cli_error(sh, "nn: bad address '%s'\r\n", argv[1]);
+			return -1;
+		}
+	}
+	if (!nn_try_acquire()) {
+		cli_error(sh, "nn: busy\r\n");
+		return -1;
+	}
+	if (nn_open_done) {
+		cli_error(sh, "nn: already open (nn close first)\r\n");
+		nn_release();
+		return -1;
+	}
+
+	if (npu_hw_init() != 0) {
+		cli_error(sh, "nn: %s\r\n",
+		          npu_hw_fail_reason() ? npu_hw_fail_reason() : "bring-up failed");
+		nn_release();
+		return -1;
+	}
+
+	rc = npu_open(addr, npu_arena_base(), npu_arena_bytes());
+	if (rc != NPU_OK) {
+		cli_error(sh, "nn: %s (0x%08lx)\r\n", npu_status_name(rc),
+		          (unsigned long)addr);
+		/* Leave the hardware down too: an NPU that is up with no model is a
+		 * state nothing below here would ever use. */
+		npu_hw_deinit();
+		nn_release();
+		return -1;
+	}
+
+	nn_open_done  = 1u;
+	nn_model_addr = addr;
+	cli_print(sh, "nn: model at 0x%08lx open, arena %lu/%lu B\r\n",
+	          (unsigned long)addr, (unsigned long)npu_arena_used(),
+	          (unsigned long)npu_arena_bytes());
+	nn_release();
+	return 0;
+}
+
+static int cmd_nn_close(struct cli_instance *sh, int argc, char **argv)
+{
+	(void)argc;
+	(void)argv;
+
+	if (!nn_try_acquire()) {
+		cli_error(sh, "nn: busy\r\n");
+		return -1;
+	}
+	npu_close();
+	npu_hw_deinit();
+	nn_open_done = 0u;
+	nn_release();
+	cli_print(sh, "nn: closed\r\n");
+	return 0;
+}
+
+static int cmd_nn_run(struct cli_instance *sh, int argc, char **argv)
+{
+	struct npu_tensor in, out;
+	const uint8_t *raw;
+	uint32_t t0, t1;
+	int rc;
+
+	(void)argc;
+	(void)argv;
+
+	if (!nn_try_acquire()) {
+		cli_error(sh, "nn: busy\r\n");
+		return -1;
+	}
+	if (!nn_open_done) {
+		cli_error(sh, "nn: no model open\r\n");
+		nn_release();
+		return -1;
+	}
+	if (npu_input(&in) != NPU_OK) {
+		cli_error(sh, "nn: no input tensor\r\n");
+		nn_release();
+		return -1;
+	}
+
+	/* One frame, then stop.  camera_capture() quiesces the datapath on both the
+	 * success and the failure path, so the camera is not left streaming into a
+	 * buffer the NPU is about to be pointed at.  It also refuses while a
+	 * preview is running, which is the camera/NPU concurrency question answered
+	 * by the layer that owns it. */
+	rc = camera_capture();
+	if (rc != 0) {
+		cli_error(sh, "nn: capture failed (%d)\r\n", rc);
+		nn_release();
+		return -1;
+	}
+	raw = camera_raw_frame();
+
+	if (nn_fill_input(sh, raw, &in) != 0) {
+		nn_release();
+		return -1;
+	}
+
+	/* Clean AFTER writing the input and BEFORE the NPU reads it. */
+	npu_cache_clean(in.data, in.bytes);
+
+	t0 = (uint32_t)tx_time_get();
+	rc = npu_invoke();
+	t1 = (uint32_t)tx_time_get();
+
+	if (rc != NPU_OK) {
+		cli_error(sh, "nn: %s\r\n", npu_status_name(rc));
+		nn_release();
+		return -1;
+	}
+
+	cli_print(sh, "nn: inference %lu ms (centre crop %ldx%ld of %ux%u; "
+	              "field of view is narrower than the preview)\r\n",
+	          (unsigned long)(t1 - t0), (long)in.dims[2], (long)in.dims[1],
+	          CAM_FRAME_WIDTH, CAM_FRAME_HEIGHT);
+
+	for (unsigned i = 0; i < npu_output_count(); i++) {
+		if (npu_output(i, &out) != NPU_OK)
+			continue;
+		/* Invalidate only now: the NPU has finished writing. */
+		npu_cache_invalidate(out.data, out.bytes);
+		if (i == 0u)
+			nn_print_top(sh, &out);
+	}
+
+	nn_release();
+	return 0;
+}
+
+CLI_SUBCMD_SET_CREATE(nn_subcmds,
+	CLI_CMD(info,  NULL, "what is loaded and what the arena costs", cmd_nn_info),
+	CLI_CMD_ARG_USAGE(open, NULL, "bring the NPU up and parse the model",
+	                  "[<flash-addr>]", cmd_nn_open, 1, 1),
+	CLI_CMD(close, NULL, "release the model and the NPU",           cmd_nn_close),
+	CLI_CMD(run,   NULL, "capture one frame and classify it",       cmd_nn_run),
+	CLI_SUBCMD_SET_END);
+
+CLI_CMD_REGISTER(nn, nn_subcmds,
+                 "Ethos-U55 inference: one-shot classification",
+                 NULL, 1, 0);

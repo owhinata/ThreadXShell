@@ -1,4 +1,18 @@
-# Flash-tool venv for the Grove Vision AI V2 (see board.cmake).
-# Same pins as the donor build environment / the SDK's xmodem/requirements.txt.
+# Host-tool venv for the Grove Vision AI V2 (see board.cmake).
+# Created at configure time in the BUILD tree, so it is disposable with it.
+#
+# Flashing: same pins as the donor build environment / the SDK's
+# xmodem/requirements.txt.
 pyserial==3.5
 xmodem==0.4.7
+
+# Model preparation (issue #45).  Vela is what turns a .tflite into the
+# command-stream model the Ethos-U55 actually runs, so the compiler version is
+# part of the model's provenance and is pinned like any other tool here rather
+# than left to whatever is on the machine.  5.1.0 emits arch version 1.0.6; the
+# driver's ethosu_dev_verify_optimizer_config compares major and minor and
+# ignores patch, which is why models built by 4.5.0 (1.0.0) and by this one both
+# pass the same gate.  ~95 MB installed, numpy included -- it rides along in the
+# flash-tool venv rather than getting one of its own because both are host
+# tooling for this board and one venv is one thing to explain.
+ethos-u-vela==5.1.0

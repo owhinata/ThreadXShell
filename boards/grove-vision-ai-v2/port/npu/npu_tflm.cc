@@ -34,7 +34,7 @@
  */
 #include "npu.h"
 #include "npu_hw.h"
-#include "npu_payload.h"
+#include "npu_model_scan.h"
 
 #include <new>
 #include <string.h>
@@ -43,7 +43,6 @@
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/schema/schema_generated.h"
-#include "tensorflow/lite/schema/schema_utils.h"   /* GetBuiltinCode() */
 
 namespace {
 
@@ -56,132 +55,6 @@ constexpr uint32_t kFlashSize = 0x01000000u;
 /* Smallest buffer that could hold a flatbuffer header worth inspecting: root
  * offset + the 4-byte file identifier at offset 4. */
 constexpr uint32_t kMinModelBytes = 16u;
-
-/*
- * Every operator in the executable subgraph must be the ethos-u custom op, and
- * every one of their command streams must satisfy the rule above.
- *
- * [!] THE PAYLOAD IS NOT custom_options.  The kernel reads `custom_initial_data`
- * only to check a CO_TYPE marker; what it hands the driver is INPUT TENSOR 0 --
- * `cms_data` from that tensor's buffer and `cms_data_size` from its `bytes`
- * (ethosu.cc, Prepare/Eval).  Validating custom_options would have inspected the
- * marker and proved nothing about what the driver actually parses.
- *
- * `bytes` is TFLM's dims-derived size, not the buffer length, so both are pinned
- * here: a 1-D 1-byte-element tensor whose extent equals its constant buffer.
- * Then the walk covers exactly the bytes the driver will walk.
- *
- * Rejecting a non-ethos-u operator is not redundant with the one-operator
- * resolver: AllocateTensors would refuse it too, but this runs first and says
- * which model is wrong rather than which operator is missing.
- */
-bool op_command_stream_is_safe(const tflite::Model *model,
-                               const tflite::SubGraph *sub,
-                               const tflite::Operator *op)
-{
-	const auto *inputs = op->inputs();
-
-	if (inputs == nullptr || inputs->size() == 0u)
-		return false;
-
-	const int32_t ti = inputs->Get(0);
-
-	if (ti < 0)
-		return false;
-
-	const auto *tensors = sub->tensors();
-
-	if (tensors == nullptr || static_cast<uint32_t>(ti) >= tensors->size())
-		return false;
-
-	const auto *t = tensors->Get(static_cast<uint32_t>(ti));
-
-	if (t == nullptr)
-		return false;
-
-	/* [!] The bytes checked here have to be the bytes the driver parses, and a
-	 * VARIABLE tensor breaks that: MicroAllocator::AllocateVariables()
-	 * overwrites eval_tensors[i].data.data with an arena allocation even when
-	 * the tensor has a serialized buffer, so Eval() would hand the driver
-	 * arena contents -- writable at run time by another operator -- while this
-	 * walk inspected the constant in flash. */
-	if (t->is_variable())
-		return false;
-
-	if (t->type() != tflite::TensorType_UINT8 &&
-	    t->type() != tflite::TensorType_INT8)
-		return false;                    /* elements must be one byte */
-
-	const auto *shape = t->shape();
-
-	if (shape == nullptr || shape->size() != 1u)
-		return false;
-
-	const int32_t extent = shape->Get(0);
-
-	if (extent <= 0)
-		return false;
-
-	const auto *buffers = model->buffers();
-
-	if (buffers == nullptr || t->buffer() >= buffers->size())
-		return false;
-
-	const auto *buf  = buffers->Get(t->buffer());
-	const auto *data = buf != nullptr ? buf->data() : nullptr;
-
-	/* Constant, and exactly as long as the size the driver will be given.
-	 * With a serialized buffer and is_variable() false, TFLM keeps the tensor
-	 * kTfLiteMmapRo and the planner leaves it alone, so the pointer Eval()
-	 * passes the driver is this buffer in flash -- the bytes walked below. */
-	if (data == nullptr || data->size() != static_cast<uint32_t>(extent))
-		return false;
-
-	return npu_payload_is_single_final_command_stream(data->data(),
-	                                                 data->size());
-}
-
-bool model_payloads_are_safe(const tflite::Model *model)
-{
-	const auto *subgraphs = model->subgraphs();
-
-	if (subgraphs == nullptr || subgraphs->size() != 1u)
-		return false;
-
-	const auto *sub    = subgraphs->Get(0);
-	const auto *ops    = sub->operators();
-	const auto *codes  = model->operator_codes();
-
-	if (sub == nullptr || ops == nullptr || ops->size() == 0u || codes == nullptr)
-		return false;
-
-	for (unsigned n = 0; n < ops->size(); n++) {
-		const auto *op = ops->Get(n);
-
-		if (op == nullptr)
-			return false;
-
-		const uint32_t ci = op->opcode_index();
-
-		if (ci >= codes->size())
-			return false;
-
-		const auto *code = codes->Get(ci);
-
-		if (code == nullptr ||
-		    tflite::GetBuiltinCode(code) != tflite::BuiltinOperator_CUSTOM)
-			return false;
-
-		const auto *custom = code->custom_code();
-
-		if (custom == nullptr || strcmp(custom->c_str(), "ethos-u") != 0)
-			return false;
-
-		if (!op_command_stream_is_safe(model, sub, op))
-			return false;
-	}
-	return true;
-}
 
 /* Storage for the interpreter and resolver.  Raw bytes plus placement new, so
  * nothing is constructed until npu_open() says so and nothing is destroyed
@@ -246,8 +119,11 @@ extern "C" int npu_open(uint32_t model_addr, void *arena, size_t arena_bytes)
 		return NPU_ERR_SCHEMA;
 
 	/* Before anything can be launched: prove no driver action follows the
-	 * command stream.  See payload_is_single_final_command_stream(). */
-	if (!model_payloads_are_safe(model))
+	 * command stream.  The scan lives in npu_model_scan.cc so that the host
+	 * gate (scripts/verify_vela_model.cc) reaches this same verdict on the
+	 * same bytes -- see that file's header for why sharing the LOCATOR matters
+	 * as much as sharing the walk. */
+	if (npu_model_payload_refusal(model) != nullptr)
 		return NPU_ERR_PAYLOAD;
 
 	g_resolver = new (g_resolver_store) tflite::MicroMutableOpResolver<1>();
@@ -363,6 +239,23 @@ extern "C" const char *npu_status_name(int status)
 	                                 "command stream";
 	default:                  return "unknown";
 	}
+}
+
+/*
+ * The one TFLite fact the C side is allowed to ask about.
+ *
+ * npu_tensor::type is a TfLiteType narrowed to int8_t, so the enumerator has to
+ * survive that narrowing for the question to be answerable at all -- and the
+ * decoder casts a buffer on the answer.  Both are checked here, at compile
+ * time, in the only translation unit that can see the enumeration.
+ */
+static_assert(static_cast<int>(kTfLiteInt8) ==
+              static_cast<int>(static_cast<int8_t>(kTfLiteInt8)),
+              "kTfLiteInt8 does not survive npu_tensor's int8_t type field");
+
+extern "C" bool npu_tensor_is_int8(int8_t type)
+{
+	return static_cast<TfLiteType>(type) == kTfLiteInt8;
 }
 
 extern "C" const char *npu_type_name(int8_t type)

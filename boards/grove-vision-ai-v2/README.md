@@ -1218,17 +1218,26 @@ impossible to unwind ever again.
 - Frame rate.  The SPI wire time is 25.8 ms per frame at 48 MHz and the capture
   does not overlap it, so the ceiling is well under the panel's 38.7 fps; the
   rev-C bounce costs more again.  Overlapping capture with blit, and giving the
-  sink its own thread, are deliberately left out of this milestone.
+  sink its own thread, are deliberately left out of this milestone.  Measured
+  at about 10 fps, which is slower than that ceiling alone explains -- where the
+  rest of the time goes is unmeasured.  Tracked in issue #38.
 - The producer's stack high-water mark (4 KB allocated; `thread` reported a
   568 B peak on the first run, so there is room to trim once the sink work is
   settled).
-- Good default exposure / gain / white-balance values.  The runtime commands
-  exist so that finding them costs no flash cycles; nothing is baked in yet.
-  Measured with the donor's defaults, in room light: means R 58 / G 66 / B 54,
-  and `mosaic` under 0.5 on every plane -- i.e. the demosaic is working and the
-  frame is simply under-exposed and unbalanced.
-- The rev-C bounce, which this board (rev D) does not exercise.
-- Ethos-U55 inference.
+- Whether the baked-in defaults are the RIGHT ones.  Values were found on the
+  bench and are now the defaults (exposure 1000, again 0x40, black level 16,
+  saturation 600, gamma on), but they were chosen by looking at the panel, not
+  by measuring a colour target -- so they are a starting point, not a
+  calibration.  The runtime commands exist so that changing them costs no flash
+  cycles.  For reference, the donor's own defaults measured in room light:
+  means R 58 / G 66 / B 54, and `mosaic` under 0.5 on every plane -- i.e. the
+  demosaic was working and the frame was simply under-exposed and unbalanced.
+  A colorimetric answer needs the colour correction matrix, tracked in issue
+  #37.
+- The rev-C bounce, which this board (rev D) does not exercise.  Deliberately
+  not tracked as an issue: it is a condition this board cannot reach, not a
+  piece of work.  This section is where it lives until a rev-C board turns up.
+- Ethos-U55 inference, scoped in issue #40.
 
 ## Flashing and recovery
 
@@ -1254,7 +1263,9 @@ terminal before running `--target flash`.
 ## Future work
 
 - LED / button / GPIO commands, SD (SPI mode), PDM microphone.
-- Camera (MIPI CSI) and Ethos-U55 inference.
+- Ethos-U55 inference -- the remaining half of M-G3, scoped in issue #40.  The
+  camera (MIPI CSI) half landed in #35, and its output is already in the shape
+  the donor's `tflm_yolov8_od` expects.
 - MVE: usable only once the ThreadX Cortex-M55 port preserves VPR across a
   context switch, or only from code that cannot be preempted.  Until then the
   predication scan keeps it out of the image and the benchmarks are scalar.

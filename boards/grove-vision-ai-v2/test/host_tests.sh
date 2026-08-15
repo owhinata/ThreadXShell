@@ -103,6 +103,19 @@ gcc $CFLAGS -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast \
     $LDFLAGS -o "$out/test_epk_irq_wrap"
 "$out/test_epk_irq_wrap"
 
+# issue #46 -- the Ethos-U command-stream payload check (port/npu/npu_payload.c).
+# No shim and no SDK header: the walk is deliberately plain C over plain bytes,
+# which is why it was split out of npu_tflm.cc.  It is a SAFETY check -- it is
+# what stops npu_open() accepting a model whose driver actions continue past the
+# launch, where the driver can return without ever handing the arena back -- so
+# the reject cases matter as much as the accept ones, and neither can be
+# exercised on the board without deliberately building a broken model.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/npu" \
+    "$here/test_npu_payload.c" "$board/port/npu/npu_payload.c" \
+    $LDFLAGS -o "$out/test_npu_payload"
+"$out/test_npu_payload"
+
 # issue #35 -- the planar B/G/R -> RGB565 packer (port/camera/cam_convert.c).
 # No shim and no SDK header: this translation unit is deliberately pure
 # arithmetic over memory, which is what lets it be tested here at all.  Every

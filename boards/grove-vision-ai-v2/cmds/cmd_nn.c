@@ -20,11 +20,13 @@
  * not this: it checks that the clock a benchmark divides by is trustworthy,
  * which is a different question.
  *
- * CACHE.  npu_invoke() does not do maintenance and the vendor hooks are
- * neutered (npu_cache.c), so the order here is load-bearing: clean the input
- * after writing it, invoke, and only invalidate the outputs once the call has
- * returned -- i.e. after confirmed completion, which is precisely what the
- * driver's own ethosu_wait() gets wrong.
+ * CACHE.  Not here any more (issue #46).  Maintenance is the port's, in
+ * npu_cache.c, hung off the driver's inference_begin/end callbacks -- the only
+ * two instants where the arena's owner actually changes hands, both of them
+ * inside Invoke().  From out here every choice is wrong: cleaning the input
+ * before the call is too early (the ethos-u kernel writes arena scratch after
+ * it) and invalidating outputs after it is too late (TFLM writes the arena
+ * before Invoke() returns).
  *
  * FIELD OF VIEW.  The camera delivers 320x240 and the model wants a square
  * input, so the frame is CENTRE-CROPPED, not resized.  The vendor's resize is
@@ -349,9 +351,13 @@ static int cmd_nn_run(struct cli_instance *sh, int argc, char **argv)
 		return -1;
 	}
 
-	/* Clean AFTER writing the input and BEFORE the NPU reads it. */
-	npu_cache_clean(in.data, in.bytes);
-
+	/* No cache maintenance here (issue #46).  It moved into the port, where the
+	 * driver's own lifecycle callbacks put it at the only two instants that are
+	 * correct: the whole arena is cleaned immediately before the command stream
+	 * is launched, and invalidated once completion is confirmed -- both before
+	 * TFLM resumes.  Anything done from out here is either too early (the
+	 * ethos-u kernel writes arena scratch after it) or too late (TFLM writes the
+	 * arena before Invoke() returns). */
 	t0 = (uint32_t)tx_time_get();
 	rc = npu_invoke();
 	t1 = (uint32_t)tx_time_get();
@@ -367,14 +373,10 @@ static int cmd_nn_run(struct cli_instance *sh, int argc, char **argv)
 	          (unsigned long)(t1 - t0), (long)in.dims[2], (long)in.dims[1],
 	          CAM_FRAME_WIDTH, CAM_FRAME_HEIGHT);
 
-	for (unsigned i = 0; i < npu_output_count(); i++) {
-		if (npu_output(i, &out) != NPU_OK)
-			continue;
-		/* Invalidate only now: the NPU has finished writing. */
-		npu_cache_invalidate(out.data, out.bytes);
-		if (i == 0u)
-			nn_print_top(sh, &out);
-	}
+	/* The outputs are already visible: the port invalidated the whole arena
+	 * once completion was confirmed, before TFLM resumed. */
+	if (npu_output(0u, &out) == NPU_OK)
+		nn_print_top(sh, &out);
 
 	nn_release();
 	return 0;

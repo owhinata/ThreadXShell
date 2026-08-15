@@ -454,6 +454,7 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/npu/npu_arena.c"
     "${BOARD_DIR}/port/npu/npu_rtos.c"
     "${BOARD_DIR}/port/npu/npu_cache.c"
+    "${BOARD_DIR}/port/npu/npu_payload.c"
     "${BOARD_DIR}/port/npu/npu_hw.c"
     "${BOARD_DIR}/port/npu/npu_flash.c"
     ${SHELL_SOURCES}

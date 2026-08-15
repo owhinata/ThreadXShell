@@ -33,6 +33,8 @@
  * identifier are checked first, on raw bytes.
  */
 #include "npu.h"
+#include "npu_hw.h"
+#include "npu_payload.h"
 
 #include <new>
 #include <string.h>
@@ -41,6 +43,7 @@
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/schema/schema_generated.h"
+#include "tensorflow/lite/schema/schema_utils.h"   /* GetBuiltinCode() */
 
 namespace {
 
@@ -53,6 +56,132 @@ constexpr uint32_t kFlashSize = 0x01000000u;
 /* Smallest buffer that could hold a flatbuffer header worth inspecting: root
  * offset + the 4-byte file identifier at offset 4. */
 constexpr uint32_t kMinModelBytes = 16u;
+
+/*
+ * Every operator in the executable subgraph must be the ethos-u custom op, and
+ * every one of their command streams must satisfy the rule above.
+ *
+ * [!] THE PAYLOAD IS NOT custom_options.  The kernel reads `custom_initial_data`
+ * only to check a CO_TYPE marker; what it hands the driver is INPUT TENSOR 0 --
+ * `cms_data` from that tensor's buffer and `cms_data_size` from its `bytes`
+ * (ethosu.cc, Prepare/Eval).  Validating custom_options would have inspected the
+ * marker and proved nothing about what the driver actually parses.
+ *
+ * `bytes` is TFLM's dims-derived size, not the buffer length, so both are pinned
+ * here: a 1-D 1-byte-element tensor whose extent equals its constant buffer.
+ * Then the walk covers exactly the bytes the driver will walk.
+ *
+ * Rejecting a non-ethos-u operator is not redundant with the one-operator
+ * resolver: AllocateTensors would refuse it too, but this runs first and says
+ * which model is wrong rather than which operator is missing.
+ */
+bool op_command_stream_is_safe(const tflite::Model *model,
+                               const tflite::SubGraph *sub,
+                               const tflite::Operator *op)
+{
+	const auto *inputs = op->inputs();
+
+	if (inputs == nullptr || inputs->size() == 0u)
+		return false;
+
+	const int32_t ti = inputs->Get(0);
+
+	if (ti < 0)
+		return false;
+
+	const auto *tensors = sub->tensors();
+
+	if (tensors == nullptr || static_cast<uint32_t>(ti) >= tensors->size())
+		return false;
+
+	const auto *t = tensors->Get(static_cast<uint32_t>(ti));
+
+	if (t == nullptr)
+		return false;
+
+	/* [!] The bytes checked here have to be the bytes the driver parses, and a
+	 * VARIABLE tensor breaks that: MicroAllocator::AllocateVariables()
+	 * overwrites eval_tensors[i].data.data with an arena allocation even when
+	 * the tensor has a serialized buffer, so Eval() would hand the driver
+	 * arena contents -- writable at run time by another operator -- while this
+	 * walk inspected the constant in flash. */
+	if (t->is_variable())
+		return false;
+
+	if (t->type() != tflite::TensorType_UINT8 &&
+	    t->type() != tflite::TensorType_INT8)
+		return false;                    /* elements must be one byte */
+
+	const auto *shape = t->shape();
+
+	if (shape == nullptr || shape->size() != 1u)
+		return false;
+
+	const int32_t extent = shape->Get(0);
+
+	if (extent <= 0)
+		return false;
+
+	const auto *buffers = model->buffers();
+
+	if (buffers == nullptr || t->buffer() >= buffers->size())
+		return false;
+
+	const auto *buf  = buffers->Get(t->buffer());
+	const auto *data = buf != nullptr ? buf->data() : nullptr;
+
+	/* Constant, and exactly as long as the size the driver will be given.
+	 * With a serialized buffer and is_variable() false, TFLM keeps the tensor
+	 * kTfLiteMmapRo and the planner leaves it alone, so the pointer Eval()
+	 * passes the driver is this buffer in flash -- the bytes walked below. */
+	if (data == nullptr || data->size() != static_cast<uint32_t>(extent))
+		return false;
+
+	return npu_payload_is_single_final_command_stream(data->data(),
+	                                                 data->size());
+}
+
+bool model_payloads_are_safe(const tflite::Model *model)
+{
+	const auto *subgraphs = model->subgraphs();
+
+	if (subgraphs == nullptr || subgraphs->size() != 1u)
+		return false;
+
+	const auto *sub    = subgraphs->Get(0);
+	const auto *ops    = sub->operators();
+	const auto *codes  = model->operator_codes();
+
+	if (sub == nullptr || ops == nullptr || ops->size() == 0u || codes == nullptr)
+		return false;
+
+	for (unsigned n = 0; n < ops->size(); n++) {
+		const auto *op = ops->Get(n);
+
+		if (op == nullptr)
+			return false;
+
+		const uint32_t ci = op->opcode_index();
+
+		if (ci >= codes->size())
+			return false;
+
+		const auto *code = codes->Get(ci);
+
+		if (code == nullptr ||
+		    tflite::GetBuiltinCode(code) != tflite::BuiltinOperator_CUSTOM)
+			return false;
+
+		const auto *custom = code->custom_code();
+
+		if (custom == nullptr || strcmp(custom->c_str(), "ethos-u") != 0)
+			return false;
+
+		if (!op_command_stream_is_safe(model, sub, op))
+			return false;
+	}
+	return true;
+}
 
 /* Storage for the interpreter and resolver.  Raw bytes plus placement new, so
  * nothing is constructed until npu_open() says so and nothing is destroyed
@@ -116,12 +245,22 @@ extern "C" int npu_open(uint32_t model_addr, void *arena, size_t arena_bytes)
 	if (model->version() != TFLITE_SCHEMA_VERSION)
 		return NPU_ERR_SCHEMA;
 
+	/* Before anything can be launched: prove no driver action follows the
+	 * command stream.  See payload_is_single_final_command_stream(). */
+	if (!model_payloads_are_safe(model))
+		return NPU_ERR_PAYLOAD;
+
 	g_resolver = new (g_resolver_store) tflite::MicroMutableOpResolver<1>();
 	if (g_resolver->AddEthosU() != kTfLiteOk) {
 		g_resolver->~MicroMutableOpResolver<1>();
 		g_resolver = nullptr;
 		return NPU_ERR_OPS;
 	}
+
+	/* The cache protocol maintains this arena as a whole, so it has to be told
+	 * which one.  Set before AllocateTensors so that every unwind below goes
+	 * through npu_close() and clears it again. */
+	npu_cache_set_arena(arena, arena_bytes);
 
 	g_interp = new (g_interp_store) tflite::MicroInterpreter(
 		model, *g_resolver, static_cast<uint8_t *>(arena), arena_bytes);
@@ -149,6 +288,9 @@ extern "C" void npu_close(void)
 		g_resolver->~MicroMutableOpResolver<1>();
 		g_resolver = nullptr;
 	}
+	/* Take the arena back from the cache protocol.  A stale base here would
+	 * have the flush hook cleaning memory nothing owns any more. */
+	npu_cache_set_arena(nullptr, 0u);
 }
 
 extern "C" int npu_input(struct npu_tensor *out)
@@ -189,7 +331,15 @@ extern "C" int npu_invoke(void)
 {
 	if (g_interp == nullptr)
 		return NPU_ERR_STATE;
-	return g_interp->Invoke() == kTfLiteOk ? NPU_OK : NPU_ERR_INVOKE;
+
+	const TfLiteStatus st = g_interp->Invoke();
+
+	/* Cache maintenance is NOT done here and must not be: TFLM has already
+	 * written the arena on its way out of Invoke().  This only closes out the
+	 * protocol's state and catches a launch that never handed the arena back. */
+	npu_cache_after_invoke();
+
+	return st == kTfLiteOk ? NPU_OK : NPU_ERR_INVOKE;
 }
 
 extern "C" size_t npu_arena_used(void)
@@ -209,6 +359,8 @@ extern "C" const char *npu_status_name(int status)
 	case NPU_ERR_ARENA:       return "arena too small for this model";
 	case NPU_ERR_TENSORS:     return "unexpected tensor layout";
 	case NPU_ERR_INVOKE:      return "inference failed";
+	case NPU_ERR_PAYLOAD:     return "model payload has actions after the "
+	                                 "command stream";
 	default:                  return "unknown";
 	}
 }

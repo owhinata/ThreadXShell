@@ -139,9 +139,16 @@
 
    **推論（#44）**: **`lib_spi_eeprom.a` の erase/write 系は禁止シンボル**
    （このフラッシュにブートローダが載る。wio のセクタ0 と同格。`setWriteEnable`
-   のみ QUAD 有効化に必要なので明示的に許可）。**Ethos-U の dcache weak フックは
-   no-op で上書きしたまま**にする — この SDK の weak 実装は空ではなく、しかも
-   `ethosu_wait()` が**完了待ちの前に**アリーナを invalidate する。
+   のみ QUAD 有効化に必要なので明示的に許可）。**アリーナのキャッシュ保守は
+   「範囲ごと」にしない**（#46） — TFLM は 16 B 整列・ラインは 32 B で、外側丸めが隣の
+   半ラインを巻き込む。潰すのは **`ethosu_invalidate_dcache()` だけ**（完了セマフォより前に
+   呼ばれる）で、`ethosu_flush_dcache()` は本物のまま。引き渡しは `ethosu_inference_begin/end`
+   に置き、アリーナ**全体**を clean / invalidate する。成功条件は
+   **`job.state == DONE` かつ `job.result == OK`**。異常時はリセットの**成功を確認してから**
+   invalidate、失敗なら fail-stop。**呼び出し側でキャッシュ保守を足さない**
+   （TFLM は `Invoke()` 復帰前にアリーナを書く）。**`npu_open()` のペイロード検査**
+   （`COMMAND_STREAM` が 1 個かつ最後 / 対象は `custom_options` ではなく入力テンソル 0 /
+   `is_variable()` は拒否）は緩めない。
    フラッシュのメモリマップ読み出し窓は**アプリが開ける**（開けるまで窓全体が
    同一レジスタにエイリアスし、フォルトも 0xFF も返さない）。その open は
    **DMAC1 の IRQ 133 を有効化する** — EPK は番号を列挙せず ISER スナップショットで

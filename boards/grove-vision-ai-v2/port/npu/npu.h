@@ -38,6 +38,9 @@ enum npu_status {
 	NPU_ERR_ARENA        = -6,  /**< AllocateTensors failed: arena too small */
 	NPU_ERR_TENSORS      = -7,  /**< unexpected input/output tensor shape or type */
 	NPU_ERR_INVOKE       = -8,  /**< the interpreter reported a run failure */
+	NPU_ERR_PAYLOAD      = -9,  /**< driver actions continue past the command
+	                                 stream, so a launch could be abandoned with
+	                                 the arena still owned by the NPU (#46) */
 };
 
 /** What a tensor looks like, flattened enough to describe over a C boundary. */

@@ -52,6 +52,7 @@
 #include "lcd_st7789.h"
 
 #define CAM_PREVIEW_DEFAULT 0u   /* 0 = until Ctrl+C */
+#define CAM_BENCH_DEFAULT  60u   /* enough to average, ~4 s at 15 fps  */
 
 static void cam_report(struct cli_instance *sh, const char *what, int rc)
 {
@@ -394,8 +395,6 @@ static int cmd_camera_preview(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-/* ---- stats --------------------------------------------------------------- */
-
 /*
  * One line of the stage profile (issue #38).
  *
@@ -462,6 +461,102 @@ static void cam_print_profile(struct cli_instance *sh,
 	cam_prof_line(sh, "other", st->prof_other_us, st->prof_total_us,
 	              st->prof_iters, "retrigger, wrap reassert, loop");
 }
+
+/*
+ * The datapath's own frame period, with the display OUT of the path (#38).
+ *
+ * WHY THIS EXISTS.  The stage profile showed that saving CPU work does not make
+ * the preview faster -- 7.8 ms saved in `pack` reappeared as 7.5 ms of `wait`
+ * and the total held at ~63 ms.  Something outside the CPU work paces the loop,
+ * and two models fit that equally: one frame per 63 ms, or one per ~31.5 ms
+ * with this loop taking every other one.  They differ by a factor of two in
+ * what is achievable and BOTH predict `wait = 63 ms - work`, so no amount of
+ * staring at a preview can separate them.
+ *
+ * What separates them is making the work small.  This runs the producer with no
+ * sink attached, so the LCD blit -- 26.4 ms, the single largest stage -- is not
+ * in the loop at all.  What is left is capture, invalidate and pack, about
+ * 10 ms with gamma off.  If the total then holds at 63 ms the datapath really
+ * does deliver one frame per 63 ms; if it drops, `total` IS the period, read
+ * directly.
+ *
+ * [!] It only reads as a period while `work` is comfortably under it -- which
+ * the profile printed below is exactly what to check.  Run it twice, with
+ * `camera gamma off` and on, to get two work levels: if the total is the same
+ * at both, it is a period and not a multiple of one.
+ *
+ * No sink is attached and none is detached.  A preview or `nn preview` already
+ * holding the datapath makes camera_stream_start() return CAM_ERR_BUSY, which
+ * is the right answer -- this measures an idle datapath or nothing.
+ */
+static int cmd_camera_bench(struct cli_instance *sh, int argc, char **argv)
+{
+	uint32_t frames = CAM_BENCH_DEFAULT;
+	struct camera_stats st;
+	uint32_t before;
+	int rc;
+
+	if (argc > 1 && cli_parse_u32(argv[1], &frames) != 0) {
+		cli_error(sh, "camera: bad frame count '%s'\r\n", argv[1]);
+		return 1;
+	}
+	if (frames == 0u) {
+		cli_error(sh, "camera: bench needs a frame count (nothing is on "
+		              "the panel to watch)\r\n");
+		return 1;
+	}
+
+	rc = camera_stream_start();
+	if (rc != CAM_OK) {
+		if (rc == CAM_ERR_BUSY)
+			cli_error(sh, "camera: a preview owns the datapath; stop "
+			              "it first\r\n");
+		else
+			cam_report(sh, "stream start", rc);
+		return 1;
+	}
+
+	camera_stream_stats(&st);
+	before = st.frames;
+
+	for (;;) {
+		if (cli_cancel_requested(sh))
+			break;
+		camera_stream_stats(&st);
+		if (!st.streaming)
+			break;                      /* the producer gave up */
+		if ((st.frames - before) >= frames)
+			break;
+		if (cli_sleep(sh, 1u) != 0)
+			break;
+	}
+
+	/* Nothing was attached, so unlike `camera preview` there is nothing to
+	 * detach and no reason to condition on a confirmed stop.  A stop that
+	 * does not confirm still leaves the camera poisoned, which the profile
+	 * below will refuse to describe. */
+	rc = camera_stream_stop();
+
+	if (cli_cancel_requested(sh))
+		return 0;
+
+	if (rc != CAM_OK) {
+		cam_report(sh, "stream stop", rc);
+		return 1;
+	}
+
+	camera_stream_stats(&st);
+	if (st.fault != NULL) {
+		cli_error(sh, "camera: stopped: %s\r\n", st.fault);
+		return 1;
+	}
+
+	cli_print(sh, "no sink attached: the LCD blit is out of this loop\r\n");
+	cam_print_profile(sh, &st);
+	return 0;
+}
+
+/* ---- stats --------------------------------------------------------------- */
 
 static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 {
@@ -844,6 +939,9 @@ CLI_SUBCMD_SET_CREATE(camera_subcmds,
 	CLI_CMD(raw, NULL, "capture the Bayer mosaic and name the phase",
 	        cmd_camera_raw),
 	CLI_CMD(stats, NULL, "producer and sink counters", cmd_camera_stats),
+	CLI_CMD_ARG_USAGE(bench, NULL,
+	                  "time the datapath with the panel out of the loop",
+	                  "[frames]", cmd_camera_bench, 1, 1),
 	CLI_CMD_ARG_USAGE(exposure, NULL,
 	                  "read or set the sensor's exposure",
 	                  "[lines]", cmd_camera_exposure, 1, 1),

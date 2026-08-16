@@ -53,9 +53,12 @@
 
 /*
  * The producer sits above the console (16) so that a frame is converted and
- * published promptly, and above the panel thread the LCD sink owns (issue #57)
- * so that its 26 ms blit can never delay the next capture.  CAM_PRODUCER_PRIO
- * itself lives in camera.h, because that second thread asserts against it.
+ * published promptly, and -- since issue #64 -- BELOW the panel thread the LCD
+ * sink owns.  That blit sleeps on its DMA for nearly all of its 26 ms, so
+ * letting it preempt this thread costs under a millisecond a frame, and it is
+ * what lets the display actually use the period this thread produces.
+ * CAM_PRODUCER_PRIO itself lives in camera.h, because that second thread
+ * asserts against it.
  */
 /*
  * [!] 8 KiB, not 4, since issue #48: this thread now runs INFERENCE.
@@ -66,9 +69,18 @@
  * was measured at 568 B before this, so the old allocation was sized for a
  * thread that did almost nothing.
  *
- * This is a STARTING allocation, not a proof.  `thread` reports the high-water
- * mark from ThreadX's fill pattern; the acceptance test is that mark with real
- * margin, measured on the success path and on both cancellation paths.
+ * MEASURED at issue #64: 908 B of 8192, after `nn preview` and five Ctrl+C
+ * cancellations -- so putting Invoke() on this thread cost about 340 B over the
+ * 568 B of before, and the allocation is nine times what the inference path
+ * actually uses.
+ *
+ * [!] It is deliberately NOT cut to fit that, because 908 B is not this
+ * thread's peak -- it is the peak of the paths measured.  The deepest chain
+ * here is the timeout RESTART (cam_quiesce() plus cam_start_datapath(), i.e.
+ * the vendor's mode-table writes), and every run so far reports `restarts 0`,
+ * so nothing has walked it.  Nor is there pressure to: check_placement_budget
+ * reports over 150 KB of DTCM gap.  Shrink this when a run that restarts has
+ * been measured, not before.
  */
 #define CAM_PRODUCER_STACK  8192u
 
@@ -94,8 +106,9 @@ _Static_assert(CAM_PRODUCER_PRIO > 0u,
 _Static_assert((CAM_PRODUCER_STACK % 8u) == 0u,
                "ThreadX wants an 8-byte aligned stack size");
 _Static_assert(CAM_PRODUCER_STACK >= 1024u,
-               "the producer's deepest call is the LCD sink's blit; anything "
-               "this small has not been thought about");
+               "the producer's deepest call is a sink's consume(), which runs "
+               "TFLM's Invoke() under `nn preview`; anything this small has not "
+               "been thought about");
 
 /*
  * How long to wait for a frame before deciding the datapath has stopped

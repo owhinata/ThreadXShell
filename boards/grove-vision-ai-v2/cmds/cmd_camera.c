@@ -464,8 +464,12 @@ static void cam_print_profile(struct cli_instance *sh,
 	              st->prof_iters, "D-cache invalidate, 225 KB");
 	cam_prof_line(sh, "pack", st->prof_pack_us, st->prof_total_us,
 	              st->prof_iters, "planar B/G/R -> RGB565, 76800 px");
+	/* NOT the blit -- that left this thread in #57 and has its own row
+	 * below.  What is left is whatever the sinks do on the producer: the
+	 * inference under `nn preview`, and since #64 the panel thread's staging
+	 * copy, which now preempts this thread instead of queueing behind it. */
 	cam_prof_line(sh, "sink", st->prof_sink_us, st->prof_total_us,
-	              st->prof_iters, "LCD blit: byte swap + SPI DMA wait");
+	              st->prof_iters, "sinks consume: inference + panel staging");
 	cam_prof_line(sh, "tune", st->prof_tune_us, st->prof_total_us,
 	              st->prof_iters, "means + sensor read-back + wb");
 	cam_prof_line(sh, "other", st->prof_other_us, st->prof_total_us,

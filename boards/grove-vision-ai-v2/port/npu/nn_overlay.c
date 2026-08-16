@@ -60,6 +60,9 @@ static struct nn_overlay_stats nn_ov_stats;
  * The invariant to protect is the panel thread's step order, in cam_lcd_sink.c:
  * nothing here may be touched after its frame_pipeline_put().
  *
+ * Note that NONE of that is an argument about priorities, which is why issue #64
+ * could reverse the two threads' ranking without touching this file.
+ *
  * Static because nothing here may ever be freed under a producer -- or now a
  * panel thread -- that did not acknowledge a stop (see nn_overlay.h).
  */

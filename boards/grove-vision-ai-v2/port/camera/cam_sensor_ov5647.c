@@ -35,38 +35,58 @@ static int ov5647_read_frame_length(uint16_t *lines);
  *
  * The SDK's OV5647_mipi_2lane_640x480.i writes HTS (0x380C/0x380D = 1852) and
  * never touches 0x380E/0x380F, leaving the part on whatever frame length it
- * powered up with -- measured at 1968 lines, which is what the 2592x1944 mode
- * wants.  Programming it explicitly is the point; the VALUE below is 1968 all
- * the same, and that is a measured choice rather than a shrug.
+ * powered up with -- 1968 lines, which is what the 2592x1944 mode wants.
+ * Programming it explicitly is the point, and the VALUE is a measured choice.
  *
- * WHY NOT LOWER.  The frame period is NOT simply VTS * HTS / PCLK.  The
- * datapath is one-shot: after the producer arms it, the capture waits for the
- * next frame start and then takes a whole active frame (480 * 31.5 us =
- * 15.1 ms) to arrive.  So the loop period is QUANTISED --
+ * TWO CONDITIONS DECIDE IT, and they are not the same condition.
  *
- *     period = T_s * ceil((W + 15.1 ms) / T_s),   T_s = VTS * 31.5 us
+ * The CAPTURE period is quantised, because the datapath is one-shot: after the
+ * producer arms it, the capture waits for the next frame start and then takes a
+ * whole active frame to arrive.
  *
- * with W the producer's own work.  Measured against six runs spanning VTS
- * 504..1968 and periods 31..63 ms, that predicts every one within 1.2%.
+ *     period = T_s * ceil((W + T_active) / T_s)
  *
- * The producer currently takes 43.5 ms a frame, so W + 15.1 ms is 58.7 ms and
- * ANY VTS from 1864 up gives one frame period of ~62 ms.  Lowering it does not
- * help: 984 measured 62.0 ms (N=2) and 504 measured 47.8 ms (N=3, and slower
- * per frame than it looks).  1968 is therefore the best of the equal choices --
- * and being the highest, it leaves the most exposure ceiling, which is the
- * other thing this register controls.
+ * The DISPLAY, since issue #64 put the panel thread above the producer, needs
+ * the sink's whole two-stage latency to fit in one period -- the hand-off is one
+ * frame deep and the pin is not released until the panel is done, so the bound
+ * is the SUM of the stages, not the larger of them:
  *
- * [!] AND THE OPTIMUM IS A CLIFF EDGE, which is why this is not tuned tight.
- * VTS 1860 gives T_s = 58,603 us against a W + 15.1 ms of 58,663 -- 60 us
- * short, so N becomes 2 and the frame rate HALVES to 8.5 fps.  Any VTS chosen
- * to sit just above the current work is one gamma setting away from falling off
- * that edge.  Pick T_s with margin, or leave it here.
+ *     S + B < period      S = what the sink does on the producer (the
+ *                             inference under `nn preview`; ~0 without it)
+ *                         B = the panel thread's service time (the `blit` row)
  *
- * The real win needs the producer's work down, not the frame length: with the
- * LCD blit off this thread (W ~ 17.6 ms), VTS ~ 1100 gives ~29 fps.  Neither
- * change does it alone.  `camera vts` is how to explore that without a flash.
+ * MEASURED at issue #64: T_active = 15.1 ms, S = 23,917 us, B = 26,455 us, so
+ * the display bound is 50,371 us -- and W is 9,194 us for `camera preview`,
+ * 32,154 for `nn preview`.
+ *
+ * WHY 880.  It is the best value for the harder-to-serve preview and a good one
+ * for the other, with the most margin on the binding bound of any candidate:
+ *
+ *     VTS   camera preview   nn preview   margin on S + B
+ *     880       35.7 fps      17.9 fps        5.5 ms
+ *    1650       19.1          19.0            2.0
+ *    1968       15.9          15.9           12.7
+ *
+ * At 880 `nn preview` simply takes N=2 (56.0 ms), which is why it keeps so much
+ * margin.  All four rows were measured with zero dropped frames.
+ *
+ * [!] THE OPTIMUM IS A CLIFF EDGE, which is why this is not tuned tighter.
+ * VTS 1580 puts the display bound 20 us on the wrong side and still showed 100
+ * of 100 -- and VTS 1540, 1.5 ms on the wrong side, dropped exactly every other
+ * frame.  A margin that thin does not fail cleanly, it degrades statistically.
+ * Pick T_s with margin, and re-measure after any change to S, B or W.
+ *
+ * [!] AND THE LINE TIME IS NOT 31.507 us.  That figure is HTS 1852 / PCLK
+ * 58.8 MHz; the zero-drop N=1 runs give period/VTS = 31.77..31.87 us, ~0.9%
+ * higher.  Predictions from the datasheet figure run optimistic by about that
+ * much, which is 450 us at these frame lengths -- enough to matter next to the
+ * cliff.  `camera vts` is how to explore all of this without a flash.
+ *
+ * The other thing this register controls is the EXPOSURE ceiling, which is
+ * bounded by the frame length: 880 caps integration at roughly 44% of what 1968
+ * allowed, so a dim scene is dimmer here.  That is the price of the frame rate.
  */
-#define OV5647_DEFAULT_VTS  1968u
+#define OV5647_DEFAULT_VTS  880u
 
 /* The mode outputs 480 lines; VTS below that plus the part's own blanking is
  * not a frame.  Linux's 504 for this mode is the practical floor, and it is

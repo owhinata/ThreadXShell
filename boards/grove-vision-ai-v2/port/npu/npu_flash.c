@@ -47,6 +47,7 @@
 
 #include "spi_eeprom_comm.h"
 
+#define LOG_TAG "npu"
 #include "log.h"
 
 /* The flash read alias, and a probe offset far enough into it that a degenerate
@@ -67,14 +68,14 @@ int npu_flash_xip_init(void)
 		return 0;
 
 	if (hx_lib_spi_eeprom_open(USE_DW_SPI_MST_Q) != 0) {
-		LOG_ERR("npu: QSPI open failed; the model cannot be read\r\n");
+		LOG_ERR("QSPI open failed; the model cannot be read");
 		return -1;
 	}
 	/* Quad, continuous-read.  Donor-identical: this is the configuration the
 	 * SDK's own classification app uses to read a model from this part. */
 	if (hx_lib_spi_eeprom_enable_XIP(USE_DW_SPI_MST_Q, true, FLASH_QUAD,
 	                                 true) != 0) {
-		LOG_ERR("npu: QSPI XIP enable failed\r\n");
+		LOG_ERR("QSPI XIP enable failed");
 		return -1;
 	}
 
@@ -86,14 +87,14 @@ int npu_flash_xip_init(void)
 	 * happened.  Proof that the RIGHT bytes are there is npu_open()'s job: it
 	 * checks the flatbuffer identifier before following a single offset. */
 	if (*a == *b) {
-		LOG_ERR("npu: flash window still aliases (0x%08lx == 0x%08lx); "
-		        "XIP did not take\r\n",
+		LOG_ERR("flash window still aliases (0x%08lx == 0x%08lx); "
+		        "XIP did not take",
 		        (unsigned long)*a, (unsigned long)*b);
 		return -1;
 	}
 
 	xip_ready = 1u;
-	LOG_INF("npu: QSPI XIP on, model window readable at 0x%08lx\r\n",
+	LOG_INF("QSPI XIP on, model window readable at 0x%08lx",
 	        (unsigned long)FLASH_R_BASE);
 	return 0;
 }

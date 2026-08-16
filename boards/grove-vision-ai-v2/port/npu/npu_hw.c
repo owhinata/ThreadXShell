@@ -53,6 +53,7 @@
 #include "hx_drv_scu.h"
 #include "ethosu_driver.h"
 
+#define LOG_TAG "npu"
 #include "log.h"
 #include "epk_irq_wrap.h"
 
@@ -69,7 +70,7 @@ static uint8_t     hw_ready;
 static int fail(const char *why)
 {
 	fail_reason = why;
-	LOG_ERR("npu: bring-up refused: %s\r\n", why);
+	LOG_ERR("bring-up refused: %s", why);
 	return -1;
 }
 
@@ -184,7 +185,7 @@ int npu_hw_init(void)
 	}
 
 	hw_ready = 1u;
-	LOG_INF("npu: Ethos-U55 up (secure, privileged), IRQ %d wrapped\r\n",
+	LOG_INF("Ethos-U55 up (secure, privileged), IRQ %d wrapped",
 	        (int)U55_IRQn);
 	return 0;
 }

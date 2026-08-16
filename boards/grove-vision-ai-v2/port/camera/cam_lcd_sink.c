@@ -26,9 +26,10 @@
  *    ever hold frames the policy has already said to discard.
  *
  * 2. The panel thread's step order is the whole safety argument, and "put last"
- *    is too coarse.  put() clears the core's busy flag, and the producer outranks
- *    this thread, so a new consume() can begin before the next instruction here
- *    executes.  See sink_panel_entry().
+ *    is too coarse.  put() clears the core's busy flag, which IS the statement
+ *    "this sink is free", so nothing belonging to the frame may be touched after
+ *    it -- whatever the two threads' priorities happen to be.  See
+ *    cam_panel_entry().
  *
  * 3. Detach unlinks BEFORE it drains.  The other order leaves the sink reachable
  *    across a window in which a fresh stream can start.
@@ -56,27 +57,41 @@
  * Strictly between the producer and the console.
  *
  * Above the console because a 26 ms blit that waits behind whatever the shell is
- * printing would stutter the picture for no reason; below the producer because
- * the producer's iteration IS the frame period epic #56 is shrinking, and this
- * thread has ~26 ms of slack per frame and spends nearly all of it asleep on the
- * DMA semaphore.  The asserts below are the point of exporting CAM_PRODUCER_PRIO
- * from camera.h: the ordering is checked, not restated.
+ * printing would stutter the picture for no reason.
+ *
+ * [!] AND ABOVE THE PRODUCER SINCE ISSUE #64, which REVERSES what #57 decided.
+ * #57 put this thread below the producer to protect the frame period, and what
+ * that actually bought was a display unable to use the period it protected: the
+ * DMA completes, this thread asks for the CPU back, and it waits out whatever is
+ * left of the producer's iteration -- so the blit lands just after the next
+ * publish and the frame is dropped.  That wait is the whole of the `- W` term in
+ * the zero-drop condition, and it came from nothing but this ordering.
+ *
+ * The producer pays for the reversal, and the bill is small: this thread sleeps
+ * on the DMA semaphore for the 26 ms of wire time and holds the CPU only for the
+ * staging copy, the short command transfers, draw() and the FIFO tail.  Measured
+ * before the change at 1.5% of a 62.6 ms frame -- 940 us, against the 8,245 us
+ * the producer spends on the same frame.
+ *
+ * The asserts below are the point of exporting CAM_PRODUCER_PRIO from camera.h:
+ * the ordering is checked, not restated.
  */
-#define CAM_PANEL_PRIO  11u
+#define CAM_PANEL_PRIO  9u
 /*
  * The deepest call here is lcd_blit_le_overlay() -> lcd_blit() ->
  * lcd_dma_burst() -> the vendor SSPI driver, plus the overlay's draw() (box
  * geometry and lcd_rect_wire()).  No inference, no interpreter -- that stayed on
- * the producer -- so this is nothing like the producer's 8 KiB.  Still a
- * STARTING allocation: `thread` reports the high-water mark and that is the
- * acceptance test.
+ * the producer -- so this is nothing like the producer's 8 KiB.
+ *
+ * MEASURED at issue #64: 544 B of 2048, across `camera preview`, `nn preview`
+ * and a frame skipped because the console held the panel.
  */
 #define CAM_PANEL_STACK 2048u
 
-_Static_assert(CAM_PANEL_PRIO > CAM_PRODUCER_PRIO,
-               "the panel thread must NOT outrank the camera producer: the "
-               "producer's iteration is the frame period, and a 26 ms blit "
-               "ahead of it would put the blit back into that period");
+_Static_assert(CAM_PANEL_PRIO < CAM_PRODUCER_PRIO,
+               "the panel thread must outrank the camera producer: below it, a "
+               "blit whose DMA completes mid-iteration waits out the rest of "
+               "that iteration and misses the next publish (issue #64)");
 _Static_assert(CAM_PANEL_PRIO < CLI_INSTANCE_PRIORITY,
                "the panel thread must outrank the console, or a frame waits "
                "behind whatever the shell is printing");
@@ -247,16 +262,20 @@ static void cam_lcd_draw(void *ctx, uint16_t *fb, uint16_t fb_w, uint16_t fb_h)
  *   1. take the mailbox and EMPTY IT, so the next delivery has somewhere to go;
  *   2. blit, with draw() inside the panel guard;
  *   3. put -- and after this line nothing belonging to that frame, the overlay
- *      or the detections may be touched, because put() clears the core's busy
- *      flag and the producer OUTRANKS this thread: a new consume() can run
- *      before the next instruction here does;
+ *      or the detections may be touched.  put() clears the core's busy flag,
+ *      which IS the statement "this sink is free", and the producer acts on it
+ *      the moment it runs.  Since issue #64 this thread outranks the producer,
+ *      so that cannot happen before step 4 -- but the rule deliberately does not
+ *      rest on that.  The ordering is a tuning parameter, and this port has
+ *      already reversed it once;
  *   4. publish idle, which is what a drain is waiting for.
  *
  * Step 4 is deliberately after step 3 and deliberately not part of it.  What it
  * publishes is the state "done has caught up with accepted", not the event "one
- * finished" -- between 3 and 4 the producer may already have handed over another
- * frame, and a drain that returned on "one finished" would return with a blit
- * still queued.
+ * finished": a drain that returned on "one finished" would return whenever ANY
+ * frame completed, with the next one already handed over and its blit still to
+ * run.  Testing the state instead is also what makes a token left by an earlier
+ * frame harmless.
  */
 static void cam_panel_entry(ULONG arg)
 {

@@ -696,6 +696,8 @@ camera sat [n]           saturation, standing in for a colour matrix
 camera auto [on|off]     the sensor's own AEC + this port's white balance
 camera gamma [on|off]    sRGB encode (off by default)
 camera bayer [mode]      demosaic phase
+camera vts [lines]       sensor frame length: frame rate and exposure ceiling
+camera bench [frames]    the datapath's own period, with no sink attached
 ```
 
 An OV5647 module in the board's MIPI CSI connector.  The datapath is fixed, and
@@ -1402,13 +1404,15 @@ the CPU back, it waits for however much of `pack` is left -- up to 17.2 ms, and
 after the next publish and the frame is dropped: at VTS 1770 the arithmetic
 margin is **203 us**.
 
-So the ceiling this file assumed for the panel -- 26.4 ms of wire time, 37.9 fps
--- is not the operative one.  The effective ceiling is ~33.6 ms, 29.8 fps, and it
-moves with whatever else the producer is doing.  Issue #58 (folding the packer
-into one LUT per channel, 17.2 -> ~8 ms) attacks this directly rather than
-incidentally, because the blocking time IS the length of `pack`.  Tracked in
-issue #64, and measured in the section below -- it was the length of `pack`, and
-the panel got its wire time back.
+So the ceiling this file assumed for the panel -- 26.4 ms of service time,
+37.8 fps -- is not the operative one while the panel sits below the producer.
+The effective ceiling is ~33.6 ms, 29.8 fps, and it moves with whatever else the
+producer is doing.  Issue #58 (folding the packer into one LUT per channel,
+17.2 -> ~8 ms) attacks this directly rather than incidentally, because the
+blocking time IS the length of `pack`.  Tracked in issue #64, and measured in the
+section below -- it was the length of `pack`, and the panel got its service time
+back.  Issue #64 then removed the coupling itself by reversing the two threads'
+priorities; see the section after that.
 
 Two practical consequences:
 
@@ -1462,13 +1466,22 @@ if its DMA completes after the producer has woken again it waits out the rest of
 `pack` and misses the next publish:
 
 ```
-zero drops  <=>  wire (26,444) + staging (850) < period - W
+zero drops  <=>  B < period - W,   B = the measured `blit`
 ```
 
-That predicted VTS 1124 for the default settings; VTS 1160 was measured at 231
-shown, 0 dropped, and a blit back at its 26,448 floor.  It also explains the
-earlier runs exactly: at `camera sat 256` W is 4,360, the condition needs 31,654,
-and VTS 1010 (32,074) clears it by 420 us -- which is why that run showed all 456
+**[!] `B` is the WHOLE of the panel thread's service time, so nothing is added to
+it.**  The `blit` row is timed from before `lcd_acquire()` to after
+`camera_frame_put()` (`cam_panel_entry()`), so its 26,444 us already contains the
+staging copy, the window and RAMWR commands, `draw()`, the pixel DMA, the FIFO
+tail and the put.  This section first wrote the condition as
+`wire (26,444) + staging (850)`, which counts the staging twice: 26,444 is not
+the wire time, it is 25,600 us of wire plus about 850 us of everything else --
+which is exactly what the `sink` measurement further up says.
+
+The corrected condition predicts VTS 1101 for the default settings; VTS 1160 was
+measured at 231 shown, 0 dropped, and a blit back at its 26,448 floor.  It also
+explains the earlier runs: at `camera sat 256` W is 4,360, the condition needs
+30,804, and VTS 1010 (32,074) clears it -- which is why that run showed all 456
 frames while the same VTS at the default settings dropped half.
 
 `nn preview` measures out at the SAME condition, and the answer there is the
@@ -1492,14 +1505,89 @@ Feeding that average into a condition that asks "what would it cost if nothing
 dropped" is circular -- the drops are what made the number small.  **Take W from
 a run with zero drops, or from `sink` doubled.**
 
-So the two previews want 1160 and 1968, and one global VTS still cannot serve
-both -- but the default now serves the harder of the two exactly.
+So the two previews wanted 1160 and 1968, and one global VTS could not serve
+both -- though the default of the day served the harder of the two exactly.
+(Issue #64 changed both the condition and the default; see below.)
 
 **[!] `camera stats`'s `sink` row is per ITERATION, not per delivery.**  With
 drops in play the two differ a lot: `nn preview` at VTS 1770 prints 11,594 us
 while the actual cost of one inference + preprocess + overlay is 22,958 us.  It
 is the right number for the period model, which is what it is there for, and the
 wrong one to budget issue #58 or #60 against.
+
+### What happened when the panel outranked the producer (issue #64)
+
+Everything above assumes the panel thread sits BELOW the producer, which is what
+issue #57 chose.  Issue #64 reversed it -- `CAM_PANEL_PRIO` 11 -> 9 -- and the
+`- W` term went away with it, because that term was never anything but this
+ordering.
+
+**The reversal was checked before it was made, and it cost one measurement, not
+one flash.**  The worry on record was that the producer would be unable to run
+during the blit.  It is not: the panel thread sleeps on the DMA semaphore for the
+wire time and holds the CPU only for the staging copy, the command transfers,
+`draw()` and the FIFO tail.  `thread` on the OLD firmware put that at **1.5% of a
+62.6 ms frame -- 940 us**, against the producer's own 13.1%.  (`thread` needs a
+prior snapshot to divide by, so the first run of it prints `--`; run it twice.)
+
+After the change, with the producer's `sink` row now carrying the staging it is
+preempted by:
+
+| | VTS | period | shown | dropped | `sink` | `blit` |
+|---|---:|---:|---:|---:|---:|---:|
+| `camera preview` | 1968 | 62,557 | 300 | 0 | 950 | 26,447 |
+| **`camera preview`** | **880** | **27,982** | **300** | **0** | 949 | 26,447 |
+| `nn preview` | 1968 | 62,612 | 200 | 0 | 23,916 | 26,451 |
+| `nn preview` | 1650 | 52,417 | 200 | 0 | 23,917 | 26,455 |
+| **`nn preview`** | **880** | **55,864** | **200** | **0** | 23,916 | 26,451 |
+
+The two bold rows are the shipping default, measured on the flashed image.
+
+**`camera preview` 27.1 -> 35.7 fps and `nn preview` 15.9 -> 17.9, at one global
+VTS of 880, with every frame shown.**  `blit` holds its 26,45x floor at every
+VTS, which is the whole point: under the old ordering it stretched to 33,595 at
+this sort of producer duty.
+
+**[!] AND THE ZERO-DROP CONDITION IS NOT `B < period`.**  That is only the case
+where the sink does nothing on the producer.  The inference runs inside
+`consume()`, BEFORE the hand-off, so the panel starts its blit that much later:
+
+```
+hand-off      = inval + pack + S            S = the sink's producer-side work
+panel free at = inval + pack + S + B        B = the panel's service time (`blit`)
+next publish  = period + inval + pack
+
+zero drops  <=>  S + B < period
+```
+
+The two stages ADD, they do not overlap: the hand-off is one frame deep and the
+pin is not released until the panel is done.  Measured S = 23,917 and B = 26,455,
+so `nn preview` needs 50,371 us however fast the producer gets.  That bound
+predicted all five rows above and both failures below.
+
+| | VTS | period | S + B - period | measured |
+|---|---:|---:|---:|---|
+| `nn preview` | 1540 | 48,871 | **+1,500** | 100 of 200 shown |
+| `nn preview` | 1500 | 48,522 | **+1,849** | 51 of 100 shown |
+| `nn preview` | 1580 | 50,351 | **+20** | 100 of 100 shown |
+
+Exactly every other frame, because a dropped iteration skips `consume()` and so
+the frame after it always fits.  And VTS 1580 is the cliff itself: 20 us on the
+failing side and it showed everything, over a hundred frames.  **A margin inside
+the model's own error is not a margin.**
+
+**[!] The line time is 31.77..31.87 us, not 31.507.**  31.507 is HTS 1852 divided
+by PCLK 58.8 MHz; every zero-drop N=1 run above gives `period / VTS` about 0.9%
+higher than that.  At these frame lengths 0.9% is 450 us -- the same order as the
+margins being reasoned about, which is how VTS 1580 got predicted onto the wrong
+side.  Use the measured figure near the cliff.
+
+The default moved to **VTS 880** on that evidence.  It is the best value for
+`camera preview`, within 1.1 fps of the best for `nn preview`, and it keeps the
+most margin on the binding bound of any candidate (5.5 ms, against 2.0 ms at
+VTS 1650) -- `nn preview` simply takes N=2 there.  The price is the exposure
+ceiling, which the frame length bounds: 880 caps integration at roughly 44% of
+what 1968 allowed, so a dim scene is dimmer.  `camera vts` changes it at runtime.
 
 ## Ethos-U55 inference (`nn`)
 

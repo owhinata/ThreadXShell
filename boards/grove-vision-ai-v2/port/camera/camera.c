@@ -362,10 +362,12 @@ static volatile uint16_t cam_tune_exposure;
 static volatile uint8_t  cam_tune_again;
 static volatile uint16_t cam_tune_dgain;
 static volatile uint8_t  cam_tune_auto;
+static volatile uint16_t cam_tune_vts;
 
 #define CAM_TUNE_EXPOSURE  0x1u
 #define CAM_TUNE_GAINS     0x2u
 #define CAM_TUNE_AUTO      0x10u
+#define CAM_TUNE_VTS       0x20u
 
 /* Producer side: take whatever is pending and apply it.  Thread context, and
  * only ever called between frames. */
@@ -388,6 +390,8 @@ static void cam_apply_tuning(void)
 		(void)cam_sensor_set_exposure(cam_tune_exposure);
 	if ((req & CAM_TUNE_GAINS) != 0u)
 		(void)cam_sensor_set_gains(cam_tune_again, cam_tune_dgain);
+	if ((req & CAM_TUNE_VTS) != 0u)
+		(void)cam_sensor_set_frame_length(cam_tune_vts);
 	/* The sensor half of `camera auto` -- taking a part's own AEC/AGC off is
 	 * an I2C write like any other, and the console may not make it itself
 	 * while this thread owns the CIS driver. */
@@ -1599,6 +1603,56 @@ int camera_set_gains(uint8_t again, uint16_t dgain)
 	cam_api_exit();
 	if (rc == CAM_OK)
 		cam_manual_control_taken();
+	return rc;
+}
+
+/*
+ * The sensor's frame length (issue #38).
+ *
+ * [!] Unlike the exposure setters beside it, this does NOT take `camera auto`
+ * off.  VTS is not a manual exposure -- it is the frame the on-chip AEC gets to
+ * work inside, and the AEC keeps running afterwards, just with a different
+ * ceiling.  Conflating the two would turn "make the preview faster" into
+ * "and stop the exposure adapting", which is not what was asked.
+ */
+int camera_set_frame_length(uint16_t lines)
+{
+	int rc;
+
+	if (cam_state == CAM_ST_STREAMING) {
+		cam_tune_vts = lines;
+		cam_tune_req |= CAM_TUNE_VTS;
+		return CAM_OK;
+	}
+
+	rc = cam_api_enter_up();
+	if (rc != CAM_OK)
+		return rc;
+	rc = (cam_sensor_set_frame_length(lines) == 0) ? CAM_OK : CAM_ERR_HAL;
+	cam_api_exit();
+	return rc;
+}
+
+/*
+ * Read it BACK from the sensor, not from the shadow.
+ *
+ * That is the whole point of having it: #38 was settled by discovering that the
+ * part was running on a frame length nobody had written, so a getter that
+ * reports what this port last wrote would have been unable to find the bug it
+ * exists to expose.
+ */
+int camera_read_frame_length(uint16_t *lines)
+{
+	int rc;
+
+	if (cam_state == CAM_ST_STREAMING)
+		return CAM_ERR_BUSY;    /* I2C; the producer owns that driver */
+
+	rc = cam_api_enter_up();
+	if (rc != CAM_OK)
+		return rc;
+	rc = (cam_sensor_read_frame_length(lines) == 0) ? CAM_OK : CAM_ERR_HAL;
+	cam_api_exit();
 	return rc;
 }
 

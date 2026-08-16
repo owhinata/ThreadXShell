@@ -728,6 +728,63 @@ static int cmd_camera_gain(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
+/*
+ * The sensor's frame length -- frame rate and exposure ceiling in one register
+ * (issue #38).
+ *
+ * WHY IT IS A KNOB.  The SDK's mode table never wrote VTS, so the part ran a
+ * VGA mode on the 5 MP mode's frame length: 1968 lines, 62.5 ms, 15.9 fps.  The
+ * fix is one register, but WHICH value is a trade this board cannot decide for
+ * anyone -- lower is faster and caps the exposure, higher is the reverse -- and
+ * finding the point by editing a #define costs a flash cycle per guess on a
+ * NOR rated ~100k of them.
+ *
+ * The read-back is from the SENSOR, deliberately.  A getter that reported this
+ * port's own last write could not have found the bug it exists to expose.
+ */
+static int cmd_camera_vts(struct cli_instance *sh, int argc, char **argv)
+{
+	uint16_t rb = 0u;
+	uint32_t v;
+	int rc;
+
+	if (argc > 1) {
+		if (cli_parse_u32(argv[1], &v) != 0 || v > 0xFFFFu) {
+			cli_error(sh, "camera: frame length must be 0..65535 "
+			              "lines\r\n");
+			return 1;
+		}
+		if (camera_set_frame_length((uint16_t)v) != CAM_OK) {
+			cli_error(sh, "camera: frame length write failed (below "
+			              "what the mode needs, or the module is not "
+			              "powered)\r\n");
+			return 1;
+		}
+	}
+
+	cli_print(sh, "vts      : %lu lines (programmed)\r\n",
+	          (unsigned long)cam_sensor_frame_length());
+
+	rc = camera_read_frame_length(&rb);
+	if (rc == CAM_OK)
+		cli_print(sh, "  sensor says : %lu\r\n", (unsigned long)rb);
+	else if (rc == CAM_ERR_BUSY)
+		cli_print(sh, "  (read-back needs an idle camera; stop the "
+		              "preview)\r\n");
+	else
+		cli_print(sh, "  (this sensor's frame length is not readable "
+		              "here)\r\n");
+
+	cli_print(sh, "           (frame period = vts x 1852 / 58.3 MHz, and the "
+	              "exposure cannot\r\n"
+	              "            exceed the frame -- lower is faster and dimmer, "
+	              "higher is the\r\n"
+	              "            reverse.  `camera bench` measures the period.)"
+	              "\r\n");
+	cam_note_queued(sh, argc);
+	return 0;
+}
+
 static int cmd_camera_wb(struct cli_instance *sh, int argc, char **argv)
 {
 	struct cam_wb wb;
@@ -939,6 +996,9 @@ CLI_SUBCMD_SET_CREATE(camera_subcmds,
 	CLI_CMD(raw, NULL, "capture the Bayer mosaic and name the phase",
 	        cmd_camera_raw),
 	CLI_CMD(stats, NULL, "producer and sink counters", cmd_camera_stats),
+	CLI_CMD_ARG_USAGE(vts, NULL,
+	                  "sensor frame length: frame rate vs exposure ceiling",
+	                  "[lines]", cmd_camera_vts, 1, 1),
 	CLI_CMD_ARG_USAGE(bench, NULL,
 	                  "time the datapath with the panel out of the loop",
 	                  "[frames]", cmd_camera_bench, 1, 1),

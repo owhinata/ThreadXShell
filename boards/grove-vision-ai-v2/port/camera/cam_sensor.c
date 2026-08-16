@@ -50,6 +50,11 @@ static uint16_t cam_exposure;
 static uint8_t  cam_again;
 static uint16_t cam_dgain = 0x0100u;   /* unity; the OV5647 has no dgain */
 
+/* The frame length this port last programmed.  0 until a bring-up has run, and
+ * deliberately NOT seeded from the descriptor: what matters is what was
+ * written, and before a bring-up nothing was. */
+static uint16_t cam_vts;
+
 /* The parts this port knows how to drive.  One entry today; it stays a table
  * because that is the shape a second part arrives in, and because detection has
  * to have something to iterate. */
@@ -200,14 +205,55 @@ int cam_sensor_init(void)
 		return -1;
 
 	/*
-	 * Nothing to re-apply after the mode table on this part: it IS the whole
-	 * configuration, and the sensor's own AEC runs the exposure.  (A part
-	 * without one needs exposure, gain and mirror written here, because
-	 * re-running the mode table puts the vendor's constants back and would
-	 * otherwise silently undo whatever the console had dialled in.  The
-	 * IMX219 was that part; issue #54 removed it.)
+	 * [!] THE FRAME LENGTH, WHICH THE MODE TABLE DOES NOT SET (issue #38).
+	 *
+	 * The SDK's OV5647 table writes HTS and never writes VTS, so without this
+	 * the part runs a VGA mode on whatever frame length it powered up with --
+	 * measured at 1968 lines, the value the 2592x1944 mode wants, and 62.5 ms
+	 * per frame.  Re-applied at every bring-up for the same reason the auto
+	 * mode is: the mode table has just gone back in.
+	 *
+	 * A console setting wins over the descriptor default, so a value found on
+	 * the bench is not undone by a fault recovery -- the same rule the Bayer
+	 * phase follows.
+	 *
+	 * Exposure and gain need no such re-apply on this part: its mode table IS
+	 * the whole configuration and its own AEC runs the exposure.  (A part
+	 * without one would need them written here.  The IMX219 was that part;
+	 * issue #54 removed it.)
 	 */
+	if (sens->set_frame_length != NULL) {
+		uint16_t want = (cam_vts != 0u) ? cam_vts : sens->default_vts;
+
+		if (want != 0u) {
+			if (sens->set_frame_length(want) != 0)
+				return -1;
+			cam_vts = want;
+		}
+	}
 	return 0;
+}
+
+int cam_sensor_set_frame_length(uint16_t lines)
+{
+	if (sens->set_frame_length == NULL)
+		return -1;
+	if (sens->set_frame_length(lines) != 0)
+		return -1;
+	cam_vts = lines;
+	return 0;
+}
+
+int cam_sensor_read_frame_length(uint16_t *lines)
+{
+	if (sens->read_frame_length == NULL)
+		return -1;
+	return sens->read_frame_length(lines);
+}
+
+uint16_t cam_sensor_frame_length(void)
+{
+	return cam_vts;
 }
 
 int cam_sensor_refresh_exposure_gains(void)

@@ -95,6 +95,27 @@ struct cam_sensor_desc {
 	 * Reporting them made a working auto-exposure look broken.
 	 */
 	int (*read_exposure_gain)(uint16_t *lines, uint8_t *again);
+
+	/*
+	 * Frame length in lines -- the sensor's VTS.  NULL on a part whose
+	 * frame length this port does not know how to reach.
+	 *
+	 * [!] THIS IS THE FRAME RATE AND THE EXPOSURE CEILING AT ONCE (#38).
+	 * A frame is VTS line times long, so the period is VTS * HTS / PCLK;
+	 * and integration time cannot exceed the frame, so lowering VTS for
+	 * frame rate lowers the longest exposure available with it.  Any
+	 * default here is a choice between the two, which is why it is also a
+	 * runtime knob.
+	 *
+	 * The `default_vts` below is what the port programmes after the mode
+	 * table.  0 means "leave whatever the table left", which is what this
+	 * port did until #38 found that the OV5647 table never writes VTS at
+	 * all and the part was running a VGA mode on the 5 MP mode's frame
+	 * length.
+	 */
+	int (*set_frame_length)(uint16_t lines);
+	int (*read_frame_length)(uint16_t *lines);
+	uint16_t default_vts;
 };
 
 /** The part that answered on I2C.  Never NULL: it starts at the first entry so
@@ -212,6 +233,22 @@ void cam_sensor_get_exposure_gains(uint16_t *lines, uint8_t *again,
 /** Sensor stream on/off.  Checked, unlike the donor's. */
 int cam_sensor_stream_on(void);
 int cam_sensor_stream_off(void);
+
+/**
+ * @brief  Set / read the sensor's frame length (VTS), in lines.
+ *
+ * [!] One register, two effects (issue #38): the frame period is
+ * VTS * HTS / PCLK, and the integration time cannot exceed the frame -- so
+ * asking for a faster frame rate is asking for a shorter longest exposure.
+ *
+ * @return 0 on success; -1 on a part whose VTS this port cannot reach, and -1
+ *         from the setter for a value below what the mode actually outputs.
+ */
+int cam_sensor_set_frame_length(uint16_t lines);
+int cam_sensor_read_frame_length(uint16_t *lines);
+
+/** The frame length this port last programmed, or 0 before it programmed one. */
+uint16_t cam_sensor_frame_length(void);
 
 #ifdef __cplusplus
 }

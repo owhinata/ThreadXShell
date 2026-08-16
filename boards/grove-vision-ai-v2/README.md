@@ -853,7 +853,10 @@ is nearly black.  Through the sRGB curve it becomes 121.
 from the standard transfer function; no libm in this image) and applies it
 LAST -- after the black level and the gain, both of which are corrections to a
 linear measurement.  Encoding first would turn the gain into a contrast control
-and the black level into a crush.
+and the black level into a crush.  Since issue #58 that table is a SEED rather
+than the thing the pixel loop reads: it is composed with the black level, the
+gain and the RGB565 truncation into the tone tables, which is why the curve now
+costs nothing at all to have on.
 
 It is ON by default, but it took a detour to get there: an earlier build
 defaulted it OFF because the picture looked washed out encoded.  That was the
@@ -1400,7 +1403,8 @@ So the ceiling this file assumed for the panel -- 26.4 ms of wire time, 37.9 fps
 moves with whatever else the producer is doing.  Issue #58 (folding the packer
 into one LUT per channel, 17.2 -> ~8 ms) attacks this directly rather than
 incidentally, because the blocking time IS the length of `pack`.  Tracked in
-issue #64.
+issue #64, and measured in the section below -- it was the length of `pack`, and
+the panel got its wire time back.
 
 Two practical consequences:
 
@@ -1410,6 +1414,63 @@ Two practical consequences:
 - **`camera preview` and `nn preview` want different VTS values** (1060 against
   1770), because their W differs by the inference.  VTS is one global setting, so
   there is no value that serves both until W comes down.
+
+### What happened when the packer became tables (issue #58)
+
+Almost every step of the conversion is a function of ONE 8-bit number -- the
+black level, the per-channel gain, the sRGB encode, the 5/6-bit truncation and
+the shift into the RGB565 field all depend only on the sample being converted.
+A function of one 8-bit number is a 256-entry table, so `cam_convert.c` now
+compiles the settings into tables whenever they change and the inner loop is
+loads.  What does not fold is SATURATION, because it pulls a channel away from
+the pixel's own luma and so depends on the other two channels; its multiply and
+divide fold anyway, since those depend only on the difference from the luma.
+
+Measured on hardware, `camera stats`:
+
+| | pack | W | blit | period | shown | dropped |
+|---|---:|---:|---:|---:|---:|---:|
+| before (issue #57) | 17,186 | 17,586 | 26,445 | 62,5xx | 15.9 | 0 |
+| tables, VTS 1968 | 7,911 | 8,280 | 26,444 | 62,634 | 15.9 | 0 |
+| tables, VTS 1010 | 7,889 | 8,265 | 31,657 | 32,153 | 15.5 | 94/187 |
+| **tables, VTS 1160** | **7,871** | **8,245** | **26,448** | **36,801** | **27.1** | **0** |
+| `camera sat 256`, VTS 1010 | 3,979 | 4,360 | 26,449 | 32,077 | **31.1** | 0 |
+
+**`pack` 17,186 -> 7,871, and the default preview went 15.9 -> 27.1 fps with
+zero drops.**  It took two rounds: folding black level, gain and gamma into one
+table per channel gave 10,435, and then folding the saturation CLAMP into the
+encode table -- widening it to cover the unclamped -256..511 instead of 0..255,
+so two compare-and-branches per channel per pixel become table contents -- gave
+7,871.  The tables cost 7,936 B of DTCM and 256 B of ITCM.
+
+**Gamma is now free.**  In the folded path the curve is baked into the same
+entry the loop reads anyway; in the saturation path it only changes what the
+encode table contains, not what the loop does.  The old finding that "gamma and
+saturation cost 7.7 ms" has become "saturation costs 3.9 ms and gamma costs
+nothing".
+
+**[!] `blit < period` IS NOT THE ZERO-DROP CONDITION**, and believing it wasted
+two flash cycles here.  At VTS 1010 the blit measured 31,657 against a 32,153
+period -- 496 us of apparent margin -- and still dropped every other frame.  The
+condition is about PHASE, not duration.  The producer publishes and then sleeps
+until `period - W` later; the panel thread starts its blit at the publish, and
+if its DMA completes after the producer has woken again it waits out the rest of
+`pack` and misses the next publish:
+
+```
+zero drops  <=>  wire (26,444) + staging (850) < period - W
+```
+
+That predicted VTS 1124 for the default settings; VTS 1160 was measured at 231
+shown, 0 dropped, and a blit back at its 26,448 floor.  It also explains the
+earlier runs exactly: at `camera sat 256` W is 4,360, the condition needs 31,654,
+and VTS 1010 (32,074) clears it by 420 us -- which is why that run showed all 456
+frames while the same VTS at the default settings dropped half.
+
+**The default VTS is still 1968** and this section is not a recommendation to
+change it: `nn preview` has a different W (the inference), so by the condition
+above it wants ~1492 where `camera preview` wants 1160.  One global setting still
+cannot serve both.
 
 **[!] `camera stats`'s `sink` row is per ITERATION, not per delivery.**  With
 drops in play the two differ a lot: `nn preview` at VTS 1770 prints 11,594 us

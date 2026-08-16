@@ -1202,14 +1202,9 @@ impossible to unwind ever again.
 
 ### Not yet answered
 
-- Frame rate.  The SPI wire time is 25.8 ms per frame at 48 MHz and the capture
-  does not overlap it, so the ceiling is well under the panel's 38.7 fps; the
-  rev-C bounce costs more again.  Overlapping capture with blit, and giving the
-  sink its own thread, are deliberately left out of this milestone.  Measured
-  at about 10 fps, which is slower than that ceiling alone explains -- where the
-  rest of the time goes is unmeasured.  Tracked in issue #38.  `nn preview`
-  (#48) adds an inference to the same serial chain, so it is slower again by
-  about the inference time.
+- ~~Frame rate~~ -- **measured, see "Where the preview's time goes" below**
+  (issue #38).  It is 15.8 fps, not the ~10 fps recorded here earlier, and the
+  leading explanation on file was wrong.
 - The producer's stack high-water mark (4 KB allocated; `thread` reported a
   568 B peak on the first run, so there is room to trim once the sink work is
   settled).
@@ -1226,6 +1221,58 @@ impossible to unwind ever again.
 - The rev-C bounce, which this board (rev D) does not exercise.  Deliberately
   not tracked as an issue: it is a condition this board cannot reach, not a
   piece of work.  This section is where it lives until a rev-C board turns up.
+
+### Where the preview's time goes (issue #38)
+
+`camera stats` prints the producer's own per-stage timing, since the last
+stream start.  It is measured on TIMER2 (the EPK's free-running source) and not
+on DWT CYCCNT, because the largest candidate stage is the producer ASLEEP
+waiting for a frame and CYCCNT stops in WFI -- a cycle counter would report that
+stage as free and produce exactly the wrong picture.
+
+Four runs, same scene, ~80-150 frames each (microseconds per frame):
+
+| run | total | wait | work | pack | sink | fps |
+|---|---|---|---|---|---|---|
+| baseline (auto on) | 63,244 | 19,261 | 43,983 | 17,186 | 26,452 | 15.8 |
+| `camera exposure 200` | 62,892 | 19,059 | 43,833 | 17,209 | 26,445 | 15.9 |
+| `camera exposure 1500` | 62,503 | 18,784 | 43,719 | 17,257 | 26,447 | 16.0 |
+| `camera gamma off` + `camera sat 256` | 62,972 | 26,800 | 36,172 | 9,546 | 26,447 | 15.9 |
+
+`work` is `total - wait`, i.e. everything the CPU does.  `invald` is 145 us and
+`tune` is 221 us with auto on (0 with it off); neither is a factor.
+
+**The exposure does nothing.**  200 against 1500 lines is a factor of 7.5 and
+moved the total by 0.6%.  The hypothesis that a stretched frame length paces the
+loop is refuted: whatever sets the pace, it is not integration time.
+
+**`sink` is the SPI DMA, and it is a hard floor.**  153,600 bytes at 48 MHz is
+25.60 ms of wire time; measured 26.45 ms, and across four runs it varied by
+7 us -- 0.03%.  So the byte-swap copy inside `lcd_blit_le()` costs about 0.85 ms,
+**1.3% of the frame**.  Removing it would mean teaching `svc/frame.h` a
+big-endian RGB565 format, which reaches every board, for 1.3%.
+
+**`pack` is 44% arithmetic, not pixel traffic.**  Turning off gamma and
+saturation took it from 17.2 ms to 9.5 ms.
+
+**[!] AND NONE OF IT MADE THE PREVIEW FASTER.**  That last run saved 7,811 us of
+CPU work; `wait` grew by 7,539 us and the total moved 272 us -- 0.4%.  The loop
+is paced by something outside the CPU work, at about 63 ms, and time saved in
+`pack` is simply spent in `wait` instead.
+
+That is the finding, and it retires two of the three things #38 proposed:
+removing the byte swap and moving the blit to its own thread both make the CPU
+faster, and the CPU is not what is holding the frame rate.
+
+**What is still unknown** is the pacer's period.  Every run sums to ~63 ms, and
+two models fit the data equally: the datapath delivers one frame per 63 ms
+(15.9 fps is then the ceiling), or it delivers one per ~31.5 ms and this loop
+takes every other one (31.7 fps would then be reachable if total work dropped
+below 31.5 ms -- it is 36.2 ms today, so the margin is 4.6 ms).  The two call
+for opposite conclusions and neither can be told from the numbers above,
+because both predict `wait = 63 ms - work`.  Distinguishing them needs the
+sensor's free-running frame period measured directly, with the LCD sink out of
+the path.
 
 ## Ethos-U55 inference (`nn`)
 
@@ -1749,7 +1796,7 @@ nn preview 30          # or a frame count
 
 **Measured on the board:** 100 frames in 12,500 ms = **8.0 fps**, with **100
 inferences for 100 frames** -- every published frame is inferred and shown, none
-dropped and none refused.  Against the ~10 fps of a plain preview that is about
+dropped and none refused.  Against the 15.8 fps of a plain preview that is about
 25 ms per frame for inference (12-13 ms), the resize and the decode together.
 The producer thread's stack high-water came out at **964 B of 8,192**: a single
 custom-operator graph really does keep the CPU-side call chain shallow, since

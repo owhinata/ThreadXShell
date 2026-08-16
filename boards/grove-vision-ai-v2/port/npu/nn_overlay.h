@@ -48,7 +48,7 @@ struct nn_overlay_stats {
  * and BlazeFace-shaped -- the caller checks that, because it can refuse before
  * starting a stream and this cannot.
  *
- * @return the vtable to pass to cam_lcd_sink_attach(); never NULL.
+ * @return the vtable to pass to cam_lcd_sink_attach_and_stream(); never NULL.
  */
 const struct cam_lcd_overlay *nn_overlay_arm(void);
 

@@ -77,12 +77,27 @@ struct cam_lcd_overlay {
 void cam_lcd_sink_create_objects(void);
 
 /**
- * @brief  Start showing published frames on the panel.
+ * @brief  Start the camera with this sink attached, and show its frames.
  *
  * Brings the panel up if needed, rotates it to landscape (the camera delivers
  * 320x240 and the panel is natively 240x320 -- MADCTL transposes for free on
- * this SPI panel, so no CPU-side rotation is involved), and subscribes to the
- * pipeline.
+ * this SPI panel, so no CPU-side rotation is involved), and then starts the
+ * stream WITH this sink, in the camera's own one-step transaction.
+ *
+ * [!] IT STARTS THE STREAM (issue #63), which is why it is not just "attach"
+ * any more.  Subscribing and starting used to be two calls the caller made in
+ * order, and `camera bench` -- which starts a stream owning no sink -- could get
+ * in between them, stranding this sink on a stream nobody here owns.  The two
+ * are indivisible now, so the caller has one call and one answer.
+ *
+ * The panel work stays OUTSIDE that transaction: bring-up is a reset pulse, an
+ * init table and a priming transfer, and none of it needs the camera held.  Only
+ * the pipeline registration is inside.
+ *
+ * ON FAILURE NOTHING IS ATTACHED and no stream is running -- including for
+ * CAM_ERR_BUSY, which now covers both "another preview owns this sink" and
+ * "another command owns the camera".  There is nothing for the caller to
+ * unwind but its own state.
  *
  * @p ov may be NULL for a plain preview.  It is an ARGUMENT rather than a
  * separate setter so that an overlay cannot outlive the command that wanted it:
@@ -90,11 +105,12 @@ void cam_lcd_sink_create_objects(void);
  * next `camera preview` to inherit.  The pointer must stay valid until
  * detach() returns CAM_OK.
  *
- * @return CAM_OK; CAM_ERR_BUSY if a preview already owns the sink; CAM_ERR_STATE
- *         if a previous detach could not be completed (see below); CAM_ERR_HAL
- *         if the panel would not come up.
+ * @return CAM_OK, with the stream running; CAM_ERR_BUSY if a preview already
+ *         owns the sink or another command owns the camera; CAM_ERR_STATE if a
+ *         previous detach could not be completed (see below); CAM_ERR_HAL if the
+ *         panel or the camera would not come up.
  */
-int cam_lcd_sink_attach(const struct cam_lcd_overlay *ov);
+int cam_lcd_sink_attach_and_stream(const struct cam_lcd_overlay *ov);
 
 /**
  * @brief  Stop showing frames: unlink the sink, then drain the panel thread.

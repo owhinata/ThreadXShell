@@ -526,7 +526,13 @@ static const struct frame_os cam_pipe_os = {
 	NULL, cam_pipe_lock, cam_pipe_unlock,
 };
 
-int camera_subscribe(struct frame_sink *sink)
+/*
+ * Not public, and that is the fix for issue #63: the only way to attach a sink
+ * is camera_stream_start(), which does it under the API mutex in the same
+ * transaction that decides the camera is free.  An out-of-band subscribe is the
+ * hole -- it can put a sink into somebody else's running stream.
+ */
+static int cam_subscribe(struct frame_sink *sink)
 {
 	if (sink == NULL || !cam_objects_ok)
 		return CAM_ERR_PARAM;
@@ -1441,13 +1447,51 @@ int camera_capture(void)
 	return rc;
 }
 
-int camera_stream_start(void)
+int camera_stream_start(struct frame_sink *sink)
 {
 	int rc = cam_api_enter();
 
 	if (rc != CAM_OK)
 		return rc;
 	if (cam_state == CAM_ST_STREAMING) {
+		cam_api_exit();
+		return CAM_ERR_BUSY;
+	}
+
+	/*
+	 * [!] AND NOBODY ELSE'S SINK MAY STILL BE LINKED (issue #63).
+	 *
+	 * "The producer is not streaming" is NOT the same as "the camera is free",
+	 * and the difference is a window with two ways in.  A sink stays linked
+	 * across its owner's teardown -- unlinking is only safe after a confirmed
+	 * stop, so the owner holds it from the moment stop() returns until it gets
+	 * round to detaching -- and the producer can also leave STREAMING BY
+	 * ITSELF (retries exhausted, terminal datapath event) while the owner is
+	 * still asleep in its poll loop, which is not a tight interleaving at all:
+	 * another console can simply type `camera bench` into it.
+	 *
+	 * Starting there would hand the old sink frames from a stream its owner
+	 * does not own, and that owner is entitled to tear down what the sink
+	 * points at.  Worse, the panel sink counts a delivery only AFTER its
+	 * overlay has run -- the whole NPU inference under `nn preview` -- so a
+	 * drain running concurrently sees "nothing outstanding" and returns
+	 * success while an inference is in flight.
+	 *
+	 * So a linked sink reserves the camera, whatever the state says.  This is
+	 * asked of the pipeline's own registry rather than of a flag here: the
+	 * registry is the thing that decides who gets frames.  It cannot go stale
+	 * in the dangerous direction -- every attach runs under this mutex, which
+	 * this thread holds, so nothing can appear after the check.  A concurrent
+	 * DETACH can make the answer stale, and that only costs an operator a
+	 * refusal to retry.
+	 *
+	 * The reservation ends at the unlink, not at the end of the owner's
+	 * teardown: an unlinked sink is unreachable no matter what its owner's own
+	 * threads are still doing (which is why a panel drain that times out does
+	 * not lock `camera bench` out for ever -- the sink is already gone from the
+	 * registry by then).
+	 */
+	if (frame_pipeline_sink_count(&cam_pipe) != 0) {
 		cam_api_exit();
 		return CAM_ERR_BUSY;
 	}
@@ -1496,6 +1540,33 @@ int camera_stream_start(void)
 	 */
 	while (tx_semaphore_get(&cam_stopped_sem, TX_NO_WAIT) == TX_SUCCESS)
 		;
+
+	/*
+	 * The subscribe goes LAST, after everything that can fail and before the
+	 * producer is released.
+	 *
+	 * Nothing can deliver a frame in between: the producer is parked on
+	 * cam_start_sem and it is the only thing that publishes -- the datapath ISR
+	 * only latches a status and posts a semaphore.  So an armed datapath with
+	 * no sink linked yet is simply a frame that nobody will be handed, and the
+	 * unwind below throws it away with cam_quiesce().
+	 *
+	 * Going last is what keeps the unwind honest.  frame_pipeline_attach() has
+	 * nothing that can fail after it links the sink, so the only failure here
+	 * is a refusal by the sink's own open() -- a geometry mismatch, not a
+	 * hardware fault.  The camera therefore stays READY (as after a capture
+	 * that timed out), rather than taking the terminal treatment a datapath
+	 * failure gets, and nothing is left linked.
+	 */
+	if (sink != NULL) {
+		rc = cam_subscribe(sink);
+		if (rc != CAM_OK) {
+			cam_quiesce();
+			cam_state = CAM_ST_READY;
+			cam_api_exit();
+			return rc;
+		}
+	}
 
 	cam_stop_req = 0u;
 	cam_state = CAM_ST_STREAMING;

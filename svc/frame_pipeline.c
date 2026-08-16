@@ -249,6 +249,21 @@ int frame_pipeline_detach(struct frame_pipeline *p, struct frame_sink *s)
 	return inflight;
 }
 
+int frame_pipeline_sink_count(struct frame_pipeline *p)
+{
+	struct frame_sink *it;
+	int n = 0;
+
+	if (!p)
+		return 0;
+
+	pl_lock(p);
+	for (it = p->sinks; it != NULL; it = it->_next)
+		n++;
+	pl_unlock(p);
+	return n;
+}
+
 /* ---- slot reference counting --------------------------------------------- */
 
 void frame_pipeline_get(struct frame_pipeline *p, struct frame_sink *s,

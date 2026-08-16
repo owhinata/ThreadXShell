@@ -1976,7 +1976,8 @@ exclusion, not proximity.  The pipeline pre-pins one delivery per sink and, unde
 `FRAME_POLICY_DROP`, refuses a second while the first is outstanding, so
 `process()` cannot run again until the panel thread has released the frame, which
 it does only after `draw()` has returned.  The two alternate strictly.  That is
-why the policy is a named constant which `cam_lcd_sink_attach()` checks: under
+why the policy is a named constant which `cam_lcd_sink_attach_and_stream()`
+checks: under
 `FRAME_POLICY_LATEST` the core re-enters `consume()` from inside `put()`, on the
 panel thread, and the inference would silently leave the producer.
 
@@ -1986,6 +1987,78 @@ The overlay hook still runs between the staging copy and the DMA
 A failed inference means no boxes on that frame, not a blank preview -- the
 picture is worth more than the annotation.  `camera stats` counts those frames
 separately from sink errors.
+
+### [!] Starting a stream and attaching its sink are ONE operation (issue #63)
+
+The start side of the same lifetime story, and it was wrong for as long as the
+stop side was right.
+
+Attaching used to be a separate call the commands made first, and `camera bench`
+starts a stream while owning **no** sink -- so it could get in between:
+
+```
+camera bench &     -- starts a stream owning no sink
+camera preview     -- the sink is DETACHED, so the attach SUCCEEDS and
+                      subscribes to the stream bench is already running
+                   -- the following start returns CAM_ERR_BUSY
+                   -- and BUSY is precisely the failure a caller must not
+                      detach on: a producer may be inside consume() by now
+                   => the sink stays attached with no owner, and `nn preview`
+                      leaks its NPU lease the same way, both until reboot
+```
+
+Checking `camera stats` before attaching does not fix that; it is a TOCTOU read
+outside the camera's API mutex. The fix is to make the check, the subscribe and
+the start indivisible, which gives the camera one ownership rule:
+
+> **A stream may start only when the camera is stopped AND no sink is linked.**
+> The sink, if there is one, is subscribed inside that same transaction.
+
+Both halves are load-bearing, and the second one is the less obvious:
+
+- without the first, the interleaving above strands a sink;
+- without the second, a sink that is **stopped but not yet unlinked** is fair
+  game. Its owner holds it from the moment `camera_stream_stop()` returns until
+  it gets round to detaching -- and, far wider, the producer can leave
+  `CAM_ST_STREAMING` **by itself** (retries exhausted, terminal datapath event)
+  while the owner is still asleep in its once-per-tick poll loop. No tight
+  interleaving is needed there at all: another console can simply type `camera
+  bench`. The new producer would then publish into the old sink, whose owner is
+  entitled to tear down what it points at.
+
+That second path is not merely untidy. The panel sink counts a delivery only
+**after** its overlay has run -- under `nn preview` that is a whole NPU inference
+-- so a drain running concurrently sees `done == accepted`, returns success, and
+the command releases the NPU while an inference is still in flight.
+
+So **a linked sink reserves the camera**: `CAM_ERR_BUSY` from a start also means
+"somebody else's sink is still attached". The question is put to
+`svc/frame_pipeline`'s own registry (`frame_pipeline_sink_count()`), not to a
+flag in the camera -- the registry is the thing that decides who gets frames.
+It cannot go stale in the dangerous direction, because every attach now runs
+under the API mutex the asking thread holds; a concurrent *detach* can only make
+a refusal unnecessary, which costs a retry.
+
+**The reservation ends at the unlink, not at the end of the owner's teardown.**
+An unlinked sink is unreachable whatever its owner's threads are still doing, so
+a panel drain that times out does not lock `camera bench` out for ever -- by then
+the sink is already out of the registry. The one case that does refuse for good
+is the camera's own `CAM_ST_LOST`, which refuses everything anyway.
+
+What this buys the commands is one call with one answer: **every failure leaves
+nothing attached and no stream running**, so `camera preview` and `nn preview`
+unwind their own state and return. The "BUSY means it might have half-worked"
+branches are gone along with the window that motivated them.
+
+**This is the START side only.** A sink can still be orphaned from the other
+end, by a different root: `camera_stream_stop()` returns `CAM_ERR_BUSY` when it
+merely fails to take the API mutex -- another console running `camera exposure`
+is enough -- and callers are required to read anything but `CAM_OK` as "the
+producer may still be running, hold everything". So ordinary lock contention
+makes a preview abandon its own attached sink while the stream runs on. That is
+issue #65, and it predates this one. The rule here does bound the damage: no
+LATER stream can reach the abandoned sink, where before #63 `camera bench` could
+walk straight into it once the producer gave up by itself.
 
 ### [!] The stop contract has two halves now (issue #57)
 
@@ -2000,11 +2073,18 @@ stop proves only the first half, so the second moved to where
 3. bounded drain of the panel thread's one possible in-flight blit;
 4. only on success: clear the overlay, allow re-attach, release the `nn` lease.
 
-**The order is not interchangeable.**  Draining first leaves the sink linked
-across a window in which another command can start a fresh stream --
-`camera_stream_stop()` releases the camera API mutex before it returns, and
-`camera bench` starts a stream while owning no sink -- and the sink would then be
-delivered frames belonging to a stream its owner had already finished with.
+**The order is not interchangeable.**  It is `svc/frame_pipeline`'s contract --
+unlink so that no further `consume()` can be issued, then wait for the work
+already handed over -- and it is also what makes the reservation above end as
+early as it safely can: once the sink is out of the registry, nothing a new
+stream does can reach it, so the drain runs without holding the camera hostage.
+Draining first would do the opposite, keeping the sink linked and reachable for
+the whole drain while its owner had already finished with it.  (Before issue #63
+that was not merely inelegant, it was the bug: `camera_stream_stop()` releases
+the camera API mutex before it returns, and `camera bench` starts a stream owning
+no sink, so a fresh stream could reach the still-linked sink.  Both ends of that
+are now closed -- the order here, and the camera refusing to start at all while
+any sink is linked.)
 
 A drain that misses its deadline is the panel thread's `CAM_ST_LOST`: nothing is
 torn down, the overlay is not cleared, the frame stays pinned, `nn` stays leased,
@@ -2036,12 +2116,14 @@ whose memory safety rests on arithmetic nobody can complete is wrong the first
 time a vendor path is slower than assumed.  So:
 
 - **The join is success-only.**  `CAM_OK` proves the producer is idle; anything
-  else proves nothing.  Every caller detaches only on `CAM_OK`.  The same rule
-  covers the SETUP path: `camera_stream_start()` returning `CAM_ERR_BUSY` means
-  a stream is already running with this sink attached, so that failure does not
-  detach either.  (Today the sink's exclusive attach makes that unreachable --
-  it is handled because "unreachable" rests on another module's exclusivity
-  rather than on anything checked at that line.)
+  else proves nothing.  Every caller detaches only on `CAM_OK`.  (The SETUP path
+  used to need the same rule, and this is where that claim was written down: a
+  start returning `CAM_ERR_BUSY` meant a stream was already running with this
+  sink attached, so that failure did not detach either.  It was called
+  unreachable "because the sink's exclusive attach makes it so" -- which was
+  wrong, because `camera bench` takes no sink and so takes no such exclusion.
+  Issue #63 closed it properly: attaching happens inside the start, a failed
+  start leaves nothing attached, and the branch is gone rather than defended.)
 - **`cam_lcd_sink_detach()` clears its overlay only when the unsubscribe
   succeeded.**  A refused unsubscribe means the sink is still attached and a
   `consume()` may still be running in it; mutating overlay state there would be

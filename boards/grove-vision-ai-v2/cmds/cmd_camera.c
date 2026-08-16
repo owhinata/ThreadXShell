@@ -295,28 +295,25 @@ static int cmd_camera_preview(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	}
 
-	/* No overlay: a plain preview stays a plain preview.  It is an argument
+	/*
+	 * No overlay: a plain preview stays a plain preview.  It is an argument
 	 * rather than a mode so that `nn preview`'s boxes can never be inherited
-	 * by this command (issue #48). */
-	rc = cam_lcd_sink_attach(NULL);
+	 * by this command (issue #48).
+	 *
+	 * ONE CALL, because attaching and starting are one operation since issue
+	 * #63 -- and therefore one failure to handle: nothing is attached and no
+	 * stream is running, whatever went wrong.  This used to be attach-then-
+	 * start with a guard here for the case where the start came back BUSY with
+	 * the sink already attached, which was a window rather than a case.
+	 */
+	rc = cam_lcd_sink_attach_and_stream(NULL);
 	if (rc == CAM_ERR_BUSY) {
-		cli_error(sh, "camera: preview already running\r\n");
+		cli_error(sh, "camera: a preview is already running, or another "
+		              "command owns the camera\r\n");
 		return 1;
 	}
 	if (rc != CAM_OK) {
-		cam_report(sh, "panel attach", rc);
-		return 1;
-	}
-
-	rc = camera_stream_start();
-	if (rc != CAM_OK) {
-		/* CAM_ERR_BUSY means a stream is already running with this sink
-		 * attached, so a producer may be inside consume() -- detaching
-		 * there would unlink a sink mid delivery.  See the same guard in
-		 * `nn preview` (issue #48). */
-		if (rc != CAM_ERR_BUSY)
-			(void)cam_lcd_sink_detach();
-		cam_report(sh, "stream start", rc);
+		cam_report(sh, "preview start", rc);
 		return 1;
 	}
 
@@ -498,9 +495,14 @@ static void cam_print_profile(struct cli_instance *sh,
  * `camera gamma off` and on, to get two work levels: if the total is the same
  * at both, it is a period and not a multiple of one.
  *
- * No sink is attached and none is detached.  A preview or `nn preview` already
- * holding the datapath makes camera_stream_start() return CAM_ERR_BUSY, which
- * is the right answer -- this measures an idle datapath or nothing.
+ * No sink is attached and none is detached.
+ *
+ * [!] AND THAT IS EXACTLY WHY IT NEEDED THE CAMERA'S OWNERSHIP RULE (issue #63).
+ * Starting a stream while owning no sink was safe only as long as nobody else's
+ * sink was linked -- which the old code did not check, so this command was the
+ * one that could take a preview's sink over.  camera_stream_start() now refuses
+ * while ANY sink is attached, so a preview that is still tearing down keeps the
+ * camera to itself and this command is told to wait.
  */
 static int cmd_camera_bench(struct cli_instance *sh, int argc, char **argv)
 {
@@ -519,11 +521,12 @@ static int cmd_camera_bench(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	}
 
-	rc = camera_stream_start();
+	rc = camera_stream_start(NULL);
 	if (rc != CAM_OK) {
 		if (rc == CAM_ERR_BUSY)
-			cli_error(sh, "camera: a preview owns the datapath; stop "
-			              "it first\r\n");
+			cli_error(sh, "camera: a preview owns the camera (a sink "
+			              "is attached, or a stream is\r\n"
+			              "        running); stop it first\r\n");
 		else
 			cam_report(sh, "stream start", rc);
 		return 1;

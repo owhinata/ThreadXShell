@@ -116,8 +116,35 @@ const uint8_t *camera_raw_frame(void);
  * @brief  Start / stop continuous capture on the producer thread.
  *
  * camera_stream_start() returns once the first frame is on its way; it does not
- * wait for one.
+ * wait for one.  @p sink may be NULL (`camera bench`, which measures the
+ * datapath with nothing watching).
  *
+ * [!] STARTING A STREAM AND SUBSCRIBING ITS SINK ARE ONE OPERATION (issue #63),
+ * and this is the ONLY way a sink gets attached.  Both halves happen under the
+ * API mutex, which is what makes the ownership rule checkable:
+ *
+ *     a stream may start only when the camera is stopped AND no sink is linked.
+ *
+ * Neither half alone is enough.  Without the first, a caller that attached and
+ * then started could find a stream already running -- and CAM_ERR_BUSY is
+ * precisely the failure it must not detach on (see the stop note below), so its
+ * sink would be stranded, attached with no owner, until reboot.  Without the
+ * second, a sink that is stopped but not yet unlinked -- the window its owner
+ * holds between a confirmed stop and its own teardown, and the whole time the
+ * producer has exited by itself while the owner is still asleep in its poll
+ * loop -- would be delivered frames from somebody else's stream.
+ *
+ * So a linked sink is an OWNERSHIP RESERVATION: CAM_ERR_BUSY here also means
+ * "somebody else's sink is still attached", and no new stream runs until that
+ * owner unlinks.  The reservation ends at the UNLINK, not at the end of the
+ * owner's teardown: once a sink is out of the registry no producer can reach it,
+ * whatever its owner is still doing with its own threads.
+ *
+ * Every failure leaves NOTHING attached, which is the property callers are
+ * entitled to rely on: unwind your own state and return, with no detach to
+ * reason about.
+ *
+
  * [!] camera_stream_stop() IS A SUCCESS-ONLY JOIN (issue #48).
  *
  * CAM_OK means the producer has been through the full stop sequence and is
@@ -133,7 +160,7 @@ const uint8_t *camera_raw_frame(void);
  * report it and hold on to whatever it owns: do NOT detach, do NOT tear down,
  * do NOT release.
  */
-int camera_stream_start(void);
+int camera_stream_start(struct frame_sink *sink);
 int camera_stream_stop(void);
 
 /** Producer and pipeline counters, as `camera stats` prints them. */
@@ -250,13 +277,25 @@ void camera_set_wb(const struct cam_wb *wb);
 void camera_get_wb(struct cam_wb *out);
 
 /**
- * @brief  Attach / detach a frame sink (svc/frame_pipeline.h contract).
+ * @brief  Detach a frame sink (svc/frame_pipeline.h contract).
  *
- * Sinks may be attached before or during a stream.  Detaching while a stream
- * runs is allowed but the caller must stop the stream first if it intends to
- * free anything the sink points at -- consume() runs on the producer thread.
+ * There is no matching subscribe: attaching happens inside
+ * camera_stream_start(), because "the camera is stopped" and "subscribe" have to
+ * be one indivisible step (issue #63 -- the sentence that used to stand here
+ * said sinks may be attached before or during a stream, and that is exactly what
+ * let a sink be attached to somebody else's stream).
+ *
+ * The asymmetry is deliberate rather than an oversight: a sink must OUTLIVE the
+ * stream it served.  Unlinking is only safe once the producer is confirmed idle
+ * (camera_stream_stop() == CAM_OK), because publish() pre-pins a sink and calls
+ * consume() with the pipeline lock released, so this stays a separate step the
+ * owner takes when it is ready.  Until it does, the sink reserves the camera:
+ * no new stream can start.
+ *
+ * REFUSED (CAM_ERR_STATE) after a producer that never acknowledged a stop --
+ * see the note on camera_stream_stop().  A refusal means the sink is still
+ * linked and must stay owned.
  */
-int camera_subscribe(struct frame_sink *sink);
 int camera_unsubscribe(struct frame_sink *sink);
 
 /** Balance one push delivery.  Sinks call this exactly once per consume(). */

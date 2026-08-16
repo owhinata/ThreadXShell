@@ -460,7 +460,7 @@ static struct frame_sink cam_lcd_sink = {
 
 /* ---- attach / detach ----------------------------------------------------- */
 
-int cam_lcd_sink_attach(const struct cam_lcd_overlay *ov)
+int cam_lcd_sink_attach_and_stream(const struct cam_lcd_overlay *ov)
 {
 	TX_INTERRUPT_SAVE_AREA
 	int rc;
@@ -487,10 +487,10 @@ int cam_lcd_sink_attach(const struct cam_lcd_overlay *ov)
 	/*
 	 * [!] BUSY, not "already done".  The shell runs commands as background
 	 * jobs, so a second `camera preview` is a real second caller -- and if
-	 * it were told the attach succeeded it would go on to fail at
-	 * camera_stream_start() and then detach on its way out, taking the
-	 * FIRST preview's sink with it.  The first preview would keep capturing
-	 * while the panel silently stopped updating.
+	 * it were told the attach succeeded, two commands would believe they own
+	 * one panel, and the second one's teardown would take the FIRST
+	 * preview's sink with it.  The first preview would keep capturing while
+	 * the panel silently stopped updating.
 	 */
 	if (!sink_claim(SINK_DETACHED, SINK_ATTACHING)) {
 		enum sink_state s = sink_get_state();
@@ -556,7 +556,24 @@ int cam_lcd_sink_attach(const struct cam_lcd_overlay *ov)
 		sink_has_overlay = 0;
 	}
 
-	rc = camera_subscribe(&cam_lcd_sink);
+	/*
+	 * [!] THE SUBSCRIBE AND THE STREAM START ARE ONE CALL (issue #63).
+	 *
+	 * They used to be two, and the gap between them was reachable: `camera
+	 * bench` starts a stream owning no sink, so it could win the race between
+	 * this module's attach and its caller's start -- leaving this sink
+	 * subscribed to somebody else's stream, with the caller's start refused
+	 * and the caller forbidden to detach (a producer may be inside consume()
+	 * by then).  The sink was then attached with no owner until reboot, and
+	 * `nn preview` leaked its NPU lease the same way.
+	 *
+	 * The camera does both halves under its API mutex now, so there is no gap
+	 * to lose.  What that buys HERE is the unwind: on any failure nothing was
+	 * linked, so this module puts its own static state back and returns.  No
+	 * detach, and no failure code that has to be treated as "it might have
+	 * half-worked".
+	 */
+	rc = camera_stream_start(&cam_lcd_sink);
 	if (rc != CAM_OK) {
 		sink_has_overlay = 0;
 		sink_set_state(SINK_DETACHED);

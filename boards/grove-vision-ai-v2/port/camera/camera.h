@@ -52,6 +52,19 @@ extern "C" {
 const char *camera_strerror(int rc);
 
 /**
+ * The producer thread's ThreadX priority.
+ *
+ * Exported since issue #57, when this port grew a SECOND frame-path thread: the
+ * LCD sink's panel thread has to sit strictly below the producer, because the
+ * producer's iteration is the frame period the whole of epic #56 is shrinking
+ * and it must never queue behind a 26 ms blit.  A relationship that matters is
+ * asserted where the second thread is declared rather than restated as a second
+ * literal -- two numbers describing one ordering is how the ordering gets
+ * broken.  Its stack size stays private to camera.c; nothing else needs it.
+ */
+#define CAM_PRODUCER_PRIO 10u
+
+/**
  * @brief  Create the driver's ThreadX objects.
  *
  * Call from tx_application_define(), next to lcd_create_objects().  The port's

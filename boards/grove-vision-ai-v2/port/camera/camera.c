@@ -53,12 +53,10 @@
 
 /*
  * The producer sits above the console (16) so that a frame is converted and
- * blitted promptly, and below nothing else -- there is no other application
- * thread on this board.  4 KB of stack is generous for a loop whose deepest
- * call is the LCD sink's blit; the high-water mark is worth measuring on
- * hardware before trimming it, which is why it is a named constant.
+ * published promptly, and above the panel thread the LCD sink owns (issue #57)
+ * so that its 26 ms blit can never delay the next capture.  CAM_PRODUCER_PRIO
+ * itself lives in camera.h, because that second thread asserts against it.
  */
-#define CAM_PRODUCER_PRIO   10u
 /*
  * [!] 8 KiB, not 4, since issue #48: this thread now runs INFERENCE.
  *
@@ -75,15 +73,17 @@
 #define CAM_PRODUCER_STACK  8192u
 
 /*
- * These stay HERE and not in shell/include/cli_config.h.  That header is the
- * shared shell core's configuration -- instances, the job pool, the transport --
- * and all three boards include it; a Grove-only camera thread's numbers in
- * there would be board specifics in a board-independent header, which is the
- * layering rule backwards.  The precedent is the same on the other two boards,
- * whose camera producers define their own CAM_PRODUCER_PRIO / _STACK locally.
+ * These stay in this PORT and not in shell/include/cli_config.h.  That header is
+ * the shared shell core's configuration -- instances, the job pool, the
+ * transport -- and all three boards include it; a Grove-only camera thread's
+ * numbers in there would be board specifics in a board-independent header, which
+ * is the layering rule backwards.  The precedent is the same on the other two
+ * boards, whose camera producers carry their own numbers locally.
  *
  * What the shared header IS the authority on is where this thread has to sit
  * relative to the console, so that is asserted against it rather than restated.
+ * The stack stays private to this file; only the priority is exported, because
+ * only the priority is part of a relationship another file has to honour.
  */
 _Static_assert(CAM_PRODUCER_PRIO < CLI_INSTANCE_PRIORITY,
                "the camera producer must outrank the console: at or below it, "

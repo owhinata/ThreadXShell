@@ -34,6 +34,7 @@
 #include "cli_backend_uart.h"
 #include "lcd_st7789.h"
 #include "camera.h"
+#include "cam_lcd_sink.h"
 
 #define LOG_TAG "main"
 #include "log.h"
@@ -139,6 +140,13 @@ void tx_application_define(void *first_unused_memory)
 	 * immediately and parks on its start semaphore; no hardware is touched
 	 * until `camera probe` or `camera preview` asks for it. */
 	camera_create_objects();
+
+	/* The panel sink's own thread (issue #57).  The blit no longer runs on
+	 * the camera producer, so the sink has a worker of its own; it parks
+	 * immediately and does nothing until a frame is handed to it.  After
+	 * camera_create_objects() only for readability -- the two are
+	 * independent, and neither touches hardware. */
+	cam_lcd_sink_create_objects();
 
 	/* Boot banner via printf -> _write -> the UART TX ring.  Pre-scheduler
 	 * _write only enqueues (never waits); the backend flushes the ring once

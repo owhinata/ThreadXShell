@@ -751,7 +751,25 @@ static int cmd_nn_preview(struct cli_instance *sh, int argc, char **argv)
 		return -1;
 	}
 
-	(void)cam_lcd_sink_detach();
+	/*
+	 * [!] AND THE DETACH IS THE SECOND HALF OF THE STOP (issue #57).
+	 *
+	 * The blit runs on the panel thread now, so a confirmed producer stop no
+	 * longer proves that nothing is using this frame: detach unlinks the
+	 * sink and then drains that thread.  A drain that does not finish means
+	 * a thread may still be inside draw(), reading the detections -- and
+	 * releasing the NPU there would let `nn close` dismantle an interpreter
+	 * underneath it, which is the same trade this command already makes for
+	 * a producer that never came back.  So the lease is released only after
+	 * BOTH halves are confirmed.
+	 */
+	stop_rc = cam_lcd_sink_detach();
+	if (stop_rc != CAM_OK) {
+		cli_error(sh, "nn: the panel thread did not finish (%d); the "
+		              "preview is unusable until reboot, and nn stays "
+		              "held\r\n", stop_rc);
+		return -1;
+	}
 	nn_release();
 
 	if (cli_cancel_requested(sh)) {

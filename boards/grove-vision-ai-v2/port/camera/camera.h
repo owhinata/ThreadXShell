@@ -135,6 +135,28 @@ struct camera_stats {
 	int32_t  last_dp_status;/**< the datapath status that stopped us      */
 	uint32_t overruns;      /**< no free slot at publish time             */
 	const char *fault;      /**< first terminal reason, or NULL           */
+
+	/*
+	 * Per-stage profile of the producer loop, SINCE THE LAST STREAM START
+	 * (issue #38) -- unlike the counters above, which are cumulative.  All
+	 * microseconds, summed over `prof_iters` loop iterations.
+	 *
+	 * prof_total is measured loop-top to loop-top, so the stages sum to it
+	 * by construction and prof_other is the remainder rather than an
+	 * independent measurement.  Zero-length when prof_ok is 0: the time
+	 * source is the EPK's TIMER2 and an untrustworthy one must say so rather
+	 * than publish a plausible number.
+	 */
+	int      prof_ok;       /**< 0 = the time source is not trustworthy   */
+	const char *prof_why;   /**< why not, when prof_ok is 0               */
+	uint32_t prof_iters;
+	uint32_t prof_total_us; /**< loop top to loop top                     */
+	uint32_t prof_wait_us;  /**< asleep on frame-ready                    */
+	uint32_t prof_inval_us; /**< D-cache invalidate, 225 KB               */
+	uint32_t prof_pack_us;  /**< planar B/G/R -> RGB565                   */
+	uint32_t prof_sink_us;  /**< sinks consume (LCD blit + SPI DMA)       */
+	uint32_t prof_tune_us;  /**< means, sensor read-back, white balance   */
+	uint32_t prof_other_us; /**< total minus the five above               */
 };
 void camera_stream_stats(struct camera_stats *out);
 

@@ -396,6 +396,73 @@ static int cmd_camera_preview(struct cli_instance *sh, int argc, char **argv)
 
 /* ---- stats --------------------------------------------------------------- */
 
+/*
+ * One line of the stage profile (issue #38).
+ *
+ * Microseconds and tenths of a percent, both assembled from integers because
+ * svc/fmt.c has no %f -- and the percentages are of prof_total_us, which was
+ * measured over the same window as the parts, so the column adds up.
+ */
+static void cam_prof_line(struct cli_instance *sh, const char *name,
+                          uint32_t us, uint32_t total_us, uint32_t iters,
+                          const char *what)
+{
+	uint32_t pct10 = (total_us != 0u)
+	               ? (uint32_t)(((uint64_t)us * 1000u) / total_us) : 0u;
+	uint32_t per   = (iters != 0u) ? (us / iters) : 0u;
+
+	cli_print(sh, "  %-7s: %6lu us/frame  %2lu.%lu%%   %s\r\n",
+	          name, (unsigned long)per,
+	          (unsigned long)(pct10 / 10u), (unsigned long)(pct10 % 10u),
+	          what);
+}
+
+/*
+ * The producer's per-stage breakdown, since the last stream start.
+ *
+ * [!] The point of this is the RATIO, not the fps.  If `wait` dominates, the
+ * sensor is not offering frames any faster and pipelining the CPU work would
+ * buy nothing; if `pack` and `sink` dominate, it would.  The two cases call for
+ * opposite work, which is why the number came before the design (issue #38).
+ */
+static void cam_print_profile(struct cli_instance *sh,
+                              const struct camera_stats *st)
+{
+	uint32_t fps10;
+
+	if (!st->prof_ok) {
+		cli_print(sh, "profile  : -- (%s)\r\n",
+		          st->prof_why != NULL ? st->prof_why : "no time source");
+		return;
+	}
+	if (st->prof_iters == 0u || st->prof_total_us == 0u) {
+		cli_print(sh, "profile  : -- (no frames since the last stream "
+		              "start)\r\n");
+		return;
+	}
+
+	fps10 = (uint32_t)(((uint64_t)st->prof_iters * 10000000u) /
+	                   st->prof_total_us);
+	cli_print(sh, "profile  : %lu iterations, %lu us/frame (%lu.%lu fps)"
+	              "  [since stream start]\r\n",
+	          (unsigned long)st->prof_iters,
+	          (unsigned long)(st->prof_total_us / st->prof_iters),
+	          (unsigned long)(fps10 / 10u), (unsigned long)(fps10 % 10u));
+
+	cam_prof_line(sh, "wait", st->prof_wait_us, st->prof_total_us,
+	              st->prof_iters, "asleep: sensor exposure + readout");
+	cam_prof_line(sh, "invald", st->prof_inval_us, st->prof_total_us,
+	              st->prof_iters, "D-cache invalidate, 225 KB");
+	cam_prof_line(sh, "pack", st->prof_pack_us, st->prof_total_us,
+	              st->prof_iters, "planar B/G/R -> RGB565, 76800 px");
+	cam_prof_line(sh, "sink", st->prof_sink_us, st->prof_total_us,
+	              st->prof_iters, "LCD blit: byte swap + SPI DMA wait");
+	cam_prof_line(sh, "tune", st->prof_tune_us, st->prof_total_us,
+	              st->prof_iters, "means + sensor read-back + wb");
+	cam_prof_line(sh, "other", st->prof_other_us, st->prof_total_us,
+	              st->prof_iters, "retrigger, wrap reassert, loop");
+}
+
 static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 {
 	struct cam_lcd_sink_stats sk;
@@ -418,6 +485,7 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 	if (st.last_dp_status != 0)
 		cli_print(sh, " (last status %ld)", (long)st.last_dp_status);
 	cli_print(sh, "\r\n");
+	cam_print_profile(sh, &st);
 	cli_print(sh, "sink lcd : %lu shown, %lu dropped, %lu busy, %lu err\r\n",
 	          (unsigned long)sk.delivered, (unsigned long)sk.dropped,
 	          (unsigned long)sk.busy, (unsigned long)sk.errors);

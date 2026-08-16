@@ -188,6 +188,24 @@ int camera_set_exposure(uint16_t lines);
 int camera_set_gains(uint8_t again, uint16_t dgain);
 
 /**
+ * @brief  Set / read the sensor's frame length (VTS), in lines.
+ *
+ * [!] One register, two effects (issue #38): the frame period is
+ * VTS * HTS / PCLK, and integration time cannot exceed the frame -- so a faster
+ * frame rate costs the longest exposure available.
+ *
+ * Unlike the exposure setters above this does NOT turn camera_auto() off: VTS
+ * is the frame the on-chip AEC works inside, not a manual exposure, and the AEC
+ * keeps adapting within the new ceiling.
+ *
+ * camera_read_frame_length() reads the SENSOR, not this port's shadow, and
+ * returns CAM_ERR_BUSY while a stream runs (it is I2C, which the producer
+ * owns).  Reading the part rather than the shadow is what found #38.
+ */
+int camera_set_frame_length(uint16_t lines);
+int camera_read_frame_length(uint16_t *lines);
+
+/**
  * @brief  Auto exposure and auto white balance, on by default.
  *
  * The datapath provides neither, so a fixed setting is correct only for the

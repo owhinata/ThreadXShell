@@ -27,6 +27,36 @@ static int ov5647_do_exposure(uint16_t lines);
 static int ov5647_do_gains(uint8_t again, uint16_t dgain);
 static int ov5647_do_auto(int on);
 static int ov5647_read_eg(uint16_t *lines, uint8_t *again);
+static int ov5647_do_frame_length(uint16_t lines);
+static int ov5647_read_frame_length(uint16_t *lines);
+
+/*
+ * [!] THE MODE TABLE DOES NOT PROGRAM VTS, AND THAT COST 4x THE FRAME RATE.
+ *
+ * The SDK's OV5647_mipi_2lane_640x480.i writes HTS (0x380C/0x380D = 1852) and
+ * never touches 0x380E/0x380F, so the part kept its power-on frame length --
+ * 1968 lines, which is the value the 2592x1944 mode wants.  A VGA mode running
+ * on the 5 MP mode's frame length is 62.5 ms per frame: measured, and it is
+ * exactly 1968 * 1852 / 58.3 MHz.
+ *
+ * Linux's ov5647 driver programmes 504 for this same mode (HTS 1852 and PLL
+ * 0x3036 = 0x46 agree with the SDK table byte for byte), which is 16.0 ms and
+ * about 62 fps.
+ *
+ * 984 rather than 504 is a deliberate middle.  The frame rate this port can
+ * actually consume is bounded by its own producer -- 43.5 ms of capture,
+ * convert and blit, about 23 fps (#38) -- so 504 would buy frames nothing can
+ * use while halving the exposure ceiling to ~500 lines, which is where the
+ * on-chip AEC already sits in ordinary room light.  984 puts the sensor at
+ * ~32 fps, comfortably past what the pipeline consumes, and leaves twice the
+ * exposure headroom.  `camera vts` moves it either way without a flash cycle.
+ */
+#define OV5647_DEFAULT_VTS  984u
+
+/* The mode outputs 480 lines; VTS below that plus the part's own blanking is
+ * not a frame.  Linux's 504 for this mode is the practical floor, and it is
+ * what this refuses below. */
+#define OV5647_MIN_VTS      504u
 
 /* ---- register tables ----------------------------------------------------- */
 
@@ -145,6 +175,33 @@ static int ov5647_read_eg(uint16_t *lines, uint8_t *again)
 	return 0;
 }
 
+static int ov5647_do_frame_length(uint16_t lines)
+{
+	HX_CIS_SensorSetting_t tbl[] = {
+		{ HX_CIS_I2C_Action_W, 0x380e, (lines >> 8) & 0xFF },
+		{ HX_CIS_I2C_Action_W, 0x380f, lines & 0xFF },
+	};
+
+	if (lines < OV5647_MIN_VTS) {
+		LOG_ERR("frame length %u is below the %u this mode needs",
+		        lines, (unsigned)OV5647_MIN_VTS);
+		return -1;
+	}
+	return WRITE_TABLE(tbl);
+}
+
+static int ov5647_read_frame_length(uint16_t *lines)
+{
+	uint8_t hi = 0u, lo = 0u;
+
+	if (hx_drv_cis_get_reg(0x380e, &hi) != HX_CIS_NO_ERROR ||
+	    hx_drv_cis_get_reg(0x380f, &lo) != HX_CIS_NO_ERROR)
+		return -1;
+	if (lines != NULL)
+		*lines = (uint16_t)(((uint16_t)hi << 8) | lo);
+	return 0;
+}
+
 const struct cam_sensor_desc cam_sensor_ov5647 = {
 	/*
 	 * 640x480 straight out of the sensor, halved to 320x240 by a
@@ -178,4 +235,7 @@ const struct cam_sensor_desc cam_sensor_ov5647 = {
 	.set_gains = ov5647_do_gains,
 	.set_auto = ov5647_do_auto,
 	.read_exposure_gain = ov5647_read_eg,
+	.set_frame_length = ov5647_do_frame_length,
+	.read_frame_length = ov5647_read_frame_length,
+	.default_vts = OV5647_DEFAULT_VTS,
 };

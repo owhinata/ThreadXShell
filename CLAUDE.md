@@ -35,7 +35,8 @@ HAL/CMSIS/ThreadX 等は upstream ミラー submodule、ARM GNU ツールチェ�
   F746 専用 cmds（fs/gui/qspi/sdram 等）は移植で追加する。
 - **移植順**: M1 = 骨組み + Wio Lite AI ポート（USB CDC で shell 起動、完了 #2）→
   M2 = F746 ポート（完了 #3）→ **M3 = boot ツリー取り込み（ビルドのみ、焼かない。完了 #11）**
-  → M4 = 全ボードビルドのスクリプト/CI 化。
+  → M4 = 全ボードビルドのスクリプト/CI 化（**保留**。着手条件は Epic #1 のコメント:
+  枚数やマイルストーンではなく、手動運用が実際に破れたとき）。
 - **Wio Lite AI の DFU ブートローダは本リポジトリに統合済み**（`boards/wio-lite-ai/boot/`、
   移植元 `owhinata/wio-lite-ai` @ `09468bb`）。app とソースを共有しない独立ツリーで、
   **統合後も不変扱い**（下記「ボード固有ルール」参照）。
@@ -63,7 +64,7 @@ boards/
   入れない。ボード差は transport 抽象（`struct cli_transport_api` の backend）と port 側グルーで
   吸収する。
 - **共有コアに触れる変更は、全対応ボードのビルドが通ることを確認してからコミットする**
-  （全ボードビルドのスクリプト/CI は統合初期に整備する）。
+  （スクリプト/CI 化は保留中。手打ちで確認する）。
 - **shell の常設状態は静的割当**。共有 shell コア（インスタンス / スタック / ジョブプール）と
   transport の常設状態は静的割当で、init / dispatch / 出力経路は heap を要求しない。board 固有
   コマンドのペイロードは、board が bounded heap・排他（`malloc_lock`）・失敗処理を明示的に
@@ -382,9 +383,11 @@ git branch -d feat/<N>-short-description
   循環）ので、結果は「明示したクロックの下での実測値」。スコアは MEM_STATIC / TCM 配置 /
   スカラビルドとセットでのみ比較可能。membench のバッファは NOLOAD なので測定前に
   明示初期化が要る。MPU / キャッシュ属性は decode せず生ダンプ。
-- **MVE**: ThreadX M55 ポートは VPR を保存しない — 自作コードで MVE intrinsics/自動
-  ベクトル化を使わない（ベンチの TU は `-fno-tree-vectorize`。ポストリンクの
-  `check_mve_predication.py` が検査）。
+- **MVE**: 自作コードで MVE intrinsics/自動ベクトル化を使わない（ベンチの TU は
+  `-fno-tree-vectorize`。ポストリンクの `check_mve_predication.py` が検査）。
+  **[!] 禁じている根拠は誤り**（#42）— ハードウェアが VPR を保存する（Armv8-M ARM の
+  PushStack/PopStack が `HaveMve()` の下で退避・復元し、規則 RZWQX により MVE 命令は
+  `CONTROL.FPCA` を立てる）。ゲートは fail-closed なので **#42 が判断するまでは維持**する。
 - **SPI LCD**（Waveshare 2inch / ST7789VW、M-G3a / #30）: SSPIM を **PB7(DO)/PB8(CLK)**
   へ mux、**CS=PB11 / DC=PB6 / RST=PA0 / BL=PA2 は GPIO**。
   **[!] 配線は pad 番号で数える。刻印は XIAO のピン位置ラベルで HX6538 の信号名ではない** —

@@ -775,12 +775,17 @@ static int cmd_camera_vts(struct cli_instance *sh, int argc, char **argv)
 		cli_print(sh, "  (this sensor's frame length is not readable "
 		              "here)\r\n");
 
-	cli_print(sh, "           (frame period = vts x 1852 / 58.3 MHz, and the "
-	              "exposure cannot\r\n"
-	              "            exceed the frame -- lower is faster and dimmer, "
-	              "higher is the\r\n"
-	              "            reverse.  `camera bench` measures the period.)"
-	              "\r\n");
+	/* [!] NOT vts x 31.5 us.  The datapath is one-shot, so a frame costs the
+	 * producer's work plus a whole active frame (15.1 ms) and the result is
+	 * rounded UP to a multiple of the sensor's period -- which is why 984 and
+	 * 1968 both measure 62 ms today.  Saying the naive formula here would
+	 * invite exactly the tuning that falls off the cliff at 1860. */
+	cli_print(sh, "           (period = vts x 31.5 us, but ROUNDED UP to a "
+	              "whole one that fits\r\n"
+	              "            the producer's work + 15.1 ms -- so lowering "
+	              "vts often changes\r\n"
+	              "            nothing.  `camera bench` measures it.  Lower "
+	              "also caps the exposure.)\r\n");
 	cam_note_queued(sh, argc);
 	return 0;
 }

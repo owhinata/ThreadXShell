@@ -1264,36 +1264,67 @@ That is the finding, and it retires two of the three things #38 proposed:
 removing the byte swap and moving the blit to its own thread both make the CPU
 faster, and the CPU is not what is holding the frame rate.
 
-**The pacer is the datapath, and its period is ~62.5 ms.**  `camera bench`
-settles it by running the producer with no sink attached, so the 26.4 ms blit
-leaves the loop entirely:
+**The pacer is the datapath, and its period is quantised.**  `camera bench`
+takes the 26.4 ms blit out of the loop by running the producer with no sink, so
+the work can be varied over a 4.6x range; `camera vts` moves the sensor's frame
+length.  Six runs:
 
-| run | work | total | fps |
-|---|---|---|---|
-| `camera bench`, gamma off + sat unity | 9,538 | 62,607 | 15.9 |
-| `camera bench`, gamma on + sat 600 | 17,096 | 62,065 | 16.1 |
-| `camera preview`, gamma on | 43,540 | 62,722 | 15.9 |
+| run | VTS | work | predicted | measured | err |
+|---|---:|---:|---:|---:|---:|
+| bench, gamma on | 504 | 17,618 | 47,639 | 47,778 | -0.3% |
+| bench, gamma on | 984 | 17,611 | 62,006 | 62,006 | 0.0% |
+| bench, gamma on | 1968 | 17,619 | 62,006 | 62,729 | -1.2% |
+| bench, gamma off | 984 | 9,777 | 31,003 | 31,254 | -0.8% |
+| preview | 984 | 43,478 | 62,006 | 62,625 | -1.0% |
+| preview | 1968 | 43,540 | 62,006 | 62,722 | -1.1% |
 
-**The CPU work varies by 4.6x and the frame period does not move** -- 657 us of
-spread, 1.1%.  That refutes the every-other-frame model outright: with 9,538 us
-of work, a datapath offering a frame every 31.25 ms could not have produced a
-62,607 us period, because the wait would have been capped at one period and the
-total at about 40.8 ms.  It was 62.6 ms.
+The model behind the predicted column, and it holds to 1.2% across periods from
+31 to 63 ms:
 
-So the datapath delivers one frame per ~62.5 ms, this loop takes every one of
-them (`sink lcd` reports 0 dropped), and **15.9 fps is the ceiling of this
-configuration**.  Every CPU-side change #38 proposed -- removing the byte swap,
-giving the blit its own thread, overlapping capture with conversion -- makes the
-CPU faster and the preview exactly as fast as it is now.  Time saved in the
-producer is spent in `wait`, which the table above shows three times over.
+```
+period = T_s * ceil((W + T_active) / T_s)
 
-Raising it means changing what the SENSOR emits, not what this firmware does
-with it: the frame period comes from the OV5647's own timing (the mode table's
-HTS at 0x380C/0x380D is 1852, and VTS is left at the part's default) and from
-`mipi_clock_mhz` in its descriptor.  The MIPI link is not the constraint -- two
-lanes at 220 MHz carry 880 Mbps against the 49 Mbps this mode actually needs.
-That is vendor register work on a part with no TRM here, and it is not tracked
-as an issue until somebody wants the frames.
+  T_s      = VTS * 31.507 us          (HTS 1852 at a PCLK of 58.8 MHz)
+  T_active = 480 * 31.507 = 15.1 ms   (one active frame on the wire)
+  W        = the producer's own work
+```
+
+**The datapath is one-shot.**  The producer arms it only after consuming the
+last frame, so every period contains the wait for the next frame start plus a
+whole active frame -- and the total is then rounded UP to a multiple of the
+sensor's period.  That single `ceil` explains everything the earlier runs made
+look mysterious: why exposure changed nothing (it never touched VTS), why 984
+and 1968 measure the same 62 ms (N=2 against N=1), and why 504 gave 47.8 ms
+rather than the 16 ms its frame length alone implies (N=3).
+
+**[!] The optimum is a cliff edge.**  With today's producer, W + T_active is
+58.7 ms.  VTS 1968 clears it with margin (N=1, 62 ms).  VTS **1860** gives
+T_s = 58,603 us -- **60 us short** -- so N becomes 2 and the frame rate HALVES
+to 8.5 fps.  Any VTS tuned to sit just above the current work is one `camera
+gamma` away from falling off that edge, which is why the default is not tuned
+tight.
+
+**What actually raises it.**  Not the frame length by itself: at W = 43.5 ms
+every VTS from 1864 up gives the same ~62 ms, and everything below is equal or
+worse.  Not the CPU by itself either: at VTS 1968 the period is one sensor frame
+whatever the CPU does.  It is BOTH, and the numbers say which way round:
+
+| | W | best VTS | period | fps |
+|---|---:|---:|---:|---:|
+| today | 43.5 ms | 1968 | 62.0 ms | 16.1 |
+| blit off the producer | 17.6 ms | ~1100 | ~34.7 ms | ~29 |
+
+So the three things this section used to list as "deliberately left out" --
+removing the byte swap, giving the sink its own thread, overlapping capture with
+conversion -- are not pointless after all, which an earlier revision of this
+file wrongly concluded.  They were simply not sufficient on their own: they cut
+W, and W only matters once VTS is chosen to let it.
+
+`sink` remains 26.45 ms of SPI wire time (153,600 bytes at 48 MHz is 25.60 ms in
+theory, and it varied by 7 us across four runs), so taking the blit off this
+thread means overlapping it, not making it cheaper.  The byte swap inside it is
+~0.85 ms, 1.3% of a frame, and still not worth teaching `svc/frame.h` a
+big-endian RGB565 format for.
 
 ## Ethos-U55 inference (`nn`)
 

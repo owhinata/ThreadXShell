@@ -45,7 +45,8 @@
 
 #include "cam_auto.h"
 #include "cam_convert.h"
-#include "cam_imx219.h"
+#include "cam_dp.h"
+#include "cam_sensor.h"
 #include "cam_lcd_sink.h"
 #include "camera.h"
 #include "lcd_st7789.h"
@@ -445,7 +446,7 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
  * Finding them by editing a #define costs one flash cycle per guess, on a part
  * whose external NOR is rated ~100k of them and whose flashing is a manual,
  * press-the-button affair.  Finding them from the console costs nothing.  Once
- * a set is known good it can be baked into the defaults in cam_imx219.c.
+ * a set is known good it can be baked into the defaults in camera.c.
  *
  * The white balance is separate from the gains and has to be, because the
  * sensor has no per-channel gain registers -- analogue and digital gain both

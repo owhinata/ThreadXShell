@@ -83,6 +83,7 @@
 #include "ethosu_driver.h"   /* struct ethosu_driver, ethosu_soft_reset() */
 #include "WE2_device.h"      /* __disable_irq                             */
 #include "WE2_core.h"        /* hx_{Clean,Invalidate}DCache_by_Addr        */
+#define LOG_TAG "npucache"
 #include "log.h"             /* LOG_ERR                                   */
 
 #define CACHE_LINE 32u
@@ -106,7 +107,7 @@ static volatile uint8_t inference_armed;
  */
 static void npu_cache_fail_stop(const char *why)
 {
-	LOG_ERR("npu cache: %s -- halting", why);
+	LOG_ERR("%s -- halting", why);
 	__disable_irq();
 	for (;;)
 		;

@@ -31,27 +31,42 @@ static int ov5647_do_frame_length(uint16_t lines);
 static int ov5647_read_frame_length(uint16_t *lines);
 
 /*
- * [!] THE MODE TABLE DOES NOT PROGRAM VTS, AND THAT COST 4x THE FRAME RATE.
+ * [!] THE MODE TABLE DOES NOT PROGRAM VTS, so this port does (issue #38).
  *
  * The SDK's OV5647_mipi_2lane_640x480.i writes HTS (0x380C/0x380D = 1852) and
- * never touches 0x380E/0x380F, so the part kept its power-on frame length --
- * 1968 lines, which is the value the 2592x1944 mode wants.  A VGA mode running
- * on the 5 MP mode's frame length is 62.5 ms per frame: measured, and it is
- * exactly 1968 * 1852 / 58.3 MHz.
+ * never touches 0x380E/0x380F, leaving the part on whatever frame length it
+ * powered up with -- measured at 1968 lines, which is what the 2592x1944 mode
+ * wants.  Programming it explicitly is the point; the VALUE below is 1968 all
+ * the same, and that is a measured choice rather than a shrug.
  *
- * Linux's ov5647 driver programmes 504 for this same mode (HTS 1852 and PLL
- * 0x3036 = 0x46 agree with the SDK table byte for byte), which is 16.0 ms and
- * about 62 fps.
+ * WHY NOT LOWER.  The frame period is NOT simply VTS * HTS / PCLK.  The
+ * datapath is one-shot: after the producer arms it, the capture waits for the
+ * next frame start and then takes a whole active frame (480 * 31.5 us =
+ * 15.1 ms) to arrive.  So the loop period is QUANTISED --
  *
- * 984 rather than 504 is a deliberate middle.  The frame rate this port can
- * actually consume is bounded by its own producer -- 43.5 ms of capture,
- * convert and blit, about 23 fps (#38) -- so 504 would buy frames nothing can
- * use while halving the exposure ceiling to ~500 lines, which is where the
- * on-chip AEC already sits in ordinary room light.  984 puts the sensor at
- * ~32 fps, comfortably past what the pipeline consumes, and leaves twice the
- * exposure headroom.  `camera vts` moves it either way without a flash cycle.
+ *     period = T_s * ceil((W + 15.1 ms) / T_s),   T_s = VTS * 31.5 us
+ *
+ * with W the producer's own work.  Measured against six runs spanning VTS
+ * 504..1968 and periods 31..63 ms, that predicts every one within 1.2%.
+ *
+ * The producer currently takes 43.5 ms a frame, so W + 15.1 ms is 58.7 ms and
+ * ANY VTS from 1864 up gives one frame period of ~62 ms.  Lowering it does not
+ * help: 984 measured 62.0 ms (N=2) and 504 measured 47.8 ms (N=3, and slower
+ * per frame than it looks).  1968 is therefore the best of the equal choices --
+ * and being the highest, it leaves the most exposure ceiling, which is the
+ * other thing this register controls.
+ *
+ * [!] AND THE OPTIMUM IS A CLIFF EDGE, which is why this is not tuned tight.
+ * VTS 1860 gives T_s = 58,603 us against a W + 15.1 ms of 58,663 -- 60 us
+ * short, so N becomes 2 and the frame rate HALVES to 8.5 fps.  Any VTS chosen
+ * to sit just above the current work is one gamma setting away from falling off
+ * that edge.  Pick T_s with margin, or leave it here.
+ *
+ * The real win needs the producer's work down, not the frame length: with the
+ * LCD blit off this thread (W ~ 17.6 ms), VTS ~ 1100 gives ~29 fps.  Neither
+ * change does it alone.  `camera vts` is how to explore that without a flash.
  */
-#define OV5647_DEFAULT_VTS  984u
+#define OV5647_DEFAULT_VTS  1968u
 
 /* The mode outputs 480 lines; VTS below that plus the part's own blanking is
  * not a frame.  Linux's 504 for this mode is the practical floor, and it is

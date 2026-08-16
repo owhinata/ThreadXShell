@@ -109,7 +109,7 @@ int wifi_rpc_disconnect(const struct wifi_rpc_opts *o, int32_t *result);
 /* The module's channel plan index: which channels it scans, and how (issue #40). */
 int wifi_rpc_get_channel_plan(const struct wifi_rpc_opts *o, uint8_t *plan,
                               int32_t *result);
-/* Install one.  ⚠️ NON-VOLATILE -- survives a full power-down, so this is provisioning
+/* Install one.  [!] NON-VOLATILE -- survives a full power-down, so this is provisioning
  * and must not run on every boot.  Read it back afterwards; see the definition. */
 int wifi_rpc_set_channel_plan(const struct wifi_rpc_opts *o, uint8_t plan,
                               int32_t *result);

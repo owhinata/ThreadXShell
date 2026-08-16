@@ -19,7 +19,7 @@
 #define NX_USER_H
 
 /*
- * ★ CRITICAL: the Cortex-M7/GNU nx_port.h hard-defaults NX_IP_PERIODIC_RATE to
+ * [!] CRITICAL: the Cortex-M7/GNU nx_port.h hard-defaults NX_IP_PERIODIC_RATE to
  * 100, but this project's ThreadX runs at 1000 Hz (port/threadx/tx_user.h,
  * TX_TIMER_TICKS_PER_SECOND = 1000, 1 tick = 1 ms).  NetX derives ALL of its time
  * bases (ARP retransmit/aging, TCP timeouts, ICMP, DHCP lease/renew) from this

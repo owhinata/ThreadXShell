@@ -61,7 +61,7 @@
  * six 512 KB slots ending at 4 MB), in the 12 MB that is still unallocated -- so
  * running the acceptance test destroys neither a live configuration nor a stored model.
  *
- * 🔴 THIS ADDRESS IS TIED TO THE BLOB REGION'S END, so it moves whenever the region
+ * [!] THIS ADDRESS IS TIED TO THE BLOB REGION'S END, so it moves whenever the region
  * does.  It was 0x00300000 until issue #55, which is exactly where the region now
  * ends -- had it stayed, a bare `nor test` would have programmed the header sector
  * of the new slot 4.  (Boards that ran `nor test` under the old default still have

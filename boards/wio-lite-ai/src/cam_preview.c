@@ -156,7 +156,7 @@ static void preview_band(unsigned band, const uint16_t *px, unsigned rows)
  * four thin ltdc_fill_rect() calls need no new drawing primitive: each one clips and
  * transposes itself.
  *
- * 🔴 THE CLAMP IS IN SIGNED ARITHMETIC, BEFORE THE uint16_t CAST.  The decoder
+ * [!] THE CLAMP IS IN SIGNED ARITHMETIC, BEFORE THE uint16_t CAST.  The decoder
  * computes x = cx - w/2, which is routinely negative for a face at the edge of the
  * frame, and surf_clip() only clips the FAR edges -- it takes uint16_t and assumes
  * non-negative input.  A negative value cast to uint16_t becomes ~65535 and sails
@@ -322,7 +322,7 @@ int cam_preview_enable(int on, int colorbar)
 		if (cam_band_claimed(CAM_BAND_NN))
 			return -2;
 		preview_on = 0;
-		/* 🔴 The result matters here.  If the release fails, the stream is still
+		/* [!] The result matters here.  If the release fails, the stream is still
 		   the OLD one, and the claim below would quietly JOIN it -- reporting a
 		   successful switch while the sensor's test-pattern bit never changed.
 		   Fail instead; the caller retries. */

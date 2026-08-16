@@ -36,7 +36,7 @@
  * that the EEMBC protocol has no use for.  It cannot collide with the protocol: every
  * host->DUT byte is printable ASCII (commands and hex digits) terminated by '%'.
  *
- * 🔴 Ctrl+C DELIBERATELY DOES NOT WORK HERE.  In raw mode cli_read_byte() hands 0x03
+ * [!] Ctrl+C DELIBERATELY DOES NOT WORK HERE.  In raw mode cli_read_byte() hands 0x03
  * over as an ordinary byte (shell/core/cli_core.c), which is what a binary protocol
  * needs -- and the shell's own cancel path is off for the same reason.  Advertising
  * Ctrl+C and then not honouring it would be worse than picking a key nobody presses

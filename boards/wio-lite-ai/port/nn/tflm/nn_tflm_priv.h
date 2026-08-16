@@ -97,7 +97,7 @@ extern uint8_t nn_tflm_model_buf[NN_TFLM_MODEL_SLOTS][NN_TFLM_MODEL_MAX];
 /**
  * Every call our global `operator new` has served (port/nn/tflm/cxx_runtime.cc).
  *
- * 🔴 BE PRECISE ABOUT WHAT THIS PROVES, because it is easy to overstate.  In the
+ * [!] BE PRECISE ABOUT WHAT THIS PROVES, because it is easy to overstate.  In the
  * current build `operator new` is not in the linked image at all: with
  * TF_LITE_STATIC_MEMORY nothing references it, so --gc-sections drops it, and
  * cmake/check_cxx_runtime.py reports that after every link.  The link-time absence is

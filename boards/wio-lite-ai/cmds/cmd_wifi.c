@@ -443,7 +443,7 @@ static int cmd_wifi_ver(struct cli_instance *sh, int argc, char **argv)
 /*
  * wifi chplan [set <hex> confirm] -- read or install the module's channel plan (#40).
  *
- * ⚠️ WRITING IS PROVISIONING, NOT CONFIGURATION.  The plan survives a full board
+ * [!] WRITING IS PROVISIONING, NOT CONFIGURATION.  The plan survives a full board
  * power-down (measured), so it is written once per module and never on a boot path.  It
  * is also the module's regulatory domain: the value decides which channels the radio may
  * use and actively probe, so installing a foreign one makes the board scan where it is

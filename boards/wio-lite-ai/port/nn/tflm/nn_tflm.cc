@@ -11,7 +11,7 @@
  * the tflite-micro + CMSIS-NN tree that cmake/tflite-micro.cmake fetches and generates
  * at configure time.
  *
- * 🔴 THERE IS NO BUILT-IN MODEL, AND THAT IS THE CENTRAL DESIGN POINT OF THIS FILE.
+ * [!] THERE IS NO BUILT-IN MODEL, AND THAT IS THE CENTRAL DESIGN POINT OF THIS FILE.
  * The donor firmware compiles a BlazeFace flatbuffer into flash as a C array, so its
  * backend always has something to run and reload(NULL) means "go back to the built-in
  * one".  That is not available here: the app partition is 384 KB with ~109 KB free,
@@ -163,7 +163,7 @@ void publish_empty()
 /*
  * The op resolver, constructed on first use into storage that is never destroyed.
  *
- * 🔴 NOT a function-local `static OpResolver resolver;`, which is the obvious way to
+ * [!] NOT a function-local `static OpResolver resolver;`, which is the obvious way to
  * write this and is what the donor firmware does.  MicroMutableOpResolver<N> has a
  * non-trivial destructor, so GCC emits a registration for it -- and because this build
  * uses -fno-use-cxa-atexit, that registration goes to plain `atexit()` rather than

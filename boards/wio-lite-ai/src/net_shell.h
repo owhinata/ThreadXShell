@@ -122,7 +122,7 @@ void net_shell_stop(void);
  * Safe to call while holding the rtl_link coarse mutex: the server thread takes no link
  * lock of any kind (see the header comment).  It is a no-op returning 0 when already OFF.
  *
- * ⚠️ It blocks the caller for up to @timeout_ms -- typically a few ms, since the server
+ * [!] It blocks the caller for up to @timeout_ms -- typically a few ms, since the server
  * is woken by an event rather than polled.  nx_net.c calls it with the coarse mutex held,
  * so another console's `wifi` / `net` / `link` command can be delayed by that much.
  */

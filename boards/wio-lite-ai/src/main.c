@@ -48,7 +48,7 @@
 #include "cam_preview.h" /* live camera preview on the LCD (issue #8 phase 3c) */
 #endif
 #endif
-/* 🔴 UNCONDITIONAL, and it has to be (issue #50).  usb_stack and iwdg_stack
+/* [!] UNCONDITIONAL, and it has to be (issue #50).  usb_stack and iwdg_stack
  * below are DTCM_BSS in every configuration, so this include cannot sit inside
  * the camera/LCD guards it used to -- BSP_ENABLE_CAMERA=OFF then left DTCM_BSS
  * undefined and the build failed on a stack that has nothing to do with either

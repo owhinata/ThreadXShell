@@ -56,7 +56,7 @@ RAM_LENGTH = 320 * 1024
 # NOT listed: cli_job_stacks, which stays in AXI-SRAM on purpose.  Background jobs
 # run CoreMark and the like -- latency-insensitive by design (shell/include/
 # cli_config.h) -- and DTCM is the scarcer of the two once the stacks land there.
-# 🔴 ONLY the residents that exist in EVERY build are listed here.  Anything a
+# [!] ONLY the residents that exist in EVERY build are listed here.  Anything a
 # BSP_ENABLE_* toggle can compile out is passed in from CMakeLists.txt with
 # --require-dtcm / --require-axi, because CMake is the only place that knows which
 # features are in this image.
@@ -105,7 +105,7 @@ REQUIRED_DTCM = (
 # being named here.  The comment stays because the REASON is not conditional: whichever
 # of them is in a given image must be in AXI-SRAM.
 #
-# 🔴 MAINTENANCE OBLIGATION, and it is the weak point of moving the lists out.  A NEW
+# [!] MAINTENANCE OBLIGATION, and it is the weak point of moving the lists out.  A NEW
 # bus-master buffer added to this firmware is not protected until someone adds it to
 # CMakeLists.txt -- and nothing here can notice the omission, because a buffer that was
 # never named looks exactly like a build where the feature is off.  Adding a *_DMA()

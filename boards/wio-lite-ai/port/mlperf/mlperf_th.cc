@@ -9,7 +9,7 @@
  * Everything here implements a function upstream's api/internally_implemented.cpp
  * declares and calls.  The names are not ours; the bodies are.
  *
- * 🔴 C++, AND NOT BY PREFERENCE.  Nothing in this file wants a C++ feature -- it is C
+ * [!] C++, AND NOT BY PREFERENCE.  Nothing in this file wants a C++ feature -- it is C
  * with a different extension.  It has to be C++ because of LINKAGE: upstream's
  * api/submitter_implemented.h declares the th_* contract with no `extern "C"`, and
  * api/internally_implemented.h declares the ee_* entry points the same way.  Compiled
@@ -57,7 +57,7 @@
  *   vww01  1x96x96x3 int8 -> 1x2    Visual Wake Words MobileNet
  *   ad01   1x640     int8 -> 1x640  ToyADMOS deep autoencoder
  *
- * 🔴 THE HOST BYTE FORMAT IS PART OF THE BENCHMARK DEFINITION, NOT OF THE MODEL.  The
+ * [!] THE HOST BYTE FORMAT IS PART OF THE BENCHMARK DEFINITION, NOT OF THE MODEL.  The
  * runner sends ic01/vww01 as unsigned RGB bytes, kws01 as int8 MFCCs it already
  * quantized, and ad01 as little-endian float32 -- documented in upstream's
  * benchmark/evaluation/datasets/README.md.  So `load` below is chosen by BENCHMARK,
@@ -364,7 +364,7 @@ void th_timestamp(void)
 	 * high-resolution choice is the one that silently aliases.  See
 	 * port/threadx/tx_glue.h for how the two clocks compose.
 	 *
-	 * 🔴 %llu, NOT upstream's EE_MSG_TIMESTAMP ("...%lu\r\n").  `unsigned long` is
+	 * [!] %llu, NOT upstream's EE_MSG_TIMESTAMP ("...%lu\r\n").  `unsigned long` is
 	 * 32 bits on this target, which puts a wrap at 2^32 us = 71 min 34 s of uptime --
 	 * and the host does NOT do modulo arithmetic: benchmark/runner/script.py computes
 	 * `end_time - start_time` in Python, whose integers are arbitrary precision, so a
@@ -430,7 +430,7 @@ void th_infer(void)
  * Does the `db` buffer hold the @p want bytes this benchmark needs?  Reports and
  * counts if not.
  *
- * 🔴 ASKED BEFORE ANY COPY, AND THAT IS THE POINT.  ee_get_buffer() copies whatever
+ * [!] ASKED BEFORE ANY COPY, AND THAT IS THE POINT.  ee_get_buffer() copies whatever
  * it has and returns how much -- so checking its RETURN value means the short data is
  * already in the destination.  Upstream can live with that because its reference
  * copies into a scratch array and simply does not forward it; this harness writes

@@ -106,7 +106,7 @@ int psram_ready(void);
  * releases it: from that point the gates above (ltdc_scanout_active(),
  * camera_streaming()) are what keep the reconfigurers away.
  *
- * 🔴 `ai stream` IS THE ONE EXCEPTION: it holds the shared guard for its whole
+ * [!] `ai stream` IS THE ONE EXCEPTION: it holds the shared guard for its whole
  * lifetime (issue #9 phase 3, app/nn_camera.h).  Arm-and-release does not work for
  * it, because the two gates above answer for the CAMERA and the DISPLAY, and the
  * thing that must not be retuned underneath is neither -- it is the NN worker

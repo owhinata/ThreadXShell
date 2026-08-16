@@ -278,7 +278,7 @@ static uint8_t cam_ring[CAM_RING_SLOTS][CAMERA_FRAME_BYTES]
 /*
  * The two band buffers of the staged stream (issue #35).
  *
- * 🔴 THIS IS THE SECOND BUFFER IN THIS FIRMWARE THAT A BUS MASTER WRITES AND THE
+ * [!] THIS IS THE SECOND BUFFER IN THIS FIRMWARE THAT A BUS MASTER WRITES AND THE
  * CPU READS -- port/sd/sd_card.c's sd_bounce was the first, and this follows it
  * exactly:
  *
@@ -929,7 +929,7 @@ static int ov2640_apply_swap_locked(void)
  * bug shows up in no counter anywhere, which is the recurring lesson of issues
  * #7, #43 and #8 phase 3a.
  *
- * 🔴 THE READ-BACK DOES NOT EQUAL WHAT WAS WRITTEN, and that is not a fault.
+ * [!] THE READ-BACK DOES NOT EQUAL WHAT WAS WRITTEN, and that is not a fault.
  * REG04 bits [1:0] are AEC[1:0] -- the bottom two bits of the automatic exposure
  * value -- and the sensor's own AEC loop rewrites them continuously while it is
  * streaming.  Measured on board #2: this writes 0x28 and `camera reg 0x30 0x04`

@@ -255,7 +255,7 @@
 /*
  * Sanity checks for the knobs that have meaning at this stage.
  *
- * 🔴 CLI_STATIC_ASSERT, not _Static_assert directly, BECAUSE THIS HEADER IS NOW
+ * [!] CLI_STATIC_ASSERT, not _Static_assert directly, BECAUSE THIS HEADER IS NOW
  * REACHED FROM C++.  `_Static_assert` is a C11 keyword; C++ spells it
  * `static_assert`, and GCC only started accepting the C spelling in C++ as an
  * extension in version 14.  Every C++ translation unit in this firmware used to live

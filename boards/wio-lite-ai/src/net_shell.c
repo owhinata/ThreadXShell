@@ -277,7 +277,7 @@ static uint32_t g_tx_hiwater;
  * contract and is already called under the instance's tx_lock.  The server thread is the
  * sole consumer and touches only `tail`, so it never contends with them.
  *
- * 🔴 THE WRITE GATE IS READ INSIDE THAT REGION, not before it, and that is load-bearing.
+ * [!] THE WRITE GATE IS READ INSIDE THAT REGION, not before it, and that is load-bearing.
  * `connected` is cleared by the server thread (or the disconnect callback) and followed by
  * nsh_tx_discard(); if a producer could test it and enqueue as two separate steps, a CLI
  * thread preempted between them -- it runs at 16, below both the server (14) and the IP
@@ -415,7 +415,7 @@ static int nsh_write(struct cli_transport *tr, const uint8_t *data, size_t len)
 	 * 32-byte chunks, so waking the drain now would transmit a third of a redraw and
 	 * pay a peer ACK for it; nsh_flush() does the waking when the whole unit is in.
 	 *
-	 * 🔴 EXCEPT when we could not take it all.  Then the core parks on CLI_EVT_TX
+	 * [!] EXCEPT when we could not take it all.  Then the core parks on CLI_EVT_TX
 	 * waiting for room, the only source of room is the drain, and the drain's only
 	 * wake-up would be an end-of-unit that cannot arrive because the unit is stuck
 	 * here.  This one line is what keeps the flow-control contract from deadlocking.

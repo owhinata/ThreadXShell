@@ -564,7 +564,7 @@ static void nxn_arm(void)
 	 * on this link", and issue #23 measured the difference at 305 vs 500 kB/s of echoed
 	 * TCP.
 	 *
-	 * ⚠️ This DELIBERATELY REVERSES issue #23 U0-3's "the rate change is exclusive and
+	 * [!] This DELIBERATELY REVERSES issue #23 U0-3's "the rate change is exclusive and
 	 * manual", and the reason it was manual has not gone away: a rate change is the one
 	 * operation here that can cost the link, and its guaranteed recovery is `wifi reset`.
 	 * What changed is the evidence -- U1 through U4-2 have driven 6 Mbaud through

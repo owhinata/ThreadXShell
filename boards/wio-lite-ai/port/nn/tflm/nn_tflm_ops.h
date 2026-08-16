@@ -6,7 +6,7 @@
  * @file    nn_tflm_ops.h
  * @brief   The operator set the tflm backend registers -- stated exactly once (#9 P2c).
  *
- * 🔴 THIS FILE EXISTS SO THE BOARD AND THE PC CANNOT DISAGREE.  Two things consume the
+ * [!] THIS FILE EXISTS SO THE BOARD AND THE PC CANNOT DISAGREE.  Two things consume the
  * list: nn_tflm.cc, which registers the operators into the MicroMutableOpResolver, and
  * scripts/verify_tflite.cc, the host-side checker that tells you BEFORE a transfer
  * whether a model stays inside that set.  If those two lists were written out
@@ -48,7 +48,7 @@
  * Exactly what MLPerf Tiny v1.4 needs on top of the base set, added by
  * -DNN_TFLM_OPS=mlperf (issue #55).
  *
- * 🔴 A MEASURED SET, NOT A GENEROUS ONE, AND THAT IS THE POINT.  All five v1.4
+ * [!] A MEASURED SET, NOT A GENEROUS ONE, AND THAT IS THE POINT.  All five v1.4
  * models -- ic01 (ResNet), ic02 (larger ResNet), kws01 (DS-CNN), vww01 (MobileNet)
  * and ad01 (deep autoencoder) -- were run through scripts/verify_tflite.cc against
  * the base set, and the union of everything they were missing is the first three
@@ -62,7 +62,7 @@
  * MAX_POOL_2D from the base set (worth 6,248 B) -- no MLPerf model uses either, and
  * only BlazeFace (issue #9) would stop running.
  *
- * 🔴 "ONE MORE OPERATOR" IS NOT A UNIT OF FLASH, so do not budget by counting them.
+ * [!] "ONE MORE OPERATOR" IS NOT A UNIT OF FLASH, so do not budget by counting them.
  * Adding MEAN and LOGISTIC to this profile was measured at ZERO bytes: their kernels
  * are already in the image because TFLM's shared operator code reaches them and
  * --gc-sections cannot drop them, so registering them buys only a resolver table
@@ -78,7 +78,7 @@
  * The common-vision superset, added by -DNN_TFLM_OPS=extended so a different int8
  * model can be dropped into a blob slot without rebuilding the firmware.
  *
- * ⚠ This profile currently OVERFLOWS the app partition (issue #55).  It is kept
+ * [!] This profile currently OVERFLOWS the app partition (issue #55).  It is kept
  * because it is the honest name for "everything a vision model might want" and
  * because the partition may not always be this full -- but it is not a working
  * configuration today, and `mlperf` is what you want instead.

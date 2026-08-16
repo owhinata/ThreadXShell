@@ -603,7 +603,7 @@ SECTIONS
    * code just silently reverts to the flash and the interrupt-latency win vanishes
    * unnoticed.  Assert that the named entry points really did land in ITCM.
    *
-   * 🔴 THESE ARE AN EARLY WARNING, NOT THE FINAL GUARD (issue #39).  Every one of
+   * [!] THESE ARE AN EARLY WARNING, NOT THE FINAL GUARD (issue #39).  Every one of
    * them is written against a SYMBOL NAME, and LTO renames symbols: once
    * `_tx_event_flags_set` has become `_tx_event_flags_set.isra.0`, DEFINED() below
    * is false, the conditional collapses to `1`, and the ASSERT passes while the

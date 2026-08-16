@@ -85,7 +85,7 @@ struct nn_camera_stats {
  *    which matters more than it looks: a reload rebuilds the interpreter and
  *    re-plans the arena, so nn_input()->data MOVES.  (The band callback re-reads
  *    that pointer every frame anyway, rather than caching it across a session.)
- *  - 🔴 The OCTOSPI1 guard closes a hole camera_streaming() does not cover.
+ *  - [!] The OCTOSPI1 guard closes a hole camera_streaming() does not cover.
  *    psram_acquire() consults only the camera and the LTDC, so the instant a DCMI
  *    overrun tears the band stream down while the worker is still inside nn_run()
  *    reading the arena, a `psram clk` retune would become legal underneath it.
@@ -102,7 +102,7 @@ int nn_camera_start(int colorbar);
 /**
  * Stop inferring, drain, and release the guards.
  *
- * 🔴 RETURNS NNCAM_ERR_TEARING WITHOUT RELEASING ANYTHING if either side is still
+ * [!] RETURNS NNCAM_ERR_TEARING WITHOUT RELEASING ANYTHING if either side is still
  * in flight: a band callback that never returned (a producer killed by a DCMI
  * overrun) or a worker still inside nn_run().  Releasing early would hand the model
  * and its arena to `ai bench` while something can still write the input tensor.

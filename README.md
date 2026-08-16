@@ -17,6 +17,14 @@ board-independent shell core with per-board ports.
 | Wio Lite AI | STM32H725AEI6 (Cortex-M7) | 550 MHz (inherited from DFU bootloader) | USB CDC (TinyUSB) | DFU (`dfu-util`) |
 | Grove Vision AI V2 | Himax HX6538 WiseEye2 (dual Cortex-M55 + Ethos-U55; app on CM55M) | 400 MHz (inherited from the Himax bootloader) | UART0 via CH343P bridge, 921600 | UART xmodem to the Himax bootloader |
 
+Each board documents itself -- procedures, pin maps, memory-map policy, gates
+and the traps specific to it:
+
+- [`boards/f746g-disco/README.md`](boards/f746g-disco/README.md)
+- [`boards/wio-lite-ai/README.md`](boards/wio-lite-ai/README.md)
+  (and its bootloader runbook, [`boot/README.md`](boards/wio-lite-ai/boot/README.md))
+- [`boards/grove-vision-ai-v2/README.md`](boards/grove-vision-ai-v2/README.md)
+
 More boards are planned.
 
 ## Architecture

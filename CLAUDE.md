@@ -237,31 +237,25 @@ git branch -d feat/<N>-short-description
 
 ### STM32F746G-DISCO
 
-- **216 MHz**（HSE 25 MHz → PLL M25 N432 P2、VOS1 + over-drive、Flash 7WS）。FPU / I$ / D$ on。
-  FPU は**単精度のみ**（`-mfpu=fpv5-sp-d16`）— CoreMark の `%f` スコア行は `__aeabi_d*` +
-  `_printf_float` 経由（`-u _printf_float` でリンク）。
-- VCP: USART1、TX=PA9 / RX=PB7、115200 8N1 → `/dev/ttyACM0`。**PA9 は OTG_FS_VBUS と共用**
-  （既定ソルダーブリッジで VCP 有効、UM1907）。LED LD1（緑）= PI1。
-- メモリ: Flash 1MB @ 0x08000000 / ITCM 16KB @ 0x00000000 / DTCM 64KB @ 0x20000000 /
-  SRAM 256KB @ 0x20010000。
-- フラッシュ書込: ST-Link（`cmake --build build/f746g-disco --target flash`）。
-- **timebase = TIM2 @ 108 MHz**（2×PCLK1、APB1 /4 で TIMPRE=0。RM0385）。EPK の time source と
-  udelay で共用するため **`CLI_CPU_CYCLES_PER_US=108`**（コアクロックの 216 ではない）。
-- **`CLI_INSTANCE_TIME_SLICE=0`（TX_NO_TIME_SLICE）を維持**する。VCP + telnet の 2 インスタンスが
-  同一優先度に並ぶが、coremark / membench / nn_run が静的状態と DWT CYCCNT を共有していて
-  多重実行に非再入（#4）。CPU-bound コマンド実行中に他コンソールが応答しないのが**期待挙動**。
+**説明の正は `boards/f746g-disco/README.md`**（クロック・ピン・メモリマップ・手順・
+ハマりどころ）。ここに置くのは破ってはいけないことだけ:
+
 - **LTO 禁止**。ldscript の ASSERT 群が配置 invariant の本体で、LTO はその ASSERT が
   依拠するシンボル / 入力セクション名を改名してしまう（`board.cmake` が per-config 変種込みで
-  FATAL_ERROR にする）。加えて POST_BUILD の `cmake/check_f746_layout.py` が
-  シンボル常駐・ベクタテーブル・float ランタイムを実イメージで検査する。
-- **SDRAM は FMC 内部バンクで用途固定**: bank0 = LTDC スキャンアウト面 + 固定居住者 /
-  bank1 = カメラ DMA アリーナ 2MB / bank2 = ETH ディスクリプタ + プール /
-  bank3 = NN アリーナ（上半分 1MB @ 0xC0700000 は reloc モデルの実行窓）。
-  バンクをまたぐ配置変更は FE とキャッシュコヒーレンシに直結する。
-- 教訓: I/D-cache 有効時は ITCM 配置の効果 ~0.6%（キャッシュが flash WS を隠蔽済み）。
+  FATAL_ERROR にする）。POST_BUILD の `cmake/check_f746_layout.py` と併せて外さない。
+- **SDRAM は FMC 内部バンクで用途固定**（bank0 = LTDC / bank1 = カメラ DMA / bank2 = ETH /
+  bank3 = NN アリーナ）。バンクをまたぐ配置変更は FE とキャッシュコヒーレンシに直結する。
+  境界は ldscript の ASSERT が持っているので、緩めない。
+- **`CLI_CPU_CYCLES_PER_US=108`**（timebase は TIM2 @ 108 MHz。コアクロックの 216 ではない）。
+- **`CLI_INSTANCE_TIME_SLICE=0`（TX_NO_TIME_SLICE）を維持**する。coremark / membench / nn_run が
+  多重実行に非再入（#4）で、CPU-bound コマンド中に他コンソールが応答しないのが**期待挙動**。
 - リファレンス: RM0385 / UM1907 / ST 公式デモ（`_ref/f746g-disco/_ref/`、read-only）。
 
 ### Wio Lite AI（[!] ブリック安全則あり）
+
+**説明の正は `boards/wio-lite-ai/README.md`**（ブート経路・継承クロック・メモリマップ・
+DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/README.md`。
+ここに残すのは**エージェントの行動を止める規則**だけで、説明は README を見る。
 
 - **現存する実機は board #2 のみ**（board #1 は恒久文鎮化）。焼き直し・実験のコストを常に意識する。
 - [!] **boot ツリー（`boards/wio-lite-ai/boot/`）と ROM リンカスクリプト
@@ -276,19 +270,10 @@ git branch -d feat/<N>-short-description
   絶対にしない。ST-Link での内蔵 Flash 書込は boot をセクタ0 に焼く用だけ（通常やらない）。
 - **boot は「参照ビルド」としてのみビルドする**（`boot` ターゲット → `boot-reference/`）。
   **セクタ0 に書けるターゲットも `dfu-boot` も作らない**（後者は boot を app パーティションに
-  焼くターゲットになる）。ビルドする理由はビルド継続性 — HAL / TinyUSB / toolchain /
-  board.cmake の変更が boot を黙って壊さないことの確認。
-  ゲートは **`cmake/check_boot_safety.py`**（`boot_precheck` = ソース manifest + compile
-  command 監査、POST_BUILD = ベクタ配置 / セクタ0 収容 / option-byte・DBGMCU 経路の不在 /
-  flash 書込の呼び出しグラフ / DFU クラス / ELF↔bin 結合 / **各オブジェクトの LTO IR 不在** /
-  golden hash）。**LTO の保証はコマンドライン走査ではなくオブジェクト（`.gnu.lto_*`
-  セクション）で取る** — specs ファイル・compiler launcher・ninja 外で作り直した
-  オブジェクトはコマンドラインに痕跡を残さない。flash 書込 API のアドレスは
-  データワードだけでなく **`movw`/`movt` 対**でも検出する（間接呼び出しは辺を残さない）。
-  **`boot_image` は毎ビルド再リンクする**（`boot_precheck` の stamp を `LINK_DEPENDS` に
-  入れてある）ので、up-to-date による迂回経路は存在しない。
+  焼くターゲットになる）。ゲートは **`cmake/check_boot_safety.py`**（precheck = ソース
+  manifest + compile command 監査 / POST_BUILD = 配置・収容・禁止経路・LTO IR・golden hash。
+  **中身と設計理由は board README**）。**外す・弱める変更は不可**。
   golden hash は donor `09468bb` の**再現性ベースライン**であって実機イメージの証明ではない。
-  ゲートの negative test は `cmake/fixtures/run_fixture_tests.py`。
 - **DFU フォールバックの安全網を app 側から壊さない**: erased/invalid app では必ず DFU モード
   に入る（中断した DFU 転送も、先頭 32B を最後に書く vector-last commit により必ずここに落ちる）。
   boot の DFU 判定条件に影響する変更を app 側から入れない。
@@ -299,30 +284,20 @@ git branch -d feat/<N>-short-description
   **`flash` は app パーティション専用**でセクタ0 には届かない（両ボードで同じ
   コマンド形にするためのエイリアスであって、ST-Link 経路を足したものではない）。
   [!] **内蔵 Flash の書換え耐久は ~10k サイクル**。自動ループで焼き直さない。
-- [!] **app はクロックツリーを再設定しない**。app は boot から継承した system/PLL クロック
-  ツリー（クロックソース、D1/D2/D3 プリスケーラ、PLL1/PLL2、および下記例外以外の PLL3 設定）、
+- [!] **app はクロックツリーを再設定しない**。boot から継承した system/PLL クロックツリー
+  （クロックソース、D1/D2/D3 プリスケーラ、PLL1/PLL2、および下記例外以外の PLL3 設定）、
   FLASH ACR、電源供給選択（SMPS/LDO）・VOS を再設定しない。ペリフェラルの bus clock gate と
-  kernel clock mux の設定は許可する。**例外は次の 2 つのみ**:
-  (a) `ltdc_clock_init()` が USB クロック供給前に行う 3 フィールド・成功パス計 4 書込み
-  （`RCC_CR.PLL3ON` clear / `RCC_PLL3DIVR.DIVR3` 更新 / `RCC_PLLCFGR.DIVR3EN` set /
-  `RCC_CR.PLL3ON` set。RM0468 §8.7.1 / §8.7.11 / §8.7.16）、
-  (b) `HAL_PWREx_EnableUSBVoltageDetector()` による `PWR_CR3.USB33DEN` set（RM0468 §6.8.4）。
-  継承値は 550 MHz / PLL3Q 48 MHz USB / FLASH latency 3。`SystemInit` は
-  **FPU + VTOR + TCM 初期化のみ**のカスタム版（ECC 有効化・ゼロ充填・`.itcm` ロード・MSP fill。
-  RCC / PWR / FLASH ACR は触らない。stock CMSIS `SystemInit` / `SystemClock_Config` は
-  呼ばない）。VTOR はリンカの `g_pfnVectors` から取る。SysTick reload は継承した
-  `SystemCoreClock`（550 MHz）から計算し、その過程で RCC は触らない。
+  kernel clock mux の設定は許可する。**例外は次の 2 つのみ**: (a) `ltdc_clock_init()` が
+  USB クロック供給前に行う PLL3R の再設定、(b) `HAL_PWREx_EnableUSBVoltageDetector()` による
+  `PWR_CR3.USB33DEN` set。**レジスタ単位の内訳と継承値は board README**。
+  `SystemInit` は **FPU + VTOR + TCM 初期化のみ**のカスタム版で、stock CMSIS の
+  `SystemInit` / `SystemClock_Config` は呼ばない。
 - [!] **RAM 配置ポリシー**（wio-lite-ai#46）: **AXI-SRAM（320KB @ 0x24000000）= バスマスタから
   見える必要があるものだけ / DTCM（128KB @ 0x20000000）= CPU 専用のホットなもの /
   ITCM（64KB）= ISR コード**。**DMA1/DMA2・SDMMC1 IDMA は TCM に届かない**
   （RM0468 §2.1.2/§2.1.5/§2.1.6）。**DTCM の DMA バッファは fault せず無言で転送されない**。
 - [!] **リンカスクリプトの `ASSERT` は LTO 下で空振りする**。配置の最終ガードはポストリンクの
   residency チェック（`check_itcm_residency.py` / `check_dtcm_residency.py` を移植して維持する）。
-- コンソール = USB CDC: USB1_OTG_HS を FS（内蔵 PHY）動作。TinyUSB(dwc2) は rhport0 を
-  OTG_HS base + `OTG_HS_IRQHandler` にエイリアス（`tud_int_handler(0)`）。GPIO = PA11/PA12
-  `GPIO_AF10_OTG1_FS`、USB クロック PLL3Q 48 MHz。app = **`0483:5740`**（ST 汎用 VCP）→
-  `/dev/ttyACM0`。
-- LED0（赤）= PC13 / LED1（黄）= PF0 / USER ボタン = PF1（active-low）。
 - **オプションバイト / RDP / DBGMCU / SWD 端子（PA13/PA14）は絶対に触らない。**
 - リファレンス: RM0468 / PM0253 / 基板 schematic（`_ref/wio-lite-ai/`、read-only）。
 
@@ -563,5 +538,6 @@ RESETN に結合されている件）、復旧手順、そのボードのゲー�
 ボードの詳細は board README へリンクする。**同じ事実を 3 箇所に写経しない** — 増えるほど
 食い違って、どれが正か分からなくなる。
 
-現状: `boards/grove-vision-ai-v2/README.md` のみ存在。f746g-disco と wio-lite-ai は
-CLAUDE.md 側に説明が残っているので、別 Issue で board README へ移す。
+3 ボードとも `boards/<board>/README.md` を持つ（#23 で規約化、#24 で f746g-disco と
+wio-lite-ai を移設）。CLAUDE.md の各ボード節は**破ってはいけないことだけ**を残し、
+説明は board README を指す。

@@ -192,6 +192,7 @@ HW 依存の設計には、LGTM 前に成立性の証拠を要求する:
 - `_ref/wio-lite-ai/` — RM0468 / PM0253 / Wio Lite AI schematic / STM32Cube_FW_H7
 - `_ref/grove-vision-ai-v2/` — HX6538 datasheet / 回路図 / M55 TRM / WE2_S.svd
   （SDK 実物は `boards/grove-vision-ai-v2/sdk/`、こちらはビルド入力なので参照可）
+- `boards/<board>/README.md` — **そのボードの説明の正**（クロック・ピン・メモリマップ・
+  手順・ゲート・ハマりどころ）。3 ボードとも存在する
 - `boards/wio-lite-ai/boot/README.md` — ブートローダが app へ渡す実測クロック値と boot 書込手順
-  （boot 統合完了までは `../wio-lite-ai/boot/README.md`）
 - 統合元の実装: `../stm32f746g-disco/shell/` `../wio-lite-ai/shell/`（および両 `port/`）

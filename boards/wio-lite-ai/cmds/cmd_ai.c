@@ -916,9 +916,15 @@ static void ai_print_decode(struct cli_instance *sh, const struct bf_det *d, int
 		return;
 	}
 	ai_print_dets(sh, d, n);
-	cli_print(sh, "maxscore: %ld (raw x1000, pre-sigmoid)  cand: %d (pre-NMS)%s\r\n",
+	/* pass and kept are two different numbers (issue #47): pass is every anchor
+	 * over the threshold, kept is how many of those the 64-entry candidate list
+	 * held.  They differ only when the cap bound, and then the kept ones are the
+	 * highest-scoring -- but NMS saw only those, so the reading is worth having.
+	 * A single "cand" conflated them and could not say which had happened. */
+	cli_print(sh, "maxscore: %ld (raw x1000, pre-sigmoid)  pass: %d  kept: %d "
+	          "(pre-NMS, cap %d)%s\r\n",
 	          (long)(blazeface_last_max_score() * 1000.0f),
-	          blazeface_last_ncand(), suffix);
+	          blazeface_last_npass(), blazeface_last_nkept(), BF_MAX_CAND, suffix);
 }
 
 /*
@@ -928,8 +934,8 @@ static void ai_print_decode(struct cli_instance *sh, const struct bf_det *d, int
  * board rather than the host: run `ai bench 1` (which fills the input with a constant
  * pattern) and then `ai dets`, and the two diagnostics below say whether the model
  * responded at all.  That separation is the point -- `dets: 0` alone cannot tell a
- * dead model from a threshold set too high, so maxscore and cand are printed beside
- * it.  Returns -1 for a model whose outputs are not BlazeFace-shaped, which is what
+ * dead model from a threshold set too high, so maxscore and the two counts are printed
+ * beside it.  Returns -1 for a model whose outputs are not BlazeFace-shaped, which is what
  * the CONFIG_NN_BACKEND=null build gets, and it says so rather than printing zeros.
  */
 static int cmd_ai_dets(struct cli_instance *sh, int argc, char **argv)

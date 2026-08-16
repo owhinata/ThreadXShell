@@ -40,7 +40,7 @@ trap 'rm -rf "$out"' EXIT
 # rename or delete one board's dispatcher and its tests stop running while the run
 # still ends in "host tests passed" -- less coverage, same green.  A board with
 # test sources but no dispatcher is therefore an error, and a board with no test
-# directory at all genuinely pins nothing (f746g-disco today).
+# directory at all genuinely pins nothing (all three have one as of issue #47).
 boards=""
 if [ $# -gt 0 ]; then
     for b in "$@"; do
@@ -230,8 +230,8 @@ gcc $CFLAGS -I "$svc" \
 # ---- board-pinned tests --------------------------------------------------- *
 # Same toolchain flags and the same scratch dir, exported so a board test is built
 # exactly like a core one and cannot quietly diverge.  A board with no
-# test/host_tests.sh simply has none (f746g-disco today) -- that is reported, not
-# an error, so the suite stays green on a board that pins nothing.
+# test/host_tests.sh simply has none -- that is reported, not an error, so the
+# suite stays green on a board that pins nothing.
 export HOST_TEST_REPO="$repo"
 export HOST_TEST_OUT="$out"
 export HOST_TEST_CFLAGS="$CFLAGS"

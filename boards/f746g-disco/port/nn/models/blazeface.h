@@ -42,7 +42,32 @@ struct bf_det {
  */
 int blazeface_decode(struct nn_model *m, struct bf_det *out, int max);
 
-/** Diagnostic: highest raw (pre-sigmoid) score seen in the last decode. */
+/**
+ * Diagnostic: highest raw (pre-sigmoid) score seen in the last decode.
+ *
+ * Over ALL 896 anchors, always -- the scan is never cut short (issue #47).  A
+ * truncating scan reports the maximum of a prefix, and then "no faces, peak 0.2"
+ * means nothing.
+ */
 float blazeface_last_max_score(void);
+
+/**
+ * Diagnostic: how many anchors passed the threshold in the last decode, BEFORE
+ * NMS and BEFORE the candidate cap.  This is the honest count.
+ *
+ * Separates "the model responded to nothing" from "NMS collapsed everything into
+ * one box" -- two states the detection count alone cannot tell apart.
+ */
+int blazeface_last_npass(void);
+
+/**
+ * Diagnostic: how many of those were actually KEPT as candidates.  Less than
+ * blazeface_last_npass() means the cap bound; the kept set is still the
+ * highest-scoring ones, but NMS then only saw those.
+ */
+int blazeface_last_nkept(void);
+
+/** Candidates retained before NMS.  Reported so the cap is never a surprise. */
+#define BF_MAX_CAND 64
 
 #endif /* BLAZEFACE_H */

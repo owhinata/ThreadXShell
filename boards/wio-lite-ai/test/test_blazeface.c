@@ -195,7 +195,7 @@ static void test_decode_512(void)
 	/* algebraic sigmoid: 0.5 + 0.5*2/(1+2) = 0.8333 */
 	CHECK(CLOSE(out[0].score, 0.83333f));
 	CHECK(CLOSE(blazeface_last_max_score(), 2.0f));
-	CHECK(blazeface_last_ncand() == 1);
+	CHECK(blazeface_last_npass() == 1);
 
 	/* a non-zero centre offset shifts the box by dx/128, dy/128 */
 	publish_blazeface();
@@ -238,7 +238,7 @@ static void test_nms(void)
 	put512(8, 8, 0, 0.0f, 0.0f, 25.6f, 25.6f, 2.0f);
 	put512(8, 8, 1, 0.0f, 0.0f, 25.6f, 25.6f, 3.0f);
 	n = blazeface_decode(&stub_model, out, BF_MAX_DET);
-	CHECK(blazeface_last_ncand() == 2);
+	CHECK(blazeface_last_npass() == 2);
 	CHECK(n == 1);
 	CHECK(CLOSE(out[0].score, 0.5f + 0.5f * 3.0f / 4.0f));   /* the higher one */
 
@@ -304,9 +304,64 @@ static void test_threshold(void)
 	 * the whole point of the diagnostic: it separates "the model is dead" from
 	 * "the threshold is too high", which the detection count cannot. */
 	CHECK(CLOSE(blazeface_last_max_score(), 2.0f));
-	CHECK(blazeface_last_ncand() == 0);
+	CHECK(blazeface_last_npass() == 0);
 
 	blazeface_set_thresh_milli(BF_DEFAULT_THRESH_MILLI);
+}
+
+/*
+ * [!] THE REGRESSION THIS CASE EXISTS FOR (issue #47).
+ *
+ * More than BF_MAX_CAND anchors pass the threshold, and the SINGLE STRONGEST one is
+ * placed at the LAST anchor of the 8x8 group -- the last thing scanned.  A decoder
+ * that stops when its candidate buffer fills never reaches it: it reports a peak
+ * score from the prefix it saw, and hands NMS a candidate set that excludes the best
+ * face in the frame.  The boxes it returns are all real detections, which is exactly
+ * why the bug survived inspection here for as long as it did.
+ *
+ * Ported from the Grove decoder's test (#45), which is where the corrected decoder
+ * shipped first.
+ */
+static void test_cap_does_not_truncate(void)
+{
+	struct bf_det out[BF_MAX_DET];
+	const int n_pass_512 = 100;    /* well past BF_MAX_CAND on its own */
+	int n;
+
+	publish_blazeface();
+	blazeface_set_thresh_milli(BF_DEFAULT_THRESH_MILLI);
+
+	/* A hundred mid-strength candidates in the 16x16 group, which is scanned first
+	 * and would fill any fixed buffer before the 8x8 group is reached.  Written
+	 * straight into the arrays: what matters is the anchor INDEX, not the cell. */
+	for (int i = 0; i < n_pass_512; i++) {
+		scr512[i] = 1.0f;
+		box512[i * BOXC + 2] = 12.8f;
+		box512[i * BOXC + 3] = 12.8f;
+	}
+
+	/* One much stronger candidate at anchor 895: cell 63 of the 8x8 grid = (7,7),
+	 * anchor 5 of that cell.  Centre (7.5/8, 7.5/8). */
+	put384(7, 7, 5, 0.0f, 0.0f, 12.8f, 12.8f, 5.0f);
+
+	n = blazeface_decode(&stub_model, out, BF_MAX_DET);
+
+	/* The peak is the real maximum, not a prefix's.  Before the fix this was 1.0. */
+	CHECK(CLOSE(blazeface_last_max_score(), 5.0f));
+
+	/* Every anchor over the threshold is counted, uncapped. */
+	CHECK(blazeface_last_npass() == n_pass_512 + 1);
+
+	/* The kept set is capped, and says so separately. */
+	CHECK(blazeface_last_nkept() == BF_MAX_CAND);
+	CHECK(blazeface_last_npass() > blazeface_last_nkept());
+
+	/* And the strongest anchor survives the cap and comes out first.  Before the
+	 * fix the scan never reached it, so the top box was one of the mid ones. */
+	CHECK(n > 0);
+	CHECK(CLOSE(out[0].score, 0.5f + 0.5f * 5.0f / 6.0f));
+	CHECK(CLOSE(out[0].x + out[0].w * 0.5f, 7.5f / 8.0f));
+	CHECK(CLOSE(out[0].y + out[0].h * 0.5f, 7.5f / 8.0f));
 }
 
 /* NaN/Inf in either the score or the box must be dropped, not propagated. */
@@ -338,6 +393,7 @@ int main(void)
 	test_decode_384();
 	test_nms();
 	test_threshold();
+	test_cap_does_not_truncate();
 	test_nonfinite();
 	printf("test_blazeface: ok\n");
 	return 0;

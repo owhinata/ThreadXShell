@@ -50,7 +50,8 @@
 #include "nn_preproc.h"
 #include "blazeface.h"
 #include "camera.h"
-#include "cam_imx219.h"
+#include "cam_dp.h"
+#include "cam_sensor.h"
 #include "cam_lcd_sink.h"
 
 #include "tx_api.h"        /* tx_time_get(): ThreadX ticks, 1 ms here */

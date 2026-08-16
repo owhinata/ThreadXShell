@@ -8,7 +8,7 @@
 
 #include "cam_lcd_sink.h"
 #include "camera.h"
-#include "cam_imx219.h"
+#include "cam_dp.h"
 #include "frame.h"
 #include "frame_pipeline.h"
 #include "lcd_st7789.h"

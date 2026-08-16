@@ -13,7 +13,8 @@
 
 #include "blazeface.h"
 #include "camera.h"
-#include "cam_imx219.h"
+#include "cam_dp.h"
+#include "cam_sensor.h"
 #include "lcd_st7789.h"
 #include "nn_preproc.h"
 #include "npu.h"

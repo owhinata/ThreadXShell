@@ -13,7 +13,7 @@
  * WHAT THIS OWNS.  Lifecycle (bring-up as a transaction, one stop path), the
  * producer thread that turns datapath interrupts into published frames, and the
  * error state machine.  The sensor and datapath registers belong to
- * cam_imx219.h; the pixel packing to cam_convert.h; the ring and its sinks to
+ * cam_dp.h and cam_sensor.h; the pixel packing to cam_convert.h; the ring and
  * svc/frame_pipeline.h.
  *
  * THE FRAME PATH.  Datapath callback (interrupt) classifies the event and posts
@@ -27,7 +27,8 @@
 #include <stdint.h>
 
 #include "cam_convert.h"
-#include "cam_imx219.h"
+#include "cam_dp.h"
+#include "cam_sensor.h"
 #include "frame_pipeline.h"
 
 #ifdef __cplusplus

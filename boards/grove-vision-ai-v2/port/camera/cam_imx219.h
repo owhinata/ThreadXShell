@@ -4,10 +4,14 @@
  */
 /**
  * @file    cam_imx219.h
- * @brief   IMX219 sensor + HX6538 datapath glue, board-owned (issue #35).
+ * @brief   OV5647 sensor + HX6538 datapath glue, board-owned (issue #35).
  *
  * A port of the SDK's `tflm_yolov8_od/cis_sensor/cis_imx219` glue, narrowed to
  * the one configuration this firmware uses and given return values.
+ *
+ * [!] THE FILE NAME NO LONGER MATCHES ITS CONTENTS (issue #54).  The IMX219 was
+ * removed and the OV5647 is the only part this port drives; splitting the
+ * datapath out and renaming what remains is issue #36.
  *
  * WHY IT IS A PORT AND NOT A COMPILE OF THE SDK FILE.  The SDK tree is
  * read-only here (cmake/himax_sdk.cmake refuses a dirty checkout), and the
@@ -27,11 +31,11 @@
  * register tables (included from the SDK tree, so they stay in sync with the
  * pin) and the exact order of the bring-up calls.
  *
- * THE FIXED CONFIGURATION.  3280x2464 RAW10 over 2 MIPI lanes -> INP crop to
- * 3200x2400 -> 10:2 binning -> 640x480 -> 4:2 subsample -> 320x240 -> HW5x5
- * demosaic (BGGR, matching the HV mirror the sensor is programmed for) ->
- * WDMA3.  That is the `tflm_yolov8_od` SUBSAMPLE_2X path, i.e. a shipping
- * configuration rather than one invented here.
+ * THE FIXED CONFIGURATION.  640x480 RAW10 over 2 MIPI lanes -- the sensor does
+ * its own first reduction with on-chip binning -> no INP crop -> 4:2 binning ->
+ * 320x240 -> HW5x5 demosaic (BGGR, the part's native order with the mirror left
+ * off) -> WDMA3.  That is the donor's shipping OV5647 configuration rather than
+ * one invented here.
  *
  * THREADING.  Everything in this header is thread context only.  Nothing here
  * may be called from the datapath callback: these functions do I2C, spin on
@@ -65,29 +69,20 @@ extern "C" {
 /**
  * @brief  Ask each known part, at its own I2C address, who it is.
  *
- * Two sensors are supported and they are physically interchangeable in the same
- * connector, so which one is present is discovered rather than configured -- a
- * build option would mean a flash cycle to swap camera, to learn something the
- * sensor will simply tell you.  Called from the power-up path; the answer
- * selects the register tables, the geometry, the link rate and the default
- * Bayer phase.
+ * With one part in the table this is an identity CHECK rather than a choice,
+ * and it stays a loop over descriptors because that is the shape a second part
+ * would arrive in -- and because asking is still the only way to tell a module
+ * that is absent from one that is wired wrong.  Called from the power-up path;
+ * the answer selects the register tables, the geometry, the link rate and the
+ * default Bayer phase.
  */
 int cam_imx219_detect(void);
 
-/** @return the detected sensor's name ("imx219" / "ov5647"). */
+/** @return the detected sensor's name ("ov5647"). */
 const char *cam_imx219_sensor_name(void);
 
 /** @return the model ID the DETECTED sensor is expected to answer with. */
 uint16_t cam_imx219_sensor_id(void);
-
-/**
- * @return non-zero if the sensor runs its OWN auto-exposure.
- *
- * The OV5647 does; the IMX219 does not.  The port's exposure loop must stand
- * down for a part that is already running one, or the two fight -- ours reading
- * a mean the sensor has just corrected, and correcting it again.
- */
-int cam_imx219_sensor_has_own_ae(void);
 
 /** @return the WDMA3 landing buffer: CAM_RAW_BYTES of SRAM, 32-byte aligned. */
 uint8_t *cam_imx219_raw_buffer(void);
@@ -104,11 +99,11 @@ int cam_imx219_power_on(void);
 void cam_imx219_power_off(void);
 
 /**
- * @brief  Read the sensor's 16-bit model ID over I2C (0x0000/0x0001).
+ * @brief  Read the sensor's 16-bit model ID over I2C.
  *
  * The cheapest end-to-end proof that the module is powered, strapped to the
  * expected I2C address and talking.  Reads whichever part cam_imx219_detect()
- * selected -- IMX219 answers 0x0219, OV5647 answers 0x5647.
+ * selected -- the OV5647 answers 0x5647 at 0x300A/0x300B.
  */
 int cam_imx219_read_id(uint16_t *id);
 
@@ -135,23 +130,6 @@ int cam_imx219_sensor_init(void);
  * Values match DEMOS_PATTENMODE_E: 0 BGGR, 1 GBRG, 2 GRBG, 3 RGGB.  Takes
  * effect at the next datapath configuration, i.e. the next capture or preview.
  */
-/**
- * @brief  MIPI bits per pixel: 10 (default) or 8.
- *
- * [!] Not just bandwidth.  RAW10 on CSI-2 is PACKED -- four pixels in five
- * bytes -- so 8-bit samples require unpacking and then discarding, by a
- * receiver whose behaviour is undocumented here and unconfigurable through the
- * SDK.  RAW8 removes that step entirely: one byte per pixel, no packing, and
- * the reduction performed inside the sensor as a designed "10b-8b compress"
- * (datasheet section 5), which also drops its black level from 64 to 16.
- *
- * Sets the sensor's CSI_DATA_FORMAT and the receiver/transmitter pixel depth
- * together -- they must agree.  Takes effect at the next datapath
- * configuration.
- */
-int cam_imx219_set_depth(uint8_t bits);
-uint8_t cam_imx219_depth(void);
-
 void cam_imx219_set_bayer(uint8_t pattern);
 uint8_t cam_imx219_bayer(void);
 const char *cam_imx219_bayer_name(uint8_t pattern);
@@ -159,16 +137,17 @@ const char *cam_imx219_bayer_name(uint8_t pattern);
 /**
  * @brief  Set the sensor's exposure and gains at RUNTIME.
  *
- * There is no automatic exposure anywhere in this datapath -- the donor
- * applications feed the raw output to a neural network, which does not care --
- * so these are the fixed values the sensor is left at, and the right ones
- * depend on the scene.  Being able to change them from the console is what
- * keeps finding them from costing a flash cycle each, on a part whose external
- * NOR is rated ~100k of those.
+ * Being able to change them from the console is what keeps finding the right
+ * values from costing a flash cycle each, on a board whose external NOR is
+ * rated ~100k of those.
  *
- * @param lines  coarse integration time (register 0x015A/0x015B)
- * @param again  analogue gain, 0..232 (0x0157)
- * @param dgain  digital gain, 0x0100 == 1.0 (0x0158/0x0159)
+ * [!] On this part BOTH also switch its on-chip AEC/AGC to manual (0x3503), or
+ * the sensor's own loop writes over the value on its next frame and the command
+ * appears to do nothing.
+ *
+ * @param lines  integration time, in lines (0x3500..0x3502, sixteenths)
+ * @param again  analogue gain on the console's 0..232 curve (0x350A/0x350B)
+ * @param dgain  digital gain, 0x0100 == 1.0; no OV5647 equivalent, ignored
  */
 int cam_imx219_set_exposure(uint16_t lines);
 int cam_imx219_set_gains(uint8_t again, uint16_t dgain);
@@ -186,16 +165,6 @@ int cam_imx219_set_gains(uint8_t again, uint16_t dgain);
 int cam_imx219_set_sensor_auto(int on);
 
 /**
- * @brief  Whether this sensor keeps exposure and frame length where the IMX219
- *         does, which is what cam_imx219_set_frame_length() and
- *         cam_imx219_read_timing() address directly.
- *
- * Ask before offering either: on a part that does not, they are refused rather
- * than aimed at whatever those addresses happen to mean there.
- */
-int cam_imx219_has_timing_regs(void);
-
-/**
  * @brief  Re-read the sensor's exposure and gain into the reported values.
  *
  * A no-op for a part this port drives itself -- there the shadow copies ARE the
@@ -206,35 +175,11 @@ int cam_imx219_has_timing_regs(void);
  */
 int cam_imx219_refresh_exposure_gains(void);
 
-/** The values currently programmed (what this driver last wrote). */
+/** The values currently programmed (what this driver last wrote, or read). */
 void cam_imx219_get_exposure_gains(uint16_t *lines, uint8_t *again,
                                    uint16_t *dgain);
 
-/**
- * @brief  Set the frame length, which is what BOUNDS the exposure.
- *
- * [!] The mode table this port includes from the SDK never programs frame
- * length (0x0160/0x0161), so it sits at the sensor's own default -- and the
- * IMX219 clamps coarse integration time to `frame_length - 4`.  Asking for a
- * longer exposure than that does not fail, it silently does nothing, which is
- * a good way to spend a session concluding the camera is broken.
- *
- * Raising it lowers the frame rate proportionally.
- *
- * @return 0 on success; -1 on a sensor without IMX219-layout timing registers
- *         (see cam_imx219_has_timing_regs()).
- */
-int cam_imx219_set_frame_length(uint16_t lines);
-
-/**
- * @brief  Read the exposure and frame length BACK from the sensor over I2C.
- *
- * Thread context, and not safe while the producer is streaming -- the vendor
- * CIS driver has no locking of its own.  @return 0 on success.
- */
-int cam_imx219_read_timing(uint16_t *exposure, uint16_t *frame_length);
-
-/** Sensor stream on/off (register 0x0100).  Checked, unlike the donor's. */
+/** Sensor stream on/off.  Checked, unlike the donor's. */
 int cam_imx219_stream_on(void);
 int cam_imx219_stream_off(void);
 

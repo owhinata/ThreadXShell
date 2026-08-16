@@ -676,7 +676,7 @@ a leak fails the test), and a sweep after every step asserting the invariant
 `AGENTS.md` states -- **every line is either disabled, or wrapped AND
 registered**, never a third thing.
 
-## Camera (IMX219 / OV5647 over MIPI CSI)
+## Camera (OV5647 over MIPI CSI)
 
 ```
 camera probe             power the module and read its sensor ID
@@ -684,28 +684,33 @@ camera capture           one frame + per-channel statistics
 camera preview [frames]  live preview on the panel, Ctrl+C to stop
 camera raw               capture the Bayer mosaic and name the phase
 camera stats             producer and sink counters
-camera exposure [lines [frame_lines]]
-                         read/set the exposure (frame_lines: IMX219 only)
+camera exposure [lines]  read/set the sensor's exposure
 camera gain [a [d]]      read/set analogue / digital gain
 camera wb [r g b]        read/set the software white balance (256 = unity)
 camera black [n]         black level subtracted before the gain (pedestal 16)
 camera sat [n]           saturation, standing in for a colour matrix
-camera auto [on|off]     auto exposure + white balance
+camera auto [on|off]     the sensor's own AEC + this port's white balance
 camera gamma [on|off]    sRGB encode (off by default)
 camera bayer [mode]      demosaic phase
-camera depth [8|10]      MIPI bits per pixel
 ```
 
-A Raspberry Pi Camera v2.1 (IMX219) in the board's MIPI CSI connector.  The
-datapath is fixed, and it is the `tflm_yolov8_od` shipping configuration rather
-than one invented here:
+An OV5647 module in the board's MIPI CSI connector.  The datapath is fixed, and
+it is the donor's shipping OV5647 configuration rather than one invented here:
 
 ```
-IMX219 3280x2464 RAW10, 2 MIPI lanes
-  -> INP crop 3200x2400 -> 10:2 binning -> 640x480 -> 4:2 subsample -> 320x240
+OV5647 640x480 RAW10, 2 MIPI lanes (the sensor bins on chip)
+  -> no INP crop -> 4:2 binning -> 320x240
   -> HW5x5 demosaic (BGGR) -> WDMA3
   -> software pack to RGB565 -> svc/frame_pipeline -> ST7789
 ```
+
+**[!] The IMX219 was supported and was removed (issue #54).**  Both modules fit
+the same connector, but they were never a like-for-like choice: the IMX219
+streams its full 3280x2464 and makes the INP do a single 10.25x reduction, which
+is soft and aliases, and it has no auto-exposure of its own -- so the port
+carried a software AE loop purely for it.  That loop, `camera depth`, the frame
+length argument to `camera exposure` and the IMX219 register tables all went
+with it.  The history is in git if a part without on-chip AE ever arrives.
 
 `camera preview` rotates the panel to landscape first.  320x240 then maps 1:1
 with no CPU-side transpose, because MADCTL really rotates this panel over 4-wire
@@ -747,82 +752,75 @@ Two consequences, both of which look like bugs and are not:
   is green-heavy.  Measured here in room light: R 58 / G 66 / B 54, i.e. about
   1.2x green -- which is exactly what the eye reads as a cast.
 
-The white balance is in SOFTWARE because it has to be: the IMX219 exposes only
+The white balance is in SOFTWARE because it has to be: the sensor exposes only
 a global analogue gain and a global digital gain, and both move all three
 channels together, so neither can correct a cast.
 
-**Exposure is not capped, the FRAME stretches.**  The datasheet's rule is that
-with `frame_length_lines - 4 < coarse_integration_time` the effective frame
-length becomes `exposure + 4`, so a long exposure costs frame rate rather than
-being ignored.  The mode table never programs frame length, so it sits at the
-sensor default of 0x0AA8 (2728) and the donor's 0x0A40 (2624) is already close
-to it.  `camera exposure <lines> [frame_lines]` sets both.
-
-**Analogue gain is usually the better knob**, and the donor leaves a lot of it
-on the table: the IMX219's gain is `256 / (256 - again)`, so the shipped
-`again = 64` is only 1.33x against a usable range up to 232 (10.7x).  Roughly
-2-3x is what these measured means want, i.e. `camera gain 160`.
+**`camera exposure` and `camera gain` also switch the sensor to manual.**  The
+OV5647's on-chip AEC/AGC would otherwise write over the value on its next frame
+and the command would appear to do nothing, so both setters write 0x3503 as
+well.  The console's `again` is a 0..232 curve inherited from the IMX219 this
+port also drove; on this part it is mapped onto the sensor's linear
+16-means-1x, so one number means one thing in the command and in the report.
 
 `camera exposure` / `camera gain` / `camera wb` set all of this at runtime, and
 that is the point of them -- finding good values by editing a `#define` costs
 one flash cycle per guess on a part rated ~100k of them, with a manual
 press-the-button flow.  Once a set is known good, bake it into the defaults in
-`port/camera/cam_imx219.c` (exposure/gain) and `camera.c` (the white balance).
-`camera capture` deliberately reports the RAW planes, before the white balance,
-so its statistics stay evidence about the sensor rather than about the gains.
+`camera.c` (the white balance).  `camera capture` deliberately reports the RAW
+planes, before the white balance, so its statistics stay evidence about the
+sensor rather than about the gains.
 
-### Auto exposure and auto white balance
+### `camera auto`: the sensor's exposure, this port's white balance
 
-The datapath has NEITHER, because the applications it was built for feed the
-output to a neural network which does not care what the picture looks like.  A
-human preview does: with fixed exposure and gains, a frame is correct only in
-the one lighting condition somebody last tuned it in.
+The datapath provides NEITHER an exposure loop nor a white balance, because the
+applications it was built for feed the output to a neural network which does not
+care what the picture looks like.  A human preview does.  The two halves come
+from different places:
 
-**Swapping the sensor does not change this** -- the loops are missing from the
-PATH, not from the part -- which is why `port/camera/cam_auto.c` exists rather
-than a different camera module.  Both are on by default:
+- **Exposure** is the OV5647's own on-chip AEC/AGC.  `camera auto on/off` writes
+  0x3503 to hand it over or take it back, and the producer thread reads the
+  sensor's current values back every few frames so the console reports what is
+  really in the part rather than what was last written by hand.
+- **White balance** is this port's, in software: grey world, green held as the
+  reference so the other two move toward it rather than all three drifting in
+  brightness.  Damped and clamped, because grey world is simply wrong for a
+  frame filled with one colour and the clamp is what stops being wrong from
+  being catastrophic.
 
-- **Exposure**: green-plane mean toward a target, gain moved before exposure
-  (gain is free, exposure costs frame rate and motion blur), damped with a
-  deadband.  Undamped, against a sensor that applies a change a frame or two
-  later, an exposure loop is an oscillator; without a deadband it hunts for
-  ever on sensor noise.
-- **White balance**: grey world, green held as the reference so the other two
-  move toward it rather than all three drifting in brightness.  Damped and
-  clamped, because grey world is simply wrong for a frame filled with one
-  colour and the clamp is what stops being wrong from being catastrophic.
+**[!] There is no software exposure loop any more (issue #54).**  There was one,
+for the IMX219, which has no AEC of its own; it went with that sensor.  Two
+exposure loops on one part do not average out -- ours would measure a mean the
+sensor had already corrected and correct it again -- so on a part that has one,
+standing down was always the behaviour.
 
 `camera auto off` before any measurement that assumes the sensor is holding
 still -- comparing Bayer phases, or reading `camera capture` twice -- since a
 loop adjusting the exposure in between is a variable nobody asked for.
 
-`test/test_cam_auto.c` runs both laws against a simulated sensor for a few
-hundred iterations: convergence from six starting brightnesses, no movement at
-all once settled, and no runaway on a black frame.  Those are failure modes
-that all look fine in a single capture and are miserable in a live preview.
+`test/test_cam_auto.c` runs the white balance against simulated means for a few
+hundred iterations: it settles, the corrected channels end up close to equal,
+the gains stay inside their clamps, and a black frame does not move them.  Those
+are failure modes that look fine in a single capture and are miserable in a live
+preview.
 
-### Two sensors, and what is NOT shared between them
+### The sensor seam
 
-The IMX219 and the OV5647 modules fit the same connector, so the port asks over
-I2C which one is there rather than taking a build option -- a build flag would
-cost a flash cycle to swap camera, on a part rated ~100k of them.
+The port asks over I2C which part is fitted rather than taking a build option --
+a build flag would cost a flash cycle to swap camera, on a board rated ~100k of
+them.  With one part in the table that is an identity check rather than a
+choice, and it stays a table because that is the shape a second part arrives in.
 
-What differs is more than a register table, and the split is the reason
-`cam_imx219.c` dispatches through per-sensor function pointers:
-
-- **The OV5647 runs its own AEC/AGC on chip; the IMX219 does not.**  So
-  `camera auto` means two different things, and on the OV5647 it also has to
-  write the sensor (0x3503).  Ours stands down for the on-chip loop when there
-  is one -- two exposure loops on one sensor hunt against each other.
-- **Neither exposure nor gain has the same layout.**  The OV5647's exposure is
-  20 bits in SIXTEENTHS of a line across 0x3500..0x3502, and its gain is 10 bits
-  where 16 means 1x.  The IMX219's are 0x015a/0x015b and 0x0157..0x0159.
-- **Frame length and its read-back are IMX219-only.**  `camera exposure <lines>
-  <frame_lines>` and the `sensor says` line address 0x0160/0x0161 directly; the
-  OV5647 keeps VTS at 0x380e/0x380f.  Both are REFUSED on a sensor that does not
-  have them rather than aimed at whatever those addresses mean there -- SCCB
-  acknowledges a write to an unimplemented register, so an unguarded one would
-  report success and change something else.  Same rule as `camera depth`.
+`cam_imx219.c` dispatches exposure, gain, auto and read-back through per-sensor
+function pointers, and that seam stays even at one entry: what differs between
+parts is more than a register table.  The OV5647's exposure is 20 bits in
+SIXTEENTHS of a line across 0x3500..0x3502 and its gain is 10 bits where 16
+means 1x; the IMX219 kept them at 0x015a/0x015b and 0x0157..0x0159.  Writing one
+part's addresses to another does not fail -- SCCB acknowledges a write to an
+unimplemented register -- so an unguarded call would report success and change
+something else.  That is why the frame-length argument and `camera depth` were
+removed with the IMX219 rather than being re-aimed at the OV5647's VTS pair at
+0x380e/0x380f.
 
 **[!] The auto mode is re-applied at every bring-up, not just when asked for.**
 A bring-up writes the mode table again, and on the OV5647 that table is what
@@ -898,9 +896,10 @@ and blue were caught: at unity saturation a swap is a slightly odd tint, and at
 
 The 10 -> 8 reduction inside the MIPI receiver is undocumented and
 unconfigurable, so the natural suspicion is that it damages the image.  It does
-not.  `camera depth 8` switches the sensor to RAW8 -- one byte per pixel, no
-CSI-2 packing at all, with the reduction done inside the sensor as its own
-designed "10b-8b compress" -- and the result is measurably WORSE:
+not.  **This was measured on the IMX219, with a `camera depth` command that no
+longer exists** (both went in issue #54) -- switching that sensor to RAW8, one
+byte per pixel with no CSI-2 packing at all and the reduction done inside the
+sensor as its own designed "10b-8b compress", made the result measurably WORSE:
 
 | | RAW10 | RAW8 |
 |---|---|---|
@@ -911,14 +910,16 @@ designed "10b-8b compress" -- and the result is measurably WORSE:
 Same Bayer phase, same `mosaic` figures, about 2.3x less signal and less colour.
 If the receiver's RAW10 unpacking were mangling anything, removing the packing
 entirely would have improved matters dramatically; it did the opposite.  **The
-RAW10 path is not the problem.**  RAW10 stays the default.
+RAW10 path is not the problem**, and that is the part of this worth keeping:
+RAW10 is what the port sends, and there is now nothing to switch.
 
-Switching depth takes THREE registers, not two: `CSI_DATA_FORMAT`
+Recorded because it cost a flash cycle to learn, and because of the trap in
+doing it: switching depth took THREE registers, not two -- `CSI_DATA_FORMAT`
 (0x018C/0x018D) **and `OPPXCK_DIV` (0x0309)**, which the datasheet's clock tree
-requires to equal the bits per pixel.  Changing the format alone leaves the
-sensor clocking pixels at the 10-bit rate while announcing 8-bit ones, and the
-datapath simply fails to start.  (The upstream Linux imx219 RAW8 patch has the
-same omission; its review raised 0x0309 for this reason.)
+requires to equal the bits per pixel.  Changing the format alone left the sensor
+clocking pixels at the 10-bit rate while announcing 8-bit ones, and the datapath
+simply failed to start.  (The upstream Linux imx219 RAW8 patch has the same
+omission; its review raised 0x0309 for this reason.)
 
 ### [!] Is the demosaic right?  Two different questions
 
@@ -981,30 +982,8 @@ saturation was turned up -- the phase default had come from the donor cfg's
 mirror-to-phase table and was RGGB, where the part is natively BGGR (Linux's
 ov5647 driver reports SBGGR10 for the same reason).
 
-Both sensors default to BGGR now, and `camera bayer` overrides stick across a
+The sensor defaults to BGGR, and `camera bayer` overrides stick across a
 re-bring-up so a bench measurement is not quietly undone by a fault recovery.
-
-#### Settled: the IMX219 module is BGGR
-
-Measured, on a scene the operator confirmed was predominantly red:
-
-```
-camera raw ->  (0,0) 43.93   (1,0) 49.69   (0,1) 49.68   (1,1) 49.25
-```
-
-A red scene must show a high red and a low blue.  Under BGGR that reads
-B 43.93 / G 49.7 / R 49.25 -- red up against the greens, blue clearly lowest,
-which is what a red scene looks like.  Under RGGB it would read R 43.93 as the
-LOWEST channel, which a red scene cannot do.  The demosaiced captures agree:
-`bayer bggr` gives R 48.91 > B 43.74, `bayer rggb` gives R 44.08 < B 49.67.
-
-It also explains why the automatic phase naming had almost no margin (0.44):
-a red scene pushes the red position right up against the greens, which is
-exactly the case the margin line warns about.
-
-And it matches the theory, which is worth stating because the two arrived
-independently: the IMX219's native order is RGGB, this port programs an HV
-mirror (0x0172 = 0x03), and mirroring RGGB in both axes gives BGGR.
 
 ### Bit depth: there is nothing to configure
 
@@ -1022,11 +1001,9 @@ If that reduction ever took the wrong end of the word, `camera raw` is what
 would show it: a smooth scene would come back as noise instead of a mosaic with
 two clearly-highest green positions.
 
-The default phase (BGGR) follows the donor's mapping from the sensor's HV
-mirror setting, and that mapping deserves suspicion here: the donor's shipping
-build selects the **OV5647**, not the IMX219, and the INP does 10:2 binning and
-4:2 subsampling **before** the demosaic, either of which can move the effective
-phase.  So the phase is runtime-settable:
+The default phase (BGGR) is the part's native order with the mirror left off,
+and it still deserves a way to be checked: the INP bins 4:2 **before** the
+demosaic, which can move the effective phase.  So the phase is runtime-settable:
 
 ```
 camera bayer bggr|gbrg|grbg|rggb

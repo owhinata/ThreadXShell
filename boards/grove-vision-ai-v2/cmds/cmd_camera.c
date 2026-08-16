@@ -4,7 +4,7 @@
  */
 /**
  * @file    cmd_camera.c
- * @brief   `camera` shell command: IMX219 bring-up, capture and live preview
+ * @brief   `camera` shell command: OV5647 bring-up, capture and live preview
  *          (Grove Vision AI V2, issue #35 / M-G3b).
  *
  * Registered LOCALLY on this board, like `lcd`: the other two boards have their
@@ -87,9 +87,8 @@ static int cmd_camera_probe(struct cli_instance *sh, int argc, char **argv)
 	cli_print(sh, "chip     : %08lx%s\r\n",
 	          (unsigned long)info.chip_version,
 	          info.rev_c ? " (rev C: per-frame MIPI bounce)" : "");
-	cli_print(sh, "sensor   : %s (id 0x%04X)%s\r\n",
-	          cam_imx219_sensor_name(), info.sensor_id,
-	          cam_imx219_sensor_has_own_ae() ? ", on-chip AEC" : "");
+	cli_print(sh, "sensor   : %s (id 0x%04X, on-chip AEC)\r\n",
+	          cam_imx219_sensor_name(), info.sensor_id);
 	cli_print(sh, "frame    : %ux%u planar B/G/R, %lu bytes\r\n",
 	          (unsigned)CAM_FRAME_WIDTH, (unsigned)CAM_FRAME_HEIGHT,
 	          (unsigned long)CAM_RAW_BYTES);
@@ -449,7 +448,7 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
  * a set is known good it can be baked into the defaults in cam_imx219.c.
  *
  * The white balance is separate from the gains and has to be, because the
- * IMX219 has no per-channel gain registers -- analogue and digital gain both
+ * sensor has no per-channel gain registers -- analogue and digital gain both
  * move all three channels together, so neither can correct a cast.  A cast is
  * the normal state of an uncorrected Bayer sensor: twice as many green
  * photosites, and greener filters.
@@ -472,12 +471,21 @@ static void cam_note_queued(struct cli_instance *sh, int argc)
 		              "value above is the previous one)\r\n");
 }
 
+/*
+ * [!] ONE ARGUMENT (issue #54).  This used to take a frame length too, because
+ * the IMX219 keeps one at 0x0160/0x0161 and clamps its exposure against it.
+ * The OV5647 keeps neither quantity where the IMX219 does -- its frame length
+ * is the VTS pair at 0x380E/0x380F -- so with the IMX219 gone there is nothing
+ * behind that argument, and it went with the sensor rather than becoming a
+ * second address this port would have to be careful about.  (SCCB acknowledges
+ * a write to an address that means something else, so "supported" and "lands
+ * somewhere unintended" look identical from here.)
+ */
 static int cmd_camera_exposure(struct cli_instance *sh, int argc, char **argv)
 {
-	uint16_t lines, dgain, rb_exp = 0u, rb_frame = 0u;
+	uint16_t lines, dgain;
 	uint8_t again;
 	uint32_t v;
-	int rb_rc;
 
 	if (argc > 1) {
 		if (cli_parse_u32(argv[1], &v) != 0 || v > 0xFFFFu) {
@@ -490,52 +498,9 @@ static int cmd_camera_exposure(struct cli_instance *sh, int argc, char **argv)
 			return 1;
 		}
 	}
-	if (argc > 2) {
-		if (cli_parse_u32(argv[2], &v) != 0 || v < 16u || v > 0xFFFFu) {
-			cli_error(sh, "camera: frame length must be 16..65535 "
-			              "lines\r\n");
-			return 1;
-		}
-		if (camera_set_frame_length((uint16_t)v) != CAM_OK) {
-			cli_error(sh, "camera: frame length write failed\r\n");
-			return 1;
-		}
-	}
 
 	cam_imx219_get_exposure_gains(&lines, &again, &dgain);
 	cli_print(sh, "exposure : %lu lines\r\n", (unsigned long)lines);
-
-	/*
-	 * The sensor's own values, read back over I2C.
-	 *
-	 * [!] A long exposure is NOT clamped -- an earlier version of this
-	 * command said it was, which was wrong.  The datasheet's rule is that
-	 * the FRAME grows to fit: with frame_length_lines - 4 < exposure, the
-	 * effective frame length becomes exposure + 4.  So the cost of a long
-	 * exposure is frame rate, not a silently ignored write.  The mode table
-	 * never programs frame length, so it sits at the sensor default of
-	 * 0x0AA8 (2728) and the donor's 0x0A40 (2624) is already close to it.
-	 */
-	rb_rc = camera_read_timing(&rb_exp, &rb_frame);
-	if (rb_rc == CAM_OK) {
-		cli_print(sh, "  sensor says : exposure %lu, frame length %lu"
-		              "\r\n",
-		          (unsigned long)rb_exp, (unsigned long)rb_frame);
-		if (lines + 4u > rb_frame)
-			cli_print(sh, "  (exposure exceeds the frame; the "
-			              "sensor stretches it to %lu lines, so "
-			              "the frame rate drops)\r\n",
-			          (unsigned long)(lines + 4u));
-	} else if (rb_rc == CAM_ERR_BUSY) {
-		cli_print(sh, "  (sensor read-back needs an idle camera; stop "
-		              "the preview to see the clamped value)\r\n");
-	} else {
-		cli_print(sh, "  (the %s does not keep exposure and frame length "
-		              "where the IMX219 does,\r\n"
-		              "   so there is nothing to read back here)\r\n",
-		          cam_imx219_sensor_name());
-	}
-
 	cam_note_queued(sh, argc);
 	return 0;
 }
@@ -612,44 +577,10 @@ static int cmd_camera_wb(struct cli_instance *sh, int argc, char **argv)
 	camera_get_wb(&wb);
 	cli_print(sh, "wb       : r %u  g %u  b %u  (256 = unity)\r\n",
 	          wb.r, wb.g, wb.b);
-	cli_print(sh, "           (applied in software: the IMX219 has no "
+	cli_print(sh, "           (applied in software: the sensor has no "
 	              "per-channel gain.  `camera black`\r\n"
 	              "            for the pedestal, `camera auto` drives these "
 	              "while a stream runs)\r\n");
-	return 0;
-}
-
-/*
- * MIPI bit depth.  The reason this is reachable from the console is in
- * cam_imx219.h: RAW10 is a PACKED CSI-2 format and how this receiver turns it
- * into 8-bit samples is undocumented and unconfigurable, whereas RAW8 has no
- * packing and lets the sensor do the reduction with its own designed
- * compression.  Being able to A/B them on one flash is the point.
- */
-static int cmd_camera_depth(struct cli_instance *sh, int argc, char **argv)
-{
-	uint32_t v;
-
-	if (argc > 1) {
-		if (cli_parse_u32(argv[1], &v) != 0 || (v != 8u && v != 10u)) {
-			cli_error(sh, "camera: depth must be 8 or 10\r\n");
-			return 1;
-		}
-		if (camera_set_depth((uint8_t)v) != CAM_OK) {
-			cli_error(sh, "camera: depth write failed (try "
-			              "`camera probe` first)\r\n");
-			return 1;
-		}
-	}
-
-	cli_print(sh, "depth    : %u bit%s   [%s]\r\n", cam_imx219_depth(),
-	          cam_imx219_depth() == 8u ? " (RAW8: unpacked, sensor does the "
-	                                     "10b-8b compress)"
-	                                   : " (RAW10: packed 4px/5B)",
-	          cam_imx219_sensor_name());
-	if (argc > 1)
-		cli_print(sh, "           (takes effect at the next `camera "
-		              "capture` or `camera preview`)\r\n");
 	return 0;
 }
 
@@ -684,10 +615,8 @@ static int cmd_camera_auto(struct cli_instance *sh, int argc, char **argv)
 	cam_imx219_get_exposure_gains(&lines, &again, &dgain);
 	camera_get_wb(&wb);
 
-	cli_print(sh, "auto     : %s  (%s)\r\n", camera_auto() ? "on" : "off",
-	          cam_imx219_sensor_has_own_ae()
-	                  ? "exposure by the sensor's own AEC, wb here"
-	                  : "exposure and wb both here");
+	cli_print(sh, "auto     : %s  (exposure by the sensor's own AEC, "
+	              "wb here)\r\n", camera_auto() ? "on" : "off");
 	cli_print(sh, "  now    : exposure %lu  again %u  wb r %u b %u\r\n",
 	          (unsigned long)lines, again, wb.r, wb.b);
 	if (camera_auto())
@@ -825,17 +754,13 @@ CLI_SUBCMD_SET_CREATE(camera_subcmds,
 	        cmd_camera_raw),
 	CLI_CMD(stats, NULL, "producer and sink counters", cmd_camera_stats),
 	CLI_CMD_ARG_USAGE(exposure, NULL,
-	                  "read or set exposure (and the frame length that "
-	                  "caps it)",
-	                  "[lines [frame_lines]]", cmd_camera_exposure, 1, 2),
+	                  "read or set the sensor's exposure",
+	                  "[lines]", cmd_camera_exposure, 1, 1),
 	CLI_CMD_ARG_USAGE(gain, NULL,
 	                  "read or set analogue / digital gain",
 	                  "[again [dgain]]", cmd_camera_gain, 1, 2),
-	CLI_CMD_ARG_USAGE(depth, NULL,
-	                  "MIPI bits per pixel: 10 (packed) or 8 (unpacked)",
-	                  "[8|10]", cmd_camera_depth, 1, 1),
 	CLI_CMD_ARG_USAGE(auto, NULL,
-	                  "auto exposure + white balance (on by default)",
+	                  "the sensor's own AEC + this port's white balance",
 	                  "[on|off]", cmd_camera_auto, 1, 1),
 	CLI_CMD_ARG_USAGE(black, NULL,
 	                  "black level subtracted before the gain (pedestal 16)",
@@ -856,5 +781,5 @@ CLI_SUBCMD_SET_CREATE(camera_subcmds,
 	CLI_SUBCMD_SET_END);
 
 CLI_CMD_REGISTER(camera, camera_subcmds,
-                 "IMX219 camera: bring-up, capture, live preview",
+                 "OV5647 camera: bring-up, capture, live preview",
                  NULL, 1, 0);

@@ -4,7 +4,7 @@
  */
 /**
  * @file    camera.h
- * @brief   IMX219 camera driver for Grove Vision AI V2 (issue #35).
+ * @brief   OV5647 camera driver for Grove Vision AI V2 (issue #35).
  *
  * Same entry-point names and the same error codes as the f746g-disco and
  * wio-lite-ai camera drivers, so the shell layer reads identically across all
@@ -63,7 +63,7 @@ void camera_create_objects(void);
 /** Snapshot of what `camera probe` reports. */
 struct camera_probe_info {
 	uint32_t chip_version; /**< SCU chip id; 0 if unreadable            */
-	uint16_t sensor_id;    /**< 0x0219 (IMX219) or 0x5647 (OV5647)      */
+	uint16_t sensor_id;    /**< 0x5647 (OV5647)                         */
 	int      rev_c;        /**< chip needs the per-frame MIPI bounce    */
 };
 
@@ -142,7 +142,7 @@ void camera_stream_stats(struct camera_stats *out);
  *
  * Unity by default, so an unbalanced preview shows what the sensor produced --
  * which is what keeps `camera capture`'s channel statistics meaning something.
- * The IMX219 has no per-channel gain registers, so a colour cast cannot be
+ * The sensor has no per-channel gain registers, so a colour cast cannot be
  * corrected at the sensor; see cam_convert.h.
  */
 /**
@@ -158,32 +158,17 @@ int camera_set_exposure(uint16_t lines);
 int camera_set_gains(uint8_t again, uint16_t dgain);
 
 /**
- * @brief  MIPI bits per pixel, 8 or 10 (see cam_imx219.h for why it matters).
- *
- * The receiver's half is programmed at the next datapath configuration, so a
- * change asked for mid-stream fully lands only on the next start.
- */
-int camera_set_depth(uint8_t bits);
-
-/** Set the frame length (see cam_imx219.h). */
-int camera_set_frame_length(uint16_t lines);
-
-/**
- * @brief  Read exposure and frame length back FROM the sensor.
- *
- * @return CAM_ERR_BUSY while a stream runs -- the read is I2C and the producer
- *         owns that driver.
- */
-int camera_read_timing(uint16_t *exposure, uint16_t *frame_length);
-
-/**
  * @brief  Auto exposure and auto white balance, on by default.
  *
  * The datapath provides neither, so a fixed setting is correct only for the
- * lighting it was tuned in.  Turn them OFF before taking measurements that
- * assume the sensor is holding still -- comparing Bayer phases, or reading
- * `camera capture` statistics twice -- since a loop adjusting the exposure
- * between two captures is a variable nobody asked for.
+ * lighting it was tuned in.  "Auto exposure" here means the SENSOR's own
+ * AEC/AGC (the port's software loop went with the IMX219 in issue #54); the
+ * white balance is this port's, in software, on the packed frame.
+ *
+ * Turn them OFF before taking measurements that assume the sensor is holding
+ * still -- comparing Bayer phases, or reading `camera capture` statistics twice
+ * -- since a loop adjusting the exposure between two captures is a variable
+ * nobody asked for.
  *
  * Switching this also switches the sensor's own AEC/AGC where it has one, so it
  * writes I2C: queued for the producer while a stream runs (CAM_OK means queued,

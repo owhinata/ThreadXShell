@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * IMX219 camera driver: lifecycle, producer thread and error state machine
+ * OV5647 camera driver: lifecycle, producer thread and error state machine
  * (issue #35).  See camera.h for the shape of the frame path.
  *
  * THE THREE THINGS THIS FILE IS CAREFUL ABOUT
@@ -273,10 +273,11 @@ static struct cam_wb cam_wb = { CAM_WB_UNITY, CAM_WB_UNITY, CAM_WB_UNITY,
                                 CAM_SAT_DEFAULT };
 
 /*
- * Auto exposure and auto white balance, ON by default.
+ * Auto mode, ON by default: the sensor's own AEC/AGC plus this port's software
+ * white balance.
  *
- * The datapath has neither, so without this a preview is correct only in the
- * one lighting condition somebody last tuned it for -- which is not a preview,
+ * The datapath provides neither, so without this a preview is correct only in
+ * the one lighting condition somebody last tuned it for -- which is not a preview,
  * it is a photograph of a settings file.  Off is available for measurements
  * that need the sensor held still (`camera capture` statistics, comparing two
  * Bayer phases), which is the one case where a loop quietly changing the
@@ -316,14 +317,10 @@ static volatile uint8_t  cam_tune_req;      /* bit0 exposure, bit1 gains */
 static volatile uint16_t cam_tune_exposure;
 static volatile uint8_t  cam_tune_again;
 static volatile uint16_t cam_tune_dgain;
-static volatile uint16_t cam_tune_frame_length;
-static volatile uint8_t  cam_tune_depth;
 static volatile uint8_t  cam_tune_auto;
 
 #define CAM_TUNE_EXPOSURE  0x1u
 #define CAM_TUNE_GAINS     0x2u
-#define CAM_TUNE_FRAME_LEN 0x4u
-#define CAM_TUNE_DEPTH     0x8u
 #define CAM_TUNE_AUTO      0x10u
 
 /* Producer side: take whatever is pending and apply it.  Thread context, and
@@ -347,14 +344,6 @@ static void cam_apply_tuning(void)
 		(void)cam_imx219_set_exposure(cam_tune_exposure);
 	if ((req & CAM_TUNE_GAINS) != 0u)
 		(void)cam_imx219_set_gains(cam_tune_again, cam_tune_dgain);
-	if ((req & CAM_TUNE_FRAME_LEN) != 0u)
-		(void)cam_imx219_set_frame_length(cam_tune_frame_length);
-	/* The sensor half only.  The receiver's depth is programmed from the
-	 * same variable at the next datapath configuration, and the two must
-	 * agree -- so a depth change asked for mid-stream only really lands
-	 * when the stream is restarted. */
-	if ((req & CAM_TUNE_DEPTH) != 0u)
-		(void)cam_imx219_set_depth(cam_tune_depth);
 	/* The sensor half of `camera auto` -- taking a part's own AEC/AGC off is
 	 * an I2C write like any other, and the console may not make it itself
 	 * while this thread owns the CIS driver. */
@@ -718,7 +707,7 @@ static int cam_bringup(void)
 
 	cam_state = CAM_ST_READY;
 	cam_datapath_configured = 0u;
-	LOG_INF("imx219 up (chip %08lx%s)",
+	LOG_INF("camera up (chip %08lx%s)",
 	        (unsigned long)info.chip_version, cam_rev_c ? ", rev C" : "");
 	return CAM_OK;
 }
@@ -919,17 +908,23 @@ static void cam_reassert_wraps(void)
 }
 
 /*
- * Steer the exposure and the white balance from the frame just published.
+ * Steer the white balance from the frame just published, and re-read what the
+ * sensor's own exposure loop has done.
  *
- * Producer thread, between frames.  The sensor writes go through the same
+ * Producer thread, between frames.  The sensor I2C goes through the same
  * cam_imx219_* calls the console uses -- this thread owns the CIS driver while
  * a stream runs, which is precisely why the console's own tuning commands queue
  * their writes for it rather than making them directly.
+ *
+ * [!] THE EXPOSURE HALF IS GONE (issue #54).  This used to run a software AE
+ * loop for a sensor that had none; the part that needed it was the IMX219, and
+ * it was removed.  The OV5647's on-chip AEC owns the exposure, so what is left
+ * here is reading it back and the white balance, which the datapath has never
+ * provided at all.
  */
 static void cam_auto_step(void)
 {
 	uint32_t means[3];
-	struct cam_ae ae;
 
 	if (!cam_auto_on)
 		return;
@@ -962,30 +957,13 @@ static void cam_auto_step(void)
 			means[c] = (means[c] > ped) ? (means[c] - ped) : 0u;
 	}
 
-	/*
-	 * [!] Stand down for a sensor that runs its own AEC.  Two exposure
-	 * loops on one sensor do not average out -- ours measures a mean the
-	 * sensor has already corrected and corrects it again, and the pair
-	 * hunt against each other.  The OV5647 has on-chip AEC/AGC, which is
-	 * why the donor never writes it an exposure.
-	 */
-	/* Whoever is driving the exposure, the reported values have to follow
-	 * it.  For a sensor running its own AEC that means reading the sensor,
-	 * and this thread is the only one that may: it owns the CIS driver
-	 * while a stream runs, which is why the console cannot do it itself. */
+	/* The sensor is driving the exposure, so the reported values have to
+	 * follow it, and this thread is the only one that may read them: it owns
+	 * the CIS driver while a stream runs, which is why the console cannot do
+	 * it itself.  Without this the console reports whatever was last written
+	 * by hand while the real exposure moves underneath, which makes a working
+	 * auto-exposure look broken. */
 	(void)cam_imx219_refresh_exposure_gains();
-
-	if (!cam_imx219_sensor_has_own_ae()) {
-		cam_imx219_get_exposure_gains(&ae.exposure, &ae.again, NULL);
-		/* The target follows the output encoding: the loop steers what
-		 * the panel shows, and the curve is what sits between. */
-		if (cam_ae_step(means[1],
-		                cam_wb.gamma ? CAM_AE_TARGET_ENCODED_X100
-		                             : CAM_AE_TARGET_LINEAR_X100, &ae)) {
-			(void)cam_imx219_set_exposure(ae.exposure);
-			(void)cam_imx219_set_gains(ae.again, 0x0100u);
-		}
-	}
 
 	/* White balance is software, so it takes effect on the NEXT frame this
 	 * thread packs -- no sensor round trip, no delay to design around. */
@@ -1498,69 +1476,6 @@ int camera_set_gains(uint8_t again, uint16_t dgain)
 	if (rc != CAM_OK)
 		return rc;
 	rc = (cam_imx219_set_gains(again, dgain) == 0) ? CAM_OK : CAM_ERR_HAL;
-	cam_api_exit();
-	return rc;
-}
-
-int camera_set_depth(uint8_t bits)
-{
-	int rc;
-
-	if (cam_state == CAM_ST_STREAMING) {
-		cam_tune_depth = bits;
-		cam_tune_req |= CAM_TUNE_DEPTH;
-		return CAM_OK;
-	}
-
-	rc = cam_api_enter_up();
-	if (rc != CAM_OK)
-		return rc;
-	rc = (cam_imx219_set_depth(bits) == 0) ? CAM_OK : CAM_ERR_HAL;
-	cam_api_exit();
-	return rc;
-}
-
-int camera_set_frame_length(uint16_t lines)
-{
-	int rc;
-
-	/* Before the queue, not after it: a request the sensor has no register
-	 * for must be refused to the caller's face.  Queueing it would report
-	 * success to the console and drop it in the producer, where the return
-	 * value has nobody to go to. */
-	if (!cam_imx219_has_timing_regs())
-		return CAM_ERR_HAL;
-
-	if (cam_state == CAM_ST_STREAMING) {
-		cam_tune_frame_length = lines;
-		cam_tune_req |= CAM_TUNE_FRAME_LEN;
-		return CAM_OK;
-	}
-
-	rc = cam_api_enter_up();
-	if (rc != CAM_OK)
-		return rc;
-	rc = (cam_imx219_set_frame_length(lines) == 0) ? CAM_OK : CAM_ERR_HAL;
-	cam_api_exit();
-	return rc;
-}
-
-int camera_read_timing(uint16_t *exposure, uint16_t *frame_length)
-{
-	int rc;
-
-	/* Read-back is I2C, so it follows the same rule as the writes: while a
-	 * stream runs the producer owns the CIS driver.  Refuse rather than
-	 * interleave -- an unreliable read here is worse than none, since the
-	 * whole point of it is to settle whether a value took. */
-	if (cam_state == CAM_ST_STREAMING)
-		return CAM_ERR_BUSY;
-
-	rc = cam_api_enter_up();
-	if (rc != CAM_OK)
-		return rc;
-	rc = (cam_imx219_read_timing(exposure, frame_length) == 0) ? CAM_OK
-	                                                           : CAM_ERR_HAL;
 	cam_api_exit();
 	return rc;
 }

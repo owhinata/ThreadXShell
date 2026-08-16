@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * IMX219 + HX6538 datapath glue (issue #35).  See cam_imx219.h for what this
+ * OV5647 + HX6538 datapath glue (issue #35).  See cam_imx219.h for what this
  * is a port OF and why it is a port rather than a compile of the SDK file.
  *
  * Source: sdk/EPII_CM55M_APP_S/app/scenario_app/tflm_yolov8_od/cis_sensor/
@@ -11,6 +11,11 @@
  * knowledge -- there is no public TRM for this part, so "why does the PA1 write
  * happen twice, once before the pinmux and once after" has no answer beyond
  * "that is what the shipping code does, on a bus that is not documented".
+ *
+ * [!] THE FILE NAME NO LONGER MATCHES ITS CONTENTS (issue #54).  The IMX219 was
+ * removed and the OV5647 is the only part this port drives; splitting the
+ * datapath out and renaming what remains is issue #36, deliberately kept
+ * separate so that the removal reads as a removal.
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -30,38 +35,20 @@
 #include "cam_mipi_calc.h"
 #include "timebase.h"
 
-#define LOG_TAG "imx219"
+#define LOG_TAG "camera"
 #include "log.h"
 
 /* ---- the link, as this board wires it ----------------------------------- */
 
-#define IMX219_I2C_ID          0x10u
-#define IMX219_MIPI_CLOCK_MHZ  456u   /* link clock; bit rate is twice this */
-#define IMX219_MIPI_LANES      2u
-#define IMX219_MIPI_DPP        10u    /* RAW10                              */
-#define IMX219_SENSOR_WIDTH    3280u
-#define IMX219_SENSOR_HEIGHT   2464u
-#define IMX219_INP_CROP_WIDTH  3200u
-#define IMX219_INP_CROP_HEIGHT 2400u
-
-/* Sensor register defaults, from the donor's cisdp_cfg.h. */
-/* 1000 lines, not the donor's 0x0A40 (2624).  Found on the bench: the donor's
- * value sits just under the sensor's default frame length, so it costs frame
- * rate for light this scene does not need.  Only the IMX219 uses it -- the
- * OV5647's own AEC owns its exposure. */
-#define IMX219_EXPOSURE_SETTING 1000u
-#define IMX219_AGAIN_SETTING    0x0040u
-#define IMX219_DGAIN_SETTING    0x0200u
-#define IMX219_BINNING_SETTING  0x0000u   /* sensor binning off: the INP does it */
-#define IMX219_MIRROR_SETTING   0x03u     /* HV mirror -> BGGR at the demosaic   */
-
-#define IMX219_REG_MODEL_ID_HI  0x0000u
-#define IMX219_REG_MODEL_ID_LO  0x0001u
-#define IMX219_MODEL_ID         0x0219u
-
-/* This board's IMX219 enable is a GPIO, not the SDK's default xSleep path. */
-#define IMX219_ENABLE_GPIO      AON_GPIO1
-#define IMX219_XSHUTDOWN_PIN    AON_GPIO2
+/*
+ * Board wiring, not sensor properties: the module connector's enable is a GPIO
+ * on this board rather than the SDK's default xSleep path, and the link is two
+ * lanes whatever is plugged into it.  Named CAM_* rather than after a part --
+ * they outlived the IMX219 (issue #54) and would have been lies as IMX219_*.
+ */
+#define CAM_MIPI_LANES      2u
+#define CAM_ENABLE_GPIO     AON_GPIO1
+#define CAM_XSHUTDOWN_PIN   AON_GPIO2
 
 /*
  * The WDMA3 landing buffer.
@@ -88,29 +75,31 @@ uint8_t *cam_imx219_raw_buffer(void)
 	return cam_raw_buf;
 }
 
-/* ---- the two sensors ------------------------------------------------------ */
+/* ---- the sensor ----------------------------------------------------------- */
 
 /*
- * WHY THERE ARE TWO, and why it is not a preference.
+ * ONE PART, AND WHY IT IS THIS ONE (issue #54).
  *
- * The SDK ships glue for both, but its shipping build selects the OV5647 -- the
- * IMX219 tree is present and is not what anyone runs.  That shows in what the
- * donor asks each part to do:
+ * The port carried both the IMX219 and the OV5647 for a while, because the two
+ * modules are physically interchangeable in the same connector.  What the bench
+ * settled is that they were never a like-for-like choice -- the donor asks each
+ * part to do something quite different, and only one of them is the SDK's
+ * shipping configuration:
  *
  *   IMX219   streams its FULL 3280x2464 and makes the HX6538's INP do a 10.25x
  *            reduction -- a five-pixel box average followed by a decimation.
- *            That is a soft, aliased path, and it is the picture this port
- *            first produced.  The sensor also has no auto-exposure, so the
- *            frame is correct only for whatever fixed exposure was last set.
+ *            Soft, and it aliases.  The sensor also has no auto-exposure, so
+ *            the frame is correct only for whatever fixed exposure was last
+ *            set, which is what the port's own AE loop existed to paper over.
  *
  *   OV5647   is programmed to emit 640x480 ITSELF, using the sensor's own
- *            binning, and the INP then halves it with a 2:1 bin.  Two clean
- *            steps instead of one crude one.  It also runs its own on-chip
- *            AEC/AGC, which is why the donor never writes an exposure for it.
+ *            binning, and the INP then halves it with a 4:2 bin.  Two clean
+ *            steps instead of one crude one, and it runs its own on-chip
+ *            AEC/AGC -- which is why the donor never writes an exposure for it.
  *
- * So "the OV5647 looked better" is not a fact about silicon quality; it is a
- * fact about which reduction path each part was given.  Both are here so the
- * comparison can be made on the bench rather than argued about.
+ * The descriptor and the function pointers stay even with a single entry: they
+ * are the seam between "the datapath" and "the part", and issue #36 is about
+ * making that seam a file boundary rather than removing it.
  */
 struct cam_sensor_desc {
 	const char *name;
@@ -136,15 +125,15 @@ struct cam_sensor_desc {
 	uint32_t mipi_clock_mhz;
 	uint8_t  dpp;                  /* MIPI bits per pixel              */
 	uint8_t  bayer;                /* default demosaic phase           */
-	uint8_t  own_ae;               /* sensor runs its own AEC/AGC      */
 
 	/*
-	 * [!] Per sensor, because the register maps have NOTHING in common.
-	 * The IMX219 keeps exposure at 0x015A/0x015B and gain at 0x0157; the
-	 * OV5647 keeps them at 0x3500..0x3502 and 0x350A/0x350B.  Writing one
-	 * part's addresses to the other does not fail -- it writes whatever
-	 * those addresses happen to mean there, which is the worst kind of
-	 * "supported".
+	 * [!] Per sensor, because register maps have NOTHING in common between
+	 * parts.  The OV5647 keeps exposure at 0x3500..0x3502 and gain at
+	 * 0x350A/0x350B; the IMX219 kept them at 0x015A/0x015B and 0x0157.
+	 * Writing one part's addresses to another does not fail -- it writes
+	 * whatever those addresses happen to mean there, which is the worst kind
+	 * of "supported", and is why this is a pointer and not a shared table
+	 * with a different base.
 	 */
 	int (*set_exposure)(uint16_t lines);
 	int (*set_gains)(uint8_t again, uint16_t dgain);
@@ -154,16 +143,13 @@ struct cam_sensor_desc {
 	 * Read the sensor's CURRENT exposure and gain back.
 	 *
 	 * Needed for exactly the part whose exposure this port does not drive:
-	 * with the OV5647's on-chip AEC running, the shadow copies of what WE
-	 * last wrote are meaningless -- they are the other sensor's defaults,
-	 * sitting still while the real exposure moves.  Reporting them made a
-	 * working auto-exposure look broken.
+	 * with the OV5647's on-chip AEC running, shadow copies of what WE last
+	 * wrote are meaningless -- they sit still while the real exposure moves.
+	 * Reporting them made a working auto-exposure look broken.
 	 */
 	int (*read_exposure_gain)(uint16_t *lines, uint8_t *again);
 };
 
-static int imx219_do_exposure(uint16_t lines);
-static int imx219_do_gains(uint8_t again, uint16_t dgain);
 static int ov5647_do_exposure(uint16_t lines);
 static int ov5647_do_gains(uint8_t again, uint16_t dgain);
 static int ov5647_do_auto(int on);
@@ -172,39 +158,13 @@ static int ov5647_read_eg(uint16_t *lines, uint8_t *again);
 /* ---- register tables ----------------------------------------------------- */
 
 /*
- * The mode table comes straight out of the SDK tree.  Including it rather than
- * copying it keeps it tied to the pinned SHA: 3280x2464 RAW10 over 2 lanes is
- * several hundred register writes of undocumented sensor state, and a stale
- * private copy of that is a debugging session nobody would enjoy.
- */
-static HX_CIS_SensorSetting_t imx219_init_setting[] = {
-#include "IMX219_mipi_2lane_3280x2464.i"
-};
-
-static HX_CIS_SensorSetting_t imx219_stream_on[] = {
-	{ HX_CIS_I2C_Action_W, 0x0100, 0x01 },
-};
-
-static HX_CIS_SensorSetting_t imx219_stream_off[] = {
-	{ HX_CIS_I2C_Action_W, 0x0100, 0x00 },
-};
-
-static HX_CIS_SensorSetting_t imx219_binning_setting[] = {
-	{ HX_CIS_I2C_Action_W, 0x0174, (IMX219_BINNING_SETTING >> 8) & 0xFF },
-	{ HX_CIS_I2C_Action_W, 0x0175, IMX219_BINNING_SETTING & 0xFF },
-};
-
-/* Exposure and the gains are written through cam_imx219_set_exposure() /
- * _set_gains() instead of a seed table: the console and the auto-exposure loop
- * both drive them, so there is one code path that touches those registers. */
-
-static HX_CIS_SensorSetting_t imx219_mirror_setting[] = {
-	{ HX_CIS_I2C_Action_W, 0x0172, IMX219_MIRROR_SETTING & 0xFF },
-};
-
-/*
  * OV5647, in its 640x480 binned mode -- the sensor does the first reduction
- * itself, which is the whole reason this part is worth having here.
+ * itself, which is the whole reason this is the part the port keeps.
+ *
+ * The mode table comes straight out of the SDK tree.  Including it rather than
+ * copying it keeps it tied to the pinned SHA: it is several hundred register
+ * writes of undocumented sensor state, and a stale private copy of that is a
+ * debugging session nobody would enjoy.
  */
 /* The SDK's table ends with a stream-off written through these two names, so
  * they have to exist before the include.  Same values the donor's cisdp_cfg.h
@@ -216,7 +176,7 @@ static HX_CIS_SensorSetting_t ov5647_init_setting[] = {
 #include "OV5647_mipi_2lane_640x480.i"
 };
 
-/* MIPI on/off, not the SMIA 0x0100 the IMX219 uses. */
+/* MIPI on/off, not the SMIA 0x0100 an IMX219-family part would use. */
 static HX_CIS_SensorSetting_t ov5647_stream_on[] = {
 	{ HX_CIS_I2C_Action_W, 0x4800, OV5647_MIPI_CTRL_ON },
 	{ HX_CIS_I2C_Action_W, 0x4202, 0x00 },
@@ -228,93 +188,26 @@ static HX_CIS_SensorSetting_t ov5647_stream_off[] = {
 };
 
 /*
- * The demosaic has to be told which Bayer phase the sensor is delivering, and
- * the mirror setting is what decides it.  The donor expresses this as a chain
- * of #if on the same constant; keeping the assertion here means a change to
- * IMX219_MIRROR_SETTING that forgets the pattern is a compile error rather than
- * a picture with the red and blue channels swapped in a way that looks like a
- * software bug in the packer.
+ * The demosaic's Bayer phase.  The descriptor's value is the DEFAULT, not a
+ * certainty -- see the note on cam_imx219_set_bayer() for why, and for what a
+ * wrong one looks like.
  */
-/*
- * The demosaic's Bayer phase.  The donor's mapping from the mirror setting
- * (HV mirror -> BGGR) is the DEFAULT, not a certainty -- see the note on
- * cam_imx219_set_bayer() for why, and for what a wrong one looks like.
- */
-static uint8_t imx219_bayer = (uint8_t)DEMOS_PATTENMODE_BGGR;
+static uint8_t cam_bayer = (uint8_t)DEMOS_PATTENMODE_BGGR;
 /* Set once the console has chosen a phase, so that a bring-up after a fault
  * does not quietly put the sensor default back and undo a bench measurement. */
-static uint8_t imx219_bayer_user;
-
-/*
- * MIPI bits per pixel: 10 (the donor's setting) or 8.
- *
- * [!] THIS IS NOT JUST A BANDWIDTH KNOB.  RAW10 on CSI-2 is a PACKED format --
- * four pixels in five bytes, the fifth carrying the four pairs of low bits --
- * so getting 8-bit samples out of it means unpacking and then discarding, and
- * how the receiver does that is not documented for this part and not
- * configurable through anything the SDK exposes (the truncate register exists
- * and no shipping application writes it).
- *
- * RAW8 removes the question rather than answering it: the format is one byte
- * per pixel with no packing at all, and the IMX219 datasheet describes the
- * reduction it performs internally as "top 8bit, 10b-8b compress" -- a designed
- * companding, done in the sensor, where the sensor's own black level also drops
- * from 64 to 16.  If the receiver's RAW10 handling is costing image quality,
- * this is the switch that shows it.
- */
-/*
- * Seeded from the DETECTED part's descriptor, not from one sensor's #define.
- * Both parts happen to be RAW10 today, so a global initialised to the IMX219's
- * value is right -- by luck.  The moment an 8-bit part is added, "reported 10,
- * running 8" is a bug nobody would think to look for, so the value follows the
- * descriptor and a console override sticks the way the Bayer phase does.
- */
-static uint8_t imx219_dpp = (uint8_t)IMX219_MIPI_DPP;
-static uint8_t imx219_dpp_user;
-
-/*
- * [!] THREE registers, not two.
- *
- * CSI_DATA_FORMAT (0x018C/0x018D) states the format on the link.  OPPXCK_DIV
- * (0x0309) is the OUTPUT PIXEL CLOCK DIVIDER, and the datasheet's clock tree
- * requires it to equal the bits per pixel -- the SDK's own mode table writes
- * 0x0A for RAW10.  Change the format alone and the sensor keeps clocking
- * pixels out at the 10-bit rate while announcing 8-bit ones: the link timing no
- * longer describes the data, the receiver never completes a frame, and the
- * datapath fails at start.  That is exactly what a first attempt here did.
- *
- * The upstream Linux imx219 driver's RAW8 patch had the same omission, and the
- * Raspberry Pi camera maintainer's review raised 0x0309 for precisely this
- * reason.
- */
-static HX_CIS_SensorSetting_t imx219_fmt_raw8[] = {
-	{ HX_CIS_I2C_Action_W, 0x018c, 0x08 },
-	{ HX_CIS_I2C_Action_W, 0x018d, 0x08 },
-	{ HX_CIS_I2C_Action_W, 0x0309, 0x08 },   /* OPPXCK_DIV = bits/pixel */
-};
-
-static HX_CIS_SensorSetting_t imx219_fmt_raw10[] = {
-	{ HX_CIS_I2C_Action_W, 0x018c, 0x0a },
-	{ HX_CIS_I2C_Action_W, 0x018d, 0x0a },
-	{ HX_CIS_I2C_Action_W, 0x0309, 0x0a },
-};
-
-
-_Static_assert(IMX219_MIRROR_SETTING == 0x03u,
-               "the default Bayer phase below follows the HV mirror setting; "
-               "change both together");
+static uint8_t cam_bayer_user;
 
 void cam_imx219_set_bayer(uint8_t pattern)
 {
 	if (pattern <= (uint8_t)DEMOS_PATTENMODE_RGGB) {
-		imx219_bayer = pattern;
-		imx219_bayer_user = 1u;
+		cam_bayer = pattern;
+		cam_bayer_user = 1u;
 	}
 }
 
 uint8_t cam_imx219_bayer(void)
 {
-	return imx219_bayer;
+	return cam_bayer;
 }
 
 const char *cam_imx219_bayer_name(uint8_t pattern)
@@ -329,46 +222,27 @@ const char *cam_imx219_bayer_name(uint8_t pattern)
 }
 
 /*
- * The live exposure/gain values.  Initialised to the donor's constants, which
- * is what the mode tables above program, and updated by the setters so that the
- * command can report what is actually in the sensor rather than a default it
- * hopes is still true.
+ * The live exposure/gain values.  Updated by the setters and by the read-back,
+ * so that the command reports what is actually in the sensor rather than a
+ * default it hopes is still true.
+ *
+ * [!] These are a SHADOW, and on this part they are not the truth on their own:
+ * the OV5647's on-chip AEC moves the real exposure without telling anyone, so
+ * cam_imx219_refresh_exposure_gains() is what makes them mean anything.
  */
-static uint16_t imx219_exposure = IMX219_EXPOSURE_SETTING;
-static uint8_t  imx219_again    = (uint8_t)IMX219_AGAIN_SETTING;
-static uint16_t imx219_dgain    = IMX219_DGAIN_SETTING;
+static uint16_t cam_exposure;
+static uint8_t  cam_again;
+static uint16_t cam_dgain = 0x0100u;   /* unity; the OV5647 has no dgain */
 
 #define TBL(t) (t), (uint16_t)(sizeof (t) / sizeof (t)[0])
 
 static struct cam_sensor_desc cam_sensors[] = {
 	{
-		.name = "imx219", .i2c_id = IMX219_I2C_ID,
-		.id_reg = IMX219_REG_MODEL_ID_HI, .id_value = IMX219_MODEL_ID,
-		.init = TBL(imx219_init_setting),
-		.on   = TBL(imx219_stream_on),
-		.off  = TBL(imx219_stream_off),
-		.tune = NULL, .tune_n = 0u,
-		.sensor_w = IMX219_SENSOR_WIDTH,
-		.sensor_h = IMX219_SENSOR_HEIGHT,
-		.crop_w = IMX219_INP_CROP_WIDTH,
-		.crop_h = IMX219_INP_CROP_HEIGHT,
-		.binning = (uint8_t)INP_BINNING_10TO2_B,
-		.subsample = (uint8_t)INP_SUBSAMPLE_4TO2,
-		.mipi_clock_mhz = IMX219_MIPI_CLOCK_MHZ,
-		.dpp = (uint8_t)IMX219_MIPI_DPP,
-		.bayer = (uint8_t)DEMOS_PATTENMODE_BGGR,   /* RGGB + HV mirror */
-		.own_ae = 0u,
-		.set_exposure = imx219_do_exposure,
-		.set_gains = imx219_do_gains,
-		.set_auto = NULL,
-		.read_exposure_gain = NULL,   /* we drive it; the shadow is true */
-	},
-	{
 		/*
 		 * 640x480 straight out of the sensor, halved to 320x240 by a
-		 * 2:1 INP bin -- against the IMX219's single 10.25x reduction.
-		 * Mirror is left off, so the phase is the native one; `camera
-		 * bayer` settles it on the bench if this proves wrong.
+		 * 4:2 INP bin.  Mirror is left off, so the phase is the native
+		 * one; `camera bayer` settles it on the bench if this proves
+		 * wrong.
 		 */
 		.name = "ov5647", .i2c_id = 0x36u,
 		.id_reg = 0x300Au, .id_value = 0x5647u,
@@ -392,7 +266,6 @@ static struct cam_sensor_desc cam_sensors[] = {
 		 * reports SBGGR10 for the same reason.
 		 */
 		.bayer = (uint8_t)DEMOS_PATTENMODE_BGGR,
-		.own_ae = 1u,                          /* on-chip AEC/AGC */
 		.set_exposure = ov5647_do_exposure,
 		.set_gains = ov5647_do_gains,
 		.set_auto = ov5647_do_auto,
@@ -407,7 +280,6 @@ static struct cam_sensor_desc cam_sensors[] = {
 static struct cam_sensor_desc *sens = &cam_sensors[0];
 
 const char *cam_imx219_sensor_name(void) { return sens->name; }
-int cam_imx219_sensor_has_own_ae(void)   { return sens->own_ae; }
 uint16_t cam_imx219_sensor_id(void)      { return sens->id_value; }
 
 /* ---- helpers ------------------------------------------------------------- */
@@ -429,7 +301,7 @@ static int write_table(HX_CIS_SensorSetting_t *tbl, uint16_t n,
 
 int cam_imx219_power_on(void)
 {
-	if (hx_drv_cis_init((CIS_XHSHUTDOWN_INDEX_E)IMX219_XSHUTDOWN_PIN,
+	if (hx_drv_cis_init((CIS_XHSHUTDOWN_INDEX_E)CAM_XSHUTDOWN_PIN,
 	                    SENSORCTRL_MCLK_DIV3) != HX_CIS_NO_ERROR) {
 		LOG_ERR("hx_drv_cis_init failed");
 		return -1;
@@ -439,9 +311,9 @@ int cam_imx219_power_on(void)
 	 * GPIO, then drive it again.  Setting it once after the mux is the
 	 * obvious simplification and is also how you get a glitch on the
 	 * module's enable while the pad is still in its reset function. */
-	(void)hx_drv_gpio_set_output(IMX219_ENABLE_GPIO, GPIO_OUT_HIGH);
+	(void)hx_drv_gpio_set_output(CAM_ENABLE_GPIO, GPIO_OUT_HIGH);
 	(void)hx_drv_scu_set_PA1_pinmux(SCU_PA1_PINMUX_AON_GPIO1, 1);
-	(void)hx_drv_gpio_set_out_value(IMX219_ENABLE_GPIO, GPIO_OUT_HIGH);
+	(void)hx_drv_gpio_set_out_value(CAM_ENABLE_GPIO, GPIO_OUT_HIGH);
 
 	/* The datasheet asks for a settling time after the supply comes up
 	 * before the first I2C transaction; the donor spends it inside its own
@@ -458,18 +330,16 @@ int cam_imx219_power_on(void)
 		LOG_ERR("hx_drv_cis_set_slaveID(0x%02X) failed", sens->i2c_id);
 		return -1;
 	}
-	/* The detected part's defaults -- unless somebody has already measured
+	/* The detected part's default -- unless somebody has already measured
 	 * an answer from the console, in which case theirs wins. */
-	if (!imx219_bayer_user)
-		imx219_bayer = sens->bayer;
-	if (!imx219_dpp_user)
-		imx219_dpp = sens->dpp;
+	if (!cam_bayer_user)
+		cam_bayer = sens->bayer;
 	return 0;
 }
 
 void cam_imx219_power_off(void)
 {
-	(void)hx_drv_gpio_set_out_value(IMX219_ENABLE_GPIO, GPIO_OUT_LOW);
+	(void)hx_drv_gpio_set_out_value(CAM_ENABLE_GPIO, GPIO_OUT_LOW);
 }
 
 /* Read the two ID bytes of whichever descriptor is currently selected. */
@@ -545,52 +415,22 @@ int cam_imx219_sensor_init(void)
 	    write_table(sens->tune, sens->tune_n, "tuning") != 0)
 		return -1;
 
-	/* The IMX219's exposure, gain, binning and mirror live outside its mode
-	 * table in this port, because the console and the auto-exposure loop
-	 * drive them.  The OV5647 has none of that: its mode table is the whole
-	 * configuration and its own AEC runs the exposure. */
-	if (!sens->own_ae) {
-		if (WRITE_TABLE(imx219_binning_setting) != 0 ||
-		    WRITE_TABLE(imx219_mirror_setting) != 0)
-			return -1;
-		/* Re-running the mode table put the donor's constants back, so
-		 * anything the console has since dialled in has to be
-		 * re-applied -- otherwise a bring-up after a fault silently
-		 * undoes the exposure somebody just spent a session finding. */
-		if (cam_imx219_set_exposure(imx219_exposure) != 0 ||
-		    cam_imx219_set_gains(imx219_again, imx219_dgain) != 0 ||
-		    cam_imx219_set_depth(imx219_dpp) != 0)
-			return -1;
-	}
+	/*
+	 * Nothing to re-apply after the mode table on this part: it IS the whole
+	 * configuration, and the sensor's own AEC runs the exposure.  (A part
+	 * without one needs exposure, gain and mirror written here, because
+	 * re-running the mode table puts the vendor's constants back and would
+	 * otherwise silently undo whatever the console had dialled in.  The
+	 * IMX219 was that part; issue #54 removed it.)
+	 */
 	return 0;
-}
-
-static int imx219_do_exposure(uint16_t lines)
-{
-	HX_CIS_SensorSetting_t tbl[] = {
-		{ HX_CIS_I2C_Action_W, 0x015a, (lines >> 8) & 0xFF },
-		{ HX_CIS_I2C_Action_W, 0x015b, lines & 0xFF },
-	};
-
-	return WRITE_TABLE(tbl);
-}
-
-static int imx219_do_gains(uint8_t again, uint16_t dgain)
-{
-	HX_CIS_SensorSetting_t tbl[] = {
-		{ HX_CIS_I2C_Action_W, 0x0157, again },
-		{ HX_CIS_I2C_Action_W, 0x0158, (dgain >> 8) & 0xFF },
-		{ HX_CIS_I2C_Action_W, 0x0159, dgain & 0xFF },
-	};
-
-	return WRITE_TABLE(tbl);
 }
 
 /*
  * OV5647.  Exposure is 20 bits across three registers in SIXTEENTHS of a line,
- * and gain is 10 bits where 16 means 1x -- neither resembles the IMX219's
- * layout, which is why these are per-sensor function pointers and not a shared
- * table with different addresses.
+ * and gain is 10 bits where 16 means 1x -- a layout nothing else shares, which
+ * is why these are function pointers on the descriptor and not a shared table
+ * with different addresses.
  *
  * Setting either by hand also has to take the sensor's own AEC/AGC OFF
  * (0x3503), or the on-chip loop simply writes over the value on its next frame
@@ -611,9 +451,10 @@ static int ov5647_do_exposure(uint16_t lines)
 
 static int ov5647_do_gains(uint8_t again, uint16_t dgain)
 {
-	/* The console's `again` is the IMX219's 0..232 curve; map it onto the
-	 * OV5647's linear 16-means-1x so one command means the same thing on
-	 * both parts.  dgain has no OV5647 equivalent and is ignored. */
+	/* The console's `again` is a 0..232 curve (inherited from the IMX219 the
+	 * port also drove, and kept because it is what `camera gain` documents);
+	 * map it onto the OV5647's linear 16-means-1x.  dgain has no OV5647
+	 * equivalent and is ignored. */
 	uint32_t g = (again >= 255u) ? 1023u : (16u * 256u) / (256u - again);
 
 	HX_CIS_SensorSetting_t tbl[] = {
@@ -643,9 +484,8 @@ static int ov5647_do_auto(int on)
 /*
  * OV5647 exposure is 20 bits in sixteenths of a line across 0x3500..0x3502;
  * gain is 10 bits at 0x350A/0x350B where 16 means 1x.  Both are converted into
- * the units the console already uses for the IMX219 -- lines, and the 0..232
- * gain curve -- so one command and one report mean the same thing on either
- * part.
+ * the units the console uses -- lines, and the 0..232 gain curve -- so the
+ * report and the command are on one scale.
  */
 static int ov5647_read_eg(uint16_t *lines, uint8_t *again)
 {
@@ -673,15 +513,15 @@ static int ov5647_read_eg(uint16_t *lines, uint8_t *again)
 
 int cam_imx219_refresh_exposure_gains(void)
 {
-	uint16_t lines = imx219_exposure;
-	uint8_t again = imx219_again;
+	uint16_t lines = cam_exposure;
+	uint8_t again = cam_again;
 
 	if (sens->read_exposure_gain == NULL)
 		return 0;                    /* the shadow is already true */
 	if (sens->read_exposure_gain(&lines, &again) != 0)
 		return -1;
-	imx219_exposure = lines;
-	imx219_again = again;
+	cam_exposure = lines;
+	cam_again = again;
 	return 0;
 }
 
@@ -691,7 +531,7 @@ int cam_imx219_set_exposure(uint16_t lines)
 		return -1;
 	if (sens->set_exposure(lines) != 0)
 		return -1;
-	imx219_exposure = lines;
+	cam_exposure = lines;
 	return 0;
 }
 
@@ -701,17 +541,16 @@ int cam_imx219_set_gains(uint8_t again, uint16_t dgain)
 		return -1;
 	if (sens->set_gains(again, dgain) != 0)
 		return -1;
-	imx219_again = again;
-	imx219_dgain = dgain;
+	cam_again = again;
+	cam_dgain = dgain;
 	return 0;
 }
 
 int cam_imx219_set_sensor_auto(int on)
 {
-	/* No on-chip AEC/AGC to hand the sensor half to, so BOTH directions are
-	 * already satisfied: "auto on" is our software loop's job and "auto off"
-	 * is the part's natural state.  Reporting a failure for one of them
-	 * would make the caller announce a fault that does not exist. */
+	/* A part with no on-chip AEC/AGC has nothing to hand the sensor half to,
+	 * so both directions are already satisfied and reporting a failure would
+	 * make the caller announce a fault that does not exist. */
 	if (sens->set_auto == NULL)
 		return 0;
 	return sens->set_auto(on);
@@ -721,89 +560,11 @@ void cam_imx219_get_exposure_gains(uint16_t *lines, uint8_t *again,
                                    uint16_t *dgain)
 {
 	if (lines != NULL)
-		*lines = imx219_exposure;
+		*lines = cam_exposure;
 	if (again != NULL)
-		*again = imx219_again;
+		*again = cam_again;
 	if (dgain != NULL)
-		*dgain = imx219_dgain;
-}
-
-int cam_imx219_set_depth(uint8_t bits)
-{
-	int rc;
-
-	if (bits != 8u && bits != 10u)
-		return -1;
-	/* CSI_DATA_FORMAT and OPPXCK_DIV are IMX219 addresses.  Refuse on any
-	 * other part rather than write them somewhere they mean something
-	 * else. */
-	if (sens->set_exposure != imx219_do_exposure) {
-		LOG_ERR("bit depth is not switchable on the %s", sens->name);
-		return -1;
-	}
-	/* CSI_DATA_FORMAT_A: 0x0808 or 0x0A0A (datasheet p.49 -- RAW8 is MIPI
-	 * data type 0x2A, RAW10 is 0x2B). */
-	rc = (bits == 8u) ? WRITE_TABLE(imx219_fmt_raw8)
-	                  : WRITE_TABLE(imx219_fmt_raw10);
-	if (rc != 0)
-		return -1;
-	imx219_dpp = bits;
-	imx219_dpp_user = 1u;
-	return 0;
-}
-
-uint8_t cam_imx219_depth(void)
-{
-	return imx219_dpp;
-}
-
-/*
- * 0x015a/0x015b (coarse exposure) and 0x0160/0x0161 (frame length) are IMX219
- * addresses.  The OV5647 keeps neither quantity there -- its exposure is 20 bits
- * across 0x3500..0x3502 and its frame length is the VTS pair at 0x380e/0x380f --
- * so running these on it would write and read registers that mean something else
- * entirely, and SCCB would acknowledge every one of them.  A write that lands
- * somewhere unintended and reports success is worse than a refusal, so refuse:
- * same rule, and the same test, as cam_imx219_set_depth() above.
- */
-int cam_imx219_has_timing_regs(void)
-{
-	return sens->set_exposure == imx219_do_exposure;
-}
-
-int cam_imx219_set_frame_length(uint16_t lines)
-{
-	HX_CIS_SensorSetting_t tbl[] = {
-		{ HX_CIS_I2C_Action_W, 0x0160, (lines >> 8) & 0xFF },
-		{ HX_CIS_I2C_Action_W, 0x0161, lines & 0xFF },
-	};
-
-	if (!cam_imx219_has_timing_regs()) {
-		LOG_ERR("frame length is not settable on the %s", sens->name);
-		return -1;
-	}
-	return WRITE_TABLE(tbl);
-}
-
-int cam_imx219_read_timing(uint16_t *exposure, uint16_t *frame_length)
-{
-	uint8_t hi, lo;
-
-	if (!cam_imx219_has_timing_regs())
-		return -1;
-	if (exposure != NULL) {
-		if (hx_drv_cis_get_reg(0x015a, &hi) != HX_CIS_NO_ERROR ||
-		    hx_drv_cis_get_reg(0x015b, &lo) != HX_CIS_NO_ERROR)
-			return -1;
-		*exposure = (uint16_t)(((uint16_t)hi << 8) | lo);
-	}
-	if (frame_length != NULL) {
-		if (hx_drv_cis_get_reg(0x0160, &hi) != HX_CIS_NO_ERROR ||
-		    hx_drv_cis_get_reg(0x0161, &lo) != HX_CIS_NO_ERROR)
-			return -1;
-		*frame_length = (uint16_t)(((uint16_t)hi << 8) | lo);
-	}
-	return 0;
+		*dgain = cam_dgain;
 }
 
 int cam_imx219_stream_on(void)
@@ -895,8 +656,8 @@ int cam_imx219_csirx_enable(void)
 		return -1;
 
 	link.bitrate_1lane_mhz = sens->mipi_clock_mhz * 2u;
-	link.lanes             = IMX219_MIPI_LANES;
-	link.pixel_dpp         = imx219_dpp;
+	link.lanes             = CAM_MIPI_LANES;
+	link.pixel_dpp         = sens->dpp;
 	link.line_length       = sens->sensor_w;
 	link.pixel_clk_mhz     = mipi_pixel_clk_mhz;
 
@@ -924,10 +685,10 @@ int cam_imx219_csirx_enable(void)
 
 	imx219_set_hscnt(mipi_pixel_clk_mhz);
 
-	sensordplib_csirx_set_pixel_depth(imx219_dpp);
+	sensordplib_csirx_set_pixel_depth(sens->dpp);
 	sensordplib_csirx_set_deskew(0);
 	sensordplib_csirx_set_fifo_fill(fill.rx);
-	sensordplib_csirx_enable(IMX219_MIPI_LANES);
+	sensordplib_csirx_enable(CAM_MIPI_LANES);
 
 	/*
 	 * The transmitter leg.  This port sends nothing out over CSI, but the
@@ -936,10 +697,10 @@ int cam_imx219_csirx_enable(void)
 	 * it is a datapath that never produces a frame.
 	 */
 	sensordplib_csitx_set_dphy_clkmode(CSITX_DPHYCLOCK_CONT);
-	sensordplib_csitx_set_pixel_depth(imx219_dpp);
+	sensordplib_csitx_set_pixel_depth(sens->dpp);
 	sensordplib_csitx_set_deskew(0);
 	sensordplib_csitx_set_fifo_fill(fill.tx);
-	sensordplib_csitx_enable(IMX219_MIPI_LANES,
+	sensordplib_csitx_enable(CAM_MIPI_LANES,
 	                         sens->mipi_clock_mhz * 2u,
 	                         sens->sensor_w, sens->sensor_h);
 
@@ -1083,7 +844,7 @@ int cam_imx219_datapath_config(void)
 	hw5x5.hw5x5_path         = HW5x5_PATH_THROUGH_DEMOSAIC;
 	hw5x5.demos_bndmode      = DEMOS_BNDODE_REFLECT;
 	hw5x5.demos_color_mode   = DEMOS_COLORMODE_RGB;
-	hw5x5.demos_pattern_mode = (DEMOS_PATTENMODE_E)imx219_bayer;
+	hw5x5.demos_pattern_mode = (DEMOS_PATTENMODE_E)cam_bayer;
 	hw5x5.demoslpf_roundmode = DEMOSLPF_ROUNDMODE_FLOOR;
 	hw5x5.hw55_crop_stx      = 0;
 	hw5x5.hw55_crop_sty      = 0;

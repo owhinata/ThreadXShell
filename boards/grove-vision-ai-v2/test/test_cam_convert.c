@@ -641,6 +641,248 @@ static void test_saturation(void)
 	}
 }
 
+/* ---- 13. the tone tables against the arithmetic they replaced ------------ */
+
+/*
+ * WHY A SECOND COPY OF THE PIPELINE LIVES HERE (issue #58).
+ *
+ * The converter used to do the black level, the gain, the curve and the 5/6-bit
+ * truncation as arithmetic on every one of 76,800 pixels; it now compiles them
+ * into per-channel tables and the inner loop is loads.  The claim that change
+ * rests on is EQUIVALENCE -- the same frame in, the same 16-bit words out, for
+ * every input and every setting -- and nothing else in the project can check it.
+ * On the panel the two are indistinguishable by construction when they agree,
+ * and when they disagree by a count or two they are STILL indistinguishable,
+ * which is the dangerous half: a table built with an off-by-one somewhere in the
+ * dark end would ship looking perfect.
+ *
+ * So the OLD implementation is transcribed below, exactly as it stood at
+ * 9ee4c5b, and the two are swept against each other.  The duplication is the
+ * point, the same way test_cam_mipi_calc.c keeps the SDK's original floating
+ * point formula: this file is not trying to avoid drifting from cam_convert.c,
+ * it is trying to notice.  Its sRGB table is a copy for that reason too -- if
+ * the shipped one is ever edited, these tests must fail until somebody says why.
+ *
+ * The thing the sweeps are really hunting is the STALE TABLE.  Tables are built
+ * from the settings and reused while the settings hold, so a key that does not
+ * cover every field would answer a `camera sat` or a `camera black` with the
+ * previous frame's tables -- a picture that ignores a typed command, which looks
+ * like the command being broken and not like a cache.  Hence cases that differ
+ * in exactly one field, and hence the alternation.
+ */
+
+static const uint8_t ref_srgb[256] = {
+	  0,  13,  22,  28,  34,  38,  42,  46,  50,  53,  56,  59,
+	 61,  64,  66,  69,  71,  73,  75,  77,  79,  81,  83,  85,
+	 86,  88,  90,  92,  93,  95,  96,  98,  99, 101, 102, 104,
+	105, 106, 108, 109, 110, 112, 113, 114, 115, 117, 118, 119,
+	120, 121, 122, 124, 125, 126, 127, 128, 129, 130, 131, 132,
+	133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144,
+	145, 146, 147, 148, 148, 149, 150, 151, 152, 153, 154, 155,
+	155, 156, 157, 158, 159, 159, 160, 161, 162, 163, 163, 164,
+	165, 166, 167, 167, 168, 169, 170, 170, 171, 172, 173, 173,
+	174, 175, 175, 176, 177, 178, 178, 179, 180, 180, 181, 182,
+	182, 183, 184, 185, 185, 186, 187, 187, 188, 189, 189, 190,
+	190, 191, 192, 192, 193, 194, 194, 195, 196, 196, 197, 197,
+	198, 199, 199, 200, 200, 201, 202, 202, 203, 203, 204, 205,
+	205, 206, 206, 207, 208, 208, 209, 209, 210, 210, 211, 212,
+	212, 213, 213, 214, 214, 215, 215, 216, 216, 217, 218, 218,
+	219, 219, 220, 220, 221, 221, 222, 222, 223, 223, 224, 224,
+	225, 226, 226, 227, 227, 228, 228, 229, 229, 230, 230, 231,
+	231, 232, 232, 233, 233, 234, 234, 235, 235, 236, 236, 237,
+	237, 238, 238, 238, 239, 239, 240, 240, 241, 241, 242, 242,
+	243, 243, 244, 244, 245, 245, 246, 246, 246, 247, 247, 248,
+	248, 249, 249, 250, 250, 251, 251, 251, 252, 252, 253, 253,
+	254, 254, 255, 255,
+};
+
+static uint8_t ref_gain8(uint8_t v, uint16_t gain, uint8_t black)
+{
+	uint32_t s;
+
+	v = (v > black) ? (uint8_t)(v - black) : 0u;
+	s = ((uint32_t)v * gain) >> 8;
+	if (s > 255u)
+		s = 255u;
+	return (uint8_t)s;
+}
+
+static uint8_t ref_sat8(uint8_t v, uint32_t y, uint16_t sat)
+{
+	int32_t d = ((int32_t)v - (int32_t)y) * (int32_t)sat / 256;
+	int32_t s = (int32_t)y + d;
+
+	if (s < 0)
+		return 0u;
+	if (s > 255)
+		return 255u;
+	return (uint8_t)s;
+}
+
+static uint16_t ref_pixel(uint8_t b, uint8_t g, uint8_t r,
+                          const struct cam_wb *wb)
+{
+	uint8_t rv = ref_gain8(r, wb->r, wb->black);
+	uint8_t gv = ref_gain8(g, wb->g, wb->black);
+	uint8_t bv = ref_gain8(b, wb->b, wb->black);
+
+	if (wb->sat != CAM_SAT_UNITY && wb->sat != 0u) {
+		uint32_t y = ((uint32_t)rv + 2u * gv + bv) / 4u;
+
+		rv = ref_sat8(rv, y, wb->sat);
+		gv = ref_sat8(gv, y, wb->sat);
+		bv = ref_sat8(bv, y, wb->sat);
+	}
+	if (wb->gamma) {
+		rv = ref_srgb[rv];
+		gv = ref_srgb[gv];
+		bv = ref_srgb[bv];
+	}
+	return (uint16_t)(((uint16_t)(rv >> 3) << 11) |
+	                  ((uint16_t)(gv >> 2) << 5) |
+	                   (uint16_t)(bv >> 3));
+}
+
+static uint8_t  ref_planes[3u * 256u];
+static uint16_t ref_got[256u];
+
+/* One batch through the real converter, every pixel of it against the
+ * transcription.  Stops at the first disagreement: a table that is wrong is
+ * wrong for millions of pixels, and sixteen million identical FAIL lines hide
+ * the one piece of information in them, which is the FIRST input that broke. */
+static int ref_batch(const struct cam_wb *wb, const uint8_t *b,
+                     const uint8_t *g, const uint8_t *r, uint32_t n,
+                     const char *what)
+{
+	uint32_t i;
+
+	memcpy(ref_planes, b, n);
+	memcpy(ref_planes + n, g, n);
+	memcpy(ref_planes + 2u * n, r, n);
+	cam_bgr_planar_to_rgb565_wb(ref_planes, ref_got, n, wb);
+
+	for (i = 0u; i < n; i++) {
+		uint16_t want = ref_pixel(b[i], g[i], r[i], wb);
+
+		if (ref_got[i] != want) {
+			CHECK(0, "%s: B%u G%u R%u packed as %04X, the "
+			      "arithmetic it replaced says %04X "
+			      "(wb %u/%u/%u black %u gamma %u sat %u)",
+			      what, (unsigned)b[i], (unsigned)g[i],
+			      (unsigned)r[i], ref_got[i], want,
+			      (unsigned)wb->r, (unsigned)wb->g, (unsigned)wb->b,
+			      (unsigned)wb->black, (unsigned)wb->gamma,
+			      (unsigned)wb->sat);
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/*
+ * Every value of every channel, with the other two held at black, mid and
+ * white.  This is the sweep that guarantees EVERY ENTRY of every table is read
+ * back at least once for this setting -- a single wrong entry is a single wrong
+ * shade, which no photograph would ever convict.
+ */
+static void sweep_axes(const struct cam_wb *wb, const char *what)
+{
+	static const uint8_t levels[3] = { 0u, 128u, 255u };
+	uint8_t b[256], g[256], r[256];
+	uint32_t ch, lv, i;
+
+	for (ch = 0u; ch < 3u; ch++)
+		for (lv = 0u; lv < 3u; lv++) {
+			for (i = 0u; i < 256u; i++) {
+				b[i] = (ch == 0u) ? (uint8_t)i : levels[lv];
+				g[i] = (ch == 1u) ? (uint8_t)i : levels[lv];
+				r[i] = (ch == 2u) ? (uint8_t)i : levels[lv];
+			}
+			if (ref_batch(wb, b, g, r, 256u, what) != 0)
+				return;
+		}
+}
+
+/*
+ * Colour TRIPLES on a grid.  The axes above cannot catch saturation: it pulls a
+ * channel away from the pixel's own luma, so its answer depends on the other
+ * two channels, and the folded form reaches it through a table indexed by the
+ * difference.  Only combinations exercise that.
+ */
+static void sweep_grid(const struct cam_wb *wb, uint32_t step, const char *what)
+{
+	uint8_t b[256], g[256], r[256];
+	uint32_t rv, gv, bv, n;
+
+	for (rv = 0u; rv < 256u; rv += step)
+		for (gv = 0u; gv < 256u; gv += step) {
+			n = 0u;
+			for (bv = 0u; bv < 256u; bv += step) {
+				b[n] = (uint8_t)bv;
+				g[n] = (uint8_t)gv;
+				r[n] = (uint8_t)rv;
+				n++;
+			}
+			if (ref_batch(wb, b, g, r, n, what) != 0)
+				return;
+		}
+}
+
+/*
+ * Case 0 is what the firmware boots with (camera.c).  Cases 1..6 differ from it
+ * in EXACTLY ONE field each, which is what makes them a test of the table key
+ * rather than of the arithmetic; the rest are the ends of every range the
+ * console will accept.
+ */
+static const struct cam_wb tone_cases[] = {
+	{ 256u, 256u, 256u,  16u, 1u,  600u },   /* the shipped default */
+	{ 512u, 256u, 256u,  16u, 1u,  600u },   /* red gain alone */
+	{ 256u, 320u, 256u,  16u, 1u,  600u },   /* green gain alone */
+	{ 256u, 256u, 400u,  16u, 1u,  600u },   /* blue gain alone */
+	{ 256u, 256u, 256u,   0u, 1u,  600u },   /* black level alone */
+	{ 256u, 256u, 256u,  16u, 0u,  600u },   /* gamma alone */
+	{ 256u, 256u, 256u,  16u, 1u,  256u },   /* saturation alone */
+	{ 256u, 256u, 256u,   0u, 0u,  256u },   /* the identity */
+	{ 256u, 256u, 256u,  16u, 1u,    0u },   /* sat 0 also means unity */
+	{   0u,   0u,   0u,   0u, 1u,  600u },   /* zero gains: black frame */
+	{ 4096u, 4096u, 4096u, 0u, 1u, 600u },   /* the console's ceiling */
+	{ 256u, 256u, 256u, 255u, 1u,  600u },   /* a pedestal above every
+	                                          * sample: also black */
+	{ 256u, 256u, 256u,  16u, 1u, 2048u },   /* saturation ceiling */
+	{ 256u, 256u, 256u,  16u, 1u,    1u },   /* very nearly greyscale */
+	{ 300u, 256u, 380u,  16u, 0u, 1024u },   /* an AWB-shaped pair, no
+	                                          * curve... */
+	{ 300u, 256u, 380u,  16u, 1u, 1024u },   /* ...and with it */
+};
+
+static void test_tone_tables(void)
+{
+	const uint32_t n = (uint32_t)(sizeof tone_cases / sizeof tone_cases[0]);
+	uint32_t i;
+
+	for (i = 0u; i < n; i++) {
+		sweep_axes(&tone_cases[i], "axes");
+		sweep_grid(&tone_cases[i], 8u, "grid");
+	}
+
+	/*
+	 * Back to the default between every case: a stale table answers with
+	 * the PREVIOUS settings, so a key that ignores one field only shows up
+	 * when that field is the one that changed and something else changed
+	 * back.  Running the list once in order would let such a key pass on
+	 * half the cases by luck.
+	 */
+	for (i = 1u; i < n; i++) {
+		sweep_axes(&tone_cases[0], "alternation: back to the default");
+		sweep_axes(&tone_cases[i], "alternation: the variant");
+	}
+
+	/* And the setting the board actually runs in, over every colour there
+	 * is -- 16.7 million of them, because this is the one case where "we
+	 * sampled it" is not the same claim as "it is equivalent". */
+	sweep_grid(&tone_cases[0], 1u, "the default, exhaustively");
+}
+
 int main(void)
 {
 	test_channel_order();
@@ -655,6 +897,7 @@ int main(void)
 	test_bayer_phase_means();
 	test_gamma();
 	test_saturation();
+	test_tone_tables();
 
 	if (failures != 0) {
 		printf("test_cam_convert: %d failure(s)\n", failures);

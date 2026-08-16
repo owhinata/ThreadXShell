@@ -6,6 +6,7 @@
  * See cam_convert.h for why this is a translation unit of its own.
  */
 #include <stddef.h>
+#include <string.h>
 
 #include "cam_convert.h"
 
@@ -56,9 +57,13 @@ static const uint8_t cam_srgb_encode[256] = {
 	254, 254, 255, 255,
 };
 
-/* (v - black) * gain/256: pedestal off first, then scale, saturating at 255. */
-static inline uint8_t cam_gain8(uint8_t v, uint16_t gain, uint8_t black,
-                                int gamma)
+/* (v - black) * gain/256: pedestal off first, then scale, saturating at 255.
+ *
+ * Applied in LINEAR light and without the encode.  Black level and gain are
+ * corrections to a linear measurement and only mean what they say there;
+ * encoding first would make the gain a contrast control and the black level a
+ * crush.  The curve comes last, after saturation, which is linear-light too. */
+static uint8_t cam_gain8(uint8_t v, uint16_t gain, uint8_t black)
 {
 	uint32_t s;
 
@@ -66,25 +71,202 @@ static inline uint8_t cam_gain8(uint8_t v, uint16_t gain, uint8_t black,
 	s = ((uint32_t)v * gain) >> 8;
 	if (s > 255u)
 		s = 255u;
-	/* Encode LAST.  Black level and gain are corrections to a LINEAR
-	 * measurement and only mean what they say in linear space; encoding
-	 * first would make the gain a contrast control and the black level a
-	 * crush. */
-	return gamma ? cam_srgb_encode[s] : (uint8_t)s;
+	return (uint8_t)s;
 }
 
-/* Push a channel away from the pixel's own luma: out = y + (v - y) * sat.
- * Saturating, and signed in the middle because v - y is a difference. */
-static inline uint8_t cam_sat8(uint8_t v, uint32_t y, uint16_t sat)
-{
-	int32_t d = ((int32_t)v - (int32_t)y) * (int32_t)sat / 256;
-	int32_t s = (int32_t)y + d;
+/* ---- the tone tables ----------------------------------------------------- */
 
-	if (s < 0)
-		return 0u;
-	if (s > 255)
-		return 255u;
-	return (uint8_t)s;
+/*
+ * WHY THERE ARE TABLES HERE AT ALL (issue #58).
+ *
+ * Nearly every step of this pipeline is a function of ONE 8-bit number: the
+ * black level, the per-channel gain, the sRGB encode and the 5/6-bit truncation
+ * each depend only on the sample being converted.  A function of one 8-bit
+ * number is a 256-entry table, and the frame is 76,800 pixels -- so doing the
+ * arithmetic per pixel means computing the same 256 answers three hundred times
+ * over.  Measured on hardware before this change, `pack` cost 17.2 ms per frame
+ * -- and since issue #57 moved the LCD blit onto its own thread, that is the
+ * largest single thing the producer does.  It costs twice over: the epic that
+ * wants 30 fps (issue #56) budgets it directly, and the panel thread sits below
+ * the producer, so a blit that finishes its DMA mid-pack waits out whatever is
+ * left of it before it can present -- which is how frames get dropped at a
+ * tuned VTS (issue #64).
+ *
+ * So the settings are compiled into tables once, and the inner loop is loads.
+ * What CANNOT fold is saturation: it pulls a channel away from the pixel's own
+ * luma, so it depends on the other two channels as well and is not a function
+ * of one number.  Its multiply-and-divide still folds -- that part depends only
+ * on the DIFFERENCE from the luma, which is one number again (cam_tone.spread).
+ *
+ * THE TABLES ARE REBUILT FROM THE SETTINGS THEMSELVES, not on request.  The
+ * white balance moves under the automatic loop every few frames, and a "tell
+ * the converter when it changed" contract has exactly one failure mode -- a
+ * caller that forgets -- whose symptom is a picture that ignores a typed
+ * command until something unrelated happens to invalidate the cache.  Comparing
+ * against the settings the tables were built from cannot go stale, and the
+ * comparison is ten bytes against a 76,800-pixel loop.
+ *
+ * Rebuilding costs 2,047 entries where the loop it serves costs 230,400, and it
+ * happens INSIDE the interval `camera stats` reports as `pack`, so the number
+ * that reports the saving already carries the price of it.
+ *
+ * [!] NOT REENTRANT.  These tables are the camera producer thread's private
+ * state -- it is the only caller (cam_publish), and the console reaches the
+ * settings through camera_set_wb() rather than through here.
+ */
+
+/* Largest stored saturation offset.  y is 0..255 and the result is clamped to
+ * 0..255 anyway, so an offset of +256 already forces white for every y and
+ * -256 already forces black: storing more resolution than that would change no
+ * output, and this keeps the table int16 for any gain the API accepts. */
+#define CAM_SPREAD_LIMIT 256
+
+/*
+ * The encode table covers the UNCLAMPED range, so that the clamp is a property
+ * of the table instead of two compare-and-branches per channel per pixel.
+ *
+ * [!] These bounds are not a margin, they are exactly what saturation can
+ * produce: y is 0..255 (it is a weighted mean of three 8-bit values) and the
+ * offset is +-CAM_SPREAD_LIMIT, so the sum spans -256..511 and nothing else.
+ * They are DERIVED from that limit rather than written out, because an index
+ * this table does not cover is a read off the end of it -- and the loop no
+ * longer has a clamp that would notice.
+ */
+#define CAM_ENC_LO (-CAM_SPREAD_LIMIT)
+#define CAM_ENC_HI (255 + CAM_SPREAD_LIMIT)
+#define CAM_ENC_N  (CAM_ENC_HI - CAM_ENC_LO + 1)
+
+static struct {
+	/** The settings these tables were built from; see cam_tone_sync(). */
+	struct cam_wb key;
+	uint8_t       built;
+	/** Raw sample -> the finished RGB565 field, for the no-saturation path. */
+	uint16_t direct[3][256];
+	/** Raw sample -> black level and gain applied, still linear. */
+	uint8_t  linear[3][256];
+	/** Linear value -> the finished RGB565 field: the clamp to 0..255, the
+	 *  encode, the truncation and the shift into place, all in one entry.
+	 *  Indexed by value - CAM_ENC_LO; the loop carries biased pointers. */
+	uint16_t encode[3][CAM_ENC_N];
+	/** (v - y) * sat / 256, clamped to +-CAM_SPREAD_LIMIT, at index
+	 *  (v - y) + 255 -- the loop carries a pointer biased by that 255. */
+	int16_t  spread[511];
+} cam_tone;
+
+/*
+ * [!] THE KEY IS COMPARED BYTE-WISE, so struct cam_wb must have no padding: a
+ * hole would make the comparison read indeterminate bytes and rebuild the
+ * tables at random.  Stating the size here is also what makes a FIELD ADDED
+ * LATER safe -- memcmp covers it automatically, and this assertion fails the
+ * build if that new field brings a hole with it.  A hand-written field-by-field
+ * comparison would silently ignore it instead, and the symptom would be a
+ * setting that does nothing.
+ */
+_Static_assert(sizeof(struct cam_wb) ==
+               3u * sizeof(uint16_t) + 2u * sizeof(uint8_t) + sizeof(uint16_t),
+               "struct cam_wb has padding; the tone-table key cannot memcmp it");
+
+/* Channel index 0/1/2 is B/G/R -- the order WDMA3 writes the planes in, so the
+ * tables are indexed with the same number as the plane they belong to. */
+static const uint8_t cam_field_drop[3]  = { 3u, 2u, 3u };
+static const uint8_t cam_field_shift[3] = { 0u, 5u, 11u };
+
+static void cam_tone_build(const struct cam_wb *wb)
+{
+	const uint16_t gain[3] = { wb->b, wb->g, wb->r };
+	uint32_t c, v;
+	int32_t t;
+
+	for (c = 0u; c < 3u; c++) {
+		for (v = 0u; v < (uint32_t)CAM_ENC_N; v++) {
+			/* The clamp lives here, once per setting change,
+			 * instead of twice per channel per pixel. */
+			int32_t s = (int32_t)v + CAM_ENC_LO;
+			uint8_t e;
+
+			if (s < 0)
+				s = 0;
+			if (s > 255)
+				s = 255;
+			e = wb->gamma ? cam_srgb_encode[s] : (uint8_t)s;
+
+			cam_tone.encode[c][v] =
+			        (uint16_t)((uint32_t)(e >> cam_field_drop[c])
+			                   << cam_field_shift[c]);
+		}
+		for (v = 0u; v < 256u; v++) {
+			uint8_t lin = cam_gain8((uint8_t)v, gain[c], wb->black);
+
+			cam_tone.linear[c][v] = lin;
+			/* The whole chain for this channel, in one entry: the
+			 * saturation-free path is three of these ORed together
+			 * and nothing else. */
+			cam_tone.direct[c][v] =
+			        cam_tone.encode[c][lin - CAM_ENC_LO];
+		}
+	}
+
+	for (t = -255; t <= 255; t++) {
+		int32_t d = (t * (int32_t)wb->sat) / 256;
+
+		if (d > CAM_SPREAD_LIMIT)
+			d = CAM_SPREAD_LIMIT;
+		if (d < -CAM_SPREAD_LIMIT)
+			d = -CAM_SPREAD_LIMIT;
+		cam_tone.spread[t + 255] = (int16_t)d;
+	}
+
+	cam_tone.key = *wb;
+	cam_tone.built = 1u;
+}
+
+/*
+ * Make the tables agree with @p wb, and hand back the settings they were built
+ * from.
+ *
+ * The caller works from the RETURNED copy rather than from @p wb, and that is
+ * the point of returning it: the console may write those fields while this
+ * thread is packing, so a loop that re-read them per pixel could pack a frame
+ * under two different saturations.  One snapshot is taken, the tables are built
+ * from it, and the loop below reads only it -- so whatever a frame was packed
+ * with, the tables and the code agree on it.
+ */
+static struct cam_wb cam_tone_sync(const struct cam_wb *wb)
+{
+	static const struct cam_wb unity = { CAM_WB_UNITY, CAM_WB_UNITY,
+	                                     CAM_WB_UNITY, 0u, 0u,
+	                                     CAM_SAT_UNITY };
+	struct cam_wb now = (wb != 0) ? *wb : unity;
+
+	if (!cam_tone.built ||
+	    memcmp(&cam_tone.key, &now, sizeof now) != 0)
+		cam_tone_build(&now);
+	return now;
+}
+
+/* Saturation, the part that does not fold: push a channel away from the pixel's
+ * own luma.  Signed, and deliberately NOT clamped -- it returns a value in
+ * CAM_ENC_LO..CAM_ENC_HI, which is exactly the range the encode table covers,
+ * so the clamp costs nothing here instead of two branches per channel.
+ *
+ * [!] always_inline is not decoration.  This translation unit is built -Os,
+ * which does NOT inline it -- measured on the linked image, the loop below
+ * called it three times per pixel, which is 230,400 calls per frame in the one
+ * loop the whole point of this file is to make cheap.
+ *
+ * [!] AND THE CALLS COST MORE THAN TIME.  Live values across three calls put
+ * the register allocator under enough pressure that GCC 13.3 at -Os spilled a
+ * constant into P0 -- VPR[15:0], an MVE register this image is supposed never
+ * to touch (VMSR P0, r3 at the top of the loop).  Inlining removed the pressure
+ * and the spill with it.  That is a happy accident and not a guarantee:
+ * check_mve_predication.py passed the build, because the pinned objdump does
+ * not decode MVE at all and prints the register as "<impl def 0xd>" (issue
+ * #66).  Until that gate can fail, the only thing standing behind "no MVE here"
+ * is reading the disassembly. */
+static inline __attribute__((always_inline)) int32_t cam_spread(
+        const int16_t *spread, uint8_t v, int32_t y)
+{
+	return y + spread[(int32_t)v - y];
 }
 
 void cam_bgr_planar_to_rgb565(const uint8_t *bgr, uint16_t *out,
@@ -99,57 +281,47 @@ void cam_bgr_planar_to_rgb565_wb(const uint8_t *bgr, uint16_t *out,
 	const uint8_t *b = bgr;
 	const uint8_t *g = bgr + pixels;
 	const uint8_t *r = bgr + 2u * pixels;
+	/* Biased once, here, rather than per channel per pixel: both offsets are
+	 * instructions a pixel folded into pointers the loop already keeps. */
+	const int16_t  *spread = &cam_tone.spread[255];
+	const uint16_t *enc_r  = &cam_tone.encode[2][-CAM_ENC_LO];
+	const uint16_t *enc_g  = &cam_tone.encode[1][-CAM_ENC_LO];
+	const uint16_t *enc_b  = &cam_tone.encode[0][-CAM_ENC_LO];
+	struct cam_wb now;
 	uint32_t i;
 
 	if (bgr == 0 || out == 0)
 		return;
 
+	now = cam_tone_sync(wb);
+
 	/* Three sequential reads and one sequential write per pixel.  Written as
 	 * plain scalar C on purpose: the obvious "improvement" here is to widen
 	 * it, and MVE is exactly what the image may not contain. */
-	if (wb == 0 || (wb->r == CAM_WB_UNITY && wb->g == CAM_WB_UNITY &&
-	                wb->b == CAM_WB_UNITY && wb->black == 0u &&
-	                wb->gamma == 0u &&
-	                (wb->sat == CAM_SAT_UNITY || wb->sat == 0u))) {
-		/* Unity is the common case and worth not paying for: three
-		 * multiplies and three compares per pixel over 76,800 pixels is
-		 * not free, and a preview that has not been balanced yet should
-		 * cost exactly what it did before this existed. */
+	if (now.sat == CAM_SAT_UNITY || now.sat == 0u) {
+		/* Everything folded: one table lookup per channel is the entire
+		 * conversion, black level and gain and curve included.  Unity
+		 * gains land here too and pay nothing extra for it, which is why
+		 * the separate unity fast path this replaced is gone. */
 		for (i = 0u; i < pixels; i++)
-			out[i] = (uint16_t)(((uint16_t)(r[i] >> 3) << 11) |
-			                    ((uint16_t)(g[i] >> 2) << 5) |
-			                     (uint16_t)(b[i] >> 3));
+			out[i] = (uint16_t)(cam_tone.direct[2][r[i]] |
+			                    cam_tone.direct[1][g[i]] |
+			                    cam_tone.direct[0][b[i]]);
 		return;
 	}
 
 	for (i = 0u; i < pixels; i++) {
-		/* Black level and white balance first, in linear light and
-		 * without the encode -- saturation is a linear-light operation
-		 * and the curve has to come after it. */
-		uint8_t rv = cam_gain8(r[i], wb->r, wb->black, 0);
-		uint8_t gv = cam_gain8(g[i], wb->g, wb->black, 0);
-		uint8_t bv = cam_gain8(b[i], wb->b, wb->black, 0);
+		uint8_t bv = cam_tone.linear[0][b[i]];
+		uint8_t gv = cam_tone.linear[1][g[i]];
+		uint8_t rv = cam_tone.linear[2][r[i]];
+		/* Luma, weighted the way the eye is: green carries most of the
+		 * brightness.  (R + 2G + B) / 4 is the cheap standard
+		 * approximation and needs no multiplies. */
+		int32_t y = ((int32_t)rv + 2 * (int32_t)gv + (int32_t)bv) / 4;
 
-		if (wb->sat != CAM_SAT_UNITY && wb->sat != 0u) {
-			/* Luma, weighted the way the eye is: green carries most
-			 * of the brightness.  (R + 2G + B) / 4 is the cheap
-			 * standard approximation and needs no multiplies. */
-			uint32_t y = ((uint32_t)rv + 2u * gv + bv) / 4u;
-
-			rv = cam_sat8(rv, y, wb->sat);
-			gv = cam_sat8(gv, y, wb->sat);
-			bv = cam_sat8(bv, y, wb->sat);
-		}
-
-		if (wb->gamma) {
-			rv = cam_srgb_encode[rv];
-			gv = cam_srgb_encode[gv];
-			bv = cam_srgb_encode[bv];
-		}
-
-		out[i] = (uint16_t)(((uint16_t)(rv >> 3) << 11) |
-		                    ((uint16_t)(gv >> 2) << 5) |
-		                     (uint16_t)(bv >> 3));
+		out[i] = (uint16_t)(enc_r[cam_spread(spread, rv, y)] |
+		                    enc_g[cam_spread(spread, gv, y)] |
+		                    enc_b[cam_spread(spread, bv, y)]);
 	}
 }
 

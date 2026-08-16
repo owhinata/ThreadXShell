@@ -96,7 +96,9 @@ the settings are also lost when the USB device re-enumerates.
   section present in the generated `.img`, command registry inside `.rodata`),
   placement/budget (ITCM/DTCM headroom, vector table, static stacks,
   benchmark-buffer residency, no forbidden SDK symbols surviving), and an
-  MVE-predication scan (the ThreadX M55 port does not save VPR).
+  MVE-predication scan (the ThreadX M55 port does not save VPR).  [!] That last
+  one **cannot currently fail** -- the pinned objdump does not decode MVE, so
+  nothing it names ever matches (issue #66).
 
 ## Time sources
 
@@ -323,10 +325,12 @@ that reason.
 working set, code and data both in TCM (this app is not XIP), `-O3
 -funroll-loops -fno-tree-vectorize`, and the core clock the run printed.  The
 `-fno-tree-vectorize` is not tuning -- `-mcpu=cortex-m55` enables MVE and the
-auto-vectoriser emits predicated MVE, which `check_mve_predication.py` fails the
-build on.  [!] That gate's premise is wrong (the hardware does stack VPR, see
-issue #42 and the Future work note below); it is kept because it is
-fail-closed, so today's published score is a **scalar** score.
+auto-vectoriser emits predicated MVE, which the port bars.  [!] Two things are
+wrong with the gate that is supposed to enforce that: its PREMISE (the hardware
+does stack VPR -- issue #42, and the Future work note below) and its
+IMPLEMENTATION (it cannot detect a single instruction it names -- issue #66).
+The option is therefore doing the work, not the scan, and today's published
+score is a **scalar** score.
 
 `membench` measures ITCM (4 KB, read only -- it is the memory all the code
 executes from, so the write/copy legs and the chase construction are not run
@@ -2265,7 +2269,16 @@ terminal before running `--target flash`.
   PopStack save and restore VPR under `HaveMve()`, and rule RZWQX makes MVE
   execution set `CONTROL.FPCA`, so the hardware preserves it across a context
   switch and the ThreadX port only has to save the callee-saved s16-s31, which it
-  does.  The scan is fail-closed, so nothing unsafe shipped -- but CoreMark and
-  the camera's pixel loops are scalar for no reason.  Tracked in issue #42, which
-  also covers what removing the scan must not skip (enforcing and reading back
-  `FPCCR.ASPEN`, since this app inherits its state from a bootloader).
+  does.  CoreMark and the camera's pixel loops are scalar for no reason.  Tracked
+  in issue #42, which also covers what removing the scan must not skip (enforcing
+  and reading back `FPCCR.ASPEN`, since this app inherits its state from a
+  bootloader).
+- [!] AND THE SCAN CANNOT FAIL.  `check_mve_predication.py` was described here as
+  fail-closed, which was the reason for keeping it despite the premise being
+  wrong.  It is not: the pinned objdump does not decode MVE at all, so `vmsr vpr`
+  prints as `<impl def 0xc>`, `vpst` and `vpsel` as `cdp2` and `vctp` as
+  `bfcsel`, and NONE of the seven forms the script names match its regexes.  It
+  has printed OK on every build since M-G1 without the ability to print anything
+  else.  Not theoretical: an intermediate version of issue #58 emitted
+  `VMSR P0, r3` -- GCC spilled a constant into VPR[15:0] under register pressure
+  -- and the gate passed the build.  Issue #66.

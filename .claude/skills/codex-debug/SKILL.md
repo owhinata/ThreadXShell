@@ -39,9 +39,11 @@ Codex 呼び出しは **codex plugin（`codex@openai-codex`）のランタイム
 
 ```bash
 node "$(ls -d "$HOME"/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs \
-        | sort -V | tail -1)" task --effort xhigh --prompt-file /abs/path/to/debug-prompt.md
+        | sort -V | tail -1)" task --effort medium --prompt-file /abs/path/to/debug-prompt.md
 ```
 
+   - `--effort` は `medium`（2026-08-13 のユーザー指示。リポジトリ共通の既定で、
+     `xhigh` は使わない。理由と実測は `codex-review` skill に書いてある）。
    - `--write` は付けない（サンドボックスは `read-only`。ローカルシェルは使えるので
      `git log` / `grep` / `sed` でリポジトリの実物を読ませてよい）。
    - **`Bash(run_in_background: true)` で起動して待つ**（解析は 120s を超える）。

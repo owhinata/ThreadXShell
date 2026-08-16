@@ -1326,6 +1326,74 @@ thread means overlapping it, not making it cheaper.  The byte swap inside it is
 ~0.85 ms, 1.3% of a frame, and still not worth teaching `svc/frame.h` a
 big-endian RGB565 format for.
 
+### What happened when the blit did move (issue #57)
+
+The prediction above held almost exactly.  The blit now runs on a panel thread
+that the LCD sink owns, and the producer's `sink` stage fell from 26,420 us to
+**2 us** while a new `blit` row on the panel thread carries **26,445 us** -- the
+26 ms moved rather than vanished, which is what `camera stats` prints both
+numbers to prove.
+
+| | predicted | measured |
+|---|---:|---:|
+| W | 17.6 ms | 17.6 ms |
+| best VTS | ~1100 | 1060 |
+| period | ~34.7 ms | 33.7 ms |
+| capture fps | ~29 | 29.6 |
+
+The cliff is real and was walked onto deliberately.  VTS 1060 leaves 713 us of
+margin; VTS **1040** leaves 82 us, and its measured period is 41,408 us -- which
+is neither `T_s` (32,767) nor `2 * T_s` (65,534) but a MIXTURE: about a quarter
+of the frames fell to N=2.  A margin that thin does not fail cleanly, it
+degrades statistically.
+
+**[!] BUT THE PICTURE DID NOT GET FASTER, and the reason is a new one.**  What
+the model predicts is the PRODUCER's period.  What reaches the glass is limited
+by the panel thread, and once VTS is tightened it drops every other frame:
+
+| | capture fps | shown fps | dropped | blit |
+|---|---:|---:|---:|---:|
+| `camera preview`, VTS 1968 | 15.9 | 15.9 | 0 | 26,445 |
+| `camera preview`, VTS 1060 | 29.6 | **14.8** | 150/300 | 33,250 |
+| `nn preview`, VTS 1770 | 17.6 | **8.9** | 99/200 | 33,595 |
+
+The blit's own work has not changed; its ELAPSED time has, in step with how
+much CPU the producer is using:
+
+| period | producer duty | blit |
+|---:|---:|---:|
+| 62.5 ms | 28% | 26,445 |
+| 33.7 ms | 52% | 33,250 |
+| 56.8 ms (`nn preview`) | 71% | 33,595 |
+
+The panel thread sits BELOW the producer, so when its DMA completes and it wants
+the CPU back, it waits for however much of `pack` is left -- up to 17.2 ms, and
++6.9 ms on average, which is that figure's half.  The blit then finishes just
+after the next publish and the frame is dropped: at VTS 1770 the arithmetic
+margin is **203 us**.
+
+So the ceiling this file assumed for the panel -- 26.4 ms of wire time, 37.9 fps
+-- is not the operative one.  The effective ceiling is ~33.6 ms, 29.8 fps, and it
+moves with whatever else the producer is doing.  Issue #58 (folding the packer
+into one LUT per channel, 17.2 -> ~8 ms) attacks this directly rather than
+incidentally, because the blocking time IS the length of `pack`.  Tracked in
+issue #64.
+
+Two practical consequences:
+
+- **the default VTS is still 1968 and nothing regressed there** (`camera preview`
+  15.9 fps with zero drops; `nn preview` 7.9 -> 8.9).  The drops appear only when
+  VTS is tuned down;
+- **`camera preview` and `nn preview` want different VTS values** (1060 against
+  1770), because their W differs by the inference.  VTS is one global setting, so
+  there is no value that serves both until W comes down.
+
+**[!] `camera stats`'s `sink` row is per ITERATION, not per delivery.**  With
+drops in play the two differ a lot: `nn preview` at VTS 1770 prints 11,594 us
+while the actual cost of one inference + preprocess + overlay is 22,958 us.  It
+is the right number for the period model, which is what it is there for, and the
+wrong one to budget issue #58 or #60 against.
+
 ## Ethos-U55 inference (`nn`)
 
 Capture a frame, run it on the NPU, print the result.  Classification (top 5,
@@ -1858,11 +1926,12 @@ argument that it might be.
 
 ### Inference runs on the camera producer thread
 
-Not on a worker.  The producer already serialises capture -> pack -> blit
-(issue #38), and it re-arms WDMA3 only AFTER every sink has consumed -- the SDK
-gates the next frame on `sensordplib_retrigger_capture()`.  So the raw frame is
-stable for the whole of `consume()`, and the boxes are guaranteed to belong to
-the frame being displayed.
+Not on a worker, and it STAYED there when the blit left (issue #57).  The
+producer re-arms WDMA3 only after every sink has consumed -- the SDK gates the
+next frame on `sensordplib_retrigger_capture()` -- so the raw frame the model
+reads is stable exactly until `consume()` returns, and nowhere else.  Moving the
+inference would mean feeding the model a buffer the datapath had been let loose
+on.
 
 A worker thread would decouple the frame rate, at the price of drawing last
 frame's boxes on this frame.  That is the harder failure to see: at 8 fps a
@@ -1873,13 +1942,57 @@ The order inside `consume()` is the design:
 1. **inference, with NO panel guard held.**  It can take the whole NPU timeout
    if an interrupt is lost, and holding the panel across that would block every
    other `lcd` command for the duration.
-2. **acquire the panel once**, then stage, draw and present without releasing.
-   The overlay hook runs between the staging copy and the DMA
-   (`lcd_blit_le_overlay()`), so a box is never half-transferred.
+2. **hand the frame to the panel thread and return.**  Since issue #57 the blit
+   happens there; the pipeline's pre-pin keeps the slot alive across the
+   hand-off, and the panel thread balances it with exactly one
+   `frame_pipeline_put()`.
+
+`draw()` therefore runs on the PANEL thread while `process()` runs on the
+producer, and the detections they share need no lock -- but the reason is
+exclusion, not proximity.  The pipeline pre-pins one delivery per sink and, under
+`FRAME_POLICY_DROP`, refuses a second while the first is outstanding, so
+`process()` cannot run again until the panel thread has released the frame, which
+it does only after `draw()` has returned.  The two alternate strictly.  That is
+why the policy is a named constant which `cam_lcd_sink_attach()` checks: under
+`FRAME_POLICY_LATEST` the core re-enters `consume()` from inside `put()`, on the
+panel thread, and the inference would silently leave the producer.
+
+The overlay hook still runs between the staging copy and the DMA
+(`lcd_blit_le_overlay()`), so a box is never half-transferred.
 
 A failed inference means no boxes on that frame, not a blank preview -- the
 picture is worth more than the annotation.  `camera stats` counts those frames
 separately from sink errors.
+
+### [!] The stop contract has two halves now (issue #57)
+
+`camera_stream_stop() == CAM_OK` used to mean "no sink is inside `consume()`"
+only BECAUSE consume ran on the producer, and issue #48 built detach, teardown
+and the `nn` gate release on that meaning.  With the blit on its own thread the
+stop proves only the first half, so the second moved to where
+`svc/frame_pipeline`'s own contract puts it:
+
+1. confirmed stop -- the producer is idle, so no new delivery can start;
+2. **unlink**, so no later stream can reach this sink;
+3. bounded drain of the panel thread's one possible in-flight blit;
+4. only on success: clear the overlay, allow re-attach, release the `nn` lease.
+
+**The order is not interchangeable.**  Draining first leaves the sink linked
+across a window in which another command can start a fresh stream --
+`camera_stream_stop()` releases the camera API mutex before it returns, and
+`camera bench` starts a stream while owning no sink -- and the sink would then be
+delivered frames belonging to a stream its owner had already finished with.
+
+A drain that misses its deadline is the panel thread's `CAM_ST_LOST`: nothing is
+torn down, the overlay is not cleared, the frame stays pinned, `nn` stays leased,
+and every later attach is refused until reboot.  Both previews gate their final
+teardown on stop AND drain.
+
+The drain's deadline is wall clock rather than a count of one-tick waits, and
+that is not a style choice: nothing consumes the idle semaphore while a preview
+runs, so one stale token banks up per frame shown.  Counting iterations would
+have burned a three-second budget in microseconds and poisoned a panel thread
+that was blitting perfectly normally -- after about a minute of preview.
 
 ### [!] A stop that is not confirmed poisons the camera
 

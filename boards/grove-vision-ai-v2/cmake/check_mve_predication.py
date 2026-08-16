@@ -3,11 +3,20 @@
 # Copyright (c) 2026 ThreadX Shell Project
 """Gate 3: no VPR-dependent MVE (Helium) instructions in the linked image.
 
-The ThreadX Cortex-M55 port saves s16-s31 (aliasing q4-q7) across context
-switches but NOT the VPR predication register -- so predicated MVE code that
-spans a context switch would silently compute with the wrong predicate.  This
-board's own code avoids MVE in M-G1 and the prebuilt driver archive was
-scanned clean at plan time; this gate keeps that true build over build.
+[!] THE PREMISE THIS GATE WAS WRITTEN ON IS WRONG (issue #42).  It was that the
+ThreadX Cortex-M55 port saves s16-s31 (aliasing q4-q7) across context switches
+but NOT the VPR predication register, leaving predicated MVE code that spans a
+context switch computing with the wrong predicate.  The Armv8-M ARM contradicts
+it: PushStack/PopStack stack and unstack VPR under HaveMve(), and rule RZWQX
+makes MVE execution set CONTROL.FPCA, so the hardware preserves VPR and the
+port only owns the callee-saved half -- which it does save.
+
+The gate stays until #42 decides, because it is fail-closed: it costs scalar
+code, not correctness, and removing it has its own prerequisite (enforcing and
+reading back FPCCR.ASPEN, since this app inherits that state from a
+bootloader).  This board's own code avoids MVE in M-G1 and the prebuilt driver
+archive was scanned clean at plan time; this gate keeps that true build over
+build.
 
 Flagged: the VPT/VPST/VCTP families, VPSEL/VPNOT, and any explicit VPR
 operand (VMSR/VMRS to/from VPR).  Plain unpredicated MVE loads/stores are

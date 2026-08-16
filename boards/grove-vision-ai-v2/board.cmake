@@ -350,11 +350,12 @@ set(SHELL_SOURCES
 #
 # [!] -fno-tree-vectorize is load-bearing, not tuning: -mcpu=cortex-m55 enables
 # MVE, and at -O3 the auto-vectoriser emits PREDICATED MVE (VCTP/VPST) for
-# exactly the kind of loops CoreMark is made of.  The ThreadX Cortex-M55 port
-# does not save/restore VPR across a context switch, so such code is unsafe in
-# a preemptible thread -- check_mve_predication.py fails the build on it.  The
-# published score is therefore a SCALAR score; core_portme.h says so in the
-# report's own flags line.
+# exactly the kind of loops CoreMark is made of -- which
+# check_mve_predication.py fails the build on.  That gate rests on a premise the
+# Armv8-M ARM contradicts (the hardware does stack VPR, see issue #42); it is
+# fail-closed, so this option is the workaround until #42 lands rather than a
+# correctness requirement.  Until then the published score is a SCALAR score;
+# core_portme.h says so in the report's own flags line.
 set(CMK_DIR "${CMAKE_SOURCE_DIR}/lib/coremark")
 add_library(coremark_obj OBJECT
     "${CMK_DIR}/core_list_join.c"
@@ -593,9 +594,9 @@ target_compile_options(shell_objs PRIVATE -Os)
 
 # [!] -fno-tree-vectorize on the camera's pixel loops, for the same reason
 # coremark_obj carries it (see the note above that option): -mcpu=cortex-m55
-# makes MVE available, the ThreadX M55 port does not preserve VPR across a
-# context switch, and check_mve_predication.py fails the build on any
-# predicated MVE in the image.  -Os does not auto-vectorise today, which is
+# makes MVE available, and check_mve_predication.py fails the build on any
+# predicated MVE in the image (a gate whose premise issue #42 refutes, kept
+# because it is fail-closed).  -Os does not auto-vectorise today, which is
 # exactly why this is stated rather than relied upon -- a later -O2 or a newer
 # GCC would turn a 76,800-iteration loop over three planes into precisely the
 # code the gate bars, and the failure would surface as a build break in an

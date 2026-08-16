@@ -323,9 +323,10 @@ that reason.
 working set, code and data both in TCM (this app is not XIP), `-O3
 -funroll-loops -fno-tree-vectorize`, and the core clock the run printed.  The
 `-fno-tree-vectorize` is not tuning -- `-mcpu=cortex-m55` enables MVE and the
-auto-vectoriser emits predicated MVE, which the ThreadX M55 port cannot carry
-across a context switch (it does not save VPR).  The published score is a
-**scalar** score.
+auto-vectoriser emits predicated MVE, which `check_mve_predication.py` fails the
+build on.  [!] That gate's premise is wrong (the hardware does stack VPR, see
+issue #42 and the Future work note below); it is kept because it is
+fail-closed, so today's published score is a **scalar** score.
 
 `membench` measures ITCM (4 KB, read only -- it is the memory all the code
 executes from, so the write/copy legs and the chase construction are not run

@@ -4,7 +4,7 @@
  */
 /**
  * @file    kv.c
- * @brief   Persistent configuration key-value store (issue #37).
+ * @brief   Persistent configuration key-value store (owhinata/wio-lite-ai#37).
  *
  * See kv.h for the contract.  This file is the only caller of FlashDB.
  */

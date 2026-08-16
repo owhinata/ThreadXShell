@@ -4,7 +4,8 @@
  */
 /**
  * @file    fx_lx_nor_driver.c
- * @brief   FileX media driver entry on LevelX NOR over QSPI (issue #30).
+ * @brief   FileX media driver entry on LevelX NOR over QSPI
+ * (owhinata/stm32f746g-disco#30).
  *
  * Implements the FileX driver-request contract on lx_nor_flash_sector_*
  * services: FileX logical sector N maps 1:1 to LevelX logical sector N, the

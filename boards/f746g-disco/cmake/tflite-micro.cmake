@@ -1,4 +1,5 @@
-# tflite-micro (TFLM) C++ backend for CONFIG_NN_BACKEND=tflm (Epic #80 P3, issue #86).
+# tflite-micro (TFLM) C++ backend for CONFIG_NN_BACKEND=tflm (Epic owhinata/stm32f746g-disco#80 P3,
+# owhinata/stm32f746g-disco#86).
 #
 # Included ONLY from the tflm branch of CMakeLists.txt, so C++ is enabled for this
 # build alone; the default (null/stedgeai) firmware never sees enable_language(CXX)
@@ -23,7 +24,7 @@ set(TFLM_SRC  "${CMAKE_BINARY_DIR}/tflm-src")     # shallow clone at the pinned 
 set(TFLM_ROOT "${CMAKE_BINARY_DIR}/tflm-tree")    # generated self-contained source tree
 set(TFLM_GEN   "${TFLM_SRC}/tensorflow/lite/micro/tools/project_generation/create_tflm_tree.py")
 
-# --- Optimized kernels: CMSIS-NN vs reference (Epic #80 P3 M2b, issue #88) ----
+# --- Optimized kernels: CMSIS-NN vs reference (Epic owhinata/stm32f746g-disco#80 P3 M2b, owhinata/stm32f746g-disco#88) ---
 # ON (default) generates the tree with OPTIMIZED_KERNEL_DIR=cmsis_nn: the tflm
 # Makefile downloads ARM-software/CMSIS-NN (+ CMSIS_6 core, pinned by its own
 # ext_libs/*_download.sh) and lists the cmsis_nn kernel wrappers instead of the

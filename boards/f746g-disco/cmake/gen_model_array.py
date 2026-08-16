@@ -3,9 +3,10 @@
 # Copyright (c) 2026 ThreadX Shell Project
 #
 # Emit a C++ byte array + size for a TFLite model, for the tflm NN backend
-# (Epic #80 P3 M2, issue #88).  Used at CMake configure time by
-# cmake/tflite-micro.cmake to turn the (gitignored, non-committed) BlazeFace
-# .tflite into a compilable translation unit inside the `tflm` static lib.
+# (Epic owhinata/stm32f746g-disco#80 P3 M2, owhinata/stm32f746g-disco#88).  Used at
+# CMake configure time by cmake/tflite-micro.cmake to turn the (gitignored,
+# non-committed) BlazeFace .tflite into a compilable translation unit inside the
+# `tflm` static lib.
 #
 # We roll our own generator (rather than tflite-micro's generate_cc_arrays.py)
 # for two reasons: (1) a FIXED symbol name decoupled from the input filename, so

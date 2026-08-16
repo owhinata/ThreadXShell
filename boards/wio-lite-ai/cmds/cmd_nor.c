@@ -4,7 +4,7 @@
  */
 /**
  * @file    cmd_nor.c
- * @brief   `nor` shell command: external W25Q128 on OCTOSPI2 (issue #37).
+ * @brief   `nor` shell command: external W25Q128 on OCTOSPI2 (owhinata/wio-lite-ai#37).
  *
  *   nor info               bring-up state, JEDEC id, geometry, device clock
  *   nor read <addr> [len]  hexdump from a device offset (default 64 B)
@@ -57,13 +57,14 @@
 
 /*
  * Default scratch sector for `nor test`.  At 4 MB -- the first sector ABOVE the
- * blob region (issue #10 put asset slots at 1 MB .. 3 MB; issue #55 widened them to
- * six 512 KB slots ending at 4 MB), in the 12 MB that is still unallocated -- so
- * running the acceptance test destroys neither a live configuration nor a stored model.
+ * blob region (owhinata/wio-lite-ai#10 put asset slots at 1 MB .. 3 MB;
+ * owhinata/wio-lite-ai#55 widened them to six 512 KB slots ending at 4 MB), in the 12 MB
+ * that is still unallocated -- so running the acceptance test destroys neither a live
+ * configuration nor a stored model.
  *
  * [!] THIS ADDRESS IS TIED TO THE BLOB REGION'S END, so it moves whenever the region
- * does.  It was 0x00300000 until issue #55, which is exactly where the region now
- * ends -- had it stayed, a bare `nor test` would have programmed the header sector
+ * does.  It was 0x00300000 until owhinata/wio-lite-ai#55, which is exactly where the region
+ * now ends -- had it stayed, a bare `nor test` would have programmed the header sector
  * of the new slot 4.  (Boards that ran `nor test` under the old default still have
  * that residue there: it decodes as `invalid` rather than as a blob, and one
  * `blob erase 4` clears it.)

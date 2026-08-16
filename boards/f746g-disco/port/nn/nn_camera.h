@@ -4,7 +4,8 @@
  */
 /**
  * @file    nn_camera.h
- * @brief   Live camera -> NN inference glue (issue #81, Epic #80).
+ * @brief   Live camera -> NN inference glue (owhinata/stm32f746g-disco#81, Epic
+ * owhinata/stm32f746g-disco#80).
  *
  * Bridges the camera frame pipeline (port/camera) to the nn inference API
  * (port/nn/nn.h): a synchronous copy push sink resizes + converts each RGB565
@@ -12,15 +13,17 @@
  * best-effort worker thread runs inference on it.  Follows the nx_mjpeg.c
  * eth_sink lifecycle (thread created once + parked) and the codex-reviewed
  * double-buffer ownership rule (the buffer the worker feeds to nn_run() is never
- * written by the sink).  Since Epic #99 Phase 1 (#100) nncam is a plain camera
- * *subscriber*: `ai stream start/stop` enable/disable it and it attaches to the
- * base capture (`camera stream`) only while the base runs.  A base detach (stop /
- * DCMI overrun / cascade) PAUSES it (frames stop) but keeps it enabled and holding
- * the nn session; it re-attaches when the base restarts.
+ * written by the sink).  Since Epic owhinata/stm32f746g-disco#99 Phase 1
+ * (owhinata/stm32f746g-disco#100) nncam is a plain camera *subscriber*: `ai stream
+ * start/stop` enable/disable it and it attaches to the base capture (`camera stream`)
+ * only while the base runs. A base detach (stop / DCMI overrun / cascade) PAUSES it
+ * (frames stop) but keeps it enabled and holding the nn session; it re-attaches when
+ * the base restarts.
  *
  * Drives `ai stream start|stop` and `ai run`.  Model-specific detection decode
- * (BlazeFace anchors + NMS) is layered above in port/nn/models (issue #81 task
- * 8); with the `null` backend this loop runs end-to-end with 0 detections.
+ * (BlazeFace anchors + NMS) is layered above in port/nn/models
+ * (owhinata/stm32f746g-disco#81 task 8); with the `null` backend this loop runs
+ * end-to-end with 0 detections.
  */
 #ifndef NN_CAMERA_H
 #define NN_CAMERA_H
@@ -50,11 +53,12 @@ struct nn_camera_stats {
 /**
  * Enable live camera inference (`ai stream start`).  @p res is a display hint
  * only -- the input adapts to whatever geometry the base capture publishes
- * (#100).  Claims the single nn session (refused -6 if `ai bench`/another stream
- * holds it) and registers nncam as an RGB565 subscriber of the base: it attaches
- * immediately if the base is already running, otherwise it stays enabled + idle
- * and attaches at the next `camera stream start`.  Non-blocking.  Returns 0 or <0
- * (-2 already running, -3 model, -4 geometry, -5 objects, -6 nn session busy).
+ * (owhinata/stm32f746g-disco#100).  Claims the single nn session (refused -6 if `ai
+ * bench`/another stream holds it) and registers nncam as an RGB565 subscriber of the
+ * base: it attaches immediately if the base is already running, otherwise it stays
+ * enabled + idle and attaches at the next `camera stream start`.  Non-blocking.
+ * Returns 0 or <0 (-2 already running, -3 model, -4 geometry, -5 objects, -6 nn
+ * session busy).
  */
 int  nn_camera_start(enum camera_res res);
 

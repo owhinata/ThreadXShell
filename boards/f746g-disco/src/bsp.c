@@ -36,8 +36,9 @@ void bsp_init(void)
     /* RAM log first: validate the reset-persistent ring (and record the reset
        cause) before anything else can log, so a fault during the rest of
        bring-up is captured.  log_init() reads RCC->CSR / HAL_GetTick(), neither
-       of which needs HAL_Init().  fault_init() (issue #28, src/fault.c) is added
-       right after, once present, so the fault handler always finds a valid ring. */
+       of which needs HAL_Init().  fault_init() (owhinata/stm32f746g-disco#28,
+       src/fault.c) is added right after, once present, so the fault handler always
+       finds a valid ring. */
     log_init();
     fault_init();   /* enable Mem/Bus/Usage faults before the rest of bring-up */
 
@@ -45,20 +46,22 @@ void bsp_init(void)
 #if BSP_ENABLE_IWDG
     /* Freeze the IWDG counter when the core is halted by the debugger (RM0385
        §40.16.5 DBGMCU_APB1_FZ.DBG_IWDG_STOP), so a SWD breakpoint does not let the
-       watchdog reset the board out from under the debug session (issue #38).  The
-       IWDG itself is armed late, at the end of tx_application_define(). */
+       watchdog reset the board out from under the debug session
+       (owhinata/stm32f746g-disco#38). The IWDG itself is armed late, at the end of
+       tx_application_define(). */
     __HAL_DBGMCU_FREEZE_IWDG();
 #endif
     SystemClock_Config();
     VCP_UART_Init();
-    timebase_init();   /* TIM2 free-run = ThreadX exec-profile time source (issue #19) */
+    /* TIM2 free-run = ThreadX exec-profile time source (owhinata/stm32f746g-disco#19) */
+    timebase_init();
 
     /* Unbuffered stdout so each printf reaches the VCP immediately. */
     setvbuf(stdout, NULL, _IONBF, 0);
 }
 
 /**
- * @brief  MPU region for the 8 MB FMC SDRAM window (issue #40).
+ * @brief  MPU region for the 8 MB FMC SDRAM window (owhinata/stm32f746g-disco#40).
  *
  * The ARMv7-M default memory map types 0xA0000000..0xDFFFFFFF as Device, so
  * without an MPU region the SDRAM would be uncached-but-Device (strongly
@@ -68,8 +71,8 @@ void bsp_init(void)
  *   - Normal: the compiler/bus may merge and reorder plain data accesses
  *     (Device semantics would serialize every word).
  *   - Non-cacheable (TEX=1, C=0, B=0): the region holds large DMA-target
- *     buffers (camera frames, #41).  With no cache lines ever allocated, DMA
- *     writes and CPU reads are coherent by construction -- no
+ *     buffers (camera frames, owhinata/stm32f746g-disco#41).  With no cache lines ever
+ * allocated, DMA writes and CPU reads are coherent by construction -- no
  *     clean/invalidate choreography, no dirty-eviction races.  The cost is
  *     slower CPU access; switch to WBWA + explicit maintenance later if a
  *     consumer needs bandwidth (documented in docs/hardware/sdram.md).
@@ -106,7 +109,8 @@ static void mpu_config_sdram(void)
      * + camera->model staging) lives here and is CPU-only -- NO DMA writes into
      * bank3 (camera DMA targets bank1, ETH bank2, LTDC bank0) -- so D-cache is
      * coherent without any maintenance.  Non-cacheable SDRAM activations were
-     * ~20x slower for NN inference (issue #81 #6, measured on MNIST). */
+     * ~20x slower for NN inference (owhinata/stm32f746g-disco#81
+     * owhinata/stm32f746g-disco#6, measured on MNIST). */
     r.Number           = MPU_REGION_NUMBER1;
     r.BaseAddress      = 0xC0600000u;
     r.Size             = MPU_REGION_SIZE_2MB;
@@ -130,13 +134,14 @@ static void mpu_config_sdram(void)
      * (the ST loader does none in XIP mode).  Note the model slots themselves are
      * RWX here (FULL_ACCESS + exec) -- data buffers stay XN in the lower half, so W^X
      * holds for the arena, but the loaded code region is not strictly W^X (existing
-     * P5 design).  Issue #92 (Epic #80 P5).
+     * P5 design).  owhinata/stm32f746g-disco#92 (Epic owhinata/stm32f746g-disco#80 P5).
      *
-     * REGION 2 IS RELOC-ONLY (issue #95): only CONFIG_NN_BACKEND=stedgeai_reloc emits
-     * .sdram.ai.model.  For non-reloc builds (null/stedgeai/tflm) the ldscript lets
-     * .sdram.ai (data) grow into bank3's upper 1 MB (TFLM needs ~1.9 MB), so an exec
-     * window there would make data executable (W^X break) -- instead we leave the
-     * whole 2 MB governed by region1 (XN cacheable) and explicitly disable region2. */
+     * REGION 2 IS RELOC-ONLY (owhinata/stm32f746g-disco#95): only
+     * CONFIG_NN_BACKEND=stedgeai_reloc emits .sdram.ai.model.  For non-reloc builds
+     * (null/stedgeai/tflm) the ldscript lets .sdram.ai (data) grow into bank3's upper 1
+     * MB (TFLM needs ~1.9 MB), so an exec window there would make data executable (W^X
+     * break) -- instead we leave the whole 2 MB governed by region1 (XN cacheable)
+     * and explicitly disable region2. */
 #ifdef CONFIG_NN_BACKEND_STEDGEAI_RELOC
     r.Number           = MPU_REGION_NUMBER2;
     r.BaseAddress      = 0xC0700000u;
@@ -179,7 +184,8 @@ static void SystemClock_Config(void)
     RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
     RCC_OscInitStruct.HSEState       = RCC_HSE_ON;
 #if BSP_ENABLE_IWDG
-    /* Also bring up the LSI: the IWDG (issue #38) is clocked from it.  OR it into
+    /* Also bring up the LSI: the IWDG (owhinata/stm32f746g-disco#38) is clocked from it.
+       OR it into
        the oscillator set so HSE/PLL stay untouched; HAL_RCC_OscConfig() waits for
        LSIRDY.  LSI is independent of the HSE+PLL 216 MHz tree (RM0385 5.2). */
     RCC_OscInitStruct.OscillatorType |= RCC_OSCILLATORTYPE_LSI;
@@ -255,9 +261,9 @@ static void VCP_UART_Init(void)
  * @brief  Retarget newlib stdout/stderr to the VCP UART so printf works.
  *
  * Weak so a backend can override it: the interrupt-driven UART shell backend
- * (shell/backend/cli_backend_uart.c, issue #7) supplies a strong _write that,
- * once the console is up, routes printf through the same TX ring as the shell so
- * USART1 has a single owner.  Apps that do not link that backend (blink /
+ * (shell/backend/cli_backend_uart.c, owhinata/stm32f746g-disco#7) supplies a strong
+ * _write that, once the console is up, routes printf through the same TX ring as the
+ * shell so USART1 has a single owner.  Apps that do not link that backend (blink /
  * coremark / threadx demo / thread_metric / exec_profile) keep this blocking
  * polling path unchanged.
  */
@@ -271,7 +277,8 @@ __attribute__((weak)) int _write(int file, char *ptr, int len)
 void Error_Handler(void)
 {
     /* Record before halting: a clock/HAL bring-up failure is then visible in
-       `dmesg` after the next reset (the ring is reset-persistent, issue #28). */
+       `dmesg` after the next reset (the ring is reset-persistent,
+       owhinata/stm32f746g-disco#28). */
     LOG_ERR("Error_Handler trapped");
     __disable_irq();
     while (1)

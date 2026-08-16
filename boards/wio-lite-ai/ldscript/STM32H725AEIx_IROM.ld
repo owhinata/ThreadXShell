@@ -2,22 +2,22 @@
  * Linker script for Wio Lite AI (STM32H725AEI6) applications, running from the
  * INTERNAL flash app partition that the DFU bootloader programs and boots.
  *
- *   FLASH : 384 KB @ 0x08020000 -- internal flash sectors 1-3 (issue #25).  The
+ *   FLASH : 384 KB @ 0x08020000 -- internal flash sectors 1-3 (owhinata/wio-lite-ai#25).  The
  *                                  bootloader owns sector 0 (0x08000000, 128 KB)
  *                                  and jumps to the vector table it finds here.
  *   RAM   : 320 KB @ 0x24000000 -- AXI-SRAM (D1).  Reserved for what a BUS MASTER
  *                                  has to reach: DMA1/DMA2 and the SDMMC1 IDMA
- *                                  cannot see either TCM (issue #46).
+ *                                  cannot see either TCM (owhinata/wio-lite-ai#46).
  *   DTCM  : 128 KB @ 0x20000000 -- tightly-coupled RAM: reset-persistent log, the
  *                                  NetX packet pool, every thread stack, and the
  *                                  main (ISR) stack at its top -- _estack =
  *                                  0x20020000, the MSP the bootloader loads from
  *                                  vector[0] and accepts as on-chip RAM.
  *   ITCM  :  64 KB @ 0x00000000 -- tightly-coupled instruction RAM; holds the ISR
- *                                  paths (.itcm, issue #24), which are zero-wait
+ *                                  paths (.itcm, owhinata/wio-lite-ai#24), which are zero-wait
  *                                  and outside both caches.
  *
- * WHY 0x08020000 AND NOT 0x70000000 (issue #25): the app used to execute in place
+ * WHY 0x08020000 AND NOT 0x70000000 (owhinata/wio-lite-ai#25): the app used to execute in place
  * from the external OCTOSPI2 NOR flash mapped at 0x70000000.  That window reads at
  * ~54 MB/s (88.7 MHz Quad, membench) against ~905 MB/s for the internal flash, and
  * every cold path, every interrupt that had fallen out of the 16 KB I-cache, and
@@ -41,19 +41,19 @@ ENTRY(Reset_Handler)
 
 /*
  * The main stack -- the one every exception and every ISR runs on -- lives at the
- * TOP OF DTCM, not at the top of AXI-SRAM (issue #46).
+ * TOP OF DTCM, not at the top of AXI-SRAM (owhinata/wio-lite-ai#46).
  *
  * Two reasons, and the second is the one that forced it:
  *
  *  1. It is the hottest data in the system and the CPU is its only user, so DTCM is
  *     where it belongs: zero wait states, and it stops evicting D-cache lines that
- *     belong to real work.  It pairs with the ISR code already in ITCM (issue #24).
+ *     belong to real work.  It pairs with the ISR code already in ITCM (owhinata/wio-lite-ai#24).
  *
  *  2. Sitting at ORIGIN(RAM)+LENGTH(RAM) it grew DOWNWARD through whatever AXI-SRAM
  *     was still free -- and nothing accounted for it.  The linker does not know the
  *     stack exists, and a Cortex-M7 has no MSPLIM to catch the collision (that is
  *     ARMv8-M).  So "free AXI-SRAM" was simultaneously the stack's headroom and the
- *     space issue #35 wants for the camera's DMA band: placing the band would have
+ *     space owhinata/wio-lite-ai#35 wants for the camera's DMA band: placing the band would have
  *     silently handed it to both.  Moving the stack out makes the free space real.
  *
  * The bootloader accepts this: it validates the app's vector[0] against the on-chip
@@ -93,9 +93,10 @@ MEMORY
   ITCM  (rx)  : ORIGIN = 0x00000000, LENGTH = 64K
   /* Internal flash sectors 1-3.  Sector 0 (0x08000000) is the DFU bootloader and
    * is deliberately outside this region: overflowing the app cannot reach it, it
-   * is a link error (issue #25). */
+   * is a link error (owhinata/wio-lite-ai#25). */
   FLASH (rx)  : ORIGIN = 0x08020000, LENGTH = 384K
-  PSRAM (xrw) : ORIGIN = 0x90000000, LENGTH = 8M     /* external OCTOSPI1 APS6408 (issue #3) */
+  /* external OCTOSPI1 APS6408 (owhinata/wio-lite-ai#3) */
+  PSRAM (xrw) : ORIGIN = 0x90000000, LENGTH = 8M
 }
 
 /* Published so the app can report its own partition instead of hard-coding it
@@ -121,14 +122,14 @@ SECTIONS
     . = ALIGN(8);
   } >FLASH
 
-  /* ---- ITCM-resident interrupt paths (issue #24) --------------------------
+  /* ---- ITCM-resident interrupt paths (owhinata/wio-lite-ai#24) --------------------------
    * When this app executed XIP from the external OCTOSPI2 flash, every ISR was
    * fetched through a 16 KB I-cache at ~54 MB/s: once coremark / USB / shell /
    * telnet had evicted the ISR lines, each burst paid the cold fetch again --
-   * rtl_uart_isr() measured 8.7 us cold vs 3.3 us warm on board #2 (#23 U0-1), and
+   * rtl_uart_isr() measured 8.7 us cold vs 3.3 us warm on board #2 (owhinata/wio-lite-ai#23 U0-1), and
    * moving it here made it a flat 0.7 us.
    *
-   * Issue #25 moved execution to the internal flash (~905 MB/s, roughly the AXI-SRAM
+   * owhinata/wio-lite-ai#25 moved execution to the internal flash (~905 MB/s, roughly the AXI-SRAM
    * refill rate), which shrinks that gap enormously -- but does not close it.  ITCM
    * is still strictly better for an interrupt path: zero wait states, outside both
    * caches, and never evicted by whatever the threads are doing.  So this section
@@ -157,7 +158,7 @@ SECTIONS
    *     `.text.<name>` and are picked by section name.
    *
    *  3. Every C function is selected as the PAIR `.text.NAME .text.NAME.*`
-   *     (issue #39).  Under LTO the compiler clones and renames functions --
+   *     (owhinata/wio-lite-ai#39).  Under LTO the compiler clones and renames functions --
    *     `_tx_event_flags_set` becomes `_tx_event_flags_set.isra.0`, and the
    *     suffixes stack (`__NVIC_SystemReset.lto_priv.0.lto_priv.0` was observed) --
    *     so a bare `.text.NAME` stops matching and the function silently returns to
@@ -193,7 +194,7 @@ SECTIONS
     *(.text._tx_timer_expiration_process .text._tx_timer_expiration_process.*)
     *(.text._tx_thread_time_slice .text._tx_thread_time_slice.*)
 
-    /* Execution Profile Kit (issue #2, `thread` cpu%): called from every ISR entry
+    /* Execution Profile Kit (owhinata/wio-lite-ai#2, `thread` cpu%): called from every ISR entry
      * and every context switch, so it is on both hot paths above.  The setup and
      * *_time_get query helpers stay in the flash -- they run from thread context. */
     *(.text._tx_execution_isr_enter .text._tx_execution_isr_enter.*)
@@ -207,14 +208,14 @@ SECTIONS
     *(.text.tx_glue_isr_enter .text.tx_glue_isr_enter.*)
     *(.text.tx_glue_isr_exit .text.tx_glue_isr_exit.*)
 
-    /* RTL8720DN UART RX (issue #23): ~75 k interrupts/s once the link goes to a
+    /* RTL8720DN UART RX (owhinata/wio-lite-ai#23): ~75 k interrupts/s once the link goes to a
      * high baud rate.  rtl_uart_isr is static and may be inlined into the two
      * handlers -- either way it ends up in ITCM, so it is not ASSERTed below. */
     *(.text.USART1_IRQHandler .text.USART1_IRQHandler.*)
     *(.text.UART9_IRQHandler .text.UART9_IRQHandler.*)
     *(.text.rtl_uart_isr*)
 
-    /* ...and the wake-up it performs (issue #23 U0-3).  The RX ISR signals the eRPC
+    /* ...and the wake-up it performs (owhinata/wio-lite-ai#23 U0-3).  The RX ISR signals the eRPC
      * service thread so it starts reading a frame immediately instead of waiting out
      * its 1 ms poll.  Measured on board #2, adding that call took the ISR from 0.7 us
      * to 4.3 us warm and 12.9 us cold -- all of it external-flash fetch, at ~24 k interrupts/s at
@@ -229,7 +230,7 @@ SECTIONS
     *(.text._tx_event_flags_set .text._tx_event_flags_set.*)
     *(.text._tx_thread_system_resume .text._tx_thread_system_resume.*)
 
-    /* ...and the two tails of that same path (issue #29).  Both are only reached
+    /* ...and the two tails of that same path (owhinata/wio-lite-ai#29).  Both are only reached
      * when a waiting thread is really made ready, which is exactly the request/reply
      * case (`wifi ver`, `wifi scan`): the eRPC service thread is parked in
      * tx_event_flags_get() WITH A TIMEOUT, so every wake-up has to unlink its timer
@@ -365,7 +366,7 @@ SECTIONS
    * NRST), letting `dmesg` replay a crash after the board comes back.  A *power*
    * reset (POR/BOR) loses them, which log_init() detects via its magic word.
    * DTCM (not AXI-SRAM) so a write bypasses the D-cache; but a bare store does NOT
-   * durably land until it is read back (svc/log.c persist_*, issue #13).  Kept out
+   * durably land until it is read back (svc/log.c persist_*, owhinata/wio-lite-ai#13).  Kept out
    * of .bss so it is not zero-filled at boot -- and out of .dtcm_bss below, which
    * SystemInit() does zero. */
   .log_noinit (NOLOAD) :
@@ -376,13 +377,13 @@ SECTIONS
     . = ALIGN(4);
   } >DTCM
 
-  /* NetX Duo packet pool (issue #23 U3), in DTCM after the log ring.  Frames are
+  /* NetX Duo packet pool (owhinata/wio-lite-ai#23 U3), in DTCM after the log ring.  Frames are
    * memcpy'd in and out by the CPU alone -- the module relays them over a UART, there
    * is no DMA anywhere in this firmware -- so DTCM is not merely allowed here, it is
    * the better home: zero wait states, no D-cache line to evict, and 32 KB of 1.5 KB
    * frames kept out of the AXI-SRAM budget.  NOLOAD because nx_packet_pool_create()
    * builds every block header itself; zero-filling it at boot would be wasted work.
-   * The reset-persistent read-back rule (issue #13) applies to surviving a reset, not
+   * The reset-persistent read-back rule (owhinata/wio-lite-ai#13) applies to surviving a reset, not
    * to ordinary runtime access, and nothing here outlives one. */
   .nx_pool (NOLOAD) :
   {
@@ -404,14 +405,14 @@ SECTIONS
   } >DTCM
 
   /*
-   * CPU-only hot data moved out of AXI-SRAM (issue #46): every ThreadX thread
+   * CPU-only hot data moved out of AXI-SRAM (owhinata/wio-lite-ai#46): every ThreadX thread
    * stack and the RTL8720 UART rings.
    *
    * WHY.  AXI-SRAM is the only RAM a bus master can reach -- DMA1/DMA2 and the
    * SDMMC1 IDMA cannot see either TCM (RM0468 sec 2.1.2 / 2.1.5 / 2.1.6), which is
    * why port/sd/sd_card.c has to bounce through .axi_dma above.  Of the 221 KB this
    * firmware had in AXI-SRAM, exactly 4 KB actually needed to be there; the rest was
-   * CPU-only data occupying the one memory the camera's DCMI band (issue #35) has no
+   * CPU-only data occupying the one memory the camera's DCMI band (owhinata/wio-lite-ai#35) has no
    * substitute for.  Stacks are also the hottest data in the system, so DTCM is not
    * a consolation prize: zero wait states and no D-cache line to evict.
    *
@@ -458,7 +459,7 @@ SECTIONS
     _edtcm_bss = .;
     _dtcm_used_end = .;   /* DTCM high-water mark for the `free` command; keep
                            * .dtcm_bss the last DTCM section so this stays the top
-                           * of the resident block (issue #11).  Passive symbol --
+                           * of the resident block (owhinata/wio-lite-ai#11).  Passive symbol --
                            * no bytes emitted, no section moves. */
   } >DTCM
 
@@ -478,7 +479,7 @@ SECTIONS
     __bss_end__ = _ebss;
   } >RAM
 
-  /* Bus-master DMA scratch, in AXI-SRAM (issue #6).  The SDMMC1 IDMA is the first
+  /* Bus-master DMA scratch, in AXI-SRAM (owhinata/wio-lite-ai#6).  The SDMMC1 IDMA is the first
    * bus master this firmware enables, so its buffer is the first memory the CPU and
    * something else both write.  It stays plain cacheable AXI-SRAM and the driver
    * does the clean/invalidate (port/sd/sd_card.c) -- but that only works if no OTHER
@@ -527,14 +528,14 @@ SECTIONS
                            * block (mirrors _dtcm_used_end above). */
   } >ITCM
 
-  /* External OCTOSPI1 APS6408 PSRAM window (issue #3), 8 MB @ 0x90000000.  The DFU
+  /* External OCTOSPI1 APS6408 PSRAM window (owhinata/wio-lite-ai#3), 8 MB @ 0x90000000.  The DFU
    * bootloader brings the PSRAM up in memory-mapped mode (or, during app-first
    * bring-up, app/psram.c does); the MPU marks this window Normal non-cacheable
    * (app/mpu.c) so future DMA buffers stay coherent under the D-cache.  NOLOAD:
    * volatile external RAM -- never part of the .bin, never loaded or zeroed at boot.
    * Empty for v1 (no named PSRAM residents yet); named buffers land in .psram* as
-   * consumers (#5 SD / #6 LCD / #7 camera) arrive.  _psram_start/_psram_end bound
-   * the free pool for a future PSRAM allocator. */
+   * consumers (owhinata/wio-lite-ai#5 SD / owhinata/wio-lite-ai#6 LCD / owhinata/wio-lite-ai#7 camera)
+   * arrive. _psram_start/_psram_end bound the free pool for a future PSRAM allocator. */
   .psram_noinit (NOLOAD) :
   {
     . = ALIGN(32);
@@ -545,7 +546,7 @@ SECTIONS
     _psram_end = .;
   } >PSRAM
 
-  /* The cacheable carve-out (issue #9 phase 2a): the top 2 MB of the same window,
+  /* The cacheable carve-out (owhinata/wio-lite-ai#9 phase 2a): the top 2 MB of the same window,
    * mapped Normal write-back by app/mpu.c region 3 for the NN runtime's CPU-only
    * working set.  Pinned to an absolute address rather than packed after the
    * residents above, because an MPU region must be a power of two at a natural
@@ -598,7 +599,7 @@ SECTIONS
   ASSERT(_dtcm_used_end <= _smsp_stack,
          "DTCM residents collide with the main stack: shrink them or _msp_size")
 
-  /* ---- .itcm residency guards (issue #24) ---------------------------------
+  /* ---- .itcm residency guards (owhinata/wio-lite-ai#24) ---------------------------------
    * An input-section pattern that stops matching does NOT fail the link -- the
    * code just silently reverts to the flash and the interrupt-latency win vanishes
    * unnoticed.  Assert that the named entry points really did land in ITCM.
@@ -637,7 +638,7 @@ SECTIONS
   ASSERT(DEFINED(fault_handler_c) ?
          (fault_handler_c < ORIGIN(ITCM) + LENGTH(ITCM)) : 1,
          "fault_handler_c is not in ITCM")
-  /* The RX ISR's wake-up path (issue #23 U0-3).  erpc_rx_ready itself is static and may
+  /* The RX ISR's wake-up path (owhinata/wio-lite-ai#23 U0-3).  erpc_rx_ready itself is static and may
    * be inlined, like rtl_uart_isr, so it is not asserted -- these two are what actually
    * cost the fetch time, and they are ThreadX globals. */
   ASSERT(DEFINED(_tx_event_flags_set) ?
@@ -646,7 +647,7 @@ SECTIONS
   ASSERT(DEFINED(_tx_thread_system_resume) ?
          (_tx_thread_system_resume < ORIGIN(ITCM) + LENGTH(ITCM)) : 1,
          "_tx_thread_system_resume (RTL8720 RX wake-up) is not in ITCM")
-  /* The tails of the same path (issue #29) -- these are the branches that only run
+  /* The tails of the same path (owhinata/wio-lite-ai#29) -- these are the branches that only run
    * when a thread is actually woken, i.e. the ones that dominate request/reply
    * latency. */
   ASSERT(DEFINED(_tx_thread_system_preempt_check) ?

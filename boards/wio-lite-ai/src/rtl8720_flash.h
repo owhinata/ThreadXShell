@@ -4,8 +4,8 @@
  */
 /*
  * Wio Lite AI (STM32H725AEI6) -- onboard RTL8720DN (Realtek AmebaD/RTL8721D) UART
- * firmware-download support (issue #19).  This is the STM32-side, on-device flasher
- * that speaks the AmebaD ROM download protocol directly over the RTL8720's LOG UART
+ * firmware-download support (owhinata/wio-lite-ai#19).  This is the STM32-side, on-device
+ * flasher that speaks the AmebaD ROM download protocol directly over the RTL8720's LOG UART
  * (= our UART9, PD14/PD15), replacing the host-PC "image tool".
  *
  * MILESTONE 1 (this file, for now): prove UART download-mode ENTRY on this board via
@@ -18,11 +18,11 @@
  *
  * Layering: HAL/CMSIS <- rtl8720.c (basic UART/power) <- rtl8720_flash.c (download
  * protocol) <- cmd_wifi.c (shell).  It never touches the RCC clock tree -- only GPIO
- * reconfig + the #17 rtl8720 UART/power primitives -- so it is clock-safe.  cli-agnostic:
- * timing via ThreadX, cancellation via an optional abort hook (like app/erpc.c).
+ * reconfig + the owhinata/wio-lite-ai#17 rtl8720 UART/power primitives -- so it is clock-safe.
+ * cli-agnostic:  timing via ThreadX, cancellation via an optional abort hook (like app/erpc.c).
  *
- * REQUIRED CALLER DISCIPLINE (issue #21 increment 8).  Every entry point here drives
- * CHIP_EN and opens/closes UART9 at several baud rates internally, and reads the shared
+ * REQUIRED CALLER DISCIPLINE (owhinata/wio-lite-ai#21 increment 8).  Every entry point here
+ * drives CHIP_EN and opens/closes UART9 at several baud rates internally, and reads the shared
  * SPSC RX ring itself.  The RTL8720 link now has other users (the resident eRPC service
  * thread, and the L2 bridge owner that holds the UART while the host stack is up), so a
  * caller MUST hold the coarse link mutex with no eRPC session live for the WHOLE session --
@@ -74,8 +74,8 @@ void     rtl_dl_digest_add(struct rtl_dl_digest *d, const uint8_t *p, uint32_t n
 uint32_t rtl_dl_digest_value(const struct rtl_dl_digest *d);
 
 /* Result of an M1 download-mode probe (all diagnostic; the `wifi flashprobe` command
- * that printed it was retired by issue #28 -- the probe stays as the protocol layer's
- * entry self-test). */
+ * that printed it was retired by owhinata/wio-lite-ai#28 -- the probe stays as the protocol
+ * layer's entry self-test). */
 struct rtl_dl_result {
 	int      entered;      /* 1 if a valid read-word reply frame (0x31..0x15) was seen */
 	int      slip;         /* 1 if SLIP framing was used for the reply, 0 if raw */
@@ -154,7 +154,7 @@ int rtl_dl_read_flash(uint32_t offset, uint32_t nsectors, uint8_t *buf, uint32_t
  * there is no collision argument to make, and halving the span does not weaken that --
  * 4096 bytes of km0_boot still either wrap or they do not.  What it does buy is 8 KB of
  * AXI-SRAM (the probe holds two of these buffers, live only during `wifi flash`), and
- * AXI-SRAM is the only memory a bus master can reach (issue #46). */
+ * AXI-SRAM is the only memory a bus master can reach (owhinata/wio-lite-ai#46). */
 #define RTL_DL_SIZE_PROBE_LEN  4096u
 
 /* Highest flash offset the download protocol can express: its read / erase / checksum
@@ -236,9 +236,9 @@ int rtl_dl_flash_chksum(uint32_t off, uint32_t len, uint32_t timeout_ms, uint32_
 /* ---- M5: program a host-supplied firmware image (DESTRUCTIVE, the real thing) ---- *
  *
  * M3's single-sector erase/write/verify self-test (`wifi flashtest`, rtl_dl_flash_selftest)
- * lived here until issue #28.  It proved the erase/write/verify path on one gated sector
- * before there was a real writer; rtl_dl_flash_program below has exercised that same path
- * on every real flash since M5, so the test window and its bespoke gates went.  The erase
+ * lived here until owhinata/wio-lite-ai#28.  It proved the erase/write/verify path on one gated
+ * sector before there was a real writer; rtl_dl_flash_program below has exercised that same
+ * path on every real flash since M5, so the test window and its bespoke gates went.  The erase
  * and block-write primitives it shared with the programmer stay private and range-checked.
  */
 

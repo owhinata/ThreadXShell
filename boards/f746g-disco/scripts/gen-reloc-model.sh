@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 # Generate an X-CUBE-AI relocatable network binary (network_rel.bin) for the
-# stedgeai_reloc backend (Epic #80 P5, issue #92).
+# stedgeai_reloc backend (Epic owhinata/stm32f746g-disco#80 P5, owhinata/stm32f746g-disco#92).
 #
 # The output network_rel.bin is a single, position-independent blob (PIC code +
 # embedded weights) that the firmware loads from the microSD card at runtime and

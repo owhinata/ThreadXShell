@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Post-link guard for the cacheable PSRAM carve-out (issue #9 phase 2a).
+"""Post-link guard for the cacheable PSRAM carve-out (owhinata/wio-lite-ai#9 phase 2a).
 
 WHY THIS EXISTS
 ---------------
@@ -33,11 +33,11 @@ image really does contain `cam_ring.lto_priv.0`):
      vanished symbol a linker-script ASSERT cannot see.
 
      The names come from the command line rather than from a constant in here, and
-     that is issue #9 phase 2c's doing.  Which buffers belong in the carve-out depends
-     on which NN backend was compiled in -- the `null` stub's three tensors, or the
-     TFLM arena and its model slots -- and CMakeLists.txt is the one place that knows.
-     While the list was hard-coded here it named the `null` buffers, so this gate
-     failed EVERY tflm build with "no such object in the image", which reads exactly
+     that is owhinata/wio-lite-ai#9 phase 2c's doing.  Which buffers belong in the
+     carve-out depends on which NN backend was compiled in -- the `null` stub's three
+     tensors, or the TFLM arena and its model slots -- and CMakeLists.txt is the one place
+     that knows.  While the list was hard-coded here it named the `null` buffers, so this
+     gate failed EVERY tflm build with "no such object in the image", which reads exactly
      like a placement bug and is not one.
 
   3. AGREEMENT -- the section starts exactly at the MPU region base.  That address is
@@ -82,12 +82,12 @@ PSRAM_AI_LENGTH = 2 * 1024 * 1024
 # --require is passed in: every one of them belongs to a BSP_ENABLE_* option, and a
 # name this script demands from a build that never compiled it is reported as "no such
 # object in the image" -- which reads like a placement regression and is not one.
-# check_dtcm_residency.py learned this in issue #9 phase 2c, when a hardcoded
+# check_dtcm_residency.py learned this in owhinata/wio-lite-ai#9 phase 2c, when a hardcoded
 # sd_bounce made BSP_ENABLE_SD=OFF unbuildable; this file kept its own hardcoded list
-# and made BSP_ENABLE_CAMERA=OFF unbuildable in exactly the same way (issue #50).
-# The rule both scripts now follow: ONLY residents that exist in EVERY configuration
-# may be named in the source; anything a toggle can remove comes from CMakeLists.txt,
-# which is the only place that knows what was built.
+# and made BSP_ENABLE_CAMERA=OFF unbuildable in exactly the same way
+# (owhinata/wio-lite-ai#50).  The rule both scripts now follow: ONLY residents that exist
+# in EVERY configuration may be named in the source; anything a toggle can remove comes
+# from CMakeLists.txt, which is the only place that knows what was built.
 MUST_STAY_NONCACHEABLE = ()
 
 # GCC clone/localisation suffixes; they stack, so stripping repeats.  Same set as

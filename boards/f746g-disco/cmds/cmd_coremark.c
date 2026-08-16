@@ -74,7 +74,8 @@ static int cmd_coremark(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	}
 
-	/* Not cooperatively cancellable (issue #16): coremark_main() is a single
+	/* Not cooperatively cancellable (owhinata/stm32f746g-disco#16): coremark_main() is
+    a single
 	 * blocking call into the read-only EEMBC submodule with no poll point, and it
 	 * prints via ee_printf -> printf (not the shell's cli_tx_send_blocking), so
 	 * neither a cli_cancel_requested() check nor the TX-blocked RX wake applies.

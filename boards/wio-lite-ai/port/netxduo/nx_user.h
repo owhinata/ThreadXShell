@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /*
- * NetX Duo build configuration for Wio Lite AI (issue #23 U3).
+ * NetX Duo build configuration for Wio Lite AI (owhinata/wio-lite-ai#23 U3).
  *
  * Pulled in by every NetX Duo translation unit through the Cortex-M7/GNU port:
  * ports/cortex_m7/gnu/inc/nx_port.h includes this file when NX_INCLUDE_USER_DEFINE_FILE
@@ -79,8 +79,8 @@
  *                                   to _nx_*_packet_deferred_receive() directly from the
  *                                   link service thread; those functions are not gated by
  *                                   this define.
- *   NX_ENABLE_TCPIP_OFFLOAD         That is road A of issue #23 -- leaving TCP/IP in the
- *                                   module -- which this whole series exists to replace.
+ *   NX_ENABLE_TCPIP_OFFLOAD         That is road A of owhinata/wio-lite-ai#23 -- leaving
+ * TCP/IP in the module -- which this whole series exists to replace.
  */
 
 #endif /* NX_USER_H */

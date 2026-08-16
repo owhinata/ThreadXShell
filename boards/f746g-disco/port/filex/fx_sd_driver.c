@@ -3,7 +3,8 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * @file    fx_sd_driver.c
- * @brief   FileX media driver on the SDMMC1 block API (issue #34).
+ * @brief   FileX media driver on the SDMMC1 block API
+ * (owhinata/stm32f746g-disco#34).
  *
  * See fx_sd_driver.h.  FileX's fx_media_open() always reads logical sector 0 for
  * the boot record and never calls _fx_partition_offset_calculate(), so an

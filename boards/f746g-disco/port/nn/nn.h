@@ -4,7 +4,8 @@
  */
 /**
  * @file    nn.h
- * @brief   Backend-agnostic on-device neural-network inference API (issue #81).
+ * @brief   Backend-agnostic on-device neural-network inference API
+ * (owhinata/stm32f746g-disco#81).
  *
  * A thin tensor-in / tensor-out abstraction over one selectable inference
  * runtime.  Exactly one backend is compiled in per build (see CONFIG_NN_BACKEND
@@ -117,8 +118,9 @@ int nn_run(struct nn_model *m);
 uint32_t nn_last_cycles(const struct nn_model *m);
 
 /*
- * Runtime model swap (issue #89 P2).  Only backends that interpret a .tflite in
- * RAM support it (tflm); others return <0 (unsupported).  Usage:
+ * Runtime model swap (owhinata/stm32f746g-disco#89 P2).  Only backends that
+ * interpret a .tflite in RAM support it (tflm); others return <0 (unsupported).
+ * Usage:
  *   nn_model_load_region(&buf,&cap);   // backend's writable staging buffer
  *   ...fill buf with up to cap bytes of a .tflite read from SD...
  *   nn_model_reload(buf, len, "name"); // activate it (data==NULL => built-in)

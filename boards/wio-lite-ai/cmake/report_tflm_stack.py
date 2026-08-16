@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Report the deepest stack frames in the TFLM library (issue #9 phase 2c).
+"""Report the deepest stack frames in the TFLM library (owhinata/wio-lite-ai#9 phase 2c).
 
 THIS IS A REPORT, NOT A GATE.  It always exits 0.  It exists because the stack budget
 on this board is the one resource the TFLM port cannot simply be given more of:
 
   - the CLI thread that runs `ai bench` has a 4,096 B stack (CLI_INSTANCE_STACK_SIZE),
   - every thread stack lives in .dtcm_bss, and DTCM has under 8 KB free once the main
-    stack is accounted for (issue #46), so there is very little to hand over,
+    stack is accounted for (owhinata/wio-lite-ai#46), so there is very little to hand
+    over,
   - and the donor firmware's evidence that this fits is its own 4,096 B shell thread
     running the same model -- but at GCC 13.3, with a different CMSIS-NN revision.
     Kernel frame sizes are exactly the sort of thing that changes across those.

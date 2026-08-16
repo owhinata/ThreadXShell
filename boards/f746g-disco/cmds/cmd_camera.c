@@ -4,13 +4,15 @@
  */
 /**
  * @file    cmd_camera.c
- * @brief   `camera` shell command: B-CAMS-OMV / OV5640 control (#39/#41/#42).
+ * @brief   `camera` shell command: B-CAMS-OMV / OV5640 control
+ * (owhinata/stm32f746g-disco#39/#41/#42).
  *
  *   camera probe            power-cycle the module and read the OV5640 chip ID
  *   camera info             driver / sensor state
  *   camera capture [test]   snapshot one QVGA RGB565 frame (test = colorbar)
  *   camera save <sd|fs> <p> write the captured frame to a file, raw RGB565
- *   camera send [name]      stream the frame to the PC over YMODEM (#50)
+ *   camera send [name]      stream the frame to the PC over YMODEM
+ * (owhinata/stm32f746g-disco#50)
  *   camera off              cut module power
  *
  * `capture` prints per-channel min/max/mean statistics plus a first-pixels
@@ -48,7 +50,7 @@ static const char *cam_strerror(int rc)
 	}
 }
 
-/* ---- `camera set` quality controls (issue #44) --------------------------- */
+/* ---- `camera set` quality controls (owhinata/stm32f746g-disco#44) ------------- */
 
 /* Symbolic-value tables for the enumerated settings (name <-> port enum). */
 struct cam_named { const char *name; int val; };
@@ -68,7 +70,8 @@ static const struct cam_named flip_names[] = {
 	{ "flip", CAM_FLIP_FLIP }, { "both", CAM_FLIP_BOTH }, { NULL, 0 }
 };
 
-/* Resolution / pixel-format names for `camera res` / `camera format` (#45).
+/* Resolution / pixel-format names for `camera res` / `camera format`
+   (owhinata/stm32f746g-disco#45).
    RGB888 is unsupported; JPEG is snapshot-only and gated to <= VGA. */
 static const struct cam_named res_names[] = {
 	{ "qqvga", CAM_RES_QQVGA }, { "qvga", CAM_RES_QVGA },
@@ -202,7 +205,8 @@ static int cmd_camera_info(struct cli_instance *sh, int argc, char **argv)
 		cli_print(sh, "\r\n");
 	}
 
-	/* #102: attached subscribers + per-sink pipeline stats.  The base capture is a
+	/* owhinata/stm32f746g-disco#102: attached subscribers + per-sink pipeline stats.
+    The base capture is a
 	   cascade of the internal stats sink plus the enabled gui/nncam/mjpeg
 	   subscribers; each attaches only while the base runs and its format matches. */
 	{
@@ -424,7 +428,8 @@ static int cmd_camera_capture(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-/* Print the PC-side conversion hint for the saved/sent frame's format (#45). */
+/* Print the PC-side conversion hint for the saved/sent frame's format
+   (owhinata/stm32f746g-disco#45). */
 static void cam_convert_hint(struct cli_instance *sh, const struct camera_mode *m,
                             const char *path)
 {
@@ -558,7 +563,8 @@ static int cmd_camera_save(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	}
 
-	/* #102: refresh the stable buffer BEFORE opening the medium / creating the
+	/* owhinata/stm32f746g-disco#102: refresh the stable buffer BEFORE opening the
+    medium / creating the
 	   file, so we save the freshest frame (base ON: the latest streamed frame of
 	   any format, even with MJPEG/GUI subscribers; base OFF: the last `camera
 	   capture`) and never create an empty file when no frame is available. */
@@ -625,7 +631,8 @@ static int cmd_camera_send(struct cli_instance *sh, int argc, char **argv)
 	struct ym_source src;
 	int rc;
 
-	/* #102: refresh the stable buffer before sizing / starting the transfer (base
+	/* owhinata/stm32f746g-disco#102: refresh the stable buffer before sizing / starting
+    the transfer (base
 	   ON: latest streamed frame; base OFF: last capture), and fail before the
 	   ymodem handshake when no frame is available. */
 	rc = camera_snapshot_latest();
@@ -676,8 +683,9 @@ static int cmd_camera_off(struct cli_instance *sh, int argc, char **argv)
 	(void)argv;
 
 	/* `camera off` cuts sensor power, which cannot happen mid-stream (it wrecks the
-	   DCMI HW).  Cascade the base capture down first (#100): stop it and wait for the
-	   producer to tear it down (every subscriber gets a close()), then power off. */
+	   DCMI HW).  Cascade the base capture down first (owhinata/stm32f746g-disco#100):
+	   stop it and wait for the producer to tear it down (every subscriber gets a
+	   close()), then power off. */
 	if (camera_streaming()) {
 		cli_print(sh, "camera: stopping stream before power off\r\n");
 		(void)camera_stream_stop();
@@ -700,11 +708,11 @@ static int cmd_camera_off(struct cli_instance *sh, int argc, char **argv)
 
 /*
  * `camera set` is a real subcommand tree (one leaf per OV5640 control) so the
- * hierarchical help (issue #37) lists every setting via `help camera set`, and
- * a missing/extra value auto-prints the leaf's usage.  Each leaf validates its
- * value, calls the matching port setter and reports the outcome; the settings
- * are cached and applied immediately when the sensor is live, else at the next
- * capture.  brightness/contrast/saturation/hue coexist (the driver fixes up the
+ * hierarchical help (owhinata/stm32f746g-disco#37) lists every setting via `help
+ * camera set`, and a missing/extra value auto-prints the leaf's usage.  Each leaf
+ * validates its value, calls the matching port setter and reports the outcome; the
+ * settings are cached and applied immediately when the sensor is live, else at the
+ * next capture.  brightness/contrast/saturation/hue coexist (the driver fixes up the
  * OV5640's shared SDE_CTRL0/CTRL8 registers).
  */
 static int set_reject(struct cli_instance *sh, const char *name, const char *val)
@@ -872,7 +880,7 @@ CLI_SUBCMD_SET_CREATE(camera_set_subcmds,
 	        cmd_set_default),
 	CLI_SUBCMD_SET_END);
 
-/* ---- resolution / pixel format (issue #45) ------------------------------- */
+/* ---- resolution / pixel format (owhinata/stm32f746g-disco#45) ----------------- */
 /* Each leaf changes one axis and keeps the other; camera_set_format re-programs
    the sensor (resolution/format scalers + the per-mode HTS/VTS/PCLK fps table)
    and is refused while a stream or GUIX preview owns the DCMI. */
@@ -906,7 +914,7 @@ static int cmd_camera_format(struct cli_instance *sh, int argc, char **argv)
 	                                    (enum camera_format)n));
 }
 
-/* ---- frame rate (issue #67) ---------------------------------------------- */
+/* ---- frame rate (owhinata/stm32f746g-disco#67) -------------------------------- */
 /* `camera fps <15|30>`: 15 = 24 MHz PCLK, 30 = 48 MHz.  30 fps only takes effect
    for a small mode while the LTDC is not scanning out (otherwise it is clamped to
    15 fps so the 48 MHz DCMI burst does not overrun the SDRAM); use `lcd off`. */
@@ -920,7 +928,7 @@ static int cmd_camera_fps(struct cli_instance *sh, int argc, char **argv)
 	return set_report(sh, argv[0], argv[1], camera_set_fps((unsigned)n));
 }
 
-/* ---- streaming (issue #46): non-blocking start / stop / stats ------------ */
+/* ---- streaming (owhinata/stm32f746g-disco#46): non-blocking start / stop / stats --- */
 
 static int cmd_stream_start(struct cli_instance *sh, int argc, char **argv)
 {
@@ -952,9 +960,10 @@ static int cmd_stream_start(struct cli_instance *sh, int argc, char **argv)
 
 	/* Clearer message than the generic CAM_ERR_STATE: only large RASTER modes are
 	   capture-only (the ring slot / one DMA NDTR cannot hold the frame).  JPEG
-	   streams via the variable-length snapshot-loop producer (#63), so it is NOT
-	   rejected here.  Also warn when 30 fps is selected but clamped to 15 because
-	   the LTDC is scanning out (the stream still runs, just at 15 fps, #67). */
+	   streams via the variable-length snapshot-loop producer
+	   (owhinata/stm32f746g-disco#63), so it is NOT rejected here.  Also warn when 30
+	   fps is selected but clamped to 15 because the LTDC is scanning out (the stream
+	   still runs, just at 15 fps, owhinata/stm32f746g-disco#67). */
 	{
 		struct camera_mode m;
 
@@ -1018,7 +1027,8 @@ static int cmd_stream_stats(struct cli_instance *sh, int argc, char **argv)
 	          si.active ? "streaming"
 	                    : (si.err ? "stopped (overrun)" : "stopped"));
 	cli_print(sh, "elapsed:   %lu ms\r\n", (unsigned long)si.elapsed_ms);
-	/* #102: split the producer counters (frames the DCMI/DMA acquired + published)
+	/* owhinata/stm32f746g-disco#102: split the producer counters (frames the DCMI/DMA
+    acquired + published)
 	   from the internal stats sink's per-sink delivery counters. */
 	cli_print(sh, "-- producer --\r\n");
 	cli_print(sh, "captured:  %lu\r\n", (unsigned long)si.captured);
@@ -1035,7 +1045,8 @@ static int cmd_stream_stats(struct cli_instance *sh, int argc, char **argv)
 	cli_print(sh, "ovr ring:  %lu\r\n", (unsigned long)si.ring_ovr);
 	cli_print(sh, "dma fe:    %lu\r\n", (unsigned long)si.dma_fe);
 	if (si.elapsed_ms != 0) {
-		/* DMA FIFO-error RATE (#59): the figure of merit for the SDRAM-contention
+		/* DMA FIFO-error RATE (owhinata/stm32f746g-disco#59): the figure of merit for the
+     SDRAM-contention
 		   work -- fe per second x10 (one decimal), no floating point. */
 		uint32_t fe10 = (uint32_t)((uint64_t)si.dma_fe * 10000u / si.elapsed_ms);
 

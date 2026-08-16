@@ -3,8 +3,8 @@
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /*
- * NetX Duo link driver over the RTL8720 link's DATA channel (issue #23 U3).
- * See app/nx_link_driver.h for what this is and which thread runs what.
+ * NetX Duo link driver over the RTL8720 link's DATA channel (owhinata/wio-lite-ai#23
+ * U3).  See app/nx_link_driver.h for what this is and which thread runs what.
  */
 #include "nx_link_driver.h"
 
@@ -19,11 +19,11 @@
 #include "nx_net.h"      /* the transmit budget asserted just below */
 
 /*
- * The transmit budget from app/nx_net.h, checked HERE (issue #27) because this is the
- * translation unit that owns the transmit path -- it lived in nx_echo.c until then,
- * where deleting a diagnostic command would have silently taken the production driver's
- * sizing guarantee with it.  If a future socket or a deeper queue breaks it, the build
- * stops rather than the console stalling on a TCP retransmit timer.
+ * The transmit budget from app/nx_net.h, checked HERE (owhinata/wio-lite-ai#27) because
+ * this is the translation unit that owns the transmit path -- it lived in nx_echo.c
+ * until then, where deleting a diagnostic command would have silently taken the
+ * production driver's sizing guarantee with it.  If a future socket or a deeper queue
+ * breaks it, the build stops rather than the console stalling on a TCP retransmit timer.
  */
 _Static_assert(NXN_TCP_SOCKETS_MAX * NXN_TCP_TX_DEPTH + NX_ARP_MAX_QUEUE_DEPTH +
                        NXN_TX_SPARE <= LINK_DATA_TX_BUFS,
@@ -83,7 +83,8 @@ static uint8_t tx_coalesce[ETH_FRAME_MAX] __attribute__((aligned(8)));
  * so a packet it retains (a TCP segment awaiting acknowledgement) comes back with
  * prepend_ptr 14 bytes -- i.e. 2 mod 4 -- below where NetX left it, and the next
  * _nx_ip_header_add() does an unaligned 32-bit store into it.  The f746 port took a
- * UsageFault to learn this (its issue #79).  Every release path below calls this first.
+ * UsageFault to learn this (its owhinata/stm32f746g-disco#79).  Every release path below
+ * calls this first.
  */
 static void link_tx_unprepend(NX_PACKET *pkt)
 {

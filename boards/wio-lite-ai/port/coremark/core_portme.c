@@ -82,7 +82,8 @@ void portable_fini(core_portable *p)
 }
 
 #if (MEM_METHOD == MEM_MALLOC)
-/* MEM_MALLOC (issue #14): CoreMark obtains its ~2 KB working set from the newlib
+/* MEM_MALLOC (owhinata/wio-lite-ai#14): CoreMark obtains its ~2 KB working set
+   from the newlib
  * heap (AXI-SRAM) at the start of each run and frees it at the end (core_main.c),
  * so the shell reserves no permanent .bss for a rarely-run benchmark.  The heap is
  * D-cache-backed but single-CPU with no DMA master, so it is self-coherent.  The

@@ -3,7 +3,8 @@
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /*
- * Staging buffer for an RTL8720DN firmware image received from the PC -- issue #19 M5.
+ * Staging buffer for an RTL8720DN firmware image received from the PC --
+ * owhinata/wio-lite-ai#19 M5.
  *
  * Why this exists: until now the board could only read the module's flash (M2/M4).  To
  * (re)write it, an image has to get ONTO the board first, and that path is also the only
@@ -11,9 +12,9 @@
  * work before anything is allowed to erase the module's boot sectors.
  *
  * The image lands in the external OCTOSPI1 PSRAM window at 0x90000000 (8 MB, brought up
- * in issue #3/#16).  AXI-SRAM could not hold it: a full chip image is 2 MB against 320 KB
- * of system RAM.  The MPU maps that window Normal / non-cacheable / shareable (app/mpu.c),
- * so a CPU write is visible to the following CPU read with no cache maintenance.
+ * in owhinata/wio-lite-ai#3/#16).  AXI-SRAM could not hold it: a full chip image is 2 MB
+ * against 320 KB of system RAM.  The MPU maps that window Normal / non-cacheable / shareable
+ * (app/mpu.c), so a CPU write is visible to the following CPU read with no cache maintenance.
  *
  * Layering: this is app-level resource management (it owns a hardware-backed buffer), so
  * it sits next to psram.c, below the shell.  The shell wires rtl_img_sink() into the

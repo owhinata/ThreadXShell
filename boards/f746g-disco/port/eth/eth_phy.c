@@ -4,7 +4,8 @@
  */
 /**
  * @file    eth_phy.c
- * @brief   Clean-room LAN8742A PHY link driver (issue #49 P1).  See eth_phy.h.
+ * @brief   Clean-room LAN8742A PHY link driver (owhinata/stm32f746g-disco#49 P1).
+ * See eth_phy.h.
  *
  * Freestanding: no HAL, no ThreadX -- all MDIO access goes through the injected
  * read/write vtable.  The LAN8742 register numbers/bits below are clause-22

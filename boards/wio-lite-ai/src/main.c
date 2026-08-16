@@ -1,7 +1,7 @@
 /*
  * Wio Lite AI (STM32H725AEI6) -- ThreadX shell app entry (Phase 2).
  *
- * Runs from the internal flash app partition at 0x08020000 (issue #25), launched
+ * Runs from the internal flash app partition at 0x08020000 (owhinata/wio-lite-ai#25), launched
  * by the DFU bootloader.  It INHERITS the bootloader's 550 MHz clock tree and must
  * NOT reprogram the RCC: src/system_stm32h7xx.c gives a clock-free SystemInit (FPU
  * + VTOR + TCM initialisation only).  HAL_Init() only sets the
@@ -61,7 +61,7 @@
 CLI_BACKEND_USBCDC_DEFINE(cdc_tr);
 CLI_INSTANCE_DEFINE(cdc_sh, &cdc_tr, "wio> ");
 
-/* --- second console: telnet over the RTL8720DN (issue #21) --------------- */
+/* --- second console: telnet over the RTL8720DN (owhinata/wio-lite-ai#21) --------------- */
 /* Statically defined and started at boot like the CDC one (cli_init is one-shot, so an
  * instance cannot be created per client): app/net_shell.c drops its output until a client
  * is actually connected, and posts CLI_EVT_CONN on accept so each client gets a fresh
@@ -82,8 +82,8 @@ static TX_THREAD usb_thread;
 static UCHAR     usb_stack[4096] DTCM_BSS __attribute__((aligned(8)));  /* tud_task + printf headroom */
 
 #if BSP_ENABLE_IWDG
-/* IWDG petter (issue #4).  Static objects; the thread only refreshes -- the watchdog
- * is armed by iwdg_init() in tx_application_define (issue #12), after this thread is
+/* IWDG petter (owhinata/wio-lite-ai#4).  Static objects; the thread only refreshes -- the watchdog
+ * is armed by iwdg_init() in tx_application_define (owhinata/wio-lite-ai#12), after this thread is
  * created.  H7 HAL_IWDG_Init() polls the PR/RLR update with a HAL_GetTick() timeout,
  * so SysTick must be live: it is, because tx_application_define now runs with
  * interrupts enabled (no __disable_irq) and SysTick_Handler calls HAL_IncTick()
@@ -134,12 +134,12 @@ void tx_application_define(void *first_unused_memory)
   led_init_off();               /* configure PC13 and hold the red LED off */
 
   /* Hold the onboard RTL8720DN in power-off (CHIP_EN=PC3 driven low) before any
-   * `wifi` command runs, so the module never floats after reset (issue #17).
+   * `wifi` command runs, so the module never floats after reset (owhinata/wio-lite-ai#17).
    * Register-only GPIO; safe here (pre-scheduler), like led_init_off(). */
   rtl8720_init();
 
 #if BSP_ENABLE_KV
-  /* External NOR mutex (issue #37).  Pure ThreadX object creation, like the two
+  /* External NOR mutex (owhinata/wio-lite-ai#37).  Pure ThreadX object creation, like the two
    * calls below it: the controller and the device itself were already brought up
    * by nor_flash_init() in main(), which runs before there is a scheduler and
    * therefore takes no lock.  Everything that erases or programs happens after
@@ -153,10 +153,10 @@ void tx_application_define(void *first_unused_memory)
   (void) kv_boot_init();
 #endif
 
-  /* RTL8720DN link ownership (issue #21 increment 8): the coarse mutex that serialises
+  /* RTL8720DN link ownership (owhinata/wio-lite-ai#21 increment 8): the coarse mutex that serialises
    * whole `wifi`/`net` flows, then the resident eRPC service thread that owns USART1
    * and multiplexes requests by sequence number.  Both are pure ThreadX object
-   * creation -- no HAL_GetTick dependency, so they are safe here (issue #12) -- and the
+   * creation -- no HAL_GetTick dependency, so they are safe here (owhinata/wio-lite-ai#12) -- and the
    * service thread only becomes READY; it parks on its event flag as soon as it runs.
    * Fail-soft: if either fails the `wifi`/`net` commands report an error and the rest
    * of the firmware still runs. */
@@ -164,10 +164,10 @@ void tx_application_define(void *first_unused_memory)
   (void) erpc_service_init();
 
 #if BSP_ENABLE_SD
-  /* microSD block driver (issue #6): creates its mutex/semaphore and configures the
+  /* microSD block driver (owhinata/wio-lite-ai#6): creates its mutex/semaphore and configures the
    * SDMMC1 pins, kernel-clock mux and NVIC.  It performs NO card I/O -- the card is
    * identified lazily by the first `sd` command -- so nothing here waits on
-   * HAL_GetTick and it is safe pre-scheduler (issue #12), like rtl8720_init() above.
+   * HAL_GetTick and it is safe pre-scheduler (owhinata/wio-lite-ai#12), like rtl8720_init() above.
    * Fail-soft: on failure the `sd` commands report "driver not initialized". */
   (void) sd_card_init();
   /* FileX mount singleton: creates its mutexes and runs fx_system_initialize().
@@ -178,13 +178,13 @@ void tx_application_define(void *first_unused_memory)
 #endif
 
 #if BSP_ENABLE_LCD
-  /* LCD over LTDC + DMA2D (issue #7).  Creates its ThreadX objects, pulses the
+  /* LCD over LTDC + DMA2D (owhinata/wio-lite-ai#7).  Creates its ThreadX objects, pulses the
    * panel reset, wakes the ST7789 over its serial link and configures the
    * controller.  It waits on no ThreadX object and runs no DMA2D transfer (the
    * frame buffers are cleared by a CPU loop), which is what makes it safe here;
    * it does spend ~255 ms in HAL_Delay for the reset pulse and the ST7789's two
-   * mandatory 120 ms settles (issue #43), which is fine because SysTick is already feeding
-   * HAL_IncTick and the IWDG is not armed until further down.
+   * mandatory 120 ms settles (owhinata/wio-lite-ai#43), which is fine because SysTick is already
+   * feeding HAL_IncTick and the IWDG is not armed until further down.
    * The frame buffers live in the OCTOSPI1 PSRAM, so the
    * bring-up is gated on psram_ready() HERE rather than inside the driver --
    * port/ltdc must not depend on app/psram, because app/psram.c depends on it
@@ -199,7 +199,7 @@ void tx_application_define(void *first_unused_memory)
 #endif
 
 #if BSP_ENABLE_CAMERA
-  /* DVP camera bring-up (issue #8 phase 1).  Creates its mutex, gates the clocks
+  /* DVP camera bring-up (owhinata/wio-lite-ai#8 phase 1).  Creates its mutex, gates the clocks
    * and configures PA2 (XCLK, parked low), PE7/PH12 (PWDN/RESETB, both asserted)
    * and I2C4.  It runs NO sensor traffic, waits on nothing, spends no time in
    * HAL_Delay and enables no interrupt -- the module stays exactly as its own
@@ -214,20 +214,20 @@ void tx_application_define(void *first_unused_memory)
 #endif
 #endif
 
-  /* Telnet console service (issue #21 increment 9): owns the module's listening/session
+  /* Telnet console service (owhinata/wio-lite-ai#21 increment 9): owns the module's listening/session
    * sockets and feeds the net_sh instance above.  Object creation only -- the thread parks
    * on its event flags until an IP address comes up (`wifi connect` / `net dhcp` arm it, or
    * `net shell start` does explicitly).  Fail-soft like the two above. */
   (void) net_shell_init();
 
-  /* The host's own IP stack (issue #23 U3): NetX Duo plus the thread that owns a bridge
+  /* The host's own IP stack (owhinata/wio-lite-ai#23 U3): NetX Duo plus the thread that owns a bridge
    * session.  Object creation only -- the IP instance comes up with address 0.0.0.0 and
    * the link DOWN, and nothing touches the RTL8720 until `wifi connect`.  Fail-soft: without
    * it `net` keeps working through the module's lwIP exactly as before. */
   (void) nx_net_init();
 
 #if BSP_ENABLE_IWDG
-  /* IWDG petter thread (priority 5), then arm the watchdog (issue #12: arm here, not
+  /* IWDG petter thread (priority 5), then arm the watchdog (owhinata/wio-lite-ai#12: arm here, not
    * in the entry, matching f746).  HAL_IWDG_Init()'s HAL_GetTick() timeout works
    * because interrupts are enabled and SysTick is ticking (HAL_IncTick) throughout
    * tx_application_define.  Fail-soft: arm ONLY if the petter was created -- an armed
@@ -276,7 +276,7 @@ int main(void)
    * disables the caches in HW, and the app persists no cacheable-SRAM state across
    * a reset, so the boot handoff is unchanged.
    *
-   * DMA coherency: there IS a bus master now (issue #6) -- the SDMMC1 IDMA, once a
+   * DMA coherency: there IS a bus master now (owhinata/wio-lite-ai#6) -- the SDMMC1 IDMA, once a
    * card is probed -- so the "one CPU behind one D-cache, self-coherent" reading of
    * the paragraph above stops holding for the memory that master touches.  Two
    * mechanisms cover it, and new DMA peripherals should pick one deliberately:
@@ -306,7 +306,7 @@ int main(void)
   timebase_init();   /* DWT cycle counter for usleep's udelay (CoreDebug/DWT only, no RCC) */
 
 #if BSP_ENABLE_LCD
-  /* LTDC pixel clock (issue #7).  MUST run here: it briefly stops PLL3 to retune
+  /* LTDC pixel clock (owhinata/wio-lite-ai#7).  MUST run here: it briefly stops PLL3 to retune
    * DIVR3 (RM0468 sec 8.7.16 -- the field is writable only with PLL3 off), and
    * PLL3Q is the 48 MHz that clocks the USB CDC console.  Before usb_hw_init()
    * nothing has enumerated and OTG_HS is not even clocked, so the outage is
@@ -319,22 +319,23 @@ int main(void)
 
   usb_hw_init();   /* OTG_HS pins/clock only; the device stack (tusb_init, which
                     * enables OTG_HS_IRQn) comes up later in the usb thread entry so
-                    * no interrupt is armed before its ThreadX objects exist (#12). */
+                    * no interrupt is armed before its ThreadX objects exist
+                    * (owhinata/wio-lite-ai#12). */
 
 #if BSP_PSRAM_INIT_IN_APP
-  /* OCTOSPI1 APS6408 PSRAM bring-up (issue #3): register-only, touches neither the
+  /* OCTOSPI1 APS6408 PSRAM bring-up (owhinata/wio-lite-ai#3): register-only, touches neither the
    * OCTOSPIM routing nor the RCC.  Fail-soft -- a failed bring-up just leaves
-   * `psram` reporting "not ready".  This stays app-side: since issue #25 the
+   * `psram` reporting "not ready".  This stays app-side: since owhinata/wio-lite-ai#25 the
    * bootloader owns no external memory at all, so the app is the natural owner. */
   psram_hw_init();
-  /* mmapscan (issue #16): if a DLYB sweep is in progress, test the next unit
+  /* mmapscan (owhinata/wio-lite-ai#16): if a DLYB sweep is in progress, test the next unit
    * against real mmap access and either record + reset, or (on a hang) let the
    * IWDG reset -- headless, before the shell.  No-op when no sweep is active. */
   psram_mmapscan_boot();
 #endif
 
 #if BSP_ENABLE_KV
-  /* OCTOSPI2 W25Q128 NOR bring-up (issue #37).  Same shape as the PSRAM above --
+  /* OCTOSPI2 W25Q128 NOR bring-up (owhinata/wio-lite-ai#37).  Same shape as the PSRAM above --
    * register-only, per-pin GPIO RMW, no RCC write, fail-soft -- and it sits here
    * for the same reason: it needs no lock (nothing else runs yet) and it performs
    * no erase or program, so it never has to sleep.  It does NOT enter the
@@ -348,7 +349,7 @@ int main(void)
 
   setvbuf(stdout, NULL, _IONBF, 0);   /* unbuffered so printf reaches _write */
 
-  /* No __disable_irq() here (issue #12): interrupts stay enabled through ThreadX
+  /* No __disable_irq() here (owhinata/wio-lite-ai#12): interrupts stay enabled through ThreadX
    * init, matching f746.  This is safe because every interrupt source is gated until
    * its ThreadX objects exist -- SysTick only calls HAL_IncTick() until
    * tx_glue_timer_enable() opens the tx_timer_active gate, and OTG_HS_IRQn stays

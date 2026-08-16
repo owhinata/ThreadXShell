@@ -3,11 +3,11 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host unit test for the camera frame pipeline core (svc/frame_pipeline.c,
- * issue #47 design / #46).  Pure: no HAL/ThreadX/shell -- a no-op frame_os and
- * mock sinks exercise the ring/refcount/policy logic on the host.  Asserts:
- *   A. init + acquire returns distinct free slots; acquire excludes the latest
- *      published slot (so a pull reader is not recycled under).
- *   B. publish stamps a monotonic generation.
+ * owhinata/stm32f746g-disco#47 design / owhinata/stm32f746g-disco#46).  Pure: no
+ * HAL/ThreadX/shell -- a no-op frame_os and mock sinks exercise the
+ * ring/refcount/policy logic on the host. Asserts:  A. init + acquire returns
+ * distinct free slots; acquire excludes the latest published slot (so a pull
+ * reader is not recycled under).  B. publish stamps a monotonic generation.
  *   C. DROP policy: a frame published while the sink is busy is dropped.
  *   D. LATEST policy: coalesces to the newest pending; on completion put()
  *      delivers it; a superseded pending is dropped.

@@ -4,7 +4,8 @@
  */
 /**
  * @file    nn.c
- * @brief   Backend-agnostic nn API dispatcher + inference timing (issue #9 P1).
+ * @brief   Backend-agnostic nn API dispatcher + inference timing
+ * (owhinata/wio-lite-ai#9 P1).
  *
  * A thin layer over the compiled-in backend (nn_backend_vt_selected).  It adds the
  * two cross-backend concerns the backends must not each reimplement:
@@ -217,7 +218,7 @@ uint32_t nn_last_cycles(const struct nn_model *m)
 	return (m && m->open) ? m->last_cycles : 0u;
 }
 
-/* ---- runtime model swap (issue #9 phase 2c) --------------------------------
+/* ---- runtime model swap (owhinata/wio-lite-ai#9 phase 2c) --------------------------
  *
  * These three wrap the OPTIONAL vtable entries, and the reason they are written out
  * rather than left to the caller is that a NULL function pointer is a landmine.  The

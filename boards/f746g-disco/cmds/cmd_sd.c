@@ -4,7 +4,8 @@
  */
 /**
  * @file    cmd_sd.c
- * @brief   `sd` shell command: microSD card + FileX filesystem (issue #33/#34).
+ * @brief   `sd` shell command: microSD card + FileX filesystem
+ * (owhinata/stm32f746g-disco#33/#34).
  *
  *   sd info            card type, capacity, block geometry, bus width, CID/CSD
  *   sd read <lba>      hexdump one 512 B block (LBA addressing)
@@ -191,7 +192,7 @@ static const struct fs_device sd_dev = {
 	.info_extra = NULL,
 };
 
-/* Accessor for cross-command reuse (camera save, issue #42). */
+/* Accessor for cross-command reuse (camera save, owhinata/stm32f746g-disco#42). */
 const struct fs_device *fs_sd_device(void)
 {
 	return &sd_dev;

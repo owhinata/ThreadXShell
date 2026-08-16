@@ -21,7 +21,7 @@
 #include "cli_instance.h"
 #include "cli_internal.h"
 
-/* ---- thread -> instance registry (#18) ------------------------------------
+/* ---- thread -> instance registry (owhinata/stm32f746g-disco#18) -------------------
  *
  * The backend's printf retarget (_write) asks cli_current_instance() which
  * shell instance owns the running thread, so printf output follows the calling
@@ -125,8 +125,9 @@ struct cli_instance *cli_current_instance(void)
 /*
  * Instance thread.  Enable the backend, show the prompt, then loop: wait for an
  * RX (or KILL) signal, drain every available byte and run the state machine.
- * The mutex is created for #5's locked output path and is intentionally not
- * taken here -- in #4 all output comes from this one thread.
+ * The mutex is created for owhinata/stm32f746g-disco#5's locked output path and is
+ * intentionally not taken here -- in owhinata/stm32f746g-disco#4 all output comes
+ * from this one thread.
  */
 static void cli_thread_entry(ULONG arg)
 {
@@ -140,7 +141,8 @@ static void cli_thread_entry(ULONG arg)
 	if (tr->api->enable(tr) != 0) {
 		if (tr->api->uninit)
 			tr->api->uninit(tr);
-		cli_unregister_thread(&sh->thread);   /* #18: drop the thread->instance map */
+		/* owhinata/stm32f746g-disco#18: drop the thread->instance map */
+		cli_unregister_thread(&sh->thread);
 		return;
 	}
 	cli_edit_session_start(sh);   /* probe terminal width + draw the first prompt */
@@ -155,7 +157,8 @@ static void cli_thread_entry(ULONG arg)
 		if (flags & CLI_EVT_KILL)
 			break;                  /* full stop/uninit lifecycle is future (§14) */
 
-		/* A transport (re)connected (issue #49 P4: TCP backend posts CLI_EVT_CONN
+		/* A transport (re)connected (owhinata/stm32f746g-disco#49 P4: TCP backend posts
+     CLI_EVT_CONN
 		 * on accept).  Start a fresh session ON THIS THREAD so every editor-state
 		 * mutation stays single-threaded against the byte loop below.  Order is
 		 * deliberate: reset state -> backend session_begin (the TCP backend sets
@@ -173,8 +176,8 @@ static void cli_thread_entry(ULONG arg)
 		 * with '\r', which dispatches the handler synchronously from inside
 		 * cli_input_byte(); bulk-reading the ring first would pull any following
 		 * type-ahead (e.g. a Ctrl+C) out of the ring into a local buffer, hiding
-		 * it from cli_cancel_poll() while the handler runs (issue #16).  Feeding
-		 * one byte at a time keeps every not-yet-consumed byte in the ring, so a
+		 * it from cli_cancel_poll() while the handler runs (owhinata/stm32f746g-disco#16).
+		 * Feeding one byte at a time keeps every not-yet-consumed byte in the ring, so a
 		 * running command can still see a 0x03 that arrived right after its line. */
 		uint8_t b;
 		while (tr->api->read(tr, &b, 1) > 0)
@@ -183,7 +186,8 @@ static void cli_thread_entry(ULONG arg)
 
 	if (tr->api->uninit)
 		tr->api->uninit(tr);
-	cli_unregister_thread(&sh->thread);   /* #18: drop the thread->instance map */
+	/* owhinata/stm32f746g-disco#18: drop the thread->instance map */
+	cli_unregister_thread(&sh->thread);
 }
 
 int cli_init(struct cli_instance *sh)
@@ -214,7 +218,8 @@ int cli_init(struct cli_instance *sh)
 	sh->esc_p[0]    = 0;
 	sh->esc_p[1]    = 0;
 	sh->overwrite   = 0;
-	sh->hist_used   = 0;        /* command history ring empty (issue #10) */
+	/* command history ring empty (owhinata/stm32f746g-disco#10) */
+	sh->hist_used   = 0;
 	sh->hist_nav_on = 0;
 	sh->hist_nav    = 0;
 	sh->bs_swap     = CLI_BACKSPACE_MODE;
@@ -222,7 +227,8 @@ int cli_init(struct cli_instance *sh)
 	sh->old_rows    = 0;
 	sh->draw_row    = 0;
 	sh->probing_cpr = 0;
-	sh->tab_list_armed = 0;     /* Tab completion two-stage flag (issue #11) */
+	/* Tab completion two-stage flag (owhinata/stm32f746g-disco#11) */
+	sh->tab_list_armed = 0;
 	sh->last_result = 0;
 	sh->rx_dropped  = 0;
 	sh->out_len     = 0;
@@ -250,7 +256,8 @@ int cli_init(struct cli_instance *sh)
 	}
 
 	/* TX_INHERIT: priority inheritance so a low-priority shell holding the TX
-	 * lock (added in #5) cannot be preempted indefinitely by a mid thread. */
+	 * lock (added in owhinata/stm32f746g-disco#5) cannot be preempted indefinitely by
+	 * a mid thread. */
 	if (tx_mutex_create(&sh->tx_lock, "cli_tx", TX_INHERIT) != TX_SUCCESS) {
 		if (tr->api->uninit)
 			tr->api->uninit(tr);
@@ -268,16 +275,17 @@ int cli_start(struct cli_instance *sh)
 		return -1;
 
 	/* Register the thread->instance mapping BEFORE creating the auto-started
-	 * thread (#18): &sh->thread is a stable member address valid before
-	 * tx_thread_create(), so a thread that begins running immediately always
-	 * finds itself registered (no register-after-start race).  A full registry
+	 * thread (owhinata/stm32f746g-disco#18): &sh->thread is a stable member address
+	 * valid before tx_thread_create(), so a thread that begins running immediately
+	 * always finds itself registered (no register-after-start race).  A full registry
 	 * is a start failure -- printf must never silently misroute. */
 	if (cli_register_thread(&sh->thread, sh) != 0)
 		return -1;
 
 	/* Time-sliced (CLI_INSTANCE_TIME_SLICE): several interactive instances share one
 	 * priority, so without a slice a CPU-bound command on one console would starve the
-	 * others until it blocked.  0 maps to TX_NO_TIME_SLICE (the pre-#21 behaviour). */
+	 * others until it blocked.  0 maps to TX_NO_TIME_SLICE (the
+	 * pre-owhinata/wio-lite-ai#21 behaviour). */
 	if (tx_thread_create(&sh->thread, "cli", cli_thread_entry, (ULONG)sh,
 	                     sh->stack, sh->stack_size,
 	                     CLI_INSTANCE_PRIORITY, CLI_INSTANCE_PRIORITY,
@@ -319,16 +327,17 @@ static ULONG cli_wait(unsigned ticks)
  *
  * A backend may raise it above CLI_TX_TIMEOUT when its own recovery is legitimately
  * slower than the default: the telnet console's is a TCP retransmit, and a deadline
- * below the RTO turned every lost segment into a truncated report (issue #48).  The
- * transport is asked, not the instance, so a background job -- whose worker aliases
- * tr to the foreground's (cli_job.c) -- inherits the same answer.
+ * below the RTO turned every lost segment into a truncated report
+ * (owhinata/wio-lite-ai#48). The transport is asked, not the instance, so a
+ * background job -- whose worker aliases tr to the foreground's (cli_job.c) --
+ * inherits the same answer.
  *
  * But the raised deadline applies to COMMAND OUTPUT only, which is what it was for.
  * The wait below only listens for RX and polls for Ctrl+C while a command is running;
  * on the editor's echo path it waits on CLI_EVT_TX alone, so a long deadline there
- * buys nothing and freezes the keyboard for its whole length instead (issue #49).  A
- * background job is always command output, and a freshly reset worker has not set
- * dispatching yet, so it is recognised by sh->fg.
+ * buys nothing and freezes the keyboard for its whole length instead
+ * (owhinata/wio-lite-ai#49). A background job is always command output, and a freshly
+ * reset worker has not set dispatching yet, so it is recognised by sh->fg.
  */
 static unsigned cli_tx_deadline(const struct cli_instance *sh)
 {
@@ -340,15 +349,15 @@ static unsigned cli_tx_deadline(const struct cli_instance *sh)
 }
 
 /*
- * Output lock (issue #5): the per-instance TX mutex guards a whole output call
- * (format + stage + flush) so concurrent writers to one instance never corrupt
- * out_buf/out_len.  TX_INHERIT (set in cli_init) bounds priority inversion while
- * the lock is held across a TX-space wait.
+ * Output lock (owhinata/stm32f746g-disco#5): the per-instance TX mutex guards a whole
+ * output call (format + stage + flush) so concurrent writers to one instance never
+ * corrupt out_buf/out_len.  TX_INHERIT (set in cli_init) bounds priority inversion
+ * while the lock is held across a TX-space wait.
  *
- * Background jobs (issue #25): a bg-job worker instance (sh->fg != NULL) has no
- * tx_lock of its own; it locks its FOREGROUND's tx_lock so its output serialises
- * against the fg line editor (which also outputs under that mutex).  The mutex
- * is owner-reentrant, so a fg call that nests another lock is harmless.
+ * Background jobs (owhinata/stm32f746g-disco#25): a bg-job worker instance (sh->fg !=
+ * NULL) has no tx_lock of its own; it locks its FOREGROUND's tx_lock so its output
+ * serialises against the fg line editor (which also outputs under that mutex).  The
+ * mutex is owner-reentrant, so a fg call that nests another lock is harmless.
  */
 static struct cli_instance *cli_out_target(struct cli_instance *sh)
 {
@@ -368,10 +377,10 @@ void cli_unlock(struct cli_instance *sh)
 	struct cli_transport *tr = o->tr;
 
 	/*
-	 * Tell the backend the unit of output is complete (issue #49), BEFORE releasing:
-	 * afterwards another writer could take the lock and start a new unit in the gap,
-	 * and the backend would flush the two together.  The hook only sets a flag, and
-	 * nothing it wakes takes tx_lock, so holding it across the call is safe.
+	 * Tell the backend the unit of output is complete (owhinata/wio-lite-ai#49), BEFORE
+	 * releasing:  afterwards another writer could take the lock and start a new unit in
+	 * the gap, and the backend would flush the two together.  The hook only sets a flag,
+	 * and nothing it wakes takes tx_lock, so holding it across the call is safe.
 	 *
 	 * Every release, including a nested one -- see the vtable comment: a missed flush
 	 * stalls a backend that waits for it (cli_console_claim() holds this lock for a
@@ -383,22 +392,24 @@ void cli_unlock(struct cli_instance *sh)
 	tx_mutex_put(&o->tx_lock);
 }
 
-/* Set for the duration of a raw binary transfer (issue #50); see cli_internal.h. */
+/* Set for the duration of a raw binary transfer (owhinata/stm32f746g-disco#50);
+   see cli_internal.h. */
 volatile uint8_t cli_xfer_active;
 
 /*
- * Console hand-over for a binary transfer (issue #50).  Take the output lock for
- * the WHOLE transfer (so a background job's output cannot interleave into the
- * YMODEM byte stream -- it blocks and, per #25, drops on its wedge deadline) and
- * raise cli_xfer_active so cli_tx_send_blocking stops draining RX and _write drops
- * printf output.  Returns 0 on success, -2 if called from a background job, -1 if
- * the lock could not be acquired.
+ * Console hand-over for a binary transfer (owhinata/stm32f746g-disco#50).  Take the
+ * output lock for the WHOLE transfer (so a background job's output cannot interleave
+ * into the YMODEM byte stream -- it blocks and, per owhinata/stm32f746g-disco#25,
+ * drops on its wedge deadline) and raise cli_xfer_active so cli_tx_send_blocking
+ * stops draining RX and _write drops printf output.  Returns 0 on success, -2 if
+ * called from a background job, -1 if the lock could not be acquired.
  *
  * A bg-job worker (sh->fg != NULL) is REFUSED: the RX ring is a strict SPSC pipe
  * owned by the foreground thread, and the USART RX ISR posts CLI_EVT_RX to the
  * FOREGROUND's event group (u->sh == fg), not the worker's -- so a worker's
  * cli_read_byte() would never wake on an ACK while the foreground line editor
- * drains the bytes.  A binary transfer must run in the foreground (#50/#25).
+ * drains the bytes.  A binary transfer must run in the foreground
+ * (owhinata/stm32f746g-disco#50/#25).
  */
 int cli_console_claim(struct cli_instance *sh)
 {
@@ -416,7 +427,8 @@ void cli_console_release(struct cli_instance *sh)
 	cli_unlock(sh);
 }
 
-/* Discard any bytes buffered in the transport RX ring (issue #50): used before a
+/* Discard any bytes buffered in the transport RX ring (owhinata/stm32f746g-disco#50):
+   used before a
  * transfer (drop the rest of the command line / type-ahead) and after (drop a
  * trailing 'O'/'C' or other protocol tail) so the shell prompt resumes clean. */
 void cli_rx_flush(struct cli_instance *sh)
@@ -428,8 +440,8 @@ void cli_rx_flush(struct cli_instance *sh)
 }
 
 /*
- * Timed raw RX read for a binary transfer (issue #50).  Returns 0..255 on a
- * received byte, -1 on timeout (timeout_ms elapsed with none), -2 on kill
+ * Timed raw RX read for a binary transfer (owhinata/stm32f746g-disco#50).  Returns
+ * 0..255 on a received byte, -1 on timeout (timeout_ms elapsed with none), -2 on kill
  * (CLI_EVT_KILL).  Unlike cli_cancel_poll()/cli_sleep() it does NOT interpret
  * 0x03 -- Ctrl+C is returned as the byte 3 like any other, so YMODEM control
  * bytes are never consumed by a cancel check.  timeout_ms == 0 polls once
@@ -448,7 +460,8 @@ int cli_read_byte(struct cli_instance *sh, unsigned timeout_ms)
 		UINT  st;
 
 		/* Drain the ring first: the main loop's TX_OR_CLEAR may already have
-		 * consumed the RX flag for a byte still sitting in the ring (#16 inv 2). */
+		 * consumed the RX flag for a byte still sitting in the ring
+		 * (owhinata/stm32f746g-disco#16 inv 2). */
 		if (tr->api->read(tr, &b, 1) > 0)
 			return (int)b;
 		if (timeout_ms == 0u)
@@ -486,14 +499,17 @@ int cli_tx_send_blocking(struct cli_instance *sh, const uint8_t *data, size_t le
 	size_t sent = 0;
 	int    is_job = (sh->fg != NULL);
 	/* bg job: base of the no-progress deadline that bounds a wedged TX so a job
-	 * never pins the shared fg->tx_lock forever (issue #25); reset on progress. */
+	 * never pins the shared fg->tx_lock forever (owhinata/stm32f746g-disco#25); reset
+	 * on progress. */
 	ULONG  stall_start = is_job ? tx_time_get() : 0u;
 
 	while (sent < len) {
-		/* Cooperative Ctrl+C (issue #16): once cancel is latched, stop emitting
+		/* Cooperative Ctrl+C (owhinata/stm32f746g-disco#16): once cancel is latched, stop
+     emitting
 		 * at once so a handler that keeps printing finishes fast.  Gated by
 		 * dispatching so the post-cancel "^C"/prompt cleanup (dispatching == 0)
-		 * is never suppressed.  For a bg job cancel_req is set by `kill` (#25). */
+		 * is never suppressed.  For a bg job cancel_req is set by `kill`
+		 * (owhinata/stm32f746g-disco#25). */
 		if (sh->dispatching && sh->cancel_req)
 			return -1;
 
@@ -518,13 +534,13 @@ int cli_tx_send_blocking(struct cli_instance *sh, const uint8_t *data, size_t le
 			 * job cannot wait for it on its own group -- instead wait a short slice
 			 * on its OWN events for a kill, then retry the write.  Bound the
 			 * no-progress time by CLI_TX_TIMEOUT so a wedged TX drops rather than
-			 * pinning fg->tx_lock (issue #25). */
+			 * pinning fg->tx_lock (owhinata/stm32f746g-disco#25). */
 			ULONG flags;
-			/* Always FINITE for a bg job (issue #25): it holds the shared
+			/* Always FINITE for a bg job (owhinata/stm32f746g-disco#25): it holds the shared
 			 * fg->tx_lock while sending, so it must not honour a zero
 			 * (never-drop) deadline -- a wedged TX would pin the lock and freeze
 			 * the foreground.  Use the configured timeout (the transport's when it
-			 * raised it, issue #48), or CLI_BG_TX_WEDGE_TICKS. */
+			 * raised it, owhinata/wio-lite-ai#48), or CLI_BG_TX_WEDGE_TICKS. */
 			ULONG budget = cli_tx_deadline(sh) ? (ULONG)cli_tx_deadline(sh)
 			                                   : (ULONG)CLI_BG_TX_WEDGE_TICKS;
 
@@ -544,9 +560,10 @@ int cli_tx_send_blocking(struct cli_instance *sh, const uint8_t *data, size_t le
 		 * command runs we also wake on RX so a Ctrl+C arriving mid-output aborts
 		 * the blocked send.  The main loop's TX_OR_CLEAR may already have consumed
 		 * the RX flag for a 0x03 still sitting in the ring, so poll the ring
-		 * BEFORE waiting (issue #16 invariant 2). */
+		 * BEFORE waiting (owhinata/stm32f746g-disco#16 invariant 2). */
 		ULONG flags;
-		/* During a raw binary transfer (issue #50) the RX ring belongs to the
+		/* During a raw binary transfer (owhinata/stm32f746g-disco#50) the RX ring belongs
+     to the
 		 * YMODEM protocol, so do NOT wake on / drain it for a Ctrl+C here -- that
 		 * would eat an ACK/'C'/NAK.  Wait only on TX space / kill. */
 		int   raw  = cli_xfer_active;
@@ -574,19 +591,21 @@ int cli_tx_send_blocking(struct cli_instance *sh, const uint8_t *data, size_t le
 }
 
 /*
- * Cancellable delay (issue #16): wait up to @p ticks ThreadX ticks, returning
- * early (non-zero) if Ctrl+C is seen or a stop is requested; 0 when the full
- * delay elapsed.  Unlike tx_thread_sleep() the wait is on the instance event
+ * Cancellable delay (owhinata/stm32f746g-disco#16): wait up to @p ticks ThreadX
+ * ticks, returning early (non-zero) if Ctrl+C is seen or a stop is requested; 0 when
+ * the full delay elapsed.  Unlike tx_thread_sleep() the wait is on the instance event
  * flags, so an RX byte (the ISR sets CLI_EVT_RX) wakes it and we drain the ring
  * for a 0x03.  Deadline-based with a wrap-safe elapsed so a non-cancel RX wake
- * neither shortens nor extends the delay.  Building block for watch/sleep (#21).
+ * neither shortens nor extends the delay.  Building block for watch/sleep
+ * (owhinata/stm32f746g-disco#21).
  */
 int cli_sleep(struct cli_instance *sh, unsigned ticks)
 {
 	if (ticks == 0)
 		return 0;                           /* contract: ticks==0 elapses at once */
 
-	/* bg job (issue #25): cancel is kill-driven, so wait ONLY on its own
+	/* bg job (owhinata/stm32f746g-disco#25): cancel is kill-driven, so wait ONLY on its
+    own
 	 * CLI_EVT_KILL (set by `kill`); never wake on / drain the shared RX, which
 	 * belongs to the interactive consumer.  Interactive: the existing RX-wake
 	 * path so a buffered 0x03 (Ctrl+C) cancels the delay. */

@@ -2,8 +2,9 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host unit test for the UART backend byte ring (issue #7).  Exercises the pure,
- * lock-free ring helpers (cli_uart_ring.h) without any HAL/ThreadX dependency:
+ * Host unit test for the UART backend byte ring (owhinata/stm32f746g-disco#7).
+ * Exercises the pure, lock-free ring helpers (cli_uart_ring.h) without any
+ * HAL/ThreadX dependency:
  *   1. empty/full bookkeeping (count/free, depth = size-1),
  *   2. single put/get FIFO order,
  *   3. overflow drops once full and never corrupts stored bytes,

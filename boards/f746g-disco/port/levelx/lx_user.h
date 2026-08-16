@@ -4,15 +4,17 @@
  */
 /**
  * @file    lx_user.h
- * @brief   LevelX build configuration for the QSPI NOR filesystem (issue #30).
+ * @brief   LevelX build configuration for the QSPI NOR filesystem
+ * (owhinata/stm32f746g-disco#30).
  *
  * Pulled in by lx_api.h via LX_INCLUDE_USER_DEFINE_FILE (CMakeLists.txt).
  *
  * Deliberately NOT defined:
  *   - LX_DIRECT_READ: the QSPI flash is not memory-mapped in this firmware
- *     (indirect mode only, #29), so LevelX must read through the driver into a
- *     RAM sector buffer.  This is also what keeps the D-cache out of the
- *     picture entirely -- no CPU access to 0x90000000 ever happens.
+ *     (indirect mode only, owhinata/stm32f746g-disco#29), so LevelX must read
+ * through the driver into a RAM sector buffer.  This is also what keeps the
+ * D-cache out of the picture entirely -- no CPU access to 0x90000000 ever
+ * happens.
  *   - LX_FREE_SECTOR_DATA_VERIFY: skip the free-sector scan at open; erased
  *     state is verified per block through the erased-verify driver callback.
  */

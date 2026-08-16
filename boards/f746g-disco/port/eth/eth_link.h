@@ -4,12 +4,13 @@
  */
 /**
  * @file    eth_link.h
- * @brief   On-board Ethernet (ETH MAC + LAN8742A RMII) link bring-up (issue #49 P1).
+ * @brief   On-board Ethernet (ETH MAC + LAN8742A RMII) link bring-up
+ * (owhinata/stm32f746g-disco#49 P1).
  *
- * Phase 1 of the Ethernet epic (#49): bring up the STM32F746 ETH MAC over RMII,
- * register the LAN8742A PHY (eth_phy.c), and detect/report link state.  No
- * NetX/LwIP, no actual traffic -- this proves the RMII pins, the 50 MHz REF_CLK,
- * the DMA-descriptor placement and the D-cache policy before the stack lands in
+ * Phase 1 of the Ethernet epic (owhinata/stm32f746g-disco#49): bring up the STM32F746
+ * ETH MAC over RMII, register the LAN8742A PHY (eth_phy.c), and detect/report link
+ * state. No NetX/LwIP, no actual traffic -- this proves the RMII pins, the 50 MHz
+ * REF_CLK, the DMA-descriptor placement and the D-cache policy before the stack lands in
  * P2.  The MAC is initialised to HAL_ETH_STATE_READY but NOT started
  * (HAL_ETH_Start is P2), so no ETH DMA runs and no ETH IRQ fires here.
  *
@@ -91,7 +92,7 @@ int eth_link_get(struct eth_link_info *out);
  */
 int eth_link_renegotiate(void);
 
-/* ---- P2 (#75) hooks: the NetX ETH driver layers on top of this MAC/PHY -----
+/* ---- P2 (owhinata/stm32f746g-disco#75) hooks: the NetX ETH driver layers on top of this MAC/PHY ---
  * These keep eth_link.c free of any NetX/HAL-handle leakage to its other callers
  * (cmd_net.c only uses the link API above): the NetX driver (port/netxduo) gets
  * the ETH handle as an opaque pointer, the MAC bytes, the shared HAL lock, and a

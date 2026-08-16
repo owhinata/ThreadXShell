@@ -4,19 +4,21 @@
  */
 /**
  * @file    guix_camera_ui.c
- * @brief   Camera GUIX app: live-preview screen + settings screen (issues #61/#68).
- *          See guix_camera_ui.h.
+ * @brief   Camera GUIX app: live-preview screen + settings screen
+ * (owhinata/stm32f746g-disco#61/#68).  See guix_camera_ui.h.
  *
- * #61 merged the former guix_app (widget tree) and guix_camera (frame sink +
- * preview controller) into this single ui/ module.  #68 splits the UI into two
- * full-panel screens that are siblings under the root (the #55 multi-screen
- * show/hide idiom):
+ * owhinata/stm32f746g-disco#61 merged the former guix_app (widget tree) and guix_camera
+ * (frame sink + preview controller) into this single ui/ module.
+ * owhinata/stm32f746g-disco#68 splits the UI into two full-panel screens that are
+ * siblings under the root (the owhinata/stm32f746g-disco#55 multi-screen show/hide
+ * idiom):
  *
  *   - preview_screen: a clean live image (a GX_ICON drawing the QVGA view buffer
  *     native 1:1 centred, black border) with NO visible widgets on top -- tapping
  *     anywhere switches to the settings screen.  Keeping the live image clean
- *     (no widgets composited on top) sidesteps the #59 B2 copy-forward, which
- *     re-stamps the camera rect every flip and would draw over any overlay.
+ *     (no widgets composited on top) sidesteps the owhinata/stm32f746g-disco#59 B2
+ * copy-forward, which re-stamps the camera rect every flip and would draw over any
+ * overlay.
  *   - settings_screen: a static dark panel (no live image) holding the 9 OV5640
  *     image-quality controls + a Back button.  Because the live image is hidden
  *     here, the controls are always readable and never composite-race the camera
@@ -33,10 +35,11 @@
  * a short blocking I2C write -- safe during streaming (the SDE bus is independent
  * of the DCMI capture path), it just blocks GUIX dispatch for the write.
  *
- * Known limitation (#70): changing image quality in a dark scene can drop the
- * preview fps, because the camera re-clamps the sensor VTS to the (stretched)
- * AEC exposure on every settings apply (#67).  This is a camera-side behaviour
- * shared with `camera set`; its fix is tracked separately in #70.
+ * Known limitation (owhinata/stm32f746g-disco#70): changing image quality in a dark
+ * scene can drop the preview fps, because the camera re-clamps the sensor VTS to the
+ * (stretched) AEC exposure on every settings apply (owhinata/stm32f746g-disco#67).  This
+ * is a camera-side behaviour shared with `camera set`; its fix is tracked separately in
+ * owhinata/stm32f746g-disco#70.
  */
 #include "guix_camera_ui.h"
 
@@ -113,7 +116,8 @@ static GX_NUMERIC_PROMPT bip_value[N_BIP];
 static GX_PROMPT        cyc_label[N_CYC];
 static GX_TEXT_BUTTON   cyc_btn[N_CYC];
 static GX_PROMPT        res_label;
-static GX_TEXT_BUTTON   btn_res;          /* preview resolution cycle (#69)        */
+/* preview resolution cycle (owhinata/stm32f746g-disco#69) */
+static GX_TEXT_BUTTON   btn_res;
 static GX_TEXT_BUTTON   btn_back;
 
 /* true while the settings screen is up (preview hidden).  The CAMERA_FRAME
@@ -170,11 +174,12 @@ static GX_CONST struct {
 };
 static int cyc_cur[N_CYC];        /* current index into names[]                    */
 
-/* ---- preview resolution (#69): the GUI cycles these two streamable RGB565 modes
+/* ---- preview resolution (owhinata/stm32f746g-disco#69): the GUI cycles these two
+   streamable RGB565 modes
    (format/fps stay fixed).  Both are 4:3 like the sensor's ISP FOV, so neither
-   stretches; 480x272 (16:9) was removed in #84 (horizontal stretch + SDRAM
-   overrun).  geometry is centred on the 480x272 panel; the view buffer below is
-   sized for the largest (QVGA) so a switch never reallocates -- only the live
+   stretches; 480x272 (16:9) was removed in owhinata/stm32f746g-disco#84 (horizontal
+   stretch + SDRAM overrun).  geometry is centred on the 480x272 panel; the view buffer
+   below is sized for the largest (QVGA) so a switch never reallocates -- only the live
    geometry passed to guix_display changes. */
 static GX_CONST struct {
 	enum camera_res res;
@@ -187,12 +192,14 @@ static GX_CONST struct {
 #define N_RES        ((int)(sizeof res_tbl / sizeof res_tbl[0]))
 #define RES_VIEW_X(i)  ((uint16_t)((LTDC_LCD_WIDTH  - res_tbl[i].w) / 2))
 #define RES_VIEW_Y(i)  ((uint16_t)((LTDC_LCD_HEIGHT - res_tbl[i].h) / 2))
-/* GUI preview boots at QVGA (320x240, index 1), centred on the panel (#84); the
+/* GUI preview boots at QVGA (320x240, index 1), centred on the panel
+   (owhinata/stm32f746g-disco#84); the
    selection then persists across gui stop/start.  The shell capture/stream path
    keeps its own QVGA default (`mode`), independent of this GUI preview resolution. */
-static int cur_res_idx = 1;       /* index into res_tbl; default QVGA (#84)         */
+/* index into res_tbl; default QVGA (owhinata/stm32f746g-disco#84) */
+static int cur_res_idx = 1;
 
-/* ---- Camera view buffer + frame_pipeline push sink (#56/#61) -------------- */
+/* ---- Camera view buffer + frame_pipeline push sink (owhinata/stm32f746g-disco#56/#61) --- */
 static uint16_t cam_view_buf[CAM_VIEW_W_MAX * CAM_VIEW_H_MAX]
 	__attribute__((aligned(32), section(".sdram.fixed")));
 static GX_PIXELMAP cam_view_pixmap;
@@ -200,13 +207,15 @@ static bool        cam_view_inited;
 static volatile int cam_redraw_pending;
 static volatile int cam_sink_inflight;
 
-/* Preview lifecycle flags (GUIX + shell threads).  Since Epic #99 Phase 1 (#100)
+/* Preview lifecycle flags (GUIX + shell threads).  Since Epic
+   owhinata/stm32f746g-disco#99 Phase 1 (owhinata/stm32f746g-disco#100)
    the GUI preview is a *subscriber* of the base capture, not its owner.
    preview_running is set by cam_sink_open when the sink attaches and cleared by
    cam_sink_close (a base stop / DCMI overrun / cascade); a base stop freezes the
    last frame (preview kept visible) and a base restart re-attaches so frames
-   resume.  The base owns the DCMI overrun auto-recovery now (camera.c #100), so
-   there is no GUI backoff.  stop_requested gates a `gui stop` racing the subscribe. */
+   resume.  The base owns the DCMI overrun auto-recovery now (camera.c
+   owhinata/stm32f746g-disco#100), so there is no GUI backoff.  stop_requested gates a
+   `gui stop` racing the subscribe. */
 static volatile int preview_running;
 static volatile int stop_requested;
 
@@ -284,7 +293,8 @@ static int cam_sink_consume(void *ctx, const struct frame_desc *f)
 	if (rc == 0 && !pending) {
 		/* Box drawing is deferred to the GUIX thread's CAMERA_FRAME handler, off the
 		   producer's DCMI-servicing critical path -- taking ltdc_lock per box here
-		   (prio 10) delayed the DMA re-arm and caused overruns (#83). */
+		   (prio 10) delayed the DMA re-arm and caused overruns
+		   (owhinata/stm32f746g-disco#83). */
 		if (guix_post_root_event(GX_EVENT_CAMERA_FRAME) == GUIX_OK)
 			cam_redraw_pending = 1;
 	}
@@ -293,12 +303,13 @@ static int cam_sink_consume(void *ctx, const struct frame_desc *f)
 }
 
 /* Base detached this subscriber: a normal `camera stream stop`, a DCMI overrun, or
-   a cascade.  A base *stop*, not a GUI stop (contract #100.2): just clear
-   preview_running so the last frame freezes on screen -- the preview stays visible
-   and resumes when the base re-attaches (cam_sink_open re-arms).  Non-blocking, no
-   camera API re-entry, so it is safe under the camera driver lock.  The base owns
-   the overrun auto-recovery now (camera.c #100), so there is nothing to restart or
-   tear down here (the AI subscriber's own close handles its bbox/session). */
+   a cascade.  A base *stop*, not a GUI stop (contract owhinata/stm32f746g-disco#100.2):
+   just clear preview_running so the last frame freezes on screen -- the preview stays
+   visible and resumes when the base re-attaches (cam_sink_open re-arms).  Non-blocking,
+   no camera API re-entry, so it is safe under the camera driver lock.  The base owns
+   the overrun auto-recovery now (camera.c owhinata/stm32f746g-disco#100), so there is
+   nothing to restart or tear down here (the AI subscriber's own close handles its
+   bbox/session). */
 static void cam_sink_close(void *ctx)
 {
 	(void)ctx;
@@ -323,7 +334,8 @@ static GX_PIXELMAP *camera_pixmap(void)
 		cam_view_pixmap.gx_pixelmap_data          = (GX_UBYTE *)cam_view_buf;
 		cam_view_pixmap.gx_pixelmap_aux_data      = GX_NULL;
 		cam_view_pixmap.gx_pixelmap_aux_data_size = 0;
-		/* width/height/data_size are set per selected resolution (#69). */
+		/* width/height/data_size are set per selected resolution
+     (owhinata/stm32f746g-disco#69). */
 		cam_view_pixmap.gx_pixelmap_width  = res_tbl[cur_res_idx].w;
 		cam_view_pixmap.gx_pixelmap_height = res_tbl[cur_res_idx].h;
 		cam_view_pixmap.gx_pixelmap_data_size =
@@ -335,7 +347,8 @@ static GX_PIXELMAP *camera_pixmap(void)
 
 /* ---- screen transitions (GUIX thread) ------------------------------------- */
 
-/* preview -> settings: re-read live values, stop the #59 B2 camera copy-forward
+/* preview -> settings: re-read live values, stop the owhinata/stm32f746g-disco#59 B2
+   camera copy-forward
    (so the producer stops re-stamping the camera rect over the static panel), then
    swap screens.  Re-sync because the shell `camera set` (e.g. after a `gui stop`)
    may have changed settings since this screen was last shown.  Dirty the whole
@@ -453,9 +466,9 @@ static UINT camera_ui_root_event(GX_WIDGET *widget, GX_EVENT *event_ptr)
 			/* Draw the face boxes here (GUIX thread) rather than on the producer:
 			   the producer just stored this frame into cam_view_buf, so stamping the
 			   boxes on top now -- before the icon redraw reads it -- keeps the boxes
-			   off the DCMI-servicing critical path (#83).  Drawn whenever inference is
-			   running; overlay_draw_boxes() is a no-op with no detections, so the box
-			   clears when `ai stream stop` runs or a face is lost. */
+			   off the DCMI-servicing critical path (owhinata/stm32f746g-disco#83).  Drawn
+			   whenever inference is running; overlay_draw_boxes() is a no-op with no detections,
+			   so the box clears when `ai stream stop` runs or a face is lost. */
 			if (nn_camera_running())
 				overlay_draw_boxes();
 			gx_system_dirty_mark((GX_WIDGET *)&cam_icon);
@@ -505,7 +518,8 @@ static void preview_teardown(void)
 	cam_redraw_pending = 0;
 }
 
-/* Rebuild the GUIX view pixmap + camera-icon geometry for res_tbl[idx] (#69).
+/* Rebuild the GUIX view pixmap + camera-icon geometry for res_tbl[idx]
+   (owhinata/stm32f746g-disco#69).
    Runs on the GUIX thread.  The view buffer is max-sized (QVGA), so only the
    pixmap width/height/data_size and the icon rectangle change -- the data pointer
    is unchanged.  Safe while the preview screen is hidden (settings up): Back's
@@ -527,11 +541,11 @@ static void apply_view_geometry(int idx)
 }
 
 /* Subscribe the preview sink to the base capture (GUIX thread).  The GUI is a
-   subscriber now (#100): this does NOT start the base -- it attaches iff the base
-   is already streaming RGB565 (cam_sink_open arms the blit geometry), otherwise it
-   stays enabled + idle and attaches at the next `camera stream start`.  @p visible
-   controls whether the camera rect is shown (false while under the settings screen).
-   Returns 0, or <0 on a hard subscribe failure. */
+   subscriber now (owhinata/stm32f746g-disco#100): this does NOT start the base -- it
+   attaches iff the base is already streaming RGB565 (cam_sink_open arms the blit
+   geometry), otherwise it stays enabled + idle and attaches at the next `camera stream
+   start`. @p visible controls whether the camera rect is shown (false while under the
+   settings screen).  Returns 0, or <0 on a hard subscribe failure. */
 static int preview_subscribe(bool visible)
 {
 	int rc;
@@ -552,7 +566,7 @@ static int preview_subscribe(bool visible)
 /* Boot-only: bring the base capture up once so the board shows a live preview out
    of the box.  Set to 1 after the first autostart; thereafter `gui start`/`stop`
    only toggle the subscription -- the base runs until an explicit `camera stream
-   stop` (the user's #100 choice). */
+   stop` (the user's owhinata/stm32f746g-disco#100 choice). */
 static int base_autostarted;
 
 /* GUIX-thread preview bring-up (GX_EVENT_CAMERA_AUTOSTART).  Also forces the UI
@@ -582,12 +596,13 @@ static void camera_ui_autostart(void)
 }
 
 /* settings: cycle to the next preview resolution.  The base owns the resolution
-   now (#100), so change it by stopping the base (cascade), setting the new res while
-   off, then restarting.  Runs on the GUIX thread.  camera_stream_stop() is async, so
-   wait until the producer is idle before set_format (else CAM_ERR_BUSY, #69).
-   #101: refuse while any OTHER subscriber is attached -- a cascade stop would tear
-   net mjpeg / ai down as a side effect of a preview-only action.  Best-effort
-   (a concurrent manual attach after the check is a benign user race). */
+   now (owhinata/stm32f746g-disco#100), so change it by stopping the base (cascade),
+   setting the new res while off, then restarting.  Runs on the GUIX thread.
+   camera_stream_stop() is async, so wait until the producer is idle before set_format
+   (else CAM_ERR_BUSY, owhinata/stm32f746g-disco#69).  owhinata/stm32f746g-disco#101:
+   refuse while any OTHER subscriber is attached -- a cascade stop would tear net mjpeg /
+   ai down as a side effect of a preview-only action. Best-effort (a concurrent manual
+   attach after the check is a benign user race). */
 static void cycle_resolution(void)
 {
 	int next = (cur_res_idx + 1) % N_RES;
@@ -801,7 +816,8 @@ static int camera_ui_build(void *display_v, void *root_v)
 		status |= mk_button(&cyc_btn[i], st, cyc_meta[i].names[cyc_cur[i]],
 		                    (USHORT)(ID_CYC + i), 370, y, 476, y + ROW_H);
 	}
-	/* Left column row 4 (below the 4 bipolar controls): preview resolution (#69).
+	/* Left column row 4 (below the 4 bipolar controls): preview resolution
+    (owhinata/stm32f746g-disco#69).
 	   A dedicated control, not a cyc_meta entry -- changing resolution needs
 	   stop -> set_format -> restart (a live re-format is BUSY), not a live setter. */
 	y = ROW_Y(N_BIP);
@@ -819,7 +835,8 @@ static int camera_ui_build(void *display_v, void *root_v)
 	root->gx_widget_event_process_function = camera_ui_root_event;
 	/* Visibility is left to the AUTOSTART handler: it hides settings_screen (that
 	   gx_widget_show(root) would otherwise leave visible) on the GUIX thread after
-	   the show, so the clip is computed against a visible root (#55 idiom). */
+	   the show, so the clip is computed against a visible root
+	   (owhinata/stm32f746g-disco#55 idiom). */
 	return 0;
 }
 
@@ -845,8 +862,9 @@ int camera_ui_start(void)
 int camera_ui_stop(void)
 {
 	/* Unsubscribe the preview from the base (the base keeps running -- `gui stop` is
-	   a subscription toggle, not a base stop, #100) and blank the screen.  The AI
-	   subscriber is independent: it keeps running (bbox just stops being drawn). */
+	   a subscription toggle, not a base stop, owhinata/stm32f746g-disco#100) and blank the
+	   screen. The AI subscriber is independent: it keeps running (bbox just stops being
+	   drawn). */
 	stop_requested = 1;
 	preview_teardown();
 	(void)guix_stop();

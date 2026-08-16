@@ -4,7 +4,8 @@
  */
 /**
  * @file    nx_eth_driver.h
- * @brief   Clean-room NetX Duo network driver over the STM32 ETH MAC (issue #49 P2).
+ * @brief   Clean-room NetX Duo network driver over the STM32 ETH MAC
+ * (owhinata/stm32f746g-disco#49 P2).
  *
  * The NetX Duo link driver entry passed to nx_ip_create().  It bridges the IPv4
  * stack to the HAL_ETH MAC (started/configured by port/eth/eth_link.c) using the

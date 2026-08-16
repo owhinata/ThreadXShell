@@ -2,15 +2,15 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host integration test for the Shell core (issue #6): input -> execute ->
- * output verified END-TO-END THROUGH THE DUMMY BACKEND.  Unlike test_core.c
+ * Host integration test for the Shell core (owhinata/stm32f746g-disco#6): input ->
+ * execute -> output verified END-TO-END THROUGH THE DUMMY BACKEND.  Unlike test_core.c
  * (which injects at the session level and stubs the transport), this drives the
  * real transport contract: cli_dummy_inject() fills the backend RX FIFO,
  * cli_test_pump() drains it through read() into the line state machine, and
  * every byte of output reaches the dummy capture log through tr->api->write()
  * via the faithful host cli_tx_send_blocking() (host_glue.c).
  *
- * Coverage at this milestone (implemented surface #2-#5):
+ * Coverage at this milestone (implemented surface owhinata/stm32f746g-disco#2-#5):
  *   - basic dispatch + subcommands (handler ran, output captured, prompt back)
  *   - §13 ASCII filter, CR/LF coalesce, ESC/CSI swallow -- via the backend
  *   - §11 flow control: normal backpressure completes, timeout drops, immediate
@@ -37,7 +37,8 @@
 
 static int ran;
 
-/* issue #16 cooperative-cancel test commands.  inject_at lets h_loop drop a 0x03
+/* owhinata/stm32f746g-disco#16 cooperative-cancel test commands.  inject_at lets h_loop
+   drop a 0x03
  * into its own RX mid-run, modelling a Ctrl+C arriving while the handler runs
  * (single-threaded host: the byte must enter the ring DURING the handler). */
 static int inject_at = -1;
@@ -58,7 +59,8 @@ static int h_args(struct cli_instance *sh, int argc, char **argv)
 }
 
 CLI_SUBCMD_SET_CREATE(sub_thing, CLI_CMD_ARG(list, NULL, "list", h_ok, 1, 0),
-	CLI_CMD_ARG(put, NULL, "put <key>", h_args, 2, 0),   /* issue #37: sub w/ mandatory>1 */
+	/* owhinata/stm32f746g-disco#37: sub w/ mandatory>1 */
+	CLI_CMD_ARG(put, NULL, "put <key>", h_args, 2, 0),
 	/* issue #10: a subcommand that spells its arguments out. */
 	CLI_CMD_ARG_USAGE(set, NULL, "store a value", "<key> <value>", h_args, 3, 0),
 	CLI_SUBCMD_SET_END);
@@ -70,7 +72,8 @@ CLI_CMD_REGISTER(need2, NULL,      "needs 2 args", h_args, 2, 0);
 /* issue #10: a root command that spells its arguments out. */
 CLI_CMD_REGISTER_USAGE(fill, NULL, "flood with a colour", "<colour>", h_args, 2, 0);
 
-/* issue #16: a compute loop that polls cli_cancel_requested(); optionally drops a
+/* owhinata/stm32f746g-disco#16: a compute loop that polls cli_cancel_requested();
+   optionally drops a
  * 0x03 into its own RX at iteration inject_at (async-arrival model). */
 static int h_loop(struct cli_instance *sh, int argc, char **argv)
 {
@@ -87,7 +90,8 @@ static int h_loop(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-/* issue #16: floods output -- with a tiny TX cap and no wait hook this would
+/* owhinata/stm32f746g-disco#16: floods output -- with a tiny TX cap and no wait hook
+   this would
  * TX-timeout, but a buffered 0x03 cancels it via the wait-path poll. */
 static int h_txwait(struct cli_instance *sh, int argc, char **argv)
 {
@@ -98,7 +102,8 @@ static int h_txwait(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-/* issue #16: cancellable delay via cli_sleep() (host mirror in host_glue.c). */
+/* owhinata/stm32f746g-disco#16: cancellable delay via cli_sleep() (host mirror in
+   host_glue.c). */
 static int h_sleep(struct cli_instance *sh, int argc, char **argv)
 {
 	(void)argc; (void)argv;
@@ -111,7 +116,8 @@ CLI_CMD_REGISTER(loopc,   NULL, "cancel loop test",  h_loop,   1, 0);
 CLI_CMD_REGISTER(txwaitc, NULL, "cancel tx test",    h_txwait, 1, 0);
 CLI_CMD_REGISTER(sleepc,  NULL, "cancel sleep test", h_sleep,  1, 0);
 
-/* issue #21: exercises the `watch` re-dispatch recipe -- parse redisp_cmd into
+/* owhinata/stm32f746g-disco#21: exercises the `watch` re-dispatch recipe -- parse
+   redisp_cmd into
  * LOCAL scratch and call the resolved handler, never touching sh->pr/argv/line.
  * Prints the parser-normalised root token so the test can assert quote/escape
  * normalisation (the basis of watch's denylist). */
@@ -324,11 +330,13 @@ static void test_arg_errors(void)
 	reset(&sh0, &tr0);
 	run_line(&sh0, "need2\r");                     /* mandatory 2, got 1 */
 	assert(has(&tr0, "need2: invalid number of arguments"));
-	/* issue #37: the usage line follows -- root-leaf path + .help as usage. */
+	/* owhinata/stm32f746g-disco#37: the usage line follows -- root-leaf path + .help as
+    usage. */
 	assert(has(&tr0, "usage: need2  (needs 2 args)"));
 	assert(sh0.last_result == CLI_DISPATCH_ERR);
 
-	/* issue #37: a subcommand's WRONG_ARGS prints the FULL command path. */
+	/* owhinata/stm32f746g-disco#37: a subcommand's WRONG_ARGS prints the FULL command
+    path. */
 	reset(&sh0, &tr0);
 	run_line(&sh0, "thing put\r");                 /* sub mandatory 2, got 1 */
 	assert(has(&tr0, "put: invalid number of arguments"));
@@ -372,7 +380,7 @@ static void test_ctrl_c(void)
 	assert(n >= 2 && strcmp(o + n - 2, "> ") == 0);   /* fresh prompt */
 }
 
-/* ---- issue #16: cooperative command cancellation ----------------------- */
+/* ---- owhinata/stm32f746g-disco#16: cooperative command cancellation --------------- */
 
 /* Inject a Ctrl+C when the send blocks / the sleep waits (async-arrival model).
  * One-shot: it models a SINGLE keypress.  Without this guard, a bounded-TX test
@@ -466,7 +474,8 @@ static void test_cancel_sleep(void)
 	assert(!has(&tr0, "cancelled"));
 }
 
-/* issue #21: the watch re-dispatch recipe runs an inner command via LOCAL
+/* owhinata/stm32f746g-disco#21: the watch re-dispatch recipe runs an inner command via
+   LOCAL
  * scratch, resolves subcommands, normalises the root token (quotes stripped),
  * and does not corrupt the outer dispatch state. */
 static void test_redispatch_recipe(void)
@@ -501,14 +510,16 @@ static void test_cancel_typeahead_discard(void)
 {
 	reset(&sh0, &tr0);
 	/* "loopc" + Ctrl+C + "hello" + Enter in one burst: the 0x03 cancels loopc;
-	 * the trailing "hello\r" must be discarded, not executed (issue #16). */
+	 * the trailing "hello\r" must be discarded, not executed
+	 * (owhinata/stm32f746g-disco#16). */
 	run_line(&sh0, "loopc\r\x03hello\r");
 	assert(has(&tr0, "^C"));
 	assert(ran == 0);                      /* hello (h_ok) never ran */
 	assert(!has(&tr0, "OK"));
 }
 
-/* issue #23: ';'-separated sequential execution end-to-end through the backend.
+/* owhinata/stm32f746g-disco#23: ';'-separated sequential execution end-to-end through
+   the backend.
  * Lines stay <= 15 chars (CLI_CMD_BUFFER_SIZE=16 in this harness). */
 static void test_sequence(void)
 {

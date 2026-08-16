@@ -4,7 +4,8 @@
  */
 /**
  * @file    fs_glue.h
- * @brief   QSPI filesystem mount state (lazy mount singleton, issue #30).
+ * @brief   QSPI filesystem mount state (lazy mount singleton,
+ * owhinata/stm32f746g-disco#30).
  *
  * One FX_MEDIA over the LevelX/QSPI stack, mounted on first use.  All calls
  * are thread-context only.  After fs_media_acquire() succeeds, fx_* calls on

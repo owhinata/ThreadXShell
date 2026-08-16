@@ -4,7 +4,7 @@
  */
 /**
  * @file    cxx_runtime.cc
- * @brief   The whole C++ runtime this firmware has (issue #9 phase 2c).
+ * @brief   The whole C++ runtime this firmware has (owhinata/wio-lite-ai#9 phase 2c).
  *
  * Compiled only into the `tflm` static library, so the default `null` build never sees
  * a line of it.  Its job is to keep the C++ runtime surface of a 384 KB image down to

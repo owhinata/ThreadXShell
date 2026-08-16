@@ -4,13 +4,14 @@
  */
 /**
  * @file    cmd_builtin.c
- * @brief   Minimal built-in shell commands for the #8 bring-up demo: help + echo.
+ * @brief   Minimal built-in shell commands for the owhinata/stm32f746g-disco#8
+ * bring-up demo: help + echo.
  *
  * These are the only commands the `shell` application registers into
  * .shell_root_cmds; the richer builtins (version/uptime/reboot, thread, devmem)
- * arrive in #12-#14.  Both handlers touch only the shell instance passed to them
- * and write through the buffered output API, so they are reentrant when several
- * instances run the same command concurrently (req §10).
+ * arrive in owhinata/stm32f746g-disco#12-#14.  Both handlers touch only the shell
+ * instance passed to them and write through the buffered output API, so they are
+ * reentrant when several instances run the same command concurrently (req §10).
  *
  * This file is linked into the `shell` executable only -- never the host test
  * harness (shell/test) -- so the unit tests keep full control of their own
@@ -64,7 +65,7 @@ static void help_line(struct cli_instance *sh, const struct cli_cmd *c)
 }
 
 /*
- * help: hierarchical command help (issue #37).
+ * help: hierarchical command help (owhinata/stm32f746g-disco#37).
  *
  *   help              -> list every root command (the .shell_root_cmds walk is
  *                        itself the proof the section + boundary symbols linked,
@@ -72,7 +73,8 @@ static void help_line(struct cli_instance *sh, const struct cli_cmd *c)
  *   help <cmd> [sub]  -> walk the command tree along the argv path; a parent
  *                        prints its subcommand list, a leaf prints its one-line
  *                        help as usage.  Reuses the existing .help strings -- no
- *                        new descriptor field (issue #37 scope).
+ *                        new descriptor field (owhinata/stm32f746g-disco#37
+ * scope).
  *
  * Registered with optional = CLI_MAX_SUBCMD_DEPTH + 1 so the deepest legal path
  * (help + root + CLI_MAX_SUBCMD_DEPTH subcommands) tokenizes; NOT CLI_ARG_RAW,

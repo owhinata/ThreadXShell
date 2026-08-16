@@ -4,7 +4,8 @@
  */
 /**
  * @file    cli_backend_log.h
- * @brief   Write-only shell transport that lands in the RAM log (issue #37).
+ * @brief   Write-only shell transport that lands in the RAM log
+ * (owhinata/wio-lite-ai#37).
  *
  * A `struct cli_transport` with no terminal behind it: everything written goes
  * into the reset-persistent log ring, one record per line, and nothing is ever

@@ -4,7 +4,8 @@
  */
 /**
  * @file    cam_preview.c
- * @brief   Live camera preview on the LCD (issue #8 phase 3c, issue #35).
+ * @brief   Live camera preview on the LCD (owhinata/wio-lite-ai#8 phase 3c,
+ * owhinata/wio-lite-ai#35).
  *
  * The pipeline, end to end:
  *
@@ -16,13 +17,13 @@
  * WHY BANDS.  The camera is 320x240 landscape and the panel 240x320 portrait, and
  * nothing on this board can rotate for free: no GFXMMU, no GPU2D, and the panel's
  * own MADCTL/MV and RAMCTRL/RM do not apply to RGB-interface pixels (the issue
- * #35/#38 spike; port/ltdc/st7789_rgb.c).  So every displayed frame is transposed
- * in software, and a transpose reads one side with a stride.  Issue #38 shipped
- * the honest slow version -- whole frames pinned out of the PSRAM ring -- and it
- * measured 25.0 ms of CPU per frame, 35% of a core, plus ~10 DCMI FIFO errors per
- * 30 s from the DCMI and the LTDC both wanting OCTOSPI1.  Staging the DCMI in
- * AXI-SRAM instead puts the strided reads on internal RAM and takes the camera off
- * that bus altogether, which is why both numbers move together.
+ * owhinata/wio-lite-ai#35/#38 spike; port/ltdc/st7789_rgb.c).  So every displayed
+ * frame is transposed in software, and a transpose reads one side with a stride.
+ * owhinata/wio-lite-ai#38 shipped the honest slow version -- whole frames pinned out
+ * of the PSRAM ring -- and it measured 25.0 ms of CPU per frame, 35% of a core, plus
+ * ~10 DCMI FIFO errors per 30 s from the DCMI and the LTDC both wanting OCTOSPI1.
+ * Staging the DCMI in AXI-SRAM instead puts the strided reads on internal RAM and
+ * takes the camera off that bus altogether, which is why both numbers move together.
  *
  * WHY THE FLIP IS ON ITS OWN THREAD.  ltdc_flip() waits for vertical blanking --
  * up to ~16 ms.  The band transposes run on the CAMERA's producer thread, and
@@ -90,8 +91,8 @@ static uint32_t     preview_shown;
 static uint32_t     preview_dropped;
 /* Cycles this frame's four band transposes have taken so far, and the completed
    total from the most recent frame (DWT, 550 MHz).  The total is the figure of
-   merit for issue #35 -- 25.0 ms was the whole-frame-from-PSRAM number it had to
-   beat. */
+   merit for owhinata/wio-lite-ai#35 -- 25.0 ms was the whole-frame-from-PSRAM number
+   it had to beat. */
 static uint32_t     preview_blit_acc;
 static uint32_t     preview_blit_cyc;
 
@@ -102,10 +103,10 @@ static uint32_t     preview_blit_cyc;
  * invalidated it and guarantees bands arrive 0,1,2,3 with no gaps inside a frame,
  * so the only frame-level decision left here is whether to start one.
  *
- * Since issue #9 phase 3 this is a cam_band client rather than the camera's one
- * registered callback -- app/cam_band.c fans out to it first and to the NN ingest
- * second.  The frame-level decision below stays entirely ours: a frame this thread
- * skips because a flip is still pending is NOT a frame the NN skips.
+ * Since owhinata/wio-lite-ai#9 phase 3 this is a cam_band client rather than the
+ * camera's one registered callback -- app/cam_band.c fans out to it first and to the
+ * NN ingest second.  The frame-level decision below stays entirely ours: a frame this
+ * thread skips because a flip is still pending is NOT a frame the NN skips.
  */
 static void preview_band(unsigned band, const uint16_t *px, unsigned rows)
 {
@@ -147,7 +148,8 @@ static void preview_band(unsigned band, const uint16_t *px, unsigned rows)
 }
 
 /*
- * One detection box, in landscape surface coordinates (issue #9 phase 4).
+ * One detection box, in landscape surface coordinates (owhinata/wio-lite-ai#9 phase
+ * 4).
  *
  * The boxes are normalized to the model's square input, which the downsample maps
  * onto the WHOLE 320x240 frame (it squashes rather than crops), and the landscape
@@ -302,8 +304,8 @@ int cam_preview_enable(int on, int colorbar)
 		/* Safe to clear regardless of rc: cam_band_release() has already dropped
 		   our claim, so the fan-out no longer reaches preview_band() at all, and
 		   on success its drain has also waited out any call still in flight.
-		   (Before issue #9 phase 3 the equivalent guarantee came from the stream
-		   itself having stopped -- but the stream now outlives us when the NN is
+		   (Before owhinata/wio-lite-ai#9 phase 3 the equivalent guarantee came from the
+		   stream itself having stopped -- but the stream now outlives us when the NN is
 		   still claiming it, so the drain is what provides it.) */
 		preview_flip_pending = 0;
 		preview_in_frame     = 0;

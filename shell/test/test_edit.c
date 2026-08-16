@@ -2,8 +2,8 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host unit test for the Shell line editor (issue #9): the cursor model (cur
- * split from len), in-line insert / overwrite / delete, the meta keys
+ * Host unit test for the Shell line editor (owhinata/stm32f746g-disco#9): the cursor model
+ * (cur split from len), in-line insert / overwrite / delete, the meta keys
  * (Ctrl+a/b/d/e/f/k/u/w, Alt+b/f, Ctrl+l), the VT100 escape parser (arrows /
  * Home / End / Del / Insert / SS3, §13 invalid-escape ignore), the CPR
  * terminal-width probe + guarded reply, and the wrap redraw row arithmetic.

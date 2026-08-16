@@ -5,7 +5,8 @@
 /**
  * @file    st7789_rgb.h
  * @brief   ST7789 panel controller bring-up over a bit-banged 3-wire SPI that is
- *          multiplexed onto the LTDC's own red data lines (issue #7).
+ *          multiplexed onto the LTDC's own red data lines
+ * (owhinata/wio-lite-ai#7).
  *
  * The kit panel (BL28005-B / JS28019H, 2.8" 240x320) is NOT a dumb RGB panel: it
  * carries an ST7789 controller that powers up asleep, with its RGB interface
@@ -29,8 +30,9 @@
  *
  * SDA and SCL do go back to the LTDC afterwards.  **CS does not** -- PA1 stays a
  * GPIO driven high for good, because leaving it under the LTDC lets scanned-out
- * red bits clock commands into the panel.  That is issue #43's second half; the
- * mechanism and the evidence are in ltdc_pin_cs_park() (ltdc_display.c).
+ * red bits clock commands into the panel.  That is owhinata/wio-lite-ai#43's
+ * second half; the mechanism and the evidence are in ltdc_pin_cs_park()
+ * (ltdc_display.c).
  *
  * Frames are 9 bits, MSB first: a leading data/command bit (0 = command,
  * 1 = parameter) followed by the byte, clocked in on SCL's rising edge with CS
@@ -53,7 +55,7 @@
  * is safe to run both from tx_application_define() alongside the rest of
  * ltdc_init() and from a thread, where HAL_Delay() merely spins.
  *
- * ---- The panel is NOT necessarily cold when this runs (issue #43) -----------
+ * ---- The panel is NOT necessarily cold when this runs (owhinata/wio-lite-ai#43) ---
  *
  * The ST7789 has its own supply, so a software reset -- `crash`, `reboot`, a DFU
  * reboot -- restarts the MCU and leaves the panel awake: Sleep Out, DISPON, RGB

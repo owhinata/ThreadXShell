@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /*
- * Wio Lite AI (STM32H725AEI6) -- the host's own IP interface (issue #23 U3).
+ * Wio Lite AI (STM32H725AEI6) -- the host's own IP interface (owhinata/wio-lite-ai#23 U3).
  *
  * Two things live here, because they are the same thing seen from two sides:
  *
@@ -17,20 +17,20 @@
  *
  * ---- what "up" costs, and why there is an owner at all -------------------------
  *
- * The module's bridge is armed with a deadline (issue #23 U2, firmware wio-n7): it takes
- * its own tap out `ms` after the last DATA_CFG, so a host that stops asking cannot leave
- * it forwarding into a link nobody reads.  The cap is 60 s, so a RESIDENT interface has
- * to keep asking -- that is the refresh loop.  And every re-arm resets the module's DATA
- * counters, so the refresh reads them first and accumulates: "was anything lost, and on
- * which side" is the question this whole issue has been decided by, and a session that
- * zeroed its own evidence every 8 s could not answer it.
+ * The module's bridge is armed with a deadline (owhinata/wio-lite-ai#23 U2, firmware
+ * wio-n7): it takes its own tap out `ms` after the last DATA_CFG, so a host that stops
+ * asking cannot leave it forwarding into a link nobody reads.  The cap is 60 s, so a
+ * RESIDENT interface has to keep asking -- that is the refresh loop.  And every re-arm
+ * resets the module's DATA counters, so the refresh reads them first and accumulates: "was
+ * anything lost, and on which side" is the question this whole issue has been decided by,
+ * and a session that zeroed its own evidence every 8 s could not answer it.
  *
  * While the tap is in, the module's own lwIP receives nothing, so anything that runs on
- * that lwIP is refused while the host stack is up -- see nx_net_guard().  Issue #23 U4
- * moved the two things that wanted a TCP connection off it entirely: `net echo`
- * (app/nx_echo.c) and the telnet console now open NetX sockets on THIS interface, and
- * therefore REQUIRE the host stack rather than being refused by it.  What is left on the
- * module's lwIP -- `net info`, `net ip`, `net dhcp` -- keeps its
+ * that lwIP is refused while the host stack is up -- see nx_net_guard().
+ * owhinata/wio-lite-ai#23 U4 moved the two things that wanted a TCP connection off it
+ * entirely: `net echo` (app/nx_echo.c) and the telnet console now open NetX sockets on THIS
+ * interface, and therefore REQUIRE the host stack rather than being refused by it.  What is
+ * left on the module's lwIP -- `net info`, `net ip`, `net dhcp` -- keeps its
  * eRPC backend, which is also what keeps a regression test against an untouched module
  * firmware alive.
  *
@@ -62,7 +62,7 @@
 struct cli_instance;
 
 /*
- * ---- the transmit budget (issue #23 U4) ---------------------------------------
+ * ---- the transmit budget (owhinata/wio-lite-ai#23 U4) -----------------------------------
  *
  * Every frame this stack transmits ends up in the link's DATA transmit pool
  * (LINK_DATA_TX_BUFS, app/link_data.h), and a full pool there is a silent drop -- correct
@@ -104,8 +104,8 @@ struct cli_instance;
  * also uses as the SYN+ACK retransmit timer during a passive open
  * (nx_tcp_packet_process.c:765-770), so it changes how a handshake behaves and not just
  * how a stall recovers.  Tuning it is therefore an experiment of its own with its own
- * evidence -- issue #23 U4-3, against nx_tcp_socket_info_get()'s retransmit counter --
- * and not something to carry into a first bring-up.
+ * evidence -- owhinata/wio-lite-ai#23 U4-3, against nx_tcp_socket_info_get()'s retransmit
+ * counter -- and not something to carry into a first bring-up.
  */
 #define NXN_TCP_RTO_MS        (2u * 1000u)
 #define NXN_TCP_RTO_RETRIES   10u
@@ -144,8 +144,8 @@ struct nx_net_modstats {
 /*
  * Create every ThreadX/NetX object and the owner thread.  Object creation only -- no
  * blocking and no HAL_GetTick dependency -- so it is safe from tx_application_define()
- * (issue #12).  The IP instance exists from boot with address 0.0.0.0, no MAC and the
- * link down; nothing touches the RTL8720 until nx_net_up().
+ * (owhinata/wio-lite-ai#12).  The IP instance exists from boot with address 0.0.0.0, no MAC
+ * and the link down; nothing touches the RTL8720 until nx_net_up().
  */
 int  nx_net_init(void);
 
@@ -165,7 +165,7 @@ void nx_net_down(void);
 
 /*
  * "The link has been taken away and CHIP_EN is about to move" -- the epilogue of
- * rtl_link_force_quiesce() for `wifi on/off/reset` (issue #41).
+ * rtl_link_force_quiesce() for `wifi on/off/reset` (owhinata/wio-lite-ai#41).
  *
  * The owner detects a revoked link by itself (the uart generation moved), but only when
  * it next wakes, which is up to NXN_REFRESH_MS later.  This hands it the news now and
@@ -225,9 +225,9 @@ void nx_net_print_status(struct cli_instance *sh);
 int nx_net_guard(struct cli_instance *sh, const char *what);
 
 /*
- * Keep the module's bridge alive across a long eRPC flow (issue #30 B2b).  Caller must
- * hold the rtl_link coarse mutex.  Returns 0 (nothing to hold, or held) / -1 (the module
- * did not answer -- do NOT start the flow).  See the definition for why.
+ * Keep the module's bridge alive across a long eRPC flow (owhinata/wio-lite-ai#30 B2b).
+ * Caller must hold the rtl_link coarse mutex.  Returns 0 (nothing to hold, or held) / -1
+ * (the module did not answer -- do NOT start the flow).  See the definition for why.
  */
 int nx_net_hold_extend(void);
 

@@ -4,20 +4,24 @@
  */
 /**
  * @file    cmd_touch.c
- * @brief   `touch` shell command: FT5336 capacitive touch status + read (#54).
+ * @brief   `touch` shell command: FT5336 capacitive touch status + read
+ * (owhinata/stm32f746g-disco#54).
  *
  *   touch probe   read the FT5336 chip ID (0x51 = present)
  *   touch info    bus / address / state / point count / mode
  *   touch read    poll the active touch points until Ctrl+C
  *
- * Phase of #48 after the LTDC display (#52): used to verify the touch wiring
- * and the X/Y mapping before EXTI-driven dispatch and GUIX input (#55/#56).
- * `touch read` polls every 100 ms and prints each active point's panel-pixel
- * coordinates (x 0..479, y 0..271; TS_SWAP_XY applied), event flag and ID tag.
+ * Phase of owhinata/stm32f746g-disco#48 after the LTDC display
+ * (owhinata/stm32f746g-disco#52): used to verify the touch wiring and the X/Y
+ * mapping before EXTI-driven dispatch and GUIX input
+ * (owhinata/stm32f746g-disco#55/#56). `touch read` polls every 100 ms and
+ * prints each active point's panel-pixel coordinates (x 0..479, y 0..271;
+ * TS_SWAP_XY applied), event flag and ID tag.
  *
  * While the GUIX UI runs it owns the FT5336 (its own I2C3 poller), so `touch
  * probe`/`read` refuse until `gui stop` -- a concurrent shell poll would clash
- * on the bus and surface the FT5336's all-ones "not touched" sentinel (#73).
+ * on the bus and surface the FT5336's all-ones "not touched" sentinel
+ * (owhinata/stm32f746g-disco#73).
  *
  * Clean-room design; no third-party code reused.
  */
@@ -30,9 +34,10 @@
    poll would be a second unsynchronized I2C3 master (touch_lock only serializes
    single transactions, not the TD_STATUS + per-point read sequence), so refuse
    the bus-touching touch commands while gui owns the input -- symmetric to the
-   lcd draw guard (ltdc_gui_owns) and the camera CAM_ERR_BUSY gates (#73).  (The
-   FT5336 not-touched sentinel itself is dropped in touch_read(); this guard is
-   about bus ownership.)  `touch info` does no bus I/O and stays allowed. */
+   lcd draw guard (ltdc_gui_owns) and the camera CAM_ERR_BUSY gates
+   (owhinata/stm32f746g-disco#73). (The FT5336 not-touched sentinel itself is
+   dropped in touch_read(); this guard is about bus ownership.)  `touch info`
+   does no bus I/O and stays allowed. */
 static int touch_gui_owned(struct cli_instance *sh)
 {
 	if (guix_is_up()) {

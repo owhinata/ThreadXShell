@@ -4,7 +4,8 @@
  */
 /**
  * @file    log.h
- * @brief   RAM log subsystem (issue #28): levelled ring + dmesg + crash record.
+ * @brief   RAM log subsystem (owhinata/stm32f746g-disco#28): levelled ring +
+ * dmesg + crash record.
  *
  * Messages are appended to a ring buffer that lives in the DTCM .log_noinit
  * section, so it survives every system reset (reboot / fault / IWDG / WWDG /
@@ -84,7 +85,7 @@ void log_clear(void);
 
 /** Decoded cause of THIS boot's reset ("IWDG"/"SFT"/"POR"/...), captured by
  *  log_init() before the RCC->CSR flags are cleared.  Used by `wdt info`
- *  (issue #38); "?" if no flag was set. */
+ *  (owhinata/stm32f746g-disco#38); "?" if no flag was set. */
 const char *log_reset_cause(void);
 
 /** Run-time severity threshold: records above @p level are dropped (default

@@ -4,7 +4,7 @@
  */
 /**
  * @file    iwdg.c
- * @brief   IWDG independent watchdog driver (issue #38).
+ * @brief   IWDG independent watchdog driver (owhinata/stm32f746g-disco#38).
  *
  * The IWDG is clocked by the LSI (~32 kHz typ, 17-47 kHz over tolerance),
  * independent of the HSE+PLL 216 MHz tree, so it keeps counting even if the main
@@ -15,7 +15,8 @@
  * shell thread) without any extra pet -- the petter preempts it.
  *
  * The whole file compiles to nothing when BSP_ENABLE_IWDG == 0, so no IWDG symbol
- * (and no LSI dependency) reaches the image (issue #38 acceptance: `nm`).
+ * (and no LSI dependency) reaches the image (owhinata/stm32f746g-disco#38
+ * acceptance: `nm`).
  *
  * Clean-room design; no third-party code reused.
  */

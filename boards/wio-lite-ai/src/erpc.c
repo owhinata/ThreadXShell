@@ -3,14 +3,14 @@
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /*
- * Minimal clean-room eRPC client for the onboard RTL8720DN (issue #5).
+ * Minimal clean-room eRPC client for the onboard RTL8720DN (owhinata/wio-lite-ai#5).
  * See erpc.h for the wire format and the public contract.
  *
  * Register-agnostic (no RCC / peripheral setup here) -- clock-safe.  It only uses
- * ThreadX time/sync and the #17 rtl8720 UART driver for the raw bytes.
+ * ThreadX time/sync and the owhinata/wio-lite-ai#17 rtl8720 UART driver for the raw bytes.
  *
- * Concurrency model (issue #21 increment 8).  ONE resident service thread owns the
- * link; every caller just posts a request and waits for its own reply:
+ * Concurrency model (owhinata/wio-lite-ai#21 increment 8).  ONE resident service thread owns
+ * the link; every caller just posts a request and waits for its own reply:
  *
  *   caller: erpc_begin()   builds [header][seq][params] + CRC into a free slot,
  *                          marks it QUEUED and wakes the service thread
@@ -21,13 +21,13 @@
  *                          carries, copying the payload into that caller's @out
  *   caller: erpc_wait()    polls its slot / abort hook / deadline on 1 ms slices
  *
- * Issue #23 U0-3 adds a second frame type on the same wire, the LINK-CTRL channel (see
- * erpc.h): one extra slot, sent and received by the same thread, that carries link-layer
+ * owhinata/wio-lite-ai#23 U0-3 adds a second frame type on the same wire, the LINK-CTRL channel
+ * (see erpc.h): one extra slot, sent and received by the same thread, that carries link-layer
  * business rather than eRPC -- reading the module's UART counters, changing the baud
  * rate, and generating measured traffic.  It is only ever used on a quiescent link.
  *
- * Why a dedicated thread: the issue-#20 N3 firmware serves several requests at once
- * and replies out of order, and its accept/recv block for seconds on the module.  A
+ * Why a dedicated thread: the owhinata/wio-lite-ai#20 N3 firmware serves several requests at
+ * once and replies out of order, and its accept/recv block for seconds on the module.  A
  * per-call lock would let one blocking accept freeze the whole link, so instead the
  * link has a single owner that multiplexes by sequence number, and callers never
  * touch the UART themselves.  erpc_call()/erpc_call_ex() are begin+wait wrappers, so
@@ -89,10 +89,10 @@
  * path (including a 1992-byte scan reply and the `net echo` data loop) the high-water
  * mark was 268 B of 1536.
  *
- * Issue #23 U3 raised it to 3072 on the argument that the DATA receive callback had become
- * a NetX driver -- allocating a packet, copying up to 1514 bytes into it and queueing it
- * for the IP thread -- and that a stack overflow on the only surviving board is not how
- * one wants to learn the new figure.  U4 then drove 2.5 MB of TCP and a telnet console
+ * owhinata/wio-lite-ai#23 U3 raised it to 3072 on the argument that the DATA receive callback
+ * had become a NetX driver -- allocating a packet, copying up to 1514 bytes into it and
+ * queueing it for the IP thread -- and that a stack overflow on the only surviving board is not
+ * how one wants to learn the new figure.  U4 then drove 2.5 MB of TCP and a telnet console
  * through that callback and measured 332 B.  The driver costs 64 B, not 2 kB, because it
  * does not recurse into the stack: the deferred-receive call only queues.
  *
@@ -107,7 +107,8 @@
 #define ERPC_F_CTRL          0x00000002u
 #define ERPC_F_DONE(i)       (0x00000100u << (i))
 
-/* Leading u16 of a LINK-CTRL frame (issue #23 U0-3).  See the channel description in
+/* Leading u16 of a LINK-CTRL frame (owhinata/wio-lite-ai#23 U0-3).  See the channel description
+   in
  * erpc.h for why this cannot collide with an eRPC frame's message size.  0xFFFE is the
  * DATA channel's marker (app/link_data.h), by the same argument. */
 #define ERPC_CTRL_MAGIC      0xFFFFu
@@ -157,7 +158,7 @@ struct erpc_slot {
 static struct erpc_slot erpc_slots[ERPC_MAX_INFLIGHT];
 
 /* ------------------------------------------------------------------ *
- *  LINK-CTRL slot (issue #23 U0-3) -- exactly one exchange at a time
+ *  LINK-CTRL slot (owhinata/wio-lite-ai#23 U0-3) -- exactly one exchange at a time
  * ------------------------------------------------------------------ */
 /*
  * Deliberately NOT part of erpc_slots[]: a CTRL frame is a different frame type with its
@@ -320,8 +321,8 @@ static uint8_t              erpc_link_up;
 static volatile uint8_t     erpc_parked;
 
 /*
- * RX interrupt hook (issue #23 U0-3).  Without it the service thread only notices bytes
- * on its 1 ms poll, which adds up to 1 ms to every frame -- ~20 % of a 1500-byte frame at
+ * RX interrupt hook (owhinata/wio-lite-ai#23 U0-3).  Without it the service thread only notices
+ * bytes on its 1 ms poll, which adds up to 1 ms to every frame -- ~20 % of a 1500-byte frame at
  * 6 Mbaud, enough to hide the 4-versus-6 Mbaud difference the U0-3 measurements exist to
  * find.  Runs in interrupt context at NVIC priority 5; tx_event_flags_set is legal there
  * (this ThreadX port uses PRIMASK critical sections, so an ISR cannot preempt one).
@@ -341,8 +342,8 @@ void erpc_link_unlock(void) { if (erpc_ready) erpc_lock_put(); }
 /*
  * CRC-16 (poly 0x1021, MSB-first, no reflection, init 0xEF4A -- erpc_crc16.cpp).
  *
- * TABLE-DRIVEN since issue #23 U1, for the DATA channel: the bit-at-a-time loop this
- * replaces costs ~40 cycles/byte, which is ~110 us for a 1500-byte Ethernet frame, and
+ * TABLE-DRIVEN since owhinata/wio-lite-ai#23 U1, for the DATA channel: the bit-at-a-time loop
+ * this replaces costs ~40 cycles/byte, which is ~110 us for a 1500-byte Ethernet frame, and
  * the receive side of that runs on the link service thread for every frame in both
  * directions.  One byte per step brings it to ~11 us.  The table is built once on first
  * use FROM THE SAME BIT LOOP, so the values cannot drift from the definition -- the
@@ -411,7 +412,7 @@ static uint8_t  rx_hdr[6];
 static uint8_t  rx_hdr_got;
 static uint8_t  rx_hdr_need = 4u;        /* 4, or 6 once a channel magic is seen */
 static uint8_t  rx_is_ctrl;              /* the frame being assembled is a CTRL frame */
-static uint8_t  rx_is_data;              /* ... or a DATA frame (issue #23 U1) */
+static uint8_t  rx_is_data;              /* ... or a DATA frame (owhinata/wio-lite-ai#23 U1) */
 static uint16_t rx_size, rx_crc, rx_body_got;
 static uint32_t rx_drain_left;           /* oversize frame: bytes still to discard */
 static uint8_t  rx_active;               /* a partial frame is in progress */
@@ -727,7 +728,7 @@ static int erpc_send_one(void)
 			 * boundary (what erpc_begin() did before increment 8).  Never done
 			 * with a frame on the wire -- its reply may already be buffered.
 			 *
-			 * ...and never while the DATA channel is live (issue #23 U1): those
+			 * ...and never while the DATA channel is live (owhinata/wio-lite-ai#23 U1): those
 			 * "stale" bytes are then most likely the middle of an Ethernet frame
 			 * arriving right now, and throwing them away would desynchronise the
 			 * reader instead of cleaning it.  Nothing is lost by skipping it: a
@@ -790,7 +791,7 @@ static int erpc_ctrl_send(void)
  * is the head-of-line cost of not fragmenting, and it is deliberate.
  *
  * No wire ledger and no budget: a DATA frame has no reply, so there is nothing to free
- * it, and the module's 16 kB input ring is what absorbs a burst (issue #23 U1).
+ * it, and the module's 16 kB input ring is what absorbs a burst (owhinata/wio-lite-ai#23 U1).
  */
 static int erpc_data_send_one(void)
 {
@@ -826,7 +827,7 @@ static int erpc_data_send_one(void)
  * The CTRL slot MUST be counted here: it is what makes the loop below wait one tick
  * instead of parking on TX_WAIT_FOREVER, and a parked thread polls no RX at all -- a
  * CTRL reply would then never be read and every CTRL call would time out.  The DATA
- * queues are counted for the same reason (issue #23 U1): a frame handed to
+ * queues are counted for the same reason (owhinata/wio-lite-ai#23 U1): a frame handed to
  * link_data_send() from another thread must not sit until something else happens to
  * wake this one. */
 static int erpc_work_pending(void)
@@ -907,7 +908,7 @@ static void erpc_svc_entry(ULONG arg)
 		erpc_lock_put();
 
 		/*
-		 * Deliver received DATA frames with NO LOCK HELD (issue #23 U1).  The
+		 * Deliver received DATA frames with NO LOCK HELD (owhinata/wio-lite-ai#23 U1).  The
 		 * consumer is a network stack once U3 lands, and calling it from inside the
 		 * lock would (a) hold the link shut for as long as the stack takes to
 		 * process a packet and (b) put erpc_lock underneath whatever locks the stack
@@ -1095,7 +1096,7 @@ int erpc_link_quiescent(void)
 		return 0;
 	erpc_lock_get();
 	quiet = (erpc_ctrl.state == ERPC_ST_FREE) && (erpc_bytes_on_wire() == 0u);
-	/* The DATA channel counts too (issue #23 U1): a queued frame is about to be
+	/* The DATA channel counts too (owhinata/wio-lite-ai#23 U1): a queued frame is about to be
 	 * written, and a reader mid-frame means bytes are still coming.  `wifi link baud`
 	 * relies on this -- changing the line rate under either would corrupt it. */
 	if (quiet && (link_data_tx_pending() || link_data_rx_ready() || rx_active))
@@ -1317,7 +1318,7 @@ int erpc_call(uint8_t service, uint8_t request,
 }
 
 /* ------------------------------------------------------------------ *
- *  LINK-CTRL (issue #23 U0-3)
+ *  LINK-CTRL (owhinata/wio-lite-ai#23 U0-3)
  * ------------------------------------------------------------------ */
 /*
  * Decide the CTRL waiter's fate in ONE locked step, exactly as erpc_slot_settle() does

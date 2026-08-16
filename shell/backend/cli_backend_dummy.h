@@ -22,9 +22,10 @@
  * cli_transport_notify_tx() when its TX buffer drains.  Nothing is auto-freed.
  *
  * Threading: this backend is single-producer / test-only -- the FIFO and
- * capacity counters are updated without locking.  On target (#8) it is driven by
- * one shell thread; if a future use injects from an ISR or several producers, the
- * ring head/tail updates would need their own exclusion.
+ * capacity counters are updated without locking.  On target
+ * (owhinata/stm32f746g-disco#8) it is driven by one shell thread; if a future use
+ * injects from an ISR or several producers, the ring head/tail updates would need their
+ * own exclusion.
  *
  * Clean-room design; no third-party code reused.
  */
@@ -69,7 +70,8 @@ struct cli_dummy {
 	size_t   tx_free;             /**< free TX capacity when bounded */
 	int      tx_fail;             /**< 1: write() returns -1 immediately */
 
-	/* End-of-unit hook calls (issue #49).  A test asserts the core signals the end of
+	/* End-of-unit hook calls (owhinata/wio-lite-ai#49).  A test asserts the core signals
+    the end of
 	 * an output call exactly once, which is what a transmitting backend needs in order
 	 * to send a whole redraw as one packet. */
 	uint32_t flushes;

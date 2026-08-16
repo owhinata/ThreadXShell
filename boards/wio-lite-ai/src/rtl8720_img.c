@@ -3,9 +3,9 @@
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /*
- * RTL8720DN firmware-image staging in PSRAM -- issue #19 M5.  See rtl8720_img.h for
- * why the image lives at 0x90000000 and what the caller owes this module (the OCTOSPI1
- * guard, and finish()-or-invalidate() after every transfer).
+ * RTL8720DN firmware-image staging in PSRAM -- owhinata/wio-lite-ai#19 M5.  See
+ * rtl8720_img.h for why the image lives at 0x90000000 and what the caller owes this
+ * module (the OCTOSPI1 guard, and finish()-or-invalidate() after every transfer).
  *
  * Deliberately dumb: it is a bounded byte buffer plus the module's own checksum
  * algorithm.  Nothing here talks to the RTL8720 -- rtl8720_flash.c does that -- and

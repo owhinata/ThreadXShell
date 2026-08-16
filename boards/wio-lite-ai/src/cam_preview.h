@@ -4,13 +4,14 @@
  */
 /**
  * @file    cam_preview.h
- * @brief   Live camera preview on the LCD (issue #8 phase 3c, issue #35).
+ * @brief   Live camera preview on the LCD (owhinata/wio-lite-ai#8 phase 3c,
+ * owhinata/wio-lite-ai#35).
  *
  * Shows the camera on the panel, rotated into the landscape drawing surface
- * (issue #38).  Since issue #35 the preview OWNS its stream: it starts a band
- * stream (camera_band_start) in which the DCMI lands 60-row slices in AXI-SRAM,
- * transposes each band into the LTDC back buffer as it arrives, and presents once
- * the fourth one is in.
+ * (owhinata/wio-lite-ai#38).  Since owhinata/wio-lite-ai#35 the preview OWNS its
+ * stream: it starts a band stream (camera_band_start) in which the DCMI lands
+ * 60-row slices in AXI-SRAM, transposes each band into the LTDC back buffer as it
+ * arrives, and presents once the fourth one is in.
  *
  * That replaced pinning whole frames out of the PSRAM ring, where the transpose's
  * strided side was the external OCTOSPI1 -- 25 ms of CPU per frame and enough
@@ -52,7 +53,8 @@ int cam_preview_enabled(void);
  *  been presented yet, and how long the most recent frame's transpose took in
  *  microseconds -- summed over its four bands, so it stays directly comparable to
  *  the 25.0 ms per frame the whole-frame-from-PSRAM version measured before issue
- *  #35.  Reported by `camera info`.  Any argument may be NULL. */
+ *  owhinata/wio-lite-ai#35.  Reported by `camera info`.  Any argument may be
+ * NULL. */
 void cam_preview_stats(uint32_t *shown, uint32_t *dropped, uint32_t *blit_us);
 
 #ifdef __cplusplus

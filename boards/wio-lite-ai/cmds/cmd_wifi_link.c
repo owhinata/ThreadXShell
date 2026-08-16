@@ -4,7 +4,7 @@
  */
 /**
  * @file    cmd_wifi_link.c
- * @brief   `wifi link` subcommands (issue #23): the RTL8720DN UART link itself.
+ * @brief   `wifi link` subcommands (owhinata/wio-lite-ai#23): the RTL8720DN UART link itself.
  *
  *   wifi link info                     both ends' counters + the current rate
  *   wifi link baud <bps>               change the rate of the link (2M / 3M / 4M / 6M)
@@ -12,10 +12,10 @@
  *   wifi link dbench [bytes] [secs] [dir]  the same, free-running on the DATA channel (U1)
  *
  * Where `wifi` is L2 and `net` is L3, this is L1/L2 of the wire between the STM32 and
- * the companion chip: the maintenance and diagnostics face of the link that issue #23
- * built (the numbers here are what proved the "L2 bypass" road the host stack now runs
- * on, and they remain the link's health monitors -- `ore`/drops must stay 0 -- and the
- * DATA channel's regression witness, `dbench`).
+ * the companion chip: the maintenance and diagnostics face of the link that
+ * owhinata/wio-lite-ai#23 built (the numbers here are what proved the "L2 bypass" road the
+ * host stack now runs on, and they remain the link's health monitors -- `ore`/drops must stay
+ * 0 -- and the DATA channel's regression witness, `dbench`).
  *
  * It talks the LINK-CTRL channel (app/erpc.h), NOT eRPC -- a second frame type that the
  * link layer owns at both ends, so none of it required touching the generated eRPC server
@@ -25,8 +25,8 @@
  *
  * PRECONDITION, for everything except the read-only `info`: THE L2 BRIDGE MUST BE DOWN,
  * i.e. this runs after a power-on and before `wifi connect`.  The reason is time and the
- * DATA channel, not ownership -- see link_ctrl_ready_ex() below, which is where issue #30
- * B2c narrowed it down.
+ * DATA channel, not ownership -- see link_ctrl_ready_ex() below, which is where
+ * owhinata/wio-lite-ai#30 B2c narrowed it down.
  *
  * TIMING.  Per-frame latency is measured with TIM2->CNT (free-running, 32-bit at
  * 2*PCLK1 = 275 MHz, started unconditionally by port/threadx/tx_glue.c for the execution
@@ -172,8 +172,8 @@ static int link_ctrl_ready_ex(struct cli_instance *sh, int allow_busy, int allow
 	/*
 	 * THE BRIDGE HAS TO BE DOWN, for everything except the read-only `info`.
 	 *
-	 * Until issue #30 B2c this was nx_net_guard() -- refuse whenever the host stack was
-	 * up -- and the reason given was ownership.  The real reason is narrower and it is
+	 * Until owhinata/wio-lite-ai#30 B2c this was nx_net_guard() -- refuse whenever the host stack
+	 * was up -- and the reason given was ownership.  The real reason is narrower and it is
 	 * about TIME and about the DATA channel: a bench holds the coarse mutex for seconds
 	 * at a stretch, and the interface owner needs that mutex every NXN_REFRESH_MS or the
 	 * module drops the tap; `dbench` additionally wants the DATA channel, which has
@@ -198,8 +198,8 @@ static int link_ctrl_ready_ex(struct cli_instance *sh, int allow_busy, int allow
 		return 1;
 	}
 	/*
-	 * `link dbench` deliberately runs with the link BUSY (issue #23 U1), and `link info`
-	 * runs with the bridge up (B2c) -- where the owner's reference makes the count 2 and
+	 * `link dbench` deliberately runs with the link BUSY (owhinata/wio-lite-ai#23 U1), and `link
+	 * info` runs with the bridge up (B2c) -- where the owner's reference makes the count 2 and
 	 * a DATA frame may well be in flight.  Both are safe for the same reason: the frame
 	 * reader demultiplexes by frame type and the CTRL slot is independent of the eRPC
 	 * slots, which is also why the owner itself refreshes over CTRL while bridged.
@@ -345,9 +345,9 @@ static int cmd_link_info(struct cli_instance *sh, int argc, char **argv)
 /*
  * Change the rate of the link.  The sequence itself -- ping, LINK_SETBAUD, re-open,
  * verify, best-effort fall back -- lives in rtl_link_set_rate() (app/rtl_link.h), because
- * since issue #23 U4-3 `net up` raises the rate too and two implementations of something
- * this delicate would eventually disagree.  What stays here is the part that is genuinely
- * this command's: argument checking, the session, and saying what happened.
+ * since owhinata/wio-lite-ai#23 U4-3 `net up` raises the rate too and two implementations of
+ * something this delicate would eventually disagree.  What stays here is the part that is
+ * genuinely this command's: argument checking, the session, and saying what happened.
  */
 static int cmd_link_baud(struct cli_instance *sh, int argc, char **argv)
 {
@@ -627,7 +627,7 @@ static int cmd_link_bench(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-/* ---- link dbench (issue #23 U1: the DATA channel) ------------------------- */
+/* ---- link dbench (owhinata/wio-lite-ai#23 U1: the DATA channel) ------------------------- */
 
 /*
  * `link bench` measures the CTRL channel, which is a REQUEST/REPLY exchange: the host
@@ -824,8 +824,8 @@ static void link_dbench_report(struct cli_instance *sh, const char *dir, uint32_
  * It asks about the DATA CHANNEL, not about the link.  The first version of this used
  * erpc_link_quiescent(), which additionally requires that no eRPC request be outstanding
  * -- and the telnet console keeps a blocking accept outstanding for as long as it is
- * armed (issue #21), so with a console up this could never succeed no matter how quiet
- * the DATA channel was.  Measured on board #2: the module reported queue 0 / in-use 0
+ * armed (owhinata/wio-lite-ai#21), so with a console up this could never succeed no matter how
+ * quiet the DATA channel was.  Measured on board #2: the module reported queue 0 / in-use 0
  * (its promise kept) while this still timed out for a full second.
  */
 static int link_data_settle(struct cli_instance *sh)
@@ -930,7 +930,7 @@ static int cmd_link_dbench(struct cli_instance *sh, int argc, char **argv)
 	link_db.elapsed_ms = (uint32_t)(HAL_GetTick() - t_start);
 
 	/* Report before anything else can fail: after a Ctrl+C the core discards handler
-	 * output, so a summary held back to the end would simply vanish (issue #16). */
+	 * output, so a summary held back to the end would simply vanish (owhinata/wio-lite-ai#16). */
 	link_dbench_report(sh, dir, bytes);
 
 	/* Stop the far end and prove both ends are quiet BEFORE reading the counters, so
@@ -965,10 +965,10 @@ static int cmd_link_dbench(struct cli_instance *sh, int argc, char **argv)
 }
 
 /*
- * `wifi link arp` lived here until issue #30 B2c.  It opened a transient L2 bridge and
- * put an ARP request on the air once a second; an `is-at` reply proved the whole path in
- * both directions at once (host builds a frame -> module transmits it with its own MAC ->
- * a real machine answers -> the driver accepts it -> the tap catches it before lwIP -> it
+ * `wifi link arp` lived here until owhinata/wio-lite-ai#30 B2c.  It opened a transient L2
+ * bridge and put an ARP request on the air once a second; an `is-at` reply proved the whole
+ * path in both directions at once (host builds a frame -> module transmits it with its own MAC
+ * -> a real machine answers -> the driver accepts it -> the tap catches it before lwIP -> it
  * survives the link), which passively watching broadcasts never could.
  *
  * It goes because the bridge is permanent now: `net dhcp` proves exactly the same round

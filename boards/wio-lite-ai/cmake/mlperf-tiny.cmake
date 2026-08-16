@@ -1,5 +1,5 @@
 # ============================================================================
-#  MLPerf Tiny v1.4 benchmark harness (issue #55)
+#  MLPerf Tiny v1.4 benchmark harness (owhinata/wio-lite-ai#55)
 #
 #  Included from CMakeLists.txt when CONFIG_MLPERF_TINY is ON.  Builds upstream's
 #  shared harness half and ours into one object library, which the `shell` target

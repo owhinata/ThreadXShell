@@ -4,19 +4,20 @@
  */
 /**
  * @file    sdram.h
- * @brief   On-board FMC SDRAM bring-up (issue #40, Epic #22).
+ * @brief   On-board FMC SDRAM bring-up (owhinata/stm32f746g-disco#40, Epic
+ * owhinata/stm32f746g-disco#22).
  *
  * Driver for the board's 128-Mbit SDRAM (Micron MT48LC4M32B2, 4M x 32) behind
  * the STM32F746 FMC SDRAM controller.  Only the low 16 data lines are wired
  * (UM1907 §6.13), so the accessible array is 8 MB at 0xC0000000 (FMC bank 1).
  *
  * The region's primary purpose is large DMA-target buffers (the camera frame
- * buffer, #41).  To make those coherent by construction, bsp_init() maps the
- * whole 8 MB through the MPU as Normal **non-cacheable** memory (see
- * mpu_config() in src/bsp.c) -- DMA writes and CPU reads need no cache
- * maintenance at the cost of slower CPU access.  Linker objects land here via
- * the `.sdram` (NOLOAD) section; nothing in it survives reset and nothing may
- * touch it before sdram_init() ran.
+ * buffer, owhinata/stm32f746g-disco#41).  To make those coherent by
+ * construction, bsp_init() maps the whole 8 MB through the MPU as Normal
+ * **non-cacheable** memory (see mpu_config() in src/bsp.c) -- DMA writes and
+ * CPU reads need no cache maintenance at the cost of slower CPU access.  Linker
+ * objects land here via the `.sdram` (NOLOAD) section; nothing in it survives
+ * reset and nothing may touch it before sdram_init() ran.
  *
  * sdram_init() performs the FMC/GPIO/controller setup plus the JEDEC power-up
  * command sequence.  It busy-waits (udelay / register polls) and uses no

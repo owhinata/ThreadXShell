@@ -13,14 +13,14 @@
  * Reset_Handler initialises only .data/.bss, never .log_noinit; a *power* reset
  * (POR/PDR/BOR) loses them, which log_init() detects via the magic.
  *
- * IMPORTANT (issue #13): a bare store to DTCM does NOT durably land -- the write
- * must be READ BACK to become effective (RM0468 DTCM/ITCM read-back requirement).
- * Confirmed on board #2: an un-read-back'd record survives only if something reads
- * the ring during that boot (dmesg / SWD), independent of elapsed time, with NO
- * ECC error (RAMECC clean -- so it is not a cache/ECC issue).  Every DTCM write
- * here is therefore followed by a volatile read-back (persist_*); without it the
- * next boot's boot-walk reads stale data and truncates the ring, silently
- * dropping the just-written record.
+ * IMPORTANT (owhinata/wio-lite-ai#13): a bare store to DTCM does NOT durably land
+ * -- the write must be READ BACK to become effective (RM0468 DTCM/ITCM read-back
+ * requirement).  Confirmed on board #2: an un-read-back'd record survives only if
+ * something reads the ring during that boot (dmesg / SWD), independent of elapsed
+ * time, with NO ECC error (RAMECC clean -- so it is not a cache/ECC issue).  Every
+ * DTCM write here is therefore followed by a volatile read-back (persist_*);
+ * without it the next boot's boot-walk reads stale data and truncates the ring,
+ * silently dropping the just-written record.
  *
  * Layout: a 32-byte header (magic/version/size/head/tail/seq/boot_count) then a
  * power-of-two data[] of variable-length records.  head/tail are free-running
@@ -138,7 +138,7 @@ static uint16_t rec_total_at(uint32_t off)
 	return total;
 }
 
-/* ---- DTCM write persistence (issue #13) -------------------------------- */
+/* ---- DTCM write persistence (owhinata/wio-lite-ai#13) ----------------------- */
 
 /* A bare store to the Cortex-M7 DTCM does NOT durably land: the location must be
  * read back to make the write "effective" (RM0468 DTCM/ITCM read-back
@@ -248,7 +248,8 @@ void log_init(void)
 		g_log.boot_count = 1u;
 	}
 
-	/* #13: read the header writes above back so they durably land in DTCM
+	/* owhinata/wio-lite-ai#13: read the header writes above back so they durably land
+    in DTCM
 	 * (the boot marker's log_write() below persists the data region). */
 	__DSB();
 	persist_hdr();
@@ -298,7 +299,8 @@ void log_vwrite(unsigned level, const char *tag, const char *fmt, va_list ap)
 		uint32_t skip = (o + rec_len > LOG_RING_DATA_SIZE)
 		                    ? (LOG_RING_DATA_SIZE - o) : 0u;
 		uint32_t need = skip + rec_len;
-		uint32_t start = g_log.head;   /* #13: span written this call (SKIP+record) */
+		/* owhinata/wio-lite-ai#13: span written this call (SKIP+record) */
+		uint32_t start = g_log.head;
 
 		/* Evict whole records from tail until the new one (plus any SKIP) fits. */
 		while ((uint32_t)(g_log.size - (g_log.head - g_log.tail)) < need &&
@@ -332,7 +334,8 @@ void log_vwrite(unsigned level, const char *tag, const char *fmt, va_list ap)
 		__DMB();                                /* body + seq visible before head */
 		g_log.head += rec_len;
 
-		/* #13: read the writes back so they durably land in DTCM (a bare store
+		/* owhinata/wio-lite-ai#13: read the writes back so they durably land in DTCM (a
+     bare store
 		 * does not); else the next boot-walk reads stale data and truncates the
 		 * ring, dropping this record.  Header last == the commit point. */
 		__DSB();
@@ -358,7 +361,8 @@ void log_clear(void)
 	LOG_CRIT_ENTER();
 	g_log.tail = g_log.head;        /* seq keeps counting across a clear */
 	__DSB();
-	persist_hdr();                  /* #13: read-back so the new tail lands */
+	/* owhinata/wio-lite-ai#13: read-back so the new tail lands */
+	persist_hdr();
 	__DSB();
 	LOG_CRIT_EXIT();
 }

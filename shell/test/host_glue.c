@@ -37,7 +37,7 @@ int  cli_lock(struct cli_instance *sh)   { (void)sh; return 0; }
 
 /* No mutex on the host, but the END-OF-UNIT signal is real behaviour, not locking:
  * cli_core.c calls the backend's flush() from here, and a backend that transmits
- * depends on it (issue #49).  Mirror it, or the whole path goes untested. */
+ * depends on it (owhinata/wio-lite-ai#49).  Mirror it, or the whole path goes untested. */
 void cli_unlock(struct cli_instance *sh)
 {
 	struct cli_instance  *o  = sh->fg ? sh->fg : sh;
@@ -49,11 +49,13 @@ void cli_unlock(struct cli_instance *sh)
 
 /* ---- backend notify: no-op (RX is pumped synchronously) ----------------- *
  * The real notify_tx contract ("backend calls this when TX space frees") is NOT
- * verified on the host -- it is exercised on target by the UART backend (#7). */
+ * verified on the host -- it is exercised on target by the UART backend
+ * (owhinata/stm32f746g-disco#7). */
 void cli_transport_notify_rx(struct cli_instance *sh) { (void)sh; }
 void cli_transport_notify_tx(struct cli_instance *sh) { (void)sh; }
 
-/* ---- background jobs: stubbed (ThreadX worker pool is target-only, #25) --- *
+/* ---- background jobs: stubbed (ThreadX worker pool is target-only,
+   owhinata/stm32f746g-disco#25) --- *
  * cli_session.c (ThreadX-free, host-built) calls these from cli_dispatch_line;
  * the real pool lives in cli_job.c (ThreadX), which the host harness does not
  * link.  Launch fails (no worker on the host) and reap is a no-op, so a host
@@ -82,7 +84,7 @@ int cli_tx_send_blocking(struct cli_instance *sh, const uint8_t *data, size_t le
 	int    stalls = 0;
 
 	while (sent < len) {
-		/* Cooperative Ctrl+C fast-fail, mirroring cli_core.c (issue #16). */
+		/* Cooperative Ctrl+C fast-fail, mirroring cli_core.c (owhinata/stm32f746g-disco#16). */
 		if (sh->dispatching && sh->cancel_req)
 			return -1;
 
@@ -103,7 +105,7 @@ int cli_tx_send_blocking(struct cli_instance *sh, const uint8_t *data, size_t le
 		 * CLI_EVT_RX while a command runs).  Mirror cli_core.c's cancel handling:
 		 * poll the ring for a buffered 0x03 before "waiting", treat the wait hook
 		 * (the host analogue of an RX/TX wake) as a chance for the test to inject
-		 * a 0x03, then poll again (issue #16). */
+		 * a 0x03, then poll again (owhinata/stm32f746g-disco#16). */
 		if (sh->dispatching && cli_cancel_poll(sh))
 			return -1;
 		if (g_tx_wait_fn)
@@ -154,7 +156,7 @@ void cli_test_pump(struct cli_instance *sh)
 
 	/* One byte at a time, mirroring cli_core.c: a '\r' dispatches synchronously,
 	 * so bulk-reading would hide following type-ahead (e.g. Ctrl+C) from
-	 * cli_cancel_poll() during the handler (issue #16). */
+	 * cli_cancel_poll() during the handler (owhinata/stm32f746g-disco#16). */
 	while (tr->api->read(tr, &b, 1) > 0)
 		cli_input_byte(sh, b);
 }

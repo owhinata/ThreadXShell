@@ -4,7 +4,8 @@
  */
 /**
  * @file    cli_job.c
- * @brief   Background-job pool: `cmd &` worker threads + jobs/kill (issue #25).
+ * @brief   Background-job pool: `cmd &` worker threads + jobs/kill
+ * (owhinata/stm32f746g-disco#25).
  *
  * A trailing '&' on a command segment runs it in a background WORKER thread drawn
  * from a fixed static pool (CLI_MAX_BG_JOBS), so the interactive prompt returns
@@ -12,9 +13,9 @@
  * command runs in it unchanged) wired as a "job" of its launching foreground
  * shell: inst.fg = fg and inst.tr = fg->tr.  That makes the worker's output --
  * cli_print AND printf -- serialise on the foreground's tx_lock and route to the
- * foreground's terminal (cli_out_begin / cli_current_instance, #18/#25), while
- * cancellation is kill-driven (the worker never drains the shared RX, which is a
- * single-consumer SPSC ring owned by the interactive thread).
+ * foreground's terminal (cli_out_begin / cli_current_instance,
+ * owhinata/stm32f746g-disco#18/#25), while cancellation is kill-driven (the worker never drains
+ * the shared RX, which is a single-consumer SPSC ring owned by the interactive thread).
  *
  * Lifecycle.  A worker's entry runs the one segment through the normal dispatch
  * path and returns, so ThreadX moves it to TX_COMPLETED -- a thread cannot delete
@@ -25,7 +26,7 @@
  * thread state (read under TX_DISABLE), never a self-set flag, so a worker still
  * executing its return epilogue is never deleted out from under itself.
  *
- * This is the only #25 file that calls ThreadX (tx_*); the parse seam
+ * This is the only owhinata/stm32f746g-disco#25 file that calls ThreadX (tx_*); the parse seam
  * (cli_segment_is_background) and the cancel/dispatch seams it relies on are
  * ThreadX-free and host-tested.  Linked into the threadx executable only -- the
  * host harness stubs cli_job_launch / cli_jobs_reap (see host_glue.c).
@@ -81,7 +82,8 @@ static struct cli_job  cli_jobs[CLI_MAX_BG_JOBS];
  * requires it); CLI_BG_JOB_STACK_SIZE is a multiple of 8 so every row aligns. */
 static UCHAR cli_job_stacks[CLI_MAX_BG_JOBS][CLI_BG_JOB_STACK_SIZE]
 	__attribute__((aligned(8)));
-static unsigned long cli_job_next_id = 1;          /* never reuses an id (#25) */
+/* never reuses an id (owhinata/stm32f746g-disco#25) */
+static unsigned long cli_job_next_id = 1;
 
 /* ---- worker instance reset (NOT cli_init: keep events, never touch tr->sh) -- *
  * cli_init() would set tr->sh = inst and re-init the backend, corrupting the
@@ -260,7 +262,8 @@ int cli_job_launch(struct cli_instance *fg, char *seg)
 	cli_job_inst_reset(&j->inst, fg, cli_job_stacks[slot], seg);
 
 	/* Register the worker thread BEFORE creating it (auto-start), so printf from a
-	 * thread that begins running at once always resolves its instance (#18). */
+	 * thread that begins running at once always resolves its instance
+	 * (owhinata/stm32f746g-disco#18). */
 	if (cli_register_thread(&j->inst.thread, &j->inst) != 0) {
 		j->state = CLI_JOB_FREE;
 		j->id    = 0;
@@ -314,7 +317,7 @@ int cli_job_kill(struct cli_instance *sh, unsigned long id)
 		/* Latch the cancel atomically vs reap's RUNNING->REAPING claim and a
 		 * subsequent slot reuse, so a kill never sets a flag on a job being torn
 		 * down or on a different job that reused the slot (the id check + latch are
-		 * one critical section).  Cooperative (issue #16/#25): a worker polling
+		 * one critical section).  Cooperative (owhinata/stm32f746g-disco#16/#25): a worker polling
 		 * cli_cancel_requested() / in cli_sleep() stops; a non-cooperative handler
 		 * (e.g. coremark) ignores it and runs to the end.  tx_event_flags_set is
 		 * ISR-safe, so calling it under TX_DISABLE only defers the wakeup switch. */

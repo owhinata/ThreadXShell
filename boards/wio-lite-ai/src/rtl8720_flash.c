@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /*
- * RTL8720DN (AmebaD) on-device UART firmware-download support -- issue #19.
+ * RTL8720DN (AmebaD) on-device UART firmware-download support -- owhinata/wio-lite-ai#19.
  * See rtl8720_flash.h for the entry mechanism, wiring and protocol references.
  *
  * Milestones, in the order they were proven on board #2: M1 download-mode entry,
@@ -19,8 +19,9 @@
  * edge so the ROM samples the download strap, brief bounded hold, then PD14 released
  * to UART9_RX) and issues the download read-word command, checking for the framed
  * reply.  NO erase / NO write -- fully reversible, cannot brick (mask-ROM download is
- * re-enterable).  Register-agnostic beyond GPIO + the #17 rtl8720 primitives (never
- * touches the RCC clock tree) -> clock-safe.  cli-agnostic (ThreadX timing + abort hook).
+ * re-enterable).  Register-agnostic beyond GPIO + the owhinata/wio-lite-ai#17 rtl8720
+ * primitives (never touches the RCC clock tree) -> clock-safe.  cli-agnostic (ThreadX timing +
+ * abort hook).
  */
 #include "stm32h7xx_hal.h"   /* GPIO reconfig (PD14 strap: AF11 UART9_RX <-> output low) */
 #include "tx_api.h"          /* tx_time_get / tx_thread_sleep (1 tick = 1 ms here) */
@@ -178,7 +179,7 @@ static int slip_decode(const uint8_t *in, int n, uint8_t *out, int cap)
 int rtl_dl_enter(uint32_t hold_us, int (*should_abort)(void *), void *ctx)
 {
 	/*
-	 * FORCE-QUIESCE FIRST, and it has to be first (issue #30 B2b).
+	 * FORCE-QUIESCE FIRST, and it has to be first (owhinata/wio-lite-ai#30 B2b).
 	 *
 	 * This used to be a bare rtl8720_uart_close() plus rtl_link_forget_module().  That
 	 * was sound only while callers proved the link was idle before entering: the
@@ -303,7 +304,7 @@ int rtl_dl_probe(int use_slip, uint32_t timeout_ms,
 }
 
 /* ================================================================== *
- *  M2: flashloader stub upload + flash READ (issue #19)
+ *  M2: flashloader stub upload + flash READ (owhinata/wio-lite-ai#19)
  *
  *  NON-DESTRUCTIVE: this section writes only the module SRAM (the flashloader stub at
  *  0x00082000) and READS flash (0x20).  It sends NO flash-erase (0x17) and NO flash
@@ -337,7 +338,7 @@ extern const uint32_t rtl8720_flashloader_len;
 #define RTL_DL_FLASH_BASE        0x08000000u   /* a block's addr carries this base for flash */
 
 /*
- * Flash range caps.  READ and WRITE are deliberately DIFFERENT (issue #19 M4):
+ * Flash range caps.  READ and WRITE are deliberately DIFFERENT (owhinata/wio-lite-ai#19 M4):
  *
  *  - WRITE_MAX stays at the original conservative 2 MB.  Every destructive path
  *    (dl_erase_sectors / dl_send_flash / rtl_dl_flash_program) keeps exactly the
@@ -684,7 +685,7 @@ int rtl_dl_load_flashloader(uint32_t target_baud, int (*ab)(void *), void *ctx)
 }
 
 /* ================================================================== *
- *  M4: capacity detection + device checksum + SPI status/ID (issue #19)
+ *  M4: capacity detection + device checksum + SPI status/ID (owhinata/wio-lite-ai#19)
  *
  *  READ-ONLY.  Nothing here erases or writes flash: the only commands issued are
  *  0x20 (block read, already proven in M2), 0x21 (SPI status/ID read) and 0x27
@@ -810,7 +811,7 @@ int rtl_dl_flash_jedec(struct rtl_dl_jedec *j, int (*ab)(void *), void *ctx)
 int rtl_dl_detect_size(struct rtl_dl_size *s, int (*ab)(void *), void *ctx)
 {
 	/* One reference span read in ONE command, plus the candidate's -- RTL_DL_SIZE_PROBE_LEN
-	 * each, halved from two sectors to one by issue #46 to give the bytes back to
+	 * each, halved from two sectors to one by owhinata/wio-lite-ai#46 to give the bytes back to
 	 * AXI-SRAM.  Function-static: off the 4 KB shell stack. */
 	static uint8_t ref[RTL_DL_SIZE_PROBE_LEN];
 	static uint8_t cand[RTL_DL_SIZE_PROBE_LEN];

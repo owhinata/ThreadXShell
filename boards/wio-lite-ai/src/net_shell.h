@@ -4,7 +4,8 @@
  */
 /**
  * @file    net_shell.h
- * @brief   telnet shell console on the host's own TCP/IP stack (issue #23 U4-2).
+ * @brief   telnet shell console on the host's own TCP/IP stack (owhinata/wio-lite-ai#23
+ * U4-2).
  *
  * A second `struct cli_instance` bound to a transport whose bytes travel over a NetX Duo
  * TCP socket on this MCU, so `telnet <board-ip>` gets the same shell as the USB CDC
@@ -15,11 +16,11 @@
  * ---- what U4-2 changed, and why it matters more than it looks -------------------
  *
  * Until U4-2 this console ran on the RTL8720DN's own lwIP, reached by an eRPC round trip
- * per operation (issue #21).  That shaped everything: one blocking module call at a time,
- * because the module's firmware has two worker tasks and ours permanently occupied one;
- * no aborting an accept or a receive, because the module keeps running a call the host
- * gave up on; a "dirty" latch and deliberately leaked file descriptors when a call did not
- * come back; and every output chunk bounded by the module's UART ring.
+ * per operation (owhinata/wio-lite-ai#21).  That shaped everything: one blocking module
+ * call at a time, because the module's firmware has two worker tasks and ours permanently
+ * occupied one;  no aborting an accept or a receive, because the module keeps running a
+ * call the host gave up on; a "dirty" latch and deliberately leaked file descriptors when a
+ * call did not come back; and every output chunk bounded by the module's UART ring.
  *
  * None of that exists now.  The stack is on this side of the link, so there is no far end
  * still running an operation we abandoned, nothing to leak, and no worker to compete for.
@@ -28,10 +29,11 @@
  * and a teardown that must PROVE it happened.
  *
  * U4-2 also deleted the TX ring, on the reasoning that TCP's own back-pressure could
- * replace it.  Issue #48 put it back: the callbacks that were supposed to signal that
- * back-pressure do not all exist, and a deadline shorter than the TCP retransmit timeout
- * turned one lost segment into a truncated report.  The mechanism, and what makes the ring
- * load-bearing rather than a buffer, is documented at the top of net_shell.c.
+ * replace it.  owhinata/wio-lite-ai#48 put it back: the callbacks that were supposed to
+ * signal that back-pressure do not all exist, and a deadline shorter than the TCP
+ * retransmit timeout turned one lost segment into a truncated report.  The mechanism, and
+ * what makes the ring load-bearing rather than a buffer, is documented at the top of
+ * net_shell.c.
  *
  * ---- the console REQUIRES the host stack ---------------------------------------
  *
@@ -79,9 +81,9 @@ enum net_shell_state {
 /*
  * Create the service thread and its ThreadX objects.  Call ONCE from
  * tx_application_define() -- object creation only (no HAL_GetTick dependency, see issue
- * #12) and the thread parks on its event flags until something arms it.  Returns 0, or -1
- * if an object could not be created (fail-soft: the telnet console is then simply
- * unavailable and the rest of the firmware runs).
+ * owhinata/wio-lite-ai#12) and the thread parks on its event flags until something arms it.
+ * Returns 0, or -1 if an object could not be created (fail-soft: the telnet console is then
+ * simply unavailable and the rest of the firmware runs).
  */
 int net_shell_init(void);
 
@@ -147,12 +149,12 @@ bool net_shell_is_console(const struct cli_instance *sh);
  * @sh is the telnet console and @what would destroy the transport it is running on
  * (power-cycle the module, take the host stack down, or take over the console byte stream
  * for YMODEM).  Not a policy -- the shell deliberately has no command restrictions (f746
- * issue #49 P4); this is only self-destruct avoidance, so it refuses on the telnet console
- * alone.
+ * owhinata/wio-lite-ai#49 P4); this is only self-destruct avoidance, so it refuses on the
+ * telnet console alone.
  *
- * (issue #21's net_shell_guard_link() is gone: since issue #23 U4-2 the console is a
- * NetX socket and no longer occupies one of the module firmware's workers, so there is
- * nothing left to protect module-side eRPC callers from.)
+ * (owhinata/wio-lite-ai#21's net_shell_guard_link() is gone: since owhinata/wio-lite-ai#23
+ * U4-2 the console is a NetX socket and no longer occupies one of the module firmware's
+ * workers, so there is nothing left to protect module-side eRPC callers from.)
  */
 int net_shell_guard(struct cli_instance *sh, const char *what);
 

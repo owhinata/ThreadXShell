@@ -4,7 +4,8 @@
  */
 /**
  * @file    cmd_ai.c
- * @brief   `ai` shell command: on-device NN inference (issue #81, Epic #80).
+ * @brief   `ai` shell command: on-device NN inference (owhinata/stm32f746g-disco#81, Epic
+ * owhinata/stm32f746g-disco#80).
  *
  * Front-end to the backend-agnostic nn API (port/nn/nn.h).  P1 scaffold covers:
  *   ai info        -- backend/model identity, I/O tensor shapes, arena size
@@ -254,7 +255,8 @@ static int cmd_ai_run(struct cli_instance *sh, int argc, char **argv)
 		cli_error(sh, "stream already running -- use 'ai stream stats'\r\n");
 		return 1;
 	}
-	/* The AI is a subscriber now (#100): it needs the base capture running to get a
+	/* The AI is a subscriber now (owhinata/stm32f746g-disco#100): it needs the base capture
+    running to get a
 	   frame.  A single-shot `ai run` cannot pull a frame from an idle base. */
 	if (!camera_streaming()) {
 		cli_error(sh, "base capture is off -- run 'camera stream start' first\r\n");
@@ -307,7 +309,8 @@ static int cmd_ai_stream_start(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	}
 	/* Enabled; attaches to the base if it is streaming RGB565, else stays idle until
-	   `camera stream start` (the AI intent is independent of the base, #100). */
+	   `camera stream start` (the AI intent is independent of the base,
+	   owhinata/stm32f746g-disco#100). */
 	if (!camera_streaming())
 		cli_print(sh, "inference enabled -- start the base ('camera stream start') "
 		              "to run\r\n");
@@ -360,7 +363,7 @@ static int cmd_ai_norm(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-/* ---- runtime model load (ai model, issue #89 P2) -------------------------- */
+/* ---- runtime model load (ai model, owhinata/stm32f746g-disco#89 P2) ------------------ */
 
 /* Basename of an SD path for the display name ("dir/x.tflite" -> "x.tflite"). */
 static const char *ai_basename(const char *p)

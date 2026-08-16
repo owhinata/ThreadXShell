@@ -4,7 +4,7 @@
  */
 /**
  * @file    cmd_devmem.c
- * @brief   `devmem` built-in shell command (issue #14): peek / poke / dump.
+ * @brief   `devmem` built-in shell command (owhinata/stm32f746g-disco#14): peek / poke / dump.
  *
  * A developer/debug memory-access command, registered only in the `shell`
  * executable (never the host test harness, like cmd_system.c / cmd_thread.c).
@@ -77,7 +77,8 @@ static const struct devmem_region devmem_map[] = {
 	{ 0x20000000u, 0x00020000u, 1, 1, WALL, 0, "DTCM"      }, /* 128 KB              */
 	{ 0x24000000u, 0x00050000u, 1, 1, WALL, 0, "AXI-SRAM"  }, /* 320 KB (D1)         */
 #if BSP_ENABLE_PSRAM
-	{ 0x90000000u, 0x00800000u, 1, 1, WALL, 1, "PSRAM"     }, /* ext OCTOSPI1 APS6408 (#3); gated on psram_ready() */
+	/* ext OCTOSPI1 APS6408 (owhinata/wio-lite-ai#3); gated on psram_ready() */
+	{ 0x90000000u, 0x00800000u, 1, 1, WALL, 1, "PSRAM"     },
 #endif
 	{ 0xE0000000u, 0x00100000u, 1, 1, W32,  0, "PPB"       }, /* SCB/NVIC/SysTick/DWT */
 };

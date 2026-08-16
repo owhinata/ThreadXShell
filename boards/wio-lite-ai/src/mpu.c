@@ -1,5 +1,5 @@
 /*
- * Wio Lite AI (STM32H725AEI6) -- MPU non-cacheable region setup (issue #3).
+ * Wio Lite AI (STM32H725AEI6) -- MPU non-cacheable region setup (owhinata/wio-lite-ai#3).
  *
  * The app enables the Cortex-M7 D-cache (app/main.c).  By the ARMv7-M default
  * memory map the external OCTOSPI1 PSRAM window at 0x90000000 (0x80000000-
@@ -9,8 +9,8 @@
  * non-cacheable, shareable so DMA buffers placed there stay coherent with no
  * per-transfer clean/invalidate.
  *
- * That premise is no longer hypothetical: issue #6 enabled the SDMMC1 IDMA, the
- * first bus master in this firmware.  It deliberately does NOT use a region here --
+ * That premise is no longer hypothetical: owhinata/wio-lite-ai#6 enabled the SDMMC1 IDMA,
+ * the first bus master in this firmware.  It deliberately does NOT use a region here --
  * its 4 KB bounce buffer sits in ordinary cacheable AXI-SRAM and port/sd/sd_card.c
  * cleans/invalidates around each transfer, because a small scratch buffer does not
  * justify one of the 16 MPU regions.  Use this table for buffers that are large,
@@ -50,9 +50,9 @@ struct mpu_region {
  * (camera framebuffer, SD scratch) are added as further rows here.
  *
  * Region 1: the 64 KB ITCM at 0x00000000, read-only but executable.  Since issue
- * #24 the interrupt paths live there (.itcm), and ITCM sits at address zero -- so
- * a stray write through a NULL pointer would overwrite the PendSV/SysTick/UART ISR
- * code and the failure would surface later as unexplained chaos.  Read-only turns
+ * owhinata/wio-lite-ai#24 the interrupt paths live there (.itcm), and ITCM sits at address
+ * zero -- so a stray write through a NULL pointer would overwrite the PendSV/SysTick/UART
+ * ISR code and the failure would surface later as unexplained chaos.  Read-only turns
  * that into an immediate MemManage fault, which app/fault.c records to the
  * reset-persistent log so `dmesg` names the culprit PC.  Nothing writes ITCM after
  * boot: SystemInit() loads it before mpu_config() runs, and no code self-modifies.
@@ -82,7 +82,8 @@ static const struct mpu_region mpu_regions[] = {
 		                     ARM_MPU_REGION_SIZE_64KB),
 	},
 	/*
-	 * Region 2: the external OCTOSPI2 window at 0x70000000, fenced off (issue #25).
+	 * Region 2: the external OCTOSPI2 window at 0x70000000, fenced off
+	 * (owhinata/wio-lite-ai#25).
 	 *
 	 * The app used to execute in place from here; it now runs from the internal
 	 * flash, so nothing memory-maps this window.  In the ARMv7-M background map
@@ -98,7 +99,7 @@ static const struct mpu_region mpu_regions[] = {
 	 * PC.  256 MB is the whole 0x70000000-0x7FFFFFFF quarter and is naturally
 	 * aligned, so it needs no sub-region masking.
 	 *
-	 * THIS ROW STAYS EVEN THOUGH OCTOSPI2 IS BROUGHT UP AGAIN (issue #37).  An
+	 * THIS ROW STAYS EVEN THOUGH OCTOSPI2 IS BROUGHT UP AGAIN (owhinata/wio-lite-ai#37).  An
 	 * earlier revision of this comment said to remove it in that case; that was
 	 * wrong, and removing it is precisely the mistake it would cause.  port/nor
 	 * drives the device entirely through indirect transactions and never enters the
@@ -106,7 +107,8 @@ static const struct mpu_region mpu_regions[] = {
 	 * un-fence -- while opening it up would restore exactly the speculative-read
 	 * hazard above, which no lock can arbitrate because the CPU never asked for the
 	 * access.  A window here needs its own MPU region designed alongside it, which
-	 * is the blob-storage work left on issue #10, not a line deleted from this one.
+	 * is the blob-storage work left on owhinata/wio-lite-ai#10, not a line deleted from this
+	 * one.
 	 */
 	{
 		.rbar = ARM_MPU_RBAR(2u, 0x70000000u),
@@ -123,7 +125,7 @@ static const struct mpu_region mpu_regions[] = {
 	 * overrides region 0 in the overlap because the MPU resolves overlapping
 	 * regions in favour of the HIGHEST region number (PM0253 sec 4.6).
 	 *
-	 * WHY.  Issue #9's inference runtime keeps its activations, input staging and
+	 * WHY.  owhinata/wio-lite-ai#9's inference runtime keeps its activations, input staging and
 	 * model slots here, and they are far too large for AXI-SRAM.  Through the
 	 * non-cacheable window that working set is bound by one bus transaction per
 	 * access rather than by bandwidth: the phase 1 stub measured ~9.8 core cycles
@@ -144,7 +146,7 @@ static const struct mpu_region mpu_regions[] = {
 	 * runs before SCB_EnableDCache() and long before app/psram.c brings the PSRAM up,
 	 * so at the moment this range becomes cacheable there is nothing cached from it.
 	 *
-	 * XN stays set.  Only data lives here -- issue #9 deliberately rejected the
+	 * XN stays set.  Only data lives here -- owhinata/wio-lite-ai#9 deliberately rejected the
 	 * relocatable-network backend that would have executed from external memory --
 	 * so the window keeps W^X.
 	 *

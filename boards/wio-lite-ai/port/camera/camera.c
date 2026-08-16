@@ -5,8 +5,8 @@
 /**
  * @file    camera.c
  * @brief   OV2640 over DCMI: XCLK (TIM5), SCCB (I2C4), sensor ID, snapshot and
- *          continuous capture (issue #8).  See camera.h for the API contract and
- *          the two board facts that shape it (host-generated XCLK, ungated
+ *          continuous capture (owhinata/wio-lite-ai#8).  See camera.h for the API
+ * contract and the two board facts that shape it (host-generated XCLK, ungated
  *          camera supply).
  *
  * Hardware setup, all cross-checked between the board schematic, ST's published
@@ -51,11 +51,11 @@
  * Two shapes of continuous capture share all of that hardware and differ only in
  * where the DMA puts the pixels:
  *
- *   - FRAME mode (issue #8 phase 3b, camera_stream_start): whole 150 KB frames
- *     into a ring of PSRAM slots, published through svc/frame_pipeline.  The DMA's
+ *   - FRAME mode (owhinata/wio-lite-ai#8 phase 3b, camera_stream_start): whole 150 KB
+ * frames into a ring of PSRAM slots, published through svc/frame_pipeline.  The DMA's
  *     memory registers are repointed on the fly as slots recycle.
- *   - BAND mode (issue #35, camera_band_start): 60-row slices into two FIXED
- *     buffers in AXI-SRAM, pushed straight to one consumer.  Nothing is repointed
+ *   - BAND mode (owhinata/wio-lite-ai#35, camera_band_start): 60-row slices into two
+ * FIXED buffers in AXI-SRAM, pushed straight to one consumer.  Nothing is repointed
  *     and nothing lands in the PSRAM, which is what makes the display's rotating
  *     blit cheap and takes the DCMI off OCTOSPI1 entirely.
  *
@@ -100,8 +100,8 @@
 #define CAM_I2C_AF        GPIO_AF4_I2C4
 
 /*
- * DCMI, 8-bit parallel (issue #8 phase 2).  All eleven lines are AF13 on this
- * UFBGA169 package -- checked against the schematic, against ST's published pin
+ * DCMI, 8-bit parallel (owhinata/wio-lite-ai#8 phase 2).  All eleven lines are AF13 on
+ * this UFBGA169 package -- checked against the schematic, against ST's published pin
  * data for this exact part, and against the factory Arduino firmware's
  * HAL_DCMI_MspInit, which programs the same set.  Grouped by port because
  * HAL_GPIO_Init takes a pin mask.
@@ -276,7 +276,7 @@ static uint8_t cam_ring[CAM_RING_SLOTS][CAMERA_FRAME_BYTES]
 	__attribute__((aligned(32), section(".psram_noinit.camera")));
 
 /*
- * The two band buffers of the staged stream (issue #35).
+ * The two band buffers of the staged stream (owhinata/wio-lite-ai#35).
  *
  * [!] THIS IS THE SECOND BUFFER IN THIS FIRMWARE THAT A BUS MASTER WRITES AND THE
  * CPU READS -- port/sd/sd_card.c's sd_bounce was the first, and this follows it
@@ -294,9 +294,9 @@ static uint8_t cam_ring[CAM_RING_SLOTS][CAMERA_FRAME_BYTES]
  *     CAMERA_BAND_BYTES is a multiple of 32, so band 1 starts on a line boundary
  *     and maintaining one band cannot reach the other.
  *
- * 76,800 B is the whole cost of issue #35 in the scarce memory, and it was
- * budgeted in issue #46: AXI-SRAM had 193,664 B free, leaving ~117 KB for the
- * on-device AI work in issue #9.
+ * 76,800 B is the whole cost of owhinata/wio-lite-ai#35 in the scarce memory, and it was
+ * budgeted in owhinata/wio-lite-ai#46: AXI-SRAM had 193,664 B free, leaving ~117 KB for
+ * the on-device AI work in owhinata/wio-lite-ai#9.
  */
 static uint8_t cam_band[2][CAMERA_BAND_BYTES]
 	__attribute__((aligned(32), section(".axi_dma.cam_band")));
@@ -325,7 +325,7 @@ static struct frame_desc *cam_m0;
 static struct frame_desc *cam_m1;
 static uint32_t cam_last_ct;
 
-/* ---- band-mode state (issue #35) ----------------------------------------- */
+/* ---- band-mode state (owhinata/wio-lite-ai#35) ------------------------------------ */
 
 /*
  * Band mode needs no ring, no pipeline and no repoint.  What it does need is a
@@ -380,7 +380,7 @@ static struct camera_info info;
  * internal flash's ~10k erase cycles.  The board answered all of them on the
  * first try and has not contradicted itself since, so they are constants now --
  * a knob that has served its purpose is a liability, not a feature.  The values
- * and how they were established are in the file header and in issue #8.
+ * and how they were established are in the file header and in owhinata/wio-lite-ai#8.
  */
 #define CAM_PWDN_ACTIVE_HIGH  1     /* PWDN high powers the sensor down          */
 #define CAM_RST_ACTIVE_LOW    1     /* RESETB low holds it in reset              */
@@ -388,8 +388,8 @@ static struct camera_info info;
 #define CAM_SCCB_READ_SPLIT   1     /* OmniVision's two-transaction read         */
 #define CAM_DVP_BYTE_SWAP     1     /* IMAGE_MODE bit0, as ST's table ships it   */
 /*
- * Readout orientation (issue #53).  ST's table ships the horizontal mirror ON,
- * which puts the live image out left-right reversed; this board wants it off.
+ * Readout orientation (owhinata/wio-lite-ai#53).  ST's table ships the horizontal mirror
+ * ON, which puts the live image out left-right reversed; this board wants it off.
  * Stated here, next to the byte-swap decision, because both are the same kind of
  * choice: what is "right" depends on what looks at the frame, not on the sensor.
  */
@@ -464,7 +464,8 @@ static void xclk_start_locked(void)
 	GPIO_InitTypeDef g = {0};
 
 	__HAL_RCC_TIM5_CLK_ENABLE();
-	/* Keep the timer clocked in CSleep so idle WFI (issue #2) does not stop the
+	/* Keep the timer clocked in CSleep so idle WFI (owhinata/wio-lite-ai#2) does not stop
+    the
 	   sensor's master clock.  TIM5LPEN resets to 1 (RM0468 sec 8.7.53); setting it
 	   explicitly documents the dependency instead of relying on a default. */
 	__HAL_RCC_TIM5_CLK_SLEEP_ENABLE();
@@ -927,7 +928,7 @@ static int ov2640_apply_swap_locked(void)
  *
  * Verify with `camera reg` (read it back) AND with the picture -- an orientation
  * bug shows up in no counter anywhere, which is the recurring lesson of issues
- * #7, #43 and #8 phase 3a.
+ * owhinata/wio-lite-ai#7, #43 and #8 phase 3a.
  *
  * [!] THE READ-BACK DOES NOT EQUAL WHAT WAS WRITTEN, and that is not a fault.
  * REG04 bits [1:0] are AEC[1:0] -- the bottom two bits of the automatic exposure
@@ -1299,8 +1300,8 @@ static int dcmi_snapshot_locked(void)
  * NOT the cause of the horizontal banding that was blamed on it for a while.
  * Phase 2 saw a step at row 27 -- R -37% / G -8% / B ~0, the scene continuous
  * across it at 0.996 correlation -- and guessed at a gain landing mid-readout.
- * Issue #44 settled it: that was DCMI_D6 open inside the camera module, sampled
- * off a floating pin.  The channel ratio was the tell and it was in the numbers
+ * owhinata/wio-lite-ai#44 settled it: that was DCMI_D6 open inside the camera module,
+ * sampled off a floating pin.  The channel ratio was the tell and it was in the numbers
  * from the start -- R and G hit, B untouched, because D6 carries R bit 3 and G
  * bit 1 and never touches B.  See the DVP data-line table in
  * shell/cmds/cmd_camera.c.
@@ -1492,7 +1493,7 @@ static void cam_stream_teardown(void)
 }
 
 /*
- * Service one completed BAND (issue #35).
+ * Service one completed BAND (owhinata/wio-lite-ai#35).
  *
  * Simpler than the frame path by construction: the memory registers are fixed for
  * the life of the stream, so there is no repoint, no CT race and no ring.  What is
@@ -1791,15 +1792,15 @@ static int cam_stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 }
 
 /*
- * Arm the band stream (issue #35).
+ * Arm the band stream (owhinata/wio-lite-ai#35).
  *
  * Deliberately parallel to cam_stream_start_locked() above, and deliberately
  * shorter: there is no pipeline to re-initialise, no ring slots to acquire and no
  * external pin to drain, because nothing outside the driver ever holds a band.
  * The pieces that DO carry over are the ones that were paid for in bugs -- the
  * error-code reset, the stale-flag clear, and enabling the interrupts here rather
- * than in camera_init() (issue #12: an interrupt source is armed only once the
- * ThreadX objects its ISR posts to exist).
+ * than in camera_init() (owhinata/wio-lite-ai#12: an interrupt source is armed only once
+ * the ThreadX objects its ISR posts to exist).
  */
 static int cam_band_start_locked(int colorbar, camera_band_fn fn, void *ctx)
 {
@@ -1909,7 +1910,7 @@ int camera_init(void)
 		return CAM_ERR_STATE;
 	/* The DCMI/DMA ISRs post these, so they exist before any interrupt can be
 	   enabled -- which camera_capture() / camera_stream_start(), not this
-	   function, do (issue #12). */
+	   function, do (owhinata/wio-lite-ai#12). */
 	if (tx_semaphore_create(&cam_done, "cam_done", 0) != TX_SUCCESS) {
 		(void)tx_mutex_delete(&cam_lock);
 		return CAM_ERR_STATE;

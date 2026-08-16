@@ -4,7 +4,7 @@
  */
 /**
  * @file    sd_card.h
- * @brief   microSD low-level driver over SDMMC1 + IDMA (issue #6).
+ * @brief   microSD low-level driver over SDMMC1 + IDMA (owhinata/wio-lite-ai#6).
  *
  * Block driver for the on-board microSD slot (J4) behind the STM32H725's SDMMC1
  * controller, using HAL_SD in DMA mode.  Ported from the STM32F746 Discovery
@@ -78,8 +78,9 @@ struct sd_card_info {
  * One-time bring-up: GPIO (AF12), NVIC, the SDMMC1 kernel-clock mux, the
  * operation mutex and the completion semaphore.  Performs **no card I/O** (no
  * HAL_SD_Init), which is what makes it safe to call from tx_application_define()
- * before the scheduler runs: nothing here waits on HAL_GetTick (issue #12).
- * Idempotent: a second call returns 0 without re-doing setup.
+ * before the scheduler runs: nothing here waits on HAL_GetTick
+ * (owhinata/wio-lite-ai#12).  Idempotent: a second call returns 0 without re-doing
+ * setup.
  */
 int sd_card_init(void);
 

@@ -4,7 +4,7 @@
  */
 /**
  * @file    cmd_thread.c
- * @brief   `thread` built-in shell command (issue #13): one combined table of
+ * @brief   `thread` built-in shell command (owhinata/stm32f746g-disco#13): one combined table of
  *          every ThreadX thread -- state / priority / run count + stack usage.
  *
  * Joins help/echo (cmd_builtin.c) and version/uptime/reboot (cmd_system.c) in the
@@ -153,7 +153,7 @@ __attribute__((weak)) int cli_thread_cpu_source_ok(const char **why)
 }
 
 /*
- * "top"-style cpu% (issue #2).  The ThreadX Execution Profile Kit accumulates,
+ * "top"-style cpu% (owhinata/wio-lite-ai#2).  The ThreadX Execution Profile Kit accumulates,
  * per thread and globally, busy time in the ticks of whatever free-running
  * counter that board's TX_EXECUTION_TIME_SOURCE names (see its tx_user.h /
  * port/threadx/tx_glue.c).  Only the RATIO matters here, so the counter's rate
@@ -300,7 +300,7 @@ static int cmd_thread(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	for (i = 0; i < count; i++, t = t->tx_thread_created_next) {
-		/* Ctrl+C between rows: stop before emitting the next one (issue #16).
+		/* Ctrl+C between rows: stop before emitting the next one (owhinata/stm32f746g-disco#16).
 		 * Outside the TX_DISABLE region below -- cli_cancel_requested() drains the
 		 * transport and must not run with interrupts disabled.  The dispatcher
 		 * detects cancel_req and prints "^C", so just return. */

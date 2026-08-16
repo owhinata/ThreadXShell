@@ -85,7 +85,7 @@ set(TUSB_DIR "${CMAKE_SOURCE_DIR}/lib/tinyusb/src")
 #
 # [!] There is deliberately NO target that writes this image anywhere:
 #   - no `flash-boot`.  An ST-Link write into sector 0 is the one operation that
-#     bricks the board, and the only surviving board is #2.  A build system that
+#     bricks the board, and the only surviving board is owhinata/wio-lite-ai#2.  A build system that
 #     CAN brick eventually will; the recovery procedure stays prose, in
 #     boot/README.md.
 #   - no `dfu-boot`.  That target would flash the BOOTLOADER into the APP
@@ -251,7 +251,7 @@ rom_finalize(boot_image)
 # owhinata/wio-lite-ai @ 09468bb -- established by rebuilding the donor in a
 # fresh build directory, not read off a stale artefact.  It is NOT a claim about
 # the byte string currently in board #2's sector 0: the only readback-verified
-# log the donor left behind belongs to the pre-#25 XIP build (30,332 B), and no
+# log the donor left behind belongs to the pre-owhinata/wio-lite-ai#25 XIP build (30,332 B), and no
 # readback hash was ever recorded for this image.  M3 asserts nothing about
 # hardware behaviour.
 set(BOOT_GOLDEN_SHA256

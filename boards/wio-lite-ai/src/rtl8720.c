@@ -4,7 +4,7 @@
  */
 /*
  * Wio Lite AI (STM32H725AEI6) -- onboard RTL8720DN WiFi/BLE companion driver
- * (issue #17).  See rtl8720.h for the wiring/summary.
+ * (owhinata/wio-lite-ai#17).  See rtl8720.h for the wiring/summary.
  *
  * Design (plan codex-review LGTM):
  *  - Bare-register UART bring-up; GPIO/clock via HAL macros (house style, cf.
@@ -17,11 +17,12 @@
  *    The ISR only writes `head`; rtl8720_uart_read() only writes `tail`.  Overflow
  *    drops the NEWEST byte to keep the ring strictly single-producer/single-consumer
  *    (the ISR never writes tail).  A __DMB() orders the data stores against the head
- *    publish -- ONCE per interrupt, after the whole drain loop (issue #23 U0-1).
+ *    publish -- ONCE per interrupt, after the whole drain loop (owhinata/wio-lite-ai#23
+ * U0-1).
  *  - No DMA: the ISR/foreground both touch the ring with the CPU, so it is
  *    self-coherent under the D-cache (no MPU / clean / invalidate needed).
  *
- * ---- RX interrupt scheme (issue #23 U0-1) -------------------------------------
+ * ---- RX interrupt scheme (owhinata/wio-lite-ai#23 U0-1) -----------------------------------
  *
  * The link is being taken from 2 Mbaud towards 6 Mbaud (600 kB/s), where one
  * interrupt per byte would mean ~600 k IRQ/s.  So the RXFIFO is drained on a
@@ -70,7 +71,7 @@
  * number that says the scheme is holding.  Measured at 2 Mbaud it stayed at exactly 8
  * over both a short ack exchange and a ~2 KB scan reply (133 interrupts).
  *
- * ---- TX interrupt scheme (issue #23 U1) ---------------------------------------
+ * ---- TX interrupt scheme (owhinata/wio-lite-ai#23 U1) -------------------------------------
  *
  * TX is interrupt-driven too since U1.  The polling spin it replaces held the caller
  * for one byte time per byte -- 2.5 ms for a 1500-byte frame at 6 Mbaud -- and the
@@ -98,14 +99,14 @@
  * rtl8720_uart_flush() and its single call site at the top of rtl8720_uart_close()
  * (every baud change in the tree goes through a close).
  *
- * BUT that measurement cannot clear a HIGHER baud, and issue #24 tracks why: back when
- * this whole path was fetched from the external OCTOSPI2 flash, the drain cost measured
- * 8.7 us cold (7 interrupts) against 3.3 us warm (133) -- the flash fetch alone was
+ * BUT that measurement cannot clear a HIGHER baud, and owhinata/wio-lite-ai#24 tracks why:
+ * back when this whole path was fetched from the external OCTOSPI2 flash, the drain cost
+ * measured 8.7 us cold (7 interrupts) against 3.3 us warm (133) -- the flash fetch alone was
  * worth microseconds.  At 2 Mbaud one byte time is 5 us, coarse enough to hide all of
  * it; at 6 Mbaud it is 1.67 us and it would show.  That is why the path was moved into
- * ITCM (issue #24/#29): the argument is now structural -- no flash fetch in the RX path
- * -- rather than a workload-dependent measurement.  Issue #25 shrank the remaining
- * exposure further by moving execution to the internal flash.
+ * ITCM (owhinata/wio-lite-ai#24/#29): the argument is now structural -- no flash fetch in the
+ * RX path -- rather than a workload-dependent measurement.  owhinata/wio-lite-ai#25 shrank
+ * the remaining exposure further by moving execution to the internal flash.
  */
 #include "stm32h7xx_hal.h"
 #include "tx_api.h"       /* tx_thread_sleep / tx_time_get: yield while the TX ring is full */
@@ -121,7 +122,8 @@
 /* UART9/USART1 kernel clock = PCLK2 (see file header for the derivation). */
 #define RTL_UART_PCLK2   137500000u
 
-/* RX ring: power-of-two so head/tail wrap with a mask.  16 KB in DTCM (issue #46,
+/* RX ring: power-of-two so head/tail wrap with a mask.  16 KB in DTCM
+   (owhinata/wio-lite-ai#46,
  * .dtcm_bss -- CPU-only, and the ISR fills it a byte at a time at ~75 k/s) is
  * 27 ms of inflow at 6 Mbaud (600 kB/s) -- the consumer is the eRPC service thread,
  * which polls on 1 ms slices, so this absorbs a long scheduling hole. */
@@ -139,7 +141,8 @@
  * interrupt-latency budget is actually being used. */
 #define RTL_ISR_GRACE    10u
 
-/* TX ring (issue #23 U1): 4 KB in DTCM (issue #46, .dtcm_bss) holds two and a half
+/* TX ring (owhinata/wio-lite-ai#23 U1): 4 KB in DTCM (owhinata/wio-lite-ai#46, .dtcm_bss)
+   holds two and a half
  * maximum-size link frames, so a sender never waits for one frame to leave before
  * staging the next.  Power-of-two for the mask. */
 #define RTL_TX_RING_SIZE 4096u
@@ -164,7 +167,8 @@ static volatile uint32_t rtl_ring_head;    /* producer: RX ISR only */
 static volatile uint32_t rtl_ring_tail;    /* consumer: rtl8720_uart_read only */
 static volatile uint32_t rtl_ring_drops;   /* RX bytes lost to overflow */
 
-/* TX ring (issue #23 U1).  SPSC the other way round from the RX one: the WRITER is the
+/* TX ring (owhinata/wio-lite-ai#23 U1).  SPSC the other way round from the RX one: the WRITER
+   is the
  * calling thread (single, by the link ownership rules -- see rtl8720_uart_write()) and
  * the CONSUMER is the ISR.  So the thread only ever advances head and the ISR only ever
  * advances tail; neither writes the other's index. */
@@ -177,7 +181,8 @@ static volatile uint32_t rtl_tx_max_bytes; /* most bytes pushed into TDR in one 
 static volatile uint32_t rtl_tx_bytes;     /* bytes handed to the hardware since open */
 static volatile uint32_t rtl_tx_waits;     /* writes that had to wait for ring space */
 
-/* ISR high-water marks (issue #23 U0-1).  Written by the ISR only; read without a
+/* ISR high-water marks (owhinata/wio-lite-ai#23 U0-1).  Written by the ISR only; read without
+   a
  * lock because each is a single word and they are diagnostics, not control flow. */
 static volatile uint32_t rtl_isr_max_bytes;   /* bytes pulled from RDR in one interrupt */
 static volatile uint32_t rtl_isr_max_cycles;  /* DWT cycles spent inside the ISR */
@@ -197,9 +202,9 @@ static IRQn_Type              rtl_irqn;
 
 /*
  * Optional "bytes have landed" callback, run from the RX ISR right after the ring's
- * head is published (issue #23 U0-3).  Its only user is the eRPC service thread, which
- * otherwise notices new bytes on its 1 ms poll: for a 1500-byte frame at 6 Mbaud
- * (2.5 ms on the wire) that adds up to 1 ms per frame, enough to hide the difference
+ * head is published (owhinata/wio-lite-ai#23 U0-3).  Its only user is the eRPC service
+ * thread, which otherwise notices new bytes on its 1 ms poll: for a 1500-byte frame at 6
+ * Mbaud (2.5 ms on the wire) that adds up to 1 ms per frame, enough to hide the difference
  * between 4 and 6 Mbaud in the U0-3 measurements.  The poll is deliberately KEPT as the
  * backstop, so this is a wake-up latency optimisation and nothing depends on it for
  * correctness -- a dropped notification costs at most one poll period.
@@ -376,7 +381,8 @@ static void rtl_uart_isr(void)
 	if (got > rtl_isr_max_bytes)
 		rtl_isr_max_bytes = got;
 
-	/* TX refill LAST (issue #23 U1): the RX FIFO is already empty by now, so the time
+	/* TX refill LAST (owhinata/wio-lite-ai#23 U1): the RX FIFO is already empty by now, so the
+    time
 	 * spent here cannot eat into the (18 - T) byte times of RX grace this interrupt was
 	 * entered with.  Bounded by the FIFO's free slots -- TXFNF goes low when it fills --
 	 * so one interrupt moves at most 16 bytes whatever the ring holds. */
@@ -441,7 +447,7 @@ void rtl8720_uart_close(void)
 	if (rtl_uart == NULL)
 		return;
 	/*
-	 * Let the transmitter finish FIRST (issue #23 U1).  Since TX became
+	 * Let the transmitter finish FIRST (owhinata/wio-lite-ai#23 U1).  Since TX became
 	 * interrupt-driven, rtl8720_uart_write() returns with bytes still queued, and the
 	 * CR1 = 0 below stops the peripheral dead -- so without this every close would
 	 * truncate whatever was in flight.  This ONE call covers every such path, because

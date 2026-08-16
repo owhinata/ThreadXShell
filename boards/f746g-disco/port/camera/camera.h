@@ -4,16 +4,17 @@
  */
 /**
  * @file    camera.h
- * @brief   B-CAMS-OMV (OV5640) camera driver over DCMI/I2C1 (issues #39/#41,
- *          Epic #22).
+ * @brief   B-CAMS-OMV (OV5640) camera driver over DCMI/I2C1
+ * (owhinata/stm32f746g-disco#39/#41, Epic owhinata/stm32f746g-disco#22).
  *
  * Sensor-control layer for the B-CAMS-OMV camera bundle (MB1683 adapter +
  * MB1379 OV5640 module) on the board's P1 30-pin ZIF connector: power
- * control and sensor identification over I2C1/SCCB (#39), plus single-frame
- * QVGA RGB565 snapshot capture over DCMI + DMA2 into the SDRAM frame buffer
- * (#41).
+ * control and sensor identification over I2C1/SCCB (owhinata/stm32f746g-disco#39),
+ * plus single-frame QVGA RGB565 snapshot capture over DCMI + DMA2 into the SDRAM
+ * frame buffer (owhinata/stm32f746g-disco#41).
  *
- * Hardware facts (UM1907 / UM2779, verified in #22 Phase 0):
+ * Hardware facts (UM1907 / UM2779, verified in owhinata/stm32f746g-disco#22 Phase
+ * 0):
  *   - P1 <-> B-CAMS-OMV CN5 wire 1:1 over the FFC (reversed pin numbering).
  *   - The MB1379 module clocks the OV5640 from its own 24 MHz crystal (UM2779
  *     §3.2) -- the host supplies no XCLK/MCO.
@@ -50,21 +51,23 @@ extern "C" {
 #define CAM_ERR_NO_FRAME  -6   /* no captured frame available                   */
 #define CAM_ERR_BUSY      -7   /* streaming or preview already owns the DCMI    */
 
-/* Default capture geometry (issue #41): QVGA RGB565, little-endian 16-bit
-   pixels (R5 in bits 15..11, G6 in 10..5, B5 in 4..0).  Issue #45 makes the
-   live geometry variable (struct camera_mode); these remain the power-on
-   default and the QVGA reference used by the snapshot pixel-stat helpers. */
+/* Default capture geometry (owhinata/stm32f746g-disco#41): QVGA RGB565,
+   little-endian 16-bit
+   pixels (R5 in bits 15..11, G6 in 10..5, B5 in 4..0).
+   owhinata/stm32f746g-disco#45 makes the live geometry variable (struct
+   camera_mode); these remain the power-on default and the QVGA reference used by
+   the snapshot pixel-stat helpers. */
 #define CAMERA_FRAME_WIDTH   320u
 #define CAMERA_FRAME_HEIGHT  240u
 #define CAMERA_FRAME_BYTES   (CAMERA_FRAME_WIDTH * CAMERA_FRAME_HEIGHT * 2u)
 
-/* ---- capture mode: resolution / pixel format (issue #45) ----------------- */
+/* ---- capture mode: resolution / pixel format (owhinata/stm32f746g-disco#45) --- */
 /*
  * Port-neutral resolution and pixel-format enums, translated to the lib/ov5640
  * OV5640 resolution / pixel-format constants by res_to_ov() / the format helpers
- * (NOT raw-value compatible -- e.g. dropping 480x272 in #84 shifted the VGA/WVGA
- * ordinals away from OV5640_R*, so never cast between the two).  The shell never
- * sees the lib values.  Ceilings:
+ * (NOT raw-value compatible -- e.g. dropping 480x272 in
+ * owhinata/stm32f746g-disco#84 shifted the VGA/WVGA ordinals away from OV5640_R*,
+ * so never cast between the two). The shell never sees the lib values.  Ceilings:
  *   - snapshot supports every resolution (DCMI/DMA intra-frame banding);
  *   - streaming supports a mode only while its frame fits one DMA NDTR
  *     (frame_words <= 65535); larger modes are capture-only;
@@ -83,10 +86,12 @@ enum camera_format {
 	CAM_FMT_Y8,         /* 1 byte/pixel, greyscale            */
 	CAM_FMT_JPEG,       /* variable length, snapshot-only     */
 	CAM_FMT__COUNT
-	/* RGB888 is intentionally unsupported in #45 (3 bpp, no consumer). */
+	/* RGB888 is intentionally unsupported in owhinata/stm32f746g-disco#45 (3 bpp,
+    no consumer). */
 };
 
-/* Why the selected fps (camera fps 15|30) is or is not in effect right now (#67).
+/* Why the selected fps (camera fps 15|30) is or is not in effect right now
+   (owhinata/stm32f746g-disco#67).
    30 fps = 48 MHz PCLK is applied only for a small streamable mode while the LTDC
    is not scanning out; otherwise the sensor is clamped to 24 MHz (15 fps) so the
    48 MHz DCMI burst never overruns the 16-bit SDRAM that the LTDC also reads. */
@@ -113,13 +118,14 @@ struct camera_mode {
 	uint32_t frame_words;     /* DMA NDTR for fixed formats (frame_bytes/4) */
 	uint16_t hts;             /* OV5640 line total (fps table)              */
 	uint16_t vts;             /* OV5640 frame total (fps table)             */
-	uint32_t pclk_hz;         /* sensor PCLK -- live effective (#67)        */
+	uint32_t pclk_hz;         /* sensor PCLK -- live effective (owhinata/stm32f746g-disco#67)        */
 	uint16_t fps_target_x10;  /* effective pclk_hz/(hts*vts) * 10, not live  */
 	uint8_t  streamable;      /* frame_words <= 65535 && !is_jpeg           */
-	uint8_t  fps_sel;         /* selected fps knob bucket: 15 or 30 (#67)   */
+	uint8_t  fps_sel;         /* selected fps knob bucket: 15 or 30 (owhinata/stm32f746g-disco#67)   */
 	uint8_t  fps_eff;         /* effective knob bucket now: 15 or 30 -- the
 	                             PCLK selection (24/48 MHz), not the exact
-	                             target rate (see fps_target_x10) (#67)     */
+	                             target rate (see fps_target_x10)
+	                             (owhinata/stm32f746g-disco#67) */
 	uint8_t  fps_clamp;       /* enum camera_fps_clamp: why eff != sel      */
 };
 
@@ -129,11 +135,11 @@ struct camera_info {
 	int      powered;     /* PWR_EN asserted and probe succeeded           */
 	int      configured;  /* sensor programmed for a capture mode          */
 	int      frame_valid; /* a captured frame is in the buffer             */
-	uint32_t frame_bytes; /* valid captured length (#45): raster size, or
+	uint32_t frame_bytes; /* valid captured length (owhinata/stm32f746g-disco#45): raster size, or
 	                         the trimmed JPEG stream length; 0 when none    */
 };
 
-/* ---- quality settings (issue #44) ---------------------------------------- */
+/* ---- quality settings (owhinata/stm32f746g-disco#44) ------------------------- */
 /*
  * OV5640 ISP image-quality controls, exposed port-neutral so the shell never
  * sees the lib/ov5640 constants.  Settings live in a RAM cache: a `camera set`
@@ -160,7 +166,8 @@ enum camera_flip {    /* mirror / flip orientation */
 #define CAM_HUE_MAX    (5)    /* +150 deg                                    */
 
 /** Current OV5640 quality settings (defaults are neutral except flip, which
- *  defaults to CAM_FLIP_FLIP for this board's camera mounting -- upright, #68). */
+ *  defaults to CAM_FLIP_FLIP for this board's camera mounting -- upright,
+ * owhinata/stm32f746g-disco#68). */
 struct camera_settings {
 	int8_t  brightness;  /* CAM_LEVEL_MIN..MAX, 0 = neutral               */
 	int8_t  contrast;    /* CAM_LEVEL_MIN..MAX                            */
@@ -168,7 +175,7 @@ struct camera_settings {
 	int8_t  hue;         /* CAM_HUE_MIN..MAX, units of 30 deg             */
 	uint8_t awb;         /* enum camera_awb                              */
 	uint8_t effect;      /* enum camera_effect                          */
-	uint8_t flip;        /* enum camera_flip (default CAM_FLIP_FLIP, #68)  */
+	uint8_t flip;        /* enum camera_flip (default CAM_FLIP_FLIP, owhinata/stm32f746g-disco#68)  */
 	uint8_t zoom;        /* digital zoom factor: 1, 2, 4 or 8           */
 	uint8_t night;       /* 0 = off, 1 = night mode on                  */
 };
@@ -195,16 +202,18 @@ int camera_power_off(void);
 /** Fill @p out with the current driver state.  Never touches the sensor. */
 int camera_get_info(struct camera_info *out);
 
-/** Fill @p out with the live capture mode (geometry/format/timing, #45).
+/** Fill @p out with the live capture mode (geometry/format/timing,
+    owhinata/stm32f746g-disco#45).
  *  Never touches the sensor.  Evaluates the fps clamp (fps_sel/fps_eff/fps_clamp,
- *  pclk_hz, fps_target_x10) live against the current LTDC scanout state (#67), so
- *  the reported rate reflects whether 30 fps is in effect right now. */
+ *  pclk_hz, fps_target_x10) live against the current LTDC scanout state
+ * (owhinata/stm32f746g-disco#67), so the reported rate reflects whether 30 fps
+ * is in effect right now. */
 int camera_get_mode(struct camera_mode *out);
 
 /**
- * Switch the capture resolution and/or pixel format (issue #45).  Re-programs
- * the OV5640 (resolution/format scalers, the per-mode HTS/VTS/PCLK fps table)
- * and resizes the live capture geometry.  Refused with CAM_ERR_BUSY while a
+ * Switch the capture resolution and/or pixel format (owhinata/stm32f746g-disco#45).
+ * Re-programs the OV5640 (resolution/format scalers, the per-mode HTS/VTS/PCLK fps
+ * table) and resizes the live capture geometry.  Refused with CAM_ERR_BUSY while a
  * stream or GUIX preview is active (the ring slots are a live DMA target sized
  * for the current mode).  Probes/configures the sensor on demand.  On any I/O
  * failure the mode is left uncommitted and the sensor is marked unconfigured so
@@ -214,11 +223,11 @@ int camera_get_mode(struct camera_mode *out);
 int camera_set_format(enum camera_res res, enum camera_format fmt);
 
 /**
- * Select the streaming frame rate (issue #67): @p fps is 15 (24 MHz PCLK) or 30
- * (48 MHz PCLK).  Stored as a preference and re-applied to the live sensor at
- * once (same path as camera_set_format), so it is refused with CAM_ERR_BUSY while
- * a stream or GUIX preview owns the DCMI.  30 fps takes effect only for a small
- * streamable mode (QQVGA/QVGA) while the LTDC is not scanning out;
+ * Select the streaming frame rate (owhinata/stm32f746g-disco#67): @p fps is 15 (24
+ * MHz PCLK) or 30 (48 MHz PCLK).  Stored as a preference and re-applied to the live
+ * sensor at once (same path as camera_set_format), so it is refused with
+ * CAM_ERR_BUSY while a stream or GUIX preview owns the DCMI.  30 fps takes effect
+ * only for a small streamable mode (QQVGA/QVGA) while the LTDC is not scanning out;
  * otherwise the sensor is clamped to 24 MHz so the 48 MHz DCMI burst never
  * overruns the SDRAM the LTDC also reads (use `lcd off` for 30 fps).  Returns
  * 0 or a negative CAM_ERR_* (CAM_ERR_PARAM for an fps other than 15/30).
@@ -243,23 +252,24 @@ int camera_capture(int colorbar);
  *
  * @p gen (optional, may be NULL) receives the frame's generation counter,
  * bumped whenever the stable buffer is refreshed -- a successful capture OR a
- * camera_snapshot_latest() (#102).  A multi-call reader (stats, save) must
- * compare generations across its reads: a concurrent capture/snapshot between
- * two reads re-validates the buffer with NEW pixels -- frame_valid alone
- * cannot detect that, only the generation change does.
+ * camera_snapshot_latest() (owhinata/stm32f746g-disco#102).  A multi-call reader
+ * (stats, save) must compare generations across its reads: a concurrent
+ * capture/snapshot between two reads re-validates the buffer with NEW pixels --
+ * frame_valid alone cannot detect that, only the generation change does.
  */
 int camera_frame_read(uint32_t offset, void *dst, uint32_t len,
                       uint32_t *gen);
 
 /**
  * Refresh the stable snapshot buffer that camera_frame_read() serves, so `camera
- * save`/`send` capture the freshest frame, then return 0 (#102).  While the base
- * is streaming this copies the latest published ring frame (any format, even with
- * MJPEG/GUI subscribers attached) via a pinned, lock-free copy that never stalls
- * the producer.  While the base is off it keeps the last `camera capture` frame
- * (non-destructive).  Returns CAM_ERR_NO_FRAME when no frame is available (base
- * streaming but nothing published yet, or base off with no prior capture).  Call
- * it once before a save/send, before creating the file / starting the transfer.
+ * save`/`send` capture the freshest frame, then return 0
+ * (owhinata/stm32f746g-disco#102). While the base is streaming this copies the
+ * latest published ring frame (any format, even with MJPEG/GUI subscribers
+ * attached) via a pinned, lock-free copy that never stalls the producer.  While the
+ * base is off it keeps the last `camera capture` frame (non-destructive).  Returns
+ * CAM_ERR_NO_FRAME when no frame is available (base streaming but nothing published
+ * yet, or base off with no prior capture). Call it once before a save/send, before
+ * creating the file / starting the transfer.
  */
 int camera_snapshot_latest(void);
 
@@ -271,10 +281,11 @@ int camera_snapshot_latest(void);
 void camera_frame_invalidate(void);
 
 /** Nonzero while a stream is running (a destructive `.sdram` op must refuse:
- *  the ring is a live DMA target).  See camera_stream_start() (#46). */
+ *  the ring is a live DMA target).  See camera_stream_start()
+ * (owhinata/stm32f746g-disco#46). */
 int camera_streaming(void);
 
-/* ---- streaming (issue #46): DCMI continuous + DMA double-buffer ----------- */
+/* ---- streaming (owhinata/stm32f746g-disco#46): DCMI continuous + DMA double-buffer --- */
 /** Live FPS / overrun snapshot for `camera stream stats`. */
 struct camera_stream_info {
 	int      active;     /* a stream is in progress                          */
@@ -283,12 +294,12 @@ struct camera_stream_info {
 	uint32_t frames;     /* PRODUCER: frames published since start           */
 	uint32_t delivered;  /* STAT SINK: frames delivered to the stats sink    */
 	uint32_t dropped;    /* STAT SINK: frames the sink dropped (busy)        */
-	uint32_t stat_errors;/* STAT SINK: consume() error returns (#102)        */
+	uint32_t stat_errors;/* STAT SINK: consume() error returns (owhinata/stm32f746g-disco#102)        */
 	uint32_t dcmi_ovr;   /* DCMI FIFO overruns                               */
 	uint32_t ring_ovr;   /* ring exhaustion / lost completions               */
-	uint32_t dma_fe;     /* DMA FIFO/DME errors tolerated (non-fatal, #56)   */
-	uint32_t jpeg_trunc; /* JPEG stream frames dropped: no SOI/EOI (#63)     */
-	uint32_t slots;      /* ring depth carved from the arena this stream (#65) */
+	uint32_t dma_fe;     /* DMA FIFO/DME errors tolerated (non-fatal, owhinata/stm32f746g-disco#56)   */
+	uint32_t jpeg_trunc; /* JPEG stream frames dropped: no SOI/EOI (owhinata/stm32f746g-disco#63)     */
+	uint32_t slots;      /* ring depth carved from the arena this stream (owhinata/stm32f746g-disco#65) */
 	uint32_t slot_bytes; /* ring slot stride this stream (align32(frame))    */
 	uint32_t elapsed_ms; /* run duration (live, or frozen at stop)           */
 };
@@ -309,7 +320,7 @@ int camera_stream_stop(void);
 /** Fill @p out with the current or last stream statistics (any time). */
 int camera_stream_stats(struct camera_stream_info *out);
 
-/* ---- base capture + subscribers (Epic #99 Phase 1, #100) ----------------- */
+/* ---- base capture + subscribers (Epic owhinata/stm32f746g-disco#99 Phase 1, owhinata/stm32f746g-disco#100) --- */
 struct frame_sink;       /* svc/frame_pipeline.h */
 struct frame_desc;       /* svc/frame.h          */
 
@@ -340,31 +351,34 @@ int camera_subscribe(struct frame_sink *s, enum camera_format cls_fmt);
 int camera_unsubscribe(struct frame_sink *s);
 
 /**
- * Register @p s as a *non-persistent* (oneshot) subscriber (#101).  Like
- * camera_subscribe() but, on a non-recover base stop (explicit `camera stream
- * stop` / `camera off`, a --frames|--secs target completion, or overrun-recovery
- * giveup), the subscriber is fully released instead of staying enabled to re-attach
- * at the next base start.  Used by the MJPEG-over-HTTP server (#49 P5): a base stop
- * means "stop the stream", not "pause it".  A transient overrun keeps the sink
- * enabled so the auto-recovery re-attaches it.  Returns 0 or a negative CAM_ERR_*.
+ * Register @p s as a *non-persistent* (oneshot) subscriber
+ * (owhinata/stm32f746g-disco#101). Like camera_subscribe() but, on a non-recover
+ * base stop (explicit `camera stream stop` / `camera off`, a --frames|--secs target
+ * completion, or overrun-recovery giveup), the subscriber is fully released instead
+ * of staying enabled to re-attach at the next base start.  Used by the
+ * MJPEG-over-HTTP server (owhinata/stm32f746g-disco#49 P5): a base stop means "stop
+ * the stream", not "pause it". A transient overrun keeps the sink enabled so the
+ * auto-recovery re-attaches it. Returns 0 or a negative CAM_ERR_*.
  */
 int camera_subscribe_oneshot(struct frame_sink *s, enum camera_format cls_fmt);
 
 /**
  * Nonzero while @p s is still a registered subscriber (enabled), whether or not it
- * is currently attached (#101).  The single source of truth a oneshot subscriber
- * (MJPEG) polls after a base teardown to tell an overrun recovery (still enabled ->
- * pause for the re-open) from a non-recover stop (released -> fully stop).  0 when
- * @p s is NULL or not registered.  Snapshot under cam_lock.
+ * is currently attached (owhinata/stm32f746g-disco#101).  The single source of
+ * truth a oneshot subscriber (MJPEG) polls after a base teardown to tell an overrun
+ * recovery (still enabled -> pause for the re-open) from a non-recover stop
+ * (released -> fully stop). 0 when @p s is NULL or not registered.  Snapshot under
+ * cam_lock.
  */
 int camera_subscribed(struct frame_sink *s);
 
 /**
  * Nonzero if any attached external subscriber OTHER THAN @p self is currently live
- * (#101).  The GUI resolution button uses this to reconfigure the base (stop ->
- * `camera res` -> restart) only when it is the sole subscriber; other subscribers
- * attached => the change is refused.  Best-effort snapshot under cam_lock (a
- * concurrent manual attach after the call is a benign user race).
+ * (owhinata/stm32f746g-disco#101).  The GUI resolution button uses this to
+ * reconfigure the base (stop -> `camera res` -> restart) only when it is the sole
+ * subscriber; other subscribers attached => the change is refused.  Best-effort
+ * snapshot under cam_lock (a concurrent manual attach after the call is a benign
+ * user race).
  */
 int camera_other_subscribers_attached(struct frame_sink *self);
 
@@ -372,7 +386,8 @@ int camera_other_subscribers_attached(struct frame_sink *self);
  *  external subscribers (gui / nncam / mjpeg).  Size a caller's array with this. */
 #define CAMERA_MAX_SUB_STATS 4
 
-/** One subscriber's identity + live per-sink pipeline statistics (#102). */
+/** One subscriber's identity + live per-sink pipeline statistics
+    (owhinata/stm32f746g-disco#102). */
 struct camera_sub_stat {
 	const char *name;      /* sink name: "stats" / "gui" / "nncam" / "mjpeg"   */
 	uint8_t     fmt;       /* enum camera_format the sink consumes             */
@@ -386,11 +401,11 @@ struct camera_sub_stat {
 
 /**
  * Snapshot the base capture's sinks into @p out (up to @p max entries) and return
- * the count (#102).  Includes the internal stats sink (while the base is on) plus
- * every registered external subscriber (gui / nncam / mjpeg), with each sink's live
- * delivered/dropped/errors.  Taken under cam_lock -> cam_pipe_lock for a consistent
- * read; the @ref camera_sub_stat.name pointers are static strings, valid after the
- * call returns.  Used by `camera info`.
+ * the count (owhinata/stm32f746g-disco#102).  Includes the internal stats sink
+ * (while the base is on) plus every registered external subscriber (gui / nncam /
+ * mjpeg), with each sink's live delivered/dropped/errors.  Taken under cam_lock ->
+ * cam_pipe_lock for a consistent read; the @ref camera_sub_stat.name pointers are
+ * static strings, valid after the call returns.  Used by `camera info`.
  */
 int camera_subscribers_snapshot(struct camera_sub_stat *out, int max);
 

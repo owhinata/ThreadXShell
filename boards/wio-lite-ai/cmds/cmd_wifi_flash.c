@@ -4,8 +4,8 @@
  */
 /**
  * @file    cmd_wifi_flash.c
- * @brief   The `wifi flash <sub>` subtree (issue #19): rewriting the RTL8720DN's own
- *          SPI flash over its mask-ROM UART download mode.
+ * @brief   The `wifi flash <sub>` subtree (owhinata/wio-lite-ai#19): rewriting the RTL8720DN's
+ * own SPI flash over its mask-ROM UART download mode.
  *
  *   wifi flash info                capacity (address wrap) / status regs / checksum
  *   wifi flash read <off> [n]      survey sectors, erased-vs-data (read-only)
@@ -14,8 +14,8 @@
  *   wifi flash imginfo             show + re-verify the staged image (read-only)
  *   wifi flash write <off> confirm DESTRUCTIVE -- program the staged image
  *
- * They were seven flat `wifi flashXXX` / `wifi imgXXX` commands until issue #28: the
- * flat namespace could not keep them together in `help wifi` (prefix order and pipeline
+ * They were seven flat `wifi flashXXX` / `wifi imgXXX` commands until owhinata/wio-lite-ai#28:
+ * the flat namespace could not keep them together in `help wifi` (prefix order and pipeline
  * order disagree -- `flashwrite` needs `imgload` to have run first), and the M3
  * single-sector self-test `wifi flashtest` went with the move, its erase/write/verify
  * path now proven by every real `wifi flash write` instead.
@@ -51,12 +51,12 @@
 #include <string.h>
 
 /*
- * Take the link for a download session (issue #30 B2b).
+ * Take the link for a download session (owhinata/wio-lite-ai#30 B2b).
  *
  * Since the bridge became permanent, the interface owner holds a UART reference for as
  * long as the host stack is up -- so the plain busy-reject claim these commands used
- * would refuse EVERY flash command, i.e. it would take away the issue-#19 recovery path
- * exactly when it is most needed.  Flashing is a recovery path and has to work when the
+ * would refuse EVERY flash command, i.e. it would take away the owhinata/wio-lite-ai#19 recovery
+ * path exactly when it is most needed.  Flashing is a recovery path and has to work when the
  * link is occupied, like `wifi on/off/reset`.
  *
  * The order matters and each step earns its place:
@@ -77,8 +77,8 @@ static int flash_claim(struct cli_instance *sh)
 	unsigned waited = 0u;
 
 	/*
-	 * First line, before the teardown below (issue #32): an automatic re-association can
-	 * be holding the coarse mutex for up to 22 s, and nx_net_down()'s unwind needs that
+	 * First line, before the teardown below (owhinata/wio-lite-ai#32): an automatic re-association
+	 * can be holding the coarse mutex for up to 22 s, and nx_net_down()'s unwind needs that
 	 * same mutex -- so disarming here is what stops step 1 from waiting out an attempt.
 	 * The credentials go with it, which is right: this session rewrites the module.
 	 */
@@ -162,7 +162,7 @@ static uint32_t flash_report_size(struct cli_instance *sh, const struct rtl_dl_s
 		          "(chip is >= 16 MB, or does not wrap)\r\n");
 		return 0u;
 	}
-	/* The span comes from the constant, not a literal: it was 8 KB until issue #46
+	/* The span comes from the constant, not a literal: it was 8 KB until owhinata/wio-lite-ai#46
 	   halved it, and a hardcoded number here would have gone on claiming 8 KB while
 	   comparing 4 -- a report that lies is worse than no report. */
 	cli_print(sh, "  capacity: %lu MB (0x%lX) -- address wrap at that offset, "
@@ -171,7 +171,8 @@ static uint32_t flash_report_size(struct cli_instance *sh, const struct rtl_dl_s
 	          (unsigned long)(RTL_DL_SIZE_PROBE_LEN / 1024u));
 	return sz->size;
 }
-/* wifi flash read <offset> [nsectors] (issue #19, M3): NON-DESTRUCTIVE flash survey --
+/* wifi flash read <offset> [nsectors] (owhinata/wio-lite-ai#19, M3): NON-DESTRUCTIVE flash
+   survey --
  * read sectors and show whether each looks erased.  It is how a range is checked before
  * and after `wifi flash write`, without needing a PC receiver like `backup` does. */
 static int cmd_flash_read(struct cli_instance *sh, int argc, char **argv)
@@ -221,7 +222,7 @@ recover:
 	rtl_link_hw_release(sh);
 	return ok ? 0 : 1;
 }
-/* wifi flash info (issue #19, M4): NON-DESTRUCTIVE flash identification.
+/* wifi flash info (owhinata/wio-lite-ai#19, M4): NON-DESTRUCTIVE flash identification.
  *
  * Runs in TWO download sessions on purpose.  Two operations each want to be last:
  * the 0x27 checksum (a timeout may still be answered later and would desynchronise
@@ -298,7 +299,7 @@ recover:
 	return ok ? 0 : 1;
 }
 /*
- * YMODEM byte source over the RTL8720 flash (issue #19 M4).
+ * YMODEM byte source over the RTL8720 flash (owhinata/wio-lite-ai#19 M4).
  *
  * ymodem_send() pulls; rtl_dl_read_flash() streams whole sectors, so we refill a
  * chunk-sized staging buffer and serve slices out of it.
@@ -307,7 +308,7 @@ recover:
  * (8 sectors), which cut the per-command overhead on the wire by 8x -- but that
  * bought throughput for a manual, non-destructive backup at the price of 28 KB of
  * AXI-SRAM held permanently, and AXI-SRAM is the only memory a bus master can
- * reach (issue #46).  `wifi flash backup` is now 8x more read commands over a
+ * reach (owhinata/wio-lite-ai#46).  `wifi flash backup` is now 8x more read commands over a
  * 6 Mbaud link and nobody will notice; the camera needed the bytes.
  *
  * NOTE the NULL abort hook in bak_src_read(): while ymodem_send() runs, its io_getc()
@@ -396,7 +397,8 @@ static void bak_build_name(char *buf, uint32_t off, uint32_t len)
 	*p = '\0';
 }
 
-/* wifi flash backup [offset] [len] (issue #19, M4): NON-DESTRUCTIVE full-chip backup.
+/* wifi flash backup [offset] [len] (owhinata/wio-lite-ai#19, M4): NON-DESTRUCTIVE full-chip
+   backup.
  * Streams the flash to the PC over the console with YMODEM (receive with `rz`).
  * Defaults to the whole chip as detected by the address-wrap probe. */
 static int cmd_flash_backup(struct cli_instance *sh, int argc, char **argv)
@@ -493,7 +495,7 @@ recover:
 	return ok ? 0 : 1;
 }
 /* ------------------------------------------------------------------ *
- *  issue #19 M5: image staging (host -> PSRAM) + programming the module
+ *  owhinata/wio-lite-ai#19 M5: image staging (host -> PSRAM) + programming the module
  * ------------------------------------------------------------------ */
 
 /* Print the staged-image record, re-reading PSRAM to catch a clobber.  Returns 1 when a
@@ -533,9 +535,9 @@ static int img_report(struct cli_instance *sh)
 }
 
 /*
- * wifi flash imgload (issue #19, M5): receive a firmware image from the PC over YMODEM into
- * the PSRAM staging buffer.  Touches NO RTL8720 hardware at all -- this is purely the
- * host-to-board transfer, and it is what makes the stock backup restorable.
+ * wifi flash imgload (owhinata/wio-lite-ai#19, M5): receive a firmware image from the PC over
+ * YMODEM into the PSRAM staging buffer.  Touches NO RTL8720 hardware at all -- this is purely
+ * the host-to-board transfer, and it is what makes the stock backup restorable.
  *
  * Console RX ownership: from cli_console_claim() until xfer_recv_sink_locked() returns,
  * the ONLY reader of the console RX ring is that helper's io_getc().  The sink must not
@@ -641,7 +643,8 @@ out:
 	return ok ? 0 : 1;
 }
 
-/* wifi flash imginfo (issue #19, M5): show the staged image and re-verify it against PSRAM. */
+/* wifi flash imginfo (owhinata/wio-lite-ai#19, M5): show the staged image and re-verify it
+   against PSRAM. */
 static int cmd_flash_imginfo(struct cli_instance *sh, int argc, char **argv)
 {
 	int ok;
@@ -658,9 +661,9 @@ static int cmd_flash_imginfo(struct cli_instance *sh, int argc, char **argv)
 	return ok ? 0 : 1;
 }
 /*
- * wifi flash write <offset> confirm (issue #19, M5): DESTRUCTIVE.  Erase and program the
- * staged image into the RTL8720DN's flash at <offset>, then verify it with the module's
- * own digest.  THIS IS THE COMMAND THAT CAN REWRITE THE MODULE'S BOOT SECTORS.
+ * wifi flash write <offset> confirm (owhinata/wio-lite-ai#19, M5): DESTRUCTIVE.  Erase and
+ * program the staged image into the RTL8720DN's flash at <offset>, then verify it with the
+ * module's own digest.  THIS IS THE COMMAND THAT CAN REWRITE THE MODULE'S BOOT SECTORS.
  *
  * The gates are layered on purpose (see rtl_dl_flash_program): here we require the
  * literal `confirm` token and re-verify the staged image against PSRAM, and the protocol

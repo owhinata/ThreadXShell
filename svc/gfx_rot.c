@@ -36,15 +36,17 @@
  *
  * So batching is what buys time (-26%), and store width buys almost none of it:
  * quartering the transactions freed 0.65 ms.  That is the useful conclusion --
- * essentially all of the ~25 ms is the strided READS, which is why issue #35
- * attacks the source (DCMI staged in AXI-SRAM) and not this loop.
+ * essentially all of the ~25 ms is the strided READS, which is why
+ * owhinata/wio-lite-ai#35 attacks the source (DCMI staged in AXI-SRAM) and not this
+ * loop.
  *
  * The pair stores are kept anyway, for the bus rather than the clock.  This
  * preview provokes DCMI FIFO errors by competing with the camera's DMA for
  * OCTOSPI1 -- 10 in 30 s, and zero when the preview is off -- and the lesson from
- * issue #8 phase 3c is that what saturates that bus is the arbitration COUNT, not
- * the byte rate.  A 5 s sample after this change showed none, which is short
- * enough to be luck (the same window had shown 4 before) but points the right way.
+ * owhinata/wio-lite-ai#8 phase 3c is that what saturates that bus is the arbitration
+ * COUNT, not the byte rate.  A 5 s sample after this change showed none, which is
+ * short enough to be luck (the same window had shown 4 before) but points the right
+ * way.
  *
  * [!] AND THE STORES BELOW ARE volatile FOR A REASON THAT COST A MEASUREMENT.
  * They were first written as a plain 32-bit copy loop, on the theory that a
@@ -57,9 +59,9 @@
  * trustworthy either: this firmware links with LTO, where compile-only flags are
  * advisory (see CMakeLists.txt).  volatile is what actually holds.
  *
- * It is a local, and locals are in DTCM since issue #46: zero wait states, no
- * cache line to evict, and no static state to make this non-reentrant.  64 pixels
- * is 128 B, comfortably inside the smallest thread stack here (512 B).
+ * It is a local, and locals are in DTCM since owhinata/wio-lite-ai#46: zero wait
+ * states, no cache line to evict, and no static state to make this non-reentrant.
+ * 64 pixels is 128 B, comfortably inside the smallest thread stack here (512 B).
  */
 #define GFX_RUN_PIXELS  64u
 
@@ -94,7 +96,7 @@ void gfx_blit_rot(const uint16_t *src, uint32_t src_stride_px,
 
 			/* Gather down the source column: strided, and cheap only when the
 			   source is AXI-SRAM or flash.  From PSRAM this is the whole cost of
-			   the operation -- which is what issue #35 moves off this bus. */
+			   the operation -- which is what owhinata/wio-lite-ai#35 moves off this bus. */
 			for (i = 0u; i < n; i++) {
 				run.px[i] = *col;
 				col += src_stride_px;

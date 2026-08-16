@@ -15,7 +15,8 @@
 #define TX_TIMER_TICKS_PER_SECOND  1000
 #endif
 
-/* ThreadX Execution Profile Kit (issue #19: `thread` cpu% column).
+/* ThreadX Execution Profile Kit (owhinata/stm32f746g-disco#19: `thread` cpu%
+   column).
  *
  * Enabling this here (rather than via CMake -D) keeps the define in one place so
  * every translation unit that sees TX_THREAD agrees on its layout: the kit adds
@@ -37,13 +38,15 @@
 /* Time source for the execution profile = TIM2->CNT (0x40000024): APB1, 32-bit,
  * free-running at TIM2CLK = 2*PCLK1 = 108 MHz (wrap ~39.77 s).  TIM2 is started
  * in svc/timebase.c (timebase_init).  Chosen over the kit default DWT_CYCCNT because
- * DWT freezes when the core clock is gated by WFI (#20): TIM2 keeps counting in
- * Sleep (TIM2LPEN reset = 1), so idle/cpu% stay correct once WFI is enabled.
- * TX_EXECUTION_MAX_TIME_SOURCE keeps its 0xFFFFFFFF default (32-bit). */
+ * DWT freezes when the core clock is gated by WFI (owhinata/stm32f746g-disco#20):
+ * TIM2 keeps counting in Sleep (TIM2LPEN reset = 1), so idle/cpu% stay correct once
+ * WFI is enabled.  TX_EXECUTION_MAX_TIME_SOURCE keeps its 0xFFFFFFFF default
+ * (32-bit). */
 #define TX_EXECUTION_TIME_SOURCE \
     ((EXECUTION_TIME_SOURCE_TYPE)(*(volatile ULONG *)0x40000024UL))
 
-/* Enable WFI in the scheduler idle loop (issue #20).  When no thread is ready,
+/* Enable WFI in the scheduler idle loop (owhinata/stm32f746g-disco#20).  When no
+   thread is ready,
  * the Cortex-M7 port inserts DSB; WFI; ISB instead of busy-spinning
  * (tx_thread_schedule.S __tx_ts_wait), so the core sleeps until an interrupt.
  *

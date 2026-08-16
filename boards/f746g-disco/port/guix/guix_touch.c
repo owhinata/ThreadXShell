@@ -4,7 +4,8 @@
  */
 /**
  * @file    guix_touch.c
- * @brief   FT5336 -> GUIX pen-event input thread (issue #55).  See guix_touch.h.
+ * @brief   FT5336 -> GUIX pen-event input thread (owhinata/stm32f746g-disco#55).
+ * See guix_touch.h.
  */
 #include "guix_touch.h"
 #include "touch.h"
@@ -48,10 +49,10 @@ static void guix_send_pen(ULONG type, USHORT x, USHORT y)
 }
 
 /*
- * Hybrid EXTI-wake + drag-poll input loop (issue #62).  When no finger is down
- * the thread blocks on the FT5336 INT wake (touch_wait_event FOREVER) at ~0 %
- * CPU; an INT edge wakes it, and while a finger stays down it polls at ~60 Hz to
- * follow a drag (the controller emits NO edges during sustained contact).  On
+ * Hybrid EXTI-wake + drag-poll input loop (owhinata/stm32f746g-disco#62).  When no
+ * finger is down the thread blocks on the FT5336 INT wake (touch_wait_event FOREVER)
+ * at ~0 % CPU; an INT edge wakes it, and while a finger stays down it polls at ~60
+ * Hz to follow a drag (the controller emits NO edges during sustained contact).  On
  * release it returns to the idle wake wait.  Park (gui stop) disarms the wake and
  * sleeps on the active flag.  If arming the INT fails (bus down) the loop
  * degrades to plain ~60 Hz polling so the UI still responds.

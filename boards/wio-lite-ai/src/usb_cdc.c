@@ -14,8 +14,9 @@
 #include "app.h"
 
 /* USB1_OTG_HS interrupt -> TinyUSB device stack (rhport 0).  Bracketed by the EPK
- * ISR hooks (issue #2) so the kit charges this handler's time to the (isr) row of
- * `thread` instead of the interrupted thread; both no-op until profiling is armed. */
+ * ISR hooks (owhinata/wio-lite-ai#2) so the kit charges this handler's time to the
+ * (isr) row of `thread` instead of the interrupted thread; both no-op until
+ * profiling is armed. */
 void OTG_HS_IRQHandler(void)
 {
   tx_glue_isr_enter();
@@ -26,7 +27,7 @@ void OTG_HS_IRQHandler(void)
 /* Bring up the OTG_HS pins/clock only (no NVIC, no stack init): called from main()
  * before the kernel starts.  The device stack (tusb_init) is brought up later, in
  * the owning usb thread's entry, so the OTG_HS interrupt is not enabled until the
- * ThreadX objects its ISR path can reach already exist (issue #12). */
+ * ThreadX objects its ISR path can reach already exist (owhinata/wio-lite-ai#12). */
 void usb_hw_init(void)
 {
   __HAL_RCC_GPIOA_CLK_ENABLE();
@@ -47,7 +48,8 @@ void usb_thread_entry(ULONG arg)
 {
   struct cli_transport *tr = (struct cli_transport *) arg;
 
-  /* Bring up the device stack from its owning thread (issue #12): tusb_init()
+  /* Bring up the device stack from its owning thread (owhinata/wio-lite-ai#12):
+     tusb_init()
    * enables OTG_HS_IRQn internally (dwc2 dcd_int_enable -> NVIC_EnableIRQ), so it
    * must run only after cli_init() created the shell's event flags -- which it did,
    * back in tx_application_define, before this thread was ever scheduled.  Set the
@@ -59,7 +61,8 @@ void usb_thread_entry(ULONG arg)
   tusb_init(BOARD_TUD_RHPORT, &dev_init);
 
   /* The scheduler and _tx_execution_initialize() have run by the time any thread
-   * entry executes, so it is safe to arm the EPK ISR hooks now (issue #2). */
+   * entry executes, so it is safe to arm the EPK ISR hooks now
+   * (owhinata/wio-lite-ai#2). */
   tx_glue_profile_enable();
 
   for (;;)

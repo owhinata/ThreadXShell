@@ -4,14 +4,15 @@
  */
 /**
  * @file    cmd_jobs.c
- * @brief   `jobs` and `kill` background-job control commands (issue #25).
+ * @brief   `jobs` and `kill` background-job control commands
+ * (owhinata/stm32f746g-disco#25).
  *
  * `jobs`      -- list the running background jobs ([id] + command); reaps and
  *                announces any that have finished first.
  * `kill %N`   -- request a cooperative stop of the job with id N (a leading '%'
  *                is optional, matching the shell job-spec syntax).  Cancellation
- *                is cooperative (issue #16): a handler that polls
- *                cli_cancel_requested() / uses cli_sleep() stops promptly; a
+ *                is cooperative (owhinata/stm32f746g-disco#16): a handler that
+ * polls cli_cancel_requested() / uses cli_sleep() stops promptly; a
  *                non-cooperative one (e.g. coremark) ignores it and runs to the
  *                end -- the kill is recorded either way.
  *

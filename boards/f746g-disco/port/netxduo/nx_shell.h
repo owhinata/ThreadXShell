@@ -4,7 +4,8 @@
  */
 /**
  * @file    nx_shell.h
- * @brief   TCP network shell (telnet) over NetX Duo (issue #49 P4).
+ * @brief   TCP network shell (telnet) over NetX Duo (owhinata/stm32f746g-disco#49
+ * P4).
  *
  * Bridges the clean-room CLI shell's transport abstraction to a NetX TCP server
  * socket: a single network shell session on port 23 (telnet/nc), bound to one

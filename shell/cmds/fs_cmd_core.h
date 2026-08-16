@@ -4,7 +4,7 @@
  */
 /**
  * @file    fs_cmd_core.h
- * @brief   Media-independent FileX command core (issue #6).
+ * @brief   Media-independent FileX command core (owhinata/wio-lite-ai#6).
  *
  * The FileX command bodies (ls/cat/write/rm/mkdir/info/umount) are written once
  * and parameterized over a `struct fs_device` vtable, so everything media-specific
@@ -17,7 +17,7 @@
  * Today microSD (cmd_sd.c) is the only device.  The indirection is kept from the
  * f746 original it was ported from -- where the same bodies also served a
  * LevelX/QSPI NOR filesystem -- because this board has an unused 16 MB W25Q128 on
- * OCTOSPI2 that issue #10 may bring back as exactly that second media.
+ * OCTOSPI2 that owhinata/wio-lite-ai#10 may bring back as exactly that second media.
  *
  * Thread-context only; the bodies use the cli_* output API and the device's
  * ownership gates, so they are safe from background jobs.
@@ -85,7 +85,8 @@ int fs_core_umount(const struct fs_device *dev, struct cli_instance *sh, int arg
  * Read an entire file from @p dev into @p buf (capacity @p cap bytes) through the
  * device's shared op gate; fails if the file is larger than @p cap.  Returns 0 with
  * *out_len set to the bytes read, or 1 (a message is printed).  The cross-command
- * reuse point for future consumers that need a whole file in RAM (#7 camera, #9 AI).
+ * reuse point for future consumers that need a whole file in RAM (owhinata/wio-lite-ai#7
+ * camera, owhinata/wio-lite-ai#9 AI).
  */
 int fs_core_read_file(const struct fs_device *dev, struct cli_instance *sh,
                       const char *path, void *buf, uint32_t cap, uint32_t *out_len);

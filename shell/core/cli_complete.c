@@ -4,7 +4,8 @@
  */
 /**
  * @file    cli_complete.c
- * @brief   Tab completion for command / subcommand names (issue #11, req §2/§8/§18.4).
+ * @brief   Tab completion for command / subcommand names (owhinata/stm32f746g-disco#11,
+ * req §2/§8/§18.4).
  *
  * cli_edit.c routes a Tab (0x09) here.  Completion is read-only over the input
  * line and the registered command tree -- it never mutates sh->line during the

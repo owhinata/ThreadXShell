@@ -4,7 +4,8 @@
  */
 /**
  * @file    nx_shell.c
- * @brief   TCP network shell (telnet) over NetX Duo (issue #49 P4).  See nx_shell.h.
+ * @brief   TCP network shell (telnet) over NetX Duo (owhinata/stm32f746g-disco#49
+ * P4). See nx_shell.h.
  *
  * One session at a time (N=1): the CLI §14 KILL/uninit lifecycle is not
  * implemented, so a static cli_instance is reused across connections rather than

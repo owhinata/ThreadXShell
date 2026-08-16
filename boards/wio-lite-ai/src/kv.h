@@ -4,7 +4,7 @@
  */
 /**
  * @file    kv.h
- * @brief   Persistent configuration key-value store (issue #37).
+ * @brief   Persistent configuration key-value store (owhinata/wio-lite-ai#37).
  *
  * A FlashDB KVDB in the first megabyte of the external NOR, wrapped so the rest of
  * the firmware never sees FlashDB or FAL.  This is the answer to "where does a

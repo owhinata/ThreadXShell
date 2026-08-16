@@ -4,7 +4,8 @@
  */
 /**
  * @file    nn_null.c
- * @brief   `null` nn backend -- a synthetic stub, not an inference runtime (#9 P1).
+ * @brief   `null` nn backend -- a synthetic stub, not an inference runtime
+ * (owhinata/wio-lite-ai#9 P1).
  *
  * The always-buildable backend.  It exists so the whole path -- CMake backend
  * selection, the vtable, the singleton open, the session guard, the cycle
@@ -28,13 +29,13 @@
  * exercises both print paths.
  *
  * PLACEMENT.  All three buffers live in the cacheable PSRAM carve-out (.psram_ai,
- * issue #9 phase 2a).  They are 17 KB of CPU-only bulk, which is the PSRAM row of
- * the memory policy in include/mem_sections.h: AXI-SRAM is reserved for what a bus
- * master must reach, and DTCM has under 8 KB genuinely free once the main stack is
- * accounted for.  Being NOLOAD they hold garbage at reset, so a caller measuring
- * with them fills the input first (shell/cmds/cmd_ai.c).  Nothing here dereferences
- * them outside run() -- in particular null_open() only fills descriptors, which is
- * what lets `ai info` work with the PSRAM down.
+ * owhinata/wio-lite-ai#9 phase 2a).  They are 17 KB of CPU-only bulk, which is the
+ * PSRAM row of the memory policy in include/mem_sections.h: AXI-SRAM is reserved for
+ * what a bus master must reach, and DTCM has under 8 KB genuinely free once the main
+ * stack is accounted for.  Being NOLOAD they hold garbage at reset, so a caller
+ * measuring with them fills the input first (shell/cmds/cmd_ai.c).  Nothing here
+ * dereferences them outside run() -- in particular null_open() only fills descriptors,
+ * which is what lets `ai info` work with the PSRAM down.
  *
  * Clean-room design; no third-party code reused.
  */
@@ -57,7 +58,8 @@
 #define NULL_SCR_COUNT ((uint32_t)NULL_CELLS)
 #define NULL_SCR_BYTES (NULL_SCR_COUNT * (uint32_t)sizeof(float))      /*  1024 */
 
-/* In the CACHEABLE PSRAM carve-out since issue #9 phase 2a (the rest of that window
+/* In the CACHEABLE PSRAM carve-out since owhinata/wio-lite-ai#9 phase 2a (the rest of
+   that window
  * is non-cacheable).  32-byte aligned so no two of them share a cache line, which
  * matters here in a way it did not while the window was uniform. */
 static int8_t null_in_buf[NULL_IN_BYTES]   PSRAM_AI __attribute__((aligned(32)));
@@ -68,7 +70,7 @@ static float  null_scr_buf[NULL_SCR_COUNT] PSRAM_AI __attribute__((aligned(32)))
  * LTO, so the optimiser sees the whole program and would otherwise be free to prove
  * that nothing reads these buffers and delete the loop that fills them -- the same
  * trap cmd_membench.c guards with its own sink, and the one that silently removed
- * issue #14's malloc probe. */
+ * owhinata/wio-lite-ai#14's malloc probe. */
 static volatile uint32_t null_sink;
 
 struct null_model {

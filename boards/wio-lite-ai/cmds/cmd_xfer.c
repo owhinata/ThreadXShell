@@ -9,14 +9,14 @@
  * The protocol core (svc/ymodem.c) is transport-agnostic; here we wire its IO
  * vtable to the raw-console API (cli_console_claim/cli_read_byte/cli_write/
  * cli_rx_flush).  The source/sink vtable is supplied by the caller -- for issue
- * #19 M4 that is the RTL8720DN download-protocol flash reader in cmd_wifi.c, and
- * for M5 the PSRAM firmware-image staging buffer in app/rtl8720_img.c.  Both
- * directions share one io_getc()/io_put() pair and therefore one set of rules
+ * owhinata/wio-lite-ai#19 M4 that is the RTL8720DN download-protocol flash reader in
+ * cmd_wifi.c, and for M5 the PSRAM firmware-image staging buffer in app/rtl8720_img.c.
+ * Both directions share one io_getc()/io_put() pair and therefore one set of rules
  * about who may read the console RX ring (see cmd_xfer.h).
  *
- * Ported from ../stm32f746g-disco (its issue #50), dropping its FileX-backed
- * `xfer send sd|fs` command: this repo has no filesystem yet, so no command is
- * registered here and only the reusable send helpers live in this file.
+ * Ported from ../stm32f746g-disco (its owhinata/stm32f746g-disco#50), dropping its
+ * FileX-backed `xfer send sd|fs` command: this repo has no filesystem yet, so no
+ * command is registered here and only the reusable send helpers live in this file.
  */
 #include "cli.h"
 #include "cmd_xfer.h"
@@ -69,9 +69,9 @@ static int io_put(void *ctx, const uint8_t *buf, size_t len)
  *
  * After a FAILED transfer, keep discarding until the line goes quiet.
  *
- * ONE cli_rx_flush() IS NOT ENOUGH, and issue #10 caught it on hardware: a peer
- * that has just been sent CAN does not stop instantly.  lrzsz retries the block it
- * was on a couple of times before it accepts the cancel, and those retries arrive
+ * ONE cli_rx_flush() IS NOT ENOUGH, and owhinata/wio-lite-ai#10 caught it on hardware:
+ * a peer that has just been sent CAN does not stop instantly.  lrzsz retries the block
+ * it was on a couple of times before it accepts the cancel, and those retries arrive
  * AFTER the flush -- so they land in the line editor, which echoes them and RUNS
  * THEM AS A COMMAND.  Rejecting an oversized file with `blob write` put the
  * sender's block 0 (filename, size, mtime, mode) on the prompt and executed the
@@ -200,7 +200,7 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src)
 	return rc;
 }
 
-/* ---- receive direction (issue #19 M5) ------------------------------------- */
+/* ---- receive direction (owhinata/wio-lite-ai#19 M5) ------------------------------ */
 
 int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink)
 {
@@ -272,7 +272,8 @@ int xfer_recv_sink(struct cli_instance *sh, const struct ym_sink *sink)
 {
 	int rc;
 
-	/* NOT "Ctrl+C aborts", which this line claimed until issue #10 noticed it
+	/* NOT "Ctrl+C aborts", which this line claimed until owhinata/wio-lite-ai#10 noticed
+    it
 	 * contradicts the receive contract three functions up: while receiving, 0x03 is
 	 * file data and io_getc_recv() deliberately passes it through, so there is no
 	 * local abort at all.  Telling the operator to press a key that does nothing is

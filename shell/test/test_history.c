@@ -2,8 +2,8 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host unit test for the command history fixed ring (issue #10): add + recall
- * (↑/↓, Ctrl+p/n), consecutive-duplicate suppression, non-consecutive duplicates
+ * Host unit test for the command history fixed ring (owhinata/stm32f746g-disco#10): add +
+ * recall (↑/↓, Ctrl+p/n), consecutive-duplicate suppression, non-consecutive duplicates
  * kept, FIFO eviction at the byte cap, empty lines skipped, the key wiring
  * through cli_input_byte, navigation-state reset on submit / Ctrl+C / the blank
  * re-submit regression, the MVP "no draft restore" behaviour, and per-instance

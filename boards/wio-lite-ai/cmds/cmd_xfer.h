@@ -7,13 +7,14 @@
  * @brief   Shared YMODEM-over-console send entry point.
  *
  * cmd_xfer.c owns the console hand-over + YMODEM driving for an injected byte
- * source, so every future sender (issue #19's `wifi flash backup`, and an `xfer
- * send <path>` once #6 brings a filesystem) shares one copy of the RX flush /
- * progress messaging / result mapping.
+ * source, so every future sender (owhinata/wio-lite-ai#19's `wifi flash backup`,
+ * and an `xfer send <path>` once owhinata/wio-lite-ai#6 brings a filesystem)
+ * shares one copy of the RX flush / progress messaging / result mapping.
  *
- * Ported from ../stm32f746g-disco (its issue #50) for issue #19 M4, minus the
- * FileX-backed `xfer send sd|fs` command -- this repo has no filesystem yet, so
- * only the reusable helper is here and no `xfer` command is registered.
+ * Ported from ../stm32f746g-disco (its owhinata/stm32f746g-disco#50) for
+ * owhinata/wio-lite-ai#19 M4, minus the FileX-backed `xfer send sd|fs` command --
+ * this repo has no filesystem yet, so only the reusable helper is here and no
+ * `xfer` command is registered.
  */
 #ifndef CMD_XFER_H
 #define CMD_XFER_H
@@ -62,7 +63,8 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src);
  * Receive a YMODEM file from the PC into @p sink over the shell's console,
  * assuming the caller ALREADY holds it (cli_console_claim).  The mirror of
  * xfer_send_source_locked(): flushes RX, runs ymodem_recv(), flushes RX again and
- * prints a one-line result.  Added for issue #19 M5 (`wifi flash imgload`).
+ * prints a one-line result.  Added for owhinata/wio-lite-ai#19 M5 (`wifi flash
+ * imgload`).
  *
  * CRITICAL -- console RX ownership: exactly as on the send side, for the duration
  * of ymodem_recv() the ONLY permitted reader of the console RX ring is this
@@ -86,11 +88,12 @@ int xfer_send_source(struct cli_instance *sh, const struct ym_source *src);
  * ON FAILURE the console RX is drained until the line goes quiet, not merely
  * flushed once: a peer that has just been sent CAN keeps retrying for a moment,
  * and anything still arriving when this returns would reach the line editor and be
- * EXECUTED as a command (issue #10 saw a rejected sender's filename run at the
- * prompt).  So a failed transfer costs up to a second of draining before it
- * reports; a successful one is unchanged.  The drain is a mitigation, not a proof
- * of quiescence -- a peer that pauses past the quiet window, or one still talking
- * at the byte cap (which says so, loudly), can still get bytes to the prompt.
+ * EXECUTED as a command (owhinata/wio-lite-ai#10 saw a rejected sender's filename
+ * run at the prompt).  So a failed transfer costs up to a second of draining
+ * before it reports; a successful one is unchanged.  The drain is a mitigation,
+ * not a proof of quiescence -- a peer that pauses past the quiet window, or one
+ * still talking at the byte cap (which says so, loudly), can still get bytes to
+ * the prompt.
  */
 int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink);
 

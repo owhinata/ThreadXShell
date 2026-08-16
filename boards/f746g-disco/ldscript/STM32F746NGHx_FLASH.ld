@@ -5,7 +5,7 @@
  *   RAM   :  256 KB @ 0x20010000 (SRAM1 240K + SRAM2 16K, contiguous, D-cached)
  *
  * The physical RAM is one contiguous 320 KB block from 0x20000000, but it is
- * split here into two regions (issue #33): the reset-persistent log lives in
+ * split here into two regions (owhinata/stm32f746g-disco#33): the reset-persistent log lives in
  * DTCM, while .data/.bss/heap/stack and the SDMMC DMA bounce buffer live in
  * SRAM1+SRAM2 (RAM).  _estack = ORIGIN(RAM)+LENGTH(RAM) = 0x20050000, the same
  * top-of-RAM value as the previous single-region layout, so the MSP is unmoved.
@@ -26,7 +26,7 @@ MEMORY
 {
   DTCM  (xrw) : ORIGIN = 0x20000000, LENGTH = 64K
   RAM   (xrw) : ORIGIN = 0x20010000, LENGTH = 256K   /* SRAM1 240K + SRAM2 16K */
-  SDRAM (xrw) : ORIGIN = 0xC0000000, LENGTH = 8M     /* FMC bank1, 16-bit bus (issue #40) */
+  SDRAM (xrw) : ORIGIN = 0xC0000000, LENGTH = 8M     /* FMC bank1, 16-bit bus (owhinata/stm32f746g-disco#40) */
   FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = 1024K
 }
 
@@ -112,12 +112,12 @@ SECTIONS
     PROVIDE_HIDDEN (__fini_array_end = .);
   } >FLASH
 
-  /* RAM log ring (issue #28): NOLOAD so the CMSIS Reset_Handler .data copy /
+  /* RAM log ring (owhinata/stm32f746g-disco#28): NOLOAD so the CMSIS Reset_Handler .data copy /
    * .bss clear never touches it -- contents survive any system reset (reboot /
    * fault / IWDG / WWDG / NRST / LPWR, RM0385 5.1.1).  Placed in the DTCM region
    * (0x20000000..0x2000FFFF), which bypasses the D-cache: log writes from fault
    * context are committed without cache maintenance and are always visible to
-   * SWD.  Since #33 the DTCM is its own MEMORY region, so this placement is
+   * SWD.  Since owhinata/stm32f746g-disco#33 the DTCM is its own MEMORY region, so this placement is
    * explicit (no longer relying on "first in RAM").  Power reset (POR/PDR/BOR,
    * 5.1.2) does not guarantee SRAM retention -- log_init() validates the magic
    * and re-initialises if invalid. */
@@ -133,7 +133,7 @@ SECTIONS
   ASSERT(_elog_noinit <= ORIGIN(DTCM) + LENGTH(DTCM),
          ".log_noinit must fit inside the 64 KB DTCM")
 
-  /* membench DTCM benchmark buffer (issue #57): NOLOAD so the startup .data
+  /* membench DTCM benchmark buffer (owhinata/stm32f746g-disco#57): NOLOAD so the startup .data
    * copy / .bss clear never touches it (the bench fills it itself).  Placed in
    * the DTCM region after .log_noinit so the `membench` command can measure the
    * tightly-coupled, non-D-cached DTCM (which otherwise holds only the log ring).
@@ -178,7 +178,7 @@ SECTIONS
     __bss_end__ = _ebss;
   } >RAM
 
-  /* SDMMC DMA bounce buffer (issue #33): NOLOAD, 32 B aligned (one Cortex-M7
+  /* SDMMC DMA bounce buffer (owhinata/stm32f746g-disco#33): NOLOAD, 32 B aligned (one Cortex-M7
    * D-cache line), placed in SRAM1 so the D-cache clean/invalidate around DMA
    * acts only on this dedicated buffer.  Not because DMA2 cannot reach the DTCM
    * (it can, via the M7 AHBS slave -- RM0385 2.1.1/2.1.6) but to confine cache
@@ -199,13 +199,13 @@ SECTIONS
   ASSERT(_esram1_dma <= 0x2004C000,
          ".sram1_dma must end within SRAM1 (before SRAM2 @0x2004C000)")
 
-  /* External FMC SDRAM (issue #40): 8 MB at 0xC0000000, MPU-mapped Normal
+  /* External FMC SDRAM (owhinata/stm32f746g-disco#40): 8 MB at 0xC0000000, MPU-mapped Normal
    * non-cacheable (src/bsp.c).  NOLOAD only: the FMC is not initialized until
    * sdram_init() runs from tx_application_define(), so the startup code
    * (.data copy / .bss zeroing) must never touch this region -- objects here
    * get no load image and no zero-init, and nothing survives reset.  Holds
-   * large DMA-target buffers (camera frame buffer, issue #41). */
-  /* SDRAM is split into FMC internal banks (issue #65): each 2 MB slice
+   * large DMA-target buffers (camera frame buffer, owhinata/stm32f746g-disco#41). */
+  /* SDRAM is split into FMC internal banks (owhinata/stm32f746g-disco#65): each 2 MB slice
    * (offset bit[22:21]) is a separate internal bank that keeps its own open
    * row.  Two named sub-regions:
    *   .sdram.fixed (bank0, 0xC0000000..0xC01FFFFF): fixed-lifetime / display
@@ -216,13 +216,13 @@ SECTIONS
    *     (cam_arena), so the DCMI ring WRITE target sits in a different internal
    *     bank from the LTDC read surface -- both banks can hold a row open,
    *     cutting precharge/activate thrashing (a FE-reduction lever; measured).
-   *   .sdram.eth   (bank2, 0xC0400000..): ETH DMA descriptors (and, from #49 P2,
+   *   .sdram.eth   (bank2, 0xC0400000..): ETH DMA descriptors (and, from owhinata/stm32f746g-disco#49 P2,
    *     the RX buffer pool).  The new HAL_ETH does NO D-cache maintenance, so its
    *     descriptors/buffers must be MPU non-cacheable -- the whole 8 MB SDRAM
    *     already is (src/bsp.c), and the FMC is unambiguously reachable by the ETH
    *     MAC DMA (AHB master), so this is the lowest-risk placement.
    *   .sdram.ai    (bank3, 0xC0600000..0xC07FFFFF): the 2 MB NN inference arena
-   *     (activations, issue #81).  Its own internal bank so it can later be
+   *     (activations, owhinata/stm32f746g-disco#81).  Its own internal bank so it can later be
    *     MPU-remapped cacheable (bsp.c region1) independently of the non-cacheable
    *     DMA banks 0..2.  CPU-only (no DMA into it) -> cacheable is coherent. */
   .sdram (NOLOAD) :
@@ -245,22 +245,22 @@ SECTIONS
 
     . = ORIGIN(SDRAM) + 0x400000; /* advance to FMC internal bank2 (0xC0400000) */
     _ssdram_eth = .;
-    KEEP(*(.sdram.eth))           /* ETH DMA descriptors (+ future RX buffers, #49) */
+    KEEP(*(.sdram.eth))           /* ETH DMA descriptors (+ future RX buffers, owhinata/stm32f746g-disco#49) */
     . = ALIGN(32);
     _esdram_eth = .;
 
     . = ORIGIN(SDRAM) + 0x600000; /* advance to FMC internal bank3 (0xC0600000) */
     _ssdram_ai = .;
-    KEEP(*(.sdram.ai))            /* NN data-only: activations/staging/RT-RAM (issue #81/#92) */
+    KEEP(*(.sdram.ai))            /* NN data-only: activations/staging/RT-RAM (owhinata/stm32f746g-disco#81/#92) */
     . = ALIGN(32);
     _esdram_ai = .;
 
     /* Bank3 upper half: executable model .bin double-slot for the X-CUBE-AI
-     * relocatable backend (Epic #80 P5, issue #92).  bsp.c region2 makes exactly
+     * relocatable backend (Epic owhinata/stm32f746g-disco#80 P5, owhinata/stm32f746g-disco#92).  bsp.c region2 makes exactly
      * this 0xC0700000/1 MB window instruction-fetchable (region1 keeps the lower
      * half XN); XIP runs the PIC code in place from here.
      *
-     * Backend-aware layout (issue #95): use MAX() rather than an unconditional
+     * Backend-aware layout (owhinata/stm32f746g-disco#95): use MAX() rather than an unconditional
      * `. = ORIGIN + 0x700000` so the model window never forces the location counter
      * BACKWARDS.  Only .sdram.ai.model has to sit at the fixed 0xC0700000 (its MPU
      * exec region is size-aligned there) and ONLY the reloc backend emits it, so:
@@ -290,18 +290,18 @@ SECTIONS
   ASSERT(_esdram_cam - _ssdram_cam == 0x200000,
          ".sdram.cam (cam_arena) must be exactly 2 MB (one FMC internal bank)")
   /* ETH descriptors/buffers must start at bank2 and now stay WITHIN bank2 (2 MB),
-     leaving bank3 free for the NN inference arena -- issue #49 / #81. */
+     leaving bank3 free for the NN inference arena -- owhinata/stm32f746g-disco#49 / #81. */
   ASSERT(_ssdram_eth == ORIGIN(SDRAM) + 0x400000,
          ".sdram.eth must start at FMC internal bank2 (0xC0400000)")
   ASSERT(_esdram_eth <= ORIGIN(SDRAM) + 0x600000,
          ".sdram.eth must fit in bank2 (below the bank3 .sdram.ai boundary, #81)")
-  /* NN inference arena occupies FMC internal bank3 -- issue #81.  For the reloc
-     backend bank3 is split into two 1 MB halves (issue #92 P5): the LOWER half
+  /* NN inference arena occupies FMC internal bank3 -- owhinata/stm32f746g-disco#81.  For the reloc
+     backend bank3 is split into two 1 MB halves (owhinata/stm32f746g-disco#92 P5): the LOWER half
      (.sdram.ai, data-only: activations/staging/RT-RAM) stays XN cacheable (bsp.c
      region1); the UPPER half (.sdram.ai.model, executable reloc .bin slots) is made
      instruction-fetchable by bsp.c region2, preserving W^X for the data buffers.
      For non-reloc backends .sdram.ai.model is empty and .sdram.ai uses the full 2 MB
-     of bank3 (issue #95).  Only nn_stedgeai_reloc.c emits .sdram.ai.model, and CMake
+     of bank3 (owhinata/stm32f746g-disco#95).  Only nn_stedgeai_reloc.c emits .sdram.ai.model, and CMake
      compiles it only for CONFIG_NN_BACKEND=stedgeai_reloc, so "model non-empty" is
      equivalent to "reloc build" -- the backend-agnostic ASSERT below relies on that. */
   ASSERT(_ssdram_ai == ORIGIN(SDRAM) + 0x600000,
@@ -311,7 +311,7 @@ SECTIONS
          ".sdram.ai.model (reloc slots): when present it must sit at the 0xC0700000 exec window (bsp.c region2); it is empty for non-reloc builds. A non-empty model not at the window means .sdram.ai data spilled into the exec window (W^X violation) -- shrink the NN data or the reloc slots.")
   ASSERT(_esdram_ai_model <= ORIGIN(SDRAM) + 0x800000,
          ".sdram.ai (+ .sdram.ai.model) must fit in FMC internal bank3 (2 MB)")
-  /* Overall guard: still inside the 8 MB SDRAM bank (issue #45/#65). */
+  /* Overall guard: still inside the 8 MB SDRAM bank (owhinata/stm32f746g-disco#45/#65). */
   ASSERT(_esdram - _ssdram <= 0x800000, ".sdram exceeds the 8 MB SDRAM bank")
 
   /* Make sure there is room left for the heap and stack */

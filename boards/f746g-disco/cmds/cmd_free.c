@@ -4,7 +4,7 @@
  */
 /**
  * @file    cmd_free.c
- * @brief   `free` shell command (issue #58): per-region memory usage at runtime.
+ * @brief   `free` shell command (owhinata/stm32f746g-disco#58): per-region memory usage at runtime.
  *
  * A runtime, dynamic counterpart to the build-time `size` output: it reports, for
  * each of the four physical memory regions, the total / statically-used / free
@@ -33,10 +33,10 @@
  *          used = (heap break) - ORIGIN(RAM) and free = _estack - (heap break).
  *   SDRAM  used = sum of the bank-aligned NOLOAD sub-regions: .sdram.fixed (bank0
  *          LTDC/display) + .sdram.cam (bank1 camera arena) + .sdram.eth (bank2 ETH
- *          DMA + NetX pool, #49) + .sdram.ai (bank3 lower, NN arena, #81/#88) +
- *          .sdram.ai.model (bank3 upper, reloc model slots, #92).  Each is summed
- *          individually so the bank-alignment holes between them are not counted
- *          (issues #65/#81/#92); sub-regions a build does not use are empty.
+ *          DMA + NetX pool, owhinata/stm32f746g-disco#49) + .sdram.ai (bank3 lower, NN arena,
+ * owhinata/stm32f746g-disco#81/#88) + .sdram.ai.model (bank3 upper, reloc model slots,
+ * owhinata/stm32f746g-disco#92). Each is summed individually so the bank-alignment holes between them
+ * are not counted (owhinata/stm32f746g-disco#65/#81/#92); sub-regions a build does not use are empty.
  *
  * Region ORIGIN/LENGTH are compile-time constants mirroring the linker MEMORY
  * block (single source of truth: the .ld).  They never change without a linker
@@ -84,15 +84,20 @@ extern uint8_t _sidata[];                   /* .data load image in FLASH      */
 extern uint8_t _slog_noinit[], _elog_noinit[]; /* DTCM reset-persistent ring  */
 extern uint8_t _sdtcm_bench[], _edtcm_bench[]; /* DTCM membench buffer (#5)   */
 /* .sdram is split into bank-aligned sub-regions separated by alignment holes
- * (issues #65/#81/#92); each resident is summed individually so the holes are
+ * (owhinata/stm32f746g-disco#65/#81/#92); each resident is summed individually so the holes are
  * not counted.  All boundary symbols are defined unconditionally by the linker
  * script, so any sub-region a given build does not use is simply empty (start
  * == end), e.g. .sdram.ai.model is 0 bytes unless the reloc NN backend is in. */
-extern uint8_t _ssdram_fixed[], _esdram_fixed[];       /* .sdram.fixed (bank0 LTDC/display) */
-extern uint8_t _ssdram_cam[],   _esdram_cam[];         /* .sdram.cam   (bank1 camera arena)  */
-extern uint8_t _ssdram_eth[],   _esdram_eth[];         /* .sdram.eth   (bank2 ETH DMA, #49)  */
-extern uint8_t _ssdram_ai[],    _esdram_ai[];          /* .sdram.ai    (bank3 NN arena, #81) */
-extern uint8_t _ssdram_ai_model[], _esdram_ai_model[]; /* .sdram.ai.model (bank3 reloc, #92) */
+/* .sdram.fixed (bank0 LTDC/display) */
+extern uint8_t _ssdram_fixed[], _esdram_fixed[];
+/* .sdram.cam   (bank1 camera arena) */
+extern uint8_t _ssdram_cam[],   _esdram_cam[];
+/* .sdram.eth   (bank2 ETH DMA, owhinata/stm32f746g-disco#49) */
+extern uint8_t _ssdram_eth[],   _esdram_eth[];
+/* .sdram.ai    (bank3 NN arena, owhinata/stm32f746g-disco#81) */
+extern uint8_t _ssdram_ai[],    _esdram_ai[];
+/* .sdram.ai.model (bank3 reloc, owhinata/stm32f746g-disco#92) */
+extern uint8_t _ssdram_ai_model[], _esdram_ai_model[];
 extern uint8_t _end[];                       /* top of static SRAM = heap base */
 extern uint8_t _estack[];                    /* top of SRAM (initial MSP)      */
 extern uint8_t _Min_Stack_Size[];            /* reserved main-stack bytes      */

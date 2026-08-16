@@ -8,7 +8,8 @@
 
 /* Configure the MPU: mark the OCTOSPI1 PSRAM window (0x90000000) Normal
  * non-cacheable so DMA buffers stay coherent under the D-cache (see app/mpu.c,
- * issue #3).  MUST be called between SCB_EnableICache() and SCB_EnableDCache(). */
+ * owhinata/wio-lite-ai#3).  MUST be called between SCB_EnableICache() and
+ * SCB_EnableDCache(). */
 void mpu_config(void);
 
 /* Bring up the OTG_HS pins/clock (PA11/PA12 AF10, FS internal PHY). */

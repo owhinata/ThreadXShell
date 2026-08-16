@@ -4,7 +4,8 @@
  */
 /**
  * @file    blob.c
- * @brief   Read-only asset region on the external NOR (issue #10 / issue #9 P2b).
+ * @brief   Read-only asset region on the external NOR (owhinata/wio-lite-ai#10 /
+ * owhinata/wio-lite-ai#9 P2b).
  *
  * See blob.h for the contract and for why the header is written last, in two steps,
  * and why the device lock is not held across a transfer.  This file is the only

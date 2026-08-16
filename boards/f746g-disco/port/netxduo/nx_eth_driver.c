@@ -4,7 +4,8 @@
  */
 /**
  * @file    nx_eth_driver.c
- * @brief   Clean-room NetX Duo network driver over the STM32 ETH MAC (#49 P2).
+ * @brief   Clean-room NetX Duo network driver over the STM32 ETH MAC
+ * (owhinata/stm32f746g-disco#49 P2).
  *
  * See nx_eth_driver.h.  Zero-copy: RX buffers and TX payloads are NX_PACKET
  * payloads from one MPU non-cacheable pool, handed straight to the ETH DMA (the
@@ -108,7 +109,8 @@ void HAL_ETH_RxLinkCallback(void **pStart, void **pEnd, uint8_t *buff, uint16_t 
 	*pEnd = p;
 }
 
-/* Undo the 14-byte Ethernet header this driver prepended for TX (issue #79).
+/* Undo the 14-byte Ethernet header this driver prepended for TX
+   (owhinata/stm32f746g-disco#79).
  * _nx_packet_transmit_release() only rewinds NetX's own headers (it adds back
  * nx_packet_ip_header_length for a retained TCP packet), so the L2 header is the
  * driver's responsibility to strip.  Without this, a retransmitted TCP packet's
@@ -261,7 +263,8 @@ static void eth_tx(NX_IP_DRIVER *req)
 		uint8_t *d = tx_coalesce;
 		if (pkt->nx_packet_length > sizeof tx_coalesce) {
 			g.st.tx_drop++;
-			eth_tx_unprepend(pkt);          /* #79: restore before release */
+			/* owhinata/stm32f746g-disco#79: restore before release */
+			eth_tx_unprepend(pkt);
 			_nx_packet_transmit_release(pkt);
 			return;
 		}
@@ -279,7 +282,8 @@ static void eth_tx(NX_IP_DRIVER *req)
 	cfg.Attributes = ETH_TX_PACKETS_FEATURES_CRCPAD;
 	cfg.CRCPadCtrl = ETH_CRC_PAD_INSERT;
 
-	/* HW TX checksum insertion (issue #98).  NetX flags, per packet, which
+	/* HW TX checksum insertion (owhinata/stm32f746g-disco#98).  NetX flags, per packet,
+    which
 	   checksums it offloaded (leaving those header fields 0); map that to the
 	   TDES0 CIC field.  Always set CSUM so ChecksumCtrl is written on every
 	   transmit -- the descriptors are init'd with CIC=FULL and DMA write-back
@@ -312,8 +316,10 @@ static void eth_tx(NX_IP_DRIVER *req)
 
 	if (st != HAL_OK) {
 		g.st.tx_drop++;
-		eth_tx_unprepend(pkt);              /* #79: restore before release */
-		_nx_packet_transmit_release(pkt);   /* TxFree won't run on a failed send */
+		/* owhinata/stm32f746g-disco#79: restore before release */
+		eth_tx_unprepend(pkt);
+		/* TxFree won't run on a failed send */
+		_nx_packet_transmit_release(pkt);
 	}
 	/* success: the packet is released later by HAL_ETH_TxFreeCallback. */
 }
@@ -431,7 +437,8 @@ VOID nx_eth_driver(NX_IP_DRIVER *req)
 		                                     g.mac_msw, g.mac_lsw, NX_FALSE);
 		nx_ip_interface_address_mapping_configure(ip, g.iface_index, NX_TRUE);
 
-		/* Report the MAC's TX checksum insertion (issue #98).  Set the flag
+		/* Report the MAC's TX checksum insertion (owhinata/stm32f746g-disco#98).  Set the
+     flag
 		   directly here rather than via nx_ip_interface_capability_set() from the
 		   glue: NX_LINK_INITIALIZE runs on the IP thread *after* it clears the
 		   capability flag to 0 (nx_ip_thread_entry.c), so a glue-side set would

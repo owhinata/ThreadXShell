@@ -4,7 +4,8 @@
  */
 /**
  * @file    nn_null.c
- * @brief   Null nn backend: BlazeFace-shaped stub, no real runtime (issue #81).
+ * @brief   Null nn backend: BlazeFace-shaped stub, no real runtime
+ * (owhinata/stm32f746g-disco#81).
  *
  * The default backend (CONFIG_NN_BACKEND=null) so the firmware always builds
  * without the ST Edge AI Core (`stedgeai`) toolchain or any model.  It exposes a

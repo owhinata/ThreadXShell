@@ -3,7 +3,7 @@
  * Copyright (c) 2026 Wio Lite AI ThreadX Shell Project
  */
 /*
- * Host test for the MLPerf Tiny harness (issue #55, port/mlperf/mlperf_th.cc).
+ * Host test for the MLPerf Tiny harness (owhinata/wio-lite-ai#55, port/mlperf/mlperf_th.cc).
  *
  * WHAT MAKES THIS WORTH HAVING: it links UPSTREAM'S OWN PARSER
  * (lib/mlperf-tiny/benchmark/api/internally_implemented.cpp), unmodified, against our

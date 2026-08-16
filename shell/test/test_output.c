@@ -2,8 +2,8 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host unit test for the Shell output API (issue #5): the minimal formatter
- * (conversions, length modifiers, width/flags and their boundaries), 32 B
+ * Host unit test for the Shell output API (owhinata/stm32f746g-disco#5): the minimal
+ * formatter (conversions, length modifiers, width/flags and their boundaries), 32 B
  * staging + autoflush across a >32 B write, VT100 colour for error/warn/info,
  * hexdump layout, and TX-failure handling (drop + tx_failed + negative return).
  * Output and the tx_* glue go through the shared dummy backend (cli_backend_dummy)
@@ -82,7 +82,8 @@ static void test_formatter(void)
 	EXPECT("  abc", "%5s", "abc");
 	EXPECT("abc  |", "%-5s|", "abc");
 
-	/* Width on %lu, which is what `thread`'s columns are built from (issue #26 widened
+	/* Width on %lu, which is what `thread`'s columns are built from
+    (owhinata/wio-lite-ai#26 widened
 	 * the runs column from 6 to 8 after a 7-digit value pushed every column right).
 	 * The interesting cases are the two ends: a value narrower than the field must be
 	 * padded, and one wider must OVERFLOW rather than truncate -- a truncated run count
@@ -257,10 +258,10 @@ static void test_tx_failure(void)
 }
 
 /*
- * End-of-unit signal (issue #49).  A backend that TRANSMITS needs to know when an output
- * call is complete, or it sends a third of a line-editor redraw and pays a network round
- * trip for it -- which is exactly what made the telnet console sluggish.  Two properties
- * the telnet backend's coalescing rests on:
+ * End-of-unit signal (owhinata/wio-lite-ai#49).  A backend that TRANSMITS needs to know
+ * when an output call is complete, or it sends a third of a line-editor redraw and pays
+ * a network round trip for it -- which is exactly what made the telnet console sluggish.
+ * Two properties the telnet backend's coalescing rests on:
  *
  *   1. exactly ONE flush per output call, however many staged chunks it took;
  *   2. a flush on EVERY release, nested ones included -- cli_console_claim() holds the

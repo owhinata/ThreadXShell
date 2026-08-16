@@ -4,7 +4,7 @@
  */
 /**
  * @file    nn_camera.h
- * @brief   Camera -> BlazeFace inference glue (issue #9 phase 3).
+ * @brief   Camera -> BlazeFace inference glue (owhinata/wio-lite-ai#9 phase 3).
  *
  * Drives a worker thread that repeatedly asks the band stream for one frame,
  * downsamples it straight into the model's input tensor, runs inference and
@@ -66,10 +66,14 @@ struct nn_camera_stats {
 	uint32_t frames;         /**< complete frames ingested into the tensor     */
 	uint32_t skipped;        /**< complete frames that passed while busy       */
 	uint32_t errors;
-	uint32_t raced;          /**< bands that wrote the tensor mid-inference (#54) */
-	uint32_t stale_posts;    /**< frame posts discarded by the pre-arm drain (#54) */
-	uint32_t ingest_last_cyc;/**< DWT cycles of the last band's downsample     */
-	uint32_t ingest_max_cyc; /**< worst band since start -- vs the ~18.5 ms deadline */
+	/**< bands that wrote the tensor mid-inference (owhinata/wio-lite-ai#54) */
+	uint32_t raced;
+	/**< frame posts discarded by the pre-arm drain (owhinata/wio-lite-ai#54) */
+	uint32_t stale_posts;
+	/**< DWT cycles of the last band's downsample */
+	uint32_t ingest_last_cyc;
+	/**< worst band since start -- vs the ~18.5 ms deadline */
+	uint32_t ingest_max_cyc;
 	uint32_t infer_last_cyc;
 	uint32_t elapsed_ms;
 	int      ndet;
@@ -119,7 +123,8 @@ void nn_camera_stats_get(struct nn_camera_stats *out);
  * if the decoder does not recognise the loaded model's outputs at all -- the same
  * convention blazeface_decode() uses, because it is the same answer travelling
  * through the worker.  -1 and 0 are different facts and the caller must not merge
- * them: one is "this is not a face model", the other is "no faces" (issue #57).
+ * them: one is "this is not a face model", the other is "no faces"
+ * (owhinata/wio-lite-ai#57).
  */
 int nn_camera_dets_get(struct bf_det *out, int max);
 

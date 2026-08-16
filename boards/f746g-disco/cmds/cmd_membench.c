@@ -4,14 +4,16 @@
  */
 /**
  * @file    cmd_membench.c
- * @brief   `membench` shell command (issue #57): memory bandwidth + latency curve.
+ * @brief   `membench` shell command (owhinata/stm32f746g-disco#57): memory bandwidth + latency
+ * curve.
  *
  * A self-contained micro-benchmark (no lmbench port) that borrows only the two
  * core ideas of lmbench -- bw_mem (sequential read/write/copy bandwidth) and
  * lat_mem_rd (pointer-chase latency over a swept working set) -- to measure the
  * four physical memories at cycle precision with the Cortex-M7 DWT CYCCNT.  The
  * goal is to make the L1 D$(16KB) -> SRAM -> SDRAM latency step visible on the
- * board (input for #65 .sdram layout and #49 NetX buffer sizing).
+ * board (input for owhinata/stm32f746g-disco#65 .sdram layout and owhinata/stm32f746g-disco#49
+ * NetX buffer sizing).
  *
  * Timing: DWT CYCCNT (enabled locally; the ThreadX exec-profile and udelay use
  * TIM2 because DWT freezes in WFI, but the bench never sleeps).  The counter is
@@ -66,7 +68,7 @@
  * `free`'s per-region used.  The SRAM buffer is NOT a static .bss array: at 32 KB
  * it would permanently reserve ~1/8 of the internal SRAM for a command that is
  * rarely run, so it is malloc'd on demand and freed when the command returns
- * (issue #94).  32 KB is 2x the 16 KB L1 D-cache, enough to defeat it for the
+ * (owhinata/stm32f746g-disco#94).  32 KB is 2x the 16 KB L1 D-cache, enough to defeat it for the
  * refill row, so the measured out-of-cache rate is unchanged from the old 64 KB. */
 #define DTCM_BENCH_BYTES   (16u * 1024u)
 #define SRAM_BENCH_BYTES   (32u * 1024u)
@@ -429,7 +431,7 @@ static int cmd_membench(struct cli_instance *sh, int argc, char **argv)
 	hclk = HAL_RCC_GetHCLKFreq();
 	sdram_ok = sdram_is_up();
 
-	/* On-demand SRAM buffer (issue #94): malloc'd from the heap (which lives in
+	/* On-demand SRAM buffer (owhinata/stm32f746g-disco#94): malloc'd from the heap (which lives in
 	 * internal SRAM, so it is the right region to measure) instead of a permanent
 	 * 32 KB .bss array.  Over-allocate by 32 to hand the bench a cache-line-aligned
 	 * pointer.  On failure, skip the SRAM rows rather than run on a null buffer. */

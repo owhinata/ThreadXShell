@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /*
- * Wio Lite AI (STM32H725AEI6) -- the NetX Duo link driver (issue #23 U3).
+ * Wio Lite AI (STM32H725AEI6) -- the NetX Duo link driver (owhinata/wio-lite-ai#23 U3).
  *
  * NetX Duo needs an Ethernet MAC.  This board does not have one: it has an RTL8720DN
  * that was turned into a relay of raw Ethernet frames in U2, reachable over the link's

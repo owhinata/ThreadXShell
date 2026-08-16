@@ -4,21 +4,24 @@
  */
 /**
  * @file    cmd_net.c
- * @brief   `net` shell command (issues #5/#23): IPv4 (L3) over the onboard RTL8720DN.
+ * @brief   `net` shell command (owhinata/wio-lite-ai#5/#23): IPv4 (L3) over the onboard
+ * RTL8720DN.
  *
  *   net info                     association + MAC + IP/mask/gw
  *   net ip <a.b.c.d/mask> [gw]   set a static address
  *   net dhcp                     (re)acquire an address via DHCP
  *   net ping <a.b.c.d> [count]   ICMP echo from the host stack
- *   net echo [port]              TCP echo server on the host stack (issue #23 U4-1)
- *   net shell start|stop|status  the telnet console (a NetX socket, issue #23 U4-2)
+ *   net echo [port]              TCP echo server on the host stack (owhinata/wio-lite-ai#23
+ * U4-1) net shell start|stop|status  the telnet console (a NetX socket,
+ * owhinata/wio-lite-ai#23 U4-2)
  *
  * This is the Wio counterpart of ../stm32f746g-disco's `net` command.  There the backend
- * is NetX Duo over the on-chip Ethernet MAC; here it is NetX Duo over the issue-#23 L2
- * bridge, which is the SINGLE L3 backend since issue #30 B1 -- everything below here
- * is the host's own stack.  The module's lwIP still exists (the bridge is a tap on its
- * netif, so it has to), but nothing here drives it any more.  The L2 side (power +
- * association) stays in `wifi`, and association is a prerequisite for everything here.
+ * is NetX Duo over the on-chip Ethernet MAC; here it is NetX Duo over the
+ * owhinata/wio-lite-ai#23 L2 bridge, which is the SINGLE L3 backend since
+ * owhinata/wio-lite-ai#30 B1 -- everything below here is the host's own stack.  The module's
+ * lwIP still exists (the bridge is a tap on its netif, so it has to), but nothing here drives
+ * it any more. The L2 side (power + association) stays in `wifi`, and association is a
+ * prerequisite for everything here.
  *
  * Only `net info` still speaks eRPC, and only to the WiFi DRIVER (service 14) for
  * association and MAC -- the tap does not touch those.  It runs inside one
@@ -50,7 +53,7 @@
 /*
  * `net info` still asks the module's WiFi DRIVER for association / MAC (service 14,
  * which the bridge does not touch).  Everything L3 moved to the host stack in issue
- * #30 B1, so this is the only eRPC left in this file.
+ * owhinata/wio-lite-ai#30 B1, so this is the only eRPC left in this file.
  */
 static void net_opts(struct wifi_rpc_opts *o, struct cli_instance *sh,
                      struct erpc_diag *diag, uint32_t timeout_ms)
@@ -61,13 +64,13 @@ static void net_opts(struct wifi_rpc_opts *o, struct cli_instance *sh,
 	o->diag         = diag;
 }
 
-/* ---- host stack (issue #23 U3) ------------------------------------------- */
+/* ---- host stack (owhinata/wio-lite-ai#23 U3) ------------------------------------------- */
 
 /*
  * The interface itself is armed by `wifi connect` and unwound by a CHIP_EN move
- * (issue #30 B2) -- there is no user-visible switch here any more.  Everything with an
- * address in it just needs the stack up, tested with ONE predicate, nx_net_is_up(), so no
- * subcommand can disagree with its neighbour about who answered.
+ * (owhinata/wio-lite-ai#30 B2) -- there is no user-visible switch here any more.  Everything
+ * with an address in it just needs the stack up, tested with ONE predicate, nx_net_is_up(), so
+ * no subcommand can disagree with its neighbour about who answered.
  */
 
 #define NET_NX_POLL_MS      100u
@@ -127,15 +130,15 @@ static int net_nx_settled(struct cli_instance *sh)
 }
 
 /*
- * `net up` and `net down` lived here until issue #30 B2d.  They armed and unwound the
- * bridge by hand, which is the "which stack owns the network" mode this issue set out to
- * delete: `wifi connect` arms it now (B2b) and a CHIP_EN move -- `wifi on`, `wifi off`,
+ * `net up` and `net down` lived here until owhinata/wio-lite-ai#30 B2d.  They armed and
+ * unwound the bridge by hand, which is the "which stack owns the network" mode this issue set
+ * out to delete: `wifi connect` arms it now (B2b) and a CHIP_EN move -- `wifi on`, `wifi off`,
  * `wifi reset`, any flash session -- takes it away.  nx_net_up()/nx_net_down() are still
  * the API; the callers are cmd_wifi.c (associate, then bring the interface up) and
  * cmd_wifi_flash.c (give the link back before entering download mode).  History: 3413170~1.
  *
- * The two ways it is taken away are NOT the same call, and issue #41 is what it costs to
- * confuse them.  A flash session may be refused, so it unwinds gracefully through
+ * The two ways it is taken away are NOT the same call, and owhinata/wio-lite-ai#41 is what it
+ * costs to confuse them.  A flash session may be refused, so it unwinds gracefully through
  * nx_net_down() and waits.  The CHIP_EN commands may not, so they hand the owner its own
  * revocation through nx_net_link_taken() -- no eRPC, no lock, no refusal.
  */
@@ -161,7 +164,7 @@ static int cmd_net_info(struct cli_instance *sh, int argc, char **argv)
 
 	/* Association, MAC and RSSI come from the module's WiFi DRIVER (service 14), which
 	 * the bridge does not touch -- so they read the same whether the host stack is up or
-	 * not.  The ADDRESS is the host stack's alone since issue #30 B1. */
+	 * not.  The ADDRESS is the host stack's alone since owhinata/wio-lite-ai#30 B1. */
 	net_opts(&o, sh, &diag, 3000u);
 	rc = wifi_rpc_is_connected(&o, &connected);
 	if (rc) {
@@ -188,9 +191,9 @@ static int cmd_net_info(struct cli_instance *sh, int argc, char **argv)
 
 	/*
 	 * Unconditionally, even when the host stack is OFF.  Its one-line summary carries
-	 * WHY it is off -- refused, or taken down by a `wifi reset` -- and until issue #23
-	 * U4 that reason only reached `dmesg`, so the question "the console vanished, what
-	 * happened?" had no answer on the command that is meant to answer it.
+	 * WHY it is off -- refused, or taken down by a `wifi reset` -- and until
+	 * owhinata/wio-lite-ai#23 U4 that reason only reached `dmesg`, so the question "the console
+	 * vanished, what happened?" had no answer on the command that is meant to answer it.
 	 * nx_net_print_status() prints the summary first and returns early when OFF.
 	 */
 	nx_net_print_status(sh);
@@ -283,8 +286,8 @@ static int cmd_net_ping(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	if (nx_net_is_up()) {
 		/* Say WHY rather than letting NetX refuse every probe in turn: with the link
-		 * down (issue #30 B2a) the interface still has an address and looks configured,
-		 * so four "NetX error" lines are the least informative possible answer. */
+		 * down (owhinata/wio-lite-ai#30 B2a) the interface still has an address and looks
+		 * configured, so four "NetX error" lines are the least informative possible answer. */
 		if (!nx_link_driver_link_up()) {
 			cli_error(sh, "net: the link is down (not associated) -- "
 			          "`wifi connect` first\r\n");
@@ -324,17 +327,17 @@ static int cmd_net_ping(struct cli_instance *sh, int argc, char **argv)
 		return ok ? 0 : 1;
 	}
 
-	/* The module-side raw-ICMP path was removed by issue #28: the surviving module
+	/* The module-side raw-ICMP path was removed by owhinata/wio-lite-ai#28: the surviving module
 	 * backend is info/ip/dhcp only, and ping belongs to the host stack. */
 	cli_error(sh, "net: no host stack -- `wifi connect` brings it up\r\n");
 	return 1;
 }
 
-/* ---- `net echo`: TCP echo server on the host stack (issue #23 U4-1) ------- */
+/* ---- `net echo`: TCP echo server on the host stack (owhinata/wio-lite-ai#23 U4-1) ------- */
 /*
- * The bring-up rehearsal for the telnet console, as its eRPC ancestor was for issue #21 --
- * one command, one thread, no concurrency of its own, exercising listen / accept / receive
- * / send / disconnect / relisten before a console rides on them.
+ * The bring-up rehearsal for the telnet console, as its eRPC ancestor was for
+ * owhinata/wio-lite-ai#21 -- one command, one thread, no concurrency of its own, exercising
+ * listen / accept / receive / send / disconnect / relisten before a console rides on them.
  *
  * What changed in U4 is what is underneath.  The old version reached the module's lwIP
  * through an eRPC round trip per chunk, so what it measured was dominated by that
@@ -366,7 +369,7 @@ static int cmd_net_echo(struct cli_instance *sh, int argc, char **argv)
 	return nx_echo_run(sh, (uint16_t)port);
 }
 
-/* ---- `net shell`: the telnet console (issue #23 U4-2) --------------------- */
+/* ---- `net shell`: the telnet console (owhinata/wio-lite-ai#23 U4-2) --------------------- */
 /*
  * The console itself lives in app/net_shell.c; these are just its controls.  Since U4-2 it
  * is a NetX socket on the HOST stack, so it needs the interface up (`wifi connect`), and

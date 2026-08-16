@@ -4,7 +4,8 @@
  */
 /**
  * @file    eth_phy.h
- * @brief   Clean-room LAN8742A Ethernet PHY link driver (issue #49 P1).
+ * @brief   Clean-room LAN8742A Ethernet PHY link driver (owhinata/stm32f746g-disco#49
+ * P1).
  *
  * A minimal IEEE-802.3 clause-22 PHY driver for the board's LAN8742A: address
  * discovery, soft reset, auto-negotiation, and link/speed/duplex read.  It is

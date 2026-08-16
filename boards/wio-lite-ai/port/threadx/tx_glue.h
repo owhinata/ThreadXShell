@@ -14,7 +14,8 @@ extern "C" {
    tx_application_define(), after all ThreadX objects/timer lists exist. */
 void tx_glue_timer_enable(void);
 
-/* Execution Profile Kit (issue #2) ISR-time accounting hooks.  Bracket the body of
+/* Execution Profile Kit (owhinata/wio-lite-ai#2) ISR-time accounting hooks.  Bracket
+   the body of
    every plain-C ISR (SysTick internally, OTG_HS in app/usb_cdc.c) with these so the
    kit attributes the ISR's time to the (isr) row instead of the interrupted thread.
    They no-op until tx_glue_profile_enable(), and compile to nothing when EPK is off. */
@@ -28,7 +29,7 @@ void tx_glue_profile_enable(void);
 #include <stdint.h>
 
 /*
- * Monotonic microseconds since the timer came up (issue #55).
+ * Monotonic microseconds since the timer came up (owhinata/wio-lite-ai#55).
  *
  * Lives here because THIS FILE OWNS TIM2 -- it is the execution-profile time source
  * tx_glue_epk_timer_init() starts, and a module that merely wants a clock has no
@@ -38,7 +39,7 @@ void tx_glue_profile_enable(void);
  * sufficient alone over a benchmark-length interval:
  *
  *   DWT->CYCCNT   1.8 ns, but wraps every 7.81 s AND freezes under idle WFI
- *                 (issue #2), so it does not measure wall clock at all.
+ *                 (owhinata/wio-lite-ai#2), so it does not measure wall clock at all.
  *   TIM2->CNT     3.6 ns and WFI-safe (TIM2LPEN, RM0468 sec 8.7.53), but 32-bit at
  *                 the timer clock, so it wraps every ~15.6 s.
  *   tx_time_get() 1 kHz, wraps in 49.7 days, never freezes -- but 1 ms of resolution

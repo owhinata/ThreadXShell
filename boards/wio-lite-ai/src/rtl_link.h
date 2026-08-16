@@ -4,7 +4,8 @@
  */
 /**
  * @file    rtl_link.h
- * @brief   Ownership of the onboard RTL8720DN link (issue #5, issue #21 increment 8).
+ * @brief   Ownership of the onboard RTL8720DN link (owhinata/wio-lite-ai#5,
+ * owhinata/wio-lite-ai#21 increment 8).
  *
  * The module is a single physical resource shared by several unrelated users:
  *
@@ -13,15 +14,15 @@
  *     that must not interleave with each other,
  *   - the eRPC link itself (USART1 @2 Mbaud), whose frames are multiplexed by the
  *     resident service thread in app/erpc.c,
- *   - the `wifi log` console bridge and the issue-#19 flash download
+ *   - the `wifi log` console bridge and the owhinata/wio-lite-ai#19 flash download
  *     path, which re-open the SAME UART peripheral (UART9, other baud rates) and read
  *     the SAME strict-SPSC RX ring themselves.
  *
  * So this file owns two things: a COARSE MUTEX that serialises whole command flows,
- * and a REFERENCE COUNT on the eRPC UART so a resident user (since issue #30 B2b that is
- * the L2 bridge owner in app/nx_net.c) can hold it open across many commands.  Together
- * with the service thread's "touch nothing while idle" rule they keep the invariant that
- * the RX ring
+ * and a REFERENCE COUNT on the eRPC UART so a resident user (since owhinata/wio-lite-ai#30
+ * B2b that is the L2 bridge owner in app/nx_net.c) can hold it open across many commands.
+ * Together with the service thread's "touch nothing while idle" rule they keep the
+ * invariant that the RX ring
  * has exactly ONE consumer at any instant: the eRPC service thread while the UART is
  * referenced, or the command thread while a bridge / flash session owns it.
  *
@@ -81,8 +82,8 @@ void rtl_link_unclaim(void);
  * CALLER MUST HOLD THE COARSE MUTEX (rtl_link_claim, or rtl_link_begin/_hw_claim which
  * take it): the reference count protects against another *referencing* user, not against
  * a session that drives the UART directly without referencing it -- which is exactly
- * what the issue-#19 flash download path does (see app/rtl8720_flash.h).  The coarse
- * mutex is what excludes those two.
+ * what the owhinata/wio-lite-ai#19 flash download path does (see app/rtl8720_flash.h).  The
+ * coarse mutex is what excludes those two.
  */
 int  rtl_link_uart_ref(enum rtl8720_uart which, uint32_t baud);
 void rtl_link_uart_unref(void);
@@ -100,7 +101,7 @@ bool rtl_link_uart_busy(void);
 unsigned rtl_link_uart_refs(void);
 
 /*
- * ---- the link's baud rate is MODULE state (issue #23 U0-3) ---------------------
+ * ---- the link's baud rate is MODULE state (owhinata/wio-lite-ai#23 U0-3) ----------------
  *
  * The eRPC link ran at a hard-coded 2 Mbaud everywhere until `wifi link baud` made it
  * changeable.  The rate then has to be remembered somewhere that outlives a single UART
@@ -178,12 +179,12 @@ int rtl_link_set_rate(uint32_t baud);
 bool rtl_link_rate_supported(uint32_t baud);
 
 /*
- * ---- generation counters, for a RESIDENT reference holder (issue #21 increment 9) ------
+ * ---- generation counters, for a RESIDENT reference holder (owhinata/wio-lite-ai#21 increment 9) ---
  *
  * An ordinary command takes and drops its reference inside one coarse-mutex section, so its
- * reference can never be revoked underneath it.  A RESIDENT holder is different (issue #21
- * increment 9 introduced one; since issue #30 B2b it is the L2 bridge owner in
- * app/nx_net.c):
+ * reference can never be revoked underneath it.  A RESIDENT holder is different
+ * (owhinata/wio-lite-ai#21 increment 9 introduced one; since owhinata/wio-lite-ai#30 B2b it
+ * is the L2 bridge owner in app/nx_net.c):
  * it holds a reference across many commands, and rtl_link_force_quiesce() (`wifi on/off/
  * reset`) deliberately drops the count to zero while it is holding one.  A plain
  * rtl_link_uart_unref() afterwards would decrement SOMEBODY ELSE'S reference -- the next
@@ -210,10 +211,11 @@ uint32_t rtl_link_quiesce_gen(void);
  * fresh power-on path, which drives CHIP_EN without going through force_quiesce and so
  * does not move rtl_link_quiesce_gen().
  *
- * It exists for a holder of state that is only meaningful for ONE module -- issue #32's
- * stored WiFi credentials (app/wifi_auto.c) -- to notice, on its own, that the module in
- * front of us has changed.  Having the holder latch and watch this counter is what keeps
- * rtl_link_forget_module() free of calls up into the layers that own such state.
+ * It exists for a holder of state that is only meaningful for ONE module --
+ * owhinata/wio-lite-ai#32's stored WiFi credentials (app/wifi_auto.c) -- to notice, on its
+ * own, that the module in front of us has changed.  Having the holder latch and watch this
+ * counter is what keeps rtl_link_forget_module() free of calls up into the layers that own
+ * such state.
  */
 uint32_t rtl_link_forget_gen(void);
 
@@ -239,8 +241,8 @@ void rtl_tcpip_set_inited(bool v);
 
 /*
  * (The host-side memo of how the address was obtained -- rtl_ip_mode() -- lived here
- * until issue #30 B1.  The module no longer takes an address at all, and the host
- * stack keeps its own dhcp-vs-static flag in struct nx_net_info.)
+ * until owhinata/wio-lite-ai#30 B1.  The module no longer takes an address at all, and the
+ * host stack keeps its own dhcp-vs-static flag in struct nx_net_info.)
  */
 
 /* ---- (b) shell adapters ------------------------------------------------------- */

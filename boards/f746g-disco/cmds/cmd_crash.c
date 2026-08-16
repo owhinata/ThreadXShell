@@ -4,7 +4,8 @@
  */
 /**
  * @file    cmd_crash.c
- * @brief   `crash` shell command (issue #28): force a fault to test the dump.
+ * @brief   `crash` shell command (owhinata/stm32f746g-disco#28): force a fault
+ * to test the dump.
  *
  *   crash bus     read a Reserved address  -> precise BusFault (BFAR check)
  *   crash undef   execute an undefined insn -> UsageFault (UNDEFINSTR)

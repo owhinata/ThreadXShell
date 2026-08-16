@@ -3,7 +3,8 @@
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /*
- * TCP echo server on the host's own NetX Duo stack (issue #23 U4-1).  See app/nx_echo.h.
+ * TCP echo server on the host's own NetX Duo stack (owhinata/wio-lite-ai#23 U4-1).  See
+ * app/nx_echo.h.
  *
  * Everything here runs on the calling CLI instance thread, whose stack is 2048 bytes
  * (shell/include/cli_config.h).  NX_TCP_SOCKET is large and the extraction buffer is a
@@ -287,10 +288,10 @@ static int nxe_session(struct nxe_run *r, NX_PACKET_POOL *pool)
  * ---- why this also goes to the log --------------------------------------------
  *
  * The ONLY way to stop this command is Ctrl+C, and once cancel is latched the core drops
- * every further byte a handler tries to print (cli_core.c:456-459, issue #16 -- a
- * cancelled command must stop spewing at once).  So a measurement command whose results
- * are printed at the end has them destroyed by the very keystroke that ends it: the first
- * board run produced the numbers and showed none of them.
+ * every further byte a handler tries to print (cli_core.c:456-459, owhinata/wio-lite-ai#16
+ * -- a cancelled command must stop spewing at once).  So a measurement command whose
+ * results are printed at the end has them destroyed by the very keystroke that ends it:
+ * the first board run produced the numbers and showed none of them.
  *
  * The log has neither property -- it does not go through the instance's output path and
  * does not consult cancel_req -- and on this board it also survives a reset (the DTCM
@@ -351,7 +352,8 @@ static void nxe_report(struct nxe_run *r)
 	          (unsigned long)ms.tx_drops,
 	          (ld.rx_drops || ld.rx_crc_err || ld.tx_drops || ms.rx_drops ||
 	           ms.rx_crc || ms.rx_gaps || ms.tx_drops) ? "  <-- LOSS" : "  (clean)");
-	/* The pass/fail line of issue #23 U4: a full DATA transmit pool is a silent drop,
+	/* The pass/fail line of owhinata/wio-lite-ai#23 U4: a full DATA transmit pool is a silent
+    drop,
 	 * and a stream protocol pays for it with a retransmit timeout. */
 	if (st.tx_no_buf != 0u)
 		cli_warn(r->sh, "  the DATA transmit pool ran dry (%lu) -- LINK_DATA_TX_BUFS is "

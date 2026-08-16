@@ -4,7 +4,8 @@
  */
 /**
  * @file    cmd_watch.c
- * @brief   `watch [-n SEC] CMD...` -- re-run CMD every SEC seconds (#21).
+ * @brief   `watch [-n SEC] CMD...` -- re-run CMD every SEC seconds
+ * (owhinata/stm32f746g-disco#21).
  *
  * Clears the screen, runs CMD, waits SEC seconds (default CLI_WATCH_DEFAULT_SEC),
  * repeats until Ctrl+C.  Like `top` over `thread` (`watch -n 1 thread`).
@@ -15,7 +16,7 @@
  * handler directly -- sh->line / sh->argv / sh->pr are never touched.  The
  * recursion/danger denylist is checked against the parser-NORMALISED root token
  * (largv[0], i.e. after quote/escape handling) so `watch "reboot"` etc. cannot
- * slip past it.  Cancellation rides on #16: the inner command's own
+ * slip past it.  Cancellation rides on owhinata/stm32f746g-disco#16: the inner command's own
  * cli_cancel_requested() polls, the interval cli_sleep(), and an explicit check
  * all observe a Ctrl+C (cancel_req is sticky until the outer dispatch ends).
  *

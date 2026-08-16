@@ -4,7 +4,8 @@
  */
 /**
  * @file    cmd_system.c
- * @brief   System built-in shell commands (issue #12): version / uptime / reboot.
+ * @brief   System built-in shell commands (owhinata/stm32f746g-disco#12): version /
+ * uptime / reboot.
  *
  * These join help/echo (cmd_builtin.c) in the `shell` executable only -- they are
  * never linked into the host test harness, which keeps its own command set.  All

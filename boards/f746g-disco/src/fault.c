@@ -4,7 +4,7 @@
  */
 /**
  * @file    fault.c
- * @brief   Cortex-M7 fault handlers + crash dump (issue #28).
+ * @brief   Cortex-M7 fault handlers + crash dump (owhinata/stm32f746g-disco#28).
  *
  * Strong HardFault/MemManage/BusFault/UsageFault handlers override the CMSIS
  * startup weak aliases (which only spin in Default_Handler).  On a fault the
@@ -15,7 +15,8 @@
  *   2. USART1 by polling (no HAL, no IRQ, no ThreadX) -> a full register / stack
  *      / backtrace dump even with the scheduler and interrupts dead.
  * Then the core halts in a busy loop (not WFI -- the old ST-Link cannot attach to
- * a sleeping core, #20/#24/#26); SWD can still inspect the halted state.
+ * a sleeping core, owhinata/stm32f746g-disco#20/#24/#26); SWD can still inspect the
+ * halted state.
  *
  * The exception entry is captured by a small naked stub shared by all four
  * vectors (the type is read back from SCB->ICSR), which hands the C handler the
@@ -150,13 +151,14 @@ static void fault_backtrace(uint32_t sp, uint32_t top, uint32_t pc, uint32_t lr)
 
 /* ---- C fault handler --------------------------------------------------- */
 
-/* Final resting state for every fault path.  With the IWDG built in (issue #38)
+/* Final resting state for every fault path.  With the IWDG built in
+   (owhinata/stm32f746g-disco#38)
  * the board stays halted only while a debugger owns the core (DHCSR C_DEBUGEN is
  * set): pet the watchdog so SWD post-mortem stays possible.  With no debugger we
  * do NOT pet, so the IWDG times out (~2-6 s) and resets the board -- an unattended
  * fault auto-recovers.  Without the IWDG it is a plain spin (SWD can still attach,
- * #26).  IWDG->KR is written directly (no HAL handle) so it is safe here even with
- * IRQs disabled and no valid driver state. */
+ * owhinata/stm32f746g-disco#26).  IWDG->KR is written directly (no HAL handle) so it
+ * is safe here even with IRQs disabled and no valid driver state. */
 static void fault_halt(void)
 {
 	for (;;) {
@@ -214,7 +216,8 @@ void fault_handler_c(uint32_t *frame, uint32_t exc_return, uint32_t *cs_regs)
 	                   (vect == 5u) ? "BusFault"   :
 	                   (vect == 6u) ? "UsageFault" : "Fault";
 
-	/* (1) RAM log first -- two lines, reset-persistent (issue #28). */
+	/* (1) RAM log first -- two lines, reset-persistent
+    (owhinata/stm32f746g-disco#28). */
 	LOG_ERR("%s cfsr=%08lx hfsr=%08lx mmfar=%08lx bfar=%08lx",
 	        name, (unsigned long)cfsr, (unsigned long)hfsr,
 	        (unsigned long)mmfar, (unsigned long)bfar);
@@ -277,7 +280,8 @@ void fault_handler_c(uint32_t *frame, uint32_t exc_return, uint32_t *cs_regs)
 	while (!(USART1->ISR & USART_ISR_TC) && (USART1->CR1 & USART_CR1_UE))
 		;                               /* let the last bytes leave */
 
-	fault_halt();                       /* halt; SWD can still attach (#26) */
+	/* halt; SWD can still attach (owhinata/stm32f746g-disco#26) */
+	fault_halt();
 }
 
 /* ---- naked entry stubs ------------------------------------------------- */

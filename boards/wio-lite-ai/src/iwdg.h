@@ -4,12 +4,14 @@
  */
 /**
  * @file    iwdg.h
- * @brief   IWDG1 independent watchdog driver + compile-time gate (issue #4).
+ * @brief   IWDG1 independent watchdog driver + compile-time gate
+ * (owhinata/wio-lite-ai#4).
  */
 #ifndef IWDG_H
 #define IWDG_H
 
-/* Compile-time gate for the IWDG watchdog (issue #4).  1 == IWDG1 armed + petter
+/* Compile-time gate for the IWDG watchdog (owhinata/wio-lite-ai#4).  1 == IWDG1 armed
+   + petter
  * thread + `wdt starve`; 0 == compiled out entirely (no IWDG symbols, LSI left
  * untouched, `wdt info` reports "disabled (build)").  The value is injected by the
  * CMake option of the same name via target_compile_definitions(shell ...); this
@@ -48,10 +50,11 @@ extern "C" {
  * automatically (no RCC write, so the inherited clock tree is untouched).
  *
  * Call ONCE from tx_application_define(), right after the petter thread is created
- * (issue #12).  HAL_IWDG_Init() polls the PR/RLR update with a HAL_GetTick() timeout,
- * so SysTick must be running: it is, because tx_application_define() now runs with
- * interrupts enabled (no __disable_irq) and SysTick_Handler calls HAL_IncTick()
- * unconditionally.  Compiled to nothing when BSP_ENABLE_IWDG == 0.
+ * (owhinata/wio-lite-ai#12).  HAL_IWDG_Init() polls the PR/RLR update with a
+ * HAL_GetTick() timeout, so SysTick must be running: it is, because
+ * tx_application_define() now runs with interrupts enabled (no __disable_irq) and
+ * SysTick_Handler calls HAL_IncTick() unconditionally.  Compiled to nothing when
+ * BSP_ENABLE_IWDG == 0.
  */
 void iwdg_init(void);
 

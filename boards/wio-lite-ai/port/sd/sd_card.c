@@ -4,7 +4,8 @@
  */
 /**
  * @file    sd_card.c
- * @brief   microSD low-level driver over SDMMC1 + internal IDMA (issue #6).
+ * @brief   microSD low-level driver over SDMMC1 + internal IDMA
+ * (owhinata/wio-lite-ai#6).
  *
  * See sd_card.h for the API contract.  Ported from the STM32F746 Discovery
  * firmware; the three things the H7 / this board changed for real are called out
@@ -540,10 +541,10 @@ int sd_card_init(void)
  * the data phase on the SDMMC's own IDMA, so there are no DMA stream interrupts to
  * service (the F7 original needed DMA2_Stream3/6 handlers as well).
  *
- * tx_glue_isr_enter/exit is the EPK (issue #2) accounting bracket every plain-C ISR
- * in this firmware uses; no armed-yet gate is needed, since this only fires during
- * an SD operation, which can only start from a shell thread long after the profile
- * kit is armed.
+ * tx_glue_isr_enter/exit is the EPK (owhinata/wio-lite-ai#2) accounting bracket
+ * every plain-C ISR in this firmware uses; no armed-yet gate is needed, since this
+ * only fires during an SD operation, which can only start from a shell thread long
+ * after the profile kit is armed.
  */
 void SDMMC1_IRQHandler(void)
 {

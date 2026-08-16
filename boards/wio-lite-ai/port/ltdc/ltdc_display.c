@@ -4,7 +4,7 @@
  */
 /**
  * @file    ltdc_display.c
- * @brief   FPC-40 RGB panel bring-up via LTDC + DMA2D (issue #7).
+ * @brief   FPC-40 RGB panel bring-up via LTDC + DMA2D (owhinata/wio-lite-ai#7).
  *
  * See ltdc_display.h for the API contract and, more importantly, for why the
  * pixel-clock path is hand-rolled instead of using the HAL (it would rewrite the
@@ -27,8 +27,8 @@
  *
  * **R2 on PA1 is NOT driven by the LTDC.**  It is also the ST7789's CS, and
  * leaving it under the LTDC lets scanned-out red bits clock commands into the
- * panel (issue #43).  It is parked as a GPIO high instead -- ltdc_pin_cs_park()
- * has the full story.  R0/R1 (SDA/SCL) do stay with the LTDC.
+ * panel (owhinata/wio-lite-ai#43).  It is parked as a GPIO high instead --
+ * ltdc_pin_cs_park() has the full story.  R0/R1 (SDA/SCL) do stay with the LTDC.
  *
  * The panel is a 2.8" 240x320 unit with an ST7789 controller and no published
  * datasheet: its timing, polarity, pixel clock and serial wake-up sequence were
@@ -594,7 +594,7 @@ static void ltdc_gpio_init(void)
 
 /*
  * Park PA1 -- LTDC_R2, which is also the ST7789's CS -- as a GPIO output driven
- * HIGH, and never give it back to the LTDC (issue #43).
+ * HIGH, and never give it back to the LTDC (owhinata/wio-lite-ai#43).
  *
  * THE PROBLEM.  RM0468 sec 38.3.2 ("Pixel input format", just above Table 315):
  * components narrower than 8 bits are expanded "by bit replication", and it
@@ -615,12 +615,13 @@ static void ltdc_gpio_init(void)
  *
  * WHY IT HID FOR TWO ISSUES.  Every test pattern is safe by construction: the
  * bars, the gradient and the bouncing rectangle are all either red = 0 (CS
- * asserted but red bit 3 never rises) or piecewise constant.  So #7 and #8 both
- * passed.  A live camera frame is not: red crosses 8 constantly while the MSB
- * stays 0, and the panel dies within seconds.  It was pinned down by streaming
- * the OV2640's own colour bars (`camera stream start test`), which runs the
- * identical DVP -> DCMI -> DMA -> PSRAM path at the identical rate and differs
- * only in the pixel values -- that never fails, live video always does.
+ * asserted but red bit 3 never rises) or piecewise constant.  So
+ * owhinata/wio-lite-ai#7 and #8 both passed.  A live camera frame is not: red
+ * crosses 8 constantly while the MSB stays 0, and the panel dies within seconds.
+ * It was pinned down by streaming the OV2640's own colour bars (`camera stream
+ * start test`), which runs the identical DVP -> DCMI -> DMA -> PSRAM path at the
+ * identical rate and differs only in the pixel values -- that never fails, live
+ * video always does.
  *
  * THE FIX.  Keep CS deasserted and the command port cannot hear anything, no
  * matter what the pixels do.  ST7789V sec 8.4.2: with CSX high the serial
@@ -651,7 +652,7 @@ static void ltdc_pin_cs_park(void)
 }
 
 /* Panel reset pulse.  HAL_Delay is safe here even pre-scheduler: SysTick feeds
-   HAL_IncTick() from the moment HAL_Init() runs (issue #12). */
+   HAL_IncTick() from the moment HAL_Init() runs (owhinata/wio-lite-ai#12). */
 static void ltdc_panel_reset(void)
 {
 	HAL_GPIO_WritePin(LCD_RST_PORT, LCD_RST_PIN, GPIO_PIN_RESET);
@@ -793,8 +794,8 @@ int ltdc_init(void)
 	 * parks LCD_RST/LCD_BL, so it must run AFTER the serial sequence.
 	 *
 	 * st7789_rgb_pins_init() runs BEFORE the reset pulse, not with the sequence:
-	 * see issue #43 and st7789_rgb.h.  Until it does, those three lines are
-	 * floating inputs -- and after a software reset the panel is powered, awake
+	 * see owhinata/wio-lite-ai#43 and st7789_rgb.h.  Until it does, those three lines
+	 * are floating inputs -- and after a software reset the panel is powered, awake
 	 * and listening to them.
 	 */
 	ltdc_reset_pins_init();
@@ -836,14 +837,15 @@ int ltdc_init(void)
 	HAL_NVIC_EnableIRQ(DMA2D_IRQn);
 
 	/*
-	 * Come up fully INITIALIZED but DARK (issue #53).  `lcd on` presents.
+	 * Come up fully INITIALIZED but DARK (owhinata/wio-lite-ai#53).  `lcd on`
+	 * presents.
 	 *
 	 * [!] What is deferred is only PRESENTING.  Everything above still ran: the
 	 * reset pulse, the ST7789's SWRESET + factory sequence, the CS park and the
 	 * controller configuration.  Skipping any of that and doing it at `lcd on`
 	 * instead is how a display comes up "LTDC perfectly healthy, screen uniformly
-	 * white" -- the failure mode issues #7 and #43 each cost days to find, and no
-	 * counter anywhere reports it.
+	 * white" -- the failure mode owhinata/wio-lite-ai#7 and #43 each cost days to
+	 * find, and no counter anywhere reports it.
 	 *
 	 * Here rather than in the caller because switching the backlight on and then
 	 * off around a return would visibly flash the panel on every boot; the pin is
@@ -855,8 +857,8 @@ int ltdc_init(void)
 	 * The side effect is the point as much as the darkness is: with no scan-out
 	 * there is no continuous LTDC read of OCTOSPI1, so `psram` tuning, `membench`
 	 * and `devmem` work from boot without an `lcd off` first, and `ai bench` does
-	 * not silently carry the ~26 ms scan-out tax that issue #9 twice mistook for
-	 * a change in inference cost.
+	 * not silently carry the ~26 ms scan-out tax that owhinata/wio-lite-ai#9 twice
+	 * mistook for a change in inference cost.
 	 */
 	__HAL_LTDC_DISABLE(&hltdc);
 	ltdc_disabled = true;
@@ -881,7 +883,7 @@ fail_obj:
 }
 
 /*
- * Re-run the panel bring-up on a live system (issue #43).
+ * Re-run the panel bring-up on a live system (owhinata/wio-lite-ai#43).
  *
  * The ST7789 keeps its own supply across an MCU reset, so it can be left in a
  * state the power-on sequence does not recover from -- and once ltdc_init() has
@@ -952,7 +954,7 @@ int ltdc_panel_recover(void)
 }
 
 /* ==========================================================================
- *  Drawing -- LANDSCAPE 320x240 coordinates (issue #38)
+ *  Drawing -- LANDSCAPE 320x240 coordinates (owhinata/wio-lite-ai#38)
  * ==========================================================================
  *
  * The public drawing API speaks a 320x240 landscape coordinate system even
@@ -965,7 +967,7 @@ int ltdc_panel_recover(void)
  * transform, applied here, once.
  *
  * THE MAPPING is the one the factory firmware called rotation 2, recovered by
- * disassembling its image (issue #38):
+ * disassembling its image (owhinata/wio-lite-ai#38):
  *
  *     landscape (x, y)  ->  fb[240 * (319 - x) + y]
  *
@@ -1075,7 +1077,7 @@ void ltdc_blit(const uint16_t *src, uint16_t x, uint16_t y,
 		   gfx_blit_rot() reads the source with a stride and writes the frame
 		   buffer in contiguous runs, which is the right way round for PSRAM --
 		   but it also means a source IN PSRAM is the expensive case.  That is
-		   what issue #35 stages through an AXI-SRAM band to avoid. */
+		   what owhinata/wio-lite-ai#35 stages through an AXI-SRAM band to avoid. */
 		gfx_blit_rot(src, w, back, LTDC_DEF_W, LTDC_DEF_H, cx, cy, cw, ch);
 	}
 	ltdc_unlock_frame();

@@ -17,7 +17,7 @@
 #endif
 
 /*
- * Execution Profile Kit -- the `thread` command's cpu% column (issue #2).
+ * Execution Profile Kit -- the `thread` command's cpu% column (owhinata/wio-lite-ai#2).
  *
  * Defined here (not via CMake -D) so every translation unit that sees TX_THREAD
  * agrees on its layout: the kit adds tx_thread_execution_time_total / _last_start
@@ -40,9 +40,9 @@
  * free-running at TIM2CLK = 2*PCLK1 = 275 MHz (wrap ~15.6 s).  TIM2 is started in
  * port/threadx/tx_glue.c (_tx_initialize_low_level).  Chosen over the kit default
  * DWT->CYCCNT (0xE0001004) because DWT freezes when the core clock is gated by WFI
- * (issue #2): TIM2 keeps counting in CSleep (TIM2LPEN, RM0468 s8.7.53), so cpu%/idle
- * stay correct once WFI is enabled.  DWT stays the udelay/membench time base (those
- * busy-wait in the foreground and never run while the core is in WFI).  Each EPK
+ * (owhinata/wio-lite-ai#2): TIM2 keeps counting in CSleep (TIM2LPEN, RM0468 s8.7.53), so
+ * cpu%/idle stay correct once WFI is enabled.  DWT stays the udelay/membench time base
+ * (those busy-wait in the foreground and never run while the core is in WFI).  Each EPK
  * delta is bounded to <= 1 ms by the SysTick isr hook, far below the 32-bit wrap.
  * TX_EXECUTION_MAX_TIME_SOURCE keeps its 0xFFFFFFFF default (full 32-bit). */
 #define TX_EXECUTION_TIME_SOURCE \

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Post-link guard for the AXI-SRAM / DTCM split (issue #46).
+"""Post-link guard for the AXI-SRAM / DTCM split (owhinata/wio-lite-ai#46).
 
 WHY THIS EXISTS
 ---------------
 AXI-SRAM is the only RAM a bus master can address on this part: DMA1/DMA2 and the
 SDMMC1 internal IDMA cannot reach either TCM (RM0468 sec 2.1.2 / 2.1.5 / 2.1.6).
-Issue #46 acts on that by reserving AXI-SRAM for buffers a master touches and
-moving every thread stack and the RTL8720 UART rings into DTCM, which is what
-frees the space the camera's DCMI band needs (issue #35).
+owhinata/wio-lite-ai#46 acts on that by reserving AXI-SRAM for buffers a master touches
+and moving every thread stack and the RTL8720 UART rings into DTCM, which is what
+frees the space the camera's DCMI band needs (owhinata/wio-lite-ai#35).
 
 Both halves of that split fail SILENTLY, in opposite directions:
 
@@ -67,7 +67,7 @@ RAM_LENGTH = 320 * 1024
 # `sd_bounce`, so the toggle could not be used at all: its whole purpose is to build a
 # firmware with no bus master while bisecting a D-cache suspicion, and the gate refused
 # precisely the build someone reaches for when something is already wrong.  Same flaw,
-# same fix as cmake/check_psram_ai_residency.py (issue #9 phase 2c).
+# same fix as cmake/check_psram_ai_residency.py (owhinata/wio-lite-ai#9 phase 2c).
 REQUIRED_DTCM = (
     "usb_stack",                    # TinyUSB device task
     "cdc_sh_stack",                 # console shell instance   (CLI_INSTANCE_DEFINE)
@@ -80,7 +80,7 @@ REQUIRED_DTCM = (
     "_tx_timer_thread_stack_area",  # ThreadX timer thread (upstream; linker pattern)
     "rtl_ring",                     # RTL8720 UART RX ring, ~75 k interrupts/s
     "rtl_tx_ring",                  # RTL8720 UART TX ring
-    "nsh_tx_buf",                   # telnet console TX ring (issue #48)
+    "nsh_tx_buf",                   # telnet console TX ring (owhinata/wio-lite-ai#48)
 )
 
 # Must stay in AXI-SRAM: a bus master writes or reads these directly.
@@ -88,18 +88,18 @@ REQUIRED_DTCM = (
 #   sd_bounce  SDMMC1 IDMA (port/sd/sd_card.c).  An AHB master -- it cannot see the
 #              TCMs at all, and moving this buffer would make every SD transfer a
 #              silent no-op rather than an error.
-#   cam_band   DCMI via DMA2_Stream1 (port/camera/camera.c, issue #35).  Same
-#              reachability rule, and the same silent failure: in DTCM the camera
+#   cam_band   DCMI via DMA2_Stream1 (port/camera/camera.c, owhinata/wio-lite-ai#35).
+# Same reachability rule, and the same silent failure: in DTCM the camera
 #              would keep running and the panel would show whatever was in the
 #              buffer at boot.
 #
 # cam_frame / cam_ring / ltdc_fb are the other master-touched buffers.  They live in
 # PSRAM and are checked by cmake/check_psram_ai_residency.py, which asserts they stay
-# OUT of the cacheable carve-out issue #9 opened in the top 2 MB of that window.  (An
-# earlier version of this comment said the linker script's .psram_noinit ASSERT covered
-# them; it never did -- that ASSERT only bounds the total against the 8 MB window and
-# says nothing about which sub-range a buffer landed in.  Harmless while the whole
-# window was non-cacheable, wrong the moment part of it was not.)
+# OUT of the cacheable carve-out owhinata/wio-lite-ai#9 opened in the top 2 MB of that
+# window. (An earlier version of this comment said the linker script's .psram_noinit
+# ASSERT covered them; it never did -- that ASSERT only bounds the total against the 8 MB
+# window and says nothing about which sub-range a buffer landed in.  Harmless while the
+# whole window was non-cacheable, wrong the moment part of it was not.)
 # Both of these belong to optional peripherals (BSP_ENABLE_SD / BSP_ENABLE_CAMERA), so
 # like the DTCM list above they arrive from CMakeLists.txt via --require-axi rather than
 # being named here.  The comment stays because the REASON is not conditional: whichever

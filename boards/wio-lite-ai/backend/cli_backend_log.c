@@ -4,7 +4,7 @@
  */
 /**
  * @file    cli_backend_log.c
- * @brief   Write-only shell transport into the RAM log (issue #37).
+ * @brief   Write-only shell transport into the RAM log (owhinata/wio-lite-ai#37).
  *
  * See cli_backend_log.h for what this is for.  The whole implementation is the
  * four mandatory transport entry points; the interesting work (reassembling lines,

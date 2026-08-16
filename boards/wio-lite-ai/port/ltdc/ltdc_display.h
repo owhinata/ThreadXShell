@@ -4,7 +4,7 @@
  */
 /**
  * @file    ltdc_display.h
- * @brief   FPC-40 RGB panel bring-up via LTDC + DMA2D (issue #7).
+ * @brief   FPC-40 RGB panel bring-up via LTDC + DMA2D (owhinata/wio-lite-ai#7).
  *
  * Drives the LCD on the board's 40-pin FPC connector through the STM32H725's
  * LTDC, with a DMA2D (Chrom-ART) accelerated, tear-free double buffer living in
@@ -80,9 +80,9 @@
  *
  * And the panel does not lose that state when the MCU does: it has its own
  * supply, so a software reset hands the sequence an already-awake controller.
- * That is issue #43 -- the sequence needs a SWRESET prefix to be replayable, and
- * ltdc_panel_recover() exists so it can be replayed at all without a power
- * cycle.
+ * That is owhinata/wio-lite-ai#43 -- the sequence needs a SWRESET prefix to be
+ * replayable, and ltdc_panel_recover() exists so it can be replayed at all without
+ * a power cycle.
  *
  * The same multiplexing has a second, nastier consequence: with RGB565 the LTDC
  * pads red by *replicating* its top bits into R[2:0] (RM0468 sec 38.3.2), so
@@ -213,11 +213,11 @@ uint32_t ltdc_refresh_chz(void);
  * only *creates* ThreadX objects and never waits on one, and it runs no DMA2D
  * transfer (both frame buffers are cleared by a CPU loop).  It does spend about
  * 255 ms in HAL_Delay() -- the reset pulse plus the ST7789's two mandatory
- * 120 ms settles, the software-reset one and the sleep-out one (issue #43; see
- * st7789_rgb.h) -- which is fine there: SysTick already feeds HAL_IncTick()
- * (issue #12), and the IWDG is armed later in the same function.  The IRQs it
- * enables stay dormant until the first ltdc_flip(), which cannot happen before
- * the scheduler starts.
+ * 120 ms settles, the software-reset one and the sleep-out one
+ * (owhinata/wio-lite-ai#43; see st7789_rgb.h) -- which is fine there: SysTick
+ * already feeds HAL_IncTick() (owhinata/wio-lite-ai#12), and the IWDG is armed
+ * later in the same function. The IRQs it enables stay dormant until the first
+ * ltdc_flip(), which cannot happen before the scheduler starts.
  *
  * Idempotent; on failure it cleans up (display off, HAL_LTDC_DeInit, objects
  * deleted) and leaves ltdc_is_up() false.
@@ -270,9 +270,10 @@ void ltdc_backlight(bool on);
  * and restore whatever scanout state was in effect (an `lcd off` stays off).
  *
  * This exists because the panel has its own supply: a software reset restarts
- * the MCU but leaves the ST7789 awake, and until issue #43 there was no way back
- * from a panel that had stopped accepting pixels except unplugging the board.
- * `lcd off` / `lcd on` cannot do it -- they only toggle LTDCEN and the backlight.
+ * the MCU but leaves the ST7789 awake, and until owhinata/wio-lite-ai#43 there was
+ * no way back from a panel that had stopped accepting pixels except unplugging the
+ * board.  `lcd off` / `lcd on` cannot do it -- they only toggle LTDCEN and the
+ * backlight.
  *
  * **Thread context only, and it blocks for ~245 ms** (the ST7789's two mandatory
  * 120 ms settles), holding the frame lock throughout -- so drawing commands and

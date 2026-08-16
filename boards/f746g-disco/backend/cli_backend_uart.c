@@ -4,7 +4,8 @@
  */
 /**
  * @file    cli_backend_uart.c
- * @brief   USART1 (VCP) interrupt-driven transport implementation (issue #7).
+ * @brief   USART1 (VCP) interrupt-driven transport implementation
+ * (owhinata/stm32f746g-disco#7).
  *
  * Implements struct cli_transport_api over the STM32 HAL UART in IT mode plus the
  * USART1 ISR, the HAL Rx/Tx/Error callbacks and the printf (_write) retarget that
@@ -140,8 +141,9 @@ static void uart_uninit(struct cli_transport *tr)
 	 * window for the polling _write fallback to clash on huart1.gState.
 	 * NOTE (future KILL/uninit lifecycle, §14): `enabled` is still 1 across the
 	 * abort, so a concurrent _write on another thread could enqueue to the ring
-	 * mid-teardown.  Harmless in #7 (uninit never runs at steady state); when the
-	 * lifecycle is real, clear `enabled` (and quiesce writers) before aborting. */
+	 * mid-teardown.  Harmless in owhinata/stm32f746g-disco#7 (uninit never runs at steady
+	 * state); when the lifecycle is real, clear `enabled` (and quiesce writers) before
+	 * aborting. */
 	HAL_UART_Abort(u->huart);
 	u->enabled      = 0;
 	u->tx_in_flight = 0;
@@ -158,7 +160,8 @@ const struct cli_transport_api cli_uart_api = {
 void USART1_IRQHandler(void)
 {
 #if defined(TX_EXECUTION_PROFILE_ENABLE)
-	/* Charge this ISR to the execution profile (issue #19).  No profile_active
+	/* Charge this ISR to the execution profile (owhinata/stm32f746g-disco#19).  No
+    profile_active
 	 * gate is needed: USART1's IRQ is only enabled from uart_enable(), which runs
 	 * in the shell thread -- i.e. after the scheduler and _tx_execution_initialize().
 	 * PRIMASK-protect the enter/exit so the kit's nest counter + 64-bit totals stay
@@ -267,7 +270,7 @@ static int tx_putc_spin(struct cli_uart *u, uint8_t b, uint32_t *stall)
  * owns it (api identity) and the console is live (enabled).  Used by _write to
  * route printf to the *calling* instance's UART; a non-UART transport (e.g. the
  * dummy backend), an un-enabled instance or a NULL instance returns NULL so the
- * caller falls back to the global console (#18).
+ * caller falls back to the global console (owhinata/stm32f746g-disco#18).
  */
 static struct cli_uart *uart_ctx_from_instance(struct cli_instance *sh)
 {
@@ -327,8 +330,8 @@ static int uart_write_other(struct cli_instance *sh, const char *ptr, int len)
  * no console bound yet) fall back to blocking polling, which is safe because no
  * IT TX has been armed.  printf is best-effort: a wedged TX drops the remainder.
  *
- * Per-thread routing (#18): the target is the UART of the shell instance that
- * owns the running thread (cli_current_instance), so printf -- including the
+ * Per-thread routing (owhinata/stm32f746g-disco#18): the target is the UART of the shell
+ * instance that owns the running thread (cli_current_instance), so printf -- including the
  * CoreMark report (ee_printf == printf), which runs in the calling shell thread
  * -- follows the calling terminal.  From an ISR, before the scheduler starts
  * (boot banner) or from a non-shell thread, cli_current_instance() returns NULL
@@ -340,8 +343,8 @@ static int uart_write_other(struct cli_instance *sh, const char *ptr, int len)
  * '\n' -- without staircasing; an existing CR before the LF is left as-is (no
  * double CR).  Only C-library printf flows through _write: the shell's own
  * cli_print emits CRLF through the transport write() path and is unaffected.
- * Line-atomicity (issue #25): when the running thread is a registered shell/job
- * thread on THIS UART (uart_ctx_from_instance() != NULL), the byte drain is
+ * Line-atomicity (owhinata/stm32f746g-disco#25): when the running thread is a registered
+ * shell/job thread on THIS UART (uart_ctx_from_instance() != NULL), the byte drain is
  * bracketed by cli_out_begin/cli_out_end -- the same output lock cli_print and
  * the line editor take (the FOREGROUND's lock for a bg-job worker) -- so a bg
  * printf (e.g. CoreMark in the background) is serialised with cli_print and the
@@ -361,7 +364,8 @@ int _write(int file, char *ptr, int len)
 	if (len <= 0)
 		return len;
 
-	/* During a raw binary transfer (issue #50) this UART is owned by the YMODEM
+	/* During a raw binary transfer (owhinata/stm32f746g-disco#50) this UART is owned by the
+    YMODEM
 	 * byte stream; drop printf output -- it would otherwise reach g_uart_console
 	 * unlocked (from a non-shell thread / ISR) and corrupt the transfer.  The
 	 * transfer's own bytes go via the transport write() path, not _write. */
@@ -378,7 +382,8 @@ int _write(int file, char *ptr, int len)
 	if (u == NULL)
 		u = g_uart_console;   /* ISR / pre-kernel / non-shell thread */
 	else
-		locked = (cli_out_begin(sh) == 0);   /* serialise with cli_print + editor (#25) */
+		/* serialise with cli_print + editor (owhinata/stm32f746g-disco#25) */
+		locked = (cli_out_begin(sh) == 0);
 
 	if (u != NULL && u->enabled) {
 		const uint8_t *d = (const uint8_t *)ptr;

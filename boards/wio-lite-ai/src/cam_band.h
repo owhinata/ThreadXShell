@@ -4,7 +4,8 @@
  */
 /**
  * @file    cam_band.h
- * @brief   Refcounted fan-out for the camera's band stream (issue #9 phase 3).
+ * @brief   Refcounted fan-out for the camera's band stream (owhinata/wio-lite-ai#9
+ * phase 3).
  *
  * port/camera exposes ONE band callback (camera_band_start() overwrites a single
  * function pointer, and refuses outright while any stream is active).  Two consumers

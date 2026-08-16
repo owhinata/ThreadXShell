@@ -3,8 +3,8 @@
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /*
- * Typed eRPC wrappers for the onboard RTL8720DN WiFi/tcpip API (issue #5, inc 3).
- * See wifi_rpc.h for the service/method IDs, the wire layout and the return
+ * Typed eRPC wrappers for the onboard RTL8720DN WiFi/tcpip API (owhinata/wio-lite-ai#5,
+ * inc 3).  See wifi_rpc.h for the service/method IDs, the wire layout and the return
  * convention.  Each function encodes the request body per BasicCodec, calls
  * erpc_call_ex() once, then decodes the reply (out params in order, return value
  * last).  Pure data marshalling -- no register/RCC access, clock-safe.
@@ -14,14 +14,14 @@
 #include <string.h>
 
 /*
- * The eRPC service thread stages a request in a per-slot buffer (issue #21 increment 8),
- * so the largest request built here has to fit ERPC_REQ_MAX.
+ * The eRPC service thread stages a request in a per-slot buffer (owhinata/wio-lite-ai#21
+ * increment 8), so the largest request built here has to fit ERPC_REQ_MAX.
  *
- * The requests that used this ceiling (wifi_rpc_lwip_send in issue #23 U4, then the
- * recvfrom reply) are gone with the service-16 wrappers, but the bound is kept: it is
- * the ceiling on WIFI_RPC_STREAM_MAX itself (which wifi_rpc_send_chunk() still hands
- * out), and relaxing it to whatever the current largest request happens to be would
- * mean revisiting it every time a caller comes or goes. */
+ * The requests that used this ceiling (wifi_rpc_lwip_send in owhinata/wio-lite-ai#23 U4,
+ * then the recvfrom reply) are gone with the service-16 wrappers, but the bound is kept:
+ * it is the ceiling on WIFI_RPC_STREAM_MAX itself (which wifi_rpc_send_chunk() still
+ * hands out), and relaxing it to whatever the current largest request happens to be
+ * would mean revisiting it every time a caller comes or goes. */
 _Static_assert(12u + WIFI_RPC_STREAM_MAX <= ERPC_REQ_MAX,
                "WIFI_RPC_STREAM_MAX exceeds the eRPC request staging buffer");
 
@@ -60,11 +60,12 @@ uint16_t wifi_rpc_send_chunk(void)
 /*
  * rpc_wifi_lwip (service 16) method IDs.  Values from the firmware's rpc_wifi_api.h.
  *
- * NOTHING calls this service any more: issue #23 U4 moved TCP onto the host's own stack
- * (deleting accept/bind/listen/recv/send/shutdown/getpeername, history 41d1ff0~1) and
- * issue #28 retired the datagram side with `net conc` and the module raw-ICMP ping.
- * The IDs stay because they are the record of the module's wire contract, not a cost;
- * a future module-side socket need would start from them again.
+ * NOTHING calls this service any more: owhinata/wio-lite-ai#23 U4 moved TCP onto the
+ * host's own stack (deleting accept/bind/listen/recv/send/shutdown/getpeername, history
+ * 41d1ff0~1) and owhinata/wio-lite-ai#28 retired the datagram side with `net conc` and
+ * the module raw-ICMP ping.  The IDs stay because they are the record of the module's
+ * wire contract, not a cost;  a future module-side socket need would start from them
+ * again.
  */
 #define SVC_WIFI_LWIP       16u
 #define M_LWIP_ACCEPT        1u
@@ -143,9 +144,9 @@ int wifi_rpc_off(const struct wifi_rpc_opts *o, int32_t *result)
 }
 
 /*
- * Why the last association failed (issue #40).  The module's own return value IS the
- * flag here -- rpc_wifi_get_last_error() forwards wifi_get_last_error() straight out --
- * so this decodes into *@err rather than into a `result` out-parameter.
+ * Why the last association failed (owhinata/wio-lite-ai#40).  The module's own return
+ * value IS the flag here -- rpc_wifi_get_last_error() forwards wifi_get_last_error()
+ * straight out -- so this decodes into *@err rather than into a `result` out-parameter.
  */
 int wifi_rpc_get_last_error(const struct wifi_rpc_opts *o, int32_t *err)
 {
@@ -202,7 +203,7 @@ int wifi_rpc_connect(const struct wifi_rpc_opts *o, const char *ssid,
 }
 
 /*
- * Install a channel plan (issue #40).
+ * Install a channel plan (owhinata/wio-lite-ai#40).
  *
  * [!] THE PLAN IS NON-VOLATILE.  Measured on board #2: a plan written here survives a
  * CHIP_EN cycle AND a full board power-down, so this is provisioning, not configuration
@@ -234,9 +235,10 @@ int wifi_rpc_set_channel_plan(const struct wifi_rpc_opts *o, uint8_t plan,
 }
 
 /*
- * Read the module's channel plan index (issue #40).  Which channels the driver will scan
- * -- and whether it may only listen passively on them -- follows from this, so it is the
- * first thing to look at when a join cannot find an access point that `wifi scan` sees.
+ * Read the module's channel plan index (owhinata/wio-lite-ai#40).  Which channels the
+ * driver will scan -- and whether it may only listen passively on them -- follows from
+ * this, so it is the first thing to look at when a join cannot find an access point that
+ * `wifi scan` sees.
  *
  * The reply carries the plan BEFORE the return value and eRPC's codec packs both without
  * padding (a uint8 is one byte on the wire, as with wifi_rpc_scan_is_scanning), so the

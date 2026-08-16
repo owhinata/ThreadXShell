@@ -4,7 +4,8 @@
  */
 /**
  * @file    sd_card.c
- * @brief   microSD low-level driver over SDMMC1 + DMA2 (issue #33).
+ * @brief   microSD low-level driver over SDMMC1 + DMA2
+ * (owhinata/stm32f746g-disco#33).
  *
  * See sd_card.h for the API contract.  Hardware setup:
  *
@@ -499,10 +500,11 @@ fail:
 /* ---- ISRs + HAL completion callbacks ------------------------------------ */
 /*
  * Strong overrides of the CMSIS weak vectors.  Each wraps the HAL handler in the
- * ThreadX execution-profile enter/exit (issue #19), PRIMASK-protected exactly
- * like USART1_IRQHandler.  No profile_active gate is needed: these only fire
- * during an SD operation, which can only be started from a shell thread long
- * after the profile kit is armed (mirrors the USART1 backend).
+ * ThreadX execution-profile enter/exit (owhinata/stm32f746g-disco#19),
+ * PRIMASK-protected exactly like USART1_IRQHandler.  No profile_active gate is
+ * needed: these only fire during an SD operation, which can only be started from
+ * a shell thread long after the profile kit is armed (mirrors the USART1
+ * backend).
  */
 void SDMMC1_IRQHandler(void)
 {

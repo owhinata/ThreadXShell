@@ -79,8 +79,8 @@ static int usbcdc_read(struct cli_transport *tr, uint8_t *data, size_t cap)
 }
 
 /* No .flush: this backend hands bytes to a ring the usb thread drains continuously, so
- * there is nothing an end-of-unit signal would change (issue #49 is about a backend that
- * transmits, where a partial unit costs a round trip). */
+ * there is nothing an end-of-unit signal would change (owhinata/wio-lite-ai#49 is about a
+ * backend that transmits, where a partial unit costs a round trip). */
 const struct cli_transport_api cli_usbcdc_api = {
 	.init   = usbcdc_init,
 	.enable = usbcdc_enable,
@@ -169,8 +169,8 @@ static struct cli_usbcdc *usbcdc_ctx_from_instance(struct cli_instance *sh)
 }
 
 /*
- * printf from a thread whose console is NOT this backend (issue #21: the telnet
- * instance, or a background job launched from it -- a worker aliases inst->tr =
+ * printf from a thread whose console is NOT this backend (owhinata/wio-lite-ai#21: the
+ * telnet instance, or a background job launched from it -- a worker aliases inst->tr =
  * fg->tr).  Its bytes must not land on the CDC ring: send them through the core's
  * staged output path on that instance's own transport, so printf follows the
  * terminal that ran the command exactly like cli_print does.  That path is
@@ -220,13 +220,14 @@ int _write(int file, char *ptr, int len)
 	if (len <= 0)
 		return len;
 
-	/* A raw binary transfer (issue #50) owns the console: drop printf so it cannot
+	/* A raw binary transfer (owhinata/wio-lite-ai#50) owns the console: drop printf so it
+    cannot
 	 * splice into the byte stream (its own bytes go via the transport write() path,
 	 * not _write).  Matches the UART backend. */
 	if (cli_xfer_active)
 		return len;
 
-	/* Owned by another backend's console (issue #21): hand it over rather than
+	/* Owned by another backend's console (owhinata/wio-lite-ai#21): hand it over rather than
 	 * writing someone else's output to the CDC. */
 	if (sh != NULL && sh->tr != NULL && sh->tr->api != &cli_usbcdc_api)
 		return usbcdc_write_other(sh, ptr, len);

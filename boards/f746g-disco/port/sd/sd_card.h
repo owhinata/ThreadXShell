@@ -4,7 +4,8 @@
  */
 /**
  * @file    sd_card.h
- * @brief   microSD low-level driver over SDMMC1 + DMA (issue #33, Epic #32).
+ * @brief   microSD low-level driver over SDMMC1 + DMA
+ * (owhinata/stm32f746g-disco#33, Epic owhinata/stm32f746g-disco#32).
  *
  * Block driver for the on-board microSD slot behind the STM32F746 SDMMC1
  * controller, using HAL_SD in DMA mode.  It is the SDMMC analogue of the QSPI

@@ -4,7 +4,8 @@
  */
 /**
  * @file    cmd_xfer.h
- * @brief   Shared YMODEM-over-VCP send entry point (issue #50).
+ * @brief   Shared YMODEM-over-VCP send entry point
+ * (owhinata/stm32f746g-disco#50).
  *
  * cmd_xfer.c owns the console hand-over + YMODEM driving for an injected byte
  * source.  `xfer send <sd|fs> <path>` builds a FileX source; `camera send`

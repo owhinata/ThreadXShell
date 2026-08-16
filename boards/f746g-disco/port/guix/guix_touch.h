@@ -4,15 +4,16 @@
  */
 /**
  * @file    guix_touch.h
- * @brief   FT5336 -> GUIX pen-event input driver (issue #55, Epic #48).
+ * @brief   FT5336 -> GUIX pen-event input driver (owhinata/stm32f746g-disco#55,
+ * Epic owhinata/stm32f746g-disco#48).
  *
  * A dedicated ThreadX thread turns the first FT5336 touch point into GUIX pen
  * events (GX_EVENT_PEN_DOWN / _PEN_DRAG / _PEN_UP) via gx_system_event_send().
- * It is EXTI-wake driven (issue #62): with no finger down it blocks on the
- * FT5336 INT wake (touch_wait_event) at ~0 % CPU, and only while a finger stays
- * down does it poll ~60 Hz to follow a drag (the controller emits no edges during
- * sustained contact).  Coordinates are panel pixels straight from touch_read()
- * (no scaling -- see touch.h).  The thread is created once and then
+ * It is EXTI-wake driven (owhinata/stm32f746g-disco#62): with no finger down it
+ * blocks on the FT5336 INT wake (touch_wait_event) at ~0 % CPU, and only while a
+ * finger stays down does it poll ~60 Hz to follow a drag (the controller emits no
+ * edges during sustained contact).  Coordinates are panel pixels straight from
+ * touch_read() (no scaling -- see touch.h).  The thread is created once and then
  * parked/un-parked by an `active` flag: gui stop clears it (and posts the wake)
  * so the thread sleeps OUTSIDE any I2C transaction (never tx_thread_suspend(),
  * which could stop it while it holds the touch mutex).

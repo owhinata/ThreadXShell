@@ -4,7 +4,8 @@
  */
 /**
  * @file    cli_uart_ring.h
- * @brief   Minimal single-buffer byte ring for the UART backend (issue #7).
+ * @brief   Minimal single-buffer byte ring for the UART backend
+ * (owhinata/stm32f746g-disco#7).
  *
  * A plain power-of-anything circular byte FIFO holding @p size-1 bytes (one slot
  * is reserved to distinguish full from empty).  The helpers are pure functions of

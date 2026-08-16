@@ -4,7 +4,8 @@
  */
 /**
  * @file    blazeface.c
- * @brief   BlazeFace-front 128 face-detection decode (issue #81 #8).  See blazeface.h.
+ * @brief   BlazeFace-front 128 face-detection decode (owhinata/stm32f746g-disco#81
+ * owhinata/stm32f746g-disco#8). See blazeface.h.
  *
  * SSD anchor decode + NMS, ported from the MediaPipe/PINTO BlazeFace convention
  * (the ST Model Zoo model's provenance).  No libm dependency: score filtering
@@ -38,10 +39,10 @@
 
 /* Anchor cell centres (normalized) + pre-NMS candidate scratch.  Placed in the
  * .sdram.ai arena (FMC bank3, MPU region1 cacheable) to keep them off the tight
- * internal SRAM (issue #94): bf_cx/bf_cy are computed once at init and read many
- * times, bf_cand is write-before-read scratch, and all access is CPU-only (the
- * worker is the sole, serialized caller), so there is no DMA-coherency concern.
- * w=h=1 fixed for the anchors, so only the centre matters. */
+ * internal SRAM (owhinata/stm32f746g-disco#94): bf_cx/bf_cy are computed once at init
+ * and read many times, bf_cand is write-before-read scratch, and all access is
+ * CPU-only (the worker is the sole, serialized caller), so there is no DMA-coherency
+ * concern.  w=h=1 fixed for the anchors, so only the centre matters. */
 static float bf_cx[BF_NANCHOR] __attribute__((aligned(32), section(".sdram.ai")));
 static float bf_cy[BF_NANCHOR] __attribute__((aligned(32), section(".sdram.ai")));
 static int   bf_anchors_ready;   /* stays in SRAM .bss (a 4-byte flag) */

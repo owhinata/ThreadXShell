@@ -4,7 +4,8 @@
  */
 /**
  * @file    mlperf_th.cc
- * @brief   The submitter half of the MLPerf Tiny harness (issue #55).  See mlperf_th.h.
+ * @brief   The submitter half of the MLPerf Tiny harness (owhinata/wio-lite-ai#55).
+ * See mlperf_th.h.
  *
  * Everything here implements a function upstream's api/internally_implemented.cpp
  * declares and calls.  The names are not ours; the bodies are.
@@ -24,8 +25,8 @@
  * The boundary to the rest of the firmware is `extern "C"` in mlperf_th.h, so
  * shell/cmds/cmd_mlperf.c stays plain C and never sees any of this.
  *
- * The gates that made issue #9 keep its buffers in C do not apply here: this file
- * places nothing in a named section, so there is no symbol for
+ * The gates that made owhinata/wio-lite-ai#9 keep its buffers in C do not apply here:
+ * this file places nothing in a named section, so there is no symbol for
  * check_psram_ai_residency.py or check_dtcm_residency.py to fail to recognise.  It
  * defines no object with a non-trivial constructor or destructor either, which is
  * what check_cxx_runtime.py is watching for.
@@ -278,10 +279,10 @@ static float dequant(int8_t q, const struct nn_tensor *t)
  * is the only kind the FPU does in one instruction here.
  *
  * A zero scale would be a division by zero, and it is reachable: a per-axis quantized
- * tensor reads back scale 0 through this API (issue #51 found that the hard way).
- * mlperf_bind() cannot see it -- the value is per tensor, not per shape -- so the
- * guard lives here, and it yields the zero point, i.e. "no information", rather than
- * an infinity that would propagate into every score.
+ * tensor reads back scale 0 through this API (owhinata/wio-lite-ai#51 found that the
+ * hard way).  mlperf_bind() cannot see it -- the value is per tensor, not per shape --
+ * so the guard lives here, and it yields the zero point, i.e. "no information", rather
+ * than an infinity that would propagate into every score.
  */
 static int8_t quantize(float v, const struct nn_tensor *t)
 {
@@ -505,8 +506,8 @@ void th_load_tensor(void)
 	 *
 	 * Writing the tensor directly is safe at THIS point and only at this point:
 	 * ee_infer() calls th_load_tensor() before the first th_infer(), so nothing is
-	 * reading the arena yet.  Issue #54 is the cautionary tale -- the input tensor's
-	 * arena lifetime ENDS AT THE FIRST OPERATOR, so TFLM reuses those bytes for
+	 * reading the arena yet.  owhinata/wio-lite-ai#54 is the cautionary tale -- the input
+	 * tensor's arena lifetime ENDS AT THE FIRST OPERATOR, so TFLM reuses those bytes for
 	 * intermediate activations, and anything that writes them mid-inference feeds the
 	 * model half a picture.  A load between two th_infer() calls would be that bug;
 	 * the protocol never asks for one.

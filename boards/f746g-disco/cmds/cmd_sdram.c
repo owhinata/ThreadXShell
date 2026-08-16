@@ -4,16 +4,17 @@
  */
 /**
  * @file    cmd_sdram.c
- * @brief   `sdram` shell command: FMC SDRAM status + memtest (issue #40).
+ * @brief   `sdram` shell command: FMC SDRAM status + memtest
+ * (owhinata/stm32f746g-disco#40).
  *
  *   sdram info           base / size / controller state
  *   sdram test [bytes]   DESTRUCTIVE write/read-back memtest (default: all 8 MB)
  *
  * The test overwrites the tested span -- everything placed in the `.sdram`
- * linker section (the camera frame buffer, #41) is clobbered, so the test
- * first drops the camera's captured-frame flag via camera_frame_invalidate()
- * (otherwise `camera save`/stats would read test patterns believing them to
- * be a frame).
+ * linker section (the camera frame buffer, owhinata/stm32f746g-disco#41) is
+ * clobbered, so the test first drops the camera's captured-frame flag via
+ * camera_frame_invalidate() (otherwise `camera save`/stats would read test
+ * patterns believing them to be a frame).
  *
  * Three passes over the span, word-wise: (1) address pattern (each word holds
  * its own address -- catches stuck/shorted/aliased address lines, which a
@@ -161,14 +162,15 @@ static int cmd_sdram_test(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	/* The test overwrites all of .sdram, including ltdc_fb (the LTDC scan-out
-	   READ surface, pinned to bank0 -- #65).  Generalize the #47 suspend/
-	   invalidate contract: refuse if GUIX owns the display (cannot safely
-	   suspend), otherwise stop LTDC scanout for the duration so the controller
-	   does not fetch the clobbered framebuffer (visual corruption + bus
-	   contention).  camera streaming is already refused above.  Single postcondition
-	   (clear+restore) below.  TOCTOU note: camera_streaming() is a volatile read,
-	   not a lock -- safe under the single-shell assumption (a concurrent CLI could
-	   still race a stream start; full locking is a separate issue). */
+	   READ surface, pinned to bank0 -- owhinata/stm32f746g-disco#65).  Generalize
+	   the owhinata/stm32f746g-disco#47 suspend/ invalidate contract: refuse if GUIX
+	   owns the display (cannot safely suspend), otherwise stop LTDC scanout for the
+	   duration so the controller does not fetch the clobbered framebuffer (visual
+	   corruption + bus contention).  camera streaming is already refused above.
+	   Single postcondition (clear+restore) below.  TOCTOU note: camera_streaming()
+	   is a volatile read, not a lock -- safe under the single-shell assumption (a
+	   concurrent CLI could still race a stream start; full locking is a separate
+	   issue). */
 	if (ltdc_gui_owns()) {
 		cli_error(sh, "sdram: LTDC/GUIX owns the display; run 'gui stop' first\r\n");
 		return 1;
@@ -216,7 +218,8 @@ static int cmd_sdram_test(struct cli_instance *sh, int argc, char **argv)
 	ret = 0;
 
 restore:
-	/* Single postcondition (#65): if we suspended an active scanout, the test
+	/* Single postcondition (owhinata/stm32f746g-disco#65): if we suspended an active
+    scanout, the test
 	   left ltdc_fb full of test patterns -- repaint both buffers black and
 	   re-enable scanout (back to the prior ON state, no garbage shown).  If
 	   scanout was already off (lcd off), leave it untouched. */

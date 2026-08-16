@@ -5,7 +5,7 @@
 /**
  * @file    camera.h
  * @brief   OV2640 DVP camera over DCMI: XCLK, SCCB, snapshot and continuous
- *          capture (issue #8).
+ *          capture (owhinata/wio-lite-ai#8).
  *
  * The board's J7 FPC-24 connector carries a plain 8-bit DVP camera into the
  * STM32H725's DCMI.  Phase 1 brought up everything the sensor needs *before* a
@@ -90,7 +90,7 @@ enum camera_sensor {
 #define CAMERA_FRAME_BYTES   (CAMERA_FRAME_WIDTH * CAMERA_FRAME_HEIGHT * 2u)
 
 /**
- * Band geometry for the staged stream (issue #35).
+ * Band geometry for the staged stream (owhinata/wio-lite-ai#35).
  *
  * A band is a horizontal slice of the frame that the DMA delivers on its own.
  * 60 rows divides 240 exactly, which is what makes band boundaries coincide with
@@ -140,8 +140,8 @@ struct camera_info {
  * Touches no sensor: XCLK stays stopped, PWDN stays asserted and RESETB stays
  * low, so the module is left exactly as power-on reset left it.  Enables no
  * interrupt and waits on nothing, which is what makes it safe to call from
- * tx_application_define() before the scheduler runs (issue #12's rule: an
- * interrupt source is only enabled after the ThreadX objects its ISR touches
+ * tx_application_define() before the scheduler runs (owhinata/wio-lite-ai#12's rule:
+ * an interrupt source is only enabled after the ThreadX objects its ISR touches
  * exist -- phase 1 has no interrupt source at all).
  *
  * @return CAM_OK, or CAM_ERR_STATE / CAM_ERR_HAL.
@@ -179,7 +179,7 @@ int camera_get_info(struct camera_info *out);
 int camera_get_mode(struct camera_mode *out);
 
 /** Readout orientation as configured after ST's table, for `camera info`
- *  (issue #53).  Never NULL. */
+ *  (owhinata/wio-lite-ai#53).  Never NULL. */
 const char *camera_get_orient(void);
 
 /** Which shape of stream owns the DCMI (camera_stream_stats.mode). */
@@ -253,8 +253,8 @@ typedef void (*camera_band_fn)(void *ctx, unsigned band, const uint16_t *px,
 /**
  * Start a BAND stream: the DCMI lands in AXI-SRAM, not in the PSRAM ring.
  *
- * WHY THIS MODE EXISTS (issue #35).  The panel is portrait and the camera
- * landscape, so every displayed frame is transposed, and a transpose reads one
+ * WHY THIS MODE EXISTS (owhinata/wio-lite-ai#35).  The panel is portrait and the
+ * camera landscape, so every displayed frame is transposed, and a transpose reads one
  * side with a stride.  With whole frames in PSRAM that strided side was the
  * external OCTOSPI1 -- 25 ms of CPU per frame, and enough extra bus arbitration
  * to make the DCMI's FIFO complain.  Staging 60-row bands in AXI-SRAM puts the

@@ -4,7 +4,7 @@
  */
 /**
  * @file    sd_fs_glue.h
- * @brief   Lazy-mount singleton for the microSD filesystem (issue #6).
+ * @brief   Lazy-mount singleton for the microSD filesystem (owhinata/wio-lite-ai#6).
  *
  * One FX_MEDIA over fx_sd_driver, mounted on first use, plus the ownership model
  * the `sd` subcommands share.  After sd_media_acquire() succeeds, fx_* calls on

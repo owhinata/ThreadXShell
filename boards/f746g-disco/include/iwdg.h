@@ -1,11 +1,13 @@
 /**
  * @file    iwdg.h
- * @brief   IWDG independent watchdog driver + compile-time gate (issue #38).
+ * @brief   IWDG independent watchdog driver + compile-time gate
+ * (owhinata/stm32f746g-disco#38).
  */
 #ifndef IWDG_H
 #define IWDG_H
 
-/* Compile-time gate for the IWDG watchdog (issue #38).  1 == IWDG armed + petter
+/* Compile-time gate for the IWDG watchdog (owhinata/stm32f746g-disco#38).  1 ==
+   IWDG armed + petter
  * thread + LSI enabled + DBGMCU freeze + `wdt starve`; 0 == compiled out entirely
  * (no IWDG symbols, LSI left disabled, `wdt info` reports "disabled (build)").
  * The threadx build forwards the CMake option of the same name to this define via
@@ -27,9 +29,9 @@ extern "C" {
  * 32 kHz typical LSI (2.04 s at the 47 kHz fast corner, 5.65 s at the 17 kHz slow
  * corner).  HAL_IWDG_Init() performs the first refresh itself.  Call once, after
  * all bring-up, from tx_application_define() just before tx_glue_timer_enable()
- * (issue #38): QSPI/SD HAL init (up to 5 s blocking on a media fault) must complete
- * BEFORE the watchdog arms, so a media fault stays fail-soft instead of becoming a
- * reset loop.  Compiled to nothing when BSP_ENABLE_IWDG == 0.
+ * (owhinata/stm32f746g-disco#38): QSPI/SD HAL init (up to 5 s blocking on a media
+ * fault) must complete BEFORE the watchdog arms, so a media fault stays fail-soft
+ * instead of becoming a reset loop.  Compiled to nothing when BSP_ENABLE_IWDG == 0.
  */
 void iwdg_init(void);
 

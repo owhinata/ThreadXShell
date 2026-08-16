@@ -218,6 +218,49 @@ static uint32_t cam_csirx_errors;
 static uint32_t cam_relock_fails;
 static uint32_t cam_dp_errors;
 static int32_t  cam_last_dp_status;
+
+/* ---- per-stage profile (issue #38) --------------------------------------- */
+
+/*
+ * [!] MEASURE FIRST.  `camera preview` runs at about 10 fps and the reason was
+ * an ESTIMATE: 153,600 bytes over a 48 MHz SPI link is 25.6 ms of DMA, so the
+ * other ~75 ms went unaccounted for and the theory on file was that the CPU
+ * touches every pixel twice.  Plausible is not measured, and the alternative --
+ * that the SENSOR simply does not offer frames any faster, in which case
+ * pipelining buys nothing at all -- is equally plausible from the armchair.
+ * So the producer times its own stages and `camera stats` prints them.
+ *
+ * [!] TIMER2, NOT DWT CYCCNT.  The biggest single candidate is this thread
+ * ASLEEP waiting for frame-ready, and CYCCNT stops in WFI (which BSP_ENABLE_WFI
+ * makes the idle thread do).  A cycle counter would report that stage as free
+ * and the picture would be exactly wrong.  TIMER2 is the EPK's free-running
+ * source and keeps counting through sleep -- proven on hardware by `epk sleep`
+ * in M-G2 -- so it is the one source that can time both halves of this loop.
+ * It is read, never written: the kit owns it.
+ *
+ * Accumulated in ticks and converted only for display, because the frequency is
+ * a runtime read-back and the division belongs where it can be reported.
+ * Reset at every stream start, unlike the counters above, which are cumulative:
+ * a mean that mixes two previews taken at different exposures is not a
+ * measurement of either.
+ */
+struct cam_prof {
+	uint64_t wait;    /* semaphore: sensor exposure + readout + datapath */
+	uint64_t inval;   /* D-cache invalidate of the 225 KB WDMA3 buffer   */
+	uint64_t pack;    /* planar B/G/R -> RGB565 with wb/gamma/saturation */
+	uint64_t sink;    /* publish -> sinks consume synchronously (LCD)    */
+	uint64_t tune;    /* means, sensor read-back, white balance step     */
+	uint64_t total;   /* loop top to loop top: the frame period          */
+	uint32_t iters;   /* loop iterations counted into `total`            */
+};
+static struct cam_prof cam_prof;
+static uint32_t cam_prof_last_top;
+static uint8_t  cam_prof_have_top;
+
+static uint32_t cam_now(void)
+{
+	return tx_glue_epk_timer_ticks();
+}
 static uint32_t cam_generation;
 static const char *cam_fault;
 
@@ -975,6 +1018,7 @@ static void cam_publish(void)
 {
 	struct frame_desc *slot;
 	uint8_t *raw = cam_dp_raw_buffer();
+	uint32_t t0, t1, t2;
 
 	/*
 	 * [!] Invalidate BEFORE reading and only AFTER the write-DMA has
@@ -984,7 +1028,10 @@ static void cam_publish(void)
 	 * to inherit: 225 KB of DMA'd pixels read back through stale cache
 	 * lines produces a picture that is mostly right and partly last frame.
 	 */
+	t0 = cam_now();
 	hx_InvalidateDCache_by_Addr((volatile void *)raw, (int32_t)CAM_RAW_BYTES);
+	t1 = cam_now();
+	cam_prof.inval += (uint32_t)(t1 - t0);
 
 	slot = frame_pipeline_acquire(&cam_pipe);
 	if (slot == NULL)
@@ -992,11 +1039,17 @@ static void cam_publish(void)
 
 	cam_bgr_planar_to_rgb565_wb(raw, (uint16_t *)slot->data,
 	                            CAM_FRAME_PIXELS, &cam_wb);
+	t2 = cam_now();
+	cam_prof.pack += (uint32_t)(t2 - t1);
 
+	/* The sinks consume ON THIS THREAD, inside publish -- so this interval
+	 * is the LCD blit (a byte-swap copy plus the SPI DMA wait), not a queue
+	 * hand-off.  That is the whole reason it is worth timing separately. */
 	frame_pipeline_publish(&cam_pipe, slot, CAM_FRAME_PIXELS * 2u,
 	                       FRAME_FMT_RGB565, (uint16_t)CAM_FRAME_WIDTH,
 	                       (uint16_t)CAM_FRAME_HEIGHT,
 	                       (uint16_t)(CAM_FRAME_WIDTH * 2u));
+	cam_prof.sink += (uint32_t)(cam_now() - t2);
 	cam_frames++;
 }
 
@@ -1012,7 +1065,24 @@ static void cam_publish(void)
  */
 static int cam_service_one(uint32_t *retries)
 {
+	uint32_t t_top = cam_now();
 	UINT rc = tx_semaphore_get(&cam_frame_sem, CAM_FRAME_TIMEOUT_TICKS);
+	uint32_t t_ready = cam_now();
+
+	/*
+	 * Accounted before any of the exits below, and the period is closed at
+	 * the NEXT top rather than here -- so the parts and the whole are
+	 * measured over the same window and the breakdown sums by construction.
+	 * The last, partial iteration is simply never closed, which is right: it
+	 * did not produce a frame.
+	 */
+	cam_prof.wait += (uint32_t)(t_ready - t_top);
+	if (cam_prof_have_top) {
+		cam_prof.total += (uint32_t)(t_top - cam_prof_last_top);
+		cam_prof.iters++;
+	}
+	cam_prof_last_top = t_top;
+	cam_prof_have_top = 1u;
 
 	if (cam_stop_req)
 		return -1;
@@ -1072,8 +1142,13 @@ static int cam_service_one(uint32_t *retries)
 	/* Between frames: the only moment at which changing the sensor's
 	 * exposure cannot tear one, and the only moment at which this thread is
 	 * provably the sole user of the vendor CIS driver. */
-	cam_auto_step();
-	cam_apply_tuning();
+	{
+		uint32_t t_tune = cam_now();
+
+		cam_auto_step();
+		cam_apply_tuning();
+		cam_prof.tune += (uint32_t)(cam_now() - t_tune);
+	}
 
 	/* WDMA3 is a single buffer, so the next capture is armed only now that
 	 * the pixels have been consumed -- that is what makes tearing
@@ -1369,6 +1444,17 @@ int camera_stream_start(void)
 		return rc;
 	}
 
+	/* The stage profile describes ONE stream (issue #38): a mean that mixed
+	 * two previews taken at different exposures would be a measurement of
+	 * neither.  The counters above stay cumulative, and the readout says
+	 * which is which. */
+	{
+		struct cam_prof zero = { 0 };
+
+		cam_prof = zero;
+		cam_prof_have_top = 0u;
+	}
+
 	/*
 	 * [!] Drain any stale stop acknowledgement first.
 	 *
@@ -1591,12 +1677,48 @@ void camera_get_wb(struct cam_wb *out)
 		*out = cam_wb;
 }
 
+/* Ticks -> microseconds at the rate TIMER2 was actually brought up at, which is
+ * a run-time read-back rather than a constant.  64-bit throughout: a long
+ * preview accumulates more ticks than 32 bits hold at 6 MHz. */
+static uint32_t cam_prof_us(uint64_t ticks, uint32_t hz)
+{
+	if (hz == 0u)
+		return 0u;
+	return (uint32_t)((ticks * 1000000u) / hz);
+}
+
 void camera_stream_stats(struct camera_stats *out)
 {
+	TX_INTERRUPT_SAVE_AREA
 	struct frame_stats fs;
+	struct cam_prof p;
+	const char *why = NULL;
+	uint32_t hz;
+	uint32_t sum;
 
 	if (out == NULL)
 		return;
+
+	/*
+	 * [!] SNAPSHOT THE PROFILE UNDER A CRITICAL SECTION.
+	 *
+	 * Its accumulators are 64-bit and the producer adds to them between
+	 * frames, so a plain read from this thread can catch a half-updated
+	 * one -- and half of a 64-bit add is not a slightly wrong number, it is
+	 * a wildly wrong one.  This readout exists to be acted on; a garbage
+	 * value here would send someone optimising the wrong stage, which is
+	 * the exact failure #38 was filed to avoid.
+	 *
+	 * Interrupts off is enough and is what this port already uses for the
+	 * same job (see cam_apply_tuning()): with them disabled the scheduler
+	 * cannot switch, so the producer cannot be mid-update.  The API mutex is
+	 * deliberately NOT taken here -- see the note on cam_api_enter(); this
+	 * function has to keep answering when the camera is refusing everything.
+	 * The single-word counters below need none of this.
+	 */
+	TX_DISABLE
+	p = cam_prof;
+	TX_RESTORE
 
 	out->streaming      = (cam_state == CAM_ST_STREAMING);
 	out->frames         = cam_frames;
@@ -1606,6 +1728,33 @@ void camera_stream_stats(struct camera_stats *out)
 	out->relock_fails   = cam_relock_fails;
 	out->dp_errors      = cam_dp_errors;
 	out->last_dp_status = cam_last_dp_status;
+
+	/*
+	 * The profile is only as good as its clock, and this port already has
+	 * the predicate for that: tx_glue_profile_ok() re-verifies TIMER2's
+	 * control and reload registers and that it is actually counting, every
+	 * time it is asked.  Saying "not trustworthy, and why" beats publishing
+	 * a breakdown nobody can act on -- the same rule `thread` follows for
+	 * its cpu% column.
+	 */
+	hz = tx_glue_epk_timer_hz();
+	out->prof_ok  = (tx_glue_profile_ok(&why) && hz != 0u);
+	out->prof_why = out->prof_ok ? NULL : (why != NULL ? why
+	                                                   : "the EPK time source is down");
+	out->prof_iters    = p.iters;
+	out->prof_total_us = cam_prof_us(p.total, hz);
+	out->prof_wait_us  = cam_prof_us(p.wait,  hz);
+	out->prof_inval_us = cam_prof_us(p.inval, hz);
+	out->prof_pack_us  = cam_prof_us(p.pack,  hz);
+	out->prof_sink_us  = cam_prof_us(p.sink,  hz);
+	out->prof_tune_us  = cam_prof_us(p.tune,  hz);
+	/* Saturating, not wrapping: rounding in the five conversions can put the
+	 * sum a microsecond or two over the total, and a 4-billion "other" is a
+	 * worse answer than a zero one. */
+	sum = out->prof_wait_us + out->prof_inval_us + out->prof_pack_us +
+	      out->prof_sink_us + out->prof_tune_us;
+	out->prof_other_us = (out->prof_total_us > sum)
+	                   ? (out->prof_total_us - sum) : 0u;
 	out->fault          = cam_fault;
 
 	frame_pipeline_stats(&cam_pipe, &fs);

@@ -1,6 +1,6 @@
-# TensorFlow Lite Micro (tflite-micro) backend for CONFIG_NN_BACKEND=tflm (issue #9
+# TensorFlow Lite Micro (tflite-micro) backend for CONFIG_NN_BACKEND=tflm (owhinata/wio-lite-ai#9
 # phase 2c).  Ported from the donor firmware ../stm32f746g-disco, which has been
-# running this exact tree + CMSIS-NN pin on a Cortex-M7 since its issue #88.
+# running this exact tree + CMSIS-NN pin on a Cortex-M7 since its owhinata/stm32f746g-disco#88.
 #
 # Included ONLY from the tflm branch of CMakeLists.txt, so C++ is enabled for that one
 # build: the default (`null`) firmware never sees enable_language(CXX) and stays
@@ -46,11 +46,11 @@ set(NN_TFLM_CMSIS_NN ON CACHE BOOL "Use CMSIS-NN optimised kernels in the tflm b
 #
 #   blazeface   the 8 ops BlazeFace-front 128 int8 actually uses
 #   mlperf      + FULLY_CONNECTED / AVERAGE_POOL_2D / SOFTMAX = 11.  Exactly what the
-#               five MLPerf Tiny v1.4 models need (issue #55), measured with
+#               five MLPerf Tiny v1.4 models need (owhinata/wio-lite-ai#55), measured with
 #               scripts/verify_tflite.cc rather than guessed.  +23,624 B of text --
 #               and +6,072 B more with CONFIG_MLPERF_TINY=ON, which leaves 15,240 B.
 #   extended    + the common-vision superset = 26.  [!] DOES NOT LINK on this firmware
-#               today: FLASH overflows by 29,200 B (measured, issue #55).
+#               today: FLASH overflows by 29,200 B (measured, owhinata/wio-lite-ai#55).
 #
 # This is a knob rather than a constant because on a 384 KB partition the width of the
 # op set is a decision, not a detail -- and `mlperf` exists precisely because the
@@ -122,7 +122,7 @@ set(NN_TFLM_VERIFY OFF CACHE BOOL "Verify the flatbuffer before building an inte
 # Optimisation level for the vendored tree.
 #
 # -O2, because it was measured on the board and it is not free.  The rest of the
-# firmware is -Os (issue #39); this library is the exception for the same reason
+# firmware is -Os (owhinata/wio-lite-ai#39); this library is the exception for the same reason
 # coremark_obj keeps -O3 and cmd_membench.c keeps -O2 -- what it produces IS the
 # deliverable.  Measured on board #2 with BlazeFace-front 128 int8, `lcd off`, 20 runs:
 #
@@ -402,7 +402,7 @@ if(HOST_CXX)
     add_custom_target(verify-model DEPENDS "${CMAKE_BINARY_DIR}/verify_tflite")
 
     # --- Host-side model rewriter (scripts/tflite_int8_input.cc) --------------
-    # Issue #51.  Strips a model's own leading QUANTIZE so the graph input becomes the
+    # owhinata/wio-lite-ai#51.  Strips a model's own leading QUANTIZE so the graph input becomes the
     # quantized tensor -- which is the only way to exercise app/nn_camera.c's int8
     # ingest path, because "an int8 model" from the model zoo means int8 WEIGHTS and
     # float I/O.  See the file header.

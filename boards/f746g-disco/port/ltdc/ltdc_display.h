@@ -4,33 +4,36 @@
  */
 /**
  * @file    ltdc_display.h
- * @brief   On-board RK043FN48H LCD bring-up via LTDC (issue #52/#53, Epic #48).
+ * @brief   On-board RK043FN48H LCD bring-up via LTDC
+ * (owhinata/stm32f746g-disco#52/#53, Epic owhinata/stm32f746g-disco#48).
  *
  * Drives the board's 4.3" 480x272 RGB panel (Rocktech RK043FN48H-CT, UM1907
- * §6.10) through the STM32F746 LTDC controller.  Phase 1 of #48 (#52) brought
- * up a single RGB565 layer statically displayed from a SDRAM frame buffer to
- * verify the LCD wiring, RGB channel order and pixel clock; Phase 2 (#53) adds
- * DMA2D-accelerated drawing and a tear-free double buffer.  Touch (#54) and
- * GUIX (#55/#56) follow.
+ * §6.10) through the STM32F746 LTDC controller.  Phase 1 of
+ * owhinata/stm32f746g-disco#48 (owhinata/stm32f746g-disco#52) brought up a single
+ * RGB565 layer statically displayed from a SDRAM frame buffer to verify the LCD
+ * wiring, RGB channel order and pixel clock; Phase 2 (owhinata/stm32f746g-disco#53)
+ * adds DMA2D-accelerated drawing and a tear-free double buffer. Touch
+ * (owhinata/stm32f746g-disco#54) and GUIX (owhinata/stm32f746g-disco#55/#56)
+ * follow.
  *
- * Double buffer (#53): two RGB565 frame buffers live in SDRAM.  Drawing always
- * targets the *back* buffer (ltdc_back_buffer()); ltdc_flip() then makes it the
- * front (displayed) one with a tear-free swap -- HAL_LTDC_SetAddress_NoReload()
- * stages the new CFBAR, HAL_LTDC_Reload(VERTICAL_BLANKING) requests the
- * register reload at the next VSYNC, and the swap is committed only after the
- * hardware has actually reloaded (SRCR.VBR reads back 0, RM0385 §18.7.6 -- VBR
- * self-clears after the HW reload).  A reload-ready IRQ (LTDC_IRQHandler ->
- * HAL_LTDC_ReloadEventCallback) wakes ltdc_flip() promptly; the VBR poll is the
- * authoritative truth.  If the reload never lands within the timeout the
- * display is latched faulted (fail-closed): the front buffer is left unchanged
- * and ltdc_is_up() goes false.
+ * Double buffer (owhinata/stm32f746g-disco#53): two RGB565 frame buffers live in
+ * SDRAM. Drawing always targets the *back* buffer (ltdc_back_buffer()); ltdc_flip()
+ * then makes it the front (displayed) one with a tear-free swap --
+ * HAL_LTDC_SetAddress_NoReload() stages the new CFBAR,
+ * HAL_LTDC_Reload(VERTICAL_BLANKING) requests the register reload at the next
+ * VSYNC, and the swap is committed only after the hardware has actually reloaded
+ * (SRCR.VBR reads back 0, RM0385 §18.7.6 -- VBR self-clears after the HW reload).
+ * A reload-ready IRQ (LTDC_IRQHandler -> HAL_LTDC_ReloadEventCallback) wakes
+ * ltdc_flip() promptly; the VBR poll is the authoritative truth.  If the reload
+ * never lands within the timeout the display is latched faulted (fail-closed): the
+ * front buffer is left unchanged and ltdc_is_up() goes false.
  *
- * Drawing acceleration (#53): DMA2D (Chrom-ART) does register-to-memory fills
- * (ltdc_fill / ltdc_fill_rect / ltdc_colorbar) and memory-to-memory blits
- * (ltdc_blit).  DMA2D is an AHB master writing the same MPU non-cacheable SDRAM
- * as the CPU and the LTDC read DMA, so all three are coherent by construction.
- * The drawing + flip APIs serialize through ltdc_lock (a ThreadX mutex), so
- * concurrent callers never tear each other's frames.
+ * Drawing acceleration (owhinata/stm32f746g-disco#53): DMA2D (Chrom-ART) does
+ * register-to-memory fills (ltdc_fill / ltdc_fill_rect / ltdc_colorbar) and
+ * memory-to-memory blits (ltdc_blit).  DMA2D is an AHB master writing the same MPU
+ * non-cacheable SDRAM as the CPU and the LTDC read DMA, so all three are coherent
+ * by construction.  The drawing + flip APIs serialize through ltdc_lock (a ThreadX
+ * mutex), so concurrent callers never tear each other's frames.
  *
  * Clock: the LTDC pixel clock comes from PLLSAI, which is otherwise unused.
  * PLLSAI shares the main PLL's input divider M (=25), so VCO_in = HSE/M =
@@ -40,10 +43,11 @@
  * separate PLL from the main PLL, so it does NOT disturb SYSCLK (216 MHz) or
  * the FMC SDRAM clock (108 MHz).  LCD_CLK was lowered from the stock 9.6 MHz to
  * 4.8 MHz (~29.6 Hz; only PLLSAIDIVR doubled 4 -> 8) to relieve the LTDC's
- * continuous SDRAM read pressure and the DCMI DMA FIFO errors of #59 (measured
- * -51% preview FE) -- a DELIBERATE out-of-spec operating point (line period
- * 118 us > the RK043FN48H 65 us max, refresh < the ~50 Hz floor) validated on
- * hardware; in-spec fallback ~8.8 MHz / ~54 Hz (PLLSAIN=176).
+ * continuous SDRAM read pressure and the DCMI DMA FIFO errors of
+ * owhinata/stm32f746g-disco#59 (measured -51% preview FE) -- a DELIBERATE
+ * out-of-spec operating point (line period 118 us > the RK043FN48H 65 us max,
+ * refresh < the ~50 Hz floor) validated on hardware; in-spec fallback ~8.8 MHz /
+ * ~54 Hz (PLLSAIN=176).
  *
  * Memory: the frame buffer lives in the `.sdram` (NOLOAD) section -- the same
  * 8 MB region that bsp_init() maps Normal **non-cacheable** through the MPU, so
@@ -85,7 +89,8 @@ extern "C" {
 #define LTDC_LCD_WIDTH   480u
 #define LTDC_LCD_HEIGHT  272u
 
-/* LCD_CLK fed to the panel: PLLSAI VCO(192) / R(5) / DIVR(8) = 4.8 MHz (#59). */
+/* LCD_CLK fed to the panel: PLLSAI VCO(192) / R(5) / DIVR(8) = 4.8 MHz
+   (owhinata/stm32f746g-disco#59). */
 #define LTDC_PIXEL_CLOCK_HZ  4800000u
 
 /* Handy RGB565 constants for the `lcd` command. */
@@ -156,7 +161,7 @@ void ltdc_unlock_frame(void);
  */
 int ltdc_flip(void);
 
-/* ---- Display ownership interlock for GUIX (#55) -----------------------------
+/* ---- Display ownership interlock for GUIX (owhinata/stm32f746g-disco#55) --------
  * GUIX (port/guix) drives the same double buffer as the `lcd` command.  The
  * ltdc_lock mutex only serializes *individual* draws/flips; it does not stop the
  * shell from swapping ltdc_front out from under GUIX (whose canvas is bound to
@@ -170,7 +175,8 @@ int ltdc_flip(void);
 
 /** Take (on=true) or release (on=false) GUIX ownership of the display.  Atomic
  *  with ltdc_lock.  Returns false if the display is down/faulted, or (for
- *  on=true) if scanout is disabled (#66) -- GUIX needs scanout running. */
+ *  on=true) if scanout is disabled (owhinata/stm32f746g-disco#66) -- GUIX needs
+ * scanout running. */
 bool ltdc_gui_take(bool on);
 
 /** Nonzero while GUIX owns the display (the `lcd` draw/flip path is disabled). */
@@ -188,29 +194,33 @@ uint32_t ltdc_pixel_clock_hz(void);
 /** Drive LCD_DISP (PI12) + LCD_BL_CTRL (PK3): true = display on + backlight. */
 void ltdc_backlight(bool on);
 
-/** Stop (false) / start (true) LTDC scanout at runtime (#66): clears/sets
+/** Stop (false) / start (true) LTDC scanout at runtime
+    (owhinata/stm32f746g-disco#66): clears/sets
  *  LTDC_GCR.LTDCEN so the controller stops/resumes fetching the framebuffer from
  *  SDRAM, and parks/raises the backlight.  Lets the LTDC's continuous SDRAM read
  *  be removed (e.g. to measure its contribution to the DCMI DMA FIFO errors of
- *  #59, or to save bandwidth/power when no display is needed).  Returns LTDC_OK,
- *  or LTDC_ERR_STATE if the display is down/faulted or GUIX owns it.  While
- *  disabled, ltdc_flip()/ltdc_gui_flip() refuse (so no VBR-timeout fault) and
- *  ltdc_gui_take(true) fails; the shell `lcd` draw commands refuse via lcd_ready().
- *  Direct ltdc_fill()/ltdc_blit() still write the back buffer but nothing is
- *  presented until re-enabled. */
+ *  owhinata/stm32f746g-disco#59, or to save bandwidth/power when no display is
+ * needed). Returns LTDC_OK, or LTDC_ERR_STATE if the display is down/faulted or
+ * GUIX owns it. While disabled, ltdc_flip()/ltdc_gui_flip() refuse (so no
+ * VBR-timeout fault) and ltdc_gui_take(true) fails; the shell `lcd` draw commands
+ * refuse via lcd_ready().  Direct ltdc_fill()/ltdc_blit() still write the back
+ * buffer but nothing is presented until re-enabled. */
 int ltdc_set_scanout(bool on);
 
-/** True when the LTDC is up but scanout is currently disabled (#66). */
+/** True when the LTDC is up but scanout is currently disabled
+    (owhinata/stm32f746g-disco#66). */
 bool ltdc_scanout_off(void);
 
 /** True when the LTDC is up AND scanout is running (fetching the framebuffer
  *  from SDRAM).  This is the condition under which a 48 MHz (30 fps) DCMI burst
- *  overruns the 16-bit SDRAM, so the camera clamps to 24 MHz when it holds (#67).
- *  Distinct from !ltdc_scanout_off(): both are false when the LTDC never came up
- *  (no display = no contention), which is the correct "scanout not active" case. */
+ *  overruns the 16-bit SDRAM, so the camera clamps to 24 MHz when it holds
+ * (owhinata/stm32f746g-disco#67).  Distinct from !ltdc_scanout_off(): both are
+ * false when the LTDC never came up (no display = no contention), which is the
+ * correct "scanout not active" case. */
 bool ltdc_scanout_active(void);
 
-/** Clear BOTH framebuffers to black (issue #65).  Low-level: it writes the
+/** Clear BOTH framebuffers to black (owhinata/stm32f746g-disco#65).  Low-level: it
+    writes the
  *  framebuffers directly under the LTDC lock and does NOT go through the
  *  scanout-disabled draw refusal, so it works even while scanout is OFF.  Used by
  *  `sdram test` to repaint the clobbered .sdram buffers before re-enabling
@@ -224,7 +234,7 @@ void ltdc_clear(void);
  *  LTDC_ERRFLAG_*; when @p clear is true the flags are cleared afterwards. */
 uint32_t ltdc_errors(bool clear);
 
-/* ---- DMA2D completion: interrupt-driven for large transfers (#64) -----------
+/* ---- DMA2D completion: interrupt-driven for large transfers (owhinata/stm32f746g-disco#64) ---
  * The DMA2D (Chrom-ART) engine is single and every transfer in this firmware
  * runs under ltdc_lock (recursive), so at most one transfer is ever in flight.
  * Small transfers still poll (HAL_DMA2D_PollForTransfer) -- the IT handoff
@@ -270,7 +280,7 @@ bool ltdc_dma2d_wait_it(struct __DMA2D_HandleTypeDef *h, uint32_t timeout_ms);
  *  wedge the next HAL_DMA2D_Init on __HAL_LOCK).  Caller holds ltdc_lock. */
 void ltdc_dma2d_disarm_it(struct __DMA2D_HandleTypeDef *h);
 
-/* ---- Drawing into the back buffer (#53; DMA2D-accelerated where noted). -----
+/* ---- Drawing into the back buffer (owhinata/stm32f746g-disco#53; DMA2D-accelerated where noted). ---
  * All of these draw into the back buffer only; they do NOT present.  Call
  * ltdc_flip() afterwards to make the result visible.  No-ops when down. */
 

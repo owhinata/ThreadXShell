@@ -4,7 +4,8 @@
  */
 /**
  * @file    cmd_mlperf.c
- * @brief   `mlperf` -- hand the console to the MLPerf Tiny / EEMBC monitor (issue #55).
+ * @brief   `mlperf` -- hand the console to the MLPerf Tiny / EEMBC monitor
+ * (owhinata/wio-lite-ai#55).
  *
  * The harness itself is port/mlperf.  This file is everything AROUND it: which model
  * it may run, which console it may own, which hardware it holds while it owns it, and

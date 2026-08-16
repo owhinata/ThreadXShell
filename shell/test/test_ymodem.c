@@ -2,9 +2,9 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host unit test for the clean-room YMODEM-CRC sender (issue #50, svc/ymodem.c).
- * Pure: no HAL/ThreadX/shell.  Drives ymodem_send() against a reactive mock
- * receiver (a response FIFO that scales with the block count) and a mock byte
+ * Host unit test for the clean-room YMODEM-CRC sender (owhinata/stm32f746g-disco#50,
+ * svc/ymodem.c).  Pure: no HAL/ThreadX/shell.  Drives ymodem_send() against a reactive
+ * mock receiver (a response FIFO that scales with the block count) and a mock byte
  * source, then parses the captured TX stream into frames and asserts:
  *   A. CRC-16/CCITT vectors,
  *   B. happy path: block 0 (name + decimal size), one short SOH block padded
@@ -352,7 +352,8 @@ int main(void)
 		struct src_ctx s = { 0, 50, 0, 0 };
 		int cans = 0;
 		mock_init(&m);
-		m.silent_at = 2;          /* ACK block0 (#1), then never respond */
+		/* ACK block0 (owhinata/stm32f746g-disco#1), then never respond */
+		m.silent_at = 2;
 		assert(run(&m, &s, "a") == YM_ERR_TIMEOUT);
 		for (size_t i = 0; i < m.txlen; i++)
 			if (m.tx[i] == CAN)

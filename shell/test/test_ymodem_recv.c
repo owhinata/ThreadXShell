@@ -2,8 +2,8 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host unit test for the clean-room YMODEM-CRC receiver (issue #19 M5,
- * svc/ymodem.c :: ymodem_recv).  Pure: no HAL/ThreadX/shell.
+ * Host unit test for the clean-room YMODEM-CRC receiver (owhinata/wio-lite-ai#19
+ * M5, svc/ymodem.c :: ymodem_recv).  Pure: no HAL/ThreadX/shell.
  *
  * Two harnesses, because they prove different things:
  *
@@ -329,8 +329,10 @@ int main(void)
 	loopback(128, "b128.bin");
 	loopback(1024, "b1024.bin");
 	loopback(1025, "b1025.bin");
-	loopback(260u * 1024u, "wrap.bin");     /* crosses the seq 255 -> 0 wrap */
-	loopback(0xDC000u, "stock.bin");        /* the #19 M5 stock-image size */
+	/* crosses the seq 255 -> 0 wrap */
+	loopback(260u * 1024u, "wrap.bin");
+	/* the owhinata/wio-lite-ai#19 M5 stock-image size */
+	loopback(0xDC000u, "stock.bin");
 	printf("  duplex loopback: ok\n");
 
 	static uint8_t in[16384];

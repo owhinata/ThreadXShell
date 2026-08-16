@@ -4,8 +4,8 @@
  */
 /**
  * @file    nn_camera.c
- * @brief   Camera -> BlazeFace inference glue (issue #9 phase 3).  See nn_camera.h
- *          for the design and, in particular, for why there is no staging buffer.
+ * @brief   Camera -> BlazeFace inference glue (owhinata/wio-lite-ai#9 phase 3).  See
+ * nn_camera.h for the design and, in particular, for why there is no staging buffer.
  */
 #include "nn_camera.h"
 
@@ -86,7 +86,8 @@ static volatile int nncam_filling;
 static volatile int nncam_holds_guards;
 
 static uint32_t nncam_infers, nncam_frames, nncam_skipped, nncam_errors;
-/* Diagnostics for the ownership invariant (#54).  `raced` must stay 0: it counts bands
+/* Diagnostics for the ownership invariant (owhinata/wio-lite-ai#54).  `raced` must stay
+   0: it counts bands
  * that wrote the input tensor while an inference owned it.  `stale` counts posts the
  * pre-arm drain threw away -- each one is a race that WOULD have started. */
 static uint32_t nncam_raced, nncam_stale_posts;
@@ -168,9 +169,9 @@ static unsigned nncam_oy_bound(unsigned band, unsigned oh)
  * than per channel: a vdiv.f32 is ~14 cycles and there are 3 per pixel.
  *
  * [!] scale > 0 IS GUARANTEED BY nn_camera_start(), which is why there is no fallback
- * here (issue #51).  There used to be one -- the donor's (rgb - 128) when the scale
- * read back as zero -- and it was not dead code: a PER-AXIS quantized tensor arrives
- * with TfLiteTensor::params.scale == 0, because its real parameters live in the
+ * here (owhinata/wio-lite-ai#51).  There used to be one -- the donor's (rgb - 128) when
+ * the scale read back as zero -- and it was not dead code: a PER-AXIS quantized tensor
+ * arrives with TfLiteTensor::params.scale == 0, because its real parameters live in the
  * affine-quantization struct that port/nn/nn.h does not expose.  So the fallback's
  * only reachable case was the one where it silently fed the model wrong pixels, with
  * the same hardcoded assumption the paragraph above rejects.  Refusing the model at

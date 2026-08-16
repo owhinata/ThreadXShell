@@ -4,7 +4,8 @@
  */
 /**
  * @file    nx_mjpeg.c
- * @brief   MJPEG-over-HTTP camera streaming server (issue #49 P5).  See nx_mjpeg.h.
+ * @brief   MJPEG-over-HTTP camera streaming server (owhinata/stm32f746g-disco#49 P5).  See
+ * nx_mjpeg.h.
  *
  * The camera frame pipeline's "eth_sink": a SYNCHRONOUS copy push sink.  In the
  * producer thread, consume() memcpy's the JPEG frame into a private SDRAM buffer
@@ -53,7 +54,8 @@ static const char http_header[] =
 	"\r\n";
 
 /* The private copy buffer lives with the NetX traffic in FMC bank2/3 (.sdram.eth),
-   away from the camera DMA arena (bank1) and the LTDC surface (bank0) -- #65. */
+   away from the camera DMA arena (bank1) and the LTDC surface (bank0) --
+   owhinata/stm32f746g-disco#65. */
 static uint8_t mjpeg_buf[MJPEG_BUF_BYTES]
 	__attribute__((aligned(32), section(".sdram.eth")));
 
@@ -307,17 +309,18 @@ static void mjpeg_entry(ULONG arg)
 		if (ip == NULL || mjpeg_socket_setup(ip) != 0) {
 			mjpeg_run = 0;
 			mjpeg_active = 0;
-			continue;              /* start's !listening path unsubscribes (#101) */
+			/* start's !listening path unsubscribes (owhinata/stm32f746g-disco#101) */
+			continue;
 		}
 		mjpeg_listening = 1;       /* nx_mjpeg_start() waits for this              */
 		LOG_INF("listening on :%u (http mjpeg)", (unsigned)NX_MJPEG_PORT);
 
 		/* Serve until an explicit `net mjpeg stop` (mjpeg_run=0) or a non-recover
-		   base teardown.  A transient DCMI overrun (base auto-recovering, #100)
-		   pauses serving and resumes without dropping the listen socket;
+		   base teardown.  A transient DCMI overrun (base auto-recovering,
+		   owhinata/stm32f746g-disco#100) pauses serving and resumes without dropping the listen socket;
 		   camera_subscribed() is the single source of truth that tells "released
-		   for good" from "paused for recovery" (#101, avoids the stale-close race).
-		   A relisten failure breaks out to a full socket re-setup. */
+		   for good" from "paused for recovery" (owhinata/stm32f746g-disco#101, avoids the stale-close
+		   race).  A relisten failure breaks out to a full socket re-setup. */
 		while (mjpeg_run) {
 			/* Accept + serve while the base is delivering (producer_dead=0). */
 			while (mjpeg_run && !producer_dead) {
@@ -383,10 +386,11 @@ int nx_mjpeg_start(void)
 	if (mjpeg_run || mjpeg_active)
 		return -2;                  /* running, or still tearing down a stop       */
 
-	/* #101: MJPEG is a JPEG-class subscriber -- it no longer owns/starts the base.
+	/* owhinata/stm32f746g-disco#101: MJPEG is a JPEG-class subscriber -- it no longer owns/starts
+    the base.
 	   The base must already be streaming JPEG (`camera format jpeg` + `camera stream
 	   start`).  Report the precise reason so `net mjpeg start` never silently opens a
-	   port that serves no frames (the #97 class of bug). */
+	   port that serves no frames (the owhinata/stm32f746g-disco#97 class of bug). */
 	if (!camera_streaming())
 		return NX_MJPEG_NO_CAPTURE;
 	if (camera_get_mode(&m) != 0 || !m.is_jpeg)
@@ -412,8 +416,8 @@ int nx_mjpeg_start(void)
 	   above is just for a precise error message: camera_subscribe_oneshot() is STRICT
 	   (attaches to a live JPEG base under one cam_lock, or fails), so if the base
 	   stopped since the pre-check this returns an error rather than a ghost idle
-	   registration (#101).  A successful attach calls eth_open(), which resets the
-	   session state + stats and clears producer_dead.  Only then do we claim the
+	   registration (owhinata/stm32f746g-disco#101).  A successful attach calls eth_open(), which
+	   resets the session state + stats and clears producer_dead.  Only then do we claim the
 	   lifecycle (mjpeg_run wakes the parked thread). */
 	rc = camera_subscribe_oneshot(&eth_sink, CAM_FMT_JPEG);
 	if (rc != 0)
@@ -433,7 +437,8 @@ int nx_mjpeg_start(void)
 		camera_unsubscribe(&eth_sink);
 		return -3;
 	}
-	/* #101: the base could have been torn down (cascade released this oneshot sink)
+	/* owhinata/stm32f746g-disco#101: the base could have been torn down (cascade released this
+    oneshot sink)
 	   while the thread was coming up -- don't report success for a stream that has
 	   already stopped.  camera_subscribed() is the single source of truth. */
 	if (!camera_subscribed(&eth_sink)) {
@@ -450,7 +455,8 @@ int nx_mjpeg_stop(void)
 {
 	if (!mjpeg_run && !mjpeg_active)
 		return -1;
-	/* Order (D3a): stop output gating, then stop, then detach the sink.  #101:
+	/* Order (D3a): stop output gating, then stop, then detach the sink.
+    owhinata/stm32f746g-disco#101:
 	   unsubscribe DETACHES ONLY (the base keeps running for other subscribers); a
 	   base cascade stop is a separate `camera stream stop`.  Idempotent if the base
 	   already released this oneshot sink (in-flight is always 0). */

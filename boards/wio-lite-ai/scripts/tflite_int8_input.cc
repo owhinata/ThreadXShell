@@ -4,7 +4,7 @@
  */
 /**
  * @file    tflite_int8_input.cc
- * @brief   Turn a float-input .tflite into an int8-input one (issue #51).
+ * @brief   Turn a float-input .tflite into an int8-input one (owhinata/wio-lite-ai#51).
  *
  * A HOST tool, built the same way scripts/verify_tflite.cc is: with the host compiler,
  * against the SAME tflite-micro tree, at the SAME pinned SHA, that cmake/tflite-micro
@@ -17,7 +17,7 @@
  * quantized it does the quantization itself, using the TENSOR'S OWN scale/zero_point --
  * deliberately, because this board's struct nn_tensor carries those parameters and the
  * donor firmware's did not, so the donor had to hardcode (1/128, 0).  That int8 branch
- * had never executed on hardware, which is issue #51.
+ * had never executed on hardware, which is owhinata/wio-lite-ai#51.
  *
  * [!] It had never executed because "an int8 model" does not mean "an int8 INPUT".  The
  * model this firmware runs -- ST model zoo's blazeface_front_128_int8.tflite -- has

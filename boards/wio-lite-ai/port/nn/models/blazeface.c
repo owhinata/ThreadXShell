@@ -4,7 +4,8 @@
  */
 /**
  * @file    blazeface.c
- * @brief   BlazeFace-front 128 face-detection decode (issue #9 phase 3).  See blazeface.h.
+ * @brief   BlazeFace-front 128 face-detection decode (owhinata/wio-lite-ai#9 phase 3).
+ * See blazeface.h.
  *
  * SSD anchor decode + NMS, ported from the MediaPipe/PINTO BlazeFace convention
  * (the ST Model Zoo model's provenance).  No libm dependency: score filtering
@@ -38,9 +39,9 @@
 
 /*
  * Anchor cell centres (normalized) + pre-NMS candidate scratch, in the cacheable
- * PSRAM carve-out (issue #9 phase 2a).  bf_cx/bf_cy are computed once and read many
- * times, bf_cand is write-before-read scratch, and every access is CPU-only from the
- * single serialized caller -- which is the whole precondition PSRAM_AI states, and
+ * PSRAM carve-out (owhinata/wio-lite-ai#9 phase 2a).  bf_cx/bf_cy are computed once and
+ * read many times, bf_cand is write-before-read scratch, and every access is CPU-only from
+ * the single serialized caller -- which is the whole precondition PSRAM_AI states, and
  * the row of the memory-placement table this carve-out exists for.  w=h=1 is fixed
  * for the anchors, so only the centre is stored.
  *

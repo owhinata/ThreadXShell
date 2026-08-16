@@ -4,7 +4,8 @@
  */
 /*
  * Wio Lite AI (STM32H725AEI6) -- onboard RTL8720DN WiFi/BLE companion driver
- * (issue #17 originally; the host's whole side of the module now sits on top of it).
+ * (owhinata/wio-lite-ai#17 originally; the host's whole side of the module now sits on
+ * top of it).
  *
  * The RTL8720DN is reached from the STM32 host over (schematic sheets 2/5/8):
  *   - CHIP_EN  : PC3                       (module power/enable; board has NO pull,
@@ -15,11 +16,12 @@
  *
  * This is the bottom layer: power (CHIP_EN) plus ONE open host UART at a time, with an
  * interrupt-driven RX ring and a TX ring, and a notify hook so a waiter wakes on arrival
- * instead of polling.  It started out (issue #17) as an investigation aid that only
- * bridged a module UART to the USB CDC console for the boot banner -- that bridge is
- * still here as `wifi log` -- but everything above it now rides the same driver: the
- * eRPC service thread (app/erpc.c) and its CTRL/DATA channels, and the issue-#19 flash
- * downloader.  Which of them owns the UART is arbitrated one layer up, in app/rtl_link.h.
+ * instead of polling.  It started out (owhinata/wio-lite-ai#17) as an investigation aid
+ * that only bridged a module UART to the USB CDC console for the boot banner -- that
+ * bridge is still here as `wifi log` -- but everything above it now rides the same
+ * driver: the eRPC service thread (app/erpc.c) and its CTRL/DATA channels, and the
+ * owhinata/wio-lite-ai#19 flash downloader.  Which of them owns the UART is arbitrated
+ * one layer up, in app/rtl_link.h.
  *
  * It touches only GPIO + UART9/USART1 + peripheral clock gates -- never the RCC clock
  * tree (baud is derived from the inherited PCLK2 = 137.5 MHz) -- so it is clock-safe.
@@ -61,10 +63,10 @@ void rtl8720_reset(void);
  * UART is active at a time; opening closes any previously-open one and clears the
  * ring.  Returns 0 on success, -1 if the UART did not come ready.
  *
- * OWNERSHIP (issue #21 increment 8) -- open/close and the ring have several would-be
- * users: the eRPC service thread (app/erpc.c), the `wifi log` console bridge
- * and the issue-#19 flash downloader.  Because open() closes the current UART and
- * resets the shared SPSC ring, it must only be called from a path that
+ * OWNERSHIP (owhinata/wio-lite-ai#21 increment 8) -- open/close and the ring have several
+ * would-be users: the eRPC service thread (app/erpc.c), the `wifi log` console bridge
+ * and the owhinata/wio-lite-ai#19 flash downloader.  Because open() closes the current
+ * UART and resets the shared SPSC ring, it must only be called from a path that
  *   (a) holds the coarse link mutex (app/rtl_link.h) for the whole session, AND
  *   (b) either goes through rtl_link_uart_ref() -- which brackets the call with
  *       erpc_link_lock() so it cannot race the service thread -- or has established
@@ -72,12 +74,13 @@ void rtl8720_reset(void);
  *       rtl_link_hw_claim() checks; with no live token the service thread is parked
  *       and touches neither the UART nor the ring).
  * The flash downloader (app/rtl8720_flash.c) opens/closes UART9 at several baud rates
- * internally and relies on (b)'s second form.  Since issue #30 B2b it no longer INHERITS
- * that condition from its caller -- the L2 bridge is permanent, so the interface owner
- * holds a reference whenever the host stack is up and the caller claims with allow_busy.
- * rtl_dl_enter() therefore ESTABLISHES it, by calling rtl_link_force_quiesce() before it
- * touches the peripheral: that revokes the reference under the eRPC lock and leaves
- * rtl_link_uart_busy() == false for the rest of the session.
+ * internally and relies on (b)'s second form.  Since owhinata/wio-lite-ai#30 B2b it no
+ * longer INHERITS that condition from its caller -- the L2 bridge is permanent, so the
+ * interface owner holds a reference whenever the host stack is up and the caller claims
+ * with allow_busy.  rtl_dl_enter() therefore ESTABLISHES it, by calling
+ * rtl_link_force_quiesce() before it touches the peripheral: that revokes the reference
+ * under the eRPC lock and leaves rtl_link_uart_busy() == false for the rest of the
+ * session.
  */
 int rtl8720_uart_open(enum rtl8720_uart which, uint32_t baud);
 
@@ -86,7 +89,7 @@ int rtl8720_uart_open(enum rtl8720_uart which, uint32_t baud);
 size_t rtl8720_uart_read(uint8_t *buf, size_t n);
 
 /*
- * Queue @p n bytes for transmission on the open UART (issue #23 U1).
+ * Queue @p n bytes for transmission on the open UART (owhinata/wio-lite-ai#23 U1).
  *
  * INTERRUPT-DRIVEN since U1: the bytes are copied into a TX ring and the TXFIFO
  * threshold interrupt drains it, so this RETURNS BEFORE THE BYTES ARE ON THE WIRE.
@@ -136,7 +139,7 @@ uint32_t rtl8720_uart_tx_space(void);
 uint32_t rtl8720_uart_overflows(void);
 
 /*
- * RX interrupt-latency diagnostics (issue #23 U0-1), reset on every open.
+ * RX interrupt-latency diagnostics (owhinata/wio-lite-ai#23 U0-1), reset on every open.
  *
  * Since the RXFIFO is drained on a threshold interrupt, the interesting number is how
  * much of the FIFO's remaining grace one interrupt actually consumed: @isr_max_bytes
@@ -168,7 +171,8 @@ struct rtl8720_uart_stats {
 	uint32_t ferr;            /* framing / noise errors (baud mismatch indicator) */
 	uint32_t ring_size;       /* RX ring capacity in bytes */
 
-	/* TX side (issue #23 U1).  Kept SEPARATE from the RX numbers on purpose: the two
+	/* TX side (owhinata/wio-lite-ai#23 U1).  Kept SEPARATE from the RX numbers on purpose:
+    the two
 	 * share one interrupt, and time spent refilling the TXFIFO is time subtracted from
 	 * @isr_grace.  If @isr_max_bytes ever climbs towards the grace, @tx_max_bytes says
 	 * whether the transmitter is the reason. */
@@ -182,7 +186,7 @@ void rtl8720_uart_stats(struct rtl8720_uart_stats *out);
 
 /*
  * Install a callback the RX ISR runs once per interrupt that stored bytes, right after
- * it publishes the ring head (issue #23 U0-3).  @cb == NULL disarms it.
+ * it publishes the ring head (owhinata/wio-lite-ai#23 U0-3).  @cb == NULL disarms it.
  *
  * It exists so a reader that would otherwise poll can be woken as soon as bytes land:
  * the eRPC service thread polls every 1 ms, which for a 1500-byte frame at 6 Mbaud

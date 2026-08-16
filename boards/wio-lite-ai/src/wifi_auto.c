@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /*
- * Host-side automatic re-association (issue #32).  See app/wifi_auto.h for why the
+ * Host-side automatic re-association (owhinata/wio-lite-ai#32).  See app/wifi_auto.h for why the
  * module's own wifi_set_autoreconnect() cannot be used, and for the threading rules.
  */
 #include "wifi_auto.h"

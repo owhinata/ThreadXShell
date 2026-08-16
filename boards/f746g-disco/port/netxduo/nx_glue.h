@@ -4,7 +4,8 @@
  */
 /**
  * @file    nx_glue.h
- * @brief   NetX Duo IPv4 bring-up + diagnostics facade (issue #49 P2).
+ * @brief   NetX Duo IPv4 bring-up + diagnostics facade
+ * (owhinata/stm32f746g-disco#49 P2).
  *
  * Owns the single NetX IP instance over the STM32 ETH MAC: the shared
  * non-cacheable packet pool, the IP thread, ARP/ICMP/UDP/TCP, and the DHCP

@@ -4,7 +4,8 @@
  */
 /**
  * @file    cmd_system.c
- * @brief   System built-in shell commands (issue #12): version / uptime / reboot.
+ * @brief   System built-in shell commands (owhinata/stm32f746g-disco#12): version /
+ * uptime / reboot.
  *
  * These join help/echo (cmd_builtin.c) in the `shell` executable only -- they are
  * never linked into the host test harness, which keeps its own command set.  All
@@ -66,8 +67,8 @@ static int cmd_version(struct cli_instance *sh, int argc, char **argv)
 	          (unsigned long)devid, (unsigned long)rev);
 	/* The internal die (FLASHSIZE_BASE = 512 KB on the H725AE) holds both: sector 0
 	 * is the DFU bootloader, sectors 1-3 are the app partition this firmware runs
-	 * from (issue #25).  The partition bounds come from the linker script so this
-	 * line, `free` and the actual link can never disagree. */
+	 * from (owhinata/wio-lite-ai#25).  The partition bounds come from the linker script so
+	 * this line, `free` and the actual link can never disagree. */
 	cli_print(sh, "Flash:    %lu KB (die; sector 0 = DFU bootloader)\r\n",
 	          (unsigned long)flash_kb);
 	cli_print(sh, "App:      %lu KB @0x%08lx (internal flash, sectors 1-3)\r\n",

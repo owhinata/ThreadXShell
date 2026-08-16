@@ -4,7 +4,8 @@
  */
 /**
  * @file    cmd_lcd.c
- * @brief   `lcd` shell command: LTDC display status + test patterns (issue #52/#53).
+ * @brief   `lcd` shell command: LTDC display status + test patterns
+ * (owhinata/stm32f746g-disco#52/#53).
  *
  *   lcd info            panel / clock / frame-buffer / LTDC error flags
  *   lcd fill <color>    flood the screen (colour name or 0xRGB565 / decimal)
@@ -13,14 +14,16 @@
  *   lcd clear           fill black
  *   lcd anim            bouncing rectangle (tear-free double-buffer demo)
  *   lcd blit            DMA2D M2M demo (copy the colour bars left->right half)
- *   lcd on | lcd off    whole display on/off (backlight + LTDC scanout, #66)
+ *   lcd on | lcd off    whole display on/off (backlight + LTDC scanout,
+ * owhinata/stm32f746g-disco#66)
  *
- * Phase 2 of #48 (#53): the LTDC is brought up at boot (src/main.c) with a
- * DMA2D-accelerated, tear-free double buffer.  Each drawing command paints the
- * back buffer (DMA2D fills/blits or, for the gradient, the CPU) then presents it
- * with ltdc_flip() -- a vertical-blanking reload confirmed via SRCR.VBR.  Used
- * to verify the DMA2D path and the tear-free swap before touch (#54) and GUIX
- * (#55/#56).
+ * Phase 2 of owhinata/stm32f746g-disco#48 (owhinata/stm32f746g-disco#53): the LTDC
+ * is brought up at boot (src/main.c) with a DMA2D-accelerated, tear-free double
+ * buffer. Each drawing command paints the back buffer (DMA2D fills/blits or, for the
+ * gradient, the CPU) then presents it with ltdc_flip() -- a vertical-blanking reload
+ * confirmed via SRCR.VBR. Used to verify the DMA2D path and the tear-free swap
+ * before touch (owhinata/stm32f746g-disco#54) and GUIX
+ * (owhinata/stm32f746g-disco#55/#56).
  *
  * Clean-room design; no third-party code reused.
  */
@@ -111,9 +114,10 @@ static int lcd_ready(struct cli_instance *sh)
 }
 
 /* Guard for the *drawing* commands: additionally refuse while GUIX owns the
-   display (#55).  The draw helpers / ltdc_flip() are no-ops under GUIX ownership
-   anyway, but failing up-front with a clear message is friendlier.  Backlight
-   (on/off) and info do NOT use this -- they are harmless while GUIX runs. */
+   display (owhinata/stm32f746g-disco#55).  The draw helpers / ltdc_flip() are no-ops
+   under GUIX ownership anyway, but failing up-front with a clear message is
+   friendlier. Backlight (on/off) and info do NOT use this -- they are harmless
+   while GUIX runs. */
 static int lcd_can_draw(struct cli_instance *sh)
 {
 	if (!lcd_ready(sh))
@@ -302,7 +306,8 @@ static int cmd_lcd_blit(struct cli_instance *sh, int argc, char **argv)
    lcd_ready() -- `lcd on` must work precisely when scanout is currently off.
    While GUIX owns the display ltdc_set_scanout() is refused (GUIX drives scanout
    itself), so the scanout change is best-effort and the backlight is toggled
-   unconditionally (harmless under GUIX, matching the pre-#72 behaviour). */
+   unconditionally (harmless under GUIX, matching the
+   pre-owhinata/stm32f746g-disco#72 behaviour). */
 static int cmd_lcd_on(struct cli_instance *sh, int argc, char **argv)
 {
 	(void)argc;

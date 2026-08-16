@@ -24,22 +24,22 @@
  *    *bandwidth* stays high even out-of-cache (burst line-refills), so the cache
  *    step shows mainly in the dependent-load *latency* rows.  DTCM is TCM (bypasses
  *    the D-cache, always the raw rate) and Flash is read-only.
- *  - Regions, listed in MEMORY-HIERARCHY order (issue #33) -- tightly-coupled RAMs,
- *    then on-chip AXI-SRAM, then the internal flash the code runs from, then the
+ *  - Regions, listed in MEMORY-HIERARCHY order (owhinata/wio-lite-ai#33) -- tightly-coupled
+ * RAMs, then on-chip AXI-SRAM, then the internal flash the code runs from, then the
  *    external window.  Not address order, and `free` uses the same sequence so the
  *    two outputs line up:
  *      ITCM  (4 KB, .itcm_bench) -- READ ONLY, and no latency column: the ISR paths
- *            live in ITCM since issue #24 and app/mpu.c marks the region read-only,
- *            so the write/copy legs and the chain-building pointer-chase would fault.
+ *            live in ITCM since owhinata/wio-lite-ai#24 and app/mpu.c marks the region
+ * read-only, so the write/copy legs and the chain-building pointer-chase would fault.
  *      DTCM  (4 KB, .dtcm_bench)
  *      SRAM  AXI-SRAM (64 KB, malloc'd on demand)
  *      Flash the embedded flash via AXIM at 0x08000000 (read-only, and the region the
- *            app itself executes from since issue #25; a read is harmless -- no
+ *            app itself executes from since owhinata/wio-lite-ai#25; a read is harmless -- no
  *            write/erase, so no brick risk even though sector 0 is the bootloader).
  *            The former "Flash ext" row measured the OCTOSPI2 XIP window at
  *            0x70000000; the bootloader no longer maps it and app/mpu.c fences it
  *            off, so the row is gone (it read 54 MB/s against 905 for the internal
- *            flash -- the reason for #25).
+ *            flash -- the reason for owhinata/wio-lite-ai#25).
  *      PSRAM OCTOSPI1 APS6408 mmap window 0x90000000 (writable scratch, MPU
  *            non-cacheable -> raw octal-DTR rate; skipped when the bring-up failed).
  *
@@ -73,8 +73,8 @@
 /* Per-region benchmark buffers.  DTCM needs a dedicated NOLOAD section (the region
  * otherwise holds only the log ring); it is the only permanently-reserved bench
  * buffer (malloc returns AXI-SRAM, never DTCM, so a DTCM-resident buffer must be
- * static).  Kept to 4 KB (issue #14): DTCM is uncached TCM with no cache cliff, so a
- * small working set measures the same raw bandwidth/latency as a large one, and it
+ * static).  Kept to 4 KB (owhinata/wio-lite-ai#14): DTCM is uncached TCM with no cache cliff,
+ * so a small working set measures the same raw bandwidth/latency as a large one, and it
  * matches SRAM_CACHED_BYTES for an apples-to-apples DTCM-raw vs SRAM-L1-hit compare.
  * The SRAM buffer is malloc'd on demand and freed on exit rather than permanently
  * reserving .bss for a rarely-run command. */
@@ -92,7 +92,8 @@
 static uint32_t dtcm_bench_buf[DTCM_BENCH_BYTES / 4]
 	__attribute__((aligned(32), section(".dtcm_bench")));
 
-/* ITCM read buffer (issue #24).  ITCM is the other tightly-coupled RAM, and since
+/* ITCM read buffer (owhinata/wio-lite-ai#24).  ITCM is the other tightly-coupled RAM, and
+   since
  * the ISR paths now execute from it, its read rate is worth having next to DTCM's.
  * READ ONLY: app/mpu.c marks the whole ITCM read-only so a stray NULL write cannot
  * corrupt the resident ISR code, which means the write/copy legs and the
@@ -103,7 +104,8 @@ static uint32_t dtcm_bench_buf[DTCM_BENCH_BYTES / 4]
 static const uint32_t itcm_bench_buf[ITCM_BENCH_BYTES / 4]
 	__attribute__((aligned(32), section(".itcm_bench"), used));
 
-/* Scratch in the cacheable PSRAM carve-out (issue #9 phase 2a).  Same device and the
+/* Scratch in the cacheable PSRAM carve-out (owhinata/wio-lite-ai#9 phase 2a).  Same device and
+   the
  * same 64 KB working set as the PSRAM row below, but a different part of it, reached
  * through the other set of MPU attributes -- so the pair reads as a cacheability
  * comparison rather than an address one.
@@ -470,7 +472,7 @@ static int cmd_membench(struct cli_instance *sh, int argc, char **argv)
 	/* Bandwidth table, in memory-hierarchy order rather than address order: the
 	 * tightly-coupled RAMs first, then on-chip AXI-SRAM, then the internal flash
 	 * the code runs from, then the external window.  `free` lists its regions the
-	 * same way so the two can be read side by side (issue #33). */
+	 * same way so the two can be read side by side (owhinata/wio-lite-ai#33). */
 	cli_print(sh, "%-24s %8s %8s %8s\r\n", "bandwidth (MB/s)", "read", "write", "copy");
 	if (do_itcm) {
 		if (cli_cancel_requested(sh)) goto done;
@@ -510,7 +512,7 @@ static int cmd_membench(struct cli_instance *sh, int argc, char **argv)
 			bw_row(sh, "PSRAM  (64KB)", (uint32_t *)PSRAM_BASE_ADDR,
 			       PSRAM_BENCH_BYTES / 4u, clk, 1);
 			/* Same device, same 64 KB, through the cacheable carve-out
-			 * (issue #9 phase 2a).  Placed after the non-cacheable row so
+			 * (owhinata/wio-lite-ai#9 phase 2a).  Placed after the non-cacheable row so
 			 * this one's line fills cannot warm anything the other measures. */
 			bw_row(sh, "PSRAM  (64KB, cached)", psram_ai_bench_buf,
 			       PSRAM_AI_BENCH_BYTES / 4u, clk, 1);

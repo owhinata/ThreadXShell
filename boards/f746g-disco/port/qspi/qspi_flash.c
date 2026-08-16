@@ -357,7 +357,8 @@ int qspi_flash_init(void)
 		return QSPI_FLASH_ERR_HAL;
 	}
 
-	/* Quad-read bring-up (issue #31) -- register traffic only, still before
+	/* Quad-read bring-up (owhinata/stm32f746g-disco#31) -- register traffic only, still
+    before
 	 * qspi_ready so no other caller can interleave.  Fails the whole init if
 	 * the VCR cannot reach a known state (read timing would be undefined). */
 	if (quad_setup() != 0) {

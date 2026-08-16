@@ -4,7 +4,8 @@
  */
 /**
  * @file    nn_tflm_ops.h
- * @brief   The operator set the tflm backend registers -- stated exactly once (#9 P2c).
+ * @brief   The operator set the tflm backend registers -- stated exactly once
+ * (owhinata/wio-lite-ai#9 P2c).
  *
  * [!] THIS FILE EXISTS SO THE BOARD AND THE PC CANNOT DISAGREE.  Two things consume the
  * list: nn_tflm.cc, which registers the operators into the MicroMutableOpResolver, and
@@ -24,9 +25,9 @@
  * Adding an operator here is not free: it is compiled kernel code in a 384 KB
  * partition.  The donor firmware measured the widening from the base set to the
  * extended one at +97,056 B, and on THIS firmware `extended` does not fit at all --
- * measured at issue #55: the link fails with FLASH overflowed by 29,200 B.  That is
- * the whole reason the `mlperf` profile below exists instead of just using `extended`.
- * Keep NN_TFLM_OPS=blazeface unless a model needs more.
+ * measured at owhinata/wio-lite-ai#55: the link fails with FLASH overflowed by 29,200 B.
+ * That is the whole reason the `mlperf` profile below exists instead of just using
+ * `extended`.  Keep NN_TFLM_OPS=blazeface unless a model needs more.
  */
 #ifndef NN_TFLM_OPS_H
 #define NN_TFLM_OPS_H
@@ -46,7 +47,7 @@
 
 /*
  * Exactly what MLPerf Tiny v1.4 needs on top of the base set, added by
- * -DNN_TFLM_OPS=mlperf (issue #55).
+ * -DNN_TFLM_OPS=mlperf (owhinata/wio-lite-ai#55).
  *
  * [!] A MEASURED SET, NOT A GENEROUS ONE, AND THAT IS THE POINT.  All five v1.4
  * models -- ic01 (ResNet), ic02 (larger ResNet), kws01 (DS-CNN), vww01 (MobileNet)
@@ -60,7 +61,7 @@
  * MLPerf harness on top (CONFIG_MLPERF_TINY=ON) the image is 377,976 B of 393,216,
  * leaving 15,240 B.  If that runs out, the next thing to give up is PAD and
  * MAX_POOL_2D from the base set (worth 6,248 B) -- no MLPerf model uses either, and
- * only BlazeFace (issue #9) would stop running.
+ * only BlazeFace (owhinata/wio-lite-ai#9) would stop running.
  *
  * [!] "ONE MORE OPERATOR" IS NOT A UNIT OF FLASH, so do not budget by counting them.
  * Adding MEAN and LOGISTIC to this profile was measured at ZERO bytes: their kernels

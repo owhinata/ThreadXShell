@@ -4,7 +4,7 @@
  */
 /**
  * @file    fs_cmd_core.c
- * @brief   Media-independent FileX command bodies (issue #6).
+ * @brief   Media-independent FileX command bodies (owhinata/wio-lite-ai#6).
  *
  * Parameterized over struct fs_device so the bodies carry no knowledge of which
  * media they are running on.  The FileX API is device-agnostic; only mount, the
@@ -411,10 +411,11 @@ int fs_core_umount(const struct fs_device *dev, struct cli_instance *sh,
  * Read an entire file into a caller buffer through the device's shared op gate.
  * No in-tree caller yet (--gc-sections drops it until there is one); it exists as
  * the reuse point for the consumers that will want a whole file in RAM -- a camera
- * frame written back (#7), an AI model loaded (#9).  The
- * size is checked up front against @p cap (fx_file_current_file_size is filled by
- * fx_file_open), so the buffer is never partially filled on an oversize file.
- * Returns 0 and sets *out_len to the byte count, or 1 with a message printed.
+ * frame written back (owhinata/wio-lite-ai#7), an AI model loaded
+ * (owhinata/wio-lite-ai#9). The size is checked up front against @p cap
+ * (fx_file_current_file_size is filled by fx_file_open), so the buffer is never
+ * partially filled on an oversize file.  Returns 0 and sets *out_len to the byte
+ * count, or 1 with a message printed.
  */
 int fs_core_read_file(const struct fs_device *dev, struct cli_instance *sh,
                       const char *path, void *buf, uint32_t cap, uint32_t *out_len)

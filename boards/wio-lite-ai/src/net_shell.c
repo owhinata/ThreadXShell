@@ -18,15 +18,15 @@
  *                        They only move bytes into the RX ring and set flags.
  *   CLI threads (16)     the shell instance and any background job, inside write().
  *
- * ---- why there is a TX ring, and what happens without one (issue #48) -------------
+ * ---- why there is a TX ring, and what happens without one (owhinata/wio-lite-ai#48) ------
  *
  * The RX ring is strict SPSC: the IP thread is the only producer, the CLI instance thread
  * the only consumer.  Output goes through a TX ring in the other direction, drained by the
- * server thread.  Until issue #48 it did not: write() built an NX_PACKET and called
- * nx_tcp_socket_send() itself, leaving back-pressure to TCP -- a refused send returned
- * short, the core waited on CLI_EVT_TX, and NetX's window-update / queue-depth callbacks
- * were supposed to wake it.  That failed in three ways at once, and telnet lost the tail of
- * every long report:
+ * server thread.  Until owhinata/wio-lite-ai#48 it did not: write() built an NX_PACKET and
+ * called nx_tcp_socket_send() itself, leaving back-pressure to TCP -- a refused send
+ * returned short, the core waited on CLI_EVT_TX, and NetX's window-update / queue-depth
+ * callbacks were supposed to wake it.  That failed in three ways at once, and telnet lost
+ * the tail of every long report:
  *
  *   1. ONE call, ONE segment.  The core stages output in CLI_PRINTF_BUFFER_SIZE (32 B)
  *      chunks, so a 5 kB report became ~180 tiny TCP segments against a 4-deep transmit
@@ -84,17 +84,19 @@
  * f746 port uses. */
 #define NSH_PRIORITY        14u
 /*
- * Issue #48 moved the whole NetX transmit path onto this thread --
+ * owhinata/wio-lite-ai#48 moved the whole NetX transmit path onto this thread --
  * nx_tcp_socket_send -> _nx_tcp_socket_send_internal -> _nx_ip_packet_send ->
- * _nx_ip_driver_packet_send -> app/nx_link_driver.c -> link_data_send -- so issue #23
- * U4-3's 596 B (measured when it only orchestrated) stopped bounding it.
+ * _nx_ip_driver_packet_send -> app/nx_link_driver.c -> link_data_send -- so
+ * owhinata/wio-lite-ai#23 U4-3's 596 B (measured when it only orchestrated) stopped bounding
+ * it.
  *
  * MEASURED AFTER THE MOVE: 492 B, on a session that filled the TX ring to its 4095 B
  * ceiling with repeated `dmesg` / `coremark` / `membench`.  Lower than the old figure
  * despite the deeper call chain, because command execution still happens in the bound CLI
- * instance and -Os + LTO (issue #39) reworked the frames.  2560 keeps 5x on that, which is
- * more than this thread needs -- if DTCM ever gets tight (it is the scarce region, see
- * issue #46), this is a safe 1 KB to give back, not a number to defend.
+ * instance and -Os + LTO (owhinata/wio-lite-ai#39) reworked the frames.  2560 keeps 5x on
+ * that, which is more than this thread needs -- if DTCM ever gets tight (it is the scarce
+ * region, see owhinata/wio-lite-ai#46), this is a safe 1 KB to give back, not a number to
+ * defend.
  */
 #define NSH_STACK           2560u
 
@@ -104,11 +106,11 @@
 #define NSH_EXTRACT         1500u    /* per-packet receive extraction buffer         */
 
 /*
- * Output the CLI threads can hand over before they have to wait (issue #48).  It is what
- * turns ~32-byte writes into MSS-sized segments, so it wants to be several MSS; 4 KB holds
- * a `coremark` report or a `membench` table outright.  It is NOT big enough for everything
- * (a `dmesg` is larger, and cli_uart_ring's usable depth is size-1), which is why the
- * deadline below matters as well -- the two together are the fix, not either alone.
+ * Output the CLI threads can hand over before they have to wait (owhinata/wio-lite-ai#48).
+ * It is what turns ~32-byte writes into MSS-sized segments, so it wants to be several MSS; 4
+ * KB holds a `coremark` report or a `membench` table outright.  It is NOT big enough for
+ * everything (a `dmesg` is larger, and cli_uart_ring's usable depth is size-1), which is why
+ * the deadline below matters as well -- the two together are the fix, not either alone.
  */
 #define NSH_TX_RING         4096u
 
@@ -118,7 +120,7 @@
  * This is the belt to the queue-depth callback's braces, and it is what makes the refusals
  * NetX cannot signal (a window overflow, an empty packet pool) recoverable at all rather
  * than fatal.  Only ever armed while the ring is non-empty, so an idle console still sleeps
- * NSH_IDLE_MS and the 98.9 % idle of issue #23 U4 is unchanged.
+ * NSH_IDLE_MS and the 98.9 % idle of owhinata/wio-lite-ai#23 U4 is unchanged.
  */
 #define NSH_DRAIN_POLL_MS   50u
 
@@ -132,11 +134,11 @@
  *
  * It MUST exceed NXN_TCP_RTO_MS (2 s): recovering a segment the link dropped means waiting
  * out a retransmit, and a shorter deadline made that loss discard the rest of the command's
- * output (issue #48).  2.5x covers the first retransmit with margin.  It deliberately does
- * NOT cover a second consecutive loss of the same segment (2 s + 4 s of backoff) -- past
- * that the cost is being tied to a peer that is alive but not reading.  The wait stays
- * interruptible throughout: cli_tx_send_blocking() also wakes on CLI_EVT_RX and polls for
- * Ctrl+C, and a session ending discards the ring and closes the write gate.
+ * output (owhinata/wio-lite-ai#48).  2.5x covers the first retransmit with margin.  It
+ * deliberately does NOT cover a second consecutive loss of the same segment (2 s + 4 s of
+ * backoff) -- past that the cost is being tied to a peer that is alive but not reading.  The
+ * wait stays interruptible throughout: cli_tx_send_blocking() also wakes on CLI_EVT_RX and
+ * polls for Ctrl+C, and a session ending discards the ring and closes the write gate.
  */
 #define NSH_TX_DEADLINE     5000u
 
@@ -147,10 +149,10 @@
  * handshake NetX abandoned) can go unseen.
  *
  * There is no polling here on purpose.  nx_tcp_socket_state_wait() would have been the
- * obvious way to wait for a connection and it is what issue #23 U4-1's `net echo` uses,
- * but it is a tx_thread_sleep(1) loop -- 1000 wake-ups a second, for ever, on a console
- * that is idle almost all of its life.  A command can afford that; a resident service
- * cannot.  nx_tcp_socket_establish_notify() gives the same information as an event.
+ * obvious way to wait for a connection and it is what owhinata/wio-lite-ai#23 U4-1's `net
+ * echo` uses, but it is a tx_thread_sleep(1) loop -- 1000 wake-ups a second, for ever, on a
+ * console that is idle almost all of its life.  A command can afford that; a resident
+ * service cannot.  nx_tcp_socket_establish_notify() gives the same information as an event.
  */
 #define NSH_IDLE_MS         1000u
 #define NSH_DISC_MS         1000u    /* bounded FIN handshake                        */
@@ -200,7 +202,7 @@ static uint8_t              g_ready;
 /*
  * The TX ring's storage.  CPU-only -- no bus master reads it; the server thread copies out
  * of it into an NX_PACKET, and the packet pool itself is in DTCM too (app/nx_net.c) -- so
- * DTCM is where the issue-#46 policy puts it.
+ * DTCM is where the owhinata/wio-lite-ai#46 policy puts it.
  *
  * It is a STANDALONE symbol rather than a member of g_ctx on purpose: the post-link gate
  * cmake/check_dtcm_residency.py matches by symbol name, so a buffer hidden inside a struct
@@ -238,10 +240,11 @@ static const char *g_last = "never started";     /* last state-changing reason  
 static uint32_t g_sessions, g_rx_bytes, g_tx_bytes, g_rx_drops;
 /*
  * Why the socket would not take a segment.  Kept APART, because merging them is what hid
- * issue #48: a single "tx waits 1402 (back-pressure, normal)" could not distinguish the
- * healthy answer from the one with no wake-up source, and the report read as healthy while
- * the console was dropping output.  Same lesson as issue #23 U4's tx-refused counter --
- * never collapse quantities whose answers point in opposite directions.
+ * owhinata/wio-lite-ai#48: a single "tx waits 1402 (back-pressure, normal)" could not
+ * distinguish the healthy answer from the one with no wake-up source, and the report read as
+ * healthy while the console was dropping output.  Same lesson as owhinata/wio-lite-ai#23
+ * U4's tx-refused counter -- never collapse quantities whose answers point in opposite
+ * directions.
  *
  *   g_tx_qdepth  the socket's transmit queue was at NXN_TCP_TX_DEPTH.  The DESIGNED
  *                back-pressure: a peer ACK releases a packet and the queue-depth callback
@@ -257,10 +260,10 @@ static uint32_t g_sessions, g_rx_bytes, g_tx_bytes, g_rx_drops;
 static uint32_t g_tx_qdepth, g_tx_win, g_tx_nobuf;
 /*
  * TCP segments this console has transmitted.  Reported next to the byte count because
- * BYTES PER SEGMENT is the health number for an interactive console, and issue #49 had to
- * infer it from bytes / refusals -- which only worked because refusals happened to be
- * near-universal at the time.  17 B/seg means one peer ACK per keystroke fragment; a
- * redraw should be one segment.
+ * BYTES PER SEGMENT is the health number for an interactive console, and
+ * owhinata/wio-lite-ai#49 had to infer it from bytes / refusals -- which only worked because
+ * refusals happened to be near-universal at the time.  17 B/seg means one peer ACK per
+ * keystroke fragment; a redraw should be one segment.
  */
 static uint32_t g_tx_segs;
 /* High-water mark of the TX ring, so `net shell status` can say whether the CLI ever had
@@ -384,10 +387,10 @@ static int nsh_enable(struct cli_transport *tr)
  * ---- the write path ------------------------------------------------------------
  *
  * cli_transport_api.write() is a NON-BLOCKING contract (cli_instance.h): enqueue what fits,
- * return the count, and let the core wait on CLI_EVT_TX for the rest.  Since issue #48 that
- * is all it does -- no NetX call, no lock, no socket.  Everything that can refuse, block or
- * be torn down lives on the server thread, which is what makes the contract honest instead
- * of merely non-blocking.
+ * return the count, and let the core wait on CLI_EVT_TX for the rest.  Since
+ * owhinata/wio-lite-ai#48 that is all it does -- no NetX call, no lock, no socket.
+ * Everything that can refuse, block or be torn down lives on the server thread, which is
+ * what makes the contract honest instead of merely non-blocking.
  */
 static int nsh_write(struct cli_transport *tr, const uint8_t *data, size_t len)
 {
@@ -411,8 +414,8 @@ static int nsh_write(struct cli_transport *tr, const uint8_t *data, size_t len)
 		g_tx_hiwater = (uint32_t)count;
 
 	/*
-	 * Deliberately NO kick here in the normal case (issue #49).  The core stages in
-	 * 32-byte chunks, so waking the drain now would transmit a third of a redraw and
+	 * Deliberately NO kick here in the normal case (owhinata/wio-lite-ai#49).  The core stages
+	 * in 32-byte chunks, so waking the drain now would transmit a third of a redraw and
 	 * pay a peer ACK for it; nsh_flush() does the waking when the whole unit is in.
 	 *
 	 * [!] EXCEPT when we could not take it all.  Then the core parks on CLI_EVT_TX
@@ -432,11 +435,11 @@ static int nsh_write(struct cli_transport *tr, const uint8_t *data, size_t len)
 }
 
 /*
- * "The unit of output is complete" -- the core calls this from cli_unlock() (issue #49).
- * THIS is what transmits: nsh_write() only fills the ring, so a whole line-editor redraw
- * reaches the drain in one piece and leaves as one TCP segment instead of one per 32-byte
- * staging chunk.  Nothing is delayed to get that -- the boundary was already known, the
- * old code just could not see it.
+ * "The unit of output is complete" -- the core calls this from cli_unlock()
+ * (owhinata/wio-lite-ai#49).  THIS is what transmits: nsh_write() only fills the ring, so a
+ * whole line-editor redraw reaches the drain in one piece and leaves as one TCP segment
+ * instead of one per 32-byte staging chunk.  Nothing is delayed to get that -- the boundary
+ * was already known, the old code just could not see it.
  */
 static void nsh_flush(struct cli_transport *tr)
 {
@@ -498,7 +501,7 @@ struct cli_transport net_shell_transport = {
 	.sh  = NULL,                   /* set by cli_init() */
 	.ctx = &g_ctx,
 	/* Longer than every other backend, and specifically longer than NXN_TCP_RTO_MS --
-	 * see NSH_TX_DEADLINE (issue #48). */
+	 * see NSH_TX_DEADLINE (owhinata/wio-lite-ai#48). */
 	.tx_timeout = NSH_TX_DEADLINE,
 };
 
@@ -691,9 +694,10 @@ static unsigned nsh_tx_drain(void)
  * (nx_tcp_server_socket_accept.c:102-124), and the timeout path restores LISTEN WITHOUT
  * unbinding, leaving a bound-but-LISTEN socket whose completing ACK
  * _nx_tcp_socket_packet_process() drops -- it has no LISTEN case
- * (nx_tcp_socket_packet_process.c:334-449).  Issue #23 U4-1 found that on hardware: the
- * client connects and receives nothing, for ever.  So arm once with NX_NO_WAIT and wait
- * with nx_tcp_socket_state_wait(), which touches nothing and may be re-entered freely.
+ * (nx_tcp_socket_packet_process.c:334-449).  owhinata/wio-lite-ai#23 U4-1 found that on
+ * hardware: the client connects and receives nothing, for ever.  So arm once with NX_NO_WAIT
+ * and wait with nx_tcp_socket_state_wait(), which touches nothing and may be re-entered
+ * freely.
  */
 static int nsh_arm_accept(void)
 {
@@ -751,8 +755,8 @@ static int nsh_arm(uint16_t port)
 	 * body is guarded by `if (socket_ptr -> nx_tcp_socket_transmit_suspension_list)`
 	 * (nx_tcp_socket_state_transmit_check.c:75-130).  A sender using NX_NO_WAIT never joins
 	 * that list, so registering it produces a callback that can never fire -- which read as
-	 * a live wake-up source for two years and cost issue #48 its diagnosis.  A window
-	 * overflow is recovered by the drain's NSH_DRAIN_POLL_MS retry instead.
+	 * a live wake-up source for two years and cost owhinata/wio-lite-ai#48 its diagnosis.  A
+	 * window overflow is recovered by the drain's NSH_DRAIN_POLL_MS retry instead.
 	 */
 	(void)nx_tcp_socket_queue_depth_notify_set(&g_sock, nsh_queue_notify);
 	/* Bound what this socket can have outstanding towards the link's DATA transmit
@@ -818,8 +822,8 @@ static int nsh_unwind(void)
 	 * Stop producers first, throw away whatever they queued, and wake anyone parked in
 	 * the core's TX wait so it re-enters write() and returns on the closed gate.
 	 *
-	 * No lock is needed around the socket calls below: since issue #48 this thread is the
-	 * only one that transmits, so there is no CLI thread to be caught inside
+	 * No lock is needed around the socket calls below: since owhinata/wio-lite-ai#48 this
+	 * thread is the only one that transmits, so there is no CLI thread to be caught inside
 	 * nx_tcp_socket_send() while the socket is deleted -- which was the single race the
 	 * old g_sock_lock existed for.
 	 */
@@ -1107,7 +1111,8 @@ int net_shell_stop_sync(uint32_t timeout_ms)
 	 * (nx_net.c calls it while unwinding), not the operator saying "I do not want a
 	 * console".  Clearing the auto-arm latch here made `net down` disable telnet for
 	 * good -- the following `net up` + `net dhcp` armed nothing and the only way back
-	 * was an explicit `net shell start`.  Found on board #2 (issue #30 B1 testing).
+	 * was an explicit `net shell start`.  Found on board #2 (owhinata/wio-lite-ai#30 B1
+	 * testing).
 	 */
 	nsh_request_stop();
 
@@ -1188,7 +1193,8 @@ void net_shell_print_status(struct cli_instance *sh)
 	          (unsigned long)g_sessions, (unsigned long)g_rx_bytes,
 	          (unsigned long)g_tx_bytes, (unsigned long)g_rx_drops);
 	/* Bytes per segment is the interactive-health number: a whole redraw should leave as
-	 * one segment, and 17 B/seg (issue #49) meant a peer ACK per keystroke fragment. */
+	 * one segment, and 17 B/seg (owhinata/wio-lite-ai#49) meant a peer ACK per keystroke
+	 * fragment. */
 	cli_print(sh, "  tx segs   %lu   avg %lu B/seg\r\n",
 	          (unsigned long)g_tx_segs,
 	          (unsigned long)(g_tx_segs ? g_tx_bytes / g_tx_segs : 0u));
@@ -1198,8 +1204,8 @@ void net_shell_print_status(struct cli_instance *sh)
 	          (unsigned long)g_tx_nobuf,
 	          g_tx_nobuf ? "  <-- pool too small" : "");
 	/* The ring high-water says whether the CLI ever had to wait at all, and dropped says
-	 * whether that wait ran out -- the pair issue #48 had no way to ask for.  Non-zero
-	 * `dropped` means output was LOST, which is otherwise entirely silent. */
+	 * whether that wait ran out -- the pair owhinata/wio-lite-ai#48 had no way to ask for.
+	 * Non-zero `dropped` means output was LOST, which is otherwise entirely silent. */
 	cli_print(sh, "  tx ring   %lu/%u B peak   dropped %lu B%s\r\n",
 	          (unsigned long)g_tx_hiwater, (unsigned)(NSH_TX_RING - 1u),
 	          (unsigned long)(g_ctx.sh ? g_ctx.sh->tx_dropped : 0u),
@@ -1209,7 +1215,7 @@ void net_shell_print_status(struct cli_instance *sh)
 	/*
 	 * The same report to the log.  The console's own status is most wanted exactly when
 	 * that console is in trouble, and cli_tx_send_blocking() discards a handler's output
-	 * once Ctrl+C is latched (cli_core.c:456-459) -- issue #23 U4-1 lost a whole
+	 * once Ctrl+C is latched (cli_core.c:456-459) -- owhinata/wio-lite-ai#23 U4-1 lost a whole
 	 * hardware measurement to that.  `dmesg` consults neither the output path nor
 	 * cancel_req, and survives a reset.
 	 */

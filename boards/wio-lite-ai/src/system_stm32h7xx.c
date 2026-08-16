@@ -19,10 +19,10 @@
  * initialises the TCMs -- ECC enable, zero fill, the .itcm load and the MSP fill.
  * We inherit what we were handed.
  *
- * (Until issue #25 the app executed in place from the external OCTOSPI2 flash at
- * 0x70000000 and the same rule was even more immediate -- resetting the RCC stalled
- * the instruction fetch itself.  Execution moved to the internal flash for the ~17x
- * read bandwidth; the hands-off-the-clocks contract did not change.)
+ * (Until owhinata/wio-lite-ai#25 the app executed in place from the external OCTOSPI2
+ * flash at 0x70000000 and the same rule was even more immediate -- resetting the RCC
+ * stalled the instruction fetch itself.  Execution moved to the internal flash for the
+ * ~17x read bandwidth; the hands-off-the-clocks contract did not change.)
  */
 
 #include "stm32h7xx.h"
@@ -32,7 +32,8 @@
  * defines g_pfnVectors at the head of .isr_vector, which the linker script puts at
  * the start of the FLASH region.  Taking VTOR from the symbol rather than from a
  * hard-coded base means the two can never disagree -- the previous 0x70000000
- * literal here was exactly the kind of duplication issue #25 had to go and fix. */
+ * literal here was exactly the kind of duplication owhinata/wio-lite-ai#25 had to go
+ * and fix. */
 extern uint32_t g_pfnVectors[];
 
 /* ITCM geometry -- mirrors the ITCM entry of the MEMORY block in
@@ -42,23 +43,25 @@ extern uint32_t g_pfnVectors[];
 #define ITCM_BASE  0x00000000UL
 #define ITCM_SIZE  (64UL * 1024UL)
 
-/* .itcm bounds from the linker script (issue #24): run image in ITCM, load image
+/* .itcm bounds from the linker script (owhinata/wio-lite-ai#24): run image in ITCM, load
+   image
  * in the app's flash partition.  Declared as arrays so a bare reference yields the
  * address. */
 extern uint32_t _sitcm[], _eitcm[], _sitcm_load[];
-/* DTCM residents moved out of AXI-SRAM (issue #46): the .dtcm_bss span this file
+/* DTCM residents moved out of AXI-SRAM (owhinata/wio-lite-ai#46): the .dtcm_bss span
+   this file
  * zero-fills, and the main-stack span it fills with a pattern. */
 extern uint32_t _sdtcm_bss[], _edtcm_bss[], _smsp_stack[];
 
 /*
- * Move the interrupt paths into ITCM (issue #24).
+ * Move the interrupt paths into ITCM (owhinata/wio-lite-ai#24).
  *
  * Every ISR is otherwise fetched from the app's flash through a 16 KB I-cache, so a
  * burst arriving after the lines were evicted pays a cold fetch.  That cost was
  * brutal when the app ran from the external OCTOSPI2 flash (8.7 us vs 3.3 us for
  * the same UART ISR on board #2) and is small now that it runs from the internal
- * one (issue #25), but ITCM is zero-wait-state, outside both caches and never
- * evicted, so the residency still wins.  The CMSIS startup only copies
+ * one (owhinata/wio-lite-ai#25), but ITCM is zero-wait-state, outside both caches and
+ * never evicted, so the residency still wins.  The CMSIS startup only copies
  * .data, so .itcm needs its own copy -- done here, the earliest point in the boot
  * flow (Reset_Handler: ExitRun0Mode -> SystemInit -> .data copy -> .bss zero ->
  * __libc_init_array -> main), because ITCM holds garbage until we fill it and
@@ -68,8 +71,8 @@ extern uint32_t _sdtcm_bss[], _edtcm_bss[], _smsp_stack[];
  * entries are ITCM addresses, so a fault raised *inside* this function would branch
  * into memory that is still being zeroed or copied.  That is accepted: it needs a
  * fault in ~40 instructions of straight-line code that touches only SCB and ITCM,
- * and the pre-#24 behaviour (spin forever in Default_Handler) was no more
- * recoverable.  A DFU reflash (hold PF1 at reset) always gets the board back.
+ * and the pre-owhinata/wio-lite-ai#24 behaviour (spin forever in Default_Handler) was no
+ * more recoverable.  A DFU reflash (hold PF1 at reset) always gets the board back.
  *
  * This function reads and writes only ITCMCR.  It does NOT touch the RCC / PWR /
  * FLASH ACR -- the app inherits the bootloader's clock tree (see the file header),
@@ -118,8 +121,8 @@ static void itcm_init(void)
 
   /* Read the image back before executing it.  RM0468 requires a read-back for data
    * to be reliably committed to a TCM -- the same trap that made the DTCM crash log
-   * lose bytes across a reset (issue #13, svc/log.c persist_*).  The accesses are
-   * volatile so the compiler cannot drop the loop. */
+   * lose bytes across a reset (owhinata/wio-lite-ai#13, svc/log.c persist_*).  The
+   * accesses are volatile so the compiler cannot drop the loop. */
   dst = (uint32_t volatile *)_sitcm;
   n   = (uint32_t)(_eitcm - _sitcm);
   while (n-- != 0u)
@@ -132,14 +135,14 @@ static void itcm_init(void)
 }
 
 /*
- * DTCM bring-up (issue #46): the ECC controls, the .dtcm_bss zero-fill and the
- * main-stack fill pattern.
+ * DTCM bring-up (owhinata/wio-lite-ai#46): the ECC controls, the .dtcm_bss zero-fill and
+ * the main-stack fill pattern.
  *
  * WHY THIS EXISTS NOW.  DTCM used to hold only NOLOAD data that its owners always
  * wrote before reading (the log ring, the NetX packet pool, a membench buffer), so
- * neither its ECC configuration nor its initial contents ever mattered.  Issue #46
- * moved every thread stack, the RTL8720 UART rings and the MAIN STACK here, and all
- * three of those assumptions change:
+ * neither its ECC configuration nor its initial contents ever mattered.
+ * owhinata/wio-lite-ai#46 moved every thread stack, the RTL8720 UART rings and the MAIN
+ * STACK here, and all three of those assumptions change:
  *
  *  - the rings are ordinary statics that were written expecting .bss zeroing, which
  *    a NOLOAD section does not get (the CMSIS startup zeroes .bss only);
@@ -230,8 +233,8 @@ uint32_t SystemD2Clock = 275000000UL;
  * /2 into all four of them (= 0b100 = index 4), so every APB clock query in this
  * firmware silently returned HCLK: HAL_RCC_GetPCLK1Freq() answered 275 MHz for a
  * 137.5 MHz bus, and `camera info` printed a 275.0 MHz I2C4 kernel clock for a
- * peripheral that is really fed 137.5 MHz.  Found in issue #8 phase 3c-2, when
- * fixing the camera's kernel-clock self-check finally made the number visible.
+ * peripheral that is really fed 137.5 MHz.  Found in owhinata/wio-lite-ai#8 phase 3c-2,
+ * when fixing the camera's kernel-clock self-check finally made the number visible.
  *
  * The values below are ST's, byte-identical to the CMSIS template.  The overlap
  * costs the 4-bit fields their 0100..0111 encodings (legal, and also /1), but the
@@ -253,11 +256,13 @@ void SystemInit(void)
    * the partition base's vector[0], so that address is a fixed contract. */
   SCB->VTOR = (uint32_t) g_pfnVectors;
 
-  /* Load the ITCM-resident interrupt paths (issue #24).  Must happen before any
+  /* Load the ITCM-resident interrupt paths (owhinata/wio-lite-ai#24).  Must happen
+     before any
    * exception can be dispatched, and before main() enables the caches / MPU. */
   itcm_init();
 
-  /* DTCM ECC controls + .dtcm_bss zero-fill + main-stack fill pattern (issue #46).
+  /* DTCM ECC controls + .dtcm_bss zero-fill + main-stack fill pattern
+     (owhinata/wio-lite-ai#46).
    * After itcm_init(), so a fault taken during the DTCM work already has its ITCM
    * handler in place; before the CMSIS startup's .data/.bss work and main(), which
    * is where the zeroed statics start being read. */

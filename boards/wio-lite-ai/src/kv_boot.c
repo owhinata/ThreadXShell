@@ -4,7 +4,8 @@
  */
 /**
  * @file    kv_boot.c
- * @brief   The configuration thread: opens the KV store and applies it (issue #37).
+ * @brief   The configuration thread: opens the KV store and applies it
+ * (owhinata/wio-lite-ai#37).
  *
  * A thread exists here for one reason: this work waits on hardware.  Opening the
  * store can erase (a first boot formats a blank partition), associating blocks on
@@ -195,9 +196,9 @@ static void cfg_wifi(void)
 		security = have_psk ? WIFI_RPC_SEC_WPA2_AES_PSK : WIFI_RPC_SEC_OPEN;
 
 	/*
-	 * Arm the re-association policy BEFORE associating, not after (issue #32).
-	 * wifi_connect_run() captures the credentials on success by calling
-	 * wifi_auto_arm(), and that call is a no-op while the policy is disabled --
+	 * Arm the re-association policy BEFORE associating, not after
+	 * (owhinata/wio-lite-ai#32).  wifi_connect_run() captures the credentials on success
+	 * by calling wifi_auto_arm(), and that call is a no-op while the policy is disabled --
 	 * so enabling it afterwards would leave it armed with nothing, and the first
 	 * AP outage would find no credentials to retry with.
 	 */
@@ -205,9 +206,9 @@ static void cfg_wifi(void)
 		wifi_auto_set_enabled(true);
 
 	/*
-	 * This used to fail every single time, and issue #40 explains why: the radio's
-	 * associations fail intermittently (about half of them, against the 5 GHz AP it
-	 * was measured on), and this path is the only one that never got a second go.  An
+	 * This used to fail every single time, and owhinata/wio-lite-ai#40 explains why: the
+	 * radio's associations fail intermittently (about half of them, against the 5 GHz AP
+	 * it was measured on), and this path is the only one that never got a second go.  An
 	 * operator retypes `wifi connect` without thinking of it as a retry; here there is
 	 * nobody to do that.  wifi_connect_run() now retries by itself, which is what makes
 	 * automatic association work -- there is nothing left for this file to wait for.

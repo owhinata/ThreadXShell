@@ -9,12 +9,13 @@
  * Pure dispatch logic over a `struct cli_instance`: it submits the accumulated
  * line to the parser, prints the outcome and returns to the prompt.  The byte
  * input / line-editing state machine that feeds the buffer lives in cli_edit.c
- * (issue #9); both files call no ThreadX (tx_*) API -- the thread loop, object
- * creation and ISR notify live in cli_core.c -- so they compile and unit-test on
- * the host against a small tx_api.h type shim (shell/test/shim).  All output
- * goes through the buffered output API (cli_write/cli_error, issue #5): echo,
- * prompt and dispatch messages are flow-controlled and (for errors) coloured.
- * Clean-room design inspired by Zephyr shell; no code reused.
+ * (owhinata/stm32f746g-disco#9); both files call no ThreadX (tx_*) API -- the
+ * thread loop, object creation and ISR notify live in cli_core.c -- so they
+ * compile and unit-test on the host against a small tx_api.h type shim
+ * (shell/test/shim). All output goes through the buffered output API
+ * (cli_write/cli_error, owhinata/stm32f746g-disco#5): echo, prompt and dispatch
+ * messages are flow-controlled and (for errors) coloured.  Clean-room design
+ * inspired by Zephyr shell; no code reused.
  */
 #include <stddef.h>
 #include <stdio.h>      /* snprintf (usage command-path join, issue #37) */
@@ -23,7 +24,8 @@
 #include "cli_instance.h"
 #include "cli_internal.h"
 
-/* Reset the per-session editor state on a transport (re)connect (issue #49 P4).
+/* Reset the per-session editor state on a transport (re)connect
+   (owhinata/stm32f746g-disco#49 P4).
  * Mirrors the per-session subset of cli_init() (cli_core.c) but touches NO
  * transport/ThreadX/config field and produces NO output -- the caller
  * (cli_thread_entry, on CLI_EVT_CONN) follows it with the backend's session_begin
@@ -65,7 +67,8 @@ void cli_prompt(struct cli_instance *sh)
 
 int cli_cancel_poll(struct cli_instance *sh)
 {
-	/* A bg-job worker (issue #25) does NOT own the transport RX: that ring is a
+	/* A bg-job worker (owhinata/stm32f746g-disco#25) does NOT own the transport RX:
+    that ring is a
 	 * strict SPSC pipe whose single consumer is the interactive shell thread.
 	 * Draining it here would steal the user's keystrokes and corrupt the ring, so
 	 * a job never reads RX -- its cancel is kill-driven (`kill %N` sets cancel_req
@@ -79,7 +82,7 @@ int cli_cancel_poll(struct cli_instance *sh)
 
 	/* Drain everything currently buffered; a 0x03 anywhere latches the cancel.
 	 * Non-0x03 bytes are discarded -- type-ahead typed during a running command
-	 * is dropped by design (issue #16). */
+	 * is dropped by design (owhinata/stm32f746g-disco#16). */
 	while ((n = tr->api->read(tr, buf, sizeof buf)) > 0)
 		for (int i = 0; i < n; i++)
 			if (buf[i] == 0x03)
@@ -94,14 +97,15 @@ bool cli_cancel_requested(struct cli_instance *sh)
 }
 
 /*
- * Parse and run ONE command segment (issue #23): a single ';'-separated piece of
- * the input line.  Mirrors the original single-command body of cli_dispatch_line
- * -- it resets the per-command flow-control flag, parses @p seg in place and
- * dispatches the resolved handler / prints the parse outcome.  Cross-segment
- * concerns (the line's "\r\n" echo, history, the cooperative-cancel feedback and
- * the prompt) stay in cli_dispatch_line; this runs once per segment.  Exposed
- * (issue #25) so a background-job worker can run its single segment through the
- * exact same parse/dispatch path as the interactive shell.
+ * Parse and run ONE command segment (owhinata/stm32f746g-disco#23): a single
+ * ';'-separated piece of the input line.  Mirrors the original single-command
+ * body of cli_dispatch_line -- it resets the per-command flow-control flag,
+ * parses @p seg in place and dispatches the resolved handler / prints the parse
+ * outcome. Cross-segment concerns (the line's "\r\n" echo, history, the
+ * cooperative-cancel feedback and the prompt) stay in cli_dispatch_line; this
+ * runs once per segment. Exposed (owhinata/stm32f746g-disco#25) so a
+ * background-job worker can run its single segment through the exact same
+ * parse/dispatch path as the interactive shell.
  */
 void cli_dispatch_segment(struct cli_instance *sh, char *seg)
 {
@@ -113,12 +117,12 @@ void cli_dispatch_segment(struct cli_instance *sh, char *seg)
 	switch (st) {
 	case CLI_PARSE_OK: {
 		/* Pass the handler-relative argv/argc (argv[0] = leaf name).  Mark the
-		 * window in which a Ctrl+C cancels the command (issue #16): cancel_req is
-		 * cleared first, dispatching gates the cooperative-cancel paths.  For a bg
-		 * job (#25) do NOT clear it: cancel_req was already reset at launch, and a
-		 * `kill` may have landed BEFORE the worker reached here (the fg, at higher
-		 * priority, can process `kill %N` from type-ahead before the worker runs) --
-		 * clearing it would drop that kill. */
+		 * window in which a Ctrl+C cancels the command (owhinata/stm32f746g-disco#16):
+		 * cancel_req is cleared first, dispatching gates the cooperative-cancel paths.
+		 * For a bg job (owhinata/stm32f746g-disco#25) do NOT clear it: cancel_req was
+		 * already reset at launch, and a `kill` may have landed BEFORE the worker
+		 * reached here (the fg, at higher priority, can process `kill %N` from
+		 * type-ahead before the worker runs) -- clearing it would drop that kill. */
 		if (!sh->fg)
 			sh->cancel_req = 0;
 		sh->dispatching = 1;
@@ -141,7 +145,8 @@ void cli_dispatch_segment(struct cli_instance *sh, char *seg)
 		break;
 	case CLI_PARSE_WRONG_ARGS:
 		cli_error(sh, "%s: invalid number of arguments\r\n", sh->pr.argv[0]);
-		/* Issue #37: follow with the command's usage -- its full command path
+		/* owhinata/stm32f746g-disco#37: follow with the command's usage -- its full
+     command path
 		 * (sh->argv[0 .. cmd_level-1], populated by cli_parse before WRONG_ARGS)
 		 * plus the argument spelling.  Built into one buffer and emitted with a
 		 * single cli_print so a background-job line cannot splice into the middle
@@ -190,26 +195,30 @@ void cli_dispatch_line(struct cli_instance *sh)
 	cli_write(sh, "\r\n", 2);           /* echo the newline before any output */
 	sh->line[sh->len] = '\0';
 
-	/* Reap any background jobs that finished since the last line (issue #25):
+	/* Reap any background jobs that finished since the last line
+    (owhinata/stm32f746g-disco#25):
 	 * delete their completed worker threads and print "[id] Done/Killed cmd" here
 	 * on the foreground thread (so the notice serialises with the prompt), on the
 	 * fresh line the "\r\n" echo just opened. */
 	cli_jobs_reap(sh);
 
-	/* Record the submitted line for history (issue #10).  Done BEFORE the split
+	/* Record the submitted line for history (owhinata/stm32f746g-disco#10).  Done
+    BEFORE the split
 	 * loop, which (via cli_next_segment + cli_parse) rewrites sh->line in place:
 	 * the WHOLE line -- ';' separators included -- is one history entry. */
 	if (sh->len > 0)
 		cli_history_add(sh, sh->line);
 
-	/* Run each ';'-separated segment in order (issue #23).  Errors do NOT stop
+	/* Run each ';'-separated segment in order (owhinata/stm32f746g-disco#23).
+    Errors do NOT stop
 	 * the sequence (bash ';' semantics: continue on failure), but a cooperative
 	 * Ctrl+C aborts the remaining segments -- the running handler latches
 	 * sh->cancel_req, which the unchanged cancel block below then reports once. */
 	char *cursor = sh->line;
 	char *seg;
 	while ((seg = cli_next_segment(&cursor)) != NULL) {
-		/* Trailing '&' (issue #25): launch this segment as a background job and
+		/* Trailing '&' (owhinata/stm32f746g-disco#25): launch this segment as a
+     background job and
 		 * return to the prompt at once instead of running it inline.  cancel_req
 		 * is the foreground line's, so it never gates a bg launch. */
 		if (cli_segment_is_background(seg)) {
@@ -221,7 +230,8 @@ void cli_dispatch_line(struct cli_instance *sh)
 			break;
 	}
 
-	/* Cooperative Ctrl+C (issue #16): if the command observed a cancel, echo the
+	/* Cooperative Ctrl+C (owhinata/stm32f746g-disco#16): if the command observed a
+    cancel, echo the
 	 * editor-style "^C" feedback.  Clear cancel_req + tx_failed + the staging
 	 * buffer FIRST (mirrors cli_edit.c's 0x03 path) so the feedback is not eaten
 	 * by the cancel fast-fail or the tx_failed output-drop; drop any residual RX
@@ -241,8 +251,9 @@ void cli_dispatch_line(struct cli_instance *sh)
 	/* Always return to the prompt; a bad command or a non-zero handler return
 	 * never stops the shell, and one instance's error cannot reach another
 	 * (fail-safe, req §9).  Reset the editor's cursor + render state so the
-	 * fresh prompt is the new render baseline (issue #9); overwrite mode is
-	 * intentionally kept across commands (session-wide, like the terminal). */
+	 * fresh prompt is the new render baseline (owhinata/stm32f746g-disco#9);
+	 * overwrite mode is intentionally kept across commands (session-wide, like
+	 * the terminal). */
 	sh->len = 0;
 	sh->cur = 0;
 	sh->line[0] = '\0';
@@ -250,7 +261,7 @@ void cli_dispatch_line(struct cli_instance *sh)
 	/* Leave history navigation unconditionally: cli_history_add only runs for a
 	 * non-empty line, so a recalled line cleared to empty (or a blank submit)
 	 * would otherwise leave hist_nav_on set and the next ↑ would resume from a
-	 * stale offset instead of the newest entry (issue #10). */
+	 * stale offset instead of the newest entry (owhinata/stm32f746g-disco#10). */
 	sh->hist_nav_on = 0;
 	sh->hist_nav = 0;
 	{

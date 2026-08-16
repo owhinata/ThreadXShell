@@ -4,14 +4,16 @@
  */
 /**
  * @file    guix_display.c
- * @brief   GUIX 565rgb display driver on the LTDC double buffer (issue #55).
+ * @brief   GUIX 565rgb display driver on the LTDC double buffer
+ * (owhinata/stm32f746g-disco#55).
  *
  * See guix_display.h for the design.  Key facts verified against GUIX v6.5.1:
  *   - The 565rgb software driver writes the *native* 16-bit colour straight to
  *     memory, so the GX_COLOR handed to horizontal_line_draw is already a packed
  *     RGB565 value in its low 16 bits.  For a DMA2D register-to-memory fill it
  *     must still be expanded to ARGB8888 -- the F7 HAL interprets the R2M colour
- *     as ARGB8888 and re-packs it to the output format (same quirk as #53).
+ *     as ARGB8888 and re-packs it to the output format (same quirk as
+ * owhinata/stm32f746g-disco#53).
  *   - gx_draw_context_pitch is in PIXELS (it is set from canvas->
  *     gx_canvas_x_resolution and used as a USHORT* row increment), not bytes.
  *   - GX_RECTANGLE edges are all inclusive.
@@ -72,7 +74,8 @@ static bool guix_dma2d_src_ok(const void *p)
 	return false;
 }
 
-/* RGB565 (low 16 bits) -> ARGB8888 (0x00RRGGBB) for DMA2D R2M (see header / #53). */
+/* RGB565 (low 16 bits) -> ARGB8888 (0x00RRGGBB) for DMA2D R2M (see header /
+   owhinata/stm32f746g-disco#53). */
 static uint32_t rgb565_to_argb8888(uint16_t c)
 {
 	uint32_t r = (uint32_t)(c >> 11) & 0x1Fu;
@@ -87,10 +90,10 @@ static uint32_t rgb565_to_argb8888(uint16_t c)
 
 /* Run an already-configured 2-operand DMA2D transfer on hdma2d_gui (R2M fill or
    M2M blit -- same HAL_DMA2D_Start/_Start_IT signature) to completion: large
-   transfers block on the completion IRQ, small ones poll (#64; threshold
-   LTDC_DMA2D_IT_MIN_PIXELS).  Guarantees DMA2D is left IDLE on failure -- the
-   camera sink's CPU fallback (cam_rect_refresh) relies on it.  Caller holds
-   ltdc_lock.  Returns true on a clean completion. */
+   transfers block on the completion IRQ, small ones poll
+   (owhinata/stm32f746g-disco#64; threshold LTDC_DMA2D_IT_MIN_PIXELS).  Guarantees
+   DMA2D is left IDLE on failure -- the camera sink's CPU fallback (cam_rect_refresh)
+   relies on it. Caller holds ltdc_lock.  Returns true on a clean completion. */
 static bool guix_dma2d_run(uint32_t pdata, uint32_t dst, uint32_t w, uint32_t h)
 {
 	if ((uint64_t)w * h >= LTDC_DMA2D_IT_MIN_PIXELS) {
@@ -108,7 +111,7 @@ static bool guix_dma2d_run(uint32_t pdata, uint32_t dst, uint32_t w, uint32_t h)
 	/* Poll timeout returns without clearing CR.START -- the engine may still be
 	   writing the destination.  Abort so a failed transfer always leaves DMA2D
 	   idle (cam_rect_refresh's CPU follow-up relies on it, and it keeps the next
-	   op's re-init clean, #59). */
+	   op's re-init clean, owhinata/stm32f746g-disco#59). */
 	if ((DMA2D->CR & DMA2D_CR_START) != 0u)
 		(void)HAL_DMA2D_Abort(&hdma2d_gui);
 	return false;
@@ -197,8 +200,9 @@ static void guix_dma2d_blend(uint16_t *dst, const void *src, uint32_t w,
 	    HAL_DMA2D_ConfigLayer(&hdma2d_gui, 0) == HAL_OK &&
 	    HAL_DMA2D_ConfigLayer(&hdma2d_gui, 1) == HAL_OK) {
 		/* Blend has three operands (BlendingStart), so it cannot use
-		   guix_dma2d_run; inline the same size-thresholded poll/IT choice (#64).
-		   Blends are icons/overlays, almost always below the threshold -> poll. */
+		   guix_dma2d_run; inline the same size-thresholded poll/IT choice
+		   (owhinata/stm32f746g-disco#64).  Blends are icons/overlays, almost always below
+		   the threshold -> poll. */
 		if ((uint64_t)w * h >= LTDC_DMA2D_IT_MIN_PIXELS) {
 			ltdc_dma2d_arm_it(&hdma2d_gui);
 			if (HAL_DMA2D_BlendingStart_IT(&hdma2d_gui,
@@ -265,15 +269,15 @@ static VOID guix_horizontal_line_draw(GX_DRAW_CONTEXT *context, INT xstart,
 	                (uint32_t)(pitch - len));
 }
 
-/* ===== #59 Lever B2: camera live-preview copy-forward elimination ===========
+/* ===== owhinata/stm32f746g-disco#59 Lever B2: camera live-preview copy-forward elimination ===
  *
  * The camera icon (CAM_VIEW_W x CAM_VIEW_H at CAM_VIEW_X,CAM_VIEW_Y) is fully
  * repainted from cam_view_buf every preview frame, so forwarding it in the
  * buffer toggle is wasted SDRAM bandwidth (one ~150 KB DMA2D blit per displayed
- * frame) and a contributor to the DCMI DMA FIFO errors of #59.  We skip that
- * copy but must never present a STALE camera rect (a later non-camera flip could
- * otherwise show an older frame -> visible regression).  Correctness is enforced
- * at PRESENT time by a per-buffer freshness flag:
+ * frame) and a contributor to the DCMI DMA FIFO errors of
+ * owhinata/stm32f746g-disco#59. We skip that copy but must never present a STALE
+ * camera rect (a later non-camera flip could otherwise show an older frame -> visible
+ * regression). Correctness is enforced at PRESENT time by a per-buffer freshness flag:
  *
  *   cam_buf_stale[i] == false   <=>   ltdc_fb[i]'s camera rect already holds the
  *                                     latest cam_view_buf content.
@@ -293,10 +297,12 @@ static bool      cam_visible;          /* camera screen on display (SHOW..HIDE):
                                           drop a forward-copy on, another screen  */
 static uint16_t *cam_view_data;        /* cam_view_buf base (registered by begin) */
 static bool      cam_buf_stale[2];     /* per LTDC buffer; invariant above        */
-/* Camera icon geometry on the panel (set by begin(), #69 variable resolution).
+/* Camera icon geometry on the panel (set by begin(), owhinata/stm32f746g-disco#69
+   variable resolution).
    Defaults to the QVGA centred placement; rect/blit helpers read these instead of
    the compile-time CAM_VIEW_* constants so the preview can run at qqvga/qvga
-   (#84).  CAM_RECT bounds are cam_x..cam_x+cam_w-1 / cam_y..cam_y+cam_h-1. */
+   (owhinata/stm32f746g-disco#84).  CAM_RECT bounds are cam_x..cam_x+cam_w-1 /
+   cam_y..cam_y+cam_h-1. */
 static uint16_t  cam_x = CAM_VIEW_X, cam_y = CAM_VIEW_Y;
 static uint16_t  cam_w = CAM_VIEW_W, cam_h = CAM_VIEW_H;
 
@@ -355,10 +361,10 @@ static int cam_rect_refresh(uint16_t *fb)
 }
 
 /* Register the view buffer + camera-rect geometry and arm B2 for a preview
-   session (#69 variable resolution).  Both LTDC buffers start stale so the first
-   frames are corrected before present.  Returns 0 on success, -1 if the geometry
-   is invalid (NULL buffer, zero size, or out of the 480x272 panel) -- in which
-   case B2 is left DISARMED (cam_view_data NULL) so a bad offset can never reach
+   session (owhinata/stm32f746g-disco#69 variable resolution).  Both LTDC buffers start
+   stale so the first frames are corrected before present.  Returns 0 on success, -1 if
+   the geometry is invalid (NULL buffer, zero size, or out of the 480x272 panel) -- in
+   which case B2 is left DISARMED (cam_view_data NULL) so a bad offset can never reach
    the DMA2D blits.  Runs under ltdc_lock. */
 int guix_display_cam_preview_begin(uint16_t *view_buf, uint16_t w, uint16_t h,
                                    uint16_t x, uint16_t y)
@@ -404,9 +410,9 @@ void guix_display_cam_set_visible(bool on)
 }
 
 /* Store a freshly captured frame (cam_w x cam_h RGB565, the current preview
-   resolution #69) into the view buffer and mark BOTH LTDC buffers stale,
-   atomically under ltdc_lock (#59 B2).  Returns 0 on a completed DMA2D copy,
-   -1 otherwise. */
+   resolution owhinata/stm32f746g-disco#69) into the view buffer and mark BOTH LTDC
+   buffers stale, atomically under ltdc_lock (owhinata/stm32f746g-disco#59 B2).
+   Returns 0 on a completed DMA2D copy, -1 otherwise. */
 int guix_display_cam_view_store(const uint16_t *src)
 {
 	int rc;
@@ -442,10 +448,10 @@ static void cam_view_fill(int x0, int y0, int x1, int y1, int w, int h, uint16_t
 }
 
 /* Draw a 2-px RGB565 rectangle outline into the camera view buffer, scaled from a
- * normalized [0,1] box (issue #83).  See the header.  The box rides the view buffer,
- * so it is composited into the live image via the same B2 paths as the frame and is
- * overwritten by the next store.  cam_view_buf is non-cacheable SDRAM, so these CPU
- * writes are coherent with the DMA2D reads that later blit it. */
+ * normalized [0,1] box (owhinata/stm32f746g-disco#83).  See the header.  The box rides
+ * the view buffer, so it is composited into the live image via the same B2 paths as
+ * the frame and is overwritten by the next store.  cam_view_buf is non-cacheable
+ * SDRAM, so these CPU writes are coherent with the DMA2D reads that later blit it. */
 void guix_display_cam_overlay_box(float nx, float ny, float nw, float nh,
                                   uint16_t rgb565)
 {
@@ -501,7 +507,8 @@ static VOID guix_buffer_toggle(GX_CANVAS *canvas, GX_RECTANGLE *dirty)
 		return;
 	}
 
-	/* #59 B2: ensure the buffer about to be presented holds the latest camera
+	/* owhinata/stm32f746g-disco#59 B2: ensure the buffer about to be presented holds the
+    latest camera
 	   frame BEFORE the flip.  In steady-state preview the full-rect pixelmap
 	   draw already cleared this buffer's stale flag, so the corrective copy only
 	   fires on a non-camera cycle whose camera rect has fallen behind. */
@@ -513,7 +520,8 @@ static VOID guix_buffer_toggle(GX_CANVAS *canvas, GX_RECTANGLE *dirty)
 		   succeeds whenever the view buffer is valid; clear stale only then.  We
 		   never skip the flip here -- doing so would strand this cycle's
 		   non-camera draws in the back buffer, and the normal copy-forward below
-		   keeps the two buffers consistent outside the camera rect (#59). */
+		   keeps the two buffers consistent outside the camera rect
+		   (owhinata/stm32f746g-disco#59). */
 		if (cam_buf_stale[cur] &&
 		    cam_rect_refresh((uint16_t *)canvas->gx_canvas_memory) == 0)
 			cam_buf_stale[cur] = false;
@@ -529,7 +537,8 @@ static VOID guix_buffer_toggle(GX_CANVAS *canvas, GX_RECTANGLE *dirty)
 	front = ltdc_framebuffer();       /* what we just presented */
 	canvas->gx_canvas_memory = (GX_COLOR *)back;
 
-	/* #59 B2: when the live preview is on and the whole dirty region is the
+	/* owhinata/stm32f746g-disco#59 B2: when the live preview is on and the whole dirty
+    region is the
 	   camera icon, skip the copy-forward -- that rect is repainted from
 	   cam_view_buf every frame and its two-buffer consistency is maintained by
 	   the stale tracking above, so forwarding it is wasted bandwidth. */
@@ -569,8 +578,9 @@ static VOID guix_buffer_toggle(GX_CANVAS *canvas, GX_RECTANGLE *dirty)
  * clip rectangle bounds the on-screen region; the source starts at the matching
  * offset inside the pixelmap.  Everything else (compressed, alpha-plane,
  * transparent, palette, ARGB formats, partial brush alpha, cacheable-SRAM
- * source) defers to the software 565rgb driver.  This is the path #56 uses to
- * blit camera frames (RGB565 in SDRAM). RM0385 §9.3.3 (M2M).
+ * source) defers to the software 565rgb driver.  This is the path
+ * owhinata/stm32f746g-disco#56 uses to blit camera frames (RGB565 in SDRAM). RM0385
+ * §9.3.3 (M2M).
  */
 static VOID guix_pixelmap_draw(GX_DRAW_CONTEXT *context, INT xpos, INT ypos,
                                GX_PIXELMAP *pmp)
@@ -607,7 +617,8 @@ static VOID guix_pixelmap_draw(GX_DRAW_CONTEXT *context, INT xpos, INT ypos,
 		uint32_t dst_off = (uint32_t)(pitch - w);
 		uint32_t src_off = (uint32_t)(pmp->gx_pixelmap_width - w);
 
-		/* #59 B2: the camera live-preview icon draws cam_view_buf into the back
+		/* owhinata/stm32f746g-disco#59 B2: the camera live-preview icon draws cam_view_buf
+     into the back
 		   buffer.  Keep the blit and the stale-flag clear in one ltdc_lock
 		   section so the producer cannot advance cam_view_buf in between (a
 		   false-negative would later present stale pixels).  Only a clip that
@@ -617,7 +628,8 @@ static VOID guix_pixelmap_draw(GX_DRAW_CONTEXT *context, INT xpos, INT ypos,
 			ltdc_lock_frame();
 			/* Clear the stale flag only when the copy actually COMPLETED and it
 			   covered the whole icon rect -- otherwise the buffer's camera rect
-			   is not really the latest view and must stay stale (#59). */
+			   is not really the latest view and must stay stale
+			   (owhinata/stm32f746g-disco#59). */
 			if (guix_dma2d_blit(dst, src, (uint32_t)w, (uint32_t)h,
 			                    dst_off, src_off) == 0 && rect_covers_cam(clip))
 				cam_buf_stale[!ltdc_active_buffer()] = false;
@@ -781,7 +793,8 @@ UINT guix_display_driver_setup(GX_DISPLAY *display)
 	sw_canvas_copy          = display->gx_display_driver_canvas_copy;
 	sw_canvas_blend         = display->gx_display_driver_canvas_blend;
 
-	/* Install the DMA2D-accelerated overrides (#55 full DMA2D: solid fill,
+	/* Install the DMA2D-accelerated overrides (owhinata/stm32f746g-disco#55 full DMA2D:
+    solid fill,
 	   pixelmap draw/blend, canvas copy/blend; the per-frame double-buffer
 	   copy-forward is in guix_buffer_toggle).  block_move stays on the software
 	   driver (intra-canvas moves overlap; DMA2D M2M is not a memmove). */

@@ -1,9 +1,9 @@
 /*
  * Wio Lite AI (STM32H725AEI6) -- OCTOSPI1 APS6408L-3OBM-BA Octal DDR PSRAM
- * app-side bring-up (issue #3) + clock/eye characterisation (issue #16).
- * Indirect operations are bounded and fail-soft so a missing PSRAM response does
- * not stop USB.  Ships at 133 MHz Fixed Latency (read 113 / write 154 MB/s),
- * validated on board #2 with a full-8MB test pass; the operating-point table and
+ * app-side bring-up (owhinata/wio-lite-ai#3) + clock/eye characterisation
+ * (owhinata/wio-lite-ai#16).  Indirect operations are bounded and fail-soft so a missing
+ * PSRAM response does not stop USB.  Ships at 133 MHz Fixed Latency (read 113 / write 154
+ * MB/s), validated on board #2 with a full-8MB test pass; the operating-point table and
  * the two-stage bring-up are documented at the PSRAM_* defines below.
  *
  * OWNERSHIP: this file owns OCTOSPI1 end to end -- its registers, its Port-1 pins
@@ -15,10 +15,10 @@
  * DQS + CLK + NCS on Port 1 (RM0468 sec 26.5.2) -- but its bus clock is enabled
  * here.
  *
- * Before issue #25 the app executed XIP from OCTOSPI2 and the bootloader had put
- * the Port-1 pins in AF while bringing that flash up, so this file only configured
- * the octal-extension pins.  Both of those are gone: the app runs from the internal
- * flash and the bootloader never touches OCTOSPI2, so psram_gpio_init() now
+ * Before owhinata/wio-lite-ai#25 the app executed XIP from OCTOSPI2 and the bootloader
+ * had put the Port-1 pins in AF while bringing that flash up, so this file only
+ * configured the octal-extension pins.  Both of those are gone: the app runs from the
+ * internal flash and the bootloader never touches OCTOSPI2, so psram_gpio_init() now
  * configures the full pin set.
  *
  * PIN MAP (schematic sheet 5/6 "OSPI1_*" nets; AF from the H735-DK BSP, same
@@ -48,8 +48,8 @@
 
 /* Device clock = OSPI kernel (PLL2R 266 MHz) / (PRESCALER+1).
  *
- * Three operating points were characterised on board #2 (issue #16, mmapscan
- * memory-mapped read-eye + membench), all full-8MB `psram test` clean:
+ * Three operating points were characterised on board #2 (owhinata/wio-lite-ai#16,
+ * mmapscan memory-mapped read-eye + membench), all full-8MB `psram test` clean:
  *
  *   presc MR0    rd wr DLYB  clock     read/write MB/s  mmap eye (DLYB units)
  *     4   0x09    5  4  u64  53.2 MHz   51 / 62         [16..68]  widest
@@ -168,7 +168,8 @@ static uint32_t      psram_mr0_cur = PSRAM_MR0_RESET;   /* live device read-late
 static uint32_t      psram_presc = PSRAM_PRESCALER;     /* live DCR2 prescaler */
 static uint32_t      psram_reg_dqse = 1u;               /* DQS-gate the reg-read path */
 
-/* Failure-stage bookkeeping (issue #3 debug): every instrumented transaction
+/* Failure-stage bookkeeping (owhinata/wio-lite-ai#3 debug): every instrumented
+   transaction
  * records into psram_last_diag; psram_hw_init copies the first failing one
  * into psram_fail_diag so `psram info`/`psram snap` can show WHERE the cold
  * bring-up died (Global Reset TCF vs first MR-pair read FTF) and what the
@@ -436,8 +437,8 @@ static void psram_gpio_init(void)
 	io.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
 
 	/*
-	 * The quad low nibble, clock and chip select (issue #25).  These used to be
-	 * left alone here because the bootloader replayed the whole GPIOF/GPIOG banks
+	 * The quad low nibble, clock and chip select (owhinata/wio-lite-ai#25).  These used to
+	 * be left alone here because the bootloader replayed the whole GPIOF/GPIOG banks
 	 * while bringing up the OCTOSPI2 XIP flash, which put them in AF as a side
 	 * effect.  The bootloader no longer touches OCTOSPI2 at all, so they come out
 	 * of reset as analog inputs and this driver has to configure them itself --
@@ -641,8 +642,8 @@ int psram_ready(void) { return psram_up; }
  * user instead.  Held at the shell-command boundary: cmd_psram.c hardware
  * subcommands, cmd_membench.c PSRAM rows, and cmd_devmem.c PSRAM accesses.
  *
- * Issue #7 added a second, non-shell contender that no test-and-set can arbitrate
- * after the fact: the LTDC. Its frame buffers live in this window, so while
+ * owhinata/wio-lite-ai#7 added a second, non-shell contender that no test-and-set can
+ * arbitrate after the fact: the LTDC. Its frame buffers live in this window, so while
  * scanout runs the display controller reads OCTOSPI1 *continuously* and entirely
  * outside the shell. Retuning the bus underneath it (prescaler, latency, MR0,
  * DLYB phase, an mmap->indirect switch) starves the LTDC FIFO at best and, with a
@@ -698,7 +699,7 @@ int psram_acquire(void)
 #endif
 #if BSP_ENABLE_CAMERA
 	/* A frame stream has the DCMI's DMA writing the PSRAM ring; a band stream
-	   (issue #35) does not touch this bus from the DMA at all, but its preview
+	   (owhinata/wio-lite-ai#35) does not touch this bus from the DMA at all, but its preview
 	   transposes into the LTDC frame buffer, which does.  Either way something is
 	   mid-write here, so the test stays on camera_streaming() rather than
 	   narrowing to frame mode. */
@@ -782,8 +783,9 @@ uint32_t psram_get_read_flags(void)
 }
 
 /* Re-write the APS6408 read-latency register MR0 (device-side latency code) and
- * re-enter mmap, to sweep the device latency without a reflash.  E.g. #16 tries
- * the ST U585 reference config MR0=0x24 (Fixed Latency LC8, matches read dummy
+ * re-enter mmap, to sweep the device latency without a reflash.  E.g.
+ * owhinata/wio-lite-ai#16 tries the ST U585 reference config MR0=0x24 (Fixed Latency LC8,
+ * matches read dummy
  * 8) to remove the variable-latency refresh-pushout jitter at high clock. */
 uint32_t psram_get_mr0(void) { return psram_mr0_cur; }
 
@@ -867,7 +869,7 @@ uint32_t psram_wtune(uint32_t off, uint32_t reps)
 }
 
 /* ------------------------------------------------------------------ *
- *  NOT-ready diagnostics (issue #3 cold bring-up failure)
+ *  NOT-ready diagnostics (owhinata/wio-lite-ai#3 cold bring-up failure)
  * ------------------------------------------------------------------ */
 uint32_t psram_init_stage(void) { return psram_stage; }
 
@@ -880,7 +882,7 @@ uint32_t psram_get_refresh(void)
 
 /* ------------------------------------------------------------------ *
  *  mmapscan: reset-persistent DLYB sweep validated against MEMORY-MAPPED
- *  access (issue #16)
+ *  access (owhinata/wio-lite-ai#16)
  * ------------------------------------------------------------------ *
  * An indirect-read DLYB eye is both non-predictive of the mmap eye
  * AND corrupts the DLYB across a full unit sweep (RM0468 sec 27: SEN-pulsing the
@@ -907,7 +909,8 @@ extern void iwdg_init(void);                   /* app/iwdg.c: arm IWDG1 (~3 s) *
 static struct psram_scan_state psram_scan
 	__attribute__((section(".log_noinit.psram_scan")));
 
-/* DTCM stores need a read-back to durably land across a reset (issue #13). */
+/* DTCM stores need a read-back to durably land across a reset
+   (owhinata/wio-lite-ai#13). */
 static void psram_scan_persist(void)
 {
 	volatile uint32_t *p = (volatile uint32_t *)&psram_scan;

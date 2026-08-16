@@ -14,9 +14,9 @@
  * the host against the tx_api.h shim.
  *
  * The actual number formatting is the clean-room formatter in svc/fmt.c (issue
- * #28); this file only supplies the staging-buffer putc sink (cli_out_putc, ctx
- * = the instance) and the lock/colour brackets.  Behaviour is unchanged from the
- * earlier inline formatter.
+ * owhinata/stm32f746g-disco#28); this file only supplies the staging-buffer putc
+ * sink (cli_out_putc, ctx = the instance) and the lock/colour brackets.
+ * Behaviour is unchanged from the earlier inline formatter.
  */
 #include <stdarg.h>
 #include <stddef.h>
@@ -69,7 +69,7 @@ static void out_str(struct cli_instance *sh, const char *s)
 		cli_out_putc(sh, *s++);
 }
 
-/* ---- output bracket (lock + bg line-break, issues #5/#25) --------------- */
+/* ---- output bracket (lock + bg line-break, owhinata/stm32f746g-disco#5/#25) --- */
 
 int cli_out_begin(struct cli_instance *sh)
 {
@@ -77,7 +77,8 @@ int cli_out_begin(struct cli_instance *sh)
 		sh->tx_failed = 1;      /* so the command result is forced non-zero */
 		return -1;
 	}
-	/* Background job (issue #25): on the FIRST output since the foreground prompt
+	/* Background job (owhinata/stm32f746g-disco#25): on the FIRST output since the
+    foreground prompt
 	 * was last (re)drawn, break to a fresh line so this output does not splice
 	 * into the user's half-typed line, and invalidate the fg's render bookkeeping
 	 * (old_rows/draw_row = 0 -> "draw at the cursor, do not erase") so the fg

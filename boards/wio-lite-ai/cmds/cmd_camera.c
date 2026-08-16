@@ -5,7 +5,7 @@
 /**
  * @file    cmd_camera.c
  * @brief   `camera` shell command: OV2640 bring-up, snapshot, continuous stream
- *          and LCD preview (issue #8).
+ *          and LCD preview (owhinata/wio-lite-ai#8).
  *
  *   camera probe          power-cycle the module and identify the sensor
  *   camera on | off       run / undo the power-up sequence (no ID read)
@@ -24,8 +24,8 @@
  * a settled frame is well under 1, and anything in the tens is a gain landing
  * mid-readout.
  *
- * READ THE RATIO BETWEEN THE THREE CHANNELS, NOT JUST dR (issue #44).  A gain
- * landing mid-readout lands once, at a varying size.  A DEAD DVP DATA LINE gives
+ * READ THE RATIO BETWEEN THE THREE CHANNELS, NOT JUST dR (owhinata/wio-lite-ai#44).  A
+ * gain landing mid-readout lands once, at a varying size.  A DEAD DVP DATA LINE gives
  * the same step size in EVERY frame at a random row, and the ratio between the
  * channels names the line, because a DVP bit sits at a fixed weight in each
  * channel.  With the byte order this driver uses (IMAGE_MODE bit 0 set, so the
@@ -39,9 +39,9 @@
  *     D5      4     1     0          D1      0    16     2
  *     D4      2     0    16          D0      0     8     1
  *
- * Issue #44 was `dR 8.00  dG 2.05  dB 0.02` in every single capture: DCMI_D6
- * (PE5, ball C3 -> FPC-24 pin 11) was open inside the camera module, so that one
- * bit was sampled off a floating pin.  It read as a constant per row, drifting
+ * owhinata/wio-lite-ai#44 was `dR 8.00  dG 2.05  dB 0.02` in every single capture:
+ * DCMI_D6 (PE5, ball C3 -> FPC-24 pin 11) was open inside the camera module, so that
+ * one bit was sampled off a floating pin.  It read as a constant per row, drifting
  * between the rails every few rows, which is a horizontal stripe -- and since the
  * bit is only 8/31 of R and 2/63 of G, the picture still looked broadly right.
  *
@@ -61,9 +61,9 @@
  * schematic could not settle (XCLK rate, PWDN/RESETB polarity, SCCB pull-ups and
  * bit rate, the read style, the DVP byte swap, the warm-up count).  They existed
  * because the internal flash is rated for ~10k erase cycles and sweeping an
- * unknown by reflashing burns them -- the lesson from issue #7's LCD bring-up.
- * The board answered every one of them and has not changed its mind since, so
- * phase 3c-2 folded the answers into constants and deleted the knobs.  `reg`
+ * unknown by reflashing burns them -- the lesson from owhinata/wio-lite-ai#7's LCD
+ * bring-up.  The board answered every one of them and has not changed its mind since,
+ * so phase 3c-2 folded the answers into constants and deleted the knobs.  `reg`
  * stays: poking the sensor's registers is still how you learn anything about it.
  *
  * Note `camera off` does NOT remove power: the camera's 2V8 rail comes off a
@@ -101,8 +101,8 @@
  * The frame lives in the PSRAM, and `psram`/`membench`/`devmem`/`wifi flash`
  * can RETUNE that bus.  Doing so while the DCMI's DMA is writing it -- or while
  * `save`/`send` is reading it -- is not a spoiled image: a memory-mapped access
- * to a half-configured OCTOSPI stalls the AXI indefinitely (issue #3).  There
- * are two consoles, so "the user would not do that" is not an argument.
+ * to a half-configured OCTOSPI stalls the AXI indefinitely (owhinata/wio-lite-ai#3).
+ * There are two consoles, so "the user would not do that" is not an argument.
  *
  * psram_acquire_shared() is the right guard for that: it refuses a command that
  * is RECONFIGURING OCTOSPI1, and nothing else.  It deliberately does NOT refuse
@@ -258,7 +258,7 @@ static int cmd_camera_info(struct cli_instance *sh, int argc, char **argv)
 		cam_preview_stats(&shown, &dropped, &blit_us);
 		/* "on, stream LOST" is the latched state, and it is worth distinguishing
 		   from a plain stop: it means the DCMI tore the stream down underneath a
-		   client that still believes it is running (issue #9 phase 3,
+		   client that still believes it is running (owhinata/wio-lite-ai#9 phase 3,
 		   app/cam_band.c).  Nothing re-arms by itself -- re-issuing the command
 		   does -- so this line has to say which of the two happened. */
 		cli_print(sh, "preview: %s (%u AXI-SRAM bands of %u rows, rotated to "
@@ -819,8 +819,8 @@ static int cmd_stream_stats(struct cli_instance *sh, int argc, char **argv)
 	/* The figure of merit for the OCTOSPI1 contention work: DMA FIFO errors are
 	   tolerated (they do not stop the stream) but their RATE says how close the
 	   bus is to not keeping up -- which is what decides whether the LTDC can
-	   scan out at the same time (phase 3c).  Issue #35 expects zero in band mode:
-	   the DCMI writes AXI-SRAM there and never touches OCTOSPI1 at all. */
+	   scan out at the same time (phase 3c).  owhinata/wio-lite-ai#35 expects zero in band
+	   mode:  the DCMI writes AXI-SRAM there and never touches OCTOSPI1 at all. */
 	cli_print(sh, "dma fe:    %lu\r\n", (unsigned long)st.dma_fe);
 	if (st.elapsed_ms != 0u) {
 		uint32_t e10 = (uint32_t)((uint64_t)st.dma_fe * 10000u / st.elapsed_ms);
@@ -872,10 +872,11 @@ CLI_SUBCMD_SET_CREATE(camera_stream_subcmds,
 
 #if BSP_ENABLE_LCD
 /*
- * `camera preview on` starts its own stream (issue #35): a BAND stream, in which
- * the DCMI lands 60-row slices in AXI-SRAM instead of whole frames in the PSRAM
- * ring.  That is the whole point of #35 -- the rotation's strided reads then come
- * off internal RAM and the camera leaves OCTOSPI1 to the display.
+ * `camera preview on` starts its own stream (owhinata/wio-lite-ai#35): a BAND stream,
+ * in which the DCMI lands 60-row slices in AXI-SRAM instead of whole frames in the
+ * PSRAM ring.  That is the whole point of owhinata/wio-lite-ai#35 -- the rotation's
+ * strided reads then come off internal RAM and the camera leaves OCTOSPI1 to the
+ * display.
  *
  * `camera stream start` is untouched and still does whole frames into the ring,
  * for the pipeline counters and for anything later that wants frames rather than

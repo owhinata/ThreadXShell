@@ -4,11 +4,12 @@
  */
 /**
  * @file    cmd_sleep.c
- * @brief   `sleep` (seconds) and `usleep` (microseconds) delay commands (#21).
+ * @brief   `sleep` (seconds) and `usleep` (microseconds) delay commands
+ * (owhinata/stm32f746g-disco#21).
  *
  * `sleep N`  -- block N seconds, cancellable with Ctrl+C.  Built on cli_sleep()
- *               (issue #16): it waits on the instance event flags, so a 0x03
- *               wakes it and the dispatcher prints "^C".
+ *               (owhinata/stm32f746g-disco#16): it waits on the instance event
+ * flags, so a 0x03 wakes it and the dispatcher prints "^C".
  * `usleep N` -- busy-wait N microseconds on the DWT cycle counter (udelay, CPU
  *               clock; CLI_CPU_CYCLES_PER_US is the board's cycles/us).  Short,
  *               CPU-bound, NOT interruptible -- capped small; use `sleep` for

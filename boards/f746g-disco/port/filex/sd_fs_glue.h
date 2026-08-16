@@ -4,7 +4,8 @@
  */
 /**
  * @file    sd_fs_glue.h
- * @brief   Lazy-mount singleton for the microSD filesystem (issue #34).
+ * @brief   Lazy-mount singleton for the microSD filesystem
+ * (owhinata/stm32f746g-disco#34).
  *
  * The microSD analogue of fs_glue.h: one FX_MEDIA over fx_sd_driver, mounted on
  * first use, with the same reader/writer ownership model.  Independent of the

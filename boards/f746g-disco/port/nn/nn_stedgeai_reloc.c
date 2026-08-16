@@ -4,7 +4,8 @@
  */
 /**
  * @file    nn_stedgeai_reloc.c
- * @brief   X-CUBE-AI relocatable-network nn backend (issue #92, Epic #80 P5).
+ * @brief   X-CUBE-AI relocatable-network nn backend (owhinata/stm32f746g-disco#92, Epic
+ * owhinata/stm32f746g-disco#80 P5).
  *
  * Runtime model swap for the ST Edge AI Core runtime: instead of baking one model
  * into Flash (nn_stedgeai.c, STAI API), this backend loads a position-independent
@@ -12,7 +13,7 @@
  * `stedgeai generate --relocatable --target stm32f7`) from the SD card at runtime
  * and runs it XIP via the ST host loader (ai_reloc_network.c) + the legacy
  * ai_rel_network_* API.  Same "SD swap, no reflash" capability the tflm backend
- * has (issue #89 P2), but on the X-CUBE-AI runtime -- so it plugs into the same
+ * has (owhinata/stm32f746g-disco#89 P2), but on the X-CUBE-AI runtime -- so it plugs into the same
  * nn vtable load_region()/reload() path and cmd_ai's `ai model load`.
  *
  * SD-only: there is NO built-in model.  open() returns an empty handle (0 in/out);
@@ -82,7 +83,7 @@ struct reloc_model {
 static struct reloc_model g_reloc;
 
 /* =====================================================================
- * Bounded .bin verifier (issue #92, codex BLOCKING).
+ * Bounded .bin verifier (owhinata/stm32f746g-disco#92, codex BLOCKING).
  *
  * The ST loader takes no length and blindly follows in-object offsets
  * (rt_get_info / install / ram_update / entry dispatch), so a short/corrupt .bin
@@ -295,7 +296,7 @@ static int reloc_map(struct nn_tensor *t, const ai_buffer *b)
 
 static void reloc_set_name(const char *name)
 {
-	/* "sd:<basename>" for display parity with the tflm SD path (issue #89). */
+	/* "sd:<basename>" for display parity with the tflm SD path (owhinata/stm32f746g-disco#89). */
 	size_t n;
 	g_reloc.name[0] = 's'; g_reloc.name[1] = 'd'; g_reloc.name[2] = ':';
 	for (n = 0; name && name[n] && n + 4u < sizeof(g_reloc.name); n++)

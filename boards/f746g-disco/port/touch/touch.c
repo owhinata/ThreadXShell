@@ -5,7 +5,7 @@
 /**
  * @file    touch.c
  * @brief   FT5336 capacitive touch panel driver: I2C3 bring-up + polled
- *          multi-touch read (issue #54).
+ *          multi-touch read (owhinata/stm32f746g-disco#54).
  *
  * See touch.h for the API contract and the hardware facts.  Setup:
  *
@@ -17,8 +17,8 @@
  *     touch_init() only sets up the GPIO/I2C and the mutex; the first bus
  *     transaction is lazy (touch_probe()/touch_read()/touch_irq_enable()).
  *   - The FT5336 INT line (PI13, EXTI15_10) drives an interrupt-driven wake
- *     (touch_irq_enable, issue #62): the GUIX input thread blocks on it and
- *     idles at ~0 % CPU instead of polling.  EXTI line 13 is SHARED with PC13
+ *     (touch_irq_enable, owhinata/stm32f746g-disco#62): the GUIX input thread blocks
+ * on it and idles at ~0 % CPU instead of polling.  EXTI line 13 is SHARED with PC13
  *     (SD card-detect): SYSCFG_EXTICR4 maps line 13 to exactly one port, so PI13
  *     and PC13 cannot both use EXTI13.  SD-detect is polled (port/sd/sd_card.c),
  *     so PI13 owns line 13 -- do not move SD-detect to EXTI13 without resolving
@@ -63,7 +63,8 @@
 
 /* FT5336 gesture/interrupt-mode register (ft5336.h GMODE 0xA4): 0x01 = interrupt
    (trigger) mode -> the controller drives INT on touch; 0x00 = polling (the
-   power-on default, INT idle).  We arm trigger mode to get EXTI edges (#62). */
+   power-on default, INT idle).  We arm trigger mode to get EXTI edges
+   (owhinata/stm32f746g-disco#62). */
 #define FT5336_GMODE_REG     0xA4u
 #define FT5336_GMODE_TRIGGER 0x01u
 
@@ -108,14 +109,16 @@ static bool touch_up;               /* touch_init() brought the bus up       */
 static bool touch_tried;            /* touch_init() ran (idempotent latch)   */
 static TX_MUTEX touch_lock;         /* per-operation serialization           */
 
-/* I2C-IT completion (#62): the Rx/Tx/error HAL callback posts touch_i2c_done;
+/* I2C-IT completion (owhinata/stm32f746g-disco#62): the Rx/Tx/error HAL callback
+   posts touch_i2c_done;
    the issuing thread bounded-waits on it (no busy-wait).  touch_i2c_active gates
    a late post after a recovered timeout; touch_i2c_err carries the error verdict. */
 static TX_SEMAPHORE     touch_i2c_done;
 static volatile int     touch_i2c_active;
 static volatile int     touch_i2c_err;
 
-/* EXTI13 wake (#62): the PI13 ISR posts touch_evt_sem; the GUIX input thread
+/* EXTI13 wake (owhinata/stm32f746g-disco#62): the PI13 ISR posts touch_evt_sem; the
+   GUIX input thread
    blocks on it (touch_wait_event) and idles at ~0 % CPU.  touch_irq_armed lets
    the ISR be silenced (park / disarm) without tearing down the EXTI config. */
 static TX_SEMAPHORE     touch_evt_sem;
@@ -224,7 +227,8 @@ int touch_init(void)
 
 	if (tx_mutex_create(&touch_lock, "touch", TX_INHERIT) != TX_SUCCESS)
 		return TOUCH_ERR_HAL;
-	/* IT completion + EXTI wake semaphores (#62), unwind on failure. */
+	/* IT completion + EXTI wake semaphores (owhinata/stm32f746g-disco#62), unwind on
+    failure. */
 	if (tx_semaphore_create(&touch_i2c_done, "ts_i2c", 0) != TX_SUCCESS) {
 		tx_mutex_delete(&touch_lock);
 		return TOUCH_ERR_HAL;
@@ -236,8 +240,10 @@ int touch_init(void)
 	}
 
 	__HAL_RCC_GPIOH_CLK_ENABLE();
-	__HAL_RCC_GPIOI_CLK_ENABLE();    /* PI13 = FT5336 INT (EXTI13, #62)        */
-	__HAL_RCC_SYSCFG_CLK_ENABLE();   /* EXTICR for the PI13 EXTI line          */
+	/* PI13 = FT5336 INT (EXTI13, owhinata/stm32f746g-disco#62) */
+	__HAL_RCC_GPIOI_CLK_ENABLE();
+	/* EXTICR for the PI13 EXTI line */
+	__HAL_RCC_SYSCFG_CLK_ENABLE();
 	__HAL_RCC_I2C3_CLK_ENABLE();
 
 	/* I2C3: PH7 = SCL, PH8 = SDA (UM1907 DISCOVERY I2C), AF4 open-drain.
@@ -262,7 +268,8 @@ int touch_init(void)
 		return TOUCH_ERR_HAL;
 	}
 
-	/* Arm the I2C3 event/error interrupts for the IT-driven reads/writes (#62).
+	/* Arm the I2C3 event/error interrupts for the IT-driven reads/writes
+    (owhinata/stm32f746g-disco#62).
 	   Safe to enable now even before any transaction.  The EXTI line + GMODE are
 	   armed later in touch_irq_enable() -- they need bus I/O, which init avoids. */
 	HAL_NVIC_SetPriority(I2C3_EV_IRQn, TOUCH_I2C_IRQ_PRIO, 0);
@@ -341,8 +348,8 @@ int touch_read(struct touch_state *st)
 
 		/* Drop the FT5336 "not touched" sentinel: an idle or just-released
 		   controller (notably while left in trigger mode after the GUIX input
-		   path, #73) reports a nonzero TD_STATUS count with all-ones
-		   (0xFFF/0xFFF) out-of-panel coordinates.  Keep only points inside the
+		   path, owhinata/stm32f746g-disco#73) reports a nonzero TD_STATUS count with
+		   all-ones (0xFFF/0xFFF) out-of-panel coordinates.  Keep only points inside the
 		   panel -- the same validity rule the GUIX driver applies
 		   (guix_touch.c) -- so callers never see the phantom point. */
 		if (x >= TOUCH_PANEL_W || y >= TOUCH_PANEL_H)
@@ -361,7 +368,7 @@ int touch_read(struct touch_state *st)
 	return TOUCH_OK;
 }
 
-/* ---- EXTI13 wake + IT arming (issue #62) -------------------------------- */
+/* ---- EXTI13 wake + IT arming (owhinata/stm32f746g-disco#62) ------------------- */
 
 int touch_irq_enable(void)
 {
@@ -430,7 +437,7 @@ void touch_evt_signal(void)
 	(void)tx_semaphore_put(&touch_evt_sem);
 }
 
-/* ---- ISRs + HAL completion callbacks (issue #62) ------------------------ */
+/* ---- ISRs + HAL completion callbacks (owhinata/stm32f746g-disco#62) ----------- */
 
 /* EXTI line 13 (PI13 = FT5336 INT).  HAL clears the pending bit and dispatches
    to HAL_GPIO_EXTI_Callback below.  Line 13 is shared with PC13 (SD-detect), but

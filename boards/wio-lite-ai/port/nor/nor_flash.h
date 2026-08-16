@@ -4,9 +4,9 @@
  */
 /**
  * @file    nor_flash.h
- * @brief   External NOR flash (OCTOSPI2 / Winbond W25Q128JV) driver (issue #37).
+ * @brief   External NOR flash (OCTOSPI2 / Winbond W25Q128JV) driver (owhinata/wio-lite-ai#37).
  *
- * The 16 MB serial NOR on OCTOSPIM Port 2.  Until issue #25 the app executed in
+ * The 16 MB serial NOR on OCTOSPIM Port 2.  Until owhinata/wio-lite-ai#25 the app executed in
  * place from this device and the bootloader owned it; now nothing maps it, so the
  * app brings it up itself -- the same ownership move app/psram.c made for the
  * OCTOSPI1 PSRAM, and the same idiom: bare registers, bounded poll loops,

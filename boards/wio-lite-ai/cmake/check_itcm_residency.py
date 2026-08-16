@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Post-link guard for the ITCM-resident interrupt paths (issues #24, #29, #39).
+"""Post-link guard for the ITCM-resident interrupt paths (owhinata/wio-lite-ai#24, #29,
+#39).
 
 WHY THIS EXISTS
 ---------------
 The interrupt paths are placed in ITCM by input-section patterns in
 ldscript/STM32H725AEIx_IROM.ld, and that placement fails OPEN: a pattern that
 stops matching does not break the link, it just moves the code back to the flash
-and quietly gives back the interrupt latency that issues #24/#29 bought.
+and quietly gives back the interrupt latency that owhinata/wio-lite-ai#24/#29 bought.
 
 The linker script has ASSERTs for this, but they cannot be trusted once the
-firmware is built with LTO (issue #39).  Each is shaped like
+firmware is built with LTO (owhinata/wio-lite-ai#39).  Each is shaped like
 
     ASSERT(DEFINED(sym) ? (sym < ORIGIN(ITCM) + LENGTH(ITCM)) : 1, "...")
 
@@ -62,13 +63,13 @@ REQUIRED_RESIDENTS = (
     "_tx_thread_schedule",              # ThreadX PendSV (port assembly)
     "_tx_timer_interrupt",              # ThreadX tick (port assembly)
     "SysTick_Handler",                  # tick vector -> HAL_IncTick + ThreadX gate
-    "USART1_IRQHandler",                # RTL8720 UART RX (issue #23)
+    "USART1_IRQHandler",                # RTL8720 UART RX (owhinata/wio-lite-ai#23)
     "UART9_IRQHandler",
     "fault_handler_c",                  # fault handler body (app/fault.c)
-    "_txe_event_flags_set",             # RX ISR wake-up path (issue #23 U0-3)
+    "_txe_event_flags_set",             # RX ISR wake-up path (owhinata/wio-lite-ai#23 U0-3)
     "_tx_event_flags_set",
     "_tx_thread_system_resume",
-    "_tx_thread_system_preempt_check",  # ...and its two tails (issue #29)
+    "_tx_thread_system_preempt_check",  # ...and its two tails (owhinata/wio-lite-ai#29)
     "_tx_timer_system_deactivate",
 )
 

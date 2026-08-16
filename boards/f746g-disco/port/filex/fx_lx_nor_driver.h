@@ -4,7 +4,8 @@
  */
 /**
  * @file    fx_lx_nor_driver.h
- * @brief   FileX media driver on LevelX NOR over QSPI (issue #30).
+ * @brief   FileX media driver on LevelX NOR over QSPI
+ * (owhinata/stm32f746g-disco#30).
  */
 #ifndef FX_LX_NOR_DRIVER_H
 #define FX_LX_NOR_DRIVER_H

@@ -4,12 +4,12 @@
  */
 /**
  * @file    wifi_connect.c
- * @brief   The association sequence (issue #37 step 4).
+ * @brief   The association sequence (owhinata/wio-lite-ai#37 step 4).
  *
  * See wifi_connect.h for why this is a module of its own.  Everything below was
- * moved verbatim out of shell/cmds/cmd_wifi.c, where it grew across issues #5,
- * #30 and #32; the only change is that the sequence now takes its parameters
- * instead of reading argv, and can earn the firmware generation itself when the
+ * moved verbatim out of shell/cmds/cmd_wifi.c, where it grew across owhinata/wio-lite-ai#5,
+ * owhinata/wio-lite-ai#30 and #32; the only change is that the sequence now takes its
+ * parameters instead of reading argv, and can earn the firmware generation itself when the
  * caller has no operator to ask.
  */
 #include "wifi_connect.h"
@@ -52,12 +52,12 @@ uint8_t wifi_fw_gen_of(const char *ver)
 }
 
 /*
- * Coordinate a long eRPC flow with the L2 bridge (issue #30 B2b).
+ * Coordinate a long eRPC flow with the L2 bridge (owhinata/wio-lite-ai#30 B2b).
  *
  * These flows used to be REFUSED while the host stack was up (`nx_net_guard`), which is
  * why recovering from an AP outage meant tearing the whole interface down.  Two things
- * made the refusal obsolete: issue #30 B1 stopped `wifi connect` touching the module's
- * lwIP address and DHCP client, and the SDK shows the tap survives the off->on(STA)
+ * made the refusal obsolete: owhinata/wio-lite-ai#30 B1 stopped `wifi connect` touching the
+ * module's lwIP address and DHCP client, and the SDK shows the tap survives the off->on(STA)
  * cycle (`netif_add()` runs only inside LwIP_Init(); wifi_on/off only move netif
  * up/down flags, never netif->input).
  *
@@ -78,9 +78,9 @@ int wifi_hold_bridge(struct cli_instance *sh, const char *what)
 }
 
 /*
- * Bring the L2 bridge up after a successful association (issue #30 B2b).  MUST be called
- * with the eRPC session already closed -- see the note at the call site.  Prints what
- * happened and returns the command's exit status.
+ * Bring the L2 bridge up after a successful association (owhinata/wio-lite-ai#30 B2b).  MUST
+ * be called with the eRPC session already closed -- see the note at the call site.  Prints
+ * what happened and returns the command's exit status.
  */
 #define WIFI_ARM_POLL_MS   100u
 #define WIFI_ARM_WAIT_MS   20000u
@@ -128,8 +128,8 @@ static int wifi_arm_bridge(struct cli_instance *sh)
 
 /*
  * How many times to attempt an association, and the wall-clock ceiling across all of
- * them (issue #40).  The measured per-attempt failure rate was about one in two on the
- * 5 GHz AP, so three attempts take that to roughly one in eight, and the observed
+ * them (owhinata/wio-lite-ai#40).  The measured per-attempt failure rate was about one in two
+ * on the 5 GHz AP, so three attempts take that to roughly one in eight, and the observed
  * failures came back in 4-7.5 s (a boot-path attempt took the longest) -- fast enough
  * for all three to run.
  *
@@ -193,9 +193,10 @@ int wifi_enter_sta(struct cli_instance *sh, struct wifi_rpc_opts *o)
 	}
 	return 0;
 }
-/* The association sequence (issue #5 inc 3): put the module in STA mode, associate
- * with the AP, and arm the L2 bridge the host stack rides on (issue #30 B2b) -- L3
- * is `net`'s job, see the note at the end of this function.  The steps are
+/* The association sequence (owhinata/wio-lite-ai#5 inc 3): put the module in STA mode,
+   associate
+ * with the AP, and arm the L2 bridge the host stack rides on (owhinata/wio-lite-ai#30 B2b) --
+ * L3 is `net`'s job, see the note at the end of this function.  The steps are
  * synchronous eRPC calls on the USART1 link (at whatever rate it runs now);
  * associating blocks on the module up to 22 s (abortable with Ctrl+C). */
 int wifi_connect_run(struct cli_instance *sh, const char *ssid, const char *pass,
@@ -213,8 +214,8 @@ int wifi_connect_run(struct cli_instance *sh, const char *ssid, const char *pass
 	if (net_shell_guard(sh, "wifi connect"))
 		return 1;
 	/*
-	 * Disarm before claiming (issue #32).  An operator typing `wifi connect` during an
-	 * outage is the very moment an automatic attempt is likely to be holding the coarse
+	 * Disarm before claiming (owhinata/wio-lite-ai#32).  An operator typing `wifi connect` during
+	 * an outage is the very moment an automatic attempt is likely to be holding the coarse
 	 * mutex, and rtl_link_begin() below would give up on it after RTL_LINK_CLAIM_WAIT_MS
 	 * and report a busy link.  The credentials are about to be replaced by this command
 	 * anyway, so cutting the attempt short costs nothing: success re-arms below.
@@ -223,7 +224,7 @@ int wifi_connect_run(struct cli_instance *sh, const char *ssid, const char *pass
 	if (rtl_link_begin(sh, true) != RTL_LINK_READY)
 		return 1;
 	/*
-	 * Check the firmware proof BEFORE spending 15 s associating (issue #30 B2b).
+	 * Check the firmware proof BEFORE spending 15 s associating (owhinata/wio-lite-ai#30 B2b).
 	 *
 	 * Since associating is what brings the interface up, a connect that cannot bridge
 	 * leaves the module joined to an AP with no way to carry a packet -- which is worse
@@ -232,11 +233,11 @@ int wifi_connect_run(struct cli_instance *sh, const char *ssid, const char *pass
 	 * fires exactly when the host genuinely does not know what is on the module.
 	 *
 	 * It cannot be earned automatically: rpc_system_version corrupts the heap of
-	 * pre-N2 firmware, which is why `wifi ver` is a deliberate act (issue #20).
+	 * pre-N2 firmware, which is why `wifi ver` is a deliberate act (owhinata/wio-lite-ai#20).
 	 */
 	if (erpc_module_gen() < WIFI_BRIDGE_MIN_GEN && earn_gen) {
 		/*
-		 * Earn it here (issue #37 step 4).  An unattended sequence has nobody to
+		 * Earn it here (owhinata/wio-lite-ai#37 step 4).  An unattended sequence has nobody to
 		 * ask, and it can never inherit the proof either: rtl8720_init() drives
 		 * CHIP_EN low at every boot, so the module in front of us has just been
 		 * power-cycled and the generation is genuinely unknown again.
@@ -289,7 +290,7 @@ int wifi_connect_run(struct cli_instance *sh, const char *ssid, const char *pass
 
 	/*
 	 * 1+2) STA mode, then associate -- and do it again if the radio simply had a bad
-	 * draw (issue #40).
+	 * draw (owhinata/wio-lite-ai#40).
 	 *
 	 * Measured on board #2 against a 5 GHz AP at -63 dBm: 4 of 8 associations failed
 	 * with the module reporting RTW_NONE_NETWORK or RTW_4WAY_HANDSHAKE_TIMEOUT, while
@@ -303,8 +304,8 @@ int wifi_connect_run(struct cli_instance *sh, const char *ssid, const char *pass
 	 * outcomes, and a repeat attempt is what has always recovered them.
 	 *
 	 * That is why this looks like "typing `wifi connect` twice works": the operator was
-	 * the retry loop.  The boot configuration (issue #37) has no operator, gets exactly
-	 * one attempt, and so was left failing every time -- which is the bug reported.
+	 * the retry loop.  The boot configuration (owhinata/wio-lite-ai#37) has no operator, gets
+	 * exactly one attempt, and so was left failing every time -- which is the bug reported.
 	 *
 	 * Both steps repeat, not just the join: every manual recovery went through
 	 * wifi_enter_sta() again, so that is the sequence with evidence behind it.
@@ -322,7 +323,7 @@ int wifi_connect_run(struct cli_instance *sh, const char *ssid, const char *pass
 		 * wifi_connect).  The 15 s this used to wait expired while the module was
 		 * still trying, so its answer came back as a stale frame and its serial mutex
 		 * stayed held for another five seconds -- long enough for the next command to
-		 * queue behind a call that had already been given up on (issue #32).  Do not
+		 * queue behind a call that had already been given up on (owhinata/wio-lite-ai#32).  Do not
 		 * shorten it to fit more retries in: that reintroduces the stale reply.
 		 */
 		cli_print(sh, "wifi: connecting to \"%s\"%s...\r\n",
@@ -414,10 +415,10 @@ no_retry:
 		cli_print(sh, "  (associated on attempt %u)\r\n", attempt);
 
 	/*
-	 * ...and that is the whole command (issue #30 B1).  It used to run the MODULE's DHCP
-	 * client here and print the lease, which is why `wifi` (L2) ended up owning an L3
+	 * ...and that is the whole command (owhinata/wio-lite-ai#30 B1).  It used to run the MODULE's
+	 * DHCP client here and print the lease, which is why `wifi` (L2) ended up owning an L3
 	 * step; the address it produced belongs to the module's lwIP, and the host stack --
-	 * the only thing that carries traffic since issue #23 U4 -- throws it away
+	 * the only thing that carries traffic since owhinata/wio-lite-ai#23 U4 -- throws it away
 	 * immediately (arming the bridge stops that DHCP client and zeroes the netif address, because
 	 * the WLAN driver filters received IP against it).  So association is all that
 	 * happens here, and L3 lives entirely in `net`.
@@ -425,15 +426,15 @@ no_retry:
 	rtl_link_end(sh);
 	cli_print(sh, "wifi: connected\r\n");
 	/*
-	 * Capture the credentials for issue #32.  A no-op unless `wifi autoreconnect on` has
-	 * been run, which is what keeps holding a passphrase in RAM an opt-in rather than
+	 * Capture the credentials for owhinata/wio-lite-ai#32.  A no-op unless `wifi autoreconnect
+	 * on` has been run, which is what keeps holding a passphrase in RAM an opt-in rather than
 	 * something every association does behind the operator's back.
 	 */
 	wifi_auto_arm(ssid, pass, security);
 	if (wifi_auto_enabled())
 		cli_print(sh, "  autoreconnect armed for \"%s\"\r\n", ssid);
 	/*
-	 * Bring the bridge up as part of associating (issue #30 B2b), so there is no
+	 * Bring the bridge up as part of associating (owhinata/wio-lite-ai#30 B2b), so there is no
 	 * user-visible "which stack owns the network" mode left.
 	 *
 	 * ORDER IS LOAD-BEARING: rtl_link_end() above released the coarse mutex and our

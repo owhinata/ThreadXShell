@@ -4,8 +4,8 @@
  */
 /**
  * @file    cam_band.c
- * @brief   Refcounted fan-out for the camera's band stream (issue #9 phase 3).
- *          See cam_band.h for why this exists and what it promises.
+ * @brief   Refcounted fan-out for the camera's band stream (owhinata/wio-lite-ai#9
+ * phase 3).  See cam_band.h for why this exists and what it promises.
  */
 #include "cam_band.h"
 

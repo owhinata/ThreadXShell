@@ -5,7 +5,7 @@
 /**
  * @file    fal_nor.c
  * @brief   FAL flash device over the external NOR, plus FlashDB's log/assert hooks
- *          (issue #37).
+ *          (owhinata/wio-lite-ai#37).
  *
  * This is the whole of FlashDB's contact with the hardware: four operations
  * forwarded to port/nor, which owns the controller, the device mutex and the

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 ThreadX Shell Project
-"""Convert a raw YUV422 frame captured by `camera save` to PNG (issue #45).
+"""Convert a raw YUV422 frame captured by `camera save` to PNG
+(owhinata/stm32f746g-disco#45).
 
 The OV5640 emits packed YUV 4:2:2 as YUYV (Y0 U Y1 V, two pixels per four
 bytes); the firmware writes it raw, width*height*2 bytes.  Luma/chroma are

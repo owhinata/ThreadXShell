@@ -13,17 +13,19 @@
  * HAL -- it sits in the freestanding svc/ layer next to fmt.c/log.c and is
  * unit-tested on the host (shell/test/test_ymodem.c) against mock IO.
  *
- * Ported verbatim from ../stm32f746g-disco (its issue #50) for issue #19 M4: the
- * RTL8720DN full-chip flash backup (`wifi flash backup`) needs to stream megabytes
- * off the board, and this is the shell's designed binary-transfer path.  The shell
- * wires @ref ym_io to cli_read_byte()/cli_write() (see shell/cmds/cmd_xfer.c) and
- * @ref ym_source to the RTL8720 download-protocol flash reader.
+ * Ported verbatim from ../stm32f746g-disco (its owhinata/stm32f746g-disco#50) for
+ * owhinata/wio-lite-ai#19 M4: the RTL8720DN full-chip flash backup (`wifi flash
+ * backup`) needs to stream megabytes off the board, and this is the shell's designed
+ * binary-transfer path. The shell wires @ref ym_io to cli_read_byte()/cli_write()
+ * (see shell/cmds/cmd_xfer.c) and @ref ym_source to the RTL8720 download-protocol
+ * flash reader.
  *
- * Issue #19 M5 added the RECEIVE direction (@ref ymodem_recv / @ref ym_sink): to
- * (re)write the RTL8720DN's firmware the board must be able to take an image FROM
- * the PC -- that is also the only way to restore the verified stock backup, so it
- * has to exist BEFORE anything writes the module's boot sectors.  The sender is
- * deliberately untouched by that work: it is the M4 path already proven on board #2.
+ * owhinata/wio-lite-ai#19 M5 added the RECEIVE direction (@ref ymodem_recv / @ref
+ * ym_sink): to (re)write the RTL8720DN's firmware the board must be able to take an
+ * image FROM the PC -- that is also the only way to restore the verified stock
+ * backup, so it has to exist BEFORE anything writes the module's boot sectors.  The
+ * sender is deliberately untouched by that work: it is the M4 path already proven on
+ * board #2.
  *
  * Clean-room: written from the YMODEM/XMODEM-CRC protocol description, NOT
  * derived from lrzsz (GPL) or any other implementation.  Interoperates with the
@@ -73,8 +75,8 @@ struct ym_source {
 
 /**
  * Byte sink (the receive-side counterpart of @ref ym_source), injected by the
- * caller.  For issue #19 M5 this is the RTL8720 firmware-image staging buffer in
- * PSRAM (app/rtl8720_img.c).
+ * caller.  For owhinata/wio-lite-ai#19 M5 this is the RTL8720 firmware-image staging
+ * buffer in PSRAM (app/rtl8720_img.c).
  */
 struct ym_sink {
 	void *ctx;

@@ -11,7 +11,7 @@
  * partition; AXI-SRAM (D1) is reserved for what a bus master has to reach, and
  * DTCM holds the reset-persistent log ring (.log_noinit), the NetX packet pool
  * (.nx_pool), the membench scratch (.dtcm_bench), every thread stack and the
- * RTL8720 UART rings (.dtcm_bss), plus the main stack on top (issue #46).  Pure
+ * RTL8720 UART rings (.dtcm_bss), plus the main stack on top (owhinata/wio-lite-ai#46).  Pure
  * introspection -- it reads linker-provided boundary symbols and the C library's
  * malloc accounting; it changes no state and touches only the shell instance
  * passed to it, so it stays reentrant across instances (req §10).
@@ -24,7 +24,7 @@
  *          the link.
  *   RAM    static = _end - ORIGIN(RAM) (.data + .bss + the DMA scratch); the heap
  *          grows up from _end and nothing grows down to meet it, so
- *          used = (heap break) - ORIGIN(RAM).  Since issue #46 the main stack is
+ *          used = (heap break) - ORIGIN(RAM).  Since owhinata/wio-lite-ai#46 the main stack is
  *          NOT here -- it moved to DTCM, which is what makes this number honest:
  *          the free bytes reported are genuinely available, rather than doubling
  *          as the main stack's unaccounted headroom.
@@ -34,14 +34,14 @@
  *          _dtcm_used_end (emitted at the end of the last DTCM section) is the used
  *          count -- read from the linker, not the log/membench internals.  The main
  *          stack sits at the TOP of the same region and is reported separately.
- *   PSRAM  two rows since issue #9 phase 2a, because the window stopped being one
+ *   PSRAM  two rows since owhinata/wio-lite-ai#9 phase 2a, because the window stopped being one
  *          kind of memory.  "PSRAM" is the non-cacheable pool, bounded by the
  *          carve-out rather than by the device so its free bytes stay spendable;
  *          "PSRAM+" is the cacheable carve-out at the top, whose used count comes
  *          from the .psram_ai section bounds rather than from ORIGIN, since it does
  *          not start at one.
  *   ITCM   used = _itcm_used_end - ORIGIN(ITCM), i.e. the .itcm interrupt-path
- *          residents (issue #24) plus the .itcm_bench membench buffer, bump-placed
+ *          residents (owhinata/wio-lite-ai#24) plus the .itcm_bench membench buffer, bump-placed
  *          from ORIGIN exactly like the DTCM block above.  The trailing "itcm:" line
  *          breaks out the resident code size on its own and prints SCB->ITCMCR raw,
  *          which is how the ITCM enable / ECC read-modify-write / retention bits are
@@ -78,7 +78,7 @@
 #define ITCM_LENGTH   (64u * 1024u)
 #define PSRAM_ORIGIN  0x90000000u          /* external OCTOSPI1 APS6408 (issue #3) */
 #define PSRAM_LENGTH  (8u * 1024u * 1024u)
-/* The window is two rows, not one, since issue #9 phase 2a carved its top 2 MB out as
+/* The window is two rows, not one, since owhinata/wio-lite-ai#9 phase 2a carved its top 2 MB out as
  * cacheable (app/mpu.c region 3).  The base row is bounded by the carve-out rather
  * than by the device, so its "free" stays spendable: allocating past PSRAM_AI_ORIGIN
  * would land in memory with different attributes. */
@@ -94,12 +94,13 @@ extern uint8_t _sdata[], _edata[];   /* .data run image in RAM   */
 extern uint8_t _sidata[];            /* .data load image in FLASH */
 extern uint8_t _end[];               /* top of static RAM = heap base */
 extern uint8_t __ram_end[];          /* top of AXI-SRAM (heap ceiling) */
-extern uint8_t _estack[];            /* top of DTCM = initial MSP (issue #46) */
+extern uint8_t _estack[];            /* top of DTCM = initial MSP (owhinata/wio-lite-ai#46) */
 extern uint8_t _smsp_stack[];        /* bottom of the main stack */
 extern uint8_t _dtcm_used_end[];     /* top of the DTCM resident block */
 extern uint8_t _psram_end[];         /* top of PSRAM residents (.psram_noinit) */
-extern uint8_t _psram_ai_start[], _psram_ai_end[];  /* cacheable carve-out (issue #9) */
-extern uint8_t _sitcm[], _eitcm[];   /* .itcm run image in ITCM (issue #24) */
+/* cacheable carve-out (owhinata/wio-lite-ai#9) */
+extern uint8_t _psram_ai_start[], _psram_ai_end[];
+extern uint8_t _sitcm[], _eitcm[];   /* .itcm run image in ITCM (owhinata/wio-lite-ai#24) */
 /* ORIGIN(FLASH) / LENGTH(FLASH) of the app partition, PROVIDEd by the linker
  * script.  Absolute symbols: the ADDRESS carries the value, hence sym(). */
 extern uint8_t __app_flash_start[], __app_flash_size[];
@@ -112,7 +113,7 @@ static uint32_t sym(const uint8_t s[])
 
 /*
  * Bytes of main stack ever used, from the fill pattern SystemInit() stamped over
- * the unused part (issue #46).  Scans up from the bottom for the first word the
+ * the unused part (owhinata/wio-lite-ai#46).  Scans up from the bottom for the first word the
  * pattern no longer covers; everything above it has been touched at some point.
  *
  * This is the main stack's whole safety net, so read a surprising number as real:
@@ -188,7 +189,7 @@ static int cmd_free(struct cli_instance *sh, int argc, char **argv)
 	/* Memory-hierarchy order, not address order: the tightly-coupled RAMs first,
 	 * then on-chip AXI-SRAM, then the internal flash the code runs from, then the
 	 * external window.  `membench` prints its rows in the same order so the two
-	 * can be read side by side (issue #33). */
+	 * can be read side by side (owhinata/wio-lite-ai#33). */
 	print_region(sh, "ITCM",  ITCM_ORIGIN,  ITCM_LENGTH,  itcm_used,
 	             ".itcm ISR paths + .itcm_bench (membench)");
 	print_region(sh, "DTCM",  DTCM_ORIGIN,  DTCM_LENGTH,  dtcm_used,
@@ -213,7 +214,7 @@ static int cmd_free(struct cli_instance *sh, int argc, char **argv)
 	cli_print(sh, "heap:  base 0x%08lX  arena %lu  in-use %lu  free-pool %lu\r\n",
 	          (unsigned long)heap_base, (unsigned long)heap_arena,
 	          (unsigned long)(unsigned)mi.uordblks, (unsigned long)(unsigned)mi.fordblks);
-	/* The main (MSP/ISR) stack, at the top of DTCM since issue #46.  `used` is the
+	/* The main (MSP/ISR) stack, at the top of DTCM since owhinata/wio-lite-ai#46.  `used` is the
 	   high-water mark recovered from the fill pattern, not a live SP reading: this
 	   is the only warning available before an overflow starts eating the DTCM
 	   residents below (see msp_high_water()). */

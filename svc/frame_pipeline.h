@@ -4,18 +4,18 @@
  */
 /**
  * @file    frame_pipeline.h
- * @brief   Camera frame ring + sink dispatch (svc/ layer, #47 design / #46
- *          implementation; multi-sink cascade live since #100/#101).
+ * @brief   Camera frame ring + sink dispatch (svc/ layer, owhinata/stm32f746g-disco#47 design /
+ * owhinata/stm32f746g-disco#46 implementation; multi-sink cascade live since owhinata/stm32f746g-disco#100/#101).
  *
  * One producer (DCMI capture) publishes frames into an N-slot SDRAM ring; many
  * sinks consume them.  The base capture attaches an internal stats sink plus up
  * to three external subscribers (GUIX preview / nncam / MJPEG) that attach and
- * detach at runtime -- the "subscriber cascade" (Epic #99).  This is the @ref frame_desc data contract (frame.h) plus
- * the ownership/back-pressure mechanics, applied to frame distribution the same
- * way @ref fs_device (#34) abstracts media and @ref ym_source (#50) abstracts a
- * byte source.
+ * detach at runtime -- the "subscriber cascade" (Epic owhinata/stm32f746g-disco#99).  This is the @ref frame_desc
+ * data contract (frame.h) plus the ownership/back-pressure mechanics, applied to frame distribution the same
+ * way @ref fs_device (owhinata/stm32f746g-disco#34) abstracts media and @ref ym_source (owhinata/stm32f746g-disco#50)
+ * abstracts a byte source.
  *
- * Layering (issue #43): this core is **freestanding** -- it depends only on
+ * Layering (owhinata/stm32f746g-disco#43): this core is **freestanding** -- it depends only on
  * <stdint.h>/<stddef.h> and an injected mutual-exclusion vtable (@ref
  * frame_os).  It calls NO HAL and NO ThreadX, so it sits in svc/ next to
  * ymodem.c/fmt.c and is host-unit-testable (ring/refcount/policy logic with a
@@ -32,7 +32,7 @@
  *   - pull access (snapshot: save / send / stats) reads the latest published
  *     slot via frame_pipeline_read_latest() (the generalised camera_frame_read),
  *     or pins it with frame_pipeline_pin_latest() to copy a whole frame out of the
- *     lock (camera save/send, #102).
+ *     lock (camera save/send, owhinata/stm32f746g-disco#102).
  * A single on-demand `camera capture` is just the degenerate case: an N=1 ring,
  * no push sinks, one publish, pulled by read_latest -- so the existing
  * camera capture/frame_read/save/send keep their semantics unchanged.
@@ -116,7 +116,7 @@ struct frame_sink {
 	int                      _pins;     /**< slots this sink currently holds (detach) */
 };
 
-/** Compile-time caps for the inline bookkeeping (issue #46 implementation).
+/** Compile-time caps for the inline bookkeeping (owhinata/stm32f746g-disco#46 implementation).
  *  A producer statically allocates one struct frame_pipeline; nslots <= MAX. */
 #ifndef FRAME_PIPELINE_MAX_SLOTS
 #define FRAME_PIPELINE_MAX_SLOTS 8u
@@ -194,7 +194,7 @@ void frame_pipeline_publish(struct frame_pipeline *p, struct frame_desc *f,
 /**
  * Set the current frame format/geometry the producer will publish.  attach()
  * passes these to a sink's open(); a producer calls this before attaching sinks
- * (and, for #45, on a format change -- re-opening sinks is the caller's job).
+ * (and, for owhinata/stm32f746g-disco#45, on a format change -- re-opening sinks is the caller's job).
  */
 void frame_pipeline_set_format(struct frame_pipeline *p, enum frame_format fmt,
                                uint16_t w, uint16_t h);
@@ -203,7 +203,7 @@ void frame_pipeline_set_format(struct frame_pipeline *p, enum frame_format fmt,
  * Register a push sink.  attach() calls s->open() with the pipeline's current
  * format/geometry to negotiate acceptance (<0 from open rejects the attach).
  * The current format is owned by the producer: fixed QVGA RGB565 today (set from
- * its init config); #45 makes it variable, re-opening sinks (close()+open()) on a
+ * its init config); owhinata/stm32f746g-disco#45 makes it variable, re-opening sinks (close()+open()) on a
  * format change.  Returns 0 or <0.
  */
 int frame_pipeline_attach(struct frame_pipeline *p, struct frame_sink *s);
@@ -261,7 +261,7 @@ int frame_pipeline_read_latest(struct frame_pipeline *p, uint32_t off,
  * (refcount != 0) even after a newer publish moves `latest` off it, so the copy is
  * tear-free without holding the pipeline lock across it.  Use for a one-shot
  * snapshot of a live streamed frame (camera save/send) without stalling the
- * producer's publish/DMA-repoint (#102).
+ * producer's publish/DMA-repoint (owhinata/stm32f746g-disco#102).
  */
 const struct frame_desc *frame_pipeline_pin_latest(struct frame_pipeline *p);
 

@@ -4,7 +4,8 @@
  */
 /**
  * @file    cmd_kv.c
- * @brief   `kv` shell command: the persistent configuration store (issue #37).
+ * @brief   `kv` shell command: the persistent configuration store
+ * (owhinata/wio-lite-ai#37).
  *
  *   kv list [prefix]           key, type, value and description
  *   kv get <key>

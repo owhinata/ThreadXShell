@@ -35,7 +35,8 @@
 extern "C" {
 #endif
 
-/** Opaque shell instance; full definition comes with the core (issue #4). */
+/** Opaque shell instance; full definition comes with the core
+    (owhinata/stm32f746g-disco#4). */
 struct cli_instance;
 
 /**
@@ -46,7 +47,8 @@ struct cli_instance;
  *
  * A long-running or large-output handler should poll cli_cancel_requested()
  * (and use cli_sleep() for any delay) so Ctrl+C can interrupt it -- cancellation
- * is cooperative; the core never force-kills the handler thread (issue #16).
+ * is cooperative; the core never force-kills the handler thread
+ * (owhinata/stm32f746g-disco#16).
  */
 typedef int (*cli_cmd_handler_t)(struct cli_instance *sh, int argc, char **argv);
 
@@ -164,9 +166,9 @@ extern const struct cli_cmd __cli_root_cmds_start[];
 extern const struct cli_cmd __cli_root_cmds_end[];
 
 /*
- * Output API (impl. #5).  Handlers print through these; each call formats into a
- * per-instance staging buffer, flushes to the instance's own transport under the
- * TX lock, and is flow-controlled (blocks on TX space, with a timeout).  Return
+ * Output API (impl. owhinata/stm32f746g-disco#5).  Handlers print through these; each call
+ * formats into a per-instance staging buffer, flushes to the instance's own transport under
+ * the TX lock, and is flow-controlled (blocks on TX space, with a timeout).  Return
  * 0 on full success, <0 if output failed (a TX timeout dropped bytes, or the
  * output lock could not be acquired) -- a handler may propagate that as a
  * non-zero exit, and the core also forces a non-zero command result when output
@@ -191,8 +193,9 @@ int cli_hexdump_base(struct cli_instance *sh, const void *data, size_t len,
                      unsigned long long base);
 
 /*
- * Cooperative cancellation (issue #16).  A running command is interrupted only
- * if it checks in -- the core never force-kills the handler thread (req §9).
+ * Cooperative cancellation (owhinata/stm32f746g-disco#16).  A running command is
+ * interrupted only if it checks in -- the core never force-kills the handler thread (req
+ * §9).
  *
  * cli_cancel_requested(): true once the user pressed Ctrl+C (0x03) during THIS
  * command.  Long loops / large output should poll it and return promptly (any
@@ -203,15 +206,16 @@ int cli_hexdump_base(struct cli_instance *sh, const void *data, size_t len,
  * cli_sleep(): a cancellable delay of @p ticks ThreadX ticks (NOT milliseconds).
  * Returns 0 when the full delay elapsed, non-zero if it was cancelled (Ctrl+C)
  * or the instance is stopping; a handler should propagate the non-zero result.
- * ticks == 0 returns 0 immediately.  Building block for watch/sleep (#21).
+ * ticks == 0 returns 0 immediately.  Building block for watch/sleep
+ * (owhinata/stm32f746g-disco#21).
  */
 bool cli_cancel_requested(struct cli_instance *sh);
 int  cli_sleep(struct cli_instance *sh, unsigned ticks);
 
 /*
- * Raw binary console transfer (issue #50).  A command that streams binary data
- * over the same UART as the shell (e.g. a YMODEM send) takes over the console for
- * the duration of the transfer, bypassing the line editor / echo / Ctrl+C poll.
+ * Raw binary console transfer (owhinata/stm32f746g-disco#50).  A command that streams
+ * binary data over the same UART as the shell (e.g. a YMODEM send) takes over the console
+ * for the duration of the transfer, bypassing the line editor / echo / Ctrl+C poll.
  *
  * cli_console_claim(): hold the output lock for the whole transfer (so background
  *   output cannot interleave into the byte stream) and enter raw mode (printf
@@ -233,8 +237,8 @@ int  cli_read_byte(struct cli_instance *sh, unsigned timeout_ms);
 void cli_rx_flush(struct cli_instance *sh);
 
 /*
- * Argument-value parsers (issue #27).  Every command that takes a number or an
- * address used to carry its own copy of these; they live here so there is one
+ * Argument-value parsers (owhinata/wio-lite-ai#27).  Every command that takes a number or
+ * an address used to carry its own copy of these; they live here so there is one
  * definition and one set of edge cases.  All are strict and side-effect-free:
  * *out is written only on success, and anything the caller then range-checks it
  * still has to range-check.  No newlib strtoul -- this firmware ships its own

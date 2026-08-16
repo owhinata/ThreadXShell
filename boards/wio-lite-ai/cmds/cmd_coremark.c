@@ -17,14 +17,14 @@
  * (~10-100 s while CoreMark auto-calibrates), so the prompt is blocked until it
  * finishes; higher-priority threads (the IWDG petter) keep running.  The ~2 KB data
  * block is malloc'd from the heap at the run's start and freed at the end
- * (MEM_MALLOC, issue #14), so nothing is permanently reserved when idle; we
+ * (MEM_MALLOC, owhinata/wio-lite-ai#14), so nothing is permanently reserved when idle; we
  * pre-flight the allocation below because CoreMark does not NULL-check it.
  *
  * Output: CoreMark prints its canonical report via ee_printf -> printf, which the
  * strong _write routes to the console of the thread that ran it -- the USB CDC ring,
- * or (issue #21) the telnet instance's transport -- i.e. the same console as cli_print (the
- * CDC TX ring is sized to hold the whole report; the timed region itself does no
- * I/O, so TX back-pressure cannot perturb the score).  With the I-cache enabled
+ * or (owhinata/wio-lite-ai#21) the telnet instance's transport -- i.e. the same console as
+ * cli_print (the CDC TX ring is sized to hold the whole report; the timed region itself
+ * does no I/O, so TX back-pressure cannot perturb the score).  With the I-cache enabled
  * (app/main.c) the score reflects cached execution rather than raw flash
  * fetch stalls.
  *

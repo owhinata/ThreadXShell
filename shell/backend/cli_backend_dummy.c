@@ -76,7 +76,8 @@ static int dummy_write(struct cli_transport *tr, const uint8_t *data, size_t len
 	return (int)accept;
 }
 
-/* End-of-unit hook: this backend transmits nothing, so it only COUNTS (issue #49).
+/* End-of-unit hook: this backend transmits nothing, so it only COUNTS
+   (owhinata/wio-lite-ai#49).
  * The count is what lets a host test assert "one flush per output call", which is the
  * property the telnet backend's segment coalescing rests on. */
 static void dummy_flush(struct cli_transport *tr)

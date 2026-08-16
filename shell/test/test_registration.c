@@ -2,7 +2,8 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host smoke test for the Shell command-registration foundation (issue #2).
+ * Host smoke test for the Shell command-registration foundation
+ * (owhinata/stm32f746g-disco#2).
  *
  * Registers a few commands with the public macros and walks the
  * .shell_root_cmds linker section at run time, asserting:

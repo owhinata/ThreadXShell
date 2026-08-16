@@ -4,19 +4,21 @@
  */
 /**
  * @file    nn_tflm.cc
- * @brief   TensorFlow Lite Micro (tflite-micro) nn backend (Epic #80 P3/P2).
+ * @brief   TensorFlow Lite Micro (tflite-micro) nn backend (Epic
+ * owhinata/stm32f746g-disco#80 P3/P2).
  *
  * Bridges a TFLM MicroInterpreter to the backend-agnostic nn vtable (nn_backend.h).
  * Compiled only when CONFIG_NN_BACKEND=tflm, into the `tflm` static lib alongside
  * the tflite-micro tree fetched + generated at CMake configure time
  * (cmake/tflite-micro.cmake).  Runs the built-in **BlazeFace-front 128 int8**
- * face-detection model (#88), and -- because TFLM interprets any .tflite flatbuffer
- * in RAM -- also a model loaded at runtime from the microSD card (#89 P2).
+ * face-detection model (owhinata/stm32f746g-disco#88), and -- because TFLM interprets any
+ * .tflite flatbuffer in RAM -- also a model loaded at runtime from the microSD card
+ * (owhinata/stm32f746g-disco#89 P2).
  *
- * Runtime model swap (#89): TFLM's op set is fixed at compile time by the resolver,
- * so this backend registers a broad common-vision op SUPERSET (23 ops) once, and an
- * SD-loaded model that stays within it runs with no rebuild.  Two 512 KB model slots
- * in .sdram.ai are double-buffered: load_region() hands out the INACTIVE slot so
+ * Runtime model swap (owhinata/stm32f746g-disco#89): TFLM's op set is fixed at compile time
+ * by the resolver, so this backend registers a broad common-vision op SUPERSET (23 ops)
+ * once, and an SD-loaded model that stays within it runs with no rebuild.  Two 512 KB model
+ * slots in .sdram.ai are double-buffered: load_region() hands out the INACTIVE slot so
  * reading a new .tflite never corrupts the flatbuffer the live interpreter is still
  * referencing, and reload() is transactional -- on any failure it rebuilds the
  * previous (known-good) model and reports it.
@@ -27,7 +29,7 @@
  * rebuild explicitly destroys the old one first (destroy_interp()).  run() is
  * CPU-bound and never yields (nn.c times it with the DWT cycle counter).  The
  * activation arena lives in .sdram.ai (FMC bank3, MPU cacheable WBWA / CPU-only,
- * issue #6), matching the stedgeai backend.
+ * owhinata/stm32f746g-disco#6), matching the stedgeai backend.
  */
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
@@ -57,11 +59,13 @@ namespace {
  * holds the 2x192 KB camera staging (nn_camera.c), the 2x512 KB SD model slots
  * below, and the BlazeFace anchor tables (~8 KB, blazeface.c): 384 + 512 + 1024 + 8
  * = ~1928 KB < 2 MB.  The .sdram.ai.model exec split is reloc-only, so tflm gets the
- * FULL 2 MB of bank3 (issue #95); the linker ASSERT enforces the 2 MB fit. */
+ * FULL 2 MB of bank3 (owhinata/stm32f746g-disco#95); the linker ASSERT enforces the 2 MB
+ * fit. */
 constexpr int kArenaSize = 512 * 1024;
 alignas(32) uint8_t g_arena[kArenaSize] __attribute__((section(".sdram.ai")));
 
-/* Two SD model slots (#89 P2), double-buffered so loading a new .tflite never
+/* Two SD model slots (owhinata/stm32f746g-disco#89 P2), double-buffered so loading a new
+   .tflite never
  * overwrites the flatbuffer the live interpreter is still reading.  16-aligned for
  * tflite::GetModel().  g_sd_slot names the slot holding the ACTIVE model, or -1
  * when the built-in model is active. */

@@ -2,8 +2,8 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host unit test for the Shell core (issue #4): the ASCII filter, the RX state
- * machine (printable/echo, Backspace, BEL on full, Ctrl+C, ESC/CSI swallow,
+ * Host unit test for the Shell core (owhinata/stm32f746g-disco#4): the ASCII filter, the RX
+ * state machine (printable/echo, Backspace, BEL on full, Ctrl+C, ESC/CSI swallow,
  * CR / LF / CR-LF coalescing) and dispatch (cli_parse status -> message, handler
  * invocation with handler-relative argv, fail-safe, instance isolation).
  *

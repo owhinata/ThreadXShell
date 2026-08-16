@@ -4,7 +4,8 @@
  */
 /**
  * @file    verify_tflite.cc
- * @brief   Check a .tflite on the PC before sending it to the board (issue #9 P2c).
+ * @brief   Check a .tflite on the PC before sending it to the board
+ * (owhinata/wio-lite-ai#9 P2c).
  *
  * A HOST tool.  It is never compiled into any firmware; it is built with the host
  * compiler against the SAME tflite-micro tree, at the SAME pinned SHA, that

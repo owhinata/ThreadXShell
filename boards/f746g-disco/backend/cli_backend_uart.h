@@ -4,7 +4,7 @@
  */
 /**
  * @file    cli_backend_uart.h
- * @brief   USART1 (ST-Link VCP) interrupt-driven transport for the shell (#7).
+ * @brief   USART1 (ST-Link VCP) interrupt-driven transport for the shell (owhinata/stm32f746g-disco#7).
  *
  * A `struct cli_transport_api` implementation over the STM32 HAL UART in
  * interrupt mode, the first real backend after the dummy/loopback one.  It does

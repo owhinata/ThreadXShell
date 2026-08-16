@@ -3,19 +3,21 @@
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /*
- * Wio Lite AI (STM32H725AEI6) -- the link's DATA channel (issue #23 U1).
+ * Wio Lite AI (STM32H725AEI6) -- the link's DATA channel (owhinata/wio-lite-ai#23 U1).
  *
  * The RTL8720DN link carries three kinds of frame on one UART, all demultiplexed by
  * the single link service thread in app/erpc.c:
  *
  *   eRPC  u16 size | u16 crc | body            request/reply, `wifi` / `net` / telnet
- *   CTRL  u16 0xFFFF | u16 len | u16 crc | body  link management (issue #23 U0-3)
+ *   CTRL  u16 0xFFFF | u16 len | u16 crc | body  link management (owhinata/wio-lite-ai#23
+ * U0-3)
  *   DATA  u16 0xFFFE | u16 len | u16 crc | body  THIS FILE
  *
  * DATA is what the other two are not: unsolicited, bidirectional and unacknowledged.
  * It exists to carry raw Ethernet frames once the module is turned into an L2 bridge
- * (issue #23 U2) so the host's own TCP/IP stack can run on top (U3).  In U1 the far end
- * is a sink/source bench instead, which is why this file knows nothing about Ethernet.
+ * (owhinata/wio-lite-ai#23 U2) so the host's own TCP/IP stack can run on top (U3).  In U1
+ * the far end is a sink/source bench instead, which is why this file knows nothing about
+ * Ethernet.
  *
  *   body = u8 chan | u8 flags | payload[len - 2]
  *
@@ -65,8 +67,10 @@
  * the channel byte says what a frame is so a bench can be told from real traffic while
  * both exist (U1 uses only BENCH, U2+ only ETH). */
 enum {
-	LINK_DATA_CHAN_ETH   = 0,        /* raw Ethernet frame (issue #23 U2 onwards) */
-	LINK_DATA_CHAN_BENCH = 1         /* U1 sink/source measurement traffic */
+	/* raw Ethernet frame (owhinata/wio-lite-ai#23 U2 onwards) */
+	LINK_DATA_CHAN_ETH   = 0,
+	/* U1 sink/source measurement traffic */
+	LINK_DATA_CHAN_BENCH = 1
 };
 
 /*
@@ -76,14 +80,14 @@ enum {
  * consumer, which returns having already copied it, so buffers come straight back.  8 is
  * plenty.
  *
- * TRANSMIT is different, and issue #23 U4 is why it grew from 8 to 16.  The producer above
- * it is now a real TCP/IP stack, which can hand down a burst -- several sockets' queued
- * segments plus a whole ARP waiting list flushed the moment an address resolves -- before
- * the service thread has written a single one of them out.  A full pool here is a silent
- * drop, which is exactly right for Ethernet and exactly wrong for a stream: TCP pays for
- * it with a retransmit timeout measured in hundreds of milliseconds.  The bound this
- * number has to satisfy is written down in app/nx_net.h ("the transmit budget") and
- * checked by a _Static_assert in app/nx_echo.c.
+ * TRANSMIT is different, and owhinata/wio-lite-ai#23 U4 is why it grew from 8 to 16.  The
+ * producer above it is now a real TCP/IP stack, which can hand down a burst -- several
+ * sockets' queued segments plus a whole ARP waiting list flushed the moment an address
+ * resolves -- before the service thread has written a single one of them out.  A full pool
+ * here is a silent drop, which is exactly right for Ethernet and exactly wrong for a
+ * stream: TCP pays for it with a retransmit timeout measured in hundreds of milliseconds.
+ * The bound this number has to satisfy is written down in app/nx_net.h ("the transmit
+ * budget") and checked by a _Static_assert in app/nx_echo.c.
  */
 #define LINK_DATA_RX_BUFS     8u
 #define LINK_DATA_TX_BUFS     16u

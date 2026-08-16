@@ -5,8 +5,8 @@
 /**
  * @file    st7789_rgb.c
  * @brief   ST7789 bring-up over the bit-banged 3-wire SPI multiplexed onto the
- *          LTDC red data lines (issue #7).  See st7789_rgb.h for why this exists
- *          and where the numbers came from.
+ *          LTDC red data lines (owhinata/wio-lite-ai#7).  See st7789_rgb.h for why
+ * this exists and where the numbers came from.
  */
 #include "st7789_rgb.h"
 
@@ -67,8 +67,8 @@ static void st_data(uint8_t d) { st_write(1u, d); }
  * be driven landscape for free -- which would matter a lot, because the camera
  * is 320x240 and this panel is 240x320, the H725 has no rotation engine (no
  * GFXMMU, no GPU2D), and transposing with DMA2D or MDMA costs ~77k scattered
- * 2-byte accesses on a serial PSRAM.  It was measured on the board (issue #8
- * phase 3a) and it does not work:
+ * 2-byte accesses on a serial PSRAM.  It was measured on the board
+ * (owhinata/wio-lite-ai#8 phase 3a) and it does not work:
  *
  *   LTDC driven at 320x240 (378x256 total, 62.00 Hz), MADCTL = 0x20:
  *     RGBCTRL[0] = 0xC0 -> the panel keeps its 240-pixel line length, so the
@@ -83,7 +83,8 @@ static void st_data(uint8_t d) { st_write(1u, d); }
  * So on THIS module MADCTL/MV does not reposition RGB-interface pixels on either
  * of the two RGBCTRL data paths.
  *
- * THE LAST KNOB IS NOW ALSO TRIED, AND IT DOES NOT WORK EITHER (issues #35/#38).
+ * THE LAST KNOB IS NOW ALSO TRIED, AND IT DOES NOT WORK EITHER
+ * (owhinata/wio-lite-ai#35/#38).
  *
  * Phase 3a stopped two flashes in and left RAMCTRL(0xB0)'s RM bit untried -- the
  * bit that selects how RGB-interface pixels reach frame memory, i.e. whether
@@ -101,19 +102,21 @@ static void st_data(uint8_t d) { st_write(1u, d); }
  *     0x00    0x01         negative   control: MV off, RM cleared
  *
  * None of them made the controller accept a 320-pixel line.  The knob is spent;
- * the probe was deleted with the answer, as bring-up knobs are (issue #8, 3c-2).
+ * the probe was deleted with the answer, as bring-up knobs are
+ * (owhinata/wio-lite-ai#8, 3c-2).
  *
  * >>> DO NOT RE-OPEN THIS.  Both MADCTL/MV and RAMCTRL/RM have now been measured
  * >>> on board #2 and neither rotates RGB-interface input on this module.  A
  * >>> future reader looking for a free rotation is looking at a closed door.
  *
  * Landscape therefore has to be produced on the host side, and both consumers of
- * that conclusion are designed around it: issue #38 gives the drawing layer a
- * landscape 320x240 coordinate system (the panel-native frame buffer stride stays
- * 240, exactly as the factory Arduino firmware did it), and issue #35 rotates the
- * camera by taking DCMI into AXI-SRAM bands and transposing into the PSRAM back
- * buffer, so the scattered side of the transpose lands on SRAM and the PSRAM side
- * stays a contiguous run.  The existing ltdc_flip() keeps it tear-free.
+ * that conclusion are designed around it: owhinata/wio-lite-ai#38 gives the
+ * drawing layer a landscape 320x240 coordinate system (the panel-native frame
+ * buffer stride stays 240, exactly as the factory Arduino firmware did it), and
+ * owhinata/wio-lite-ai#35 rotates the camera by taking DCMI into AXI-SRAM bands
+ * and transposing into the PSRAM back buffer, so the scattered side of the
+ * transpose lands on SRAM and the PSRAM side stays a contiguous run.  The existing
+ * ltdc_flip() keeps it tear-free.
  */
 static void st_send_sequence(void)
 {
@@ -150,14 +153,14 @@ static void st_send_sequence(void)
 	 * its own supply, so the table above can be replayed into a controller that
 	 * is already Sleep Out + DISPON with its RGB interface live -- a state it
 	 * was never written against, and one it does not recover from.  That is
-	 * issue #43: after a soft reset the panel stayed uniformly white until the
-	 * board was unplugged, while the LTDC reported a perfectly healthy scanout
-	 * and every `lcd` command returned success.
+	 * owhinata/wio-lite-ai#43: after a soft reset the panel stayed uniformly white
+	 * until the board was unplugged, while the LTDC reported a perfectly healthy
+	 * scanout and every `lcd` command returned success.
 	 *
 	 * So restore the state the transcription DOES assume, then replay it.  This
-	 * keeps issue #7's "the factory image is the specification" premise intact:
-	 * the specified bytes are still sent verbatim, they are just no longer sent
-	 * into an undefined initial state.
+	 * keeps owhinata/wio-lite-ai#7's "the factory image is the specification" premise
+	 * intact:  the specified bytes are still sent verbatim, they are just no longer
+	 * sent into an undefined initial state.
 	 *
 	 * The 120 ms is mandatory, not padding.  The ST7789V forbids SLPOUT for
 	 * 120 ms after a reset taken while the display was in Sleep Out mode --

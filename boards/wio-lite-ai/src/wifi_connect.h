@@ -4,7 +4,8 @@
  */
 /**
  * @file    wifi_connect.h
- * @brief   The association sequence, shared by `wifi connect` and boot (issue #37).
+ * @brief   The association sequence, shared by `wifi connect` and boot
+ * (owhinata/wio-lite-ai#37).
  *
  * Associating with an AP is not one call.  It is a fixed order of claims and
  * releases across four modules -- the coarse link mutex, the module's bridge
@@ -14,8 +15,9 @@
  * exactly ONE copy of that order.
  *
  * It lived in shell/cmds/cmd_wifi.c until the configuration store grew a boot
- * sequence that needs the same thing (issue #37 step 4).  Re-deriving it there
- * would have put the ordering constraints in two places, which is how they drift.
+ * sequence that needs the same thing (owhinata/wio-lite-ai#37 step 4).  Re-deriving
+ * it there would have put the ordering constraints in two places, which is how they
+ * drift.
  *
  * Reporting goes through a `struct cli_instance` rather than a log call, because
  * every module this drives already reports that way.  The boot caller supplies an
@@ -53,13 +55,14 @@ struct cli_instance;
  *                  that proof is lost on every reset because CHIP_EN is driven low
  *                  at every boot -- so an unattended sequence would never get past
  *                  it.  false (the interactive path) reports that and stops, which
- *                  keeps `wifi ver` the deliberate act issue #20 made it: the
- *                  version query corrupts the heap of pre-N2 firmware.  true (the
+ *                  keeps `wifi ver` the deliberate act owhinata/wio-lite-ai#20 made
+ * it: the version query corrupts the heap of pre-N2 firmware.  true (the
  *                  boot path) queries the version itself.
  *
- * Associating is RETRIED (issue #40): the radio fails intermittently and a repeat is
- * what recovers it, so a single failure is not reported as one.  See the loop for the
- * measurements behind that and for the one reason that is never retried.
+ * Associating is RETRIED (owhinata/wio-lite-ai#40): the radio fails intermittently
+ * and a repeat is what recovers it, so a single failure is not reported as one.  See
+ * the loop for the measurements behind that and for the one reason that is never
+ * retried.
  *
  * Returns 0 on success.  Reports everything it does through @p sh.
  */

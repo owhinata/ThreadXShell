@@ -4,7 +4,8 @@
  */
 /**
  * @file    cmd_ai.c
- * @brief   `ai` shell command: on-device NN inference (issue #9 phases 1 and 2c).
+ * @brief   `ai` shell command: on-device NN inference (owhinata/wio-lite-ai#9 phases 1
+ * and 2c).
  *
  *   ai info              backend / model / tensor shapes / quantization / arena
  *   ai bench [n]         run inference n times, report min/avg/max latency
@@ -18,14 +19,15 @@
  * which the `null` build still accepts and answers honestly, because the "this
  * backend cannot load a model" case is a value nn.c returns rather than a missing
  * command (port/nn/nn.h).  The camera-driven `ai run` / `ai stream` are phase 3.
- * `ai out` is issue #57: once this build could load models other than BlazeFace
- * (issue #55), `ai dets` was the only way to read an output and it reads them as
- * BlazeFace, so any other model ran with its answer invisible.
+ * `ai out` is owhinata/wio-lite-ai#57: once this build could load models other than
+ * BlazeFace (owhinata/wio-lite-ai#55), `ai dets` was the only way to read an output and
+ * it reads them as BlazeFace, so any other model ran with its answer invisible.
  *
  * WHERE A MODEL COMES FROM IS DECIDED HERE, not in port/nn.  That layer is
  * model-agnostic on purpose; the fact that this board keeps models in the external
- * NOR's blob region (issue #10) is a property of the board, so the blob_* calls and
- * the CRC check live in this file and the nn API only ever sees "here are len bytes".
+ * NOR's blob region (owhinata/wio-lite-ai#10) is a property of the board, so the blob_*
+ * calls and the CRC check live in this file and the nn API only ever sees "here are len
+ * bytes".
  *
  * LATENCY IS MEASURED WITH THE DWT CYCLE COUNTER, captured inside nn_run() (see
  * port/nn/nn.c) and converted here.  The divisor is SystemCoreClock -- 550 MHz, the
@@ -67,12 +69,12 @@
 #define AI_BENCH_MAX_ITERS     100000u
 
 /*
- * `ai out` prints a PREFIX of a tensor, never all of it (issue #57).  16 covers every
- * classifier this board runs -- vww01 has 2 classes, ic0x 10, kws01 12 -- and the cap
- * exists because the other kind of output tensor is BlazeFace's 512x16, which at one
- * line each would be 8192 lines the console cannot be interrupted out of usefully
- * (cli_core drops a cancelled handler's output, issue #16, so a long dump is not
- * something the user can stop and still read).
+ * `ai out` prints a PREFIX of a tensor, never all of it (owhinata/wio-lite-ai#57).  16
+ * covers every classifier this board runs -- vww01 has 2 classes, ic0x 10, kws01 12 --
+ * and the cap exists because the other kind of output tensor is BlazeFace's 512x16, which
+ * at one line each would be 8192 lines the console cannot be interrupted out of usefully
+ * (cli_core drops a cancelled handler's output, owhinata/wio-lite-ai#16, so a long dump
+ * is not something the user can stop and still read).
  */
 #define AI_OUT_DEFAULT_ELEMS   16u
 #define AI_OUT_MAX_ELEMS       64u
@@ -223,7 +225,7 @@ static int cmd_ai_info(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-/* ---- ai model load / unload (issue #9 phase 2c) --------------------------- */
+/* ---- ai model load / unload (owhinata/wio-lite-ai#9 phase 2c) ---------------------- */
 
 /*
  * Take both guards, in this order, for anything that touches tensors or the arena.
@@ -231,7 +233,8 @@ static int cmd_ai_info(struct cli_instance *sh, int argc, char **argv)
  * THE ORDER IS NOT ARBITRARY.  The NN session is the software claim and the OCTOSPI1
  * guard is the hardware one; taking the hardware first would mean holding a peripheral
  * for as long as it takes to tell the user that a piece of software was busy.  The
- * same order as `ai bench` below, and the same reasoning issue #9 phase 2a recorded.
+ * same order as `ai bench` below, and the same reasoning owhinata/wio-lite-ai#9 phase 2a
+ * recorded.
  *
  * psram_acquire_shared() is the READ/WRITE guard, not a reconfiguration one, so it
  * coexists with an already-armed LTDC scan-out or camera stream.  It is still a single
@@ -401,7 +404,7 @@ static int cmd_ai_model_load(struct cli_instance *sh, int argc, char **argv)
 	 *
 	 * fdb_calc_crc32() is used bare, chained from 0.  It inverts at entry and exit
 	 * itself, so this IS standard CRC-32/ISO-HDLC and wrapping it would double-invert
-	 * (issue #37; shell/test/test_crc32.c pins the property).
+	 * (owhinata/wio-lite-ai#37; shell/test/test_crc32.c pins the property).
 	 */
 	crc = fdb_calc_crc32(0u, stage, info.length);
 	if (crc != info.crc32) {
@@ -550,9 +553,9 @@ static int cmd_ai_bench(struct cli_instance *sh, int argc, char **argv)
 	 * is the whole point.  The flags are sticky and global, so anything that ran
 	 * between the benchmark and a later query is indistinguishable from the benchmark;
 	 * only a pair bracketing exactly the measured window attributes an underrun to
-	 * inference.  Issue #9 phase 2a checked this co-residency with the synthetic stub,
-	 * whose memory traffic is nothing like a real model's, so the question is open
-	 * again here.
+	 * inference.  owhinata/wio-lite-ai#9 phase 2a checked this co-residency with the
+	 * synthetic stub, whose memory traffic is nothing like a real model's, so the question
+	 * is open again here.
 	 *
 	 * Clearing is what makes the attribution work -- a bit that was already set would
 	 * otherwise mask an underrun this run caused -- and it is also the one destructive
@@ -561,9 +564,9 @@ static int cmd_ai_bench(struct cli_instance *sh, int argc, char **argv)
 	 *
 	 * So what is being discarded is reported HERE, before the loop, and not with the
 	 * results at the end.  A Ctrl+C would never reach the end -- and once cancel
-	 * latches, cli_core drops every byte a dispatching handler writes (issue #16), so a
-	 * report deferred to the end is not merely late on that path, it is unreachable.
-	 * The history would be gone with nothing said about it.
+	 * latches, cli_core drops every byte a dispatching handler writes
+	 * (owhinata/wio-lite-ai#16), so a report deferred to the end is not merely late on that
+	 * path, it is unreachable.  The history would be gone with nothing said about it.
 	 */
 	ltdc_pre = ltdc_errors(true);
 	if (ltdc_pre && ltdc_scanout_active())
@@ -586,8 +589,8 @@ static int cmd_ai_bench(struct cli_instance *sh, int argc, char **argv)
 
 	/*
 	 * Ctrl+C reports nothing, deliberately.  Once cancel latches, this core drops
-	 * every further byte a dispatching handler writes (cli_core.c, issue #16) so a
-	 * chatty handler cannot outlive the keystroke -- the "^C" and the prompt that do
+	 * every further byte a dispatching handler writes (cli_core.c, owhinata/wio-lite-ai#16)
+	 * so a chatty handler cannot outlive the keystroke -- the "^C" and the prompt that do
 	 * appear come from the core's own post-dispatch cleanup.  So the donor
 	 * firmware's "^C after N" plus partial statistics could not reach the terminal
 	 * here however it were written, and a half-finished benchmark is not a result
@@ -650,7 +653,7 @@ static int cmd_ai_bench(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-/* ---- ai out (issue #57) --------------------------------------------------- */
+/* ---- ai out (owhinata/wio-lite-ai#57) ---------------------------------------------- */
 
 /*
  * Decompose @p v for printing as "%s%lu.%06lu" -- sign, integer part, six fraction
@@ -721,12 +724,13 @@ static int32_t ai_tensor_raw(const struct nn_tensor *t, uint32_t i)
  *
  * WHY THIS IS NOT ANOTHER DECODER.  `ai dets` reads the outputs too, but it reads them
  * AS BLAZEFACE: four tensors in a known order, turned into boxes.  Every other model has
- * no decoder here and therefore no way to be read at all, which is what issue #57 hit --
- * vww01 (MLPerf Tiny's MobileNet, issue #55) already runs on camera frames without a
- * line of change, because app/nn_camera.c takes its geometry and its quantization from
- * the input tensor rather than assuming BlazeFace's; its 1x2 answer was simply invisible.
- * Dequantized numbers are model-agnostic, and that is the whole point: a command that
- * knows nothing about the model is the one that can still tell you the model works.
+ * no decoder here and therefore no way to be read at all, which is what
+ * owhinata/wio-lite-ai#57 hit -- vww01 (MLPerf Tiny's MobileNet, owhinata/wio-lite-ai#55)
+ * already runs on camera frames without a line of change, because app/nn_camera.c takes
+ * its geometry and its quantization from the input tensor rather than assuming
+ * BlazeFace's; its 1x2 answer was simply invisible.  Dequantized numbers are
+ * model-agnostic, and that is the whole point: a command that knows nothing about the
+ * model is the one that can still tell you the model works.
  *
  * IT RUNS NOTHING.  The values are whatever the last inference left in the arena -- the
  * same contract `ai dets` documents, and it pairs with the same two idioms: `ai bench 1`
@@ -735,9 +739,10 @@ static int32_t ai_tensor_raw(const struct nn_tensor *t, uint32_t i)
  *
  * [!] A ZERO SCALE IS NOT A UNIT SCALE.  A per-axis quantized tensor arrives through this
  * API with params.scale == 0 because its real parameters live in the affine-quantization
- * struct port/nn/nn.h does not expose (issue #51, the same fact app/nn_camera.c refuses
- * an input over).  Dequantizing with it would print 0.000000 for every element of a
- * perfectly good tensor, so the codes are printed alone and the header says why.
+ * struct port/nn/nn.h does not expose (owhinata/wio-lite-ai#51, the same fact
+ * app/nn_camera.c refuses an input over).  Dequantizing with it would print 0.000000 for
+ * every element of a perfectly good tensor, so the codes are printed alone and the header
+ * says why.
  */
 static int cmd_ai_out(struct cli_instance *sh, int argc, char **argv)
 {
@@ -867,7 +872,7 @@ static int cmd_ai_out(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-/* ---- ai dets / ai thresh (issue #9 phase 3) ------------------------------- */
+/* ---- ai dets / ai thresh (owhinata/wio-lite-ai#9 phase 3) -------------------------- */
 
 /*
  * Print a detection list.  Units are spelled out on the header line because they
@@ -988,7 +993,7 @@ static int cmd_ai_thresh(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-/* ---- ai run / ai stream / ai norm / ai overlay (issue #9 phase 3) --------- */
+/* ---- ai run / ai stream / ai norm / ai overlay (owhinata/wio-lite-ai#9 phase 3) ---- */
 
 #if BSP_ENABLE_CAMERA
 
@@ -1146,7 +1151,8 @@ static int cmd_ai_stream_stats(struct cli_instance *sh, int argc, char **argv)
 	cli_print(sh, "frames  : %lu ingested, %lu skipped (worker busy), %lu error(s)\r\n",
 	          (unsigned long)st.frames, (unsigned long)st.skipped,
 	          (unsigned long)st.errors);
-	/* The ownership invariant, reported rather than assumed (#54).  `raced` must be 0;
+	/* The ownership invariant, reported rather than assumed (owhinata/wio-lite-ai#54).
+    `raced` must be 0;
 	 * anything else means part of the tensor the model saw was activations, not
 	 * camera.  `stale` counts the frame posts the pre-arm drain discarded -- each one
 	 * is a race that would have started and then never stopped. */
@@ -1245,7 +1251,7 @@ static int cmd_ai_run(struct cli_instance *sh, int argc, char **argv)
 
 cancelled:
 	/* Ctrl+C: cli_core drops every byte a dispatching handler writes once cancel
-	   latches (issue #16), so there is nothing to report -- just clean up. */
+	   latches (owhinata/wio-lite-ai#16), so there is nothing to report -- just clean up. */
 	(void)nn_camera_stop();
 	return 1;
 }

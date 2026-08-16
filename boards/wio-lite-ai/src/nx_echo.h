@@ -3,12 +3,13 @@
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /*
- * Wio Lite AI (STM32H725AEI6) -- TCP echo server on the host's own stack (issue #23 U4-1).
+ * Wio Lite AI (STM32H725AEI6) -- TCP echo server on the host's own stack
+ * (owhinata/wio-lite-ai#23 U4-1).
  *
  * This is the bring-up rehearsal for the telnet console, exactly as the eRPC version was
- * for issue #21: one shell command, one thread, no concurrency of its own, exercising the
- * whole path a console will later ride on -- listen, accept, receive, send, disconnect,
- * relisten -- and reporting the numbers the console's sizing depends on.
+ * for owhinata/wio-lite-ai#21: one shell command, one thread, no concurrency of its own,
+ * exercising the whole path a console will later ride on -- listen, accept, receive, send,
+ * disconnect, relisten -- and reporting the numbers the console's sizing depends on.
  *
  * What it replaces did the same job over the module's lwIP via eRPC round-trips.  Here
  * every byte is framed by NetX Duo on this MCU, handed to app/nx_link_driver.c, and put on

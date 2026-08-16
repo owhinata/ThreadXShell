@@ -4,14 +4,14 @@
  */
 /*
  * Wio Lite AI (STM32H725AEI6) -- minimal clean-room eRPC client for the onboard
- * RTL8720DN (issue #5, increment 1: eRPC-over-UART link bring-up).
+ * RTL8720DN (owhinata/wio-lite-ai#5, increment 1: eRPC-over-UART link bring-up).
  *
  * The RTL8720DN ships Seeed's eRPC firmware (seeed-ambd-firmware @Wio-Lite-AI),
  * which exposes an eRPC server over UART @2,000,000 baud on "Serial3" (= the STM32
  * USART1 / BLE_UART, PA10/PB14).  This is a hand-written C client that speaks the
  * exact wire format of that firmware -- no C++ eRPC runtime is pulled in.  It sits
- * on top of the #17 rtl8720 UART driver (app/rtl8720.c) and never touches the RCC
- * clock tree, so it is clock-safe.
+ * on top of the owhinata/wio-lite-ai#17 rtl8720 UART driver (app/rtl8720.c) and never
+ * touches the RCC clock tree, so it is clock-safe.
  *
  * Wire format (reference: https://github.com/Seeed-Studio/seeed-ambd-firmware,
  * branch Wio-Lite-AI):
@@ -30,7 +30,7 @@
  * ones the module pushes at us (scan-done, WiFi events) are drained and counted as
  * unsupported invocations.  A host server stub is a separate issue.
  *
- * ---- Concurrency model (issue #21 increment 8) --------------------------------
+ * ---- Concurrency model (owhinata/wio-lite-ai#21 increment 8) -----------------------------
  *
  * The link is owned by ONE resident service thread created by erpc_service_init()
  * (see app/erpc.c).  It is the only reader of the USART1 RX ring (which is a strict
@@ -41,7 +41,7 @@
  *     t = erpc_begin(...); erpc_wait(t, ...) asynchronous, several in flight
  *
  * That is what lets a caller keep a blocking accept/recv outstanding on the module
- * (the issue-#20 N3 firmware serves requests concurrently and may reply OUT OF
+ * (the owhinata/wio-lite-ai#20 N3 firmware serves requests concurrently and may reply OUT OF
  * ORDER) while another thread runs `wifi`/`net` commands on the same link.  Up to
  * ERPC_MAX_INFLIGHT requests may be outstanding.
  *
@@ -60,7 +60,7 @@
 #include <stddef.h>
 
 /*
- * ---- little-endian wire codec (issue #27) -------------------------------------
+ * ---- little-endian wire codec (owhinata/wio-lite-ai#27) ----------------------------------
  *
  * Every byte this link carries is little-endian at its natural width: the eRPC
  * BasicCodec (app/wifi_rpc.c), the eRPC framing itself (app/erpc.c) and the CTRL /
@@ -97,8 +97,8 @@ static inline uint32_t erpc_get_u32le(const uint8_t *p)
  * per-slot buffer of 8 + ERPC_REQ_MAX bytes (8 = eRPC message header + sequence), so a
  * caller's own request bytes never have to outlive its erpc_begin().  It is bounded by
  * app/wifi_rpc.c's _Static_assert on 12 + WIFI_RPC_STREAM_MAX = 268 B, which was the
- * size of wifi_rpc_lwip_send() before issue #23 U4 moved TCP off the module and deleted
- * it; the assert is kept as the ceiling on WIFI_RPC_STREAM_MAX itself. */
+ * size of wifi_rpc_lwip_send() before owhinata/wio-lite-ai#23 U4 moved TCP off the module
+ * and deleted it; the assert is kept as the ceiling on WIFI_RPC_STREAM_MAX itself. */
 #define ERPC_REQ_MAX      320u
 
 /*
@@ -115,9 +115,9 @@ static inline uint32_t erpc_get_u32le(const uint8_t *p)
  * uses to reproduce the measured cliff) or the frame still fits this budget.
  * A reply proves the module consumed that request's bytes, which is what frees them.
  *
- * That ring is gone in the issue #23 U0-2 firmware (`2.1.3+wio-n4`), which owns USI0
- * directly behind an 8 kB ring, so the budget can be lifted -- but ONLY once we have
- * seen that firmware answer on THIS link.  Hence a runtime value that always starts at
+ * That ring is gone in the owhinata/wio-lite-ai#23 U0-2 firmware (`2.1.3+wio-n4`), which
+ * owns USI0 directly behind an 8 kB ring, so the budget can be lifted -- but ONLY once we
+ * have seen that firmware answer on THIS link.  Hence a runtime value that always starts at
  * (and falls back to) the safe number: see erpc_set_wire_budget().
  */
 #define ERPC_WIRE_BUDGET_SAFE 127u
@@ -159,8 +159,8 @@ uint16_t erpc_crc16(const uint8_t *d, uint16_t n);
 /*
  * Create the link service thread and its ThreadX objects.  Call ONCE from
  * tx_application_define() (no HAL_GetTick dependency, so it is safe there -- see
- * issue #12); every other entry point here needs it.  Returns 0 on success, -1 if a
- * ThreadX object could not be created -- in which case the module stays unusable and
+ * owhinata/wio-lite-ai#12); every other entry point here needs it.  Returns 0 on success, -1
+ * if a ThreadX object could not be created -- in which case the module stays unusable and
  * every call below fails with -1 (fail-soft: the rest of the firmware still runs).
  */
 int erpc_service_init(void);
@@ -211,9 +211,10 @@ void erpc_link_closed(void);
  * state.  Deliberately NOT reset by erpc_link_opened/_closed: `wifi ver`, the call
  * that proves the firmware, drops the UART reference before it returns, so anything tied
  * to the UART "open" would revert the moment it was earned and could never take effect
- * (this is exactly the defect the issue #23 U0-2 plan had).  app/rtl_link.c clears it
- * instead at every point the module's identity can change -- every CHIP_EN transition and
- * every flash write -- the same set of points it already uses for rtl_tcpip_set_inited().
+ * (this is exactly the defect the owhinata/wio-lite-ai#23 U0-2 plan had).  app/rtl_link.c
+ * clears it instead at every point the module's identity can change -- every CHIP_EN
+ * transition and every flash write -- the same set of points it already uses for
+ * rtl_tcpip_set_inited().
  *
  * @gen is the N of the "2.1.3+wio-nN" build id, 0 when unknown (the safe default, and
  * what the factory / pre-N2 firmware leaves it at).  What it currently gates:
@@ -230,7 +231,7 @@ uint8_t  erpc_module_gen(void);
 uint16_t erpc_wire_budget(void);
 
 /*
- * ---- LINK-CTRL channel (issue #23 U0-3) ---------------------------------------
+ * ---- LINK-CTRL channel (owhinata/wio-lite-ai#23 U0-3) ------------------------------------
  *
  * A second frame type multiplexed onto the same UART, owned by the link layer at BOTH
  * ends rather than by eRPC.  It carries the things eRPC cannot: reading the module's own
@@ -260,10 +261,10 @@ enum {
 	ERPC_CTRL_STATS      = 2,        /* -> u32 LE x 12, see cmd_wifi_link.c */
 	ERPC_CTRL_SETBAUD    = 3,        /* u32 baud + u32 magic; ACK on the OLD baud */
 	ERPC_CTRL_BENCH      = 4,        /* u32 reply_bytes, u8 seed, u8 rsvd[3], data[] */
-	/* DATA channel control (issue #23 U1), firmware wio-n6 and later. */
+	/* DATA channel control (owhinata/wio-lite-ai#23 U1), firmware wio-n6 and later. */
 	ERPC_CTRL_DATA_CFG   = 5,        /* u8 mode, u8 seed, u16 bytes, u32 ms, u32 magic */
 	ERPC_CTRL_DATA_STATS = 6,        /* -> u32 LE x 12, see cmd_wifi_link.c */
-	/* L2 bridge (issue #23 U2), firmware wio-n7 and later. */
+	/* L2 bridge (owhinata/wio-lite-ai#23 U2), firmware wio-n7 and later. */
 	ERPC_CTRL_ETH_INFO   = 7         /* -> u8 mac[6], u8 flags, u8 rsvd, u32 LE x 8 */
 };
 
@@ -291,10 +292,10 @@ enum {
 #define ERPC_DATA_MODE_SINK     0x01u
 #define ERPC_DATA_MODE_SOURCE   0x02u
 /*
- * BRIDGE (issue #23 U2, firmware wio-n7 and later) taps the module's WiFi netif: frames
- * received from the air arrive as DATA on LINK_DATA_CHAN_ETH, and DATA frames sent on that
- * channel go out over the air.  It is a MODE rather than a command of its own so that
- * OFF's contract above covers the bridge's producer too -- the module's WiFi receive
+ * BRIDGE (owhinata/wio-lite-ai#23 U2, firmware wio-n7 and later) taps the module's WiFi
+ * netif: frames received from the air arrive as DATA on LINK_DATA_CHAN_ETH, and DATA frames
+ * sent on that channel go out over the air.  It is a MODE rather than a command of its own
+ * so that OFF's contract above covers the bridge's producer too -- the module's WiFi receive
  * thread -- instead of needing a second teardown protocol that could disagree with it.
  * The @ms field doubles as the module's watchdog: it takes the bridge down on its own that
  * long after CFG, so a host that dies mid-session cannot leave the module forwarding into
@@ -315,11 +316,11 @@ enum {
  *
  * -3 collapses every module-side refusal into one number, which is not enough once a
  * command can refuse for more than one reason: erpc_ctrl_last_status() returns the byte
- * itself so the caller can say WHY (issue #23 U2 -- asking the module to bridge before it
- * has an lwIP netif to tap is a different problem from a malformed request, and the first
- * is what a new user hits; see the status decode in cmd_wifi_link.c's link_data_cfg).
- * Valid immediately after a -3 and nowhere else; it is well defined for the same reason
- * the single reply slot is: one CTRL exchange at a time, held by one owner.
+ * itself so the caller can say WHY (owhinata/wio-lite-ai#23 U2 -- asking the module to
+ * bridge before it has an lwIP netif to tap is a different problem from a malformed request,
+ * and the first is what a new user hits; see the status decode in cmd_wifi_link.c's
+ * link_data_cfg).  Valid immediately after a -3 and nowhere else; it is well defined for the
+ * same reason the single reply slot is: one CTRL exchange at a time, held by one owner.
  */
 int erpc_ctrl_call(uint8_t cmd, const uint8_t *req, uint16_t req_len,
                    uint8_t *out, uint16_t out_cap, uint32_t timeout_ms,
@@ -329,7 +330,7 @@ int erpc_ctrl_call(uint8_t cmd, const uint8_t *req, uint16_t req_len,
 uint8_t erpc_ctrl_last_status(void);
 
 /*
- * ---- DATA channel (issue #23 U1) ------------------------------------------------
+ * ---- DATA channel (owhinata/wio-lite-ai#23 U1) -------------------------------------------
  *
  * The third frame type on this wire lives in app/link_data.{c,h}; the service thread
  * here is what actually reads and writes it, exactly as it does for eRPC and CTRL.  The
@@ -350,10 +351,10 @@ void erpc_data_posted(void);
  * additionally requires no eRPC request to be outstanding.  Something normally is: the
  * interface owner refreshes the association over eRPC on its own schedule, and back when
  * TCP still ran on the module the telnet console kept a blocking accept outstanding by
- * design (issue #21).  Asking the stronger question when tearing the DATA channel down
- * would therefore fail for reasons that have nothing to do with DATA.  This is the half of
- * it that matters: the detach ordering rule in app/link_data.h needs the DATA channel
- * quiet, not the link idle.
+ * design (owhinata/wio-lite-ai#21).  Asking the stronger question when tearing the DATA
+ * channel down would therefore fail for reasons that have nothing to do with DATA.  This is
+ * the half of it that matters: the detach ordering rule in app/link_data.h needs the DATA
+ * channel quiet, not the link idle.
  */
 int erpc_data_quiescent(void);
 
@@ -405,7 +406,7 @@ int erpc_call_ex(uint8_t service, uint8_t request,
                  int (*should_abort)(void *ctx), void *abort_ctx);
 
 /*
- * ---- Asynchronous, multi-in-flight API (issue #20 N3) --------------------------
+ * ---- Asynchronous, multi-in-flight API (owhinata/wio-lite-ai#20 N3) ----------------------
  *
  * These let a caller keep several requests outstanding at once -- what the N3
  * worker-dispatch firmware enables.  Since increment 8 they are thread-safe: the slot
@@ -460,11 +461,12 @@ int erpc_system_ack(uint8_t c, uint8_t *echoed, struct erpc_diag *diag);
  * (truncated to @out_cap-1); negative on failure (-2 timeout / -3 malformed / -4
  * aborted).
  *
- * WARNING -- only send this to issue-#20 N2+ firmware.  The factory / N1 server shim
- * erpc_free()s a string literal when version is invoked, which corrupts the module's
- * heap regardless of what the host does with the reply; that is why increment 1 never
- * called it.  N2 (patch 0002) makes the shim's target a heap copy ("2.1.3+wio-n2"), so
- * from N2 on this is safe.  Board #2 currently runs n8 ("2.1.3+wio-n8", issue #31). */
+ * WARNING -- only send this to owhinata/wio-lite-ai#20 N2+ firmware.  The factory / N1
+ * server shim erpc_free()s a string literal when version is invoked, which corrupts the
+ * module's heap regardless of what the host does with the reply; that is why increment 1
+ * never called it.  N2 (patch 0002) makes the shim's target a heap copy ("2.1.3+wio-n2"), so
+ * from N2 on this is safe.  Board #2 currently runs n8 ("2.1.3+wio-n8",
+ * owhinata/wio-lite-ai#31). */
 int erpc_system_version(char *out, uint16_t out_cap, struct erpc_diag *diag);
 
 #endif /* APP_ERPC_H */

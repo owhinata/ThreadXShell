@@ -4,7 +4,8 @@
  */
 /**
  * @file    cli_history.c
- * @brief   Command history -- fixed byte ring (issue #10, req §8).
+ * @brief   Command history -- fixed byte ring (owhinata/stm32f746g-disco#10, req
+ * §8).
  *
  * Entries are the lines the user submits, packed oldest->newest into the
  * per-instance buffer sh->hist[0..hist_used), each '\0'-terminated.  Adding a
@@ -21,8 +22,8 @@
  * already uses.
  *
  * The line editor's call sites (ESC[A/B, ESC O A/B, Ctrl+p/n) and the
- * dispatch-time add are unchanged from #9; navigation state is reset by the
- * dispatcher and the Ctrl+C handler, not here.
+ * dispatch-time add are unchanged from owhinata/stm32f746g-disco#9; navigation
+ * state is reset by the dispatcher and the Ctrl+C handler, not here.
  *
  * Clean-room design; no third-party code reused.
  */

@@ -4,7 +4,7 @@
  */
 /**
  * @file    iwdg.c
- * @brief   IWDG1 independent watchdog driver (issue #4).
+ * @brief   IWDG1 independent watchdog driver (owhinata/wio-lite-ai#4).
  *
  * The IWDG1 is clocked by the LSI (~32 kHz typ, 17-47 kHz over tolerance),
  * independent of the inherited HSE+PLL 550 MHz tree, so it keeps counting even if
@@ -16,9 +16,9 @@
  * the petter preempts it.
  *
  * iwdg_init() is called from tx_application_define(), right after the petter thread is
- * created (issue #12).  HAL_IWDG_Init()'s HAL_GetTick()-based PR/RLR poll runs with
- * SysTick live because tx_application_define now runs with interrupts enabled (no
- * __disable_irq) and SysTick_Handler calls HAL_IncTick() unconditionally.
+ * created (owhinata/wio-lite-ai#12).  HAL_IWDG_Init()'s HAL_GetTick()-based PR/RLR
+ * poll runs with SysTick live because tx_application_define now runs with interrupts
+ * enabled (no __disable_irq) and SysTick_Handler calls HAL_IncTick() unconditionally.
  *
  * The whole file compiles to nothing when BSP_ENABLE_IWDG == 0, so no IWDG symbol
  * (and no LSI dependency) reaches the image.

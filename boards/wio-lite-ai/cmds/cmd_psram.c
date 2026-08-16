@@ -4,7 +4,8 @@
  */
 /**
  * @file    cmd_psram.c
- * @brief   `psram` shell command (issue #3): OCTOSPI1 APS6408 PSRAM status + test.
+ * @brief   `psram` shell command (owhinata/wio-lite-ai#3): OCTOSPI1 APS6408 PSRAM
+ * status + test.
  *
  *   psram info          show bring-up state, device clock, ID, mmap window
  *   psram test [bytes]  write/read/verify patterns over the mmap window (default,
@@ -18,9 +19,10 @@
  * (like cmd_membench.c); PSRAM is scratch RAM so no dangerous-command gate.
  *
  * `psram test` deliberately stops at the top of the non-cacheable pool (6 MB) rather
- * than covering the device: issue #9 made the last 2 MB Normal write-back, and a
- * memory test through a write-back cache proves nothing, because the read-back can
- * be served from the cache while the device is not answering at all.
+ * than covering the device: owhinata/wio-lite-ai#9 made the last 2 MB Normal
+ * write-back, and a memory test through a write-back cache proves nothing, because
+ * the read-back can be served from the cache while the device is not answering at
+ * all.
  *
  * Clean-room design; no third-party code reused.
  */
@@ -137,7 +139,8 @@ static int cmd_psram_phase(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-/* psram mr0 <hex>: write the APS6408 MR0 read-latency register (#16 diagnostic).
+/* psram mr0 <hex>: write the APS6408 MR0 read-latency register
+   (owhinata/wio-lite-ai#16 diagnostic).
  * 0x09 = power-up default (Variable LC5); 0x24 = Fixed Latency LC8 (ST U585
  * reference -- pair with `psram set 8 <wr>`).  Verify with `psram probe 0`. */
 static int cmd_psram_mr0(struct cli_instance *sh, int argc, char **argv)
@@ -235,12 +238,13 @@ static int cmd_psram_test(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	}
 	/*
-	 * Bounded by the non-cacheable pool, not by the device.  Since issue #9 phase 2a
-	 * the top 2 MB is Normal write-back (app/mpu.c region 3), and a memory test
-	 * cannot run through a write-back cache and mean anything: the store below can
-	 * be answered by the cache and never reach the APS6408, so a device that has
-	 * stopped answering would still be reported PASS.  That is the reading issues
-	 * #3 and #16 tuned the timing against, so it has to stay a device test.
+	 * Bounded by the non-cacheable pool, not by the device.  Since
+	 * owhinata/wio-lite-ai#9 phase 2a the top 2 MB is Normal write-back (app/mpu.c
+	 * region 3), and a memory test cannot run through a write-back cache and mean
+	 * anything: the store below can be answered by the cache and never reach the
+	 * APS6408, so a device that has stopped answering would still be reported PASS.
+	 * That is the reading issues owhinata/wio-lite-ai#3 and #16 tuned the timing
+	 * against, so it has to stay a device test.
 	 */
 	if (len == 0u || len > PSRAM_NC_BYTES) {
 		clamped = (len > PSRAM_NC_BYTES);
@@ -273,10 +277,10 @@ static int cmd_psram_test(struct cli_instance *sh, int argc, char **argv)
 }
 
 /* psram mmapscan <start [phase]|show|stop>: reset-persistent DLYB sweep
- * validated against real memory-mapped access (issue #16).  `start` captures the
- * current clock/latency/MR0 and sweeps DLYB units 0..124 (step 4) on `phase`
- * (default 3), auto-rebooting per unit -- the console drops during the sweep and
- * returns when it completes; then `show` prints which units passed mmap. */
+ * validated against real memory-mapped access (owhinata/wio-lite-ai#16).  `start`
+ * captures the current clock/latency/MR0 and sweeps DLYB units 0..124 (step 4) on
+ * `phase` (default 3), auto-rebooting per unit -- the console drops during the sweep
+ * and returns when it completes; then `show` prints which units passed mmap. */
 static int cmd_psram_mmapscan(struct cli_instance *sh, int argc, char **argv)
 {
 	struct psram_scan_state st;

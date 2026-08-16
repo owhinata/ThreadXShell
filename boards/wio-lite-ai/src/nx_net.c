@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /*
- * The host's own IP interface over the RTL8720 L2 bridge (issue #23 U3).
+ * The host's own IP interface over the RTL8720 L2 bridge (owhinata/wio-lite-ai#23 U3).
  * See app/nx_net.h for the design, the failure rule and the threading.
  */
 #include "nx_net.h"
@@ -60,7 +60,7 @@
 
 #define NXN_OWNER_PRIORITY 13u
 /*
- * 3072, not 2048: issue #32 puts a new call chain on this thread -- nxn_refresh() ->
+ * 3072, not 2048: owhinata/wio-lite-ai#32 puts a new call chain on this thread -- nxn_refresh() ->
  * nxn_auto_reconnect() -> wifi_auto_attempt() -> wifi_rpc_connect() (which builds its
  * request in a 160-byte local) -> erpc_call_ex().
  *
@@ -85,10 +85,10 @@
 #define NXN_HOLD_MAX_MS    60000u
 #define NXN_REFRESH_MS     8000u
 /*
- * How long nx_net_link_taken() waits for the owner to act on a revoked link (issue #41).
- * The owner only has to reach the generation check at the top of its UP branch and run
- * nxn_link_revoked(), which issues no eRPC and takes no lock -- so this is a scheduler
- * turn, not a transaction, and half a second is already three orders of magnitude of
+ * How long nx_net_link_taken() waits for the owner to act on a revoked link
+ * (owhinata/wio-lite-ai#41).  The owner only has to reach the generation check at the top of its UP
+ * branch and run nxn_link_revoked(), which issues no eRPC and takes no lock -- so this is a
+ * scheduler turn, not a transaction, and half a second is already three orders of magnitude of
  * slack.  It is deliberately NOT sized for the module: nothing here talks to it.
  */
 #define NXN_TAKEN_WAIT_MS  500u
@@ -99,8 +99,8 @@
                                        * DATA writer is idle -- as `link` does        */
 #define NXN_RPC_TMO_MS     5000u
 /*
- * How long an issue-#32 re-association may block.  It must EXCEED the module's own join
- * timeout, which is 20 s (rtw_down_timeout_sema(join_sema, 20000) in lib_arduino.a's
+ * How long an owhinata/wio-lite-ai#32 re-association may block.  It must EXCEED the module's own
+ * join timeout, which is 20 s (rtw_down_timeout_sema(join_sema, 20000) in lib_arduino.a's
  * wifi_connect): give up first and the module is still holding its serial mutex when the
  * next call goes out, and its answer arrives as a stale frame we have to drop.
  */
@@ -110,8 +110,8 @@
 
 /*
  * How long the interface waits for the telnet console to prove it has released its socket
- * (issue #23 U4-2).  Typically ~250 ms -- one poll of the console server's connect wait --
- * so this is the "something is wrong" bound, not the expected cost.  It is spent holding
+ * (owhinata/wio-lite-ai#23 U4-2).  Typically ~250 ms -- one poll of the console server's connect
+ * wait -- so this is the "something is wrong" bound, not the expected cost.  It is spent holding
  * the coarse link mutex in nxn_stop(), which is the only reason it is not larger.
  */
 #define NXN_SHELL_STOP_MS  3000u
@@ -122,7 +122,7 @@
 
 /*
  * Consecutive association samples that must be non-positive before the link is declared
- * down (issue #30 B2a).  Two at NXN_REFRESH_MS = up to ~16 s of latency on a real
+ * down (owhinata/wio-lite-ai#30 B2a).  Two at NXN_REFRESH_MS = up to ~16 s of latency on a real
  * disconnect, which is the price of not dropping every socket on one lost round trip.
  */
 #define NXN_LINK_DOWN_SAMPLES 2
@@ -209,7 +209,7 @@ static uint32_t nxn_uart_gen;
 static uint8_t  nxn_mac[6];
 static uint8_t  nxn_radio_up;
 
-/* Association tracking for the link state (issue #30 B2a).  Owner thread only, except
+/* Association tracking for the link state (owhinata/wio-lite-ai#30 B2a).  Owner thread only, except
  * nxn_lease_stale which readers sample without the lock -- a bool that only ever moves
  * on a link transition or a successful lease, so a torn read is not a thing. */
 static uint8_t  nxn_link_down_run;
@@ -370,7 +370,8 @@ static void nxn_dhcp_halt(void)
  *
  * erpc_data_quiescent(), NOT erpc_link_quiescent(): the stronger question additionally
  * requires that no eRPC request be outstanding, and a telnet console keeps a blocking
- * accept outstanding by design, so it could never succeed with one armed (issue #23 U1).
+ * accept outstanding by design, so it could never succeed with one armed (owhinata/wio-lite-ai#23
+ * U1).
  */
 static int nxn_settle(void)
 {
@@ -561,7 +562,7 @@ static void nxn_arm(void)
 	 * Every module boots at 2 Mbaud -- that is its firmware, and this increment does not
 	 * reflash it -- so 6 M can only ever be reached by asking, once per module boot.
 	 * `net up` is the right place to ask: it is the command that says "I want throughput
-	 * on this link", and issue #23 measured the difference at 305 vs 500 kB/s of echoed
+	 * on this link", and owhinata/wio-lite-ai#23 measured the difference at 305 vs 500 kB/s of echoed
 	 * TCP.
 	 *
 	 * [!] This DELIBERATELY REVERSES issue #23 U0-3's "the rate change is exclusive and
@@ -692,7 +693,7 @@ refuse:
 }
 
 /*
- * Turn an association sample into the interface's link state (issue #30 B2a).
+ * Turn an association sample into the interface's link state (owhinata/wio-lite-ai#30 B2a).
  *
  * @assoc: 1 associated, 0 not, -1 no answer (transport failure / refresh skipped).
  *
@@ -736,7 +737,7 @@ static void nxn_publish_link(int assoc)
 }
 
 /*
- * Abort hook for an issue-#32 re-association.  Polled by erpc_call_ex() about once a
+ * Abort hook for an owhinata/wio-lite-ai#32 re-association.  Polled by erpc_call_ex() about once a
  * millisecond on this thread.
  *
  * Disarming IS the abort -- see app/wifi_auto.h -- so there is no separate cancel flag and
@@ -752,8 +753,8 @@ static int nxn_auto_abort(void *ctx)
 }
 
 /*
- * Re-associate after the module has told us it is not associated (issue #32).  Called from
- * nxn_refresh() with the coarse mutex held; returns a fresh association sample for
+ * Re-associate after the module has told us it is not associated (owhinata/wio-lite-ai#32).  Called
+ * from nxn_refresh() with the coarse mutex held; returns a fresh association sample for
  * nxn_publish_link(): 1 associated, 0 not, -1 no answer.
  *
  * THE ABORT PATH IS THE DELICATE PART.  erpc_call_ex()'s abort releases the HOST's slot and
@@ -845,7 +846,7 @@ static void nxn_refresh(void)
 			nxn_radio_up = (flags & ERPC_ETH_F_RUNNING) ? 1u : 0u;
 		}
 		/*
-		 * Association, piggy-backed on the refresh we are already here for (issue #30
+		 * Association, piggy-backed on the refresh we are already here for (owhinata/wio-lite-ai#30
 		 * B2a).  It is the ONLY reliable source: the ETH_INFO flag above is
 		 * rltk_wlan_running(), which says the WiFi DRIVER is started -- not that it is
 		 * joined to an AP -- so using it as the link signal would report "up" while the
@@ -858,7 +859,7 @@ static void nxn_refresh(void)
 			assoc = (connected == WIFI_RPC_OK) ? 1 : 0;
 
 		/*
-		 * Automatic re-association (issue #32), on a DEFINITE "not associated" only.
+		 * Automatic re-association (owhinata/wio-lite-ai#32), on a DEFINITE "not associated" only.
 		 * assoc < 0 is a transport failure -- the module did not answer -- which is
 		 * not the network's fault and must never make us re-join.
 		 *
@@ -1092,7 +1093,7 @@ void nx_net_down(void)
 }
 
 /*
- * The link has just been force-quiesced and CHIP_EN is about to move (issue #41).
+ * The link has just been force-quiesced and CHIP_EN is about to move (owhinata/wio-lite-ai#41).
  *
  * The owner ALREADY has the revocation: nxn_entry()'s UP branch compares
  * rtl_link_uart_gen() against nxn_uart_gen before every refresh, and
@@ -1100,8 +1101,8 @@ void nx_net_down(void)
  * wake-up -- it is asleep in the NXN_REFRESH_MS wait at the bottom of the same branch,
  * so the revocation landed up to eight seconds late and `wifi connect` meanwhile saw a
  * stale NX_NET_UP: wifi_hold_bridge() asked a module that had just been power-cycled to
- * renew the bridge, and refused when it did not answer.  That is the whole of #41 -- the
- * time between the two, not a missing path.
+ * renew the bridge, and refused when it did not answer.  That is the whole of
+ * owhinata/wio-lite-ai#41 -- the time between the two, not a missing path.
  *
  * NOT nx_net_down(), deliberately.  That posts nxn_req_stop and runs the graceful
  * nxn_stop(), which takes the coarse mutex for up to NXN_ARM_CLAIM_MS and talks eRPC to
@@ -1149,7 +1150,7 @@ int nx_net_info_get(struct nx_net_info *out)
 	out->mask      = (uint32_t)mask;
 	out->gw        = (uint32_t)gw;
 	out->ip_valid  = (ip != 0);
-	/* Set when the link went down under a live address (issue #30 B2a).  The lease is
+	/* Set when the link went down under a live address (owhinata/wio-lite-ai#30 B2a).  The lease is
 	 * not renewed automatically -- starting the DHCP client from the link transition is
 	 * the lock-order cycle nxn_link_status_cb() documents -- so the address on the
 	 * interface may be one the network no longer agrees with. */
@@ -1345,7 +1346,7 @@ void nx_net_print_status(struct cli_instance *sh)
 	if (nxn_state == NX_NET_OFF)
 		return;
 
-	/* `link` is the ASSOCIATION (issue #30 B2a), which is what decides whether a frame
+	/* `link` is the ASSOCIATION (owhinata/wio-lite-ai#30 B2a), which is what decides whether a frame
 	 * can reach the air.  `driver` is rltk_wlan_running() -- the WiFi driver being
 	 * started -- which stays up across an AP going away, so it is reported separately
 	 * rather than being allowed to masquerade as the link state. */
@@ -1405,7 +1406,7 @@ int nx_net_guard(struct cli_instance *sh, const char *what)
 }
 
 /*
- * Hold the module's bridge watchdog open across a long eRPC flow (issue #30 B2b).
+ * Hold the module's bridge watchdog open across a long eRPC flow (owhinata/wio-lite-ai#30 B2b).
  *
  * The owner refreshes the tap every NXN_REFRESH_MS by taking the coarse mutex -- so a
  * command that holds that mutex for longer than NXN_HOLD_MS silently loses the bridge

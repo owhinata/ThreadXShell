@@ -4,7 +4,8 @@
  */
 /**
  * @file    blazeface.h
- * @brief   BlazeFace-front 128 face-detection decode (issue #9 phase 3).
+ * @brief   BlazeFace-front 128 face-detection decode (owhinata/wio-lite-ai#9 phase
+ * 3).
  *
  * Model-specific post-processing for ST Model Zoo's BlazeFace Front 128x128 (a
  * MediaPipe/PINTO-derived SSD face detector).  Lives ABOVE the backend-agnostic

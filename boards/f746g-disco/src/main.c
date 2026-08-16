@@ -17,10 +17,10 @@
  *
  * The multi-instance architecture (req §10, acceptance §18.8) is exercised by the
  * host tests (two dummy instances, no crosstalk) and was demonstrated on silicon
- * in #8; the demo keeps a single interactive instance so the VCP carries a clean,
- * uninterrupted line-editing session (no second instance mirroring over the same
- * UART).  The dummy backend remains a first-class, host-tested backend in the
- * library.
+ * in owhinata/stm32f746g-disco#8; the demo keeps a single interactive instance so
+ * the VCP carries a clean, uninterrupted line-editing session (no second instance
+ * mirroring over the same UART).  The dummy backend remains a first-class,
+ * host-tested backend in the library.
  *
  * Board bring-up (216 MHz clock, caches, VCP UART, printf) is in bsp.c; the
  * SysTick/ThreadX integration is in port/threadx/tx_glue.c; the strong _write
@@ -52,7 +52,8 @@
 #include <stdio.h>
 
 void tx_glue_timer_enable(void);
-void tx_glue_profile_enable(void);   /* issue #19: arm exec-profile ISR hooks */
+/* owhinata/stm32f746g-disco#19: arm exec-profile ISR hooks */
+void tx_glue_profile_enable(void);
 
 /* ---- shell instances --------------------------------------------------- */
 
@@ -60,7 +61,8 @@ void tx_glue_profile_enable(void);   /* issue #19: arm exec-profile ISR hooks */
 CLI_BACKEND_UART_DEFINE(vcp_tr, &huart1);
 CLI_INSTANCE_DEFINE(vcp_sh, &vcp_tr, "sh> ");
 
-/* Network shell over TCP (issue #49 P4): one telnet session bound to the NetX
+/* Network shell over TCP (owhinata/stm32f746g-disco#49 P4): one telnet session
+   bound to the NetX
  * TCP server transport (port/netxduo/nx_shell.c).  The instance thread runs at
  * boot (idle until a client connects); nx_shell_init() arms the socket later. */
 CLI_INSTANCE_DEFINE(net_sh, &nx_shell_transport, "net> ");
@@ -75,7 +77,8 @@ _Static_assert(SHELL_COUNT <= CLI_MAX_INSTANCES,
 
 /* ---- background threads ------------------------------------------------- */
 
-/* Sized from the measured high-water-mark (`thread` peak = 300 B, #93); 512 B
+/* Sized from the measured high-water-mark (`thread` peak = 300 B,
+   owhinata/stm32f746g-disco#93); 512 B
  * keeps ~1.7x margin for this GPIO-toggle-and-sleep thread. */
 #define LED_STACK_SIZE  512
 
@@ -94,7 +97,8 @@ static void led_entry(ULONG arg)
 
 	/* First application thread to run (priority 10) -- this point is past
 	 * _tx_execution_initialize(), so it is the earliest safe spot to arm the
-	 * execution-profile ISR hooks (issue #19).  See tx_glue.c profile_active. */
+	 * execution-profile ISR hooks (owhinata/stm32f746g-disco#19).  See tx_glue.c
+	 * profile_active. */
 	tx_glue_profile_enable();
 
 	LD1_GPIO_CLK_EN();
@@ -111,13 +115,15 @@ static void led_entry(ULONG arg)
 }
 
 #if BSP_ENABLE_IWDG
-/* IWDG petter (issue #38): a high-priority thread whose only job is to refresh the
+/* IWDG petter (owhinata/stm32f746g-disco#38): a high-priority thread whose only
+   job is to refresh the
  * independent watchdog ~1 s.  Priority 5 sits above led (10), cli (16) and the bg
  * workers (17), so it preempts CoreMark and any lower-priority runaway -- the
  * watchdog then fires only on a tick/scheduler stall, an IRQ-off lockup, or a
  * runaway at priority < 5.  ~1 s pet is <= T/2 at every LSI corner (T = 2.04 s at
  * the 47 kHz fast corner), the standard refresh margin. */
-/* Sized from the measured high-water-mark (`thread` peak = 128 B, #93); 256 B
+/* Sized from the measured high-water-mark (`thread` peak = 128 B,
+   owhinata/stm32f746g-disco#93); 256 B
  * keeps ~2x margin for this pet-and-sleep thread. */
 #define IWDG_PETTER_STACK_SIZE  256
 #define IWDG_PETTER_PRIORITY    5
@@ -161,7 +167,8 @@ void tx_application_define(void *first_unused_memory)
 			printf("shell: instance %u start failed (skipped)\r\n", (unsigned)i);
 	}
 
-	/* Background-job worker pool (issue #25): create the per-worker event groups
+	/* Background-job worker pool (owhinata/stm32f746g-disco#25): create the
+    per-worker event groups
 	 * once, now that the interactive instances exist.  Workers are spawned on
 	 * demand by `cmd &`. */
 	cli_job_pool_init();
@@ -170,36 +177,42 @@ void tx_application_define(void *first_unused_memory)
 	                 led_stack, sizeof led_stack,
 	                 LED_PRIORITY, LED_PRIORITY, TX_NO_TIME_SLICE, TX_AUTO_START);
 
-	/* QSPI NOR bring-up (issue #29): peripheral + operation mutex only -- no
+	/* QSPI NOR bring-up (owhinata/stm32f746g-disco#29): peripheral + operation mutex
+    only -- no
 	 * flash transaction, so it is safe before the scheduler starts.  On failure
 	 * the `qspi` command reports "driver not initialized"; nothing else stops. */
 	if (qspi_flash_init() != 0)
 		printf("qspi: init failed (qspi command disabled)\r\n");
 
-	/* Filesystem glue (issue #30): mount mutex + fx_system_initialize only;
+	/* Filesystem glue (owhinata/stm32f746g-disco#30): mount mutex +
+    fx_system_initialize only;
 	 * the media itself mounts lazily on the first `fs` command. */
 	fs_glue_init();
 
-	/* SDMMC1 SD-card bring-up (issue #33): GPIO/DMA/NVIC + operation mutex and
+	/* SDMMC1 SD-card bring-up (owhinata/stm32f746g-disco#33): GPIO/DMA/NVIC +
+    operation mutex and
 	 * DMA-completion semaphore only -- no card I/O, so it is safe before the
 	 * scheduler starts.  On failure the `sd` command reports "driver not
 	 * initialized"; nothing else stops. */
 	if (sd_card_init() != 0)
 		printf("sd: init failed (sd command disabled)\r\n");
 
-	/* SD filesystem glue (issue #34): SD mount mutexes only -- the media
+	/* SD filesystem glue (owhinata/stm32f746g-disco#34): SD mount mutexes only -- the
+    media
 	 * mounts lazily on the first `sd` FS command.  fx_system_initialize() was
 	 * already run by fs_glue_init(), so this does not repeat it. */
 	sd_fs_glue_init();
 
-	/* FMC SDRAM bring-up (issue #40): GPIO/FMC controller + the JEDEC power-up
+	/* FMC SDRAM bring-up (owhinata/stm32f746g-disco#40): GPIO/FMC controller + the
+    JEDEC power-up
 	 * sequence (polling only, ~sub-ms).  Before camera_init() -- the camera
-	 * frame buffer (#41) lives in SDRAM.  On failure the `sdram`/`camera
-	 * capture` commands report it; nothing else stops. */
+	 * frame buffer (owhinata/stm32f746g-disco#41) lives in SDRAM.  On failure the
+	 * `sdram`/`camera capture` commands report it; nothing else stops. */
 	if (sdram_init() != 0) {
 		printf("sdram: init failed (sdram/camera capture disabled)\r\n");
 	} else {
-		/* LTDC display bring-up (issue #52): PLLSAI -> LCD_CLK + one RGB565
+		/* LTDC display bring-up (owhinata/stm32f746g-disco#52): PLLSAI -> LCD_CLK + one
+     RGB565
 		 * layer from a SDRAM frame buffer.  Gated on sdram_init() success --
 		 * the frame buffer lives in .sdram, so it must NOT run with the FMC
 		 * down (touching 0xC0000000 would fault).  Polling only (PLLSAI lock /
@@ -209,21 +222,24 @@ void tx_application_define(void *first_unused_memory)
 			printf("ltdc: init failed (lcd command disabled)\r\n");
 	}
 
-	/* Camera bring-up (issue #39): PWR_EN GPIO (parked off), I2C1 and the
+	/* Camera bring-up (owhinata/stm32f746g-disco#39): PWR_EN GPIO (parked off), I2C1
+    and the
 	 * operation mutex only -- no sensor I/O, so it is safe before the scheduler
 	 * starts.  On failure the `camera` command reports "driver not
 	 * initialized"; nothing else stops. */
 	if (camera_init() != 0)
 		printf("camera: init failed (camera command disabled)\r\n");
 
-	/* FT5336 touch bring-up (issue #54): I2C3 (PH7/PH8) + the operation mutex
+	/* FT5336 touch bring-up (owhinata/stm32f746g-disco#54): I2C3 (PH7/PH8) + the
+    operation mutex
 	 * only -- no bus I/O, so it is safe before the scheduler starts.  SDRAM
 	 * independent (separate I2C3 bus from the camera's I2C1).  On failure the
 	 * `touch` command reports it; nothing else stops. */
 	if (touch_init() != 0)
 		printf("touch: init failed (touch command disabled)\r\n");
 
-	/* Ethernet bring-up (issue #49 P1): ETH MAC + LAN8742A RMII PHY, link
+	/* Ethernet bring-up (owhinata/stm32f746g-disco#49 P1): ETH MAC + LAN8742A RMII
+    PHY, link
 	 * detection only (no NetX/traffic).  GATED on sdram_is_up(): the ETH DMA
 	 * descriptors live in .sdram.eth (0xC0400000) and HAL_ETH_Init writes them
 	 * immediately, so with the FMC down this would fault instead of failing soft
@@ -235,12 +251,14 @@ void tx_application_define(void *first_unused_memory)
 		if (eth_init() != 0) {
 			printf("eth: init failed (net command disabled)\r\n");
 		} else if (nx_net_init() != 0) {
-			/* NetX Duo IPv4 (issue #49 P2): pool/IP/ARP/ICMP/UDP/DHCP.  Only
+			/* NetX Duo IPv4 (owhinata/stm32f746g-disco#49 P2): pool/IP/ARP/ICMP/UDP/DHCP.
+      Only
 			 * creates ThreadX objects here -- DHCP negotiates later on the IP
 			 * thread.  On failure the link still works; `net` IP/ping report it. */
 			printf("net: NetX Duo init failed (IP disabled)\r\n");
 		} else if (nx_shell_init() != 0) {
-			/* TCP network shell (issue #49 P4): listen :23 + server thread.  The
+			/* TCP network shell (owhinata/stm32f746g-disco#49 P4): listen :23 + server
+      thread. The
 			 * net_sh instance thread already started above; on failure the telnet
 			 * shell is disabled, everything else keeps running. */
 			printf("net: shell server init failed (telnet disabled)\r\n");
@@ -249,7 +267,8 @@ void tx_application_define(void *first_unused_memory)
 		printf("eth: skipped (SDRAM down)\r\n");
 	}
 
-	/* GUIX camera UI (issues #60/#61).  Register the widget-tree builder first --
+	/* GUIX camera UI (owhinata/stm32f746g-disco#60/#61).  Register the widget-tree
+    builder first --
 	 * no I/O, so safe here -- then bring the UI up ON at boot, symmetric with the
 	 * camera producer (created at boot, idle-sleeping) instead of the lazy `gui
 	 * start`.  Gated on the LTDC display being up (the canvas lives in the .sdram
@@ -272,7 +291,8 @@ void tx_application_define(void *first_unused_memory)
 	}
 
 #if BSP_ENABLE_IWDG
-	/* IWDG last (issue #38).  Order here is deliberate and must stay
+	/* IWDG last (owhinata/stm32f746g-disco#38).  Order here is deliberate and must
+    stay
 	 * "petter create -> iwdg_init() -> tx_glue_timer_enable()":
 	 *   - All fail-soft bring-up above (QSPI/SD HAL init can block up to ~5 s on a
 	 *     media fault) completes BEFORE the watchdog arms, so a media fault stays

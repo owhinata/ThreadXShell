@@ -4,14 +4,16 @@
  */
 /**
  * @file    mem_sections.h
- * @brief   Placement attributes for the non-default memories (issue #46).
+ * @brief   Placement attributes for the non-default memories
+ * (owhinata/wio-lite-ai#46).
  *
  * The rule this firmware follows, and the reason these exist:
  *
  *     AXI-SRAM = only what a BUS MASTER has to reach
  *     DTCM     = CPU-only hot data (thread stacks, ISR rings, packet pool)
  *     PSRAM    = bulk / cold
- *     ITCM     = interrupt code (issues #24 / #29, placed in the linker script)
+ *     ITCM     = interrupt code (owhinata/wio-lite-ai#24 / #29, placed in the linker
+ * script)
  *
  * AXI-SRAM is the scarce one, and not because it is small.  It is the only RAM a
  * bus master can address: DMA1/DMA2 and the SDMMC1 internal IDMA cannot see either
@@ -19,7 +21,7 @@
  * every SD transfer through a buffer in .axi_dma.  A survey of every *_DMA() call
  * in this firmware found exactly three buffers a master ever touches, totalling
  * 4 KB in AXI-SRAM -- the other 217 KB was CPU-only data sitting in the one memory
- * the camera's DCMI band (issue #35) has no substitute for.
+ * the camera's DCMI band (owhinata/wio-lite-ai#35) has no substitute for.
  *
  * [!] NEVER put a buffer a DMA engine will touch in DTCM.  It does not fault: the
  * transfer simply moves nothing, and the failure surfaces much later as data that
@@ -56,7 +58,8 @@
 #define DTCM_BSS  __attribute__((section(".dtcm_bss")))
 
 /**
- * Put a definition in the CACHEABLE PSRAM carve-out (.psram_ai, issue #9 phase 2a).
+ * Put a definition in the CACHEABLE PSRAM carve-out (.psram_ai,
+ * owhinata/wio-lite-ai#9 phase 2a).
  *
  * The top 2 MB of the OCTOSPI1 window is mapped Normal write-back by app/mpu.c
  * region 3, unlike the rest of it.  This is where the NN runtime's large CPU-only

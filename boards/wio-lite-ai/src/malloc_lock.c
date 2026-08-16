@@ -5,7 +5,7 @@
 /**
  * @file    malloc_lock.c
  * @brief   Thread-safe newlib heap: back __malloc_lock/__malloc_unlock with a
- *          ThreadX mutex (issue #14).
+ *          ThreadX mutex (owhinata/wio-lite-ai#14).
  *
  * The stock newlib-nano __malloc_lock/__malloc_unlock forward to the retargetable
  * lock hooks (__retarget_lock_acquire/release_recursive), which are no-op `bx lr`

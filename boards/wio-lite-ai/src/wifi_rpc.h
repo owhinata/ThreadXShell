@@ -4,7 +4,7 @@
  */
 /*
  * Wio Lite AI (STM32H725AEI6) -- typed eRPC wrappers for the onboard RTL8720DN
- * WiFi/tcpip API (issue #5, increment 3: WiFi association).
+ * WiFi/tcpip API (owhinata/wio-lite-ai#5, increment 3: WiFi association).
  *
  * Thin, synchronous C wrappers over app/erpc.c's erpc_call_ex().  Each function
  * performs ONE eRPC round-trip on the currently-open RTL8720 UART; a caller holds that
@@ -59,7 +59,7 @@
 
 /*
  * rtw_connect_error_flag_t (Realtek Ameba wifi_constants.h): what the module's
- * wifi_get_last_error() reports about the LAST association attempt (issue #40).
+ * wifi_get_last_error() reports about the LAST association attempt (owhinata/wio-lite-ai#40).
  *
  * This is the only way to tell apart the several reasons an association fails: the SDK's
  * wifi_connect() collapses all of them into one RTW_ERROR (-1) return.  It reaches that
@@ -106,7 +106,8 @@ int wifi_rpc_connect(const struct wifi_rpc_opts *o, const char *ssid,
                      const char *password /* NULL = open network */,
                      uint32_t security, int32_t *result);
 int wifi_rpc_disconnect(const struct wifi_rpc_opts *o, int32_t *result);
-/* The module's channel plan index: which channels it scans, and how (issue #40). */
+/* The module's channel plan index: which channels it scans, and how
+   (owhinata/wio-lite-ai#40). */
 int wifi_rpc_get_channel_plan(const struct wifi_rpc_opts *o, uint8_t *plan,
                               int32_t *result);
 /* Install one.  [!] NON-VOLATILE -- survives a full power-down, so this is provisioning
@@ -116,7 +117,8 @@ int wifi_rpc_set_channel_plan(const struct wifi_rpc_opts *o, uint8_t plan,
 int wifi_rpc_is_connected(const struct wifi_rpc_opts *o, int32_t *result);
 /* Why the last association attempt failed: *@err is one of WIFI_RPC_ERR_* above.  Unlike
  * the other wrappers there is no separate module `result` -- the flag IS the return
- * value, so a decode failure is the only way this reports nothing (issue #40). */
+ * value, so a decode failure is the only way this reports nothing
+ * (owhinata/wio-lite-ai#40). */
 int wifi_rpc_get_last_error(const struct wifi_rpc_opts *o, int32_t *err);
 /* Name for a WIFI_RPC_ERR_* value; never NULL (unrecognised values read as "unknown"). */
 const char *wifi_rpc_err_name(int32_t err);
@@ -124,8 +126,8 @@ int wifi_rpc_get_rssi(const struct wifi_rpc_opts *o, int32_t *rssi, int32_t *res
 int wifi_rpc_get_mac(const struct wifi_rpc_opts *o, char mac[18], int32_t *result);
 int wifi_rpc_tcpip_init(const struct wifi_rpc_opts *o, int32_t *result);
 /*
- * get_ip_info / set_ip_info / dhcpc_start were here until issue #30 B1.  They drove the
- * MODULE's L3 -- an address the host stack throws away the moment the bridge goes in
+ * get_ip_info / set_ip_info / dhcpc_start were here until owhinata/wio-lite-ai#30 B1.  They
+ * drove the MODULE's L3 -- an address the host stack throws away the moment the bridge goes in
  * (arming the bridge stops the DHCP client and the module zeroes its netif, because the
  * WLAN driver filters received IP against it).  L3 is the host's alone now; what remains of
  * service 15 is the two calls the BRIDGE itself needs.
@@ -228,18 +230,18 @@ int wifi_rpc_scan_record(const uint8_t *buf, uint16_t got, uint16_t idx,
  * ---- what used to be here (rpc_wifi_lwip, service 16) ----------------------------
  *
  * The socket-offload wrappers lived here in two waves, and both are gone.  bind /
- * listen / accept / recv / send / shutdown / getpeername served issue #21's
- * TCP-on-the-module era; issue #23 U4 moved `net echo` and the telnet console onto the
- * host's own NetX Duo stack and they were deleted with it (history: 41d1ff0~1).  The
+ * listen / accept / recv / send / shutdown / getpeername served owhinata/wio-lite-ai#21's
+ * TCP-on-the-module era; owhinata/wio-lite-ai#23 U4 moved `net echo` and the telnet console
+ * onto the host's own NetX Duo stack and they were deleted with it (history: 41d1ff0~1).  The
  * datagram side -- socket / setsockopt / sendto / recvfrom (+ its async _begin) /
  * close / errno, which carried `net ping`'s raw ICMP and the `net conc` diagnostic --
- * followed in issue #28 when ping became host-stack-only and conc was retired.  The
- * firmware quirks they encoded (accept never filling in the peer address, the recvfrom
- * timeout honoured only on N2+ firmware, the SO_RCVTIMEO handling from issue #20 N2)
- * are recorded with the code in this file's history, and the service-16 method IDs
+ * followed in owhinata/wio-lite-ai#28 when ping became host-stack-only and conc was retired.
+ * The firmware quirks they encoded (accept never filling in the peer address, the recvfrom
+ * timeout honoured only on N2+ firmware, the SO_RCVTIMEO handling from owhinata/wio-lite-ai#20
+ * N2) are recorded with the code in this file's history, and the service-16 method IDs
  * remain listed in wifi_rpc.c as the record of the module's wire contract -- a future
- * module-side socket need would start from them again (issue #5's BSD sockets are the
- * host stack's job and do not).
+ * module-side socket need would start from them again (owhinata/wio-lite-ai#5's BSD sockets
+ * are the host stack's job and do not).
  */
 
 /* Maximum payload of one streamed eRPC request the link contract allows; today only
@@ -287,10 +289,10 @@ int wifi_rpc_scan_record(const uint8_t *buf, uint16_t got, uint16_t idx,
  * move bytes reliably over eRPC against an unproven module must chunk at
  * WIFI_RPC_SEND_SAFE; receiving may use the full WIFI_RPC_STREAM_MAX.
  *
- * THE FIRMWARE FIX IS NOW IN (issue #23 U0-2, fw/rtl8720/patches/0004): the module owns
- * USI0 directly behind an 8 kB ring and reads it in bulk, so none of the three causes
- * above survives and a full WIFI_RPC_STREAM_MAX payload is safe.  But the host must keep
- * working against an older module -- the two are flashed separately and the recovery path
+ * THE FIRMWARE FIX IS NOW IN (owhinata/wio-lite-ai#23 U0-2, fw/rtl8720/patches/0004): the
+ * module owns USI0 directly behind an 8 kB ring and reads it in bulk, so none of the three
+ * causes above survives and a full WIFI_RPC_STREAM_MAX payload is safe.  But the host must
+ * keep working against an older module -- the two are flashed separately and the recovery path
  * (`wifi flash imgload` / `flash write`) exists precisely to put an older image back -- so the
  * chunk size is a RUNTIME question, not a compile-time one: see wifi_rpc_send_chunk().
  * WIFI_RPC_SEND_SAFE remains the answer for a link we have no proof about.

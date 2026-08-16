@@ -87,9 +87,9 @@ static void fault_rest(void)
  * does not look inside inline asm: without it the whole function is dropped as
  * dead and the link fails with
  *   undefined reference to `fault_handler_c' / dangerous relocation
- * (issue #39).  `-Wl,-u,fault_handler_c` fixes the same thing from the link line,
- * but the attribute keeps the reason next to the code and does not depend on how
- * the firmware is built. */
+ * (owhinata/wio-lite-ai#39).  `-Wl,-u,fault_handler_c` fixes the same thing from
+ * the link line, but the attribute keeps the reason next to the code and does not
+ * depend on how the firmware is built. */
 __attribute__((used)) void fault_handler_c(uint32_t *frame, uint32_t exc_return)
 {
 	static volatile uint32_t in_fault;

@@ -112,7 +112,8 @@ static int next_token(char **rdp, char **wrp, char **tok_out)
 }
 
 /*
- * Split a line on top-level ';' (command sequencing, issue #23).
+ * Split a line on top-level ';' (command sequencing,
+ * owhinata/stm32f746g-disco#23).
  *
  * Returns the next ';'-separated segment starting at *cursor, NUL-terminating it
  * in place (the delimiting ';' is overwritten with '\0') and advancing *cursor
@@ -175,7 +176,8 @@ char *cli_next_segment(char **cursor)
 }
 
 /*
- * Detect (and strip) a trailing background '&' on a command segment (issue #25).
+ * Detect (and strip) a trailing background '&' on a command segment
+ * (owhinata/stm32f746g-disco#25).
  *
  * Scans @p seg with the SAME quote/escape rules as cli_next_segment() /
  * next_token(): a '&' is the background operator only when it is the last
@@ -407,13 +409,13 @@ enum cli_parse_status cli_parse(char *line, char **argv, int argv_cap,
 	return CLI_PARSE_OK;
 }
 
-/* ---- argument-value parsers (issue #27) ---------------------------------- */
+/* ---- argument-value parsers (owhinata/wio-lite-ai#27) ----------------------- */
 
 /*
  * These are the deduplicated copies of the per-command parsers that every
- * numeric/address-taking command carried before issue #27 (7 copies of the
- * integer one alone).  Kept here, next to the tokenizer, because they are the
- * same kind of thing: pure functions over a token, no shell instance involved,
+ * numeric/address-taking command carried before owhinata/wio-lite-ai#27 (7 copies
+ * of the integer one alone).  Kept here, next to the tokenizer, because they are
+ * the same kind of thing: pure functions over a token, no shell instance involved,
  * and covered by the host tests in shell/test/test_parse.c.
  */
 

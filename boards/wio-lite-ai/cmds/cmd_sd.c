@@ -4,7 +4,7 @@
  */
 /**
  * @file    cmd_sd.c
- * @brief   `sd` shell command: microSD card + FileX filesystem (issue #6).
+ * @brief   `sd` shell command: microSD card + FileX filesystem (owhinata/wio-lite-ai#6).
  *
  *   sd info            card type, capacity, block geometry, bus width, CID/CSD
  *   sd read <lba>      hexdump one 512 B block (LBA addressing)

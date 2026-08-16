@@ -4,13 +4,15 @@
  */
 /**
  * @file    touch.h
- * @brief   FT5336 capacitive touch panel over I2C3 (issue #54, Epic #48).
+ * @brief   FT5336 capacitive touch panel over I2C3 (owhinata/stm32f746g-disco#54,
+ * Epic owhinata/stm32f746g-disco#48).
  *
  * Reads the FocalTech FT5336 controller behind the board's 4.3" RK043FN48H
  * panel: chip-ID probe and a polled multi-touch read (up to 5 simultaneous
- * points).  Phase of #48 after the LTDC display (#52): enough to verify the
- * touch wiring and the X/Y mapping with the `touch` command before EXTI-driven
- * dispatch and GUIX input (#55/#56).
+ * points).  Phase of owhinata/stm32f746g-disco#48 after the LTDC display
+ * (owhinata/stm32f746g-disco#52): enough to verify the touch wiring and the X/Y
+ * mapping with the `touch` command before EXTI-driven dispatch and GUIX input
+ * (owhinata/stm32f746g-disco#55/#56).
  *
  * Hardware facts (UM1907 / ST BSP):
  *   - Bus: I2C3, SCL=PH7 / SDA=PH8 (AF4, open-drain), the board's shared
@@ -21,7 +23,7 @@
  *   - INT: FT5336_INT = PI13 (EXTI15_10).  touch_irq_enable() puts the FT5336 in
  *     interrupt (trigger) mode and arms PI13 as a rising-edge EXTI so a touch
  *     wakes a waiter (touch_wait_event) -- the GUIX input path uses this to idle
- *     at ~0 % CPU instead of polling (issue #62).
+ *     at ~0 % CPU instead of polling (owhinata/stm32f746g-disco#62).
  *
  * Concurrency: public calls serialize on an internal TX_MUTEX; the API is
  * thread-context only (never from an ISR).  I2C reads/writes are interrupt-driven
@@ -113,7 +115,7 @@ int touch_probe(uint8_t *id);
  */
 int touch_read(struct touch_state *st);
 
-/* ---- EXTI13 interrupt-driven wake (issue #62) --------------------------- */
+/* ---- EXTI13 interrupt-driven wake (owhinata/stm32f746g-disco#62) ------------ */
 
 /**
  * Arm the FT5336 INT line (PI13 / EXTI15_10): configure PI13 as a rising-edge

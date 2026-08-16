@@ -4,7 +4,8 @@
  */
 /**
  * @file    sd_fs_glue.c
- * @brief   Lazy-mount singleton for the microSD filesystem (issue #6).
+ * @brief   Lazy-mount singleton for the microSD filesystem
+ * (owhinata/wio-lite-ai#6).
  *
  * Ported from the STM32F746 Discovery firmware, where an identical file sat beside
  * a second (LevelX/QSPI NOR) media and inherited fx_system_initialize() from it.

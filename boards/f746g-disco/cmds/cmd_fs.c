@@ -4,7 +4,8 @@
  */
 /**
  * @file    cmd_fs.c
- * @brief   `fs` shell command (issue #30): FileX filesystem on the QSPI NOR.
+ * @brief   `fs` shell command (owhinata/stm32f746g-disco#30): FileX filesystem on the
+ * QSPI NOR.
  *
  *   fs format [full] yes   (re)format; `full` first erases all 256 blocks
  *   fs ls [path]           list a directory (default /)
@@ -15,11 +16,12 @@
  *   fs info                capacity / free space / FAT type / wear
  *   fs umount              flush + unmount (e.g. before `qspi test`)
  *
- * Since issue #34 the media-independent bodies (ls/cat/write/rm/mkdir/info/
- * umount) live in fs_cmd_core.c and are shared with the `sd` command; this file
- * keeps only the QSPI-specific pieces: the LevelX format, the wear info line,
- * the `struct fs_device` instance binding the QSPI glue, and the thin wrappers
- * that register them.  Behaviour is unchanged from #30/#31.
+ * Since owhinata/stm32f746g-disco#34 the media-independent bodies
+ * (ls/cat/write/rm/mkdir/info/ umount) live in fs_cmd_core.c and are shared with the
+ * `sd` command; this file keeps only the QSPI-specific pieces: the LevelX format, the
+ * wear info line, the `struct fs_device` instance binding the QSPI glue, and the thin
+ * wrappers that register them.  Behaviour is unchanged from
+ * owhinata/stm32f746g-disco#30/#31.
  *
  * Clean-room design; no third-party code reused.
  */
@@ -35,7 +37,8 @@
 
 /* ---- QSPI device binding -------------------------------------------------- */
 
-/* Wear-leveling visibility (issue #31): LevelX keeps per-block erase counts in
+/* Wear-leveling visibility (owhinata/stm32f746g-disco#31): LevelX keeps per-block
+   erase counts in
  * the block headers and tracks min/max live (updated at open and on every
  * reclaim), so the spread shows leveling at work.  Trailing line of `fs info`. */
 static void qspi_info_extra(struct cli_instance *sh, FX_MEDIA *media)
@@ -61,7 +64,7 @@ static const struct fs_device qspi_dev = {
 	.info_extra = qspi_info_extra,
 };
 
-/* Accessor for cross-command reuse (camera save, issue #42). */
+/* Accessor for cross-command reuse (camera save, owhinata/stm32f746g-disco#42). */
 const struct fs_device *fs_qspi_device(void)
 {
 	return &qspi_dev;

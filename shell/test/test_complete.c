@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host unit test for Tab completion (issue #11): the word-boundary scan, the
+ * Host unit test for Tab completion (owhinata/stm32f746g-disco#11): the word-boundary scan, the
  * read-only command-set resolution (root vs subcommand, leading spaces, argument
  * territory), the prefix scan with longest-common-prefix tracking, the single-
  * candidate complete + trailing space, the bash-style two-stage candidate list,

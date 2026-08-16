@@ -20,8 +20,9 @@ void Error_Handler(void);
 
 /**
  * Enable the configurable faults (MemManage/Bus/Usage) and divide-by-zero
- * trapping so the crash-dump handler (src/fault.c, issue #28) can classify a
- * fault precisely.  Call early in bsp_init(), after log_init().
+ * trapping so the crash-dump handler (src/fault.c,
+ * owhinata/stm32f746g-disco#28) can classify a fault precisely.  Call early in
+ * bsp_init(), after log_init().
  */
 void fault_init(void);
 

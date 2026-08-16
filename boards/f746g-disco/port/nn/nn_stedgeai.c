@@ -4,7 +4,8 @@
  */
 /**
  * @file    nn_stedgeai.c
- * @brief   X-CUBE-AI (ST Edge AI Core / STAI) nn backend (issue #81 / Epic #80).
+ * @brief   X-CUBE-AI (ST Edge AI Core / STAI) nn backend (owhinata/stm32f746g-disco#81 / Epic
+ * owhinata/stm32f746g-disco#80).
  *
  * Bridges the ST Edge AI Core generated network (port/nn/generated/, produced by
  * `stedgeai generate`) to the backend-agnostic nn vtable (nn_backend.h).  Uses

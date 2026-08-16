@@ -4,7 +4,8 @@
  */
 /**
  * @file    nn_backend.h
- * @brief   Internal vtable a concrete nn backend implements (issue #81).
+ * @brief   Internal vtable a concrete nn backend implements
+ * (owhinata/stm32f746g-disco#81).
  *
  * nn.c dispatches the public nn.h API to exactly one backend via this vtable.
  * Each backend (nn_null.c, nn_stedgeai.c, later nn_tflm.c) defines its own
@@ -45,7 +46,7 @@ struct nn_backend_vt {
 	/** Pure inference (no timing). Inputs pre-filled; 0 on success, <0 on error. */
 	int  (*run)(void *impl);
 
-	/* --- Optional: runtime model reload from a RAM buffer (issue #89 P2) ------
+	/* --- Optional: runtime model reload from a RAM buffer (owhinata/stm32f746g-disco#89 P2) ---
 	 * A backend that cannot swap the model at runtime leaves BOTH NULL; nn.c then
 	 * reports the feature unsupported.  Only the tflm backend implements them
 	 * (it can interpret an arbitrary .tflite flatbuffer in RAM). */

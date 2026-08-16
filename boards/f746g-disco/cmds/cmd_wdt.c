@@ -4,7 +4,7 @@
  */
 /**
  * @file    cmd_wdt.c
- * @brief   `wdt` shell command (issue #38): IWDG status + starve test.
+ * @brief   `wdt` shell command (owhinata/stm32f746g-disco#38): IWDG status + starve test.
  *
  *   wdt info     show watchdog state, nominal timeout and last reset cause
  *   wdt starve   stop petting (IRQ off, spin) so the IWDG resets the board

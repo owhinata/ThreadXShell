@@ -24,7 +24,8 @@ static UCHAR tx_unused_memory[4];
    exist (SysTick is already ticking from bsp_init()/HAL_Init()). */
 static volatile UINT tx_timer_active = 0u;
 
-/* Separate gate for the execution-profile ISR hooks (issue #19).  It must turn
+/* Separate gate for the execution-profile ISR hooks (owhinata/stm32f746g-disco#19).
+   It must turn
    on only AFTER _tx_execution_initialize() (which the kernel runs after
    tx_application_define()), so it is NOT tx_timer_active (set inside
    tx_application_define, i.e. before the kit is initialized).  The first
@@ -56,7 +57,8 @@ void tx_glue_timer_enable(void)
 }
 
 /* Called from the first application thread to run (led_entry), which is past
-   _tx_execution_initialize(): enable the execution-profile ISR hooks (issue #19). */
+   _tx_execution_initialize(): enable the execution-profile ISR hooks
+   (owhinata/stm32f746g-disco#19). */
 void tx_glue_profile_enable(void)
 {
     profile_active = 1u;
@@ -72,7 +74,8 @@ void tx_glue_profile_enable(void)
 void SysTick_Handler(void)
 {
 #if defined(TX_EXECUTION_PROFILE_ENABLE)
-    /* Account this ISR to the execution profile (issue #19).  Gated on
+    /* Account this ISR to the execution profile (owhinata/stm32f746g-disco#19).
+       Gated on
        profile_active so it never runs before the kit is initialized or before
        TIM2 (the time source) is live.  Snapshot the gate (0->1 one-shot) so
        enter/exit stay paired.  The enter/exit bookkeeping (nest counter + 64-bit

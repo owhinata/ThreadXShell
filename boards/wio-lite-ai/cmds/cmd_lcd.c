@@ -4,7 +4,8 @@
  */
 /**
  * @file    cmd_lcd.c
- * @brief   `lcd` shell command: LTDC display status + test patterns (issue #7).
+ * @brief   `lcd` shell command: LTDC display status + test patterns
+ * (owhinata/wio-lite-ai#7).
  *
  *   lcd info            panel / clock / frame buffer / LTDC error flags
  *   lcd fill <color>    flood the screen (colour name or 0xRGB565 / decimal)
@@ -25,8 +26,8 @@
  * wiring and the RGB565 bit order in one shot.
  *
  * Coordinates here are the LANDSCAPE 320x240 drawing surface, not the panel's
- * 240x320 (issue #38) -- see the header of ltdc_display.h for the mapping and for
- * why the panel cannot do the rotation itself.
+ * 240x320 (owhinata/wio-lite-ai#38) -- see the header of ltdc_display.h for the mapping
+ * and for why the panel cannot do the rotation itself.
  *
  * `lcd off` is also the prerequisite for any `psram` subcommand that retunes
  * OCTOSPI1: scanout reads the frame buffer out of that bus continuously, so
@@ -103,7 +104,8 @@ static int cmd_lcd_info(struct cli_instance *sh, int argc, char **argv)
 
 	cli_print(sh, "panel:   ST7789 %ux%u RGB565 (FPC-40, LTDC layer 0)\r\n",
 	          (unsigned)p.w, (unsigned)p.h);
-	/* The two differ on purpose (issue #38): the panel is portrait, everything
+	/* The two differ on purpose (owhinata/wio-lite-ai#38): the panel is portrait,
+    everything
 	   drawn on it is addressed landscape, and the rotation is a fixed coordinate
 	   transform in ltdc_display.c -- not anything the panel does. */
 	cli_print(sh, "surface: %ux%u landscape (drawing coordinates; fb stride stays %u)\r\n",
@@ -224,8 +226,8 @@ static int cmd_lcd_anim(struct cli_instance *sh, int argc, char **argv)
 	if (!lcd_ready(sh))
 		return 1;
 	/* The drawing surface, not ltdc_panel_get()'s panel geometry: the API is
-	   landscape 320x240 since issue #38, so a rectangle bounced inside 240x320
-	   would spend half its travel clipped off the long edge. */
+	   landscape 320x240 since owhinata/wio-lite-ai#38, so a rectangle bounced inside
+	   240x320 would spend half its travel clipped off the long edge. */
 	maxx = (int)ltdc_surface_w() - w;
 	maxy = (int)ltdc_surface_h() - h;
 
@@ -309,7 +311,7 @@ static int cmd_lcd_on(struct cli_instance *sh, int argc, char **argv)
 	/* The SHARED guard: scan-out only reads the frame buffer, so it has to be
 	   kept away from a command that is reconfiguring OCTOSPI1 -- but not from a
 	   camera stream, which merely writes a different part of the same memory.
-	   That is what lets the preview exist at all (issue #8 phase 3c). */
+	   That is what lets the preview exist at all (owhinata/wio-lite-ai#8 phase 3c). */
 	if (!psram_acquire_shared()) {
 		cli_error(sh, "lcd: OCTOSPI1 busy (a psram/membench command or "
 		              "`ai stream` holds it)\r\n");
@@ -342,8 +344,8 @@ static int cmd_lcd_off(struct cli_instance *sh, int argc, char **argv)
  * The panel has its own supply, so a software reset (`crash`, `reboot`) leaves
  * it awake in a state the sequence used to be unable to recover from -- the
  * screen goes uniformly white and every counter keeps reporting health (issue
- * #43).  `lcd off` / `lcd on` is not that: it toggles LTDCEN and the backlight
- * and never speaks to the panel.  This is the one command that does.
+ * owhinata/wio-lite-ai#43).  `lcd off` / `lcd on` is not that: it toggles LTDCEN and the
+ * backlight and never speaks to the panel.  This is the one command that does.
  *
  * The OCTOSPI1 guard is TAKEN FIRST and held across the whole call, not probed:
  * ltdc_panel_recover() stops scanout and starts it again, and in that window a

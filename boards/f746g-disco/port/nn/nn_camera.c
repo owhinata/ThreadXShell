@@ -4,9 +4,10 @@
  */
 /**
  * @file    nn_camera.c
- * @brief   Live camera -> NN inference glue (issue #81, Epic #80).  See nn_camera.h.
+ * @brief   Live camera -> NN inference glue (owhinata/stm32f746g-disco#81, Epic
+ * owhinata/stm32f746g-disco#80). See nn_camera.h.
  *
- * Design (codex-reviewed, issue #81):
+ * Design (codex-reviewed, owhinata/stm32f746g-disco#81):
  *   - A SYNCHRONOUS copy push sink (like nx_mjpeg.c eth_sink): consume() runs in
  *     the camera producer thread, resizes + converts the RGB565 frame into an
  *     int8 staging buffer, then camera_frame_put()s the pin immediately, so the
@@ -58,8 +59,9 @@
 
 #define NNCAM_WORKER_PRIORITY 18          /* full best-effort (below BG-17)        */
 /* Sized from the measured high-water-mark (`thread` peak = 1024 B under the
- * stedgeai backend, #93); 4096 keeps ~4x margin.  NOTE: re-measure if switching
- * to the tflm/reloc backend -- CMSIS-NN kernels + the interpreter nest deeper. */
+ * stedgeai backend, owhinata/stm32f746g-disco#93); 4096 keeps ~4x margin.  NOTE: re-measure
+ * if switching to the tflm/reloc backend -- CMSIS-NN kernels + the interpreter nest
+ * deeper. */
 #define NNCAM_WORKER_STACK    4096u
 #define NNCAM_POLL_TICKS      100u        /* sem wait -> stop latency               */
 
@@ -79,12 +81,18 @@ static TX_SEMAPHORE nncam_sem;            /* consume posts a READY stage        
 static struct frame_sink nncam_sink;
 static struct nn_model  *nncam_model;
 
-static volatile int nncam_run;            /* enabled intent (ai stream start=1, stop=0) */
-static volatile int nncam_active;         /* worker is in the run loop (set by worker) */
-static volatile int nncam_producer_dead;  /* base detached (close cb): paused, not stopped */
-static volatile int nncam_holds_session;  /* the AI subscriber holds the nn session    */
-static int          nncam_created;        /* worker/objects created once            */
-static uint8_t      nncam_res;            /* enum camera_res hint (display only, #100) */
+/* enabled intent (ai stream start=1, stop=0) */
+static volatile int nncam_run;
+/* worker is in the run loop (set by worker) */
+static volatile int nncam_active;
+/* base detached (close cb): paused, not stopped */
+static volatile int nncam_producer_dead;
+/* the AI subscriber holds the nn session */
+static volatile int nncam_holds_session;
+/* worker/objects created once */
+static int          nncam_created;
+/* enum camera_res hint (display only, owhinata/stm32f746g-disco#100) */
+static uint8_t      nncam_res;
 
 /* Session generation, bumped on every (re)attach + on a base detach.  An in-flight
  * ingest that spans a session boundary reverts instead of injecting a stale frame. */
@@ -92,7 +100,8 @@ static volatile uint32_t nncam_epoch;
 
 /* Release the nn session iff the AI subscriber still holds it (exactly once per
  * `ai stream` lifetime; called only from nn_camera_stop()).  A base detach (close)
- * NEVER releases -- the session owner is the AI enabled intent (contract #100.4). */
+ * NEVER releases -- the session owner is the AI enabled intent (contract
+ * owhinata/stm32f746g-disco#100.4). */
 static void nncam_release_session(void)
 {
 	int held;
@@ -179,7 +188,7 @@ static void nncam_preprocess(const struct frame_desc *f, void *dst)
  * an overrun auto-recovery re-attaches (this reset) while the AI stays enabled, so
  * the prio-18 worker may be mid-copy out of a ST_RUNNING stage -- clobbering it to
  * ST_FREE would let the producer reuse that buffer under the worker (contract
- * #100.3, same discipline as nncam_close). */
+ * owhinata/stm32f746g-disco#100.3, same discipline as nncam_close). */
 static void nncam_session_reset(void)
 {
 	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
@@ -263,9 +272,9 @@ static int nncam_consume(void *ctx, const struct frame_desc *f)
 }
 
 /* Base detached this subscriber (base capture stopped / DCMI overrun / cascade).
- * A PAUSE, not a stop (contract #100.2/.4): keep the AI enabled (nncam_run) and
- * the nn session held -- the session owner is the `ai stream` intent, released
- * only by nn_camera_stop().  Bump the epoch so an in-flight ingest reverts, drop
+ * A PAUSE, not a stop (contract owhinata/stm32f746g-disco#100.2/.4): keep the AI enabled
+ * (nncam_run) and the nn session held -- the session owner is the `ai stream` intent,
+ * released only by nn_camera_stop().  Bump the epoch so an in-flight ingest reverts, drop
  * any pending (non-RUNNING) staged frame so a stale frame is not inferred after a
  * later re-attach, and wake the worker to re-evaluate.  Non-blocking and no camera
  * API re-entry, so it is safe under the camera lock. */
@@ -357,9 +366,10 @@ static void nncam_entry(ULONG arg)
 		nncam_active = 1;
 		LOG_INF("inference running (prio %u)", (unsigned)NNCAM_WORKER_PRIORITY);
 		/* Run while enabled.  A base detach (producer_dead) is a PAUSE, not a stop
-		 * (#100): no frames flow so the worker just idles on the poll timeout until
-		 * the base re-attaches (nncam_open re-arms the session).  Only nn_camera_stop
-		 * clears nncam_run, so the session release stays with the AI intent owner. */
+		 * (owhinata/stm32f746g-disco#100): no frames flow so the worker just idles on the poll
+		 * timeout until the base re-attaches (nncam_open re-arms the session).  Only
+		 * nn_camera_stop clears nncam_run, so the session release stays with the AI intent
+		 * owner. */
 		while (nncam_run) {
 			if (tx_semaphore_get(&nncam_sem, NNCAM_POLL_TICKS) != TX_SUCCESS)
 				continue;                   /* timeout -> re-check run               */
@@ -462,7 +472,8 @@ int nn_camera_start(enum camera_res res)
 {
 	int rc;
 
-	(void)res;                              /* input adapts to the base geometry (#100) */
+	/* input adapts to the base geometry (owhinata/stm32f746g-disco#100) */
+	(void)res;
 	if (nncam_run || nncam_active)
 		return -2;                          /* running or still tearing down        */
 
@@ -475,7 +486,7 @@ int nn_camera_start(enum camera_res res)
 	/* Claim the single inference session first: refused (-6) if `ai bench` or a
 	 * stream is using the non-reentrant singleton model.  The session owner is this
 	 * `ai stream` enable; it is released only by nn_camera_stop() / the worker's
-	 * run-loop exit, NEVER by a base detach (contract #100.4). */
+	 * run-loop exit, NEVER by a base detach (contract owhinata/stm32f746g-disco#100.4). */
 	if (nn_session_try_acquire() != 0)
 		return -6;
 	nncam_holds_session = 1;

@@ -4,16 +4,18 @@
  */
 /**
  * @file    fx_user.h
- * @brief   FileX build configuration for the QSPI NOR filesystem (issue #30).
+ * @brief   FileX build configuration for the QSPI NOR filesystem
+ * (owhinata/stm32f746g-disco#30).
  *
  * Pulled in by fx_port.h via FX_INCLUDE_USER_DEFINE_FILE (CMakeLists.txt).
  *
  * Deliberately NOT defined:
  *   - FX_SINGLE_THREAD: keep the per-media ThreadX mutex so shell foreground
  *     and background jobs can hit the same media concurrently.
- *   - FX_ENABLE_FAULT_TOLERANT: out of the MVP scope (#27) -- the acceptance
- *     bar is persistence after a clean flush, not power-loss-during-write
- *     integrity (explicit follow-up issue).
+ *   - FX_ENABLE_FAULT_TOLERANT: out of the MVP scope
+ * (owhinata/stm32f746g-disco#27) -- the acceptance bar is persistence after a
+ * clean flush, not power-loss-during-write integrity (explicit follow-up
+ * issue).
  */
 #ifndef FX_USER_H
 #define FX_USER_H

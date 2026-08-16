@@ -4,7 +4,8 @@
  */
 /**
  * @file    nx_user.h
- * @brief   NetX Duo build configuration for this project (issue #49 P2).
+ * @brief   NetX Duo build configuration for this project (owhinata/stm32f746g-disco#49
+ * P2).
  *
  * Pulled in by every NetX Duo translation unit via the Cortex-M7/GNU port
  * (ports/cortex_m7/gnu/inc/nx_port.h includes this when NX_INCLUDE_USER_DEFINE_FILE
@@ -47,12 +48,14 @@
  * driver bottom-half (RX drain / TX reclaim) via NX_LINK_DEFERRED_PROCESSING. */
 #define NX_DRIVER_DEFERRED_PROCESSING
 
-/* Enable nx_tcp_socket_queue_depth_notify_set (issue #49 P4): the network shell
+/* Enable nx_tcp_socket_queue_depth_notify_set (owhinata/stm32f746g-disco#49 P4): the
+   network shell
  * backend waits on it (+ window_update) to resume output after TCP back-pressure
  * instead of timing out.  Without this the API returns NX_NOT_SUPPORTED. */
 #define NX_ENABLE_TCP_QUEUE_DEPTH_UPDATE_NOTIFY
 
-/* Enable per-interface hardware offload capability (issue #98).  Lets the ETH
+/* Enable per-interface hardware offload capability (owhinata/stm32f746g-disco#98).
+   Lets the ETH
  * driver report the STM32 MAC's TX checksum insertion (IPv4 header + TCP), so
  * NetX skips the matching SW checksum (a redundant read pass over non-cacheable
  * SDRAM) and instead leaves the field 0 + flags the packet; the driver maps that
@@ -62,7 +65,7 @@
  * report no RX capability, so RX checksums stay SW-verified. */
 #define NX_ENABLE_INTERFACE_CAPABILITY
 
-/* DHCP client thread stack (issue #93).  nxd_dhcp_client.h declares
+/* DHCP client thread stack (owhinata/stm32f746g-disco#93).  nxd_dhcp_client.h declares
  * nx_dhcp_thread_stack[NX_DHCP_THREAD_STACK_SIZE] as a member of the NX_DHCP
  * control block with a #ifndef-guarded 4096 default; measured high-water-mark is
  * 436 B (`thread` peak), so 2048 keeps ~4.7x margin.  Overriding here (reached by

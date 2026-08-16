@@ -4,7 +4,8 @@
  */
 /**
  * @file    nor_flash.c
- * @brief   External NOR flash (OCTOSPI2 / W25Q128JV) driver (issue #37).
+ * @brief   External NOR flash (OCTOSPI2 / W25Q128JV) driver
+ * (owhinata/wio-lite-ai#37).
  *
  * See nor_flash.h for the API contract and for why this driver never enters
  * memory-mapped mode.  What follows is the hardware detail.
@@ -26,9 +27,10 @@
  * Each pin is configured with HAL_GPIO_Init, i.e. per-pin read-modify-write.  The
  * bootloader's deleted driver replayed the whole GPIOF and GPIOG banks instead,
  * and that whole-bank write also put the PSRAM's Port-1 pins (PF6-10, PG6) into
- * AF as a side effect -- a dependency that went unnoticed until issue #25 removed
- * the bootloader's OCTOSPI2 code and the PSRAM stopped answering.  app/psram.c
- * owns those pins now.  Never write a whole GPIO bank here.
+ * AF as a side effect -- a dependency that went unnoticed until
+ * owhinata/wio-lite-ai#25 removed the bootloader's OCTOSPI2 code and the PSRAM
+ * stopped answering. app/psram.c owns those pins now.  Never write a whole GPIO
+ * bank here.
  *
  * CLOCK: the OCTOSPI kernel clock is the pll2_r_ck the bootloader started
  * (266 MHz), shared with OCTOSPI1.  DCR2 prescaler 2 divides by 3 -> 88.7 MHz,

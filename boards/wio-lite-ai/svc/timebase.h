@@ -9,8 +9,9 @@
  * Ported to the Wio Lite AI (STM32H725): udelay() runs on the DWT cycle counter
  * (CPU clock, SystemCoreClock = 550 MHz).  A foreground busy-wait never runs while
  * the core is asleep, so DWT freezing under WFI does not affect it, and it needs no
- * peripheral or RCC touch.  The ThreadX execution-profile kit (issue #2) reads a
- * free-running, WFI-safe TIM2 for its time source instead (port/threadx).
+ * peripheral or RCC touch.  The ThreadX execution-profile kit
+ * (owhinata/wio-lite-ai#2) reads a free-running, WFI-safe TIM2 for its time source
+ * instead (port/threadx).
  */
 #ifndef TIMEBASE_H
 #define TIMEBASE_H
@@ -31,7 +32,7 @@ void timebase_init(void);
 /**
  * Busy-wait @p us microseconds on the DWT cycle counter (CPU clock, set up by
  * timebase_init()).  Does NOT yield -- short delays only; the `usleep` command
- * caps it (issue #21).
+ * caps it (owhinata/wio-lite-ai#21).
  */
 void udelay(uint32_t us);
 

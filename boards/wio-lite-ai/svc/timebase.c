@@ -9,10 +9,10 @@
  * Re-based on the Cortex-M7 DWT cycle counter rather than the stm32f746g-disco
  * TIM2 timebase: udelay() is a foreground busy-wait that never runs while the core
  * is asleep, so DWT freezing under WFI does not affect it and it needs no
- * peripheral.  The ThreadX execution-profile kit (issue #2) instead reads a
- * free-running, WFI-safe TIM2 as its time source (see port/threadx/tx_user.h and
- * tx_glue.c).  Pure CoreDebug/DWT register access -- no RCC touch (clock-inheritance
- * contract).
+ * peripheral.  The ThreadX execution-profile kit (owhinata/wio-lite-ai#2) instead
+ * reads a free-running, WFI-safe TIM2 as its time source (see port/threadx/tx_user.h
+ * and tx_glue.c).  Pure CoreDebug/DWT register access -- no RCC touch
+ * (clock-inheritance contract).
  */
 #include "timebase.h"
 

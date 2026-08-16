@@ -4,7 +4,8 @@
  */
 /**
  * @file    nn_tflm.cc
- * @brief   TensorFlow Lite Micro backend for the nn layer (issue #9 phase 2c).
+ * @brief   TensorFlow Lite Micro backend for the nn layer (owhinata/wio-lite-ai#9 phase
+ * 2c).
  *
  * Bridges a TFLM MicroInterpreter to the backend-agnostic vtable in nn_backend.h.
  * Compiled only when CONFIG_NN_BACKEND=tflm, into the `tflm` static library alongside
@@ -15,8 +16,8 @@
  * The donor firmware compiles a BlazeFace flatbuffer into flash as a C array, so its
  * backend always has something to run and reload(NULL) means "go back to the built-in
  * one".  That is not available here: the app partition is 384 KB with ~109 KB free,
- * the model is 189 KB, and issue #9 decided models live in the external NOR's blob
- * region precisely so that changing one costs a transfer instead of an internal-flash
+ * the model is 189 KB, and owhinata/wio-lite-ai#9 decided models live in the external NOR's
+ * blob region precisely so that changing one costs a transfer instead of an internal-flash
  * erase cycle (~10k lifetime, see app/blob.h).
  *
  * So open() succeeds with NO MODEL: zero inputs, zero outputs, the name "(none)".
@@ -42,7 +43,7 @@
  *
  * Clean-room bridge over a third-party runtime; the structure follows the donor
  * firmware ../stm32f746g-disco, which has been running this pin on a Cortex-M7 since
- * its issue #88.
+ * its owhinata/stm32f746g-disco#88.
  */
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"

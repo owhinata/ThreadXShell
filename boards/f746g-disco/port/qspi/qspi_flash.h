@@ -4,15 +4,16 @@
  */
 /**
  * @file    qspi_flash.h
- * @brief   QSPI NOR flash driver (Micron N25Q128A / MT25QL128, 16 MB) -- issue #29.
+ * @brief   QSPI NOR flash driver (Micron N25Q128A / MT25QL128, 16 MB) --
+ * owhinata/stm32f746g-disco#29.
  *
  * Low-level driver for the on-board 128 Mbit QSPI NOR behind the STM32F746
  * QUADSPI controller, in *indirect* mode only (polled HAL transfers through the
  * controller FIFO; no DMA, no memory-mapped window at 0x90000000).  Because no
  * CPU access ever touches the memory-mapped region, the D-cache needs no
- * maintenance here.  Reads run 1-1-4 (FAST READ QUAD OUTPUT 0x6B, issue #31)
- * once init verifies the VCR dummy-cycle setup, with a 1-1-1 (0x0B) fallback;
- * all other commands (id/status/program/erase) stay 1-1-1.
+ * maintenance here.  Reads run 1-1-4 (FAST READ QUAD OUTPUT 0x6B,
+ * owhinata/stm32f746g-disco#31) once init verifies the VCR dummy-cycle setup, with a 1-1-1
+ * (0x0B) fallback;  all other commands (id/status/program/erase) stay 1-1-1.
  *
  * Concurrency: every public call serializes on an internal ThreadX mutex for the
  * whole flash operation (write-enable -> command -> busy-wait -> error check), so

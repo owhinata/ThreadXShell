@@ -1,5 +1,5 @@
 /*
- * Wio Lite AI (STM32H725AEI6) -- OCTOSPI1 APS6408 PSRAM API (issue #3).
+ * Wio Lite AI (STM32H725AEI6) -- OCTOSPI1 APS6408 PSRAM API (owhinata/wio-lite-ai#3).
  */
 #ifndef APP_PSRAM_H
 #define APP_PSRAM_H
@@ -11,12 +11,13 @@
 #define PSRAM_SIZE_BYTES  0x00800000u   /* 8 MB (APS6408_RAM_SIZE) */
 
 /*
- * The window is not uniform since issue #9 phase 2a.  Its top 2 MB is carved out as
- * Normal cacheable write-back (app/mpu.c region 3) for the CPU-only working set of
- * the NN runtime -- activations, input staging and model slots -- because inference
- * through a non-cacheable window is bound by one bus transaction per access rather
- * than by bandwidth.  Everything below stays Normal non-cacheable, which is what
- * lets the LTDC, the DMA2D and the DCMI share their buffers with the CPU untouched.
+ * The window is not uniform since owhinata/wio-lite-ai#9 phase 2a.  Its top 2 MB is
+ * carved out as Normal cacheable write-back (app/mpu.c region 3) for the CPU-only
+ * working set of the NN runtime -- activations, input staging and model slots --
+ * because inference through a non-cacheable window is bound by one bus transaction
+ * per access rather than by bandwidth.  Everything below stays Normal non-cacheable,
+ * which is what lets the LTDC, the DMA2D and the DCMI share their buffers with the
+ * CPU untouched.
  *
  * Two rules follow, and both are enforced after every link by
  * cmake/check_psram_ai_residency.py:
@@ -100,16 +101,16 @@ int psram_ready(void);
  *                             Refused only while a reconfiguring command holds
  *                             the bus.  These do not exclude each other, which is
  *                             what lets the display scan out while the camera
- *                             streams (issue #8 3c).
+ *                             streams (owhinata/wio-lite-ai#8 3c).
  *
  * A continuous user takes the shared guard just long enough to arm itself, then
  * releases it: from that point the gates above (ltdc_scanout_active(),
  * camera_streaming()) are what keep the reconfigurers away.
  *
  * [!] `ai stream` IS THE ONE EXCEPTION: it holds the shared guard for its whole
- * lifetime (issue #9 phase 3, app/nn_camera.h).  Arm-and-release does not work for
- * it, because the two gates above answer for the CAMERA and the DISPLAY, and the
- * thing that must not be retuned underneath is neither -- it is the NN worker
+ * lifetime (owhinata/wio-lite-ai#9 phase 3, app/nn_camera.h).  Arm-and-release does
+ * not work for it, because the two gates above answer for the CAMERA and the DISPLAY,
+ * and the thing that must not be retuned underneath is neither -- it is the NN worker
  * reading its arena out of the cacheable PSRAM carve-out.  The moment a DCMI
  * overrun tears the band stream down, camera_streaming() goes false while that
  * worker is still inside nn_run(), and a `psram clk` would become legal.  The
@@ -160,14 +161,16 @@ uint32_t psram_get_read_flags(void);
 
 /* APS6408 read-latency register MR0 (device-side latency code): getter for
  * `psram info`, and a diagnostic writer (`psram mr0`) to try e.g. Fixed Latency
- * LC8 (0x24) -- deterministic read timing to widen the eye at high clock (#16).
- * Verify with `psram probe 0` (MA0 D0 = MR0). */
+ * LC8 (0x24) -- deterministic read timing to widen the eye at high clock
+ * (owhinata/wio-lite-ai#16).  Verify with `psram probe 0` (MA0 D0 = MR0). */
 uint32_t psram_get_mr0(void);
 void psram_set_mr0(uint32_t val);
 
-/* mmapscan (issue #16): reset-persistent DLYB sweep validated against real
+/* mmapscan (owhinata/wio-lite-ai#16): reset-persistent DLYB sweep validated against
+   real
  * memory-mapped access.  cfg/rng pack the plan and progress into two words so
- * the whole struct is a handful of DTCM words (read-back-persisted, #13):
+ * the whole struct is a handful of DTCM words (read-back-persisted,
+ * owhinata/wio-lite-ai#13):
  *   cfg = presc[7:0] | phase[15:8] | rd_dcyc[23:16] | wr_dcyc[31:24]
  *   rng = unit_lo[7:0] | unit_step[15:8] | ncand[23:16] | idx[31:24]
  * tested/passed are per-candidate bitmaps; mr0 is the device MR0 to write (0 =
@@ -199,8 +202,8 @@ void psram_mmapscan_stop(void);
 int psram_mmapscan_get(struct psram_scan_state *out);
 
 /* Read-eye scan granularity: DLYB unit is swept 0..(COLS-1)*STEP in STEP-sized
- * columns (issue #16).  32 columns of step 4 span the full 0..124 unit range at
- * 4-unit resolution -- fine enough to locate the passing window's centre. */
+ * columns (owhinata/wio-lite-ai#16).  32 columns of step 4 span the full 0..124 unit
+ * range at 4-unit resolution -- fine enough to locate the passing window's centre. */
 #define PSRAM_SCAN_STEP  4u
 #define PSRAM_SCAN_COLS  32u
 

@@ -4,7 +4,8 @@
  */
 /**
  * @file    mlperf_th.h
- * @brief   The MLPerf Tiny / EEMBC harness bound to this board (issue #55).
+ * @brief   The MLPerf Tiny / EEMBC harness bound to this board
+ * (owhinata/wio-lite-ai#55).
  *
  * MLPerf Tiny splits its device firmware in two.  `lib/mlperf-tiny/benchmark/api/`
  * holds the parts every submitter shares -- the serial command parser, the `db` input
@@ -15,11 +16,12 @@
  * ONE FIRMWARE, ALL THE BENCHMARKS.  Upstream's reference submissions compile the
  * model into the image and answer the host's `profile` query with a compile-time
  * string, so each benchmark is a separate build.  This board already loads its model
- * at run time out of a NOR blob slot (issue #9), so the benchmark identity is a
- * function of WHICH MODEL IS OPEN, and mlperf_model_id() answers from the tensor
- * shapes.  That is what -DTH_MODEL_VERSION=mlperf_model_id() exploits: upstream
- * writes `th_printf("m-model-[%s]\r\n", TH_MODEL_VERSION)`, and a macro that expands
- * to a function call satisfies %s just as well as a literal does.  No upstream edit.
+ * at run time out of a NOR blob slot (owhinata/wio-lite-ai#9), so the benchmark
+ * identity is a function of WHICH MODEL IS OPEN, and mlperf_model_id() answers from
+ * the tensor shapes.  That is what -DTH_MODEL_VERSION=mlperf_model_id() exploits:
+ * upstream writes `th_printf("m-model-[%s]\r\n", TH_MODEL_VERSION)`, and a macro that
+ * expands to a function call satisfies %s just as well as a literal does.  No upstream
+ * edit.
  *
  * Layering: this is a port/ module.  It sits on port/nn (the model), shell/ (the
  * console it writes protocol bytes to) and port/threadx (the microsecond clock).

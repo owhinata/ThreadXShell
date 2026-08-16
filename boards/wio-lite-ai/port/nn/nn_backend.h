@@ -4,7 +4,8 @@
  */
 /**
  * @file    nn_backend.h
- * @brief   Internal vtable a concrete nn backend implements (issue #9 P1).
+ * @brief   Internal vtable a concrete nn backend implements (owhinata/wio-lite-ai#9
+ * P1).
  *
  * nn.c dispatches the public nn.h API to exactly one backend through this vtable.
  * Each backend (nn_null.c, later nn_tflm.cc) defines its own private model handle
@@ -57,12 +58,12 @@ struct nn_backend_vt {
 	/** Pure inference (no timing). Inputs pre-filled; 0 on success, <0 on error. */
 	int  (*run)(void *impl);
 
-	/* ---- optional: runtime model swap (issue #9 phase 2c) ------------------
+	/* ---- optional: runtime model swap (owhinata/wio-lite-ai#9 phase 2c) --------------
 	 *
-	 * The shape issue #9 phase 1 deliberately left unspecified, now that phase 2b
-	 * has settled it: a model is a blob on the external NOR, read into a staging
-	 * buffer the backend owns.  Only a backend that INTERPRETS a model at run time
-	 * can implement these -- which is the whole reason TFLM was chosen over a code
+	 * The shape owhinata/wio-lite-ai#9 phase 1 deliberately left unspecified, now that
+	 * phase 2b has settled it: a model is a blob on the external NOR, read into a
+	 * staging buffer the backend owns.  Only a backend that INTERPRETS a model at run
+	 * time can implement these -- which is the whole reason TFLM was chosen over a code
 	 * generator, whose model is compiled in and can only change by reflashing.
 	 */
 

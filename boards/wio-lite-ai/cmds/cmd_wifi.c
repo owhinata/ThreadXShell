@@ -8,21 +8,22 @@
  *
  *   wifi info                     show wiring + CHIP_EN state
  *   wifi on | off                 drive CHIP_EN high (power on) / low (power off)
- *                                 (`on` is a no-op when it is already high -- issue #47)
+ *                                 (`on` is a no-op when it is already high -- owhinata/wio-lite-ai#47)
  *   wifi reset                    power-cycle CHIP_EN (Low 80 ms -> High)
  *   wifi log [reset]              bridge the LOG UART (UART9 @115200) <-> console;
  *                                 `reset` power-cycles first, capturing boot from t=0
  *   wifi ver                      prove the eRPC link (rpc_system_ack) + read the FW
  *                                 build id = the capability gate the L2 bridge requires
- *   wifi connect <ssid> [pw] [sec]  associate (STA) + arm the L2 bridge (#5 inc 3)
+ *   wifi connect <ssid> [pw] [sec]  associate (STA) + arm the L2 bridge (owhinata/wio-lite-ai#5 inc 3)
  *   wifi disconnect               drop the current association
- *   wifi autoreconnect [on|off]   re-associate by ourselves when the AP goes away (#32)
+ *   wifi autoreconnect [on|off]   re-associate by ourselves when the AP goes away
+ * (owhinata/wio-lite-ai#32)
  *   wifi status                   connected? + RSSI + IP/mask/gw + MAC
  *   wifi scan                     list visible APs: ch/band/rssi/security/bssid/ssid
- *   wifi link <sub>               the UART link itself -- cmd_wifi_link.c (issue #23)
- *   wifi flash <sub>              the module's own SPI flash -- cmd_wifi_flash.c (#19)
+ *   wifi link <sub>               the UART link itself -- cmd_wifi_link.c (owhinata/wio-lite-ai#23)
+ *   wifi flash <sub>              the module's own SPI flash -- cmd_wifi_flash.c (owhinata/wio-lite-ai#19)
  *
- * The log bridge takes over the console (f746g-disco issue #50 raw API): RTL8720DN RX
+ * The log bridge takes over the console (f746g-disco owhinata/wio-lite-ai#50 raw API): RTL8720DN RX
  * bytes stream to the CDC console and console keystrokes go to the module's TX, so
  * the operator reads the boot banner.  Ctrl+C exits.  Foreground only.  (The AT/HS
  * UART = USART1 carries binary eRPC, not ASCII, so it is driven via `wifi ver` /
@@ -170,7 +171,7 @@ static int wifi_power_claim(struct cli_instance *sh, const char *what)
 	if (net_shell_guard(sh, what))
 		return 1;
 	/*
-	 * BEFORE the claim, not after (issue #32).  An automatic re-association holds the
+	 * BEFORE the claim, not after (owhinata/wio-lite-ai#32).  An automatic re-association holds the
 	 * coarse mutex for up to 22 s, and these are the recovery commands -- the ones that
 	 * must work exactly when something is stuck.  Disarming is what aborts an attempt in
 	 * flight, so doing it here makes the claim below succeed in milliseconds instead of
@@ -182,7 +183,7 @@ static int wifi_power_claim(struct cli_instance *sh, const char *what)
 }
 
 /*
- * Take the link away, and TELL THE HOST STACK (issue #41).
+ * Take the link away, and TELL THE HOST STACK (owhinata/wio-lite-ai#41).
  *
  * The two belong together, so they are one function -- rtl_link.h keeps force-quiesce and
  * its siblings in single functions for exactly this reason, "precisely so that set cannot
@@ -190,11 +191,11 @@ static int wifi_power_claim(struct cli_instance *sh, const char *what)
  * revoked generation on its own, just up to NXN_REFRESH_MS (8 s) later, so the interface
  * does stand down -- eventually.  Everything typed inside that window meanwhile finds a
  * stale NX_NET_UP, and `wifi connect` refuses because it cannot renew the L2 bridge on a
- * module that was power-cycled a second ago.  That was #41, hit about half the time.
+ * module that was power-cycled a second ago.  That was owhinata/wio-lite-ai#41, hit about half the time.
  *
  * All three commands here need it, not just off/reset: what strands the host stack is the
  * force-quiesce, and `wifi on` calls it too -- on the path where it really does raise
- * CHIP_EN.  Since issue #47 that is the only path it has; see cmd_wifi_on().
+ * CHIP_EN.  Since owhinata/wio-lite-ai#47 that is the only path it has; see cmd_wifi_on().
  */
 static void wifi_power_take_link(struct cli_instance *sh)
 {
@@ -205,7 +206,7 @@ static void wifi_power_take_link(struct cli_instance *sh)
 }
 
 /*
- * `wifi on` is IDEMPOTENT (issue #47).
+ * `wifi on` is IDEMPOTENT (owhinata/wio-lite-ai#47).
  *
  * The other two recovery commands earn their destruction: they move CHIP_EN, so the module
  * really does become a different module and everything the host believed about it -- the
@@ -287,7 +288,7 @@ static int cmd_wifi_log(struct cli_instance *sh, int argc, char **argv)
 	return wifi_bridge_run(sh, RTL8720_UART_LOG, 115200u, do_reset);
 }
 
-/* wifi ver: prove the eRPC link and read the firmware build id (issues #5/#20/#23).
+/* wifi ver: prove the eRPC link and read the firmware build id (owhinata/wio-lite-ai#5/#20/#23).
  * Power on the RTL8720DN if needed, open the eRPC UART at the link's current rate and
  * round-trip a byte through rpc_system_ack -- a valid CRC-framed echo proves the link
  * (transport + framing + codec + the Serial3<->USART1 mapping) end to end -- then read
@@ -295,9 +296,9 @@ static int cmd_wifi_log(struct cli_instance *sh, int argc, char **argv)
  * is talking to, so it is where every firmware-gated capability is earned; the L2
  * bridge refuses until it has run.  CAUTION: on pre-N2 / stock firmware the version query
  * corrupts the module heap (the factory shim erpc_free()s a string literal) -- RAM
- * only, `wifi reset` recovers, flash is untouched (issue #20). */
+ * only, `wifi reset` recovers, flash is untouched (owhinata/wio-lite-ai#20). */
 /*
- * Report the RX interrupt-latency budget and the three DIFFERENT losses (issue #23
+ * Report the RX interrupt-latency budget and the three DIFFERENT losses (owhinata/wio-lite-ai#23
  * U0-1).  Snapshot @st with rtl8720_uart_stats() while the session still holds the
  * UART: the counters survive a close but are cleared by the next open.
  *
@@ -311,7 +312,7 @@ static int cmd_wifi_log(struct cli_instance *sh, int argc, char **argv)
  * the grace budget (the drain loop absorbs bytes that land while it runs), it just has
  * to stay well under one byte time on the wire.  NOTE the ISR path is ITCM-resident,
  * so the FIRST invocation after a cold I-cache pays an external-flash fetch: on board
- * #2 the maximum was 8.7 us over 7 interrupts (`wifi ver`) but 3.3 us over 133
+ * owhinata/wio-lite-ai#2 the maximum was 8.7 us over 7 interrupts (`wifi ver`) but 3.3 us over 133
  * (`wifi scan`), i.e. the short-exchange figure is the cold entry, not the real cost.
  */
 static void print_rx_budget(struct cli_instance *sh,
@@ -385,7 +386,7 @@ static int cmd_wifi_ver(struct cli_instance *sh, int argc, char **argv)
 		if (erpc_system_version(ver, (uint16_t)sizeof(ver), &vdiag) >= 0)
 			have_ver = 1;
 		/* This is the only place the host learns which firmware it is talking to, so it
-		 * is where every firmware-dependent capability is earned: the issue #23 U0-2
+		 * is where every firmware-dependent capability is earned: the owhinata/wio-lite-ai#23 U0-2
 		 * wire budget (n4 owns USI0 behind an 8 kB ring, so the 127-byte limit that
 		 * shaped every request size is gone) and the U0-3 LINK-CTRL channel (n5).
 		 * Anything else -- including a version query that failed -- leaves the
@@ -428,7 +429,7 @@ static int cmd_wifi_ver(struct cli_instance *sh, int argc, char **argv)
 	          "stall %u ctrl_bad %u\r\n",
 	          total.crc_fail, total.oversize, total.timeout, total.skipped_reply,
 	          total.unsupported_invocation, total.frame_stall, total.ctrl_bad);
-	/* RX interrupt-latency budget (issue #23 U0-1).  `bytes/grace` is how much of the
+	/* RX interrupt-latency budget (owhinata/wio-lite-ai#23 U0-1).  `bytes/grace` is how much of the
 	 * RXFIFO's post-threshold headroom the worst interrupt actually used -- it is the
 	 * number that says whether the threshold scheme holds at a higher baud.  Times are
 	 * in tenths of a microsecond: a single interrupt is only a few microseconds at
@@ -441,7 +442,7 @@ static int cmd_wifi_ver(struct cli_instance *sh, int argc, char **argv)
 }
 
 /*
- * wifi chplan [set <hex> confirm] -- read or install the module's channel plan (#40).
+ * wifi chplan [set <hex> confirm] -- read or install the module's channel plan (owhinata/wio-lite-ai#40).
  *
  * [!] WRITING IS PROVISIONING, NOT CONFIGURATION.  The plan survives a full board
  * power-down (measured), so it is written once per module and never on a boot path.  It
@@ -458,9 +459,9 @@ static int cmd_wifi_ver(struct cli_instance *sh, int argc, char **argv)
  * shipped 0x7f has more bits set than any real domain index -- so getting back to it
  * could require clearing bits that a fuse array cannot clear).
  *
- * This is deliberately kept rather than deleted with the rest of the issue #40 bring-up:
+ * This is deliberately kept rather than deleted with the rest of the owhinata/wio-lite-ai#40 bring-up:
  * a non-volatile setting on a device we can otherwise only power-cycle needs a way to be
- * inspected and put back.  Issue #40 itself did NOT turn out to need it -- installing a
+ * inspected and put back.  owhinata/wio-lite-ai#40 itself did NOT turn out to need it -- installing a
  * plan that covers 5 GHz did not stop the association failures.
  */
 static int cmd_wifi_chplan(struct cli_instance *sh, int argc, char **argv)
@@ -527,13 +528,13 @@ static int cmd_wifi_chplan(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-/* wifi connect <ssid> [password] [security_hex] (issue #5 inc 3).  The sequence
+/* wifi connect <ssid> [password] [security_hex] (owhinata/wio-lite-ai#5 inc 3).  The sequence
  * itself moved to app/wifi_connect.c when the boot configuration grew a second
- * caller (issue #37 step 4); what is left here is the argument handling.  Default
+ * caller (owhinata/wio-lite-ai#37 step 4); what is left here is the argument handling.  Default
  * security is WPA2-AES with a password / OPEN without; a 3rd hex arg overrides it.
  *
  * earn_gen is false: on this path there IS an operator, so an unknown firmware
- * generation is reported and `wifi ver` stays the deliberate act issue #20 made it.
+ * generation is reported and `wifi ver` stays the deliberate act owhinata/wio-lite-ai#20 made it.
  */
 static int cmd_wifi_connect(struct cli_instance *sh, int argc, char **argv)
 {
@@ -563,11 +564,11 @@ static int cmd_wifi_disconnect(struct cli_instance *sh, int argc, char **argv)
 
 	(void)argc; (void)argv;
 	/* Dropping the association is a link-down event, not a teardown: the bridge stays
-	 * (issue #30 B2b treats an operator disconnect exactly like the AP going away). */
+	 * (owhinata/wio-lite-ai#30 B2b treats an operator disconnect exactly like the AP going away). */
 	if (net_shell_guard(sh, "wifi disconnect"))
 		return 1;
 	/*
-	 * Disarm BEFORE the claim (issue #32).  An operator disconnect has to win: leaving
+	 * Disarm BEFORE the claim (owhinata/wio-lite-ai#32).  An operator disconnect has to win: leaving
 	 * autoreconnect armed would have the owner thread re-join within 8 s, and holding the
 	 * coarse mutex in an attempt would make the claim below time out first.
 	 */
@@ -582,7 +583,7 @@ static int cmd_wifi_disconnect(struct cli_instance *sh, int argc, char **argv)
 
 	wifi_opts(&o, sh, &diag);
 	/*
-	 * 25 s, not 5 (issue #32).  The disarm above aborts a re-association on the HOST
+	 * 25 s, not 5 (owhinata/wio-lite-ai#32).  The disarm above aborts a re-association on the HOST
 	 * side only -- rpc_wifi_connect is outside the module firmware's concurrent
 	 * allow-list, so the module can still be inside wifi_connect() holding its serial
 	 * mutex for the rest of its own 20 s timeout, and this request queues behind it.
@@ -606,7 +607,7 @@ static int cmd_wifi_disconnect(struct cli_instance *sh, int argc, char **argv)
 }
 
 /*
- * wifi autoreconnect [on|off] (issue #32): whether the HOST re-associates by itself when
+ * wifi autoreconnect [on|off] (owhinata/wio-lite-ai#32): whether the HOST re-associates by itself when
  * the AP goes away.  No argument reports the state and the tally.
  *
  * Turning it on does not go near the module -- it only says that the next successful
@@ -686,7 +687,7 @@ static int cmd_wifi_status(struct cli_instance *sh, int argc, char **argv)
 			cli_print(sh, "  rssi %ld dBm\r\n", (long)rssi);
 	}
 	/*
-	 * The channel plan (issue #40).  It decides which channels the driver scans and
+	 * The channel plan (owhinata/wio-lite-ai#40).  It decides which channels the driver scans and
 	 * whether it may only listen passively on them, so it is the first thing to check
 	 * when a join reports "target AP not found" for an access point `wifi scan` lists.
 	 * Reported raw: the plan-index-to-channel-set table lives in the driver, not here,
@@ -702,14 +703,14 @@ static int cmd_wifi_status(struct cli_instance *sh, int argc, char **argv)
 			cli_print(sh, "  channel plan: 0x%02x\r\n", (unsigned)plan);
 	}
 	rtl_link_end(sh);
-	/* No address here: L3 belongs to `net` (issue #30 B1).  The module's own lwIP no
+	/* No address here: L3 belongs to `net` (owhinata/wio-lite-ai#30 B1).  The module's own lwIP no
 	 * longer takes one, so printing it would only ever show 0.0.0.0. */
 	cli_print(sh, "  (`net info` for the address)\r\n");
 	return 0;
 }
 
 /*
- * ---- wifi scan (issue #5, increment 6) ------------------------------------------
+ * ---- wifi scan (owhinata/wio-lite-ai#5, increment 6) ------------------------------------------
  *
  * How many records to pull back in the single get_ap_records reply.  Three ceilings
  * meet here: the module serialises the whole array into ONE eRPC frame and both sides
@@ -868,7 +869,7 @@ static int scan_wait_done(struct cli_instance *sh, struct wifi_rpc_opts *o,
 }
 
 /*
- * wifi scan (issue #5 inc 6): list the APs the module can see.
+ * wifi scan (owhinata/wio-lite-ai#5 inc 6): list the APs the module can see.
  *
  * The module's scan is asynchronous, so this is start -> poll -> get_ap_num ->
  * get_ap_records, all inside one console-claimed USART1 session.  It needs an STA
@@ -978,7 +979,7 @@ static int cmd_wifi_scan(struct cli_instance *sh, int argc, char **argv)
 
 	/* The AP-record reply is the biggest receive in the tree (~2 KB), so this session
 	 * is the one that shows the STEADY-STATE interrupt cost rather than a cold-cache
-	 * first entry -- which is what the issue-#23 threshold choice rests on. */
+	 * first entry -- which is what the owhinata/wio-lite-ai#23 threshold choice rests on. */
 	rtl8720_uart_stats(&st);
 	rtl_link_end(sh);
 

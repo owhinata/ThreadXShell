@@ -4,7 +4,8 @@
  */
 /**
  * @file    eth_link.c
- * @brief   ETH MAC + LAN8742A RMII link bring-up (issue #49 P1).  See eth_link.h.
+ * @brief   ETH MAC + LAN8742A RMII link bring-up (owhinata/stm32f746g-disco#49 P1).
+ * See eth_link.h.
  *
  * Clean-room glue: the RMII MspInit (GPIO/clock) is done inline before
  * HAL_ETH_Init (the project's port idiom -- the HAL weak MspInit stays a no-op),
@@ -282,7 +283,7 @@ int eth_link_renegotiate(void)
 	return (rc == ETH_PHY_OK) ? ETH_OK : ETH_ERR_PHY;
 }
 
-/* ---- P2 (#75) hooks for the NetX ETH driver ------------------------------- */
+/* ---- P2 (owhinata/stm32f746g-disco#75) hooks for the NetX ETH driver ------------- */
 
 void eth_link_set_callback(eth_link_cb_t cb, void *arg)
 {

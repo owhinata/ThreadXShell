@@ -3,8 +3,8 @@
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /*
- * Ownership of the onboard RTL8720DN link (issue #5; promoted from shell/cmds/ and
- * given the coarse mutex + UART reference count in issue #21 increment 8).
+ * Ownership of the onboard RTL8720DN link (owhinata/wio-lite-ai#5; promoted from shell/cmds/
+ * and given the coarse mutex + UART reference count in owhinata/wio-lite-ai#21 increment 8).
  * See rtl_link.h for the model and the lock order.  No clock/RCC/register access of
  * its own (clock-safe).
  */
@@ -15,13 +15,14 @@
 #include "erpc.h"
 #include "rtl8720.h"
 
-/* Rate-change timings (issue #23 U4-3).  The CTRL timeout matches `link`'s. */
+/* Rate-change timings (owhinata/wio-lite-ai#23 U4-3).  The CTRL timeout matches `link`'s. */
 #define RTL_RATE_CTRL_TMO_MS  500u
 #define RTL_RATE_SETTLE_MS    100u
 
 /* Coarse link mutex: serialises whole command flows against each other.  The eRPC
  * service thread deliberately does NOT take it -- that is what lets another thread's
- * RPCs slip in between the RPCs of a running command (issue #21 increment 9). */
+ * RPCs slip in between the RPCs of a running command (owhinata/wio-lite-ai#21 increment
+ * 9). */
 static TX_MUTEX g_link_mutex;
 static uint8_t  g_mutex_ready;
 
@@ -56,8 +57,8 @@ void rtl_link_forget_module(void)
 	erpc_set_module_gen(0u);               /* ... and its firmware must be re-proved */
 	g_tcpip_inited = false;
 	/* Published rather than acted on: state that belongs to ONE module but lives in a
-	 * layer above this one (issue #32's WiFi credentials) watches this counter instead
-	 * of being reached down to from here.  See rtl_link_forget_gen() in rtl_link.h. */
+	 * layer above this one (owhinata/wio-lite-ai#32's WiFi credentials) watches this counter
+	 * instead of being reached down to from here.  See rtl_link_forget_gen() in rtl_link.h. */
 	g_forget_gen++;
 }
 
@@ -309,7 +310,7 @@ void rtl_link_hw_release(struct cli_instance *sh)
 	cli_console_release(sh);
 }
 
-/* ---- link rate (issue #23 U0-3, made shareable in U4-3) ------------------- */
+/* ---- link rate (owhinata/wio-lite-ai#23 U0-3, made shareable in U4-3) ----------------- */
 
 /*
  * Both ends' supported rates.  The module's UART tops out at 6 Mbaud

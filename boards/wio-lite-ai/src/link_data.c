@@ -3,8 +3,8 @@
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /*
- * The link's DATA channel (issue #23 U1).  See link_data.h for the wire format, the
- * ownership rules and the detach ordering rule.
+ * The link's DATA channel (owhinata/wio-lite-ai#23 U1).  See link_data.h for the wire
+ * format, the ownership rules and the detach ordering rule.
  *
  * Register-agnostic and clock-agnostic (clock-safe): pools and queues only.  The UART is
  * never touched here -- app/erpc.c's service thread remains the single owner of it, and

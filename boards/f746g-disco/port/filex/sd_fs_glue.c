@@ -4,7 +4,8 @@
  */
 /**
  * @file    sd_fs_glue.c
- * @brief   Lazy-mount singleton for the microSD filesystem (issue #34).
+ * @brief   Lazy-mount singleton for the microSD filesystem
+ * (owhinata/stm32f746g-disco#34).
  *
  * Cloned from fs_glue.c (the QSPI lazy-mount singleton) for the SD media: a
  * separate FX_MEDIA / cache / mutex set so the two filesystems are independent.

@@ -4,7 +4,8 @@
  */
 /**
  * @file    lx_nor_qspi_driver.c
- * @brief   LevelX NOR driver glue: LX_NOR_FLASH <-> qspi_flash (issue #30).
+ * @brief   LevelX NOR driver glue: LX_NOR_FLASH <-> qspi_flash
+ * (owhinata/stm32f746g-disco#30).
  *
  * Geometry: 256 LevelX blocks, one per 64 KB erase sector of the N25Q128A
  * (16 MB total), 512 B logical sectors.  64 KB blocks keep the LevelX metadata

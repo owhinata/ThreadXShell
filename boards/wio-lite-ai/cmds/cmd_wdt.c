@@ -4,7 +4,7 @@
  */
 /**
  * @file    cmd_wdt.c
- * @brief   `wdt` shell command (issue #4): IWDG status + starve test.
+ * @brief   `wdt` shell command (owhinata/wio-lite-ai#4): IWDG status + starve test.
  *
  *   wdt info     show watchdog state, nominal timeout and last reset cause
  *   wdt starve   stop petting (IRQ off, spin) so the IWDG resets the board

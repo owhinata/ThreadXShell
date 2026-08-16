@@ -4,17 +4,19 @@
  */
 /**
  * @file    guix_glue.h
- * @brief   GUIX bring-up / lifecycle on ThreadX (issue #55, Epic #48).
+ * @brief   GUIX bring-up / lifecycle on ThreadX (owhinata/stm32f746g-disco#55,
+ * Epic owhinata/stm32f746g-disco#48).
  *
  * Ties the GUIX 565rgb display driver (guix_display), the FT5336 input thread
  * (guix_touch) and the app's widget tree (built via a registered builder, e.g.
- * the ui/ camera app -- #61) together and starts GUIX on ThreadX.
- * Started ON at boot (issue #60): tx_application_define() calls guix_start()
- * after the LTDC/touch bring-up, symmetric with the camera producer.  This is
- * safe before the scheduler -- guix_first_start() only does memory setup +
- * ThreadX object creation (no blocking wait); the first paint is deferred to
- * the GUIX system thread once scheduling runs.  `gui stop` then hands the
- * display back so the `lcd`/`touch` test commands work, and `gui start` resumes.
+ * the ui/ camera app -- owhinata/stm32f746g-disco#61) together and starts GUIX on
+ * ThreadX.  Started ON at boot (owhinata/stm32f746g-disco#60):
+ * tx_application_define() calls guix_start() after the LTDC/touch bring-up,
+ * symmetric with the camera producer. This is safe before the scheduler --
+ * guix_first_start() only does memory setup + ThreadX object creation (no blocking
+ * wait); the first paint is deferred to the GUIX system thread once scheduling
+ * runs. `gui stop` then hands the display back so the `lcd`/`touch` test commands
+ * work, and `gui start` resumes.
  *
  * gx_system_initialize() + display/canvas/widget creation + gx_system_start()
  * happen exactly ONCE (the GUIX system thread and its global objects are not
@@ -41,8 +43,9 @@ extern "C" {
  *  calls it once after creating the display/canvas/root, then does
  *  gx_widget_show(root).  @p display / @p root are void* (GX_DISPLAY* /
  *  GX_WINDOW_ROOT*) so this header stays free of GUIX types and guix_glue does
- *  not depend on the ui layer (dependency inversion, #43/#61).  Returns 0 on
- *  success, nonzero (a GX status) on failure. */
+ *  not depend on the ui layer (dependency inversion,
+ * owhinata/stm32f746g-disco#43/#61). Returns 0 on success, nonzero (a GX
+ * status) on failure. */
 typedef int (*guix_app_builder_fn)(void *display, void *root);
 
 /** Register the widget-tree builder.  Call once (camera_ui_init from
@@ -64,11 +67,11 @@ int guix_stop(void);
 bool guix_is_up(void);
 
 /** Post a user event (gx_event_type = @p type) to the GUIX root window from any
- *  thread.  The camera live preview (#56) uses this from the producer/shell
- *  threads to drive screen show/hide and per-frame icon repaints -- target is
- *  always the root because a NULL-target custom event is not routed to the root
- *  handler.  @p type is unsigned long to hold GX_FIRST_USER_EVENT-based ids
- *  without forcing GUIX headers on callers.  Returns GUIX_OK, or GUIX_ERR when
+ *  thread.  The camera live preview (owhinata/stm32f746g-disco#56) uses this from
+ * the producer/shell threads to drive screen show/hide and per-frame icon repaints
+ * -- target is always the root because a NULL-target custom event is not routed to
+ * the root handler.  @p type is unsigned long to hold GX_FIRST_USER_EVENT-based
+ * ids without forcing GUIX headers on callers.  Returns GUIX_OK, or GUIX_ERR when
  *  the UI is not running or the GUIX event queue is full (caller may retry). */
 int guix_post_root_event(unsigned long type);
 

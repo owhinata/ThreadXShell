@@ -12,16 +12,17 @@
  * source are injected (see ymodem.h), so this file is freestanding (no shell /
  * ThreadX / HAL) and host-testable.
  *
- * Ported from ../stm32f746g-disco for issue #19 M4 (RTL8720DN full-chip flash backup
- * over the USB CDC console).  The only deviation from the donor is a longer initial
- * handshake budget -- see YM_HANDSHAKE_RETRIES.
+ * Ported from ../stm32f746g-disco for owhinata/wio-lite-ai#19 M4 (RTL8720DN full-chip
+ * flash backup over the USB CDC console).  The only deviation from the donor is a longer
+ * initial handshake budget -- see YM_HANDSHAKE_RETRIES.
  *
- * Issue #19 M5 added the mirror-image RECEIVER at the bottom of this file (the board
- * has to take a firmware image FROM the PC before it may rewrite the RTL8720DN).  It
- * shares the framing constants and ymodem_crc16() but has its OWN static block buffer,
- * so the two directions never alias -- which is also what lets the host test drive
- * both concurrently over a pthread loopback.  Nothing above the "RECEIVER" banner was
- * changed by that work: the sender is the code already proven on board #2 in M4.
+ * owhinata/wio-lite-ai#19 M5 added the mirror-image RECEIVER at the bottom of this file
+ * (the board has to take a firmware image FROM the PC before it may rewrite the
+ * RTL8720DN). It shares the framing constants and ymodem_crc16() but has its OWN static
+ * block buffer, so the two directions never alias -- which is also what lets the host
+ * test drive both concurrently over a pthread loopback.  Nothing above the "RECEIVER"
+ * banner was changed by that work: the sender is the code already proven on board #2 in
+ * M4.
  */
 #include "ymodem.h"
 
@@ -301,7 +302,7 @@ enum ym_result ymodem_send(const struct ym_io *io, const struct ym_source *src)
 }
 
 /* ======================================================================== *
- *  RECEIVER (issue #19 M5)
+ *  RECEIVER (owhinata/wio-lite-ai#19 M5)
  * ======================================================================== *
  *
  * Receiver state machine, the mirror of ym_run() above:

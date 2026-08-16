@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Post-link guard for the C++ containment of the TFLM backend (issue #9 phase 2c).
+"""Post-link guard for the C++ containment of the TFLM backend (owhinata/wio-lite-ai#9 phase
+2c).
 
 WHY THIS EXISTS
 ---------------
@@ -40,8 +41,8 @@ them announces itself at link time.
    `DEFINED(sym) ? ... : 1`, which passes vacuously when the name it asks about does
    not exist.  A C++ file-scope `static` can be emitted as `_ZL...`, so a buffer that
    moved into C++ would leave both of those checking nothing at all.  This is exactly
-   how LTO's `foo.lto_priv.0` renaming broke ASSERTs before (issue #39), and it is why
-   the carve-out's residents are defined in nn_tflm_bufs.c -- a C file -- on purpose.
+   how LTO's `foo.lto_priv.0` renaming broke ASSERTs before (owhinata/wio-lite-ai#39), and it
+   is why the carve-out's residents are defined in nn_tflm_bufs.c -- a C file -- on purpose.
    Here we confirm no mangled name has appeared in the carve-out.
 
 Exit status 0 = pass; 1 = a containment failure; 2 = the check could not be

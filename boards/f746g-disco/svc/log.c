@@ -4,7 +4,8 @@
  */
 /**
  * @file    log.c
- * @brief   DTCM RAM log ring (issue #28): reset-persistent, ISR/fault-safe.
+ * @brief   DTCM RAM log ring (owhinata/stm32f746g-disco#28): reset-persistent,
+ * ISR/fault-safe.
  *
  * The ring lives in the .log_noinit section, placed first in RAM by the linker
  * so it lands in the DTCM (0x20000000).  The DTCM bypasses the D-cache, so a
@@ -133,8 +134,9 @@ static uint16_t rec_total_at(uint32_t off)
 /* ---- init / reset cause ------------------------------------------------ */
 
 /* RCC->CSR snapshot from log_init(), kept because log_init() clears the flags
- * (RMVF) right after reading them -- `wdt info` (issue #38) reads this back via
- * log_reset_cause() to show what caused this boot (e.g. "IWDG"). */
+ * (RMVF) right after reading them -- `wdt info` (owhinata/stm32f746g-disco#38)
+ * reads this back via log_reset_cause() to show what caused this boot (e.g.
+ * "IWDG"). */
 static uint32_t g_reset_csr;
 
 static const char *reset_cause_str(uint32_t csr)
@@ -151,9 +153,12 @@ static const char *reset_cause_str(uint32_t csr)
 
 void log_init(void)
 {
-	uint32_t csr = RCC->CSR;        /* capture before clearing the flags */
-	RCC->CSR |= RCC_CSR_RMVF;       /* clear so the next boot reads its own cause */
-	g_reset_csr = csr;              /* keep for log_reset_cause() (issue #38) */
+	/* capture before clearing the flags */
+	uint32_t csr = RCC->CSR;
+	/* clear so the next boot reads its own cause */
+	RCC->CSR |= RCC_CSR_RMVF;
+	/* keep for log_reset_cause() (owhinata/stm32f746g-disco#38) */
+	g_reset_csr = csr;
 
 	int valid = (g_log.magic == LOG_MAGIC) &&
 	            (g_log.version == LOG_VERSION) &&

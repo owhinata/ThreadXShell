@@ -4,7 +4,8 @@
  */
 /**
  * @file    fal_cfg.h
- * @brief   FAL (Flash Abstraction Layer) device and partition table (issue #37).
+ * @brief   FAL (Flash Abstraction Layer) device and partition table
+ * (owhinata/wio-lite-ai#37).
  *
  * FAL includes this by name from fal.h.  It declares which flash devices exist and
  * how they are carved up; the device itself is implemented in fal_nor.c.
@@ -21,8 +22,8 @@
  * Partition layout of the 16 MB device.  Only the first megabyte is claimed:
  *
  *   0x000000  kv        1 MB   FlashDB KVDB, 4 KB sectors x 256
- *   0x100000  blob      3 MB   the read-only asset region (issue #10, widened by
- *                              issue #55): 6 slots of 512 KB, owned by app/blob.c.
+ *   0x100000  blob      3 MB   the read-only asset region (owhinata/wio-lite-ai#10,
+ * widened by owhinata/wio-lite-ai#55): 6 slots of 512 KB, owned by app/blob.c.
  *                              It STILL has no partition entry, which is the point
  *                              -- blob.c addresses the device directly, so FAL (and
  *                              through it FlashDB) has no route out of the first

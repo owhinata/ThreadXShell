@@ -5,21 +5,21 @@
 /**
  * @file    frame.h
  * @brief   Format-agnostic zero-copy camera frame descriptor (svc/ layer,
- *          issue #47 -- DESIGN PROPOSAL, no implementation yet).
+ *          owhinata/stm32f746g-disco#47 -- DESIGN PROPOSAL, no implementation yet).
  *
  * The camera frame pipeline distributes one producer (DCMI capture) to many
  * sinks (file / LTDC / Ethernet / VCP).  A captured frame lives in an SDRAM
- * ring slot (.sdram, MPU non-cacheable, #40); it is never copied between the
- * producer and a sink -- only this descriptor (a pointer + geometry + a
- * generation number) is handed across.  @ref frame_desc is the data contract
+ * ring slot (.sdram, MPU non-cacheable, owhinata/stm32f746g-disco#40); it is never
+ * copied between the producer and a sink -- only this descriptor (a pointer + geometry
+ * + a generation number) is handed across.  @ref frame_desc is the data contract
  * every sink sees; @ref frame_sink and the ring mechanics are in
  * frame_pipeline.h.
  *
  * This header is a clean-room IF proposal: it declares the descriptor and the
  * format enum only.  The ring/dispatch engine (frame_pipeline.c) is implemented
- * later (#46 producer / #45 formats); see docs/{ja,en}/architecture/
- * frame-pipeline.md for the full design and the ownership/back-pressure
- * contract.
+ * later (owhinata/stm32f746g-disco#46 producer / owhinata/stm32f746g-disco#45
+ * formats); see docs/{ja,en}/architecture/ frame-pipeline.md for the full design and
+ * the ownership/back-pressure contract.
  */
 #ifndef FRAME_H
 #define FRAME_H
@@ -57,7 +57,7 @@ enum frame_format {
  * full pin/put and detach contract.
  */
 struct frame_desc {
-	void    *data;   /**< slot start in SDRAM (non-cacheable, #40); sink read-only  */
+	void    *data;   /**< slot start in SDRAM (non-cacheable, owhinata/stm32f746g-disco#40); sink read-only  */
 	uint32_t bytes;  /**< valid payload length; for JPEG the effective stream length
 	                      (NOT the DMA transfer length -- DCMI zero-pads the last
 	                      32-bit word, RM0385 17.3.9), set by the producer         */

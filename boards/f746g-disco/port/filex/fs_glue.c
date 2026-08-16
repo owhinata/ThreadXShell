@@ -4,7 +4,8 @@
  */
 /**
  * @file    fs_glue.c
- * @brief   Lazy-mount singleton for the QSPI filesystem (issue #30).
+ * @brief   Lazy-mount singleton for the QSPI filesystem
+ * (owhinata/stm32f746g-disco#30).
  *
  * Why lazy: the LevelX open scans all 256 block headers (tens of ms of QSPI
  * traffic), and a virgin/garbage flash plainly fails to mount -- doing this on

@@ -35,7 +35,7 @@ static UCHAR tx_unused_memory[4];
 static volatile UINT tx_timer_active = 0u;
 
 #ifdef TX_EXECUTION_PROFILE_ENABLE
-/* Gate for the Execution Profile Kit ISR hooks (issue #2).  Separate from
+/* Gate for the Execution Profile Kit ISR hooks (owhinata/wio-lite-ai#2).  Separate from
    tx_timer_active: the isr enter/exit calls must not run before the kit's state is
    set up by _tx_execution_initialize() (called after tx_application_define(), just
    before the scheduler starts).  Armed by tx_glue_profile_enable() from a thread
@@ -83,7 +83,8 @@ void tx_glue_timer_enable(void)
     tx_timer_active = 1u;
 }
 
-/* Execution Profile Kit ISR-time accounting (issue #2).  The kit's nest counter is a
+/* Execution Profile Kit ISR-time accounting (owhinata/wio-lite-ai#2).  The kit's nest
+   counter is a
    plain read-modify-write; OTG_HS (prio 6) can preempt SysTick (prio 14), so the
    enter/exit calls are made atomic with a PRIMASK critical section.  No-op until
    tx_glue_profile_enable(); compiled out entirely when EPK is disabled. */
@@ -121,8 +122,8 @@ void tx_glue_profile_enable(void)
 }
 
 /*
- * Microsecond time base (issue #55).  See tx_glue.h for why it takes two clocks to
- * make one; this is the arithmetic.
+ * Microsecond time base (owhinata/wio-lite-ai#55).  See tx_glue.h for why it takes two
+ * clocks to make one; this is the arithmetic.
  *
  * TIM2's kernel clock is COMPUTED, not assumed.  RM0468 sec 8.7.6 (RCC_CFGR.TIMPRE)
  * and sec 8.7.8 (RCC_D2CFGR.D2PPRE1): with an APB prescaler of 1 the timer clock

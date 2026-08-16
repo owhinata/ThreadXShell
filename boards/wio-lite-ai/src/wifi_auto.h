@@ -3,7 +3,8 @@
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /*
- * Wio Lite AI (STM32H725AEI6) -- host-side automatic re-association (issue #32).
+ * Wio Lite AI (STM32H725AEI6) -- host-side automatic re-association
+ * (owhinata/wio-lite-ai#32).
  *
  * When the AP disappears, is switched off or deauthenticates us, the association goes and
  * nothing brings it back.  This file is the policy that does: the credentials of the last
@@ -16,9 +17,9 @@
  *
  * `wifi_set_autoreconnect()` installs a handler that runs wifi_connect() and then
  * LwIP_DHCP(0, START), falling back to LwIP_AUTOIP when nothing answers (disassembly of
- * lib_arduino.a:wifi_conf.o, issue #31).  While the L2 bridge is in, not one byte reaches
- * the module's lwIP, so that DHCP always times out and AutoIP puts 169.254.x.x on
- * xnetif[0] -- and the WLAN driver's netif_is_valid_IP() returns 1 unconditionally ONLY
+ * lib_arduino.a:wifi_conf.o, owhinata/wio-lite-ai#31).  While the L2 bridge is in, not one
+ * byte reaches the module's lwIP, so that DHCP always times out and AutoIP puts 169.254.x.x
+ * on xnetif[0] -- and the WLAN driver's netif_is_valid_IP() returns 1 unconditionally ONLY
  * while the netif address is zero.  The moment it is not, host-bound unicast IP is dropped
  * before it ever reaches netif_rx().  Enabling the module's feature therefore kills the
  * bridge silently, which is why the host re-issues rpc_wifi_connect itself: the module's

@@ -2,7 +2,8 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 Wio Lite AI ThreadX Shell Project
  *
- * Host unit test for fdb_calc_crc32() AS app/blob.c USES IT (issue #10 / #9 P2b).
+ * Host unit test for fdb_calc_crc32() AS app/blob.c USES IT
+ * (owhinata/wio-lite-ai#10 / #9 P2b).
  *
  * The blob region stamps every stored asset with a CRC-32 computed from the YMODEM
  * stream as it arrives, chunk by chunk, and `blob verify` re-reads the flash and
@@ -19,10 +20,10 @@
  * (A) is the one that bit: FlashDB's implementation inverts at BOTH ends already
  * (fdb_utils.c: `crc = crc ^ ~0U` on entry, `return crc ^ ~0U` on exit), so the
  * usual "init 0xFFFFFFFF, complement the result" wrapper inverts twice and yields a
- * different number.  An earlier revision of the #10 plan called for exactly that
- * wrapper; it would have produced a board that disagreed with the host with no way
- * to tell whether the CRC, the transfer or the flash was at fault.  Case D pins the
- * trap so nobody re-adds the wrapper.
+ * different number.  An earlier revision of the owhinata/wio-lite-ai#10 plan called
+ * for exactly that wrapper; it would have produced a board that disagreed with the
+ * host with no way to tell whether the CRC, the transfer or the flash was at fault.
+ * Case D pins the trap so nobody re-adds the wrapper.
  *
  * This is also the ONLY part of the blob work that can be verified without the
  * board, which is why it exists at all.  Vectors cross-checked against zlib.crc32.

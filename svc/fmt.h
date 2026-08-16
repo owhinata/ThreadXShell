@@ -6,12 +6,12 @@
  * @file    fmt.h
  * @brief   Clean-room minimal printf formatter; output is a putc callback.
  *
- * Lifted from cli_printf.c (issue #28) so the same formatter backs three sinks:
- * the shell output API (cli_print/cli_hexdump, ctx = struct cli_instance), the
- * RAM log (fmt_vsnformat into a stack buffer), and the fault dump (ctx = a
- * polling-UART putc).  It depends only on <stdarg.h>/<stddef.h> -- no
- * cli_instance, no ThreadX, no HAL -- so it sits in the freestanding svc/ layer
- * and src/ code (fault.c) and svc/log.c can link it without pulling in the
+ * Lifted from cli_printf.c (owhinata/stm32f746g-disco#28) so the same formatter
+ * backs three sinks:  the shell output API (cli_print/cli_hexdump, ctx = struct
+ * cli_instance), the RAM log (fmt_vsnformat into a stack buffer), and the fault
+ * dump (ctx = a polling-UART putc).  It depends only on <stdarg.h>/<stddef.h> --
+ * no cli_instance, no ThreadX, no HAL -- so it sits in the freestanding svc/
+ * layer and src/ code (fault.c) and svc/log.c can link it without pulling in the
  * shell.  Clean-room: neither newlib's nor Zephyr's printf is reused.
  *
  * Supported conversions: %% %c %s %d %i %u %x %X %p, length modifiers l / ll / z,

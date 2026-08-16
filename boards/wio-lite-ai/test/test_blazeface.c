@@ -3,7 +3,7 @@
  * Copyright (c) 2026 Wio Lite AI ThreadX Shell Project
  */
 /*
- * Host unit test for port/nn/models/blazeface.c (issue #9 phase 3).
+ * Host unit test for port/nn/models/blazeface.c (owhinata/wio-lite-ai#9 phase 3).
  *
  * The decoder is the one genuinely new piece of arithmetic this phase adds, and it
  * is the piece whose failure mode is silent: wrong anchor indexing, a wrong scale or

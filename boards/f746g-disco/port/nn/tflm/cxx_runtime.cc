@@ -4,7 +4,8 @@
  */
 /**
  * @file    cxx_runtime.cc
- * @brief   Minimal bare-metal C++ runtime shim for the TFLM backend (Epic #80 #86).
+ * @brief   Minimal bare-metal C++ runtime shim for the TFLM backend (Epic
+ * owhinata/stm32f746g-disco#80 owhinata/stm32f746g-disco#86).
  *
  * Compiled only into the `tflm` static lib (CONFIG_NN_BACKEND=tflm).  Its whole
  * job is to keep the C++ runtime surface tiny under newlib-nano:

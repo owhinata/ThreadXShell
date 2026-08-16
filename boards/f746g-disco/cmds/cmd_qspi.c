@@ -4,7 +4,8 @@
  */
 /**
  * @file    cmd_qspi.c
- * @brief   `qspi` shell command (issue #29): QSPI NOR flash bring-up/debug.
+ * @brief   `qspi` shell command (owhinata/stm32f746g-disco#29): QSPI NOR flash
+ * bring-up/debug.
  *
  *   qspi probe             read the JEDEC ID (expect 20 BA 18)
  *   qspi info              geometry, clock, status/flag registers
@@ -18,8 +19,9 @@
  * is left partially programmed -- it is a scratch area by contract).
  *
  * erase/test rewrite flash content, so they compile in only with
- * CLI_ENABLE_DANGEROUS_CMDS, like devmem.  Once the filesystem lands (#27
- * Phase B) they will additionally be refused while the FileX media is mounted.
+ * CLI_ENABLE_DANGEROUS_CMDS, like devmem.  Once the filesystem lands
+ * (owhinata/stm32f746g-disco#27 Phase B) they will additionally be refused while
+ * the FileX media is mounted.
  *
  * Clean-room design; no third-party code reused.
  */
@@ -184,7 +186,8 @@ static int parse_subsector(struct cli_instance *sh, const char *s, uint32_t *add
 	return 0;
 }
 
-/* Take raw ownership of the flash (issue #30): refused while the filesystem
+/* Take raw ownership of the flash (owhinata/stm32f746g-disco#30): refused while
+   the filesystem
  * is mounted or any fs command/format is running -- raw erases under a live
  * FileX/LevelX volume would corrupt it. */
 static int qspi_raw_gate(struct cli_instance *sh)

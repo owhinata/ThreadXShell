@@ -4,7 +4,8 @@
  */
 /**
  * @file    nn.c
- * @brief   Backend-agnostic nn API dispatcher + inference timing (issue #81).
+ * @brief   Backend-agnostic nn API dispatcher + inference timing
+ * (owhinata/stm32f746g-disco#81).
  *
  * Thin layer over the compiled-in backend (nn_backend_vt_selected).  Adds the
  * two cross-backend concerns the backends must not each reimplement:
@@ -13,10 +14,11 @@
  *
  * DWT: the Cortex-M7 DWT has a software lock that leaves CYCCNT frozen at 0 with
  * no debugger attached until the CoreSight lock key (0xC5ACCE55) is written to
- * the Lock Access Register.  Same technique as cmd_membench.c (issue #57).  The
- * counter only stalls in WFI; nn_run() is CPU-bound and never sleeps, so the
- * elapsed count is the true inference latency (inflated by any preemption, which
- * for a best-effort worker is exactly what we want to measure).
+ * the Lock Access Register.  Same technique as cmd_membench.c
+ * (owhinata/stm32f746g-disco#57). The counter only stalls in WFI; nn_run() is
+ * CPU-bound and never sleeps, so the elapsed count is the true inference latency
+ * (inflated by any preemption, which for a best-effort worker is exactly what we
+ * want to measure).
  */
 #include "nn.h"
 #include "nn_backend.h"
@@ -206,7 +208,7 @@ uint32_t nn_last_cycles(const struct nn_model *m)
 	return (m && m->open) ? m->last_cycles : 0u;
 }
 
-/* ---- runtime model swap (issue #89 P2) ------------------------------------- */
+/* ---- runtime model swap (owhinata/stm32f746g-disco#89 P2) ------------------ */
 
 int nn_model_load_region(void **buf, uint32_t *cap)
 {

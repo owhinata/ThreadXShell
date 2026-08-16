@@ -4,7 +4,7 @@
  */
 /**
  * @file    fdb_cfg.h
- * @brief   FlashDB build configuration for this firmware (issue #37).
+ * @brief   FlashDB build configuration for this firmware (owhinata/wio-lite-ai#37).
  *
  * FlashDB includes this by name (`#include <fdb_cfg.h>`); it is the only place its
  * compile-time behaviour is set.  Everything here is a deliberate choice -- see

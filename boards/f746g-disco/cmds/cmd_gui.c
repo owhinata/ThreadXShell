@@ -4,7 +4,8 @@
  */
 /**
  * @file    cmd_gui.c
- * @brief   `gui` shell command: start/stop the GUIX camera UI (issues #55/#61).
+ * @brief   `gui` shell command: start/stop the GUIX camera UI
+ * (owhinata/stm32f746g-disco#55/#61).
  *
  *   gui start   start (or resume) the GUIX camera UI -- takes over the LCD +
  *               FT5336 touch and subscribes the live camera preview.
@@ -12,17 +13,17 @@
  *               `lcd` (so the `lcd`/`touch`/`camera` test commands can run).
  *   gui info    GUIX state / system-thread priority / display / canvas.
  *
- * Since Epic #99 Phase 1 (#100) the GUI preview is a *subscriber* of the base
- * capture (`camera stream`), not its owner: `gui start` shows the window and
- * subscribes the preview (it follows the base -- frozen while the base is off,
- * live while it streams RGB565); `gui stop` unsubscribes without stopping the base
- * or the AI.  Face-detect boxes are drawn whenever `ai stream` is running (the old
- * `gui overlay` sub-command is gone).  #68 added a settings page reached by tapping
- * the live image (image-quality controls + Back).  The UI is started ON at boot
- * (#60), which also brings the base capture up once so the preview is live out of
- * the box; while it runs the `lcd` drawing commands are refused (the display is
- * owned by GUIX) -- run `gui stop` first.  The camera UI itself lives in
- * ui/guix_camera_ui.c (presentation layer).
+ * Since Epic owhinata/stm32f746g-disco#99 Phase 1 (owhinata/stm32f746g-disco#100) the
+ * GUI preview is a *subscriber* of the base capture (`camera stream`), not its owner:
+ * `gui start` shows the window and subscribes the preview (it follows the base -- frozen
+ * while the base is off, live while it streams RGB565); `gui stop` unsubscribes without
+ * stopping the base or the AI.  Face-detect boxes are drawn whenever `ai stream` is
+ * running (the old `gui overlay` sub-command is gone).  owhinata/stm32f746g-disco#68
+ * added a settings page reached by tapping the live image (image-quality controls +
+ * Back). The UI is started ON at boot (owhinata/stm32f746g-disco#60), which also brings
+ * the base capture up once so the preview is live out of the box; while it runs the
+ * `lcd` drawing commands are refused (the display is owned by GUIX) -- run `gui stop`
+ * first. The camera UI itself lives in ui/guix_camera_ui.c (presentation layer).
  *
  * Clean-room design; no third-party code reused.
  */
@@ -49,7 +50,8 @@ static int cmd_gui_start(struct cli_instance *sh, int argc, char **argv)
 		cli_error(sh, "gui: failed to start GUIX\r\n");
 		return 1;
 	}
-	/* #97/#101: the preview attach is deferred to the GUIX thread, so report the
+	/* owhinata/stm32f746g-disco#97/#101: the preview attach is deferred to the GUIX thread,
+    so report the
 	   preview state from the base capture the window will follow -- never claim
 	   "live preview" when the base is off (frozen) or JPEG (no raster to render).
 	   The preview goes live the moment an RGB565 `camera stream` runs. */

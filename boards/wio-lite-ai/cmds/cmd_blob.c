@@ -4,7 +4,8 @@
  */
 /**
  * @file    cmd_blob.c
- * @brief   `blob` shell command: the NOR asset region (issue #10 / issue #9 P2b).
+ * @brief   `blob` shell command: the NOR asset region (owhinata/wio-lite-ai#10 /
+ * owhinata/wio-lite-ai#9 P2b).
  *
  *   blob list                    every slot: state, size, CRC32, name
  *   blob info <slot>             one slot in detail, with its device addresses

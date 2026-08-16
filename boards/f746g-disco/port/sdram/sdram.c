@@ -4,7 +4,7 @@
  */
 /**
  * @file    sdram.c
- * @brief   FMC SDRAM bring-up for the on-board MT48LC4M32B2 (issue #40).
+ * @brief   FMC SDRAM bring-up for the on-board MT48LC4M32B2 (owhinata/stm32f746g-disco#40).
  *
  * See sdram.h for the API contract.  Hardware setup:
  *

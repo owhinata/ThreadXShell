@@ -4,7 +4,8 @@
  */
 /**
  * @file    cmd_net.c
- * @brief   `net` shell command: on-board Ethernet + NetX Duo IPv4 (issues #49 P1/P2).
+ * @brief   `net` shell command: on-board Ethernet + NetX Duo IPv4
+ * (owhinata/stm32f746g-disco#49 P1/P2).
  *
  *   net info               MAC / PHY id / link state + IP / mask / gateway
  *   net link               re-run auto-negotiation and report link state
@@ -348,7 +349,7 @@ static int cmd_net_dhcp(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-/* ---- MJPEG-over-HTTP camera streaming (#49 P5) --------------------------- */
+/* ---- MJPEG-over-HTTP camera streaming (owhinata/stm32f746g-disco#49 P5) ------------ */
 
 static int cmd_net_mjpeg_start(struct cli_instance *sh, int argc, char **argv)
 {
@@ -358,10 +359,11 @@ static int cmd_net_mjpeg_start(struct cli_instance *sh, int argc, char **argv)
 	(void)argv;
 	if (!net_ip_ready(sh))
 		return 1;
-	/* #101: MJPEG is a JPEG-class subscriber -- it attaches to the running base
+	/* owhinata/stm32f746g-disco#101: MJPEG is a JPEG-class subscriber -- it attaches to the
+    running base
 	   (resolution follows the base), it no longer owns/starts the DCMI.  Report the
 	   precise reason on a format/state clash instead of silently opening a dead port
-	   (the #97 class of bug). */
+	   (the owhinata/stm32f746g-disco#97 class of bug). */
 	rc = nx_mjpeg_start();
 	if (rc == -2) {
 		cli_error(sh, "net: mjpeg already running\r\n");

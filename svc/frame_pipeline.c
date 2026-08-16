@@ -5,7 +5,8 @@
 /**
  * @file    frame_pipeline.c
  * @brief   Camera frame ring + sink dispatch -- freestanding core (svc/ layer,
- *          issues #47 design / #46 implementation).
+ *          owhinata/stm32f746g-disco#47 design / owhinata/stm32f746g-disco#46
+ * implementation).
  *
  * Pure bookkeeping over caller-provided SDRAM slots: it calls no HAL and no
  * ThreadX.  Mutual exclusion is the injected @ref frame_os; all waiting and

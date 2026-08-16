@@ -4,7 +4,8 @@
  */
 /**
  * @file    lx_nor_qspi_driver.h
- * @brief   LevelX NOR driver glue for the on-board QSPI flash (issue #30).
+ * @brief   LevelX NOR driver glue for the on-board QSPI flash
+ * (owhinata/stm32f746g-disco#30).
  */
 #ifndef LX_NOR_QSPI_DRIVER_H
 #define LX_NOR_QSPI_DRIVER_H

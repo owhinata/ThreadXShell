@@ -2,13 +2,14 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host unit test for the command-line parser (issue #3): tokenizer quote/escape
- * rules, static subcommand-tree search, and argc/argv validation including RAW.
+ * Host unit test for the command-line parser (owhinata/stm32f746g-disco#3): tokenizer
+ * quote/escape rules, static subcommand-tree search, and argc/argv validation
+ * including RAW.
  *
  * Compiled together with cli_parse.c and small CLI_MAX_ARGC / CLI_MAX_SUBCMD_DEPTH
  * overrides (see run_host_tests.sh) so the token-limit and nesting-limit paths
- * can be exercised with a compact command tree.  Uses the #2 host_sections.ld to
- * supply the .shell_root_cmds section.
+ * can be exercised with a compact command tree.  Uses the owhinata/stm32f746g-disco#2
+ * host_sections.ld to supply the .shell_root_cmds section.
  */
 #include <assert.h>
 #include <stddef.h>
@@ -75,8 +76,9 @@ static int run_tok(const char *s)
 }
 
 /* Collect every ';'-separated segment of a mutable copy of @p s into @p segv
- * (issue #23).  Returns the segment count; segments are NUL-terminated in place
- * and kept verbatim (only the ';' delimiters are overwritten). */
+ * (owhinata/stm32f746g-disco#23).  Returns the segment count; segments are
+ * NUL-terminated in place and kept verbatim (only the ';' delimiters are
+ * overwritten). */
 static char seg_buf[CLI_CMD_BUFFER_SIZE];
 static int split_all(const char *s, char **segv, int cap)
 {
@@ -202,7 +204,8 @@ static void test_raw(void)
 	assert(strcmp(res.argv[1], "hello there") == 0);
 }
 
-/* issue #23: top-level ';' splitter -- quote/escape-aware, verbatim segments. */
+/* owhinata/stm32f746g-disco#23: top-level ';' splitter -- quote/escape-aware,
+   verbatim segments. */
 static void test_segment(void)
 {
 	char *sv[8];
@@ -263,7 +266,7 @@ static void test_segment(void)
 
 /* Run cli_segment_is_background() on a mutable copy of @p s: returns the bg flag
  * and leaves the (possibly '&'-stripped) segment in bg_buf for the caller to
- * compare (issue #25). */
+ * compare (owhinata/stm32f746g-disco#25). */
 static char bg_buf[CLI_CMD_BUFFER_SIZE];
 static int is_bg(const char *s)
 {
@@ -320,12 +323,12 @@ static void test_background(void)
 	}
 }
 
-/* ---- argument-value parsers (issue #27) ---------------------------------- */
+/* ---- argument-value parsers (owhinata/wio-lite-ai#27) --------------------------- */
 
 /*
- * These had seven private copies before issue #27 -- one per command that took a
- * number.  Now there is one, with seven callers, so the edge cases are worth
- * pinning down here rather than on the board.
+ * These had seven private copies before owhinata/wio-lite-ai#27 -- one per command
+ * that took a number.  Now there is one, with seven callers, so the edge cases are
+ * worth pinning down here rather than on the board.
  */
 static void test_value_parsers(void)
 {

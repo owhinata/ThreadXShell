@@ -4,23 +4,25 @@
  */
 /**
  * @file    gfx_rot.h
- * @brief   90-degree rotating RGB565 blit (issues #38, #35).
+ * @brief   90-degree rotating RGB565 blit (owhinata/wio-lite-ai#38, #35).
  *
  * The panel is 240x320 portrait and everything worth putting on it is landscape:
  * the camera is 320x240, and so was the board's factory firmware, which drew in a
  * 320x240 coordinate system and transposed per pixel on its way into a 240-stride
  * frame buffer.  This part cannot rotate for us -- no GFXMMU, no GPU2D, nothing in
  * the LTDC -- and the panel will not either: MADCTL/MV was measured dead on the
- * RGB interface in issue #8 phase 3a, and RAMCTRL's RM bit, the last untried knob,
- * came back negative too (see port/ltdc/st7789_rgb.c, and do not re-open it).
+ * RGB interface in owhinata/wio-lite-ai#8 phase 3a, and RAMCTRL's RM bit, the last
+ * untried knob, came back negative too (see port/ltdc/st7789_rgb.c, and do not
+ * re-open it).
  *
  * So the transpose is ours to do, and this is the one place that does it.
  *
  * WHY IT LIVES IN svc/.  It touches no hardware -- no HAL, no CMSIS, no ThreadX,
  * just pixels and strides.  Both callers are above it in the dependency order
- * (port/ltdc's landscape drawing API, and the camera pipeline in issue #35), so a
- * shared, hardware-free service is the honest home; putting it in port/ltdc would
- * make the camera path depend on the display driver for arithmetic.
+ * (port/ltdc's landscape drawing API, and the camera pipeline in
+ * owhinata/wio-lite-ai#35), so a shared, hardware-free service is the honest home;
+ * putting it in port/ltdc would make the camera path depend on the display driver
+ * for arithmetic.
  *
  * ---- The one thing to understand before using it ---------------------------
  *
@@ -37,9 +39,10 @@
  *     internal flash; expensive from PSRAM.
  *
  * [!] So do not hand this a source in PSRAM and expect the camera to work.  Issue
- * #35 exists precisely to stage DCMI frames through an AXI-SRAM band first; a
- * PSRAM-to-PSRAM transpose is the shape issue #8 phase 3a called "the worst
- * possible for a serial PSRAM" and measured as such.
+ * owhinata/wio-lite-ai#35 exists precisely to stage DCMI frames through an
+ * AXI-SRAM band first; a PSRAM-to-PSRAM transpose is the shape
+ * owhinata/wio-lite-ai#8 phase 3a called "the worst possible for a serial PSRAM"
+ * and measured as such.
  */
 #ifndef GFX_ROT_H
 #define GFX_ROT_H

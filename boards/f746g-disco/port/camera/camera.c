@@ -4,8 +4,9 @@
  */
 /**
  * @file    camera.c
- * @brief   B-CAMS-OMV (OV5640) camera driver: power + I2C probe (#39),
- *          DCMI + DMA snapshot capture (#41).
+ * @brief   B-CAMS-OMV (OV5640) camera driver: power + I2C probe
+ * (owhinata/stm32f746g-disco#39), DCMI + DMA snapshot capture
+ * (owhinata/stm32f746g-disco#41).
  *
  * See camera.h for the API contract and the hardware facts.  Setup:
  *
@@ -18,7 +19,7 @@
  *   - The OV5640 component driver (lib/ov5640) does all sensor register I/O
  *     through the OV5640_IO_t bus glue below: HAL_I2C_Mem_* with 16-bit
  *     register addresses at I2C address 0x78.
- *   - DCMI (issue #41): 8-bit parallel, hardware sync, HSYNC=HIGH /
+ *   - DCMI (owhinata/stm32f746g-disco#41): 8-bit parallel, hardware sync, HSYNC=HIGH /
  *     VSYNC=HIGH / PCLK=RISING -- the H747I-DISCO BSP's proven OV5640 values;
  *     OV5640_Init() programs the matching sensor-side polarities.  Pins
  *     (F746G-DISCO P1, all AF13): PA4=HSYNC, PA6=PIXCLK, PG9=VSYNC,
@@ -35,7 +36,8 @@
  *
  * Cache coherency: none needed -- the frame buffer lives in the .sdram
  * section, which bsp_init() maps Normal non-cacheable through the MPU
- * (issue #40), so the DMA writes and CPU reads are coherent by construction.
+ * (owhinata/stm32f746g-disco#40), so the DMA writes and CPU reads are coherent by
+ * construction.
  *
  * Clean-room glue; the ST BSP (stm32746g_discovery_camera.c, H747I BSP) and
  * RM0385/UM1907/UM2779 were used as a register/pin/timing reference only.
@@ -146,17 +148,18 @@ static volatile int cam_xfer_active;   /* 1 between DMA issue and completion */
 
 static int cam_ready;                  /* camera_init() done           */
 static int cam_colorbar = -1;          /* last pattern mode; -1 unknown */
-static uint32_t cam_frame_gen;         /* #102: bumped whenever the stable cam_frame
+static uint32_t cam_frame_gen;         /* owhinata/stm32f746g-disco#102: bumped whenever the stable cam_frame
                                           buffer is refreshed -- by `camera capture`
                                           or by camera_snapshot_latest() (base ON).
                                           save/send compare it across chunks to detect
                                           a frame replaced mid-read. */
 static struct camera_info info;
 
-/* Quality settings (issue #44): RAM cache, neutral by default EXCEPT flip, which
+/* Quality settings (owhinata/stm32f746g-disco#44): RAM cache, neutral by default EXCEPT
+   flip, which
    defaults to CAM_FLIP_FLIP so the live preview / capture comes out upright for
-   this board's camera-module mounting orientation (issue #68).  Survives power
-   cycles so a `camera set` made while powered off still takes effect at the next
+   this board's camera-module mounting orientation (owhinata/stm32f746g-disco#68).  Survives
+   power cycles so a `camera set` made while powered off still takes effect at the next
    capture; cleared back to these defaults only by camera_set_defaults. */
 static struct camera_settings settings = {
 	.brightness = 0, .contrast = 0, .saturation = 0, .hue = 0,
@@ -172,27 +175,29 @@ static int settings_dirty;
 /* Companion to settings_dirty, but for the sensor *timing* (AEC max-exposure
    ceiling restore + VTS reclamp).  SDE/geometry changes do NOT touch timing, so
    their no-timing apply must not clear a pending timing retry -- a separate flag
-   (#70) keeps "SDE applied OK but the VTS/ceiling step failed" recoverable.  Set
-   only inside settings_and_timing_apply_locked() on any failure of that full
-   timing apply and cleared there on full success; apply_if_live_locked() falls
+   (owhinata/stm32f746g-disco#70) keeps "SDE applied OK but the VTS/ceiling step failed"
+   recoverable. Set only inside settings_and_timing_apply_locked() on any failure of that
+   full timing apply and cleared there on full success; apply_if_live_locked() falls
    back to a full timing apply while it is set, and camera_configure_locked()
    retries on it. */
 static int timing_dirty;
 
-/* ---- capture mode: resolution / pixel format / fps (issue #45) ----------- */
+/* ---- capture mode: resolution / pixel format / fps (owhinata/stm32f746g-disco#45) ---- */
 /*
  * The single source of truth for the live capture geometry/format/timing.  The
  * snapshot/stream paths read it instead of the old fixed CAMERA_FRAME_* macros;
  * camera_set_format() re-programs the sensor and updates it.  Defaults to the
- * power-on QVGA RGB565 mode so the driver behaves exactly as before #45 until a
- * mode switch.  Timing (hts/vts/pclk) is the OV5640 common-table reality at
- * power-on; the fps table (mode_fps[]) overrides it on a set_format. */
+ * power-on QVGA RGB565 mode so the driver behaves exactly as before
+ * owhinata/stm32f746g-disco#45 until a mode switch.  Timing (hts/vts/pclk) is the OV5640
+ * common-table reality at power-on; the fps table (mode_fps[]) overrides it on a
+ * set_format. */
 static struct camera_mode mode = {
 	.res = CAM_RES_QVGA, .format = CAM_FMT_RGB565,
 	.hts = 1600u, .vts = 1000u, .pclk_hz = 24000000u,   /* QVGA fps-table base */
 };
 
-/* fps knob (#67): the selected frame rate (15 or 30), a user preference mapped to
+/* fps knob (owhinata/stm32f746g-disco#67): the selected frame rate (15 or 30), a user
+   preference mapped to
    a 24/48 MHz OV5640 PCLK.  48 MHz (30 fps) takes effect only for a small mode
    while the LTDC is not scanning out (effective_ov_pclk()); otherwise the sensor
    is clamped to 24 MHz so the 48 MHz DCMI burst never overruns the 16-bit SDRAM
@@ -203,7 +208,8 @@ static uint8_t cam_fps_sel = 15u;
    Distinct from mode.pclk_hz (the displayed/effective value): this is the truth
    about the sensor.  Reset to 0 on every re-init (mode_reset_default / each
    OV5640_Init) so apply_effective_pclk_locked() re-writes SetPCLK after a reset
-   even when mode.pclk_hz happens to match what we would select (#67). */
+   even when mode.pclk_hz happens to match what we would select
+   (owhinata/stm32f746g-disco#67). */
 static uint32_t cam_sensor_pclk_hz;
 
 /* Pure geometry per resolution (independent of format/timing). */
@@ -215,7 +221,8 @@ static const uint16_t res_wh[CAM_RES__COUNT][2] = {
 };
 
 /* JPEG single-shot capture budget: <= 65535 words so HAL_DCMI_Start_DMA runs a
-   plain (non-banded) DMA and the valid length is simply budget - NDTR (#45). */
+   plain (non-banded) DMA and the valid length is simply budget - NDTR
+   (owhinata/stm32f746g-disco#45). */
 #define CAM_JPEG_BUDGET_WORDS  65535u
 #define CAM_JPEG_BUDGET_BYTES  (CAM_JPEG_BUDGET_WORDS * 4u)
 
@@ -260,22 +267,23 @@ static void mode_recompute(struct camera_mode *m)
 /* Largest fixed-format snapshot frame = WVGA RGB565 (800x480x2).  cam_frame is
    sized for it (one contiguous region, required by the HAL intra-frame banding)
    and also serves as the JPEG capture budget buffer (<= CAM_JPEG_BUDGET_BYTES).
-   The active mode uses a prefix; the rest is unused slack (#45). */
+   The active mode uses a prefix; the rest is unused slack
+   (owhinata/stm32f746g-disco#45). */
 #define CAM_FRAME_MAX_BYTES  (800u * 480u * 2u)   /* 768000, 32-aligned */
 
 /* Snapshot frame buffer in external SDRAM (.sdram: NOLOAD, MPU non-cacheable,
-   #40).  DMA-written by DCMI, CPU-read by camera_frame_read -- coherent with no
-   cache maintenance because the region never allocates cache lines. */
+   owhinata/stm32f746g-disco#40).  DMA-written by DCMI, CPU-read by camera_frame_read --
+   coherent with no cache maintenance because the region never allocates cache lines. */
 static uint8_t cam_frame[CAM_FRAME_MAX_BYTES]
 	__attribute__((aligned(32), section(".sdram.fixed")));
 
-/* ---- streaming (issue #46): DCMI continuous + DMA double-buffer ---------- */
+/* ---- streaming (owhinata/stm32f746g-disco#46): DCMI continuous + DMA double-buffer --- */
 /*
- * The continuous producer feeds a frame pipeline (svc/frame_pipeline.c, the #47
- * design).  The ring slots are carved at stream start from cam_arena (below): at
- * any instant the DMA double-buffer (DBM) targets two of them (M0AR/M1AR), one
- * holds the latest published frame, and one is free to be acquired (so >= 4 slots
- * is the comfortable case; >= 2 is the hard minimum for the DBM pair).  On each
+ * The continuous producer feeds a frame pipeline (svc/frame_pipeline.c, the
+ * owhinata/stm32f746g-disco#47 design).  The ring slots are carved at stream start from
+ * cam_arena (below): at any instant the DMA double-buffer (DBM) targets two of them
+ * (M0AR/M1AR), one holds the latest published frame, and one is free to be acquired (so >=
+ * 4 slots is the comfortable case; >= 2 is the hard minimum for the DBM pair).  On each
  * frame the dedicated cam_producer thread (NOT an ISR, NOT the shell thread)
  * reads CT to find the just-completed buffer, acquires a free slot, repoints that
  * buffer's M-register away (HAL_DMAEx_ChangeMemory) and only THEN publishes -- so
@@ -284,13 +292,15 @@ static uint8_t cam_frame[CAM_FRAME_MAX_BYTES]
  * hdma_dcmi and are mutually exclusive (cam_stream_active gate).
  */
 #define CAM_PRODUCER_PRIO  10u     /* below IWDG petter (5), like LED (10)      */
-/* Sized from the measured high-water-mark (`thread` peak = 508 B, #93); 1024
+/* Sized from the measured high-water-mark (`thread` peak = 508 B,
+   owhinata/stm32f746g-disco#93); 1024
  * keeps ~2x margin for this well-exercised DCMI sem-wait producer.             */
 #define CAM_PRODUCER_STACK 1024u
 #define CAM_PRODUCER_TICK  10u     /* bounded sem wait so --secs/stop fire even
                                       when no frames arrive (sync lost), ms      */
 
-/* Camera DMA ring arena (issue #65): one fixed 2 MB buffer pinned by the linker
+/* Camera DMA ring arena (owhinata/stm32f746g-disco#65): one fixed 2 MB buffer pinned by the
+   linker
    to FMC SDRAM internal bank1 (0xC0200000, .sdram.cam) so the DCMI ring WRITE
    target stays in a different internal bank from the LTDC scan-out READ surface
    (ltdc_fb, bank0) -- both banks keep a row open, cutting precharge/activate
@@ -300,7 +310,7 @@ static uint8_t cam_frame[CAM_FRAME_MAX_BYTES]
    FRAME_PIPELINE_MAX_SLOTS -- so small modes get a deeper ring.  2 MB gives the
    full FRAME_PIPELINE_MAX_SLOTS ring even for the largest streamable slot
    (QVGA RGB565 = 153600, rounded up) and keeps cam_arena filling bank1 for the
-   #65 FE bank-isolation win. */
+   owhinata/stm32f746g-disco#65 FE bank-isolation win. */
 #define CAM_ARENA_BYTES    (2u * 1024u * 1024u)
 
 static uint8_t cam_arena[CAM_ARENA_BYTES]
@@ -314,13 +324,13 @@ static TX_THREAD    cam_producer;
 static UCHAR        cam_producer_stack[CAM_PRODUCER_STACK];
 static struct frame_sink cam_stat_sink;   /* counting sink (FPS / OVR source)   */
 
-/* ---- subscriber registry (Epic #99 Phase 1, #100) ------------------------
-   External push sinks (GUIX preview #56 / nncam inference #81 / MJPEG #49 P5)
-   register here as *subscribers*.  camera.c owns their pipeline membership
-   under cam_lock: a subscriber is linked into cam_pipe only while the base
-   capture (`camera stream`) is active AND its format class matches the base
-   format.  The internal cam_stat_sink is attached directly (always
-   compatible), outside this table.  `attached == 1` iff the sink is currently
+/* ---- subscriber registry (Epic owhinata/stm32f746g-disco#99 Phase 1, owhinata/stm32f746g-disco#100) ---
+   External push sinks (GUIX preview owhinata/stm32f746g-disco#56 / nncam inference
+   owhinata/stm32f746g-disco#81 / MJPEG owhinata/stm32f746g-disco#49 P5) register here as
+   *subscribers*. camera.c owns their pipeline membership under cam_lock: a subscriber is
+   linked into cam_pipe only while the base capture (`camera stream`) is active AND its
+   format class matches the base format.  The internal cam_stat_sink is attached directly
+   (always compatible), outside this table.  `attached == 1` iff the sink is currently
    in cam_pipe.sinks (registry invariant); a detach clears it in the same
    cam_lock section.  A subscriber's own module keeps only its `enabled` intent
    and feature resources -- never `attached` (so a stale attach cannot diverge
@@ -339,14 +349,15 @@ struct cam_sub {
 	uint8_t            fmt;      /* enum camera_format consumed             */
 	uint8_t            enabled;  /* subscriber intent (registered)          */
 	uint8_t            attached; /* linked in cam_pipe.sinks (cam_lock)     */
-	uint8_t            oneshot;  /* #101: non-persistent (MJPEG) -- a non-recover
+	uint8_t            oneshot;  /* owhinata/stm32f746g-disco#101: non-persistent (MJPEG) -- a non-recover
 	                               stop fully releases it (see
 	                               cam_subs_release_oneshot); persistent subs
 	                               (gui/nncam) stay enabled and re-attach. */
 };
 static struct cam_sub cam_subs[CAM_MAX_SUBS];
 
-/* #101: release oneshot subs on a non-recover base stop -- forward-declared here
+/* owhinata/stm32f746g-disco#101: release oneshot subs on a non-recover base stop --
+   forward-declared here
    because camera_power_off() (above the registry helpers) calls it. */
 static void cam_subs_release_oneshot(void);
 
@@ -355,25 +366,26 @@ static volatile int      cam_stop_req;       /* stop requested (producer drains)
 static volatile int      cam_stream_err;     /* DCMI OVR -> terminal stop       */
 static volatile uint32_t cam_stream_ovr;     /* DCMI overrun count              */
 static volatile uint32_t cam_ring_ovr;       /* free-slot exhaustion / lost     */
-static volatile uint32_t cam_stream_fe;      /* DMA FIFO/DME errors tolerated (#56) */
-static volatile uint32_t cam_ring_slots;     /* ring depth this stream (#65 arena) */
-static volatile uint32_t cam_ring_slot_bytes;/* ring slot stride this stream (#65) */
+static volatile uint32_t cam_stream_fe;      /* DMA FIFO/DME errors tolerated (owhinata/stm32f746g-disco#56) */
+static volatile uint32_t cam_ring_slots;     /* ring depth this stream (owhinata/stm32f746g-disco#65 arena) */
+static volatile uint32_t cam_ring_slot_bytes;/* ring slot stride this stream (owhinata/stm32f746g-disco#65) */
 static uint32_t cam_start_tick;              /* HAL tick at start (--secs)       */
 static uint32_t cam_target_frames;           /* 0 = unbounded                   */
 static uint32_t cam_target_secs;             /* 0 = unbounded                   */
 static uint32_t cam_last_ct;                 /* CT at last serviced completion  */
 static struct frame_desc *cam_m0, *cam_m1;   /* slots currently in M0AR/M1AR    */
-static struct frame_desc *cam_jpeg_slot;     /* JPEG stream: the single DMA target (#63) */
-static volatile uint32_t cam_jpeg_trunc;     /* JPEG stream: frames with no SOI/EOI (#63) */
+static struct frame_desc *cam_jpeg_slot;     /* JPEG stream: the single DMA target (owhinata/stm32f746g-disco#63) */
+static volatile uint32_t cam_jpeg_trunc;     /* JPEG stream: frames with no SOI/EOI (owhinata/stm32f746g-disco#63) */
 
-/* ---- base capture overrun auto-recovery (#100, contract 6) ----------------
+/* ---- base capture overrun auto-recovery (owhinata/stm32f746g-disco#100, contract 6) -----
    A DCMI overrun is a producer-general fault, not a subscriber concern: the base
    tears down (cascade close() to every subscriber) and the producer re-arms
    itself at the same mode; subscribers re-attach via cam_subs_attach_all() and
    just saw a close()/open() pair.  An escalating rapid-overrun counter breaks a
    persistent overrun loop -- after CAM_RECOVER_GIVEUP rapid recoveries the base
    stays off so the user can remove the bandwidth culprit (e.g. `ai stream stop`)
-   and restart.  This replaces the old GUI-overlay-specific backoff (#83). */
+   and restart.  This replaces the old GUI-overlay-specific backoff
+   (owhinata/stm32f746g-disco#83). */
 #define CAM_RECOVER_WINDOW  8000u   /* ms: window for "rapid" successive recovery */
 #define CAM_RECOVER_GIVEUP  6       /* rapid count -> stop auto-restarting        */
 static volatile int cam_recover_pending;   /* last teardown was an overrun (recover) */
@@ -383,8 +395,8 @@ static int          cam_start_colorbar;    /* colorbar of the running base (reco
 
 /* ---- locking ------------------------------------------------------------ */
 /* Public API entries take the mutex here; all real work below lives in
-   *_locked() helpers so no path ever re-acquires cam_lock (a capture in #41
-   probes on demand by calling the _locked helper directly). */
+   *_locked() helpers so no path ever re-acquires cam_lock (a capture in
+   owhinata/stm32f746g-disco#41 probes on demand by calling the _locked helper directly). */
 
 static int op_lock(void)
 {
@@ -437,7 +449,7 @@ static int32_t cam_io_read(uint16_t addr, uint16_t reg, uint8_t *data,
 	return OV5640_OK;
 }
 
-/* ---- mode timing / DCMI helpers (issue #45) ------------------------------ */
+/* ---- mode timing / DCMI helpers (owhinata/stm32f746g-disco#45) ----------------------- */
 
 /* Toggle the DCMI hardware JPEG mode.  JPEGMode latches at HAL_DCMI_Init, so a
    switch needs a DeInit/Init with the new value; the cached hdcmi.Init keeps the
@@ -487,13 +499,15 @@ static int write_hts_vts(uint16_t hts, uint16_t vts)
 /* OV5640 daylight default for both AEC max-exposure pairs (common table value,
    ov5640.c).  OV5640_NightModeConfig(ENABLE) raises both to ~0x0B88; its DISABLE
    only clears the auto-frame-rate bit and does NOT restore this, so night-off
-   would otherwise leave the ceiling (and thus the VTS reclamp) stuck high (#70). */
+   would otherwise leave the ceiling (and thus the VTS reclamp) stuck high
+   (owhinata/stm32f746g-disco#70). */
 #define CAM_AEC_MAX_DEFAULT  0x03D8u
 
 /* Restore the two AEC max-exposure ceilings (0x3A02/03 and 0x3A14/15) to the
    daylight default.  Only the VTS-driving ceilings are reset; the night banding
-   steps / max-bands (0x3A08-0E) do not affect VTS and are out of scope (#70).
-   Caller holds cam_lock and the sensor is configured.  Returns 0 on success. */
+   steps / max-bands (0x3A08-0E) do not affect VTS and are out of scope
+   (owhinata/stm32f746g-disco#70).  Caller holds cam_lock and the sensor is configured.
+   Returns 0 on success. */
 static int restore_aec_max_default_locked(void)
 {
 	uint8_t b;
@@ -516,9 +530,9 @@ static int restore_aec_max_default_locked(void)
    984; night mode raises BOTH to ~0x0B88).  Write the mode's HTS and an effective
    VTS = max(mode.vts base, max exposure + margin) so the auto-exposure always has
    room, and refresh the live fps target.  mode.vts stays the fps-table base, and
-   settings_and_timing_apply_locked() restores the ceiling on night-off (#70), so
-   turning night mode off drops the effective VTS back to the table value.  Caller
-   holds cam_lock and the sensor is configured. */
+   settings_and_timing_apply_locked() restores the ceiling on night-off
+   (owhinata/stm32f746g-disco#70), so turning night mode off drops the effective VTS back to
+   the table value. Caller holds cam_lock and the sensor is configured. */
 #define CAM_VTS_EXP_MARGIN  16u
 static int apply_vts_locked(void)
 {
@@ -555,7 +569,8 @@ static void mode_reset_default(void)
 	   guard), so without this a re-configure after a power cycle / failed switch
 	   would be a no-op and leave the sensor unprogrammed (mode/sensor mismatch). */
 	ov5640.IsInitialized = 0U;
-	cam_sensor_pclk_hz = 0u;   /* sensor PLL back at power-on default (#67) */
+	/* sensor PLL back at power-on default (owhinata/stm32f746g-disco#67) */
+	cam_sensor_pclk_hz = 0u;
 	mode_recompute(&d);
 	mode = d;
 }
@@ -574,7 +589,7 @@ static void power_off_locked(void)
 	/* The sensor lost power: any selected mode no longer matches it, so reset
 	   the descriptor (and the DCMI JPEG state) to the QVGA RGB565 default that
 	   the next lazy OV5640_Init will program -- keeps mode / sensor / DCMI
-	   consistent across a power cycle (#45). */
+	   consistent across a power cycle (owhinata/stm32f746g-disco#45). */
 	mode_reset_default();
 }
 
@@ -597,8 +612,10 @@ static int camera_probe_locked(uint32_t *chip_id)
 	info.configured  = 0;
 	info.frame_valid = 0;
 	info.frame_bytes = 0;
-	cam_colorbar     = -1;   /* power cycle reset the sensor registers */
-	mode_reset_default();    /* sensor is back at power-on defaults (#45) */
+	/* power cycle reset the sensor registers */
+	cam_colorbar     = -1;
+	/* sensor is back at power-on defaults (owhinata/stm32f746g-disco#45) */
+	mode_reset_default();
 
 	/* OV5640_ReadID software-resets the sensor and waits 500 ms (GetTick
 	   poll) before reading 0x300A/0x300B. */
@@ -623,7 +640,7 @@ static int camera_probe_locked(uint32_t *chip_id)
 	return 0;
 }
 
-/* ---- quality settings (locked helpers, issue #44) ------------------------ */
+/* ---- quality settings (locked helpers, owhinata/stm32f746g-disco#44) ----------------- */
 
 /* Map the port-neutral enums to the lib/ov5640 constants. */
 static uint32_t awb_to_ov(uint8_t a)
@@ -769,8 +786,8 @@ io_err:
    to ~0x0B88 inside settings_apply_all_locked(); when night is OFF the vendored
    DISABLE leaves them stuck high, so restore the daylight ceiling here before the
    VTS clamp reads it -- otherwise the effective VTS (and fps) never come back down
-   (#70).  Timing failures re-arm timing_dirty (NOT settings_dirty, which the SDE
-   block already cleared) so a later live setter / configure retries just the
+   (owhinata/stm32f746g-disco#70).  Timing failures re-arm timing_dirty (NOT settings_dirty,
+   which the SDE block already cleared) so a later live setter / configure retries just the
    timing step without an SDE-only apply silently dropping it.  Caller holds
    cam_lock with the sensor configured and the mode committed. */
 static int settings_and_timing_apply_locked(void)
@@ -802,10 +819,11 @@ static int settings_and_timing_apply_locked(void)
 
    For SDE/geometry-only setters (brightness..zoom) this does NOT reclamp the VTS:
    those settings cannot change the AEC max exposure, so re-running the exposure-
-   aware VTS clamp on every tweak only risked dropping fps for no reason (#70).
-   The one exception is a pending timing retry (timing_dirty): then fall back to
-   the full timing apply so a prior failed ceiling-restore / VTS clamp recovers on
-   the next live operation instead of waiting for the next configure. */
+   aware VTS clamp on every tweak only risked dropping fps for no reason
+   (owhinata/stm32f746g-disco#70).  The one exception is a pending timing retry
+   (timing_dirty): then fall back to the full timing apply so a prior failed ceiling-restore
+   / VTS clamp recovers on the next live operation instead of waiting for the next
+   configure. */
 static int apply_if_live_locked(void)
 {
 	if (!info.configured || cam_colorbar != 0)
@@ -826,7 +844,7 @@ static int apply_with_timing_if_live_locked(void)
 	return settings_and_timing_apply_locked();
 }
 
-/* ---- capture (locked helpers, issue #41) ---------------------------------- */
+/* ---- capture (locked helpers, owhinata/stm32f746g-disco#41) -------------------------- */
 
 /* Remove any leftover signals so a stale post cannot satisfy the next wait. */
 static void drain_done(void)
@@ -848,7 +866,8 @@ static int camera_configure_locked(int colorbar)
 		}
 		info.configured = 1;
 		cam_colorbar    = -1;   /* forces the mode block below to run */
-		cam_sensor_pclk_hz = 0u;   /* Init reset the PLL; apply_effective re-sets (#67) */
+		/* Init reset the PLL; apply_effective re-sets (owhinata/stm32f746g-disco#67) */
+		cam_sensor_pclk_hz = 0u;
 		tx_thread_sleep(CAM_SETTLE_INIT_MS);
 	}
 
@@ -865,7 +884,7 @@ static int camera_configure_locked(int colorbar)
 		/* Re-apply the cached quality settings LAST, in live mode only:
 		   OV5640_Init and ColorbarModeConfig(DISABLE) both write the SDE
 		   register block (the latter sets SDE_CTRL4), so the settings must
-		   land after them or they get clobbered (issue #44).  The colorbar
+		   land after them or they get clobbered (owhinata/stm32f746g-disco#44).  The colorbar
 		   test pattern owns its own SDE_CTRL4 and ignores quality, so skip
 		   it there.  cam_colorbar is committed only after a successful apply
 		   so a failed apply re-runs this block on the next capture. */
@@ -881,8 +900,8 @@ static int camera_configure_locked(int colorbar)
 	/* Mode unchanged but a prior live apply failed: retry so the sensor matches
 	   the cache.  settings_dirty covers the SDE/geometry/night cache; timing_dirty
 	   covers a failed AEC-ceiling restore / VTS clamp (which an SDE-only apply does
-	   not re-run, #70).  Either one means a full timing apply is owed.  Skipped in
-	   colorbar mode -- quality is irrelevant there and would disturb the test
+	   not re-run, owhinata/stm32f746g-disco#70).  Either one means a full timing apply is
+	   owed. Skipped in colorbar mode -- quality is irrelevant there and would disturb the test
 	   pattern's SDE_CTRL4. */
 	if (!colorbar && (settings_dirty || timing_dirty)) {
 		int rc = settings_and_timing_apply_locked();
@@ -893,16 +912,16 @@ static int camera_configure_locked(int colorbar)
 	return 0;
 }
 
-/* ---- mode switch: resolution / pixel format / fps (issue #45) ------------- */
+/* ---- mode switch: resolution / pixel format / fps (owhinata/stm32f746g-disco#45) ----- */
 
 /*
  * Per-resolution timing table.  fps = pclk_hz / (hts * vts); the PCLK is no longer
- * a fixed column -- it is the runtime fps knob (#67), see effective_ov_pclk().
- * HTS/VTS is tightened on the small streamable modes (1600x1000) so 24 MHz gives a
- * clean ~15 fps and 48 MHz exactly doubles it to ~30 fps (48e6/(1600*1000)=30.0);
- * VGA/WVGA keep the full common timing (snapshot-only, frame rate irrelevant, and
- * pinned to 24 MHz).  VTS is the BASE: apply_vts_locked() raises the effective VTS
- * when the AEC max exposure needs more lines and drops it back to this base.
+ * a fixed column -- it is the runtime fps knob (owhinata/stm32f746g-disco#67), see
+ * effective_ov_pclk().  HTS/VTS is tightened on the small streamable modes (1600x1000) so
+ * 24 MHz gives a clean ~15 fps and 48 MHz exactly doubles it to ~30 fps
+ * (48e6/(1600*1000)=30.0);  VGA/WVGA keep the full common timing (snapshot-only, frame rate
+ * irrelevant, and pinned to 24 MHz).  VTS is the BASE: apply_vts_locked() raises the
+ * effective VTS when the AEC max exposure needs more lines and drops it back to this base.
  */
 static const struct {
 	uint16_t hts;
@@ -924,9 +943,9 @@ static int res_is_small(uint8_t res)
 struct cam_pclk_sel { uint8_t ov; uint32_t hz; };
 
 /*
- * The single safety predicate (#67): 48 MHz (30 fps) only when 30 fps is selected
- * AND the mode is small AND the LTDC is NOT scanning out.  Any missing condition
- * clamps to 24 MHz (15 fps) so the 48 MHz DCMI burst cannot overrun the 16-bit
+ * The single safety predicate (owhinata/stm32f746g-disco#67): 48 MHz (30 fps) only when 30
+ * fps is selected AND the mode is small AND the LTDC is NOT scanning out.  Any missing
+ * condition clamps to 24 MHz (15 fps) so the 48 MHz DCMI burst cannot overrun the 16-bit
  * SDRAM that the LTDC reads continuously.  ltdc_scanout_active() is false when the
  * LTDC never came up (no display = no contention), which correctly allows 48 MHz.
  */
@@ -945,9 +964,9 @@ static struct cam_pclk_sel effective_ov_pclk(uint8_t res)
  * Re-apply the effective PCLK to the live sensor if it differs from what is
  * actually programmed (cam_sensor_pclk_hz).  Called before arming a stream or a
  * snapshot so the sensor PCLK always matches (fps_sel, res, scanout) even when the
- * scanout state changed since the last set_format -- and it fixes the old #45
- * asymmetry where the snapshot lazy-configure never set PCLK at all.  Caller holds
- * cam_lock with the sensor configured.
+ * scanout state changed since the last set_format -- and it fixes the old
+ * owhinata/stm32f746g-disco#45 asymmetry where the snapshot lazy-configure never set PCLK
+ * at all. Caller holds cam_lock with the sensor configured.
  */
 static int apply_effective_pclk_locked(void)
 {
@@ -966,7 +985,8 @@ static int apply_effective_pclk_locked(void)
 		mode.fps_target_x10 = (uint16_t)((uint64_t)sel.hz * 10u /
 		                                 ((uint32_t)mode.hts * mode.vts));
 	/* SetPCLK writes 0x3036/0x3037 (PLL multiplier / root divider) with no internal
-	   delay, so the PLL must re-lock: wait >1 frame before arming (#67, codex). */
+	   delay, so the PLL must re-lock: wait >1 frame before arming
+	   (owhinata/stm32f746g-disco#67, codex). */
 	tx_thread_sleep(CAM_SETTLE_MODE_MS);
 	return 0;
 }
@@ -1007,8 +1027,8 @@ static enum frame_format fmt_to_frame(uint8_t f)
  * Refused while streaming/preview owns the DCMI (the ring is a live target).
  * On any I/O failure the sensor is marked unconfigured and the mode is reset to
  * the QVGA RGB565 default, so a half-applied sensor/DCMI state never persists --
- * the next capture full-re-inits to a state that matches the descriptor (#45).
- * cam_lock held by the caller.
+ * the next capture full-re-inits to a state that matches the descriptor
+ * (owhinata/stm32f746g-disco#45).  cam_lock held by the caller.
  */
 static int camera_set_format_locked(uint8_t res, uint8_t fmt)
 {
@@ -1017,7 +1037,8 @@ static int camera_set_format_locked(uint8_t res, uint8_t fmt)
 	int rc;
 
 	if (cam_stream_active)
-		return CAM_ERR_BUSY;           /* base capture owns the DCMI/DMA (#100) */
+		/* base capture owns the DCMI/DMA (owhinata/stm32f746g-disco#100) */
+		return CAM_ERR_BUSY;
 	if (!sdram_is_up())
 		return CAM_ERR_STATE;
 	if (res >= CAM_RES__COUNT || fmt >= CAM_FMT__COUNT)
@@ -1026,7 +1047,8 @@ static int camera_set_format_locked(uint8_t res, uint8_t fmt)
 		return CAM_ERR_PARAM;          /* JPEG is snapshot-only, gated <= VGA */
 
 	/* Candidate mode: geometry from res + HTS/VTS from the timing table + the
-	   effective PCLK from the fps knob (#67).  Validate capacity before the sensor. */
+	   effective PCLK from the fps knob (owhinata/stm32f746g-disco#67).  Validate capacity
+	   before the sensor. */
 	struct cam_pclk_sel psel = effective_ov_pclk(res);
 
 	m = (struct camera_mode){ .res = res, .format = fmt,
@@ -1064,7 +1086,8 @@ static int camera_set_format_locked(uint8_t res, uint8_t fmt)
 			goto fail;
 		}
 		info.configured = 1;
-		cam_sensor_pclk_hz = 0u;   /* Init reprogrammed the PLL to its default (#67) */
+		/* Init reprogrammed the PLL to its default (owhinata/stm32f746g-disco#67) */
+		cam_sensor_pclk_hz = 0u;
 		tx_thread_sleep(CAM_SETTLE_INIT_MS);
 	}
 
@@ -1072,7 +1095,8 @@ static int camera_set_format_locked(uint8_t res, uint8_t fmt)
 		goto fail;
 	if (OV5640_SetPixelFormat(&ov5640, fmt_to_ov(fmt)) != OV5640_OK)
 		goto fail;
-	if (OV5640_SetPCLK(&ov5640, psel.ov) != OV5640_OK)      /* fps knob (#67) */
+	/* fps knob (owhinata/stm32f746g-disco#67) */
+	if (OV5640_SetPCLK(&ov5640, psel.ov) != OV5640_OK)
 		goto fail;
 	cam_sensor_pclk_hz = psel.hz;   /* sensor now matches the effective selection */
 
@@ -1109,7 +1133,8 @@ fail:
    the HAL intra-frame banding path, which sets CR.DBM; a normal completion
    self-heals (the next Start clears or re-sets DBM as needed), but an aborted
    banded transfer (timeout / DCMI error) can leave DBM/CT stale, so re-init the
-   stream to a clean DMA_NORMAL state for the next capture (#45 R8). */
+   stream to a clean DMA_NORMAL state for the next capture (owhinata/stm32f746g-disco#45
+   R8). */
 static void snapshot_dma_reinit(void)
 {
 	(void)HAL_DMA_DeInit(&hdma_dcmi);
@@ -1124,7 +1149,8 @@ static void snapshot_dma_reinit(void)
    *valid receives the trimmed length (EOI+2).  No SOI/EOI -> truncated (CAM_ERR_HAL).
    Only the captured range is scanned (the .sdram buffer is NOLOAD: it can hold an
    older/garbage tail beyond eff_bytes).  Silent: the caller logs / counts -- this
-   serves both the snapshot finalize and the JPEG streaming producer (#63). */
+   serves both the snapshot finalize and the JPEG streaming producer
+   (owhinata/stm32f746g-disco#63). */
 static int jpeg_trim(const uint8_t *buf, uint32_t eff_bytes, uint32_t *valid)
 {
 	uint32_t i;
@@ -1148,7 +1174,7 @@ static int camera_capture_locked(int colorbar)
 		return CAM_ERR_STATE;
 
 	if (cam_stream_active)
-		return CAM_ERR_BUSY;    /* streaming owns the DCMI/DMA (issue #46) */
+		return CAM_ERR_BUSY;    /* streaming owns the DCMI/DMA (owhinata/stm32f746g-disco#46) */
 
 	if (!info.powered) {
 		rc = camera_probe_locked(NULL);
@@ -1160,8 +1186,10 @@ static int camera_capture_locked(int colorbar)
 	if (rc != 0)
 		return rc;
 
-	/* Program the effective PCLK for the fps knob + current scanout state (#67);
-	   also covers the old #45 asymmetry (lazy configure never set PCLK). */
+	/* Program the effective PCLK for the fps knob + current scanout state
+    (owhinata/stm32f746g-disco#67);
+	   also covers the old owhinata/stm32f746g-disco#45 asymmetry (lazy configure never set
+	   PCLK). */
 	rc = apply_effective_pclk_locked();
 	if (rc != 0)
 		return rc;
@@ -1297,10 +1325,10 @@ int camera_set_fps(unsigned fps)
 	/* Re-apply to the live sensor the same way `camera res` / `camera format` do:
 	   rebuild the current mode so the new effective PCLK is reprogrammed at once.
 	   Inherits the set_format BUSY gate (refused while a stream/preview owns the
-	   DCMI) -- the sensor PLL must not be retuned under a live DMA target (#67).
-	   On any failure (BUSY / I/O) restore the previous selection so the stored
-	   preference never diverges from what the sensor actually got -- otherwise
-	   camera_get_mode() would report an fps the live sensor never received. */
+	   DCMI) -- the sensor PLL must not be retuned under a live DMA target
+	   (owhinata/stm32f746g-disco#67).  On any failure (BUSY / I/O) restore the previous
+	   selection so the stored preference never diverges from what the sensor actually got --
+	   otherwise camera_get_mode() would report an fps the live sensor never received. */
 	prev = cam_fps_sel;
 	cam_fps_sel = (uint8_t)fps;
 	rc = camera_set_format_locked(mode.res, mode.format);
@@ -1354,13 +1382,15 @@ int camera_snapshot_latest(void)
 
 	if (rc != 0)
 		return rc;
-	/* #102: base ON -> refresh the stable cam_frame buffer from the latest published
+	/* owhinata/stm32f746g-disco#102: base ON -> refresh the stable cam_frame buffer from the
+    latest published
 	   ring frame so save/send always get the newest frame (any format, and even while
 	   MJPEG/GUI subscribers are attached).  The pin keeps the slot out of the
 	   producer's acquire() while we copy OUTSIDE the pipeline lock (pin held only across
 	   a brief refcount++/--), so the producer's publish/DMA-repoint is never stalled.
-	   base OFF -> keep the last `camera capture` frame (non-destructive, #102 decision);
-	   no captured frame at all -> CAM_ERR_NO_FRAME. */
+	   base OFF -> keep the last `camera capture` frame (non-destructive,
+	   owhinata/stm32f746g-disco#102 decision);  no captured frame at all ->
+	   CAM_ERR_NO_FRAME. */
 	if (cam_stream_active) {
 		const struct frame_desc *f = frame_pipeline_pin_latest(&cam_pipe);
 
@@ -1395,7 +1425,8 @@ int camera_probe(uint32_t *chip_id)
 	int rc = op_lock();
 	if (rc != 0)
 		return rc;
-	if (cam_stream_active) {          /* streaming owns the sensor/DCMI (#46) */
+	/* streaming owns the sensor/DCMI (owhinata/stm32f746g-disco#46) */
+	if (cam_stream_active) {
 		op_unlock();
 		return CAM_ERR_BUSY;
 	}
@@ -1413,8 +1444,10 @@ int camera_power_off(void)
 		op_unlock();
 		return CAM_ERR_BUSY;
 	}
-	cam_recover_pending = 0;          /* do not auto-recover into a powered-off sensor */
-	cam_subs_release_oneshot();       /* #101: power off cancels recovery -> release oneshot */
+	/* do not auto-recover into a powered-off sensor */
+	cam_recover_pending = 0;
+	/* owhinata/stm32f746g-disco#101: power off cancels recovery -> release oneshot */
+	cam_subs_release_oneshot();
 	power_off_locked();
 	op_unlock();
 	return 0;
@@ -1445,7 +1478,8 @@ int camera_get_mode(struct camera_mode *out)
 	if (rc != 0)
 		return rc;
 	*out = mode;
-	/* Evaluate the fps clamp live against the current LTDC scanout state (#67), so
+	/* Evaluate the fps clamp live against the current LTDC scanout state
+    (owhinata/stm32f746g-disco#67), so
 	   `camera info` reflects whether 30 fps is actually in effect right now -- the
 	   sensor PCLK is only re-applied at the next capture/stream arm, but the report
 	   must be current.  Report the live-effective PCLK / fps target, not a stale
@@ -1463,9 +1497,9 @@ int camera_get_mode(struct camera_mode *out)
 	   programmed in the sensor, not the fps-table base, so the report follows the
 	   exposure-aware VTS reclamp (night mode raises VTS -> lower fps).  Otherwise
 	   the field would mix a live PCLK with a base VTS and read 15.0 while the sensor
-	   runs at ~5 fps in night mode (#71).  Read it back when configured (the sensor
-	   is the source of truth); fall back to the base table value otherwise or on a
-	   read error. */
+	   runs at ~5 fps in night mode (owhinata/stm32f746g-disco#71).  Read it back when
+	   configured (the sensor is the source of truth); fall back to the base table value
+	   otherwise or on a read error. */
 	{
 		uint16_t vts = mode.vts;
 
@@ -1480,7 +1514,7 @@ int camera_get_mode(struct camera_mode *out)
 	return 0;
 }
 
-/* ---- quality settings public API (issue #44) ----------------------------- */
+/* ---- quality settings public API (owhinata/stm32f746g-disco#44) ---------------------- */
 
 int camera_get_settings(struct camera_settings *out)
 {
@@ -1613,7 +1647,8 @@ int camera_set_night(int on)
 		return rc;
 	settings.night = on ? 1u : 0u;
 	settings_dirty = 1;
-	rc = apply_with_timing_if_live_locked();   /* night changes the AEC ceiling (#70) */
+	/* night changes the AEC ceiling (owhinata/stm32f746g-disco#70) */
+	rc = apply_with_timing_if_live_locked();
 	op_unlock();
 	return rc;
 }
@@ -1630,16 +1665,18 @@ int camera_set_defaults(void)
 	settings.hue        = 0;
 	settings.awb        = CAM_AWB_AUTO;
 	settings.effect     = CAM_FX_NONE;
-	settings.flip       = CAM_FLIP_FLIP;   /* upright for this board's mounting (#68) */
+	/* upright for this board's mounting (owhinata/stm32f746g-disco#68) */
+	settings.flip       = CAM_FLIP_FLIP;
 	settings.zoom       = 1;
 	settings.night      = 0;
 	settings_dirty      = 1;
-	rc = apply_with_timing_if_live_locked();   /* night->off must restore ceiling/VTS (#70) */
+	/* night->off must restore ceiling/VTS (owhinata/stm32f746g-disco#70) */
+	rc = apply_with_timing_if_live_locked();
 	op_unlock();
 	return rc;
 }
 
-/* ---- streaming producer (issue #46) -------------------------------------- */
+/* ---- streaming producer (owhinata/stm32f746g-disco#46) ------------------------------- */
 
 /* frame_os: the pipeline core's injected mutual exclusion (a TX_MUTEX, distinct
    from the driver cam_lock).  The core is only ever entered from the producer
@@ -1662,15 +1699,16 @@ static const struct frame_os cam_pipe_os = {
 
 /* Counting sink: the display-independent FPS / throughput consumer.  DROP
    policy and it returns each frame's pin immediately (no holding), so the
-   producer is never blocked -- exactly the #46 measurement target.  The core
-   keeps delivered/dropped. */
+   producer is never blocked -- exactly the owhinata/stm32f746g-disco#46 measurement target.
+   The core keeps delivered/dropped. */
 static int cam_stat_open(void *ctx, enum frame_format fmt, uint16_t w, uint16_t h)
 {
 	(void)ctx;
 	(void)fmt;
 	(void)w;
 	(void)h;
-	return 0;   /* counting sink: accepts whatever the producer publishes (#45) */
+	/* counting sink: accepts whatever the producer publishes (owhinata/stm32f746g-disco#45) */
+	return 0;
 }
 
 static int cam_stat_consume(void *ctx, const struct frame_desc *f)
@@ -1681,7 +1719,8 @@ static int cam_stat_consume(void *ctx, const struct frame_desc *f)
 }
 
 /* DMA transfer-complete (ISR context): one ring buffer just filled.  Only wakes
-   the producer; it touches no ring / pipeline / CT state (the #47 ISR rule). */
+   the producer; it touches no ring / pipeline / CT state (the
+   owhinata/stm32f746g-disco#47 ISR rule). */
 static void cam_stream_dma_cb(DMA_HandleTypeDef *h)
 {
 	(void)h;
@@ -1696,7 +1735,7 @@ static void cam_stream_dma_cb(DMA_HandleTypeDef *h)
    contention (LTDC continuously reads the framebuffer) and, per RM0385 8.5.5,
    do NOT disable the stream -- the snapshot path simply never sees them.  So
    count and ignore them (cam_stream_fe); only a transfer error (TE), which the
-   hardware uses to actually halt the stream, is terminal (#56). */
+   hardware uses to actually halt the stream, is terminal (owhinata/stm32f746g-disco#56). */
 static void cam_stream_dma_err_cb(DMA_HandleTypeDef *h)
 {
 	if (!cam_stream_active)
@@ -1740,8 +1779,8 @@ static struct cam_sub *cam_sub_find(struct frame_sink *s)
 
 /* Claim/find the registry slot for @p s and mark it enabled for pixel format
    @p fmt (no attach).  @p oneshot selects the persistence policy (0 = persistent
-   gui/nncam, 1 = non-persistent MJPEG, #101).  Returns the slot, or NULL if the
-   table is full.  cam_lock held.  A subscriber's own module owns only this
+   gui/nncam, 1 = non-persistent MJPEG, owhinata/stm32f746g-disco#101).  Returns the slot,
+   or NULL if the table is full.  cam_lock held.  A subscriber's own module owns only this
    `enabled` intent; membership (`attached`) is set later by the attach path.
    `oneshot` is set on EVERY register so a reused slot never inherits a stale
    policy from a previous subscriber. */
@@ -1764,8 +1803,8 @@ static struct cam_sub *cam_sub_register(struct frame_sink *s, enum camera_format
 /* Attach every enabled subscriber whose format class matches the (freshly
    inited) base to cam_pipe.  Rollback: on any attach failure detach the ones
    done this pass and return <0, leaving no partial membership (contract
-   #100.8).  On success returns the count of external subscribers attached
-   (0 => a plain `camera stream` with no subscriber).  cam_lock held; the base
+   owhinata/stm32f746g-disco#100.8).  On success returns the count of external subscribers
+   attached (0 => a plain `camera stream` with no subscriber).  cam_lock held; the base
    was off on entry, so every subscriber starts detached. */
 static int cam_subs_attach_all(void)
 {
@@ -1798,7 +1837,7 @@ static int cam_subs_attach_all(void)
 /* Detach every attached subscriber (cascade: each frame_pipeline_detach() calls
    the sink's close()).  Producer-thread teardown and explicit stop both converge
    here.  A subscriber's close() is non-blocking and must not re-enter the camera
-   API (contract #100.2), so this is safe with cam_lock held. */
+   API (contract owhinata/stm32f746g-disco#100.2), so this is safe with cam_lock held. */
 static void cam_subs_detach_all(void)
 {
 	for (int i = 0; i < CAM_MAX_SUBS; i++) {
@@ -1809,15 +1848,16 @@ static void cam_subs_detach_all(void)
 	}
 }
 
-/* #101: fully release non-persistent (oneshot, e.g. MJPEG) subscribers -- clear
+/* owhinata/stm32f746g-disco#101: fully release non-persistent (oneshot, e.g. MJPEG)
+   subscribers -- clear
    the registration so a later base start's cam_subs_attach_all() cannot ghost
    re-attach a subscriber whose owning feature has no consumer anymore.  Called
    under cam_lock on a NON-recover base stop (explicit stop / --frames|--secs
    target done / overrun recover giveup): base off for good, so a oneshot sub must
    go idle in the registry too.  Persistent subs (gui/nncam, oneshot=0) are
    untouched -- they keep their enabled intent and re-attach at the next base start
-   (contract #100.1).  The oneshot sub is already detached (attached=0) by
-   cam_subs_detach_all before this runs; a MJPEG thread observing this via
+   (contract owhinata/stm32f746g-disco#100.1).  The oneshot sub is already detached
+   (attached=0) by cam_subs_detach_all before this runs; a MJPEG thread observing this via
    camera_subscribed() then fully stops rather than pausing for a re-open. */
 static void cam_subs_release_oneshot(void)
 {
@@ -1839,7 +1879,8 @@ static void cam_stream_teardown(void)
 	(void)tx_mutex_get(&cam_lock, TX_WAIT_FOREVER);
 	if (cam_stream_active) {
 		/* Auto-recover only an overrun/DMA-error stop that was NOT an explicit
-		   stop or a --frames/--secs target completion (#100 contract 6). */
+		   stop or a --frames/--secs target completion (owhinata/stm32f746g-disco#100 contract
+		   6). */
 		cam_recover_pending = cam_stream_err && !cam_stop_req;
 		cam_stream_active = 0;
 		cam_elapsed_ms = HAL_GetTick() - cam_start_tick;
@@ -1848,8 +1889,8 @@ static void cam_stream_teardown(void)
 		   clear interrupt-enables (HAL only disables FRAME inside the FRAME IRQ).
 		   A timeout-driven stop (--secs / stop) tears down between FRAMEs with
 		   FRAME still armed, so a later raster stream -- which assumes FRAME is
-		   disabled -- would take a spurious cam_stream_sem.  Disable it here (#63;
-		   a no-op for the raster path that never enabled it). */
+		   disabled -- would take a spurious cam_stream_sem.  Disable it here
+		   (owhinata/stm32f746g-disco#63;  a no-op for the raster path that never enabled it). */
 		__HAL_DCMI_DISABLE_IT(&hdcmi, DCMI_IT_FRAME);
 		frame_pipeline_detach(&cam_pipe, &cam_stat_sink);
 		/* Cascade: detach every attached subscriber too (each detach fires the
@@ -1858,9 +1899,10 @@ static void cam_stream_teardown(void)
 		   still-linked sink.  Subscriber sinks are synchronous (no cross-thread
 		   pin) and their close() is non-blocking, so a producer-thread detach is
 		   safe here.  This is the master-switch teardown for both an explicit
-		   stop and an async OVR/auto-stop (contract #100.2). */
+		   stop and an async OVR/auto-stop (contract owhinata/stm32f746g-disco#100.2). */
 		cam_subs_detach_all();
-		/* #101: a non-recover stop (explicit / target done) leaves the base off
+		/* owhinata/stm32f746g-disco#101: a non-recover stop (explicit / target done) leaves the
+     base off
 		   for good -> fully release oneshot (MJPEG) subscribers so a later start
 		   cannot ghost re-attach them.  An overrun (cam_recover_pending) keeps them
 		   enabled: cam_stream_recover() re-attaches them at the same mode. */
@@ -1938,7 +1980,7 @@ static void cam_stream_service(int had_sem)
 		cam_ring_ovr += seen - (uint32_t)published;
 }
 
-/* ---- JPEG variable-length streaming (issue #63) -------------------------- */
+/* ---- JPEG variable-length streaming (owhinata/stm32f746g-disco#63) ------------------- */
 /*
  * JPEG cannot ride the raster DBM/TC path: a JPEG frame is shorter than the DMA
  * budget, so the transfer-complete interrupt never fires at the frame boundary.
@@ -1967,7 +2009,7 @@ static HAL_StatusTypeDef cam_jpeg_arm(struct frame_desc *slot)
 		return st;
 	/* The banding path enables the DMA FIFO/direct-mode error interrupts; under
 	   SDRAM contention HAL's DCMI_DMAError would abort the capture, so silence the
-	   non-fatal FE/DME the way the snapshot path does (#45 R8). */
+	   non-fatal FE/DME the way the snapshot path does (owhinata/stm32f746g-disco#45 R8). */
 	__HAL_DMA_DISABLE_IT(&hdma_dcmi, DMA_IT_FE);
 	__HAL_DMA_DISABLE_IT(&hdma_dcmi, DMA_IT_DME);
 	return HAL_OK;
@@ -1984,9 +2026,9 @@ static int cam_stream_should_stop(void)
 
 /* Service one JPEG frame: finalise the current slot (Stop -> NDTR -> EOI trim),
    publish it at its real length, then re-arm into a free slot.  save/send pull the
-   latest published frame on demand (camera_snapshot_latest, #102), so this hot path
-   does no cam_frame mirror.  Every HAL failure (Stop / re-arm) is terminal ->
-   teardown, so the stream never sticks "active" with no frame coming.
+   latest published frame on demand (camera_snapshot_latest, owhinata/stm32f746g-disco#102),
+   so this hot path does no cam_frame mirror.  Every HAL failure (Stop / re-arm) is terminal
+   -> teardown, so the stream never sticks "active" with no frame coming.
    Producer-thread only. */
 static void cam_stream_service_jpeg(int had_sem)
 {
@@ -2014,7 +2056,7 @@ static void cam_stream_service_jpeg(int had_sem)
 		if (freed != NULL) {
 			frame_pipeline_publish(&cam_pipe, cam_jpeg_slot, valid,
 			                       FRAME_FMT_JPEG, mode.width, mode.height, 0u);
-			/* #102: the producer no longer mirrors into cam_frame.  camera
+			/* owhinata/stm32f746g-disco#102: the producer no longer mirrors into cam_frame.  camera
 			   save/send pull the latest published frame on demand via
 			   camera_snapshot_latest() (frame_pipeline_pin_latest), so this hot
 			   path stays copy-free for every format -- raster and JPEG alike. */
@@ -2053,7 +2095,8 @@ static void cam_stream_recover(void)
 	(void)tx_mutex_get(&cam_lock, TX_WAIT_FOREVER);
 	if (!cam_recover_pending || cam_stream_active) {
 		cam_recover_pending = 0;
-		/* #101: recovery cancelled (explicit stop/start raced in) and the base is
+		/* owhinata/stm32f746g-disco#101: recovery cancelled (explicit stop/start raced in) and
+     the base is
 		   off -> release oneshot subs so they cannot ghost re-attach.  Defensive:
 		   the cancelling entry point already released them; idempotent here. */
 		if (!cam_stream_active)
@@ -2070,7 +2113,8 @@ static void cam_stream_recover(void)
 	cam_recover_last = now;
 
 	if (cam_recover_rapid >= CAM_RECOVER_GIVEUP) {
-		/* #101: auto-recovery abandoned -> base stays off, so oneshot (MJPEG)
+		/* owhinata/stm32f746g-disco#101: auto-recovery abandoned -> base stays off, so oneshot
+     (MJPEG)
 		   subscribers must go idle too (a paused MJPEG thread sees this via
 		   camera_subscribed() and fully stops instead of waiting forever). */
 		cam_subs_release_oneshot();
@@ -2084,7 +2128,8 @@ static void cam_stream_recover(void)
 	   subscriber (each sees a close()/open() pair). */
 	rc = stream_start_locked(cam_start_colorbar, cam_target_frames, cam_target_secs);
 	if (rc != 0)
-		cam_subs_release_oneshot();    /* #101: re-arm failed, base off -> release */
+		/* owhinata/stm32f746g-disco#101: re-arm failed, base off -> release */
+		cam_subs_release_oneshot();
 	(void)tx_mutex_put(&cam_lock);
 	if (rc != 0)
 		LOG_WRN("base auto-recovery failed (%d) -- use 'camera stream start'", rc);
@@ -2103,7 +2148,8 @@ static void cam_producer_entry(ULONG arg)
 	(void)arg;
 	for (;;) {
 		if (!cam_stream_active) {
-			if (cam_recover_pending) {     /* overrun: re-arm the base (#100) */
+			/* overrun: re-arm the base (owhinata/stm32f746g-disco#100) */
+			if (cam_recover_pending) {
 				cam_stream_recover();
 				continue;
 			}
@@ -2146,9 +2192,10 @@ static int stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 	/* Partition the camera arena (cam_arena, bank1) into ring slots sized to the
 	   current mode: slot stride = align32(frame_bytes), as many slots as fit,
 	   capped at FRAME_PIPELINE_MAX_SLOTS -- so small modes get a deeper ring
-	   (#65).  REJECT (not clamp) when fewer than 2 slots fit: 0/1 slot cannot run
-	   the DBM pair, and clamping up to 2 would overflow the arena since
-	   frame_pipeline_publish() does not validate bytes <= slot_size (#45). */
+	   (owhinata/stm32f746g-disco#65).  REJECT (not clamp) when fewer than 2 slots fit: 0/1
+	   slot cannot run the DBM pair, and clamping up to 2 would overflow the arena since
+	   frame_pipeline_publish() does not validate bytes <= slot_size
+	   (owhinata/stm32f746g-disco#45). */
 	slot_size = (mode.frame_bytes + 31u) & ~31u;
 	if (slot_size == 0u || CAM_ARENA_BYTES / slot_size < 2u)
 		return CAM_ERR_STATE;
@@ -2160,7 +2207,8 @@ static int stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 	if (rc != 0)
 		return rc;
 
-	/* Program the effective PCLK for the fps knob + current scanout state (#67):
+	/* Program the effective PCLK for the fps knob + current scanout state
+    (owhinata/stm32f746g-disco#67):
 	   30 fps (48 MHz) only takes effect here when the LTDC is not scanning out, so
 	   a plain `camera stream start` after `lcd off` runs at 30 fps while one
 	   started with the display on (or a GUIX preview) clamps to 15 fps. */
@@ -2184,11 +2232,13 @@ static int stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 		frame_pipeline_detach(&cam_pipe, &cam_stat_sink);
 		return CAM_ERR_STATE;
 	}
-	(void)nx;                         /* #102: no longer used for a mirror latch */
+	/* owhinata/stm32f746g-disco#102: no longer used for a mirror latch */
+	(void)nx;
 	cam_stream_ovr    = 0;
 	cam_ring_ovr      = 0;
 	cam_stream_fe     = 0;
-	cam_ring_slots    = nslots;       /* #65: observable arena partition */
+	/* owhinata/stm32f746g-disco#65: observable arena partition */
+	cam_ring_slots    = nslots;
 	cam_ring_slot_bytes = slot_size;
 	cam_jpeg_trunc    = 0;
 	cam_stream_err    = 0;
@@ -2202,10 +2252,11 @@ static int stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 	drain_stream_sem();
 
 	if (mode.is_jpeg) {
-		/* JPEG snapshot-loop (#63): one ring slot is the live DMA target and the
+		/* JPEG snapshot-loop (owhinata/stm32f746g-disco#63): one ring slot is the live DMA target
+     and the
 		   DCMI FRAME ISR delimits each variable-length frame (no DBM, no TC).  On
 		   any failure path cascade-detach every subscriber attached above (the
-		   MJPEG eth_sink is the only JPEG-class subscriber, #49 P5). */
+		   MJPEG eth_sink is the only JPEG-class subscriber, owhinata/stm32f746g-disco#49 P5). */
 		cam_jpeg_slot = frame_pipeline_acquire(&cam_pipe);
 		if (cam_jpeg_slot == NULL) {
 			cam_subs_detach_all();
@@ -2284,12 +2335,14 @@ int camera_stream_start(int colorbar, uint32_t frames, uint32_t secs)
 
 	if (rc != 0)
 		return rc;
-	/* Base capture start (#100): allowed unless already streaming.  Subscribers
+	/* Base capture start (owhinata/stm32f746g-disco#100): allowed unless already streaming.
+    Subscribers
 	   attach inside stream_start_locked(); there is no single owner to refuse.
 	   An explicit start resets the overrun-recovery backoff. */
 	cam_recover_pending = 0;
 	cam_recover_rapid   = 0;
-	/* #101: a fresh explicit start supersedes any aborted overrun-recovery window --
+	/* owhinata/stm32f746g-disco#101: a fresh explicit start supersedes any aborted
+    overrun-recovery window --
 	   drop orphaned oneshot (MJPEG) subs left enabled+detached so they cannot ghost
 	   re-attach to this new base (possibly a different format).  Only when the base
 	   is off: an active base keeps its attached oneshot and the start below
@@ -2318,9 +2371,9 @@ int camera_subscribe(struct frame_sink *s, enum camera_format fmt)
 	}
 	rc = 0;
 	/* Attach now iff the base is already running and its format matches; otherwise
-	   stay enabled + idle and attach at the next base start (contract #100.1: the
-	   subscriber's enabled intent is orthogonal to base on/off).  A failed attach
-	   (pipeline full / open() reject) leaves no registration. */
+	   stay enabled + idle and attach at the next base start (contract
+	   owhinata/stm32f746g-disco#100.1: the subscriber's enabled intent is orthogonal to base
+	   on/off). A failed attach (pipeline full / open() reject) leaves no registration. */
 	if (cam_stream_active && !sub->attached && sub->fmt == mode.format) {
 		if (frame_pipeline_attach(&cam_pipe, s) == 0) {
 			sub->attached = 1;
@@ -2345,7 +2398,8 @@ int camera_subscribe_oneshot(struct frame_sink *s, enum camera_format fmt)
 	rc = op_lock();
 	if (rc != 0)
 		return rc;
-	/* #101: STRICT attach.  Unlike camera_subscribe() (which registers enabled+idle
+	/* owhinata/stm32f746g-disco#101: STRICT attach.  Unlike camera_subscribe() (which
+    registers enabled+idle
 	   when the base is off / format-mismatched), a oneshot (MJPEG) subscriber must
 	   bind to a LIVE, format-matching base under THIS cam_lock -- there is no
 	   enabled-idle registration.  This makes the base-state check and the attach
@@ -2394,7 +2448,8 @@ int camera_unsubscribe(struct frame_sink *s)
 		if (sub->attached) {
 			/* Detach (no more new consume; close() fires) and report the pins the
 			   sink still holds so the caller can drain its own thread.  The base
-			   keeps running: unsubscribing never stops it (contract #100.2). */
+			   keeps running: unsubscribing never stops it (contract
+			   owhinata/stm32f746g-disco#100.2). */
 			inflight = frame_pipeline_detach(&cam_pipe, s);
 			sub->attached = 0;
 		}
@@ -2411,7 +2466,8 @@ int camera_subscribed(struct frame_sink *s)
 	struct cam_sub *sub;
 	int enabled = 0;
 
-	/* #101: single source of truth for "is @p s still a registered subscriber".
+	/* owhinata/stm32f746g-disco#101: single source of truth for "is @p s still a registered
+    subscriber".
 	   A oneshot (MJPEG) sink polls this after a base teardown (its close() only set
 	   a flag): still enabled => an overrun recovery is in flight, keep the HTTP
 	   session paused for the re-open; not enabled => a non-recover stop released it
@@ -2429,7 +2485,8 @@ int camera_other_subscribers_attached(struct frame_sink *self)
 {
 	int other = 0;
 
-	/* #101: true if any attached external subscriber OTHER THAN @p self is live.
+	/* owhinata/stm32f746g-disco#101: true if any attached external subscriber OTHER THAN @p
+    self is live.
 	   The GUI resolution button uses this to only reconfigure the base (stop ->
 	   camera res -> restart, which cascades every subscriber) when it is the sole
 	   attached subscriber.  Best-effort snapshot under cam_lock: a concurrent
@@ -2457,7 +2514,8 @@ int camera_stream_stop(void)
 
 	if (rc != 0)
 		return rc;
-	/* Master switch (#100): `camera stream stop` cascades -- the producer teardown
+	/* Master switch (owhinata/stm32f746g-disco#100): `camera stream stop` cascades -- the
+    producer teardown
 	   detaches every subscriber (each close()) and stops the DCMI.  Never refused
 	   for having subscribers; auto-stop is intentionally absent (an idle base with
 	   no subscribers stays ON until an explicit stop). */
@@ -2466,7 +2524,8 @@ int camera_stream_stop(void)
 		cam_stop_req = 1;
 		(void)tx_semaphore_put(&cam_stream_sem);  /* producer tears down (releases oneshot) */
 	} else {
-		/* #101: base already inactive -- an overrun tore it down and this stop
+		/* owhinata/stm32f746g-disco#101: base already inactive -- an overrun tore it down and
+     this stop
 		   cancels the pending auto-recovery.  The producer teardown that would
 		   normally release oneshot (MJPEG) subs will not run again, so release them
 		   here (idempotent if none registered). */
@@ -2502,10 +2561,14 @@ int camera_stream_stats(struct camera_stream_info *out)
 	   (matching start / teardown), so this nesting cannot deadlock. */
 	(void)tx_mutex_get(&cam_pipe_lock, TX_WAIT_FOREVER);
 	out->captured    = cam_pipe.stats.captured;    /* producer */
-	out->frames      = cam_pipe.stats.published;    /* producer */
-	out->delivered   = cam_stat_sink.delivered;     /* stat sink */
-	out->dropped     = cam_stat_sink.dropped;       /* stat sink */
-	out->stat_errors = cam_stat_sink.errors;        /* stat sink (#102) */
+	/* producer */
+	out->frames      = cam_pipe.stats.published;
+	/* stat sink */
+	out->delivered   = cam_stat_sink.delivered;
+	/* stat sink */
+	out->dropped     = cam_stat_sink.dropped;
+	/* stat sink (owhinata/stm32f746g-disco#102) */
+	out->stat_errors = cam_stat_sink.errors;
 	(void)tx_mutex_put(&cam_pipe_lock);
 	op_unlock();
 	return 0;
@@ -2522,7 +2585,8 @@ int camera_subscribers_snapshot(struct camera_sub_stat *out, int max)
 	/* Consistent read of the per-sink counters (producer writes them under
 	   cam_pipe_lock).  Lock order cam_lock -> cam_pipe_lock (as elsewhere). */
 	(void)tx_mutex_get(&cam_pipe_lock, TX_WAIT_FOREVER);
-	/* The internal stats sink is attached for the whole base lifetime (#46). */
+	/* The internal stats sink is attached for the whole base lifetime
+    (owhinata/stm32f746g-disco#46). */
 	if (cam_stream_active && n < max) {
 		out[n].name      = cam_stat_sink.name;
 		out[n].fmt       = mode.format;
@@ -2568,7 +2632,8 @@ int camera_init(void)
 		tx_mutex_delete(&cam_lock);
 		return CAM_ERR_STATE;
 	}
-	/* Streaming (issue #46): the pipeline's frame_os mutex and the DMA-TC ->
+	/* Streaming (owhinata/stm32f746g-disco#46): the pipeline's frame_os mutex and the DMA-TC
+    ->
 	   producer wakeup semaphore.  The producer thread is created at the end. */
 	if (tx_mutex_create(&cam_pipe_lock, "campipe", TX_INHERIT) != TX_SUCCESS) {
 		tx_semaphore_delete(&cam_done);
@@ -2655,7 +2720,7 @@ int camera_init(void)
 	   which (unlike the snapshot HAL_DMA_Start_IT) enables the DMA FIFO-error
 	   interrupt; FE/DME are non-fatal (RM0385 8.5.5 -- they do not disable the
 	   stream) and transient under SDRAM contention, so cam_stream_dma_err_cb
-	   treats only a transfer error (TE) as terminal (#56). */
+	   treats only a transfer error (TE) as terminal (owhinata/stm32f746g-disco#56). */
 	hdma_dcmi.Instance                 = DMA2_Stream1;
 	hdma_dcmi.Init.Channel             = DMA_CHANNEL_1;
 	hdma_dcmi.Init.Direction           = DMA_PERIPH_TO_MEMORY;
@@ -2715,7 +2780,8 @@ int camera_init(void)
 		goto fail_i2c;
 	}
 
-	/* The streaming counting sink (issue #46) -- format-validated at attach. */
+	/* The streaming counting sink (owhinata/stm32f746g-disco#46) -- format-validated at
+    attach. */
 	cam_stat_sink.name    = "stats";
 	cam_stat_sink.ctx     = NULL;
 	cam_stat_sink.policy  = FRAME_POLICY_DROP;
@@ -2791,7 +2857,8 @@ void DMA2_Stream1_IRQHandler(void)
 void HAL_DCMI_FrameEventCallback(DCMI_HandleTypeDef *h)
 {
 	(void)h;
-	/* JPEG streaming (#63) delimits each variable-length frame by FRAME (the
+	/* JPEG streaming (owhinata/stm32f746g-disco#63) delimits each variable-length frame by
+    FRAME (the
 	   raster stream leaves FRAME disabled, so this only fires for a JPEG stream);
 	   wake the producer to finalise + re-arm.  Mode-exclusive with the snapshot
 	   gate below. */
@@ -2808,7 +2875,8 @@ void HAL_DCMI_FrameEventCallback(DCMI_HandleTypeDef *h)
 void HAL_DCMI_ErrorCallback(DCMI_HandleTypeDef *h)
 {
 	(void)h;
-	/* Streaming (issue #46): a continuous-mode DCMI overrun is terminal -- the
+	/* Streaming (owhinata/stm32f746g-disco#46): a continuous-mode DCMI overrun is terminal --
+    the
 	   HAL DCMI IRQ has already aborted the DMA -- so flag it and wake the
 	   producer to tear down cleanly.  (Mode-exclusive with the snapshot gate.) */
 	if (cam_stream_active) {

@@ -4,7 +4,8 @@
  */
 /**
  * @file    guix_glue.c
- * @brief   GUIX bring-up / lifecycle on ThreadX (issue #55).  See guix_glue.h.
+ * @brief   GUIX bring-up / lifecycle on ThreadX (owhinata/stm32f746g-disco#55).
+ * See guix_glue.h.
  */
 #include "guix_glue.h"
 #include "guix_display.h"
@@ -29,7 +30,8 @@ static GX_WINDOW_ROOT guix_root;
 static bool guix_inited;          /* gx_system_initialize() done (one-shot) */
 static bool guix_active;          /* UI currently running                   */
 
-/* App-supplied widget-tree builder (dependency inversion, #61): guix_first_start
+/* App-supplied widget-tree builder (dependency inversion,
+   owhinata/stm32f746g-disco#61): guix_first_start
    calls it after creating the display/canvas/root, so this port layer never
    includes the ui/ app header. */
 static guix_app_builder_fn guix_app_builder;
@@ -49,7 +51,8 @@ static int guix_first_start(void)
 	   ltdc_front between this read and the GUIX thread's first buffer toggle --
 	   the canvas would otherwise be bound to a now-front (visible) buffer.
 	   Every failure path releases ownership before returning. */
-	if (!ltdc_gui_take(true)) {              /* refused if scanout disabled (#66) */
+	/* refused if scanout disabled (owhinata/stm32f746g-disco#66) */
+	if (!ltdc_gui_take(true)) {
 		LOG_ERR("LTDC scanout disabled -- cannot take the display");
 		return GUIX_ERR;
 	}
@@ -122,7 +125,8 @@ int guix_start(void)
 		LOG_ERR("LTDC display down -- cannot start GUIX");
 		return GUIX_ERR_STATE;
 	}
-	if (ltdc_scanout_off()) {           /* (#66) GUIX needs scanout running */
+	/* (owhinata/stm32f746g-disco#66) GUIX needs scanout running */
+	if (ltdc_scanout_off()) {
 		LOG_ERR("LTDC scanout disabled -- run 'lcd on' before starting GUIX");
 		return GUIX_ERR_STATE;
 	}
@@ -138,7 +142,8 @@ int guix_start(void)
 		/* Restart: re-take ownership, re-establish the canvas-on-back-buffer
 		   invariant (the manual blank in guix_stop() moved ltdc_front), re-show
 		   and force a repaint. */
-		if (!ltdc_gui_take(true)) {       /* refused if scanout disabled (#66) */
+		/* refused if scanout disabled (owhinata/stm32f746g-disco#66) */
+		if (!ltdc_gui_take(true)) {
 			LOG_ERR("LTDC scanout disabled -- cannot restart GUIX");
 			return GUIX_ERR;
 		}
@@ -166,7 +171,7 @@ int guix_stop(void)
 		return GUIX_OK;
 
 	guix_touch_set_active(false);        /* park input (outside any I2C op) */
-	touch_evt_signal();                  /* (#62) kick the input thread out of its
+	touch_evt_signal();                  /* (owhinata/stm32f746g-disco#62) kick the input thread out of its
 	                                        FOREVER touch-wake wait so it re-checks
 	                                        the active flag and re-parks promptly */
 	gx_widget_hide(&guix_root);          /* GUIX stops compositing the UI   */

@@ -6,14 +6,14 @@
  * @file    cli_edit.c
  * @brief   Interactive line editor: RX/escape state machine, edit ops, redraw.
  *
- * Grows out of the minimal escape *swallower* that issue #4 kept in
+ * Grows out of the minimal escape *swallower* that owhinata/stm32f746g-disco#4 kept in
  * cli_session.c: cli_input_byte() now drives a full VT100 line editor.  The
  * cursor (sh->cur) is split from the length (sh->len) so text can be inserted,
  * overwritten and deleted anywhere in the line; meta keys (Ctrl+a/b/d/e/f/k/u/w,
  * Alt+b/f, Ctrl+l) and the arrow / Home / End / Del / Insert escape sequences
  * move and edit it.  Like cli_session.c this file calls no ThreadX (tx_*) API --
  * it reaches the transport only through the buffered output primitives
- * (cli_lock / cli_out_putc / cli_out_flush, issue #5) -- so it compiles and
+ * (cli_lock / cli_out_putc / cli_out_flush, owhinata/stm32f746g-disco#5) -- so it compiles and
  * unit-tests on the host against the tx_api.h shim.
  *
  * Redraw model (req §2 "wrap at terminal width"): a single cli_edit_refresh()
@@ -21,9 +21,9 @@
  * terminal's auto-wrap behaviour at the last column -- it forces a newline at an
  * exact width boundary and tracks the render's row count (old_rows) and the
  * cursor's row (draw_row) itself, so wrapped lines redraw deterministically.
- * Two fast paths keep the common cases cheap (and byte-identical to issue #4):
- * appending at end of line echoes the one byte, and Backspace at end of line
- * emits "\b \b".  Terminal width is auto-detected via a CPR probe (see
+ * Two fast paths keep the common cases cheap (and byte-identical to
+ * owhinata/stm32f746g-disco#4):  appending at end of line echoes the one byte, and Backspace
+ * at end of line emits "\b \b".  Terminal width is auto-detected via a CPR probe (see
  * cli_edit_session_start); until/without a reply CLI_TERM_WIDTH is used.
  *
  * Clean-room design: the multi-row redraw is informed by the *concept* of a
@@ -145,7 +145,8 @@ static void cli_edit_refresh(struct cli_instance *sh)
 
 /* Public thin wrapper over the static refresh: lets cli_history.c (a separate
  * translation unit) repaint after recalling an entry into the line buffer.  The
- * caller sets sh->line / len / cur first; this redraws prompt + line (issue #10). */
+ * caller sets sh->line / len / cur first; this redraws prompt + line
+ * (owhinata/stm32f746g-disco#10). */
 void cli_edit_redraw(struct cli_instance *sh)
 {
 	cli_edit_refresh(sh);
@@ -179,7 +180,8 @@ static void edit_reposition(struct cli_instance *sh)
 	cli_unlock(sh);
 }
 
-/* ---- fast paths (preserve the issue #4 byte stream for the common cases) - */
+/* ---- fast paths (preserve the owhinata/stm32f746g-disco#4 byte stream for the common
+   cases) - */
 
 /* Append @p c at end of line with a single-byte echo, iff the cursor is at the
  * end and the new char stays within the current physical row (not landing on a
@@ -379,13 +381,20 @@ static void op_clear_screen(struct cli_instance *sh) /* Ctrl+l */
 static void csi_final(struct cli_instance *sh, char f)
 {
 	switch (f) {
-	case 'A': cli_history_prev(sh); break;           /* up    (#10 ring) */
-	case 'B': cli_history_next(sh); break;           /* down  (#10 ring) */
-	case 'C': op_right(sh); break;                   /* right */
-	case 'D': op_left(sh); break;                    /* left  */
-	case 'H': op_home(sh); break;                    /* Home  */
-	case 'F': op_end(sh); break;                     /* End   */
-	case '~':                                        /* ESC[<n>~ keypad/edit */
+	/* up    (owhinata/stm32f746g-disco#10 ring) */
+	case 'A': cli_history_prev(sh); break;
+	/* down  (owhinata/stm32f746g-disco#10 ring) */
+	case 'B': cli_history_next(sh); break;
+	/* right */
+	case 'C': op_right(sh); break;
+	/* left */
+	case 'D': op_left(sh); break;
+	/* Home */
+	case 'H': op_home(sh); break;
+	/* End */
+	case 'F': op_end(sh); break;
+	/* ESC[<n>~ keypad/edit */
+	case '~':
 		switch (sh->esc_np >= 1 ? sh->esc_p[0] : 0) {
 		case 1: case 7: op_home(sh); break;          /* Home */
 		case 4: case 8: op_end(sh); break;           /* End */
@@ -441,7 +450,7 @@ static void edit_submit(struct cli_instance *sh)
 
 void cli_input_byte(struct cli_instance *sh, uint8_t b)
 {
-	/* Background-job output landed since the last keystroke (issue #25): a bg
+	/* Background-job output landed since the last keystroke (owhinata/stm32f746g-disco#25): a bg
 	 * worker printed under this instance's tx_lock, broke to a fresh line and
 	 * reset old_rows/draw_row/render_dirty.  Repaint the prompt + current input
 	 * line here -- BEFORE any byte handling, including the fast-append path that
@@ -458,7 +467,8 @@ void cli_input_byte(struct cli_instance *sh, uint8_t b)
 	if (b & 0x80u)
 		return;
 
-	/* Tab completion is bash-style two-stage (issue #11): the candidate list is
+	/* Tab completion is bash-style two-stage (owhinata/stm32f746g-disco#11): the candidate list
+    is
 	 * only shown on a SECOND consecutive Tab.  Any other key breaks the run, so
 	 * disarm here -- 0x09 is the sole byte that preserves the armed state. */
 	if (b != 0x09)
@@ -474,7 +484,7 @@ void cli_input_byte(struct cli_instance *sh, uint8_t b)
 		sh->len = 0;
 		sh->cur = 0;
 		sh->line[0] = '\0';
-		sh->hist_nav_on = 0;        /* leave history navigation (issue #10) */
+		sh->hist_nav_on = 0;        /* leave history navigation (owhinata/stm32f746g-disco#10) */
 		/* The "^C\r\n" left the cursor on a fresh line; cli_prompt draws the
 		 * prompt there, so set the render baseline to that prompt (NOT 0, or a
 		 * later shortening refresh would skip the clear and leave stale text). */
@@ -559,11 +569,11 @@ void cli_input_byte(struct cli_instance *sh, uint8_t b)
 	case 0x06: op_right(sh); return;                 /* Ctrl+f */
 	case 0x0B: op_kill_eol(sh);  return;             /* Ctrl+k */
 	case 0x0C: op_clear_screen(sh); return;          /* Ctrl+l */
-	case 0x0E: cli_history_next(sh); return;         /* Ctrl+n (#10 ring) */
-	case 0x10: cli_history_prev(sh); return;         /* Ctrl+p (#10 ring) */
+	case 0x0E: cli_history_next(sh); return;         /* Ctrl+n (owhinata/stm32f746g-disco#10 ring) */
+	case 0x10: cli_history_prev(sh); return;         /* Ctrl+p (owhinata/stm32f746g-disco#10 ring) */
 	case 0x15: op_kill_bol(sh);  return;             /* Ctrl+u */
 	case 0x17: op_del_word(sh);  return;             /* Ctrl+w */
-	case 0x09: cli_tab_complete(sh); return;         /* Tab: completion (#11) */
+	case 0x09: cli_tab_complete(sh); return;         /* Tab: completion (owhinata/stm32f746g-disco#11) */
 	case 0x08:                                       /* Backspace */
 		op_backspace(sh);
 		return;

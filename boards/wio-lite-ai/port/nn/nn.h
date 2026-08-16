@@ -4,7 +4,8 @@
  */
 /**
  * @file    nn.h
- * @brief   Backend-agnostic on-device neural-network inference API (issue #9 P1).
+ * @brief   Backend-agnostic on-device neural-network inference API
+ * (owhinata/wio-lite-ai#9 P1).
  *
  * A thin tensor-in / tensor-out abstraction over one selectable inference runtime.
  * Exactly one backend is compiled in per build (CONFIG_NN_BACKEND in CMakeLists.txt):
@@ -159,9 +160,10 @@ int nn_run(struct nn_model *m);
 uint32_t nn_last_cycles(const struct nn_model *m);
 
 /*
- * Runtime model swap (issue #9 phase 2c).  A backend that interprets a model at run
- * time -- `tflm` -- can be handed a different one without reflashing; the `null` stub
- * cannot, and returns NN_ERR_NOSUP from both calls below rather than pretending.
+ * Runtime model swap (owhinata/wio-lite-ai#9 phase 2c).  A backend that interprets a
+ * model at run time -- `tflm` -- can be handed a different one without reflashing; the
+ * `null` stub cannot, and returns NN_ERR_NOSUP from both calls below rather than
+ * pretending.
  *
  * Which model to load and where it comes from are NOT decided here.  This layer is
  * model-agnostic by design, and the answer on this board (a slot in the external NOR

@@ -6,15 +6,16 @@
  * @file    fmt.c
  * @brief   Clean-room minimal printf formatter (callback / fixed-buffer sinks).
  *
- * The formatter that used to live inline in cli_printf.c (issue #5), lifted here
- * (issue #28) behind a putc callback so the shell output API, the RAM log and
- * the fault dump share one implementation.  It streams characters into the sink
- * one at a time (no large intermediate buffer; honours the §8 "flush when full"
- * model when the sink is the shell's 32 B staging).  Supported conversions:
- * %% %c %s %d %i %u %x %X %p, length modifiers l / ll / z, field width with
- * '0' / '-' flags.  No precision, no + / space / # flags.  Clean-room -- neither
- * newlib's nor Zephyr's printf code is reused.  Depends only on the freestanding
- * headers below, never on cli_instance or any tx_* API.
+ * The formatter that used to live inline in cli_printf.c
+ * (owhinata/stm32f746g-disco#5), lifted here (owhinata/stm32f746g-disco#28)
+ * behind a putc callback so the shell output API, the RAM log and the fault dump
+ * share one implementation. It streams characters into the sink one at a time
+ * (no large intermediate buffer; honours the §8 "flush when full" model when the
+ * sink is the shell's 32 B staging). Supported conversions:  %% %c %s %d %i %u
+ * %x %X %p, length modifiers l / ll / z, field width with '0' / '-' flags.  No
+ * precision, no + / space / # flags. Clean-room -- neither newlib's nor Zephyr's
+ * printf code is reused. Depends only on the freestanding headers below, never
+ * on cli_instance or any tx_* API.
  */
 #include <stdarg.h>
 #include <stddef.h>

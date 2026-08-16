@@ -4,7 +4,8 @@
  */
 /**
  * @file    fx_sd_driver.h
- * @brief   FileX media driver on the SDMMC1 block API (issue #34, Epic #32).
+ * @brief   FileX media driver on the SDMMC1 block API
+ * (owhinata/stm32f746g-disco#34, Epic owhinata/stm32f746g-disco#32).
  *
  * Maps FileX driver requests onto sd_card_read/write_blocks().  The SD card has
  * its own wear-leveling FTL, so there is no LevelX layer.  Because PC/camera

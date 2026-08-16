@@ -4,7 +4,7 @@
  */
 /**
  * @file    ltdc_display.c
- * @brief   RK043FN48H LCD bring-up via LTDC (issue #52/#53).
+ * @brief   RK043FN48H LCD bring-up via LTDC (owhinata/stm32f746g-disco#52/#53).
  *
  * See ltdc_display.h for the API contract and the clock/memory rationale.
  * Hardware setup, mirroring the ST BSP (stm32746g_discovery_lcd.c) / RM0385:
@@ -15,8 +15,8 @@
  *     separate PLL, so SYSCLK (216 MHz) and the FMC SDRAM clock (108 MHz) are
  *     untouched.  4.8 MHz is LOWERED from the stock 9.6 MHz (only PLLSAIDIVR
  *     doubled 4 -> 8) to cut the LTDC's continuous SDRAM read pressure and the
- *     DCMI DMA FIFO errors it causes during camera preview (#59; measured -51%
- *     preview FE vs no levers).  NOTE: at 4.8 MHz the line period is 566 clk =
+ *     DCMI DMA FIFO errors it causes during camera preview (owhinata/stm32f746g-disco#59;
+ * measured -51% preview FE vs no levers).  NOTE: at 4.8 MHz the line period is 566 clk =
  *     118 us, well OUTSIDE the RK043FN48H 55..65 us spec (the 480 active px alone
  *     take 100 us), and ~29.6 Hz is below the panel's ~50 Hz floor -- a deliberate
  *     out-of-spec operating point validated on hardware (stable image, no sync
@@ -31,15 +31,15 @@
  *   - One RGB565 layer covering the full 480x272 window, source = the `.sdram`
  *     frame buffers below (two of them, double-buffered).
  *
- * Drawing is DMA2D-accelerated (#53): the Chrom-ART engine does register-to-
- * memory fills (ltdc_dma2d_fill) and memory-to-memory blits (ltdc_dma2d_blit).
+ * Drawing is DMA2D-accelerated (owhinata/stm32f746g-disco#53): the Chrom-ART engine does
+ * register-to- memory fills (ltdc_dma2d_fill) and memory-to-memory blits (ltdc_dma2d_blit).
  * Small transfers are polled to completion; large ones (>= LTDC_DMA2D_IT_MIN_
- * PIXELS) block on a DMA2D completion IRQ instead of spinning the CPU (#64).
- * DMA2D, the CPU and the LTDC read DMA all touch the same MPU non-cacheable
- * `.sdram` region, so they are coherent with no cache work.
+ * PIXELS) block on a DMA2D completion IRQ instead of spinning the CPU
+ * (owhinata/stm32f746g-disco#64).  DMA2D, the CPU and the LTDC read DMA all touch the same
+ * MPU non-cacheable `.sdram` region, so they are coherent with no cache work.
  *
- * Double buffer + tear-free flip (#53): drawing targets the back buffer;
- * ltdc_flip() stages it via HAL_LTDC_SetAddress_NoReload() then HAL_LTDC_Reload
+ * Double buffer + tear-free flip (owhinata/stm32f746g-disco#53): drawing targets the back
+ * buffer;  ltdc_flip() stages it via HAL_LTDC_SetAddress_NoReload() then HAL_LTDC_Reload
  * (VERTICAL_BLANKING) and waits for the hardware reload.  SRCR.VBR is the
  * authoritative signal -- it self-clears only after the HW commits the reload at
  * the next vertical blanking (RM0385 §18.7.6) -- and the reload-ready IRQ
@@ -81,16 +81,25 @@ static uint16_t ltdc_fb[2][LTDC_LCD_WIDTH * LTDC_LCD_HEIGHT]
 static LTDC_HandleTypeDef  hltdc;
 static DMA2D_HandleTypeDef hdma2d;
 
-static uint8_t      ltdc_front;       /* index (0/1) of the displayed buffer  */
-static bool         ltdc_up;          /* init succeeded                       */
-static bool         ltdc_tried;       /* init ran (idempotence latch)         */
-static bool         ltdc_fault;       /* reload stuck -> display latched down */
-static bool         ltdc_gui_owned;   /* GUIX owns the display (#55)          */
-static bool         ltdc_disabled;    /* LTDC scanout stopped (lcd off, #66) */
-static TX_SEMAPHORE ltdc_reload_sem;  /* posted by the reload-ready IRQ       */
-static TX_MUTEX     ltdc_lock;        /* serializes drawing + flip            */
+/* index (0/1) of the displayed buffer */
+static uint8_t      ltdc_front;
+/* init succeeded */
+static bool         ltdc_up;
+/* init ran (idempotence latch) */
+static bool         ltdc_tried;
+/* reload stuck -> display latched down */
+static bool         ltdc_fault;
+/* GUIX owns the display (owhinata/stm32f746g-disco#55) */
+static bool         ltdc_gui_owned;
+/* LTDC scanout stopped (lcd off, owhinata/stm32f746g-disco#66) */
+static bool         ltdc_disabled;
+/* posted by the reload-ready IRQ */
+static TX_SEMAPHORE ltdc_reload_sem;
+/* serializes drawing + flip */
+static TX_MUTEX     ltdc_lock;
 
-/* DMA2D interrupt-driven completion (#64).  The engine is single and serialized
+/* DMA2D interrupt-driven completion (owhinata/stm32f746g-disco#64).  The engine is single and
+   serialized
    on ltdc_lock, so at most one transfer is armed at a time; dma2d_active is the
    handle DMA2D_IRQHandler dispatches to (NULL between transfers), and
    dma2d_done_sem is posted by the transfer-complete/error callback. */
@@ -127,7 +136,8 @@ void ltdc_unlock_frame(void)
 	(void)tx_mutex_put(&ltdc_lock);
 }
 
-/* GUIX ownership (#55).  Set/clear under ltdc_lock so the flag flip is atomic
+/* GUIX ownership (owhinata/stm32f746g-disco#55).  Set/clear under ltdc_lock so the flag flip
+   is atomic
    against an in-flight draw helper: take() cannot complete while a helper holds
    the lock mid-draw, and once owned every public draw/flip path (which re-reads
    ltdc_gui_owned under the same lock) becomes a no-op/refusal. */
@@ -136,7 +146,8 @@ bool ltdc_gui_take(bool on)
 	if (!ltdc_up)               /* lock/objects may not exist yet */
 		return false;
 	ltdc_lock_frame();
-	/* Re-check under the lock: fault and the scanout-disabled flag (#66) are
+	/* Re-check under the lock: fault and the scanout-disabled flag
+    (owhinata/stm32f746g-disco#66) are
 	   both set under ltdc_lock, so the decision cannot race a concurrent flip
 	   or lcd off.  GUIX cannot run/flip with scanout off. */
 	if (ltdc_fault || (on && ltdc_disabled)) {
@@ -148,7 +159,8 @@ bool ltdc_gui_take(bool on)
 	return true;
 }
 
-/* Stop/start LTDC scanout at runtime (#66).  Disabling clears LTDC_GCR.LTDCEN so
+/* Stop/start LTDC scanout at runtime (owhinata/stm32f746g-disco#66).  Disabling clears
+   LTDC_GCR.LTDCEN so
    the controller stops fetching the framebuffer from SDRAM (parks the backlight
    off too); enabling restarts it -- the layer/timing registers are untouched, so
    scanout resumes on the current front buffer.  Refused while GUIX owns the
@@ -194,7 +206,8 @@ bool ltdc_gui_owns(void)
 	return ltdc_gui_owned;
 }
 
-/* Clear BOTH framebuffers to black (issue #65).  Low-level: it writes ltdc_fb
+/* Clear BOTH framebuffers to black (owhinata/stm32f746g-disco#65).  Low-level: it writes
+   ltdc_fb
    directly under ltdc_lock and does NOT go through the scanout-disabled draw
    refusal, so it works while scanout is OFF -- a destructive `sdram test`
    repaints the clobbered .sdram buffers with this before re-enabling scanout.
@@ -240,7 +253,7 @@ uint32_t ltdc_errors(bool clear)
 	return mask;
 }
 
-/* ---- DMA2D interrupt-driven completion (#64) -------------------------------
+/* ---- DMA2D interrupt-driven completion (owhinata/stm32f746g-disco#64) ---------------------
  * Large transfers block on dma2d_done_sem instead of spinning in
  * HAL_DMA2D_PollForTransfer (see ltdc_display.h).  HAL_DMA2D_Start_IT enables
  * TC|TE|CE together but its IRQ handler only disables the bit of the event that
@@ -320,7 +333,8 @@ bool ltdc_dma2d_wait_it(struct __DMA2D_HandleTypeDef *h_, uint32_t timeout_ms)
 
 /* ---- DMA2D (Chrom-ART) draw primitives (ST BSP LL_FillBuffer / -------------
  * LL_ConvertLineToARGB8888 idiom: per-op Init + ConfigLayer + Start + complete
- * (polled for small transfers, interrupt-driven for large ones, #64)). */
+ * (polled for small transfers, interrupt-driven for large ones,
+ * owhinata/stm32f746g-disco#64)). */
 
 /* Expand an RGB565 colour to ARGB8888 (0x00RRGGBB).  R2M fills MUST pass this
    to HAL_DMA2D_Start(): the F7 HAL takes the R2M "color" argument as an
@@ -343,8 +357,8 @@ static uint32_t rgb565_to_argb8888(uint16_t c)
 /* Kick off an already-configured 2-operand DMA2D transfer (R2M fill or M2M blit
    -- both use HAL_DMA2D_Start/_Start_IT with the same signature) and run it to
    completion: interrupt-driven (block) when w*h is large, else polled (spin),
-   per LTDC_DMA2D_IT_MIN_PIXELS (#64).  Returns true on a clean completion.
-   Caller holds ltdc_lock. */
+   per LTDC_DMA2D_IT_MIN_PIXELS (owhinata/stm32f746g-disco#64).  Returns true on a clean
+   completion.  Caller holds ltdc_lock. */
 static bool dma2d_run(uint32_t pdata, uint32_t dst, uint32_t w, uint32_t h)
 {
 	if ((uint64_t)w * h >= LTDC_DMA2D_IT_MIN_PIXELS) {
@@ -403,7 +417,8 @@ static void ltdc_dma2d_blit(uint16_t *dst, const uint16_t *src, uint32_t w,
 		                w, h);
 }
 
-/* PLLSAI -> LCD_CLK = 4.8 MHz (#59; see file header / RM0385 §5.3.24/25).
+/* PLLSAI -> LCD_CLK = 4.8 MHz (owhinata/stm32f746g-disco#59; see file header / RM0385
+   §5.3.24/25).
    VCO_in 1 MHz * PLLSAIN(192) = 192 MHz (100..432 range) / PLLSAIR(5) = 38.4 MHz
    / PLLSAIDIVR(8) = 4.8 MHz (~29.6 Hz).  Out-of-spec on purpose (validated on
    hardware); in-spec fallback PLLSAIN=176, R=5, DIVR=4 (-> 8.8 MHz / ~54 Hz). */
@@ -549,7 +564,8 @@ int ltdc_init(void)
 		tx_semaphore_delete(&ltdc_reload_sem);
 		return LTDC_ERR_STATE;
 	}
-	/* DMA2D completion semaphore (#64): posted by DMA2D_IRQHandler so a large
+	/* DMA2D completion semaphore (owhinata/stm32f746g-disco#64): posted by DMA2D_IRQHandler so a
+    large
 	   transfer's caller blocks instead of spinning HAL_DMA2D_PollForTransfer. */
 	if (tx_semaphore_create(&dma2d_done_sem, "dma2d", 0) != TX_SUCCESS) {
 		LOG_ERR("dma2d completion semaphore create failed");
@@ -590,7 +606,8 @@ int ltdc_init(void)
 	HAL_NVIC_SetPriority(LTDC_IRQn, 9, 0);
 	HAL_NVIC_EnableIRQ(LTDC_IRQn);
 
-	/* DMA2D completion IRQ (#64): priority 10, below DCMI/DMA2 (8) and LTDC (9)
+	/* DMA2D completion IRQ (owhinata/stm32f746g-disco#64): priority 10, below DCMI/DMA2 (8) and
+    LTDC (9)
 	   so it never preempts the camera DMA -- completion notification is not
 	   latency-critical, it just wakes the blocked draw thread.  Only armed
 	   transiently by HAL_DMA2D_Start_IT (ltdc_dma2d_arm_it); idle otherwise.
@@ -801,7 +818,8 @@ static int ltdc_flip_locked(void)
 	if (!ltdc_up || ltdc_fault)
 		return LTDC_ERR_STATE;
 	if (ltdc_disabled)
-		return LTDC_ERR_STATE;   /* scanout off (#66): no VBR reload would come */
+		/* scanout off (owhinata/stm32f746g-disco#66): no VBR reload would come */
+		return LTDC_ERR_STATE;
 
 	back = (uint8_t)!ltdc_front;
 
@@ -816,8 +834,8 @@ static int ltdc_flip_locked(void)
 	(void)HAL_LTDC_Reload(&hltdc, LTDC_RELOAD_VERTICAL_BLANKING);
 
 	/* Wake-up hint (the IRQ posts on reload-ready); the truth is VBR below.
-	   A frame is ~33.7 ms (~29.6 Hz @ 4.8 MHz, #59), so 100 ms is still several
-	   frames of slack. */
+	   A frame is ~33.7 ms (~29.6 Hz @ 4.8 MHz, owhinata/stm32f746g-disco#59), so 100 ms is still
+	   several frames of slack. */
 	(void)tx_semaphore_get(&ltdc_reload_sem, 100);
 
 	/* Authoritative confirmation: wait (up to ~100 ms total) for the hardware
@@ -894,7 +912,7 @@ void HAL_LTDC_ReloadEventCallback(LTDC_HandleTypeDef *hltdc_cb)
 		(void)tx_semaphore_put(&ltdc_reload_sem);
 }
 
-/* ---- DMA2D completion IRQ (#64; armed transiently by HAL_DMA2D_Start_IT). ----
+/* ---- DMA2D completion IRQ (owhinata/stm32f746g-disco#64; armed transiently by HAL_DMA2D_Start_IT). ---
  * Dispatches to the in-flight handle.  Between transfers dma2d_active is NULL
  * (ltdc_dma2d_disarm_it); a DMA2D IRQ taken then is a late/stale completion from
  * a just-disarmed transfer (e.g. a timeout that finished right as we tore down)

@@ -12,9 +12,9 @@
  * sees plain text and the output path stays byte-for-byte identical minus the
  * escapes.
  *
- * The cursor/erase control sequences (issue #9 line editor) are a *separate*
- * group that is NOT gated by CLI_USE_COLOR -- they carry editing semantics, not
- * decoration, so they are always emitted.  Numeric cursor moves (ESC[<n>A/B/C)
+ * The cursor/erase control sequences (owhinata/stm32f746g-disco#9 line editor) are a
+ * *separate* group that is NOT gated by CLI_USE_COLOR -- they carry editing semantics,
+ * not decoration, so they are always emitted.  Numeric cursor moves (ESC[<n>A/B/C)
  * are built at run time in cli_edit.c; only the parameter-less sequences live
  * here.  Only a handful of well-known sequences -- this is original, not copied.
  */
@@ -35,12 +35,13 @@
 #define CLI_VT100_RESET   ""
 #endif
 
-/* Cursor / erase control (always emitted, issue #9). */
+/* Cursor / erase control (always emitted, owhinata/stm32f746g-disco#9). */
 #define CLI_VT100_CLR_LINE   "\x1b[2K"          /**< erase the whole current line */
 #define CLI_VT100_CLR_EOS    "\x1b[0J"          /**< erase from cursor to end of screen */
 #define CLI_VT100_CLR_SCREEN "\x1b[2J\x1b[H"    /**< clear screen + home (Ctrl+l) */
 /* Width probe: jump far right, then request a cursor-position report (CPR).  The
- * reply ESC[<rows>;<cols>R reports cols = terminal width (issue #9, §2 wrap). */
+ * reply ESC[<rows>;<cols>R reports cols = terminal width (owhinata/stm32f746g-disco#9,
+ * §2 wrap). */
 #define CLI_VT100_CPR_PROBE  "\x1b[999C\x1b[6n"
 
 #endif /* CLI_VT100_H */

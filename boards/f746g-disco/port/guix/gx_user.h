@@ -4,7 +4,8 @@
  */
 /**
  * @file    gx_user.h
- * @brief   GUIX build configuration for STM32F746G-DISCO (issue #55, Epic #48).
+ * @brief   GUIX build configuration for STM32F746G-DISCO
+ * (owhinata/stm32f746g-disco#55, Epic owhinata/stm32f746g-disco#48).
  *
  * Pulled in by gx_port.h when GX_INCLUDE_USER_DEFINE_FILE is defined (set for
  * the `threadx` target in CMakeLists.txt), exactly like port/filex/fx_user.h
@@ -26,8 +27,9 @@
 
 /*
  * GUIX system thread stack.  Widget-tree traversal plus glyph rendering nests a
- * fair bit.  Measured high-water-mark is 896 B (`thread` peak, #93), so 4 KiB
- * (== GUIX's own default) keeps ~4.6x margin -- down from the initial 8 KiB.
+ * fair bit.  Measured high-water-mark is 896 B (`thread` peak,
+ * owhinata/stm32f746g-disco#93), so 4 KiB (== GUIX's own default) keeps ~4.6x
+ * margin -- down from the initial 8 KiB.
  */
 #define GX_THREAD_STACK_SIZE        4096
 

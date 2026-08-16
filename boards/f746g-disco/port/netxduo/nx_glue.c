@@ -4,7 +4,8 @@
  */
 /**
  * @file    nx_glue.c
- * @brief   NetX Duo IPv4 bring-up + diagnostics facade (issue #49 P2).  See nx_glue.h.
+ * @brief   NetX Duo IPv4 bring-up + diagnostics facade (owhinata/stm32f746g-disco#49
+ * P2). See nx_glue.h.
  *
  * The single packet pool lives in `.sdram.eth` (FMC bank2, MPU non-cacheable):
  * the new HAL_ETH does no D-cache maintenance, so every DMA-visible payload --

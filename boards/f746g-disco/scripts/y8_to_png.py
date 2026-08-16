@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 ThreadX Shell Project
-"""Convert a raw Y8 greyscale frame captured by `camera save` to PNG (issue #45).
+"""Convert a raw Y8 greyscale frame captured by `camera save` to PNG
+(owhinata/stm32f746g-disco#45).
 
 The OV5640 Y8 mode emits one luma byte per pixel; the firmware writes it raw,
 width*height bytes.  This maps directly to an 8-bit greyscale PNG.

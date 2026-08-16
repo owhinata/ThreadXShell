@@ -11,7 +11,7 @@
 # (ldscript/STM32H725AEIx_IROM.ld) provides on hardware.  No firmware build is
 # involved -- this runs on the build host, not the board.
 #
-# svc/ymodem.c came over with issue #19 M4 (the RTL8720DN flash backup streams
+# svc/ymodem.c came over with owhinata/wio-lite-ai#19 M4 (the RTL8720DN flash backup streams
 # over the console with YMODEM), so its test is ported too.  (The donor's
 # frame_pipeline test covers a camera module that has no counterpart here.)
 #
@@ -193,8 +193,8 @@ gcc $CFLAGS -DCLI_USE_COLOR=0 -DCLI_CMD_BUFFER_SIZE=8 -DTEST_COMPLETE_SMALL_BUF 
     $LDFLAGS -o "$out/test_complete_smallbuf"
 "$out/test_complete_smallbuf"
 
-# #19 M4 -- clean-room YMODEM-CRC sender (svc/ymodem.c): CRC-16/CCITT vectors, block
-# framing (block 0 name+size, STX/SOH, 0x1A short-block padding, seq/~seq, CRC),
+# owhinata/wio-lite-ai#19 M4 -- clean-room YMODEM-CRC sender (svc/ymodem.c): CRC-16/CCITT
+# vectors, block framing (block 0 name+size, STX/SOH, 0x1A short-block padding, seq/~seq, CRC),
 # NAK resend, CAN abort + teardown, seq wrap mod 256, and a 1-byte-at-a-time
 # source filling full blocks.  Pure svc layer -- HAL/ThreadX/shell-free, so it
 # builds with the host gcc and needs only the svc include dir for the header.
@@ -203,8 +203,8 @@ gcc $CFLAGS -I "$svc" \
     $LDFLAGS -o "$out/test_ymodem"
 "$out/test_ymodem"
 
-# #19 M5 -- the YMODEM RECEIVER (ymodem_recv), which is what lets the board take a
-# firmware image FROM the PC (and therefore what makes the stock backup restorable).
+# owhinata/wio-lite-ai#19 M5 -- the YMODEM RECEIVER (ymodem_recv), which is what lets the board
+# take a firmware image FROM the PC (and therefore what makes the stock backup restorable).
 # Two harnesses: a pthread duplex loopback that runs ymodem_send() and ymodem_recv()
 # against each other through blocking FIFOs -- the only way to exercise the real
 # handshake, since the sender only advances on the receiver's 'C'/ACKs -- and scripted
@@ -215,8 +215,8 @@ gcc $CFLAGS -I "$svc" \
     $LDFLAGS -pthread -o "$out/test_ymodem_recv"
 "$out/test_ymodem_recv"
 
-# issue #8 phase 3a -- camera frame pipeline core (svc/frame_pipeline.c): ring slot
-# acquire/publish, refcount pin/put, DROP/LATEST policy + pending transfer, detach
+# owhinata/wio-lite-ai#8 phase 3a -- camera frame pipeline core (svc/frame_pipeline.c): ring
+# slot acquire/publish, refcount pin/put, DROP/LATEST policy + pending transfer, detach
 # in-flight count, read_latest generation, and an N=4 ring cycling under a counting
 # sink.  Pure svc layer -- HAL/ThreadX/shell-free, and the mutual exclusion it needs
 # is injected (struct frame_os), so the whole engine runs on the host with a no-op

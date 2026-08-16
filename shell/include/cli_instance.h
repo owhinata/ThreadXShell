@@ -40,25 +40,25 @@ extern "C" {
 #define CLI_EVT_RX    0x1u   /**< RX data available (set by the backend / ISR) */
 #define CLI_EVT_TX    0x2u   /**< TX space freed: the backend sets it after a short
                               *   write() has room again, and cli_tx_send_blocking()
-                              *   suspends on it (issue #5 flow control).  Every backend
+                              *   suspends on it (owhinata/wio-lite-ai#5 flow control).  Every backend
                               *   OWES this after refusing bytes -- a path that can refuse
                               *   without ever setting it makes the core wait out its
-                              *   deadline and DROP the rest of the output (issue #48). */
+                              *   deadline and DROP the rest of the output (owhinata/wio-lite-ai#48). */
 #define CLI_EVT_KILL  0x4u   /**< request the thread to stop (full stop is future) */
 #define CLI_EVT_CONN  0x8u   /**< a transport (re)connected: begin a fresh session
-                              *   (issue #49 P4 -- the TCP backend posts this on
+                              *   (owhinata/stm32f746g-disco#49 P4 -- the TCP backend posts this on
                               *   accept so the instance thread resets the editor
                               *   state and redraws the prompt; never set for a
                               *   persistent transport like the UART). */
 
-/* Cooperative Ctrl+C cancel (issue #16) deliberately adds NO new event-flag bit:
+/* Cooperative Ctrl+C cancel (owhinata/stm32f746g-disco#16) deliberately adds NO new event-flag bit:
  * the wake source for an in-flight command is the existing CLI_EVT_RX (the ISR
  * already sets it on every received byte).  The cancel STATE lives in
  * struct cli_instance::cancel_req; the 0x03 is detected in thread context by
  * draining the rx_ring (cli_cancel_poll), which keeps the backend a dumb byte
  * pipe (no 0x03 semantics in the ISR/backend). */
 
-/* RX byte state machine (cli_edit.c, issue #9).  ESC begins an escape sequence;
+/* RX byte state machine (cli_edit.c, owhinata/stm32f746g-disco#9).  ESC begins an escape sequence;
  * '[' enters CSI (parameter-accumulating: arrows / Home / End / Del / Insert /
  * the CPR width report), 'O' enters SS3 (application-mode arrows), and a bare
  * 'b'/'f' is Alt+word-move.  Unknown / malformed sequences fall back to NORMAL
@@ -83,7 +83,7 @@ struct cli_transport;
  * Backend transport interface.  The core talks to hardware only through this.
  * init/enable/write/read are mandatory; uninit/update may be NULL.
  *
- * write (#5 contract): NON-blocking.  Enqueue up to @p len bytes into the
+ * write (owhinata/stm32f746g-disco#5 contract): NON-blocking.  Enqueue up to @p len bytes into the
  * backend TX buffer and return the count actually accepted (0..len), or <0 on
  * error.  It must NOT block.  If it accepts fewer than @p len (TX full), the
  * backend is obliged to fire cli_transport_notify_tx() once space frees again --
@@ -103,7 +103,7 @@ struct cli_transport_api {
 	 * connection-oriented backend enable its output for the new session (the TCP
 	 * backend sets `connected` here so the fresh prompt is the first thing the new
 	 * client sees, and a previous command's output that drained after a reconnect
-	 * is dropped -- see issue #49 P4).  Never invoked for a persistent transport. */
+	 * is dropped -- see owhinata/stm32f746g-disco#49 P4).  Never invoked for a persistent transport. */
 	void (*session_begin)(struct cli_transport *tr);
 	/*
 	 * Optional (NULL ok): "that was a complete unit of output".  The core calls it
@@ -114,7 +114,7 @@ struct cli_transport_api {
 	 * same unit is coming: the core stages in CLI_PRINTF_BUFFER_SIZE chunks, so a
 	 * backend that transmits on every write() splits one redraw across several
 	 * packets.  Over TCP that cost a peer ACK per chunk and made the telnet console
-	 * sluggish (issue #49); with this, the same redraw leaves as one segment and
+	 * sluggish (owhinata/wio-lite-ai#49); with this, the same redraw leaves as one segment and
 	 * NOTHING is delayed to achieve it -- the boundary is already known.
 	 *
 	 * Called on EVERY release, nested ones included, because a missed flush is a
@@ -139,7 +139,7 @@ struct cli_transport {
 	 * legitimately take to free space.  For a ring drained by a local thread that
 	 * is microseconds; for the telnet console (app/net_shell.c) recovery can mean
 	 * a TCP retransmit, so a deadline shorter than the RTO turns one lost segment
-	 * into a truncated report -- issue #48.  A background job inherits it for free,
+	 * into a truncated report -- owhinata/wio-lite-ai#48.  A background job inherits it for free,
 	 * because cli_job.c aliases the worker's tr to the foreground's.
 	 */
 	ULONG                           tx_timeout;
@@ -155,26 +155,26 @@ struct cli_instance {
 	/* ThreadX primitives (created by cli_init / cli_start). */
 	TX_THREAD            thread;
 	TX_EVENT_FLAGS_GROUP events;
-	TX_MUTEX             tx_lock;     /**< created TX_INHERIT; reserved for #5 locked output */
+	TX_MUTEX             tx_lock;     /**< created TX_INHERIT; reserved for owhinata/stm32f746g-disco#5 locked output */
 	UCHAR               *stack;       /**< thread stack base (from CLI_INSTANCE_DEFINE) */
 	ULONG                stack_size;
 
 	struct cli_transport *tr;
 
-	/* Background job link (issue #25).  NULL for an interactive instance; for a
+	/* Background job link (owhinata/stm32f746g-disco#25).  NULL for an interactive instance; for a
 	 * bg-job worker instance it points at the launching foreground shell.  When
 	 * set, the output path (cli_lock / cli_tx_send_blocking TX-wait) targets the
 	 * FOREGROUND's tx_lock + transport so bg output serialises against the fg
 	 * line editor; cancel is kill-driven (the worker never drains the shared RX). */
 	struct cli_instance *fg;
 
-	/* Line input + cursor (issue #9: cur is split out from len for in-line edit). */
+	/* Line input + cursor (owhinata/stm32f746g-disco#9: cur is split out from len for in-line edit). */
 	char     line[CLI_CMD_BUFFER_SIZE];
 	uint16_t len;                    /**< chars in line[]; line[len] kept NUL */
 	uint16_t cur;                    /**< cursor index, 0..len (insert point) */
 	uint8_t  overwrite;              /**< 0=insert (default), 1=overwrite; Insert key toggles */
 
-	/* Command history: fixed byte ring (issue #10, req §8).  Entries are packed
+	/* Command history: fixed byte ring (owhinata/stm32f746g-disco#10, req §8).  Entries are packed
 	 * oldest->newest in hist[0..hist_used), each '\0'-terminated.  Adding a line
 	 * evicts the oldest entries FIFO until the new one fits; no dynamic
 	 * allocation.  All state is per-instance, so histories never cross (req §10). */
@@ -183,47 +183,47 @@ struct cli_instance {
 	uint8_t  hist_nav_on;            /**< 1 = recalling a history entry; 0 = on the live line */
 	uint16_t hist_nav;               /**< offset in hist[] of the entry currently recalled */
 
-	/* Per-instance parser scratch (sized by #3's CLI_ARGV_CAP). */
+	/* Per-instance parser scratch (sized by owhinata/stm32f746g-disco#3's CLI_ARGV_CAP). */
 	char                  *argv[CLI_ARGV_CAP];
 	struct cli_parse_result pr;
 
-	/* RX state machine + escape parsing (issue #9). */
+	/* RX state machine + escape parsing (owhinata/stm32f746g-disco#9). */
 	enum cli_rx_state rx;
 	uint8_t           prev_cr;       /**< last byte was CR: swallow a following LF */
 	uint16_t          esc_p[2];      /**< CSI numeric params (e.g. ESC[3~, ESC[r;cR) */
 	uint8_t           esc_np;        /**< number of params seen (0..2) */
 	uint8_t           esc_bad;       /**< current CSI had >2 params / extra ';' (reject CPR) */
 
-	/* Terminal / line-editor render state (issue #9). */
+	/* Terminal / line-editor render state (owhinata/stm32f746g-disco#9). */
 	uint8_t  bs_swap;                /**< backspace mode: 1 makes DEL (0x7F) delete forward */
 	uint8_t  term_width;             /**< columns; CLI_TERM_WIDTH until a CPR updates it */
 	uint8_t  old_rows;               /**< physical rows the last render occupied (0 = none) */
 	uint8_t  draw_row;               /**< row of the physical cursor within the render (0-based) */
 	uint8_t  probing_cpr;            /**< a width probe (ESC[6n) is awaiting its CPR reply */
-	uint8_t  tab_list_armed;         /**< Tab completion (issue #11): 1 = next Tab lists candidates;
+	uint8_t  tab_list_armed;         /**< Tab completion (owhinata/stm32f746g-disco#11): 1 = next Tab lists candidates;
 	                                  *   set after an LCP-only extend or a no-extend first Tab,
 	                                  *   reset by any non-Tab byte (bash-style two-stage). */
-	volatile uint8_t render_dirty;   /**< issue #25: bg output broke this instance's input-line
+	volatile uint8_t render_dirty;   /**< owhinata/stm32f746g-disco#25: bg output broke this instance's input-line
 	                                  *   render (old_rows/draw_row reset to 0 under tx_lock); the
 	                                  *   fg thread repaints prompt+line in cli_input_byte() BEFORE
 	                                  *   the next byte (incl. the fast-append path) and clears it. */
 
 	char prompt[CLI_PROMPT_BUFFER_SIZE];
 
-	/* Output staging + flow control (#5). */
+	/* Output staging + flow control (owhinata/stm32f746g-disco#5). */
 	char     out_buf[CLI_PRINTF_BUFFER_SIZE]; /**< staging buffer; flushed when full */
 	uint16_t out_len;
 	uint8_t  tx_failed;              /**< output dropped this command (TX timeout); reset each dispatch */
-	uint8_t  dispatching;            /**< 1 while a command handler runs (issue #16): gates the
+	uint8_t  dispatching;            /**< 1 while a command handler runs (owhinata/stm32f746g-disco#16): gates the
 	                                  *   cooperative Ctrl+C cancel paths (TX-blocked RX wake, fast-fail)
 	                                  *   so the post-cancel ^C/prompt cleanup is never suppressed */
 	volatile uint8_t cancel_req;     /**< sticky: a 0x03 (Ctrl+C) was seen during the running command
-	                                  *   (issue #16); set by cli_cancel_poll, cleared each dispatch */
+	                                  *   (owhinata/stm32f746g-disco#16); set by cli_cancel_poll, cleared each dispatch */
 
 	enum cli_state state;
 	int            last_result;      /**< return value of the most recent command */
-	uint32_t       rx_dropped;       /**< RX-overflow drop count (incremented in #7) */
-	uint32_t       tx_dropped;       /**< bytes dropped on TX timeout (#5) */
+	uint32_t       rx_dropped;       /**< RX-overflow drop count (incremented in owhinata/stm32f746g-disco#7) */
+	uint32_t       tx_dropped;       /**< bytes dropped on TX timeout (owhinata/stm32f746g-disco#5) */
 };
 
 /**
@@ -233,7 +233,7 @@ struct cli_instance {
  * state is zero-initialised, i.e. CLI_UNINIT, until cli_init().
  *
  * Enforcing CLI_MAX_INSTANCES at build time happens where instances are
- * collected for startup (issues #6/#8), not here.
+ * collected for startup (owhinata/stm32f746g-disco#6/#8), not here.
  */
 #define CLI_INSTANCE_DEFINE(_name, _transport_ptr, _prompt_str)              \
 	_Static_assert(sizeof(_prompt_str) <= CLI_PROMPT_BUFFER_SIZE,        \
@@ -259,14 +259,16 @@ int  cli_start(struct cli_instance *sh);
  * including from ISR context, to wake the instance thread.  They only set an
  * event flag -- never take a lock or touch the line state (requirements §10). */
 void cli_transport_notify_rx(struct cli_instance *sh);
-void cli_transport_notify_tx(struct cli_instance *sh);   /* reserved for #5 */
-void cli_transport_notify_conn(struct cli_instance *sh); /* issue #49 P4: (re)connect -> fresh session */
+/* reserved for owhinata/stm32f746g-disco#5 */
+void cli_transport_notify_tx(struct cli_instance *sh);
+/* owhinata/stm32f746g-disco#49 P4: (re)connect -> fresh session */
+void cli_transport_notify_conn(struct cli_instance *sh);
 
-/* Thread->instance registry (#18).  Lets a backend's printf retarget (_write)
+/* Thread->instance registry (owhinata/stm32f746g-disco#18).  Lets a backend's printf retarget (_write)
  * resolve which shell instance owns the running thread, so printf follows the
  * calling terminal instead of a single global console.  cli_start() registers
  * its own instance thread before creating it; future background-job workers
- * (#25) register their worker thread against the owning instance the same way
+ * (owhinata/stm32f746g-disco#25) register their worker thread against the owning instance the same way
  * (register BEFORE tx_thread_create so an auto-started thread is never seen
  * unregistered).  cli_register_thread returns 0 on success, -1 when the table
  * is full (caller must treat that as a failure, never silently continue --
@@ -276,7 +278,7 @@ int                  cli_register_thread(TX_THREAD *t, struct cli_instance *sh);
 void                 cli_unregister_thread(TX_THREAD *t);
 struct cli_instance *cli_current_instance(void);
 
-/* Background jobs (#25, cli_job.c).  `cmd &` runs the command in a worker thread
+/* Background jobs (owhinata/stm32f746g-disco#25, cli_job.c).  `cmd &` runs the command in a worker thread
  * drawn from a fixed static pool.  cli_job_pool_init() creates the pool's event
  * groups once at boot (call after the interactive instances start).  The other
  * entry points run on the foreground thread: cli_job_launch() spawns a worker

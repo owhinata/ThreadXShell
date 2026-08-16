@@ -4,7 +4,7 @@
  */
 /**
  * @file    fx_sd_driver.h
- * @brief   FileX media driver on the SDMMC1 block API (issue #6).
+ * @brief   FileX media driver on the SDMMC1 block API (owhinata/wio-lite-ai#6).
  *
  * Maps FileX driver requests onto sd_card_read/write_blocks().  The SD card has
  * its own wear-levelling FTL, so there is no LevelX layer.  Because PC and camera

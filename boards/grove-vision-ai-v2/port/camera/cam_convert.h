@@ -38,7 +38,7 @@ extern "C" {
  * Per-channel gain, in 1/256ths.  CAM_WB_UNITY (256) leaves a channel alone.
  *
  * This is a WHITE BALANCE, and it is in software because there is nowhere else
- * for it: this datapath has no automatic white balance and the IMX219 exposes
+ * for it: this datapath has no automatic white balance and the sensor exposes
  * no per-channel gain registers -- only a global analogue and a global digital
  * one, which move all three together and so cannot correct a cast.
  *
@@ -196,12 +196,12 @@ uint32_t cam_plane_mosaic_x100(const uint8_t *plane, uint32_t w, uint32_t h);
 /**
  * @brief  Mean of each plane, x100, over a subsampled grid.
  *
- * For the auto exposure and white balance loops, which run once per frame on
- * the producer thread and must not cost a frame's worth of time to do it.
+ * For the white balance loop, which runs once per frame on the producer thread
+ * and must not cost a frame's worth of time to do it.
  *
  * @param step  sample every @p step'th pixel (1 = all of them).  16 reads 4,800
- *              pixels of a 320x240 frame, which is far more than either loop
- *              needs -- both are steering a damped control law, not measuring
+ *              pixels of a 320x240 frame, which is far more than the loop
+ *              needs -- it is steering a damped control law, not measuring
  *              anything that has to be exact.
  * @param out   three means: B, G, R, in the buffer's own plane order
  */

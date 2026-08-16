@@ -256,9 +256,14 @@
    MPU / キャッシュ属性は firmware で decode せず**生レジスタをダンプ**する
    （継承状態で TRM も無い。SRAM 行を cacheable と断定しない）。
 
-8f. **grove-vision-ai-v2: カメラ（IMX219 / #35）。**
-   データパスは固定（3280x2464 RAW10 2 lane → INP crop 3200x2400 → 10:2 binning →
-   4:2 subsample → 320x240 → HW5x5 demosaic BGGR → WDMA3）。
+8f. **grove-vision-ai-v2: カメラ（OV5647 / #35, #54）。**
+   データパスは固定（640x480 RAW10 2 lane（センサ側でビニング済み）→ INP crop 無し →
+   4:2 binning → 320x240 → HW5x5 demosaic BGGR → WDMA3）。
+   **IMX219 は #54 で削除済み**。ソフト自動露出（`cam_ae_step`）・`camera depth`・
+   frame_lines 引数（0x0160/0x0161）も一緒に消えた。`camera auto` は
+   **センサのオンチップ AEC + このポートのソフト WB**。
+   センサ記述子の関数ポインタ seam は 1 エントリでも維持する
+   （register map は部品ごとに全く違い、SCCB は未実装レジスタも ACK するため）。
    **WDMA3 出力はプレーナ B/G/R**（インタリーブ RGB565 ではない。HXCSC は入力
    アンパッカーであってパッカーではない）。パックはソフト
    （`port/camera/cam_convert.c`、`-fno-tree-vectorize`）。
@@ -301,7 +306,7 @@
      （`test/test_timer_probe.c`、probe はラッチするので 2 プロセス）。
    - **4 つの `__wrap_hx_drv_timer_*` は `noipa`**。`check_timer_seam.py` が名前で
      逆アセンブルを検査するので、`.part.0` に分割されるとゲートが空振りする。
-   - SDK ツリーは read-only。IMX219 のモードテーブル `.i` は**コピーせず SDK から
+   - SDK ツリーは read-only。センサのモードテーブル `.i` は**コピーせず SDK から
      include** する（pin した SHA に紐付けるため）。
 
 9. **ビルドは `_ref/` を読まない。** `_ref/`（および `../*/_ref/`）は git 管理外の資料置き場。

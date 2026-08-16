@@ -49,7 +49,7 @@ HAL/CMSIS/ThreadX 等は upstream ミラー submodule、ARM GNU ツールチェ�
 Grove Vision AI V2（3 枚目、初の非 STM32。完了）:
 
 - M-G1 = bring-up（#22）→ M-G2 = CoreMark / membench / thread cpu% / WFI（#25）→
-  M-G3a = SPI LCD（#30）→ M-G3b = IMX219 カメラ（#35）→
+  M-G3a = SPI LCD（#30）→ M-G3b = カメラ（#35）→
   M-G3c = Ethos-U55 推論（#44 / #45 / #46 / #48）。
 
 ビルドは `-DBOARD=<board>` で 1 ビルドディレクトリ = 1 ボード（既定なし）。ボードごとの
@@ -389,9 +389,12 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   — TCM は DMA から見えない（スタックも .rodata も不可）。**fps は完了条件にしない**。
   GPIO は **PL061 系**（`+0x000`〜`+0x3FC` はアドレスがビットマスクのデータレジスタ、
   方向は `+0x400`）。詳細は board README。
-- **カメラ**（IMX219 / MIPI CSI、M-G3b / #35）: データパスは固定
-  （3280x2464 RAW10 2 lane → INP crop → 10:2 binning → 4:2 subsample → 320x240 →
-  HW5x5 demosaic BGGR → WDMA3。`tflm_yolov8_od` の出荷構成）。
+- **カメラ**（OV5647 / MIPI CSI、M-G3b / #35）: データパスは固定
+  （640x480 RAW10 2 lane（センサ側でビニング済み）→ INP crop 無し → 4:2 binning →
+  320x240 → HW5x5 demosaic BGGR → WDMA3。donor の OV5647 出荷構成）。
+  **IMX219 は #54 で削除**。ソフト自動露出（`cam_ae_step`）・`camera depth`・
+  `camera exposure` の frame_lines 引数も一緒に消えた。`camera auto` は
+  **センサのオンチップ AEC + このポートのソフト WB** の意味。
   **WDMA3 はプレーナ B/G/R で、パックはソフト**（HXCSC は入力アンパッカー）。
   **[!] DMA が触るバッファは TCM 不可**（`.cam_raw` / `.cam_slots` は SRAM NOLOAD、
   placement gate が pin）。**WDMA3 は frame-ready 後・読取前に全長 invalidate**

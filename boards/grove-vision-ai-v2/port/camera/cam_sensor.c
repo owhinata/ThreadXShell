@@ -44,7 +44,7 @@
  *
  * [!] These are a SHADOW, and on this part they are not the truth on their own:
  * the OV5647's on-chip AEC moves the real exposure without telling anyone, so
- * cam_imx219_refresh_exposure_gains() is what makes them mean anything.
+ * cam_sensor_refresh_exposure_gains() is what makes them mean anything.
  */
 static uint16_t cam_exposure;
 static uint8_t  cam_again;
@@ -65,8 +65,8 @@ static const struct cam_sensor_desc *sens = cam_sensors[0];
 
 const struct cam_sensor_desc *cam_sensor_current(void) { return sens; }
 
-const char *cam_imx219_sensor_name(void) { return sens->name; }
-uint16_t cam_imx219_sensor_id(void)      { return sens->id_value; }
+const char *cam_sensor_name(void) { return sens->name; }
+uint16_t cam_sensor_id(void)      { return sens->id_value; }
 
 /* ---- helpers ------------------------------------------------------------- */
 
@@ -82,7 +82,7 @@ int cam_sensor_write_table(HX_CIS_SensorSetting_t *tbl, uint16_t n,
 
 /* ---- power / identity ---------------------------------------------------- */
 
-int cam_imx219_power_on(void)
+int cam_sensor_power_on(void)
 {
 	if (hx_drv_cis_init((CIS_XHSHUTDOWN_INDEX_E)CAM_XSHUTDOWN_PIN,
 	                    SENSORCTRL_MCLK_DIV3) != HX_CIS_NO_ERROR) {
@@ -107,7 +107,7 @@ int cam_imx219_power_on(void)
 	/* Which part is actually in the connector decides the geometry, the
 	 * link rate and the register tables, so it has to be settled before
 	 * anything else is programmed. */
-	if (cam_imx219_detect() != 0)
+	if (cam_sensor_detect() != 0)
 		return -1;
 	if (hx_drv_cis_set_slaveID(sens->i2c_id) != HX_CIS_NO_ERROR) {
 		LOG_ERR("hx_drv_cis_set_slaveID(0x%02X) failed", sens->i2c_id);
@@ -121,7 +121,7 @@ int cam_imx219_power_on(void)
 	return 0;
 }
 
-void cam_imx219_power_off(void)
+void cam_sensor_power_off(void)
 {
 	(void)hx_drv_gpio_set_out_value(CAM_ENABLE_GPIO, GPIO_OUT_LOW);
 }
@@ -140,7 +140,7 @@ static int read_id_of(const struct cam_sensor_desc *d, uint16_t *id)
 	return 0;
 }
 
-int cam_imx219_read_id(uint16_t *id)
+int cam_sensor_read_id(uint16_t *id)
 {
 	if (id == NULL)
 		return -1;
@@ -159,7 +159,7 @@ int cam_imx219_read_id(uint16_t *id)
  * flash cycle to swap camera, on a part whose NOR is rated ~100k of them, to
  * discover something the sensor will simply tell you.
  */
-int cam_imx219_detect(void)
+int cam_sensor_detect(void)
 {
 	uint32_t i;
 
@@ -187,7 +187,7 @@ int cam_imx219_detect(void)
 	return -1;
 }
 
-int cam_imx219_sensor_init(void)
+int cam_sensor_init(void)
 {
 	/* Stream off first: the mode table is not safe to apply to a streaming
 	 * sensor, and the module may still be streaming from a previous run
@@ -210,7 +210,7 @@ int cam_imx219_sensor_init(void)
 	return 0;
 }
 
-int cam_imx219_refresh_exposure_gains(void)
+int cam_sensor_refresh_exposure_gains(void)
 {
 	uint16_t lines = cam_exposure;
 	uint8_t again = cam_again;
@@ -224,7 +224,7 @@ int cam_imx219_refresh_exposure_gains(void)
 	return 0;
 }
 
-int cam_imx219_set_exposure(uint16_t lines)
+int cam_sensor_set_exposure(uint16_t lines)
 {
 	if (sens->set_exposure == NULL)
 		return -1;
@@ -234,7 +234,7 @@ int cam_imx219_set_exposure(uint16_t lines)
 	return 0;
 }
 
-int cam_imx219_set_gains(uint8_t again, uint16_t dgain)
+int cam_sensor_set_gains(uint8_t again, uint16_t dgain)
 {
 	if (sens->set_gains == NULL)
 		return -1;
@@ -245,7 +245,7 @@ int cam_imx219_set_gains(uint8_t again, uint16_t dgain)
 	return 0;
 }
 
-int cam_imx219_set_sensor_auto(int on)
+int cam_sensor_set_auto(int on)
 {
 	/* A part with no on-chip AEC/AGC has nothing to hand the sensor half to,
 	 * so both directions are already satisfied and reporting a failure would
@@ -255,7 +255,7 @@ int cam_imx219_set_sensor_auto(int on)
 	return sens->set_auto(on);
 }
 
-void cam_imx219_get_exposure_gains(uint16_t *lines, uint8_t *again,
+void cam_sensor_get_exposure_gains(uint16_t *lines, uint8_t *again,
                                    uint16_t *dgain)
 {
 	if (lines != NULL)
@@ -266,12 +266,12 @@ void cam_imx219_get_exposure_gains(uint16_t *lines, uint8_t *again,
 		*dgain = cam_dgain;
 }
 
-int cam_imx219_stream_on(void)
+int cam_sensor_stream_on(void)
 {
 	return cam_sensor_write_table(sens->on, sens->on_n, "stream on");
 }
 
-int cam_imx219_stream_off(void)
+int cam_sensor_stream_off(void)
 {
 	return cam_sensor_write_table(sens->off, sens->off_n, "stream off");
 }

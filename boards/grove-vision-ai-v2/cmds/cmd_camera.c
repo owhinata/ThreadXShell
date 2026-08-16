@@ -89,7 +89,7 @@ static int cmd_camera_probe(struct cli_instance *sh, int argc, char **argv)
 	          (unsigned long)info.chip_version,
 	          info.rev_c ? " (rev C: per-frame MIPI bounce)" : "");
 	cli_print(sh, "sensor   : %s (id 0x%04X, on-chip AEC)\r\n",
-	          cam_imx219_sensor_name(), info.sensor_id);
+	          cam_sensor_name(), info.sensor_id);
 	cli_print(sh, "frame    : %ux%u planar B/G/R, %lu bytes\r\n",
 	          (unsigned)CAM_FRAME_WIDTH, (unsigned)CAM_FRAME_HEIGHT,
 	          (unsigned long)CAM_RAW_BYTES);
@@ -152,7 +152,7 @@ static int cmd_camera_capture(struct cli_instance *sh, int argc, char **argv)
 		uint32_t colour = cam_frame_colour_x100(raw, CAM_FRAME_PIXELS);
 
 		cli_print(sh, "bayer    : %s   colour separation %lu.%02lu\r\n",
-		          cam_imx219_bayer_name(cam_imx219_bayer()),
+		          cam_dp_bayer_name(cam_dp_bayer()),
 		          (unsigned long)(colour / 100u),
 		          (unsigned long)(colour % 100u));
 	}
@@ -519,7 +519,7 @@ static int cmd_camera_exposure(struct cli_instance *sh, int argc, char **argv)
 		}
 	}
 
-	cam_imx219_get_exposure_gains(&lines, &again, &dgain);
+	cam_sensor_get_exposure_gains(&lines, &again, &dgain);
 	cli_print(sh, "exposure : %lu lines\r\n", (unsigned long)lines);
 	cam_note_queued(sh, argc);
 	cam_note_manual(sh, was_auto);
@@ -534,7 +534,7 @@ static int cmd_camera_gain(struct cli_instance *sh, int argc, char **argv)
 	int was_auto = camera_auto();
 
 	if (argc > 1) {
-		cam_imx219_get_exposure_gains(&lines, &again, &dgain);
+		cam_sensor_get_exposure_gains(&lines, &again, &dgain);
 		a = again;
 		d = dgain;
 
@@ -555,7 +555,7 @@ static int cmd_camera_gain(struct cli_instance *sh, int argc, char **argv)
 		}
 	}
 
-	cam_imx219_get_exposure_gains(&lines, &again, &dgain);
+	cam_sensor_get_exposure_gains(&lines, &again, &dgain);
 	cli_print(sh, "again    : %u\r\n", again);
 	cli_print(sh, "dgain    : %lu (%lu.%02lux)\r\n", (unsigned long)dgain,
 	          (unsigned long)(dgain / 256u),
@@ -635,7 +635,7 @@ static int cmd_camera_auto(struct cli_instance *sh, int argc, char **argv)
 		}
 	}
 
-	cam_imx219_get_exposure_gains(&lines, &again, &dgain);
+	cam_sensor_get_exposure_gains(&lines, &again, &dgain);
 	camera_get_wb(&wb);
 
 	cli_print(sh, "auto     : %s  (exposure by the sensor's own AEC, "
@@ -752,11 +752,11 @@ static int cmd_camera_bayer(struct cli_instance *sh, int argc, char **argv)
 			              "bggr gbrg grbg rggb\r\n");
 			return 1;
 		}
-		cam_imx219_set_bayer(i);
+		cam_dp_set_bayer(i);
 	}
 
 	cli_print(sh, "bayer    : %s\r\n",
-	          cam_imx219_bayer_name(cam_imx219_bayer()));
+	          cam_dp_bayer_name(cam_dp_bayer()));
 	if (argc > 1)
 		cli_print(sh, "           (takes effect at the next `camera "
 		              "capture` or `camera preview`)\r\n");

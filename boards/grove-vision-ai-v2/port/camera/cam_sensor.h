@@ -130,16 +130,16 @@ extern const struct cam_sensor_desc cam_sensor_ov5647;
  * the answer selects the register tables, the geometry, the link rate and the
  * default Bayer phase.
  */
-int cam_imx219_detect(void);
+int cam_sensor_detect(void);
 
 /** @return the detected sensor's name ("ov5647"). */
-const char *cam_imx219_sensor_name(void);
+const char *cam_sensor_name(void);
 
 /** @return the model ID the DETECTED sensor is expected to answer with. */
-uint16_t cam_imx219_sensor_id(void);
+uint16_t cam_sensor_id(void);
 
 /** @return the WDMA3 landing buffer: CAM_RAW_BYTES of SRAM, 32-byte aligned. */
-uint8_t *cam_imx219_raw_buffer(void);
+uint8_t *cam_dp_raw_buffer(void);
 
 /**
  * @brief  Power the module and open the sensor's I2C channel.
@@ -147,22 +147,22 @@ uint8_t *cam_imx219_raw_buffer(void);
  * Drives PA1/AON_GPIO1 high -- on this board that is the IMX219's enable, not
  * the SDK's default xSleep path -- and initialises the CIS layer.  Idempotent.
  */
-int cam_imx219_power_on(void);
+int cam_sensor_power_on(void);
 
 /** Drop the module's enable line.  Safe to call when it is already down. */
-void cam_imx219_power_off(void);
+void cam_sensor_power_off(void);
 
 /**
  * @brief  Read the sensor's 16-bit model ID over I2C.
  *
  * The cheapest end-to-end proof that the module is powered, strapped to the
- * expected I2C address and talking.  Reads whichever part cam_imx219_detect()
+ * expected I2C address and talking.  Reads whichever part cam_sensor_detect()
  * selected -- the OV5647 answers 0x5647 at 0x300A/0x300B.
  */
-int cam_imx219_read_id(uint16_t *id);
+int cam_sensor_read_id(uint16_t *id);
 
 /** Push the init tables: mode, binning, exposure, gains, mirror. */
-int cam_imx219_sensor_init(void);
+int cam_sensor_init(void);
 
 /**
  * @brief  Set the sensor's exposure and gains at RUNTIME.
@@ -179,8 +179,8 @@ int cam_imx219_sensor_init(void);
  * @param again  analogue gain on the console's 0..232 curve (0x350A/0x350B)
  * @param dgain  digital gain, 0x0100 == 1.0; no OV5647 equivalent, ignored
  */
-int cam_imx219_set_exposure(uint16_t lines);
-int cam_imx219_set_gains(uint8_t again, uint16_t dgain);
+int cam_sensor_set_exposure(uint16_t lines);
+int cam_sensor_set_gains(uint8_t again, uint16_t dgain);
 
 /**
  * @brief  Hand exposure back to (or take it from) the sensor's own AEC.
@@ -192,7 +192,7 @@ int cam_imx219_set_gains(uint8_t again, uint16_t dgain);
  * @return 0 on success, including on a part with no on-chip loop -- there both
  *         directions are already true and there is nothing to write.
  */
-int cam_imx219_set_sensor_auto(int on);
+int cam_sensor_set_auto(int on);
 
 /**
  * @brief  Re-read the sensor's exposure and gain into the reported values.
@@ -203,15 +203,15 @@ int cam_imx219_set_sensor_auto(int on);
  * real exposure moves underneath, which makes a working auto-exposure look
  * broken.  I2C: producer thread only while a stream runs.
  */
-int cam_imx219_refresh_exposure_gains(void);
+int cam_sensor_refresh_exposure_gains(void);
 
 /** The values currently programmed (what this driver last wrote, or read). */
-void cam_imx219_get_exposure_gains(uint16_t *lines, uint8_t *again,
+void cam_sensor_get_exposure_gains(uint16_t *lines, uint8_t *again,
                                    uint16_t *dgain);
 
 /** Sensor stream on/off.  Checked, unlike the donor's. */
-int cam_imx219_stream_on(void);
-int cam_imx219_stream_off(void);
+int cam_sensor_stream_on(void);
+int cam_sensor_stream_off(void);
 
 #ifdef __cplusplus
 }

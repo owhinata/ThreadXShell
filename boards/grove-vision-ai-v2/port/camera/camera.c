@@ -18,7 +18,7 @@
  *    case would hand a sink a frame produced by a datapath that has already
  *    failed.  The error latch is sticky and is checked first.
  *
- * 3. There is exactly ONE stop sequence (cam_imx219_full_stop), and every path
+ * 3. There is exactly ONE stop sequence (cam_dp_full_stop), and every path
  *    that ends a stream goes through it: the user's stop, a bounded-wait
  *    timeout, a terminal datapath event, and a bring-up that failed half way.
  *    Multiple stop paths is how a peripheral ends up in a state nobody wrote
@@ -342,14 +342,14 @@ static void cam_apply_tuning(void)
 	TX_RESTORE
 
 	if ((req & CAM_TUNE_EXPOSURE) != 0u)
-		(void)cam_imx219_set_exposure(cam_tune_exposure);
+		(void)cam_sensor_set_exposure(cam_tune_exposure);
 	if ((req & CAM_TUNE_GAINS) != 0u)
-		(void)cam_imx219_set_gains(cam_tune_again, cam_tune_dgain);
+		(void)cam_sensor_set_gains(cam_tune_again, cam_tune_dgain);
 	/* The sensor half of `camera auto` -- taking a part's own AEC/AGC off is
 	 * an I2C write like any other, and the console may not make it itself
 	 * while this thread owns the CIS driver. */
 	if ((req & CAM_TUNE_AUTO) != 0u)
-		(void)cam_imx219_set_sensor_auto(cam_tune_auto);
+		(void)cam_sensor_set_auto(cam_tune_auto);
 }
 
 /*
@@ -565,7 +565,7 @@ static int cam_wrapped_step(int (*step)(void))
 	return rc;
 }
 
-static int cam_step_power_on(void) { return cam_imx219_power_on(); }
+static int cam_step_power_on(void) { return cam_sensor_power_on(); }
 
 /*
  * The datapath's two rounds.  Grouped this way because the vendor calls in each
@@ -583,13 +583,13 @@ static int cam_step_power_on(void) { return cam_imx219_power_on(); }
  */
 static int cam_step_dp(void)
 {
-	if (cam_imx219_csirx_enable() != 0)
+	if (cam_dp_csirx_enable() != 0)
 		return -1;
-	return cam_raw_mode ? cam_imx219_datapath_config_raw()
-	                    : cam_imx219_datapath_config();
+	return cam_raw_mode ? cam_dp_config_raw()
+	                    : cam_dp_config();
 }
 
-static int cam_step_capture(void) { return cam_imx219_capture_start(); }
+static int cam_step_capture(void) { return cam_dp_capture_start(); }
 
 /*
  * Bring the port up.  A TRANSACTION: every failure path leaves the hardware and
@@ -615,9 +615,9 @@ static int cam_step_capture(void) { return cam_imx219_capture_start(); }
 static int cam_bringup_fail(const char *why, int rc)
 {
 	cam_fault_latch(why);
-	cam_imx219_full_stop();
+	cam_dp_full_stop();
 	cam_unwrap_all();
-	cam_imx219_power_off();
+	cam_sensor_power_off();
 	cam_state = CAM_ST_DOWN;
 	return rc;
 }
@@ -669,7 +669,7 @@ static int cam_bringup(void)
 	}
 
 	/* Slow I2C, interrupts enabled, round one already accounted for. */
-	if (cam_imx219_sensor_init() != 0)
+	if (cam_sensor_init() != 0)
 		return cam_bringup_fail("the sensor did not accept its mode table",
 		                        CAM_ERR_NO_SENSOR);
 	/*
@@ -682,22 +682,22 @@ static int cam_bringup(void)
 	 * be honoured at all when it arrived before any probe: until detection
 	 * ran, "the sensor" was a default descriptor and not the fitted part.
 	 */
-	if (cam_imx219_set_sensor_auto((int)cam_auto_on) != 0)
+	if (cam_sensor_set_auto((int)cam_auto_on) != 0)
 		return cam_bringup_fail("the sensor kept its own exposure loop",
 		                        CAM_ERR_HAL);
 	/* Against the DETECTED part's ID, not a hard-coded one: detection has
 	 * already established which sensor is in the connector, and re-checking
 	 * against the other one's number is how a working OV5647 gets reported
 	 * as "the sensor did not identify itself". */
-	if (cam_imx219_read_id(&id) != 0 || id != cam_imx219_sensor_id()) {
+	if (cam_sensor_read_id(&id) != 0 || id != cam_sensor_id()) {
 		LOG_ERR("sensor model id 0x%04X, expected 0x%04X", id,
-		        cam_imx219_sensor_id());
+		        cam_sensor_id());
 		return cam_bringup_fail("the sensor did not identify itself",
 		                        CAM_ERR_NO_SENSOR);
 	}
 
-	info.chip_version = cam_imx219_chip_version();
-	cam_rev_c = cam_imx219_needs_rev_c_bounce() ? 1u : 0u;
+	info.chip_version = cam_dp_chip_version();
+	cam_rev_c = cam_dp_needs_rev_c_bounce() ? 1u : 0u;
 
 	/* hx_dplib_register_cb() and not the SDK's event_handler layer: this
 	 * port has a scheduler and does not want the vendor's superloop. */
@@ -740,7 +740,7 @@ static int cam_start_datapath(void)
 	/* Clear the latched receiver status while the receiver is down: it
 	 * latches, so a poll taken later without this reports the PREVIOUS
 	 * link. */
-	if (cam_imx219_csirx_clear_errors() != 0) {
+	if (cam_dp_csirx_clear_errors() != 0) {
 		cam_fault_latch("the CSI receiver error status would not clear");
 		return CAM_ERR_HAL;
 	}
@@ -752,7 +752,7 @@ static int cam_start_datapath(void)
 	cam_datapath_configured = 1u;
 
 	/* Sensor I2C: outside the masked round, as in the bring-up. */
-	if (cam_imx219_stream_on() != 0) {
+	if (cam_sensor_stream_on() != 0) {
 		cam_fault_latch("the sensor would not start streaming");
 		return CAM_ERR_HAL;
 	}
@@ -781,7 +781,7 @@ static int cam_start_datapath(void)
  *    device" -- and the camera was written without it.  On hardware the result
  *    was immediate and permanent: after one `camera preview`, `thread` printed
  *    "cpu% unavailable (an accounted interrupt vector was replaced)" until the
- *    next reboot.  cam_imx219_full_stop() IS the vendor's close, and it moves
+ *    next reboot.  cam_dp_full_stop() IS the vendor's close, and it moves
  *    vectors the accounting registry is still holding pointers to.
  *
  * They compose, because masking is what makes the middle safe: the lines are
@@ -814,11 +814,11 @@ static void cam_quiesce(void)
 	cam_unwrap_to(cam_wrapsets_core);
 
 	/* 3. now the vendor may do as it likes with them */
-	cam_imx219_full_stop();
+	cam_dp_full_stop();
 	cam_datapath_configured = 0u;
 
 	/* 4. and only now is clearing meaningful */
-	(void)cam_imx219_csirx_clear_errors();
+	(void)cam_dp_csirx_clear_errors();
 	for (i = 0u; i < nlines; i++)
 		NVIC_ClearPendingIRQ((IRQn_Type)lines[i]);
 
@@ -849,14 +849,14 @@ static void cam_quiesce(void)
  */
 static int cam_rev_c_off(void)
 {
-	if (cam_imx219_stream_off() != 0) {
+	if (cam_sensor_stream_off() != 0) {
 		cam_fault_latch("the sensor would not stop for the rev-C bounce");
 		return -1;
 	}
-	cam_imx219_csirx_disable();
+	cam_dp_csirx_disable();
 	/* Clear WHILE disabled: the status latches, so this is the only moment
 	 * at which a later poll can mean anything about the new link. */
-	if (cam_imx219_csirx_clear_errors() != 0) {
+	if (cam_dp_csirx_clear_errors() != 0) {
 		cam_fault_latch("the CSI error status would not clear on bounce");
 		return -1;
 	}
@@ -867,16 +867,16 @@ static int cam_rev_c_on(void)
 {
 	struct cam_csirx_errors err;
 
-	if (cam_imx219_csirx_enable() != 0) {
+	if (cam_dp_csirx_enable() != 0) {
 		cam_fault_latch("the CSI receiver would not come back up");
 		return -1;
 	}
-	if (cam_imx219_stream_on() != 0) {
+	if (cam_sensor_stream_on() != 0) {
 		cam_fault_latch("the sensor would not restart after the bounce");
 		return -1;
 	}
 
-	cam_imx219_csirx_errors(&err);
+	cam_dp_csirx_errors(&err);
 	if (!err.readable) {
 		cam_fault_latch("the CSI error status could not be read");
 		return -1;
@@ -913,7 +913,7 @@ static void cam_reassert_wraps(void)
  * sensor's own exposure loop has done.
  *
  * Producer thread, between frames.  The sensor I2C goes through the same
- * cam_imx219_* calls the console uses -- this thread owns the CIS driver while
+ * cam_sensor_* calls the console uses -- this thread owns the CIS driver while
  * a stream runs, which is precisely why the console's own tuning commands queue
  * their writes for it rather than making them directly.
  *
@@ -932,7 +932,7 @@ static void cam_auto_step(void)
 	if ((++cam_auto_phase % CAM_AUTO_EVERY) != 0u)
 		return;
 
-	cam_frame_means_x100(cam_imx219_raw_buffer(), CAM_FRAME_PIXELS,
+	cam_frame_means_x100(cam_dp_raw_buffer(), CAM_FRAME_PIXELS,
 	                     CAM_AUTO_STEP, means);
 
 	/*
@@ -964,7 +964,7 @@ static void cam_auto_step(void)
 	 * it itself.  Without this the console reports whatever was last written
 	 * by hand while the real exposure moves underneath, which makes a working
 	 * auto-exposure look broken. */
-	(void)cam_imx219_refresh_exposure_gains();
+	(void)cam_sensor_refresh_exposure_gains();
 
 	/* White balance is software, so it takes effect on the NEXT frame this
 	 * thread packs -- no sensor round trip, no delay to design around. */
@@ -974,7 +974,7 @@ static void cam_auto_step(void)
 static void cam_publish(void)
 {
 	struct frame_desc *slot;
-	uint8_t *raw = cam_imx219_raw_buffer();
+	uint8_t *raw = cam_dp_raw_buffer();
 
 	/*
 	 * [!] Invalidate BEFORE reading and only AFTER the write-DMA has
@@ -1078,7 +1078,7 @@ static int cam_service_one(uint32_t *retries)
 	/* WDMA3 is a single buffer, so the next capture is armed only now that
 	 * the pixels have been consumed -- that is what makes tearing
 	 * impossible rather than unlikely. */
-	cam_imx219_retrigger();
+	cam_dp_retrigger();
 
 	/*
 	 * [!] AND TAKE THE INTERRUPTS BACK, every frame.
@@ -1241,9 +1241,9 @@ int camera_probe(struct camera_probe_info *out)
 
 	rc = cam_bringup();
 	if (rc == CAM_OK) {
-		out->chip_version = cam_imx219_chip_version();
+		out->chip_version = cam_dp_chip_version();
 		out->rev_c = cam_rev_c;
-		if (cam_imx219_read_id(&out->sensor_id) != 0) {
+		if (cam_sensor_read_id(&out->sensor_id) != 0) {
 			out->sensor_id = 0u;
 			rc = CAM_ERR_NO_SENSOR;
 		}
@@ -1255,7 +1255,7 @@ int camera_probe(struct camera_probe_info *out)
 
 const uint8_t *camera_raw_frame(void)
 {
-	return cam_imx219_raw_buffer();
+	return cam_dp_raw_buffer();
 }
 
 int camera_capture_raw(void)
@@ -1319,7 +1319,7 @@ int camera_capture(void)
 		if (cam_frame_ready) {
 			cam_frame_ready = 0u;
 			hx_InvalidateDCache_by_Addr(
-				(volatile void *)cam_imx219_raw_buffer(),
+				(volatile void *)cam_dp_raw_buffer(),
 				(int32_t)CAM_RAW_BYTES);
 			cam_frames++;
 			rc = CAM_OK;
@@ -1487,7 +1487,7 @@ int camera_set_exposure(uint16_t lines)
 	rc = cam_api_enter_up();
 	if (rc != CAM_OK)
 		return rc;
-	rc = (cam_imx219_set_exposure(lines) == 0) ? CAM_OK : CAM_ERR_HAL;
+	rc = (cam_sensor_set_exposure(lines) == 0) ? CAM_OK : CAM_ERR_HAL;
 	cam_api_exit();
 	if (rc == CAM_OK)
 		cam_manual_control_taken();
@@ -1509,7 +1509,7 @@ int camera_set_gains(uint8_t again, uint16_t dgain)
 	rc = cam_api_enter_up();
 	if (rc != CAM_OK)
 		return rc;
-	rc = (cam_imx219_set_gains(again, dgain) == 0) ? CAM_OK : CAM_ERR_HAL;
+	rc = (cam_sensor_set_gains(again, dgain) == 0) ? CAM_OK : CAM_ERR_HAL;
 	cam_api_exit();
 	if (rc == CAM_OK)
 		cam_manual_control_taken();
@@ -1574,7 +1574,7 @@ int camera_set_auto(int on)
 	rc = cam_api_enter_up();
 	if (rc != CAM_OK)
 		return CAM_OK;
-	rc = (cam_imx219_set_sensor_auto((int)cam_auto_on) == 0) ? CAM_OK
+	rc = (cam_sensor_set_auto((int)cam_auto_on) == 0) ? CAM_OK
 	                                                         : CAM_ERR_HAL;
 	cam_api_exit();
 	return rc;

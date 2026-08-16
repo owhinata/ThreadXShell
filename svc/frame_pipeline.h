@@ -218,6 +218,27 @@ int frame_pipeline_attach(struct frame_pipeline *p, struct frame_sink *s);
  */
 int frame_pipeline_detach(struct frame_pipeline *p, struct frame_sink *s);
 
+/**
+ * How many sinks are attached right now.
+ *
+ * For producers that treat an attached sink as an OWNERSHIP RESERVATION: a sink
+ * outlives the stream it was attached for (its owner may only unlink it once the
+ * producer is confirmed idle), so "the producer has stopped" does not mean "this
+ * sink is free".  A producer that starts a fresh stream while somebody else's
+ * sink is still linked would deliver frames to a sink whose owner has finished
+ * with it -- and that owner is entitled to tear down what the sink points at.
+ * Asking the registry is what makes the rule checkable; reading a producer's own
+ * "am I streaming" flag is the check that misses (issue #63).
+ *
+ * Takes the lock internally, so the answer is a snapshot.  It is a decision
+ * rather than a snapshot only for a caller that holds whatever excludes attaches
+ * -- for the Grove camera, its API mutex, which every attach now runs under.  In
+ * the other direction there is no hazard: a concurrent detach can only make a
+ * non-zero answer stale, which costs the caller a refusal it did not have to
+ * make.
+ */
+int frame_pipeline_sink_count(struct frame_pipeline *p);
+
 /* ---- slot reference counting (async sinks) ------------------------------- */
 
 /**

@@ -672,43 +672,30 @@ static int cmd_nn_preview(struct cli_instance *sh, int argc, char **argv)
 		return -1;
 	}
 
-	rc = cam_lcd_sink_attach(nn_overlay_arm());
-	if (rc == CAM_ERR_BUSY) {
-		cli_error(sh, "nn: a preview is already running\r\n");
-		nn_release();
-		return -1;
-	}
+	/*
+	 * [!] ONE CALL, AND THEREFORE ONE FAILURE (issue #63).
+	 *
+	 * This used to attach the sink and then start the stream, and a start that
+	 * came back BUSY meant a stream was already running WITH THIS SINK
+	 * ATTACHED -- a producer could be inside consume() at that moment, so the
+	 * sink could not be detached and the NPU could not be released, and this
+	 * command had to leave both held for good.  It was reachable: `camera
+	 * bench` starts a stream owning no sink, so it could land between the two
+	 * calls.
+	 *
+	 * The camera does both under its API mutex now, so a failure here means
+	 * nothing was attached and nothing started: release the gate and go.  The
+	 * lease still has to survive the STOP side, which is a different problem
+	 * (#48) and is handled below.
+	 */
+	rc = cam_lcd_sink_attach_and_stream(nn_overlay_arm());
 	if (rc != CAM_OK) {
-		cli_error(sh, "nn: panel attach failed (%d)\r\n", rc);
+		if (rc == CAM_ERR_BUSY)
+			cli_error(sh, "nn: a preview is already running, or "
+			              "another command owns the camera\r\n");
+		else
+			cli_error(sh, "nn: preview start failed (%d)\r\n", rc);
 		nn_release();
-		return -1;
-	}
-
-	rc = camera_stream_start();
-	if (rc != CAM_OK) {
-		/*
-		 * [!] CAM_ERR_BUSY IS NOT "NOTHING HAPPENED".  It is the one
-		 * start failure that means a stream is ALREADY RUNNING -- and
-		 * this sink is attached to it, so a producer can be inside
-		 * consume() right now.  Detaching would unlink a sink mid
-		 * delivery and releasing the gate would let `nn close` dismantle
-		 * an interpreter the producer is using.  Every other failure
-		 * (bring-up, datapath) leaves no producer, so the sink comes
-		 * back off normally.
-		 *
-		 * Today the exclusive attach above makes this unreachable --
-		 * whoever owns the stream owns the sink.  It is handled anyway
-		 * because "unreachable" here rests on another module's
-		 * exclusivity rather than on anything checked at this line.
-		 */
-		cli_error(sh, "nn: stream start failed (%d)\r\n", rc);
-		if (rc != CAM_ERR_BUSY) {
-			(void)cam_lcd_sink_detach();
-			nn_release();
-		} else {
-			cli_error(sh, "nn: a stream is already running; nn stays "
-			              "held\r\n");
-		}
 		return -1;
 	}
 

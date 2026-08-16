@@ -225,6 +225,36 @@ static void test_detach(void)
 	assert(m.consume_calls == before);
 }
 
+/* F1. the sink count is what a producer checks before starting (issue #63) --- */
+static void test_sink_count(void)
+{
+	struct frame_pipeline p;
+	struct mock m, m2;
+	fresh(&p, 4);
+	mock_init(&m, &p, FRAME_POLICY_DROP, 0 /* hold */);
+	mock_init(&m2, &p, FRAME_POLICY_DROP, 0 /* hold */);
+
+	assert(frame_pipeline_sink_count(&p) == 0);
+	assert(frame_pipeline_attach(&p, &m.sink) == 0);
+	assert(frame_pipeline_sink_count(&p) == 1);
+	assert(frame_pipeline_attach(&p, &m2.sink) == 0);
+	assert(frame_pipeline_sink_count(&p) == 2);
+
+	/*
+	 * The count follows the UNLINK, not the drain: detach reports a pin still
+	 * in flight and the sink is gone from the registry all the same.  That is
+	 * the property the camera's ownership rule rests on -- a sink whose owner
+	 * is still draining it cannot be reached by a new producer.
+	 */
+	struct frame_desc *d1 = frame_pipeline_acquire(&p);
+	frame_pipeline_publish(&p, d1, SLOT_SZ, FRAME_FMT_RGB565, 4, 2, 8);
+	assert(frame_pipeline_detach(&p, &m.sink) == 1);
+	assert(frame_pipeline_sink_count(&p) == 1);
+
+	(void)frame_pipeline_detach(&p, &m2.sink);
+	assert(frame_pipeline_sink_count(&p) == 0);
+}
+
 /* F2. detach drops an undelivered LATEST pending pin ------------------------*/
 static void test_detach_pending(void)
 {
@@ -311,6 +341,7 @@ int main(void)
 	test_latest();
 	test_refcount();
 	test_detach();
+	test_sink_count();
 	test_detach_pending();
 	test_read_latest();
 	test_ring_cycle();

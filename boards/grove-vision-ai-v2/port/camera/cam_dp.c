@@ -67,14 +67,14 @@ _Static_assert(sizeof cam_raw_buf == 230400u,
 _Static_assert((CAM_RAW_BYTES % 32u) == 0u,
                "the WDMA3 buffer is not a whole number of cache lines");
 
-uint8_t *cam_imx219_raw_buffer(void)
+uint8_t *cam_dp_raw_buffer(void)
 {
 	return cam_raw_buf;
 }
 
 /*
  * The demosaic's Bayer phase.  The descriptor's value is the DEFAULT, not a
- * certainty -- see the note on cam_imx219_set_bayer() for why, and for what a
+ * certainty -- see the note on cam_dp_set_bayer() for why, and for what a
  * wrong one looks like.
  */
 static uint8_t cam_bayer = (uint8_t)DEMOS_PATTENMODE_BGGR;
@@ -82,7 +82,7 @@ static uint8_t cam_bayer = (uint8_t)DEMOS_PATTENMODE_BGGR;
  * does not quietly put the sensor default back and undo a bench measurement. */
 static uint8_t cam_bayer_user;
 
-void cam_imx219_set_bayer(uint8_t pattern)
+void cam_dp_set_bayer(uint8_t pattern)
 {
 	if (pattern <= (uint8_t)DEMOS_PATTENMODE_RGGB) {
 		cam_bayer = pattern;
@@ -90,12 +90,12 @@ void cam_imx219_set_bayer(uint8_t pattern)
 	}
 }
 
-uint8_t cam_imx219_bayer(void)
+uint8_t cam_dp_bayer(void)
 {
 	return cam_bayer;
 }
 
-const char *cam_imx219_bayer_name(uint8_t pattern)
+const char *cam_dp_bayer_name(uint8_t pattern)
 {
 	switch (pattern) {
 	case DEMOS_PATTENMODE_BGGR: return "bggr";
@@ -123,7 +123,7 @@ void cam_dp_seed_bayer(uint8_t pattern)
  * NOT the system or CPU clock tree: the board rule is that the app inherits
  * what the bootloader configured, and this does not touch any of it.
  */
-static uint32_t imx219_select_mipi_clock(void)
+static uint32_t cam_dp_select_mipi_clock(void)
 {
 	SCU_PDHSC_DPCLK_CFG_T cfg;
 	uint32_t pllfreq = 0u;
@@ -157,7 +157,7 @@ static uint32_t imx219_select_mipi_clock(void)
 	return mipi_pixel_clk / 1000000u;
 }
 
-static void imx219_set_hscnt(uint32_t mipi_pixel_clk_mhz)
+static void cam_dp_set_hscnt(uint32_t mipi_pixel_clk_mhz)
 {
 	MIPIRX_DPHYHSCNT_CFG_T hscnt;
 
@@ -182,7 +182,7 @@ static void imx219_set_hscnt(uint32_t mipi_pixel_clk_mhz)
 	sensordplib_csirx_set_hscnt(hscnt);
 }
 
-int cam_imx219_csirx_enable(void)
+int cam_dp_csirx_enable(void)
 {
 	const struct cam_sensor_desc *sd = cam_sensor_current();
 	struct cam_mipi_link link;
@@ -191,7 +191,7 @@ int cam_imx219_csirx_enable(void)
 	SCU_VMUTE_CFG_T vmute;
 	uint32_t mipi_pixel_clk_mhz;
 
-	mipi_pixel_clk_mhz = imx219_select_mipi_clock();
+	mipi_pixel_clk_mhz = cam_dp_select_mipi_clock();
 	if (mipi_pixel_clk_mhz == 0u)
 		return -1;
 
@@ -223,7 +223,7 @@ int cam_imx219_csirx_enable(void)
 	swrst.HSC_MIPITX = 1;
 	(void)hx_drv_scu_set_DP_SWReset(swrst);
 
-	imx219_set_hscnt(mipi_pixel_clk_mhz);
+	cam_dp_set_hscnt(mipi_pixel_clk_mhz);
 
 	sensordplib_csirx_set_pixel_depth(sd->dpp);
 	sensordplib_csirx_set_deskew(0);
@@ -253,12 +253,12 @@ int cam_imx219_csirx_enable(void)
 	return 0;
 }
 
-void cam_imx219_csirx_disable(void)
+void cam_dp_csirx_disable(void)
 {
 	sensordplib_csirx_disable();
 }
 
-int cam_imx219_csirx_clear_errors(void)
+int cam_dp_csirx_clear_errors(void)
 {
 	int rc = 0;
 
@@ -271,7 +271,7 @@ int cam_imx219_csirx_clear_errors(void)
 	return rc;
 }
 
-void cam_imx219_csirx_errors(struct cam_csirx_errors *out)
+void cam_dp_csirx_errors(struct cam_csirx_errors *out)
 {
 	uint32_t err = 0u, dphy = 0u;
 
@@ -291,7 +291,7 @@ void cam_imx219_csirx_errors(struct cam_csirx_errors *out)
 /* ---- datapath ------------------------------------------------------------ */
 
 /* The INP chain: crop, bin, subsample.  Shared by both output legs. */
-static int cam_imx219_inp_config(void)
+static int cam_dp_inp_config(void)
 {
 	const struct cam_sensor_desc *sd = cam_sensor_current();
 	INP_CROP_T crop = { 0 };
@@ -335,17 +335,17 @@ static int cam_imx219_inp_config(void)
  *
  * One frame is 320x240 = 76,800 bytes, so it shares the WDMA3 buffer.
  */
-int cam_imx219_datapath_config_raw(void)
+int cam_dp_config_raw(void)
 {
 	sensordplib_set_xDMA_baseaddrbyapp(0u, (uint32_t)(uintptr_t)cam_raw_buf,
 	                                   0u);
-	if (cam_imx219_inp_config() != 0)
+	if (cam_dp_inp_config() != 0)
 		return -1;
 	sensordplib_set_raw_wdma2(CAM_FRAME_WIDTH, CAM_FRAME_HEIGHT, NULL);
 	return 0;
 }
 
-int cam_imx219_datapath_config(void)
+int cam_dp_config(void)
 {
 	/*
 	 * [!] ZERO-INITIALISED, and that is not decoration.
@@ -379,7 +379,7 @@ int cam_imx219_datapath_config(void)
 	sensordplib_set_xDMA_baseaddrbyapp(0u, 0u,
 	                                   (uint32_t)(uintptr_t)cam_raw_buf);
 
-	if (cam_imx219_inp_config() != 0)
+	if (cam_dp_inp_config() != 0)
 		return -1;
 
 	hw5x5.hw5x5_path         = HW5x5_PATH_THROUGH_DEMOSAIC;
@@ -399,7 +399,7 @@ int cam_imx219_datapath_config(void)
 	return 0;
 }
 
-int cam_imx219_capture_start(void)
+int cam_dp_capture_start(void)
 {
 	sensordplib_set_mclkctrl_xsleepctrl_bySCMode();
 	if (sensordplib_set_sensorctrl_start() != 0) {
@@ -409,12 +409,12 @@ int cam_imx219_capture_start(void)
 	return 0;
 }
 
-void cam_imx219_retrigger(void)
+void cam_dp_retrigger(void)
 {
 	sensordplib_retrigger_capture();
 }
 
-void cam_imx219_full_stop(void)
+void cam_dp_full_stop(void)
 {
 	/* The vendor's order, and every failure path in this port funnels
 	 * through it.  Nothing here checks a return value or bails out early:
@@ -423,13 +423,13 @@ void cam_imx219_full_stop(void)
 	sensordplib_stop_capture();
 	sensordplib_start_swreset();
 	sensordplib_stop_swreset_WoSensorCtrl();
-	(void)cam_imx219_stream_off();
+	(void)cam_sensor_stream_off();
 	sensordplib_csirx_disable();
 }
 
 /* ---- chip revision ------------------------------------------------------- */
 
-uint32_t cam_imx219_chip_version(void)
+uint32_t cam_dp_chip_version(void)
 {
 	uint32_t chipid = 0u, version = 0u;
 
@@ -438,7 +438,7 @@ uint32_t cam_imx219_chip_version(void)
 	return chipid;
 }
 
-int cam_imx219_needs_rev_c_bounce(void)
+int cam_dp_needs_rev_c_bounce(void)
 {
-	return cam_imx219_chip_version() == CAM_CHIP_VERSION_C;
+	return cam_dp_chip_version() == CAM_CHIP_VERSION_C;
 }

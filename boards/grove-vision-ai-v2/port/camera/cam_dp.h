@@ -31,7 +31,7 @@
  * register tables (included from the SDK tree, so they stay in sync with the
  * pin) and the exact order of the bring-up calls.
  *
- * THREADING.  Thread context, except cam_imx219_retrigger().
+ * THREADING.  Thread context, except cam_dp_retrigger().
  */
 #ifndef CAM_DP_H
 #define CAM_DP_H
@@ -53,13 +53,13 @@ extern "C" {
 
 /**
  * Chip revision C, which needs the per-frame MIPI bounce (see
- * cam_imx219_needs_rev_c_bounce()).  The SDK does not export this constant --
+ * cam_dp_needs_rev_c_bounce()).  The SDK does not export this constant --
  * every donor app re-defines it locally, and so does this port.
  */
 #define CAM_CHIP_VERSION_C 0x8538000Cu
 
 /** @return the WDMA3 landing buffer: CAM_RAW_BYTES of SRAM, 32-byte aligned. */
-uint8_t *cam_imx219_raw_buffer(void);
+uint8_t *cam_dp_raw_buffer(void);
 
 /**
  * @brief  The demosaic's Bayer phase, settable at RUNTIME.
@@ -81,9 +81,9 @@ uint8_t *cam_imx219_raw_buffer(void);
  * Values match DEMOS_PATTENMODE_E: 0 BGGR, 1 GBRG, 2 GRBG, 3 RGGB.  Takes
  * effect at the next datapath configuration, i.e. the next capture or preview.
  */
-void cam_imx219_set_bayer(uint8_t pattern);
-uint8_t cam_imx219_bayer(void);
-const char *cam_imx219_bayer_name(uint8_t pattern);
+void cam_dp_set_bayer(uint8_t pattern);
+uint8_t cam_dp_bayer(void);
+const char *cam_dp_bayer_name(uint8_t pattern);
 
 /**
  * @brief  Adopt @p pattern as the phase, unless the console has already chosen.
@@ -102,10 +102,10 @@ void cam_dp_seed_bayer(uint8_t pattern);
  * Selects the PLL-derived MIPI clock, resets both PHYs, programs the HS counts
  * and the computed FIFO fill (cam_mipi_calc.h), and enables two lanes.
  */
-int cam_imx219_csirx_enable(void);
+int cam_dp_csirx_enable(void);
 
-/** Disable the MIPI receiver.  Pairs with cam_imx219_csirx_enable(). */
-void cam_imx219_csirx_disable(void);
+/** Disable the MIPI receiver.  Pairs with cam_dp_csirx_enable(). */
+void cam_dp_csirx_disable(void);
 
 /**
  * @brief  Program the INP crop/bin/subsample chain and the HW5x5 -> WDMA3 leg.
@@ -114,7 +114,7 @@ void cam_imx219_csirx_disable(void);
  * reset, and nothing in the SDK documents which of these registers survive it.
  * Assuming they do is the kind of thing that works until it does not.
  */
-int cam_imx219_datapath_config(void);
+int cam_dp_config(void);
 
 /**
  * @brief  Configure the RAW leg instead: INP -> WDMA2, no demosaic.
@@ -126,13 +126,13 @@ int cam_imx219_datapath_config(void);
  * the 8-bit samples the MIPI receiver made of the sensor's RAW10 actually look
  * like.
  */
-int cam_imx219_datapath_config_raw(void);
+int cam_dp_config_raw(void);
 
 /** Start the sensor controller (the first frame follows). */
-int cam_imx219_capture_start(void);
+int cam_dp_capture_start(void);
 
 /** Arm the next frame.  Cheap, and the only per-frame call on the happy path. */
-void cam_imx219_retrigger(void);
+void cam_dp_retrigger(void);
 
 /**
  * @brief  Stop everything, in the vendor's order, unconditionally.
@@ -144,9 +144,9 @@ void cam_imx219_retrigger(void);
  * there is exactly one sequence to get right and exactly one to reason about
  * when a restart has to prove the hardware is quiet.
  */
-void cam_imx219_full_stop(void);
+void cam_dp_full_stop(void);
 
-/** Latched CSI receiver error state, as read by cam_imx219_csirx_errors(). */
+/** Latched CSI receiver error state, as read by cam_dp_csirx_errors(). */
 struct cam_csirx_errors {
 	uint32_t err;      /**< error IRQ status                        */
 	uint32_t dphyerr;  /**< D-PHY error IRQ status                  */
@@ -163,13 +163,13 @@ struct cam_csirx_errors {
  * @return 0 if both clears reported success, -1 otherwise.  A failed clear is
  *         not cosmetic: it means the next poll cannot be believed.
  */
-int cam_imx219_csirx_clear_errors(void);
+int cam_dp_csirx_clear_errors(void);
 
 /** Sample the latched receiver error state.  Never clears. */
-void cam_imx219_csirx_errors(struct cam_csirx_errors *out);
+void cam_dp_csirx_errors(struct cam_csirx_errors *out);
 
 /** @return the chip version word (SCU), or 0 if it could not be read. */
-uint32_t cam_imx219_chip_version(void);
+uint32_t cam_dp_chip_version(void);
 
 /**
  * @return non-zero when this chip needs the per-frame MIPI bounce.
@@ -180,7 +180,7 @@ uint32_t cam_imx219_chip_version(void);
  * receiver bring-up per frame) and it freezes the sensor's own exposure and
  * gain loops, so it is applied only where it is needed.
  */
-int cam_imx219_needs_rev_c_bounce(void);
+int cam_dp_needs_rev_c_bounce(void);
 
 #ifdef __cplusplus
 }

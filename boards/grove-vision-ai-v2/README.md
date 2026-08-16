@@ -820,7 +820,7 @@ a build flag would cost a flash cycle to swap camera, on a board rated ~100k of
 them.  With one part in the table that is an identity check rather than a
 choice, and it stays a table because that is the shape a second part arrives in.
 
-`cam_imx219.c` dispatches exposure, gain, auto and read-back through per-sensor
+`cam_sensor.c` dispatches exposure, gain, auto and read-back through per-sensor
 function pointers, and that seam stays even at one entry: what differs between
 parts is more than a register table.  The OV5647's exposure is 20 bits in
 SIXTEENTHS of a line across 0x3500..0x3502 and its gain is 10 bits where 16
@@ -1047,7 +1047,7 @@ the measurement means nothing at all.
 
 ### [!] Unwrap before the vendor teardown, not after
 
-`cam_imx219_full_stop()` IS the vendor's "close the device", and it moves
+`cam_dp_full_stop()` IS the vendor's "close the device", and it moves
 interrupt vectors.  Running it while this port's wrappers are still installed
 and registered leaves the accounting registry holding pointers to vectors that
 no longer exist -- and the failure is permanent and silent until you look:
@@ -1081,7 +1081,7 @@ abort path had to learn (see "A DMA completion is not a transfer completion"):
 clearing while the hardware is still running just means the next event lands
 after the clear, and on a restart it arrives as the new stream's first frame.
 
-There is one stop sequence (`cam_imx219_full_stop`) and all four ways of ending
+There is one stop sequence (`cam_dp_full_stop`) and all four ways of ending
 a stream go through it: the user's stop, a frame-timeout, a terminal datapath
 event, and a bring-up that failed part way.  The datapath configuration is
 deliberately NOT kept across it -- the stop performs a datapath software reset

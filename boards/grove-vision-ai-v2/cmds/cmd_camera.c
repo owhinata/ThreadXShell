@@ -355,10 +355,23 @@ static int cmd_camera_preview(struct cli_instance *sh, int argc, char **argv)
 	 * released.  The camera poisons itself on that path and refuses
 	 * everything afterwards, so there is nothing to clean up here and
 	 * nothing that would be safe to do.
+	 *
+	 * [!] AND THE DETACH CAN FAIL TOO, since issue #57: it unlinks the sink
+	 * and then drains the panel thread, and a drain that does not finish
+	 * leaves a thread that may still be blitting.  A confirmed stop is now
+	 * only half the answer, so the result is reported rather than dropped.
 	 */
 	rc = camera_stream_stop();
-	if (rc == CAM_OK)
-		(void)cam_lcd_sink_detach();
+	if (rc == CAM_OK) {
+		int drain_rc = cam_lcd_sink_detach();
+
+		if (drain_rc != CAM_OK) {
+			cli_error(sh, "camera: the panel thread did not finish "
+			              "(%d); preview is unusable until reboot\r\n",
+			          drain_rc);
+			return 1;
+		}
+	}
 
 	if (cli_cancel_requested(sh)) {
 		/* Cancelled.  Silent on purpose, as in `lcd loop`: the shared
@@ -584,6 +597,28 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 	cli_print(sh, "sink lcd : %lu shown, %lu dropped, %lu busy, %lu err\r\n",
 	          (unsigned long)sk.delivered, (unsigned long)sk.dropped,
 	          (unsigned long)sk.busy, (unsigned long)sk.errors);
+	/*
+	 * [!] WHERE THE 26 ms WENT (issue #57).
+	 *
+	 * The producer's `sink` row above is now just the hand-off (plus the
+	 * inference under `nn preview`); the blit itself is timed on the panel
+	 * thread and reported here.  Both numbers are needed: "the producer's
+	 * went down" is also what a sink that silently stopped drawing looks
+	 * like, and only this row distinguishes moved from lost.
+	 */
+	if (!sk.prof_ok)
+		cli_print(sh, "  blit   : -- (%s)\r\n",
+		          sk.prof_why != NULL ? sk.prof_why : "no time source");
+	else if (sk.blit_frames == 0u)
+		cli_print(sh, "  blit   : -- (no frames since the last "
+		              "attach)\r\n");
+	else
+		cli_print(sh, "  blit   : %6lu us/frame over %lu frame(s) "
+		              "[panel thread]\r\n",
+		          (unsigned long)(sk.blit_us / sk.blit_frames),
+		          (unsigned long)sk.blit_frames);
+	if (sk.fault != NULL)
+		cli_print(sh, "sink err : %s\r\n", sk.fault);
 	/* Only ever non-zero after an `nn preview`: a frame whose inference was
 	 * refused is still SHOWN, just without boxes, so it counts here and not
 	 * as a sink error. */

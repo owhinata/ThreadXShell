@@ -42,10 +42,27 @@ static volatile uint8_t nn_ov_stop;
 
 static struct nn_overlay_stats nn_ov_stats;
 
-/* This frame's detections, produced by process() and consumed by draw() -- both
- * on the producer thread inside one consume(), so no lock and no publication
- * problem.  Static because nothing here may ever be freed under a producer that
- * did not acknowledge a stop (see nn_overlay.h). */
+/*
+ * This frame's detections, produced by process() and consumed by draw().
+ *
+ * [!] THEY ARE NO LONGER THE SAME THREAD (issue #57).  process() runs on the
+ * camera producer, inside consume(); draw() runs on the panel thread, inside the
+ * blit that consume() handed over.  There is still no lock, and the reason is
+ * not proximity any more but exclusion:
+ *
+ *   - the pipeline pre-pins ONE delivery per sink and, under FRAME_POLICY_DROP,
+ *     refuses a second while the first is outstanding -- so process() cannot run
+ *     again until the panel thread has released the frame;
+ *   - the panel thread releases it only AFTER draw() has returned.
+ *
+ * So the two alternate strictly, and the hand-off (a semaphore, which on this
+ * M55 port carries the context-switch DSB/ISB) publishes what process() wrote.
+ * The invariant to protect is the panel thread's step order, in cam_lcd_sink.c:
+ * nothing here may be touched after its frame_pipeline_put().
+ *
+ * Static because nothing here may ever be freed under a producer -- or now a
+ * panel thread -- that did not acknowledge a stop (see nn_overlay.h).
+ */
 static struct bf_det nn_ov_det[BF_MAX_DET];
 static int           nn_ov_ndet;
 static struct nn_preproc_geom nn_ov_geom;

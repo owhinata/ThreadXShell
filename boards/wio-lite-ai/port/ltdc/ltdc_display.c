@@ -838,7 +838,7 @@ int ltdc_init(void)
 	/*
 	 * Come up fully INITIALIZED but DARK (issue #53).  `lcd on` presents.
 	 *
-	 * 🔴 What is deferred is only PRESENTING.  Everything above still ran: the
+	 * [!] What is deferred is only PRESENTING.  Everything above still ran: the
 	 * reset pulse, the ST7789's SWRESET + factory sequence, the CS park and the
 	 * controller configuration.  Skipping any of that and doing it at `lcd on`
 	 * instead is how a display comes up "LTDC perfectly healthy, screen uniformly

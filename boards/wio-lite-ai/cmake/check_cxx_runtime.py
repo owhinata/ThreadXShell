@@ -61,14 +61,14 @@ CANNOT_CHECK = 2   # exit code for "the check could not run", never confused wit
 # exception-frame tables and is emitted for every image whether or not any C++ exists;
 # .fini_array's is its counterpart.
 #
-# 🔴 ALL FIVE ARE CHECKED, not just .init_array.  The linker script KEEPs
+# [!] ALL FIVE ARE CHECKED, not just .init_array.  The linker script KEEPs
 # .preinit_array, .init_array and .fini_array (ldscript/STM32H725AEIx_IROM.ld), and GCC
 # still honours the legacy .ctors/.dtors spellings -- so a guard that watched only
 # .init_array would leave four other doors into "code that runs before main" open.  A
 # `__attribute__((constructor(101)))` lands in .preinit_array, and that is the WORST of
 # them: preinit constructors run even earlier than the rest.
 #
-# 🔴 These are CEILINGS measured from the C-only build, not exact values.  Writing
+# [!] These are CEILINGS measured from the C-only build, not exact values.  Writing
 # `== 4` would turn a toolchain upgrade that adds a second crtbegin entry into a build
 # failure blamed on a source change that is perfectly correct.  What we care about is
 # that OUR code contributed nothing, and "did not grow past the C-only baseline" says

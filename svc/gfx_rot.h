@@ -36,7 +36,7 @@
  *   - source: read with `src_stride_px` between rows.  Free from AXI-SRAM or the
  *     internal flash; expensive from PSRAM.
  *
- * 🔴 So do not hand this a source in PSRAM and expect the camera to work.  Issue
+ * [!] So do not hand this a source in PSRAM and expect the camera to work.  Issue
  * #35 exists precisely to stage DCMI frames through an AXI-SRAM band first; a
  * PSRAM-to-PSRAM transpose is the shape issue #8 phase 3a called "the worst
  * possible for a serial PSRAM" and measured as such.

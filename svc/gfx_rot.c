@@ -15,7 +15,7 @@
 /*
  * Pixels staged between the strided gather and the contiguous store.
  *
- * 🔴 THE STAGING IS THE OPTIMISATION.  It looks like pointless copying -- read a
+ * [!] THE STAGING IS THE OPTIMISATION.  It looks like pointless copying -- read a
  * pixel, put it in a buffer, copy the buffer out -- and the obvious "simplification"
  * of storing each pixel straight to the destination was tried and MEASURED SLOWER
  * on hardware: 34.5 ms per 320x240 frame against 25.7 ms for the staged version
@@ -46,7 +46,7 @@
  * the byte rate.  A 5 s sample after this change showed none, which is short
  * enough to be luck (the same window had shown 4 before) but points the right way.
  *
- * 🔴 AND THE STORES BELOW ARE volatile FOR A REASON THAT COST A MEASUREMENT.
+ * [!] AND THE STORES BELOW ARE volatile FOR A REASON THAT COST A MEASUREMENT.
  * They were first written as a plain 32-bit copy loop, on the theory that a
  * quarter as many transactions would help.  GCC's loop-distribute-patterns
  * recognised the loop and turned it back into a call to memcpy() -- which in

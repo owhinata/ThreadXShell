@@ -25,7 +25,7 @@
  * BSP_ENABLE_LCD.  Including cam_preview.h here would drag the LCD into a
  * camera-only build.
  *
- * 🔴 A REFCOUNT ALONE CANNOT DESCRIBE WHAT HAPPENS AFTER A DCMI OVERRUN.  The camera
+ * [!] A REFCOUNT ALONE CANNOT DESCRIBE WHAT HAPPENS AFTER A DCMI OVERRUN.  The camera
  * tears its band stream down from the producer side (cam_band_cb = NULL,
  * cam_stream_active = 0; port/camera/camera.c cam_stream_teardown()) and tells
  * nobody, which would leave clients "claimed" with nothing behind them -- claimed and
@@ -78,7 +78,7 @@ int cam_band_claim(enum cam_band_client c, int colorbar, cam_band_client_fn fn);
 /**
  * Drop @p c's claim, stopping the stream when the last client leaves.
  *
- * 🔴 ON CAM_BAND_ERR_BUSY THE CALLER MUST NOT FREE ANYTHING THE CALLBACK TOUCHES.
+ * [!] ON CAM_BAND_ERR_BUSY THE CALLER MUST NOT FREE ANYTHING THE CALLBACK TOUCHES.
  * The drain waits for an in-flight callback to return; if it does not (a producer
  * killed mid-callback), the client's buffers may still be written.  For the NN that
  * means the model session and the OCTOSPI1 guard stay held -- handing the arena to

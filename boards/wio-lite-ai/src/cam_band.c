@@ -53,7 +53,7 @@ static int          band_colorbar;
  * Serializes claim against claim and against release -- NOT the fan-out, which stays
  * lock-free on PRIMASK because it runs on the producer thread and must never block.
  *
- * 🔴 WITHOUT THIS, TWO COLD STARTS RACE, and the consequence is the exact corruption
+ * [!] WITHOUT THIS, TWO COLD STARTS RACE, and the consequence is the exact corruption
  * the drain exists to prevent.  Both consoles can issue a command at once (USB CDC
  * and telnet), so `camera preview on` and `ai stream start` can both observe
  * "no stream running", both publish their claim -- claims are published BEFORE the
@@ -140,7 +140,7 @@ int cam_band_stream_lost(void)
 /*
  * The one real camera_band_fn.  Runs on the camera's producer thread.
  *
- * 🔴 THE CLAIM TEST AND THE cb_active INCREMENT ARE ONE ATOMIC STEP.  Clearing a
+ * [!] THE CLAIM TEST AND THE cb_active INCREMENT ARE ONE ATOMIC STEP.  Clearing a
  * claim and then waiting for a "busy" flag would miss the producer that has already
  * passed the claim test and not yet entered the callback: it would run afterwards,
  * writing a buffer whose owner believed the drain was complete.  Once band_claimed[c]
@@ -174,7 +174,7 @@ static void cam_band_fanout(void *ctx, unsigned band, const uint16_t *px,
 
 		fn(band, px, rows);
 
-		/* 🔴 Re-read PRIMASK here rather than reusing the value from entry: the
+		/* [!] Re-read PRIMASK here rather than reusing the value from entry: the
 		 * callback may have changed the interrupt state, and restoring a stale
 		 * value would leave interrupts in whatever state they were two sections
 		 * ago.  The same reason nn_session_release() saves its own. */

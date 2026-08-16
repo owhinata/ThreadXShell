@@ -19,7 +19,7 @@
 # downloads the ARM toolchain at configure time; only the tflm build pays the fetch
 # cost, and a SHA-keyed stamp makes it a one-time cost.
 #
-# 🔴 lib/cmsis_core is NOT reused for the CMSIS-NN build.  The donor firmware recorded
+# [!] lib/cmsis_core is NOT reused for the CMSIS-NN build.  The donor firmware recorded
 # that a vendored CMSIS core/NN pair mismatched against the one tflite-micro expects
 # produces legacy-API compile errors; letting upstream's own downloader pick the
 # matched pair is the whole reason this works unattended.
@@ -49,7 +49,7 @@ set(NN_TFLM_CMSIS_NN ON CACHE BOOL "Use CMSIS-NN optimised kernels in the tflm b
 #               five MLPerf Tiny v1.4 models need (issue #55), measured with
 #               scripts/verify_tflite.cc rather than guessed.  +23,624 B of text --
 #               and +6,072 B more with CONFIG_MLPERF_TINY=ON, which leaves 15,240 B.
-#   extended    + the common-vision superset = 26.  ⚠ DOES NOT LINK on this firmware
+#   extended    + the common-vision superset = 26.  [!] DOES NOT LINK on this firmware
 #               today: FLASH overflows by 29,200 B (measured, issue #55).
 #
 # This is a knob rather than a constant because on a 384 KB partition the width of the
@@ -78,7 +78,7 @@ endif()
 
 # Run the flatbuffers verifier over a model before handing it to the interpreter.
 #
-# 🔴 OFF by default, and it is worth being exact about what that gives up, because it
+# [!] OFF by default, and it is worth being exact about what that gives up, because it
 # is NOT "models are unchecked".  Three checks remain: the length, the "TFL3" file
 # identifier, and the blob's CRC32 taken over the copy in PSRAM that is about to be
 # interpreted.  What they cannot catch is a .tflite that was already truncated ON THE
@@ -99,7 +99,7 @@ endif()
 # garbage detections with no error at all.  The last one is the real cost: not "it
 # crashes", but "it runs and lies".
 #
-# 🔴 It is OFF because THE SAME CHECK IS AVAILABLE ON THE PC, FOR FREE, AND EARLIER.
+# [!] It is OFF because THE SAME CHECK IS AVAILABLE ON THE PC, FOR FREE, AND EARLIER.
 # The `verify-model` target below builds scripts/verify_tflite.cc with the host
 # compiler against this very tree, so it calls the identical VerifyModelBuffer() -- not
 # an approximation of it -- and rejects the file before `blob write` has erased a slot
@@ -116,7 +116,7 @@ endif()
 #   cmake --build build/wio-lite-ai-tflm --target verify-model
 #   ./build/wio-lite-ai-tflm/verify_tflite model.tflite      # then blob write + sb
 #
-# 🔴 Turn it back ON for any build whose models will not pass through that command.
+# [!] Turn it back ON for any build whose models will not pass through that command.
 set(NN_TFLM_VERIFY OFF CACHE BOOL "Verify the flatbuffer before building an interpreter")
 
 # Optimisation level for the vendored tree.
@@ -256,7 +256,7 @@ if(NN_TFLM_CMSIS_NN)
     list(APPEND TFLM_LIB_SOURCES ${TFLM_CMSIS_NN_SOURCES})
 endif()
 
-# 🔴 STATIC, not OBJECT, and that is a size decision rather than a style one.  Archive
+# [!] STATIC, not OBJECT, and that is a size decision rather than a style one.  Archive
 # members are extracted ON DEMAND, so the ~15 kernels this build never registers --
 # MicroMutableOpResolver<N> only instantiates the AddXxx() members that are actually
 # called -- are never pulled into the link at all.  As an OBJECT library every object
@@ -302,7 +302,7 @@ if(NN_TFLM_CMSIS_NN)
         "${TFLM_ROOT}/third_party/cmsis/CMSIS/Core/Include"
         "${TFLM_ROOT}/third_party/cmsis_nn"
         "${TFLM_ROOT}/third_party/cmsis_nn/Include")
-    # 🔴 -DCMSIS_NN is not optional.  It is what OPTIMIZED_KERNEL_DIR=cmsis_nn adds in
+    # [!] -DCMSIS_NN is not optional.  It is what OPTIMIZED_KERNEL_DIR=cmsis_nn adds in
     # the tflm Makefile (the uppercased directory name), and it switches the kernel
     # headers (conv.h, pooling.h, ...) from inline REFERENCE registrations to extern
     # declarations that the cmsis_nn *.cc then define.  Without it every optimised
@@ -311,7 +311,7 @@ if(NN_TFLM_CMSIS_NN)
         CMSIS_NN ARM_NN_ENABLE_F16=0 ARM_NN_ENABLE_F32=0 NN_TFLM_CMSIS_NN=1)
 endif()
 
-# 🔴 C_STANDARD 11 is required, not cosmetic.  GCC 15 (this repository's pinned
+# [!] C_STANDARD 11 is required, not cosmetic.  GCC 15 (this repository's pinned
 # toolchain) defaults C to gnu23, and the CMSIS-NN .c sources in this tree are written
 # against C11/C17.  The donor firmware never hit this: it was on GCC 13.3, where the
 # default was still gnu17.
@@ -444,7 +444,7 @@ endif()
 function(nn_tflm_attach tgt)
     target_link_libraries(${tgt} PRIVATE tflm)
 
-    # 🔴 LINKER_LANGUAGE C is required, not defensive.  CMake picks the link driver by
+    # [!] LINKER_LANGUAGE C is required, not defensive.  CMake picks the link driver by
     # the highest CMAKE_<LANG>_LINKER_PREFERENCE among the target's sources AND the
     # languages of the libraries it links -- CXX is 30, C is 10, and it PROPAGATES out
     # of a linked static library.  Left alone, `shell` would be linked with g++, which

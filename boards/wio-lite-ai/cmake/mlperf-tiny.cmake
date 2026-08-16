@@ -28,7 +28,7 @@ if(NOT EXISTS "${MLPERF_API}/internally_implemented.cpp")
 endif()
 
 # --- The harness object library ----------------------------------------------
-# 🔴 A LIBRARY OF ITS OWN, NOT TWO MORE ENTRIES IN SHELL_SOURCES.  Both sources are
+# [!] A LIBRARY OF ITS OWN, NOT TWO MORE ENTRIES IN SHELL_SOURCES.  Both sources are
 # C++, and `shell` is compiled without any of the flags that keep C++ from dragging a
 # runtime into a bare-metal image -- it has never needed them, because until now every
 # C++ translation unit in this firmware lived inside the `tflm` library.  Adding these

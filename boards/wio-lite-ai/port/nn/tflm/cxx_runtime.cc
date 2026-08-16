@@ -10,7 +10,7 @@
  * a line of it.  Its job is to keep the C++ runtime surface of a 384 KB image down to
  * the few functions on this page.
  *
- * 🔴 WHY OUR OWN operator new EXISTS, WHEN NOTHING SHOULD CALL IT.  With
+ * [!] WHY OUR OWN operator new EXISTS, WHEN NOTHING SHOULD CALL IT.  With
  * TF_LITE_STATIC_MEMORY the interpreter serves every allocation from the arena with a
  * bump allocator and never reaches the heap.  But flatbuffers and the odd STL fragment
  * still REFERENCE operator new, and a reference is all the linker needs.  Left
@@ -62,7 +62,7 @@ volatile uint32_t nn_tflm_cxx_new_calls = 0u;
  * hang.  On this board malloc failing means the AXI-SRAM heap is exhausted, which
  * `free` reports and which no retry will fix.
  *
- * 🔴 THE THROWING FORMS MUST NOT RETURN NULL, so they spin instead.  The standard says
+ * [!] THE THROWING FORMS MUST NOT RETURN NULL, so they spin instead.  The standard says
  * the non-nothrow operator new either returns storage or throws ([basic.stc.dynamic]);
  * with -fno-exceptions it cannot throw, and returning null would hand a null pointer to
  * a caller that -- correctly, by the contract -- never checks it.  The fault would then

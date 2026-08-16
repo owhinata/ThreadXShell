@@ -204,7 +204,7 @@ int wifi_rpc_connect(const struct wifi_rpc_opts *o, const char *ssid,
 /*
  * Install a channel plan (issue #40).
  *
- * ⚠️ THE PLAN IS NON-VOLATILE.  Measured on board #2: a plan written here survives a
+ * [!] THE PLAN IS NON-VOLATILE.  Measured on board #2: a plan written here survives a
  * CHIP_EN cycle AND a full board power-down, so this is provisioning, not configuration
  * -- do NOT call it on every boot.  Where the module keeps it was not determined; if it
  * is a write-once fuse array then only bit-SETTING writes will take, which matters

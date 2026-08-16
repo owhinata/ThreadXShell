@@ -19,7 +19,7 @@
  * donor firmware's did not, so the donor had to hardcode (1/128, 0).  That int8 branch
  * had never executed on hardware, which is issue #51.
  *
- * 🔴 It had never executed because "an int8 model" does not mean "an int8 INPUT".  The
+ * [!] It had never executed because "an int8 model" does not mean "an int8 INPUT".  The
  * model this firmware runs -- ST model zoo's blazeface_front_128_int8.tflite -- has
  * int8 WEIGHTS and float32 I/O: its first operator is a QUANTIZE that converts the
  * float input to int8 (scale 1/255, zero point -128), and four DEQUANTIZEs convert the
@@ -39,7 +39,7 @@
  * operator inputs/outputs/intermediates, SignatureDef tensor maps).  What is NOT
  * enumerable is what a METADATA buffer means:
  *
- *   🔴 tflite-micro reads an "OfflineMemoryAllocation" metadata buffer as a tensor
+ *   [!] tflite-micro reads an "OfflineMemoryAllocation" metadata buffer as a tensor
  *   COUNT followed by one offset PER TENSOR INDEX, and fails AllocateTensors() when
  *   the count disagrees with the graph (micro_allocation_info.cc,
  *   GetOfflinePlannedOffsets).  A model carrying it would pass the flatbuffer verifier
@@ -55,7 +55,7 @@
  * The same reasoning applies to debug_metadata_index: this tool does not parse debug
  * metadata, so it will not renumber a graph that references it.
  *
- * 🔴 THE FLATBUFFER BUILDER NEEDS AN EXPLICIT ALLOCATOR HERE.
+ * [!] THE FLATBUFFER BUILDER NEEDS AN EXPLICIT ALLOCATOR HERE.
  * Upstream flatbuffers lets a null allocator mean "use the default one".  The copy
  * vendored into the pinned tflite-micro tree does not -- its Allocate() dereferences
  * the pointer unconditionally (third_party/flatbuffers/include/flatbuffers/
@@ -281,7 +281,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	/* 🔴 A CUSTOM operator's options are an opaque blob.  Nothing in the schema stops
+	/* [!] A CUSTOM operator's options are an opaque blob.  Nothing in the schema stops
 	 * one from holding tensor indices, and nothing in this tool could renumber them --
 	 * the same argument as the metadata allowlist above, applied to the other opaque
 	 * field in the file.  (verify_tflite rejects CUSTOM anyway, because no custom
@@ -416,7 +416,7 @@ int main(int argc, char **argv)
 		       type_name(q_t->type));
 		return 1;
 	}
-	/* 🔴 Per-tensor quantization specifically.  A per-axis input would arrive on the
+	/* [!] Per-tensor quantization specifically.  A per-axis input would arrive on the
 	 * board with TfLiteTensor::params.scale == 0 (the real parameters live in the
 	 * affine quantization struct, which port/nn/nn.h does not expose), and
 	 * nn_camera_start() rejects exactly that.  Producing such a model here would be
@@ -450,7 +450,7 @@ int main(int argc, char **argv)
 
 	/* --- the transform ---------------------------------------------------- */
 
-	/* 🔴 Read off the operator BEFORE erasing it: `q` dangles from the next line on,
+	/* [!] Read off the operator BEFORE erasing it: `q` dangles from the next line on,
 	 *    and the operator code is needed at the end. */
 	const uint32_t q_code_idx = q->opcode_index;
 
@@ -528,7 +528,7 @@ int main(int argc, char **argv)
 
 	/* --- repack ----------------------------------------------------------- */
 
-	/* 🔴 The allocator is not optional here -- see the file header. */
+	/* [!] The allocator is not optional here -- see the file header. */
 	flatbuffers::DefaultAllocator alloc;
 	flatbuffers::FlatBufferBuilder fbb(1024, &alloc);
 	tflite::FinishModelBuffer(fbb, tflite::Model::Pack(fbb, &m));

@@ -36,7 +36,7 @@
  * default address moved with it (shell/cmds/cmd_nor.c) -- that is the one constant
  * outside this file that is tied to the region END rather than to a slot.
  *
- * 🔴 THE GEOMETRY CHANGE IS WHY BLOB_FMT_VER IS NOW 2.  The new slot bases coincide
+ * [!] THE GEOMETRY CHANGE IS WHY BLOB_FMT_VER IS NOW 2.  The new slot bases coincide
  * with the old EVEN slots' header sectors, so a version-1 header would still decode
  * and still verify -- under a different slot number.  See app/blob.c.
  *

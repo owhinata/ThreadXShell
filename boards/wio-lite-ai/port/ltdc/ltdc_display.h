@@ -222,7 +222,7 @@ uint32_t ltdc_refresh_chz(void);
  * Idempotent; on failure it cleans up (display off, HAL_LTDC_DeInit, objects
  * deleted) and leaves ltdc_is_up() false.
  *
- * 🔴 ON SUCCESS THE PANEL IS INITIALIZED BUT DARK (issue #53): the ST7789 has
+ * [!] ON SUCCESS THE PANEL IS INITIALIZED BUT DARK (issue #53): the ST7789 has
  * been woken and the controller configured, but LTDCEN and the backlight are
  * off, so ltdc_is_up() is true while ltdc_scanout_active() is false until
  * ltdc_set_scanout(true) (`lcd on`).  Drawing entry points still write the back
@@ -346,7 +346,7 @@ int ltdc_flip(void);
  * afterwards.  All are no-ops when the display is down.  Coordinates are clipped
  * to the surface.
  *
- * 🔴 COORDINATES ARE LANDSCAPE 320x240, NOT THE PANEL'S 240x320 (issue #38).
+ * [!] COORDINATES ARE LANDSCAPE 320x240, NOT THE PANEL'S 240x320 (issue #38).
  * x is the long axis (0..319), y the short one (0..239).  The frame buffer keeps
  * a 240-pixel stride and the rotation happens in ltdc_display.c, using the
  * mapping the board's factory firmware used:

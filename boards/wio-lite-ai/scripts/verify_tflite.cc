@@ -11,7 +11,7 @@
  * cmake/tflite-micro.cmake already fetched for the `tflm` build.  That matters more
  * than anything else about it:
  *
- *   🔴 IT RUNS tflite::VerifyModelBuffer() ITSELF, not an approximation of it.
+ *   [!] IT RUNS tflite::VerifyModelBuffer() ITSELF, not an approximation of it.
  *
  * The firmware can be built with NN_TFLM_VERIFY=ON and pay 22,936 B of a 384 KB
  * partition to run that function on the board.  Running it here instead costs the
@@ -30,7 +30,7 @@
  *   2. the "TFL3" file identifier at offset 4
  *   3. tflite::VerifyModelBuffer() -- the full structural walk
  *   4. the schema version the runtime understands
- *   5. 🔴 that every operator the model uses is one this FIRMWARE registered
+ *   5. [!] that every operator the model uses is one this FIRMWARE registered
  *
  * Step 5 is the one the board cannot do well.  TFLM's AllocateTensors() returns a
  * single kTfLiteError for "an operator is missing" and "the activations do not fit",

@@ -300,7 +300,7 @@ static void test_threshold(void)
 	blazeface_set_thresh_milli(900);
 	CHECK(blazeface_decode(&stub_model, out, BF_MAX_DET) == 0);
 
-	/* 🔴 and the peak raw score is still reported when NOTHING passes -- that is
+	/* [!] and the peak raw score is still reported when NOTHING passes -- that is
 	 * the whole point of the diagnostic: it separates "the model is dead" from
 	 * "the threshold is too high", which the detection count cannot. */
 	CHECK(CLOSE(blazeface_last_max_score(), 2.0f));

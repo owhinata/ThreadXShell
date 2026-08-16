@@ -61,7 +61,7 @@
  */
 #define BLOB_MAGIC       0x314C4257u   /* bytes 'W','B','L','1' in memory order */
 /*
- * 🔴 VERSION 2 BECAUSE THE SLOT GEOMETRY CHANGED (issue #55).  Slots went from
+ * [!] VERSION 2 BECAUSE THE SLOT GEOMETRY CHANGED (issue #55).  Slots went from
  * 256 KB x 8 to 512 KB x 6, and the new slot bases (0x100000, 0x180000, 0x200000,
  * 0x280000, ...) LAND EXACTLY ON THE OLD EVEN SLOTS' HEADER SECTORS -- payload
  * included, since both start one 4 KB sector in.  A version-1 header written under

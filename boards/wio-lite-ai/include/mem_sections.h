@@ -21,7 +21,7 @@
  * 4 KB in AXI-SRAM -- the other 217 KB was CPU-only data sitting in the one memory
  * the camera's DCMI band (issue #35) has no substitute for.
  *
- * 🔴 NEVER put a buffer a DMA engine will touch in DTCM.  It does not fault: the
+ * [!] NEVER put a buffer a DMA engine will touch in DTCM.  It does not fault: the
  * transfer simply moves nothing, and the failure surfaces much later as data that
  * was never written.
  *
@@ -47,7 +47,7 @@
  * The section is NOLOAD, so the CMSIS startup's .bss zero-fill does not reach it;
  * SystemInit() zeroes the whole span instead, which keeps the "statics start as
  * zero" contract these variables were written against.  Use it for CPU-only data
- * only -- see the 🔴 above.
+ * only -- see the [!] above.
  *
  * Alignment is left to the caller: ThreadX wants 8-byte-aligned stacks, and
  * spelling that at each definition keeps the requirement visible where it applies
@@ -64,7 +64,7 @@
  * non-cacheable window that working set costs one bus transaction per access instead
  * of one per cache line.
  *
- * 🔴 CPU-ONLY, WITH NO EXCEPTIONS.  Everywhere else in this firmware, "PSRAM" and
+ * [!] CPU-ONLY, WITH NO EXCEPTIONS.  Everywhere else in this firmware, "PSRAM" and
  * "safe for DMA" mean the same thing, because the window is non-cacheable and the
  * camera and display drivers rely on that for coherency with no maintenance at all.
  * That is exactly untrue in here.  A buffer a bus master writes will still transfer

@@ -124,7 +124,7 @@ static void ai_print_tensor(struct cli_instance *sh, const char *tag, int idx,
 		 * this firmware is printed as scaled integers -- the same idiom as the fps
 		 * and MHz lines elsewhere.
 		 *
-		 * 🔴 NOT parts-per-million into a fixed "0.%06lu" (issue #51).  That form
+		 * [!] NOT parts-per-million into a fixed "0.%06lu" (issue #51).  That form
 		 * silently misprints any scale >= 1 -- 1.5 came out as "0.1500000" -- and
 		 * output tensors routinely have one.  A quantization scale is the number
 		 * you check when detections look wrong, so it has to survive being read.
@@ -132,7 +132,7 @@ static void ai_print_tensor(struct cli_instance *sh, const char *tag, int idx,
 		float s = t->scale;
 		uint32_t s_int, s_frac;
 
-		/* 🔴 Clamped BEFORE the cast, not after: float -> uint32_t is undefined for
+		/* [!] Clamped BEFORE the cast, not after: float -> uint32_t is undefined for
 		 * NaN and for anything outside the destination's range, and `ai info` is the
 		 * command reached for when a model is already suspect -- it must not be the
 		 * thing that then misbehaves. */
@@ -302,7 +302,7 @@ static int cmd_ai_model_load(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	/*
-	 * 🔴 THE SESSION IS TAKEN BEFORE load_region(), NOT AFTER.  Which staging slot is
+	 * [!] THE SESSION IS TAKEN BEFORE load_region(), NOT AFTER.  Which staging slot is
 	 * "the inactive one" is a function of backend state, so a slot number handed out
 	 * before the claim can be stale by the time it is used: two consoles both ask,
 	 * both are told slot 1, the first wins the session and makes slot 1 ACTIVE, and
@@ -392,7 +392,7 @@ static int cmd_ai_model_load(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	/*
-	 * 🔴 CRC THE COPY IN PSRAM, NOT THE FLASH.  `blob verify` re-reads the NOR and
+	 * [!] CRC THE COPY IN PSRAM, NOT THE FLASH.  `blob verify` re-reads the NOR and
 	 * compares it against the stored value, which says nothing about the bytes that
 	 * are about to be interpreted: a fault anywhere between the NOR and this buffer --
 	 * the driver, the bus, the PSRAM itself -- would pass that check and still hand a
@@ -673,7 +673,7 @@ static int ai_f32_parts(float v, const char **sign, uint32_t *ip, uint32_t *frac
 		*sign = "-";
 		v = -v;
 	}
-	/* 🔴 Clamped BEFORE the cast, not after: float -> uint32_t is undefined for
+	/* [!] Clamped BEFORE the cast, not after: float -> uint32_t is undefined for
 	 * anything outside the destination's range, and this command is reached for when
 	 * a model is already suspect -- it must not be the thing that then misbehaves.
 	 * Same reasoning, same clamp, as the scale in ai_print_tensor(). */
@@ -733,7 +733,7 @@ static int32_t ai_tensor_raw(const struct nn_tensor *t, uint32_t i)
  * then `ai out` reads a run over the constant pattern, and `ai run` then `ai out` reads
  * one camera frame.
  *
- * 🔴 A ZERO SCALE IS NOT A UNIT SCALE.  A per-axis quantized tensor arrives through this
+ * [!] A ZERO SCALE IS NOT A UNIT SCALE.  A per-axis quantized tensor arrives through this
  * API with params.scale == 0 because its real parameters live in the affine-quantization
  * struct port/nn/nn.h does not expose (issue #51, the same fact app/nn_camera.c refuses
  * an input over).  Dequantizing with it would print 0.000000 for every element of a
@@ -894,7 +894,7 @@ static void ai_print_dets(struct cli_instance *sh, const struct bf_det *d, int n
  * Print what the worker's decoder made of the last inference: the detections, or -- for
  * a model the decoder does not recognise at all -- that fact and where to look instead.
  *
- * 🔴 THE TWO CASES MUST NOT PRINT THE SAME THING (issue #57).  A non-BlazeFace model
+ * [!] THE TWO CASES MUST NOT PRINT THE SAME THING (issue #57).  A non-BlazeFace model
  * used to arrive here as `dets: 0`, which reads as "no faces in the frame", beside a
  * `maxscore` that blazeface_decode() had returned too early to touch -- so the number
  * still belonged to whichever model ran before.  Both lines look like a measurement of
@@ -995,7 +995,7 @@ static int cmd_ai_thresh(struct cli_instance *sh, int argc, char **argv)
 /*
  * How long `ai run` lets the sensor settle when it started the stream itself.
  *
- * 🔴 NOT CAMERA_WARM_FRAMES.  That constant belongs to camera_capture_locked() and
+ * [!] NOT CAMERA_WARM_FRAMES.  That constant belongs to camera_capture_locked() and
  * neither stream path uses it (port/camera/camera.c says so explicitly) -- a band
  * stream starts delivering immediately, with the AEC/AWB still converging, so the
  * first frames are badly exposed.  ~8 frame periods at ~13.5 fps is enough for them

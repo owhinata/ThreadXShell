@@ -78,7 +78,7 @@ PSRAM_AI_LENGTH = 2 * 1024 * 1024
 #   cam_frame  DCMI target for a single capture, same file, same reasoning -- its own
 #              declaration spells the cache contract out.
 #
-# 🔴 THEY ARE PASSED IN WITH --noncacheable, NOT LISTED HERE, and for the same reason
+# [!] THEY ARE PASSED IN WITH --noncacheable, NOT LISTED HERE, and for the same reason
 # --require is passed in: every one of them belongs to a BSP_ENABLE_* option, and a
 # name this script demands from a build that never compiled it is reported as "no such
 # object in the image" -- which reads like a placement regression and is not one.

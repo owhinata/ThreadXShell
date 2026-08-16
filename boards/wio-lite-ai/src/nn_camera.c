@@ -38,7 +38,7 @@
  * phase 2c, and blazeface_decode() adds ~250 B (a 64-byte NMS bitmap plus the
  * detection array), so this is ~1.4x the expected peak.
  *
- * 🔴 That margin is thinner than it looks from the phase 2c notes, which recorded
+ * [!] That margin is thinner than it looks from the phase 2c notes, which recorded
  * "DTCM free 15,808 B".  That figure counted the 8 KB main-stack reservation as
  * free; the number the linker ASSERT actually enforces (_dtcm_used_end <=
  * _smsp_stack) was 7,616 B, and this stack spends 3,072 of it.  `free` prints the
@@ -159,7 +159,7 @@ static unsigned nncam_oy_bound(unsigned band, unsigned oh)
  *
  * Layout is HWC (o = (oy*ow + ox) * oc), channel order RGB, matching a 1xHxWxC input.
  *
- * 🔴 For a quantized input the value is the NORMALIZED float put through the
+ * [!] For a quantized input the value is the NORMALIZED float put through the
  * tensor's OWN scale/zero_point, not the donor's hardcoded (rgb - 128).  This
  * board's struct nn_tensor carries the quantization params and the donor's did not,
  * which is the only reason it had to assume (1/128, 0); assuming it here would be
@@ -167,7 +167,7 @@ static unsigned nncam_oy_bound(unsigned band, unsigned oh)
  * on a quantized input.  The 1/scale reciprocal is computed once per band rather
  * than per channel: a vdiv.f32 is ~14 cycles and there are 3 per pixel.
  *
- * 🔴 scale > 0 IS GUARANTEED BY nn_camera_start(), which is why there is no fallback
+ * [!] scale > 0 IS GUARANTEED BY nn_camera_start(), which is why there is no fallback
  * here (issue #51).  There used to be one -- the donor's (rgb - 128) when the scale
  * read back as zero -- and it was not dead code: a PER-AXIS quantized tensor arrives
  * with TfLiteTensor::params.scale == 0, because its real parameters live in the
@@ -266,7 +266,7 @@ static void nncam_band(unsigned band, const uint16_t *px, unsigned rows)
 		return;
 	}
 
-	/* 🔴 Re-read every frame, never cached across a session: `ai model load`
+	/* [!] Re-read every frame, never cached across a session: `ai model load`
 	   rebuilds the interpreter and re-plans the arena, so this pointer moves.
 	   (That load cannot happen WHILE we stream -- it needs the NN session, which
 	   this stream holds -- but the cost of re-reading is one load.) */
@@ -316,7 +316,7 @@ static void nncam_publish(const struct bf_det *d, int n)
 	if (n > 0)
 		memcpy(nncam_dets, d, (size_t)n * sizeof(*d));
 	/*
-	 * 🔴 A DECODER THAT DOES NOT RECOGNISE THE MODEL IS NOT "ZERO FACES" (issue #57).
+	 * [!] A DECODER THAT DOES NOT RECOGNISE THE MODEL IS NOT "ZERO FACES" (issue #57).
 	 * Collapsing blazeface_decode()'s -1 into 0 made every non-BlazeFace model report
 	 * `dets: 0` -- which reads as a measurement -- next to a `maxscore` the decoder had
 	 * returned too early to touch, so that number still belonged to whatever model ran
@@ -333,7 +333,7 @@ static void nncam_step(void)
 	int n;
 
 	/*
-	 * 🔴 DISCARD ANY POST THAT PREDATES THIS ARM, AND DO IT BEFORE ARMING.
+	 * [!] DISCARD ANY POST THAT PREDATES THIS ARM, AND DO IT BEFORE ARMING.
 	 *
 	 * want_frame is what licenses the producer to write the input tensor, so it must
 	 * never still be set when nn_run() starts -- the tensor's arena space is reused by
@@ -354,7 +354,7 @@ static void nncam_step(void)
 	 * can land together.  Discarding it costs one frame; not discarding it costs every
 	 * frame after it.
 	 *
-	 * 🔴 What this does NOT establish is "the post I get back belongs to a fill that
+	 * [!] What this does NOT establish is "the post I get back belongs to a fill that
 	 * started after I armed".  A fill already in flight when the previous step timed
 	 * out completes and posts after this arm, and that is fine -- the guarantee that
 	 * matters comes from the PRODUCER, which clears want_frame BEFORE it posts (see
@@ -531,7 +531,7 @@ int nn_camera_start(int colorbar)
 		return NNCAM_ERR_GEOM;
 	}
 	/*
-	 * 🔴 The quantization parameters have to be USABLE, not merely present (#51).
+	 * [!] The quantization parameters have to be USABLE, not merely present (#51).
 	 * nn_tensor carries ONE scale, and the backend fills it from
 	 * TfLiteTensor::params.scale -- which a PER-AXIS quantized tensor leaves at zero,
 	 * keeping its real parameters in the affine-quantization struct this API does not
@@ -548,7 +548,7 @@ int nn_camera_start(int colorbar)
 	nncam_ow = in->dims[2];
 	nncam_oc = in->dims[3];
 	/*
-	 * 🔴 THE CHANNEL COUNT IS CHECKED BECAUSE nncam_rows() STOPS AT THREE (issue #57).
+	 * [!] THE CHANNEL COUNT IS CHECKED BECAUSE nncam_rows() STOPS AT THREE (issue #57).
 	 * It writes `c < oc && c < 3` channels from an RGB565 pixel, so a four-channel
 	 * input would leave channel 3 of every pixel holding whatever the arena last had --
 	 * no fault, no overrun, just one plane of stale activations fed to the model as if
@@ -629,7 +629,7 @@ int nn_camera_stop(void)
 	 * test but had not yet entered cannot slip through behind us.  Until this
 	 * returns OK, something may still be writing the input tensor.
 	 *
-	 * 🔴 Called UNCONDITIONALLY, not just when the claim is still set.  A previous
+	 * [!] Called UNCONDITIONALLY, not just when the claim is still set.  A previous
 	 * stop that timed out already cleared the claim but left a callback in flight;
 	 * skipping the drain on the retry because "we are not claimed any more" would
 	 * release the arena to `ai bench` with that callback still able to write the
@@ -644,7 +644,7 @@ int nn_camera_stop(void)
 		tx_thread_sleep(1);
 
 	if (rc_band != CAM_BAND_OK || nncam_worker_busy) {
-		/* 🔴 Deliberately do NOT release the session or the OCTOSPI1 guard.  See
+		/* [!] Deliberately do NOT release the session or the OCTOSPI1 guard.  See
 		   nn_camera.h: handing the arena to `ai bench` while a dead-but-not-
 		   returned callback can still write the input tensor is unrecoverable,
 		   whereas holding a session nobody can use is not.  The worker releases

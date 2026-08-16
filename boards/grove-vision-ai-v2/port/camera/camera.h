@@ -153,6 +153,13 @@ void camera_stream_stats(struct camera_stats *out);
  * vendor CIS driver, which has no locking, and the producer uses it too; and
  * between frames is also the only moment a rolling-shutter exposure change
  * does not tear a frame.  When nothing is streaming they apply directly.
+ *
+ * [!] A SUCCESSFUL CALL TURNS camera_auto() OFF (issue #39).  Writing an
+ * exposure by hand is what taking manual control means, and the sensor's own
+ * AEC/AGC is already switched to manual by the write itself -- leaving the flag
+ * set would report an auto mode that is not running.  Note this also freezes
+ * the software white balance, which shares the flag; camera_set_auto(1) hands
+ * both back.  A refused write changes nothing.
  */
 int camera_set_exposure(uint16_t lines);
 int camera_set_gains(uint8_t again, uint16_t dgain);

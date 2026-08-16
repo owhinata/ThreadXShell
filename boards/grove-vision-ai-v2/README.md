@@ -1264,15 +1264,36 @@ That is the finding, and it retires two of the three things #38 proposed:
 removing the byte swap and moving the blit to its own thread both make the CPU
 faster, and the CPU is not what is holding the frame rate.
 
-**What is still unknown** is the pacer's period.  Every run sums to ~63 ms, and
-two models fit the data equally: the datapath delivers one frame per 63 ms
-(15.9 fps is then the ceiling), or it delivers one per ~31.5 ms and this loop
-takes every other one (31.7 fps would then be reachable if total work dropped
-below 31.5 ms -- it is 36.2 ms today, so the margin is 4.6 ms).  The two call
-for opposite conclusions and neither can be told from the numbers above,
-because both predict `wait = 63 ms - work`.  Distinguishing them needs the
-sensor's free-running frame period measured directly, with the LCD sink out of
-the path.
+**The pacer is the datapath, and its period is ~62.5 ms.**  `camera bench`
+settles it by running the producer with no sink attached, so the 26.4 ms blit
+leaves the loop entirely:
+
+| run | work | total | fps |
+|---|---|---|---|
+| `camera bench`, gamma off + sat unity | 9,538 | 62,607 | 15.9 |
+| `camera bench`, gamma on + sat 600 | 17,096 | 62,065 | 16.1 |
+| `camera preview`, gamma on | 43,540 | 62,722 | 15.9 |
+
+**The CPU work varies by 4.6x and the frame period does not move** -- 657 us of
+spread, 1.1%.  That refutes the every-other-frame model outright: with 9,538 us
+of work, a datapath offering a frame every 31.25 ms could not have produced a
+62,607 us period, because the wait would have been capped at one period and the
+total at about 40.8 ms.  It was 62.6 ms.
+
+So the datapath delivers one frame per ~62.5 ms, this loop takes every one of
+them (`sink lcd` reports 0 dropped), and **15.9 fps is the ceiling of this
+configuration**.  Every CPU-side change #38 proposed -- removing the byte swap,
+giving the blit its own thread, overlapping capture with conversion -- makes the
+CPU faster and the preview exactly as fast as it is now.  Time saved in the
+producer is spent in `wait`, which the table above shows three times over.
+
+Raising it means changing what the SENSOR emits, not what this firmware does
+with it: the frame period comes from the OV5647's own timing (the mode table's
+HTS at 0x380C/0x380D is 1852, and VTS is left at the part's default) and from
+`mipi_clock_mhz` in its descriptor.  The MIPI link is not the constraint -- two
+lanes at 220 MHz carry 880 Mbps against the 49 Mbps this mode actually needs.
+That is vendor register work on a part with no TRM here, and it is not tracked
+as an issue until somebody wants the frames.
 
 ## Ethos-U55 inference (`nn`)
 

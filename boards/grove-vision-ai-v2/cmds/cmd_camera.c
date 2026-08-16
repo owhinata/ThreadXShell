@@ -472,6 +472,24 @@ static void cam_note_queued(struct cli_instance *sh, int argc)
 }
 
 /*
+ * Say that a manual exposure or gain has taken `camera auto` off (issue #39).
+ *
+ * The state change is real and the user did not ask for it in so many words, so
+ * it is announced rather than left to be discovered by a later `camera auto`
+ * printing "off".  Only when it actually changed: repeating `camera exposure`
+ * on an already-manual camera should not keep saying so.
+ */
+static void cam_note_manual(struct cli_instance *sh, int was_auto)
+{
+	if (!was_auto || camera_auto())
+		return;
+	cli_print(sh, "           (auto is now OFF: a manual value takes the "
+	              "sensor's own AEC off, and\r\n"
+	              "            freezes the white balance with it.  "
+	              "`camera auto on` hands both back)\r\n");
+}
+
+/*
  * [!] ONE ARGUMENT (issue #54).  This used to take a frame length too, because
  * the IMX219 keeps one at 0x0160/0x0161 and clamps its exposure against it.
  * The OV5647 keeps neither quantity where the IMX219 does -- its frame length
@@ -486,6 +504,7 @@ static int cmd_camera_exposure(struct cli_instance *sh, int argc, char **argv)
 	uint16_t lines, dgain;
 	uint8_t again;
 	uint32_t v;
+	int was_auto = camera_auto();
 
 	if (argc > 1) {
 		if (cli_parse_u32(argv[1], &v) != 0 || v > 0xFFFFu) {
@@ -502,6 +521,7 @@ static int cmd_camera_exposure(struct cli_instance *sh, int argc, char **argv)
 	cam_imx219_get_exposure_gains(&lines, &again, &dgain);
 	cli_print(sh, "exposure : %lu lines\r\n", (unsigned long)lines);
 	cam_note_queued(sh, argc);
+	cam_note_manual(sh, was_auto);
 	return 0;
 }
 
@@ -510,6 +530,7 @@ static int cmd_camera_gain(struct cli_instance *sh, int argc, char **argv)
 	uint16_t lines, dgain;
 	uint8_t again;
 	uint32_t a, d;
+	int was_auto = camera_auto();
 
 	if (argc > 1) {
 		cam_imx219_get_exposure_gains(&lines, &again, &dgain);
@@ -539,6 +560,7 @@ static int cmd_camera_gain(struct cli_instance *sh, int argc, char **argv)
 	          (unsigned long)(dgain / 256u),
 	          (unsigned long)(((dgain % 256u) * 100u) / 256u));
 	cam_note_queued(sh, argc);
+	cam_note_manual(sh, was_auto);
 	return 0;
 }
 

@@ -794,6 +794,15 @@ exposure loops on one part do not average out -- ours would measure a mean the
 sensor had already corrected and correct it again -- so on a part that has one,
 standing down was always the behaviour.
 
+**[!] `camera exposure` and `camera gain` turn auto OFF (issue #39).**  Writing
+a value by hand IS taking manual control, and the sensor's AEC/AGC is already
+switched to manual by the write itself (0x3503) -- so leaving the flag set meant
+`camera auto` reported "on" while the sensor's loop was stopped.  Note that the
+flag is shared, so this freezes the white balance too; the commands say so when
+it happens, and `camera auto on` hands both back.  One flag is deliberate:
+reporting "auto: on" while only one of the two loops runs is exactly the
+confusion this fixes.
+
 `camera auto off` before any measurement that assumes the sensor is holding
 still -- comparing Bayer phases, or reading `camera capture` twice -- since a
 loop adjusting the exposure in between is a variable nobody asked for.

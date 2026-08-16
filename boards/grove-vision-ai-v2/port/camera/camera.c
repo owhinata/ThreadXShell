@@ -1443,6 +1443,35 @@ int camera_stream_stop(void)
 	return CAM_OK;
 }
 
+/*
+ * [!] A MANUAL EXPOSURE OR GAIN TAKES `camera auto` OFF (issue #39).
+ *
+ * The sensor's own writers put its AEC/AGC into manual (0x3503) as part of the
+ * write -- they have to, or the on-chip loop overwrites the value on its next
+ * frame and the command appears to do nothing.  So after a successful write the
+ * HARDWARE is already in manual, and leaving cam_auto_on set meant `camera auto`
+ * reported "on" while the sensor's loop was stopped.  That is the half of this
+ * which is the flag catching up with a register this port had already written,
+ * not a state change invented here.
+ *
+ * The other half IS an added effect and is worth stating plainly: this flag also
+ * gates the software white balance, so a manual exposure freezes the colour
+ * correction as well.  Keeping one flag is deliberate -- reporting "auto: on"
+ * while only one of the two loops is running is the exact confusion this issue
+ * is about, and two flags would need `camera auto` to grow two answers.  The
+ * commands print that it happened rather than doing it silently, and
+ * `camera auto on` hands both back.
+ *
+ * Only on SUCCESS.  A refused write leaves the sensor's loop running, so the
+ * flag must stay as it was -- and a camera that is absent or lost never reaches
+ * here, because cam_api_enter_up() refused first.  The queued (streaming) path
+ * counts as success: the producer will apply it.
+ */
+static void cam_manual_control_taken(void)
+{
+	cam_auto_on = 0u;
+}
+
 int camera_set_exposure(uint16_t lines)
 {
 	int rc;
@@ -1450,6 +1479,7 @@ int camera_set_exposure(uint16_t lines)
 	if (cam_state == CAM_ST_STREAMING) {
 		cam_tune_exposure = lines;
 		cam_tune_req |= CAM_TUNE_EXPOSURE;
+		cam_manual_control_taken();
 		return CAM_OK;
 	}
 
@@ -1458,6 +1488,8 @@ int camera_set_exposure(uint16_t lines)
 		return rc;
 	rc = (cam_imx219_set_exposure(lines) == 0) ? CAM_OK : CAM_ERR_HAL;
 	cam_api_exit();
+	if (rc == CAM_OK)
+		cam_manual_control_taken();
 	return rc;
 }
 
@@ -1469,6 +1501,7 @@ int camera_set_gains(uint8_t again, uint16_t dgain)
 		cam_tune_again = again;
 		cam_tune_dgain = dgain;
 		cam_tune_req |= CAM_TUNE_GAINS;
+		cam_manual_control_taken();
 		return CAM_OK;
 	}
 
@@ -1477,6 +1510,8 @@ int camera_set_gains(uint8_t again, uint16_t dgain)
 		return rc;
 	rc = (cam_imx219_set_gains(again, dgain) == 0) ? CAM_OK : CAM_ERR_HAL;
 	cam_api_exit();
+	if (rc == CAM_OK)
+		cam_manual_control_taken();
 	return rc;
 }
 

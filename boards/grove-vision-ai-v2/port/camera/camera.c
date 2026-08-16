@@ -294,11 +294,30 @@ static const char *cam_fault;
  *    -- blacks lifted to grey.  Observed exactly that way on hardware when
  *    gamma was turned on by itself.
  *
- * 16 is not a guess tuned to one scene: the datasheet fixes the sensor's black
- * level at 64 in RAW10 (which is 16 once the receiver has taken the top eight
- * bits) and at 16 natively in RAW8, so it is the same number either way.
+ * 16 is not a guess tuned to one scene -- but the reason this used to give was
+ * the WRONG SENSOR's (issue #61).  It quoted a datasheet fixing the pedestal at
+ * 64 in RAW10, which is the IMX219's, written when this port drove both parts
+ * and "the datasheet" did not say which; the OV5647's has no such sentence, and
+ * the IMX219 left in issue #54.  The value survives the correction because the
+ * part and the bench agree on it:
+ *
+ *  - the OV5647's BLC target (0x4009) powers up at 0x10 = 16, and the SDK mode
+ *    table this port includes writes 0x4000, 0x4001 and 0x4004 but never
+ *    0x4009 -- so the part runs on that default;
+ *  - measured here on a dark frame with `camera auto off`, the floor spans
+ *    8..16 with per-plane means of 12.9 to 13.6.  `camera raw` says the same
+ *    per Bayer phase (13.0..14.0) with the demosaic out of the path, so the two
+ *    routes agree independently.
+ *
+ * The default is the TOP of that range rather than its mean, and that is the
+ * choice: the curve multiplies whatever is LEFT, so subtracting the mean leaves
+ * one to three counts that encode to 13..28 out of 255.  Confirmed on hardware
+ * -- at `camera black 13` the blacks do not close.  The same measurement rules
+ * out reading 0x4009 as a 10-bit number (a target of 4 would put the floor near
+ * 4, and it does not).
+ *
  * Raising it further trades shadow detail for contrast and is a scene decision
- * -- `camera wb <r> <g> <b> <black>`.
+ * -- `camera black <n>`.
  */
 #define CAM_BLACK_LEVEL_DEFAULT 16u
 

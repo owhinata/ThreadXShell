@@ -58,12 +58,15 @@ struct cam_wb {
 	 * Black level subtracted from every channel BEFORE the gain, clamped at
 	 * zero.
 	 *
-	 * The sensor carries a fixed black pedestal -- 64 counts in RAW10 by
-	 * the datasheet, which is 16 once the receiver has taken the top eight
-	 * bits, and 16 natively in RAW8.  It is not noise and it does not go
-	 * away with exposure: it is a constant added to every pixel, so it
-	 * lifts black off zero and costs contrast directly.  Measured here, the
-	 * darkest pixel in a dim scene sat at 26-41 rather than near zero.
+	 * The sensor carries a fixed black pedestal: the OV5647's BLC target
+	 * (0x4009) powers up at 16 and the mode table never writes it.  It is
+	 * not noise and it does not go away with exposure -- it is a constant
+	 * added to every pixel, so it lifts black off zero and costs contrast
+	 * directly.  Measured here on a dark frame with `camera auto off`, the
+	 * floor spans 8..16 rather than sitting near zero, which is why the
+	 * default subtracts 16 and not the ~13 mean (see camera.c; an earlier
+	 * version of this note argued the number from the IMX219's datasheet,
+	 * a part this port has not had since issue #54 -- issue #61).
 	 *
 	 * Subtracting it before the gain is what makes the gain do what it
 	 * looks like it does; scaling first would multiply the pedestal too.

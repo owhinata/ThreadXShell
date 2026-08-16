@@ -687,7 +687,7 @@ camera stats             producer and sink counters
 camera exposure [lines]  read/set the sensor's exposure
 camera gain [a [d]]      read/set analogue / digital gain
 camera wb [r g b]        read/set the software white balance (256 = unity)
-camera black [n]         black level subtracted before the gain (pedestal 16)
+camera black [n]         black level subtracted before the gain (default 16)
 camera sat [n]           saturation, standing in for a colour matrix
 camera auto [on|off]     the sensor's own AEC + this port's white balance
 camera gamma [on|off]    sRGB encode (off by default)
@@ -870,10 +870,33 @@ simply dark or simply blown while the loop reports success.
 12.92 at the origin, so it multiplies whatever pedestal is left in the data: a
 black level of 16 encodes to 71, and the picture comes out visibly washed out
 with its blacks lifted to grey.  That is exactly what happened on hardware when
-gamma was enabled on its own.  So the black level defaults to 16 alongside it --
-and 16 is not a scene-tuned guess: the datasheet fixes the sensor's pedestal at
-64 in RAW10 (16 after the receiver takes the top eight bits) and at 16 natively
-in RAW8.
+gamma was enabled on its own.  So the black level defaults to 16 alongside it,
+and 16 is not a scene-tuned guess.
+
+Where 16 comes from (issue #61 -- an earlier version of this section justified
+it from the IMX219's datasheet, a part this port lost in issue #54, and the
+OV5647's datasheet has no equivalent sentence):
+
+- the OV5647's BLC target register `0x4009` powers up at `0x10` = 16, and the
+  SDK mode table this port includes writes `0x4000`, `0x4001` and `0x4004` but
+  never `0x4009` -- so the part runs on that default;
+- measured on a dark frame with `camera auto off`, `camera capture` gives plane
+  minima of 8-9, maxima of 15-16 and means of 12.85 (G) to 13.60 (B).
+  `camera raw` agrees per Bayer phase with the demosaic out of the path
+  (12.96-13.96), so the two routes confirm each other rather than one being an
+  artefact of interpolation.
+
+**The default is the TOP of that range, not its mean, and deliberately.**  What
+the sRGB curve multiplies is whatever is LEFT after the subtraction, so taking
+off the mean leaves one to three counts, which encode to 13-28 out of 255.
+Confirmed on hardware: at `camera black 13` the blacks do not close.  The same
+measurement also rules out reading `0x4009` as a 10-bit quantity -- a target of
+4 would put the floor near 4, and it does not.
+
+The pedestal is not quite uniform across the Bayer positions (blue sits about
+0.8 counts above green, and the two greens differ by 0.23), which the single
+scalar here cannot express; that is one count against the three between 13 and
+16, and it belongs with the colour work in issue #37.
 
 ### [!] There is no colour correction matrix, and it shows
 

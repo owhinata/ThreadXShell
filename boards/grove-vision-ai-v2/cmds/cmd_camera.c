@@ -933,10 +933,14 @@ static int cmd_camera_black(struct cli_instance *sh, int argc, char **argv)
 
 	cli_print(sh, "black    : %u  (subtracted before the gain)\r\n",
 	          wb.black);
-	cli_print(sh, "           (the sensor's own pedestal is 16 and does not "
-	              "vary; above that\r\n"
-	              "            you are trading shadow detail for contrast, "
-	              "which is a scene call.\r\n"
+	cli_print(sh, "           (16 is the sensor's BLC target and the TOP of "
+	              "the measured floor,\r\n"
+	              "            which spans 8..16 with a mean near 13 -- the "
+	              "top is the useful\r\n"
+	              "            end, since the gamma curve multiplies whatever "
+	              "is left.  Above 16\r\n"
+	              "            you trade shadow detail for contrast, which is "
+	              "a scene call.\r\n"
 	              "            `camera capture` prints each plane's minimum "
 	              "-- that is the floor)\r\n");
 	return 0;
@@ -1052,7 +1056,7 @@ CLI_SUBCMD_SET_CREATE(camera_subcmds,
 	                  "the sensor's own AEC + this port's white balance",
 	                  "[on|off]", cmd_camera_auto, 1, 1),
 	CLI_CMD_ARG_USAGE(black, NULL,
-	                  "black level subtracted before the gain (pedestal 16)",
+	                  "black level subtracted before the gain (default 16)",
 	                  "[n]", cmd_camera_black, 1, 1),
 	CLI_CMD_ARG_USAGE(sat, NULL,
 	                  "saturation, standing in for a colour matrix "

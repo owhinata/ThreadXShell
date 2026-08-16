@@ -1,23 +1,31 @@
 /*
  * SPDX-License-Identifier: MIT
- * Copyright (c) 2026 Wio Lite AI ThreadX Shell Project
+ * Copyright (c) 2026 ThreadX Shell Project
  */
 /*
- * Host unit test for port/nn/models/blazeface.c (owhinata/wio-lite-ai#9 phase 3).
+ * Host unit test for port/nn/models/blazeface.c (issue #47).
  *
- * The decoder is the one genuinely new piece of arithmetic this phase adds, and it
- * is the piece whose failure mode is silent: wrong anchor indexing, a wrong scale or
- * an off-by-512 in the second group all produce boxes that are plausible on screen
- * and wrong.  On the board the only evidence would be "the rectangle does not sit on
- * the face", which is also what bad exposure, the wrong normalization and a wrong
- * threshold look like.  So it is pinned here, where the expected box can be computed
- * by hand.
+ * The REAL decoder is compiled here, not a copy of its arithmetic -- a transcription
+ * would drift from the firmware's and nothing would notice.  It is testable at all
+ * because blazeface.c reaches into the nn layer through exactly two functions,
+ * nn_output_count() and nn_output(), and nn.h is HAL/ThreadX-free; struct nn_model is
+ * opaque there (nn.c defines it), which is precisely what lets the stub at the top of
+ * this file define its own.
  *
- * blazeface.c reaches into the nn layer through exactly two functions --
- * nn_output_count() and nn_output() -- and nn.h is HAL/ThreadX-free, so the whole
- * decoder runs on the host against the stub at the bottom of this file.  struct
- * nn_model is opaque in nn.h (nn.c defines it), which is precisely what lets the
- * stub define its own.
+ * [!] WHY THIS BOARD GETS A TEST NOW.  The decoder's failures are silent: a wrong
+ * anchor scale or an off-by-512 into the second anchor group draws a plausible
+ * rectangle in the wrong place, and on hardware that is indistinguishable from bad
+ * exposure or a wrong normalization.  Worse, the decoder does not run at all in the
+ * default CONFIG_NN_BACKEND=null build -- it is compiled, but blazeface_decode()
+ * returns -1 without touching anything, because the null backend's stub tensors are
+ * not BlazeFace-shaped.  Exercising it therefore needs a non-default build AND a
+ * generated model on the board.  This file is where the arithmetic is actually
+ * pinned; wio-lite-ai has had the equivalent since its own port, and the truncation
+ * bug that #47 fixes lived in BOTH copies unnoticed.
+ *
+ * The threshold here is the compile-time BF_SCORE_LOGIT (0.405), not a runtime knob
+ * -- that is the one place this board's decoder differs from wio's, so the scores
+ * below are chosen against that fixed value.
  */
 #include "blazeface.h"
 #include "nn.h"
@@ -89,7 +97,7 @@ static void set_tensor(int i, void *data, uint32_t bytes, uint16_t a, uint16_t c
 /*
  * Publish BlazeFace-shaped outputs, deliberately NOT in the order the decoder looks
  * them up: bf_find() is supposed to match on shape, so a build that quietly went
- * back to indexing must fail here.
+ * back to indexing must fail here.  The quiet score is well below BF_SCORE_LOGIT.
  */
 static void publish_blazeface(void)
 {
@@ -138,7 +146,8 @@ static int put384(int gx, int gy, int a, float dx, float dy, float w, float h,
 /* ---------------------------------------------------------------- the tests ---- */
 
 /* A model whose outputs are not BlazeFace-shaped must be a no-op, not a crash: the
- * CONFIG_NN_BACKEND=null build publishes exactly this and `ai dets` calls in anyway. */
+ * CONFIG_NN_BACKEND=null build publishes exactly this and the decoder is called in
+ * anyway (it is linked unconditionally). */
 static void test_not_blazeface(void)
 {
 	struct bf_det out[BF_MAX_DET];
@@ -183,7 +192,6 @@ static void test_decode_512(void)
 	int n;
 
 	publish_blazeface();
-	blazeface_set_thresh_milli(BF_DEFAULT_THRESH_MILLI);
 	put512(8, 8, 0, 0.0f, 0.0f, 25.6f, 25.6f, 2.0f);
 
 	n = blazeface_decode(&stub_model, out, BF_MAX_DET);
@@ -196,6 +204,7 @@ static void test_decode_512(void)
 	CHECK(CLOSE(out[0].score, 0.83333f));
 	CHECK(CLOSE(blazeface_last_max_score(), 2.0f));
 	CHECK(blazeface_last_npass() == 1);
+	CHECK(blazeface_last_nkept() == 1);
 
 	/* a non-zero centre offset shifts the box by dx/128, dy/128 */
 	publish_blazeface();
@@ -257,60 +266,30 @@ static void test_nms(void)
 	CHECK(blazeface_decode(&stub_model, out, 3) == 3);
 }
 
-/* The threshold knob has to reach the comparison, and its two units have to agree. */
+/*
+ * The compile-time threshold has to reach the comparison, and the peak has to be
+ * reported even when nothing passes -- that is what separates "the model is dead"
+ * from "the threshold is too high", which the detection count cannot.
+ */
 static void test_threshold(void)
 {
 	struct bf_det out[BF_MAX_DET];
 
-	/* The default milli IS the donor's tuned logit, to within the resolution of an
-	 * integer milli: sigmoid(0.405) = 0.644127, and inverting the rounded 644 gives
-	 * 0.40449 back.  That 0.0005 of logit is 0.05% of probability -- worth stating
-	 * rather than hiding behind a loose epsilon everywhere else in this test. */
-	blazeface_set_thresh_milli(BF_DEFAULT_THRESH_MILLI);
-	CHECK(blazeface_get_thresh_milli() == BF_DEFAULT_THRESH_MILLI);
-	CHECK(fabs(blazeface_get_thresh_logit() - 0.405) < 1e-3);
-
-	/* p = 0.5 is logit 0 for the algebraic sigmoid too */
-	blazeface_set_thresh_milli(500);
-	CHECK(CLOSE(blazeface_get_thresh_logit(), 0.0f));
-
-	/* round trip through the inverse: sigmoid(logit(p)) == p */
-	for (unsigned milli = 100; milli <= 900; milli += 100) {
-		float x, p;
-
-		blazeface_set_thresh_milli(milli);
-		x = blazeface_get_thresh_logit();
-		p = 0.5f + 0.5f * x / (1.0f + (x < 0.0f ? -x : x));
-		CHECK(CLOSE(p, (float)milli / 1000.0f));
-	}
-
-	/* the poles are clamped, not divided by zero */
-	blazeface_set_thresh_milli(0);
-	CHECK(blazeface_get_thresh_milli() == 1);
-	CHECK(blazeface_get_thresh_logit() < 0.0f);
-	blazeface_set_thresh_milli(100000);
-	CHECK(blazeface_get_thresh_milli() == 999);
-	CHECK(blazeface_get_thresh_logit() > 0.0f);
-
-	/* and it actually filters: raw 2.0 -> reported 0.833 */
+	/* 0.5 is above BF_SCORE_LOGIT (0.405); 0.3 is below. */
 	publish_blazeface();
-	put512(8, 8, 0, 0.0f, 0.0f, 25.6f, 25.6f, 2.0f);
-	blazeface_set_thresh_milli(800);
+	put512(8, 8, 0, 0.0f, 0.0f, 25.6f, 25.6f, 0.5f);
 	CHECK(blazeface_decode(&stub_model, out, BF_MAX_DET) == 1);
-	blazeface_set_thresh_milli(900);
+
+	publish_blazeface();
+	put512(8, 8, 0, 0.0f, 0.0f, 25.6f, 25.6f, 0.3f);
 	CHECK(blazeface_decode(&stub_model, out, BF_MAX_DET) == 0);
-
-	/* [!] and the peak raw score is still reported when NOTHING passes -- that is
-	 * the whole point of the diagnostic: it separates "the model is dead" from
-	 * "the threshold is too high", which the detection count cannot. */
-	CHECK(CLOSE(blazeface_last_max_score(), 2.0f));
+	CHECK(CLOSE(blazeface_last_max_score(), 0.3f));
 	CHECK(blazeface_last_npass() == 0);
-
-	blazeface_set_thresh_milli(BF_DEFAULT_THRESH_MILLI);
+	CHECK(blazeface_last_nkept() == 0);
 }
 
 /*
- * [!] THE REGRESSION THIS CASE EXISTS FOR (issue #47).
+ * [!] THE REGRESSION THIS FILE EXISTS FOR (issue #47).
  *
  * More than BF_MAX_CAND anchors pass the threshold, and the SINGLE STRONGEST one is
  * placed at the LAST anchor of the 8x8 group -- the last thing scanned.  A decoder
@@ -329,7 +308,6 @@ static void test_cap_does_not_truncate(void)
 	int n;
 
 	publish_blazeface();
-	blazeface_set_thresh_milli(BF_DEFAULT_THRESH_MILLI);
 
 	/* A hundred mid-strength candidates in the 16x16 group, which is scanned first
 	 * and would fill any fixed buffer before the 8x8 group is reached.  Written

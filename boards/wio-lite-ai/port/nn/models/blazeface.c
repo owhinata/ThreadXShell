@@ -19,6 +19,21 @@
  * registered unconditionally -- including in the CONFIG_NN_BACKEND=null build,
  * whose stub publishes 1x256x16 int8 and 1x256 float32 and therefore matches
  * nothing here.
+ *
+ * [!] THE SCAN IS NEVER CUT SHORT (issue #47).  This decoder used to stop the
+ * moment its 64-candidate buffer filled, which made two things wrong at once and
+ * neither of them visibly: the reported peak score became the maximum of a
+ * PREFIX of the anchors, and NMS was handed the FIRST 64 candidates rather than
+ * the best 64.  The 16x16 group is scanned first, so a frame that filled the
+ * buffer there meant the 8x8 group was never visited at all -- and the strongest
+ * face in the frame was dropped if it sat in it.  Everything that came out was
+ * still a real detection, which is exactly why it survived inspection.
+ *
+ * So every one of the 896 anchors is visited, always, and the candidate list is
+ * bounded by EVICTION instead: once full, a new candidate replaces the current
+ * weakest.  The fix is the one Grove's decoder shipped with (#45); ported here
+ * with its diagnostics but not its other two departures (computed anchor centres
+ * and tensor descriptors), so the two ports stay comparable.
  */
 #include "blazeface.h"
 #include "nn.h"
@@ -35,7 +50,13 @@
 #define BF_BOX_STRIDE  16         /* 4 bbox + 12 (6 keypoints x 2) per anchor      */
 
 #define BF_NMS_IOU     0.5f
-#define BF_MAX_CAND    64
+
+/* One pre-NMS candidate.  The anchor index rides along so that evicting the
+ * weakest entry from a full list is decidable without consulting scan order. */
+struct bf_cand {
+	struct bf_det det;
+	int           anchor;
+};
 
 /*
  * Anchor cell centres (normalized) + pre-NMS candidate scratch, in the cacheable
@@ -52,18 +73,20 @@
  */
 static float bf_cx[BF_NANCHOR] PSRAM_AI __attribute__((aligned(32)));
 static float bf_cy[BF_NANCHOR] PSRAM_AI __attribute__((aligned(32)));
-static struct bf_det bf_cand[BF_MAX_CAND] PSRAM_AI __attribute__((aligned(32)));
+static struct bf_cand bf_cand[BF_MAX_CAND] PSRAM_AI __attribute__((aligned(32)));
 
 static int bf_anchors_ready;   /* .bss -- see above */
 
-/* Diagnostics: peak raw model response and pre-NMS candidate count of the last
- * decode.  Between them they separate "the model saw nothing" from "the threshold
- * is too high" from "NMS merged everything", which one detection count cannot. */
+/* Diagnostics of the last decode.  Between them they separate "the model saw
+ * nothing" from "the threshold is too high" from "NMS merged everything" from
+ * "the cap bound", which one detection count cannot. */
 static float bf_last_max = -1e9f;
-static int   bf_last_ncand;
+static int   bf_last_npass;
+static int   bf_last_nkept;
 
 float blazeface_last_max_score(void) { return bf_last_max; }
-int   blazeface_last_ncand(void)     { return bf_last_ncand; }
+int   blazeface_last_npass(void)     { return bf_last_npass; }
+int   blazeface_last_nkept(void)     { return bf_last_nkept; }
 
 static float bf_fabsf(float v) { return v < 0.0f ? -v : v; }
 
@@ -173,12 +196,52 @@ static const float *bf_find(struct nn_model *m, int anchors, int chan)
 	return NULL;
 }
 
-/* Decode one anchor group (box[anchors*16], score[anchors]) into bf_cand. */
-static int bf_decode_group(const float *box, const float *score, int anchors,
-                           int anchor_off, int ncand)
+/*
+ * Insert into the bounded top-N candidate list.
+ *
+ * @p nkept is the current occupancy.  Once full the weakest entry is evicted,
+ * which is what makes the list "the best 64" rather than "the first 64".  The
+ * eviction target is the lowest score, ties broken towards the HIGHER anchor
+ * index -- combined with rejecting an incoming exact tie, that makes the kept
+ * set a function of the scores alone and not of the order they arrived in.
+ */
+static int bf_offer(const struct bf_det *d, int anchor, int nkept)
 {
-	for (int i = 0; i < anchors && ncand < BF_MAX_CAND; i++) {
+	int worst;
+
+	if (nkept < BF_MAX_CAND) {
+		bf_cand[nkept].det    = *d;
+		bf_cand[nkept].anchor = anchor;
+		return nkept + 1;
+	}
+
+	worst = 0;
+	for (int i = 1; i < BF_MAX_CAND; i++) {
+		if (bf_cand[i].det.score < bf_cand[worst].det.score ||
+		    (bf_cand[i].det.score == bf_cand[worst].det.score &&
+		     bf_cand[i].anchor > bf_cand[worst].anchor))
+			worst = i;
+	}
+	if (d->score > bf_cand[worst].det.score) {
+		bf_cand[worst].det    = *d;
+		bf_cand[worst].anchor = anchor;
+	}
+	return nkept;
+}
+
+/*
+ * Decode one anchor group (box[anchors*16], score[anchors]) into bf_cand.
+ *
+ * Visits EVERY anchor (issue #47): the peak-score diagnostic and the pass count
+ * are only meaningful over the whole set, and the candidate list is bounded by
+ * eviction rather than by stopping.
+ */
+static int bf_decode_group(const float *box, const float *score, int anchors,
+                           int anchor_off, int nkept)
+{
+	for (int i = 0; i < anchors; i++) {
 		const float *r = box + (size_t)i * BF_BOX_STRIDE;
+		struct bf_det d;
 		float cx, cy, w, h;
 
 		if (!bf_finite(score[i]))           /* reject NaN/Inf scores            */
@@ -187,6 +250,8 @@ static int bf_decode_group(const float *box, const float *score, int anchors,
 			bf_last_max = score[i];
 		if (score[i] <= bf_thresh_logit)    /* pre-sigmoid threshold            */
 			continue;
+
+		bf_last_npass++;
 
 		cx = r[0] / BF_INPUT + bf_cx[anchor_off + i];
 		cy = r[1] / BF_INPUT + bf_cy[anchor_off + i];
@@ -197,20 +262,21 @@ static int bf_decode_group(const float *box, const float *score, int anchors,
 		if (w <= 0.0f || h <= 0.0f)
 			continue;
 
-		bf_cand[ncand].x = cx - w * 0.5f;
-		bf_cand[ncand].y = cy - h * 0.5f;
-		bf_cand[ncand].w = w;
-		bf_cand[ncand].h = h;
-		bf_cand[ncand].score = bf_sigmoid(score[i]);
-		ncand++;
+		d.x     = cx - w * 0.5f;
+		d.y     = cy - h * 0.5f;
+		d.w     = w;
+		d.h     = h;
+		d.score = bf_sigmoid(score[i]);
+
+		nkept = bf_offer(&d, anchor_off + i, nkept);
 	}
-	return ncand;
+	return nkept;
 }
 
 int blazeface_decode(struct nn_model *m, struct bf_det *out, int max)
 {
 	const float *box512, *scr512, *box384, *scr384;
-	int ncand = 0, nout = 0;
+	int nkept = 0, nout = 0;
 	uint8_t used[BF_MAX_CAND] = { 0 };
 
 	if (!m || !out || max <= 0)
@@ -226,10 +292,13 @@ int blazeface_decode(struct nn_model *m, struct bf_det *out, int max)
 	if (!bf_anchors_ready)
 		bf_gen_anchors();
 
-	bf_last_max = -1e9f;
-	ncand = bf_decode_group(box512, scr512, BF_A512, 0, ncand);
-	ncand = bf_decode_group(box384, scr384, BF_A384, BF_A512, ncand);
-	bf_last_ncand = ncand;
+	bf_last_max   = -1e9f;
+	bf_last_npass = 0;
+	bf_last_nkept = 0;
+
+	nkept = bf_decode_group(box512, scr512, BF_A512, 0, nkept);
+	nkept = bf_decode_group(box384, scr384, BF_A384, BF_A512, nkept);
+	bf_last_nkept = nkept;
 
 	/* Hard NMS: repeatedly take the highest-scoring unused box, suppress the
 	 * rest that overlap it beyond BF_NMS_IOU. */
@@ -237,18 +306,19 @@ int blazeface_decode(struct nn_model *m, struct bf_det *out, int max)
 		int best = -1;
 		float best_s = 0.0f;
 
-		for (int i = 0; i < ncand; i++)
-			if (!used[i] && bf_cand[i].score > best_s) {
-				best_s = bf_cand[i].score;
+		for (int i = 0; i < nkept; i++)
+			if (!used[i] && bf_cand[i].det.score > best_s) {
+				best_s = bf_cand[i].det.score;
 				best = i;
 			}
 		if (best < 0)
 			break;
 
-		out[nout++] = bf_cand[best];
+		out[nout++] = bf_cand[best].det;
 		used[best] = 1;
-		for (int i = 0; i < ncand; i++)
-			if (!used[i] && bf_iou(&bf_cand[best], &bf_cand[i]) > BF_NMS_IOU)
+		for (int i = 0; i < nkept; i++)
+			if (!used[i] &&
+			    bf_iou(&bf_cand[best].det, &bf_cand[i].det) > BF_NMS_IOU)
 				used[i] = 1;
 	}
 	return nout;

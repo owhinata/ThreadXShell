@@ -345,8 +345,15 @@ static int cmd_ai_stream_stats(struct cli_instance *sh, int argc, char **argv)
 	nn_camera_stats_get(&s);
 	ai_print_stats(sh, &s);
 	ai_print_dets(sh);
-	cli_print(sh, "maxscore %ld  norm %s  (diagnostic)\r\n",
+	/* pass and kept are two different numbers (issue #47): pass is every anchor
+	 * over the threshold, kept is how many of those the 64-entry candidate list
+	 * held.  They differ only when the cap bound, and then the kept ones are the
+	 * highest-scoring -- but NMS saw only those.  Printed beside maxscore because
+	 * that is the number consulted when the boxes look wrong, and until #47 it
+	 * was the maximum of however much of the scan had run. */
+	cli_print(sh, "maxscore %ld  pass %d  kept %d (cap %d)  norm %s  (diagnostic)\r\n",
 	          (long)(blazeface_last_max_score() * 100.0f),
+	          blazeface_last_npass(), blazeface_last_nkept(), BF_MAX_CAND,
 	          nn_camera_get_norm() ? "[-1,1]" : "[0,1]");
 	return 0;
 }

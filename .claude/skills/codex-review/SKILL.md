@@ -47,14 +47,18 @@ plugin のバージョン番号をハードコードしないこと（更新で�
 
 ```bash
 node "$(ls -d "$HOME"/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs \
-        | sort -V | tail -1)" task --effort xhigh --prompt-file /abs/path/to/plan-review.md
+        | sort -V | tail -1)" task --effort medium --prompt-file /abs/path/to/plan-review.md
 ```
 
 （コマンドは **`node` で始める**こと。先頭に変数代入を置くと `Bash(node:*)` の
 permission ルールに当たらず毎回プロンプトが出る。）
 
 - `--write` は**付けない**。付けなければサンドボックスは `read-only`（レビューに書込は不要）。
-- `--effort` は `xhigh`（Wio 側はブリックリスクがあるゲートなので最大で回す）。
+- `--effort` は `medium`（2026-08-13 のユーザー指示。これが既定で、`xhigh` は使わない）。
+  medium でも BLOCKING は的確に出る — Grove の plan レビューは medium の 3 ラウンドで収束した。
+  **所要は effort よりスコープの広さで決まる**: 実測で 3 面フル 18 分 / 差分限定 6 分、
+  実ファイル走査を伴う plan（#57）は medium でも 30 分超。時間が問題なら effort を上げ下げ
+  するより**観点を絞る**（面を減らす / focus を 1〜2 問にする）方が効く。
 - **`Bash(run_in_background: true)` で起動して待つ**。plan review は毎回 120s を超えるので
   フォアグラウンドだとツール側でタイムアウトする。出力ファイルを読んで結果を取る。
   （スコープを削ってフォアグラウンドに収めると根拠の薄いレビューになる方が損。）

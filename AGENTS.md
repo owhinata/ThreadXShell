@@ -72,6 +72,8 @@
    boot ターゲットの LTO 有効化も不可（ゲートが読む呼び出しグラフの辺が消える）。
    boot ソース / ROM ldscript の変更は `cmake/boot_manifest.sha256` と golden hash の
    両方の更新を伴い、レビュー済み例外を要する。
+   ブート経路・継承クロック・ゲートの中身は `boards/wio-lite-ai/README.md`、
+   復旧手順は `boards/wio-lite-ai/boot/README.md`。
 
 7. **Wio Lite AI: RAM 配置ポリシー**: AXI-SRAM（320KB @ 0x24000000）= バスマスタから見える
    必要があるものだけ（**DMA が届く唯一の RAM**）/ DTCM（128KB @ 0x20000000）= CPU 専用 /
@@ -103,6 +105,8 @@
    実行窓 0xC0700000）。**バンクをまたぐ配置変更は FE / キャッシュコヒーレンシに直結する**。
    `.sdram` は単一出力セクションで境界シンボルが常設されるため、ASSERT だけでは
    属性の脱落を検出できない — だから `check_f746_layout.py` のシンボル常駐検査がある。
+   詳細（クロック / コンソール / バンク割当ての理由 / ゲート）は
+   `boards/f746g-disco/README.md`。
 
 8c. **f746g-disco: 3 つの割込みハンドラは強シンボルでなければならない**
    （`PendSV_Handler` / `SysTick_Handler` / `USART1_IRQHandler`）。stock CMSIS startup は

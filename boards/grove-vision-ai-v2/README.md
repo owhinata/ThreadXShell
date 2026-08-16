@@ -1471,10 +1471,29 @@ earlier runs exactly: at `camera sat 256` W is 4,360, the condition needs 31,654
 and VTS 1010 (32,074) clears it by 420 us -- which is why that run showed all 456
 frames while the same VTS at the default settings dropped half.
 
-**The default VTS is still 1968** and this section is not a recommendation to
-change it: `nn preview` has a different W (the inference), so by the condition
-above it wants ~1492 where `camera preview` wants 1160.  One global setting still
-cannot serve both.
+`nn preview` measures out at the SAME condition, and the answer there is the
+default:
+
+| `nn preview` | pack | sink | W | period | shown | dropped |
+|---|---:|---:|---:|---:|---:|---:|
+| VTS 1492 | 7,934 | 11,494 | 19,802 | 47,231 | 10.6 | 56/112 |
+| **VTS 1968** | 7,930 | 22,987 | 31,291 | 63,047 | **15.8** | **0** |
+
+7.9 fps at issue #38, 8.9 at #57, **15.8 now, with every frame shown** -- and the
+setting that does it is the one the board already boots with.
+
+**[!] AND THE FIRST OF THOSE TWO ROWS CANNOT PREDICT THE SECOND.**  Reading a W
+of 19,802 off the VTS 1492 run gives a required period of 47.1 ms and says
+VTS 1492 is nearly right, which is how this section first got written -- and it
+is wrong by 16.6 ms.  The reason is that `sink` is per ITERATION: when the panel
+is busy the overlay sink returns early WITHOUT running the inference, so on a run
+that drops half its frames the row averages a full consume with a skipped one.
+Feeding that average into a condition that asks "what would it cost if nothing
+dropped" is circular -- the drops are what made the number small.  **Take W from
+a run with zero drops, or from `sink` doubled.**
+
+So the two previews want 1160 and 1968, and one global VTS still cannot serve
+both -- but the default now serves the harder of the two exactly.
 
 **[!] `camera stats`'s `sink` row is per ITERATION, not per delivery.**  With
 drops in play the two differ a lot: `nn preview` at VTS 1770 prints 11,594 us

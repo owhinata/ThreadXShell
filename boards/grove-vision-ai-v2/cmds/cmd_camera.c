@@ -841,12 +841,17 @@ static int cmd_camera_vts(struct cli_instance *sh, int argc, char **argv)
 		cli_print(sh, "  (this sensor's frame length is not readable "
 		              "here)\r\n");
 
-	/* [!] NOT vts x 31.5 us.  The datapath is one-shot, so a frame costs the
+	/* [!] NOT vts x 31.8 us.  The datapath is one-shot, so a frame costs the
 	 * producer's work plus a whole active frame (15.1 ms) and the result is
 	 * rounded UP to a multiple of the sensor's period -- which is why 984 and
 	 * 1968 both measure 62 ms today.  Saying the naive formula here would
-	 * invite exactly the tuning that falls off the cliff at 1860. */
-	cli_print(sh, "           (period = vts x 31.5 us, but ROUNDED UP to a "
+	 * invite exactly the tuning that falls off the cliff at 1860.
+	 *
+	 * 31.8 and not the 31.507 this used to print: that figure is HTS 1852
+	 * over a 58.8 MHz PCLK, and every N=1 run measures about 0.9% higher --
+	 * 450 us at these frame lengths, the same order as the margin somebody
+	 * reading this line would be tuning against. */
+	cli_print(sh, "           (period = vts x 31.8 us, but ROUNDED UP to a "
 	              "whole one that fits\r\n"
 	              "            the producer's work + 15.1 ms -- so lowering "
 	              "vts often changes\r\n"

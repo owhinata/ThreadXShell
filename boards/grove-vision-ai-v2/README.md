@@ -1060,10 +1060,11 @@ the measurement means nothing at all.
 
 1. **The DMA'd frame must be cache-invalidated before the CPU reads it.**  The
    shipping vendor glue invalidates only the 32-byte JPEG size word and never
-   the 225 KB WDMA3 buffer, so this omission is easy to inherit.  The result is
+   the 225 KB WDMA3 frame, so this omission is easy to inherit.  The result is
    a frame that is mostly right and partly the previous one.  Invalidate after
    frame-ready (which is the statement that the write-DMA has stopped) and
-   before reading.
+   before reading -- and since issue #59 only the COMPLETED landing buffer,
+   never its sibling, which the DMA is about to be handed.
 2. **`lcd_blit()` wants wire order (big-endian) and the pipeline carries
    little-endian.**  `lcd_blit_le()` exists so the driver owns that swap.
    Publishing wire-order pixels under a `FRAME_FMT_RGB565` tag would be cheaper
@@ -1124,6 +1125,16 @@ Errors have priority over frames: the callback's error latch is sticky and is
 checked before the frame-ready flag, so a wakeup carrying both never publishes a
 frame produced by a datapath that has already failed.  Any negative status the
 port does not recognise is treated as terminal.
+
+**[!] Since issue #59 the latch is re-read a second time, immediately before
+publishing.**  With the arm moved ahead of the work, "the datapath faulted" and
+"this frame came from that operation" stopped being one statement: a status can
+now arrive DURING pack and consume, and the arm itself can latch one that
+belongs to the current iteration (a premature disable the mask failed to
+contain).  The frame being discarded was itself verified good -- that is the
+intended cost of fail-closed, one frame at teardown.  The pre-existing hole (a
+status raised late for frame N and seen only at the next loop top) is unchanged
+in kind.
 
 ### Chip revision C needs a per-frame MIPI bounce
 
@@ -1321,21 +1332,28 @@ period = T_s * ceil((W + T_active) / T_s)
   W        = the producer's own work
 ```
 
+**[!] The `T_active` term is HISTORY since issue #59** -- the datapath is
+double-buffered now and the capture overlaps `W`, so the current condition is
+`period = T_s * ceil(W / T_s)`; see "The T_active term is gone" below.  The
+measurements in this section were taken on the one-shot datapath and are kept
+as the record that established the model.
+
 The line time here is the measured 31.8 us, **not** the 31.507 that HTS 1852 over
 a 58.8 MHz PCLK gives.  This block used to quote the datasheet figure while the
 frame-length section below said it was wrong, so the page contradicted itself.
 The measurement, and why 0.9% matters next to the cliff, are under
 "The line time is 31.77..31.87 us" in that section.
 
-**The datapath is one-shot.**  The producer arms it only after consuming the
-last frame, so every period contains the wait for the next frame start plus a
-whole active frame -- and the total is then rounded UP to a multiple of the
-sensor's period.  That single `ceil` explains everything the earlier runs made
-look mysterious: why exposure changed nothing (it never touched VTS), why 984
-and 1968 measure the same 62 ms (N=2 against N=1), and why 504 gave 47.8 ms
-rather than the 16 ms its frame length alone implies (N=3).
+**The datapath WAS one-shot with a single landing buffer.**  The producer armed
+it only after consuming the last frame, so every period contained the wait for
+the next frame start plus a whole active frame -- and the total is then rounded
+UP to a multiple of the sensor's period.  That single `ceil` explains everything
+the earlier runs made look mysterious: why exposure changed nothing (it never
+touched VTS), why 984 and 1968 measure the same 62 ms (N=2 against N=1), and why
+504 gave 47.8 ms rather than the 16 ms its frame length alone implies (N=3).
+(The `ceil` survives issue #59; the serialised `T_active` inside it does not.)
 
-**[!] The optimum is a cliff edge.**  With today's producer, W + T_active is
+**[!] The optimum is a cliff edge.**  At the W of the day, W + T_active was
 58.7 ms.  VTS 1968 clears it with margin (N=1, 62 ms).  VTS **1860** gives
 T_s = 58,603 us -- **60 us short** -- so N becomes 2 and the frame rate HALVES
 to 8.5 fps.  Any VTS tuned to sit just above the current work is one `camera
@@ -1635,8 +1653,70 @@ at runtime, with no flash.
 The exposure ceiling moves the other way for once: 1550 allows 49.3 ms of
 integration against 28.0 at 880, so a dim scene gets more light, not less.
 
-Issue #59 removes `T_active` from the capture condition altogether, at which
-point every row here moves again.
+### [!] The T_active term is gone since issue #59: two landing buffers
+
+Issue #59 doubled the WDMA3 landing buffer (`.cam_raw` is 450 KB now, two
+frames) and moved the arm to the FRONT of the producer's iteration: the capture
+of frame N+1 runs on the other buffer while the CPU packs, infers and publishes
+frame N.  The active frame time left the critical path, and the conditions are
+now:
+
+```
+zero drops  <=>  B <= period        and    period = T_s * ceil(W / T_s)
+```
+
+For the first time one frame length serves BOTH previews -- `camera preview`'s
+period is bounded by B under every T_s that `nn preview`'s W accepts.
+
+**Measured on the flashed image** (rev D, 200-frame runs): at the default
+VTS 1060, `nn preview` AND `camera preview` both measure **29.6 fps with 0 of
+200 dropped**, per-buffer counts 100/100, no premature disables, `arm`
+43 us/frame, and `nn preview`'s `wait` collapsed to 1,362 us -- the capture
+really does run under the work now, and that wait IS the 4.0% margin.  At
+VTS 1048 `nn preview` measures 29.9 fps, 0/200.  The contention question
+answered itself small: W is 32,381 us against #71's serialised 32,223, so
+overlapping the WDMA3 write with the pack, the SPI DMA and the NPU costs
+**+0.5%**.
+
+The default is **VTS 1060**, NOT the 30.0 fps row: 1048's measured margin is
+2.6..3.6% and T_s itself wandered 340 us between two runs at that VTS --
+inside the >= 4% rule issues #38 and #71 paid for.  `camera vts 1048` buys the
+round number at the bench; issue #60 is what makes 30 fps comfortable rather
+than exact.  The table in cam_sensor_ov5647.c is the authority.
+
+**How the flip works, and what defends it** (the machine and its hardware rules
+live in `port/camera/cam_wdma3.{h,c}` -- disassembled facts, since the SVD names
+these registers but describes nothing):
+
+- The channel addresses are programmed only while xDMA is DISABLED (the
+  vendor's own ordering; whether STARTADDR latches at the enable edge is
+  undocumented, so writing it live cannot be justified).  The WDMA3 interrupt
+  is masked across the disable -- a disable can raise
+  `ERR_DIS_BEFORE_FINISH`, which this port's closed classification makes
+  terminal -- via the WDMA3-specific mask pair, NOT `hx_drv_xdma_set_mask()`,
+  which writes both mask registers wholesale and would destroy the configured
+  mask.  The mask is restored on every exit, fault paths included.
+- At every frame-ready the six channel registers are read back and compared
+  with the buffer that was armed; a mismatch is a fault, not a counted anomaly.
+  **That proves "nothing moved the configuration", not "the hardware wrote
+  here"** -- the getters echo programmed values.  What proves the alternation is
+  real: the host test (`test/test_cam_wdma3.c`, the real module against mock
+  registers) and the `buffers` row of `camera stats`, whose two counts must
+  advance together.  A flip that silently became a no-op is a working preview
+  at the OLD frame rate, which nothing else can tell from a working one.
+- The status audit at the arm is fail-closed: only the premature-disable bit
+  may be acknowledged (counted first, from the pre-acknowledge sample, and the
+  readback after the acknowledge must come back clean), anything else refuses
+  the arm.  `camera stats` prints the count only when it is non-zero;
+  acceptance requires it absent.
+
+**Tearing is still impossible rather than unlikely, and issue #48's guarantee
+got stronger.**  One arm per iteration means at most one capture in flight, and
+the flip happens only at the next frame-ready -- so the buffer the model reads
+is stable for the producer's WHOLE iteration, not just until a re-arm.  The
+rev-C bounce path keeps the old serialised order (bouncing the receiver every
+frame leaves no defined place to arm early); it uses the same transitions at a
+later point, and it is unreachable on the rev-D board here.
 
 ## Ethos-U55 inference (`nn`)
 
@@ -2170,12 +2250,15 @@ argument that it might be.
 
 ### Inference runs on the camera producer thread
 
-Not on a worker, and it STAYED there when the blit left (issue #57).  The
-producer re-arms WDMA3 only after every sink has consumed -- the SDK gates the
-next frame on `sensordplib_retrigger_capture()` -- so the raw frame the model
-reads is stable exactly until `consume()` returns, and nowhere else.  Moving the
-inference would mean feeding the model a buffer the datapath had been let loose
-on.
+Not on a worker, and it STAYED there when the blit left (issue #57) and again
+when the capture went double-buffered (issue #59).  The raw frame the model
+reads is the COMPLETED landing buffer, which the datapath cannot touch again
+before the producer's next frame-ready flips the pair -- so it is stable for the
+producer's whole iteration, and `consume()` runs inside that iteration.  Moving
+the inference to another thread would take it outside that window and feed the
+model a buffer the datapath had been let loose on.  (Before #59 the guarantee
+was narrower -- the single buffer was stable only until the re-arm at the END of
+`consume()` -- so the early arm strengthened it rather than costing it.)
 
 A worker thread would decouple the frame rate, at the price of drawing last
 frame's boxes on this frame.  That is the harder failure to see: at 8 fps a

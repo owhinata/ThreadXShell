@@ -40,74 +40,65 @@ static int ov5647_read_frame_length(uint16_t *lines);
  *
  * TWO CONDITIONS DECIDE IT, and they are not the same condition.
  *
- * The CAPTURE period is quantised, because the datapath is one-shot: after the
- * producer arms it, the capture waits for the next frame start and then takes a
- * whole active frame to arrive.
+ * The CAPTURE period is quantised.  Since issue #59 the datapath is
+ * double-buffered and the producer arms the next capture BEFORE working on the
+ * frame it has, so the active frame time left the critical path:
  *
- *     period = T_s * ceil((W + T_active) / T_s)
+ *     period = T_s * ceil(W / T_s)        (was ceil((W + T_active) / T_s))
  *
  * The DISPLAY needs the panel thread to keep up:
  *
  *     B <= period         B = the panel thread's service time (the `blit` row)
  *
- * [!] THAT USED TO BE `S + B < period` -- A SUM, not a max (issue #64), where S
- * was the inference the sink runs on the producer.  Issue #71 removed the S
- * term by returning the pipeline pin at the staging seam instead of after the
- * transfer: the release now happens inside consume(), so the window in which
- * the sink counts as busy is contained in S rather than following it.  The
- * measured hold is 775 us against a 26.5 ms transfer.  Anything derived from
- * the old sum -- the candidate table this comment used to carry, and the 880 it
- * chose -- was recomputed rather than adjusted.
+ * (Issue #64 made that a sum, S + B; issue #71 made it this max again by
+ * returning the pipeline pin at the staging seam.  History in those issues.)
  *
- * MEASURED at issue #71, board rev D, 200-frame runs:
+ * MEASURED at issue #59, board rev D, 60- and 200-frame runs:
  *
- *     T_active = 15.1 ms          B = 26,437..26,466 us
- *     hold     = 773..784 us      line time = 31.70..31.84 us
- *     W = 32,223 us for `nn preview` (S = 23,937), 9,201 for `camera preview`
+ *     T_active = 15.1 ms (no longer on the critical path)
+ *     B = 26,461 us               line time = 31.7..32.0 us (it wanders ~1%)
+ *     W = 32,381 us for `nn preview`, ~9.2 ms for `camera preview`
  *
- * So `nn preview` needs T_s > W + T_active = 47,323 us to take N=1, and that is
- * now the only binding condition -- B is comfortably under it.
+ * The overlap's own price: `arm` 43 us/frame, and W grew 158 us (+0.5%) over
+ * issue #71's serialised measurement -- the WDMA3 write now runs concurrently
+ * with the pack, the SPI DMA and the NPU, and that is what the concurrency
+ * costs on this interconnect.  Measured, because it could not be predicted.
  *
- *     VTS   nn preview   camera preview   margin on 47,323
- *     880      17.8 fps       35.7 fps     (N=2)
- *    1480      10.6           --            -262 us
- *    1500      16.8           --             +317 us
- *    1550      20.2           20.3         +1,964 us
- *    1600      19.6           --           +3,554 us
+ * So `nn preview` needs T_s > W = 32,381 us for N=1, and B sits under every
+ * such T_s -- for the first time one frame length serves BOTH previews:
  *
- * WHY 1550.  The best measured `nn preview` with a margin that survived, which
- * is not the same as the best measured `nn preview`.
+ *     VTS    T_s measured     nn preview          margin on W
+ *    1013   32,319 us         (below W: N=2)         --
+ *    1048   33,236..33,578    29.9 fps, 0/200 drop   2.6..3.6%
+ *    1060   33,726..33,827    29.6 fps, 0/200 drop   4.0%
  *
- * [!] 1500 IS WHY THE MARGIN IS NOT TRIMMED.  Its 317 us is 0.67%, and the line
- * time itself moves 31.70..31.84 across measurement points -- +-0.2%, or +-95 us
- * at this frame length -- so the margin sat inside the model's own error.  It
- * measured 16.8 fps against a predicted 21.0, and the period came out 59,469 us,
- * which is NOT a multiple of T_s: about a quarter of the frames slipped to N=2.
- * That is the second demonstration of this after issue #38's VTS 1540/1580, and
- * the first where it appeared as a FRACTION of frames rather than as every other
- * one.  1480 is the negative control: 411 us the other side of the boundary,
- * 10.6 fps, exactly N=2.
+ * `camera preview` at 1060 measures the same 29.6 fps, 0/200 dropped -- the
+ * first default that serves both.
+ *
+ * WHY THE DEFAULT IS NOT THE 1048 ROW.  Its margin is inside the band the
+ * project rule bars: two measured cliffs say a thin margin degrades
+ * statistically rather than cleanly (issue #38's VTS 1540, 60 us short, every
+ * other frame lost; issue #71's VTS 1500, 0.67% margin, a quarter of frames
+ * slipped) -- and here T_s itself wandered 340 us between two runs at the same
+ * VTS, which is the 1048 row's whole margin.  Hence: keep 4% or more, default
+ * 1060, and `camera vts 1048` buys the round 30.0 at the bench when wanted.
+ * Issue #60 cuts W and is what makes 30 fps comfortable rather than exact.
  *
  * [!] AND THE LINE TIME IS NOT 31.507 us.  That figure is HTS 1852 / PCLK
- * 58.8 MHz; every N=1 run gives period/VTS about 0.9% higher.  Predictions from
- * the datasheet figure run optimistic by roughly 450 us at these frame lengths
- * -- the same order as the margin being reasoned about.  `camera vts` explores
- * all of this without a flash.
+ * 58.8 MHz; every N=1 run gives period/VTS higher, 31.7..32.0 across the #59
+ * sweep.  Predictions from the datasheet figure run optimistic by the same
+ * order as the margin being reasoned about.  `camera vts` explores all of this
+ * without a flash.
  *
- * THE PRICE IS `camera preview`, and it is not small: 35.7 -> 20.3 fps.  Its own
- * W is only 9.2 ms, so its period is entirely T_s, and a single frame length
- * cannot serve both -- `nn preview` wants T_s above 47.3 ms, `camera preview`
- * wants it as small as B allows.  This value chooses `nn preview`, which is what
- * issue #56 is about; `camera vts 880` hands the other one back at runtime.
+ * The EXPOSURE ceiling, which the frame length also bounds, follows the value
+ * down: 1060 allows 33.4 ms of integration against 49.3 at the old 1550.  A dim
+ * scene keeps `camera vts` for longer frames -- the trade is now light against
+ * frame rate, not one preview against the other.
  *
- * The EXPOSURE ceiling, which the frame length also bounds, moves the other way
- * for once: 1550 allows 49.3 ms of integration against 28.0 at 880, so a dim
- * scene gets more light rather than less.
- *
- * [!] RE-MEASURE AFTER ANY CHANGE TO W OR B.  Issue #59 removes T_active from
- * the capture condition altogether, at which point every row above moves.
+ * [!] RE-MEASURE AFTER ANY CHANGE TO W OR B.  The next mover is issue #60
+ * (preprocess/overlay), which cuts W and moves every row again.
  */
-#define OV5647_DEFAULT_VTS  1550u
+#define OV5647_DEFAULT_VTS  1060u
 
 /* The mode outputs 480 lines; VTS below that plus the part's own blanking is
  * not a frame.  Linux's 504 for this mode is the practical floor, and it is

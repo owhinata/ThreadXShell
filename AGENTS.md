@@ -270,8 +270,16 @@
    - **DMA が触るバッファを TCM に置かない**（fault せず無言で転送されない）。
      `.cam_raw` / `.cam_slots` は SRAM NOLOAD で、`check_placement_budget.py` の
      RESIDENCY がシンボル→サイズ→セクション→領域を pin する。**外さない。**
-   - **WDMA3 バッファは frame-ready 後・CPU 読取前に全長 invalidate する**
-     （ベンダのグルーは 32B の JPEG サイズ語しか invalidate しない。真似しない）。
+   - **WDMA3 バッファは frame-ready 後・CPU 読取前に、完了した面だけ全長 invalidate する**
+     （ベンダのグルーは 32B の JPEG サイズ語しか invalidate しない。真似しない。
+     #59 以降 landing buffer は 2 面で、DMA が書いている側の面には触れない）。
+   - **[!] WDMA3 のチャネルアドレスを書くのは `cam_wdma3.c` だけ、かつ xDMA を
+     disable してから**（enable 中の書換えは根拠が無い。#59）。disable を跨ぐ
+     マスクは **WDMA3 専用の `hx_drv_xdma_get/set_WDMA3INTMask` ペア**で行い、
+     `hx_drv_xdma_set_mask()` は使わない（両マスクレジスタを丸ごと書き潰す）。
+     マスクは fault 経路も含む**全ての出口で復元**する。arm 時のステータス監査は
+     fail-closed（acknowledge してよいのは premature-disable のみ・カウント必須・
+     再読出しで clean を要求）。**緩める変更は不可。**
    - **停止は単一ルーチン `cam_imx219_full_stop()` に収束させる**（正常停止 /
      timeout / terminal / bring-up 失敗の 4 経路とも）。**再開はバリア**:
      フル停止で静止させてから clear → pending clear → semaphore drain → 再 arm。

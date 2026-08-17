@@ -458,10 +458,20 @@ static void cam_print_profile(struct cli_instance *sh,
 	          (unsigned long)(st->prof_total_us / st->prof_iters),
 	          (unsigned long)(fps10 / 10u), (unsigned long)(fps10 % 10u));
 
+	/* In LOOP order (issue #59 rearranged it): the arm goes ahead of the
+	 * work, and tune ahead of pack, so the rows read as the iteration
+	 * runs. */
 	cam_prof_line(sh, "wait", st->prof_wait_us, st->prof_total_us,
 	              st->prof_iters, "asleep: sensor exposure + readout");
 	cam_prof_line(sh, "invald", st->prof_inval_us, st->prof_total_us,
-	              st->prof_iters, "D-cache invalidate, 225 KB");
+	              st->prof_iters, "D-cache invalidate, one buffer, 225 KB");
+	/* The next capture is running from here down: this row is the price of
+	 * the overlap, and it is the one to watch if `wait` ever grows -- an
+	 * arm that slows down eats the blanking-interval deadline. */
+	cam_prof_line(sh, "arm", st->prof_arm_us, st->prof_total_us,
+	              st->prof_iters, "arm next capture + wrap reassert");
+	cam_prof_line(sh, "tune", st->prof_tune_us, st->prof_total_us,
+	              st->prof_iters, "means + sensor read-back + wb");
 	cam_prof_line(sh, "pack", st->prof_pack_us, st->prof_total_us,
 	              st->prof_iters, "planar B/G/R -> RGB565, 76800 px");
 	/* NOT the blit -- that left this thread in #57 and has its own row
@@ -470,10 +480,8 @@ static void cam_print_profile(struct cli_instance *sh,
 	 * copy, which now preempts this thread instead of queueing behind it. */
 	cam_prof_line(sh, "sink", st->prof_sink_us, st->prof_total_us,
 	              st->prof_iters, "sinks consume: inference + panel staging");
-	cam_prof_line(sh, "tune", st->prof_tune_us, st->prof_total_us,
-	              st->prof_iters, "means + sensor read-back + wb");
 	cam_prof_line(sh, "other", st->prof_other_us, st->prof_total_us,
-	              st->prof_iters, "retrigger, wrap reassert, loop");
+	              st->prof_iters, "verify, error recheck, loop");
 }
 
 /*
@@ -599,6 +607,22 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 	cli_print(sh, "dp errors: %lu", (unsigned long)st.dp_errors);
 	if (st.last_dp_status != 0)
 		cli_print(sh, " (last status %ld)", (long)st.last_dp_status);
+	cli_print(sh, "\r\n");
+	/*
+	 * The double-buffer evidence (issue #59).  A flip that silently became
+	 * a no-op -- every arm landing on buffer 0 -- produces a working
+	 * picture at the OLD frame rate, which nothing else on this screen can
+	 * tell from a working one.  Equal-ish per-buffer counts is the
+	 * on-hardware proof the alternation is real; the premature-disable
+	 * count is the proof the mask around the arm's disable is doing its
+	 * job, and acceptance requires it zero.
+	 */
+	cli_print(sh, "buffers  : %lu / %lu frames (b0/b1)",
+	          (unsigned long)st.buf_frames[0],
+	          (unsigned long)st.buf_frames[1]);
+	if (st.premature_disables != 0u)
+		cli_print(sh, ", %lu premature-disable",
+		          (unsigned long)st.premature_disables);
 	cli_print(sh, "\r\n");
 	cam_print_profile(sh, &st);
 	cli_print(sh, "sink lcd : %lu shown, %lu dropped, %lu busy, %lu err\r\n",
@@ -841,11 +865,12 @@ static int cmd_camera_vts(struct cli_instance *sh, int argc, char **argv)
 		cli_print(sh, "  (this sensor's frame length is not readable "
 		              "here)\r\n");
 
-	/* [!] NOT vts x 31.8 us.  The datapath is one-shot, so a frame costs the
-	 * producer's work plus a whole active frame (15.1 ms) and the result is
-	 * rounded UP to a multiple of the sensor's period -- which is why 984 and
-	 * 1968 both measure 62 ms today.  Saying the naive formula here would
-	 * invite exactly the tuning that falls off the cliff at 1860.
+	/* [!] NOT simply vts x 31.8 us.  The period is rounded UP to a whole
+	 * sensor frame that fits the producer's work -- since issue #59 the
+	 * capture overlaps that work, so the active frame time (15.1 ms) is no
+	 * longer added, but the ceil survives: lowering vts below the work
+	 * still changes nothing, and tuning it just above the work is the
+	 * cliff both #38 and #71 measured.
 	 *
 	 * 31.8 and not the 31.507 this used to print: that figure is HTS 1852
 	 * over a 58.8 MHz PCLK, and every N=1 run measures about 0.9% higher --
@@ -853,10 +878,10 @@ static int cmd_camera_vts(struct cli_instance *sh, int argc, char **argv)
 	 * reading this line would be tuning against. */
 	cli_print(sh, "           (period = vts x 31.8 us, but ROUNDED UP to a "
 	              "whole one that fits\r\n"
-	              "            the producer's work + 15.1 ms -- so lowering "
-	              "vts often changes\r\n"
-	              "            nothing.  `camera bench` measures it.  Lower "
-	              "also caps the exposure.)\r\n");
+	              "            the producer's work -- so lowering vts often "
+	              "changes nothing.\r\n"
+	              "            `camera bench` measures it.  Lower also caps "
+	              "the exposure.)\r\n");
 	cam_note_queued(sh, argc);
 	return 0;
 }

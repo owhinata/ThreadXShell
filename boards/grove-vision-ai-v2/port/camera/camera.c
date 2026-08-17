@@ -40,6 +40,7 @@
 #include "cam_convert.h"
 #include "cam_dp.h"
 #include "cam_sensor.h"
+#include "cam_wdma3.h"
 #include "epk_irq_wrap.h"
 #include "timer_seam.h"
 #include "tx_glue.h"
@@ -259,10 +260,11 @@ static int32_t  cam_last_dp_status;
  */
 struct cam_prof {
 	uint64_t wait;    /* semaphore: sensor exposure + readout + datapath */
-	uint64_t inval;   /* D-cache invalidate of the 225 KB WDMA3 buffer   */
+	uint64_t inval;   /* D-cache invalidate of one 225 KB landing buffer */
+	uint64_t arm;     /* mask/disable/program/audit/retrigger (#59)      */
+	uint64_t tune;    /* means, sensor read-back, white balance step     */
 	uint64_t pack;    /* planar B/G/R -> RGB565 with wb/gamma/saturation */
 	uint64_t sink;    /* publish -> sinks consume synchronously (LCD)    */
-	uint64_t tune;    /* means, sensor read-back, white balance step     */
 	uint64_t total;   /* loop top to loop top: the frame period          */
 	uint32_t iters;   /* loop iterations counted into `total`            */
 };
@@ -1017,7 +1019,7 @@ static void cam_auto_step(void)
 	if ((++cam_auto_phase % CAM_AUTO_EVERY) != 0u)
 		return;
 
-	cam_frame_means_x100(cam_dp_raw_buffer(), CAM_FRAME_PIXELS,
+	cam_frame_means_x100(cam_dp_completed_buffer(), CAM_FRAME_PIXELS,
 	                     CAM_AUTO_STEP, means);
 
 	/*
@@ -1056,24 +1058,15 @@ static void cam_auto_step(void)
 	(void)cam_awb_step(means[0], means[1], means[2], &cam_wb);
 }
 
-static void cam_publish(void)
+static void cam_publish(const uint8_t *raw)
 {
 	struct frame_desc *slot;
-	uint8_t *raw = cam_dp_raw_buffer();
-	uint32_t t0, t1, t2;
+	uint32_t t1, t2;
 
-	/*
-	 * [!] Invalidate BEFORE reading and only AFTER the write-DMA has
-	 * stopped -- which frame-ready is exactly the statement of.  The
-	 * shipping vendor glue never does this for the WDMA3 buffer (it
-	 * invalidates only the 32-byte JPEG size word), so the omission is easy
-	 * to inherit: 225 KB of DMA'd pixels read back through stale cache
-	 * lines produces a picture that is mostly right and partly last frame.
-	 */
-	t0 = cam_now();
-	hx_InvalidateDCache_by_Addr((volatile void *)raw, (int32_t)CAM_RAW_BYTES);
+	/* The invalidate happened in cam_service_one(), before the arm: the
+	 * pixels must be readable before anything else is allowed to matter,
+	 * and the arm must not wait for the packer. */
 	t1 = cam_now();
-	cam_prof.inval += (uint32_t)(t1 - t0);
 
 	slot = frame_pipeline_acquire(&cam_pipe);
 	if (slot == NULL)
@@ -1110,6 +1103,8 @@ static int cam_service_one(uint32_t *retries)
 	uint32_t t_top = cam_now();
 	UINT rc = tx_semaphore_get(&cam_frame_sem, CAM_FRAME_TIMEOUT_TICKS);
 	uint32_t t_ready = cam_now();
+	const uint8_t *raw;
+	uint32_t t;
 
 	/*
 	 * Accounted before any of the exits below, and the period is closed at
@@ -1169,36 +1164,80 @@ static int cam_service_one(uint32_t *retries)
 	/* A frame did arrive, so whatever went wrong before has recovered. */
 	*retries = 0u;
 
-	if (cam_rev_c && cam_rev_c_off() != 0) {
-		cam_relock_fails++;
+	/*
+	 * Verify and commit (issue #59): the channel registers must still
+	 * describe the buffer that was armed, or the frame is somewhere this
+	 * port cannot name.  Only after that is the buffer readable.
+	 */
+	if (cam_dp_frame_complete(&raw) != 0) {
+		cam_fault_latch("the WDMA3 configuration moved under the stream");
 		return -1;
 	}
-
-	cam_publish();
-
-	if (cam_rev_c && cam_rev_c_on() != 0) {
-		cam_relock_fails++;
-		return -1;
-	}
-
-	/* Between frames: the only moment at which changing the sensor's
-	 * exposure cannot tear one, and the only moment at which this thread is
-	 * provably the sole user of the vendor CIS driver. */
-	{
-		uint32_t t_tune = cam_now();
-
-		cam_auto_step();
-		cam_apply_tuning();
-		cam_prof.tune += (uint32_t)(cam_now() - t_tune);
-	}
-
-	/* WDMA3 is a single buffer, so the next capture is armed only now that
-	 * the pixels have been consumed -- that is what makes tearing
-	 * impossible rather than unlikely. */
-	cam_dp_retrigger();
 
 	/*
-	 * [!] AND TAKE THE INTERRUPTS BACK, every frame.
+	 * [!] Invalidate BEFORE reading and only AFTER the write-DMA has
+	 * stopped -- which frame-ready is exactly the statement of.  The
+	 * shipping vendor glue never does this for the WDMA3 buffer (it
+	 * invalidates only the 32-byte JPEG size word), so the omission is easy
+	 * to inherit: 225 KB of DMA'd pixels read back through stale cache
+	 * lines produces a picture that is mostly right and partly last frame.
+	 * One buffer's worth, never the sibling's: the sibling is about to be
+	 * handed to the DMA, and its lines are none of this thread's business.
+	 */
+	t = cam_now();
+	hx_InvalidateDCache_by_Addr((volatile void *)(uintptr_t)raw,
+	                            (int32_t)CAM_RAW_BYTES);
+	cam_prof.inval += (uint32_t)(cam_now() - t);
+
+	if (cam_rev_c) {
+		/*
+		 * Revision C keeps the SERIALISED order: the bounce drops the
+		 * receiver and the sensor stream every frame, so there is no
+		 * defined place to arm early.  Same transitions, later
+		 * scheduling point -- there is no second flip mechanism.
+		 * (Unreachable on the board in hand, which is rev D.)
+		 */
+		if (cam_rev_c_off() != 0) {
+			cam_relock_fails++;
+			return -1;
+		}
+		cam_publish(raw);
+		if (cam_rev_c_on() != 0) {
+			cam_relock_fails++;
+			return -1;
+		}
+		t = cam_now();
+		cam_auto_step();
+		cam_apply_tuning();
+		cam_prof.tune += (uint32_t)(cam_now() - t);
+
+		t = cam_now();
+		if (cam_dp_arm_next() != 0) {
+			cam_fault_latch("the next capture could not be armed");
+			return -1;
+		}
+		cam_prof.arm += (uint32_t)(cam_now() - t);
+		cam_reassert_wraps();
+		return 0;
+	}
+
+	/*
+	 * [!] THE ARM GOES BEFORE THE WORK (issue #59).  That is the whole
+	 * change: the capture of frame N+1 runs on the other landing buffer
+	 * while this thread packs, infers and publishes frame N, so the active
+	 * frame time leaves the critical path.  Its deadline is the sensor's
+	 * blanking interval (~18 ms at the frame lengths in use) against the
+	 * few hundred microseconds of invalidate above.
+	 */
+	t = cam_now();
+	if (cam_dp_arm_next() != 0) {
+		cam_fault_latch("the next capture could not be armed");
+		return -1;
+	}
+
+	/*
+	 * [!] AND TAKE THE INTERRUPTS BACK, IMMEDIATELY -- nothing may sit
+	 * between the arm and this.
 	 *
 	 * Measured on hardware: irq 143 is wrapped at start-up with one vendor
 	 * handler and is carrying a DIFFERENT one a frame later -- the
@@ -1206,14 +1245,51 @@ static int cam_service_one(uint32_t *retries)
 	 * cannot see that (the line never changes its ENABLED state), so
 	 * without this the line silently stops being accounted one frame into
 	 * every stream, and `thread` blanks the whole cpu% column for as long
-	 * as the preview runs.
+	 * as the preview runs.  With the arm now FIRST, frame-ready can fire
+	 * during everything below; every instruction inserted before this call
+	 * widens the window in which that fires through an unaccounted vector.
 	 *
 	 * Cheap: one vector read and a compare per wrapped line, a handful of
-	 * lines, once per 26 ms frame.  Under a critical section because it may
+	 * lines, once per frame.  Under a critical section because it may
 	 * write the vector table, and an interrupt taken mid-write would
 	 * dispatch through a half-updated entry.
 	 */
 	cam_reassert_wraps();
+	cam_prof.arm += (uint32_t)(cam_now() - t);
+
+	/*
+	 * Between frames -- and since the arm moved first, DURING the sensor's
+	 * vertical blanking rather than at an arbitrary point of the next
+	 * exposure: the one moment a rolling-shutter write cannot tear a
+	 * frame, and the one moment this thread is provably the sole user of
+	 * the vendor CIS driver.  After the arm, so the arm's deadline does
+	 * not depend on how long the sensor I2C takes.
+	 */
+	t = cam_now();
+	cam_auto_step();
+	cam_apply_tuning();
+	cam_prof.tune += (uint32_t)(cam_now() - t);
+
+	/*
+	 * [!] RE-READ THE STICKY LATCH before publishing (the error-first rule;
+	 * see AGENTS.md).  Before issue #59 nothing was armed during publish,
+	 * so "the datapath faulted" and "this frame came from that operation"
+	 * were the same statement and the loop-top check covered both.  The
+	 * early arm separates them -- and the arm itself can latch a status
+	 * that belongs to THIS iteration.  Discarding a frame that was itself
+	 * good is the intended consequence of fail-closed; it costs one frame,
+	 * at teardown.
+	 */
+	if (cam_err != 0) {
+		cam_last_dp_status = cam_err;
+		cam_dp_errors++;
+		LOG_ERR("datapath error %ld before publish; stopping",
+		        (long)cam_err);
+		cam_fault_latch("the datapath reported a terminal error");
+		return -1;
+	}
+
+	cam_publish(raw);
 	return 0;
 }
 
@@ -1372,7 +1448,7 @@ int camera_probe(struct camera_probe_info *out)
 
 const uint8_t *camera_raw_frame(void)
 {
-	return cam_dp_raw_buffer();
+	return cam_dp_completed_buffer();
 }
 
 int camera_capture_raw(void)
@@ -1436,7 +1512,8 @@ int camera_capture(void)
 		if (cam_frame_ready) {
 			cam_frame_ready = 0u;
 			hx_InvalidateDCache_by_Addr(
-				(volatile void *)cam_dp_raw_buffer(),
+				(volatile void *)(uintptr_t)
+					cam_dp_completed_buffer(),
 				(int32_t)CAM_RAW_BYTES);
 			cam_frames++;
 			rc = CAM_OK;
@@ -1902,17 +1979,26 @@ void camera_stream_stats(struct camera_stats *out)
 	out->prof_total_us = cam_prof_us(p.total, hz);
 	out->prof_wait_us  = cam_prof_us(p.wait,  hz);
 	out->prof_inval_us = cam_prof_us(p.inval, hz);
+	out->prof_arm_us   = cam_prof_us(p.arm,   hz);
 	out->prof_pack_us  = cam_prof_us(p.pack,  hz);
 	out->prof_sink_us  = cam_prof_us(p.sink,  hz);
 	out->prof_tune_us  = cam_prof_us(p.tune,  hz);
-	/* Saturating, not wrapping: rounding in the five conversions can put the
+	/* Saturating, not wrapping: rounding in the six conversions can put the
 	 * sum a microsecond or two over the total, and a 4-billion "other" is a
 	 * worse answer than a zero one. */
-	sum = out->prof_wait_us + out->prof_inval_us + out->prof_pack_us +
-	      out->prof_sink_us + out->prof_tune_us;
+	sum = out->prof_wait_us + out->prof_inval_us + out->prof_arm_us +
+	      out->prof_pack_us + out->prof_sink_us + out->prof_tune_us;
 	out->prof_other_us = (out->prof_total_us > sum)
 	                   ? (out->prof_total_us - sum) : 0u;
 	out->fault          = cam_fault;
+
+	/* The alternation evidence (issue #59): equal-ish per-buffer counts
+	 * under a stream is what says the flip is real, and the premature-
+	 * disable count is what says the mask around the arm's disable is
+	 * doing its job.  Single-word reads of producer-owned counters. */
+	out->buf_frames[0]       = cam_wdma3_completions(0u);
+	out->buf_frames[1]       = cam_wdma3_completions(1u);
+	out->premature_disables  = cam_wdma3_premature_disables();
 
 	frame_pipeline_stats(&cam_pipe, &fs);
 	out->overruns = fs.overruns;

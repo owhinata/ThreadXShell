@@ -21,7 +21,7 @@
  * (BGGR) -> WDMA3.  That is the donor's shipping OV5647 configuration rather
  * than one invented here.
  *
- * THREADING.  Thread context only, except cam_dp_retrigger(), which the
+ * THREADING.  Thread context only, except cam_dp_arm_next(), which the
  * producer calls per frame.
  */
 #include <stddef.h>
@@ -39,6 +39,7 @@
 #include "cam_dp.h"
 #include "cam_sensor.h"
 #include "cam_mipi_calc.h"
+#include "cam_wdma3.h"
 #include "timebase.h"
 
 #define LOG_TAG "camdp"
@@ -48,28 +49,38 @@
 #define CAM_MIPI_LANES      2u
 
 /*
- * The WDMA3 landing buffer.
+ * The WDMA3 landing buffers -- TWO of one frame each since issue #59, so the
+ * capture of frame N+1 can overlap the CPU's work on frame N.  Which one is
+ * armed and which one is readable is cam_wdma3.c's state machine; this file
+ * only owns the memory.
  *
  * In SRAM and NOT in TCM, for the same reason the LCD frame buffer is: the DMA
  * engines on this part cannot see TCM, and a transfer to a TCM address does not
  * fault -- it simply never arrives.  32-byte aligned because the CPU has to
- * invalidate it a cache line at a time before reading each frame, and an
- * invalidate that starts mid-line would either miss bytes or discard a
- * neighbour's.  Its own section so the placement gate can pin the address and
- * the size (cmake/check_placement_budget.py); the donor's `mm_reserve` bump
- * allocator puts it wherever the heap happened to be, which no gate can check.
+ * invalidate one buffer a cache line at a time before reading each frame, and
+ * an invalidate that starts mid-line would either miss bytes or discard a
+ * neighbour's.  One symbol rather than two, so the placement gate keeps pinning
+ * symbol -> size -> section -> region with only its expected size changed
+ * (cmake/check_placement_budget.py); the donor's `mm_reserve` bump allocator
+ * puts its buffer wherever the heap happened to be, which no gate can check.
  */
-static uint8_t cam_raw_buf[CAM_RAW_BYTES]
+static uint8_t cam_raw_buf[CAM_WDMA3_BUFFERS][CAM_RAW_BYTES]
 	__attribute__((section(".cam_raw"), aligned(32)));
 
-_Static_assert(sizeof cam_raw_buf == 230400u,
-               "the WDMA3 buffer is not one 320x240 planar BGR frame");
+_Static_assert(sizeof cam_raw_buf == 460800u,
+               "the WDMA3 arena is not two 320x240 planar BGR frames");
+/*
+ * The row stride is CAM_RAW_BYTES, so this is also what keeps the two buffers
+ * from sharing a cache line: while the DMA writes one buffer the CPU
+ * invalidates the other, and a shared line would let that invalidate discard
+ * bytes the DMA just delivered next door.
+ */
 _Static_assert((CAM_RAW_BYTES % 32u) == 0u,
-               "the WDMA3 buffer is not a whole number of cache lines");
+               "a landing buffer is not a whole number of cache lines");
 
-uint8_t *cam_dp_raw_buffer(void)
+const uint8_t *cam_dp_completed_buffer(void)
 {
-	return cam_raw_buf;
+	return cam_raw_buf[cam_wdma3_read_index()];
 }
 
 /*
@@ -337,7 +348,12 @@ static int cam_dp_inp_config(void)
  */
 int cam_dp_config_raw(void)
 {
-	sensordplib_set_xDMA_baseaddrbyapp(0u, (uint32_t)(uintptr_t)cam_raw_buf,
+	/* The RAW leg is WDMA2 and one-shot only, so there is no layout to
+	 * capture and nothing will ever flip: reset so the completed-buffer
+	 * accessor answers "buffer 0", which is where WDMA2 lands. */
+	cam_wdma3_reset();
+	sensordplib_set_xDMA_baseaddrbyapp(0u,
+	                                   (uint32_t)(uintptr_t)cam_raw_buf[0],
 	                                   0u);
 	if (cam_dp_inp_config() != 0)
 		return -1;
@@ -375,9 +391,14 @@ int cam_dp_config(void)
 	 * Zero rather than a scratch buffer so that a future path change which
 	 * DOES use them faults at once instead of quietly writing into memory
 	 * that belongs to something else.
+	 *
+	 * The global is always LANDING BUFFER 0.  The vendor derives all three
+	 * channel addresses from it, so every configuration starts the stream
+	 * on buffer 0; cam_wdma3 adopts that layout below and owns every later
+	 * move (issue #59).
 	 */
 	sensordplib_set_xDMA_baseaddrbyapp(0u, 0u,
-	                                   (uint32_t)(uintptr_t)cam_raw_buf);
+	                                   (uint32_t)(uintptr_t)cam_raw_buf[0]);
 
 	if (cam_dp_inp_config() != 0)
 		return -1;
@@ -396,6 +417,28 @@ int cam_dp_config(void)
 	 * hx_dplib_register_cb() instead of going through the SDK's
 	 * event_handler scheduler. */
 	sensordplib_set_hw5x5_wdma3(hw5x5, NULL);
+
+	/*
+	 * Adopt the channel layout the vendor just programmed (issue #59).
+	 * This reads the six address/size registers back, refuses anything
+	 * that does not tile buffer 0 exactly, and resets the machine to
+	 * "buffer 0 armed and readable" -- which also re-establishes the
+	 * indices after the vendor's software reset, whose effect on these
+	 * registers no document describes.
+	 */
+	{
+		const uint32_t bases[CAM_WDMA3_BUFFERS] = {
+			(uint32_t)(uintptr_t)cam_raw_buf[0],
+			(uint32_t)(uintptr_t)cam_raw_buf[1],
+		};
+
+		if (cam_wdma3_capture_layout(bases, CAM_RAW_BYTES) != 0) {
+			LOG_ERR("wdma3 layout refused: %s (status %08lx)",
+			        cam_wdma3_fault(),
+			        (unsigned long)cam_wdma3_fault_status());
+			return -1;
+		}
+	}
 	return 0;
 }
 
@@ -409,7 +452,33 @@ int cam_dp_capture_start(void)
 	return 0;
 }
 
-void cam_dp_retrigger(void)
+int cam_dp_frame_complete(const uint8_t **completed)
+{
+	if (cam_wdma3_frame_complete() != 0) {
+		LOG_ERR("wdma3 frame refused: %s (status %08lx)",
+		        cam_wdma3_fault(),
+		        (unsigned long)cam_wdma3_fault_status());
+		return -1;
+	}
+	if (completed != NULL)
+		*completed = cam_raw_buf[cam_wdma3_read_index()];
+	return 0;
+}
+
+int cam_dp_arm_next(void)
+{
+	if (cam_wdma3_arm_next() != 0) {
+		LOG_ERR("wdma3 arm refused: %s (status %08lx)",
+		        cam_wdma3_fault(),
+		        (unsigned long)cam_wdma3_fault_status());
+		return -1;
+	}
+	return 0;
+}
+
+/* The one-function seam cam_wdma3.h declares: the retrigger belongs to the
+ * sensordp layer, and this file is the one that already speaks it. */
+void cam_wdma3_hw_retrigger(void)
 {
 	sensordplib_retrigger_capture();
 }

@@ -509,6 +509,7 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/camera/cam_mipi_calc.c"
     "${BOARD_DIR}/port/camera/cam_auto.c"
     "${BOARD_DIR}/port/camera/cam_dp.c"
+    "${BOARD_DIR}/port/camera/cam_wdma3.c"
     "${BOARD_DIR}/port/camera/cam_sensor.c"
     "${BOARD_DIR}/port/camera/cam_sensor_ov5647.c"
     "${BOARD_DIR}/port/camera/camera.c"

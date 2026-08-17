@@ -319,13 +319,16 @@ SECTIONS
      * applied to the second region).  Same order-sensitivity as __sram_end. */
     __sram_ldr_end = .;
 
-    /* The camera's WDMA3 landing buffer (issue #35).  320x240 planar B/G/R =
-     * 225 KB, written by the datapath's write-DMA and read by the CPU one
-     * frame at a time.  In SRAM for the same reason as the framebuffer above --
-     * the DMA engines cannot see TCM -- and 32-byte aligned because the CPU has
-     * to invalidate the whole buffer before reading each frame, and an
-     * invalidate that begins mid-cache-line either misses bytes or discards a
-     * neighbour's. */
+    /* The camera's WDMA3 landing buffers (issues #35, #59).  TWO of 320x240
+     * planar B/G/R = 225 KB each, 450 KB in all: the write-DMA fills one while
+     * the CPU reads the other, which is what took the active frame time off
+     * the preview's critical path.  In SRAM for the same reason as the
+     * framebuffer above -- the DMA engines cannot see TCM -- and 32-byte
+     * aligned because the CPU invalidates one buffer before reading each
+     * frame, and an invalidate that begins mid-cache-line either misses bytes
+     * or discards a neighbour's; the row stride is a whole number of lines
+     * (asserted in cam_dp.c) so the invalidate can never touch the buffer the
+     * DMA is writing next door. */
     .cam_raw (NOLOAD) : ALIGN(32)
     {
         __cam_raw_start = .;

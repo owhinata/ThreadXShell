@@ -109,7 +109,28 @@ int camera_capture(void);
  */
 int camera_capture_raw(void);
 
-/** @return the WDMA3 buffer (CAM_RAW_BYTES: B, G then R planes), never NULL. */
+/**
+ * @return the completed raw frame (CAM_RAW_BYTES: B, G then R planes), never
+ *         NULL.
+ *
+ * [!] EXCLUSIVITY CONTRACT (issue #59).  There are TWO landing buffers and the
+ * pointer MOVES between frames, so a plain index is the only synchronisation
+ * there is -- which is sound exactly as long as every caller obeys this:
+ *
+ *  - DURING A STREAM: producer thread only, called synchronously from inside a
+ *    sink's consume().  The producer commits the index before publishing and
+ *    moves it again only on the next frame-ready, so the frame is stable for
+ *    the whole call.
+ *  - OTHERWISE: only after a successful camera_capture() / camera_capture_raw()
+ *    with the producer idle -- which those calls guarantee, since they refuse
+ *    while a stream runs and quiesce before returning.
+ *  - EITHER WAY the pointer is valid for that call's duration only.  Do not
+ *    store it.
+ *
+ * Those are exactly today's callers: the nn overlay's process() (on the
+ * producer, inside consume()) and the command paths behind camera_capture().
+ * A new caller from any other context is a data race, not a grey area.
+ */
 const uint8_t *camera_raw_frame(void);
 
 /**
@@ -192,11 +213,25 @@ struct camera_stats {
 	uint32_t prof_iters;
 	uint32_t prof_total_us; /**< loop top to loop top                     */
 	uint32_t prof_wait_us;  /**< asleep on frame-ready                    */
-	uint32_t prof_inval_us; /**< D-cache invalidate, 225 KB               */
+	uint32_t prof_inval_us; /**< D-cache invalidate, one landing buffer   */
+	uint32_t prof_arm_us;   /**< arm the next capture + wrap reassert     */
 	uint32_t prof_pack_us;  /**< planar B/G/R -> RGB565                   */
 	uint32_t prof_sink_us;  /**< sinks consume (LCD blit + SPI DMA)       */
 	uint32_t prof_tune_us;  /**< means, sensor read-back, white balance   */
-	uint32_t prof_other_us; /**< total minus the five above               */
+	uint32_t prof_other_us; /**< total minus the six above                */
+
+	/*
+	 * The double-buffer evidence (issue #59).  buf_frames counts frames
+	 * committed readable per landing buffer since the last configuration --
+	 * equal-ish counts under a stream is what says the alternation is
+	 * real, since a no-op flip produces a working picture at the old frame
+	 * rate.  premature_disables is CUMULATIVE and counts the
+	 * disable-before-finish statuses the arm had to acknowledge; the mask
+	 * around the arm's disable exists to keep it zero, and acceptance
+	 * requires that.
+	 */
+	uint32_t buf_frames[2];
+	uint32_t premature_disables;
 };
 void camera_stream_stats(struct camera_stats *out);
 

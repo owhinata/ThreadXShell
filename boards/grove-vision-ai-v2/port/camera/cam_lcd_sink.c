@@ -197,11 +197,50 @@ static int sink_mbox_overlay_ok;
 static volatile uint32_t sink_accepted;
 static volatile uint32_t sink_done;
 
+/*
+ * [!] AND HOW MANY OF THEM WERE HANDED BACK (issue #71).
+ *
+ * `done` is NOT that number.  It says "the panel finished with this frame",
+ * which it does whether or not the pin was returned -- so a leaked pin passes
+ * the drain, detaches cleanly, and only shows up on the NEXT stream as
+ * `overruns` climbing, because the leaked slot plus `latest` leave
+ * frame_pipeline_acquire() with nothing to hand out.  The number that says the
+ * pin came back has to be counted where the put is made.
+ *
+ * The core cannot answer this for us.  frame_pipeline_detach() returns the
+ * in-flight count, but camera_unsubscribe() drops it (issue #72), and
+ * frame_pipeline_put() has no result at all: unpin saturates at zero, so a
+ * double release is traceless there.  Both directions are visible here.
+ *
+ * Panel thread only, one writer, so the increment needs no critical section --
+ * the same as the sink_stats counters beside it.  The COMPARISON does, because
+ * the other half is written by the producer.
+ */
+static volatile uint32_t sink_puts;
+
 /* Blit timing, panel-thread side (issue #57).  64-bit because a long preview
  * accumulates more than 32 bits hold at 6 MHz -- and therefore read only under
  * a critical section, as the producer's profile already is. */
 static uint64_t sink_blit_ticks;
 static uint32_t sink_blit_frames;
+
+/*
+ * How long the frame is actually held, from the hand-off to the pin coming back
+ * (issue #71).  Same 64-bit treatment, same reason.
+ *
+ * This is the term the frame period is now bounded by, so it is the one that
+ * has to be measurable: with the pin released at the staging seam the zero-drop
+ * condition is `period >= max(W, B, S + this)`, and `blit` above measures B --
+ * the whole panel-thread interval, transfer included -- which is a different
+ * number and no longer the binding one.
+ *
+ * Measured from the mailbox take (so the wake and the scheduling latency are
+ * inside it) to after frame_pipeline_put() has returned (so the pipeline mutex
+ * wait is too).  Both ends matter: taken from the driver call instead, it would
+ * flatter itself by everything this thread did to get there.
+ */
+static uint64_t sink_stage_ticks;
+static uint32_t sink_stage_frames;
 
 static void sink_fault_latch(const char *why)
 {
@@ -246,6 +285,49 @@ static enum sink_state sink_get_state(void)
 
 /* ---- the panel thread ---------------------------------------------------- */
 
+/*
+ * One frame's hand-back, on the panel thread's STACK (issue #71).
+ *
+ * On the stack because that is what makes "at most once" structural rather than
+ * remembered: a static flag would have to be cleared at the top of every
+ * iteration, and the bug where it is not is exactly the bug that leaves the
+ * sink busy for ever.  A fresh one per frame cannot carry anything over.
+ */
+struct sink_release {
+	const struct frame_desc *f;
+	uint32_t t_release;   /* EPK ticks, stamped after the put returned */
+	int      released;
+	int      by_hook;     /* the driver told us, i.e. the fast path */
+};
+
+/*
+ * THE one place a frame goes back to the pipeline.
+ *
+ * Idempotent, and that is the point: the driver's hook is not guaranteed to run
+ * (a rejection before staging skips it) and is not guaranteed NOT to have run
+ * (the transfer's own geometry test is after it), so the panel thread calls
+ * this unconditionally afterwards and exactly one of the two calls does the
+ * work.  The alternative -- have the caller reason about which paths fired --
+ * is the reasoning that gets it wrong.
+ */
+static void sink_release_frame(struct sink_release *r)
+{
+	if (r->released)
+		return;
+
+	camera_frame_put(&cam_lcd_sink, r->f);
+	/*
+	 * Both stamped AFTER the put has returned, not before it.  There is no
+	 * exception path in C, so the later assignment is the one that states
+	 * what actually happened -- and the pin is not really back until
+	 * frame_pipeline_put() has taken the pipeline mutex and dropped it, so
+	 * a timestamp taken before the call would quietly omit the wait for it.
+	 */
+	sink_puts++;
+	r->t_release = tx_glue_epk_timer_ticks();
+	r->released  = 1;
+}
+
 /* Trampoline: the LCD driver's callback signature is its own, and the sink's
  * overlay contract is the sink's.  Only reached with an overlay armed. */
 static void cam_lcd_draw(void *ctx, uint16_t *fb, uint16_t fb_w, uint16_t fb_h)
@@ -255,20 +337,53 @@ static void cam_lcd_draw(void *ctx, uint16_t *fb, uint16_t fb_w, uint16_t fb_h)
 }
 
 /*
+ * The driver telling us the slot is finished with -- staged into its own
+ * framebuffer, drawn on, and not read again (issue #71).
+ *
+ * This is the whole optimisation: releasing here rather than after the transfer
+ * takes ~25.6 ms of SPI wire time out of the window in which this sink counts
+ * as busy, and the producer's next publish is refused for exactly that window.
+ *
+ * It obeys the hook's contract by construction: it takes the frame-pipeline
+ * lock (which this hook, unlike the overlay one, is allowed to do), touches no
+ * framebuffer, and calls no LCD entry point.
+ */
+static void cam_lcd_staged(void *ctx)
+{
+	struct sink_release *r = (struct sink_release *)ctx;
+
+	sink_release_frame(r);
+	r->by_hook = 1;
+}
+
+/*
  * One frame, on the panel thread.
  *
- * [!] THE STEP ORDER IS THE SAFETY ARGUMENT, and it is finer than "put last".
+ * [!] THE STEP ORDER IS THE SAFETY ARGUMENT, and issue #71 deliberately RELAXED
+ * the "put last" rule this comment used to state. Read why before tightening it
+ * back.
  *
  *   1. take the mailbox and EMPTY IT, so the next delivery has somewhere to go;
- *   2. blit, with draw() inside the panel guard;
- *   3. put -- and after this line nothing belonging to that frame, the overlay
- *      or the detections may be touched.  put() clears the core's busy flag,
- *      which IS the statement "this sink is free", and the producer acts on it
- *      the moment it runs.  Since issue #64 this thread outranks the producer,
- *      so that cannot happen before step 4 -- but the rule deliberately does not
- *      rest on that.  The ordering is a tuning parameter, and this port has
- *      already reversed it once;
+ *   2. blit, with draw() inside the panel guard -- and the put now happens INSIDE
+ *      it, from the driver's staged hook, between the drawing and the transfer;
+ *   3. release again, which does nothing if step 2 already did it;
  *   4. publish idle, which is what a drain is waiting for.
+ *
+ * WHY THE PUT MAY MOVE INTO THE MIDDLE. The old rule was "nothing belonging to
+ * that frame may be touched after the put", and it is still true -- what changed
+ * is when nothing needs to be. The driver stages the slot into its OWN
+ * framebuffer and hands THAT to the DMA, so once the staging copy and draw() are
+ * done, the slot is dead: 25.6 ms of wire time during which the old order kept
+ * it pinned for nobody. That window was the whole gap between the display bound
+ * being `S + B` and being `max(period, B)` -- see issue #56's budget.
+ *
+ * What still may NOT move: the overlay and the detections are read by draw() on
+ * this thread, so the release goes AFTER it, never after the staging copy alone.
+ * And `sink_done` stays where it is, in step 4's block. It answers "this blit is
+ * finished"; the pin answers "the source is free". They were one statement and
+ * are now two, and conflating them again would let cam_panel_drain() report idle
+ * with a transfer still running -- which is the answer cam_lcd_sink_detach()
+ * tears the overlay down on.
  *
  * Step 4 is deliberately after step 3 and deliberately not part of it.  What it
  * publishes is the state "done has caught up with accepted", not the event "one
@@ -283,6 +398,8 @@ static void cam_panel_entry(ULONG arg)
 
 	for (;;) {
 		TX_INTERRUPT_SAVE_AREA
+		struct sink_release rel;
+		struct lcd_blit_hooks hooks;
 		const struct frame_desc *f;
 		uint32_t t0;
 		int overlay_ok;
@@ -300,27 +417,39 @@ static void cam_panel_entry(ULONG arg)
 		if (f == NULL)
 			continue;    /* a stale post; nothing was handed over */
 
+		/* The hand-back state for THIS frame, and the clock the hold is
+		 * measured from -- the mailbox take, not the driver call, so the
+		 * wake and the scheduling latency are inside the number. */
+		t0 = tx_glue_epk_timer_ticks();
+		rel.f         = f;
+		rel.t_release = t0;
+		rel.released  = 0;
+		rel.by_hook   = 0;
+
 		/* 2. the blit.  TX_NO_WAIT inside lcd_acquire(), and a skipped
 		 * frame if the panel is taken: blocking here would hold the
 		 * pipeline slot pinned behind whatever `lcd fill` a user
 		 * happened to type, and a live preview that drops a frame is
 		 * better than one that stalls the ring.  The count says it
 		 * happened. */
-		t0 = tx_glue_epk_timer_ticks();
 		if (lcd_acquire() != 0) {
 			sink_stats.busy++;
 		} else {
 			/* lcd_blit_le_overlay: the slot is little-endian RGB565
 			 * and the panel wants wire order.  The driver owns that
 			 * swap, and calls the draw hook between the swap and the
-			 * DMA. */
+			 * DMA -- then the staged hook, which is where this sink
+			 * hands the slot back (issue #71). */
+			hooks.overlay = (overlay_ok && sink_overlay.draw != NULL)
+					? cam_lcd_draw : NULL;
+			hooks.staged  = cam_lcd_staged;
+			hooks.ctx     = &rel;
+
 			blit = lcd_blit_le_overlay(
 				0u, 0u, (uint16_t)CAM_FRAME_WIDTH,
 				(uint16_t)CAM_FRAME_HEIGHT,
 				(const uint16_t *)f->data,
-				(overlay_ok && sink_overlay.draw != NULL)
-					? cam_lcd_draw : NULL,
-				NULL, NULL, NULL);
+				&hooks, NULL, NULL);
 			lcd_release();
 
 			if (blit == 0)
@@ -329,13 +458,17 @@ static void cam_panel_entry(ULONG arg)
 				sink_stats.errors++;
 		}
 
-		/* 3. THE put, on every path above.  It must name THIS sink:
-		 * frame_pipeline_put() clears the sink's busy flag only when it
-		 * is given the owning sink, and a NULL there would leave the
-		 * sink busy for ever and its DROP policy discarding every frame
-		 * after the first.  (NULL is for releasing a
-		 * frame_pipeline_pin_latest() pin, which has no sink.) */
-		camera_frame_put(&cam_lcd_sink, f);
+		/* 3. and release again, on every path above.  A no-op whenever
+		 * the hook already did it, which is every healthy frame; this is
+		 * for the paths that never reached it -- the panel being taken
+		 * just above, and the driver refusing before it stages.
+		 *
+		 * It must name THIS sink: frame_pipeline_put() clears the sink's
+		 * busy flag only when it is given the owning sink, and a NULL
+		 * there would leave the sink busy for ever and its DROP policy
+		 * discarding every frame after the first.  (NULL is for releasing
+		 * a frame_pipeline_pin_latest() pin, which has no sink.) */
+		sink_release_frame(&rel);
 
 		/* Timing is taken here rather than around the blit alone so it
 		 * covers everything this thread does with the frame -- which is
@@ -343,6 +476,14 @@ static void cam_panel_entry(ULONG arg)
 		TX_DISABLE
 		sink_blit_ticks += (uint32_t)(tx_glue_epk_timer_ticks() - t0);
 		sink_blit_frames++;
+		/* The hold, but only when the hook was what ended it: on the
+		 * fallback paths the release is late by construction and
+		 * averaging those in would report the very thing this change
+		 * exists to remove. */
+		if (rel.by_hook) {
+			sink_stage_ticks += (uint32_t)(rel.t_release - t0);
+			sink_stage_frames++;
+		}
 		sink_done++;
 		TX_RESTORE
 
@@ -558,8 +699,14 @@ int cam_lcd_sink_attach_and_stream(const struct cam_lcd_overlay *ov)
 	sink_mbox_overlay_ok = 0;
 	sink_accepted        = 0u;
 	sink_done            = 0u;
+	/* In the SAME breath as sink_accepted: the two are compared against each
+	 * other at detach, so a reset that cleared one without the other would
+	 * manufacture the very mismatch that poisons the sink. */
+	sink_puts            = 0u;
 	sink_blit_ticks      = 0u;
 	sink_blit_frames     = 0u;
+	sink_stage_ticks     = 0u;
+	sink_stage_frames    = 0u;
 	TX_RESTORE
 	while (tx_semaphore_get(&cam_panel_work, TX_NO_WAIT) == TX_SUCCESS)
 		;
@@ -693,16 +840,71 @@ int cam_lcd_sink_detach(void)
 		 * The same answer #48 gave for a producer that never
 		 * acknowledged a stop: refuse for good rather than tear down
 		 * underneath a live thread.  The overlay is NOT cleared -- the
-		 * thread may be inside draw(), reading the detections -- the
-		 * frame stays pinned, and the caller must keep whatever it was
-		 * holding on this sink's behalf (`nn preview` keeps its lease).
-		 * All of this state is static, so keeping it costs nothing.
+		 * thread may be inside draw(), reading the detections -- and the
+		 * caller must keep whatever it was holding on this sink's behalf
+		 * (`nn preview` keeps its lease).  All of this state is static,
+		 * so keeping it costs nothing.
+		 *
+		 * This used to add "the frame stays pinned", and since issue #71
+		 * that is no longer something this path knows: the pin may well
+		 * have been returned at the staging seam with the transfer still
+		 * running.  Which it is does not change the answer -- what makes
+		 * this terminal is a thread that did not come back, not a slot.
 		 */
 		LOG_ERR("the panel thread did not finish; the preview sink is "
 		        "unusable until reboot");
 		sink_fault_latch("the panel thread did not release a frame");
 		sink_set_state(SINK_LOST);
 		return CAM_ERR_TIMEOUT;
+	}
+
+	/*
+	 * [!] AND EVERY FRAME THAT WAS ACCEPTED WAS HANDED BACK (issue #71).
+	 *
+	 * This is the moment, and the only moment, at which those two numbers
+	 * are required to agree: the sink is unlinked so `accepted` has stopped
+	 * moving, and the drain succeeded so the panel thread has finished with
+	 * everything it was given.  DURING a stream they legitimately differ by
+	 * the one frame in flight, which is why this is not a running check.
+	 *
+	 * It has to be asked here because nothing else asks it.  `done` counts
+	 * blits, not releases, so the drain above passes either way;
+	 * frame_pipeline_put() has no result and its unpin saturates at zero, so
+	 * a double release leaves no trace there; and camera_unsubscribe()
+	 * throws away the in-flight count the core does return (issue #72).
+	 * Without this, a leaked pin detaches cleanly and surfaces later as the
+	 * NEXT preview finding no acquirable slot.
+	 *
+	 * Both read in one critical section: `accepted` is written by the
+	 * producer and `puts` by the panel thread, so reading them separately
+	 * would be comparing two different instants.
+	 *
+	 * SINK_LOST rather than a repair, in both directions.  Fewer puts than
+	 * accepts means a slot is still pinned; more means the refcount is
+	 * already wrong and a slot may be recycled under a live reader.  Nothing
+	 * here can tell which, and there is no operation that would make either
+	 * safe -- so this refuses for good, as everything else in this file does
+	 * when it cannot prove the alternative.
+	 */
+	{
+		TX_INTERRUPT_SAVE_AREA
+		uint32_t acc, puts;
+
+		TX_DISABLE
+		acc  = sink_accepted;
+		puts = sink_puts;
+		TX_RESTORE
+
+		if (puts != acc) {
+			LOG_ERR("panel sink released %lu of %lu frames; the preview "
+			        "sink is unusable until reboot",
+			        (unsigned long)puts, (unsigned long)acc);
+			sink_fault_latch(puts < acc
+				? "a panel frame was never handed back"
+				: "a panel frame was handed back twice");
+			sink_set_state(SINK_LOST);
+			return CAM_ERR_STATE;
+		}
 	}
 
 	/* Provably idle: no delivery outstanding and none can start. */
@@ -717,8 +919,8 @@ void cam_lcd_sink_stats(struct cam_lcd_sink_stats *out)
 {
 	TX_INTERRUPT_SAVE_AREA
 	const char *why = NULL;
-	uint64_t ticks;
-	uint32_t frames;
+	uint64_t ticks, sticks;
+	uint32_t frames, sframes;
 	uint32_t hz;
 
 	if (out == NULL)
@@ -738,9 +940,13 @@ void cam_lcd_sink_stats(struct cam_lcd_sink_stats *out)
 	 * as a mixture of two instants.
 	 */
 	TX_DISABLE
-	*out   = sink_stats;
-	ticks  = sink_blit_ticks;
-	frames = sink_blit_frames;
+	*out    = sink_stats;
+	ticks   = sink_blit_ticks;
+	frames  = sink_blit_frames;
+	sticks  = sink_stage_ticks;
+	sframes = sink_stage_frames;
+	out->accepted = sink_accepted;
+	out->puts     = sink_puts;
 	TX_RESTORE
 
 	/* The pipeline counts drops (policy DROP, sink busy with a previous
@@ -764,6 +970,9 @@ void cam_lcd_sink_stats(struct cam_lcd_sink_stats *out)
 	out->blit_frames = frames;
 	out->blit_us     = out->prof_ok
 	                 ? (uint32_t)((ticks * 1000000u) / hz) : 0u;
+	out->hold_frames = sframes;
+	out->hold_us     = out->prof_ok
+	                 ? (uint32_t)((sticks * 1000000u) / hz) : 0u;
 
 	/* Separate from prof_why: one says the CLOCK is untrustworthy, the
 	 * other says the SINK is finished.  Reporting either through the other

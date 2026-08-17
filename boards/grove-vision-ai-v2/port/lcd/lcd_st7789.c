@@ -1256,9 +1256,7 @@ void lcd_rect_wire(uint16_t *fb, uint16_t fb_w, uint16_t fb_h,
 
 int lcd_blit_le_overlay(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                         const uint16_t *pixels,
-                        void (*overlay)(void *ctx, uint16_t *fb,
-                                        uint16_t fb_w, uint16_t fb_h),
-                        void *ctx,
+                        const struct lcd_blit_hooks *hooks,
                         int (*stop)(void *), void *stop_arg)
 {
 	uint32_t count = (uint32_t)w * (uint32_t)h;
@@ -1307,8 +1305,27 @@ int lcd_blit_le_overlay(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 	 * in between the drawing and the transfer -- and see the contract in
 	 * the header for everything the callback may not do with that.
 	 */
-	if (overlay != NULL)
-		overlay(ctx, lcd_fb, w, h);
+	if (hooks != NULL && hooks->overlay != NULL)
+		hooks->overlay(hooks->ctx, lcd_fb, w, h);
+
+	/*
+	 * And the source is finished with (issue #71).
+	 *
+	 * The loop above copied every pixel the transfer needs into lcd_fb, and
+	 * the call below hands lcd_fb -- not `pixels` -- to the DMA.  So from
+	 * here the caller's buffer is dead: 25.6 ms of wire time at this
+	 * panel's clock during which whoever lent it to us does not have to
+	 * keep it intact.  That is the whole reason this hook exists; for the
+	 * camera it is the difference between the frame pipeline's slot being
+	 * held for `staging + transfer` and just for `staging`.
+	 *
+	 * AFTER the overlay, deliberately -- see the header. And before the
+	 * transfer's own geometry test, which lives inside lcd_blit(): a
+	 * rejection there happens with this already called, which is why the
+	 * header tells callers to keep their own record.
+	 */
+	if (hooks != NULL && hooks->staged != NULL)
+		hooks->staged(hooks->ctx);
 
 	rc = lcd_blit(x, y, w, h, lcd_fb, stop, stop_arg);
 	lcd_release();
@@ -1318,8 +1335,7 @@ int lcd_blit_le_overlay(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 int lcd_blit_le(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                 const uint16_t *pixels, int (*stop)(void *), void *stop_arg)
 {
-	return lcd_blit_le_overlay(x, y, w, h, pixels, NULL, NULL,
-	                           stop, stop_arg);
+	return lcd_blit_le_overlay(x, y, w, h, pixels, NULL, stop, stop_arg);
 }
 
 int lcd_fill(uint16_t rgb565, int (*stop)(void *), void *stop_arg)

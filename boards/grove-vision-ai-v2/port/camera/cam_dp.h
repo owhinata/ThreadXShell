@@ -31,7 +31,7 @@
  * register tables (included from the SDK tree, so they stay in sync with the
  * pin) and the exact order of the bring-up calls.
  *
- * THREADING.  Thread context, except cam_dp_retrigger().
+ * THREADING.  Thread context, except cam_dp_arm_next().
  */
 #ifndef CAM_DP_H
 #define CAM_DP_H
@@ -58,8 +58,17 @@ extern "C" {
  */
 #define CAM_CHIP_VERSION_C 0x8538000Cu
 
-/** @return the WDMA3 landing buffer: CAM_RAW_BYTES of SRAM, 32-byte aligned. */
-uint8_t *cam_dp_raw_buffer(void);
+/**
+ * @return the landing buffer the CPU may read: CAM_RAW_BYTES of SRAM,
+ *         32-byte aligned.
+ *
+ * There are TWO landing buffers since issue #59 and this answers from the
+ * transition machine's read index, so the pointer MOVES between frames.
+ * Callers inherit camera_raw_frame()'s exclusivity contract (camera.h): read
+ * it where that contract allows, hold it no longer than the call that
+ * obtained it.
+ */
+const uint8_t *cam_dp_completed_buffer(void);
 
 /**
  * @brief  The demosaic's Bayer phase, settable at RUNTIME.
@@ -131,8 +140,29 @@ int cam_dp_config_raw(void);
 /** Start the sensor controller (the first frame follows). */
 int cam_dp_capture_start(void);
 
-/** Arm the next frame.  Cheap, and the only per-frame call on the happy path. */
-void cam_dp_retrigger(void);
+/**
+ * @brief  A frame-ready arrived: verify, commit, hand the frame back.
+ *
+ * Fronts cam_wdma3_frame_complete() (see cam_wdma3.h for what the verify does
+ * and does not prove) and returns the completed landing buffer -- the ONLY
+ * pointer the caller may read, and only until the next arm chooses this buffer
+ * again.  Producer thread, demosaic leg only; the RAW leg is one-shot and
+ * never calls this.
+ *
+ * @return 0, or -1 with the refusal logged; the caller's fault path owns what
+ *         happens next.
+ */
+int cam_dp_frame_complete(const uint8_t **completed);
+
+/**
+ * @brief  Arm the capture of the next frame into the other landing buffer.
+ *
+ * Fronts cam_wdma3_arm_next(): mask, disable, program, read back, audit,
+ * retrigger, restore.  Per-frame, producer thread.  On failure nothing was
+ * armed and xDMA is left disabled; the stream is over and the caller latches
+ * the fault.
+ */
+int cam_dp_arm_next(void);
 
 /**
  * @brief  Stop everything, in the vendor's order, unconditionally.

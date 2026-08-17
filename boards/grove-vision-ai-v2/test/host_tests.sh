@@ -80,6 +80,24 @@ if [ -f "$sdk/drivers/inc/hx_drv_timer.h" ]; then
             $LDFLAGS -o "$out/test_timer_probe_$_case"
         "$out/test_timer_probe_$_case"
     done
+
+    # issue #59 -- the WDMA3 landing-buffer transition machine
+    # (port/camera/cam_wdma3.c).  Its worst failure is a flip that silently
+    # became a no-op: every arm landing on buffer 0 is a working preview at
+    # the OLD frame rate, which no runtime check can tell from a working one.
+    # The REAL module is compiled against the REAL SDK hx_drv_xdma.h (the
+    # shimmed WE2_device.h resolves first, exactly as for the timer seam), and
+    # the mock keeps the accessors' disassembled quirks -- halfword-writing
+    # getters, setters that return success unconditionally -- because a mock
+    # politer than the hardware passes callers the hardware fails.
+    gcc $CFLAGS \
+        -I "$here" -I "$here/shim" \
+        -I "$board/port/camera" \
+        -I "$sdk/drivers/inc" \
+        "$here/test_cam_wdma3.c" \
+        "$board/port/camera/cam_wdma3.c" \
+        $LDFLAGS -o "$out/test_cam_wdma3"
+    "$out/test_cam_wdma3"
 else
     echo "  (skipped test_timer_seam: no Himax SDK at $sdk --" \
          "configure a grove-vision-ai-v2 build tree first)"

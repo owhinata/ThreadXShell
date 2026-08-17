@@ -140,14 +140,16 @@ RESIDENCY = [
     # the loadable region it would silently cost .rodata and the NN arena the
     # room they were given.
     ("lcd_fb", 240 * 320 * 2, ".lcd_fb", "SRAM_LDR", SRAM_LDR),
-    # Camera buffers (issue #35).  The WDMA3 landing buffer is written by the
-    # datapath's DMA and the pipeline slots are read by the SPI DMA, so both
-    # inherit the framebuffer's failure mode exactly: in TCM they would not
-    # fault, the transfer would simply never happen.  The raw buffer has a
-    # second reason to be pinned -- the CPU invalidates CAM_RAW_BYTES of cache
-    # starting at it before every frame, so a buffer shorter than the gate
-    # believes would have the driver invalidating past its end.
-    ("cam_raw_buf",   320 * 240 * 3, ".cam_raw",   "SRAM", SRAM),
+    # Camera buffers (issues #35, #59).  The WDMA3 landing buffers -- TWO
+    # frames since #59, alternated so capture overlaps the CPU's work -- are
+    # written by the datapath's DMA and the pipeline slots are read by the SPI
+    # DMA, so both inherit the framebuffer's failure mode exactly: in TCM they
+    # would not fault, the transfer would simply never happen.  The raw arena
+    # has a second reason to be pinned -- the CPU invalidates CAM_RAW_BYTES of
+    # cache from one buffer's start before every frame, so an arena shorter
+    # than the gate believes would have the second buffer's invalidate (and
+    # the DMA behind it) running past the reservation's end.
+    ("cam_raw_buf",   320 * 240 * 3 * 2, ".cam_raw",   "SRAM", SRAM),
     ("cam_slot_mem",  320 * 240 * 2 * 2, ".cam_slots", "SRAM", SRAM),
     # NN tensor arena (issue #44).  Pinned for the same reason as the camera
     # buffers -- the Ethos-U55 is a bus master and TCM reachability is

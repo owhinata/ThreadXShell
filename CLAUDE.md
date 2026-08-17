@@ -397,10 +397,15 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   **センサのオンチップ AEC + このポートのソフト WB** の意味。
   **WDMA3 はプレーナ B/G/R で、パックはソフト**（HXCSC は入力アンパッカー）。
   **[!] DMA が触るバッファは TCM 不可**（`.cam_raw` / `.cam_slots` は SRAM NOLOAD、
-  placement gate が pin）。**WDMA3 は frame-ready 後・読取前に全長 invalidate**
+  placement gate が pin）。**WDMA3 の landing buffer は 2 面**（#59。450 KB、
+  arm はイテレーション先頭で他面へ。チャネルアドレスを書くのは `cam_wdma3.c` だけ・
+  xDMA disable 中のみ・マスクは WDMA3 専用ペアで save/restore —
+  `hx_drv_xdma_set_mask()` 不可。監査は fail-closed で緩め不可）。
+  **frame-ready 後・読取前に完了面だけ全長 invalidate**
   （ベンダのグルーはやっていない）。**停止は単一ルーチン、再開はバリア
   （静止 → クリア → 再 arm）** — callback は status しか持たないので世代番号では
-  遅延イベントを弾けない。**エラーはフレームより優先・未知の負値は terminal**。
+  遅延イベントを弾けない。**エラーはフレームより優先・未知の負値は terminal**
+  （#59 以降は publish 直前にも sticky ラッチを再読する）。
   `lcd_blit` は BE / pipeline は LE で、swap は `lcd_blit_le()` が持つ。
   **EPK 容量 32**（`GROVE_EPK_WRAP_MAX` == `TX_GLUE_EPK_MAX_IRQ`）。
   **Timer0 の割込み到達は probe で検証済み**（M-G3a 申し送りを解消。PRIMASK 外で
@@ -439,8 +444,9 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   アリーナ確保で上書きする）。
   NPU bring-up は SEC_ONLY 経路に無いので自前（読み戻し + fail-closed）。詳細は board README。
 - **ライブ推論オーバーレイ（`nn preview` / #48）**: 推論は**カメラ producer スレッド上・
-  sink の `consume()` 内**で走る（WDMA3 の再 arm は全 sink の consume 後なので raw フレームは
-  安定 = 枠は必ず表示中のフレームのもの）。順序は**推論（パネルガード無し）→ ガードを 1 回
+  sink の `consume()` 内**で走る（モデルが読むのは完了済みの landing buffer で、
+  次の frame-ready まで面は flip しない — #59 で 2 面化して「consume まで」から
+  「イテレーション全体」に強まった = 枠は必ず表示中のフレームのもの）。順序は**推論（パネルガード無し）→ ガードを 1 回
   取って stage/draw/present**（`lcd_blit_le_overlay()` の callback は staging と DMA の間。
   ガードは再帰的なので再入は deadlock ではなく**進行中トランザクションの破壊**になる）。
   [!] **`camera_stream_stop()` は成功時のみ join を保証する**（`CAM_OK` = producer 停止済み。

@@ -159,9 +159,6 @@ const char *cam_sensor_name(void);
 /** @return the model ID the DETECTED sensor is expected to answer with. */
 uint16_t cam_sensor_id(void);
 
-/** @return the WDMA3 landing buffer: CAM_RAW_BYTES of SRAM, 32-byte aligned. */
-uint8_t *cam_dp_raw_buffer(void);
-
 /**
  * @brief  Power the module and open the sensor's I2C channel.
  *

@@ -1316,10 +1316,16 @@ The model behind the predicted column, and it holds to 1.2% across periods from
 ```
 period = T_s * ceil((W + T_active) / T_s)
 
-  T_s      = VTS * 31.507 us          (HTS 1852 at a PCLK of 58.8 MHz)
-  T_active = 480 * 31.507 = 15.1 ms   (one active frame on the wire)
+  T_s      = VTS * 31.8 us            (MEASURED; see the note below)
+  T_active = 480 * 31.8 = 15.1 ms     (one active frame on the wire)
   W        = the producer's own work
 ```
+
+The line time here is the measured 31.8 us, **not** the 31.507 that HTS 1852 over
+a 58.8 MHz PCLK gives.  This block used to quote the datasheet figure while the
+frame-length section below said it was wrong, so the page contradicted itself.
+The measurement, and why 0.9% matters next to the cliff, are under
+"The line time is 31.77..31.87 us" in that section.
 
 **The datapath is one-shot.**  The producer arms it only after consuming the
 last frame, so every period contains the wait for the next frame start plus a
@@ -1582,12 +1588,55 @@ higher than that.  At these frame lengths 0.9% is 450 us -- the same order as th
 margins being reasoned about, which is how VTS 1580 got predicted onto the wrong
 side.  Use the measured figure near the cliff.
 
-The default moved to **VTS 880** on that evidence.  It is the best value for
-`camera preview`, within 1.1 fps of the best for `nn preview`, and it keeps the
-most margin on the binding bound of any candidate (5.5 ms, against 2.0 ms at
-VTS 1650) -- `nn preview` simply takes N=2 there.  The price is the exposure
-ceiling, which the frame length bounds: 880 caps integration at roughly 44% of
-what 1968 allowed, so a dim scene is dimmer.  `camera vts` changes it at runtime.
+### [!] The S term is gone since issue #71, and the default moved with it
+
+Everything above describes the bound as `S + B < period`, and that was correct
+while the panel sink held its pipeline pin until the SPI transfer finished.  It
+does not any more.  Issue #71 returns the pin at the staging seam -- the driver
+stages the frame into its own framebuffer and hands THAT to the DMA, so the slot
+is dead once the staging copy and `draw()` are done -- and the release therefore
+happens inside `consume()`.  The window in which the sink counts as busy is now
+contained in `S` rather than following it, so:
+
+```
+zero drops  <=>  B <= period        and    period = T_s * ceil((W + T_active) / T_s)
+```
+
+Measured at #71: the hold is **775 us** against a 26.5 ms transfer, and
+`camera stats` reports it as its own `held` row, separate from `blit`.  `B` is
+still 26.4 ms and still the display's floor -- it is the SPI wire time and
+nothing in #71 touched it -- but at these periods it no longer binds.
+
+So `nn preview` is bounded only by `W + T_active` = **47,323 us**, and the
+default moved to **VTS 1550** (T_s = 49,287, margin 1,964 us):
+
+| VTS | `nn preview` | `camera preview` | margin on 47,323 |
+|---:|---:|---:|---:|
+| 880 | 17.8 fps | **35.7 fps** | (N=2) |
+| 1480 | 10.6 | -- | -262 us |
+| 1500 | 16.8 | -- | +317 us |
+| **1550** | **20.2** | 20.3 | +1,964 us |
+| 1600 | 19.6 | -- | +3,554 us |
+
+**VTS 1500 is why the margin is not trimmed further, and it is a new failure
+mode.**  Its 317 us is 0.67%, and the line time itself moves 31.70..31.84 across
+measurement points -- so the margin sat inside the model's own error again.  It
+measured 16.8 fps against a predicted 21.0, and its 59,469 us period is **not a
+multiple of `T_s`**: roughly a quarter of the frames slipped to N=2.  The 1540
+row above showed this as *every other* frame; here it is a fraction.  1480 is the
+negative control -- 411 us the other side, 10.6 fps, cleanly N=2.
+
+**The price is `camera preview`: 35.7 -> 20.3 fps.**  Its `W` is only 9.2 ms so
+its period is entirely `T_s`, and one frame length cannot serve both -- `nn
+preview` wants `T_s` above 47.3 ms, `camera preview` wants it as small as `B`
+allows.  The default chooses `nn preview`; `camera vts 880` hands the other back
+at runtime, with no flash.
+
+The exposure ceiling moves the other way for once: 1550 allows 49.3 ms of
+integration against 28.0 at 880, so a dim scene gets more light, not less.
+
+Issue #59 removes `T_active` from the capture condition altogether, at which
+point every row here moves again.
 
 ## Ethos-U55 inference (`nn`)
 

@@ -46,47 +46,68 @@ static int ov5647_read_frame_length(uint16_t *lines);
  *
  *     period = T_s * ceil((W + T_active) / T_s)
  *
- * The DISPLAY, since issue #64 put the panel thread above the producer, needs
- * the sink's whole two-stage latency to fit in one period -- the hand-off is one
- * frame deep and the pin is not released until the panel is done, so the bound
- * is the SUM of the stages, not the larger of them:
+ * The DISPLAY needs the panel thread to keep up:
  *
- *     S + B < period      S = what the sink does on the producer (the
- *                             inference under `nn preview`; ~0 without it)
- *                         B = the panel thread's service time (the `blit` row)
+ *     B <= period         B = the panel thread's service time (the `blit` row)
  *
- * MEASURED at issue #64: T_active = 15.1 ms, S = 23,917 us, B = 26,455 us, so
- * the display bound is 50,371 us -- and W is 9,194 us for `camera preview`,
- * 32,154 for `nn preview`.
+ * [!] THAT USED TO BE `S + B < period` -- A SUM, not a max (issue #64), where S
+ * was the inference the sink runs on the producer.  Issue #71 removed the S
+ * term by returning the pipeline pin at the staging seam instead of after the
+ * transfer: the release now happens inside consume(), so the window in which
+ * the sink counts as busy is contained in S rather than following it.  The
+ * measured hold is 775 us against a 26.5 ms transfer.  Anything derived from
+ * the old sum -- the candidate table this comment used to carry, and the 880 it
+ * chose -- was recomputed rather than adjusted.
  *
- * WHY 880.  It is the best value for the harder-to-serve preview and a good one
- * for the other, with the most margin on the binding bound of any candidate:
+ * MEASURED at issue #71, board rev D, 200-frame runs:
  *
- *     VTS   camera preview   nn preview   margin on S + B
- *     880       35.7 fps      17.9 fps        5.5 ms
- *    1650       19.1          19.0            2.0
- *    1968       15.9          15.9           12.7
+ *     T_active = 15.1 ms          B = 26,437..26,466 us
+ *     hold     = 773..784 us      line time = 31.70..31.84 us
+ *     W = 32,223 us for `nn preview` (S = 23,937), 9,201 for `camera preview`
  *
- * At 880 `nn preview` simply takes N=2 (56.0 ms), which is why it keeps so much
- * margin.  All four rows were measured with zero dropped frames.
+ * So `nn preview` needs T_s > W + T_active = 47,323 us to take N=1, and that is
+ * now the only binding condition -- B is comfortably under it.
  *
- * [!] THE OPTIMUM IS A CLIFF EDGE, which is why this is not tuned tighter.
- * VTS 1580 puts the display bound 20 us on the wrong side and still showed 100
- * of 100 -- and VTS 1540, 1.5 ms on the wrong side, dropped exactly every other
- * frame.  A margin that thin does not fail cleanly, it degrades statistically.
- * Pick T_s with margin, and re-measure after any change to S, B or W.
+ *     VTS   nn preview   camera preview   margin on 47,323
+ *     880      17.8 fps       35.7 fps     (N=2)
+ *    1480      10.6           --            -262 us
+ *    1500      16.8           --             +317 us
+ *    1550      20.2           20.3         +1,964 us
+ *    1600      19.6           --           +3,554 us
+ *
+ * WHY 1550.  The best measured `nn preview` with a margin that survived, which
+ * is not the same as the best measured `nn preview`.
+ *
+ * [!] 1500 IS WHY THE MARGIN IS NOT TRIMMED.  Its 317 us is 0.67%, and the line
+ * time itself moves 31.70..31.84 across measurement points -- +-0.2%, or +-95 us
+ * at this frame length -- so the margin sat inside the model's own error.  It
+ * measured 16.8 fps against a predicted 21.0, and the period came out 59,469 us,
+ * which is NOT a multiple of T_s: about a quarter of the frames slipped to N=2.
+ * That is the second demonstration of this after issue #38's VTS 1540/1580, and
+ * the first where it appeared as a FRACTION of frames rather than as every other
+ * one.  1480 is the negative control: 411 us the other side of the boundary,
+ * 10.6 fps, exactly N=2.
  *
  * [!] AND THE LINE TIME IS NOT 31.507 us.  That figure is HTS 1852 / PCLK
- * 58.8 MHz; the zero-drop N=1 runs give period/VTS = 31.77..31.87 us, ~0.9%
- * higher.  Predictions from the datasheet figure run optimistic by about that
- * much, which is 450 us at these frame lengths -- enough to matter next to the
- * cliff.  `camera vts` is how to explore all of this without a flash.
+ * 58.8 MHz; every N=1 run gives period/VTS about 0.9% higher.  Predictions from
+ * the datasheet figure run optimistic by roughly 450 us at these frame lengths
+ * -- the same order as the margin being reasoned about.  `camera vts` explores
+ * all of this without a flash.
  *
- * The other thing this register controls is the EXPOSURE ceiling, which is
- * bounded by the frame length: 880 caps integration at roughly 44% of what 1968
- * allowed, so a dim scene is dimmer here.  That is the price of the frame rate.
+ * THE PRICE IS `camera preview`, and it is not small: 35.7 -> 20.3 fps.  Its own
+ * W is only 9.2 ms, so its period is entirely T_s, and a single frame length
+ * cannot serve both -- `nn preview` wants T_s above 47.3 ms, `camera preview`
+ * wants it as small as B allows.  This value chooses `nn preview`, which is what
+ * issue #56 is about; `camera vts 880` hands the other one back at runtime.
+ *
+ * The EXPOSURE ceiling, which the frame length also bounds, moves the other way
+ * for once: 1550 allows 49.3 ms of integration against 28.0 at 880, so a dim
+ * scene gets more light rather than less.
+ *
+ * [!] RE-MEASURE AFTER ANY CHANGE TO W OR B.  Issue #59 removes T_active from
+ * the capture condition altogether, at which point every row above moves.
  */
-#define OV5647_DEFAULT_VTS  880u
+#define OV5647_DEFAULT_VTS  1550u
 
 /* The mode outputs 480 lines; VTS below that plus the part's own blanking is
  * not a frame.  Linux's 504 for this mode is the practical floor, and it is

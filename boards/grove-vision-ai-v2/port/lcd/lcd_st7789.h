@@ -235,8 +235,55 @@ int lcd_blit_le(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                 const uint16_t *pixels, int (*stop)(void *), void *stop_arg);
 
 /**
+ * The two callbacks lcd_blit_le_overlay() can make, and their contexts.
+ *
+ * [!] THEY RUN AT THE SAME POINT AND HAVE OPPOSITE CONTRACTS. Read both.
+ *
+ * `overlay` draws on the staged frame (issue #48). `staged` is told that the
+ * caller's SOURCE buffer is finished with (issue #71): everything the transfer
+ * needs has been copied into the driver's own framebuffer, and the DMA reads
+ * that, never @p pixels. A caller that borrowed the source from somewhere may
+ * hand it back here rather than after the transfer, which is 25.6 ms earlier at
+ * this panel's clock.
+ *
+ * `staged` runs AFTER `overlay`, and that order is load-bearing for a caller
+ * whose overlay data is produced by another thread: releasing before the draw
+ * would let that thread start writing the next frame's annotations while draw()
+ * is still reading this one's.
+ *
+ * What `staged` may do, where `overlay` may not: TAKE LOCKS. It runs at a point
+ * where the driver holds only the panel guard and wants nothing back, so a
+ * caller may complete a hand-off that needs its own mutex.
+ *
+ * What it may NOT do, and here it is stricter than `overlay`:
+ *
+ *   - it must NOT touch the framebuffer. `overlay`'s turn is over; the frame is
+ *     final and the next thing that happens to it is the transfer;
+ *   - it must NOT call any LCD entry point, for the same reason `overlay` may
+ *     not -- the guard is recursive, so re-entry corrupts the transaction in
+ *     progress rather than deadlocking;
+ *   - it must NOT block for long. The panel guard is held, so everything else
+ *     that wants the panel is failing its non-blocking acquire meanwhile.
+ *
+ * [!] AND IT IS NOT GUARANTEED TO RUN. It is reached only once staging has
+ * happened, so a rejection before that point skips it -- and a rejection AFTER
+ * it (the ready/orientation/geometry test lives inside the transfer, not here)
+ * still leaves it already called. A caller that releases something here needs
+ * its own record of whether that happened; it cannot infer it from the return
+ * value.
+ */
+struct lcd_blit_hooks {
+	/** Draw on the staged frame. NULL to skip. */
+	void (*overlay)(void *ctx, uint16_t *fb, uint16_t fb_w, uint16_t fb_h);
+	/** The source buffer is finished with. NULL to skip. */
+	void (*staged)(void *ctx);
+	/** Passed back to both, untouched. */
+	void *ctx;
+};
+
+/**
  * @brief  As lcd_blit_le(), with a chance to draw ON the staged frame before it
- *         goes out (issue #48).
+ *         goes out (issue #48), and to be told when the SOURCE is free (#71).
  *
  * @p overlay is called once, after @p pixels have been converted into the
  * driver's framebuffer and before the DMA starts, with that framebuffer and its
@@ -263,14 +310,14 @@ int lcd_blit_le(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
  * PURE. It touches no driver state and takes no lock, so calling it from here
  * is not re-entry in any sense that matters.
  *
- * @param overlay  may be NULL, which makes this exactly lcd_blit_le()
- * @param ctx      passed back to @p overlay untouched
+ * @p staged is a SECOND callback with a DIFFERENT contract -- see the note on
+ * struct lcd_blit_hooks.
+ *
+ * @param hooks  may be NULL, which makes this exactly lcd_blit_le()
  */
 int lcd_blit_le_overlay(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                         const uint16_t *pixels,
-                        void (*overlay)(void *ctx, uint16_t *fb,
-                                        uint16_t fb_w, uint16_t fb_h),
-                        void *ctx,
+                        const struct lcd_blit_hooks *hooks,
                         int (*stop)(void *), void *stop_arg);
 
 /**

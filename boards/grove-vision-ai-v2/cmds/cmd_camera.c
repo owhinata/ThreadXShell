@@ -624,6 +624,30 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 		              "[panel thread]\r\n",
 		          (unsigned long)(sk.blit_us / sk.blit_frames),
 		          (unsigned long)sk.blit_frames);
+	/*
+	 * [!] AND HOW LONG THE SLOT IS HELD (issue #71), which is NOT the row
+	 * above.  `blit` is the panel thread's whole interval; this stops when
+	 * the pin goes back at the staging seam, before the transfer.  The gap
+	 * between the two is exactly what moving the release bought, and this is
+	 * the number the frame period is now bounded by -- so it is the one to
+	 * read before picking a frame length with `camera vts`.
+	 */
+	if (sk.prof_ok && sk.hold_frames != 0u)
+		cli_print(sh, "  held   : %6lu us/frame over %lu frame(s) "
+		              "[to pin returned]\r\n",
+		          (unsigned long)(sk.hold_us / sk.hold_frames),
+		          (unsigned long)sk.hold_frames);
+	/*
+	 * A stream in flight has one frame out, so `accepted` leading `puts` by
+	 * one is normal and not worth printing.  Any other gap is worth seeing
+	 * at once -- detach turns it into a poisoned sink, and this is how to
+	 * catch it before then.
+	 */
+	if (sk.accepted != sk.puts)
+		cli_print(sh, "  handed : %lu accepted, %lu released%s\r\n",
+		          (unsigned long)sk.accepted, (unsigned long)sk.puts,
+		          (sk.accepted - sk.puts == 1u) ? " (one in flight)"
+		                                        : " [!]");
 	if (sk.fault != NULL)
 		cli_print(sh, "sink err : %s\r\n", sk.fault);
 	/* Only ever non-zero after an `nn preview`: a frame whose inference was

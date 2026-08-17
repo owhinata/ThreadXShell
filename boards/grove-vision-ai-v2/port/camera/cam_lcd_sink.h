@@ -161,10 +161,35 @@ struct cam_lcd_sink_stats {
 	uint32_t busy;           /**< frames skipped because the panel was taken */
 	uint32_t overlay_errors; /**< process() refused: frame shown, no boxes   */
 
+	/**
+	 * Deliveries accepted, and slots handed back (issue #71).
+	 *
+	 * [!] THEY ARE NOT REQUIRED TO MATCH WHILE A STREAM RUNS -- one frame is
+	 * normally in flight, so `accepted` leads by one.  They are an invariant
+	 * only after a successful drain, which is where detach checks them and
+	 * poisons the sink if they disagree.  Reported here so the pair can be
+	 * watched without ending the preview to find out.
+	 */
+	uint32_t    accepted;
+	uint32_t    puts;
+
 	int         prof_ok;     /**< 0 = the time source is not trustworthy     */
 	const char *prof_why;    /**< why not, when prof_ok is 0 (else NULL)     */
 	uint32_t    blit_frames; /**< blits counted into blit_us                 */
 	uint32_t    blit_us;     /**< TOTAL microseconds, not per frame          */
+
+	/**
+	 * How long the slot is HELD: hand-off to pin returned (issue #71).
+	 *
+	 * Not a subset of blit_us -- a different span with a different end.
+	 * blit_us is the panel thread's whole interval, transfer included; this
+	 * one stops when the pin goes back at the staging seam, which is what
+	 * the frame period is now bounded by.  Counted only on frames the
+	 * driver's staged hook ended, so the fallback paths (panel taken, driver
+	 * refused early) cannot inflate it.  TOTAL microseconds, not per frame.
+	 */
+	uint32_t    hold_frames;
+	uint32_t    hold_us;
 
 	/** Why the sink is finished, or NULL.  Deliberately not the same field
 	 *  as prof_why: one says the clock cannot be trusted, this one says the

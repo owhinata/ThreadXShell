@@ -452,6 +452,13 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   [!] **`camera_stream_stop()` は成功時のみ join を保証する**（`CAM_OK` = producer 停止済み。
   timeout は何も証明しない）。**全ての呼び出し元は `CAM_OK` の時だけ detach する**
   （`camera preview` も同様。従来は無条件 detach で、これは既存のバグだった）。
+  [!] **stop だけが API mutex を有界待ちする**（#65。他の入口は `TX_NO_WAIT` のまま —
+  両方向に戻さない）。**poison の判定は待ちの向こう側でもう一度行う**（`CAM_ST_LOST` は
+  「not streaming」でもあるので、近道を前に置くと起きていない stop を成功と報告する）。
+  この順序は `port/camera/cam_state.c` の純関数が**唯一の判断点**で、
+  `camera_stream_stop()` 側に近道を書き戻さない（実機では作れない分岐なので、
+  `test/test_cam_stop.c` だけが検査できる）。取得できなかった場合は
+  **`CAM_ERR_LOCKED`（-8。このボード固有）で poison しない**（何も聞いていない）。
   未確認の join は **`CAM_ST_LOST`**（**再起動まで全ハードウェア操作を拒否**。
   `CAM_ST_FAULTED` は「次の bring-up で作り直す」= ここでは最悪の動作なので使えない）で、
   この経路では **detach も teardown も `nn` gate 解放もしない**（overlay/sink の状態が

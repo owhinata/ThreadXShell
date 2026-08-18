@@ -72,6 +72,29 @@ static void cam_report(struct cli_instance *sh, const char *what, int rc)
 		          (long)st.last_dp_status);
 }
 
+/*
+ * A stop that did not confirm, said accurately (issue #65).
+ *
+ * The two failures need different sentences because they leave the board in
+ * different places, and the old single message described the wrong one for the
+ * commoner case: a lock collision was reported as a camera that had poisoned
+ * itself.  What they share is the part that is not advice -- the sink is still
+ * attached, and this command must not detach it.
+ */
+static void cam_report_stop(struct cli_instance *sh, int rc)
+{
+	cam_report(sh, "stream stop", rc);
+
+	if (rc == CAM_ERR_LOCKED)
+		cli_error(sh, "        nothing was asked of the producer and "
+		              "nothing was torn down;\r\n"
+		              "        the sink stays attached, and a reboot "
+		              "is what clears it\r\n");
+	else if (rc == CAM_ERR_TIMEOUT)
+		cli_error(sh, "        the producer is still running; the "
+		              "camera is unusable until reboot\r\n");
+}
+
 /* ---- probe --------------------------------------------------------------- */
 
 static int cmd_camera_probe(struct cli_instance *sh, int argc, char **argv)
@@ -380,7 +403,7 @@ static int cmd_camera_preview(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	if (rc != CAM_OK) {
-		cam_report(sh, "stream stop", rc);
+		cam_report_stop(sh, rc);
 		return 1;
 	}
 
@@ -570,7 +593,7 @@ static int cmd_camera_bench(struct cli_instance *sh, int argc, char **argv)
 		return 0;
 
 	if (rc != CAM_OK) {
-		cam_report(sh, "stream stop", rc);
+		cam_report_stop(sh, rc);
 		return 1;
 	}
 
@@ -609,6 +632,17 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 	if (st.last_dp_status != 0)
 		cli_print(sh, " (last status %ld)", (long)st.last_dp_status);
 	cli_print(sh, "\r\n");
+	/*
+	 * Stops that found the API locked (issue #65).  Zero is the normal
+	 * answer and the line is still worth printing: since the stop WAITS now
+	 * instead of giving up, a collision leaves no other trace -- and a
+	 * collision used to be the thing that stranded a sink until reboot.
+	 * A non-zero count with the previews still working is the fix doing its
+	 * job; the longest wait says how close it came to the deadline.
+	 */
+	cli_print(sh, "stop lock: %lu contended (longest wait %lu ms)\r\n",
+	          (unsigned long)st.lock_contended,
+	          (unsigned long)st.lock_wait_max_ms);
 	/*
 	 * The double-buffer evidence (issue #59).  A flip that silently became
 	 * a no-op -- every arm landing on buffer 0 -- produces a working

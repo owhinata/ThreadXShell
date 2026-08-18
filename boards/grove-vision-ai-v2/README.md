@@ -2421,15 +2421,68 @@ nothing attached and no stream running**, so `camera preview` and `nn preview`
 unwind their own state and return. The "BUSY means it might have half-worked"
 branches are gone along with the window that motivated them.
 
-**This is the START side only.** A sink can still be orphaned from the other
-end, by a different root: `camera_stream_stop()` returns `CAM_ERR_BUSY` when it
-merely fails to take the API mutex -- another console running `camera exposure`
-is enough -- and callers are required to read anything but `CAM_OK` as "the
-producer may still be running, hold everything". So ordinary lock contention
-makes a preview abandon its own attached sink while the stream runs on. That is
-issue #65, and it predates this one. The rule here does bound the damage: no
-LATER stream can reach the abandoned sink, where before #63 `camera bench` could
-walk straight into it once the producer gave up by itself.
+**This is the START side only.** The stop side had its own way of orphaning a
+sink, and it is issue #65, fixed below.
+
+### [!] The stop waits for the API mutex; every other call still refuses (#65)
+
+`cam_api_enter()` takes the API mutex with `TX_NO_WAIT`, and that is right for
+the tuning and capture entry points: a refusal there is cheap and honest. It was
+wrong for the stop. Callers must read anything but `CAM_OK` as "the producer may
+still be inside my sink, hold everything" -- so a **microsecond of lock
+contention** (another shell in `camera probe`, a background job in `camera
+capture`) made a preview abandon its own attached sink, keep `nn`'s NPU lease,
+and print that the camera was unusable until reboot when nothing had been
+touched at all.
+
+So `camera_stream_stop()` now **tries, and then waits**:
+
+- the poison test stays BEFORE the mutex (#48) -- a call that will be refused
+  must never queue behind anything;
+- the untimed try keeps the uncontended path exactly what it was, and makes
+  "had to wait" an exact count rather than an inference;
+- the bounded wait clears the worst hold a healthy system can have: a concurrent
+  stop's whole join (6 s) dominates a one-shot capture's bring-up + frame wait +
+  quiesce (under 3 s), so the deadline is 8 s. Like the join deadline it is not
+  a correctness parameter -- reaching it means a holder is wedged;
+- **the poison is re-tested on the far side of the wait.** This is a hazard the
+  wait introduces: a stop blocked behind another stop's join wakes up owning the
+  mutex with the state already `CAM_ST_LOST`, and `CAM_ST_LOST` is also "not
+  streaming", so the old "not streaming -> `CAM_OK`" shortcut would have reported
+  a confirmed stop that never happened.
+
+That ordering is the correctness, so it is **not** written inline: it is
+`cam_stop_decide()` in `port/camera/cam_state.c`, a pure function over (how the
+acquisition ended, the state read while holding), and `test/test_cam_stop.c`
+walks the table. The case that matters cannot be produced from a console -- it
+needs two stops overlapping on a board with one shell -- so a host test is the
+only place it can ever be exercised. `camera_stream_stop()` keeps no shortcut of
+its own ahead of that call; a copy would be the copy that drifts.
+
+**The two failures now say different things**, which is the other half of #65:
+
+| return | what it proves | what the operator is told |
+|---|---|---|
+| `CAM_ERR_TIMEOUT` | the producer was asked and never acknowledged | the camera poisons itself; unusable until reboot |
+| `CAM_ERR_LOCKED` (-8, Grove-only) | this call never acquired the API, so nothing was asked and nothing was touched | the sink stays attached, and a reboot is what clears the reservation |
+
+`CAM_ERR_LOCKED` deliberately claims nothing about the stream: the holder may be
+a stop that has already joined and not yet let go. The camera is not poisoned --
+but with a linked sink reserving it and no command that can stop a stream on its
+own, the reboot part is still true, and saying only "nothing was torn down"
+would read as recoverable.
+
+Waiting forever instead would trade a stranded sink for a **dead console**: the
+mutex wait is not interruptible by Ctrl+C and this board has one shell, so there
+would be no message and no diagnosis. Bounded, then say what happened, is what
+`CAM_ST_LOST` already does.
+
+`camera stats` grew a `stop lock:` line -- how many stops found the mutex held,
+and the longest they waited (timed-out attempts included). Zero is the normal
+answer; the line exists because a collision now leaves no other trace, and a
+collision used to be the thing that stranded a sink. The pair is updated and
+snapshotted under a short `TX_DISABLE`: two stops can be at that boundary at
+once, and neither owns the mutex there.
 
 ### [!] The stop contract has two halves now (issue #57)
 

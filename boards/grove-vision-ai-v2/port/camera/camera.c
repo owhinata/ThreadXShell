@@ -40,6 +40,7 @@
 #include "cam_convert.h"
 #include "cam_dp.h"
 #include "cam_sensor.h"
+#include "cam_state.h"
 #include "cam_wdma3.h"
 #include "epk_irq_wrap.h"
 #include "timer_seam.h"
@@ -138,6 +139,31 @@ _Static_assert(CAM_PRODUCER_STACK >= 1024u,
 #define CAM_STOP_JOIN_TICKS (6u * TX_TIMER_TICKS_PER_SECOND)
 
 /*
+ * How long camera_stream_stop() waits for the API MUTEX -- which is a different
+ * question from the one above (issue #65).
+ *
+ * Every other entry point takes the mutex with TX_NO_WAIT, because for them a
+ * refusal is cheap and honest.  The stop cannot do that: by camera.h's rule a
+ * caller reads anything but CAM_OK as "the producer may still be inside my
+ * sink", so a collision that lasted microseconds made a preview abandon its own
+ * sink for ever.  Waiting is safe here -- the producer never takes this mutex,
+ * and no holder waits on the producer or the panel thread, so there is no cycle.
+ *
+ * Bounded by the worst hold a HEALTHY system can have, which is the larger of:
+ *
+ *   - a concurrent stop, which holds the mutex for its whole join
+ *     (CAM_STOP_JOIN_TICKS, 6 s), and
+ *   - a one-shot capture, which holds it for a bring-up (the 100 ms Timer0
+ *     delivery probe dominates) plus CAM_FRAME_TIMEOUT_TICKS (2 s) plus the
+ *     quiesce -- under 3 s.
+ *
+ * So the join dominates, and 8 s clears it with room for scheduling.  Like the
+ * join deadline this is NOT a correctness parameter: reaching it means a holder
+ * is wedged, and the stop then reports that it never asked rather than guessing.
+ */
+#define CAM_STOP_LOCK_TICKS (8u * TX_TIMER_TICKS_PER_SECOND)
+
+/*
  * Restart attempts after a timeout before giving up for good.  Bounded on
  * purpose: an endlessly retrying producer turns a dead camera into a board that
  * looks busy, and each retry is a full datapath reconfiguration.
@@ -169,35 +195,10 @@ static UCHAR     cam_producer_stack[CAM_PRODUCER_STACK]
 
 /* ---- state --------------------------------------------------------------- */
 
-enum cam_state {
-	CAM_ST_DOWN = 0,   /**< nothing brought up                        */
-	CAM_ST_READY,      /**< powered, wrapped, sensor identified       */
-	CAM_ST_STREAMING,
-	CAM_ST_FAULTED,    /**< terminal; the next open() rebuilds it all */
-	CAM_ST_LOST,       /**< [!] UNRECOVERABLE -- see below            */
-};
-
 /*
- * [!] CAM_ST_LOST: the producer never acknowledged a stop (issue #48).
- *
- * Every other state describes hardware this thread controls.  This one
- * describes hardware that MAY STILL BE IN USE by a producer thread which did
- * not come back inside the join deadline -- so the one thing that must not
- * happen is another command rebuilding, quiescing or powering it underneath
- * that thread.
- *
- * CAM_ST_FAULTED cannot express this: it is explicitly the recoverable
- * terminal state, and cam_bringup() treats it as "rebuild everything", which is
- * exactly the action that would be catastrophic here.  So this is separate, and
- * it is reached only from the join timeout.
- *
- * WHY REBOOT AND NOT A RETRY.  There is nothing to wait for.  The producer is
- * blocked somewhere the deadline already proved is longer than expected -- a
- * lost NPU interrupt, a wedged vendor driver -- and no later call can learn
- * whether it has finished, because the acknowledgement it would have used is
- * the very thing that did not arrive.  Refusing forever is the only honest
- * answer, and it is cheap: this state is unreachable unless something is
- * already badly wrong.
+ * The states, and the stop's decision over them, live in cam_state.h -- see the
+ * note there for why the decision is a pure function and not inline below.
+ * CAM_ST_LOST's contract is documented beside the enum.
  */
 
 static struct frame_pipeline cam_pipe;
@@ -232,6 +233,22 @@ static uint32_t cam_csirx_errors;
 static uint32_t cam_relock_fails;
 static uint32_t cam_dp_errors;
 static int32_t  cam_last_dp_status;
+
+/*
+ * How often a stop found the API mutex held, and the longest it then waited
+ * (issue #65).
+ *
+ * NOT producer-owned, and not mutex-protected either: the whole point is that
+ * they are written by a thread which has just failed to take the mutex, and two
+ * stops can be at that boundary at once.  So the pair is updated -- and read
+ * back in camera_stream_stats() -- inside a short TX_DISABLE, the same way the
+ * panel sink's hand-off counters are.
+ *
+ * The wait includes the attempts that went on to TIME OUT: that is the
+ * observation worth having, since it is the one the operator sees as a refusal.
+ */
+static uint32_t cam_lock_contended;
+static uint32_t cam_lock_wait_max;
 
 /* ---- per-stage profile (issue #38) --------------------------------------- */
 
@@ -467,6 +484,7 @@ const char *camera_strerror(int rc)
 	case CAM_ERR_NO_SENSOR:  return "no sensor";
 	case CAM_ERR_NO_FRAME:   return "no frame captured yet";
 	case CAM_ERR_BUSY:       return "camera busy";
+	case CAM_ERR_LOCKED:     return "the camera API stayed locked";
 	default:                 return "unknown error";
 	}
 }
@@ -1387,7 +1405,7 @@ static int cam_api_enter(void)
 	 * and takes no mutex, so `camera stats` still answers and still says
 	 * what happened -- a refusal with no way to see why is not a diagnosis.
 	 */
-	if (cam_state == CAM_ST_LOST)
+	if (!cam_api_may_acquire(cam_objects_ok, cam_state))
 		return CAM_ERR_STATE;
 	if (tx_mutex_get(&cam_api_mutex, TX_NO_WAIT) != TX_SUCCESS)
 		return CAM_ERR_BUSY;
@@ -1397,6 +1415,51 @@ static int cam_api_enter(void)
 static void cam_api_exit(void)
 {
 	(void)tx_mutex_put(&cam_api_mutex);
+}
+
+/* Record one contended stop, count and longest wait together (issue #65). */
+static void cam_note_contention(ULONG waited)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	cam_lock_contended++;
+	if ((uint32_t)waited > cam_lock_wait_max)
+		cam_lock_wait_max = (uint32_t)waited;
+	TX_RESTORE
+}
+
+/*
+ * The stop's acquisition: try, and only then wait (issue #65).
+ *
+ * Try first so that the uncontended path -- every stop anyone has ever run --
+ * is the same call it always was, and so that "had to wait" is an exact count
+ * rather than an inference from elapsed time.
+ *
+ * The caller has already made the poison test that belongs BEFORE the mutex;
+ * this returns only how the attempt ended, and cam_stop_decide() turns that,
+ * with the state read while holding, into what the stop does.
+ */
+static enum cam_stop_acquire cam_api_enter_stop(void)
+{
+	UINT st = tx_mutex_get(&cam_api_mutex, TX_NO_WAIT);
+	ULONG t0;
+
+	if (st == TX_SUCCESS)
+		return CAM_STOP_ACQ_HELD;
+	if (st != TX_NOT_AVAILABLE)
+		return CAM_STOP_ACQ_ERROR;
+
+	t0 = tx_time_get();
+	st = tx_mutex_get(&cam_api_mutex, CAM_STOP_LOCK_TICKS);
+	cam_note_contention(tx_time_get() - t0);
+
+	if (st == TX_SUCCESS)
+		return CAM_STOP_ACQ_HELD;
+	/* TX_NOT_AVAILABLE here is the deadline; anything else is a mutex this
+	 * port can no longer rely on, which is not the same answer. */
+	return (st == TX_NOT_AVAILABLE) ? CAM_STOP_ACQ_TIMEOUT
+	                                : CAM_STOP_ACQ_ERROR;
 }
 
 /*
@@ -1668,13 +1731,48 @@ int camera_stream_start(struct frame_sink *sink)
 
 int camera_stream_stop(void)
 {
-	int rc = cam_api_enter();
+	enum cam_stop_acquire acq;
 
-	if (rc != CAM_OK)
-		return rc;
-	if (cam_state != CAM_ST_STREAMING) {
+	/*
+	 * [!] THE POISON TEST IS STILL BEFORE THE MUTEX (issue #48): a call that
+	 * is going to be refused must never queue behind anything.
+	 */
+	if (!cam_api_may_acquire(cam_objects_ok, cam_state))
+		return CAM_ERR_STATE;
+
+	acq = cam_api_enter_stop();
+
+	/*
+	 * [!] AND THE DECISION IS cam_stop_decide()'s, ALL OF IT (issue #65).
+	 *
+	 * Nothing here may test the state ahead of it -- CAM_ST_LOST is also
+	 * "not streaming", so a shortcut placed first would report a confirmed
+	 * stop that never happened.  Keeping the whole table in one pure
+	 * function is what lets the host test hold that ordering down; a copy of
+	 * it here would be the copy that drifts.
+	 */
+	switch (cam_stop_decide(acq, cam_state)) {
+	case CAM_STOP_REFUSE_LOCKED:
+		/*
+		 * The mutex never came free, so the producer was never asked --
+		 * this call did not touch the port and did not confirm
+		 * anything.  It says nothing about whether the stream is still
+		 * running (the holder may be a stop that has already joined),
+		 * and it does NOT poison: nothing was done to be undone.
+		 */
+		LOG_ERR("the camera API stayed locked; the stop was never "
+		        "requested");
+		return CAM_ERR_LOCKED;
+	case CAM_STOP_REFUSE_STATE:
+		if (acq == CAM_STOP_ACQ_HELD)
+			cam_api_exit();
+		return CAM_ERR_STATE;
+	case CAM_STOP_ALREADY:
 		cam_api_exit();
 		return CAM_OK;         /* already stopped: not an error */
+	case CAM_STOP_JOIN:
+	default:
+		break;
 	}
 
 	/*
@@ -1929,6 +2027,7 @@ void camera_stream_stats(struct camera_stats *out)
 	const char *why = NULL;
 	uint32_t hz;
 	uint32_t sum;
+	uint32_t lock_contended, lock_wait_max;
 
 	if (out == NULL)
 		return;
@@ -1952,7 +2051,18 @@ void camera_stream_stats(struct camera_stats *out)
 	 */
 	TX_DISABLE
 	p = cam_prof;
+	/* The contention pair in the same breath, and for the same reason as
+	 * the panel sink's counters: the two belong together, and a stop that is
+	 * at that boundary right now owns no mutex to serialise it.  Copied
+	 * raw -- the conversion to milliseconds is arithmetic and has no
+	 * business running with interrupts off. */
+	lock_contended = cam_lock_contended;
+	lock_wait_max  = cam_lock_wait_max;
 	TX_RESTORE
+
+	out->lock_contended   = lock_contended;
+	out->lock_wait_max_ms = (lock_wait_max * 1000u) /
+	                        TX_TIMER_TICKS_PER_SECOND;
 
 	out->streaming      = (cam_state == CAM_ST_STREAMING);
 	out->frames         = cam_frames;

@@ -301,6 +301,15 @@
      — あれは「次の bring-up で作り直す」状態で、ここでは最悪の動作になる。
      この経路では detach も teardown も所有権解放もしない。
      `camera_stream_stats()` は mutex もハードウェアも触らないので拒否理由は必ず読める。
+   - [!] **stop だけが API mutex を有界待ちする（#65）。** 他の入口は `TX_NO_WAIT` の
+     まま。**両方向に戻さない** — 元の `TX_NO_WAIT` では単なるロック競合が
+     「producer 未確認」として返り、preview が自分の sink を捨てていた。
+     **poison の判定は待ちの向こう側でもう一度**（`CAM_ST_LOST` は「not streaming」でも
+     あるので、近道を前に置くと**起きていない stop を `CAM_OK` として報告する**）。
+     この順序は `port/camera/cam_state.c` の `cam_stop_decide()` が**唯一の判断点**で、
+     `camera_stream_stop()` に近道を書き戻すと `test/test_cam_stop.c` が
+     検査できなくなる（実機では作れない分岐）。取得失敗は **`CAM_ERR_LOCKED`（-8、
+     このボード固有）で poison しない** — 何も聞いていないので何も証明していない。
    - **EPK 容量は `GROVE_EPK_WRAP_MAX` == `TX_GLUE_EPK_MAX_IRQ` == 32**
      （`_Static_assert` で結んである。片方だけ動かさない）。
      **[!] `nn preview`（#48）で 31/32 に達する**（camera 26 + UART0 1 + LCD 2 +

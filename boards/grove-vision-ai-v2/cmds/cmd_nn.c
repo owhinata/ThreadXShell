@@ -728,13 +728,22 @@ static int cmd_nn_preview(struct cli_instance *sh, int argc, char **argv)
 
 	if (stop_rc != CAM_OK) {
 		/*
-		 * The producer never acknowledged.  Detaching now would unlink
-		 * a sink it may be inside, so nothing is torn down and the gate
-		 * is kept -- the camera has poisoned itself and says so.
+		 * No confirmed stop, so nothing is torn down and the gate is
+		 * kept: detaching now would unlink a sink the producer may be
+		 * inside.  That much is the same for every failure -- but what
+		 * the operator is told is NOT, and saying the poisoned version
+		 * of it for a lock collision was a plain lie (issue #65).
 		 */
-		cli_error(sh, "nn: the camera did not stop (%d); it is now "
-		              "unusable until reboot, and nn stays held\r\n",
-		          stop_rc);
+		if (stop_rc == CAM_ERR_LOCKED)
+			cli_error(sh, "nn: the camera API stayed locked, so the "
+			              "stop was never requested;\r\n"
+			              "    nothing was torn down, the sink stays "
+			              "attached and nn stays held.\r\n"
+			              "    A reboot is what clears it\r\n");
+		else
+			cli_error(sh, "nn: the camera did not stop (%d); it is "
+			              "now unusable until reboot, and nn stays "
+			              "held\r\n", stop_rc);
 		return -1;
 	}
 

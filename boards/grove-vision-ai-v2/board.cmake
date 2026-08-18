@@ -329,6 +329,7 @@ set(SHELL_SOURCES
     "${BOARD_DIR}/cmds/cmd_membench.c"
     "${BOARD_DIR}/cmds/cmd_epk.c"
     "${BOARD_DIR}/cmds/cmd_lcd.c"
+    "${BOARD_DIR}/cmds/cmd_mve.c"
     "${BOARD_DIR}/cmds/cmd_camera.c"
     "${BOARD_DIR}/cmds/cmd_nn.c"
     "${CMAKE_SOURCE_DIR}/svc/fmt.c"
@@ -348,14 +349,15 @@ set(SHELL_SOURCES
 # ~180 KB spare, so the wio port's malloc-per-run trade does not apply.
 # ITERATIONS=0 -> CoreMark auto-calibrates the run time.
 #
-# [!] -fno-tree-vectorize is load-bearing, not tuning: -mcpu=cortex-m55 enables
-# MVE, and at -O3 the auto-vectoriser emits PREDICATED MVE (VCTP/VPST) for
-# exactly the kind of loops CoreMark is made of -- which
-# check_mve_predication.py fails the build on.  That gate rests on a premise the
-# Armv8-M ARM contradicts (the hardware does stack VPR, see issue #42); it is
-# fail-closed, so this option is the workaround until #42 lands rather than a
-# correctness requirement.  Until then the published score is a SCALAR score;
-# core_portme.h says so in the report's own flags line.
+# [!] -fno-tree-vectorize is the ONE place this option survived issue #42, and
+# the reason changed with it.  It is no longer about MVE safety -- the ban is
+# gone and the hardware preserves VPR -- it is about BASELINE COMPARABILITY: the
+# published 3.13 CoreMark/MHz was measured with these flags, and a CoreMark
+# score means nothing apart from the flags it was built with (which is why
+# core_portme.h reports them).  A vectorised score would be a perfectly valid
+# different result; taking it means re-measuring and restating every comparison
+# that quotes the old one, which is a deliberate step and not a side effect of
+# lifting a ban.
 set(CMK_DIR "${CMAKE_SOURCE_DIR}/lib/coremark")
 add_library(coremark_obj OBJECT
     "${CMK_DIR}/core_list_join.c"
@@ -380,8 +382,10 @@ set_source_files_properties("${CMK_DIR}/core_main.c" PROPERTIES
 
 # --- TFLite Micro + Ethos-U55 core driver (issue #44) ------------------------
 # Built FROM SOURCE, not from prebuilt_libs/.  The only 2412-tag archive the SDK
-# ships is the CMSIS-NN variant, and CMSIS-NN is Helium code -- linking it would
-# put predicated MVE in the image and check_mve_predication.py would reject it.
+# ships is the CMSIS-NN variant, and CMSIS-NN is Helium code.  That was a bar to
+# linking it while issue #42's ban stood; the ban is gone, but nothing is gained
+# by swapping a source build for an archive whose kernels this configuration
+# does not register.
 # Building from source costs nothing here because there is nothing to replace:
 # the op resolver registers AddEthosU() and NOTHING else, so not one CPU kernel
 # is linked.  A Vela-compiled model folds every conv/pool/activation into the
@@ -476,18 +480,15 @@ target_compile_definitions(tflm_obj PUBLIC
     # tuned it -- and since #48 the number is load-bearing for the camera's
     # stop join, which reasons about two of these waits.
     ETHOSU_SEMAPHORE_WAIT_INFERENCE=${GROVE_NPU_INFERENCE_TIMEOUT_TICKS})
-# [!] -fno-tree-vectorize on the WHOLE set, not just the pixel loops.
-# -mcpu=cortex-m55 makes MVE available to every translation unit, so
-# auto-vectorisation can appear anywhere -- registering no CPU kernels bounds
-# what RUNS on the CPU, not what the compiler emits -- and
-# check_mve_predication.py fails the build on predicated MVE.  (That gate rests
-# on a premise the Armv8-M ARM contradicts, see issue #42; it is fail-closed, so
-# this is the workaround until #42 lands, not a correctness requirement.)
+# -fno-tree-vectorize is GONE from here (issue #42).  It was on the whole set
+# because MVE is available to every translation unit and the predication scan
+# would have failed the build on what the auto-vectoriser emitted.  The scan is
+# deleted and the ban with it; nothing here needs the compiler held back.
 #
 # -Wno-* : the SDK's TFLM snapshot is upstream code compiled here with warnings
 # the rest of this port keeps on.  Scoped to this target only.
 target_compile_options(tflm_obj PRIVATE
-    -Os -fno-tree-vectorize
+    -Os
     $<$<COMPILE_LANGUAGE:CXX>:-Wno-unused-parameter -Wno-sign-compare>)
 
 # --- The shell firmware ------------------------------------------------------
@@ -501,6 +502,7 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/src/retarget.c"
     "${BOARD_DIR}/src/malloc_lock.c"
     "${BOARD_DIR}/src/xprintf_shim.c"
+    "${BOARD_DIR}/port/threadx/fp_enforce.c"
     "${BOARD_DIR}/port/threadx/tx_glue.c"
     "${BOARD_DIR}/port/sdk_seam/timer_seam.c"
     "${BOARD_DIR}/port/sdk_seam/epk_irq_wrap.c"
@@ -596,36 +598,23 @@ target_compile_definitions(shell_objs PRIVATE
     NN_MODEL_DET_OFFSET=${GROVE_MODEL_DET_ADDR})
 target_compile_options(shell_objs PRIVATE -Os)
 
-# [!] -fno-tree-vectorize on the camera's pixel loops, for the same reason
-# coremark_obj carries it (see the note above that option): -mcpu=cortex-m55
-# makes MVE available, and check_mve_predication.py fails the build on any
-# predicated MVE in the image (a gate whose premise issue #42 refutes, kept
-# because it is fail-closed).  -Os does not auto-vectorise today, which is
-# exactly why this is stated rather than relied upon -- a later -O2 or a newer
-# GCC would turn a 76,800-iteration loop over three planes into precisely the
-# code the gate bars, and the failure would surface as a build break in an
-# unrelated commit.
+# [!] THE CAMERA/NN/LCD PIXEL LOOPS NO LONGER CARRY -fno-tree-vectorize
+# (issue #42).  They carried it because -mcpu=cortex-m55 makes MVE available and
+# check_mve_predication.py failed the build on predicated MVE -- a gate whose
+# premise the Armv8-M ARM contradicts and which, per issue #66, could not detect
+# one instruction it named.  Both are gone, so these loops are compiled the way
+# every other one here is.
 #
-# [!] PER TRANSLATION UNIT, and blazeface.c needs its own entry: the option on
-# tflm_obj is scoped to that target and does not reach anything here.  The
-# decoder's 896-anchor loops are precisely the shape that would vectorise.
+# What replaced the ban is an enforcement rather than a check: FPCCR.ASPEN is
+# set, read back and fail-stopped on before kernel entry (port/threadx/
+# fp_enforce.c), which is what makes the hardware stack VPR with the rest of the
+# caller-saved vector state.  `mve` on the console is the experiment that
+# watches a pattern survive a context switch.
 #
-# [!] lcd_st7789.c BELONGS ON THIS LIST and was missing (issue #48).  Its
-# little-endian staging pass is a 76,800-iteration byte-swap over a uint16
-# buffer -- precisely the shape the gate bars -- and #48 adds a rectangle
-# rasteriser next to it.  Nothing unsafe ever shipped, because the scan is
-# fail-closed, but the omission was luck rather than design.
-#
-# cmd_nn.c is deliberately NOT here: its header used to claim it carried this
-# option, which was false.  The claim is made true by deletion -- #48 moved the
-# pixel loop out into nn_preproc.c, which is on the list.
-set_source_files_properties(
-    "${BOARD_DIR}/port/camera/cam_convert.c"
-    "${BOARD_DIR}/port/npu/models/blazeface.c"
-    "${BOARD_DIR}/port/npu/nn_preproc.c"
-    "${BOARD_DIR}/port/lcd/lcd_st7789.c"
-    TARGET_DIRECTORY shell_objs
-    PROPERTIES COMPILE_OPTIONS "-fno-tree-vectorize")
+# [!] Measured at the time: with the pinned GCC 15.2 at -Os, removing the option
+# changes nothing these files emit -- no MVE appears.  It is permission, not a
+# speed-up, and any claim that it made something faster has to come from
+# `camera stats`, not from here.
 target_link_options(shell PRIVATE
     "-T${LDSCRIPT_APP}" -Wl,-Map=shell.map,--cref)
 set_target_properties(shell PROPERTIES LINK_DEPENDS "${LDSCRIPT_APP}")
@@ -742,15 +731,14 @@ add_custom_command(TARGET shell POST_BUILD
             --nm "${CMAKE_NM}" --objdump "${CMAKE_OBJDUMP}"
             "$<TARGET_FILE:shell>"
     COMMENT "check_placement_budget.py (ITCM/DTCM budget + forbidden refs)")
-# 3. MVE predication scan: the ThreadX Cortex-M55 port does not save/restore
-#    VPR across context switches, so predicated MVE (VCTP/VPST blocks) must not
-#    appear in the linked image.  (Plain unpredicated MVE loads in the prebuilt
-#    driver are fine -- q4-q7 alias s16-s31, which the port does save.)
-add_custom_command(TARGET shell POST_BUILD
-    COMMAND "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/check_mve_predication.py"
-            --objdump "${CMAKE_OBJDUMP}"
-            "$<TARGET_FILE:shell>"
-    COMMENT "check_mve_predication.py (no VPR-dependent MVE in the image)")
+# 3. (was the MVE predication scan; deleted by issue #42.)  It barred predicated
+#    MVE because the ThreadX port was believed not to save VPR.  The Armv8-M ARM
+#    says the HARDWARE saves it -- with FPCCR.ASPEN set, which is now enforced
+#    and read back before kernel entry (port/threadx/fp_enforce.c) -- and the
+#    scan could not have caught anything anyway: the pinned objdump does not
+#    decode MVE (issue #66).  check_placement_budget.py requires the enforcement
+#    symbol in its place, which works because --gc-sections drops an uncalled
+#    function; cmake/fixtures/ proves that requirement bites.
 # 4. Timer seam: no vendor timer code survives the --wrap.  Since issue #35 the
 #    camera archives are in THIS link, so the firmware image is now the real
 #    subject of this check -- seam_probe (below) keeps running it too, because

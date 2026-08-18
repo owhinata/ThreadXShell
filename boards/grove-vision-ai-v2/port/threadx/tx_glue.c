@@ -40,6 +40,7 @@
 #include "WE2_device.h"
 #include "hx_drv_scu.h"          /* SCU timer clock gate / divider / owner */
 
+#include "fp_enforce.h"
 #include "tx_glue.h"
 
 #define LOG_TAG "txglue"
@@ -370,6 +371,67 @@ fail:
     LOG_ERR("epk: %s", (epk_why != NULL) ? epk_why : "TIMER2 bring-up failed");
 }
 
+/*
+ * The floating-point context precondition (issue #42).
+ *
+ * `FPCCR.ASPEN` is what makes the PE set `CONTROL.FPCA` on a floating-point or
+ * MVE instruction, and `CONTROL.FPCA` is what makes the exception frame carry
+ * S0-S15, FPSCR and -- on a part with MVE -- VPR.  The ThreadX port adds
+ * `{s16-s31}` only when the EXC_RETURN says that frame is there.  So with ASPEN
+ * clear the whole chain stops silently and vector state does not survive
+ * preemption.
+ *
+ * [!] AND THAT IS NOT ABOUT THIS PROJECT'S OWN CODE.  The prebuilt Himax driver
+ * archives execute MVE -- 80 vector load/stores, counted in issue #66 -- so this
+ * image has depended on ASPEN since long before issue #42 lifted the ban on
+ * writing any.  Nothing here or in the SDK's SystemInit() writes FPCCR, which
+ * makes the value the bootloader's, and inherited state is what this port reads
+ * back rather than trusts (as with SystemCoreClock and the WFI bits below).
+ *
+ * Unconditional, unlike the WFI block: this is not about sleeping.  The verdict
+ * is fp_enforce_judge() so that the failing boots -- which no hardware here can
+ * produce -- are testable on the host.
+ */
+_Static_assert(FP_FPCCR_ASPEN == FPU_FPCCR_ASPEN_Msk,
+               "FP_FPCCR_ASPEN does not match CMSIS");
+_Static_assert(FP_FPCCR_LSPEN == FPU_FPCCR_LSPEN_Msk,
+               "FP_FPCCR_LSPEN does not match CMSIS");
+_Static_assert(FP_FPCCR_LSPACT == FPU_FPCCR_LSPACT_Msk,
+               "FP_FPCCR_LSPACT does not match CMSIS");
+
+static void fp_enforce_preconditions(void)
+{
+    uint32_t before = FPU->FPCCR;
+    uint32_t after;
+    enum fp_enforce_verdict v;
+
+    /* Read-modify-write: FPCCR is not just these three bits -- it also carries
+     * the security and the "which handler was ready" state of a lazy save. */
+    FPU->FPCCR = before | FP_FPCCR_ASPEN;
+    __DSB();
+    __ISB();
+    after = FPU->FPCCR;
+
+    v = fp_enforce_judge(before, after);
+    if (v != FP_ENFORCE_OK) {
+        LOG_ERR("fp: FPCCR %08lx -> %08lx, CPACR %08lx: %s -- halting",
+                (unsigned long)before, (unsigned long)after,
+                (unsigned long)SCB->CPACR, fp_enforce_strerror(v));
+        __disable_irq();
+        for (;;)
+            ;
+    }
+
+    /* CPACR is logged, not checked: with CP10/CP11 disabled the first
+     * floating-point instruction takes a UsageFault, which announces itself
+     * rather than corrupting a neighbour's registers.  LSPEN is logged for the
+     * same reason it is not judged -- both stackings are correct here. */
+    LOG_INF("fp: FPCCR %08lx (%s stacking), CPACR %08lx",
+            (unsigned long)after,
+            (after & FP_FPCCR_LSPEN) ? "lazy" : "eager",
+            (unsigned long)SCB->CPACR);
+}
+
 #ifdef TX_ENABLE_WFI
 /*
  * WFI preconditions.  TX_ENABLE_WFI is compiled into the port's idle loop, so
@@ -420,6 +482,10 @@ void _tx_initialize_low_level(void)
     NVIC_SetPriority(SysTick_IRQn, 6);
 
     _tx_initialize_unused_memory = (VOID *)tx_unused_memory;
+
+    /* Before anything else here: every later line, and every thread, assumes
+     * vector state survives preemption. */
+    fp_enforce_preconditions();
 
 #ifdef TX_ENABLE_WFI
     epk_wfi_enforce_preconditions();

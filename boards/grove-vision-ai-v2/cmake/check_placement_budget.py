@@ -16,6 +16,13 @@
   5. Measurement-buffer residency (issue #25): each benchmark buffer must sit
      in the memory whose name `membench` prints beside its numbers, in a
      NOBITS section.
+  6. Required survivors (issue #42): the mirror of check 4.  --gc-sections
+     drops an uncalled function, so a name that is ABSENT was not called by
+     anything -- which is how a precondition enforced before kernel entry
+     would disappear without a word.  This replaces the MVE predication scan
+     deleted in #42; cmake/fixtures/ removes the call and watches this fire,
+     because a required-symbol check nobody has seen fail is worth as little
+     as the scan it replaced (issue #66).
 
 Stdlib-only; POST_BUILD.
 """
@@ -111,6 +118,23 @@ FORBIDDEN_PREFIXES = [
     # holding, silently and only while idle.  libpwrmgmt.a is linked but
     # nothing references it, so --gc-sections keeps the image clean.
     ("hx_lib_pm_", "Himax power management", set()),
+]
+
+# Symbols that must SURVIVE.  See check 6: with -ffunction-sections and
+# --gc-sections, presence is evidence of a reference, so this catches a
+# precondition whose only caller was deleted.
+#
+# [!] Nothing here may be force-retained (KEEP, __attribute__((used)), an
+# EXTERN in the linker script).  Retaining the symbol independently would let
+# an UNCALLED function satisfy this check, which is the one thing it exists to
+# rule out -- and would quietly turn it into the same kind of gate as the scan
+# it replaced.
+REQUIRED = [
+    # issue #42: FPCCR.ASPEN is what makes the hardware stack VPR and the rest
+    # of the caller-saved vector state.  The prebuilt driver archives execute
+    # MVE, so this is not optional and never was; the judgement lives in
+    # port/threadx/fp_enforce.c and is called from _tx_initialize_low_level().
+    ("fp_enforce_judge", "the FP context precondition (issue #42)"),
 ]
 
 # Benchmark buffers -- issue #25.  membench labels every row with a memory
@@ -286,6 +310,12 @@ def main():
         if hits:
             errors.append(f"{what} API is linked in ({len(hits)} symbol(s), "
                           f"e.g. {hits[0]}); nothing in this port may drive it")
+
+    # 6. required survivors -- the mirror of 4
+    for want, what in REQUIRED:
+        if want not in by_name:
+            errors.append(f"required symbol {want} is NOT in the image: "
+                          f"{what} is not called by anything")
 
     # 5. measurement buffers live where their labels claim, whole and alone
     sized = nm_sizes(args.nm, args.elf)

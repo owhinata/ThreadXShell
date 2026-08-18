@@ -95,10 +95,10 @@ the settings are also lost when the USB device re-enumerates.
 - **Post-build gates** (`cmake/check_*.py`): image coherence (every linker
   section present in the generated `.img`, command registry inside `.rodata`),
   placement/budget (ITCM/DTCM headroom, vector table, static stacks,
-  benchmark-buffer residency, no forbidden SDK symbols surviving), and an
-  MVE-predication scan (the ThreadX M55 port does not save VPR).  [!] That last
-  one **cannot currently fail** -- the pinned objdump does not decode MVE, so
-  nothing it names ever matches (issue #66).
+  benchmark-buffer residency, no forbidden SDK symbols surviving, and -- since
+  issue #42 -- one REQUIRED symbol), and the timer seam.  There were four: the
+  MVE-predication scan is gone, because its premise was wrong and it could not
+  detect a single instruction it named (issues #42 and #66).
 
 ## Time sources
 
@@ -324,13 +324,13 @@ that reason.
 **A CoreMark score is not comparable on its own.**  Quote it with: `MEM_STATIC`
 working set, code and data both in TCM (this app is not XIP), `-O3
 -funroll-loops -fno-tree-vectorize`, and the core clock the run printed.  The
-`-fno-tree-vectorize` is not tuning -- `-mcpu=cortex-m55` enables MVE and the
-auto-vectoriser emits predicated MVE, which the port bars.  [!] Two things are
-wrong with the gate that is supposed to enforce that: its PREMISE (the hardware
-does stack VPR -- issue #42, and the Future work note below) and its
-IMPLEMENTATION (it cannot detect a single instruction it names -- issue #66).
-The option is therefore doing the work, not the scan, and today's published
-score is a **scalar** score.
+`-fno-tree-vectorize` is not tuning, and since issue #42 it is not about MVE
+safety either -- MVE is allowed now.  It is the one place the option survived,
+for BASELINE COMPARABILITY: 3.13 CoreMark/MHz was measured with these flags, and
+a score means nothing apart from the flags it was built with.  A vectorised run
+would be a perfectly valid different result; taking it means re-measuring and
+restating every comparison that quotes the old number -- a deliberate step
+rather than a side effect.  Today's published score is a **scalar** score.
 
 `membench` measures ITCM (4 KB, read only -- it is the memory all the code
 executes from, so the write/copy legs and the chase construction are not run
@@ -2719,20 +2719,109 @@ terminal before running `--target flash`.
   #45 and boxes on the live preview in #48; the camera's output is already in
   the shape the donor's `tflm_yolov8_od` expects, but that model wants a
   1,053 KB arena against the 450 KB reserved here.
-- MVE.  [!] The reason it is barred is WRONG: the Armv8-M ARM's PushStack /
-  PopStack save and restore VPR under `HaveMve()`, and rule RZWQX makes MVE
-  execution set `CONTROL.FPCA`, so the hardware preserves it across a context
-  switch and the ThreadX port only has to save the callee-saved s16-s31, which it
-  does.  CoreMark and the camera's pixel loops are scalar for no reason.  Tracked
-  in issue #42, which also covers what removing the scan must not skip (enforcing
-  and reading back `FPCCR.ASPEN`, since this app inherits its state from a
-  bootloader).
-- [!] AND THE SCAN CANNOT FAIL.  `check_mve_predication.py` was described here as
-  fail-closed, which was the reason for keeping it despite the premise being
-  wrong.  It is not: the pinned objdump does not decode MVE at all, so `vmsr vpr`
-  prints as `<impl def 0xc>`, `vpst` and `vpsel` as `cdp2` and `vctp` as
-  `bfcsel`, and NONE of the seven forms the script names match its regexes.  It
-  has printed OK on every build since M-G1 without the ability to print anything
-  else.  Not theoretical: an intermediate version of issue #58 emitted
-  `VMSR P0, r3` -- GCC spilled a constant into VPR[15:0] under register pressure
-  -- and the gate passed the build.  Issue #66.
+### MVE is allowed, and what holds it up is enforced rather than scanned (#42)
+
+The ban is gone.  It rested on the ThreadX M55 port not saving VPR across a
+context switch, and the Armv8-M ARM says otherwise: the floating-point exception
+frame carries S0-S15, FPSCR and -- under `if HaveMve()` -- **VPR at offset
+0x44**, and rule RZWQX makes MVE execution set `CONTROL.FPCA`, which is what
+makes that frame exist.  The port owns only the callee-saved half and does save
+it (`VSTMDB {s16-s31}` under `__ARM_FP`, guarded by the EXC_RETURN frame-type
+test).  So: hardware owns VPR and q0-q3, the port owns q4-q7, and nothing was
+missing.
+
+**And the scan that was supposed to enforce the ban could not fail.**  The
+pinned objdump does not decode MVE: `vmsr vpr` prints as `<impl def 0xc>`,
+`vpst`/`vpsel` as `cdp2`, `vctp` as `bfcsel` -- none of the seven forms the
+script named match its regexes.  It printed OK on every build since M-G1 without
+the ability to print anything else.  Not theoretical: an intermediate version of
+issue #58 emitted `VMSR P0, r3` (GCC spilling a constant into VPR[15:0] under
+register pressure) and the gate passed the build.  Issue #66.
+
+#### What actually keeps this safe: FPCCR.ASPEN
+
+With ASPEN clear, an MVE or FP instruction does NOT set `CONTROL.FPCA`, no
+extended frame is stacked or reserved, and the port's frame-type test then skips
+`{s16-s31}`.  **That was never about this project's own code**: the prebuilt
+Himax archives execute MVE -- 66 vector load/stores in today's image, all inside
+vendor functions doing struct copies (`hx_drv_scu_get_all_pull_cfg`,
+`dw_uart_*_install`, `CSIRX_Init`, `dmac_*_install`) -- so the image has depended
+on ASPEN since M-G1, and the ban protected nothing.
+
+Nothing here or in the SDK's `SystemInit()` writes FPCCR, so the value is the
+bootloader's.  Measured on the board: FPCCR `0xD00004FC` (ASPEN and LSPEN set,
+LSPACT clear), CPACR `0x00F00000`, MVFR1 `0x12100211` (MVE bits `[11:8]` = 2:
+integer and floating-point).  FPCCR's low half varies between boots -- `0x4FC`
+and `0x47C` have both been seen -- because those are the "which handler was
+ready" flags a lazy save latches, which is why the judgement reads ASPEN and
+LSPACT and nothing else.  Inherited state is what this port reads back
+rather than trusts, so `_tx_initialize_low_level()` now sets ASPEN, barriers,
+reads it back, and **halts** if it did not take -- beside the WFI preconditions
+and for the same reason.
+
+An inherited `LSPACT` is **rejected, not cleared**: the bit says a lazy save is
+outstanding for a stack frame this application does not own.  LSPEN is reported
+and not judged (lazy and eager are both correct; under lazy, the port's own
+`{s16-s31}` save is the FP instruction that materialises the deferred frame
+first).  CPACR is logged rather than checked -- with CP10/CP11 off the first FP
+instruction takes a UsageFault, which announces itself.
+
+The judgement is a pure function (`port/threadx/fp_enforce.c`) because the boots
+that would halt cannot be produced on hardware; `test/test_fp_enforce.c` walks
+the table, including the case that matters (ASPEN reads back fine and the only
+wrong thing is the inherited `LSPACT`).  `check_placement_budget.py` requires
+the symbol to survive -- which means something calls it, since `--gc-sections`
+drops an uncalled function -- and fixture **P2** deletes the call and watches
+that requirement fire.  A required-symbol check nobody has seen fail would be
+worth exactly what the scan it replaced was worth.
+
+#### `mve`: watching it work
+
+    grove> mve
+
+Arguments are one thing and an observation is another.  The command creates a
+worker ABOVE the shell thread's priority, and:
+
+1. masks interrupts, then makes the worker ready -- so the switch is only
+   PENDING (ThreadX restores the caller's PRIMASK rather than clearing it);
+2. in ONE assembly block with no call in it: loads a pattern into q4-q7 and VPR,
+   samples `CONTROL` (FPCA must be set, or the frame this depends on does not
+   exist), unmasks, takes the switch, and reads both back;
+3. checks the worker's epoch FIRST, then the values.
+
+The predicate pattern is **16 bits**: VPR.P0 is `[15:0]`, `[19:16]`/`[23:20]` are
+the VPT block's MASK fields and `[31:24]` are RES0, so `vmsr p0` writes the
+predicate and nothing else.  (The first run of this test wrote a 32-bit pattern
+and read back the low half, which looked like a failure and was not -- the value
+had survived the switch, in the width the register has.)  The MASK fields are
+left alone deliberately: setting them puts the PE inside a VPT block, which would
+predicate the instructions the test itself has to execute next, and it would
+prove nothing extra -- VPR is one register in one stack slot, so a P0 that
+survives is a VPR that survived.
+
+**[!] A sleep would not have been a test.**  A thread that loads a pattern,
+sleeps and reads it back passes on a broken port: an idle board has nothing else
+ready, so nobody overwrites anything and "unchanged" proves nothing.  Hence the
+antagonist, which writes a different pattern over the same registers.  And
+**nothing may call a C function between the load and the switch**: q4-q7 are
+callee-SAVED, so a `tx_thread_resume()` that used them would spill the pattern to
+this thread's own stack and put it back afterwards -- masking a port that never
+saved a vector register in its life.
+
+#### What this changed in the generated code: nothing
+
+`-fno-tree-vectorize` came off `cam_convert.c`, `nn_preproc.c`, `blazeface.c`,
+`lcd_st7789.c` and the whole TFLM set.  With the pinned GCC 15.2 at `-Os` that
+emits **no MVE at all**: `-fopt-info-vec` reports no vectorised loop in any of
+them, and the only vector mnemonics in their assembly are `vmrs APSR_nzcv,
+FPSCR` -- the scalar float-comparison idiom.  In the linked image every
+q-register instruction belongs to a vendor prebuilt function; the only ones from
+this project's own code are in `mve` itself.
+
+So this is permission, not a speed-up, and any future claim that it made
+something faster has to come from `camera stats`.
+
+**[!] Ask the compiler, not the disassembler.**  The way to check this is to
+recompile with the real flags and `-S` and read what GCC emitted, or to attribute
+q-register instructions in the image to their functions.  Grepping objdump for
+`vpt`/`vctp` is how issue #66 happened.

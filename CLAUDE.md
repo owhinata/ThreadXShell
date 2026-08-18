@@ -369,11 +369,21 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   循環）ので、結果は「明示したクロックの下での実測値」。スコアは MEM_STATIC / TCM 配置 /
   スカラビルドとセットでのみ比較可能。membench のバッファは NOLOAD なので測定前に
   明示初期化が要る。MPU / キャッシュ属性は decode せず生ダンプ。
-- **MVE**: 自作コードで MVE intrinsics/自動ベクトル化を使わない（ベンチの TU は
-  `-fno-tree-vectorize`。ポストリンクの `check_mve_predication.py` が検査）。
-  **[!] 禁じている根拠は誤り**（#42）— ハードウェアが VPR を保存する（Armv8-M ARM の
-  PushStack/PopStack が `HaveMve()` の下で退避・復元し、規則 RZWQX により MVE 命令は
-  `CONTROL.FPCA` を立てる）。ゲートは fail-closed なので **#42 が判断するまでは維持**する。
+- **MVE は解禁済み**（#42）。禁止の根拠だった「移植が VPR を保存しない」は誤りで、
+  **ハードウェアが保存する** — Armv8-M ARM の FP フレームが `HaveMve()` の下で
+  offset 0x44 に VPR を積み、規則 RZWQX により MVE 実行が `CONTROL.FPCA` を立てる。
+  ThreadX 側は callee-saved の `{s16-s31}` を保存する（`__ARM_FP` 下、拡張フレームがある時）。
+  `check_mve_predication.py` は**削除**（そもそも #66 のとおり 1 命令も検出できなかった）。
+  [!] **成立条件は `FPCCR.ASPEN`** で、これはブートローダ継承値。**カーネル入場前に
+  強制 → 読み戻し → 駄目なら halt**（`port/threadx/fp_enforce.c`。判断は純関数で
+  ホストテスト済み、`check_placement_budget.py` がシンボル存在を要求し、
+  `cmake/fixtures/` の P2 が「呼び出しを消すとゲートが落ちる」ことを実証する）。
+  **継承 `LSPACT` は拒否**（クリアしない — 所有していないフレームの帳簿）。
+  実機で見る手段は **`mve` コマンド**（高優先度の汚染役スレッドを立て、
+  q4-q7 と VPR がコンテキストスイッチを跨いで生き残ることを確認する。
+  sleep だけでは誰も上書きしないので**壊れた系でも通ってしまう**）。
+  **CoreMark の TU だけ `-fno-tree-vectorize` を残す** — MVE 禁止ではなく、
+  公表値 3.13 CoreMark/MHz との**基準線の連続性**のため。
 - **SPI LCD**（Waveshare 2inch / ST7789VW、M-G3a / #30）: SSPIM を **PB7(DO)/PB8(CLK)**
   へ mux、**CS=PB11 / DC=PB6 / RST=PA0 / BL=PA2 は GPIO**。
   **[!] 配線は pad 番号で数える。刻印は XIAO のピン位置ラベルで HX6538 の信号名ではない** —
@@ -410,10 +420,12 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   **EPK 容量 32**（`GROVE_EPK_WRAP_MAX` == `TX_GLUE_EPK_MAX_IRQ`）。
   **Timer0 の割込み到達は probe で検証済み**（M-G3a 申し送りを解消。PRIMASK 外で
   実行し、失敗したら bring-up ごと拒否）。詳細は board README。
-- ポストビルドゲート 4 本（`boards/grove-vision-ai-v2/cmake/`）: イメージ整合
+- ポストビルドゲート **3 本**（`boards/grove-vision-ai-v2/cmake/`。#42 で MVE 述語
+  スキャンを削除した）: イメージ整合
   （生成 `.img` と ELF の突き合わせ + `.rodata` 内のコマンドレジストリ検証）/
   配置・予算（ITCM/DTCM headroom、ベクタ常駐、静的スタック、禁止シンボル残存、
-  測定・表示バッファの常駐）/ MVE 述語命令スキャン /
+  **必須シンボル残存**（#42。`--gc-sections` が未呼び出し関数を落とすので、
+  存在＝呼ばれている）、測定・表示バッファの常駐）/
   **timer seam**（`check_timer_seam.py`。カメラアーカイブ込みの `seam_probe` リンクで
   「ベンダ timer コードが 1 バイトも残らない」ことを検査。negative test は
   `cmake/fixtures/run_fixture_tests.py`）。**外す・弱める変更は不可**

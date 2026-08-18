@@ -813,6 +813,72 @@ confusion this fixes.
 still -- comparing Bayer phases, or reading `camera capture` twice -- since a
 loop adjusting the exposure in between is a variable nobody asked for.
 
+### [!] The exposure cannot exceed the frame, and the port enforces it (#70)
+
+The OV5647 does not refuse an exposure longer than its frame length: it
+**extends the frame** to fit it. So `camera exposure 2000` at the default VTS of
+940 used to succeed, and the frame rate changed as a side effect of setting the
+exposure -- silently, since nothing reports the stretch (the VTS register still
+reads 940; only `camera bench` would show it). Both directions are the same
+invariant, and both are handled:
+
+- **`camera exposure` refuses** a value longer than the current frame length and
+  names the knob to turn instead. Refusing rather than clamping, because a
+  silently clamped exposure is the same class of surprise in the other
+  direction.
+- **`camera vts` caps a MANUAL exposure** down to the new frame length and says
+  so. Capping rather than refusing, because the command exists to chase a frame
+  rate and the help has always said "Lower also caps the exposure" -- refusing
+  would make the documented behaviour a lie in the other direction.
+
+Only in manual: with the sensor's own AEC running the exposure is its business
+and it keeps itself inside the frame. That distinction is why the driver keeps
+its own copy of the auto state (`cam_sensor.c`) rather than asking the camera
+layer: writing an exposure on this part switches 0x3503 to manual, so a cap
+applied while the loop was running would turn `camera auto` off as a side effect
+of asking for a faster frame rate.
+
+**The queued path made the apply ORDER load-bearing.** While a stream runs these
+writes are handed to the producer thread, and it used to apply `auto` last --
+so `camera auto off` followed by `camera vts 500` capped nothing, the loop still
+being nominally in charge when the frame length went in. `auto` is applied
+first now, which also settles a combination that was answering the wrong way
+round before: a manual exposure queued alongside an `auto on` now wins, as
+issue #39 says it should.
+
+Both checks live in the driver, and the command repeats the test before it
+queues. That is not belt-and-braces: during a stream `camera_set_exposure()`
+returns `CAM_OK` as soon as the value is queued, so a refusal inside the driver
+would happen on a thread with no console attached and the command would print
+success.
+
+**[!] The bound enforced is `exposure <= vts`, which is the part that can be
+derived.** Real parts also need a few lines of blanking, and the figure for this
+one is not in anything this repository has -- the SDK's OV5647 glue never
+touches either register. An exposure of exactly VTS may therefore still stretch
+the frame slightly; `camera bench` is what would show it.
+
+### `--` until something has read the sensor back (#55)
+
+`camera exposure`, `camera gain` and `camera auto` print `--` rather than `0`
+until a bring-up or a stream has actually read the part. The shadows start
+empty, and `exposure 0` does not read as "not measured" -- it reads as an
+exposure of zero, a number an operator can act on. (The values it replaced were
+worse: until issue #54 the shadows were seeded with the IMX219's donor constants,
+and "1000 lines" looks entirely plausible for a part that is not even fitted.)
+
+The window is short, because the bring-up now reads exposure and gain back once
+it has applied the mode table -- so `camera probe`, which is the command anyone
+reaches for first, fills them. That read-back is best-effort: a bring-up that
+got that far has a working sensor, and failing it over a diagnostic read would
+trade a camera for a number.
+
+`camera vts` had the same shape for a different reason and is fixed the same
+way: it printed the `programmed` shadow BEFORE the read-back that runs the
+bring-up which fills it, so the first camera command after a flash answered
+`0 lines (programmed)` while the sensor beside it said 940. The read-back now
+happens first and both lines are printed after it.
+
 `test/test_cam_auto.c` runs the white balance against simulated means for a few
 hundred iterations: it settles, the corrected channels end up close to equal,
 the gains stay inside their clamps, and a black frame does not move them.  Those

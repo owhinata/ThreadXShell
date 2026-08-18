@@ -73,6 +73,21 @@ static void cam_report(struct cli_instance *sh, const char *what, int rc)
 }
 
 /*
+ * Nothing has read the sensor back yet (issue #55).
+ *
+ * `--` rather than the shadow's zero, because `exposure 0` is not visibly a
+ * placeholder: it reads as an exposure of zero, which is a number an operator
+ * can act on.  The window is short -- a bring-up fills these, and `camera
+ * probe` is a bring-up -- but it is exactly the window somebody is in when they
+ * are working out whether the module is alive at all.
+ */
+static void cam_print_unread(struct cli_instance *sh, const char *what)
+{
+	cli_print(sh, "%-9s: -- (nothing has read the sensor back yet; "
+	              "`camera probe`)\r\n", what);
+}
+
+/*
  * A stop that did not confirm, said accurately (issue #65).
  *
  * The two failures need different sentences because they leave the board in
@@ -831,8 +846,32 @@ static int cmd_camera_exposure(struct cli_instance *sh, int argc, char **argv)
 	int was_auto = camera_auto();
 
 	if (argc > 1) {
+		uint16_t vts = cam_sensor_frame_length();
+
 		if (cli_parse_u32(argv[1], &v) != 0 || v > 0xFFFFu) {
 			cli_error(sh, "camera: exposure must be 0..65535\r\n");
+			return 1;
+		}
+		/*
+		 * [!] SAID HERE AS WELL AS ENFORCED IN THE DRIVER (issue #70).
+		 *
+		 * The driver refuses this, but during a stream the write is
+		 * QUEUED for the producer -- camera_set_exposure() returns
+		 * CAM_OK before anything reaches the sensor -- so the refusal
+		 * would happen on a thread with no console to report it, and
+		 * this command would print success.  Checking here is what makes
+		 * the answer arrive where the question was asked.
+		 */
+		if (vts != 0u && v > vts) {
+			cli_error(sh, "camera: %lu lines is longer than the "
+			              "frame (vts %u)\r\n", (unsigned long)v,
+			          vts);
+			cli_error(sh, "        the sensor would stretch the "
+			              "frame to fit it, so this would change "
+			              "the\r\n"
+			              "        frame rate instead.  Raise the "
+			              "frame length first: `camera vts %lu`\r\n",
+			          (unsigned long)v);
 			return 1;
 		}
 		if (camera_set_exposure((uint16_t)v) != CAM_OK) {
@@ -843,7 +882,10 @@ static int cmd_camera_exposure(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	cam_sensor_get_exposure_gains(&lines, &again, &dgain);
-	cli_print(sh, "exposure : %lu lines\r\n", (unsigned long)lines);
+	if (cam_sensor_exposure_gains_valid())
+		cli_print(sh, "exposure : %lu lines\r\n", (unsigned long)lines);
+	else
+		cam_print_unread(sh, "exposure");
 	cam_note_queued(sh, argc);
 	cam_note_manual(sh, was_auto);
 	return 0;
@@ -879,7 +921,13 @@ static int cmd_camera_gain(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	cam_sensor_get_exposure_gains(&lines, &again, &dgain);
-	cli_print(sh, "again    : %u\r\n", again);
+	if (cam_sensor_exposure_gains_valid())
+		cli_print(sh, "again    : %u\r\n", again);
+	else
+		cam_print_unread(sh, "again");
+	/* dgain is not read back from anything -- the OV5647 has no digital gain
+	 * and the shadow is a unity this port keeps for the API's shape -- so it
+	 * is not part of the question `--` answers. */
 	cli_print(sh, "dgain    : %lu (%lu.%02lux)\r\n", (unsigned long)dgain,
 	          (unsigned long)(dgain / 256u),
 	          (unsigned long)(((dgain % 256u) * 100u) / 256u));
@@ -905,6 +953,8 @@ static int cmd_camera_gain(struct cli_instance *sh, int argc, char **argv)
 static int cmd_camera_vts(struct cli_instance *sh, int argc, char **argv)
 {
 	uint16_t rb = 0u;
+	uint16_t lines, dgain, capped = 0u;
+	uint8_t again;
 	uint32_t v;
 	int rc;
 
@@ -914,6 +964,16 @@ static int cmd_camera_vts(struct cli_instance *sh, int argc, char **argv)
 			              "lines\r\n");
 			return 1;
 		}
+		/* What the driver is about to do to a manual exposure that no
+		 * longer fits (issue #70), worked out BEFORE the write so the
+		 * old value can be named -- and here rather than from the
+		 * result, because during a stream the write is queued and the
+		 * capping happens on the producer thread. */
+		cam_sensor_get_exposure_gains(&lines, &again, &dgain);
+		if (!camera_auto() && cam_sensor_exposure_gains_valid() &&
+		    lines > (uint16_t)v)
+			capped = lines;
+
 		if (camera_set_frame_length((uint16_t)v) != CAM_OK) {
 			cli_error(sh, "camera: frame length write failed (below "
 			              "what the mode needs, or the module is not "
@@ -922,10 +982,24 @@ static int cmd_camera_vts(struct cli_instance *sh, int argc, char **argv)
 		}
 	}
 
+	/*
+	 * [!] THE READ-BACK FIRST, THEN BOTH LINES (issue #55).
+	 *
+	 * `programmed` is a shadow that a bring-up fills -- and the read-back
+	 * below is what RUNS that bring-up on a cold board.  Printing it first
+	 * answered `camera vts` with "0 lines (programmed)" on the first camera
+	 * command after a flash, while the sensor beside it said 940: the
+	 * command was reporting a value it was about to go and fetch.
+	 */
+	rc = camera_read_frame_length(&rb);
+
 	cli_print(sh, "vts      : %lu lines (programmed)\r\n",
 	          (unsigned long)cam_sensor_frame_length());
+	if (capped != 0u)
+		cli_print(sh, "  exposure capped to %lu lines (was %u; it "
+		              "cannot exceed the frame)\r\n",
+		          (unsigned long)v, capped);
 
-	rc = camera_read_frame_length(&rb);
 	if (rc == CAM_OK)
 		cli_print(sh, "  sensor says : %lu\r\n", (unsigned long)rb);
 	else if (rc == CAM_ERR_BUSY)
@@ -1031,8 +1105,16 @@ static int cmd_camera_auto(struct cli_instance *sh, int argc, char **argv)
 
 	cli_print(sh, "auto     : %s  (exposure by the sensor's own AEC, "
 	              "wb here)\r\n", camera_auto() ? "on" : "off");
-	cli_print(sh, "  now    : exposure %lu  again %u  wb r %u b %u\r\n",
-	          (unsigned long)lines, again, wb.r, wb.b);
+	if (cam_sensor_exposure_gains_valid())
+		cli_print(sh, "  now    : exposure %lu  again %u  "
+		              "wb r %u b %u\r\n",
+		          (unsigned long)lines, again, wb.r, wb.b);
+	else
+		/* The white balance is this port's own and is always known; only
+		 * the sensor's two halves of this line are unread. */
+		cli_print(sh, "  now    : exposure --  again --  "
+		              "wb r %u b %u  (sensor not read back yet)\r\n",
+		          wb.r, wb.b);
 	if (camera_auto())
 		cli_print(sh, "           (the loops steer these while a stream "
 		              "runs; turn auto OFF before\r\n"

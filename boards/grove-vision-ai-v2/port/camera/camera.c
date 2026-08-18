@@ -447,17 +447,29 @@ static void cam_apply_tuning(void)
 	cam_tune_req = 0u;
 	TX_RESTORE
 
+	/*
+	 * The sensor half of `camera auto` -- taking a part's own AEC/AGC off is
+	 * an I2C write like any other, and the console may not make it itself
+	 * while this thread owns the CIS driver.
+	 *
+	 * [!] FIRST, and it used to be last (issue #70).  Two things in one pass
+	 * need it that way round.  The frame length caps a MANUAL exposure to
+	 * fit, so it has to be applied after the pass has settled whose exposure
+	 * it is -- with the old order, `camera auto off` followed by `camera vts`
+	 * capped nothing, because the sensor's loop was still nominally running
+	 * when the frame length went in.  And a manual exposure queued in the
+	 * same pass now wins over an `auto on` queued with it, which is the rule
+	 * issue #39 wrote down: a manual write takes auto off.  The old order
+	 * had the opposite effect for that combination.
+	 */
+	if ((req & CAM_TUNE_AUTO) != 0u)
+		(void)cam_sensor_set_auto(cam_tune_auto);
 	if ((req & CAM_TUNE_EXPOSURE) != 0u)
 		(void)cam_sensor_set_exposure(cam_tune_exposure);
 	if ((req & CAM_TUNE_GAINS) != 0u)
 		(void)cam_sensor_set_gains(cam_tune_again, cam_tune_dgain);
 	if ((req & CAM_TUNE_VTS) != 0u)
 		(void)cam_sensor_set_frame_length(cam_tune_vts);
-	/* The sensor half of `camera auto` -- taking a part's own AEC/AGC off is
-	 * an I2C write like any other, and the console may not make it itself
-	 * while this thread owns the CIS driver. */
-	if ((req & CAM_TUNE_AUTO) != 0u)
-		(void)cam_sensor_set_auto(cam_tune_auto);
 }
 
 /*

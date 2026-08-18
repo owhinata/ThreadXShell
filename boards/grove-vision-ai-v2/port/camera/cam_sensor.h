@@ -227,6 +227,19 @@ int cam_sensor_refresh_exposure_gains(void);
 void cam_sensor_get_exposure_gains(uint16_t *lines, uint8_t *again,
                                    uint16_t *dgain);
 
+/**
+ * @brief  Has anything ever put a real value in those?  (issue #55)
+ *
+ * Zero until a bring-up or a stream has read the sensor back, or the console
+ * has written a value.  It exists because the alternative is printing `0`, and
+ * `exposure 0` is not obviously a placeholder -- it reads as an exposure of
+ * zero, which is a number somebody can act on.  (The values it replaced were
+ * worse: until issue #54 the shadow was seeded with the IMX219's donor
+ * constants, and "1000 lines" looks entirely plausible for a part that was not
+ * fitted.)
+ */
+int cam_sensor_exposure_gains_valid(void);
+
 /** Sensor stream on/off.  Checked, unlike the donor's. */
 int cam_sensor_stream_on(void);
 int cam_sensor_stream_off(void);
@@ -237,6 +250,13 @@ int cam_sensor_stream_off(void);
  * [!] One register, two effects (issue #38): the frame period is
  * VTS * HTS / PCLK, and the integration time cannot exceed the frame -- so
  * asking for a faster frame rate is asking for a shorter longest exposure.
+ *
+ * [!] AND THAT SECOND EFFECT IS ENFORCED HERE (issue #70).  A manual
+ * exposure longer than the new frame length is capped to fit, because the part
+ * would otherwise EXTEND THE FRAME to make room -- so a command that asked for
+ * a faster frame rate would silently not get one.  Only in manual: with the
+ * sensor's own AEC running, the exposure is its business and it keeps itself
+ * inside the frame.
  *
  * @return 0 on success; -1 on a part whose VTS this port cannot reach, and -1
  *         from the setter for a value below what the mode actually outputs.

@@ -50,6 +50,26 @@ static uint16_t cam_exposure;
 static uint8_t  cam_again;
 static uint16_t cam_dgain = 0x0100u;   /* unity; the OV5647 has no dgain */
 
+/*
+ * Whether anything has ever put a real value in the two above (issue #55).
+ * Zero from a cold boot until a bring-up reads the part back or the console
+ * writes a value -- and the display says `--` for that window rather than
+ * printing the zeros, which read as an exposure of zero rather than as "not
+ * measured".
+ */
+static uint8_t  cam_eg_valid;
+
+/*
+ * Whether the sensor's own AEC owns the exposure (issue #70).
+ *
+ * Kept here, beside the values it governs, because the frame-length setter has
+ * to know it: capping a manual exposure to a shorter frame is right, and doing
+ * the same while the on-chip loop is running would both fight that loop and --
+ * on this part, where writing an exposure switches 0x3503 to manual -- turn
+ * `camera auto` off as a side effect of asking for a faster frame rate.
+ */
+static uint8_t  cam_auto_at_sensor = 1u;
+
 /* The frame length this port last programmed.  0 until a bring-up has run, and
  * deliberately NOT seeded from the descriptor: what matters is what was
  * written, and before a bring-up nothing was. */
@@ -231,6 +251,25 @@ int cam_sensor_init(void)
 			cam_vts = want;
 		}
 	}
+
+	/*
+	 * [!] AND READ THE EXPOSURE BACK, ONCE, HERE (issue #55).
+	 *
+	 * Otherwise the only thing that ever fills those shadows is
+	 * cam_auto_step(), on the producer thread, DURING a stream -- so a cold
+	 * board answered `camera exposure` with a 0 that had never been near the
+	 * sensor, and `camera probe` did not help, which is the command an
+	 * operator reaches for first.  This is also the right moment for it: the
+	 * mode table has just gone back in, so the part's exposure is whatever
+	 * that table left, and any earlier shadow describes a configuration that
+	 * no longer exists.
+	 *
+	 * Best-effort: a bring-up that got this far has a working sensor, and
+	 * failing the whole thing over a diagnostic read-back would trade a
+	 * camera for a number.  The `--` in the display is what says it did not
+	 * happen.
+	 */
+	(void)cam_sensor_refresh_exposure_gains();
 	return 0;
 }
 
@@ -241,6 +280,30 @@ int cam_sensor_set_frame_length(uint16_t lines)
 	if (sens->set_frame_length(lines) != 0)
 		return -1;
 	cam_vts = lines;
+
+	/*
+	 * [!] A MANUAL EXPOSURE FOLLOWS THE FRAME DOWN (issue #70).
+	 *
+	 * The part does not refuse an exposure longer than its frame length --
+	 * it EXTENDS THE FRAME to fit it.  So without this, `camera vts 600`
+	 * with a manual exposure of 800 lines returns success, programmes the
+	 * register, and leaves the frame rate where it was: the one thing the
+	 * command exists to change is the one thing that did not change.
+	 *
+	 * Only in manual.  With the on-chip AEC running the exposure is its
+	 * business -- it keeps itself inside the frame -- and writing one here
+	 * would switch 0x3503 to manual, turning `camera auto` off as a side
+	 * effect of asking for a faster frame rate.
+	 *
+	 * A failed cap is a failed call: reporting success would leave the
+	 * caller believing a frame length that the next frame contradicts.
+	 */
+	if (!cam_auto_at_sensor && cam_eg_valid && cam_exposure > lines &&
+	    sens->set_exposure != NULL) {
+		if (sens->set_exposure(lines) != 0)
+			return -1;
+		cam_exposure = lines;
+	}
 	return 0;
 }
 
@@ -267,6 +330,7 @@ int cam_sensor_refresh_exposure_gains(void)
 		return -1;
 	cam_exposure = lines;
 	cam_again = again;
+	cam_eg_valid = 1u;
 	return 0;
 }
 
@@ -274,9 +338,26 @@ int cam_sensor_set_exposure(uint16_t lines)
 {
 	if (sens->set_exposure == NULL)
 		return -1;
+	/*
+	 * [!] REFUSED, not stretched (issue #70).  An exposure longer than the
+	 * frame is not a configuration this part declines -- it lengthens the
+	 * frame to fit, so the command would change the frame rate as a side
+	 * effect of setting the exposure, silently.  Refusing says which knob to
+	 * turn instead; `camera vts` is right there.  (Before a bring-up the
+	 * frame length is not known -- 0 -- and there is nothing to check
+	 * against.)
+	 */
+	if (cam_vts != 0u && lines > cam_vts)
+		return -1;
 	if (sens->set_exposure(lines) != 0)
 		return -1;
 	cam_exposure = lines;
+	cam_eg_valid = 1u;
+	/* The write itself took the on-chip loop to manual -- it has to, or that
+	 * loop overwrites the value on its next frame (issue #39).  So this is
+	 * the hardware catching up with a register that was already written, not
+	 * a policy applied here. */
+	cam_auto_at_sensor = 0u;
 	return 0;
 }
 
@@ -288,6 +369,8 @@ int cam_sensor_set_gains(uint8_t again, uint16_t dgain)
 		return -1;
 	cam_again = again;
 	cam_dgain = dgain;
+	cam_eg_valid = 1u;
+	cam_auto_at_sensor = 0u;       /* same register, same reason */
 	return 0;
 }
 
@@ -296,9 +379,22 @@ int cam_sensor_set_auto(int on)
 	/* A part with no on-chip AEC/AGC has nothing to hand the sensor half to,
 	 * so both directions are already satisfied and reporting a failure would
 	 * make the caller announce a fault that does not exist. */
-	if (sens->set_auto == NULL)
+	if (sens->set_auto == NULL) {
+		cam_auto_at_sensor = 0u;
 		return 0;
-	return sens->set_auto(on);
+	}
+	if (sens->set_auto(on) != 0)
+		return -1;
+	/* Only after the write took: the cap in the frame-length setter reads
+	 * this to decide whose exposure it is, and a shadow that ran ahead of a
+	 * refused write would have it fighting a loop that is still running. */
+	cam_auto_at_sensor = on ? 1u : 0u;
+	return 0;
+}
+
+int cam_sensor_exposure_gains_valid(void)
+{
+	return cam_eg_valid;
 }
 
 void cam_sensor_get_exposure_gains(uint16_t *lines, uint8_t *again,

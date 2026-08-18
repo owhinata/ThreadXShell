@@ -21,9 +21,17 @@
  * [!] The vector that carries the whole point is HELD + CAM_ST_LOST.  LOST is
  * also "not streaming", so the moment a "not streaming -> success" shortcut is
  * put back in front of the poison test, that line fails -- which is what this
- * file is for.  It has power only while cam_stop_decide() remains the ONLY
- * place that decides; a copy of the shortcut in camera.c would be invisible
- * here.
+ * file is for.
+ *
+ * [!] AND HERE IS WHAT IT DOES NOT COVER, because a test that is believed to
+ * prove more than it does is worse than no test.  This compiles cam_state.c and
+ * nothing else: camera_stream_stop() itself is never built or run here, so a
+ * shortcut added AHEAD of the call, a mutex released twice, or a success
+ * returned after a failed join would all leave this file green.  What holds
+ * those down is that the decision has exactly one implementation and the
+ * function that calls it is short -- not this test.  What this test does hold
+ * down is the table itself, including the two ways it could be made to fail
+ * open by someone extending an enum: see the "future member" vectors below.
  */
 #include <stdio.h>
 
@@ -183,11 +191,61 @@ static void test_only_already_is_success(void)
 		}
 }
 
+/* ---- the enums are going to grow ----------------------------------------- */
+
+/*
+ * [!] A MEMBER ADDED LATER MUST REFUSE, not inherit the friendliest answer.
+ *
+ * Both enums are the kind that grows: a second poison state, an acquisition
+ * that was interrupted rather than timed out.  The dangerous default is the
+ * silent one -- an unknown acquisition treated as "we hold the mutex" answers
+ * from the state table, and an unknown state treated as "not streaming" answers
+ * ALREADY, which is a CONFIRMED STOP.  Either would be a caller detaching a
+ * sink on the strength of an enumerator nobody had thought about yet.
+ *
+ * The next unused value stands in for that future member.  -Wall names the file
+ * when the state switch grows a member with no case; this is the other half,
+ * for the value that reaches the code before anyone updates it.
+ */
+static void test_future_members(void)
+{
+	static const enum cam_state every[] = {
+		CAM_ST_DOWN, CAM_ST_READY, CAM_ST_STREAMING, CAM_ST_FAULTED,
+		CAM_ST_LOST,
+	};
+	enum cam_stop_acquire future_acq = (enum cam_stop_acquire)3;
+	enum cam_state future_state = (enum cam_state)5;
+	unsigned i;
+
+	for (i = 0u; i < sizeof every / sizeof every[0]; i++)
+		CHECK(cam_stop_decide(future_acq, every[i]) ==
+		      CAM_STOP_REFUSE_STATE,
+		      "an unknown acquisition + %s did not refuse",
+		      state_name(every[i]));
+
+	CHECK(cam_stop_decide(CAM_STOP_ACQ_HELD, future_state) ==
+	      CAM_STOP_REFUSE_STATE,
+	      "an unknown state reported a stop that never happened");
+	CHECK(cam_stop_decide(CAM_STOP_ACQ_TIMEOUT, future_state) ==
+	      CAM_STOP_REFUSE_LOCKED,
+	      "an unknown state changed what a lock timeout means");
+
+	/*
+	 * cam_api_may_acquire() is deliberately NOT pinned for an unknown state.
+	 * Either answer is defensible -- a second poison state would want a
+	 * refusal, and anything else would not -- and a test that guessed would
+	 * fail on the commit that decides correctly.  The refusal that matters
+	 * is CAM_ST_LOST's, above; the fail-closed answer after the mutex is
+	 * what covers the rest.
+	 */
+}
+
 int main(void)
 {
 	test_may_acquire();
 	test_decide();
 	test_only_already_is_success();
+	test_future_members();
 
 	if (failures != 0) {
 		printf("test_cam_stop: %d failure(s)\n", failures);

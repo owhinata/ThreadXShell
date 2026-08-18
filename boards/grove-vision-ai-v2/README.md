@@ -2484,6 +2484,35 @@ collision used to be the thing that stranded a sink. The pair is updated and
 snapshotted under a short `TX_DISABLE`: two stops can be at that boundary at
 once, and neither owns the mutex there.
 
+Three smaller things came out of the adversarial review of that change, all of
+them the same shape -- a rule that was only kept by everyone remembering it:
+
+- **`camera_unsubscribe()` now refuses while the producer is streaming**, not
+  only after a lost one. It is meant to be the backstop for a caller that
+  forgets the confirmed-stop rule, and it was backstopping the rarer way of
+  forgetting: unlinking during a stream races a delivery that `publish()` has
+  already pre-pinned and let out of the pipeline's lock, and the drain that
+  follows can read a hand-off count from before it and call the sink idle.
+  No caller does this today; `CAM_ERR_LOCKED` is one more return that a future
+  one could get wrong.
+- **`cam_stop_decide()` is fail-closed for both enums.** "Not `HELD`" refuses
+  rather than "`ERROR` refuses", and the state table lists every state that may
+  report success instead of treating "not streaming" as success. A member added
+  to either enum therefore refuses until somebody decides what it means -- and
+  because the state switch has no `default`, `-Wall` names the file while it is
+  being added. `test_cam_stop.c` pins both with "future member" vectors.
+- **`cam_state` is `volatile`.** The stop reads it again after waiting on the
+  mutex and that read has to be a real load; it is a file-static whose address
+  is never taken, so a compiler may keep it in a register across the wait. This
+  build does emit the reload -- `volatile` is what stops that from being a
+  property of the toolchain rather than of the program.
+
+The test file says plainly what it does NOT cover: it compiles `cam_state.c` and
+nothing else, so a shortcut added ahead of the call in `camera_stream_stop()`, a
+mutex released twice, or a success returned after a failed join would leave it
+green. What holds those down is that the decision has one implementation and the
+function calling it is short -- not the test.
+
 ### [!] The stop contract has two halves now (issue #57)
 
 `camera_stream_stop() == CAM_OK` used to mean "no sink is inside `consume()`"

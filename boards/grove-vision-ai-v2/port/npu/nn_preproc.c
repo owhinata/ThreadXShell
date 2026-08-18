@@ -23,16 +23,29 @@
 /*
  * The largest frame or model dimension this will compute with.
  *
- * Not a hardware limit -- a limit on the arithmetic.  The coordinate numerator
- * below is (2*dst + 1) * extent * 2^15; at 4096 that is about 1.1e15, which a
- * signed 64-bit value holds with four orders of magnitude to spare.  Anything
- * larger is refused rather than wrapped.
+ * Not a hardware limit -- a limit on the arithmetic, and since issue #60 it is
+ * what makes the whole resize fit in 32-bit integers.  Every quantity below is
+ * bounded by it:
+ *
+ *   walk base   num(k)/den < 2 * extent * 2^15 = extent * 2^16 <= 2.68e8
+ *   walk bias   (origin << 16)                                 <= 2.68e8
+ *   coordinate  base + bias                                    <= 5.37e8
+ *   walk step   (2 * extent * 2^15) / den                      <= 2.68e8
+ *   remainders  < den                                          <= 4096
+ *
+ * The largest is 5.37e8, a quarter of a signed 32-bit value's range.  That
+ * matters on a Cortex-M55: 32-bit divide and multiply are single instructions
+ * where the 64-bit forms are calls and register pairs, and the inner loop runs
+ * 16,384 times per frame.  Anything larger is refused rather than wrapped.
+ *
+ * [!] The 2^15 rather than 2^16 in num(k) is not cosmetic -- it is what keeps
+ * `base` inside the bound above.  See nn_walk_init().
  */
 #define NN_MAX_DIM    4096u
 
 /* 1.0 in Q16.  A positive constant, so shifting BY it is fine; what follows is
  * careful never to shift a negative value. */
-#define NN_ONE_Q16 ((int64_t)1 << NN_Q)
+#define NN_ONE_Q16 ((int32_t)1 << NN_Q)
 
 /*
  * [!] MATHEMATICAL FLOOR, not C truncation -- and no shifting of negatives.
@@ -49,13 +62,13 @@
  * the comment.  `/` truncates toward zero by definition, so one correction step
  * turns it into a floor.
  */
-static int32_t nn_floor_q16(int64_t q)
+static int32_t nn_floor_q16(int32_t q)
 {
-	int64_t i = q / NN_ONE_Q16;
+	int32_t i = q / NN_ONE_Q16;
 
 	if (q < 0 && i * NN_ONE_Q16 != q)
 		i -= 1;
-	return (int32_t)i;
+	return i;
 }
 
 /*
@@ -67,39 +80,109 @@ static int32_t nn_floor_q16(int64_t q)
  * Truncated, and paired with (NN_W_ONE - f), so the two weights sum to exactly
  * 256 and no rounding step exists that could produce 257.
  */
-static uint32_t nn_frac_q8(int64_t q, int32_t floor_i)
+static uint32_t nn_frac_q8(int32_t q, int32_t floor_i)
 {
-	int64_t frac = q - (int64_t)floor_i * NN_ONE_Q16;
+	int32_t frac = q - floor_i * NN_ONE_Q16;
 
 	return (uint32_t)(frac >> 8) & 0xFFu;
 }
 
 /*
- * Source sample index for destination index @p dst, half-pixel centres:
+ * Source sample index for destination index k, half-pixel centres:
  *
- *     src = origin + (dst + 0.5) * extent / dst_extent - 0.5
+ *     src(k) = origin + (k + 0.5) * extent / dst_extent - 0.5
  *
- * in Q16, which rearranges to the form below so that the only division is one
- * exact integer division of non-negative operands -- its rounding is therefore
- * plain truncation and never meets C's toward-zero behaviour on a negative
- * value.  Computed PER DESTINATION PIXEL rather than accumulated by adding a
- * step, so truncation cannot drift along a row.
+ * in Q16, which rearranges to
  *
- * The 64-bit intermediate is a generality requirement, not a fix for an
- * overflow at today's numbers: 240 -> 128 peaks at 255*240*32768, about 2.0e9,
- * which fits a signed 32-bit value at 93% of its range -- but an extent of 320
- * already exceeds it at 2.67e9.  Keeping the width off the shape of whichever
- * model happens to be loaded is worth more than the cycles.
+ *     src(k) = num(k) / dst_extent + (origin << 16) - 0.5,
+ *     num(k) = (2k + 1) * extent * 2^15
+ *
+ * so that the only division is one exact integer division of non-negative
+ * operands -- its rounding is therefore plain truncation and never meets C's
+ * toward-zero behaviour on a negative value.
+ *
+ * ---------------------------------------------------------------------------
+ * [!] WHY THIS IS A WALK AND NOT A DIVISION PER PIXEL (issue #60).
+ *
+ * It used to evaluate the formula above at every destination pixel, and the
+ * comment defending that said: computed per pixel "rather than accumulated by
+ * adding a step, so truncation cannot drift along a row".  The hazard is real
+ * -- adding a TRUNCATED step per pixel accumulates its rounding error -- but
+ * the conclusion did not follow, and the price was severe: dst_extent is a
+ * variable, so this is a 64-bit division by a non-constant, which on a
+ * Cortex-M55 is a call to __aeabi_ldivmod.  Measured at 10,305 us per frame
+ * for a 240x240 -> 128x128 resize, about 250 cycles per output pixel for
+ * twelve multiply-adds -- the single largest term in `nn preview`'s producer
+ * work after the inference itself.
+ *
+ * The walk below is the same sequence, EXACT, because it carries the remainder
+ * rather than dropping it.  num(k) advances by a constant
+ *
+ *     step = num(k+1) - num(k) = 2 * extent * 2^15,
+ *
+ * so with (q, r) = (num/den, num%den) held together, one step is
+ *
+ *     q += step/den;  r += step%den;  if (r >= den) { r -= den; q += 1; }
+ *
+ * and the carry runs at most once because both r and step%den are < den.  No
+ * information is discarded at any step, so this is not an accumulation of
+ * truncated values -- it is the same quotient the division would have
+ * produced, for every k.  test_nn_preproc.c pins that against an independent
+ * closed-form oracle rather than leaving it as an argument.
+ *
+ * [!] AND IT IS WHAT LETS THE WHOLE THING BE 32-BIT.  The 64-bit intermediate
+ * this file used to carry was needed for num(k) -- (2k+1) * extent * 2^15
+ * reaches 1.1e15 at NN_MAX_DIM -- and num(k) is exactly what the walk never
+ * forms.  What is left is the quotient and a remainder below den, both inside
+ * the bounds listed at NN_MAX_DIM.  On this core that is the difference
+ * between single instructions and library calls, 16,384 times a frame.
  */
-static int64_t nn_src_q16(uint32_t dst, uint32_t origin, uint32_t extent,
-                          uint32_t dst_extent)
-{
-	int64_t num = (int64_t)(2u * dst + 1u) * (int64_t)extent
-	              * (int64_t)(1 << (NN_Q - 1));
+struct nn_src_walk {
+	int32_t  base;    /* num(k) / den                                  */
+	uint32_t rem;     /* num(k) % den, which is what makes it exact    */
+	uint32_t den;     /* dst_extent                                    */
+	uint32_t step_q;  /* step / den                                    */
+	uint32_t step_r;  /* step % den, always < den                      */
+	int32_t  bias;    /* (origin << NN_Q) - 0.5, added on read         */
+};
 
-	return num / (int64_t)dst_extent
-	       + ((int64_t)origin << NN_Q)
-	       - NN_HALF_Q16;
+/*
+ * Seed at k = 0.  The four divisions here are the only ones left, and they are
+ * per FRAME -- see nn_preproc_fill().  They are 32-bit, which this core does in
+ * hardware.
+ *
+ * num0 and step are formed in uint32 and that is checked, not assumed:
+ * extent <= NN_MAX_DIM = 4096, so num0 = extent * 2^15 <= 1.34e8 and
+ * step = 2 * num0 <= 2.68e8, both well inside uint32.
+ */
+static void nn_walk_init(struct nn_src_walk *w, uint32_t origin,
+                         uint32_t extent, uint32_t dst_extent)
+{
+	uint32_t num0 = extent * (uint32_t)(1 << (NN_Q - 1));
+	uint32_t step = 2u * num0;
+
+	w->den    = dst_extent;
+	w->base   = (int32_t)(num0 / w->den);
+	w->rem    = num0 % w->den;
+	w->step_q = step / w->den;
+	w->step_r = step % w->den;
+	w->bias   = (int32_t)(origin << NN_Q) - NN_HALF_Q16;
+}
+
+static int32_t nn_walk_q16(const struct nn_src_walk *w)
+{
+	return w->base + w->bias;
+}
+
+static void nn_walk_step(struct nn_src_walk *w)
+{
+	w->base += (int32_t)w->step_q;
+	w->rem  += w->step_r;
+	/* At most one carry: r < den and step_r < den, so r + step_r < 2*den. */
+	if (w->rem >= w->den) {
+		w->rem  -= w->den;
+		w->base += 1;
+	}
 }
 
 int nn_preproc_geom(uint32_t frame_w, uint32_t frame_h,
@@ -150,6 +233,7 @@ int nn_preproc_fill(const uint8_t *bgr, uint32_t frame_w, uint32_t frame_h,
                     const struct nn_preproc_geom *g, uint8_t *dst)
 {
 	const uint8_t *pb, *pg, *pr;
+	struct nn_src_walk wx_row, wy;
 	uint32_t plane;
 
 	if (bgr == NULL || g == NULL || dst == NULL)
@@ -160,14 +244,43 @@ int nn_preproc_fill(const uint8_t *bgr, uint32_t frame_w, uint32_t frame_h,
 		return -1;
 	if (g->w == 0u || g->h == 0u || g->dst_w == 0u || g->dst_h == 0u)
 		return -1;
+	/*
+	 * [!] AND THE BOUND THE 32-BIT ARITHMETIC RESTS ON (issue #60).
+	 *
+	 * nn_preproc_geom() already refuses anything larger, so on every path
+	 * this port actually takes these are redundant -- which is precisely the
+	 * argument that would let them be omitted, and precisely why they are
+	 * here.  This function takes a caller-supplied struct and does not know
+	 * that geom() built it; without this a hand-made one wraps num0 in
+	 * nn_walk_init() and the resize reads outside the frame.  The check that
+	 * makes a bound true has to sit where the bound is used.
+	 *
+	 * Bounding frame_w and frame_h bounds the extents too: the test above
+	 * has already established g->x + g->w <= frame_w and g->y + g->h <=
+	 * frame_h.
+	 */
+	if (frame_w > NN_MAX_DIM || frame_h > NN_MAX_DIM ||
+	    g->dst_w > NN_MAX_DIM || g->dst_h > NN_MAX_DIM)
+		return -1;
 
 	plane = frame_w * frame_h;
 	pb = bgr;
 	pg = bgr + plane;
 	pr = bgr + 2u * plane;
 
-	for (uint32_t dy = 0; dy < g->dst_h; dy++) {
-		int64_t  sy_q  = nn_src_q16(dy, g->y, g->h, g->dst_h);
+	/*
+	 * The x mapping does not depend on the row, so its seed is computed
+	 * ONCE for the frame and each row starts from a copy -- which is what
+	 * keeps the divisions in nn_walk_init() off the row loop as well as off
+	 * the pixel loop.  Four divisions per frame, against the 16,512 this
+	 * function used to do.
+	 */
+	nn_walk_init(&wx_row, g->x, g->w, g->dst_w);
+	nn_walk_init(&wy, g->y, g->h, g->dst_h);
+
+	for (uint32_t dy = 0; dy < g->dst_h; dy++, nn_walk_step(&wy)) {
+		struct nn_src_walk wx = wx_row;
+		int32_t  sy_q  = nn_walk_q16(&wy);
 		int32_t  y0    = nn_floor_q16(sy_q);
 		uint32_t fy    = nn_frac_q8(sy_q, y0);
 		uint32_t wy1   = fy;
@@ -189,8 +302,8 @@ int nn_preproc_fill(const uint8_t *bgr, uint32_t frame_w, uint32_t frame_h,
 		row0 = (uint32_t)y0 * frame_w;
 		row1 = (uint32_t)y1 * frame_w;
 
-		for (uint32_t dx = 0; dx < g->dst_w; dx++) {
-			int64_t  sx_q = nn_src_q16(dx, g->x, g->w, g->dst_w);
+		for (uint32_t dx = 0; dx < g->dst_w; dx++, nn_walk_step(&wx)) {
+			int32_t  sx_q = nn_walk_q16(&wx);
 			int32_t  x0   = nn_floor_q16(sx_q);
 			uint32_t fx   = nn_frac_q8(sx_q, x0);
 			uint32_t wx1  = fx;

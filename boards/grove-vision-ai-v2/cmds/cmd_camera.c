@@ -50,6 +50,7 @@
 #include "cam_lcd_sink.h"
 #include "camera.h"
 #include "lcd_st7789.h"
+#include "nn_overlay.h"   /* the sink row's stage split under `nn preview` */
 
 #define CAM_PREVIEW_DEFAULT 0u   /* 0 = until Ctrl+C */
 #define CAM_BENCH_DEFAULT  60u   /* enough to average, ~4 s at 15 fps  */
@@ -661,6 +662,41 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 		              "[to pin returned]\r\n",
 		          (unsigned long)(sk.hold_us / sk.hold_frames),
 		          (unsigned long)sk.hold_frames);
+	/*
+	 * [!] WHAT IS INSIDE THE PRODUCER'S `sink` ROW under `nn preview`
+	 * (issue #60).  One number was carrying the whole of "preprocess +
+	 * inference + decode + hand-off", and which stage owns it decides what
+	 * is worth optimising -- so the overlay times its own stages and they
+	 * are printed HERE, next to the sink row they have to sum against.  The
+	 * remainder against that row is the hand-off plus whatever preempted
+	 * the producer inside it (the panel's staging copy, since #64).
+	 *
+	 * The scope is in the header because it is NOT the profile's: these
+	 * reset when an `nn preview` arms the overlay, not at stream start, so
+	 * after a later `camera preview` they still describe the LAST nn run
+	 * while the sink row above no longer contains them.
+	 */
+	{
+		struct nn_overlay_stats ns;
+
+		nn_overlay_stats(&ns);
+		if (ns.prof_frames != 0u && ns.prof_ok) {
+			cli_print(sh, "nn sink  : %lu frame(s), last nn preview "
+			              "[producer thread]\r\n",
+			          (unsigned long)ns.prof_frames);
+			cli_print(sh, "  prep   : %6lu us/frame   setup + "
+			              "crop/resize\r\n",
+			          (unsigned long)(ns.prep_us / ns.prof_frames));
+			cli_print(sh, "  invoke : %6lu us/frame   NPU inference\r\n",
+			          (unsigned long)(ns.invoke_us / ns.prof_frames));
+			cli_print(sh, "  decode : %6lu us/frame   anchors -> "
+			              "boxes\r\n",
+			          (unsigned long)(ns.decode_us / ns.prof_frames));
+		} else if (ns.prof_frames != 0u) {
+			cli_print(sh, "nn sink  : -- (the EPK time source is not "
+			              "trusted)\r\n");
+		}
+	}
 	/*
 	 * A stream in flight has one frame out, so `accepted` leading `puts` by
 	 * one is normal and not worth printing.  Any other gap is worth seeing

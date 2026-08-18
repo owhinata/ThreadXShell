@@ -143,6 +143,176 @@ static uint8_t saturated(uint32_t x, uint32_t y, int plane)
 	return 255;
 }
 
+/* --- the incremental walk against a closed-form oracle (issue #60) --------- */
+
+/*
+ * An INDEPENDENT implementation of the whole resize, written the obvious way:
+ * the closed form evaluated with a fresh 64-bit division at every destination
+ * pixel, exactly as nn_preproc.c did before #60 replaced it with a stepped
+ * walk.  Not a copy of the new arithmetic -- if it were, it could not catch
+ * the failure it exists for.
+ *
+ * WHY IT IS HERE AT ALL.  The other cases in this file pin the CONVENTIONS
+ * (half-pixel centres, floor, edges) on small hand-computable images.  They
+ * cannot see the failure a stepped walk has: a per-step rounding error is zero
+ * for the first few pixels and grows with k, so a 4- or 8-wide case passes
+ * while a real 128-wide one is wrong at the right-hand edge.  This compares
+ * every byte at a width larger than any model input this port loads, which is
+ * the only shape of test that could fail.
+ *
+ * VERIFIED TO FAIL: dropping the carry in nn_walk_step() (the one line that
+ * makes the walk exact rather than an accumulation of truncated steps) makes
+ * this report thousands of differing bytes, while every other case in this
+ * file still passes.
+ */
+static int64_t oracle_src_q16(uint32_t dst, uint32_t origin, uint32_t extent,
+                              uint32_t dst_extent)
+{
+	int64_t num = (int64_t)(2u * dst + 1u) * (int64_t)extent * (int64_t)32768;
+
+	return num / (int64_t)dst_extent + ((int64_t)origin << 16) - 32768;
+}
+
+static int32_t oracle_floor_q16(int64_t q)
+{
+	int64_t i = q / 65536;
+
+	if (q < 0 && i * 65536 != q)
+		i -= 1;
+	return (int32_t)i;
+}
+
+static uint32_t oracle_clamp(int32_t v, uint32_t lo, uint32_t hi)
+{
+	if (v < (int32_t)lo)
+		return lo;
+	if (v > (int32_t)hi)
+		return hi;
+	return (uint32_t)v;
+}
+
+static void oracle_fill(const uint8_t *bgr, uint32_t frame_w, uint32_t frame_h,
+                        const struct nn_preproc_geom *g, uint8_t *dst)
+{
+	uint32_t plane = frame_w * frame_h;
+
+	for (uint32_t dy = 0; dy < g->dst_h; dy++) {
+		int64_t  sy = oracle_src_q16(dy, g->y, g->h, g->dst_h);
+		int32_t  iy = oracle_floor_q16(sy);
+		uint32_t fy = (uint32_t)((sy - (int64_t)iy * 65536) >> 8) & 0xFFu;
+		uint32_t y0 = oracle_clamp(iy,     g->y, g->y + g->h - 1u);
+		uint32_t y1 = oracle_clamp(iy + 1, g->y, g->y + g->h - 1u);
+
+		for (uint32_t dx = 0; dx < g->dst_w; dx++) {
+			int64_t  sx = oracle_src_q16(dx, g->x, g->w, g->dst_w);
+			int32_t  ix = oracle_floor_q16(sx);
+			uint32_t fx = (uint32_t)((sx - (int64_t)ix * 65536) >> 8)
+			              & 0xFFu;
+			uint32_t x0 = oracle_clamp(ix,     g->x, g->x + g->w - 1u);
+			uint32_t x1 = oracle_clamp(ix + 1, g->x, g->x + g->w - 1u);
+			uint32_t w00 = (256u - fx) * (256u - fy);
+			uint32_t w01 = fx * (256u - fy);
+			uint32_t w10 = (256u - fx) * fy;
+			uint32_t w11 = fx * fy;
+			size_t i00 = (size_t)y0 * frame_w + x0;
+			size_t i01 = (size_t)y0 * frame_w + x1;
+			size_t i10 = (size_t)y1 * frame_w + x0;
+			size_t i11 = (size_t)y1 * frame_w + x1;
+			/* planar B,G,R in -> interleaved R,G,B out */
+			static const int order[3] = { 2, 1, 0 };
+
+			for (int c = 0; c < 3; c++) {
+				const uint8_t *p = bgr + (size_t)order[c] * plane;
+				uint32_t v = (p[i00] * w00 + p[i01] * w01 +
+				              p[i10] * w10 + p[i11] * w11 +
+				              32768u) >> 16;
+
+				*dst++ = (uint8_t)(v - 128u);
+			}
+		}
+	}
+}
+
+static void test_walk_matches_the_closed_form(void)
+{
+	/* Deliberately not a power of two in either direction, and wider than
+	 * any model input this port loads, so a per-step error has room to
+	 * accumulate and no ratio divides evenly. */
+	enum { W = 320, H = 240, DW = 200, DH = 137 };
+	static uint8_t frame[W * H * 3];
+	static uint8_t got[DW * DH * 3];
+	static uint8_t want[DW * DH * 3];
+	struct nn_preproc_geom g;
+	size_t bad = 0, first = 0;
+
+	/* A ramp in x and y at once, so a drift in EITHER axis shows up. */
+	for (int p = 0; p < 3; p++)
+		for (uint32_t y = 0; y < H; y++)
+			for (uint32_t x = 0; x < W; x++)
+				frame[(size_t)p * W * H + (size_t)y * W + x] =
+					(uint8_t)((x * 7u + y * 13u + (uint32_t)p * 29u)
+					          & 0xFFu);
+
+	expect("oracle geometry", nn_preproc_geom(W, H, DW, DH, &g) == 0,
+	       "refused");
+	expect("oracle fill", nn_preproc_fill(frame, W, H, &g, got) == 0,
+	       "refused");
+	oracle_fill(frame, W, H, &g, want);
+
+	for (size_t i = 0; i < sizeof got; i++)
+		if (got[i] != want[i]) {
+			if (bad == 0)
+				first = i;
+			bad++;
+		}
+
+	expect("the stepped walk equals the closed form byte for byte",
+	       bad == 0, "%zu of %zu bytes differ, first at %zu (got %d want %d)",
+	       bad, sizeof got, first, got[first], want[first]);
+}
+
+/*
+ * The same equivalence at the shape the firmware actually runs, and at an
+ * upscale -- where the walk's coordinates go NEGATIVE and the carry interacts
+ * with the floor correction.
+ */
+static void test_walk_matches_at_real_shapes(void)
+{
+	enum { W = 320, H = 240 };
+	static uint8_t frame[W * H * 3];
+	static uint8_t got[240 * 240 * 3];
+	static uint8_t want[240 * 240 * 3];
+	static const uint32_t shapes[][2] = {
+		{ 128, 128 },   /* BlazeFace: what `nn preview` runs */
+		{  96,  96 },   /* a smaller classifier             */
+		{ 240, 240 },   /* upscale in x, identity in y      */
+	};
+
+	for (int p = 0; p < 3; p++)
+		for (uint32_t y = 0; y < H; y++)
+			for (uint32_t x = 0; x < W; x++)
+				frame[(size_t)p * W * H + (size_t)y * W + x] =
+					(uint8_t)((x * 3u + y * 5u + (uint32_t)p) & 0xFFu);
+
+	for (size_t s = 0; s < sizeof shapes / sizeof shapes[0]; s++) {
+		struct nn_preproc_geom g;
+		size_t n;
+
+		expect("shape geometry",
+		       nn_preproc_geom(W, H, shapes[s][0], shapes[s][1], &g) == 0,
+		       "refused %ux%u", shapes[s][0], shapes[s][1]);
+		expect("shape fill",
+		       nn_preproc_fill(frame, W, H, &g, got) == 0,
+		       "refused %ux%u", shapes[s][0], shapes[s][1]);
+		oracle_fill(frame, W, H, &g, want);
+
+		n = (size_t)g.dst_w * g.dst_h * 3u;
+		expect("the walk equals the closed form at a real shape",
+		       memcmp(got, want, n) == 0, "%ux%u differs",
+		       shapes[s][0], shapes[s][1]);
+	}
+}
+
 static void test_identity_scale_is_a_copy(void)
 {
 	enum { W = 16, H = 16 };
@@ -303,6 +473,31 @@ static void test_fill_rejects_bad_arguments(void)
 	g.w = 99u;
 	expect("a crop wider than the frame is refused",
 	       nn_preproc_fill(frame, 8, 8, &g, dst) != 0, "accepted");
+
+	/*
+	 * [!] AND THE DIMENSION BOUND, ASKED OF fill() DIRECTLY (issue #60).
+	 *
+	 * geom() has always refused these, so reaching fill() with them means a
+	 * hand-built struct -- which the signature permits and which nothing
+	 * else would catch.  Since #60 the bound is not merely a policy: it is
+	 * what keeps nn_walk_init()'s extent * 2^15 inside a uint32.  A test
+	 * that only ever went through geom() would pass with the check deleted.
+	 */
+	(void)nn_preproc_geom(8, 8, 8, 8, &g);
+	expect("a frame wider than the arithmetic allows is refused",
+	       nn_preproc_fill(frame, 100000u, 8, &g, dst) != 0, "accepted");
+	expect("a frame taller than the arithmetic allows is refused",
+	       nn_preproc_fill(frame, 8, 100000u, &g, dst) != 0, "accepted");
+
+	(void)nn_preproc_geom(8, 8, 8, 8, &g);
+	g.dst_w = 100000u;
+	expect("a model input wider than the arithmetic allows is refused",
+	       nn_preproc_fill(frame, 8, 8, &g, dst) != 0, "accepted");
+
+	(void)nn_preproc_geom(8, 8, 8, 8, &g);
+	g.dst_h = 100000u;
+	expect("a model input taller than the arithmetic allows is refused",
+	       nn_preproc_fill(frame, 8, 8, &g, dst) != 0, "accepted");
 }
 
 /* --- box mapping ---------------------------------------------------------- */
@@ -405,6 +600,8 @@ int main(void)
 	test_geom_upscale_allowed();
 	test_geom_degenerate_refused();
 	test_identity_scale_is_a_copy();
+	test_walk_matches_the_closed_form();
+	test_walk_matches_at_real_shapes();
 	test_channel_order_is_rgb();
 	test_halfpixel_downscale_by_two();
 	test_upscale_clamps_the_first_sample();

@@ -53,52 +53,60 @@ static int ov5647_read_frame_length(uint16_t *lines);
  * (Issue #64 made that a sum, S + B; issue #71 made it this max again by
  * returning the pipeline pin at the staging seam.  History in those issues.)
  *
- * MEASURED at issue #59, board rev D, 60- and 200-frame runs:
+ * MEASURED at issue #60, board rev D, 200-frame runs (the #59 sweep this
+ * replaces is in git history; its default was 1060 against W = 32,381 us):
  *
  *     T_active = 15.1 ms (no longer on the critical path)
- *     B = 26,461 us               line time = 31.7..32.0 us (it wanders ~1%)
- *     W = 32,381 us for `nn preview`, ~9.2 ms for `camera preview`
+ *     B = 26,439..26,456 us       line time = 31.85..31.92 us
+ *     W = 28,200 us for `nn preview`, 9.3 ms for `camera preview`
  *
- * The overlap's own price: `arm` 43 us/frame, and W grew 158 us (+0.5%) over
- * issue #71's serialised measurement -- the WDMA3 write now runs concurrently
- * with the pack, the SPI DMA and the NPU, and that is what the concurrency
- * costs on this interconnect.  Measured, because it could not be predicted.
+ * The overlap's own price: `arm` 43..45 us/frame.  Issue #59 measured what the
+ * concurrency itself costs -- the WDMA3 write running alongside the pack, the
+ * SPI DMA and the NPU put W up 158 us (+0.5%) over #71's serialised figure --
+ * and that comparison is not re-derivable here, because #60 moved W for an
+ * unrelated reason.  It is quoted as #59's result, not re-measured.
  *
- * So `nn preview` needs T_s > W = 32,381 us for N=1, and B sits under every
- * such T_s -- for the first time one frame length serves BOTH previews:
+ * So `nn preview` needs T_s > W = 28,200 us for N=1, and B sits under every
+ * such T_s -- one frame length serves BOTH previews, as it has since #59:
  *
- *     VTS    T_s measured     nn preview          margin on W
- *    1013   32,319 us         (below W: N=2)         --
- *    1048   33,236..33,578    29.9 fps, 0/200 drop   2.6..3.6%
- *    1060   33,726..33,827    29.6 fps, 0/200 drop   4.0%
+ *     VTS    T_s measured   nn preview          margin on W
+ *    1000   31,917 us       31.3 fps, 0/200 drop   11.6%
+ *     960   30,580 us       32.7 fps, 0/200 drop    7.8%
+ *     940   30,006 us       33.3 fps, 0/200 drop    6.0%
+ *     920   29,303 us       34.1 fps, 0/200 drop    3.8%
+ *     900   28,692 us       34.8 fps, 0/200 drop    1.7%
  *
- * `camera preview` at 1060 measures the same 29.6 fps, 0/200 dropped -- the
- * first default that serves both.
+ * W came out within 14 us of 28,200 at every one of those rows, which is what
+ * makes the column a measurement of the frame length rather than of the load.
+ * Re-measured on the flashed image with 940 as the default: 29,986 us, 33.3 fps,
+ * 0/200, `camera preview` 29,841 us and 33.5 fps on the same value.
  *
- * WHY THE DEFAULT IS NOT THE 1048 ROW.  Its margin is inside the band the
- * project rule bars: two measured cliffs say a thin margin degrades
- * statistically rather than cleanly (issue #38's VTS 1540, 60 us short, every
- * other frame lost; issue #71's VTS 1500, 0.67% margin, a quarter of frames
- * slipped) -- and here T_s itself wandered 340 us between two runs at the same
- * VTS, which is the 1048 row's whole margin.  Hence: keep 4% or more, default
- * 1060, and `camera vts 1048` buys the round 30.0 at the bench when wanted.
- * Issue #60 cuts W and is what makes 30 fps comfortable rather than exact.
+ * WHY THE DEFAULT IS NOT THE 920 ROW, though it drops nothing at 34.1 fps.
+ * Its margin is inside the band the project rule bars, and the rule is not
+ * arbitrary: three measured cliffs say a thin margin degrades statistically
+ * rather than cleanly (issue #38's VTS 1540, 60 us short, every other frame
+ * lost; issue #71's VTS 1500, 0.67% margin, a quarter of frames slipped; #57's
+ * VTS 1040, 82 us, likewise) -- and T_s itself wandered 340 us between two runs
+ * at the same VTS in #59, which is more than the whole margin of the 900 row
+ * and most of the 920 row's.  Hence: keep 4% or more, default 940, and
+ * `camera vts 920` buys 34 fps at the bench when the scene is cooperative.
  *
  * [!] AND THE LINE TIME IS NOT 31.507 us.  That figure is HTS 1852 / PCLK
- * 58.8 MHz; every N=1 run gives period/VTS higher, 31.7..32.0 across the #59
- * sweep.  Predictions from the datasheet figure run optimistic by the same
- * order as the margin being reasoned about.  `camera vts` explores all of this
- * without a flash.
+ * 58.8 MHz; every N=1 run gives period/VTS higher -- 31.85..31.92 across this
+ * five-point sweep, 31.7..32.0 across #59's.  Predictions from the datasheet
+ * figure run optimistic by the same order as the margin being reasoned about.
+ * `camera vts` explores all of this without a flash.
  *
  * The EXPOSURE ceiling, which the frame length also bounds, follows the value
- * down: 1060 allows 33.4 ms of integration against 49.3 at the old 1550.  A dim
- * scene keeps `camera vts` for longer frames -- the trade is now light against
- * frame rate, not one preview against the other.
+ * down: 940 allows 29.9 ms of integration against 33.4 at the old 1060 and 49.3
+ * at the 1550 before it.  A dim scene keeps `camera vts` for longer frames --
+ * the trade is light against frame rate, not one preview against the other.
  *
- * [!] RE-MEASURE AFTER ANY CHANGE TO W OR B.  The next mover is issue #60
- * (preprocess/overlay), which cuts W and moves every row again.
+ * [!] RE-MEASURE AFTER ANY CHANGE TO W OR B.  W is now 1,745 us above B, so the
+ * NEXT reduction of W stops helping partway: at W < B = 26,455 the panel's wire
+ * time becomes the bound and no frame length beats 37.8 fps.
  */
-#define OV5647_DEFAULT_VTS  1060u
+#define OV5647_DEFAULT_VTS  940u
 
 /* The mode outputs 480 lines; VTS below that plus the part's own blanking is
  * not a frame.  Linux's 504 for this mode is the practical floor, and it is

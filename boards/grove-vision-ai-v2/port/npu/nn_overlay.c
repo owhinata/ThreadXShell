@@ -18,6 +18,7 @@
 #include "lcd_st7789.h"
 #include "nn_preproc.h"
 #include "npu.h"
+#include "tx_glue.h"       /* the EPK's TIMER2: the stage clock (issue #60) */
 
 /* Enough descriptors for any model handed to the decoder; BlazeFace needs
  * four.  Matches the cap in cmd_nn.c for the same reason it exists there. */
@@ -41,6 +42,27 @@
 static volatile uint8_t nn_ov_stop;
 
 static struct nn_overlay_stats nn_ov_stats;
+
+/*
+ * The stage accumulators behind the struct's prep/invoke/decode (issue #60).
+ *
+ * EPK TIMER2 ticks, for the same reason the camera's profile uses them: this
+ * is the clock that is already validated every time anyone asks
+ * tx_glue_profile_ok(), and the sink number these stages have to sum against
+ * is measured with it.  64-bit because a long preview overflows 32 at 6 MHz.
+ *
+ * Written on the producer thread only, with no critical section -- the same
+ * discipline as camera.c's cam_prof, and sound for the same reason: every
+ * reader snapshots under TX_DISABLE, and the console thread that reads them
+ * cannot preempt the producer mid-add (it is strictly below it).  Only frames
+ * that completed all three stages accumulate, so the three means describe the
+ * same set of frames; a frame that failed mid-way vanishes into `sink`'s
+ * remainder, which is where every other anomaly in that column already goes.
+ */
+static uint64_t nn_ov_prep_ticks;
+static uint64_t nn_ov_invoke_ticks;
+static uint64_t nn_ov_decode_ticks;
+static uint32_t nn_ov_prof_frames;
 
 /*
  * This frame's detections, produced by process() and consumed by draw().
@@ -78,6 +100,7 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	struct npu_tensor outs[NN_OVERLAY_MAX_OUTPUTS];
 	unsigned n_out, i;
 	uint32_t t0, t1;
+	uint32_t e0, e1, e2, e3;
 	int nd;
 
 	(void)ctx;
@@ -110,6 +133,16 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 		nn_ov_stats.skipped++;
 		return -1;
 	}
+
+	/*
+	 * Stage clocks (issue #60).  Everything from here to the invoke is
+	 * `prep`: the tensor and geometry setup is microseconds, so the row
+	 * effectively reads as the crop/resize -- but it is measured from HERE
+	 * so that prep + invoke + decode covers this function without a gap,
+	 * and the difference against `camera stats`' sink row is exactly the
+	 * hand-off plus whatever preempted the producer inside it.
+	 */
+	e0 = tx_glue_epk_timer_ticks();
 
 	if (npu_input(&in) != NPU_OK) {
 		nn_ov_stats.errors++;
@@ -147,6 +180,7 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 		nn_ov_stats.errors++;
 		return -1;
 	}
+	e1 = tx_glue_epk_timer_ticks();
 
 	/*
 	 * Stop check 2 of 3, and the one that matters: this is the last instant
@@ -168,17 +202,23 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 		return -1;
 	}
 	t1 = (uint32_t)tx_time_get();
+	e2 = tx_glue_epk_timer_ticks();
 
 	nd = blazeface_decode(outs, n_out, nn_ov_det, BF_MAX_DET);
 	if (nd < 0) {
 		nn_ov_stats.errors++;
 		return -1;
 	}
+	e3 = tx_glue_epk_timer_ticks();
 
 	nn_ov_stats.inferences++;
 	nn_ov_stats.detections += (uint32_t)nd;
 	nn_ov_stats.last_ms   = t1 - t0;
 	nn_ov_stats.last_ndet = nd;
+	nn_ov_prep_ticks   += (uint32_t)(e1 - e0);
+	nn_ov_invoke_ticks += (uint32_t)(e2 - e1);
+	nn_ov_decode_ticks += (uint32_t)(e3 - e2);
+	nn_ov_prof_frames++;
 	nn_ov_ndet    = nd;
 	nn_ov_geom_ok = 1;
 
@@ -238,6 +278,10 @@ const struct cam_lcd_overlay *nn_overlay_arm(void)
 	nn_ov_stats.errors     = 0u;
 	nn_ov_stats.last_ms    = 0u;
 	nn_ov_stats.last_ndet  = 0;
+	nn_ov_prep_ticks       = 0u;
+	nn_ov_invoke_ticks     = 0u;
+	nn_ov_decode_ticks     = 0u;
+	nn_ov_prof_frames      = 0u;
 	nn_ov_ndet             = 0;
 	nn_ov_geom_ok          = 0;
 	nn_ov_stop             = 0u;
@@ -249,9 +293,44 @@ void nn_overlay_request_stop(void)
 	nn_ov_stop = 1u;
 }
 
+/* Ticks -> total us, in 64-bit so the multiply cannot wrap first.  The result
+ * is truncated to 32 bits, which holds hours of accumulated stage time -- the
+ * same exposure cam_lcd_sink.c's blit_us already accepts. */
+static uint32_t nn_ov_us(uint64_t ticks, uint32_t hz)
+{
+	return (hz != 0u) ? (uint32_t)((ticks * 1000000u) / hz) : 0u;
+}
+
 void nn_overlay_stats(struct nn_overlay_stats *out)
 {
+	TX_INTERRUPT_SAVE_AREA
+	const char *why = NULL;
+	uint64_t prep, invoke, decode;
+	uint32_t frames, hz;
+
 	if (out == NULL)
 		return;
-	*out = nn_ov_stats;
+
+	/*
+	 * One critical section for the lot: the 64-bit accumulators are written
+	 * by the producer thread, and half of a 64-bit add is not a slightly
+	 * wrong number but a wildly wrong one.  Same treatment as the camera's
+	 * profile and the panel sink's, for the same reason.
+	 */
+	TX_DISABLE
+	*out   = nn_ov_stats;
+	prep   = nn_ov_prep_ticks;
+	invoke = nn_ov_invoke_ticks;
+	decode = nn_ov_decode_ticks;
+	frames = nn_ov_prof_frames;
+	TX_RESTORE
+
+	/* The stage rows are only as good as their clock, and this port has the
+	 * predicate for that -- the same one `thread` and `camera stats` use. */
+	hz = tx_glue_epk_timer_hz();
+	out->prof_ok     = (tx_glue_profile_ok(&why) && hz != 0u);
+	out->prof_frames = frames;
+	out->prep_us     = out->prof_ok ? nn_ov_us(prep,   hz) : 0u;
+	out->invoke_us   = out->prof_ok ? nn_ov_us(invoke, hz) : 0u;
+	out->decode_us   = out->prof_ok ? nn_ov_us(decode, hz) : 0u;
 }

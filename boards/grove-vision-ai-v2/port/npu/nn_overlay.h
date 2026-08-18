@@ -39,6 +39,20 @@ struct nn_overlay_stats {
 	uint32_t errors;       /**< invoke or decode refused                 */
 	uint32_t last_ms;      /**< the most recent inference, in ticks      */
 	int      last_ndet;    /**< faces in the most recent frame           */
+
+	/*
+	 * The producer-side stage split (issue #60).  `camera stats` prints one
+	 * `sink` number for everything a sink does on the producer; under
+	 * `nn preview` almost all of it is this overlay's process(), and which
+	 * STAGE of process() owns it decides what is worth optimising.  Totals
+	 * since arm, over prof_frames frames -- only frames that completed all
+	 * three stages are counted, so the three rows describe the same set.
+	 */
+	uint32_t prof_frames;  /**< frames in the stage totals below          */
+	uint32_t prep_us;      /**< tensor setup + crop/resize into the input */
+	uint32_t invoke_us;    /**< the NPU inference                        */
+	uint32_t decode_us;    /**< anchor decode into boxes                 */
+	int      prof_ok;      /**< the EPK clock backing them is trusted    */
 };
 
 /**
@@ -68,7 +82,11 @@ const struct cam_lcd_overlay *nn_overlay_arm(void);
  */
 void nn_overlay_request_stop(void);
 
-/** Snapshot the counters. Safe at any time; each field is a single word. */
+/**
+ * Snapshot the counters.  Safe at any time: the word-sized counters need no
+ * care, and the 64-bit stage accumulators behind prep/invoke/decode are copied
+ * under a critical section (issue #60), same as the camera's own profile.
+ */
 void nn_overlay_stats(struct nn_overlay_stats *out);
 
 #ifdef __cplusplus

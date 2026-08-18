@@ -1445,7 +1445,9 @@ Two practical consequences:
   VTS is tuned down;
 - **`camera preview` and `nn preview` want different VTS values** (1060 against
   1770), because their W differs by the inference.  VTS is one global setting, so
-  there is no value that serves both until W comes down.
+  there is no value that serves both until W comes down.  (It did: issue #59
+  removed `T_active` from the critical path and one frame length has served both
+  since -- 940 today.  This bullet is the state at #57.)
 
 ### What happened when the packer became tables (issue #58)
 
@@ -1669,20 +1671,29 @@ For the first time one frame length serves BOTH previews -- `camera preview`'s
 period is bounded by B under every T_s that `nn preview`'s W accepts.
 
 **Measured on the flashed image** (rev D, 200-frame runs): at the default
-VTS 1060, `nn preview` AND `camera preview` both measure **29.6 fps with 0 of
-200 dropped**, per-buffer counts 100/100, no premature disables, `arm`
-43 us/frame, and `nn preview`'s `wait` collapsed to 1,362 us -- the capture
-really does run under the work now, and that wait IS the 4.0% margin.  At
-VTS 1048 `nn preview` measures 29.9 fps, 0/200.  The contention question
-answered itself small: W is 32,381 us against #71's serialised 32,223, so
-overlapping the WDMA3 write with the pack, the SPI DMA and the NPU costs
-**+0.5%**.
+VTS 940, `nn preview` measures **33.3 fps** and `camera preview` **33.5 fps**,
+both with **0 of 200 dropped**, per-buffer counts 100/100, no premature
+disables, `arm` 43-45 us/frame, and `nn preview`'s `wait` down to 1,772 us --
+the capture really does run under the work now, and that wait IS the 5.9%
+margin.  B measured 26,439 us on the same image.
 
-The default is **VTS 1060**, NOT the 30.0 fps row: 1048's measured margin is
-2.6..3.6% and T_s itself wandered 340 us between two runs at that VTS --
-inside the >= 4% rule issues #38 and #71 paid for.  `camera vts 1048` buys the
-round number at the bench; issue #60 is what makes 30 fps comfortable rather
-than exact.  The table in cam_sensor_ov5647.c is the authority.
+The two previews differ only in where the time sits, which is the clearest
+statement of the two bounds: `nn preview` spends 19,862 us in `sink` and waits
+1,772; `camera preview` spends 951 us in `sink` and waits 20,577, its period
+held up by B alone.
+
+The default is **VTS 940**, NOT the faster 920 row (34.1 fps, also 0/200):
+920's margin is 3.8% and T_s itself wandered 340 us between two runs at one VTS
+in #59 -- inside the >= 4% rule issues #38, #57 and #71 paid for.  `camera vts
+920` buys 34 fps at the bench.  The table in cam_sensor_ov5647.c is the
+authority.
+
+[!] **The default moved 1060 -> 940 because issue #60 cut W**, not because the
+rule changed: W fell 32,381 -> 28,200 us when the preprocessing stopped doing a
+64-bit software division per output pixel (see below), and a frame length is
+only ever the shortest one that clears W with margin.  This is the third time
+the pair has had to be re-selected together; the constant and its sweep table
+live in one place for that reason.
 
 **How the flip works, and what defends it** (the machine and its hardware rules
 live in `port/camera/cam_wdma3.{h,c}` -- disassembled facts, since the SVD names
@@ -2238,15 +2249,71 @@ nn preview 30          # or a frame count
 
 `camera preview` is unchanged and still shows a plain picture.
 
-**Measured on the board:** 100 frames in 12,500 ms = **8.0 fps**, with **100
-inferences for 100 frames** -- every published frame is inferred and shown, none
-dropped and none refused.  Against the 15.8 fps of a plain preview that is about
-25 ms per frame for inference (12-13 ms), the resize and the decode together.
-The producer thread's stack high-water came out at **964 B of 8,192**: a single
-custom-operator graph really does keep the CPU-side call chain shallow, since
-the work is in the NPU.  8 KiB stays as the allocation anyway -- the margin is
-the point, and the measurement is what says it is not needed rather than an
-argument that it might be.
+**Measured on the board** (issue #60, rev D, default VTS 940): 200 frames at
+**33.3 fps**, with **200 inferences for 200 frames** -- every published frame is
+inferred and shown, none dropped and none refused.  `camera preview` measures
+33.5 fps on the same frame length, so one value serves both.  The producer
+thread's stack high-water
+came out at **964 B of 8,192**: a single custom-operator graph really does keep
+the CPU-side call chain shallow, since the work is in the NPU.  8 KiB stays as
+the allocation anyway -- the margin is the point, and the measurement is what
+says it is not needed rather than an argument that it might be.
+
+(It started at 8.0 fps when #48 landed it.  The route from there is issue #56's
+budget: #57 took the blit off this thread, #58 folded the packer into tables,
+#64 reversed the two threads' priorities, #71 returned the slot pin at the
+staging seam, #59 double-buffered the capture, and #60 -- below -- cut the
+preprocessing.)
+
+### Where `nn preview`'s producer time goes (issue #60)
+
+`camera stats` prints one `sink` row for everything a sink does on the producer,
+and under `nn preview` that number was 24.0 ms with no way to see inside it.  It
+now splits, from counters the overlay keeps on the same EPK clock:
+
+```
+  sink   :  19862 us/frame   sinks consume: inference + panel staging
+nn sink  : 200 frame(s), last nn preview [producer thread]
+  prep   :   6126 us/frame   setup + crop/resize
+  invoke :  12673 us/frame   NPU inference
+  decode :    108 us/frame   anchors -> boxes
+```
+
+The split is what retired the standing guess.  #56 attributed roughly 10 ms to
+"preprocessing and overlay" without knowing the division; measured, **the
+overlay was innocent** -- the decode is 108 us and the drawing is on the panel
+thread inside `blit` -- and all of it was the resize.
+
+**And the resize was doing a 64-bit software division per output pixel.**
+`nn_src_q16()` divided by `dst_extent`, a variable, so every one of the 16,384
+output pixels called `__aeabi_ldivmod`: **10,305 us, about 250 cycles per pixel**
+for twelve multiply-adds.  Two changes, both bit-exact:
+
+| | divisions per frame | library calls in `nn_preproc_fill` | prep |
+|---|---:|---:|---:|
+| before | 16,512 | 16,512 | 10,305 us |
+| stepped walk | 4 | 4 | 7,134 us |
+| + 32-bit coordinates | 4 (hardware `udiv`) | **0** | **6,126 us** |
+
+The walk replaces the division with an increment that carries the REMAINDER, so
+it is the same quotient at every k rather than an accumulation of truncated
+steps -- which is the hazard the old comment cited when it defended dividing per
+pixel, and it does not apply to a walk that keeps the remainder.  Dropping the
+remainder is what the old comment was right about: doing so makes 3,946 of
+82,200 output bytes wrong, and **every small hand-computed case in the host
+tests still passes**, which is why `test_nn_preproc.c` also compares a full
+200x137 resize against an independent closed-form oracle.
+
+Carrying no 64-bit numerator is then what lets the whole thing be 32-bit: the
+bound at `NN_MAX_DIM` in `nn_preproc.c` lists every quantity, the largest being
+5.37e8.  `nn_preproc_fill()` re-checks that bound itself rather than trusting
+that `nn_preproc_geom()` built the struct -- delete the check and the host tests
+segfault, which is the difference between a bound and a comment.
+
+W fell 32,381 -> 28,214 us, and the frame length was re-selected onto it (VTS
+1060 -> 940, 29.6 -> 33.3 fps).  **The next reduction of W stops paying partway:**
+at W < B = 26,439 us the panel's SPI wire time becomes the bound and nothing
+beats 37.8 fps.  There is 1.8 ms of room left before that.
 
 ### Inference runs on the camera producer thread
 

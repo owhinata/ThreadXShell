@@ -196,6 +196,19 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_cam_auto"
 "$out/test_cam_auto"
 
+# issue #65 -- the stop's decision table (port/camera/cam_state.c).  The stop
+# has to separate three answers that all look like "not streaming": poisoned,
+# nothing to stop, and the API mutex never came free.  Only the middle one may
+# report success, because success is what permits the caller to detach its sink.
+# The case that matters -- a stop that waited for the mutex and woke up owning it
+# with the port already poisoned by another stop -- needs two stops overlapping
+# on a board with one shell, so it cannot be produced on hardware at all.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/camera" \
+    "$here/test_cam_stop.c" "$board/port/camera/cam_state.c" \
+    $LDFLAGS -o "$out/test_cam_stop"
+"$out/test_cam_stop"
+
 # issue #35 -- the CSI FIFO fill computation (port/camera/cam_mipi_calc.c).  The
 # firmware rewrote the SDK's double + ceil() formula in integer arithmetic
 # because this link has no libm; this checks the rewrite against the ORIGINAL

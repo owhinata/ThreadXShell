@@ -512,6 +512,7 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/camera/cam_wdma3.c"
     "${BOARD_DIR}/port/camera/cam_sensor.c"
     "${BOARD_DIR}/port/camera/cam_sensor_ov5647.c"
+    "${BOARD_DIR}/port/camera/cam_state.c"
     "${BOARD_DIR}/port/camera/camera.c"
     "${BOARD_DIR}/port/camera/cam_lcd_sink.c"
     # Ethos-U55 inference glue (issue #44).  The C++ interpreter is contained

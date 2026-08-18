@@ -36,8 +36,11 @@ extern "C" {
 #endif
 
 /*
- * Error codes.  Same names and meanings as the other two boards' camera
- * drivers -- deliberately, so that a reader who knows one knows all three.
+ * Error codes.  -1 to -7 have the same names and meanings as the other two
+ * boards' camera drivers -- deliberately, so that a reader who knows one knows
+ * all three.  Past that they diverge: -8 exists because only this port's stop
+ * has to separate "I could not ask" from "I asked and got no answer", which is
+ * a distinction the other two boards' cameras do not make (issue #65).
  */
 #define CAM_OK             0
 #define CAM_ERR_PARAM     -1  /**< bad argument                              */
@@ -47,6 +50,7 @@ extern "C" {
 #define CAM_ERR_NO_SENSOR -5  /**< the sensor did not answer, or answered wrong */
 #define CAM_ERR_NO_FRAME  -6  /**< nothing has been captured yet              */
 #define CAM_ERR_BUSY      -7  /**< a stream already owns the datapath         */
+#define CAM_ERR_LOCKED    -8  /**< the API stayed locked; nothing was asked   */
 
 /** @return a short description of a CAM_* code (never NULL). */
 const char *camera_strerror(int rc);
@@ -172,14 +176,28 @@ const uint8_t *camera_raw_frame(void);
  * idle -- and only then may a caller detach a sink, free anything a sink points
  * at, or release ownership of a device the sink was driving.
  *
- * ANY OTHER RETURN PROVES NOTHING, and CAM_ERR_TIMEOUT specifically means the
- * producer is still running somewhere.  It used to be described as
- * unconditionally synchronous, which was never quite true -- the wait is
- * bounded -- and became actively dangerous once a sink could run an NPU
- * inference inside consume().  On that path the camera enters an unrecoverable
- * state and refuses everything afterwards, so the caller's job is simply to
- * report it and hold on to whatever it owns: do NOT detach, do NOT tear down,
- * do NOT release.
+ * ANY OTHER RETURN PROVES NOTHING, and the caller's job is the same for all of
+ * them: report, and hold on to whatever it owns -- do NOT detach, do NOT tear
+ * down, do NOT release.  What differs is what the operator should be told, and
+ * two returns say very different things:
+ *
+ *   CAM_ERR_TIMEOUT  the producer was asked and never acknowledged.  It is
+ *                    still running somewhere, so the camera POISONS itself and
+ *                    refuses everything afterwards.  Unrecoverable; say so.
+ *
+ *   CAM_ERR_LOCKED   the API mutex never came free, so the producer was never
+ *                    asked and NOTHING WAS TOUCHED (issue #65).  This is not a
+ *                    statement about the stream: the holder may be a stop that
+ *                    has already joined and not yet let go.  The camera is not
+ *                    poisoned -- but with a sink still linked reserving it, and
+ *                    no command that can stop a stream on its own, a reboot is
+ *                    what clears the reservation.
+ *
+ * It used to be described as unconditionally synchronous, which was never quite
+ * true -- the wait is bounded -- and became actively dangerous once a sink could
+ * run an NPU inference inside consume().  CAM_ERR_LOCKED exists because that
+ * caller rule turned a microsecond of lock contention into an abandoned sink:
+ * the stop reported a shape of failure it had not actually observed.
  */
 int camera_stream_start(struct frame_sink *sink);
 int camera_stream_stop(void);
@@ -196,6 +214,16 @@ struct camera_stats {
 	int32_t  last_dp_status;/**< the datapath status that stopped us      */
 	uint32_t overruns;      /**< no free slot at publish time             */
 	const char *fault;      /**< first terminal reason, or NULL           */
+
+	/*
+	 * How often a stop found the API mutex held, and the longest it waited
+	 * (issue #65).  Cumulative, and reported here because nothing else can
+	 * see the path: the fix turns contention into a wait instead of a
+	 * refusal, so without a count there is no evidence it was ever entered.
+	 * The wait includes attempts that went on to time out.
+	 */
+	uint32_t lock_contended;
+	uint32_t lock_wait_max_ms;
 
 	/*
 	 * Per-stage profile of the producer loop, SINCE THE LAST STREAM START

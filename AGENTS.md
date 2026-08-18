@@ -310,6 +310,15 @@
      `camera_stream_stop()` に近道を書き戻すと `test/test_cam_stop.c` が
      検査できなくなる（実機では作れない分岐）。取得失敗は **`CAM_ERR_LOCKED`（-8、
      このボード固有）で poison しない** — 何も聞いていないので何も証明していない。
+     判定は**両 enum とも fail-closed**（「HELD でなければ拒否」/ 成功を返す状態は
+     列挙する）。**`default:` を足して塞がない** — メンバ追加時に `-Wall` が鳴るのと
+     "future member" ベクタが落ちるのが検知経路。
+   - [!] **`camera_unsubscribe()` はストリーム中も拒否する（#65）。** poison だけを
+     見ていたのでは backstop になっていない（`publish()` は pre-pin して lock を
+     離してから `consume()` を呼ぶので、ストリーム中の unlink は進行中の配送と競合し、
+     直後の drain は古い受け渡しカウントを見て idle と判定し得る）。
+   - `cam_state` は **volatile**。stop が mutex 待ちの**後にもう一度読む**ため
+     （アドレスを取らない file-static はレジスタに保持され得る）。
    - **EPK 容量は `GROVE_EPK_WRAP_MAX` == `TX_GLUE_EPK_MAX_IRQ` == 32**
      （`_Static_assert` で結んである。片方だけ動かさない）。
      **[!] `nn preview`（#48）で 31/32 に達する**（camera 26 + UART0 1 + LCD 2 +

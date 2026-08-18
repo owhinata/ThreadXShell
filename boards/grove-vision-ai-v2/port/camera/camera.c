@@ -209,7 +209,17 @@ static TX_SEMAPHORE cam_stopped_sem; /* producer -> thread: idle again    */
 static TX_MUTEX     cam_api_mutex;   /* serialises the public entry points */
 static int          cam_objects_ok;
 
-static enum cam_state cam_state;
+/*
+ * [!] volatile, and for one specific reason (issue #65): camera_stream_stop()
+ * reads this AGAIN after waiting on the API mutex, and that second read has to
+ * be a real load.  This is a file-static whose address is never taken, so a
+ * compiler is entitled to keep it in a register across the wait -- and a stale
+ * read there would answer with the state from BEFORE another thread poisoned
+ * the port, which is precisely the case the re-test exists to catch.  The
+ * current build does emit the reload; volatile is what stops that from being a
+ * property of this toolchain rather than of the program.
+ */
+static volatile enum cam_state cam_state;
 static uint8_t  cam_stop_req;
 static uint8_t  cam_datapath_configured;
 static uint8_t  cam_rev_c;
@@ -587,6 +597,22 @@ int camera_unsubscribe(struct frame_sink *sink)
 	 */
 	if (cam_state == CAM_ST_LOST)
 		return CAM_ERR_STATE;
+	/*
+	 * [!] AND A RUNNING PRODUCER REFUSES TOO (issue #65).
+	 *
+	 * The poison test above was the whole backstop, which made it a backstop
+	 * for one way of forgetting the rule and not for the obvious one.
+	 * Unlinking a sink while the producer is streaming races a delivery that
+	 * is already pre-pinned and out of the pipeline's lock: the drain that
+	 * follows can read a hand-off count from before that delivery, call the
+	 * sink idle, and let its owner tear down state a consume() is about to
+	 * use.  Nothing reaches here that way today -- the one caller detaches
+	 * only after a confirmed stop -- but "the callers are careful" is the
+	 * property this function exists to stop depending on, and CAM_ERR_LOCKED
+	 * has just added another return a caller could get this wrong on.
+	 */
+	if (cam_state == CAM_ST_STREAMING)
+		return CAM_ERR_BUSY;
 	(void)frame_pipeline_detach(&cam_pipe, sink);
 	return CAM_OK;
 }

@@ -196,6 +196,19 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_cam_auto"
 "$out/test_cam_auto"
 
+# issue #42 -- the floating-point precondition's verdict
+# (port/threadx/fp_enforce.c).  The check it belongs to halts the board before
+# the scheduler starts, and the boots that would make it halt cannot be produced
+# on hardware -- nothing can ask this part to refuse an FPCCR write.  The
+# decision was split out from the halt for this file, because the alternative is
+# a gate nobody has ever seen fail, which this repository already has one of
+# (issue #66).
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/threadx" \
+    "$here/test_fp_enforce.c" "$board/port/threadx/fp_enforce.c" \
+    $LDFLAGS -o "$out/test_fp_enforce"
+"$out/test_fp_enforce"
+
 # issue #65 -- the stop's decision table (port/camera/cam_state.c).  The stop
 # has to separate three answers that all look like "not streaming": poisoned,
 # nothing to stop, and the API mutex never came free.  Only the middle one may

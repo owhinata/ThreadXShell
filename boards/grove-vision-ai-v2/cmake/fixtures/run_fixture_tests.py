@@ -94,6 +94,27 @@ def link(build_dir, cmd, what):
         raise SystemExit(1)
 
 
+def ninja_compile_command(build_dir, obj_suffix):
+    """The compile line Ninja uses for the object ending in `obj_suffix`."""
+    out = subprocess.run(["ninja", "-C", build_dir, "-t", "commands",
+                          "shell_objs"],
+                         check=True, capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        if obj_suffix in line and " -c " in line:
+            return line.strip()
+    raise SystemExit(f"run_fixture_tests: no compile command for {obj_suffix}")
+
+
+def compile_one(build_dir, cmd, what):
+    r = subprocess.run(cmd, shell=True, cwd=build_dir,
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"run_fixture_tests: fixture {what} failed to COMPILE -- the "
+              f"fixture is broken, not the gate:\n{r.stderr[-2000:]}",
+              file=sys.stderr)
+        raise SystemExit(1)
+
+
 def run_gate(board_dir, build_dir, elf, nm, objdump):
     r = subprocess.run(
         [sys.executable, os.path.join(board_dir, "cmake", "check_timer_seam.py"),
@@ -118,7 +139,11 @@ def run_placement_gate(board_dir, build_dir, elf, nm, objdump):
          "--nm", nm, "--objdump", objdump, os.path.join(build_dir, elf)],
         capture_output=True, text=True)
     text = r.stdout + r.stderr
-    ids = {"FLOOR"} if "loadable-SRAM floor" in text else set()
+    ids = set()
+    if "loadable-SRAM floor" in text:
+        ids.add("FLOOR")
+    if "required symbol fp_enforce_judge" in text:
+        ids.add("REQUIRED")
     return r.returncode, ids, text
 
 
@@ -219,10 +244,17 @@ def main():
     # Prepended to the COMPILER invocation, not appended to the command: the
     # line Ninja reports ends with the POST_BUILD gate run chained on with &&,
     # so anything added at the end becomes an argument to that instead.
+    # [!] EVERY create_objects() the removed sources define, not just the
+    # camera's.  Issue #57 gave the panel sink a thread of its own and main.c a
+    # second call, and this fixture went on naming only the first -- so it
+    # stopped LINKING at 3bb16e4 and stayed that way, unnoticed, because the
+    # suite is run by hand.  A fixture that cannot link is a negative test that
+    # is not running.
     f2 = f2_objs.replace(
         "arm-none-eabi-g++ ",
         "arm-none-eabi-g++ "
-        "-Wl,--defsym=camera_create_objects=lcd_create_objects ", 1)
+        "-Wl,--defsym=camera_create_objects=lcd_create_objects "
+        "-Wl,--defsym=cam_lcd_sink_create_objects=lcd_create_objects ", 1)
     if f2 == base:
         raise SystemExit("run_fixture_tests: the probe link names no camera "
                          "archives; the fixture cannot remove them")
@@ -266,10 +298,57 @@ def main():
     ok &= expect("P1 loadable section in the loader window is caught",
                  rc, ids, 1, {"FLOOR"}, text)
 
+    # --- check_placement_budget.py: the required symbol (issue #42) ----------
+    #
+    # P2: the call to the FP precondition is deleted from tx_glue.c.  That check
+    # replaced the MVE predication scan, and it works ONLY because
+    # --gc-sections drops an uncalled function -- so this fixture is what says
+    # the requirement has teeth rather than being a name that happens to be
+    # there.  Without it the replacement would be exactly the kind of gate the
+    # scan turned out to be (issue #66): green, and unable to fail.
+    #
+    # The source is COPIED and edited, the way P1 copies the linker script, so
+    # nothing in the firmware carries a hook that exists for a test.
+    print("run_fixture_tests (check_placement_budget.py, required symbol):")
+
+    glue_src = os.path.join(board, "port", "threadx", "tx_glue.c")
+    glue_dst = os.path.join(outdir, "p2_no_fp_enforce.c")
+    with open(glue_src) as f:
+        glue = f.read()
+    glue_broken = glue.replace("    fp_enforce_preconditions();\n", "")
+    if glue_broken == glue:
+        raise SystemExit("run_fixture_tests: tx_glue.c does not call "
+                         "fp_enforce_preconditions(); the fixture cannot "
+                         "remove it")
+    with open(glue_dst, "w") as f:
+        f.write(glue_broken)
+
+    cc = ninja_compile_command(build, "port/threadx/tx_glue.c.obj")
+    obj_old = re.search(r"-o (\S*tx_glue\.c\.obj)", cc).group(1)
+    obj_new = "seam-fixtures/p2_tx_glue.obj"
+    p2_cc = cc.replace(f"-o {obj_old}", f"-o {obj_new}")
+    p2_cc = re.sub(r"-c \S*tx_glue\.c",
+                   f"-I {os.path.dirname(glue_src)} -c {glue_dst}", p2_cc)
+    # The dependency file would be written next to the original object.
+    p2_cc = re.sub(r"-MD -MT \S+ -MF \S+", "", p2_cc)
+    compile_one(build, p2_cc, "P2")
+
+    p2 = shell_link.replace(obj_old, obj_new)
+    if p2 == shell_link:
+        raise SystemExit("run_fixture_tests: the firmware link does not name "
+                         f"{obj_old}; the fixture cannot substitute it")
+    p2 = retarget(p2, "shell.elf", "seam-fixtures/p2_no_fp_enforce.elf")
+    link(build, p2, "P2")
+    rc, ids, text = run_placement_gate(board, build,
+                                       "seam-fixtures/p2_no_fp_enforce.elf",
+                                       nm, objdump)
+    ok &= expect("P2 a deleted FP precondition call is caught",
+                 rc, ids, 1, {"REQUIRED"}, text)
+
     if not ok:
         print("run_fixture_tests: FAIL", file=sys.stderr)
         return 1
-    print("run_fixture_tests: OK (5 fixtures)")
+    print("run_fixture_tests: OK (6 fixtures)")
     return 0
 
 

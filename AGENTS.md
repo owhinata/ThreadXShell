@@ -129,11 +129,15 @@
    boot ROM + BOOT_OPT + factory image）。ポストリンクゲート 3 本
    （`check_image_coherence.py` = 生成 .img と ELF の突き合わせ + .rodata 内
    コマンドレジストリ / `check_placement_budget.py` = 配置・予算・ベンチバッファの
-   常駐・禁止シンボル / `check_mve_predication.py` = 述語 MVE を禁止。[!] この
-   ゲートの前提は誤り — Armv8-M ARM の PushStack/PopStack は `HaveMve()` の下で
-   VPR を退避・復元し、規則 RZWQX により MVE 命令は `CONTROL.FPCA` を立てるので
-   ハードウェアが保存する（issue #42）。fail-closed なので当面は維持）を
-   外す・弱める変更は不可。**LTO 不使用**（実測で ITCM が 3,616 B 増える。
+   常駐・禁止シンボル・**必須シンボル**）を外す・弱める変更は不可。
+   [!] **4 本目の `check_mve_predication.py` は #42 で削除した** — 前提
+   （移植が VPR を保存しない）が誤りで、実際は**ハードウェアが保存する**うえ、
+   そのスキャンは #66 のとおり 1 命令も検出できなかった。代わりに立っているのは
+   **強制**の方: `FPCCR.ASPEN` をカーネル入場前に set → 読み戻し → 駄目なら halt
+   （`port/threadx/fp_enforce.c`。継承 `LSPACT` も拒否。判断は純関数でホストテスト、
+   `check_placement_budget.py` がシンボルを要求し、`cmake/fixtures/` の P2 が
+   「呼び出しを消すと落ちる」ことを実証する）。**MVE は解禁済み**で、実機で
+   確認する手段は `mve` コマンド。**LTO 不使用**（実測で ITCM が 3,616 B 増える。
    ITCM の 63% が IR を持たないプリビルトで元が取れない）。
 
    **SRAM 窓は 2 領域**（#29）: `0x3401F000` は 2nd bootloader の実行窓で
@@ -250,7 +254,9 @@
    由来）なので採らない。**SCU の値が「正しい」ことは証明できない**（独立した時間源が
    このボードには無い）ので、結果は「検証済みの絶対値」ではなく
    「明示したクロックの下での実測値」として出す。
-   ベンチマークの翻訳単位は `-fno-tree-vectorize`（自動ベクトル化が述語 MVE を出す）。
+   **CoreMark の翻訳単位だけ `-fno-tree-vectorize`** を残す（#42）。MVE 禁止では
+   なく、公表値 3.13 CoreMark/MHz との**基準線の連続性**のため — 外すなら測り直して
+   比較記述を全部書き直すところまでが 1 セット。
    membench のバッファは NOLOAD セクションなので **測定前に明示的に全書き込み**が要る
    （startup の copy/zero を通らない。TCM の ECC 未初期化読み出しも避ける）。
    MPU / キャッシュ属性は firmware で decode せず**生レジスタをダンプ**する

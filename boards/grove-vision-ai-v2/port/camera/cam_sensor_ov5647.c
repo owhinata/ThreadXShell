@@ -66,47 +66,58 @@ static int ov5647_read_frame_length(uint16_t *lines);
  * and that comparison is not re-derivable here, because #60 moved W for an
  * unrelated reason.  It is quoted as #59's result, not re-measured.
  *
- * So `nn preview` needs T_s > W = 28,200 us for N=1, and B sits under every
- * such T_s -- one frame length serves BOTH previews, as it has since #59:
+ * [!] AND THEN THE BINDING CONDITION SWAPPED (issue #76).  Compiling the
+ * per-frame pixel loops -O3 -- which issue #42 made possible by removing the MVE
+ * ban that forced -Os on them -- took `pack` 7,851 -> 6,73x us and `prep`
+ * 6,124 -> 4,458 us, and the panel's own staging vectorised: `held` 772 -> 197
+ * us, which is B itself coming down.  Re-measured, 60-frame runs:
  *
- *     VTS    T_s measured   nn preview          margin on W
- *    1000   31,917 us       31.3 fps, 0/200 drop   11.6%
- *     960   30,580 us       32.7 fps, 0/200 drop    7.8%
- *     940   30,006 us       33.3 fps, 0/200 drop    6.0%
- *     920   29,303 us       34.1 fps, 0/200 drop    3.8%
- *     900   28,692 us       34.8 fps, 0/200 drop    1.7%
+ *     B = 25,863..25,870 us       (was 26,439..26,456)
+ *     W = 24,762 us for `nn preview`   (was 28,200)
  *
- * W came out within 14 us of 28,200 at every one of those rows, which is what
- * makes the column a measurement of the frame length rather than of the load.
- * Re-measured on the flashed image with 940 as the default: 29,986 us, 33.3 fps,
- * 0/200, `camera preview` 29,841 us and 33.5 fps on the same value.
+ * So W < B now.  The frame length no longer has to clear the producer's work --
+ * it has to clear the PANEL, and the sweep is read against B rather than W:
  *
- * WHY THE DEFAULT IS NOT THE 920 ROW, though it drops nothing at 34.1 fps.
- * Its margin is inside the band the project rule bars, and the rule is not
- * arbitrary: three measured cliffs say a thin margin degrades statistically
- * rather than cleanly (issue #38's VTS 1540, 60 us short, every other frame
- * lost; issue #71's VTS 1500, 0.67% margin, a quarter of frames slipped; #57's
- * VTS 1040, 82 us, likewise) -- and T_s itself wandered 340 us between two runs
- * at the same VTS in #59, which is more than the whole margin of the 900 row
- * and most of the 920 row's.  Hence: keep 4% or more, default 940, and
- * `camera vts 920` buys 34 fps at the bench when the scene is cooperative.
+ *     VTS    period measured   nn preview        margin on B
+ *     940    30,429 us         32.8 fps, 0 drop    17.6%
+ *     900    29,028 us         34.4 fps, 0 drop    12.2%
+ *     870    27,843 us         35.9 fps, 0 drop     7.6%
+ *     850    27,594 us         36.2 fps, 0 drop     6.7%
+ *     830    26,741 us         37.3 fps, 0 drop     3.4%
+ *
+ * WHY 850 AND NOT THE 830 ROW, though it drops nothing at 37.3 fps: 3.4% is
+ * inside the band the project rule bars, and the display bound is a CLIFF like
+ * the capture one -- issue #64 measured VTS 1540, 1.5 ms on the wrong side of
+ * it, losing every other frame while VTS 1580 passed 100/100.
+ *
+ * [!] AND THE FLASHED IMAGE PROVED THE POINT.  Re-measured with 850 as the
+ * default, 200-frame runs: `nn preview` 27,185 us and 36.7 fps, `camera
+ * preview` 27,011 us and 37.0 fps, both 0/200 dropped with 100/100 per-buffer
+ * counts.  Those periods are 400..580 us SHORTER than the same VTS measured
+ * during the sweep, so the margin on B is 5.1% and 4.4%, not the 6.7% the sweep
+ * row shows -- T_s wanders about 2% between runs, which is exactly the
+ * phenomenon the >= 4% rule exists for.  Apply the same wander to the 830 row
+ * and its 3.4% lands under 2%.  `camera vts 830` at the bench when the scene
+ * and the room are cooperative.
  *
  * [!] AND THE LINE TIME IS NOT 31.507 us.  That figure is HTS 1852 / PCLK
- * 58.8 MHz; every N=1 run gives period/VTS higher -- 31.85..31.92 across this
- * five-point sweep, 31.7..32.0 across #59's.  Predictions from the datasheet
- * figure run optimistic by the same order as the margin being reasoned about.
- * `camera vts` explores all of this without a flash.
+ * 58.8 MHz; every N=1 run gives period/VTS higher -- 32.00..32.46 across this
+ * sweep, 31.85..31.92 across #60's, 31.7..32.0 across #59's.  Predictions from
+ * the datasheet figure run optimistic by the same order as the margin being
+ * reasoned about.  `camera vts` explores all of this without a flash.
  *
  * The EXPOSURE ceiling, which the frame length also bounds, follows the value
- * down: 940 allows 29.9 ms of integration against 33.4 at the old 1060 and 49.3
- * at the 1550 before it.  A dim scene keeps `camera vts` for longer frames --
+ * down: 850 allows 27.6 ms of integration against 29.9 at 940 and 49.3 at the
+ * 1550 of two rounds ago.  A dim scene keeps `camera vts` for longer frames --
  * the trade is light against frame rate, not one preview against the other.
  *
- * [!] RE-MEASURE AFTER ANY CHANGE TO W OR B.  W is now 1,745 us above B, so the
- * NEXT reduction of W stops helping partway: at W < B = 26,455 the panel's wire
- * time becomes the bound and no frame length beats 37.8 fps.
+ * [!] RE-MEASURE AFTER ANY CHANGE TO W OR B -- and note which one binds now.
+ * Cutting W no longer buys anything: it is 1.1 ms BELOW B already, so the next
+ * frame rate comes from the panel.  B is 153,600 B over a 48 MHz SPI, of which
+ * only the ~197 us of staging is software; the wire time is the wall, and
+ * beating it means the SSPIM clock, not the CPU.
  */
-#define OV5647_DEFAULT_VTS  940u
+#define OV5647_DEFAULT_VTS  850u
 
 /* The mode outputs 480 lines; VTS below that plus the part's own blanking is
  * not a frame.  Linux's 504 for this mode is the practical floor, and it is

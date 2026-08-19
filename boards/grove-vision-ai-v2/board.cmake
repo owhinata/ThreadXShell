@@ -615,6 +615,34 @@ target_compile_options(shell_objs PRIVATE -Os)
 # changes nothing these files emit -- no MVE appears.  It is permission, not a
 # speed-up, and any claim that it made something faster has to come from
 # `camera stats`, not from here.
+#
+# --- and then the level itself became a free choice (issue #76) --------------
+#
+# These four are the translation units with a PER-FRAME pixel loop, and they are
+# built -O3 while the rest of the firmware stays -Os.  Two things make that a
+# cheap trade here and neither is obvious from the outside:
+#
+#   - the code executes from ITCM, so a bigger function costs nothing but space.
+#     There is no instruction cache to spill: TCM is tightly coupled.  The usual
+#     "-Os because -O3 thrashes the cache" reasoning does not apply.
+#   - space is not scarce.  The four cost +4,882 B together against ~69 KB of
+#     ITCM headroom, and check_placement_budget.py keeps that honest.
+#
+# [!] AND IT IS NOT ABOUT MVE.  With the ban lifted the auto-vectoriser does fire
+# here, but only on straight-line code in the COLD functions -- the frame's two
+# biggest CPU stages, cam_bgr_planar_to_rgb565_wb() (pack) and nn_preproc_fill()
+# (prep), emit no vector register at any level.  #58 made pack a LUT gather and
+# #60 made prep a recurrence, and neither shape auto-vectorises.  What this
+# option buys them is ordinary scalar quality: unrolling and scheduling.  The
+# numbers that justify it are in issue #76 and the board README, measured on the
+# board -- if they ever stop justifying it, take it out.
+set_source_files_properties(
+    "${BOARD_DIR}/port/camera/cam_convert.c"
+    "${BOARD_DIR}/port/npu/models/blazeface.c"
+    "${BOARD_DIR}/port/npu/nn_preproc.c"
+    "${BOARD_DIR}/port/lcd/lcd_st7789.c"
+    TARGET_DIRECTORY shell_objs
+    PROPERTIES COMPILE_OPTIONS "-O3")
 target_link_options(shell PRIVATE
     "-T${LDSCRIPT_APP}" -Wl,-Map=shell.map,--cref)
 set_target_properties(shell PROPERTIES LINK_DEPENDS "${LDSCRIPT_APP}")

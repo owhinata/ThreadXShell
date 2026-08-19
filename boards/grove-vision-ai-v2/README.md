@@ -1748,11 +1748,52 @@ statement of the two bounds: `nn preview` spends 19,862 us in `sink` and waits
 1,772; `camera preview` spends 951 us in `sink` and waits 20,577, its period
 held up by B alone.
 
-The default is **VTS 940**, NOT the faster 920 row (34.1 fps, also 0/200):
-920's margin is 3.8% and T_s itself wandered 340 us between two runs at one VTS
-in #59 -- inside the >= 4% rule issues #38, #57 and #71 paid for.  `camera vts
-920` buys 34 fps at the bench.  The table in cam_sensor_ov5647.c is the
-authority.
+### [!] The binding condition swapped, and the default moved to 850 (#76)
+
+Everything above reads the frame length against `W`, the producer's work.  That
+stopped being the right question when the pixel loops were compiled `-O3` --
+which issue #42 made possible by deleting the MVE ban that had forced `-Os` on
+them:
+
+| | before | after | |
+|---|---:|---:|---|
+| `pack` | 7,851 us | **6,73x** | scalar quality; the loop does not vectorise |
+| `prep` | 6,124 us | **4,458** | same |
+| `decode` | 108 us | **74** | this one DID vectorise |
+| `held` (staging) | 772 us | **197** | so did this -- and it is inside B |
+| **W** (`nn preview`) | 28,200 us | **24,762** | |
+| **B** (panel) | 26,439 us | **25,869** | |
+
+**W is now BELOW B.**  So the frame length no longer has to clear the producer;
+it has to clear the panel, and the sweep is read against B:
+
+| VTS | period | `nn preview` | margin on B |
+|---:|---:|---:|---:|
+| 940 | 30,429 us | 32.8 fps, 0 drop | 17.6% |
+| 900 | 29,028 us | 34.4 fps, 0 drop | 12.2% |
+| 870 | 27,843 us | 35.9 fps, 0 drop | 7.6% |
+| **850** | **27,594 us** | **36.2 fps, 0 drop** | **6.7%** |
+| 830 | 26,741 us | 37.3 fps, 0 drop | 3.4% |
+
+The default is **VTS 850**, not the faster 830 row: 3.4% is inside the band the
+rule bars, and **the display bound is a cliff too** -- issue #64 measured VTS
+1540, 1.5 ms on the wrong side of it, losing every other frame while 1580 passed
+100/100.  `camera vts 830` buys 37 fps at the bench.  The table in
+cam_sensor_ov5647.c is the authority.
+
+**Measured on the flashed image** (200-frame runs, 850 as the default):
+`nn preview` 27,185 us and **36.7 fps**, `camera preview` 27,011 us and
+**37.0 fps**, both **0 of 200 dropped**, per-buffer counts 100/100, B 25,864..
+25,868 us with 195..197 us of it software.
+
+[!] Those periods are 400..580 us SHORTER than the same VTS measured during the
+sweep above, which puts the real margin at **5.1% and 4.4%**, not 6.7%.  T_s
+wanders about 2% between runs -- the very thing the >= 4% rule is for -- and the
+same wander applied to the 830 row would take it under 2%.
+
+**And cutting `W` further buys nothing now.**  It is 1.1 ms below B already.
+B is 153,600 B over a 48 MHz SPI of which only ~197 us is software, so the next
+frame rate comes from the SSPIM clock, not from the CPU.
 
 [!] **The default moved 1060 -> 940 because issue #60 cut W**, not because the
 rule changed: W fell 32,381 -> 28,200 us when the preprocessing stopped doing a

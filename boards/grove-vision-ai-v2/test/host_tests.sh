@@ -222,6 +222,20 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_cam_stop"
 "$out/test_cam_stop"
 
+# issue #68 -- the EDM observer's bookkeeping (port/camera/cam_edm.c).  Nothing
+# a console can type makes EDM fire: the event has been seen twice, both times
+# inside a hang, and it cannot be asked for again.  So the accumulation and the
+# "first, then every power of two" policy would otherwise be code added to
+# explain a failure that has never once run -- the shape of gate this repository
+# has already been bitten by (issues #66, #42).  The case that carries the point
+# is saturation: a counter that wrapped would restart the geometric trail and
+# flood the one log ring that survives the recovery reset.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/camera" \
+    "$here/test_cam_edm.c" "$board/port/camera/cam_edm.c" \
+    $LDFLAGS -o "$out/test_cam_edm"
+"$out/test_cam_edm"
+
 # issue #35 -- the CSI FIFO fill computation (port/camera/cam_mipi_calc.c).  The
 # firmware rewrote the SDK's double + ceil() formula in integer arithmetic
 # because this link has no libm; this checks the rewrite against the ORIGINAL

@@ -39,6 +39,7 @@
 #include "cam_auto.h"
 #include "cam_convert.h"
 #include "cam_dp.h"
+#include "cam_edm.h"
 #include "cam_sensor.h"
 #include "cam_state.h"
 #include "cam_wdma3.h"
@@ -553,14 +554,77 @@ static void cam_dp_callback(SENSORDPLIB_STATUS_E status)
 
 	default:
 		/* Every abnormal WDMA status, every 1-bit-parser error
-		 * (-100..-108), every EDM timing error and watchdog timeout --
-		 * and anything unrecognised. */
+		 * (-100..-108), every EDM WATCHDOG timeout -- and anything
+		 * unrecognised.
+		 *
+		 * [!] WATCHDOG, and only watchdog.  The vendor's own EDM
+		 * callback is what turns WDT1/2/3 into the three negative
+		 * statuses that land here; EDM TIMING violations do NOT arrive
+		 * here and never have, because nothing in the SDK registers
+		 * that callback and the datapath configuration masks every
+		 * timing bit besides.  Issue #68 gives that branch an observer
+		 * -- see cam_edm.h.  (An earlier version of this comment
+		 * claimed both, which is how the gap survived being read.) */
 		if (cam_err == 0)
 			cam_err = (int32_t)status;
 		break;
 	}
 
 	(void)tx_semaphore_put(&cam_frame_sem);
+}
+
+/* ---- the EDM observer (INTERRUPT CONTEXT) -------------------------------- */
+
+/*
+ * The other branch of the same vendor ISR (issue #68).  cam_edm.h has the whole
+ * story; what matters here is that this branch was reaching nobody, and that the
+ * one line it used to leave is the last thing in the ring before both observed
+ * `nn preview` hangs.
+ *
+ * PURELY OBSERVATIONAL, on purpose.  No cam_err, no stop, no semaphore.  Nothing
+ * has shown this event to be fatal -- it may well be an artefact -- and deciding
+ * that it is would pre-empt the measurement.  It does not clear anything either:
+ * the vendor acknowledges by writing back the status it read, so a zero status
+ * clears nothing, and a full clear here would be a fix resting on a mechanism
+ * that has not been established yet.
+ *
+ * [!] AND IT IS NOT TRANSPARENT.  Installing this removes the vendor's xprintf
+ * from the exact path that precedes the hangs and puts different work there.  If
+ * the hang stops happening after this change, that is not evidence of a fix --
+ * only a recurrence, with its record, advances the issue.
+ */
+static struct cam_edm_state cam_edm;   /* zero == nothing seen (cam_edm.h) */
+
+static void cam_edm_isr(uint32_t status)
+{
+	struct cam_edm_event ev;
+
+	ev.status     = status;
+	ev.tick       = tx_glue_epk_timer_ticks();
+	ev.generation = cam_generation;
+	cam_dp_edm_read(&ev.mask, ev.wdt);
+
+	if (!cam_edm_note(&cam_edm, &ev))
+		return;
+
+	/*
+	 * [!] SELF-CONTAINED, because the counters do not survive what recovers
+	 * the board.  They are ordinary static storage and the reset wipes them;
+	 * only this ring is .noinit.  Reading `camera stats` afterwards would
+	 * show zeroes, so every number has to be in the record itself.
+	 *
+	 * And TERSE, because it has to fit LOG_MSG_MAX: an all-ones rendering of
+	 * these eight fields runs to 98 characters against a limit of 104, and an
+	 * overlong record is truncated from the END -- so the fields that would
+	 * go first are the ones printed last, the tick and the generation.  Six
+	 * characters of headroom is why nothing is lost today; adding a field
+	 * without re-counting is how that would stop being true.
+	 */
+	LOG_WRN("edm #%lu s %08lx m %08lx w %lu/%lu/%lu t %lu g %lu",
+	        (unsigned long)cam_edm.events, (unsigned long)ev.status,
+	        (unsigned long)ev.mask, (unsigned long)ev.wdt[0],
+	        (unsigned long)ev.wdt[1], (unsigned long)ev.wdt[2],
+	        (unsigned long)ev.tick, (unsigned long)ev.generation);
 }
 
 /* ---- pipeline plumbing --------------------------------------------------- */
@@ -732,7 +796,30 @@ static int cam_step_dp(void)
 	                    : cam_dp_config();
 }
 
-static int cam_step_capture(void) { return cam_dp_capture_start(); }
+/*
+ * Capture start, and then the EDM observer (issue #68) -- IN THAT ORDER, INSIDE
+ * THIS ROUND, and nowhere else.
+ *
+ * The start is what reaches the vendor's watchdog configuration, which is what
+ * registers the vendor's EDM callback and ENABLES IRQ 143.  Installing straight
+ * after it makes this port the last writer of that vector, and the round's
+ * wrap-then-reassert step (see cam_wrapped_step) adopts the line either way: as
+ * a fresh one if this round enabled it, or through the re-assert path if the
+ * datapath round had already.  Outside a round this would be the "enabled but
+ * unwrapped" state AGENTS.md bars -- see cam_dp_edm_observe().
+ *
+ * Only on success.  A failed start goes straight to the teardown, and installing
+ * an observer on the way out could enable a line the vendor never did -- which
+ * would spend an accounting slot to watch hardware that is being shut down.
+ */
+static int cam_step_capture(void)
+{
+	int rc = cam_dp_capture_start();
+
+	if (rc == 0)
+		cam_dp_edm_observe(cam_edm_isr);
+	return rc;
+}
 
 /*
  * Bring the port up.  A TRANSACTION: every failure path leaves the hardware and
@@ -955,6 +1042,22 @@ static void cam_quiesce(void)
 
 	/* 2. hand the vectors back while they are still ours to hand back */
 	cam_unwrap_to(cam_wrapsets_core);
+
+	/*
+	 * 2b. and take the EDM observer out BEFORE the vendor stop, not after
+	 * (issue #68).  That stop drops the vendor's own EDM callback, and the
+	 * vendor only disables IRQ 143 when BOTH callbacks are NULL -- so an
+	 * observer left installed here would quietly stop the stop from
+	 * disabling the line.  The line is already masked by step 1, so this is
+	 * about not changing vendor behaviour rather than about safety, which is
+	 * exactly why it would never have been noticed.
+	 *
+	 * Every teardown this port has arrives here -- normal stop, producer
+	 * error, timeout restart, start failure, retry exhaustion -- so this one
+	 * placement covers them all.  The bring-up failure path needs nothing:
+	 * it runs before the capture round, so nothing is installed yet.
+	 */
+	cam_dp_edm_observe(NULL);
 
 	/* 3. now the vendor may do as it likes with them */
 	cam_dp_full_stop();
@@ -2096,6 +2199,12 @@ void camera_stream_stats(struct camera_stats *out)
 	 * business running with interrupts off. */
 	lock_contended = cam_lock_contended;
 	lock_wait_max  = cam_lock_wait_max;
+	/* And the EDM tally in the same breath (issue #68).  Each word is read
+	 * atomically on its own, but {count, first, last, tick, generation} has
+	 * to describe ONE instant: an event landing between two of these reads
+	 * would produce a tuple that never existed, which is the one thing a
+	 * five-field diagnostic must not do. */
+	cam_edm_snapshot(&cam_edm, &out->edm);
 	TX_RESTORE
 
 	out->lock_contended   = lock_contended;

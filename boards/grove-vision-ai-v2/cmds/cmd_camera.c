@@ -659,6 +659,21 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 	          (unsigned long)st.lock_contended,
 	          (unsigned long)st.lock_wait_max_ms);
 	/*
+	 * The EDM observer (issue #68).  Printed only when non-zero: the whole
+	 * point is that this has never been seen on a healthy run, so a standing
+	 * "edm: 0" line would train the eye to skip past the one thing worth
+	 * noticing.  Cumulative since boot, unlike the per-stream profile below.
+	 *
+	 * [!] After a hang this line is GONE -- the reset that recovers the board
+	 * wipes it.  `dmesg` is the readout that survives; see cam_edm.h.
+	 */
+	if (st.edm.events != 0u)
+		cli_print(sh, "edm      : %lu event(s), first %08lx last %08lx "
+		              "(see dmesg)\r\n",
+		          (unsigned long)st.edm.events,
+		          (unsigned long)st.edm.first_status,
+		          (unsigned long)st.edm.last_status);
+	/*
 	 * The double-buffer evidence (issue #59).  A flip that silently became
 	 * a no-op -- every arm landing on buffer 0 -- produces a working
 	 * picture at the OLD frame rate, which nothing else on this screen can

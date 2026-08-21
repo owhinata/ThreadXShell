@@ -1309,6 +1309,89 @@ rebuilding: dropping the undo log instead would leave those lines enabled and
 registered, absent from the next ISER delta (they are no longer "fresh"), and
 impossible to unwind ever again.
 
+### [!] EDM: irq 143's other branch reached nobody (issue #68)
+
+The same line as above, and the reason it is worth its own section.  EDM is the
+Error Detection Module, a datapath monitor.  Its ISR is in the prebuilt
+`libdriver.a` and dispatches on the three WDMA watchdog bits:
+
+| status | branch | who is registered |
+|---|---|---|
+| a watchdog bit set | watchdog callback | **the vendor's**, which forwards WDT1/2/3 into this port's datapath callback as -75/-76/-77 |
+| no watchdog bit | timing callback | **nobody** -- one line of vendor `xprintf`, then gone |
+
+Nothing in the SDK, prebuilt or source, registers the timing callback.  So a
+`camera`/`nn` datapath error you can see in `camera stats` is a watchdog; the
+other branch was invisible.
+
+**And the other branch should be unreachable.**  The datapath configuration this
+port already performs masks every timing bit (leaving only the three watchdog
+bits able to raise the interrupt), so nothing should ever take it.  The event
+actually observed did, carrying a status of **zero** -- an interrupt taken while
+the status register read nothing.  Two readings fit:
+
+- a stale NVIC pending bit delivered after its source was gone; or
+- a watchdog whose status was cleared between the NVIC latching the request and
+  the ISR's read.  The per-frame retrigger rewrites the watchdog configuration,
+  so there is a writer in the right place -- and this reading means a
+  five-second datapath stall was reported and then silently discarded.
+
+[!] **The record does not tell those two apart, and it is not meant to.**  Both
+present the same way -- status zero, the same mask, watchdog counters freshly
+reloaded by the retrigger -- and nothing here observes the age of a pending bit
+or the phase of the retrigger.  What the record settles is the question that has
+no answer today at all: **whether the event happens once or repeatedly**, at what
+rate, and in which stream.  That is the fork this cannot currently resolve; the
+two readings above are what the answer would then bear on.
+
+It matters because that vendor line is the **last record in the ring before both
+observed `nn preview` hangs**, and appears in none of the six healthy bring-ups
+recorded beside them.
+
+`cam_edm_isr()` in `port/camera/camera.c` is now that callback;
+`port/camera/cam_edm.c` holds its bookkeeping, pure so that
+`test/test_cam_edm.c` can drive it.  Each **selected** event (see the policy
+below -- most events in a storm write nothing) produces one **self-contained**
+record: the counters are ordinary static storage and the reset that recovers the
+board wipes them, so the record has to carry everything itself.
+
+```
+WRN camera: edm #1 s 00000000 m 0003ffff w 0/0/0 t 41231884 g 3
+             |   |          |         |      |          |    stream generation
+             |   |          |         |      |          profile-timer tick
+             |   |          |         |      the three watchdog counters
+             |   |          |         EDM interrupt mask (1 == masked)
+             |   |          the status the vendor ISR read
+             |   cumulative count since boot
+```
+
+Logged on the **first event and then every power of two**.  A storm is exactly
+the case where no thread runs again to be asked, so the `.noinit` ring is the
+only channel left -- and a record per event would push the boot history that
+explains the event out of it.  The count saturates rather than wrapping, or the
+trail would restart.  `camera stats` grows an `edm :` line when the count is
+non-zero, but **after a hang that line is gone**: read `dmesg` first, before
+anything else.
+
+[!] **This observer is not transparent, and a non-recurrence proves nothing.**
+Installing the callback removes the vendor's `xprintf` from the exact ISR path
+that precedes both hangs and puts different work there.  If the hang stops
+happening from here on, that is as consistent with having perturbed it as with
+anything else.  Only a recurrence, with its record, advances the issue.
+
+Registering the **watchdog** callback instead is not an option: the vendor's is
+the only thing forwarding watchdog timeouts into `cam_dp_callback()`, and
+replacing it would trade a working error path for a log line.
+
+The ordering is the fiddly part and both ends are enforced by where the calls
+sit.  The vendor registration entry point disables irq 143, re-points its vector
+at its own ISR and re-enables it -- so **installing happens inside a
+measure-then-wrap round** (immediately after the capture start, which is what
+enables the line), and the round's wrap-then-reassert step adopts it.  Removing
+happens **inside the quiesce, before the vendor stop**, because that stop drops
+the vendor's watchdog callback and only disables irq 143 when *both* callbacks
+are NULL.  No new wrap slot is consumed: irq 143 was already being wrapped.
+
 ### Not yet answered
 
 - ~~Frame rate~~ -- **measured, see "Where the preview's time goes" below**

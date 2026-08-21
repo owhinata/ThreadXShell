@@ -28,6 +28,7 @@
 
 #include "cam_convert.h"
 #include "cam_dp.h"
+#include "cam_edm.h"
 #include "cam_sensor.h"
 #include "frame_pipeline.h"
 
@@ -224,6 +225,20 @@ struct camera_stats {
 	 */
 	uint32_t lock_contended;
 	uint32_t lock_wait_max_ms;
+
+	/*
+	 * The EDM observer's tally (issue #68).  CUMULATIVE SINCE BOOT, not
+	 * since the last stream: the event is rare enough that two may be a
+	 * session apart, and clearing it per stream would discard the only
+	 * evidence there was.  Zero is the expected answer.
+	 *
+	 * [!] This is the LIVE readout, and it is not the one that matters after
+	 * a hang -- the reset that recovers the board wipes it.  Selected events
+	 * (the first, then every power of two) also write a self-contained record
+	 * to the log ring, which is .noinit and survives; `dmesg` is what to read
+	 * afterwards.  See cam_edm.h.
+	 */
+	struct cam_edm_state edm;
 
 	/*
 	 * Per-stage profile of the producer loop, SINCE THE LAST STREAM START

@@ -122,6 +122,21 @@ static int cmd_camera_probe(struct cli_instance *sh, int argc, char **argv)
 	rc = camera_probe(&info);
 	if (rc != CAM_OK) {
 		cam_report(sh, "probe", rc);
+		/*
+		 * "camera busy" on its own reads like something to retry, and
+		 * retrying is the one thing that will not help (issue #74).
+		 *
+		 * Deliberately naming BOTH causes: this code comes back either
+		 * from the streaming refusal or from cam_api_enter() failing to
+		 * take the API mutex, and the two are indistinguishable here.
+		 * A message that only mentioned the stream would tell someone
+		 * running `camera capture &` to stop a stream that is not there.
+		 */
+		if (rc == CAM_ERR_BUSY)
+			cli_error(sh, "        a stream is running (the producer "
+			              "owns the sensor's I2C bus), or another\r\n"
+			              "        camera command holds the API; "
+			              "`camera stats` says which\r\n");
 		return 1;
 	}
 

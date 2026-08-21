@@ -100,6 +100,33 @@ int cam_api_may_acquire(int objects_ok, enum cam_state st);
 enum cam_stop_action cam_stop_decide(enum cam_stop_acquire acq,
                                      enum cam_state st);
 
+/** Why a sink's owner may not release what the sink reads (issue #72). */
+enum cam_drain_verdict {
+	CAM_DRAIN_DONE = 0, /**< thread idle, holding nothing: release       */
+	CAM_DRAIN_THREAD,   /**< the thread never came back                  */
+	CAM_DRAIN_PINNED,   /**< it came back still holding a pipeline slot  */
+};
+
+/**
+ * @brief  May a sink's owner tear down what the sink points at?
+ *
+ * @param drain_rc  0 if the owner's own drain reported the thread idle
+ * @param pins      the pipeline's count for this sink, taken AFTER that drain
+ *
+ * Two failures, not one, and they need different sentences: a thread that never
+ * returned is somewhere unknown, while a thread that returned holding a slot has
+ * a bookkeeping bug and the ring is one slot short.  Collapsing them into "drain
+ * failed" is what left the second invisible until the NEXT stream ran out of
+ * slots (issue #72).
+ *
+ * [!] THE COUNT DECIDES, NOT THE CLOCK.  @p drain_rc must already reflect a
+ * final look at the state -- a drain that gives up the moment its deadline
+ * passes, without re-reading, rejects a hand-off that completed at that same
+ * instant.  This function cannot see that mistake; cam_panel_drain() avoids it
+ * by testing the counters before the deadline on every pass.
+ */
+enum cam_drain_verdict cam_drain_decide(int drain_rc, int pins);
+
 #ifdef __cplusplus
 }
 #endif

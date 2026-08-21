@@ -693,6 +693,13 @@ int camera_unsubscribe(struct frame_sink *sink)
 	return CAM_OK;
 }
 
+int camera_sink_pins(const struct frame_sink *sink)
+{
+	if (sink == NULL || !cam_objects_ok)
+		return 0;
+	return frame_pipeline_sink_pins(&cam_pipe, sink);
+}
+
 void camera_frame_put(struct frame_sink *sink, const struct frame_desc *f)
 {
 	frame_pipeline_put(&cam_pipe, sink, f);

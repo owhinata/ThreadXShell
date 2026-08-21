@@ -209,14 +209,62 @@ void frame_pipeline_set_format(struct frame_pipeline *p, enum frame_format fmt,
 int frame_pipeline_attach(struct frame_pipeline *p, struct frame_sink *s);
 
 /**
- * Unlink a sink so no further consume() is issued to it, and report how many
- * pins it still holds in flight (including a LATEST pending pin).  The core does
- * NOT wait: before freeing @p s / its ctx, the caller (which owns the sink's
- * thread and queue) must drain that thread -- let the running consume() finish
- * and every pin be put() -- until the in-flight count reaches zero.  Returns the
- * in-flight pin count at detach time.
+ * Unlink a sink so that no LATER publish selects it, and report how many pins it
+ * still holds in flight.  The core does NOT wait: before freeing @p s / its ctx,
+ * the caller (which owns the sink's thread and queue) must drain that thread --
+ * let the running consume() finish and every pin be put() -- until the in-flight
+ * count reaches zero.  Returns the in-flight pin count at detach time.
+ *
+ * [!] THE COUNT EXCLUDES AN UNDELIVERED LATEST PENDING PIN, which this drops on
+ * the way out: nothing will ever deliver that frame, so the sink can never put()
+ * it and a caller draining towards zero would wait forever.  (This header said
+ * "including" for as long as it has existed, and the code has never done that.)
+ *
+ * [!] "No later PUBLISH", not "no further consume()".  TWO windows already
+ * scheduled a call before the unlink and still make it:
+ *   - publish() copies the sinks it will deliver to into a local array, drops
+ *     the lock, and only then calls consume() on each -- any policy, not just
+ *     LATEST;
+ *   - put() takes a LATEST sink's pending frame into a local, drops the lock,
+ *     and calls consume() with it.
+ * Both hold their pin across the call, so the count below never reports the sink
+ * idle while one is happening; but a caller reading this as "consume() can no
+ * longer run" would be wrong.
+ *
+ * [!] AND THE RETURNED NUMBER IS NOT THE ONE THAT MEANS ANYTHING.  A non-zero
+ * count here is NORMAL -- the sink's thread may legitimately be mid-delivery.
+ * The count that says whether the contract was honoured is the one taken AFTER
+ * the caller has drained, which is what frame_pipeline_sink_pins() is for.
+ * Every owner that ignored this built a private counter instead (issue #72).
  */
 int frame_pipeline_detach(struct frame_pipeline *p, struct frame_sink *s);
+
+/**
+ * How many pins sink @p s holds right now.  Attached or detached alike: @p s is
+ * the caller's storage and its bookkeeping survives the unlink.
+ *
+ * THIS IS THE DRAIN CHECK (issue #72).  Call it after draining the sink's
+ * thread; a non-zero answer means the drain did not finish and the sink's ctx --
+ * whatever consume() reads -- must NOT be torn down or reused yet.
+ *
+ * [!] FOR A DETACHED SINK, ZERO IS A DECISION AND NOT MERELY A SNAPSHOT, which
+ * is what makes an after-the-drain check worth taking.  The reason is not the
+ * obvious one: it is NOT that nothing can add a pin, because
+ * frame_pipeline_get() has no attachment test and an in-flight consumer may
+ * legitimately call it.  It is that such a consumer still owns the delivery pin
+ * it was called with, and can only reach get() before releasing it -- so the
+ * count cannot fall to zero and then rise again.  Zero means the owner is out.
+ *
+ * A non-zero answer IS only a snapshot: the sink may be about to put().  That
+ * asymmetry is the right way round for a check that must not pass early.
+ *
+ * There is deliberately no busy accessor to go with this.  publish() sets a
+ * sink's busy state and takes its pin inside one locked section, so a busy sink
+ * always holds at least one pin; a second way to ask would add nothing except
+ * the chance of reading the two at different instants.
+ */
+int frame_pipeline_sink_pins(struct frame_pipeline *p,
+                             const struct frame_sink *s);
 
 /**
  * How many sinks are attached right now.

@@ -198,6 +198,45 @@ int cam_dp_csirx_clear_errors(void);
 /** Sample the latched receiver error state.  Never clears. */
 void cam_dp_csirx_errors(struct cam_csirx_errors *out);
 
+/* ---- the EDM seam (issue #68) -------------------------------------------- */
+
+/** What the vendor's EDM ISR hands its timing callback: the status it read. */
+typedef void (*cam_dp_edm_cb)(uint32_t status);
+
+/**
+ * @brief  Install (or remove, with NULL) this port's EDM timing callback.
+ *
+ * The branch of the vendor ISR that nobody registers -- see cam_edm.h.  Here
+ * rather than in camera.c because this file is the one that already speaks the
+ * vendor datapath, the same reason cam_wdma3_hw_retrigger() lives here.
+ *
+ * [!] THIS MOVES AN ACCOUNTED INTERRUPT.  The vendor entry point disables
+ * IRQ 143, re-points its vector at its own ISR and re-enables it.  So installing
+ * must happen INSIDE a measure-then-wrap round -- the round's wrap-then-reassert
+ * step then adopts the line, exactly as it already does for the vendor's own
+ * per-frame re-registration.  Calling this outside a round produces the
+ * "enabled but unwrapped" state AGENTS.md bars.
+ *
+ * [!] AND REMOVING MUST PRECEDE THE VENDOR STOP.  cam_dp_full_stop() drops the
+ * vendor's watchdog callback, and the vendor only disables IRQ 143 when BOTH
+ * callbacks are NULL.  An observer left installed would silently stop the vendor
+ * stop from disabling the line.
+ *
+ * Registering the WATCHDOG callback instead is not an option: the vendor's is
+ * the only thing forwarding watchdog timeouts into cam_dp_callback(), and
+ * replacing it would trade a working error path for a log line.
+ */
+void cam_dp_edm_observe(cam_dp_edm_cb cb);
+
+/**
+ * @brief  Read the EDM state that a status word of zero cannot give you.
+ *
+ * The mask (1 == masked) and the three WDMA watchdog counters.  Plain register
+ * loads, safe from the callback.  Called with the status already in hand, so
+ * that "the status said nothing" and "nothing was going on" stay separable.
+ */
+void cam_dp_edm_read(uint32_t *mask, uint32_t wdt[3]);
+
 /** @return the chip version word (SCU), or 0 if it could not be read. */
 uint32_t cam_dp_chip_version(void);
 

@@ -28,6 +28,7 @@
 #include <stdint.h>
 
 #include "hx_drv_csirx.h"
+#include "hx_drv_edm.h"
 #include "hx_drv_hw5x5.h"
 #include "hx_drv_inp.h"
 #include "hx_drv_scu.h"
@@ -494,6 +495,36 @@ void cam_dp_full_stop(void)
 	sensordplib_stop_swreset_WoSensorCtrl();
 	(void)cam_sensor_stream_off();
 	sensordplib_csirx_disable();
+}
+
+/* ---- the EDM seam (issue #68) -------------------------------------------- */
+
+void cam_dp_edm_observe(cam_dp_edm_cb cb)
+{
+	/*
+	 * The vendor prototype takes the same shape (a uint32_t event), so this
+	 * is a pass-through and not an adapter.  Passing NULL clears the vendor's
+	 * pointer; the ordering rules that make either direction safe are in
+	 * cam_dp.h and enforced by where camera.c calls this.
+	 */
+	hx_drv_edm_register_timing_cb((EDM_ISREvent_t)cb);
+}
+
+void cam_dp_edm_read(uint32_t *mask, uint32_t wdt[3])
+{
+	uint32_t i;
+
+	if (mask != NULL) {
+		*mask = 0u;
+		hx_drv_edm_get_mask(mask);
+	}
+	if (wdt == NULL)
+		return;
+	/* The vendor numbers its watchdogs from one; the array is from zero. */
+	for (i = 0u; i < 3u; i++) {
+		wdt[i] = 0u;
+		hx_drv_edm_get_wdt_count((uint8_t)(i + 1u), &wdt[i]);
+	}
 }
 
 /* ---- chip revision ------------------------------------------------------- */

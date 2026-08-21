@@ -211,6 +211,19 @@ struct camera_stream_stats {
 	uint32_t band_late;    /**< band mode: bands the consumer did not reach   */
 	uint32_t band_torn;    /**< band mode: bands the DMA caught up with       */
 	uint32_t band_desync;  /**< band mode: frame ends off a band boundary     */
+	/*
+	 * Detaches that found the stats sink still holding a pipeline slot
+	 * (issue #72).  Zero is the only correct value: this sink puts inside
+	 * consume(), and none of its three detach sites can have a publish in
+	 * flight -- the teardown is entered by the producer itself, and the two
+	 * start failures happen before capture is possible.  So a slot can never
+	 * legitimately be held there.
+	 *
+	 * Cumulative since boot and NOT mode-specific: it is filled in before the
+	 * band/frame split, because a counter hidden by whichever stream ran last
+	 * is a diagnostic that disappears exactly when it is wanted.
+	 */
+	uint32_t sink_undrained;
 };
 
 /**

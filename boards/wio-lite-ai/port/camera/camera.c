@@ -319,6 +319,8 @@ static UCHAR        cam_producer_stack[CAM_PRODUCER_STACK] DTCM_BSS
 
 static struct frame_pipeline cam_pipe;
 static struct frame_sink     cam_stat_sink;
+/* Detaches that found the stats sink still pinned (issue #72).  Cumulative. */
+static uint32_t              cam_sink_undrained;
 
 /* The two slots the DMA's M0AR/M1AR currently point at. */
 static struct frame_desc *cam_m0;
@@ -1370,6 +1372,46 @@ static int cam_stat_consume(void *ctx, const struct frame_desc *f)
 	return 0;
 }
 
+/*
+ * Detach the stats sink and check the core's own in-flight count (issue #72).
+ *
+ * svc/frame_pipeline requires a sink's owner to drain until that count reaches
+ * zero before anything the sink reads is freed or reused.  This port has nothing
+ * to drain: cam_stat_consume() puts the slot back before it returns.
+ *
+ * And no publish can be in flight at any of the three callers -- but for two
+ * DIFFERENT reasons, which is worth stating because the callers are not even on
+ * the same thread:
+ *   - the teardown is entered from cam_stream_service(), i.e. by the producer
+ *     itself, which returns immediately afterwards.  Nothing else publishes.
+ *   - the two start failures run on whatever thread called
+ *     camera_stream_start() -- normally a console thread, not the producer --
+ *     and get there BEFORE capture is possible: one after an acquire returned
+ *     NULL, one after the DMA refused to start.  No frame has been taken.
+ *
+ * So the count here is ALWAYS zero, and anything else is a put that did not
+ * happen.
+ *
+ * [!] AND THE DAMAGE ON THIS BOARD IS BOUNDED, unlike the other two.  A stream
+ * start re-runs frame_pipeline_init(), which rebuilds every slot with refcount
+ * zero, and the attach that follows clears the sink's own bookkeeping.  So a
+ * leaked pin here cannot accumulate into the "next stream finds no free slot"
+ * failure #72 is about; it heals at the next start.  This is a bug detector, not
+ * protection -- which is why it reports and counts rather than refusing.
+ */
+static void cam_stat_sink_detach(const char *where)
+{
+	int pins;
+
+	(void)frame_pipeline_detach(&cam_pipe, &cam_stat_sink);
+	pins = frame_pipeline_sink_pins(&cam_pipe, &cam_stat_sink);
+	if (pins != 0) {
+		cam_sink_undrained++;
+		LOG_ERR("stats sink still holds %d slot(s) at %s: a consume() "
+		        "returned without putting", pins, where);
+	}
+}
+
 /* DMA transfer-complete, ISR context: one ring slot -- or, in band mode, one
    band -- just filled.  Wakes the producer and nothing else: it touches no ring,
    no pipeline and no CT.  The band counter is the single exception, and it is
@@ -1481,7 +1523,7 @@ static void cam_stream_teardown(void)
 		(void)tx_mutex_put(&cam_lock);
 	}
 
-	frame_pipeline_detach(&cam_pipe, &cam_stat_sink);
+	cam_stat_sink_detach("stream teardown");
 	cam_m0 = NULL;
 	cam_m1 = NULL;
 
@@ -1721,7 +1763,7 @@ static int cam_stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 	cam_m0 = frame_pipeline_acquire(&cam_pipe);
 	cam_m1 = frame_pipeline_acquire(&cam_pipe);
 	if (cam_m0 == NULL || cam_m1 == NULL) {
-		frame_pipeline_detach(&cam_pipe, &cam_stat_sink);
+		cam_stat_sink_detach("ring slots unavailable");
 		return CAM_ERR_STATE;
 	}
 
@@ -1768,7 +1810,7 @@ static int cam_stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 		cam_stream_active = 0;
 		HAL_NVIC_DisableIRQ(DMA2_Stream1_IRQn);
 		HAL_NVIC_DisableIRQ(DCMI_IRQn);
-		frame_pipeline_detach(&cam_pipe, &cam_stat_sink);
+		cam_stat_sink_detach("DMA start failed");
 		LOG_ERR("stream DMA start failed");
 		return CAM_ERR_HAL;
 	}
@@ -2110,6 +2152,11 @@ int camera_stream_stats(struct camera_stream_stats *out)
 	                                    : cam_elapsed_ms;
 	out->dcmi_ovr   = cam_dcmi_ovr;
 	out->dma_fe     = cam_stream_fe;
+	/* BEFORE the mode branch, which returns early: this one is board-global
+	   and cumulative since boot, so hiding it whenever the last stream happened
+	   to be a band run would lose the diagnostic exactly when someone came
+	   looking for it (issue #72). */
+	out->sink_undrained = cam_sink_undrained;
 	if (cam_last_mode == CAM_STREAM_BAND) {
 		/* Nothing from the pipeline here -- the ring is not merely empty, it is
 		   not part of this path, and reporting its zeroes beside real counters

@@ -828,6 +828,14 @@ static int cmd_stream_stats(struct cli_instance *sh, int argc, char **argv)
 		cli_print(sh, "dma fe/s:  %lu.%lu\r\n", (unsigned long)(e10 / 10u),
 		          (unsigned long)(e10 % 10u));
 	}
+	/* Board-global and cumulative, so it goes BEFORE the mode split below --
+	   which returns early for band mode and would otherwise hide it.  Printed
+	   only when non-zero (issue #72): zero is the only correct value and the
+	   only reason to look, so a standing "undrained: 0" would train the eye to
+	   skip past the one line worth noticing. */
+	if (st.sink_undrained != 0u)
+		cli_print(sh, "undrained: %lu detach(es) with a slot still held\r\n",
+		          (unsigned long)st.sink_undrained);
 	/* Only the counters this mode actually keeps.  The others are not zero, they
 	   are absent -- there is no ring in band mode and no band grid in frame mode --
 	   and printing an absent counter as 0 reads as "nothing went wrong". */

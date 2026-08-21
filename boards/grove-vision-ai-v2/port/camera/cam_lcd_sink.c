@@ -42,6 +42,7 @@
 #include "cam_lcd_sink.h"
 #include "camera.h"
 #include "cam_dp.h"
+#include "cam_state.h"
 #include "cli_config.h"
 #include "frame.h"
 #include "frame_pipeline.h"
@@ -810,9 +811,15 @@ int cam_lcd_sink_detach(void)
 	/*
 	 * [!] UNLINK FIRST (issue #57).
 	 *
-	 * This is svc/frame_pipeline's own contract -- detach stops further
-	 * consume() and reports what is still in flight; the owner of the sink's
-	 * thread then drains it.  Doing it the other way round leaves the sink
+	 * This is svc/frame_pipeline's own contract -- detach stops any LATER
+	 * publish from selecting the sink and reports what is still in flight; the
+	 * owner of the sink's thread then drains it.  (Not "stops further
+	 * consume()": a call publish() or put() had already scheduled still runs
+	 * after the unlink.  It cannot happen here, because this path is only
+	 * reached after a confirmed producer stop -- but the contract says the
+	 * weaker thing and this comment used to say the stronger one.)
+	 *
+	 * Doing it the other way round leaves the sink
 	 * reachable across a window in which another command can start a stream:
 	 * camera_stream_stop() releases the camera API mutex before it returns,
 	 * and `camera bench` starts a stream while owning no sink.  The sink
@@ -905,6 +912,34 @@ int cam_lcd_sink_detach(void)
 			sink_set_state(SINK_LOST);
 			return CAM_ERR_STATE;
 		}
+	}
+
+	/*
+	 * [!] AND THE CORE'S OWN COUNT AGREES (issue #72).
+	 *
+	 * The two checks above are this file's bookkeeping about this file's
+	 * bookkeeping.  This one asks the pipeline, which is the thing that
+	 * actually owns the slots -- and until #72 it had no way to answer: the
+	 * count it returns from detach is taken before the drain, when a non-zero
+	 * value is normal, and camera_unsubscribe() threw even that away.
+	 *
+	 * It is not redundant with `puts == accepted`, and neither replaces the
+	 * other.  They see different things:
+	 *   - `puts == accepted` catches a DOUBLE release, which the core cannot:
+	 *     its unpin saturates at zero, so the second put leaves no trace.
+	 *   - this catches a pin the core knows about that this file's counters
+	 *     never saw -- an extra frame_pipeline_get(), which no sink here does
+	 *     today but which the contract permits.
+	 * Keeping both is what makes "the sink is holding nothing" a claim about
+	 * the pipeline rather than about two counters in this file.
+	 */
+	if (cam_drain_decide(CAM_OK, camera_sink_pins(&cam_lcd_sink))
+	    != CAM_DRAIN_DONE) {
+		LOG_ERR("the panel thread finished still holding a pipeline slot; "
+		        "the preview sink is unusable until reboot");
+		sink_fault_latch("the panel sink kept a slot the pipeline owns");
+		sink_set_state(SINK_LOST);
+		return CAM_ERR_STATE;
 	}
 
 	/* Provably idle: no delivery outstanding and none can start. */

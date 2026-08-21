@@ -376,6 +376,29 @@ void camera_get_wb(struct cam_wb *out);
  */
 int camera_unsubscribe(struct frame_sink *sink);
 
+/**
+ * @brief  How many pipeline slots @p sink still holds (issue #72).
+ *
+ * A sink's owner asks this AFTER draining its thread: a non-zero answer means
+ * the drain did not finish and nothing the sink reads may be torn down or
+ * reused.  The pipeline is file-static here, so this is how a sink module gets
+ * to ask at all.
+ *
+ * Works whether or not @p sink is still attached; see
+ * frame_pipeline_sink_pins() for why zero is trustworthy once it is unlinked.
+ * No API mutex: this reads the pipeline's own lock-protected bookkeeping, and it
+ * must keep answering on the teardown paths where the API is refusing.
+ *
+ * [!] A NULL @p sink, or a port whose objects were never created, answers ZERO
+ * -- which a caller reads as permission to tear down.  That is fail-OPEN, and it
+ * is only acceptable because neither is reachable: a sink's owner passes the
+ * address of its own static sink, and the drain path is downstream of a
+ * successful camera_unsubscribe(), which already proved the objects exist.  If
+ * this ever grows a caller without those two properties, it needs a verdict that
+ * can say "I cannot answer" instead.
+ */
+int camera_sink_pins(const struct frame_sink *sink);
+
 /** Balance one push delivery.  Sinks call this exactly once per consume(). */
 void camera_frame_put(struct frame_sink *sink, const struct frame_desc *f);
 

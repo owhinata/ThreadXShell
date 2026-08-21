@@ -235,8 +235,11 @@ int frame_pipeline_detach(struct frame_pipeline *p, struct frame_sink *s)
 	}
 	s->_next = NULL;
 	/* A LATEST pending frame was never delivered to the sink, so the sink can
-	   never put() it.  Drop it here (no new consume() after detach), leaving
-	   only the pins the sink actually holds for the caller to drain. */
+	   never put() it.  Drop it here -- BEFORE the count is read below, so what
+	   the caller drains towards zero is only what the sink can actually hand
+	   back.  (A call already scheduled by publish() or by put()'s pending
+	   hand-off still runs after this unlink; each holds its own pin, so the
+	   count stays honest.  See the header.) */
 	if (s->_pending) {
 		unpin_locked(s, s->_pending);
 		s->_pending = NULL;
@@ -247,6 +250,26 @@ int frame_pipeline_detach(struct frame_pipeline *p, struct frame_sink *s)
 	if (s->close)
 		s->close(s->ctx);
 	return inflight;
+}
+
+int frame_pipeline_sink_pins(struct frame_pipeline *p,
+                             const struct frame_sink *s)
+{
+	int pins;
+
+	if (!p || !s)
+		return 0;
+
+	/* Under the lock even though this is one word, and not for tearing: it is
+	 * a plain int and this reads nothing else, so there is no pair to catch
+	 * half-updated.  It is to synchronise with the writers at all -- publish()
+	 * and put() move this from other threads, and an unsynchronised read
+	 * alongside them is a data race whatever the width.  The cost is a few
+	 * instructions on a teardown path. */
+	pl_lock(p);
+	pins = s->_pins;
+	pl_unlock(p);
+	return pins;
 }
 
 int frame_pipeline_sink_count(struct frame_pipeline *p)

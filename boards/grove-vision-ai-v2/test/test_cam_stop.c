@@ -240,12 +240,52 @@ static void test_future_members(void)
 	 */
 }
 
+/*
+ * The drain verdict (issue #72).
+ *
+ * Neither failing vector can be produced on hardware.  A thread that never comes
+ * back needs a wedged panel; a thread that comes back still holding a pipeline
+ * slot needs a consume() that returns without putting -- which is a bug, not an
+ * input.  So the only place the two are ever distinguished is here.
+ *
+ * [!] They MUST stay distinguished.  "The thread is somewhere unknown" and "the
+ * thread is idle and the ring is one slot short" are different diagnoses with
+ * different next steps, and collapsing them into "drain failed" is what left the
+ * second one invisible until a later stream ran out of slots.
+ */
+static void test_drain_verdict(void)
+{
+	CHECK(cam_drain_decide(0, 0) == CAM_DRAIN_DONE,
+	      "a clean drain holding nothing must release");
+
+	/* A thread that never came back: the count is a reading of bookkeeping a
+	 * live thread is still moving, so it must not be reported as the fault
+	 * whatever it says. */
+	CHECK(cam_drain_decide(-1, 0) == CAM_DRAIN_THREAD,
+	      "a failed drain with a zero count is still a thread failure");
+	CHECK(cam_drain_decide(-1, 1) == CAM_DRAIN_THREAD,
+	      "a failed drain must not be reported as a leaked pin");
+	CHECK(cam_drain_decide(-1, 99) == CAM_DRAIN_THREAD,
+	      "the thread failure outranks any count");
+
+	/* Idle, but holding: the count has stopped moving, so this is real. */
+	CHECK(cam_drain_decide(0, 1) == CAM_DRAIN_PINNED,
+	      "one unreleased slot must be caught");
+	CHECK(cam_drain_decide(0, 7) == CAM_DRAIN_PINNED,
+	      "several unreleased slots must be caught");
+
+	/* Nothing but DONE may let the owner release what the sink reads. */
+	CHECK(cam_drain_decide(1, 0) != CAM_DRAIN_DONE,
+	      "a positive drain code is not success");
+}
+
 int main(void)
 {
 	test_may_acquire();
 	test_decide();
 	test_only_already_is_success();
 	test_future_members();
+	test_drain_verdict();
 
 	if (failures != 0) {
 		printf("test_cam_stop: %d failure(s)\n", failures);

@@ -283,6 +283,116 @@ static void test_detach_pending(void)
 	assert(m.sink._pins == 0);
 }
 
+/*
+ * F3. the DRAIN CHECK: the pin count of a sink the owner is tearing down
+ * (issue #72)
+ *
+ * The number frame_pipeline_detach() returns is the one at detach time, and a
+ * non-zero value there is NORMAL -- the sink may be mid-delivery.  The number
+ * that says whether the owner's drain finished is this one, taken afterwards,
+ * and until issue #72 there was no way to ask for it: every owner that cared
+ * kept a private counter beside the core's instead.
+ *
+ * [!] The case below is the one no existing test covered -- the query on a
+ * sink that has ALREADY been unlinked.  That is the whole point: an attached
+ * sink's count is a moving target, while a detached sink's zero is a decision
+ * (see the header for why get() does not break that).
+ */
+static void test_sink_pins_drain(void)
+{
+	struct frame_pipeline p;
+	struct mock m;
+	int inflight;
+	fresh(&p, 4);
+	mock_init(&m, &p, FRAME_POLICY_DROP, 0 /* hold */);
+	assert(frame_pipeline_attach(&p, &m.sink) == 0);
+
+	/* Idle: nothing held. */
+	assert(frame_pipeline_sink_pins(&p, &m.sink) == 0);
+
+	struct frame_desc *d1 = frame_pipeline_acquire(&p);
+	frame_pipeline_publish(&p, d1, SLOT_SZ, FRAME_FMT_RGB565, 4, 2, 8);
+	/* Mid-delivery, still attached. */
+	assert(frame_pipeline_sink_pins(&p, &m.sink) == 1);
+
+	inflight = frame_pipeline_detach(&p, &m.sink);
+	assert(inflight == 1);
+	/* And the same answer through the accessor once unlinked -- this is what
+	   an owner asks after its drain, and here the drain has NOT happened. */
+	assert(frame_pipeline_sink_pins(&p, &m.sink) == 1);
+
+	/* The owner's thread finishes: the drain is now complete. */
+	frame_pipeline_put(&p, &m.sink, d1);
+	assert(frame_pipeline_sink_pins(&p, &m.sink) == 0);
+
+	/* A publish now reaches nobody, so the count stays put. */
+	struct frame_desc *d2 = frame_pipeline_acquire(&p);
+	frame_pipeline_publish(&p, d2, SLOT_SZ, FRAME_FMT_RGB565, 4, 2, 8);
+	assert(frame_pipeline_sink_pins(&p, &m.sink) == 0);
+
+	/*
+	 * [!] AND THE INTERLEAVING THE "ZERO IS A DECISION" PROOF TURNS ON.
+	 *
+	 * get() has no attachment test, so a consumer CAN take an extra pin on a
+	 * sink that is already unlinked -- which is why "nothing can add a pin"
+	 * would be the wrong reason to trust a zero.  The real reason is the
+	 * ordering below: get() is only reachable while the consumer still holds
+	 * the delivery pin it was called with, so the count passes through 2 and 1
+	 * on its way down and never rises from 0.
+	 */
+	struct frame_desc *d3 = frame_pipeline_acquire(&p);
+	assert(frame_pipeline_attach(&p, &m.sink) == 0);
+	frame_pipeline_publish(&p, d3, SLOT_SZ, FRAME_FMT_RGB565, 4, 2, 8);
+	assert(frame_pipeline_sink_pins(&p, &m.sink) == 1);   /* the delivery pin */
+
+	assert(frame_pipeline_detach(&p, &m.sink) == 1);
+	frame_pipeline_get(&p, &m.sink, d3);                  /* re-queue: +1 */
+	assert(frame_pipeline_sink_pins(&p, &m.sink) == 2);
+
+	frame_pipeline_put(&p, &m.sink, d3);                  /* the extra pin */
+	assert(frame_pipeline_sink_pins(&p, &m.sink) == 1);
+	frame_pipeline_put(&p, &m.sink, d3);                  /* the delivery pin */
+	assert(frame_pipeline_sink_pins(&p, &m.sink) == 0);   /* and now it is out */
+
+	/*
+	 * Null arguments answer zero rather than dereferencing.  NOT presented as
+	 * a safety property: zero is what a caller reads as permission to tear
+	 * down, so this is fail-OPEN and is only acceptable because no caller can
+	 * reach it -- a sink's owner passes the address of its own static sink.
+	 */
+	assert(frame_pipeline_sink_pins(&p, NULL) == 0);
+	assert(frame_pipeline_sink_pins(NULL, &m.sink) == 0);
+}
+
+/*
+ * F4. a LATEST sink's pending pin is visible to the drain check too.
+ *
+ * detach() drops the pending pin (nothing will ever deliver it), so the count
+ * an owner sees afterwards covers only what the sink can still put() back.  A
+ * check that counted the dropped pending frame would never reach zero and would
+ * strand the teardown forever.
+ */
+static void test_sink_pins_latest(void)
+{
+	struct frame_pipeline p;
+	struct mock m;
+	fresh(&p, 5);
+	mock_init(&m, &p, FRAME_POLICY_LATEST, 0 /* hold */);
+	assert(frame_pipeline_attach(&p, &m.sink) == 0);
+
+	struct frame_desc *d1 = frame_pipeline_acquire(&p);
+	frame_pipeline_publish(&p, d1, SLOT_SZ, FRAME_FMT_RGB565, 4, 2, 8);
+	struct frame_desc *d2 = frame_pipeline_acquire(&p);
+	frame_pipeline_publish(&p, d2, SLOT_SZ, FRAME_FMT_RGB565, 4, 2, 8);
+	assert(frame_pipeline_sink_pins(&p, &m.sink) == 2);  /* active + pending */
+
+	assert(frame_pipeline_detach(&p, &m.sink) == 1);     /* pending dropped */
+	assert(frame_pipeline_sink_pins(&p, &m.sink) == 1);
+
+	frame_pipeline_put(&p, &m.sink, d1);
+	assert(frame_pipeline_sink_pins(&p, &m.sink) == 0);  /* drain complete */
+}
+
 /* G. read_latest bytes + generation ---------------------------------------- */
 static void test_read_latest(void)
 {
@@ -343,6 +453,8 @@ int main(void)
 	test_detach();
 	test_sink_count();
 	test_detach_pending();
+	test_sink_pins_drain();
+	test_sink_pins_latest();
 	test_read_latest();
 	test_ring_cycle();
 	assert(lock_depth == 0);              /* every lock balanced by unlock */

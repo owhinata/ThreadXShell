@@ -62,3 +62,23 @@ enum cam_stop_action cam_stop_decide(enum cam_stop_acquire acq,
 	}
 	return CAM_STOP_REFUSE_STATE;
 }
+
+enum cam_drain_verdict cam_drain_decide(int drain_rc, int pins)
+{
+	/*
+	 * The thread first: if it never came back, the pin count says nothing
+	 * useful -- it is a reading of bookkeeping a live thread is still moving.
+	 * Reporting PINNED there would name the wrong failure and send someone
+	 * looking for a put() that is simply not due yet.
+	 */
+	if (drain_rc != 0)
+		return CAM_DRAIN_THREAD;
+	/*
+	 * The thread is idle, so this count has stopped moving and zero is a
+	 * decision rather than a reading (frame_pipeline_sink_pins()).  Anything
+	 * else means a delivery was never handed back.
+	 */
+	if (pins != 0)
+		return CAM_DRAIN_PINNED;
+	return CAM_DRAIN_DONE;
+}

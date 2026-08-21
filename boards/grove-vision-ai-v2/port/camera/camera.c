@@ -1626,6 +1626,46 @@ static int cam_api_enter_up(void)
 	return CAM_OK;
 }
 
+/*
+ * [!] REFUSED WHILE A STREAM RUNS (issue #74).
+ *
+ * This reads the sensor's model ID over I2C, and the producer is doing its own
+ * I2C at the same time from cam_auto_step() -- the exposure and gain read-back
+ * and the queued tuning writes.  The API mutex does not serialise those two,
+ * because THE PRODUCER NEVER TAKES IT: it is a rendezvous partner, not an API
+ * caller, and that is deliberate.  So without this there are two threads on one
+ * bus with nothing between them.
+ *
+ * camera_read_frame_length() has refused for exactly this reason all along, and
+ * the tuning setters queue their writes for the producer instead of touching the
+ * bus.  This entry point was simply missed.  Nothing has ever been observed --
+ * the symptoms would be an occasional wrong ID or a disturbed frame, and this
+ * link is slow enough that the window is narrow -- so this closes a hole found
+ * by reading rather than one seen.
+ *
+ * [!] Those six neighbours are not wholly in the clear either, and saying they
+ * queue "instead of" touching the bus is true of the path they intend and not of
+ * the one a stale test can reach: they all read cam_state BEFORE the mutex, so a
+ * stream that starts in between leaves the fall-through doing I2C anyway.  That
+ * is pre-existing and wider than this issue -- see issue #77.
+ *
+ * AND THE TEST IS INSIDE THE MUTEX, unlike the one in
+ * camera_read_frame_length() which is taken before it.  Not a style difference:
+ * camera_stream_start() publishes CAM_ST_STREAMING while holding this mutex, so
+ * testing after the acquire means a stream cannot start between the test and the
+ * I2C.  This function already holds the mutex at that point, so the stronger
+ * placement costs nothing here.  (Whether the other one's earlier test wants the
+ * same treatment is its own question, not this issue's.)
+ *
+ * Refusing rather than answering from cache is the honest option.  The chip
+ * version and the rev-C flag are cached and cam_sensor_id() returns the selected
+ * descriptor's EXPECTED id, not a fresh observation -- so serving those would
+ * quietly turn "go and look" into "what did the last bring-up establish?".  And
+ * a running stream is not itself proof the module is still there: it stays
+ * STREAMING until the producer notices a timeout or a fault, so the module could
+ * have been unplugged since.  The live read that would settle it is the very
+ * thing that is unsafe here, which is why the answer is a refusal.
+ */
 int camera_probe(struct camera_probe_info *out)
 {
 	int rc;
@@ -1635,6 +1675,10 @@ int camera_probe(struct camera_probe_info *out)
 	rc = cam_api_enter();
 	if (rc != CAM_OK)
 		return rc;
+	if (cam_state == CAM_ST_STREAMING) {
+		cam_api_exit();
+		return CAM_ERR_BUSY;    /* I2C; the producer owns that driver */
+	}
 
 	rc = cam_bringup();
 	if (rc == CAM_OK) {

@@ -3052,6 +3052,66 @@ and now has ONE definition -- `NPU_INFERENCE_TIMEOUT_TICKS` in
 places with only the CMake literal live, so the header's constant was dead and
 would have drifted the first time anyone tuned it.
 
+### [!] A failed teardown is not recoverable from the console (#75), and that is the answer
+
+Every teardown on this board is allowed to fail, and the correct answer to each
+failure is to **hold on to everything** -- do not detach, do not release. That is
+the rule above, and it is right: a sink unlinked while a producer or the panel
+thread may still be inside it is the one thing `svc/frame_pipeline` cannot
+survive.
+
+The consequence is that nothing can pick it up afterwards. Issue #75 asked
+whether it should be able to. **The answer is no**, and this section is the
+record of why -- so that the next reader does not add a recovery path believing
+it was simply overlooked.
+
+What each failure actually leaves, re-derived after #72, #79 and #77 landed
+(the table in #75 was written before them and two of its rows have changed):
+
+| the failure | camera | sink | camera reserved? | what is actually true |
+|---|---|---|---|---|
+| stop returns `CAM_ERR_TIMEOUT` | poisoned (`CAM_ST_LOST`) | attached | yes | reboot, **by design** -- the producer may still be running |
+| stop returns `CAM_ERR_LOCKED` | **healthy** | attached | yes | **the producer was never asked, so the stream and the panel are still live** |
+| `cam_lcd_sink_detach()` drain times out | **healthy** | **unlinked** | **no** | the camera still works; only the panel preview is lost |
+| `camera_unsubscribe()` refused terminally | poisoned | attached | yes | as the first row |
+
+Two of those are `CAM_ST_LOST`, where refusing for ever is the whole point. The
+drain-timeout row is smaller than it looks: the unsubscribe SUCCEEDED before the
+drain was attempted, so the sink is out of the registry and the reservation is
+gone -- `camera bench`, `camera capture` and `nn run` all still work, and what is
+lost is `camera preview`.
+
+**That leaves exactly one row where a healthy camera is stranded**, and the two
+recoveries proposed in #75 do not reach it:
+
+- **A `camera stop` command.** The `CAM_ERR_LOCKED` row means the API mutex was
+  held for the whole bounded wait, so a retry meets the same holder -- and the
+  stop has already waited 8 s, which is longer than any healthy holder (a
+  concurrent stop's join is 6 s, a one-shot capture under 3 s). It would help
+  only a holder that frees between 8 s and never. And a bare stop could not
+  detach the sink anyway: the detach lives in the command that OWNS the sink,
+  and that command has already returned.
+- **Reclaiming at attach.** This no longer has a case to serve. It was written
+  for a sink latched into `SINK_LOST` by a *retryable* detach failure, and
+  **issue #79 fixed that at the source**: retryable and terminal are now
+  separated, and a retryable one puts the sink back to `SINK_ATTACHED` so the
+  next stop retries. On the `CAM_ERR_LOCKED` row there is nothing to reclaim --
+  the session is not abandoned, it is still running.
+
+Adding a recovery would mean claiming an ownerless sink can be safely unlinked,
+which is the claim #48 examined and rejected. Reaching any of these rows means
+something is already wedged, and a reboot is a second.
+
+**[!] Where the evidence lands after a Ctrl+C.** `camera preview` and `nn
+preview` both report a failed stop -- but not on the cancelled path, where they
+return silently. That is deliberate and not a gap that can be closed here: the
+shared core discards output produced while `cancel_req` is set (`cli_core.c`),
+so a message printed there would never reach the terminal. Ctrl+C is also the
+normal way to end a preview. So the record goes to the log ring instead:
+`camera_stream_stop()` calls `LOG_ERR` on both the locked and the timed-out
+path, and **`dmesg` is where to look** when a preview ends and the camera will
+not start again.
+
 ### The producer thread's stack
 
 Raised from 4 KiB to 8 KiB: it now carries TFLM's `Invoke()`, the ethos-u driver

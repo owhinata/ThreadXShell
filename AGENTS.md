@@ -383,6 +383,20 @@
      API に入る前に立てると**拒否された `camera raw` でも走行中の stream を
      one-shot 用に再構成し得る**。`CAM_BUS_DIRECT` を得た後にだけ立て、
      `cam_api_exit()` が落とす（`volatile`）。
+     [!] **`cmds/` は producer が消費するデータパス設定を書かない（#80）。**
+     `camera bayer` が `cam_dp_set_bayer()` を直接呼んでいた —— レジスタを触らないので
+     I2C / bring-up を探す掃除では見えず、**「次の capture / preview で効く」という
+     印字が嘘**になっていた（producer が再起動経路で拾う）。入口は
+     `camera_set_bayer()` で、**queue ではなく拒否**（phase を読むのはデータパス構成時で
+     フレームごとではない = どちらにせよライブでは効かない）。
+     `cmds/` が触ってよい `cam_dp_*` は**読み取りと幾何定数だけ**。
+     [!] **ただし規則は「producer が消費する状態は全部所有権を通す」ではない。**
+     `cam_wb`（`camera wb` / `black` / `sat` / `gamma`）は**意図的にライブ**で、
+     所有権を要求すると走行中の色調整ができなくなる（#67 がまさにそれを要る）。
+     境界は**消費のされ方**: bayer は**データパス構成時**に読まれるので、遅れて効く =
+     嘘になる。`cam_wb` は `cam_tone_sync()` が**フレームごとに 1 回スナップショット**して
+     LUT を組むので、最悪でも 1 フレームが新旧混在になって次で収束する。
+     **ここに所有権を足さない。**
      **`cam_auto_on` を書くのは API mutex を保持したスレッドだけ** ——
      `cam_manual_control_taken()` を `cam_api_exit()` の**後**に置くと、
      `tx_mutex_put()` はスケジューリング点なので、その隙に入った `camera auto on` の

@@ -94,12 +94,20 @@ static uint8_t cam_bayer = (uint8_t)DEMOS_PATTENMODE_BGGR;
  * does not quietly put the sensor default back and undo a bench measurement. */
 static uint8_t cam_bayer_user;
 
-void cam_dp_set_bayer(uint8_t pattern)
+int cam_dp_set_bayer(uint8_t pattern)
 {
-	if (pattern <= (uint8_t)DEMOS_PATTENMODE_RGGB) {
-		cam_bayer = pattern;
-		cam_bayer_user = 1u;
-	}
+	if (pattern > (uint8_t)DEMOS_PATTENMODE_RGGB)
+		return -1;
+	/*
+	 * Both fields together, and the caller holds the camera API mutex
+	 * (issue #80).  cam_bayer_user is read by cam_dp_seed_bayer(), which
+	 * bring-up calls -- and bring-up runs under that same mutex, so the two
+	 * cannot interleave and a chosen phase cannot be silently replaced by the
+	 * fitted part's default half way through being recorded.
+	 */
+	cam_bayer = pattern;
+	cam_bayer_user = 1u;
+	return 0;
 }
 
 uint8_t cam_dp_bayer(void)

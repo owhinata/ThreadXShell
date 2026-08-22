@@ -2370,6 +2370,42 @@ int camera_read_frame_length(uint16_t *lines)
 	return rc;
 }
 
+/*
+ * The demosaic's Bayer phase (issue #80).
+ *
+ * [!] IT LOOKS LIKE A SOFTWARE SHADOW, WHICH IS WHY IT WAS MISSED.  Nothing
+ * here touches a register, so `camera bayer` reached cam_dp_set_bayer()
+ * directly, past this header, for as long as the command has existed -- and
+ * the audit that found the other eight entry points (issue #77) was of
+ * port/camera/, not of what cmds/ calls.
+ *
+ * But cam_dp_config() reads it, and the PRODUCER reaches cam_dp_config() on its
+ * frame-timeout restart.  So writing it during a preview arms a change to THAT
+ * stream, which fires whenever the next timeout happens to arrive -- the
+ * command meanwhile printing that it takes effect at the next capture or
+ * preview.  Intermittent colour corruption whose trigger looks unrelated.
+ *
+ * No bring-up: this configures the demosaic, not the sensor, so there is no
+ * I2C and nothing to power.  What it needs from cam_bus_enter() is only the
+ * other half -- the proof that no producer is running and none can start while
+ * the write happens.
+ */
+int camera_set_bayer(uint8_t pattern)
+{
+	enum cam_bus_owner owner;
+	int rc = cam_bus_enter(&owner);
+
+	if (rc != CAM_OK)
+		return rc;
+	if (owner != CAM_BUS_DIRECT) {
+		cam_api_exit();
+		return CAM_ERR_BUSY;
+	}
+	rc = (cam_dp_set_bayer(pattern) == 0) ? CAM_OK : CAM_ERR_PARAM;
+	cam_api_exit();
+	return rc;
+}
+
 void camera_set_wb(const struct cam_wb *wb)
 {
 	if (wb != NULL)

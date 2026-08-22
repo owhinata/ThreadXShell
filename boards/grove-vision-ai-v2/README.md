@@ -1122,6 +1122,12 @@ That leaves an R/B-swapped pair, which only a scene of KNOWN colour can
 separate -- see the table above.  On a grey scene every phase scores low and
 the measurement means nothing at all.
 
+[!] **Set it with the camera idle.**  It is refused while a stream runs
+(issue #80), because the phase is read when the datapath is CONFIGURED and not
+per frame: it could not have shown you a live change either way, and a value
+written during a preview would instead have altered that preview at its next
+frame-timeout restart.  So stop the preview, set the phase, start again.
+
 ### [!] Four things that produce a plausible, wrong picture
 
 1. **The DMA'd frame must be cache-invalidated before the CPU reads it.**  The
@@ -2896,12 +2902,55 @@ mutations were measured to fail it -- `LOST -> direct`, the broad
 `not streaming -> direct`, an unknown state reaching direct, believing the state
 without the mutex, `producer -> direct`, and `ERROR` reported as busy.
 
-**One console path is still outside all of this: `camera bayer` -- issue #80.**
-It calls `cam_dp_set_bayer()` directly, past `camera.h` and without the mutex,
-and the producer consumes that value on its restart path. It is the same class
-and it is deliberately not fixed here: it needs a new public API and a decision
-about whether the setting is refused during a stream or held pending, which is
-more than a reordering.
+**One console path was still outside all of this: `camera bayer` -- issue #80,
+now closed.** It called `cam_dp_set_bayer()` directly, past `camera.h` and
+without the mutex, and the producer consumes that value on its restart path, so
+the line the command printed -- "takes effect at the next `camera capture` or
+`camera preview`" -- was a promise it could not keep while a stream ran.
+
+It goes through `camera_set_bayer()` now, and the answer is a **refusal**, not a
+queue like the tuning setters. The phase is read when the datapath is
+**configured** (`cam_dp_config()`), not per frame, so it cannot take effect live
+whatever the entry point does -- queueing would only mean not saying so.
+Refusing is what makes the printed sentence true. `cam_bayer_user` is set in the
+same locked section, which also closes its race with `cam_dp_seed_bayer()`
+(bring-up runs under the same mutex).
+
+[!] It was missed by #77's audit because **it looks like a software shadow**:
+nothing in `cam_dp_set_bayer()` touches a register, so it did not appear in a
+sweep for I2C and bring-up. The lesson is the audit's scope -- #77 swept
+`port/camera/` for what happens after `cam_api_exit()`, and this was in `cmds/`.
+`cmds/` reaches exactly three `cam_dp_*` symbols and this was the only setter
+among them; the other two are reads of a byte the producer never writes.
+
+#### [!] And the rule is NOT "everything the producer consumes needs ownership"
+
+The `cmds/` sweep turned up a second console-reachable, register-free mutation
+of producer-consumed state -- `camera wb`, and `black` / `sat` / `gamma` with
+it. The review that found it recommended putting the same ownership check in
+front. **That was not adopted, and the reason is the point of this section.**
+
+`cam_wb` is **deliberately live**. Steering the colour while watching the panel
+is what the knob is for, and it is exactly what issue #67 needs; requiring the
+camera to be idle would take that away and make the board worse at the job.
+
+What separates the two is **how the value is consumed**, not that the producer
+consumes it:
+
+| | consumed | a late write means |
+|---|---|---|
+| Bayer phase | when the datapath is **configured** (stream start, timeout restart) | the phase of a stream already running changes, at a moment nobody asked for -- and the command's printed promise is false |
+| `cam_wb` | `cam_tone_sync()` **snapshots it once per frame** and builds the LUTs from that snapshot | at worst ONE frame is packed from a mixture of the old and new settings, and the next frame is clean |
+
+So the `cam_wb` write is genuinely an unsynchronised multi-field update, and its
+whole consequence is a single frame blending two settings -- against a software
+AWB loop that is moving those same fields every frame anyway. There is no
+mid-frame seam: the snapshot is taken before the LUTs are built, so the frame is
+packed from one consistent set.
+
+Do not add ownership here. If the tear ever needs closing, the answer is
+atomicity (a `TX_DISABLE` around the copy on both sides, as the tuning queue
+already does), never a refusal.
 
 The file also names three misimplementations it would **not** catch, all of them
 in the ten lines that call the table rather than in the table: reading

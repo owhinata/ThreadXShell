@@ -89,8 +89,17 @@ const uint8_t *cam_dp_completed_buffer(void);
  *
  * Values match DEMOS_PATTENMODE_E: 0 BGGR, 1 GBRG, 2 GRBG, 3 RGGB.  Takes
  * effect at the next datapath configuration, i.e. the next capture or preview.
+ *
+ * [!] NOT FOR THE CONSOLE TO CALL (issue #80).  cam_dp_config() consumes this,
+ * and the PRODUCER reaches cam_dp_config() on its frame-timeout restart -- so a
+ * value written while a stream runs can change the phase of THAT stream, which
+ * is exactly what the sentence above promises it will not do.  The console goes
+ * through camera_set_bayer(), which refuses unless it owns the camera.  This
+ * stays public because camera.c is what calls it, not because anything may.
+ *
+ * @return 0 if the pattern was accepted, -1 if it is out of range.
  */
-void cam_dp_set_bayer(uint8_t pattern);
+int cam_dp_set_bayer(uint8_t pattern);
 uint8_t cam_dp_bayer(void);
 const char *cam_dp_bayer_name(uint8_t pattern);
 

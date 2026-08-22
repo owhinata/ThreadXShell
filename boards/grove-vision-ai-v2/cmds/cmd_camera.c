@@ -1301,6 +1301,7 @@ static int cmd_camera_bayer(struct cli_instance *sh, int argc, char **argv)
 {
 	static const char *const names[4] = { "bggr", "gbrg", "grbg", "rggb" };
 	uint8_t i;
+	int rc;
 
 	if (argc > 1) {
 		for (i = 0u; i < 4u; i++)
@@ -1311,7 +1312,29 @@ static int cmd_camera_bayer(struct cli_instance *sh, int argc, char **argv)
 			              "bggr gbrg grbg rggb\r\n");
 			return 1;
 		}
-		cam_dp_set_bayer(i);
+		/*
+		 * Through the camera API, not cam_dp_set_bayer() (issue #80).
+		 * This command used to write the phase straight into the
+		 * datapath from here, and the producer picks that value up on
+		 * its own restart -- so the line printed below was a promise
+		 * this command could not keep while a stream was running.
+		 */
+		rc = camera_set_bayer(i);
+		if (rc != CAM_OK) {
+			if (rc == CAM_ERR_BUSY)
+				cli_error(sh, "camera: bayer refused: the "
+				              "camera is streaming, or another "
+				              "camera\r\n"
+				              "        command holds the API.  "
+				              "The phase is read when the "
+				              "datapath is\r\n"
+				              "        configured, so stop the "
+				              "preview and set it before "
+				              "starting\r\n");
+			else
+				cam_report(sh, "bayer", rc);
+			return 1;
+		}
 	}
 
 	cli_print(sh, "bayer    : %s\r\n",

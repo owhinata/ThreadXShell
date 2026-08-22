@@ -401,6 +401,15 @@
      `cam_manual_control_taken()` を `cam_api_exit()` の**後**に置くと、
      `tx_mutex_put()` はスケジューリング点なので、その隙に入った `camera auto on` の
      結果を上書きして「センサーは auto、フラグは off」を作る（#39 の食い違いの裏返し）。
+   - [!] **teardown の失敗にコンソールからの回収路を足さない（#75、決定済み）。**
+     失敗時に「全部握ったまま」が正解で、持ち主のいない sink を安全に外せると主張するのは
+     #48 が検討して否定した内容。**#79 が唯一の実害ケース（retryable な detach 失敗が
+     恒久 `SINK_LOST` にラッチ）を根で直した**ので、残るのは
+     「保持者が 8 秒 wedge した `CAM_ERR_LOCKED`」1 行だけで、そこでは producer が
+     **止まっていない**（回収する対象が無い）。drain timeout の行は sink が既に unlink
+     済みで予約も切れており、失うのは preview だけ。**証拠は `dmesg`** —— Ctrl+C 経路では
+     コンソールに出せない（`cancel_req` 中の出力は共有コアが捨てる）が、
+     `camera_stream_stop()` は両方の失敗を `LOG_ERR` でリングに落とす。
    - [!] **`camera_unsubscribe()` はストリーム中も拒否する（#65）。** poison だけを
      見ていたのでは backstop になっていない（`publish()` は pre-pin して lock を
      離してから `consume()` を呼ぶので、ストリーム中の unlink は進行中の配送と競合し、

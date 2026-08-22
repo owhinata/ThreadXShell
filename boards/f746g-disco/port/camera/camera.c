@@ -1810,6 +1810,7 @@ static struct cam_sub *cam_sub_register(struct frame_sink *s, enum camera_format
 static int cam_subs_attach_all(void)
 {
 	int n = 0;
+	int rc;
 
 	for (int i = 0; i < CAM_MAX_SUBS; i++) {
 		struct cam_sub *sub = &cam_subs[i];
@@ -1818,9 +1819,15 @@ static int cam_subs_attach_all(void)
 			continue;
 		if (sub->fmt != mode.format)
 			continue;                     /* format mismatch: stay enabled + idle */
-		if (frame_pipeline_attach(&cam_pipe, sub->sink) != 0) {
-			/* out of pipeline slots / open() rejected: unwind this pass so the
-			   base start fails clean with no half-attached subscriber. */
+		rc = frame_pipeline_attach(&cam_pipe, sub->sink);
+		if (rc != 0) {
+			/* out of pipeline slots / open() rejected / the sink was never
+			   drained: unwind this pass so the base start fails clean with no
+			   half-attached subscriber.  Say WHICH (issue #72) -- a refused
+			   attach is the only report a missed drain ever produces. */
+			LOG_ERR("subscriber '%s' attach refused: %s",
+			        sub->sink->name ? sub->sink->name : "?",
+			        frame_pipeline_strerror(rc));
 			for (int k = 0; k < CAM_MAX_SUBS; k++) {
 				if (cam_subs[k].attached) {
 					(void)frame_pipeline_detach(&cam_pipe, cam_subs[k].sink);
@@ -2226,8 +2233,11 @@ static int stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 		return CAM_ERR_STATE;
 	frame_pipeline_set_format(&cam_pipe, fmt_to_frame(mode.format),
 	                          mode.width, mode.height);
-	if (frame_pipeline_attach(&cam_pipe, &cam_stat_sink) != 0)
+	rc = frame_pipeline_attach(&cam_pipe, &cam_stat_sink);
+	if (rc != 0) {
+		LOG_ERR("stats sink attach refused: %s", frame_pipeline_strerror(rc));
 		return CAM_ERR_STATE;
+	}
 	nx = cam_subs_attach_all();       /* enabled + compatible subscribers */
 	if (nx < 0) {
 		frame_pipeline_detach(&cam_pipe, &cam_stat_sink);
@@ -2376,9 +2386,13 @@ int camera_subscribe(struct frame_sink *s, enum camera_format fmt)
 	   owhinata/stm32f746g-disco#100.1: the subscriber's enabled intent is orthogonal to base
 	   on/off). A failed attach (pipeline full / open() reject) leaves no registration. */
 	if (cam_stream_active && !sub->attached && sub->fmt == mode.format) {
-		if (frame_pipeline_attach(&cam_pipe, s) == 0) {
+		int arc = frame_pipeline_attach(&cam_pipe, s);
+
+		if (arc == 0) {
 			sub->attached = 1;
 		} else {
+			LOG_ERR("subscriber '%s' attach refused: %s",
+			        s->name ? s->name : "?", frame_pipeline_strerror(arc));
 			sub->sink = NULL;
 			sub->enabled = 0;
 			sub->oneshot = 0;
@@ -2425,12 +2439,15 @@ int camera_subscribe_oneshot(struct frame_sink *s, enum camera_format fmt)
 		op_unlock();
 		return 0;
 	}
-	if (frame_pipeline_attach(&cam_pipe, s) != 0) {
+	rc = frame_pipeline_attach(&cam_pipe, s);
+	if (rc != 0) {
+		LOG_ERR("oneshot subscriber '%s' attach refused: %s",
+		        s->name ? s->name : "?", frame_pipeline_strerror(rc));
 		sub->sink = NULL;
 		sub->enabled = 0;
 		sub->oneshot = 0;
 		op_unlock();
-		return CAM_ERR_BUSY;              /* pipeline full / open() rejected */
+		return CAM_ERR_BUSY;
 	}
 	sub->attached = 1;
 	op_unlock();

@@ -183,29 +183,67 @@ void frame_pipeline_publish(struct frame_pipeline *p, struct frame_desc *f,
 
 /* ---- sink registry ------------------------------------------------------- */
 
-int frame_pipeline_attach(struct frame_pipeline *p, struct frame_sink *s)
+/*
+ * May @p s be attached to @p p?  One traversal, one locked snapshot, and the
+ * order is deliberate (issue #72).
+ *
+ * Already-linked comes FIRST -- before capacity -- or a re-attach into a full
+ * pipeline would be reported as "full", sending someone to look for a sink slot
+ * when the actual fault is that this sink is already in one.
+ *
+ * The caller holds the lock.  Nothing here calls out.
+ */
+static int attach_refusal_locked(const struct frame_pipeline *p,
+                                 const struct frame_sink *s)
 {
-	struct frame_sink *it;
+	const struct frame_sink *it;
 	unsigned n = 0;
 
-	if (!p || !s)
-		return -1;
-
-	pl_lock(p);
-	for (it = p->sinks; it != NULL; it = it->_next)
+	for (it = p->sinks; it != NULL; it = it->_next) {
+		if (it == s)
+			return FRAME_PIPELINE_ERR_ATTACHED;
 		n++;
-	pl_unlock(p);
-	if (n >= FRAME_PIPELINE_MAX_SINKS)
-		return -1;
-
-	if (s->open) {
-		int rc = s->open(s->ctx, p->fmt, p->width, p->height);
-
-		if (rc < 0)
-			return rc;
 	}
+	/*
+	 * [!] EXACTLY ZERO, not "zero or less".  unpin_locked() saturates its
+	 * decrement at zero, so this count cannot go negative through the pipeline
+	 * -- a negative one means the sink's bookkeeping was written by something
+	 * that had no business writing it, and reading that as "released" would let
+	 * the reset below run over a callback that is still inside the sink.
+	 */
+	if (s->_pins != 0)
+		return FRAME_PIPELINE_ERR_UNDRAINED;
+	if (n >= FRAME_PIPELINE_MAX_SINKS)
+		return FRAME_PIPELINE_ERR_FULL;
+	return FRAME_PIPELINE_OK;
+}
+
+int frame_pipeline_attach(struct frame_pipeline *p, struct frame_sink *s)
+{
+	int err;
+
+	if (!p || !s)
+		return FRAME_PIPELINE_ERR_PARAM;
 
 	pl_lock(p);
+	err = attach_refusal_locked(p, s);
+	pl_unlock(p);
+	if (err != FRAME_PIPELINE_OK)
+		return err;                  /* refused, and nothing was touched */
+
+	/*
+	 * Normalised, not passed through (issue #72).  A board's open() can return
+	 * any negative it likes, so forwarding it would make every value the core
+	 * picks for its own refusals forgeable -- and the whole point of naming
+	 * those refusals is that a caller can tell them apart from this one.
+	 */
+	if (s->open && s->open(s->ctx, p->fmt, p->width, p->height) < 0)
+		return FRAME_PIPELINE_ERR_OPEN;
+
+	pl_lock(p);
+	/* Safe to reset only because the refusal above proved there is nothing here
+	   worth keeping: no pins, not linked.  The three counters are per-session
+	   and the boards read them that way. */
 	s->_busy    = 0;
 	s->_pending = NULL;
 	s->_pins    = 0;
@@ -215,7 +253,20 @@ int frame_pipeline_attach(struct frame_pipeline *p, struct frame_sink *s)
 	s->_next  = p->sinks;
 	p->sinks  = s;
 	pl_unlock(p);
-	return 0;
+	return FRAME_PIPELINE_OK;
+}
+
+const char *frame_pipeline_strerror(int rc)
+{
+	switch (rc) {
+	case FRAME_PIPELINE_OK:             return "ok";
+	case FRAME_PIPELINE_ERR_PARAM:      return "bad argument";
+	case FRAME_PIPELINE_ERR_FULL:       return "pipeline full";
+	case FRAME_PIPELINE_ERR_OPEN:       return "sink open() rejected";
+	case FRAME_PIPELINE_ERR_ATTACHED:   return "already attached";
+	case FRAME_PIPELINE_ERR_UNDRAINED:  return "sink still holds frame pins";
+	default:                            return "unknown";
+	}
 }
 
 int frame_pipeline_detach(struct frame_pipeline *p, struct frame_sink *s)

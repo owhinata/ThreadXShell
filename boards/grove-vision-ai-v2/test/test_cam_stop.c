@@ -57,9 +57,10 @@
  * and every vector below still passed -- because the table it bypasses is
  * perfectly correct.  Nothing here can see a caller that does not call.  What
  * found it was reading every entry point again afterwards, which is the only
- * thing that can -- and issue #80 is a second instance still open, a shell
- * command that reaches past camera.h into cam_dp.h and changes datapath
- * configuration the producer consumes.
+ * thing that can -- and issue #80 was a second instance, found the same way: a
+ * shell command reaching past camera.h into cam_dp.h to change datapath
+ * configuration the producer consumes.  That one was invisible to a sweep for
+ * I2C and bring-up because it touches no register at all.
  */
 #include <stdio.h>
 

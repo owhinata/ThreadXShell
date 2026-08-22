@@ -334,6 +334,30 @@ int camera_set_frame_length(uint16_t lines);
 int camera_read_frame_length(uint16_t *lines);
 
 /**
+ * @brief  Choose the demosaic's Bayer phase (issue #80).
+ *
+ * The value itself and what a wrong one looks like belong to cam_dp.h; this is
+ * the entry that owns the camera while writing it.
+ *
+ * [!] REFUSED WHILE A STREAM RUNS, and unlike the tuning setters beside it the
+ * refusal is not a queue.  cam_dp_config() consumes the phase, and the producer
+ * reaches cam_dp_config() on its frame-timeout restart -- so a value written
+ * during a stream would change the phase of THAT stream, at some later moment
+ * nobody asked for.  Queueing it instead would not help: the phase is read when
+ * the datapath is CONFIGURED, not per frame, so it cannot take effect live
+ * whatever this does.  Refusing is what makes "takes effect at the next capture
+ * or preview" true rather than a hope.
+ *
+ * Reading the phase back (cam_dp_bayer()) needs none of this: the producer
+ * never writes it.
+ *
+ * @return CAM_OK; CAM_ERR_PARAM for a pattern outside 0..3; CAM_ERR_BUSY while
+ *         a stream owns the camera or another command holds the API;
+ *         CAM_ERR_STATE if the port is poisoned or was never created.
+ */
+int camera_set_bayer(uint8_t pattern);
+
+/**
  * @brief  Auto exposure and auto white balance, on by default.
  *
  * The datapath provides neither, so a fixed setting is correct only for the

@@ -42,11 +42,27 @@
    `open()` の負値は**単一のコアエラーに正規化する** — 透過するとコアが自分の戻り値を
    所有できない（ボードが同じ値を返せる）。判定順は
    **already-linked → pins → capacity**（満杯時の再 attach を FULL と誤報しないため）。
-   [!] **並行性の保証はまだコアに無い**（#79）。今のコアが依拠する前提は 3 つだけで、
-   3 ボードともこれを満たしている: **attach 同士は 1 つの pipeline 上で直列化される /
-   ある sink は自分の attach 進行中に detach されない / `init()` は他のどの操作とも重ならない**。
-   広げて「全 registry 操作を直列化する」と書かない — Grove の `camera_unsubscribe()` は
-   API mutex を取らないので、それは現状の説明として**嘘になる**。
+   [!] **並行性はコアが持つ（#79）。** attach は `open()` の前に sink を claim し、
+   detach は `close()` を跨いで claim する。**claim 済みの sink は全入口が拒否する**。
+   sink の所有状態は `UNOWNED -> ATTACHING -> ATTACHED -> DETACHING -> DRAINING -> UNOWNED` で、
+   **DRAINING を出る条件は `_pins == 0 && _callbacks == 0`**（「pin が返った」ではない ——
+   `publish()` は `consume()` をロック外で呼び、**戻ってから統計を書く**ので、
+   pin が 0 でもコアはまだ sink に触っている。#72 の put-last 規則の裏返し）。
+   - **state は唯一の真実ではない。** registry membership・owner・2 つのカウンタは独立した
+     事実で、3 入口とも**共通の整合検査**を通す。冗長に見える行が噛む ——
+     `ATTACHED + owner NULL` は破壊的 detach へ直行してボードの `close()` を呼ぶし、
+     `UNOWNED + linked` は detach に裸の pin 数を返させる
+   - **3 入口は同じ破損を同じ分類にする。** port が行動を変えるのは
+     **retryable（transition / not-quiescent）か terminal か**だけ。1 つの入口だけが
+     破損を retryable と呼ぶと、**port が壊れた sink を永久に retry する**
+   - `detach()` は**非負の pin 数 または 負の error**を返す。**非負（0 を含む）は
+     それ単独では teardown 許可ではない**
+   - **走査は有界**（cycle は state error。ループしたリストで exactly once を数えるのは
+     この issue が閉じたハングの再現方法）
+   - **caller に残る条件は 3 つ**: `set_format()` は attach と重ならない /
+     sink は同時に 1 つの pipeline にしか属さず全 sink-scoped 呼び出しは owner を使う /
+     `init()` は完全に quiescent なときだけ。**「全 registry 操作を直列化する」とは書かない** ——
+     Grove の `camera_unsubscribe()` は API mutex を取らないので現状の説明として嘘になる
 
 3. **upstream submodule（`lib/` 配下）は read-only。** HAL / CMSIS / ThreadX 系 / TinyUSB /
    CoreMark ほか。編集は不可、調整は port 側で。

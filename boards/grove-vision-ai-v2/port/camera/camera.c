@@ -672,6 +672,8 @@ static int cam_subscribe(struct frame_sink *sink)
 
 int camera_unsubscribe(struct frame_sink *sink)
 {
+	int rc;
+
 	if (sink == NULL || !cam_objects_ok)
 		return CAM_ERR_PARAM;
 	/*
@@ -700,12 +702,34 @@ int camera_unsubscribe(struct frame_sink *sink)
 	 */
 	if (cam_state == CAM_ST_STREAMING)
 		return CAM_ERR_BUSY;
-	(void)frame_pipeline_detach(&cam_pipe, sink);
-	return CAM_OK;
+	/*
+	 * [!] AND THE CORE'S ANSWER IS NOT DISCARDED ANY MORE (issue #79).  It used
+	 * to be, which made this the one place a "retry, a callback is still
+	 * running" came back as CAM_OK -- and this board's only caller reads CAM_OK
+	 * as "unlinked, go and tear down".
+	 *
+	 * The split matters more than the value: TRANSITION and QUIESCE mean ask
+	 * again, everything else means this will not get better.  Reporting a
+	 * retryable one as terminal strands the panel until reboot; reporting a
+	 * terminal one as retryable makes an ownership bug retry forever and never
+	 * be diagnosed.
+	 */
+	rc = frame_pipeline_detach(&cam_pipe, sink);
+	if (rc >= 0)
+		return CAM_OK;
+	LOG_ERR("sink '%s' detach refused: %s", sink->name ? sink->name : "?",
+	        frame_pipeline_strerror(rc));
+	if (rc == FRAME_PIPELINE_ERR_TRANSITION || rc == FRAME_PIPELINE_ERR_QUIESCE)
+		return CAM_ERR_BUSY;         /* retryable: ask again in a moment */
+	return CAM_ERR_STATE;            /* terminal */
 }
 
 int camera_sink_pins(const struct frame_sink *sink)
 {
+	/* Passed through, negatives included (issue #79): the core answers a
+	   negative when it cannot tell -- a transition, a callback that has not
+	   returned -- and cam_drain_decide() already treats anything that is not
+	   exactly zero as "not drained", so the fail-closed reading is free. */
 	if (sink == NULL || !cam_objects_ok)
 		return 0;
 	return frame_pipeline_sink_pins(&cam_pipe, sink);

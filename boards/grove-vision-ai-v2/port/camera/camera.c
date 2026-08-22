@@ -225,7 +225,7 @@ static uint8_t  cam_stop_req;
 static uint8_t  cam_datapath_configured;
 static uint8_t  cam_rev_c;
 /* Next datapath configuration uses the RAW leg (INP -> WDMA2, no demosaic). */
-static uint8_t  cam_raw_mode;
+static volatile uint8_t cam_raw_mode;
 
 /*
  * Interrupt-owned.  `cam_err` is STICKY: once a terminal status has been seen
@@ -471,6 +471,68 @@ static void cam_apply_tuning(void)
 		(void)cam_sensor_set_gains(cam_tune_again, cam_tune_dgain);
 	if ((req & CAM_TUNE_VTS) != 0u)
 		(void)cam_sensor_set_frame_length(cam_tune_vts);
+}
+
+/*
+ * Console side: hand one change over, value and request bit together.
+ *
+ * [!] AND THE API MUTEX PROTECTS NONE OF THIS (issue #77).  Since #77 these are
+ * called with it held, which makes it look as though they no longer need to
+ * care -- but the thread they are racing is the PRODUCER, and the producer
+ * never takes that mutex.  `cam_tune_req |= bit` is a read-modify-write, so a
+ * producer that claims and clears the word between the load and the store has
+ * its claim undone: the bit comes back and the change is applied a second time.
+ * Harmless today, because the value fields still hold what was applied and the
+ * writes are idempotent -- but it is a lost update, and the next person to
+ * queue something that is NOT idempotent would inherit it.
+ *
+ * TX_DISABLE is what actually serialises the two, and it is the same mechanism
+ * cam_apply_tuning() already uses to claim the word.  This port's ThreadX
+ * critical sections are PRIMASK-based (TX_PORT_USE_BASEPRI is left undefined in
+ * port/threadx/tx_user.h), so masking interrupts also masks PendSV: the
+ * scheduler cannot run and the higher-priority producer thread cannot preempt
+ * us mid-sequence.  Both stores are covered, not just the bit, so the producer
+ * never sees a request bit standing over a value that has not landed yet.
+ */
+static void cam_tune_queue_exposure(uint16_t lines)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	cam_tune_exposure = lines;
+	cam_tune_req |= CAM_TUNE_EXPOSURE;
+	TX_RESTORE
+}
+
+static void cam_tune_queue_gains(uint8_t again, uint16_t dgain)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	cam_tune_again = again;
+	cam_tune_dgain = dgain;
+	cam_tune_req |= CAM_TUNE_GAINS;
+	TX_RESTORE
+}
+
+static void cam_tune_queue_vts(uint16_t lines)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	cam_tune_vts = lines;
+	cam_tune_req |= CAM_TUNE_VTS;
+	TX_RESTORE
+}
+
+static void cam_tune_queue_auto(uint8_t on)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	cam_tune_auto = on;
+	cam_tune_req |= CAM_TUNE_AUTO;
+	TX_RESTORE
 }
 
 /*
@@ -1525,7 +1587,7 @@ static void cam_producer_entry(ULONG arg)
 		 *
 		 * It also keeps the stale cam_stopped_sem post below
 		 * unreachable: with the state pinned, every later
-		 * camera_stream_stop() is refused by cam_api_enter() before it
+		 * camera_stream_stop() is refused by its poison test before it
 		 * can consume this count and report a join that never happened.
 		 */
 		if (cam_state != CAM_ST_LOST)
@@ -1568,35 +1630,29 @@ void camera_create_objects(void)
 	cam_objects_ok = 1;
 }
 
-static int cam_api_enter(void)
-{
-	if (!cam_objects_ok)
-		return CAM_ERR_STATE;
-	/*
-	 * [!] THE POISON CHECK, and it is deliberately BEFORE the mutex
-	 * (issue #48).
-	 *
-	 * Every entry point that touches camera hardware comes through here, so
-	 * this one test is what makes "the producer may still be running"
-	 * safe: nothing can power the module, quiesce the datapath, unwrap an
-	 * interrupt or rebuild the port while a thread that never acknowledged
-	 * a stop is still in flight.
-	 *
-	 * Before the mutex because the lost producer may itself still hold
-	 * things; making a poisoned call queue behind anything would turn a
-	 * clear refusal into a hang.  camera_stream_stats() reads no hardware
-	 * and takes no mutex, so `camera stats` still answers and still says
-	 * what happened -- a refusal with no way to see why is not a diagnosis.
-	 */
-	if (!cam_api_may_acquire(cam_objects_ok, cam_state))
-		return CAM_ERR_STATE;
-	if (tx_mutex_get(&cam_api_mutex, TX_NO_WAIT) != TX_SUCCESS)
-		return CAM_ERR_BUSY;
-	return CAM_OK;
-}
-
 static void cam_api_exit(void)
 {
+	/*
+	 * [!] AND THE ONE-SHOT RAW MODE ENDS HERE (issue #77).
+	 *
+	 * cam_raw_mode selects the Bayer datapath in cam_step_dp(), and the
+	 * PRODUCER reads it -- on its own frame-timeout restart, which calls
+	 * cam_start_datapath() from the producer thread.  So a value left
+	 * standing outside a held-mutex section can reconfigure a LIVE stream
+	 * for a one-shot capture.
+	 *
+	 * camera_capture_raw() used to set it before the API was entered at all,
+	 * so even a REFUSED raw capture left a window in which a running
+	 * preview's restart could pick it up -- the refusal was honest and the
+	 * damage happened anyway.  It is now set only after cam_bus_enter() has
+	 * answered CAM_BUS_DIRECT, which is what proves no producer is running
+	 * and none can start.
+	 *
+	 * Clearing it here rather than at each exit makes the scope structural
+	 * instead of remembered: nothing this port does needs it to survive a
+	 * release, and a path added later cannot leak it.
+	 */
+	cam_raw_mode = 0u;
 	(void)tx_mutex_put(&cam_api_mutex);
 }
 
@@ -1623,49 +1679,141 @@ static void cam_note_contention(ULONG waited)
  * this returns only how the attempt ended, and cam_stop_decide() turns that,
  * with the state read while holding, into what the stop does.
  */
-static enum cam_stop_acquire cam_api_enter_stop(void)
+static enum cam_api_acquire cam_api_enter_stop(void)
 {
 	UINT st = tx_mutex_get(&cam_api_mutex, TX_NO_WAIT);
 	ULONG t0;
 
 	if (st == TX_SUCCESS)
-		return CAM_STOP_ACQ_HELD;
+		return CAM_ACQ_HELD;
 	if (st != TX_NOT_AVAILABLE)
-		return CAM_STOP_ACQ_ERROR;
+		return CAM_ACQ_ERROR;
 
 	t0 = tx_time_get();
 	st = tx_mutex_get(&cam_api_mutex, CAM_STOP_LOCK_TICKS);
 	cam_note_contention(tx_time_get() - t0);
 
 	if (st == TX_SUCCESS)
-		return CAM_STOP_ACQ_HELD;
+		return CAM_ACQ_HELD;
 	/* TX_NOT_AVAILABLE here is the deadline; anything else is a mutex this
 	 * port can no longer rely on, which is not the same answer. */
-	return (st == TX_NOT_AVAILABLE) ? CAM_STOP_ACQ_TIMEOUT
-	                                : CAM_STOP_ACQ_ERROR;
+	return (st == TX_NOT_AVAILABLE) ? CAM_ACQ_UNAVAILABLE
+	                                : CAM_ACQ_ERROR;
 }
 
 /*
- * Enter the API AND make sure the port is up.
+ * [!] ENTER THE API AND FIND OUT WHO OWNS THE SENSOR BUS (issue #77).
  *
- * The tuning entry points all talk to the sensor over I2C, which needs the
- * module powered and the CIS layer initialised.  Requiring the operator to have
- * run `camera probe` first is an ordering rule with no reason behind it that
- * they can see -- `camera capture` brings the port up on its own, so `camera
- * gain` refusing until something else has run just reads as a broken command.
+ * Every entry point that may reach the vendor CIS driver comes through here.
+ * It exists because the test that keeps the console off that bus -- "is a
+ * stream running?" -- is only worth anything if it is taken with this mutex
+ * HELD.  camera_stream_start() publishes CAM_ST_STREAMING while holding it, so
+ * a test taken before the acquire can be overtaken by an entire stream start
+ * and the caller then walks in on a bus the producer owns.  TX_NO_WAIT does not
+ * help: by then the starter has let go.
+ *
+ * Five entry points did exactly that until this existed, and camera_probe()'s
+ * fix for issue #74 added a sixth ordering of its own.  So the ordering is
+ * written once, and the decision it feeds is a pure function (cam_bus_decide())
+ * because the race cannot be produced on this board's single console.
+ *
+ * THE CONTRACT IS DELIBERATELY NARROW, because the alternative is a mutex whose
+ * ownership depends on which of four answers came back:
+ *
+ *   CAM_OK   -- the mutex IS held, and *owner is exactly CAM_BUS_DIRECT or
+ *               CAM_BUS_PRODUCER.  The caller has ONE cleanup exit calling
+ *               cam_api_exit().
+ *   negative -- the mutex is NOT held and *owner is untouched.
+ *
+ * So a refusal can never be mistaken for a route, and an owner value added
+ * later cannot quietly become a successful one.  That matters more than it
+ * looks: ThreadX mutexes are recursive, so a nested acquire would not deadlock
+ * loudly -- it would return success and leave the mutex held after one put.
+ *
+ * BRING-UP IS NOT DONE HERE.  The direct route's callers do it themselves,
+ * holding the mutex.  Keeping it out is what lets camera_set_auto() keep
+ * "a camera that will not come up is not a failure of this command" without a
+ * special case, and it is safe because only the direct route ever calls it: the
+ * producer route never brings up, and only camera_stream_start() can enter
+ * CAM_ST_STREAMING, under this same mutex.
  */
-static int cam_api_enter_up(void)
+static int cam_bus_enter(enum cam_bus_owner *owner)
 {
-	int rc = cam_api_enter();
+	enum cam_api_acquire acq;
+	enum cam_bus_owner who;
+	UINT st;
 
-	if (rc != CAM_OK)
-		return rc;
-	rc = cam_bringup();
-	if (rc != CAM_OK) {
-		cam_api_exit();
-		return rc;
+	if (!cam_objects_ok)
+		return CAM_ERR_STATE;
+	/*
+	 * [!] THE POISON CHECK, and it is deliberately BEFORE the mutex
+	 * (issue #48).
+	 *
+	 * Every entry point that touches camera hardware comes through here, so
+	 * this one test is what makes "the producer may still be running" safe:
+	 * nothing can power the module, quiesce the datapath, unwrap an interrupt
+	 * or rebuild the port while a thread that never acknowledged a stop is
+	 * still in flight.
+	 *
+	 * Before the mutex because the lost producer may itself still hold
+	 * things; making a poisoned call queue behind anything would turn a clear
+	 * refusal into a hang.  camera_stream_stats() reads no hardware and takes
+	 * no mutex, so `camera stats` still answers and still says what happened
+	 * -- a refusal with no way to see why is not a diagnosis.
+	 *
+	 * [!] But it is NOT the last word, and treating it as one is what issue
+	 * #77 found: poison can land between this test and the acquire below, so
+	 * cam_bus_decide() tests CAM_ST_LOST again on the far side.  Both are
+	 * needed -- this one so a doomed call never queues, that one because this
+	 * one's answer can be stale by the time the mutex is in hand.
+	 */
+	if (!cam_api_may_acquire(cam_objects_ok, cam_state))
+		return CAM_ERR_STATE;
+
+	st = tx_mutex_get(&cam_api_mutex, TX_NO_WAIT);
+	if (st == TX_SUCCESS)
+		acq = CAM_ACQ_HELD;
+	else if (st == TX_NOT_AVAILABLE)
+		acq = CAM_ACQ_UNAVAILABLE;
+	else
+		acq = CAM_ACQ_ERROR;
+
+	/*
+	 * [!] cam_state is READ ONLY ON THE HELD PATH.  Not a micro-optimisation:
+	 * an unlocked read is the very thing this function exists to stop, and
+	 * passing one "for the table to ignore" would put it back at the point
+	 * where a future edit is most likely to start believing it.
+	 *
+	 * And the placeholder is CAM_ST_LOST, the one state that refuses, rather
+	 * than the zero value -- so that if the table's acquisition guard is ever
+	 * weakened, what is standing behind it here still fails closed instead of
+	 * reading as an idle port and handing back CAM_BUS_DIRECT.
+	 */
+	who = cam_bus_decide(acq, (acq == CAM_ACQ_HELD) ? cam_state
+	                                                : CAM_ST_LOST);
+
+	switch (who) {
+	case CAM_BUS_DIRECT:
+	case CAM_BUS_PRODUCER:
+		*owner = who;
+		return CAM_OK;
+	case CAM_BUS_REFUSE_BUSY:
+		/* Nothing was acquired, so there is nothing to release. */
+		return CAM_ERR_BUSY;
+	case CAM_BUS_REFUSE_STATE:
+		break;
 	}
-	return CAM_OK;
+	/*
+	 * [!] AND HERE THE MUTEX MAY BE HELD.  A state refusal arrives two ways:
+	 * a mutex that failed for a reason other than contention (nothing to
+	 * release), or a POISONED PORT SEEN THROUGH A SUCCESSFUL ACQUIRE.  The
+	 * second is the whole reason cam_bus_decide() re-tests CAM_ST_LOST, and it
+	 * is the one place the "negative means not held" half of this contract can
+	 * be broken.
+	 */
+	if (acq == CAM_ACQ_HELD)
+		cam_api_exit();
+	return CAM_ERR_STATE;
 }
 
 /*
@@ -1685,19 +1833,10 @@ static int cam_api_enter_up(void)
  * link is slow enough that the window is narrow -- so this closes a hole found
  * by reading rather than one seen.
  *
- * [!] Those six neighbours are not wholly in the clear either, and saying they
- * queue "instead of" touching the bus is true of the path they intend and not of
- * the one a stale test can reach: they all read cam_state BEFORE the mutex, so a
- * stream that starts in between leaves the fall-through doing I2C anyway.  That
- * is pre-existing and wider than this issue -- see issue #77.
- *
- * AND THE TEST IS INSIDE THE MUTEX, unlike the one in
- * camera_read_frame_length() which is taken before it.  Not a style difference:
- * camera_stream_start() publishes CAM_ST_STREAMING while holding this mutex, so
- * testing after the acquire means a stream cannot start between the test and the
- * I2C.  This function already holds the mutex at that point, so the stronger
- * placement costs nothing here.  (Whether the other one's earlier test wants the
- * same treatment is its own question, not this issue's.)
+ * The test that decides it is cam_bus_enter()'s, which is to say it is taken
+ * with the mutex HELD.  Issue #74 made that placement here and issue #77 gave
+ * the other six the same one; the note on cam_bus_enter() says why a test taken
+ * any earlier is worth nothing.
  *
  * Refusing rather than answering from cache is the honest option.  The chip
  * version and the rev-C flag are cached and cam_sensor_id() returns the selected
@@ -1710,14 +1849,17 @@ static int cam_api_enter_up(void)
  */
 int camera_probe(struct camera_probe_info *out)
 {
+	enum cam_bus_owner owner;
 	int rc;
 
 	if (out == NULL)
 		return CAM_ERR_PARAM;
-	rc = cam_api_enter();
+	rc = cam_bus_enter(&owner);
 	if (rc != CAM_OK)
 		return rc;
-	if (cam_state == CAM_ST_STREAMING) {
+	/* Tested for the one route that may act, not against the one that may
+	 * not: an owner added later must not become a licence to read the bus. */
+	if (owner != CAM_BUS_DIRECT) {
 		cam_api_exit();
 		return CAM_ERR_BUSY;    /* I2C; the producer owns that driver */
 	}
@@ -1741,34 +1883,36 @@ const uint8_t *camera_raw_frame(void)
 	return cam_dp_completed_buffer();
 }
 
-int camera_capture_raw(void)
+/*
+ * The one-shot capture, in the demosaiced or the raw Bayer datapath.
+ *
+ * [!] ONE IMPLEMENTATION TAKING THE MODE AS AN ARGUMENT, not a wrapper that
+ * sets a flag around a call (issue #77).  The old shape set cam_raw_mode before
+ * camera_capture() had entered the API, so the flag stood while the call was
+ * still deciding whether it was allowed to run at all -- see cam_api_exit() for
+ * what a producer restart does with it in that window.  Passing it in means it
+ * cannot be set before the answer.
+ */
+static int cam_capture_one(uint8_t raw)
 {
-	int rc;
-
-	/*
-	 * The same one-shot capture, with the demosaic taken out of the path so
-	 * that what lands in the buffer is the Bayer mosaic itself.  The flag is
-	 * cleared before returning, so a later preview is unaffected however
-	 * this one ends.
-	 */
-	cam_raw_mode = 1u;
-	rc = camera_capture();
-	cam_raw_mode = 0u;
-	return rc;
-}
-
-int camera_capture(void)
-{
+	enum cam_bus_owner owner;
 	uint32_t waited;
 	int rc;
 
-	rc = cam_api_enter();
+	rc = cam_bus_enter(&owner);
 	if (rc != CAM_OK)
 		return rc;
-	if (cam_state == CAM_ST_STREAMING) {
+	/* A one-shot capture drives the datapath as well as the bus, so the
+	 * producer route is a refusal here too -- and tested the same way round
+	 * as everywhere else. */
+	if (owner != CAM_BUS_DIRECT) {
 		cam_api_exit();
 		return CAM_ERR_BUSY;
 	}
+
+	/* Only now, with the datapath owned: cam_step_dp() reads this, and until
+	 * this mutex is released nobody else can reach it. */
+	cam_raw_mode = raw;
 
 	rc = cam_bringup();
 	if (rc != CAM_OK) {
@@ -1827,13 +1971,52 @@ int camera_capture(void)
 	return rc;
 }
 
+int camera_capture(void)
+{
+	return cam_capture_one(0u);
+}
+
+int camera_capture_raw(void)
+{
+	return cam_capture_one(1u);
+}
+
 int camera_stream_start(struct frame_sink *sink)
 {
-	int rc = cam_api_enter();
+	enum cam_bus_owner owner;
+	int rc = cam_bus_enter(&owner);
 
+	/*
+	 * [!] THE EIGHTH ENTRY POINT, and the one with the most to lose (issue
+	 * #77, found reviewing the other seven).
+	 *
+	 * This used to enter with cam_api_enter() and then test only for
+	 * CAM_ST_STREAMING -- which is "not streaming, therefore go ahead", the
+	 * shape cam_bus_decide() exists to refuse.  CAM_ST_LOST is also not
+	 * streaming, and it IS reachable after the acquire: pass the pre-mutex
+	 * poison test while a stream runs, be preempted, let a stop take the
+	 * mutex and time out, and resume owning a poisoned port.
+	 *
+	 * Where the tuning setters would then have done one I2C transaction, this
+	 * reaches cam_bringup(), which rebuilds everything that is not READY or
+	 * STREAMING: power the module down, unwrap the interrupts, re-detect.
+	 * Underneath a producer that never acknowledged a stop.  That is the
+	 * single action CAM_ST_LOST exists to prevent, not merely a collision on
+	 * a bus.
+	 *
+	 * The sink reservation below does not stand in for this.  It refuses a
+	 * start while any sink is linked, so a preview or `nn preview` whose stop
+	 * failed is covered by it -- but `camera bench` streams with NO sink, so
+	 * on that path the registry is empty and there is nothing else in the way.
+	 *
+	 * Nothing about the answers changes: CAM_BUS_PRODUCER is the state this
+	 * already refused as CAM_ERR_BUSY, and a poisoned port already reported
+	 * CAM_ERR_STATE when it was visible before the mutex.  What changes is
+	 * that it is now also refused when it becomes visible after.
+	 */
 	if (rc != CAM_OK)
 		return rc;
-	if (cam_state == CAM_ST_STREAMING) {
+	if (owner != CAM_BUS_DIRECT) {
 		cam_api_exit();
 		return CAM_ERR_BUSY;
 	}
@@ -1960,7 +2143,7 @@ int camera_stream_start(struct frame_sink *sink)
 
 int camera_stream_stop(void)
 {
-	enum cam_stop_acquire acq;
+	enum cam_api_acquire acq;
 
 	/*
 	 * [!] THE POISON TEST IS STILL BEFORE THE MUTEX (issue #48): a call that
@@ -1993,7 +2176,7 @@ int camera_stream_stop(void)
 		        "requested");
 		return CAM_ERR_LOCKED;
 	case CAM_STOP_REFUSE_STATE:
-		if (acq == CAM_STOP_ACQ_HELD)
+		if (acq == CAM_ACQ_HELD)
 			cam_api_exit();
 		return CAM_ERR_STATE;
 	case CAM_STOP_ALREADY:
@@ -2061,55 +2244,75 @@ int camera_stream_stop(void)
  * `camera auto on` hands both back.
  *
  * Only on SUCCESS.  A refused write leaves the sensor's loop running, so the
- * flag must stay as it was -- and a camera that is absent or lost never reaches
- * here, because cam_api_enter_up() refused first.  The queued (streaming) path
- * counts as success: the producer will apply it.
+ * flag must stay as it was -- and a camera that is absent, lost or busy never
+ * reaches here, because cam_bus_enter() refused first.  The queued (producer)
+ * path counts as success: the producer will apply it.
+ *
+ * [!] AND IT IS CALLED WITH THE API MUTEX STILL HELD (issue #77).  It used to
+ * be called just after cam_api_exit(), which put the flag change outside the
+ * transaction that earned it -- and tx_mutex_put() is a scheduling point, so
+ * the gap is not theoretical.  A `camera auto on` acquiring in it would turn
+ * the sensor's AEC back on and release, and then THIS call would set the flag
+ * to 0 over the top: the sensor running auto exposure while camera_auto()
+ * reports off and the software white balance stays frozen.  Exactly the
+ * disagreement issue #39 exists to prevent, reached from the other side.
+ *
+ * With this and camera_set_auto() both writing under the mutex, cam_auto_on has
+ * one rule and no exceptions: only a thread holding the API mutex writes it.
  */
 static void cam_manual_control_taken(void)
 {
 	cam_auto_on = 0u;
 }
 
+/*
+ * [!] THE FOUR SETTERS AND THE ONE GETTER BELOW ALL HAVE THE SAME SHAPE, and
+ * that is the point of issue #77.  Enter, be told who owns the sensor bus, and
+ * only then branch -- rather than deciding first and acquiring afterwards,
+ * which is what let a stream start in between and leave the fall-through doing
+ * I2C on a bus the producer owned.  Six entry points had six orderings; the
+ * ordering now lives once, in cam_bus_enter().
+ *
+ * The visible cost is that queueing takes the API mutex where it used to take
+ * nothing, so these can now answer CAM_ERR_BUSY during a stream start, stop,
+ * capture or probe.  That is a real change and it is the honest one: while a
+ * stream is merely RUNNING the mutex is free (the producer never takes it), so
+ * what a refusal reports is a genuinely concurrent operation and not the
+ * steady state.  cmd_camera.c names both causes.
+ */
 int camera_set_exposure(uint16_t lines)
 {
-	int rc;
+	enum cam_bus_owner owner;
+	int rc = cam_bus_enter(&owner);
 
-	if (cam_state == CAM_ST_STREAMING) {
-		cam_tune_exposure = lines;
-		cam_tune_req |= CAM_TUNE_EXPOSURE;
-		cam_manual_control_taken();
-		return CAM_OK;
-	}
-
-	rc = cam_api_enter_up();
 	if (rc != CAM_OK)
 		return rc;
-	rc = (cam_sensor_set_exposure(lines) == 0) ? CAM_OK : CAM_ERR_HAL;
-	cam_api_exit();
+	if (owner == CAM_BUS_PRODUCER)
+		cam_tune_queue_exposure(lines);
+	else if ((rc = cam_bringup()) == CAM_OK)
+		rc = (cam_sensor_set_exposure(lines) == 0) ? CAM_OK
+		                                           : CAM_ERR_HAL;
 	if (rc == CAM_OK)
 		cam_manual_control_taken();
+	cam_api_exit();
 	return rc;
 }
 
 int camera_set_gains(uint8_t again, uint16_t dgain)
 {
-	int rc;
+	enum cam_bus_owner owner;
+	int rc = cam_bus_enter(&owner);
 
-	if (cam_state == CAM_ST_STREAMING) {
-		cam_tune_again = again;
-		cam_tune_dgain = dgain;
-		cam_tune_req |= CAM_TUNE_GAINS;
-		cam_manual_control_taken();
-		return CAM_OK;
-	}
-
-	rc = cam_api_enter_up();
 	if (rc != CAM_OK)
 		return rc;
-	rc = (cam_sensor_set_gains(again, dgain) == 0) ? CAM_OK : CAM_ERR_HAL;
-	cam_api_exit();
+	if (owner == CAM_BUS_PRODUCER)
+		cam_tune_queue_gains(again, dgain);
+	else if ((rc = cam_bringup()) == CAM_OK)
+		rc = (cam_sensor_set_gains(again, dgain) == 0) ? CAM_OK
+		                                               : CAM_ERR_HAL;
 	if (rc == CAM_OK)
 		cam_manual_control_taken();
+	cam_api_exit();
 	return rc;
 }
 
@@ -2124,18 +2327,16 @@ int camera_set_gains(uint8_t again, uint16_t dgain)
  */
 int camera_set_frame_length(uint16_t lines)
 {
-	int rc;
+	enum cam_bus_owner owner;
+	int rc = cam_bus_enter(&owner);
 
-	if (cam_state == CAM_ST_STREAMING) {
-		cam_tune_vts = lines;
-		cam_tune_req |= CAM_TUNE_VTS;
-		return CAM_OK;
-	}
-
-	rc = cam_api_enter_up();
 	if (rc != CAM_OK)
 		return rc;
-	rc = (cam_sensor_set_frame_length(lines) == 0) ? CAM_OK : CAM_ERR_HAL;
+	if (owner == CAM_BUS_PRODUCER)
+		cam_tune_queue_vts(lines);
+	else if ((rc = cam_bringup()) == CAM_OK)
+		rc = (cam_sensor_set_frame_length(lines) == 0) ? CAM_OK
+		                                               : CAM_ERR_HAL;
 	cam_api_exit();
 	return rc;
 }
@@ -2150,15 +2351,21 @@ int camera_set_frame_length(uint16_t lines)
  */
 int camera_read_frame_length(uint16_t *lines)
 {
-	int rc;
+	enum cam_bus_owner owner;
+	int rc = cam_bus_enter(&owner);
 
-	if (cam_state == CAM_ST_STREAMING)
-		return CAM_ERR_BUSY;    /* I2C; the producer owns that driver */
-
-	rc = cam_api_enter_up();
 	if (rc != CAM_OK)
 		return rc;
-	rc = (cam_sensor_read_frame_length(lines) == 0) ? CAM_OK : CAM_ERR_HAL;
+	/* A READ cannot be handed to the producer -- there is nowhere for the
+	   answer to come back to -- so this is the one of the five where the
+	   producer route is a refusal rather than a queued request. */
+	if (owner != CAM_BUS_DIRECT) {
+		cam_api_exit();
+		return CAM_ERR_BUSY;    /* I2C; the producer owns that driver */
+	}
+	if ((rc = cam_bringup()) == CAM_OK)
+		rc = (cam_sensor_read_frame_length(lines) == 0) ? CAM_OK
+		                                                : CAM_ERR_HAL;
 	cam_api_exit();
 	return rc;
 }
@@ -2171,22 +2378,32 @@ void camera_set_wb(const struct cam_wb *wb)
 
 int camera_set_auto(int on)
 {
+	enum cam_bus_owner owner;
 	int rc;
 
 	/*
-	 * [!] THE POISON CHECK HAS TO BE FIRST HERE, and only here (issue #48).
+	 * [!] NOTHING IS RECORDED UNTIL A ROUTE IS GRANTED (issue #77).
 	 *
-	 * Every other setter reaches hardware through cam_api_enter(), which
-	 * refuses.  This one is different twice over: it writes cam_auto_on
-	 * BEFORE going near the mutex, and it deliberately converts a bring-up
-	 * failure into CAM_OK (the request is kept and applied later).  Both are
-	 * right for a camera that is merely absent and wrong for one whose
-	 * producer never came back -- the flag is read by cam_auto_step() on
-	 * that very thread, and reporting success would be a lie about a device
-	 * that is finished.
+	 * cam_auto_on used to be written before the mutex was even attempted,
+	 * and every cam_api_enter_up() failure was then turned into CAM_OK.  For
+	 * an absent camera that is right -- see below -- but cam_api_enter_up()
+	 * also fails on lock contention, so a `camera auto off` that collided
+	 * with a stream start FLIPPED THE FLAG, WROTE NO I2C, AND REPORTED
+	 * SUCCESS.  That is precisely the lie issue #39 set out to remove: the
+	 * port says "auto: off" while the sensor's own AEC is still running, and
+	 * the software white balance -- which shares this flag -- is frozen with
+	 * it.  A refusal now leaves the flag exactly as it was, so a retry is
+	 * both meaningful and idempotent.
+	 *
+	 * The poison test still happens first; it is inside cam_bus_enter(), and
+	 * before the mutex there as it must be (issue #48).  This used to need
+	 * its own copy because the streaming path never entered the API at all.
+	 * It does now, so the copy is gone -- and CAM_ST_LOST is refused whether
+	 * it is seen before the acquire or, as it can be, after.
 	 */
-	if (cam_state == CAM_ST_LOST)
-		return CAM_ERR_STATE;
+	rc = cam_bus_enter(&owner);
+	if (rc != CAM_OK)
+		return rc;
 
 	cam_auto_on = on ? 1u : 0u;
 
@@ -2196,17 +2413,17 @@ int camera_set_auto(int on)
 	 * as well, or `camera exposure` is overwritten a frame later and manual
 	 * control silently does not exist.
 	 *
-	 * That is an I2C write, so it obeys the same two rules as every other
-	 * tuning setter here rather than going straight at the bus: while a
-	 * stream runs the producer owns the CIS driver and this is queued for
-	 * it, and otherwise it goes under the API mutex on a brought-up sensor.
-	 * Bringing up is also what makes the request meaningful before the first
-	 * probe -- detection runs there, so the write lands on the sensor that
-	 * is actually fitted rather than on the default descriptor.
+	 * That is an I2C write, so it obeys the same rule as every other tuning
+	 * setter here rather than going straight at the bus: when the producer
+	 * owns the CIS driver this is queued for it, and otherwise it goes under
+	 * the API mutex on a brought-up sensor.  Bringing up is also what makes
+	 * the request meaningful before the first probe -- detection runs there,
+	 * so the write lands on the sensor that is actually fitted rather than
+	 * on the default descriptor.
 	 */
-	if (cam_state == CAM_ST_STREAMING) {
-		cam_tune_auto = cam_auto_on;
-		cam_tune_req |= CAM_TUNE_AUTO;
+	if (owner == CAM_BUS_PRODUCER) {
+		cam_tune_queue_auto(cam_auto_on);
+		cam_api_exit();
 		return CAM_OK;
 	}
 
@@ -2217,12 +2434,18 @@ int camera_set_auto(int on)
 	 * kept -- reporting an error would be telling the user to retry
 	 * something that has already taken.  Only a sensor that is up and
 	 * refuses the write has actually failed.
+	 *
+	 * [!] This is now the ONLY failure turned into success, which is the
+	 * whole reason bring-up is called here instead of inside cam_bus_enter():
+	 * "could not reach the sensor" and "could not get in at all" have to end
+	 * differently, and folding them into one helper made them one answer.
 	 */
-	rc = cam_api_enter_up();
-	if (rc != CAM_OK)
+	if (cam_bringup() != CAM_OK) {
+		cam_api_exit();
 		return CAM_OK;
+	}
 	rc = (cam_sensor_set_auto((int)cam_auto_on) == 0) ? CAM_OK
-	                                                         : CAM_ERR_HAL;
+	                                                  : CAM_ERR_HAL;
 	cam_api_exit();
 	return rc;
 }
@@ -2274,7 +2497,7 @@ void camera_stream_stats(struct camera_stats *out)
 	 * Interrupts off is enough and is what this port already uses for the
 	 * same job (see cam_apply_tuning()): with them disabled the scheduler
 	 * cannot switch, so the producer cannot be mid-update.  The API mutex is
-	 * deliberately NOT taken here -- see the note on cam_api_enter(); this
+	 * deliberately NOT taken here -- see the note on cam_bus_enter(); this
 	 * function has to keep answering when the camera is refusing everything.
 	 * The single-word counters below need none of this.
 	 */

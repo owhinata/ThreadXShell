@@ -464,6 +464,14 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   [!] **`camera_stream_stop()` は成功時のみ join を保証する**（`CAM_OK` = producer 停止済み。
   timeout は何も証明しない）。**全ての呼び出し元は `CAM_OK` の時だけ detach する**
   （`camera preview` も同様。従来は無条件 detach で、これは既存のバグだった）。
+  [!] **センサーバスの所有者は mutex 保持下で決める**（#74 / #77。producer は API mutex を
+  取らないので、コンソールをバスから遠ざけているのは**状態検査**の方。`camera_stream_start()` が
+  **保持下で** `CAM_ST_STREAMING` を publish する以上、**acquire より前の検査は無価値**）。
+  入口は **`cam_bus_enter()` 1 本**で、`cam_bus_decide()` が**「誰が持っているか」を返す**
+  （「何をすべきか」ではない）。`CAM_OK` ⇒ **mutex 保持** + owner は DIRECT / PRODUCER のみ。
+  **bring-up はヘルパに入れない**。**`CAM_ST_LOST` は保持下で到達する**ので direct に落とさない
+  （`cam_bringup()` がポートを再構築する）。判定は**状態を列挙**する（「STREAMING 以外」は
+  fail open）。詳細は board README。
   [!] **stop だけが API mutex を有界待ちする**（#65。他の入口は `TX_NO_WAIT` のまま —
   両方向に戻さない）。**poison の判定は待ちの向こう側でもう一度行う**（`CAM_ST_LOST` は
   「not streaming」でもあるので、近道を前に置くと起きていない stop を成功と報告する）。

@@ -2,9 +2,10 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * The stop's decision table (issue #65).  See cam_state.h for why it is here
- * and not inline in camera.c: the case that matters cannot be produced on
- * hardware, so it is written as a pure function and walked by a host test.
+ * The camera port's decision tables (issues #65, #72, #77).  See cam_state.h
+ * for why they are here and not inline in camera.c: the cases that matter
+ * cannot be produced on hardware, so they are written as pure functions and
+ * walked by a host test.
  */
 #include "cam_state.h"
 
@@ -15,7 +16,7 @@ int cam_api_may_acquire(int objects_ok, enum cam_state st)
 	return (st != CAM_ST_LOST);
 }
 
-enum cam_stop_action cam_stop_decide(enum cam_stop_acquire acq,
+enum cam_stop_action cam_stop_decide(enum cam_api_acquire acq,
                                      enum cam_state st)
 {
 	/*
@@ -24,20 +25,20 @@ enum cam_stop_action cam_stop_decide(enum cam_stop_acquire acq,
 	 * not yet let go, or the producer may have left by itself, so `st` is
 	 * not ours to read and the port is NOT poisoned on this path.
 	 */
-	if (acq == CAM_STOP_ACQ_TIMEOUT)
+	if (acq == CAM_ACQ_UNAVAILABLE)
 		return CAM_STOP_REFUSE_LOCKED;
 
 	/*
 	 * [!] ANYTHING THAT IS NOT "WE HOLD IT" REFUSES, tested that way round
-	 * on purpose.  CAM_STOP_ACQ_ERROR is a mutex this port can no longer
+	 * on purpose.  CAM_ACQ_ERROR is a mutex this port can no longer
 	 * rely on -- the same class as never having created one, and kept apart
-	 * from the timeout so "could not ask" keeps its narrow meaning -- and a
-	 * value added to the enum later lands here too.  Written as a default
-	 * case beside HELD it would have fallen through to the state table
-	 * instead, which can answer ALREADY: a confirmed stop, reported by a
-	 * caller that does not hold the mutex.
+	 * from CAM_ACQ_UNAVAILABLE so that "could not ask" keeps its narrow
+	 * meaning -- and a value added to the enum later lands here too.  Written
+	 * as a default case beside HELD it would have fallen through to the state
+	 * table instead, which can answer ALREADY: a confirmed stop, reported by
+	 * a caller that does not hold the mutex.
 	 */
-	if (acq != CAM_STOP_ACQ_HELD)
+	if (acq != CAM_ACQ_HELD)
 		return CAM_STOP_REFUSE_STATE;
 
 	/*
@@ -61,6 +62,59 @@ enum cam_stop_action cam_stop_decide(enum cam_stop_acquire acq,
 		return CAM_STOP_REFUSE_STATE;
 	}
 	return CAM_STOP_REFUSE_STATE;
+}
+
+enum cam_bus_owner cam_bus_decide(enum cam_api_acquire acq, enum cam_state st)
+{
+	/*
+	 * [!] THE ACQUISITION FIRST, AND `st` IS NOT CONSULTED UNLESS WE HOLD IT.
+	 *
+	 * cam_state is published under this mutex by camera_stream_start(), so a
+	 * value read without holding it is a value another thread may already have
+	 * moved on from -- which is issue #77 itself, arriving one level down.  The
+	 * caller passes a placeholder for the two refusals rather than a real read,
+	 * so "ignored unless held" is true where the variable is TOUCHED and not
+	 * merely here; this ordering is what makes that placeholder safe.
+	 *
+	 * Split the same way cam_stop_decide() splits it: contention is retryable
+	 * and says nothing about the port, while a mutex that failed for any other
+	 * reason is a broken kernel object and belongs with "nothing usable".
+	 * Collapsing them would make a corrupt mutex look like a busy one and send
+	 * the operator into a retry loop against a fault.
+	 */
+	if (acq == CAM_ACQ_UNAVAILABLE)
+		return CAM_BUS_REFUSE_BUSY;
+	if (acq != CAM_ACQ_HELD)
+		return CAM_BUS_REFUSE_STATE;
+
+	/*
+	 * [!] ENUMERATED, NOT "ANYTHING BUT STREAMING".
+	 *
+	 * CAM_BUS_DIRECT is the permission to drive the vendor CIS driver, which
+	 * has no locking of its own and which the producer uses too, so it is the
+	 * one answer that can hurt.  A wider test -- `st != CAM_ST_STREAMING` --
+	 * reads identically on every state anyone has thought about and fails open
+	 * on CAM_ST_LOST, which IS reachable here (see cam_state.h: poison can land
+	 * between the pre-mutex test and this acquire).  Direct on a poisoned port
+	 * means cam_bringup() rebuilding it under a producer that never
+	 * acknowledged a stop.
+	 *
+	 * So every state that may touch the bus is one somebody decided may touch
+	 * it.  No `default:` -- -Wall names this file while a new member is still
+	 * being added, and the fail-closed return below catches the value that
+	 * reaches here before anyone updates the switch.
+	 */
+	switch (st) {
+	case CAM_ST_STREAMING:
+		return CAM_BUS_PRODUCER;
+	case CAM_ST_DOWN:
+	case CAM_ST_READY:
+	case CAM_ST_FAULTED:
+		return CAM_BUS_DIRECT;
+	case CAM_ST_LOST:
+		return CAM_BUS_REFUSE_STATE;
+	}
+	return CAM_BUS_REFUSE_STATE;
 }
 
 enum cam_drain_verdict cam_drain_decide(int drain_rc, int pins)

@@ -65,6 +65,19 @@ extern "C" {
 #define FRAME_PIPELINE_ERR_OPEN       (-3) /* the sink's own open() rejected   */
 #define FRAME_PIPELINE_ERR_ATTACHED   (-4) /* already linked into this pipeline */
 #define FRAME_PIPELINE_ERR_UNDRAINED  (-5) /* still holds pins -- see attach()  */
+#define FRAME_PIPELINE_ERR_TRANSITION (-6) /* an attach or detach is in flight  */
+#define FRAME_PIPELINE_ERR_QUIESCE    (-7) /* a callback has not returned yet   */
+#define FRAME_PIPELINE_ERR_OWNER      (-8) /* a different pipeline owns it      */
+#define FRAME_PIPELINE_ERR_STATE      (-9) /* the sink's bookkeeping disagrees  */
+
+/*
+ * [!] TWO OF THESE ARE RETRYABLE AND THE REST ARE NOT, and that split is the
+ * only thing a port acts on (issue #79).  TRANSITION and QUIESCE mean "ask
+ * again in a moment"; ATTACHED, UNDRAINED, OWNER, STATE, FULL and PARAM mean
+ * "this will not get better by itself".  Every entry point below classifies the
+ * same sink the same way -- a port that retried what another call had already
+ * called terminal would spin on a corrupted sink forever.
+ */
 
 /**
  * Injected mutual exclusion.  The glue wires this to a ThreadX TX_MUTEX
@@ -87,6 +100,32 @@ struct frame_os {
  * where the producer naturally blocks on a single frame.  Hence there is no
  * BLOCK policy.
  */
+/**
+ * Where a sink is in its registry lifecycle (issue #79).  Core-owned, moved only
+ * under the owning pipeline's lock.  UNOWNED is zero so a static sink starts
+ * correct without an initialiser.
+ *
+ *   UNOWNED -> ATTACHING -> ATTACHED -> DETACHING -> DRAINING -> UNOWNED
+ *                 |                                     ^
+ *                 \- open() rejected -> UNOWNED          \- _pins == 0 AND
+ *                                                            _callbacks == 0
+ *
+ * [!] THE EXIT FROM DRAINING IS NOT "THE PIN CAME BACK".  publish() calls
+ * consume() outside the lock and re-takes it afterwards to write the sink's
+ * statistics, and put()'s LATEST hand-off does the same -- so the core is still
+ * touching the sink after its pin is home.  Ownership ends when both are done,
+ * released by whichever arrives last.  This is #72's put-last rule seen from the
+ * other side: a pin at zero proves the callback is out of the OWNER's state, not
+ * that the core is out of the sink's.
+ */
+enum frame_sink_state {
+	FRAME_SINK_UNOWNED = 0,
+	FRAME_SINK_ATTACHING,
+	FRAME_SINK_ATTACHED,
+	FRAME_SINK_DETACHING,
+	FRAME_SINK_DRAINING,
+};
+
 enum frame_policy {
 	FRAME_POLICY_DROP = 0, /**< if the sink is busy, drop this frame (live default) */
 	FRAME_POLICY_LATEST,   /**< coalesce: while busy keep only the newest as pending */
@@ -124,6 +163,13 @@ struct frame_sink {
 	uint32_t errors;
 
 	/* Core-internal; the owner must not touch these.
+	   [!] AND THEY ARE CROSS-CHECKED, not trusted one at a time (issue #79).
+	   The state, the owner, this sink's place in the registry and the two
+	   counters are independent facts; every entry point requires them to agree
+	   before it does anything, because each pairing that cannot arise from a
+	   real transition is a way for a corrupted sink to reach real work -- an
+	   ATTACHED sink with no owner would otherwise walk into detach and have a
+	   board's close() called on it.
 	   [!] But it must ZERO them before the first attach (issue #72): attach now
 	   READS `_pins` to decide whether the sink was ever drained, so a sink that
 	   came up with garbage in it would be refused forever.  Every sink in this
@@ -134,6 +180,9 @@ struct frame_sink {
 	const struct frame_desc *_pending; /**< LATEST coalesce slot (pinned)         */
 	int                      _busy;     /**< a consume() for this sink is in flight */
 	int                      _pins;     /**< slots this sink currently holds (detach) */
+	int                      _callbacks; /**< consume() calls not yet accounted for  */
+	uint8_t                  _state;    /**< enum frame_sink_state                  */
+	struct frame_pipeline   *_owner;    /**< the pipeline that may touch this sink  */
 };
 
 /** Compile-time caps for the inline bookkeeping (owhinata/stm32f746g-disco#46 implementation).
@@ -176,11 +225,26 @@ struct frame_pipeline {
 	enum frame_format      fmt;                          /* current format (open)   */
 	uint16_t               width, height;               /* current geometry (open) */
 	struct frame_stats     stats;
+	/* Capacity claimed by attaches that have not linked yet (issue #79): only
+	   attach raises the sink count, so counting linked + reserved is what bounds
+	   it without asking callers to serialise.  No walk can verify this against
+	   the sinks -- an ATTACHING sink is by definition not in the list -- so what
+	   holds it is that the claim and this increment are one locked section. */
+	unsigned               _reserved;
 };
 
 /* ---- producer side ------------------------------------------------------- */
 
 /**
+ * [!] EVERYTHING MUST BE QUIESCENT AND NOTHING MAY OVERLAP THIS (issue #79).
+ * It takes no lock and memsets the whole struct, and it cannot reach state
+ * parked in a sink it has never seen.  So: no linked sink, no attach
+ * reservation, no sink of this pipeline mid-transition or draining, no
+ * outstanding pin, and no consume() of its own -- or its epilogue -- still
+ * running.  "Quiescent" was doing too much work as a single word; each of those
+ * is a way for the rebuilt pipeline to be written by something that belonged to
+ * the old one.
+ *
  * Bind the engine to @p nslots ring slots carved from caller-owned SDRAM
  * (slot_mem is nslots * slot_size bytes, .sdram, non-cacheable).  The producer
  * owns the slot memory; the core owns only the bookkeeping (gen / refcount /
@@ -252,15 +316,24 @@ void frame_pipeline_set_format(struct frame_pipeline *p, enum frame_format fmt,
  * `s->_next = p->sinks` while `s` is in that list; if it is the head, `s->_next`
  * becomes `s` and every later traversal of the registry never terminates.
  *
- * [!] SERIALISATION IS THE CALLER'S, and these are the exact conditions the
- * refusals above rest on (issue #72; the core will take them over):
- *   - attach() calls on one pipeline are mutually serialised;
- *   - a sink is not detached while its own attach() is in progress;
- *   - init() does not overlap any other operation on the pipeline.
- * Only attach raises the sink count, so serialising attach against attach is
- * what bounds capacity; a detach of a DIFFERENT sink during an open() only
- * lowers it.  What still needs an owner is the same-sink rule, because attach
- * releases the lock across open() and detach releases it across close().
+ * [!] THE CORE SERIALISES THESE NOW (issue #79).  attach() claims the sink
+ * before it calls open() and commits after, detach() claims it across close(),
+ * and a claimed sink is refused by every entry point -- so overlapping calls no
+ * longer have to be kept apart by the caller.  THREE conditions do survive, and
+ * they are not formalities:
+ *   - set_format() does not overlap an attach.  attach snapshots the format
+ *     under the claim so open() cannot see a half-updated one, but a sink can
+ *     still agree to one geometry and then be published another; closing that
+ *     would need the core to re-open its ATTACHING sinks, and set_format()
+ *     returns void.
+ *   - a sink belongs to at most one pipeline at a time, and every sink-scoped
+ *     call uses its owner.  attach() and detach() refuse a foreign owner;
+ *     get(), put() and sink_pins() are contract-bound instead, because put()
+ *     returns void and they are the per-frame path.  Concurrent calls on one
+ *     sink from two pipelines are undefined: the state lives in the sink but is
+ *     guarded by a pipeline's lock, and closing that would need atomics this
+ *     freestanding core does not have.
+ *   - init() runs only on a fully quiescent pipeline -- see its own comment.
  */
 int frame_pipeline_attach(struct frame_pipeline *p, struct frame_sink *s);
 
@@ -276,7 +349,28 @@ const char *frame_pipeline_strerror(int rc);
 
 /**
  * Unlink a sink so that no LATER publish selects it, and report how many pins it
- * still holds in flight.  The core does NOT wait: before freeing @p s / its ctx,
+ * still holds in flight.
+ *
+ * Returns **a non-negative pin count, or a negative FRAME_PIPELINE_ERR_***
+ * (issue #79) -- the type has always been read as a count, so this has to be
+ * said outright.  ERR_OWNER for a sink another pipeline owns, ERR_TRANSITION
+ * while an attach or detach of it is in flight, ERR_QUIESCE while one of its
+ * callbacks has not returned, ERR_STATE when its bookkeeping disagrees with
+ * itself.  A sink nobody owns is a no-op that answers its pin count: nothing is
+ * unlinked, no pending frame is dropped and close() is NOT called, because
+ * telling a sink it was detached when it was never linked is its own bug.
+ *
+ * [!] A NON-NEGATIVE ANSWER, ZERO INCLUDED, IS NOT PERMISSION TO TEAR DOWN.  A
+ * sink whose callback already put its pin can honestly answer zero while that
+ * callback is still running.  Permission comes from the drain check afterwards
+ * -- and a caller that ignored a negative here must not read a later
+ * sink_pins() == 0 as permission either.
+ *
+ * [!] OVERLAPPING CALLS LINEARISE AS DETACH-FIRST, ATTACH-COMMIT-SECOND.  A
+ * detach that arrives while the sink is being attached finds nothing to unlink
+ * and says so; the attach then completes and the sink IS attached afterwards.
+ * A caller that needs a detach to definitely take effect retries once the
+ * transition it was told about has ended.  The core does NOT wait: before freeing @p s / its ctx,
  * the caller (which owns the sink's thread and queue) must drain that thread --
  * let the running consume() finish and every pin be put() -- until the in-flight
  * count reaches zero.  Returns the in-flight pin count at detach time.
@@ -312,6 +406,13 @@ int frame_pipeline_detach(struct frame_pipeline *p, struct frame_sink *s);
  * THIS IS THE DRAIN CHECK (issue #72).  Call it after draining the sink's
  * thread; a non-zero answer means the drain did not finish and the sink's ctx --
  * whatever consume() reads -- must NOT be torn down or reused yet.
+ *
+ * Since #79 this answers a negative in the same cases detach() does -- a
+ * transition, an unreturned callback, a foreign owner, inconsistent bookkeeping
+ * -- because the three entry points must not classify one damaged sink
+ * differently: a port retries a transition and gives up on corruption, so one
+ * disagreement is a port spinning on a broken sink forever.  Zero from here
+ * always means "nothing outstanding", never "I could not tell".
  *
  * [!] FOR A DETACHED SINK, ZERO IS A DECISION AND NOT MERELY A SNAPSHOT, which
  * is what makes an after-the-drain check worth taking.  The reason is not the

@@ -1373,6 +1373,29 @@ static int cam_stat_consume(void *ctx, const struct frame_desc *f)
 }
 
 /*
+ * [!] The pipeline is not safe to rebuild any more (issue #79).
+ *
+ * File-static, and deliberately NOT inside the pipeline: frame_pipeline_init()
+ * memsets that, so a latch living there would be cleared by the very operation
+ * it exists to prevent.  Never cleared before a reboot -- there is nothing to
+ * wait for once the core has said it cannot account for a sink this port owns.
+ * Logged once, so the reason reaches the console rather than living only inside
+ * a refusal.
+ */
+static int cam_pipe_unsafe;
+
+static void cam_pipe_fail_stop(const char *where, const char *why)
+{
+	if (!cam_pipe_unsafe) {
+		cam_pipe_unsafe = 1;
+		cam_sink_undrained++;
+		LOG_ERR("stats sink at %s: %s -- the camera pipeline cannot be "
+		        "rebuilt safely; streaming is disabled until reboot",
+		        where, why);
+	}
+}
+
+/*
  * Detach the stats sink and check the core's own in-flight count (issue #72).
  *
  * svc/frame_pipeline requires a sink's owner to drain until that count reaches
@@ -1392,23 +1415,55 @@ static int cam_stat_consume(void *ctx, const struct frame_desc *f)
  * So the count here is ALWAYS zero, and anything else is a put that did not
  * happen.
  *
- * [!] AND THE DAMAGE ON THIS BOARD IS BOUNDED, unlike the other two.  A stream
- * start re-runs frame_pipeline_init(), which rebuilds every slot with refcount
- * zero, and the attach that follows clears the sink's own bookkeeping.  So a
- * leaked pin here cannot accumulate into the "next stream finds no free slot"
- * failure #72 is about; it heals at the next start.  This is a bug detector, not
- * protection -- which is why it reports and counts rather than refusing.
+ * [!] IT USED TO HEAL AT THE NEXT START, AND NO LONGER DOES (issue #79).  A
+ * stream start re-runs frame_pipeline_init(), which rebuilt every slot with
+ * refcount zero, and the attach that followed cleared the sink's own
+ * bookkeeping -- so a leaked pin here could not accumulate, and this was a bug
+ * detector rather than protection.  #79 made that re-init a precondition
+ * violation instead: a sink holding a pin is DRAINING with its owner still set,
+ * and init() cannot reach state parked in a sink.  So a leak now latches the
+ * fail-stop below and streaming is refused until reboot.
  */
 static void cam_stat_sink_detach(const char *where)
 {
-	int pins;
+	int rc, pins;
 
-	(void)frame_pipeline_detach(&cam_pipe, &cam_stat_sink);
+	/*
+	 * [!] THE CORE'S ANSWER IS TESTED FIRST, AND A NEGATIVE IS NOT A COUNT
+	 * (issue #79).  Both calls below can now answer "I cannot tell" -- a
+	 * transition, a callback that has not returned, bookkeeping that disagrees
+	 * with itself -- and this function used to discard the first and print the
+	 * second as a number of slots.
+	 *
+	 * Testing it is necessary but not sufficient, which is why the latch
+	 * exists: this returns void, and its callers go on to re-run
+	 * frame_pipeline_init() at this start or the next one.  init() memsets the
+	 * pipeline and cannot reach state parked in a sink, so running it then
+	 * would violate the precondition this change adds.  Unreachable in normal
+	 * operation -- cam_stat_consume() puts synchronously before returning, and
+	 * every caller is either the producer itself or a pre-publish failure --
+	 * and that is exactly why it is decided here rather than discovered later.
+	 */
+	rc = frame_pipeline_detach(&cam_pipe, &cam_stat_sink);
+	if (rc < 0) {
+		cam_pipe_fail_stop(where, frame_pipeline_strerror(rc));
+		return;
+	}
 	pins = frame_pipeline_sink_pins(&cam_pipe, &cam_stat_sink);
+	if (pins < 0) {
+		cam_pipe_fail_stop(where, frame_pipeline_strerror(pins));
+		return;
+	}
 	if (pins != 0) {
-		cam_sink_undrained++;
+		/* [!] AND A LEFTOVER PIN LATCHES TOO (issue #79).  Before #79 this was
+		   a diagnostic that healed at the next start; now a sink holding a pin
+		   is DRAINING with its owner still set, and the next start re-runs
+		   frame_pipeline_init() -- which memsets the pipeline and cannot reach
+		   that state.  Reporting it and carrying on would be this port
+		   violating the precondition the same change just added. */
 		LOG_ERR("stats sink still holds %d slot(s) at %s: a consume() "
 		        "returned without putting", pins, where);
+		cam_pipe_fail_stop(where, "a consume() returned without putting");
 	}
 }
 
@@ -1702,6 +1757,12 @@ static int cam_stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 {
 	int rc;
 
+	/* [!] Ahead of everything, including the probe and the sensor configure
+	   below (issue #79): a start that is going to be refused must not
+	   reconfigure the hardware on its way to failing, and the pipeline re-init
+	   further down is the operation this latch exists to stop. */
+	if (cam_pipe_unsafe)
+		return CAM_ERR_STATE;
 	if (cam_stream_active || cam_xfer_active)
 		return CAM_ERR_BUSY;
 	if (!info.powered || info.sensor != CAM_SENSOR_OV2640) {

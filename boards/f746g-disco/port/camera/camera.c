@@ -1768,6 +1768,57 @@ static uint32_t cam_elapsed_ms;   /* frozen at teardown for post-stop `stats` */
 
 /* ---- subscriber registry helpers (all under cam_lock) --------------------- */
 
+/* The internal stats sink's detach, in one place so its refusal cannot be
+   discarded at one site and handled at another (issue #79). */
+static void cam_stat_detach(void);
+
+
+/*
+ * [!] The pipeline is not safe to rebuild any more (issue #79).
+ *
+ * Keeping `attached` when the core refuses a detach is only half of it: the
+ * next base start re-runs frame_pipeline_init(), which memsets the pipeline and
+ * cannot reach state parked in a sink -- and attach-all would then skip the very
+ * subscriber whose registration we kept, leaving this port and the core
+ * disagreeing about who is linked.  So a refusal latches, and the latch is
+ * tested before the start touches anything.
+ *
+ * File-static, deliberately outside the pipeline (init memsets that) and never
+ * cleared before a reboot: there is nothing to wait for once the core has said
+ * it cannot account for a sink.  Unreachable while every detach here runs under
+ * cam_lock with a synchronous consume, which is what makes it a backstop.
+ */
+static int cam_pipe_unsafe;
+
+static void cam_pipe_fail_stop(const char *what, const char *why)
+{
+	if (!cam_pipe_unsafe) {
+		cam_pipe_unsafe = 1;
+		LOG_ERR("%s: %s -- the camera pipeline cannot be rebuilt safely; "
+		        "capture is disabled until reboot", what, why);
+	}
+}
+
+static void cam_stat_detach(void)
+{
+	int rc = frame_pipeline_detach(&cam_pipe, &cam_stat_sink);
+
+	if (rc < 0) {
+		cam_pipe_fail_stop("stats sink detach refused",
+		                   frame_pipeline_strerror(rc));
+	} else if (rc > 0) {
+		/* [!] A LEFTOVER PIN LATCHES TOO (issue #79), and this is not the old
+		   diagnostic.  cam_stat_consume() puts before returning, so a pin left
+		   here is a put that did not happen -- and since #79 such a sink is
+		   DRAINING with its owner still set, which the next start's
+		   frame_pipeline_init() cannot reach.  Carrying on would be this port
+		   breaking the precondition the same change added. */
+		LOG_ERR("stats sink still holds %d slot(s)", rc);
+		cam_pipe_fail_stop("stats sink undrained",
+		                   "a consume() returned without putting");
+	}
+}
+
 /* Find the registry slot for sink @p s, or NULL if not registered.  Passing NULL
    returns the first free slot (used to claim one), or NULL when the table is full. */
 static struct cam_sub *cam_sub_find(struct frame_sink *s)
@@ -1830,8 +1881,19 @@ static int cam_subs_attach_all(void)
 			        frame_pipeline_strerror(rc));
 			for (int k = 0; k < CAM_MAX_SUBS; k++) {
 				if (cam_subs[k].attached) {
-					(void)frame_pipeline_detach(&cam_pipe, cam_subs[k].sink);
-					cam_subs[k].attached = 0;
+					/* Keep `attached` if the core says it did NOT unlink
+					   (issue #79) -- clearing it here would leave this port's
+					   registry disagreeing with the pipeline's, and the next
+					   base start would re-init over a sink the core still
+					   holds. */
+					int drc = frame_pipeline_detach(&cam_pipe,
+					                                cam_subs[k].sink);
+
+					if (drc >= 0)
+						cam_subs[k].attached = 0;
+					else
+						cam_pipe_fail_stop("subscriber detach refused",
+						                   frame_pipeline_strerror(drc));
 				}
 			}
 			return -1;
@@ -1850,7 +1912,17 @@ static void cam_subs_detach_all(void)
 {
 	for (int i = 0; i < CAM_MAX_SUBS; i++) {
 		if (cam_subs[i].attached) {
-			(void)frame_pipeline_detach(&cam_pipe, cam_subs[i].sink);
+			/* Same rule as the rollback above (issue #79): only a detach the
+			   core actually performed clears this port's own record of it --
+			   and a refusal latches, because the next start would otherwise
+			   re-init the pipeline out from under it. */
+			int drc = frame_pipeline_detach(&cam_pipe, cam_subs[i].sink);
+
+			if (drc < 0) {
+				cam_pipe_fail_stop("subscriber detach refused",
+				                   frame_pipeline_strerror(drc));
+				continue;
+			}
 			cam_subs[i].attached = 0;
 		}
 	}
@@ -1870,6 +1942,11 @@ static void cam_subs_detach_all(void)
 static void cam_subs_release_oneshot(void)
 {
 	for (int i = 0; i < CAM_MAX_SUBS; i++) {
+		/* [!] Not while the core still has it (issue #79).  Dropping the
+		   registration of a sink whose detach was refused would erase the one
+		   record that says the pipeline is still holding it. */
+		if (cam_subs[i].attached)
+			continue;
 		if (cam_subs[i].sink != NULL && cam_subs[i].oneshot) {
 			cam_subs[i].enabled = 0;
 			cam_subs[i].sink    = NULL;
@@ -1900,7 +1977,7 @@ static void cam_stream_teardown(void)
 		   disabled -- would take a spurious cam_stream_sem.  Disable it here
 		   (owhinata/stm32f746g-disco#63;  a no-op for the raster path that never enabled it). */
 		__HAL_DCMI_DISABLE_IT(&hdcmi, DCMI_IT_FRAME);
-		frame_pipeline_detach(&cam_pipe, &cam_stat_sink);
+		cam_stat_detach();
 		/* Cascade: detach every attached subscriber too (each detach fires the
 		   sink's close(), the "base detached" notification -- NOT feature stop),
 		   so the next frame_pipeline_init() (a later start) cannot memset a
@@ -2183,6 +2260,13 @@ static int stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 	int rc, nx;
 	uint32_t slot_size, nslots;
 
+	/* [!] First, ahead of the probe and everything else (issue #79): a start
+	   that is going to be refused must not power or reconfigure the sensor on
+	   its way to failing, and the frame_pipeline_init() further down is the
+	   operation this latch exists to stop.  Here rather than in the public
+	   entry point because the overrun re-arm reaches this function directly. */
+	if (cam_pipe_unsafe)
+		return CAM_ERR_STATE;
 	if (cam_stream_active)
 		return CAM_ERR_BUSY;           /* already streaming */
 	if (!sdram_is_up())
@@ -2240,7 +2324,7 @@ static int stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 	}
 	nx = cam_subs_attach_all();       /* enabled + compatible subscribers */
 	if (nx < 0) {
-		frame_pipeline_detach(&cam_pipe, &cam_stat_sink);
+		cam_stat_detach();
 		return CAM_ERR_STATE;
 	}
 	/* owhinata/stm32f746g-disco#102: no longer used for a mirror latch */
@@ -2271,7 +2355,7 @@ static int stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 		cam_jpeg_slot = frame_pipeline_acquire(&cam_pipe);
 		if (cam_jpeg_slot == NULL) {
 			cam_subs_detach_all();
-			frame_pipeline_detach(&cam_pipe, &cam_stat_sink);
+			cam_stat_detach();
 			return CAM_ERR_STATE;
 		}
 		cam_stream_active = 1;             /* arm the ISR + producer */
@@ -2286,7 +2370,7 @@ static int stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 			(void)HAL_DMA_Init(&hdma_dcmi);
 			__HAL_LINKDMA(&hdcmi, DMA_Handle, hdma_dcmi);
 			cam_subs_detach_all();
-			frame_pipeline_detach(&cam_pipe, &cam_stat_sink);
+			cam_stat_detach();
 			drain_stream_sem();
 			LOG_ERR("JPEG stream arm failed");
 			return CAM_ERR_HAL;
@@ -2301,7 +2385,7 @@ static int stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 	cam_m1 = frame_pipeline_acquire(&cam_pipe);
 	if (cam_m0 == NULL || cam_m1 == NULL) {
 		cam_subs_detach_all();
-		frame_pipeline_detach(&cam_pipe, &cam_stat_sink);
+		cam_stat_detach();
 		return CAM_ERR_STATE;
 	}
 
@@ -2322,7 +2406,7 @@ static int stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 	        mode.frame_words) != HAL_OK) {
 		cam_stream_active = 0;
 		cam_subs_detach_all();
-		frame_pipeline_detach(&cam_pipe, &cam_stat_sink);
+		cam_stat_detach();
 		LOG_ERR("stream DMA start failed");
 		return CAM_ERR_HAL;
 	}
@@ -2469,6 +2553,26 @@ int camera_unsubscribe(struct frame_sink *s)
 			   keeps running: unsubscribing never stops it (contract
 			   owhinata/stm32f746g-disco#100.2). */
 			inflight = frame_pipeline_detach(&cam_pipe, s);
+			if (inflight < 0) {
+				/* [!] The core says it did NOT unlink (issue #79) -- a
+				   transition or a callback of ours still in flight, or
+				   bookkeeping it no longer trusts.  Keep the registration:
+				   clearing `attached` and freeing the slot here would let the
+				   next base start attach a sink the pipeline still has, and
+				   would tell this subscriber's owner it was detached when it
+				   was not.  And LATCH, because every caller of this ignores
+				   the value -- without it the next start would re-init the
+				   pipeline out from under the sink the core still holds.
+				   Unreachable while every path in here runs under cam_lock,
+				   which is exactly why it is a backstop. */
+				LOG_ERR("subscriber '%s' detach refused: %s",
+				        s->name ? s->name : "?",
+				        frame_pipeline_strerror(inflight));
+				cam_pipe_fail_stop("subscriber detach refused",
+				                   frame_pipeline_strerror(inflight));
+				op_unlock();
+				return inflight;
+			}
 			sub->attached = 0;
 		}
 		sub->enabled = 0;

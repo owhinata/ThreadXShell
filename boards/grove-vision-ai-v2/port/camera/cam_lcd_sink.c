@@ -827,11 +827,25 @@ int cam_lcd_sink_detach(void)
 	 * finished with.
 	 */
 	rc = camera_unsubscribe(&cam_lcd_sink);
+	if (rc == CAM_ERR_BUSY) {
+		/*
+		 * [!] RETRYABLE, so it must NOT become SINK_LOST (issue #79).  The core
+		 * says a transition or a callback of ours is still in flight and to ask
+		 * again; latching the terminal state here would strand the panel until
+		 * reboot for something that clears by itself in a moment.  Put the sink
+		 * back where it was so the next stop retries -- leaving it in
+		 * SINK_DETACHING would wedge it just as badly, by a different road.
+		 */
+		LOG_WRN("the camera is not ready to unsubscribe the panel; retry");
+		sink_set_state(SINK_ATTACHED);
+		return CAM_ERR_BUSY;
+	}
 	if (rc != CAM_OK) {
 		/*
-		 * Refused -- which is what a lost producer gets.  The sink is
-		 * STILL LINKED and a consume() may still be running in it, so
-		 * nothing here may be torn down and nothing may be handed back.
+		 * Refused for good -- a lost producer, or bookkeeping the core no
+		 * longer trusts.  The sink is STILL LINKED and a consume() may still
+		 * be running in it, so nothing here may be torn down and nothing may
+		 * be handed back.
 		 */
 		LOG_ERR("the camera refused the unsubscribe (%d)", rc);
 		sink_fault_latch("the camera refused to unsubscribe the panel");

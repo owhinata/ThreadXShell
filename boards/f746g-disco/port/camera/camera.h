@@ -349,6 +349,14 @@ int camera_subscribe(struct frame_sink *s, enum camera_format cls_fmt);
  * when not attached): a nonzero value means a consume() was pre-pinned and may
  * not have started yet, so the caller must drain @p s AFTER this returns.  Safe
  * when @p s is not registered (no-op, returns 0).
+ *
+ * [!] Returns a NEGATIVE FRAME_PIPELINE_ERR_* if the core refused the detach
+ * (issue #79) -- a transition or a callback of this sink still in flight.  The
+ * registration is KEPT in that case, so the subscriber is still registered and
+ * still attached; a caller that needs the detach to take effect retries.  Every
+ * path in this port reaches here under the camera lock, so it is a backstop
+ * rather than something a caller sees, and the three callers ignore the value
+ * for that reason.
  */
 int camera_unsubscribe(struct frame_sink *s);
 

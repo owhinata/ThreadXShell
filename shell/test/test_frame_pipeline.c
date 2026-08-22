@@ -16,6 +16,9 @@
  *   G. read_latest() returns the latest frame's bytes + generation (tear via
  *      gen across calls).
  *   H. a counting (auto-put) sink keeps an N=4 ring cycling like the producer.
+ *   I. attach REFUSES an undrained or already-linked sink instead of erasing
+ *      its bookkeeping, decides before open(), and normalises open()'s
+ *      rejection to one core error (issue #72).
  */
 #include <assert.h>
 #include <stddef.h>
@@ -393,6 +396,236 @@ static void test_sink_pins_latest(void)
 	assert(frame_pipeline_sink_pins(&p, &m.sink) == 0);  /* drain complete */
 }
 
+/*
+ * I. attach refuses instead of erasing (issue #72).
+ *
+ * attach() used to zero `_pins`, `_busy` and `_pending` unconditionally.  For a
+ * sink whose owner skipped its drain that erased the only evidence there was:
+ * the count the owner had been told to watch went to zero while the SLOT
+ * refcounts the sink still held stayed up, so the ring was one slot short from
+ * then on and nothing said so.
+ *
+ * [!] These are the LAST line of defence, not the first.  Every board's owner
+ * refuses reuse before the core is consulted, so on a healthy system none of
+ * this ever runs -- which is exactly why it has to be tested here.
+ */
+static void test_attach_refuses_undrained(void)
+{
+	struct frame_pipeline p;
+	struct mock m;
+	int opens;
+
+	fresh(&p, 4);
+	mock_init(&m, &p, FRAME_POLICY_DROP, 0 /* hold */);
+	assert(frame_pipeline_attach(&p, &m.sink) == FRAME_PIPELINE_OK);
+
+	struct frame_desc *d1 = pub(&p);
+	assert(frame_pipeline_detach(&p, &m.sink) == 1);   /* undrained on purpose */
+	assert(frame_pipeline_sink_pins(&p, &m.sink) == 1);
+
+	/* The owner ignores its own contract and re-attaches. */
+	opens = m.open_calls;
+	m.sink.delivered = 7;                 /* something to notice being reset */
+	assert(frame_pipeline_attach(&p, &m.sink) == FRAME_PIPELINE_ERR_UNDRAINED);
+
+	/* Refused BEFORE open(), so nothing was touched: the sink's owner was not
+	   told to reset the state its consume() reads, the pin is still countable,
+	   and the sink is not in the registry. */
+	assert(m.open_calls == opens);
+	assert(m.sink.delivered == 7);
+	assert(frame_pipeline_sink_pins(&p, &m.sink) == 1);
+	assert(frame_pipeline_sink_count(&p) == 0);
+
+	/* A pin that comes back late clears the refusal by itself. */
+	frame_pipeline_put(&p, &m.sink, d1);
+	assert(frame_pipeline_sink_pins(&p, &m.sink) == 0);
+	assert(frame_pipeline_attach(&p, &m.sink) == FRAME_PIPELINE_OK);
+	assert(m.open_calls == opens + 1);
+	assert(m.sink.delivered == 0);        /* and NOW the reset is right */
+}
+
+/*
+ * I1b. the three ways the undrained refusal can be got WRONG, each of which the
+ * test above lets through.  Written out separately because every one of them is
+ * a plausible implementation, not a typo.
+ */
+static void test_attach_undrained_precedence(void)
+{
+	struct frame_pipeline p;
+	struct mock held, fill[FRAME_PIPELINE_MAX_SINKS];
+	unsigned i;
+
+	/*
+	 * (a) UNDRAINED must outrank FULL.  A pipeline with no room AND a sink that
+	 * never handed its frame back must name the sink, not the pipeline --
+	 * otherwise the one fault that is invisible everywhere else gets reported
+	 * as the one that is obvious from `camera info`.
+	 */
+	fresh(&p, 4);
+	mock_init(&held, &p, FRAME_POLICY_DROP, 0 /* hold */);
+	assert(frame_pipeline_attach(&p, &held.sink) == FRAME_PIPELINE_OK);
+	struct frame_desc *d1 = pub(&p);
+	assert(frame_pipeline_detach(&p, &held.sink) == 1);   /* undrained */
+
+	for (i = 0; i < FRAME_PIPELINE_MAX_SINKS; i++) {
+		mock_init(&fill[i], &p, FRAME_POLICY_DROP, 1 /* auto put */);
+		assert(frame_pipeline_attach(&p, &fill[i].sink) == FRAME_PIPELINE_OK);
+	}
+	assert(frame_pipeline_sink_count(&p) == FRAME_PIPELINE_MAX_SINKS);
+	assert(frame_pipeline_attach(&p, &held.sink) == FRAME_PIPELINE_ERR_UNDRAINED);
+	frame_pipeline_put(&p, &held.sink, d1);
+
+	/*
+	 * (b) It is the PIN that refuses, not the busy flag.  put() clears `_busy`
+	 * on the way out, so a sink that took an extra get() and returned only its
+	 * delivery pin sits at busy = 0 with a slot still held -- the exact state a
+	 * `_busy`-based check would wave through, and the exact state that leaves
+	 * the ring one slot short.
+	 */
+	fresh(&p, 4);
+	mock_init(&held, &p, FRAME_POLICY_DROP, 0 /* hold */);
+	assert(frame_pipeline_attach(&p, &held.sink) == FRAME_PIPELINE_OK);
+	struct frame_desc *d2 = pub(&p);
+	frame_pipeline_get(&p, &held.sink, d2);               /* the sink re-queues */
+	frame_pipeline_put(&p, &held.sink, d2);               /* delivery pin back  */
+	assert(held.sink._busy == 0);
+	assert(frame_pipeline_sink_pins(&p, &held.sink) == 1);
+	assert(frame_pipeline_detach(&p, &held.sink) == 1);
+	assert(frame_pipeline_attach(&p, &held.sink) == FRAME_PIPELINE_ERR_UNDRAINED);
+	frame_pipeline_put(&p, &held.sink, d2);
+
+	/*
+	 * (c) A NEGATIVE count is not "released".  unpin_locked() saturates at
+	 * zero, so the pipeline cannot produce one -- a negative count means the
+	 * sink's bookkeeping was written by something that had no business writing
+	 * it, and `_pins > 0` would read that as permission to reset over a
+	 * callback still inside the sink.  Reached here by writing the field
+	 * directly, which is the only way it can happen at all.
+	 */
+	fresh(&p, 4);
+	mock_init(&held, &p, FRAME_POLICY_DROP, 0);
+	held.sink._pins = -1;
+	assert(frame_pipeline_attach(&p, &held.sink) == FRAME_PIPELINE_ERR_UNDRAINED);
+	assert(held.open_calls == 0);
+}
+
+/*
+ * I1c. a refusal leaves the sink's IN-FLIGHT bookkeeping alone, not just its
+ * public counters.  `_busy` and `_pending` are what a LATEST sink's owner is
+ * mid-way through; clearing them on the way to a refusal would drop a frame the
+ * sink still owns and lose the pin that goes with it.
+ */
+static void test_attach_refusal_keeps_inflight_state(void)
+{
+	struct frame_pipeline p;
+	struct mock m;
+
+	fresh(&p, 5);
+	mock_init(&m, &p, FRAME_POLICY_LATEST, 0 /* hold */);
+	assert(frame_pipeline_attach(&p, &m.sink) == FRAME_PIPELINE_OK);
+
+	struct frame_desc *d1 = pub(&p);      /* delivered: busy + 1 pin      */
+	(void)pub(&p);                        /* coalesced: pending + 1 pin   */
+	assert(m.sink._busy == 1);
+	assert(m.sink._pending != NULL);
+	assert(frame_pipeline_sink_pins(&p, &m.sink) == 2);
+
+	/* Detach drops the pending pin (nothing will ever deliver it), so what is
+	   left is the live delivery -- and a re-attach must not touch it. */
+	assert(frame_pipeline_detach(&p, &m.sink) == 1);
+	assert(m.sink._busy == 1);
+
+	assert(frame_pipeline_attach(&p, &m.sink) == FRAME_PIPELINE_ERR_UNDRAINED);
+	assert(m.sink._busy == 1);            /* still mid-delivery */
+	assert(m.sink._pending == NULL);      /* dropped by detach, not by us */
+	assert(frame_pipeline_sink_pins(&p, &m.sink) == 1);
+
+	frame_pipeline_put(&p, &m.sink, d1);
+	assert(frame_pipeline_attach(&p, &m.sink) == FRAME_PIPELINE_OK);
+	assert(m.sink._busy == 0);            /* and now the reset runs */
+}
+
+/*
+ * I2. attach refuses a sink that is already linked, and says so before it says
+ * "full".
+ *
+ * Re-linking a linked sink writes `s->_next = p->sinks` while `s` is in that
+ * list -- if it is the head, `s->_next` becomes `s` and every later traversal
+ * of the registry never terminates.  So the assertion that matters after the
+ * refusal is not the return value: it is that the registry can still be walked
+ * at all.
+ */
+static void test_attach_refuses_already_attached(void)
+{
+	struct frame_pipeline p;
+	struct mock m[FRAME_PIPELINE_MAX_SINKS];
+	unsigned i;
+
+	fresh(&p, 4);
+	for (i = 0; i < FRAME_PIPELINE_MAX_SINKS; i++)
+		mock_init(&m[i], &p, FRAME_POLICY_DROP, 1 /* auto put */);
+
+	assert(frame_pipeline_attach(&p, &m[0].sink) == FRAME_PIPELINE_OK);
+	assert(frame_pipeline_attach(&p, &m[0].sink) == FRAME_PIPELINE_ERR_ATTACHED);
+	assert(m[0].open_calls == 1);                    /* open() not re-run */
+	assert(frame_pipeline_sink_count(&p) == 1);      /* the list terminates */
+
+	/* [!] And it keeps saying "already attached" once the pipeline is full --
+	   reporting FULL there would send someone looking for a free sink slot when
+	   the actual fault is that this sink is in one. */
+	for (i = 1; i < FRAME_PIPELINE_MAX_SINKS; i++)
+		assert(frame_pipeline_attach(&p, &m[i].sink) == FRAME_PIPELINE_OK);
+	assert(frame_pipeline_sink_count(&p) == FRAME_PIPELINE_MAX_SINKS);
+	assert(frame_pipeline_attach(&p, &m[0].sink) == FRAME_PIPELINE_ERR_ATTACHED);
+
+	/* A different sink into a full pipeline is the one that gets FULL, and its
+	   open() is not called either. */
+	struct mock extra;
+	mock_init(&extra, &p, FRAME_POLICY_DROP, 1);
+	assert(frame_pipeline_attach(&p, &extra.sink) == FRAME_PIPELINE_ERR_FULL);
+	assert(extra.open_calls == 0);
+
+	/* The registry still delivers to everyone it should. */
+	(void)pub(&p);
+	for (i = 0; i < FRAME_PIPELINE_MAX_SINKS; i++)
+		assert(m[i].consume_calls == 1);
+	assert(extra.consume_calls == 0);
+}
+
+/*
+ * I3. a sink's own open() rejection is NORMALISED, not passed through.
+ *
+ * Without this the core cannot own its return values at all: a board's open()
+ * is free to return any negative it likes, so every code the core picks for its
+ * own refusals would be forgeable -- and telling those apart is the entire
+ * reason for naming them.  An implementation that still forwards open()'s value
+ * passes both refusal tests above and fails only this one.
+ */
+static void test_attach_open_rejection_normalised(void)
+{
+	struct frame_pipeline p;
+	struct mock m;
+
+	fresh(&p, 4);
+	mock_init(&m, &p, FRAME_POLICY_DROP, 1 /* auto put */);
+	m.open_rc = -123;                     /* a value the core never chose */
+	m.sink.delivered = 5;
+
+	assert(frame_pipeline_attach(&p, &m.sink) == FRAME_PIPELINE_ERR_OPEN);
+	assert(m.open_calls == 1);            /* the sink WAS asked */
+	assert(frame_pipeline_sink_count(&p) == 0);       /* and not linked */
+	assert(m.sink.delivered == 5);        /* core state left alone */
+	assert(frame_pipeline_sink_pins(&p, &m.sink) == 0);
+
+	/* The rejection is the sink's to withdraw. */
+	m.open_rc = 0;
+	assert(frame_pipeline_attach(&p, &m.sink) == FRAME_PIPELINE_OK);
+	assert(frame_pipeline_sink_count(&p) == 1);
+	assert(m.sink.delivered == 0);
+	(void)pub(&p);
+	assert(m.consume_calls == 1);
+}
+
 /* G. read_latest bytes + generation ---------------------------------------- */
 static void test_read_latest(void)
 {
@@ -455,6 +688,11 @@ int main(void)
 	test_detach_pending();
 	test_sink_pins_drain();
 	test_sink_pins_latest();
+	test_attach_refuses_undrained();
+	test_attach_undrained_precedence();
+	test_attach_refusal_keeps_inflight_state();
+	test_attach_refuses_already_attached();
+	test_attach_open_rejection_normalised();
 	test_read_latest();
 	test_ring_cycle();
 	assert(lock_depth == 0);              /* every lock balanced by unlock */

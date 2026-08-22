@@ -1757,8 +1757,16 @@ static int cam_stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 		return CAM_ERR_STATE;
 	frame_pipeline_set_format(&cam_pipe, FRAME_FMT_RGB565, CAMERA_FRAME_WIDTH,
 	                          CAMERA_FRAME_HEIGHT);
-	if (frame_pipeline_attach(&cam_pipe, &cam_stat_sink) != 0)
+	rc = frame_pipeline_attach(&cam_pipe, &cam_stat_sink);
+	if (rc != 0) {
+		/* Say WHICH (issue #72).  ERR_UNDRAINED here means cam_stat_consume()
+		   returned without putting its slot back on an earlier run -- the one
+		   thing this port's synchronous sink cannot do, and now the only report
+		   it would ever produce.  It no longer heals at the next start: the
+		   attach that used to zero the count is what refuses. */
+		LOG_ERR("stats sink attach refused: %s", frame_pipeline_strerror(rc));
 		return CAM_ERR_STATE;
+	}
 
 	cam_m0 = frame_pipeline_acquire(&cam_pipe);
 	cam_m1 = frame_pipeline_acquire(&cam_pipe);

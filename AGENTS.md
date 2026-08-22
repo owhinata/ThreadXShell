@@ -32,6 +32,22 @@
 
 2. **共有コアに触れる変更は全対応ボードで成立すること。** 片方のボードだけを見て LGTM しない。
 
+2b. **`svc/frame_pipeline` の sink registry: attach は拒否する、直列化は呼び出し元（#72 / #79）。**
+   `frame_pipeline_attach()` は **未 drain の sink（pin を持ったまま）** と
+   **既に link 済みの sink** を拒否する。**緩めない** — 前者を通すと sink の pin カウントだけが
+   0 になり、pipeline 側の slot refcount は上がったままでリングが恒久的に 1 スロット短くなる
+   （#72 の本体）。後者は `s->_next = s` を作り、**以後の registry 走査が終わらない**。
+   拒否は**全部 `open()` の前**に決まる（副作用ゼロ。`open()` はボードが consume() の読む
+   状態をリセットする場所なので、未 drain の sink に対して呼んではいけない）。
+   `open()` の負値は**単一のコアエラーに正規化する** — 透過するとコアが自分の戻り値を
+   所有できない（ボードが同じ値を返せる）。判定順は
+   **already-linked → pins → capacity**（満杯時の再 attach を FULL と誤報しないため）。
+   [!] **並行性の保証はまだコアに無い**（#79）。今のコアが依拠する前提は 3 つだけで、
+   3 ボードともこれを満たしている: **attach 同士は 1 つの pipeline 上で直列化される /
+   ある sink は自分の attach 進行中に detach されない / `init()` は他のどの操作とも重ならない**。
+   広げて「全 registry 操作を直列化する」と書かない — Grove の `camera_unsubscribe()` は
+   API mutex を取らないので、それは現状の説明として**嘘になる**。
+
 3. **upstream submodule（`lib/` 配下）は read-only。** HAL / CMSIS / ThreadX 系 / TinyUSB /
    CoreMark ほか。編集は不可、調整は port 側で。
 

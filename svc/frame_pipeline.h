@@ -53,6 +53,20 @@ extern "C" {
 #endif
 
 /**
+ * Return values.  A closed set, and that is the point (issue #72): attach used
+ * to hand back whatever a sink's own open() returned, so no value the core
+ * picked for itself could be told apart from one a board invented.  Every
+ * open() rejection is now reported as FRAME_PIPELINE_ERR_OPEN, and each reason
+ * the CORE refuses has a name a caller can log.
+ */
+#define FRAME_PIPELINE_OK              0
+#define FRAME_PIPELINE_ERR_PARAM      (-1) /* NULL pipeline or sink            */
+#define FRAME_PIPELINE_ERR_FULL       (-2) /* no room for another sink         */
+#define FRAME_PIPELINE_ERR_OPEN       (-3) /* the sink's own open() rejected   */
+#define FRAME_PIPELINE_ERR_ATTACHED   (-4) /* already linked into this pipeline */
+#define FRAME_PIPELINE_ERR_UNDRAINED  (-5) /* still holds pins -- see attach()  */
+
+/**
  * Injected mutual exclusion.  The glue wires this to a ThreadX TX_MUTEX
  * (TX_INHERIT); a host unit test wires it to a no-op.  The core never blocks on
  * anything else: there is no wait primitive in svc/, so all waiting/notification
@@ -109,7 +123,13 @@ struct frame_sink {
 	uint32_t dropped;
 	uint32_t errors;
 
-	/* Core-internal; the owner must not touch these. */
+	/* Core-internal; the owner must not touch these.
+	   [!] But it must ZERO them before the first attach (issue #72): attach now
+	   READS `_pins` to decide whether the sink was ever drained, so a sink that
+	   came up with garbage in it would be refused forever.  Every sink in this
+	   project is static, which zeroes them for free -- this says so out loud
+	   because "the owner must not touch these" used to mean the core never
+	   looked at them before it owned them. */
 	struct frame_sink       *_next;
 	const struct frame_desc *_pending; /**< LATEST coalesce slot (pinned)         */
 	int                      _busy;     /**< a consume() for this sink is in flight */
@@ -204,9 +224,55 @@ void frame_pipeline_set_format(struct frame_pipeline *p, enum frame_format fmt,
  * format/geometry to negotiate acceptance (<0 from open rejects the attach).
  * The current format is owned by the producer: fixed QVGA RGB565 today (set from
  * its init config); owhinata/stm32f746g-disco#45 makes it variable, re-opening sinks (close()+open()) on a
- * format change.  Returns 0 or <0.
+ * format change.
+ *
+ * Returns FRAME_PIPELINE_OK, or one of:
+ *   ERR_PARAM       NULL argument;
+ *   ERR_ATTACHED    @p s is already linked into @p p;
+ *   ERR_UNDRAINED   @p s still holds pins from an earlier session;
+ *   ERR_FULL        no room for another sink;
+ *   ERR_OPEN        the sink's own open() rejected the format/geometry.
+ *
+ * [!] A REFUSAL BY THE CORE HAS NO SIDE EFFECTS: all four are decided before
+ * open() is called, so the sink is not linked, its bookkeeping is untouched, and
+ * its owner has not been told anything.  That ordering is not tidiness -- open()
+ * is where a board resets the state its consume() reads, and doing that to a
+ * sink whose owner never drained is exactly the hazard below.
+ *
+ * [!] ERR_UNDRAINED IS THE POINT OF ISSUE #72.  Attach used to zero `_pins`,
+ * `_busy` and `_pending` unconditionally.  For a sink whose owner skipped the
+ * drain that erased the only evidence: the count the owner was told to watch
+ * went to zero while the SLOT refcounts the sink still held stayed up, so the
+ * ring was permanently one slot short and nothing said so.  A sink that is
+ * refused here has a callback that may still be inside it; the fix is to drain
+ * it (see detach), not to attach again.  A pin that comes back late clears the
+ * refusal by itself -- the next attach succeeds.
+ *
+ * [!] AND ERR_ATTACHED IS NOT PEDANTRY.  Re-linking a linked sink writes
+ * `s->_next = p->sinks` while `s` is in that list; if it is the head, `s->_next`
+ * becomes `s` and every later traversal of the registry never terminates.
+ *
+ * [!] SERIALISATION IS THE CALLER'S, and these are the exact conditions the
+ * refusals above rest on (issue #72; the core will take them over):
+ *   - attach() calls on one pipeline are mutually serialised;
+ *   - a sink is not detached while its own attach() is in progress;
+ *   - init() does not overlap any other operation on the pipeline.
+ * Only attach raises the sink count, so serialising attach against attach is
+ * what bounds capacity; a detach of a DIFFERENT sink during an open() only
+ * lowers it.  What still needs an owner is the same-sink rule, because attach
+ * releases the lock across open() and detach releases it across close().
  */
 int frame_pipeline_attach(struct frame_pipeline *p, struct frame_sink *s);
+
+/**
+ * A short name for one of the FRAME_PIPELINE_* codes, for the boards' logs.
+ *
+ * It lives here so the three ports cannot drift apart on what a refusal is
+ * called -- the reason a refusal is worth logging at all is that the failure it
+ * reports is otherwise invisible, and three private tables would eventually
+ * disagree about it.  Never NULL; an unknown code reads as "unknown".
+ */
+const char *frame_pipeline_strerror(int rc);
 
 /**
  * Unlink a sink so that no LATER publish selects it, and report how many pins it

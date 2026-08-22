@@ -653,10 +653,21 @@ static const struct frame_os cam_pipe_os = {
  */
 static int cam_subscribe(struct frame_sink *sink)
 {
+	int rc;
+
 	if (sink == NULL || !cam_objects_ok)
 		return CAM_ERR_PARAM;
-	return (frame_pipeline_attach(&cam_pipe, sink) == 0) ? CAM_OK
-	                                                     : CAM_ERR_PARAM;
+	rc = frame_pipeline_attach(&cam_pipe, sink);
+	if (rc != 0) {
+		/* Say WHICH (issue #72).  This board is the one the refusal actually
+		   protects: the pipeline is initialised ONCE, at object create, so a
+		   slot a sink never handed back is gone for good and the ring is short
+		   from then on -- silently, until now. */
+		LOG_ERR("sink '%s' attach refused: %s",
+		        sink->name ? sink->name : "?", frame_pipeline_strerror(rc));
+		return CAM_ERR_PARAM;
+	}
+	return CAM_OK;
 }
 
 int camera_unsubscribe(struct frame_sink *sink)
@@ -1896,12 +1907,14 @@ int camera_stream_start(struct frame_sink *sink)
 	 * no sink linked yet is simply a frame that nobody will be handed, and the
 	 * unwind below throws it away with cam_quiesce().
 	 *
-	 * Going last is what keeps the unwind honest.  frame_pipeline_attach() has
-	 * nothing that can fail after it links the sink, so the only failure here
-	 * is a refusal by the sink's own open() -- a geometry mismatch, not a
-	 * hardware fault.  The camera therefore stays READY (as after a capture
-	 * that timed out), rather than taking the terminal treatment a datapath
-	 * failure gets, and nothing is left linked.
+	 * Going last is what keeps the unwind honest.  frame_pipeline_attach()
+	 * either links the sink or fails with NOTHING linked and nothing touched --
+	 * every refusal it makes is decided before the sink's open() is called
+	 * (issue #72).  So the failures here are a geometry mismatch from the
+	 * sink's own open(), or the core refusing a sink that is already attached
+	 * or has not handed its frames back; none is a hardware fault.  The camera
+	 * therefore stays READY (as after a capture that timed out) rather than
+	 * taking the terminal treatment a datapath failure gets.
 	 */
 	if (sink != NULL) {
 		rc = cam_subscribe(sink);

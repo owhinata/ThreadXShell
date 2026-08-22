@@ -295,6 +295,12 @@ void camera_stream_stats(struct camera_stats *out);
  * between frames is also the only moment a rolling-shutter exposure change
  * does not tear a frame.  When nothing is streaming they apply directly.
  *
+ * [!] WHICH OF THE TWO IS DECIDED UNDER THE API MUTEX (issue #77), so these
+ * can also answer CAM_ERR_BUSY -- when something else holds it, not because a
+ * stream is running.  A stream that is merely RUNNING does not hold it (the
+ * producer never takes it); a start, stop, capture or probe does.  Nothing is
+ * queued, written or recorded on that path, so a retry is free.
+ *
  * [!] A SUCCESSFUL CALL TURNS camera_auto() OFF (issue #39).  Writing an
  * exposure by hand is what taking manual control means, and the sensor's own
  * AEC/AGC is already switched to manual by the write itself -- leaving the flag
@@ -318,7 +324,11 @@ int camera_set_gains(uint8_t again, uint16_t dgain);
  *
  * camera_read_frame_length() reads the SENSOR, not this port's shadow, and
  * returns CAM_ERR_BUSY while a stream runs (it is I2C, which the producer
- * owns).  Reading the part rather than the shadow is what found #38.
+ * owns) -- a read cannot be queued for the producer the way the setters are,
+ * because there is nowhere for the answer to come back to.  Since issue #77 it
+ * returns CAM_ERR_BUSY for API-mutex contention as well; the two are not
+ * distinguished, so a caller reporting it should name both.  Reading the part
+ * rather than the shadow is what found #38.
  */
 int camera_set_frame_length(uint16_t lines);
 int camera_read_frame_length(uint16_t *lines);
@@ -345,8 +355,16 @@ int camera_read_frame_length(uint16_t *lines);
  * on a sensor with its own AEC is what would otherwise switch it back on.
  *
  * @return CAM_OK -- including when the camera would not come up, since the
- *         request is kept and applied later; CAM_ERR_* only when a sensor that
- *         IS up refused the write.
+ *         request is kept and applied later; CAM_ERR_HAL only when a sensor
+ *         that IS up refused the write; CAM_ERR_STATE / CAM_ERR_BUSY when the
+ *         call never got in at all.
+ *
+ * [!] THE MODE IS RECORDED ONLY ONCE A ROUTE IS GRANTED (issue #77).  "Would
+ * not come up" is a kept request and reports success; "could not get in"
+ * (poisoned, or the API mutex was held) is a refusal that changes nothing, so
+ * the flag never disagrees with the sensor.  Before #77 the two were the same
+ * answer and the flag moved either way -- which meant a `camera auto off` that
+ * lost a race said "off" while the sensor's AEC kept running.
  */
 int camera_set_auto(int on);
 int camera_auto(void);

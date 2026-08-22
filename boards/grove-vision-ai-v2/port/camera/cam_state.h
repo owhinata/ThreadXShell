@@ -4,21 +4,30 @@
  */
 /**
  * @file    cam_state.h
- * @brief   The camera port's state machine, and what a stop does in each state
- *          (issues #48, #65).
+ * @brief   The camera port's state machine, and the decisions taken over it
+ *          (issues #48, #65, #72, #77).
  *
  * WHY THIS IS ITS OWN FILE.  The states live here rather than in camera.c
- * because the stop's decision -- refuse, refuse without having asked, nothing to
- * do, or join the producer -- is the one part of camera.c that CANNOT be
- * exercised on hardware.  The case that matters is a stop which waited for the
- * API mutex and woke up owning it with the port already poisoned, and there is
- * no way to produce that from a console.  As a pure function over the state it
- * is a table, and test/test_cam_stop.c walks it.
+ * because the decisions taken over them are the parts of camera.c that CANNOT
+ * be exercised on hardware.  For the stop it is a call which waited for the API
+ * mutex and woke up owning it with the port already poisoned; for the bus
+ * routing it is a call overtaken by a whole stream start, or by a stop that
+ * poisons the port, between one statement and the next.  Neither can be
+ * produced from a console -- this board has one shell, and its background jobs
+ * run BELOW the foreground one under TX_NO_TIME_SLICE, so `cmd &; cmd2` cannot
+ * even get the two threads into the right order.  As pure functions over the
+ * state they are tables, and test/test_cam_stop.c walks them.
  *
- * So this file owns the PRECEDENCE (poison before "not streaming", and never
- * the other way round); camera.c owns the sequencing and everything that
- * touches hardware.  Splitting it anywhere else would leave the precedence
+ * So this file owns the PRECEDENCE; camera.c owns the sequencing and everything
+ * that touches hardware.  Splitting it anywhere else would leave the precedence
  * untested, which is exactly the bug issue #65 turned out to be.
+ *
+ * [!] THE PRECEDENCE IS NOT THE SAME SHAPE IN BOTH TABLES, and assuming it is
+ * would leave one of them untested.  In cam_stop_decide() it is an ORDERING
+ * hazard -- CAM_ST_LOST is also "not streaming", so a shortcut placed ahead of
+ * the poison test answers success.  In cam_bus_decide() the states are distinct
+ * enumerators that no reordering can confuse; what fails open there is a WIDER
+ * test that stops enumerating.  Each function says which one it is.
  */
 #ifndef CAM_STATE_H
 #define CAM_STATE_H
@@ -58,11 +67,25 @@ enum cam_state {
  * already badly wrong.
  */
 
-/** How the stop's attempt on the API mutex ended (issue #65). */
-enum cam_stop_acquire {
-	CAM_STOP_ACQ_HELD = 0, /**< this caller owns the mutex            */
-	CAM_STOP_ACQ_TIMEOUT,  /**< the bounded wait expired              */
-	CAM_STOP_ACQ_ERROR,    /**< the mutex refused for any other reason */
+/**
+ * How an attempt on the API mutex ended (issues #65, #77).
+ *
+ * [!] SHARED BY BOTH TABLES BELOW, and neutral about the wait on purpose.  The
+ * stop waits (bounded), every other entry point uses TX_NO_WAIT -- but both
+ * consume the SAME fact and only disagree about the policy to apply to it, so
+ * one input enum with two tables is the honest shape.  A second, parallel
+ * acquisition enum would be two vocabularies for one thing, and they drift.
+ *
+ * CAM_ACQ_UNAVAILABLE therefore means "the caller did not obtain the mutex
+ * within whatever wait it was willing to do" -- the stop's deadline, or the
+ * zero wait of everything else.  What that IMPLIES is table-specific and stays
+ * in the tables: for a stop it is "nothing was asked" (CAM_ERR_LOCKED, and the
+ * port is NOT poisoned); for a bus caller it is simply "busy, ask again".
+ */
+enum cam_api_acquire {
+	CAM_ACQ_HELD = 0,    /**< this caller owns the mutex               */
+	CAM_ACQ_UNAVAILABLE, /**< the mutex was not free within the wait   */
+	CAM_ACQ_ERROR,       /**< the mutex refused for any other reason   */
 };
 
 /** What camera_stream_stop() should do (issue #65). */
@@ -97,8 +120,63 @@ int cam_api_may_acquire(int objects_ok, enum cam_state st);
  * may be inside.  A stop can now block behind another stop's join, which is
  * exactly how it wakes up holding the mutex with the state already poisoned.
  */
-enum cam_stop_action cam_stop_decide(enum cam_stop_acquire acq,
+enum cam_stop_action cam_stop_decide(enum cam_api_acquire acq,
                                      enum cam_state st);
+
+/** Who may act on the sensor bus, once the mutex attempt has ended (#77). */
+enum cam_bus_owner {
+	CAM_BUS_REFUSE_STATE = 0, /**< nothing usable; refuse             */
+	CAM_BUS_REFUSE_BUSY,      /**< the mutex was not obtained         */
+	CAM_BUS_PRODUCER,         /**< a stream owns the sensor bus       */
+	CAM_BUS_DIRECT,           /**< this caller owns it                */
+};
+
+/**
+ * @brief  Who owns the sensor bus for this call?  (Issue #77.)
+ *
+ * @param acq  how the acquisition ended
+ * @param st   the state, read while HOLDING the mutex (meaningless otherwise)
+ *
+ * WHY OWNERSHIP AND NOT AN ACTION.  Two groups of entry points ask this and
+ * want different things from the same answer: camera_probe() and
+ * camera_capture() turn CAM_BUS_PRODUCER into a refusal, while the tuning
+ * setters turn it into a queued request for the producer.  A table that
+ * returned "refuse" or "queue" could serve only one of them, and the second
+ * would grow its own ordering -- which is how five entry points came to have
+ * five of them (and camera_probe() a sixth) in the first place.
+ *
+ * [!] CAM_BUS_DIRECT IS THE ONLY DANGEROUS ANSWER.  It is the permission to
+ * drive the vendor CIS driver, which has no locking and which the producer
+ * uses too.  So everything here is arranged so that direct is reached only by
+ * being named: unknown acquisitions and unknown states fall to a refusal, and
+ * the state switch lists the states that may act rather than testing for the
+ * one that may not.
+ *
+ * [!] AND CAM_ST_LOST IS REACHABLE HERE, WITH THE MUTEX HELD.  The poison test
+ * is before the mutex (cam_api_may_acquire(), issue #48), so poison can land in
+ * the gap: a caller passes that test while a stream is running, is preempted, a
+ * stop takes the mutex, fails its join, writes CAM_ST_LOST and releases -- and
+ * the caller then acquires and reads a poisoned state.  Classifying that as
+ * "not streaming, therefore direct" would send it into cam_bringup(), which
+ * accepts only READY and STREAMING as already-up and would therefore TEAR THE
+ * PORT DOWN AND REBUILD IT under a producer that never acknowledged a stop.
+ * That is the exact action CAM_ST_LOST exists to prevent.
+ *
+ * This is issue #65's "re-test the poison on the far side of the acquire",
+ * arriving on a path that does not wait -- and it does not depend on an
+ * unlikely schedule being likely.  The common interleaving ends in
+ * CAM_BUS_REFUSE_BUSY (the stop still holds the mutex when the delayed caller
+ * runs); this one needs the caller to stay unscheduled until the stop is done.
+ * ThreadX does not promise it will run in that window, so the ordering is
+ * permitted, and safety may not rest on the usual outcome.
+ *
+ * By contrast, "poison before STREAMING" is NOT a precedence inside this table
+ * the way it is in cam_stop_decide(): the two are distinct enumerators, so no
+ * reordering of equality tests can confuse them.  What can fail open is a
+ * WIDER test -- `st != CAM_ST_STREAMING -> direct` -- which is why the states
+ * are enumerated.
+ */
+enum cam_bus_owner cam_bus_decide(enum cam_api_acquire acq, enum cam_state st);
 
 /** Why a sink's owner may not release what the sink reads (issue #72). */
 enum cam_drain_verdict {

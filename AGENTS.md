@@ -351,10 +351,51 @@
      判定は**両 enum とも fail-closed**（「HELD でなければ拒否」/ 成功を返す状態は
      列挙する）。**`default:` を足して塞がない** — メンバ追加時に `-Wall` が鳴るのと
      "future member" ベクタが落ちるのが検知経路。
+   - [!] **センサーバスの所有者は mutex 保持下で決める（#74 / #77）。** producer は
+     API mutex を取らないので、コンソールをバスから遠ざけているのは mutex ではなく
+     **状態検査**。そして `camera_stream_start()` は **mutex 保持下で**
+     `CAM_ST_STREAMING` を publish するので、**acquire より前に取った検査は無価値**
+     （stream start 丸ごとに追い越され、`cam_bringup()` が「もう上がっている」と返して
+     fall-through が producer の持つ CIS ドライバを叩く。`TX_NO_WAIT` では閉じない）。
+     入口は **`cam_bus_enter()` 1 本**で、`cam_state.c` の `cam_bus_decide()` が
+     **「何をすべきか」ではなく「誰がバスを持っているか」**を返す
+     （probe / capture / VTS read-back / **stream start** は producer を拒否へ、
+     4 つの setter は queue へ）。**`camera_stream_start()` も必ずここを通す** ——
+     poison を direct に落とすと `cam_bringup()` が**ポートを再構築**する（setter の
+     I2C 1 回とは被害が違う）。**sink 予約は代わりにならない**:
+     `camera bench` は `camera_stream_start(NULL)` で sink 無しなので registry が空。
+     契約は **`CAM_OK` ⇒ mutex 保持 + owner は DIRECT か PRODUCER のみ /
+     負値 ⇒ 非保持**（ThreadX の mutex は再帰的なので、入れ子取得は
+     デッドロックせず「1 回の put で保持が残る」形で壊れる）。
+     **bring-up はヘルパに入れない** — `camera_set_auto()` の
+     「上がらなくても CAM_OK」と「そもそも入れなかった」を別の答えにするため。
+     [!] **`CAM_ST_LOST` は保持下で到達する**（poison 検査は mutex の前なので、
+     preflight と acquire の間に stop の join 失敗が挟まる）。ここを direct に落とすと
+     `cam_bringup()` が**ポートを再構築**する = #48 が防ぐ最悪の動作。
+     [!] **判定は「STREAMING 以外」ではなく状態を列挙する** —— #65 と違って順序の
+     ハザードではなく（enum は同時に両方にならない）、**広い検査**が fail open する。
+     `default:` は書かない。**新しい `CAM_ERR_BUSY` の意味はコマンドごとに違う**:
+     probe と read-back は「stream または API」、4 つの setter は
+     **API のみ**（stream 中は queue = 成功なので「preview を止めろ」は誤誘導）。
+     queue の書き込みは **`TX_DISABLE` で値とビットを一括**（mutex は producer に対して
+     何も守らない）。**`cam_raw_mode` は mutex 保持区間にスコープする** ——
+     `cam_step_dp()` が読み、producer もタイムアウト再起動でそこを通るので、
+     API に入る前に立てると**拒否された `camera raw` でも走行中の stream を
+     one-shot 用に再構成し得る**。`CAM_BUS_DIRECT` を得た後にだけ立て、
+     `cam_api_exit()` が落とす（`volatile`）。
+     **`cam_auto_on` を書くのは API mutex を保持したスレッドだけ** ——
+     `cam_manual_control_taken()` を `cam_api_exit()` の**後**に置くと、
+     `tx_mutex_put()` はスケジューリング点なので、その隙に入った `camera auto on` の
+     結果を上書きして「センサーは auto、フラグは off」を作る（#39 の食い違いの裏返し）。
    - [!] **`camera_unsubscribe()` はストリーム中も拒否する（#65）。** poison だけを
      見ていたのでは backstop になっていない（`publish()` は pre-pin して lock を
      離してから `consume()` を呼ぶので、ストリーム中の unlink は進行中の配送と競合し、
      直後の drain は古い受け渡しカウントを見て idle と判定し得る）。
+     **API mutex は取らないまま**でよいが、理由を間違えない —— **core は競合 detach を
+     拒否しない**（`frame_pipeline_detach()` は ATTACHED な sink をカメラが streaming でも
+     unlink する。拒否するのは遷移中と未返却 callback だけで、`cam_state` を知らない）。
+     安全にしているのは **呼び出し元 1 箇所 + 確認済み stop の後だけ + sink 予約**
+     （unlink までは registry に残り、`frame_pipeline_sink_count() != 0` が start を弾く、#63）。
    - `cam_state` は **volatile**。stop が mutex 待ちの**後にもう一度読む**ため
      （アドレスを取らない file-static はレジスタに保持され得る）。
    - **EPK 容量は `GROVE_EPK_WRAP_MAX` == `TX_GLUE_EPK_MAX_IRQ` == 32**

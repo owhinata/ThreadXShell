@@ -841,6 +841,31 @@ static void cam_note_queued(struct cli_instance *sh, int argc)
 }
 
 /*
+ * A tuning write that was refused rather than failed (issue #77).
+ *
+ * [!] IT REPLACES THE USUAL MESSAGE, it does not follow it.  The usual one asks
+ * whether the module is powered and suggests `camera probe` -- advice that is
+ * simply wrong here, and `camera probe` is one of the very commands that can be
+ * holding the thing in the way.
+ *
+ * [!] AND NOT THE SAME TWO CAUSES AS `camera probe`'s own message.  A running
+ * stream does not make these refuse -- it makes them QUEUE, and that is a
+ * success.  So the only way to reach CAM_ERR_BUSY here is API-mutex
+ * contention, and naming a preview would send the operator after the wrong
+ * thing.  Naming what CAN hold it matters because the answer is "wait": the
+ * producer never takes that mutex, so nothing about a steady stream is holding
+ * it.  It is a start, a stop, a capture or a probe, all of them short.
+ */
+static void cam_note_api_busy(struct cli_instance *sh, const char *what)
+{
+	cli_error(sh, "camera: %s refused: another camera command holds the "
+	              "API\r\n", what);
+	cli_error(sh, "        (a stream start or stop, a capture, or a "
+	              "probe).  Nothing was\r\n"
+	              "        written -- try again\r\n");
+}
+
+/*
  * Say that a manual exposure or gain has taken `camera auto` off (issue #39).
  *
  * The state change is real and the user did not ask for it in so many words, so
@@ -874,6 +899,7 @@ static int cmd_camera_exposure(struct cli_instance *sh, int argc, char **argv)
 	uint8_t again;
 	uint32_t v;
 	int was_auto = camera_auto();
+	int rc;
 
 	if (argc > 1) {
 		uint16_t vts = cam_sensor_frame_length();
@@ -904,9 +930,14 @@ static int cmd_camera_exposure(struct cli_instance *sh, int argc, char **argv)
 			          (unsigned long)v);
 			return 1;
 		}
-		if (camera_set_exposure((uint16_t)v) != CAM_OK) {
-			cli_error(sh, "camera: exposure write failed (is the "
-			              "module powered?  try `camera probe`)\r\n");
+		rc = camera_set_exposure((uint16_t)v);
+		if (rc != CAM_OK) {
+			if (rc == CAM_ERR_BUSY)
+				cam_note_api_busy(sh, "exposure write");
+			else
+				cli_error(sh, "camera: exposure write failed "
+				              "(is the module powered?  try "
+				              "`camera probe`)\r\n");
 			return 1;
 		}
 	}
@@ -927,6 +958,7 @@ static int cmd_camera_gain(struct cli_instance *sh, int argc, char **argv)
 	uint8_t again;
 	uint32_t a, d;
 	int was_auto = camera_auto();
+	int rc;
 
 	if (argc > 1) {
 		cam_sensor_get_exposure_gains(&lines, &again, &dgain);
@@ -943,9 +975,14 @@ static int cmd_camera_gain(struct cli_instance *sh, int argc, char **argv)
 			              "(256 = 1.0x)\r\n");
 			return 1;
 		}
-		if (camera_set_gains((uint8_t)a, (uint16_t)d) != CAM_OK) {
-			cli_error(sh, "camera: gain write failed (is the module "
-			              "powered?  try `camera probe`)\r\n");
+		rc = camera_set_gains((uint8_t)a, (uint16_t)d);
+		if (rc != CAM_OK) {
+			if (rc == CAM_ERR_BUSY)
+				cam_note_api_busy(sh, "gain write");
+			else
+				cli_error(sh, "camera: gain write failed (is "
+				              "the module powered?  try "
+				              "`camera probe`)\r\n");
 			return 1;
 		}
 	}
@@ -1004,10 +1041,15 @@ static int cmd_camera_vts(struct cli_instance *sh, int argc, char **argv)
 		    lines > (uint16_t)v)
 			capped = lines;
 
-		if (camera_set_frame_length((uint16_t)v) != CAM_OK) {
-			cli_error(sh, "camera: frame length write failed (below "
-			              "what the mode needs, or the module is not "
-			              "powered)\r\n");
+		rc = camera_set_frame_length((uint16_t)v);
+		if (rc != CAM_OK) {
+			if (rc == CAM_ERR_BUSY)
+				cam_note_api_busy(sh, "frame length write");
+			else
+				cli_error(sh, "camera: frame length write "
+				              "failed (below what the mode "
+				              "needs, or the module is not "
+				              "powered)\r\n");
 			return 1;
 		}
 	}
@@ -1033,8 +1075,12 @@ static int cmd_camera_vts(struct cli_instance *sh, int argc, char **argv)
 	if (rc == CAM_OK)
 		cli_print(sh, "  sensor says : %lu\r\n", (unsigned long)rb);
 	else if (rc == CAM_ERR_BUSY)
-		cli_print(sh, "  (read-back needs an idle camera; stop the "
-		              "preview)\r\n");
+		/* Both causes (issue #77): the producer owns the bus while a
+		   stream runs, and since #77 the read also refuses when another
+		   camera command holds the API.  Nothing was read either way. */
+		cli_print(sh, "  (read-back needs an idle camera: stop the "
+		              "preview, or another camera\r\n"
+		              "   command holds the API)\r\n");
 	else
 		cli_print(sh, "  (this sensor's frame length is not readable "
 		              "here)\r\n");
@@ -1107,6 +1153,7 @@ static int cmd_camera_auto(struct cli_instance *sh, int argc, char **argv)
 	uint16_t lines, dgain;
 	uint8_t again;
 	struct cam_wb wb;
+	int rc;
 
 	if (argc > 1) {
 		int on;
@@ -1122,10 +1169,15 @@ static int cmd_camera_auto(struct cli_instance *sh, int argc, char **argv)
 		/* Reported, not discarded: on a sensor with its own AEC this
 		 * carries a register write, and a silent failure there means
 		 * `camera exposure` quietly stops holding. */
-		if (camera_set_auto(on) != CAM_OK) {
-			cli_error(sh, "camera: could not set the sensor's own "
-			              "exposure loop (is the module powered?  "
-			              "try `camera probe`)\r\n");
+		rc = camera_set_auto(on);
+		if (rc != CAM_OK) {
+			if (rc == CAM_ERR_BUSY)
+				cam_note_api_busy(sh, "auto");
+			else
+				cli_error(sh, "camera: could not set the "
+				              "sensor's own exposure loop (is "
+				              "the module powered?  try "
+				              "`camera probe`)\r\n");
 			return 1;
 		}
 	}

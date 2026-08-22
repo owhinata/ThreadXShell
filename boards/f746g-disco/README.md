@@ -152,6 +152,51 @@ Subsystems behind them: LTDC + GUIX (`gui`, `lcd`), OV5640 over DCMI
 FT5336 touch (`touch`), Ethernet with NetX Duo (`net`), the NN backends (`ai`),
 and YMODEM transfer over the console (`xfer`).
 
+### [!] Three subscribers share one capture, and each has to drain its sink
+
+The GUI preview, `ai stream` and `net mjpeg` are all *subscribers* of one base
+capture.  Stopping one of them detaches its sink while the base keeps running --
+that is the whole point of a subscriber -- so a delivery can already be in
+flight across the unlink: `frame_pipeline_publish()` copies the sinks it will
+deliver to into a local array, drops the pipeline lock, and only then calls
+`consume()` on each.
+
+Two rules follow, and neither is optional (issue #72):
+
+- **`camera_frame_put()` is the last statement of every `consume()` on this
+  board.**  That is what makes one number -- the sink's pipeline pin count --
+  answer "may I release what this sink reads".  It does not prove the callback
+  RETURNED (there is still its epilogue, and the pipeline updates sink
+  statistics afterwards); it proves the callback no longer touches anything the
+  owner owns, which is enough only because every sink object here is static.
+  Work moved back below the put becomes invisible to the count.
+- **The owner enters its `DRAINING` state before `camera_unsubscribe()`, not
+  after.**  A start walking into the drain would re-subscribe the sink, and
+  `frame_pipeline_attach()` resets the pin count -- erasing the evidence the
+  drain is waiting on.  The states are `port/camera/cam_own.h`; the drain
+  decision is `port/camera/cam_drain.h`; both are pure functions with host tests
+  because the branches that matter (a drain that spends its budget, two owner
+  commands in flight at once) cannot be produced from the console.
+
+When a drain does spend its budget, the owner refuses to release and says so:
+
+| command | what you see | what it means |
+|---|---|---|
+| `gui stop` | `preview did not release the camera frame; display kept` | GUIX keeps the LCD and the preview stays armed.  Run `gui stop` again. |
+| `ai stream stop` | `camera has not released the inference frame` | `ai stream start` is refused until a later `ai stream stop` finds it clear. |
+| `net mjpeg stop` | `camera has not released the mjpeg frame` | likewise for `net mjpeg start`. |
+
+Retrying is the recovery, and it is fail-closed in both directions: if the
+callback never comes back, every retry keeps refusing; if it does, a retry can
+prove it.  A `busy` message instead means another start/stop for that subsystem
+is running right now and nothing was touched.
+
+One behaviour changed with this: `gui start` while the UI is already up is now a
+no-op instead of snapping the panel back to the preview screen.  The autostart it
+used to re-post carries no claim on the preview lifecycle, so a slow one could
+land after a `gui stop` had already drained and released the sink.  Use the
+settings screen's **Back** button to return to the preview.
+
 ## Debugging
 
 SWD is available through the same ST-Link.  Use the system `gdb-multiarch` --

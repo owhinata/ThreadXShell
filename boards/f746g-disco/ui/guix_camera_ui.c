@@ -48,6 +48,7 @@
 #include "ltdc_display.h"        /* LTDC_LCD_WIDTH / HEIGHT                       */
 
 #include "camera.h"              /* camera_subscribe / camera_set_x / ranges, enums */
+#include "cam_own.h"             /* the owner lifecycle (issue #72)               */
 #include "frame_pipeline.h"      /* struct frame_sink / frame_desc, FRAME_*      */
 #include "nn_camera.h"           /* nn_camera_running / nn_camera_dets_get (bbox, #83) */
 
@@ -205,19 +206,40 @@ static uint16_t cam_view_buf[CAM_VIEW_W_MAX * CAM_VIEW_H_MAX]
 static GX_PIXELMAP cam_view_pixmap;
 static bool        cam_view_inited;
 static volatile int cam_redraw_pending;
-static volatile int cam_sink_inflight;
 
-/* Preview lifecycle flags (GUIX + shell threads).  Since Epic
+/* ATTACHMENT state, not a gate (issue #72).  Since Epic
    owhinata/stm32f746g-disco#99 Phase 1 (owhinata/stm32f746g-disco#100)
    the GUI preview is a *subscriber* of the base capture, not its owner.
    preview_running is set by cam_sink_open when the sink attaches and cleared by
    cam_sink_close (a base stop / DCMI overrun / cascade); a base stop freezes the
    last frame (preview kept visible) and a base restart re-attaches so frames
    resume.  The base owns the DCMI overrun auto-recovery now (camera.c
-   owhinata/stm32f746g-disco#100), so there is no GUI backoff.  stop_requested gates a
-   `gui stop` racing the subscribe. */
+   owhinata/stm32f746g-disco#100), so there is no GUI backoff.
+   [!] Because the BASE moves this flag, it says nothing about what a `gui start`
+   or `gui stop` may do -- that is preview_own below, and reading this one as a
+   gate is how the first attempt at #72 left its drain interval open. */
 static volatile int preview_running;
-static volatile int stop_requested;
+
+/* Preview lifecycle (issue #72), serialised by cam_own.h.  It replaces the
+   stop_requested flag: the race that flag covered (a `gui stop` on a shell
+   thread against the deferred autostart on the GUIX thread) is now one state
+   that every entry point consults -- and so is the race it could NOT cover, a
+   `gui start` walking into the interval where a `gui stop` has detached the sink
+   and is watching its pins fall to zero.  camera_ui_start() claims it on the
+   calling thread; camera_ui_autostart() finishes the claim on the GUIX thread. */
+static volatile enum cam_own_state preview_own;
+
+/* How long a teardown waits for the preview sink to hand its frame back (ticks,
+   wall clock; 1 tick = 1 ms).  Unchanged from the wait this replaces.  A healthy
+   consume() here is one frame copy plus a non-blocking event post, so what the
+   budget is really sized for is a producer preempted mid-consume, not the copy. */
+#define PREVIEW_DRAIN_TICKS  100u
+
+/* How long an entry point waits for an outstanding start claim to resolve
+   (ticks, wall clock).  Sized for what it actually waits on: the GUIX thread
+   finishing the full-panel repaint that guix_start() queued ahead of the
+   autostart event, plus one camera_subscribe() under the camera lock. */
+#define PREVIEW_CLAIM_TICKS  1000u
 
 /* Latest base geometry delivered to the sink (res_tbl index), latched by
    cam_sink_open off the GUIX thread; the CAMERA_GEOM handler re-syncs the GUIX
@@ -280,16 +302,26 @@ static void overlay_draw_boxes(void)
 		                             OVERLAY_BOX_COLOR);
 }
 
+/* [!] PUT LAST.  camera_frame_put() must stay the LAST STATEMENT of this
+   function, and of every other consume() on this board (issue #72).  That rule
+   is the whole proof a teardown gets: once the pin reaches zero this callback
+   touches nothing the owner owns, so ONE count answers "may I release the
+   preview surface".  Move work back below the put and preview_teardown() starts
+   freeing the blit geometry underneath a live copy again -- silently, because
+   the count would still read zero.  See cam_drain.h.
+
+   Safe to leave the pin held across the post: the post is non-blocking
+   (gx_system_event_send -> tx_queue_send TX_NO_WAIT), the GUIX thread runs at
+   prio 14 below this producer at 10 so it cannot preempt us before the put, and
+   what it wakes up to read is cam_view_buf -- a copy -- never the ring slot. */
 static int cam_sink_consume(void *ctx, const struct frame_desc *f)
 {
 	int pending = cam_redraw_pending;
 	int rc = 0;
 
 	(void)ctx;
-	cam_sink_inflight++;
 	if (!pending)
 		rc = guix_display_cam_view_store((const uint16_t *)f->data);
-	camera_frame_put(&guix_cam_sink, f);
 	if (rc == 0 && !pending) {
 		/* Box drawing is deferred to the GUIX thread's CAMERA_FRAME handler, off the
 		   producer's DCMI-servicing critical path -- taking ltdc_lock per box here
@@ -298,7 +330,7 @@ static int cam_sink_consume(void *ctx, const struct frame_desc *f)
 		if (guix_post_root_event(GX_EVENT_CAMERA_FRAME) == GUIX_OK)
 			cam_redraw_pending = 1;
 	}
-	cam_sink_inflight--;
+	camera_frame_put(&guix_cam_sink, f);        /* LAST -- see the rule above  */
 	return rc;
 }
 
@@ -499,23 +531,65 @@ static UINT camera_ui_root_event(GX_WIDGET *widget, GX_EVENT *event_ptr)
 
 /* ---- preview start / stop -------------------------------------------------- */
 
-/* Unsubscribe the preview sink from the base (the base keeps running for other
-   subscribers) and blank the preview.  Used by `gui stop`. */
-static void preview_teardown(void)
+/* Wait (bounded, wall clock) for an outstanding start claim to finish.
+ *
+ * [!] WHY WAITING AND NOT REFUSING.  `gui start` is deferred: it claims the
+ * lifecycle on the caller's thread and the GUIX thread finishes the claim when
+ * it gets to the autostart event -- which is queued BEHIND the full-panel
+ * repaint guix_start() just asked for.  So the claim is normally still
+ * outstanding when `gui start` returns, and a `gui stop` typed straight after it
+ * (or on the same line) would be refused for something that is about to resolve
+ * on its own.  That is not hypothetical: `gui stop; gui start; gui stop` fails
+ * every command after the second without this.
+ *
+ * Waiting is safe because only the finishing side can leave CAM_OWN_STARTING,
+ * and that side is the GUIX thread at priority 14 -- above every shell thread
+ * that calls in here, so it cannot be starved by the waiter.  Nothing is held
+ * across the wait: the caller takes its transition afterwards, on whatever state
+ * the claim resolved to.  If the claim never resolves (an event that was never
+ * delivered) the budget expires and the caller refuses as before.
+ *
+ * Costs nothing before the scheduler: at boot the state is IDLE, so the loop
+ * never runs and never sleeps. */
+static void preview_await_claim(void)
 {
-	int pending, i;
+	ULONG start = tx_time_get();
 
-	pending = camera_unsubscribe(&guix_cam_sink);
-	if (pending > 0)
+	while (cam_own_start_claimed(&preview_own)
+	       && (tx_time_get() - start) < (ULONG)PREVIEW_CLAIM_TICKS)
 		tx_thread_sleep(1);
-	for (i = 0; i < 100 && cam_sink_inflight > 0; i++)
-		tx_thread_sleep(1);
-	if (cam_sink_inflight > 0)
-		LOG_WRN("camera preview drain timeout (inflight=%d)", cam_sink_inflight);
+}
+
+/* Unsubscribe the preview sink from the base (the base keeps running for other
+   subscribers), wait for the sink to hand its frame back, and only then blank
+   the preview.  Used by `gui stop`.
+
+   [!] THE CALLER MUST ALREADY BE IN CAM_OWN_DRAINING.  The order is the point of
+   issue #72: the state that refuses a concurrent `gui start` is entered BEFORE
+   the unsubscribe below, so nothing can re-attach this sink -- and re-attaching
+   it would reset the pin count this then watches, erasing the evidence.
+
+   Returns CAM_DRAIN_DONE once the preview surface is released, or
+   CAM_DRAIN_PINNED with everything left armed and untouched.  Leaving it armed
+   is deliberate: guix_display_cam_preview_end() un-arms the blit geometry that
+   an outstanding consume() is copying into, which is exactly the release this
+   drain exists to hold back. */
+static enum cam_drain_step preview_teardown(void)
+{
+	enum cam_drain_step step;
+
+	(void)camera_unsubscribe(&guix_cam_sink);
+	step = camera_sink_drain(&guix_cam_sink, PREVIEW_DRAIN_TICKS);
+	if (step != CAM_DRAIN_DONE) {
+		LOG_WRN("camera preview drain timeout (pins=%d); preview left armed",
+		        camera_sink_pins(&guix_cam_sink));
+		return step;
+	}
 	preview_running = 0;
 	guix_display_cam_set_visible(false);
 	guix_display_cam_preview_end();
 	cam_redraw_pending = 0;
+	return step;
 }
 
 /* Rebuild the GUIX view pixmap + camera-icon geometry for res_tbl[idx]
@@ -550,7 +624,11 @@ static int preview_subscribe(bool visible)
 {
 	int rc;
 
-	if (stop_requested || !guix_is_up())
+	/* No stop_requested test any more: the caller (camera_ui_autostart) runs
+	   inside a CAM_OWN_STARTING claim, and a `gui stop` racing it is refused by
+	   the lifecycle rather than by a flag this function has to remember to read
+	   (issue #72). */
+	if (!guix_is_up())
 		return -1;
 	guix_display_cam_set_visible(visible);
 	cam_redraw_pending = 0;
@@ -576,23 +654,40 @@ static int base_autostarted;
    re-exposed (a non-GUIX thread must not touch the widget tree). */
 static void camera_ui_autostart(void)
 {
+	int ok;
+
+	/* [!] Backstop: act only on a claim that is still outstanding (issue #72).
+	   This handler runs on the GUIX thread, an unbounded time after
+	   camera_ui_start() posted the event, and it SUBSCRIBES -- so an event with
+	   no live claim behind it could attach the sink underneath a `gui stop` that
+	   has already drained and released the preview.  Only the finishing side
+	   moves STARTING, and that is this function, so a "no" here is durable. */
+	if (!cam_own_start_claimed(&preview_own))
+		return;
+
 	enter_preview();                /* preview shown, settings hidden, B2 per state */
 	apply_view_geometry(cur_res_idx);
-	if (preview_subscribe(true) != 0)
-		return;
-	/* Start the base ONCE at boot.  The camera probe (blocking I2C) runs here on the
-	   GUIX thread, never before the scheduler.  A failure (no sensor) just leaves the
-	   preview subscribed + idle until `camera stream start`. */
-	if (!base_autostarted) {
-		base_autostarted = 1;
-		if (camera_stream_start(0, 0, 0) == 0)
-			LOG_INF("base capture on (boot); camera preview on");
-		else
-			LOG_INF("camera preview subscribed; base off "
-			        "(start with 'camera stream start')");
-	} else {
-		LOG_INF("camera preview subscribed");
+	ok = (preview_subscribe(true) == 0);
+	if (ok) {
+		/* Start the base ONCE at boot.  The camera probe (blocking I2C) runs here on
+		   the GUIX thread, never before the scheduler.  A failure (no sensor) just
+		   leaves the preview subscribed + idle until `camera stream start`. */
+		if (!base_autostarted) {
+			base_autostarted = 1;
+			if (camera_stream_start(0, 0, 0) == 0)
+				LOG_INF("base capture on (boot); camera preview on");
+			else
+				LOG_INF("camera preview subscribed; base off "
+				        "(start with 'camera stream start')");
+		} else {
+			LOG_INF("camera preview subscribed");
+		}
 	}
+	/* Finish the claim camera_ui_start() made on the calling thread -- on BOTH
+	   outcomes.  A claim left standing would refuse every later `gui start`
+	   forever, which is the failure mode a lifecycle has that a flag does not
+	   (issue #72).  A no-op unless we are the start that claimed it. */
+	cam_own_start_finish(&preview_own, ok);
 }
 
 /* settings: cycle to the next preview resolution.  The base owns the resolution
@@ -849,24 +944,85 @@ void camera_ui_init(void)
 
 int camera_ui_start(void)
 {
-	int rc = guix_start();
+	enum cam_own_start act;
+	int rc;
 
-	if (rc != GUIX_OK)
+	/* Claim the lifecycle HERE, on the calling thread, even though the subscribe
+	   happens later on the GUIX thread (issue #72): this returns as soon as the
+	   event is posted, so a `gui stop` right behind it would otherwise find
+	   nothing to do and then watch the queued autostart subscribe a preview
+	   nobody asked for.  Safe before the scheduler (the main.c boot path): the
+	   claim is an interrupt-disabled store, with no kernel object involved. */
+	preview_await_claim();              /* let a deferred start finish first  */
+	act = cam_own_start_take(&preview_own);
+	if (act == CAM_OWN_START_HELD)
+		return CAMERA_UI_ERR_BUSY;      /* a teardown still owns the sink     */
+
+	rc = guix_start();
+	if (rc != GUIX_OK) {
+		cam_own_start_finish(&preview_own, 0);   /* no-op unless we claimed  */
 		return rc;
-	stop_requested = 0;
-	if (guix_post_root_event(GX_EVENT_CAMERA_AUTOSTART) != GUIX_OK)
+	}
+	/* [!] A start that finds the preview ALREADY RUNNING must not post the
+	   autostart event.  The event carries no claim, and by the time the GUIX
+	   thread runs it a `gui stop` may have detached and drained the sink: the
+	   handler would then re-subscribe it with the lifecycle saying IDLE (a sink
+	   attached that no owner is accounted for), or land inside the drain, where
+	   frame_pipeline_attach() resets the very pin count the stop is watching.
+	   The cost is that `gui start` no longer snaps the panel back to the preview
+	   screen while the UI is up -- the settings screen's Back button does that. */
+	if (act != CAM_OWN_START_GO)
+		return GUIX_OK;                 /* already up; nothing deferred      */
+
+	if (guix_post_root_event(GX_EVENT_CAMERA_AUTOSTART) != GUIX_OK) {
+		/* Nothing will finish the claim now: release it, or every later
+		   `gui start` refuses forever.  A claim that can be dropped on the
+		   floor is the one failure mode a state has that a flag does not. */
+		cam_own_start_finish(&preview_own, 0);
 		LOG_WRN("camera autostart post failed; use 'gui start' to retry");
+	}
 	return GUIX_OK;
 }
 
 int camera_ui_stop(void)
 {
+	enum cam_own_stop act;
+	enum cam_drain_step step;
+
+	/* A `gui stop` typed right after a `gui start` means "stop the thing that
+	   start is bringing up", not "refuse because it is still coming up". */
+	preview_await_claim();
+	act = cam_own_stop_take(&preview_own);
+
 	/* Unsubscribe the preview from the base (the base keeps running -- `gui stop` is
 	   a subscription toggle, not a base stop, owhinata/stm32f746g-disco#100) and blank the
 	   screen. The AI subscriber is independent: it keeps running (bbox just stops being
 	   drawn). */
-	stop_requested = 1;
-	preview_teardown();
-	(void)guix_stop();
-	return 0;
+	switch (act) {
+	case CAM_OWN_STOP_IDLE:
+		/* No preview of ours to drain -- but `gui stop` also means "hand the
+		   display back to lcd", and GUIX can be up with no preview subscribed
+		   (an autostart post that failed, a base that never streamed). */
+		(void)guix_stop();
+		return 0;
+	case CAM_OWN_STOP_HELD:
+		return CAMERA_UI_ERR_BUSY;      /* a start or another stop owns it   */
+	case CAM_OWN_STOP_DRAIN:
+	case CAM_OWN_STOP_RETRY:
+		break;                          /* we own the teardown from here     */
+	}
+
+	step = preview_teardown();
+	/* guix_stop() BEFORE the commit: it hands the display back to `lcd`, and
+	   committing first would let a `gui start` claim the lifecycle and call
+	   guix_start() while we are still inside it.  Skipped entirely when the
+	   drain did not finish -- GUIX then stays up holding the LCD, which is what
+	   makes the failure recoverable: a later `gui stop` re-polls and finishes,
+	   and `gui start` takes the existing restart path. */
+	if (step == CAM_DRAIN_DONE)
+		(void)guix_stop();
+	/* worker_parked = 1: the preview has no worker of its own.  The GUIX system
+	   thread outlives every `gui stop`, so there is nothing here to settle. */
+	cam_own_drain_finish(&preview_own, step, 1);
+	return (step == CAM_DRAIN_DONE) ? 0 : CAMERA_UI_ERR_PINS;
 }

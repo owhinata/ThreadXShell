@@ -431,6 +431,8 @@ add_executable(shell
     "${BOARD_DIR}/port/qspi/qspi_flash.c"
     "${BOARD_DIR}/port/sd/sd_card.c"
     "${BOARD_DIR}/port/camera/camera.c"
+    "${BOARD_DIR}/port/camera/cam_drain.c"
+    "${BOARD_DIR}/port/camera/cam_own.c"
     "${BOARD_DIR}/port/ltdc/ltdc_display.c"
     "${BOARD_DIR}/port/touch/touch.c"
     "${BOARD_DIR}/port/sdram/sdram.c"

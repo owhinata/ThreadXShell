@@ -42,6 +42,14 @@ static int cmd_gui_start(struct cli_instance *sh, int argc, char **argv)
 	(void)argc;
 	(void)argv;
 	rc = camera_ui_start();
+	if (rc == CAMERA_UI_ERR_BUSY) {
+		/* issue #72: a `gui stop` is still draining the preview sink.  Refusing
+		   is the point -- starting here would re-attach the sink and reset the
+		   pin count that teardown is waiting on. */
+		cli_error(sh, "gui: busy -- a preview teardown is still in progress "
+		          "(retry in a moment)\r\n");
+		return 1;
+	}
 	if (rc == GUIX_ERR_STATE) {
 		cli_error(sh, "gui: display not initialized (is 'lcd' up?)\r\n");
 		return 1;
@@ -76,9 +84,23 @@ static int cmd_gui_start(struct cli_instance *sh, int argc, char **argv)
 
 static int cmd_gui_stop(struct cli_instance *sh, int argc, char **argv)
 {
+	int rc;
+
 	(void)argc;
 	(void)argv;
-	(void)camera_ui_stop();
+	rc = camera_ui_stop();
+	if (rc == CAMERA_UI_ERR_BUSY) {
+		cli_error(sh, "gui: busy -- another gui start/stop is in progress\r\n");
+		return 1;
+	}
+	if (rc != 0) {
+		/* issue #72: the preview surface is still armed and GUIX still holds the
+		   LCD, because a producer callback may still be copying into it.  Saying
+		   "display returned to lcd" here is the lie this issue exists to fix. */
+		cli_error(sh, "gui: preview did not release the camera frame; display "
+		          "kept -- retry 'gui stop'\r\n");
+		return 1;
+	}
 	cli_print(sh, "gui: stopped (display returned to 'lcd')\r\n");
 	return 0;
 }

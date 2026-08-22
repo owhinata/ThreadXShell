@@ -247,7 +247,7 @@ static void ai_print_dets(struct cli_instance *sh)
 static int cmd_ai_run(struct cli_instance *sh, int argc, char **argv)
 {
 	struct nn_camera_stats s;
-	int rc;
+	int rc, stop_rc;
 
 	(void)argc; (void)argv;
 
@@ -277,7 +277,17 @@ static int cmd_ai_run(struct cli_instance *sh, int argc, char **argv)
 			break;
 	}
 	nn_camera_stats_get(&s);
-	nn_camera_stop();
+	stop_rc = nn_camera_stop();
+	/* issue #72: a one-shot must not swallow a teardown that did not finish --
+	   the next `ai stream start` will be refused, and the reason has to have
+	   been said out loud once already. */
+	if (stop_rc == -7)
+		cli_warn(sh, "teardown incomplete: the camera has not released the "
+		         "inference frame; run 'ai stream stop' before starting "
+		         "again\r\n");
+	else if (stop_rc == -8)
+		cli_warn(sh, "teardown skipped: another 'ai stream' command owns the "
+		         "stream\r\n");
 
 	if (s.infers < 1) {
 		cli_warn(sh, "no inference completed (base streaming RGB565? camera connected?)\r\n");
@@ -328,6 +338,19 @@ static int cmd_ai_stream_stop(struct cli_instance *sh, int argc, char **argv)
 	if (rc == -1) {
 		cli_warn(sh, "not running\r\n");
 		return 0;
+	}
+	if (rc == -8) {
+		cli_error(sh, "busy -- another 'ai stream' start/stop is in "
+		          "progress\r\n");
+		return 1;
+	}
+	if (rc == -7) {
+		/* issue #72: the sink is detached but still pinned, so a producer
+		   callback may still be writing our staging buffers.  Refusing the
+		   restart is the point; retrying this command is what clears it. */
+		cli_error(sh, "camera has not released the inference frame; the stream "
+		          "stays reserved -- retry 'ai stream stop'\r\n");
+		return 1;
 	}
 	if (rc != 0) {
 		cli_error(sh, "stop timed out (%d)\r\n", rc);

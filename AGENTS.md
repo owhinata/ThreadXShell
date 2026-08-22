@@ -341,6 +341,43 @@
    - SDK ツリーは read-only。センサのモードテーブル `.i` は**コピーせず SDK から
      include** する（pin した SHA に紐付けるため）。
 
+8g. **f746g-disco: カメラ subscriber の drain と owner lifecycle（#72）。**
+   GUI preview / `ai stream` / `net mjpeg` は 1 つの base capture の subscriber で、
+   `camera_unsubscribe()` は **base を止めずに** detach する。`publish()` は sink を
+   pre-pin して lock を離してから `consume()` を呼ぶので、unlink を跨いだ配送が実在する。
+   - **`camera_frame_put()` は全 `consume()` の最後の文**（3 sink とも）。これが drain の
+     唯一の根拠で、後ろに仕事を足すと **pin カウントは 0 のまま** owner がその仕事の
+     読んでいるものを解放する。**証明できるのは「関数が返った」ではなく
+     「そのコールバックが owner の所有物にもう触らない」** — sink が静的だから足りる。
+   - **`CAM_OWN_DRAINING` は `camera_unsubscribe()` の前に入る。** 逆にすると drain 区間が
+     丸ごと無防備で、そこに入った start が sink を再 attach し、
+     `frame_pipeline_attach()` が `_pins` をリセットして**証拠を消す**。
+   - **直列化（PRIMASK）は作業を跨いで保持しない**: 取る → 遷移 → 離す → drain と
+     teardown → 取り直して commit。跨ぐと `tx_thread_sleep()` を跨ぎ、
+     `nncam_lock` / `ltdc_lock` とロック順が逆転して teardown が deadlock になる。
+   - **判定は `port/camera/cam_drain.c` と `cam_own.c` の純関数が唯一の判断点**。
+     owner 側に近道を書き戻さない（実機で作れない分岐なので
+     `test/test_cam_drain.c` / `test_cam_own.c` だけが検査できる）。**両方 fail-closed**
+     （カウントを先に見て deadline は境界だけ / 未知の状態は refuse）。
+     **`default:` を足して塞がない** — メンバ追加時に `-Wall` が鳴るのと
+     "future member" ベクタが落ちるのが検知経路。
+   - **DONE は `pins == 0` ちょうどだけ。`pins < 0` を released 扱いにしない。**
+     `unpin_locked()` は 0 で飽和するのでパイプラインは負を作れず、負は
+     「誰かが sink の帳簿を書いた」しか意味しない。それを「解放済み」と読むのは
+     説明のつかない値の上で teardown を通す fail-open。
+   - **遅延 start（GUIX preview）はイベントに claim を持たせる。** 既に RUNNING の
+     `gui start` は AUTOSTART を post しない（claim の無いイベントは、`gui stop` が
+     drain を終えた後に届いて sink を再 attach しうる）。ハンドラ側も
+     `cam_own_start_claimed()` で自分の claim が生きていることを確認してから subscribe する。
+   - **worker は session を返してから「parked」を公開する**（nn の
+     `nncam_release_session()` → `nncam_active = 0` の順）。逆にすると、stop が parked を
+     見て IDLE を commit → 新しい start が新 session を acquire → 旧 worker の release が
+     **新しい session を解放する**。
+   - **失敗は呼び出し元まで返す**: `CAM_DRAIN_PINNED` のとき GUI は `guix_stop()` を
+     呼ばず「display returned to lcd」と言わない。`nn_camera_stop()` は -7、
+     `nx_mjpeg_stop()` は `NX_MJPEG_PINS` を返し、**次の start を拒否し続ける**
+     （retryable だが両方向に fail-closed）。詳細は `boards/f746g-disco/README.md`。
+
 9. **ビルドは `_ref/` を読まない。** `_ref/`（および `../*/_ref/`）は git 管理外の資料置き場。
    CMake / スクリプトが参照するとクローンしただけでは configure できなくなる。
    C コード中の言及は出典コメントのみ可。

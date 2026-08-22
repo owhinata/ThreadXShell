@@ -10,10 +10,14 @@
  * Design (codex-reviewed, owhinata/stm32f746g-disco#81):
  *   - A SYNCHRONOUS copy push sink (like nx_mjpeg.c eth_sink): consume() runs in
  *     the camera producer thread, resizes + converts the RGB565 frame into an
- *     int8 staging buffer, then camera_frame_put()s the pin immediately, so the
- *     pipeline in-flight count is always 0 and the camera's async teardown stays
- *     correct.  The nearest-neighbour resize reads only WxH sampled source pixels
- *     (cheaper than copying the whole frame), keeping producer-thread load low.
+ *     int8 staging buffer, and camera_frame_put()s the pin as its LAST STATEMENT.
+ *     The nearest-neighbour resize reads only WxH sampled source pixels (cheaper
+ *     than copying the whole frame), keeping producer-thread load low.
+ *     [!] This file used to claim the in-flight count is "always 0".  That is
+ *     true of the consume BODY and false at detach, which is the moment an owner
+ *     asks: camera_unsubscribe() detaches while the base keeps running, so a
+ *     publish can already be in flight across the unlink.  nn_camera_stop() now
+ *     drains that pin instead of assuming it away (issue #72).
  *   - NN-input ownership (the BLOCKING codex fix): the sink NEVER writes a buffer
  *     the worker is using.  Two staging buffers with a FREE/FILLING/READY/RUNNING
  *     state machine under a short TX_MUTEX; the worker copies a READY stage into
@@ -32,6 +36,7 @@
 #include "nn_camera.h"
 #include "models/blazeface.h" /* BlazeFace decode (model-specific post-process) */
 #include "camera.h"          /* camera_subscribe / camera_unsubscribe / camera_frame_put */
+#include "cam_own.h"         /* the owner lifecycle (issue #72)                        */
 #include "frame_pipeline.h"  /* struct frame_sink / frame_desc / FRAME_POLICY_* */
 
 #include "stm32f7xx_hal.h"   /* HAL_GetTick, HAL_RCC_GetHCLKFreq */
@@ -64,6 +69,14 @@
  * deeper. */
 #define NNCAM_WORKER_STACK    4096u
 #define NNCAM_POLL_TICKS      100u        /* sem wait -> stop latency               */
+/* Teardown budgets (ticks, WALL CLOCK; 1 tick = 1 ms).  The sink drain is short
+ * because a healthy consume() is one resize away from its put; the worker settle
+ * keeps the 3 s this always allowed, since it may have to outlast a whole
+ * inference.  Both are wall clock rather than a count of sleeps: counting
+ * iterations burns the budget instantly once the sleeps stop sleeping, and would
+ * then report a healthy worker as stuck (issue #65). */
+#define NNCAM_DRAIN_TICKS     100u        /* sink pin -> release                    */
+#define NNCAM_SETTLE_TICKS    3000u       /* worker parks (may span an inference)   */
 
 /* Staging buffers live in the NN arena (bank3, .sdram.ai).  Raw bytes: hold either
  * int8 or float32 preprocessed input depending on the model's input dtype. */
@@ -91,6 +104,15 @@ static volatile int nncam_producer_dead;
 static volatile int nncam_holds_session;
 /* worker/objects created once */
 static int          nncam_created;
+
+/* The `ai stream` lifecycle (issue #72), serialised by cam_own.h.  It guards the
+ * SINK: which entry points may subscribe it, and the interval in which a stop
+ * has detached it and is watching its pins fall to zero.  The three volatile
+ * flags above stay, and describe something else -- the worker and the nn session,
+ * which deliberately OUTLIVE a stop that returned -2 (the worker releases the
+ * session itself on its way out).  Both are consulted at a start; neither
+ * subsumes the other. */
+static volatile enum cam_own_state nncam_own;
 /* enum camera_res hint (display only, owhinata/stm32f746g-disco#100) */
 static uint8_t      nncam_res;
 
@@ -261,13 +283,18 @@ static void nncam_ingest(const struct frame_desc *f)
 	(void)tx_semaphore_put(&nncam_sem);     /* wake the worker                      */
 }
 
+/* [!] PUT LAST.  camera_frame_put() must stay the LAST STATEMENT here, as in
+   every consume() on this board (issue #72): once the pin reaches zero this
+   callback touches nothing the owner owns, which is what lets nn_camera_stop()
+   settle for ONE count.  Work moved back below the put would be invisible to
+   that count -- the failure this rule exists to prevent. */
 static int nncam_consume(void *ctx, const struct frame_desc *f)
 {
 	(void)ctx;
 
 	if (nncam_run)
 		nncam_ingest(f);                    /* preprocess into staging (pin held)   */
-	camera_frame_put(&nncam_sink, f);       /* release the pin (in-flight 0)        */
+	camera_frame_put(&nncam_sink, f);       /* LAST -- see the rule above           */
 	return 0;
 }
 
@@ -375,12 +402,28 @@ static void nncam_entry(ULONG arg)
 				continue;                   /* timeout -> re-check run               */
 			(void)nncam_step();
 		}
-		nncam_active = 0;                   /* parked; nn_camera_stop() waits on this */
-		/* The run loop exits only on nncam_run=0 (an `ai stream stop`) -- a base
-		 * detach is a pause that keeps run=1.  Release the session here so it is
-		 * freed even if nn_camera_stop() timed out mid-nn_run() (idempotent via the
-		 * holds flag with nn_camera_stop's own release). */
+		/* [!] THE SESSION GOES BACK BEFORE WE ANNOUNCE THAT WE PARKED, and the
+		 * order is the correctness (issue #72).  nncam_active = 0 is what a stop
+		 * waits on; the moment it is visible the stop may release the session,
+		 * commit the lifecycle to IDLE and let a NEW `ai stream start` acquire a
+		 * fresh session -- and if this release were still to come, it would then
+		 * hand back the new stream's session, because the holds flag it reads is
+		 * the one that start has just set.  Releasing first makes that
+		 * impossible: after this line we own nothing a later start could be
+		 * given.
+		 *
+		 * The run loop exits only on nncam_run=0 (an `ai stream stop`) -- a base
+		 * detach is a pause that keeps run=1.  Releasing here is what frees the
+		 * session even when nn_camera_stop() timed out mid-nn_run() (idempotent
+		 * with nn_camera_stop's own release via the holds flag). */
 		nncam_release_session();
+		nncam_active = 0;                   /* parked; nn_camera_stop() waits on this */
+		/* And finish the lifecycle if a stop gave up waiting for us: it committed
+		 * SETTLING and returned -2, so this parking is the event that lets a later
+		 * `ai stream start` back in (issue #72).  A no-op in every other state --
+		 * a stop still inside its own drain commits its own result, and must not
+		 * have it overwritten from here. */
+		cam_own_settle(&nncam_own);
 		LOG_INF("inference stopped (%lu infers)", (unsigned long)nnstat.infers);
 	}
 }
@@ -470,25 +513,46 @@ static int nncam_create_objects(void)
 
 int nn_camera_start(enum camera_res res)
 {
+	enum cam_own_start act;
 	int rc;
 
 	/* input adapts to the base geometry (owhinata/stm32f746g-disco#100) */
 	(void)res;
-	if (nncam_run || nncam_active)
-		return -2;                          /* running or still tearing down        */
+	/* Claim the lifecycle first (issue #72).  Everything below happens inside
+	   CAM_OWN_STARTING, so a concurrent `ai stream stop` is refused rather than
+	   interleaved -- a stop that ran a whole teardown between this claim and the
+	   subscribe below would leave both commands reporting success. */
+	act = cam_own_start_take(&nncam_own);
+	if (act != CAM_OWN_START_GO)
+		return -2;                          /* running, or a teardown owns the sink */
+
+	/* The flags are still tested, and they are NOT the same question: the
+	   lifecycle guards the sink, while these say whether the worker and the nn
+	   session from a previous stream are still winding down.  A stop that
+	   returned -2 leaves the lifecycle clear and these set. */
+	if (nncam_run || nncam_active || nncam_holds_session) {
+		cam_own_start_finish(&nncam_own, 0);
+		return -2;                          /* still tearing down                   */
+	}
 
 	rc = nncam_open_model();                /* model + input geometry (bounds-checked) */
-	if (rc != 0)
+	if (rc != 0) {
+		cam_own_start_finish(&nncam_own, 0);
 		return rc;
-	if (nncam_create_objects() != 0)
+	}
+	if (nncam_create_objects() != 0) {
+		cam_own_start_finish(&nncam_own, 0);
 		return -5;
+	}
 
 	/* Claim the single inference session first: refused (-6) if `ai bench` or a
 	 * stream is using the non-reentrant singleton model.  The session owner is this
 	 * `ai stream` enable; it is released only by nn_camera_stop() / the worker's
 	 * run-loop exit, NEVER by a base detach (contract owhinata/stm32f746g-disco#100.4). */
-	if (nn_session_try_acquire() != 0)
+	if (nn_session_try_acquire() != 0) {
+		cam_own_start_finish(&nncam_own, 0);
 		return -6;
+	}
 	nncam_holds_session = 1;
 
 	/* Enable the subscriber BEFORE subscribing so a frame delivered the instant we
@@ -502,34 +566,77 @@ int nn_camera_start(enum camera_res res)
 		nncam_run = 0;
 		nncam_holds_session = 0;
 		nn_session_release();
+		cam_own_start_finish(&nncam_own, 0);
 		return rc;
 	}
+	cam_own_start_finish(&nncam_own, 1);    /* STARTING -> RUNNING                  */
 	return 0;
+}
+
+/* Wait (bounded, wall clock) for the worker to leave its run loop; non-zero if
+ * it parked.  Kept apart from the sink drain because it answers a different
+ * question: the sink drain says the producer is out of our staging state, this
+ * says the worker is out of the model. */
+static int nncam_settle_worker(void)
+{
+	ULONG start = tx_time_get();
+
+	while (nncam_active && (tx_time_get() - start) < (ULONG)NNCAM_SETTLE_TICKS)
+		tx_thread_sleep(10);
+	return !nncam_active;
 }
 
 int nn_camera_stop(void)
 {
-	if (!nncam_run && !nncam_active)
-		return -1;
+	enum cam_own_stop act = cam_own_stop_take(&nncam_own);
+	enum cam_drain_step step;
+	int parked;
 
+	switch (act) {
+	case CAM_OWN_STOP_IDLE:
+		return -1;                          /* nothing of ours is up                */
+	case CAM_OWN_STOP_HELD:
+		return -8;                          /* a start / another stop owns it       */
+	case CAM_OWN_STOP_DRAIN:                /* the running case                     */
+	case CAM_OWN_STOP_RETRY:                /* finish what an earlier stop could not */
+		break;
+	}
+
+	/* [!] The ORDER is the fix (issue #72): CAM_OWN_DRAINING was entered above,
+	 * BEFORE this unsubscribe, so no `ai stream start` can re-subscribe the sink
+	 * while its pins are being watched -- frame_pipeline_attach() resets exactly
+	 * the count the drain below reads.  Everything from here to the commit runs
+	 * with the lifecycle held but NO serialiser held: these waits sleep, and one
+	 * of the callbacks takes nncam_lock. */
 	nncam_run = 0;                          /* disable: worker exits its run loop   */
 	(void)tx_semaphore_put(&nncam_sem);     /* wake the worker if waiting           */
 	(void)camera_unsubscribe(&nncam_sink);  /* detach (close); base keeps running   */
 
-	for (int i = 0; i < 30 && nncam_active; i++)
-		tx_thread_sleep(100);
+	/* The sink first.  A publish can have been in flight across the unlink, and
+	 * that consume() keeps preprocessing into a staging buffer until it puts its
+	 * pin back -- the thing this file used to assume away. */
+	step = camera_sink_drain(&nncam_sink, NNCAM_DRAIN_TICKS);
 
-	/* If the worker is still mid-nn_run() after the wait, keep the session: releasing
-	 * now would let another activity acquire the model while the worker still reads
-	 * it.  The worker releases the session itself when it exits the run loop (run=0),
-	 * so report -2 (still tearing down) -- the release is not lost. */
-	if (nncam_active)
-		return -2;
+	/* Then the worker.  If it is still mid-nn_run(), keep the session: releasing
+	 * now would let another activity acquire the model while the worker still
+	 * reads it.  The worker releases the session itself when it leaves the run
+	 * loop, so the -2 below does not lose the release. */
+	parked = nncam_settle_worker();
+	if (parked)
+		nncam_release_session();
 
-	/* Worker parked (or never entered the loop): release the session iff the worker
-	 * did not already (idempotent via the holds flag). */
-	nncam_release_session();
-	return 0;
+	cam_own_drain_finish(&nncam_own, step, parked);
+	/* [!] The worker may have parked between that last poll and this commit, and
+	 * found the lifecycle still DRAINING -- so it left it alone, correctly, and
+	 * nobody would ever clear the SETTLING just written.  Close that window here;
+	 * in the other interleaving the worker's own settle runs after this commit
+	 * and does it instead. */
+	if (!parked && !nncam_active)
+		cam_own_settle(&nncam_own);
+
+	if (step != CAM_DRAIN_DONE)
+		return -7;                          /* sink still pinned: reuse refused     */
+	return parked ? 0 : -2;                 /* -2: worker still winding down        */
 }
 
 bool nn_camera_running(void)

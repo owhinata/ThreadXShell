@@ -37,6 +37,8 @@
 
 #include <stdint.h>
 
+#include "cam_drain.h"     /* enum cam_drain_step (issue #72)         */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -371,6 +373,38 @@ int camera_subscribe_oneshot(struct frame_sink *s, enum camera_format cls_fmt);
  * cam_lock.
  */
 int camera_subscribed(struct frame_sink *s);
+
+/**
+ * @brief  How many pipeline slots @p s still holds right now (issue #72).
+ *
+ * The number camera_unsubscribe() returns is taken at detach time, where a
+ * nonzero value is NORMAL -- the base keeps running, so a publish can be in
+ * flight across the unlink.  This is how the owner then watches that value fall
+ * to zero, which is the drain the doc comment above has always required and
+ * which nothing here implemented.  The pipeline is file-static in camera.c, so
+ * this is the only way a subscriber module can ask.
+ *
+ * Works whether or not @p s is still attached; see frame_pipeline_sink_pins()
+ * for why zero is trustworthy once it is unlinked.  0 for a NULL @p s.
+ */
+int camera_sink_pins(const struct frame_sink *s);
+
+/**
+ * @brief  Wait for @p s to hand back everything the pipeline gave it (issue #72).
+ *
+ * @param ticks  the owner's budget, in ThreadX ticks (WALL CLOCK, not polls)
+ * @return CAM_DRAIN_DONE once the sink holds nothing, else CAM_DRAIN_PINNED.
+ *
+ * Call it AFTER camera_unsubscribe(), and only from an owner that has already
+ * entered the state which refuses a concurrent start (cam_own.h) -- the drain is
+ * meaningful only while nothing can re-attach the sink, because
+ * frame_pipeline_attach() resets the very bookkeeping it watches.  DONE is the
+ * only answer that lets the owner release what its consume() reads; cam_drain.h
+ * states exactly how much DONE proves, which is less than "consume() returned".
+ *
+ * Sleeps, so thread context only, and never with the camera lock held.
+ */
+enum cam_drain_step camera_sink_drain(const struct frame_sink *s, uint32_t ticks);
 
 /**
  * Nonzero if any attached external subscriber OTHER THAN @p self is currently live

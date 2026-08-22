@@ -379,6 +379,13 @@ static int cmd_net_mjpeg_start(struct cli_instance *sh, int argc, char **argv)
 		          "-- `camera stream stop`, `camera format jpeg`, restart\r\n");
 		return 1;
 	}
+	if (rc == NX_MJPEG_PINS) {
+		/* issue #72: the start failed and its unwind could not get the sink
+		   back, so the stream stays reserved until a stop proves it clear. */
+		cli_error(sh, "net: mjpeg start failed and the camera has not released "
+		          "the frame; run `net mjpeg stop` before retrying\r\n");
+		return 1;
+	}
 	if (rc != 0) {
 		cli_error(sh, "net: mjpeg start failed (%d)\r\n", rc);
 		return 1;
@@ -399,6 +406,18 @@ static int cmd_net_mjpeg_stop(struct cli_instance *sh, int argc, char **argv)
 	rc = nx_mjpeg_stop();
 	if (rc == -1) {
 		cli_error(sh, "net: mjpeg not running\r\n");
+		return 1;
+	}
+	if (rc == NX_MJPEG_BUSY) {
+		cli_error(sh, "net: busy -- another mjpeg start/stop is in progress\r\n");
+		return 1;
+	}
+	if (rc == NX_MJPEG_PINS) {
+		/* issue #72: the sink is detached but still pinned, so a producer
+		   callback may still be copying into the send buffer.  Refusing the
+		   restart is the point; retrying this command is what clears it. */
+		cli_error(sh, "net: camera has not released the mjpeg frame; the stream "
+		          "stays reserved -- retry `net mjpeg stop`\r\n");
 		return 1;
 	}
 	if (rc != 0) {

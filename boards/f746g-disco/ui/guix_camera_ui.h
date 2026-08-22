@@ -44,6 +44,13 @@
 extern "C" {
 #endif
 
+/* Return codes beyond the GUIX_* ones the bring-up passes through (issue #72).
+   Kept clear of GUIX_ERR (-1) and GUIX_ERR_STATE (-2), which camera_ui_start()
+   still returns unchanged from guix_start(). */
+#define CAMERA_UI_OK         0
+#define CAMERA_UI_ERR_BUSY  -3   /* a start or a teardown owns the preview sink */
+#define CAMERA_UI_ERR_PINS  -4   /* the sink did not hand its frame back        */
+
 /** Register the GUIX widget-tree builder with guix_glue.  No GUIX/camera I/O, so
  *  it is safe to call from tx_application_define() before the scheduler.  Call
  *  once at boot, before any camera_ui_start(). */
@@ -51,15 +58,26 @@ void camera_ui_init(void);
 
 /** Bring the GUIX camera UI up (or resume it) and request the live preview.
  *  Shared by the boot path (owhinata/stm32f746g-disco#60) and `gui start`.
- * Boot-safe. Returns 0 on success, or a negative GUIX bring-up error
- * (GUIX_ERR_STATE: display down). */
+ * Boot-safe. Returns 0 on success, a negative GUIX bring-up error
+ * (GUIX_ERR_STATE: display down), or CAMERA_UI_ERR_BUSY while a preview
+ * teardown still owns the sink (issue #72). */
 int camera_ui_start(void);
 
 /** Stop the live preview (unsubscribe from the base -- the base keeps running for
  *  other subscribers), blank the screen and hand the display back to `lcd`
- *  (`gui stop`).  Thread context only.  Idempotent.  Returns 0.  Since Epic
+ *  (`gui stop`).  Thread context only.  Idempotent.  Since Epic
  * owhinata/stm32f746g-disco#99 Phase 1 (owhinata/stm32f746g-disco#100) this no
- * longer stops the base capture nor the AI subscriber. */
+ * longer stops the base capture nor the AI subscriber.
+ *
+ * Returns 0, or:
+ *   CAMERA_UI_ERR_BUSY  another start/stop owns the lifecycle -- nothing done;
+ *   CAMERA_UI_ERR_PINS  the sink did not hand its frame back inside the budget.
+ *
+ * [!] CAMERA_UI_ERR_PINS MUST NOT BE REPORTED AS A STOP (issue #72).  The
+ * preview surface is still armed and GUIX still holds the LCD, precisely
+ * because a producer callback may still be copying into it.  It is recoverable
+ * rather than terminal: a later `gui stop` re-polls and finishes the teardown,
+ * and `gui start` uses the existing restart path. */
 int camera_ui_stop(void);
 
 #ifdef __cplusplus

@@ -43,6 +43,7 @@
  * RM0385/UM1907/UM2779 were used as a register/pin/timing reference only.
  */
 #include "camera.h"
+#include "cam_drain.h"     /* the sink-drain decision (issue #72) */
 #include "sdram.h"
 #include "ltdc_display.h"   /* ltdc_scanout_active() -- 30 fps clamp guard (#67) */
 
@@ -2459,6 +2460,39 @@ int camera_unsubscribe(struct frame_sink *s)
 	}
 	op_unlock();
 	return inflight;
+}
+
+int camera_sink_pins(const struct frame_sink *s)
+{
+	/* No op_lock(): the pipeline takes its own lock for this, and a drain runs
+	   on teardown paths where the camera lock may be held by whoever is tearing
+	   down.  Queuing behind it would turn a poll into a deadlock. */
+	if (s == NULL)
+		return 0;
+	return frame_pipeline_sink_pins(&cam_pipe, s);
+}
+
+enum cam_drain_step camera_sink_drain(const struct frame_sink *s, uint32_t ticks)
+{
+	ULONG start = tx_time_get();
+
+	/* The waiting lives here, in one place, because all three owners want the
+	   same loop and the interesting part is the decision (cam_drain.c) rather
+	   than the sleeping.  No op_lock() for the same reason as above.
+
+	   [!] The budget is WALL CLOCK, not a count of sleeps.  A loop that counted
+	   iterations of a 1-tick sleep burns its whole budget in an instant once
+	   the sleeps stop actually sleeping -- and would then report a healthy sink
+	   as stuck (issue #65, from the other direction). */
+	for (;;) {
+		enum cam_drain_step step =
+			cam_sink_drain_step(camera_sink_pins(s),
+			                    (tx_time_get() - start) >= (ULONG)ticks);
+
+		if (step != CAM_DRAIN_WAIT)
+			return step;
+		tx_thread_sleep(1);
+	}
 }
 
 int camera_subscribed(struct frame_sink *s)

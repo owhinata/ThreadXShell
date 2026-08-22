@@ -36,6 +36,9 @@ extern "C" {
    transport codes and the CAM_ERR_* range (-1..-7). */
 #define NX_MJPEG_NO_CAPTURE  (-10)  /* base not streaming: run `camera stream start` */
 #define NX_MJPEG_FMT_CLASH   (-11)  /* base is raster (RGB565): mjpeg needs JPEG     */
+/* Teardown codes (issue #72), in the same range for the same reason. */
+#define NX_MJPEG_BUSY        (-12)  /* a start or another stop owns the lifecycle   */
+#define NX_MJPEG_PINS        (-13)  /* the sink did not hand its frame back         */
 
 /** Snapshot for `net mjpeg stats`. */
 struct nx_mjpeg_stats {
@@ -56,14 +59,24 @@ struct nx_mjpeg_stats {
  * (owhinata/stm32f746g-disco#101).  The base must already be streaming JPEG (`camera
  * format jpeg` + `camera stream start`); the stream resolution follows the base.
  * Returns 0, or a negative:  NX_MJPEG_NO_CAPTURE (base off), NX_MJPEG_FMT_CLASH (base
- * is raster, not JPEG), -1 (net down), -2 (already running), -3 (listen / thread
- * failed), or a CAM_ERR_* from camera_subscribe_oneshot (e.g. CAM_ERR_STATE registry
- * full).
+ * is raster, not JPEG), -1 (net down), -2 (already running / a teardown owns the
+ * sink), -3 (listen / thread failed), NX_MJPEG_PINS (the start failed AND its
+ * unwind could not get the sink back -- retry `net mjpeg stop`, issue #72), or a
+ * CAM_ERR_* from camera_subscribe_oneshot (e.g. CAM_ERR_STATE registry full).
  */
 int  nx_mjpeg_start(void);
 
-/** Detach the MJPEG sink (the base keeps running).  0 ok, -1 not running, -2
- *  teardown timed out. */
+/** Detach the MJPEG sink (the base keeps running), wait for the producer to hand
+ *  the sink's frame back, then for the server thread to park.  Returns:
+ *    0                 stopped;
+ *   -1                 not running;
+ *   -2                 the server thread has not parked yet (the sink IS
+ *                      released, so this is not a refusal -- it parks by itself);
+ *   NX_MJPEG_PINS      the sink did not hand its frame back (issue #72): a
+ *                      producer callback may still be copying into mjpeg_buf, so
+ *                      `net mjpeg start` is refused until a later stop re-polls
+ *                      and finds it clear.  Retryable by design;
+ *   NX_MJPEG_BUSY      a start or another stop owns the lifecycle -- nothing done. */
 int  nx_mjpeg_stop(void);
 
 /** Fill @p out (may be NULL) and return true while the server is running. */

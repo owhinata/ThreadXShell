@@ -57,15 +57,25 @@ struct nn_camera_stats {
  * bench`/another stream holds it) and registers nncam as an RGB565 subscriber of the
  * base: it attaches immediately if the base is already running, otherwise it stays
  * enabled + idle and attaches at the next `camera stream start`.  Non-blocking.
- * Returns 0 or <0 (-2 already running, -3 model, -4 geometry, -5 objects, -6 nn
- * session busy).
+ * Returns 0 or <0 (-2 already running / still tearing down / a teardown owns the
+ * sink, -3 model, -4 geometry, -5 objects, -6 nn session busy).
  */
 int  nn_camera_start(enum camera_res res);
 
 /** Disable live inference (`ai stream stop`): unsubscribe from the base (which
- *  keeps running for other subscribers) and release the nn session after the
- *  worker parks.  Bounded wait; returns 0, -1 (not running), or -2 (worker still
- *  mid-inference -- the session is released by the worker as it exits). */
+ *  keeps running for other subscribers), wait for the producer to hand this
+ *  sink's frame back, and release the nn session after the worker parks.
+ *  Bounded waits (wall clock).  Returns:
+ *    0   stopped;
+ *   -1   not running;
+ *   -2   the worker is still mid-inference -- it releases the session as it
+ *        exits, and the sink is already released, so this is not a refusal;
+ *   -7   the sink did not hand its frame back (issue #72).  A producer callback
+ *        may still be preprocessing into our staging buffers, so `ai stream
+ *        start` is refused until a later stop re-polls and finds it clear.
+ *        Retryable by design: if the callback never returns, every retry keeps
+ *        refusing, which is what a terminal state would have given anyway;
+ *   -8   a start or another stop owns the lifecycle -- nothing was done. */
 int  nn_camera_stop(void);
 
 /** True while inference is enabled. */

@@ -48,6 +48,8 @@
  */
 #include "npu_hw.h"
 
+#include "nor_flash.h"
+
 #include "WE2_device.h"
 #include "WE2_core.h"       /* EPII_NVIC_SetVector */
 #include "hx_drv_scu.h"
@@ -66,6 +68,8 @@ static struct ethosu_driver npu_drv;
 static struct epk_irq_wrapset npu_irqs;
 static const char *fail_reason;
 static uint8_t     hw_ready;
+/* The committed flash lease: non-zero exactly while hw_ready is (issue #86). */
+static uint32_t    nor_lease;
 
 static int fail(const char *why)
 {
@@ -137,23 +141,37 @@ static void npu_irq_handler(void)
 int npu_hw_init(void)
 {
 	struct epk_irq_snapshot snap;
+	uint32_t lease = 0u;
 
 	if (hw_ready)
-		return 0;
+		return 0;               /* already ready: acquire nothing */
 	fail_reason = NULL;
 
-	/* Everything the bring-up enables must end up wrapped; take the reference
-	 * point before the first thing that could enable an interrupt. */
+	/* [!] THE FLASH LEASE COMES FIRST, AND OUTSIDE THIS SNAPSHOT (issue #86).
+	 * The model lives in flash and is parsed in place, so the read window has
+	 * to exist before anything downstream can look at it -- but bringing that
+	 * window up is what enables the QSPI DMA interrupt, and that line belongs
+	 * to port/nor/.  It used to land in npu_irqs, so npu_hw_deinit() disabled
+	 * it on every `nn close` while the old one-way latch went on reporting the
+	 * flash as initialised.
+	 *
+	 * [!] The token stays LOCAL until this whole transaction succeeds.  Three
+	 * things below can still fail, and cmd_nn.c does NOT call npu_hw_deinit()
+	 * when npu_hw_init() returns non-zero -- so each of those returns has to
+	 * hand the lease back itself. */
+	if (nor_acquire(NOR_LEASE_NPU, &lease) != 0)
+		return fail(nor_fail_reason() != NULL
+		            ? nor_fail_reason()
+		            : "the flash window is unavailable; the model is unreadable");
+
+	/* Everything the NPU bring-up enables must end up wrapped; take the
+	 * reference point after the flash, so this set is only the NPU's own. */
 	grove_epk_irq_snapshot(&snap);
 
-	/* The model lives in flash and is parsed in place, so the read window has
-	 * to exist before anything downstream can even look at it.  First because
-	 * it is the cheapest thing to fail on. */
-	if (npu_flash_xip_init() != 0)
-		return fail("QSPI XIP did not come up; the model is unreadable");
-
-	if (npu_scu_bring_up() != 0)
+	if (npu_scu_bring_up() != 0) {
+		(void)nor_release(lease);
 		return -1;
+	}
 
 	/* Clear any violation the bootloader or a previous run left latched, so a
 	 * fault during inference can only be ours. */
@@ -169,6 +187,7 @@ int npu_hw_init(void)
 	                1,      /* security_enable  */
 	                1) != 0) {   /* privilege_enable */
 		NVIC_DisableIRQ((IRQn_Type)U55_IRQn);
+		(void)nor_release(lease);
 		(void)fail("ethosu_init failed");
 		return -1;
 	}
@@ -180,10 +199,14 @@ int npu_hw_init(void)
 		grove_epk_irq_unwrap_set(&npu_irqs);
 		ethosu_deinit(&npu_drv);
 		NVIC_DisableIRQ((IRQn_Type)U55_IRQn);
+		(void)nor_release(lease);
 		(void)fail("could not account the NPU interrupts (EPK wrap failed)");
 		return -1;
 	}
 
+	/* Committed only here, alongside hw_ready -- the two are what
+	 * npu_hw_deinit() keys off, and neither may be true without the other. */
+	nor_lease = lease;
 	hw_ready = 1u;
 	LOG_INF("Ethos-U55 up (secure, privileged), IRQ %d wrapped",
 	        (int)U55_IRQn);
@@ -192,13 +215,25 @@ int npu_hw_init(void)
 
 void npu_hw_deinit(void)
 {
+	uint32_t lease;
+
 	if (!hw_ready)
-		return;
+		return;                 /* nothing committed: a no-op, as nn close needs */
 	hw_ready = 0u;
+
+	/* Cleared before it is released, so a second call through any path finds
+	 * nothing to hand back rather than handing the same claim back twice. */
+	lease = nor_lease;
+	nor_lease = 0u;
 
 	ethosu_deinit(&npu_drv);
 	NVIC_DisableIRQ((IRQn_Type)U55_IRQn);
 	grove_epk_irq_unwrap_set(&npu_irqs);
+
+	/* [!] The NOR lease goes back LAST, and only the NPU's own wrapset was
+	 * unwound above.  IRQ 133 is port/nor/'s and stays wrapped and enabled --
+	 * that difference is the whole of issue #86. */
+	(void)nor_release(lease);
 
 	/* Back into reset: an idle NPU that still has bus mastership is a thing
 	 * nobody is watching. */

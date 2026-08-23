@@ -2111,6 +2111,98 @@ separately.  Without that, an image between 1 and 2 MB passes the layout check
 and is refused by the bootloader with `ERR_IMAGE_SZ` -- on the hardware, with
 the serial port open and a reset already pressed.
 
+### `nor` -- reading the flash, and who owns the window (issue #86)
+
+```
+nor info    the lifecycle, the JEDEC id, the wrapped IRQ, MPU/SCU read-back
+nor scan    walk all 16 MB and report every extent that is not erased
+```
+
+There is no `nor write` or `nor erase`, and that is deliberate: a bounded write
+path is issue #88, and a raw one here would make the bounds check that issue
+exists to build pointless before it was written.
+
+[!] **"Read-only" would be the wrong word for it, though.** Neither subcommand
+programs or erases the *array*, but the first bring-up runs the vendor's
+quad-enable, which sets WEL and writes the QE bit of the NOR's non-volatile
+status register. That is a flash write. It is not new -- `nn open` has always
+done it, which is why `setWriteEnable` is a documented exception to the
+forbidden-symbol list -- but it becomes reachable from a diagnostic here.
+
+**The QSPI lifecycle belongs to `port/nor/`, not to the NPU.** It used to be
+brought up inside `npu_hw_init()`'s EPK snapshot, which put IRQ 133 -- the line
+the vendor library uses to move flash data with DMA -- into the *NPU's* wrapset.
+So `nn close` unwrapped it, and unwrapping disables. The old one-way latch in
+`npu_flash.c` went on reporting the flash as initialised over the top of that.
+Nothing noticed because only memory-mapped reads follow today; issue #49's writes
+would have. `nor info` after an `nn close` is how that is checked without a
+debugger:
+
+```
+irq      : 133 wrapped, enabled
+```
+
+The bring-up is staged, and the stages cannot be reordered:
+
+| step | why it cannot move |
+|---|---|
+| snapshot, open, wrap -- all under PRIMASK | IRQ 133 is *discovered* by the call that enables it, so "wrap before anything opens QSPI" is not possible |
+| restore PRIMASK before XIP setup | the vendor's quad-enable spins on flags only a completion interrupt clears; masked, it deadlocks |
+| JEDEC id **before** XIP | the vendor's read-ID carries the same XIP guard as its write entry points and returns the same refusal afterwards |
+
+[!] **The vendor moves the MPU under us.** `hx_lib_qspi_eeprom_enable_XIP()`
+calls `EPII_QSPIXIP_MEM_Attribute_S` and `_NS`, `EPII_MPU_Enable` and `_NS`,
+`hx_drv_scu_set_xip_en`, `hx_drv_scu_set_isp_write_en` and
+`hx_InvalidateDCache_by_Addr` -- and returns without checking any of them. "This
+port does not configure the MPU" was true of our code and false of the path we
+call. So bring-up reads the MPU back architecturally (the region covering the
+alias is searched for, not assumed), captures the SCU word raw -- the SVD names
+that register but gives no field breakdown -- and only then probes.
+
+The probe checks **content**: the window must start with the Himax container
+magic. The old two-word probe caught the failure that actually happened, a
+degenerate window aliasing one register block across all 16 MB, but a register
+block cannot coincidentally be a firmware image header.
+
+[!] **And bring-up is not free.** It permanently changes MPU state and takes one
+EPK slot for the rest of the session. Not new capacity -- `nn open` already does
+it and the interrupt is one line either way -- but now reachable from a
+diagnostic, and worth knowing on a board about to need its 31/32 high-water mark
+or one whose endurance is in question (issue #89).
+
+### What is actually on this board's flash
+
+Measured with `nor scan`, which reads **every byte**:
+
+```
+0x000000 0x0a9000    692224  firmware     slot 0 (an older, larger image)
+0x100000 0x19c000    638976  firmware     slot 1 (the live one)
+0x300000 0x33f000   ~256 KB  blob         a FlashDB KVDB, 4 KB on / 4 KB off
+0x3bb000 0x5ee000   2306048  blob         the SDK's PEOPLENET / YOLOV8_POSE address
+0xb7b000 0xd20000   1724416  model-cls
+0xd20000 0xd50000    196608  model-det
+0xd50000 0xd6b000    110592  blob-tail
+0xffe000 0x1000000     8192  slot-header  both copies
+                    5812224 B occupied of 16777216
+```
+
+[!] **`blob` is not empty**: ~2.6 MB of it is occupied by software this port did
+not put there. The seventeen-point `devmem peek` survey that preceded issue #85
+found "something" at `0x400000` and `0x500000` and had no way to see that they
+are one 2.3 MB object at the vendor's own model address. Nothing should write
+there on the strength of sampling.
+
+[!] **The scan reads every byte because sampling one word per sector lied.** The
+first version did that and reported two holes inside the contiguous detection
+model, because two of its sectors happen to begin with `0xFFFFFFFF` -- 8,192 B
+under-reported, in the direction that makes a region look freer than it is.
+
+[!] **The JEDEC id is `5e 50 18`, and Winbond is `0xEF`.** This board's NOR is
+not the W25Q128JW this README names elsewhere; the capacity byte agrees with the
+bootloader's `flash size[5]`, so the read is sound and the part is different.
+The ~100k endurance figure and the erase-unit sizes quoted here come from that
+datasheet -- see issue #89.
+
 ### [!] The blob area is not empty flash, and the first write destroys what is there
 
 `0x200000..0xB70000` is reserved (9,895,936 B) and written by nothing yet.  It is

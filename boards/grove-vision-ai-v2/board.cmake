@@ -83,9 +83,12 @@ set(GROVE_MODEL_DET_FILE
     CACHE FILEPATH
     "Vela-compiled BlazeFace model (`--target flash-model-det`, `nn open det`)")
 # 0xD20000 is the first 64 KB boundary above the classification model's extent
-# (0xB7B000 + 1,704,672 = 0xD1B2E0), 64 KB being the largest erase block this
-# NOR offers.  The checker is what makes that a checked property rather than
-# arithmetic in a comment.
+# (0xB7B000 + 1,704,672 = 0xD1B2E0).  It was chosen when 64 KB was believed to
+# be the erase block; the measured granularity is 4 KB (issue #88), so the
+# alignment is now more than it needs to be rather than wrong.  Left where it
+# is because moving a model address moves what `nn open det` was compiled with
+# and what is already programmed on the board.  The checker is what makes any
+# of this a checked property rather than arithmetic in a comment.
 set(GROVE_MODEL_DET_ADDR "0xD20000" CACHE STRING
     "Flash offset of the detection model")
 
@@ -109,7 +112,14 @@ include("${BOARD_DIR}/cmake/flash_geometry.cmake")
 #
 # Ends on the first block the classification model owns, so the two abut with no
 # unnamed gap.  Derived from the model's address rather than repeating the
-# 0xB70000 that rounding happens to produce today.
+# 0xB7B000 that rounding happens to produce today.
+#
+# [!] THAT END MOVED UP BY 44 KB when the granularity became 4 KB (issue #88):
+# the model address is 4 KB aligned but not 64 KB aligned, so 0xB70000..0xB7B000
+# used to round into the model's blocks and now belongs to blob.  Those 44 KB
+# have never been walked by `nor scan` -- the survey predates them -- so they
+# are reserved but NOT yet known to be empty.  Do not write there until a scan
+# has covered them.
 #
 # [!] WHAT IS THERE TODAY IS NOT OURS, AND THE FIRST WRITE DESTROYS IT.  The
 # factory SenseCraft firmware left a FlashDB KVDB at 0x300000 -- FlashDB's

@@ -5,22 +5,36 @@
 #
 # [!] EVERYTHING HERE IS A MEASUREMENT, NOT A KNOB.
 #
-# These four numbers describe the part and the resident bootloader.  They were
+# These five numbers describe the part and the resident bootloader.  They were
 # CACHE STRING entries when the layout first shrank, and that was a fail-open:
 # the SAME values both declare the layout and configure the check over it, so
-# one -D weakened the rule and its verification together.  All three of these
+# one -D weakened the rule and its verification together.  All four of these
 # configure cleanly and pass the layout check:
 #
 #   -DGROVE_FW_SLOT_SIZE=0x200000   a 1.7 MB artifact is accepted as firmware,
 #                                   which the bootloader refuses with ERR_IMAGE_SZ
 #   -DGROVE_FW_SLOTS=1              blob starts at 0x100000, so a blob write
 #                                   destroys the inactive firmware slot
-#   -DGROVE_ERASE_GRAN=0x1000       the slot-header reservation shrinks to one
-#                                   4 KB sector, putting the BACKUP header at
+#   -DGROVE_SLOT_HDR_COPIES=1       the slot-header reservation covers only
+#                                   0xFFF000, putting the BACKUP header at
 #                                   0xFFE000 inside blob-tail
-#   -DGROVE_FLASH_SIZE=0x2000000    the slot-header reservation moves to
-#                                   0x1FF0000 -- off the end of the real part --
-#                                   so BOTH real headers land inside blob-tail
+#   -DGROVE_ERASE_GRAN=0x100        the reservation shrinks to 512 B at
+#                                   0xFFFE00 so BOTH headers land inside
+#                                   blob-tail, AND the destroyed-footprint
+#                                   rounding starts under-reporting, because the
+#                                   bootloader erases in 4 KB sectors
+#   -DGROVE_FLASH_SIZE=0x2000000    the slot-header reservation moves off the
+#                                   end of the real part, so BOTH real headers
+#                                   land inside blob-tail
+#
+# [!] GROVE_ERASE_GRAN AND GROVE_SLOT_HDR_COPIES ARE TWO FACTS, NOT ONE
+# (issue #88).  Until the erase granularity was measured, the slot-header
+# reservation was written as "one erase block", which silently made the header
+# span a function of the footprint rounding.  Tightening the rounding to the
+# measured 4 KB would then have shrunk the reservation to a single sector and
+# dropped the backup header into blob-tail -- exactly the -D above that this
+# file already refused.  They are separate measurements now: how much a write
+# destroys, and how many copies of the header the bootloader keeps.
 #
 # So they are plain variables, and an inherited or command-line cache entry that
 # disagrees is a hard error rather than something that silently wins.  An entry
@@ -35,9 +49,11 @@
 # name  value  why-it-is-fixed
 set(_grove_flash_geometry
     GROVE_FLASH_SIZE   0x1000000
-      "the W25Q128JW is 16 MB, and the bootloader reports flash size[5] = FLASH_SIZE_128Mb"
-    GROVE_ERASE_GRAN   0x10000
-      "64 KB is the largest block this NOR offers -- the conservative bound the layout check rounds to"
+      "the fitted 128 Mbit NOR is 16 MB, and the bootloader reports flash size[5] = FLASH_SIZE_128Mb"
+    GROVE_ERASE_GRAN   0x1000
+      "the 2nd bootloader erases in 4 KB sectors and only in 4 KB sectors -- measured, see below"
+    GROVE_SLOT_HDR_COPIES 2
+      "the 2nd bootloader keeps the slot header at flash_end-0x1000 and a backup at flash_end-0x2000"
     GROVE_FW_SLOT_SIZE 0x100000
       "the bootloader prints `Image max size 0x00100000` on every flash"
     GROVE_FW_SLOTS     2
@@ -117,17 +133,30 @@ math(EXPR GROVE_FW_RESERVED "${GROVE_FW_SLOT_SIZE} * ${GROVE_FW_SLOTS}"
 #
 # Destroying it is not a hard brick: the checksum fails, the bootloader says so
 # and falls back to slot 0.  But if the live image is the one in slot 1, that
-# fallback silently boots the PREVIOUS build.  One erase block, so that BOTH
-# copies are covered -- which is exactly what -DGROVE_ERASE_GRAN=0x1000 undid.
-math(EXPR GROVE_SLOT_HDR_ADDR "${GROVE_FLASH_SIZE} - ${GROVE_ERASE_GRAN}"
+# fallback silently boots the PREVIOUS build.
+#
+# [!] AND THE 2ND BOOTLOADER DOES NOT ONLY READ IT -- IT REWRITES BOTH COPIES
+# after every burn, which is where the span comes from (issue #88).  Its own
+# arithmetic, disassembled at base 0x3401F000:
+#
+#     erase_range(0, flash_size - 0x1000,  flash_size - 1);      write(.., 20)
+#     erase_range(0, flash_size - 0x2000,  flash_size - 0x1001); write(.., 20)
+#
+# and erase_range() walks `addr & ~0xFFF` in 4 KB steps.  So the destroyed span
+# is exactly the last TWO 4 KB sectors and nothing below them.  That is the
+# reservation: GROVE_SLOT_HDR_COPIES sectors, not "one erase block" -- see the
+# header of this file for why conflating the two was a fail-open.
+math(EXPR GROVE_SLOT_HDR_RESERVED
+     "${GROVE_ERASE_GRAN} * ${GROVE_SLOT_HDR_COPIES}" OUTPUT_FORMAT HEXADECIMAL)
+math(EXPR GROVE_SLOT_HDR_ADDR "${GROVE_FLASH_SIZE} - ${GROVE_SLOT_HDR_RESERVED}"
      OUTPUT_FORMAT HEXADECIMAL)
-set(GROVE_SLOT_HDR_RESERVED "${GROVE_ERASE_GRAN}")
 
 # For the host test, and for anyone who wants the numbers without reading CMake.
 if(DEFINED GROVE_FLASH_GEOMETRY_REPORT)
     file(WRITE "${GROVE_FLASH_GEOMETRY_REPORT}"
          "GROVE_FLASH_SIZE=${GROVE_FLASH_SIZE}\n"
          "GROVE_ERASE_GRAN=${GROVE_ERASE_GRAN}\n"
+         "GROVE_SLOT_HDR_COPIES=${GROVE_SLOT_HDR_COPIES}\n"
          "GROVE_FW_SLOT_SIZE=${GROVE_FW_SLOT_SIZE}\n"
          "GROVE_FW_SLOTS=${GROVE_FW_SLOTS}\n"
          "GROVE_FW_RESERVED=${GROVE_FW_RESERVED}\n"

@@ -34,18 +34,28 @@ Two things make the bytes destroyed by a write larger than the file:
   * xmodem sends whole packets.  The last one is padded, so the receiver is
     handed ceil(size / packet) * packet bytes and writes all of them.
 
-  * flash is erased in blocks.  The receiver is the Himax bootloader resident
-    in the NOR itself -- closed, and not disassembled to a conclusion here --
-    so the block size it uses is not known.  The SDK's own SPI flash library
-    offers 4 KB sectors, 32 KB blocks and 64 KB blocks, and this check rounds
-    to the LARGEST of them.  That is a conservative bound and is stated as one:
-    whatever the bootloader actually does, its footprint is contained in what
-    is checked here.  (A bound is the right shape for this: erring large costs
-    address space, of which there is spare; erring small costs a board.)
+  * flash is erased in blocks.  This used to round to 64 KB -- the largest
+    block the SDK's flash library offers -- because the receiver is the Himax
+    bootloader resident in the NOR itself and it had not been disassembled to a
+    conclusion.  It has been now (issue #88).  Its range eraser walks
+    `addr & ~0xFFF` in 4 KB steps and passes erase enum 0 to every call; the
+    opcode table it indexes holds 0x20/0x52/0xD8 at offsets 30/31/32 and only
+    offset 30 is ever read.  32 KB, 64 KB and chip erase are never issued.
+
+    So 4 KB is a MEASUREMENT of the resident second-stage flashing path, not a
+    bound over every possible receiver.  It is narrower than what it replaced,
+    and the thing it stops covering is a future receiver that erases in bigger
+    blocks -- if one ever writes this part, this number is wrong for it.
 
 The one thing it cannot bound is a receiver that erases the whole chip before
 writing.  Nothing static could; the evidence is empirical, from the hardware
 check that reads the OTHER model back after flashing one.
+
+[!] --erase-granularity IS REQUIRED, and used to have a default of 64 KB.  A
+default is a second, independent declaration of a measured board fact: the
+caller in board.cmake passes the real one, so the default could only ever be
+consulted by a caller that forgot -- and it would then check a layout nobody
+declared.  Refusing is the only honest answer to "which part is this?".
 
 A RESERVATION IS NOT ALWAYS THE LIMIT ON ONE ARTIFACT (issue #85)
 
@@ -119,11 +129,12 @@ class Partition:
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--flash-size", type=parse_int, required=True,
-                    help="total flash bytes (W25Q128JW: 0x1000000)")
+                    help="total flash bytes (this part: 0x1000000)")
     ap.add_argument("--packet", type=parse_int, default=128,
                     help="xmodem packet size the sender uses")
-    ap.add_argument("--erase-granularity", type=parse_int, default=0x10000,
-                    help="largest erase block the part offers (see the header)")
+    ap.add_argument("--erase-granularity", type=parse_int, required=True,
+                    help="erase block the receiver actually uses (see the "
+                         "header -- no default on purpose)")
     ap.add_argument("--partition", action="append", default=[],
                     metavar="NAME:START:RESERVED",
                     help="one declared region; repeat for each")
@@ -199,7 +210,7 @@ def main():
     fails = []
 
     print(f"flash    : {args.flash_size} B, "
-          f"erase granularity {args.erase_granularity} B (conservative bound), "
+          f"erase granularity {args.erase_granularity} B (measured), "
           f"xmodem packet {args.packet} B")
     print(f"{'partition':<12} {'reserved blocks':>25} {'file':>10} {'sent':>10} "
           f"  state")

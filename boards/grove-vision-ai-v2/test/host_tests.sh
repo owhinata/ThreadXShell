@@ -245,6 +245,43 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_nor_state"
 "$out/test_nor_state"
 
+# issue #88 -- the NOR write seam's decisions (port/sdk_seam/nor_seam.c).
+# cmake/check_nor_seam.py settles who may REACH the vendor's erase and program
+# entry points; this settles what happens when they are reached, and it is the
+# only thing that can.  Every caller of those wrappers is first-party code
+# written to satisfy them, so an address one byte past the writable interval, an
+# erase unit this die has never been asked for, and a chip erase exist here or
+# nowhere -- and each of them would cost a flash cycle of a part whose endurance
+# is not documented (issue #89) to try on the board.
+#
+# [!] The assertion that carries the file is not the return value.  The vendor's
+# own erase and program report nothing usable (erase_sector returns the
+# write-protect helper's result and discards everything after it; write returns
+# a hard-coded 0), so what a refusal has to guarantee is that the part was never
+# addressed -- which is why the test stubs __real_* and checks the recorder is
+# empty after every refusal.
+#
+# The REAL seam is compiled against the REAL SDK headers (-isystem, so their own
+# warnings stay out of the suite's output), because the erase entry point takes
+# FLASH_ERASE_SIZE_E and inventing an `int` here would be the test agreeing with
+# itself about an ABI instead of with the archive.
+if [ -f "$sdk/library/spi_eeprom/qspi_eeprom_interface.h" ]; then
+    gcc $CFLAGS \
+        -DNOR_PART_FW_END=0x200000 -DNOR_PART_BLOB_END=0xB7B000 \
+        -DNOR_ERASE_GRAN=0x1000 \
+        -I "$here" -I "$board/port/sdk_seam" -I "$board/port/nor" \
+        -I "$board/svc" \
+        -isystem "$sdk/library/spi_eeprom" -isystem "$sdk/drivers/inc" \
+        -isystem "$sdk/device/inc" -isystem "$sdk/CMSIS" \
+        -isystem "$sdk/CMSIS/Include" -isystem "$sdk/drivers/seconly_inc" \
+        "$here/test_nor_seam.c" "$board/port/sdk_seam/nor_seam.c" \
+        $LDFLAGS -o "$out/test_nor_seam"
+    "$out/test_nor_seam"
+else
+    echo "  (skipped test_nor_seam: no Himax SDK at $sdk --" \
+         "configure a grove-vision-ai-v2 build tree first)"
+fi
+
 # issue #68 -- the EDM observer's bookkeeping (port/camera/cam_edm.c).  Nothing
 # a console can type makes EDM fire: the event has been seen twice, both times
 # inside a hang, and it cannot be asked for again.  So the accumulation and the

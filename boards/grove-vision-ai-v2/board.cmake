@@ -339,6 +339,38 @@ set(LIBSPIEEPROM "${SDK}/prebuilt_libs/gnu/lib_spi_eeprom.a")
 set(LIBSENSORDP  "${SDK}/prebuilt_libs/gnu/libsensordp.a")
 set(LIBEXTDEVICE "${SDK}/prebuilt_libs/gnu/libextdevice.a")
 
+# --- Vendor NOR write-path seam (issue #88) ----------------------------------
+# The comment above is what the QSPI archive was linked for in issue #44, and it
+# stops being the whole story here: issue #49's blob needs a WRITE path on the
+# same part that carries the bootloader, the firmware image and the
+# bootloader's slot header.
+#
+# So the four inner entry points are redirected to port/sdk_seam/nor_seam.c,
+# which bounds erase and program to the `blob` interval in units this die has
+# actually been measured erasing, and refuses chip erase and the word-at-a-time
+# programmer outright -- see nor_seam.h for what that does and does not prove.
+#
+# THE INNER (hx_lib_qspi_*) NAMES, NOT THE OUTER (hx_lib_spi_*) ONES.  The
+# outer forms in spi_eeprom_comm.o are thin forwarders that pick a bus by id and
+# tail into these; wrapping the outer pair would leave the inner ones reachable
+# directly.  Wrapping the inner ones covers both, because the forwarder's own
+# call is an undefined reference that --wrap rewrites.
+#
+# [!] AND UNLIKE THE TIMER SEAM, THIS ONE CALLS __real_.  That makes the claim a
+# statement about WHO MAY REACH the vendor code rather than about whether it is
+# present, which no check over the finished ELF can settle -- so
+# cmake/check_nor_seam.py audits relocations in the linker's inputs and
+# classifies them live/discarded from the linker's own map.
+set(SDK_NOR_WRAP_SYMBOLS
+    hx_lib_qspi_eeprom_erase_sector
+    hx_lib_qspi_eeprom_write
+    hx_lib_qspi_eeprom_erase_all
+    hx_lib_qspi_eeprom_word_write)
+set(SDK_NOR_WRAP_FLAGS "")
+foreach(_sym IN LISTS SDK_NOR_WRAP_SYMBOLS)
+    list(APPEND SDK_NOR_WRAP_FLAGS "-Wl,--wrap=${_sym}")
+endforeach()
+
 # --- ThreadX ----------------------------------------------------------------
 # Core sources + the Cortex-M55/GNU port asm.  The port ships its example
 # _tx_initialize_low_level in example_build/ (outside the src/ glob), so the
@@ -582,6 +614,10 @@ add_library(shell_objs OBJECT
     # brought up inside npu_hw_init()'s EPK snapshot, so `nn close` disabled it.
     "${BOARD_DIR}/port/nor/nor_state.c"
     "${BOARD_DIR}/port/nor/nor_flash.c"
+    # The bounded door to the vendor's NOR write path (issue #88).  In
+    # port/sdk_seam/ and not port/nor/ because it is the same KIND of thing as
+    # timer_seam.c: a board-owned definition of a name -Wl,--wrap redirects.
+    "${BOARD_DIR}/port/sdk_seam/nor_seam.c"
     "${BOARD_DIR}/port/lcd/lcd_st7789.c"
     "${BOARD_DIR}/port/camera/cam_convert.c"
     "${BOARD_DIR}/port/camera/cam_mipi_calc.c"
@@ -620,7 +656,8 @@ target_link_libraries(shell PRIVATE bsp_iface coremark_obj tflm_obj
 # CoreMark's canonical report prints its score with %f; pull in newlib's float
 # printf (newlib-nano omits it by default).  This is also why src/malloc_lock.c
 # exists: that conversion allocates from the heap, now from several threads.
-target_link_options(shell PRIVATE -u _printf_float ${SDK_TIMER_WRAP_FLAGS})
+target_link_options(shell PRIVATE -u _printf_float
+    ${SDK_TIMER_WRAP_FLAGS} ${SDK_NOR_WRAP_FLAGS})
 target_include_directories(shell_objs PRIVATE
     "${BOARD_DIR}/src"
     "${BOARD_DIR}/port/threadx"
@@ -680,7 +717,11 @@ target_compile_definitions(shell_objs PRIVATE
     NOR_PART_BLOB_END=${GROVE_BLOB_END}
     NOR_PART_CLS_END=${GROVE_MODEL_DET_ADDR}
     NOR_PART_DET_END=${GROVE_BLOB_TAIL_ADDR}
-    NOR_PART_TAIL_END=${GROVE_SLOT_HDR_ADDR})
+    NOR_PART_TAIL_END=${GROVE_SLOT_HDR_ADDR}
+    # The erase unit the seam permits (issue #88).  From the same measured
+    # geometry check_flash_partitions.py rounds destruction footprints with, so
+    # what the firmware refuses and what the host checks are one number.
+    NOR_ERASE_GRAN=${GROVE_ERASE_GRAN})
 target_compile_options(shell_objs PRIVATE -Os)
 
 # [!] THE CAMERA/NN/LCD PIXEL LOOPS NO LONGER CARRY -fno-tree-vectorize
@@ -732,6 +773,23 @@ target_link_options(shell PRIVATE
     "-T${LDSCRIPT_APP}" -Wl,-Map=shell.map,--cref)
 set_target_properties(shell PROPERTIES LINK_DEPENDS "${LDSCRIPT_APP}")
 
+# [!] THE MAP IS DELETED BEFORE EVERY LINK (issue #88).  check_nor_seam.py
+# decides which input sections survived --gc-sections from this map, and a map
+# left over from an earlier link would answer that question about a different
+# link -- silently, and in the permissive direction, because the sections the
+# rule is about are the ones a stale map would still call discarded.  Removing
+# it first means a map can only exist because THIS link wrote it.  (The gate
+# also cross-checks the map's addresses against the ELF; this is the half that
+# does not depend on the check being right.)
+#
+# BYPRODUCTS names the map as an output of this edge, which is what makes a
+# deleted map get rebuilt.  Without it ninja tracks only shell.elf, so removing
+# the map (or a stray fixture run doing it) leaves the gate reading a file
+# nothing will regenerate.
+add_custom_command(TARGET shell PRE_LINK
+    COMMAND "${CMAKE_COMMAND}" -E rm -f "${CMAKE_BINARY_DIR}/shell.map"
+    BYPRODUCTS "${CMAKE_BINARY_DIR}/shell.map")
+
 # --- Vendor timer seam probe (issue #30) -------------------------------------
 # The probe is the same objects as `shell`, plus libsensordp.a / libextdevice.a,
 # plus FORCED references to the datapath entry points that reach the vendor
@@ -763,6 +821,29 @@ set(SEAM_PROBE_FORCED
     hx_drv_cis_init
     hx_drv_cis_set_reg
     hx_drv_cis_setRegTable)
+# [!] AND THE NOR SEAM'S FOUR WRAPPERS (issue #88), for the same reason and a
+# sharper one.  Until issue #88 Part C lands there is NO caller for the write
+# path in the firmware, so every wrapper is garbage-collected out of `shell` and
+# check_nor_seam.py would be asserting its rules over an empty set -- green, and
+# unable to fail, which is the gate shape this repository has already been
+# bitten by twice (issues #66, #42).
+#
+# Forcing the four makes the probe carry the link the gate is about: the two
+# permitted wrappers become live, their __real_ references pull the vendor's
+# erase_sector and write into the image, and the two refusing wrappers become
+# live WITHOUT pulling anything -- which is the property that lets
+# check_placement_budget.py go on barring erase_all and word_write by absence.
+#
+# [!] AND A DROPPED --wrap FLAG BECOMES A LINK ERROR HERE.  With the flag gone
+# __real_hx_lib_qspi_eeprom_write resolves to nothing, and the forced reference
+# means the wrapper cannot be collected away from the problem.  That is stronger
+# than any check over the output, which is why the fixture for it asserts a
+# failed link rather than a gate diagnostic.
+list(APPEND SEAM_PROBE_FORCED
+    __wrap_hx_lib_qspi_eeprom_erase_sector
+    __wrap_hx_lib_qspi_eeprom_write
+    __wrap_hx_lib_qspi_eeprom_erase_all
+    __wrap_hx_lib_qspi_eeprom_word_write)
 set(SEAM_PROBE_FORCE_FLAGS "")
 foreach(_sym IN LISTS SEAM_PROBE_FORCED)
     list(APPEND SEAM_PROBE_FORCE_FLAGS "-Wl,-u,${_sym}")
@@ -773,9 +854,68 @@ target_link_libraries(seam_probe PRIVATE bsp_iface coremark_obj tflm_obj
     -Wl,--start-group "${LIBDRIVER}" "${LIBPWRMGMT}"
                       "${LIBSENSORDP}" "${LIBEXTDEVICE}" "${LIBSPIEEPROM}" -Wl,--end-group)
 target_link_options(seam_probe PRIVATE
-    -u _printf_float ${SDK_TIMER_WRAP_FLAGS} ${SEAM_PROBE_FORCE_FLAGS}
+    -u _printf_float ${SDK_TIMER_WRAP_FLAGS} ${SDK_NOR_WRAP_FLAGS}
+    ${SEAM_PROBE_FORCE_FLAGS}
     "-T${LDSCRIPT_APP}" -Wl,-Map=seam_probe.map,--cref)
 set_target_properties(seam_probe PROPERTIES LINK_DEPENDS "${LDSCRIPT_APP}")
+add_custom_command(TARGET seam_probe PRE_LINK
+    COMMAND "${CMAKE_COMMAND}" -E rm -f "${CMAKE_BINARY_DIR}/seam_probe.map"
+    BYPRODUCTS "${CMAKE_BINARY_DIR}/seam_probe.map")
+
+# --- The NOR seam's linker inputs (issue #88) --------------------------------
+# check_nor_seam.py audits relocations in the linker's INPUTS and classifies
+# each one live or discarded from the map.  For that to mean anything it has to
+# know it saw every input: an object it never opened is an object whose calls it
+# never looked at.  So board.cmake writes down what it hands the linker, the
+# gate compares that against the map's own LOAD list, and anything in neither
+# the manifest nor the toolchain is a refusal.
+#
+# Generated rather than restated because $<TARGET_OBJECTS:> is the same list the
+# link line is built from -- a hand-written copy would drift, and a manifest
+# that has drifted is one that stops covering whatever was added.
+#
+# `shell` and `seam_probe` link the SAME inputs (the probe differs only in
+# forced references and where its output goes), so one manifest serves both.
+set(NOR_SEAM_MANIFEST "${GEN_DIR}/nor_seam_inputs.txt")
+file(GENERATE OUTPUT "${NOR_SEAM_MANIFEST}" CONTENT
+"$<JOIN:$<TARGET_OBJECTS:shell_objs>,\n>
+$<JOIN:$<TARGET_OBJECTS:coremark_obj>,\n>
+$<JOIN:$<TARGET_OBJECTS:tflm_obj>,\n>
+${LIBDRIVER}
+${LIBPWRMGMT}
+${LIBSENSORDP}
+${LIBEXTDEVICE}
+${LIBSPIEEPROM}
+")
+
+# Where the compiler's own inputs (crt*.o, libc_nano.a, libgcc.a) come from.
+# The gate needs the boundary so it can tell "an input nobody declared" from
+# "an input the compiler driver adds"; it still checks that the latter do not
+# reference the write path.
+get_filename_component(_grove_gcc_bin "${CMAKE_C_COMPILER}" DIRECTORY)
+get_filename_component(GROVE_TOOLCHAIN_ROOT "${_grove_gcc_bin}" DIRECTORY)
+
+# The objects allowed to call the wrapped names.  EMPTY on purpose: issue #88
+# Part D lands the seam and this gate, and Part C lands the writer that will be
+# the first entry here.  Until then "nothing may call the vendor write path" is
+# the rule, and the probe below is what stops that being a rule about an empty
+# set.
+set(NOR_SEAM_CALLERS "")
+set(NOR_SEAM_CALLER_FLAGS "")
+foreach(_obj IN LISTS NOR_SEAM_CALLERS)
+    list(APPEND NOR_SEAM_CALLER_FLAGS "--allow-caller" "${_obj}")
+endforeach()
+
+set(NOR_SEAM_GATE_ARGS
+    --nm "${CMAKE_NM}" --objdump "${CMAKE_OBJDUMP}"
+    --manifest "${NOR_SEAM_MANIFEST}"
+    --toolchain-root "${GROVE_TOOLCHAIN_ROOT}"
+    --link-dir "${CMAKE_BINARY_DIR}"
+    --seam-object "port/sdk_seam/nor_seam.c.obj"
+    ${NOR_SEAM_CALLER_FLAGS}
+    --writable-lo "${GROVE_BLOB_ADDR}"
+    --writable-hi "${GROVE_BLOB_END}"
+    --erase-unit "${GROVE_ERASE_GRAN}")
 
 # The same gate as on `shell`, on the probe link.  Both run: the probe keeps the
 # forced-reference coverage, `shell` is the image that actually ships.
@@ -785,6 +925,15 @@ add_custom_command(TARGET seam_probe POST_BUILD
             --require-archives
             "$<TARGET_FILE:seam_probe>"
     COMMENT "check_timer_seam.py (no vendor timer code survives the --wrap)")
+# And the NOR seam's gate, WITH --require-live-wrappers.  This is the link where
+# the write path exists, so it is the link where the rules are about something.
+add_custom_command(TARGET seam_probe POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/check_nor_seam.py"
+            ${NOR_SEAM_GATE_ARGS}
+            --map "${CMAKE_BINARY_DIR}/seam_probe.map"
+            --require-live-wrappers
+            "$<TARGET_FILE:seam_probe>"
+    COMMENT "check_nor_seam.py (only the seam reaches the NOR write path)")
 
 # Make the probe part of the default build: a seam that is only checked when
 # somebody remembers to ask is not a gate.
@@ -862,6 +1011,19 @@ add_custom_command(TARGET shell POST_BUILD
             --require-archives
             "$<TARGET_FILE:shell>"
     COMMENT "check_timer_seam.py (no vendor timer code survives the --wrap)")
+# 5. NOR write-path seam (issue #88): every reference to the vendor's erase and
+#    program entry points comes from port/sdk_seam/nor_seam.c, and the interval
+#    the seam enforces is the one this file declared.  NOT --require-live-
+#    wrappers here: until Part C's writer lands, the firmware has no caller and
+#    the whole seam is garbage-collected out of it -- which is a correct image
+#    and a vacuous check, so seam_probe carries the forced references and runs
+#    the same gate over a link where the write path is real.
+add_custom_command(TARGET shell POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/check_nor_seam.py"
+            ${NOR_SEAM_GATE_ARGS}
+            --map "${CMAKE_BINARY_DIR}/shell.map"
+            "$<TARGET_FILE:shell>"
+    COMMENT "check_nor_seam.py (only the seam reaches the NOR write path)")
 
 # --- Flash target ------------------------------------------------------------
 # xmodem upload to the Himax bootloader: run the target, press the board's

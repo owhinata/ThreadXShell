@@ -424,16 +424,18 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   **EPK 容量 32**（`GROVE_EPK_WRAP_MAX` == `TX_GLUE_EPK_MAX_IRQ`）。
   **Timer0 の割込み到達は probe で検証済み**（M-G3a 申し送りを解消。PRIMASK 外で
   実行し、失敗したら bring-up ごと拒否）。詳細は board README。
-- ポストビルドゲート **3 本**（`boards/grove-vision-ai-v2/cmake/`。#42 で MVE 述語
-  スキャンを削除した）: イメージ整合
+- ポストビルドゲート **4 本**（`boards/grove-vision-ai-v2/cmake/`。#42 で MVE 述語
+  スキャンを削除し、#88 で NOR seam を足した）: イメージ整合
   （生成 `.img` と ELF の突き合わせ + `.rodata` 内のコマンドレジストリ検証）/
   配置・予算（ITCM/DTCM headroom、ベクタ常駐、静的スタック、禁止シンボル残存、
   **必須シンボル残存**（#42。`--gc-sections` が未呼び出し関数を落とすので、
   存在＝呼ばれている）、測定・表示バッファの常駐）/
   **timer seam**（`check_timer_seam.py`。カメラアーカイブ込みの `seam_probe` リンクで
-  「ベンダ timer コードが 1 バイトも残らない」ことを検査。negative test は
-  `cmake/fixtures/run_fixture_tests.py`）。**外す・弱める変更は不可**
-  （f746/wio のゲートと同格）。
+  「ベンダ timer コードが 1 バイトも残らない」ことを検査）/
+  **NOR seam**（`check_nor_seam.py`、#88。ベンダの erase/program に届いてよいのは
+  `port/sdk_seam/nor_seam.c` だけ。判定は **ELF ではなく ld の map**）。
+  negative test はいずれも `cmake/fixtures/run_fixture_tests.py`。
+  **外す・弱める変更は不可**（f746/wio のゲートと同格）。
 - **推論（`nn` / #44）**: TFLM は**ソースからビルド**（プリビルトは CMSIS-NN 版のみ＝MVE を
   持ち込む）。op resolver は `AddEthosU()` 1 個で **CPU カーネル 0 本**。実リンク量 15,360 B。
   **[!] フラッシュのメモリマップ読み出し窓はアプリが開ける** — リセット時は死んでおり、
@@ -446,7 +448,8 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   [!] **ただしこの absence 検査は defence in depth であって証明ではない**（#87）— 読み出し経路が
   `hx_drv_spi_mst_get_dev` / `hx_drv_dmac_get_dev` / `DMA_send` を既に引き込んでおり、
   禁止リストのどの名前にも触れずに WREN + 任意オペコードを組める。**「リストが通った」を
-  「書込み能力が無い」と読まない**。
+  「書込み能力が無い」と読まない**。**#88 Part D の seam / ゲートを足しても同じ**で、
+  変わったのは問いが「イメージに在るか」から「誰が届いてよいか」になったことだけ。
   **[!] アリーナの保守は「範囲ごと」ではなく「全体を 2 点で切り替える」**（#46）。
   TFLM の確保は 16 B 整列 / キャッシュラインは 32 B なので、範囲ごとの外側丸めは隣の半ラインを
   巻き込む。しかも NPU は中間 FM をアリーナ全体に書き、CPU は ethos-u カーネルのスクラッチ
@@ -585,6 +588,20 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   ピークが前半の最大になり、後方 384 群の最強顔を落とす）。出力 4 本は **shape で探す**。
   **4 本の scale/zp は全部違う**（8x8 のスコアは zp 126 / scale 1.22 で実質 3 値）ので
   共有の脱量子化定数を作らない。詳細は board README。
+- **[!] ベンダの NOR 書込み経路へ届いてよいのは seam だけ**（#88 Part D）。
+  内側 4 本（`hx_lib_qspi_eeprom_{erase_sector,write,erase_all,word_write}`）を
+  `-Wl,--wrap` で `port/sdk_seam/nor_seam.c` に寄せる。**外側 `hx_lib_spi_eeprom_*` を
+  wrap しても駄目**（薄いフォワーダなので内側が直に届く）。**`erase_all` と
+  `word_write` の wrapper は `__real_*` を名指ししない** — それがベンダ実装を GC させ、
+  この 2 本の absence 検査を恒久的に保つ。書けるのは **`blob` だけ**、消去は
+  **4 KB / enum 0 のみ**、`NOR_ST_WRITING` 以外は拒否。
+  [!] **判定は ELF ではなく ld の map**（GC 後の ELF に出自は残らず、
+  `spi_eeprom_comm.o` は既にリンク入力でその外側フォワーダが内側名を参照する。
+  オブジェクト単位の規則は正しいリンクでも常時 fail する）。map は
+  **PRE_LINK で消し BYPRODUCTS で宣言**、入力マニフェストは `$<TARGET_OBJECTS:>` から
+  生成して map の `LOAD` と突き合わせ、**LTO とアドレス取得は拒否**。
+  [!] **ベンダの戻り値は成否を報告しない**（`erase_sector` は WP 解除の結果、
+  `write` は定数 0）。**唯一の真実は読み戻し**で、それは writer（Part C）の責務。
 - **[!] 外付け NOR のライフサイクルは `port/nor/` が所有する**（#86）。QSPI/XIP の立ち上げと
   **IRQ 133（DMAC1 combined）の EPK wrapset は `port/nor/` のもの**で、NPU の snapshot は
   その後に取る。**NPU 側に戻してはいけない** — 戻すと `nn close` の unwrap が IRQ 133 を

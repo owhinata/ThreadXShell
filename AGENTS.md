@@ -163,7 +163,9 @@
    boot ROM + BOOT_OPT + factory image）。ポストリンクゲート 3 本
    （`check_image_coherence.py` = 生成 .img と ELF の突き合わせ + .rodata 内
    コマンドレジストリ / `check_placement_budget.py` = 配置・予算・ベンチバッファの
-   常駐・禁止シンボル・**必須シンボル**）を外す・弱める変更は不可。
+   常駐・禁止シンボル・**必須シンボル**）＋ **#88 で 4 本目 `check_nor_seam.py`**
+   （NOR 書込み経路に触れてよいのは `port/sdk_seam/nor_seam.c` だけ）を
+   外す・弱める変更は不可。
    [!] **4 本目の `check_mve_predication.py` は #42 で削除した** — 前提
    （移植が VPR を保存しない）が誤りで、実際は**ハードウェアが保存する**うえ、
    そのスキャンは #66 のとおり 1 命令も検出できなかった。代わりに立っているのは
@@ -256,7 +258,32 @@
    リースは `npu_hw_init` 取得 / `npu_hw_deinit` 解放（`npu_open`/`npu_close` は触らない）で、
    トークンは成功時にのみ `hw_ready` と同時コミット。ベンダの `enable_XIP` は MPU を
    再構成して戻り値を検査しないので読み戻しはこちら持ち。**JEDEC ID は XIP 前にしか読めない**。
-   `nor` に **`write`/`erase`/生オペコードを足さない**（境界付き書込みは #88）。
+   `nor` に **生オペコードを足さない**（境界付き `write`/`erase` は #88 Part E）。
+   [!] **NOR 書込み seam（#88 Part D）**: 内側 4 本
+   （`hx_lib_qspi_eeprom_{erase_sector,write,erase_all,word_write}`）を `-Wl,--wrap` で
+   `port/sdk_seam/nor_seam.c` へ寄せる。**外側 `hx_lib_spi_eeprom_*` ではなく内側**を
+   wrap する（外側は薄いフォワーダで、外側だけ wrap すると内側が直に届く）。
+   **`erase_all` と `word_write` の wrapper は `__real_*` を名指ししない** — これが
+   ベンダ実装を GC させ、`check_placement_budget.py` の absence をこの 2 本について
+   恒久的に有効に保つ。書けるのは **`blob` だけ**（`blob-tail` は含めない）、消去は
+   **4 KB / enum 0 のみ**、境界は減算ベース、`NOR_ST_WRITING` 以外は拒否。
+   [!] **ゲートは ELF ではなく ld の map で live/discarded を判定する** — GC 後の ELF に
+   入力セクションの出自は残らず、しかも `spi_eeprom_comm.o` は `open`/`read_ID`/
+   `enable_XIP` のため**既にリンク入力**で、その外側フォワーダが内側名への
+   リロケーションを持つ。だからオブジェクト単位の規則は正しいリンクでも常時 fail し、
+   かといって許可すると別 TU が外側を生かすだけで穴が開く。**単位は入力セクション。**
+   map は **PRE_LINK で消し BYPRODUCTS で宣言**する（古い map は別のリンクについて
+   答える）。**入力マニフェストは `$<TARGET_OBJECTS:>` から生成**し、map の `LOAD` と
+   突き合わせて未計上を拒否。**LTO は拒否**（IR にはリロケーションが無く、
+   リンカの実入力は `/tmp/cc*.ltrans.o` になる）。**アドレス取得のリロケーションも拒否**。
+   [!] **これは defence in depth であって能力の証明ではない**（#87）— 読み出し経路が
+   `hx_drv_spi_mst_get_dev` / `hx_drv_dmac_get_dev` / `DMA_send` 系を既に引き込んでおり、
+   禁止・監査のどの名前にも触れずに WREN + 任意オペコードを組める。
+   [!] **ベンダの戻り値は成否を報告しない**（`erase_sector` は WP 解除の結果、
+   `write` は定数 0）。**唯一の真実は読み戻し**で、それは writer（Part C）の責務。
+   [!] **Part C が着地したら `hx_lib_qspi_eeprom_{erase_sector,write}` と
+   `hx_lib_spi_eeprom_clear_write_protect` の 3 名を FORBIDDEN から外す**
+   （`erase_all` / `word_write` は外さない）。
    [!] **XIP 窓を読む者は全員リースを持つ**（#90。`NPU` / `SCAN` / `DEVMEM` の 3 スロット）。
    `devmem` は無リースだった — 立っていない窓を読むと fault も 0xFF も返さず
    **16 MB 全体が 1 レジスタにエイリアスして嘘の内容を印字**した（実機で観測）。

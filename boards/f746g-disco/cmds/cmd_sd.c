@@ -270,7 +270,8 @@ static int cmd_sd_format(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	if (is_exfat) {
-		cli_error(sh, "sd: exFAT not supported in this build (FAT32 only); see #35\r\n");
+		/* Why this build is FAT32 only: owhinata/stm32f746g-disco#35. */
+		cli_error(sh, "sd: exFAT not supported in this build (FAT32 only)\r\n");
 		return 1;
 	}
 

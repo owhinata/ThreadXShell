@@ -55,6 +55,16 @@ static const char *acq_name(enum nor_acquire a)
 	return "?";
 }
 
+static const char *wr_name(enum nor_write w)
+{
+	switch (w) {
+	case NOR_WR_GO:      return "GO";
+	case NOR_WR_BUSY:    return "BUSY";
+	case NOR_WR_FAULTED: return "FAULTED";
+	}
+	return "?";
+}
+
 static const char *rel_name(enum nor_release r)
 {
 	switch (r) {
@@ -123,6 +133,9 @@ int main(void)
 		{ NOR_ST_OFF,      NOR_ACQ_BRING_UP },
 		{ NOR_ST_XIP,      NOR_ACQ_TAKE     },
 		{ NOR_ST_ENABLING, NOR_ACQ_BUSY     },
+		/* A writer has taken the alias down; readers wait, they are not
+		 * faulted, because this one clears (issue #88). */
+		{ NOR_ST_WRITING,  NOR_ACQ_BUSY     },
 		{ NOR_ST_FAULTED,  NOR_ACQ_FAULTED  },
 	};
 	for (unsigned i = 0; i < sizeof(acq) / sizeof(acq[0]); i++) {
@@ -130,6 +143,50 @@ int main(void)
 		CHECK(got == acq[i].want, "acquire_decide(%s) = %s, want %s",
 		      nor_state_name(acq[i].st), acq_name(got),
 		      acq_name(acq[i].want));
+	}
+
+	/* ---- the write table, every state x readers ---------------------- */
+	{
+		static const struct {
+			enum nor_state st;
+			uint32_t       live;
+			enum nor_write want;
+			const char    *what;
+		} wr[] = {
+			{ NOR_ST_XIP,      0u,   NOR_WR_GO,      "up and unread"    },
+			/* [!] The whole point: one reader is enough to refuse. A
+			 * writer drops XIP, and that reader's window goes with it. */
+			{ NOR_ST_XIP,      0x1u, NOR_WR_BUSY,    "one reader out"   },
+			{ NOR_ST_XIP,      0x4u, NOR_WR_BUSY,    "devmem reading"   },
+			{ NOR_ST_XIP,      0x7u, NOR_WR_BUSY,    "all three out"    },
+			/* [!] OFF is BUSY, not "bring it up": bring-up is a reader's
+			 * errand and a writer must not own it (nor_state.h). */
+			{ NOR_ST_OFF,      0u,   NOR_WR_BUSY,    "never brought up" },
+			{ NOR_ST_ENABLING, 0u,   NOR_WR_BUSY,    "bring-up running" },
+			/* Two writers must not both get GO. */
+			{ NOR_ST_WRITING,  0u,   NOR_WR_BUSY,    "a writer has it"  },
+			{ NOR_ST_FAULTED,  0u,   NOR_WR_FAULTED, "terminal"         },
+			/* Terminal wins over an empty reader mask, not the reverse. */
+			{ NOR_ST_FAULTED,  0x2u, NOR_WR_FAULTED, "terminal, read"   },
+		};
+		for (unsigned i = 0; i < sizeof(wr) / sizeof(wr[0]); i++) {
+			enum nor_write got = nor_write_decide(wr[i].st, wr[i].live);
+			CHECK(got == wr[i].want,
+			      "write_decide(%s, live=0x%x) [%s] = %s, want %s",
+			      nor_state_name(wr[i].st), wr[i].live, wr[i].what,
+			      wr_name(got), wr_name(wr[i].want));
+		}
+
+		/* An unknown state refuses terminally here too. */
+		CHECK(nor_write_decide((enum nor_state)99, 0u) == NOR_WR_FAULTED,
+		      "an unknown state did not refuse a write terminally");
+
+		/* [!] AND THE MASK IS NOT CONSULTED AS A BOOLEAN.  Every single-slot
+		 * mask must refuse, or a writer would start on top of whichever
+		 * reader happened to sit in a bit the check ignored. */
+		for (unsigned slot = 0; slot < (unsigned)NOR_LEASE_SLOTS; slot++)
+			CHECK(nor_write_decide(NOR_ST_XIP, 1u << slot) == NOR_WR_BUSY,
+			      "a writer started with slot %u holding a lease", slot);
 	}
 
 	/* [!] An unknown state must refuse the terminal way, not the busy way:

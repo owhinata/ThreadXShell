@@ -265,6 +265,12 @@
    **acquire が窓を立てる操作なので 1 つで両方閉じる。**
    [!] **単一インスタンスの拒否はコンソールから再現不能** — ホストテストが唯一の検査。
    **XIP probe は writable interval の外**（`_Static_assert`。#90 以前は blob 内の 0xB00000）。
+   [!] **probe は読む前に自分で invalidate する**（#88）— ベンダの `enable_XIP` は
+   **base から 512 B しか無効化しない**ので、probe B も writer が変えた範囲も含まれない。
+   [!] **`NOR_ST_WRITING`**（#88）: write は XIP を落とすので readers を締め出す。
+   **state と reader マスクは同一クリティカルセクションで読み、GO を得た者が
+   publish してから抜ける**（別々だと間に `nor_acquire` が入る）。
+   **`NOR_ST_OFF` は BUSY で「bring it up」ではない** — bring-up は reader の仕事。
    [!] **「read-only」とは書かない** — 配列は触らないが初回 bring-up は QE ビット
    （NOR の不揮発ステータスレジスタ）を書く。`nn open` も従来から同じ。
    `nor scan` は**全バイト読む**（サンプリングは偽の隙間を作り、占有を過少報告する）。

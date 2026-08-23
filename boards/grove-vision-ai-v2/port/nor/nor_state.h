@@ -46,6 +46,15 @@ enum nor_state {
 	NOR_ST_OFF = 0,   /**< nothing brought up; the alias is not readable  */
 	NOR_ST_ENABLING,  /**< one caller is bringing it up; others wait out  */
 	NOR_ST_XIP,       /**< the window is up and has been probed           */
+	/* [!] The one non-terminal state the window is NOT readable in (issue
+	 * #88).  A write has to drop XIP -- the vendor's erase and program entry
+	 * points refuse outright while it is on -- so the alias dies for the
+	 * duration and every reader has to be kept out.  It is not a teardown:
+	 * the transaction restores XIP, re-probes and commits back to
+	 * NOR_ST_XIP, or fails and commits to NOR_ST_FAULTED.  "OFF is reached
+	 * once, at boot" above stays true; what changes is that OFF is no longer
+	 * the only state XIP can be left for. */
+	NOR_ST_WRITING,   /**< one writer owns the part; the alias is down    */
 	NOR_ST_FAULTED,   /**< bring-up failed or could not be verified       */
 };
 
@@ -149,6 +158,39 @@ enum nor_release nor_release_decide(enum nor_state st, uint32_t live,
 
 /** How many leases the mask says are out.  Population count, nothing more. */
 uint32_t nor_readers(uint32_t live);
+
+/** What a caller asking to write should do. */
+enum nor_write {
+	NOR_WR_GO = 0,    /**< nobody is reading and the window is up: claim it */
+	NOR_WR_BUSY,      /**< readers out, a bring-up in flight, or a writer   */
+	NOR_WR_FAULTED,   /**< terminal: refuse, and keep refusing              */
+};
+
+/**
+ * @brief  Decide whether a write transaction may start (issue #88).
+ *
+ * @param st    the lifecycle state
+ * @param live  bitmask of slots currently holding a reader lease
+ *
+ * [!] THE ANSWER AND THE CLAIM MUST SHARE ONE CRITICAL SECTION.  This function
+ * reads @p st and @p live together; the caller that gets NOR_WR_GO must publish
+ * NOR_ST_WRITING before releasing the section that produced them.  Checking
+ * "no readers" and dropping XIP as two steps leaves the interval in between,
+ * and nor_acquire() only has to land there once for a reader to be handed a
+ * lease on a window that is about to disappear.
+ *
+ * [!] AND NOR_ST_OFF IS BUSY, NOT "BRING IT UP".  A writer needs the QSPI
+ * master open, which is what bring-up does -- but bring-up is a reader's
+ * errand: it runs the vendor's XIP setup, waits on DMA completion, and takes
+ * the EPK snapshot.  Letting a writer own that would put two unrelated
+ * transactions in one path.  Refusing is answerable by the caller: bring the
+ * window up first, then write.
+ *
+ * As with nor_acquire_decide(), the states that may act are ENUMERATED.
+ * "anything that is not WRITING" would let a writer start from OFF, and
+ * "state == XIP" alone would let one start on top of live readers.
+ */
+enum nor_write nor_write_decide(enum nor_state st, uint32_t live);
 
 /** Human-readable names, for `nor info` and for the host test's diagnostics. */
 const char *nor_state_name(enum nor_state st);

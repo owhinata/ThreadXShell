@@ -13,6 +13,9 @@
   4. Forbidden survivors: with -ffunction-sections + --gc-sections, an
      uncalled function is dropped -- so if any FORBIDDEN name is PRESENT in
      the image, something references it, which violates the port's design.
+     [!] For the NOR write path this is DEFENCE IN DEPTH, not proof (issue
+     #87): the read path already links raw SPI/DMA primitives from which a
+     program or erase can be assembled without naming anything on the list.
   5. Measurement-buffer residency (issue #25): each benchmark buffer must sit
      in the memory whose name `membench` prints beside its numbers, in a
      NOBITS section.
@@ -66,14 +69,35 @@ FORBIDDEN = [
     # its status register, and that write needs the WEL latch first.  So it is
     # part of configuring the READ path, not of writing the array.
     #
-    # On its own the latch cannot modify anything: it has to be followed by a
-    # program or erase opcode, and every entry point that issues one is on this
-    # list and verified absent.  Barring it would mean giving up quad reads to
-    # remove a capability that is not there.
+    # [!] AND THE OLD JUSTIFICATION FOR ALLOWING IT WAS FALSE (issue #87).  It
+    # said the latch is harmless because "every entry point that issues a
+    # program or erase opcode is on this list and verified absent".  It is not.
+    # These are all in the shipped image, pulled in by the read/XIP path:
+    #
+    #     hx_drv_spi_mst_get_dev, hx_drv_dmac_get_dev
+    #     hx_lib_spi_eeprom_DMA_send, DMA_send_recv, set_DMA_config, waitWIP
+    #
+    # A first-party translation unit can take those two handles and DMA an
+    # arbitrary opcode buffer -- WREN then chip erase -- without naming one
+    # symbol on this list.  They cannot be barred, because the read path needs
+    # them.
+    #
+    # So this check is DEFENCE IN DEPTH AND NOT EXHAUSTIVE, and saying otherwise
+    # is worse than saying nothing: it invites the next reader to treat "the
+    # list passes" as "there is no write capability".  A gate over the write
+    # path that could establish that is issue #88, and issue #88's own finding
+    # is that no symbol-level check on this image can.
     "hx_lib_qspi_eeprom_erase_all",
     "hx_lib_qspi_eeprom_erase_sector",
     "hx_lib_qspi_eeprom_write",
     "hx_lib_qspi_eeprom_word_write",
+    # [!] Arbitrary-opcode transports (issue #87).  These take a caller-supplied
+    # byte buffer and put it on the wire, so one of them is every program and
+    # erase opcode at once.  Nothing references them today, which is exactly why
+    # barring them costs nothing -- and why it was worth doing before something
+    # did.  Found by an adversarial review of the issue #49 plan.
+    "hx_lib_spi_eeprom_Send_Op_code",
+    "hx_lib_qspi_eeprom_Send_Op_code",
     # SDK SysTick pokers: ThreadX owns SysTick on this port.
     "EPII_Set_Systick_load",
     "EPII_Set_Systick_enable",

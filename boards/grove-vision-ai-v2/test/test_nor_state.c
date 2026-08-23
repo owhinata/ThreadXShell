@@ -198,6 +198,47 @@ int main(void)
 		CHECK(nor_readers(p.live) == 0u, "readers did not return to 0");
 	}
 
+	{	/* [!] THREE HOLDERS, NOT TWO (issue #90).  `devmem` reads the same
+		 * window and now takes its own slot, so the accounting has to
+		 * survive a third concurrent holder -- and, more to the point, one
+		 * holder's release must still not touch the other two.  The token
+		 * carries a slot precisely so that this is decidable; a
+		 * generation-only token makes all three releases identical. */
+		struct port p = { NOR_ST_OFF, 0u, 0u };
+		uint32_t npu  = port_acquire(&p, NOR_LEASE_NPU, 1);
+		uint32_t scan = port_acquire(&p, NOR_LEASE_SCAN, 1);
+		uint32_t dvm  = port_acquire(&p, NOR_LEASE_DEVMEM, 1);
+
+		CHECK(npu != 0u && scan != 0u && dvm != 0u,
+		      "three holders could not all acquire");
+		CHECK(npu != dvm && scan != dvm,
+		      "devmem was given a token another holder already has");
+		CHECK(nor_readers(p.live) == 3u, "readers = %u, want 3",
+		      nor_readers(p.live));
+
+		/* The slot is single-instance: a second devmem -- a backgrounded
+		 * dump beside a foreground peek -- is refused, not handed the
+		 * lease its sibling is holding. */
+		CHECK(port_acquire(&p, NOR_LEASE_DEVMEM, 1) == 0u,
+		      "a second devmem was handed the same slot");
+		CHECK(nor_readers(p.live) == 3u,
+		      "a refused acquire changed the count to %u",
+		      nor_readers(p.live));
+
+		CHECK(port_release(&p, dvm) == NOR_REL_DROP, "devmem release refused");
+		CHECK(nor_readers(p.live) == 2u,
+		      "releasing devmem left %u readers, want 2",
+		      nor_readers(p.live));
+		CHECK(port_release(&p, dvm) == NOR_REL_NOT_HELD,
+		      "a duplicate devmem release was not caught");
+		/* And the two it must not have disturbed are still live. */
+		CHECK(port_release(&p, npu) == NOR_REL_DROP,
+		      "the NPU's lease was taken by devmem");
+		CHECK(port_release(&p, scan) == NOR_REL_DROP,
+		      "the scan's lease was taken by devmem");
+		CHECK(nor_readers(p.live) == 0u, "readers did not return to 0");
+	}
+
 	{	/* A failed bring-up is terminal and hands out nothing. */
 		struct port p = { NOR_ST_OFF, 0u, 0u };
 		CHECK(port_acquire(&p, NOR_LEASE_NPU, 0) == 0u,

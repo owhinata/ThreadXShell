@@ -2126,6 +2126,44 @@ There is no `nor write` or `nor erase`, and that is deliberate: a bounded write
 path is issue #88, and a raw one here would make the bounds check that issue
 exists to build pointless before it was written.
 
+**Every reader of the window holds a lease**, and there are three single-instance
+slots (`port/nor/nor_state.h`):
+
+| slot | held for |
+|---|---|
+| `NOR_LEASE_NPU` | `npu_hw_init()` .. `npu_hw_deinit()` -- the whole life of an open model, which is parsed in place through the window |
+| `NOR_LEASE_SCAN` | one whole `nor info` or `nor scan` |
+| `NOR_LEASE_DEVMEM` | one `devmem` access that touches the alias, including a whole `dump` |
+
+[!] **`devmem` had no lease at all until issue #90**, which was wrong in two
+directions rather than one.
+
+The one that was **observed**: nothing stopped it reading a window that had
+never been brought up, and a dead window does not fault and does not read
+`0xFF` -- it aliases one register block across all 16 MB, so
+`devmem dump 0x3a000000` printed plausible nonsense as flash contents.  After
+the fix the same dump on a fresh boot reads `63 6b 42 53` (`ckBS`), the real
+firmware header, because acquiring the lease is what brings the window up.
+
+The one that is **real but bounded**: `CLI_MAX_BG_JOBS` is 2, so a devmem
+access can be in flight beside another command, and issue #88's writer would
+sample "no readers" and drop XIP underneath it.  A dump of the alias is capped
+at `CLI_DEVMEM_DUMP_MAX_LEN`, though, and background jobs run below the
+foreground one under `TX_NO_TIME_SLICE` -- so `cmd &; cmd2` does not actually
+interleave them and this half cannot be demonstrated by typing.
+
+[!] **Which means the single-instance refusal is not reachable from a console
+either.**  `test/test_nor_state.c` walks it instead, for the same reason
+`nor_state.h` gives for keeping the decisions as pure functions: they are the
+parts of the port hardware cannot be steered into.  Do not go looking for a
+`flash window busy` on the board -- it will not appear, and a procedure that
+asks for it reports a pass for the wrong reason.
+
+The lease spans the whole `dump` rather than each line.  Not because the walk is
+long -- it is capped -- but because that is where the transaction ends: bytes
+after the first would otherwise be free to come from a window somebody was
+entitled to pull down mid-dump.
+
 [!] **"Read-only" would be the wrong word for it, though.** Neither subcommand
 programs or erases the *array*, but the first bring-up runs the vendor's
 quad-enable, which sets WEL and writes the QE bit of the NOR's non-volatile
@@ -2167,6 +2205,29 @@ The probe checks **content**: the window must start with the Himax container
 magic. The old two-word probe caught the failure that actually happened, a
 degenerate window aliasing one register block across all 16 MB, but a register
 block cannot coincidentally be a firmware image header.
+
+[!] **The second probe word reads the slot-header block, not `blob`**
+(issue #90). It used to be `0x00B00000` -- 11 MB in, where the aliasing showed
+itself -- with no thought for who owns those bytes, and `blob` is exactly what
+issue #88's writer is allowed to erase. A probe there would have been proving
+"the window came back" by reading bytes the caller had just destroyed. The
+slot-header block is the one region nothing may ever write (issue #85), it is
+the highest address in the part, and its content is known. A `_Static_assert`
+in `nor_flash.c` now requires **every** probe offset to lie outside
+`[NOR_PART_FW_END, NOR_PART_BLOB_END)`, so adding a third one has to answer the
+question rather than quietly reintroduce the problem.
+
+`nor info` reports what it read there:
+
+```
+probe    : 0x00ffe000 = 0x414d4948  (slot-header magic)
+```
+
+[!] **That magic is observed, never required.** A corrupt slot header still
+boots -- the bootloader says so and falls back to slot 0 -- so making bring-up
+depend on a record this port does not own would turn somebody else's
+recoverable damage into our unrecoverable refusal. The acceptance condition is
+only that the two probe words differ.
 
 [!] **And bring-up is not free.** It permanently changes MPU state and takes one
 EPK slot for the rest of the session. Not new capacity -- `nn open` already does
@@ -2396,6 +2457,15 @@ whole window.  `nn open` brings XIP up and the same dump then reads
 `24 00 00 00 54 46 4c 33`.  `devmem`'s flash region is listed read-only for
 exactly this: without being able to dump the window, the difference between
 "nothing was flashed" and "the window is shut" is guesswork.
+
+[!] **That demonstration no longer reproduces through `devmem`** (issue #90).
+`devmem` now takes `NOR_LEASE_DEVMEM` before touching the alias, and acquiring
+a lease is what brings the window up -- so a dump either reads real flash or is
+refused, and can no longer print a register block as though it were flash
+contents.  That was the second half of the bug: not only could a writer drop
+XIP under a backgrounded dump, but before any bring-up the dump was silently
+lying.  A degenerate window is now caught where it should be, by bring-up's own
+probe, and `nor info` reports the port as `faulted` with the reason.
 
 ### `nn info`'s interrupt list shrinks after the first open, and that is correct
 

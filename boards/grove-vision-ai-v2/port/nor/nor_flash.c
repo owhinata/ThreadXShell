@@ -74,9 +74,45 @@
  * what lives at flash offset 0.  Little-endian "ckBS". */
 #define NOR_IMAGE_MAGIC         0x53426B63u
 
-/* A probe offset far enough in that a degenerate window cannot coincidentally
- * match the first word.  11 MB is where the aliasing showed itself. */
-#define NOR_PROBE_OFF           0x00B00000u
+/* The two words the bring-up probe compares.  A degenerate window reads the
+ * same everywhere, so two offsets whose contents differ are what distinguishes
+ * "the flash is mapped" from "one register block is aliased across 16 MB".
+ *
+ * [!] THE SECOND ONE USED TO BE 0x00B00000, AND THAT IS INSIDE blob (issue
+ * #90).  11 MB in was chosen because that is where the aliasing showed itself,
+ * with no thought for who owns those bytes -- and blob is exactly the region
+ * issue #88's writer is allowed to erase.  The check that says "the window came
+ * back" would have been reading bytes the caller had just destroyed.
+ *
+ * The slot-header block is the one part of this flash nothing may ever write
+ * (issue #85).  It is also the highest address in the part, so its address bits
+ * differ from word 0 in more places than 0xB00000 did, and its content is known.
+ */
+#define NOR_PROBE_A_OFF         0u                 /* the firmware image     */
+#define NOR_PROBE_B_OFF         NOR_PART_TAIL_END  /* the backup slot header */
+
+/* [!] EVERY PROBE MUST LIE OUTSIDE THE INTERVAL A WRITER MAY ERASE.  Stated
+ * once, as a rule over both offsets, so that moving a partition edge or adding
+ * a third probe has to answer it rather than quietly reintroduce issue #90.
+ * blob is [NOR_PART_FW_END, NOR_PART_BLOB_END) -- see board.cmake. */
+#define NOR_PROBE_OUTSIDE_BLOB(off) \
+	((off) < NOR_PART_FW_END || (off) >= NOR_PART_BLOB_END)
+_Static_assert(NOR_PROBE_OUTSIDE_BLOB(NOR_PROBE_A_OFF),
+               "XIP probe A reads flash a writer may erase (issue #90)");
+_Static_assert(NOR_PROBE_OUTSIDE_BLOB(NOR_PROBE_B_OFF),
+               "XIP probe B reads flash a writer may erase (issue #90)");
+
+/* What the bootloader's slot header starts with, at flash_end - 0x1000 and
+ * again at flash_end - 0x2000 (issue #85).  Little-endian "HIMA" "XWE2" -- the
+ * same two words the 1st bootloader builds with movw/movt to compare.
+ *
+ * [!] OBSERVED, NOT REQUIRED.  A corrupt header still boots: the bootloader
+ * says so and falls back to slot 0.  Making bring-up depend on a record this
+ * port does not own would turn somebody else's recoverable damage into our
+ * unrecoverable refusal, so `nor info` reports the match and nothing acts on
+ * it.  The probe's acceptance condition is only that the two words differ. */
+#define NOR_SLOT_HDR_MAGIC0     0x414D4948u
+#define NOR_SLOT_HDR_MAGIC1     0x32455758u
 
 static struct {
 	enum nor_state state;
@@ -200,8 +236,16 @@ static int enable_xip_and_verify(void)
 	__DSB();
 	__ISB();
 
-	first = rd32(NOR_XIP_BASE);
-	probe = rd32(NOR_XIP_BASE + NOR_PROBE_OFF);
+	first = rd32(NOR_XIP_BASE + NOR_PROBE_A_OFF);
+	probe = rd32(NOR_XIP_BASE + NOR_PROBE_B_OFF);
+
+	/* Observation only -- see NOR_SLOT_HDR_MAGIC0.  Captured before the
+	 * verdict below so that `nor info` can show it even on a refusal. */
+	r->probe_off  = NOR_PROBE_B_OFF;
+	r->probe_word = probe;
+	r->probe_hdr  = (probe == NOR_SLOT_HDR_MAGIC0 &&
+	                 rd32(NOR_XIP_BASE + NOR_PROBE_B_OFF + 4u) ==
+	                 NOR_SLOT_HDR_MAGIC1) ? 1u : 0u;
 
 	/* The failure that actually happened: one register block aliased across the
 	 * whole window, so every address reads the same. */

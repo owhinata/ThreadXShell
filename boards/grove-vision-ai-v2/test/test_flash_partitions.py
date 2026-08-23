@@ -37,21 +37,23 @@ PACKET = 128
 fails = 0
 
 
-def run(partitions, images=(), writing=(), flash_size=FLASH):
+def run(partitions, images=(), writing=(), flash_size=FLASH, image_max=()):
     argv = [sys.executable, CHECKER, "--flash-size", hex(flash_size)]
     for name, start, reserved in partitions:
         argv += ["--partition", f"{name}:{hex(start)}:{hex(reserved)}"]
     for name, path in images:
         argv += ["--image", f"{name}:{path}"]
+    for name, limit in image_max:
+        argv += ["--image-max", f"{name}:{hex(limit)}"]
     for name in writing:
         argv += ["--writing", name]
     return subprocess.run(argv, capture_output=True, text=True)
 
 
 def check(name, want_ok, partitions, images=(), writing=(), expect_text=None,
-          flash_size=FLASH):
+          flash_size=FLASH, image_max=()):
     global fails
-    r = run(partitions, images, writing, flash_size)
+    r = run(partitions, images, writing, flash_size, image_max)
     got_ok = (r.returncode == 0)
     out = r.stdout + r.stderr
 
@@ -79,10 +81,16 @@ def main():
 
     # The real layout, so the tests exercise the shape actually shipped.
     REAL = [
-        ("firmware",  0x000000, 0xB70000),
+        ("firmware",  0x000000, 0x200000),
+        ("blob",      0x200000, 0x970000),
         ("model-cls", 0xB7B000, 0x1A5000),
         ("model-det", 0xD20000, 0x030000),
+        ("blob-tail", 0xD50000, 0x2A0000),
+        ("slot-header", 0xFF0000, 0x010000),
     ]
+    # firmware reserves BOTH A/B slots because a flash lands in whichever is
+    # inactive; one image still has to fit ONE of them (issue #85).
+    REAL_MAX = [("firmware", 0x100000)]
 
     with tempfile.TemporaryDirectory() as tmp:
         small = make(tmp, "small.bin", 1024)
@@ -93,7 +101,35 @@ def main():
         # --- the layout alone, with no artifacts at all -------------------
         # This is what makes the gate independent of what happens to be built.
         check("the shipped layout checks out with no files present", True, REAL,
-              expect_text="reservations are disjoint")
+              image_max=REAL_MAX, expect_text="reservations are disjoint")
+
+        # [!] The layout claims the WHOLE part, with no unnamed gap (issue #85).
+        # The checker cannot assert this -- a gap is legal, and on most layouts
+        # it is what you want -- but on this board it is a property worth
+        # keeping: an unclaimed run is not spare capacity, it is capacity
+        # nothing stops the next partition from being placed into.  Checked
+        # here, where the shipped numbers live.
+        # [!] Compare BLOCK SPANS, not byte extents -- the same rounding the
+        # checker does.  model-cls starts at 0xB7B000 but owns the block from
+        # 0xB70000, so a byte-extent comparison reports a gap that does not
+        # exist.  Getting this wrong here is the file's own headline mistake.
+        def span(start, reserved):
+            return ((start // G) * G, ((start + reserved + G - 1) // G) * G)
+
+        covered = sorted(span(st, n) for _, st, n in REAL)
+        cursor = 0
+        for start, end in covered:
+            if start != cursor:
+                print(f"  FAIL the shipped layout leaves 0x{cursor:06x}"
+                      f"..0x{start:06x} unclaimed")
+                fails += 1
+            cursor = max(cursor, end)
+        if cursor != FLASH:
+            print(f"  FAIL the shipped layout stops at 0x{cursor:06x}, not the "
+                  f"end of a 0x{FLASH:x} B flash")
+            fails += 1
+        else:
+            print("  ok   the shipped layout claims every byte of the part")
 
         check("reservations that share a block are refused", False, [
             ("a", 0x100000, 0x010000),
@@ -169,6 +205,31 @@ def main():
         ], images=[("a", over)], writing=["a"],
            expect_text="outside its reservation")
 
+        # --- the per-artifact ceiling (issue #85) ------------------------
+        # firmware reserves two 1 MB slots but one image must fit one slot.
+        SLOT = 0x100000
+        TWO_SLOTS = [("firmware", 0x000000, 2 * SLOT)]
+        one_slot = make(tmp, "one_slot.bin", SLOT)
+        over_slot = make(tmp, "over_slot.bin", SLOT + 1)
+
+        check("an artifact exactly at the ceiling is accepted", True,
+              TWO_SLOTS, images=[("firmware", one_slot)], writing=["firmware"],
+              image_max=[("firmware", SLOT)],
+              expect_text="reservations are disjoint")
+
+        # [!] The one this exists for: it fits the RESERVATION (2 MB) and would
+        # have passed before, then been refused by the bootloader on hardware
+        # with the serial port open and a reset already pressed.
+        check("an artifact over the ceiling but inside the reservation is "
+              "refused", False,
+              TWO_SLOTS, images=[("firmware", over_slot)], writing=["firmware"],
+              image_max=[("firmware", SLOT)],
+              expect_text="ceiling on ONE artifact")
+
+        check("without a ceiling the same artifact is accepted", True,
+              TWO_SLOTS, images=[("firmware", over_slot)], writing=["firmware"],
+              expect_text="reservations are disjoint")
+
         # --- malformed input ----------------------------------------------
         for argv, why in (
             (["--partition", "no-reservation:0x0"], "a malformed --partition"),
@@ -180,6 +241,17 @@ def main():
              "an --image for an undeclared partition"),
             (["--partition", "a:0x0:0x1000", "--writing", "a"],
              "--writing without --image"),
+            (["--partition", "a:0x0:0x1000", "--image-max", "b:0x100"],
+             "an --image-max for an undeclared partition"),
+            (["--partition", "a:0x0:0x1000", "--image-max", "a:nonsense"],
+             "an --image-max with an unreadable size"),
+            (["--partition", "a:0x0:0x1000", "--image-max", "a:0x0"],
+             "a zero --image-max"),
+            # [!] A ceiling ABOVE the reservation can never fire -- the
+            # reservation check refuses first -- so it would read as protection
+            # while doing nothing.  Refuse the declaration instead (issue #85).
+            (["--partition", "a:0x0:0x1000", "--image-max", "a:0x2000"],
+             "an --image-max larger than the reservation"),
         ):
             r = subprocess.run(
                 [sys.executable, CHECKER, "--flash-size", hex(FLASH)] + argv,

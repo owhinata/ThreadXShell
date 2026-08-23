@@ -89,8 +89,11 @@ set(GROVE_MODEL_DET_FILE
 set(GROVE_MODEL_DET_ADDR "0xD20000" CACHE STRING
     "Flash offset of the detection model")
 
-set(GROVE_FLASH_SIZE "0x1000000" CACHE STRING
-    "External NOR size (W25Q128JW = 16 MB)")
+# Fixed NOR / bootloader geometry, and everything that derives only from it
+# (issue #85).  Separate file because those four numbers are MEASUREMENTS, not
+# settings: they are plain variables and a disagreeing -D is a hard error, which
+# is the enforcement -- see the header there, and test/test_flash_geometry.py.
+include("${BOARD_DIR}/cmake/flash_geometry.cmake")
 
 set(GEN_DIR "${CMAKE_BINARY_DIR}/gen")
 file(MAKE_DIRECTORY "${GEN_DIR}")
@@ -975,10 +978,30 @@ endif()
 # and each flashing target names only the artifact it actually writes.
 #
 # The reservations are erase-block spans, so they are what a write can destroy
-# rather than what a file occupies.  firmware owns everything below the first
-# model; each model owns the blocks from its own start up to the next boundary.
-set(GROVE_FW_RESERVED "0xB70000" CACHE STRING
-    "Flash reserved for the firmware image (everything below the first model)")
+# rather than what a file occupies.  Each model owns the blocks from its own
+# start up to the next boundary.
+#
+# [!] The blob area (issue #85, reserved for #49 Step 2).  Declared but written
+# by nothing yet, and that is the point: a reservation is a property of
+# addresses, so having it checked from the day it exists is what stops the next
+# partition from being placed on top of it.
+#
+# Ends on the first block the classification model owns, so the two abut with no
+# unnamed gap.  Derived from the model's address rather than repeating the
+# 0xB70000 that rounding happens to produce today.
+#
+# [!] WHAT IS THERE TODAY IS NOT OURS, AND THE FIRST WRITE DESTROYS IT.  The
+# factory SenseCraft firmware left a FlashDB KVDB at 0x300000 -- FlashDB's
+# sector magic, at the offset FDB_WRITE_GRAN = 32 puts it -- and data at
+# 0x400000 and 0x500000.  Nothing in this port reads any of it, and reflashing
+# the factory image would not bring its contents back.  Accepted deliberately
+# (2026-08-23) in exchange for the 9.4 MB.
+set(GROVE_BLOB_ADDR "${GROVE_FW_RESERVED}")
+math(EXPR GROVE_BLOB_END
+     "(${GROVE_MODEL_CLS_ADDR} / ${GROVE_ERASE_GRAN}) * ${GROVE_ERASE_GRAN}"
+     OUTPUT_FORMAT HEXADECIMAL)
+math(EXPR GROVE_BLOB_RESERVED "${GROVE_BLOB_END} - ${GROVE_BLOB_ADDR}"
+     OUTPUT_FORMAT HEXADECIMAL)
 # 0xB7B000 + 0x1A5000 = 0xD20000, so this ends exactly on the detector's first
 # block.  Headroom over today's 1,704,672 B model: ~19 KB.
 set(GROVE_MODEL_CLS_RESERVED "0x1A5000" CACHE STRING
@@ -987,12 +1010,41 @@ set(GROVE_MODEL_CLS_RESERVED "0x1A5000" CACHE STRING
 set(GROVE_MODEL_DET_RESERVED "0x30000" CACHE STRING
     "Flash reserved for the detection model")
 
+# The rest of the flash above the models (issue #85).  It is blob's second run
+# today and is declared for the reason any reservation is: an unnamed 2.8 MB gap
+# is not spare capacity, it is capacity nobody is stopping the next partition
+# from being placed into.
+#
+# [!] THE SPLIT IS TEMPORARY.  The models are the only thing between the two
+# runs, and #49 Step 4 moves them INTO blob -- at which point their reservations
+# are deleted and blob becomes one run of 0x200000..GROVE_SLOT_HDR_ADDR.  That
+# is the destination; the models cannot be deleted before then because `nn open
+# cls|det` is compiled with their addresses and `--target flash-model-*` names
+# their partitions, and deleting the reservation would stop the gate protecting
+# flash that is still in use.
+math(EXPR GROVE_BLOB_TAIL_ADDR
+     "${GROVE_MODEL_DET_ADDR} + ${GROVE_MODEL_DET_RESERVED}"
+     OUTPUT_FORMAT HEXADECIMAL)
+math(EXPR GROVE_BLOB_TAIL_RESERVED
+     "${GROVE_SLOT_HDR_ADDR} - ${GROVE_BLOB_TAIL_ADDR}"
+     OUTPUT_FORMAT HEXADECIMAL)
+
+# [!] --image-max, not just the reservation.  The firmware reservation covers
+# BOTH slots, but a single image has to fit in ONE -- the bootloader refuses a
+# larger one with ERR_IMAGE_SZ, after the serial port is open and a reset has
+# been pressed.  Without this, an image between 1 and 2 MB passes the layout
+# check and fails on the hardware.
 set(GROVE_FLASH_LAYOUT
     "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/check_flash_partitions.py"
     --flash-size "${GROVE_FLASH_SIZE}"
+    --erase-granularity "${GROVE_ERASE_GRAN}"
     --partition "firmware:0x0:${GROVE_FW_RESERVED}"
+    --image-max "firmware:${GROVE_FW_SLOT_SIZE}"
+    --partition "blob:${GROVE_BLOB_ADDR}:${GROVE_BLOB_RESERVED}"
     --partition "model-cls:${GROVE_MODEL_CLS_ADDR}:${GROVE_MODEL_CLS_RESERVED}"
-    --partition "model-det:${GROVE_MODEL_DET_ADDR}:${GROVE_MODEL_DET_RESERVED}")
+    --partition "model-det:${GROVE_MODEL_DET_ADDR}:${GROVE_MODEL_DET_RESERVED}"
+    --partition "blob-tail:${GROVE_BLOB_TAIL_ADDR}:${GROVE_BLOB_TAIL_RESERVED}"
+    --partition "slot-header:${GROVE_SLOT_HDR_ADDR}:${GROVE_SLOT_HDR_RESERVED}")
 
 # [!] The model is STAGED INTO THE BUILD DIR before being sent, and that copy is
 # not optional.  xmodem_send.py writes its preamble scratch file next to the

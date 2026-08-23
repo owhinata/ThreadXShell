@@ -47,8 +47,18 @@ The one thing it cannot bound is a receiver that erases the whole chip before
 writing.  Nothing static could; the evidence is empirical, from the hardware
 check that reads the OTHER model back after flashing one.
 
+A RESERVATION IS NOT ALWAYS THE LIMIT ON ONE ARTIFACT (issue #85)
+
+The firmware reservation covers the bootloader's TWO A/B slots, because a flash
+lands in whichever one is inactive and the build cannot know which.  But a
+single image still has to fit in ONE slot -- the bootloader refuses a larger one
+with ERR_IMAGE_SZ, by which point the serial port is open and a reset has been
+pressed.  So a partition may also declare --image-max: a ceiling on the artifact
+itself, checked separately from the blocks the partition owns.
+
 Exit 0 and print the layout when the reservations are disjoint, every supplied
-artifact fits its own reservation, and the artifact being written exists.
+artifact fits its own reservation and its own --image-max, and the artifact
+being written exists.
 """
 
 import argparse
@@ -83,6 +93,7 @@ class Partition:
         self.granularity = granularity
         self.path = None          # set by --image
         self.writing = False      # set by --writing
+        self.image_max = None     # set by --image-max
 
         if not self.name:
             raise ValueError("a partition needs a name")
@@ -118,6 +129,10 @@ def main():
                     help="one declared region; repeat for each")
     ap.add_argument("--image", action="append", default=[], metavar="NAME:FILE",
                     help="an artifact to measure against its reservation")
+    ap.add_argument("--image-max", action="append", default=[],
+                    metavar="NAME:BYTES",
+                    help="ceiling on ONE artifact in this partition, when that "
+                         "is smaller than the reservation (see the header)")
     ap.add_argument("--writing", action="append", default=[], metavar="NAME",
                     help="the partition(s) this flash writes; their images must "
                          "exist")
@@ -150,6 +165,26 @@ def main():
             return 1
         by_name[name].path = path
 
+    for spec in args.image_max:
+        name, _, value = spec.partition(":")
+        if name not in by_name or not value:
+            print(f"check_flash_partitions: --image-max {spec!r} names no "
+                  f"declared partition", file=sys.stderr)
+            return 1
+        try:
+            limit = parse_int(value)
+        except ValueError:
+            print(f"check_flash_partitions: --image-max {spec!r} has no "
+                  f"readable size", file=sys.stderr)
+            return 1
+        if limit <= 0 or limit > by_name[name].reserved:
+            print(f"check_flash_partitions: --image-max {spec!r} must be "
+                  f"positive and no larger than the {name} reservation "
+                  f"({by_name[name].reserved} B) -- a ceiling above the "
+                  f"reservation would check nothing", file=sys.stderr)
+            return 1
+        by_name[name].image_max = limit
+
     for name in args.writing:
         if name not in by_name:
             print(f"check_flash_partitions: --writing {name!r} names no "
@@ -177,6 +212,8 @@ def main():
             sent = p.transferred(size)
         state = "WRITING" if p.writing else ("present" if size is not None
                                              else "not built")
+        if p.image_max is not None:
+            state += f" (max 1 artifact {p.image_max} B)"
         print(f"{p.name:<12}   0x{r0:08x}..0x{r1:08x} "
               f"{'' if size is None else size:>10} "
               f"{'' if sent is None else sent:>10}   {state}")
@@ -222,6 +259,17 @@ def main():
                     f"          first -- see the board README.")
             continue
         size = os.path.getsize(p.path)
+        # [!] The ceiling is on the ARTIFACT, not on the blocks a write of it
+        # would disturb: the bootloader is refusing an image by its length, and
+        # padding it out to a packet or a block is our arithmetic, not its.
+        if p.image_max is not None and size > p.image_max:
+            fails.append(
+                f"{p.name}: the artifact is {size} B, over the {p.image_max} B "
+                f"ceiling on ONE artifact here.\n"
+                f"          The reservation ({p.reserved} B) is larger because "
+                f"it covers more than one\n"
+                f"          slot; the bootloader still refuses an image that "
+                f"does not fit a single one.")
         sent = p.transferred(size)
         w0, w1 = block_span(p.start, sent, args.erase_granularity)
         r0, r1 = p.reservation

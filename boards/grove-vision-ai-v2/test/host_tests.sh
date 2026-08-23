@@ -160,6 +160,15 @@ gcc $CFLAGS \
 # destroying a partition to see whether the check would have stopped it.
 python3 "$here/test_flash_partitions.py"
 
+# issue #85 -- the fixed NOR/bootloader geometry (cmake/flash_geometry.cmake).
+# The four numbers there both declare the flash layout and configure the check
+# over it, so while they were cache entries a single -D moved the rule and its
+# verification together and the layout check still said OK.  The refusal IS the
+# enforcement now, so this drives the real file through a real `cmake` configure
+# -- a do-nothing project(NONE), so there is no toolchain and each case is
+# instant.
+python3 "$here/test_flash_geometry.py"
+
 # issue #35 -- the planar B/G/R -> RGB565 packer (port/camera/cam_convert.c).
 # No shim and no SDK header: this translation unit is deliberately pure
 # arithmetic over memory, which is what lets it be tested here at all.  Every

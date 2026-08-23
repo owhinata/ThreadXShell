@@ -6,13 +6,16 @@
  * @file    cli_core.c
  * @brief   Shell ThreadX glue: instance lifecycle, thread loop, ISR notify.
  *
- * This is the only shell core file that calls ThreadX (tx_*) APIs; the line
- * editing (cli_edit.c) and dispatch (cli_session.c) logic it drives stays
- * ThreadX-free for host unit testing.  Per instance it owns one tx_thread, one
- * tx_event_flags group (RX / TX / KILL) and one tx_mutex.  The thread blocks on
- * the event flags, drains the transport on an RX signal and feeds each byte to
- * the state machine.  No mutable global state, so several instances run
- * concurrently and independently (requirements §10).
+ * One of the two shell core files that call ThreadX (tx_*) APIs -- the other is
+ * cli_job.c, which spawns the background-job workers.  Everything else in
+ * shell/core/ stays ThreadX-free so it can be unit-tested on the host: the line
+ * editing (cli_edit.c), dispatch (cli_session.c), output staging (cli_printf.c),
+ * parsing (cli_parse.c), completion (cli_complete.c), history (cli_history.c)
+ * and the console-counter scan (cli_console.c).  Per instance it owns one
+ * tx_thread, one tx_event_flags group (RX / TX / KILL) and one tx_mutex.  The
+ * thread blocks on the event flags, drains the transport on an RX signal and
+ * feeds each byte to the state machine.  No mutable global state, so several
+ * instances run concurrently and independently (requirements §10).
  *
  * Clean-room design inspired by Zephyr shell's thread model; no code reused.
  */

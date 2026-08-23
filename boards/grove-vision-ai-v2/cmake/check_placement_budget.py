@@ -98,6 +98,14 @@ FORBIDDEN = [
     # did.  Found by an adversarial review of the issue #49 plan.
     "hx_lib_spi_eeprom_Send_Op_code",
     "hx_lib_qspi_eeprom_Send_Op_code",
+    # [!] AND THE ONES THAT SAY "READ".  The first pass at this list barred the
+    # two functions whose names say "send opcode" and missed the two whose names
+    # say "read data" -- but Send_Op_Read_Data takes the SAME caller-supplied op
+    # buffer, up to 256 bytes, and sending WREN followed by a chip erase does not
+    # stop being a write because the caller then reads a reply and throws it
+    # away.  Barred on what they can do, not on what they are called.
+    "hx_lib_spi_eeprom_Send_Op_Read_Data",
+    "hx_lib_qspi_eeprom_Send_Op_Read_Data",
     # SDK SysTick pokers: ThreadX owns SysTick on this port.
     "EPII_Set_Systick_load",
     "EPII_Set_Systick_enable",

@@ -178,7 +178,8 @@
    低位窓に降りていないか」は **ldscript には書けない規則**（ld は NOBITS を
    区別しない）ので配置ゲートが ELF のフラグで検査する。
 
-   **推論（#44）**: **`lib_spi_eeprom.a` の erase/write 系と `Send_Op_code` は禁止シンボル**
+   **推論（#44）**: **`lib_spi_eeprom.a` の erase/write 系と、任意オペコード送出 4 本
+   （`Send_Op_code` / `Send_Op_Read_Data` の spi/qspi 両形）は禁止シンボル**
    （このフラッシュにブートローダが載る。wio のセクタ0 と同格。`setWriteEnable`
    のみ QUAD 有効化に必要なので明示的に許可）。**アリーナのキャッシュ保守は
    「範囲ごと」にしない**（#46） — TFLM は 16 B 整列・ラインは 32 B で、外側丸めが隣の

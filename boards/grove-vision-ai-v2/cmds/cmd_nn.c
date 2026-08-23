@@ -34,8 +34,11 @@
  * camera's 320x240 -- is SCALED into the input (issue #48).  It used to be a
  * 128x128 centre CROP, a field of view so narrow the detector was nearly
  * useless at any normal working distance.  The resize is scalar and lives in
- * port/npu/nn_preproc.c, where it is host-tested; the vendor's is a Helium
- * routine and linking it would put predicated MVE in the image.
+ * port/npu/nn_preproc.c, where it is HOST-TESTED -- that is the reason, and it
+ * is the whole reason.  This used to say that linking the vendor's Helium
+ * routine would put predicated MVE in the image, back when a gate barred that;
+ * issue #42 deleted the gate and lifted the ban, so the sentence outlived the
+ * rule it cited.
  */
 #include "cli.h"
 

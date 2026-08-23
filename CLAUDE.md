@@ -339,9 +339,10 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   `uart_read_udma` を使う場合は **DMA3 combined IRQ（69）も** enable（67/68 は不可）。
 - [!] **毎回の flash は bootloader 領域も書き直す**（Himax 標準フロー、donor 実績多数）。
   外付け NOR の耐久 ~100k。**自動ループで焼かない**。
-  [!] **その数字は回路図が指定する W25Q128JWSIQ のデータシート由来で、実装されている部品は
-  それではない**（#89。`nor info` の JEDEC は `5e 50 18`、Winbond は `0xEF`）。ルールは
-  変わらない（部品が不明ならむしろ慎重に）が、**耐久も消去単位も未確認**である。復旧 = チップ内 boot ROM +
+  [!] **その数字は回路図が指定する W25Q128JWSIQ のデータシート由来で、実装品は
+  Zbit ZB25LQ128C**（#89。JEDEC `5e 50 18`、刻印で確認。1.8V/128Mbit のピン互換二次ソース）。
+  ルールは変わらないが、**耐久も 32 KB 消去の可否も文書で裏が取れていない**
+  （`_ref/` に ZB25LQ128 のデータシートは無い）。#88 の境界チェックが decode する対象。復旧 = チップ内 boot ROM +
   BOOT_OPT ストラップ + factory image（手順は `boards/grove-vision-ai-v2/README.md`）。
   コンソールと flash は同一シリアルデバイス（ターミナルを閉じてから焼く。
   CH343P は環境により `/dev/ttyUSB*` に見える）。

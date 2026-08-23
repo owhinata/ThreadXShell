@@ -3,7 +3,7 @@
 ThreadX shell port for the Seeed Grove Vision AI V2: Himax HX6538 (WiseEye2),
 dual Cortex-M55 (the app runs on the big CM55M core at 400 MHz) + Ethos-U55
 NPU, an external 16 MB QSPI NOR flash (the schematic specifies a W25Q128JWSIQ;
-the part fitted to this board is not one -- see below), console and flashing on UART0
+the part fitted to this board is a Zbit ZB25LQ128C -- see below), console and flashing on UART0
 through the onboard CH343P USB-UART bridge (the chip has NO USB device
 controller).
 
@@ -2198,7 +2198,7 @@ first version did that and reported two holes inside the contiguous detection
 model, because two of its sectors happen to begin with `0xFFFFFFFF` -- 8,192 B
 under-reported, in the direction that makes a region look freer than it is.
 
-### [!] The fitted NOR is not the one the schematic specifies
+### [!] The fitted NOR is a Zbit ZB25LQ128C, not the schematic's Winbond
 
 `nor info` reads `jedec : 5e 50 18`. The schematic
 (`Grove_Vision_AI_Module_V2_Circuit_Diagram.pdf`) specifies **W25Q128JWSIQ**, and
@@ -2215,10 +2215,28 @@ What is established:
 | capacity | `0x18` = 2^24 = 16 MB, which the bootloader independently reports as `flash size[5]` |
 | manufacturer | `0x5E`, valid JEDEC odd parity, and not Winbond |
 
-What is **not** established, and nothing in this repository can establish it:
-which manufacturer `0x5E` is, this part's endurance, and which erase units it
-offers. Every `~100k` in this README, and the 4 KB / 32 KB / 64 KB erase sizes,
-come from the W25Q128JW datasheet by way of the schematic.
+The part was then identified from the package marking:
+
+```
+Z (logo)  FC2524
+25LQ128CSJG
+P3R111
+```
+
+The stylised `Z` is **Zbit Semiconductor**, whose JEDEC manufacturer id is
+`0x5E`, and the number reads **ZB25LQ128C** -- `L` for 1.8 V, `Q` for quad,
+`128` for 128 Mbit. `FC2524` and `P3R111` are lot and date codes. That accounts
+for all three id bytes and for the substitution being viable at all: the
+W25Q128JW the schematic asks for is also a 1.8 V 128 Mbit quad part, so this is
+a pin- and voltage-compatible second source.
+
+[!] **Identifying the part is not the same as verifying it.** No ZB25LQ128
+datasheet is in `_ref/`, so the two things that matter to this port are still
+unconfirmed: its **endurance**, and **which erase units it honours**. Every
+`~100k` in this README, and the 4 KB / 32 KB / 64 KB erase sizes, still come
+from the W25Q128JW datasheet by way of the schematic -- they are now a
+reasonable expectation for a part of this class rather than a documented fact
+about this one.
 
 That leaves the operational rules unchanged -- an unidentified part is a reason
 for more caution about looping a flash, not less -- but two things now rest on an

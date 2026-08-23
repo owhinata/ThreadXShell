@@ -278,6 +278,63 @@ int                  cli_register_thread(TX_THREAD *t, struct cli_instance *sh);
 void                 cli_unregister_thread(TX_THREAD *t);
 struct cli_instance *cli_current_instance(void);
 
+/*
+ * Per-console counter snapshot (issue #28): one row per running interactive
+ * console, filled by cli_console_snapshot() and printed by the shared `console`
+ * command.  Kept small and self-contained on purpose.
+ *
+ * VALUES, not pointers into the instance.  A background-job worker's instance
+ * lives in the static job pool and is REUSED by the next `cmd &`, so a row that
+ * merely pointed at an instance could describe a different one by the time it
+ * reached the terminal.  Workers are not listed today, so nothing depends on
+ * that -- copying just means the window cannot exist.
+ */
+struct cli_console_stat {
+	char     prompt[CLI_PROMPT_BUFFER_SIZE]; /**< label: the instance prompt, NUL-terminated */
+	uint32_t rx_dropped;                     /**< RX-overflow drops since boot */
+	uint32_t tx_dropped;                     /**< bytes dropped on TX timeout since boot */
+};
+
+/**
+ * Snapshot the drop counters of every RUNNING INTERACTIVE console.
+ *
+ * The contract, stated operationally: an instance STARTED by cli_start() and
+ * currently in the thread->instance registry, with fg == NULL.  Two things drop
+ * out of that by construction:
+ *   - an instance that is cli_init()ed but never started is not in the registry
+ *     at all (the Wio's kv_boot_sh: not a console -- its output goes to dmesg);
+ *   - a background-job worker registers its worker thread against an instance
+ *     whose fg points at the launching foreground shell, so fg != NULL excludes
+ *     it.  Workers belong to `jobs`, which is where they can be identified;
+ *     their prompt is empty, so a row for one could not be told apart anyway.
+ * Whether anyone is CONNECTED is deliberately not part of it: a telnet console
+ * running since boot with no client is precisely what this readout is for.
+ *
+ * [!] The predicate therefore means "a started foreground CLI endpoint", not "a
+ * human can reach it".  cli_start() is the API that gives an instance a prompt
+ * and an RX loop, so anything started through it is such an endpoint and listing
+ * it is correct rather than a false positive.  The core learns neither a role
+ * field nor the backend type -- telling it which transports humans use would
+ * break the layering the transport abstraction exists to keep.
+ *
+ * Rows are not de-duplicated; see cli_console_collect() (shell/core/cli_console.h).
+ *
+ * The whole scan-and-copy runs in one interrupt-disabled critical section, so
+ * the caller prints AFTERWARDS -- cli_print() waits on a mutex and must not be
+ * called from inside one.
+ *
+ * @param out    array receiving up to @p cap rows (may be NULL when @p cap is 0)
+ * @param cap    capacity of @p out in rows; CLI_MAX_INSTANCES covers every board
+ *               that honours its own instance-count invariant, which the
+ *               registry itself does NOT enforce -- so a caller still owes the
+ *               user a truncation notice rather than passing off a partial table
+ *               as a complete one
+ * @param found  optional out: total matching consoles seen.  It EXCEEDS the
+ *               return value exactly when @p out was too small
+ * @return number of rows written (0..cap)
+ */
+size_t cli_console_snapshot(struct cli_console_stat *out, size_t cap, size_t *found);
+
 /* Background jobs (owhinata/stm32f746g-disco#25, cli_job.c).  `cmd &` runs the command in a worker thread
  * drawn from a fixed static pool.  cli_job_pool_init() creates the pool's event
  * groups once at boot (call after the interactive instances start).  The other

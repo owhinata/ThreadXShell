@@ -169,6 +169,17 @@ gcc $CFLAGS -I "$backend" \
     $LDFLAGS -o "$out/test_uart_ring"
 "$out/test_uart_ring"
 
+# Console-counter snapshot (issue #28): which registry entries count as a running
+# interactive console, and how a too-small caller array is reported.  cli_console.c
+# calls no tx_* service, so it builds against the tx_api.h shim exactly like
+# cli_session.c; the TX_DISABLE wrapper around it (cli_core.c) and the `console`
+# command itself are firmware-only, as cmd_thread.c is.
+gcc $CFLAGS \
+    -I "$here/shim" -I "$inc" -I "$core" \
+    "$here/test_console.c" "$core/cli_console.c" \
+    $LDFLAGS -o "$out/test_console"
+"$out/test_console"
+
 # Tab completion: word boundary + read-only token walk (command-set resolution),
 # prefix scan with longest-common-prefix tracking, single-candidate complete +
 # trailing space, bash-style two-stage candidate list, BEL on no match / argument

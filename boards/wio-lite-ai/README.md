@@ -181,10 +181,11 @@ Negative tests for the gate live in `cmake/fixtures/run_fixture_tests.py`.
 ## Commands
 
 ```
-ai      blob    camera  coremark  crash  devmem  dmesg  echo   free
-help    jobs    kill    kv        lcd    membench  mlperf  net  nor
-psram   reboot  sd      sleep     thread uptime  usleep  version
-watch   wdt     wifi
+ai        blob      camera    console   coremark  crash
+devmem    dmesg     echo      free      help      jobs
+kill      kv        lcd       membench  mlperf    net
+nor       psram     reboot    sd        sleep     thread
+uptime    usleep    version   watch     wdt       wifi
 ```
 
 Behind them: the RTL8720DN companion for WiFi and the telnet console (`wifi`,
@@ -192,6 +193,16 @@ Behind them: the RTL8720DN companion for WiFi and the telnet console (`wifi`,
 `blob`, `nor`), the 8 MB PSRAM (`psram`), the ST7789 panel over the LTDC's RGB
 interface (`lcd`), a DVP camera (`camera`), and the TFLM inference backend
 (`ai`).
+
+This board runs two shell instances -- `wio>` on the USB CDC and `wio-net>` on
+telnet -- each with its own line editor, history and RX/TX drop counters.
+`console` prints those counters, one line per console; what counts as a console
+is in the root
+[README](../../README.md#a-board-can-run-more-than-one-console).  `wio-net>`'s
+`rx_drop` stays 0 by construction -- only a ring-buffered backend can overflow,
+and the TCP one has no ring -- while `tx_drop` applies to both.  The boot-time
+KV shell (`src/kv_boot.c`) is an instance too, but it is never started as a
+console -- its output goes to `dmesg` -- so it is not listed.
 
 ## Flashing and recovery
 

@@ -41,6 +41,26 @@ HAL / CMSIS / ThreadX (lib/, upstream submodules, read-only)
 The Wio Lite AI DFU bootloader is an independent tree that shares no sources with
 the app/shell layers and is treated as immutable.
 
+### A board can run more than one console
+
+A shell instance owns its transport, line editor, history and drop counters, and
+a board may start several at once -- so "the console" is not a single thing. The
+shared `console` command prints one line per running interactive console: its
+prompt as the label, then `rx_drop` (bytes a backend discarded because the RX
+ring was full) and `tx_drop` (output bytes dropped after a TX no-progress
+deadline). Both are cumulative since boot and neither can be cleared -- a counter
+a reader can zero stops being evidence.
+
+What it lists is every instance that `cli_start()` started and that is still in
+the thread->instance registry. A background job's worker is an instance too but
+not a console -- `jobs` lists those -- and an instance that is initialised and
+never started is not one either. Whether a client is attached is deliberately not
+part of it: a telnet console sitting since boot with nobody on it is exactly what
+this readout is for.
+
+A backend may keep private counters of its own as well. Those stay board-owned
+and are described in that board's README.
+
 ## Repository layout
 
 ```

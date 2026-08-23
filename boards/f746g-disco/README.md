@@ -138,10 +138,11 @@ Two gates back that up:
 ## Commands
 
 ```
-ai      camera  coremark  crash  devmem  dmesg  echo    free   fs
-gui     help    jobs      kill   lcd     membench  net  qspi   reboot
-sd      sdram   sleep     thread touch   uptime  usleep  version
-watch   wdt     xfer
+ai        camera    console   coremark  crash     devmem
+dmesg     echo      free      fs        gui       help
+jobs      kill      lcd       membench  net       qspi
+reboot    sd        sdram     sleep     thread    touch
+uptime    usleep    version   watch     wdt       xfer
 ```
 
 `help` lists them with one-line descriptions; `help <cmd>` and
@@ -151,6 +152,24 @@ Subsystems behind them: LTDC + GUIX (`gui`, `lcd`), OV5640 over DCMI
 (`camera`), QSPI NOR with LevelX + FileX (`fs`, `qspi`), microSD (`sd`),
 FT5336 touch (`touch`), Ethernet with NetX Duo (`net`), the NN backends (`ai`),
 and YMODEM transfer over the console (`xfer`).
+
+This board runs two shell instances -- `sh>` on the VCP and `net>` on telnet --
+each with its own line editor, history and RX/TX drop counters, so `console`
+prints two lines here:
+
+```
+sh> console
+console         rx_drop    tx_drop
+sh>                   0          0
+net>                  0          0
+```
+
+The `net>` row appears whether or not a telnet client is attached.  Its `rx_drop`
+stays 0 by construction -- only a ring-buffered backend can overflow, and the TCP
+one has no ring -- while `tx_drop` applies to both, because the no-progress
+deadline that drops output lives in the shared output path.  What counts as a
+console, and what the two columns mean, is in the root
+[README](../../README.md#a-board-can-run-more-than-one-console).
 
 ### [!] Three subscribers share one capture, and each has to drain its sink
 

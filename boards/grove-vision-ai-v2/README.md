@@ -90,6 +90,15 @@ the settings are also lost when the USB device re-enumerates.
   is verified working here.  The documented fallback, should a future SDK
   bump break it, is a 1-byte `uart_read_udma()` re-arm -- which additionally
   needs the DMA3 combined IRQ (69) enabled, not just UART0's (90).
+  The shared `console` command prints this instance's RX/TX drop counters (the
+  readout issue #25's "rx_dropped does not move across a heavy paste" needed and
+  did not have).  A ring overflow bumps the shared `sh->rx_dropped` as well as
+  this backend's private `rx_dropped_ring`, so `console`'s `rx_drop` does show
+  it; what stays board-private is the backend's own fields -- that mirror, and
+  `err_events` (overrun / framing / parity), which has no shared counterpart at
+  all and is still not displayed anywhere.  This board runs a single console, so
+  the table has one row -- see the root
+  [README](../../README.md#a-board-can-run-more-than-one-console).
 - **SDK diagnostics** (`xprintf`) are satisfied by a board shim that routes
   into the `dmesg` RAM log; the SDK clib/console is not linked at all.
 - **Post-build gates** (`cmake/check_*.py`): image coherence (every linker

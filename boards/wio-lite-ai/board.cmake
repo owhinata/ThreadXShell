@@ -442,6 +442,7 @@ set(APP_TINYUSB_SOURCES
 set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/shell/core/cli_core.c"
     "${CMAKE_SOURCE_DIR}/shell/core/cli_complete.c"
+    "${CMAKE_SOURCE_DIR}/shell/core/cli_console.c"
     "${CMAKE_SOURCE_DIR}/shell/core/cli_edit.c"
     "${CMAKE_SOURCE_DIR}/shell/core/cli_history.c"
     "${CMAKE_SOURCE_DIR}/shell/core/cli_job.c"
@@ -454,6 +455,7 @@ set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_builtin.c"
     "${BOARD_DIR}/cmds/cmd_system.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_thread.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_console.c"
     "${BOARD_DIR}/cmds/cmd_free.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_sleep.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_watch.c"

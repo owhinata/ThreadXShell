@@ -95,6 +95,61 @@ set(GROVE_MODEL_DET_ADDR "0xD20000" CACHE STRING
 # is the enforcement -- see the header there, and test/test_flash_geometry.py.
 include("${BOARD_DIR}/cmake/flash_geometry.cmake")
 
+# [!] THE RESERVATIONS LIVE HERE, WITH THE ADDRESSES, and not down beside the
+# flashing targets where they started.  Two consumers need them and one of them
+# is 400 lines above the other: the flashing targets at the bottom of this file,
+# and the firmware itself -- cmd_nor.c is compiled with the partition edges so
+# that `nor scan`'s labels and the layout check cannot drift apart (issue #86).
+# Leaving them below meant the compile definitions expanded to nothing, which
+# the C compiler caught only because an empty initialiser is a syntax error.
+# [!] The blob area (issue #85, reserved for #49 Step 2).  Declared but written
+# by nothing yet, and that is the point: a reservation is a property of
+# addresses, so having it checked from the day it exists is what stops the next
+# partition from being placed on top of it.
+#
+# Ends on the first block the classification model owns, so the two abut with no
+# unnamed gap.  Derived from the model's address rather than repeating the
+# 0xB70000 that rounding happens to produce today.
+#
+# [!] WHAT IS THERE TODAY IS NOT OURS, AND THE FIRST WRITE DESTROYS IT.  The
+# factory SenseCraft firmware left a FlashDB KVDB at 0x300000 -- FlashDB's
+# sector magic, at the offset FDB_WRITE_GRAN = 32 puts it -- and data at
+# 0x400000 and 0x500000.  Nothing in this port reads any of it, and reflashing
+# the factory image would not bring its contents back.  Accepted deliberately
+# (2026-08-23) in exchange for the 9.4 MB.
+set(GROVE_BLOB_ADDR "${GROVE_FW_RESERVED}")
+math(EXPR GROVE_BLOB_END
+     "(${GROVE_MODEL_CLS_ADDR} / ${GROVE_ERASE_GRAN}) * ${GROVE_ERASE_GRAN}"
+     OUTPUT_FORMAT HEXADECIMAL)
+math(EXPR GROVE_BLOB_RESERVED "${GROVE_BLOB_END} - ${GROVE_BLOB_ADDR}"
+     OUTPUT_FORMAT HEXADECIMAL)
+# 0xB7B000 + 0x1A5000 = 0xD20000, so this ends exactly on the detector's first
+# block.  Headroom over today's 1,704,672 B model: ~19 KB.
+set(GROVE_MODEL_CLS_RESERVED "0x1A5000" CACHE STRING
+    "Flash reserved for the classification model")
+# 0xD20000 + 0x30000 = 0xD50000.  Headroom over today's ~164 KB model: ~32 KB.
+set(GROVE_MODEL_DET_RESERVED "0x30000" CACHE STRING
+    "Flash reserved for the detection model")
+
+# The rest of the flash above the models (issue #85).  It is blob's second run
+# today and is declared for the reason any reservation is: an unnamed 2.8 MB gap
+# is not spare capacity, it is capacity nobody is stopping the next partition
+# from being placed into.
+#
+# [!] THE SPLIT IS TEMPORARY.  The models are the only thing between the two
+# runs, and #49 Step 4 moves them INTO blob -- at which point their reservations
+# are deleted and blob becomes one run of 0x200000..GROVE_SLOT_HDR_ADDR.  That
+# is the destination; the models cannot be deleted before then because `nn open
+# cls|det` is compiled with their addresses and `--target flash-model-*` names
+# their partitions, and deleting the reservation would stop the gate protecting
+# flash that is still in use.
+math(EXPR GROVE_BLOB_TAIL_ADDR
+     "${GROVE_MODEL_DET_ADDR} + ${GROVE_MODEL_DET_RESERVED}"
+     OUTPUT_FORMAT HEXADECIMAL)
+math(EXPR GROVE_BLOB_TAIL_RESERVED
+     "${GROVE_SLOT_HDR_ADDR} - ${GROVE_BLOB_TAIL_ADDR}"
+     OUTPUT_FORMAT HEXADECIMAL)
+
 set(GEN_DIR "${CMAKE_BINARY_DIR}/gen")
 file(MAKE_DIRECTORY "${GEN_DIR}")
 
@@ -337,6 +392,7 @@ set(SHELL_SOURCES
     "${BOARD_DIR}/cmds/cmd_mve.c"
     "${BOARD_DIR}/cmds/cmd_camera.c"
     "${BOARD_DIR}/cmds/cmd_nn.c"
+    "${BOARD_DIR}/cmds/cmd_nor.c"
     "${CMAKE_SOURCE_DIR}/svc/fmt.c"
     # Camera frame ring (issue #35).  Freestanding: it depends on <stdint.h>
     # and an injected lock vtable only, which is why the same file serves all
@@ -511,6 +567,11 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/threadx/tx_glue.c"
     "${BOARD_DIR}/port/sdk_seam/timer_seam.c"
     "${BOARD_DIR}/port/sdk_seam/epk_irq_wrap.c"
+    # External NOR lifecycle (issue #86).  Owns the QSPI master, the XIP window
+    # and the interrupt the vendor library uses for DMA -- which used to be
+    # brought up inside npu_hw_init()'s EPK snapshot, so `nn close` disabled it.
+    "${BOARD_DIR}/port/nor/nor_state.c"
+    "${BOARD_DIR}/port/nor/nor_flash.c"
     "${BOARD_DIR}/port/lcd/lcd_st7789.c"
     "${BOARD_DIR}/port/camera/cam_convert.c"
     "${BOARD_DIR}/port/camera/cam_mipi_calc.c"
@@ -532,7 +593,6 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/npu/npu_payload.c"
     "${BOARD_DIR}/port/npu/npu_model_scan.cc"
     "${BOARD_DIR}/port/npu/npu_hw.c"
-    "${BOARD_DIR}/port/npu/npu_flash.c"
     "${BOARD_DIR}/port/npu/nn_preproc.c"
     "${BOARD_DIR}/port/npu/nn_overlay.c"
     # Model-specific post-processing (issue #45).  Above npu.h, which stays
@@ -555,6 +615,7 @@ target_include_directories(shell_objs PRIVATE
     "${BOARD_DIR}/src"
     "${BOARD_DIR}/port/threadx"
     "${BOARD_DIR}/port/sdk_seam"
+    "${BOARD_DIR}/port/nor"
     "${BOARD_DIR}/port/lcd"
     "${BOARD_DIR}/port/camera"
     "${BOARD_DIR}/port/npu"
@@ -601,7 +662,15 @@ target_compile_definitions(shell_objs PRIVATE
     # not two that a comment asks to agree.  Offsets, not addresses: cmd_nn.c
     # adds the flash read alias base, which is a property of the chip.
     NN_MODEL_CLS_OFFSET=${GROVE_MODEL_CLS_ADDR}
-    NN_MODEL_DET_OFFSET=${GROVE_MODEL_DET_ADDR})
+    NN_MODEL_DET_OFFSET=${GROVE_MODEL_DET_ADDR}
+    # `nor scan` labels its extents with these, and they are the SAME variables
+    # check_flash_partitions.py consumes -- so the labels on the device and the
+    # layout the host checks cannot drift apart (issues #45, #85, #86).
+    NOR_PART_FW_END=${GROVE_FW_RESERVED}
+    NOR_PART_BLOB_END=${GROVE_BLOB_END}
+    NOR_PART_CLS_END=${GROVE_MODEL_DET_ADDR}
+    NOR_PART_DET_END=${GROVE_BLOB_TAIL_ADDR}
+    NOR_PART_TAIL_END=${GROVE_SLOT_HDR_ADDR})
 target_compile_options(shell_objs PRIVATE -Os)
 
 # [!] THE CAMERA/NN/LCD PIXEL LOOPS NO LONGER CARRY -fno-tree-vectorize
@@ -981,54 +1050,6 @@ endif()
 # rather than what a file occupies.  Each model owns the blocks from its own
 # start up to the next boundary.
 #
-# [!] The blob area (issue #85, reserved for #49 Step 2).  Declared but written
-# by nothing yet, and that is the point: a reservation is a property of
-# addresses, so having it checked from the day it exists is what stops the next
-# partition from being placed on top of it.
-#
-# Ends on the first block the classification model owns, so the two abut with no
-# unnamed gap.  Derived from the model's address rather than repeating the
-# 0xB70000 that rounding happens to produce today.
-#
-# [!] WHAT IS THERE TODAY IS NOT OURS, AND THE FIRST WRITE DESTROYS IT.  The
-# factory SenseCraft firmware left a FlashDB KVDB at 0x300000 -- FlashDB's
-# sector magic, at the offset FDB_WRITE_GRAN = 32 puts it -- and data at
-# 0x400000 and 0x500000.  Nothing in this port reads any of it, and reflashing
-# the factory image would not bring its contents back.  Accepted deliberately
-# (2026-08-23) in exchange for the 9.4 MB.
-set(GROVE_BLOB_ADDR "${GROVE_FW_RESERVED}")
-math(EXPR GROVE_BLOB_END
-     "(${GROVE_MODEL_CLS_ADDR} / ${GROVE_ERASE_GRAN}) * ${GROVE_ERASE_GRAN}"
-     OUTPUT_FORMAT HEXADECIMAL)
-math(EXPR GROVE_BLOB_RESERVED "${GROVE_BLOB_END} - ${GROVE_BLOB_ADDR}"
-     OUTPUT_FORMAT HEXADECIMAL)
-# 0xB7B000 + 0x1A5000 = 0xD20000, so this ends exactly on the detector's first
-# block.  Headroom over today's 1,704,672 B model: ~19 KB.
-set(GROVE_MODEL_CLS_RESERVED "0x1A5000" CACHE STRING
-    "Flash reserved for the classification model")
-# 0xD20000 + 0x30000 = 0xD50000.  Headroom over today's ~164 KB model: ~32 KB.
-set(GROVE_MODEL_DET_RESERVED "0x30000" CACHE STRING
-    "Flash reserved for the detection model")
-
-# The rest of the flash above the models (issue #85).  It is blob's second run
-# today and is declared for the reason any reservation is: an unnamed 2.8 MB gap
-# is not spare capacity, it is capacity nobody is stopping the next partition
-# from being placed into.
-#
-# [!] THE SPLIT IS TEMPORARY.  The models are the only thing between the two
-# runs, and #49 Step 4 moves them INTO blob -- at which point their reservations
-# are deleted and blob becomes one run of 0x200000..GROVE_SLOT_HDR_ADDR.  That
-# is the destination; the models cannot be deleted before then because `nn open
-# cls|det` is compiled with their addresses and `--target flash-model-*` names
-# their partitions, and deleting the reservation would stop the gate protecting
-# flash that is still in use.
-math(EXPR GROVE_BLOB_TAIL_ADDR
-     "${GROVE_MODEL_DET_ADDR} + ${GROVE_MODEL_DET_RESERVED}"
-     OUTPUT_FORMAT HEXADECIMAL)
-math(EXPR GROVE_BLOB_TAIL_RESERVED
-     "${GROVE_SLOT_HDR_ADDR} - ${GROVE_BLOB_TAIL_ADDR}"
-     OUTPUT_FORMAT HEXADECIMAL)
-
 # [!] --image-max, not just the reservation.  The firmware reservation covers
 # BOTH slots, but a single image has to fit in ONE -- the bootloader refuses a
 # larger one with ERR_IMAGE_SZ, after the serial port is open and a reset has

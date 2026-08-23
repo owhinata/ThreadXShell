@@ -231,6 +231,20 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_cam_stop"
 "$out/test_cam_stop"
 
+# issue #86 -- the NOR port's lifecycle decisions (port/nor/nor_state.c).  Two of
+# the cases cannot be produced from a console: two callers arriving in the
+# `OFF -> ENABLING` window (one shell, and background jobs run BELOW the
+# foreground one under TX_NO_TIME_SLICE), and a release of a lease the caller
+# does not hold in the variants that matter.  The one this file is really for is
+# a level up: npu_hw_init() acquires and can then fail three more ways, and its
+# caller does NOT tear down on failure -- so the last section walks that
+# sequence, which an acquire/release table alone would pass while it leaked.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/nor" \
+    "$here/test_nor_state.c" "$board/port/nor/nor_state.c" \
+    $LDFLAGS -o "$out/test_nor_state"
+"$out/test_nor_state"
+
 # issue #68 -- the EDM observer's bookkeeping (port/camera/cam_edm.c).  Nothing
 # a console can type makes EDM fire: the event has been seen twice, both times
 # inside a hang, and it cannot be asked for again.  So the accumulation and the

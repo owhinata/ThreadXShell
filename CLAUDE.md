@@ -566,6 +566,19 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   ピークが前半の最大になり、後方 384 群の最強顔を落とす）。出力 4 本は **shape で探す**。
   **4 本の scale/zp は全部違う**（8x8 のスコアは zp 126 / scale 1.22 で実質 3 値）ので
   共有の脱量子化定数を作らない。詳細は board README。
+- **[!] 外付け NOR のライフサイクルは `port/nor/` が所有する**（#86）。QSPI/XIP の立ち上げと
+  **IRQ 133（DMAC1 combined）の EPK wrapset は `port/nor/` のもの**で、NPU の snapshot は
+  その後に取る。**NPU 側に戻してはいけない** — 戻すと `nn close` の unwrap が IRQ 133 を
+  disable し、片方向ラッチが「初期化済み」と言い続ける（#86 の欠陥そのもの）。
+  リースは **`npu_hw_init` が取得し `npu_hw_deinit` が解放**する（`npu_open`/`npu_close` は
+  触らない）。トークンは**成功するまでローカル**で、`hw_ready` と同時にのみコミットする。
+  [!] **ベンダの `enable_XIP` は MPU を再構成して戻り値を検査しない**ので、読み戻しは
+  こちら側の責任。**JEDEC ID は XIP 前にしか読めない**（read-ID も同じ XIP ガードを持つ）。
+  `nor` に **`write`/`erase`/生オペコードを足さない**（境界付き書込みは #88）。
+  [!] ただし**「read-only」と書かない** — 配列は触らないが、初回 bring-up はベンダの
+  quad-enable 経由で **NOR の不揮発ステータスレジスタ（QE ビット）を書く**（#86 の
+  adversarial review 指摘）。`nn open` が従来からやっていることで新規ではないが、
+  診断コマンドから到達可能になった。
 - **[!] SRAM 窓は 2 領域**（#29）: `CM55M_S_SRAM_LDR` 0x3401F000 = 2nd bootloader の実行窓で
   **NOLOAD 専用** / `CM55M_S_SRAM` 0x3404D000 = loadable 可。`.rodata` は後者。
   「CONTENTS を持つセクションが低位窓に降りていないか」は **ldscript には書けない規則**

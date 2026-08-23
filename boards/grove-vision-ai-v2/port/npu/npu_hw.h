@@ -63,16 +63,6 @@ const char *npu_hw_fail_reason(void);
 /** True once npu_hw_init() has succeeded and npu_hw_deinit() has not run. */
 int npu_hw_ready(void);
 
-/**
- * Put the QSPI NOR into XIP mode so the model can be read in place.
- *
- * NOT automatic at reset -- see npu_flash.c for the hardware symptom that
- * proved it.  READ PATH ONLY: this flash carries the bootloader, and the
- * erase/write entry points that ship in the same archive are barred from the
- * image by check_placement_budget.py.
- */
-int npu_flash_xip_init(void);
-int npu_flash_xip_ready(void);
 
 /**
  * The interrupt lines this bring-up wrapped for the execution profile kit.

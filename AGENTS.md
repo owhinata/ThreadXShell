@@ -157,7 +157,8 @@
    `TX_SINGLE_MODE_SECURE` 必須**。優先度は 3-bit（PendSV=7 / SysTick=6）。
    `platform_driver_init()` は PRIMASK 下 + カーネル入場前に IRQ 0..200 を
    disable/clear（プリビルトが IRQ を勝手に開くため）。**毎回の flash は bootloader
-   領域も書く**（Himax 標準。W25Q128JW ~100k 耐久、自動ループ焼き不可。復旧 =
+   領域も書く**（Himax 標準。耐久 ~100k は**回路図の W25Q128JWSIQ 由来で実装品は別物**
+   （#89）。自動ループ焼き不可。復旧 =
    boot ROM + BOOT_OPT + factory image）。ポストリンクゲート 3 本
    （`check_image_coherence.py` = 生成 .img と ELF の突き合わせ + .rodata 内
    コマンドレジストリ / `check_placement_budget.py` = 配置・予算・ベンチバッファの

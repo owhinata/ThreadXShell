@@ -18,6 +18,7 @@
  */
 #include <stddef.h>
 
+#include "cli_console.h"
 #include "cli_instance.h"
 #include "cli_internal.h"
 
@@ -33,10 +34,7 @@
  * publish-.sh-last / retract-.sh-first ordering below must be paired with the
  * appropriate volatile/barriers.)
  */
-static struct cli_thread_map {
-	TX_THREAD           *thread;
-	struct cli_instance *sh;
-} cli_thread_reg[CLI_THREAD_MAP_MAX];
+static struct cli_thread_map cli_thread_reg[CLI_THREAD_MAP_MAX];
 
 /*
  * True when running in exception / ISR context (IPSR != 0).  tx_thread_identify()
@@ -120,6 +118,31 @@ struct cli_instance *cli_current_instance(void)
 	TX_RESTORE
 
 	return result;
+}
+
+/*
+ * Console-counter snapshot (issue #28).  The registry is already the list of
+ * started CLI endpoints, so this reuses it rather than adding a second one: the
+ * table cli_current_instance() scans to route printf is the same table that
+ * answers "which consoles are up".
+ *
+ * The scan and the copies happen inside the same short critical section that
+ * guards every other use of the table, and nothing else does -- cli_console_collect()
+ * calls no tx_* service, formats nothing and uses no string function, so the
+ * section stays bounded by CLI_THREAD_MAP_MAX.  Printing is the caller's job,
+ * afterwards, because cli_print() waits on a mutex (cmd_thread.c takes the same
+ * snapshot-then-print shape against the ThreadX created list).
+ */
+size_t cli_console_snapshot(struct cli_console_stat *out, size_t cap, size_t *found)
+{
+	TX_INTERRUPT_SAVE_AREA
+	size_t n;
+
+	TX_DISABLE
+	n = cli_console_collect(cli_thread_reg, CLI_THREAD_MAP_MAX, out, cap, found);
+	TX_RESTORE
+
+	return n;
 }
 
 /*

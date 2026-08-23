@@ -3,8 +3,9 @@
 # Copyright (c) 2026 ThreadX Shell Project
 """Negative tests for the post-build gates that assert a LINKER property.
 
-Covers cmake/check_timer_seam.py (issue #30) and the loadable-SRAM floor in
-cmake/check_placement_budget.py (issue #29).
+Covers cmake/check_timer_seam.py (issue #30), the loadable-SRAM floor and the
+required-symbol rule in cmake/check_placement_budget.py (issues #29, #42), and
+cmake/check_nor_seam.py (issue #88).
 
 WHY REAL LINKS AND NOT UNIT TESTS
 ---------------------------------
@@ -25,6 +26,27 @@ exactly one thing broken:
 
   P1  .lcd_fb made LOADABLE             -> the loader-window floor fires
   P0  the unmodified firmware           -> PASS
+
+  Q0  the unmodified probe              -> PASS
+  Q1  another TU calls the inner name   -> N5
+  Q2  another TU references __real_     -> N6
+  Q3  another TU revives the vendor's
+      outer forwarder                   -> N5, N11 and N16
+  Q4  a linked input left out of the
+      manifest                          -> N2
+  Q5  an authorised caller takes the
+      ADDRESS instead of calling        -> N9
+  Q6  chip erase made reachable         -> N8
+  Q7  the probe without its forced
+      wrapper references                -> N14 (the vacuous link)
+  Q8  a map from a different link       -> N1
+  Q9  a --wrap flag dropped             -> the LINK fails
+  Q10 an input built with LTO           -> N2 and N4
+
+[!] THE Q CASES RUN ON THE PROBE, NOT THE FIRMWARE.  Until issue #88 Part C
+lands there is no caller for the NOR write path in `shell`, so the whole seam is
+collected out of it and the rules would be true of nothing.  Q7 is the fixture
+for exactly that shape of emptiness.
 
 F3 and P0 are not decoration: without them, the fixtures above could all be
 failing for some unrelated reason that also happens to break the pristine link,
@@ -62,6 +84,7 @@ Usage:
 import argparse
 import os
 import re
+import shlex
 import subprocess
 import sys
 
@@ -125,6 +148,61 @@ def run_gate(board_dir, build_dir, elf, nm, objdump):
     return r.returncode, ids, (r.stdout + r.stderr)
 
 
+def nor_gate_command(build_dir, target):
+    """The check_nor_seam.py invocation Ninja runs for `target`, verbatim.
+
+    Read out of the real build for the same reason the link command is: the
+    gate takes the writable interval and the erase unit as arguments, and a
+    copy of those numbers here would be a second declaration of the layout --
+    free to drift, and then these fixtures would be testing a rule the project
+    does not enforce.
+    """
+    out = subprocess.run(["ninja", "-C", build_dir, "-t", "commands", target],
+                         check=True, capture_output=True, text=True).stdout
+    for line in reversed(out.splitlines()):
+        for part in line.split(" && "):
+            if "check_nor_seam.py" in part:
+                return shlex.split(part)
+    raise SystemExit("run_fixture_tests: no check_nor_seam.py command for "
+                     f"{target} in {build_dir} -- build it first")
+
+
+def nor_gate_variant(base, elf=None, mapfile=None, manifest=None,
+                     callers=(), require_live=None):
+    """`base` with only what a fixture needs changed."""
+    cmd = list(base)
+
+    # [!] AFTER THE SCRIPT PATH.  cmd[0] is the interpreter and cmd[1] the
+    # script; inserting at 1 puts the option where python reads a filename, and
+    # the gate exits 2 having parsed nothing -- which reads as "no diagnostics",
+    # i.e. a fixture that failed silently rather than one that caught anything.
+    def set_opt(name, value):
+        if name in cmd:
+            cmd[cmd.index(name) + 1] = value
+        else:
+            cmd.insert(2, value)
+            cmd.insert(2, name)
+
+    if mapfile is not None:
+        set_opt("--map", mapfile)
+    if manifest is not None:
+        set_opt("--manifest", manifest)
+    if require_live is False and "--require-live-wrappers" in cmd:
+        cmd.remove("--require-live-wrappers")
+    for c in callers:
+        cmd.insert(2, c)
+        cmd.insert(2, "--allow-caller")
+    if elf is not None:
+        cmd[-1] = elf
+    return cmd
+
+
+def run_nor_gate(cmd, build_dir):
+    r = subprocess.run(cmd, cwd=build_dir, capture_output=True, text=True)
+    ids = set(re.findall(r"\[(N\d+)\]", r.stdout + r.stderr))
+    return r.returncode, ids, (r.stdout + r.stderr)
+
+
 def run_placement_gate(board_dir, build_dir, elf, nm, objdump):
     """check_placement_budget.py on one ELF.
 
@@ -147,19 +225,26 @@ def run_placement_gate(board_dir, build_dir, elf, nm, objdump):
     return r.returncode, ids, text
 
 
-def link_only(cmd):
-    """Just the compiler invocation, without the POST_BUILD chain.
+def link_only(cmd, output="shell.elf"):
+    """Just the compiler invocation, without the PRE_LINK and POST_BUILD chain.
 
-    Ninja reports the firmware link with the image generation and all four gates
-    chained on with &&.  A fixture wants the link and nothing else -- running the
-    real image generator on a deliberately broken ELF would be slow and would
-    fail for its own reasons.  (The command also STARTS with `: &&`, which is
-    why this picks the segment out rather than truncating at the first &&.)
+    Ninja reports a link with everything CMake chained onto it: the map deletion
+    that runs before it, the image generation, and the gates.  A fixture wants
+    the link and nothing else -- running the real image generator on a
+    deliberately broken ELF would be slow and fail for its own reasons.
+
+    [!] AND SINCE ISSUE #88 IT IS NOT OPTIONAL FOR THE PROBE EITHER.  The probe
+    link now carries `rm -f seam_probe.map` in front of it and two gates behind
+    it, and retarget() renames only the compiler's own -o and -Wl,-Map.  Running
+    the whole reported command would delete the REAL map and then run the real
+    gates against the real ELF with the map gone -- a fixture destroying the
+    thing the next fixture reads.  (The command also STARTS with `: &&`, which
+    is why this picks the segment out rather than truncating at the first &&.)
     """
     for part in cmd.split(" && "):
-        if "arm-none-eabi-g++" in part and "-o shell.elf" in part:
+        if "arm-none-eabi-g++" in part and f"-o {output}" in part:
             return part.strip()
-    raise SystemExit("run_fixture_tests: no compiler segment in the shell link")
+    raise SystemExit(f"run_fixture_tests: no compiler segment for {output}")
 
 
 def expect(name, got_rc, got_ids, want_rc, want_ids, text):
@@ -190,7 +275,8 @@ def main():
     nm = args.nm or os.path.join(tc, "arm-none-eabi-nm")
     objdump = args.objdump or os.path.join(tc, "arm-none-eabi-objdump")
 
-    base = ninja_link_command(build, "seam_probe.elf")
+    base = link_only(ninja_link_command(build, "seam_probe.elf"),
+                     "seam_probe.elf")
     outdir = os.path.join(build, "seam-fixtures")
     os.makedirs(outdir, exist_ok=True)
 
@@ -345,10 +431,192 @@ def main():
     ok &= expect("P2 a deleted FP precondition call is caught",
                  rc, ids, 1, {"REQUIRED"}, text)
 
+    # --- check_nor_seam.py: who may reach the NOR write path (issue #88) -----
+    #
+    # The gate's claim is that ONE translation unit reaches the vendor's erase
+    # and program entry points.  Every case below is a different way another one
+    # could, linked for real into the probe -- and each asserts the DIAGNOSTIC,
+    # because several of these trip more than one rule and a fixture that
+    # settles for "refused" stays green when the rule it was written for dies.
+    #
+    # [!] THE PROBE, NOT THE FIRMWARE.  Until issue #88 Part C lands the
+    # firmware has no caller for the write path at all, so `shell` collects the
+    # whole seam away and there is nothing for these to be true or false about.
+    # That is exactly why board.cmake forces the wrapper references in the probe.
+    print("run_fixture_tests (check_nor_seam.py):")
+
+    nor_base = nor_gate_command(build, "seam_probe.elf")
+    manifest = nor_base[nor_base.index("--manifest") + 1]
+    with open(manifest) as f:
+        manifest_lines = [l.strip() for l in f if l.strip()]
+
+    # Q0 first, for the reason F3 and P0 come first: without it the cases below
+    # could all be failing for some unrelated reason.
+    rc, ids, text = run_nor_gate(nor_base, build)
+    ok &= expect("Q0 pristine probe passes", rc, ids, 0, set(), text)
+
+    fixture_src = os.path.join(board, "cmake", "fixtures", "nor_seam_caller.c")
+    seam_cc = ninja_compile_command(build, "port/sdk_seam/nor_seam.c.obj")
+    seam_obj = re.search(r"-o (\S*nor_seam\.c\.obj)", seam_cc).group(1)
+
+    def build_case(case, extra_cflags=""):
+        """Compile one FX_ case with the FIRMWARE's own compile line, and link
+        it into the probe with the wrapper references still forced."""
+        obj = f"seam-fixtures/q_{case.lower()}.obj"
+        cc = seam_cc.replace(f"-o {seam_obj}", f"-o {obj}")
+        cc = re.sub(r"-c \S*nor_seam\.c",
+                    f"{extra_cflags} -D{case} -c {fixture_src}", cc)
+        cc = re.sub(r"-MD -MT \S+ -MF \S+", "", cc)
+        compile_one(build, cc, case)
+        elf = f"seam-fixtures/q_{case.lower()}.elf"
+        mapfile = f"seam-fixtures/q_{case.lower()}.map"
+        link_cmd = base.replace(
+            "arm-none-eabi-g++ ",
+            f"arm-none-eabi-g++ {obj} -Wl,-u,nor_fixture ", 1)
+        link_cmd = retarget(link_cmd, "seam_probe.elf", elf)
+        link(build, link_cmd, case)
+        # The manifest is what tells the gate which inputs it may audit, so a
+        # new translation unit belongs in it -- board.cmake would have put it
+        # there.  Q4 is the case that leaves it out on purpose.
+        man = os.path.join(build, "seam-fixtures", f"q_{case.lower()}.txt")
+        with open(man, "w") as f:
+            f.write("\n".join(manifest_lines
+                               + [os.path.join(build, obj)]) + "\n")
+        return elf, mapfile, man, obj
+
+    # Q1: another translation unit calls the wrapped entry point.  --wrap still
+    # sends it to the seam, so it is still bounded -- but by a caller nobody
+    # enumerated, and the enumeration is the whole claim.
+    elf, mp, man, _obj = build_case("FX_INNER_CALL")
+    rc, ids, text = run_nor_gate(
+        nor_gate_variant(nor_base, elf=elf, mapfile=mp, manifest=man), build)
+    ok &= expect("Q1 an unlisted caller of the inner name is caught",
+                 rc, ids, 1, {"N5"}, text)
+
+    # Q2: straight past the seam -- __real_ IS the vendor implementation.
+    elf, mp, man, _obj = build_case("FX_REAL_CALL")
+    rc, ids, text = run_nor_gate(
+        nor_gate_variant(nor_base, elf=elf, mapfile=mp, manifest=man), build)
+    ok &= expect("Q2 a __real_ reference outside the seam is caught",
+                 rc, ids, 1, {"N6"}, text)
+
+    # Q3: the case that makes this gate work on input sections rather than on
+    # objects.  spi_eeprom_comm.o is already in the link; this file only keeps
+    # its outer forwarder alive, and reaches the inner entry point through it.
+    #
+    # [!] ALL THREE IDS ARE REQUIRED.  Reviving the forwarder trips the absence
+    # rule (N11) on its own, so asserting only "refused" would leave the
+    # caller-edge rule (N16) free to be deleted with this fixture still green.
+    # N5 is the third: the revived forwarder is itself a live section calling
+    # the inner name, from an object that is not an authorised caller -- which
+    # is the same rule Q1 tests, arriving here through vendor code.  That it
+    # fires is what makes "classify by input section" more than a phrase: an
+    # object-level rule would have had to permit spi_eeprom_comm.o outright.
+    elf, mp, man, _obj = build_case("FX_OUTER_CALL")
+    rc, ids, text = run_nor_gate(
+        nor_gate_variant(nor_base, elf=elf, mapfile=mp, manifest=man), build)
+    ok &= expect("Q3 reaching the inner name through the vendor's forwarder "
+                 "is caught, by all three rules",
+                 rc, ids, 1, {"N5", "N11", "N16"}, text)
+
+    # Q4: the same file as Q1, left OUT of the manifest.  An input the gate
+    # never opens is an input whose calls it never sees, so the manifest check
+    # is what stops the audit being narrowed by adding a file.
+    elf, mp, _man, _obj = build_case("FX_INNER_CALL")
+    rc, ids, text = run_nor_gate(
+        nor_gate_variant(nor_base, elf=elf, mapfile=mp), build)
+    ok &= expect("Q4 an input missing from the manifest is caught",
+                 rc, ids, 1, {"N2"}, text)
+
+    # Q5: an AUTHORISED caller that takes the address instead of calling.  Run
+    # with the fixture allowed, so the address rule is the only one left to
+    # fire -- an edge audit that accepted this would be following a call graph
+    # the program does not have.
+    elf, mp, man, obj = build_case("FX_ADDRESS")
+    rc, ids, text = run_nor_gate(
+        nor_gate_variant(nor_base, elf=elf, mapfile=mp, manifest=man,
+                         callers=[os.path.basename(obj)]), build)
+    ok &= expect("Q5 taking the address instead of calling is caught",
+                 rc, ids, 1, {"N9"}, text)
+
+    # Q6: chip erase reached from an authorised caller.  It is refused because
+    # it has no address to be bounded against, not because of who called it --
+    # so the authorised caller is what isolates that rule.
+    elf, mp, man, obj = build_case("FX_CHIP_ERASE")
+    rc, ids, text = run_nor_gate(
+        nor_gate_variant(nor_base, elf=elf, mapfile=mp, manifest=man,
+                         callers=[os.path.basename(obj)]), build)
+    ok &= expect("Q6 a live reference to chip erase is caught",
+                 rc, ids, 1, {"N8"}, text)
+
+    # Q7: the probe linked WITHOUT the forced wrapper references.  Every rule
+    # above then passes over an empty set, which is the shape of gate this
+    # repository has been bitten by twice (issues #66, #42).
+    q7 = base
+    for _sym in ("erase_sector", "write", "erase_all", "word_write"):
+        q7 = q7.replace(f"-Wl,-u,__wrap_hx_lib_qspi_eeprom_{_sym} ", "")
+    if q7 == base:
+        raise SystemExit("run_fixture_tests: the probe link forces no NOR "
+                         "wrapper references; the fixture cannot remove them")
+    q7 = retarget(q7, "seam_probe.elf", "seam-fixtures/q7_collected.elf")
+    link(build, q7, "Q7")
+    rc, ids, text = run_nor_gate(
+        nor_gate_variant(nor_base, elf="seam-fixtures/q7_collected.elf",
+                         mapfile="seam-fixtures/q7_collected.map"), build)
+    ok &= expect("Q7 a link with the whole seam collected away is caught",
+                 rc, ids, 1, {"N14"}, text)
+
+    # Q8: a map from a DIFFERENT link.  Everything this gate decides about
+    # live-vs-discarded comes out of the map, so a stale one answers about
+    # another link -- board.cmake deletes the map PRE_LINK, and this is what
+    # says the cross-check behind that belt is fastened too.
+    rc, ids, text = run_nor_gate(
+        nor_gate_variant(nor_base, mapfile="shell.map"), build)
+    ok &= expect("Q8 a map from another link is caught",
+                 rc, ids, 1, {"N1"}, text)
+
+    # Q9: a --wrap flag dropped.  There is no gate diagnostic for this and there
+    # does not need to be: with the reference forced, __real_ resolves to
+    # nothing and the LINK fails.  Asserted as a link failure naming the symbol,
+    # because "the link broke" on its own could be any mistake in the fixture.
+    q9 = base.replace("-Wl,--wrap=hx_lib_qspi_eeprom_write ", "")
+    if q9 == base:
+        raise SystemExit("run_fixture_tests: --wrap=hx_lib_qspi_eeprom_write is "
+                         "not in the probe link; the fixture cannot break it")
+    q9 = retarget(q9, "seam_probe.elf", "seam-fixtures/q9_unwrapped.elf")
+    r = subprocess.run(q9, shell=True, cwd=build, capture_output=True, text=True)
+    q9_ok = (r.returncode != 0 and
+             "__real_hx_lib_qspi_eeprom_write" in (r.stdout + r.stderr))
+    print(f"  {'ok  ' if q9_ok else 'FAIL'} Q9 a dropped --wrap is a link error")
+    if not q9_ok:
+        print("       wanted a failed link naming "
+              "__real_hx_lib_qspi_eeprom_write; got rc="
+              f"{r.returncode}\n{r.stderr[-1500:]}", file=sys.stderr)
+    ok &= q9_ok
+
+    # Q10: the same call, in a translation unit built with LTO.  Two things go
+    # wrong at once and both diagnostics are wanted:
+    #
+    #   N4  there are no relocations against the vendor names in an LTO object.
+    #       The calls are still in the IR and do not exist until the plugin
+    #       recompiles at link time, so every rule above would pass over a file
+    #       doing exactly what Q1 does.
+    #   N2  and the linker's real inputs stop being the ones CMake declared --
+    #       the plugin hands ld /tmp/cc*.ltrans0.ltrans.o, which no manifest
+    #       could ever name.
+    #
+    # Refusing to audit what it cannot read is the only honest answer, and it is
+    # why this board bans LTO rather than working around it.
+    elf, mp, man, _obj = build_case("FX_INNER_CALL", extra_cflags="-flto")
+    rc, ids, text = run_nor_gate(
+        nor_gate_variant(nor_base, elf=elf, mapfile=mp, manifest=man), build)
+    ok &= expect("Q10 an LTO input is refused rather than audited",
+                 rc, ids, 1, {"N2", "N4"}, text)
+
     if not ok:
         print("run_fixture_tests: FAIL", file=sys.stderr)
         return 1
-    print("run_fixture_tests: OK (6 fixtures)")
+    print("run_fixture_tests: OK (17 fixtures)")
     return 0
 
 

@@ -116,9 +116,11 @@ the settings are also lost when the USB device re-enumerates.
   section present in the generated `.img`, command registry inside `.rodata`),
   placement/budget (ITCM/DTCM headroom, vector table, static stacks,
   benchmark-buffer residency, no forbidden SDK symbols surviving, and -- since
-  issue #42 -- one REQUIRED symbol), and the timer seam.  There were four: the
-  MVE-predication scan is gone, because its premise was wrong and it could not
-  detect a single instruction it named (issues #42 and #66).
+  issue #42 -- one REQUIRED symbol), the timer seam, and -- since issue #88 --
+  the NOR write seam (only `port/sdk_seam/nor_seam.c` may reach the vendor's
+  erase and program entry points; it reads the linker's map, not the finished
+  ELF).  The MVE-predication scan is gone, because its premise was wrong and it
+  could not detect a single instruction it named (issues #42 and #66).
 
 ## Time sources
 
@@ -2277,6 +2279,146 @@ it and the interrupt is one line either way -- but now reachable from a
 diagnostic, and worth knowing on a board about to need its 31/32 high-water mark
 or one whose endurance is in question (issue #89).
 
+### The write seam: one door to the vendor's erase and program
+
+Issue #88 Part D. `lib_spi_eeprom.a` can erase and program this flash, and the
+flash holds the bootloader, the firmware image and the bootloader's slot header.
+Issue #49 needs to write part of it, so those entry points cannot simply stay
+barred the way `check_placement_budget.py` bars them -- they have to be
+reachable through exactly one place that bounds them.
+
+`board.cmake` redirects the four inner entry points with `-Wl,--wrap` to
+`port/sdk_seam/nor_seam.c`:
+
+| wrapped | what the seam does |
+|---|---|
+| `hx_lib_qspi_eeprom_erase_sector` | bounds it, then calls `__real_` |
+| `hx_lib_qspi_eeprom_write` | bounds it, then calls `__real_` |
+| `hx_lib_qspi_eeprom_erase_all` | refuses; no `__real_` reference exists |
+| `hx_lib_qspi_eeprom_word_write` | refuses; no `__real_` reference exists |
+
+The bounds: the address range must lie wholly inside `blob` (**not** `blob-tail`
+-- the two runs are separated by flash `nn open cls|det` reads until issue #49
+Step 4 merges them), an erase must be on a 4 KB boundary and ask for erase unit
+0, `word_switch` must be 0, and the port must be in `NOR_ST_WRITING`. The
+comparisons are subtraction-based, so `addr + len` is never formed before the
+address is known to be inside the interval.
+
+**The inner names, not the outer ones.** The outer `hx_lib_spi_eeprom_*` forms
+in `spi_eeprom_comm.o` are thin forwarders that pick a bus by id and tail into
+these; wrapping the outer pair would leave the inner ones reachable directly.
+Wrapping the inner pair covers both, because the forwarder's own call is an
+undefined reference that `--wrap` rewrites.
+
+**Two of the four never mention `__real_`, and that is load-bearing.** A chip
+erase names no address, so there is no interval to check it against; the
+word-at-a-time programmer would be a second write path with its own rules.
+Because their wrappers hold no `__real_` reference, `--gc-sections` drops the
+vendor implementations out of the link entirely -- which is what lets
+`check_placement_budget.py` go on barring those two by absence for good.
+
+#### What the gate over it can say, and what it cannot
+
+`cmake/check_nor_seam.py` (gate 5). Unlike the vendor timer seam, whose claim is
+"no vendor timer code is in the image at all" and which a symbol check settles,
+here the vendor code IS in the image and the claim is about **who may reach
+it**.
+
+[!] **And that claim is narrow.** It says nothing about whether this firmware
+could write the flash some other way, because it demonstrably could: the
+read/XIP path already links `hx_drv_spi_mst_get_dev`, `hx_drv_dmac_get_dev` and
+the vendor's `DMA_send` / `set_DMA_config` / `waitWIP` / `setWriteEnable`
+helpers, none of which can be removed without losing the read path, and those
+are enough to assemble WREN plus an arbitrary opcode without naming one symbol
+the gate looks at. Direct MMIO is beyond all of it. Read "the gate passed" as
+*this door is bolted*, never as *there is no other door* (issue #87).
+
+[!] **"Bounded" is spatial only.** `hx_lib_spi_eeprom_waitWIP` is a polling loop
+with no timeout and both permitted entry points call it, so a part that never
+drops its WIP bit hangs the calling thread. That is inside a prebuilt archive.
+
+**Why it reads the linker's map and not the ELF.** The finished ELF cannot
+answer the question. After `--gc-sections` there is no record of which input
+section a surviving instruction came from, nor of which references were dropped
+-- and the vendor's outer forwarders each hold a relocation to the inner name,
+in an object that is *already* a link input because `open` / `read_ID` /
+`enable_XIP` live in it. So an object-level rule ("only the writer names the
+inner symbols") fails permanently on a link that is correct, and permitting that
+object reopens the hole, because another translation unit only has to keep the
+outer forwarder alive to reach the inner name through it. The unit that
+separates those two cases is the **input section**, and whether one survived is
+a fact only the linker holds. `--print-gc-sections` is a diagnostic stream; the
+map is the artifact.
+
+Consequences worth knowing:
+
+- **the map is deleted before every link** (`PRE_LINK`) and named a `BYPRODUCTS`
+  so ninja rebuilds it. A map from an earlier link would answer about a
+  different link, silently and in the permissive direction. The gate also
+  cross-checks live `.text.<symbol>` addresses against the ELF, so the two
+  halves of that do not depend on each other.
+- **every linker input is accounted.** `board.cmake` generates the manifest from
+  the same `$<TARGET_OBJECTS:>` lists the link line is built from; the gate
+  compares it against the map's own `LOAD` list and refuses anything in neither
+  the manifest nor the toolchain. An input it never opened is an input whose
+  calls it never saw.
+- **LTO is refused, not worked around.** In an LTO object the calls are still in
+  the IR and there are no relocations to audit -- and the plugin hands `ld`
+  `/tmp/cc*.ltrans.o`, which no manifest could name. This board does not use LTO
+  (see the note at the top of this README); the gate is why that has to stay
+  true here specifically.
+- **an address is not a call.** Relocation types other than a direct call or
+  jump are refused against any of these names: a function pointer defeats an
+  edge audit, and a pointer to `__real_` defeats `--wrap` itself.
+
+`nor info` prints the interval the seam was compiled to enforce, read out of the
+`nor_seam_limits` record in `.rodata`. The gate reads the same twelve bytes and
+compares them with the layout `board.cmake` declared -- the literals cannot be
+checked in the instructions instead, because at `-Os` the compiler rewrites
+`lo <= a && a < hi` into `a - lo <u hi - lo` and the interval's end never
+appears.
+
+#### It is checked on the probe, because the firmware has no writer yet
+
+Part D lands the seam and the gate; Part C lands the writer. Until then nothing
+in `shell` calls the write path, the whole seam is garbage-collected out of the
+firmware, and every rule above would be true of an empty set -- the shape of
+gate this board has already been bitten by twice (issues #66, #42). So
+`seam_probe` forces references to the four wrappers, and the gate runs there
+with `--require-live-wrappers`: all four wrappers present, and the two permitted
+vendor entry points present with them, or it fails.
+
+`cmake/fixtures/run_fixture_tests.py` carries a pristine control and ten
+negative tests for it, each a real link of the real objects with one thing
+broken, each asserting the **diagnostic** and not merely a non-zero exit. The one that says the most is
+`Q3`: a translation unit that reaches the inner name by reviving the vendor's
+outer forwarder, which must trip all three of the caller-edge rule, the outer
+caller-edge rule and the outer-absence rule -- because reviving the forwarder
+trips the absence rule on its own, and a fixture that settled for "refused"
+would stay green with the edge rules deleted.
+
+`test/test_nor_seam.c` is the other half: the link gate says who may reach the
+wrappers, and the host test says what happens when they are reached. Every
+refusal there checks that the stubbed `__real_` was **not called** -- the vendor
+returns nothing usable (below), so what a refusal has to guarantee is that the
+part was never addressed at all, and a return-value test would pass on a seam
+that refused and called through anyway.
+
+#### [!] The vendor's return values do not report success
+
+Disassembly of the pinned archive:
+
+- `hx_lib_qspi_eeprom_erase_sector` saves `clear_write_protect`'s result in `r8`
+  and returns it, discarding the results of `setWriteEnable`, `waitWIP`,
+  `set_DMA_config`, `DMA_send` and the final `waitWIP`.
+- `hx_lib_qspi_eeprom_write` puts `movs r0, #0` after the last `waitWIP` and
+  returns unconditionally, discarding every `DMA_send` in its loop.
+
+So **the only truth about whether an operation happened is reading the array
+back**, and that is a requirement on the writer (Part C), not something the seam
+can supply. A negative from the *seam* is different and does mean something
+definite: `NOR_SEAM_REFUSED` says nothing was sent to the part.
+
 ### What is actually on this board's flash
 
 Measured with `nor scan`, which reads **every byte**:
@@ -2661,9 +2803,23 @@ the flash that holds the bootloader.  All of them are on
 
 `setWriteEnable` IS present and is deliberately allowed.  Putting the part into
 QUAD mode writes the QE bit in its status register and that write needs the WEL
-latch first, so it is part of configuring the read path.  On its own a latch
-cannot modify anything -- it has to be followed by a program or erase opcode, and
-every entry point that issues one is barred and gone.
+latch first, so it is part of configuring the read path.
+
+[!] **An earlier version of this section justified that by saying a latch cannot
+modify anything on its own, because every entry point that issues a program or
+erase opcode is barred and gone.  That was false** (issue #87).  The read path
+links `hx_drv_spi_mst_get_dev`, `hx_drv_dmac_get_dev` and the vendor's
+`DMA_send` / `DMA_send_recv` / `set_DMA_config` / `waitWIP` helpers, and none of
+them can be barred without losing the read path -- so a first-party translation
+unit can put WREN and then any opcode on the wire without naming one symbol on
+that list.  The forbidden-symbol rule is **defence in depth and not exhaustive**;
+saying otherwise is worse than saying nothing, because it invites the next
+reader to treat "the list passes" as "there is no write capability".
+
+Since issue #88 Part D the entry points are additionally wrapped, and
+`check_nor_seam.py` asks the question the list cannot: not *is it in the image*
+but *who may reach it*.  That gate's own limits are the same ones, stated where
+it lives -- see **The write seam** above.
 
 ## Face detection (`nn detect`, BlazeFace-front 128)
 

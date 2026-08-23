@@ -87,6 +87,21 @@ FORBIDDEN = [
     # list passes" as "there is no write capability".  A gate over the write
     # path that could establish that is issue #88, and issue #88's own finding
     # is that no symbol-level check on this image can.
+    #
+    # [!] AND TWO OF THESE FOUR ARE ON BORROWED TIME (issue #88).  The seam in
+    # port/sdk_seam/nor_seam.c wraps all four, but only erase_sector and write
+    # call __real_ -- so as long as nothing in the firmware calls THEM, the
+    # linker drops the vendor implementations and this list keeps passing
+    # unchanged.  That is true today because Part C's writer does not exist yet;
+    # when it lands, erase_sector, write and hx_lib_spi_eeprom_clear_write_
+    # protect (which erase_sector calls across objects) become present, and
+    # these two names have to come off this list.  erase_all and word_write do
+    # NOT: their wrappers refuse without naming __real_, which is what keeps
+    # them collectable and keeps this rule covering them for good.
+    #
+    # What replaces the two is cmake/check_nor_seam.py, which asks the question
+    # this list cannot once the code is present: not "is it in the image" but
+    # "who may reach it".
     "hx_lib_qspi_eeprom_erase_all",
     "hx_lib_qspi_eeprom_erase_sector",
     "hx_lib_qspi_eeprom_write",

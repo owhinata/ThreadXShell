@@ -40,6 +40,7 @@
 #include <string.h>
 
 #include "nor_flash.h"
+#include "nor_seam.h"
 
 /* The partition edges, from board.cmake -- the same variables
  * check_flash_partitions.py consumes, so the labels here and the layout the
@@ -149,6 +150,17 @@ static int cmd_nor_info(struct cli_instance *sh, int argc, char **argv)
 	cli_print(sh, "window   : 0x%08lx, %lu B\r\n",
 	          (unsigned long)NOR_XIP_BASE, (unsigned long)NOR_SIZE);
 	cli_print(sh, "leases   : %lu\r\n", (unsigned long)r.readers);
+	/* What the write seam was COMPILED to allow (issue #88).  Read out of the
+	 * seam's own .rodata record rather than restated here, so the interval this
+	 * line shows is the one the wrappers enforce -- and so that
+	 * cmake/check_nor_seam.py, which reads the same twelve bytes out of the
+	 * linked image, is checking a fact somebody can also see on the device.
+	 * There is no `nor erase` or `nor write` yet; the bounds exist before the
+	 * commands do, which is the order issue #88 is being built in. */
+	cli_print(sh, "writable : 0x%08lx..0x%08lx, %lu B unit\r\n",
+	          (unsigned long)nor_seam_limits.lo,
+	          (unsigned long)nor_seam_limits.hi,
+	          (unsigned long)nor_seam_limits.unit);
 	/* [!] The probe reads the slot-header block, not `blob` (issue #90): a
 	 * probe inside blob would be proving the window came back by reading bytes
 	 * issue #88's writer is allowed to erase.

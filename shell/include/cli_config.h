@@ -111,8 +111,11 @@
  * (owhinata/stm32f746g-disco#18): printf/_write resolves the owning shell instance of the
  * running thread from this table.  Per-instance shell threads register one slot each;
  * each background-job worker (owhinata/stm32f746g-disco#25) also registers while it runs ->
- * size for both so a launch never fails to register (a full table makes cli_register_thread()
- * return -1, which the caller must treat as an error rather than misroute). */
+ * size for both so a launch never fails to register.  A full table is only ONE of the
+ * reasons cli_register_thread() can refuse -- since issue #81 it also refuses a thread or
+ * an instance that is already registered, which is what stops a duplicate from leaving an
+ * orphan entry behind.  Every refusal is non-zero and terminal: the caller must treat it as
+ * an error rather than run unregistered and misroute printf.  See enum cli_reg_status. */
 #ifndef CLI_THREAD_MAP_MAX
 #define CLI_THREAD_MAP_MAX (CLI_MAX_INSTANCES + CLI_MAX_BG_JOBS)
 #endif

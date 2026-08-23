@@ -11,7 +11,7 @@
  * shell/core/ stays ThreadX-free so it can be unit-tested on the host: the line
  * editing (cli_edit.c), dispatch (cli_session.c), output staging (cli_printf.c),
  * parsing (cli_parse.c), completion (cli_complete.c), history (cli_history.c)
- * and the console-counter scan (cli_console.c).  Per instance it owns one
+ * and the registry decisions (cli_registry.c).  Per instance it owns one
  * tx_thread, one tx_event_flags group (RX / TX / KILL) and one tx_mutex.  The
  * thread blocks on the event flags, drains the transport on an RX signal and
  * feeds each byte to the state machine.  No mutable global state, so several
@@ -21,7 +21,7 @@
  */
 #include <stddef.h>
 
-#include "cli_console.h"
+#include "cli_registry.h"
 #include "cli_instance.h"
 #include "cli_internal.h"
 
@@ -54,46 +54,31 @@ static inline unsigned int cli_in_isr(void)
 	return ipsr;
 }
 
+/*
+ * Both entry points are lock wrappers: the DECISION -- which slot may be taken,
+ * why a registration is refused, which entries a removal clears -- lives in
+ * cli_registry.c, where it is host-testable (issue #81).  Neither the scan nor
+ * the stores call a tx_* service, so the critical section stays a bounded walk
+ * over CLI_THREAD_MAP_MAX entries, as it was before.
+ */
 int cli_register_thread(TX_THREAD *t, struct cli_instance *sh)
 {
 	TX_INTERRUPT_SAVE_AREA
-	int i, slot = -1;
-
-	if (t == NULL || sh == NULL)
-		return -1;
+	enum cli_reg_status st;
 
 	TX_DISABLE
-	for (i = 0; i < CLI_THREAD_MAP_MAX; i++) {
-		if (cli_thread_reg[i].sh == NULL) {
-			slot = i;
-			break;
-		}
-	}
-	if (slot >= 0) {
-		cli_thread_reg[slot].thread = t;
-		cli_thread_reg[slot].sh     = sh;   /* publish last */
-	}
+	st = cli_reg_add(cli_thread_reg, CLI_THREAD_MAP_MAX, t, sh);
 	TX_RESTORE
 
-	return slot >= 0 ? 0 : -1;   /* -1: table full -- caller must not continue */
+	return (int)st;   /* 0 or a negative reason; see enum cli_reg_status */
 }
 
 void cli_unregister_thread(TX_THREAD *t)
 {
 	TX_INTERRUPT_SAVE_AREA
-	int i;
-
-	if (t == NULL)
-		return;
 
 	TX_DISABLE
-	for (i = 0; i < CLI_THREAD_MAP_MAX; i++) {
-		if (cli_thread_reg[i].thread == t) {
-			cli_thread_reg[i].sh     = NULL;   /* retract first */
-			cli_thread_reg[i].thread = NULL;
-			break;
-		}
-	}
+	(void)cli_reg_remove(cli_thread_reg, CLI_THREAD_MAP_MAX, t);
 	TX_RESTORE
 }
 
@@ -303,8 +288,9 @@ int cli_start(struct cli_instance *sh)
 	/* Register the thread->instance mapping BEFORE creating the auto-started
 	 * thread (owhinata/stm32f746g-disco#18): &sh->thread is a stable member address
 	 * valid before tx_thread_create(), so a thread that begins running immediately
-	 * always finds itself registered (no register-after-start race).  A full registry
-	 * is a start failure -- printf must never silently misroute. */
+	 * always finds itself registered (no register-after-start race).  ANY refusal
+	 * is a start failure -- a full registry is only one of them since issue #81 --
+	 * because printf must never silently misroute. */
 	if (cli_register_thread(&sh->thread, sh) != 0)
 		return -1;
 

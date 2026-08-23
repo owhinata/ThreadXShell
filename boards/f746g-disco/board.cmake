@@ -290,7 +290,7 @@ list(FILTER NX_CORE EXCLUDE REGEX "nx_ram_network_driver")
 add_library(shell_obj OBJECT
     "${CMAKE_SOURCE_DIR}/shell/core/cli_core.c"
     "${CMAKE_SOURCE_DIR}/shell/core/cli_complete.c"
-    "${CMAKE_SOURCE_DIR}/shell/core/cli_console.c"
+    "${CMAKE_SOURCE_DIR}/shell/core/cli_registry.c"
     "${CMAKE_SOURCE_DIR}/shell/core/cli_edit.c"
     "${CMAKE_SOURCE_DIR}/shell/core/cli_history.c"
     "${CMAKE_SOURCE_DIR}/shell/core/cli_job.c"

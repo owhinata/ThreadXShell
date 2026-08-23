@@ -270,10 +270,39 @@ void cli_transport_notify_conn(struct cli_instance *sh);
  * its own instance thread before creating it; future background-job workers
  * (owhinata/stm32f746g-disco#25) register their worker thread against the owning instance the same way
  * (register BEFORE tx_thread_create so an auto-started thread is never seen
- * unregistered).  cli_register_thread returns 0 on success, -1 when the table
- * is full (caller must treat that as a failure, never silently continue --
- * see CLI_THREAD_MAP_MAX).  cli_current_instance returns NULL from ISR context,
- * before the scheduler starts, or for any unregistered thread. */
+ * unregistered).  cli_register_thread returns 0 on success and a NEGATIVE
+ * reason on failure -- a full table is only one of them since issue #81; see
+ * enum cli_reg_status below for the full set and the order they are chosen in.
+ * Any failure is terminal: the caller must never silently continue, or printf
+ * from that thread misroutes.  cli_current_instance returns NULL from ISR
+ * context, before the scheduler starts, or for any unregistered thread. */
+
+/**
+ * Outcome of cli_register_thread() (issue #81).  Success is 0 and every failure
+ * is negative, so the existing `!= 0` checks at the call sites stay correct.
+ *
+ * [!] The table is scanned WHOLE before the outcome is chosen, and the choice
+ * follows this fixed order:
+ *
+ *     ERR_ARG -> ERR_DUP_THREAD -> ERR_DUP_INSTANCE -> ERR_FULL -> OK
+ *
+ * because the conditions overlap: registering a pair that is already present
+ * matches both duplicate tests, and a damaged table can hold a thread duplicate
+ * and an instance duplicate in different entries.  Deciding from the first
+ * match would make the reason depend on entry order, and would let "full AND
+ * duplicate" be reported as merely full.
+ *
+ * A failure is TERMINAL for the caller -- registering is what makes printf
+ * resolve the calling terminal, so continuing without it misroutes output.
+ */
+enum cli_reg_status {
+	CLI_REG_OK               =  0,  /**< registered */
+	CLI_REG_ERR_ARG          = -1,  /**< t or sh was NULL */
+	CLI_REG_ERR_DUP_THREAD   = -2,  /**< that thread is already registered */
+	CLI_REG_ERR_DUP_INSTANCE = -3,  /**< that instance is already registered */
+	CLI_REG_ERR_FULL         = -4,  /**< no free slot (see CLI_THREAD_MAP_MAX) */
+};
+
 int                  cli_register_thread(TX_THREAD *t, struct cli_instance *sh);
 void                 cli_unregister_thread(TX_THREAD *t);
 struct cli_instance *cli_current_instance(void);
@@ -317,7 +346,7 @@ struct cli_console_stat {
  * field nor the backend type -- telling it which transports humans use would
  * break the layering the transport abstraction exists to keep.
  *
- * Rows are not de-duplicated; see cli_console_collect() (shell/core/cli_console.h).
+ * Rows are not de-duplicated; see cli_console_collect() (shell/core/cli_registry.h).
  *
  * The whole scan-and-copy runs in one interrupt-disabled critical section, so
  * the caller prints AFTERWARDS -- cli_print() waits on a mutex and must not be

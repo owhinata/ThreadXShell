@@ -169,14 +169,26 @@ gcc $CFLAGS -I "$backend" \
     $LDFLAGS -o "$out/test_uart_ring"
 "$out/test_uart_ring"
 
-# Console-counter snapshot (issue #28): which registry entries count as a running
-# interactive console, and how a too-small caller array is reported.  cli_console.c
-# calls no tx_* service, so it builds against the tx_api.h shim exactly like
-# cli_session.c; the TX_DISABLE wrapper around it (cli_core.c) and the `console`
-# command itself are firmware-only, as cmd_thread.c is.
+# Registry slot rules (issue #81): which registrations are refused and why, with
+# the refusal reason decided from the whole table in a fixed order, and the
+# removal sweep whose postcondition is "no entry has this thread".  Both are
+# unreachable from healthy firmware -- a test is the only thing that can build
+# the damaged table -- which is exactly why they live in cli_registry.c rather
+# than cli_core.c (that TU needs ThreadX and an MRS on IPSR, so it cannot build
+# on the host at all).
 gcc $CFLAGS \
     -I "$here/shim" -I "$inc" -I "$core" \
-    "$here/test_console.c" "$core/cli_console.c" \
+    "$here/test_registry.c" "$core/cli_registry.c" \
+    $LDFLAGS -o "$out/test_registry"
+"$out/test_registry"
+
+# Console-counter snapshot (issue #28): which registry entries count as a running
+# interactive console, and how a too-small caller array is reported.  Same TU as
+# above; the TX_DISABLE wrappers (cli_core.c) and the `console` command itself
+# are firmware-only, as cmd_thread.c is.
+gcc $CFLAGS \
+    -I "$here/shim" -I "$inc" -I "$core" \
+    "$here/test_console.c" "$core/cli_registry.c" \
     $LDFLAGS -o "$out/test_console"
 "$out/test_console"
 

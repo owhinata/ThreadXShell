@@ -37,6 +37,7 @@
 #include <string.h>
 
 #include "cli_instance.h"
+#include "cli_registry.h"   /* cli_reg_strerror (issue #81) */
 #include "cli_internal.h"
 #include "tx_api.h"   /* tx_thread_*, tx_event_flags_*, TX_COMPLETED/TX_TERMINATED, TX_DISABLE */
 
@@ -264,11 +265,19 @@ int cli_job_launch(struct cli_instance *fg, char *seg)
 	/* Register the worker thread BEFORE creating it (auto-start), so printf from a
 	 * thread that begins running at once always resolves its instance
 	 * (owhinata/stm32f746g-disco#18). */
-	if (cli_register_thread(&j->inst.thread, &j->inst) != 0) {
-		j->state = CLI_JOB_FREE;
-		j->id    = 0;
-		cli_error(fg, "background job table full\r\n");
-		return -1;
+	{
+		int rc = cli_register_thread(&j->inst.thread, &j->inst);
+
+		if (rc != 0) {
+			j->state = CLI_JOB_FREE;
+			j->id    = 0;
+			/* Say which rule refused rather than asserting a cause: since
+			 * issue #81 a full table is only one of the reasons, and naming
+			 * the wrong one sends the reader hunting the wrong thing. */
+			cli_error(fg, "cannot start background job: %s\r\n",
+			          cli_reg_strerror((enum cli_reg_status)rc));
+			return -1;
+		}
 	}
 
 	if (tx_thread_create(&j->inst.thread, "cli-bg", cli_job_entry,

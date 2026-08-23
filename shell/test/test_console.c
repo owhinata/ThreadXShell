@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host unit test for the console-counter snapshot scan (issue #28,
- * shell/core/cli_console.c).  cli_console_snapshot() itself is a TX_DISABLE
+ * shell/core/cli_registry.c).  cli_console_snapshot() itself is a TX_DISABLE
  * wrapper in cli_core.c (firmware only) and the `console` command is not linked
  * into this harness, so what is testable -- and what actually decides what the
  * command shows -- is cli_console_collect():
@@ -24,7 +24,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "cli_console.h"
+#include "cli_registry.h"
 
 #define SLOTS 8
 

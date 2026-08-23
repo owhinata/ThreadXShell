@@ -2,7 +2,8 @@
 
 ThreadX shell port for the Seeed Grove Vision AI V2: Himax HX6538 (WiseEye2),
 dual Cortex-M55 (the app runs on the big CM55M core at 400 MHz) + Ethos-U55
-NPU, external W25Q128JW 16 MB QSPI NOR flash, console and flashing on UART0
+NPU, an external 16 MB QSPI NOR flash (the schematic specifies a W25Q128JWSIQ;
+the part fitted to this board is not one -- see below), console and flashing on UART0
 through the onboard CH343P USB-UART bridge (the chip has NO USB device
 controller).
 
@@ -2197,11 +2198,50 @@ first version did that and reported two holes inside the contiguous detection
 model, because two of its sectors happen to begin with `0xFFFFFFFF` -- 8,192 B
 under-reported, in the direction that makes a region look freer than it is.
 
-[!] **The JEDEC id is `5e 50 18`, and Winbond is `0xEF`.** This board's NOR is
-not the W25Q128JW this README names elsewhere; the capacity byte agrees with the
-bootloader's `flash size[5]`, so the read is sound and the part is different.
-The ~100k endurance figure and the erase-unit sizes quoted here come from that
-datasheet -- see issue #89.
+### [!] The fitted NOR is not the one the schematic specifies
+
+`nor info` reads `jedec : 5e 50 18`. The schematic
+(`Grove_Vision_AI_Module_V2_Circuit_Diagram.pdf`) specifies **W25Q128JWSIQ**, and
+Winbond's manufacturer id is `0xEF` -- the SDK says so itself in
+`library/spi_eeprom/spi_eeprom_peri.h`. So the design calls for a Winbond part
+and this board has something else: an undocumented BOM substitution, with no
+alternate-part note anywhere in the materials.
+
+What is established:
+
+| | |
+|---|---|
+| the read is sound | the vendor's read-ID writes exactly three bytes (`strb [r6,#0..2]`), so this is not an overflow or an offset |
+| capacity | `0x18` = 2^24 = 16 MB, which the bootloader independently reports as `flash size[5]` |
+| manufacturer | `0x5E`, valid JEDEC odd parity, and not Winbond |
+
+What is **not** established, and nothing in this repository can establish it:
+which manufacturer `0x5E` is, this part's endurance, and which erase units it
+offers. Every `~100k` in this README, and the 4 KB / 32 KB / 64 KB erase sizes,
+come from the W25Q128JW datasheet by way of the schematic.
+
+That leaves the operational rules unchanged -- an unidentified part is a reason
+for more caution about looping a flash, not less -- but two things now rest on an
+assumption rather than a fact:
+
+- **the 64 KB rounding in `check_flash_partitions.py`.** Rounding a destroyed
+  footprint *up* is safe while the real erase unit is smaller, and issue #85
+  measured that the bootloader's own footprint does not reach a 64 KB boundary.
+  The unsafe direction would be a part whose largest erase unit is *larger* than
+  64 KB, which is unusual but not checked.
+- **the erase-size enum issue #88 will decode.** The SDK's driver offers the
+  three opcodes; whether this part honours all three -- 32 KB (`0x52`) is the
+  least universal -- is unverified.
+
+[!] The read-only way to settle both is **SFDP** (opcode `0x5A`), which reports a
+part's erase types and sizes. It needs a raw opcode transaction, so it needs XIP
+off and the machinery issue #88 builds -- and `Send_Op_code` is barred by the
+placement gate until then (issue #87). It is not available from `nor info` today.
+
+Nobody read this id before because there was nowhere to read it from: the
+vendor's read-ID carries the same XIP guard as its write entry points, so the
+only moment it can be read is inside bring-up, between the interrupt wrap and
+enabling the window.
 
 ### [!] The blob area is not empty flash, and the first write destroys what is there
 
@@ -2246,8 +2286,10 @@ It compares **destroyed footprints, not file extents** -- xmodem pads its last
 packet, and the flash is erased in blocks -- so two regions whose bytes do not
 touch can still be found to collide.  The erase block size the resident Himax
 bootloader uses is not known (it is closed, and was not disassembled to a
-conclusion), so the check rounds to **64 KB**, the largest this NOR offers: a
-conservative bound that contains whatever the bootloader actually does.
+conclusion), so the check rounds to **64 KB**, the largest erase unit the SDK's
+driver offers: a conservative bound that contains whatever the bootloader
+actually does, and one that stays conservative for any part whose own largest
+erase unit is 64 KB or less (issue #89).
 
 `0xD20000` is the first 64 KB boundary above the classification model's extent
 (`0xB7B000 + 1,704,672 = 0xD1B2E0`), so the two reservations abut exactly.
@@ -3406,8 +3448,10 @@ see the cpu% column still reported as trustworthy.
 
 Every flash rewrites the WHOLE image, bootloader region included -- that is
 the vendor-standard flow, proven many times on this board by the donor build
-environment.  The external NOR (W25Q128JW) is rated ~100k program/erase
-cycles; do not script flashing in a loop.
+environment.  The external NOR is rated ~100k program/erase cycles -- from the
+datasheet of the part the schematic specifies, which is not the part fitted
+here (issue #89) -- so treat that as an estimate and do not script flashing in
+a loop.
 
 If a flash goes wrong (power loss mid-transfer, corrupted image):
 

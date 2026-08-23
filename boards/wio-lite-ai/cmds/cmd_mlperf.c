@@ -223,5 +223,5 @@ static int cmd_mlperf(struct cli_instance *sh, int argc, char **argv)
  * that could have been an option is either already state (which model is loaded) or
  * belongs to the host's test script. */
 CLI_CMD_REGISTER(mlperf, NULL,
-                 "hand the console to the MLPerf Tiny monitor (issue #55)",
+                 "hand the console to the MLPerf Tiny monitor",
                  cmd_mlperf, 1, 0);

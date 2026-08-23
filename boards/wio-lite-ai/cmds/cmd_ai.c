@@ -1343,4 +1343,4 @@ CLI_SUBCMD_SET_CREATE(ai_subcmds,
 	CLI_SUBCMD_SET_END);
 
 CLI_CMD_REGISTER(ai, ai_subcmds,
-                 "on-device NN inference (issue #9)", NULL, 1, 0);
+                 "on-device NN inference", NULL, 1, 0);

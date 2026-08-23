@@ -1051,8 +1051,8 @@ int net_shell_start(uint16_t port, const char **why)
 	else if (g_sock_created)
 		reason = "its previous socket could not be released; reset the board";
 	else if (!nx_net_is_up())
-		reason = "the telnet console runs on the host stack -- `net up` first "
-		         "(issue #23 U4 moved it off the module's lwIP)";
+		/* owhinata/wio-lite-ai#23 U4 moved it off the module's lwIP. */
+		reason = "the telnet console runs on the host stack -- `net up` first";
 	if (reason != NULL) {
 		if (why != NULL)
 			*why = reason;

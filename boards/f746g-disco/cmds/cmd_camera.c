@@ -876,7 +876,8 @@ CLI_SUBCMD_SET_CREATE(camera_set_subcmds,
 	                  "none|mirror|flip|both", cmd_set_flip, 2, 0),
 	CLI_CMD_ARG_USAGE(zoom,   NULL, "<1|2|4|8>", "1|2|4|8", cmd_set_zoom, 2, 0),
 	CLI_CMD_ARG_USAGE(night,  NULL, "<on|off>", "on|off", cmd_set_night, 2, 0),
-	CLI_CMD(default,    NULL, "reset settings (neutral; flip defaults to flip, #68)",
+	/* Why neutral still means flip: owhinata/stm32f746g-disco#68. */
+	CLI_CMD(default,    NULL, "reset settings (neutral; flip defaults to flip)",
 	        cmd_set_default),
 	CLI_SUBCMD_SET_END);
 
@@ -1054,8 +1055,9 @@ static int cmd_stream_stats(struct cli_instance *sh, int argc, char **argv)
 		          (unsigned long)(fe10 / 10u), (unsigned long)(fe10 % 10u));
 	}
 	cli_print(sh, "jpeg trunc:%lu\r\n", (unsigned long)si.jpeg_trunc);
+	/* Ring arena: owhinata/stm32f746g-disco#65. */
 	if (si.slots != 0)
-		cli_print(sh, "ring:      %lu slots x %lu B (arena #65)\r\n",
+		cli_print(sh, "ring:      %lu slots x %lu B\r\n",
 		          (unsigned long)si.slots, (unsigned long)si.slot_bytes);
 	cli_print(sh, "-- stat sink (shell) --\r\n");
 	cli_print(sh, "delivered: %lu\r\n", (unsigned long)si.delivered);

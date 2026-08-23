@@ -93,7 +93,8 @@
 #define NOR_TEST_DEFAULT_STR   NOR_STR(NOR_TEST_DEFAULT_HEX)
 
 _Static_assert(NOR_TEST_DEFAULT_ADDR >= BLOB_REGION_END,
-               "the `nor test` default must stay above the blob region -- issue #55 "
+               "the `nor test` default must stay above the blob region -- "
+               "owhinata/wio-lite-ai#55 "
                "moved the region's end and this address has to follow it");
 
 static const char *nor_strerror(int rc)

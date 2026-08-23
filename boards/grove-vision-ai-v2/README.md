@@ -1978,13 +1978,164 @@ rewrites the bootloader -- worth having on a part with ~100k NOR cycles.
 
 | partition | write address | reserved blocks | today's artifact | flashed by |
 |---|---|---|---|---|
-| firmware | `0x000000` | `0x000000..0xB70000` | 405,504 B image | `--target flash` |
+| firmware | `0x000000` | `0x000000..0x200000` | 425,984 B image | `--target flash` |
+| blob | `0x200000` | `0x200000..0xB70000` | -- (9,895,936 B) | nothing yet |
 | model-cls | `0xB7B000` | `0xB70000..0xD20000` | MobileNet, 1,704,672 B | `--target flash-model-cls` |
 | model-det | `0xD20000` | `0xD20000..0xD50000` | BlazeFace, 164,512 B | `--target flash-model-det` |
+| blob-tail | `0xD50000` | `0xD50000..0xFF0000` | -- (2,752,512 B) | nothing yet |
+| slot-header | -- | `0xFF0000..0x1000000` | the bootloader's slot header (x2) | **never written** |
+
+**The map claims every byte of the part.**  An unclaimed run is not spare
+capacity, it is capacity nothing stops the next partition from being placed
+into, so there is no unnamed gap and `test_flash_partitions.py` checks that
+there is not -- comparing block spans, the way the checker does, because
+`model-cls` starts at `0xB7B000` while owning the block from `0xB70000`.
+
+[!] **The two blob runs are temporary, and the models are what separates them.**
+Issue #49 Step 4 moves the models INTO blob; their reservations are deleted then
+and blob becomes one run of `0x200000..0xFF0000` (14,614,528 B).  They cannot be
+deleted before then: `nn open cls|det` is compiled with their addresses,
+`--target flash-model-*` names their partitions, and dropping the reservation
+would stop the gate protecting flash that is still in use.
+
+### [!] The last block is the bootloader's slot header
+
+Not a precaution about an unidentified marker -- the 1st bootloader's own code
+says what it is:
+
+```
+sub.w  r0, r4, #0xC6000000   ; 0xC6000000 == -0x3A000000, so + the XIP base
+sub.w  r1, r0, #4096         ; flash_end - 0x1000
+movs   r2, #20               ; a 20-byte record
+bl     <read>
+movs   r1, #18
+bl     <checksum>            ; over the first 18 bytes
+ldrh   r1, [r4, #18]         ; compared with the u16 at +18
+movw/movt r1, 0x414D4948     ; "HIMA"
+movw/movt r1, 0x32455758     ; "XWE2"
+<on any mismatch>            ; adr -> "slot_header invalid !!"
+```
+
+and on hardware, at `flash_end - 0x1000` and again at `flash_end - 0x2000` (the
+backup the 2nd bootloader writes after a burn -- it prints `backup slot header`):
+
+```
+"HIMAXWE2" | u32 0x00000000 | u32 0x00000002 | u16 0x0001 | u16 checksum
+             ^ the slot offset the boot log prints
+```
+
+Our boot log shows `slot flash_offset 0x00000000` **without** `slot_header
+invalid !!`, so the header is valid and its stored offset is 0.
+
+And a flash demonstrates the whole mechanism in one go -- the record is not just
+read, it is rewritten:
+
+```
+before the flash   slot flash_offset 0x00000000
+during the flash   slot FlashOffset 0x00100000     <- the slot being burned
+                   backup slot header
+after the flash    slot flash_offset 0x00100000    <- it moved
+```
+
+So the live image is now the one in slot 1, which is also when the failure mode
+below is worth taking seriously: destroying the header would fall back to slot
+0, which currently holds the **previous** build.
+
+Two things made this hard to find, and both are worth remembering: the **address
+is computed** from the flash size the bootloader detects at runtime, so no
+literal `0xFFF000` appears in the binary; and the **magic is built with
+movw/movt**, so a byte search for `HIMAXWE2` finds nothing either.  (The log
+strings are reached by `adr`, which is why they have no literal-pool references
+at any base.)
+
+Destroying it is **not a hard brick** -- the checksum fails, the bootloader says
+so, and it falls back to slot 0.  But if the live image is the one in slot 1,
+that fallback silently boots the **previous build**.  One erase block is
+reserved, so that both copies are inside it.
 
 Addresses live in ONE place: `GROVE_MODEL_CLS_ADDR` / `GROVE_MODEL_DET_ADDR` in
 `board.cmake`.  They are compiled into `cmd_nn.c` as well, so `nn open det` and
 `--target flash-model-det` cannot drift apart.
+
+### The firmware reservation is the bootloader's own arithmetic
+
+It was `0xB70000` (11.4 MB) until issue #85 -- "everything below the first
+model", which was not a measurement but a way of not knowing.  The resident
+bootloader announces its layout on the console during every `--target flash`:
+
+```
+flash type[0], flash size[5]      -> FLASH_SIZE_128Mb = 16 MB
+slot flash_offset 0x00000000      <- 1st BL: the slot it booted
+slot FlashOffset 0x00100000       <- 2nd BL: the slot it burns to
+Image max size   0x00100000       <- one slot is 1 MB
+backup slot header                <- written after the burn
+```
+
+**Two A/B slots of 1 MB, at `0x000000` and `0x100000`, alternated on every
+flash.**  So the firmware needs 2 MB.  `GROVE_FW_RESERVED` is derived from
+`GROVE_FW_SLOT_SIZE * GROVE_FW_SLOTS` rather than written as `0x200000` beside a
+comment explaining it: the constant and the comment drift, and it is the comment
+that gets believed.
+
+[!] **Those numbers are measurements, not settings, and `cmake/flash_geometry.cmake`
+enforces that.**  `GROVE_FLASH_SIZE`, `GROVE_ERASE_GRAN`, `GROVE_FW_SLOT_SIZE`
+and `GROVE_FW_SLOTS` are plain variables, and a cache entry or `-D` that
+disagrees is a **hard error at configure time**.  They were `CACHE STRING`
+entries at first, and that was a fail-open of a particular shape: the same
+values declare the layout *and* configure the check over it, so one `-D` moved
+the rule and its verification together and the layout check still printed OK.
+Each of these configured cleanly and passed:
+
+| override | what the check then blessed |
+|---|---|
+| `-DGROVE_FW_SLOT_SIZE=0x200000` | a 1,704,672 B artifact accepted as firmware -- which the bootloader refuses with `ERR_IMAGE_SZ` |
+| `-DGROVE_FW_SLOTS=1` | blob starting at `0x100000`, so blob owns the inactive firmware slot |
+| `-DGROVE_ERASE_GRAN=0x1000` | `slot-header` shrunk to `0xFFF000:0x1000`, putting the **backup** header at `0xFFE000` inside blob-tail |
+| `-DGROVE_FLASH_SIZE=0x2000000` | `slot-header` moved to `0x1FF0000`, off the end of the real part, so **both** real headers land inside blob-tail |
+
+An entry that *agrees* is accepted and dropped, so a build directory configured
+before that file existed still works.  The refusal is the enforcement, so
+`test/test_flash_geometry.py` drives the real file through a real `cmake`
+configure -- one case per row above -- rather than reading it.  It uses a
+do-nothing `project(NONE)`, so there is no toolchain and each case is instant.
+
+A consequence worth knowing while reading a flash dump: since the burn
+alternates slots, **the image at `0x000000` is usually the previous build**, and
+the running one is at `0x100000` -- or the other way round.  Neither address is
+"the firmware".
+
+[!] The reservation covers BOTH slots, because the build cannot know which one a
+flash will land in.  **One image still has to fit ONE slot**, so `board.cmake`
+passes `--image-max firmware:${GROVE_FW_SLOT_SIZE}` and the check enforces it
+separately.  Without that, an image between 1 and 2 MB passes the layout check
+and is refused by the bootloader with `ERR_IMAGE_SZ` -- on the hardware, with
+the serial port open and a reset already pressed.
+
+### [!] The blob area is not empty flash, and the first write destroys what is there
+
+`0x200000..0xB70000` is reserved (9,895,936 B) and written by nothing yet.  It is
+not blank: a read-only survey through the XIP window found, left over from the
+factory SenseCraft firmware,
+
+| address | what |
+|---|---|
+| `0x300000` | a **FlashDB KVDB** -- FlashDB's sector magic, at the offset `FDB_WRITE_GRAN = 32` puts it, with the `00 ff ff ff` status tables around it |
+| `0x400000`, `0x500000` | data |
+| `0x600000..0xB70000` | erased at all 17 points sampled |
+
+Nothing in this port reads any of it, and reflashing the factory image would not
+bring its contents back.  Shrinking the reservation was a deliberate trade
+(2026-08-23): the 9.4 MB in exchange for that.
+
+It is **not ours**, despite `lib/flashdb` being in this repository -- that is a
+submodule added for Wio Lite AI, which configures `FDB_WRITE_GRAN = 8`.  The
+store on this flash is `32`, a different format that the Wio `kv` code could not
+read.  This board has never run the Wio firmware.
+
+[!] The survey was **sampling, not a scan**: 17 points across 5.7 MB.  Before
+anything actually writes here, a read-only walk of the window (reporting
+non-erased extents) is what turns "we did not see anything" into "there is
+nothing there".
 
 **The layout is reservations, not files.**  `cmake/check_flash_partitions.py`
 checks that the reservations are disjoint and fit the part *with no artifacts

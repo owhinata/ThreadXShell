@@ -440,8 +440,8 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   しかもフォルトも 0xFF も返さず**窓全体が同一レジスタにエイリアス**する
   （`hx_lib_spi_eeprom_open` + `enable_XIP`）。その open は **DMAC1 の IRQ 133 を有効化する**
   （EPK スナップショットが実測で捕捉。番号を列挙せず測る方式の存在理由）。
-  **[!] `lib_spi_eeprom.a` の erase/write 系と `Send_Op_code`（任意オペコード送出、#87）は
-  禁止シンボル** — このフラッシュには
+  **[!] `lib_spi_eeprom.a` の erase/write 系と、任意オペコード送出 4 本
+  （`Send_Op_code` / `Send_Op_Read_Data` の spi/qspi 両形、#87）は禁止シンボル** — このフラッシュには
   ブートローダが載る（wio のセクタ0 と同格）。`setWriteEnable` のみ QUAD 有効化に必要なので許可。
   [!] **ただしこの absence 検査は defence in depth であって証明ではない**（#87）— 読み出し経路が
   `hx_drv_spi_mst_get_dev` / `hx_drv_dmac_get_dev` / `DMA_send` を既に引き込んでおり、

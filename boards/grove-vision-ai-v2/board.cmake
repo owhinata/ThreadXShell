@@ -306,7 +306,7 @@ option(BSP_ENABLE_WFI "Enable ThreadX idle WFI power saving" ON)
 set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/shell/core/cli_core.c"
     "${CMAKE_SOURCE_DIR}/shell/core/cli_complete.c"
-    "${CMAKE_SOURCE_DIR}/shell/core/cli_console.c"
+    "${CMAKE_SOURCE_DIR}/shell/core/cli_registry.c"
     "${CMAKE_SOURCE_DIR}/shell/core/cli_edit.c"
     "${CMAKE_SOURCE_DIR}/shell/core/cli_history.c"
     "${CMAKE_SOURCE_DIR}/shell/core/cli_job.c"

@@ -436,8 +436,13 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   しかもフォルトも 0xFF も返さず**窓全体が同一レジスタにエイリアス**する
   （`hx_lib_spi_eeprom_open` + `enable_XIP`）。その open は **DMAC1 の IRQ 133 を有効化する**
   （EPK スナップショットが実測で捕捉。番号を列挙せず測る方式の存在理由）。
-  **[!] `lib_spi_eeprom.a` の erase/write 系は禁止シンボル** — このフラッシュには
+  **[!] `lib_spi_eeprom.a` の erase/write 系と `Send_Op_code`（任意オペコード送出、#87）は
+  禁止シンボル** — このフラッシュには
   ブートローダが載る（wio のセクタ0 と同格）。`setWriteEnable` のみ QUAD 有効化に必要なので許可。
+  [!] **ただしこの absence 検査は defence in depth であって証明ではない**（#87）— 読み出し経路が
+  `hx_drv_spi_mst_get_dev` / `hx_drv_dmac_get_dev` / `DMA_send` を既に引き込んでおり、
+  禁止リストのどの名前にも触れずに WREN + 任意オペコードを組める。**「リストが通った」を
+  「書込み能力が無い」と読まない**。
   **[!] アリーナの保守は「範囲ごと」ではなく「全体を 2 点で切り替える」**（#46）。
   TFLM の確保は 16 B 整列 / キャッシュラインは 32 B なので、範囲ごとの外側丸めは隣の半ラインを
   巻き込む。しかも NPU は中間 FM をアリーナ全体に書き、CPU は ethos-u カーネルのスクラッチ

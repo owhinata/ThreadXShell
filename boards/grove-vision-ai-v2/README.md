@@ -90,15 +90,25 @@ the settings are also lost when the USB device re-enumerates.
   is verified working here.  The documented fallback, should a future SDK
   bump break it, is a 1-byte `uart_read_udma()` re-arm -- which additionally
   needs the DMA3 combined IRQ (69) enabled, not just UART0's (90).
-  The shared `console` command prints this instance's RX/TX drop counters (the
-  readout issue #25's "rx_dropped does not move across a heavy paste" needed and
-  did not have).  A ring overflow bumps the shared `sh->rx_dropped` as well as
-  this backend's private `rx_dropped_ring`, so `console`'s `rx_drop` does show
-  it; what stays board-private is the backend's own fields -- that mirror, and
-  `err_events` (overrun / framing / parity), which has no shared counterpart at
-  all and is still not displayed anywhere.  This board runs a single console, so
-  the table has one row -- see the root
+  A ring overflow is counted once, in the shared `cli_instance::rx_dropped`
+  that the `console` command prints -- the readout issue #25's "rx_dropped does
+  not move across a heavy paste" needed and did not have.  This board runs a
+  single console, so the table has one row; see the root
   [README](../../README.md#a-board-can-run-more-than-one-console).
+- **[!] The backend keeps no private counters, and the line-error callback is
+  deliberately not registered.**  It used to hold a mirror of `rx_dropped` and
+  an `err_events` count of the driver's error callback, and nothing could read
+  either.  Both were removed with #28 rather than given a board-local display,
+  and dropping the `UART_CMD_SET_ERRCB` registration with them changes no
+  hardware behaviour.  That last part was established by disassembling
+  `prebuilt_libs/gnu/libdriver.a`, not assumed: `dw_uart_control` command 13 is
+  the single instruction `str r2, [r4, #72]`, and in `dw_uart_isr` the receiver
+  line-status branch (`IIR & 0xF == 6`) reads
+  `ldr r3, [r4, #72] ; cbz r3, +6 ; blx r3 ; ldr r3, [r5, #20]` -- the callback
+  is NULL-checked, and the LSR read that acknowledges OE/PE/FE/BI (`WE2_S.svd`:
+  offset `0x14`) is the `cbz`'s fall-through, so the driver clears the error
+  whether or not anyone registered.  The callback was a pure observer.  If a
+  line-error count is ever wanted, it comes back **with a way to read it**.
 - **SDK diagnostics** (`xprintf`) are satisfied by a board shim that routes
   into the `dmesg` RAM log; the SDK clib/console is not linked at all.
 - **Post-build gates** (`cmake/check_*.py`): image coherence (every linker

@@ -78,8 +78,10 @@ struct cli_grove_uart {
 	uint32_t tx_chunk;             /**< length of the in-flight chunk */
 
 	volatile uint8_t enabled;      /**< enable() succeeded; IRQ armed */
-	uint32_t rx_dropped_ring;      /**< ring-full drops (also sh->rx_dropped) */
-	uint32_t err_events;           /**< driver err_cb invocations */
+	/* No drop / error counters here: a ring-full drop is counted where it can
+	 * be read, in the shared cli_instance::rx_dropped that `console` prints
+	 * (issue #28).  A private mirror of it, and a line-error count with no
+	 * reader at all, were removed rather than given a board-local display. */
 };
 
 /** The UART transport vtable (init/enable/write/read/uninit). */

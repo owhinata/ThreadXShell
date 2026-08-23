@@ -103,7 +103,6 @@ static void uart_rx_cb(void *arg)
 	 * ring overflow drop the byte and count (the shell surfaces rx_dropped). */
 	while (dev->uart_read_nonblock(&b, 1u) == 1) {
 		if (!cli_uart_ring_put(&u->rx_ring, b)) {
-			u->rx_dropped_ring++;
 			if (u->sh != NULL)
 				u->sh->rx_dropped++;
 		}
@@ -139,16 +138,6 @@ static void uart_tx_cb(void *arg)
 	/* Space just freed: wake the core if it was blocked on TX. */
 	if (u->sh != NULL)
 		cli_transport_notify_tx(u->sh);
-}
-
-static void uart_err_cb(void *arg)
-{
-	struct cli_grove_uart *u = g_uart_console;
-	(void)arg;
-
-	if (u == NULL)
-		return;
-	u->err_events++;                /* overrun/framing/parity: counted only */
 }
 
 /* ---- vendor ISR wrapping (EPK ISR accounting, issue #25) ---------------- */
@@ -246,8 +235,6 @@ static int uart_init(struct cli_transport *tr)
 	u->tx_in_flight    = 0u;
 	u->tx_chunk        = 0u;
 	u->enabled         = 0u;
-	u->rx_dropped_ring = 0u;
-	u->err_events      = 0u;
 	u->sh              = tr->sh;    /* cli_init() set tr->sh before init */
 
 	/* Become the console now so _write routes here; `enabled` stays 0 until
@@ -293,7 +280,25 @@ static int uart_enable(struct cli_transport *tr)
 	(void)dev->uart_control(UART_CMD_SET_RXINT_BUF, (UART_CTRL_PARAM)0u);
 	(void)dev->uart_control(UART_CMD_SET_RXCB, (UART_CTRL_PARAM)uart_rx_cb);
 	(void)dev->uart_control(UART_CMD_SET_TXCB, (UART_CTRL_PARAM)uart_tx_cb);
-	(void)dev->uart_control(UART_CMD_SET_ERRCB, (UART_CTRL_PARAM)uart_err_cb);
+	/*
+	 * No UART_CMD_SET_ERRCB.  The line-error callback was only ever a counter
+	 * nobody could read, and dropping it changes no hardware behaviour --
+	 * established by disassembling the prebuilt driver (issue #28):
+	 *
+	 *   dw_uart_control cmd 13 is one instruction, `str r2, [r4, #72]`: it
+	 *   records the pointer in the ctrl struct and does nothing else.  That
+	 *   struct is in .bss, so the field is NULL when never set.
+	 *
+	 *   dw_uart_isr, on IIR & 0xF == 6 (16550 receiver line status), does
+	 *      ldr r3, [r4, #72] ; cbz r3, +6 ; blx r3 ; ldr r3, [r5, #20]
+	 *   -- the callback is NULL-CHECKED, and the read of LSR (WE2_S.svd:
+	 *   offset 0x14) that acknowledges OE/PE/FE/BI is the cbz's fall-through,
+	 *   so the driver clears the error either way.  The callback was a pure
+	 *   observer of an error the driver was already handling.
+	 *
+	 * If a line-error count is ever wanted, it has to come back with a way to
+	 * READ it -- that is the whole lesson of issue #28.
+	 */
 	if (dev->uart_control(UART_CMD_SET_RXINT, (UART_CTRL_PARAM)1u) != 0) {
 		LOG_ERR("uart0 rx int enable failed");
 		return -1;

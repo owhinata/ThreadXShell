@@ -17,12 +17,30 @@
  * CLI_ENABLE_DANGEROUS_CMDS is set.
  *
  * Address-range gate: accesses are checked against a compile-time region
- * allow-list.  The map lists the secure aliases of the real on-chip RAMs and
- * the PPB (word-only); everything else -- reserved holes, the peripheral
- * windows, and notably the FLASH XIP alias 0x3A000000 -- is absent.  The XIP
- * window is deliberately NOT listed in M-G1: the app is loaded to SRAM/TCM and
- * whether the QSPI XIP path is left readable behind it after boot is
- * unverified (no public TRM); a stalled AXI access there would hang the shell.
+ * allow-list.  The map lists the secure aliases of the real on-chip RAMs, the
+ * PPB (word-only) and the FLASH XIP read alias; everything else -- reserved
+ * holes and the peripheral windows -- is absent.
+ *
+ * [!] THE XIP ALIAS NEEDS A LEASE, NOT JUST AN ALLOW-LIST ENTRY (issue #90).
+ * Being in the map says the address is legal to read.  It says nothing about
+ * whether there is anything mapped there, and this window has an owner:
+ * port/nor/ brings it up and issue #88's writer will drop it.  Reading it
+ * without holding a lease was wrong in two directions:
+ *
+ *   - before any bring-up the window is DEAD, and a dead window does not fault
+ *     and does not read 0xFF -- one register block aliases across all 16 MB, so
+ *     `devmem dump 0x3a000000` printed plausible nonsense as flash contents;
+ *   - CLI_MAX_BG_JOBS is 2, so a devmem access can be in flight beside another
+ *     command, and a writer that sampled "no readers" would drop XIP out from
+ *     under it.  [!] This half is BOUNDED and hard to hit: a dump of the alias
+ *     is at most CLI_DEVMEM_DUMP_MAX_LEN bytes, and background jobs run below
+ *     the foreground one under TX_NO_TIME_SLICE, so `cmd &; cmd2` does not
+ *     actually interleave them.  It is the first half above that was observed
+ *     lying on hardware.
+ *
+ * So every access that touches the alias takes NOR_LEASE_DEVMEM first and gives
+ * it back on every exit.  Acquiring is also what brings the window up, which is
+ * why one answer closes both problems.
  *
  * Clean-room design; no third-party code reused.
  */
@@ -30,6 +48,8 @@
 
 #include <stdint.h>
 #include <string.h>
+
+#include "nor_flash.h"
 
 #if CLI_ENABLE_DANGEROUS_CMDS
 
@@ -74,7 +94,10 @@ static const struct devmem_region devmem_map[] = {
 	 * model header can actually be looked at: `nn` parses the flatbuffer in
 	 * place here, and when it refuses, the only way to tell "nothing was
 	 * flashed" from "flashed at the wrong offset" is to dump the bytes. */
-	{ 0x3A000000u, 0x01000000u, 1, 0, WALL, "FLASH-R"}, /* 16 MB, read alias  */
+	/* [!] From nor_flash.h, not restated.  port/nor/ owns this window; a
+	 * second copy of its base or size here would be a second declaration of
+	 * somebody else's fact, free to drift. */
+	{ NOR_XIP_BASE, NOR_SIZE,    1, 0, WALL, "FLASH-R"}, /* 16 MB, read alias  */
 };
 
 /* "8"/"16"/"32" -> access width in bytes (1/2/4). */
@@ -124,6 +147,55 @@ static int devmem_check(struct cli_instance *sh, uint32_t addr, uint32_t span,
 	cli_error(sh, "devmem: 0x%08lx (%lu bytes) not in an allowed region\r\n",
 	          (unsigned long)addr, (unsigned long)span);
 	return -1;
+}
+
+/*
+ * Take the XIP lease if this access touches the flash alias, and only then
+ * (issue #90).  `*token` is 0 when no lease was needed, which devmem_leave()
+ * treats as "nothing to give back" -- so every caller can pair the two
+ * unconditionally and there is no path that returns while still holding one.
+ *
+ * [!] INTERSECTION, NOT CONTAINMENT.  devmem_check() has already refused
+ * anything that straddles a region boundary, so today an access either lies
+ * wholly inside the alias or wholly outside it.  Asking the weaker question
+ * anyway means this stays correct if the map ever gains an adjacent region:
+ * erring towards taking a lease costs a refusal, erring away costs a read of a
+ * window somebody is entitled to pull down.
+ */
+static int devmem_enter(struct cli_instance *sh, uint32_t addr, uint32_t span,
+                        uint32_t *token)
+{
+	uint64_t alo = addr;
+	uint64_t ahi = (uint64_t)addr + span;
+	uint64_t xlo = NOR_XIP_BASE;
+	uint64_t xhi = (uint64_t)NOR_XIP_BASE + NOR_SIZE;
+
+	*token = 0u;
+	if (ahi <= xlo || alo >= xhi)
+		return 0;                       /* nowhere near the flash window */
+
+	if (nor_acquire(NOR_LEASE_DEVMEM, token) == 0)
+		return 0;
+
+	/* Refusals: the port is faulted, a bring-up is in flight, or this
+	 * single-instance slot is already held.
+	 *
+	 * [!] THE SLOT-ALREADY-HELD CASE CANNOT BE PRODUCED FROM A CONSOLE, so do
+	 * not go looking for it on hardware.  Background jobs run below the
+	 * foreground one under TX_NO_TIME_SLICE, so two devmem commands never
+	 * overlap by typing.  test/test_nor_state.c walks it instead -- the same
+	 * reason nor_state.h gives for keeping the decisions as pure functions. */
+	if (nor_lifecycle_state() == NOR_ST_FAULTED)
+		cli_error(sh, "devmem: flash window unusable: %s\r\n",
+		          nor_fail_reason() ? nor_fail_reason() : "faulted");
+	else
+		cli_error(sh, "devmem: flash window busy\r\n");
+	return -1;
+}
+
+static void devmem_leave(uint32_t token)
+{
+	(void)nor_release(token);       /* 0 is "nothing held" and is not an error */
 }
 
 /* Read `width` bytes at `addr` (already gated and aligned). */
@@ -180,21 +252,24 @@ static int parse_addr_width(struct cli_instance *sh, const char *addr_s,
 
 static int cmd_devmem_peek(struct cli_instance *sh, int argc, char **argv)
 {
-	uint32_t addr, width;
+	uint32_t addr, width, token;
 
 	if (parse_addr_width(sh, argv[1], argc >= 3 ? argv[2] : NULL,
 	                     &addr, &width) != 0)
 		return 1;
 	if (devmem_check(sh, addr, width, width, 0) != 0)
 		return 1;
+	if (devmem_enter(sh, addr, width, &token) != 0)
+		return 1;
 
 	print_cell(sh, addr, width, mem_read(addr, width));
+	devmem_leave(token);
 	return 0;
 }
 
 static int cmd_devmem_poke(struct cli_instance *sh, int argc, char **argv)
 {
-	uint32_t addr, width, value;
+	uint32_t addr, width, value, token;
 	uintptr_t a;
 
 	if (cli_parse_u32(argv[2], &value) != 0) {
@@ -211,6 +286,12 @@ static int cmd_devmem_poke(struct cli_instance *sh, int argc, char **argv)
 	}
 	if (devmem_check(sh, addr, width, width, 1) != 0)
 		return 1;
+	/* Unreachable for the alias today -- the map marks it read-only, so
+	 * devmem_check() refuses first -- but paired here anyway so that making it
+	 * writable would be a decision about writing, not an accidental one about
+	 * ownership. */
+	if (devmem_enter(sh, addr, width, &token) != 0)
+		return 1;
 
 	a = (uintptr_t)addr;
 	switch (width) {
@@ -220,12 +301,14 @@ static int cmd_devmem_poke(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	print_cell(sh, addr, width, mem_read(addr, width));     /* read-back */
+	devmem_leave(token);
 	return 0;
 }
 
 static int cmd_devmem_dump(struct cli_instance *sh, int argc, char **argv)
 {
-	uint32_t addr, len = 64;                        /* default 64 bytes */
+	uint32_t addr, len = 64, token;                 /* default 64 bytes */
+	int rc;
 
 	if (cli_parse_u32(argv[1], &addr) != 0) {
 		cli_error(sh, "devmem: bad address '%s'\r\n", argv[1]);
@@ -242,12 +325,20 @@ static int cmd_devmem_dump(struct cli_instance *sh, int argc, char **argv)
 		          (unsigned long)len, (unsigned)CLI_DEVMEM_DUMP_MAX_LEN);
 		return 1;
 	}
-	/* dump is byte-granular, so it needs an 8-bit-capable region (RAM). */
+	/* dump is byte-granular, so it needs an 8-bit-capable region. */
 	if (devmem_check(sh, addr, len, 1, 0) != 0)
 		return 1;
+	if (devmem_enter(sh, addr, len, &token) != 0)
+		return 1;
 
-	return cli_hexdump_base(sh, (const void *)(uintptr_t)addr, len, addr)
-	       == 0 ? 0 : 1;
+	/* [!] The lease spans the WHOLE walk, not each read.  A dump is capped at
+	 * CLI_DEVMEM_DUMP_MAX_LEN so this is not a long window today, but the rule
+	 * is about where the transaction ends rather than how big it happens to
+	 * be: releasing between lines would mean the bytes after the first could
+	 * come from a window somebody was entitled to pull down mid-dump. */
+	rc = cli_hexdump_base(sh, (const void *)(uintptr_t)addr, len, addr);
+	devmem_leave(token);
+	return rc == 0 ? 0 : 1;
 }
 
 CLI_SUBCMD_SET_CREATE(devmem_subcmds,

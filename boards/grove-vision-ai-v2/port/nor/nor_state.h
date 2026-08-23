@@ -92,6 +92,21 @@ enum nor_acquire nor_acquire_decide(enum nor_state st);
 enum nor_lease_slot {
 	NOR_LEASE_NPU = 0,  /**< held across npu_hw_init .. npu_hw_deinit */
 	NOR_LEASE_SCAN,     /**< held for the whole of one `nor scan`     */
+	/* [!] `devmem` reads the XIP alias too, and used to do it with no lease at
+	 * all (issue #90).  That was wrong in two directions, not one: nothing
+	 * stopped it reading a window that had never been brought up -- which does
+	 * not fault and does not read 0xFF, it aliases one register across all
+	 * 16 MB, so the dump printed plausible nonsense as flash contents -- and
+	 * nothing stopped a writer dropping XIP underneath an access in flight.
+	 * Taking a lease answers both, because acquiring one is what brings the
+	 * window up.
+	 *
+	 * [!] Only the first half was observed on hardware.  The second is
+	 * bounded -- a dump of the alias is at most CLI_DEVMEM_DUMP_MAX_LEN bytes
+	 * -- and cannot be produced by typing, because background jobs run below
+	 * the foreground one under TX_NO_TIME_SLICE.  It is real, and it is the
+	 * kind of real this file exists to decide about without hardware. */
+	NOR_LEASE_DEVMEM,   /**< held across one `devmem` access to the alias */
 	NOR_LEASE_SLOTS,
 };
 

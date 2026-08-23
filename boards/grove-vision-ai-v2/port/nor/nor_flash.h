@@ -84,6 +84,17 @@ struct nor_report {
 	uint32_t mpu_rlar;
 	uint32_t mpu_mair0;
 	uint32_t mpu_mair1;
+	/* The bring-up probe that proves the window is not a degenerate alias.
+	 * [!] It reads the bootloader's slot-header block, NOT `blob` -- issue #90.
+	 * A probe inside blob would be reading bytes issue #88's writer is allowed
+	 * to erase, so "the window came back" could be answered by the very bytes
+	 * the caller had just destroyed. */
+	uint32_t probe_off;       /**< flash offset probe B reads                 */
+	uint32_t probe_word;      /**< what it read (raw, never decoded)          */
+	/* [!] OBSERVED, NOT REQUIRED.  A corrupt slot header still boots -- the
+	 * bootloader falls back to slot 0 -- so bring-up must not depend on it.
+	 * Reported so a human can see whether it is intact; nothing acts on it. */
+	uint8_t  probe_hdr;       /**< 1 if "HIMAXWE2" is at probe_off            */
 	int      irq;             /**< the line this port wrapped, or -1          */
 	/* [!] The observable for issue #86 itself.  The line used to be part of
 	 * the NPU's EPK wrapset, so `nn close` unwrapped it and unwrapping

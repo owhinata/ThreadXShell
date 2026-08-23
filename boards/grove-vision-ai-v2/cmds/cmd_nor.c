@@ -149,6 +149,16 @@ static int cmd_nor_info(struct cli_instance *sh, int argc, char **argv)
 	cli_print(sh, "window   : 0x%08lx, %lu B\r\n",
 	          (unsigned long)NOR_XIP_BASE, (unsigned long)NOR_SIZE);
 	cli_print(sh, "leases   : %lu\r\n", (unsigned long)r.readers);
+	/* [!] The probe reads the slot-header block, not `blob` (issue #90): a
+	 * probe inside blob would be proving the window came back by reading bytes
+	 * issue #88's writer is allowed to erase.
+	 * The magic is REPORTED, never required -- a corrupt slot header still
+	 * boots (the bootloader falls back to slot 0), so bring-up must not turn
+	 * somebody else's recoverable damage into our refusal. */
+	cli_print(sh, "probe    : 0x%08lx = 0x%08lx  %s\r\n",
+	          (unsigned long)r.probe_off, (unsigned long)r.probe_word,
+	          r.probe_hdr ? "(slot-header magic)"
+	                      : "(no slot-header magic -- observation only)");
 	/* [!] The observable for issue #86: this line used to be part of the NPU's
 	 * EPK wrapset, so `nn close` unwrapped it -- and unwrapping disables. */
 	cli_print(sh, "irq      : %d %s\r\n", r.irq,

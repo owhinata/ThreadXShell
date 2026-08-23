@@ -31,14 +31,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CHECKER = os.path.join(HERE, "..", "cmake", "check_flash_partitions.py")
 
 FLASH = 0x1000000
-G = 0x10000          # the checker's default erase granularity
+# [!] PASSED EXPLICITLY, never inherited (issue #88).  The checker used to
+# default to 64 KB and this file relied on that default, so the test and the
+# thing it tests read one number from two places -- change either alone and the
+# suite goes on passing while checking a layout nobody ships.
+G = 0x1000           # what the resident 2nd bootloader actually erases
 PACKET = 128
 
 fails = 0
 
 
 def run(partitions, images=(), writing=(), flash_size=FLASH, image_max=()):
-    argv = [sys.executable, CHECKER, "--flash-size", hex(flash_size)]
+    argv = [sys.executable, CHECKER, "--flash-size", hex(flash_size),
+            "--erase-granularity", hex(G)]
     for name, start, reserved in partitions:
         argv += ["--partition", f"{name}:{hex(start)}:{hex(reserved)}"]
     for name, path in images:
@@ -82,11 +87,11 @@ def main():
     # The real layout, so the tests exercise the shape actually shipped.
     REAL = [
         ("firmware",  0x000000, 0x200000),
-        ("blob",      0x200000, 0x970000),
+        ("blob",      0x200000, 0x97B000),
         ("model-cls", 0xB7B000, 0x1A5000),
         ("model-det", 0xD20000, 0x030000),
-        ("blob-tail", 0xD50000, 0x2A0000),
-        ("slot-header", 0xFF0000, 0x010000),
+        ("blob-tail", 0xD50000, 0x2AE000),
+        ("slot-header", 0xFFE000, 0x002000),
     ]
     # firmware reserves BOTH A/B slots because a flash lands in whichever is
     # inactive; one image still has to fit ONE of them (issue #85).
@@ -110,9 +115,12 @@ def main():
         # nothing stops the next partition from being placed into.  Checked
         # here, where the shipped numbers live.
         # [!] Compare BLOCK SPANS, not byte extents -- the same rounding the
-        # checker does.  model-cls starts at 0xB7B000 but owns the block from
-        # 0xB70000, so a byte-extent comparison reports a gap that does not
-        # exist.  Getting this wrong here is the file's own headline mistake.
+        # checker does.  Every edge above happens to be 4 KB aligned today, so
+        # the two agree; that was NOT true at 64 KB, where model-cls started at
+        # 0xB7B000 but owned the block from 0xB70000 and a byte-extent
+        # comparison reported a gap that did not exist.  Keep the rounding: the
+        # property being checked is about blocks, and the next address that is
+        # not block-aligned must not silently read as a hole.
         def span(start, reserved):
             return ((start // G) * G, ((start + reserved + G - 1) // G) * G)
 
@@ -178,9 +186,14 @@ def main():
               expect_text="This is the artifact being written")
 
         # --- artifacts against their own reservations ---------------------
+        # [!] The reservation is stated in BLOCKS, not as a literal.  It used
+        # to be 0x010000, which was one block only while G was 64 KB -- so this
+        # case quietly stopped testing anything when G shrank, because
+        # three_blocks (3 * G) then fitted inside it.  The property is "the
+        # artifact is bigger than what it was given", so both sides scale.
         check("an artifact larger than its reservation is refused", False, [
-            ("a", 0x100000, 0x010000),
-            ("b", 0x200000, 0x010000),
+            ("a", 0x100000, G),
+            ("b", 0x200000, G),
         ], images=[("a", three_blocks)], writing=["a"],
            expect_text="outside its reservation")
 
@@ -189,7 +202,7 @@ def main():
         check("an oversized neighbour is caught while flashing the firmware",
               False, [
             ("firmware", 0x000000, 0x100000),
-            ("model", 0x100000, 0x010000),
+            ("model", 0x100000, G),
         ], images=[("firmware", small), ("model", three_blocks)],
            writing=["firmware"], expect_text="outside its reservation")
 
@@ -254,13 +267,29 @@ def main():
              "an --image-max larger than the reservation"),
         ):
             r = subprocess.run(
-                [sys.executable, CHECKER, "--flash-size", hex(FLASH)] + argv,
+                [sys.executable, CHECKER, "--flash-size", hex(FLASH),
+                 "--erase-granularity", hex(G)] + argv,
                 capture_output=True, text=True)
             if r.returncode == 0:
                 print(f"  FAIL {why} is accepted")
                 fails += 1
             else:
                 print(f"  ok   {why} refuses")
+
+        # [!] And the granularity itself has no default any more (issue #88).
+        # It is a measured property of the receiver, so a caller that does not
+        # say which receiver it means must not get one picked for it -- that is
+        # how the old 64 KB default would have gone on quietly checking a
+        # layout nobody declared.  Watched failing, like every other rule here.
+        r = subprocess.run(
+            [sys.executable, CHECKER, "--flash-size", hex(FLASH),
+             "--partition", "a:0x0:0x1000"],
+            capture_output=True, text=True)
+        if r.returncode == 0:
+            print("  FAIL a missing --erase-granularity is accepted")
+            fails += 1
+        else:
+            print("  ok   a missing --erase-granularity refuses")
 
     if fails:
         print(f"test_flash_partitions: {fails} failure(s)")

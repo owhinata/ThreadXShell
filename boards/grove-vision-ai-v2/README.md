@@ -1980,21 +1980,24 @@ rewrites the bootloader -- worth having on a part with ~100k NOR cycles.
 | partition | write address | reserved blocks | today's artifact | flashed by |
 |---|---|---|---|---|
 | firmware | `0x000000` | `0x000000..0x200000` | 425,984 B image | `--target flash` |
-| blob | `0x200000` | `0x200000..0xB70000` | -- (9,895,936 B) | nothing yet |
-| model-cls | `0xB7B000` | `0xB70000..0xD20000` | MobileNet, 1,704,672 B | `--target flash-model-cls` |
+| blob | `0x200000` | `0x200000..0xB7B000` | -- (9,940,992 B) | nothing yet |
+| model-cls | `0xB7B000` | `0xB7B000..0xD20000` | MobileNet, 1,704,672 B | `--target flash-model-cls` |
 | model-det | `0xD20000` | `0xD20000..0xD50000` | BlazeFace, 164,512 B | `--target flash-model-det` |
-| blob-tail | `0xD50000` | `0xD50000..0xFF0000` | -- (2,752,512 B) | nothing yet |
-| slot-header | -- | `0xFF0000..0x1000000` | the bootloader's slot header (x2) | **never written** |
+| blob-tail | `0xD50000` | `0xD50000..0xFFE000` | -- (2,809,856 B) | nothing yet |
+| slot-header | -- | `0xFFE000..0x1000000` | the bootloader's slot header (x2) | **never written** |
 
 **The map claims every byte of the part.**  An unclaimed run is not spare
 capacity, it is capacity nothing stops the next partition from being placed
 into, so there is no unnamed gap and `test_flash_partitions.py` checks that
-there is not -- comparing block spans, the way the checker does, because
-`model-cls` starts at `0xB7B000` while owning the block from `0xB70000`.
+there is not -- comparing block spans, the way the checker does.  Every edge in
+the table happens to be 4 KB aligned today so the two agree; that was not true
+while the granularity was 64 KB, when `model-cls` started at `0xB7B000` and
+owned the block from `0xB70000`.  The rounding stays: the property is about
+blocks, and the next address that is not block-aligned must not read as a hole.
 
 [!] **The two blob runs are temporary, and the models are what separates them.**
 Issue #49 Step 4 moves the models INTO blob; their reservations are deleted then
-and blob becomes one run of `0x200000..0xFF0000` (14,614,528 B).  They cannot be
+and blob becomes one run of `0x200000..0xFFE000` (14,671,872 B).  They cannot be
 deleted before then: `nn open cls|det` is compiled with their addresses,
 `--target flash-model-*` names their partitions, and dropping the reservation
 would stop the gate protecting flash that is still in use.
@@ -2198,6 +2201,13 @@ first version did that and reported two holes inside the contiguous detection
 model, because two of its sectors happen to begin with `0xFFFFFFFF` -- 8,192 B
 under-reported, in the direction that makes a region look freer than it is.
 
+[!] **`0xB70000..0xB7B000` is erased.**  Those 44 KB joined `blob` when the
+granularity became 4 KB (issue #88) and had never been walked, because the
+survey predates them.  Re-scanned after that change: they appear in no extent,
+so they are `0xFF` throughout.  The `slot-header` extent is worth reading twice
+too -- `0xffe000..0x1000000`, 8,192 B, exactly the reservation the bootloader's
+own erase arithmetic produces.
+
 ### [!] The fitted NOR is a Zbit ZB25LQ128C, not the schematic's Winbond
 
 `nor info` reads `jedec : 5e 50 18`. The schematic
@@ -2242,19 +2252,19 @@ That leaves the operational rules unchanged -- an unidentified part is a reason
 for more caution about looping a flash, not less -- but two things now rest on an
 assumption rather than a fact:
 
-- **the 64 KB rounding in `check_flash_partitions.py`.** Rounding a destroyed
-  footprint *up* is safe while the real erase unit is smaller, and issue #85
-  measured that the bootloader's own footprint does not reach a 64 KB boundary.
-  The unsafe direction would be a part whose largest erase unit is *larger* than
-  64 KB, which is unusual but not checked.
-- **the erase-size enum issue #88 will decode.** The SDK's driver offers the
-  three opcodes; whether this part honours all three -- 32 KB (`0x52`) is the
-  least universal -- is unverified.
+- **which erase units this part honours.** The SDK's driver offers three
+  opcodes. Issue #88 disassembled the resident 2nd bootloader and found it
+  issues **only `0x20` (4 KB)** -- never `0x52` (32 KB), never `0xD8` (64 KB),
+  never a chip erase. So 4 KB is now a *measured* property of this die, because
+  every `--target flash` exercises it. The other two remain unexercised, which
+  is why the writer issue #88 adds refuses them.
+- **endurance.** Still the W25Q128JW number. Nothing measures it.
 
-[!] The read-only way to settle both is **SFDP** (opcode `0x5A`), which reports a
-part's erase types and sizes. It needs a raw opcode transaction, so it needs XIP
-off and the machinery issue #88 builds -- and `Send_Op_code` is barred by the
-placement gate until then (issue #87). It is not available from `nor info` today.
+[!] The read-only way to settle the rest is **SFDP** (opcode `0x5A`), which
+reports a part's erase types and sizes. It needs a raw opcode transaction, so it
+needs XIP off and the machinery issue #88 builds -- and `Send_Op_code` is barred
+by the placement gate until then (issue #87). A throwaway spike tried it and the
+call never returned, so it is not a cheap answer either; see the issue.
 
 Nobody read this id before because there was nowhere to read it from: the
 vendor's read-ID carries the same XIP guard as its write entry points, so the
@@ -2263,15 +2273,11 @@ enabling the window.
 
 ### [!] The blob area is not empty flash, and the first write destroys what is there
 
-`0x200000..0xB70000` is reserved (9,895,936 B) and written by nothing yet.  It is
-not blank: a read-only survey through the XIP window found, left over from the
-factory SenseCraft firmware,
-
-| address | what |
-|---|---|
-| `0x300000` | a **FlashDB KVDB** -- FlashDB's sector magic, at the offset `FDB_WRITE_GRAN = 32` puts it, with the `00 ff ff ff` status tables around it |
-| `0x400000`, `0x500000` | data |
-| `0x600000..0xB70000` | erased at all 17 points sampled |
+`0x200000..0xB7B000` is reserved (9,940,992 B) and written by nothing yet.  It
+is **not blank** -- what is in it, and where, is the `nor scan` output above;
+that is the authoritative account and this section does not repeat it.  About
+2.6 MB was left there by the factory SenseCraft firmware, including a FlashDB
+KVDB at `0x300000`.
 
 Nothing in this port reads any of it, and reflashing the factory image would not
 bring its contents back.  Shrinking the reservation was a deliberate trade
@@ -2281,11 +2287,6 @@ It is **not ours**, despite `lib/flashdb` being in this repository -- that is a
 submodule added for Wio Lite AI, which configures `FDB_WRITE_GRAN = 8`.  The
 store on this flash is `32`, a different format that the Wio `kv` code could not
 read.  This board has never run the Wio firmware.
-
-[!] The survey was **sampling, not a scan**: 17 points across 5.7 MB.  Before
-anything actually writes here, a read-only walk of the window (reporting
-non-erased extents) is what turns "we did not see anything" into "there is
-nothing there".
 
 **The layout is reservations, not files.**  `cmake/check_flash_partitions.py`
 checks that the reservations are disjoint and fit the part *with no artifacts
@@ -2302,16 +2303,39 @@ blocks the operation it is not protecting is a gate that gets deleted.
 
 It compares **destroyed footprints, not file extents** -- xmodem pads its last
 packet, and the flash is erased in blocks -- so two regions whose bytes do not
-touch can still be found to collide.  The erase block size the resident Himax
-bootloader uses is not known (it is closed, and was not disassembled to a
-conclusion), so the check rounds to **64 KB**, the largest erase unit the SDK's
-driver offers: a conservative bound that contains whatever the bootloader
-actually does, and one that stays conservative for any part whose own largest
-erase unit is 64 KB or less (issue #89).
+touch can still be found to collide.
+
+The block size used to be a guess: 64 KB, the largest the SDK's driver offers,
+because the receiver is the Himax bootloader resident in the NOR itself and it
+had not been disassembled to a conclusion.  It has been now (issue #88), at base
+`0x3401F000`:
+
+- its range eraser walks `addr & ~0xFFF` in 4 KB steps and passes erase enum 0
+  to every call;
+- the opcode table it indexes holds `20 52 d8` at offsets 30/31/32, and only
+  offset 30 is ever read -- 32 KB, 64 KB and chip erase are never issued;
+- the slot-header path erases exactly `flash_end-0x1000` and `flash_end-0x2000`,
+  one 4 KB sector each, which is where the `slot-header` reservation's size
+  comes from.
+
+So the check rounds to **4 KB**, and that is a measurement of the resident
+flashing path rather than a bound over every possible receiver.  It is narrower
+than what it replaced: what it stops covering is a future receiver that erases
+in bigger blocks.
+
+[!] **The granularity and the slot-header span are two separate facts**
+(`GROVE_ERASE_GRAN`, `GROVE_SLOT_HDR_COPIES`).  They used to be one -- the
+reservation was "one erase block" -- so tightening the rounding alone would have
+shrunk it onto a single sector and dropped the backup header into `blob-tail`.
+`cmake/flash_geometry.cmake` had already recorded that exact `-D` as a
+fail-open; separating the two is what makes the tightening safe.
 
 `0xD20000` is the first 64 KB boundary above the classification model's extent
-(`0xB7B000 + 1,704,672 = 0xD1B2E0`), so the two reservations abut exactly.
-Host tests: `test/test_flash_partitions.py`.
+(`0xB7B000 + 1,704,672 = 0xD1B2E0`).  It was chosen when 64 KB was believed to be
+the erase block, so the alignment is now more than it needs to be rather than
+wrong; the address stays because `nn open det` is compiled with it and it is
+already programmed on the board.
+Host tests: `test/test_flash_partitions.py`, `test/test_flash_geometry.py`.
 
 **Both model targets verify before they transmit.**  `flash-model-cls` and
 `flash-model-det` stage a copy, run the partition check and `verify_vela_model`

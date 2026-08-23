@@ -43,27 +43,26 @@
 
 /* The partition edges, from board.cmake -- the same variables
  * check_flash_partitions.py consumes, so the labels here and the layout the
- * host checks cannot drift apart (issues #45, #85). */
-#ifndef NOR_PART_FW_END
-#define NOR_PART_FW_END     0x200000u
-#endif
-#ifndef NOR_PART_BLOB_END
-#define NOR_PART_BLOB_END   0xB70000u
-#endif
-#ifndef NOR_PART_CLS_END
-#define NOR_PART_CLS_END    0xD20000u
-#endif
-#ifndef NOR_PART_DET_END
-#define NOR_PART_DET_END    0xD50000u
-#endif
-#ifndef NOR_PART_TAIL_END
-#define NOR_PART_TAIL_END   0xFF0000u
+ * host checks cannot drift apart (issues #45, #85).
+ *
+ * [!] NO FALLBACK VALUES (issue #88).  These used to be #ifndef defaults, and
+ * defaults are a second declaration of a layout that only one file is allowed
+ * to declare: when the granularity became 4 KB, three of the five moved, and a
+ * tree that had lost the compile definitions would have gone on labelling
+ * `nor scan` output with the old map -- silently, because a plausible label is
+ * indistinguishable from a correct one.  A missing definition is a build
+ * error. */
+#if !defined(NOR_PART_FW_END) || !defined(NOR_PART_BLOB_END) || \
+    !defined(NOR_PART_CLS_END) || !defined(NOR_PART_DET_END) || \
+    !defined(NOR_PART_TAIL_END)
+#error "NOR_PART_*_END must come from board.cmake's partition map"
 #endif
 
-/* [!] The scan step is the SMALLEST erase unit this NOR offers, not the largest.
- * The layout check rounds destroyed footprints UP to 64 KB because erring large
- * there costs address space and erring small costs a board; a survey has the
- * opposite bias, so it looks at every 4 KB sector. */
+/* [!] The scan step is the erase unit the resident 2nd bootloader actually
+ * uses, measured by disassembling it (issue #88): it walks `addr & ~0xFFF` in
+ * 4 KB steps and never issues a 32 KB, 64 KB or chip erase.  The layout check
+ * rounds destroyed footprints to the same 4 KB, so a survey and the layout it
+ * surveys now agree on what one write can disturb. */
 #define SCAN_STEP        0x1000u
 #define SCAN_MAX_RECORDS 64u
 /* Yield often enough that a 16 MB walk cannot monopolise the console. */

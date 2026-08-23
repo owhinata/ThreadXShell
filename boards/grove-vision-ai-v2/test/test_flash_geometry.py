@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 ThreadX Shell Project
-"""Host tests for cmake/flash_geometry.cmake (issue #85).
+"""Host tests for cmake/flash_geometry.cmake (issues #85, #88).
 
 WHY THIS RUNS A REAL `cmake`
 
-The four numbers in that file describe the part and the resident bootloader.
+The five numbers in that file describe the part and the resident bootloader.
 They were CACHE STRING entries when the firmware reservation first shrank to
 2 MB, and that was a fail-open of a specific shape: the SAME values declare the
 layout AND configure the check over it, so one -D moved the rule and its
@@ -18,12 +18,23 @@ fix:
                                      bootloader refuses with ERR_IMAGE_SZ
   -DGROVE_FW_SLOTS=1             ->  blob starts at 0x100000, so blob owns the
                                      inactive firmware slot
-  -DGROVE_ERASE_GRAN=0x1000      ->  slot-header shrinks to 0xfff000:0x1000 and
+  -DGROVE_SLOT_HDR_COPIES=1      ->  slot-header shrinks to 0xfff000:0x1000 and
                                      blob-tail grows to 0xfff000, swallowing the
                                      BACKUP slot header at 0xFFE000
+  -DGROVE_ERASE_GRAN=0x100       ->  the reservation shrinks to 512 B at
+                                     0xfffe00 so BOTH headers land in blob-tail,
+                                     and destroyed footprints stop being rounded
+                                     to what the bootloader actually erases
   -DGROVE_FLASH_SIZE=0x2000000   ->  slot-header moves to 0x1ff0000, off the end
                                      of the real part, so BOTH real headers at
                                      0xFFE000/0xFFF000 end up inside blob-tail
+
+[!] THE ERASE GRANULARITY AND THE HEADER COPY COUNT ARE TWO FACTS (issue #88).
+The header span used to be derived from the granularity -- "one erase block" --
+so tightening the rounding to the measured 4 KB would have shrunk the
+reservation onto a single sector.  That is the -DGROVE_SLOT_HDR_COPIES=1 case
+above, and it is why the derivation is tested as `size - gran * copies` rather
+than trusting that one number happens to cover both copies.
 
 The fix is that a disagreeing cache entry is a hard error.  The refusal IS the
 enforcement, so it is tested by driving the real file through a real configure
@@ -53,12 +64,13 @@ GEOMETRY = os.path.normpath(os.path.join(HERE, "..", "cmake",
 # What the file must produce when nobody argues with it.
 EXPECT = {
     "GROVE_FLASH_SIZE":        0x1000000,
-    "GROVE_ERASE_GRAN":        0x10000,
+    "GROVE_ERASE_GRAN":        0x1000,
+    "GROVE_SLOT_HDR_COPIES":   2,
     "GROVE_FW_SLOT_SIZE":      0x100000,
     "GROVE_FW_SLOTS":          2,
     "GROVE_FW_RESERVED":       0x200000,
-    "GROVE_SLOT_HDR_ADDR":     0xFF0000,
-    "GROVE_SLOT_HDR_RESERVED": 0x10000,
+    "GROVE_SLOT_HDR_ADDR":     0xFFE000,
+    "GROVE_SLOT_HDR_RESERVED": 0x2000,
 }
 
 fails = 0
@@ -154,20 +166,24 @@ def main():
             slot = int(values["GROVE_FW_SLOT_SIZE"], 0)
             slots = int(values["GROVE_FW_SLOTS"], 0)
             gran = int(values["GROVE_ERASE_GRAN"], 0)
+            copies = int(values["GROVE_SLOT_HDR_COPIES"], 0)
             size = int(values["GROVE_FLASH_SIZE"], 0)
             if int(values["GROVE_FW_RESERVED"], 0) != slot * slots:
                 print("  FAIL GROVE_FW_RESERVED is not slot size * slot count")
                 fails += 1
-            elif int(values["GROVE_SLOT_HDR_ADDR"], 0) != size - gran:
-                print("  FAIL GROVE_SLOT_HDR_ADDR is not flash size - erase block")
+            elif int(values["GROVE_SLOT_HDR_RESERVED"], 0) != gran * copies:
+                print("  FAIL GROVE_SLOT_HDR_RESERVED is not erase block * copies")
+                fails += 1
+            elif int(values["GROVE_SLOT_HDR_ADDR"], 0) != size - gran * copies:
+                print("  FAIL GROVE_SLOT_HDR_ADDR is not flash size - reservation")
                 fails += 1
             else:
                 print("  ok   the derived values follow from the measurements")
 
             # [!] The reservation must cover BOTH copies of the slot header:
             # flash_end - 0x1000 and flash_end - 0x2000.  This is the property
-            # -DGROVE_ERASE_GRAN=0x1000 destroyed, and it is worth stating as a
-            # property rather than trusting that 64 KB happens to be enough.
+            # -DGROVE_SLOT_HDR_COPIES=1 destroys, and it is worth stating as a
+            # property rather than trusting that the span happens to be enough.
             hdr = int(values["GROVE_SLOT_HDR_ADDR"], 0)
             if hdr > size - 0x2000:
                 print(f"  FAIL the slot-header reservation starts at 0x{hdr:X}, "
@@ -179,9 +195,9 @@ def main():
         # --- a cache entry that AGREES is accepted -----------------------
         # Every build directory configured before this file existed has these.
         expect_ok(tmp, "an inherited cache entry with the same value is accepted",
-                  ["GROVE_ERASE_GRAN=0x10000", "GROVE_FW_SLOTS=2"])
+                  ["GROVE_ERASE_GRAN=0x1000", "GROVE_FW_SLOTS=2"])
         expect_ok(tmp, "the same value written differently is accepted",
-                  ["GROVE_ERASE_GRAN=65536"])
+                  ["GROVE_ERASE_GRAN=4096"])
 
         # --- a cache entry that DISAGREES is refused ---------------------
         # One case per exploit measured before the fix; see the module header.
@@ -191,7 +207,13 @@ def main():
             ("dropping to one firmware slot is refused",
              "GROVE_FW_SLOTS=1"),
             ("a smaller erase granularity is refused",
-             "GROVE_ERASE_GRAN=0x1000"),
+             "GROVE_ERASE_GRAN=0x100"),
+            ("a larger erase granularity is refused",
+             "GROVE_ERASE_GRAN=0x10000"),
+            ("dropping to one slot-header copy is refused",
+             "GROVE_SLOT_HDR_COPIES=1"),
+            ("inventing a third slot-header copy is refused",
+             "GROVE_SLOT_HDR_COPIES=3"),
             ("a larger flash than the part is refused",
              "GROVE_FLASH_SIZE=0x2000000"),
         ):

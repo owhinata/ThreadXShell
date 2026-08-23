@@ -2229,6 +2229,48 @@ depend on a record this port does not own would turn somebody else's
 recoverable damage into our unrecoverable refusal. The acceptance condition is
 only that the two probe words differ.
 
+[!] **The probe invalidates the lines it is about to read** (issue #88). The
+vendor's `enable_XIP()` ends with
+`hx_InvalidateDCache_by_Addr(alias_base, 512)` -- 512 bytes, at the base,
+whatever the caller intends to read. Word 0 falls inside that; the second probe
+does not, and neither would any range a writer had just changed. So a read
+after XIP comes back up could be answered from a line cached before it went
+down, and the check that says "the window is healthy" would never reach the bus.
+
+Today that is latent rather than live: bring-up runs once, on a window that has
+not existed before, so there is nothing stale to find. It is done anyway,
+because the probe exists precisely to not take the window's health on trust, and
+"nothing caches this line yet" is the assumption that stops holding the moment
+issue #88's writer drops XIP and brings it back.
+
+### The lifecycle has a fifth state for writing
+
+`NOR_ST_WRITING` (issue #88). A write drops XIP -- the vendor's erase and
+program entry points refuse outright while it is on -- so the alias is down for
+the duration and readers have to be kept out. It is not a teardown: the
+transaction restores XIP, re-probes and commits back to `NOR_ST_XIP`, or fails
+and commits to `NOR_ST_FAULTED`. "OFF is reached once, at boot" still holds;
+what changed is that OFF is no longer the only state XIP can be left for.
+
+Two rules in `nor_write_decide()` are worth stating because the wider version of
+each is what fails open:
+
+- **the state and the reader mask are read together.** A writer that sampled
+  "no readers" and then dropped XIP leaves the interval in between, and
+  `nor_acquire()` only has to land there once for a reader to be handed a lease
+  on a window that is about to disappear. The caller that gets `NOR_WR_GO`
+  publishes `NOR_ST_WRITING` before releasing the same critical section.
+- **`NOR_ST_OFF` is BUSY, not "bring it up".** A writer needs the QSPI master
+  open, but bring-up is a reader's errand -- vendor XIP setup, a DMA wait, the
+  EPK snapshot. Letting a writer own it would put two unrelated transactions in
+  one path. The refusal is answerable: bring the window up, then write.
+
+[!] **This is the decision layer only.** Nothing calls `nor_write_decide()`
+yet, so `--gc-sections` drops it from the image; the procedure that will is the
+writer itself. `test/test_nor_state.c` is its only consumer today and walks
+every state against every reader mask -- which is what `nor_state.h` says to do
+with decisions hardware cannot be steered into.
+
 [!] **And bring-up is not free.** It permanently changes MPU state and takes one
 EPK slot for the rest of the session. Not new capacity -- `nn open` already does
 it and the interrupt is one line either way -- but now reachable from a

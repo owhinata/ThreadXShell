@@ -601,6 +601,10 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   [!] **単一インスタンスの拒否はコンソールから再現不能**（bg は低優先度 + NO_TIME_SLICE）。
   ホストテストが唯一の検査で、実機手順に書くと**理由の違う pass** を報告することになる。
   **XIP probe は writable interval の外に置く**（`_Static_assert` で強制。#90 以前は blob 内）。
+  [!] **probe は読む前に自分で invalidate する**（#88）— ベンダの `enable_XIP` は
+  **base から 512 B しか無効化しない**（probe B も writer が変えた範囲も外）。
+  [!] **`NOR_ST_WRITING`**（#88）: **state と reader マスクは同一クリティカルセクションで読み、
+  GO を得た者が publish してから抜ける**。**`NOR_ST_OFF` は BUSY**（bring-up は reader の仕事）。
   [!] ただし**「read-only」と書かない** — 配列は触らないが、初回 bring-up はベンダの
   quad-enable 経由で **NOR の不揮発ステータスレジスタ（QE ビット）を書く**（#86 の
   adversarial review 指摘）。`nn open` が従来からやっていることで新規ではないが、

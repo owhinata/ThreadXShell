@@ -23,6 +23,10 @@ enum nor_acquire nor_acquire_decide(enum nor_state st)
 		return NOR_ACQ_TAKE;
 	case NOR_ST_ENABLING:
 		return NOR_ACQ_BUSY;
+	/* A writer has dropped XIP; the alias is not readable until it commits
+	 * back (issue #88).  BUSY and not FAULTED: this one really does clear. */
+	case NOR_ST_WRITING:
+		return NOR_ACQ_BUSY;
 	case NOR_ST_FAULTED:
 		return NOR_ACQ_FAULTED;
 	default:
@@ -91,8 +95,34 @@ const char *nor_state_name(enum nor_state st)
 	case NOR_ST_OFF:      return "off";
 	case NOR_ST_ENABLING: return "enabling";
 	case NOR_ST_XIP:      return "xip";
+	case NOR_ST_WRITING:  return "writing";
 	case NOR_ST_FAULTED:  return "faulted";
 	default:              break;
 	}
 	return "?";
+}
+
+enum nor_write nor_write_decide(enum nor_state st, uint32_t live)
+{
+	/* Enumerated for the same reason acquire is (nor_state.h): the wider
+	 * tests here are "not WRITING" -- which starts a writer from OFF, before
+	 * the QSPI master is open -- and "state == XIP" alone, which starts one on
+	 * top of readers whose window it is about to remove. */
+	switch (st) {
+	case NOR_ST_XIP:
+		/* Read WITH the state, not after it.  A writer that trusted a
+		 * separately-sampled reader count would be deciding on two facts
+		 * that were never true at the same instant. */
+		return (live == 0u) ? NOR_WR_GO : NOR_WR_BUSY;
+	case NOR_ST_OFF:
+	case NOR_ST_ENABLING:
+	case NOR_ST_WRITING:
+		return NOR_WR_BUSY;
+	case NOR_ST_FAULTED:
+		return NOR_WR_FAULTED;
+	default:
+		break;
+	}
+	/* Unknown means corrupted.  Refuse terminally rather than invitingly. */
+	return NOR_WR_FAULTED;
 }

@@ -59,6 +59,8 @@
 #include "WE2_device.h"          /* CMSIS core: MPU, PRIMASK, barriers        */
 #include "spi_eeprom_comm.h"
 
+#include "WE2_core.h"        /* hx_InvalidateDCache_by_Addr */
+
 #include "epk_irq_wrap.h"
 
 #define LOG_TAG "nor"
@@ -130,6 +132,37 @@ static int fail(const char *why)
 	nor.state = NOR_ST_FAULTED;
 	LOG_ERR("%s", why);
 	return -1;
+}
+
+/* This part's D-cache line, as npu_cache.c already assumes. */
+#define NOR_CACHE_LINE          32u
+
+/*
+ * Invalidate [off, off+len) of the alias, rounded out to whole cache lines.
+ *
+ * [!] THE VENDOR DOES NOT DO THIS FOR US, AND NOT BECAUSE IT FORGOT ONE CALL.
+ * hx_lib_qspi_eeprom_enable_XIP() ends with
+ * hx_InvalidateDCache_by_Addr(alias_base, 512) -- five hundred and twelve
+ * bytes, at the base, regardless of what the caller is about to read.  Word 0
+ * happens to fall inside that; the second probe does not, and neither would any
+ * range issue #88's writer had just changed.  So a read after XIP comes back up
+ * can be answered from a line cached before it went down: the check that says
+ * "the window is healthy" would never reach the bus.
+ *
+ * Today that is latent rather than live -- bring-up runs once, on a window that
+ * has not existed before, so there is nothing cached to be stale.  It is being
+ * fixed here anyway because the whole reason the probe exists is to not take
+ * the window's health on trust, and "no path caches this line yet" is exactly
+ * the kind of assumption that stops being true when the writer lands.
+ */
+static void invalidate_alias(uint32_t off, uint32_t len)
+{
+	uint32_t lo = (NOR_XIP_BASE + off) & ~(NOR_CACHE_LINE - 1u);
+	uint32_t hi = (NOR_XIP_BASE + off + len + NOR_CACHE_LINE - 1u) &
+	              ~(NOR_CACHE_LINE - 1u);
+
+	hx_InvalidateDCache_by_Addr((volatile void *)(uintptr_t)lo,
+	                            (int32_t)(hi - lo));
 }
 
 static uint32_t rd32(uint32_t addr)
@@ -233,6 +266,11 @@ static int enable_xip_and_verify(void)
 	if ((r->mpu_ctrl_s & MPU_CTRL_ENABLE_Msk) == 0u)
 		return fail("the Secure MPU is disabled after XIP enable");
 
+	/* Invalidate every line the probe is about to read, THEN order it, THEN
+	 * read.  The vendor's own 512 bytes at the base do not cover probe B, and
+	 * a probe served from cache proves nothing about the window. */
+	invalidate_alias(NOR_PROBE_A_OFF, 4u);
+	invalidate_alias(NOR_PROBE_B_OFF, 8u);   /* both magic words */
 	__DSB();
 	__ISB();
 

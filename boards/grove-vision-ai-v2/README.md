@@ -2268,11 +2268,17 @@ other one back with `nn open` + a run.
 
 `MicroMutableOpResolver<1>` with `AddEthosU()` and nothing else.  A Vela-compiled
 model folds its whole graph into the single `ethos-u` custom operator, so there
-is no CPU kernel to register and no reason for CMSIS-NN -- which matters here
-because CMSIS-NN is Helium, and Helium is what the predication scan keeps out of
-the image.  A model Vela did NOT fully offload fails at `AllocateTensors` with a
-missing-operator error rather than quietly falling back to a scalar reference
-kernel; a silent fallback would be slow in a way nobody would think to look for.
+is no CPU kernel to register and no reason for CMSIS-NN.  A model Vela did NOT
+fully offload fails at `AllocateTensors` with a missing-operator error rather
+than quietly falling back to a scalar reference kernel; a silent fallback would
+be slow in a way nobody would think to look for.
+
+[!] The reason is **not** that something keeps Helium out of the image.  It used
+to say that, naming the MVE predication scan -- which issue #42 deleted, because
+its premise was wrong and issue #66 had already shown it could not detect a
+single instruction it named.  MVE is permitted here now.  Keeping the resolver at
+one operator is a choice about not linking CMSIS-NN and about failing loudly, and
+should be argued on those grounds.
 
 This is a **policy**, not a cache constraint.  Before issue #46 a CPU operator
 running after the `ethos-u` one inside `Invoke()` would have read the NPU's

@@ -8,15 +8,20 @@
  *
  *   nor info    what the lifecycle established, and what is true now
  *   nor scan    walk the window and report what is not erased
+ *   nor cycle   take the window down and bring it back, touching no data
+ *   nor erase   erase the flash covering a range, inside `blob` only
+ *   nor write   program a byte pattern, inside `blob` only
  *
- * NO `nor write` AND NO `nor erase`, ON PURPOSE.  This flash holds the
- * bootloader in its first 2 MB and the bootloader's slot header in its last
- * block.  A bounded write path is issue #88; exposing a raw one here would make
- * the bounds check that issue exists to build pointless before it was written.
+ * THE LAST THREE ARE ISSUE #88 PART E, AND THEY ARE THIN ON PURPOSE.  All the
+ * judgement is in port/nor/nor_write.c and port/sdk_seam/nor_seam.c; this file
+ * parses two numbers, prints the footprint before it is destroyed and prints
+ * what came back.  There is no raw-opcode subcommand and no way to name an
+ * address outside the writable interval -- the interval is the seam's, read out
+ * of its own .rodata record, and the writer refuses before it claims the part.
  *
- * [!] BUT "READ-ONLY" WOULD BE THE WRONG WORD, and an adversarial review was
- * right to say so.  Neither subcommand programs or erases the ARRAY -- and
- * neither is free:
+ * [!] AND "READ-ONLY" WAS ALREADY THE WRONG WORD FOR THE FIRST TWO, which an
+ * adversarial review was right to say before any of this existed.  Neither
+ * `info` nor `scan` programs or erases the ARRAY -- and neither is free:
  *
  *   - the first bring-up runs the vendor's quad-enable, which sets WEL and
  *     writes the QE bit of the NOR's non-volatile status register.  That is a
@@ -26,13 +31,15 @@
  *   - and bring-up permanently changes MPU state and takes one EPK slot for the
  *     rest of the session.  Also not new capacity, also newly reachable.
  *
- * Worth knowing before running one on a board about to need its 31/32
- * high-water mark, or on a part whose endurance is in question (issue #89).
+ * `nor cycle` is the same story, twice per run: taking the window down clears
+ * that QE bit and bringing it back sets it again.  So the one subcommand that
+ * touches no data still costs two status-register writes, which is worth
+ * knowing on a part whose endurance is not documented (issue #89).
  *
  * WHY `nor scan` EARNS ITS PLACE.  The 12.6 MB reserved for issue #49's blob
  * was surveyed with seventeen `devmem peek`s.  That is sampling, not a scan: it
  * can find an occupant but cannot say a region is empty.  Nothing should write
- * there on the strength of it.
+ * there on the strength of it -- and now something can.
  */
 #include "cli.h"
 
@@ -41,6 +48,7 @@
 
 #include "nor_flash.h"
 #include "nor_seam.h"
+#include "nor_write.h"
 
 /* The partition edges, from board.cmake -- the same variables
  * check_flash_partitions.py consumes, so the labels here and the layout the
@@ -155,8 +163,8 @@ static int cmd_nor_info(struct cli_instance *sh, int argc, char **argv)
 	 * line shows is the one the wrappers enforce -- and so that
 	 * cmake/check_nor_seam.py, which reads the same twelve bytes out of the
 	 * linked image, is checking a fact somebody can also see on the device.
-	 * There is no `nor erase` or `nor write` yet; the bounds exist before the
-	 * commands do, which is the order issue #88 is being built in. */
+	 * It is also the only place `nor erase` and `nor write` get their bounds
+	 * from -- this file holds no copy of them. */
 	cli_print(sh, "writable : 0x%08lx..0x%08lx, %lu B unit\r\n",
 	          (unsigned long)nor_seam_limits.lo,
 	          (unsigned long)nor_seam_limits.hi,
@@ -283,12 +291,212 @@ static int cmd_nor_scan(struct cli_instance *sh, int argc, char **argv)
 	return stopped ? 1 : 0;
 }
 
+/* --- the write path (issue #88 Part E) ------------------------------------
+ *
+ * Three subcommands over one transaction.  What each of them is allowed to do
+ * is decided in port/nor/nor_write.c and checked again in the seam; what is
+ * here is argument parsing, the footprint printed BEFORE it is destroyed, and
+ * the report printed after.
+ */
+
+/* [!] A WRITE CANNOT BRING THE WINDOW UP -- that is a reader's errand, and
+ * nor_write_decide() answers NOR_WR_BUSY from NOR_ST_OFF for a reason worth
+ * keeping (nor_state.h).  So a write subcommand does the reader's part first,
+ * explicitly, and hands the lease straight back.
+ *
+ * That leaves a gap between the release and the claim.  The claim is what
+ * closes it: if anything took a lease in between, it refuses rather than
+ * waiting, and the user sees "busy" instead of a window pulled out from under
+ * somebody.  Doing it the other way round -- having the writer bring the part
+ * up itself -- is what would put two unrelated transactions in one path. */
+static int nor_cmd_bring_up(struct cli_instance *sh)
+{
+	uint32_t token;
+
+	if (nor_cmd_enter(sh, &token) != 0)
+		return -1;
+	(void)nor_release(token);
+	return 0;
+}
+
+/* Everything a transaction reports, in one shape, so the three subcommands
+ * cannot describe the same outcome differently. */
+static int nor_cmd_report(struct cli_instance *sh, enum nor_write_status st,
+                          const struct nor_write_report *r)
+{
+	if (r->jedec_ok)
+		cli_print(sh, "jedec    : %02x %02x %02x (re-read with the window "
+		              "down)\r\n", r->jedec[0], r->jedec[1], r->jedec[2]);
+
+	switch (st) {
+	case NOR_WRITE_OK:
+		if (r->span.len == 0u)
+			cli_print(sh, "ok       : the window went down and came back, "
+			              "re-probed; no data touched\r\n");
+		else
+			cli_print(sh, "ok       : %lu B done, %lu B read back\r\n",
+			          (unsigned long)r->done, (unsigned long)r->verified);
+		return 0;
+	case NOR_WRITE_BUSY:
+		cli_error(sh, "nor: busy -- a reader holds the window, or it has "
+		              "never been brought up\r\n");
+		return 1;
+	case NOR_WRITE_REFUSED:
+		cli_error(sh, "nor: refused -- %s\r\n",
+		          r->fail ? r->fail : "outside what this port may write");
+		cli_print(sh, "writable : 0x%08lx..0x%08lx, %lu B unit\r\n",
+		          (unsigned long)nor_seam_limits.lo,
+		          (unsigned long)nor_seam_limits.hi,
+		          (unsigned long)nor_seam_limits.unit);
+		return 1;
+	case NOR_WRITE_NO_TRANSPORT:
+		cli_error(sh, "nor: the part did not answer with the window down; "
+		              "nothing was sent\r\n");
+		return 1;
+	case NOR_WRITE_INCOMPLETE:
+		cli_error(sh, "nor: stopped after %lu B of %lu (vendor returned "
+		              "%ld)\r\n", (unsigned long)r->done,
+		          (unsigned long)r->span.len, (long)r->vendor_rc);
+		cli_print(sh, "         %lu B read back and verified; nothing is "
+		              "claimed about the rest\r\n",
+		          (unsigned long)r->verified);
+		return 1;
+	case NOR_WRITE_FAULTED:
+	default:
+		cli_error(sh, "nor: FAULTED -- %s\r\n",
+		          r->fail ? r->fail : "the transaction could not be verified");
+		if (r->bad_valid)
+			cli_print(sh, "         first at 0x%08lx: read 0x%02x, wanted "
+			              "0x%02x\r\n", (unsigned long)r->bad_off,
+			          r->bad_got, r->bad_want);
+		/* Terminal by design: a mismatch cannot be told from a window that is
+		 * lying about the array, and every later read would inherit that.  See
+		 * port/nor/nor_write.c. */
+		cli_print(sh, "         the port refuses everything until the board "
+		              "is reset\r\n");
+		return 1;
+	}
+}
+
+static int cmd_nor_cycle(struct cli_instance *sh, int argc, char **argv)
+{
+	struct nor_write_report r;
+	enum nor_write_status st;
+
+	(void)argc;
+	(void)argv;
+
+	if (nor_cmd_bring_up(sh) != 0)
+		return 1;
+	/* [!] SAID BEFORE IT RUNS, and phrased as the COST OF THE OPERATION rather
+	 * than as an announcement that it is happening.  This is the subcommand
+	 * somebody reaches for to "check without changing anything", so the cost
+	 * belongs in front of it -- but the transaction can still be refused (a
+	 * reader lease), and a line that said "this is now writing the status
+	 * register" followed by "busy" would be describing something that did not
+	 * happen. */
+	cli_print(sh, "a cycle costs two status-register writes and touches no "
+	              "data\r\n");
+	st = nor_write_cycle(&r);
+	return nor_cmd_report(sh, st, &r);
+}
+
+static int cmd_nor_erase(struct cli_instance *sh, int argc, char **argv)
+{
+	struct nor_write_report r;
+	enum nor_write_status st;
+	struct nor_span span;
+	uint32_t addr, len;
+
+	(void)argc;
+	if (cli_parse_u32(argv[1], &addr) != 0 ||
+	    cli_parse_u32(argv[2], &len) != 0) {
+		cli_error(sh, "nor: bad number\r\n");
+		return 1;
+	}
+	if (nor_cmd_bring_up(sh) != 0)
+		return 1;
+
+	/* [!] THE FOOTPRINT, AND BEFORE THE ERASE RATHER THAN WITH THE REPORT.
+	 * An erase destroys whole units, so naming 16 bytes loses 4 KB and the
+	 * range that is LOST is what a reader of this output needs.  Printing it
+	 * first also matters because the vendor's write path is built on a poll
+	 * with no timeout (nor_write.h): if this ever wedges, the last line on the
+	 * console is what was in flight.
+	 *
+	 * Computed by the same pure function the writer uses, from the same
+	 * interval, so the two cannot disagree -- and this call decides nothing.
+	 * The writer computes it again and its answer is the one that governs. */
+	if (nor_span_erase(nor_seam_limits.lo, nor_seam_limits.hi,
+	                   nor_seam_limits.unit, addr, len, &span) == NOR_SPAN_OK)
+		cli_print(sh, "footprint: 0x%08lx..0x%08lx (%lu B, %lu sector(s))\r\n",
+		          (unsigned long)span.addr,
+		          (unsigned long)(span.addr + span.len),
+		          (unsigned long)span.len,
+		          (unsigned long)(span.len / nor_seam_limits.unit));
+	else
+		cli_print(sh, "request  : 0x%08lx +%lu B\r\n",
+		          (unsigned long)addr, (unsigned long)len);
+
+	st = nor_write_erase(addr, len, &r);
+	return nor_cmd_report(sh, st, &r);
+}
+
+/* The pattern `nor write` programs.  One program page, which is the unit the
+ * part itself programs in and is enough to prove the path in both directions:
+ * write a sentinel that is not 0xFF, read it through the restored window, then
+ * erase and see 0xFF.  Bulk data does not come through a console -- issue #49's
+ * blob writer calls nor_write_program() directly. */
+static uint8_t write_pattern[NOR_PROGRAM_PAGE];
+
+static int cmd_nor_write(struct cli_instance *sh, int argc, char **argv)
+{
+	struct nor_write_report r;
+	enum nor_write_status st;
+	uint32_t addr, len, byte = 0xA5u;
+
+	if (cli_parse_u32(argv[1], &addr) != 0 ||
+	    cli_parse_u32(argv[2], &len) != 0 ||
+	    (argc >= 4 && cli_parse_u32(argv[3], &byte) != 0)) {
+		cli_error(sh, "nor: bad number\r\n");
+		return 1;
+	}
+	if (len == 0u || len > sizeof(write_pattern)) {
+		cli_error(sh, "nor: length must be 1..%lu (one program page)\r\n",
+		          (unsigned long)sizeof(write_pattern));
+		return 1;
+	}
+	if (byte > 0xFFu) {
+		cli_error(sh, "nor: pattern must be a byte\r\n");
+		return 1;
+	}
+	memset(write_pattern, (int)byte, len);
+
+	if (nor_cmd_bring_up(sh) != 0)
+		return 1;
+
+	cli_print(sh, "program  : 0x%08lx +%lu B of 0x%02lx\r\n",
+	          (unsigned long)addr, (unsigned long)len, (unsigned long)byte);
+	/* [!] No erase first, deliberately.  Programming only clears bits, so
+	 * writing over something that is not erased leaves the AND of the two --
+	 * and the read-back catches that, terminally.  An erase hidden inside this
+	 * command would destroy 4 KB to write 256 bytes, without saying so. */
+	st = nor_write_program(addr, write_pattern, len, &r);
+	return nor_cmd_report(sh, st, &r);
+}
+
 CLI_SUBCMD_SET_CREATE(nor_subcmds,
 	CLI_CMD_ARG_USAGE(info, NULL, "lifecycle, JEDEC id, wrapped IRQ, MPU/SCU",
 	                  NULL, cmd_nor_info, 1, 0),
 	CLI_CMD_ARG_USAGE(scan, NULL, "walk the window, report non-erased extents",
 	                  NULL, cmd_nor_scan, 1, 0),
+	CLI_CMD_ARG_USAGE(cycle, NULL, "window down and back up; no data touched",
+	                  NULL, cmd_nor_cycle, 1, 0),
+	CLI_CMD_ARG_USAGE(erase, NULL, "erase <addr> <len> (whole 4 KB sectors)",
+	                  "<addr> <len>", cmd_nor_erase, 3, 0),
+	CLI_CMD_ARG_USAGE(write, NULL, "write <addr> <len> [byte] (one page max)",
+	                  "<addr> <len> [byte]", cmd_nor_write, 3, 1),
 	CLI_SUBCMD_SET_END);
 
 CLI_CMD_REGISTER(nor, nor_subcmds,
-                 "inspect the external QSPI NOR (no array writes)", NULL, 1, 0);
+                 "inspect and write the external QSPI NOR", NULL, 1, 0);

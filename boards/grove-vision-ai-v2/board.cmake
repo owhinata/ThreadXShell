@@ -105,10 +105,13 @@ include("${BOARD_DIR}/cmake/flash_geometry.cmake")
 # that `nor scan`'s labels and the layout check cannot drift apart (issue #86).
 # Leaving them below meant the compile definitions expanded to nothing, which
 # the C compiler caught only because an empty initialiser is a syntax error.
-# [!] The blob area (issue #85, reserved for #49 Step 2).  Declared but written
-# by nothing yet, and that is the point: a reservation is a property of
-# addresses, so having it checked from the day it exists is what stops the next
-# partition from being placed on top of it.
+# [!] The blob area (issue #85, reserved for #49 Step 2).  It has a bounded
+# WRITER since issue #88 Part C -- port/nor/nor_write.c, and `nor erase` /
+# `nor write` on top of it -- and this is the only partition that writer will
+# touch.  What it still has no writer of is DATA: nothing puts anything
+# meaningful here until #49 Step 2.  The reservation is a property of addresses
+# either way, and having it checked from the day it existed is what stopped the
+# next partition being placed on top of it.
 #
 # Ends on the first block the classification model owns, so the two abut with no
 # unnamed gap.  Derived from the model's address rather than repeating the
@@ -116,10 +119,9 @@ include("${BOARD_DIR}/cmake/flash_geometry.cmake")
 #
 # [!] THAT END MOVED UP BY 44 KB when the granularity became 4 KB (issue #88):
 # the model address is 4 KB aligned but not 64 KB aligned, so 0xB70000..0xB7B000
-# used to round into the model's blocks and now belongs to blob.  Those 44 KB
-# have never been walked by `nor scan` -- the survey predates them -- so they
-# are reserved but NOT yet known to be empty.  Do not write there until a scan
-# has covered them.
+# used to round into the model's blocks and now belongs to blob.  The original
+# survey predates them; they were walked afterwards, on hardware, and read 0xFF
+# throughout (issue #88 Part A).
 #
 # [!] WHAT IS THERE TODAY IS NOT OURS, AND THE FIRST WRITE DESTROYS IT.  The
 # factory SenseCraft firmware left a FlashDB KVDB at 0x300000 -- FlashDB's
@@ -614,6 +616,12 @@ add_library(shell_objs OBJECT
     # brought up inside npu_hw_init()'s EPK snapshot, so `nn close` disabled it.
     "${BOARD_DIR}/port/nor/nor_state.c"
     "${BOARD_DIR}/port/nor/nor_flash.c"
+    # The bounded write transaction (issue #88 Part C).  nor_span.c is the pure
+    # arithmetic the host test walks -- which bytes a request names, and what an
+    # erase rounds them to -- and nor_write.c is the one object that may call
+    # the vendor's erase and program entry points (see NOR_SEAM_CALLERS below).
+    "${BOARD_DIR}/port/nor/nor_span.c"
+    "${BOARD_DIR}/port/nor/nor_write.c"
     # The bounded door to the vendor's NOR write path (issue #88).  In
     # port/sdk_seam/ and not port/nor/ because it is the same KIND of thing as
     # timer_seam.c: a board-owned definition of a name -Wl,--wrap redirects.
@@ -895,12 +903,15 @@ ${LIBSPIEEPROM}
 get_filename_component(_grove_gcc_bin "${CMAKE_C_COMPILER}" DIRECTORY)
 get_filename_component(GROVE_TOOLCHAIN_ROOT "${_grove_gcc_bin}" DIRECTORY)
 
-# The objects allowed to call the wrapped names.  EMPTY on purpose: issue #88
-# Part D lands the seam and this gate, and Part C lands the writer that will be
-# the first entry here.  Until then "nothing may call the vendor write path" is
-# the rule, and the probe below is what stops that being a rule about an empty
-# set.
-set(NOR_SEAM_CALLERS "")
+# The objects allowed to call the wrapped names.  ONE (issue #88 Part C): the
+# transaction in port/nor/nor_write.c, which bounds every call before it makes
+# it and reads the array back afterwards.
+#
+# [!] THE ENTRY IS AN OBJECT, NOT A DIRECTORY OR A SYMBOL.  port/nor/ also holds
+# the lifecycle, and nor_flash.c is where a future "just erase it here" would be
+# most tempting to write; naming the file rather than the directory is what
+# makes that a gate failure instead of a diff nobody has to justify.
+set(NOR_SEAM_CALLERS "port/nor/nor_write.c.obj")
 set(NOR_SEAM_CALLER_FLAGS "")
 foreach(_obj IN LISTS NOR_SEAM_CALLERS)
     list(APPEND NOR_SEAM_CALLER_FLAGS "--allow-caller" "${_obj}")

@@ -2122,11 +2122,15 @@ the serial port open and a reset already pressed.
 ```
 nor info    the lifecycle, the JEDEC id, the wrapped IRQ, MPU/SCU read-back
 nor scan    walk all 16 MB and report every extent that is not erased
+nor cycle   take the window down and bring it back; no data touched
+nor erase   erase the flash covering <addr> <len>, inside `blob` only
+nor write   program <addr> <len> [byte], inside `blob` only, one page max
 ```
 
-There is no `nor write` or `nor erase`, and that is deliberate: a bounded write
-path is issue #88, and a raw one here would make the bounds check that issue
-exists to build pointless before it was written.
+The last three are issue #88 Part E and are thin on purpose: all the judgement
+is in `port/nor/nor_write.c` and `port/sdk_seam/nor_seam.c` (below).  There is
+no raw-opcode subcommand and no way to name an address outside the writable
+interval.
 
 **Every reader of the window holds a lease**, and there are three single-instance
 slots (`port/nor/nor_state.h`):
@@ -2267,11 +2271,12 @@ each is what fails open:
   EPK snapshot. Letting a writer own it would put two unrelated transactions in
   one path. The refusal is answerable: bring the window up, then write.
 
-[!] **This is the decision layer only.** Nothing calls `nor_write_decide()`
-yet, so `--gc-sections` drops it from the image; the procedure that will is the
-writer itself. `test/test_nor_state.c` is its only consumer today and walks
-every state against every reader mask -- which is what `nor_state.h` says to do
-with decisions hardware cannot be steered into.
+[!] **The decision cannot be produced from a console even now that the writer
+exists.** Two callers arriving in the same window needs two threads, and this
+board has one shell whose background jobs run below the foreground one under
+`TX_NO_TIME_SLICE`. `test/test_nor_state.c` walks every state against every
+reader mask instead -- which is what `nor_state.h` says to do with decisions
+hardware cannot be steered into.
 
 [!] **And bring-up is not free.** It permanently changes MPU state and takes one
 EPK slot for the rest of the session. Not new capacity -- `nn open` already does
@@ -2378,15 +2383,21 @@ checked in the instructions instead, because at `-Os` the compiler rewrites
 `lo <= a && a < hi` into `a - lo <u hi - lo` and the interval's end never
 appears.
 
-#### It is checked on the probe, because the firmware has no writer yet
+#### It is checked on the firmware AND on the probe
 
-Part D lands the seam and the gate; Part C lands the writer. Until then nothing
-in `shell` calls the write path, the whole seam is garbage-collected out of the
-firmware, and every rule above would be true of an empty set -- the shape of
-gate this board has already been bitten by twice (issues #66, #42). So
-`seam_probe` forces references to the four wrappers, and the gate runs there
-with `--require-live-wrappers`: all four wrappers present, and the two permitted
-vendor entry points present with them, or it fails.
+Since Part C the shipped image really does contain the write path:
+`port/nor/nor_write.c` calls `hx_lib_qspi_eeprom_erase_sector` and
+`hx_lib_qspi_eeprom_write`, so the gate on `shell` audits two live `__real_`
+edges and one authorised caller instead of an empty set.  `board.cmake` names
+that one object -- **the object, not the directory**: `port/nor/` also holds the
+lifecycle, and `nor_flash.c` is where a future "just erase it here" would be
+most tempting to write.
+
+`seam_probe` is kept anyway.  It forces references to all four wrappers and runs
+the gate with `--require-live-wrappers`, which covers the two the firmware does
+**not** call: `erase_all` and `word_write` are refused without naming `__real_`,
+so they are collected out of `shell` and only the probe can assert anything
+about them.  It is also the link the negative tests are built from.
 
 `cmake/fixtures/run_fixture_tests.py` carries a pristine control and ten
 negative tests for it, each a real link of the real objects with one thing
@@ -2414,10 +2425,185 @@ Disassembly of the pinned archive:
 - `hx_lib_qspi_eeprom_write` puts `movs r0, #0` after the last `waitWIP` and
   returns unconditionally, discarding every `DMA_send` in its loop.
 
+`clear_write_protect` itself has exactly one exit, `movs r0, #0`, so the erase's
+"success" return is a constant.
+
 So **the only truth about whether an operation happened is reading the array
-back**, and that is a requirement on the writer (Part C), not something the seam
-can supply. A negative from the *seam* is different and does mean something
-definite: `NOR_SEAM_REFUSED` says nothing was sent to the part.
+back**, which is what the writer does (below) and not something the seam can
+supply.  The negatives are still worth having, because they are issued *before*
+anything reaches the wire: `-28` for a window that is still up and `-50` for a
+write-enable latch that would not set after 21 tries.  And a negative from the
+*seam* is different again: `NOR_SEAM_REFUSED` says nothing was sent to the part.
+
+### The write transaction (issue #88 Part C)
+
+`port/nor/nor_write.c`. One call is the whole thing, because the vendor refuses
+erase and program while the memory-mapped window is up (`-28`) and that window
+is what every reader of this part uses:
+
+1. **claim** -- state `NOR_ST_XIP`, no reader leases, publish `NOR_ST_WRITING`
+   under the same critical section that read them
+2. **drop the window**, and establish that it went by reading `xip_en` and
+   `isp_write_en` back out of the SCU
+3. **re-read the JEDEC id** -- the canary, below
+4. **the operation**, one 4 KB unit or one 256 B program page per vendor call
+5. **bring the window back**, verify it and re-probe it
+6. **read the array back** through the window and compare
+7. **commit** -- `NOR_ST_XIP`, or terminal `NOR_ST_FAULTED`
+
+Steps 5 and 7 run whatever happened in step 4: a transaction that gave up
+part-way still owes every reader a window.
+
+The bounds are asked twice on purpose. `nor_span.c` answers "which bytes" before
+the part is claimed, so a bad request costs nothing and can say which rule it
+broke; the seam asks again at the door, on every single call, and that is the
+one that holds when the caller is not this file.
+
+#### [!] Step 3 is a canary, and it is the only step here about liveness
+
+Every piece of the vendor's write path is built on
+`hx_lib_spi_eeprom_DMA_send_recv`, which spins on a flag a completion interrupt
+clears and has **no timeout**: `waitWIP`, `set_quad_mode`, `clear_write_protect`
+and `readWEL` are all made of it. A throwaway branch in August 2026 hung the
+console exactly there, on the first such call after the window came down, and
+nothing but a reset recovered it.
+
+Nothing in this port can bound a spin inside a prebuilt archive. What it can do
+is put the **first** one on a call that changes nothing -- `read_ID`, which uses
+the identical `set_DMA_config` + `DMA_send_recv` pair -- so that a part which
+has stopped answering costs a reset instead of a half-erased region. It also
+turns "the transport still works with the window down" from an assumption into a
+checked precondition, and compares the answer with what bring-up recorded.
+
+`nor cycle` is that preamble and postamble with no operation between them, which
+makes it the first thing to run on hardware: it exercises every risky step
+without putting an erase on the wire.
+
+#### The QSPI's DMA controller is not the one the LCD and camera use
+
+Issue #88 left this as an open item, to be **measured** rather than derived: the
+vendor takes a DMA id at runtime and hands it to `hx_drv_dmac_get_dev()`, so
+static analysis could not say which controller instance the SSPI panel and the
+camera datapath end up on.  If any of them shared DMAC1 with the QSPI master, a
+write transaction running beside a preview would need an arbiter this port does
+not have -- so the measurement was a hard prerequisite for the first destructive
+command.
+
+It is answerable from the console without going through any of this port's own
+bookkeeping, because IRQ 133 is DMAC1's combined line and the NVIC enable bit is
+readable directly.  On a fresh boot, before anything touches the flash
+(`ISER[4]` is at `0xE000E110`, and 133 is bit 5 = `0x20`):
+
+```
+devmem peek 0xE000E110     -> 0x00000000
+lcd bar                    (the panel's DMA runs)
+camera preview 30          (the camera's DMA runs, 36.2 fps)
+devmem peek 0xE000E110     -> 0x00000000     <- still clear
+nor info                   (brings the window up)
+devmem peek 0xE000E110     -> 0x00000020     <- only now
+```
+
+Neither the panel nor the camera enabled 133, so neither is on DMAC1's combined
+interrupt: **different controller instances**, and no arbiter is needed.
+Measured 2026-08-24 on board #2.
+
+The residual limit is the usual one for a measurement like this: it rules out a
+shared *interrupt*, not a shared controller driven by polling.  Nothing on this
+board does that -- SSPI and WDMA3 are both EPK-wrapped, which means both raise
+interrupts of their own.
+
+#### [!] A transaction writes the status register even when it writes no data
+
+Taking the window down calls the vendor's `set_quad_mode` with the quad-enable
+bit **cleared**, and bringing it back sets it again. The helper reads the
+register first and skips the write when the bit already matches, so it is twice
+per transaction and not more -- but `nor cycle`, the one subcommand that touches
+no data, still costs two non-volatile status-register writes. An erase adds
+`clear_write_protect`, which does the same for the block-protect bits.
+
+The array cannot be lost that way, so nothing here is dangerous. It is not free
+either, on a part whose endurance is not documented (issue #89) -- do not put one
+of these in a loop.
+
+If the board resets between steps 2 and 5 the part is left with its quad bit
+clear. That is the factory state, and the state the 2nd bootloader leaves behind
+after every flash, so it boots.
+
+#### [!] A read-back mismatch is terminal, and that is the deliberate part
+
+Faulting the whole port over a few bytes in `blob` looks disproportionate: it
+stops `nn open` reading a model that has nothing to do with the range that
+failed, until the board is reset. The reason is that a mismatch has two
+explanations this code cannot tell apart --
+
+- the array did not take what the vendor said it took, or
+- **the window is not telling the truth about the array** --
+
+and the second makes every subsequent read of this part suspect, including the
+model `nn` parses in place. A port that carried on would be serving reads it has
+just been given evidence against.
+
+The outcomes where that ambiguity is **absent** do not fault. A vendor entry
+point that refused before putting anything on the wire is `incomplete`: what it
+did accept is read back and verified, nothing is claimed about the rest, and the
+port stays usable. A transport that never answered is `no transport`: nothing
+was sent at all.
+
+That precision is what the page split buys. A chunk that does not cross a page
+boundary is exactly one iteration of the vendor's own loop, so a `-50` from it
+refuses that page and nothing before it -- handing the vendor a long buffer
+instead would let it program several pages and then fail, and "how far it got"
+would be a lie.
+
+#### What is read back, and after what
+
+Exactly the prefix the vendor accepted -- verifying bytes it already said it
+refused would turn a refusal the code understands into a mismatch it does not.
+Before the comparison the writer invalidates that range itself: the vendor's XIP
+restore invalidates 512 bytes at the base of the window and nothing else, so
+without it the comparison could be answered out of lines cached before the
+window went down (by `nor scan`, or by `nn` parsing a model) and never reach the
+part at all.
+
+The window's own re-probe carries one more thing for free. It reads the firmware
+header through the continuous **quad** read, which a part whose quad-enable bit
+did not come back cannot answer -- so step 5 already checks the status register
+went back the way it came.
+
+#### The staging buffer is not about DMA
+
+`hx_lib_qspi_eeprom_write` takes its payload as `uint8_t *` and, on the
+`word_switch` path this port refuses, byte-swaps it **in place**. So each page
+goes through a buffer `nor_write.c` owns, and the caller's bytes are what the
+read-back compares against.
+
+It is **not** there for DMA reachability, and an earlier reading of this board
+had that backwards: the vendor memcpy's the payload into its own DTCM pool
+before any transfer starts, and the bring-up read that identified the fitted die
+used a DTCM stack buffer in both directions. This port's "DMA cannot see TCM"
+rule is about SSPI and WDMA3, not this path.
+
+#### What the console can and cannot do
+
+```
+nor cycle                      the transaction with no operation
+nor erase <addr> <len>         whole 4 KB sectors; prints the footprint first
+nor write <addr> <len> [byte]  one program page of a byte pattern
+```
+
+`nor erase` prints the **footprint** -- what is lost, not what was asked for --
+*before* it runs, both because an erase destroys whole units and because if the
+vendor ever wedges, the last line on the console is what was in flight.
+
+`nor write` is capped at one program page. That is enough to prove the path in
+both directions (write a sentinel that is not `0xFF`, read it back through the
+restored window, erase, see `0xFF`); bulk data does not come through a console,
+and issue #49's blob writer calls `nor_write_program()` directly.
+
+None of the three brings the window up on its own -- that is a reader's errand
+(`NOR_ST_OFF` is `BUSY`). Each does the reader's part explicitly first and hands
+the lease straight back; the claim is what closes the gap in between, because it
+refuses rather than waits.
 
 ### What is actually on this board's flash
 
@@ -2797,9 +2983,18 @@ suspend the calling job with no way back.
 
 `lib_spi_eeprom.a` is linked for one reason -- enabling the read window -- but it
 also defines `erase_all`, `erase_sector`, `write` and `clear_write_protect`, on
-the flash that holds the bootloader.  All of them are on
+the flash that holds the bootloader.  All of them were on
 `check_placement_budget.py`'s forbidden list and verified absent: with
 `--gc-sections`, presence would mean a caller.
+
+[!] **Three of the four are off that list since issue #88 Part C**, because they
+now have one: `erase_sector`, `write` and the `clear_write_protect` the first of
+them calls across objects are all in the shipped image, so asking whether they
+are *present* stopped being a question with an answer.  `erase_all` and
+`word_write` are **not** off -- their wrappers refuse without naming `__real_`,
+which keeps the vendor implementations collectable and keeps that rule covering
+them for good.  What replaced the three is `check_nor_seam.py` (below), which
+asks a strictly harder question.
 
 `setWriteEnable` IS present and is deliberately allowed.  Putting the part into
 QUAD mode writes the QE bit in its status register and that write needs the WEL
@@ -2816,10 +3011,12 @@ that list.  The forbidden-symbol rule is **defence in depth and not exhaustive**
 saying otherwise is worse than saying nothing, because it invites the next
 reader to treat "the list passes" as "there is no write capability".
 
-Since issue #88 Part D the entry points are additionally wrapped, and
-`check_nor_seam.py` asks the question the list cannot: not *is it in the image*
-but *who may reach it*.  That gate's own limits are the same ones, stated where
-it lives -- see **The write seam** above.
+Since issue #88 Part D the entry points are wrapped, and `check_nor_seam.py`
+asks the question the list cannot: not *is it in the image* but *who may reach
+it*.  Part C then gave them a caller -- exactly one, `port/nor/nor_write.c` --
+so that gate is now audited against the shipped firmware and not only against
+the probe.  Its own limits are the same ones as above, stated where it lives:
+see **The write seam** and **The write transaction**.
 
 ## Face detection (`nn detect`, BlazeFace-front 128)
 

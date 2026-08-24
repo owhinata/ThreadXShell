@@ -562,7 +562,9 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   実機で `ERR_IMAGE_SZ` になる）。**焼き先はスロット交替**なので `0x0` も `0x100000` も
   ファームで、どちらか一方が「正」ではない。
   **`0x200000..0xB7B000` は blob 予約**（9,940,992 B）＋ **`0xD50000..0xFFE000` が blob-tail**
-  （2,809,856 B）。**書き手は #49 Step 2 でまだ無い**。
+  （2,809,856 B）。**境界付き writer は #88 で入った**（`nor erase`/`nor write` と
+  `nor_write_program()`。書けるのは `blob` だけで `blob-tail` は含まない）が、
+  **実データの書き手は #49 Step 2 でまだ無い**。
   （`0xB70000..0xB7B000` の 44 KB は #88 で blob に入り、実機の `nor scan` で全 0xFF を確認済み。）
   **2 分割なのは間にモデルがあるからで、
   #49 Step 4 でモデルを blob へ移した時点で予約を削除し、blob は `0x200000..0xFFE000` の
@@ -600,8 +602,32 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   オブジェクト単位の規則は正しいリンクでも常時 fail する）。map は
   **PRE_LINK で消し BYPRODUCTS で宣言**、入力マニフェストは `$<TARGET_OBJECTS:>` から
   生成して map の `LOAD` と突き合わせ、**LTO とアドレス取得は拒否**。
-  [!] **ベンダの戻り値は成否を報告しない**（`erase_sector` は WP 解除の結果、
-  `write` は定数 0）。**唯一の真実は読み戻し**で、それは writer（Part C）の責務。
+  [!] **ベンダの戻り値は成否を報告しない**（`erase_sector` は WP 解除の結果で、
+  その `clear_write_protect` の出口は `movs r0,#0` の 1 つだけ / `write` は定数 0）。
+  **唯一の真実は読み戻し**で、それは writer の責務。ただし**負の値は wire に出る前の
+  拒否**（`-28` = 窓が落ちていない / `-50` = WEL が 21 回で立たない）。
+  **Part C 着地に伴い `hx_lib_qspi_eeprom_{erase_sector,write}` と
+  `hx_lib_spi_eeprom_clear_write_protect` の 3 名は FORBIDDEN から外れた。戻さない。**
+- **[!] 書込みトランザクションは 1 本で、途中で返らない**（#88 Part C。
+  `port/nor/nor_write.c` が seam の**唯一の認可呼び出し元**で、`board.cmake` は
+  **ディレクトリでなくオブジェクト**を名指しする）: claim → 窓を落とす（SCU 読み戻しで
+  確定）→ **JEDEC 再読（canary）** → 操作 → 窓を戻す → **読み戻し照合** → commit。
+  **窓の復帰と commit は操作が失敗しても必ず走る。**
+  [!] **canary が liveness の唯一の手段** — ベンダの write 経路は全て
+  `DMA_send_recv` のタイムアウト無しスピンで、窓を落とした直後の 1 本目で実際に
+  コンソールが固まったことがある。**1 本目を「何も変えない read_ID」にする**
+  （`nor cycle` がその前後だけを実行する非破壊コマンド）。有界化はできない。
+  [!] **読み戻し不一致は terminal `FAULTED`** — 「配列が受け付けなかった」と
+  「窓が嘘をついている」を区別できず、後者なら `nn` がその場で parse するモデルを含む
+  以後の全読み出しが疑わしい。**wire 前の拒否と transport 無応答は fault させない**
+  （曖昧さが無い）。照合対象は**ベンダが受け付けた prefix だけ**で、
+  256 B ページ分割が「どこで止まったか」を正確にする（長いバッファだと
+  ベンダは複数ページ書いてから失敗し得る）。読む前に**自分で invalidate する**。
+  [!] **staging バッファの理由は DMA reachability ではない** — ベンダの `write` は
+  `word_switch` 経路で**呼び出し元バッファを in-place で byte-swap する**
+  （TCM 禁止則は SSPI/WDMA3 の話）。
+  [!] **1 トランザクションは無データでもステータスレジスタを 2 回書く**
+  （窓の down/up が QE を落として立てる）。`nor cycle` も無料ではない。
 - **[!] 外付け NOR のライフサイクルは `port/nor/` が所有する**（#86）。QSPI/XIP の立ち上げと
   **IRQ 133（DMAC1 combined）の EPK wrapset は `port/nor/` のもの**で、NPU の snapshot は
   その後に取る。**NPU 側に戻してはいけない** — 戻すと `nn close` の unwrap が IRQ 133 を
@@ -610,7 +636,8 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   触らない）。トークンは**成功するまでローカル**で、`hw_ready` と同時にのみコミットする。
   [!] **ベンダの `enable_XIP` は MPU を再構成して戻り値を検査しない**ので、読み戻しは
   こちら側の責任。**JEDEC ID は XIP 前にしか読めない**（read-ID も同じ XIP ガードを持つ）。
-  `nor` に **`write`/`erase`/生オペコードを足さない**（境界付き書込みは #88）。
+  `nor` に **生オペコードを足さない**（境界付き `write`/`erase`/`cycle` は
+  #88 Part C/E で着地済み。足すなら writer 経由で `nor_span.c` の判断を通す）。
   [!] **XIP 窓を読む者は全員リースを持つ**（#90。`NPU`/`SCAN`/`DEVMEM` の 3 スロット）。
   `devmem` は無リースで、立っていない窓を読むと **16 MB が 1 レジスタにエイリアスして
   嘘を印字**した（実機で観測）。背景アクセスの足元で XIP を落とす方は実在するが有界。

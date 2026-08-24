@@ -258,7 +258,8 @@
    リースは `npu_hw_init` 取得 / `npu_hw_deinit` 解放（`npu_open`/`npu_close` は触らない）で、
    トークンは成功時にのみ `hw_ready` と同時コミット。ベンダの `enable_XIP` は MPU を
    再構成して戻り値を検査しないので読み戻しはこちら持ち。**JEDEC ID は XIP 前にしか読めない**。
-   `nor` に **生オペコードを足さない**（境界付き `write`/`erase` は #88 Part E）。
+   `nor` に **生オペコードを足さない**（境界付き `write`/`erase` は #88 Part C/E で
+   着地済み。追加するなら writer 経由で、`nor_span.c` の判断を通す）。
    [!] **NOR 書込み seam（#88 Part D）**: 内側 4 本
    （`hx_lib_qspi_eeprom_{erase_sector,write,erase_all,word_write}`）を `-Wl,--wrap` で
    `port/sdk_seam/nor_seam.c` へ寄せる。**外側 `hx_lib_spi_eeprom_*` ではなく内側**を
@@ -279,11 +280,38 @@
    [!] **これは defence in depth であって能力の証明ではない**（#87）— 読み出し経路が
    `hx_drv_spi_mst_get_dev` / `hx_drv_dmac_get_dev` / `DMA_send` 系を既に引き込んでおり、
    禁止・監査のどの名前にも触れずに WREN + 任意オペコードを組める。
-   [!] **ベンダの戻り値は成否を報告しない**（`erase_sector` は WP 解除の結果、
-   `write` は定数 0）。**唯一の真実は読み戻し**で、それは writer（Part C）の責務。
-   [!] **Part C が着地したら `hx_lib_qspi_eeprom_{erase_sector,write}` と
-   `hx_lib_spi_eeprom_clear_write_protect` の 3 名を FORBIDDEN から外す**
-   （`erase_all` / `word_write` は外さない）。
+   [!] **ベンダの戻り値は成否を報告しない**（`erase_sector` は WP 解除の結果で、
+   その `clear_write_protect` は出口が `movs r0,#0` の 1 つだけ / `write` は定数 0）。
+   **唯一の真実は読み戻し**で、それは writer（`port/nor/nor_write.c`）の責務。
+   ただし**負の値は wire に出る前の拒否**なので意味がある（`-28` = 窓が落ちていない、
+   `-50` = WEL が 21 回で立たなかった）。
+   **Part C 着地に伴い `hx_lib_qspi_eeprom_{erase_sector,write}` と
+   `hx_lib_spi_eeprom_clear_write_protect` の 3 名は FORBIDDEN から外れた**
+   （`erase_all` / `word_write` は外さない。**戻す変更は不可**）。
+   [!] **書込みトランザクションは 1 本の手続きで、途中で返らない**（#88 Part C）:
+   claim → 窓を落とす（SCU 読み戻しで確定）→ **JEDEC 再読（canary）** →
+   操作 → 窓を戻す → **読み戻し照合** → commit。**窓の復帰と commit は
+   操作が失敗しても必ず走る。**
+   [!] **canary は liveness のための唯一の手** — ベンダの write 経路は全部
+   `DMA_send_recv` のタイムアウト無しスピンで、窓を落とした直後の最初の 1 本で
+   実際にコンソールが固まったことがある。**最初の 1 本を「何も変えない read_ID」に
+   する**（`nor cycle` がその preamble/postamble だけを実行する）。
+   [!] **読み戻し不一致は terminal `FAULTED`** — 「配列が受け付けなかった」と
+   「窓が嘘をついている」を区別できず、後者なら以後の全読み出し（`nn` が
+   その場で parse するモデルを含む）が疑わしくなる。**ベンダが wire 前に拒否した
+   場合と transport 無応答は fault させない**（曖昧さが無いので `incomplete` /
+   `no transport` として窓を戻して継続）。
+   [!] **照合対象はベンダが受け付けた prefix だけ**。ページ分割（256 B 境界を
+   跨がない）が「どこで止まったか」を正確にする — 長いバッファを渡すと
+   ベンダは複数ページを書いてから失敗し得るので `done` が嘘になる。
+   [!] **staging バッファの理由は DMA reachability ではない** — ベンダの `write` は
+   `uint8_t *` を取り `word_switch` 経路で**呼び出し元バッファを in-place で
+   byte-swap する**。TCM 禁止則は SSPI/WDMA3 の話（ベンダは自分の DTCM プールへ
+   memcpy してから DMA する）。
+   [!] **1 トランザクションは無データでもステータスレジスタを 2 回書く** —
+   窓を落とすと `set_quad_mode` が QE を落とし、戻すと立てる（値が同じなら
+   書かないので 2 回で頭打ち）。`nor cycle` も無料ではない。
+   途中でリセットしても QE=0 は工場状態かつ 2nd BL が焼込み後に残す状態なので起動する。
    [!] **XIP 窓を読む者は全員リースを持つ**（#90。`NPU` / `SCAN` / `DEVMEM` の 3 スロット）。
    `devmem` は無リースだった — 立っていない窓を読むと fault も 0xFF も返さず
    **16 MB 全体が 1 レジスタにエイリアスして嘘の内容を印字**した（実機で観測）。
@@ -306,7 +334,8 @@
    ビルドを通り、実機で `ERR_IMAGE_SZ` になる）。**焼き先はスロット交替なので
    `0x0` も `0x100000` も「ファーム」であり、どちらか一方ではない。**
    `0x200000..0xB7B000` は **blob 予約**（9,940,992 B）＋ `0xD50000..0xFFE000` が
-   **blob-tail**（2,809,856 B）で、書き手はまだ無い。
+   **blob-tail**（2,809,856 B）。**境界付き writer は #88 Part C/E で入った**が
+   （書けるのは `blob` だけ）、**実データの書き手は #49 Step 2 でまだ無い**。
    （`0xB70000..0xB7B000` の 44 KB は #88 で blob に入り、実機の `nor scan` で
    **全 0xFF を確認済み**。）**2 分割なのは間にモデルがあるからで、
    #49 Step 4 でモデルを blob へ移した時点で予約を削除し blob は一本になる**。

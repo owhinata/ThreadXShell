@@ -107,6 +107,86 @@ struct nor_report {
 /** Fill @p r.  Valid at any state; fields not established yet read as zero. */
 void nor_report(struct nor_report *r);
 
+/* --- what a write transaction borrows from the lifecycle (issue #88) -------
+ *
+ * These five exist for port/nor/nor_write.c, which owns the transaction, and
+ * for nothing else.  They are here rather than there because the window, the
+ * lease mask and the fault latch are THIS file's state: a writer that reached
+ * into them would be a second owner of the lifecycle, and the one thing issue
+ * #86 established is that this part must have exactly one.
+ *
+ * [!] THEY DO NOT COMPOSE INTO ANYTHING BUT THE SEQUENCE nor_write.h STATES.
+ * nor_write_claim() leaves the port in NOR_ST_WRITING -- readable by nobody,
+ * writable by one caller -- and only nor_write_commit() gets it out again.  A
+ * path that claimed and returned early would strand the part in a state whose
+ * every answer is "busy", for the rest of the session.
+ */
+
+/**
+ * @brief  Claim the part for one write transaction.
+ *
+ * Reads the state and the lease mask together and publishes NOR_ST_WRITING
+ * under the same critical section, which is the whole point: see
+ * nor_write_decide() in nor_state.h.  On anything but NOR_WR_GO nothing was
+ * claimed and nothing has to be committed.
+ */
+enum nor_write nor_write_claim(void);
+
+/**
+ * @brief  End the transaction claimed above.
+ *
+ * @param ok   non-zero if everything the transaction promised held
+ * @param why  the reason to latch when it did not; may be NULL
+ *
+ * [!] A FAULT LATCHED EARLIER WINS OVER @p ok.  The window helpers below latch
+ * through the same first-failure record nor_fail_reason() reports, so a
+ * transaction that lost the window at step 2 and then succeeded at everything
+ * afterwards still commits to NOR_ST_FAULTED.  Without that, "ok" from a later
+ * step would hand the alias back to readers over a window this port has already
+ * said it does not understand.
+ */
+void nor_write_commit(int ok, const char *why);
+
+/**
+ * @brief  Take the memory-mapped window down, and establish that it went.
+ *
+ * The vendor's enable_XIP calls the SCU and the MPU and returns without
+ * checking any of them, so "asked" and "happened" are read back apart here:
+ * SCU xip_en and isp_write_en must both read 0 before anything reaches the
+ * erase or program path.  @return 0, or -1 with the port already faulted.
+ */
+int nor_window_drop(void);
+
+/**
+ * @brief  Bring the window back, verify it and re-probe it.
+ *
+ * The same sequence bring-up runs, for the same reason and with the same
+ * probes -- both of which sit outside anything a writer may erase (issue #90).
+ * @return 0, or -1 with the port already faulted.
+ */
+int nor_window_restore(void);
+
+/**
+ * @brief  Invalidate [off, off+len) of the alias, rounded out to cache lines.
+ *
+ * [!] REQUIRED BEFORE READING BACK WHAT WAS JUST WRITTEN.  The vendor's XIP
+ * restore invalidates 512 bytes at the base of the window and nothing else, so
+ * a comparison against a range that was in the cache before the window went
+ * down would be answered without the bus being touched at all.
+ */
+void nor_alias_invalidate(uint32_t off, uint32_t len);
+
+/**
+ * @brief  Re-read the JEDEC id with the window down, and check it.
+ *
+ * @param out  receives the three bytes; zeroed if the part did not answer
+ * @return 0 if it answered and agrees with what bring-up recorded, else -1
+ *
+ * The canary described in nor_write.h.  It uses the same DMA_send_recv path
+ * every part of the vendor's write path is built on, and it changes nothing.
+ */
+int nor_jedec_recheck(uint8_t out[3]);
+
 #ifdef __cplusplus
 }
 #endif

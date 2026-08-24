@@ -62,7 +62,12 @@ FORBIDDEN = [
     "hx_lib_spi_eeprom_erase_sector",
     "hx_lib_spi_eeprom_write",
     "hx_lib_spi_eeprom_word_write",
-    "hx_lib_spi_eeprom_clear_write_protect",
+    # [!] hx_lib_spi_eeprom_clear_write_protect CAME OFF THIS LIST (issue #88
+    # Part C).  It is not one of the outer forwarders above -- it lives in
+    # spi_eeprom_peri.o and the INNER erase_sector calls it across objects, so
+    # it arrived in the image the moment the writer gave erase_sector a caller.
+    # Its absence was never the property being checked here; the four names
+    # above are, and they stay.
     # NOT barred: hx_lib_spi_eeprom_setWriteEnable.  It IS in the image, pulled
     # in from inside the archive (spi_eeprom_peri.o) by the quad-enable path --
     # putting a Winbond-class part into QUAD mode means writing the QE bit in
@@ -88,23 +93,27 @@ FORBIDDEN = [
     # path that could establish that is issue #88, and issue #88's own finding
     # is that no symbol-level check on this image can.
     #
-    # [!] AND TWO OF THESE FOUR ARE ON BORROWED TIME (issue #88).  The seam in
-    # port/sdk_seam/nor_seam.c wraps all four, but only erase_sector and write
-    # call __real_ -- so as long as nothing in the firmware calls THEM, the
-    # linker drops the vendor implementations and this list keeps passing
-    # unchanged.  That is true today because Part C's writer does not exist yet;
-    # when it lands, erase_sector, write and hx_lib_spi_eeprom_clear_write_
-    # protect (which erase_sector calls across objects) become present, and
-    # these two names have to come off this list.  erase_all and word_write do
-    # NOT: their wrappers refuse without naming __real_, which is what keeps
-    # them collectable and keeps this rule covering them for good.
+    # [!] AND TWO OF THESE FOUR CAME OFF THIS LIST (issue #88 Part C).  The seam
+    # in port/sdk_seam/nor_seam.c wraps all four, but only erase_sector and
+    # write call __real_.  While nothing called them the linker dropped the
+    # vendor implementations and this list went on passing; the writer in
+    # port/nor/nor_write.c gives them a caller, so they are in the image now and
+    # asking whether they are PRESENT stopped being a question with an answer.
     #
-    # What replaces the two is cmake/check_nor_seam.py, which asks the question
+    # What replaces them is cmake/check_nor_seam.py, which asks the question
     # this list cannot once the code is present: not "is it in the image" but
-    # "who may reach it".
+    # "who may reach it".  That is a strictly harder question -- it is decided
+    # from the linker's map, per input section, over relocations in the linker's
+    # own inputs -- and it is not a downgrade.
+    #
+    # erase_all and word_write are NOT off: their wrappers refuse without naming
+    # __real_, which is what keeps the vendor implementations collectable and
+    # keeps this rule covering them for good.  A chip erase names no address, so
+    # there is no bounded form of it to build later; word_write would be a
+    # second write path with rules of its own.  Adding a __real_ reference to
+    # either wrapper is what would silently break this, and check_nor_seam.py's
+    # N8 is the rule that catches it there.
     "hx_lib_qspi_eeprom_erase_all",
-    "hx_lib_qspi_eeprom_erase_sector",
-    "hx_lib_qspi_eeprom_write",
     "hx_lib_qspi_eeprom_word_write",
     # [!] Arbitrary-opcode transports (issue #87).  These take a caller-supplied
     # byte buffer and put it on the wire, so one of them is every program and

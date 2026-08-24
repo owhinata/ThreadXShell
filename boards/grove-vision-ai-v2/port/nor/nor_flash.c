@@ -60,6 +60,7 @@
 #include "spi_eeprom_comm.h"
 
 #include "WE2_core.h"        /* hx_InvalidateDCache_by_Addr */
+#include "hx_drv_scu.h"     /* the xip_en / isp_write_en read-backs   */
 
 #include "epk_irq_wrap.h"
 
@@ -237,19 +238,16 @@ static int open_and_wrap(void)
 	return 0;
 }
 
-/* Steps 5-7. */
-static int enable_xip_and_verify(void)
+/*
+ * Steps 6-7, and the whole of what issue #88's writer has to redo after every
+ * transaction.  Factored out of bring-up rather than copied into the writer:
+ * "the window is up and it is really this flash" is one claim, and two versions
+ * of it would be two claims that are free to drift.
+ */
+static int window_up(void)
 {
 	struct nor_report *r = &nor.rep;
 	uint32_t first, probe;
-
-	/* 5: before XIP, or never. */
-	if (hx_lib_spi_eeprom_read_ID(USE_DW_SPI_MST_Q, r->jedec) == 0)
-		r->jedec_valid = 1u;
-	else
-		LOG_WRN("JEDEC id unreadable; `nor info` will not show one");
-
-	r->scu_xip_before = rd32(SCU_ISP_XIP_SPICACHE);
 
 	/* 6: quad, continuous-read.  Donor-identical -- this is the configuration
 	 * the SDK's own classification app uses to read a model from this part. */
@@ -290,10 +288,35 @@ static int enable_xip_and_verify(void)
 	if (first == probe)
 		return fail("flash window still aliases; XIP did not take");
 	/* And the stronger question: is this the FLASH?  A register block cannot
-	 * coincidentally be a Himax image header. */
+	 * coincidentally be a Himax image header.
+	 *
+	 * [!] AND AFTER A WRITE TRANSACTION IT ANSWERS ONE MORE (issue #88).
+	 * Taking the window down clears the part's quad-enable bit and bringing it
+	 * back sets it again; if that had not taken, this continuous quad read
+	 * would return something that is not a firmware header.  The check was
+	 * already here, so the writer needs no separate one -- but it is now
+	 * carrying that too. */
 	if (first != NOR_IMAGE_MAGIC)
 		return fail("flash window is readable but does not start with a "
 		            "firmware image");
+	return 0;
+}
+
+/* Steps 5-7. */
+static int enable_xip_and_verify(void)
+{
+	struct nor_report *r = &nor.rep;
+
+	/* 5: before XIP, or never. */
+	if (hx_lib_spi_eeprom_read_ID(USE_DW_SPI_MST_Q, r->jedec) == 0)
+		r->jedec_valid = 1u;
+	else
+		LOG_WRN("JEDEC id unreadable; `nor info` will not show one");
+
+	r->scu_xip_before = rd32(SCU_ISP_XIP_SPICACHE);
+
+	if (window_up() != 0)
+		return -1;
 
 	LOG_INF("QSPI XIP on at 0x%08lx, IRQ %d wrapped",
 	        (unsigned long)NOR_XIP_BASE, nor.rep.irq);
@@ -311,7 +334,6 @@ static void claim_locked(enum nor_lease_slot slot, uint32_t *out)
 int nor_acquire(enum nor_lease_slot slot, uint32_t *out)
 {
 	uint32_t pm;
-	int      mine = 0;
 
 	if (out != NULL)
 		*out = 0u;
@@ -331,7 +353,6 @@ int nor_acquire(enum nor_lease_slot slot, uint32_t *out)
 	switch (nor_acquire_decide(nor.state)) {
 	case NOR_ACQ_BRING_UP:
 		nor.state = NOR_ST_ENABLING;
-		mine = 1;
 		break;
 	case NOR_ACQ_TAKE:
 		/* [!] CLAIMED HERE, not in a second critical section further down.
@@ -420,4 +441,114 @@ void nor_report(struct nor_report *r)
 		r->scu_xip_after = rd32(SCU_ISP_XIP_SPICACHE);
 		(void)mpu_capture(r);
 	}
+}
+
+/* --- what a write transaction borrows (issue #88) --------------------------
+ *
+ * port/nor/nor_write.c owns the transaction; these five are the pieces of it
+ * that touch this file's state or this file's window.  See nor_flash.h for the
+ * contract and nor_write.h for the sequence they belong to.
+ */
+
+enum nor_write nor_write_claim(void)
+{
+	enum nor_write verdict;
+	uint32_t pm = __get_PRIMASK();
+
+	/* [!] The state and the lease mask are read TOGETHER and the claim is
+	 * published before the section ends.  Two steps would leave an interval
+	 * nor_acquire() only has to land in once for a reader to be handed a lease
+	 * on a window that is about to disappear -- see nor_write_decide(). */
+	__disable_irq();
+	verdict = nor_write_decide(nor.state, nor.live);
+	if (verdict == NOR_WR_GO)
+		nor.state = NOR_ST_WRITING;
+	__set_PRIMASK(pm);
+	return verdict;
+}
+
+void nor_write_commit(int ok, const char *why)
+{
+	uint32_t pm;
+	int faulted;
+
+	pm = __get_PRIMASK();
+	__disable_irq();
+	/* [!] nor.fail IS CONSULTED, not just @p ok.  The window helpers latch
+	 * through fail(), which has already set NOR_ST_FAULTED; a transaction that
+	 * lost the window early and then succeeded at the steps after it must not
+	 * be able to publish NOR_ST_XIP over the top of that. */
+	if (ok && nor.fail == NULL) {
+		nor.state = NOR_ST_XIP;
+		faulted = 0;
+	} else {
+		if (nor.fail == NULL)
+			nor.fail = (why != NULL) ? why : "write transaction failed";
+		nor.state = NOR_ST_FAULTED;
+		faulted = 1;
+	}
+	__set_PRIMASK(pm);
+
+	if (faulted)
+		LOG_ERR("write transaction left the port faulted: %s", nor.fail);
+}
+
+int nor_window_drop(void)
+{
+	uint8_t xip = 1u, isp = 1u;
+
+	if (hx_lib_spi_eeprom_enable_XIP(USE_DW_SPI_MST_Q, false, FLASH_QUAD,
+	                                 true) != 0)
+		return fail("QSPI XIP disable failed");
+
+	/* [!] ASKED IS NOT HAPPENED.  hx_lib_qspi_eeprom_enable_XIP() calls
+	 * hx_drv_scu_set_xip_en() and hx_drv_scu_set_isp_write_en() and discards
+	 * both results, so this is the only place the transition becomes a fact.
+	 * The vendor's erase and program refuse with -28 while the window is up --
+	 * but that is the vendor's own software flag, set by the same call, and a
+	 * flag agreeing with itself is not evidence about the SCU. */
+	if (hx_drv_scu_get_xip_en(&xip) != SCU_NO_ERROR || xip != 0u)
+		return fail("the flash window did not go down when it was asked to");
+	if (hx_drv_scu_get_isp_write_en(&isp) != SCU_NO_ERROR || isp != 0u)
+		return fail("ISP write enable is set with the flash window down");
+
+	nor.rep.scu_xip_after = rd32(SCU_ISP_XIP_SPICACHE);
+	return 0;
+}
+
+int nor_window_restore(void)
+{
+	return window_up();
+}
+
+void nor_alias_invalidate(uint32_t off, uint32_t len)
+{
+	invalidate_alias(off, len);
+}
+
+int nor_jedec_recheck(uint8_t out[3])
+{
+	uint8_t id[3] = { 0u, 0u, 0u };
+	int rc;
+
+	if (out == NULL)
+		return -1;
+	rc = (hx_lib_spi_eeprom_read_ID(USE_DW_SPI_MST_Q, id) == 0) ? 0 : -1;
+	out[0] = id[0];
+	out[1] = id[1];
+	out[2] = id[2];
+	if (rc != 0)
+		return -1;
+
+	if (nor.rep.jedec_valid) {
+		if (memcmp(id, nor.rep.jedec, sizeof(id)) != 0)
+			return -1;
+		return 0;
+	}
+	/* Bring-up could not read one -- it warns and carries on, because the id is
+	 * reported and not required.  Latch whatever answers now so that the NEXT
+	 * transaction has something to compare against. */
+	memcpy(nor.rep.jedec, id, sizeof(id));
+	nor.rep.jedec_valid = 1u;
+	return 0;
 }

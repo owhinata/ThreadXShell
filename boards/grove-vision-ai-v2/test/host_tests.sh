@@ -245,6 +245,21 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_nor_state"
 "$out/test_nor_state"
 
+# issue #88 -- the write request arithmetic (port/nor/nor_span.c).  Which bytes
+# a request names, and -- the part with teeth -- which bytes an ERASE destroys,
+# since it destroys a whole 4 KB unit and not a byte.  No shim and no SDK
+# header: this translation unit is deliberately pure arithmetic, which is what
+# lets the wraparound cases exist at all.  None of them can be produced on the
+# board: the writer is the only caller and it is written to satisfy these rules,
+# so an address that rounds outside the interval, or a request near 2^32, is
+# either checked here or trusted -- in a region that holds the bootloader, on a
+# part whose endurance is not documented (issue #89).
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/nor" \
+    "$here/test_nor_write.c" "$board/port/nor/nor_span.c" \
+    $LDFLAGS -o "$out/test_nor_write"
+"$out/test_nor_write"
+
 # issue #88 -- the NOR write seam's decisions (port/sdk_seam/nor_seam.c).
 # cmake/check_nor_seam.py settles who may REACH the vendor's erase and program
 # entry points; this settles what happens when they are reached, and it is the

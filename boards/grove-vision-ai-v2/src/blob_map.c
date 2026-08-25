@@ -55,6 +55,24 @@ const char *blob_map_verdict_name(enum blob_map_verdict v)
 	return "?";
 }
 
+int blob_map_verdict_names_slot(enum blob_map_verdict v)
+{
+	switch (v) {
+	case BLOB_MAP_UNALIGNED:
+	case BLOB_MAP_TOO_SMALL:
+	case BLOB_MAP_OUTSIDE:
+	case BLOB_MAP_ORDER:
+	case BLOB_MAP_OVERLAP:
+		return 1;
+	case BLOB_MAP_OK:
+	case BLOB_MAP_NO_SLOTS:
+	case BLOB_MAP_BAD_INTERVAL:
+	default:
+		break;
+	}
+	return 0;
+}
+
 enum blob_map_verdict blob_map_check(uint32_t lo, uint32_t hi, uint32_t unit,
                                      const struct blob_slot *slots,
                                      unsigned count, unsigned *bad)

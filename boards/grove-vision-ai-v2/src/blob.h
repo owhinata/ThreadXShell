@@ -51,6 +51,16 @@ extern "C" {
 #define BLOB_ERR_PARAM  -1   /**< no such slot, or a range outside the payload */
 #define BLOB_ERR_BUSY   -2   /**< the NOR would not grant a lease              */
 #define BLOB_ERR_MAP    -3   /**< the slot table does not fit the seam's limits */
+/**
+ * The NOR port is faulted.  TERMINAL, and told apart from BLOB_ERR_BUSY on
+ * purpose: nor_acquire() refuses for both reasons, and folding them together
+ * would send an operator to `nor info` to find out who is holding the part
+ * when the answer is that nothing is and a reset is required.  The three
+ * entry points here classify a failure the same way, which is the rule
+ * issue #79 wrote for frame_pipeline: an entry point that calls a terminal
+ * failure retryable has a caller retrying forever.
+ */
+#define BLOB_ERR_FAULT  -4
 
 /* ---- the table, checked against the seam ---------------------------------- */
 

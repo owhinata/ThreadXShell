@@ -16,9 +16,13 @@
      [!] For the NOR write path this is DEFENCE IN DEPTH, not proof (issue
      #87): the read path already links raw SPI/DMA primitives from which a
      program or erase can be assembled without naming anything on the list.
-  5. Measurement-buffer residency (issue #25): each benchmark buffer must sit
-     in the memory whose name `membench` prints beside its numbers, in a
-     NOBITS section.
+  5. Buffer residency (issues #25, #30, #35, #44, #92): every buffer whose
+     placement means something must sit where its owner believes, in a NOBITS
+     section.  It began as the benchmark buffers, which have to be in the
+     memory `membench` prints beside their numbers; the ones added since fail
+     more quietly than that -- a framebuffer or a DMA landing buffer in TCM
+     never appears and never faults, and a staging buffer in DTCM works while
+     spending the heap-to-stack gap this file also guards.
   6. Required survivors (issue #42): the mirror of check 4.  --gc-sections
      drops an uncalled function, so a name that is ABSENT was not called by
      anything -- which is how a precondition enforced before kernel entry
@@ -241,13 +245,23 @@ RESIDENCY = [
     # CoreMark MEM_STATIC working set: a plain .bss array, so there is no
     # dedicated section to pin it to -- only the region matters.
     ("static_memblk",   2 * 1000, None,          "DTCM", DTCM),
+    # The blob staging buffer (issue #92).  Pinned for a different reason from
+    # everything above it: no DMA reads this buffer -- nor_write.c copies out
+    # of it a page at a time -- so a copy that drifted into DTCM would WORK,
+    # and would quietly spend 64 KB of the ~152 KB heap-to-stack gap this file
+    # also guards.  A failure nobody would see is exactly what a residency pin
+    # is for.  The size is stated here independently of blob_stage.h so that
+    # the two have to be changed together; the chunk a transfer actually
+    # programs is settled by measurement and may be smaller than this.
+    ("blob_stage_buf",  64 * 1024, ".blob_stage", "SRAM", SRAM),
 ]
 
-# The benchmark buffers must stay NOBITS: they are sized in tens of kilobytes
-# and a LOADable one would be flashed as that many bytes of zeros (and would
-# then also have to satisfy the image-coherence gate).
+# Every reservation above must stay NOBITS: they are sized in tens or hundreds
+# of kilobytes and a LOADable one would be flashed as that many bytes of zeros
+# (and would then also have to satisfy the image-coherence gate) -- on a part
+# this project deliberately does not wear out.
 NOBITS_SECTIONS = [".itcm_bench", ".dtcm_bench", ".sram_bench", ".lcd_fb",
-                   ".cam_raw", ".cam_slots", ".nn_arena"]
+                   ".cam_raw", ".cam_slots", ".nn_arena", ".blob_stage"]
 
 
 def run(cmd):
@@ -377,24 +391,24 @@ def main():
     sized = nm_sizes(args.nm, args.elf)
     for sym, want_size, sec_name, region_name, region in RESIDENCY:
         if sym not in sized:
-            errors.append(f"benchmark buffer {sym} is missing from the image")
+            errors.append(f"pinned buffer {sym} is missing from the image")
             continue
         addr, size = sized[sym]
         end = addr + size
         if size != want_size:
-            errors.append(f"benchmark buffer {sym} is {size} B, expected "
-                          f"{want_size} B -- the gate and the command have "
+            errors.append(f"pinned buffer {sym} is {size} B, expected "
+                          f"{want_size} B -- the gate and the owner have "
                           "drifted apart")
         if not (region[0] <= addr and end <= region[0] + region[1]):
-            errors.append(f"benchmark buffer {sym} [0x{addr:08x},0x{end:08x}) "
-                          f"is not entirely in {region_name} -- it would "
-                          "measure the wrong memory under that name")
+            errors.append(f"pinned buffer {sym} [0x{addr:08x},0x{end:08x}) "
+                          f"is not entirely in {region_name} -- the label and "
+                          "the memory have parted company")
         if sec_name is not None:
             sec = secs.get(sec_name)
             if sec is None:
                 errors.append(f"section {sec_name} is missing")
             elif not (sec[0] <= addr and end <= sec[0] + sec[1]):
-                errors.append(f"benchmark buffer {sym} "
+                errors.append(f"pinned buffer {sym} "
                               f"[0x{addr:08x},0x{end:08x}) is not inside its "
                               f"own section {sec_name} "
                               f"[0x{sec[0]:08x},0x{sec[0] + sec[1]:08x})")
@@ -403,8 +417,8 @@ def main():
         if sec is None:
             errors.append(f"section {name} is missing")
         elif "CONTENTS" in sec[2]:
-            errors.append(f"section {name} is LOADable ({sec[1]} B); benchmark "
-                          "buffers must stay NOLOAD")
+            errors.append(f"section {name} is LOADable ({sec[1]} B); pinned "
+                          "reservations must stay NOLOAD")
 
     # 6. no two allocated sections overlap.  A NOLOAD reservation that shares
     #    address space with something else still passes every per-section check

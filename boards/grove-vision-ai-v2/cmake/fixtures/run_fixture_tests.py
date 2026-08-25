@@ -222,6 +222,8 @@ def run_placement_gate(board_dir, build_dir, elf, nm, objdump):
         ids.add("FLOOR")
     if "required symbol fp_enforce_judge" in text:
         ids.add("REQUIRED")
+    if "pinned buffer blob_stage_buf" in text:
+        ids.add("RESIDENCY")
     return r.returncode, ids, text
 
 
@@ -430,6 +432,55 @@ def main():
                                        nm, objdump)
     ok &= expect("P2 a deleted FP precondition call is caught",
                  rc, ids, 1, {"REQUIRED"}, text)
+
+    # --- check_placement_budget.py: buffer residency (issues #25, #92) -------
+    #
+    # P3: the blob staging buffer loses its section attribute, so it lands in
+    # .bss -- which on this board is DTCM.
+    #
+    # [!] THIS IS THE FIRST NEGATIVE TEST THE RESIDENCY RULE HAS EVER HAD.  It
+    # has pinned the benchmark buffers since #25, the framebuffer since #30 and
+    # the camera and NN buffers since #35 and #44, and nothing had ever watched
+    # it fail -- the shape of gate this repository has been bitten by twice
+    # (issues #66, #42).  The staging buffer is the case where it matters most
+    # and shows least: unlike the framebuffer and the DMA landing buffers,
+    # NOTHING would break.  No DMA reads it, so in DTCM it would work perfectly
+    # while spending 64 KB of the heap-to-stack gap that this same gate guards
+    # from the other side.
+    print("run_fixture_tests (check_placement_budget.py, buffer residency):")
+
+    stage_src = os.path.join(board, "src", "blob_stage.c")
+    stage_dst = os.path.join(outdir, "p3_unpinned_stage.c")
+    with open(stage_src) as f:
+        stage = f.read()
+    stage_broken = stage.replace('section(".blob_stage"), ', "")
+    if stage_broken == stage:
+        raise SystemExit("run_fixture_tests: blob_stage.c does not place the "
+                         "buffer with a section attribute; the fixture cannot "
+                         "remove it")
+    with open(stage_dst, "w") as f:
+        f.write(stage_broken)
+
+    cc = ninja_compile_command(build, "src/blob_stage.c.obj")
+    obj_old = re.search(r"-o (\S*blob_stage\.c\.obj)", cc).group(1)
+    obj_new = "seam-fixtures/p3_blob_stage.obj"
+    p3_cc = cc.replace(f"-o {obj_old}", f"-o {obj_new}")
+    p3_cc = re.sub(r"-c \S*blob_stage\.c",
+                   f"-I {os.path.dirname(stage_src)} -c {stage_dst}", p3_cc)
+    p3_cc = re.sub(r"-MD -MT \S+ -MF \S+", "", p3_cc)
+    compile_one(build, p3_cc, "P3")
+
+    p3 = shell_link.replace(obj_old, obj_new)
+    if p3 == shell_link:
+        raise SystemExit("run_fixture_tests: the firmware link does not name "
+                         f"{obj_old}; the fixture cannot substitute it")
+    p3 = retarget(p3, "shell.elf", "seam-fixtures/p3_unpinned_stage.elf")
+    link(build, p3, "P3")
+    rc, ids, text = run_placement_gate(board, build,
+                                       "seam-fixtures/p3_unpinned_stage.elf",
+                                       nm, objdump)
+    ok &= expect("P3 a staging buffer that drifted out of SRAM is caught",
+                 rc, ids, 1, {"RESIDENCY"}, text)
 
     # --- check_nor_seam.py: who may reach the NOR write path (issue #88) -----
     #

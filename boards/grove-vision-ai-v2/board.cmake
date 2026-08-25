@@ -607,6 +607,13 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/src/retarget.c"
     "${BOARD_DIR}/src/malloc_lock.c"
     "${BOARD_DIR}/src/xprintf_shim.c"
+    # The blob staging reservation (issue #92, #49 Step 2).  64 KB of the
+    # loadable SRAM window claimed for the buffer a transfer programs out of.
+    # It lands before the transfer that fills it because it is a claim on
+    # memory: check_placement_budget.py pins symbol -> size -> section ->
+    # region, and settling that while the window has 430 KB spare is cheaper
+    # than settling it when something needs the room.
+    "${BOARD_DIR}/src/blob_stage.c"
     "${BOARD_DIR}/port/threadx/fp_enforce.c"
     "${BOARD_DIR}/port/threadx/tx_glue.c"
     "${BOARD_DIR}/port/sdk_seam/timer_seam.c"

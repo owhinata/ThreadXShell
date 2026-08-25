@@ -10,7 +10,7 @@
  *   nor scan    walk the window and report what is not erased
  *   nor cycle   take the window down and bring it back, touching no data
  *   nor erase   erase the flash covering a range, inside `blob` only
- *   nor write   program a byte pattern, inside `blob` only
+ *   nor write   program a byte pattern, inside `blob` only, 64 KB max
  *
  * THE LAST THREE ARE ISSUE #88 PART E, AND THEY ARE THIN ON PURPOSE.  All the
  * judgement is in port/nor/nor_write.c and port/sdk_seam/nor_seam.c; this file
@@ -46,6 +46,9 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "tx_api.h"          /* tx_time_get: 1 ms ticks, for the elapsed line */
+
+#include "blob_stage.h"      /* the staging buffer a long program runs out of */
 #include "nor_flash.h"
 #include "nor_seam.h"
 #include "nor_write.h"
@@ -587,7 +590,7 @@ static int cmd_nor_erase(struct cli_instance *sh, int argc, char **argv)
 	struct nor_erase_progress prog = { NULL, erase_tick };
 	enum nor_write_status st;
 	struct nor_span span;
-	uint32_t addr, len, token;
+	uint32_t addr, len, token, t0, t1;
 	int rc;
 
 	(void)argc;
@@ -628,24 +631,34 @@ static int cmd_nor_erase(struct cli_instance *sh, int argc, char **argv)
 		cli_print(sh, "request  : 0x%08lx +%lu B\r\n",
 		          (unsigned long)addr, (unsigned long)len);
 
+	t0 = (uint32_t)tx_time_get();
 	st = nor_write_erase(token, addr, len, &prog, &r);
+	t1 = (uint32_t)tx_time_get();
 	rc = nor_cmd_report(sh, st, &r);
+	cli_print(sh, "elapsed  : %lu ms (%lu sector(s))\r\n",
+	          (unsigned long)(t1 - t0),
+	          (unsigned long)(r.span.len / nor_seam_limits.unit));
 	(void)nor_unreserve(token);
 	return rc;
 }
 
-/* The pattern `nor write` programs.  One program page, which is the unit the
- * part itself programs in and is enough to prove the path in both directions:
- * write a sentinel that is not 0xFF, read it through the restored window, then
- * erase and see 0xFF.  Bulk data does not come through a console -- issue #49's
- * blob writer calls nor_write_program() directly. */
-static uint8_t write_pattern[NOR_PROGRAM_PAGE];
+/* [!] `nor write` PROGRAMS OUT OF THE BLOB STAGING BUFFER (issue #92), and it
+ * used to have a 256-byte pattern of its own.  Not because a console needs to
+ * write 64 KB of one byte -- it does not -- but because implementation order
+ * item 6 of #49 Step 2 has to MEASURE how long one program transaction takes at
+ * 1, 4, 16, 32 and 64 KB before the transfer's chunk size can be chosen, and a
+ * measurement taken through a different buffer would be a measurement of a
+ * different path.  This is the buffer the transfer will use.
+ *
+ * Sharing it is safe for the same reason blob_stage.h gives: everything that
+ * touches it holds the NOR reservation, and `nor write` holds one from
+ * nor_cmd_writer_enter() to nor_unreserve() below. */
 
 static int cmd_nor_write(struct cli_instance *sh, int argc, char **argv)
 {
 	struct nor_write_report r;
 	enum nor_write_status st;
-	uint32_t addr, len, token, byte = 0xA5u;
+	uint32_t addr, len, token, byte = 0xA5u, t0, t1;
 	int rc;
 
 	if (cli_parse_u32(argv[1], &addr) != 0 ||
@@ -654,16 +667,16 @@ static int cmd_nor_write(struct cli_instance *sh, int argc, char **argv)
 		cli_error(sh, "nor: bad number\r\n");
 		return 1;
 	}
-	if (len == 0u || len > sizeof(write_pattern)) {
-		cli_error(sh, "nor: length must be 1..%lu (one program page)\r\n",
-		          (unsigned long)sizeof(write_pattern));
+	if (len == 0u || len > BLOB_STAGE_BYTES) {
+		cli_error(sh, "nor: length must be 1..%lu (the staging buffer)\r\n",
+		          (unsigned long)BLOB_STAGE_BYTES);
 		return 1;
 	}
 	if (byte > 0xFFu) {
 		cli_error(sh, "nor: pattern must be a byte\r\n");
 		return 1;
 	}
-	memset(write_pattern, (int)byte, len);
+	memset(blob_stage_buf, (int)byte, len);
 
 	if (nor_cmd_writer_enter(sh, &token) != 0)
 		return 1;
@@ -674,8 +687,16 @@ static int cmd_nor_write(struct cli_instance *sh, int argc, char **argv)
 	 * writing over something that is not erased leaves the AND of the two --
 	 * and the read-back catches that, terminally.  An erase hidden inside this
 	 * command would destroy 4 KB to write 256 bytes, without saying so. */
-	st = nor_write_program(token, addr, write_pattern, len, &r);
+	t0 = (uint32_t)tx_time_get();
+	st = nor_write_program(token, addr, blob_stage_buf, len, &r);
+	t1 = (uint32_t)tx_time_get();
 	rc = nor_cmd_report(sh, st, &r);
+	/* [!] THE WHOLE TRANSACTION, not the vendor call: the window down, the
+	 * JEDEC canary, the pages, the window back up, the re-probe and the
+	 * read-back.  That is what a transfer pays per chunk, so it is what the
+	 * chunk size has to be chosen against. */
+	cli_print(sh, "elapsed  : %lu ms (whole transaction, %lu B)\r\n",
+	          (unsigned long)(t1 - t0), (unsigned long)len);
 	(void)nor_unreserve(token);
 	return rc;
 }
@@ -689,7 +710,7 @@ CLI_SUBCMD_SET_CREATE(nor_subcmds,
 	                  NULL, cmd_nor_cycle, 1, 0),
 	CLI_CMD_ARG_USAGE(erase, NULL, "erase <addr> <len> (whole 4 KB sectors)",
 	                  "<addr> <len>", cmd_nor_erase, 3, 0),
-	CLI_CMD_ARG_USAGE(write, NULL, "write <addr> <len> [byte] (one page max)",
+	CLI_CMD_ARG_USAGE(write, NULL, "write <addr> <len> [byte] (64 KB max)",
 	                  "<addr> <len> [byte]", cmd_nor_write, 3, 1),
 	CLI_SUBCMD_SET_END);
 

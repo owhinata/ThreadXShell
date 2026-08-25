@@ -2124,13 +2124,23 @@ nor info    the lifecycle, the JEDEC id, the wrapped IRQ, MPU/SCU read-back
 nor scan    walk all 16 MB and report every extent that is not erased
 nor cycle   take the window down and bring it back; no data touched
 nor erase   erase the flash covering <addr> <len>, inside `blob` only
-nor write   program <addr> <len> [byte], inside `blob` only, one page max
+nor write   program <addr> <len> [byte], inside `blob` only, 64 KB max
 ```
 
 The last three are issue #88 Part E and are thin on purpose: all the judgement
 is in `port/nor/nor_write.c` and `port/sdk_seam/nor_seam.c` (below).  There is
 no raw-opcode subcommand and no way to name an address outside the writable
 interval.
+
+[!] **`nor write`'s cap moved from one program page to 64 KB in issue #92**, and
+it now programs out of the blob staging buffer rather than a 256-byte pattern of
+its own.  Not because a console needs to write 64 KB of one byte: #49 Step 2 has
+to know what one program TRANSACTION costs at each candidate chunk size before
+the transfer's chunk can be chosen, and a measurement taken through a different
+buffer would be a measurement of a different path.  Both `write` and `erase`
+print an `elapsed` line for the same reason -- the whole transaction, not the
+vendor call, because the window down, the JEDEC canary, the read-back and the
+re-probe are what a transfer pays per chunk.
 
 **Every reader of the window holds a lease**, and there are four single-instance
 slots (`port/nor/nor_state.h`):
@@ -2745,10 +2755,34 @@ which nothing in this repository had. Two cancelled erases, from the log:
 | 4.034 | 5.337 | 118,784 B | 29 | 44.9 ms |
 
 Both figures fold in one transaction's overhead -- the window down, the canary,
-the restore and re-probe, and the read-back of what was erased -- so each is an
-**upper bound**. Two independent runs agreeing on ~45 ms is enough to say the
-fitted Zbit die behaves like the W25Q128JW datasheet's *typical* and nothing
-like its 400 ms maximum, so a whole 2 MB slot is roughly **23 s**, not minutes.
+the restore and re-probe, and the read-back of what was erased.  They were
+enough to say the fitted Zbit die behaves like the W25Q128JW datasheet's
+*typical* and nothing like its 400 ms maximum.
+
+[!] **AND THEY ARE NOT THE NUMBER TO PLAN WITH.**  Issue #92 gave `nor erase`
+and `nor write` an `elapsed` line -- ThreadX ticks around the whole transaction
+-- and measured directly:
+
+| erased | sectors | elapsed | per sector |
+|---|---|---|---|
+| 65,536 B | 16 | 1,112 ms | 69.5 ms |
+| 65,536 B | 16 | 1,147 ms | 71.7 ms |
+| 131,072 B | 32 | 2,472 ms | 77.2 ms |
+| 4,096 B | 1 | 82 ms | 82.0 ms |
+
+That is **70-82 ms/sector, not 46**, and it makes a 2 MB slot **~40 s** rather
+than the 23 s the paragraph above implied.  The two are not reconcilable from
+here and the direct one is the one to believe: four runs at three sizes, timed
+inside the firmware around exactly the call being measured, counting the same
+tick CoreMark's 1253.13 score comes out of.  The older figures are the delta
+between two `dmesg` lines whose endpoints bracket more than the erase --
+`QSPI XIP on` is logged once per lifecycle at bring-up, not per transaction --
+so they measure an interval that includes whatever happened before the erase
+started.
+
+40 s is an announced wait rather than a problem: a `blob write` erases its slot
+**before** the transfer starts, so nothing is waiting on a protocol timeout
+while it runs.
 
 That matters for issue #49 Step 2, which had to plan around not knowing: a
 `blob write` erases its slot before the transfer starts, and the difference
@@ -3013,6 +3047,47 @@ reads a payload byte: it recovers the length and the CRC recorded when the blob
 arrived.  Whether the payload still matches them is what `blob verify` will
 answer, and a consumer that parses a payload in place -- `nn open` reads a
 model straight out of the window -- has to check it first.
+
+#### What a write costs, and where the chunk size comes from
+
+Measured on the board with the `elapsed` line `nor write` and `nor erase` print,
+into the uncarved space above the slots so that no slot's state was disturbed:
+
+| programmed | elapsed | erased | elapsed |
+|---|---|---|---|
+| 1 KB | 3 ms | 1 sector | 82 ms |
+| 4 KB | 9 ms | 16 sectors | 1,112 / 1,147 ms |
+| 16 KB | 34 ms | 32 sectors | 2,472 ms |
+| 32 KB | 67 ms | | |
+| 64 KB | 134 ms | | |
+
+A program transaction is **0.7 ms + 2.08 ms/KB** -- the fixed cost is under a
+millisecond, so the time is essentially all payload and the chunk size barely
+moves it (4.7 s of programming for the 1,704,672 B classification model at 1 KB,
+3.6 s at 64 KB).  What the chunk size moves is the number of TRANSACTIONS, and
+every transaction takes the window down and back up and writes the NOR's
+non-volatile status register twice:
+
+| chunk | program transactions | total for the cls model |
+|---|---|---|
+| 1 KB | 1,665 | 1,668 |
+| 16 KB | 105 | 108 |
+| 32 KB | 53 | 56 |
+| **64 KB** | **27** | **30** |
+
+So the chunk is the whole staging buffer, 64 KB, and 30 is the transaction
+budget #49 Step 2 was planned against: 1 erase + 27 programs + body + magic.
+
+**Nothing in the protocol argues for less.**  `sb` (lrzsz 0.12.21) is
+stop-and-wait -- it sends one block and waits for the ACK rather than streaming
+ahead -- and if the ACK does not come it **retransmits after exactly 60 s**.
+Measured through a pty loopback with a receiver that goes deliberately silent:
+retransmissions at 60.002, 120.002, 180.003, 240.003 and 300.003 s, five in a
+row without giving up.  Against that, 134 ms per chunk has a margin of ~450x,
+and the RX ring only ever has to hold the one frame in flight plus a
+retransmitted copy (2 x 1,029 B against 4,095 B of ring).  The erase is the only
+long operation and it runs **before** the protocol starts, which is what that
+design decision bought.
 
 #### The baseline, as read on the board (2026-08-25)
 

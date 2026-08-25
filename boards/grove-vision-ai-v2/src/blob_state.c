@@ -107,15 +107,16 @@ const char *blob_slot_state_name(enum blob_slot_state s)
 const char *blob_hdr_reject_name(enum blob_hdr_reject r)
 {
 	switch (r) {
-	case BLOB_REJECT_NONE:     return "ok";
-	case BLOB_REJECT_SHORT:    return "header buffer is too small";
-	case BLOB_REJECT_MAGIC:    return "magic page is neither erased nor a header";
-	case BLOB_REJECT_VER:      return "format version is not this one";
-	case BLOB_REJECT_BASE:     return "header names a different slot";
-	case BLOB_REJECT_LENGTH:   return "payload length does not fit the slot";
-	case BLOB_REJECT_NAME:     return "stored name breaks the name rules";
-	case BLOB_REJECT_BODY_CRC: return "body checksum does not match";
-	default:                   break;
+	case BLOB_REJECT_NONE:      return "ok";
+	case BLOB_REJECT_SHORT:     return "header buffer is too small";
+	case BLOB_REJECT_MAGIC:     return "magic page is neither erased nor a header";
+	case BLOB_REJECT_BODY_TAIL: return "body page holds bytes after the header";
+	case BLOB_REJECT_VER:       return "format version is not this one";
+	case BLOB_REJECT_BASE:      return "header names a different slot";
+	case BLOB_REJECT_LENGTH:    return "payload length does not fit the slot";
+	case BLOB_REJECT_NAME:      return "stored name breaks the name rules";
+	case BLOB_REJECT_BODY_CRC:  return "body checksum does not match";
+	default:                    break;
 	}
 	return "?";
 }
@@ -203,6 +204,22 @@ enum blob_slot_state blob_hdr_decode(const uint8_t *hdr, uint32_t hdr_len,
 		return BLOB_INVALID;
 	}
 
+	/* [!] The SAME provenance test on page 1.  This port programs
+	 * BLOB_BODY_SIZE bytes into an erased page and never touches the rest,
+	 * so a byte after the body did not come from here -- and without this,
+	 * a header with one stray 0x00 at offset BLOB_BODY_SIZE decoded as
+	 * VALID, which is a sequence no writer here can produce.  Erased
+	 * everywhere still reaches the EMPTY answer below, since an erased tail
+	 * passes this. */
+	if (!all_erased(body + BLOB_BODY_SIZE,
+	                NOR_PROGRAM_PAGE - BLOB_BODY_SIZE)) {
+		if (why != NULL)
+			*why = BLOB_REJECT_BODY_TAIL;
+		if (out != NULL)
+			out->state = BLOB_INVALID;
+		return BLOB_INVALID;
+	}
+
 	r = body_decode(body, slot_base, payload_max, out);
 	if (r == BLOB_REJECT_NONE) {
 		enum blob_slot_state st = magic_present ? BLOB_VALID
@@ -232,20 +249,25 @@ enum blob_slot_state blob_hdr_decode(const uint8_t *hdr, uint32_t hdr_len,
 	return BLOB_INVALID;
 }
 
-enum blob_hdr_reject blob_hdr_encode_body(uint8_t *body, uint32_t body_len,
+enum blob_hdr_reject blob_hdr_encode_body(uint8_t *page, uint32_t page_len,
                                           uint32_t slot_base,
                                           uint32_t payload_max,
                                           const struct blob_info *info)
 {
+	uint8_t *body = page;
 	uint32_t nlen = 0u;
 
-	if (body == NULL || body_len < BLOB_BODY_SIZE || info == NULL)
+	if (page == NULL || page_len < NOR_PROGRAM_PAGE || info == NULL)
 		return BLOB_REJECT_SHORT;
 	if (blob_name_check(info->name, &nlen) != BLOB_NAME_OK)
 		return BLOB_REJECT_NAME;
 	if (info->length == 0u || info->length > payload_max)
 		return BLOB_REJECT_LENGTH;
 
+	/* Erased first, body over it: whatever length the caller programs, from
+	 * the body to the whole page, the flash ends up the same.  0xFF over
+	 * erased flash clears no bits. */
+	memset(page, 0xFF, NOR_PROGRAM_PAGE);
 	memset(body, 0, BLOB_BODY_SIZE);
 	put32(body + BLOB_BODY_OFF_VER, BLOB_FMT_VER);
 	put32(body + BLOB_BODY_OFF_BASE, slot_base);
@@ -258,11 +280,12 @@ enum blob_hdr_reject blob_hdr_encode_body(uint8_t *body, uint32_t body_len,
 	return BLOB_REJECT_NONE;
 }
 
-enum blob_hdr_reject blob_hdr_encode_magic(uint8_t *magic, uint32_t magic_len)
+enum blob_hdr_reject blob_hdr_encode_magic(uint8_t *page, uint32_t page_len)
 {
-	if (magic == NULL || magic_len < BLOB_MAGIC_SIZE)
+	if (page == NULL || page_len < NOR_PROGRAM_PAGE)
 		return BLOB_REJECT_SHORT;
-	memcpy(magic, magic_bytes, BLOB_MAGIC_SIZE);
+	memset(page, 0xFF, NOR_PROGRAM_PAGE);
+	memcpy(page, magic_bytes, BLOB_MAGIC_SIZE);
 	return BLOB_REJECT_NONE;
 }
 

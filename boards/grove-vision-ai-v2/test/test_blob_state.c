@@ -208,13 +208,25 @@ static void t_empty_and_foreign(void)
 	/* An erased magic page over foreign body bytes is INVALID and NOT
 	 * incomplete: "the magic is 0xFF" is not the test.  Calling it
 	 * incomplete would tell an operator a transfer of theirs was cut short
-	 * when what is there is somebody else's. */
+	 * when what is there is somebody else's.  The reason names the page's
+	 * tail, which is the provenance test -- bytes where this port writes
+	 * nothing -- rather than complaining about the version of a KVDB
+	 * sector. */
 	hdr_erase();
 	memset(BODY, 0x5A, NOR_PROGRAM_PAGE);
 	st = decode(&why, &got);
-	CHECK(st == BLOB_INVALID && why == BLOB_REJECT_VER,
+	CHECK(st == BLOB_INVALID && why == BLOB_REJECT_BODY_TAIL,
 	      "an erased magic over foreign bytes is %s (%s)",
 	      blob_slot_state_name(st), blob_hdr_reject_name(why));
+
+	/* Foreign bytes only in the fields, with the tail erased: the version
+	 * is then the first thing that fails, in field order. */
+	hdr_erase();
+	memset(BODY, 0x5A, BLOB_BODY_SIZE);
+	st = decode(&why, &got);
+	CHECK(st == BLOB_INVALID && why == BLOB_REJECT_VER,
+	      "foreign header fields are %s (%s)", blob_slot_state_name(st),
+	      blob_hdr_reject_name(why));
 
 	/* A magic over an erased body: the transfer never wrote a body, so
 	 * there is nothing to be valid. */
@@ -254,6 +266,68 @@ static void t_magic_page(void)
 	hdr[NOR_PROGRAM_PAGE - 1u] = 0xFFu;
 	CHECK(decode(&why, &got) == BLOB_VALID,
 	      "clearing the stray byte did not restore the header");
+}
+
+/* [!] Found by review, not by writing the tests: page 0's tail was checked for
+ * provenance and page 1's was not, so a header with one stray byte after the
+ * body -- a sequence no writer here can produce -- decoded as VALID.  The
+ * asymmetry was the fail-open; these are the vectors that close it. */
+static void t_body_page_tail(void)
+{
+	static uint8_t page[NOR_PROGRAM_PAGE];
+	struct blob_info info, got;
+	enum blob_hdr_reject why;
+	uint32_t i;
+
+	hdr_erase();
+	(void)put_body(BASE, CAP, "m", 16u, 0u);
+	put_magic();
+	CHECK(decode(&why, &got) == BLOB_VALID, "the baseline did not decode");
+
+	/* The reviewer's vector: the first byte past the body. */
+	BODY[BLOB_BODY_SIZE] = 0x00u;
+	CHECK(decode(&why, &got) == BLOB_INVALID &&
+	      why == BLOB_REJECT_BODY_TAIL,
+	      "a stray byte after the body decoded as %s",
+	      blob_hdr_reject_name(why));
+	BODY[BLOB_BODY_SIZE] = 0xFFu;
+	CHECK(decode(&why, &got) == BLOB_VALID,
+	      "clearing the stray byte did not restore the header");
+
+	/* And the last byte of the page, so the check covers the whole tail. */
+	BODY[NOR_PROGRAM_PAGE - 1u] = 0xFEu;
+	CHECK(decode(&why, &got) == BLOB_INVALID &&
+	      why == BLOB_REJECT_BODY_TAIL,
+	      "a stray byte at the end of the page decoded as %s",
+	      blob_hdr_reject_name(why));
+
+	/* The encoder is the other half: it lays out the WHOLE page, so a
+	 * writer that programs the page rather than the body puts the same
+	 * bytes in the flash -- 0xFF over erased flash clears nothing.  An
+	 * encoder that filled only the body would have that writer program
+	 * whatever its buffer held into a header. */
+	memset(page, 0xA5, sizeof page);
+	memset(&info, 0, sizeof info);
+	memcpy(info.name, "m", 1u);
+	info.length = 16u;
+	CHECK(blob_hdr_encode_body(page, sizeof page, BASE, CAP, &info) ==
+	      BLOB_REJECT_NONE, "the body would not encode");
+	for (i = BLOB_BODY_SIZE; i < NOR_PROGRAM_PAGE; i++) {
+		if (page[i] != 0xFFu) {
+			CHECK(0, "the encoder left 0x%02X at page offset %u",
+			      page[i], i);
+			break;
+		}
+	}
+	hdr_erase();
+	memcpy(BODY, page, sizeof page);          /* program the whole page */
+	memset(page, 0xA5, sizeof page);
+	CHECK(blob_hdr_encode_magic(page, sizeof page) == BLOB_REJECT_NONE,
+	      "the magic would not encode");
+	memcpy(hdr, page, sizeof page);
+	CHECK(decode(&why, &got) == BLOB_VALID,
+	      "a header programmed a page at a time is %s",
+	      blob_hdr_reject_name(why));
 }
 
 static void t_body_rejections(void)
@@ -368,6 +442,11 @@ static void t_codec_edges(void)
 	info.length = 16u;
 	CHECK(blob_hdr_encode_body(small, sizeof small, BASE, CAP, &info) ==
 	      BLOB_REJECT_SHORT, "the encoder wrote into a buffer too small");
+	/* Room for the body but not for the page it has to lay out. */
+	CHECK(blob_hdr_encode_body(BODY, BLOB_BODY_SIZE, BASE, CAP, &info) ==
+	      BLOB_REJECT_SHORT, "the encoder wrote a body without its page");
+	CHECK(blob_hdr_encode_magic(hdr, BLOB_MAGIC_SIZE) == BLOB_REJECT_SHORT,
+	      "the magic went into a buffer smaller than a page");
 	CHECK(blob_hdr_encode_body(NULL, NOR_PROGRAM_PAGE, BASE, CAP, &info) ==
 	      BLOB_REJECT_SHORT, "the encoder accepted a NULL buffer");
 	CHECK(blob_hdr_encode_body(BODY, NOR_PROGRAM_PAGE, BASE, CAP, NULL) ==
@@ -390,7 +469,7 @@ static void t_codec_edges(void)
 	CHECK(blob_hdr_encode_magic(small, sizeof small) == BLOB_REJECT_SHORT,
 	      "the magic went into a buffer too small");
 	CHECK(small[0] == 0xA5u, "a refused magic still wrote bytes");
-	CHECK(blob_hdr_encode_magic(NULL, BLOB_MAGIC_SIZE) == BLOB_REJECT_SHORT,
+	CHECK(blob_hdr_encode_magic(NULL, NOR_PROGRAM_PAGE) == BLOB_REJECT_SHORT,
 	      "the magic went into a NULL buffer");
 }
 
@@ -688,6 +767,7 @@ int main(void)
 	t_roundtrip();
 	t_empty_and_foreign();
 	t_magic_page();
+	t_body_page_tail();
 	t_body_rejections();
 	t_codec_edges();
 	t_choose();

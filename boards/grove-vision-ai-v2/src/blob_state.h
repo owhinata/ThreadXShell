@@ -102,6 +102,15 @@ extern "C" {
  * erased magic page and an undecodable body is INVALID: calling it incomplete
  * would tell an operator that a transfer of theirs was interrupted when what is
  * actually there is somebody else's data.
+ *
+ * [!] AND VALID IS A STATEMENT ABOUT THE HEADER, NOT ABOUT THE PAYLOAD.  The
+ * decoder never reads a payload byte: it recovers the length and the CRC that
+ * were recorded when the blob arrived, and nothing here says the payload still
+ * matches them.  Only re-reading the payload and recomputing that CRC says
+ * that, which is what `blob verify` is for -- so a consumer that PARSES a
+ * payload rather than copying it (`nn open` reads the model in place, out of
+ * the XIP window) has to verify it first, and hold the reader lease it verified
+ * under for as long as it goes on reading.
  */
 enum blob_slot_state {
 	BLOB_EMPTY = 0,
@@ -119,15 +128,22 @@ const char *blob_slot_state_name(enum blob_slot_state s);
  * things from an operator -- and fixed in ONE order so the answer does not
  * depend on how the decoder happens to be written:
  *
- *   1. the magic page, when it is neither erased nor the magic.  Foreign data
- *      fails every later test too, and naming the first one it fails would
+ *   1. PROVENANCE, on both pages: bytes where this port writes nothing.  It
+ *      programs BLOB_MAGIC_SIZE bytes into page 0 and BLOB_BODY_SIZE into page
+ *      1, so anything else in either page came from somewhere else.  Foreign
+ *      data fails every later test too, and naming the first one it fails would
  *      report a version error about a KVDB sector
- *   2. otherwise the first body field that fails, in the order they are stored
+ *   2. then the first body field that fails, in the order they are stored
+ *
+ * [!] THE TWO PAGES GET THE SAME PROVENANCE TEST, and asymmetry here is a
+ * fail-open: with page 1's tail unchecked, a header with one stray byte after
+ * the body -- a byte sequence this port cannot produce -- decoded as VALID.
  */
 enum blob_hdr_reject {
 	BLOB_REJECT_NONE = 0,
 	BLOB_REJECT_SHORT,     /**< caller passed fewer than BLOB_HDR_SPAN bytes */
 	BLOB_REJECT_MAGIC,     /**< page 0 is neither erased nor the magic       */
+	BLOB_REJECT_BODY_TAIL, /**< page 1 holds bytes after the body            */
 	BLOB_REJECT_VER,       /**< a format this build does not know            */
 	BLOB_REJECT_BASE,      /**< the body names a different slot              */
 	BLOB_REJECT_LENGTH,    /**< zero, or more payload than the slot holds    */
@@ -191,19 +207,26 @@ enum blob_slot_state blob_hdr_decode(const uint8_t *hdr, uint32_t hdr_len,
                                      enum blob_hdr_reject *why);
 
 /**
- * @brief  Lay out the body page for @p info in @p body.
+ * @brief  Lay out the body page for @p info in @p page.
  *
- * @return BLOB_REJECT_NONE when @p body holds a body the decoder will accept,
+ * @return BLOB_REJECT_NONE when @p page holds a body the decoder will accept,
  *         and the reason it refused otherwise -- the SAME vocabulary the
  *         decoder rejects with, deliberately: what this refuses to write and
  *         what that refuses to read are one set of rules, and the host test
  *         asserts the two agree rather than trusting that they do.
  *
+ * [!] IT LAYS OUT THE WHOLE PAGE, body first and erased bytes after, so that
+ * programming any length from BLOB_BODY_SIZE up to a full page puts the same
+ * thing in the flash: the tail is 0xFF, which programs as a no-op over erased
+ * flash and is what the decoder's provenance test requires.  An encoder that
+ * filled only the body would leave a caller that programmed the page writing
+ * whatever its buffer happened to hold into a header.
+ *
  * Nothing may be programmed on a refusal.  The bytes after the name are zeroed
  * rather than left erased so that a body which lost power part-way through its
  * one program fails the body CRC instead of decoding as a shorter name.
  */
-enum blob_hdr_reject blob_hdr_encode_body(uint8_t *body, uint32_t body_len,
+enum blob_hdr_reject blob_hdr_encode_body(uint8_t *page, uint32_t page_len,
                                           uint32_t slot_base,
                                           uint32_t payload_max,
                                           const struct blob_info *info);
@@ -215,11 +238,13 @@ enum blob_hdr_reject blob_hdr_encode_body(uint8_t *body, uint32_t body_len,
  * with the body it would be one page program that could land the magic over a
  * half-formed body: a slot that looks valid and is not.
  *
- * @return BLOB_REJECT_NONE, or BLOB_REJECT_SHORT for a buffer too small to
- *         hold the magic -- which is a refusal to write anything, not a
- *         truncated magic that would read back as INVALID forever.
+ * Lays out the whole page for the same reason blob_hdr_encode_body() does.
+ *
+ * @return BLOB_REJECT_NONE, or BLOB_REJECT_SHORT for a buffer smaller than a
+ *         page -- which is a refusal to write anything, not a truncated magic
+ *         that would read back as INVALID forever.
  */
-enum blob_hdr_reject blob_hdr_encode_magic(uint8_t *magic, uint32_t magic_len);
+enum blob_hdr_reject blob_hdr_encode_magic(uint8_t *page, uint32_t page_len);
 
 /* ---- choosing where a write goes ----------------------------------------- */
 
@@ -262,6 +287,15 @@ const char *blob_choice_name(enum blob_choice c);
  * @param count  how many
  * @param want   the slot the operator named, or negative for none
  * @param target receives the chosen index on REUSE / FRESH; untouched otherwise
+ *
+ * [!] THE VIEWS MUST BE READ UNDER THE RESERVATION THAT THE ERASE THEN RUNS
+ * IN, and the caller is the only thing that can arrange it.  A scan taken
+ * before nor_reserve() answers a question about a part somebody else may write
+ * next: the shell runs background jobs (CLI_MAX_BG_JOBS), a `nor erase` among
+ * them, and #91 added the reservation precisely because the gap between two
+ * transactions is open.  Reserve, decode every slot, choose, erase, program and
+ * commit inside one reservation, and release it at one exit -- otherwise a slot
+ * that was EMPTY when it was chosen can hold a blob by the time it is erased.
  *
  * FRESH accepts EMPTY and INCOMPLETE and refuses VALID and INVALID.  An
  * INCOMPLETE slot has no magic, so nothing `blob list` calls a blob is lost;

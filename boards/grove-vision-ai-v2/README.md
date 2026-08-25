@@ -2138,7 +2138,7 @@ slots (`port/nor/nor_state.h`):
 | slot | held for |
 |---|---|
 | `NOR_LEASE_NPU` | `npu_hw_init()` .. `npu_hw_deinit()` -- the whole life of an open model, which is parsed in place through the window |
-| `NOR_LEASE_SCAN` | one whole `nor info` or `nor scan` |
+| `NOR_LEASE_SCAN` | one whole `nor scan`, and the bring-up `nor info` does when nothing is up yet |
 | `NOR_LEASE_DEVMEM` | one `devmem` access that touches the alias, including a whole `dump` |
 
 [!] **`devmem` had no lease at all until issue #90**, which was wrong in two
@@ -2249,27 +2249,108 @@ because the probe exists precisely to not take the window's health on trust, and
 "nothing caches this line yet" is the assumption that stops holding the moment
 issue #88's writer drops XIP and brings it back.
 
-### The lifecycle has a fifth state for writing
+### The lifecycle has two more states for writing
 
 `NOR_ST_WRITING` (issue #88). A write drops XIP -- the vendor's erase and
 program entry points refuse outright while it is on -- so the alias is down for
 the duration and readers have to be kept out. It is not a teardown: the
-transaction restores XIP, re-probes and commits back to `NOR_ST_XIP`, or fails
-and commits to `NOR_ST_FAULTED`. "OFF is reached once, at boot" still holds;
-what changed is that OFF is no longer the only state XIP can be left for.
+transaction restores XIP, re-probes and commits back, or fails and commits to
+`NOR_ST_FAULTED`. "OFF is reached once, at boot" still holds; what changed is
+that OFF is no longer the only state XIP can be left for.
 
-Two rules in `nor_write_decide()` are worth stating because the wider version of
-each is what fails open:
+`NOR_ST_RESERVED` (issue #91). One writer owns the part, but no transaction is
+running: the window is up and correct, and the only thing that changed is that
+no reader may take a lease.
 
-- **the state and the reader mask are read together.** A writer that sampled
-  "no readers" and then dropped XIP leaves the interval in between, and
+**Why a state and not just a transaction.** A transaction excluded readers only
+while it ran. `nor_write_commit()` published `NOR_ST_XIP`, so between two
+transactions the part looked free -- and a write that is bigger than one
+transaction spends most of its life in exactly that gap. Issue #49's
+`blob write` is 1 erase + N program chunks + 2 header writes, and it blocks the
+foreground thread on the UART between them, which is when a lower-priority
+background job runs. A `nn open &` landing there would take a lease that the
+next chunk then had to refuse over, killing a transfer minutes in.
+
+So a writer takes a reservation first, runs its transactions inside it, and
+gives it back:
+
+```
+XIP --reserve--> RESERVED --claim--> WRITING --commit--> RESERVED --unreserve--> XIP
+                                            \--fault--> FAULTED
+```
+
+**The state says somebody owns it; the token says who.** Both are needed -- a
+state alone cannot tell the owner's second transaction from a stranger's first.
+The token's sequence is bumped per reservation rather than per bring-up, so a
+token kept past its unreserve cannot validate against the next one, and its low
+byte is `0xFF`, which no lease token can carry.
+
+[!] **It is deliberately not a fourth lease slot.** A lease lives in the reader
+mask, and anything in that mask makes `nor_write_decide()` answer BUSY -- so a
+writer holding one would refuse itself. Making the mask mean "these bits are
+readers and that bit is a writer" would push mask-awareness into the acquire
+table, which is decided by state alone today and is simpler for it.
+
+Rules worth stating because the wider version of each is what fails open:
+
+- **the state, the reader mask and the owner are read together.** A writer that
+  sampled "no readers" and then dropped XIP leaves the interval in between, and
   `nor_acquire()` only has to land there once for a reader to be handed a lease
   on a window that is about to disappear. The caller that gets `NOR_WR_GO`
-  publishes `NOR_ST_WRITING` before releasing the same critical section.
+  publishes `NOR_ST_WRITING` before releasing the same critical section, and
+  the caller that gets `NOR_RSV_GO` publishes the state **and the owner**
+  together.
 - **`NOR_ST_OFF` is BUSY, not "bring it up".** A writer needs the QSPI master
   open, but bring-up is a reader's errand -- vendor XIP setup, a DMA wait, the
   EPK snapshot. Letting a writer own it would put two unrelated transactions in
-  one path. The refusal is answerable: bring the window up, then write.
+  one path. The refusal is answerable: bring the window up, then reserve.
+- **an owner that disagrees with the state is TERMINAL, not busy.** Adding an
+  owner adds combinations no correct transition produces, and the two that
+  matter fail in opposite directions. `RESERVED` with no owner is the dangerous
+  one: nobody can ever unreserve it, so every answer the port gives is BUSY for
+  the rest of the session -- and refusing it as "wrong token", which a token
+  comparison alone would do, is precisely the wrong answer. `XIP` with an owner
+  is the other: the next writer would be told the part is free while somebody
+  holds it. Neither is reachable, because the state and the owner are always
+  published together; they are checked because "unreachable" is a property of
+  today's call sites.
+
+**The reservation must be given back on every exit.** This is the hazard
+`nor_write.h` describes one level down -- a claim that returns without being
+returned leaves a port whose every answer is "busy" -- and it is easier to get
+wrong up here, because the code in between is a whole protocol. The shape that
+works is `npu_hw_init()`'s: keep the token local and zero-initialised, route
+every exit through one release point, nest any other resource's release inside
+it. "Every exit" means every exit this code takes: the shell's **cooperative**
+kill (`CLI_EVT_KILL`, which `cli_read_byte()` reports as `-2`) still returns
+through the caller's own code. A `tx_thread_terminate()` does not, and nothing
+here can help it -- that is outside the contract, not covered by it.
+
+[!] **`nor info` does not take a lease any more** (issue #91). It reads the SCU
+and walks the MPU; it never touches the alias, so the lease bought nothing --
+and cost everything, because a lease cannot be taken while a writer holds a
+reservation. That made the one command that says *why* the part is busy
+unavailable exactly when it was. It still takes one for a single purpose: `OFF`
+means nothing has been brought up, and bring-up is a reader's errand.
+
+Two things follow from that, and both are visible in the output:
+
+- **the registers are sampled only where the window is up** -- `XIP` and
+  `RESERVED`. In `WRITING` the window is down, so the SCU would describe the
+  transition rather than the mapping. `nor info` prints
+  `window down (writing); registers not sampled` instead of the previous
+  values, because a stale reading printed without comment is indistinguishable
+  from a current one.
+- **the whole snapshot is taken under one critical section**, state included.
+  The owner of a reservation moves `RESERVED -> WRITING` without warning, and a
+  snapshot that straddled it would pair a state with registers read after the
+  window went down.
+
+`nor info` also prints the raw lease mask, and a refusal names the holder when
+there is exactly one and it is a slot the command knows: `busy -- \`nn\` has a
+model open (nn close)` is actionable and `busy` is not. Two holders, or a slot
+added later that nobody taught the mapping about, fall back to the generic
+answer -- a wrong name is worse than none.
 
 [!] **The decision cannot be produced from a console even now that the writer
 exists.** Two callers arriving in the same window needs two threads, and this
@@ -2602,8 +2683,84 @@ and issue #49's blob writer calls `nor_write_program()` directly.
 
 None of the three brings the window up on its own -- that is a reader's errand
 (`NOR_ST_OFF` is `BUSY`). Each does the reader's part explicitly first and hands
-the lease straight back; the claim is what closes the gap in between, because it
-refuses rather than waits.
+the lease straight back, then takes the writer **reservation** (issue #91),
+which is what closes the gap in between because it refuses rather than waits.
+Each has exactly one exit, and that exit gives the reservation back.
+
+**`nor erase` can be interrupted with Ctrl+C** (issue #91), and prints progress
+every 256 KB. A whole 2 MB slot is 512 sector erases on this die, and how long
+that takes is not documented for the part actually fitted (issue #89) -- the
+`~45 ms/sector` everyone quotes comes from the W25Q128JW datasheet, and its
+*maximum* is 400 ms, which would be 205 s for one slot.
+
+[!] **The cancel point is inside the transaction, not between several of them.**
+Splitting a long erase into a transaction per chunk was the obvious way to get a
+cancel point and the wrong one: every extra transaction is another window
+down/up, which is **two more writes of the NOR's non-volatile status register**,
+and another chance to meet the vendor's unbounded spin. So the erase stays one
+transaction and `erase_run()` takes a progress/cancel callback.
+
+Two things about that callback are load-bearing:
+
+- **it runs with the window DOWN.** It may call `cli_cancel_requested()`,
+  `cli_print()` and `log_write()` -- between them the RX ring, shell code in
+  ITCM, `.rodata` in SRAM and the log ring in DTCM, none of which reach the
+  flash. It must not read the alias, take a lease, stat a blob, open the NPU,
+  re-enter `nor_write_*()`, claim the console, or block without a bound.
+- **it is called only after a unit has actually been erased.** The first unit of
+  a slot is its header sector, so a cancel that could run before it would leave
+  the previous header intact and still valid -- while the caller believed the
+  slot was now empty.
+
+[!] **The cancel result is in `dmesg`, not on the console, and that is the
+shell's design rather than a bug here.** Once Ctrl+C is latched,
+`cli_tx_send_blocking()` returns `-1` and `tx_failed` drops every remaining byte
+of that command's output -- deliberately, so a runaway handler cannot keep
+spewing after a cancel (`shell/core/cli_core.c`). The consequence is that the
+one report an operator most needs, *how much of the erase actually happened*,
+is exactly the one the console can never show. So every transaction outcome is
+written to the log ring as well, and `nor erase` says so before it starts:
+
+```
+grove> nor erase 0x600000 0x80000
+         Ctrl+C stops it between sectors; the result is in `dmesg`
+footprint: 0x00600000..0x00680000 (524288 B, 128 sector(s))
+^C
+grove> dmesg
+[   16.579] WRN nor: incomplete 0x600000+524288: 110592/110592 (cancelled) -- cancelled between erase sectors
+```
+
+Those timestamps are also the first **measurement of this die's erase speed**,
+which nothing in this repository had. Two cancelled erases, from the log:
+
+| window up | cancel logged | erased | sectors | per sector |
+|---|---|---|---|---|
+| 15.326 | 16.579 | 110,592 B | 27 | 46.4 ms |
+| 4.034 | 5.337 | 118,784 B | 29 | 44.9 ms |
+
+Both figures fold in one transaction's overhead -- the window down, the canary,
+the restore and re-probe, and the read-back of what was erased -- so each is an
+**upper bound**. Two independent runs agreeing on ~45 ms is enough to say the
+fitted Zbit die behaves like the W25Q128JW datasheet's *typical* and nothing
+like its 400 ms maximum, so a whole 2 MB slot is roughly **23 s**, not minutes.
+
+That matters for issue #49 Step 2, which had to plan around not knowing: a
+`blob write` erases its slot before the transfer starts, and the difference
+between 23 s and 205 s is the difference between an announced wait and an
+unusable command.
+
+Every outcome is logged, not only the cancelled one: on a part whose endurance
+is not documented (issue #89) a durable record of how many transactions have run
+is worth having, and a log line that only appears on failure is one nobody has
+seen the shape of.
+
+[!] **A cancel and a vendor refusal both end `NOR_WRITE_INCOMPLETE`, and only
+one of them promises anything.** The report carries `cancelled` to tell them
+apart: a cancel guarantees everything up to `done` really was erased, and in
+particular that the first unit went. A vendor refusal on the very first sector
+leaves `done == 0`, the old header intact and the slot still valid -- so
+"the erase did not succeed, therefore the slot is empty" is **not** a valid
+inference. Only a cancel supports it.
 
 ### What is actually on this board's flash
 

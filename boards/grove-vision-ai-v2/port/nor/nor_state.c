@@ -23,6 +23,13 @@ enum nor_acquire nor_acquire_decide(enum nor_state st)
 		return NOR_ACQ_TAKE;
 	case NOR_ST_ENABLING:
 		return NOR_ACQ_BUSY;
+	/* A writer owns the part but is between transactions (issue #91).  The
+	 * window is still up, so this refusal is not about the alias being
+	 * unreadable -- it is about not handing out a lease the owner's next
+	 * transaction would then have to refuse itself over.  BUSY: it clears
+	 * when the owner unreserves. */
+	case NOR_ST_RESERVED:
+		return NOR_ACQ_BUSY;
 	/* A writer has dropped XIP; the alias is not readable until it commits
 	 * back (issue #88).  BUSY and not FAULTED: this one really does clear. */
 	case NOR_ST_WRITING:
@@ -95,6 +102,7 @@ const char *nor_state_name(enum nor_state st)
 	case NOR_ST_OFF:      return "off";
 	case NOR_ST_ENABLING: return "enabling";
 	case NOR_ST_XIP:      return "xip";
+	case NOR_ST_RESERVED: return "reserved";
 	case NOR_ST_WRITING:  return "writing";
 	case NOR_ST_FAULTED:  return "faulted";
 	default:              break;
@@ -102,18 +110,131 @@ const char *nor_state_name(enum nor_state st)
 	return "?";
 }
 
-enum nor_write nor_write_decide(enum nor_state st, uint32_t live)
+/* --- the writer reservation (issue #91) ---------------------------------- */
+
+#define NOR_RSV_TOKEN_MARK  0xFFu   /* no lease's slot+1 can be this */
+
+int nor_owner_consistent(enum nor_state st, uint32_t owner)
 {
-	/* Enumerated for the same reason acquire is (nor_state.h): the wider
-	 * tests here are "not WRITING" -- which starts a writer from OFF, before
-	 * the QSPI master is open -- and "state == XIP" alone, which starts one on
-	 * top of readers whose window it is about to remove. */
+	switch (st) {
+	/* Nobody may own the part in these: no reservation has been taken, or
+	 * the last one was given back. */
+	case NOR_ST_OFF:
+	case NOR_ST_ENABLING:
+	case NOR_ST_XIP:
+		return owner == 0u;
+	/* Somebody must, in these: RESERVED is only entered by a caller that
+	 * publishes its token in the same critical section, and WRITING is only
+	 * entered from RESERVED. */
+	case NOR_ST_RESERVED:
+	case NOR_ST_WRITING:
+		return owner != 0u;
+	/* [!] EITHER IS CONSISTENT WHILE FAULTED, and that is not laziness.  A
+	 * fault can be latched by bring-up (no owner has ever existed) or by a
+	 * transaction the owner is still holding -- and that owner must still be
+	 * able to give the reservation back.  Demanding one or the other here
+	 * would make one of those two ordinary paths report corruption. */
+	case NOR_ST_FAULTED:
+		return 1;
+	default:
+		break;
+	}
+	return 0;   /* an unknown state is a corrupted one */
+}
+
+uint32_t nor_reservation_make(uint32_t seq)
+{
+	if (seq == 0u)
+		return 0u;
+	return (seq << NOR_TOKEN_SLOT_BITS) | NOR_RSV_TOKEN_MARK;
+}
+
+enum nor_reserve nor_reserve_decide(enum nor_state st, uint32_t live,
+                                    uint32_t owner)
+{
+	/* Asked before the state is enumerated, because a disagreement means the
+	 * enumeration below is reasoning over bookkeeping that is already wrong. */
+	if (!nor_owner_consistent(st, owner))
+		return NOR_RSV_FAULTED;
+
 	switch (st) {
 	case NOR_ST_XIP:
+		/* Read WITH the state, not after it -- the same rule
+		 * nor_write_decide() follows, and for the same reason. */
+		return (live == 0u) ? NOR_RSV_GO : NOR_RSV_BUSY;
+	/* OFF is a reader's errand (nor_state.h); ENABLING is one in flight;
+	 * RESERVED and WRITING are somebody else's claim.  All clear on their
+	 * own, so all are BUSY rather than terminal. */
+	case NOR_ST_OFF:
+	case NOR_ST_ENABLING:
+	case NOR_ST_RESERVED:
+	case NOR_ST_WRITING:
+		return NOR_RSV_BUSY;
+	case NOR_ST_FAULTED:
+		return NOR_RSV_FAULTED;
+	default:
+		break;
+	}
+	return NOR_RSV_FAULTED;
+}
+
+enum nor_unreserve nor_unreserve_decide(enum nor_state st, uint32_t owner,
+                                        uint32_t token)
+{
+	if (!nor_owner_consistent(st, owner))
+		return NOR_UNRSV_INCONSISTENT;
+
+	/* "Nothing held" is answered first, for the reason nor_release_decide()
+	 * answers it first: a zero token must never be able to match a zero
+	 * owner and read as a live claim. */
+	if (token == 0u || owner == 0u)
+		return NOR_UNRSV_NOT_HELD;
+	if (token != owner)
+		return NOR_UNRSV_STALE;
+
+	switch (st) {
+	case NOR_ST_RESERVED:
+		return NOR_UNRSV_DROP;
+	/* The owner may always hand a faulted reservation back; what it may not
+	 * do is take the port out of FAULTED by doing so. */
+	case NOR_ST_FAULTED:
+		return NOR_UNRSV_DROP_FAULTED;
+	/* Only nor_write_commit() leaves WRITING -- see nor_state.h. */
+	case NOR_ST_WRITING:
+		return NOR_UNRSV_BUSY;
+	/* Consistency already established that these carry no owner, so a
+	 * non-zero owner cannot have got here; enumerated anyway rather than
+	 * folded into a default that would also swallow an unknown state. */
+	case NOR_ST_OFF:
+	case NOR_ST_ENABLING:
+	case NOR_ST_XIP:
+		return NOR_UNRSV_NOT_HELD;
+	default:
+		break;
+	}
+	return NOR_UNRSV_INCONSISTENT;
+}
+
+enum nor_write nor_write_decide(enum nor_state st, uint32_t live,
+                                uint32_t owner, uint32_t token)
+{
+	if (!nor_owner_consistent(st, owner))
+		return NOR_WR_FAULTED;
+
+	/* Enumerated for the same reason acquire is (nor_state.h): the wider
+	 * tests here are "not WRITING" -- which starts a writer from OFF, before
+	 * the QSPI master is open -- and "state == RESERVED" alone, which lets a
+	 * caller run a transaction inside somebody else's claim. */
+	switch (st) {
+	case NOR_ST_RESERVED:
 		/* Read WITH the state, not after it.  A writer that trusted a
 		 * separately-sampled reader count would be deciding on two facts
 		 * that were never true at the same instant. */
+		if (token == 0u || token != owner)
+			return NOR_WR_BUSY;
 		return (live == 0u) ? NOR_WR_GO : NOR_WR_BUSY;
+	/* XIP is now "unclaimed", not "ready to write" (issue #91). */
+	case NOR_ST_XIP:
 	case NOR_ST_OFF:
 	case NOR_ST_ENABLING:
 	case NOR_ST_WRITING:

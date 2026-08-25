@@ -46,17 +46,57 @@ enum nor_state {
 	NOR_ST_OFF = 0,   /**< nothing brought up; the alias is not readable  */
 	NOR_ST_ENABLING,  /**< one caller is bringing it up; others wait out  */
 	NOR_ST_XIP,       /**< the window is up and has been probed           */
+	/* [!] ONE WRITER OWNS THE PART, BUT NO TRANSACTION IS RUNNING (issue
+	 * #91).  The window is still up and still correct; what has changed is
+	 * that no reader may take a lease, because the owner is about to drop it
+	 * again.  This state exists because a WRITE THAT IS BIGGER THAN ONE
+	 * TRANSACTION had nothing holding the part between its transactions:
+	 * nor_write_commit() published NOR_ST_XIP, and a reader only had to land
+	 * in that gap to be handed a lease -- which the next transaction would
+	 * then refuse, killing a transfer that was minutes in.  It is reachable:
+	 * `blob write` blocks the foreground thread on the UART between chunks,
+	 * which is exactly when a lower-priority background job runs.
+	 *
+	 * Only the holder of the reservation token may move RESERVED -> WRITING,
+	 * and only nor_unreserve() gets back out to XIP. */
+	NOR_ST_RESERVED,  /**< one writer owns it; window up, readers barred  */
 	/* [!] The one non-terminal state the window is NOT readable in (issue
 	 * #88).  A write has to drop XIP -- the vendor's erase and program entry
 	 * points refuse outright while it is on -- so the alias dies for the
 	 * duration and every reader has to be kept out.  It is not a teardown:
 	 * the transaction restores XIP, re-probes and commits back to
-	 * NOR_ST_XIP, or fails and commits to NOR_ST_FAULTED.  "OFF is reached
-	 * once, at boot" above stays true; what changes is that OFF is no longer
-	 * the only state XIP can be left for. */
-	NOR_ST_WRITING,   /**< one writer owns the part; the alias is down    */
+	 * NOR_ST_RESERVED, or fails and commits to NOR_ST_FAULTED.  "OFF is
+	 * reached once, at boot" above stays true; what changes is that OFF is no
+	 * longer the only state XIP can be left for. */
+	NOR_ST_WRITING,   /**< a transaction is running; the alias is down    */
 	NOR_ST_FAULTED,   /**< bring-up failed or could not be verified       */
 };
+
+/**
+ * @brief  Does the owner field agree with the state? (issue #91)
+ *
+ * [!] THIS IS THE PART THAT IS NOT DECORATION.  Adding an owner to a state
+ * machine adds combinations that no correct transition produces, and the two
+ * that matter fail in opposite directions:
+ *
+ *   RESERVED with no owner   nobody can ever unreserve it, so every answer
+ *                            this port gives is BUSY for the rest of the
+ *                            session.  Refusing it as "wrong token" -- which
+ *                            is what a token comparison alone would do -- is
+ *                            precisely the wrong answer.
+ *   XIP with an owner        a reservation that was released without the
+ *                            state following it; the next writer would be
+ *                            told the part is free while somebody holds it.
+ *
+ * Neither is reachable through the transitions below, because the state and
+ * the owner are always published in one critical section.  They are checked
+ * because "unreachable" is a property of today's call sites, and the cost of
+ * being wrong about that is a port nobody can use.  A disagreement is
+ * TERMINAL, not busy: it is evidence the port's own bookkeeping is corrupt.
+ *
+ * @return non-zero when @p owner is consistent with @p st.
+ */
+int nor_owner_consistent(enum nor_state st, uint32_t owner);
 
 /** What a caller asking for a reader lease should do. */
 enum nor_acquire {
@@ -159,38 +199,138 @@ enum nor_release nor_release_decide(enum nor_state st, uint32_t live,
 /** How many leases the mask says are out.  Population count, nothing more. */
 uint32_t nor_readers(uint32_t live);
 
-/** What a caller asking to write should do. */
-enum nor_write {
-	NOR_WR_GO = 0,    /**< nobody is reading and the window is up: claim it */
-	NOR_WR_BUSY,      /**< readers out, a bring-up in flight, or a writer   */
-	NOR_WR_FAULTED,   /**< terminal: refuse, and keep refusing              */
+/* --- the writer reservation (issue #91) ------------------------------------
+ *
+ * A reservation is what makes a write that spans SEVERAL transactions safe.
+ * It is deliberately NOT a fourth lease slot: a lease lives in @ref live, and
+ * anything in @ref live makes nor_write_decide() answer BUSY -- so a writer
+ * holding one would refuse itself.  Turning the mask into "these bits are
+ * readers and that bit is a writer" would put mask-awareness into the acquire
+ * table, which is decided by state alone today and is simpler for it.
+ *
+ * The state says "somebody owns this"; the token says who.  Both are needed:
+ * a state alone cannot tell the owner's second transaction apart from a
+ * stranger's first.
+ */
+
+/** What a reserve attempt may do. */
+enum nor_reserve {
+	NOR_RSV_GO = 0,   /**< window up, no readers, no owner: take it        */
+	NOR_RSV_BUSY,     /**< readers out, a bring-up in flight, or an owner  */
+	/** Terminal.  The port is faulted, the state is unknown, or the state
+	 *  and the owner field disagree (nor_owner_consistent()). */
+	NOR_RSV_FAULTED,
 };
 
 /**
- * @brief  Decide whether a write transaction may start (issue #88).
+ * @brief  Decide whether a reservation may be taken.
  *
- * @param st    the lifecycle state
- * @param live  bitmask of slots currently holding a reader lease
+ * [!] AS WITH nor_acquire_decide(), THE CALLER THAT GETS NOR_RSV_GO MUST
+ * PUBLISH BOTH THE STATE AND THE OWNER BEFORE LEAVING THE CRITICAL SECTION
+ * THAT PRODUCED THEM.  Publishing the state first would leave RESERVED with no
+ * owner -- see nor_owner_consistent() for why that is the worst of the
+ * reachable mistakes.
+ *
+ * [!] AND NOR_ST_OFF IS BUSY HERE TOO, for the reason it is busy for a write:
+ * bring-up is a reader's errand (it runs the vendor's XIP setup and takes the
+ * EPK snapshot), and a writer that owned it would be running two unrelated
+ * transactions in one path.
+ */
+enum nor_reserve nor_reserve_decide(enum nor_state st, uint32_t live,
+                                    uint32_t owner);
+
+/** What an unreserve attempt may do. */
+enum nor_unreserve {
+	NOR_UNRSV_DROP = 0,     /**< clear the owner and go back to XIP        */
+	/** Clear the owner but STAY faulted.  A holder may always give a
+	 *  reservation back -- refusing while faulted would strand the owner
+	 *  field for the rest of the session -- but giving it back is not
+	 *  evidence the port recovered. */
+	NOR_UNRSV_DROP_FAULTED,
+	/** [!] REFUSED, and this is the one refusal that is about the CALLER'S
+	 *  code rather than about contention.  A transaction is in flight; the
+	 *  only way out of NOR_ST_WRITING is nor_write_commit().  Letting an
+	 *  unreserve through here would either strip the owner from a running
+	 *  transaction or publish NOR_ST_XIP over a window that is still down.
+	 *
+	 *  Unreachable through nor_write.c, whose run() cannot return without
+	 *  committing -- which is exactly why the host test hands this case to
+	 *  the pure function directly.  A rule nobody has watched fail is worth
+	 *  as little as no rule. */
+	NOR_UNRSV_BUSY,
+	NOR_UNRSV_NOT_HELD,     /**< a zero token, or nobody owns it           */
+	NOR_UNRSV_STALE,        /**< a token that is not the current owner     */
+	/** Terminal: the state and the owner field disagree. */
+	NOR_UNRSV_INCONSISTENT,
+};
+
+/**
+ * @brief  Decide whether a reservation may be given back.
+ *
+ * @param st     the lifecycle state
+ * @param owner  the reservation token currently recorded, or 0
+ * @param token  the caller's token; 0 means "I hold nothing"
+ */
+enum nor_unreserve nor_unreserve_decide(enum nor_state st, uint32_t owner,
+                                        uint32_t token);
+
+/**
+ * @brief  Build a reservation token.  Never 0 for @p seq != 0.
+ *
+ * The low byte is 0xFF, which no lease token can carry (a lease's low byte is
+ * its slot + 1, and there are three slots).  So a lease token handed to an
+ * unreserve, or a reservation token handed to a release, cannot be mistaken
+ * for a live claim of the other kind -- it simply fails to match.
+ *
+ * @p seq is a counter bumped on every reservation, NOT the lifecycle
+ * generation: the generation only moves at bring-up, so two reservations in
+ * one lifecycle would mint the same token and a stale one from the first would
+ * validate during the second.
+ */
+uint32_t nor_reservation_make(uint32_t seq);
+
+/** What a caller asking to run one write transaction should do. */
+enum nor_write {
+	NOR_WR_GO = 0,    /**< the caller owns the reservation: claim it       */
+	NOR_WR_BUSY,      /**< readers out, a bring-up in flight, or not ours  */
+	NOR_WR_FAULTED,   /**< terminal: refuse, and keep refusing             */
+};
+
+/**
+ * @brief  Decide whether one write transaction may start (issues #88, #91).
+ *
+ * @param st     the lifecycle state
+ * @param live   bitmask of slots currently holding a reader lease
+ * @param owner  the reservation token currently recorded, or 0
+ * @param token  the caller's reservation token
  *
  * [!] THE ANSWER AND THE CLAIM MUST SHARE ONE CRITICAL SECTION.  This function
- * reads @p st and @p live together; the caller that gets NOR_WR_GO must publish
- * NOR_ST_WRITING before releasing the section that produced them.  Checking
- * "no readers" and dropping XIP as two steps leaves the interval in between,
- * and nor_acquire() only has to land there once for a reader to be handed a
- * lease on a window that is about to disappear.
+ * reads @p st, @p live and @p owner together; the caller that gets NOR_WR_GO
+ * must publish NOR_ST_WRITING before releasing the section that produced them.
+ * Checking "no readers" and dropping XIP as two steps leaves the interval in
+ * between, and nor_acquire() only has to land there once for a reader to be
+ * handed a lease on a window that is about to disappear.
+ *
+ * [!] A TRANSACTION NOW STARTS FROM NOR_ST_RESERVED, NOT FROM NOR_ST_XIP
+ * (issue #91).  Every writer holds a reservation first, so XIP means "nobody
+ * has claimed this" and is BUSY here.  @p live is still checked even though a
+ * reservation can only be taken with no readers out: the cost is one
+ * comparison and the alternative is a reader who has to re-derive the
+ * reservation's guarantee to believe this one.
  *
  * [!] AND NOR_ST_OFF IS BUSY, NOT "BRING IT UP".  A writer needs the QSPI
  * master open, which is what bring-up does -- but bring-up is a reader's
  * errand: it runs the vendor's XIP setup, waits on DMA completion, and takes
  * the EPK snapshot.  Letting a writer own that would put two unrelated
  * transactions in one path.  Refusing is answerable by the caller: bring the
- * window up first, then write.
+ * window up first, then reserve, then write.
  *
  * As with nor_acquire_decide(), the states that may act are ENUMERATED.
  * "anything that is not WRITING" would let a writer start from OFF, and
- * "state == XIP" alone would let one start on top of live readers.
+ * "state == RESERVED" alone would let a stranger use somebody else's claim.
  */
-enum nor_write nor_write_decide(enum nor_state st, uint32_t live);
+enum nor_write nor_write_decide(enum nor_state st, uint32_t live,
+                                uint32_t owner, uint32_t token);
 
 /** Human-readable names, for `nor info` and for the host test's diagnostics. */
 const char *nor_state_name(enum nor_state st);

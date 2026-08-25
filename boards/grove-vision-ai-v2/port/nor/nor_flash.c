@@ -121,6 +121,8 @@ static struct {
 	enum nor_state state;
 	uint32_t       live;        /* bitmask of slots holding a lease */
 	uint32_t       gen;
+	uint32_t       owner;       /* reservation token, or 0 (issue #91) */
+	uint32_t       rsv_seq;     /* bumped per reservation, never reused */
 	const char    *fail;
 	struct epk_irq_wrapset irqs;
 	struct nor_report      rep;
@@ -426,9 +428,22 @@ const char *nor_fail_reason(void)
 
 void nor_report(struct nor_report *r)
 {
+	uint32_t pm;
+
 	if (r == NULL)
 		return;
+
+	/* [!] ONE CRITICAL SECTION FOR THE WHOLE SNAPSHOT (issue #91).  The owner
+	 * of a reservation moves RESERVED -> WRITING without warning, and that
+	 * transition takes the window down: a state sampled before it and
+	 * registers sampled after it would describe a mapping that never existed.
+	 * Everything below is register reads and a sixteen-entry MPU walk -- no
+	 * waits, no vendor calls -- so the section stays short. */
+	pm = __get_PRIMASK();
+	__disable_irq();
 	*r = nor.rep;
+	r->state   = nor.state;
+	r->live    = nor.live;
 	r->readers = nor_readers(nor.live);
 	r->irq_enabled = 0u;
 	if (nor.rep.irq >= 0) {
@@ -436,11 +451,29 @@ void nor_report(struct nor_report *r)
 		r->irq_enabled = (NVIC->ISER[n >> 5] & (1u << (n & 31u))) ? 1u : 0u;
 	}
 	/* Re-read the live registers rather than trusting what bring-up latched:
-	 * the point of `nor info` is to show what is true now. */
-	if (nor.state == NOR_ST_XIP) {
+	 * the point of `nor info` is to show what is true now.
+	 *
+	 * [!] ENUMERATED, and RESERVED is in the list because the window is UP in
+	 * it -- a reservation bars readers, it does not take the mapping away.
+	 * WRITING is deliberately absent: the window is down, so the registers
+	 * would describe the transition rather than the mapping. regs_sampled is
+	 * what stops the caller printing the stale copy as if it were current. */
+	r->regs_sampled = 0u;
+	switch (nor.state) {
+	case NOR_ST_XIP:
+	case NOR_ST_RESERVED:
 		r->scu_xip_after = rd32(SCU_ISP_XIP_SPICACHE);
 		(void)mpu_capture(r);
+		r->regs_sampled = 1u;
+		break;
+	case NOR_ST_OFF:
+	case NOR_ST_ENABLING:
+	case NOR_ST_WRITING:
+	case NOR_ST_FAULTED:
+	default:
+		break;
 	}
+	__set_PRIMASK(pm);
 }
 
 /* --- what a write transaction borrows (issue #88) --------------------------
@@ -450,17 +483,97 @@ void nor_report(struct nor_report *r)
  * contract and nor_write.h for the sequence they belong to.
  */
 
-enum nor_write nor_write_claim(void)
+int nor_reserve(uint32_t *out)
+{
+	enum nor_reserve verdict;
+	uint32_t pm;
+
+	if (out == NULL)
+		return -1;
+	*out = 0u;
+
+	pm = __get_PRIMASK();
+	__disable_irq();
+	verdict = nor_reserve_decide(nor.state, nor.live, nor.owner);
+	if (verdict == NOR_RSV_GO) {
+		/* [!] THE SEQUENCE, THE OWNER AND THE STATE GO TOGETHER.  Publishing
+		 * NOR_ST_RESERVED first would leave a state whose owner is zero --
+		 * which nor_owner_consistent() calls corruption precisely because
+		 * nobody could ever unreserve it (nor_state.h).
+		 *
+		 * The counter is per-reservation and never reused, so a token kept
+		 * past its unreserve cannot validate against the next one. */
+		nor.rsv_seq++;
+		nor.owner = nor_reservation_make(nor.rsv_seq);
+		nor.state = NOR_ST_RESERVED;
+		*out = nor.owner;
+	}
+	__set_PRIMASK(pm);
+
+	if (verdict == NOR_RSV_FAULTED && nor.fail == NULL)
+		LOG_WRN("reservation refused: the lifecycle bookkeeping disagrees");
+	return (verdict == NOR_RSV_GO) ? 0 : -1;
+}
+
+int nor_unreserve(uint32_t token)
+{
+	enum nor_unreserve verdict;
+	uint32_t pm = __get_PRIMASK();
+	int rc = -1;
+
+	__disable_irq();
+	verdict = nor_unreserve_decide(nor.state, nor.owner, token);
+	switch (verdict) {
+	case NOR_UNRSV_DROP:
+		nor.owner = 0u;
+		nor.state = NOR_ST_XIP;
+		rc = 0;
+		break;
+	/* The owner lets go; the fault stays.  Getting out of FAULTED is not
+	 * something any caller can do -- it takes a reset. */
+	case NOR_UNRSV_DROP_FAULTED:
+		nor.owner = 0u;
+		rc = 0;
+		break;
+	case NOR_UNRSV_BUSY:
+	case NOR_UNRSV_NOT_HELD:
+	case NOR_UNRSV_STALE:
+	case NOR_UNRSV_INCONSISTENT:
+	default:
+		break;
+	}
+	__set_PRIMASK(pm);
+
+	/* NOT_HELD is ordinary: the single release point runs with a token that
+	 * is still zero whenever the reserve itself was refused.  The rest mean
+	 * somebody is handing back a claim that is not theirs, or that this
+	 * port's own bookkeeping has come apart. */
+	if (verdict == NOR_UNRSV_STALE)
+		LOG_WRN("unreserve with a token from an older reservation, ignored");
+	else if (verdict == NOR_UNRSV_BUSY)
+		LOG_ERR("unreserve while a write transaction is running, ignored");
+	else if (verdict == NOR_UNRSV_INCONSISTENT)
+		LOG_ERR("unreserve found the state and the owner disagreeing");
+	return rc;
+}
+
+uint32_t nor_reservation_owner(void)
+{
+	return nor.owner;
+}
+
+enum nor_write nor_write_claim(uint32_t token)
 {
 	enum nor_write verdict;
 	uint32_t pm = __get_PRIMASK();
 
-	/* [!] The state and the lease mask are read TOGETHER and the claim is
-	 * published before the section ends.  Two steps would leave an interval
-	 * nor_acquire() only has to land in once for a reader to be handed a lease
-	 * on a window that is about to disappear -- see nor_write_decide(). */
+	/* [!] The state, the lease mask and the owner are read TOGETHER and the
+	 * claim is published before the section ends.  Two steps would leave an
+	 * interval nor_acquire() only has to land in once for a reader to be
+	 * handed a lease on a window that is about to disappear -- see
+	 * nor_write_decide(). */
 	__disable_irq();
-	verdict = nor_write_decide(nor.state, nor.live);
+	verdict = nor_write_decide(nor.state, nor.live, nor.owner, token);
 	if (verdict == NOR_WR_GO)
 		nor.state = NOR_ST_WRITING;
 	__set_PRIMASK(pm);
@@ -479,7 +592,11 @@ void nor_write_commit(int ok, const char *why)
 	 * lost the window early and then succeeded at the steps after it must not
 	 * be able to publish NOR_ST_XIP over the top of that. */
 	if (ok && nor.fail == NULL) {
-		nor.state = NOR_ST_XIP;
+		/* [!] BACK TO RESERVED, NOT XIP (issue #91).  The transaction is over;
+		 * the reservation is not.  Publishing XIP here is the gap a reader
+		 * used to be handed a lease in, between one chunk of a `blob write`
+		 * and the next. */
+		nor.state = NOR_ST_RESERVED;
 		faulted = 0;
 	} else {
 		if (nor.fail == NULL)

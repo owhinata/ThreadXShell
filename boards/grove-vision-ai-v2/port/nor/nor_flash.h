@@ -102,10 +102,81 @@ struct nor_report {
 	 * hardware without a debugger. */
 	uint8_t  irq_enabled;
 	uint32_t readers;
+	/** [!] THE RAW LEASE MASK, not just how many (issue #91).  A writer that
+	 *  is refused needs to say WHICH holder refused it -- "busy" leaves the
+	 *  operator to guess, and the answer is nearly always `nn open`.  Raw
+	 *  because this struct is a snapshot: the mapping from bit to name
+	 *  belongs to whoever prints it, and a holder this port does not
+	 *  recognise must degrade to a generic refusal rather than a wrong name. */
+	uint32_t live;
+	/** The lifecycle state the rest of this snapshot was taken in. */
+	enum nor_state state;
+	/** [!] NON-ZERO ONLY WHEN THE REGISTER FIELDS WERE ACTUALLY READ.
+	 *  They are sampled in the states where the window is up -- XIP and
+	 *  RESERVED -- and NOT while a transaction has it down, because what a
+	 *  down window's SCU says is not a description of a healthy mapping.
+	 *  Without this flag the caller would print the last good sample as if it
+	 *  were current, which is the failure mode this whole file exists to
+	 *  avoid: a plausible answer is indistinguishable from a correct one. */
+	uint8_t  regs_sampled;
 };
 
-/** Fill @p r.  Valid at any state; fields not established yet read as zero. */
+/**
+ * @brief  Fill @p r.  Valid at any state; fields not established yet read zero.
+ *
+ * [!] SAMPLED UNDER ONE CRITICAL SECTION, state included.  The owner of a
+ * reservation can move RESERVED -> WRITING at any moment, and a snapshot that
+ * straddled that would pair a state with registers taken after the window went
+ * down.  Takes no lease: reading the SCU and walking the MPU does not touch
+ * the alias, and requiring a lease is what used to make `nor info` unavailable
+ * exactly while a writer held the part (issue #91).
+ */
 void nor_report(struct nor_report *r);
+
+/* --- the writer reservation (issue #91) ------------------------------------
+ *
+ * A write that spans more than one transaction needs something to hold the
+ * part BETWEEN its transactions; nor_write_commit() publishes a state readers
+ * may enter, and `blob write` blocks on the UART in exactly that gap.  See
+ * nor_state.h for why this is a state and an owner rather than a fourth lease.
+ */
+
+/**
+ * @brief  Claim the part for a sequence of write transactions.
+ *
+ * @param out  receives the token to store; set to 0 on any refusal
+ * @return 0 on success, -1 if refused
+ *
+ * [!] THE CALLER MUST GUARANTEE nor_unreserve() RUNS ON EVERY EXIT.  This has
+ * the same shape as the hazard nor_write.h describes one level down -- a claim
+ * that returns without being given back leaves a port whose every answer is
+ * "busy" for the rest of the session -- and one level up it is easier to get
+ * wrong, because the code between reserve and unreserve is a whole protocol.
+ * The pattern that works is npu_hw_init()'s: keep the token LOCAL and
+ * zero-initialised, route every exit through one release point, and nest any
+ * other resource's release inside it.
+ *
+ * [!] "EVERY EXIT" MEANS EVERY EXIT THIS CODE TAKES.  A thread stopped through
+ * the shell's cooperative kill (CLI_EVT_KILL, which cli_read_byte() reports as
+ * -2) still returns through the caller's own code and can release.  A thread
+ * ended with tx_thread_terminate() does not, and nothing here can help it;
+ * that is outside the contract, not covered by it.
+ */
+int nor_reserve(uint32_t *out);
+
+/**
+ * @brief  Give a reservation back.  Safe to call with a zero token.
+ *
+ * @return 0 if a reservation was dropped, -1 if the token held nothing or a
+ *         transaction is still running.
+ *
+ * A faulted port still accepts this -- the owner has to be able to let go --
+ * but the port stays faulted.
+ */
+int nor_unreserve(uint32_t token);
+
+/** The reservation token currently recorded, or 0.  For diagnostics only. */
+uint32_t nor_reservation_owner(void);
 
 /* --- what a write transaction borrows from the lifecycle (issue #88) -------
  *
@@ -125,12 +196,14 @@ void nor_report(struct nor_report *r);
 /**
  * @brief  Claim the part for one write transaction.
  *
- * Reads the state and the lease mask together and publishes NOR_ST_WRITING
- * under the same critical section, which is the whole point: see
- * nor_write_decide() in nor_state.h.  On anything but NOR_WR_GO nothing was
- * claimed and nothing has to be committed.
+ * @param token  the caller's reservation token (issue #91)
+ *
+ * Reads the state, the lease mask and the recorded owner together and
+ * publishes NOR_ST_WRITING under the same critical section, which is the whole
+ * point: see nor_write_decide() in nor_state.h.  On anything but NOR_WR_GO
+ * nothing was claimed and nothing has to be committed.
  */
-enum nor_write nor_write_claim(void);
+enum nor_write nor_write_claim(uint32_t token);
 
 /**
  * @brief  End the transaction claimed above.
@@ -138,12 +211,17 @@ enum nor_write nor_write_claim(void);
  * @param ok   non-zero if everything the transaction promised held
  * @param why  the reason to latch when it did not; may be NULL
  *
+ * [!] A SUCCESSFUL COMMIT RETURNS TO NOR_ST_RESERVED, NOT NOR_ST_XIP (issue
+ * #91).  The reservation outlives the transaction; publishing XIP here is
+ * precisely the gap this issue closed.
+ *
  * [!] A FAULT LATCHED EARLIER WINS OVER @p ok.  The window helpers below latch
  * through the same first-failure record nor_fail_reason() reports, so a
  * transaction that lost the window at step 2 and then succeeded at everything
  * afterwards still commits to NOR_ST_FAULTED.  Without that, "ok" from a later
  * step would hand the alias back to readers over a window this port has already
- * said it does not understand.
+ * said it does not understand.  The owner is left in place either way, so the
+ * caller can still unreserve.
  */
 void nor_write_commit(int ok, const char *why);
 

@@ -50,6 +50,9 @@
 #include "nor_seam.h"
 #include "nor_write.h"
 
+#define LOG_TAG "nor"
+#include "log.h"
+
 /* The partition edges, from board.cmake -- the same variables
  * check_flash_partitions.py consumes, so the labels here and the layout the
  * host checks cannot drift apart (issues #45, #85).
@@ -134,19 +137,53 @@ static int nor_cmd_enter(struct cli_instance *sh, uint32_t *token)
 	return -1;
 }
 
+/* Who is holding the window, for a refusal that can be acted on (issue #91).
+ *
+ * [!] NAMED ONLY WHEN EXACTLY ONE HOLDER IS OUT, and only when it is a slot
+ * this file knows.  "busy" leaves the operator guessing; "busy -- `nn` holds
+ * it" tells them what to close.  But a WRONG name is worse than none, so
+ * anything else -- two holders, a slot added later that nobody taught this
+ * function about -- degrades to the generic answer.  nor_flash.h hands out the
+ * raw mask precisely so that this mapping lives with the thing that prints it.
+ */
+static const char *lease_holder(uint32_t live)
+{
+	switch (live) {
+	case (1u << NOR_LEASE_NPU):    return "`nn` has a model open (nn close)";
+	case (1u << NOR_LEASE_SCAN):   return "a `nor scan` is running";
+	case (1u << NOR_LEASE_DEVMEM): return "a `devmem` read is in flight";
+	default:                       break;
+	}
+	return NULL;
+}
+
 static int cmd_nor_info(struct cli_instance *sh, int argc, char **argv)
 {
 	struct nor_report r;
-	uint32_t token;
 
 	(void)argc;
 	(void)argv;
 
-	if (nor_cmd_enter(sh, &token) != 0)
-		return 1;
+	/* [!] NO LEASE FOR THE REPORT (issue #91).  `nor info` reads the SCU and
+	 * walks the MPU; it never touches the alias, so the lease it used to take
+	 * bought nothing -- and cost everything, because a lease cannot be taken
+	 * while a writer holds a reservation.  That made the one command that says
+	 * WHY the part is busy unavailable exactly when it was.
+	 *
+	 * A lease is still taken for one purpose: OFF means nothing has been
+	 * brought up, and bring-up is a reader's errand (nor_state.h).  Enumerated
+	 * rather than "if it is not XIP", so a state added later does not silently
+	 * start bringing hardware up from inside a diagnostic. */
+	if (nor_lifecycle_state() == NOR_ST_OFF) {
+		uint32_t token;
+
+		if (nor_cmd_enter(sh, &token) != 0)
+			return 1;
+		(void)nor_release(token);
+	}
 	nor_report(&r);
 
-	cli_print(sh, "state    : %s%s%s\r\n", nor_state_name(nor_lifecycle_state()),
+	cli_print(sh, "state    : %s%s%s\r\n", nor_state_name(r.state),
 	          nor_fail_reason() ? " -- " : "",
 	          nor_fail_reason() ? nor_fail_reason() : "");
 	if (r.jedec_valid)
@@ -157,7 +194,13 @@ static int cmd_nor_info(struct cli_instance *sh, int argc, char **argv)
 		              "XIP is on)\r\n");
 	cli_print(sh, "window   : 0x%08lx, %lu B\r\n",
 	          (unsigned long)NOR_XIP_BASE, (unsigned long)NOR_SIZE);
-	cli_print(sh, "leases   : %lu\r\n", (unsigned long)r.readers);
+	{
+		const char *who = lease_holder(r.live);
+
+		cli_print(sh, "leases   : %lu (mask 0x%lx)%s%s\r\n",
+		          (unsigned long)r.readers, (unsigned long)r.live,
+		          who ? " -- " : "", who ? who : "");
+	}
 	/* What the write seam was COMPILED to allow (issue #88).  Read out of the
 	 * seam's own .rodata record rather than restated here, so the interval this
 	 * line shows is the one the wrappers enforce -- and so that
@@ -184,6 +227,18 @@ static int cmd_nor_info(struct cli_instance *sh, int argc, char **argv)
 	cli_print(sh, "irq      : %d %s\r\n", r.irq,
 	          r.irq < 0 ? "(none wrapped)"
 	                    : (r.irq_enabled ? "wrapped, enabled" : "WRAPPED BUT OFF"));
+	/* [!] SAY WHEN THEY WERE NOT TAKEN, rather than printing the last good
+	 * copy (issue #91).  A transaction has the window down, so its SCU and MPU
+	 * would describe the transition and not the mapping -- and a stale value
+	 * printed without comment is indistinguishable from a current one, which is
+	 * the failure this whole port is built to avoid. */
+	if (!r.regs_sampled) {
+		cli_print(sh, "scu xip  : 0x%08lx -> -- (window down; registers not "
+		              "sampled)\r\n", (unsigned long)r.scu_xip_before);
+		cli_print(sh, "mpu      : not sampled in state '%s'\r\n",
+		          nor_state_name(r.state));
+		return 0;
+	}
 	/* Raw, not decoded: the SVD names this register but gives no field
 	 * breakdown, and this board does not guess at bits it cannot name. */
 	cli_print(sh, "scu xip  : 0x%08lx -> 0x%08lx (raw)\r\n",
@@ -198,8 +253,6 @@ static int cmd_nor_info(struct cli_instance *sh, int argc, char **argv)
 		cli_print(sh, "mpu rgn  : none covers the window\r\n");
 	cli_print(sh, "mpu mair : 0x%08lx 0x%08lx\r\n",
 	          (unsigned long)r.mpu_mair0, (unsigned long)r.mpu_mair1);
-
-	(void)nor_release(token);
 	return 0;
 }
 
@@ -304,11 +357,16 @@ static int cmd_nor_scan(struct cli_instance *sh, int argc, char **argv)
  * keeping (nor_state.h).  So a write subcommand does the reader's part first,
  * explicitly, and hands the lease straight back.
  *
- * That leaves a gap between the release and the claim.  The claim is what
- * closes it: if anything took a lease in between, it refuses rather than
- * waiting, and the user sees "busy" instead of a window pulled out from under
- * somebody.  Doing it the other way round -- having the writer bring the part
- * up itself -- is what would put two unrelated transactions in one path. */
+ * That leaves a gap between the release and the reservation.  The reservation
+ * is what closes it: if anything took a lease in between, it refuses rather
+ * than waiting, and the user sees "busy" instead of a window pulled out from
+ * under somebody.  Doing it the other way round -- having the writer bring the
+ * part up itself -- is what would put two unrelated transactions in one path.
+ *
+ * [!] SINCE ISSUE #91 THE RESERVATION ALSO HOLDS THE GAP AFTERWARDS, which is
+ * what a write made of several transactions needs and what these three do not:
+ * a reader that arrives between two chunks of a `blob write` used to be handed
+ * a lease that the next chunk would then refuse over. */
 static int nor_cmd_bring_up(struct cli_instance *sh)
 {
 	uint32_t token;
@@ -319,11 +377,95 @@ static int nor_cmd_bring_up(struct cli_instance *sh)
 	return 0;
 }
 
+/*
+ * Bring the part up if nobody has, then take the writer reservation (#91).
+ *
+ * [!] THE TOKEN STAYS LOCAL TO THE CALLER AND EVERY EXIT MUST GIVE IT BACK.
+ * A reservation that is taken and not returned leaves a port whose every
+ * answer is "busy" for the rest of the session -- the same hazard
+ * nor_write.h describes one level down, and easier to get wrong up here
+ * because the code in between is a whole command.  The three subcommands below
+ * are written with one exit each for that reason; a fourth that grew an early
+ * `return` would be the bug.
+ *
+ * These three only ever run ONE transaction, so a reservation looks like
+ * ceremony here.  It is not optional: nor_write_claim() now starts from
+ * NOR_ST_RESERVED, and the reservation is what says which caller the claim
+ * belongs to.  What it buys these commands is that a background job cannot
+ * take a lease between the bring-up above and the transaction below.
+ */
+static int nor_cmd_writer_enter(struct cli_instance *sh, uint32_t *token)
+{
+	struct nor_report r;
+	const char *who;
+
+	*token = 0u;
+	if (nor_cmd_bring_up(sh) != 0)
+		return -1;
+	if (nor_reserve(token) == 0)
+		return 0;
+
+	if (nor_lifecycle_state() == NOR_ST_FAULTED) {
+		cli_error(sh, "nor: %s\r\n",
+		          nor_fail_reason() ? nor_fail_reason() : "faulted");
+		return -1;
+	}
+	/* Name the holder when there is exactly one and we know it; the operator
+	 * can act on "close `nn`" and cannot act on "busy". */
+	nor_report(&r);
+	who = lease_holder(r.live);
+	if (who != NULL)
+		cli_error(sh, "nor: busy -- %s\r\n", who);
+	else if (r.readers != 0u)
+		cli_error(sh, "nor: busy -- %lu reader(s) hold the window "
+		              "(mask 0x%lx)\r\n", (unsigned long)r.readers,
+		          (unsigned long)r.live);
+	else
+		cli_error(sh, "nor: busy -- another writer holds the part\r\n");
+	return -1;
+}
+
 /* Everything a transaction reports, in one shape, so the three subcommands
- * cannot describe the same outcome differently. */
+ * cannot describe the same outcome differently.
+ *
+ * [!] AND IT ALSO GOES TO THE LOG RING, WHICH IS NOT BELT-AND-BRACES (issue
+ * #91).  Once Ctrl+C is latched, cli_tx_send_blocking() returns -1 and
+ * tx_failed drops every remaining byte of THIS command's output -- deliberately
+ * (shell/core/cli_core.c), so a runaway handler cannot keep spewing after a
+ * cancel.  The consequence here is that the one report an operator most needs
+ * -- how much of an erase actually happened -- is exactly the one the console
+ * can never show.  `dmesg` is where it can be read.
+ *
+ * Logging EVERY outcome rather than only the cancelled one is deliberate too:
+ * on a part whose endurance is not documented (issue #89), a durable record of
+ * how many transactions have run is worth having, and a log line that only
+ * appears on failure is one nobody has seen the shape of. */
+static void nor_cmd_log(enum nor_write_status st,
+                        const struct nor_write_report *r)
+{
+	unsigned level = (st == NOR_WRITE_OK) ? LOG_LEVEL_INF
+	               : (st == NOR_WRITE_FAULTED) ? LOG_LEVEL_ERR
+	               : LOG_LEVEL_WRN;
+
+	/* [!] COMPACT, AND THE FIELDS ARE IN THIS ORDER ON PURPOSE.  A record is
+	 * LOG_MSG_MAX (104) bytes and the first version of this line overran it,
+	 * losing the tail of the reason -- so the machine-readable part (status,
+	 * span, done/verified, cancelled) comes first and the prose last, and a
+	 * truncation can only ever cost the end of the prose.  The realistic worst
+	 * case measures 92 bytes. */
+	log_write(level, "nor", "%s 0x%lx+%lu: %lu/%lu%s%s%s",
+	          nor_write_status_name(st), (unsigned long)r->span.addr,
+	          (unsigned long)r->span.len, (unsigned long)r->done,
+	          (unsigned long)r->verified,
+	          r->cancelled ? " (cancelled)" : "",
+	          r->fail ? " -- " : "", r->fail ? r->fail : "");
+}
+
 static int nor_cmd_report(struct cli_instance *sh, enum nor_write_status st,
                           const struct nor_write_report *r)
 {
+	nor_cmd_log(st, r);
+
 	if (r->jedec_ok)
 		cli_print(sh, "jedec    : %02x %02x %02x (re-read with the window "
 		              "down)\r\n", r->jedec[0], r->jedec[1], r->jedec[2]);
@@ -354,9 +496,16 @@ static int nor_cmd_report(struct cli_instance *sh, enum nor_write_status st,
 		              "nothing was sent\r\n");
 		return 1;
 	case NOR_WRITE_INCOMPLETE:
-		cli_error(sh, "nor: stopped after %lu B of %lu (vendor returned "
-		              "%ld)\r\n", (unsigned long)r->done,
-		          (unsigned long)r->span.len, (long)r->vendor_rc);
+		/* [!] TWO DIFFERENT EVENTS SHARE THIS STATUS and only one of them is
+		 * the caller's doing.  Reporting a Ctrl+C as "the vendor returned 0"
+		 * would read as a part that refused for no reason. */
+		if (r->cancelled)
+			cli_error(sh, "nor: cancelled after %lu B of %lu\r\n",
+			          (unsigned long)r->done, (unsigned long)r->span.len);
+		else
+			cli_error(sh, "nor: stopped after %lu B of %lu (vendor returned "
+			              "%ld)\r\n", (unsigned long)r->done,
+			          (unsigned long)r->span.len, (long)r->vendor_rc);
 		cli_print(sh, "         %lu B read back and verified; nothing is "
 		              "claimed about the rest\r\n",
 		          (unsigned long)r->verified);
@@ -382,11 +531,13 @@ static int cmd_nor_cycle(struct cli_instance *sh, int argc, char **argv)
 {
 	struct nor_write_report r;
 	enum nor_write_status st;
+	uint32_t token;
+	int rc;
 
 	(void)argc;
 	(void)argv;
 
-	if (nor_cmd_bring_up(sh) != 0)
+	if (nor_cmd_writer_enter(sh, &token) != 0)
 		return 1;
 	/* [!] SAID BEFORE IT RUNS, and phrased as the COST OF THE OPERATION rather
 	 * than as an announcement that it is happening.  This is the subcommand
@@ -397,16 +548,46 @@ static int cmd_nor_cycle(struct cli_instance *sh, int argc, char **argv)
 	 * happen. */
 	cli_print(sh, "a cycle costs two status-register writes and touches no "
 	              "data\r\n");
-	st = nor_write_cycle(&r);
-	return nor_cmd_report(sh, st, &r);
+	st = nor_write_cycle(token, &r);
+	rc = nor_cmd_report(sh, st, &r);
+	(void)nor_unreserve(token);
+	return rc;
+}
+
+/*
+ * The erase tick (issue #91).  Runs with the memory-mapped window DOWN, so it
+ * is held to what nor_write.h permits there: the cancel poll drains the RX ring
+ * and reads shell state, and cli_print() goes to the UART -- neither reaches
+ * the flash.  Nothing here may read the alias.
+ *
+ * Progress is printed sparsely.  A line per 4 KB sector would be 512 lines for
+ * one slot and would itself become the slow part; one per 64 sectors is a line
+ * every 256 KB, which is frequent enough to show the thing is alive.
+ */
+#define ERASE_TICK_EVERY  (64u * 0x1000u)
+
+static int erase_tick(void *ctx, uint32_t done, uint32_t total)
+{
+	struct cli_instance *sh = (struct cli_instance *)ctx;
+
+	if (total > ERASE_TICK_EVERY && (done % ERASE_TICK_EVERY) == 0u)
+		cli_print(sh, "erasing  : %lu / %lu B\r\n", (unsigned long)done,
+		          (unsigned long)total);
+	/* [!] Non-zero STOPS the erase, and the transaction ends INCOMPLETE with
+	 * everything up to here genuinely erased.  Ctrl+C is available because
+	 * this command has not claimed the console -- a caller that had would have
+	 * to poll something else. */
+	return cli_cancel_requested(sh) ? 1 : 0;
 }
 
 static int cmd_nor_erase(struct cli_instance *sh, int argc, char **argv)
 {
 	struct nor_write_report r;
+	struct nor_erase_progress prog = { NULL, erase_tick };
 	enum nor_write_status st;
 	struct nor_span span;
-	uint32_t addr, len;
+	uint32_t addr, len, token;
+	int rc;
 
 	(void)argc;
 	if (cli_parse_u32(argv[1], &addr) != 0 ||
@@ -414,7 +595,8 @@ static int cmd_nor_erase(struct cli_instance *sh, int argc, char **argv)
 		cli_error(sh, "nor: bad number\r\n");
 		return 1;
 	}
-	if (nor_cmd_bring_up(sh) != 0)
+	prog.ctx = sh;
+	if (nor_cmd_writer_enter(sh, &token) != 0)
 		return 1;
 
 	/* [!] THE FOOTPRINT, AND BEFORE THE ERASE RATHER THAN WITH THE REPORT.
@@ -428,18 +610,27 @@ static int cmd_nor_erase(struct cli_instance *sh, int argc, char **argv)
 	 * interval, so the two cannot disagree -- and this call decides nothing.
 	 * The writer computes it again and its answer is the one that governs. */
 	if (nor_span_erase(nor_seam_limits.lo, nor_seam_limits.hi,
-	                   nor_seam_limits.unit, addr, len, &span) == NOR_SPAN_OK)
+	                   nor_seam_limits.unit, addr, len, &span) == NOR_SPAN_OK) {
+		/* [!] SAID BEFORE THE ERASE STARTS, because it cannot be said after.
+		 * A latched Ctrl+C drops the rest of this command's console output
+		 * (see nor_cmd_report()), so the operator has to be told in advance
+		 * where the result will be. */
+		if (span.len > nor_seam_limits.unit)
+			cli_print(sh, "         Ctrl+C stops it between sectors; the "
+			              "result is in `dmesg`\r\n");
 		cli_print(sh, "footprint: 0x%08lx..0x%08lx (%lu B, %lu sector(s))\r\n",
 		          (unsigned long)span.addr,
 		          (unsigned long)(span.addr + span.len),
 		          (unsigned long)span.len,
 		          (unsigned long)(span.len / nor_seam_limits.unit));
-	else
+	} else
 		cli_print(sh, "request  : 0x%08lx +%lu B\r\n",
 		          (unsigned long)addr, (unsigned long)len);
 
-	st = nor_write_erase(addr, len, &r);
-	return nor_cmd_report(sh, st, &r);
+	st = nor_write_erase(token, addr, len, &prog, &r);
+	rc = nor_cmd_report(sh, st, &r);
+	(void)nor_unreserve(token);
+	return rc;
 }
 
 /* The pattern `nor write` programs.  One program page, which is the unit the
@@ -453,7 +644,8 @@ static int cmd_nor_write(struct cli_instance *sh, int argc, char **argv)
 {
 	struct nor_write_report r;
 	enum nor_write_status st;
-	uint32_t addr, len, byte = 0xA5u;
+	uint32_t addr, len, token, byte = 0xA5u;
+	int rc;
 
 	if (cli_parse_u32(argv[1], &addr) != 0 ||
 	    cli_parse_u32(argv[2], &len) != 0 ||
@@ -472,7 +664,7 @@ static int cmd_nor_write(struct cli_instance *sh, int argc, char **argv)
 	}
 	memset(write_pattern, (int)byte, len);
 
-	if (nor_cmd_bring_up(sh) != 0)
+	if (nor_cmd_writer_enter(sh, &token) != 0)
 		return 1;
 
 	cli_print(sh, "program  : 0x%08lx +%lu B of 0x%02lx\r\n",
@@ -481,8 +673,10 @@ static int cmd_nor_write(struct cli_instance *sh, int argc, char **argv)
 	 * writing over something that is not erased leaves the AND of the two --
 	 * and the read-back catches that, terminally.  An erase hidden inside this
 	 * command would destroy 4 KB to write 256 bytes, without saying so. */
-	st = nor_write_program(addr, write_pattern, len, &r);
-	return nor_cmd_report(sh, st, &r);
+	st = nor_write_program(token, addr, write_pattern, len, &r);
+	rc = nor_cmd_report(sh, st, &r);
+	(void)nor_unreserve(token);
+	return rc;
 }
 
 CLI_SUBCMD_SET_CREATE(nor_subcmds,

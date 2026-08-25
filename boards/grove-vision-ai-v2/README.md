@@ -2132,7 +2132,7 @@ is in `port/nor/nor_write.c` and `port/sdk_seam/nor_seam.c` (below).  There is
 no raw-opcode subcommand and no way to name an address outside the writable
 interval.
 
-**Every reader of the window holds a lease**, and there are three single-instance
+**Every reader of the window holds a lease**, and there are four single-instance
 slots (`port/nor/nor_state.h`):
 
 | slot | held for |
@@ -2140,6 +2140,12 @@ slots (`port/nor/nor_state.h`):
 | `NOR_LEASE_NPU` | `npu_hw_init()` .. `npu_hw_deinit()` -- the whole life of an open model, which is parsed in place through the window |
 | `NOR_LEASE_SCAN` | one whole `nor scan`, and the bring-up `nor info` does when nothing is up yet |
 | `NOR_LEASE_DEVMEM` | one `devmem` access that touches the alias, including a whole `dump` |
+| `NOR_LEASE_BLOB` | one `blob` read: one row of a listing, one `info`, one `read` (issue #92) |
+
+The slots are separate holders, not a mutex: two readers of different slots are
+out at the same time quite happily.  `nn open cls` followed by `blob list`
+works, and was checked on the board -- a model stays open through a listing,
+because both are reading the same window and neither is writing it.
 
 [!] **`devmem` had no lease at all until issue #90**, which was wrong in two
 directions rather than one.
@@ -2935,6 +2941,96 @@ skipping the check would be the fail-open the arrangement exists to prevent.
 The one thing no static check can bound is a receiver that erases the whole chip
 before writing.  That evidence is empirical: flash one model, then read the
 other one back with `nn open` + a run.
+
+### `blob` -- the asset store (issue #92, #49 Step 2)
+
+```
+blob list           every slot: state, size, length, crc32, name
+blob info <slot>    one slot in full, and why an invalid one is
+blob read <slot> [off] [len]    hexdump payload bytes (256 B max)
+blob free           slots that can take something, and what cannot
+```
+
+The read side only, so far: `blob write`, `erase` and `verify` are items 6 and
+7 of #49 Step 2.  Nothing here writes the array -- though the first lease on a
+cold port still runs the vendor's quad-enable, which writes the NOR's
+non-volatile status register, exactly as `nor info` does.
+
+**The slots are a table over the seam's writable interval, not a second
+declaration of it.**  `blob_map_check()` takes `lo`, `hi` and `unit` as
+arguments and they come from `nor_seam_limits`, so when #49 Step 4 deletes the
+model reservations and the interval grows to `0x200000..0xFFE000`, the only
+thing that changes here is the table.  Ten slots in four size classes, 9 MB
+exactly:
+
+| slots | base | size | payload |
+|---|---|---|---|
+| 2 | `0x200000`, `0x400000` | 2 MB | 2,093,056 B |
+| 3 | `0x600000`, `0x700000`, `0x800000` | 1 MB | 1,044,480 B |
+| 3 | `0x900000`, `0x980000`, `0xA00000` | 512 KB | 520,192 B |
+| 2 | `0xA80000`, `0xAC0000` | 256 KB | 258,048 B |
+
+Fixed slots rather than variable extents because what lands here is a few
+models and the operation that matters is replacing one in place; the size
+classes are what stop a 164 KB detector occupying a 2 MB hole.  The first erase
+unit of a slot is its header and the rest is payload, which keeps every payload
+4 KB aligned -- what the NPU needs to parse a model in place.
+
+[!] **Identity is the base address, never the index.**  Reorder the table and
+every index means a different piece of flash, so nothing that persists carries
+one: a stored header names its own base, and the number `blob list` prints is a
+display ordinal resolved against the table on the spot.
+
+**The 503,808 B above `0xB00000` are not carved**, and `blob free` reports them
+apart from the free slots for that reason -- no slot names them, so nothing can
+be put there.  They are not too small to carve (another 256 KB slot would fit);
+the table stops on a round nine megabytes and Step 4 re-carves the region.
+
+**The header is two program pages, and the magic page is written last and
+alone** (`src/blob_state.c`).  Page 0 holds an 8-byte magic and nothing else;
+page 1 holds version, the slot's own base, the payload length, the payload
+CRC-32, the name and a CRC over itself.  So an interrupted transfer leaves a
+slot with no magic, and a body that failed to program cannot be rescued by a
+magic that lands anyway.  Two pages rather than the donor's one because wio
+rests on the W25Q128JV datasheet's partial-page programming and the die
+actually fitted here has no datasheet at all (issue #89): every page here is
+programmed once.
+
+| state | means |
+|---|---|
+| `empty` | both header pages are erased |
+| `valid` | the magic is there and the body decodes completely |
+| `incomplete` | the magic page is erased and the body decodes -- a transfer that did not finish |
+| `invalid` | anything else, including flash this port did not write |
+
+[!] **`empty` is a statement about the HEADER.**  The payload underneath may
+hold anything, and on this board it does -- see the section above.  Every
+listing says so in a footer, because it is the one thing an operator will get
+wrong.
+
+[!] **And `valid` is a statement about the header too.**  The decoder never
+reads a payload byte: it recovers the length and the CRC recorded when the blob
+arrived.  Whether the payload still matches them is what `blob verify` will
+answer, and a consumer that parses a payload in place -- `nn open` reads a
+model straight out of the window -- has to check it first.
+
+#### The baseline, as read on the board (2026-08-25)
+
+```
+slot  base          size  state         length     crc32  name
+   0  0x00200000   2048K  empty             --        --  --
+   1  0x00400000   2048K  invalid           --        --  --
+   2  0x00600000   1024K  empty             --        --  --
+   ...                                                        (3..9 all empty)
+```
+
+`blob info 1` says `magic page is neither erased nor a header`, and
+`blob read 1 0 64` shows high-entropy bytes: the factory extent
+`0x3bb000..0x5ee000` covers slot 1's header sector.  This is the shape the
+region is expected to be in before anything of ours is written -- **nine slots
+usable, largest payload 2,093,056 B** -- and it is worth re-reading after the
+first `blob write` lands, because "slot 1 went from invalid to something else"
+is a claim about the writer that no gate can make.
 
 ### One operator, and therefore no CMSIS-NN
 

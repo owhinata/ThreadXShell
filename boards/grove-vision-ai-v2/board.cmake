@@ -437,7 +437,13 @@ set(SHELL_SOURCES
     "${BOARD_DIR}/cmds/cmd_camera.c"
     "${BOARD_DIR}/cmds/cmd_nn.c"
     "${BOARD_DIR}/cmds/cmd_nor.c"
+    "${BOARD_DIR}/cmds/cmd_blob.c"
     "${CMAKE_SOURCE_DIR}/svc/fmt.c"
+    # CRC-32/ISO-HDLC (issue #92).  The blob store stamps every asset with the
+    # checksum of the stream that arrived; wio's blob borrows FlashDB's, which
+    # this board does not link.  Freestanding, and host-tested against zlib and
+    # against a table-free reference (shell/test/test_crc32.c).
+    "${CMAKE_SOURCE_DIR}/svc/crc32.c"
     # Camera frame ring (issue #35).  Freestanding: it depends on <stdint.h>
     # and an injected lock vtable only, which is why the same file serves all
     # three boards and has a host unit test (shell/test/test_frame_pipeline.c).
@@ -614,6 +620,15 @@ add_library(shell_objs OBJECT
     # region, and settling that while the window has 430 KB spare is cheaper
     # than settling it when something needs the room.
     "${BOARD_DIR}/src/blob_stage.c"
+    # The asset store (issue #92).  blob_map.c carves the seam's writable
+    # interval into slots and blob_state.c decides what the bytes at the top of
+    # one mean -- both pure, both walked by test/test_blob_{map,state}.c on the
+    # host -- and blob.c is the part that needs the board: the lease, the cache
+    # invalidate, and the arithmetic that turns a slot into a pointer into the
+    # memory-mapped window.
+    "${BOARD_DIR}/src/blob_map.c"
+    "${BOARD_DIR}/src/blob_state.c"
+    "${BOARD_DIR}/src/blob.c"
     "${BOARD_DIR}/port/threadx/fp_enforce.c"
     "${BOARD_DIR}/port/threadx/tx_glue.c"
     "${BOARD_DIR}/port/sdk_seam/timer_seam.c"

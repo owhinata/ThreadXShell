@@ -152,6 +152,7 @@ static const char *lease_holder(uint32_t live)
 	case (1u << NOR_LEASE_NPU):    return "`nn` has a model open (nn close)";
 	case (1u << NOR_LEASE_SCAN):   return "a `nor scan` is running";
 	case (1u << NOR_LEASE_DEVMEM): return "a `devmem` read is in flight";
+	case (1u << NOR_LEASE_BLOB):   return "a `blob` read is in flight";
 	default:                       break;
 	}
 	return NULL;

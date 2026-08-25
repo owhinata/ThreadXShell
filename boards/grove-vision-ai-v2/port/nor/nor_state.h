@@ -156,6 +156,13 @@ enum nor_lease_slot {
 	 * the foreground one under TX_NO_TIME_SLICE.  It is real, and it is the
 	 * kind of real this file exists to decide about without hardware. */
 	NOR_LEASE_DEVMEM,   /**< held across one `devmem` access to the alias */
+	/* The asset store's reads (issue #92): one `blob list` row, one
+	 * `blob info`, one `blob read`.  A READ lease and nothing more -- a
+	 * `blob write` runs inside a reservation (nor_state.h's RESERVED),
+	 * which is what holds the part across the several transactions a
+	 * transfer is made of, and a writer holding a lease as well would
+	 * refuse itself. */
+	NOR_LEASE_BLOB,
 	NOR_LEASE_SLOTS,
 };
 

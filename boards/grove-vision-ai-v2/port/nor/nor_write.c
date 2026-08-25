@@ -123,7 +123,9 @@ static void note(struct nor_write_report *r, const char *why)
  * Both are refusals issued before an erase opcode reaches the wire, so the loop
  * stops there rather than carrying on into sectors that would refuse too.
  */
-static void erase_run(struct nor_span span, struct nor_write_report *r)
+static void erase_run(struct nor_span span,
+                      const struct nor_erase_progress *prog,
+                      struct nor_write_report *r)
 {
 	uint32_t unit = nor_seam_limits.unit;
 
@@ -135,6 +137,24 @@ static void erase_run(struct nor_span span, struct nor_write_report *r)
 			return;
 		}
 		r->done = off + unit;
+
+		/* [!] AFTER THE UNIT WENT, NEVER BEFORE (issue #91).  A caller
+		 * erasing a slot is erasing its header sector first, and "I
+		 * cancelled, so the slot is empty" is only true once that sector is
+		 * gone.  A tick before the first erase would let a cancel leave the
+		 * previous header intact -- still valid, still found by a scan --
+		 * while the caller believed otherwise.
+		 *
+		 * Note this is NOT the same as the loop simply failing early: a
+		 * vendor refusal on the first unit leaves done == 0 and `cancelled`
+		 * clear, and the old header survives that.  Both end INCOMPLETE;
+		 * only one of them promises anything. */
+		if (prog != NULL && prog->tick != NULL &&
+		    prog->tick(prog->ctx, r->done, span.len) != 0) {
+			r->cancelled = 1u;
+			note(r, "cancelled between erase sectors");
+			return;
+		}
 	}
 }
 
@@ -226,16 +246,19 @@ static int verify(enum txn_op op, struct nor_span span, const uint8_t *src,
 }
 
 /* The transaction.  nor_write.h has the numbered sequence; this is it. */
-static enum nor_write_status run(enum txn_op op, struct nor_span span,
-                                 const uint8_t *src,
+static enum nor_write_status run(enum txn_op op, uint32_t token,
+                                 struct nor_span span, const uint8_t *src,
+                                 const struct nor_erase_progress *prog,
                                  struct nor_write_report *r)
 {
 	enum nor_write_status st = NOR_WRITE_OK;
 	enum nor_write claim;
 	int commit_ok;
 
-	/* 1. Claim.  Nothing below this point may return without committing. */
-	claim = nor_write_claim();
+	/* 1. Claim.  Nothing below this point may return without committing.
+	 *    The token is what says this caller owns the reservation the claim
+	 *    comes out of (issue #91); without one the answer is BUSY. */
+	claim = nor_write_claim(token);
 	if (claim == NOR_WR_BUSY)
 		return NOR_WRITE_BUSY;
 	if (claim != NOR_WR_GO)
@@ -256,10 +279,12 @@ static enum nor_write_status run(enum txn_op op, struct nor_span span,
 		r->jedec_ok = 1u;
 		/* 4. The operation, if this shape has one. */
 		if (op == TXN_ERASE)
-			erase_run(span, r);
+			erase_run(span, prog, r);
 		else if (op == TXN_PROGRAM)
 			program_run(span, src, r);
 		if (r->done < span.len) {
+			/* note() keeps the FIRST reason, so a cancel that already
+			 * recorded itself is not relabelled as a vendor refusal. */
 			note(r, "the vendor refused part-way through");
 			st = NOR_WRITE_INCOMPLETE;
 		}
@@ -296,17 +321,20 @@ static void report_init(struct nor_write_report *r)
 	memset(r, 0, sizeof(*r));
 }
 
-enum nor_write_status nor_write_cycle(struct nor_write_report *r)
+enum nor_write_status nor_write_cycle(uint32_t token,
+                                      struct nor_write_report *r)
 {
 	struct nor_span span = { 0u, 0u };
 
 	if (r == NULL)
 		return NOR_WRITE_REFUSED;
 	report_init(r);
-	return run(TXN_CYCLE, span, NULL, r);
+	return run(TXN_CYCLE, token, span, NULL, NULL, r);
 }
 
-enum nor_write_status nor_write_erase(uint32_t addr, uint32_t len,
+enum nor_write_status nor_write_erase(uint32_t token, uint32_t addr,
+                                      uint32_t len,
+                                      const struct nor_erase_progress *prog,
                                       struct nor_write_report *r)
 {
 	struct nor_span span;
@@ -327,11 +355,11 @@ enum nor_write_status nor_write_erase(uint32_t addr, uint32_t len,
 		r->fail = nor_span_verdict_name(v);
 		return NOR_WRITE_REFUSED;
 	}
-	return run(TXN_ERASE, span, NULL, r);
+	return run(TXN_ERASE, token, span, NULL, prog, r);
 }
 
-enum nor_write_status nor_write_program(uint32_t addr, const void *data,
-                                        uint32_t len,
+enum nor_write_status nor_write_program(uint32_t token, uint32_t addr,
+                                        const void *data, uint32_t len,
                                         struct nor_write_report *r)
 {
 	struct nor_span span;
@@ -355,5 +383,5 @@ enum nor_write_status nor_write_program(uint32_t addr, const void *data,
 		r->fail = nor_span_verdict_name(v);
 		return NOR_WRITE_REFUSED;
 	}
-	return run(TXN_PROGRAM, span, (const uint8_t *)data, r);
+	return run(TXN_PROGRAM, token, span, (const uint8_t *)data, NULL, r);
 }

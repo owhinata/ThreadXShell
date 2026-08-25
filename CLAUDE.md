@@ -649,6 +649,15 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   **base から 512 B しか無効化しない**（probe B も writer が変えた範囲も外）。
   [!] **`NOR_ST_WRITING`**（#88）: **state と reader マスクは同一クリティカルセクションで読み、
   GO を得た者が publish してから抜ける**。**`NOR_ST_OFF` は BUSY**（bring-up は reader の仕事）。
+  [!] **`NOR_ST_RESERVED` と予約トークン**（#91）: **トランザクションを跨ぐ所有権**。
+  commit は XIP ではなく **RESERVED に戻す**（XIP を publish すると隙に reader が入る）。
+  **リースの 4 枠目にはしない** / **state と owner は同時に publish** /
+  **owner と state の不整合は terminal**（`RESERVED + owner==0` を「トークン違い」に
+  すると永久 BUSY）/ **予約は全ての出口で返す**（契約は協調的 kill まで）。
+  **`nor info` はリースを取らない**（予約中に「なぜ busy か」を言えなくなるため。
+  レジスタは XIP / RESERVED でのみ採取し、`WRITING` では「未採取」と言う）。
+  **長い消去はトランザクションを割らず**、`erase_run()` にコールバックを注入する
+  （**窓が落ちた状態で走る**。**1 ユニット消し終えてから**呼ぶ — 先頭がヘッダセクタ）。
   [!] ただし**「read-only」と書かない** — 配列は触らないが、初回 bring-up はベンダの
   quad-enable 経由で **NOR の不揮発ステータスレジスタ（QE ビット）を書く**（#86 の
   adversarial review 指摘）。`nn open` が従来からやっていることで新規ではないが、

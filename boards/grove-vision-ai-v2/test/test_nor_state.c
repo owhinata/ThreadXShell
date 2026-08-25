@@ -133,6 +133,10 @@ int main(void)
 		{ NOR_ST_OFF,      NOR_ACQ_BRING_UP },
 		{ NOR_ST_XIP,      NOR_ACQ_TAKE     },
 		{ NOR_ST_ENABLING, NOR_ACQ_BUSY     },
+		/* A writer owns the part between transactions; the window is
+		 * still up, but a lease handed out here is one the owner's next
+		 * transaction would have to refuse itself over (issue #91). */
+		{ NOR_ST_RESERVED, NOR_ACQ_BUSY     },
 		/* A writer has taken the alias down; readers wait, they are not
 		 * faulted, because this one clears (issue #88). */
 		{ NOR_ST_WRITING,  NOR_ACQ_BUSY     },
@@ -147,46 +151,208 @@ int main(void)
 
 	/* ---- the write table, every state x readers ---------------------- */
 	{
+		static const uint32_t OWNER = 0x1FFu;   /* seq 1 */
+		static const uint32_t OTHER = 0x2FFu;   /* seq 2 */
 		static const struct {
 			enum nor_state st;
-			uint32_t       live;
+			uint32_t       live, owner, token;
 			enum nor_write want;
 			const char    *what;
 		} wr[] = {
-			{ NOR_ST_XIP,      0u,   NOR_WR_GO,      "up and unread"    },
+			{ NOR_ST_RESERVED, 0u, 0x1FFu, 0x1FFu, NOR_WR_GO,
+			  "ours, unread" },
 			/* [!] The whole point: one reader is enough to refuse. A
-			 * writer drops XIP, and that reader's window goes with it. */
-			{ NOR_ST_XIP,      0x1u, NOR_WR_BUSY,    "one reader out"   },
-			{ NOR_ST_XIP,      0x4u, NOR_WR_BUSY,    "devmem reading"   },
-			{ NOR_ST_XIP,      0x7u, NOR_WR_BUSY,    "all three out"    },
+			 * writer drops XIP, and that reader's window goes with it.
+			 * A reservation is only taken with no readers out, so this
+			 * is defence in depth -- and it costs one comparison. */
+			{ NOR_ST_RESERVED, 0x1u, 0x1FFu, 0x1FFu, NOR_WR_BUSY,
+			  "one reader out" },
+			{ NOR_ST_RESERVED, 0x4u, 0x1FFu, 0x1FFu, NOR_WR_BUSY,
+			  "devmem reading" },
+			{ NOR_ST_RESERVED, 0x7u, 0x1FFu, 0x1FFu, NOR_WR_BUSY,
+			  "all three out" },
+			/* [!] SOMEBODY ELSE'S RESERVATION.  "state == RESERVED"
+			 * alone would let this run inside their claim (issue #91). */
+			{ NOR_ST_RESERVED, 0u, 0x1FFu, 0x2FFu, NOR_WR_BUSY,
+			  "a stranger's token" },
+			{ NOR_ST_RESERVED, 0u, 0x1FFu, 0u, NOR_WR_BUSY,
+			  "no token at all" },
+			/* [!] XIP IS NO LONGER WRITEABLE (issue #91): it means
+			 * nobody has claimed the part, so a transaction that started
+			 * here would be one nothing was holding between its steps. */
+			{ NOR_ST_XIP,      0u, 0u, 0x1FFu, NOR_WR_BUSY,
+			  "unclaimed" },
+			{ NOR_ST_XIP,      0u, 0u, 0u,       NOR_WR_BUSY,
+			  "unclaimed, no token" },
 			/* [!] OFF is BUSY, not "bring it up": bring-up is a reader's
 			 * errand and a writer must not own it (nor_state.h). */
-			{ NOR_ST_OFF,      0u,   NOR_WR_BUSY,    "never brought up" },
-			{ NOR_ST_ENABLING, 0u,   NOR_WR_BUSY,    "bring-up running" },
-			/* Two writers must not both get GO. */
-			{ NOR_ST_WRITING,  0u,   NOR_WR_BUSY,    "a writer has it"  },
-			{ NOR_ST_FAULTED,  0u,   NOR_WR_FAULTED, "terminal"         },
+			{ NOR_ST_OFF,      0u, 0u, 0x1FFu, NOR_WR_BUSY,
+			  "never brought up" },
+			{ NOR_ST_ENABLING, 0u, 0u, 0x1FFu, NOR_WR_BUSY,
+			  "bring-up running" },
+			/* Two transactions must not both get GO, even for the same
+			 * owner: only nor_write_commit() leaves WRITING. */
+			{ NOR_ST_WRITING,  0u, 0x1FFu, 0x1FFu, NOR_WR_BUSY,
+			  "our own transaction is running" },
+			{ NOR_ST_FAULTED,  0u, 0x1FFu, 0x1FFu, NOR_WR_FAULTED,
+			  "terminal" },
 			/* Terminal wins over an empty reader mask, not the reverse. */
-			{ NOR_ST_FAULTED,  0x2u, NOR_WR_FAULTED, "terminal, read"   },
+			{ NOR_ST_FAULTED,  0x2u, 0u, 0u, NOR_WR_FAULTED,
+			  "terminal, read" },
+			/* [!] INCONSISTENT BOOKKEEPING IS TERMINAL, NOT BUSY: a
+			 * RESERVED with no owner is a port nobody can unreserve. */
+			{ NOR_ST_RESERVED, 0u, 0u, 0x1FFu, NOR_WR_FAULTED,
+			  "reserved with no owner" },
+			{ NOR_ST_XIP,      0u, 0x1FFu, 0x1FFu, NOR_WR_FAULTED,
+			  "xip with an owner" },
+			{ NOR_ST_OFF,      0u, 0x1FFu, 0u, NOR_WR_FAULTED,
+			  "off with an owner" },
+			{ NOR_ST_ENABLING, 0u, 0x1FFu, 0u, NOR_WR_FAULTED,
+			  "enabling with an owner" },
 		};
 		for (unsigned i = 0; i < sizeof(wr) / sizeof(wr[0]); i++) {
-			enum nor_write got = nor_write_decide(wr[i].st, wr[i].live);
+			enum nor_write got = nor_write_decide(wr[i].st, wr[i].live,
+			                                      wr[i].owner, wr[i].token);
 			CHECK(got == wr[i].want,
-			      "write_decide(%s, live=0x%x) [%s] = %s, want %s",
-			      nor_state_name(wr[i].st), wr[i].live, wr[i].what,
-			      wr_name(got), wr_name(wr[i].want));
+			      "write_decide(%s, live=0x%x, owner=0x%x, token=0x%x) [%s]"
+			      " = %s, want %s",
+			      nor_state_name(wr[i].st), wr[i].live, wr[i].owner,
+			      wr[i].token, wr[i].what, wr_name(got),
+			      wr_name(wr[i].want));
 		}
 
 		/* An unknown state refuses terminally here too. */
-		CHECK(nor_write_decide((enum nor_state)99, 0u) == NOR_WR_FAULTED,
+		CHECK(nor_write_decide((enum nor_state)99, 0u, 0u, 0u) ==
+		      NOR_WR_FAULTED,
 		      "an unknown state did not refuse a write terminally");
 
 		/* [!] AND THE MASK IS NOT CONSULTED AS A BOOLEAN.  Every single-slot
 		 * mask must refuse, or a writer would start on top of whichever
 		 * reader happened to sit in a bit the check ignored. */
 		for (unsigned slot = 0; slot < (unsigned)NOR_LEASE_SLOTS; slot++)
-			CHECK(nor_write_decide(NOR_ST_XIP, 1u << slot) == NOR_WR_BUSY,
+			CHECK(nor_write_decide(NOR_ST_RESERVED, 1u << slot, OWNER,
+			                       OWNER) == NOR_WR_BUSY,
 			      "a writer started with slot %u holding a lease", slot);
+		(void)OTHER;
+	}
+
+	/* ---- the reservation tables (issue #91) -------------------------- */
+	{
+		static const uint32_t T1 = 0x1FFu;   /* seq 1 */
+		static const uint32_t T2 = 0x2FFu;   /* seq 2 */
+
+		/* A token is never zero, and never collides with a lease token --
+		 * a lease's low byte is its slot + 1, which cannot reach 0xFF. */
+		CHECK(nor_reservation_make(0u) == 0u,
+		      "sequence 0 minted a usable reservation token");
+		CHECK(nor_reservation_make(1u) == T1 &&
+		      nor_reservation_make(2u) == T2,
+		      "reservation tokens are not what the port will compare");
+		for (unsigned slot = 0; slot < (unsigned)NOR_LEASE_SLOTS; slot++)
+			for (unsigned gen = 0; gen < 4u; gen++)
+				CHECK(nor_token_make(gen, (enum nor_lease_slot)slot) !=
+				      nor_reservation_make(gen == 0u ? 1u : gen),
+				      "a lease token collided with a reservation token");
+
+		/* -- consistency, which the two tables below lean on ---------- */
+		CHECK(nor_owner_consistent(NOR_ST_OFF, 0u), "off/no owner");
+		CHECK(!nor_owner_consistent(NOR_ST_OFF, T1), "off/owner");
+		CHECK(nor_owner_consistent(NOR_ST_XIP, 0u), "xip/no owner");
+		CHECK(!nor_owner_consistent(NOR_ST_XIP, T1), "xip/owner");
+		CHECK(!nor_owner_consistent(NOR_ST_RESERVED, 0u), "reserved/none");
+		CHECK(nor_owner_consistent(NOR_ST_RESERVED, T1), "reserved/owner");
+		CHECK(!nor_owner_consistent(NOR_ST_WRITING, 0u), "writing/none");
+		/* [!] BOTH are consistent while faulted: bring-up can fault before
+		 * any owner exists, and a transaction can fault while one holds it
+		 * -- and that owner still has to be able to let go. */
+		CHECK(nor_owner_consistent(NOR_ST_FAULTED, 0u), "faulted/none");
+		CHECK(nor_owner_consistent(NOR_ST_FAULTED, T1), "faulted/owner");
+		CHECK(!nor_owner_consistent((enum nor_state)99, 0u), "unknown state");
+
+		/* -- reserve -------------------------------------------------- */
+		static const struct {
+			enum nor_state   st;
+			uint32_t         live, owner;
+			enum nor_reserve want;
+			const char      *what;
+		} rsv[] = {
+			{ NOR_ST_XIP,      0u,   0u, NOR_RSV_GO,      "free"        },
+			{ NOR_ST_XIP,      0x1u, 0u, NOR_RSV_BUSY,    "a reader"    },
+			{ NOR_ST_XIP,      0x7u, 0u, NOR_RSV_BUSY,    "three"       },
+			/* Bring-up is a reader's errand here too (nor_state.h). */
+			{ NOR_ST_OFF,      0u,   0u, NOR_RSV_BUSY,    "never up"    },
+			{ NOR_ST_ENABLING, 0u,   0u, NOR_RSV_BUSY,    "coming up"   },
+			{ NOR_ST_RESERVED, 0u, 0x1FFu, NOR_RSV_BUSY, "taken"      },
+			{ NOR_ST_WRITING,  0u, 0x1FFu, NOR_RSV_BUSY, "mid-write"  },
+			{ NOR_ST_FAULTED,  0u,   0u, NOR_RSV_FAULTED, "terminal"    },
+			/* Inconsistency is terminal, not busy -- see nor_state.h. */
+			{ NOR_ST_XIP,      0u, 0x1FFu, NOR_RSV_FAULTED, "xip+own" },
+			{ NOR_ST_RESERVED, 0u,   0u, NOR_RSV_FAULTED, "rsv+noown"   },
+		};
+		for (unsigned i = 0; i < sizeof(rsv) / sizeof(rsv[0]); i++) {
+			enum nor_reserve got = nor_reserve_decide(rsv[i].st, rsv[i].live,
+			                                          rsv[i].owner);
+			CHECK(got == rsv[i].want,
+			      "reserve_decide(%s, live=0x%x, owner=0x%x) [%s] = %d, "
+			      "want %d", nor_state_name(rsv[i].st), rsv[i].live,
+			      rsv[i].owner, rsv[i].what, (int)got, (int)rsv[i].want);
+		}
+		CHECK(nor_reserve_decide((enum nor_state)99, 0u, 0u) ==
+		      NOR_RSV_FAULTED, "an unknown state did not refuse terminally");
+
+		/* -- unreserve ------------------------------------------------ */
+		static const struct {
+			enum nor_state     st;
+			uint32_t           owner, token;
+			enum nor_unreserve want;
+			const char        *what;
+		} unr[] = {
+			{ NOR_ST_RESERVED, 0x1FFu, 0x1FFu, NOR_UNRSV_DROP,
+			  "the owner lets go" },
+			/* [!] THE OWNER MAY ALWAYS LET GO, faulted included -- but
+			 * letting go is not what clears a fault. */
+			{ NOR_ST_FAULTED,  0x1FFu, 0x1FFu, NOR_UNRSV_DROP_FAULTED,
+			  "letting go after a fault" },
+			/* [!] REFUSED WHILE A TRANSACTION RUNS.  Unreachable through
+			 * nor_write.c, whose run() always commits -- which is exactly
+			 * why it is handed to the pure function here.  Flip the
+			 * implementation to allow it and this line fails. */
+			{ NOR_ST_WRITING,  0x1FFu, 0x1FFu, NOR_UNRSV_BUSY,
+			  "mid-transaction" },
+			{ NOR_ST_RESERVED, 0x1FFu, 0x2FFu, NOR_UNRSV_STALE,
+			  "a token from an earlier reservation" },
+			{ NOR_ST_RESERVED, 0x1FFu, 0u, NOR_UNRSV_NOT_HELD,
+			  "a zero token" },
+			/* The ordinary answer at the single release point when the
+			 * reserve itself was refused and the token is still zero. */
+			{ NOR_ST_XIP,      0u, 0u, NOR_UNRSV_NOT_HELD,
+			  "nothing was ever held" },
+			{ NOR_ST_XIP,      0u, 0x1FFu, NOR_UNRSV_NOT_HELD,
+			  "a token outliving its reservation" },
+			{ NOR_ST_FAULTED,  0u, 0u, NOR_UNRSV_NOT_HELD,
+			  "faulted before anyone reserved" },
+			/* Inconsistent bookkeeping is terminal here too, and the
+			 * RESERVED-with-no-owner row is the one that matters: a plain
+			 * wrong-token refusal would leave it busy forever. */
+			{ NOR_ST_RESERVED, 0u, 0x1FFu, NOR_UNRSV_INCONSISTENT,
+			  "reserved with no owner" },
+			{ NOR_ST_XIP,      0x1FFu, 0x1FFu, NOR_UNRSV_INCONSISTENT,
+			  "xip with an owner" },
+			{ NOR_ST_WRITING,  0u, 0x1FFu, NOR_UNRSV_INCONSISTENT,
+			  "writing with no owner" },
+		};
+		for (unsigned i = 0; i < sizeof(unr) / sizeof(unr[0]); i++) {
+			enum nor_unreserve got = nor_unreserve_decide(unr[i].st,
+			                                              unr[i].owner,
+			                                              unr[i].token);
+			CHECK(got == unr[i].want,
+			      "unreserve_decide(%s, owner=0x%x, token=0x%x) [%s] = %d, "
+			      "want %d", nor_state_name(unr[i].st), unr[i].owner,
+			      unr[i].token, unr[i].what, (int)got, (int)unr[i].want);
+		}
+		CHECK(nor_unreserve_decide((enum nor_state)99, T1, T1) ==
+		      NOR_UNRSV_INCONSISTENT,
+		      "an unknown state did not refuse an unreserve terminally");
 	}
 
 	/* [!] An unknown state must refuse the terminal way, not the busy way:

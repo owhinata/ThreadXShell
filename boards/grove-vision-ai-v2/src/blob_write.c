@@ -242,6 +242,10 @@ enum blob_write_result blob_write_run(const struct blob_write_ops *ops,
 	w.payload_addr = payload_addr;
 	blob_write_arm(&w.bk, target, payload_max);
 
+	if (ops->announce != NULL)
+		ops->announce(ops->ctx, target, base,
+		              (payload_addr - base) + payload_max);
+
 	/* The whole slot, one transaction, cancellable between sectors.  ~40 s
 	 * for 2 MB on this die, which is why it is here and not inside the
 	 * protocol's timeouts. */

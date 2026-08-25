@@ -55,7 +55,8 @@ static int failures;
 struct mock {
 	/* what happened */
 	unsigned reserves, unreserves, claims, releases, programs, erases;
-	unsigned receives, read_backs, stats;
+	unsigned receives, read_backs, stats, announces;
+	unsigned announce_slot;
 	uint32_t token_given, token_returned;
 	/* what to break */
 	int fail_reserve, fail_claim, fail_stat, fail_geometry;
@@ -186,6 +187,21 @@ static int mock_read_back(void *ctx, uint32_t addr, void *buf, uint32_t len)
 	return 0;
 }
 
+/* The announcement, and WHEN it happens is the whole of what it is for: after
+ * the slot is chosen, before the erase, and never on a path that refuses. */
+static void mock_announce(void *ctx, unsigned slot, uint32_t base, uint32_t bytes)
+{
+	struct mock *k = ctx;
+
+	k->announces++;
+	k->announce_slot = slot;
+	CHECK(base == MOCK_BASE, "announced base 0x%08lx", (unsigned long)base);
+	CHECK(bytes == (MOCK_PAYLOAD - MOCK_BASE) + MOCK_CAP,
+	      "announced %lu bytes", (unsigned long)bytes);
+	CHECK(k->erases == 0u, "announced AFTER the erase had started");
+	CHECK(k->reserves == 1u, "announced outside the reservation");
+}
+
 static unsigned mock_count(void *ctx)
 {
 	return ((struct mock *)ctx)->count;
@@ -225,7 +241,7 @@ static int mock_geometry(void *ctx, unsigned slot, uint32_t *base,
 static const struct blob_write_ops OPS = {
 	&m, mock_reserve, mock_unreserve, mock_erase, mock_program,
 	mock_claim, mock_release, mock_receive, mock_read_back, NULL,
-	mock_count, mock_stat, mock_geometry,
+	mock_announce, mock_count, mock_stat, mock_geometry,
 };
 
 /* Every case starts from a part that works and a transfer that completes. */
@@ -291,6 +307,8 @@ static void t_stored(void)
 	CHECK(rep.transactions == 4u, "%lu transaction(s), expected 4",
 	      (unsigned long)rep.transactions);
 	CHECK(m.programs == 3u, "%u program(s)", m.programs);
+	CHECK(m.announces == 1u && m.announce_slot == 1u,
+	      "announced %u time(s) for slot %u", m.announces, m.announce_slot);
 	check_unwound("stored", 1, 1);
 
 	/* The header is in the flash and decodes, magic and all -- which is the
@@ -348,6 +366,8 @@ static void t_choice(void)
 	      "a new name without a slot was accepted");
 	CHECK(m.erases == 0u && m.claims == 0u,
 	      "a refused choice still erased or claimed");
+	CHECK(m.announces == 0u,
+	      "a refused choice still warned about destroying a slot");
 	check_unwound("need slot", 1, 0);
 
 	reset();
@@ -365,6 +385,7 @@ static void t_choice(void)
 	      rep.choice == BLOB_CHOICE_DUPLICATE,
 	      "a duplicate name was written to another slot");
 	CHECK(m.erases == 0u, "a duplicate name still erased something");
+	CHECK(m.announces == 0u, "a duplicate name still warned about a slot");
 	check_unwound("duplicate", 1, 0);
 
 	reset();
@@ -374,6 +395,7 @@ static void t_choice(void)
 	      rep.choice == BLOB_CHOICE_OCCUPIED,
 	      "another blob was overwritten");
 	CHECK(m.erases == 0u, "an occupied slot was erased anyway");
+	CHECK(m.announces == 0u, "an occupied slot was announced anyway");
 	check_unwound("occupied", 1, 0);
 
 	/* [!] No table, no reservation: nothing is taken before there is
@@ -396,6 +418,7 @@ static void t_failures(void)
 	m.fail_reserve = 1;
 	CHECK(run("x", 0, &rep) == BLOB_WRITE_BUSY, "a refused reserve is not busy");
 	CHECK(m.erases == 0u && m.claims == 0u, "a refused reserve went on");
+	CHECK(m.announces == 0u, "a refused reserve still announced a slot");
 	check_unwound("reserve refused", 0, 0);
 
 	/* [!] A cancel during the erase must not go on to program: the flash is

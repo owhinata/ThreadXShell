@@ -125,6 +125,17 @@ struct blob_write_ops {
 	/** Optional: told what the sender called the file, for the log.  The
 	 *  stored name is the CLI's argument and never this. */
 	void (*note_sender_name)(void *ctx, const char *name, uint32_t size);
+	/**
+	 * Optional: the slot has been chosen and is about to be erased.
+	 *
+	 * [!] THE POINT IS WHEN IT IS CALLED.  A `blob write` destroys a slot
+	 * before the transfer starts, so an operator has to be told -- but every
+	 * refusal above happens FIRST, and printing "whatever is in it is gone"
+	 * ahead of "that name is in another slot" says something untrue about a
+	 * slot nothing touched.  It was doing exactly that until the messages
+	 * were read on hardware.
+	 */
+	void (*announce)(void *ctx, unsigned slot, uint32_t base, uint32_t bytes);
 	/** How many slots the table has. */
 	unsigned (*slot_count)(void *ctx);
 	/** Decode one slot's header.  [!] CALLED WITH THE RESERVATION HELD, and

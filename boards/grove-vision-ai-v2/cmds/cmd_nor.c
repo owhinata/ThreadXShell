@@ -49,6 +49,7 @@
 #include "tx_api.h"          /* tx_time_get: 1 ms ticks, for the elapsed line */
 
 #include "blob_stage.h"      /* the staging buffer a long program runs out of */
+#include "nor_cmd.h"         /* nor_cmd_writer_enter: shared with `blob write` */
 #include "nor_flash.h"
 #include "nor_seam.h"
 #include "nor_write.h"
@@ -398,7 +399,7 @@ static int nor_cmd_bring_up(struct cli_instance *sh)
  * belongs to.  What it buys these commands is that a background job cannot
  * take a lease between the bring-up above and the transaction below.
  */
-static int nor_cmd_writer_enter(struct cli_instance *sh, uint32_t *token)
+int nor_cmd_writer_enter(struct cli_instance *sh, uint32_t *token)
 {
 	struct nor_report r;
 	const char *who;
@@ -654,12 +655,37 @@ static int cmd_nor_erase(struct cli_instance *sh, int argc, char **argv)
  * touches it holds the NOR reservation, and `nor write` holds one from
  * nor_cmd_writer_enter() to nor_unreserve() below. */
 
+/* [!] A PATTERN, NOT A CONSTANT, and this is the default for a reason learned
+ * the expensive way (issue #92).  `nor write` used to fill with 0xA5 and a
+ * 64 KB program of it read back perfectly -- while the first real transfer
+ * faulted on the same path.  A constant is invariant under everything that can
+ * go wrong between a buffer and an array: a page written twice, pages written
+ * out of order, bytes swapped within a word, a stale copy re-sent.  It cannot
+ * fail, so it proved nothing.
+ *
+ * Seeded from the address so that two writes to different places differ, and so
+ * that repeating a write at the same address is reproducible.  The period is
+ * long: a repeated 256-byte page shows up as a mismatch, which a pattern with
+ * period 256 would have hidden.
+ */
+static void fill_pattern(uint8_t *buf, uint32_t len, uint32_t seed)
+{
+	uint32_t x = seed | 1u;
+
+	for (uint32_t i = 0u; i < len; i++) {
+		x ^= x << 13;
+		x ^= x >> 17;
+		x ^= x << 5;
+		buf[i] = (uint8_t)(x & 0xFFu);
+	}
+}
+
 static int cmd_nor_write(struct cli_instance *sh, int argc, char **argv)
 {
 	struct nor_write_report r;
 	enum nor_write_status st;
-	uint32_t addr, len, token, byte = 0xA5u, t0, t1;
-	int rc;
+	uint32_t addr, len, token, byte = 0u, t0, t1;
+	int rc, constant = 0;
 
 	if (cli_parse_u32(argv[1], &addr) != 0 ||
 	    cli_parse_u32(argv[2], &len) != 0 ||
@@ -667,6 +693,7 @@ static int cmd_nor_write(struct cli_instance *sh, int argc, char **argv)
 		cli_error(sh, "nor: bad number\r\n");
 		return 1;
 	}
+	constant = (argc >= 4);
 	if (len == 0u || len > BLOB_STAGE_BYTES) {
 		cli_error(sh, "nor: length must be 1..%lu (the staging buffer)\r\n",
 		          (unsigned long)BLOB_STAGE_BYTES);
@@ -676,13 +703,21 @@ static int cmd_nor_write(struct cli_instance *sh, int argc, char **argv)
 		cli_error(sh, "nor: pattern must be a byte\r\n");
 		return 1;
 	}
-	memset(blob_stage_buf, (int)byte, len);
+	if (constant)
+		memset(blob_stage_buf, (int)byte, len);
+	else
+		fill_pattern(blob_stage_buf, len, addr);
 
 	if (nor_cmd_writer_enter(sh, &token) != 0)
 		return 1;
 
-	cli_print(sh, "program  : 0x%08lx +%lu B of 0x%02lx\r\n",
-	          (unsigned long)addr, (unsigned long)len, (unsigned long)byte);
+	if (constant)
+		cli_print(sh, "program  : 0x%08lx +%lu B of 0x%02lx\r\n",
+		          (unsigned long)addr, (unsigned long)len,
+		          (unsigned long)byte);
+	else
+		cli_print(sh, "program  : 0x%08lx +%lu B of a varying pattern\r\n",
+		          (unsigned long)addr, (unsigned long)len);
 	/* [!] No erase first, deliberately.  Programming only clears bits, so
 	 * writing over something that is not erased leaves the AND of the two --
 	 * and the read-back catches that, terminally.  An erase hidden inside this
@@ -710,7 +745,7 @@ CLI_SUBCMD_SET_CREATE(nor_subcmds,
 	                  NULL, cmd_nor_cycle, 1, 0),
 	CLI_CMD_ARG_USAGE(erase, NULL, "erase <addr> <len> (whole 4 KB sectors)",
 	                  "<addr> <len>", cmd_nor_erase, 3, 0),
-	CLI_CMD_ARG_USAGE(write, NULL, "write <addr> <len> [byte] (64 KB max)",
+	CLI_CMD_ARG_USAGE(write, NULL, "write <addr> <len> [byte] (pattern if no byte)",
 	                  "<addr> <len> [byte]", cmd_nor_write, 3, 1),
 	CLI_SUBCMD_SET_END);
 

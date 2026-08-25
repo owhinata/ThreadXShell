@@ -61,6 +61,8 @@ extern "C" {
  * failure retryable has a caller retrying forever.
  */
 #define BLOB_ERR_FAULT  -4
+#define BLOB_ERR_EMPTY  -5   /**< the slot holds no header to check against  */
+#define BLOB_ERR_CRC    -6   /**< the payload does not match its stored CRC  */
 
 /* ---- the table, checked against the seam ---------------------------------- */
 
@@ -107,6 +109,59 @@ int blob_stat(unsigned slot, struct blob_info *out, enum blob_hdr_reject *why);
  * blob_stat() first.
  */
 int blob_read(unsigned slot, uint32_t off, void *buf, uint32_t len);
+
+/**
+ * @brief  Re-read @p slot's payload and check it against its stored CRC-32.
+ *
+ * @param computed  receives what the flash actually adds up to.  May be NULL
+ * @return BLOB_OK on a match, BLOB_ERR_CRC on a mismatch, BLOB_ERR_EMPTY when
+ *         the slot holds no header with a length and a CRC in it
+ *
+ * The stored CRC is of the stream that arrived, so this compares the flash
+ * against the PC's file rather than against itself.  It reads through the
+ * staging buffer, which is safe because the buffer's other user is a write and
+ * a write holds the reservation -- so the lease this takes cannot be out at the
+ * same time.
+ *
+ * INCOMPLETE slots are checked too: the body is there, so there is something to
+ * check against, and "the payload of an interrupted transfer is intact as far
+ * as it got" is a question worth being able to ask.
+ */
+int blob_verify(unsigned slot, uint32_t *computed);
+
+/* ---- for the writer -------------------------------------------------------- */
+
+/**
+ * @brief  blob_stat() for the holder of the writer reservation.
+ *
+ * Same answer, no lease -- a reservation refuses leases, so a writer deciding
+ * which slot to use cannot take one.  Refused when no reservation is out.
+ */
+int blob_stat_reserved(unsigned slot, struct blob_info *out,
+                       enum blob_hdr_reject *why);
+
+/**
+ * @brief  Where @p slot is, for a caller that is about to write it.
+ *
+ * Any of the out parameters may be NULL.  Fails the same way the read side does
+ * when the table does not validate or the slot does not exist.
+ */
+int blob_slot_geometry(unsigned slot, uint32_t *base, uint32_t *payload_addr,
+                       uint32_t *payload_max);
+
+/**
+ * @brief  Read the window WITHOUT taking a lease.
+ *
+ * [!] ONLY LEGAL FOR THE HOLDER OF THE WRITER RESERVATION, and it checks: with
+ * no reservation out this refuses rather than reading, because a read of the
+ * alias with neither a lease nor a reservation is issue #90 -- a window nobody
+ * is holding up can be taken down underneath it, and a window that was never
+ * brought up aliases one register across all 16 MB.
+ *
+ * It exists because a writer cannot take a lease: a reservation refuses them,
+ * which is the whole point of it.
+ */
+int blob_read_reserved(uint32_t addr, void *buf, uint32_t len);
 
 #ifdef __cplusplus
 }

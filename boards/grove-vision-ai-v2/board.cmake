@@ -438,6 +438,14 @@ set(SHELL_SOURCES
     "${BOARD_DIR}/cmds/cmd_nn.c"
     "${BOARD_DIR}/cmds/cmd_nor.c"
     "${BOARD_DIR}/cmds/cmd_blob.c"
+    # YMODEM receive over the console (issue #92).  The protocol core is the
+    # shared svc/ one; cmd_xfer.c is the twenty lines that wire it to the raw
+    # console API.  Receive only -- nothing on this board produces a file to
+    # send -- and a third copy of that wiring on purpose: sharing it needs a
+    # board hook for "not over telnet", which is a mechanism and a separate
+    # issue.
+    "${BOARD_DIR}/cmds/cmd_xfer.c"
+    "${CMAKE_SOURCE_DIR}/svc/ymodem.c"
     "${CMAKE_SOURCE_DIR}/svc/fmt.c"
     # CRC-32/ISO-HDLC (issue #92).  The blob store stamps every asset with the
     # checksum of the stream that arrived; wio's blob borrows FlashDB's, which
@@ -629,6 +637,11 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/src/blob_map.c"
     "${BOARD_DIR}/src/blob_state.c"
     "${BOARD_DIR}/src/blob.c"
+    # The write coordinator (issue #92).  Takes its operations as a vtable so
+    # that test/test_blob_write.c can fail each of them and watch the
+    # reservation and the console claim come back exactly once -- which is the
+    # part of a transfer hardware cannot demonstrate.
+    "${BOARD_DIR}/src/blob_write.c"
     "${BOARD_DIR}/port/threadx/fp_enforce.c"
     "${BOARD_DIR}/port/threadx/tx_glue.c"
     "${BOARD_DIR}/port/sdk_seam/timer_seam.c"

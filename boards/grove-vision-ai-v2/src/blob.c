@@ -16,6 +16,8 @@
 
 #include <string.h>
 
+#include "blob_stage.h"  /* the buffer verify reads through            */
+#include "crc32.h"
 #include "nor_flash.h"   /* nor_acquire / nor_release / nor_alias_invalidate */
 #include "nor_seam.h"    /* nor_seam_limits -- the interval, from the seam    */
 
@@ -80,6 +82,19 @@ uint32_t blob_payload_max(unsigned slot)
 	return s ? blob_map_payload_max(s, nor_seam_limits.unit) : 0u;
 }
 
+/* The decode itself, with the window already held by somebody -- a lease or a
+ * reservation.  Both wrappers below are the same three lines around it, and
+ * having one copy is what keeps the invalidate from being forgotten in one of
+ * them. */
+static void stat_locked(const struct blob_slot *s, struct blob_info *out,
+                        enum blob_hdr_reject *why)
+{
+	nor_alias_invalidate(s->base, BLOB_HDR_SPAN);
+	(void)blob_hdr_decode(alias(s->base), BLOB_HDR_SPAN, s->base,
+	                      blob_map_payload_max(s, nor_seam_limits.unit),
+	                      out, why);
+}
+
 int blob_stat(unsigned slot, struct blob_info *out, enum blob_hdr_reject *why)
 {
 	const struct blob_slot *s;
@@ -94,13 +109,27 @@ int blob_stat(unsigned slot, struct blob_info *out, enum blob_hdr_reject *why)
 
 	if (nor_acquire(NOR_LEASE_BLOB, &token) != 0)
 		return acquire_failure();
-
-	nor_alias_invalidate(s->base, BLOB_HDR_SPAN);
-	(void)blob_hdr_decode(alias(s->base), BLOB_HDR_SPAN, s->base,
-	                      blob_map_payload_max(s, nor_seam_limits.unit),
-	                      out, why);
-
+	stat_locked(s, out, why);
 	(void)nor_release(token);
+	return BLOB_OK;
+}
+
+int blob_stat_reserved(unsigned slot, struct blob_info *out,
+                       enum blob_hdr_reject *why)
+{
+	const struct blob_slot *s;
+	int err = 0;
+
+	if (out == NULL)
+		return BLOB_ERR_PARAM;
+	s = checked_slot(slot, &err);
+	if (s == NULL)
+		return err;
+	/* Checked for the same reason blob_read_reserved() checks: a read of the
+	 * alias with neither a lease nor a reservation is issue #90. */
+	if (nor_reservation_owner() == 0u)
+		return BLOB_ERR_BUSY;
+	stat_locked(s, out, why);
 	return BLOB_OK;
 }
 
@@ -136,4 +165,75 @@ int blob_read(unsigned slot, uint32_t off, void *buf, uint32_t len)
 	 * the flash. */
 	(void)nor_release(token);
 	return BLOB_OK;
+}
+
+int blob_slot_geometry(unsigned slot, uint32_t *base, uint32_t *payload_addr,
+                       uint32_t *payload_max)
+{
+	const struct blob_slot *s;
+	int err = 0;
+
+	s = checked_slot(slot, &err);
+	if (s == NULL)
+		return err;
+	if (base != NULL)
+		*base = s->base;
+	if (payload_addr != NULL)
+		*payload_addr = blob_map_payload_addr(s, nor_seam_limits.unit);
+	if (payload_max != NULL)
+		*payload_max = blob_map_payload_max(s, nor_seam_limits.unit);
+	return BLOB_OK;
+}
+
+int blob_read_reserved(uint32_t addr, void *buf, uint32_t len)
+{
+	if (buf == NULL || len == 0u)
+		return BLOB_ERR_PARAM;
+	/* Checked, not assumed.  Without a reservation out, nothing is holding
+	 * the window up and this would be the #90 read all over again. */
+	if (nor_reservation_owner() == 0u)
+		return BLOB_ERR_BUSY;
+	if (addr < nor_seam_limits.lo || len > nor_seam_limits.hi - addr)
+		return BLOB_ERR_PARAM;
+
+	nor_alias_invalidate(addr, len);
+	memcpy(buf, alias(addr), len);
+	return BLOB_OK;
+}
+
+int blob_verify(unsigned slot, uint32_t *computed)
+{
+	struct blob_info info;
+	const struct blob_slot *s;
+	uint32_t token = 0u, off = 0u, crc = 0u, addr;
+	int err = 0, rc;
+
+	s = checked_slot(slot, &err);
+	if (s == NULL)
+		return err;
+	rc = blob_stat(slot, &info, NULL);
+	if (rc != BLOB_OK)
+		return rc;
+	if (info.state != BLOB_VALID && info.state != BLOB_INCOMPLETE)
+		return BLOB_ERR_EMPTY;
+
+	addr = blob_map_payload_addr(s, nor_seam_limits.unit);
+	if (nor_acquire(NOR_LEASE_BLOB, &token) != 0)
+		return acquire_failure();
+
+	while (off < info.length) {
+		uint32_t take = info.length - off;
+
+		if (take > BLOB_STAGE_BYTES)
+			take = BLOB_STAGE_BYTES;
+		nor_alias_invalidate(addr + off, take);
+		memcpy(blob_stage_buf, alias(addr + off), take);
+		crc = crc32_update(crc, blob_stage_buf, take);
+		off += take;
+	}
+
+	(void)nor_release(token);
+	if (computed != NULL)
+		*computed = crc;
+	return (crc == info.crc32) ? BLOB_OK : BLOB_ERR_CRC;
 }

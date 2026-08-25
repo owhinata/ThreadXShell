@@ -60,10 +60,19 @@ static void t_program_bounds(void)
 	      "one byte at the first writable address: %s",
 	      nor_span_verdict_name(v));
 
-	/* The last byte, and one past it.  HI is exclusive. */
+	/* The last WORD, and one past the end.  HI is exclusive.
+	 *
+	 * [!] The last BYTE is no longer a legal program address (issue #92): the
+	 * transport takes 32-bit words byte-reversed and the writer reverses what
+	 * it sends, so where a word starts has to be defined.  A one-byte program
+	 * at HI-1 used to be accepted here and would have landed three bytes
+	 * earlier. */
+	v = nor_span_program(LO, HI, HI - 4u, 4u, &s);
+	CHECK(v == NOR_SPAN_OK && s.addr == HI - 4u && s.len == 4u,
+	      "last writable word: %s", nor_span_verdict_name(v));
 	v = nor_span_program(LO, HI, HI - 1u, 1u, &s);
-	CHECK(v == NOR_SPAN_OK && s.addr == HI - 1u && s.len == 1u,
-	      "last writable byte: %s", nor_span_verdict_name(v));
+	CHECK(v == NOR_SPAN_BAD_ALIGN, "the last byte alone: %s",
+	      nor_span_verdict_name(v));
 	v = nor_span_program(LO, HI, HI, 1u, &s);
 	CHECK(v == NOR_SPAN_OUTSIDE, "one past the end: %s",
 	      nor_span_verdict_name(v));
@@ -74,6 +83,26 @@ static void t_program_bounds(void)
 	      nor_span_verdict_name(v));
 	v = nor_span_program(LO, HI, LO, HI - LO + 1u, &s);
 	CHECK(v == NOR_SPAN_OUTSIDE, "the whole interval plus one: %s",
+	      nor_span_verdict_name(v));
+
+	/* Every offset within a word, so the rule is the alignment and not the
+	 * address: only the aligned one is accepted, and a short length at an
+	 * aligned address still is (the writer pads the tail with 0xFF, which
+	 * programs nothing). */
+	for (uint32_t off = 1u; off < 4u; off++) {
+		v = nor_span_program(LO, HI, LO + 0x40u + off, 4u, &s);
+		CHECK(v == NOR_SPAN_BAD_ALIGN, "offset %lu into a word: %s",
+		      (unsigned long)off, nor_span_verdict_name(v));
+	}
+	v = nor_span_program(LO, HI, LO + 0x40u, 3u, &s);
+	CHECK(v == NOR_SPAN_OK && s.len == 3u,
+	      "three bytes at an aligned address: %s", nor_span_verdict_name(v));
+
+	/* [!] Order: an address that is BOTH outside and unaligned reports
+	 * OUTSIDE.  The bounds are what protect the flash; the alignment is what
+	 * protects the bytes, and the more serious answer is the one to give. */
+	v = nor_span_program(LO, HI, HI + 1u, 4u, &s);
+	CHECK(v == NOR_SPAN_OUTSIDE, "outside and unaligned: %s",
 	      nor_span_verdict_name(v));
 
 	/* Below the interval, and zero length. */

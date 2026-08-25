@@ -172,6 +172,45 @@ static void erase_run(struct nor_span span,
  * hx_lib_qspi_eeprom_write returns a hard-coded 0, so again only a negative
  * says anything.
  */
+/*
+ * [!] THE WIRE TAKES 32-BIT WORDS BYTE-REVERSED, and issue #92 found that out
+ * on hardware after issue #88 had shipped.  Program a pattern through this path
+ * and read it back and the bytes of every word come back in the opposite order:
+ * a program of `b7 0c 4b 73` reads `73 4b 0c b7`.
+ *
+ * The vendor library knows: hx_lib_qspi_eeprom_write() takes a `word_switch`
+ * flag and, when it is non-zero, calls word_switch_func() -- which is exactly
+ * this reversal, in place, over the caller's buffer.  This port passes 0 and
+ * does the reversal itself, for two reasons.  The seam refuses a non-zero
+ * word_switch because that path mutates a buffer a prebuilt archive was handed
+ * (nor_seam.h), and -- the one that matters -- word_switch_func() returns 0 and
+ * DOES NOTHING when the length is not a multiple of four, a result its caller
+ * ignores.  A payload with a three-byte tail would go to the array reversed
+ * while every layer reported success.
+ *
+ * So the tail is padded to a whole word with 0xFF before the reversal.  0xFF is
+ * the erased value: programming it clears no bits, so the padding writes
+ * nothing.  It cannot cross into the next page either -- the address is
+ * word-aligned (nor_span_program refuses otherwise), so a page's remainder is a
+ * whole number of words and only the LAST piece of a payload is ever short.
+ *
+ * [!] AND A CONSTANT-BYTE TEST CANNOT SEE ANY OF THIS.  `nor write` filled with
+ * 0xA5 for issue #88's whole life and 64 KB of it verified perfectly; the
+ * reversal is invisible unless the four bytes of a word differ.  The command
+ * fills with a varying pattern now.
+ */
+static void word_reverse(uint8_t *p, uint32_t n)
+{
+	for (uint32_t i = 0u; i + 4u <= n; i += 4u) {
+		uint8_t a = p[i], b = p[i + 1u];
+
+		p[i]      = p[i + 3u];
+		p[i + 1u] = p[i + 2u];
+		p[i + 2u] = b;
+		p[i + 3u] = a;
+	}
+}
+
 static void program_run(struct nor_span span, const uint8_t *src,
                         struct nor_write_report *r)
 {
@@ -180,6 +219,7 @@ static void program_run(struct nor_span span, const uint8_t *src,
 	while (done < span.len) {
 		uint32_t n = nor_span_page_chunk(span.addr + done, span.len - done,
 		                                 (uint32_t)sizeof(page_buf));
+		uint32_t nw;
 		int32_t rc;
 
 		/* Cannot happen with a non-zero cap and a non-zero remainder; a zero
@@ -189,7 +229,11 @@ static void program_run(struct nor_span span, const uint8_t *src,
 			return;
 		}
 		memcpy(page_buf, src + done, n);
-		rc = hx_lib_qspi_eeprom_write(span.addr + done, page_buf, n, 0u);
+		nw = (n + 3u) & ~3u;
+		if (nw > n)
+			memset(&page_buf[n], 0xFFu, nw - n);
+		word_reverse(page_buf, nw);
+		rc = hx_lib_qspi_eeprom_write(span.addr + done, page_buf, nw, 0u);
 		if (rc != 0) {
 			r->vendor_rc = rc;
 			return;

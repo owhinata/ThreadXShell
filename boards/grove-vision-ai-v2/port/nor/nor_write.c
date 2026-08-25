@@ -289,6 +289,47 @@ static int verify(enum txn_op op, struct nor_span span, const uint8_t *src,
 	return 0;
 }
 
+/*
+ * Step 1b: is the target still erased?
+ *
+ * [!] REFUSED HERE RATHER THAN FAULTED THREE STEPS LATER.  Programming into
+ * flash that is not erased is legal on a NOR and always a mistake in this port:
+ * bits only go from 1 to 0, so what lands is the AND of the two, and the
+ * read-back then reports a mismatch -- which is TERMINAL, because a mismatch
+ * cannot be told apart from a window that is lying about the array.  The cost
+ * of that is a port that refuses everything until the board is reset.
+ *
+ * It is worth avoiding: an operator (or a set of instructions) that names a
+ * range one sector wider than the erase is an ordinary slip, and it happened
+ * during issue #92's own bring-up.  So the range is read BEFORE anything is
+ * claimed to have gone wrong, while the window is still up and this caller
+ * already owns the part, and a target that is not erased is a REFUSAL --
+ * nothing was sent and nothing is faulted.
+ *
+ * This does not make the fault path dead: it still fires for a part that
+ * accepts a write and reads back something else, which is the case that has to
+ * stay terminal.
+ */
+static int target_is_erased(struct nor_span span, struct nor_write_report *r)
+{
+	const volatile uint8_t *win;
+
+	nor_alias_invalidate(span.addr, span.len);
+	__DSB();
+	__ISB();
+	win = (const volatile uint8_t *)(uintptr_t)(NOR_XIP_BASE + span.addr);
+	for (uint32_t i = 0u; i < span.len; i++) {
+		if (win[i] != 0xFFu) {
+			r->bad_off   = span.addr + i;
+			r->bad_got   = win[i];
+			r->bad_want  = 0xFFu;
+			r->bad_valid = 1u;
+			return 0;
+		}
+	}
+	return 1;
+}
+
 /* The transaction.  nor_write.h has the numbered sequence; this is it. */
 static enum nor_write_status run(enum txn_op op, uint32_t token,
                                  struct nor_span span, const uint8_t *src,
@@ -310,8 +351,14 @@ static enum nor_write_status run(enum txn_op op, uint32_t token,
 
 	r->span = span;
 
+	/* 1b. A program needs erased flash.  Checked with the window still up,
+	 *     because that is the only moment it can be read -- and refusing here
+	 *     is what keeps an ordinary range slip from being terminal. */
+	if (op == TXN_PROGRAM && !target_is_erased(span, r)) {
+		note(r, "the target is not erased");
+		st = NOR_WRITE_REFUSED;
 	/* 2. Drop the window, established by reading the SCU back. */
-	if (nor_window_drop() != 0) {
+	} else if (nor_window_drop() != 0) {
 		note(r, "the flash window could not be taken down");
 		st = NOR_WRITE_FAULTED;
 	/* 3. The canary: the DMA receive path every part of the vendor's write
@@ -337,8 +384,16 @@ static enum nor_write_status run(enum txn_op op, uint32_t token,
 	/* 5. Every reader is owed a window back, whatever happened above.  This is
 	 *    also where a quad-enable bit that did not come back gets caught: the
 	 *    restore's probe reads the firmware header through the continuous quad
-	 *    read, which a part still in single mode cannot answer. */
-	if (nor_window_restore() != 0) {
+	 *    read, which a part still in single mode cannot answer.
+	 *
+	 * [!] EXCEPT AFTER A REFUSAL, WHERE IT NEVER WENT DOWN.  Restoring a window
+	 *    that is already up is not free: the restore sets the quad-enable bit,
+	 *    which is a write of the NOR's non-volatile status register, and the
+	 *    whole reason the erased-target check happens before step 2 is to spend
+	 *    nothing at all on a request that is not going to happen. */
+	if (st == NOR_WRITE_REFUSED) {
+		/* nothing was taken down, so there is nothing to bring back */
+	} else if (nor_window_restore() != 0) {
 		note(r, "the flash window did not come back");
 		st = NOR_WRITE_FAULTED;
 	} else if (st != NOR_WRITE_FAULTED) {
@@ -350,8 +405,11 @@ static enum nor_write_status run(enum txn_op op, uint32_t token,
 	/* 7. Commit.  NOR_ST_XIP only for the outcomes that leave this port able to
 	 *    answer for what it is serving; see the file comment for why a mismatch
 	 *    is not one of them. */
+	/* NOR_WRITE_REFUSED is in this set because a refusal by definition touched
+	 * nothing: the window never went down and no opcode was sent, so the port
+	 * is exactly as able to answer for the array as it was a moment ago. */
 	commit_ok = (st == NOR_WRITE_OK || st == NOR_WRITE_INCOMPLETE ||
-	             st == NOR_WRITE_NO_TRANSPORT);
+	             st == NOR_WRITE_NO_TRANSPORT || st == NOR_WRITE_REFUSED);
 	nor_write_commit(commit_ok, r->fail);
 	if (!commit_ok)
 		return NOR_WRITE_FAULTED;

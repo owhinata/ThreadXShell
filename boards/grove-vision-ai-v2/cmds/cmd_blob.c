@@ -403,6 +403,31 @@ static int op_read_back(void *ctx, uint32_t addr, void *buf, uint32_t len)
 	return blob_read_reserved(addr, buf, len) == BLOB_OK ? 0 : -1;
 }
 
+/* ~80 ms per 4 KB sector, measured on this die (#49 Step 2 item 6; the table is
+ * in the board README).  Only ever used to set an expectation before a wait
+ * that can reach 40 s -- nothing decides anything from it. */
+#define BLOB_ERASE_MS_PER_SECTOR  80u
+
+static void op_announce(void *ctx, unsigned slot, uint32_t base, uint32_t bytes)
+{
+	struct cli_instance *sh = ((struct wr_ctx *)ctx)->sh;
+	unsigned long secs = ((unsigned long)(bytes / nor_seam_limits.unit) *
+	                      BLOB_ERASE_MS_PER_SECTOR + 999u) / 1000u;
+
+	/* Said here rather than at the top of the command: everything that can
+	 * refuse has refused by now, so this is only printed when a slot really is
+	 * about to be destroyed -- and it can name which one. */
+	cli_print(sh, "slot %u   : 0x%08lx, %lu KB -- erasing it first, so whatever "
+	              "is there\r\n", slot, (unsigned long)base,
+	          (unsigned long)(bytes / 1024u));
+	cli_print(sh, "           is gone even if the transfer fails.  About "
+	              "%lu s; Ctrl+C stops it between sectors\r\n", secs);
+	cli_print(sh, "           then start the sender: `sb -k <file>` (lrzsz "
+	              "YMODEM batch), or Ctrl+A Ctrl+S in picocom\r\n");
+	cli_print(sh, "           Ctrl+C does NOT abort the transfer -- cancel the "
+	              "sender instead.  Result also in `dmesg`\r\n");
+}
+
 static void op_note_name(void *ctx, const char *name, uint32_t size)
 {
 	(void)ctx;
@@ -439,7 +464,7 @@ static int cmd_blob_write(struct cli_instance *sh, int argc, char **argv)
 	const struct blob_write_ops ops = {
 		&ctx, op_reserve, op_unreserve, op_erase, op_program,
 		op_claim_console, op_release_console, op_receive, op_read_back,
-		op_note_name, op_slot_count, op_stat, op_geometry,
+		op_note_name, op_announce, op_slot_count, op_stat, op_geometry,
 	};
 	struct blob_write_report rep;
 	enum blob_write_result res;
@@ -458,19 +483,10 @@ static int cmd_blob_write(struct cli_instance *sh, int argc, char **argv)
 		want = (int)want32;
 	}
 
-	/* Said BEFORE anything happens, because most of it cannot be said after:
-	 * once the console is handed to the protocol the PC's terminal belongs to
-	 * `sb`, and once Ctrl+C is latched the shell drops the rest of this
-	 * command's output. */
-	cli_print(sh, "blob: erasing the whole slot first -- whatever is in it is "
-	              "gone even if the transfer fails\r\n");
-	cli_print(sh, "      (a 2 MB slot takes about 40 s; Ctrl+C stops it "
-	              "between sectors)\r\n");
-	cli_print(sh, "      then start the sender: `sb <file>` (lrzsz YMODEM "
-	              "batch), or Ctrl+A Ctrl+S in picocom\r\n");
-	cli_print(sh, "      Ctrl+C does NOT abort the transfer -- cancel the "
-	              "sender instead.  Result also in `dmesg`\r\n");
-
+	/* [!] Nothing is printed here.  What this command has to say -- that a
+	 * slot is about to be erased and the operator should start the sender --
+	 * is only true once a slot has been CHOSEN, and choosing happens inside
+	 * the reservation.  op_announce() says it at that moment. */
 	drops0 = sh->rx_dropped;
 	res = blob_write_run(&ops, argv[1], want, &rep);
 

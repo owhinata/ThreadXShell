@@ -37,6 +37,16 @@ enum blob_map_verdict blob_check_map(unsigned *bad)
 	                      blob_map_count(), bad);
 }
 
+/* Why an acquire was refused.  nor_acquire() answers -1 for a part somebody
+ * else is using and for a part nobody can use again, and only the second calls
+ * for a reset. */
+static int acquire_failure(void)
+{
+	if (nor_lifecycle_state() == NOR_ST_FAULTED)
+		return BLOB_ERR_FAULT;
+	return BLOB_ERR_BUSY;
+}
+
 /* The slot, once the table has been checked and the index is in range. */
 static const struct blob_slot *checked_slot(unsigned slot, int *err)
 {
@@ -83,7 +93,7 @@ int blob_stat(unsigned slot, struct blob_info *out, enum blob_hdr_reject *why)
 		return err;
 
 	if (nor_acquire(NOR_LEASE_BLOB, &token) != 0)
-		return BLOB_ERR_BUSY;
+		return acquire_failure();
 
 	nor_alias_invalidate(s->base, BLOB_HDR_SPAN);
 	(void)blob_hdr_decode(alias(s->base), BLOB_HDR_SPAN, s->base,
@@ -115,7 +125,7 @@ int blob_read(unsigned slot, uint32_t off, void *buf, uint32_t len)
 	addr = blob_map_payload_addr(s, nor_seam_limits.unit) + off;
 
 	if (nor_acquire(NOR_LEASE_BLOB, &token) != 0)
-		return BLOB_ERR_BUSY;
+		return acquire_failure();
 
 	nor_alias_invalidate(addr, len);
 	memcpy(buf, alias(addr), len);

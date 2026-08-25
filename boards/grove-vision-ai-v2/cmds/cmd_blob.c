@@ -67,10 +67,24 @@ static int blob_complain(struct cli_instance *sh, int rc)
 		cli_error(sh, "blob: the NOR is busy -- `nor info` says who "
 		              "holds it\r\n");
 		return 1;
+	case BLOB_ERR_FAULT:
+		/* Not busy, and not worth retrying: the port latched a failure
+		 * and only a reset clears it.  Sending an operator to look for
+		 * a holder that does not exist is the wrong instruction. */
+		cli_error(sh, "blob: the NOR port is faulted -- %s (reset "
+		              "required)\r\n",
+		          nor_fail_reason() ? nor_fail_reason() : "no reason "
+		          "recorded");
+		return 1;
 	case BLOB_ERR_MAP:
 		v = blob_check_map(&bad);
-		cli_error(sh, "blob: slot table is not usable: %s (slot %u)\r\n",
-		          blob_map_verdict_name(v), bad);
+		if (blob_map_verdict_names_slot(v))
+			cli_error(sh, "blob: slot table is not usable: %s "
+			              "(slot %u)\r\n",
+			          blob_map_verdict_name(v), bad);
+		else
+			cli_error(sh, "blob: slot table is not usable: %s\r\n",
+			          blob_map_verdict_name(v));
 		return 1;
 	default:
 		break;

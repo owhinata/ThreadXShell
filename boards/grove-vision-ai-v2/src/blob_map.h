@@ -84,6 +84,16 @@ enum blob_map_verdict {
 const char *blob_map_verdict_name(enum blob_map_verdict v);
 
 /**
+ * Does @p v name a slot, i.e. is blob_map_check()'s @p bad meaningful?
+ *
+ * Two of the verdicts are about the table as a whole and would otherwise be
+ * reported against slot 0, which is a slot that exists and is probably fine.
+ * The answer lives here rather than in whatever prints the message, so there
+ * is one statement of which verdicts carry an index.
+ */
+int blob_map_verdict_names_slot(enum blob_map_verdict v);
+
+/**
  * @brief  Is @p slots a table this port may act on inside [@p lo, @p hi)?
  *
  * @param unit   bytes one permitted erase destroys; a power of two

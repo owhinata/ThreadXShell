@@ -2556,6 +2556,46 @@ the part is claimed, so a bad request costs nothing and can say which rule it
 broke; the seam asks again at the door, on every single call, and that is the
 one that holds when the caller is not this file.
 
+There is a step 1b since issue #92: **a program refuses a target that is not
+erased**, read through the window while it is still up and this caller already
+owns the part. Bits only go from 1 to 0, so programming over unerased flash
+lands the AND of the two and the read-back reports a mismatch -- which is
+terminal, and the cause can be as ordinary as naming a range one sector wider
+than the erase. That happened during #92's own bring-up, from instructions
+written in this repository. The refusal costs nothing: the window never goes
+down, so not even the quad-enable bit is rewritten.
+
+#### [!] The transport takes 32-bit words byte-reversed (issue #92)
+
+Program `b7 0c 4b 73` through this path and read it back and you get
+`73 4b 0c b7`. Every 32-bit word arrives at the array with its bytes in the
+opposite order.
+
+The vendor library knows. `hx_lib_qspi_eeprom_write()` takes a `word_switch`
+flag and calls `word_switch_func()` when it is set, which disassembles to
+exactly this reversal, in place, over the caller's buffer. This port passes 0
+-- the seam refuses anything else, because that path mutates a buffer handed to
+a prebuilt archive -- so nothing was reversing anything.
+
+[!] **And relying on the vendor's version would have been worse.**
+`word_switch_func()` returns 0 and does nothing at all when the length is not a
+multiple of four, a result its caller ignores. A payload with a three-byte tail
+would have gone to the array reversed while every layer reported success.
+
+So `nor_write.c` reverses each word in its own page buffer and pads a short tail
+to a whole word with `0xFF`, which programs nothing. `nor_span_program()`
+refuses an address that is not word aligned and the seam refuses a transfer that
+is not whole words: where a word starts has to be defined before its bytes can
+be put back in order.
+
+[!] **Issue #88 shipped this path and could not have seen it.** `nor write`
+filled with a constant `0xA5`, and a constant is invariant under word reversal:
+64 KB of it verified perfectly, twice, including in the timing measurements that
+chose the transfer's chunk size. Three cases in `test/test_nor_seam.c` asserted
+that byte-granular writes were fine -- one of them named "unaligned is fine".
+The command fills with a varying pattern now, seeded from the address, and the
+first real transfer is what found the reversal.
+
 #### [!] Step 3 is a canary, and it is the only step here about liveness
 
 Every piece of the vendor's write path is built on
@@ -3089,7 +3129,7 @@ retransmitted copy (2 x 1,029 B against 4,095 B of ring).  The erase is the only
 long operation and it runs **before** the protocol starts, which is what that
 design decision bought.
 
-#### The baseline, as read on the board (2026-08-25)
+#### The baseline, as read on the board (2026-08-25, before anything was written)
 
 ```
 slot  base          size  state         length     crc32  name
@@ -3103,9 +3143,83 @@ slot  base          size  state         length     crc32  name
 `blob read 1 0 64` shows high-entropy bytes: the factory extent
 `0x3bb000..0x5ee000` covers slot 1's header sector.  This is the shape the
 region is expected to be in before anything of ours is written -- **nine slots
-usable, largest payload 2,093,056 B** -- and it is worth re-reading after the
-first `blob write` lands, because "slot 1 went from invalid to something else"
-is a claim about the writer that no gate can make.
+usable, largest payload 2,093,056 B**.
+
+[!] **The board no longer reads like that**, and the difference is the record of
+what #92 verified: slot 0 holds a 1,704,672 B test payload and slot 5 a
+100,000 B one, and slot 8 reads `invalid` because a raw `nor write` put a
+pattern in its header sector. Slot 1 is still `invalid` for the original reason
+-- the factory extent -- which is the one row worth checking against this table.
+Anything of ours can be cleared with `blob erase <slot>`; the factory data
+cannot be brought back and was never ours.
+
+#### Writing one: `blob write <name> [slot]`
+
+```
+blob write <name> [slot]    receive a file over YMODEM into a slot
+blob verify <slot>          re-read the payload and check its stored crc32
+blob erase <slot>           retire a blob: erase its header sector
+```
+
+The order is the design, and each step is where it is because of something the
+board taught:
+
+1. **reserve the part** (#91).  The token stays local until the run is over, so
+   a failure at any later step gives back exactly one reservation.
+2. **choose the slot, under that reservation.**  A scan taken before reserving
+   describes a part somebody else may write next, so a slot that was empty when
+   it was chosen could hold a blob by the time it is erased.  The name decides
+   it: a name already stored goes back to its own slot, a new one has to be told
+   which slot to use, and a name that lives in a DIFFERENT slot is refused
+   rather than moved -- there is never a window with two slots under one name.
+3. **announce**, then **erase the whole slot in one transaction**, cancellable
+   between sectors.  ~21 s for 1 MB, ~41 s for 2 MB.  The announcement happens
+   here rather than at the top of the command, so a refused write does not warn
+   about destroying a slot it never touched.
+4. **only if the erase reported OK.**  Programming into flash whose erase was
+   cut short reads back as the AND of the two, which is a terminal fault -- an
+   ordinary Ctrl+C would kill the port for the session.
+5. **claim the console** -- after the erase, so the erase keeps a live line
+   editor for its cancel and nobody holds a raw console for 40 s.
+6. **receive**, programming a 64 KB chunk at a time.  A program that does not
+   report OK latches, and no further program or header follows it.
+7. **release the console, then the body page, then the magic page**, each its
+   own transaction and each read back by the writer.  Split so every outcome is
+   either "no magic, so not valid" or "magic, so the body was read back and
+   matched".
+8. **verify the payload against the CRC of the stream that arrived**, and give
+   the reservation back.  One exit, whatever happened.
+
+Measured end to end, against values computed on the host first:
+
+| file | stored | crc32 | NOR transactions | rx_drop |
+|---|---|---|---|---|
+| 100,000 B | slot 9 / slot 5 | `A26667AD` | 5 | +0 |
+| 1,704,672 B | slot 0 | `1D2E14C4` | **30** | +0 |
+
+30 is the budget #49 Step 2 was planned against: 1 erase + 27 chunks + body +
+magic.  `sb -k` moves the bytes at 76-79 KB/s.
+
+**`blob erase` is one 4 KB sector**, the header, and the payload underneath is
+left alone -- the next `blob write` erases it anyway.  So `blob list` stops
+showing the blob immediately, which is what "erase" means to an operator, while
+`blob read` on the same slot still returns the bytes.  That is checked on
+hardware rather than asserted here.
+
+[!] **THE RESULT OF A CANCEL IS IN `dmesg`, NOT ON THE CONSOLE.**  Once Ctrl+C
+is latched the shell drops the rest of the command's output, deliberately, so a
+cancelled erase returns to a silent prompt.  Every outcome is written to the log
+ring as well, and the announcement says so before it starts.
+
+[!] **THERE IS NO LOCAL Ctrl+C DURING A RECEIVE.**  While receiving, the stream
+is the file, so 0x03 is ordinary data -- about one byte in 256 of binary content
+-- and cannot be told from a keypress.  The donor treated it as an abort and
+corrupted every transfer until it stopped.  Cancel from the PC instead.  The
+consequence worth knowing: a `blob write` started with no sender waits out the
+receiver's 120 s handshake budget with no way to interrupt it, and picocom runs
+`sb` from its own hook, so Ctrl+C does not reach the sender either.  Giving the
+handshake phase an abort would need a new hook through the protocol's IO vtable,
+which is a separate issue.
 
 ### One operator, and therefore no CMSIS-NN
 

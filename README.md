@@ -67,7 +67,7 @@ and are described in that board's README.
 CMakeLists.txt        project, board selection, submodule bootstrap, cli_version.h
 cmake/                toolchain file (fetches ARM GNU on first configure), version template
 shell/                board-independent: core/ include/ backend/ cmds/ test/
-svc/                  board-independent services (fmt, ymodem, frame pipeline, gfx)
+svc/                  board-independent services (fmt, crc32, ymodem, frame pipeline, gfx)
 lib/                  upstream mirror submodules (read-only)
 boards/<board>/       board.cmake, src/ port/ cmds/ backend/ svc/ include/ ldscript/ cmake/
 ```

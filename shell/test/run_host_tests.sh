@@ -250,6 +250,21 @@ gcc $CFLAGS -I "$svc" \
     $LDFLAGS -o "$out/test_frame_pipeline"
 "$out/test_frame_pipeline"
 
+# issue #92 (#49 Step 2) -- the CRC-32 the Grove blob store stamps assets with
+# (svc/crc32.c): canonical CRC-32/ISO-HDLC vectors, chaining at every split point,
+# a cls-model-sized stream accumulated in 1024-byte YMODEM blocks (bit-sensitive),
+# the double-inversion wrapper that must NOT be re-added, and agreement with a
+# table-free reference computed straight from the polynomial -- the last is what
+# keeps the 64-byte table honest, since the test shares no table with the code.
+# Pure svc layer -- HAL/ThreadX/shell-free, so it needs only the svc include dir.
+# (Built as test_crc32_svc: boards/wio-lite-ai/test pins the same properties for
+# FlashDB's fdb_calc_crc32(), which is what the donor's blob uses, and that one
+# already owns the name test_crc32 in this scratch dir.)
+gcc $CFLAGS -I "$svc" \
+    "$here/test_crc32.c" "$svc/crc32.c" \
+    $LDFLAGS -o "$out/test_crc32_svc"
+"$out/test_crc32_svc"
+
 # ---- board-pinned tests --------------------------------------------------- *
 # Same toolchain flags and the same scratch dir, exported so a board test is built
 # exactly like a core one and cannot quietly diverge.  A board with no

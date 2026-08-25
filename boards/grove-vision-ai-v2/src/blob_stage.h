@@ -48,15 +48,28 @@ extern "C" {
 #endif
 
 /**
- * Bytes of staging, and therefore the largest chunk one transaction can take.
+ * Bytes of staging, and the chunk one transaction programs: a transfer fills
+ * this buffer and hands the whole of it to one nor_write_program().
  *
- * [!] A CEILING, NOT THE CHUNK SIZE.  What a transfer actually programs per
- * transaction is settled by measurement (#49 Step 2, implementation order item
- * 6: how long a program of 1/4/16/32/64 KB takes against how long the sender
- * waits before retransmitting).  This is how much room that measurement is
- * allowed to ask for, chosen as the largest chunk the transaction budget was
- * written around -- 1 erase + 27 programs + body + magic = 30 transactions for
- * the 1,704,672 B classification model.
+ * [!] MEASURED, NOT CHOSEN (#49 Step 2, implementation order item 6).  One
+ * program transaction on this board costs
+ *
+ *     0.7 ms  +  2.08 ms per KB      (1/4/16/32/64 KB, whole transaction,
+ *                                     R^2 to within the 1 ms tick)
+ *
+ * -- so the fixed cost of a transaction is under a millisecond and the time is
+ * essentially all payload.  Chunk size therefore barely changes how long a
+ * transfer takes (4.7 s of programming for the 1,704,672 B classification
+ * model at 1 KB, 3.6 s at 64 KB); what it changes is how many TRANSACTIONS
+ * there are, and each one takes the memory-mapped window down and back up and
+ * writes the NOR's non-volatile status register twice on the way (nor_write.h).
+ * 1 KB chunks would be 1,668 transactions for that model and 64 KB chunks are
+ * 30, which is the budget #49 Step 2 was planned against: 1 erase + 27
+ * programs + body + magic.
+ *
+ * Nothing in the protocol argues for less: the sender waits 60 s before it
+ * retransmits an unacknowledged block (measured against lrzsz 0.12.21 through
+ * a pty), and 64 KB costs 134 ms.
  *
  * cmake/check_placement_budget.py states this number independently and fails
  * the build if the two ever disagree.

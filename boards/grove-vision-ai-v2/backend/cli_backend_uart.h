@@ -51,9 +51,25 @@ extern "C" {
 #endif
 
 /* RX ring depth (bytes).  Holds CLI_GROVE_RX_BUFFER_SIZE-1; a burst that
- * outruns the shell thread is dropped + counted. */
+ * outruns the shell thread is dropped + counted.
+ *
+ * [!] 4096 SINCE ISSUE #92, AND 1024 WAS NOT ENOUGH TO HOLD ONE YMODEM FRAME.
+ * A 1K frame on the wire is 1029 bytes -- STX, the sequence byte and its
+ * complement, 1024 of payload and a 16-bit CRC -- and a 1024-byte ring holds
+ * 1023.  So a `blob write` transfer could not have absorbed a single frame
+ * even with the ring completely empty, and the receiver is away for a whole
+ * NOR program transaction between reads.  At 921600 baud the payload arrives
+ * at ~92 KB/s, so this is the difference between ~11 ms of absorption and
+ * ~44 ms.
+ *
+ * [!] IT MOVES THE CLIFF; IT DOES NOT REMOVE IT.  Three frames of slack buys
+ * one retransmission, and what actually has to hold is that a program
+ * transaction plus its margin finishes inside the sender's first retry
+ * interval.  Both of those are measurements this project has not taken yet
+ * (#49 Step 2, implementation order item 6), and until it has, the size below
+ * is headroom rather than a proof. */
 #ifndef CLI_GROVE_RX_BUFFER_SIZE
-#define CLI_GROVE_RX_BUFFER_SIZE 1024
+#define CLI_GROVE_RX_BUFFER_SIZE 4096
 #endif
 
 /* TX ring depth (bytes).  Sized to hold the whole boot banner enqueued before
@@ -99,6 +115,15 @@ extern const struct cli_transport_api cli_grove_uart_api;
 /* A ring needs >= 2 bytes (one slot is the full/empty sentinel). */
 _Static_assert(CLI_GROVE_RX_BUFFER_SIZE >= 2, "RX ring must be >= 2");
 _Static_assert(CLI_GROVE_TX_BUFFER_SIZE >= 2, "TX ring must be >= 2");
+
+/* And it must hold two whole YMODEM 1K frames, which is the reason for the
+ * size above: 1029 bytes each (STX + seq + ~seq + 1024 + CRC16), one slot
+ * spent on the full/empty sentinel.  Written as the sum rather than taken from
+ * svc/ymodem.h because that header exports no frame size -- the framing is the
+ * protocol's, not a knob of ours, and this is the one place on this board that
+ * has to be sized against it. */
+_Static_assert(CLI_GROVE_RX_BUFFER_SIZE - 1u >= 2u * (1u + 1u + 1u + 1024u + 2u),
+               "RX ring must hold two YMODEM 1K frames (issue #92)");
 
 #ifdef __cplusplus
 }

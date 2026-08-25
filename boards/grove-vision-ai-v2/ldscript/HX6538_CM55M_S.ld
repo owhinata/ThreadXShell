@@ -376,6 +376,28 @@ SECTIONS
         __nn_arena_end = .;
     } > CM55M_S_SRAM
 
+    /* The blob staging buffer (issue #92).  64 KB between a YMODEM transfer
+     * and the NOR: bytes accumulate until a chunk is full and then one write
+     * transaction takes the whole chunk, because every transaction takes the
+     * memory-mapped window down and back up and writes the part's non-volatile
+     * status register twice on the way.
+     *
+     * [!] IN SRAM FOR THE BUDGET, NOT FOR REACHABILITY -- unlike .lcd_fb,
+     * .cam_raw and .cam_slots above, nothing hands this buffer to a DMA
+     * engine.  nor_write.c copies out of it a program page at a time.  It is
+     * here because 64 KB is a large bite out of the ~152 KB heap-to-stack gap
+     * in DTCM and a small one out of this window.
+     *
+     * NOLOAD and KEEP for the same reasons as its neighbours: zeros in the
+     * image are NOR wear, and a reservation --gc-sections dropped would let
+     * the next section take the address the placement gate says is reserved. */
+    .blob_stage (NOLOAD) : ALIGN(32)
+    {
+        __blob_stage_start = .;
+        KEEP(*(.blob_stage))
+        __blob_stage_end = .;
+    } > CM55M_S_SRAM
+
     /* High-water mark of the SRAM window, for the `free` command (issue #26).
      * MUST stay after every section assigned to CM55M_S_SRAM -- the location
      * counter here still belongs to that region, and the next output section

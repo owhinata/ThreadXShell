@@ -25,6 +25,11 @@ exactly one thing broken:
   F3  the unmodified probe             -> PASS
 
   P1  .lcd_fb made LOADABLE             -> the loader-window floor fires
+  P2  the FP precondition call deleted  -> REQUIRED (--gc-sections drops it)
+  P3  the staging buffer without its
+      section attribute                 -> RESIDENCY (it lands in DTCM)
+  P4  the staging buffer in a section
+      with no flags at all              -> ALLOC (it claims no memory)
   P0  the unmodified firmware           -> PASS
 
   Q0  the unmodified probe              -> PASS
@@ -224,6 +229,8 @@ def run_placement_gate(board_dir, build_dir, elf, nm, objdump):
         ids.add("REQUIRED")
     if "pinned buffer blob_stage_buf" in text:
         ids.add("RESIDENCY")
+    if "claims no memory" in text:
+        ids.add("ALLOC")
     return r.returncode, ids, text
 
 
@@ -249,7 +256,16 @@ def link_only(cmd, output="shell.elf"):
     raise SystemExit(f"run_fixture_tests: no compiler segment for {output}")
 
 
+# Counted rather than written down: the total below was 17 while this file ran
+# 17 fixtures, and stayed 17 when the eighteenth was added.  A number that has
+# to be maintained by hand reads as coverage whether or not it is there.
+RAN = 0
+
+
 def expect(name, got_rc, got_ids, want_rc, want_ids, text):
+    global RAN
+
+    RAN += 1
     ok = (got_rc == want_rc) and (got_ids == want_ids)
     print(f"  {'ok  ' if ok else 'FAIL'} {name}: rc={got_rc} ids={sorted(got_ids) or '-'}")
     if not ok:
@@ -262,6 +278,8 @@ def expect(name, got_rc, got_ids, want_rc, want_ids, text):
 
 
 def main():
+    global RAN
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-dir", required=True)
     ap.add_argument("--board-dir", required=True)
@@ -482,6 +500,71 @@ def main():
     ok &= expect("P3 a staging buffer that drifted out of SRAM is caught",
                  rc, ids, 1, {"RESIDENCY"}, text)
 
+    # P4: the same buffer in a section that claims no memory -- no ALLOC and
+    # no CONTENTS -- at the address the reservation was given.  The gate's
+    # overlap check only looks at allocated sections, so such a section keeps
+    # its address and its symbol while dropping out of it, and the next section
+    # could be handed the same range with nothing to say so.
+    #
+    # [!] THIS IS THE ONLY FIXTURE HERE THAT NO OTHER RULE CATCHES.  It came
+    # from review of 1c3730d, and it took two rounds: four attempts to build it
+    # (output section (INFO) and (COPY), objcopy --set-section-flags, and the
+    # asm section below on its own) all came back with CONTENTS, which the
+    # NOLOAD rule refuses -- so the finding looked unreachable.  Sending that
+    # evidence back produced the combination that works: a non-ALLOC %nobits
+    # INPUT section and an output section whose type is overridden to
+    # SHT_NOBITS.  Against the gate as it shipped in 1c3730d this ELF passes.
+    #
+    # It needs both halves, which is why it edits a source AND the linker
+    # script.  The size comes out of the real header so it cannot drift from
+    # the reservation it stands in for, and `.size` is what keeps nm reporting
+    # the symbol -- without it residency answers first and the fixture would be
+    # passing on that rule's back.
+    stage_h = os.path.join(board, "src", "blob_stage.h")
+    with open(stage_h) as f:
+        m = re.search(r"BLOB_STAGE_BYTES\s+\((\d+)u \* (\d+)u\)", f.read())
+    if not m:
+        raise SystemExit("run_fixture_tests: cannot read BLOB_STAGE_BYTES out "
+                         "of blob_stage.h; the fixture cannot size itself")
+    stage_bytes = int(m.group(1)) * int(m.group(2))
+
+    asm_dst = os.path.join(outdir, "p4_unallocated_stage.c")
+    with open(asm_dst, "w") as f:
+        f.write('__asm__(".section .blob_stage,\\"\\",%nobits\\n"\n'
+                '        ".global blob_stage_buf\\n"\n'
+                '        ".balign 32\\n"\n'
+                f'        "blob_stage_buf: .space {stage_bytes}\\n"\n'
+                f'        ".size blob_stage_buf, {stage_bytes}\\n"\n'
+                '        ".type blob_stage_buf, %object\\n"\n'
+                '        ".previous\\n");\n')
+
+    p4_cc = cc.replace(f"-o {obj_old}", "-o seam-fixtures/p4_blob_stage.obj")
+    p4_cc = re.sub(r"-c \S*blob_stage\.c", f"-c {asm_dst}", p4_cc)
+    p4_cc = re.sub(r"-MD -MT \S+ -MF \S+", "", p4_cc)
+    compile_one(build, p4_cc, "P4")
+
+    ld_nobits = os.path.join(outdir, "p4_nobits_type.ld")
+    ld_typed = ld.replace(".blob_stage (NOLOAD) : ALIGN(32)",
+                          ".blob_stage (TYPE = SHT_NOBITS) : ALIGN(32)")
+    if ld_typed == ld:
+        raise SystemExit("run_fixture_tests: .blob_stage is not NOLOAD in the "
+                         "linker script; the fixture cannot retype it")
+    with open(ld_nobits, "w") as f:
+        f.write(ld_typed)
+
+    p4 = shell_link.replace(obj_old, "seam-fixtures/p4_blob_stage.obj")
+    p4 = re.sub(r"-T\S*HX6538_CM55M_S\.ld", f"-T{ld_nobits}", p4)
+    p4 = retarget(p4, "shell.elf", "seam-fixtures/p4_unallocated_stage.elf")
+    link(build, p4, "P4")
+    rc, ids, text = run_placement_gate(board, build,
+                                       "seam-fixtures/p4_unallocated_stage.elf",
+                                       nm, objdump)
+    # Exactly one id.  Residency finds the symbol, at the right address, the
+    # right size and inside its own section; the NOLOAD rule finds no CONTENTS.
+    # Everything the gate checked before 1c3730d is satisfied.
+    ok &= expect("P4 a reservation that claims no memory is caught",
+                 rc, ids, 1, {"ALLOC"}, text)
+
     # --- check_nor_seam.py: who may reach the NOR write path (issue #88) -----
     #
     # The gate's claim is that ONE translation unit reaches the vendor's erase
@@ -638,6 +721,7 @@ def main():
     r = subprocess.run(q9, shell=True, cwd=build, capture_output=True, text=True)
     q9_ok = (r.returncode != 0 and
              "__real_hx_lib_qspi_eeprom_write" in (r.stdout + r.stderr))
+    RAN += 1   # asserted by hand rather than through expect(); still a fixture
     print(f"  {'ok  ' if q9_ok else 'FAIL'} Q9 a dropped --wrap is a link error")
     if not q9_ok:
         print("       wanted a failed link naming "
@@ -667,7 +751,7 @@ def main():
     if not ok:
         print("run_fixture_tests: FAIL", file=sys.stderr)
         return 1
-    print("run_fixture_tests: OK (17 fixtures)")
+    print(f"run_fixture_tests: OK ({RAN} fixtures)")
     return 0
 
 

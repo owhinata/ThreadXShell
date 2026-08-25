@@ -416,9 +416,31 @@ def main():
         sec = secs.get(name)
         if sec is None:
             errors.append(f"section {name} is missing")
-        elif "CONTENTS" in sec[2]:
+            continue
+        if "CONTENTS" in sec[2]:
             errors.append(f"section {name} is LOADable ({sec[1]} B); pinned "
                           "reservations must stay NOLOAD")
+        # ...and it has to CLAIM the memory it reserves.  A section with no
+        # ALLOC keeps its address and its symbol while dropping out of the
+        # overlap check below, which only looks at allocated sections -- so the
+        # next section can be given the same range with nothing to say so.
+        #
+        # [!] THIS ONE HAS BEEN SEEN TO MATTER.  Raised by review of 1c3730d,
+        # where the gate checked "no CONTENTS" and never "ALLOC".  Four
+        # attempts to build such a section -- output section (INFO), output
+        # section (COPY), objcopy --set-section-flags, and a TU declaring the
+        # section in asm with an empty flag string -- all came back with
+        # CONTENTS, which the rule above refuses, and it looked unreachable.
+        # It is not: a non-ALLOC %nobits INPUT section together with an output
+        # section retyped `(TYPE = SHT_NOBITS)` produces .blob_stage at its
+        # proper address, 64 KB, with neither CONTENTS nor ALLOC, and a symbol
+        # nm reports normally.  Every check this file made before that review
+        # passes on it.  cmake/fixtures/ builds exactly that and this is the
+        # only rule that answers.
+        if "ALLOC" not in sec[2]:
+            errors.append(f"section {name} claims no memory ({sec[1]} B, "
+                          "not ALLOC); a reservation that is not allocated is "
+                          "invisible to the overlap check")
 
     # 6. no two allocated sections overlap.  A NOLOAD reservation that shares
     #    address space with something else still passes every per-section check

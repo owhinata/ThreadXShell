@@ -64,6 +64,11 @@ enum nor_span_verdict {
 	NOR_SPAN_OUTSIDE,      /**< the footprint is not wholly inside      */
 	NOR_SPAN_BAD_UNIT,     /**< erase unit zero or not a power of two   */
 	NOR_SPAN_BAD_INTERVAL, /**< the writable interval is not usable     */
+	/** A program address that is not a whole 32-bit word.  The transport
+	 *  takes words byte-reversed (nor_write.c), so the writer reverses what
+	 *  it sends -- and where a word starts is only defined against a
+	 *  word-aligned address.  Refused rather than guessed. */
+	NOR_SPAN_BAD_ALIGN,
 };
 
 /** Short name, for the refusal message and the host test's diagnostics. */
@@ -79,7 +84,9 @@ const char *nor_span_verdict_name(enum nor_span_verdict v);
  * @param out   receives the span; untouched unless NOR_SPAN_OK
  *
  * A program touches exactly what it names -- no rounding -- so this is the
- * bounds check and nothing else.  It is deliberately the same shape as
+ * bounds check plus one alignment rule: @p addr must be a whole 32-bit word,
+ * because the transport reverses the bytes of each word and the writer has to
+ * reverse them back (issue #92).  It is deliberately the same shape as
  * nor_seam_check_write(): the writer asks here before it claims the part, the
  * seam asks again at the door, and the two must not disagree about an edge.
  */

@@ -198,16 +198,30 @@ int main(void)
 			enum nor_seam_verdict want;
 			const char *what;
 		} cases[] = {
-			{ LO,       1u,      0u, 0, NOR_SEAM_GO,       "first byte" },
-			{ HI - 1u,  1u,      0u, 0, NOR_SEAM_GO,       "last byte" },
+			/* [!] WHOLE WORDS, and the three cases below used to say
+			 * the opposite -- "first byte", "last byte" and
+			 * "unaligned is fine" all expected GO until issue #92
+			 * measured what a byte-granular write actually does.  The
+			 * transport takes 32-bit words byte-reversed; a transfer
+			 * that does not start and end on a word has no defined
+			 * byte order, and the writer pads its tail to a word
+			 * before it gets here. */
+			{ LO,       4u,      0u, 0, NOR_SEAM_GO,       "first word" },
+			{ HI - 4u,  4u,      0u, 0, NOR_SEAM_GO,       "last word" },
 			{ LO,       HI - LO, 0u, 0, NOR_SEAM_GO,       "whole interval" },
-			{ LO + 1u,  1u,      0u, 0, NOR_SEAM_GO,       "unaligned is fine" },
+			{ LO,       1u,      0u, 0, NOR_SEAM_UNALIGNED,"a single byte" },
+			{ LO,       3u,      0u, 0, NOR_SEAM_UNALIGNED,"a short tail" },
+			{ LO + 1u,  4u,      0u, 0, NOR_SEAM_UNALIGNED,"one byte into a word" },
+			{ LO + 2u,  4u,      0u, 0, NOR_SEAM_UNALIGNED,"two bytes into a word" },
 			{ LO,       0u,      0u, 0, NOR_SEAM_EMPTY,    "zero length" },
-			{ LO,       1u,      1u, 0, NOR_SEAM_BAD_MODE, "word_switch" },
-			{ LO,       1u,      0u, 1, NOR_SEAM_NO_BUFFER,"no payload" },
-			{ LO - 1u,  1u,      0u, 0, NOR_SEAM_OUTSIDE,  "below" },
-			{ HI - 1u,  2u,      0u, 0, NOR_SEAM_OUTSIDE,  "over the end" },
-			{ HI,       1u,      0u, 0, NOR_SEAM_OUTSIDE,  "at the end" },
+			{ LO,       4u,      1u, 0, NOR_SEAM_BAD_MODE, "word_switch" },
+			{ LO,       4u,      0u, 1, NOR_SEAM_NO_BUFFER,"no payload" },
+			{ LO - 4u,  4u,      0u, 0, NOR_SEAM_OUTSIDE,  "below" },
+			{ HI - 4u,  8u,      0u, 0, NOR_SEAM_OUTSIDE,  "over the end" },
+			{ HI,       4u,      0u, 0, NOR_SEAM_OUTSIDE,  "at the end" },
+			/* Outside AND unaligned reports OUTSIDE: the bounds are
+			 * what protect the flash. */
+			{ HI + 1u,  4u,      0u, 0, NOR_SEAM_OUTSIDE,  "outside and unaligned" },
 			{ LO,       HI - LO + 1u, 0u, 0, NOR_SEAM_OUTSIDE,
 			  "one past the whole interval" },
 			/* Same wrap case as the erase table: addr + len would

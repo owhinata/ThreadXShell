@@ -145,6 +145,14 @@ enum nor_seam_verdict nor_seam_check_write(enum nor_state st, uint32_t addr,
 		return NOR_SEAM_OUTSIDE;
 	if (len > nor_seam_limits.hi - addr)
 		return NOR_SEAM_OUTSIDE;
+	/* [!] WORDS, NOT BYTES (issue #92).  The transport takes 32-bit words with
+	 * their bytes reversed, so the writer reverses what it sends -- and a
+	 * transfer that does not start and end on a word has no defined byte
+	 * order.  nor_span_program() refuses the address for the same reason; this
+	 * is the door saying it too, because the door is what a caller that
+	 * skipped the arithmetic would still have to get past. */
+	if ((addr % 4u) != 0u || (len % 4u) != 0u)
+		return NOR_SEAM_UNALIGNED;
 	return NOR_SEAM_GO;
 }
 

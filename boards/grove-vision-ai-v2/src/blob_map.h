@@ -56,6 +56,18 @@ extern "C" {
 #endif
 
 /**
+ * The most slots this build will look at in one pass.
+ *
+ * [!] A BOUND ON A STACK ARRAY, not a statement about the table.  The writer
+ * decides which slot to use from one view per slot, gathered under the
+ * reservation, and that array has to be a fixed size on a 4 KB thread stack.
+ * The shipped table has ten; a table with more than this is refused rather than
+ * truncated, because choosing from a truncated view is how a write ends up
+ * somewhere nobody looked at.
+ */
+#define BLOB_MAX_SLOTS   32u
+
+/**
  * One slot: where it starts and how much flash it owns, header included.
  *
  * The first erase unit of @ref base is the header sector and the rest is

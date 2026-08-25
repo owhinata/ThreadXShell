@@ -11,10 +11,12 @@
  *   blob read <slot>    hexdump payload bytes
  *   blob free           which slots can take something, and what cannot
  *
- * The write side -- `blob write`, `erase` and `verify` -- is items 6 and 7 of
- * #49 Step 2 and is not here yet.  Until it is, everything this file can reach
- * is a read: it takes NOR_LEASE_BLOB, which is also what brings the window up,
- * and gives it back before it prints.
+ * The reads take NOR_LEASE_BLOB, which is also what brings the window up, and
+ * give it back before they print.  `write` and `erase` take the writer
+ * RESERVATION instead (#91) and hold it across everything they do -- which is
+ * also what serialises them against each other and against `nor erase`, so
+ * there is no separate busy flag here: a second mutating command is refused by
+ * the reservation, in the same words `nor erase` uses.
  *
  * [!] THE FIRST BRING-UP IS NOT FREE, and this file makes it reachable from
  * four more places.  Taking a lease on a port that has never been up runs the
@@ -35,8 +37,13 @@
 #include "cli_instance.h"
 
 #include "blob.h"
+#include "blob_write.h"
+#include "cmd_xfer.h"
+#include "log.h"
+#include "nor_cmd.h"
 #include "nor_flash.h"
 #include "nor_seam.h"
+#include "nor_write.h"
 
 /* Same cap as `devmem dump`, and for the same reason: the hexdump holds the
  * output path for as long as it takes to print, and a length nobody bounded
@@ -290,6 +297,301 @@ static int cmd_blob_free(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
+
+/* ---- write ----------------------------------------------------------------- */
+
+/* Everything the coordinator needs from the board, and nothing else.  It is a
+ * vtable because the unwinding is what has to be tested and hardware can
+ * demonstrate about two of the seven ways out (blob_write.h). */
+struct wr_ctx {
+	struct cli_instance *sh;
+	int console_bg;      /**< the claim was refused because we are a bg job */
+};
+
+/* Runs with the memory-mapped window DOWN, so it is held to what nor_write.h
+ * permits there: the cancel poll reads the RX ring and shell state, and
+ * cli_print() goes to the UART.  Nothing here may touch the alias. */
+#define BLOB_ERASE_TICK_EVERY  (64u * 0x1000u)
+
+static int wr_erase_tick(void *ctx, uint32_t done, uint32_t total)
+{
+	struct cli_instance *sh = (struct cli_instance *)ctx;
+
+	if (total > BLOB_ERASE_TICK_EVERY && (done % BLOB_ERASE_TICK_EVERY) == 0u)
+		cli_print(sh, "erasing  : %lu / %lu B\r\n", (unsigned long)done,
+		          (unsigned long)total);
+	return cli_cancel_requested(sh) ? 1 : 0;
+}
+
+static int op_reserve(void *ctx, uint32_t *token)
+{
+	struct wr_ctx *c = (struct wr_ctx *)ctx;
+
+	return nor_cmd_writer_enter(c->sh, token);
+}
+
+static void op_unreserve(void *ctx, uint32_t token)
+{
+	(void)ctx;
+	(void)nor_unreserve(token);
+}
+
+static int op_erase(void *ctx, uint32_t token, uint32_t addr, uint32_t len,
+                    uint32_t *done, int *cancelled)
+{
+	struct wr_ctx *c = (struct wr_ctx *)ctx;
+	struct nor_erase_progress prog = { c->sh, wr_erase_tick };
+	struct nor_write_report r;
+	enum nor_write_status st = nor_write_erase(token, addr, len, &prog, &r);
+
+	*done = r.done;
+	*cancelled = r.cancelled ? 1 : 0;
+	if (st != NOR_WRITE_OK)
+		log_write(LOG_LEVEL_ERR, "blob", "erase 0x%lx+%lu: %s (%lu done)",
+		          (unsigned long)addr, (unsigned long)len,
+		          nor_write_status_name(st), (unsigned long)r.done);
+	return (int)st;
+}
+
+static int op_program(void *ctx, uint32_t token, uint32_t addr,
+                      const void *data, uint32_t len)
+{
+	struct wr_ctx *c = (struct wr_ctx *)ctx;
+	struct nor_write_report r;
+	enum nor_write_status st = nor_write_program(token, addr, data, len, &r);
+
+	(void)c;
+	if (st != NOR_WRITE_OK) {
+		log_write(LOG_LEVEL_ERR, "blob", "program 0x%lx+%lu: %s (%lu done)",
+		          (unsigned long)addr, (unsigned long)len,
+		          nor_write_status_name(st), (unsigned long)r.done);
+		/* [!] THE MISMATCHING BYTE, not just the verdict.  This runs with
+		 * the console handed to the protocol, so the log is the only place
+		 * it can be said -- and "read 0x%02x, wanted 0x%02x" at a known
+		 * offset is the difference between knowing what went wrong and
+		 * spending a flash cycle guessing. */
+		if (r.bad_valid)
+			log_write(LOG_LEVEL_ERR, "blob",
+			          "first bad at 0x%lx: read %02x, wanted %02x",
+			          (unsigned long)r.bad_off, r.bad_got, r.bad_want);
+	}
+	return (int)st;
+}
+
+static int op_claim_console(void *ctx)
+{
+	struct wr_ctx *c = (struct wr_ctx *)ctx;
+	int rc = cli_console_claim(c->sh);
+
+	c->console_bg = (rc == -2);
+	return rc == 0 ? 0 : -1;
+}
+
+static void op_release_console(void *ctx)
+{
+	cli_console_release(((struct wr_ctx *)ctx)->sh);
+}
+
+static int op_receive(void *ctx, const struct ym_sink *sink)
+{
+	return xfer_recv_sink_locked(((struct wr_ctx *)ctx)->sh, sink);
+}
+
+static int op_read_back(void *ctx, uint32_t addr, void *buf, uint32_t len)
+{
+	(void)ctx;
+	return blob_read_reserved(addr, buf, len) == BLOB_OK ? 0 : -1;
+}
+
+static void op_note_name(void *ctx, const char *name, uint32_t size)
+{
+	(void)ctx;
+	/* [!] TO THE LOG, NOT THE CONSOLE: the PC's terminal belongs to `sb`
+	 * while this runs.  And noted rather than stored -- the key is the name
+	 * the operator typed. */
+	log_write(LOG_LEVEL_INF, "blob", "sender offered '%s' (%lu B)",
+	          name ? name : "", (unsigned long)size);
+}
+
+static unsigned op_slot_count(void *ctx)
+{
+	(void)ctx;
+	return blob_map_count();
+}
+
+static int op_stat(void *ctx, unsigned slot, struct blob_info *info)
+{
+	(void)ctx;
+	return blob_stat_reserved(slot, info, NULL) == BLOB_OK ? 0 : -1;
+}
+
+static int op_geometry(void *ctx, unsigned slot, uint32_t *base,
+                       uint32_t *payload_addr, uint32_t *payload_max)
+{
+	(void)ctx;
+	return blob_slot_geometry(slot, base, payload_addr, payload_max) ==
+	       BLOB_OK ? 0 : -1;
+}
+
+static int cmd_blob_write(struct cli_instance *sh, int argc, char **argv)
+{
+	struct wr_ctx ctx = { sh, 0 };
+	const struct blob_write_ops ops = {
+		&ctx, op_reserve, op_unreserve, op_erase, op_program,
+		op_claim_console, op_release_console, op_receive, op_read_back,
+		op_note_name, op_slot_count, op_stat, op_geometry,
+	};
+	struct blob_write_report rep;
+	enum blob_write_result res;
+	enum blob_name_verdict nv;
+	uint32_t want32, drops0;
+	int want = -1;
+
+	nv = blob_name_check(argv[1], NULL);
+	if (nv != BLOB_NAME_OK) {
+		cli_error(sh, "blob: %s\r\n", blob_name_verdict_name(nv));
+		return 1;
+	}
+	if (argc >= 3) {
+		if (cli_parse_u32(argv[2], &want32) != 0)
+			return blob_complain(sh, BLOB_ERR_PARAM);
+		want = (int)want32;
+	}
+
+	/* Said BEFORE anything happens, because most of it cannot be said after:
+	 * once the console is handed to the protocol the PC's terminal belongs to
+	 * `sb`, and once Ctrl+C is latched the shell drops the rest of this
+	 * command's output. */
+	cli_print(sh, "blob: erasing the whole slot first -- whatever is in it is "
+	              "gone even if the transfer fails\r\n");
+	cli_print(sh, "      (a 2 MB slot takes about 40 s; Ctrl+C stops it "
+	              "between sectors)\r\n");
+	cli_print(sh, "      then start the sender: `sb <file>` (lrzsz YMODEM "
+	              "batch), or Ctrl+A Ctrl+S in picocom\r\n");
+	cli_print(sh, "      Ctrl+C does NOT abort the transfer -- cancel the "
+	              "sender instead.  Result also in `dmesg`\r\n");
+
+	drops0 = sh->rx_dropped;
+	res = blob_write_run(&ops, argv[1], want, &rep);
+
+	/* The post-mortem goes to the log as well: after a cancel the console
+	 * shows none of this, and during the transfer the PC could not see it. */
+	log_write(res == BLOB_WRITE_STORED ? LOG_LEVEL_INF : LOG_LEVEL_ERR, "blob",
+	          "write '%s' slot %u: %s, %lu B, %lu tx, drops %lu",
+	          argv[1], rep.slot, blob_write_result_name(res),
+	          (unsigned long)rep.received, (unsigned long)rep.transactions,
+	          (unsigned long)(sh->rx_dropped - drops0));
+
+	if (res == BLOB_WRITE_STORED) {
+		cli_print(sh, "stored   : '%s' in slot %u, %lu B, crc32 %08lX\r\n",
+		          argv[1], rep.slot, (unsigned long)rep.received,
+		          (unsigned long)rep.crc);
+		cli_print(sh, "cost     : %lu NOR transaction(s), rx_drop +%lu\r\n",
+		          (unsigned long)rep.transactions,
+		          (unsigned long)(sh->rx_dropped - drops0));
+		return 0;
+	}
+
+	if (res == BLOB_WRITE_NO_SLOT) {
+		cli_error(sh, "blob: %s\r\n", blob_choice_name(rep.choice));
+		if (rep.choice == BLOB_CHOICE_NEED_SLOT)
+			cli_error(sh, "      say which one: `blob write %s <slot>` "
+			              "(`blob free` lists them)\r\n", argv[1]);
+		else if (rep.choice == BLOB_CHOICE_OCCUPIED ||
+		         rep.choice == BLOB_CHOICE_DUPLICATE)
+			cli_error(sh, "      `blob erase <slot>` first, on purpose\r\n");
+		return 1;
+	}
+	if (res == BLOB_WRITE_NO_CONSOLE && ctx.console_bg)
+		cli_error(sh, "blob: cannot run in the background -- drop the "
+		              "trailing '&'\r\n");
+	else
+		cli_error(sh, "blob: %s (%lu B erased, %lu B received, %lu tx)\r\n",
+		          blob_write_result_name(res), (unsigned long)rep.erased,
+		          (unsigned long)rep.received,
+		          (unsigned long)rep.transactions);
+	return 1;
+}
+
+/* ---- erase ----------------------------------------------------------------- */
+
+static int cmd_blob_erase(struct cli_instance *sh, int argc, char **argv)
+{
+	struct nor_erase_progress prog = { sh, wr_erase_tick };
+	struct nor_write_report r;
+	enum nor_write_status st;
+	uint32_t slot, base = 0u, token = 0u;
+	int rc;
+
+	(void)argc;
+	if (cli_parse_u32(argv[1], &slot) != 0)
+		return blob_complain(sh, BLOB_ERR_PARAM);
+	rc = blob_slot_geometry((unsigned)slot, &base, NULL, NULL);
+	if (rc != BLOB_OK)
+		return blob_complain(sh, rc);
+
+	if (nor_cmd_writer_enter(sh, &token) != 0)
+		return 1;
+
+	/* [!] THE HEADER SECTOR ONLY.  Retiring a blob is one 4 KB erase rather
+	 * than the whole slot: the payload underneath is left alone and the next
+	 * `blob write` erases it anyway.  So this is fast, and `blob list` stops
+	 * showing the blob immediately -- which is what "erase" means to an
+	 * operator -- while the bytes are still there for anyone who reads the
+	 * flash directly.  Said out loud below for that reason. */
+	cli_print(sh, "erasing  : slot %lu header at 0x%08lx (one sector)\r\n",
+	          (unsigned long)slot, (unsigned long)base);
+	st = nor_write_erase(token, base, nor_seam_limits.unit, &prog, &r);
+	(void)nor_unreserve(token);
+
+	if (st != NOR_WRITE_OK) {
+		cli_error(sh, "blob: erase %s\r\n", nor_write_status_name(st));
+		return 1;
+	}
+	cli_print(sh, "erased   : the header is gone; the payload is still in the "
+	              "flash until something writes over it\r\n");
+	return 0;
+}
+
+/* ---- verify ---------------------------------------------------------------- */
+
+static int cmd_blob_verify(struct cli_instance *sh, int argc, char **argv)
+{
+	struct blob_info info;
+	uint32_t slot, crc = 0u;
+	int rc;
+
+	(void)argc;
+	if (cli_parse_u32(argv[1], &slot) != 0)
+		return blob_complain(sh, BLOB_ERR_PARAM);
+	if (blob_stat((unsigned)slot, &info, NULL) != BLOB_OK)
+		return blob_complain(sh, BLOB_ERR_BUSY);
+
+	rc = blob_verify((unsigned)slot, &crc);
+	switch (rc) {
+	case BLOB_OK:
+		cli_print(sh, "slot %lu  : PASS, %lu B, crc32 %08lX\r\n",
+		          (unsigned long)slot, (unsigned long)info.length,
+		          (unsigned long)crc);
+		return 0;
+	case BLOB_ERR_CRC:
+		/* The stored CRC is of the stream that arrived, so a mismatch
+		 * means the flash and the PC's file differ -- not that the flash
+		 * disagrees with itself. */
+		cli_error(sh, "slot %lu  : FAIL, read back %08lX, header says "
+		              "%08lX\r\n", (unsigned long)slot,
+		          (unsigned long)crc, (unsigned long)info.crc32);
+		return 1;
+	case BLOB_ERR_EMPTY:
+		cli_error(sh, "blob: slot %lu holds no header to check against\r\n",
+		          (unsigned long)slot);
+		return 1;
+	default:
+		break;
+	}
+	return blob_complain(sh, rc);
+}
+
 CLI_SUBCMD_SET_CREATE(blob_subcmds,
 	CLI_CMD_ARG_USAGE(list, NULL, "every slot: state, size, length, crc32, name",
 	                  NULL, cmd_blob_list, 1, 0),
@@ -299,6 +601,12 @@ CLI_SUBCMD_SET_CREATE(blob_subcmds,
 	                  "<slot> [off] [len]", cmd_blob_read, 2, 2),
 	CLI_CMD_ARG_USAGE(free, NULL, "slots that can take something, and what cannot",
 	                  NULL, cmd_blob_free, 1, 0),
+	CLI_CMD_ARG_USAGE(write, NULL, "receive a file over YMODEM into a slot",
+	                  "<name> [slot]", cmd_blob_write, 2, 1),
+	CLI_CMD_ARG_USAGE(verify, NULL, "re-read a slot and check its stored crc32",
+	                  "<slot>", cmd_blob_verify, 2, 0),
+	CLI_CMD_ARG_USAGE(erase, NULL, "retire a blob: erase its header sector",
+	                  "<slot>", cmd_blob_erase, 2, 0),
 	CLI_SUBCMD_SET_END);
 
 CLI_CMD_REGISTER(blob, blob_subcmds,

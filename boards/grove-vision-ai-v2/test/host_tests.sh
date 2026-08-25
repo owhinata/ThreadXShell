@@ -355,3 +355,20 @@ gcc $CFLAGS \
     "$here/test_blob_state.c" "$board/src/blob_state.c" "$svc/crc32.c" \
     $LDFLAGS -o "$out/test_blob_state"
 "$out/test_blob_state"
+
+# issue #92 (#49 Step 2) -- the `blob write` coordinator (src/blob_write.c).  A
+# write holds the NOR reservation and the console claim at once and there are
+# nine ways to leave; each has to give back exactly what it took.  The board can
+# stage perhaps two of them, each costs flash cycles of a part whose endurance
+# is not documented (issue #89), and a leaked reservation does not announce
+# itself -- it turns the next `nn open` into "busy" for the rest of the session,
+# by which time the cause is gone.  So the coordinator takes its operations as a
+# vtable, and this fails each in turn and counts the unwinding.  It drives the
+# coordinator's own sink as well, which is how a rejected block 0, a short file
+# and an empty batch happen without a PC.
+gcc $CFLAGS \
+    -I "$board/src" -I "$board/port/nor" -I "$svc" \
+    "$here/test_blob_write.c" "$board/src/blob_write.c" \
+    "$board/src/blob_state.c" "$board/src/blob_stage.c" "$svc/crc32.c" \
+    $LDFLAGS -o "$out/test_blob_write"
+"$out/test_blob_write"

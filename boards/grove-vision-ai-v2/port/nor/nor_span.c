@@ -22,6 +22,7 @@ const char *nor_span_verdict_name(enum nor_span_verdict v)
 	case NOR_SPAN_OUTSIDE:      return "outside the writable interval";
 	case NOR_SPAN_BAD_UNIT:     return "erase unit is not a power of two";
 	case NOR_SPAN_BAD_INTERVAL: return "the writable interval is not usable";
+	case NOR_SPAN_BAD_ALIGN:    return "program address is not word aligned";
 	default:                    break;
 	}
 	return "?";
@@ -43,6 +44,11 @@ enum nor_span_verdict nor_span_program(uint32_t lo, uint32_t hi, uint32_t addr,
 		return NOR_SPAN_OUTSIDE;
 	if (len > hi - addr)
 		return NOR_SPAN_OUTSIDE;
+	/* After the bounds, deliberately: an address outside the interval is the
+	 * more serious fact and should be the one reported.  This one is about
+	 * whether the bytes would land in the right ORDER (issue #92). */
+	if ((addr % 4u) != 0u)
+		return NOR_SPAN_BAD_ALIGN;
 
 	out->addr = addr;
 	out->len  = len;

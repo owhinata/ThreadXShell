@@ -24,6 +24,7 @@ board=$(cd "$here/.." && pwd)
 out="$HOST_TEST_OUT"
 CFLAGS="$HOST_TEST_CFLAGS"
 LDFLAGS="$HOST_TEST_LDFLAGS"
+svc="$HOST_TEST_SVC"          # freestanding service layer (crc32.c)
 sdk="$board/sdk/EPII_CM55M_APP_S"
 
 # issue #30 -- the vendor timer API seam (port/sdk_seam/timer_seam.c).  Its
@@ -323,3 +324,34 @@ gcc $CFLAGS \
     "$here/test_cam_mipi_calc.c" "$board/port/camera/cam_mipi_calc.c" \
     $LDFLAGS -lm -o "$out/test_cam_mipi_calc"
 "$out/test_cam_mipi_calc"
+
+# issue #92 (#49 Step 2) -- the asset slot table (src/blob_map.c).  The firmware
+# ships one table, so every table that breaks a rule -- a base half a unit off
+# the erase grid, a slot running past the writable interval, two slots claiming
+# the same flash -- exists here or nowhere.  Nor would the board refuse one: the
+# seam bounds the WRITER and not the table, so an overlapping slot would erase a
+# neighbour's payload with nothing out of the ordinary happening.  The ten
+# entries are also pinned base by base, because #49 Step 4 appends to this table
+# and an append that reordered it would move every stored blob to a different
+# slot number.
+gcc $CFLAGS \
+    -I "$board/src" \
+    "$here/test_blob_map.c" "$board/src/blob_map.c" \
+    $LDFLAGS -o "$out/test_blob_map"
+"$out/test_blob_map"
+
+# issue #92 (#49 Step 2) -- the blob header codec and the transfer's decisions
+# (src/blob_state.c).  A body whose CRC is wrong, a header that names a slot it
+# is not in, a sender that closes the batch short of what block 0 declared, a
+# program that failed in the middle of a 1.7 MB payload: staging any of those on
+# the board costs flash cycles of a part whose endurance is not documented
+# (issue #89), and most cannot be staged at all without a PC that misbehaves on
+# demand.  What they decide is destructive -- a header that decodes when it
+# should not is a `blob write` aimed at the wrong slot.  Built against the real
+# nor_span.h (the header's page granularity is the vendor's program page) and
+# linked with svc/crc32.c, which is what the body checksum is.
+gcc $CFLAGS \
+    -I "$board/src" -I "$board/port/nor" -I "$svc" \
+    "$here/test_blob_state.c" "$board/src/blob_state.c" "$svc/crc32.c" \
+    $LDFLAGS -o "$out/test_blob_state"
+"$out/test_blob_state"

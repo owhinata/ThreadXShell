@@ -201,29 +201,18 @@ int blob_read_reserved(uint32_t addr, void *buf, uint32_t len)
 	return BLOB_OK;
 }
 
-int blob_verify(unsigned slot, struct blob_info *out, uint32_t *computed)
+/* The CRC walk, with the window held by somebody and the BLOB lease -- which is
+ * what makes blob_stage_buf single-user -- already taken.  Both entry points
+ * below are the same acquire around this, and having one copy is what keeps the
+ * invalidate-per-chunk from being forgotten in one of them. */
+static int verify_locked(const struct blob_slot *s, struct blob_info *out,
+                         uint32_t *computed)
 {
 	struct blob_info info;
-	const struct blob_slot *s;
-	uint32_t token = 0u, off = 0u, crc = 0u, addr;
-	int err = 0;
-
-	s = checked_slot(slot, &err);
-	if (s == NULL)
-		return err;
-
-	/* [!] ONE LEASE FOR BOTH HALVES.  Reading the header under one lease and
-	 * the payload under another leaves a window in between for a background
-	 * `nor erase` or a `blob write` to change the slot -- and the result of
-	 * that race is a PASS against a header that is no longer there.  The
-	 * caller gets back the header this actually checked against, so what it
-	 * prints and what was compared cannot drift either. */
-	if (nor_acquire(NOR_LEASE_BLOB, &token) != 0)
-		return acquire_failure();
+	uint32_t off = 0u, crc = 0u, addr;
 
 	stat_locked(s, &info, NULL);
 	if (info.state != BLOB_VALID && info.state != BLOB_INCOMPLETE) {
-		(void)nor_release(token);
 		if (out != NULL)
 			*out = info;
 		return BLOB_ERR_EMPTY;
@@ -241,10 +230,80 @@ int blob_verify(unsigned slot, struct blob_info *out, uint32_t *computed)
 		off += take;
 	}
 
-	(void)nor_release(token);
 	if (computed != NULL)
 		*computed = crc;
 	if (out != NULL)
 		*out = info;
 	return (crc == info.crc32) ? BLOB_OK : BLOB_ERR_CRC;
+}
+
+int blob_verify(unsigned slot, struct blob_info *out, uint32_t *computed)
+{
+	const struct blob_slot *s;
+	uint32_t token = 0u;
+	int err = 0, rc;
+
+	s = checked_slot(slot, &err);
+	if (s == NULL)
+		return err;
+
+	/* [!] ONE LEASE FOR BOTH HALVES.  Reading the header under one lease and
+	 * the payload under another leaves a window in between for a background
+	 * `nor erase` or a `blob write` to change the slot -- and the result of
+	 * that race is a PASS against a header that is no longer there.  The
+	 * caller gets back the header this actually checked against, so what it
+	 * prints and what was compared cannot drift either. */
+	if (nor_acquire(NOR_LEASE_BLOB, &token) != 0)
+		return acquire_failure();
+	rc = verify_locked(s, out, computed);
+	(void)nor_release(token);
+	return rc;
+}
+
+int blob_stat_leased(unsigned slot, uint32_t token, struct blob_info *out,
+                     enum blob_hdr_reject *why)
+{
+	const struct blob_slot *s;
+	int err = 0;
+
+	if (out == NULL)
+		return BLOB_ERR_PARAM;
+	s = checked_slot(slot, &err);
+	if (s == NULL)
+		return err;
+	/* Checked for the same reason blob_stat_reserved() checks its
+	 * reservation: a read of the alias that nothing is holding up is
+	 * issue #90.  A token that is not live is the caller's mistake, not
+	 * contention, but BUSY is the only refusal the read side has for "the
+	 * window is not yours" and inventing a second one here would give the
+	 * three entry points different vocabularies for the same failure. */
+	if (!nor_lease_held(token))
+		return BLOB_ERR_BUSY;
+	stat_locked(s, out, why);
+	return BLOB_OK;
+}
+
+int blob_verify_leased(unsigned slot, uint32_t token, struct blob_info *out,
+                       uint32_t *computed)
+{
+	const struct blob_slot *s;
+	uint32_t stage_token = 0u;
+	int err = 0, rc;
+
+	s = checked_slot(slot, &err);
+	if (s == NULL)
+		return err;
+	if (!nor_lease_held(token))
+		return BLOB_ERR_BUSY;
+
+	/* [!] NOT FOR THE WINDOW -- the caller's token is holding that up.  This
+	 * is the claim on blob_stage_buf: the buffer has one user at a time, and
+	 * on the read side the thing that arranges it is this lease being
+	 * single-instance.  Without it a `blob verify` and an `nn open` would walk
+	 * different slots through the same 64 KB. */
+	if (nor_acquire(NOR_LEASE_BLOB, &stage_token) != 0)
+		return acquire_failure();
+	rc = verify_locked(s, out, computed);
+	(void)nor_release(stage_token);
+	return rc;
 }

@@ -1955,7 +1955,9 @@ boxes on the LIVE preview (`nn preview`) since issue #48.  The console stays
 usable while any of them runs.
 
 ```
-nn open [cls|det|<addr>]  # QSPI XIP on, NPU out of reset, model parsed in place
+nn open <name>            # QSPI XIP on, NPU out of reset, the blob of that name
+                          #   parsed in place
+nn open --addr <a> <len>  # ... or a raw address and length
 nn info                   # tensors, arena use, which interrupts got wrapped
 nn run                    # one frame -> classification, top 5
 nn detect                 # one frame -> face boxes
@@ -1964,8 +1966,147 @@ nn run &                  # either, in the background; the prompt comes straight
 nn close
 ```
 
-`cls` and `det` are the two model partitions below; the raw address form stays
-for checking a model somebody put somewhere else.
+### The model is a blob, opened by name (#93, #49 Step 4a)
+
+`nn open cls` asks the asset store for the blob called `cls` and parses what it
+finds.  It used to mean an address `board.cmake` compiled in, which made
+changing a model a host-build errand -- and for the detector, which cannot be
+committed, an errand that started by reproducing a pipeline.  Now:
+
+```
+blob write cls 3                 # on the board; then send the file from the PC
+nn open cls
+nn run
+```
+
+**The order inside `nn open <name>` is the design**, and every step of it is
+load-bearing:
+
+1. the `nn` ownership gate, as every subcommand has.
+2. **`npu_hw_init()` FIRST**, which takes `NOR_LEASE_NPU`.  From here to
+   `nn close` the window is up and no writer can take the part -- a reservation
+   needs the lease mask empty.  Resolving a name first and bringing the hardware
+   up afterwards would leave a gap between the answer and the parse, and the
+   answer is an address.
+3. **every slot scanned, under that lease.**  Candidates are `VALID` only, and
+   nothing is folded into "not found": no match, a duplicated name, a slot that
+   would not read, a faulted port and a table that does not fit the seam are
+   five different sentences.  A scan with a hole in it refuses rather than
+   resolving from what it got -- it cannot say a name is unique otherwise.
+4. **`blob_verify()` on the chosen slot**, still under the same lease.  This is
+   the step the first draft of the plan left out and the review caught:
+   **`BLOB_VALID` is a statement about the HEADER**, and a consumer that PARSES
+   a payload in place has to check the payload.
+5. `npu_open()`, with the length from the header the CRC ran against.
+6. any failure on the way down: `npu_hw_deinit()`, so the flash lease is never
+   held by a half-open NPU.
+
+`blob_stat()` and `blob_verify()` take a lease and give it back; the leased
+forms (`blob_stat_leased`, `blob_verify_leased`) take the CALLER'S token and
+check it is live, so the sequence is safe by construction rather than by
+accident of what else happened to be holding the part.
+
+The raw form is `nn open --addr <addr> <len>` -- a flag, so that a name can
+never be read as a hex number or the other way round.  It is how you look at a
+model somebody put somewhere the store does not carve.
+
+### [!] `npu_open()` takes a length, and verifies the flatbuffer (#93)
+
+`tflite::GetModel()` is a cast.  Every accessor after it follows an offset out
+of the buffer, and until #93 there was no buffer -- only an address with "enough
+room for a header" behind it.  A malformed model could reference the
+neighbouring slot, the rest of the store, or the bootloader's own block at the
+top of the part.
+
+That was survivable while a model was something the host build had verified and
+written to a fixed address.  It is not survivable now: `nn open <name>` parses a
+payload an operator sent, and **the blob CRC is computed over the stream that
+ARRIVED**, so a file that was already broken on the PC verifies perfectly and
+lands intact.  So the order is
+
+```
+range -> length -> "TFL3" identifier -> flatbuffer verifier -> payload scan
+```
+
+and the length is what makes the verifier a bounds check at all.  The raw form
+takes one for the same reason: "the rest of the window" would satisfy the
+arithmetic and check nothing.  The length also has a FLOOR -- the identifier is
+read at offset 4, so a shorter declared length would have the identifier check
+reading outside the bounds it declared.
+
+**The verifier's limits are stated, not defaulted.**  flatbuffers defaults to
+depth 64 and a million tables; the generated table verifiers RECURSE, and this
+runs on a 4,096 B shell stack.  Measured with `-fstack-usage`: every frame in
+the recursive cycle is 24 B or less, so a level of nesting costs about 64 B --
+16 levels is ~1.0 KB and the default 64 would be ~4.1 KB, the whole stack.  The
+real classification model needs **depth 4 and 19 tables** (Vela folds the graph
+into one custom operator), and the shipped limits are 16 and 4096: room enough
+that a legitimate model Vela did not fully offload reaches the op resolver and
+is refused THERE, rather than being reported here as malformed.
+
+Cost of the verifier in the image: **ITCM 214,368 -> 226,368 B**, against a gate
+that requires 8,192 B of headroom out of 262,144.
+
+`NPU_ERR_MODEL_FORMAT` is its own status, separate from `_MAGIC` ("this is not a
+model") and `_SCHEMA` ("a model this build cannot read").
+
+#### [!] What the verifier does NOT say
+
+It says every offset in the flatbuffer lands inside the declared length.  Three
+things it is not:
+
+- **It does not read the command stream.**  The U55 payload is an opaque byte
+  vector; `check_nested_flatbuffers` is off and `npu_payload.c` checks the
+  driver-action ENVELOPE (one `COMMAND_STREAM`, last) and not the instructions
+  in it.  The driver hands the stream and the tensor base addresses to the
+  device after alignment checks; nothing here bounds what a crafted stream then
+  asks the NPU to touch.  That was true before #93 as well -- it is the limit of
+  the new check, not a regression -- and closing it would mean decoding U55
+  instructions, which nothing in this tree does.
+- **It does not say the model is a sane Vela output.**  One subgraph, every
+  operator on Ethos-U, an arena that fits: `verify_vela_model` on the host.  The
+  two are not alternatives to each other.
+- **The raw `--addr` form is bounded by the WINDOW, not by a slot.**  It skips
+  the store on purpose -- no lookup, no header, no CRC -- so a length starting in
+  one slot may reach into the next if those bytes happen to verify.  It cannot
+  reach past the end of the 16 MB alias.  Slot isolation is what opening by name
+  is for.
+
+### [!] The host gate did not go away, and it runs the board's check
+
+`scripts/verify_vela_model.cc` checks what the board cannot: one subgraph, every
+operator on Ethos-U, int8 I/O, an offline plan, no unreachable tensors, an arena
+that fits, and for the detector the shapes the decoder looks for.  The device's
+bounds check does not replace any of that -- and it runs AFTER the write, by
+which point a bad model has cost ~40 s of erase and transfer and a flash cycle
+of a part whose endurance is not documented (#89).
+
+It used to be impossible to write a model without it, because the verifier ran
+inside `--target flash-model-*`.  `blob write` takes whatever arrives on the
+wire, so the chain is put back on the PC side:
+
+```
+picocom -b 921600 /dev/ttyACM0 \
+    --send-cmd "build/grove-vision-ai-v2/send_verified_model.sh --profile det"
+```
+
+then `blob write det <slot>` on the board and `C-a C-s` in picocom.  The script
+**stages a copy, verifies THAT copy, and sends the same file** -- verifying one
+path and sending it again is a gap a build could step into.  It writes the
+verifier's output to **stderr**, because picocom connects the send command's
+stdout to the serial line.  The profile is an explicit argument and never a
+guess from a filename: the detector's shape checks are det-only, and the
+strength of a gate must not depend on what somebody called a file.
+
+[!] **It is fail-closed.**  With no host C++ compiler there is no verifier, and
+the script refuses and sends nothing rather than transferring unchecked.
+
+[!] **The negative test on hardware has to bypass it.**  A CRC-valid but
+FlatBuffer-malformed model is the only way to reach the device's new bound, and
+the wrapper rejects it on the host first -- so that one case is sent with a bare
+`sb -k`.
+
+### The model partitions are still there, until Step 4b
 
 The models are SEPARATE flash partitions from the firmware:
 
@@ -1976,6 +2117,14 @@ cmake --build build/grove-vision-ai-v2 --target flash-model-det   # BlazeFace
 
 which means iterating on firmware never disturbs them, and swapping models never
 rewrites the bootloader -- worth having on a part with ~100k NOR cycles.
+
+[!] **`nn open` no longer reads them**, and that is why Step 4 is split in two.
+Step 4b (#94) deletes the reservations and the writable interval grows to
+`0xFFE000` -- which puts the OLD model region within reach of raw `nor erase`
+and `nor write`, not just the slot API.  Doing that while `nn` still read a
+fixed address would open a window in which a running model can be erased.  So 4a
+moves the reader and 4b moves the map, in that order, and 4b does not start
+until a blob-named `nn open cls` plus `nn run` has been seen on hardware.
 
 ### The flash partition map, and the checks over it
 
@@ -1998,11 +2147,14 @@ owned the block from `0xB70000`.  The rounding stays: the property is about
 blocks, and the next address that is not block-aligned must not read as a hole.
 
 [!] **The two blob runs are temporary, and the models are what separates them.**
-Issue #49 Step 4 moves the models INTO blob; their reservations are deleted then
-and blob becomes one run of `0x200000..0xFFE000` (14,671,872 B).  They cannot be
-deleted before then: `nn open cls|det` is compiled with their addresses,
-`--target flash-model-*` names their partitions, and dropping the reservation
-would stop the gate protecting flash that is still in use.
+Issue #49 Step 4b (#94) deletes the model reservations and blob becomes one run
+of `0x200000..0xFFE000` (14,671,872 B).  Since Step 4a (#93) `nn open` no longer
+reads them -- it opens a blob by name -- but they cannot be deleted yet:
+`--target flash-model-*` still names their partitions, the copies programmed on
+the board are still what a running `nn` was checked against, and dropping the
+reservation would stop the gate protecting flash that is still in use.  The
+ordering is the point: extending the writable interval to `0xFFE000` puts the
+old model region within reach of raw `nor erase` and `nor write`.
 
 ### [!] The last block is the bootloader's slot header
 
@@ -2060,8 +2212,14 @@ that fallback silently boots the **previous build**.  One erase block is
 reserved, so that both copies are inside it.
 
 Addresses live in ONE place: `GROVE_MODEL_CLS_ADDR` / `GROVE_MODEL_DET_ADDR` in
-`board.cmake`.  They are compiled into `cmd_nn.c` as well, so `nn open det` and
-`--target flash-model-det` cannot drift apart.
+`board.cmake`, which is what `--target flash-model-*` and
+`check_flash_partitions.py` both read.
+
+[!] Since #93 they are **no longer compiled into `cmd_nn.c`**.  `nn open <name>`
+takes the address from the blob header it verified, so there is nothing here for
+the firmware to be told -- and a compiled-in constant that nothing reads is one
+nobody notices going stale.  The old fixed addresses are still reachable, by
+typing them: `nn open --addr 0x3AB7B000 1704672`.
 
 ### The firmware reservation is the bootloader's own arithmetic
 
@@ -3013,8 +3171,8 @@ fail-open; separating the two is what makes the tightening safe.
 `0xD20000` is the first 64 KB boundary above the classification model's extent
 (`0xB7B000 + 1,704,672 = 0xD1B2E0`).  It was chosen when 64 KB was believed to be
 the erase block, so the alignment is now more than it needs to be rather than
-wrong; the address stays because `nn open det` is compiled with it and it is
-already programmed on the board.
+wrong; the address stays because a copy is already programmed on the board and
+`--target flash-model-det` writes there.
 Host tests: `test/test_flash_partitions.py`, `test/test_flash_geometry.py`.
 
 **Both model targets verify before they transmit.**  `flash-model-cls` and
@@ -3098,7 +3256,9 @@ wrong.
 reads a payload byte: it recovers the length and the CRC recorded when the blob
 arrived.  Whether the payload still matches them is what `blob verify` will
 answer, and a consumer that parses a payload in place -- `nn open` reads a
-model straight out of the window -- has to check it first.
+model straight out of the window -- has to check it first.  Since #93 it does,
+under the lease it goes on reading with: `blob_verify_leased()` between the name
+lookup and `npu_open()`.
 
 #### What a write costs, and where the chunk size comes from
 
@@ -3399,8 +3559,8 @@ handed back, and TFLM writes it while the NPU may still be running.
 The SDK is read-only, so this is closed at the other end: `npu_open()` refuses a
 model whose payload is not **exactly one `COMMAND_STREAM`, as the last action**.
 With nothing left to parse after the launch there is nothing left to fail on.
-Vela emits exactly this shape, but `nn open <addr>` takes an arbitrary address,
-so it is checked rather than assumed.  `npu_cache_after_invoke()` is the
+Vela emits exactly this shape, but `nn open` takes whatever an operator put in a
+blob slot or typed an address for, so it is checked rather than assumed.  `npu_cache_after_invoke()` is the
 backstop: if an inference ever does return with the arena still owed, it halts.
 
 Two things about that check are easy to get wrong, and both were:

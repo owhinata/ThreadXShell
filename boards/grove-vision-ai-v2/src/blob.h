@@ -12,12 +12,19 @@
  * and hands back an answer.  The write side (#49 Step 2, implementation order
  * items 6 and 7) lands on top of it.
  *
- * [!] EVERY READ TAKES A LEASE, and taking one is also what brings the window
+ * [!] EVERY READ IS UNDER A LEASE, and taking one is also what brings the window
  * up.  Reading the memory-mapped alias without one is issue #90: a window that
  * was never brought up does not fault and does not read 0xFF, it aliases one
  * register across all 16 MB, and a dump of it printed plausible nonsense as
  * flash contents.  So there is no "read it quickly without the ceremony" entry
  * point here, and there is not going to be one.
+ *
+ * There are three ways to be holding the window, and each has its own entry
+ * point rather than a flag: this file takes a lease itself, the _reserved forms
+ * are for the writer (which cannot take one -- a reservation refuses leases),
+ * and the _leased forms are for a caller holding a lease of its OWN, which they
+ * check.  What none of them will do is read on the strength of somebody else
+ * happening to have one.
  *
  * [!] AND EVERY READ INVALIDATES FIRST.  The vendor's XIP restore invalidates
  * 512 bytes at the base of the window and nothing else (nor_flash.h), so after
@@ -32,6 +39,12 @@
  * remaining rows report busy rather than silently reporting the old contents.
  * Holding one lease across the walk would keep the window from `nn` for as
  * long as the printing took, and would still be a snapshot of ten reads.
+ *
+ * [!] `nn open <name>` IS THE EXCEPTION, AND IT HAS TO BE (issue #93).  It is
+ * not printing a listing, it is choosing an address to parse a model at: the
+ * scan, the name lookup, the CRC and the parse all have to describe ONE state
+ * of the flash, so they run under the single lease npu_hw_init() took and it is
+ * never handed back in between.  That is what the _leased forms below are for.
  */
 #ifndef BLOB_H
 #define BLOB_H
@@ -135,6 +148,50 @@ int blob_read(unsigned slot, uint32_t off, void *buf, uint32_t len);
  * as it got" is a question worth being able to ask.
  */
 int blob_verify(unsigned slot, struct blob_info *out, uint32_t *computed);
+
+/* ---- for a reader that already holds a lease -------------------------------- */
+
+/**
+ * @brief  blob_stat() for a caller that is holding its OWN lease.
+ *
+ * @param token  the caller's live lease token; refused when it is not live
+ *
+ * `nn open <name>` (issue #93) resolves a name and then parses the model it
+ * finds, in place, out of the XIP window.  Between those two things nothing may
+ * write the part -- and nothing can, because the NPU lease npu_hw_init() took
+ * is still out and a writer's reservation requires the lease mask to be empty.
+ * That is the whole reason this entry point exists: the lease-taking form would
+ * hand its lease back at the end of every slot it looked at, and the sequence
+ * would be safe only by accident of what else the caller happened to be
+ * holding.
+ *
+ * [!] IT CHECKS THE TOKEN RATHER THAN TRUSTING THE CALLER.  "Some lease is
+ * out" is a fact about somebody else's lifetime; only the caller's own token
+ * says the window will still be up on the next line.  With neither a live
+ * token nor a reservation this would be the issue #90 read -- a window nobody
+ * brought up aliases one register across all 16 MB and prints plausible
+ * nonsense.
+ */
+int blob_stat_leased(unsigned slot, uint32_t token, struct blob_info *out,
+                     enum blob_hdr_reject *why);
+
+/**
+ * @brief  blob_verify() for a caller that is holding its OWN lease.
+ *
+ * Same answers as blob_verify(), and the caller's lease is neither taken nor
+ * dropped by it -- which is what lets `nn open` verify a payload and then go on
+ * reading the very bytes it checked.
+ *
+ * [!] IT STILL TAKES NOR_LEASE_BLOB FOR THE DURATION, and not for the window:
+ * the caller's token is already holding that up.  It is for blob_stage_buf.
+ * The staging buffer has exactly one user at a time (blob_stage.h), and on the
+ * read side the thing that arranges it is the BLOB lease being single-instance.
+ * A second CRC walk running under a different lease would share the buffer with
+ * a `blob verify`, so this takes the same lease that one does and is refused
+ * with BLOB_ERR_BUSY while it is out.
+ */
+int blob_verify_leased(unsigned slot, uint32_t token, struct blob_info *out,
+                       uint32_t *computed);
 
 /* ---- for the writer -------------------------------------------------------- */
 

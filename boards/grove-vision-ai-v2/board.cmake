@@ -746,13 +746,14 @@ target_compile_definitions(shell_objs PRIVATE
     # no warning).  The compile-time SDK config is a 24 MHz placeholder and
     # must never be used for this; udelay() reads SystemCoreClock directly.
     CLI_CPU_CYCLES_PER_US=400
-    # Where the two models live, from the SAME cache variables the flash
-    # targets use (issue #45).  Compiled in rather than restated in cmd_nn.c so
-    # that `nn open cls` and `--target flash-model-cls` name one address and
-    # not two that a comment asks to agree.  Offsets, not addresses: cmd_nn.c
-    # adds the flash read alias base, which is a property of the chip.
-    NN_MODEL_CLS_OFFSET=${GROVE_MODEL_CLS_ADDR}
-    NN_MODEL_DET_OFFSET=${GROVE_MODEL_DET_ADDR}
+    # NN_MODEL_{CLS,DET}_OFFSET are GONE (issue #93).  `nn open <name>` reads
+    # the model out of the asset store now, so cmd_nn.c has no fixed address to
+    # be told about -- the address comes from the blob header, under the lease
+    # it was verified with.  GROVE_MODEL_*_ADDR still exist and still drive the
+    # flash-model-* targets and the partition checker until Step 4b (#94) folds
+    # those reservations into blob; what would be wrong is leaving a compiled-in
+    # constant here that nothing reads, since an unreferenced constant is one
+    # nobody notices going stale.
     # `nor scan` labels its extents with these, and they are the SAME variables
     # check_flash_partitions.py consumes -- so the labels on the device and the
     # layout the host checks cannot drift apart (issues #45, #85, #86).
@@ -1233,16 +1234,56 @@ if(HOST_CXX)
                 "${BOARD_DIR}/port/npu/npu_payload.h"
                 "${BOARD_DIR}/port/npu/npu_arena.c"
                 "${BOARD_DIR}/port/npu/npu.h"
+                # The bounded flatbuffer check the firmware runs (issue #93).
+                # Listed so that changing a limit rebuilds the host gate: the
+                # whole point of sharing it is that the two cannot disagree.
+                "${BOARD_DIR}/port/npu/npu_verify.h"
         COMMENT "host c++ -> verify_vela_model (checks a model before it is flashed)"
         VERBATIM)
 
     add_custom_target(model-tools
         DEPENDS "${CMAKE_BINARY_DIR}/tflite_strip_boundary"
                 "${CMAKE_BINARY_DIR}/verify_vela_model")
+    set(GROVE_SEND_VERIFIER "${CMAKE_BINARY_DIR}/verify_vela_model")
 else()
     message(STATUS "grove: no host C++ compiler -- the `model-tools` target is "
                    "unavailable (the firmware itself still builds)")
+    # Left EMPTY on purpose, and the script refuses on an empty one.  See below.
+    set(GROVE_SEND_VERIFIER "")
 endif()
+
+# --- The verified send path (issue #93) ---------------------------------------
+#
+# `blob write` receives whatever arrives on the wire.  The models used to be
+# flashed by `--target flash-model-cls|det`, and the host gate ran INSIDE that
+# target, so there was no way to write one without it; over the console there is
+# no such chain.  This puts the chain back, on the PC side, as the thing picocom
+# is pointed at:
+#
+#     picocom -b 921600 /dev/ttyACM0 \
+#         --send-cmd "${CMAKE_BINARY_DIR}/send_verified_model.sh --profile det"
+#
+# [!] AND IT IS GENERATED EVEN WITH NO HOST C++, with an empty verifier path,
+# because the script refuses on that with a sentence saying why.  Generating
+# nothing would make the failure "no such file" from inside picocom's send hook,
+# which is a worse thing to read than a refusal -- and the refusal is the fail
+# closed the gate is for.  The board-side bounds checks in npu_open() do not
+# replace this one: they say a flatbuffer holds together, not that it is a model
+# this firmware can run, and they run after the erase and the transfer.
+find_program(GROVE_SB_TOOL NAMES sb DOC "lrzsz YMODEM sender, for the model send path")
+if(GROVE_SB_TOOL)
+    set(GROVE_SEND_SB "${GROVE_SB_TOOL}")
+else()
+    # Left as the bare name: `sb` may be installed after this build was
+    # configured, and PATH at send time is the honest place to look it up.
+    set(GROVE_SEND_SB "sb")
+endif()
+configure_file("${BOARD_DIR}/scripts/send_verified_model.sh.in"
+               "${CMAKE_BINARY_DIR}/send_verified_model.sh"
+               @ONLY
+               FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                                GROUP_READ GROUP_EXECUTE
+                                WORLD_READ WORLD_EXECUTE)
 
 # --- Model flash target (issue #44) ------------------------------------------
 # SEPARATE from `flash`, and deliberately so.  The model is its own flash

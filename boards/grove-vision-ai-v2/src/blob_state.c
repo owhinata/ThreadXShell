@@ -362,6 +362,52 @@ enum blob_choice blob_choose_target(const struct blob_slot_view *v,
 	return BLOB_CHOICE_OCCUPIED;
 }
 
+/* ---- finding one to read ------------------------------------------------- */
+
+const char *blob_lookup_name(enum blob_lookup l)
+{
+	switch (l) {
+	case BLOB_LOOKUP_FOUND:     return "found";
+	case BLOB_LOOKUP_NONE:      return "no slot holds that name";
+	case BLOB_LOOKUP_DUPLICATE: return "more than one slot holds that name";
+	case BLOB_LOOKUP_REFUSE:    return "the slot scan does not hold together";
+	default:                    break;
+	}
+	return "?";
+}
+
+enum blob_lookup blob_resolve_name(const struct blob_slot_view *v,
+                                   unsigned count, unsigned *found)
+{
+	unsigned i, matches = 0u, match_at = 0u;
+
+	if (v == NULL || found == NULL)
+		return BLOB_LOOKUP_REFUSE;
+	if (count == 0u)
+		return BLOB_LOOKUP_REFUSE;
+
+	for (i = 0u; i < count; i++) {
+		if (!v[i].name_match)
+			continue;
+		/* Same contradiction blob_choose_target() refuses on, and refused
+		 * here for the reader's version of the reason: a name_match on a
+		 * slot the caller also calls EMPTY is a scan that disagrees with
+		 * itself, and resolving from one would point the interpreter at
+		 * flash nobody looked at. */
+		if (v[i].state != BLOB_VALID)
+			return BLOB_LOOKUP_REFUSE;
+		matches++;
+		match_at = i;
+	}
+	if (matches > 1u)
+		return BLOB_LOOKUP_DUPLICATE;
+	if (matches == 0u)
+		return BLOB_LOOKUP_NONE;
+
+	*found = match_at;
+	return BLOB_LOOKUP_FOUND;
+}
+
 /* ---- the transfer's own state -------------------------------------------- */
 
 const char *blob_wr_verdict_name(enum blob_wr_verdict v)

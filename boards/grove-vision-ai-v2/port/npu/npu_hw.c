@@ -245,6 +245,14 @@ const char *npu_hw_fail_reason(void)
 	return fail_reason;
 }
 
+uint32_t npu_hw_flash_lease(void)
+{
+	/* nor_lease is written alongside hw_ready and cleared before it is
+	 * released, so there is no window in which this returns a token the port
+	 * has already handed back. */
+	return nor_lease;
+}
+
 int npu_hw_ready(void)
 {
 	return hw_ready ? 1 : 0;

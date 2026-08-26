@@ -761,6 +761,77 @@ static void t_transfer_phases(void)
 	blob_write_reset(NULL);
 }
 
+/*
+ * The reader's half: which slot a name resolves to (issue #93).
+ *
+ * Separate from t_choose() because the two answer different questions over the
+ * same views -- a writer asks where a name MAY go and gets answers about EMPTY
+ * and INCOMPLETE slots, a reader asks where it IS and only VALID can answer.
+ * The one that matters most here is DUPLICATE: `nn open <name>` turns the
+ * answer into an address the interpreter parses in place, so picking the first
+ * of two would load whichever copy the table happens to reach first.
+ */
+static void t_resolve(void)
+{
+	struct blob_slot_view v[VIEWS];
+	unsigned found;
+
+	views_init(v);
+	found = 0xEEu;
+	CHECK(blob_resolve_name(v, VIEWS, &found) == BLOB_LOOKUP_NONE &&
+	      found == 0xEEu, "an empty table resolved a name");
+
+	v[3].state = BLOB_VALID;
+	v[3].name_match = 1u;
+	found = 0xEEu;
+	CHECK(blob_resolve_name(v, VIEWS, &found) == BLOB_LOOKUP_FOUND &&
+	      found == 3u, "the one slot holding the name was not found");
+
+	/* Two slots under one name cannot be produced by `blob write` -- it
+	 * refuses -- but a raw `nor write` can put anything anywhere, and flash
+	 * outlives firmware. */
+	v[1].state = BLOB_VALID;
+	v[1].name_match = 1u;
+	found = 0xEEu;
+	CHECK(blob_resolve_name(v, VIEWS, &found) == BLOB_LOOKUP_DUPLICATE &&
+	      found == 0xEEu, "a duplicated name resolved to one of them");
+
+	/* Only VALID answers.  An INCOMPLETE slot has a decodable header and a
+	 * payload that stopped part way; a match on one is a scan contradicting
+	 * itself, and resolving from it would point the interpreter at a
+	 * truncated model that still has a plausible header. */
+	views_init(v);
+	v[2].state = BLOB_INCOMPLETE;
+	v[2].name_match = 1u;
+	found = 0xEEu;
+	CHECK(blob_resolve_name(v, VIEWS, &found) == BLOB_LOOKUP_REFUSE &&
+	      found == 0xEEu, "a name matched on a slot that is not VALID");
+	v[2].state = BLOB_EMPTY;
+	CHECK(blob_resolve_name(v, VIEWS, &found) == BLOB_LOOKUP_REFUSE,
+	      "a name matched on an empty slot");
+
+	/* A VALID slot that does not carry the name is not an answer either --
+	 * name_match is the only thing that selects. */
+	views_init(v);
+	v[0].state = BLOB_VALID;
+	v[4].state = BLOB_VALID;
+	CHECK(blob_resolve_name(v, VIEWS, &found) == BLOB_LOOKUP_NONE,
+	      "a VALID slot answered for a name it does not hold");
+
+	CHECK(blob_resolve_name(NULL, VIEWS, &found) == BLOB_LOOKUP_REFUSE &&
+	      blob_resolve_name(v, 0u, &found) == BLOB_LOOKUP_REFUSE &&
+	      blob_resolve_name(v, VIEWS, NULL) == BLOB_LOOKUP_REFUSE,
+	      "a lookup with nothing to look at answered");
+
+	/* Every verdict prints as something. */
+	CHECK(blob_lookup_name(BLOB_LOOKUP_FOUND) != NULL &&
+	      blob_lookup_name(BLOB_LOOKUP_NONE) != NULL &&
+	      blob_lookup_name(BLOB_LOOKUP_DUPLICATE) != NULL &&
+	      blob_lookup_name(BLOB_LOOKUP_REFUSE) != NULL &&
+	      blob_lookup_name((enum blob_lookup)99) != NULL,
+	      "a lookup verdict has no name");
+}
+
 int main(void)
 {
 	t_names();
@@ -771,6 +842,7 @@ int main(void)
 	t_body_rejections();
 	t_codec_edges();
 	t_choose();
+	t_resolve();
 	t_transfer_happy();
 	t_transfer_refusals();
 	t_transfer_phases();

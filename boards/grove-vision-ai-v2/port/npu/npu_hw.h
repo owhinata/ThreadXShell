@@ -63,6 +63,23 @@ const char *npu_hw_fail_reason(void);
 /** True once npu_hw_init() has succeeded and npu_hw_deinit() has not run. */
 int npu_hw_ready(void);
 
+/**
+ * @brief  The flash reader lease this port is holding, or 0.
+ *
+ * [!] FOR PASSING BACK TO THE BLOB READS THAT RUN UNDER IT (issue #93).
+ * `nn open <name>` resolves a name, checks the payload's CRC and then parses
+ * the model in place, and all three have to happen without the window being
+ * handed back in between -- otherwise a writer can move in between the check
+ * and the parse.  The lease that keeps the window up across all of it is this
+ * one, and blob_stat_leased() / blob_verify_leased() want the token so they can
+ * CHECK it rather than assume somebody is holding something.
+ *
+ * Zero unless npu_hw_init() committed, which is the same condition
+ * npu_hw_ready() reports; a zero token is refused by every reader that takes
+ * one, so there is no state in which this hands out something that would pass.
+ */
+uint32_t npu_hw_flash_lease(void);
+
 
 /**
  * The interrupt lines this bring-up wrapped for the execution profile kit.

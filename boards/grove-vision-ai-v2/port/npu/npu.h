@@ -42,6 +42,19 @@ enum npu_status {
 	NPU_ERR_PAYLOAD      = -9,  /**< driver actions continue past the command
 	                                 stream, so a launch could be abandoned with
 	                                 the arena still owned by the NPU (#46) */
+	/**
+	 * The flatbuffer does not hold together within its declared length: an
+	 * offset leads outside the buffer, a vector runs past its end, the
+	 * nesting is deeper or wider than the limits allow (#93).
+	 *
+	 * [!] SEPARATE FROM _MAGIC AND _SCHEMA ON PURPOSE.  Those two say "this is
+	 * not a model" and "it is a model this build cannot read"; this one says
+	 * "these bytes claim to be a model and are internally broken", which is
+	 * the answer an operator gets after a transfer that arrived intact -- the
+	 * blob CRC is of the stream that was sent, so a file that was corrupt
+	 * before it left the PC verifies perfectly and fails HERE.
+	 */
+	NPU_ERR_MODEL_FORMAT = -10,
 };
 
 /** What a tensor looks like, flattened enough to describe over a C boundary. */
@@ -61,14 +74,35 @@ struct npu_tensor {
  * @param model_addr  address of the flatbuffer, IN THE MEMORY-MAPPED FLASH
  *                    READ WINDOW.  It is parsed where it lies and never copied,
  *                    so it must stay readable for as long as the model is open.
+ * @param model_len   how many bytes of model there are at @p model_addr
  * @param arena       cache-line-aligned scratch, NPU-visible (i.e. not TCM)
  * @param arena_bytes size of @p arena
  *
- * Validates the address range and the flatbuffer identifier BEFORE walking any
- * of it: an erased flash region reads as 0xFF and would otherwise be followed
- * as offsets.  On any failure nothing is left constructed.
+ * Validates the address range, the length, the flatbuffer identifier and then
+ * the whole flatbuffer BEFORE walking any of it as a model: an erased flash
+ * region reads as 0xFF and would otherwise be followed as offsets.  On any
+ * failure nothing is left constructed.
+ *
+ * [!] @p model_len IS THE BOUNDS CHECK AND IT IS NOT OPTIONAL (#93).
+ * tflite::GetModel() is a cast; every accessor after it follows an offset out
+ * of the buffer, and until #93 there was no buffer -- only an address with
+ * "enough room for a header" behind it, so a malformed model could reference
+ * the neighbouring slot, the rest of the store, or the bootloader's own block
+ * at the top of the part.  The length is what turns that into a bounded
+ * question, and the caller has to have it from somewhere that KNOWS: a blob
+ * header, or an operator who typed it.  Passing "the rest of the window" would
+ * satisfy the arithmetic and check nothing.
  */
-int npu_open(uint32_t model_addr, void *arena, size_t arena_bytes);
+int npu_open(uint32_t model_addr, uint32_t model_len, void *arena,
+             size_t arena_bytes);
+
+/** The shortest and longest @p model_len npu_open() will consider, so that a
+ *  caller can refuse with its own vocabulary before getting here -- and so the
+ *  host gate and the shell agree on the floor.  The floor exists because the
+ *  file identifier is read at offset 4: a shorter length would have the
+ *  identifier check reading outside the bounds the caller declared. */
+uint32_t npu_model_len_min(void);
+uint32_t npu_model_len_max(uint32_t model_addr);
 
 /** Tear down the interpreter.  Safe to call when not open. */
 void npu_close(void);

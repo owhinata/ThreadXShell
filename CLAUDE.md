@@ -467,6 +467,36 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   **`is_variable()` は拒否**（`AllocateVariables()` がシリアライズ済みバッファでも
   アリーナ確保で上書きする）。
   NPU bring-up は SEC_ONLY 経路に無いので自前（読み戻し + fail-closed）。詳細は board README。
+- **モデルは blob の名前で開く（`nn open <name>` / #93 = #49 Step 4a）**:
+  **[!] `npu_open()` は長さを取り、`GetModel()` の前に境界付き FlatBuffer verifier を通す。**
+  `GetModel()` は cast で以後の accessor は offset を辿るだけ。**blob の CRC は「届いた
+  バイト列」に対するもの**なので、PC 側で既に壊れていたモデルは CRC を通って無傷で着く。
+  順序は **範囲 → 長さ → identifier → verifier → ペイロード走査**。長さには**下限も要る**
+  （identifier を `raw+4` から読む）。**生アドレス形にも長さ必須**
+  （`nn open --addr <addr> <len>`。「窓の残り全部」は境界検査にならない）。
+  **[!] verifier の limits は明示で、既定を使わない** — 既定は depth 64 / table 100 万、
+  生成 verifier は再帰し**シェルスタックは 4,096 B**（実測: 再帰フレームは 24 B 以下＝
+  1 段 ~64 B なので既定の 64 段は ~4.1 KB ＝スタック全部）。実モデルは **depth 4 / table 19**、
+  出荷値は 16 / 4096（「Vela が全面 offload していないモデル」は op resolver で
+  refuse されるべきで、ここで malformed と報告してはいけない）。
+  **limits と呼び出しは `port/npu/npu_verify.h` の 1 箇所**でホストゲートが同じものを
+  リンクする（既定 limits でホストが通し実機が落ちる、を作らない）。ITCM +12,000 B。
+  **[!] `nn open <name>` はリースを切らさない**: nn ゲート → **`npu_hw_init()` を先に**
+  （`NOR_LEASE_NPU` 確保）→ 内側で**全スロット走査**（候補は **VALID のみ**・**重複拒否**・
+  0 件 / BUSY / FAULT / MAP を**別々に分類**し「見つからない」に畳まない・**読めない
+  スロットが 1 つでもあれば拒否**）→ **`blob_verify_leased()` で CRC** → `npu_open()` →
+  **途中失敗は必ず `npu_hw_deinit()`**。`blob_stat_leased` / `blob_verify_leased` は
+  **呼び出し元のトークンを取り live か検査する**（「誰かがリースを持っている」は他人の
+  寿命の話）。`blob_verify_leased` が **`NOR_LEASE_BLOB` も取るのは窓ではなく
+  `blob_stage_buf` の排他**のため。
+  **[!] ホスト側の検証ゲート（`verify_vela_model`）を外さない** — デバイスの境界検査は
+  置き換えにならず（単一サブグラフ / 全 op が Ethos-U / int8 I/O / offline plan /
+  アリーナ / BlazeFace の shape を見ない）、しかも**書込みの後**に走るので malformed でも
+  既に ~40 秒の消去と転送を消費している。公式経路は
+  **`build/<board>/send_verified_model.sh`**（picocom の `--send-cmd`）で
+  **staging コピー → 検証 → 同一ファイル送信**、**`--profile cls|det` は明示引数**
+  （ファイル名から推測しない）、**出力は stderr**（YMODEM 線に流さない）、
+  **ホスト C++ 不在は fail-closed**。
 - **ライブ推論オーバーレイ（`nn preview` / #48）**: 推論は**カメラ producer スレッド上・
   sink の `consume()` 内**で走る（モデルが読むのは完了済みの landing buffer で、
   次の frame-ready まで面は flip しない — #59 で 2 面化して「consume まで」から
@@ -531,8 +561,9 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   **#48 以降は通常こちらではない** — 画角が広がって顔が入力上で小さくなり、細かい 16x16 群
   （scale 0.036937 / zp 49、上限 2881）が拾うのでスコアは動く（実測 peak 1292 / score 781）。
   **[!] フラッシュ配置は「予約」で宣言し、検査する**: `GROVE_MODEL_{CLS,DET}_{FILE,ADDR,RESERVED}`
-  （1 個の無名アドレスを使い回さない。アドレスは cmd_nn.c へコンパイル定義で渡し
-  `nn open cls|det` と同一）。`cmake/check_flash_partitions.py` は**予約どうしの非重複を
+  （1 個の無名アドレスを使い回さない）。**#93 以降 cmd_nn.c はアドレスを持たない**
+  （`nn open <name>` が blob ヘッダから取る。参照されないコンパイル定義は残さない）。
+  `cmake/check_flash_partitions.py` は**予約どうしの非重複を
   成果物ゼロでも検査**し、**存在必須なのは今から書く成果物だけ**。
   **[!] 全ファイルを要求してはいけない** — 検出モデルはライセンス上コミットできないので、
   クリーンなツリーでは**ただのファーム焼き（`--target flash`）が止まる**（実際に一度そうした）。
@@ -568,9 +599,13 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   （`0xB70000..0xB7B000` の 44 KB は #88 で blob に入り、実機の `nor scan` で全 0xFF を確認済み。）
   **2 分割なのは間にモデルがあるからで、
   #49 Step 4 でモデルを blob へ移した時点で予約を削除し、blob は `0x200000..0xFFE000` の
-  一本（14,671,872 B）になる**。それ以前にモデル予約を消してはいけない（`nn open cls|det` が
-  アドレスをコンパイル時に持ち、`--target flash-model-*` がパーティション名で自分を検査し、
-  何より**まだ使われているフラッシュがゲートに守られなくなる**）。
+  一本（14,671,872 B）になる**。それ以前にモデル予約を消してはいけない — #93 で
+  `nn open` はアドレスを持たなくなったが、`--target flash-model-*` がパーティション名で
+  自分を検査し、実機に載っている当のコピーがそこにあり、何より**まだ使われている
+  フラッシュがゲートに守られなくなる**。**[!] 4a / 4b に割ってあるのは順序が本体だから** —
+  4b が予約を消すと writable interval が `0xFFE000` まで伸び、**スロット API だけでなく
+  生の `nor erase`/`nor write` も旧モデル領域へ届く**。4b の着手条件（blob 名経由の
+  `nn open` + `nn run` が実機で通っていること）は #94 に書いてある。
   **最終ブロック `0xFFE000..0x1000000` は `slot-header` 予約で、絶対に書かない** —
   正体は**ブートローダのスロットヘッダ**（#85 で 1st BL の逆アセンブルにより判明）。
   `flash_end - 0x1000` と `- 0x2000`（2nd BL が焼込み後に書く backup）に 20 バイト:

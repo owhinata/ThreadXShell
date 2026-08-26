@@ -197,12 +197,19 @@ enum blob_write_result blob_write_run(const struct blob_write_ops *ops,
 	unsigned count, i, target = 0u;
 	int cancelled = 0, claimed = 0, rc;
 
-	if (ops == NULL || rep == NULL || name == NULL)
+	if (ops == NULL || rep == NULL || name == NULL ||
+	    ops->console_ready == NULL)
 		return BLOB_WRITE_REFUSED;
 	memset(rep, 0, sizeof *rep);
 	memset(&w, 0, sizeof w);
 	w.ops = ops;
 	w.rep = rep;
+
+	/* [!] FIRST, because it is the one refusal that is knowable for free.  A
+	 * background job can never claim the console, and finding that out after
+	 * the erase means a slot destroyed by a command that then refused. */
+	if (ops->console_ready(ops->ctx) != 0)
+		return BLOB_WRITE_NO_CONSOLE;
 
 	count = ops->slot_count(ops->ctx);
 	if (count == 0u || count > BLOB_MAX_SLOTS) {

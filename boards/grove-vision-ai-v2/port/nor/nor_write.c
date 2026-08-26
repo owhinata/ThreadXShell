@@ -251,6 +251,20 @@ static void program_run(struct nor_span span, const uint8_t *src,
  * already said it refused would turn a refusal this code understands into a
  * mismatch it does not, and mismatches are terminal.  Nothing is claimed about
  * the remainder, and NOR_WRITE_INCOMPLETE is how the caller is told so.
+ *
+ * [!] AND FOR AN ERASE THIS PROVES LESS THAN IT LOOKS.  Every erased byte is
+ * 0xFF, so reading the requested range back as 0xFF says the range is erased
+ * and nothing about WHICH sectors the part actually erased: a target that was
+ * already erased would pass even if a different sector went instead.  What
+ * bounds the address is the arithmetic before the call (nor_span.c) and the
+ * seam at the door, not this.
+ *
+ * A program can say more, but only as much as its data allows: the comparison
+ * is a statement about WHERE bytes landed exactly when the expected values
+ * differ by position.  Issue #92's byte reversal was seen through a varying
+ * pattern and was invisible for the whole of issue #88 through a constant
+ * 0xA5, and `nor write` still accepts a constant when one is asked for.  Same
+ * check, and what it proves depends on what was written.
  */
 static int verify(enum txn_op op, struct nor_span span, const uint8_t *src,
                   struct nor_write_report *r)

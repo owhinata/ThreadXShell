@@ -201,26 +201,35 @@ int blob_read_reserved(uint32_t addr, void *buf, uint32_t len)
 	return BLOB_OK;
 }
 
-int blob_verify(unsigned slot, uint32_t *computed)
+int blob_verify(unsigned slot, struct blob_info *out, uint32_t *computed)
 {
 	struct blob_info info;
 	const struct blob_slot *s;
 	uint32_t token = 0u, off = 0u, crc = 0u, addr;
-	int err = 0, rc;
+	int err = 0;
 
 	s = checked_slot(slot, &err);
 	if (s == NULL)
 		return err;
-	rc = blob_stat(slot, &info, NULL);
-	if (rc != BLOB_OK)
-		return rc;
-	if (info.state != BLOB_VALID && info.state != BLOB_INCOMPLETE)
-		return BLOB_ERR_EMPTY;
 
-	addr = blob_map_payload_addr(s, nor_seam_limits.unit);
+	/* [!] ONE LEASE FOR BOTH HALVES.  Reading the header under one lease and
+	 * the payload under another leaves a window in between for a background
+	 * `nor erase` or a `blob write` to change the slot -- and the result of
+	 * that race is a PASS against a header that is no longer there.  The
+	 * caller gets back the header this actually checked against, so what it
+	 * prints and what was compared cannot drift either. */
 	if (nor_acquire(NOR_LEASE_BLOB, &token) != 0)
 		return acquire_failure();
 
+	stat_locked(s, &info, NULL);
+	if (info.state != BLOB_VALID && info.state != BLOB_INCOMPLETE) {
+		(void)nor_release(token);
+		if (out != NULL)
+			*out = info;
+		return BLOB_ERR_EMPTY;
+	}
+
+	addr = blob_map_payload_addr(s, nor_seam_limits.unit);
 	while (off < info.length) {
 		uint32_t take = info.length - off;
 
@@ -235,5 +244,7 @@ int blob_verify(unsigned slot, uint32_t *computed)
 	(void)nor_release(token);
 	if (computed != NULL)
 		*computed = crc;
+	if (out != NULL)
+		*out = info;
 	return (crc == info.crc32) ? BLOB_OK : BLOB_ERR_CRC;
 }

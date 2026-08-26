@@ -112,6 +112,20 @@ static int chan_put(void *ctx, const uint8_t *src, size_t len)
 }
 
 /* ---- pattern source / capturing sink -------------------------------------- */
+
+/*
+ * [!] POSITION-DEPENDENT, WITH A PERIOD LONGER THAN A BLOCK.  This used to be
+ * `pos & 0xFF`, which repeats every 256 bytes -- so every 1024-byte block of
+ * the transfer carried IDENTICAL content, and a receiver that delivered a
+ * duplicate block and dropped the next one would produce the right length and
+ * the right bytes.  A test whose data cannot tell one block from another cannot
+ * see a protocol that loses track of which block it is on.
+ */
+static uint8_t pat_byte(uint32_t pos)
+{
+	return (uint8_t)((pos * 2654435761u) >> 24);
+}
+
 struct pat_src { uint32_t pos, size; };
 
 static int pat_read(void *ctx, uint8_t *dst, uint32_t want, uint32_t *got)
@@ -122,7 +136,7 @@ static int pat_read(void *ctx, uint8_t *dst, uint32_t want, uint32_t *got)
 	if (n > want)
 		n = want;
 	for (uint32_t i = 0; i < n; i++)
-		dst[i] = (uint8_t)((s->pos + i) & 0xFFu);
+		dst[i] = pat_byte(s->pos + i);
 	s->pos += n;
 	*got = n;
 	return 0;
@@ -233,7 +247,7 @@ static void loopback(uint32_t size, const char *name)
 	assert(sink.declared == size);
 	assert(sink.len == size);
 	for (uint32_t i = 0; i < size; i++)
-		assert(sink.buf[i] == (uint8_t)(i & 0xFFu));
+		assert(sink.buf[i] == pat_byte(i));
 	free(sink.buf);
 }
 
@@ -336,14 +350,16 @@ int main(void)
 	printf("  duplex loopback: ok\n");
 
 	static uint8_t in[16384];
-	static uint8_t data[1024];
+	static uint8_t data[1024], data2[1024];
 	uint8_t        b0[128], nullb0[128];
 	struct script  s;
 	struct cap_sink sink;
 	static uint8_t sinkbuf[4096];
 
-	for (int i = 0; i < 1024; i++)
-		data[i] = (uint8_t)(i & 0xFF);
+	for (int i = 0; i < 1024; i++) {
+		data[i]  = pat_byte((uint32_t)i);
+		data2[i] = pat_byte((uint32_t)i + 1024u);   /* block 2, not block 1 */
+	}
 	memset(nullb0, 0, sizeof nullb0);
 
 #define SCRIPT_BEGIN()  do {                                    \
@@ -379,13 +395,19 @@ int main(void)
 		n = put_block(in, n, SOH, 0, b0, 128, 0);
 		n = put_block(in, n, STX, 1, data, 1024, 0);
 		n = put_block(in, n, STX, 1, data, 1024, 0);   /* duplicate seq 1 */
-		n = put_block(in, n, STX, 2, data, 1024, 0);
+		n = put_block(in, n, STX, 2, data2, 1024, 0);
 		in[n++] = EOT;
 		n = put_block(in, n, SOH, 0, nullb0, 128, 0);
 		s.inlen = n;
 
 		assert(run_script(&s, &sink) == YM_OK);
 		assert(sink.len == 2048);                      /* not 3072 */
+		/* [!] AND THE RIGHT 2048.  The two data blocks carry different bytes
+		 * on purpose: with identical content, a receiver that delivered the
+		 * DUPLICATE and dropped seq 2 would produce the same length and the
+		 * same bytes as one that got it right. */
+		assert(memcmp(sink.buf, data, 1024) == 0);
+		assert(memcmp(sink.buf + 1024, data2, 1024) == 0);
 		assert(count_byte(&s, NAK) == 0);
 	}
 

@@ -194,6 +194,46 @@
    （TFLM は `Invoke()` 復帰前にアリーナを書く）。**`npu_open()` のペイロード検査**
    （`COMMAND_STREAM` が 1 個かつ最後 / 対象は `custom_options` ではなく入力テンソル 0 /
    `is_variable()` は拒否）は緩めない。
+
+   **モデルは blob の名前で開く（#93 / #49 Step 4a）**:
+   [!] **`npu_open()` は長さを取り、`GetModel()` の前に境界付き FlatBuffer verifier を
+   通す**。`GetModel()` は cast で、以後の accessor は全て offset を辿る —
+   **blob の CRC は「届いたバイト列」に対するもの**なので、PC 側で既に壊れていた
+   モデルは CRC を通って無傷で着く。順序は **範囲 → 長さ → identifier → verifier →
+   ペイロード走査**。長さには**下限も要る**（identifier を `raw+4` から読むため）。
+   **生アドレス形にも長さ必須**（`nn open --addr <addr> <len>`。「窓の残り全部」は
+   境界検査にならない）。**verifier の limits は明示**（既定は depth 64 / table 100 万で、
+   生成 verifier は再帰し**シェルスタックは 4,096 B**。実測: 再帰の各フレームは 24 B 以下
+   ＝ 1 段 ~64 B なので既定 64 段は ~4.1 KB ＝スタック全部。実モデルは **depth 4 /
+   table 19**、出荷値は 16 / 4096）。**limits と verifier 呼び出しは
+   `port/npu/npu_verify.h` の 1 箇所**で、ホストゲートが同じものをリンクする
+   （既定 limits でホストが通し実機が落ちる、を作らない）。
+   `NPU_ERR_MODEL_FORMAT` は magic / schema / payload と別。
+   [!] **`nn open <name>` はリースを切らさない**: nn ゲート → **`npu_hw_init()` を先に**
+   （`NOR_LEASE_NPU` を確保）→ その内側で**全スロット走査**（候補は VALID のみ・
+   **重複拒否**・0 件 / BUSY / FAULT / MAP を別々に分類し「見つからない」に畳まない・
+   **読めないスロットが 1 つでもあれば拒否**）→ **`blob_verify_leased()` で CRC** →
+   `npu_open()` → **途中失敗は必ず `npu_hw_deinit()`**。
+   `blob_stat_leased` / `blob_verify_leased` は**呼び出し元のトークンを取り、live か
+   検査する**（「誰かがリースを持っている」は他人の寿命の話）。
+   `blob_verify_leased` は **`NOR_LEASE_BLOB` も取る** — 窓ではなく
+   **`blob_stage_buf` の排他**のため。
+   [!] **ホスト側の検証ゲートを外さない**（`verify_vela_model`）。デバイス側の境界検査は
+   置き換えにならない（単一サブグラフ / 全 op が Ethos-U / int8 I/O / offline plan /
+   アリーナ / BlazeFace の shape は見ない）し、**デバイスの検査は書込みの後**で、
+   malformed でも既に ~40 秒の消去と転送を消費している。公式経路は
+   **`build/<board>/send_verified_model.sh`**（picocom の `--send-cmd`）:
+   **staging コピー → 検証 → 同一ファイル送信**、**`--profile cls|det` は明示引数**
+   （ファイル名から推測しない）、**出力は stderr**（YMODEM 線に流さない）、
+   **ホスト C++ 不在は fail-closed**（skip しない）。
+   [!] **verifier が言うのは「offset が宣言された長さの内側に落ちる」ことだけ** —
+   **U55 のコマンドストリームは読まない**（opaque なバイト列。`npu_payload.c` が見るのは
+   アクションの封筒であって中の命令ではなく、ドライバは整列検査の後そのまま device へ渡す。
+   #93 以前からそうで、これは新しい検査の限界であって退行ではない）/ **Vela 出力として
+   妥当かも言わない**（ホストゲートの仕事）/ **生 `--addr` 形は窓で境界され、スロットでは
+   境界されない**（意図的に store を迂回するので、隣のスロットへ伸びる長さは
+   バイト列が verify すれば通る。16 MB エイリアスの外へは出られない。
+   スロット隔離が要るなら名前で開く）。
    フラッシュのメモリマップ読み出し窓は**アプリが開ける**（開けるまで窓全体が
    同一レジスタにエイリアスし、フォルトも 0xFF も返さない）。その open は
    **DMAC1 の IRQ 133 を有効化する** — EPK は番号を列挙せず ISER スナップショットで
@@ -381,8 +421,11 @@
    （`0xB70000..0xB7B000` の 44 KB は #88 で blob に入り、実機の `nor scan` で
    **全 0xFF を確認済み**。）**2 分割なのは間にモデルがあるからで、
    #49 Step 4 でモデルを blob へ移した時点で予約を削除し blob は一本になる**。
-   それ以前にモデル予約を消さない（`nn open` がアドレスを持ち、flash ターゲットが
-   名前で自分を検査し、**まだ使われているフラッシュが守られなくなる**）。
+   それ以前にモデル予約を消さない — #93 で `nn open` はアドレスを持たなくなったが、
+   flash ターゲットが名前で自分を検査し、実機に載っている当のコピーがそこにあり、
+   何より**まだ使われているフラッシュが守られなくなる**。**順序が本体**で、
+   writable interval を `0xFFE000` まで伸ばすと**生の `nor erase`/`nor write` が
+   旧モデル領域へ届く**（4b の着手条件は #94 に書いてある）。
    **最終ブロック `0xFFE000..0x1000000` は `slot-header` 予約で絶対に書かない** —
    **ブートローダのスロットヘッダ**（`flash_end - 0x1000` と `- 0x2000` に 20 バイト、
    magic `"HIMAXWE2"` + チェックサム）。壊すとフォールバックで**黙って前のビルドが起動する**。

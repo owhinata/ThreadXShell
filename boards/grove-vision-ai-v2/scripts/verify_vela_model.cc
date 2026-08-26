@@ -48,6 +48,14 @@
  * says why the LOCATOR matters as much as the walk. */
 #include "npu_model_scan.h"
 
+/* And the firmware's own bounded flatbuffer check (issue #93).  This tool used
+ * to construct a flatbuffers::Verifier with the DEFAULT limits, which are the
+ * ones the board cannot afford -- so a model could pass here and be refused by
+ * npu_open() with NPU_ERR_MODEL_FORMAT, on the serial line, after the erase.
+ * A host gate that accepts what the device rejects has moved the failure rather
+ * than caught it. */
+#include "npu_verify.h"
+
 extern "C" {
 #include "npu.h"           /* npu_arena_base() / npu_arena_bytes() */
 }
@@ -265,19 +273,19 @@ int main(int argc, char **argv)
 
 	/* --- the flatbuffer itself ------------------------------------------- */
 
-	if (buf.size() < 8u || !tflite::ModelBufferHasIdentifier(buf.data())) {
-		printf("  FAIL   not a .tflite flatbuffer (no \"TFL3\" identifier)\n");
+	if (buf.size() < NPU_MODEL_MIN_BYTES ||
+	    !tflite::ModelBufferHasIdentifier(buf.data())) {
+		printf("  FAIL   not a .tflite flatbuffer (no \"TFL3\" identifier, "
+		       "or shorter than %u B)\n", NPU_MODEL_MIN_BYTES);
 		printf("RESULT   : REJECT\n");
 		return 1;
 	}
-	{
-		flatbuffers::Verifier v(buf.data(), buf.size());
-
-		if (!tflite::VerifyModelBuffer(v)) {
-			printf("  FAIL   the flatbuffer is malformed\n");
-			printf("RESULT   : REJECT\n");
-			return 1;
-		}
+	if (!npu_verify_model_buffer(buf.data(), buf.size())) {
+		printf("  FAIL   the flatbuffer is malformed, or nests deeper than %u "
+		       "or wider than %u tables (the firmware's limits)\n",
+		       NPU_VERIFY_MAX_DEPTH, NPU_VERIFY_MAX_TABLES);
+		printf("RESULT   : REJECT\n");
+		return 1;
 	}
 
 	const tflite::Model *model = tflite::GetModel(buf.data());
@@ -288,8 +296,9 @@ int main(int argc, char **argv)
 		printf("RESULT   : REJECT\n");
 		return 1;
 	}
-	printf("  ok     flatbuffer verifies, schema version %d\n",
-	       TFLITE_SCHEMA_VERSION);
+	printf("  ok     flatbuffer verifies within the firmware's limits "
+	       "(depth %u, %u tables), schema version %d\n",
+	       NPU_VERIFY_MAX_DEPTH, NPU_VERIFY_MAX_TABLES, TFLITE_SCHEMA_VERSION);
 
 	/* Everything past here needs a subgraph, so a bad shape stops the run
 	 * rather than being reported alongside checks that could not be made. */

@@ -311,6 +311,46 @@ enum blob_choice blob_choose_target(const struct blob_slot_view *v,
                                     unsigned count, int want,
                                     unsigned *target);
 
+/* ---- finding one to read ------------------------------------------------- */
+
+/** What resolving a name against a scan of the table found. */
+enum blob_lookup {
+	BLOB_LOOKUP_FOUND = 0,  /**< exactly one VALID slot carries the name  */
+	BLOB_LOOKUP_NONE,       /**< no VALID slot carries it                 */
+	BLOB_LOOKUP_DUPLICATE,  /**< more than one does                       */
+	BLOB_LOOKUP_REFUSE,     /**< the views do not hold together           */
+};
+
+/** Short name for a lookup result, for the console and the host test. */
+const char *blob_lookup_name(enum blob_lookup l);
+
+/**
+ * @brief  Which slot holds the blob called @p name?
+ *
+ * @param v      one view per slot, in table order
+ * @param count  how many
+ * @param found  receives the index on BLOB_LOOKUP_FOUND; untouched otherwise
+ *
+ * The reader's half of blob_choose_target(), and separate from it on purpose:
+ * a writer asks "where may I put this name" and gets answers about EMPTY and
+ * INCOMPLETE slots, while a reader asks "where IS this name" and only a VALID
+ * slot can answer.  Folding the two would give one of them the other's rules.
+ *
+ * [!] DUPLICATE IS ITS OWN ANSWER AND IS NOT "NOT FOUND" (issue #93).  Two
+ * slots under one name cannot be produced by `blob write` -- it refuses -- but
+ * flash outlives firmware, and a raw `nor write` can put anything anywhere.
+ * Picking the first would make `nn open <name>` load whichever copy the table
+ * happens to reach first, which is the sort of answer that is right until the
+ * table changes.
+ *
+ * [!] AND THE VIEWS MUST COME FROM A SCAN THE CALLER IS STILL HOLDING THE
+ * WINDOW UP FOR.  This is arithmetic over what somebody read; what makes the
+ * answer still true when the model is parsed is the lease that was never
+ * dropped in between (blob.h).
+ */
+enum blob_lookup blob_resolve_name(const struct blob_slot_view *v,
+                                   unsigned count, unsigned *found);
+
 /* ---- the transfer's own state -------------------------------------------- */
 
 /**

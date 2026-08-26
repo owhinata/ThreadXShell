@@ -7,7 +7,8 @@
  * @brief   `nn` command: one-shot Ethos-U55 classification (issues #44, #40).
  *
  *   nn info               what is loaded, and the arena budget
- *   nn open [<addr>]      bring the NPU up and parse the model in flash
+ *   nn open <name>        bring the NPU up and parse the blob of that name
+ *   nn open --addr <a> <n>  ... or a raw address and length
  *   nn close              release it
  *   nn run                capture one frame, preprocess, infer, print top-5
  *   nn detect             the same, decoded as BlazeFace face boxes (#45)
@@ -47,6 +48,8 @@
 
 #include "WE2_device.h"   /* __get_PRIMASK / __disable_irq / __set_PRIMASK */
 
+#include "blob.h"
+#include "nor_flash.h"    /* NOR_XIP_BASE -- one spelling of the alias base */
 #include "npu.h"
 #include "npu_hw.h"
 #include "nn_overlay.h"
@@ -60,22 +63,36 @@
 #include "tx_api.h"        /* tx_time_get(): ThreadX ticks, 1 ms here */
 
 /*
- * Where the models live.
+ * Where the models live: IN THE ASSET STORE, BY NAME (issue #93).
  *
- * The OFFSETS come from board.cmake -- the same cache variables the
- * flash-model-* targets write to -- so there is one address per model and not
- * a constant here plus a constant there kept in step by a comment (issue #45).
- * The base is the chip's memory-mapped flash read alias, which is a property of
- * the part rather than of the layout.
+ * They used to live at two addresses board.cmake compiled in, and `--target
+ * flash-model-cls|det` was the only way to change one -- which meant the host
+ * build tree, and for the detector (which cannot be committed) reproducing a
+ * whole pipeline first.  Now `nn open cls` asks the store for the blob called
+ * `cls`, and putting a new one there is `blob write` over the console.
  *
- * `nn open` takes either name or a raw address; the raw form stays because the
- * partition table is a convention and `nn open <addr>` is how you check a model
- * somebody put somewhere else.
+ * The raw form survives as `nn open --addr <addr> <len>`, spelled with a flag
+ * so that a name can never be read as an address or the other way round.  It is
+ * how you look at a model somebody put somewhere the store does not carve, and
+ * during Step 4a it is also how the old fixed addresses are still reachable, to
+ * check that a blob and the model it replaced infer the same thing.
+ *
+ * [!] AND THE RAW FORM TAKES A LENGTH, WHICH IS NOT CEREMONY.  npu_open()'s
+ * bounds check IS the length (npu.h); "the rest of the window" would put every
+ * other slot and the bootloader's own block inside the valid reference range of
+ * a malformed model, which is not a bounds check at all.
+ *
+ * [!] BUT THE RAW FORM IS BOUNDED BY THE WINDOW AND NOT BY A SLOT, and that is
+ * a property to state rather than a gap to find later.  `--addr` deliberately
+ * skips the store: no name lookup, no header, no CRC.  So a length that starts
+ * inside one slot and reaches into the next one is accepted, if the bytes
+ * happen to verify -- npu_open() has no slot map and is not being given one.
+ * It cannot reach past the end of the 16 MB alias, which is the guarantee the
+ * raw form makes.  That is the right shape for what it is FOR: reading a model
+ * somebody put somewhere the store does not carve, including the fixed
+ * addresses the models were flashed to before #93, which are outside the
+ * writable interval entirely.  Slot isolation is what `nn open <name>` is for.
  */
-#define NN_FLASH_READ_BASE    0x3A000000u
-#define NN_MODEL_CLS_ADDR     (NN_FLASH_READ_BASE + NN_MODEL_CLS_OFFSET)
-#define NN_MODEL_DET_ADDR     (NN_FLASH_READ_BASE + NN_MODEL_DET_OFFSET)
-#define NN_MODEL_ADDR_DEFAULT NN_MODEL_CLS_ADDR
 
 /* --- ownership ----------------------------------------------------------- */
 
@@ -103,6 +120,145 @@ static void nn_release(void)
 
 static uint8_t  nn_open_done;
 static uint32_t nn_model_addr;
+static uint32_t nn_model_len;
+/** What was typed, so `nn info` can say where the open model came from: the
+ *  blob's name, or "--addr" for the raw form.  A label and never a key -- the
+ *  slot it resolved to is recorded next to it and the name is not looked up
+ *  again. */
+static char     nn_model_from[BLOB_NAME_MAX + 1];
+static int      nn_model_slot;      /**< -1 for the raw form */
+
+/* --- resolving a model in the asset store -------------------------------- */
+
+/**
+ * Where an `nn open` is pointed.
+ *
+ * Filled in by the argument parser before any hardware is touched, and for the
+ * name form the address and length are still zero at that point: they come from
+ * the blob header, under the lease, once there is one.
+ */
+struct nn_source {
+	const char *name;   /**< NULL for the raw form            */
+	uint32_t    addr;   /**< absolute, in the XIP alias       */
+	uint32_t    len;
+};
+
+/**
+ * Read every slot into a view, under the caller's lease.
+ *
+ * [!] IT REFUSES ON THE FIRST SLOT IT CANNOT READ rather than resolving from
+ * what it got.  A scan with a hole in it is a scan that cannot say a name is
+ * unique, and "not found" is exactly the wrong answer to give about a slot
+ * nobody looked at -- the writer's blob_choose_target() has the same rule for
+ * the same reason.
+ */
+static int nn_scan_slots(struct cli_instance *sh, uint32_t token,
+                         const char *name, struct blob_slot_view *v,
+                         unsigned *count)
+{
+	unsigned n = blob_map_count(), i;
+
+	if (n == 0u || n > BLOB_MAX_SLOTS) {
+		cli_error(sh, "nn: the slot table has %u slots, which this build "
+		              "cannot scan\r\n", n);
+		return -1;
+	}
+	for (i = 0u; i < n; i++) {
+		struct blob_info info;
+		int rc = blob_stat_leased(i, token, &info, NULL);
+
+		if (rc != BLOB_OK) {
+			cli_error(sh, "nn: slot %u unreadable (%s)\r\n", i,
+			          rc == BLOB_ERR_FAULT ? "the NOR port is faulted; "
+			                                 "a reset is required"
+			          : rc == BLOB_ERR_BUSY ? "the flash is busy"
+			          : rc == BLOB_ERR_MAP  ? "the slot table does not fit "
+			                                  "the writable interval"
+			                                : "bad slot");
+			return -1;
+		}
+		v[i].state      = info.state;
+		v[i].name_match = (uint8_t)(info.state == BLOB_VALID &&
+		                            strcmp(info.name, name) == 0);
+	}
+	*count = n;
+	return 0;
+}
+
+/**
+ * Turn a blob name into the address and length npu_open() will be given.
+ *
+ * [!] THE ORDER HERE IS THE POINT (issue #93), and it is the order the plan
+ * review settled on after the first draft got it wrong:
+ *
+ *   the caller already holds the NPU lease  ->  scan every slot  ->  resolve
+ *   the name  ->  CHECK THE PAYLOAD'S CRC  ->  take the length from the header
+ *   that check ran against  ->  hand it to npu_open()
+ *
+ * with the lease never dropped in between.  Two things make each step
+ * necessary.  BLOB_VALID is a statement about the HEADER only (blob_state.h):
+ * it says a header decoded, not that the payload beneath it is the one that
+ * header describes -- so a model must be verified before it is parsed, and it
+ * is `nn` and not the store that has to ask.  And blob_stat()'s lease is taken
+ * and RETURNED per slot, so resolving through it would leave a gap between the
+ * answer and the parse in which a background `blob write` could replace the
+ * very slot that was chosen.
+ */
+static int nn_resolve_blob(struct cli_instance *sh, uint32_t token,
+                           struct nn_source *src)
+{
+	struct blob_slot_view v[BLOB_MAX_SLOTS];
+	struct blob_info info;
+	unsigned count = 0u, slot = 0u;
+	uint32_t computed = 0u, payload = 0u;
+	enum blob_lookup found;
+	int rc;
+
+	if (nn_scan_slots(sh, token, src->name, v, &count) != 0)
+		return -1;
+
+	found = blob_resolve_name(v, count, &slot);
+	if (found != BLOB_LOOKUP_FOUND) {
+		cli_error(sh, "nn: '%s': %s\r\n", src->name,
+		          blob_lookup_name(found));
+		if (found == BLOB_LOOKUP_NONE)
+			cli_error(sh, "nn: (blob list shows what is there; "
+			              "blob write %s <slot> puts it there)\r\n",
+			          src->name);
+		return -1;
+	}
+
+	/* [!] AND THE CRC IS CHECKED WITH THE SAME LEASE STILL OUT.  The payload
+	 * is read where it lies for as long as the model is open, so what is being
+	 * established is not "these bytes were right once" but "these bytes are
+	 * right and cannot change while I hold this". */
+	rc = blob_verify_leased(slot, token, &info, &computed);
+	if (rc != BLOB_OK) {
+		if (rc == BLOB_ERR_CRC)
+			cli_error(sh, "nn: slot %u ('%s') fails its CRC "
+			              "(stored %08lx, flash %08lx); refusing to parse it\r\n",
+			          slot, src->name, (unsigned long)info.crc32,
+			          (unsigned long)computed);
+		else
+			cli_error(sh, "nn: slot %u ('%s') could not be verified (%d)\r\n",
+			          slot, src->name, rc);
+		return -1;
+	}
+
+	/* The length comes from the header blob_verify_leased() actually checked
+	 * against, and not from a second stat: those two could disagree, and the
+	 * one that matters is the one the CRC was compared under. */
+	payload = blob_payload_addr(slot);
+	if (payload == 0u || info.length == 0u) {
+		cli_error(sh, "nn: slot %u ('%s') has no payload to parse\r\n",
+		          slot, src->name);
+		return -1;
+	}
+	src->addr = NOR_XIP_BASE + payload;
+	src->len  = info.length;
+	nn_model_slot = (int)slot;
+	return 0;
+}
 
 /* --- preprocessing ------------------------------------------------------- */
 
@@ -271,11 +427,17 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 	          blazeface_get_thresh_milli());
 
 	if (!nn_open_done) {
-		cli_print(sh, "model    not open (nn open [<addr>])\r\n");
+		cli_print(sh, "model    not open (nn open <name>)\r\n");
 		nn_release();
 		return 0;
 	}
-	cli_print(sh, "model    0x%08lx\r\n", (unsigned long)nn_model_addr);
+	if (nn_model_from[0] != '\0')
+		cli_print(sh, "model    '%s' from slot %d, 0x%08lx, %lu B\r\n",
+		          nn_model_from, nn_model_slot, (unsigned long)nn_model_addr,
+		          (unsigned long)nn_model_len);
+	else
+		cli_print(sh, "model    0x%08lx, %lu B (--addr)\r\n",
+		          (unsigned long)nn_model_addr, (unsigned long)nn_model_len);
 	cli_print(sh, "arena    %lu B used by this layout\r\n",
 	          (unsigned long)npu_arena_used());
 	if (npu_input(&t) == NPU_OK)
@@ -287,24 +449,62 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-static int cmd_nn_open(struct cli_instance *sh, int argc, char **argv)
+/* The two spellings, parsed before any hardware is touched.  `--addr` is a
+ * flag and not a shape the parser guesses at: a bare token could be a name or a
+ * hex number depending on what somebody called their blob, and the reading it
+ * gets must not depend on that. */
+static int nn_parse_open_args(struct cli_instance *sh, int argc, char **argv,
+                              struct nn_source *src)
 {
-	uint32_t addr = NN_MODEL_ADDR_DEFAULT;
-	int rc;
+	memset(src, 0, sizeof(*src));
 
-	if (argc > 1) {
-		/* The two partition names before the numeric form, so a name can never
-		 * be mistaken for a hex address. */
-		if (strcmp(argv[1], "cls") == 0) {
-			addr = NN_MODEL_CLS_ADDR;
-		} else if (strcmp(argv[1], "det") == 0) {
-			addr = NN_MODEL_DET_ADDR;
-		} else if (cli_parse_u32(argv[1], &addr) != 0) {
-			cli_error(sh, "nn: bad address '%s' (want cls, det or an address)\r\n",
-			          argv[1]);
+	if (argc == 2 && strcmp(argv[1], "--addr") != 0) {
+		enum blob_name_verdict nv = blob_name_check(argv[1], NULL);
+
+		if (nv != BLOB_NAME_OK) {
+			cli_error(sh, "nn: '%s' is not a blob name (%s)\r\n", argv[1],
+			          blob_name_verdict_name(nv));
 			return -1;
 		}
+		src->name = argv[1];
+		return 0;
 	}
+	if (argc == 4 && strcmp(argv[1], "--addr") == 0) {
+		if (cli_parse_u32(argv[2], &src->addr) != 0) {
+			cli_error(sh, "nn: bad address '%s'\r\n", argv[2]);
+			return -1;
+		}
+		if (cli_parse_u32(argv[3], &src->len) != 0) {
+			cli_error(sh, "nn: bad length '%s'\r\n", argv[3]);
+			return -1;
+		}
+		/* Refused here in this command's own words rather than as a bare
+		 * NPU_ERR_MODEL_ADDR from three layers down, because at this end of
+		 * it the operator can see which of the two numbers is wrong. */
+		if (src->len < npu_model_len_min() ||
+		    src->len > npu_model_len_max(src->addr)) {
+			cli_error(sh, "nn: length %lu is not between %lu and %lu for "
+			              "0x%08lx\r\n",
+			          (unsigned long)src->len,
+			          (unsigned long)npu_model_len_min(),
+			          (unsigned long)npu_model_len_max(src->addr),
+			          (unsigned long)src->addr);
+			return -1;
+		}
+		return 0;
+	}
+	cli_error(sh, "nn: usage: nn open <name> | nn open --addr <addr> <len>\r\n");
+	return -1;
+}
+
+static int cmd_nn_open(struct cli_instance *sh, int argc, char **argv)
+{
+	struct nn_source src;
+	int rc;
+
+	if (nn_parse_open_args(sh, argc, argv, &src) != 0)
+		return -1;
+
 	if (!nn_try_acquire()) {
 		cli_error(sh, "nn: busy\r\n");
 		return -1;
@@ -315,6 +515,13 @@ static int cmd_nn_open(struct cli_instance *sh, int argc, char **argv)
 		return -1;
 	}
 
+	/* [!] THE BRING-UP COMES BEFORE THE LOOKUP, AND THAT IS THE ORDERING THE
+	 * WHOLE COMMAND IS BUILT AROUND (issue #93).  npu_hw_init() takes the
+	 * flash reader lease, so from here to the end of the model's life the
+	 * window is up and no writer can take the part -- a reservation needs the
+	 * lease mask empty (nor_state.h).  Resolving a name first and bringing the
+	 * hardware up afterwards would put a gap between the answer and the parse,
+	 * and the answer is an ADDRESS. */
 	if (npu_hw_init() != 0) {
 		cli_error(sh, "nn: %s\r\n",
 		          npu_hw_fail_reason() ? npu_hw_fail_reason() : "bring-up failed");
@@ -322,22 +529,45 @@ static int cmd_nn_open(struct cli_instance *sh, int argc, char **argv)
 		return -1;
 	}
 
-	rc = npu_open(addr, npu_arena_base(), npu_arena_bytes());
+	nn_model_slot = -1;
+	if (src.name != NULL &&
+	    nn_resolve_blob(sh, npu_hw_flash_lease(), &src) != 0) {
+		/* Every failure from here down leaves the hardware down: an NPU that
+		 * is up with no model is a state nothing below here would ever use,
+		 * and it would hold the flash lease against `blob write` for as long
+		 * as it lasted. */
+		npu_hw_deinit();
+		nn_release();
+		return -1;
+	}
+
+	rc = npu_open(src.addr, src.len, npu_arena_base(), npu_arena_bytes());
 	if (rc != NPU_OK) {
-		cli_error(sh, "nn: %s (0x%08lx)\r\n", npu_status_name(rc),
-		          (unsigned long)addr);
-		/* Leave the hardware down too: an NPU that is up with no model is a
-		 * state nothing below here would ever use. */
+		cli_error(sh, "nn: %s (0x%08lx, %lu B)\r\n", npu_status_name(rc),
+		          (unsigned long)src.addr, (unsigned long)src.len);
 		npu_hw_deinit();
 		nn_release();
 		return -1;
 	}
 
 	nn_open_done  = 1u;
-	nn_model_addr = addr;
-	cli_print(sh, "nn: model at 0x%08lx open, arena %lu/%lu B\r\n",
-	          (unsigned long)addr, (unsigned long)npu_arena_used(),
-	          (unsigned long)npu_arena_bytes());
+	nn_model_addr = src.addr;
+	nn_model_len  = src.len;
+	if (src.name != NULL) {
+		(void)strncpy(nn_model_from, src.name, sizeof(nn_model_from) - 1u);
+		nn_model_from[sizeof(nn_model_from) - 1u] = '\0';
+		cli_print(sh, "nn: '%s' from slot %d open at 0x%08lx, %lu B, "
+		              "arena %lu/%lu B\r\n",
+		          nn_model_from, nn_model_slot, (unsigned long)src.addr,
+		          (unsigned long)src.len, (unsigned long)npu_arena_used(),
+		          (unsigned long)npu_arena_bytes());
+	} else {
+		nn_model_from[0] = '\0';
+		cli_print(sh, "nn: model at 0x%08lx open, %lu B, arena %lu/%lu B\r\n",
+		          (unsigned long)src.addr, (unsigned long)src.len,
+		          (unsigned long)npu_arena_used(),
+		          (unsigned long)npu_arena_bytes());
+	}
 	nn_release();
 	return 0;
 }
@@ -353,7 +583,11 @@ static int cmd_nn_close(struct cli_instance *sh, int argc, char **argv)
 	}
 	npu_close();
 	npu_hw_deinit();
-	nn_open_done = 0u;
+	nn_open_done     = 0u;
+	nn_model_addr    = 0u;
+	nn_model_len     = 0u;
+	nn_model_slot    = -1;
+	nn_model_from[0] = '\0';
 	nn_release();
 	cli_print(sh, "nn: closed\r\n");
 	return 0;
@@ -851,7 +1085,7 @@ out:
 CLI_SUBCMD_SET_CREATE(nn_subcmds,
 	CLI_CMD(info,  NULL, "what is loaded and what the arena costs", cmd_nn_info),
 	CLI_CMD_ARG_USAGE(open, NULL, "bring the NPU up and parse the model",
-	                  "[cls|det|<flash-addr>]", cmd_nn_open, 1, 1),
+	                  "<name> | --addr <flash-addr> <len>", cmd_nn_open, 2, 2),
 	CLI_CMD(close, NULL, "release the model and the NPU",           cmd_nn_close),
 	CLI_CMD(run,   NULL, "capture one frame and classify it",       cmd_nn_run),
 	CLI_CMD(detect, NULL, "capture one frame and find faces",       cmd_nn_detect),

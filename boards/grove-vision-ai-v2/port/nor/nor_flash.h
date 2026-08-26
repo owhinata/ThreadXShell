@@ -65,6 +65,29 @@ int nor_acquire(enum nor_lease_slot slot, uint32_t *out);
  */
 int nor_release(uint32_t token);
 
+/**
+ * @brief  Is @p token a lease that is live RIGHT NOW?
+ *
+ * @return 1 when the token names a slot this lifecycle currently holds, 0 for
+ *         anything else -- a zero token, a slot that is not held, a token from
+ *         a previous lifecycle.
+ *
+ * The same question nor_release() asks, without dropping anything, and it
+ * exists for readers that do not take their own lease.  `nn open` resolves a
+ * blob name and then parses the model in place, all of it under the ONE lease
+ * npu_hw_init() took (issue #93); the blob reads it makes along the way have to
+ * be able to check that the caller really is holding the window up rather than
+ * trusting it, because a read of the alias with no lease is issue #90 -- a
+ * window that was never brought up does not fault and does not read 0xFF, it
+ * aliases one register across all 16 MB.
+ *
+ * [!] IT TAKES THE CALLER'S TOKEN AND NOT "IS ANYBODY HOLDING ONE".  A holder
+ * elsewhere keeps the window up for exactly as long as IT chooses to, so
+ * "somebody has a lease" is a fact about another caller's lifetime; only the
+ * caller's own token says the window will still be up on the next line.
+ */
+int nor_lease_held(uint32_t token);
+
 /** The lifecycle state, for `nor info` and for refusing early. */
 enum nor_state nor_lifecycle_state(void);
 

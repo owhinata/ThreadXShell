@@ -31,6 +31,22 @@
  * Pointed at erased flash (all 0xFF) those offsets are garbage, and the first
  * thing to notice would be a fault. So the address range and the "TFL3" file
  * identifier are checked first, on raw bytes.
+ *
+ * [!] AND THAT WAS NOT ENOUGH ONCE THE MODEL CAME OUT OF THE ASSET STORE
+ * (issue #93).  The identifier says the first eight bytes look right; it says
+ * nothing about the offsets behind them.  A model used to be something the host
+ * build had verified and written to a fixed address, so "it is where we put it"
+ * carried the rest of the argument -- but `nn open <name>` reads a payload an
+ * operator sent, and the blob CRC that guards the transfer is computed over the
+ * stream that ARRIVED, so a file that was already broken on the PC verifies
+ * perfectly and lands here intact.  Hence a real bounds check, in this order:
+ *
+ *     range -> length -> identifier -> flatbuffer verifier -> payload walk
+ *
+ * The verifier is the generated tflite::VerifyModelBuffer(), which is what
+ * makes every offset in the buffer a checked one; the payload walk after it
+ * (npu_model_scan) is about what the model MEANS and needs the offsets to be
+ * trustworthy before it starts.
  */
 #include "npu.h"
 #include "npu_hw.h"
@@ -44,17 +60,27 @@
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
+/* The bounded flatbuffer check and its limits, shared with the host gate so
+ * that scripts/verify_vela_model.cc reaches THIS verdict and not one that
+ * resembles it (issue #93). */
+#include "npu_verify.h"
+
 namespace {
 
 /* The flash read window the model must live in.  BASE_ADDR_FLASH1_R_ALIAS and
  * FLASH1_SIZE from the SDK's WE2_device_addr.h, spelled out here so this file
- * does not drag the whole device header into a C++ TU. */
+ * does not drag the whole device header into a C++ TU.
+ *
+ * The other spelling of the base is NOR_XIP_BASE (port/nor/nor_flash.h), which
+ * is what everything above this boundary uses; npu_model_len_max() is how a
+ * caller asks THIS file where the window ends rather than assuming the two
+ * agree. */
 constexpr uint32_t kFlashBase = 0x3A000000u;
 constexpr uint32_t kFlashSize = 0x01000000u;
 
-/* Smallest buffer that could hold a flatbuffer header worth inspecting: root
- * offset + the 4-byte file identifier at offset 4. */
-constexpr uint32_t kMinModelBytes = 16u;
+/* The length floor: npu_verify.h owns it, because it is a property of where the
+ * file identifier sits rather than of this file. */
+constexpr uint32_t kMinModelBytes = NPU_MODEL_MIN_BYTES;
 
 /* Storage for the interpreter and resolver.  Raw bytes plus placement new, so
  * nothing is constructed until npu_open() says so and nothing is destroyed
@@ -94,23 +120,52 @@ void describe(const TfLiteTensor *t, struct npu_tensor *out)
 
 }  /* namespace */
 
-extern "C" int npu_open(uint32_t model_addr, void *arena, size_t arena_bytes)
+extern "C" uint32_t npu_model_len_min(void)
+{
+	return kMinModelBytes;
+}
+
+extern "C" uint32_t npu_model_len_max(uint32_t model_addr)
+{
+	if (model_addr < kFlashBase || model_addr >= kFlashBase + kFlashSize)
+		return 0u;
+	return kFlashBase + kFlashSize - model_addr;
+}
+
+extern "C" int npu_open(uint32_t model_addr, uint32_t model_len, void *arena,
+                        size_t arena_bytes)
 {
 	if (g_interp != nullptr)
 		return NPU_ERR_STATE;
 	if (arena == nullptr || arena_bytes == 0u)
 		return NPU_ERR_ARENA;
 
-	/* Range first: everything after this dereferences the address. */
-	if (model_addr < kFlashBase ||
-	    model_addr > kFlashBase + kFlashSize - kMinModelBytes)
+	/* Range and length first: everything after this dereferences the address,
+	 * and everything after the verifier trusts the length.
+	 *
+	 * Subtraction-based, in the same discipline as nor_span.c and
+	 * blob_map_check(): `model_addr + model_len` is never formed, so a length
+	 * near 2^32 is refused rather than wrapped into looking contained. */
+	if (model_addr < kFlashBase || model_addr >= kFlashBase + kFlashSize)
+		return NPU_ERR_MODEL_ADDR;
+	if (model_len < kMinModelBytes ||
+	    model_len > kFlashBase + kFlashSize - model_addr)
 		return NPU_ERR_MODEL_ADDR;
 
 	/* Then the file identifier, on raw bytes.  Flatbuffers put it at offset 4;
-	 * erased flash reads 0xFF and fails here instead of inside the parser. */
+	 * erased flash reads 0xFF and fails here instead of inside the parser.
+	 * Inside the declared length, because kMinModelBytes is a floor on it. */
 	const uint8_t *raw = reinterpret_cast<const uint8_t *>(model_addr);
 	if (memcmp(raw + 4, "TFL3", 4) != 0)
 		return NPU_ERR_MODEL_MAGIC;
+
+	/* [!] AND ONLY NOW IS THE BUFFER SAFE TO FOLLOW (issue #93).  Every check
+	 * above is on bytes at known offsets; this is the one that makes the
+	 * OFFSETS trustworthy, and it has to come before GetModel() because
+	 * GetModel() is a cast and the first accessor after it is already
+	 * following one. */
+	if (!npu_verify_model_buffer(raw, model_len))
+		return NPU_ERR_MODEL_FORMAT;
 
 	const tflite::Model *model =
 		tflite::GetModel(reinterpret_cast<const void *>(model_addr));
@@ -237,6 +292,7 @@ extern "C" const char *npu_status_name(int status)
 	case NPU_ERR_INVOKE:      return "inference failed";
 	case NPU_ERR_PAYLOAD:     return "model payload has actions after the "
 	                                 "command stream";
+	case NPU_ERR_MODEL_FORMAT: return "model flatbuffer is malformed";
 	default:                  return "unknown";
 	}
 }

@@ -416,6 +416,23 @@ int nor_release(uint32_t token)
 	return rc;
 }
 
+int nor_lease_held(uint32_t token)
+{
+	uint32_t pm = __get_PRIMASK();
+	int held;
+
+	/* nor_release_decide() is the arbiter of what a token means, and it is
+	 * reused here rather than re-derived: a second opinion about which tokens
+	 * are live is exactly the drift that would let a reader keep reading a
+	 * window its token no longer holds up.  DROP is "this token names a slot
+	 * that is currently held" -- the release is what would act on it, and this
+	 * only asks. */
+	__disable_irq();
+	held = nor_release_decide(nor.state, nor.live, token, nor.gen) == NOR_REL_DROP;
+	__set_PRIMASK(pm);
+	return held;
+}
+
 enum nor_state nor_lifecycle_state(void)
 {
 	return nor.state;

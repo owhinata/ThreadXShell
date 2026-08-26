@@ -60,6 +60,8 @@ struct mock {
 	uint32_t token_given, token_returned;
 	/* what to break */
 	int fail_reserve, fail_claim, fail_stat, fail_geometry;
+	int background;           /* a bg job: no console claim can ever work */
+	unsigned console_asks;
 	int erase_rc, erase_cancel;
 	int program_fail_at;      /* 1-based; 0 = never */
 	int recv_rc;              /* what the transfer reports */
@@ -129,6 +131,15 @@ static int mock_program(void *ctx, uint32_t token, uint32_t addr,
 	return 0;
 }
 
+static int mock_console_ready(void *ctx)
+{
+	struct mock *k = ctx;
+
+	k->console_asks++;
+	CHECK(k->reserves == 0u, "the console was asked about AFTER reserving");
+	return k->background ? -1 : 0;
+}
+
 static int mock_claim(void *ctx)
 {
 	struct mock *k = ctx;
@@ -164,8 +175,18 @@ static int mock_receive(void *ctx, const struct ym_sink *sink)
 
 		if (take > sizeof block)
 			take = sizeof block;
-		for (i = 0u; i < take; i++)
-			block[i] = (uint8_t)((off + i) * 7u + 1u);
+		/* [!] POSITION-DEPENDENT, WITH A PERIOD LONGER THAN A CHUNK.  This
+		 * used to be `(off + i) * 7 + 1`, whose low byte repeats every 256 --
+		 * so every 1 KB block was identical and so was every 64 KB staging
+		 * chunk, and a coordinator that duplicated a chunk, re-sent a stale
+		 * one or swapped two would have passed both the CRC and the
+		 * read-back.  That is the same blindness a constant 0xA5 gave the
+		 * write path for the whole of issue #88. */
+		for (i = 0u; i < take; i++) {
+			uint32_t v = (off + i) * 2654435761u;
+
+			block[i] = (uint8_t)(v >> 24);
+		}
 		if (sink->write(sink->ctx, block, take) != 0)
 			return 1;
 	}
@@ -240,7 +261,8 @@ static int mock_geometry(void *ctx, unsigned slot, uint32_t *base,
 
 static const struct blob_write_ops OPS = {
 	&m, mock_reserve, mock_unreserve, mock_erase, mock_program,
-	mock_claim, mock_release, mock_receive, mock_read_back, NULL,
+	mock_console_ready, mock_claim, mock_release, mock_receive,
+	mock_read_back, NULL,
 	mock_announce, mock_count, mock_stat, mock_geometry,
 };
 
@@ -443,6 +465,22 @@ static void t_failures(void)
 	CHECK(run("x", 0, &rep) == BLOB_WRITE_NO_CONSOLE, "a refused console is not");
 	CHECK(m.receives == 0u, "the transfer ran without the console");
 	check_unwound("console refused", 1, 0);
+
+	/* [!] A BACKGROUND JOB COSTS NOTHING.  cli_console_claim() refuses one on
+	 * `sh->fg != NULL` alone, which is knowable before anything is spent -- and
+	 * the order used to be reserve, choose, ERASE, then find out.  `blob write
+	 * existing 0 &` destroyed two megabytes and printed "drop the trailing
+	 * '&'".  Raised by review of d98e7f5. */
+	reset();
+	m.background = 1;
+	CHECK(run("x", 0, &rep) == BLOB_WRITE_NO_CONSOLE,
+	      "a background job is not refused as a console failure");
+	CHECK(m.console_asks == 1u, "the console was asked about %u time(s)",
+	      m.console_asks);
+	CHECK(m.reserves == 0u && m.stats == 0u && m.erases == 0u &&
+	      m.announces == 0u && m.claims == 0u,
+	      "a background job reserved, stat'd, announced or erased something");
+	check_unwound("background", 0, 0);
 
 	/* Block 0 declaring more than the slot holds: the sink rejects, the
 	 * receiver cancels the batch, and nothing is programmed. */

@@ -114,6 +114,18 @@ struct blob_write_ops {
 	/** Program @p len bytes.  0 on success. */
 	int  (*program)(void *ctx, uint32_t token, uint32_t addr,
 	                const void *data, uint32_t len);
+	/**
+	 * Could a console claim ever succeed?  0 yes, <0 never.
+	 *
+	 * [!] ASKED FIRST, BEFORE THE RESERVATION, AND NOT OPTIONAL.  A
+	 * background job can never claim the console -- the RX ring is a strict
+	 * SPSC pipe owned by the foreground thread, so cli_console_claim()
+	 * refuses on `sh->fg != NULL` alone.  That is knowable with no side
+	 * effects, and the order used to be: reserve, choose, ERASE THE SLOT,
+	 * then discover it.  `blob write existing 0 &` destroyed two megabytes
+	 * and printed "drop the trailing '&'".
+	 */
+	int  (*console_ready)(void *ctx);
 	/** Claim the console for raw byte IO.  0, or <0 (background / busy). */
 	int  (*claim_console)(void *ctx);
 	/** Give the console back.  Called once, on every path that claimed. */

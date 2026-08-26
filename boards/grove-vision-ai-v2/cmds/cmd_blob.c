@@ -378,6 +378,19 @@ static int op_program(void *ctx, uint32_t token, uint32_t addr,
 	return (int)st;
 }
 
+static int op_console_ready(void *ctx)
+{
+	struct wr_ctx *c = (struct wr_ctx *)ctx;
+
+	/* The same condition cli_console_claim() refuses on, asked without
+	 * claiming anything: a background job's worker does not own the RX ring. */
+	if (c->sh->fg != NULL) {
+		c->console_bg = 1;
+		return -1;
+	}
+	return 0;
+}
+
 static int op_claim_console(void *ctx)
 {
 	struct wr_ctx *c = (struct wr_ctx *)ctx;
@@ -463,7 +476,8 @@ static int cmd_blob_write(struct cli_instance *sh, int argc, char **argv)
 	struct wr_ctx ctx = { sh, 0 };
 	const struct blob_write_ops ops = {
 		&ctx, op_reserve, op_unreserve, op_erase, op_program,
-		op_claim_console, op_release_console, op_receive, op_read_back,
+		op_console_ready, op_claim_console, op_release_console,
+		op_receive, op_read_back,
 		op_note_name, op_announce, op_slot_count, op_stat, op_geometry,
 	};
 	struct blob_write_report rep;
@@ -478,7 +492,13 @@ static int cmd_blob_write(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	}
 	if (argc >= 3) {
-		if (cli_parse_u32(argv[2], &want32) != 0)
+		/* [!] RANGE-CHECKED WHILE IT IS STILL UNSIGNED.  `want` carries a
+		 * negative sentinel for "no slot given", and cli_parse_u32 accepts
+		 * the whole 32-bit range -- so 4294967295 used to become -1 and be
+		 * read as "no slot", which for an existing name means "reuse the
+		 * one it is in" and erases a slot the operator never named. */
+		if (cli_parse_u32(argv[2], &want32) != 0 ||
+		    want32 >= (uint32_t)blob_map_count())
 			return blob_complain(sh, BLOB_ERR_PARAM);
 		want = (int)want32;
 	}
@@ -580,10 +600,10 @@ static int cmd_blob_verify(struct cli_instance *sh, int argc, char **argv)
 	(void)argc;
 	if (cli_parse_u32(argv[1], &slot) != 0)
 		return blob_complain(sh, BLOB_ERR_PARAM);
-	if (blob_stat((unsigned)slot, &info, NULL) != BLOB_OK)
-		return blob_complain(sh, BLOB_ERR_BUSY);
 
-	rc = blob_verify((unsigned)slot, &crc);
+	/* One call, one lease: what is printed below is the header the CRC was
+	 * compared against, not a second read of the same slot. */
+	rc = blob_verify((unsigned)slot, &info, &crc);
 	switch (rc) {
 	case BLOB_OK:
 		cli_print(sh, "slot %lu  : PASS, %lu B, crc32 %08lX\r\n",

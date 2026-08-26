@@ -113,6 +113,7 @@ int blob_read(unsigned slot, uint32_t off, void *buf, uint32_t len);
 /**
  * @brief  Re-read @p slot's payload and check it against its stored CRC-32.
  *
+ * @param out       receives the header it checked against.  May be NULL
  * @param computed  receives what the flash actually adds up to.  May be NULL
  * @return BLOB_OK on a match, BLOB_ERR_CRC on a mismatch, BLOB_ERR_EMPTY when
  *         the slot holds no header with a length and a CRC in it
@@ -123,11 +124,17 @@ int blob_read(unsigned slot, uint32_t off, void *buf, uint32_t len);
  * a write holds the reservation -- so the lease this takes cannot be out at the
  * same time.
  *
+ * [!] THE HEADER AND THE PAYLOAD ARE READ UNDER ONE LEASE.  Taking a second one
+ * in between would leave a window for a background write to change the slot,
+ * and the result of that race is a PASS against a header that has been
+ * replaced.  @p out is the header it actually compared against, so a caller
+ * cannot print one thing and have checked another.
+ *
  * INCOMPLETE slots are checked too: the body is there, so there is something to
  * check against, and "the payload of an interrupted transfer is intact as far
  * as it got" is a question worth being able to ask.
  */
-int blob_verify(unsigned slot, uint32_t *computed);
+int blob_verify(unsigned slot, struct blob_info *out, uint32_t *computed);
 
 /* ---- for the writer -------------------------------------------------------- */
 

@@ -2588,6 +2588,18 @@ refuses an address that is not word aligned and the seam refuses a transfer that
 is not whole words: where a word starts has to be defined before its bytes can
 be put back in order.
 
+[!] **An erase read-back proves less than a program's.**  Every erased byte is
+`0xFF`, so reading the range back says it is erased and nothing about which
+sectors the part actually erased -- a target that was already erased passes even
+if a different sector went instead.  The address is bounded by the arithmetic
+before the call and by the seam at the door, not by the read-back.
+
+A program's read-back can say more -- but only as much as its data allows.  It
+is a statement about WHERE bytes landed exactly when the expected values differ
+by position, which is why the default pattern is seeded from the address and why
+a constant is still accepted when one is asked for.  Same check; what it proves
+depends on what was written.
+
 [!] **Issue #88 shipped this path and could not have seen it.** `nor write`
 filled with a constant `0xA5`, and a constant is invariant under word reversal:
 64 KB of it verified perfectly, twice, including in the timing measurements that

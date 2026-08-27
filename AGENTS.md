@@ -275,9 +275,9 @@
    持ち込まない / Vela が全面 offload していないモデルを `AllocateTensors` で
    うるさく落とす**という設計判断である。境界の型変換は**ファイル側で剥がす**
    （`scripts/tflite_strip_boundary.cc`）。
-   **フラッシュ配置は宣言 + 検査**: モデルごとに名前付き変数
-   （`GROVE_MODEL_{CLS,DET}_{FILE,ADDR,RESERVED}`）を持ち、アドレスは cmd_nn.c へ
-   コンパイル定義で渡す（1 個の無名アドレスを使い回さない）。
+   **モデルは blob のアセットで、固定アドレスの予約を持たない**（#93 / #94）。
+   `nn open <name>` がスロットから読む。`GROVE_MODEL_*` / `--target flash-model-*` /
+   `model-cls` / `model-det` / `blob-tail` は **#94 で削除済み。復活させない**。
    **配置は「予約」であってファイルではない** — `cmake/check_flash_partitions.py` は
    予約どうしの非重複と 16 MB 収容を**成果物が 1 つも無くても**検査し、
    **存在必須なのは今から書く成果物だけ**にする（全ファイルを要求すると、
@@ -287,9 +287,11 @@
    ＝常駐 2nd BL が実際に発行する唯一の消去単位。#88 で逆アセンブルにより確定。
    `0x52`/`0xD8`/chip erase は 1 度も発行されない。**全 receiver への上界ではなく
    この経路の実測値**）。
-   **モデルの flash ターゲットは staging コピーに対して検査 → `verify_vela_model` →
+   **モデルの送信は staging コピーに対して検査 → `verify_vela_model` →
    同じファイルを送信**の順で、検証を README の手順に出さない（ホスト C++ が
-   無ければ skip せず拒否）。**これらのゲートを外す・緩める変更は不可**。
+   無ければ skip せず拒否）。#94 で `--target flash-model-*` が消えた後もこの鎖は
+   `build/<board>/send_verified_model.sh`（picocom の `--send-cmd`）に残る。
+   **これらのゲートを外す・緩める変更は不可**。
    **firmware 予約は 2 MB で、ブートローダ自身の算術から導出する**（#85。A/B 2 スロット
    x `Image max size 0x100000`。`GROVE_FW_SLOT_SIZE` x `GROVE_FW_SLOTS`。`0x200000` を
    ベタ書きしてコメントで説明しない）。**[!] `GROVE_FLASH_SIZE` / `GROVE_ERASE_GRAN` / `GROVE_SLOT_HDR_COPIES` /
@@ -299,7 +301,7 @@
    **キャッシュ化に戻す変更は不可**。
    **[!] `GROVE_ERASE_GRAN` と `GROVE_SLOT_HDR_COPIES` は別の事実で、束ね直さない**（#88）。
    スロットヘッダ予約を「1 消去ブロック」から導くと、粒度を実測の 4 KB へ絞った瞬間に
-   予約が 1 セクタに縮み、**backup ヘッダが blob-tail に落ちる**
+   予約が 1 セクタに縮み、**backup ヘッダが blob（当時の blob-tail）に落ちる**
    （`flash_geometry.cmake` が fail-open として名指しで却下している当のもの）。
    **[!] 外付け NOR のライフサイクルは `port/nor/` 所有**（#86）。QSPI/XIP の立ち上げと
    **IRQ 133 の EPK wrapset は `port/nor/` のもの**で、NPU の snapshot はその後に取る。
@@ -315,7 +317,8 @@
    wrap する（外側は薄いフォワーダで、外側だけ wrap すると内側が直に届く）。
    **`erase_all` と `word_write` の wrapper は `__real_*` を名指ししない** — これが
    ベンダ実装を GC させ、`check_placement_budget.py` の absence をこの 2 本について
-   恒久的に有効に保つ。書けるのは **`blob` だけ**（`blob-tail` は含めない）、消去は
+   恒久的に有効に保つ。書けるのは **`blob` だけ**（#94 以降は
+   `0x200000..0xFFE000` の一本。`slot-header` は含めない）、消去は
    **4 KB / enum 0 のみ**、境界は減算ベース、`NOR_ST_WRITING` 以外は拒否。
    [!] **ゲートは ELF ではなく ld の map で live/discarded を判定する** — GC 後の ELF に
    入力セクションの出自は残らず、しかも `spi_eeprom_comm.o` は `open`/`read_ID`/
@@ -404,9 +407,9 @@
    収まる必要がある**ので `--image-max` で別に検査する（無いと 1〜2 MB のイメージが
    ビルドを通り、実機で `ERR_IMAGE_SZ` になる）。**焼き先はスロット交替なので
    `0x0` も `0x100000` も「ファーム」であり、どちらか一方ではない。**
-   `0x200000..0xB7B000` は **blob 予約**（9,940,992 B）＋ `0xD50000..0xFFE000` が
-   **blob-tail**（2,809,856 B）。**境界付き writer は #88 Part C/E で入った**が
-   （書けるのは `blob` だけ）、**実データの書き手は #49 Step 2 でまだ無い**。
+   `0x200000..0xFFE000` は **blob 予約の一本**（14,671,872 B。#94 でモデル予約と
+   `blob-tail` を畳んだ結果）。**境界付き writer は #88 Part C/E で入り**、
+   **実データの書き手は #92 で入った**。
    **読み側は #92 で入った**（`blob list`/`info`/`read`/`free`）:
    **スロット表は `nor_seam_limits` の consumer で、第二の宣言を作らない**
    （`blob_map_check()` が `lo`/`hi`/`unit` を引数で受ける）/
@@ -428,13 +431,26 @@
    （拒否の前に「全部消えます」と言わない）/ **キャンセルの結果は `dmesg` にしか出ない** /
    **受信中はローカル Ctrl+C が無い**（0x03 はファイルの一部）。
    （`0xB70000..0xB7B000` の 44 KB は #88 で blob に入り、実機の `nor scan` で
-   **全 0xFF を確認済み**。）**2 分割なのは間にモデルがあるからで、
-   #49 Step 4 でモデルを blob へ移した時点で予約を削除し blob は一本になる**。
-   それ以前にモデル予約を消さない — #93 で `nn open` はアドレスを持たなくなったが、
-   flash ターゲットが名前で自分を検査し、実機に載っている当のコピーがそこにあり、
-   何より**まだ使われているフラッシュが守られなくなる**。**順序が本体**で、
-   writable interval を `0xFFE000` まで伸ばすと**生の `nor erase`/`nor write` が
-   旧モデル領域へ届く**（4b の着手条件は #94 に書いてある）。
+   **全 0xFF を確認済み**。）**スロット表は #94 で全面 re-carve した**
+   （`0x200000` から大きい順: 4M x1 / 2M x2 / 1M x3 / 512K x3 / 256K x2 = 11 スロット、
+   13 MB、`0xF00000` 終端。`0xF00000..0xFFE000` の 1,040,384 B は**意図的に未 carve**）。
+   [!] **全面 re-carve は規則ではなく一度きりの支払い** — identity は基底アドレスなので
+   通常許されるのは **append だけ**。#94 でやったのは、当時 store にあったのが
+   `cls`（基底 `0x200000` のままで生き残る）+ `det` + テスト 1 件で**再送が安い唯一の
+   瞬間だった**から。**次の re-carve はその時点の中身を全部払う。以後は append。**
+   `test/test_blob_map.c` が表全体を要素ごとに pin し、連続性とクラス降順も見る。
+   [!] **4 MB クラスは実機が動かせる大きさで決めてあり、今の中身とは無関係**。
+   モデルサイズを縛るのは**スロットだけ**（flatbuffer は XIP 窓から in-place で読まれ
+   コピーされない / アリーナは重みでなく feature map で決まる — **164,512 B の det の方が
+   1,704,672 B の cls よりアリーナが大きい**）。
+   [!] **旧モデルのバイトは消えていない。表示は各スロットの「ヘッダセクタ」だけで決まる**
+   （旧パーティションの位置ではない）: 再フラッシュ後は 0=`valid`(cls) /
+   2・3=`empty`（座礁した `test-small`/`det` がペイロードに。`empty` は「ヘッダが無い」で
+   あって「空きフラッシュ」ではない）/ 5・6=`invalid`（旧 MobileNet がヘッダセクタを覆う。
+   `blob erase` が要る）。**`det` と `test-small` は送り直した。**
+   **現在: `cls` = slot 1 `0x600000` / `det` = slot 9 `0xE80000`**（cls を 4 MB スロットから
+   退かして、そこは「他に入らないモデル」用に空けてある）。実測 cls 30 / det 6 トランザクション。
+   [!] **blob の移動は `erase` → `write`** — VALID なまま別スロットへ書くと `DUPLICATE` で拒否。
    **最終ブロック `0xFFE000..0x1000000` は `slot-header` 予約で絶対に書かない** —
    **ブートローダのスロットヘッダ**（`flash_end - 0x1000` と `- 0x2000` に 20 バイト、
    magic `"HIMAXWE2"` + チェックサム）。壊すとフォールバックで**黙って前のビルドが起動する**。

@@ -2134,55 +2134,51 @@ FlatBuffer-malformed model is the only way to reach the device's new bound, and
 the wrapper rejects it on the host first -- so that one case is sent with a bare
 `sb -k`.
 
-### The model partitions are still there, until Step 4b
+### The model partitions are gone (#94)
 
-The models are SEPARATE flash partitions from the firmware:
+There used to be two more flashing targets, `--target flash-model-cls` and
+`--target flash-model-det`, writing MobileNet at `0xB7B000` and BlazeFace at
+`0xD20000`.  Both are deleted.  A model is an asset in the store now: it goes
+over the console with `blob write`, through the verified send path above, and
+`nn open <name>` reads it out of a slot.
 
-```
-cmake --build build/grove-vision-ai-v2 --target flash-model-cls   # MobileNet
-cmake --build build/grove-vision-ai-v2 --target flash-model-det   # BlazeFace
-```
+[!] **Step 4 was split in two because of the ORDER.** Deleting the reservations
+grows the writable interval to `0xFFE000`, which puts the old model region
+within reach of raw `nor erase` and `nor write` -- not just the slot API.  Doing
+that while `nn` still read a fixed address would have opened a window in which
+a running model could be erased.  So 4a (#93) moved the reader and 4b (#94)
+moved the map, in that order, and 4b did not start until both models had been
+written to the store, verified there and opened by name on hardware.
 
-which means iterating on firmware never disturbs them, and swapping models never
-rewrites the bootloader -- worth having on a part with ~100k NOR cycles.
-
-[!] **`nn open` no longer reads them**, and that is why Step 4 is split in two.
-Step 4b (#94) deletes the reservations and the writable interval grows to
-`0xFFE000` -- which puts the OLD model region within reach of raw `nor erase`
-and `nor write`, not just the slot API.  Doing that while `nn` still read a
-fixed address would open a window in which a running model can be erased.  So 4a
-moves the reader and 4b moves the map, in that order, and 4b does not start
-until a blob-named `nn open cls` plus `nn run` has been seen on hardware.
+[!] **Nothing erased the old copies.**  MobileNet's bytes are still at
+`0xB7B000` and BlazeFace's at `0xD20000`, and stay readable by address -- `nn
+open --addr 0x3AB7B000 1704672` -- until something writes there.  They now fall
+across several slots of the re-carved table, which do not all report the same
+state; see the `nor scan` section.
 
 ### The flash partition map, and the checks over it
 
 | partition | write address | reserved blocks | today's artifact | flashed by |
 |---|---|---|---|---|
-| firmware | `0x000000` | `0x000000..0x200000` | 425,984 B image | `--target flash` |
-| blob | `0x200000` | `0x200000..0xB7B000` | -- (9,940,992 B) | nothing yet |
-| model-cls | `0xB7B000` | `0xB7B000..0xD20000` | MobileNet, 1,704,672 B | `--target flash-model-cls` |
-| model-det | `0xD20000` | `0xD20000..0xD50000` | BlazeFace, 164,512 B | `--target flash-model-det` |
-| blob-tail | `0xD50000` | `0xD50000..0xFFE000` | -- (2,809,856 B) | nothing yet |
+| firmware | `0x000000` | `0x000000..0x200000` | 466,944 B image | `--target flash` |
+| blob | `0x200000` | `0x200000..0xFFE000` | assets (14,671,872 B) | `blob write`, `nor write` |
 | slot-header | -- | `0xFFE000..0x1000000` | the bootloader's slot header (x2) | **never written** |
+
+**Three partitions since #94**, where there were six: `model-cls`, `model-det`
+and the `blob-tail` run above them were folded into blob.  blob is one run from
+the end of the firmware slots to the start of the bootloader's slot header, and
+its end IS `GROVE_SLOT_HDR_ADDR` rather than a number that agrees with it -- so
+the seam's interval, `nor scan`'s labels, `nor_seam_limits` in the ELF and
+`check_flash_partitions.py`'s expectations all descend from one declaration.
 
 **The map claims every byte of the part.**  An unclaimed run is not spare
 capacity, it is capacity nothing stops the next partition from being placed
 into, so there is no unnamed gap and `test_flash_partitions.py` checks that
 there is not -- comparing block spans, the way the checker does.  Every edge in
-the table happens to be 4 KB aligned today so the two agree; that was not true
-while the granularity was 64 KB, when `model-cls` started at `0xB7B000` and
-owned the block from `0xB70000`.  The rounding stays: the property is about
-blocks, and the next address that is not block-aligned must not read as a hole.
-
-[!] **The two blob runs are temporary, and the models are what separates them.**
-Issue #49 Step 4b (#94) deletes the model reservations and blob becomes one run
-of `0x200000..0xFFE000` (14,671,872 B).  Since Step 4a (#93) `nn open` no longer
-reads them -- it opens a blob by name -- but they cannot be deleted yet:
-`--target flash-model-*` still names their partitions, the copies programmed on
-the board are still what a running `nn` was checked against, and dropping the
-reservation would stop the gate protecting flash that is still in use.  The
-ordering is the point: extending the writable interval to `0xFFE000` puts the
-old model region within reach of raw `nor erase` and `nor write`.
+the table is 4 KB aligned today so the two agree; that was not true while the
+granularity was 64 KB, when `model-cls` started at `0xB7B000` and owned the
+block from `0xB70000`.  The rounding stays: the property is about blocks, and
+the next address that is not block-aligned must not read as a hole.
 
 ### [!] The last block is the bootloader's slot header
 
@@ -2239,15 +2235,13 @@ so, and it falls back to slot 0.  But if the live image is the one in slot 1,
 that fallback silently boots the **previous build**.  One erase block is
 reserved, so that both copies are inside it.
 
-Addresses live in ONE place: `GROVE_MODEL_CLS_ADDR` / `GROVE_MODEL_DET_ADDR` in
-`board.cmake`, which is what `--target flash-model-*` and
-`check_flash_partitions.py` both read.
-
-[!] Since #93 they are **no longer compiled into `cmd_nn.c`**.  `nn open <name>`
-takes the address from the blob header it verified, so there is nothing here for
-the firmware to be told -- and a compiled-in constant that nothing reads is one
-nobody notices going stale.  The old fixed addresses are still reachable, by
-typing them: `nn open --addr 0x3AB7B000 1704672`.
+[!] **No model address is compiled into anything any more** (#93, #94).
+`nn open <name>` takes the address from the blob header it verified, and since
+#94 there is no `GROVE_MODEL_*_ADDR` for a flashing target to read either -- a
+layout value that can still be set and is read by nothing reads as part of the
+map, so board.cmake `unset(... CACHE)`s them the way it does `GROVE_FW_RESERVED`.
+The old fixed addresses are still reachable by typing them, until something
+writes there: `nn open --addr 0x3AB7B000 1704672`.
 
 ### The firmware reservation is the bootloader's own arithmetic
 
@@ -2585,12 +2579,12 @@ reachable through exactly one place that bounds them.
 | `hx_lib_qspi_eeprom_erase_all` | refuses; no `__real_` reference exists |
 | `hx_lib_qspi_eeprom_word_write` | refuses; no `__real_` reference exists |
 
-The bounds: the address range must lie wholly inside `blob` (**not** `blob-tail`
--- the two runs are separated by flash `nn open cls|det` reads until issue #49
-Step 4 merges them), an erase must be on a 4 KB boundary and ask for erase unit
-0, `word_switch` must be 0, and the port must be in `NOR_ST_WRITING`. The
-comparisons are subtraction-based, so `addr + len` is never formed before the
-address is known to be inside the interval.
+The bounds: the address range must lie wholly inside `blob` -- one run of
+`0x200000..0xFFE000` since #94, which is everything except the firmware slots
+and the bootloader's slot header -- an erase must be on a 4 KB boundary and ask
+for erase unit 0, `word_switch` must be 0, and the port must be in
+`NOR_ST_WRITING`. The comparisons are subtraction-based, so `addr + len` is
+never formed before the address is known to be inside the interval.
 
 **The inner names, not the outer ones.** The outer `hx_lib_spi_eeprom_*` forms
 in `spi_eeprom_comm.o` are thin forwarders that pick a bus by id and tail into
@@ -3056,6 +3050,11 @@ Measured with `nor scan`, which reads **every byte**:
                     5812224 B occupied of 16777216
 ```
 
+[!] **Those labels are pre-#94.**  Taken before the model reservations were
+folded in; the same extents now print under `blob`, because `model-cls`,
+`model-det` and `blob-tail` no longer exist as partitions.  The BYTES are
+unchanged -- folding a reservation does not erase anything.
+
 [!] **`blob` is not empty**: ~2.6 MB of it is occupied by software this port did
 not put there. The seventeen-point `devmem peek` survey that preceded issue #85
 found "something" at `0x400000` and `0x500000` and had no way to see that they
@@ -3073,6 +3072,60 @@ survey predates them.  Re-scanned after that change: they appear in no extent,
 so they are `0xFF` throughout.  The `slot-header` extent is worth reading twice
 too -- `0xffe000..0x1000000`, 8,192 B, exactly the reservation the bootloader's
 own erase arithmetic produces.
+
+[!] **After #94's re-carve, several slots started over these bytes and they did
+not all report the same state.**  What decides it is only where the old data
+falls relative to each slot's own 4 KB HEADER SECTOR -- never where the old
+partitions were.  The first `blob list` after reflashing, OBSERVED:
+
+| idx | base | state | why |
+|---|---|---|---|
+| 0 | `0x200000` | `valid` (`cls`) | **survived the re-carve** -- its header names base `0x200000`, which is still a slot base, and 1,704,672 B fits the new 4 MB payload |
+| 2 | `0x800000` | `empty` | header sector never written -- while the stranded `test-small` sat in the payload |
+| 3 | `0xA00000` | `empty` | same, with the stranded `det` in the payload |
+| 5 | `0xC00000` | `invalid` | the old MobileNet run (`0xB7B000..0xD1B2E0`) COVERS this header sector -- the magic page held model bytes (`BLOB_REJECT_MAGIC`) |
+| 6 | `0xD00000` | `invalid` | same |
+| 1, 4, 7-10 | | `empty` | header sector erased, payload blank |
+
+Slots 2 and 3 are the case issue #92's vocabulary exists for: **`empty` means
+"no header", never "blank flash"**, so `blob write foo 2` is accepted as fresh
+and erases the whole slot.  Slots 5 and 6 were refused as occupied until
+`blob erase <slot>` retired each -- one 4 KB header erase, after which both read
+`empty`.
+
+Either way `blob write` says what it is about to do before it does it ("erasing
+it first, so whatever is there is gone even if the transfer fails"), and nothing
+has read those bytes since #93.  What is easy to get backwards is which slots
+need the deliberate erase: the `model-cls` reservation ended at `0xD20000`, a
+further 128 KB past where the model itself stops, so reservation edges do not
+tell you which sectors hold bytes.  Only the scan does.
+
+[!] **`det` and `test-small` had to be re-sent**, their headers being at
+`0xAC0000` and `0x900000`, which are no longer slot bases.  That is the price
+#94 paid on purpose, and it was payable only because it was small.
+
+### Where the models live now
+
+Both were re-sent over the console through `send_verified_model.sh`, and `cls`
+was moved out of the 4 MB slot so that slot stays available for a model that
+needs it:
+
+| blob | slot | base | payload address | size | crc32 |
+|---|---|---|---|---|---|
+| `cls` | 1 | `0x600000` | `0x3A601000` | 1,704,672 B | `8E679A3F` |
+| `det` | 9 | `0xE80000` | `0x3AE81000` | 164,512 B | `F6DA1D1E` |
+
+Measured on the way: **30 NOR transactions for `cls`** -- the #49 Step 2 budget
+exactly -- and **6 for `det`**.  Slot 9 is above `0xD6B000`, which was this
+board's high-water mark, so that write was also the first this port has made to
+flash nothing had ever touched.
+
+[!] **Moving a blob is `erase` then `write`, in that order.**  `blob write cls 1`
+while `cls` was still valid in slot 0 is refused with `DUPLICATE`:
+`blob_choose_target()` will not add to a state where one name is in two slots.
+`blob erase 0` retires the name first.  It erases only the header sector, so
+between the two commands the payload is still readable by address
+(`nn open --addr 0x3A201000 1704672`) if the transfer needs retrying.
 
 ### [!] The fitted NOR is a Zbit ZB25LQ128C, not the schematic's Winbond
 
@@ -3139,15 +3192,16 @@ enabling the window.
 
 ### [!] The blob area is not empty flash, and the first write destroys what is there
 
-`0x200000..0xB7B000` is reserved (9,940,992 B) and written by nothing yet.  It
-is **not blank** -- what is in it, and where, is the `nor scan` output above;
-that is the authoritative account and this section does not repeat it.  About
-2.6 MB was left there by the factory SenseCraft firmware, including a FlashDB
-KVDB at `0x300000`.
+`0x200000..0xFFE000` is reserved (14,671,872 B).  It is **not blank** -- what is
+in it, and where, is the `nor scan` output above; that is the authoritative
+account and this section does not repeat it.  About 2.6 MB was left there by the
+factory SenseCraft firmware, including a FlashDB KVDB at `0x300000`, and since
+#94 the region also covers the old fixed model copies at `0xB7B000` and
+`0xD20000`.
 
 Nothing in this port reads any of it, and reflashing the factory image would not
 bring its contents back.  Shrinking the reservation was a deliberate trade
-(2026-08-23): the 9.4 MB in exchange for that.
+(2026-08-23): the space in exchange for that.
 
 It is **not ours**, despite `lib/flashdb` being in this repository -- that is a
 submodule added for Wio Lite AI, which configures `FDB_WRITE_GRAN = 8`.  The
@@ -3194,25 +3248,24 @@ in bigger blocks.
 reservation was "one erase block" -- so tightening the rounding alone would have
 shrunk it onto a single sector and dropped the backup header into `blob-tail`.
 `cmake/flash_geometry.cmake` had already recorded that exact `-D` as a
-fail-open; separating the two is what makes the tightening safe.
+fail-open; separating the two is what makes the tightening safe.  (`blob-tail`
+is gone since #94, but the `-D` table above still names it -- that is what those
+overrides destroyed when the reservation existed, and the entries are kept as
+the record of why the two numbers are separate.)
 
-`0xD20000` is the first 64 KB boundary above the classification model's extent
-(`0xB7B000 + 1,704,672 = 0xD1B2E0`).  It was chosen when 64 KB was believed to be
-the erase block, so the alignment is now more than it needs to be rather than
-wrong; the address stays because a copy is already programmed on the board and
-`--target flash-model-det` writes there.
 Host tests: `test/test_flash_partitions.py`, `test/test_flash_geometry.py`.
 
-**Both model targets verify before they transmit.**  `flash-model-cls` and
-`flash-model-det` stage a copy, run the partition check and `verify_vela_model`
-**on that staged copy**, and then send **that same file** -- so nothing can be
-swapped in between, and a stale or malformed model never costs an erase cycle.
-With no host C++ compiler the verifier cannot be built and the targets refuse;
-skipping the check would be the fail-open the arrangement exists to prevent.
+**The staged-copy chain outlived the targets it was built for.**  The two
+`flash-model-*` targets staged a copy, ran the partition check and
+`verify_vela_model` **on that staged copy**, and sent **that same file**.  Both
+targets are gone (#94) and the chain moved to `send_verified_model.sh`, which
+does the same three steps on the path the console uses.  With no host C++
+compiler the verifier cannot be built and the script refuses; skipping the check
+would be the fail-open the arrangement exists to prevent.
 
 The one thing no static check can bound is a receiver that erases the whole chip
-before writing.  That evidence is empirical: flash one model, then read the
-other one back with `nn open` + a run.
+before writing.  That evidence is empirical: write one asset, then read another
+one back.
 
 ### `blob` -- the asset store (issue #92, #49 Step 2)
 
@@ -3221,26 +3274,57 @@ blob list           every slot: state, size, length, crc32, name
 blob info <slot>    one slot in full, and why an invalid one is
 blob read <slot> [off] [len]    hexdump payload bytes (256 B max)
 blob free           slots that can take something, and what cannot
+blob write <name> <slot>        receive a file over YMODEM into a slot
+blob verify <slot>  re-read a slot and check its stored crc32
+blob erase <slot>   retire a blob: erase its header sector
 ```
 
-The read side only, so far: `blob write`, `erase` and `verify` are items 6 and
-7 of #49 Step 2.  Nothing here writes the array -- though the first lease on a
-cold port still runs the vendor's quad-enable, which writes the NOR's
-non-volatile status register, exactly as `nor info` does.
+Note that even the read side is not free of writes: the first lease on a cold
+port runs the vendor's quad-enable, which writes the NOR's non-volatile status
+register, exactly as `nor info` does.
 
 **The slots are a table over the seam's writable interval, not a second
 declaration of it.**  `blob_map_check()` takes `lo`, `hi` and `unit` as
-arguments and they come from `nor_seam_limits`, so when #49 Step 4 deletes the
-model reservations and the interval grows to `0x200000..0xFFE000`, the only
-thing that changes here is the table.  Ten slots in four size classes, 9 MB
-exactly:
+arguments and they come from `nor_seam_limits` -- so when #49 Step 4b deleted
+the model reservations and the interval grew to `0x200000..0xFFE000`, the only
+thing that changed here was the table.  Eleven slots in five size classes,
+13 MB, running from `0x200000` to `0xF00000` with the classes in descending
+order and no gaps:
 
-| slots | base | size | payload |
+| idx | base | size | payload |
 |---|---|---|---|
-| 2 | `0x200000`, `0x400000` | 2 MB | 2,093,056 B |
-| 3 | `0x600000`, `0x700000`, `0x800000` | 1 MB | 1,044,480 B |
-| 3 | `0x900000`, `0x980000`, `0xA00000` | 512 KB | 520,192 B |
-| 2 | `0xA80000`, `0xAC0000` | 256 KB | 258,048 B |
+| 0 | `0x200000` | 4 MB | 4,190,208 B |
+| 1-2 | `0x600000`, `0x800000` | 2 MB | 2,093,056 B |
+| 3-5 | `0xA00000`, `0xB00000`, `0xC00000` | 1 MB | 1,044,480 B |
+| 6-8 | `0xD00000`, `0xD80000`, `0xE00000` | 512 KB | 520,192 B |
+| 9-10 | `0xE80000`, `0xEC0000` | 256 KB | 258,048 B |
+
+[!] **This table was re-carved WHOLE at #94, and that is not the rule.**
+Identity is the base address, so the only edit normally allowed is an APPEND:
+anything else points a stored blob's header at a slot that no longer starts
+where it does, and the blob becomes unreachable.  #92 shipped ten slots and
+pinned them as a golden prefix for exactly that reason.
+
+The prefix was spent here once, deliberately.  Appending would have left the
+classes interleaved by address -- 2 MB, 1 MB, 512 KB, 256 KB, then a 4 MB slot
+bolted on at the top -- with the largest class in the last place a reader looks.
+Re-carving largest-first cost the re-sending of two files, because at that
+moment the store held `cls` (which **survives**: same base `0x200000`, and a
+header only has to agree with its own slot's base and fit its `payload_max`),
+`det`, and one test file.  **There is no second cheap moment** -- the next
+re-carve pays whatever is stored then.  `test/test_blob_map.c` now pins the
+WHOLE table entry by entry, plus contiguity and descending class order, so any
+entry that moves fails there first.
+
+[!] **The 4 MB class is sized by what the hardware can run, not by anything
+stored here** -- the largest asset today is a 1,704,672 B model.  Nothing but
+the slot bounds model size: the flatbuffer is read in place out of the XIP
+window and never copied, `npu_open()`'s length limit is whatever is left of the
+window, and the arena is a function of feature-map sizes rather than of weights.
+The two models prove that last part -- the **164,512 B detector uses a bigger
+arena (394,800 B) than the 1,704,672 B classifier (385,748 B)**.  So a model
+over 2,093,056 B is something this board could run and a 2 MB store could not
+hold.
 
 Fixed slots rather than variable extents because what lands here is a few
 models and the operation that matters is replacing one in place; the size
@@ -3253,10 +3337,18 @@ every index means a different piece of flash, so nothing that persists carries
 one: a stored header names its own base, and the number `blob list` prints is a
 display ordinal resolved against the table on the spot.
 
-**The 503,808 B above `0xB00000` are not carved**, and `blob free` reports them
-apart from the free slots for that reason -- no slot names them, so nothing can
-be put there.  They are not too small to carve (another 256 KB slot would fit);
-the table stops on a round nine megabytes and Step 4 re-carves the region.
+**`0xF00000..0xFFE000` -- 1,040,384 B -- is deliberately left uncarved**, and
+`blob free` reports it apart from the free slots because no slot names those
+bytes, so nothing can be put there.
+
+It is not too small: a draft of #94 put a 512 KB and a 256 KB slot in it.  It is
+uncarved because **nothing needs those classes** -- three 1 MB and two 512 KB
+slots are still free -- and every carved slot costs a `blob_stat` in each `nn
+open <name>` and a line in each `blob list`.  Left whole, it can become whatever
+class a real demand asks for, and **appending is the one safe direction**, so
+this is where a future class goes without touching anything already stored.  (A
+1 MB slot would not fit regardless: that class needs 1,048,576 B.)  Above it is
+the bootloader's slot header, which nothing may ever write.
 
 **The header is two program pages, and the magic page is written last and
 alone** (`src/blob_state.c`).  Page 0 holds an 8-byte magic and nothing else;
@@ -3690,10 +3782,10 @@ mv model/blazeface_stripped_vela.tflite model/blazeface_vela.tflite
 ./verify_vela_model model/blazeface_vela.tflite --blazeface
 ```
 
-`GROVE_MODEL_DET_FILE` already points at that last path, so
-`--target flash-model-det` picks it up -- and runs `verify_vela_model` itself on
-the staged copy before transmitting, so the manual run above is for reading the
-report, not for safety.
+That last file is what goes into the store: point `send_verified_model.sh
+--profile det` at it from picocom and run `blob write det <slot>` on the board.
+The script stages, verifies and sends the same copy, so the manual
+`./verify_vela_model` above is for reading the report, not for safety.
 
 **Why the stripping step.** "An int8 model" from the model zoo means int8
 WEIGHTS and float32 I/O: the graph starts with a `QUANTIZE` and ends with four

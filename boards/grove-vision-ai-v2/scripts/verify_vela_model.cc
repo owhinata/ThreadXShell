@@ -95,6 +95,17 @@ const expected_output kBlazeFaceOutputs[] = {
 
 int g_fail;
 
+/* How many of @p outs have this exact 1 x anchors x chan shape.  Split out so
+ * that the check and the notice below cannot come to disagree about what the
+ * decoder's contract IS -- the reason npu_model_scan.h gives for sharing the
+ * locator with the firmware, applied to the two branches of this one tool. */
+unsigned count_matching(const std::vector<const tflite::Tensor *> &outs,
+                        const expected_output &x);
+
+/* Does @p outs satisfy the decoder's contract exactly: four outputs, each of
+ * the four shapes present once? */
+bool blazeface_contract_holds(const std::vector<const tflite::Tensor *> &outs);
+
 void fail(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void fail(const char *fmt, ...)
 {
@@ -150,6 +161,33 @@ bool as_anchor_shape(const tflite::Tensor *t, int32_t *anchors, int32_t *chan)
 		return false;
 	*anchors = s->Get(1);
 	*chan    = s->Get(2);
+	return true;
+}
+
+unsigned count_matching(const std::vector<const tflite::Tensor *> &outs,
+                        const expected_output &x)
+{
+	unsigned matches = 0;
+
+	for (const tflite::Tensor *t : outs) {
+		int32_t a = 0, c = 0;
+
+		if (as_anchor_shape(t, &a, &c) && a == x.anchors && c == x.chan)
+			matches++;
+	}
+	return matches;
+}
+
+bool blazeface_contract_holds(const std::vector<const tflite::Tensor *> &outs)
+{
+	const size_t want = sizeof kBlazeFaceOutputs / sizeof kBlazeFaceOutputs[0];
+
+	if (outs.size() != want)
+		return false;
+	for (size_t e = 0; e < want; e++) {
+		if (count_matching(outs, kBlazeFaceOutputs[e]) != 1u)
+			return false;
+	}
 	return true;
 }
 
@@ -260,7 +298,9 @@ int main(int argc, char **argv)
 		        "  ethos-u operators only, a payload npu_open() will accept, int8\n"
 		        "  I/O, an offline memory plan, and a layout that fits the arena\n"
 		        "  the board reserves.  --blazeface also pins the four output\n"
-		        "  shapes the decoder looks for.\n");
+		        "  shapes the decoder looks for -- it ADDS checks rather than\n"
+		        "  naming a model, so without it a detector still passes, and\n"
+		        "  says so.\n");
 		return 2;
 	}
 
@@ -459,7 +499,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	/* --- the decoder's contract, when asked for it ------------------------ */
+	/* --- the decoder's contract ------------------------------------------- */
 
 	if (blazeface) {
 		const size_t want = sizeof kBlazeFaceOutputs / sizeof kBlazeFaceOutputs[0];
@@ -470,15 +510,8 @@ int main(int argc, char **argv)
 		} else {
 			for (size_t e = 0; e < want; e++) {
 				const expected_output &x = kBlazeFaceOutputs[e];
-				unsigned matches = 0;
+				unsigned matches = count_matching(outs, kBlazeFaceOutputs[e]);
 
-				for (const tflite::Tensor *t : outs) {
-					int32_t a = 0, c = 0;
-
-					if (as_anchor_shape(t, &a, &c) &&
-					    a == x.anchors && c == x.chan)
-						matches++;
-				}
 				if (matches != 1u)
 					fail("BlazeFace wants exactly one 1x%dx%d output (%s); "
 					     "found %u.  blazeface_decode() locates its tensors "
@@ -489,6 +522,27 @@ int main(int argc, char **argv)
 				printf("  ok     the four BlazeFace output shapes are present "
 				       "and unambiguous\n");
 		}
+	} else if (blazeface_contract_holds(outs)) {
+		/* [!] NOTICED, NOT CHECKED, AND NOT REFUSED (issue #95).
+		 *
+		 * `--profile cls|det` reads like it names the model and does not: it
+		 * selects a CHECK SET, and `det` is `cls` plus the four shapes above.
+		 * So sending the detector as `cls` passes and transmits, with the one
+		 * check that is specific to it never run -- which is what happened the
+		 * first time the detector went into the asset store, because picocom
+		 * was still running with an earlier step's send hook.  The wrapper
+		 * cannot tell: it is launched on the PC and the slot name is typed on
+		 * the board.
+		 *
+		 * A note rather than a refusal.  Carrying these four shapes is strong
+		 * evidence and not proof, and a gate that refused on it would be
+		 * asserting an identity it cannot establish.  What it can honestly say
+		 * is that there was a stricter check available and nobody asked for
+		 * it -- before any of the file has gone down the wire. */
+		printf("  [!]    this model carries the four BlazeFace output shapes "
+		       "but --blazeface\n"
+		       "         was not given, so they were NOT pinned "
+		       "(--profile det pins them)\n");
 	}
 
 	/* --- reachability ------------------------------------------------------ */

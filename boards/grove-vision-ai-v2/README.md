@@ -2095,8 +2095,36 @@ then `blob write det <slot>` on the board and `C-a C-s` in picocom.  The script
 path and sending it again is a gap a build could step into.  It writes the
 verifier's output to **stderr**, because picocom connects the send command's
 stdout to the serial line.  The profile is an explicit argument and never a
-guess from a filename: the detector's shape checks are det-only, and the
-strength of a gate must not depend on what somebody called a file.
+guess from a filename: the strength of a gate must not depend on what somebody
+called a file.
+
+[!] **`--profile` SELECTS A CHECK SET.  It does not name the model** (#95).
+`det` is `cls` plus the four BlazeFace output shapes, so the two directions are
+not symmetric: `--profile det` on the classifier is rejected, and
+`--profile cls` on the detector **passes and transmits**, with the one check
+specific to it never run.
+
+That is not hypothetical -- it is what happened the first time the detector went
+into the store, because picocom was still running with an earlier step's send
+hook.  The wrapper cannot detect it on its own: it is launched on the PC and the
+slot name is typed on the board, so a stale launcher is the ordinary way to get
+it wrong.  So `verify_vela_model` **says so** when a model carries the four
+shapes and `--blazeface` was not given:
+
+```
+  [!]    this model carries the four BlazeFace output shapes but --blazeface
+         was not given, so they were NOT pinned (--profile det pins them)
+```
+
+A note and not a refusal.  Carrying those shapes is strong evidence, not proof,
+and a gate that refused on it would be asserting an identity it cannot
+establish.  What it can honestly say is that a stricter check was available and
+nobody asked for it -- before any of the file has gone down the wire.
+
+`cls` gets no equivalent pin, deliberately: the classification path has no fixed
+output contract (`nn run` prints a top-5 over whatever the output vector is), so
+pinning `1x10` would refuse legitimate classifiers to manufacture a symmetry
+that is not there.
 
 [!] **It is fail-closed.**  With no host C++ compiler there is no verifier, and
 the script refuses and sends nothing rather than transferring unchecked.

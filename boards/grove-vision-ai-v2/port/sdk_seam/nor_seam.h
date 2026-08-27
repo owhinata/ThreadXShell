@@ -75,10 +75,20 @@ extern "C" {
 #error "NOR_PART_FW_END / NOR_PART_BLOB_END / NOR_ERASE_GRAN must come from board.cmake"
 #endif
 
-/* [!] blob AND NOT blob-tail.  The two runs are one reservation split by the
- * models that sit between them (board.cmake), and #49 Step 4 merges them --
- * but until it does, the tail is separated from blob by flash that `nn open
- * cls|det` reads, and a writable interval spanning it would span those. */
+/* [!] ONE RUN NOW, AND IT REACHES THE OLD MODEL ADDRESSES (issue #94).  blob
+ * used to stop below `model-cls` and resume above `model-det` as `blob-tail`,
+ * because the flash between them was what `nn open cls|det` read.  Since issue
+ * #93 a model is an asset in the store and nothing reads a fixed address, so
+ * the interval is [firmware end, slot header) with nothing carved out of it.
+ *
+ * The consequence is deliberate and was the whole reason #49 Step 4 was split
+ * in two: `nor erase` and `nor write` can now address the blocks the old fixed
+ * copies still occupy.  Nothing erased them -- they are simply no longer
+ * protected, because nothing needs them any more.
+ *
+ * What is still NOT in here is the slot header itself.  HI is exclusive and
+ * equals its first address (board.cmake), so the bootloader's own two sectors
+ * stay out of reach. */
 #define NOR_WRITABLE_LO   ((uint32_t)(NOR_PART_FW_END))
 #define NOR_WRITABLE_HI   ((uint32_t)(NOR_PART_BLOB_END))   /* exclusive */
 

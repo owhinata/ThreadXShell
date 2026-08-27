@@ -51,116 +51,73 @@ set(MCU_OPTS -mcpu=cortex-m55 -mthumb -mfloat-abi=hard)
 
 set(LDSCRIPT_APP "${BOARD_DIR}/ldscript/HX6538_CM55M_S.ld")
 
-# --- Flash partition map (issues #44, #45) -----------------------------------
+# --- Flash partition map (issues #44, #45, #85, #94) -------------------------
 # Declared HERE, above everything that uses it, because two consumers need it:
 # the flashing targets at the bottom of this file, and the firmware itself --
-# cmd_nn.c is compiled with these offsets so that `nn open cls` and
-# `--target flash-model-cls` name one address rather than two that a comment
-# asks to agree.
-#
-# [!] ONE NAMED VARIABLE PAIR PER MODEL (issue #45).  There used to be a single
-# anonymous GROVE_MODEL_FILE/ADDR.  That was fine while there was one model and
-# became a hazard the moment there were two: "the model" stops identifying
-# anything, and the flash target writes whichever one the cache happens to
-# hold -- over whatever is at the address the cache happens to hold.
+# cmd_nor.c is compiled with the partition edges so that `nor scan`'s labels and
+# the layout the host checks cannot drift apart (issue #86).  Leaving them below
+# meant the compile definitions expanded to nothing, which the C compiler caught
+# only because an empty initialiser is a syntax error.
 #
 # check_flash_partitions.py turns this map into a checked property.  It runs as
 # the first command of every flashing target, so a layout mistake stops before
 # the serial port is opened.
-set(GROVE_MODEL_CLS_FILE
-    "${GROVE_SDK_ROOT}/model_zoo/tflm_mb_cls/qat_pruning_model_vela.tflite"
-    CACHE FILEPATH
-    "Vela-compiled classification model (`--target flash-model-cls`, `nn open cls`)")
-set(GROVE_MODEL_CLS_ADDR "0xB7B000" CACHE STRING
-    "Flash offset of the classification model")
-
-# The detector is NOT in the SDK and cannot be committed (the model zoo licence
-# covers the weights), so this defaults to where the documented pipeline puts
-# it: build/<board>/model/.  See the BlazeFace section of the board README for
-# the commands that produce it.
-set(GROVE_MODEL_DET_FILE
-    "${CMAKE_BINARY_DIR}/model/blazeface_vela.tflite"
-    CACHE FILEPATH
-    "Vela-compiled BlazeFace model (`--target flash-model-det`, `nn open det`)")
-# 0xD20000 is the first 64 KB boundary above the classification model's extent
-# (0xB7B000 + 1,704,672 = 0xD1B2E0).  It was chosen when 64 KB was believed to
-# be the erase block; the measured granularity is 4 KB (issue #88), so the
-# alignment is now more than it needs to be rather than wrong.  Left where it
-# is because moving a model address moves what `nn open det` was compiled with
-# and what is already programmed on the board.  The checker is what makes any
-# of this a checked property rather than arithmetic in a comment.
-set(GROVE_MODEL_DET_ADDR "0xD20000" CACHE STRING
-    "Flash offset of the detection model")
+#
+# [!] THE MODELS ARE NOT PARTITIONS ANY MORE (issue #94, #49 Step 4b).  There
+# were two -- `model-cls` at 0xB7B000 and `model-det` at 0xD20000, each with its
+# own GROVE_MODEL_*_{FILE,ADDR,RESERVED} and a `--target flash-model-*` that
+# wrote it -- plus a `blob-tail` reservation whose only reason to exist was that
+# those two sat between the store and the bootloader's slot header.  Since issue
+# #93 `nn open <name>` reads a model out of an asset slot, under the lease its
+# CRC was checked with, so nothing reads a fixed address any more and the split
+# has nothing left to protect.  Deleting them was gated on hardware evidence,
+# recorded on issue #94 first: both models verify in the store, both open by
+# name, and both run.
+#
+# [!] THE OLD COPIES ARE NOT ERASED BY THIS.  The table below covers those
+# blocks and the writer may now reach them; the bytes stay where they are until
+# something writes there.
 
 # Fixed NOR / bootloader geometry, and everything that derives only from it
-# (issue #85).  Separate file because those four numbers are MEASUREMENTS, not
+# (issue #85).  Separate file because those five numbers are MEASUREMENTS, not
 # settings: they are plain variables and a disagreeing -D is a hard error, which
 # is the enforcement -- see the header there, and test/test_flash_geometry.py.
 include("${BOARD_DIR}/cmake/flash_geometry.cmake")
 
-# [!] THE RESERVATIONS LIVE HERE, WITH THE ADDRESSES, and not down beside the
-# flashing targets where they started.  Two consumers need them and one of them
-# is 400 lines above the other: the flashing targets at the bottom of this file,
-# and the firmware itself -- cmd_nor.c is compiled with the partition edges so
-# that `nor scan`'s labels and the layout check cannot drift apart (issue #86).
-# Leaving them below meant the compile definitions expanded to nothing, which
-# the C compiler caught only because an empty initialiser is a syntax error.
-# [!] The blob area (issue #85, reserved for #49 Step 2).  It has a bounded
-# WRITER since issue #88 Part C -- port/nor/nor_write.c, and `nor erase` /
-# `nor write` on top of it -- and this is the only partition that writer will
-# touch.  What it still has no writer of is DATA: nothing puts anything
-# meaningful here until #49 Step 2.  The reservation is a property of addresses
-# either way, and having it checked from the day it existed is what stopped the
-# next partition being placed on top of it.
+# [!] The asset store: reserved by issue #85, given a format by #92, given the
+# rest of the part by #94.  It has a bounded WRITER since issue #88 Part C --
+# port/nor/nor_write.c, with `nor erase` / `nor write` and `blob write` on top
+# of it -- and this is the only partition that writer will touch.
 #
-# Ends on the first block the classification model owns, so the two abut with no
-# unnamed gap.  Derived from the model's address rather than repeating the
-# 0xB7B000 that rounding happens to produce today.
+# ONE RUN, from the end of the firmware slots to the START of the bootloader's
+# slot header.  Its end IS GROVE_SLOT_HDR_ADDR rather than a number that agrees
+# with it: the seam's interval, `nor scan`'s labels, nor_seam_limits in the ELF
+# and check_flash_partitions.py's expectations all descend from that one
+# declaration, so there is no pair of values that could drift.
 #
-# [!] THAT END MOVED UP BY 44 KB when the granularity became 4 KB (issue #88):
-# the model address is 4 KB aligned but not 64 KB aligned, so 0xB70000..0xB7B000
-# used to round into the model's blocks and now belongs to blob.  The original
-# survey predates them; they were walked afterwards, on hardware, and read 0xFF
-# throughout (issue #88 Part A).
-#
-# [!] WHAT IS THERE TODAY IS NOT OURS, AND THE FIRST WRITE DESTROYS IT.  The
+# [!] WHAT IS THERE TODAY IS NOT ALL OURS, AND THE FIRST WRITE DESTROYS IT.  The
 # factory SenseCraft firmware left a FlashDB KVDB at 0x300000 -- FlashDB's
 # sector magic, at the offset FDB_WRITE_GRAN = 32 puts it -- and data at
 # 0x400000 and 0x500000.  Nothing in this port reads any of it, and reflashing
 # the factory image would not bring its contents back.  Accepted deliberately
-# (2026-08-23) in exchange for the 9.4 MB.
+# (2026-08-23) in exchange for the space.
 set(GROVE_BLOB_ADDR "${GROVE_FW_RESERVED}")
-math(EXPR GROVE_BLOB_END
-     "(${GROVE_MODEL_CLS_ADDR} / ${GROVE_ERASE_GRAN}) * ${GROVE_ERASE_GRAN}"
+math(EXPR GROVE_BLOB_RESERVED "${GROVE_SLOT_HDR_ADDR} - ${GROVE_BLOB_ADDR}"
      OUTPUT_FORMAT HEXADECIMAL)
-math(EXPR GROVE_BLOB_RESERVED "${GROVE_BLOB_END} - ${GROVE_BLOB_ADDR}"
-     OUTPUT_FORMAT HEXADECIMAL)
-# 0xB7B000 + 0x1A5000 = 0xD20000, so this ends exactly on the detector's first
-# block.  Headroom over today's 1,704,672 B model: ~19 KB.
-set(GROVE_MODEL_CLS_RESERVED "0x1A5000" CACHE STRING
-    "Flash reserved for the classification model")
-# 0xD20000 + 0x30000 = 0xD50000.  Headroom over today's ~164 KB model: ~32 KB.
-set(GROVE_MODEL_DET_RESERVED "0x30000" CACHE STRING
-    "Flash reserved for the detection model")
 
-# The rest of the flash above the models (issue #85).  It is blob's second run
-# today and is declared for the reason any reservation is: an unnamed 2.8 MB gap
-# is not spare capacity, it is capacity nobody is stopping the next partition
-# from being placed into.
-#
-# [!] THE SPLIT IS TEMPORARY.  The models are the only thing between the two
-# runs, and #49 Step 4 moves them INTO blob -- at which point their reservations
-# are deleted and blob becomes one run of 0x200000..GROVE_SLOT_HDR_ADDR.  That
-# is the destination; the models cannot be deleted before then because `nn open
-# cls|det` is compiled with their addresses and `--target flash-model-*` names
-# their partitions, and deleting the reservation would stop the gate protecting
-# flash that is still in use.
-math(EXPR GROVE_BLOB_TAIL_ADDR
-     "${GROVE_MODEL_DET_ADDR} + ${GROVE_MODEL_DET_RESERVED}"
-     OUTPUT_FORMAT HEXADECIMAL)
-math(EXPR GROVE_BLOB_TAIL_RESERVED
-     "${GROVE_SLOT_HDR_ADDR} - ${GROVE_BLOB_TAIL_ADDR}"
-     OUTPUT_FORMAT HEXADECIMAL)
+# [!] THE DELETED CACHE ENTRIES ARE DROPPED, NOT LEFT TO ROT.  These six were
+# CACHE STRING / CACHE FILEPATH, so a build directory configured before #94
+# still carries them -- visible in cmake-gui, settable with -D, and read by
+# nothing.  A layout value that can still be set and has no effect is worse than
+# one that is gone: it reads as part of the map.  Same reasoning as
+# GROVE_FW_RESERVED in flash_geometry.cmake.  (GROVE_BLOB_END and the
+# GROVE_BLOB_TAIL_* pair went too, but they were derived plain variables and
+# leave nothing behind.)
+foreach(_dead GROVE_MODEL_CLS_FILE GROVE_MODEL_CLS_ADDR GROVE_MODEL_CLS_RESERVED
+              GROVE_MODEL_DET_FILE GROVE_MODEL_DET_ADDR GROVE_MODEL_DET_RESERVED)
+    unset(${_dead} CACHE)
+endforeach()
+unset(_dead)
 
 set(GEN_DIR "${CMAKE_BINARY_DIR}/gen")
 file(MAKE_DIRECTORY "${GEN_DIR}")
@@ -746,22 +703,29 @@ target_compile_definitions(shell_objs PRIVATE
     # no warning).  The compile-time SDK config is a 24 MHz placeholder and
     # must never be used for this; udelay() reads SystemCoreClock directly.
     CLI_CPU_CYCLES_PER_US=400
-    # NN_MODEL_{CLS,DET}_OFFSET are GONE (issue #93).  `nn open <name>` reads
-    # the model out of the asset store now, so cmd_nn.c has no fixed address to
-    # be told about -- the address comes from the blob header, under the lease
-    # it was verified with.  GROVE_MODEL_*_ADDR still exist and still drive the
-    # flash-model-* targets and the partition checker until Step 4b (#94) folds
-    # those reservations into blob; what would be wrong is leaving a compiled-in
-    # constant here that nothing reads, since an unreferenced constant is one
-    # nobody notices going stale.
+    # NN_MODEL_{CLS,DET}_OFFSET are GONE (issue #93) and so are the model
+    # partitions they used to name (issue #94).  `nn open <name>` reads the
+    # model out of the asset store, under the lease its CRC was checked with,
+    # so no compiled-in address is left here -- and an unreferenced constant is
+    # one nobody notices going stale.
     # `nor scan` labels its extents with these, and they are the SAME variables
     # check_flash_partitions.py consumes -- so the labels on the device and the
     # layout the host checks cannot drift apart (issues #45, #85, #86).
+    # TWO edges for three labels: everything below the first is firmware,
+    # everything below the second is blob, and the rest of the part is the
+    # bootloader's slot header.
     NOR_PART_FW_END=${GROVE_FW_RESERVED}
-    NOR_PART_BLOB_END=${GROVE_BLOB_END}
-    NOR_PART_CLS_END=${GROVE_MODEL_DET_ADDR}
-    NOR_PART_DET_END=${GROVE_BLOB_TAIL_ADDR}
-    NOR_PART_TAIL_END=${GROVE_SLOT_HDR_ADDR}
+    NOR_PART_BLOB_END=${GROVE_SLOT_HDR_ADDR}
+    # [!] THE SAME NUMBER, AND STILL A SEPARATE DEFINITION (issue #94).  blob
+    # now ends exactly where the slot header begins, so one variable feeds both
+    # -- but "the last address a writer may reach" and "where the bootloader
+    # keeps its backup header" are two facts, and port/nor/nor_flash.c reads the
+    # second one to pick an XIP probe whose CONTENT it knows.  Spelling that
+    # probe as blob's end would make it follow blob: give the top of the part to
+    # some future partition and the probe would quietly start reading that
+    # instead of the header, with every check still passing.  Issue #88 made
+    # this mistake once, with the erase granularity and the header's span.
+    NOR_PART_SLOT_HDR=${GROVE_SLOT_HDR_ADDR}
     # The erase unit the seam permits (issue #88).  From the same measured
     # geometry check_flash_partitions.py rounds destruction footprints with, so
     # what the firmware refuses and what the host checks are one number.
@@ -961,7 +925,7 @@ set(NOR_SEAM_GATE_ARGS
     --seam-object "port/sdk_seam/nor_seam.c.obj"
     ${NOR_SEAM_CALLER_FLAGS}
     --writable-lo "${GROVE_BLOB_ADDR}"
-    --writable-hi "${GROVE_BLOB_END}"
+    --writable-hi "${GROVE_SLOT_HDR_ADDR}"
     --erase-unit "${GROVE_ERASE_GRAN}")
 
 # The same gate as on `shell`, on the probe link.  Both run: the probe keeps the
@@ -1285,29 +1249,28 @@ configure_file("${BOARD_DIR}/scripts/send_verified_model.sh.in"
                                 GROUP_READ GROUP_EXECUTE
                                 WORLD_READ WORLD_EXECUTE)
 
-# --- Model flash target (issue #44) ------------------------------------------
-# SEPARATE from `flash`, and deliberately so.  The model is its own flash
-# partition -- the xmodem tool takes "<file> <position> <offset>" and writes it
-# nowhere near the firmware image -- so the two are reflashed independently.
-# That matters on a part with ~100k NOR cycles: iterating on the firmware costs
-# nothing extra once the model is down, and swapping models does not rewrite the
-# bootloader.
-#
-# This target does NOT depend on `shell`: making it rebuild or reflash the
-# firmware would defeat the point and burn cycles nobody asked for.
+# --- The layout check, and the one flashing target left (issues #44, #45, #94)-
 #
 # [!] THE LAYOUT IS RESERVATIONS, AND IT IS SEPARATE FROM WHAT IS BUILT.
-# The first version of this listed the three FILES and required all of them,
-# which made plain `--target flash` refuse on any tree where the detection model
-# -- which cannot be committed, being model-zoo licensed -- had not been built
-# by hand.  A gate that blocks the operation it is not protecting is a gate
+# The first version of this listed the FILES and required all of them, which
+# made plain `--target flash` refuse on any tree where the detection model --
+# which cannot be committed, being model-zoo licensed -- had not been built by
+# hand.  A gate that blocks the operation it is not protecting is a gate
 # somebody removes, and then nothing is protected.  So the partitions declare
 # ADDRESSES and SIZES, checked against each other with no files present at all,
-# and each flashing target names only the artifact it actually writes.
+# and the flashing target names only the artifact it actually writes.
 #
 # The reservations are erase-block spans, so they are what a write can destroy
-# rather than what a file occupies.  Each model owns the blocks from its own
-# start up to the next boundary.
+# rather than what a file occupies.
+#
+# [!] THERE USED TO BE FOUR MORE PARTITIONS AND TWO MORE TARGETS (issue #94).
+# `model-cls`, `model-det`, `blob-tail` and the `flash-model-*` targets that
+# wrote the first two are gone: since issue #93 a model is an asset in the
+# store, put there over the console by `blob write` and read by `nn open
+# <name>`.  What checked the model before it was transmitted has NOT gone with
+# them -- it moved to send_verified_model.sh above, which is the same chain
+# (stage, verify, send exactly the file that was verified) on the path the
+# console uses.
 #
 # [!] --image-max, not just the reservation.  The firmware reservation covers
 # BOTH slots, but a single image has to fit in ONE -- the bootloader refuses a
@@ -1321,90 +1284,13 @@ set(GROVE_FLASH_LAYOUT
     --partition "firmware:0x0:${GROVE_FW_RESERVED}"
     --image-max "firmware:${GROVE_FW_SLOT_SIZE}"
     --partition "blob:${GROVE_BLOB_ADDR}:${GROVE_BLOB_RESERVED}"
-    --partition "model-cls:${GROVE_MODEL_CLS_ADDR}:${GROVE_MODEL_CLS_RESERVED}"
-    --partition "model-det:${GROVE_MODEL_DET_ADDR}:${GROVE_MODEL_DET_RESERVED}"
-    --partition "blob-tail:${GROVE_BLOB_TAIL_ADDR}:${GROVE_BLOB_TAIL_RESERVED}"
     --partition "slot-header:${GROVE_SLOT_HDR_ADDR}:${GROVE_SLOT_HDR_RESERVED}")
 
-# [!] The model is STAGED INTO THE BUILD DIR before being sent, and that copy is
-# not optional.  xmodem_send.py writes its preamble scratch file next to the
-# model it is given (os.path.dirname of the --model path), so pointing it
-# straight at model_zoo/ drops a _temp_model_0_preamble_data.bin inside the SDK
-# tree -- which is read-only by project invariant, and himax_sdk.cmake refuses
-# to configure the next build because the tree no longer matches the pinned
-# commit.  Found the hard way.
-set(GROVE_MODEL_STAGE "${CMAKE_BINARY_DIR}/model")
-
-# [!] THE MODEL VERIFIER RUNS INSIDE THE FLASHING TARGET, not as a step the
-# README asks you to remember.  Without it a stale, malformed, partially
-# offloaded or arena-oversized model is written to the NOR -- costing an erase
-# cycle of a part rated for ~100k and leaving a feature that cannot work -- and
-# the only thing that ever notices is `nn open` refusing, on hardware, later.
-#
-# It runs on the STAGED COPY, and the staged copy is what gets sent, so there is
-# no window in which the file examined and the file transmitted could differ.
-# The layout check runs on the same staged file for the same reason.
-#
-# With no host C++ compiler the verifier cannot be built, and the target then
-# REFUSES rather than flashing unverified.  Skipping the check would be the
-# fail-open this whole arrangement exists to avoid.
-if(HOST_CXX)
-    set(GROVE_MODEL_VERIFY "${CMAKE_BINARY_DIR}/verify_vela_model")
-else()
-    set(GROVE_MODEL_VERIFY "")
-endif()
-
-function(grove_add_model_flash_target tgt part file addr verify_args what)
-    set(_staged "${GROVE_MODEL_STAGE}/${tgt}.tflite")
-
-    if(NOT GROVE_MODEL_VERIFY)
-        add_custom_target(${tgt}
-            COMMAND "${CMAKE_COMMAND}" -E echo
-                    "${tgt}: no host C++ compiler, so verify_vela_model cannot "
-                    "be built.  Refusing to flash a model this build cannot check."
-            COMMAND "${CMAKE_COMMAND}" -E false
-            COMMENT "${tgt} (unavailable: no host C++ compiler)")
-        return()
-    endif()
-
-    add_custom_target(${tgt}
-        COMMAND "${CMAKE_COMMAND}" -E make_directory "${GROVE_MODEL_STAGE}"
-        COMMAND "${CMAKE_COMMAND}" -E copy "${file}" "${_staged}"
-        # Everything below inspects and then sends exactly this one file.
-        COMMAND ${GROVE_FLASH_LAYOUT}
-                --image "firmware:${CMAKE_BINARY_DIR}/shell.img"
-                --image "${part}:${_staged}"
-                --writing "${part}"
-        COMMAND "${GROVE_MODEL_VERIFY}" "${_staged}" ${verify_args}
-        COMMAND "${GROVE_VENV}/bin/python" "${GROVE_SDK_ROOT}/xmodem/xmodem_send.py"
-                --port=${GROVE_SERIAL_PORT}
-                --baudrate=${GROVE_SERIAL_BAUDRATE}
-                --protocol=xmodem
-                # ONE argument, quoted: the tool parses --model as a single
-                # "<file> <flash-position> <offset>" string and argparse rejects
-                # the trailing words if CMake splits them into separate argv
-                # entries.
-                "--model=${_staged} ${addr} 0x00000"
-        USES_TERMINAL
-        COMMENT "verify + xmodem -> ${what} @${addr} (press reset when asked)")
-    add_dependencies(${tgt} model-tools)
-endfunction()
-
-grove_add_model_flash_target(flash-model-cls model-cls
-    "${GROVE_MODEL_CLS_FILE}" "${GROVE_MODEL_CLS_ADDR}" ""
-    "classification model")
-grove_add_model_flash_target(flash-model-det model-det
-    "${GROVE_MODEL_DET_FILE}" "${GROVE_MODEL_DET_ADDR}" "--blazeface"
-    "detection model")
-
-# `flash` names only the firmware.  The models are passed as --image so that a
-# model which has outgrown its slot is still caught here -- free coverage -- but
-# their absence is not an obstacle to updating the firmware.
+# `flash` names only the firmware, and now that is the only artifact this build
+# writes to the NOR at a fixed address at all.
 add_custom_target(flash
     COMMAND ${GROVE_FLASH_LAYOUT}
             --image "firmware:${CMAKE_BINARY_DIR}/shell.img"
-            --image "model-cls:${GROVE_MODEL_CLS_FILE}"
-            --image "model-det:${GROVE_MODEL_DET_FILE}"
             --writing firmware
     COMMAND "${GROVE_VENV}/bin/python" "${GROVE_SDK_ROOT}/xmodem/xmodem_send.py"
             --port=${GROVE_SERIAL_PORT}

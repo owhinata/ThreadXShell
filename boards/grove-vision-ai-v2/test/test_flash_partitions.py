@@ -85,12 +85,14 @@ def main():
     global fails
 
     # The real layout, so the tests exercise the shape actually shipped.
+    #
+    # [!] THREE PARTITIONS, WHERE THERE WERE SIX (issue #94).  `model-cls`,
+    # `model-det` and the `blob-tail` run above them were folded into blob once
+    # `nn open <name>` stopped reading a fixed address; blob is one run from the
+    # end of the firmware slots to the start of the bootloader's slot header.
     REAL = [
         ("firmware",  0x000000, 0x200000),
-        ("blob",      0x200000, 0x97B000),
-        ("model-cls", 0xB7B000, 0x1A5000),
-        ("model-det", 0xD20000, 0x030000),
-        ("blob-tail", 0xD50000, 0x2AE000),
+        ("blob",      0x200000, 0xDFE000),
         ("slot-header", 0xFFE000, 0x002000),
     ]
     # firmware reserves BOTH A/B slots because a flash lands in whichever is
@@ -169,21 +171,37 @@ def main():
         ])
 
         # --- the regression that motivated the split ----------------------
-        check("flashing the firmware does not need the models", True, REAL,
-              images=[("firmware", three_blocks),
-                      ("model-cls", missing),
-                      ("model-det", missing)],
+        # [!] ON A SYNTHETIC LAYOUT SINCE issue #94, and deliberately.  These
+        # used to run on REAL, whose `model-cls` / `model-det` were exactly the
+        # artifacts that could be absent; REAL now declares one artifact-bearing
+        # partition, so on it "flashing A does not need B" has no B and would
+        # pass while testing nothing.  The property belongs to the CHECKER, not
+        # to whatever the board's map happens to be this month, so it is stated
+        # over a map that still has two.
+        TWO_ARTIFACTS = [
+            ("firmware", 0x000000, 0x200000),
+            ("model",    0x200000, 0x200000),
+        ]
+        check("flashing the firmware does not need the model", True,
+              TWO_ARTIFACTS,
+              images=[("firmware", three_blocks), ("model", missing)],
               writing=["firmware"])
 
-        check("flashing one model does not need the other", True, REAL,
-              images=[("firmware", missing),
-                      ("model-det", one_block)],
-              writing=["model-det"])
+        check("flashing the model does not need the firmware", True,
+              TWO_ARTIFACTS,
+              images=[("firmware", missing), ("model", one_block)],
+              writing=["model"])
 
         # ...but the thing actually being written must exist.
-        check("the artifact being written must exist", False, REAL,
-              images=[("model-det", missing)], writing=["model-det"],
+        check("the artifact being written must exist", False, TWO_ARTIFACTS,
+              images=[("model", missing)], writing=["model"],
               expect_text="This is the artifact being written")
+
+        # And the shipped layout keeps the half of it that still applies: a
+        # plain `--target flash` names the firmware and nothing else.
+        check("the shipped layout flashes the firmware on its own", True, REAL,
+              images=[("firmware", three_blocks)], writing=["firmware"],
+              image_max=REAL_MAX)
 
         # --- artifacts against their own reservations ---------------------
         # [!] The reservation is stated in BLOCKS, not as a literal.  It used

@@ -283,7 +283,7 @@ gcc $CFLAGS \
 # itself about an ABI instead of with the archive.
 if [ -f "$sdk/library/spi_eeprom/qspi_eeprom_interface.h" ]; then
     gcc $CFLAGS \
-        -DNOR_PART_FW_END=0x200000 -DNOR_PART_BLOB_END=0xB7B000 \
+        -DNOR_PART_FW_END=0x200000 -DNOR_PART_BLOB_END=0xFFE000 \
         -DNOR_ERASE_GRAN=0x1000 \
         -I "$here" -I "$board/port/sdk_seam" -I "$board/port/nor" \
         -I "$board/svc" \

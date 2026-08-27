@@ -63,14 +63,13 @@
  *
  * [!] NO FALLBACK VALUES (issue #88).  These used to be #ifndef defaults, and
  * defaults are a second declaration of a layout that only one file is allowed
- * to declare: when the granularity became 4 KB, three of the five moved, and a
- * tree that had lost the compile definitions would have gone on labelling
- * `nor scan` output with the old map -- silently, because a plausible label is
- * indistinguishable from a correct one.  A missing definition is a build
- * error. */
-#if !defined(NOR_PART_FW_END) || !defined(NOR_PART_BLOB_END) || \
-    !defined(NOR_PART_CLS_END) || !defined(NOR_PART_DET_END) || \
-    !defined(NOR_PART_TAIL_END)
+ * to declare: when the granularity became 4 KB three of the five edges then
+ * declared moved, and when the model partitions were folded into blob (issue
+ * #94) three of them disappeared -- and a tree that had lost the compile
+ * definitions would have gone on labelling `nor scan` output with the old map,
+ * silently, because a plausible label is indistinguishable from a correct one.
+ * A missing definition is a build error. */
+#if !defined(NOR_PART_FW_END) || !defined(NOR_PART_BLOB_END)
 #error "NOR_PART_*_END must come from board.cmake's partition map"
 #endif
 
@@ -110,12 +109,14 @@ struct part {
 	const char *name;
 };
 
+/* [!] THREE, WHERE THERE WERE SIX (issue #94).  `model-cls`, `model-det` and
+ * the `blob-tail` run above them were folded into blob once `nn open <name>`
+ * stopped reading a fixed address (issue #93).  The bytes of the old copies are
+ * still out there -- nothing erased them -- but they are inside blob now, and
+ * `nor scan` says so rather than naming a partition that no longer exists. */
 static const struct part parts[] = {
 	{ NOR_PART_FW_END,   "firmware"    },
 	{ NOR_PART_BLOB_END, "blob"        },
-	{ NOR_PART_CLS_END,  "model-cls"   },
-	{ NOR_PART_DET_END,  "model-det"   },
-	{ NOR_PART_TAIL_END, "blob-tail"   },
 	{ NOR_SIZE,          "slot-header" },
 };
 

@@ -91,8 +91,29 @@
  * (issue #85).  It is also the highest address in the part, so its address bits
  * differ from word 0 in more places than 0xB00000 did, and its content is known.
  */
+/* The same rule cmd_nor.c states: the layout is declared in board.cmake and
+ * nowhere else, so a tree that lost the compile definitions must not get a
+ * plausible-looking default here.  Without this the failure is still a build
+ * error -- these appear in _Static_assert expressions -- but it names the
+ * wrong thing. */
+#if !defined(NOR_PART_FW_END) || !defined(NOR_PART_BLOB_END) || \
+    !defined(NOR_PART_SLOT_HDR)
+#error "NOR_PART_FW_END / NOR_PART_BLOB_END / NOR_PART_SLOT_HDR must come from board.cmake"
+#endif
+
+/* [!] NAMED FOR THE HEADER, NOT FOR blob's END (issue #94).  Since the model
+ * reservations were folded in, blob finishes exactly where the slot header
+ * begins and the two constants hold the same number -- but the probe wants the
+ * place whose CONTENT it knows, and writing it as the writable interval's end
+ * would make it follow blob wherever blob went.  Then the assertion below would
+ * be true by construction while the probe read something else entirely.
+ *
+ * The cost of naming it honestly is that the assertion now passes with no
+ * margin for probe B.  That is the truth about this layout rather than a
+ * weakening of the rule: the rule still decides probe A, and it still fires if
+ * either probe is moved down into blob. */
 #define NOR_PROBE_A_OFF         0u                 /* the firmware image     */
-#define NOR_PROBE_B_OFF         NOR_PART_TAIL_END  /* the backup slot header */
+#define NOR_PROBE_B_OFF         NOR_PART_SLOT_HDR  /* the backup slot header */
 
 /* [!] EVERY PROBE MUST LIE OUTSIDE THE INTERVAL A WRITER MAY ERASE.  Stated
  * once, as a rule over both offsets, so that moving a partition edge or adding

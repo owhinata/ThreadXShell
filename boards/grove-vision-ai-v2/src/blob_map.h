@@ -13,9 +13,8 @@
  * arguments so it cannot quietly grow a second opinion about them.  That
  * matters twice over: a table that disagreed with the seam would be refused by
  * the seam anyway (the slots are where the writer aims, not what bounds it),
- * and #49 Step 4 moves the models into blob and the interval grows to
- * 0x200000..0xFFE000 -- at which point the only thing that changes here is the
- * table.
+ * and when #49 Step 4b moved the models into blob and the interval grew to
+ * 0x200000..0xFFE000, the only thing that changed here was the table.
  *
  * FIXED SLOTS IN SIZE CLASSES, NOT VARIABLE EXTENTS.  What lands here is a few
  * models and assets, and the operation that matters is replacing one in place,
@@ -23,24 +22,49 @@
  * real weakness of fixed slots -- a 164 KB detector sitting in a 2 MB hole --
  * is what the size classes are for:
  *
- *     2 MB   x2   0x200000, 0x400000
- *     1 MB   x3   0x600000, 0x700000, 0x800000
- *     512 KB x3   0x900000, 0x980000, 0xA00000
- *     256 KB x2   0xA80000, 0xAC0000
+ *     4 MB   x1   0x200000
+ *     2 MB   x2   0x600000, 0x800000
+ *     1 MB   x3   0xA00000, 0xB00000, 0xC00000
+ *     512 KB x3   0xD00000, 0xD80000, 0xE00000
+ *     256 KB x2   0xE80000, 0xEC0000
  *
- * Ten slots, 9 MB exactly, ending at 0xB00000.
+ * Eleven slots, 13 MB, running from 0x200000 to 0xF00000 with the classes in
+ * descending order and no gaps.  Listed here by class, which is also table
+ * order for once -- the table is ascending by base, and largest-first happens
+ * to be the same sequence.
  *
- * [!] AND THE 503,808 B ABOVE THEM ARE NOT CARVED.  Not because they are too
- * small to hold a slot -- they would hold another 256 KB one and change -- but
- * because the table stops on a round nine megabytes and Step 4 re-carves the
- * whole region anyway.  `blob free` reports it separately for exactly that
- * reason: it is not free space, because nothing here can name it.
+ * [!] THE 4 MB CLASS IS SIZED BY WHAT THE HARDWARE CAN RUN, not by anything
+ * here today (the largest asset is a 1,704,672 B model).  Nothing but the slot
+ * bounds model size: the flatbuffer is read in place out of the XIP window and
+ * never copied, and the arena is a function of feature-map sizes rather than of
+ * weights -- the 164,512 B detector uses a bigger arena than the 1.7 MB
+ * classifier.  A slot is the only thing that would have said no.
+ *
+ * [!] AND 0xF00000..0xFFE000 -- 1,040,384 B -- IS DELIBERATELY LEFT UNCARVED.
+ * Not because it is too small; it would hold a 512 KB and a 256 KB slot, which
+ * is what a draft of #94 did.  Three 1 MB and two 512 KB slots are still free,
+ * so those two would have been homes for a demand that does not exist, and a
+ * carved slot costs a stat in every `nn open <name>` and a line in every `blob
+ * list`.  Left whole, it can become whatever class a real need asks for --
+ * appending is the safe direction -- and until then nothing can be stored there
+ * because no slot names it.  `blob free` reports it apart from the free slots
+ * for exactly that reason.  (A 1 MB slot would not fit regardless: that class
+ * needs 1,048,576 B.)
  *
  * [!] IDENTITY IS THE BASE ADDRESS, NEVER THE INDEX.  Reorder the table and
  * every index means a different piece of flash, so nothing that persists may
  * carry one: a stored header names its own base (blob_state.h), and the index
  * `blob list` prints is a display ordinal resolved against the table on the
  * spot.  blob_map_index_of() is the resolver for the other direction.
+ *
+ * [!] WHICH IS WHY THE ONLY SAFE EDIT IS AN APPEND -- and why #94 re-carving
+ * this table whole was a one-off with a price attached.  A slot that moves
+ * strands whatever was stored in it: the header is still in the flash, it still
+ * names its own base, and no entry has that base any more, so nothing resolves
+ * it.  #94 paid that price on purpose because the store held one model that
+ * survived the move (`cls`, still based at 0x200000) and two files worth
+ * re-sending.  There is no second cheap moment; the next re-carve pays whatever
+ * is stored then.
  *
  * Pure arithmetic -- no hardware, no ThreadX -- so test/test_blob_map.c
  * compiles this exact file on the host and feeds blob_map_check() the broken
@@ -61,8 +85,8 @@ extern "C" {
  * [!] A BOUND ON A STACK ARRAY, not a statement about the table.  The writer
  * decides which slot to use from one view per slot, gathered under the
  * reservation, and that array has to be a fixed size on a 4 KB thread stack.
- * The shipped table has ten; a table with more than this is refused rather than
- * truncated, because choosing from a truncated view is how a write ends up
+ * The shipped table has eleven; a table with more than this is refused rather
+ * than truncated, because choosing from a truncated view is how a write ends up
  * somewhere nobody looked at.
  */
 #define BLOB_MAX_SLOTS   32u

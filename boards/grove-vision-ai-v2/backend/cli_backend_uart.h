@@ -65,9 +65,25 @@ extern "C" {
  * [!] IT MOVES THE CLIFF; IT DOES NOT REMOVE IT.  Three frames of slack buys
  * one retransmission, and what actually has to hold is that a program
  * transaction plus its margin finishes inside the sender's first retry
- * interval.  Both of those are measurements this project has not taken yet
- * (#49 Step 2, implementation order item 6), and until it has, the size below
- * is headroom rather than a proof. */
+ * interval.  BOTH ARE MEASURED (issue #92, and the board README's "What a write
+ * costs" section holds the tables):
+ *
+ *   a program transaction  0.7 ms + 2.08 ms/KB, so the 64 KB chunk this port
+ *                          actually programs takes 134 ms
+ *   the first retry        `sb` (lrzsz 0.12.21) is stop-and-wait and
+ *                          retransmits after exactly 60 s -- through a pty
+ *                          loopback with a deliberately silent receiver,
+ *                          60.002 / 120.002 / 180.003 / 240.003 / 300.003 s,
+ *                          five in a row without giving up
+ *
+ * That is a margin of ~450x, and it means the ring only ever has to hold the
+ * one frame in flight plus a retransmitted copy: 2 x 1,029 = 2,058 B against
+ * the 4,095 this holds.  The erase is the only long operation and it runs
+ * BEFORE the protocol starts, which is what that design decision bought.
+ *
+ * [!] 60 s IS THIS SENDER, NOT A LAW.  It was measured from lrzsz 0.12.21; a
+ * sender that retries faster would have to be measured again, and 134 ms is
+ * the number it would have to beat. */
 #ifndef CLI_GROVE_RX_BUFFER_SIZE
 #define CLI_GROVE_RX_BUFFER_SIZE 4096
 #endif

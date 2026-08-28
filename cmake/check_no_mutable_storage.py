@@ -68,12 +68,17 @@ def sections(objdump, obj):
 
 
 def common_symbols(nm, obj):
-    """Defined COMMON symbols -- storage with no section to find it by."""
-    try:
-        out = subprocess.run([nm, "--defined-only", obj], check=True,
-                             capture_output=True, text=True).stdout
-    except (OSError, subprocess.CalledProcessError):
-        return []
+    """Defined COMMON symbols -- storage with no section to find it by.
+
+    [!] FAILURE PROPAGATES.  This used to catch an nm that would not run and
+    return "no COMMON symbols", so pointing --nm at something broken produced a
+    clean OK -- a check reporting the absence of what it never looked for.  That
+    is the exact failure mode this gate exists to prevent, reproduced inside the
+    gate itself.  Making the ARGUMENT required did not make its EXECUTION
+    required; only letting the error out does.
+    """
+    out = subprocess.run([nm, "--defined-only", obj], check=True,
+                         capture_output=True, text=True).stdout
     found = []
     for line in out.splitlines():
         parts = line.split()
@@ -142,15 +147,15 @@ def main():
               (args.object, exc), file=sys.stderr)
         return 2
 
-    # [!] nm is REQUIRED for the common check, not merely nice for diagnostics.
-    # Refusing to run without it beats running a check that silently covers less
-    # than it says.
-    if not args.nm:
-        print("check_no_mutable_storage: --nm is required (the COMMON check "
-              "needs it, and half a check reports the same OK as a whole one)",
-              file=sys.stderr)
+    # [!] A COMMON check that could not run is not a COMMON check.  CANNOT_CHECK
+    # (2), never 0: half a check reports the same OK as a whole one.
+    try:
+        commons = common_symbols(args.nm, args.object)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print("check_no_mutable_storage: %s could not list symbols in %s (%s).  "
+              "The COMMON half of this gate did not run, so this is not a pass."
+              % (args.nm, args.object, exc), file=sys.stderr)
         return 2
-    commons = common_symbols(args.nm, args.object)
 
     if not bad and not commons:
         print("check_no_mutable_storage: OK (%s owns no mutable storage)" % what)

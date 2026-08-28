@@ -144,6 +144,32 @@ def main():
                        rc, why))
                 failures += 1
 
+    # [!] AND THE CHECKER MUST REFUSE TO RUN HALF OF ITSELF.  Its COMMON pass
+    # needs nm, and an earlier version turned an nm that would not execute into
+    # "no COMMON symbols found" -- a clean OK about something never looked at,
+    # which is the failure mode this whole gate exists to prevent, reproduced
+    # inside the gate.  Making the argument required did not make its execution
+    # required.
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "probe.c")
+        obj = os.path.join(tmp, "probe.o")
+        with open(src, "w") as fh:
+            fh.write(CLEAN)
+        cmd = [args.cc, "-std=c11", "-O1", "-fno-lto"] + args.cflags.split()
+        cmd += ["-c", src, "-o", obj]
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        rc = subprocess.run(
+            [sys.executable, CHECKER, "--objdump", args.objdump,
+             "--nm", "/bin/false", "--label", "nm_broken", obj],
+            capture_output=True, text=True).returncode
+        if rc == 2:
+            print("  ok   %-14s reported CANNOT_CHECK, not a pass (a checker that "
+                  "cannot run its own COMMON pass must not say OK)" % "nm_broken")
+        else:
+            print("  FAIL %-14s returned %d; an nm that will not execute must give "
+                  "2, never 0" % ("nm_broken", rc))
+            failures += 1
+
     if failures:
         print("run_storage_gate_tests: %d failure(s)" % failures)
         return 1

@@ -34,6 +34,14 @@
 # that decides WHETHER storage exists -- definitions, includes, architecture,
 # optimisation, per-source options -- is the shipped build's.
 #
+# [!] WHAT IT COPIES, EXACTLY: the interface library it links, plus the consumer's
+# INCLUDE_DIRECTORIES, COMPILE_DEFINITIONS and COMPILE_OPTIONS.  It does NOT copy
+# usage requirements from any OTHER library the consumer links, nor the target's
+# COMPILE_FLAGS, C_STANDARD or compile features.  Verified equal on all three
+# boards today, flag for flag; if a board later gives this file options by one of
+# those routes, the audit stops being the board's compile and this list is where
+# to start.
+#
 # [!] -fno-common is NOT set, deliberately.  It only suppresses tentative
 # definitions, and an explicit __attribute__((common)) survives it with no section
 # for the checker to find.  check_no_mutable_storage.py refuses COMMON symbols
@@ -65,7 +73,14 @@ function(add_decoder_storage_gate)
         target_compile_options(${DSG_NAME} PRIVATE
             $<TARGET_PROPERTY:${DSG_CONSUMER},COMPILE_OPTIONS>)
     endif()
-    # The one override, last so it wins: an LTO object has no sections to read.
+    # The one override: an LTO object is bytecode with no sections to read.
+    #
+    # [!] NOT "last so it wins" -- per-source options come after this, as Grove's
+    # -O3 does.  A per-source -flto would therefore land after it and turn the
+    # audit object back into bytecode.  That is caught today, but by accident: a
+    # slim LTO object carries __gnu_lto_slim, which the checker's COMMON pass
+    # reports.  Written down because relying on an accident is fine only while
+    # somebody knows it is one.
     target_compile_options(${DSG_NAME} PRIVATE -fno-lto)
 
     add_custom_target(${DSG_NAME}_check

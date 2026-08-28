@@ -6,11 +6,11 @@
  * @file    nn_decoder.h
  * @brief   This board's adapter onto the shared BlazeFace decoder (issue #97).
  *
- * The decoder itself is svc/blazeface.c, shared with grove-vision-ai-v2 and
- * f746g-disco.  It reads svc/tensor.h descriptors, so somebody has to turn this
- * board's `struct nn_tensor` into them, and somebody has to own the decoder's
- * state and its candidate scratch -- the shared translation unit owns no storage
- * at all, which is precisely what lets the scratch stay in `.psram_ai` here and
+ * The decoder itself is svc/blazeface.c, shared with wio-lite-ai and
+ * grove-vision-ai-v2.  It reads svc/tensor.h descriptors, so somebody has to turn
+ * this board's `struct nn_tensor` into them, and somebody has to own the
+ * decoder's state and its candidate scratch -- the shared translation unit owns
+ * no storage at all, which is what lets the scratch stay in `.sdram.ai` here and
  * somewhere else on the other two boards.  This file is both.
  *
  *
@@ -25,7 +25,7 @@
  *
  * IT TAKES THE MODEL HANDLE, not a tensor array, because that is what both
  * callers already have: the decoder is singleton-independent but this board's
- * inference API is not, and pulling the four outputs is the adapter's job.
+ * inference API is not, and pulling the outputs is the adapter's job.
  */
 #ifndef NN_DECODER_H
 #define NN_DECODER_H
@@ -42,28 +42,24 @@ extern "C" {
  *
  * @param res  filled on every path, failures included, so a caller never reports
  *             diagnostics left over from an earlier frame.  It also carries the
- *             threshold THIS decode applied -- report that rather than asking for
- *             the current one, which another console may have changed since.
+ *             threshold THIS decode applied.
  *
  * @return the number of detections (>= 0), or a BF_ERR_* code.  [!] Those codes
- *         are not interchangeable: BF_ERR_MODEL means the open model is not
- *         BlazeFace, the others mean this firmware is wired wrong.  Do not fold
- *         them together, and do not fold any of them into zero detections --
- *         "zero faces" reads as a measurement (issue #57).
+ *         are not interchangeable, and NONE of them is zero faces: this board's
+ *         camera worker used to fold every negative into 0, which reads as a
+ *         measurement and would have hidden a decoder that was never initialised
+ *         behind a perfectly healthy-looking "no faces" (issue #57).
  */
 int nn_decoder_run(struct nn_model *m, struct bf_det *out, int max,
                    struct bf_result *res);
 
 /**
  * Score threshold as a milli-probability, on the same scale as bf_det.score.
- * Outside 1..999 the request is refused (BF_ERR_ARG) and nothing changes: those
- * are the poles of the inverse sigmoid, and a silently clamped threshold is a
- * setting that does not do what it says.
+ * Outside 1..999 the request is refused (BF_ERR_ARG) and nothing changes.
  *
- * SAFE TO CALL WHILE A STREAM RUNS.  The decoder reads the threshold once per
- * frame, so a set here lands wholly before or wholly after a decode and the value
- * used is reported back in @ref bf_result -- which is why `ai thresh` takes no
- * guard and tuning against a live stream still works.
+ * This board has no `ai thresh` command yet -- unifying the command surface is
+ * issue #50 -- so the default is what it uses.  That default is the same number
+ * the compile-time BF_SCORE_LOGIT of 0.405 was, in the other unit.
  */
 int      nn_decoder_set_thresh_milli(unsigned milli);
 unsigned nn_decoder_get_thresh_milli(void);

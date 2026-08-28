@@ -345,10 +345,28 @@ set(CLI_DEVMEM_DUMP_MAX_LEN "256" CACHE STRING "Max bytes per devmem dump")
 set(CONFIG_NN_BACKEND "null" CACHE STRING "NN inference backend: null | stedgeai | stedgeai_reloc | tflm")
 set_property(CACHE CONFIG_NN_BACKEND PROPERTY STRINGS null stedgeai stedgeai_reloc tflm)
 
+# [!] ONE VARIABLE FOR THE SHARED DECODER'S PATH (issue #97): the source list and
+# the audit target below must name the same file.
+get_filename_component(F746_SHARED_DECODER
+                       "${CMAKE_SOURCE_DIR}/svc/blazeface.c" ABSOLUTE)
+if(NOT EXISTS "${F746_SHARED_DECODER}")
+    message(FATAL_ERROR
+        "shared BlazeFace decoder not found:\n  ${F746_SHARED_DECODER}\n"
+        "This board builds it (issue #97); it is not optional.")
+endif()
+
 set(NN_SOURCES
     "${BOARD_DIR}/port/nn/nn.c"
     "${BOARD_DIR}/port/nn/nn_camera.c"          # live camera -> inference glue
-    "${BOARD_DIR}/port/nn/models/blazeface.c")  # BlazeFace decode (model post-proc)
+    # Model post-processing.  The decoder is SHARED with the other two boards
+    # (issue #97); port/nn/nn_decoder.c is this board's half -- nn_tensor ->
+    # tensor_desc, and the ownership of the decoder's state and its candidate
+    # scratch, because the shared translation unit owns no storage at all.
+    # Built in EVERY backend configuration, including `null`, which is what keeps
+    # the unconditional --require-sdram-ai below honest.
+    "${F746_SHARED_DECODER}"
+    "${CMAKE_SOURCE_DIR}/svc/nn_det_record.c"
+    "${BOARD_DIR}/port/nn/nn_decoder.c")
 if(CONFIG_NN_BACKEND STREQUAL "null")
     list(APPEND NN_SOURCES "${BOARD_DIR}/port/nn/nn_null.c")
 elseif(CONFIG_NN_BACKEND STREQUAL "stedgeai")
@@ -584,6 +602,16 @@ firmware_finalize(shell)
 # regression and is not one.  The condition on each line is the one that adds its
 # source above.
 set(F746_LAYOUT_REQUIRED "")
+# [!] A GATE THIS BOARD DID NOT HAVE (issue #97).  The decoder's candidate scratch
+# has always lived in .sdram.ai, and nothing checked it: the built-in required list
+# in check_f746_layout.py never named it, `.sdram.ai` uses KEEP so --gc-sections
+# cannot even produce the "no such object" hint, and the linker ASSERTs bound only
+# where the section STARTS -- an empty .sdram.ai satisfies every one of them.
+# Losing the attribute would have moved the buffer into internal SRAM with the
+# build still green.  Wio's equivalent gate catches exactly that class; this board
+# was the one where it would have been silent.  Unconditional, because the decoder
+# is compiled in every backend configuration.
+list(APPEND F746_LAYOUT_REQUIRED --require-sdram-ai nn_dec_scratch)
 if(CONFIG_NN_BACKEND STREQUAL "null")
     # port/nn/nn_null.c -- the stub backend's input buffer in the NN arena.
     list(APPEND F746_LAYOUT_REQUIRED --require-sdram-ai null_in_buf)
@@ -593,6 +621,34 @@ if(CONFIG_NN_BACKEND STREQUAL "stedgeai_reloc")
     # the 0xC0700000 window bsp.c region2 makes instruction-fetchable.
     list(APPEND F746_LAYOUT_REQUIRED --require-model-window g_model_slot)
 endif()
+
+# --- the shared decoder must own no storage (issue #97) -----------------------
+#
+# svc/blazeface.c is one decoder for three boards, and it works only because each
+# board passes IN its candidate scratch -- so the scratch keeps this board's
+# .sdram.ai placement and the layout gate above can name a board-owned symbol.
+#
+# [!] PER BOARD, NOT ONCE ON THE HOST: the property is about the object THIS build
+# produces, and storage behind `#if defined(__arm__)` passes a host check and fails
+# on the device.  An AUDIT compile -- this board's real definitions and includes,
+# with optimisation, LTO and common overridden so a static cannot be optimised out
+# of sight before it is counted.
+add_library(f746_decoder_audit OBJECT EXCLUDE_FROM_ALL "${F746_SHARED_DECODER}")
+target_include_directories(f746_decoder_audit PRIVATE
+    $<TARGET_PROPERTY:shell,INCLUDE_DIRECTORIES>)
+target_compile_definitions(f746_decoder_audit PRIVATE
+    $<TARGET_PROPERTY:shell,COMPILE_DEFINITIONS>)
+target_compile_options(f746_decoder_audit PRIVATE -O0 -fno-lto -fno-common)
+add_custom_target(f746_decoder_storage_gate
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/cmake/check_no_mutable_storage.py"
+            --objdump "${CMAKE_OBJDUMP}" --nm "${CMAKE_NM}"
+            --label "svc/blazeface.c (f746g-disco)"
+            $<TARGET_OBJECTS:f746_decoder_audit>
+    COMMENT "check the shared decoder owns no mutable storage"
+    COMMAND_EXPAND_LISTS VERBATIM)
+add_dependencies(f746_decoder_storage_gate f746_decoder_audit)
+add_dependencies(shell f746_decoder_storage_gate)
 
 add_custom_command(TARGET shell POST_BUILD
     COMMAND "${Python3_EXECUTABLE}"

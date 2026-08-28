@@ -231,17 +231,59 @@ static void ai_print_stats(struct cli_instance *sh, const struct nn_camera_stats
 	          (unsigned long)s->detections);
 }
 
-/* Print the latest detections as percent-of-frame boxes (avoids %f). */
+/*
+ * Print the latest detections as percent-of-frame boxes (avoids %f), and the
+ * diagnostics that belong to THOSE boxes.
+ *
+ * [!] ONE SNAPSHOT (issue #97).  The worker publishes the boxes and the decode's
+ * own numbers together; this command decodes nothing itself, so fetching them
+ * separately paired this frame's boxes with whatever the decoder had last been
+ * asked -- a different frame, while a stream runs.
+ */
 static void ai_print_dets(struct cli_instance *sh)
 {
+	struct nn_camera_decode snap;
 	struct bf_det d[BF_MAX_DET];
-	int n = nn_camera_dets_get(d, BF_MAX_DET);
+	int n;
 
+	if (!nn_camera_decode_get(&snap, d, BF_MAX_DET)) {
+		cli_print(sh, "  dets: n/a -- no stream has run\r\n");
+		return;
+	}
+	if (!snap.valid) {
+		/* Not the same as "no faces": this session has not decoded a frame,
+		 * and printing a zero here would be a measurement nobody took. */
+		cli_print(sh, "  dets: n/a -- this stream has not decoded a frame yet\r\n");
+		return;
+	}
+	if (snap.ndet < 0) {
+		/* [!] Only BF_ERR_MODEL is about the model; the others mean this
+		 * firmware is wired wrong, and the worker no longer folds either into
+		 * a healthy-looking zero. */
+		if (snap.res.status == BF_ERR_MODEL)
+			cli_print(sh, "  dets: n/a -- this model's outputs are not "
+			          "BlazeFace-shaped\r\n");
+		else
+			cli_print(sh, "  dets: n/a -- the decoder is not usable "
+			          "(internal error %d)\r\n", snap.res.status);
+		return;
+	}
+	n = snap.ndet < BF_MAX_DET ? snap.ndet : BF_MAX_DET;
 	for (int i = 0; i < n; i++)
 		cli_print(sh, "  face[%d]  x %ld%% y %ld%% w %ld%% h %ld%%  score %ld%%\r\n",
 		          i, (long)(d[i].x * 100.0f), (long)(d[i].y * 100.0f),
 		          (long)(d[i].w * 100.0f), (long)(d[i].h * 100.0f),
 		          (long)(d[i].score * 100.0f));
+	/* pass and kept are two different numbers (issue #47): pass is every anchor
+	 * over the threshold, kept is how many of those the 64-entry candidate list
+	 * held.  They differ only when the cap bound, and then the kept ones are the
+	 * highest-scoring -- but NMS saw only those.  Printed beside maxscore because
+	 * that is the number consulted when the boxes look wrong, and until #47 it
+	 * was the maximum of however much of the scan had run.  The threshold is the
+	 * one THIS decode applied, not whatever is current by print time. */
+	cli_print(sh, "  maxscore %ld  pass %d  kept %d (cap %d)  thresh %u\r\n",
+	          (long)(snap.res.max_score * 100.0f), snap.res.npass,
+	          snap.res.nkept, BF_MAX_CAND, snap.res.thresh_milli);
 }
 
 static int cmd_ai_run(struct cli_instance *sh, int argc, char **argv)
@@ -368,16 +410,7 @@ static int cmd_ai_stream_stats(struct cli_instance *sh, int argc, char **argv)
 	nn_camera_stats_get(&s);
 	ai_print_stats(sh, &s);
 	ai_print_dets(sh);
-	/* pass and kept are two different numbers (issue #47): pass is every anchor
-	 * over the threshold, kept is how many of those the 64-entry candidate list
-	 * held.  They differ only when the cap bound, and then the kept ones are the
-	 * highest-scoring -- but NMS saw only those.  Printed beside maxscore because
-	 * that is the number consulted when the boxes look wrong, and until #47 it
-	 * was the maximum of however much of the scan had run. */
-	cli_print(sh, "maxscore %ld  pass %d  kept %d (cap %d)  norm %s  (diagnostic)\r\n",
-	          (long)(blazeface_last_max_score() * 100.0f),
-	          blazeface_last_npass(), blazeface_last_nkept(), BF_MAX_CAND,
-	          nn_camera_get_norm() ? "[-1,1]" : "[0,1]");
+	cli_print(sh, "norm     %s\r\n", nn_camera_get_norm() ? "[-1,1]" : "[0,1]");
 	return 0;
 }
 

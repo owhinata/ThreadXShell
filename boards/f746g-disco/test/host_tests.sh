@@ -24,21 +24,23 @@ out="$HOST_TEST_OUT"
 CFLAGS="$HOST_TEST_CFLAGS"
 LDFLAGS="$HOST_TEST_LDFLAGS"
 
-# issue #47 -- the BlazeFace decoder (port/nn/models/blazeface.c): SSD anchor decode,
-# the bounded top-N candidate list and NMS.  This is the one piece of arithmetic on
-# this board whose failure is silent, and it is also the one that CANNOT be exercised
-# by the default build: CONFIG_NN_BACKEND=null links the decoder but publishes tensors
-# it does not recognise, so blazeface_decode() returns -1 and touches nothing.  Running
-# it on hardware needs a non-default backend AND a generated model; the arithmetic is
-# therefore pinned here, where the expected box is computed by hand.
+# issue #97 -- the adapter onto the SHARED BlazeFace decoder (port/nn/nn_decoder.c).
+# The decoder's arithmetic moved to svc/blazeface.c and is covered by
+# shell/test/test_blazeface.c, which is board-independent; what stays here is the
+# half that cannot be -- nn_tensor -> tensor_desc, against this board's real nn.h.
+# struct nn_model is opaque (defined in nn.c), so the test supplies its own
+# nn_output_count() / nn_output(), which is also what makes the adapter testable.
 #
-# The decoder depends on nn.h alone (no HAL, no ThreadX, no libm) and struct nn_model
-# is opaque there, so the test supplies its own nn_output_count() / nn_output() and
-# runs the real decoder unmodified.  Built against the REAL port/nn headers.
-gcc $CFLAGS -I "$board/port/nn" -I "$board/port/nn/models" \
-    "$here/test_blazeface.c" "$board/port/nn/models/blazeface.c" \
-    $LDFLAGS -lm -o "$out/test_blazeface"
-"$out/test_blazeface"
+# The cases are the translation's own failure modes: an unsupported dtype mapped
+# onto one the decoder reads, float32 put through the affine form (this board
+# publishes scale 0 for an unquantised tensor, and its graphs are float32), a rank
+# above four truncated into a match, and a hole in the output set reported as a
+# model-shape problem.
+gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" \
+    "$here/test_nn_decoder.c" "$board/port/nn/nn_decoder.c" \
+    "$HOST_TEST_SVC/blazeface.c" \
+    $LDFLAGS -lm -o "$out/test_nn_decoder"
+"$out/test_nn_decoder"
 
 # issue #72 -- the sink-drain decision (port/camera/cam_drain.c).  Three
 # subscribers here detach while the base capture keeps running, so each has to

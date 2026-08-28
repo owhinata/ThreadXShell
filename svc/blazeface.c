@@ -347,6 +347,13 @@ int blazeface_set_thresh_milli(struct blazeface *bf, unsigned milli)
 	return BF_OK;
 }
 
+float blazeface_logit_of_milli(unsigned milli)
+{
+	if (milli < 1u || milli > 999u)
+		return 0.0f;
+	return bf_logit((float)milli / 1000.0f);
+}
+
 unsigned blazeface_get_thresh_milli(const struct blazeface *bf)
 {
 	if (bf == NULL || !bf->ready)

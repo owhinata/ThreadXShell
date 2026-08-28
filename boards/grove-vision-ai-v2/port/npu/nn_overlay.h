@@ -37,6 +37,15 @@ struct nn_overlay_stats {
 	uint32_t detections;   /**< faces drawn, summed over frames          */
 	uint32_t skipped;      /**< frames not inferred (a stop was pending) */
 	uint32_t errors;       /**< invoke or decode refused                 */
+	/*
+	 * [!] Two kinds of decode failure, counted apart (issue #97).  There is no
+	 * console on the producer thread, so a summary is the only place a failure
+	 * can be explained -- and "the open model is not BlazeFace" calls for
+	 * opening a different model while "the decoder is not initialised" calls
+	 * for looking at the firmware.  One `errors` total cannot say which.
+	 */
+	uint32_t model_errors;   /**< the tensors were not BlazeFace-shaped   */
+	uint32_t decoder_errors; /**< the decoder itself refused (a wiring fault) */
 	uint32_t last_ms;      /**< the most recent inference, in ticks      */
 	int      last_ndet;    /**< faces in the most recent frame           */
 

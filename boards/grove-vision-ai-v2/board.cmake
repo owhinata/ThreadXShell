@@ -572,6 +572,21 @@ target_compile_options(tflm_obj PRIVATE
 # executable so the seam probe below can link the SAME objects a second time
 # without recompiling them (issue #30).  Nothing else changes: `shell` still
 # links exactly this object set in exactly this order.
+# [!] ONE VARIABLE FOR THE SHARED DECODER'S PATH, used by the source list, the
+# -O3 property and the storage gate below (issue #97).  set_source_files_properties()
+# SILENTLY IGNORES a path that is not a source of the target, so a file moved out
+# from under it loses its optimisation level with no warning and no gate -- and
+# the board README's frame rates depend on this one being built -O3.  Spelling the
+# path once removes the way those two can drift apart; the checks after the target
+# is defined catch the other way, where the path is stale on both.
+get_filename_component(GROVE_SHARED_DECODER
+                       "${CMAKE_SOURCE_DIR}/svc/blazeface.c" ABSOLUTE)
+if(NOT EXISTS "${GROVE_SHARED_DECODER}")
+    message(FATAL_ERROR
+        "shared BlazeFace decoder not found:\n  ${GROVE_SHARED_DECODER}\n"
+        "This board builds it (issue #97); it is not optional.")
+endif()
+
 add_library(shell_objs OBJECT
     "${BOARD_DIR}/src/main.c"
     "${BOARD_DIR}/src/fault.c"
@@ -641,10 +656,15 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/npu/npu_hw.c"
     "${BOARD_DIR}/port/npu/nn_preproc.c"
     "${BOARD_DIR}/port/npu/nn_overlay.c"
-    # Model-specific post-processing (issue #45).  Above npu.h, which stays
-    # model-agnostic; it sees tensor DESCRIPTORS and not the interpreter, which
-    # is what lets the host test drive the real decoder.
-    "${BOARD_DIR}/port/npu/models/blazeface.c"
+    # Model-specific post-processing (issue #45), now SHARED with the other two
+    # boards (issue #97).  The decoder is above npu.h, which stays model-agnostic;
+    # it sees tensor DESCRIPTORS and not the interpreter, which is what lets the
+    # host test drive the real decoder.  nn_decoder.c is this board's translation
+    # from npu_tensor into svc/tensor.h -- the only file here that knows both --
+    # and it owns the decoder's state and scratch, because the shared TU owns
+    # nothing (see the storage gate below).
+    "${GROVE_SHARED_DECODER}"
+    "${BOARD_DIR}/port/npu/nn_decoder.c"
     ${SHELL_SOURCES}
     ${SDK_SOURCES}
     ${TX_CORE} ${TX_ASM} ${TX_EPK})
@@ -666,7 +686,6 @@ target_include_directories(shell_objs PRIVATE
     "${BOARD_DIR}/port/lcd"
     "${BOARD_DIR}/port/camera"
     "${BOARD_DIR}/port/npu"
-    "${BOARD_DIR}/port/npu/models"
     # Header surface of the two camera archives (issue #35): the CIS (sensor
     # I2C) layer and the sensor datapath library.  Not in bsp_iface because
     # only port/camera/ has any business calling them.
@@ -759,8 +778,11 @@ target_compile_options(shell_objs PRIVATE -Os)
 #   - the code executes from ITCM, so a bigger function costs nothing but space.
 #     There is no instruction cache to spill: TCM is tightly coupled.  The usual
 #     "-Os because -O3 thrashes the cache" reasoning does not apply.
-#   - space is not scarce.  The four cost +4,882 B together against ~69 KB of
-#     ITCM headroom, and check_placement_budget.py keeps that honest.
+#   - space is not scarce.  The four cost +4,882 B together, and
+#     check_placement_budget.py keeps that honest -- it PRINTS the headroom on
+#     every link, which is the number to read rather than one written down here
+#     (it was "~69 KB" for a long time after it had become 34,880 B; see the
+#     board README for how to measure it).
 #
 # [!] AND IT IS NOT ABOUT MVE.  With the ban lifted the auto-vectoriser does fire
 # here, but only on straight-line code in the COLD functions -- the frame's two
@@ -770,13 +792,86 @@ target_compile_options(shell_objs PRIVATE -Os)
 # option buys them is ordinary scalar quality: unrolling and scheduling.  The
 # numbers that justify it are in issue #76 and the board README, measured on the
 # board -- if they ever stop justifying it, take it out.
-set_source_files_properties(
+set(GROVE_O3_SOURCES
     "${BOARD_DIR}/port/camera/cam_convert.c"
-    "${BOARD_DIR}/port/npu/models/blazeface.c"
+    "${GROVE_SHARED_DECODER}"
     "${BOARD_DIR}/port/npu/nn_preproc.c"
-    "${BOARD_DIR}/port/lcd/lcd_st7789.c"
+    "${BOARD_DIR}/port/lcd/lcd_st7789.c")
+set_source_files_properties(${GROVE_O3_SOURCES}
     TARGET_DIRECTORY shell_objs
     PROPERTIES COMPILE_OPTIONS "-O3")
+# [!] AND THEN CHECK THAT EACH PATH IS ACTUALLY A SOURCE OF THE TARGET.  EXISTS
+# alone is not enough: a file can still be on disk at the old path while no
+# longer being compiled into shell_objs, and set_source_files_properties() says
+# nothing either way.  This is the only thing standing between "the decoder moved"
+# and "the frame rate quietly dropped" (issue #97).
+get_target_property(_grove_objs_sources shell_objs SOURCES)
+foreach(_o3 IN LISTS GROVE_O3_SOURCES)
+    get_filename_component(_o3_abs "${_o3}" ABSOLUTE)
+    set(_o3_found FALSE)
+    foreach(_src IN LISTS _grove_objs_sources)
+        get_filename_component(_src_abs "${_src}" ABSOLUTE)
+        if(_src_abs STREQUAL _o3_abs)
+            set(_o3_found TRUE)
+            break()
+        endif()
+    endforeach()
+    if(NOT _o3_found)
+        message(FATAL_ERROR
+            "-O3 is set on a file that shell_objs does not build:\n  ${_o3}\n"
+            "CMake ignores that silently, so the file would be built at the "
+            "default level and nothing would say so.  Fix the path, or drop it "
+            "from GROVE_O3_SOURCES.")
+    endif()
+endforeach()
+# --- the shared decoder must own no storage (issue #97) -----------------------
+#
+# svc/blazeface.c is one decoder for three boards, and it only works because each
+# board passes IN its candidate scratch -- so the scratch keeps that board's
+# placement (here plain .bss; .psram_ai on wio, .sdram.ai on f746) and that
+# board's residency gate keeps naming a board-owned symbol.  A static added to
+# the shared file would silently become state no board placed and no board's gate
+# mentions, and on f746 there is no gate that would ever notice.
+#
+# [!] THIS RUNS PER BOARD, NOT ONCE ON THE HOST.  The property is about the object
+# each TARGET build produces, and code behind `#if defined(__arm__)` -- or behind
+# one board's definitions -- passes a host check and fails on the device.
+# cmake/fixtures/run_storage_gate_tests.py demonstrates exactly that asymmetry.
+#
+# It is an AUDIT compile, not the build's own: optimisation, LTO and common are
+# overridden so that a static cannot be optimised out of sight before it is
+# counted.  It inherits this board's real definitions, includes and architecture
+# flags from shell_objs, which is the part that has to be real.
+add_library(grove_decoder_audit OBJECT EXCLUDE_FROM_ALL "${GROVE_SHARED_DECODER}")
+target_include_directories(grove_decoder_audit PRIVATE
+    $<TARGET_PROPERTY:shell_objs,INCLUDE_DIRECTORIES>)
+target_compile_definitions(grove_decoder_audit PRIVATE
+    $<TARGET_PROPERTY:shell_objs,COMPILE_DEFINITIONS>)
+target_compile_options(grove_decoder_audit PRIVATE -O0 -fno-lto -fno-common)
+# (An OBJECT library cannot carry POST_BUILD, so the check is its own target.)
+add_custom_target(grove_decoder_storage_gate
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/cmake/check_no_mutable_storage.py"
+            --objdump "${CMAKE_OBJDUMP}" --nm "${CMAKE_NM}"
+            --label "svc/blazeface.c (grove-vision-ai-v2)"
+            $<TARGET_OBJECTS:grove_decoder_audit>
+    COMMENT "check the shared decoder owns no mutable storage"
+    COMMAND_EXPAND_LISTS VERBATIM)
+add_dependencies(grove_decoder_storage_gate grove_decoder_audit)
+add_dependencies(shell grove_decoder_storage_gate)
+
+# And the negative tests for that checker, run with THIS board's cross compiler
+# so the __arm__-only fixture is meaningful (it passes under the host compiler,
+# which is the whole point of it).
+add_custom_target(grove_decoder_storage_fixtures
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/cmake/fixtures/run_storage_gate_tests.py"
+            --cc "${CMAKE_C_COMPILER}" --objdump "${CMAKE_OBJDUMP}"
+            --nm "${CMAKE_NM}" --cflags "-mcpu=cortex-m55 -mthumb"
+    COMMENT "storage gate negative tests (cross compiler)"
+    VERBATIM)
+add_dependencies(shell grove_decoder_storage_fixtures)
+
 target_link_options(shell PRIVATE
     "-T${LDSCRIPT_APP}" -Wl,-Map=shell.map,--cref)
 set_target_properties(shell PROPERTIES LINK_DEPENDS "${LDSCRIPT_APP}")

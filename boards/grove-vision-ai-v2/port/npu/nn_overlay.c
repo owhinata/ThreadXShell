@@ -11,7 +11,7 @@
 
 #include "tx_api.h"        /* tx_time_get(): ThreadX ticks, 1 ms here */
 
-#include "blazeface.h"
+#include "nn_decoder.h"
 #include "camera.h"
 #include "cam_dp.h"
 #include "cam_sensor.h"
@@ -22,7 +22,6 @@
 
 /* Enough descriptors for any model handed to the decoder; BlazeFace needs
  * four.  Matches the cap in cmd_nn.c for the same reason it exists there. */
-#define NN_OVERLAY_MAX_OUTPUTS 8
 
 /* Box colour and thickness.  Green because it is the one hue the camera's
  * unbalanced output never produces at full saturation, so a box is never
@@ -89,6 +88,9 @@ static uint32_t nn_ov_prof_frames;
  * panel thread -- that did not acknowledge a stop (see nn_overlay.h).
  */
 static struct bf_det nn_ov_det[BF_MAX_DET];
+/* The most recent decode's status, so `nn preview`'s summary can say WHY it
+ * annotated nothing rather than only that it did not. */
+static int           nn_ov_last_status;
 static int           nn_ov_ndet;
 static struct nn_preproc_geom nn_ov_geom;
 static int           nn_ov_geom_ok;
@@ -97,10 +99,11 @@ static int nn_overlay_process(void *ctx, const void *pixels,
                               uint16_t w, uint16_t h)
 {
 	struct npu_tensor in;
-	struct npu_tensor outs[NN_OVERLAY_MAX_OUTPUTS];
+	struct npu_tensor outs[NN_DECODER_MAX_OUTPUTS];
 	unsigned n_out, i;
 	uint32_t t0, t1;
 	uint32_t e0, e1, e2, e3;
+	struct bf_result bfr;
 	int nd;
 
 	(void)ctx;
@@ -164,7 +167,7 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	}
 
 	n_out = npu_output_count();
-	if (n_out > NN_OVERLAY_MAX_OUTPUTS) {
+	if (n_out > NN_DECODER_MAX_OUTPUTS) {
 		nn_ov_stats.errors++;
 		return -1;
 	}
@@ -204,11 +207,22 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	t1 = (uint32_t)tx_time_get();
 	e2 = tx_glue_epk_timer_ticks();
 
-	nd = blazeface_decode(outs, n_out, nn_ov_det, BF_MAX_DET);
+	nd = nn_decoder_run(outs, n_out, nn_ov_det, BF_MAX_DET, &bfr);
 	if (nd < 0) {
+		/* [!] There is no console on this path, so the only way a decode
+		 * failure can be told apart afterwards is if it is counted apart
+		 * (issue #97).  A bare errors++ makes "the open model is not
+		 * BlazeFace" and "the decoder was never initialised" the same
+		 * number, and they call for opposite investigations. */
+		if (nd == BF_ERR_MODEL)
+			nn_ov_stats.model_errors++;
+		else
+			nn_ov_stats.decoder_errors++;
 		nn_ov_stats.errors++;
+		nn_ov_last_status = nd;
 		return -1;
 	}
+	nn_ov_last_status = BF_OK;
 	e3 = tx_glue_epk_timer_ticks();
 
 	nn_ov_stats.inferences++;
@@ -276,8 +290,11 @@ const struct cam_lcd_overlay *nn_overlay_arm(void)
 	nn_ov_stats.detections = 0u;
 	nn_ov_stats.skipped    = 0u;
 	nn_ov_stats.errors     = 0u;
+	nn_ov_stats.model_errors   = 0u;
+	nn_ov_stats.decoder_errors = 0u;
 	nn_ov_stats.last_ms    = 0u;
 	nn_ov_stats.last_ndet  = 0;
+	nn_ov_last_status      = 0;
 	nn_ov_prep_ticks       = 0u;
 	nn_ov_invoke_ticks     = 0u;
 	nn_ov_decode_ticks     = 0u;

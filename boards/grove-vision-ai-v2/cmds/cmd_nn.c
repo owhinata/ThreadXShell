@@ -54,7 +54,7 @@
 #include "npu_hw.h"
 #include "nn_overlay.h"
 #include "nn_preproc.h"
-#include "blazeface.h"
+#include "nn_decoder.h"
 #include "camera.h"
 #include "cam_dp.h"
 #include "cam_sensor.h"
@@ -424,7 +424,7 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	cli_print(sh, "detect   score threshold %u/1000 (nn thresh <1..999>)\r\n",
-	          blazeface_get_thresh_milli());
+	          nn_decoder_get_thresh_milli());
 
 	if (!nn_open_done) {
 		cli_print(sh, "model    not open (nn open <name>)\r\n");
@@ -680,7 +680,6 @@ static int cmd_nn_run(struct cli_instance *sh, int argc, char **argv)
  * needs four.  A model with more outputs than this is reported rather than
  * silently truncated, because a decoder that locates tensors by shape would
  * otherwise fail with "not BlazeFace-shaped" and never say why. */
-#define NN_MAX_OUTPUTS 8
 
 /*
  * Does the model's input quantisation match what nn_fill_input() produces?
@@ -720,8 +719,9 @@ static int nn_input_quant_ok(struct cli_instance *sh, const struct npu_tensor *i
 static int cmd_nn_detect(struct cli_instance *sh, int argc, char **argv)
 {
 	struct npu_tensor in;
-	struct npu_tensor outs[NN_MAX_OUTPUTS];
+	struct npu_tensor outs[NN_DECODER_MAX_OUTPUTS];
 	struct bf_det det[BF_MAX_DET];
+	struct bf_result bfr;
 	struct nn_preproc_geom geom;
 	unsigned n_out, i;
 	uint32_t t0, t1;
@@ -750,9 +750,9 @@ static int cmd_nn_detect(struct cli_instance *sh, int argc, char **argv)
 		goto out;
 
 	n_out = npu_output_count();
-	if (n_out > NN_MAX_OUTPUTS) {
+	if (n_out > NN_DECODER_MAX_OUTPUTS) {
 		cli_error(sh, "nn: model has %u outputs, this command reads %u\r\n",
-		          n_out, (unsigned)NN_MAX_OUTPUTS);
+		          n_out, (unsigned)NN_DECODER_MAX_OUTPUTS);
 		goto out;
 	}
 	for (i = 0; i < n_out; i++)
@@ -775,10 +775,19 @@ static int cmd_nn_detect(struct cli_instance *sh, int argc, char **argv)
 	/* The descriptors were taken before the run; the POINTERS in them are
 	 * arena addresses that do not move, and the port made the contents visible
 	 * before Invoke() returned. */
-	nd = blazeface_decode(outs, n_out, det, BF_MAX_DET);
+	nd = nn_decoder_run(outs, n_out, det, BF_MAX_DET, &bfr);
 	if (nd < 0) {
-		cli_error(sh, "nn: the open model is not BlazeFace-shaped (wants 1x512x16, "
-		              "1x512x1, 1x384x16 and 1x384x1 int8 outputs)\r\n");
+		/* [!] The codes are not interchangeable (issue #97).  Only MODEL is
+		 * something the user did; the others mean this firmware is wired
+		 * wrong, and saying "not BlazeFace-shaped" for one of those would
+		 * send someone off to re-check a model that is fine. */
+		if (nd == BF_ERR_MODEL)
+			cli_error(sh, "nn: the open model is not BlazeFace-shaped "
+			              "(wants 1x512x16, 1x512x1, 1x384x16 and "
+			              "1x384x1 int8 outputs)\r\n");
+		else
+			cli_error(sh, "nn: the decoder is not usable (internal "
+			              "error %d)\r\n", nd);
 		goto out;
 	}
 
@@ -813,14 +822,18 @@ static int cmd_nn_detect(struct cli_instance *sh, int argc, char **argv)
 	 * are different states and the count alone cannot tell them apart.  The
 	 * peak is over ALL 896 anchors (blazeface.c never cuts the scan short), so
 	 * it is the real maximum and not the maximum of a prefix. */
-	peak = (long)(blazeface_last_max_score() * 1000.0f);
+	peak = (long)(bfr.max_score * 1000.0f);
+	/* [!] The threshold printed is the one THIS decode applied, carried back
+	 * in the result -- not whatever is current now.  They can differ: another
+	 * console can set a new one between the decode and this line, and then the
+	 * promise that a box is shown exactly when its score clears the printed
+	 * threshold would quietly be false. */
 	cli_print(sh, "    peak raw %ld/1000, threshold %ld/1000 raw "
 	              "(= %u/1000 after sigmoid)\r\n",
-	          peak, (long)(blazeface_get_thresh_logit() * 1000.0f),
-	          blazeface_get_thresh_milli());
+	          peak, (long)(blazeface_logit_of_milli(bfr.thresh_milli) * 1000.0f),
+	          bfr.thresh_milli);
 	cli_print(sh, "    %d anchor(s) over threshold, %d kept of %d, %d after NMS\r\n",
-	          blazeface_last_npass(), blazeface_last_nkept(),
-	          (int)BF_MAX_CAND, nd);
+	          bfr.npass, bfr.nkept, (int)BF_MAX_CAND, nd);
 	rc = 0;
 out:
 	nn_release();
@@ -847,7 +860,7 @@ out:
 static int cmd_nn_preview(struct cli_instance *sh, int argc, char **argv)
 {
 	struct npu_tensor in;
-	struct npu_tensor outs[NN_MAX_OUTPUTS];
+	struct npu_tensor outs[NN_DECODER_MAX_OUTPUTS];
 	struct nn_overlay_stats ns;
 	struct camera_stats st;
 	uint32_t frames = 0u;   /* 0 = until Ctrl+C, as `camera preview` */
@@ -890,9 +903,9 @@ static int cmd_nn_preview(struct cli_instance *sh, int argc, char **argv)
 		return -1;
 	}
 	n_out = npu_output_count();
-	if (n_out > NN_MAX_OUTPUTS) {
+	if (n_out > NN_DECODER_MAX_OUTPUTS) {
 		cli_error(sh, "nn: model has %u outputs, this command reads %u\r\n",
-		          n_out, (unsigned)NN_MAX_OUTPUTS);
+		          n_out, (unsigned)NN_DECODER_MAX_OUTPUTS);
 		nn_release();
 		return -1;
 	}
@@ -902,7 +915,7 @@ static int cmd_nn_preview(struct cli_instance *sh, int argc, char **argv)
 			nn_release();
 			return -1;
 		}
-	if (!blazeface_shapes_ok(outs, n_out)) {
+	if (!nn_decoder_shapes_ok(outs, n_out)) {
 		cli_error(sh, "nn: the open model is not BlazeFace-shaped "
 		              "(nn open det)\r\n");
 		nn_release();
@@ -1043,6 +1056,15 @@ static int cmd_nn_preview(struct cli_instance *sh, int argc, char **argv)
 			cli_print(sh, "%lu frame(s) skipped, %lu refused\r\n",
 			          (unsigned long)ns.skipped,
 			          (unsigned long)ns.errors);
+		/* [!] Say WHICH refusal (issue #97).  The producer has no console,
+		 * so this line is the only place the two can be told apart -- and
+		 * one means "open a different model" while the other means "this
+		 * firmware is wired wrong". */
+		if (ns.model_errors || ns.decoder_errors)
+			cli_print(sh, "  of those: %lu not BlazeFace-shaped, "
+			              "%lu decoder fault(s)\r\n",
+			          (unsigned long)ns.model_errors,
+			          (unsigned long)ns.decoder_errors);
 	}
 	return 0;
 }
@@ -1068,15 +1090,18 @@ static int cmd_nn_thresh(struct cli_instance *sh, int argc, char **argv)
 		 * decoder compares against is undefined there, so they are refused
 		 * rather than clamped -- a silently clamped threshold is a setting
 		 * that does not do what it says. */
-		if (blazeface_set_thresh_milli(milli) != 0) {
+		if (nn_decoder_set_thresh_milli(milli) != BF_OK) {
 			cli_error(sh, "nn: threshold must be 1..999 (milli-probability)\r\n");
 			rc = -1;
 			goto out;
 		}
 	}
+	milli = nn_decoder_get_thresh_milli();
+	/* One read, then both units derived from it: asking twice could straddle
+	 * another console's set and print a milli value next to a logit that is
+	 * not its conversion. */
 	cli_print(sh, "nn: detect threshold %u/1000 (raw %ld/1000)\r\n",
-	          blazeface_get_thresh_milli(),
-	          (long)(blazeface_get_thresh_logit() * 1000.0f));
+	          milli, (long)(blazeface_logit_of_milli(milli) * 1000.0f));
 out:
 	nn_release();
 	return rc;

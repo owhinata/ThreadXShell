@@ -107,11 +107,18 @@ void describe(const TfLiteTensor *t, struct npu_tensor *out)
 	out->zero_point = t->params.zero_point;
 	out->scale      = t->params.scale;
 
-	if (t->dims != nullptr) {
+	/*
+	 * [!] A HIGHER-RANK TENSOR IS REFUSED, NOT TRUNCATED (issue #97).  This
+	 * used to clamp the rank to four and report the first four dimensions,
+	 * which is worse than losing information: a truncated shape can still
+	 * MATCH a consumer's lookup, and then the consumer reads a tensor it was
+	 * not looking for while every check it makes passes.  Leaving rank 0 (and
+	 * the dims zeroed by the memset above) says "not representable here", and
+	 * every shape test downstream fails on it.
+	 */
+	if (t->dims != nullptr && t->dims->size >= 0 && t->dims->size <= 4) {
 		int rank = t->dims->size;
 
-		if (rank > 4)
-			rank = 4;               /* npu_tensor carries four; report what fits */
 		out->rank = static_cast<uint8_t>(rank);
 		for (int i = 0; i < rank; i++)
 			out->dims[i] = t->dims->data[i];

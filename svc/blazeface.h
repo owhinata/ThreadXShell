@@ -185,6 +185,18 @@ int      blazeface_set_thresh_milli(struct blazeface *bf, unsigned milli);
 unsigned blazeface_get_thresh_milli(const struct blazeface *bf);
 
 /**
+ * The raw pre-sigmoid logit a milli-probability corresponds to.
+ *
+ * A PURE CONVERSION, not a query: the decoder stores only the milli value, and a
+ * caller that wants to show the logit -- it is the number that appears next to a
+ * score in any discussion of the model -- converts the one it is reporting.
+ * Passing @ref bf_result.thresh_milli therefore shows the logit that decode
+ * really compared against, rather than whatever is current by print time.
+ * Outside 1..999 the inverse sigmoid has no value and this returns 0.
+ */
+float blazeface_logit_of_milli(unsigned milli);
+
+/**
  * @brief  Are these tensors BlazeFace-shaped, without decoding anything?
  *
  * For a caller that must decide BEFORE it commits to something expensive --

@@ -135,24 +135,26 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_npu_payload"
 "$out/test_npu_payload"
 
-# issue #45 -- the BlazeFace decoder (port/npu/models/blazeface.c).  The REAL
-# decoder is compiled, which is possible at all because it takes tensor
-# DESCRIPTORS instead of reaching into the NPU singleton.  Its failure modes are
-# a scale factor or an offset -- boxes that are still boxes, in the wrong place,
-# on an image nobody can see -- and each hypothesis otherwise costs a flash
-# cycle of a NOR with ~100k of them.  The case that earns the file is the
-# candidate cap: the donor implementation stops decoding when its buffer fills,
-# so a busy frame drops the strongest face if it lands in the 8x8 group, which
-# is scanned last.
+# issue #97 -- the adapter onto the SHARED BlazeFace decoder
+# (port/npu/nn_decoder.c).  The decoder's arithmetic moved to svc/blazeface.c and
+# is covered by shell/test/test_blazeface.c, which is board-independent; what
+# stays here is the half that cannot be: npu_tensor -> tensor_desc, compiled
+# against this board's REAL npu.h.  A shimmed copy of that header could drift
+# from the firmware's without anything noticing.
 #
-# No shim: npu.h is plain C with no hardware in it, and the test supplies
-# npu_tensor_is_int8() itself (on the board it lives in npu_tflm.cc, where a
-# static_assert pins the enumerator).
+# The cases are the translation's own failure modes -- an unknown TfLiteType read
+# as int8, the rank-0 "not representable" marker treated as present, an output
+# count beyond the descriptor array -- none of which the core test can see.
+#
+# No shim: npu.h and log.h are plain C with no hardware in them, and the test
+# supplies npu_tensor_is_int8() and log_write() itself (on the board the first
+# lives in npu_tflm.cc, where a static_assert pins the enumerator).
 gcc $CFLAGS \
-    -I "$here" -I "$board/port/npu" -I "$board/port/npu/models" \
-    "$here/test_blazeface.c" "$board/port/npu/models/blazeface.c" \
-    $LDFLAGS -o "$out/test_blazeface"
-"$out/test_blazeface"
+    -I "$here" -I "$board/port/npu" -I "$board/svc" -I "$HOST_TEST_SVC" \
+    "$here/test_nn_decoder.c" "$board/port/npu/nn_decoder.c" \
+    "$HOST_TEST_SVC/blazeface.c" \
+    $LDFLAGS -o "$out/test_nn_decoder"
+"$out/test_nn_decoder"
 
 # issue #45 -- the flash partition check (cmake/check_flash_partitions.py).
 # A gate over a destructive, unrecoverable-in-place operation: the model and the

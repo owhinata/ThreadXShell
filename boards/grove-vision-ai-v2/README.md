@@ -3844,19 +3844,48 @@ the first `nn detect` on hardware is the proof.
 
 ### The decoder
 
-`port/npu/models/blazeface.c`: SSD anchor decode over 896 anchors (16x16 grid
-with 2 per cell, 8x8 with 6), then hard NMS.  No libm -- the threshold is
-compared as a pre-sigmoid logit and the reported confidence uses an algebraic
-sigmoid.  It takes tensor DESCRIPTORS rather than reaching into the NPU
-singleton, which is what lets `test/test_blazeface.c` compile the real decoder
-and drive it with synthetic tensors.
+`svc/blazeface.c`, SHARED with the other two boards since issue #97: SSD anchor
+decode over 896 anchors (16x16 grid with 2 per cell, 8x8 with 6), then hard NMS.
+No libm -- the threshold is compared as a pre-sigmoid logit and the reported
+confidence uses an algebraic sigmoid.  It takes tensor DESCRIPTORS
+(`svc/tensor.h`) rather than reaching into the NPU singleton, which is what lets
+`shell/test/test_blazeface.c` compile the real decoder and drive it with
+synthetic tensors.
 
-Two things differ from the Wio/F746 implementation of the same model:
+`port/npu/nn_decoder.c` is this board's half: `npu_tensor` -> `tensor_desc`, and
+the decoder's state and candidate scratch, which live here because the shared
+translation unit owns no storage at all.  That is not a style rule -- it is what
+lets each board keep its own placement for the scratch (plain `.bss` here,
+`.psram_ai` on Wio, `.sdram.ai` on F746) and its own residency gate.  A build
+gate enforces it: an audit compile of the shared file with this board's real
+definitions must produce no allocated, writable section
+(`cmake/check_no_mutable_storage.py`, negative tests in `cmake/fixtures/`).
+It costs **+800 B of ITCM** over the board-private version it replaced, measured
+with `check_placement_budget.py` on either side of the change.
 
-- **The anchor centres are computed, not tabulated.**  The donor fills two
+The board-independent arithmetic is tested in `shell/test/test_blazeface.c`; what
+stays in `test/test_nn_decoder.c` is the translation, compiled against the real
+`npu.h` -- an unknown TfLiteType must not be read as int8, and the rank-0 marker
+`npu_tflm.cc` leaves for a tensor it cannot represent must not look present.
+
+[!] **Two of the decoder's failure paths cannot be reached on this board, and no
+hardware procedure should pretend otherwise.**  `BF_ERR_MODEL` -- "the open model
+is not BlazeFace-shaped" -- needs a model whose outputs are the wrong shape but
+whose INPUT quantisation matches, and `nn detect` refuses a mismatched input scale
+at its entry, before the decoder is called at all.  Opening `cls` and running
+`nn detect` therefore produces the input-scale message, not a decode failure.  The
+overlay's `model_errors` / `decoder_errors` counters are unreachable for the same
+reason.  The host tests are the only thing that exercises them; a procedure that
+said "open the wrong model and check the message" would report a pass earned by a
+different check.
+
+Two things differ from what the Wio/F746 copies of this decoder used to do, and
+both are now simply what the shared one does:
+
+- **The anchor centres are computed, not tabulated.**  Those versions filled two
   `float[896]` tables on first use behind a ready flag; the centres are
-  `(cell + 0.5) / grid`, so computing them removes 7 KB of DTCM and a piece of
-  lazily-initialised static state.
+  `(cell + 0.5) / grid`, so computing them removes 7 KB of carve-out and a piece
+  of lazily-initialised static state.
 - **The scan is never cut short.**  The donor stops decoding when its
   64-candidate buffer fills, which makes two things wrong at once: the reported
   peak score becomes the maximum of a PREFIX, and NMS sees the FIRST 64
@@ -3922,8 +3951,8 @@ represent.
 
 It is also why a decoder that shared one dequantisation constant across the four
 tensors would look almost right: the boxes would still be boxes.
-`test_blazeface.c` writes the same quantised bytes into both groups and requires
-the decoded sizes to differ by the ratio of the scales.
+`shell/test/test_blazeface.c` writes the same quantised bytes into both groups
+and requires the decoded sizes to differ by the ratio of the scales.
 
 ### Limits worth stating with any result
 

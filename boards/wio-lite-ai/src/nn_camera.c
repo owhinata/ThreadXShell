@@ -12,6 +12,8 @@
 #include "cam_band.h"
 #include "camera.h"
 #include "nn.h"
+#include "nn_decoder.h"
+#include "nn_det_record.h"
 #include "psram.h"
 
 #include "stm32h7xx_hal.h"   /* HAL_GetTick, SystemCoreClock, DWT */
@@ -97,8 +99,14 @@ static uint32_t nncam_start_tick;
 static int nncam_norm_signed;   /* 0 = [0,1] (default), 1 = [-1,1] */
 static int nncam_overlay;
 
-static struct bf_det nncam_dets[BF_MAX_DET];
-static int           nncam_ndet;
+/*
+ * The published decode: boxes AND the diagnostics that describe them, plus the
+ * session generation that keeps a stopped session's in-flight decode from landing
+ * in a live one.  The decisions live in svc/nn_det_record.c so they can be tested
+ * -- the ordering they guard against cannot be produced deterministically on
+ * hardware -- and the storage and the lock are ours.
+ */
+static struct nn_det_record nncam_rec;
 
 /* Input geometry, latched at start so the band callback does no shape work. */
 static unsigned nncam_ow, nncam_oh, nncam_oc;
@@ -310,27 +318,54 @@ static void nncam_band(unsigned band, const uint16_t *px, unsigned rows)
 
 /* ---------------------------------------------------------------- worker ------ */
 
-static void nncam_publish(const struct bf_det *d, int n)
+/*
+ * Publish one decode's boxes and diagnostics together, under the detection lock.
+ *
+ * @return non-zero if they were taken.  A publish from a session that has since
+ *         ended is DROPPED -- svc/nn_det_record.c has the rule and the reason --
+ *         and the caller must not count it, because `ai run` waits on the
+ *         inference counter and then reads the record.
+ */
+static int nncam_publish(const struct bf_det *d, int n,
+                         const struct bf_result *res, uint32_t gen)
+{
+	int took;
+
+	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) != TX_SUCCESS)
+		return 0;
+	took = nn_det_record_publish(&nncam_rec, d, n, res, gen);
+	(void)tx_mutex_put(&nncam_det_lock);
+	return took;
+}
+
+/* Start or end a session: invalidate the record and move the generation, both
+ * under the lock, so an in-flight decode from the previous one lands nowhere. */
+static void nncam_record_reset(void)
 {
 	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) != TX_SUCCESS)
 		return;
-	if (n > 0)
-		memcpy(nncam_dets, d, (size_t)n * sizeof(*d));
-	/*
-	 * [!] A DECODER THAT DOES NOT RECOGNISE THE MODEL IS NOT "ZERO FACES" (issue #57).
-	 * Collapsing blazeface_decode()'s -1 into 0 made every non-BlazeFace model report
-	 * `dets: 0` -- which reads as a measurement -- next to a `maxscore` the decoder had
-	 * returned too early to touch, so that number still belonged to whatever model ran
-	 * before.  Two readings that both look like this model's answer, and neither is.
-	 * The -1 is carried through to the shell instead, which prints the reason.
-	 */
-	nncam_ndet = (n < 0) ? -1 : n;
+	nn_det_record_reset(&nncam_rec);
 	(void)tx_mutex_put(&nncam_det_lock);
+}
+
+/* The generation the worker remembers when it ARMS -- see nn_det_record.h for
+ * why sampling it after the wait would leave the re-arm boundary open. */
+static uint32_t nncam_gen_now(void)
+{
+	uint32_t g;
+
+	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) != TX_SUCCESS)
+		return 0u;
+	g = nn_det_record_gen(&nncam_rec);
+	(void)tx_mutex_put(&nncam_det_lock);
+	return g;
 }
 
 static void nncam_step(void)
 {
 	struct bf_det tmp[BF_MAX_DET];
+	struct bf_result bfr;
+	uint32_t gen;
 	int n;
 
 	/*
@@ -367,6 +402,14 @@ static void nncam_step(void)
 	while (tx_semaphore_get(&nncam_frame_sem, TX_NO_WAIT) == TX_SUCCESS)
 		nncam_stale_posts++;
 
+	/*
+	 * [!] THE GENERATION IS SAVED HERE, at the arm, and not after the wait.
+	 * Saving it once the semaphore returns would leave the re-arm boundary open:
+	 * a stop and a fresh start could both happen while this thread sits in the
+	 * wait, and the value read afterwards would be the NEW session's -- so the
+	 * old frame would publish into it looking current.
+	 */
+	gen = nncam_gen_now();
 	nncam_want_frame = 1;
 	if (tx_semaphore_get(&nncam_frame_sem, NNCAM_FRAME_WAIT_TICKS) != TX_SUCCESS) {
 		/* No frame within the bound.  The band flow may have ended without ever
@@ -397,12 +440,14 @@ static void nncam_step(void)
 	}
 	nncam_infer_cyc = nn_last_cycles(nncam_model);
 
-	n = blazeface_decode(nncam_model, tmp, BF_MAX_DET);
-	nncam_publish(tmp, n);
-	/* Bumped LAST, after the boxes are published: `ai run` waits for this counter
-	   to move and then reads the detections, so incrementing first would let it
-	   read the PREVIOUS inference's boxes and report them as this one's. */
-	nncam_infers++;
+	n = nn_decoder_run(nncam_model, tmp, BF_MAX_DET, &bfr);
+	/* Bumped LAST, after the boxes are published, and ONLY IF THEY WERE: `ai run`
+	   waits for this counter to move and then reads the detections, so
+	   incrementing first would let it read the PREVIOUS inference's boxes and
+	   report them as this one's -- and so would incrementing for a publish that
+	   the generation check dropped. */
+	if (nncam_publish(tmp, n, &bfr, gen))
+		nncam_infers++;
 }
 
 static void nncam_entry(ULONG arg)
@@ -595,7 +640,7 @@ int nn_camera_start(int colorbar)
 	nncam_start_tick  = HAL_GetTick();
 	nncam_want_frame  = 0;
 	nncam_filling     = 0;
-	nncam_publish(NULL, 0);
+	nncam_record_reset();
 	while (tx_semaphore_get(&nncam_frame_sem, TX_NO_WAIT) == TX_SUCCESS)
 		;
 
@@ -619,6 +664,14 @@ int nn_camera_stop(void)
 		return NNCAM_ERR_NOTRUN;
 
 	nncam_run = 0;
+	/*
+	 * [!] MOVE THE GENERATION BEFORE WAITING FOR THE WORKER.  The wait below is
+	 * bounded and the worker may be most of an inference away from noticing, so a
+	 * decode that started under the old session can still complete after this
+	 * returns.  Bumping here means its publish is dropped rather than resurrecting
+	 * a stopped session's boxes.
+	 */
+	nncam_record_reset();
 	/* Poke the worker out of its bounded wait so it notices immediately rather
 	   than after the remainder of a 100 ms timeout. */
 	(void)tx_semaphore_put(&nncam_frame_sem);
@@ -688,24 +741,45 @@ void nn_camera_stats_get(struct nn_camera_stats *out)
 	/* Read directly rather than under nncam_det_lock: a single int cannot tear on
 	   this core, and taking the mutex here would make this function unusable before
 	   the first start() has created it (`ai stream stats` on a cold boot). */
-	out->ndet = nncam_ndet;
+	/* Read without nncam_det_lock: a single int cannot tear on this core, and
+	   taking the mutex here would make this function unusable before the first
+	   start() has created it (`ai stream stats` on a cold boot). */
+	out->ndet = nncam_rec.ndet;
 }
 
 int nn_camera_dets_get(struct bf_det *out, int max)
 {
-	int n;
+	struct nn_camera_decode snap;
 
-	if (out == NULL || max <= 0 || !nncam_created)
+	if (out == NULL || max <= 0)
+		return 0;
+	if (nn_camera_decode_get(&snap, out, max) == 0)
+		return 0;
+	return snap.ndet > max ? max : snap.ndet;
+}
+
+int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
+                         int max)
+{
+	struct nn_det_snapshot snap;
+
+	if (out == NULL || !nncam_created)
 		return 0;
 	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) != TX_SUCCESS)
 		return 0;
-	n = nncam_ndet;
-	if (n > max)
-		n = max;
-	if (n > 0)
-		memcpy(out, nncam_dets, (size_t)n * sizeof(*out));
+	/*
+	 * [!] ONE LOCK FOR BOTH.  The boxes and the diagnostics that describe them
+	 * are published together and have to be read together: taking them in two
+	 * calls lets a frame land in between, and then a console prints this
+	 * frame's boxes beside the next frame's peak score with nothing to show
+	 * they disagree (issue #97).
+	 */
+	nn_det_record_snapshot(&nncam_rec, &snap, dets, max);
 	(void)tx_mutex_put(&nncam_det_lock);
-	return n;
+	out->valid = snap.valid;
+	out->ndet  = snap.ndet;
+	out->res   = snap.res;
+	return 1;
 }
 
 void nn_camera_set_norm(int signed_range) { nncam_norm_signed = signed_range ? 1 : 0; }

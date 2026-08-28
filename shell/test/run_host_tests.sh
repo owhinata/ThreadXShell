@@ -293,6 +293,23 @@ gcc $CFLAGS -I "$svc" \
 python3 "$repo/cmake/fixtures/run_storage_gate_tests.py" \
     --cc gcc --objdump objdump --nm nm
 
+# issue #97 -- the published decode record (svc/nn_det_record.c).  A camera stream
+# decodes on a worker and a console prints on another thread, so what the two
+# exchange has a rule: the boxes and the diagnostics that describe them travel
+# together, and a decode that outlived its session lands nowhere.
+#
+# [!] THE SECOND HALF IS WHY THIS FILE EXISTS.  Stopping a stream cannot cancel an
+# inference already running -- it can only wait, and the wait is bounded -- so
+# "stop clears the record, the old inference finishes and publishes" is reachable
+# on hardware and would resurrect a stopped session's boxes.  It cannot be
+# INJECTED there, though, so the interleavings are written out by hand here; a
+# test that ran a stream and looked for stale boxes would pass almost always and
+# prove nothing.  Pure svc layer, so it needs only the svc include dir.
+gcc $CFLAGS -I "$svc" \
+    "$here/test_nn_det_record.c" "$svc/nn_det_record.c" \
+    $LDFLAGS -o "$out/test_nn_det_record"
+"$out/test_nn_det_record"
+
 # ---- board-pinned tests --------------------------------------------------- *
 # Same toolchain flags and the same scratch dir, exported so a board test is built
 # exactly like a core one and cannot quietly diverge.  A board with no

@@ -127,6 +127,27 @@ maintenance obligation that the asserts did not.
 carve-out, and `cmake/check_cxx_runtime.py` bounds what the C++ (TFLM) backend
 is allowed to drag in.
 
+Since issue #97 there is one more, and it protects something less obvious.  The
+BlazeFace decoder is shared by all three boards (`svc/blazeface.c`), and sharing
+it is only possible because it owns NO storage: this board passes in its own
+candidate scratch, which is how that buffer stays in `.psram_ai` and how
+`check_psram_ai_residency.py` keeps naming a symbol this board owns
+(`nn_dec_scratch`, in `port/nn/nn_decoder.c`).  A static added to the shared file
+would become state nobody placed and no gate mentions.
+`cmake/check_no_mutable_storage.py` refuses that, by compiling the shared file
+with this board's real definitions and requiring the object to have no allocated,
+writable section.  It measures sections rather than symbols because thread-local
+storage is not an `STT_OBJECT` and inline asm can place anonymous writable bytes;
+`cmake/fixtures/run_storage_gate_tests.py` demonstrates both, and demonstrates
+why the check runs against the cross compiler rather than on the host.
+
+[!] Only the SCRATCH is placed.  The decoder's state -- the threshold -- stays in
+ordinary internal RAM, and that is deliberate twice over: `.psram_ai` is NOLOAD,
+so an initialised field there would never be loaded (and NOLOAD keeps the
+previous run's bytes, so it would fail by appearing to work), and the PSRAM
+bring-up is fail-soft, so `ai thresh` has to keep answering on a board whose
+external memory did not come up.
+
 ## Console
 
 The console is USB CDC on USB1_OTG_HS, driven at full speed through the

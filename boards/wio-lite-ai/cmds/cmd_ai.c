@@ -44,7 +44,7 @@
  */
 #include "cli.h"
 #include "nn.h"
-#include "blazeface.h"       /* issue #9 P3: model-specific decode, above the nn API */
+#include "nn_decoder.h"       /* issue #9 P3: model-specific decode, above the nn API */
 #include "psram.h"
 
 #if BSP_ENABLE_KV
@@ -882,12 +882,13 @@ static int cmd_ai_out(struct cli_instance *sh, int argc, char **argv)
  * the printed threshold.  svc/fmt.c implements no %f, so both are scaled integers,
  * the same idiom as the quantization scale in ai_print_tensor() above.
  */
-static void ai_print_dets(struct cli_instance *sh, const struct bf_det *d, int n)
+static void ai_print_dets(struct cli_instance *sh, const struct bf_det *d, int n,
+                          unsigned thresh_milli)
 {
 	int i;
 
 	cli_print(sh, "dets    : %d  (x/y/w/h in %% of frame, score in milli; "
-	          "thresh %u)\r\n", n, blazeface_get_thresh_milli());
+	          "thresh %u)\r\n", n, thresh_milli);
 	for (i = 0; i < n; i++)
 		cli_print(sh, "  face[%d]  x %ld%% y %ld%% w %ld%% h %ld%%  score %ld\r\n",
 		          i, (long)(d[i].x * 100.0f), (long)(d[i].y * 100.0f),
@@ -908,14 +909,27 @@ static void ai_print_dets(struct cli_instance *sh, const struct bf_det *d, int n
  * not actually re-arm): a confident wrong answer costs more than no answer.
  */
 static void ai_print_decode(struct cli_instance *sh, const struct bf_det *d, int n,
-                            const char *suffix)
+                            const struct bf_result *res, const char *suffix)
 {
 	if (n < 0) {
-		cli_print(sh, "dets    : n/a -- this model's outputs are not "
-		          "BlazeFace-shaped; read them with `ai out`%s\r\n", suffix);
+		/* [!] Only BF_ERR_MODEL is about the model (issue #97).  The others
+		 * mean this firmware is wired wrong, and saying "not BlazeFace-shaped"
+		 * for one of them sends someone off to re-check a model that is fine. */
+		if (n == BF_ERR_MODEL)
+			cli_print(sh, "dets    : n/a -- this model's outputs are not "
+			          "BlazeFace-shaped; read them with `ai out`%s\r\n",
+			          suffix);
+		else
+			cli_print(sh, "dets    : n/a -- the decoder is not usable "
+			          "(internal error %d)%s\r\n", n, suffix);
 		return;
 	}
-	ai_print_dets(sh, d, n);
+	/* [!] THE THRESHOLD PRINTED IS THE ONE THAT DECODE APPLIED, carried in the
+	 * result -- not whatever is current now.  Another console can set a new one
+	 * between the decode and this line, and the promise this file makes just
+	 * above ai_print_dets() -- that a box is shown exactly when its printed score
+	 * clears the printed threshold -- would quietly stop being true. */
+	ai_print_dets(sh, d, n, res->thresh_milli);
 	/* pass and kept are two different numbers (issue #47): pass is every anchor
 	 * over the threshold, kept is how many of those the 64-entry candidate list
 	 * held.  They differ only when the cap bound, and then the kept ones are the
@@ -923,10 +937,35 @@ static void ai_print_decode(struct cli_instance *sh, const struct bf_det *d, int
 	 * A single "cand" conflated them and could not say which had happened. */
 	cli_print(sh, "maxscore: %ld (raw x1000, pre-sigmoid)  pass: %d  kept: %d "
 	          "(pre-NMS, cap %d)%s\r\n",
-	          (long)(blazeface_last_max_score() * 1000.0f),
-	          blazeface_last_npass(), blazeface_last_nkept(), BF_MAX_CAND, suffix);
+	          (long)(res->max_score * 1000.0f),
+	          res->npass, res->nkept, BF_MAX_CAND, suffix);
 }
 
+
+/*
+ * Print what the stream worker last published.
+ *
+ * [!] "NOTHING DECODED YET" IS NOT "NO FACES" (issue #97).  A session that has
+ * not completed a frame has an empty box list and no diagnostics, and printing
+ * that as a zero-detection decode would be a measurement nobody took.  The
+ * snapshot carries the distinction; this is the one place that has to respect it.
+ */
+static void ai_print_published(struct cli_instance *sh, const char *suffix)
+{
+	struct nn_camera_decode snap;
+	struct bf_det dets[BF_MAX_DET];
+
+	if (!nn_camera_decode_get(&snap, dets, BF_MAX_DET)) {
+		cli_print(sh, "dets    : n/a -- no stream has run%s\r\n", suffix);
+		return;
+	}
+	if (!snap.valid) {
+		cli_print(sh, "dets    : n/a -- this stream has not decoded a frame "
+		          "yet%s\r\n", suffix);
+		return;
+	}
+	ai_print_decode(sh, dets, snap.ndet, &snap.res, suffix);
+}
 /*
  * Decode whatever is currently in the model's output tensors.
  *
@@ -941,6 +980,7 @@ static void ai_print_decode(struct cli_instance *sh, const struct bf_det *d, int
 static int cmd_ai_dets(struct cli_instance *sh, int argc, char **argv)
 {
 	struct bf_det dets[BF_MAX_DET];
+	struct bf_result bfr;
 	struct nn_model *m = NULL;
 	int n, rc;
 
@@ -951,8 +991,7 @@ static int cmd_ai_dets(struct cli_instance *sh, int argc, char **argv)
 	   simply be refused -- and would be the wrong answer anyway.  Report the boxes
 	   the worker published instead. */
 	if (nn_camera_running()) {
-		n = nn_camera_dets_get(dets, BF_MAX_DET);
-		ai_print_decode(sh, dets, n, "  [live stream]");
+		ai_print_published(sh, "  [live stream]");
 		return 0;
 	}
 #endif
@@ -966,21 +1005,27 @@ static int cmd_ai_dets(struct cli_instance *sh, int argc, char **argv)
 	 * same reason `ai bench` is guarded and `ai info` is not. */
 	if (ai_guards_take(sh) != 0)
 		return 1;
-	n = blazeface_decode(m, dets, BF_MAX_DET);
+	n = nn_decoder_run(m, dets, BF_MAX_DET, &bfr);
 	ai_guards_give();
 
-	if (n < 0) {
+	if (n == BF_ERR_MODEL) {
 		cli_error(sh, "ai: the loaded model's outputs are not BlazeFace-shaped "
 		          "(need 1x512x16 / 1x512x1 / 1x384x16 / 1x384x1 float32 -- "
 		          "see `ai info`).  `ai out` reads any model's outputs\r\n");
 		return 1;
 	}
-	ai_print_decode(sh, dets, n, "");
+	if (n < 0) {
+		cli_error(sh, "ai: the decoder is not usable (internal error %d)\r\n", n);
+		return 1;
+	}
+	ai_print_decode(sh, dets, n, &bfr, "");
 	return 0;
 }
 
 static int cmd_ai_thresh(struct cli_instance *sh, int argc, char **argv)
 {
+	unsigned milli;
+
 	if (argc > 1) {
 		uint32_t v;
 
@@ -988,14 +1033,25 @@ static int cmd_ai_thresh(struct cli_instance *sh, int argc, char **argv)
 			cli_error(sh, "ai: thresh must be 1 .. 999 (milli-probability)\r\n");
 			return 1;
 		}
-		blazeface_set_thresh_milli((unsigned)v);
+		/* [!] NO GUARD, deliberately (issue #97).  The decoder reads the
+		 * threshold once per frame, so a set here lands wholly before or
+		 * wholly after a decode and the value used comes back in the result
+		 * -- which is what lets sensitivity be tuned against a running
+		 * stream instead of being refused for its whole lifetime. */
+		if (nn_decoder_set_thresh_milli((unsigned)v) != BF_OK) {
+			cli_error(sh, "ai: thresh must be 1 .. 999 "
+			          "(milli-probability)\r\n");
+			return 1;
+		}
 	}
 	/* The logit is what is actually compared against the raw tensor, so print it
 	 * too: it is the number that appears next to a score in any model discussion,
-	 * and having only the friendly unit on screen hides the conversion. */
+	 * and having only the friendly unit on screen hides the conversion.  One read,
+	 * both units derived from it: asking twice could straddle another console's
+	 * set and print a milli value beside a logit that is not its conversion. */
+	milli = nn_decoder_get_thresh_milli();
 	cli_print(sh, "thresh  : %u milli-probability  (raw logit x1000 = %ld)\r\n",
-	          blazeface_get_thresh_milli(),
-	          (long)(blazeface_get_thresh_logit() * 1000.0f));
+	          milli, (long)(blazeface_logit_of_milli(milli) * 1000.0f));
 	return 0;
 }
 
@@ -1173,8 +1229,7 @@ static int cmd_ai_stream_stats(struct cli_instance *sh, int argc, char **argv)
 	cli_print(sh, "norm    : %s   overlay: %s\r\n",
 	          st.norm_signed ? "[-1,1]" : "[0,1]", st.overlay ? "on" : "off");
 
-	n = nn_camera_dets_get(dets, BF_MAX_DET);
-	ai_print_decode(sh, dets, n, "");
+	ai_print_published(sh, "");
 
 	return 0;
 }
@@ -1195,9 +1250,10 @@ static int cmd_ai_stream(struct cli_instance *sh, int argc, char **argv)
 static int cmd_ai_run(struct cli_instance *sh, int argc, char **argv)
 {
 	struct nn_camera_stats st;
+	struct nn_camera_decode snap = { 0, 0, { 0, 0.0f, 0, 0, 0u } };
 	struct bf_det dets[BF_MAX_DET];
 	uint32_t base, waited;
-	int cold, rc, n;
+	int cold, rc;
 
 	(void)argc; (void)argv;
 
@@ -1236,7 +1292,10 @@ static int cmd_ai_run(struct cli_instance *sh, int argc, char **argv)
 			goto cancelled;
 	}
 
-	n = nn_camera_dets_get(dets, BF_MAX_DET);
+	/* [!] BEFORE THE STOP.  Stopping ends the session, which invalidates the
+	 * published record on purpose -- so the boxes this run is about have to be
+	 * taken while the session that produced them is still the current one. */
+	(void)nn_camera_decode_get(&snap, dets, BF_MAX_DET);
 	nn_camera_stats_get(&st);
 	(void)nn_camera_stop();
 
@@ -1252,7 +1311,11 @@ static int cmd_ai_run(struct cli_instance *sh, int argc, char **argv)
 	}
 	cli_print(sh, "inference: %lu us\r\n",
 	          (unsigned long)ai_cyc_to_us(st.infer_last_cyc));
-	ai_print_decode(sh, dets, n, "");
+	if (snap.valid)
+		ai_print_decode(sh, dets, snap.ndet, &snap.res, "");
+	else
+		cli_print(sh, "dets    : n/a -- the run completed but published "
+		          "nothing\r\n");
 	return 0;
 
 cancelled:

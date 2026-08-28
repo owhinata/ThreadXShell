@@ -782,6 +782,17 @@ set(NN_SOURCES "${BOARD_DIR}/port/nn/nn.c")
 # backend was selected, and CMake is the only place that knows.  When the list was
 # hard-coded in the script, the script itself refused every tflm build -- the `null`
 # stub's buffers are not in that image.
+# [!] ONE VARIABLE FOR THE SHARED DECODER'S PATH (issue #97): the source list and
+# the residency gate below must name the same file, and spelling it twice is how
+# they drift.
+get_filename_component(WIO_SHARED_DECODER
+                       "${CMAKE_SOURCE_DIR}/svc/blazeface.c" ABSOLUTE)
+if(NOT EXISTS "${WIO_SHARED_DECODER}")
+    message(FATAL_ERROR
+        "shared BlazeFace decoder not found:\n  ${WIO_SHARED_DECODER}\n"
+        "This board builds it (issue #97); it is not optional.")
+endif()
+
 set(NN_PSRAM_AI_REQUIRED "")
 if(CONFIG_NN_BACKEND STREQUAL "null")
     list(APPEND NN_SOURCES "${BOARD_DIR}/port/nn/nn_null.c")
@@ -801,16 +812,27 @@ else()
 endif()
 # membench's cacheable row is in the carve-out whichever backend is built.
 list(APPEND NN_PSRAM_AI_REQUIRED --require psram_ai_bench_buf)
-# Model-specific post-processing, above the model-agnostic nn API.
-# Built UNCONDITIONALLY -- including in the `null` build, whose stub tensors it simply
-# does not recognise (blazeface_decode() returns -1 without touching anything).  That
-# is what lets `ai dets` be registered unconditionally, and keeping the reference in
-# every build is also what keeps the three --require lines below honest: a symbol
-# --gc-sections dropped would be reported as "no such object in the image", which
-# reads like a placement regression and is not one.
-list(APPEND NN_SOURCES "${BOARD_DIR}/port/nn/models/blazeface.c")
-list(APPEND NN_PSRAM_AI_REQUIRED
-     --require bf_cx --require bf_cy --require bf_cand)
+# Model-specific post-processing, above the model-agnostic nn API.  The decoder
+# itself is SHARED with the other two boards since issue #97; port/nn/nn_decoder.c
+# is this board's half -- nn_tensor -> tensor_desc, and the ownership of the
+# decoder's state and its candidate scratch, because the shared translation unit
+# owns no storage at all.
+#
+# Built UNCONDITIONALLY -- including in the `null` build, whose stub tensors it
+# simply does not recognise (the decoder returns BF_ERR_MODEL without touching
+# anything).  That is what lets `ai dets` be registered unconditionally, and
+# keeping the reference in every build is also what keeps the --require line below
+# honest: a symbol --gc-sections dropped would be reported as "no such object in
+# the image", which reads like a placement regression and is not one.
+#
+# [!] The two anchor tables are gone -- the shared decoder computes the centres --
+# so only the candidate scratch is still placed, and it is the BOARD's object, not
+# the shared file's.  That is the whole reason the scratch is passed in: it keeps
+# the residency gate pointing at something this board owns.
+list(APPEND NN_SOURCES "${WIO_SHARED_DECODER}"
+                       "${CMAKE_SOURCE_DIR}/svc/nn_det_record.c"
+                       "${BOARD_DIR}/port/nn/nn_decoder.c")
+list(APPEND NN_PSRAM_AI_REQUIRED --require nn_dec_scratch)
 # The other half of that gate: PSRAM buffers a bus master owns, which must stay OUT
 # of the cacheable carve-out.  Named here rather than in the script for the same
 # reason as the DTCM list above -- each belongs to a BSP_ENABLE_* option, and a name
@@ -1091,6 +1113,36 @@ add_custom_command(TARGET shell POST_BUILD
 # 2 MB stopped being non-cacheable, and that rule has no runtime enforcement at all: a
 # DMA buffer in there transfers correctly and is then read back stale from the data
 # cache, intermittently, only under cache pressure.  `shell` only, like the two above.
+# --- the shared decoder must own no storage (issue #97) -----------------------
+#
+# svc/blazeface.c is one decoder for three boards, and it works only because each
+# board passes IN its candidate scratch -- so the scratch keeps this board's
+# .psram_ai placement and the residency gate below keeps naming a board-owned
+# symbol.  A static added to the shared file would become state nobody placed and
+# no gate mentions.
+#
+# [!] PER BOARD, NOT ONCE ON THE HOST: the property is about the object THIS build
+# produces, and storage behind `#if defined(__arm__)` passes a host check and fails
+# on the device.  An AUDIT compile -- this board's real definitions and includes,
+# with optimisation, LTO and common overridden so a static cannot be optimised out
+# of sight before it is counted.
+add_library(wio_decoder_audit OBJECT EXCLUDE_FROM_ALL "${WIO_SHARED_DECODER}")
+target_include_directories(wio_decoder_audit PRIVATE
+    $<TARGET_PROPERTY:shell,INCLUDE_DIRECTORIES>)
+target_compile_definitions(wio_decoder_audit PRIVATE
+    $<TARGET_PROPERTY:shell,COMPILE_DEFINITIONS>)
+target_compile_options(wio_decoder_audit PRIVATE -O0 -fno-lto -fno-common)
+add_custom_target(wio_decoder_storage_gate
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/cmake/check_no_mutable_storage.py"
+            --objdump "${CMAKE_OBJDUMP}" --nm "${CMAKE_NM}"
+            --label "svc/blazeface.c (wio-lite-ai)"
+            $<TARGET_OBJECTS:wio_decoder_audit>
+    COMMENT "check the shared decoder owns no mutable storage"
+    COMMAND_EXPAND_LISTS VERBATIM)
+add_dependencies(wio_decoder_storage_gate wio_decoder_audit)
+add_dependencies(shell wio_decoder_storage_gate)
+
 add_custom_command(TARGET shell POST_BUILD
     COMMAND "${Python3_EXECUTABLE}"
             "${BOARD_DIR}/cmake/check_psram_ai_residency.py"

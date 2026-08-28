@@ -826,39 +826,12 @@ foreach(_o3 IN LISTS GROVE_O3_SOURCES)
 endforeach()
 # --- the shared decoder must own no storage (issue #97) -----------------------
 #
-# svc/blazeface.c is one decoder for three boards, and it only works because each
-# board passes IN its candidate scratch -- so the scratch keeps that board's
-# placement (here plain .bss; .psram_ai on wio, .sdram.ai on f746) and that
-# board's residency gate keeps naming a board-owned symbol.  A static added to
-# the shared file would silently become state no board placed and no board's gate
-# mentions, and on f746 there is no gate that would ever notice.
-#
-# [!] THIS RUNS PER BOARD, NOT ONCE ON THE HOST.  The property is about the object
-# each TARGET build produces, and code behind `#if defined(__arm__)` -- or behind
-# one board's definitions -- passes a host check and fails on the device.
-# cmake/fixtures/run_storage_gate_tests.py demonstrates exactly that asymmetry.
-#
-# It is an AUDIT compile, not the build's own: optimisation, LTO and common are
-# overridden so that a static cannot be optimised out of sight before it is
-# counted.  It inherits this board's real definitions, includes and architecture
-# flags from shell_objs, which is the part that has to be real.
-add_library(grove_decoder_audit OBJECT EXCLUDE_FROM_ALL "${GROVE_SHARED_DECODER}")
-target_include_directories(grove_decoder_audit PRIVATE
-    $<TARGET_PROPERTY:shell_objs,INCLUDE_DIRECTORIES>)
-target_compile_definitions(grove_decoder_audit PRIVATE
-    $<TARGET_PROPERTY:shell_objs,COMPILE_DEFINITIONS>)
-target_compile_options(grove_decoder_audit PRIVATE -O0 -fno-lto -fno-common)
-# (An OBJECT library cannot carry POST_BUILD, so the check is its own target.)
-add_custom_target(grove_decoder_storage_gate
-    COMMAND "${Python3_EXECUTABLE}"
-            "${CMAKE_SOURCE_DIR}/cmake/check_no_mutable_storage.py"
-            --objdump "${CMAKE_OBJDUMP}" --nm "${CMAKE_NM}"
-            --label "svc/blazeface.c (grove-vision-ai-v2)"
-            $<TARGET_OBJECTS:grove_decoder_audit>
-    COMMENT "check the shared decoder owns no mutable storage"
-    COMMAND_EXPAND_LISTS VERBATIM)
-add_dependencies(grove_decoder_storage_gate grove_decoder_audit)
-add_dependencies(shell grove_decoder_storage_gate)
+# See cmake/decoder_storage_gate.cmake for what this checks and why it has to be
+# THIS board's compile rather than a generic one.
+include("${CMAKE_SOURCE_DIR}/cmake/decoder_storage_gate.cmake")
+add_decoder_storage_gate(NAME grove_decoder_audit SOURCE "${GROVE_SHARED_DECODER}"
+                         IFACE bsp_iface CONSUMER shell_objs)
+add_dependencies(shell grove_decoder_audit_check)
 
 # And the negative tests for that checker, run with THIS board's cross compiler
 # so the __arm__-only fixture is meaningful (it passes under the host compiler,

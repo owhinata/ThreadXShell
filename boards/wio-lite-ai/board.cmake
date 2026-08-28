@@ -1115,33 +1115,12 @@ add_custom_command(TARGET shell POST_BUILD
 # cache, intermittently, only under cache pressure.  `shell` only, like the two above.
 # --- the shared decoder must own no storage (issue #97) -----------------------
 #
-# svc/blazeface.c is one decoder for three boards, and it works only because each
-# board passes IN its candidate scratch -- so the scratch keeps this board's
-# .psram_ai placement and the residency gate below keeps naming a board-owned
-# symbol.  A static added to the shared file would become state nobody placed and
-# no gate mentions.
-#
-# [!] PER BOARD, NOT ONCE ON THE HOST: the property is about the object THIS build
-# produces, and storage behind `#if defined(__arm__)` passes a host check and fails
-# on the device.  An AUDIT compile -- this board's real definitions and includes,
-# with optimisation, LTO and common overridden so a static cannot be optimised out
-# of sight before it is counted.
-add_library(wio_decoder_audit OBJECT EXCLUDE_FROM_ALL "${WIO_SHARED_DECODER}")
-target_include_directories(wio_decoder_audit PRIVATE
-    $<TARGET_PROPERTY:shell,INCLUDE_DIRECTORIES>)
-target_compile_definitions(wio_decoder_audit PRIVATE
-    $<TARGET_PROPERTY:shell,COMPILE_DEFINITIONS>)
-target_compile_options(wio_decoder_audit PRIVATE -O0 -fno-lto -fno-common)
-add_custom_target(wio_decoder_storage_gate
-    COMMAND "${Python3_EXECUTABLE}"
-            "${CMAKE_SOURCE_DIR}/cmake/check_no_mutable_storage.py"
-            --objdump "${CMAKE_OBJDUMP}" --nm "${CMAKE_NM}"
-            --label "svc/blazeface.c (wio-lite-ai)"
-            $<TARGET_OBJECTS:wio_decoder_audit>
-    COMMENT "check the shared decoder owns no mutable storage"
-    COMMAND_EXPAND_LISTS VERBATIM)
-add_dependencies(wio_decoder_storage_gate wio_decoder_audit)
-add_dependencies(shell wio_decoder_storage_gate)
+# See cmake/decoder_storage_gate.cmake for what this checks and why it has to be
+# THIS board's compile rather than a generic one.
+include("${CMAKE_SOURCE_DIR}/cmake/decoder_storage_gate.cmake")
+add_decoder_storage_gate(NAME wio_decoder_audit SOURCE "${WIO_SHARED_DECODER}"
+                         IFACE bsp_iface CONSUMER shell)
+add_dependencies(shell wio_decoder_audit_check)
 
 add_custom_command(TARGET shell POST_BUILD
     COMMAND "${Python3_EXECUTABLE}"

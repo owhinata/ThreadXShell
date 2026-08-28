@@ -41,7 +41,7 @@
 
 #include <stdint.h>
 
-#include "blazeface.h"   /* struct bf_det / BF_MAX_DET */
+#include "blazeface.h"   /* struct bf_det / bf_result / BF_MAX_DET (svc/) */
 
 #define NNCAM_OK           0
 #define NNCAM_ERR_RUNNING (-1)  /**< a stream is already running                 */
@@ -127,6 +127,36 @@ void nn_camera_stats_get(struct nn_camera_stats *out);
  * (owhinata/wio-lite-ai#57).
  */
 int nn_camera_dets_get(struct bf_det *out, int max);
+
+/**
+ * One decode's boxes and the diagnostics that belong to them.
+ *
+ * [!] READ TOGETHER OR NOT AT ALL (issue #97).  The worker publishes both under
+ * one lock; a caller that fetched the boxes and then asked the decoder for its
+ * "last" numbers was pairing this frame's boxes with whatever had been decoded
+ * by the time it got round to printing -- while a stream runs, a different frame.
+ */
+struct nn_camera_decode {
+	int              valid;  /**< 0 = nothing decoded in this session yet     */
+	int              ndet;   /**< faces, or -1 for "not a BlazeFace model"    */
+	struct bf_result res;    /**< status, peak, pass/kept, threshold APPLIED  */
+};
+
+/**
+ * Take a coherent snapshot of the last published decode.
+ *
+ * @param dets  optional; the boxes, up to @p max of them
+ * @return non-zero if a snapshot was taken (zero before the first stream start,
+ *         when the lock does not exist yet).  A snapshot with `valid == 0` means
+ *         the session has not decoded a frame yet -- which is NOT the same as a
+ *         decode that found nothing, and must not be printed as one.
+ *
+ * Cumulative counters stay in nn_camera_stats_get(): they are updated outside
+ * this lock, and one of the callers polls them every 10 ms without wanting the
+ * boxes at all.
+ */
+int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
+                         int max);
 
 /** Input normalization: 1 = [-1,1], 0 = [0,1] (default).  Applies to float32 and
  *  quantized inputs alike -- a quantized input is the normalized value put through

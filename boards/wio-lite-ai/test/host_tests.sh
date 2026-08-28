@@ -44,22 +44,28 @@ gcc $CFLAGS -Wno-unused-parameter \
     $LDFLAGS -o "$out/test_crc32"
 "$out/test_crc32"
 
-# issue #9 phase 3 -- the BlazeFace decoder (port/nn/models/blazeface.c): SSD anchor
-# decode + NMS + the score-threshold knob.  This is the one piece of new arithmetic
-# whose failure is silent -- a wrong anchor scale or an off-by-512 into the second
-# anchor group draws a plausible rectangle in the wrong place, and on the board that
-# is indistinguishable from bad exposure or a wrong normalization.  Here the expected
-# box is computed by hand.  The decoder depends on nn.h alone (no HAL, no ThreadX, no
-# libm), and struct nn_model is opaque, so the test supplies its own nn_output_count()
-# / nn_output() and runs the real decoder unmodified.  Built against the REAL
-# boards/<board>/include/mem_sections.h so the PSRAM_AI attribute on the host is
-# the same one the firmware uses -- a shimmed copy could drift from it without
-# anything noticing.
-gcc $CFLAGS -I "$board/include" -I "$board/port/nn" \
-    -I "$board/port/nn/models" \
-    "$here/test_blazeface.c" "$board/port/nn/models/blazeface.c" \
-    $LDFLAGS -lm -o "$out/test_blazeface"
-"$out/test_blazeface"
+# issue #97 -- the adapter onto the SHARED BlazeFace decoder (port/nn/nn_decoder.c).
+# The decoder's arithmetic moved to svc/blazeface.c and is covered by
+# shell/test/test_blazeface.c, which is board-independent; what stays here is the
+# half that cannot be -- nn_tensor -> tensor_desc, against this board's real nn.h.
+# struct nn_model is opaque (defined in nn.c), so the test supplies its own
+# nn_output_count() / nn_output(), which is also what makes the adapter testable.
+#
+# The cases are the translation's own failure modes: an unsupported dtype mapped
+# onto one the decoder reads, float32 put through the affine form (this board
+# publishes scale 0 for an unquantised tensor, so that would zero every value), a
+# rank above four truncated into a match, and a hole in the output set reported as
+# a model-shape problem.
+#
+# Built against the REAL boards/<board>/include/mem_sections.h so the PSRAM_AI
+# attribute on the host is the same one the firmware uses -- a shimmed copy could
+# drift from it without anything noticing, and check_psram_ai_residency.py names
+# `nn_dec_scratch` on the linked image as the other end of that.
+gcc $CFLAGS -I "$board/include" -I "$board/port/nn" -I "$HOST_TEST_SVC" \
+    "$here/test_nn_decoder.c" "$board/port/nn/nn_decoder.c" \
+    "$HOST_TEST_SVC/blazeface.c" \
+    $LDFLAGS -lm -o "$out/test_nn_decoder"
+"$out/test_nn_decoder"
 
 # issue #55 -- the MLPerf Tiny harness (port/mlperf/mlperf_th.cc), driven through
 # UPSTREAM'S OWN PARSER (lib/mlperf-tiny/benchmark/api/internally_implemented.cpp,

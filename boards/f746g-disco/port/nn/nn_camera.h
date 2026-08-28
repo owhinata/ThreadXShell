@@ -32,7 +32,7 @@
 #include <stdint.h>
 
 #include "camera.h"            /* enum camera_res */
-#include "models/blazeface.h"  /* struct bf_det */
+#include "blazeface.h"  /* struct bf_det */
 
 #ifdef __cplusplus
 extern "C" {
@@ -86,6 +86,33 @@ void nn_camera_stats_get(struct nn_camera_stats *out);
 
 /** Copy the latest detections into @p out[0..max); returns the count copied. */
 int nn_camera_dets_get(struct bf_det *out, int max);
+
+/**
+ * One decode's boxes and the diagnostics that belong to them.
+ *
+ * [!] READ TOGETHER OR NOT AT ALL (issue #97).  The worker publishes both under
+ * one lock.  `ai stream stats` does not decode anything itself -- it reports what
+ * the worker last published -- so fetching the boxes and then asking the decoder
+ * for its "last" numbers paired this frame's boxes with whatever had been decoded
+ * by the time it got round to printing.
+ */
+struct nn_camera_decode {
+	int              valid;  /**< 0 = nothing decoded in this session yet     */
+	int              ndet;   /**< faces, or -1 for "not a BlazeFace model"    */
+	struct bf_result res;    /**< status, peak, pass/kept, threshold APPLIED  */
+};
+
+/**
+ * Take a coherent snapshot of the last published decode.
+ *
+ * @param dets  optional; the boxes, up to @p max of them
+ * @return non-zero if a snapshot was taken (zero before the first attach, when
+ *         the lock does not exist yet).  `valid == 0` means this session has not
+ *         decoded a frame -- which is NOT a decode that found nothing, and must
+ *         not be printed as one.
+ */
+int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
+                         int max);
 
 /** Runtime float32 input normalization: 1 = [-1,1], 0 = [0,1] (tuning, no reflash). */
 void nn_camera_set_norm(int signed_range);

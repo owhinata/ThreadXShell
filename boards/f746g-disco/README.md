@@ -135,6 +135,27 @@ Two gates back that up:
 - `cmake/check_f746_layout.py`, POST_BUILD, which checks the real image for
   symbol residency, the vector table and the float runtime
 
+[!] The ASSERTs are weaker than they look for `.sdram.ai` in particular: they
+bound where the section STARTS, so an EMPTY one satisfies all of them, and the
+section uses `KEEP` so `--gc-sections` cannot even produce the "no such object"
+hint the other boards get.  Until issue #97 nothing named the BlazeFace decoder's
+candidate scratch, and dropping its section attribute would have moved it into
+internal SRAM with every check still green.  `check_f746_layout.py` now requires
+`nn_dec_scratch` unconditionally -- unconditionally because the decoder is
+compiled in every `CONFIG_NN_BACKEND` configuration.
+
+A third gate arrived with it, and it protects the arrangement that made the
+require possible.  The decoder itself is shared by all three boards
+(`svc/blazeface.c`) and owns NO storage: this board passes in its own scratch,
+which is how that buffer keeps `.sdram.ai` and how the layout gate can name a
+symbol this board owns (`port/nn/nn_decoder.c`).
+`cmake/check_no_mutable_storage.py` refuses a static added to the shared file, by
+compiling it with this board's real definitions and requiring the object to have
+no allocated, writable section.  Only the SCRATCH is placed -- the decoder's
+threshold stays in ordinary internal RAM, because `.sdram` is NOLOAD and an
+initialised field there would never be loaded (and NOLOAD keeps the previous
+run's bytes, so it would fail by appearing to work).
+
 ## Commands
 
 ```

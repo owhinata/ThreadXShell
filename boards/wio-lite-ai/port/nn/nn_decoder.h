@@ -13,6 +13,16 @@
  * at all, which is precisely what lets the scratch stay in `.psram_ai` here and
  * somewhere else on the other two boards.  This file is both.
  *
+ *
+ * [!] THIS FILE IS TWO LINES DIFFERENT FROM THE OTHER nn.h BOARD'S COPY of it,
+ * and that is deliberate rather than overlooked.  The two differ only in where the
+ * scratch is placed, because `struct nn_tensor` and `enum nn_dtype` happen to be
+ * identical on both -- but `port/nn/nn.h` as a whole is not (184 of its 382 lines
+ * differ), and neither is nn.c.  Folding these two adapters therefore means
+ * folding that API first, which is a larger and separate question than issue #97
+ * set out to answer.  Recorded here so the next person weighs it rather than
+ * rediscovering it.
+ *
  * IT TAKES THE MODEL HANDLE, not a tensor array, because that is what both
  * callers already have: the decoder is singleton-independent but this board's
  * inference API is not, and pulling the four outputs is the adapter's job.

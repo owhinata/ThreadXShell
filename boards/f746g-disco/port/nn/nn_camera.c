@@ -34,7 +34,8 @@
 
 #include "nn.h"
 #include "nn_camera.h"
-#include "models/blazeface.h" /* BlazeFace decode (model-specific post-process) */
+#include "nn_decoder.h"   /* the shared BlazeFace decoder, via this board's adapter */
+#include "nn_det_record.h"
 #include "camera.h"          /* camera_subscribe / camera_unsubscribe / camera_frame_put */
 #include "cam_own.h"         /* the owner lifecycle (issue #72)                        */
 #include "frame_pipeline.h"  /* struct frame_sink / frame_desc / FRAME_POLICY_* */
@@ -142,8 +143,14 @@ static uint32_t nncam_in_bytes;
 static uint8_t  nncam_in_dtype;   /* enum nn_dtype of the model input */
 
 /* Latest detections (BlazeFace), guarded by nncam_lock; read via nn_camera_dets_get(). */
-static struct bf_det nncam_dets[BF_MAX_DET];
-static int           nncam_ndet;
+/*
+ * The published decode: boxes AND the diagnostics that describe them, plus the
+ * session generation that keeps a decode from a session that has ended out of a
+ * live one.  The rules live in svc/nn_det_record.c so they can be tested -- the
+ * ordering they guard against cannot be produced deterministically on hardware --
+ * and the storage and the lock (nncam_lock) are ours.
+ */
+static struct nn_det_record nncam_rec;
 
 /* Float32 input normalization, runtime-tunable (ai norm) to settle the [-1,1] vs
  * [0,1] ambiguity on hardware without reflashing. */
@@ -215,7 +222,9 @@ static void nncam_session_reset(void)
 {
 	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
 	nncam_producer_dead = 0;
-	nncam_ndet = 0;                     /* drop stale detections from a prior session */
+	/* Drop stale detections from a prior session AND move the generation, so an
+	 * inference still running under the old one cannot publish into this one. */
+	nn_det_record_reset(&nncam_rec);
 	for (int i = 0; i < NNCAM_STAGE_N; i++)
 		if (nncam_state[i] != ST_RUNNING)
 			nncam_state[i] = ST_FREE;   /* leave a stage the worker is copying out of */
@@ -314,7 +323,10 @@ static void nncam_close(void *ctx)
 	for (int i = 0; i < NNCAM_STAGE_N; i++)
 		if (nncam_state[i] == ST_READY)
 			nncam_state[i] = ST_FREE;       /* drop pending; ST_RUNNING/FILLING left */
-	nncam_ndet = 0;                         /* clear boxes: no live frames while paused */
+	/* Clear the boxes: no live frames while paused.  Moving the generation with
+	 * them is what stops the ST_RUNNING stage this function deliberately leaves
+	 * alone from publishing after the pause. */
+	nn_det_record_reset(&nncam_rec);
 	tx_mutex_put(&nncam_lock);
 	(void)tx_semaphore_put(&nncam_sem);     /* wake worker (idles until re-attach)  */
 }
@@ -328,11 +340,20 @@ static int nncam_step(void)
 	uint32_t mhz = hclk / 1000000u ? hclk / 1000000u : 1u;
 	int j = -1;
 	int rc;
+	uint32_t gen;
 
 	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
 	for (int k = 0; k < NNCAM_STAGE_N; k++) {
 		if (nncam_state[k] == ST_READY) { nncam_state[k] = ST_RUNNING; j = k; break; }
 	}
+	/*
+	 * [!] THE GENERATION IS SAMPLED WITH THE CLAIM, under the same lock.  Taking
+	 * it later would leave a window: nncam_close() deliberately LEAVES an
+	 * ST_RUNNING stage alone and bumps the epoch, so this thread can be inside
+	 * the inference below when the session ends -- and a value read afterwards
+	 * would already be the next session's.
+	 */
+	gen = nn_det_record_gen(&nncam_rec);
 	tx_mutex_put(&nncam_lock);
 
 	if (j < 0)
@@ -358,21 +379,24 @@ static int nncam_step(void)
 	nnstat.infers++;
 	nnstat.last_us = nn_last_cycles(nncam_model) / mhz;
 
-	/* Model-specific decode (BlazeFace).  A safe no-op (returns <0) for other
-	 * models, so this stays model-agnostic at the sink level.  Publish the boxes
-	 * under the lock for nn_camera_dets_get(). */
+	/* Model-specific decode (BlazeFace).  A safe no-op (returns BF_ERR_MODEL) for
+	 * other models, so this stays model-agnostic at the sink level.  Publish the
+	 * boxes and the diagnostics that go with them under the lock. */
 	{
 		struct bf_det tmp[BF_MAX_DET];
-		int nd = blazeface_decode(nncam_model, tmp, BF_MAX_DET);
+		struct bf_result bfr;
+		int nd = nn_decoder_run(nncam_model, tmp, BF_MAX_DET, &bfr);
 
 		tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
-		if (nd < 0) {
-			nncam_ndet = 0;
-		} else {
-			nncam_ndet = nd;
-			for (int d = 0; d < nd; d++)
-				nncam_dets[d] = tmp[d];
-		}
+		/*
+		 * [!] A NEGATIVE RETURN IS NO LONGER FOLDED INTO ZERO (issue #57/#97).
+		 * It used to be, and that was the worst place for it: "0 faces" reads
+		 * as a measurement, so a decoder that had never been initialised --
+		 * a build fault, permanent, on every frame -- would have shown up as a
+		 * perfectly healthy stream finding nobody.  The record keeps -1, and
+		 * the status with it.
+		 */
+		(void)nn_det_record_publish(&nncam_rec, tmp, nd, &bfr, gen);
 		tx_mutex_put(&nncam_lock);
 		nnstat.detections = (nd > 0) ? (uint32_t)nd : 0u;
 	}
@@ -666,16 +690,41 @@ void nn_camera_stats_get(struct nn_camera_stats *out)
 
 int nn_camera_dets_get(struct bf_det *out, int max)
 {
-	int n;
+	struct nn_camera_decode snap;
 
-	if (!nncam_created || !out || max <= 0)
+	if (!out || max <= 0)
+		return 0;
+	if (!nn_camera_decode_get(&snap, out, max))
+		return 0;
+	/* A count of boxes actually copied.  A negative ndet means "not a BlazeFace
+	 * model" and there are no boxes to hand back; callers that need to tell that
+	 * apart from an honest zero use nn_camera_decode_get(). */
+	if (snap.ndet <= 0)
+		return 0;
+	return snap.ndet < max ? snap.ndet : max;
+}
+
+int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
+                         int max)
+{
+	struct nn_det_snapshot snap;
+
+	if (!nncam_created || !out)
 		return 0;                           /* nncam_lock not created before 1st start */
 	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
-	n = nncam_ndet < max ? nncam_ndet : max;
-	for (int i = 0; i < n; i++)
-		out[i] = nncam_dets[i];
+	/*
+	 * [!] ONE LOCK FOR BOTH.  The boxes and the diagnostics that describe them
+	 * are published together and have to be read together: taking them in two
+	 * calls lets a frame land in between, and `ai stream stats` -- which does not
+	 * decode anything itself -- would print this frame's boxes beside another
+	 * frame's peak score with nothing to show they disagree (issue #97).
+	 */
+	nn_det_record_snapshot(&nncam_rec, &snap, dets, max);
 	tx_mutex_put(&nncam_lock);
-	return n;
+	out->valid = snap.valid;
+	out->ndet  = snap.ndet;
+	out->res   = snap.res;
+	return 1;
 }
 
 void nn_camera_set_norm(int signed_range) { nncam_norm_signed = signed_range ? 1 : 0; }

@@ -67,7 +67,8 @@ and are described in that board's README.
 CMakeLists.txt        project, board selection, submodule bootstrap, cli_version.h
 cmake/                toolchain file (fetches ARM GNU on first configure), version template
 shell/                board-independent: core/ include/ backend/ cmds/ test/
-svc/                  board-independent services (fmt, crc32, ymodem, frame pipeline, gfx)
+svc/                  board-independent services (fmt, crc32, ymodem, frame pipeline,
+                      gfx, and the BlazeFace decoder every board shares)
 lib/                  upstream mirror submodules (read-only)
 boards/<board>/       board.cmake, src/ port/ cmds/ backend/ svc/ include/ ldscript/ cmake/
 ```
@@ -196,8 +197,8 @@ sh shell/test/run_host_tests.sh wio-lite-ai  # core + one board
 `shell/test/` holds the board-independent tests and always runs them. A test that
 compiles board-owned code against the board's real headers belongs to that board
 and lives in `boards/<board>/test/host_tests.sh`, which the runner invokes with
-the same toolchain flags (Wio Lite AI pins three: CRC-32, BlazeFace, MLPerf Tiny;
-f746g-disco pins none).
+the same toolchain flags. Each board pins the adapter that turns its own tensor
+type into the neutral one; the decoder they share is tested once, centrally.
 
 ## Status
 

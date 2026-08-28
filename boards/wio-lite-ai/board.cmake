@@ -833,6 +833,15 @@ list(APPEND NN_SOURCES "${WIO_SHARED_DECODER}"
                        "${CMAKE_SOURCE_DIR}/svc/nn_det_record.c"
                        "${BOARD_DIR}/port/nn/nn_decoder.c")
 list(APPEND NN_PSRAM_AI_REQUIRED --require nn_dec_scratch)
+# [!] AND THE STATE MUST STAY OUT (issue #97).  The scratch requirement above says
+# nothing about the decoder's state, and moving `nn_dec` / `nn_dec_ready` into the
+# carve-out would leave every gate green -- while .psram_ai is NOLOAD, so the
+# threshold would come up holding the previous run's bytes and a `ready` flag that
+# followed it would survive a warm reset still saying ready, skipping
+# initialisation over stale state.  It would also break the fail-soft rule: the
+# shell runs when the PSRAM bring-up failed, and `ai thresh` has to keep answering.
+list(APPEND NN_PSRAM_AI_REQUIRED
+     --internal-ram nn_dec --internal-ram nn_dec_ready)
 # The other half of that gate: PSRAM buffers a bus master owns, which must stay OUT
 # of the cacheable carve-out.  Named here rather than in the script for the same
 # reason as the DTCM list above -- each belongs to a BSP_ENABLE_* option, and a name

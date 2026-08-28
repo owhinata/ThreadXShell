@@ -16,6 +16,13 @@ section that is both allocated and writable is the storage itself, whatever put
 it there, so that is what is measured.  Empty sections are ignored because the
 compiler emits .data and .bss unconditionally.
 
+[!] AND A COMMON RULE AS WELL, because sections alone are not enough.  A tentative
+definition, or an explicit `__attribute__((common))`, becomes a COMMON symbol --
+which has NO allocated section at all, so the section rule sees nothing.
+`-fno-common` stops the tentative case but the explicit attribute survives it
+(verified against the real cross compiler: it still emits `.comm`).  Both are
+storage in the linked image, so both are refused.
+
 [!] WHY THIS RUNS PER BOARD AND NOT ONCE ON THE HOST.  The property is about the
 object each TARGET build produces.  The host and the boards differ in predefined
 macros, ABI and compile options, so code that generates storage only under
@@ -24,10 +31,16 @@ on the device.  Each board therefore compiles the shared TU with its own real
 definitions, includes and architecture flags (optimisation, LTO and common are
 overridden for the audit, so this is an audit compile and not the build's own).
 
-[!] WHAT IT DOES NOT PROVE.  That the object owns no storage expressed as
-writable.  NOT that the source contains no `static` -- a static the compiler
-optimises away entirely leaves nothing to see, and proving its absence would
-take a source-level check this is not.
+[!] WHAT IT DOES NOT PROVE.  It proves that THIS object owns no storage expressed
+as writable or common.  It is not:
+
+  - a proof about the SOURCE.  A static the compiler optimises away leaves nothing
+    to see, and that is fine -- it is not in the shipped object either.
+  - a proof against code written to evade it.  The audit compiles the real source
+    with the board's real definitions, includes, architecture and optimisation, so
+    conditional compilation resolves the way it does in the shipped build; but a
+    preprocessor condition chosen specifically to differ here would still differ.
+    This catches storage added the ordinary way, which is the way it gets added.
 """
 import argparse
 import re
@@ -52,6 +65,24 @@ def sections(objdump, obj):
         if i + 1 < len(lines):
             flags = {f.strip() for f in lines[i + 1].split(",")}
         yield m.group("name"), int(m.group("size"), 16), flags
+
+
+def common_symbols(nm, obj):
+    """Defined COMMON symbols -- storage with no section to find it by."""
+    try:
+        out = subprocess.run([nm, "--defined-only", obj], check=True,
+                             capture_output=True, text=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    found = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        cls = parts[-2] if len(parts) >= 3 else parts[0]
+        if cls in "Cc":
+            found.append(parts[-1])
+    return found
 
 
 def offenders(objdump, obj):
@@ -95,7 +126,8 @@ def symbols(nm, obj):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--objdump", required=True)
-    ap.add_argument("--nm", help="only used to name symbols in a failure")
+    ap.add_argument("--nm", required=True,
+                    help="needed for the COMMON check, and to name symbols")
     ap.add_argument("--label", default="",
                     help="what to call this object in messages")
     ap.add_argument("object")
@@ -110,7 +142,17 @@ def main():
               (args.object, exc), file=sys.stderr)
         return 2
 
-    if not bad:
+    # [!] nm is REQUIRED for the common check, not merely nice for diagnostics.
+    # Refusing to run without it beats running a check that silently covers less
+    # than it says.
+    if not args.nm:
+        print("check_no_mutable_storage: --nm is required (the COMMON check "
+              "needs it, and half a check reports the same OK as a whole one)",
+              file=sys.stderr)
+        return 2
+    commons = common_symbols(args.nm, args.object)
+
+    if not bad and not commons:
         print("check_no_mutable_storage: OK (%s owns no mutable storage)" % what)
         return 0
 
@@ -119,7 +161,12 @@ def main():
     for name, size, flags in bad:
         print("  %-20s %6d B   [%s]" %
               (name, size, ", ".join(sorted(flags))), file=sys.stderr)
-    if args.nm:
+    if commons:
+        print("  COMMON symbols (no section of their own, so the rule above",
+              "cannot see them):", file=sys.stderr)
+        for name in commons:
+            print("    %s" % name, file=sys.stderr)
+    if args.nm and bad:
         syms = symbols(args.nm, args.object)
         if syms:
             print("  symbols:", file=sys.stderr)

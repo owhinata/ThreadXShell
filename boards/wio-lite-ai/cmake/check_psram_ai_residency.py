@@ -191,6 +191,10 @@ def main():
     ap.add_argument("--require", action="append", metavar="SYMBOL", default=[],
                     help="base name of an object that must live in .psram_ai; repeat "
                          "once per object (the set depends on CONFIG_NN_BACKEND)")
+    ap.add_argument("--internal-ram", action="append", metavar="SYMBOL", default=[],
+                    help="object that must NOT be in the PSRAM carve-out at all -- "
+                         "for state that has to be INITIALISED, since .psram_ai is "
+                         "NOLOAD (issue #97); repeat once per object")
     ap.add_argument("--noncacheable", action="append", metavar="SYMBOL", default=[],
                     help="base name of a PSRAM buffer a bus master touches, which "
                          "must therefore stay OUT of the cacheable carve-out; repeat "
@@ -223,6 +227,17 @@ def main():
     noncacheable = tuple(MUST_STAY_NONCACHEABLE) + tuple(args.noncacheable)
 
     failures = check_out_of_range(
+        syms, tuple(args.internal_ram), PSRAM_AI_ORIGIN, region_end,
+        "the PSRAM carve-out",
+        "[!] THIS IS ABOUT INITIALISATION, NOT SPEED (issue #97).  .psram_ai is "
+        "NOLOAD, so an object with initialised fields placed there is never "
+        "loaded -- and because NOLOAD keeps whatever the previous run left, it "
+        "comes up holding stale values rather than obviously-wrong ones.  A "
+        "'ready' flag that moved in here with the state it guards would survive a "
+        "warm reset still saying ready, and initialisation would be skipped over "
+        "stale data.  It also breaks the fail-soft rule: this board's shell runs "
+        "when the PSRAM bring-up failed, and state in here would not be readable.",
+    ) + check_out_of_range(
         syms, noncacheable, PSRAM_AI_ORIGIN, region_end,
         "the cacheable PSRAM carve-out",
         "A bus master owns this buffer, and every driver that shares it with the CPU "

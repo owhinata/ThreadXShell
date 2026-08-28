@@ -823,6 +823,27 @@ foreach(_o3 IN LISTS GROVE_O3_SOURCES)
             "default level and nothing would say so.  Fix the path, or drop it "
             "from GROVE_O3_SOURCES.")
     endif()
+    # [!] AND THAT THE OPTION IS ACTUALLY IN EFFECT.  Membership alone is not the
+    # property: a later set_source_files_properties() that cleared COMPILE_OPTIONS,
+    # or appended its own -O, would leave this file a source of the target and
+    # built at some other level, with the check above still satisfied.  Per-source
+    # options come last on the command line, so the LAST -O here is the one that
+    # decides.
+    get_source_file_property(_o3_opts "${_o3_abs}"
+                             TARGET_DIRECTORY shell_objs COMPILE_OPTIONS)
+    set(_o3_last "")
+    foreach(_opt IN LISTS _o3_opts)
+        if(_opt MATCHES "^-O")
+            set(_o3_last "${_opt}")
+        endif()
+    endforeach()
+    if(NOT _o3_last STREQUAL "-O3")
+        message(FATAL_ERROR
+            "the effective optimisation for\n  ${_o3}\nis '${_o3_last}', not -O3 "
+            "(its per-source options are: ${_o3_opts}).\nThese four files carry the "
+            "per-frame pixel loops and the board README's frame rates are measured "
+            "with them at -O3; a different level here is a silent regression.")
+    endif()
 endforeach()
 # --- the shared decoder must own no storage (issue #97) -----------------------
 #

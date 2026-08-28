@@ -326,6 +326,43 @@ def check_residency(syms, required):
     return failures
 
 
+def check_not_in_sdram(syms, forbidden):
+    """Every symbol named here must live OUTSIDE external SDRAM.
+
+    [!] THIS IS ABOUT INITIALISATION, NOT SPEED (issue #97).  The whole `.sdram`
+    output section is NOLOAD, so an object with initialised fields placed there is
+    never loaded -- and because NOLOAD keeps whatever the previous run left, it
+    comes up holding stale values instead of obviously-wrong ones.  A "ready" flag
+    that moved into SDRAM with the state it guards would survive a warm reset
+    still saying ready, and initialisation would be skipped over stale data.
+
+    Requiring the symbol to EXIST is deliberate: a list that silently guards
+    nothing is the failure mode these gates are written against.
+    """
+    failures = []
+    lo, hi = SDRAM_BANK0[0], SDRAM_BANK3[1]
+    for name in forbidden:
+        matches = [(addr, sym) for addr, typ, sym in syms
+                   if typ in DATA_TYPES and strip_clone_suffixes(sym) == name]
+        if not matches:
+            failures.append(
+                f"{name}: no such object in the image.  This list names state that "
+                f"must stay in internal RAM; if it was renamed or removed, update "
+                f"the list rather than letting the check guard nothing."
+            )
+            continue
+        for addr, sym in matches:
+            if lo <= addr < hi:
+                failures.append(
+                    f"{sym} at 0x{addr:08x} is in external SDRAM, which is NOLOAD.  "
+                    f"Its initialisers are never loaded and it comes up holding the "
+                    f"PREVIOUS run's bytes -- so it fails by appearing to work.  "
+                    f"State belongs in internal RAM; only write-before-read scratch "
+                    f"belongs in the carve-out."
+                )
+    return failures
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("elf")
@@ -337,6 +374,10 @@ def main():
     ap.add_argument("--require-model-window", action="append", metavar="SYMBOL", default=[],
                     help="object that must sit in the 0xC0700000 executable model "
                          "window (stedgeai_reloc only)")
+    ap.add_argument("--forbid-sdram", action="append", metavar="SYMBOL", default=[],
+                    help="object that must NOT be in external SDRAM at all -- for "
+                         "state that has to be INITIALISED, since the whole .sdram "
+                         "output section is NOLOAD (issue #97)")
     args = ap.parse_args()
 
     required = list(REQUIRED)
@@ -354,6 +395,7 @@ def main():
     cmd_failures, cmd_bytes, cmd_count = check_command_table(syms)
     failures += cmd_failures
     failures += check_residency(syms, required)
+    failures += check_not_in_sdram(syms, args.forbid_sdram)
 
     if failures:
         print(f"check_f746_layout: FAIL ({len(failures)} problem(s)) in {args.elf}",

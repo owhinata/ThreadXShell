@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """Negative tests for cmake/check_no_mutable_storage.py (issue #97).
 
-A gate nobody has watched fail is not a gate.  This compiles four small fixtures
-and asserts what the checker says about each, so that the rule is exercised
-rather than assumed.
+A gate nobody has watched fail is not a gate.  This compiles a handful of small
+fixtures and asserts what the checker says about each, so that the rule is
+exercised rather than assumed.
+
+Three of them are shapes an adversarial review defeated the first version with,
+and they are here so the fix stays fixed: thread-local storage and anonymous
+inline-asm bytes have no STT_OBJECT symbol, explicit COMMON has no section at
+all, and storage behind `__INCLUDE_LEVEL__` exists only when the file is compiled
+directly -- which is why the audit compiles the real source rather than a wrapper
+that includes it.
 
 The fixtures are held here as source strings rather than as files because they
 exist only to be rejected: as files they would be four more things that have to
@@ -44,6 +51,16 @@ FIXTURES = [
      '\n__asm__(".section .bss.anon,\\"aw\\",%nobits\\n.space 64\\n.previous");\n',
      "fail",
      "anonymous writable bytes with no symbol at all"),
+    ("explicit_common", CLEAN +
+     "\nint shared __attribute__((common));\nint *use(void) { return &shared; }\n",
+     "fail",
+     "explicit COMMON, which -fno-common does not stop and which has NO section"),
+    ("include_level", CLEAN +
+     "\n#if __INCLUDE_LEVEL__ == 0\nstatic volatile unsigned hidden;\n"
+     "unsigned bump(void) { return ++hidden; }\n#endif\n",
+     "fail",
+     "storage that exists only when the file is compiled DIRECTLY -- an audit "
+     "that #included it would miss this"),
     ("target_only", CLEAN +
      "\n#if defined(__arm__)\nstatic int only_on_target;\n"
      "int bump(void) { return ++only_on_target; }\n#endif\n",
@@ -83,7 +100,10 @@ def main():
             with open(src, "w") as fh:
                 fh.write(source)
 
-            cmd = [args.cc, "-std=c11", "-O0", "-fno-lto", "-fno-common"]
+            # -fno-common deliberately NOT passed: the explicit_common fixture
+            # exists to show that suppressing tentative definitions is not the
+            # same as refusing COMMON, and the gate refuses it either way.
+            cmd = [args.cc, "-std=c11", "-O1", "-fno-lto"]
             cmd += args.cflags.split()
             cmd += ["-c", src, "-o", obj]
             try:

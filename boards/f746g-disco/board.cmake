@@ -612,6 +612,14 @@ set(F746_LAYOUT_REQUIRED "")
 # was the one where it would have been silent.  Unconditional, because the decoder
 # is compiled in every backend configuration.
 list(APPEND F746_LAYOUT_REQUIRED --require-sdram-ai nn_dec_scratch)
+# [!] AND THE STATE MUST STAY OUT.  The requirement above says nothing about the
+# decoder's state, and moving `nn_dec` / `nn_dec_ready` into the arena would leave
+# every gate green -- while the whole .sdram output section is NOLOAD, so the
+# threshold would come up holding the previous run's bytes and a `ready` flag that
+# followed it would survive a warm reset still saying ready, skipping
+# initialisation over stale state.
+list(APPEND F746_LAYOUT_REQUIRED
+     --forbid-sdram nn_dec --forbid-sdram nn_dec_ready)
 if(CONFIG_NN_BACKEND STREQUAL "null")
     # port/nn/nn_null.c -- the stub backend's input buffer in the NN arena.
     list(APPEND F746_LAYOUT_REQUIRED --require-sdram-ai null_in_buf)

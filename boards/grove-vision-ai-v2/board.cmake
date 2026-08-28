@@ -831,6 +831,32 @@ foreach(_o3 IN LISTS GROVE_O3_SOURCES)
     # decides.
     get_source_file_property(_o3_opts "${_o3_abs}"
                              TARGET_DIRECTORY shell_objs COMPILE_OPTIONS)
+    # [!] THIS READS THE PROPERTY, NOT THE COMMAND, so it can only judge what it
+    # can evaluate.  A generator expression is resolved after configure -- an
+    # appended $<$<COMPILE_LANGUAGE:C>:-O0> would leave the last LITERAL -O here
+    # as -O3 while the generated command ended in -O0 -- and the older
+    # COMPILE_FLAGS string property is a second route this loop never sees.
+    # Refuse both rather than pass them: a check that cannot evaluate its input
+    # must not report OK about it.
+    foreach(_opt IN LISTS _o3_opts)
+        if(_opt MATCHES "\\$<")
+            message(FATAL_ERROR
+                "a generator expression is set on\n  ${_o3}\nvia COMPILE_OPTIONS "
+                "('${_opt}').  This check runs at configure time and cannot tell "
+                "what that expands to, so it cannot say whether -O3 survives it. "
+                "Use a plain option, or extend this check to inspect the generated "
+                "command.")
+        endif()
+    endforeach()
+    get_source_file_property(_o3_flags "${_o3_abs}"
+                             TARGET_DIRECTORY shell_objs COMPILE_FLAGS)
+    if(_o3_flags AND NOT _o3_flags STREQUAL "NOTFOUND")
+        message(FATAL_ERROR
+            "COMPILE_FLAGS is set on\n  ${_o3}\n('${_o3_flags}').  It lands on the "
+            "command line alongside COMPILE_OPTIONS and this check does not read "
+            "it, so -O3 could be overridden without anything noticing.  Put the "
+            "option in COMPILE_OPTIONS instead.")
+    endif()
     set(_o3_last "")
     foreach(_opt IN LISTS _o3_opts)
         if(_opt MATCHES "^-O")

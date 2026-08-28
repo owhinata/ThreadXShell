@@ -265,6 +265,34 @@ gcc $CFLAGS -I "$svc" \
     $LDFLAGS -o "$out/test_crc32_svc"
 "$out/test_crc32_svc"
 
+# issue #97 -- the shared BlazeFace decoder (svc/blazeface.c), folded from three
+# diverged board copies.  The REAL decoder is compiled here against synthetic
+# tensors, which it permits because it takes descriptors (svc/tensor.h) rather
+# than reaching into any inference singleton -- the arrangement that lets a
+# decode bug be found without spending a flash cycle on a board.  Absorbs the
+# assertions of all three tests it replaced, and runs the type-independent ones
+# against BOTH int8 (Grove) and float32 (wio, f746): per-tensor dequantisation,
+# the anchor grid, lookup by shape, the candidate cap not truncating the scan
+# (issue #47), NMS, the distinct failure codes (issue #57), and init validation.
+# Pure svc layer -- HAL/ThreadX/shell-free, so it needs only the svc include dir.
+gcc $CFLAGS -I "$svc" \
+    "$here/test_blazeface.c" "$svc/blazeface.c" \
+    $LDFLAGS -o "$out/test_blazeface_svc"
+"$out/test_blazeface_svc"
+
+# issue #97 -- negative tests for cmake/check_no_mutable_storage.py, the gate that
+# keeps svc/blazeface.c from growing state of its own (each board passes in its
+# own scratch so that it keeps its own placement and its own residency gate).
+# Four fixtures: clean, a plain static, thread-local storage and anonymous
+# writable bytes from inline asm -- the last two are why the gate measures
+# SECTIONS and not symbols, since neither is an STT_OBJECT.
+# [!] The fifth, `target_only`, PASSES here on purpose: it puts its static behind
+# `#if defined(__arm__)`, so a host-side run cannot see it.  That is the whole
+# reason the gate itself is wired per board against the cross compiler rather
+# than once here.  The boards run this same script with their own toolchain.
+python3 "$repo/cmake/fixtures/run_storage_gate_tests.py" \
+    --cc gcc --objdump objdump --nm nm
+
 # ---- board-pinned tests --------------------------------------------------- *
 # Same toolchain flags and the same scratch dir, exported so a board test is built
 # exactly like a core one and cannot quietly diverge.  A board with no

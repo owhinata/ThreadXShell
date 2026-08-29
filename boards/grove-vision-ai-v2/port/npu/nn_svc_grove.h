@@ -27,6 +27,8 @@
 #ifndef NN_SVC_GROVE_H
 #define NN_SVC_GROVE_H
 
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -63,10 +65,12 @@ int nn_svc_grove_model_open(void);
  * live picture with no boxes and no explanation, which is the exact failure the
  * command exists to make visible.
  *
- * @param why  set to a board-owned sentence when the answer is no
+ * @param why  filled with the reason when the answer is no.  A CALLER-OWNED
+ *             buffer, not a pointer into this port: two consoles must not be
+ *             able to overwrite each other's explanation.
  * @return 0 when a decode would find its tensors
  */
-int nn_svc_grove_detector_ready(const char **why);
+int nn_svc_grove_detector_ready(char *why, size_t cap);
 
 #ifdef __cplusplus
 }

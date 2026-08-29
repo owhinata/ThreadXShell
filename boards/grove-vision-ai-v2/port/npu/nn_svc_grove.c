@@ -67,9 +67,6 @@ static int      nn_model_slot;      /**< -1 for the raw form                  */
 static struct nn_preproc_geom nn_geom;
 static uint8_t nn_geom_valid;
 
-/** Why the last operation failed, in this board's own words. */
-static char nn_detail[160];
-
 /* ---- the transient claim -------------------------------------------------
  *
  * Single-instance, not a mutex: two consoles may both reach `nn`, and what has
@@ -94,19 +91,19 @@ static void nn_release(void)
 	nn_busy = 0u;
 }
 
-static void nn_detail_clear(void)
-{
-	nn_detail[0] = '\0';
-}
-
-static void nn_detail_set(const char *fmt, ...)
+static void nn_detail_to(char *dst, size_t cap, const char *fmt, ...)
 {
 	va_list ap;
 
 	va_start(ap, fmt);
-	(void)fmt_vsnformat(nn_detail, sizeof nn_detail, fmt, ap);
+	(void)fmt_vsnformat(dst, cap, fmt, ap);
 	va_end(ap);
 }
+
+/* Every failure path writes into the result it is about to return. */
+#define nn_detail_set(...) \
+	nn_detail_to(res->detail, sizeof res->detail, __VA_ARGS__)
+#define nn_detail_clear()  (res->detail[0] = '\0')
 
 /* Fill a result in one place, so no path can set a status and forget the
    disposition -- they are two answers and both are always given. */
@@ -118,7 +115,6 @@ static void nn_result(struct nn_op_result *res, int status, enum nn_claim claim)
 {
 	res->status = status;
 	res->claim  = (uint8_t)claim;
-	nn_svc_str(res->detail, sizeof res->detail, nn_detail);
 }
 
 /* ---- info ---------------------------------------------------------------- */
@@ -169,8 +165,9 @@ void nn_svc_info(struct nn_svc_info *out)
  * what it got.  A scan with a hole cannot say a name is unique, and "not found"
  * is exactly the wrong answer to give about a slot nobody looked at.
  */
-static int nn_scan_slots(uint32_t token, const char *name,
-                         struct blob_slot_view *v, unsigned *count)
+static int nn_scan_slots(struct nn_op_result *res, uint32_t token,
+                         const char *name, struct blob_slot_view *v,
+                         unsigned *count)
 {
 	unsigned n = blob_map_count(), i;
 
@@ -212,8 +209,8 @@ static int nn_scan_slots(uint32_t token, const char *name,
  * resolving through it would leave a gap in which a background `blob write`
  * could replace the very slot that was chosen.
  */
-static int nn_resolve_blob(uint32_t token, const char *name, uint32_t *addr,
-                           uint32_t *len)
+static int nn_resolve_blob(struct nn_op_result *res, uint32_t token,
+                           const char *name, uint32_t *addr, uint32_t *len)
 {
 	struct blob_slot_view v[BLOB_MAX_SLOTS];
 	struct blob_info info;
@@ -222,7 +219,7 @@ static int nn_resolve_blob(uint32_t token, const char *name, uint32_t *addr,
 	enum blob_lookup found;
 	int rc;
 
-	if (nn_scan_slots(token, name, v, &count) != 0)
+	if (nn_scan_slots(res, token, name, v, &count) != 0)
 		return -1;
 
 	found = blob_resolve_name(v, count, &slot);
@@ -357,8 +354,8 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	}
 
 	nn_model_slot = -1;
-	if (name != NULL && nn_resolve_blob(npu_hw_flash_lease(), name, &addr,
-	                                    &len) != 0) {
+	if (name != NULL && nn_resolve_blob(res, npu_hw_flash_lease(), name,
+	                                    &addr, &len) != 0) {
 		/* Every failure from here leaves the hardware DOWN: an NPU that is up
 		 * with no model is a state nothing would use, and it would hold the
 		 * flash lease against `blob write` for as long as it lasted. */
@@ -477,7 +474,8 @@ int nn_svc_input(struct tensor_desc *out)
  * in the wrong places, on an image nobody can see.  So it refuses rather than
  * warns.  Compared in millionths so no float formatting is needed.
  */
-static int nn_input_quant_ok(const struct npu_tensor *in)
+static int nn_input_quant_ok(struct nn_op_result *res,
+                             const struct npu_tensor *in)
 {
 	long micro = (long)(in->scale * 1000000.0f + 0.5f);
 
@@ -495,7 +493,8 @@ static int nn_input_quant_ok(const struct npu_tensor *in)
 	return 0;
 }
 
-static int nn_fill_input(const uint8_t *raw, const struct npu_tensor *in)
+static int nn_fill_input(struct nn_op_result *res, const uint8_t *raw,
+                         const struct npu_tensor *in)
 {
 	uint32_t w, h;
 
@@ -608,7 +607,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		nn_release();
 		return;
 	}
-	if (nn_fill_input(camera_raw_frame(), &in) != 0) {
+	if (nn_fill_input(res, camera_raw_frame(), &in) != 0) {
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
 		nn_release();
 		return;
@@ -626,7 +625,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	/* The quantisation check happens only once there is something to decode:
 	 * a classifier is a legitimate model here and must not be refused for not
 	 * being a detector. */
-	if (nn_input_quant_ok(&in) == 0) {
+	if (nn_input_quant_ok(res, &in) == 0) {
 		nn_decode_into(snap, dets, max);
 	} else {
 		/* Not a detector's input -- say so through the decoder's own vocabulary
@@ -796,8 +795,10 @@ int nn_svc_grove_model_open(void)
 	return nn_open_done;
 }
 
-int nn_svc_grove_detector_ready(const char **why)
+int nn_svc_grove_detector_ready(char *why, size_t cap)
 {
+	struct nn_op_result probe;
+	struct nn_op_result *res = &probe;
 	struct npu_tensor in;
 	struct npu_tensor outs[NN_DECODER_MAX_OUTPUTS];
 	unsigned n_out, i;
@@ -805,32 +806,29 @@ int nn_svc_grove_detector_ready(const char **why)
 	nn_detail_clear();
 	if (npu_input(&in) != NPU_OK) {
 		nn_detail_set("the model has no input tensor");
-		*why = nn_detail;
-		return -1;
+		goto refused;
 	}
-	if (nn_input_quant_ok(&in) != 0) {
-		*why = nn_detail;
-		return -1;
-	}
+	if (nn_input_quant_ok(res, &in) != 0)
+		goto refused;
 	n_out = npu_output_count();
 	if (n_out > NN_DECODER_MAX_OUTPUTS) {
 		nn_detail_set("the model has %u outputs and this path reads %u",
 		              n_out, (unsigned)NN_DECODER_MAX_OUTPUTS);
-		*why = nn_detail;
-		return -1;
+		goto refused;
 	}
 	for (i = 0u; i < n_out; i++)
 		if (npu_output(i, &outs[i]) != NPU_OK) {
 			nn_detail_set("output %u is unreadable", i);
-			*why = nn_detail;
-			return -1;
+			goto refused;
 		}
 	if (!nn_decoder_shapes_ok(outs, n_out)) {
 		nn_detail_set("the loaded model is not BlazeFace-shaped");
-		*why = nn_detail;
-		return -1;
+		goto refused;
 	}
 	return 0;
+refused:
+	nn_svc_str(why, cap, probe.detail);
+	return -1;
 }
 
 unsigned nn_svc_thresh_get(void)

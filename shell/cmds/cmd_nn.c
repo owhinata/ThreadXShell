@@ -126,14 +126,10 @@ static int nn_cancel_shim(void *ctx)
 static void nn_report(struct cli_instance *sh, const char *what,
                       const struct nn_op_result *res)
 {
-	const char *why;
-
-	if (res->status != NN_SVC_OK) {
-		why = nn_svc_strerror(res->status);
-		if (why == NULL)
-			why = nn_status_name(res->status);
-		cli_error(sh, "nn: %s: %s (%d)\r\n", what, why, res->status);
-	}
+	if (res->status != NN_SVC_OK)
+		cli_error(sh, "nn: %s: %s (%d)\r\n", what,
+		          res->detail[0] ? res->detail : nn_status_name(res->status),
+		          res->status);
 
 	switch (res->claim) {
 	case NN_CLAIM_RETRYABLE:
@@ -195,11 +191,12 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 	memset(&info, 0, sizeof info);
 	nn_svc_info(&info);
 
-	cli_print(sh, "backend : %s\r\n", info.backend ? info.backend : "-");
+	cli_print(sh, "backend : %s\r\n",
+	          info.backend[0] ? info.backend : "-");
 	cli_print(sh, "model   : %s\r\n",
-	          info.model_active ? (info.model ? info.model : "(unnamed)")
+	          info.model_active ? (info.model[0] ? info.model : "(unnamed)")
 	                            : "(none)");
-	if (info.source)
+	if (info.source[0])
 		cli_print(sh, "source  : %s\r\n", info.source);
 	cli_print(sh, "arena   : %lu B reserved\r\n",
 	          (unsigned long)info.arena_bytes);

@@ -101,8 +101,8 @@ const char *nn_claim_name(uint8_t claim);
 /** One-line human name for a @ref nn_model_state.  Always non-NULL. */
 const char *nn_model_state_name(uint8_t state);
 
-/** Generic name for a @ref NN_SVC_OK status code, used when the board's own
- *  nn_svc_strerror() has nothing more specific.  Always non-NULL. */
+/** Generic name for a status code, used when the board wrote no `detail`
+ *  alongside it.  Always non-NULL. */
 const char *nn_status_name(int status);
 
 #ifdef __cplusplus

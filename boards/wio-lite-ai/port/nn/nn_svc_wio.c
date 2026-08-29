@@ -58,16 +58,15 @@ static void nn_detail_set(const char *fmt, ...)
 	va_end(ap);
 }
 
+/* [!] The detail is COPIED into the caller's result here, at the one place a
+ * result is built.  nn_detail is this file's buffer and the next command on
+ * another console overwrites it -- so a pointer to it would be printed after it
+ * had already become somebody else's sentence. */
 static void nn_result(struct nn_op_result *res, int status, enum nn_claim claim)
 {
 	res->status = status;
 	res->claim  = (uint8_t)claim;
-}
-
-const char *nn_svc_strerror(int status)
-{
-	(void)status;
-	return (nn_detail[0] != '\0') ? nn_detail : NULL;
+	nn_svc_str(res->detail, sizeof res->detail, nn_detail);
 }
 
 /*
@@ -131,25 +130,24 @@ void nn_svc_info(struct nn_svc_info *out)
 	const struct nn_backend_info *bi = nn_backend();
 	struct nn_model *m = NULL;
 
-	out->backend = bi ? bi->name : NULL;
+	memset(out, 0, sizeof *out);
+	nn_svc_str(out->backend, sizeof out->backend, bi ? bi->name : NULL);
 
-	if (nn_model_open(&m) != 0 || m == NULL) {
-		out->model_active = 0u;
-		out->model        = NULL;
-		out->source       = NULL;
-		out->arena_bytes  = 0u;
+	if (nn_model_open(&m) != 0 || m == NULL)
 		return;
-	}
-	out->model_active = 1u;
-	out->model        = nn_model_name(m);
-	out->arena_bytes  = nn_activations_bytes(m);
-	out->arena_used   = 0u;
 
-	/* Say plainly that nothing is being inferred, so a latency from `nn bench`
-	   is never mistaken for a model's. */
-	out->source = (bi && strcmp(bi->name, "null") == 0)
-	                  ? "synthetic workload, not inference"
-	                  : NULL;
+	/* Copied, not borrowed: the backend owns this name and a reload replaces
+	   it, so the caller must not hold a pointer into it while printing. */
+	out->model_active = 1u;
+	nn_svc_str(out->model, sizeof out->model, nn_model_name(m));
+	out->arena_bytes = nn_activations_bytes(m);
+	out->arena_used  = 0u;   /* this backend reports only the reservation */
+
+	/* [!] Say plainly when nothing is being inferred, so a latency from
+	 * `nn bench` is never mistaken for a model's. */
+	if (bi && strcmp(bi->name, "null") == 0)
+		nn_svc_str(out->source, sizeof out->source,
+		           "synthetic workload, not inference");
 }
 
 /* ---- model lifecycle ----------------------------------------------------- */

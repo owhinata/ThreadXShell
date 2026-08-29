@@ -70,7 +70,7 @@ extern "C" {
 
 /**
  * Status of one operation.  Zero is success; a board's own richer failure code
- * passes through as a negative number it can name through nn_svc_strerror().
+ * passes through as a negative number, explained in the result's `detail`.
  *
  * These sit far from zero so they cannot be confused with a backend's, the same
  * convention the boards' own nn.h already uses.
@@ -143,10 +143,24 @@ enum nn_model_state {
 	NN_MODEL_PREVIOUS,    /**< the request was refused; the old one is active */
 };
 
-/** The two answers every operation gives.  Never collapse them into one. */
+/** Longest board-written explanation carried back with a result. */
+#define NN_SVC_DETAIL_MAX 159
+
+/**
+ * The two answers every operation gives.  Never collapse them into one.
+ *
+ * [!] @ref detail IS A COPY, for the same reason the info strings are.  A board
+ * adapter cannot print -- it holds no shell instance -- so it writes why a thing
+ * failed in its own words and the shared command prints that.  Returning a
+ * pointer into the adapter instead would hand the caller something the next
+ * command on another console overwrites while it is being printed, which is the
+ * bug this contract already had once at the tensor level.  Empty means "no more
+ * than the status code says".
+ */
 struct nn_op_result {
 	int     status;  /**< NN_SVC_OK, or a negative code               */
 	uint8_t claim;   /**< enum nn_claim -- the caller's authority     */
+	char    detail[NN_SVC_DETAIL_MAX + 1];
 };
 
 /* ---- pointing a load at something ---------------------------------------- */
@@ -194,16 +208,46 @@ struct nn_spec {
 
 /* ---- what `nn info` prints ----------------------------------------------- */
 
-/** Identity and cost of what is loaded.  Strings are board-owned and stay valid
- *  while the model does; NULL where a board has nothing to say. */
+/*
+ * Identity and cost of what is loaded.
+ *
+ * [!] THE STRINGS ARE COPIES, NOT BORROWED POINTERS, AND THAT IS THE WHOLE
+ * POINT.  A board fills this under whatever claim it uses and releases before
+ * returning -- `nn info` must keep answering while a stream runs, which is
+ * exactly when it is worth asking.  A borrowed pointer would then be printed
+ * after the claim was gone, and on one board it points straight at the buffer a
+ * concurrent `nn model unload` clears.  Copying under the claim is what makes
+ * "non-blocking info" and "a name that is still true when printed" both hold.
+ *
+ * An empty string means "nothing to say", so a caller never has to test for
+ * NULL and can never print a pointer it does not own.
+ */
+#define NN_SVC_BACKEND_MAX 31
+#define NN_SVC_MODEL_MAX   47
+#define NN_SVC_SOURCE_MAX  79
+
 struct nn_svc_info {
-	const char *backend;      /**< runtime that would run a model         */
-	const char *model;        /**< active model's name, or NULL if none   */
-	const char *source;       /**< what the load was pointed at, or NULL  */
-	uint32_t    arena_bytes;  /**< arena the board reserves               */
-	uint32_t    arena_used;   /**< of that, what the model needs (0=n/a)  */
-	uint8_t     model_active; /**< 0 when nothing is loaded               */
+	char     backend[NN_SVC_BACKEND_MAX + 1];  /**< runtime, or ""        */
+	char     model[NN_SVC_MODEL_MAX + 1];      /**< active model, or ""   */
+	char     source[NN_SVC_SOURCE_MAX + 1];    /**< where from, or ""     */
+	uint32_t arena_bytes;   /**< arena the board reserves                 */
+	uint32_t arena_used;    /**< of that, what the model needs (0 = n/a)  */
+	uint8_t  model_active;  /**< 0 when nothing is loaded                 */
 };
+
+/** Copy @p src into a fixed field, always NUL-terminated, never truncating into
+ *  something that could read as a different name.  NULL @p src gives "". */
+static inline void nn_svc_str(char *dst, size_t cap, const char *src)
+{
+	size_t i = 0;
+
+	if (dst == NULL || cap == 0u)
+		return;
+	if (src != NULL)
+		for (; i + 1u < cap && src[i] != '\0'; i++)
+			dst[i] = src[i];
+	dst[i] = '\0';
+}
 
 /* ---- operations ---------------------------------------------------------- */
 
@@ -246,10 +290,6 @@ static inline int nn_svc_cancelled(nn_svc_cancel_fn fn, void *ctx)
 /** Backend, model and arena, for `nn info`.  Never fails on a board that has an
  *  adapter at all; a board with no model loaded still answers. */
 void nn_svc_info(struct nn_svc_info *out);
-
-/** A board's own name for a status it returned, or NULL to let the shared
- *  command print the generic one. */
-const char *nn_svc_strerror(int status);
 
 /**
  * Point the model lifecycle at @p spec.

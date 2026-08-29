@@ -23,8 +23,8 @@
  * take a shell instance, so the messages this board used to print at the point
  * of failure -- which slot, which CRC, which of two numbers is out of range --
  * would otherwise have flattened into a status code.  They are formatted into a
- * detail buffer here and the shared command prints them through
- * nn_svc_strerror().  Losing them would have made every failure read the same.
+ * detail buffer here and copied into the result the shared command prints.
+ * Losing them would have made every failure read the same.
  */
 #include "nn_svc.h"
 
@@ -110,24 +110,24 @@ static void nn_detail_set(const char *fmt, ...)
 
 /* Fill a result in one place, so no path can set a status and forget the
    disposition -- they are two answers and both are always given. */
+/* [!] The detail is COPIED into the caller's result here, at the one place a
+ * result is built.  nn_detail is this file's buffer and the next command on
+ * another console overwrites it -- so a pointer to it would be printed after it
+ * had already become somebody else's sentence. */
 static void nn_result(struct nn_op_result *res, int status, enum nn_claim claim)
 {
 	res->status = status;
 	res->claim  = (uint8_t)claim;
-}
-
-const char *nn_svc_strerror(int status)
-{
-	(void)status;
-	return (nn_detail[0] != '\0') ? nn_detail : NULL;
+	nn_svc_str(res->detail, sizeof res->detail, nn_detail);
 }
 
 /* ---- info ---------------------------------------------------------------- */
 
 void nn_svc_info(struct nn_svc_info *out)
 {
-	out->backend      = "ethos-u55 (tflm, secure)";
-	out->arena_bytes  = (uint32_t)npu_arena_bytes();
+	memset(out, 0, sizeof *out);
+	nn_svc_str(out->backend, sizeof out->backend, "ethos-u55 (tflm, secure)");
+	out->arena_bytes = (uint32_t)npu_arena_bytes();
 
 	/*
 	 * [!] BEHIND THE GATE, and when the gate refuses, only facts that CANNOT
@@ -136,21 +136,26 @@ void nn_svc_info(struct nn_svc_info *out)
 	 * running on another job rewrites exactly what this would walk.
 	 */
 	if (!nn_try_acquire()) {
-		out->model_active = 0u;
-		out->model        = NULL;
-		out->source       = "(busy -- another nn job holds it)";
+		nn_svc_str(out->source, sizeof out->source,
+		           "(busy -- another nn job holds it)");
 		return;
 	}
 
+	/*
+	 * [!] EVERY STRING IS COPIED BEFORE THE GATE GOES BACK.  nn_model_from is
+	 * this file's buffer and `nn model unload` clears it under the same gate,
+	 * so handing the caller a pointer to it would be handing out something an
+	 * unload can empty before the caller finishes printing.
+	 */
 	out->model_active = nn_open_done;
 	out->arena_used   = nn_open_done ? (uint32_t)npu_arena_used() : 0u;
 	if (nn_open_done) {
-		out->model  = (nn_model_from[0] != '\0') ? nn_model_from : "(raw)";
-		out->source = npu_hw_ready() ? "npu up (secure, privileged)"
-		                             : "npu down";
+		nn_svc_str(out->model, sizeof out->model,
+		           (nn_model_from[0] != '\0') ? nn_model_from : "(raw)");
+		nn_svc_str(out->source, sizeof out->source,
+		           npu_hw_ready() ? "npu up (secure, privileged)" : "npu down");
 	} else {
-		out->model  = NULL;
-		out->source = npu_hw_fail_reason();
+		nn_svc_str(out->source, sizeof out->source, npu_hw_fail_reason());
 	}
 	nn_release();
 }

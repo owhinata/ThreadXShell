@@ -20,7 +20,7 @@
  * it never reaches up into shell/ or ui/.
  *
  * Threading: a single model instance is NOT reentrant.  For P1, nn_run() is
- * driven from one inference worker thread (or, for `ai bench`, the CLI thread
+ * driven from one inference worker thread (or, for `nn bench`, the CLI thread
  * while nothing else runs it); callers serialize access.  nn_run() is CPU-bound
  * and never sleeps, so the DWT cycle counter it uses for nn_last_cycles() does
  * not freeze mid-run (the counter only stops in WFI -- see cmd_membench.c).
@@ -70,7 +70,7 @@ struct nn_tensor {
 /** Opaque model handle (defined in nn.c). */
 struct nn_model;
 
-/** Identity of the compiled-in backend, for `ai info`. */
+/** Identity of the compiled-in backend, for `nn info`. */
 struct nn_backend_info {
 	const char *name;      /**< "null" | "stedgeai" | "tflm"                  */
 	const char *version;   /**< backend/runtime version string, or ""         */
@@ -104,7 +104,7 @@ int  nn_output_count(const struct nn_model *m);
 struct nn_tensor *nn_input(struct nn_model *m, int idx);
 struct nn_tensor *nn_output(struct nn_model *m, int idx);
 
-/** Size of the activation arena (bytes), for `ai info`; 0 if unknown. */
+/** Size of the activation arena (bytes), for `nn info`; 0 if unknown. */
 uint32_t nn_activations_bytes(const struct nn_model *m);
 
 /**
@@ -136,8 +136,8 @@ int nn_model_reload(const void *data, uint32_t len, const char *name);
 /*
  * Coarse single-session guard.  The singleton model + the backends are NOT
  * reentrant, and multiple shells (UART + telnet) can issue `ai` commands, so
- * only ONE inference activity may use the model at a time: a one-shot `ai bench`,
- * or a live `ai run` / `ai stream`.  try_acquire() claims the session (returns 0)
+ * only ONE inference activity may use the model at a time: a one-shot `nn bench`,
+ * or a live `nn run` / `nn stream`.  try_acquire() claims the session (returns 0)
  * or reports it busy (<0); release() frees it.  Interrupt-guarded and
  * thread-agnostic -- the acquiring and releasing threads may differ (stream start
  * in one shell, stop in another).  No init required.

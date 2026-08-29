@@ -12,11 +12,11 @@
  * synthetic model whose tensor shapes match BlazeFace Front 128x128 int8 (input
  * 1x128x128x3; outputs 1x896x16 box regressors + 1x896x1 scores), with a REAL,
  * writable input buffer placed in the .sdram.ai arena (FMC bank3).  This lets the
- * full plumbing -- `ai info`, `ai bench`, and the camera inference sink (M2) --
+ * full plumbing -- `nn info`, `nn bench`, and the camera inference sink (M2) --
  * be developed and exercised end-to-end before the stedgeai backend exists.
  *
  * run() is a no-op returning success (0 inference cycles of real work), so
- * `ai bench` measures only the nn.c dispatch/timing overhead here.
+ * `nn bench` measures only the nn.c dispatch/timing overhead here.
  *
  * NOTE: the input buffer lives in the .sdram (NOLOAD) region, which is only
  * valid after sdram_init() (tx_application_define()).  nn_model_open() is called

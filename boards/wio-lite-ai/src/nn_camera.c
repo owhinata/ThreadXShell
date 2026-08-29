@@ -172,7 +172,7 @@ static unsigned nncam_oy_bound(unsigned band, unsigned oh)
  * tensor's OWN scale/zero_point, not the donor's hardcoded (rgb - 128).  This
  * board's struct nn_tensor carries the quantization params and the donor's did not,
  * which is the only reason it had to assume (1/128, 0); assuming it here would be
- * silently wrong for any model quantized differently, and `ai norm` would do nothing
+ * silently wrong for any model quantized differently, and `nn norm` would do nothing
  * on a quantized input.  The 1/scale reciprocal is computed once per band rather
  * than per channel: a vdiv.f32 is ~14 cycles and there are 3 per pixel.
  *
@@ -576,7 +576,7 @@ int nn_camera_start(int colorbar)
 
 	/* Software claim first, hardware claim second -- taking the peripheral first
 	   would mean holding it just to report that software was busy (the order
-	   cmd_ai.c documents and phase 2a recorded). */
+	   cmd_nn.c documents and phase 2a recorded). */
 	if (nn_session_try_acquire() != 0)
 		return NNCAM_ERR_SESSION;
 

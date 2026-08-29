@@ -21,7 +21,7 @@
  * initialised fields placed in it is never loaded -- and NOLOAD keeps whatever
  * the previous run left, so it would fail by appearing to work.  The decoder's
  * state therefore stays in ordinary internal RAM below, which also means
- * `ai thresh` still answers when the PSRAM bring-up failed (it is fail-soft, and
+ * `nn thresh` still answers when the PSRAM bring-up failed (it is fail-soft, and
  * the shell runs without it).
  *
  * Write-before-read on every decode and CPU-only, which is what made the
@@ -39,7 +39,7 @@ static int              nn_dec_ready;
  *
  * A lazy flag is safe HERE in a way it would not be inside the shared decoder:
  * every path that can reach a decode is serialised by this board's NN session,
- * and `ai thresh` only touches a single word that is atomic by construction.
+ * and `nn thresh` only touches a single word that is atomic by construction.
  */
 static int nn_decoder_bind(void)
 {

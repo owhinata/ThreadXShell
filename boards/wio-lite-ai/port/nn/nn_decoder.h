@@ -62,7 +62,7 @@ int nn_decoder_run(struct nn_model *m, struct bf_det *out, int max,
  *
  * SAFE TO CALL WHILE A STREAM RUNS.  The decoder reads the threshold once per
  * frame, so a set here lands wholly before or wholly after a decode and the value
- * used is reported back in @ref bf_result -- which is why `ai thresh` takes no
+ * used is reported back in @ref bf_result -- which is why `nn thresh` takes no
  * guard and tuning against a live stream still works.
  */
 /**

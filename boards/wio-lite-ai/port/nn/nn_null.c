@@ -13,19 +13,19 @@
  * before TFLM, C++ and a real model arrive.
  *
  * IT DOES NOT INFER ANYTHING, and it says so: the model is named "null-stub" and
- * `ai info` prints a note.  But unlike the donor firmware's version, whose run() is
+ * `nn info` prints a note.  But unlike the donor firmware's version, whose run() is
  * an empty `return 0`, this one does a deterministic pass over the input and writes
  * derived values to both outputs.  An empty run() reports zero cycles, and zero is
  * exactly the reading a BROKEN cycle counter gives -- the one number that cannot
  * distinguish "measured correctly" from "measured nothing".  A real pass makes
- * `ai bench` report a stable non-zero latency, and makes the outputs change when
+ * `nn bench` report a stable non-zero latency, and makes the outputs change when
  * the input changes, so the tensor plumbing is observably end-to-end.
  *
  * SHAPES.  Deliberately not the donor's BlazeFace-shaped 128x128 stub.  That
  * geometry earned its keep there because that firmware's P1 also shipped the camera
  * inference sink; here the sink is a later phase and will run against the real
  * model, so all this stub owes us is one multi-dimensional quantized input, more
- * than one output, and both a quantized and a non-quantized output so `ai info`
+ * than one output, and both a quantized and a non-quantized output so `nn info`
  * exercises both print paths.
  *
  * PLACEMENT.  All three buffers live in the cacheable PSRAM carve-out (.psram_ai,
@@ -33,9 +33,9 @@
  * PSRAM row of the memory policy in include/mem_sections.h: AXI-SRAM is reserved for
  * what a bus master must reach, and DTCM has under 8 KB genuinely free once the main
  * stack is accounted for.  Being NOLOAD they hold garbage at reset, so a caller
- * measuring with them fills the input first (shell/cmds/cmd_ai.c).  Nothing here
+ * measuring with them fills the input first (shell/cmds/cmd_nn.c).  Nothing here
  * dereferences them outside run() -- in particular null_open() only fills descriptors,
- * which is what lets `ai info` work with the PSRAM down.
+ * which is what lets `nn info` work with the PSRAM down.
  *
  * Clean-room design; no third-party code reused.
  */
@@ -150,7 +150,7 @@ static struct nn_tensor *null_output(void *impl, int idx)
 
 /* A stub has no intermediate tensors, so there is no activation arena to report.
  * Reporting the input size instead (as the donor does) would put a number on the
- * `ai info` arena line that means nothing. */
+ * `nn info` arena line that means nothing. */
 static uint32_t null_activations_bytes(void *impl)
 {
 	(void)impl;
@@ -200,7 +200,7 @@ static int null_run(void *impl)
  * load_region / reload / heap_allocs are left out on purpose, so they are NULL and
  * nn.c answers NN_ERR_NOSUP for them.  A stub could fake a model swap -- accept the
  * bytes, ignore them and report success -- and that would be the worst possible
- * behaviour: `ai model load` would appear to work, and the first wrong inference would
+ * behaviour: `nn model load` would appear to work, and the first wrong inference would
  * be blamed on the model rather than on the backend that never read it.  This backend
  * has no model to swap, and says so.
  */

@@ -57,9 +57,10 @@ int nn_decoder_run(struct nn_model *m, struct bf_det *out, int max,
  * Score threshold as a milli-probability, on the same scale as bf_det.score.
  * Outside 1..999 the request is refused (BF_ERR_ARG) and nothing changes.
  *
- * This board has no `ai thresh` command yet -- unifying the command surface is
- * issue #50 -- so the default is what it uses.  That default is the same number
- * the compile-time BF_SCORE_LOGIT of 0.405 was, in the other unit.
+ * `nn thresh` reaches this through the shared command's adapter (issue #50), so
+ * the default below is only the starting point rather than the only value this
+ * board can use.  That default is the same number the compile-time
+ * BF_SCORE_LOGIT of 0.405 was, in the other unit.
  */
 /**
  * @brief  Translate one native descriptor into the neutral one (issue #97).

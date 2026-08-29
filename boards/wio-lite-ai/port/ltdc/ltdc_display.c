@@ -856,7 +856,7 @@ int ltdc_init(void)
 	 *
 	 * The side effect is the point as much as the darkness is: with no scan-out
 	 * there is no continuous LTDC read of OCTOSPI1, so `psram` tuning, `membench`
-	 * and `devmem` work from boot without an `lcd off` first, and `ai bench` does
+	 * and `devmem` work from boot without an `lcd off` first, and `nn bench` does
 	 * not silently carry the ~26 ms scan-out tax that owhinata/wio-lite-ai#9 twice
 	 * mistook for a change in inference cost.
 	 */

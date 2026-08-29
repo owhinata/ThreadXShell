@@ -123,7 +123,7 @@ void nn_svc_info(struct nn_svc_info *out)
 	 *   Taking the session unconditionally would make `nn info` REFUSE while a
 	 *   stream runs -- the worker holds it for the whole stream -- and that is
 	 *   exactly when the report is worth asking for.  Both boards' previous
-	 *   `ai info` read this name with no claim at all for that reason.
+	 *   `nn info` read this name with no claim at all for that reason.
 	 *
 	 *   Not taking it at all leaves the copy able to race a reload, which
 	 *   rewrites the backend's name buffer byte by byte, and produce a torn

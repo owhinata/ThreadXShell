@@ -14,13 +14,13 @@
  * eth_sink lifecycle (thread created once + parked) and the codex-reviewed
  * double-buffer ownership rule (the buffer the worker feeds to nn_run() is never
  * written by the sink).  Since Epic owhinata/stm32f746g-disco#99 Phase 1
- * (owhinata/stm32f746g-disco#100) nncam is a plain camera *subscriber*: `ai stream
+ * (owhinata/stm32f746g-disco#100) nncam is a plain camera *subscriber*: `nn stream
  * start/stop` enable/disable it and it attaches to the base capture (`camera stream`)
  * only while the base runs. A base detach (stop / DCMI overrun / cascade) PAUSES it
  * (frames stop) but keeps it enabled and holding the nn session; it re-attaches when
  * the base restarts.
  *
- * Drives `ai stream start|stop` and `ai run`.  Model-specific detection decode
+ * Drives `nn stream start|stop` and `nn run`.  Model-specific detection decode
  * (BlazeFace anchors + NMS) is layered above in port/nn/models
  * (owhinata/stm32f746g-disco#81 task 8); with the `null` backend this loop runs
  * end-to-end with 0 detections.
@@ -61,7 +61,7 @@ struct nn_camera_stats {
 };
 
 /**
- * Enable live camera inference (`ai stream start`).  @p res is a display hint
+ * Enable live camera inference (`nn stream start`).  @p res is a display hint
  * only -- the input adapts to whatever geometry the base capture publishes
  * (owhinata/stm32f746g-disco#100).  Claims the single nn session (refused -6 if `ai
  * bench`/another stream holds it) and registers nncam as an RGB565 subscriber of the
@@ -72,7 +72,7 @@ struct nn_camera_stats {
  */
 int  nn_camera_start(enum camera_res res);
 
-/** Disable live inference (`ai stream stop`): unsubscribe from the base (which
+/** Disable live inference (`nn stream stop`): unsubscribe from the base (which
  *  keeps running for other subscribers), wait for the producer to hand this
  *  sink's frame back, and release the nn session after the worker parks.
  *  Bounded waits (wall clock).  Returns:
@@ -81,7 +81,7 @@ int  nn_camera_start(enum camera_res res);
  *   -2   the worker is still mid-inference -- it releases the session as it
  *        exits, and the sink is already released, so this is not a refusal;
  *   -7   the sink did not hand its frame back (issue #72).  A producer callback
- *        may still be preprocessing into our staging buffers, so `ai stream
+ *        may still be preprocessing into our staging buffers, so `nn stream
  *        start` is refused until a later stop re-polls and finds it clear.
  *        Retryable by design: if the callback never returns, every retry keeps
  *        refusing, which is what a terminal state would have given anyway;
@@ -101,7 +101,7 @@ int nn_camera_dets_get(struct bf_det *out, int max);
  * One decode's boxes and the diagnostics that belong to them.
  *
  * [!] READ TOGETHER OR NOT AT ALL (issue #97).  The worker publishes both under
- * one lock.  `ai stream stats` does not decode anything itself -- it reports what
+ * one lock.  `nn stream stats` does not decode anything itself -- it reports what
  * the worker last published -- so fetching the boxes and then asking the decoder
  * for its "last" numbers paired this frame's boxes with whatever had been decoded
  * by the time it got round to printing.

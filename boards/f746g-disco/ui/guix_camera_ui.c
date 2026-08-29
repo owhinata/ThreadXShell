@@ -291,7 +291,7 @@ static int cam_sink_open(void *ctx, enum frame_format fmt, uint16_t w, uint16_t 
    thread, right after the frame store).  The dets are normalized [0,1] to the
    full preview frame, which maps 1:1 onto the view buffer, so they scale directly.
    nn_camera_dets_get() returns 0 when inference is not running or has no detection,
-   so the boxes clear when `ai stream stop` runs or a face is lost. */
+   so the boxes clear when `nn stream stop` runs or a face is lost. */
 static void overlay_draw_boxes(void)
 {
 	struct bf_det d[BF_MAX_DET];
@@ -500,7 +500,7 @@ static UINT camera_ui_root_event(GX_WIDGET *widget, GX_EVENT *event_ptr)
 			   boxes on top now -- before the icon redraw reads it -- keeps the boxes
 			   off the DCMI-servicing critical path (owhinata/stm32f746g-disco#83).  Drawn
 			   whenever inference is running; overlay_draw_boxes() is a no-op with no detections,
-			   so the box clears when `ai stream stop` runs or a face is lost. */
+			   so the box clears when `nn stream stop` runs or a face is lost. */
 			if (nn_camera_running())
 				overlay_draw_boxes();
 			gx_system_dirty_mark((GX_WIDGET *)&cam_icon);

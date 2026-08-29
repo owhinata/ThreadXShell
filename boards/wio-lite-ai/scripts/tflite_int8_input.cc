@@ -65,7 +65,7 @@
  * DefaultAllocator, as below.
  *
  * WHAT IT DOES NOT DO: it prints no CRC-32.  scripts/verify_tflite.cc prints the value
- * that `blob list` and `ai model load` display, and one number with one source cannot
+ * that `blob list` and `nn model load` display, and one number with one source cannot
  * disagree with itself.  Run that on the output -- the closing message says so.
  *
  * Build + run:  cmake --build build-tflm --target int8-input-model
@@ -567,7 +567,7 @@ int main(int argc, char **argv)
 	       "          must apply q = round(real / scale) + zero_point itself; that is\n"
 	       "          what app/nn_camera.c does, from the tensor's own parameters.\n"
 	       "          Next, for the structural check and the CRC-32 that `blob list`\n"
-	       "          and `ai model load` display:\n"
+	       "          and `nn model load` display:\n"
 	       "            verify_tflite %s\n", argv[2]);
 	return 0;
 }

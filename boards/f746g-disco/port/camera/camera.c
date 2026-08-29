@@ -384,7 +384,7 @@ static volatile uint32_t cam_jpeg_trunc;     /* JPEG stream: frames with no SOI/
    itself at the same mode; subscribers re-attach via cam_subs_attach_all() and
    just saw a close()/open() pair.  An escalating rapid-overrun counter breaks a
    persistent overrun loop -- after CAM_RECOVER_GIVEUP rapid recoveries the base
-   stays off so the user can remove the bandwidth culprit (e.g. `ai stream stop`)
+   stays off so the user can remove the bandwidth culprit (e.g. `nn stream stop`)
    and restart.  This replaces the old GUI-overlay-specific backoff
    (owhinata/stm32f746g-disco#83). */
 #define CAM_RECOVER_WINDOW  8000u   /* ms: window for "rapid" successive recovery */

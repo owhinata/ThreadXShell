@@ -17,7 +17,7 @@
  * GUI preview is a *subscriber* of the base capture (`camera stream`), not its owner:
  * `gui start` shows the window and subscribes the preview (it follows the base -- frozen
  * while the base is off, live while it streams RGB565); `gui stop` unsubscribes without
- * stopping the base or the AI.  Face-detect boxes are drawn whenever `ai stream` is
+ * stopping the base or the AI.  Face-detect boxes are drawn whenever `nn stream` is
  * running (the old `gui overlay` sub-command is gone).  owhinata/stm32f746g-disco#68
  * added a settings page reached by tapping the live image (image-quality controls +
  * Back). The UI is started ON at boot (owhinata/stm32f746g-disco#60), which also brings

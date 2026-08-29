@@ -45,7 +45,7 @@
 /* Activation arena reservation.  Set from CMake (NN_TFLM_ARENA_KB); the fallback keeps
  * this header meaningful when read on its own.  The donor firmware measured
  * arena_used_bytes() = 470,304 B for BlazeFace-front 128 int8, so 512 KB is that plus
- * headroom -- and `ai info` reports the USED figure, which is the one that means
+ * headroom -- and `nn info` reports the USED figure, which is the one that means
  * anything.  A reservation is not a measurement. */
 #ifndef NN_TFLM_ARENA_KB
 #define NN_TFLM_ARENA_KB 512
@@ -53,7 +53,7 @@
 #define NN_TFLM_ARENA_BYTES  ((uint32_t)NN_TFLM_ARENA_KB * 1024u)
 
 /* Two model slots, double-buffered.  Sized to swallow a WHOLE blob payload
- * (BLOB_PAYLOAD_MAX = 520,192 B, app/blob.h) so `ai model load` can never be refused
+ * (BLOB_PAYLOAD_MAX = 520,192 B, app/blob.h) so `nn model load` can never be refused
  * for a reason the operator cannot see from `blob list`: any blob that fits a slot on
  * the NOR fits a slot here.  512 KB = 524,288 B leaves 4,096 B of margin over that.
  *
@@ -103,12 +103,12 @@ extern uint8_t nn_tflm_model_buf[NN_TFLM_MODEL_SLOTS][NN_TFLM_MODEL_MAX];
  * TF_LITE_STATIC_MEMORY nothing references it, so --gc-sections drops it, and
  * cmake/check_cxx_runtime.py reports that after every link.  The link-time absence is
  * the real evidence -- far stronger than any run could give -- and it means this
- * counter is 0 by construction rather than by observation.  `ai info` printing 0 is
+ * counter is 0 by construction rather than by observation.  `nn info` printing 0 is
  * therefore NOT a measurement of this build's behaviour.
  *
  * It is still worth having, as a tripwire that is currently inert.  The moment some
  * future path does allocate, `operator new` becomes reachable, gets linked, and the
- * counter starts meaning something -- and `ai info` shows it without anyone having to
+ * counter starts meaning something -- and `nn info` shows it without anyone having to
  * remember to look.  On this firmware such an allocation would come out of the newlib
  * heap in AXI-SRAM, which is shared with everything else and was never sized for it.
  */

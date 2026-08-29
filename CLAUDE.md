@@ -76,6 +76,27 @@ boards/
   吸収する。
 - **共有コアに触れる変更は、全対応ボードのビルドが通ることを確認してからコミットする**
   （スクリプト/CI 化は保留中。手打ちで確認する）。
+- **[!] `nn` は 3 ボード共有の 1 コマンド**（#50。`shell/cmds/cmd_nn.c` +
+  契約 `svc/nn_svc.h` + ボードごとの `nn_svc_*.c` アダプタ）。破ってはいけないこと:
+  - **共有 TU（`cmd_nn.c` / `nn_cmd_core.c`）は可変記憶域を 1 バイトも持たない** —
+    `check_no_mutable_storage.py` が**ボードごとの監査コンパイル**で強制する
+    （デコーダ #97 と同じ理由・同じスクリプト。ホストの答えは別物なので当てにしない）。
+    状態はアダプタが持つ。
+  - **capability マクロは「性質」であって「ボード名」ではない**
+    （`boards/<board>/svc/nn_svc_config.h`）。`#ifdef <BOARD>` の言い換えを作らない。
+    バックエンドで変わる能力は `CONFIG_NN_BACKEND` に従わせる。
+  - **status と claim disposition は別フィールド**。`retryable`（再試行で解決しうる）と
+    `terminal`（再起動しかない）を畳まない — 畳むと再起動不要のボードで再起動させ、
+    その逆もやる。**判断できないボードは `terminal` に fail-closed**。
+    disposition は「いま誰が持っているか」ではなく**呼び出し側の解放権限**である。
+  - **モデル指定はタグ付き**（`--name` / `--slot` / `--path` / `builtin` /
+    `--addr <a> <len>`）。**裸の文字列は拒否する** — 同じ語がボードごとに別物を指すので、
+    受け付けた瞬間に shell がボードを知ることになる。`--addr` の長さは必須。
+  - **port のアダプタは `struct cli_instance` を取らない**。印字・待ち・キャンセル判定が
+    要るものは `boards/<board>/cmds/` に置く（そこは shell 層）。port が上を名指ししない。
+  - **`nn stream`（STM32 2 枚）と `nn preview`（Grove）は暫定**。後続 Issue で
+    3 ボードとも `nn stream start/stop/stats` に寄せ、`preview` は**削除する**。
+    2 つ目の恒久文法として育てない。
 - **shell の常設状態は静的割当**。共有 shell コア（インスタンス / スタック / ジョブプール）と
   transport の常設状態は静的割当で、init / dispatch / 出力経路は heap を要求しない。board 固有
   コマンドのペイロードは、board が bounded heap・排他（`malloc_lock`）・失敗処理を明示的に
@@ -467,13 +488,13 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   **`is_variable()` は拒否**（`AllocateVariables()` がシリアライズ済みバッファでも
   アリーナ確保で上書きする）。
   NPU bring-up は SEC_ONLY 経路に無いので自前（読み戻し + fail-closed）。詳細は board README。
-- **モデルは blob の名前で開く（`nn open <name>` / #93 = #49 Step 4a）**:
+- **モデルは blob の名前で開く（`nn model load --name <name>` / #93 = #49 Step 4a）**:
   **[!] `npu_open()` は長さを取り、`GetModel()` の前に境界付き FlatBuffer verifier を通す。**
   `GetModel()` は cast で以後の accessor は offset を辿るだけ。**blob の CRC は「届いた
   バイト列」に対するもの**なので、PC 側で既に壊れていたモデルは CRC を通って無傷で着く。
   順序は **範囲 → 長さ → identifier → verifier → ペイロード走査**。長さには**下限も要る**
   （identifier を `raw+4` から読む）。**生アドレス形にも長さ必須**
-  （`nn open --addr <addr> <len>`。「窓の残り全部」は境界検査にならない）。
+  （`nn model load --addr <addr> <len>`。「窓の残り全部」は境界検査にならない）。
   **[!] verifier の limits は明示で、既定を使わない** — 既定は depth 64 / table 100 万、
   生成 verifier は再帰し**シェルスタックは 4,096 B**（実測: 再帰フレームは 24 B 以下＝
   1 段 ~64 B なので既定の 64 段は ~4.1 KB ＝スタック全部）。実モデルは **depth 4 / table 19**、
@@ -481,7 +502,7 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   refuse されるべきで、ここで malformed と報告してはいけない）。
   **limits と呼び出しは `port/npu/npu_verify.h` の 1 箇所**でホストゲートが同じものを
   リンクする（既定 limits でホストが通し実機が落ちる、を作らない）。ITCM +12,000 B。
-  **[!] `nn open <name>` はリースを切らさない**: nn ゲート → **`npu_hw_init()` を先に**
+  **[!] `nn model load --name <name>` はリースを切らさない**: nn ゲート → **`npu_hw_init()` を先に**
   （`NOR_LEASE_NPU` 確保）→ 内側で**全スロット走査**（候補は **VALID のみ**・**重複拒否**・
   0 件 / BUSY / FAULT / MAP を**別々に分類**し「見つからない」に畳まない・**読めない
   スロットが 1 つでもあれば拒否**）→ **`blob_verify_leased()` で CRC** → `npu_open()` →
@@ -531,21 +552,21 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   （`Invoke()` を載せたため。実測 high-water で確認する）。
   **[!] EPK は 31/32 に達する**（camera 26 + UART0 1 + LCD 2 + QSPI/U55 2）。
   `nn run` はパネルを上げないので、5 者が同時に載るのは `nn preview` が初。
-- **顔検出（`nn detect` / #45, #48）**: BlazeFace-front 128 を Ethos-U55 で。
+- **顔検出（`nn run` / #45, #48）**: BlazeFace-front 128 を Ethos-U55 で。
   **op resolver は `<1>` のまま維持する。[!] 理由は「CPU op がキャッシュ的に危険」ではない**
   （#46 で消えた） — **CMSIS-NN（= Helium）を持ち込まない / Vela が全面 offload していない
   モデルを `AllocateTensors` でうるさく落とす**という設計判断。境界の型変換 5 個
   （先頭 QUANTIZE + 末尾 DEQUANTIZE 4）は**ファイル側で剥がす**
   （`scripts/tflite_strip_boundary.cc`。テンソルは削除せず孤児のまま = 番号の振り直しが不要）。
   剥がすと Vela は **CPU operators = 0**。入力量子化 scale 1/255・zp -128 は
-  前処理の `pixel - 128` と一致し、`nn detect` / `nn preview` は入口でそれを**検査して拒否する**。
+  前処理の `pixel - 128` と一致し、`nn run` / `nn preview` は入口でそれを**検査して拒否する**。
   **[!] 入力は 240x240（フレーム中央の最大正方形）を「スケール」する**（#48。従来は 128x128 の
   ただの中央 crop で、実用距離では検出できないほど画角が狭かった）。前処理は
   `port/npu/nn_preproc.c`（half-pixel 中心の bilinear・固定小数・**ホストテスト必須**）。
   **[!] サンプリングは半ピクセル項を持ち、箱の「辺」は持たない** — 同一の変換の
   2 つの表現で、辺に sampling の規約を当てると全部の箱が半ソースピクセルずれる
   （顔相手には見えない）。**負座標は数学的 floor**（C の 0 方向切り捨ては upscale で 1 ずれる）。
-  `nn detect` の箱は**フレーム座標**で表示する（overlay と同じ関数を通すので
+  `nn run` の箱は**フレーム座標**で表示する（overlay と同じ関数を通すので
   コンソールとパネルが食い違わない）。
   **モデルが見るのは生の planar フレームで、パネルに出ている絵ではない**
   （WB / gamma / saturation はパネル向けの調整。gamma 付きを食わせる案は別実験）。
@@ -561,7 +582,7 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   **#48 以降は通常こちらではない** — 画角が広がって顔が入力上で小さくなり、細かい 16x16 群
   （scale 0.036937 / zp 49、上限 2881）が拾うのでスコアは動く（実測 peak 1292 / score 781）。
   **[!] フラッシュ配置は「予約」で宣言し、検査する**。**#93 以降 cmd_nn.c はアドレスを
-  持たず**（`nn open <name>` が blob ヘッダから取る）、**#94 でモデル予約そのものが消えた**:
+  持たず**（`nn model load --name <name>` が blob ヘッダから取る）、**#94 でモデル予約そのものが消えた**:
   `GROVE_MODEL_{CLS,DET}_{FILE,ADDR,RESERVED}` / `model-cls` / `model-det` / `blob-tail` /
   `--target flash-model-*` は**削除済みで、復活させない**。パーティションは
   **firmware / blob / slot-header の 3 つ**。
@@ -604,7 +625,7 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   動かし、**両モデルが store で verify・名前で open・実行できることを実機で確認してから**
   4b（#94）で地図を動かした。**この順序を後から緩めない。**
   **[!] 旧モデルのコピーは消えていない** — `0xB7B000` / `0xD20000` のバイトは
-  そのまま残る（`nn open --addr 0x3AB7B000 1704672` で読める）。
+  そのまま残る（`nn model load --addr 0x3AB7B000 1704672` で読める）。
   **スロット表は #94 で全面 re-carve した**（`0x200000` から大きい順:
   4M x1 / 2M x2 / 1M x3 / 512K x3 / 256K x2 = 11 スロット、13 MB、`0xF00000` で終端。
   `0xF00000..0xFFE000` の 1,040,384 B は**意図的に未 carve**で、需要が出たときに
@@ -637,7 +658,7 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   **[!] blob の移動は `erase` → `write` の順**。`cls` が slot 0 で VALID のまま
   `blob write cls 1` は `DUPLICATE` で拒否される（1 名前 2 スロットの状態は作らない）。
   `blob erase` はヘッダセクタだけなので、2 コマンドの間もペイロードは生アドレスで読める
-  （`nn open --addr <payload> <len>`）。
+  （`nn model load --addr <payload> <len>`）。
   **最終ブロック `0xFFE000..0x1000000` は `slot-header` 予約で、絶対に書かない** —
   正体は**ブートローダのスロットヘッダ**（#85 で 1st BL の逆アセンブルにより判明）。
   `flash_end - 0x1000` と `- 0x2000`（2nd BL が焼込み後に書く backup）に 20 バイト:
@@ -740,7 +761,7 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   送り手を起動しないと 120 秒待つ）。実測は 1,704,672 B が **30 トランザクション**。
 - **[!] 外付け NOR のライフサイクルは `port/nor/` が所有する**（#86）。QSPI/XIP の立ち上げと
   **IRQ 133（DMAC1 combined）の EPK wrapset は `port/nor/` のもの**で、NPU の snapshot は
-  その後に取る。**NPU 側に戻してはいけない** — 戻すと `nn close` の unwrap が IRQ 133 を
+  その後に取る。**NPU 側に戻してはいけない** — 戻すと `nn model unload` の unwrap が IRQ 133 を
   disable し、片方向ラッチが「初期化済み」と言い続ける（#86 の欠陥そのもの）。
   リースは **`npu_hw_init` が取得し `npu_hw_deinit` が解放**する（`npu_open`/`npu_close` は
   触らない）。トークンは**成功するまでローカル**で、`hw_ready` と同時にのみコミットする。
@@ -770,7 +791,7 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   （**窓が落ちた状態で走る**。**1 ユニット消し終えてから**呼ぶ — 先頭がヘッダセクタ）。
   [!] ただし**「read-only」と書かない** — 配列は触らないが、初回 bring-up はベンダの
   quad-enable 経由で **NOR の不揮発ステータスレジスタ（QE ビット）を書く**（#86 の
-  adversarial review 指摘）。`nn open` が従来からやっていることで新規ではないが、
+  adversarial review 指摘）。`nn model load` が従来からやっていることで新規ではないが、
   診断コマンドから到達可能になった。
 - **[!] SRAM 窓は 2 領域**（#29）: `CM55M_S_SRAM_LDR` 0x3401F000 = 2nd bootloader の実行窓で
   **NOLOAD 専用** / `CM55M_S_SRAM` 0x3404D000 = loadable 可。`.rodata` は後者。

@@ -1955,36 +1955,46 @@ boxes on the LIVE preview (`nn preview`) since issue #48.  The console stays
 usable while any of them runs.
 
 ```
-nn open <name>            # QSPI XIP on, NPU out of reset, the blob of that name
+nn model load --name <n>  # QSPI XIP on, NPU out of reset, the blob of that name
                           #   parsed in place
-nn open --addr <a> <len>  # ... or a raw address and length
+nn model load --addr <a> <len>   # ... or a raw address and a length
 nn info                   # tensors, arena use, which interrupts got wrapped
-nn run                    # one frame -> classification, top 5
-nn detect                 # one frame -> face boxes
+nn run                    # one frame -> whatever the LOADED MODEL produces:
+                          #   top-5 classes, or face boxes.  See below.
+nn out [t] [n]            # dequantised values of an output tensor
+nn dets                   # decode the current outputs into boxes
 nn thresh [<1..999>]      # the detector's score threshold, milli-probability
-nn run &                  # either, in the background; the prompt comes straight back
-nn close
+nn run &                  # in the background; the prompt comes straight back
+nn model unload
 ```
+
+[!] **`nn run` is one verb for both kinds of model** (issue #50).  This board used
+to have `nn run` for classification and `nn detect` for faces, so the operator had
+to know which the loaded model was and pick the matching word -- while the model
+already decides.  The decoder says which it is looking at, and only its
+"not BlazeFace-shaped" answer routes to the class report; the other refusals stay
+refusals, because one of them means the model is wrong and the others mean this
+firmware is.
 
 ### The model is a blob, opened by name (#93, #49 Step 4a)
 
-`nn open cls` asks the asset store for the blob called `cls` and parses what it
+`nn model load --name cls` asks the asset store for the blob called `cls` and parses what it
 finds.  It used to mean an address `board.cmake` compiled in, which made
 changing a model a host-build errand -- and for the detector, which cannot be
 committed, an errand that started by reproducing a pipeline.  Now:
 
 ```
 blob write cls 3                 # on the board; then send the file from the PC
-nn open cls
+nn model load cls
 nn run
 ```
 
-**The order inside `nn open <name>` is the design**, and every step of it is
+**The order inside `nn model load --name <name>` is the design**, and every step of it is
 load-bearing:
 
 1. the `nn` ownership gate, as every subcommand has.
 2. **`npu_hw_init()` FIRST**, which takes `NOR_LEASE_NPU`.  From here to
-   `nn close` the window is up and no writer can take the part -- a reservation
+   `nn model unload` the window is up and no writer can take the part -- a reservation
    needs the lease mask empty.  Resolving a name first and bringing the hardware
    up afterwards would leave a gap between the answer and the parse, and the
    answer is an address.
@@ -2006,7 +2016,7 @@ forms (`blob_stat_leased`, `blob_verify_leased`) take the CALLER'S token and
 check it is live, so the sequence is safe by construction rather than by
 accident of what else happened to be holding the part.
 
-The raw form is `nn open --addr <addr> <len>` -- a flag, so that a name can
+The raw form is `nn model load --addr <addr> <len>` -- a flag, so that a name can
 never be read as a hex number or the other way round.  It is how you look at a
 model somebody put somewhere the store does not carve.
 
@@ -2019,7 +2029,7 @@ neighbouring slot, the rest of the store, or the bootloader's own block at the
 top of the part.
 
 That was survivable while a model was something the host build had verified and
-written to a fixed address.  It is not survivable now: `nn open <name>` parses a
+written to a fixed address.  It is not survivable now: `nn model load --name <name>` parses a
 payload an operator sent, and **the blob CRC is computed over the stream that
 ARRIVED**, so a file that was already broken on the PC verifies perfectly and
 lands intact.  So the order is
@@ -2140,7 +2150,7 @@ There used to be two more flashing targets, `--target flash-model-cls` and
 `--target flash-model-det`, writing MobileNet at `0xB7B000` and BlazeFace at
 `0xD20000`.  Both are deleted.  A model is an asset in the store now: it goes
 over the console with `blob write`, through the verified send path above, and
-`nn open <name>` reads it out of a slot.
+`nn model load --name <name>` reads it out of a slot.
 
 [!] **Step 4 was split in two because of the ORDER.** Deleting the reservations
 grows the writable interval to `0xFFE000`, which puts the old model region
@@ -2236,12 +2246,12 @@ that fallback silently boots the **previous build**.  One erase block is
 reserved, so that both copies are inside it.
 
 [!] **No model address is compiled into anything any more** (#93, #94).
-`nn open <name>` takes the address from the blob header it verified, and since
+`nn model load --name <name>` takes the address from the blob header it verified, and since
 #94 there is no `GROVE_MODEL_*_ADDR` for a flashing target to read either -- a
 layout value that can still be set and is read by nothing reads as part of the
 map, so board.cmake `unset(... CACHE)`s them the way it does `GROVE_FW_RESERVED`.
 The old fixed addresses are still reachable by typing them, until something
-writes there: `nn open --addr 0x3AB7B000 1704672`.
+writes there: `nn model load --addr 0x3AB7B000 1704672`.
 
 ### The firmware reservation is the bootloader's own arithmetic
 
@@ -2333,7 +2343,7 @@ slots (`port/nor/nor_state.h`):
 | `NOR_LEASE_BLOB` | one `blob` read: one row of a listing, one `info`, one `read` (issue #92) |
 
 The slots are separate holders, not a mutex: two readers of different slots are
-out at the same time quite happily.  `nn open cls` followed by `blob list`
+out at the same time quite happily.  `nn model load --name cls` followed by `blob list`
 works, and was checked on the board -- a model stays open through a listing,
 because both are reading the same window and neither is writing it.
 
@@ -2369,17 +2379,17 @@ entitled to pull down mid-dump.
 [!] **"Read-only" would be the wrong word for it, though.** Neither subcommand
 programs or erases the *array*, but the first bring-up runs the vendor's
 quad-enable, which sets WEL and writes the QE bit of the NOR's non-volatile
-status register. That is a flash write. It is not new -- `nn open` has always
+status register. That is a flash write. It is not new -- `nn model load` has always
 done it, which is why `setWriteEnable` is a documented exception to the
 forbidden-symbol list -- but it becomes reachable from a diagnostic here.
 
 **The QSPI lifecycle belongs to `port/nor/`, not to the NPU.** It used to be
 brought up inside `npu_hw_init()`'s EPK snapshot, which put IRQ 133 -- the line
 the vendor library uses to move flash data with DMA -- into the *NPU's* wrapset.
-So `nn close` unwrapped it, and unwrapping disables. The old one-way latch in
+So `nn model unload` unwrapped it, and unwrapping disables. The old one-way latch in
 `npu_flash.c` went on reporting the flash as initialised over the top of that.
 Nothing noticed because only memory-mapped reads follow today; issue #49's writes
-would have. `nor info` after an `nn close` is how that is checked without a
+would have. `nor info` after an `nn model unload` is how that is checked without a
 debugger:
 
 ```
@@ -2464,7 +2474,7 @@ transactions the part looked free -- and a write that is bigger than one
 transaction spends most of its life in exactly that gap. Issue #49's
 `blob write` is 1 erase + N program chunks + 2 header writes, and it blocks the
 foreground thread on the UART between them, which is when a lower-priority
-background job runs. A `nn open &` landing there would take a lease that the
+background job runs. A `nn model load &` landing there would take a lease that the
 next chunk then had to refuse over, killing a transfer minutes in.
 
 So a writer takes a reservation first, runs its transactions inside it, and
@@ -2544,7 +2554,7 @@ Two things follow from that, and both are visible in the output:
 
 `nor info` also prints the raw lease mask, and a refusal names the holder when
 there is exactly one and it is a slot the command knows: `busy -- \`nn\` has a
-model open (nn close)` is actionable and `busy` is not. Two holders, or a slot
+model open (nn model unload)` is actionable and `busy` is not. Two holders, or a slot
 added later that nobody taught the mapping about, fall back to the generic
 answer -- a wrong name is worse than none.
 
@@ -2556,7 +2566,7 @@ reader mask instead -- which is what `nor_state.h` says to do with decisions
 hardware cannot be steered into.
 
 [!] **And bring-up is not free.** It permanently changes MPU state and takes one
-EPK slot for the rest of the session. Not new capacity -- `nn open` already does
+EPK slot for the rest of the session. Not new capacity -- `nn model load` already does
 it and the interrupt is one line either way -- but now reachable from a
 diagnostic, and worth knowing on a board about to need its 31/32 high-water mark
 or one whose endurance is in question (issue #89).
@@ -2861,7 +2871,7 @@ after every flash, so it boots.
 #### [!] A read-back mismatch is terminal, and that is the deliberate part
 
 Faulting the whole port over a few bytes in `blob` looks disproportionate: it
-stops `nn open` reading a model that has nothing to do with the range that
+stops `nn model load` reading a model that has nothing to do with the range that
 failed, until the board is reset. The reason is that a mismatch has two
 explanations this code cannot tell apart --
 
@@ -3125,7 +3135,7 @@ while `cls` was still valid in slot 0 is refused with `DUPLICATE`:
 `blob_choose_target()` will not add to a state where one name is in two slots.
 `blob erase 0` retires the name first.  It erases only the header sector, so
 between the two commands the payload is still readable by address
-(`nn open --addr 0x3A201000 1704672`) if the transfer needs retrying.
+(`nn model load --addr 0x3A201000 1704672`) if the transfer needs retrying.
 
 ### [!] The fitted NOR is a Zbit ZB25LQ128C, not the schematic's Winbond
 
@@ -3375,7 +3385,7 @@ wrong.
 [!] **And `valid` is a statement about the header too.**  The decoder never
 reads a payload byte: it recovers the length and the CRC recorded when the blob
 arrived.  Whether the payload still matches them is what `blob verify` will
-answer, and a consumer that parses a payload in place -- `nn open` reads a
+answer, and a consumer that parses a payload in place -- `nn model load` reads a
 model straight out of the window -- has to check it first.  Since #93 it does,
 under the lease it goes on reading with: `blob_verify_leased()` between the name
 lookup and `npu_open()`.
@@ -3557,7 +3567,7 @@ devmem dump 0x3A000000 32   ->  07 0c 40 00 00 00 00 00 ...
 ```
 
 Identical bytes 11 MB apart -- a controller register block aliased across the
-whole window.  `nn open` brings XIP up and the same dump then reads
+whole window.  `nn model load` brings XIP up and the same dump then reads
 `24 00 00 00 54 46 4c 33`.  `devmem`'s flash region is listed read-only for
 exactly this: without being able to dump the window, the difference between
 "nothing was flashed" and "the window is shut" is guesswork.
@@ -3573,13 +3583,13 @@ probe, and `nor info` reports the port as `faulted` with the reason.
 
 ### `nn info`'s interrupt list shrinks after the first open, and that is correct
 
-The first `nn open` after a reset reports `irq 133, 192`; every later one
+The first `nn model load` after a reset reports `irq 133, 192`; every later one
 reports `irq 192`.  Nothing is being lost:
 
 - `npu_flash_xip_init()` is one-shot (`xip_ready`).  The first open calls into
   the QSPI library, which enables IRQ 133 as a side effect (below); later opens
   skip it because the read window is already up.
-- `nn close` unwraps, and unwrapping DISABLES -- the EPK rule is that a line is
+- `nn model unload` unwraps, and unwrapping DISABLES -- the EPK rule is that a line is
   either disabled or wrapped-and-registered, never a third thing.
 
 So on the second open 133 is disabled and stays disabled, which is why the
@@ -3679,7 +3689,7 @@ handed back, and TFLM writes it while the NPU may still be running.
 The SDK is read-only, so this is closed at the other end: `npu_open()` refuses a
 model whose payload is not **exactly one `COMMAND_STREAM`, as the last action**.
 With nothing left to parse after the launch there is nothing left to fail on.
-Vela emits exactly this shape, but `nn open` takes whatever an operator put in a
+Vela emits exactly this shape, but `nn model load` takes whatever an operator put in a
 blob slot or typed an address for, so it is checked rather than assumed.  `npu_cache_after_invoke()` is the
 backstop: if an inference ever does return with the arena still owed, it halts.
 
@@ -3752,14 +3762,14 @@ so that gate is now audited against the shipped firmware and not only against
 the probe.  Its own limits are the same ones as above, stated where it lives:
 see **The write seam** and **The write transaction**.
 
-## Face detection (`nn detect`, BlazeFace-front 128)
+## Face detection (`nn run`, BlazeFace-front 128)
 
 Issue #45.  ST model zoo's BlazeFace Front 128x128 -- a MediaPipe-derived SSD
 face detector -- on the NPU, decoded to boxes on the CPU.
 
 ```
-nn open det
-nn detect
+nn model load --name det
+nn run                 # the detector is loaded, so this reports boxes
 nn thresh 500          # more sensitive; 1..999, milli-probability
 ```
 
@@ -3840,7 +3850,7 @@ board, which is the strongest pre-hardware evidence available that the command
 stream will be accepted; the arch version differs only in the patch field, which
 `ethosu_dev_verify_optimizer_config` does not compare.  It is still only
 evidence -- the driver checks compatibility against registers at INVOKE time, so
-the first `nn detect` on hardware is the proof.
+the first `nn run` on hardware is the proof.
 
 ### The decoder
 
@@ -3871,9 +3881,9 @@ stays in `test/test_nn_decoder.c` is the translation, compiled against the real
 [!] **Two of the decoder's failure paths cannot be reached on this board, and no
 hardware procedure should pretend otherwise.**  `BF_ERR_MODEL` -- "the open model
 is not BlazeFace-shaped" -- needs a model whose outputs are the wrong shape but
-whose INPUT quantisation matches, and `nn detect` refuses a mismatched input scale
+whose INPUT quantisation matches, and `nn run` refuses a mismatched input scale
 at its entry, before the decoder is called at all.  Opening `cls` and running
-`nn detect` therefore produces the input-scale message, not a decode failure.  The
+`nn run` therefore produces the input-scale message, not a decode failure.  The
 overlay's `model_errors` / `decoder_errors` counters are unreachable for the same
 reason.  The host tests are the only thing that exercises them; a procedure that
 said "open the wrong model and check the message" would report a pass earned by a
@@ -3894,7 +3904,7 @@ both are now simply what the shared one does:
   visited and the candidate list is a bounded top-N with deterministic
   tie-breaking.  (The same bug is still in the other two boards.)
 
-`nn detect` always prints the peak raw score, the number of anchors over the
+`nn run` always prints the peak raw score, the number of anchors over the
 threshold, the number kept, and the number after NMS.  "No faces" and "the
 threshold is above everything the model produced" are different states and the
 detection count cannot tell them apart.
@@ -3992,9 +4002,17 @@ all three are invisible by eye:
 - **Box edges carry NO half-pixel term.**  The `- 0.5` converts a continuous
   coordinate to a sample INDEX; an edge is already continuous.  Applying the
   sampling convention to edges biases every box by half a source pixel.  The
-  two mappings are one transform, and `nn detect` now prints boxes in FRAME
-  pixels through the same function the overlay draws with -- so the console and
-  the panel cannot disagree.
+  two mappings are one transform, and `nn run` maps boxes into FRAME
+  coordinates through the same function the overlay draws with -- so the console
+  and the panel cannot disagree.
+
+  [!] Since issue #50 the console prints those frame coordinates as a
+  PERCENTAGE of the frame rather than in pixels, because all three boards now
+  share one command and one output format.  Only the UNIT changed: the
+  conversion is still `nn_preproc_box()`, still the overlay's, so what #48
+  established -- that the console and the panel describe the same rectangle --
+  is untouched.  The percentage is of the frame, not of the model input; on this
+  board those differ, because the model is shown the centre square.
 - **Mathematical floor, not a C cast.**  Truncation toward zero is off by one
   for negative coordinates, and the `- 0.5` makes the first destination pixel
   negative on any upscale.
@@ -4018,7 +4036,7 @@ how the weights are constructed, not because the pixels happened to be small.
 Issue #48.  The camera on the panel with the detections drawn on it:
 
 ```
-nn open det
+nn model load det
 nn preview             # Ctrl+C to stop
 nn preview 30          # or a frame count
 ```
@@ -4711,7 +4729,7 @@ all five at once.
 There is no room for an unexpected vendor-enabled line.  The wrap is
 fail-closed, so the symptom would be the camera refusing to come up during
 `nn preview` rather than silent mis-accounting -- but it is worth running
-`thread` once after the first `nn open det`, when IRQ 133 is also present, to
+`thread` once after the first `nn model load --name det`, when IRQ 133 is also present, to
 see the cpu% column still reported as trustworthy.
 
 ## Flashing and recovery

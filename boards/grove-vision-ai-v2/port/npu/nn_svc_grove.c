@@ -260,12 +260,18 @@ static int nn_resolve_blob(uint32_t token, const char *name, uint32_t *addr,
 
 /* ---- model lifecycle ----------------------------------------------------- */
 
-void nn_svc_model_load(const struct nn_spec *spec, struct nn_op_result *res,
+void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
+                       void *ctx, struct nn_op_result *res,
                        enum nn_model_state *state)
 {
 	uint32_t addr = 0u, len = 0u;
 	const char *name = NULL;
 	int rc;
+
+	/* This board's models come from the asset store or a raw window; it never
+	   reads a file, so the reader is not used. */
+	(void)read;
+	(void)ctx;
 
 	nn_detail_clear();
 	*state = NN_MODEL_EMPTY;
@@ -534,12 +540,20 @@ static void nn_decode_into(struct nn_det_snapshot *snap, struct bf_det *dets,
 }
 
 void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
+                     nn_svc_cancel_fn cancel, void *ctx,
                      struct nn_op_result *res)
 {
 	struct npu_tensor in;
 	int rc;
 
 	nn_detail_clear();
+	/* Nothing here waits long enough to poll: camera_capture() and npu_invoke()
+	   are each one blocking call into hardware.  Checked once so a Ctrl+C that
+	   arrived before the work starts is still honoured. */
+	if (nn_svc_cancelled(cancel, ctx)) {
+		nn_result(res, NN_SVC_ERR_CANCEL, NN_CLAIM_NONE);
+		return;
+	}
 
 	if (!nn_try_acquire()) {
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
@@ -652,7 +666,8 @@ void nn_svc_bench_prepare(struct nn_op_result *res)
 	nn_release();
 }
 
-void nn_svc_bench_run(uint32_t iters, uint64_t *us, struct nn_op_result *res)
+void nn_svc_bench_run(uint32_t iters, uint64_t *us, nn_svc_cancel_fn cancel,
+                      void *ctx, struct nn_op_result *res)
 {
 	uint32_t t0, t1, i;
 
@@ -672,6 +687,13 @@ void nn_svc_bench_run(uint32_t iters, uint64_t *us, struct nn_op_result *res)
 
 	t0 = (uint32_t)tx_time_get();
 	for (i = 0u; i < iters; i++) {
+		if (nn_svc_cancelled(cancel, ctx)) {
+			nn_detail_set("cancelled after %lu of %lu run(s)",
+			              (unsigned long)i, (unsigned long)iters);
+			nn_result(res, NN_SVC_ERR_CANCEL, NN_CLAIM_NONE);
+			nn_release();
+			return;
+		}
 		if (npu_invoke() != NPU_OK) {
 			nn_detail_set("inference failed on run %lu of %lu",
 			              (unsigned long)i + 1u, (unsigned long)iters);

@@ -357,6 +357,7 @@ endif()
 
 set(NN_SOURCES
     "${BOARD_DIR}/port/nn/nn.c"
+    "${BOARD_DIR}/port/nn/nn_svc_f746.c"   # the shared `nn` command's adapter
     "${BOARD_DIR}/port/nn/nn_camera.c"          # live camera -> inference glue
     # Model post-processing.  The decoder is SHARED with the other two boards
     # (issue #97); port/nn/nn_decoder.c is this board's half -- nn_tensor ->
@@ -446,7 +447,9 @@ add_executable(shell
     "${BOARD_DIR}/cmds/cmd_xfer.c"
     "${BOARD_DIR}/cmds/cmd_sdram.c"
     "${BOARD_DIR}/cmds/cmd_net.c"
-    "${BOARD_DIR}/cmds/cmd_ai.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
+    "${BOARD_DIR}/cmds/cmd_nn_board.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/fs_cmd_core.c"
     "${BOARD_DIR}/port/qspi/qspi_flash.c"
     "${BOARD_DIR}/port/sd/sd_card.c"
@@ -638,6 +641,19 @@ include("${CMAKE_SOURCE_DIR}/cmake/shared_storage_gate.cmake")
 add_shared_storage_gate(NAME f746_decoder_audit SOURCE "${F746_SHARED_DECODER}"
                          IFACE bsp_iface CONSUMER shell)
 add_dependencies(shell f746_decoder_audit_check)
+
+# The same rule on the one shared `nn` command and its pure half (issue #50).
+# [!] THIS BOARD IS THE ONE THE GATE MATTERS MOST FOR: it has no residency check
+# that would notice a buffer quietly landing in internal SRAM, so a static added
+# to a shared unit would regress placement here as a SUCCESSFUL build.
+add_shared_storage_gate(NAME f746_nn_cmd_audit
+                        SOURCE "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
+                        IFACE bsp_iface CONSUMER shell)
+add_dependencies(shell f746_nn_cmd_audit_check)
+add_shared_storage_gate(NAME f746_nn_core_audit
+                        SOURCE "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
+                        IFACE bsp_iface CONSUMER shell)
+add_dependencies(shell f746_nn_core_audit_check)
 
 add_custom_command(TARGET shell POST_BUILD
     COMMAND "${Python3_EXECUTABLE}"

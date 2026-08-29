@@ -207,6 +207,42 @@ struct nn_svc_info {
 
 /* ---- operations ---------------------------------------------------------- */
 
+/**
+ * Has the operator asked to stop?
+ *
+ * An operation that waits needs to notice Ctrl+C, and the thing that knows is a
+ * shell instance -- which must not cross into a board's port.  So the command
+ * passes this instead: a plain function and an opaque context, neither of which
+ * says anything about a shell.  A board calls it while it waits and gives up
+ * with NN_SVC_ERR_CANCEL when it returns non-zero.
+ *
+ * [!] IT MAY BE NULL, and a board must cope: a caller with nothing to cancel on
+ * (a test, or a path that cannot be interrupted) passes none, and "no cancel
+ * function" means "never cancelled", never a crash.
+ */
+typedef int (*nn_svc_cancel_fn)(void *ctx);
+
+/**
+ * Read a whole file into a buffer.
+ *
+ * A board whose model source is a filesystem path needs one of these, and the
+ * filesystem helper that has it takes a shell instance and prints its own
+ * errors -- so it cannot be called from a port.  The same shape as the cancel
+ * hook solves it: the board's own SHELL-layer file implements the read, the
+ * shared command passes it down, and the port sees only a function pointer.
+ * Nothing in a port ever names anything above it.
+ *
+ * @return 0 with @p len set, non-zero on failure (a message has been printed)
+ */
+typedef int (*nn_svc_read_fn)(void *ctx, const char *path, void *buf,
+                              uint32_t cap, uint32_t *len);
+
+/** Convenience for a board: true when @p fn says stop.  NULL never stops. */
+static inline int nn_svc_cancelled(nn_svc_cancel_fn fn, void *ctx)
+{
+	return (fn != NULL) && (fn(ctx) != 0);
+}
+
 /** Backend, model and arena, for `nn info`.  Never fails on a board that has an
  *  adapter at all; a board with no model loaded still answers. */
 void nn_svc_info(struct nn_svc_info *out);
@@ -225,7 +261,8 @@ const char *nn_svc_strerror(int status);
  *
  * @param state  where the lifecycle ended up, independent of the status
  */
-void nn_svc_model_load(const struct nn_spec *spec, struct nn_op_result *res,
+void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
+                       void *ctx, struct nn_op_result *res,
                        enum nn_model_state *state);
 
 /** Release the model-specific persistent resources, in model -> NPU -> lease
@@ -249,6 +286,7 @@ int nn_svc_input(struct tensor_desc *out);
  * @param dets  optional; up to @p max boxes, normalised to the MODEL INPUT
  */
 void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
+                     nn_svc_cancel_fn cancel, void *ctx,
                      struct nn_op_result *res);
 
 /**
@@ -283,7 +321,8 @@ void nn_svc_bench_prepare(struct nn_op_result *res);
  *            in DWT cycles, ThreadX ticks and a free-running vendor timer
  *            respectively, and only they know which
  */
-void nn_svc_bench_run(uint32_t iters, uint64_t *us, struct nn_op_result *res);
+void nn_svc_bench_run(uint32_t iters, uint64_t *us, nn_svc_cancel_fn cancel,
+                      void *ctx, struct nn_op_result *res);
 
 /** Float input normalisation: 0 = [0,1], 1 = [-1,1].  Meaningless where the
  *  input is integer, which is why it is a capability and not a stub. */

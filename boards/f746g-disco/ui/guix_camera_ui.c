@@ -706,7 +706,7 @@ static void cycle_resolution(void)
 
 	if (camera_other_subscribers_attached(&guix_cam_sink)) {
 		LOG_WRN("resolution change blocked: other subscribers attached "
-		        "(stop net mjpeg / ai stream first)");
+		        "(stop net mjpeg / nn stream first)");
 		return;
 	}
 	was_streaming = camera_streaming() != 0;

@@ -55,7 +55,7 @@ static int          band_colorbar;
  *
  * [!] WITHOUT THIS, TWO COLD STARTS RACE, and the consequence is the exact corruption
  * the drain exists to prevent.  Both consoles can issue a command at once (USB CDC
- * and telnet), so `camera preview on` and `ai stream start` can both observe
+ * and telnet), so `camera preview on` and `nn stream start` can both observe
  * "no stream running", both publish their claim -- claims are published BEFORE the
  * stream starts, so that the very first band cannot be dropped -- and both call
  * camera_band_start().  The camera accepts one and returns CAM_ERR_BUSY to the other,

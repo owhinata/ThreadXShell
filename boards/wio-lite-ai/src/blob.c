@@ -68,7 +68,7 @@
  * included, since both start one 4 KB sector in.  A version-1 header written under
  * the old geometry therefore decodes perfectly under the new one, and the old
  * `length` still passes the (now larger) BLOB_PAYLOAD_MAX bound, so `blob list`
- * would show it as valid, `blob verify` would pass, and `ai model load` would load
+ * would show it as valid, `blob verify` would pass, and `nn model load` would load
  * it -- under a DIFFERENT SLOT NUMBER (old slot 2 appears as new slot 1, and the old
  * odd slots vanish into the middle of a new slot's payload).
  *

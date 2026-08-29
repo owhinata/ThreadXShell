@@ -83,7 +83,7 @@ int cam_band_claim(enum cam_band_client c, int colorbar, cam_band_client_fn fn);
  * The drain waits for an in-flight callback to return; if it does not (a producer
  * killed mid-callback), the client's buffers may still be written.  For the NN that
  * means the model session and the OCTOSPI1 guard stay held -- handing the arena to
- * `ai bench` while a dead-but-not-returned callback can still write the input tensor
+ * `nn bench` while a dead-but-not-returned callback can still write the input tensor
  * is not recoverable, whereas holding a session nobody can use is.
  */
 int cam_band_release(enum cam_band_client c);
@@ -97,7 +97,7 @@ int cam_band_any_claimed(void);
 /**
  * Has the stream died underneath its claimants?  Evaluated lazily by whoever asks --
  * no polling thread exists, and none is needed: the reporting surfaces
- * (`ai stream stats`, `camera info`) and the NN worker's bounded semaphore wait all
+ * (`nn stream stats`, `camera info`) and the NN worker's bounded semaphore wait all
  * come through here.  Sticky until the last client releases or a claim re-arms.
  */
 int cam_band_stream_lost(void);

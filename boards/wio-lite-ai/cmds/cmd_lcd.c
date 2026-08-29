@@ -314,7 +314,7 @@ static int cmd_lcd_on(struct cli_instance *sh, int argc, char **argv)
 	   That is what lets the preview exist at all (owhinata/wio-lite-ai#8 phase 3c). */
 	if (!psram_acquire_shared()) {
 		cli_error(sh, "lcd: OCTOSPI1 busy (a psram/membench command or "
-		              "`ai stream` holds it)\r\n");
+		              "`nn stream` holds it)\r\n");
 		return 1;
 	}
 	rc = ltdc_set_scanout(true);
@@ -365,7 +365,7 @@ static int cmd_lcd_reset(struct cli_instance *sh, int argc, char **argv)
 	}
 	if (!psram_acquire_shared()) {
 		cli_error(sh, "lcd: OCTOSPI1 busy (a psram/membench command or "
-		              "`ai stream` holds it)\r\n");
+		              "`nn stream` holds it)\r\n");
 		return 1;
 	}
 	cli_print(sh, "lcd: resetting the panel (~0.3 s)...\r\n");

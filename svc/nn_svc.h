@@ -269,8 +269,35 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
  *  order.  Idempotent: unloading nothing succeeds. */
 void nn_svc_model_unload(struct nn_op_result *res);
 
+/**
+ * Pin the active model so the DATA pointers in its descriptors stay valid.
+ *
+ * [!] A DESCRIPTOR IS SAFE TO READ UNGUARDED; ITS BUFFER IS NOT.  Shape, dtype,
+ * scale and length are copied out and cannot be invalidated underneath a reader.
+ * The `data` pointer is different: it addresses the arena, and an unload on
+ * another console can close the interpreter, hand back the NOR lease, or rebuild
+ * the model singleton while a reader is part way through it.  Both boards that
+ * had an equivalent command already knew this -- one guarded its whole tensor
+ * report, the other guarded the read loop and deliberately left `info`
+ * unguarded because `info` never dereferences the buffer.
+ *
+ * So: anything that walks tensor CONTENTS holds this across the walk.  Anything
+ * that only prints the descriptor does not need it, and taking it there would
+ * make `nn info` refuse while a stream runs -- which is exactly the diagnostic
+ * an operator wants at that moment.
+ *
+ * Not recursive: no operation here takes it twice, and none of the board
+ * operations may be called while it is held.
+ *
+ * @return NN_SVC_OK, or a status if the model is gone or the claim is held
+ */
+int  nn_svc_tensors_pin(void);
+void nn_svc_tensors_unpin(void);
+
 /** Tensors, as the shared command sees them.  Valid only while a model is
- *  active.  @return the count, or a negative status. */
+ *  active.  The descriptor is a copy and may be read unguarded; dereferencing
+ *  its @ref tensor_desc::data requires nn_svc_tensors_pin().
+ *  @return the count, or a negative status. */
 int nn_svc_output_count(void);
 int nn_svc_output(unsigned index, struct tensor_desc *out);
 int nn_svc_input(struct tensor_desc *out);

@@ -413,6 +413,22 @@ void nn_svc_model_unload(struct nn_op_result *res)
 
 /* ---- tensors ------------------------------------------------------------- */
 
+int nn_svc_tensors_pin(void)
+{
+	if (!nn_try_acquire())
+		return NN_SVC_ERR_BUSY;
+	if (!nn_open_done) {
+		nn_release();
+		return NN_SVC_ERR_STATE;
+	}
+	return NN_SVC_OK;
+}
+
+void nn_svc_tensors_unpin(void)
+{
+	nn_release();
+}
+
 int nn_svc_output_count(void)
 {
 	if (!nn_open_done)

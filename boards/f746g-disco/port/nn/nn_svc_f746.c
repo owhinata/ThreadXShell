@@ -245,6 +245,22 @@ void nn_svc_model_unload(struct nn_op_result *res)
 
 /* ---- tensors ------------------------------------------------------------- */
 
+int nn_svc_tensors_pin(void)
+{
+	struct nn_model *m = NULL;
+
+	if (nn_model_open(&m) != 0 || m == NULL)
+		return NN_SVC_ERR_STATE;
+	if (nn_session_try_acquire() != 0)
+		return NN_SVC_ERR_BUSY;
+	return NN_SVC_OK;
+}
+
+void nn_svc_tensors_unpin(void)
+{
+	nn_session_release();
+}
+
 int nn_svc_output_count(void)
 {
 	struct nn_model *m = NULL;

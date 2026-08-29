@@ -352,6 +352,23 @@ void nn_svc_model_unload(struct nn_op_result *res)
 
 /* ---- tensors ------------------------------------------------------------- */
 
+int nn_svc_tensors_pin(void)
+{
+	struct nn_model *m = NULL;
+
+	if (nn_model_open(&m) != 0 || m == NULL)
+		return NN_SVC_ERR_STATE;
+	/* [!] BOTH guards: reading tensor bodies walks the arena, and the arena is
+	 * in the PSRAM behind OCTOSPI1 -- the same reason `nn bench` and `nn dets`
+	 * are guarded here and `nn info` is not. */
+	return nn_guards_take();
+}
+
+void nn_svc_tensors_unpin(void)
+{
+	nn_guards_give();
+}
+
 int nn_svc_output_count(void)
 {
 	struct nn_model *m = NULL;

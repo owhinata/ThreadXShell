@@ -71,6 +71,9 @@
 #ifndef NN_SVC_HAS_PREVIEW
 #define NN_SVC_HAS_PREVIEW     0
 #endif
+#ifndef NN_SVC_HAS_MODEL_PATH
+#define NN_SVC_HAS_MODEL_PATH  0
+#endif
 
 #if NN_SVC_HAS_STREAM
 /** The board's own `nn stream` set: a worker's lifecycle is not a formatting
@@ -82,10 +85,28 @@ extern const struct cli_cmd nn_board_stream_subcmds[];
 /** The board's own `nn preview`, likewise. */
 int nn_board_preview(struct cli_instance *sh, int argc, char **argv);
 #endif
+#if NN_SVC_HAS_MODEL_PATH
+/** The board's own whole-file read, for the `--path` source.  It lives in the
+ *  board's cmds/ because the filesystem helper it uses takes a shell instance;
+ *  passing it DOWN is what keeps the port from reaching up for it. */
+int nn_board_read_file(void *ctx, const char *path, void *buf, uint32_t cap,
+                       uint32_t *len);
+#endif
 
 /* Longest shape string worth carrying: four dimensions of up to ten digits, the
    separators, and the terminator. */
 #define NN_SHAPE_MAX 48
+
+/*
+ * The cancellation hook a board waits on.
+ *
+ * The board must not see a shell instance, so it gets a plain function and an
+ * opaque context.  This is the only place the two are connected.
+ */
+static int nn_cancel_shim(void *ctx)
+{
+	return cli_cancel_requested((struct cli_instance *)ctx) ? 1 : 0;
+}
 
 /* ---- saying what happened ------------------------------------------------ */
 
@@ -233,7 +254,11 @@ static int cmd_nn_model_load(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	memset(&res, 0, sizeof res);
-	nn_svc_model_load(&spec, &res, &state);
+#if NN_SVC_HAS_MODEL_PATH
+	nn_svc_model_load(&spec, nn_board_read_file, sh, &res, &state);
+#else
+	nn_svc_model_load(&spec, NULL, NULL, &res, &state);
+#endif
 
 	/*
 	 * [!] THE RESULTING MODEL STATE IS ITS OWN ANSWER.  A refused load
@@ -304,7 +329,7 @@ static int cmd_nn_bench(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	memset(&res, 0, sizeof res);
-	nn_svc_bench_run(iters, &us, &res);
+	nn_svc_bench_run(iters, &us, nn_cancel_shim, sh, &res);
 	if (res.status != NN_SVC_OK) {
 		nn_report(sh, "bench", &res);
 		return 1;
@@ -483,7 +508,7 @@ static int cmd_nn_run(struct cli_instance *sh, int argc, char **argv)
 	memset(dets, 0, sizeof dets);
 	memset(&res, 0, sizeof res);
 
-	nn_svc_run_once(&snap, dets, BF_MAX_DET, &res);
+	nn_svc_run_once(&snap, dets, BF_MAX_DET, nn_cancel_shim, sh, &res);
 	if (res.status != NN_SVC_OK) {
 		nn_report(sh, "run", &res);
 		return 1;

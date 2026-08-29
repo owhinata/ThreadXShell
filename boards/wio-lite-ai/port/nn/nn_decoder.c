@@ -76,7 +76,7 @@ static uint8_t nn_dtype_to_tensor(uint8_t dtype)
  * while every check it makes passes.  Rank 0 says "not representable" and every
  * shape test downstream fails on it.
  */
-static void nn_desc_from_tensor(struct tensor_desc *d, const struct nn_tensor *t)
+void nn_decoder_desc(struct tensor_desc *d, const struct nn_tensor *t)
 {
 	memset(d, 0, sizeof(*d));
 	d->data  = t->data;
@@ -122,7 +122,7 @@ int nn_decoder_run(struct nn_model *m, struct bf_det *out, int max,
 			memset(&desc[i], 0, sizeof desc[i]);
 			continue;
 		}
-		nn_desc_from_tensor(&desc[i], t);
+		nn_decoder_desc(&desc[i], t);
 	}
 	return blazeface_decode(&nn_dec, desc, (unsigned)n_out, out, max, res);
 

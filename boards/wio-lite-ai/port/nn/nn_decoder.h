@@ -65,6 +65,15 @@ int nn_decoder_run(struct nn_model *m, struct bf_det *out, int max,
  * used is reported back in @ref bf_result -- which is why `ai thresh` takes no
  * guard and tuning against a live stream still works.
  */
+/**
+ * @brief  Translate one native descriptor into the neutral one (issue #97).
+ *
+ * Public because the nn_svc adapter (issue #50) needs the same translation to
+ * publish tensors to the shared command, and a second copy of it is exactly the
+ * duplication issue #97 removed.
+ */
+void nn_decoder_desc(struct tensor_desc *d, const struct nn_tensor *t);
+
 int      nn_decoder_set_thresh_milli(unsigned milli);
 unsigned nn_decoder_get_thresh_milli(void);
 

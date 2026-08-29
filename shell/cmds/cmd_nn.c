@@ -191,8 +191,11 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 	memset(&info, 0, sizeof info);
 	nn_svc_info(&info);
 
-	cli_print(sh, "backend : %s\r\n",
-	          info.backend[0] ? info.backend : "-");
+	if (info.version[0])
+		cli_print(sh, "backend : %s (%s)\r\n", info.backend, info.version);
+	else
+		cli_print(sh, "backend : %s\r\n",
+		          info.backend[0] ? info.backend : "-");
 	cli_print(sh, "model   : %s\r\n",
 	          info.model_active ? (info.model[0] ? info.model : "(unnamed)")
 	                            : "(none)");
@@ -348,9 +351,14 @@ static int cmd_nn_bench(struct cli_instance *sh, int argc, char **argv)
 	 * average on its own hides it.
 	 */
 	cli_print(sh, "runs    : %lu\r\n", (unsigned long)st.runs);
-	cli_print(sh, "latency : min %lu  avg %lu  max %lu us\r\n",
-	          (unsigned long)st.min_us, (unsigned long)st.avg_us,
-	          (unsigned long)st.max_us);
+	if (st.clock_mhz)
+		cli_print(sh, "latency : min %lu  avg %lu  max %lu us  (@%lu MHz)\r\n",
+		          (unsigned long)st.min_us, (unsigned long)st.avg_us,
+		          (unsigned long)st.max_us, (unsigned long)st.clock_mhz);
+	else
+		cli_print(sh, "latency : min %lu  avg %lu  max %lu us\r\n",
+		          (unsigned long)st.min_us, (unsigned long)st.avg_us,
+		          (unsigned long)st.max_us);
 	cli_print(sh, "total   : %lu.%03lu ms\r\n",
 	          (unsigned long)(st.total_us / 1000u),
 	          (unsigned long)(st.total_us % 1000u));

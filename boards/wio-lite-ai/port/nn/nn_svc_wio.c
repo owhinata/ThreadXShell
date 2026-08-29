@@ -139,6 +139,7 @@ void nn_svc_info(struct nn_svc_info *out)
 
 	memset(out, 0, sizeof *out);
 	nn_svc_str(out->backend, sizeof out->backend, bi ? bi->name : NULL);
+	nn_svc_str(out->version, sizeof out->version, bi ? bi->version : NULL);
 
 	if (nn_model_open(&m) != 0 || m == NULL)
 		return;
@@ -618,6 +619,8 @@ void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
 		out->min_us = 0u;
 	else
 		out->avg_us = (uint32_t)(out->total_us / out->runs);
+	/* Say what the cycle -> microsecond conversion assumed. */
+	out->clock_mhz = SystemCoreClock / 1000000u;
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
 

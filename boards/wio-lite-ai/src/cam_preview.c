@@ -318,7 +318,7 @@ int cam_preview_enable(int on, int colorbar)
 	   test` could switch a running preview to the colour bars -- the test-pattern
 	   bit lives in the sensor's COM7 and only a restart rewrites it.  With the
 	   stream now shared, a restart is no longer ours alone to do: it would tear the
-	   stream out from under a running `ai stream`.  So restart only when the
+	   stream out from under a running `nn stream`.  So restart only when the
 	   setting actually changes, and refuse when somebody else is on the stream. */
 	if (camera_band_streaming() && colorbar != cam_band_colorbar()) {
 		if (cam_band_claimed(CAM_BAND_NN))

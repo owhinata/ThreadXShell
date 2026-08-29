@@ -47,14 +47,14 @@
 #include <cstdlib>
 #include <new>
 
-/* See nn_tflm_priv.h: this is evidence for `ai info`, not a statistic. */
+/* See nn_tflm_priv.h: this is evidence for `nn info`, not a statistic. */
 extern "C" volatile uint32_t nn_tflm_cxx_new_calls;
 volatile uint32_t nn_tflm_cxx_new_calls = 0u;
 
 /*
  * Routed to malloc rather than returning nullptr: with TF_LITE_STATIC_MEMORY nothing
  * should reach these at all, and if something does, the useful outcome is that it
- * works while `ai info` reports a non-zero counter.  The counter is the claim; the
+ * works while `nn info` reports a non-zero counter.  The counter is the claim; the
  * allocator behind it is a fallback.
  *
  * These deliberately do NOT run the new_handler loop the standard describes.  There is

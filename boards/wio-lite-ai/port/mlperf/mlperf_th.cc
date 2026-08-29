@@ -400,7 +400,7 @@ void th_timestamp_initialize(void)
 void th_final_initialize(void)
 {
 	/* Upstream's reference builds its interpreter here.  Ours was built by
-	 * `ai model load` long before the monitor started, which is the whole reason one
+	 * `nn model load` long before the monitor started, which is the whole reason one
 	 * firmware can run every benchmark. */
 }
 
@@ -545,7 +545,7 @@ void th_load_tensor(void)
  * svc/fmt.c implements no %f and no precision flag -- a deliberate, load-bearing
  * property of this firmware's printf, not a gap to work around by pulling in newlib's
  * float formatter (which would also put an unbounded frame on a 4,096 B stack).  The
- * same idiom is used for quantization scales in shell/cmds/cmd_ai.c and for fps in
+ * same idiom is used for quantization scales in shell/cmds/cmd_nn.c and for fps in
  * the camera commands.
  *
  * Saturating rather than wrapping: the protocol wants a number the host's float()

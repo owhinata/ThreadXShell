@@ -14,10 +14,10 @@
  * and runs it XIP via the ST host loader (ai_reloc_network.c) + the legacy
  * ai_rel_network_* API.  Same "SD swap, no reflash" capability the tflm backend
  * has (owhinata/stm32f746g-disco#89 P2), but on the X-CUBE-AI runtime -- so it plugs into the same
- * nn vtable load_region()/reload() path and cmd_ai's `ai model load`.
+ * nn vtable load_region()/reload() path and cmd_nn's `nn model load`.
  *
  * SD-only: there is NO built-in model.  open() returns an empty handle (0 in/out);
- * `ai model load <bin>` installs a model; `ai model builtin` unloads it.
+ * `nn model load --path <bin>` installs a model; `nn model load builtin` unloads it.
  *
  * Memory (all in .sdram.ai / .sdram.ai.model, FMC bank3):
  *   - g_model_slot[2]  (.sdram.ai.model, bank3 UPPER half -> bsp.c MPU region2 makes
@@ -385,7 +385,7 @@ static int reloc_bk_init(void)
 
 static int reloc_bk_open(void **impl_out)
 {
-	/* SD-only: start empty.  A model appears only after `ai model load`. */
+	/* SD-only: start empty.  A model appears only after `nn model load`. */
 	g_reloc.hdl   = AI_HANDLE_NULL;
 	g_reloc.slot  = -1;
 	g_reloc.n_in  = 0;

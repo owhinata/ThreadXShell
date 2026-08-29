@@ -83,7 +83,7 @@ uint32_t nn_det_record_gen(const struct nn_det_record *r);
  * @param gen  what @ref nn_det_record_gen returned when this frame was ARMED
  *
  * @return non-zero if it was taken.  A caller must not count a decode that was
- *         dropped: `ai run` waits on the inference counter and then reads the
+ *         dropped: `nn run` waits on the inference counter and then reads the
  *         record, so a counter bumped for a publish that did not happen hands it
  *         the previous frame's boxes as this one's.
  *

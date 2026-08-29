@@ -25,7 +25,7 @@
  *     No free stage -> drop (FRAME_POLICY_DROP).
  *   - Worker priority 18 (below BG-17/CLI-16/GUIX-14/net-12/camera-10): fully
  *     best-effort, so inference never starves the DCMI ring, UI, net, or the CLI
- *     that must deliver `ai stream stop`.  Inference is monolithic (no mid-run
+ *     that must deliver `nn stream stop`.  Inference is monolithic (no mid-run
  *     yield), so a lower-than-CLI priority is what guarantees stop reaches us.
  */
 #include <string.h>          /* memcpy */
@@ -58,7 +58,7 @@
 /* Float32 input normalization.  BlazeFace's model card says [-1,1], but its ST
  * config says rescale 1/255 -> [0,1] -- and [0,1] is what actually detects faces
  * on hardware (maxscore 288 vs 11), so ST retrained with [0,1].  Default [0,1];
- * `ai norm 1` flips to [-1,1] at runtime for other models. */
+ * `nn norm 1` flips to [-1,1] at runtime for other models. */
 #ifndef NNCAM_NORM_SIGNED
 #define NNCAM_NORM_SIGNED 0
 #endif
@@ -95,7 +95,7 @@ static TX_SEMAPHORE nncam_sem;            /* consume posts a READY stage        
 static struct frame_sink nncam_sink;
 static struct nn_model  *nncam_model;
 
-/* enabled intent (ai stream start=1, stop=0) */
+/* enabled intent (nn stream start=1, stop=0) */
 static volatile int nncam_run;
 /* worker is in the run loop (set by worker) */
 static volatile int nncam_active;
@@ -106,7 +106,7 @@ static volatile int nncam_holds_session;
 /* worker/objects created once */
 static int          nncam_created;
 
-/* The `ai stream` lifecycle (issue #72), serialised by cam_own.h.  It guards the
+/* The `nn stream` lifecycle (issue #72), serialised by cam_own.h.  It guards the
  * SINK: which entry points may subscribe it, and the interval in which a stop
  * has detached it and is watching its pins fall to zero.  The three volatile
  * flags above stay, and describe something else -- the worker and the nn session,
@@ -140,7 +140,7 @@ static uint32_t     nncam_gen_drops;
 static volatile uint32_t nncam_epoch;
 
 /* Release the nn session iff the AI subscriber still holds it (exactly once per
- * `ai stream` lifetime; called only from nn_camera_stop()).  A base detach (close)
+ * `nn stream` lifetime; called only from nn_camera_stop()).  A base detach (close)
  * NEVER releases -- the session owner is the AI enabled intent (contract
  * owhinata/stm32f746g-disco#100.4). */
 static void nncam_release_session(void)
@@ -170,7 +170,7 @@ static uint8_t  nncam_in_dtype;   /* enum nn_dtype of the model input */
  */
 static struct nn_det_record nncam_rec;
 
-/* Float32 input normalization, runtime-tunable (ai norm) to settle the [-1,1] vs
+/* Float32 input normalization, runtime-tunable (`nn norm`) to settle the [-1,1] vs
  * [0,1] ambiguity on hardware without reflashing. */
 static int nncam_norm_signed = NNCAM_NORM_SIGNED;
 
@@ -329,7 +329,7 @@ static int nncam_consume(void *ctx, const struct frame_desc *f)
 
 /* Base detached this subscriber (base capture stopped / DCMI overrun / cascade).
  * A PAUSE, not a stop (contract owhinata/stm32f746g-disco#100.2/.4): keep the AI enabled
- * (nncam_run) and the nn session held -- the session owner is the `ai stream` intent,
+ * (nncam_run) and the nn session held -- the session owner is the `nn stream` intent,
  * released only by nn_camera_stop().  Bump the epoch so an in-flight ingest reverts, drop
  * any pending (non-RUNNING) staged frame so a stale frame is not inferred after a
  * later re-attach, and wake the worker to re-evaluate.  Non-blocking and no camera
@@ -451,14 +451,14 @@ static void nncam_entry(ULONG arg)
 		/* [!] THE SESSION GOES BACK BEFORE WE ANNOUNCE THAT WE PARKED, and the
 		 * order is the correctness (issue #72).  nncam_active = 0 is what a stop
 		 * waits on; the moment it is visible the stop may release the session,
-		 * commit the lifecycle to IDLE and let a NEW `ai stream start` acquire a
+		 * commit the lifecycle to IDLE and let a NEW `nn stream start` acquire a
 		 * fresh session -- and if this release were still to come, it would then
 		 * hand back the new stream's session, because the holds flag it reads is
 		 * the one that start has just set.  Releasing first makes that
 		 * impossible: after this line we own nothing a later start could be
 		 * given.
 		 *
-		 * The run loop exits only on nncam_run=0 (an `ai stream stop`) -- a base
+		 * The run loop exits only on nncam_run=0 (an `nn stream stop`) -- a base
 		 * detach is a pause that keeps run=1.  Releasing here is what frees the
 		 * session even when nn_camera_stop() timed out mid-nn_run() (idempotent
 		 * with nn_camera_stop's own release via the holds flag). */
@@ -466,7 +466,7 @@ static void nncam_entry(ULONG arg)
 		nncam_active = 0;                   /* parked; nn_camera_stop() waits on this */
 		/* And finish the lifecycle if a stop gave up waiting for us: it committed
 		 * SETTLING and returned -2, so this parking is the event that lets a later
-		 * `ai stream start` back in (issue #72).  A no-op in every other state --
+		 * `nn stream start` back in (issue #72).  A no-op in every other state --
 		 * a stop still inside its own drain commits its own result, and must not
 		 * have it overwritten from here. */
 		cam_own_settle(&nncam_own);
@@ -482,8 +482,8 @@ static int nncam_open_model(void)
 
 	if (nn_model_open(&nncam_model) != 0)
 		return -3;
-	/* No model loaded (e.g. the stedgeai_reloc backend before `ai model load`): the
-	 * single choke point that rejects `ai run`/`ai stream` cleanly. */
+	/* No model loaded (e.g. the stedgeai_reloc backend before `nn model load`): the
+	 * single choke point that rejects `nn run`/`nn stream` cleanly. */
 	if (nn_input_count(nncam_model) == 0)
 		return -3;
 	in = nn_input(nncam_model, 0);
@@ -565,7 +565,7 @@ int nn_camera_start(enum camera_res res)
 	/* input adapts to the base geometry (owhinata/stm32f746g-disco#100) */
 	(void)res;
 	/* Claim the lifecycle first (issue #72).  Everything below happens inside
-	   CAM_OWN_STARTING, so a concurrent `ai stream stop` is refused rather than
+	   CAM_OWN_STARTING, so a concurrent `nn stream stop` is refused rather than
 	   interleaved -- a stop that ran a whole teardown between this claim and the
 	   subscribe below would leave both commands reporting success. */
 	act = cam_own_start_take(&nncam_own);
@@ -591,9 +591,9 @@ int nn_camera_start(enum camera_res res)
 		return -5;
 	}
 
-	/* Claim the single inference session first: refused (-6) if `ai bench` or a
+	/* Claim the single inference session first: refused (-6) if `nn bench` or a
 	 * stream is using the non-reentrant singleton model.  The session owner is this
-	 * `ai stream` enable; it is released only by nn_camera_stop() / the worker's
+	 * `nn stream` enable; it is released only by nn_camera_stop() / the worker's
 	 * run-loop exit, NEVER by a base detach (contract owhinata/stm32f746g-disco#100.4). */
 	if (nn_session_try_acquire() != 0) {
 		cam_own_start_finish(&nncam_own, 0);
@@ -655,7 +655,7 @@ int nn_camera_stop(void)
 	}
 
 	/* [!] The ORDER is the fix (issue #72): CAM_OWN_DRAINING was entered above,
-	 * BEFORE this unsubscribe, so no `ai stream start` can re-subscribe the sink
+	 * BEFORE this unsubscribe, so no `nn stream start` can re-subscribe the sink
 	 * while its pins are being watched -- frame_pipeline_attach() resets exactly
 	 * the count the drain below reads.  Everything from here to the commit runs
 	 * with the lifecycle held but NO serialiser held: these waits sleep, and one
@@ -747,7 +747,7 @@ int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
 	/*
 	 * [!] ONE LOCK FOR BOTH.  The boxes and the diagnostics that describe them
 	 * are published together and have to be read together: taking them in two
-	 * calls lets a frame land in between, and `ai stream stats` -- which does not
+	 * calls lets a frame land in between, and `nn stream stats` -- which does not
 	 * decode anything itself -- would print this frame's boxes beside another
 	 * frame's peak score with nothing to show they disagree (issue #97).
 	 */

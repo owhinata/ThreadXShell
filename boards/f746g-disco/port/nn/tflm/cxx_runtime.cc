@@ -42,8 +42,16 @@ volatile uint32_t g_tflm_cxx_new_calls = 0;
  * (which would drag in __cxa_throw / _Unwind_* / std::bad_alloc type-info even under
  * -fno-exceptions).  We keep the standard (throwing) operator new signature and route
  * to newlib's malloc/free: with TF_LITE_STATIC_MEMORY the bump allocator means these
- * are never hit at runtime, and g_tflm_cxx_new_calls (asserted == 0 by `ai selftest`)
- * proves it -- but if new IS ever reached the shell degrades gracefully instead of
+ * are never hit at runtime, and g_tflm_cxx_new_calls counts any that were.
+ *
+ * [!] NOTHING IN THE FIRMWARE READS THAT COUNTER.  This used to say an
+ * `ai selftest` asserted it to zero; no such command exists, under that name or
+ * the `nn` one that replaced it, and none ever did here.  It is `volatile` and
+ * exported so a debugger or `devmem` can read it, which is the whole of its use
+ * -- said plainly rather than left as a promise of a check that never runs
+ * (issue #100).
+ *
+ * If new IS ever reached the shell degrades gracefully instead of
  * hanging.  (Routing to malloc, not returning null, also avoids -Wnew-returns-null.) */
 void *operator new(std::size_t n)   { g_tflm_cxx_new_calls++; return malloc(n); }
 void *operator new[](std::size_t n) { g_tflm_cxx_new_calls++; return malloc(n); }

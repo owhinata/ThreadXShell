@@ -94,7 +94,7 @@ struct tflm_model {
 tflm_model g_tm;
 char g_model_name[64];
 
-/* The active flatbuffer + its length (for `ai model` display).  Defaults to the
+/* The active flatbuffer + its length (for `nn model` display).  Defaults to the
  * built-in BlazeFace model; redirected to an SD slot by reload(). */
 const void *g_active_model = g_blazeface_model_data;
 uint32_t    g_active_len;                    /* lazily set to the built-in size */
@@ -128,7 +128,7 @@ void fill_tensor(struct nn_tensor *nt, const TfLiteTensor *tt)
 	nt->zero_point = tt->params.zero_point;
 }
 
-/* Copy a model display name into g_model_name (backend-owned, so `ai info` never
+/* Copy a model display name into g_model_name (backend-owned, so `nn info` never
  * holds a dangling pointer into argv/path).  slot<0 => the built-in name; else
  * "sd:<name>". */
 void set_model_name(const char *name, int slot)
@@ -381,7 +381,7 @@ static struct nn_tensor *tflm_bk_output(void *impl, int idx)
 	return (idx >= 0 && idx < m->n_out) ? &m->out[idx] : nullptr;
 }
 
-/* Report the arena TFLM actually planned (not the 512 KB reservation), so `ai info`
+/* Report the arena TFLM actually planned (not the 512 KB reservation), so `nn info`
  * compares apples-to-apples with the stedgeai backend's ACTIVATIONS_SIZE. */
 static uint32_t tflm_bk_acts_bytes(void *impl) { return ((struct tflm_model *)impl)->used; }
 

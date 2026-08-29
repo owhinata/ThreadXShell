@@ -36,12 +36,12 @@
  * Step 5 is the one the board cannot do well.  TFLM's AllocateTensors() returns a
  * single kTfLiteError for "an operator is missing" and "the activations do not fit",
  * and with TF_LITE_STRIP_ERROR_STRINGS there is no message to tell them apart -- so
- * `ai model load` has to report both possibilities and let you guess.  Here the
+ * `nn model load` has to report both possibilities and let you guess.  Here the
  * missing operator is named.  The list comes from port/nn/tflm/nn_tflm_ops.h, the same
  * header the firmware registers from, so the two cannot drift apart.
  *
  * It also prints the CRC-32/ISO-HDLC of the file, which is what `blob list` and
- * `ai model load` display, so the "is this the file I sent?" question is answered by
+ * `nn model load` display, so the "is this the file I sent?" question is answered by
  * the same command.
  *
  * Build + run:  cmake --build build-tflm --target verify-model
@@ -167,7 +167,7 @@ int main(int argc, char **argv)
 	const uint32_t len = (uint32_t)buf.size();
 	printf("file    : %s\n", argv[1]);
 	printf("size    : %u B\n", len);
-	printf("crc32   : %08X   (compare with `blob list` / `ai model load`)\n",
+	printf("crc32   : %08X   (compare with `blob list` / `nn model load`)\n",
 	       crc32_iso_hdlc(buf.data(), buf.size()));
 
 	/* 1. length ---------------------------------------------------------- */
@@ -275,7 +275,7 @@ int main(int argc, char **argv)
 	 */
 	printf("RESULT  : PASS -- structurally valid, schema version %d, and no unregistered\n"
 	       "          builtin operators.  Remaining checks happen on the board when\n"
-	       "          `ai model load` calls AllocateTensors(): operator versions, each\n"
+	       "          `nn model load` calls AllocateTensors(): operator versions, each\n"
 	       "          kernel's shape/type constraints, and whether the activations fit\n"
 	       "          the arena.\n", TFLITE_SCHEMA_VERSION);
 	return 0;

@@ -23,12 +23,12 @@
  * So open() succeeds with NO MODEL: zero inputs, zero outputs, the name "(none)".
  * Three things fall out of that, all of them wanted:
  *
- *   - `ai info` works on a board that has never been given a model, and reports the
+ *   - `nn info` works on a board that has never been given a model, and reports the
  *     backend honestly instead of failing to open.
  *   - The nn_backend_vt contract that open() must not touch tensor bodies -- because
- *     `ai info` is called with the PSRAM down -- is satisfied structurally rather than
+ *     `nn info` is called with the PSRAM down -- is satisfied structurally rather than
  *     by being careful: with no model there are no tensors to touch, and the arena is
- *     first written by AllocateTensors() inside `ai model load`, which does take the
+ *     first written by AllocateTensors() inside `nn model load`, which does take the
  *     PSRAM guard.
  *   - reload(NULL, ...) is an UNLOAD rather than a revert, which is the only meaning
  *     it can have with nothing built in.
@@ -135,7 +135,7 @@ void fill_tensor(struct nn_tensor *nt, const TfLiteTensor *tt)
 }
 
 /* Copy a display name into backend-owned storage.  nullptr / "" means no model, and
- * the name is owned here rather than borrowed so `ai info` can never end up printing
+ * the name is owned here rather than borrowed so `nn info` can never end up printing
  * through a pointer into a command's argv. */
 void set_model_name(const char *name)
 {
@@ -312,7 +312,7 @@ int build_interp(const void *data, uint32_t len)
 	/*
 	 * Publish counts-last, and zero them first.
 	 *
-	 * `ai info` reads these descriptors WITHOUT the NN session guard -- deliberately,
+	 * `nn info` reads these descriptors WITHOUT the NN session guard -- deliberately,
 	 * because nn_backend.h promises open() and the descriptor accessors work with the
 	 * PSRAM down, and making an inspector wait on a running benchmark would be a poor
 	 * trade.  So a second console can be walking g_tm while this runs.  Filling the
@@ -351,7 +351,7 @@ static int tflm_bk_init(void)
 }
 
 /* Opens with no model -- see the file header for why that is the normal state and not
- * a degraded one.  Touches no tensor body, so `ai info` works with the PSRAM down. */
+ * a degraded one.  Touches no tensor body, so `nn info` works with the PSRAM down. */
 static int tflm_bk_open(void **impl_out)
 {
 	if (!g_tm.open) {
@@ -530,8 +530,8 @@ static uint32_t tflm_bk_heap_allocs(void)
 }
 
 /* The version string carries the build's POSTURE, not just its identity.  Whether the
- * flatbuffer verifier is compiled in changes what a failed `ai model load` can mean, so
- * `ai info` should not require reading CMakeCache.txt to find out.  With it off, the
+ * flatbuffer verifier is compiled in changes what a failed `nn model load` can mean, so
+ * `nn info` should not require reading CMakeCache.txt to find out.  With it off, the
  * equivalent check lives on the PC (scripts/verify_tflite.cc) and someone has to have
  * run it -- which is exactly the kind of assumption worth printing. */
 #if defined(NN_TFLM_CMSIS_NN)

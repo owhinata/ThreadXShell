@@ -42,7 +42,7 @@ struct nn_backend_vt {
 
 	/** Open the singleton model; set *impl_out. 0 on success, <0 otherwise.
 	 *  MUST NOT touch tensor bodies -- only fill the struct nn_tensor descriptors.
-	 *  `ai info` calls this without bringing the PSRAM up, so a backend whose
+	 *  `nn info` calls this without bringing the PSRAM up, so a backend whose
 	 *  buffers live in external memory would fault or stall if open() dereferenced
 	 *  them. */
 	int  (*open)(void **impl_out);
@@ -92,7 +92,7 @@ struct nn_backend_vt {
 	 * How many times the backend's language runtime has allocated from the C heap.
 	 *
 	 * Exists for one claim: the TFLM backend is configured so that inference never
-	 * touches the heap, and `ai info` should be able to show that rather than assert
+	 * touches the heap, and `nn info` should be able to show that rather than assert
 	 * it.  A backend with no runtime of its own leaves this NULL.
 	 */
 	uint32_t (*heap_allocs)(void);

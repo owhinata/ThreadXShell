@@ -101,7 +101,7 @@ struct nn_tensor {
 /** Opaque model handle (defined in nn.c). */
 struct nn_model;
 
-/** Identity of the compiled-in backend, for `ai info`. */
+/** Identity of the compiled-in backend, for `nn info`. */
 struct nn_backend_info {
 	const char *name;      /**< "null" | "tflm"                               */
 	const char *version;   /**< backend/runtime version string, or ""         */
@@ -136,7 +136,7 @@ int  nn_output_count(const struct nn_model *m);
 struct nn_tensor *nn_input(struct nn_model *m, int idx);
 struct nn_tensor *nn_output(struct nn_model *m, int idx);
 
-/** Size of the activation arena (bytes), for `ai info`; 0 if unknown. */
+/** Size of the activation arena (bytes), for `nn info`; 0 if unknown. */
 uint32_t nn_activations_bytes(const struct nn_model *m);
 
 /**
@@ -167,12 +167,12 @@ uint32_t nn_last_cycles(const struct nn_model *m);
  *
  * Which model to load and where it comes from are NOT decided here.  This layer is
  * model-agnostic by design, and the answer on this board (a slot in the external NOR
- * blob region) belongs to the shell command that reads it -- see shell/cmds/cmd_ai.c.
+ * blob region) belongs to the shell command that reads it -- see shell/cmds/cmd_nn.c.
  * All this API says is: here is a buffer, fill it, tell me you did.
  *
  * THE CALLER MUST HOLD THE NN SESSION (nn_session_try_acquire) ACROSS BOTH CALLS.
  * Between them the staging buffer is being filled, and after them the model handle and
- * every tensor pointer in it have been replaced.  A second console running `ai bench`
+ * every tensor pointer in it have been replaced.  A second console running `nn bench`
  * in that window would be reading tensors out of a model that no longer exists.
  */
 
@@ -188,7 +188,7 @@ int nn_model_load_region(void **buf, uint32_t *cap);
 /**
  * Adopt the model now sitting in the staging buffer: @p len bytes at @p data, called
  * @p name for display.  @p data == NULL unloads, which leaves the backend open with no
- * model rather than closed (`ai info` still works, `ai bench` refuses).
+ * model rather than closed (`nn info` still works, `nn bench` refuses).
  *
  * TRANSACTIONAL.  A model the backend cannot build is reported without disturbing the
  * one already loaded, so a truncated file costs nothing but the message.  Returns 0,
@@ -203,7 +203,7 @@ int nn_model_reload(const void *data, uint32_t len, const char *name);
 const char *nn_model_strerror(int rc);
 
 /**
- * Heap allocations made by the backend's language runtime, for `ai info`.  Returns 0
+ * Heap allocations made by the backend's language runtime, for `nn info`.  Returns 0
  * and sets @p *out, or NN_ERR_NOSUP when the backend has no such runtime to count.
  *
  * The TFLM backend is built so this stays at 0 -- its interpreter allocates only from

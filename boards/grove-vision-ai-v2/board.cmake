@@ -392,7 +392,9 @@ set(SHELL_SOURCES
     "${BOARD_DIR}/cmds/cmd_lcd.c"
     "${BOARD_DIR}/cmds/cmd_mve.c"
     "${BOARD_DIR}/cmds/cmd_camera.c"
-    "${BOARD_DIR}/cmds/cmd_nn.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
+    "${BOARD_DIR}/cmds/cmd_nn_board.c"
     "${BOARD_DIR}/cmds/cmd_nor.c"
     "${BOARD_DIR}/cmds/cmd_blob.c"
     # YMODEM receive over the console (issue #92).  The protocol core is the
@@ -665,6 +667,7 @@ add_library(shell_objs OBJECT
     # nothing (see the storage gate below).
     "${GROVE_SHARED_DECODER}"
     "${BOARD_DIR}/port/npu/nn_decoder.c"
+    "${BOARD_DIR}/port/npu/nn_svc_grove.c"
     ${SHELL_SOURCES}
     ${SDK_SOURCES}
     ${TX_CORE} ${TX_ASM} ${TX_EPK})
@@ -873,12 +876,26 @@ foreach(_o3 IN LISTS GROVE_O3_SOURCES)
 endforeach()
 # --- the shared decoder must own no storage (issue #97) -----------------------
 #
-# See cmake/decoder_storage_gate.cmake for what this checks and why it has to be
+# See cmake/shared_storage_gate.cmake for what this checks and why it has to be
 # THIS board's compile rather than a generic one.
-include("${CMAKE_SOURCE_DIR}/cmake/decoder_storage_gate.cmake")
-add_decoder_storage_gate(NAME grove_decoder_audit SOURCE "${GROVE_SHARED_DECODER}"
+include("${CMAKE_SOURCE_DIR}/cmake/shared_storage_gate.cmake")
+add_shared_storage_gate(NAME grove_decoder_audit SOURCE "${GROVE_SHARED_DECODER}"
                          IFACE bsp_iface CONSUMER shell_objs)
 add_dependencies(shell grove_decoder_audit_check)
+
+# The same rule on the one shared `nn` command and its pure half (issue #50).
+# Same property, same failure mode: a static in either lands in memory no board
+# placed.  Audited with THIS board's compile for the reason above -- and here it
+# also decides which subcommands exist, because the capability macros come from
+# this board's nn_svc_config.h.
+add_shared_storage_gate(NAME grove_nn_cmd_audit
+                        SOURCE "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
+                        IFACE bsp_iface CONSUMER shell_objs)
+add_dependencies(shell grove_nn_cmd_audit_check)
+add_shared_storage_gate(NAME grove_nn_core_audit
+                        SOURCE "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
+                        IFACE bsp_iface CONSUMER shell_objs)
+add_dependencies(shell grove_nn_core_audit_check)
 
 # And the negative tests for that checker, run with THIS board's cross compiler
 # so the __arm__-only fixture is meaningful (it passes under the host compiler,

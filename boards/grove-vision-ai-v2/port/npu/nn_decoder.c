@@ -67,7 +67,7 @@ static int nn_decoder_bind(void)
  * higher-rank tensor into four dimensions, so a rank of 0 arriving here means
  * "not representable", and every shape test downstream fails on it.
  */
-static void nn_desc_from_npu(struct tensor_desc *d, const struct npu_tensor *t)
+void nn_decoder_desc(struct tensor_desc *d, const struct npu_tensor *t)
 {
 	memset(d, 0, sizeof(*d));
 	d->data  = t->data;
@@ -90,7 +90,7 @@ static unsigned nn_desc_all(struct tensor_desc *d, unsigned cap,
 	if (n > cap)
 		n = cap;
 	for (i = 0; i < n; i++)
-		nn_desc_from_npu(&d[i], &outs[i]);
+		nn_decoder_desc(&d[i], &outs[i]);
 	return i;
 }
 

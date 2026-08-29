@@ -53,6 +53,17 @@ extern "C" {
 int nn_decoder_shapes_ok(const struct npu_tensor *outs, unsigned n);
 
 /**
+ * @brief  Translate one native descriptor into the neutral one (issue #97).
+ *
+ * Public because the nn_svc adapter (issue #50) needs the same translation to
+ * publish tensors to the shared command, and a second copy of it is exactly the
+ * duplication issue #97 removed.  The rank passes through unchanged: npu_tflm.cc
+ * already refuses to truncate a higher-rank tensor, so a rank of 0 arriving here
+ * means "not representable" and every shape test downstream fails on it.
+ */
+void nn_decoder_desc(struct tensor_desc *d, const struct npu_tensor *t);
+
+/**
  * Decode @p n NPU output tensors into @p out[0..max).
  *
  * @param res  filled on every path, failures included, so a caller never reports

@@ -343,15 +343,112 @@ static int cmd_nn_bench(struct cli_instance *sh, int argc, char **argv)
  * measurement; -1 means the outputs are not a model this decoder knows, which is
  * a different thing to go and look at.
  */
+/*
+ * Top classes of an output vector, by insertion -- N is small and the vector is
+ * a class count, so nothing cleverer earns its code size.
+ *
+ * [!] THIS IS WHAT MAKES ONE `run` SERVE BOTH KINDS OF MODEL.  The three boards
+ * used to split classification and detection into separate subcommands, so the
+ * operator had to know which the loaded model was and pick the matching verb.
+ * What is loaded already decides that, and the decoder says so: only
+ * BF_ERR_MODEL means "not a detector", and it is the one code that routes here
+ * instead of being reported as a failure.
+ */
+static void nn_print_top(struct cli_instance *sh, const struct tensor_desc *t)
+{
+	enum { TOP_N = 5 };
+	int   best_i[TOP_N];
+	float best_v[TOP_N];
+	unsigned n = 0u, k;
+	uint32_t esz = nn_dtype_size(t->dtype), count, i;
+
+	if (esz == 0u || t->data == NULL) {
+		cli_warn(sh, "top     : the output cannot be read at a known "
+		             "stride (%s)\r\n", nn_dtype_name(t->dtype));
+		return;
+	}
+	count = (uint32_t)(t->bytes / esz);
+
+	for (k = 0u; k < TOP_N; k++) {
+		best_i[k] = -1;
+		best_v[k] = -1e30f;
+	}
+	for (i = 0u; i < count; i++) {
+		float v;
+
+		switch (t->dtype) {
+		case TENSOR_DTYPE_INT8:
+			v = ((float)((const int8_t *)t->data)[i] - (float)t->zero_point) *
+			    t->scale;
+			break;
+		case TENSOR_DTYPE_UINT8:
+			v = ((float)((const uint8_t *)t->data)[i] - (float)t->zero_point) *
+			    t->scale;
+			break;
+		case TENSOR_DTYPE_FLOAT32:
+			v = ((const float *)t->data)[i];
+			break;
+		default:
+			return;   /* refused above for anything without a stride */
+		}
+		for (k = 0u; k < TOP_N; k++) {
+			if (v > best_v[k]) {
+				unsigned j;
+
+				for (j = TOP_N - 1u; j > k; j--) {
+					best_v[j] = best_v[j - 1u];
+					best_i[j] = best_i[j - 1u];
+				}
+				best_v[k] = v;
+				best_i[k] = (int)i;
+				if (n < TOP_N)
+					n++;
+				break;
+			}
+		}
+	}
+
+	cli_print(sh, "top     : %u of %lu class(es)\r\n", n, (unsigned long)count);
+	for (k = 0u; k < n; k++) {
+		const char *sign;
+		uint32_t ip, frac;
+
+		if (nn_f32_parts(best_v[k], &sign, &ip, &frac) != 0)
+			cli_print(sh, "  #%u  class %-4d  nan\r\n", k + 1u, best_i[k]);
+		else
+			cli_print(sh, "  #%u  class %-4d  score %s%lu.%06lu\r\n",
+			          k + 1u, best_i[k], sign, (unsigned long)ip,
+			          (unsigned long)frac);
+	}
+}
+
 static void nn_print_dets(struct cli_instance *sh,
                           const struct nn_det_snapshot *snap,
                           const struct bf_det *dets)
 {
 	int i;
 
+	/*
+	 * [!] THE DECODER'S NEGATIVE CODES ARE NOT INTERCHANGEABLE (issue #97), and
+	 * folding them here would undo that.  BF_ERR_MODEL means the loaded model
+	 * is not a detector -- an ordinary thing to have loaded, and the cue to
+	 * report classes instead.  The others mean this firmware is wired wrong,
+	 * and reporting them as "not a detector" would send somebody off to
+	 * re-check a model that is fine.
+	 */
+	if (snap->ndet == BF_ERR_MODEL) {
+		struct tensor_desc t;
+
+		if (nn_svc_output(0u, &t) == NN_SVC_OK)
+			nn_print_top(sh, &t);
+		else
+			cli_warn(sh, "nn: not a detector, and output 0 is "
+			             "unreadable\r\n");
+		return;
+	}
 	if (snap->ndet < 0) {
-		cli_warn(sh, "dets    : the outputs are not a shape this decoder "
-		             "knows (%d)\r\n", snap->ndet);
+		cli_error(sh, "nn: the decoder is not usable (internal error %d)\r\n",
+		          snap->ndet);
 		return;
 	}
 

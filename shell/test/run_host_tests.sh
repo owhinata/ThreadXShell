@@ -310,6 +310,27 @@ gcc $CFLAGS -I "$svc" \
     $LDFLAGS -o "$out/test_nn_det_record"
 "$out/test_nn_det_record"
 
+# issue #50 -- the pure parts of the ONE shared `nn` command (shell/cmds).  Two
+# things live here that a console cannot check:
+#
+#   the scaled-integer number formatting, because this firmware has no %f and the
+#   form it replaces printed 1.5 as "0.1500000" -- silently wrong for every
+#   quantisation scale >= 1, which output tensors routinely have, and plausible
+#   enough either way that nobody noticed by reading it;
+#
+#   the model-source grammar, whose whole point is that a BARE string is refused.
+#   The same word means a blob name on one board, a path on another and nothing
+#   on a third, so a parser that accepted one would have to guess per board --
+#   board knowledge back inside shell/ by a quieter route.  The refusal is the
+#   assertion someone deletes to make the command friendlier.
+#
+# Links cli_parse.c for cli_parse_u32(): the grammar uses this firmware's own
+# number parser rather than growing a second one.
+gcc $CFLAGS -I "$inc" -I "$here/../cmds" -I "$core" -I "$svc" \
+    "$here/test_nn_cmd_core.c" "$here/../cmds/nn_cmd_core.c" "$core/cli_parse.c" \
+    $LDFLAGS -o "$out/test_nn_cmd_core"
+"$out/test_nn_cmd_core"
+
 # ---- board-pinned tests --------------------------------------------------- *
 # Same toolchain flags and the same scratch dir, exported so a board test is built
 # exactly like a core one and cannot quietly diverge.  A board with no

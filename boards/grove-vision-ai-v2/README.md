@@ -1444,6 +1444,12 @@ are NULL.  No new wrap slot is consumed: irq 143 was already being wrapped.
 
 ### Where the preview's time goes (issue #38)
 
+> The runs from here to the end of the frame-rate study were recorded when live
+> inference was called `nn preview` and blocked the console. Issue #99 replaced
+> it with `nn stream start/stop/stats`; the command name in these tables is left
+> as it was run, because they are a record rather than instructions.
+
+
 `camera stats` prints the producer's own per-stage timing, since the last
 stream start.  It is measured on TIMER2 (the EPK's free-running source) and not
 on DWT CYCCNT, because the largest candidate stage is the producer ASLEEP
@@ -1951,7 +1957,7 @@ later point, and it is unreachable on the rev-D board here.
 
 Capture a frame, run it on the NPU, print the result.  Classification (top 5,
 92 ms) since issue #44; BlazeFace face detection (13 ms) since issue #45; face
-boxes on the LIVE preview (`nn preview`) since issue #48.  The console stays
+boxes on the LIVE preview (`nn stream`) since issue #48.  The console stays
 usable while any of them runs.
 
 ```
@@ -4031,17 +4037,62 @@ how the weights are constructed, not because the pixels happened to be small.
   The arena is in SRAM because the donor puts it there, which is evidence and not
   proof.
 
-## Face boxes on the live preview (`nn preview`)
+## Face boxes on the live preview (`nn stream`)
 
-Issue #48.  The camera on the panel with the detections drawn on it:
+Issue #48, and issue #99 for the grammar.  The camera on the panel with the
+detections drawn on it:
 
 ```
-nn model load det
-nn preview             # Ctrl+C to stop
-nn preview 30          # or a frame count
+nn model load --name det
+nn stream start             # returns immediately; the panel keeps updating
+nn stream stats             # while it runs
+nn stream stop
+
+nn stream start --frames 30 # or a bounded run: stops itself, Ctrl+C also stops
 ```
 
 `camera preview` is unchanged and still shows a plain picture.
+
+**This used to be `nn preview`, which BLOCKED until Ctrl+C** (issue #99 replaced
+it with the same `nn stream start/stop/stats` the other two boards speak, and
+removed it).  On a board with ONE console that is the bigger half of the change:
+`camera stats`, `nn info` and `nn thresh` during a run were simply unreachable
+before, because the console was inside the command.  The measurement tables
+further down were recorded under the old name and are left as they were written
+-- they are a record of runs, not instructions.
+
+Three things behave differently now that the stream outlives the command:
+
+- **`nn info` answers while it runs**, as it always did on the other two boards.
+  It reports the model and where it came from, and says plainly which sections it
+  is withholding -- the arena figure and the tensors need the claim the stream is
+  holding, and the arena is being rewritten every frame anyway.
+- **`nn model unload`, `nn run`, `nn bench`, `nn out` and `nn dets` are refused**
+  while a stream runs, by the same claim. `nn thresh` still works: the shared
+  decoder's threshold is an atomic snapshot each decode samples once.
+- **`lcd rot` and `lcd madctl` are refused** while any camera sink owns the
+  panel. They move the driver's PERSISTENT geometry, and the sink blits a fixed
+  size the driver validates internally -- so a rotation mid-stream leaves every
+  later blit refused or clamped **while each layer still reports success**, and
+  it stays that way until the stream is stopped.
+
+  **[!] The backlight is neither guarded nor refused, and both halves of that
+  were learned at the bench.** `lcd_backlight()` is one GPIO write touching no
+  SPI state, no framebuffer and no DMA, while under a live stream the panel
+  thread holds the panel guard for about **96% of every frame** (compare `blit`
+  with `profile` in `camera stats`) -- so guarding it made `lcd on` fail with
+  `busy` in exactly the case it exists for, a panel switched off before the
+  stream started. And once `on` worked during a stream, refusing `off` had no
+  hazard left under it: the reason for that refusal had been "no frame turns it
+  back on". The line between the two groups is the KIND of failure, not its
+  severity -- a rotation is silent and lasts; a dark panel announces itself and
+  is one command from undone.
+
+  That same 96% explains the rest of the `lcd` set under a stream: `lcd fill`,
+  `lcd bar`, `lcd orient` and even the read-backs will usually report
+  `busy (another lcd command holds the panel)`, because they are transfer-scoped
+  and the transfer is nearly always in progress. That is the guard working, not
+  a fault.
 
 **Measured on the board** (issue #60, rev D, default VTS 940): 200 frames at
 **33.3 fps**, with **200 inferences for 200 frames** -- every published frame is
@@ -4059,15 +4110,15 @@ budget: #57 took the blit off this thread, #58 folded the packer into tables,
 staging seam, #59 double-buffered the capture, and #60 -- below -- cut the
 preprocessing.)
 
-### Where `nn preview`'s producer time goes (issue #60)
+### Where `nn stream`'s producer time goes (issue #60)
 
 `camera stats` prints one `sink` row for everything a sink does on the producer,
-and under `nn preview` that number was 24.0 ms with no way to see inside it.  It
+and under `nn stream` that number was 24.0 ms with no way to see inside it.  It
 now splits, from counters the overlay keeps on the same EPK clock:
 
 ```
   sink   :  19862 us/frame   sinks consume: inference + panel staging
-nn sink  : 200 frame(s), last nn preview [producer thread]
+nn sink  : 200 frame(s), last nn stream [producer thread]
   prep   :   6126 us/frame   setup + crop/resize
   invoke :  12673 us/frame   NPU inference
   decode :    108 us/frame   anchors -> boxes
@@ -4168,7 +4219,7 @@ camera preview     -- the sink is DETACHED, so the attach SUCCEEDS and
                    -- the following start returns CAM_ERR_BUSY
                    -- and BUSY is precisely the failure a caller must not
                       detach on: a producer may be inside consume() by now
-                   => the sink stays attached with no owner, and `nn preview`
+                   => the sink stays attached with no owner, and `nn stream`
                       leaks its NPU lease the same way, both until reboot
 ```
 
@@ -4192,7 +4243,7 @@ Both halves are load-bearing, and the second one is the less obvious:
   entitled to tear down what it points at.
 
 That second path is not merely untidy. The panel sink counts a delivery only
-**after** its overlay has run -- under `nn preview` that is a whole NPU inference
+**after** its overlay has run -- under `nn stream` that is a whole NPU inference
 -- so a drain running concurrently sees `done == accepted`, returns success, and
 the command releases the NPU while an inference is still in flight.
 
@@ -4211,7 +4262,7 @@ the sink is already out of the registry. The one case that does refuse for good
 is the camera's own `CAM_ST_LOST`, which refuses everything anyway.
 
 What this buys the commands is one call with one answer: **every failure leaves
-nothing attached and no stream running**, so `camera preview` and `nn preview`
+nothing attached and no stream running**, so `camera preview` and `nn stream`
 unwind their own state and return. The "BUSY means it might have half-worked"
 branches are gone along with the window that motivated them.
 
@@ -4337,7 +4388,7 @@ power the module down, unwrap the interrupts, re-detect -- underneath a producer
 that never acknowledged a stop.
 
 The sink reservation does not stand in for the check. It refuses a start while
-any sink is linked, so a `camera preview` or `nn preview` whose stop failed is
+any sink is linked, so a `camera preview` or `nn stream` whose stop failed is
 covered -- but **`camera bench` streams with no sink at all**
 (`camera_stream_start(NULL)`), and on that path the registry is empty and
 nothing else is in the way. None of the answers changed: `CAM_BUS_PRODUCER` is
@@ -4482,7 +4533,7 @@ alone would not be enough:
 
 1. it has **one caller**, `cam_lcd_sink_detach()`;
 2. that caller is reached **only after a confirmed stop** -- from `camera
-   preview` and from `nn preview`, both of which detach only on `CAM_OK`;
+   preview` and from `nn stream`, both of which detach only on `CAM_OK`;
 3. until the unlink completes the sink is still in the registry, and a competing
    start holds the API mutex and refuses while the registry is non-empty (the
    reservation from #63).
@@ -4723,12 +4774,12 @@ mark, and that is the number to check.
 
 Camera (up to 26 lines) + UART0 (1) + LCD SPI/DMA (2) + QSPI and U55 (2) = 31 of
 the 32 EPK wrap slots, reaching exactly 32 if the UART's DMA fallback is ever
-used.  `nn run` never brings the panel up, so nothing before `nn preview` had
+used.  `nn run` never brings the panel up, so nothing before `nn stream` had
 all five at once.
 
 There is no room for an unexpected vendor-enabled line.  The wrap is
 fail-closed, so the symptom would be the camera refusing to come up during
-`nn preview` rather than silent mis-accounting -- but it is worth running
+`nn stream` rather than silent mis-accounting -- but it is worth running
 `thread` once after the first `nn model load --name det`, when IRQ 133 is also present, to
 see the cpu% column still reported as trustworthy.
 

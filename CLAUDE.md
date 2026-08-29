@@ -94,9 +94,40 @@ boards/
     受け付けた瞬間に shell がボードを知ることになる。`--addr` の長さは必須。
   - **port のアダプタは `struct cli_instance` を取らない**。印字・待ち・キャンセル判定が
     要るものは `boards/<board>/cmds/` に置く（そこは shell 層）。port が上を名指ししない。
-  - **`nn stream`（STM32 2 枚）と `nn preview`（Grove）は暫定**。後続 Issue で
-    3 ボードとも `nn stream start/stop/stats` に寄せ、`preview` は**削除する**。
-    2 つ目の恒久文法として育てない。
+  - **ライブ推論は 3 ボードとも `nn stream start/stop/stats` の 1 文法**（#99 で統一、
+    `preview` は削除済み。**復活させない**）。`start` は非ブロッキングで、待ちは
+    共有コマンドの `--frames <n>` が 1 実装で持つ。
+  - **[!] stream には世代がある**（#99）。`start` が返す generation を待ち手が持ち、
+    `stop` はそれを**遷移を claim するのと同じクリティカルセクション内で照合する**。
+    `NN_STREAM_GEN_ANY` は操作者が打つ `nn stream stop` 専用で、**待ち手は絶対に渡さない**
+    — 渡すと「自分が起こしていない stream」を畳んでカメラ / NPU / バスガードを他人から
+    奪う。**世代の照合と stop の claim は 1 呼び出し**（分けると 2 者が同じ stream に入る）。
+    機械は `svc/nn_stream_life.c` の 1 本で、3 ボードが状態だけ持つ。
+  - **[!] start の admission も機械が持つ**（#99 の 2 巡目）。**下位の worker を触る前に
+    STARTING を claim し、失敗したら abort する**。後から記録すると「worker は動いて
+    いるのに phase は IDLE」の窓ができ、wio の re-arm はその窓で**進行中の stop を
+    上書きする**。`commit()` は STARTING 以外を拒否する（LOST を蘇生させないため）。**finish/retry/poison も
+    STOPPING 以外を拒否**する — 機械が規律に頼るなら共有した意味が無い。
+  - **[!] worker のカウンタは世代と一致しない**（#99 3 巡目）。wio は re-arm でカウンタを
+    意図的に継続するので、**`nn_stream_stats` は commit 時に基準を latch して差を出す**。
+    素通しすると `--frames 10` が re-arm 直後に即成立して、自分が上げた stream を止める。
+    **re-arm は `nncam_record_reset()` で decode record も retire する**（バンド再取得の前）—
+    さもないと前世代の顔と、境界を跨いで publish される推論が新世代の成果になる。
+  - **[!] 遷移が拒否されたら wrapper の副作用も走らせない**（#99 4 巡目）。
+    `finish/retry/poison/abort` は成否を返し、claim の解放や elapsed の凍結はその成功時のみ。
+    黙って拒否するだけのガードは、守るはずの不変条件違反でこそ fail open する。
+  - **[!] poll は 2 相 + 遷移カウンタ**（#99）。数値は自分のロックを持つサブシステムから
+    来る（Grove のカメラ統計は frame pipeline の mutex に落ちる）ので、
+    **割込み禁止下では集められない**。世代と状態だけでは足りない — **retryable な stop は
+    世代を保ったまま状態を戻す**ので、両方が変わらないまま teardown 1 回ぶんを跨げる。
+  - **[!] retryable と terminal の分類は「その時点で何ができるか」で決まる**（#99）。
+    Grove の `CAM_ERR_LOCKED` は #99 以前 reboot 扱いだったが、その根拠は
+    「sink を持つコマンドとは別に stop できるコマンドが無い」ことで、#99 がそれを作った。
+    detach の `CAM_ERR_BUSY` も #79 が retryable と決めている。**terminal に畳み直さない。**
+    表は `boards/grove-vision-ai-v2/port/npu/nn_stream_state.c`（純関数・ホストテスト必須）。
+  - **[!] 未文書の stop コードは terminal に fail-closed**（#99 の adversarial review）。
+    catch-all の retryable は「証拠が無い戻り値」を回復可能と約束してしまう。
+    既定は `nn_stream_disp_of()` が持ち、ボードは**表だけ**を出す。
 - **shell の常設状態は静的割当**。共有 shell コア（インスタンス / スタック / ジョブプール）と
   transport の常設状態は静的割当で、init / dispatch / 出力経路は heap を要求しない。board 固有
   コマンドのペイロードは、board が bounded heap・排他（`malloc_lock`）・失敗処理を明示的に
@@ -518,7 +549,7 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   **staging コピー → 検証 → 同一ファイル送信**、**`--profile cls|det` は明示引数**
   （ファイル名から推測しない）、**出力は stderr**（YMODEM 線に流さない）、
   **ホスト C++ 不在は fail-closed**。
-- **ライブ推論オーバーレイ（`nn preview` / #48）**: 推論は**カメラ producer スレッド上・
+- **ライブ推論オーバーレイ（`nn stream` / #48、#99）**: 推論は**カメラ producer スレッド上・
   sink の `consume()` 内**で走る（モデルが読むのは完了済みの landing buffer で、
   次の frame-ready まで面は flip しない — #59 で 2 面化して「consume まで」から
   「イテレーション全体」に強まった = 枠は必ず表示中のフレームのもの）。順序は**推論（パネルガード無し）→ ガードを 1 回
@@ -551,7 +582,7 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   parse する。従来は 2 箇所に書かれ片方が dead だった）。producer スタックは **8 KiB**
   （`Invoke()` を載せたため。実測 high-water で確認する）。
   **[!] EPK は 31/32 に達する**（camera 26 + UART0 1 + LCD 2 + QSPI/U55 2）。
-  `nn run` はパネルを上げないので、5 者が同時に載るのは `nn preview` が初。
+  `nn run` はパネルを上げないので、5 者が同時に載るのは `nn stream` が初。
 - **顔検出（`nn run` / #45, #48）**: BlazeFace-front 128 を Ethos-U55 で。
   **op resolver は `<1>` のまま維持する。[!] 理由は「CPU op がキャッシュ的に危険」ではない**
   （#46 で消えた） — **CMSIS-NN（= Helium）を持ち込まない / Vela が全面 offload していない
@@ -559,7 +590,7 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   （先頭 QUANTIZE + 末尾 DEQUANTIZE 4）は**ファイル側で剥がす**
   （`scripts/tflite_strip_boundary.cc`。テンソルは削除せず孤児のまま = 番号の振り直しが不要）。
   剥がすと Vela は **CPU operators = 0**。入力量子化 scale 1/255・zp -128 は
-  前処理の `pixel - 128` と一致し、`nn run` / `nn preview` は入口でそれを**検査して拒否する**。
+  前処理の `pixel - 128` と一致し、`nn run` / `nn stream` は入口でそれを**検査して拒否する**。
   **[!] 入力は 240x240（フレーム中央の最大正方形）を「スケール」する**（#48。従来は 128x128 の
   ただの中央 crop で、実用距離では検出できないほど画角が狭かった）。前処理は
   `port/npu/nn_preproc.c`（half-pixel 中心の bilinear・固定小数・**ホストテスト必須**）。

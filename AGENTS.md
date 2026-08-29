@@ -58,8 +58,26 @@
    - **port のアダプタは `struct cli_instance` を取らない。** 印字・待ち・キャンセル判定・
      ファイル読みが要るものは `boards/<board>/cmds/` に置き、**下へ関数ポインタで渡す**
      （`nn_svc_cancel_fn` / `nn_svc_read_fn`）。port が cmds/ を名指ししない。
-   - **`nn stream`（f746/wio）と `nn preview`（Grove）は暫定。** 後続 Issue で 3 ボードとも
-     `nn stream start/stop/stats` に統一し `preview` は削除する。恒久化させない。
+   - **ライブ推論は 3 ボードとも `nn stream start/stop/stats`**（#99 で統一、`preview` は
+     削除済み。復活させない）。`start` は非ブロッキングで、待ちは共有コマンドの
+     `--frames <n>` が 1 実装で持つ。
+   - **[!] stream には世代がある。** `start` が返す generation を待ち手が持ち、`stop` は
+     **遷移を claim するのと同じクリティカルセクション内で**照合する。`NN_STREAM_GEN_ANY`
+     は操作者の `nn stream stop` 専用で **待ち手は渡さない**（渡すと他人の stream を畳んで
+     カメラ / NPU / バスガードを奪う）。**照合と claim は 1 呼び出し**（分けると 2 者が同じ stream に入り、
+     負けた方が後から後継 stream を畳む）。機械は `svc/nn_stream_life.c` の 1 本。
+   - **[!] start の admission も機械が持つ。** 下位 worker を触る**前に** STARTING を
+     claim し、失敗なら abort。後から記録すると re-arm が進行中の stop を上書きする。
+     `commit()` は STARTING 以外を拒否（LOST の蘇生防止）、finish/retry/poison も
+     STOPPING 以外を拒否。**worker のカウンタは世代と一致しない**ので、poll は
+     commit 時に latch した基準を引く（wio の re-arm はカウンタを継続する）。
+     re-arm は decode record も retire する。**遷移が拒否されたら wrapper の副作用も
+     走らせない**（成否を返す。claim 解放を無条件にすると不変条件違反で fail open）。
+   - **[!] poll は 2 相 + 遷移カウンタ。** 数値は自分のロックを持つ側から来るので割込み
+     禁止下では集められず、世代と状態だけでは retryable な stop を跨いだ読みを弾けない。
+   - **[!] Grove の teardown 分類**（`port/npu/nn_stream_state.c`、純関数・ホストテスト）:
+     カメラの `CAM_ERR_LOCKED` と detach の `CAM_ERR_BUSY` は **retryable**、join timeout /
+     poison / 恒久拒否は **terminal**。**terminal に畳み直さない。**
 
 2b. **`svc/frame_pipeline` の sink registry: attach は拒否する、直列化は呼び出し元（#72 / #79）。**
    `frame_pipeline_attach()` は **未 drain の sink（pin を持ったまま）** と
@@ -682,7 +700,7 @@
      （アドレスを取らない file-static はレジスタに保持され得る）。
    - **EPK 容量は `GROVE_EPK_WRAP_MAX` == `TX_GLUE_EPK_MAX_IRQ` == 32**
      （`_Static_assert` で結んである。片方だけ動かさない）。
-     **[!] `nn preview`（#48）で 31/32 に達する**（camera 26 + UART0 1 + LCD 2 +
+     **[!] `nn stream`（#48/#99）で 31/32 に達する**（camera 26 + UART0 1 + LCD 2 +
      QSPI/U55 2。UART の DMA fallback を使うと 32）。余裕は無い。fail-closed なので
      症状は「camera が上がらない」であって黙った誤計上ではない。
      measure-then-wrap は **2 ラウンド**（間の I2C モードテーブルは PRIMASK 外。

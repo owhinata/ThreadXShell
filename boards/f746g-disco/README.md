@@ -213,7 +213,16 @@ console, and what the two columns mean, is in the root
 ### [!] Three subscribers share one capture, and each has to drain its sink
 
 The GUI preview, `nn stream` and `net mjpeg` are all *subscribers* of one base
-capture.  Stopping one of them detaches its sink while the base keeps running --
+capture.
+
+> **`nn stream` is a subscriber, and `--frames` waits on that** (issue #99).
+> `nn stream start` enables inference whether or not the base capture is running:
+> with it stopped the stream stays enabled and idle, and attaches at the next
+> `camera stream start`. So `nn stream start --frames <n>` waits indefinitely
+> until the base is started, which is not a hung command. The start says so when
+> the base is not running. (Issue #99 also removed the `[qqvga|qvga]` word this
+> command used to take -- the port discarded it and derived the geometry from
+> whatever the base publishes, so it had not selected anything for some time.)  Stopping one of them detaches its sink while the base keeps running --
 that is the whole point of a subscriber -- so a delivery can already be in
 flight across the unlink: `frame_pipeline_publish()` copies the sinks it will
 deliver to into a local array, drops the pipeline lock, and only then calls

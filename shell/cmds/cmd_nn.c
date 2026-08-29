@@ -74,6 +74,9 @@
 #ifndef NN_SVC_HAS_MODEL_PATH
 #define NN_SVC_HAS_MODEL_PATH  0
 #endif
+#ifndef NN_SVC_HAS_OVERLAY
+#define NN_SVC_HAS_OVERLAY     0
+#endif
 
 #if NN_SVC_HAS_STREAM
 /** The board's own `nn stream` set: a worker's lifecycle is not a formatting
@@ -306,8 +309,8 @@ static int cmd_nn_model_unload(struct cli_instance *sh, int argc, char **argv)
 static int cmd_nn_bench(struct cli_instance *sh, int argc, char **argv)
 {
 	struct nn_op_result res;
-	uint32_t iters = 10u;
-	uint64_t us = 0u;
+	struct nn_bench_stats st;
+	uint32_t iters = 50u;
 
 	if (argc > 1 && cli_parse_u32(argv[1], &iters) != 0) {
 		cli_error(sh, "nn: usage: nn bench [iterations]\r\n");
@@ -329,23 +332,32 @@ static int cmd_nn_bench(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	memset(&res, 0, sizeof res);
-	nn_svc_bench_run(iters, &us, nn_cancel_shim, sh, &res);
+	memset(&st, 0, sizeof st);
+	nn_svc_bench_run(iters, &st, nn_cancel_shim, sh, &res);
 	if (res.status != NN_SVC_OK) {
 		nn_report(sh, "bench", &res);
 		return 1;
 	}
 	nn_report(sh, "bench", &res);
 
-	cli_print(sh, "bench   : %lu run(s), %lu.%03lu ms total\r\n",
-	          (unsigned long)iters, (unsigned long)(us / 1000u),
-	          (unsigned long)(us % 1000u));
-	if (iters > 0u) {
-		uint64_t each = us / iters;
-
-		cli_print(sh, "each    : %lu.%03lu ms\r\n",
-		          (unsigned long)(each / 1000u), (unsigned long)(each % 1000u));
+	if (st.runs == 0u) {
+		cli_warn(sh, "nn: no run completed\r\n");
+		return 1;
 	}
-	if (us == 0u)
+	/*
+	 * [!] THE SPREAD, NOT JUST THE MEAN.  Inference shares a core with a
+	 * console and, on two boards, a camera producer -- so the gap between the
+	 * fastest and the slowest run is often the thing being looked for, and an
+	 * average on its own hides it.
+	 */
+	cli_print(sh, "runs    : %lu\r\n", (unsigned long)st.runs);
+	cli_print(sh, "latency : min %lu  avg %lu  max %lu us\r\n",
+	          (unsigned long)st.min_us, (unsigned long)st.avg_us,
+	          (unsigned long)st.max_us);
+	cli_print(sh, "total   : %lu.%03lu ms\r\n",
+	          (unsigned long)(st.total_us / 1000u),
+	          (unsigned long)(st.total_us % 1000u));
+	if (st.total_us == 0u)
 		cli_warn(sh, "note    : zero elapsed -- the time source is not "
 		             "advancing, so this is not a measurement\r\n");
 	return 0;
@@ -703,6 +715,26 @@ static int cmd_nn_norm(struct cli_instance *sh, int argc, char **argv)
 }
 #endif /* NN_SVC_HAS_NORM */
 
+#if NN_SVC_HAS_OVERLAY
+static int cmd_nn_overlay(struct cli_instance *sh, int argc, char **argv)
+{
+	if (argc < 2) {
+		cli_print(sh, "overlay : %s\r\n", nn_svc_overlay_get() ? "on" : "off");
+		return 0;
+	}
+	if (strcmp(argv[1], "on") == 0) {
+		nn_svc_overlay_set(1);
+	} else if (strcmp(argv[1], "off") == 0) {
+		nn_svc_overlay_set(0);
+	} else {
+		cli_error(sh, "nn: usage: nn overlay <on|off>\r\n");
+		return 1;
+	}
+	cli_print(sh, "overlay : %s\r\n", nn_svc_overlay_get() ? "on" : "off");
+	return 0;
+}
+#endif /* NN_SVC_HAS_OVERLAY */
+
 /* ---- registration -------------------------------------------------------- */
 
 #if NN_SVC_HAS_MODEL_LOAD
@@ -741,6 +773,10 @@ CLI_SUBCMD_SET_CREATE(nn_subcmds,
 #if NN_SVC_HAS_NORM
 	CLI_CMD_ARG_USAGE(norm, NULL, "float input normalisation",
 	                  "usage: nn norm <0|1>\r\n", cmd_nn_norm, 1, 1),
+#endif
+#if NN_SVC_HAS_OVERLAY
+	CLI_CMD_ARG_USAGE(overlay, NULL, "draw the boxes on the live preview",
+	                  "usage: nn overlay <on|off>\r\n", cmd_nn_overlay, 1, 1),
 #endif
 #if NN_SVC_HAS_STREAM
 	CLI_CMD_ARG_USAGE(stream, nn_board_stream_subcmds, "live inference",

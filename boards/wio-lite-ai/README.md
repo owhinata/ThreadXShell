@@ -145,7 +145,7 @@ why the check runs against the cross compiler rather than on the host.
 ordinary internal RAM, and that is deliberate twice over: `.psram_ai` is NOLOAD,
 so an initialised field there would never be loaded (and NOLOAD keeps the
 previous run's bytes, so it would fail by appearing to work), and the PSRAM
-bring-up is fail-soft, so `ai thresh` has to keep answering on a board whose
+bring-up is fail-soft, so `nn thresh` has to keep answering on a board whose
 external memory did not come up.
 
 ## Console
@@ -246,7 +246,7 @@ Behind them: the RTL8720DN companion for WiFi and the telnet console (`wifi`,
 `net`), the external NOR with a key-value store and a blob region (`kv`,
 `blob`, `nor`), the 8 MB PSRAM (`psram`), the ST7789 panel over the LTDC's RGB
 interface (`lcd`), a DVP camera (`camera`), and the TFLM inference backend
-(`ai`).
+(`nn`).
 
 This board runs two shell instances -- `wio>` on the USB CDC and `wio-net>` on
 telnet -- each with its own line editor, history and RX/TX drop counters.

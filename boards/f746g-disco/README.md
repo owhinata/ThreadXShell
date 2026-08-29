@@ -189,7 +189,7 @@ uptime    usleep    version   watch     wdt       xfer
 
 Subsystems behind them: LTDC + GUIX (`gui`, `lcd`), OV5640 over DCMI
 (`camera`), QSPI NOR with LevelX + FileX (`fs`, `qspi`), microSD (`sd`),
-FT5336 touch (`touch`), Ethernet with NetX Duo (`net`), the NN backends (`ai`),
+FT5336 touch (`touch`), Ethernet with NetX Duo (`net`), the NN backends (`nn`),
 and YMODEM transfer over the console (`xfer`).
 
 This board runs two shell instances -- `sh>` on the VCP and `net>` on telnet --
@@ -212,7 +212,7 @@ console, and what the two columns mean, is in the root
 
 ### [!] Three subscribers share one capture, and each has to drain its sink
 
-The GUI preview, `ai stream` and `net mjpeg` are all *subscribers* of one base
+The GUI preview, `nn stream` and `net mjpeg` are all *subscribers* of one base
 capture.  Stopping one of them detaches its sink while the base keeps running --
 that is the whole point of a subscriber -- so a delivery can already be in
 flight across the unlink: `frame_pipeline_publish()` copies the sinks it will
@@ -241,7 +241,7 @@ When a drain does spend its budget, the owner refuses to release and says so:
 | command | what you see | what it means |
 |---|---|---|
 | `gui stop` | `preview did not release the camera frame; display kept` | GUIX keeps the LCD and the preview stays armed.  Run `gui stop` again. |
-| `ai stream stop` | `camera has not released the inference frame` | `ai stream start` is refused until a later `ai stream stop` finds it clear. |
+| `nn stream stop` | `camera has not released the inference frame` | `nn stream start` is refused until a later `nn stream stop` finds it clear.  `nn run` reports the same condition rather than swallowing it (issue #50). |
 | `net mjpeg stop` | `camera has not released the mjpeg frame` | likewise for `net mjpeg start`. |
 
 Retrying is the recovery, and it is fail-closed in both directions: if the

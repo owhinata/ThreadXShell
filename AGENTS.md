@@ -32,6 +32,35 @@
 
 2. **共有コアに触れる変更は全対応ボードで成立すること。** 片方のボードだけを見て LGTM しない。
 
+2a. **`nn` は 3 ボード共有の 1 コマンド（#50）。** `shell/cmds/cmd_nn.c` が唯一の実装で、
+   契約は `svc/nn_svc.h`、ボード側は `boards/*/port/*/nn_svc_*.c` のアダプタ。以下は
+   **緩めた時点で BLOCKING**:
+   - **共有 TU（`cmd_nn.c` / `nn_cmd_core.c`）は可変記憶域を持たない。**
+     `check_no_mutable_storage.py` を**ボードごとの監査コンパイル**で当てる
+     （#97 のデコーダと同一機構）。**ホストの結果は当てにならない** — host では
+     コマンド表が `.data.rel.ro` に落ちて偽陽性になり、実機の cortex-m 向けでは
+     `READONLY` になる。状態を持ってよいのはアダプタだけ。
+   - **capability マクロは性質であってボード名ではない**
+     （`boards/<board>/svc/nn_svc_config.h`）。`#ifdef <BOARD>` の言い換えを作らない。
+     バックエンド依存の能力は `CONFIG_NN_BACKEND` に従う（f746/wio の `model load`）。
+   - **status と claim disposition は別フィールドで、4 値を畳まない。**
+     `none`（解放するな。ボードが巻き戻し済み）/ `caller`（1 回だけ解放）/
+     `retryable`（解放権限なし。worker が片付けうる。stop の再試行が正解）/
+     `terminal`（解放権限なし。再起動しかない）。**`retryable` と `terminal` の混同は
+     実害**（前者で再起動させる / 後者で永久に再試行させる）。
+     **判断できないボードは `terminal` に fail-closed。**
+     disposition は「いま誰が持っているか」ではなく**呼び出し側の解放権限**
+     （wio では worker とコンソールが最後の 1 人を競うので、読んだ時点の保持は保証できない）。
+   - **モデル指定はタグ付き**（`--name` / `--slot` / `--path` / `builtin` /
+     `--addr <a> <len>`）で、**裸の文字列は拒否**。同じ語が Grove では blob 名、
+     f746 では SD パス、wio では無意味なので、受理は shell にボード知識を戻すこと。
+     **`--addr` の長さは必須**（FlatBuffer verifier の境界。「窓の残り全部」は不可）。
+   - **port のアダプタは `struct cli_instance` を取らない。** 印字・待ち・キャンセル判定・
+     ファイル読みが要るものは `boards/<board>/cmds/` に置き、**下へ関数ポインタで渡す**
+     （`nn_svc_cancel_fn` / `nn_svc_read_fn`）。port が cmds/ を名指ししない。
+   - **`nn stream`（f746/wio）と `nn preview`（Grove）は暫定。** 後続 Issue で 3 ボードとも
+     `nn stream start/stop/stats` に統一し `preview` は削除する。恒久化させない。
+
 2b. **`svc/frame_pipeline` の sink registry: attach は拒否する、直列化は呼び出し元（#72 / #79）。**
    `frame_pipeline_attach()` は **未 drain の sink（pin を持ったまま）** と
    **既に link 済みの sink** を拒否する。**緩めない** — 前者を通すと sink の pin カウントだけが
@@ -668,7 +697,7 @@
      include** する（pin した SHA に紐付けるため）。
 
 8g. **f746g-disco: カメラ subscriber の drain と owner lifecycle（#72）。**
-   GUI preview / `ai stream` / `net mjpeg` は 1 つの base capture の subscriber で、
+   GUI preview / `nn stream` / `net mjpeg` は 1 つの base capture の subscriber で、
    `camera_unsubscribe()` は **base を止めずに** detach する。`publish()` は sink を
    pre-pin して lock を離してから `consume()` を呼ぶので、unlink を跨いだ配送が実在する。
    - **`camera_frame_put()` は全 `consume()` の最後の文**（3 sink とも）。これが drain の

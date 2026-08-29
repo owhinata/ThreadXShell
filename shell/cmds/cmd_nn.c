@@ -391,15 +391,30 @@ static int cmd_nn_bench(struct cli_instance *sh, int argc, char **argv)
  * BF_ERR_MODEL means "not a detector", and it is the one code that routes here
  * instead of being reported as a failure.
  */
-static void nn_print_top(struct cli_instance *sh, const struct tensor_desc *t)
+static void nn_print_top(struct cli_instance *sh, unsigned index)
 {
+	struct tensor_desc td;
+	const struct tensor_desc *t = &td;
 	enum { TOP_N = 5 };
 	int   best_i[TOP_N];
 	float best_v[TOP_N];
 	unsigned n = 0u, k;
-	uint32_t esz = nn_dtype_size(t->dtype), count, i;
+	uint32_t esz, count, i;
 
+	/* [!] PINNED ACROSS THE FETCH AND THE WALK.  The buffer is in the arena, and
+	 * an unload on another console would close the interpreter underneath it. */
+	if (nn_svc_tensors_pin() != NN_SVC_OK) {
+		cli_warn(sh, "top     : the model is busy or gone\r\n");
+		return;
+	}
+	if (nn_svc_output(index, &td) != NN_SVC_OK) {
+		nn_svc_tensors_unpin();
+		cli_warn(sh, "top     : output %u is unreadable\r\n", index);
+		return;
+	}
+	esz = nn_dtype_size(t->dtype);
 	if (esz == 0u || t->data == NULL) {
+		nn_svc_tensors_unpin();
 		cli_warn(sh, "top     : the output cannot be read at a known "
 		             "stride (%s)\r\n", nn_dtype_name(t->dtype));
 		return;
@@ -426,6 +441,7 @@ static void nn_print_top(struct cli_instance *sh, const struct tensor_desc *t)
 			v = ((const float *)t->data)[i];
 			break;
 		default:
+			nn_svc_tensors_unpin();
 			return;   /* refused above for anything without a stride */
 		}
 		for (k = 0u; k < TOP_N; k++) {
@@ -444,6 +460,8 @@ static void nn_print_top(struct cli_instance *sh, const struct tensor_desc *t)
 			}
 		}
 	}
+
+	nn_svc_tensors_unpin();   /* the values are copied out; printing is safe */
 
 	cli_print(sh, "top     : %u of %lu class(es)\r\n", n, (unsigned long)count);
 	for (k = 0u; k < n; k++) {
@@ -474,13 +492,7 @@ static void nn_print_dets(struct cli_instance *sh,
 	 * re-check a model that is fine.
 	 */
 	if (snap->ndet == BF_ERR_MODEL) {
-		struct tensor_desc t;
-
-		if (nn_svc_output(0u, &t) == NN_SVC_OK)
-			nn_print_top(sh, &t);
-		else
-			cli_warn(sh, "nn: not a detector, and output 0 is "
-			             "unreadable\r\n");
+		nn_print_top(sh, 0u);
 		return;
 	}
 	if (snap->ndet < 0) {
@@ -579,7 +591,7 @@ static int cmd_nn_out(struct cli_instance *sh, int argc, char **argv)
 {
 	struct tensor_desc t;
 	uint32_t idx = 0u, want = 16u, esz, have, i;
-	int n;
+	int n, rc = 1;
 
 	if (argc > 1 && cli_parse_u32(argv[1], &idx) != 0) {
 		cli_error(sh, "nn: usage: nn out [tensor] [count]\r\n");
@@ -599,17 +611,33 @@ static int cmd_nn_out(struct cli_instance *sh, int argc, char **argv)
 		cli_error(sh, "nn: tensor must be 0 .. %d\r\n", n - 1);
 		return 1;
 	}
-	if (nn_svc_output(idx, &t) != NN_SVC_OK || t.data == NULL) {
-		cli_error(sh, "nn: output %lu has no buffer\r\n", (unsigned long)idx);
+
+	/*
+	 * [!] PINNED FOR THE WHOLE WALK, not just the fetch.  This reads tensor
+	 * BODIES -- the arena -- and a `nn model unload` on another console can
+	 * close the interpreter, return the flash lease, or rebuild the model
+	 * singleton while this loop is part way through it.  Both boards that had
+	 * an equivalent command guarded exactly this and left `nn info` unguarded,
+	 * because `info` never dereferences the buffer.
+	 *
+	 * One exit from here down, so the pin is returned exactly once however this
+	 * ends -- the failure paths outnumber the success path.
+	 */
+	if (nn_svc_tensors_pin() != NN_SVC_OK) {
+		cli_error(sh, "nn: busy -- another nn command holds the model\r\n");
 		return 1;
 	}
 
+	if (nn_svc_output(idx, &t) != NN_SVC_OK || t.data == NULL) {
+		cli_error(sh, "nn: output %lu has no buffer\r\n", (unsigned long)idx);
+		goto out;
+	}
 	esz = nn_dtype_size(t.dtype);
 	if (esz == 0u) {
 		cli_error(sh, "nn: output %lu has an element type this build does "
 		              "not know (%s) -- refusing to read it at a guessed "
 		              "stride\r\n", (unsigned long)idx, nn_dtype_name(t.dtype));
-		return 1;
+		goto out;
 	}
 	have = (uint32_t)(t.bytes / esz);
 	if (want > have)
@@ -647,9 +675,9 @@ static int cmd_nn_out(struct cli_instance *sh, int argc, char **argv)
 			    t.scale;
 			break;
 		case TENSOR_DTYPE_FLOAT32:
-			/* [!] No affine here: scale and zero point are meaningless
-			 * for a float tensor, and two boards publish a scale of 0
-			 * for one.  Multiplying would print every value as zero. */
+			/* [!] No affine here: scale and zero point are meaningless for a
+			 * float tensor, and two boards publish a scale of 0 for one.
+			 * Multiplying would print every value as zero. */
 			v = ((const float *)t.data)[i];
 			break;
 		default:
@@ -666,7 +694,10 @@ static int cmd_nn_out(struct cli_instance *sh, int argc, char **argv)
 		if (cli_cancel_requested(sh))
 			break;
 	}
-	return 0;
+	rc = 0;
+out:
+	nn_svc_tensors_unpin();
+	return rc;
 }
 
 /* ---- nn thresh ----------------------------------------------------------- */

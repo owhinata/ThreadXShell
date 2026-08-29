@@ -85,7 +85,7 @@ struct nn_camera_stats {
  * Holds the NN session AND psram_acquire_shared() for the WHOLE lifetime of the
  * stream, not per inference.  Both are deliberate:
  *
- *  - The session being held is what makes `ai model load` refuse while streaming,
+ *  - The session being held is what makes `nn model load` refuse while streaming,
  *    which matters more than it looks: a reload rebuilds the interpreter and
  *    re-plans the arena, so nn_input()->data MOVES.  (The band callback re-reads
  *    that pointer every frame anyway, rather than caching it across a session.)
@@ -96,10 +96,10 @@ struct nn_camera_stats {
  *    Per-inference holding would refuse the same commands AND leave a gap between
  *    inferences for exactly that.
  *
- * The documented consequence: START THE PREVIEW BEFORE `ai stream start`.  The guard
+ * The documented consequence: START THE PREVIEW BEFORE `nn stream start`.  The guard
  * coexists with an already-armed LTDC scan-out and band DMA, but it refuses a NEW
  * `lcd on` / `lcd reset` / `camera capture` / `camera preview on` while held -- the
- * same behaviour `ai bench` has, for the same reason.
+ * same behaviour `nn bench` has, for the same reason.
  */
 int nn_camera_start(int colorbar);
 
@@ -109,7 +109,7 @@ int nn_camera_start(int colorbar);
  * [!] RETURNS NNCAM_ERR_TEARING WITHOUT RELEASING ANYTHING if either side is still
  * in flight: a band callback that never returned (a producer killed by a DCMI
  * overrun) or a worker still inside nn_run().  Releasing early would hand the model
- * and its arena to `ai bench` while something can still write the input tensor.
+ * and its arena to `nn bench` while something can still write the input tensor.
  * Holding a session nobody can use is recoverable; that is not.  Calling stop again
  * re-checks and completes the release, which is why it is idempotent.
  */

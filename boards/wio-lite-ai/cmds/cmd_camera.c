@@ -119,7 +119,7 @@ static int cam_psram_take(struct cli_instance *sh)
 	if (!psram_acquire_shared()) {
 		cli_error(sh, "camera: OCTOSPI1 busy (wait for "
 		              "psram/membench/devmem/wifi flash, or run "
-		              "`ai stream stop`)\r\n");
+		              "`nn stream stop`)\r\n");
 		return 0;
 	}
 	return 1;
@@ -923,13 +923,13 @@ static int cmd_camera_preview(struct cli_instance *sh, int argc, char **argv)
 		if (on)
 			cam_psram_give();
 		/* -2 is its own case: everything is healthy, but switching the sensor's
-		   test pattern means restarting the shared band stream, and `ai stream` is
+		   test pattern means restarting the shared band stream, and `nn stream` is
 		   on it.  The catch-all below would send someone to `dmesg` for a fault
 		   that is not there. */
 		if (rc == -2)
 			cli_error(sh, "camera: switching the test pattern restarts the band "
-			              "stream, which `ai stream` is using -- "
-			              "`ai stream stop` first\r\n");
+			              "stream, which `nn stream` is using -- "
+			              "`nn stream stop` first\r\n");
 		else if (rc == -3)
 			cli_error(sh, "camera: the other console is starting or stopping the "
 			              "band stream -- try again\r\n");

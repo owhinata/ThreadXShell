@@ -14,7 +14,7 @@
  *
  * HOW A RUN LOOKS
  *
- *     wio> ai model load 0            # a benchmark model from a NOR blob slot
+ *     wio> nn model load --slot 0            # a benchmark model from a NOR blob slot
  *     wio> mlperf                     # console goes raw; the host drives from here
  *     ...                             # PC: python main.py --mode=p
  *     ^]                              # back to the shell, with a local summary
@@ -53,7 +53,7 @@
 static int mlperf_guards_take(struct cli_instance *sh)
 {
 	/*
-	 * Same order as `ai bench` (shell/cmds/cmd_ai.c): the software session first,
+	 * Same order as `nn bench` (shell/cmds/cmd_nn.c): the software session first,
 	 * then the hardware.  Taking the PSRAM first would mean holding a peripheral in
 	 * order to discover that a second console is already using the model.
 	 */
@@ -69,7 +69,7 @@ static int mlperf_guards_take(struct cli_instance *sh)
 	}
 	if (!psram_acquire_shared()) {
 		cli_error(sh, "mlperf: OCTOSPI1 busy (a psram/membench/wifi flash command "
-		              "holds it, or `ai stream` is running)\r\n");
+		              "holds it, or `nn stream` is running)\r\n");
 		nn_session_release();
 		return -1;
 	}
@@ -138,7 +138,7 @@ static int cmd_mlperf(struct cli_instance *sh, int argc, char **argv)
 	}
 	if (nn_input_count(m) == 0) {
 		cli_error(sh, "mlperf: no model loaded -- `blob list`, then "
-		              "`ai model load <slot>`\r\n");
+		              "`nn model load --slot <n>`\r\n");
 		return 1;
 	}
 

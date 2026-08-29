@@ -67,22 +67,33 @@ static void nn_result(struct nn_op_result *res, int status, enum nn_claim claim)
 }
 
 /*
- * A stop's return, as cleanup authority.
+ * This board's stop codes, and nothing else (issue #99).
  *
- * [!] -7 AND -8 ARE NOT FAILURES TO REPORT AND FORGET (issue #72).  -7 means the
- * sink is detached but still pinned, so a producer callback may still be writing
- * the staging buffers; -8 means another start/stop owns the transition.  In both
- * the claim is still out, the release is idempotent and either the worker or a
- * later stop settles it -- so this is RETRYABLE, and the next start being
- * refused has to have been said out loud once already.
+ * [!] EXHAUSTIVE, WITH THE DEFAULT ELSEWHERE.  This used to end in a catch-all
+ * "retryable" -- and even spelled the catch-all out twice, which is how a rule
+ * that had stopped being a rule managed to look deliberate.  nn_stream_disp_of()
+ * supplies the fail-closed default now.
+ *
+ * nn_camera_stop() returns exactly these five.
  */
+static const struct nn_stream_disp nn_stop_disp[] = {
+	{  0, NN_STREAM_CLAIM_NONE      },  /* stopped                          */
+	{ -1, NN_STREAM_CLAIM_NONE      },  /* was not running                  */
+	/* The worker is still inside nn_run(); it releases the session as it
+	   exits, and the sink is already released, so this is not a refusal. */
+	{ -2, NN_STREAM_CLAIM_RETRYABLE },
+	/* The sink did not hand its frame back: a producer callback may still be
+	   preprocessing into our staging buffers (issue #72). */
+	{ -7, NN_STREAM_CLAIM_RETRYABLE },
+	/* A start or another stop owns the lifecycle -- nothing was done. */
+	{ -8, NN_STREAM_CLAIM_RETRYABLE },
+};
+
 static enum nn_claim nn_claim_of_stop(int stop_rc)
 {
-	if (stop_rc == 0 || stop_rc == -1)   /* stopped, or was not running */
-		return NN_CLAIM_NONE;
-	if (stop_rc == -7 || stop_rc == -8)
-		return NN_CLAIM_RETRYABLE;
-	return NN_CLAIM_RETRYABLE;           /* a timeout settles the same way */
+	return (enum nn_claim)nn_stream_disp_of(stop_rc, nn_stop_disp,
+	                                        (unsigned)(sizeof nn_stop_disp /
+	                                                   sizeof nn_stop_disp[0]));
 }
 
 /* ---- info ---------------------------------------------------------------- */
@@ -134,6 +145,12 @@ void nn_svc_info(struct nn_svc_info *out)
 	if (bi && strcmp(bi->name, "null") == 0)
 		nn_svc_str(out->source, sizeof out->source,
 		           "synthetic workload, not inference");
+
+	/* Every section is answered here, streaming or not -- which is the point of
+	   the copy above (issue #99 made this explicit rather than implied). */
+	out->avail_identity = (uint8_t)NN_AVAIL_OK;
+	out->avail_runtime  = (uint8_t)NN_AVAIL_OK;
+	out->avail_tensors  = (uint8_t)NN_AVAIL_OK;
 }
 
 /* ---- model lifecycle ----------------------------------------------------- */
@@ -507,6 +524,340 @@ void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
 }
 
 /* ---- norm, boxes and threshold ------------------------------------------- */
+
+/* ---- live inference (issue #99) ------------------------------------------
+ *
+ * The subscriber worker in port/nn/nn_camera.c is unchanged and still owns the
+ * lifecycle and the NN session.  What this adds is an IDENTITY, so a `--frames`
+ * waiter cannot stop a stream that another console started after its own had
+ * gone.
+ */
+/* The lifecycle itself is svc/nn_stream_life.c's -- see there for why one
+   machine rather than three, and for the rule that every call below is made
+   under this port's own critical section. */
+static struct nn_stream_life nn_life;
+static uint32_t nn_stream_t0;
+static uint32_t nn_stream_ms;
+
+/* Admit a start BEFORE the worker is touched.  This board has no re-arm, so
+   IDLE is the only phase a start may come from. */
+static enum nn_stream_start_claim nn_stream_admit(void)
+{
+	enum nn_stream_start_claim r;
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	r = nn_stream_life_begin(&nn_life);
+	TX_RESTORE
+	return r;
+}
+
+static void nn_stream_unadmit(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	(void)nn_stream_life_abort(&nn_life);
+	TX_RESTORE
+}
+
+static void nn_stream_mint(uint32_t *gen)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	/* [!] Published only once the generation exists -- see the note in
+	 * svc/nn_stream_life.h on applying side effects to a refused transition. */
+	*gen = nn_stream_life_commit(&nn_life);
+	if (*gen != NN_STREAM_GEN_ANY) {
+		nn_stream_t0 = (uint32_t)tx_time_get();
+		nn_stream_ms = 0u;
+	}
+	TX_RESTORE
+}
+
+/*
+ * [!] TEST AND CLAIM IN ONE CALL, under one critical section.  Comparing the
+ * generation and then acting is what let two callers both be admitted for one
+ * stream -- and the second of them then ran its teardown against whatever was
+ * there by the time it got round to it, which on this board is an untagged
+ * nn_camera_stop().
+ */
+static enum nn_stream_stop_claim nn_stream_claim_stop(uint32_t gen)
+{
+	enum nn_stream_stop_claim r;
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	r = nn_stream_life_claim_stop(&nn_life, gen);
+	TX_RESTORE
+	return r;
+}
+
+
+void nn_svc_stream_start(const struct nn_stream_spec *spec,
+                         struct nn_op_result *res, uint32_t *gen)
+{
+	int rc;
+
+	if (res == NULL)
+		return;
+	res->detail[0] = '\0';
+	if (spec == NULL || gen == NULL) {
+		nn_result(res, NN_SVC_ERR_ARG, NN_CLAIM_NONE);
+		return;
+	}
+	if (spec->test) {
+		nn_detail_set("this board has no test pattern to stream");
+		nn_result(res, NN_SVC_ERR_SPEC, NN_CLAIM_NONE);
+		return;
+	}
+
+	/* The geometry is NOT chosen here: the input adapts to whatever the base
+	   capture publishes.  The resolution word this command used to take was
+	   discarded by the port, and issue #99 removed it. */
+	/* [!] ADMITTED BEFORE THE WORKER IS TOUCHED, so this never says IDLE while
+	 * the board is already streaming. */
+	switch (nn_stream_admit()) {
+	case NN_STREAM_START_GO:
+		break;
+	case NN_STREAM_START_RUNNING:
+		nn_detail_set("a stream is already running (`nn stream stats`)");
+		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
+		return;
+	case NN_STREAM_START_DEAD:
+		nn_detail_set("a previous teardown was never confirmed; only a reboot "
+		              "clears it");
+		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
+		return;
+	case NN_STREAM_START_BUSY:
+	default:
+		nn_detail_set("a start or a stop is already in progress -- retry");
+		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
+		return;
+	}
+
+	rc = nn_camera_start(CAM_RES_QVGA);
+	if (rc != 0) {
+		nn_stream_unadmit();
+		nn_detail_set("start failed (%d): NN busy (bench or another stream), "
+		              "SDRAM down, or no model loaded?", rc);
+		nn_result(res, (rc == -2) ? NN_SVC_ERR_STATE : NN_SVC_ERR_HW,
+		          NN_CLAIM_NONE);
+		return;
+	}
+	nn_stream_mint(gen);
+	if (*gen == NN_STREAM_GEN_ANY) {
+		/*
+		 * [!] REFUSED, WHICH MEANS THIS CALLER NO LONGER OWNS THE START -- and
+		 * therefore does not know who does.  Unreachable under the transitions
+		 * admission allows, so this is invariant-failure handling; it fails
+		 * CLOSED rather than tidying up.  Issuing a stop here would be an
+		 * ownerless teardown that could collide with one already in progress,
+		 * and releasing the claim could free something a live thread is inside.
+		 * Report terminal and leave everything exactly as it is.
+		 */
+		nn_detail_set("the stream lifecycle moved underneath this start; what "
+		              "owns the hardware now cannot be established");
+		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
+		return;
+	}
+
+	/*
+	 * [!] THIS IS A SUBSCRIBER OF THE BASE CAPTURE, and saying so matters more
+	 * now than it did: a bounded `--frames` run waits for frames that will
+	 * never arrive until the base is started, and the wait itself cannot tell
+	 * that from a slow camera.
+	 */
+	if (!camera_streaming())
+		nn_detail_set("inference enabled -- start the base "
+		              "(`camera stream start`) before frames arrive");
+	else
+		nn_detail_set("inference stream started");
+	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
+}
+
+int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
+{
+	struct nn_camera_stats st;
+	struct nn_camera_decode dec;
+	uint32_t seq0, seq1, g, t0, ms;
+	uint8_t  phase;
+	TX_INTERRUPT_SAVE_AREA
+
+	if (out == NULL)
+		return NN_SVC_ERR_ARG;
+
+	TX_DISABLE
+	nn_stream_life_snapshot(&nn_life, &g, &phase, &seq0);
+	t0 = nn_stream_t0;
+	ms = nn_stream_ms;
+	TX_RESTORE
+
+	if (g == NN_STREAM_GEN_ANY)
+		return NN_SVC_ERR_STATE;                  /* nothing has ever run */
+	/* [!] Only a DIFFERENT generation is "somebody else's".  Our own, finished,
+	 * still answers -- that is how a waiter tells "mine ended" from "a
+	 * successor is running", and they call for different words. */
+	if (gen != NN_STREAM_GEN_ANY && gen != g)
+		return NN_SVC_ERR_GEN;
+
+	/* Outside the critical section: these take their own locks. */
+	nn_camera_stats_get(&st);
+	dec.valid = 0;
+	(void)nn_camera_decode_get(&dec, NULL, 0);
+
+	TX_DISABLE
+	nn_stream_life_snapshot(&nn_life, NULL, NULL, &seq1);
+	TX_RESTORE
+	if (seq1 != seq0)
+		return NN_SVC_ERR_STALE;
+
+	memset(out, 0, sizeof *out);
+	out->running = (phase == (uint8_t)NN_STREAM_PHASE_RUNNING &&
+	               st.running) ? 1u : 0u;
+	/* [!] The per-STREAM counts, not the per-attach ones -- see nn_camera.h.
+	 * Mixing the two made `nn stream stats` report 60 frames in, 36 infers and
+	 * 0 skipped, which cannot all be true of one period. */
+	/* [!] OFFERED, not staged: a frame dropped for want of a free stage was
+	 * still offered, and `skipped` has to be a subset of `frames`. */
+	out->skipped = st.gen_drops;
+	out->frames  = st.gen_frames + st.gen_drops;
+	out->infers  = st.gen_infers;
+	out->errors  = st.gen_errors;
+	out->last_us = st.last_us;
+	out->elapsed_ms = out->running
+	                ? (uint32_t)(((uint32_t)tx_time_get() - t0) * 1000u /
+	                             TX_TIMER_TICKS_PER_SECOND)
+	                : ms;
+	out->last_valid = dec.valid ? 1u : 0u;
+	out->last_ndet  = (int32_t)dec.ndet;
+	return NN_SVC_OK;
+}
+
+void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
+{
+	enum nn_claim claim;
+	int rc;
+	TX_INTERRUPT_SAVE_AREA
+
+	if (res == NULL)
+		return;
+	res->detail[0] = '\0';
+
+	switch (nn_stream_claim_stop(gen)) {
+	case NN_STREAM_STOP_GO:
+		break;
+	case NN_STREAM_STOP_WRONG_GEN:
+		nn_detail_set("that stream has already been replaced by another");
+		nn_result(res, NN_SVC_ERR_GEN, NN_CLAIM_NONE);
+		return;
+	case NN_STREAM_STOP_BUSY:
+		/* [!] NOTHING WAS ATTEMPTED, SO NOTHING IS THE CALLER'S TO RELEASE
+		 * (issue #99, bench).  This used to report RETRYABLE, which made the
+		 * shared reporter add "teardown did not finish; nn is still held" --
+		 * said to a background waiter whose stream another console was at that
+		 * moment tearing down perfectly well.  The claim is somebody else's and
+		 * they are settling it; the retry advice belongs in the detail, not in
+		 * a warning about a teardown this caller never began. */
+		nn_detail_set("a start or another stop owns the stream -- retry");
+		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
+		return;
+	case NN_STREAM_STOP_DEAD:
+		nn_detail_set("a previous teardown was never confirmed; only a reboot "
+		              "clears it");
+		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
+		return;
+	case NN_STREAM_STOP_IDLE:
+	default:
+		nn_detail_set("not running");
+		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
+		return;
+	}
+
+	/*
+	 * [!] THE LIFECYCLE IS SETTLED ON EVERY EXIT FROM HERE, because the claim
+	 * above left it in STOPPING and nothing else can start or stop until it is
+	 * handed back.  A path that returned without doing so would wedge the
+	 * stream for good -- the failure the retryable answer exists to avoid.
+	 */
+	rc = nn_camera_stop();
+	claim = nn_claim_of_stop(rc);
+	TX_DISABLE
+	/* [!] The elapsed freeze rides on the transition, not beside it: if the
+	 * settle were refused, freezing anyway would date a generation that is
+	 * still running. */
+	if (claim == NN_CLAIM_RETRYABLE) {
+		(void)nn_stream_life_retry(&nn_life);  /* stoppable again, same gen */
+	} else {
+		int took = (claim == NN_CLAIM_TERMINAL)
+		         ? nn_stream_life_poison(&nn_life)
+		         : nn_stream_life_finish(&nn_life);  /* the generation is kept */
+
+		if (took)
+			nn_stream_ms = (uint32_t)(((uint32_t)tx_time_get() -
+			                           nn_stream_t0) * 1000u /
+			                          TX_TIMER_TICKS_PER_SECOND);
+	}
+	TX_RESTORE
+
+	if (rc == -1) {
+		nn_detail_set("not running");
+		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
+		return;
+	}
+	if (rc != 0) {
+		/*
+		 * [!] THE INCOMPLETE TEARDOWNS ARE RETRYABLE, NOT FAILURES (issue #72),
+		 * and anything this board does not document is TERMINAL -- see
+		 * nn_stop_disp[].
+		 * -7 means the sink is detached but still pinned, so a producer callback
+		 * may still be writing the staging buffers; -8 means another start or
+		 * stop owns the transition.  In both the claim is still out and the
+		 * release is idempotent, so repeating the stop is what settles it.
+		 */
+		if (rc == -8)
+			nn_detail_set("another `nn stream` start/stop is in progress -- "
+			              "retry");
+		else if (rc == -7)
+			nn_detail_set("the camera has not released the inference frame; "
+			              "the stream stays reserved -- retry");
+		else if (rc == -2)
+			nn_detail_set("the worker is still inside an inference; it "
+			              "releases the session as it exits -- retry");
+		else
+			/* [!] AND AN UNDOCUMENTED CODE MUST NOT SAY "RETRY" (issue #99).
+			 * It is classified TERMINAL by nn_stop_disp[], so the shared
+			 * reporter is about to say nn stays held until reboot -- telling
+			 * the operator to retry in the same breath is two instructions
+			 * that contradict each other. */
+			nn_detail_set("the teardown returned an undocumented code (%d), so "
+			              "it cannot be classified", rc);
+		nn_result(res, NN_SVC_ERR_HW, claim);
+		return;
+	}
+	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
+}
+
+int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
+                        char *buf, size_t cap)
+{
+	struct nn_camera_stats st;
+
+	if (buf == NULL || cap == 0u)
+		return NN_SVC_ERR_ARG;
+	buf[0] = '\0';
+	if (ctx != NN_STREAM_LINES_STATS || index != 0u)
+		return 0;
+
+	nn_camera_stats_get(&st);
+	/* The base geometry the input adapted to.  It is a report, never a setting
+	   -- see the note in nn_svc_stream_start(). */
+	nn_detail_to(buf, cap, "base    : %s",
+	             (st.res == (uint8_t)CAM_RES_QQVGA) ? "qqvga" :
+	             (st.res == (uint8_t)CAM_RES_QVGA)  ? "qvga" : "vga");
+	return 1;
+}
 
 void nn_svc_norm_set(int signed_range)
 {

@@ -32,15 +32,20 @@
  * than not listing it.
  */
 
-/*
- * NOT a background stream either.  This board's live inference is `nn preview`,
- * which BLOCKS and draws on the panel, and the other two boards have a
- * background worker with stop/stats.  Issue #50 deliberately does not
- * reconcile those: the difference is the camera-producer and panel-guard
- * ordering that issues #48, #65 and #77 settled, not a formatting difference.
- * The follow-up moves every board to `nn stream start/stop/stats` and REMOVES
- * this -- it is temporary, not a second permanent grammar.
+/**
+ * Live inference, as `nn stream start/stop/stats` (issue #99).
+ *
+ * This board's live inference used to be `nn preview`, which BLOCKED and drew
+ * on the panel while the other two had a background worker.  Issue #99 moved
+ * all three onto one grammar over neutral start/poll/stop hooks and removed
+ * `preview`; the panel drawing is unchanged, it simply outlives the command
+ * now.  On a board with ONE console that is the bigger half of the change --
+ * `camera stats` and `nn info` during a run were previously unreachable.
+ *
+ * NOT NN_SVC_HAS_STREAM_TEST: there is no sensor test pattern here, and a
+ * `--test` that always refused would be an option listed in `help` that cannot
+ * do anything.
  */
-#define NN_SVC_HAS_PREVIEW     1
+#define NN_SVC_HAS_STREAM      1
 
 #endif /* NN_SVC_CONFIG_H */

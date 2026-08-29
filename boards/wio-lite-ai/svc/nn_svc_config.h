@@ -38,12 +38,14 @@
  *  whenever its preview runs. */
 #define NN_SVC_HAS_OVERLAY     1
 
-/** A background inference worker with stop and stats.  The handler stays this
- *  board's own for now -- see cmds/cmd_nn_board.c and issue #50's deferral. */
+/** Live inference, as `nn stream start/stop/stats`.  One shared implementation
+ *  since issue #99; the worker below it is unchanged. */
 #define NN_SVC_HAS_STREAM      1
 
-/* NOT `preview`: this board's live inference is the background worker above,
-   and the overlay rides on the camera's own LTDC preview rather than on a
-   blocking command of its own. */
+/** ...and this board is the only one with a sensor test pattern to stream
+ *  instead of the camera, so `nn stream start --test` exists here and is
+ *  refused elsewhere.  A property, not a board name: it is the colorbar the
+ *  band claim can ask for. */
+#define NN_SVC_HAS_STREAM_TEST 1
 
 #endif /* NN_SVC_CONFIG_H */

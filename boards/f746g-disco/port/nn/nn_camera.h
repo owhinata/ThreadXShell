@@ -48,6 +48,16 @@ struct nn_camera_stats {
 	uint32_t last_us;      /**< latency of the last inference (us)     */
 	uint32_t fps_x100;     /**< average inference rate x100 since start */
 	uint32_t detections;   /**< detections from the last inference (task 8) */
+	/**
+	 * [!] Frames since the logical `nn stream start`, which `frames` above is
+	 * NOT (issue #99): that one is cleared on every pipeline attach, so it
+	 * restarts when the base capture starts and again after an overrun
+	 * re-attach.  A bounded run needs a count that only moves forwards.
+	 */
+	uint32_t gen_frames;
+	uint32_t gen_infers;   /**< ...and the same for these three, or the four   */
+	uint32_t gen_errors;   /**< numbers describe two different periods and do  */
+	uint32_t gen_drops;    /**< not add up (issue #99).                        */
 };
 
 /**

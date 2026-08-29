@@ -394,7 +394,6 @@ set(SHELL_SOURCES
     "${BOARD_DIR}/cmds/cmd_camera.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
-    "${BOARD_DIR}/cmds/cmd_nn_board.c"
     "${BOARD_DIR}/cmds/cmd_nor.c"
     "${BOARD_DIR}/cmds/cmd_blob.c"
     # YMODEM receive over the console (issue #92).  The protocol core is the
@@ -668,6 +667,8 @@ add_library(shell_objs OBJECT
     "${GROVE_SHARED_DECODER}"
     "${BOARD_DIR}/port/npu/nn_decoder.c"
     "${BOARD_DIR}/port/npu/nn_svc_grove.c"
+    "${BOARD_DIR}/port/npu/nn_stream_state.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"
     ${SHELL_SOURCES}
     ${SDK_SOURCES}
     ${TX_CORE} ${TX_ASM} ${TX_EPK})
@@ -896,6 +897,14 @@ add_shared_storage_gate(NAME grove_nn_core_audit
                         SOURCE "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
                         IFACE bsp_iface CONSUMER shell_objs)
 add_dependencies(shell grove_nn_core_audit_check)
+
+# ...and the shared stream lifecycle (issue #99), for the same reason: the state
+# is the BOARD's struct, so a static appearing in here would be memory no board
+# placed and no board's residency gate names.
+add_shared_storage_gate(NAME grove_nn_life_audit
+                        SOURCE "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"
+                        IFACE bsp_iface CONSUMER shell_objs)
+add_dependencies(shell grove_nn_life_audit_check)
 
 # And the negative tests for that checker, run with THIS board's cross compiler
 # so the __arm__-only fixture is meaningful (it passes under the host compiler,

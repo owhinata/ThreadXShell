@@ -50,7 +50,7 @@
 #include "cam_lcd_sink.h"
 #include "camera.h"
 #include "lcd_st7789.h"
-#include "nn_overlay.h"   /* the sink row's stage split under `nn preview` */
+#include "nn_overlay.h"   /* the sink row's stage split under `nn stream` */
 
 #define CAM_PREVIEW_DEFAULT 0u   /* 0 = until Ctrl+C */
 #define CAM_BENCH_DEFAULT  60u   /* enough to average, ~4 s at 15 fps  */
@@ -351,7 +351,7 @@ static int cmd_camera_preview(struct cli_instance *sh, int argc, char **argv)
 
 	/*
 	 * No overlay: a plain preview stays a plain preview.  It is an argument
-	 * rather than a mode so that `nn preview`'s boxes can never be inherited
+	 * rather than a mode so that `nn stream`'s boxes can never be inherited
 	 * by this command (issue #48).
 	 *
 	 * ONE CALL, because attaching and starting are one operation since issue
@@ -530,7 +530,7 @@ static void cam_print_profile(struct cli_instance *sh,
 	              st->prof_iters, "planar B/G/R -> RGB565, 76800 px");
 	/* NOT the blit -- that left this thread in #57 and has its own row
 	 * below.  What is left is whatever the sinks do on the producer: the
-	 * inference under `nn preview`, and since #64 the panel thread's staging
+	 * inference under `nn stream`, and since #64 the panel thread's staging
 	 * copy, which now preempts this thread instead of queueing behind it. */
 	cam_prof_line(sh, "sink", st->prof_sink_us, st->prof_total_us,
 	              st->prof_iters, "sinks consume: inference + panel staging");
@@ -712,7 +712,7 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 	 * [!] WHERE THE 26 ms WENT (issue #57).
 	 *
 	 * The producer's `sink` row above is now just the hand-off (plus the
-	 * inference under `nn preview`); the blit itself is timed on the panel
+	 * inference under `nn stream`); the blit itself is timed on the panel
 	 * thread and reported here.  Both numbers are needed: "the producer's
 	 * went down" is also what a sink that silently stopped drawing looks
 	 * like, and only this row distinguishes moved from lost.
@@ -742,7 +742,7 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 		          (unsigned long)(sk.hold_us / sk.hold_frames),
 		          (unsigned long)sk.hold_frames);
 	/*
-	 * [!] WHAT IS INSIDE THE PRODUCER'S `sink` ROW under `nn preview`
+	 * [!] WHAT IS INSIDE THE PRODUCER'S `sink` ROW under `nn stream`
 	 * (issue #60).  One number was carrying the whole of "preprocess +
 	 * inference + decode + hand-off", and which stage owns it decides what
 	 * is worth optimising -- so the overlay times its own stages and they
@@ -751,7 +751,7 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 	 * the producer inside it (the panel's staging copy, since #64).
 	 *
 	 * The scope is in the header because it is NOT the profile's: these
-	 * reset when an `nn preview` arms the overlay, not at stream start, so
+	 * reset when an `nn stream` arms the overlay, not at stream start, so
 	 * after a later `camera preview` they still describe the LAST nn run
 	 * while the sink row above no longer contains them.
 	 */
@@ -760,7 +760,7 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 
 		nn_overlay_stats(&ns);
 		if (ns.prof_frames != 0u && ns.prof_ok) {
-			cli_print(sh, "nn sink  : %lu frame(s), last nn preview "
+			cli_print(sh, "nn sink  : %lu frame(s), last nn stream "
 			              "[producer thread]\r\n",
 			          (unsigned long)ns.prof_frames);
 			cli_print(sh, "  prep   : %6lu us/frame   setup + "
@@ -789,7 +789,7 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 		                                        : " [!]");
 	if (sk.fault != NULL)
 		cli_print(sh, "sink err : %s\r\n", sk.fault);
-	/* Only ever non-zero after an `nn preview`: a frame whose inference was
+	/* Only ever non-zero after an `nn stream`: a frame whose inference was
 	 * refused is still SHOWN, just without boxes, so it counts here and not
 	 * as a sink error. */
 	if (sk.overlay_errors != 0u)

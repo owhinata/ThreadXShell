@@ -38,11 +38,13 @@
  *  choice of range is real here in a way it is not on an int8-only board. */
 #define NN_SVC_HAS_NORM        1
 
-/** A background inference worker with stop and stats.  The handler stays this
- *  board's own for now -- see cmds/cmd_nn_board.c and issue #50's deferral. */
+/** Live inference, as `nn stream start/stop/stats`.  One shared implementation
+ *  since issue #99; the subscriber worker below it is unchanged.
+ *
+ *  NOT NN_SVC_HAS_STREAM_TEST: there is no test pattern on this path.  The
+ *  `[qqvga|qvga]` argument this command used to take was removed with it --
+ *  the port discarded it and took the geometry from the base capture instead,
+ *  so it had not selected anything for some time. */
 #define NN_SVC_HAS_STREAM      1
-
-/* NOT `preview`: that is the other board's blocking panel form.  This board's
-   live inference is the background worker above. */
 
 #endif /* NN_SVC_CONFIG_H */

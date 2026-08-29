@@ -29,7 +29,7 @@
 /*
  * Priority 18, which nothing else in this firmware uses.
  *
- * BELOW the CLI (16) so `ai stream stop` always reaches the console -- inference is
+ * BELOW the CLI (16) so `nn stream stop` always reaches the console -- inference is
  * a monolithic ~373 ms call with no yield in it, which is precisely why it must sit
  * under the thing that stops it.  BELOW the preview (12) and the camera producer
  * (10) so inference never delays the display or the band deadline.
@@ -247,7 +247,7 @@ static void nncam_rows(const uint16_t *src, unsigned src_y0,
 /*
  * One band, on the camera's producer thread, fanned out by app/cam_band.c after the
  * preview has had it.  Must finish well inside a band period (~18.5 ms); the DWT
- * cycles below are what proves it does, and `ai stream stats` reports the worst one.
+ * cycles below are what proves it does, and `nn stream stats` reports the worst one.
  */
 static void nncam_band(unsigned band, const uint16_t *px, unsigned rows)
 {
@@ -275,7 +275,7 @@ static void nncam_band(unsigned band, const uint16_t *px, unsigned rows)
 		return;
 	}
 
-	/* [!] Re-read every frame, never cached across a session: `ai model load`
+	/* [!] Re-read every frame, never cached across a session: `nn model load`
 	   rebuilds the interpreter and re-plans the arena, so this pointer moves.
 	   (That load cannot happen WHILE we stream -- it needs the NN session, which
 	   this stream holds -- but the cost of re-reading is one load.) */
@@ -323,7 +323,7 @@ static void nncam_band(unsigned band, const uint16_t *px, unsigned rows)
  *
  * @return non-zero if they were taken.  A publish from a session that has since
  *         ended is DROPPED -- svc/nn_det_record.c has the rule and the reason --
- *         and the caller must not count it, because `ai run` waits on the
+ *         and the caller must not count it, because `nn run` waits on the
  *         inference counter and then reads the record.
  */
 static int nncam_publish(const struct bf_det *d, int n,
@@ -441,7 +441,7 @@ static void nncam_step(void)
 	nncam_infer_cyc = nn_last_cycles(nncam_model);
 
 	n = nn_decoder_run(nncam_model, tmp, BF_MAX_DET, &bfr);
-	/* Bumped LAST, after the boxes are published, and ONLY IF THEY WERE: `ai run`
+	/* Bumped LAST, after the boxes are published, and ONLY IF THEY WERE: `nn run`
 	   waits for this counter to move and then reads the detections, so
 	   incrementing first would let it read the PREVIOUS inference's boxes and
 	   report them as this one's -- and so would incrementing for a publish that
@@ -528,8 +528,8 @@ int nn_camera_start(int colorbar)
 		 * in its bounded wait, and the NN claim was never dropped.  So the re-arm
 		 * is exactly one call, and it must NOT re-take the guards.
 		 *
-		 * Refusing here instead would make `ai stream stats`' own advice ("re-issue
-		 * `ai stream start` to re-arm") wrong, which is worse than having no
+		 * Refusing here instead would make `nn stream stats`' own advice ("re-issue
+		 * `nn stream start` to re-arm") wrong, which is worse than having no
 		 * recovery hint at all.
 		 */
 		if (!cam_band_stream_lost())
@@ -547,10 +547,24 @@ int nn_camera_start(int colorbar)
 		nncam_filling    = 0;
 		nncam_want_frame = 0;
 
+		/*
+		 * [!] AND THE DECODE RECORD IS RETIRED TOO (issue #99).  A re-arm is a
+		 * NEW generation as far as `nn stream` is concerned, and this reset is
+		 * what makes the worker agree: it clears the last decode, so the new
+		 * generation does not open by reporting the old one's faces, and it
+		 * advances the record generation, so an inference that was still in
+		 * flight when the stream died cannot publish across the boundary and be
+		 * counted as this generation's work.
+		 *
+		 * BEFORE the band is re-claimed, so the producer never resumes while the
+		 * old generation is still the current one.
+		 */
+		nncam_record_reset();
+
 		if (cam_band_claim(CAM_BAND_NN, colorbar, nncam_band) != CAM_BAND_OK) {
 			/* cam_band_claim() unwound our claim, but nncam_run and the guards
 			   are still ours -- and with no claim left the lost latch cannot
-			   re-arm itself, so a second `ai stream start` would just report
+			   re-arm itself, so a second `nn stream start` would just report
 			   "already running".  Say what actually clears it instead of leaving
 			   the user to discover a state with no obvious way out. */
 			return NNCAM_ERR_REARM;
@@ -686,7 +700,7 @@ int nn_camera_stop(void)
 	 * [!] Called UNCONDITIONALLY, not just when the claim is still set.  A previous
 	 * stop that timed out already cleared the claim but left a callback in flight;
 	 * skipping the drain on the retry because "we are not claimed any more" would
-	 * release the arena to `ai bench` with that callback still able to write the
+	 * release the arena to `nn bench` with that callback still able to write the
 	 * input tensor -- which is the precise thing the first stop refused to do.
 	 * cam_band_release() is idempotent, so calling it again is free.
 	 */
@@ -699,10 +713,10 @@ int nn_camera_stop(void)
 
 	if (rc_band != CAM_BAND_OK || nncam_worker_busy) {
 		/* [!] Deliberately do NOT release the session or the OCTOSPI1 guard.  See
-		   nn_camera.h: handing the arena to `ai bench` while a dead-but-not-
+		   nn_camera.h: handing the arena to `nn bench` while a dead-but-not-
 		   returned callback can still write the input tensor is unrecoverable,
 		   whereas holding a session nobody can use is not.  The worker releases
-		   on its way out, or a second `ai stream stop` completes it. */
+		   on its way out, or a second `nn stream stop` completes it. */
 		LOG_WRN("stop: still tearing down (band %d, worker busy %d)",
 		        rc_band, nncam_worker_busy);
 		return NNCAM_ERR_TEARING;
@@ -740,10 +754,10 @@ void nn_camera_stats_get(struct nn_camera_stats *out)
 
 	/* Read directly rather than under nncam_det_lock: a single int cannot tear on
 	   this core, and taking the mutex here would make this function unusable before
-	   the first start() has created it (`ai stream stats` on a cold boot). */
+	   the first start() has created it (`nn stream stats` on a cold boot). */
 	/* Read without nncam_det_lock: a single int cannot tear on this core, and
 	   taking the mutex here would make this function unusable before the first
-	   start() has created it (`ai stream stats` on a cold boot). */
+	   start() has created it (`nn stream stats` on a cold boot). */
 	out->ndet = nncam_rec.ndet;
 }
 

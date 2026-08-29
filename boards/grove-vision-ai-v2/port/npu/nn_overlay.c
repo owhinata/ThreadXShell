@@ -88,7 +88,7 @@ static uint32_t nn_ov_prof_frames;
  * panel thread -- that did not acknowledge a stop (see nn_overlay.h).
  */
 static struct bf_det nn_ov_det[BF_MAX_DET];
-/* The most recent decode's status, so `nn preview`'s summary can say WHY it
+/* The most recent decode's status, so `nn stream`'s summary can say WHY it
  * annotated nothing rather than only that it did not. */
 static int           nn_ov_last_status;
 static int           nn_ov_ndet;
@@ -119,7 +119,7 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	 * packs it into the slot and only then publishes) but not the same
 	 * pixels.
 	 *
-	 * Keeping the model on the raw frame is what makes `nn preview`
+	 * Keeping the model on the raw frame is what makes `nn stream`
 	 * comparable with `nn detect`, and keeps issue #45's working detection
 	 * as the baseline: #48 changes the geometry, and changing the colour
 	 * path in the same commit would leave nothing to compare against.

@@ -561,7 +561,7 @@ static int cam_lcd_consume(void *ctx, const struct frame_desc *f)
 	/*
 	 * [!] ON THE PRODUCER, and that ordering is the design (issue #48).
 	 *
-	 * This is where a whole NPU inference happens under `nn preview`.  It
+	 * This is where a whole NPU inference happens under `nn stream`.  It
 	 * reads the raw WDMA3 buffer, which is stable only until this function
 	 * returns -- the datapath is re-armed after publish -- so it cannot be
 	 * moved to the panel thread with the blit.  It runs with the panel
@@ -659,12 +659,37 @@ int cam_lcd_sink_attach_and_stream(const struct cam_lcd_overlay *ov)
 		return (s == SINK_LOST) ? CAM_ERR_STATE : CAM_ERR_BUSY;
 	}
 
-	/* Outside the critical section on purpose: lcd_init() is a reset pulse,
-	 * an init table and a priming DMA transfer.  Only the claim above and
-	 * the transition below are indivisible. */
+	/*
+	 * [!] THE PANEL GUARD IS HELD FROM HERE UNTIL THE SINK IS LINKED (issue
+	 * #99), and that is not the same job as the critical section above.
+	 *
+	 * Since live inference stopped blocking its console, an operator can type
+	 * `lcd rot` while a stream is coming up.  Rotation and MADCTL change the
+	 * driver's PERSISTENT geometry, and this sink blits a fixed size that the
+	 * driver validates inside the guard -- so a rotation landing between the
+	 * check below and the attach leaves every later blit refused or clamped
+	 * while every layer still reports success.  Asking "is a sink linked?" and
+	 * then acting cannot close that: the sink is not linked yet.
+	 *
+	 * Holding the guard across the bring-up and the rotate makes the two
+	 * mutually exclusive instead.  It is a non-blocking guard, so a setter that
+	 * arrives meanwhile is refused rather than queued, and this is refused if a
+	 * setter got there first -- which is the honest answer in both directions.
+	 *
+	 * Not a critical section: lcd_init() is a reset pulse, an init table and a
+	 * priming DMA transfer, and the guard is exactly the right thing to hold
+	 * across it.  It is recursive, so the driver calls below nest.
+	 */
+	if (lcd_acquire() != 0) {
+		LOG_ERR("the panel is held by another command");
+		sink_set_state(SINK_DETACHED);
+		return CAM_ERR_BUSY;
+	}
+
 	if (!lcd_ready()) {
 		if (lcd_init() != 0) {
 			LOG_ERR("panel bring-up failed");
+			lcd_release();
 			sink_set_state(SINK_DETACHED);
 			return CAM_ERR_HAL;
 		}
@@ -681,6 +706,7 @@ int cam_lcd_sink_attach_and_stream(const struct cam_lcd_overlay *ov)
 	    lcd_height() < (uint16_t)CAM_FRAME_HEIGHT) {
 		if (lcd_set_rotation(90u) != 0) {
 			LOG_ERR("could not rotate the panel to landscape");
+			lcd_release();
 			sink_set_state(SINK_DETACHED);
 			return CAM_ERR_HAL;
 		}
@@ -732,7 +758,7 @@ int cam_lcd_sink_attach_and_stream(const struct cam_lcd_overlay *ov)
 	 * subscribed to somebody else's stream, with the caller's start refused
 	 * and the caller forbidden to detach (a producer may be inside consume()
 	 * by then).  The sink was then attached with no owner until reboot, and
-	 * `nn preview` leaked its NPU lease the same way.
+	 * `nn stream` leaks its NPU lease the same way.
 	 *
 	 * The camera does both halves under its API mutex now, so there is no gap
 	 * to lose.  What that buys HERE is the unwind: on any failure nothing was
@@ -743,12 +769,30 @@ int cam_lcd_sink_attach_and_stream(const struct cam_lcd_overlay *ov)
 	rc = camera_stream_start(&cam_lcd_sink);
 	if (rc != CAM_OK) {
 		sink_has_overlay = 0;
+		lcd_release();
 		sink_set_state(SINK_DETACHED);
 		return rc;
 	}
 
+	/* Linked.  From here the state itself is what keeps a persistent-state
+	   `lcd` command out, so the guard goes back for the blits to take. */
 	sink_set_state(SINK_ATTACHED);
+	lcd_release();
 	return CAM_OK;
+}
+
+/*
+ * Is the panel spoken for by this sink?
+ *
+ * [!] ANYTHING BUT DETACHED COUNTS, and that is what makes this answer the
+ * question the frame pipeline's own sink count cannot: that one walks LINKED
+ * sinks, and the window this exists to close is the one BEFORE the link, while
+ * the panel is being brought up and rotated to landscape.  SINK_LOST counts too
+ * -- a thread may still be inside it.
+ */
+int cam_lcd_sink_linked(void)
+{
+	return (sink_get_state() != SINK_DETACHED);
 }
 
 /*
@@ -863,7 +907,7 @@ int cam_lcd_sink_detach(void)
 		 * underneath a live thread.  The overlay is NOT cleared -- the
 		 * thread may be inside draw(), reading the detections -- and the
 		 * caller must keep whatever it was holding on this sink's behalf
-		 * (`nn preview` keeps its lease).  All of this state is static,
+		 * (`nn stream` keeps its lease).  All of this state is static,
 		 * so keeping it costs nothing.
 		 *
 		 * This used to add "the frame stays pinned", and since issue #71

@@ -44,6 +44,7 @@
 
 #include "blazeface.h"       /* struct bf_det, struct bf_result */
 #include "nn_det_record.h"   /* struct nn_det_snapshot (issue #97) */
+#include "nn_stream_life.h" /* the shared stream lifecycle (issue #99)   */
 #include "tensor.h"          /* struct tensor_desc (issue #97) */
 
 #ifdef __cplusplus
@@ -83,6 +84,8 @@ extern "C" {
 #define NN_SVC_ERR_BUSY     (-74)  /**< a transient claim is held elsewhere      */
 #define NN_SVC_ERR_CANCEL   (-75)  /**< the operator interrupted it              */
 #define NN_SVC_ERR_HW       (-76)  /**< the hardware refused or did not settle   */
+#define NN_SVC_ERR_STALE    (-77)  /**< the sample straddled a transition; retry */
+#define NN_SVC_ERR_GEN      (-78)  /**< that stream generation is not current    */
 
 /**
  * What the CALLER may do about the board's transient claim afterwards.
@@ -102,10 +105,18 @@ extern "C" {
  * knowable afterwards which one was thrown away.
  */
 enum nn_claim {
-	/** Never acquired, or the board rolled it back itself.  The caller must
-	 *  NOT release: wio's load takes its software claim, fails to take the
-	 *  hardware one, and unwinds the first internally -- releasing again here
-	 *  would free a claim that by then belongs to somebody else. */
+	/** Never acquired, the board rolled it back itself, or it belongs to
+	 *  something with its own lifetime.  The caller must NOT release: wio's
+	 *  load takes its software claim, fails to take the hardware one, and
+	 *  unwinds the first internally -- releasing again here would free a claim
+	 *  that by then belongs to somebody else.
+	 *
+	 *  [!] A HEALTHY RUNNING STREAM REPORTS THIS TOO, and it is not a
+	 *  contradiction.  nn_svc_stream_start() leaves the claim held BY THE
+	 *  STREAM until its stop, so there is something held and the caller still
+	 *  has no authority over it -- which is exactly what this value says.  It
+	 *  is not "nothing is held"; that would be reading it as an ownership
+	 *  snapshot, which the note above says it is not. */
 	NN_CLAIM_NONE = 0,
 	/** The caller owns it and releases it exactly once. */
 	NN_CLAIM_CALLER,
@@ -123,6 +134,14 @@ enum nn_claim {
 	 *  resource is quiescent must fail closed to this rather than guess. */
 	NN_CLAIM_TERMINAL,
 };
+
+/* [!] nn_stream_life.h mirrors these because it cannot include this file
+ * without a cycle.  A drift is a build failure here rather than a table that
+ * decides about values nobody means. */
+_Static_assert((int)NN_CLAIM_NONE      == NN_STREAM_CLAIM_NONE,      "claim moved");
+_Static_assert((int)NN_CLAIM_CALLER    == NN_STREAM_CLAIM_CALLER,    "claim moved");
+_Static_assert((int)NN_CLAIM_RETRYABLE == NN_STREAM_CLAIM_RETRYABLE, "claim moved");
+_Static_assert((int)NN_CLAIM_TERMINAL  == NN_STREAM_CLAIM_TERMINAL,  "claim moved");
 
 /**
  * Where the model lifecycle ended up.  Reported by nn_svc_model_load()
@@ -222,7 +241,33 @@ struct nn_spec {
  * An empty string means "nothing to say", so a caller never has to test for
  * NULL and can never print a pointer it does not own.
  */
+/**
+ * Whether one section of @ref nn_svc_info actually got filled.
+ *
+ * [!] THREE VALUES, BECAUSE TWO CANNOT HOLD THREE MEANINGS.  A zero in
+ * `arena_used` already means "this board does not report it", so the same zero
+ * cannot also mean "a stream owns the claim and I could not look".  Those are
+ * different answers -- one is permanent and one clears when the stream stops --
+ * and an operator acts on them differently.
+ *
+ * PER SECTION, because this is precisely where the boards legitimately differ.
+ * Two of them copy their identity with no claim at all and so answer everything
+ * while a stream runs; the third must take its claim to walk interpreter state,
+ * and a stream holds that claim for its whole life.  One flag for the struct
+ * would force the strictest board's answer onto the other two.
+ */
+enum nn_avail {
+	NN_AVAIL_OK = 0,      /**< filled and true                                */
+	NN_AVAIL_NA,          /**< this board has nothing to report here          */
+	NN_AVAIL_WITHHELD,    /**< a stream owns the claim; ask again after it stops */
+};
+
 #define NN_SVC_BACKEND_MAX 31
+/* [!] THE VERSION IS NOT A NAME AND DOES NOT FIT IN A NAME'S FIELD.  Sharing
+ * the backend's 31 characters cut one board's "tflite-micro + CMSIS-NN, no
+ * on-board model verify" off at "no on-", which reads as a truncated sentence
+ * rather than a shortened one -- and the half it removed was the caveat. */
+#define NN_SVC_VERSION_MAX 63
 /* [!] LONG ENOUGH FOR THE LONGEST NAME ANY BOARD CAN PRODUCE.  wio's asset
  * store allows 63 characters, and a field that truncates would report two
  * distinct legal models under one prefix -- a name that is wrong rather than
@@ -232,12 +277,23 @@ struct nn_spec {
 
 struct nn_svc_info {
 	char     backend[NN_SVC_BACKEND_MAX + 1];  /**< runtime, or ""        */
-	char     version[NN_SVC_BACKEND_MAX + 1];  /**< its build, or ""      */
+	char     version[NN_SVC_VERSION_MAX + 1];  /**< its build, or ""      */
 	char     model[NN_SVC_MODEL_MAX + 1];      /**< active model, or ""   */
 	char     source[NN_SVC_SOURCE_MAX + 1];    /**< where from, or ""     */
 	uint32_t arena_bytes;   /**< arena the board reserves                 */
 	uint32_t arena_used;    /**< of that, what the model needs (0 = n/a)  */
 	uint8_t  model_active;  /**< 0 when nothing is loaded                 */
+
+	/*
+	 * What of the above is actually an answer -- see @ref nn_avail.  A board
+	 * that fills everything sets all three to NN_AVAIL_OK and nothing changes
+	 * for it.  The command prints the reason for anything else rather than
+	 * quietly leaving the line out: a shorter report reads like a model with
+	 * no tensors, which is a different and wrong fact.
+	 */
+	uint8_t  avail_identity;  /**< model / source / model_active            */
+	uint8_t  avail_runtime;   /**< arena_used, and any live hardware state  */
+	uint8_t  avail_tensors;   /**< nn_svc_input / _output / _output_count   */
 };
 
 /** Copy @p src into a fixed field, always NUL-terminated, never truncating into
@@ -420,6 +476,163 @@ struct nn_bench_stats {
 void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
                       nn_svc_cancel_fn cancel, void *ctx,
                       struct nn_op_result *res);
+
+/* ---- live inference (issue #99) ------------------------------------------
+ *
+ * One grammar on every board: `nn stream start/stop/stats`.  Until issue #99
+ * two of them had a non-blocking worker and the third had a blocking panel
+ * `preview`, each implemented by its own command file; the wait is now written
+ * once, here above the boards.
+ *
+ * [!] A STREAM HAS AN IDENTITY, AND THAT IS THE WHOLE REASON FOR `gen`.  A
+ * bounded `--frames` run waits on one console while another console -- or a
+ * background job on a board that has only one console -- can stop that stream
+ * and start a new one.  A waiter that then issued a plain "stop" would tear
+ * down a stream it never started, releasing a camera, an NPU or a bus guard
+ * that now belongs to somebody else.  So a start hands back a generation, and
+ * the two operations that a waiter performs afterwards carry it.
+ */
+
+/** How a stream is started.  Tagged for the same reason a model source is: the
+ *  bare word would mean different things on different boards. */
+struct nn_stream_spec {
+	/** Feed a test pattern instead of the sensor.  Refused with
+	 *  NN_SVC_ERR_SPEC where the board has no such thing.  A frame count is
+	 *  deliberately NOT here: the bounded run is the shared command's own, and
+	 *  a field in this struct is a field a board could start using. */
+	uint8_t test;
+};
+
+/**
+ * What a stream has done so far.
+ *
+ * [!] `frames` IS WHAT THE INFERENCE PATH WAS OFFERED, and the other counts are
+ * subsets of it: `skipped` are the offered frames it did not take, `infers` are
+ * the ones it finished.  So `frames - skipped >= infers` reads as a sentence.
+ *
+ * The boards' own counters do NOT agree on this and each converts.  Left alone,
+ * two of them reported only the frames they ingested while still reporting every
+ * frame they turned away, which printed as "55 in, 269 skipped" -- skipped out
+ * of what?  A shared command whose one number means two things on two boards is
+ * the thing this contract exists to prevent.
+ */
+struct nn_stream_stats {
+	uint8_t  running;      /**< the stream is still producing               */
+	/**
+	 * [!] "NEVER DECODED" IS NOT "DECODED NOTHING".  Without this a console
+	 * prints "0 faces" for a stream that has not finished its first frame,
+	 * which reads as a working detector finding nobody.  One board's own
+	 * contract already required the two apart and this keeps that true.
+	 */
+	uint8_t  last_valid;
+	uint32_t frames;
+	uint32_t skipped;      /**< delivered but not inferred (busy, stopping) */
+	uint32_t infers;
+	uint32_t errors;
+	/** Of `errors`, split as issue #97 split them: a model whose tensors are
+	 *  not the shape the decoder wants means "load a different model", while a
+	 *  decoder that refused means "this firmware is wired wrong".  One total
+	 *  cannot say which, and the producer has no console to say it on. */
+	uint32_t model_errors;
+	uint32_t decoder_errors;
+	uint32_t last_us;      /**< the most recent inference                   */
+	uint32_t elapsed_ms;   /**< since this generation started               */
+	int32_t  last_ndet;    /**< valid only when @ref last_valid             */
+};
+
+/** Which set of board lines is being asked for. */
+enum nn_stream_lines_ctx {
+	NN_STREAM_LINES_STARTED = 0,  /**< printed once, after a successful start */
+	NN_STREAM_LINES_STATS,        /**< printed under `nn stream stats`        */
+};
+
+/** Capacity the shared command provides for one board line, terminator
+ *  included, and the hard cap on how many it will ask for.  The cap is not
+ *  decoration: it is what stops an adapter bug from printing for ever. */
+#define NN_STREAM_LINE_MAX   96
+#define NN_STREAM_LINES_MAX  12
+
+/**
+ * Start inferring, and return immediately.
+ *
+ * The board runs its OWN ordered sequence -- one of them must refuse a model
+ * that cannot annotate before a stream exists, because a preview that starts
+ * and then fails on every frame is a live picture with no explanation -- and
+ * unwinds it itself on failure.
+ *
+ * On success the STREAM owns the board's transient claim until its stop, so the
+ * caller's authority is NN_CLAIM_NONE (see the note on that value).  A
+ * one-line note for the operator goes in the result's `detail`: one board tells
+ * "started" from "re-armed after a lost stream" there, and those are different
+ * events.
+ *
+ * @param gen  set to this stream's generation on success; untouched otherwise
+ */
+void nn_svc_stream_start(const struct nn_stream_spec *spec,
+                         struct nn_op_result *res, uint32_t *gen);
+
+/**
+ * How far it has got.  Takes no claim, so it answers WHILE the stream runs --
+ * which is when it is worth asking.
+ *
+ * [!] SAMPLED IN TWO PHASES, AND IT HAS TO BE.  The numbers live in subsystems
+ * that take their own locks, so an adapter cannot gather them with interrupts
+ * disabled: that is a deadlock, not a slow path.  It samples them outside its
+ * critical section, then re-enters and accepts them only if nothing moved.
+ *
+ * [!] AND WHAT IT CHECKS IS A TRANSITION COUNTER, NOT THE GENERATION AND STATE.
+ * Those two are not enough here, for a reason this contract creates: a
+ * RETRYABLE stop keeps its generation and puts the lifecycle back where a later
+ * stop can claim it, so a sample can straddle an entire failed teardown and
+ * find both fields exactly as it left them.  A counter bumped on every
+ * transition is what makes this a real seqlock rather than an ABA.
+ *
+ * @return NN_SVC_OK; NN_SVC_ERR_STALE if the sample moved under it (not an
+ *         error -- sample again); NN_SVC_ERR_GEN if @p gen is not the current
+ *         stream, which is a DIFFERENT answer from "not running" because it
+ *         means somebody else's stream is
+ */
+int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out);
+
+/**
+ * Stop, tear down, and say who may clean up.
+ *
+ * [!] ONE CALL, NOT A REQUEST AND THEN A STOP.  One board must ask its overlay
+ * to stop before it stops the producer, or an ordinary Ctrl+C waits out an
+ * inference that had not begun.  Exposing that as two entry points would put an
+ * ordering the shared caller can get wrong in place of one it cannot.
+ *
+ * @param gen  NN_STREAM_GEN_ANY for an operator's `nn stream stop`; a waiter
+ *             passes the generation it started, so it can never stop a
+ *             successor.  Tested inside the same critical section that claims
+ *             the stop transition -- outside it, it would be a stale read.
+ *
+ * A stop that comes back RETRYABLE must leave the lifecycle stoppable again,
+ * keeping its generation.  Parking it mid-transition would turn one moment of
+ * lock contention into a stream nothing can ever tear down, which is the very
+ * outcome the retryable answer exists to avoid.
+ */
+void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res);
+
+/**
+ * One line of whatever this board wants to say that the neutral struct has no
+ * field for -- an ownership invariant, an ingest deadline, an ordering warning.
+ *
+ * Indexed rather than returned in a block so the shared command needs exactly
+ * one small buffer and still owns no storage.  The rules are all load-bearing:
+ *
+ *   - the adapter writes ONLY @p buf, never a buffer of its own, so two
+ *     consoles can enumerate at the same time without overwriting each other;
+ *   - it always NUL-terminates;
+ *   - the lines are INDEPENDENTLY SAMPLED and are not one atomic snapshot, so
+ *     nothing may be computed across two of them;
+ *   - the caller stops at NN_STREAM_LINES_MAX regardless.
+ *
+ * @return 1 when a line was written, 0 when there are no more, negative on a
+ *         failure the caller reports rather than silently ends on
+ */
+int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
+                        char *buf, size_t cap);
 
 /** Float input normalisation: 0 = [0,1], 1 = [-1,1].  Meaningless where the
  *  input is integer, which is why it is a capability and not a stub. */

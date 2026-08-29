@@ -242,6 +242,16 @@ gcc $CFLAGS \
 # a level up: npu_hw_init() acquires and can then fail three more ways, and its
 # caller does NOT tear down on failure -- so the last section walks that
 # sequence, which an acquire/release table alone would pass while it leaked.
+# issue #99 -- the live-inference teardown table (port/npu/nn_stream_state.c).
+# Two halves that can each come back unconfirmed, and the two answers -- retry or
+# reboot -- are opposite mistakes.  None of the vectors can be typed on a board
+# with one console whose background jobs run below the foreground shell.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/npu" \
+    "$here/test_nn_stream.c" "$board/port/npu/nn_stream_state.c" \
+    $LDFLAGS -o "$out/test_nn_stream"
+"$out/test_nn_stream"
+
 gcc $CFLAGS \
     -I "$here" -I "$board/port/nor" \
     "$here/test_nor_state.c" "$board/port/nor/nor_state.c" \

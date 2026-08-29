@@ -331,6 +331,21 @@ gcc $CFLAGS -I "$inc" -I "$here/../cmds" -I "$core" -I "$svc" \
     $LDFLAGS -o "$out/test_nn_cmd_core"
 "$out/test_nn_cmd_core"
 
+# issue #99 -- the shared stream lifecycle (svc/nn_stream_life.c).
+#
+# A `--frames` waiter and a second console racing over one stream: the waiter
+# must never tear down a stream it did not start.  The generation alone does not
+# close that -- two callers can both be admitted unless the stop transition is
+# CLAIMED in the same breath, which is the defect the adversarial review of this
+# issue found on two of the three boards.  None of it can be typed: the window is
+# between two statements of another thread, and the board where it matters most
+# has one console whose background jobs run below the foreground shell under
+# TX_NO_TIME_SLICE.  One machine, one test.
+gcc $CFLAGS -I "$inc" -I "$svc" \
+    "$here/test_nn_stream_life.c" "$svc/nn_stream_life.c" \
+    $LDFLAGS -o "$out/test_nn_stream_life"
+"$out/test_nn_stream_life"
+
 # ---- board-pinned tests --------------------------------------------------- *
 # Same toolchain flags and the same scratch dir, exported so a board test is built
 # exactly like a core one and cannot quietly diverge.  A board with no

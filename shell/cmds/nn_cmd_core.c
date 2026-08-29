@@ -220,6 +220,8 @@ const char *nn_status_name(int status)
 	case NN_SVC_ERR_BUSY:      return "busy (another nn command is running)";
 	case NN_SVC_ERR_CANCEL:    return "cancelled";
 	case NN_SVC_ERR_HW:        return "the hardware refused or did not settle";
+	case NN_SVC_ERR_STALE:     return "the reading moved while it was taken";
+	case NN_SVC_ERR_GEN:       return "that stream has been replaced by another";
 	default:                   return "failed";
 	}
 }

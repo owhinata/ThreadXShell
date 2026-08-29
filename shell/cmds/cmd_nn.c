@@ -412,8 +412,10 @@ static void nn_print_top(struct cli_instance *sh, unsigned index)
 	enum { TOP_N = 5 };
 	int   best_i[TOP_N];
 	float best_v[TOP_N];
+	int32_t best_raw[TOP_N];
 	unsigned n = 0u, k;
 	uint32_t esz, count, i;
+	int integer_scored;
 
 	/* [!] PINNED ACROSS THE FETCH AND THE WALK.  The buffer is in the arena, and
 	 * an unload on another console would close the interpreter underneath it. */
@@ -427,6 +429,7 @@ static void nn_print_top(struct cli_instance *sh, unsigned index)
 		return;
 	}
 	esz = nn_dtype_size(t->dtype);
+	integer_scored = (t->dtype != TENSOR_DTYPE_FLOAT32);
 	if (esz == 0u || t->data == NULL) {
 		nn_svc_tensors_unpin();
 		cli_warn(sh, "top     : the output cannot be read at a known "
@@ -438,20 +441,23 @@ static void nn_print_top(struct cli_instance *sh, unsigned index)
 	for (k = 0u; k < TOP_N; k++) {
 		best_i[k] = -1;
 		best_v[k] = -1e30f;
+		best_raw[k] = 0;
 	}
 	for (i = 0u; i < count; i++) {
+		int32_t raw;
 		float v;
 
 		switch (t->dtype) {
 		case TENSOR_DTYPE_INT8:
-			v = ((float)((const int8_t *)t->data)[i] - (float)t->zero_point) *
-			    t->scale;
+			raw = ((const int8_t *)t->data)[i];
+			v = ((float)raw - (float)t->zero_point) * t->scale;
 			break;
 		case TENSOR_DTYPE_UINT8:
-			v = ((float)((const uint8_t *)t->data)[i] - (float)t->zero_point) *
-			    t->scale;
+			raw = ((const uint8_t *)t->data)[i];
+			v = ((float)raw - (float)t->zero_point) * t->scale;
 			break;
 		case TENSOR_DTYPE_FLOAT32:
+			raw = 0;
 			v = ((const float *)t->data)[i];
 			break;
 		default:
@@ -465,9 +471,11 @@ static void nn_print_top(struct cli_instance *sh, unsigned index)
 				for (j = TOP_N - 1u; j > k; j--) {
 					best_v[j] = best_v[j - 1u];
 					best_i[j] = best_i[j - 1u];
+					best_raw[j] = best_raw[j - 1u];
 				}
 				best_v[k] = v;
 				best_i[k] = (int)i;
+				best_raw[k] = raw;
 				if (n < TOP_N)
 					n++;
 				break;
@@ -479,15 +487,25 @@ static void nn_print_top(struct cli_instance *sh, unsigned index)
 
 	cli_print(sh, "top     : %u of %lu class(es)\r\n", n, (unsigned long)count);
 	for (k = 0u; k < n; k++) {
-		const char *sign;
-		uint32_t ip, frac;
+		/*
+		 * [!] THE RAW CODE AND THE SCORE IN MILLI, matching what this report
+		 * looked like before three commands became one.  The raw int8 is what
+		 * gets checked first when a dequantised number looks wrong -- it is
+		 * the half that does not depend on the scale being right -- and milli
+		 * is the unit `dets` already prints, so one command does not carry
+		 * two spellings of "score".
+		 */
+		long milli = (long)(best_v[k] * 1000.0f);
 
-		if (nn_f32_parts(best_v[k], &sign, &ip, &frac) != 0)
-			cli_print(sh, "  #%u  class %-4d  nan\r\n", k + 1u, best_i[k]);
+		if (best_v[k] != best_v[k])          /* NaN */
+			cli_print(sh, "  #%u  class %-4d  raw %4ld  score nan\r\n",
+			          k + 1u, best_i[k], (long)best_raw[k]);
+		else if (integer_scored)
+			cli_print(sh, "  #%u  class %-4d  raw %4ld  score %ld/1000\r\n",
+			          k + 1u, best_i[k], (long)best_raw[k], milli);
 		else
-			cli_print(sh, "  #%u  class %-4d  score %s%lu.%06lu\r\n",
-			          k + 1u, best_i[k], sign, (unsigned long)ip,
-			          (unsigned long)frac);
+			cli_print(sh, "  #%u  class %-4d  score %ld/1000\r\n",
+			          k + 1u, best_i[k], milli);
 	}
 }
 

@@ -64,6 +64,7 @@
  * since PA2 is the one pin there that can be confirmed without a meter.
  */
 #include "cli.h"
+#include "cam_lcd_sink.h"
 #include "lcd_st7789.h"
 
 #include "tx_api.h"
@@ -172,6 +173,39 @@ static int lcd_hold_ready(struct cli_instance *sh)
 	lcd_release();
 	cli_error(sh, "lcd: panel bring-up failed (see `dmesg`)\r\n");
 	return -1;
+}
+
+/*
+ * Hold the panel for a change to its PERSISTENT state, refusing while a camera
+ * sink owns it (issue #99).
+ *
+ * [!] THE CHECK IS MADE UNDER THE GUARD, and that is the whole point rather than
+ * tidiness.  Rotation and MADCTL move the driver's geometry and the backlight
+ * stays where it is put; the panel sink blits a fixed size that the driver
+ * validates inside the guard, so a rotation that lands between an unguarded
+ * check and the write leaves every later blit refused or clamped while each
+ * layer still reports success.  The sink's attach path holds this same guard
+ * from bring-up until it is linked, so a caller that holds it here either got in
+ * before the sink existed or can see it.
+ *
+ * Only rotation and MADCTL come through here.  A transfer-scoped command (fill,
+ * bar, orient, the loop) does not need to: the worst it can do is lose a frame.
+ * Neither does the backlight, which is a GPIO write with an obvious and
+ * instantly reversible effect -- see lcd_set_backlight().
+ */
+static int lcd_hold_exclusive(struct cli_instance *sh, const char *what)
+{
+	if (lcd_hold_ready(sh) != 0)
+		return -1;
+	if (cam_lcd_sink_linked()) {
+		lcd_release();
+		cli_error(sh, "lcd: a camera sink owns the panel -- %s would leave "
+		              "its frames refused or clamped.\r\n"
+		              "     Stop it first (`nn stream stop`, or `camera "
+		              "preview` with Ctrl+C)\r\n", what);
+		return -1;
+	}
+	return 0;
 }
 
 /* Shared by `fill` and `clear`: hold the panel, flood it, report a transfer
@@ -371,7 +405,8 @@ static int cmd_lcd_rot(struct cli_instance *sh, int argc, char **argv)
 		cli_error(sh, "lcd: rot takes 0, 90, 180 or 270\r\n");
 		return 1;
 	}
-	if (lcd_hold_ready(sh) != 0)
+	/* The SETTER only: reading the rotation back is always safe. */
+	if (lcd_hold_exclusive(sh, "rotating the panel") != 0)
 		return 1;
 	if (lcd_set_rotation((unsigned)v) != 0) {
 		lcd_release();
@@ -404,7 +439,8 @@ static int cmd_lcd_madctl(struct cli_instance *sh, int argc, char **argv)
 		cli_error(sh, "lcd: madctl takes one byte, e.g. 0x60\r\n");
 		return 1;
 	}
-	if (lcd_hold_ready(sh) != 0)
+	/* The SETTER only: reading MADCTL back is always safe. */
+	if (lcd_hold_exclusive(sh, "writing MADCTL") != 0)
 		return 1;
 	if (lcd_set_madctl((uint8_t)v) != 0) {
 		lcd_release();
@@ -490,12 +526,45 @@ static int cmd_lcd_regs(struct cli_instance *sh, int argc, char **argv)
  * sensor attached. */
 static int lcd_set_backlight(struct cli_instance *sh, int on)
 {
-	if (lcd_hold_ready(sh) != 0)
-		return 1;
-	lcd_backlight(on);
-	lcd_release();
+	/*
+	 * [!] NEITHER DIRECTION TAKES THE TRANSACTION GUARD, AND NEITHER IS
+	 * REFUSED.  Two separate things, both learned at the bench.
+	 *
+	 * The guard first: lcd_backlight() is ONE GPIO WRITE.  It touches no SPI
+	 * state, no framebuffer, no CS/DC and no DMA, so the panel guard protects
+	 * nothing it does -- while under a live stream the panel thread holds that
+	 * guard for about 96% of every frame (compare `blit` against `profile` in
+	 * `camera stats`).  Taking it made `lcd on` fail with "busy" almost every
+	 * time, in exactly the case it exists for.
+	 *
+	 * Then the refusal, which this file briefly had on `off` alone.  That was
+	 * justified by "a live preview goes dark and no frame turns it back on" --
+	 * a premise the line above removes, because `on` now works during a stream.
+	 * What was left was an asymmetry with no hazard under it, and turning the
+	 * panel off while inference runs is an ordinary thing to want.
+	 *
+	 * Rotation and MADCTL stay refused, and the difference is the KIND of
+	 * failure rather than the severity: those leave the sink's fixed-size blits
+	 * refused or clamped while every layer still reports success, which is
+	 * silent and lasts until the stream is stopped.  A dark panel announces
+	 * itself and is one command away from undone.
+	 */
+	int streaming = cam_lcd_sink_linked();
+
+	if (streaming) {
+		/* A sink owns the panel, so it is already up: straight to the pin. */
+		lcd_backlight(on);
+	} else {
+		if (lcd_hold_ready(sh) != 0)
+			return 1;
+		lcd_backlight(on);
+		lcd_release();
+	}
 	cli_print(sh, "backlight %s%s\r\n", on ? "on" : "off",
 	          on ? "" : " (PA2 low also holds the Grove I2C SCL low)");
+	if (streaming && !on)
+		cli_print(sh, "  the stream is still running -- `lcd on` brings the "
+		              "picture back\r\n");
 	return 0;
 }
 

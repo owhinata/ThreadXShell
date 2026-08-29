@@ -200,7 +200,7 @@ float blazeface_logit_of_milli(unsigned milli);
  * @brief  Are these tensors BlazeFace-shaped, without decoding anything?
  *
  * For a caller that must decide BEFORE it commits to something expensive --
- * Grove's `nn preview` starts a camera stream, and discovering the wrong model is
+ * Grove's `nn stream` starts a camera stream, and discovering the wrong model is
  * open on every frame would be a preview that runs and silently never annotates.
  * Uses the same lookups blazeface_decode() does, so the two cannot disagree.
  *

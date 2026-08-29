@@ -38,9 +38,12 @@
 #include "camera.h"
 #include "cam_dp.h"
 #include "fmt.h"
+#include "cam_lcd_sink.h"
+#include "camera.h"
 #include "nn_decoder.h"
-#include "nn_svc_grove.h"
+#include "nn_overlay.h"
 #include "nn_preproc.h"
+#include "nn_stream_state.h"
 #include "nor_flash.h"    /* NOR_XIP_BASE */
 #include "npu.h"
 #include "npu_hw.h"
@@ -55,6 +58,7 @@
  * of their own, and a second copy would be a second answer.
  */
 static uint8_t  nn_busy;            /**< the transient claim                  */
+static uint8_t  nn_owner;           /**< enum nn_owner -- WHO holds it        */
 static uint8_t  nn_open_done;       /**< a model is active                    */
 static uint32_t nn_model_addr;
 static uint32_t nn_model_len;
@@ -72,7 +76,22 @@ static uint8_t nn_geom_valid;
  * Single-instance, not a mutex: two consoles may both reach `nn`, and what has
  * to be prevented is two jobs inside the NPU at once.  The gate also covers open
  * and close, because a teardown rewrites the hardware state that `info` walks.
+ *
+ * [!] IT ALSO RECORDS WHO HOLDS IT (issue #99), and that is not the same thing
+ * as @ref nn_claim -- which is the CALLER's cleanup authority and stays exactly
+ * as it was.  This is internal, and it exists because a stream now holds the
+ * claim across commands.  Without it `nn info` would answer "busy" for the whole
+ * life of a stream, which is precisely when it is worth asking, and which the
+ * other two boards deliberately do not do.  A transient op and a stream are
+ * different holders: no unload can begin while the stream holds this, so the
+ * identity below is safe to read; an op may be dismantling exactly that.
  */
+enum nn_owner {
+	NN_OWNER_NONE = 0,
+	NN_OWNER_OP,      /**< one operation, which releases before it returns */
+	NN_OWNER_STREAM,  /**< a running stream, until its stop               */
+};
+
 static int nn_try_acquire(void)
 {
 	int got;
@@ -80,15 +99,143 @@ static int nn_try_acquire(void)
 
 	TX_DISABLE
 	got = !nn_busy;
-	if (got)
-		nn_busy = 1u;
+	if (got) {
+		nn_busy  = 1u;
+		nn_owner = (uint8_t)NN_OWNER_OP;
+	}
 	TX_RESTORE
 	return got;
 }
 
 static void nn_release(void)
 {
-	nn_busy = 0u;
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	nn_owner = (uint8_t)NN_OWNER_NONE;
+	nn_busy  = 0u;
+	TX_RESTORE
+}
+
+/* ---- the stream lifecycle (issue #99) ------------------------------------
+ *
+ * The machine itself is svc/nn_stream_life.c's, shared with the other two boards
+ * -- see there for why one implementation rather than three.  What is here is
+ * only this port's critical section around it and the two baselines a poll
+ * subtracts.
+ */
+static struct nn_stream_life nn_life;
+static uint32_t nn_stream_frames0;   /**< camera frame count when it started  */
+static uint32_t nn_stream_t0;        /**< ticks when it started               */
+static uint32_t nn_stream_ms;        /**< frozen elapsed, once it has stopped */
+
+/* Claim IDLE -> STARTING together with the transient claim.  ONE critical
+   section, because they are one decision: a start that took the claim and then
+   found the lifecycle busy would have to unwind a claim another job may have
+   taken in between. */
+static enum nn_stream_start_claim nn_stream_begin(void)
+{
+	enum nn_stream_start_claim r;
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	/* The transient claim and the lifecycle are one decision here, so the gate
+	   is tested first and reported as BUSY -- another nn job, not a stream. */
+	if (nn_busy) {
+		r = NN_STREAM_START_BUSY;
+	} else {
+		r = nn_stream_life_begin(&nn_life);
+		if (r == NN_STREAM_START_GO) {
+			nn_busy  = 1u;
+			nn_owner = (uint8_t)NN_OWNER_STREAM;
+		}
+	}
+	TX_RESTORE
+	return r;
+}
+
+/* Everything came up: mint the generation and publish the baselines with it. */
+static void nn_stream_commit(uint32_t frames0, uint32_t t0, uint32_t *gen)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	/* [!] Baselines published only once the generation exists, so a refused
+	 * commit cannot leave this generation's numbers describing another's. */
+	*gen = nn_stream_life_commit(&nn_life);
+	if (*gen != NN_STREAM_GEN_ANY) {
+		nn_stream_frames0 = frames0;
+		nn_stream_t0      = t0;
+		nn_stream_ms      = 0u;
+	}
+	TX_RESTORE
+}
+
+/* A start that failed after nn_stream_begin(): nothing is up, so give both the
+   lifecycle and the claim back. */
+static void nn_stream_abort(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	if (nn_stream_life_abort(&nn_life)) {
+		nn_owner = (uint8_t)NN_OWNER_NONE;
+		nn_busy  = 0u;
+	}
+	TX_RESTORE
+}
+
+/* [!] Test and claim in one call, under one critical section -- see the note in
+   svc/nn_stream_life.h for the interleaving that separating them admits. */
+static enum nn_stream_stop_claim nn_stream_claim_stop(uint32_t gen)
+{
+	enum nn_stream_stop_claim r;
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	r = nn_stream_life_claim_stop(&nn_life, gen);
+	TX_RESTORE
+	return r;
+}
+
+/* Both halves confirmed. */
+static void nn_stream_finish(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	/* [!] THE CLAIM IS RELEASED ONLY IF THE TRANSITION HAPPENED.  Clearing it
+	 * regardless would hand the NPU back on exactly the invariant failure the
+	 * guard exists to catch -- and something may still be inside it. */
+	if (nn_stream_life_finish(&nn_life)) {
+		nn_stream_ms = (uint32_t)(((uint32_t)tx_time_get() - nn_stream_t0) *
+		                          1000u / TX_TIMER_TICKS_PER_SECOND);
+		nn_owner = (uint8_t)NN_OWNER_NONE;
+		nn_busy  = 0u;
+	}
+	TX_RESTORE
+}
+
+/* Retryable: stoppable again, same generation, claim still held. */
+static void nn_stream_unclaim_stop(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	nn_stream_life_retry(&nn_life);
+	TX_RESTORE
+}
+
+/* Unconfirmed: the claim is never given back. */
+static void nn_stream_poison(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	if (nn_stream_life_poison(&nn_life))
+		nn_stream_ms = (uint32_t)(((uint32_t)tx_time_get() - nn_stream_t0) *
+		                          1000u / TX_TIMER_TICKS_PER_SECOND);
+	TX_RESTORE
 }
 
 static void nn_detail_to(char *dst, size_t cap, const char *fmt, ...)
@@ -121,39 +268,86 @@ static void nn_result(struct nn_op_result *res, int status, enum nn_claim claim)
 
 void nn_svc_info(struct nn_svc_info *out)
 {
+	uint8_t owner_snap, open_snap;
+	char    from_snap[BLOB_NAME_MAX + 1];
+	TX_INTERRUPT_SAVE_AREA
+
 	memset(out, 0, sizeof *out);
 	nn_svc_str(out->backend, sizeof out->backend, "ethos-u55 (tflm, secure)");
 	out->arena_bytes = (uint32_t)npu_arena_bytes();
 
 	/*
-	 * [!] BEHIND THE GATE, and when the gate refuses, only facts that CANNOT
-	 * be in flight are reported (issue #45).  The arena reservation is a
-	 * link-time constant; whether a model is open is not, and a teardown
-	 * running on another job rewrites exactly what this would walk.
+	 * THE COMMON CASE IS UNCHANGED: when nothing holds the gate, take it and
+	 * answer everything, because a teardown running on another job rewrites
+	 * exactly what this walks.
 	 */
-	if (!nn_try_acquire()) {
-		nn_svc_str(out->source, sizeof out->source,
-		           "(busy -- another nn job holds it)");
+	if (nn_try_acquire()) {
+		out->model_active = nn_open_done;
+		out->arena_used   = nn_open_done ? (uint32_t)npu_arena_used() : 0u;
+		if (nn_open_done) {
+			nn_svc_str(out->model, sizeof out->model,
+			           (nn_model_from[0] != '\0') ? nn_model_from : "(raw)");
+			nn_svc_str(out->source, sizeof out->source,
+			           npu_hw_ready() ? "npu up (secure, privileged)"
+			                          : "npu down");
+		} else {
+			nn_svc_str(out->source, sizeof out->source,
+			           npu_hw_fail_reason());
+		}
+		out->avail_identity = (uint8_t)NN_AVAIL_OK;
+		out->avail_runtime  = (uint8_t)NN_AVAIL_OK;
+		out->avail_tensors  = nn_open_done ? (uint8_t)NN_AVAIL_OK
+		                                   : (uint8_t)NN_AVAIL_NA;
+		nn_release();
 		return;
 	}
 
 	/*
-	 * [!] EVERY STRING IS COPIED BEFORE THE GATE GOES BACK.  nn_model_from is
-	 * this file's buffer and `nn model unload` clears it under the same gate,
-	 * so handing the caller a pointer to it would be handing out something an
-	 * unload can empty before the caller finishes printing.
+	 * [!] HELD -- AND BY WHOM DECIDES HOW MUCH CAN STILL BE SAID (issue #99).
+	 *
+	 * A stream holds this gate for its whole life, and `nn info` refusing for
+	 * all of that is exactly backwards: a running stream is when the report is
+	 * worth asking for, and the other two boards answer then.  No unload can be
+	 * in flight while a STREAM holds it -- an unload would have to take this
+	 * same gate -- so the identity is stable and safe to copy.  An ordinary
+	 * operation is the opposite: it may be dismantling that very thing.
+	 *
+	 * [!] AND THE TEST AND THE COPY ARE ONE CRITICAL SECTION.  Testing "a
+	 * stream owns it" and then copying afterwards lets the stream end in
+	 * between and an unload race the copy -- the check would be describing a
+	 * world that no longer exists by the time it is used.
 	 */
-	out->model_active = nn_open_done;
-	out->arena_used   = nn_open_done ? (uint32_t)npu_arena_used() : 0u;
-	if (nn_open_done) {
-		nn_svc_str(out->model, sizeof out->model,
-		           (nn_model_from[0] != '\0') ? nn_model_from : "(raw)");
+	TX_DISABLE
+	owner_snap = nn_owner;
+	open_snap  = nn_open_done;
+	memcpy(from_snap, nn_model_from, sizeof from_snap);
+	TX_RESTORE
+
+	if (owner_snap != (uint8_t)NN_OWNER_STREAM) {
+		/* An operation has it.  Only what CANNOT be in flight is reported: the
+		   arena reservation above is a link-time constant, and nothing else. */
 		nn_svc_str(out->source, sizeof out->source,
-		           npu_hw_ready() ? "npu up (secure, privileged)" : "npu down");
-	} else {
-		nn_svc_str(out->source, sizeof out->source, npu_hw_fail_reason());
+		           "(busy -- another nn job holds it)");
+		out->avail_identity = (uint8_t)NN_AVAIL_WITHHELD;
+		out->avail_runtime  = (uint8_t)NN_AVAIL_WITHHELD;
+		out->avail_tensors  = (uint8_t)NN_AVAIL_WITHHELD;
+		return;
 	}
-	nn_release();
+
+	out->model_active   = open_snap;
+	out->avail_identity = (uint8_t)NN_AVAIL_OK;
+	if (open_snap)
+		nn_svc_str(out->model, sizeof out->model,
+		           (from_snap[0] != '\0') ? from_snap : "(raw)");
+	nn_svc_str(out->source, sizeof out->source, "streaming (`nn stream stats`)");
+	/*
+	 * The rest needs the gate the stream is holding -- and would be misleading
+	 * anyway: the arena is being rewritten every frame, so a tensor's CONTENTS
+	 * are not a thing to report while this runs.  That is the line svc/nn_svc.h
+	 * already draws between a descriptor and its buffer.
+	 */
+	out->avail_runtime = (uint8_t)NN_AVAIL_WITHHELD;
+	out->avail_tensors = (uint8_t)NN_AVAIL_WITHHELD;
 }
 
 /* ---- resolving a model in the asset store -------------------------------- */
@@ -775,60 +969,349 @@ int nn_svc_box_to_frame(const struct bf_det *in, struct bf_det *out)
 	return NN_SVC_OK;
 }
 
-/* ---- what this board's own `nn preview` needs ----------------------------
+/* ---- live inference (issue #99) ------------------------------------------
  *
- * Declared in nn_svc_grove.h; see there for why preview stays a board command
- * while its state lives here.
+ * The work itself runs on the CAMERA PRODUCER THREAD, inside the panel sink's
+ * consume() (nn_overlay.c).  What is here only starts it, reports on it and
+ * stops it -- and, unlike the command file this replaces, it holds no shell
+ * instance, because a port may not.  Everything that needs to print, wait or
+ * notice Ctrl+C is the shared command's, above svc/nn_svc.h.
  */
-int nn_svc_grove_acquire(void)
-{
-	return nn_try_acquire();
-}
 
-void nn_svc_grove_release(void)
-{
-	nn_release();
-}
+/* [!] The table in nn_stream_state.c decides about NUMBERS, and it is compiled
+ * on the host where camera.h cannot be included.  These are what tie the two
+ * together: if the camera ever renumbers a code, this fails to build here rather
+ * than leaving the table deciding about values nobody returns. */
+_Static_assert(NN_STREAM_CAM_OK      == CAM_OK,          "CAM_OK moved");
+_Static_assert(NN_STREAM_CAM_TIMEOUT == CAM_ERR_TIMEOUT, "CAM_ERR_TIMEOUT moved");
+_Static_assert(NN_STREAM_CAM_STATE   == CAM_ERR_STATE,   "CAM_ERR_STATE moved");
+_Static_assert(NN_STREAM_CAM_BUSY    == CAM_ERR_BUSY,    "CAM_ERR_BUSY moved");
+_Static_assert(NN_STREAM_CAM_LOCKED  == CAM_ERR_LOCKED,  "CAM_ERR_LOCKED moved");
 
-int nn_svc_grove_model_open(void)
+/*
+ * Would this model actually annotate frames?
+ *
+ * [!] SETTLED BEFORE THE STREAM STARTS, where refusing costs nothing and can
+ * say why.  A stream that starts and then fails on every frame is a panel
+ * showing a live picture with no boxes and no explanation -- the exact failure
+ * live inference exists to make visible.
+ */
+static int nn_detector_ready(struct nn_op_result *res)
 {
-	return nn_open_done;
-}
-
-int nn_svc_grove_detector_ready(char *why, size_t cap)
-{
-	struct nn_op_result probe;
-	struct nn_op_result *res = &probe;
 	struct npu_tensor in;
 	struct npu_tensor outs[NN_DECODER_MAX_OUTPUTS];
 	unsigned n_out, i;
 
-	nn_detail_clear();
 	if (npu_input(&in) != NPU_OK) {
 		nn_detail_set("the model has no input tensor");
-		goto refused;
+		return -1;
 	}
 	if (nn_input_quant_ok(res, &in) != 0)
-		goto refused;
+		return -1;
 	n_out = npu_output_count();
 	if (n_out > NN_DECODER_MAX_OUTPUTS) {
 		nn_detail_set("the model has %u outputs and this path reads %u",
 		              n_out, (unsigned)NN_DECODER_MAX_OUTPUTS);
-		goto refused;
+		return -1;
 	}
-	for (i = 0u; i < n_out; i++)
+	for (i = 0u; i < n_out; i++) {
 		if (npu_output(i, &outs[i]) != NPU_OK) {
 			nn_detail_set("output %u is unreadable", i);
-			goto refused;
+			return -1;
 		}
+	}
 	if (!nn_decoder_shapes_ok(outs, n_out)) {
 		nn_detail_set("the loaded model is not BlazeFace-shaped");
-		goto refused;
+		return -1;
 	}
 	return 0;
-refused:
-	nn_svc_str(why, cap, probe.detail);
-	return -1;
+}
+
+void nn_svc_stream_start(const struct nn_stream_spec *spec,
+                         struct nn_op_result *res, uint32_t *gen)
+{
+	struct camera_stats cs;
+	int rc;
+
+	if (res == NULL)
+		return;
+	nn_detail_clear();
+	if (spec == NULL || gen == NULL) {
+		nn_result(res, NN_SVC_ERR_ARG, NN_CLAIM_NONE);
+		return;
+	}
+	if (spec->test) {
+		/* No sensor test pattern on this board.  Refused before anything is
+		   acquired, so nothing has to be unwound. */
+		nn_detail_set("this board has no test pattern to stream");
+		nn_result(res, NN_SVC_ERR_SPEC, NN_CLAIM_NONE);
+		return;
+	}
+
+	switch (nn_stream_begin()) {
+	case NN_STREAM_START_GO:
+		break;
+	case NN_STREAM_START_RUNNING:
+		nn_detail_set("a stream is already running (`nn stream stats`)");
+		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
+		return;
+	case NN_STREAM_START_DEAD:
+		nn_detail_set("a previous teardown was never confirmed; only a reboot "
+		              "clears it");
+		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
+		return;
+	case NN_STREAM_START_BUSY:
+	default:
+		nn_detail_set("busy -- another nn job, or a start or stop, holds it");
+		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
+		return;
+	}
+	/* From here every failure gives BOTH the lifecycle and the claim back. */
+	if (!nn_open_done) {
+		nn_detail_set("no model is loaded -- `nn model load --name det`");
+		nn_stream_abort();
+		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
+		return;
+	}
+	if (nn_detector_ready(res) != 0) {
+		nn_stream_abort();
+		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
+		return;
+	}
+
+	/*
+	 * [!] ONE CALL, AND THEREFORE ONE FAILURE (issue #63).  Attaching the sink
+	 * and starting the stream used to be two steps, and a start that came back
+	 * BUSY meant a stream was already running WITH THIS SINK ATTACHED -- a
+	 * producer could be inside consume(), so the sink could not be detached and
+	 * the NPU could not be released.  The camera does both under its API mutex,
+	 * so a failure here means nothing was attached and nothing started.
+	 */
+	rc = cam_lcd_sink_attach_and_stream(nn_overlay_arm());
+	if (rc != CAM_OK) {
+		if (rc == CAM_ERR_BUSY)
+			nn_detail_set("the camera is already streaming, or another "
+			              "command owns it");
+		else
+			nn_detail_set("the camera would not start (%d)", rc);
+		nn_stream_abort();
+		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
+		return;
+	}
+
+	camera_stream_stats(&cs);
+	nn_stream_commit(cs.frames, (uint32_t)tx_time_get(), gen);
+	if (*gen == NN_STREAM_GEN_ANY) {
+		/*
+		 * [!] REFUSED, WHICH MEANS THIS CALLER NO LONGER OWNS THE START -- and
+		 * therefore does not know who does.  Unreachable under the transitions
+		 * admission allows, so this is invariant-failure handling; it fails
+		 * CLOSED rather than tidying up.  Issuing a stop here would be an
+		 * ownerless teardown that could collide with one already in progress,
+		 * and releasing the claim could free something a live thread is inside.
+		 * Report terminal and leave everything exactly as it is.
+		 */
+		nn_detail_set("the stream lifecycle moved underneath this start; what "
+		              "owns the hardware now cannot be established");
+		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
+		return;
+	}
+	nn_detail_set("inference stream started -- boxes are on the panel");
+	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
+}
+
+int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
+{
+	struct camera_stats cs;
+	struct nn_overlay_stats os;
+	uint32_t seq0, seq1, g, frames0, t0, ms;
+	uint8_t  phase;
+	TX_INTERRUPT_SAVE_AREA
+
+	if (out == NULL)
+		return NN_SVC_ERR_ARG;
+
+	/* Phase 1: identity and baselines. */
+	TX_DISABLE
+	nn_stream_life_snapshot(&nn_life, &g, &phase, &seq0);
+	frames0 = nn_stream_frames0;
+	t0      = nn_stream_t0;
+	ms      = nn_stream_ms;
+	TX_RESTORE
+
+	if (g == NN_STREAM_GEN_ANY)
+		return NN_SVC_ERR_STATE;                  /* nothing has ever run */
+	if (gen != NN_STREAM_GEN_ANY && gen != g)
+		return NN_SVC_ERR_GEN;
+
+	/*
+	 * [!] PHASE 2 IS OUTSIDE THE CRITICAL SECTION, AND IT HAS TO BE.
+	 * camera_stream_stats() ends in the frame pipeline's mutex; waiting for a
+	 * mutex with interrupts disabled is a deadlock, not a slow path.
+	 */
+	camera_stream_stats(&cs);
+	nn_overlay_stats(&os);
+
+	/*
+	 * Phase 3: accept only if nothing moved.  The counter, not the generation
+	 * and the state -- a retryable stop returns to both of those unchanged.
+	 */
+	TX_DISABLE
+	nn_stream_life_snapshot(&nn_life, NULL, NULL, &seq1);
+	TX_RESTORE
+	if (seq1 != seq0)
+		return NN_SVC_ERR_STALE;
+
+	memset(out, 0, sizeof *out);
+	out->running        = (phase == (uint8_t)NN_STREAM_PHASE_RUNNING) ? 1u : 0u;
+	out->frames         = cs.frames - frames0;
+	out->skipped        = os.skipped;
+	out->infers         = os.inferences;
+	out->errors         = os.errors;
+	out->model_errors   = os.model_errors;
+	out->decoder_errors = os.decoder_errors;
+	out->last_us        = os.last_ms * 1000u;
+	out->elapsed_ms     = out->running
+	                    ? (uint32_t)(((uint32_t)tx_time_get() - t0) * 1000u /
+	                                 TX_TIMER_TICKS_PER_SECOND)
+	                    : ms;
+	/* [!] Nothing decoded yet is not "decoded nobody". */
+	out->last_valid = (os.inferences != 0u) ? 1u : 0u;
+	out->last_ndet  = (int32_t)os.last_ndet;
+	return NN_SVC_OK;
+}
+
+/* The sentence an operator gets.  They are not interchangeable -- two of these
+   mean "nothing was touched" and "something is still running in there". */
+static const char *nn_stream_why_text(unsigned char why)
+{
+	switch ((enum nn_stream_why)why) {
+	case NN_STREAM_WHY_CAM_LOCKED:
+		return "the camera API stayed locked, so the stop was never requested "
+		       "and nothing was touched -- run `nn stream stop` again";
+	case NN_STREAM_WHY_CAM_LOST:
+		return "the producer never acknowledged the stop; the camera is "
+		       "unusable until reboot";
+	case NN_STREAM_WHY_CAM_STATE:
+		return "the camera refused the stop; it is unusable until reboot";
+	case NN_STREAM_WHY_SINK_BUSY:
+		return "the panel has not finished with this stream's frames -- run "
+		       "`nn stream stop` again";
+	case NN_STREAM_WHY_SINK_LOST:
+		return "the panel thread did not finish; the preview is unusable "
+		       "until reboot";
+	case NN_STREAM_WHY_OK:
+	default:
+		return "stopped";
+	}
+}
+
+void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
+{
+	struct nn_stream_verdict v;
+	int cam_rc, detach_rc = 0, attempted = 0;
+
+	if (res == NULL)
+		return;
+	nn_detail_clear();
+
+	switch (nn_stream_claim_stop(gen)) {
+	case NN_STREAM_STOP_GO:
+		break;
+	case NN_STREAM_STOP_IDLE:
+		nn_detail_set("no stream is running");
+		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
+		return;
+	case NN_STREAM_STOP_WRONG_GEN:
+		nn_detail_set("that stream has already been replaced by another");
+		nn_result(res, NN_SVC_ERR_GEN, NN_CLAIM_NONE);
+		return;
+	case NN_STREAM_STOP_DEAD:
+		nn_detail_set("a previous teardown was never confirmed; only a reboot "
+		              "clears it");
+		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
+		return;
+	case NN_STREAM_STOP_BUSY:
+	default:
+		/* [!] NOTHING WAS ATTEMPTED, SO NOTHING IS THE CALLER'S TO RELEASE
+		 * (issue #99, bench).  This used to report RETRYABLE, which made the
+		 * shared reporter add "teardown did not finish; nn is still held" --
+		 * said to a background waiter whose stream another console was at that
+		 * moment tearing down perfectly well.  The claim is somebody else's and
+		 * they are settling it; the retry advice belongs in the detail, not in
+		 * a warning about a teardown this caller never began. */
+		nn_detail_set("a start or another stop owns the stream -- retry");
+		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
+		return;
+	}
+
+	/* [!] BEFORE the camera stop, always: it is what keeps the frame in flight
+	 * from starting an inference the join would then have to wait out. */
+	nn_overlay_request_stop();
+	cam_rc = camera_stream_stop();
+
+	/* [!] AND THE DETACH IS THE SECOND HALF OF THE STOP (issue #57), reached
+	 * only on a confirmed producer stop -- the blit runs on the panel thread,
+	 * so a confirmed stop alone does not prove nothing is using the frame. */
+	if (nn_stream_may_detach(cam_rc)) {
+		attempted = 1;
+		detach_rc = cam_lcd_sink_detach();
+	}
+	nn_stream_stop_decide(cam_rc, attempted, detach_rc, &v);
+
+	switch ((enum nn_stream_act)v.act) {
+	case NN_STREAM_ACT_DONE:
+		nn_stream_finish();
+		nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
+		return;
+	case NN_STREAM_ACT_RETRY:
+		nn_stream_unclaim_stop();
+		nn_detail_set("%s", nn_stream_why_text(v.why));
+		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_RETRYABLE);
+		return;
+	case NN_STREAM_ACT_TERMINAL:
+	default:
+		nn_stream_poison();
+		nn_detail_set("%s", nn_stream_why_text(v.why));
+		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
+		return;
+	}
+}
+
+int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
+                        char *buf, size_t cap)
+{
+	struct nn_overlay_stats os;
+
+	if (buf == NULL || cap == 0u)
+		return NN_SVC_ERR_ARG;
+	buf[0] = '\0';
+	if (ctx != NN_STREAM_LINES_STATS)
+		return 0;                        /* nothing to add at start */
+
+	nn_overlay_stats(&os);
+	switch (index) {
+	case 0u:
+		nn_detail_to(buf, cap, "faces   : %lu drawn since the stream started",
+		             (unsigned long)os.detections);
+		return 1;
+	case 1u:
+		/* The producer-side split (issue #60).  Only when the clock behind it
+		   is trusted -- an untrusted number here would be read as a
+		   measurement. */
+		if (!os.prof_ok || os.prof_frames == 0u)
+			return 0;
+		nn_detail_to(buf, cap,
+		             "producer: %lu us prep, %lu us invoke, %lu us decode "
+		             "(%lu frames)",
+		             (unsigned long)(os.prep_us / os.prof_frames),
+		             (unsigned long)(os.invoke_us / os.prof_frames),
+		             (unsigned long)(os.decode_us / os.prof_frames),
+		             (unsigned long)os.prof_frames);
+		return 1;
+	default:
+		return 0;
+	}
 }
 
 unsigned nn_svc_thresh_get(void)

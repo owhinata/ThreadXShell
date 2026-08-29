@@ -283,7 +283,7 @@ static void test_walk_matches_at_real_shapes(void)
 	static uint8_t got[240 * 240 * 3];
 	static uint8_t want[240 * 240 * 3];
 	static const uint32_t shapes[][2] = {
-		{ 128, 128 },   /* BlazeFace: what `nn preview` runs */
+		{ 128, 128 },   /* BlazeFace: what `nn stream` runs */
 		{  96,  96 },   /* a smaller classifier             */
 		{ 240, 240 },   /* upscale in x, identity in y      */
 	};

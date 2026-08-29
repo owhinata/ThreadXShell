@@ -287,7 +287,7 @@ struct lcd_blit_hooks {
  *
  * @p overlay is called once, after @p pixels have been converted into the
  * driver's framebuffer and before the DMA starts, with that framebuffer and its
- * geometry. It is how `nn preview` puts face boxes on a camera frame without a
+ * geometry. It is how `nn stream` puts face boxes on a camera frame without a
  * second full-frame buffer and without the caller ever holding the panel guard
  * itself.
  *

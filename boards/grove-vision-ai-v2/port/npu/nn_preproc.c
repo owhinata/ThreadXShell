@@ -112,7 +112,7 @@ static uint32_t nn_frac_q8(int32_t q, int32_t floor_i)
  * variable, so this is a 64-bit division by a non-constant, which on a
  * Cortex-M55 is a call to __aeabi_ldivmod.  Measured at 10,305 us per frame
  * for a 240x240 -> 128x128 resize, about 250 cycles per output pixel for
- * twelve multiply-adds -- the single largest term in `nn preview`'s producer
+ * twelve multiply-adds -- the single largest term in `nn stream`'s producer
  * work after the inference itself.
  *
  * The walk below is the same sequence, EXACT, because it carries the remainder

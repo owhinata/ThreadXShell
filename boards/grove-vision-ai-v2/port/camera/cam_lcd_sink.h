@@ -38,7 +38,7 @@ extern "C" {
  * the point:
  *
  *   - process() runs FIRST, ON THE PRODUCER THREAD, with NO guard held, and may
- *     take as long as it needs -- `nn preview` runs a whole NPU inference here.
+ *     take as long as it needs -- `nn stream` runs a whole NPU inference here.
  *     It stays on the producer deliberately: the raw WDMA3 buffer it reads is
  *     stable only until consume() returns (the datapath is re-armed after
  *     publish), so this is the one place the model sees the frame that is about
@@ -113,6 +113,24 @@ void cam_lcd_sink_create_objects(void);
 int cam_lcd_sink_attach_and_stream(const struct cam_lcd_overlay *ov);
 
 /**
+ * @brief  Is the panel spoken for by this sink? (issue #99)
+ *
+ * For the `lcd` commands that change PERSISTENT panel state -- rotation, MADCTL,
+ * the backlight -- rather than one transfer.  Since live inference stopped
+ * blocking its console those became typeable during a stream, and a rotation
+ * mid-stream leaves the sink's fixed-size blits refused or clamped while every
+ * layer still reports success.
+ *
+ * [!] ASK IT WHILE HOLDING THE PANEL GUARD.  Answered and then acted on
+ * afterwards it is a TOCTOU: the attach path takes the guard from bring-up until
+ * the sink is linked precisely so that a caller holding it either finishes first
+ * or sees the sink.
+ *
+ * @return non-zero if this sink is attached, coming up, or lost
+ */
+int cam_lcd_sink_linked(void);
+
+/**
  * @brief  Stop showing frames: unlink the sink, then drain the panel thread.
  *
  * [!] THE CALLER MUST HAVE A CONFIRMED STOP FIRST -- camera_stream_stop() ==
@@ -131,7 +149,7 @@ int cam_lcd_sink_attach_and_stream(const struct cam_lcd_overlay *ov);
  * nothing is torn down, the overlay is NOT cleared, the frame stays pinned, and
  * every later attach() is refused until reboot.  The caller must treat that
  * exactly as it treats a camera that never acknowledged a stop -- in particular
- * `nn preview` must keep its lease, because the panel thread may still be inside
+ * `nn stream` must keep its lease, because the panel thread may still be inside
  * a draw() that reads the detections.  All of this module's state is static, so
  * keeping it costs nothing; releasing it while a thread may still be in there
  * cannot be survived.

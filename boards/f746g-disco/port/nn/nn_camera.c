@@ -116,6 +116,24 @@ static int          nncam_created;
 static volatile enum cam_own_state nncam_own;
 /* enum camera_res hint (display only, owhinata/stm32f746g-disco#100) */
 static uint8_t      nncam_res;
+/*
+ * [!] FRAMES SINCE THE LOGICAL STREAM START, WHICH IS NOT WHAT nnstat.frames
+ * COUNTS (issue #99).  nnstat is cleared by nncam_session_reset(), and that runs
+ * on every pipeline ATTACH -- so it restarts when the base capture starts, and
+ * again after an overrun re-attach.  A bounded `nn stream start --frames n`
+ * cannot be built on a number that goes backwards underneath it, and subtracting
+ * a baseline in the shared command does not help for the same reason.  This one
+ * is reset only where a stream logically begins, and is monotonic across base
+ * re-attachments.
+ */
+static uint32_t     nncam_gen_frames;
+/* [!] AND ITS SIBLINGS, for the same reason.  Reporting a per-GENERATION frame
+ * count beside per-ATTACH inference and drop counts produced stats that do not
+ * add up -- "60 frames in, 36 infers, 0 skipped" was the first bench run.  All
+ * four move together or none of them mean anything. */
+static uint32_t     nncam_gen_infers;
+static uint32_t     nncam_gen_errors;
+static uint32_t     nncam_gen_drops;
 
 /* Session generation, bumped on every (re)attach + on a base detach.  An in-flight
  * ingest that spans a session boundary reverts instead of injecting a stale frame. */
@@ -271,6 +289,7 @@ static void nncam_ingest(const struct frame_desc *f)
 
 	if (i < 0) {                            /* no free buffer -> drop this frame    */
 		nnstat.drops++;
+		nncam_gen_drops++;
 		return;
 	}
 
@@ -289,6 +308,7 @@ static void nncam_ingest(const struct frame_desc *f)
 	tx_mutex_put(&nncam_lock);
 
 	nnstat.frames++;
+	nncam_gen_frames++;                     /* per stream, not per attach (#99)     */
 	(void)tx_semaphore_put(&nncam_sem);     /* wake the worker                      */
 }
 
@@ -374,9 +394,11 @@ static int nncam_step(void)
 	rc = nn_run(nncam_model);
 	if (rc != 0) {
 		nnstat.errors++;
+		nncam_gen_errors++;
 		return 1;
 	}
 	nnstat.infers++;
+	nncam_gen_infers++;
 	nnstat.last_us = nn_last_cycles(nncam_model) / mhz;
 
 	/* Model-specific decode (BlazeFace).  A safe no-op (returns BF_ERR_MODEL) for
@@ -593,6 +615,12 @@ int nn_camera_start(enum camera_res res)
 		cam_own_start_finish(&nncam_own, 0);
 		return rc;
 	}
+	/* [!] HERE, and nowhere else (issue #99): a refused start must not clear
+	   it, and neither must a re-attach part way through a running stream. */
+	nncam_gen_frames = 0u;
+	nncam_gen_infers = 0u;
+	nncam_gen_errors = 0u;
+	nncam_gen_drops  = 0u;
 	cam_own_start_finish(&nncam_own, 1);    /* STARTING -> RUNNING                  */
 	return 0;
 }
@@ -676,6 +704,10 @@ void nn_camera_stats_get(struct nn_camera_stats *out)
 		return;
 	out->running    = (nncam_run != 0);
 	out->res        = nncam_res;
+	out->gen_frames = nncam_gen_frames;
+	out->gen_infers = nncam_gen_infers;
+	out->gen_errors = nncam_gen_errors;
+	out->gen_drops  = nncam_gen_drops;
 	out->frames     = nnstat.frames;
 	out->drops      = nnstat.drops;
 	out->infers     = nnstat.infers;

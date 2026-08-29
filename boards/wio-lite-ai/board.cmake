@@ -881,7 +881,7 @@ endif()
 list(APPEND SHELL_SOURCES ${NN_SOURCES}
      "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"      # the one shared command
      "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c" # its pure half
-     "${BOARD_DIR}/cmds/cmd_nn_board.c")            # this board's `nn stream`
+     "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c")     # the shared stream lifecycle
 
 # The MLPerf Tiny v1.4 benchmark harness.  Like CONFIG_NN_BACKEND above and
 # for the same reason, this is NOT a BSP_ENABLE_* switch -- those all name a piece of
@@ -1162,6 +1162,14 @@ add_shared_storage_gate(NAME wio_nn_core_audit
                         SOURCE "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
                         IFACE bsp_iface CONSUMER shell)
 add_dependencies(shell wio_nn_core_audit_check)
+
+# ...and the shared stream lifecycle (issue #99), for the same reason: the state
+# is the BOARD's struct, so a static appearing in here would be memory no board
+# placed and no board's residency gate names.
+add_shared_storage_gate(NAME wio_nn_life_audit
+                        SOURCE "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"
+                        IFACE bsp_iface CONSUMER shell)
+add_dependencies(shell wio_nn_life_audit_check)
 
 add_shared_storage_gate(NAME wio_decoder_audit SOURCE "${WIO_SHARED_DECODER}"
                          IFACE bsp_iface CONSUMER shell)

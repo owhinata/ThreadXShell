@@ -450,6 +450,7 @@ add_executable(shell
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
     "${BOARD_DIR}/cmds/cmd_nn_board.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/fs_cmd_core.c"
     "${BOARD_DIR}/port/qspi/qspi_flash.c"
     "${BOARD_DIR}/port/sd/sd_card.c"
@@ -654,6 +655,14 @@ add_shared_storage_gate(NAME f746_nn_core_audit
                         SOURCE "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
                         IFACE bsp_iface CONSUMER shell)
 add_dependencies(shell f746_nn_core_audit_check)
+
+# ...and the shared stream lifecycle (issue #99), for the same reason: the state
+# is the BOARD's struct, so a static appearing in here would be memory no board
+# placed and no board's residency gate names.
+add_shared_storage_gate(NAME f746_nn_life_audit
+                        SOURCE "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"
+                        IFACE bsp_iface CONSUMER shell)
+add_dependencies(shell f746_nn_life_audit_check)
 
 add_custom_command(TARGET shell POST_BUILD
     COMMAND "${Python3_EXECUTABLE}"

@@ -110,7 +110,7 @@ _Static_assert((CAM_PRODUCER_STACK % 8u) == 0u,
                "ThreadX wants an 8-byte aligned stack size");
 _Static_assert(CAM_PRODUCER_STACK >= 1024u,
                "the producer's deepest call is a sink's consume(), which runs "
-               "TFLM's Invoke() under `nn preview`; anything this small has not "
+               "TFLM's Invoke() under `nn stream`; anything this small has not "
                "been thought about");
 
 /*
@@ -2005,7 +2005,7 @@ int camera_stream_start(struct frame_sink *sink)
 	 * a bus.
 	 *
 	 * The sink reservation below does not stand in for this.  It refuses a
-	 * start while any sink is linked, so a preview or `nn preview` whose stop
+	 * start while any sink is linked, so a preview or `nn stream` whose stop
 	 * failed is covered by it -- but `camera bench` streams with NO sink, so
 	 * on that path the registry is empty and there is nothing else in the way.
 	 *
@@ -2036,7 +2036,7 @@ int camera_stream_start(struct frame_sink *sink)
 	 * Starting there would hand the old sink frames from a stream its owner
 	 * does not own, and that owner is entitled to tear down what the sink
 	 * points at.  Worse, the panel sink counts a delivery only AFTER its
-	 * overlay has run -- the whole NPU inference under `nn preview` -- so a
+	 * overlay has run -- the whole NPU inference under `nn stream` -- so a
 	 * drain running concurrently sees "nothing outstanding" and returns
 	 * success while an inference is in flight.
 	 *

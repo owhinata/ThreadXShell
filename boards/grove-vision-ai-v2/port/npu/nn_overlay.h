@@ -17,8 +17,8 @@
  * OWNERSHIP.  All state here is static and none of it is ever freed, which is
  * what makes the camera's lost-producer path survivable (see camera.h): if a
  * stop is never acknowledged, a producer still inside consume() keeps touching
- * this, and it must still be there.  The `nn` gate held by the command for the
- * whole preview is what keeps a second caller out.
+ * this, and it must still be there.  The `nn` gate, held for the whole life of
+ * the stream, is what keeps a second caller out.
  */
 #ifndef NN_OVERLAY_H
 #define NN_OVERLAY_H
@@ -31,7 +31,7 @@
 extern "C" {
 #endif
 
-/** What a preview did, for the command's closing summary. */
+/** What a stream has done, for `nn stream stats`. */
 struct nn_overlay_stats {
 	uint32_t inferences;   /**< frames run through the NPU               */
 	uint32_t detections;   /**< faces drawn, summed over frames          */
@@ -52,7 +52,7 @@ struct nn_overlay_stats {
 	/*
 	 * The producer-side stage split (issue #60).  `camera stats` prints one
 	 * `sink` number for everything a sink does on the producer; under
-	 * `nn preview` almost all of it is this overlay's process(), and which
+	 * `nn stream` almost all of it is this overlay's process(), and which
 	 * STAGE of process() owns it decides what is worth optimising.  Totals
 	 * since arm, over prof_frames frames -- only frames that completed all
 	 * three stages are counted, so the three rows describe the same set.
@@ -65,7 +65,7 @@ struct nn_overlay_stats {
 };
 
 /**
- * @brief  Arm the overlay for one preview, and hand back the vtable to attach.
+ * @brief  Arm the overlay for one stream, and hand back the vtable to attach.
  *
  * Resets the counters and clears the stop flag. The model must already be open
  * and BlazeFace-shaped -- the caller checks that, because it can refuse before

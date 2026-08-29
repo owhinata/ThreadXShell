@@ -19,7 +19,7 @@
  * were.  Both callers -- `nn detect` on the shell thread and the live overlay on
  * the camera producer thread -- go through this one instance, which is correct
  * because `nn_busy` in cmd_nn.c already holds across every nn subcommand
- * including the whole of `nn preview`, so two decodes cannot overlap.
+ * including the whole of `nn stream`, so two decodes cannot overlap.
  */
 #ifndef NN_DECODER_H
 #define NN_DECODER_H
@@ -45,7 +45,7 @@ extern "C" {
  * @brief  Would these tensors decode as BlazeFace, without decoding them?
  *
  * For a caller that must decide BEFORE it commits to something expensive:
- * `nn preview` starts a camera stream, and discovering the wrong model is open
+ * `nn stream` starts a camera stream, and discovering the wrong model is open
  * on every frame would be a preview that runs and silently never annotates.
  *
  * @return non-zero if a decode would find all four tensors.

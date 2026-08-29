@@ -121,6 +121,24 @@ knowing:
 | `CLI_DEVMEM_DUMP_MAX_LEN` | 256 | bytes per `devmem` dump |
 | `CONFIG_NN_BACKEND` | `null` | `null` / `stedgeai` / `stedgeai_reloc` / `tflm` |
 
+[!] `null` STAYS THE DEFAULT HERE, deliberately (issue #98).  wio-lite-ai defaults
+to `tflm`; this board cannot, because none of its other three backends configures
+in a clean tree:
+
+| backend | what a clean tree does not have |
+|---|---|
+| `tflm` | a `.tflite` -- it is baked into the image, and this repo ships none |
+| `stedgeai_reloc` | the ST Edge AI Core install (its loader source, ST-SLA) |
+| `stedgeai` | that install, its runtime `.a`, AND `stedgeai generate` output |
+
+Verified by trying each: `stedgeai` fails on the missing generated model even on a
+machine that HAS the ST install, and `stedgeai_reloc` only configures because such
+an install is present.  So defaulting to any of them would break
+`cmake -DBOARD=f746g-disco` for anyone who has not installed proprietary tooling.
+Changing that is not a default-value question -- it needs a backend that runs from
+an artifact this repo can ship, which is what wio already does by loading models
+from NOR at runtime.
+
 ### [!] LTO is refused on this board
 
 `board.cmake` turns an attempt to enable it into a `FATAL_ERROR`, including the

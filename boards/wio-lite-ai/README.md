@@ -189,15 +189,48 @@ Negative tests for the gate live in `cmake/fixtures/run_fixture_tests.py`.
 
 | Option | Default | Effect |
 |---|---|---|
+| `CONFIG_NN_BACKEND` | **tflm** | TensorFlow Lite Micro inference; `null` for the stub |
 | `BSP_ENABLE_LTO` | ON | link-time optimisation for the shell firmware |
 | `BSP_ENABLE_WFI` | ON | ThreadX idle WFI |
 | `BSP_ENABLE_IWDG` | ON | watchdog + `wdt` |
 | `BSP_ENABLE_PSRAM` | ON | OCTOSPI1 APS6408 window + `psram` |
-| `BSP_ENABLE_SD` | ON | SDMMC1 + `sd` |
+| `BSP_ENABLE_SD` | **OFF under tflm**, else ON | SDMMC1 + `sd` |
 | `BSP_ENABLE_LCD` | ON | FPC-40 RGB panel on the LTDC + `lcd` |
 | `BSP_ENABLE_KV` | ON | external NOR on OCTOSPI2 + the config KV store |
 | `BSP_ENABLE_CAMERA` | ON | FPC-24 DVP camera on the DCMI + `camera` |
 | `CONFIG_MLPERF_TINY` | OFF | MLPerf Tiny v1.4 harness + `mlperf` |
+
+### Why tflm is the default here and nowhere else (issue #98)
+
+This is the only board that can afford it without asking anything of whoever
+configures the tree.  Its models arrive at RUNTIME, from the NOR blob region, so
+nothing is baked into the image and `cmake -DBOARD=wio-lite-ai` needs no arguments.
+f746g-disco's tflm bakes a `.tflite` in and this repo ships none -- defaulting it
+would make a clean tree fail to configure -- so that board stays `null`.
+
+[!] **It costs most of what is left of the 384 KB app partition**, and the microSD
+is what pays for it.  Measured:
+
+| build | app partition | free |
+|---|---|---|
+| `null` (+ SD) | 305,584 B, 77.7% | 87,632 B |
+| **`tflm`, SD dropped (the default)** | **350,096 B, 89.0%** | **43,120 B** |
+| `tflm` + SD | 384,572 B, 97.8% | 8,644 B |
+
+The last row links and leaves no room to add anything, which is why the tflm
+default also turns `BSP_ENABLE_SD` off.  `-DBSP_ENABLE_SD=ON` brings it back, but
+wanting the SD back is a reason to audit the space first, not to pass a flag.
+
+[!] The switch only affects NEW build directories.  `CONFIG_NN_BACKEND` is a cache
+variable, so a tree already configured as `null` stays `null` until it is
+reconfigured -- which is also why the SD default, keyed on `NOT DEFINED
+BSP_ENABLE_SD`, does not fire in one of those.
+
+[!] **The tflm build has not been run on hardware.**  It builds and passes every
+gate in both configurations, and `check_cxx_runtime.py` -- which only runs for
+tflm -- is now part of the default build.  But no image from this configuration
+has been flashed, so the first `--target flash` after this change ships something
+new.
 
 ## Commands
 

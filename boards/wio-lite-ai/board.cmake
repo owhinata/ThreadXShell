@@ -613,7 +613,23 @@ option(BSP_PSRAM_INIT_IN_APP "Bring up OCTOSPI1 PSRAM app-side (app-first valida
 # Which NN backend this build links.  Declared HERE, above the BSP_ENABLE_*
 # options, because BSP_ENABLE_SD's default depends on it -- the rest of the NN wiring
 # stays further down with the other source lists.
-set(CONFIG_NN_BACKEND "null" CACHE STRING "NN inference backend: null | tflm")
+#
+# DEFAULT tflm SINCE ISSUE #98.  This board can afford it and the other two cannot:
+# its models come from the NOR blob region at RUNTIME, so nothing has to be baked
+# into the image and a clean tree still configures with no arguments.  (f746g-disco
+# stays `null` for exactly that reason -- its tflm bakes a .tflite in and this repo
+# ships none, so defaulting it would break `cmake -DBOARD=f746g-disco` for everyone.)
+#
+# [!] IT COSTS MOST OF WHAT IS LEFT OF THE 384 KB APP PARTITION.  Measured at the
+# commit that made this change: 305,584 B (77.7%) as `null`, 350,096 B (89.0%) as
+# `tflm` with the microSD dropped -- which is what the BSP_ENABLE_SD default below
+# does, and why it does it.  Keeping the SD as well is 384,572 B (97.8%), leaving
+# 8,644 B: enough to link today and not enough to add anything.  If a future change
+# needs the SD back, it needs the space audited first, not just -DBSP_ENABLE_SD=ON.
+#
+# Existing build directories are unaffected: this is a CACHE default, so a tree
+# already configured as `null` stays `null` until someone reconfigures it.
+set(CONFIG_NN_BACKEND "tflm" CACHE STRING "NN inference backend: null | tflm")
 set_property(CACHE CONFIG_NN_BACKEND PROPERTY STRINGS null tflm)
 
 # On-board microSD over SDMMC1 + IDMA.  ON builds the block driver

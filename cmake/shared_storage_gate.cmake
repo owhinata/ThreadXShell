@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 ThreadX Shell Project
 #
-# The audit target behind cmake/check_no_mutable_storage.py (issue #97).
+# The audit target behind cmake/check_no_mutable_storage.py (issues #97, #50).
 #
-# svc/blazeface.c is one decoder for three boards, and that only works because it
-# owns no mutable storage: each board passes in its own candidate scratch, so the
-# scratch keeps that board's placement and that board's residency gate keeps
-# naming a symbol the board owns.  This compiles the shared file once more, on its
-# own, and refuses any allocated writable section in the result.
+# A file shared by three boards may own no mutable storage.  svc/blazeface.c was
+# the first: each board passes in its own candidate scratch, so the scratch keeps
+# that board's placement and that board's residency gate keeps naming a symbol the
+# board owns.  shell/cmds/cmd_nn.c is the second, for the same reason -- a static
+# added to the one shared `nn` command would land in memory no board placed, and
+# one of the three has no residency gate that would notice.  This compiles a
+# shared file once more, on its own, and refuses any allocated writable section in
+# the result.
 #
 # [!] IT MUST BE THE BOARD'S OWN COMPILE, or the gate is answering about a
 # different object than the one that ships.  Two things were got wrong first and
@@ -47,15 +50,15 @@
 # for the checker to find.  check_no_mutable_storage.py refuses COMMON symbols
 # outright instead, which covers both.
 #
-function(add_decoder_storage_gate)
+function(add_shared_storage_gate)
     cmake_parse_arguments(DSG "" "NAME;SOURCE;IFACE;CONSUMER" "" ${ARGN})
     if(NOT DSG_NAME OR NOT DSG_SOURCE OR NOT DSG_IFACE)
         message(FATAL_ERROR
-            "add_decoder_storage_gate: NAME, SOURCE and IFACE are all required")
+            "add_shared_storage_gate: NAME, SOURCE and IFACE are all required")
     endif()
     if(NOT EXISTS "${DSG_SOURCE}")
         message(FATAL_ERROR
-            "add_decoder_storage_gate: no such source:\n  ${DSG_SOURCE}")
+            "add_shared_storage_gate: no such source:\n  ${DSG_SOURCE}")
     endif()
 
     # [!] The REAL source, not a copy or a wrapper: see the note above.

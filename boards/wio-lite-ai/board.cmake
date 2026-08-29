@@ -1140,10 +1140,10 @@ add_custom_command(TARGET shell POST_BUILD
 # cache, intermittently, only under cache pressure.  `shell` only, like the two above.
 # --- the shared decoder must own no storage (issue #97) -----------------------
 #
-# See cmake/decoder_storage_gate.cmake for what this checks and why it has to be
+# See cmake/shared_storage_gate.cmake for what this checks and why it has to be
 # THIS board's compile rather than a generic one.
-include("${CMAKE_SOURCE_DIR}/cmake/decoder_storage_gate.cmake")
-add_decoder_storage_gate(NAME wio_decoder_audit SOURCE "${WIO_SHARED_DECODER}"
+include("${CMAKE_SOURCE_DIR}/cmake/shared_storage_gate.cmake")
+add_shared_storage_gate(NAME wio_decoder_audit SOURCE "${WIO_SHARED_DECODER}"
                          IFACE bsp_iface CONSUMER shell)
 add_dependencies(shell wio_decoder_audit_check)
 

@@ -666,13 +666,15 @@ void nn_svc_bench_prepare(struct nn_op_result *res)
 	nn_release();
 }
 
-void nn_svc_bench_run(uint32_t iters, uint64_t *us, nn_svc_cancel_fn cancel,
-                      void *ctx, struct nn_op_result *res)
+void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
+                      nn_svc_cancel_fn cancel, void *ctx,
+                      struct nn_op_result *res)
 {
-	uint32_t t0, t1, i;
+	uint32_t i;
 
 	nn_detail_clear();
-	*us = 0u;
+	memset(out, 0, sizeof *out);
+	out->min_us = 0xFFFFFFFFu;
 
 	if (!nn_try_acquire()) {
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
@@ -685,8 +687,9 @@ void nn_svc_bench_run(uint32_t iters, uint64_t *us, nn_svc_cancel_fn cancel,
 		return;
 	}
 
-	t0 = (uint32_t)tx_time_get();
 	for (i = 0u; i < iters; i++) {
+		uint32_t t0, t1, us;
+
 		if (nn_svc_cancelled(cancel, ctx)) {
 			nn_detail_set("cancelled after %lu of %lu run(s)",
 			              (unsigned long)i, (unsigned long)iters);
@@ -694,6 +697,7 @@ void nn_svc_bench_run(uint32_t iters, uint64_t *us, nn_svc_cancel_fn cancel,
 			nn_release();
 			return;
 		}
+		t0 = (uint32_t)tx_time_get();
 		if (npu_invoke() != NPU_OK) {
 			nn_detail_set("inference failed on run %lu of %lu",
 			              (unsigned long)i + 1u, (unsigned long)iters);
@@ -701,12 +705,28 @@ void nn_svc_bench_run(uint32_t iters, uint64_t *us, nn_svc_cancel_fn cancel,
 			nn_release();
 			return;
 		}
-	}
-	t1 = (uint32_t)tx_time_get();
+		t1 = (uint32_t)tx_time_get();
 
-	/* ThreadX ticks are 1 ms here; the contract's unit is microseconds, which
-	   is the neutral one because the other two boards measure in DWT cycles. */
-	*us = (uint64_t)(t1 - t0) * 1000u;
+		/*
+		 * [!] TICKS ARE 1 ms HERE, so a single inference resolves to whole
+		 * milliseconds and the spread is coarse.  That is a property of this
+		 * board's time source rather than of the measurement, and it is why
+		 * the unit crossing the contract is microseconds: converting up is
+		 * lossless, and only this file knows what a tick is worth.
+		 */
+		us = (t1 - t0) * 1000u;
+		out->total_us += us;
+		if (us < out->min_us)
+			out->min_us = us;
+		if (us > out->max_us)
+			out->max_us = us;
+		out->runs++;
+	}
+
+	if (out->runs == 0u)
+		out->min_us = 0u;
+	else
+		out->avg_us = (uint32_t)(out->total_us / out->runs);
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 	nn_release();
 }

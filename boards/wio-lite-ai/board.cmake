@@ -793,7 +793,8 @@ endif()
 #
 # CONFIG_NN_BACKEND itself is declared much earlier in this file, above the BSP_ENABLE_*
 # block, because BSP_ENABLE_SD's default depends on which backend was selected.
-set(NN_SOURCES "${BOARD_DIR}/port/nn/nn.c")
+set(NN_SOURCES "${BOARD_DIR}/port/nn/nn.c"
+               "${BOARD_DIR}/port/nn/nn_svc_wio.c")  # the shared `nn` command's adapter
 # Which buffers the cacheable-carve-out gate must find in the image depends on which
 # backend was selected, and CMake is the only place that knows.  When the list was
 # hard-coded in the script, the script itself refused every tflm build -- the `null`
@@ -823,6 +824,11 @@ elseif(CONFIG_NN_BACKEND STREQUAL "tflm")
     include("${BOARD_DIR}/cmake/tflite-micro.cmake")
     list(APPEND NN_PSRAM_AI_REQUIRED
          --require nn_tflm_arena --require nn_tflm_model_buf)
+    # Tells the board's nn_svc_config.h that a RUNTIME MODEL LOADER exists, so
+    # the shared `nn` command registers `model load` (issue #50).  The same
+    # spelling f746g-disco already uses: the capability follows the backend, not
+    # the board, because the same board answers differently in two builds.
+    set(NN_BACKEND_DEFINE CONFIG_NN_BACKEND_TFLM=1)
 else()
     message(FATAL_ERROR "CONFIG_NN_BACKEND must be 'null' or 'tflm'")
 endif()
@@ -872,7 +878,10 @@ if(BSP_ENABLE_CAMERA)
     list(APPEND NN_PSRAM_AI_REQUIRED --noncacheable cam_ring)  # DCMI via DMA2_Stream1
     list(APPEND NN_PSRAM_AI_REQUIRED --noncacheable cam_frame) # DCMI single capture
 endif()
-list(APPEND SHELL_SOURCES ${NN_SOURCES} "${BOARD_DIR}/cmds/cmd_ai.c")
+list(APPEND SHELL_SOURCES ${NN_SOURCES}
+     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"      # the one shared command
+     "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c" # its pure half
+     "${BOARD_DIR}/cmds/cmd_nn_board.c")            # this board's `nn stream`
 
 # The MLPerf Tiny v1.4 benchmark harness.  Like CONFIG_NN_BACKEND above and
 # for the same reason, this is NOT a BSP_ENABLE_* switch -- those all name a piece of
@@ -1001,6 +1010,7 @@ target_compile_definitions(shell PRIVATE
     # YMODEM block; 4 KB makes an overrun require the shell thread to be starved
     # for four whole blocks.  `wifi imgload` reports the drop count either way.
     CLI_USBCDC_RX_BUFFER_SIZE=4096
+    ${NN_BACKEND_DEFINE}               # set only for a backend with a loader
     BSP_ENABLE_IWDG=$<BOOL:${BSP_ENABLE_IWDG}>   # IWDG1 arm + petter + wdt
     BSP_ENABLE_WFI=$<BOOL:${BSP_ENABLE_WFI}>      # gates TX_ENABLE_WFI (tx_user.h)
     BSP_ENABLE_PSRAM=$<BOOL:${BSP_ENABLE_PSRAM}>          # PSRAM window + psram cmd
@@ -1143,6 +1153,16 @@ add_custom_command(TARGET shell POST_BUILD
 # See cmake/shared_storage_gate.cmake for what this checks and why it has to be
 # THIS board's compile rather than a generic one.
 include("${CMAKE_SOURCE_DIR}/cmake/shared_storage_gate.cmake")
+# The same rule on the one shared `nn` command and its pure half (issue #50).
+add_shared_storage_gate(NAME wio_nn_cmd_audit
+                        SOURCE "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
+                        IFACE bsp_iface CONSUMER shell)
+add_dependencies(shell wio_nn_cmd_audit_check)
+add_shared_storage_gate(NAME wio_nn_core_audit
+                        SOURCE "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
+                        IFACE bsp_iface CONSUMER shell)
+add_dependencies(shell wio_nn_core_audit_check)
+
 add_shared_storage_gate(NAME wio_decoder_audit SOURCE "${WIO_SHARED_DECODER}"
                          IFACE bsp_iface CONSUMER shell)
 add_dependencies(shell wio_decoder_audit_check)

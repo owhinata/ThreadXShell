@@ -315,19 +315,41 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
 void nn_svc_bench_prepare(struct nn_op_result *res);
 
 /**
- * Invoke @p iters times and report the total.
+ * What a benchmark measured.
  *
- * @param us  elapsed microseconds -- a neutral unit, because the boards measure
- *            in DWT cycles, ThreadX ticks and a free-running vendor timer
- *            respectively, and only they know which
+ * [!] MIN, AVERAGE AND MAX, NOT A TOTAL.  An average alone hides the thing a
+ * benchmark is usually run to find: on a board where inference shares a core
+ * with a console and a camera, the spread between the fastest and the slowest
+ * run is the measurement.  One of the boards already reported all three and
+ * dropping to a total would have been a quiet loss of resolution.
+ *
+ * Microseconds is the neutral unit: the boards count DWT cycles, ThreadX ticks
+ * and a free-running vendor timer respectively, and only each of them knows how
+ * to get from its own to real time.
  */
-void nn_svc_bench_run(uint32_t iters, uint64_t *us, nn_svc_cancel_fn cancel,
-                      void *ctx, struct nn_op_result *res);
+struct nn_bench_stats {
+	uint32_t runs;      /**< completed runs -- fewer than asked if cancelled */
+	uint64_t total_us;
+	uint32_t min_us;
+	uint32_t max_us;
+	uint32_t avg_us;
+};
+
+/** Invoke @p iters times and report the spread. */
+void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
+                      nn_svc_cancel_fn cancel, void *ctx,
+                      struct nn_op_result *res);
 
 /** Float input normalisation: 0 = [0,1], 1 = [-1,1].  Meaningless where the
  *  input is integer, which is why it is a capability and not a stub. */
 void nn_svc_norm_set(int signed_range);
 int  nn_svc_norm_get(void);
+
+/** Draw the boxes on the board's live preview.  A capability because one board
+ *  can turn it off independently while another draws whenever its preview runs
+ *  -- "always on" is not the same answer as "there is a switch". */
+void nn_svc_overlay_set(int on);
+int  nn_svc_overlay_get(void);
 
 /* ---- boxes --------------------------------------------------------------- */
 

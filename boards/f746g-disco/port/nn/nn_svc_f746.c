@@ -399,15 +399,16 @@ void nn_svc_bench_prepare(struct nn_op_result *res)
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
 
-void nn_svc_bench_run(uint32_t iters, uint64_t *us, nn_svc_cancel_fn cancel,
-                      void *ctx, struct nn_op_result *res)
+void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
+                      nn_svc_cancel_fn cancel, void *ctx,
+                      struct nn_op_result *res)
 {
 	struct nn_model *m = NULL;
 	uint32_t i;
-	uint64_t cycles = 0u;
 
 	nn_detail_clear();
-	*us = 0u;
+	memset(out, 0, sizeof *out);
+	out->min_us = 0xFFFFFFFFu;
 
 	if (nn_model_open(&m) != 0 || m == NULL) {
 		nn_detail_set("no model is loaded");
@@ -419,7 +420,10 @@ void nn_svc_bench_run(uint32_t iters, uint64_t *us, nn_svc_cancel_fn cancel,
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 		return;
 	}
+
 	for (i = 0u; i < iters; i++) {
+		uint32_t us;
+
 		if (nn_svc_cancelled(cancel, ctx)) {
 			nn_detail_set("cancelled after %lu of %lu run(s)",
 			              (unsigned long)i, (unsigned long)iters);
@@ -434,12 +438,22 @@ void nn_svc_bench_run(uint32_t iters, uint64_t *us, nn_svc_cancel_fn cancel,
 			nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
 			return;
 		}
-		cycles += nn_last_cycles(m);
+		/* DWT core cycles -> microseconds.  The divisor is the TIMEBASE's
+		   clock, which on this board is not the core clock. */
+		us = nn_last_cycles(m) / (uint32_t)(CLI_CPU_CYCLES_PER_US);
+		out->total_us += us;
+		if (us < out->min_us)
+			out->min_us = us;
+		if (us > out->max_us)
+			out->max_us = us;
+		out->runs++;
 	}
 	nn_session_release();
 
-	/* DWT core cycles -> microseconds, the contract's neutral unit. */
-	*us = cycles / (uint64_t)(CLI_CPU_CYCLES_PER_US);
+	if (out->runs == 0u)
+		out->min_us = 0u;
+	else
+		out->avg_us = (uint32_t)(out->total_us / out->runs);
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
 

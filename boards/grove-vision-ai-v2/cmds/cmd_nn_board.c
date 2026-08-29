@@ -42,7 +42,7 @@ int nn_board_preview(struct cli_instance *sh, int argc, char **argv)
 {
 	struct nn_overlay_stats ns;
 	struct camera_stats st;
-	const char *why = NULL;
+	char why[128];
 	uint32_t frames = 0u;   /* 0 = until Ctrl+C, as `camera preview` */
 	uint32_t before;
 	ULONG t0, t1, ticks;
@@ -68,8 +68,10 @@ int nn_board_preview(struct cli_instance *sh, int argc, char **argv)
 	 * fails on every frame is a panel showing a live picture with no boxes and
 	 * no explanation -- the exact failure this command exists to make visible.
 	 */
-	if (nn_svc_grove_detector_ready(&why) != 0) {
-		cli_error(sh, "nn: %s\r\n", why ? why : "this model cannot annotate");
+	why[0] = '\0';
+	if (nn_svc_grove_detector_ready(why, sizeof why) != 0) {
+		cli_error(sh, "nn: %s\r\n",
+		          why[0] ? why : "this model cannot annotate");
 		nn_svc_grove_release();
 		return -1;
 	}

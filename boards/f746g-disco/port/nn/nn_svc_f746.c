@@ -35,23 +35,25 @@
 #include "sdram.h"
 #include "tx_api.h"
 
-/* The one thing this file remembers, and it is not state about the model: it is
-   the last failure's words, so that a status code does not have to carry them. */
-static char nn_detail[160];
+/*
+ * [!] THERE IS NO SHARED DIAGNOSTIC BUFFER -- see the note in the Grove adapter.
+ * A failure's words go straight into the caller's result, so two consoles
+ * building results at once cannot overwrite each other's explanation.
+ */
 
-static void nn_detail_clear(void)
-{
-	nn_detail[0] = '\0';
-}
-
-static void nn_detail_set(const char *fmt, ...)
+static void nn_detail_to(char *dst, size_t cap, const char *fmt, ...)
 {
 	va_list ap;
 
 	va_start(ap, fmt);
-	(void)fmt_vsnformat(nn_detail, sizeof nn_detail, fmt, ap);
+	(void)fmt_vsnformat(dst, cap, fmt, ap);
 	va_end(ap);
 }
+
+/* Every failure path writes into the result it is about to return. */
+#define nn_detail_set(...) \
+	nn_detail_to(res->detail, sizeof res->detail, __VA_ARGS__)
+#define nn_detail_clear()  (res->detail[0] = '\0')
 
 /* [!] The detail is COPIED into the caller's result here, at the one place a
  * result is built.  nn_detail is this file's buffer and the next command on
@@ -61,7 +63,6 @@ static void nn_result(struct nn_op_result *res, int status, enum nn_claim claim)
 {
 	res->status = status;
 	res->claim  = (uint8_t)claim;
-	nn_svc_str(res->detail, sizeof res->detail, nn_detail);
 }
 
 /*
@@ -89,6 +90,7 @@ void nn_svc_info(struct nn_svc_info *out)
 {
 	const struct nn_backend_info *bi = nn_backend();
 	struct nn_model *m = NULL;
+	int held;
 
 	memset(out, 0, sizeof *out);
 	nn_svc_str(out->backend, sizeof out->backend, bi ? bi->name : NULL);
@@ -99,9 +101,31 @@ void nn_svc_info(struct nn_svc_info *out)
 	/* Copied, not borrowed: the backend owns this name and a reload replaces
 	   it, so the caller must not hold a pointer into it while printing. */
 	out->model_active = 1u;
+	out->arena_used  = 0u;   /* this backend reports only the reservation */
+	/*
+	 * [!] THE NAME IS COPIED UNDER THE SESSION WHEN THE SESSION IS FREE, and
+	 * copied anyway when it is not.  That is a deliberate middle, not an
+	 * oversight:
+	 *
+	 *   Taking the session unconditionally would make `nn info` REFUSE while a
+	 *   stream runs -- the worker holds it for the whole stream -- and that is
+	 *   exactly when the report is worth asking for.  Both boards' previous
+	 *   `ai info` read this name with no claim at all for that reason.
+	 *
+	 *   Not taking it at all leaves the copy able to race a reload, which
+	 *   rewrites the backend's name buffer byte by byte, and produce a torn
+	 *   name.  Cosmetic and self-correcting, but avoidable.
+	 *
+	 * So: try.  A reload cannot be in flight while the session is free, so the
+	 * common case is now provably clean; when it is held the behaviour is what
+	 * it always was, and no diagnostic is lost.
+	 */
+	held = (nn_session_try_acquire() == 0);
 	nn_svc_str(out->model, sizeof out->model, nn_model_name(m));
 	out->arena_bytes = nn_activations_bytes(m);
-	out->arena_used  = 0u;   /* this backend reports only the reservation */
+	if (held)
+		nn_session_release();
+
 
 	/* [!] Say plainly when nothing is being inferred, so a latency from
 	 * `nn bench` is never mistaken for a model's. */

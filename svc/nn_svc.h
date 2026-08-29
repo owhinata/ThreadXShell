@@ -223,7 +223,11 @@ struct nn_spec {
  * NULL and can never print a pointer it does not own.
  */
 #define NN_SVC_BACKEND_MAX 31
-#define NN_SVC_MODEL_MAX   47
+/* [!] LONG ENOUGH FOR THE LONGEST NAME ANY BOARD CAN PRODUCE.  wio's asset
+ * store allows 63 characters, and a field that truncates would report two
+ * distinct legal models under one prefix -- a name that is wrong rather than
+ * merely short. */
+#define NN_SVC_MODEL_MAX   63
 #define NN_SVC_SOURCE_MAX  79
 
 struct nn_svc_info {

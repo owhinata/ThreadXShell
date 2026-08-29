@@ -40,23 +40,30 @@
 #include "stm32h7xx_hal.h"   /* SystemCoreClock -- the DWT counter's clock */
 #include "tx_api.h"
 
-/* The only thing this file remembers: the last failure's words, so a status code
-   does not have to carry them across a layer that cannot print. */
-static char nn_detail[176];
+/*
+ * [!] THERE IS NO SHARED DIAGNOSTIC BUFFER, and that is the fix for a hazard the
+ * first version of this file had.  A port adapter cannot print -- it holds no
+ * shell instance -- so it writes WHY something failed, and the shared command
+ * prints that.  Keeping those words in one static here meant two consoles
+ * building results at once would overwrite each other's explanation: the second
+ * console's sentence would appear under the first console's command.  Writing
+ * straight into the caller's result removes the sharing instead of locking it,
+ * so the words a command prints are the words that command produced.
+ */
 
-static void nn_detail_clear(void)
-{
-	nn_detail[0] = '\0';
-}
-
-static void nn_detail_set(const char *fmt, ...)
+static void nn_detail_to(char *dst, size_t cap, const char *fmt, ...)
 {
 	va_list ap;
 
 	va_start(ap, fmt);
-	(void)fmt_vsnformat(nn_detail, sizeof nn_detail, fmt, ap);
+	(void)fmt_vsnformat(dst, cap, fmt, ap);
 	va_end(ap);
 }
+
+/* Every failure path writes into the result it is about to return. */
+#define nn_detail_set(...) \
+	nn_detail_to(res->detail, sizeof res->detail, __VA_ARGS__)
+#define nn_detail_clear()  (res->detail[0] = '\0')
 
 /* [!] The detail is COPIED into the caller's result here, at the one place a
  * result is built.  nn_detail is this file's buffer and the next command on
@@ -66,7 +73,6 @@ static void nn_result(struct nn_op_result *res, int status, enum nn_claim claim)
 {
 	res->status = status;
 	res->claim  = (uint8_t)claim;
-	nn_svc_str(res->detail, sizeof res->detail, nn_detail);
 }
 
 /*
@@ -96,7 +102,7 @@ static enum nn_claim nn_claim_of_stop(int stop_rc)
  * @return NN_SVC_OK, or a status with NOTHING held -- every failure unwinds what
  *         it took, so the caller's disposition is always NN_CLAIM_NONE.
  */
-static int nn_guards_take(void)
+static int nn_guards_take(struct nn_op_result *res)
 {
 	if (nn_session_try_acquire() != 0) {
 		nn_detail_set("NN busy (another nn command is running)");
@@ -129,6 +135,7 @@ void nn_svc_info(struct nn_svc_info *out)
 {
 	const struct nn_backend_info *bi = nn_backend();
 	struct nn_model *m = NULL;
+	int held;
 
 	memset(out, 0, sizeof *out);
 	nn_svc_str(out->backend, sizeof out->backend, bi ? bi->name : NULL);
@@ -139,9 +146,31 @@ void nn_svc_info(struct nn_svc_info *out)
 	/* Copied, not borrowed: the backend owns this name and a reload replaces
 	   it, so the caller must not hold a pointer into it while printing. */
 	out->model_active = 1u;
+	out->arena_used  = 0u;   /* this backend reports only the reservation */
+	/*
+	 * [!] THE NAME IS COPIED UNDER THE SESSION WHEN THE SESSION IS FREE, and
+	 * copied anyway when it is not.  That is a deliberate middle, not an
+	 * oversight:
+	 *
+	 *   Taking the session unconditionally would make `nn info` REFUSE while a
+	 *   stream runs -- the worker holds it for the whole stream -- and that is
+	 *   exactly when the report is worth asking for.  Both boards' previous
+	 *   `ai info` read this name with no claim at all for that reason.
+	 *
+	 *   Not taking it at all leaves the copy able to race a reload, which
+	 *   rewrites the backend's name buffer byte by byte, and produce a torn
+	 *   name.  Cosmetic and self-correcting, but avoidable.
+	 *
+	 * So: try.  A reload cannot be in flight while the session is free, so the
+	 * common case is now provably clean; when it is held the behaviour is what
+	 * it always was, and no diagnostic is lost.
+	 */
+	held = (nn_session_try_acquire() == 0);
 	nn_svc_str(out->model, sizeof out->model, nn_model_name(m));
 	out->arena_bytes = nn_activations_bytes(m);
-	out->arena_used  = 0u;   /* this backend reports only the reservation */
+	if (held)
+		nn_session_release();
+
 
 	/* [!] Say plainly when nothing is being inferred, so a latency from
 	 * `nn bench` is never mistaken for a model's. */
@@ -335,7 +364,7 @@ void nn_svc_model_unload(struct nn_op_result *res)
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 		return;
 	}
-	rc = nn_guards_take();
+	rc = nn_guards_take(res);
 	if (rc != NN_SVC_OK) {
 		nn_result(res, rc, NN_CLAIM_NONE);
 		return;
@@ -353,13 +382,18 @@ void nn_svc_model_unload(struct nn_op_result *res)
 int nn_svc_tensors_pin(void)
 {
 	struct nn_model *m = NULL;
+	/* The pin reports a status only; nobody prints a detail for it, so the
+	   words nn_guards_take() would write land here and are discarded. */
+	struct nn_op_result probe;
+	struct nn_op_result *res = &probe;
 
+	(void)res;
 	if (nn_model_open(&m) != 0 || m == NULL)
 		return NN_SVC_ERR_STATE;
 	/* [!] BOTH guards: reading tensor bodies walks the arena, and the arena is
 	 * in the PSRAM behind OCTOSPI1 -- the same reason `nn bench` and `nn dets`
 	 * are guarded here and `nn info` is not. */
-	return nn_guards_take();
+	return nn_guards_take(&probe);
 }
 
 void nn_svc_tensors_unpin(void)
@@ -505,7 +539,7 @@ void nn_svc_bench_prepare(struct nn_op_result *res)
 		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
 		return;
 	}
-	rc = nn_guards_take();
+	rc = nn_guards_take(res);
 	if (rc != NN_SVC_OK) {
 		nn_result(res, rc, NN_CLAIM_NONE);
 		return;
@@ -540,7 +574,7 @@ void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
 		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
 		return;
 	}
-	rc = nn_guards_take();
+	rc = nn_guards_take(res);
 	if (rc != NN_SVC_OK) {
 		nn_result(res, rc, NN_CLAIM_NONE);
 		return;

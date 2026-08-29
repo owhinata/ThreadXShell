@@ -232,6 +232,7 @@ struct nn_spec {
 
 struct nn_svc_info {
 	char     backend[NN_SVC_BACKEND_MAX + 1];  /**< runtime, or ""        */
+	char     version[NN_SVC_BACKEND_MAX + 1];  /**< its build, or ""      */
 	char     model[NN_SVC_MODEL_MAX + 1];      /**< active model, or ""   */
 	char     source[NN_SVC_SOURCE_MAX + 1];    /**< where from, or ""     */
 	uint32_t arena_bytes;   /**< arena the board reserves                 */
@@ -404,6 +405,15 @@ struct nn_bench_stats {
 	uint32_t min_us;
 	uint32_t max_us;
 	uint32_t avg_us;
+	/**
+	 * [!] THE CLOCK THE CONVERSION USED, or 0 when the board counts real time
+	 * directly.  Not decoration: on the board whose core clock is INHERITED
+	 * from a bootloader, the cycle counter is the raw measurement and
+	 * microseconds are derived from this number -- so a misread clock moves
+	 * every figure above while the hardware is fine.  Printing what was
+	 * assumed is what makes the reading checkable.
+	 */
+	uint32_t clock_mhz;
 };
 
 /** Invoke @p iters times and report the spread. */

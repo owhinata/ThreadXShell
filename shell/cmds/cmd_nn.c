@@ -362,9 +362,18 @@ static int cmd_nn_bench(struct cli_instance *sh, int argc, char **argv)
 	cli_print(sh, "total   : %lu.%03lu ms\r\n",
 	          (unsigned long)(st.total_us / 1000u),
 	          (unsigned long)(st.total_us % 1000u));
+	/*
+	 * [!] NAME BOTH CAUSES, because this cannot tell them apart and one of
+	 * them is ordinary.  A backend that performs no inference (the `null`
+	 * stub on one board returns immediately) legitimately takes zero
+	 * measurable time; a stopped cycle counter looks identical from here.
+	 * Blaming the time source alone sends someone debugging hardware that is
+	 * fine.
+	 */
 	if (st.total_us == 0u)
-		cli_warn(sh, "note    : zero elapsed -- the time source is not "
-		             "advancing, so this is not a measurement\r\n");
+		cli_warn(sh, "note    : zero elapsed -- either this backend performs "
+		             "no inference, or the cycle counter is not advancing.  "
+		             "Not a measurement either way\r\n");
 	return 0;
 }
 #endif /* NN_SVC_HAS_BENCH */

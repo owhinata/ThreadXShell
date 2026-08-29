@@ -33,6 +33,7 @@
 #include "nn_camera.h"
 #include "nn_decoder.h"
 #include "sdram.h"
+#include "stm32f7xx_hal.h"   /* HAL_RCC_GetHCLKFreq: the DWT counter's clock */
 #include "tx_api.h"
 
 /*
@@ -443,6 +444,8 @@ void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
                       struct nn_op_result *res)
 {
 	struct nn_model *m = NULL;
+	uint32_t hclk = HAL_RCC_GetHCLKFreq();
+	uint32_t mhz = (hclk / 1000000u) ? (hclk / 1000000u) : 1u;
 	uint32_t i;
 
 	nn_detail_clear();
@@ -477,9 +480,14 @@ void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
 			nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
 			return;
 		}
-		/* DWT core cycles -> microseconds.  The divisor is the TIMEBASE's
-		   clock, which on this board is not the core clock. */
-		us = nn_last_cycles(m) / (uint32_t)(CLI_CPU_CYCLES_PER_US);
+		/*
+		 * [!] DWT CYCCNT COUNTS THE CORE CLOCK, so the divisor is HCLK --
+		 * NOT CLI_CPU_CYCLES_PER_US, which is this board's TIM2 timebase
+		 * rate (108) and half the core clock (216).  Using it made every
+		 * latency twice what it should be, silently, on a board where
+		 * nothing else would have contradicted the number.
+		 */
+		us = mhz ? (nn_last_cycles(m) / mhz) : 0u;
 		out->total_us += us;
 		if (us < out->min_us)
 			out->min_us = us;
@@ -494,7 +502,7 @@ void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
 	else
 		out->avg_us = (uint32_t)(out->total_us / out->runs);
 	/* Say what the cycle -> microsecond conversion assumed. */
-	out->clock_mhz = (uint32_t)(CLI_CPU_CYCLES_PER_US);
+	out->clock_mhz = mhz;
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
 

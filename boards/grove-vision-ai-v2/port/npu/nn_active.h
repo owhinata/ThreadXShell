@@ -45,6 +45,34 @@
 extern "C" {
 #endif
 
+struct nn_preproc_geom;
+
+/**
+ * @brief  Publish the transform the current decode was built with.
+ *
+ * [!] ONE GEOMETRY, FOR THE SAME REASON THERE IS ONE DECODER.  `nn run` and
+ * `nn stream` each build their own input and each kept their own
+ * nn_preproc_geom, and the plugin's coordinate transform was first wired to the
+ * stream's -- so every box `nn run` produced came back "outside the frame",
+ * because the geometry it consulted had never been set on that path.  Both
+ * paths publish here now, and the nn gate is what makes "the last one set" the
+ * right one: the two never run at once.
+ */
+void nn_active_set_geom(const struct nn_preproc_geom *g);
+
+/** Forget it: there is no current decode to map boxes for. */
+void nn_active_clear_geom(void);
+
+/**
+ * @brief  The base vtable's transform -- model input coordinates to frame
+ *         pixels.
+ *
+ * @return 0 with @p out filled, or non-zero when there is nothing to draw (no
+ *         current geometry, or a box a degenerate model made non-finite).
+ */
+int nn_active_to_frame(void *ctx, float x, float y, float w, float h,
+                       struct plugin_rect *out);
+
 /** Is a plugin in force?  When it is, the boxes belong to it. */
 int nn_active_is_plugin(void);
 

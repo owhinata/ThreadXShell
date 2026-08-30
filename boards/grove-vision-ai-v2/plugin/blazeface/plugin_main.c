@@ -216,7 +216,7 @@ static int pl_report(const struct plugin_printer *out)
 		               pl_base_to_frame(pl_base, pl_det[i].x, pl_det[i].y,
 		                                pl_det[i].w, pl_det[i].h, &r) == 0;
 
-		rc = pl_emit(out, "  face ", 6u);
+		rc = pl_emit(out, "  face ", 7u);   /* 7, not 6: the trailing space is part of it */
 		if (rc == 0)
 			rc = pl_emit_u32(out, (uint32_t)i);
 		/*

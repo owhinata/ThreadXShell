@@ -5153,12 +5153,24 @@ What the two plugins actually cost:
 
 ### What keeping the resident decoder costs
 
-The firmware still contains the BlazeFace decoder, and it is meant to.  It is
-the path for a payload that is NOT a container -- `det` and `cls` reached this
-board before containers existed, and a change that required re-sending them
-would spend erase cycles of a part whose endurance is not documented -- and it
-is the baseline `test/test_plugin_decode.c` compares the plugin against.  Drop
-it and the differential test has nothing to differ from.
+The firmware still contains the BlazeFace decoder.  **[!] The two reasons this
+section first gave for that do not survive being measured, and issue #104 is
+open to remove it.**  They are recorded here because the shape of the mistake is
+worth more than the claim was:
+
+- *"it is the path for a payload that is not a container -- `det` and `cls`
+  reached this board before containers existed, and re-sending them costs erase
+  cycles"*.  **This issue's own verification re-sent both as containers.**  The
+  board's `nn run` prints the plugin's wording, not the resident one, so nothing
+  on this device uses the resident decoder at all.  A rule was quoted by the very
+  work that had just consumed its premise.
+- *"it is the baseline `test/test_plugin_decode.c` compares against"*.  That test
+  compiles `nn_decoder.c` and `svc/blazeface.c` **itself**, on the host.  Whether
+  the firmware links them has nothing to do with it, so this was never a reason
+  for residency.
+
+What is left is a capability question -- whether a bare `.tflite` detector should
+still work on this board -- and that is #104's to answer.
 
 So while a plugin is loaded the same arithmetic is in the image twice, and the
 resident half's state is allocated whether or not anything reads it:
@@ -5176,7 +5188,10 @@ the whole check.
 
 **Nothing is dead, though.**  Every resident path is reachable with no plugin
 loaded: the shim's fallbacks, the overlay's own draw, and the shared class
-report.  And the one thing that is NOT duplicated is the point of the exercise:
+report.  And `nn_decoder.c` holds two unrelated things -- `nn_decoder_desc()` is
+a pure `npu_tensor` -> `tensor_desc` translation with no model in it, needed by
+`nn out` and `nn info` whatever decodes.  The split line #104 would cut along is
+already there.  And the one thing that is NOT duplicated is the point of the exercise:
 **the CIFAR-10 labels appear zero times in the firmware.**  The shared class
 report can only print class NUMBERS, because a name travels with the model and
 nowhere else.

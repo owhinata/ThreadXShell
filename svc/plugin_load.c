@@ -406,6 +406,7 @@ static enum plugin_result parse_into(const uint8_t *p, size_t len,
 	if (crc32_update(0u, p + s[i_plugin].off, s[i_plugin].len) != digest)
 		return PLUGIN_ERR_DIGEST;
 
+	out->digest     = digest;
 	out->has_plugin = 1u;
 	return PLUGIN_OK;
 }

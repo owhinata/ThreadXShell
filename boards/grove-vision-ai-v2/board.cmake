@@ -1600,7 +1600,16 @@ set(GROVE_PLUGIN_STACK_SHELL    4096)
 # container verifier recomputes it from the same header, so a disagreement is a
 # refusal rather than a silent mismatch.
 set(GROVE_PLUGIN_TARGET_ID "0x9302")
-set(GROVE_PLUGIN_BUILD_ID "${CMAKE_PROJECT_VERSION}")
+# [!] NOT CMAKE_PROJECT_VERSION -- this project sets none, so the manifest
+# carried an empty build id and `nn info` printed "build )".  The build id is
+# what a fault report names, so it has to identify something.
+execute_process(COMMAND git -C "${CMAKE_SOURCE_DIR}" rev-parse --short HEAD
+                OUTPUT_VARIABLE GROVE_PLUGIN_BUILD_ID
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET)
+if(NOT GROVE_PLUGIN_BUILD_ID)
+    set(GROVE_PLUGIN_BUILD_ID "nogit")
+endif()
 # One declaration, two consumers: the firmware's validator and the host sender
 # that must agree with it.  See nn_svc_grove.c for why this is not the issue #85
 # hazard.

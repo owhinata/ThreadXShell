@@ -1441,3 +1441,113 @@ add_custom_target(flash
     DEPENDS shell
     USES_TERMINAL
     COMMENT "xmodem -> shell.img over ${GROVE_SERIAL_PORT} (press reset when asked)")
+
+# ---------------------------------------------------------------------------
+# The plugin image (issue #101 = #78 Step 1a)
+# ---------------------------------------------------------------------------
+#
+# [!] ITS OWN ARTIFACT GRAPH, AND DELIBERATELY NOT A CMAKE TARGET.  A plugin is
+# a SECOND program: prelinked for the .plugin reservation, linked with its own
+# script, built with its own flags, and it must never reach shell_objs, the
+# Himax image generator, check_image_coherence.py, the NOR seam probe or the
+# firmware's placement gate.  Making it a target would put it one property
+# lookup away from inheriting the firmware's settings; explicit commands, the
+# way verify_vela_model is built, keep the two graphs from touching.
+#
+# The flags are stated here rather than inherited for the same reason.  The
+# shared decoder is compiled at -O3 inside shell_objs through a directory
+# property; the plugin gets -Os and -ffreestanding, because it links no libc and
+# lives in a 128 KiB reservation.
+#
+# [!] AND svc/blazeface.c IS THE SAME FILE THE FIRMWARE LINKS.  Compiling a copy
+# would fork the decoder issue #97 spent itself merging.  It is the wrapper that
+# is new, not the arithmetic.
+set(GROVE_PLUGIN_DIR "${BOARD_DIR}/plugin/blazeface")
+set(GROVE_PLUGIN_OUT "${CMAKE_BINARY_DIR}/plugin/blazeface")
+set(GROVE_PLUGIN_SRCS
+    "${GROVE_PLUGIN_DIR}/plugin_main.c"
+    "${GROVE_PLUGIN_DIR}/plugin_base.c"
+    "${GROVE_PLUGIN_DIR}/plugin_libc.c"
+    "${CMAKE_SOURCE_DIR}/svc/blazeface.c")
+
+set(GROVE_PLUGIN_CFLAGS
+    -mcpu=cortex-m55 -mthumb -mfloat-abi=hard
+    -Os -std=c11 -Wall -Wextra -Werror
+    -ffreestanding -fno-builtin -fno-common
+    -ffunction-sections -fdata-sections
+    # No stack protector and no unwind tables: both add sections the loader
+    # would have to service, and the image gate refuses them.  Turned off here
+    # so the failure is a missing feature rather than a rejected artifact.
+    -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables
+    # The stack gate's input.  Without it a bound cannot be derived at all, and
+    # the gate says so rather than guessing.
+    -fstack-usage
+    -I "${CMAKE_SOURCE_DIR}/svc" -I "${GROVE_PLUGIN_DIR}")
+
+set(_plugin_objs "")
+foreach(_src ${GROVE_PLUGIN_SRCS})
+    get_filename_component(_stem "${_src}" NAME_WE)
+    set(_obj "${GROVE_PLUGIN_OUT}/${_stem}.o")
+    add_custom_command(
+        OUTPUT "${_obj}" "${GROVE_PLUGIN_OUT}/${_stem}.su"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${GROVE_PLUGIN_OUT}"
+        COMMAND "${CMAKE_C_COMPILER}" ${GROVE_PLUGIN_CFLAGS}
+                -c "${_src}" -o "${_obj}"
+        DEPENDS "${_src}"
+        WORKING_DIRECTORY "${GROVE_PLUGIN_OUT}"
+        COMMENT "plugin cc ${_stem}.c"
+        VERBATIM)
+    list(APPEND _plugin_objs "${_obj}")
+    list(APPEND _plugin_sus "${GROVE_PLUGIN_OUT}/${_stem}.su")
+endforeach()
+
+# Provisional caps for each callback, from the threads they run on: decode on
+# the camera producer (8 KiB), draw on the panel thread (2048 B), report on the
+# shell thread (4 KiB).
+#
+# [!] THESE ARE CAPS, NOT DERIVED ALLOWANCES, AND THE DIFFERENCE MATTERS.  It is
+# tempting to write the draw allowance as 2048 - 544, the panel stack minus the
+# peak measured at issue #64.  That subtraction does not mean what it looks
+# like:
+#
+#   - the 544 B peak ALREADY INCLUDES the resident overlay's own draw(), which a
+#     plugin's draw REPLACES rather than adds to;
+#   - it is a high-water observation over the scenarios that were exercised, not
+#     an upper bound on the paths that exist;
+#   - neither number reserves anything for EXCEPTION FRAMES.  On Cortex-M an
+#     exception stacks its frame on the CURRENT stack -- PSP for a ThreadX
+#     thread -- so an interrupt taken while the panel thread runs costs 32 B,
+#     or 104 B once the FP context is stacked, which this hard-float build will
+#     do.
+#
+# A real allowance is 2048 minus the depth at the point draw() is CALLED on the
+# deepest path, minus an exception reserve, minus margin -- and none of those
+# three is measured yet.  1024 is simply a number comfortably above what the
+# first plugin actually needs (300 B), chosen so the gate has something to
+# enforce.  Step 1b measures the three terms and sets the admission policy; the
+# plan is explicit that a plugin passing HERE is not thereby safe to execute.
+add_custom_command(
+    OUTPUT "${GROVE_PLUGIN_OUT}/plugin.elf"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${GROVE_PLUGIN_OUT}"
+    COMMAND "${CMAKE_C_COMPILER}" -nostdlib -nostartfiles
+            -T "${GROVE_PLUGIN_DIR}/plugin.ld"
+            -Wl,--gc-sections -Wl,--no-warn-rwx-segments
+            # [!] THE QUOTES GO ROUND THE WHOLE ARGUMENT.  Written as
+            # -Wl,-Map="${...}" under VERBATIM, CMake escapes the inner quotes
+            # and ld is handed a filename that literally contains them: the map
+            # is silently never written, and the only sign is a warning in a
+            # build that otherwise succeeds.
+            "-Wl,-Map=${GROVE_PLUGIN_OUT}/plugin.map"
+            -mcpu=cortex-m55 -mthumb -mfloat-abi=hard
+            ${_plugin_objs} -o "${GROVE_PLUGIN_OUT}/plugin.elf"
+    COMMAND "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/check_plugin_image.py"
+            "${GROVE_PLUGIN_OUT}/plugin.elf"
+            --nm "${CMAKE_NM}" --objdump "${CMAKE_OBJDUMP}"
+            --su ${_plugin_sus}
+            --entry pl_entry=8192 pl_decode=8192 pl_draw=1024 pl_report=4096
+    DEPENDS ${_plugin_objs} "${GROVE_PLUGIN_DIR}/plugin.ld"
+            "${BOARD_DIR}/cmake/check_plugin_image.py"
+    COMMENT "plugin ld + gate -> plugin.elf"
+    VERBATIM)
+
+add_custom_target(plugin ALL DEPENDS "${GROVE_PLUGIN_OUT}/plugin.elf")

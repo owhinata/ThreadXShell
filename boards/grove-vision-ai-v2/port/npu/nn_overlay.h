@@ -76,6 +76,19 @@ struct nn_overlay_stats {
 	uint32_t depth_draw;   /**< panel thread, at the draw call site       */
 };
 
+struct plugin_rect;
+
+/**
+ * @brief  Map a box in model-input coordinates to frame pixels.
+ *
+ * The base vtable's transform (issue #103), and the same one the resident draw
+ * path uses -- so a plugin's boxes land where the firmware's would, and a
+ * non-finite box from a degenerate model is refused identically.  Returns
+ * non-zero when there is nothing to draw.
+ */
+int nn_overlay_to_frame(void *ctx, float x, float y, float w, float h,
+                        struct plugin_rect *out);
+
 /**
  * @brief  Arm the overlay for one stream, and hand back the vtable to attach.
  *

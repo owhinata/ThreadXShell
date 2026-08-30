@@ -39,6 +39,7 @@
 #include "cam_dp.h"
 #include "fmt.h"
 #include "plugin_load.h"
+#include "plugin_run.h"
 #include "cam_lcd_sink.h"
 #include "camera.h"
 #include "nn_decoder.h"
@@ -452,6 +453,33 @@ static const struct plugin_policy nn_plugin_policy = {
 };
 
 /*
+ * What this board offers a plugin (issue #103).
+ *
+ * [!] TWO ENTRIES, NOT SEVEN.  The reviewed plan listed preprocessing, invoke
+ * and tensor fetching here as well.  Reading the code they would have wrapped
+ * settles it: nn_overlay.c drives the sequence -- it counts the outputs, fills
+ * the input, invokes the NPU and then CALLS the decoder.  A decoder is called;
+ * it never calls up.  Exporting machinery no plugin can reach for would be
+ * three more indirect call sites for the stack analysis to account for and
+ * nothing gained.
+ */
+static void nn_plugin_log(void *ctx, const char *s, size_t len)
+{
+	(void)ctx;
+	/* The producer thread has no console, so this is the only way a plugin can
+	 * explain itself.  Bounded by the log ring's own message limit. */
+	LOG_INF("plugin: %.*s", (int)len, s);
+}
+
+static const struct plugin_base_api nn_plugin_base = {
+	.version  = PLUGIN_ABI_VERSION,
+	.size     = (uint32_t)sizeof(struct plugin_base_api),
+	.ctx      = NULL,
+	.log      = nn_plugin_log,
+	.to_frame = nn_overlay_to_frame,
+};
+
+/*
  * The manifest of the container the open model came from, or zeroed.
  *
  * [!] PLAIN DATA, AND NOTHING HERE IS EVER CALLED.  struct plugin_view carries
@@ -544,6 +572,30 @@ static int nn_resolve_blob(struct nn_op_result *res, uint32_t token,
 			return -1;
 		}
 		nn_has_container = 1;
+
+		/*
+		 * [!] STILL INSIDE THE LEASE.  The image is read from the XIP window,
+		 * and the window is only pinned while this lease is live -- which is
+		 * exactly why the load happens here rather than after the caller has
+		 * finished with the model.  plugin_run_load() checks it too, because a
+		 * later caller may not know that.
+		 *
+		 * A container with no plugin is not a failure: the model half of it is
+		 * still perfectly usable, and NO_PLUGIN says so.
+		 */
+		{
+			enum plugin_run_result pr;
+
+			pr = plugin_run_load(&nn_container,
+			                     (const void *)(uintptr_t)(NOR_XIP_BASE +
+			                                               payload),
+			                     token, &nn_plugin_base);
+			if (pr != PLUGIN_RUN_OK && pr != PLUGIN_RUN_NO_PLUGIN) {
+				nn_detail_set("slot %u ('%s'): %s", slot, name,
+				              plugin_run_strerror(pr));
+				return -1;
+			}
+		}
 		/* The MODEL section, not the container: npu_open() parses a
 		 * flatbuffer and the rest of the payload is not one. */
 		*addr = NOR_XIP_BASE + payload + nn_container.model_off;
@@ -697,8 +749,14 @@ void nn_svc_model_unload(struct nn_op_result *res)
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 		return;
 	}
-	/* Idempotent: unloading nothing succeeds.  Order is model -> NPU -> lease,
-	   and npu_hw_deinit() is what returns the flash lease. */
+	/* Idempotent: unloading nothing succeeds.  Order is plugin -> model -> NPU
+	   -> lease, and npu_hw_deinit() is what returns the flash lease.
+	   [!] THE PLUGIN GOES FIRST.  It was loaded from the window this lease
+	   pins, and its code is about to stop being the code anyone should enter;
+	   unpublishing before the model is closed means no window exists in which
+	   the fault reporter names a plugin whose model is already gone. */
+	plugin_run_unload();
+	nn_has_container = 0;
 	npu_close();
 	npu_hw_deinit();
 	nn_open_done     = 0u;
@@ -1528,8 +1586,9 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	 * and nothing has branched into the image they describe.  The wording says
 	 * so; Step 1b is what changes it.
 	 */
-	if (nn_info_line(write, ctx, "plugin  : %s (build %s), not loaded\r\n",
-	                 nn_container.name, nn_container.build_id) < 0)
+	if (nn_info_line(write, ctx, "plugin  : %s (build %s), %s\r\n",
+	                 nn_container.name, nn_container.build_id,
+	                 plugin_run_active() ? "loaded" : "not loaded") < 0)
 		return;
 	if (nn_info_line(write, ctx, "  image : %lu B file / %lu B mem, link 0x%08lx\r\n",
 	                 (unsigned long)nn_container.file_size,

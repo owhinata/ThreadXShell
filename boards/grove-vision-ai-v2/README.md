@@ -4783,7 +4783,7 @@ fail-closed, so the symptom would be the camera refusing to come up during
 `thread` once after the first `nn model load --name det`, when IRQ 133 is also present, to
 see the cpu% column still reported as trustworthy.
 
-## Model containers, and the plugin that does not run yet (issue #101)
+## Model containers (issue #101)
 
 A model can be swapped without reflashing -- issues #92/#93/#94 built the asset
 store -- but until now the code that INTERPRETS its output could not be: the
@@ -4791,10 +4791,10 @@ firmware holds exactly one decoder.  The store scales to eleven slots and the
 interpretation stops at one.  A container carries a model and the code that
 reads it in one blob.
 
-**Step 1a, which is what is here, never executes the plugin.**  The device
-parses a container, validates its manifest in full, hands the MODEL section to
-the existing `npu_open()`, and reports what the plugin claims.  Loading and
-calling it is Step 1b.
+**Step 1a, which is what this section describes, never executes the plugin.**
+The device parses a container, validates its manifest in full, hands the MODEL
+section to the existing `npu_open()`, and reports what the plugin claims.
+Loading and calling it is Step 1b -- issue #103, the next section.
 
 ### Sending one
 
@@ -4872,9 +4872,12 @@ sequentially placed section would the day a neighbour grew.  The sequential
 sections grow upward into the gap below it; `free` reports the two spans and the
 gap between them, and the linker asserts they have not met.
 
-The first real plugin measures 2,400 B of code and 1,740 B of bss, so 128 KiB is
-generous.  It is an opening number, revisited in Step 1b against a plugin that
-rasterises something.
+The first real plugin measured 2,400 B of code and 1,740 B of bss, so 128 KiB is
+generous.  It is still an opening number: the two plugins that exist now are
+measured in the next section and neither rasterises anything, so the figure that
+would justify shrinking the reservation is not in yet -- and shrinking it can be
+done ONCE, because a plugin is prelinked and moving the reservation invalidates
+every container already in the store.
 
 ### What the gates do and do not prove
 
@@ -4923,12 +4926,407 @@ host gate derives a transitive bound from the real code and refuses a
 declaration that does not match it, and the device refuses one that exceeds what
 its threads can spare -- before anything is called.
 
-**[!] The current limits are provisional.**  A real allowance is the thread's
-stack minus the depth at the point the callback is CALLED, minus a reserve for
-exception frames -- Cortex-M stacks those on the thread's own PSP, 32 B or 104 B
-once the FP context goes -- minus margin, and none of those three is measured.
-1024 B for draw is simply comfortably above what the first plugin needs (300 B).
-Step 1b measures them and sets the admission policy.
+The limits were provisional while Step 1a was all there was, and **two of the
+three were above the ceiling they were supposed to be under** -- the producer's
+was 8192, the whole thread stack, so a plugin declaring it would have been
+admitted and would then have overflowed.  A limit that cannot be exceeded is not
+a limit.  The measured allowances, and the arithmetic behind them, are in the
+next section.
+
+## The plugin runs (issue #103 = #78 Step 1b)
+
+Step 1a delivered and gated a container without ever branching into it.  This is
+the step that branches, and with it **a new model family costs no firmware
+change**: the container carries the code that reads the model's output, and that
+code decodes, draws on the panel and writes to the console.
+
+Two plugins ship in the tree.  `plugin/blazeface` is the face detector -- the
+same `svc/blazeface.c` the firmware links, wrapped -- and exists so the two
+paths can be compared.  `plugin/cifar10` is the point: it interprets the
+classification model's ten-element output and **prints class names**, which no
+amount of firmware generalisation could do, because the names come with the
+model and nowhere else.
+
+```
+blob erase 1                      # the slot has to be empty; see below
+blob write cls 1                  # then C-a C-s in picocom
+nn model load --name cls
+nn run
+```
+
+```
+cifar10  top 3 of 10  (dequantised outputs, not probabilities)
+  #1  cat         out  -783/1000  raw   -8
+  #2  horse       out -1566/1000  raw  -20
+  #3  airplane    out -1762/1000  raw  -23
+```
+
+Before this, the same command printed `class 3  raw -8  score -783/1000` and a
+human looked 3 up in a table that lived on the PC.  The raw byte is still beside
+the label because it is the half that does not depend on the scale being right,
+which is what gets checked first when a dequantised number looks wrong.
+
+**[!] AND THAT HEADER IS THERE BECAUSE THE FIRST VERSION CALLED IT A SCORE.**
+The numbers above are a real capture, and every one of them is NEGATIVE.  They
+are correct: this model's output tensor is quantised at scale 0.0652715 with
+zero point 4, so it represents about -8.6..+8.0 -- raw model outputs, not
+probabilities.  `nn dets` prints a sigmoid confidence in the same `N/1000`
+shape, and the first version of this report borrowed that spelling with a
+comment claiming it put the two on one scale.  A negative probability is not a
+near miss, it is the wrong unit, and **the comment asserting the unit was right
+is how that got past a review**.  `out` is the word `nn out` already uses for
+the dequantised value of an output tensor, which is exactly what this is.
+
+They are left as the model produced them.  A softmax would be friendlier and
+needs `exp()`; the plugin links no libm, and an approximation would replace a
+number the model computed with one the plugin invented.
+
+The three being close together and all negative is also the honest answer:
+CIFAR-10 is airplane / automobile / bird / cat / deer / dog / frog / horse /
+ship / truck, and a camera pointed at a room is none of them.
+
+**[!] The shared `nn run` class report cannot make this distinction.**  It sees
+an arbitrary output vector and has no idea what the model meant by it, so it
+still prints `score N/1000` over whatever is there.  A plugin knows, because it
+shipped with the model.  That difference is the whole of issue #78, in one line
+of formatting.
+
+### One branch point, not one per caller
+
+`port/npu/nn_active.c` is the only place that decides which decoder is in force,
+and **everything** goes through it: the one-shot decode, the stream's admission,
+decode and draw, the threshold, and the report.
+
+Routing only the obvious call -- the stream's decode -- was the first design and
+the code says why it is not enough.  `nn run` has its own decode path, stream
+admission asks its own shape question, and `nn thresh` reached the resident
+decoder directly.  **A plugin carries its own threshold**, so `nn thresh 700`
+would have moved the firmware's number while the plugin went on using its old
+one: a divergence an operator meets in the first minute.  And a differential
+test that hands both decoders the same threshold cannot see it, which is why
+`test/test_plugin_decode.c` sets the threshold **through the shim** and then
+checks the other decoder did not move.
+
+Two things follow from a plugin's result being private:
+
+- `nn_active_decode()` **does not fill the caller's box array**.  The firmware
+  does not know what shape a plugin's result has -- that is the whole of issue
+  #78 -- so the boxes belong to the plugin and it is asked to draw or report
+  them.  `nn_det_snapshot.external` carries that fact to the shared command,
+  which then calls `nn_svc_report()` instead of printing boxes it does not own.
+- **`report` needed a path to `nn run` at all.**  The shared command consumed a
+  snapshot and detections and nothing else; the board's only channel was the
+  `nn info` extension Step 1a added.  `svc/nn_svc.h` now carries
+  `nn_svc_report()`, on the same `nn_svc_write_fn` boundary, so there is one
+  convention rather than two.
+
+### [!] One geometry, for the same reason there is one decoder
+
+`nn run` and `nn stream` each build their own input and each kept their own
+`nn_preproc_geom`.  The plugin's coordinate transform was wired to the stream's,
+so every box `nn run` produced came back **"outside the frame"** -- the geometry
+it consulted had never been set on that path.  Both publish to the shim now, and
+the `nn` ownership gate is what makes "the last one set" correct: the two paths
+never run at once.
+
+Nothing gates what a command PRINTS, so this was found by putting the output
+next to the previous session's.  The same session found `report` printing a
+score and no coordinates -- **a plugin owning the display is not a licence to
+report less** -- and both are pinned in the host test now.
+
+### The loader
+
+`port/plugin/plugin_run.c`, in this order:
+
+```
+copy the image into .plugin  ->  zero bss and scratch  ->  D-cache clean,
+DSB, I-cache invalidate, DSB, ISB  ->  read the MPU back and judge it  ->
+publish the fault-attribution slot  ->  call entry() LAST
+```
+
+**Entry is last, after everything else has passed.**  An earlier design had the
+plugin RETURN its descriptor, which meant running unverified code to find out
+whether the code was worth running.  The manifest is data.
+
+**Cache maintenance covers the whole reservation, not the image.**  It is by
+address and rounds outward to whole 32-byte lines; maintaining only the image
+would let that rounding reach whatever follows.  The reservation's start and end
+are both 32-byte multiples, pinned by the linker script.
+
+**The flash lease is a precondition, not a new mechanism.**  The image is read
+out of the XIP window, and the window can be taken down -- but `enable_XIP()` is
+called from two places in `port/nor/nor_flash.c`, a writer's reservation is
+granted only when no reader lease is live, and `npu_hw_init()` holds
+`NOR_LEASE_NPU` for as long as a model is open.  A plugin is only ever loaded
+while a model is open, so the window is already pinned; `plugin_run_load()`
+asserts that with `nor_lease_held()` rather than building a second lock.
+
+**One place turns an offset into an address.**  `svc/plugin_load.c` deliberately
+returns integers and no function pointers, so "the validation step executes
+nothing" is a property of its types.  `plugin_run_slot()` is where that stops
+being true, and the loader's own entry call goes through the same helper -- the
+first cut had this file compute the entry address and the shim compute the other
+six, which is two places claiming to be one.
+
+### The MPU is read back before the branch
+
+The vendor's `enable_XIP()` reconfigures the MPU, so this port cannot assume the
+reservation is still Normal and executable because it was at boot.
+`plugin_mpu_judge()` takes the register values as arguments and is a pure
+function, host-tested, because none of its refusals can be produced on this
+board.
+
+Three of its rules are there because of mistakes made next door:
+
+- **Armv8-M PMSAv8 has no "higher-numbered region wins".**  Two regions matching
+  one address makes the access faulty, so the check is "exactly one enabled
+  region covers the whole range and nothing else intersects it", not "some
+  region covers it".
+- **`limit = (RLAR.LIMIT << 5) | 0x1F`, and the region includes that last
+  32-byte block.**  `port/nor/nor_flash.c`'s diagnostic capture compares against
+  the masked value and so reads every region 31 bytes short.  Harmless there;
+  copied here it would refuse a reservation that ends exactly at the region's
+  end.
+- **MAIR is decoded in full.**  "Not Device" is a different question from
+  "Normal": outer set with inner zero is a RESERVED encoding that an inequality
+  waves through.
+- The region count comes from **`MPU_TYPE.DREGION`**, not the 16 that the
+  diagnostic capture hard-codes.
+
+The fallback to the default memory map is taken only with the MPU disabled, or
+enabled with `PRIVDEFENA` and no region matching any address in the range.  A
+partial or multiple match never falls back.
+
+### What a plugin may spend, and where the numbers come from
+
+```
+allowance = thread stack - depth already spent at the call site
+                         - the asynchronous reserve - margin
+```
+
+The **call-site depth is measured on the board** -- the shim reads SP just before
+it calls, keeps the high-water and `nn stream stats` prints it.  That is a
+different number from the thread's peak (`thread`'s 0xEF scan, 544 B at issue
+#64): that one is the maximum anywhere on the path, this one is the depth a
+callee inherits.
+
+The **asynchronous reserve is 208 B, derived rather than measured**: at most one
+hardware exception frame lands on a thread's PSP -- nested and tail-chained
+exceptions run in Handler mode on MSP -- which is 104 B extended plus 4 B
+alignment, plus ThreadX's own 100 B PendSV save (`r4-r11`, `{s16-s31}`, the
+saved LR), which coexists with it while a callback is suspended.
+
+The 104 B holds **only because `FPCCR.TS` is zero**, and FPCCR is a bootloader
+inheritance: with `TS == 1` the hardware stacks `s16-s31` as well and the frame
+is 172 B.  `fp_enforce.c` checked `ASPEN` and `LSPACT` and not this one, so
+`TS == 0` is now **enforced and read back** beside them, on the same principle --
+inherited FP state is forced, not trusted.
+
+Measured on the board, and what the policy is set to:
+
+```
+at call     577 B (camera producer)   249 B (panel thread)
+producer    8192 - 577 - 208 = 7407 available    ->  GROVE_PLUGIN_STACK_PRODUCER 4096
+panel       2048 - 249 - 208 = 1591 available    ->  GROVE_PLUGIN_STACK_PANEL    1024
+shell       4096 - (not instrumented) - 208      ->  GROVE_PLUGIN_STACK_SHELL    1024
+```
+
+**[!] Two of the provisional numbers were above the ceiling.**  `PRODUCER` was
+8192 -- the entire thread stack -- and `SHELL` was 4096, likewise.  A plugin
+declaring those would have been admitted and would then have overflowed: the
+check could not fire for the case it exists to catch.  That is worse than a
+wrong number, and it is the shape to look for whenever a limit is written before
+the thing it limits has been measured.
+
+The declared bound may legitimately be **zero**: the classifier's entry point is
+frameless.  That collided with the ABI's original rule, where zero on a present
+slot meant "nobody measured this" -- absence already has its own spelling in the
+slot field, so zero was freed for its literal meaning and the refusal a zero
+LIMIT stands for is now written out instead of riding on the same comparison.
+
+What the two plugins actually cost:
+
+| | text | data | bss | mem | entry | shapes_ok | decode | draw | report |
+|---|---|---|---|---|---|---|---|---|---|
+| `blazeface` | 2,736 | 0 | 1,740 | 4,480 | 8 | 40 | 192 | 300 | 344 |
+| `cifar10` | 1,392 | 0 | 48 | 1,472 | 0 | 16 | 48 | -- | 336 |
+
+**[!] Running from SRAM is not free.**  Decode went from 83 us resident to
+124 us as a plugin -- the firmware's copy runs from ITCM and the plugin's from
+the SRAM reservation.  Live inference still holds 37 inf/s, because the frame
+rate is paced elsewhere (issue #60), but do not read "the frame rate did not
+move" as "it costs nothing".
+
+### The painter, and what its budget is not
+
+A plugin never receives the framebuffer pointer.  The base keeps the buffer and
+its geometry and validates every rectangle, so a bug in loaded code cannot write
+outside the frame -- that is the **one** property this boundary provides.
+
+`draw()` runs on the panel thread with the panel guard held and everything else
+that wants the panel is failing its non-blocking acquire meanwhile, so the work
+the BASE does on a plugin's behalf is capped: pixels visited after clipping,
+every source pixel a colour-key blit must READ (including the transparent ones --
+they cost a read and a compare whether or not they are written), and one charge
+per call so a primitive that clips away entirely is not free.  The charge is made
+**before** the primitive touches the framebuffer, so a refusal leaves the frame
+unchanged rather than half drawn.  Budget: 19,200 pixels and 64 operations per
+frame; the detector plugin has been measured at 10,185 over a live stream and
+has never been refused.
+
+**[!] It is not a bound on arbitrary computation inside `draw()`.**  A plugin is
+trusted native code; nothing stops it spending a millisecond on arithmetic before
+it calls anything.  What this bounds is the rendering the base performs, which is
+the part the base is in a position to refuse.  The guard contract in
+`lcd_st7789.h` is the other half and is not enforceable.
+
+The painter is deliberately more than `rect`: a painter that could only draw
+hollow boxes would be a detector-only painter, reproducing one layer up the very
+asymmetry issue #78 exists to remove.  `blit` is the escape hatch -- a plugin
+rasterises glyphs, a mask or a skeleton into its OWN buffer during `decode()`, on
+the producer thread with no guard held, and hands over spans.
+
+### A fault inside a plugin is named
+
+`fault.c` prints `plugin <name> +0xXXX` when the faulting pc lies inside the
+active image.  The loader copies the name and build id into an immutable slot and
+publishes a pointer to it with one aligned store; the handler reads that pointer
+and then only loader-owned memory, and **never dereferences anything inside the
+plugin**.  Unpublishing is another single store and happens before the slot is
+touched again.
+
+The claim stops at "the pc is inside the active plugin", which is all an
+imprecise fault can honestly support, and attribution is suppressed when the
+stacked frame could not be read.
+
+**[!] The fault does not go to `CAM_ST_LOST`, and no camera teardown runs.**
+`fault.c` disables interrupts, records, and resets immediately -- **the reset is
+the teardown**.  `CAM_ST_LOST` is the state a normal stop enters when it could not
+join a running producer; a synchronous fault does not pass through it.  The plan
+for this issue said otherwise three times before the code was read.
+
+### The classifier, and the check that would have refused it
+
+`nn_input_quant_ok()` refuses a model whose input quantisation is not scale
+1/255 zero point -128, because `nn_preproc_fill()` writes `pixel - 128` and
+BlazeFace's arithmetic assumes the model reads that back as those parameters.
+On `nn run` a refusal routes to the built-in class report; on `nn stream` it
+refuses to start.
+
+The classification model's input says scale 0.0203246, zero point -8 -- and **the
+vendor's own scenario app writes `pixel - 128` into it and is right to**
+(`sdk/EPII_CM55M_APP_S/app/scenario_app/tflm_mb_cls/cvapp_mb_cls.cpp`).  So the
+check is the RESIDENT decoder's precondition, not a statement about what this
+board can feed.  A plugin ships with its model, and shipping it is the statement
+that the two agree, so a loaded plugin is not held to it.  Left as it was, every
+classifier container would have been routed to the built-in class report and the
+labels it carries would never have been read: the whole of issue #78, refused by
+a check about somebody else's decoder.
+
+**`nn stream` refuses a decoder that cannot draw.**  DRAW is an optional slot and
+the classifier has none -- a label on the panel needs a font, which is Step 2.
+Starting a stream for it would light the camera and the panel and show a live
+picture that is never marked, which is exactly the failure the admission check
+exists to prevent.  `nn run` still reports its classes.
+
+### Sending a container
+
+`--profile` chooses the model checks **and the plugin**; `--plugin` overrides it.
+
+| profile | model gate | plugin |
+|---|---|---|
+| `det` | `--blazeface` (the four output shapes pinned) | `blazeface` |
+| `cls` | shape checks only | `cifar10` |
+
+```
+picocom -b 921600 /dev/ttyACM0 \
+    --send-cmd "<build>/send_verified_container.sh --profile cls --slot 1"
+```
+
+Deriving the plugin from the profile rather than asking separately is
+deliberate: they would be one more pair to get out of step, and a container
+carrying the wrong decoder is one the device ACCEPTS -- the manifest is well
+formed, the shapes simply never match.  The choice is printed on every run.
+
+**[!] But the profile now carries two facts, and it was already asymmetric.**
+`--profile det` on the classifier is rejected by the model gate; `--profile cls`
+on the detector passes and transmits, because `det` is `cls` plus four output
+shapes and there is nothing for the looser profile to catch (issue #95).  Doing
+that now also ships the CIFAR-10 plugin with the detector's weights.  The device
+accepts the container -- the manifest is well formed -- and `nn run` then says
+`cifar10: no result (the open model is not the 10-class CIFAR-10 classifier)`,
+which is at least a sentence naming the mistake instead of a wrong answer.
+`--plugin` exists to override the pairing when that is what you actually mean.
+
+**[!] `blob write` refuses a duplicate name.**  Replacing `cls` in the slot it
+already occupies is `blob erase 1` then `blob write cls 1`; a write to a
+different slot while the old one is still VALID is refused with `DUPLICATE`,
+because one name in two slots is not a state this store will hold.
+
+### Two ways to be looking at the wrong bytes
+
+Both were walked into during this work, and neither announces itself.
+
+- **Firmware and plugin are separate artifacts, and the mistake goes BOTH ways.**
+  They are separate artifact GRAPHS: `ninja -t inputs shell.elf` names nothing
+  under `plugin/`, and touching a plugin source leaves `shell.img` byte
+  identical.  So:
+    - `--target flash` does not touch the container in the blob store.  Editing a
+      plugin, rebuilding and reflashing leaves the board running the plugin it
+      already had -- the shape that gets walked into first, because reflashing
+      feels like it updates everything.
+    - and the reverse: a plugin-only change needs **no flash at all**, only a
+      re-send.  This one was walked into second, one message after the first was
+      written down: a formatting fix inside `plugin/cifar10` was reported as
+      needing a firmware rebuild.  A hazard recorded in one direction reads as
+      settled, and the other half of it is still live.
+
+  `nn info` prints the loaded plugin's **CRC** because of the first of those --
+  the build id is a source revision stamped at configure time and does not move
+  when a plugin is edited and rebuilt, and the image size often does not either.
+- **picocom's `--send-cmd` decides which sender runs.**  Start picocom with
+  `send_verified_model.sh` and then send a container, and the bare-model path
+  transfers it; start it with no `--send-cmd` and a raw `.tflite` goes down the
+  wire with no gate at all.  Neither can be refused on the device: a bare model
+  is a legitimate payload and takes the pre-container path by design.  It is
+  backward compatibility working exactly as intended, and it looks like the
+  plugin silently not being there.
+
+### What the host tests cover, and two gate bugs they turned up
+
+`test/test_plugin_decode.c` compiles the real shim with BOTH decoders -- the
+resident adapter and the real plugin source -- and compares them on synthetic
+tensors: the same count, the same rectangles in the same order through the same
+transform, the same scores in the report, and the same negative code for a
+non-int8 tensor, a rank-0 marker and a null array.  It also drives the routing
+itself: the threshold isolation above, the plugin leaving the caller's arrays
+untouched, a writer that refuses part way, and a decode with no geometry
+published.
+
+`test/test_plugin_cifar10.c` drives the classifier through its own slot table.
+Every failure that plugin can have is a confident sentence about the wrong thing:
+a label lookup off by one is a working demo to anyone not holding a deer, a
+reversed ranking still prints three tidy rows, and a 1000-class output accepted
+as a 10-class one names a CIFAR-10 label for an ImageNet score.
+
+Adding the second plugin also made the image gate fail, and both reasons were
+real:
+
+- **GCC spells an interprocedural clone two ways.**  The ELF calls it
+  `pl_utoa.constprop.0` and `-fstack-usage` calls the same body
+  `pl_utoa.constprop`, without the index.  The analyser looked up the ELF
+  spelling, found nothing and failed closed -- correct behaviour on a wrong
+  premise.  Matching a clone to its PARENT would be a guess; matching the two
+  spellings of one clone is not.
+- **And that was hiding a fail-open underneath it.**  The walk skipped every call
+  whose target was the current function, to avoid reading an ordinary loop as
+  recursion -- which also skipped genuine direct self-recursion, the one thing it
+  exists to refuse.  The `recursion` fixture had been passing on the clone bug
+  the whole time.  It now tells `b <f+0x8>` (a loop) from `b <f>` (a call), and
+  the fixture fails for its own reason.
+
+Two mistakes cancelling is how a gate ends up never having been seen to fail for
+the reason it was written.
 
 ## Flashing and recovery
 

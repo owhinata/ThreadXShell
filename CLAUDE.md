@@ -725,9 +725,10 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   ワーカーは**フレームを arm / claim した時点**で控え、publish のロック内で照合する
   （`svc/nn_det_record.c`。実機では決定論的に注入できないのでホストテストが唯一の検査）。
   詳細は board README。
-- **[!] plugin container（#101 = #78 Step 1a）**: モデルと、その出力を解釈するコードを
-  1 blob で運ぶ。**Step 1a はロードも実行もしない** — 検証して `nn info` に出すだけ。
-  説明は board README。破ってはいけないこと:
+- **[!] plugin container（#101 = Step 1a / #103 = Step 1b）**: モデルと、その出力を
+  解釈するコードを 1 blob で運ぶ。**#103 以降、plugin は実際に走る**（デコード・
+  パネル描画・閾値・report）。分類器 plugin（`plugin/cifar10`）がラベルを出すのが
+  #78 の目的の実証点。説明は board README。破ってはいけないこと:
   - **`svc/plugin_load.c` は呼び出し可能なポインタを返さない**（`plugin_view` は整数
     オフセットとコピー済みバイトのみ）。「実行しない」は規律ではなく**型の性質**。
   - **ゲートは plugin ELF にも適用する**（対象外にしない）。ただし
@@ -746,8 +747,36 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   - **`.plugin` は固定絶対アドレス**（`0x341E0000..0x34200000`、上端アンカー）。
     prelink されるので動かすと既存 plugin が全て無効。**ldscript と placement gate が
     独立に宣言する。**
-  - **スタック上限は provisional で、1a を通った plugin は「実行して安全」ではない**
-    （呼び出し地点の深さ・例外フレームの取り分・余裕が未測定。決めるのは Step 1b）。
+  - **ゲートを通った plugin は「実行して安全」ではない**。上限が守るのはスタックだけ。
+  - **[!] 分岐点は `port/npu/nn_active.c` の 1 つ**（#103）。一発デコード / stream の
+    admission・decode・draw / **閾値** / report が全部そこを通る。**plugin は自分の
+    閾値を持つ**ので片方だけ繋ぐと `nn thresh` が届かない。**同じ閾値を両者に明示的に
+    与える differential test はこれを見逃す** — テストは**シム経由で設定して、
+    もう一方が動いていないこと**を見る。**幾何も 1 つ**（`nn run` と `nn stream` が
+    両方 publish する。片方だけだと他方が毎回 `outside the frame`）。
+    **decode 結果は private**（`nn_active_decode()` は呼び出し側の箱を書かない）。
+  - **[!] オフセット → アドレスは `plugin_run_slot()` の 1 箇所**（ローダの entry も同じ
+    ヘルパ）。**実行前に MPU を読み戻して fail-closed**（`enable_XIP()` が再構成する。
+    Armv8-M に「番号の大きいリージョンが勝つ」は無い / `limit` は最後の 32 B を含む /
+    MAIR は完全復号 / リージョン数は `MPU_TYPE.DREGION`）。判定は純関数・ホストテスト必須。
+    **窓を守る新しい機構は作らない**（既存の NOR リースが守る。`nor_lease_held()` で assert）。
+  - **[!] plugin の fault は `CAM_ST_LOST` に行かない。リセットが teardown である。**
+    帰属は「pc が active plugin 内」まで。handler は publish 済みメタデータだけ読む。
+  - **[!] 上限は実測から導出する。超えられない上限は上限ではない**（暫定値 2 つが
+    スレッドスタック全体と同値で、検査が発火できなかった）。**非同期予約 208 B の前提は
+    `FPCCR.TS == 0` の強制**。**導出値 0 は「未測定」ではない**（present なスロットは
+    0 を宣言してよい。absent の綴りは slot 側で、`stack_limit == 0` の拒否は明示的に書く）。
+  - **[!] painter の予算はガード保持時間に比例する仕事の上界**であって `draw()` 内の
+    任意計算の上界ではない。課金は**フレームバッファを触る前**。
+  - **[!] `nn_input_quant_ok()` は常駐デコーダの前提条件**で、plugin は縛られない
+    （ベンダの分類器アプリ自身が scale 0.0203 / zp -8 に `pixel - 128` を書く）。
+    縛ると分類器 container が全て組込み class report に流れ、ラベルが読まれない。
+    **`nn stream` は描けないデコーダを拒否する**（分類器に DRAW は無い＝Step 2）。
+  - **ファームと plugin は別成果物で、間違いは両方向**。`--target flash` は container を
+    更新しない／**plugin だけの変更に焼き直しは不要**（実測: plugin を触っても
+    `shell.img` はバイト一致、`shell.elf` の入力に `plugin/` は 0 件）。
+    **片方向だけ書いた危険は解決済みに読める。**（`nn info` の **CRC** は前者のため。
+    build id は configure 時の revision）。
 - **[!] ベンダの NOR 書込み経路へ届いてよいのは seam だけ**（#88 Part D）。
   内側 4 本（`hx_lib_qspi_eeprom_{erase_sector,write,erase_all,word_write}`）を
   `-Wl,--wrap` で `port/sdk_seam/nor_seam.c` に寄せる。**外側 `hx_lib_spi_eeprom_*` を

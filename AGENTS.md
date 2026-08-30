@@ -751,9 +751,10 @@
      `nx_mjpeg_stop()` は `NX_MJPEG_PINS` を返し、**次の start を拒否し続ける**
      （retryable だが両方向に fail-closed）。詳細は `boards/f746g-disco/README.md`。
 
-9. **[!] plugin container（#101 / #78 Step 1a）。** モデルと、その出力を解釈するコードを
-   1 つの blob で運ぶ。**Step 1a はロードも実行もしない** — 検証して報告するだけ。
-   説明は `boards/grove-vision-ai-v2/README.md`。破ってはいけないこと:
+9. **[!] plugin container（#101 = Step 1a / #103 = Step 1b）。** モデルと、その出力を
+   解釈するコードを 1 つの blob で運ぶ。**#103 以降、plugin は実際にロードされて走る**
+   （デコード・パネル描画・閾値・report）。説明は
+   `boards/grove-vision-ai-v2/README.md`。破ってはいけないこと:
    - **`svc/plugin_load.c` は呼び出し可能なポインタを 1 つも返さない。** `struct
      plugin_view` は整数オフセットとコピー済みバイトだけ。「1a は plugin を実行しない」は
      規律ではなく**型の性質**であり、そこに関数ポインタを足した瞬間に消える。
@@ -779,9 +780,63 @@
      ローダは再配置を一切しないので、動かすと既存の全 plugin が無効になる。
      **ldscript と `check_placement_budget.py` が独立に宣言する**（検査対象から期待値を
      読むゲートは何を渡されても通る）。
-   - **スタック上限は provisional。** 真の許容値は「スレッドのスタック −
-     callback 呼び出し地点の深さ − 例外フレームの取り分 − 余裕」で、**3 項とも未測定**。
-     **1a を通った plugin を「実行して安全」と扱わない**（admission policy は Step 1b）。
+   - **ゲートを通った plugin を「実行して安全」と読まない。** メモリ安全性は誰も
+     証明していない。上限が守るのは**スタックだけ**である。
+   - **[!] 分岐点は `port/npu/nn_active.c` の 1 つだけ**（#103）。一発デコード /
+     stream の admission・decode・draw / **閾値** / report の全部がそこを通る。
+     `nn_overlay.c` だけを分岐させない — `nn run` は独自経路を持ち、`nn thresh` は
+     常駐デコーダを直接叩いていた。**plugin は自分の閾値を持つ**ので、片方だけ
+     繋ぐと `nn thresh 700` が plugin に届かない。**両者に同じ閾値を明示的に与える
+     differential test はこれを見逃す**ので、テストは**シム経由で設定して
+     もう一方が動いていないことを見る**。
+   - **[!] plugin の decode 結果は private。** `nn_active_decode()` は呼び出し側の
+     `bf_det[]` / `bf_result` を**書かない**（`snap->external` がそれを伝える）。
+     箱を読む代わりに draw / report を頼む。
+   - **[!] 幾何は 1 つ**（#103）。`nn run` と `nn stream` は別々の
+     `nn_preproc_geom` を作るので、**両方がシムに publish する**。片方だけ繋ぐと
+     もう片方の箱が毎回 `outside the frame` になる（実際にそうなった）。
+   - **[!] オフセットをアドレスに変えてよいのは `plugin_run_slot()` の 1 箇所**。
+     ローダ自身の entry 呼び出しも同じヘルパを通す。
+   - **[!] 実行前に MPU を読み戻して fail-closed**（ベンダの `enable_XIP()` が MPU を
+     再構成する）。**Armv8-M に「番号の大きいリージョンが勝つ」規則は無い**（複数一致は
+     アクセス無効）/ **`limit = (RLAR.LIMIT << 5) | 0x1F`** で最後の 32 B ブロックを
+     含む（`nor_flash.c` の診断用 capture はマスク後の値と比べており、**流用しない**）/
+     **MAIR は完全に復号する**（「Device でない」では予約エンコーディングを通す）/
+     リージョン数は **`MPU_TYPE.DREGION`**。判定は純関数でホストテスト必須。
+   - **検査から実行までの窓に新しい機構を作らない。** 既存の NOR リースが守っている
+     （`enable_XIP()` は `nor_flash.c` の 2 箇所 / `npu_hw_init()` がモデル生存期間
+     リースを保持 / writer の予約は live reader 0 のときだけ）。`nor_lease_held()` で
+     assert するだけにする。
+   - **[!] plugin の fault は `CAM_ST_LOST` に行かない。`fault.c` は記録して即リセットし、
+     リセットが teardown である。** カメラの後始末は起きず、起きる必要もない。
+     帰属は「pc が active plugin の範囲内」までで、handler は publish 済みの
+     不変メタデータしか読まない（**plugin メモリを deref しない**）。
+   - **[!] スタック上限は実測から導出する。超えられない上限は上限ではない。**
+     `allowance = スレッドのスタック − 呼び出し地点の深さ − 非同期予約 208 B − 余裕`。
+     暫定値のうち 2 つが天井（スレッドスタック全体）と同値で、**検査が発火できなかった**。
+     208 B の前提は **`FPCCR.TS == 0` の強制**（`fp_enforce.c`。継承値なので検査では
+     足りない）。
+   - **[!] 導出値 0 は「未測定」ではない**（#103）。present なスロットは 0 を宣言してよい
+     （分類器の entry はフレームレス）。**absent の綴りは slot 側**にあり、
+     `stack_limit == 0` の拒否は**明示的に書く**（比較に相乗りさせない）。
+   - **[!] painter の予算はガード保持時間に比例する仕事の上界であって、`draw()` 内の
+     任意の計算の上界ではない。** 課金はフレームバッファを触る**前**（部分描画を残さない）。
+     colour-key blit は**透明でも読んだソース画素を全部数える**。
+   - **[!] `nn_input_quant_ok()` は常駐デコーダの前提条件**であって、このボードが
+     モデルを食わせられるかの話ではない（#103）。**plugin はこれに縛られない** —
+     ベンダの分類器アプリ自身が scale 0.0203 / zp -8 の入力に `pixel - 128` を書く。
+     縛ると全ての分類器 container が組込みの class report に流れ、container が運ぶ
+     ラベルは一度も読まれない。
+   - **[!] `nn stream` は描けないデコーダを拒否する。** DRAW は任意スロットで、
+     分類器は持たない（パネルのラベルは Step 2）。拒否しないと「動いているが
+     一度も注釈されないプレビュー」になる。
+   - **ファームと plugin は別成果物で、間違いは両方向に起きる。** 別の artifact
+     graph であり（`ninja -t inputs shell.elf` に `plugin/` は 1 つも現れず、plugin の
+     ソースを触っても `shell.img` はバイト一致）、**`--target flash` は container を
+     更新しない**／逆に **plugin だけの変更に焼き直しは不要**（再送だけ）。
+     前者は 1 度、後者はその直後に踏んだ。**片方向だけ書き留めた危険は「解決済み」に
+     読めて、残り半分が生きたままになる。** `nn info` が **CRC** を出すのは前者のため
+     （build id は configure 時の source revision で、plugin を直して再ビルドしても動かない）。
 
 10. **ビルドは `_ref/` を読まない。** `_ref/`（および `../*/_ref/`）は git 管理外の資料置き場。
    CMake / スクリプトが参照するとクローンしただけでは configure できなくなる。

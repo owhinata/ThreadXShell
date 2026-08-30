@@ -417,6 +417,12 @@ set(SHELL_SOURCES
     # (the policy is passed in) and host-tested, and the SAME file the host-side
     # verify_container links, so the two cannot disagree.
     "${CMAKE_SOURCE_DIR}/svc/plugin_load.c"
+    # The loader and its MPU verdict (issue #103).  plugin_mpu.c is a pure
+    # function so that the refusals -- a reservation that is Device memory, or
+    # covered by two regions, or execute-never -- are reachable from a host
+    # test; no board can be arranged to produce them.
+    "${BOARD_DIR}/port/plugin/plugin_mpu.c"
+    "${BOARD_DIR}/port/plugin/plugin_run.c"
     # Camera frame ring (issue #35).  Freestanding: it depends on <stdint.h>
     # and an injected lock vtable only, which is why the same file serves all
     # three boards and has a host unit test (shell/test/test_frame_pipeline.c).
@@ -697,6 +703,7 @@ target_include_directories(shell_objs PRIVATE
     "${BOARD_DIR}/port/lcd"
     "${BOARD_DIR}/port/camera"
     "${BOARD_DIR}/port/npu"
+    "${BOARD_DIR}/port/plugin"
     # Header surface of the two camera archives (issue #35): the CIS (sensor
     # I2C) layer and the sensor datapath library.  Not in bsp_iface because
     # only port/camera/ has any business calling them.

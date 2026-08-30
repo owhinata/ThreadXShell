@@ -17,31 +17,6 @@
 #include <stddef.h>
 
 /*
- * Turn a slot offset into something callable.
- *
- * [!] THE ONE PLACE THIS HAPPENS.  svc/plugin_load.c deliberately returns
- * integers and no function pointers, so that "the validation step does not
- * execute anything" is a property of its types.  Here is where the offsets
- * become addresses, and it is guarded by plugin_run_active() -- which is only
- * true after the loader has copied the image, synchronised the caches, checked
- * the MPU and had the plugin's own entry point accept.
- *
- * The Thumb bit is kept: the manifest carried it, plugin_load.c insisted on it,
- * and stripping it here would produce a branch to Arm state on a core that has
- * none.
- */
-static void *slot_addr(unsigned slot)
-{
-	const struct plugin_view *v = plugin_run_view();
-
-	if (v == NULL || slot >= PLUGIN_SLOT_COUNT)
-		return NULL;
-	if (v->slot[slot] == PLUGIN_SLOT_ABSENT)
-		return NULL;
-	return (void *)(uintptr_t)(v->link_addr + v->slot[slot]);
-}
-
-/*
  * The transform the plugin sees.  A copy rather than a pointer: the paths that
  * publish it own storage with different lifetimes, and a plugin asking after
  * one of them had moved on would read whatever was left.
@@ -83,7 +58,7 @@ int nn_active_to_frame(void *ctx, float x, float y, float w, float h,
 
 int nn_active_is_plugin(void)
 {
-	return plugin_run_active() && slot_addr(PLUGIN_SLOT_DECODE) != NULL;
+	return plugin_run_active() && plugin_run_slot(PLUGIN_SLOT_DECODE) != NULL;
 }
 
 /* The tensors reach a plugin as svc/tensor.h descriptors, which is the contract
@@ -102,11 +77,21 @@ static unsigned to_desc(const struct npu_tensor *outs, unsigned n,
 	return n;
 }
 
+/*
+ * [!] THE NULL CHECK IS HERE, NOT IN EACH BRANCH.  nn_decoder.c defends against
+ * a null tensor array and a plugin has no way to; routed one side at a time,
+ * the two decoders would answer a caller's mistake differently -- the resident
+ * one with BF_ERR_ARG, the plugin one by walking a null pointer in to_desc().
+ * Neither caller in this firmware can pass null, which is exactly why the
+ * asymmetry would have sat here unnoticed.
+ */
 int nn_active_shapes_ok(const struct npu_tensor *outs, unsigned n)
 {
 	plugin_shapes_ok_fn fn =
-		(plugin_shapes_ok_fn)slot_addr(PLUGIN_SLOT_SHAPES_OK);
+		(plugin_shapes_ok_fn)plugin_run_slot(PLUGIN_SLOT_SHAPES_OK);
 
+	if (outs == NULL)
+		return 0;
 	if (nn_active_is_plugin() && fn != NULL) {
 		struct tensor_desc d[NN_DECODER_MAX_OUTPUTS];
 		unsigned m = to_desc(outs, n, d, NN_DECODER_MAX_OUTPUTS);
@@ -119,8 +104,18 @@ int nn_active_shapes_ok(const struct npu_tensor *outs, unsigned n)
 int nn_active_decode(const struct npu_tensor *outs, unsigned n,
                      struct bf_det *out, int max, struct bf_result *res)
 {
-	plugin_decode_fn fn = (plugin_decode_fn)slot_addr(PLUGIN_SLOT_DECODE);
+	plugin_decode_fn fn = (plugin_decode_fn)plugin_run_slot(PLUGIN_SLOT_DECODE);
 
+	if (outs == NULL) {
+		/* Nothing was decoded, so say so in @p res too rather than leaving the
+		 * caller to publish a previous frame's diagnostics -- which is the
+		 * rule nn_decoder_run() already follows on this same path. */
+		if (res != NULL) {
+			memset(res, 0, sizeof(*res));
+			res->status = BF_ERR_ARG;
+		}
+		return BF_ERR_ARG;   /* see nn_active_shapes_ok */
+	}
 	if (nn_active_is_plugin() && fn != NULL) {
 		struct tensor_desc d[NN_DECODER_MAX_OUTPUTS];
 		unsigned m = to_desc(outs, n, d, NN_DECODER_MAX_OUTPUTS);
@@ -136,7 +131,7 @@ int nn_active_decode(const struct npu_tensor *outs, unsigned n,
 
 void nn_active_draw(const struct plugin_painter *paint)
 {
-	plugin_draw_fn fn = (plugin_draw_fn)slot_addr(PLUGIN_SLOT_DRAW);
+	plugin_draw_fn fn = (plugin_draw_fn)plugin_run_slot(PLUGIN_SLOT_DRAW);
 
 	if (nn_active_is_plugin() && fn != NULL && paint != NULL)
 		fn(paint);
@@ -144,9 +139,16 @@ void nn_active_draw(const struct plugin_painter *paint)
 	 * which knows what they are. */
 }
 
+int nn_active_can_draw(void)
+{
+	if (!nn_active_is_plugin())
+		return 1;
+	return plugin_run_slot(PLUGIN_SLOT_DRAW) != NULL;
+}
+
 int nn_active_report(nn_svc_write_fn write, void *ctx)
 {
-	plugin_report_fn fn = (plugin_report_fn)slot_addr(PLUGIN_SLOT_REPORT);
+	plugin_report_fn fn = (plugin_report_fn)plugin_run_slot(PLUGIN_SLOT_REPORT);
 	struct plugin_printer out;
 
 	if (!nn_active_is_plugin() || fn == NULL || write == NULL)
@@ -172,7 +174,7 @@ int nn_active_report(nn_svc_write_fn write, void *ctx)
 unsigned nn_active_get_thresh_milli(void)
 {
 	plugin_param_get_fn fn =
-		(plugin_param_get_fn)slot_addr(PLUGIN_SLOT_PARAM_GET);
+		(plugin_param_get_fn)plugin_run_slot(PLUGIN_SLOT_PARAM_GET);
 	uint32_t v = 0u;
 
 	if (nn_active_is_plugin() && fn != NULL &&
@@ -184,7 +186,7 @@ unsigned nn_active_get_thresh_milli(void)
 int nn_active_set_thresh_milli(unsigned milli)
 {
 	plugin_param_set_fn fn =
-		(plugin_param_set_fn)slot_addr(PLUGIN_SLOT_PARAM_SET);
+		(plugin_param_set_fn)plugin_run_slot(PLUGIN_SLOT_PARAM_SET);
 
 	if (nn_active_is_plugin() && fn != NULL)
 		return fn(NN_ACTIVE_PARAM_THRESH_MILLI, (uint32_t)milli) == 0;

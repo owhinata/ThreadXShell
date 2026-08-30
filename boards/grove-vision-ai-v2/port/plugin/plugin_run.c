@@ -112,6 +112,26 @@ static void plugin_sync_caches(void)
 	__ISB();
 }
 
+/*
+ * Turn a slot offset into something callable.  See plugin_run.h.
+ *
+ * Split out so that the entry call below and plugin_run_slot() cannot disagree:
+ * they are the same arithmetic, over the same view, with the same absent-slot
+ * rule.  Static, because the only thing outside this file that may form one of
+ * these addresses is a caller of plugin_run_slot(), which is gated on the
+ * plugin having completed its entry point -- and the entry call obviously
+ * cannot be.
+ */
+static void *plugin_slot_addr(const struct plugin_view *v, uint32_t base,
+                              unsigned slot)
+{
+	if (v == NULL || slot >= (unsigned)PLUGIN_SLOT_COUNT)
+		return NULL;
+	if (v->slot[slot] == PLUGIN_SLOT_ABSENT)
+		return NULL;
+	return (void *)(uintptr_t)(base + v->slot[slot]);
+}
+
 /* ---- load / unload ------------------------------------------------------- */
 
 enum plugin_run_result plugin_run_load(const struct plugin_view *v,
@@ -122,15 +142,24 @@ enum plugin_run_result plugin_run_load(const struct plugin_view *v,
 	uint32_t res_len  = (uint32_t)(__plugin_end - __plugin_start);
 	enum plugin_mpu_verdict mv;
 	plugin_entry_fn entry;
-	uint32_t slot;
 
 	if (v == NULL || container == NULL || base == NULL)
 		return PLUGIN_RUN_ARG;
+
+	/*
+	 * Whatever was there is gone from this point on.
+	 *
+	 * [!] BEFORE THE has_plugin TEST, NOT AFTER IT.  A container that carries
+	 * only a model is a legal container and NO_PLUGIN is not an error -- but it
+	 * is still a request to load something else, and returning it early left the
+	 * PREVIOUS plugin published and callable.  A caller reading NO_PLUGIN as
+	 * success would then decode a new model with an old model's decoder.  The
+	 * argument check above stays in front: a null pointer is not a request.
+	 */
+	plugin_run_unload();
+
 	if (!v->has_plugin)
 		return PLUGIN_RUN_NO_PLUGIN;
-
-	/* Whatever was there is gone from this point on. */
-	plugin_run_unload();
 
 	/* The window the image is read from must be pinned by the caller.  See
 	 * plugin_run.h for why this is a check and not a new mechanism. */
@@ -176,8 +205,16 @@ enum plugin_run_result plugin_run_load(const struct plugin_view *v,
 	__DMB();
 	pl_active = &pl_slot;            /* single aligned store; see the header */
 
-	slot = v->slot[PLUGIN_SLOT_ENTRY];
-	entry = (plugin_entry_fn)(uintptr_t)(res_base + slot);
+	entry = (plugin_entry_fn)plugin_slot_addr(&pl_view, res_base,
+	                                          PLUGIN_SLOT_ENTRY);
+	if (entry == NULL) {
+		/* plugin_parse() refuses a manifest whose ENTRY is absent, so this is
+		 * unreachable through the one caller -- and a branch to 0 is not the
+		 * way to find out it stopped being. */
+		LOG_ERR("'%s' declares no entry point", pl_slot.name);
+		plugin_run_unload();
+		return PLUGIN_RUN_ENTRY;
+	}
 
 	if (entry(base) != 0) {
 		LOG_ERR("'%s' refused its own entry point", pl_slot.name);
@@ -209,9 +246,9 @@ int plugin_run_active(void)
 	return pl_started;
 }
 
-const struct plugin_view *plugin_run_view(void)
+void *plugin_run_slot(unsigned slot)
 {
-	return pl_started ? &pl_view : NULL;
+	return pl_started ? plugin_slot_addr(&pl_view, pl_slot.base, slot) : NULL;
 }
 
 const char *plugin_run_attribute(uint32_t pc, uint32_t *off)

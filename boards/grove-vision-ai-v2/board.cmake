@@ -1469,6 +1469,37 @@ add_custom_target(flash
 # [!] AND svc/blazeface.c IS THE SAME FILE THE FIRMWARE LINKS.  Compiling a copy
 # would fork the decoder issue #97 spent itself merging.  It is the wrapper that
 # is new, not the arithmetic.
+# What each thread may lend a plugin callback (issue #103).  DERIVED, not
+# guessed any more:
+#
+#   allowance = thread stack - depth already spent at the call site
+#                            - the asynchronous reserve - margin
+#
+# The depth is measured on hardware and reported by `nn stream stats`; the
+# reserve is 208 B, derived rather than measured (at most one hardware exception
+# frame lands on a thread's PSP -- nested and tail-chained exceptions run in
+# Handler mode on MSP -- which is 104 B extended plus 4 B alignment now that
+# FPCCR.TS is enforced to zero, plus ThreadX's own 100 B PendSV save, which can
+# coexist with it while a callback is suspended).
+#
+#   producer  8192 - 577 - 208 = 7407 available   (plugin decode measures 192 B)
+#   panel     2048 - 233 - 208 = 1607 available   (plugin draw   measures 300 B)
+#   shell     4096 - (not measured) - 208
+#
+# [!] TWO OF THE PROVISIONAL VALUES WERE ABOVE THE CEILING, not merely generous.
+# PRODUCER was 8192 -- the whole thread stack -- and SHELL was 4096, likewise.
+# A plugin declaring those would have been ACCEPTED and would have overflowed:
+# the check could not fire for the case it exists to catch.  That is worse than
+# a wrong number, because a limit that cannot be exceeded is not a limit.
+#
+# The panel figure keeps 583 B of the 1607 as margin, because 233 B is a
+# high-water over the paths that were exercised and the panel thread serves more
+# than the overlay.  The shell figure stays conservative because its call site is
+# not instrumented yet; the shim of implementation step 7 adds it.
+set(GROVE_PLUGIN_STACK_PRODUCER 4096)
+set(GROVE_PLUGIN_STACK_PANEL    1024)
+set(GROVE_PLUGIN_STACK_SHELL    1024)
+
 set(GROVE_PLUGIN_DIR "${BOARD_DIR}/plugin/blazeface")
 set(GROVE_PLUGIN_OUT "${CMAKE_BINARY_DIR}/plugin/blazeface")
 set(GROVE_PLUGIN_SRCS
@@ -1556,9 +1587,18 @@ add_custom_command(
             # so a short list here does not under-report -- it stops the
             # container being built at all, which is the right direction but a
             # confusing place to discover it.
-            --entry pl_entry=8192 pl_shapes_ok=8192 pl_decode=8192
-                    pl_draw=1024 pl_report=4096
-                    pl_param_set=4096 pl_param_get=4096
+            # [!] THE SAME VARIABLES THE FIRMWARE'S POLICY USES.  Written out
+            # again here, the gate and the device would be two declarations of
+            # one rule, and a plugin could pass the build and be refused on the
+            # board -- the shape issue #93 hit.  The numbers are derived where
+            # they are set, from the measured call-site depth.
+            --entry pl_entry=${GROVE_PLUGIN_STACK_PRODUCER}
+                    pl_shapes_ok=${GROVE_PLUGIN_STACK_PRODUCER}
+                    pl_decode=${GROVE_PLUGIN_STACK_PRODUCER}
+                    pl_draw=${GROVE_PLUGIN_STACK_PANEL}
+                    pl_report=${GROVE_PLUGIN_STACK_SHELL}
+                    pl_param_set=${GROVE_PLUGIN_STACK_SHELL}
+                    pl_param_get=${GROVE_PLUGIN_STACK_SHELL}
             --emit-stacks "${GROVE_PLUGIN_OUT}/plugin.stacks.json"
     DEPENDS ${_plugin_objs} "${GROVE_PLUGIN_DIR}/plugin.ld"
             "${BOARD_DIR}/cmake/check_plugin_image.py"
@@ -1588,12 +1628,6 @@ set(GROVE_PLUGIN_ELF "${GROVE_PLUGIN_OUT}/plugin.elf")
 set(GROVE_PLUGIN_STACKS "${GROVE_PLUGIN_OUT}/plugin.stacks.json")
 set(GROVE_PLUGIN_BASE "0x341E0000")
 set(GROVE_PLUGIN_MAX  "131072")
-# What each thread may lend a plugin callback.  PROVISIONAL: see the note in
-# the plugin gate wiring above -- the depth at the call site and the exception
-# reserve are not measured, and Step 1b sets the real admission policy.
-set(GROVE_PLUGIN_STACK_PRODUCER 8192)
-set(GROVE_PLUGIN_STACK_PANEL    1024)
-set(GROVE_PLUGIN_STACK_SHELL    4096)
 
 # cortex-m55 / fp-armv8 / hard float / little endian / CMSE, per
 # plugin_target_id() in svc/plugin_abi.h.  Stated here and computed there: the

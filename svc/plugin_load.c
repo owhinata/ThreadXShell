@@ -292,7 +292,21 @@ static enum plugin_result check_manifest(const uint8_t *p, uint32_t sect_off,
 		if (at < seg_off[0] || at - seg_off[0] >= seg_len[0])
 			return PLUGIN_ERR_SLOT_RANGE;
 
-		if (st == 0u || st > pol->stack_limit[i])
+		/*
+		 * [!] A DERIVED BOUND OF ZERO IS A MEASUREMENT, NOT AN OMISSION
+		 * (issue #103).  This used to read `st == 0u || st > limit`, which
+		 * made zero a second spelling of "absent" -- and the second plugin's
+		 * entry point turned out to be genuinely frameless, so the host gate
+		 * derived 0 and the packer could not declare what it had measured.
+		 * Absence has its own spelling in the SLOT field and is handled above,
+		 * so nothing here needs zero to mean it.
+		 *
+		 * The refusal a zero limit stands for is spelled out instead of riding
+		 * on that comparison: a thread that can lend a plugin nothing must
+		 * refuse the slot even when the plugin asks for nothing, because the
+		 * limit is the board saying this callback may not run at all.
+		 */
+		if (pol->stack_limit[i] == 0u || st > pol->stack_limit[i])
 			return PLUGIN_ERR_STACK;
 
 		out->slot[i]  = v;

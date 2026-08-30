@@ -29,6 +29,7 @@
  */
 #include "plugin_abi.h"
 #include "plugin_base.h"
+#include "plugin_fmt.h"
 #include "blazeface.h"
 #include "tensor.h"
 
@@ -142,39 +143,6 @@ static void pl_draw(const struct plugin_painter *paint)
 /* ---- the console ---------------------------------------------------------- */
 
 /*
- * Format an unsigned into @p buf backwards, returning the offset of the first
- * digit.  A plugin formats its own text: the printer is length-bearing and not
- * varargs, so no formatter crosses the ABI -- reaching for one would pull a
- * float formatter into three firmwares at once, which is the trap svc/fmt.c
- * documents.
- */
-static unsigned pl_utoa(char *buf, unsigned len, uint32_t v)
-{
-	unsigned i = len;
-
-	do {
-		buf[--i] = (char)('0' + (v % 10u));
-		v /= 10u;
-	} while (v != 0u && i != 0u);
-	return i;
-}
-
-static int pl_emit(const struct plugin_printer *out, const char *s, size_t len)
-{
-	int rc = pl_print_write(out, s, len);
-
-	return rc < 0 ? rc : 0;
-}
-
-static int pl_emit_u32(const struct plugin_printer *out, uint32_t v)
-{
-	char b[12];
-	unsigned at = pl_utoa(b, (unsigned)sizeof b, v);
-
-	return pl_emit(out, b + at, sizeof b - at);
-}
-
-/*
  * Describe the last decode.
  *
  * [!] EVERY FAILURE PROPAGATES.  A sink that has said no has said no; continuing
@@ -190,25 +158,25 @@ static int pl_report(const struct plugin_printer *out)
 
 	if (pl_ndet < 0) {
 		/* The diagnostic IS the result here -- see pl_decode(). */
-		rc = pl_emit(out, "blazeface: decode refused (", 27u);
+		rc = pl_fmt_cstr(out, "blazeface: decode refused (");
 		if (rc == 0)
-			rc = pl_emit_u32(out, (uint32_t)(-pl_ndet));
+			rc = pl_fmt_u32(out, (uint32_t)(-pl_ndet));
 		if (rc == 0)
-			rc = pl_emit(out, ")\r\n", 3u);
+			rc = pl_fmt_cstr(out, ")\r\n");
 		return rc;
 	}
 
 	/* The header says what the numbers are, because this report and the
 	 * resident one do not use the same units -- see the box loop below. */
-	rc = pl_emit(out, "faces ", 6u);
+	rc = pl_fmt_cstr(out, "faces ");
 	if (rc == 0)
-		rc = pl_emit_u32(out, (uint32_t)pl_ndet);
+		rc = pl_fmt_u32(out, (uint32_t)pl_ndet);
 	if (rc == 0)
-		rc = pl_emit(out, "  thresh ", 9u);
+		rc = pl_fmt_cstr(out, "  thresh ");
 	if (rc == 0)
-		rc = pl_emit_u32(out, pl_res.thresh_milli);
+		rc = pl_fmt_u32(out, pl_res.thresh_milli);
 	if (rc == 0)
-		rc = pl_emit(out, "/1000\r\n", 7u);
+		rc = pl_fmt_cstr(out, "/1000\r\n");
 
 	for (i = 0; i < pl_ndet && i < BF_MAX_DET && rc == 0; i++) {
 		struct plugin_rect r;
@@ -216,9 +184,12 @@ static int pl_report(const struct plugin_printer *out)
 		               pl_base_to_frame(pl_base, pl_det[i].x, pl_det[i].y,
 		                                pl_det[i].w, pl_det[i].h, &r) == 0;
 
-		rc = pl_emit(out, "  face ", 7u);   /* 7, not 6: the trailing space is part of it */
+		/* The trailing space is part of the literal.  It used to be a
+		 * hand-counted length beside it -- "7, not 6" -- which is a comment that
+		 * exists because the count is a second declaration of the string. */
+		rc = pl_fmt_cstr(out, "  face ");
 		if (rc == 0)
-			rc = pl_emit_u32(out, (uint32_t)i);
+			rc = pl_fmt_u32(out, (uint32_t)i);
 		/*
 		 * [!] THE BOX, NOT JUST THE SCORE.  The first version of this printed
 		 * a score and nothing else, and on hardware that showed up as `nn run`
@@ -233,35 +204,35 @@ static int pl_report(const struct plugin_printer *out)
 		 * unit is in the line so the two are not mistaken for each other.
 		 */
 		if (rc == 0 && have_box) {
-			rc = pl_emit(out, "  x ", 4u);
+			rc = pl_fmt_cstr(out, "  x ");
 			if (rc == 0)
-				rc = pl_emit_u32(out, (uint32_t)(r.x0 < 0 ? 0 : r.x0));
+				rc = pl_fmt_u32(out, (uint32_t)(r.x0 < 0 ? 0 : r.x0));
 			if (rc == 0)
-				rc = pl_emit(out, " y ", 3u);
+				rc = pl_fmt_cstr(out, " y ");
 			if (rc == 0)
-				rc = pl_emit_u32(out, (uint32_t)(r.y0 < 0 ? 0 : r.y0));
+				rc = pl_fmt_u32(out, (uint32_t)(r.y0 < 0 ? 0 : r.y0));
 			if (rc == 0)
-				rc = pl_emit(out, " w ", 3u);
+				rc = pl_fmt_cstr(out, " w ");
 			if (rc == 0)
-				rc = pl_emit_u32(out, (uint32_t)(r.x1 > r.x0 ? r.x1 - r.x0 : 0));
+				rc = pl_fmt_u32(out, (uint32_t)(r.x1 > r.x0 ? r.x1 - r.x0 : 0));
 			if (rc == 0)
-				rc = pl_emit(out, " h ", 3u);
+				rc = pl_fmt_cstr(out, " h ");
 			if (rc == 0)
-				rc = pl_emit_u32(out, (uint32_t)(r.y1 > r.y0 ? r.y1 - r.y0 : 0));
+				rc = pl_fmt_u32(out, (uint32_t)(r.y1 > r.y0 ? r.y1 - r.y0 : 0));
 			if (rc == 0)
-				rc = pl_emit(out, " px", 3u);
+				rc = pl_fmt_cstr(out, " px");
 		} else if (rc == 0) {
-			rc = pl_emit(out, "  outside the frame", 19u);
+			rc = pl_fmt_cstr(out, "  outside the frame");
 		}
 		if (rc == 0)
-			rc = pl_emit(out, "  score ", 8u);
+			rc = pl_fmt_cstr(out, "  score ");
 		/* milli, on the same scale the threshold is printed in: one command
 		 * carrying two spellings of "score" is the divergence issue #50 spent
 		 * itself removing. */
 		if (rc == 0)
-			rc = pl_emit_u32(out, (uint32_t)(pl_det[i].score * 1000.0f));
+			rc = pl_fmt_u32(out, (uint32_t)(pl_det[i].score * 1000.0f));
 		if (rc == 0)
-			rc = pl_emit(out, "\r\n", 2u);
+			rc = pl_fmt_cstr(out, "\r\n");
 	}
 	return rc;
 }

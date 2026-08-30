@@ -328,6 +328,12 @@ enum plugin_slot {
  * transitive bound from the linked plugin and refuses a manifest that does not
  * match it -- see plugin_load.h for what the loader does with these, and
  * AGENTS.md for why matching is still not the same as being admissible.
+ *
+ * [!] ZERO IS A LEGAL BOUND FOR A PRESENT SLOT, and only for a present one.  A
+ * frameless entry point really does need no stack of its own, and the second
+ * plugin's has one; an ABSENT slot must still declare zero, because absence is
+ * spelled in @ref slot and a stale number beside it would be a second, weaker
+ * spelling of the same fact.
  */
 struct plugin_manifest {
 	uint8_t  magic[4];          /**< "PMAN"                                */

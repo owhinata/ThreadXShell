@@ -114,8 +114,18 @@ REG = r"(?:r\d+|ip|sp|lr|pc|fp|sl)"
 # being useless noise.  An indirect CALL is `blx <reg>`, or `bx <reg>` to
 # anything but lr (a tail call).
 INDIRECT_RE = re.compile(r"\bblx\s+" + REG + r"\b|\bbx\s+(?!lr\b)" + REG + r"\b")
-DIRECT_CALL_RE = re.compile(r"\bbl\s+[0-9a-f]+\s+<([^>+]+)")
-TAIL_CALL_RE = re.compile(r"\bb(?:\.[nw])?\s+[0-9a-f]+\s+<([^>+]+)")
+# [!] THE OFFSET IS CAPTURED, BECAUSE `b <f+0x8>` AND `b <f>` ARE NOT THE SAME
+# THING.  objdump renders an ordinary loop inside f as a branch to `<f+0x8>` and
+# a self tail call as a branch to `<f>`, and the first draft of the walk below
+# told them apart by skipping EVERY call whose target was the current function.
+# That skipped genuine direct recursion too -- the one thing the walk exists to
+# refuse -- and the recursion fixture in cmake/fixtures went on passing because
+# the clone-naming bug above happened to refuse its image for an unrelated
+# reason.  Two mistakes cancelling is how a gate ends up never having been seen
+# to fail for its own reason.
+DIRECT_CALL_RE = re.compile(r"\bbl\s+[0-9a-f]+\s+<([^>+]+)(\+0x[0-9a-f]+)?>")
+TAIL_CALL_RE = re.compile(
+    r"\bb(?:\.[nw])?\s+[0-9a-f]+\s+<([^>+]+)(\+0x[0-9a-f]+)?>")
 
 
 def run(cmd):
@@ -151,6 +161,20 @@ def disassemble(objdump, elf):
     return funcs
 
 
+# [!] GCC SPELLS AN INTERPROCEDURAL CLONE TWO WAYS, AND THIS IS NOT A GUESS.
+# ipa-cp, ipa-sra and partial inlining emit extra bodies for a function; the ELF
+# calls one `pl_utoa.constprop.0` and -fstack-usage calls the SAME body
+# `pl_utoa.constprop`, without the index.  The analyser looked the ELF name up
+# verbatim, found nothing and failed closed -- correct behaviour on a wrong
+# premise, and it went unseen until a second plugin gave a static helper three
+# call sites with a constant argument.  Matching a clone to its PARENT would be
+# a guess; matching the two spellings of one clone is not.  Where a name really
+# is ambiguous (two clones, one .su name) the larger frame is kept, which is the
+# direction a bound may err in.
+CLONE_SUFFIX_RE = re.compile(
+    r"^(.*\.(?:constprop|isra|part|cold|lto_priv|localalias))\.\d+$")
+
+
 def stack_usage(su_files):
     """{function: (frame, qualifier)} from -fstack-usage output."""
     frames = {}
@@ -161,8 +185,37 @@ def stack_usage(su_files):
                 if len(parts) < 3:
                     continue
                 name = parts[0].rsplit(":", 1)[-1]
-                frames[name] = (int(parts[1]), parts[2])
+                entry = (int(parts[1]), parts[2])
+                prev = frames.get(name)
+                if prev is None or su_rank(entry) > su_rank(prev):
+                    frames[name] = entry
     return frames
+
+
+def su_rank(entry):
+    """Order two .su records for the same name; the larger one is kept.
+
+    [!] A NON-STATIC QUALIFIER OUTRANKS EVERY BYTE COUNT.  Two clones can share
+    one normalised name, and merging them by frame size alone throws away the
+    only thing that matters if one of them is `dynamic` or `bounded`: that it
+    has no static bound at all.  A small dynamic record losing to a large static
+    one would hand `frame_of()` a finite number for a body that has none, and
+    the gate would state a bound where there is not one -- which is the fail-open
+    direction, and the reason a merge exists here at all is a naming quirk, not
+    a licence to summarise evidence.
+    """
+    frame, qual = entry
+    return (0 if qual == "static" else 1, frame)
+
+
+def frame_of(fn, frames):
+    """The .su entry for an ELF symbol, or None.  See CLONE_SUFFIX_RE."""
+    if fn in frames:
+        return frames[fn]
+    m = CLONE_SUFFIX_RE.match(fn)
+    if m and m.group(1) in frames:
+        return frames[m.group(1)]
+    return None
 
 
 def bound_stack(entry, funcs, frames, errors):
@@ -173,11 +226,12 @@ def bound_stack(entry, funcs, frames, errors):
         if fn in path:
             errors.append(f"stack: recursion through {fn} ({' -> '.join(path)})")
             return 0
-        if fn not in frames:
+        su = frame_of(fn, frames)
+        if su is None:
             errors.append(f"stack: no frame recorded for {fn} -- the .su input "
                           "does not match the linked image")
             return 0
-        frame, qual = frames[fn]
+        frame, qual = su
         if qual != "static":
             errors.append(f"stack: {fn} has a {qual} frame (alloca/VLA); a "
                           "bound cannot be stated")
@@ -191,9 +245,14 @@ def bound_stack(entry, funcs, frames, errors):
                 worst = max(worst, VENEER_BASE_COST)
                 continue
             m = DIRECT_CALL_RE.search(line) or TAIL_CALL_RE.search(line)
-            if m and m.group(1) != fn:
+            if m:
                 callee = m.group(1)
-                if callee in funcs or callee in frames:
+                # A branch into the MIDDLE of this same function is a loop, not
+                # a call; a branch to its entry is recursion and is walked, so
+                # the `fn in path` test above refuses it.
+                if callee == fn and m.group(2):
+                    continue
+                if callee in funcs or frame_of(callee, frames) is not None:
                     worst = max(worst, walk(callee, path + [fn]))
         return frame + worst
 

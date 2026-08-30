@@ -238,13 +238,20 @@ def main():
     if slots[L["slot"]["param_set"]]:
         cap |= L["cap"]["params"]
 
+    # [!] "MEASURED ZERO" AND "NEVER MEASURED" ARE DIFFERENT (issue #103).  This
+    # tested the VALUE -- `if v and not stacks[i]` -- which reads a frameless
+    # callback as an omission and refuses to build a perfectly good container.
+    # The classifier plugin's entry point is exactly that, so the two are told
+    # apart by which arguments arrived, not by what they said.
     stacks = [0] * L["slot_count"]
+    given = set()
     named = {k: int(v) for k, v in (s.split("=") for s in args.stack)}
     for slot_name, idx in L["slot"].items():
         if slot_name in named:
             stacks[idx] = named[slot_name]
+            given.add(idx)
     for i, v in enumerate(slots):
-        if v and not stacks[i]:
+        if v and i not in given:
             die(f"slot {i} is present but no --stack was given for it; the "
                 "manifest may not declare a stack it has not measured")
 

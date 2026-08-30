@@ -9,7 +9,10 @@
 #include "nn_active.h"
 
 #include "nn_decoder.h"
+#include "nn_preproc.h"
 #include "plugin_run.h"
+
+#include <string.h>
 
 #include <stddef.h>
 
@@ -36,6 +39,46 @@ static void *slot_addr(unsigned slot)
 	if (v->slot[slot] == PLUGIN_SLOT_ABSENT)
 		return NULL;
 	return (void *)(uintptr_t)(v->link_addr + v->slot[slot]);
+}
+
+/*
+ * The transform the plugin sees.  A copy rather than a pointer: the paths that
+ * publish it own storage with different lifetimes, and a plugin asking after
+ * one of them had moved on would read whatever was left.
+ */
+static struct nn_preproc_geom nn_geom_cur;
+static uint8_t                nn_geom_cur_ok;
+
+void nn_active_set_geom(const struct nn_preproc_geom *g)
+{
+	if (g == NULL) {
+		nn_geom_cur_ok = 0u;
+		return;
+	}
+	nn_geom_cur    = *g;
+	nn_geom_cur_ok = 1u;
+}
+
+void nn_active_clear_geom(void)
+{
+	nn_geom_cur_ok = 0u;
+}
+
+int nn_active_to_frame(void *ctx, float x, float y, float w, float h,
+                       struct plugin_rect *out)
+{
+	struct nn_preproc_box b;
+
+	(void)ctx;
+	if (out == NULL || !nn_geom_cur_ok)
+		return -1;
+	if (nn_preproc_box(&nn_geom_cur, x, y, w, h, &b) != 0)
+		return -1;
+	out->x0 = b.x0;
+	out->y0 = b.y0;
+	out->x1 = b.x1;
+	out->y1 = b.y1;
+	return 0;
 }
 
 int nn_active_is_plugin(void)

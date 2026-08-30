@@ -315,6 +315,7 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	nn_ov_prof_frames++;
 	nn_ov_ndet    = nd;
 	nn_ov_geom_ok = 1;
+	nn_active_set_geom(&nn_ov_geom);   /* issue #103 */
 
 	/* Stop check 3 of 3: a stop that arrived during the inference should not
 	 * be followed by drawing on a panel the caller is about to stop using. */
@@ -384,32 +385,6 @@ static void nn_overlay_draw(void *ctx, uint16_t *fb, uint16_t fb_w,
 		lcd_rect_wire(fb, fb_w, fb_h, b.x0, b.y0, b.x1, b.y1,
 		              NN_OVERLAY_RGB565, NN_OVERLAY_STROKE);
 	}
-}
-
-/*
- * The base vtable's coordinate transform (issue #103).
- *
- * Lives here because the geometry does: nn_ov_geom is set when the input is
- * built and is meaningless before that.  The plugin gets the same function the
- * resident draw path uses, so a box drawn by a plugin and a box drawn by the
- * firmware land in the same place -- and both are refused for the same reason
- * when a degenerate model produces a non-finite one.
- */
-int nn_overlay_to_frame(void *ctx, float x, float y, float w, float h,
-                        struct plugin_rect *out)
-{
-	struct nn_preproc_box b;
-
-	(void)ctx;
-	if (out == NULL || !nn_ov_geom_ok)
-		return -1;
-	if (nn_preproc_box(&nn_ov_geom, x, y, w, h, &b) != 0)
-		return -1;
-	out->x0 = b.x0;
-	out->y0 = b.y0;
-	out->x1 = b.x1;
-	out->y1 = b.y1;
-	return 0;
 }
 
 static const struct cam_lcd_overlay nn_ov_vtable = {

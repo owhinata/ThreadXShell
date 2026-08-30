@@ -477,7 +477,7 @@ static const struct plugin_base_api nn_plugin_base = {
 	.size     = (uint32_t)sizeof(struct plugin_base_api),
 	.ctx      = NULL,
 	.log      = nn_plugin_log,
-	.to_frame = nn_overlay_to_frame,
+	.to_frame = nn_active_to_frame,
 };
 
 /*
@@ -766,6 +766,7 @@ void nn_svc_model_unload(struct nn_op_result *res)
 	nn_model_slot    = -1;
 	nn_model_from[0] = '\0';
 	nn_geom_valid    = 0u;
+	nn_active_clear_geom();
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 	nn_release();
 }
@@ -878,6 +879,7 @@ static int nn_fill_input(struct nn_op_result *res, const uint8_t *raw,
 		return -1;
 	}
 	nn_geom_valid = 1u;
+	nn_active_set_geom(&nn_geom);   /* the plugin's transform, issue #103 */
 	return 0;
 }
 

@@ -241,6 +241,26 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_plugin_mpu"
 "$out/test_plugin_mpu"
 
+# issue #103 -- the painter's budget and clipping (port/plugin/plugin_paint.c).
+#
+# A plugin's draw() runs on the panel thread with the panel guard held, and
+# everything else that wants the panel is failing its non-blocking acquire
+# meanwhile, so the work the BASE does on a plugin's behalf is capped.  What is
+# tested is whether the cap can be talked past: an absurd rectangle, a zero
+# stride, a mostly-transparent blit (charged for every source pixel READ, not
+# for the ones written -- otherwise a full-screen overlay costs almost nothing),
+# and a refused primitive leaving the framebuffer untouched rather than half
+# drawn.
+#
+# lcd_rect_wire() is stubbed in the test: it is the driver's own pure primitive
+# with its own rules, and pulling lcd_st7789.c onto the host would drag in the
+# SPI driver for nothing.  The subject here is the painter.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/plugin" -I "$board/port/lcd" -I "$board/../../svc" \
+    "$here/test_plugin_paint.c" "$board/port/plugin/plugin_paint.c" \
+    $LDFLAGS -o "$out/test_plugin_paint"
+"$out/test_plugin_paint"
+
 # issue #65 -- the stop's decision table (port/camera/cam_state.c).  The stop
 # has to separate three answers that all look like "not streaming": poisoned,
 # nothing to stop, and the API mutex never came free.  Only the middle one may

@@ -372,6 +372,23 @@ typedef int (*nn_svc_write_fn)(void *ctx, const char *s, size_t len);
 void nn_svc_info_extra(nn_svc_write_fn write, void *ctx);
 
 /**
+ * @brief  Let the board's active decoder describe its own last result.
+ *
+ * Called by `nn run` and `nn dets` when @ref nn_det_snapshot::external says the
+ * boxes are not in the caller's array.  A board with no such decoder does
+ * nothing and returns 0 -- and that is not a stub for symmetry: the shared
+ * command only calls this when a board has already said the result is
+ * elsewhere, so silence here would be a board contradicting itself.
+ *
+ * Same rules as @ref nn_svc_info_extra: @p write is valid for the call only,
+ * must not be stored, and must not be invoked with interrupts masked or an
+ * inference gate held.
+ *
+ * @return 0, or negative when the writer refused.
+ */
+int nn_svc_report(nn_svc_write_fn write, void *ctx);
+
+/**
  * Read a whole file into a buffer.
  *
  * A board whose model source is a filesystem path needs one of these, and the

@@ -1183,3 +1183,19 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	(void)write;
 	(void)ctx;
 }
+
+/*
+ * Nothing to say (issue #103).
+ *
+ * The shared command only calls this when a board has already set
+ * nn_det_snapshot::external -- "the boxes are not in your array" -- and this
+ * board never does, because it has no loadable decoder.  So this is not a stub
+ * kept for symmetry: it is unreachable here, and if it ever ran it would mean
+ * this board had contradicted itself.
+ */
+int nn_svc_report(nn_svc_write_fn write, void *ctx)
+{
+	(void)write;
+	(void)ctx;
+	return 0;
+}

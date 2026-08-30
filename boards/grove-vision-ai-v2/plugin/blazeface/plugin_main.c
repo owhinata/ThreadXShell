@@ -198,6 +198,8 @@ static int pl_report(const struct plugin_printer *out)
 		return rc;
 	}
 
+	/* The header says what the numbers are, because this report and the
+	 * resident one do not use the same units -- see the box loop below. */
 	rc = pl_emit(out, "faces ", 6u);
 	if (rc == 0)
 		rc = pl_emit_u32(out, (uint32_t)pl_ndet);
@@ -209,7 +211,50 @@ static int pl_report(const struct plugin_printer *out)
 		rc = pl_emit(out, "/1000\r\n", 7u);
 
 	for (i = 0; i < pl_ndet && i < BF_MAX_DET && rc == 0; i++) {
-		rc = pl_emit(out, "  score ", 8u);
+		struct plugin_rect r;
+		int have_box = pl_base != NULL &&
+		               pl_base_to_frame(pl_base, pl_det[i].x, pl_det[i].y,
+		                                pl_det[i].w, pl_det[i].h, &r) == 0;
+
+		rc = pl_emit(out, "  face ", 6u);
+		if (rc == 0)
+			rc = pl_emit_u32(out, (uint32_t)i);
+		/*
+		 * [!] THE BOX, NOT JUST THE SCORE.  The first version of this printed
+		 * a score and nothing else, and on hardware that showed up as `nn run`
+		 * losing the coordinates it had always printed -- the resident path
+		 * reports x/y/w/h and this did not.  No gate compares what a command
+		 * PRINTS; it took a session next to the old output to see.
+		 *
+		 * In FRAME PIXELS, through the base's transform, because that is what
+		 * the base offers.  The resident path prints percentages, which it can
+		 * because the shell knows the frame size; a plugin does not, and
+		 * hardcoding 320x240 here would be board knowledge in a plugin.  The
+		 * unit is in the line so the two are not mistaken for each other.
+		 */
+		if (rc == 0 && have_box) {
+			rc = pl_emit(out, "  x ", 4u);
+			if (rc == 0)
+				rc = pl_emit_u32(out, (uint32_t)(r.x0 < 0 ? 0 : r.x0));
+			if (rc == 0)
+				rc = pl_emit(out, " y ", 3u);
+			if (rc == 0)
+				rc = pl_emit_u32(out, (uint32_t)(r.y0 < 0 ? 0 : r.y0));
+			if (rc == 0)
+				rc = pl_emit(out, " w ", 3u);
+			if (rc == 0)
+				rc = pl_emit_u32(out, (uint32_t)(r.x1 > r.x0 ? r.x1 - r.x0 : 0));
+			if (rc == 0)
+				rc = pl_emit(out, " h ", 3u);
+			if (rc == 0)
+				rc = pl_emit_u32(out, (uint32_t)(r.y1 > r.y0 ? r.y1 - r.y0 : 0));
+			if (rc == 0)
+				rc = pl_emit(out, " px", 3u);
+		} else if (rc == 0) {
+			rc = pl_emit(out, "  outside the frame", 19u);
+		}
+		if (rc == 0)
+			rc = pl_emit(out, "  score ", 8u);
 		/* milli, on the same scale the threshold is printed in: one command
 		 * carrying two spellings of "score" is the divergence issue #50 spent
 		 * itself removing. */

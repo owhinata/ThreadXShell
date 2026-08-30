@@ -12,6 +12,8 @@
 #include "tx_api.h"        /* tx_time_get(): ThreadX ticks, 1 ms here */
 
 #include "nn_decoder.h"
+#include "nn_active.h"
+#include "plugin_paint.h"
 #include "plugin_abi.h"
 #include "camera.h"
 #include "cam_dp.h"
@@ -115,6 +117,33 @@ static int           nn_ov_geom_ok;
  * PSP, and a local sits within a few bytes of it without assuming which stack
  * pointer the compiler kept anything in.
  */
+/*
+ * What one plugin draw() may spend, and why these numbers.
+ *
+ * The panel guard is held for the whole of draw(), and everything else that
+ * wants the panel is failing its non-blocking acquire meanwhile.  The staged
+ * blit that follows costs about 775 us (issue #71), so a draw that approached
+ * that would double the window.
+ *
+ * A full frame is 320 x 240 = 76,800 pixels, and at roughly four cycles a pixel
+ * on a 400 MHz core that is already about 770 us -- the whole staging budget.
+ * So the cap is a quarter of a frame: enough for a label bar (320 x 16 = 5,120)
+ * or for every box BF_MAX_DET allows, and far enough below the frame that the
+ * panel path's timing is not the thing being spent.
+ *
+ * [!] A CAP THAT CANNOT BE EXCEEDED IS NOT A CAP.  The stack allowances of this
+ * issue were first written at the size of the whole thread stack, which made
+ * the check unable to fire for the case it existed to catch.  This one is
+ * deliberately below what a plugin might plausibly want, and what a draw
+ * actually spends is reported by `nn stream stats` so it can be judged rather
+ * than argued about.
+ */
+#define NN_OV_DRAW_PIXELS  (320u * 240u / 4u)
+#define NN_OV_DRAW_OPS     64u
+
+static uint32_t nn_ov_draw_spent;     /* high-water, pixels charged  */
+static uint32_t nn_ov_draw_refused;   /* primitives refused for want */
+
 static uint32_t nn_ov_depth_decode;   /* high-water, producer thread */
 static uint32_t nn_ov_depth_draw;     /* high-water, panel thread    */
 
@@ -258,7 +287,7 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	 * depth a callee inherits rather than the depth including it. */
 	nn_ov_note_depth(&nn_ov_depth_decode);
 
-	nd = nn_decoder_run(outs, n_out, nn_ov_det, BF_MAX_DET, &bfr);
+	nd = nn_active_decode(outs, n_out, nn_ov_det, BF_MAX_DET, &bfr);
 	if (nd < 0) {
 		/* [!] There is no console on this path, so the only way a decode
 		 * failure can be told apart afterwards is if it is counted apart
@@ -304,6 +333,30 @@ static void nn_overlay_draw(void *ctx, uint16_t *fb, uint16_t fb_w,
 	/* The panel thread's call site -- the tight one.  This is the number the
 	 * draw allowance is computed from. */
 	nn_ov_note_depth(&nn_ov_depth_draw);
+
+	/*
+	 * A plugin paints its own result (issue #103), because the firmware does
+	 * not know what shape that result has -- which is the whole point of
+	 * issue #78.  The resident path below stays for a container that carries
+	 * no plugin.
+	 */
+	if (nn_active_is_plugin()) {
+		struct plugin_painter paint;
+		struct plugin_paint_budget bud;
+
+		bud.pixels  = NN_OV_DRAW_PIXELS;
+		bud.ops     = NN_OV_DRAW_OPS;
+		bud.refused = 0u;
+		plugin_paint_bind(&paint, &bud, fb, fb_w, fb_h);
+		nn_active_draw(&paint);
+
+		/* What it actually spent, so the cap can be judged against something
+		 * rather than defended in the abstract. */
+		if (NN_OV_DRAW_PIXELS - bud.pixels > nn_ov_draw_spent)
+			nn_ov_draw_spent = NN_OV_DRAW_PIXELS - bud.pixels;
+		nn_ov_draw_refused += bud.refused;
+		return;
+	}
 
 	/*
 	 * Bound by lcd_st7789.h's callback contract: the panel guard is held,
@@ -431,6 +484,8 @@ void nn_overlay_stats(struct nn_overlay_stats *out)
 	out->prep_us     = out->prof_ok ? nn_ov_us(prep,   hz) : 0u;
 	out->invoke_us   = out->prof_ok ? nn_ov_us(invoke, hz) : 0u;
 	out->decode_us   = out->prof_ok ? nn_ov_us(decode, hz) : 0u;
-	out->depth_decode = nn_ov_depth_decode;
-	out->depth_draw   = nn_ov_depth_draw;
+	out->depth_decode  = nn_ov_depth_decode;
+	out->depth_draw    = nn_ov_depth_draw;
+	out->draw_spent    = nn_ov_draw_spent;
+	out->draw_refused  = nn_ov_draw_refused;
 }

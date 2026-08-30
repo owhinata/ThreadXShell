@@ -43,6 +43,7 @@
 #include "cam_lcd_sink.h"
 #include "camera.h"
 #include "nn_decoder.h"
+#include "nn_active.h"
 #include "nn_overlay.h"
 #include "nn_preproc.h"
 #include "nn_stream_state.h"
@@ -909,7 +910,7 @@ static void nn_decode_into(struct nn_det_snapshot *snap, struct bf_det *dets,
 			return;
 		}
 
-	nd = nn_decoder_run(outs, n_out, dets, max, &bfr);
+	nd = nn_active_decode(outs, n_out, dets, max, &bfr);
 	snap->valid = 1;
 	snap->ndet  = nd;
 	snap->res   = bfr;
@@ -1182,7 +1183,7 @@ static int nn_detector_ready(struct nn_op_result *res)
 			return -1;
 		}
 	}
-	if (!nn_decoder_shapes_ok(outs, n_out)) {
+	if (!nn_active_shapes_ok(outs, n_out)) {
 		nn_detail_set("the loaded model is not BlazeFace-shaped");
 		return -1;
 	}
@@ -1478,11 +1479,20 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 		 */
 		if (os.depth_decode == 0u && os.depth_draw == 0u)
 			return 0;                /* nothing has run yet */
-		nn_detail_to(buf, cap,
-		             "at call : %lu B spent on the producer, %lu B on the "
-		             "panel (high-water)",
-		             (unsigned long)os.depth_decode,
-		             (unsigned long)os.depth_draw);
+		if (os.draw_spent != 0u || os.draw_refused != 0u)
+			nn_detail_to(buf, cap,
+			             "at call : %lu B producer, %lu B panel; plugin drew "
+			             "%lu px, %lu refused",
+			             (unsigned long)os.depth_decode,
+			             (unsigned long)os.depth_draw,
+			             (unsigned long)os.draw_spent,
+			             (unsigned long)os.draw_refused);
+		else
+			nn_detail_to(buf, cap,
+			             "at call : %lu B spent on the producer, %lu B on the "
+			             "panel (high-water)",
+			             (unsigned long)os.depth_decode,
+			             (unsigned long)os.depth_draw);
 		return 1;
 	case 2u:
 		/* The producer-side split (issue #60).  Only when the clock behind it
@@ -1505,12 +1515,12 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 
 unsigned nn_svc_thresh_get(void)
 {
-	return nn_decoder_get_thresh_milli();
+	return nn_active_get_thresh_milli();
 }
 
 int nn_svc_thresh_set(unsigned milli)
 {
-	return (nn_decoder_set_thresh_milli(milli) == BF_OK) ? NN_SVC_OK
+	return nn_active_set_thresh_milli(milli) ? NN_SVC_OK
 	                                                     : NN_SVC_ERR_ARG;
 }
 

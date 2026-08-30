@@ -424,6 +424,8 @@ set(SHELL_SOURCES
     "${BOARD_DIR}/port/plugin/plugin_mpu.c"
     "${BOARD_DIR}/port/plugin/plugin_run.c"
     "${BOARD_DIR}/port/plugin/plugin_paint.c"
+    # The one place that decides which decoder is in force (issue #103).
+    "${BOARD_DIR}/port/npu/nn_active.c"
     # Camera frame ring (issue #35).  Freestanding: it depends on <stdint.h>
     # and an injected lock vtable only, which is why the same file serves all
     # three boards and has a host unit test (shell/test/test_frame_pipeline.c).

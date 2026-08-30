@@ -1602,8 +1602,9 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	 * and nothing has branched into the image they describe.  The wording says
 	 * so; Step 1b is what changes it.
 	 */
-	if (nn_info_line(write, ctx, "plugin  : %s (build %s), %s\r\n",
+	if (nn_info_line(write, ctx, "plugin  : %s (build %s, crc %08lx), %s\r\n",
 	                 nn_container.name, nn_container.build_id,
+	                 (unsigned long)nn_container.digest,
 	                 plugin_run_active() ? "loaded" : "not loaded") < 0)
 		return;
 	if (nn_info_line(write, ctx, "  image : %lu B file / %lu B mem, link 0x%08lx\r\n",

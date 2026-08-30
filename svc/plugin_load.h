@@ -86,6 +86,17 @@ struct plugin_view {
 	uint32_t stack[PLUGIN_SLOT_COUNT];
 	uint32_t capability;
 	uint32_t link_addr;
+	/*
+	 * The digest the container carried and this parse checked (issue #103).
+	 *
+	 * [!] THE ONLY HONEST IDENTITY OF THE LOADED BYTES.  The manifest's build id
+	 * is a source revision, stamped at configure time -- edit a plugin, rebuild
+	 * without reconfiguring, and it does not move.  The image size does not
+	 * always move either: a one-character fix changes neither.  This is a CRC of
+	 * the plugin section itself, so it moves whenever the bytes do, which is
+	 * what somebody looking at `nn info` after a re-send actually needs.
+	 */
+	uint32_t digest;
 	char     name[PLUGIN_NAME_MAX];
 	char     build_id[PLUGIN_BUILD_ID_MAX];
 };

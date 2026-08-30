@@ -4783,6 +4783,153 @@ fail-closed, so the symptom would be the camera refusing to come up during
 `thread` once after the first `nn model load --name det`, when IRQ 133 is also present, to
 see the cpu% column still reported as trustworthy.
 
+## Model containers, and the plugin that does not run yet (issue #101)
+
+A model can be swapped without reflashing -- issues #92/#93/#94 built the asset
+store -- but until now the code that INTERPRETS its output could not be: the
+firmware holds exactly one decoder.  The store scales to eleven slots and the
+interpretation stops at one.  A container carries a model and the code that
+reads it in one blob.
+
+**Step 1a, which is what is here, never executes the plugin.**  The device
+parses a container, validates its manifest in full, hands the MODEL section to
+the existing `npu_open()`, and reports what the plugin claims.  Loading and
+calling it is Step 1b.
+
+### Sending one
+
+```
+# on the board
+blob write det 9
+
+# in picocom: C-a C-s, then type the model path at the "*** file:" prompt
+build/grove-vision-ai-v2/model/blazeface_vela.tflite
+```
+
+with picocom started as
+
+```
+picocom -b 921600 /dev/ttyACM0 \
+    --send-cmd "<build>/send_verified_container.sh --profile det --slot 9"
+```
+
+`--profile` and `--slot` are both mandatory.  The profile decides which model
+checks run and is never guessed from a filename.  The slot has to be given
+because **the host cannot discover it**: `blob write` picks a slot on the DEVICE
+and erases the whole slot before the YMODEM size header arrives, so an oversized
+container is discovered after ~40 s with the old contents already gone.  The two
+slot numbers must match and nothing can check that for you.
+
+### What the chain does, and why in that order
+
+```
+stage -> pack ONCE -> re-parse the container -> extract the model and the plugin
+image FROM IT -> verify_vela_model on the extracted model -> verify_container
+(the device's own validator) -> check it fits the named slot -> send that file
+```
+
+Checking the parts and then assembling is not equivalent.  The strength of
+`send_verified_model.sh` is that the file it verified and the file it sent are
+one file; verifying components leaves the packer free to read the inputs again
+and nothing downstream would notice.
+
+`verify_container` links `svc/plugin_load.c` -- the same validator the firmware
+runs -- so a container cannot pass on the host and be refused on the board.
+Issue #93 is why that matters: its host gate used the flatbuffer verifier's
+default limits while the firmware used its own, and a model passed on the host
+and failed on the board, after the erase and the transfer had been spent.
+
+### [!] The model section is 16-byte aligned, and 4 is not enough
+
+There are two alignment requirements and only one of them is visible in this
+port's own code:
+
+- `npu_payload.c` refuses a payload that is not 4-byte aligned -- the
+  flatbuffer's rule;
+- the **Ethos-U driver refuses every base address that is not 16-byte aligned**
+  (`ethos_u_core_driver/src/ethosu_driver.c`, `MASK_16_BYTE_ALIGN`).
+
+The first was read out of the port and taken for the whole answer.  The mistake
+could not be seen from a working board: until containers existed a model always
+sat at the blob payload address -- a slot base plus one erase unit, so 4 KB
+aligned -- and 16 was met by accident on every model ever loaded.  The first
+container put the model at +0xA7C, four-aligned and twelve bytes short, and the
+driver said
+
+```
+E: Command stream addr 0x3aea78fc not aligned to 16 bytes
+```
+
+Checking the OFFSET is sufficient because the payload address it is added to is
+a multiple of the erase unit, which `test_blob_map.c` pins.
+
+### The reservation
+
+`.plugin` is a fixed 128 KiB NOLOAD reservation at `0x341E0000..0x34200000`, at
+the TOP of the loadable SRAM window.  A plugin is prelinked for that address --
+the loader services no relocations -- so it cannot be allowed to drift the way a
+sequentially placed section would the day a neighbour grew.  The sequential
+sections grow upward into the gap below it; `free` reports the two spans and the
+gap between them, and the linker asserts they have not met.
+
+The first real plugin measures 2,400 B of code and 1,740 B of bss, so 128 KiB is
+generous.  It is an opening number, revisited in Step 1b against a plugin that
+rasterises something.
+
+### What the gates do and do not prove
+
+`check_plugin_image.py` applies the firmware's own checks to the plugin ELF --
+forbidden symbols, an allocated-section whitelist, no relocations, storage in
+the declared segments, indirect branches only in the named veneers, and a
+transitive stack bound per entry point.  The linker enforces some of the same
+things first: under `-nostdlib` an unresolved symbol, a forbidden vendor entry
+point that is nowhere in the image, and unwind tables that need a personality
+routine are all link errors, so those gate checks are unreachable in the normal
+build.  `cmake/fixtures/run_plugin_gate_tests.py` records which defence catches
+which shape, so a passing gate is not read as evidence that all of its checks
+ran.
+
+**[!] None of it proves memory safety.**  It cannot see an ordinary
+out-of-bounds write, a bad tensor pointer, a scratch overrun, or wrong
+arithmetic on a base pointer the vtable legitimately handed over.  There is also
+**no MMIO check**: a literal-pool word is a constant, not necessarily an address
+-- the first attempt flagged `1000.0f`, `0.0078125f` and the bytes of a string
+-- and even a perfect address decoder would have nothing to compare against,
+because this part puts peripherals at 0x34001000..0x34100000, inside the same
+window as the SRAM a plugin legitimately occupies.  That check was deleted
+rather than kept as reassurance, the same call issues #42/#66 made for the MVE
+predication scan.
+
+**A plugin is reviewed, trusted native code with the same standing as board
+code.**  It runs Secure and privileged.  The gates are defence in depth and the
+container's digest shows only that the bytes that arrived are the bytes that
+were sent -- provenance rests on the official packer running the gate and
+assembling the container indivisibly, not on the digest.
+
+### Stack, and why there is a limit at all
+
+Each callback runs on a different thread's stack, and they are not the same
+size: decode on the camera producer (8 KiB), draw on the panel thread (2,048 B,
+whose measured peak at issue #64 is already 544 B), report on the shell thread
+(4 KiB).  These stacks are statically allocated and do not grow.  An overflow is
+caught here -- the ThreadX M55 port sets PSPLIM per thread, so it raises a
+UsageFault with `CFSR.STKOF` and lands in `fault.c` -- but the M7 boards have no
+such register and would corrupt a neighbour silently.
+
+The reason a build-time limit exists at all is that **a plugin is not present
+when the firmware is built**.  There is no moment at which the firmware could
+bound code that arrives later over a wire.  So the plugin declares its need, the
+host gate derives a transitive bound from the real code and refuses a
+declaration that does not match it, and the device refuses one that exceeds what
+its threads can spare -- before anything is called.
+
+**[!] The current limits are provisional.**  A real allowance is the thread's
+stack minus the depth at the point the callback is CALLED, minus a reserve for
+exception frames -- Cortex-M stacks those on the thread's own PSP, 32 B or 104 B
+once the FP context goes -- minus margin, and none of those three is measured.
+1024 B for draw is simply comfortably above what the first plugin needs (300 B).
+Step 1b measures them and sets the admission policy.
+
 ## Flashing and recovery
 
 Every flash rewrites the WHOLE image, bootloader region included -- that is

@@ -1448,7 +1448,13 @@ extern uint8_t __plugin_start[], __plugin_end[];
  */
 static int nn_info_line(nn_svc_write_fn write, void *ctx, const char *f, ...)
 {
-	char line[80];
+	/* [!] 80 WAS TOO SHORT, AND TRUNCATION ATE THE LINE ENDING.  The image line
+	 * ran past it on the hardware and came out as
+	 *   "... (reservation 131072 B at 0x  code 2400 B ..."
+	 * -- cut mid-number AND missing its CRLF, so the next line ran on.  A
+	 * bounded formatter drops what does not fit, and what did not fit was the
+	 * terminator that separates this line from the next. */
+	char line[128];
 	va_list ap;
 	int n;
 
@@ -1498,12 +1504,12 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	if (nn_info_line(write, ctx, "plugin  : %s (build %s), not loaded\r\n",
 	                 nn_container.name, nn_container.build_id) < 0)
 		return;
-	if (nn_info_line(write, ctx,
-	                 "  image : %lu B file / %lu B mem, link 0x%08lx "
-	                 "(reservation %lu B at 0x%08lx)\r\n",
+	if (nn_info_line(write, ctx, "  image : %lu B file / %lu B mem, link 0x%08lx\r\n",
 	                 (unsigned long)nn_container.file_size,
 	                 (unsigned long)nn_container.mem_size,
-	                 (unsigned long)nn_container.link_addr,
+	                 (unsigned long)nn_container.link_addr) < 0)
+		return;
+	if (nn_info_line(write, ctx, "  where : %lu B reserved at 0x%08lx\r\n",
 	                 (unsigned long)size, (unsigned long)base) < 0)
 		return;
 	(void)nn_info_line(write, ctx,

@@ -159,12 +159,32 @@ struct plugin_container_hdr {
 /**
  * Alignment the MODEL section's offset must satisfy.
  *
- * The Ethos-U command stream is read from where the model lies, and the payload
- * walk that hands it over requires a 4-byte aligned address (port/npu/
- * npu_payload.c).  A container is copied nowhere before that walk, so the
- * alignment has to be true of the offset inside the container.
+ * [!] SIXTEEN, NOT FOUR, AND THE HARDWARE IS WHAT SAID SO.  There are two
+ * separate requirements and only one of them is visible in this repo's own
+ * code:
+ *
+ *   - npu_payload.c refuses a payload that is not 4-byte aligned, which is the
+ *     flatbuffer's requirement;
+ *   - the Ethos-U driver refuses EVERY base address that is not 16-byte
+ *     aligned (ethos_u_core_driver/src/ethosu_driver.c, MASK_16_BYTE_ALIGN).
+ *
+ * The first was read out of the port and taken for the whole answer.  It is
+ * not, and the mistake could not be seen from a working system: until
+ * containers existed a model always sat at the blob payload address, which is a
+ * slot base plus one erase unit and therefore 4 KB aligned, so 16 was satisfied
+ * by accident on every model ever loaded.  The first container put the model at
+ * +0xA7C -- 4-aligned, 12 bytes short of 16 -- and the driver said so:
+ *
+ *     E: Command stream addr 0x3aea78fc not aligned to 16 bytes
+ *
+ * A constraint that the old placement over-satisfied was invisible until
+ * something placed differently.
+ *
+ * Checking the OFFSET is sufficient because the payload address it is added to
+ * is itself a multiple of the erase unit -- blob_map_payload_addr() is a slot
+ * base plus one unit, and test_blob_map.c pins both.
  */
-#define PLUGIN_MODEL_ALIGN      4u
+#define PLUGIN_MODEL_ALIGN      16u
 
 /**
  * Alignment the PLUGIN load image's base and END must satisfy.

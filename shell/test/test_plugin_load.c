@@ -53,7 +53,16 @@
 
 #define PLUGIN_SECT_OFF HDR_SZ
 #define PLUGIN_SECT_LEN (MAN_SZ + IMAGE_FILE)
-#define MODEL_OFF       (PLUGIN_SECT_OFF + PLUGIN_SECT_LEN)
+/*
+ * [!] ROUNDED UP, AND THE TEST USED NOT TO BE.  This was
+ * PLUGIN_SECT_OFF + PLUGIN_SECT_LEN, which came to 604 -- 4-aligned and twelve
+ * bytes short of 16 -- so the fixture had EXACTLY the defect the packer had, and
+ * a suite that agreed with the bug could not catch it.  The hardware did:
+ * "Command stream addr 0x3aea78fc not aligned to 16 bytes".
+ */
+#define ALIGN_UP(v, a)  (((v) + (a) - 1u) & ~((a) - 1u))
+#define MODEL_OFF       ALIGN_UP(PLUGIN_SECT_OFF + PLUGIN_SECT_LEN, \
+                                 PLUGIN_MODEL_ALIGN)
 /*
  * [!] A GAP BETWEEN THE MODEL AND THE DATA SECTION, ON PURPOSE.  Sections need
  * not be contiguous -- the validator checks range and non-overlap, nothing else
@@ -321,7 +330,17 @@ static void test_sections(void)
 	 */
 	one("two sections overlap", SF(2, offset), MODEL_OFF + 4u,
 	    PLUGIN_ERR_SECTION_OVERLAP, 0);
-	one("the model is not 4-byte aligned", SF(1, offset), MODEL_OFF + 1u,
+	one("the model is not aligned at all", SF(1, offset), MODEL_OFF + 1u,
+	    PLUGIN_ERR_MODEL_ALIGN, 0);
+	/*
+	 * [!] THE CASE THAT WOULD HAVE CAUGHT THE REAL BUG.  Four-byte alignment is
+	 * the flatbuffer's requirement and it is NOT enough: the Ethos-U driver
+	 * refuses every base address that is not 16-byte aligned.  Until containers
+	 * existed a model always sat at a 4 KB-aligned payload address, so 16 was
+	 * met by accident and nothing here tested for it.  An offset that is
+	 * 4-aligned and not 16-aligned is the shape that reached the hardware.
+	 */
+	one("the model is 4-byte aligned but not 16", SF(1, offset), MODEL_OFF + 4u,
 	    PLUGIN_ERR_MODEL_ALIGN, 0);
 
 	/* No model at all: one DATA section and nothing else. */

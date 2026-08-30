@@ -120,12 +120,24 @@ static int cmd_free(struct cli_instance *sh, int argc, char **argv)
 	row(sh, "DTCM", DTCM_ORIGIN, DTCM_LENGTH, dtcm_used);
 	row(sh, "SRAMl", SRAML_ORIGIN, SRAML_LENGTH, sraml_used);
 	row(sh, "SRAM", SRAM_ORIGIN, SRAM_LENGTH, sram_used);
-	cli_print(sh, "  seq   %7lu B used, %7lu B to grow before 0x%08lx\r\n",
-	          (unsigned long)sram_seq,
-	          (unsigned long)(sym(__plugin_start) - sym(__sram_seq_end)),
+	/*
+	 * [!] ONE NUMBER, NOT TWO.  An earlier version also printed "N B to grow
+	 * before 0x341e0000", which on the hardware came out equal to the free
+	 * column every time -- and not by luck: the reservation is anchored at the
+	 * TOP of the region and the linker asserts that it ends there, so
+	 *
+	 *     free    = region - (seq + plugin)
+	 *     to grow = plugin_start - seq_end = region - plugin - seq
+	 *
+	 * are the same quantity written twice.  Printing both invited a reader to
+	 * treat them as independent facts and to wonder which one to believe when
+	 * they agreed.  The free column is the gap; this line says so and gives the
+	 * address the gap ends at.
+	 */
+	cli_print(sh, "  seq   %7lu B used; plugin %lu B reserved at 0x%08lx\r\n",
+	          (unsigned long)sram_seq, (unsigned long)plugin_len,
 	          (unsigned long)sym(__plugin_start));
-	cli_print(sh, "  plugin %6lu B reserved at 0x%08lx (issue #101)\r\n",
-	          (unsigned long)plugin_len, (unsigned long)sym(__plugin_start));
+	cli_print(sh, "        free above is the gap between them (issue #101)\r\n");
 
 	cli_print(sh, "data:   %lu B  bss+noinit: %lu B\r\n",
 	          (unsigned long)(sym(__data_end__) - sym(__data_start__)),

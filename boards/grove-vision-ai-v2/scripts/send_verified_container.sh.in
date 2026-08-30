@@ -44,6 +44,15 @@
 #       --send-cmd "<build>/send_verified_container.sh --profile det --slot 9"
 #
 # then on the board `blob write det 9`, and C-a C-s in picocom.
+#
+# [!] --profile ALSO CHOOSES THE PLUGIN, and --plugin overrides it.  There are
+# two plugins now (issue #103): the BlazeFace decoder and the CIFAR-10
+# classifier, and they are the code that reads `det` and `cls` respectively.
+# Deriving the plugin from the profile rather than asking for it separately is
+# deliberate: the two would be one more pair an operator can get out of step, and
+# a container carrying the wrong decoder is one the device accepts -- the
+# manifest is well formed, the shapes just never match.  The mapping is printed
+# on every run so the choice is visible rather than assumed.
 
 set -e
 
@@ -52,8 +61,7 @@ CONTAINER_VERIFIER="@GROVE_CONTAINER_VERIFIER@"
 PACKER="@GROVE_PACKER@"
 LAYOUT="@GROVE_ABI_LAYOUT_JSON@"
 SLOTS="@GROVE_SLOT_TABLE_JSON@"
-PLUGIN_ELF="@GROVE_PLUGIN_ELF@"
-PLUGIN_STACKS="@GROVE_PLUGIN_STACKS@"
+PLUGIN_ROOT="@GROVE_PLUGIN_ROOT@"
 PLUGIN_TARGET_ID="@GROVE_PLUGIN_TARGET_ID@"
 PLUGIN_BASE="@GROVE_PLUGIN_BASE@"
 PLUGIN_MAX="@GROVE_PLUGIN_MAX@"
@@ -69,10 +77,13 @@ die() {
 
 profile=""
 slot=""
+plugin=""
 while [ $# -gt 0 ]; do
     case "$1" in
     --profile) [ $# -ge 2 ] || die "--profile needs cls or det"; profile="$2"; shift 2 ;;
     --profile=*) profile="${1#--profile=}"; shift ;;
+    --plugin) [ $# -ge 2 ] || die "--plugin needs a name"; plugin="$2"; shift 2 ;;
+    --plugin=*) plugin="${1#--plugin=}"; shift ;;
     --slot) [ $# -ge 2 ] || die "--slot needs a number"; slot="$2"; shift 2 ;;
     --slot=*) slot="${1#--slot=}"; shift ;;
     --) shift; break ;;
@@ -82,11 +93,18 @@ while [ $# -gt 0 ]; do
 done
 
 case "$profile" in
-cls)  verify_args="" ;;
-det)  verify_args="--blazeface" ;;
+cls)  verify_args="";            default_plugin="cifar10" ;;
+det)  verify_args="--blazeface"; default_plugin="blazeface" ;;
 "")   die "no --profile; say cls or det (it decides which checks run)" ;;
 *)    die "unknown profile '$profile'; want cls or det" ;;
 esac
+[ -n "$plugin" ] || plugin="$default_plugin"
+case "$plugin" in
+*[!a-z0-9_-]*|"") die "--plugin wants a plugin directory name, got '$plugin'" ;;
+esac
+
+PLUGIN_ELF="$PLUGIN_ROOT/$plugin/plugin.elf"
+PLUGIN_STACKS="$PLUGIN_ROOT/$plugin/plugin.stacks.json"
 
 case "$slot" in
 "")            die "no --slot; the device erases the whole slot before it learns the size, so the fit has to be checked here" ;;
@@ -108,7 +126,7 @@ src="$1"
 [ -x "$CONTAINER_VERIFIER" ] || \
     die "container verifier not built: $CONTAINER_VERIFIER"
 [ -f "$PLUGIN_ELF" ] || \
-    die "no plugin image: $PLUGIN_ELF (cmake --build <build> --target plugin)"
+    die "no plugin image for '$plugin': $PLUGIN_ELF (cmake --build <build> --target plugin)"
 [ -f "$PLUGIN_STACKS" ] || \
     die "no stack bounds from the plugin gate: $PLUGIN_STACKS -- the manifest may not declare a stack nobody derived"
 [ -f "$LAYOUT" ] || die "no ABI layout: $LAYOUT"
@@ -131,8 +149,8 @@ b = json.load(open(sys.argv[1]))
 print(" ".join("--stack %s=%d" % (names[k], v) for k, v in b.items() if k in names))
 ' "$PLUGIN_STACKS")
 
-printf 'send_verified_container: packing %s (profile %s) for slot %s\n' \
-    "$src" "$profile" "$slot" >&2
+printf 'send_verified_container: packing %s (profile %s, plugin %s) for slot %s\n' \
+    "$src" "$profile" "$plugin" "$slot" >&2
 
 # shellcheck disable=SC2086
 "$PYTHON" "$PACKER" --layout "$LAYOUT" --elf "$PLUGIN_ELF" \

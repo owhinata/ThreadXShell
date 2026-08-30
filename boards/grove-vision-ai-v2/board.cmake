@@ -1510,13 +1510,17 @@ set(GROVE_PLUGIN_STACK_PRODUCER 4096)
 set(GROVE_PLUGIN_STACK_PANEL    1024)
 set(GROVE_PLUGIN_STACK_SHELL    1024)
 
-set(GROVE_PLUGIN_DIR "${BOARD_DIR}/plugin/blazeface")
-set(GROVE_PLUGIN_OUT "${CMAKE_BINARY_DIR}/plugin/blazeface")
-set(GROVE_PLUGIN_SRCS
-    "${GROVE_PLUGIN_DIR}/plugin_main.c"
-    "${GROVE_PLUGIN_DIR}/plugin_base.c"
-    "${GROVE_PLUGIN_DIR}/plugin_libc.c"
-    "${CMAKE_SOURCE_DIR}/svc/blazeface.c")
+# --- one build rule, two plugins (issue #103 = #78 Step 1b) ------------------
+#
+# [!] EACH PLUGIN IS A SEPARATE PROGRAM, not a configuration of one.  They are
+# prelinked for the SAME reservation and only one is ever loaded, so they share
+# a link script, the base veneers and the freestanding libc remnant -- those
+# moved to plugin/common/ when the second one arrived -- and nothing else.  Each
+# has its own plugin_main.c, its own slot table and its own set of exports, and
+# the last of those is why the gate's --entry list is per plugin: it derives a
+# transitive bound for every entry point BY NAME, so naming one a plugin does
+# not export is not a permissive short list, it is a build failure.
+set(GROVE_PLUGIN_COMMON "${BOARD_DIR}/plugin/common")
 
 set(GROVE_PLUGIN_CFLAGS
     -mcpu=cortex-m55 -mthumb -mfloat-abi=hard
@@ -1530,92 +1534,104 @@ set(GROVE_PLUGIN_CFLAGS
     # The stack gate's input.  Without it a bound cannot be derived at all, and
     # the gate says so rather than guessing.
     -fstack-usage
-    -I "${CMAKE_SOURCE_DIR}/svc" -I "${GROVE_PLUGIN_DIR}")
+    -I "${CMAKE_SOURCE_DIR}/svc" -I "${GROVE_PLUGIN_COMMON}")
 
-set(_plugin_objs "")
-foreach(_src ${GROVE_PLUGIN_SRCS})
-    get_filename_component(_stem "${_src}" NAME_WE)
-    set(_obj "${GROVE_PLUGIN_OUT}/${_stem}.o")
+# grove_add_plugin(<name> SOURCES <extra .c ...> ENTRIES <sym=limit ...>)
+#
+# The sources named are the plugin's OWN; plugin/common's three are added here
+# so that a new plugin cannot forget the veneers the gate insists every indirect
+# call goes through.
+function(grove_add_plugin _name)
+    cmake_parse_arguments(P "" "" "SOURCES;ENTRIES" ${ARGN})
+    set(_dir "${BOARD_DIR}/plugin/${_name}")
+    set(_out "${CMAKE_BINARY_DIR}/plugin/${_name}")
+    set(_srcs "${_dir}/plugin_main.c"
+              "${GROVE_PLUGIN_COMMON}/plugin_base.c"
+              "${GROVE_PLUGIN_COMMON}/plugin_fmt.c"
+              "${GROVE_PLUGIN_COMMON}/plugin_libc.c"
+              ${P_SOURCES})
+
+    set(_objs "")
+    set(_sus "")
+    foreach(_src ${_srcs})
+        get_filename_component(_stem "${_src}" NAME_WE)
+        set(_obj "${_out}/${_stem}.o")
+        add_custom_command(
+            OUTPUT "${_obj}" "${_out}/${_stem}.su"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${_out}"
+            COMMAND "${CMAKE_C_COMPILER}" ${GROVE_PLUGIN_CFLAGS}
+                    -I "${_dir}"
+                    -c "${_src}" -o "${_obj}"
+            DEPENDS "${_src}"
+            WORKING_DIRECTORY "${_out}"
+            COMMENT "plugin ${_name}: cc ${_stem}.c"
+            VERBATIM)
+        list(APPEND _objs "${_obj}")
+        list(APPEND _sus "${_out}/${_stem}.su")
+    endforeach()
+
     add_custom_command(
-        OUTPUT "${_obj}" "${GROVE_PLUGIN_OUT}/${_stem}.su"
-        COMMAND "${CMAKE_COMMAND}" -E make_directory "${GROVE_PLUGIN_OUT}"
-        COMMAND "${CMAKE_C_COMPILER}" ${GROVE_PLUGIN_CFLAGS}
-                -c "${_src}" -o "${_obj}"
-        DEPENDS "${_src}"
-        WORKING_DIRECTORY "${GROVE_PLUGIN_OUT}"
-        COMMENT "plugin cc ${_stem}.c"
+        OUTPUT "${_out}/plugin.elf" "${_out}/plugin.stacks.json"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${_out}"
+        COMMAND "${CMAKE_C_COMPILER}" -nostdlib -nostartfiles
+                -T "${GROVE_PLUGIN_COMMON}/plugin.ld"
+                -Wl,--gc-sections -Wl,--no-warn-rwx-segments
+                # [!] THE QUOTES GO ROUND THE WHOLE ARGUMENT.  Written as
+                # -Wl,-Map="${...}" under VERBATIM, CMake escapes the inner
+                # quotes and ld is handed a filename that literally contains
+                # them: the map is silently never written, and the only sign is
+                # a warning in a build that otherwise succeeds.
+                "-Wl,-Map=${_out}/plugin.map"
+                -mcpu=cortex-m55 -mthumb -mfloat-abi=hard
+                ${_objs} -o "${_out}/plugin.elf"
+        COMMAND "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/check_plugin_image.py"
+                "${_out}/plugin.elf"
+                --nm "${CMAKE_NM}" --objdump "${CMAKE_OBJDUMP}"
+                --su ${_sus}
+                # [!] EVERY SLOT THE PLUGIN EXPORTS, not just the interesting
+                # ones.  The packer refuses to declare a stack for a slot nobody
+                # measured, so a short list here does not under-report -- it
+                # stops the container being built at all, which is the right
+                # direction but a confusing place to discover it.
+                # [!] THE SAME VARIABLES THE FIRMWARE'S POLICY USES.  Written
+                # out again here, the gate and the device would be two
+                # declarations of one rule, and a plugin could pass the build
+                # and be refused on the board -- the shape issue #93 hit.  The
+                # numbers are derived where they are set, from the measured
+                # call-site depth.
+                --entry ${P_ENTRIES}
+                --emit-stacks "${_out}/plugin.stacks.json"
+        DEPENDS ${_objs} "${GROVE_PLUGIN_COMMON}/plugin.ld"
+                "${BOARD_DIR}/cmake/check_plugin_image.py"
+        COMMENT "plugin ${_name}: ld + gate -> plugin.elf"
         VERBATIM)
-    list(APPEND _plugin_objs "${_obj}")
-    list(APPEND _plugin_sus "${GROVE_PLUGIN_OUT}/${_stem}.su")
-endforeach()
 
-# Provisional caps for each callback, from the threads they run on: decode on
-# the camera producer (8 KiB), draw on the panel thread (2048 B), report on the
-# shell thread (4 KiB).
-#
-# [!] THESE ARE CAPS, NOT DERIVED ALLOWANCES, AND THE DIFFERENCE MATTERS.  It is
-# tempting to write the draw allowance as 2048 - 544, the panel stack minus the
-# peak measured at issue #64.  That subtraction does not mean what it looks
-# like:
-#
-#   - the 544 B peak ALREADY INCLUDES the resident overlay's own draw(), which a
-#     plugin's draw REPLACES rather than adds to;
-#   - it is a high-water observation over the scenarios that were exercised, not
-#     an upper bound on the paths that exist;
-#   - neither number reserves anything for EXCEPTION FRAMES.  On Cortex-M an
-#     exception stacks its frame on the CURRENT stack -- PSP for a ThreadX
-#     thread -- so an interrupt taken while the panel thread runs costs 32 B,
-#     or 104 B once the FP context is stacked, which this hard-float build will
-#     do.
-#
-# A real allowance is 2048 minus the depth at the point draw() is CALLED on the
-# deepest path, minus an exception reserve, minus margin -- and none of those
-# three is measured yet.  1024 is simply a number comfortably above what the
-# first plugin actually needs (300 B), chosen so the gate has something to
-# enforce.  Step 1b measures the three terms and sets the admission policy; the
-# plan is explicit that a plugin passing HERE is not thereby safe to execute.
-add_custom_command(
-    OUTPUT "${GROVE_PLUGIN_OUT}/plugin.elf" "${GROVE_PLUGIN_OUT}/plugin.stacks.json"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${GROVE_PLUGIN_OUT}"
-    COMMAND "${CMAKE_C_COMPILER}" -nostdlib -nostartfiles
-            -T "${GROVE_PLUGIN_DIR}/plugin.ld"
-            -Wl,--gc-sections -Wl,--no-warn-rwx-segments
-            # [!] THE QUOTES GO ROUND THE WHOLE ARGUMENT.  Written as
-            # -Wl,-Map="${...}" under VERBATIM, CMake escapes the inner quotes
-            # and ld is handed a filename that literally contains them: the map
-            # is silently never written, and the only sign is a warning in a
-            # build that otherwise succeeds.
-            "-Wl,-Map=${GROVE_PLUGIN_OUT}/plugin.map"
-            -mcpu=cortex-m55 -mthumb -mfloat-abi=hard
-            ${_plugin_objs} -o "${GROVE_PLUGIN_OUT}/plugin.elf"
-    COMMAND "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/check_plugin_image.py"
-            "${GROVE_PLUGIN_OUT}/plugin.elf"
-            --nm "${CMAKE_NM}" --objdump "${CMAKE_OBJDUMP}"
-            --su ${_plugin_sus}
-            # [!] EVERY SLOT THE PLUGIN EXPORTS, not just the interesting ones.
-            # The packer refuses to declare a stack for a slot nobody measured,
-            # so a short list here does not under-report -- it stops the
-            # container being built at all, which is the right direction but a
-            # confusing place to discover it.
-            # [!] THE SAME VARIABLES THE FIRMWARE'S POLICY USES.  Written out
-            # again here, the gate and the device would be two declarations of
-            # one rule, and a plugin could pass the build and be refused on the
-            # board -- the shape issue #93 hit.  The numbers are derived where
-            # they are set, from the measured call-site depth.
-            --entry pl_entry=${GROVE_PLUGIN_STACK_PRODUCER}
-                    pl_shapes_ok=${GROVE_PLUGIN_STACK_PRODUCER}
-                    pl_decode=${GROVE_PLUGIN_STACK_PRODUCER}
-                    pl_draw=${GROVE_PLUGIN_STACK_PANEL}
-                    pl_report=${GROVE_PLUGIN_STACK_SHELL}
-                    pl_param_set=${GROVE_PLUGIN_STACK_SHELL}
-                    pl_param_get=${GROVE_PLUGIN_STACK_SHELL}
-            --emit-stacks "${GROVE_PLUGIN_OUT}/plugin.stacks.json"
-    DEPENDS ${_plugin_objs} "${GROVE_PLUGIN_DIR}/plugin.ld"
-            "${BOARD_DIR}/cmake/check_plugin_image.py"
-    COMMENT "plugin ld + gate -> plugin.elf"
-    VERBATIM)
+    set(GROVE_PLUGIN_ELFS ${GROVE_PLUGIN_ELFS} "${_out}/plugin.elf" PARENT_SCOPE)
+endfunction()
 
-add_custom_target(plugin ALL DEPENDS "${GROVE_PLUGIN_OUT}/plugin.elf")
+# [!] svc/blazeface.c IS THE SAME FILE THE FIRMWARE LINKS.  Compiling a copy
+# would fork the decoder issue #97 spent itself merging.  It is the wrapper that
+# is new, not the arithmetic.
+grove_add_plugin(blazeface
+    SOURCES "${CMAKE_SOURCE_DIR}/svc/blazeface.c"
+    ENTRIES pl_entry=${GROVE_PLUGIN_STACK_PRODUCER}
+            pl_shapes_ok=${GROVE_PLUGIN_STACK_PRODUCER}
+            pl_decode=${GROVE_PLUGIN_STACK_PRODUCER}
+            pl_draw=${GROVE_PLUGIN_STACK_PANEL}
+            pl_report=${GROVE_PLUGIN_STACK_SHELL}
+            pl_param_set=${GROVE_PLUGIN_STACK_SHELL}
+            pl_param_get=${GROVE_PLUGIN_STACK_SHELL})
+
+# The classifier.  Four entry points, because it neither draws nor takes a
+# parameter -- see plugin/cifar10/plugin_main.c for why each absence is a
+# decision.
+grove_add_plugin(cifar10
+    ENTRIES pl_entry=${GROVE_PLUGIN_STACK_PRODUCER}
+            pl_shapes_ok=${GROVE_PLUGIN_STACK_PRODUCER}
+            pl_decode=${GROVE_PLUGIN_STACK_PRODUCER}
+            pl_report=${GROVE_PLUGIN_STACK_SHELL})
+
+add_custom_target(plugin ALL DEPENDS ${GROVE_PLUGIN_ELFS})
 
 # --- the container chain (issue #101) ---------------------------------------
 #
@@ -1634,8 +1650,7 @@ set(GROVE_ABI_LAYOUT_JSON "${CMAKE_BINARY_DIR}/plugin/abi_layout.json")
 set(GROVE_SLOT_TABLE_JSON "${CMAKE_BINARY_DIR}/plugin/slot_table.json")
 set(GROVE_CONTAINER_VERIFIER "${CMAKE_BINARY_DIR}/verify_container")
 set(GROVE_PACKER "${BOARD_DIR}/scripts/pack_container.py")
-set(GROVE_PLUGIN_ELF "${GROVE_PLUGIN_OUT}/plugin.elf")
-set(GROVE_PLUGIN_STACKS "${GROVE_PLUGIN_OUT}/plugin.stacks.json")
+set(GROVE_PLUGIN_ROOT "${CMAKE_BINARY_DIR}/plugin")
 set(GROVE_PLUGIN_BASE "0x341E0000")
 set(GROVE_PLUGIN_MAX  "131072")
 

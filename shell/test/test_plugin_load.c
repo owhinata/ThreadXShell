@@ -461,8 +461,14 @@ static void test_slots(void)
 	one("a slot asks for more stack than the thread has",
 	    MF(stack) + 4u * PLUGIN_SLOT_DRAW,
 	    pol.stack_limit[PLUGIN_SLOT_DRAW] + 1u, PLUGIN_ERR_STACK, 1);
-	one("a present slot declares no stack",
-	    MF(stack) + 4u * PLUGIN_SLOT_DRAW, 0u, PLUGIN_ERR_STACK, 1);
+	/* [!] AND ZERO IS NOT ONE OF THEM (issue #103).  This case used to assert a
+	 * refusal, on the reasoning that zero meant "nobody measured it".  A
+	 * frameless callback measures zero -- the classifier plugin's entry point
+	 * does -- so refusing it made the packer unable to declare what the gate had
+	 * derived.  Absence has its own spelling in the SLOT field, checked
+	 * separately below, so nothing needs zero to mean it here. */
+	one("a present slot may declare a derived bound of zero",
+	    MF(stack) + 4u * PLUGIN_SLOT_DRAW, 0u, PLUGIN_OK, 1);
 
 	/* An absent slot must declare no stack either: one spelling of absence. */
 	wr32(MF(stack) + 4u * PLUGIN_SLOT_PARAM_SET, 64u);
@@ -512,6 +518,18 @@ static void test_policy_and_digest(void)
 	assert(plugin_parse(buf, sizeof buf, &narrow, &view) == PLUGIN_ERR_STACK);
 	printf("  %-46s -> %s\n", "a thread that can spare nothing",
 	       plugin_result_name(PLUGIN_ERR_STACK));
+
+	/* [!] AND IT STILL REFUSES A SLOT THAT ASKS FOR NOTHING.  While zero was
+	 * also the spelling of "unmeasured", that refusal came for free out of
+	 * `st == 0u ||`; now that a plugin may legitimately declare zero, the two
+	 * meet -- and a limit of zero has to win, because it is the board saying
+	 * this callback may not run at all rather than a size comparison. */
+	wr32(MF(stack) + 4u * PLUGIN_SLOT_DRAW, 0u);
+	restamp();
+	assert(plugin_parse(buf, sizeof buf, &narrow, &view) == PLUGIN_ERR_STACK);
+	printf("  %-46s -> %s\n", "... even for a plugin that asks for nothing",
+	       plugin_result_name(PLUGIN_ERR_STACK));
+	build();
 
 	/* The digest is the LAST check, so a body byte flipped without restamping
 	 * is what reaches it. */

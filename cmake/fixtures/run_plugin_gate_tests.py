@@ -32,6 +32,10 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))   # cmake/fixtures -> repo root
 PLUGIN = os.path.join(REPO, "boards", "grove-vision-ai-v2", "plugin", "blazeface")
+# The link script, the base veneers and the freestanding libc remnant are shared
+# by every plugin (issue #103), so a fixture assembles the two directories the
+# real build does.
+COMMON = os.path.join(REPO, "boards", "grove-vision-ai-v2", "plugin", "common")
 GATE = os.path.join(REPO, "boards", "grove-vision-ai-v2", "cmake",
                     "check_plugin_image.py")
 
@@ -48,6 +52,7 @@ def build(cc, nm, objdump, work, mutate=None, cflags=None):
     """Build a plugin image, optionally mutated.  Returns (rc, output)."""
     src = os.path.join(work, "src")
     shutil.copytree(PLUGIN, src)
+    shutil.copytree(COMMON, src, dirs_exist_ok=True)
     shutil.copy(os.path.join(REPO, "svc", "blazeface.c"), src)
     if mutate:
         mutate(src)
@@ -55,7 +60,8 @@ def build(cc, nm, objdump, work, mutate=None, cflags=None):
     cflags = (cflags if cflags is not None else BASE_CFLAGS + NO_UNWIND) + [
         "-I", os.path.join(REPO, "svc"), "-I", src]
     objs, sus = [], []
-    for name in ("plugin_main", "plugin_base", "plugin_libc", "blazeface"):
+    for name in ("plugin_main", "plugin_base", "plugin_fmt", "plugin_libc",
+                 "blazeface"):
         obj = os.path.join(work, name + ".o")
         r = subprocess.run([cc] + cflags + ["-c", os.path.join(src, name + ".c"),
                                             "-o", obj],
@@ -64,6 +70,26 @@ def build(cc, nm, objdump, work, mutate=None, cflags=None):
             return 99, "compile failed:\n" + r.stderr
         objs.append(obj)
         sus.append(os.path.join(work, name + ".su"))
+
+    # A fixture may edit the MEASUREMENTS after the compile, which is the only
+    # way to produce a .su that disagrees with the image without also changing
+    # the image.  `.drop_su` removes a record; `.add_su` appends one.
+    drop = os.path.join(src, ".drop_su")
+    if os.path.exists(drop):
+        with open(drop) as fh:
+            names = {ln.strip() for ln in fh if ln.strip()}
+        for su in sus:
+            with open(su) as fh:
+                keep = [ln for ln in fh
+                        if ln.split("\t")[0].rsplit(":", 1)[-1] not in names]
+            with open(su, "w") as fh:
+                fh.writelines(keep)
+    add = os.path.join(src, ".add_su")
+    if os.path.exists(add):
+        with open(add) as fh:
+            extra = fh.read()
+        with open(sus[0], "a") as fh:
+            fh.write(extra)
 
     elf = os.path.join(work, "plugin.elf")
     r = subprocess.run([cc, "-nostdlib", "-nostartfiles",
@@ -125,6 +151,38 @@ def m_undefined(src):
         "extern int a_symbol_that_does_not_exist(void);\n/* ---- state ---")
 
 
+def m_no_frame(src):
+    """[!] THE CHECK THE CLONE BUG WAS SITTING ON TOP OF (issue #103).
+
+    GCC writes an interprocedural clone as `f.constprop` in the .su file and
+    `f.constprop.0` in the ELF, so the analyser looked up a name it would never
+    find and refused every image containing one.  Teaching it the second
+    spelling is right, and it is exactly the kind of change that can turn a
+    fail-closed check into a fail-open one.  This fixture keeps the underlying
+    rule honest: a function that really has NO measurement -- here because its
+    .su line is deleted after the compile -- must still be refused.
+    """
+    with open(os.path.join(src, ".drop_su"), "w") as fh:
+        fh.write("pl_decode\n")
+
+
+def m_dup_su(src):
+    """[!] TWO RECORDS, ONE NAME, AND THE QUALIFIER IS THE EVIDENCE (issue #103).
+
+    Teaching the gate that `f.constprop.0` and `f.constprop` are one body made
+    duplicate normalised names possible, and the first merge kept whichever had
+    the larger byte count.  A `dynamic` record -- alloca or a VLA, meaning there
+    IS no static bound -- would lose to a bigger `static` one and the gate would
+    state a bound for a body that has none.
+
+    The .su file is the gate's INPUT, so the fixture writes one: a second record
+    for pl_decode, dynamic and deliberately SMALL, so a size-only merge discards
+    it.  The image is untouched.
+    """
+    with open(os.path.join(src, ".add_su"), "w") as fh:
+        fh.write("plugin_main.c:0:0:pl_decode\t16\tdynamic\n")
+
+
 def m_recursion(src):
     """[!] IT MUST BE RECURSION THE COMPILER CANNOT REMOVE.  A tail call was the
     obvious fixture and the wrong one: GCC inlined the helper and turned the
@@ -165,6 +223,12 @@ CASES = [
      "linker: unwind tables pull in a personality routine that does not exist"),
     ("recursion", m_recursion, None, "gate",
      "gate: a cycle the compiler could not flatten -- no bound exists"),
+    ("dup_su", m_dup_su, None, "gate",
+     "gate: a duplicate record with no static bound is not outvoted by a "
+     "larger static one"),
+    ("no_frame", m_no_frame, None, "gate",
+     "gate: a function in the image with no measurement -- still fail-closed "
+     "after the clone-name fix"),
 ]
 
 

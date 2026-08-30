@@ -62,6 +62,20 @@ struct nn_det_snapshot {
 	int              valid;
 	int              ndet;
 	struct bf_result res;
+
+	/*
+	 * [!] THE BOXES ARE SOMEWHERE ELSE (issue #103).  Set when the decoder that
+	 * produced this count is a LOADED PLUGIN, whose result has a shape this
+	 * firmware does not know -- not knowing it is the whole point of issue #78.
+	 * The caller's `dets` array is then untouched and @ref res is zeroed, so a
+	 * consumer must ask the board to describe the result (nn_svc_report())
+	 * instead of reading boxes that were never written.
+	 *
+	 * A flag rather than a sentinel count: the count is still meaningful (it is
+	 * the plugin's own, and negative values still carry BF_ERR_* meanings), and
+	 * overloading it would make "how many" and "where from" one number.
+	 */
+	uint8_t          external;
 };
 
 /**

@@ -911,9 +911,13 @@ static void nn_decode_into(struct nn_det_snapshot *snap, struct bf_det *dets,
 		}
 
 	nd = nn_active_decode(outs, n_out, dets, max, &bfr);
-	snap->valid = 1;
-	snap->ndet  = nd;
-	snap->res   = bfr;
+	snap->valid    = 1;
+	snap->ndet     = nd;
+	snap->res      = bfr;
+	/* [!] SAY WHERE THE BOXES ARE.  A plugin left `dets` and `bfr` alone, so a
+	 * consumer that printed them would print whatever was there before -- zeros
+	 * on the first run and a stale decode after that, which is worse. */
+	snap->external = (uint8_t)(nn_active_is_plugin() ? 1 : 0);
 }
 
 void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
@@ -1613,4 +1617,16 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	                   (unsigned long)nn_container.code_len,
 	                   (unsigned long)nn_container.data_seg_len,
 	                   (unsigned long)nn_container.bss_len);
+}
+
+/* ---- the active decoder's own report (issue #103) ------------------------- */
+
+/*
+ * Only a plugin has anything to say here.  The resident decoder's result IS the
+ * boxes the shared command already prints, and printing it twice in two
+ * spellings is the divergence issue #50 spent itself removing.
+ */
+int nn_svc_report(nn_svc_write_fn write, void *ctx)
+{
+	return nn_active_report(write, ctx);
 }

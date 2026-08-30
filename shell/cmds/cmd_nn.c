@@ -609,6 +609,24 @@ static void nn_print_dets(struct cli_instance *sh,
 	 * and reporting them as "not a detector" would send somebody off to
 	 * re-check a model that is fine.
 	 */
+	/*
+	 * [!] THE BOXES MAY NOT BE OURS (issue #103).  When a loaded plugin decoded
+	 * this, `dets` was never written -- the plugin's result has a shape this
+	 * firmware does not know -- so the board describes it instead.  Checked
+	 * before everything else, including the BF_ERR_MODEL branch below: those
+	 * codes belong to the resident decoder's vocabulary, and a plugin's count
+	 * is its own.
+	 */
+	if (snap->external) {
+		struct nn_info_sink sink;
+
+		sink.sh = sh;
+		if (nn_svc_report(nn_info_write, &sink) < 0)
+			cli_warn(sh, "nn: the decoder stopped part way through its own "
+			             "report\r\n");
+		return;
+	}
+
 	if (snap->ndet == BF_ERR_MODEL) {
 		nn_print_top(sh, 0u);
 		return;

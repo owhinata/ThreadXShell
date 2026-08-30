@@ -5151,6 +5151,36 @@ What the two plugins actually cost:
 | `blazeface` | 2,736 | 0 | 1,740 | 4,480 | 8 | 40 | 192 | 300 | 344 |
 | `cifar10` | 1,392 | 0 | 48 | 1,472 | 0 | 16 | 48 | -- | 336 |
 
+### What keeping the resident decoder costs
+
+The firmware still contains the BlazeFace decoder, and it is meant to.  It is
+the path for a payload that is NOT a container -- `det` and `cls` reached this
+board before containers existed, and a change that required re-sending them
+would spend erase cycles of a part whose endurance is not documented -- and it
+is the baseline `test/test_plugin_decode.c` compares the plugin against.  Drop
+it and the differential test has nothing to differ from.
+
+So while a plugin is loaded the same arithmetic is in the image twice, and the
+resident half's state is allocated whether or not anything reads it:
+
+| | resident (firmware) | in the plugin image |
+|---|---|---|
+| `svc/blazeface.c` | 2,736 B ITCM, `-O3` | 1,638 B SRAM, `-Os` |
+| decoder state | 1,716 B `.bss` | 1,740 B bss |
+
+The 1,716 B is `nn_dec_scratch` (1,536), `nn_dec` (16), `nn_dec_ready` (4) and
+the overlay's `nn_ov_det` (160).  A loaded plugin never touches any of it.  The
+same source is compiled twice because the image gate's rule is that a plugin
+resolves everything within itself, which is what makes "no undefined symbols"
+the whole check.
+
+**Nothing is dead, though.**  Every resident path is reachable with no plugin
+loaded: the shim's fallbacks, the overlay's own draw, and the shared class
+report.  And the one thing that is NOT duplicated is the point of the exercise:
+**the CIFAR-10 labels appear zero times in the firmware.**  The shared class
+report can only print class NUMBERS, because a name travels with the model and
+nowhere else.
+
 **[!] Running from SRAM is not free.**  Decode went from 83 us resident to
 124 us as a plugin -- the firmware's copy runs from ITCM and the plugin's from
 the SRAM reservation.  Live inference still holds 37 inf/s, because the frame

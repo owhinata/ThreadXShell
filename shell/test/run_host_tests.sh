@@ -265,6 +265,25 @@ gcc $CFLAGS -I "$svc" \
     $LDFLAGS -o "$out/test_crc32_svc"
 "$out/test_crc32_svc"
 
+# issue #101 (#78 Step 1a) -- container and manifest validation (svc/plugin_load.c):
+# everything that must hold BEFORE a plugin's first instruction is fetched.
+#
+# [!] EVERY ONE OF THE THIRTY REFUSAL CODES IS PROVOKED HERE.  plugin_load.h names
+# them separately on purpose -- several are ordinary operator mistakes (a container
+# built for another board, a stale ABI) that must not read like corruption -- and a
+# reason no input can reach is not a reason.  Each case mutates ONE field of an
+# otherwise valid container, because a hand-rolled broken buffer can be refused by
+# an earlier check and then pass while proving nothing about the check it names.
+# Two cases in this file were written wrong in exactly that way and caught by their
+# own assertion: a section overlap that ran past the container end, and a
+# misaligned model that collided with the next section.
+#
+# Pure svc layer, so the svc include dir is all it needs.
+gcc $CFLAGS -I "$svc" \
+    "$here/test_plugin_load.c" "$svc/plugin_load.c" "$svc/crc32.c" \
+    $LDFLAGS -o "$out/test_plugin_load"
+"$out/test_plugin_load"
+
 # issue #97 -- the shared BlazeFace decoder (svc/blazeface.c), folded from three
 # diverged board copies.  The REAL decoder is compiled here against synthetic
 # tensors, which it permits because it takes descriptors (svc/tensor.h) rather

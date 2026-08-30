@@ -135,50 +135,49 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_npu_payload"
 "$out/test_npu_payload"
 
-# issue #97 -- the adapter onto the SHARED BlazeFace decoder
-# (port/npu/nn_decoder.c).  The decoder's arithmetic moved to svc/blazeface.c and
-# is covered by shell/test/test_blazeface.c, which is board-independent; what
-# stays here is the half that cannot be: npu_tensor -> tensor_desc, compiled
-# against this board's REAL npu.h.  A shimmed copy of that header could drift
-# from the firmware's without anything noticing.
+# issues #97, #104 -- npu_tensor -> tensor_desc (port/npu/npu_desc.c).
 #
-# The cases are the translation's own failure modes -- an unknown TfLiteType read
-# as int8, the rank-0 "not representable" marker treated as present, an output
-# count beyond the descriptor array -- none of which the core test can see.
+# This was test_nn_decoder.c and drove a decoder the firmware linked.  Issue #104
+# removed that decoder; the TRANSLATION stayed, because `nn out`, `nn info` and
+# the active-decoder shim all need it whatever interprets the tensors -- or
+# whether anything does.
 #
-# No shim: npu.h and log.h are plain C with no hardware in them, and the test
-# supplies npu_tensor_is_int8() and log_write() itself (on the board the first
-# lives in npu_tflm.cc, where a static_assert pins the enumerator).
+# It is still a board test because the point is the REAL npu.h: a shimmed copy
+# could drift from the firmware's without anything noticing.  The cases are the
+# translation's own failure modes -- an unknown TfLiteType read as int8, the
+# rank-0 "not representable" marker treated as present, a field inherited from
+# the previous tensor -- none of which the core suite can see.
+#
+# NO svc/blazeface.c HERE ANY MORE.  There is no decoder in this half, so
+# linking one would only prove it still compiles.
 gcc $CFLAGS \
     -I "$here" -I "$board/port/npu" -I "$board/svc" -I "$HOST_TEST_SVC" \
-    "$here/test_nn_decoder.c" "$board/port/npu/nn_decoder.c" \
-    "$HOST_TEST_SVC/blazeface.c" \
-    $LDFLAGS -o "$out/test_nn_decoder"
-"$out/test_nn_decoder"
+    "$here/test_npu_desc.c" "$board/port/npu/npu_desc.c" \
+    $LDFLAGS -o "$out/test_npu_desc"
+"$out/test_npu_desc"
 
-# issue #103 -- the active-decoder shim, and the resident decoder against the
-# plugin that replaces it (port/npu/nn_active.c).
+# issues #103, #104 -- the active-decoder shim, and the plugin decoder against a
+# reference the test builds (port/npu/nn_active.c).
 #
-# The one branch point issue #103 built, compiled with BOTH decoders it routes
-# between -- the resident adapter and the REAL plugin source, linked against the
-# same svc/blazeface.c the firmware links.  Nothing is stubbed but the seam that
-# turns a slot offset into an address, because a host function address does not
-# fit the uint32_t a manifest carries.
+# [!] WHAT THIS COMPARES CHANGED WITH ISSUE #104.  It used to hold the two
+# decoders that both shipped -- the firmware's resident adapter and the plugin.
+# The firmware no longer has one, so the second half is a reference this test
+# builds directly on svc/blazeface.c.  That is a weaker statement about the
+# product and still worth making: the plugin's WRAPPER is what it catches.
 #
 # The shared arithmetic is NOT what is tested (shell/test/test_blazeface.c owns
 # that).  What is tested is everything around it, and each of these fails on the
 # board as a working-looking preview: a threshold set through the shim that
-# reached the OTHER decoder's copy -- the divergence the plan says a differential
-# test giving both the same threshold cannot see; a plugin allowed to write the
-# caller's box array, which the firmware would then print as its own; and a
-# coordinate transform published by one path and consulted from another, which
-# is what made every box `nn run` produced come back "outside the frame" until a
-# session next to the old output found it.
+# reached somewhere else; a coordinate transform published by one path and
+# consulted from another, which is what made every box `nn run` produced come
+# back "outside the frame" until a session next to the old output found it; and
+# -- new with #104 -- a shim that quietly DECODES with no plugin loaded instead
+# of refusing, which nothing outside this file could see.
 gcc $CFLAGS \
     -I "$here" -I "$board/port/npu" -I "$board/port/plugin" -I "$board/svc" \
     -I "$board/plugin/blazeface" -I "$board/plugin/common" -I "$HOST_TEST_SVC" \
     "$here/test_plugin_decode.c" \
-    "$board/port/npu/nn_active.c" "$board/port/npu/nn_decoder.c" \
+    "$board/port/npu/nn_active.c" "$board/port/npu/npu_desc.c" \
     "$board/port/npu/nn_preproc.c" \
     "$board/plugin/blazeface/plugin_main.c" \
     "$board/plugin/common/plugin_base.c" "$board/plugin/common/plugin_fmt.c" \

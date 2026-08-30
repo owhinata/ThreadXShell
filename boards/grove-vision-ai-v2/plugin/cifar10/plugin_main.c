@@ -25,12 +25,14 @@
  *
  * [!] AND THE INPUT IS FED THE WAY THE VENDOR FEEDS IT.  That app writes
  * `pixel - 128` into the input tensor and ignores the recorded scale and zero
- * point, exactly as this port's nn_preproc_fill() does.  The firmware's
- * nn_input_quant_ok() would refuse the pair, and it is right to for the RESIDENT
- * decoder -- BlazeFace's arithmetic assumes the fill convention matches the
- * quantisation -- but a plugin ships WITH its model, and shipping it is the
- * statement that the two agree.  See nn_svc_grove.c, which is where that
- * distinction is enforced.
+ * point, exactly as this port's nn_preproc_fill() does.  The firmware used to
+ * refuse that pair -- rightly, for the RESIDENT BlazeFace decoder, whose
+ * arithmetic assumed the fill convention matched the quantisation -- and issue
+ * #103 had to waive the check for plugins so that this container's labels could
+ * be read at all.  Issue #104 removed that decoder and the check went with it:
+ * a plugin ships WITH its model, and shipping it is the statement that the two
+ * agree.  The fill convention is now a board property, documented rather than
+ * enforced (nn_preproc.h).
  *
  * [!] NO draw().  Putting a label on the panel needs a font, and that is #78
  * Step 2.  This plugin declares REPORT and nothing else, which is a legal
@@ -38,9 +40,11 @@
  * running a live preview that annotates nothing.
  *
  * [!] NO PARAMETERS EITHER.  A threshold is a detector's idea; the top of a
- * class vector is always reported.  With PARAM_GET absent the shim answers
- * `nn thresh` from the resident decoder, which is the honest answer -- "this
- * decoder has no threshold" -- rather than inventing one.
+ * class vector is always reported.  With PARAM_GET absent, `nn thresh` reads
+ * `none` -- which is the honest answer, and is now literally what the shim
+ * returns.  Before issue #104 it borrowed the resident decoder's number, so a
+ * console showed `644/1000` while this container was loaded and nothing on the
+ * board would ever read it.
  */
 #include "plugin_abi.h"
 #include "plugin_base.h"

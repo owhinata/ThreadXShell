@@ -80,6 +80,9 @@ void nn_det_record_snapshot(const struct nn_det_record *r,
 	out->valid = r->valid;
 	out->ndet  = r->ndet;
 	out->res   = r->res;
+	/* Every member, this one included -- see the header for why leaving it to
+	   the caller's memset stopped being safe once there was a third kind. */
+	out->kind  = (uint8_t)NN_DET_CALLER_BOXES;
 	if (dets != NULL && max > 0) {
 		n = r->ndet;
 		if (n > max)

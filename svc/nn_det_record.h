@@ -57,25 +57,57 @@ struct nn_det_record {
 	uint32_t         gen;    /**< session generation; see the file comment   */
 };
 
+/**
+ * Where the result of one decode actually is (issues #103, #104).
+ *
+ * [!] ONE EXCLUSIVE FIELD, NOT A FLAG PER CASE.  This began as a single boolean
+ * -- "the boxes are the plugin's" -- and issue #104 needed a third answer, for a
+ * board with no decoder at all.  Added as a second boolean the two would have
+ * had a meaningless combination, and a consumer meeting it would have had to
+ * invent a precedence the producers never agreed on.
+ *
+ * [!] AND THE ZERO IS THE ORDINARY CASE ON PURPOSE.  Two boards fill the
+ * caller's array and nothing else; making their answer the default is what lets
+ * this be added without changing what they mean.  It does NOT excuse them from
+ * saying so -- see @ref nn_det_record_snapshot.
+ */
+enum nn_det_kind {
+	/** The count is faces and the boxes are in the caller's array. */
+	NN_DET_CALLER_BOXES = 0,
+	/**
+	 * [!] THE BOXES ARE SOMEWHERE ELSE (issue #103).  The decoder that produced
+	 * this count is a LOADED PLUGIN, whose result has a shape this firmware does
+	 * not know -- not knowing it is the whole point of issue #78.  The caller's
+	 * `dets` array is untouched and @ref nn_det_snapshot::res is zeroed, so a
+	 * consumer must ask the board to describe the result (nn_svc_report())
+	 * instead of reading boxes that were never written.
+	 *
+	 * The count stays meaningful beside it (it is the plugin's own, and negative
+	 * values still carry BF_ERR_* meanings), which is why this is a separate
+	 * field rather than a sentinel count: overloading would make "how many" and
+	 * "where from" one number.
+	 */
+	NN_DET_PLUGIN_REPORT = 1,
+	/**
+	 * [!] NOTHING DECODED THESE OUTPUTS (issue #104).  A board with no decoder
+	 * ran the model and has raw output tensors and no interpretation of them.
+	 * The count means nothing here and neither do the boxes; a consumer reports
+	 * the tensors themselves.
+	 *
+	 * Deliberately NOT spelled as a BF_ERR_* code: those are a decoder's
+	 * vocabulary, and BF_ERR_MODEL in particular means "not a detector", which
+	 * routes to the shared class report -- printing the top 5 of a detector's
+	 * regression tensor as though they were classes.
+	 */
+	NN_DET_RAW_TENSORS = 2
+};
+
 /** A coherent read of @ref nn_det_record: boxes and diagnostics in one go. */
 struct nn_det_snapshot {
 	int              valid;
 	int              ndet;
 	struct bf_result res;
-
-	/*
-	 * [!] THE BOXES ARE SOMEWHERE ELSE (issue #103).  Set when the decoder that
-	 * produced this count is a LOADED PLUGIN, whose result has a shape this
-	 * firmware does not know -- not knowing it is the whole point of issue #78.
-	 * The caller's `dets` array is then untouched and @ref res is zeroed, so a
-	 * consumer must ask the board to describe the result (nn_svc_report())
-	 * instead of reading boxes that were never written.
-	 *
-	 * A flag rather than a sentinel count: the count is still meaningful (it is
-	 * the plugin's own, and negative values still carry BF_ERR_* meanings), and
-	 * overloading it would make "how many" and "where from" one number.
-	 */
-	uint8_t          external;
+	uint8_t          kind;   /**< one of @ref nn_det_kind */
 };
 
 /**
@@ -112,6 +144,14 @@ int nn_det_record_publish(struct nn_det_record *r, const struct bf_det *d, int n
  * Take a coherent snapshot, and up to @p max boxes with it.
  *
  * @param dets  optional
+ *
+ * [!] IT SETS @ref nn_det_snapshot::kind, rather than leaving the zero to the
+ * caller's memset.  This record only ever holds caller boxes, so the value is
+ * never in doubt -- but it used to be the one member this function did not
+ * write, and every caller happened to clear the destination first.  With a third
+ * kind in the field that omission becomes reachable: a snapshot reused across
+ * two reads would keep the earlier one's routing and the shared command would
+ * look somewhere else for boxes that are right there.
  */
 void nn_det_record_snapshot(const struct nn_det_record *r,
                             struct nn_det_snapshot *out,

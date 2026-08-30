@@ -3109,9 +3109,37 @@ and erases the whole slot.  Slots 5 and 6 were refused as occupied until
 `blob erase <slot>` retired each -- one 4 KB header erase, after which both read
 `empty`.
 
+[!] **Those two erases went through the middle of the old MobileNet, and issue
+#104 is when somebody noticed.**  Retiring slots 5 and 6 erased 4 KB at
+`0xC00000` and at `0xD00000` -- both inside `0xB7B000..0xD1B2E0`.  Loading that
+copy by address still SUCCEEDS: the flatbuffer header, the metadata and the
+tensor descriptors are near the start and survived, so `nn model load --addr
+0x3AB7B000 1704672` reports "loaded", `nn info` prints a correct `1x10 int8
+q(s=0.065271 zp=4)` output, and the bounded verifier passes -- it walks
+structure, not content.  What fails is the NPU:
+
+```
+nn run
+E: NPU inference timed out. (ethosu_driver.c:607)
+Node ethos-u (number 0) failed to invoke with status 1
+nn: run: inference failed (-76)
+```
+
+with `nn out` reading `raw -128` across the vector, the saturated floor of an
+inference run on 0xFF.  **The BlazeFace copy at `0xD20000` is untouched** -- the
+`0xD00000` erase ends at `0xD01000` -- and runs fine, which is what identifies
+the damage as the flash rather than the code.
+
+Two things this is worth keeping for.  **A model that loads is not a model that
+runs**: nothing on the `--addr` path is in a position to notice, because the
+store's CRC covers a blob and a raw address has no blob.  And it is the same
+lesson as the reservation edges above, in its expensive form -- the erase was
+reasoned about as "one 4 KB header sector", which is true, and nobody asked what
+else was at that address.
+
 Either way `blob write` says what it is about to do before it does it ("erasing
 it first, so whatever is there is gone even if the transfer fails"), and nothing
-has read those bytes since #93.  What is easy to get backwards is which slots
+had read those bytes between #93 and #104.  What is easy to get backwards is which slots
 need the deliberate erase: the `model-cls` reservation ended at `0xD20000`, a
 further 128 KB past where the model itself stops, so reservation edges do not
 tell you which sectors hold bytes.  Only the scan does.
@@ -3868,32 +3896,35 @@ confidence uses an algebraic sigmoid.  It takes tensor DESCRIPTORS
 `shell/test/test_blazeface.c` compile the real decoder and drive it with
 synthetic tensors.
 
-`port/npu/nn_decoder.c` is this board's half: `npu_tensor` -> `tensor_desc`, and
-the decoder's state and candidate scratch, which live here because the shared
-translation unit owns no storage at all.  That is not a style rule -- it is what
-lets each board keep its own placement for the scratch (plain `.bss` here,
-`.psram_ai` on Wio, `.sdram.ai` on F746) and its own residency gate.  A build
-gate enforces it: an audit compile of the shared file with this board's real
-definitions must produce no allocated, writable section
+[!] **This firmware does not link it (issue #104).**  The decoder reaches this
+board inside a *container*, compiled into the plugin that carries it -- see
+"The firmware has no decoder" below.  It is still the shared file, and the other
+two boards still link it directly, so the storage rule below still applies: the
+shared translation unit owns no storage at all, which is what lets each board
+keep its own placement for the candidate scratch (plain `.bss` here, `.psram_ai`
+on Wio, `.sdram.ai` on F746) and its own residency gate.  A build gate enforces
+it, and on THIS board it runs on the object the plugin build actually links
 (`cmake/check_no_mutable_storage.py`, negative tests in `cmake/fixtures/`).
-It costs **+800 B of ITCM** over the board-private version it replaced, measured
-with `check_placement_budget.py` on either side of the change.
+
+`port/npu/npu_desc.c` is what remains of this board's half: `npu_tensor` ->
+`tensor_desc`, and nothing else.  `nn out`, `nn info` and the active-decoder shim
+all need that translation whatever interprets the tensors -- or whether anything
+does -- which is why it outlived the decoder that used to share its file.
 
 The board-independent arithmetic is tested in `shell/test/test_blazeface.c`; what
-stays in `test/test_nn_decoder.c` is the translation, compiled against the real
-`npu.h` -- an unknown TfLiteType must not be read as int8, and the rank-0 marker
-`npu_tflm.cc` leaves for a tensor it cannot represent must not look present.
+stays in `test/test_npu_desc.c` is the translation, compiled against the real
+`npu.h` -- an unknown TfLiteType must not be read as int8, the rank-0 marker
+`npu_tflm.cc` leaves for a tensor it cannot represent must not look present, and
+a reused descriptor must keep nothing of the previous tensor.
 
-[!] **Two of the decoder's failure paths cannot be reached on this board, and no
-hardware procedure should pretend otherwise.**  `BF_ERR_MODEL` -- "the open model
-is not BlazeFace-shaped" -- needs a model whose outputs are the wrong shape but
-whose INPUT quantisation matches, and `nn run` refuses a mismatched input scale
-at its entry, before the decoder is called at all.  Opening `cls` and running
-`nn run` therefore produces the input-scale message, not a decode failure.  The
-overlay's `model_errors` / `decoder_errors` counters are unreachable for the same
-reason.  The host tests are the only thing that exercises them; a procedure that
-said "open the wrong model and check the message" would report a pass earned by a
-different check.
+[!] **Two of the decoder's failure paths cannot be reached from the console, and
+no hardware procedure should pretend otherwise.**  `BF_ERR_MODEL` -- "the open
+model is not BlazeFace-shaped" -- and the overlay's `model_errors` /
+`decoder_errors` counters need a loaded plugin that refuses the tensors, and
+`nn stream` will not start one whose shapes it has already rejected.  The host
+tests are the only thing that exercises them; a procedure that said "open the
+wrong model and check the message" would report a pass earned by a different
+check.
 
 Two things differ from what the Wio/F746 copies of this decoder used to do, and
 both are now simply what the shared one does:
@@ -5105,7 +5136,15 @@ allowance = thread stack - depth already spent at the call site
 ```
 
 The **call-site depth is measured on the board** -- the shim reads SP just before
-it calls, keeps the high-water and `nn stream stats` prints it.  That is a
+it calls, keeps the high-water and `nn stream stats` prints it.
+
+[!] **Re-measured for issue #104, and the two records of it disagreed.**
+`board.cmake` derived the panel allowance from 233 B while this file recorded
+249 B for the same call site, so one had been wrong since #103 -- and the
+allowances come from it.  Both are superseded by the figures below, measured with
+the #104 build.  They went DOWN because that change shrank the frames:
+`nn_active_decode()` lost three parameters and the overlay lost the locals that
+went with its resident draw path.  That is a
 different number from the thread's peak (`thread`'s 0xEF scan, 544 B at issue
 #64): that one is the maximum anywhere on the path, this one is the depth a
 callee inherits.
@@ -5125,9 +5164,9 @@ inherited FP state is forced, not trusted.
 Measured on the board, and what the policy is set to:
 
 ```
-at call     577 B (camera producer)   249 B (panel thread)
-producer    8192 - 577 - 208 = 7407 available    ->  GROVE_PLUGIN_STACK_PRODUCER 4096
-panel       2048 - 249 - 208 = 1591 available    ->  GROVE_PLUGIN_STACK_PANEL    1024
+at call     553 B (camera producer)   217 B (panel thread)
+producer    8192 - 553 - 208 = 7431 available    ->  GROVE_PLUGIN_STACK_PRODUCER 4096
+panel       2048 - 217 - 208 = 1623 available    ->  GROVE_PLUGIN_STACK_PANEL    1024
 shell       4096 - (not instrumented) - 208      ->  GROVE_PLUGIN_STACK_SHELL    1024
 ```
 
@@ -5151,50 +5190,63 @@ What the two plugins actually cost:
 | `blazeface` | 2,736 | 0 | 1,740 | 4,480 | 8 | 40 | 192 | 300 | 344 |
 | `cifar10` | 1,392 | 0 | 48 | 1,472 | 0 | 16 | 48 | -- | 336 |
 
-### What keeping the resident decoder costs
+### The firmware has no decoder (issue #104)
 
-The firmware still contains the BlazeFace decoder.  **[!] The two reasons this
-section first gave for that do not survive being measured, and issue #104 is
-open to remove it.**  They are recorded here because the shape of the mistake is
-worth more than the claim was:
+**A decoder reaches this board only inside a container.**  The BlazeFace
+arithmetic was in the shipped image twice -- once in the firmware, once in the
+plugin that carries it -- and the two reasons this section first gave for keeping
+the firmware copy did not survive being measured:
 
 - *"it is the path for a payload that is not a container -- `det` and `cls`
   reached this board before containers existed, and re-sending them costs erase
-  cycles"*.  **This issue's own verification re-sent both as containers.**  The
-  board's `nn run` prints the plugin's wording, not the resident one, so nothing
-  on this device uses the resident decoder at all.  A rule was quoted by the very
-  work that had just consumed its premise.
+  cycles"*.  **Issue #103's own verification re-sent both as containers.**  The
+  board's `nn run` printed the plugin's wording, not the resident one, so nothing
+  on this device was using the resident decoder at all.  A rule was quoted by the
+  very work that had just consumed its premise.
 - *"it is the baseline `test/test_plugin_decode.c` compares against"*.  That test
-  compiles `nn_decoder.c` and `svc/blazeface.c` **itself**, on the host.  Whether
-  the firmware links them has nothing to do with it, so this was never a reason
-  for residency.
+  compiles the decoder **itself**, on the host.  Whether the firmware links it
+  has nothing to do with it, so this was never a reason for residency.
 
-What is left is a capability question -- whether a bare `.tflite` detector should
-still work on this board -- and that is #104's to answer.
+What it cost, measured with `check_placement_budget.py` either side:
+**3,456 B of ITCM**, and 1,728 B of the DTCM heap-to-stack gap.
 
-So while a plugin is loaded the same arithmetic is in the image twice, and the
-resident half's state is allocated whether or not anything reads it:
+**What a bare `.tflite` does now.**  It still loads, and `nn run` still captures
+a frame, fills the input and invokes the NPU.  What changed is the report: with
+nothing to interpret the outputs, the outputs are described as they are.
 
-| | resident (firmware) | in the plugin image |
-|---|---|---|
-| `svc/blazeface.c` | 2,736 B ITCM, `-O3` | 1,638 B SRAM, `-Os` |
-| decoder state | 1,716 B `.bss` | 1,740 B bss |
+```
+nn run
+run     : ok
+decoder : none -- 4 output(s), undecoded
+  out[0]  1x896x16 int8  q(s=0.019848 zp=-3)  14336B
+  out[1]  1x896x1 int8  q(s=1.224698 zp=126)  896B
+  ...
+note    : `nn out <tensor> <count>` reads the values; a container carrying a
+          decoder interprets them
+```
 
-The 1,716 B is `nn_dec_scratch` (1,536), `nn_dec` (16), `nn_dec_ready` (4) and
-the overlay's `nn_ov_det` (160).  A loaded plugin never touches any of it.  The
-same source is compiled twice because the image gate's rule is that a plugin
-resolves everything within itself, which is what makes "no undefined symbols"
-the whole check.
+**[!] It does not fall back to the class report.**  That report reads output 0 as
+a vector of class scores, which for a detector's regression tensor is a tidy
+table of numbers that mean nothing.  A firmware with no decoder cannot tell a
+detector from a classifier, so it stops guessing rather than guessing quietly.
+`nn stream` refuses outright, because there would be nothing to put on the panel.
 
-**Nothing is dead, though.**  Every resident path is reachable with no plugin
-loaded: the shim's fallbacks, the overlay's own draw, and the shared class
-report.  And `nn_decoder.c` holds two unrelated things -- `nn_decoder_desc()` is
-a pure `npu_tensor` -> `tensor_desc` translation with no model in it, needed by
-`nn out` and `nn info` whatever decodes.  The split line #104 would cut along is
-already there.  And the one thing that is NOT duplicated is the point of the exercise:
-**the CIFAR-10 labels appear zero times in the firmware.**  The shared class
-report can only print class NUMBERS, because a name travels with the model and
-nowhere else.
+**[!] And nothing checks the input quantisation any more.**  That check belonged
+to the resident decoder, whose arithmetic assumed `pixel - 128` was read as scale
+1/255 zero point -128.  A bare model whose input says otherwise is still fed, and
+the tensors above are then a faithful reading of a meaningless inference.  The
+fill convention is a property of this board (`port/npu/nn_preproc.h`) that a
+container is written against -- the vendor's own CIFAR-10 model records scale
+0.0203 zero point -8 and is fed `pixel - 128` deliberately.
+
+`nn thresh` reads `none` whenever nothing holds one -- no container loaded, or a
+container whose decoder takes no parameters, like the classifier.  It used to
+show the resident decoder's `644/1000` while the classifier was loaded, which was
+a setting nobody would ever read.
+
+**The point of the exercise survives:** **the CIFAR-10 labels appear zero times
+in the firmware.**  The shared class report can only print class NUMBERS, because
+a name travels with the model and nowhere else.
 
 **[!] Running from SRAM is not free.**  Decode went from 83 us resident to
 124 us as a plugin -- the firmware's copy runs from ITCM and the plugin's from

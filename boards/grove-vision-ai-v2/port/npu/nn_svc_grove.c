@@ -42,7 +42,7 @@
 #include "plugin_run.h"
 #include "cam_lcd_sink.h"
 #include "camera.h"
-#include "nn_decoder.h"
+#include "npu_desc.h"
 #include "nn_active.h"
 #include "nn_overlay.h"
 #include "nn_preproc.h"
@@ -54,11 +54,10 @@
 
 /* ---- state ---------------------------------------------------------------
  *
- * Plain .bss.  This board's decoder state is already here (nn_decoder.c) for the
- * same reason: nothing on this board needs a placement attribute, because
- * nothing here is touched by a bus master.  The other two boards' adapters own
- * nothing new at all -- they already have a model singleton and a session gate
- * of their own, and a second copy would be a second answer.
+ * Plain .bss: nothing here needs a placement attribute, because nothing here is
+ * touched by a bus master.  The other two boards' adapters own nothing new at
+ * all -- they already have a model singleton and a session gate of their own,
+ * and a second copy would be a second answer.
  */
 static uint8_t  nn_busy;            /**< the transient claim                  */
 static uint8_t  nn_owner;           /**< enum nn_owner -- WHO holds it        */
@@ -830,7 +829,7 @@ int nn_svc_output(unsigned index, struct tensor_desc *out)
 		return NN_SVC_ERR_STATE;
 	if (npu_output(index, &t) != NPU_OK)
 		return NN_SVC_ERR_ARG;
-	nn_decoder_desc(out, &t);
+	npu_desc_of(out, &t);
 	return NN_SVC_OK;
 }
 
@@ -842,7 +841,7 @@ int nn_svc_input(struct tensor_desc *out)
 		return NN_SVC_ERR_STATE;
 	if (npu_input(&t) != NPU_OK)
 		return NN_SVC_ERR_ARG;
-	nn_decoder_desc(out, &t);
+	npu_desc_of(out, &t);
 	return NN_SVC_OK;
 }
 
@@ -851,17 +850,18 @@ int nn_svc_input(struct tensor_desc *out)
 /*
  * Can this board fill the model's input at all?
  *
- * [!] THE BOARD'S PRECONDITION, NOT THE DECODER'S, AND THE TWO WERE ONE
- * FUNCTION UNTIL ISSUE #103.  nn_preproc_fill() writes ONE BYTE per element:
- * on a tensor of any other element type it fills a fraction of the buffer with
- * values of the wrong width, and the length check in nn_fill_input() passes,
- * because a float32 tensor of the same shape is LARGER than the bytes being
- * written.  The NPU is then invoked on a mostly-untouched arena.
+ * [!] THE BOARD'S PRECONDITION, AND THE ONLY ONE LEFT.  nn_preproc_fill()
+ * writes ONE BYTE per element: on a tensor of any other element type it fills a
+ * fraction of the buffer with values of the wrong width, and the length check in
+ * nn_fill_input() passes, because a float32 tensor of the same shape is LARGER
+ * than the bytes being written.  The NPU is then invoked on a mostly-untouched
+ * arena.
  *
- * That is true whoever decodes the outputs, so it is asked whoever decodes
- * them.  Splitting it out of nn_input_quant_ok() is what makes that possible:
- * waiving the whole of that function for a plugin -- which the first cut of
- * this change did -- waived this too, and nothing downstream looks at the type.
+ * It sat inside a QUANTISATION check until issue #103 split the two, and that
+ * split is why issue #104 could delete the other half without taking this with
+ * it: the quantisation question belonged to the resident decoder and went when
+ * that decoder did, while this one is about whether the frame can be written at
+ * all and is true whoever reads the result -- or whether anyone does.
  */
 static int nn_input_fillable(struct nn_op_result *res,
                              const struct npu_tensor *in)
@@ -871,36 +871,6 @@ static int nn_input_fillable(struct nn_op_result *res,
 		nn_detail_set("this board fills the input a byte at a time, so it "
 		              "needs an int8 input; this model has %s",
 		              npu_type_name(in->type));
-		return -1;
-	}
-	return 0;
-}
-
-/*
- * Does the model's input quantisation match what the preprocessor produces?
- *
- * [!] NOT A FORMALITY.  nn_preproc_fill() writes `pixel - 128` -- a fixed shift,
- * not a quantisation using the tensor's parameters -- which is exactly right for
- * scale 1/255 with zero point -128 and progressively wrong for anything else.
- * Being wrong here does not look like an error: the boxes are still boxes, just
- * in the wrong places, on an image nobody can see.  So it refuses rather than
- * warns.  Compared in millionths so no float formatting is needed.
- *
- * [!] THIS ONE BELONGS TO THE RESIDENT DECODER ALONE, and a plugin is not held
- * to it -- see nn_svc_run_once().  The element type is a separate question and
- * is asked separately, above.
- */
-static int nn_input_quant_ok(struct nn_op_result *res,
-                             const struct npu_tensor *in)
-{
-	long micro = (long)(in->scale * 1000000.0f + 0.5f);
-
-	if (nn_input_fillable(res, in) != 0)
-		return -1;
-	if (in->zero_point != -128 || micro < 3882 || micro > 3961) {
-		nn_detail_set("this model wants scale %ld/1e6 zp %ld, but the frame is "
-		              "filled as (pixel - 128), which is scale 3922/1e6 zp -128",
-		              micro, (long)in->zero_point);
 		return -1;
 	}
 	return 0;
@@ -941,42 +911,62 @@ static int nn_fill_input(struct nn_op_result *res, const uint8_t *raw,
 }
 
 /*
- * Decode whatever the outputs currently hold.
+ * Decode whatever the outputs currently hold -- or say that nothing did.
  *
- * [!] A NEGATIVE RETURN IS PUBLISHED AS IT IS, not folded into zero faces
- * (issue #57) and not folded into one code (issue #97): BF_ERR_MODEL is the one
- * the operator caused -- the open model is not a detector -- and the shared
- * command uses exactly that to fall back to reporting the top classes instead.
- * The others mean this firmware is wired wrong and must not read as either.
+ * [!] THE ONE PLACE THIS BOARD DECIDES (issue #104).  `nn run` and `nn dets`
+ * both arrive here, and the plugin-or-raw choice lives INSIDE rather than at
+ * each of them, so the two cannot be routed differently.  That is the shape
+ * issue #103 got wrong once: a single branch point was built for the decoder and
+ * the neighbouring question -- the geometry -- was left at two sources, and
+ * every box `nn run` produced came back "outside the frame".
+ *
+ * [!] AND WITH NO PLUGIN THERE IS NO DECODER AT ALL.  This firmware stopped
+ * carrying one, so the outputs are reported as the tensors they are.  Not as a
+ * BF_ERR_* code: BF_ERR_MODEL means "not a detector" and routes to the shared
+ * class report, which would print the top 5 of a detector's regression tensor as
+ * though the numbers were class scores.
+ *
+ * A negative return from a PLUGIN is published as it is, not folded into zero
+ * faces (issue #57) and not folded into one code (issue #97).
  */
-static void nn_decode_into(struct nn_det_snapshot *snap, struct bf_det *dets,
-                           int max)
+static void nn_decode_into(struct nn_det_snapshot *snap)
 {
-	struct npu_tensor outs[NN_DECODER_MAX_OUTPUTS];
+	struct npu_tensor outs[NPU_DESC_MAX_OUTPUTS];
 	struct bf_result bfr;
 	unsigned n_out, i;
 	int nd;
 
 	memset(&bfr, 0, sizeof bfr);
+	snap->valid = 1;
+	snap->res   = bfr;
+
+	if (!nn_active_is_plugin()) {
+		/* Nothing interprets these.  The count means nothing, so it is not one
+		   an operator could read as a measurement. */
+		snap->ndet = 0;
+		snap->kind = (uint8_t)NN_DET_RAW_TENSORS;
+		return;
+	}
+
 	n_out = npu_output_count();
-	if (n_out > NN_DECODER_MAX_OUTPUTS)
-		n_out = NN_DECODER_MAX_OUTPUTS;
+	if (n_out > NPU_DESC_MAX_OUTPUTS)
+		n_out = NPU_DESC_MAX_OUTPUTS;
 	for (i = 0u; i < n_out; i++)
 		if (npu_output(i, &outs[i]) != NPU_OK) {
-			snap->valid = 1;
-			snap->ndet  = BF_ERR_ARG;
-			snap->res   = bfr;
+			snap->ndet = BF_ERR_ARG;
+			/* This exit writes the kind too: it returns before the decision
+			   below, and a reused snapshot would otherwise keep the routing of
+			   whatever ran last (issue #104). */
+			snap->kind = (uint8_t)NN_DET_PLUGIN_REPORT;
 			return;
 		}
 
-	nd = nn_active_decode(outs, n_out, dets, max, &bfr);
-	snap->valid    = 1;
-	snap->ndet     = nd;
-	snap->res      = bfr;
-	/* [!] SAY WHERE THE BOXES ARE.  A plugin left `dets` and `bfr` alone, so a
-	 * consumer that printed them would print whatever was there before -- zeros
-	 * on the first run and a stale decode after that, which is worse. */
-	snap->external = (uint8_t)(nn_active_is_plugin() ? 1 : 0);
+	nd = nn_active_decode(outs, n_out);
+	snap->ndet = nd;
+	/* [!] SAY WHERE THE RESULT IS.  The plugin never touched the caller's array,
+	 * so a consumer that printed it would print whatever was there before --
+	 * zeros on the first run and a stale decode after that, which is worse. */
+	snap->kind = (uint8_t)NN_DET_PLUGIN_REPORT;
 }
 
 void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
@@ -1043,35 +1033,23 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	}
 
 	/*
-	 * WHO DECODES, AND THE ONE QUESTION THAT DECIDES IT.
+	 * WHO DECODES.
 	 *
-	 * The quantisation check runs only once there is something to decode: a
-	 * classifier is a legitimate model here and must not be refused for not
-	 * being a detector.
+	 * [!] AND NOTHING ASKS ABOUT THE INPUT QUANTISATION ANY MORE (issue #104).
+	 * That check belonged to the resident decoder: nn_preproc_fill() writes
+	 * `pixel - 128` and BlazeFace's arithmetic assumed the model read that as
+	 * scale 1/255 zero point -128.  With that decoder gone the question has no
+	 * owner -- a plugin ships WITH its model, and shipping it is the statement
+	 * that the two agree (the vendor's own CIFAR-10 app writes `pixel - 128`
+	 * into an input recorded at scale 0.0203 zero point -8 and is right to).
 	 *
-	 * [!] AND IT IS THE RESIDENT DECODER'S PRECONDITION, NOT A STATEMENT ABOUT
-	 * THIS BOARD (issue #103).  nn_preproc_fill() writes `pixel - 128` and
-	 * BlazeFace's arithmetic assumes the model reads that as scale 1/255 zero
-	 * point -128; a model whose input says otherwise is not a detector, which is
-	 * exactly what the fallback below reports.  A PLUGIN ships WITH its model,
-	 * and shipping it is the statement that the two agree -- the vendor's own
-	 * CIFAR-10 app writes `pixel - 128` into an input tensor recorded at scale
-	 * 0.0203 zero point -8 and is right to.  Asking the base's question about a
-	 * model the base does not know would route every classifier container to the
-	 * built-in class report, and the labels the container carries would never be
-	 * read: the whole of issue #78 refused by a check about somebody else's
-	 * decoder.
+	 * What that costs is a diagnostic, and it is worth naming: a bare model
+	 * whose input quantisation is not this board's convention is still fed, and
+	 * the tensors reported below are then a faithful reading of a meaningless
+	 * inference.  The convention is stated in the board README rather than
+	 * enforced by a check no decoder stands behind.
 	 */
-	if (nn_active_is_plugin() || nn_input_quant_ok(res, &in) == 0) {
-		nn_decode_into(snap, dets, max);
-	} else {
-		/* Not a detector's input -- say so through the decoder's own vocabulary
-		 * so the shared command falls back to reporting classes. */
-		snap->valid = 1;
-		snap->ndet  = BF_ERR_MODEL;
-		memset(&snap->res, 0, sizeof snap->res);
-		nn_detail_clear();
-	}
+	nn_decode_into(snap);
 
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 	nn_release();
@@ -1092,7 +1070,7 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
 		nn_release();
 		return;
 	}
-	nn_decode_into(snap, dets, max);
+	nn_decode_into(snap);
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 	nn_release();
 }
@@ -1242,7 +1220,7 @@ _Static_assert(NN_STREAM_CAM_LOCKED  == CAM_ERR_LOCKED,  "CAM_ERR_LOCKED moved")
 static int nn_detector_ready(struct nn_op_result *res)
 {
 	struct npu_tensor in;
-	struct npu_tensor outs[NN_DECODER_MAX_OUTPUTS];
+	struct npu_tensor outs[NPU_DESC_MAX_OUTPUTS];
 	unsigned n_out, i;
 
 	if (npu_input(&in) != NPU_OK) {
@@ -1255,14 +1233,25 @@ static int nn_detector_ready(struct nn_op_result *res)
 	 * anything can. */
 	if (nn_input_fillable(res, &in) != 0)
 		return -1;
-	/* The resident decoder's precondition, and only its own -- see
-	 * nn_svc_run_once() for why a plugin is not held to it. */
-	if (!nn_active_is_plugin() && nn_input_quant_ok(res, &in) != 0)
+	/*
+	 * [!] IS THERE A DECODER AT ALL, ASKED FIRST (issue #104).  Ahead of the
+	 * shape question and ahead of the draw question, because with no plugin
+	 * loaded neither of those has anything to be about -- and because the answer
+	 * sends the operator somewhere the others do not: not to a different model,
+	 * but to a container that carries a decoder for this one.  `nn run` still
+	 * works here and reports the raw outputs; a stream cannot, because there
+	 * would be nothing to put on the panel.
+	 */
+	if (!nn_active_is_plugin()) {
+		nn_detail_set("no decoder is loaded, so a stream would annotate "
+		              "nothing -- load a container that carries one; "
+		              "`nn run` reports the raw outputs");
 		return -1;
+	}
 	n_out = npu_output_count();
-	if (n_out > NN_DECODER_MAX_OUTPUTS) {
+	if (n_out > NPU_DESC_MAX_OUTPUTS) {
 		nn_detail_set("the model has %u outputs and this path reads %u",
-		              n_out, (unsigned)NN_DECODER_MAX_OUTPUTS);
+		              n_out, (unsigned)NPU_DESC_MAX_OUTPUTS);
 		return -1;
 	}
 	for (i = 0u; i < n_out; i++) {
@@ -1272,13 +1261,7 @@ static int nn_detector_ready(struct nn_op_result *res)
 		}
 	}
 	if (!nn_active_shapes_ok(outs, n_out)) {
-		/* Whose refusal it is, because the two send you to different places:
-		 * the resident decoder wants a different MODEL, a plugin wants a
-		 * different CONTAINER. */
-		if (nn_active_is_plugin())
-			nn_detail_set("the loaded plugin cannot read this model's outputs");
-		else
-			nn_detail_set("the loaded model is not BlazeFace-shaped");
+		nn_detail_set("the loaded plugin cannot read this model's outputs");
 		return -1;
 	}
 	/*
@@ -1290,7 +1273,7 @@ static int nn_detector_ready(struct nn_op_result *res)
 	 * acquired.  `nn run` still reports its classes.
 	 */
 	if (!nn_active_can_draw()) {
-		nn_detail_set("the loaded decoder does not draw, so a stream would "
+		nn_detail_set("the loaded plugin does not draw, so a stream would "
 		              "annotate nothing -- `nn run` reports its result");
 		return -1;
 	}
@@ -1627,8 +1610,16 @@ unsigned nn_svc_thresh_get(void)
 
 int nn_svc_thresh_set(unsigned milli)
 {
-	return nn_active_set_thresh_milli(milli) ? NN_SVC_OK
-	                                                     : NN_SVC_ERR_ARG;
+	switch (nn_active_set_thresh_milli(milli)) {
+	case NN_ACTIVE_THRESH_OK:
+		return NN_SVC_OK;
+	case NN_ACTIVE_THRESH_NO_DECODER:
+		/* Not an argument error: the value was fine and there is nothing here
+		 * to hold it (issue #104). */
+		return NN_SVC_ERR_STATE;
+	default:
+		return NN_SVC_ERR_ARG;
+	}
 }
 
 /* ---- `nn info` extras (issue #101) --------------------------------------- */

@@ -75,7 +75,14 @@ int nn_preproc_geom(uint32_t frame_w, uint32_t frame_h,
  * order, each @p frame_w * @p frame_h bytes. Destination is interleaved R, G, B
  * int8, which is what the model wants, written as (pixel - 128) -- a fixed
  * shift, correct for scale 1/255 with zero point -128 and progressively wrong
- * for anything else. The caller checks that; see nn_input_quant_ok().
+ * for anything else.
+ *
+ * [!] AND NOTHING CHECKS THAT ANY MORE (issue #104). The check belonged to the
+ * resident BlazeFace decoder, whose arithmetic assumed it; with that decoder
+ * gone the question has no owner, because a plugin ships WITH its model and
+ * shipping it is the statement that the two agree. This shift is therefore a
+ * board CONVENTION a container is written against, not a promise about the
+ * model that is loaded -- see the board README.
  *
  * Bilinear with half-pixel sample centres, all fixed point, no libm. The
  * neighbour indices are clamped to the crop, which is what makes the first and

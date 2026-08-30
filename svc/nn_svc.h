@@ -728,8 +728,32 @@ int nn_svc_box_to_frame(const struct bf_det *in, struct bf_det *out);
 
 /* ---- detection threshold ------------------------------------------------- */
 
-/** Score threshold in milli-probability, held by the board's decoder state. */
+/**
+ * There is no threshold to report (issue #104).
+ *
+ * [!] SPELLED IN THE CONTRACT, not left for a caller to infer from a zero.  A
+ * board can reach a state where nothing holds a threshold at all -- no decoder
+ * is loaded, or the loaded one takes no parameters -- and zero is available for
+ * it because a real threshold is a milli-probability strictly inside 0 and 1: at
+ * the poles the inverse sigmoid has none.  Printing it as `0/1000` would be a
+ * setting an operator could reasonably try to change.
+ */
+#define NN_SVC_THRESH_NONE  0u
+
+/**
+ * Score threshold in milli-probability, held by whichever decoder is in force.
+ *
+ * @return 1..999, or @ref NN_SVC_THRESH_NONE when nothing holds one.
+ */
 unsigned nn_svc_thresh_get(void);
+
+/**
+ * @return NN_SVC_OK, NN_SVC_ERR_ARG if the value was refused, or
+ *         NN_SVC_ERR_STATE if there is no decoder to hold one.
+ *
+ * The last two are separate because they send an operator to different places:
+ * one is a number to change, the other is a container to load.
+ */
 int      nn_svc_thresh_set(unsigned milli);
 
 #ifdef __cplusplus

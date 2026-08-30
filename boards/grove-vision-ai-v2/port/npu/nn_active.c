@@ -8,7 +8,7 @@
  */
 #include "nn_active.h"
 
-#include "nn_decoder.h"
+#include "npu_desc.h"
 #include "nn_preproc.h"
 #include "plugin_run.h"
 
@@ -63,8 +63,8 @@ int nn_active_is_plugin(void)
 
 /* The tensors reach a plugin as svc/tensor.h descriptors, which is the contract
  * issue #97 established so that one decoder can read any board's tensors.  The
- * conversion is nn_decoder_desc(), reused rather than repeated: a second
- * translation could disagree with the resident path about what a tensor is. */
+ * conversion is npu_desc_of(), reused rather than repeated: a second translation
+ * could disagree with `nn out` and `nn info` about what a tensor is. */
 static unsigned to_desc(const struct npu_tensor *outs, unsigned n,
                         struct tensor_desc *d, unsigned cap)
 {
@@ -73,17 +73,15 @@ static unsigned to_desc(const struct npu_tensor *outs, unsigned n,
 	if (n > cap)
 		n = cap;
 	for (i = 0u; i < n; i++)
-		nn_decoder_desc(&d[i], &outs[i]);
+		npu_desc_of(&d[i], &outs[i]);
 	return n;
 }
 
 /*
- * [!] THE NULL CHECK IS HERE, NOT IN EACH BRANCH.  nn_decoder.c defends against
- * a null tensor array and a plugin has no way to; routed one side at a time,
- * the two decoders would answer a caller's mistake differently -- the resident
- * one with BF_ERR_ARG, the plugin one by walking a null pointer in to_desc().
- * Neither caller in this firmware can pass null, which is exactly why the
- * asymmetry would have sat here unnoticed.
+ * [!] THE NULL CHECK IS HERE, NOT IN A BRANCH.  A plugin has no way to defend
+ * against a null tensor array -- to_desc() would walk it -- and this is the one
+ * place every caller passes through.  No caller in this firmware can pass null,
+ * which is exactly why an omission here would have sat unnoticed.
  */
 int nn_active_shapes_ok(const struct npu_tensor *outs, unsigned n)
 {
@@ -93,40 +91,35 @@ int nn_active_shapes_ok(const struct npu_tensor *outs, unsigned n)
 	if (outs == NULL)
 		return 0;
 	if (nn_active_is_plugin() && fn != NULL) {
-		struct tensor_desc d[NN_DECODER_MAX_OUTPUTS];
-		unsigned m = to_desc(outs, n, d, NN_DECODER_MAX_OUTPUTS);
+		struct tensor_desc d[NPU_DESC_MAX_OUTPUTS];
+		unsigned m = to_desc(outs, n, d, NPU_DESC_MAX_OUTPUTS);
 
 		return fn(d, m);
 	}
-	return nn_decoder_shapes_ok(outs, n);
+	return 0;   /* no decoder: nothing here can read any shape */
 }
 
-int nn_active_decode(const struct npu_tensor *outs, unsigned n,
-                     struct bf_det *out, int max, struct bf_result *res)
+int nn_active_decode(const struct npu_tensor *outs, unsigned n)
 {
 	plugin_decode_fn fn = (plugin_decode_fn)plugin_run_slot(PLUGIN_SLOT_DECODE);
 
-	if (outs == NULL) {
-		/* Nothing was decoded, so say so in @p res too rather than leaving the
-		 * caller to publish a previous frame's diagnostics -- which is the
-		 * rule nn_decoder_run() already follows on this same path. */
-		if (res != NULL) {
-			memset(res, 0, sizeof(*res));
-			res->status = BF_ERR_ARG;
-		}
+	if (outs == NULL)
 		return BF_ERR_ARG;   /* see nn_active_shapes_ok */
-	}
 	if (nn_active_is_plugin() && fn != NULL) {
-		struct tensor_desc d[NN_DECODER_MAX_OUTPUTS];
-		unsigned m = to_desc(outs, n, d, NN_DECODER_MAX_OUTPUTS);
+		struct tensor_desc d[NPU_DESC_MAX_OUTPUTS];
+		unsigned m = to_desc(outs, n, d, NPU_DESC_MAX_OUTPUTS);
 
-		/* out/res are deliberately untouched -- see the header. */
-		(void)out;
-		(void)max;
-		(void)res;
 		return fn(d, m);
 	}
-	return nn_decoder_run(outs, n, out, max, res);
+	/*
+	 * [!] A BACKSTOP, NOT A PATH (issue #104).  There is no decoder in this
+	 * firmware any more, so nobody should arrive here: nn_svc_grove.c decides
+	 * plugin-or-raw in the one helper both its callers reach, and the stream
+	 * refuses admission before a camera is lit.  It still answers rather than
+	 * pretending, and it answers "no decoder is bound" -- not BF_ERR_MODEL,
+	 * which means "not a detector" and routes to the shared class report.
+	 */
+	return BF_ERR_UNINIT;
 }
 
 void nn_active_draw(const struct plugin_painter *paint)
@@ -135,14 +128,14 @@ void nn_active_draw(const struct plugin_painter *paint)
 
 	if (nn_active_is_plugin() && fn != NULL && paint != NULL)
 		fn(paint);
-	/* Otherwise nothing: the resident decoder's boxes are drawn by the caller,
-	 * which knows what they are. */
+	/* Otherwise nothing, and there is nothing else it could be: with no plugin
+	 * there is no decoder, so there is no result to paint. */
 }
 
 int nn_active_can_draw(void)
 {
 	if (!nn_active_is_plugin())
-		return 1;
+		return 0;   /* nothing decodes, so nothing annotates */
 	return plugin_run_slot(PLUGIN_SLOT_DRAW) != NULL;
 }
 
@@ -160,14 +153,15 @@ int nn_active_report(nn_svc_write_fn write, void *ctx)
 }
 
 /*
- * [!] THE THRESHOLD FOLLOWS THE DECODER THAT WILL USE IT.
+ * [!] THE THRESHOLD BELONGS TO THE DECODER THAT WILL USE IT, AND THERE MAY BE
+ * NONE (issues #103, #104).
  *
- * A plugin owns its own threshold, so setting the firmware's while a plugin is
- * loaded would change a number nothing reads and leave the operator watching
- * `nn thresh` report a value the boxes do not obey.  When no plugin declares
- * the parameter callbacks, the resident decoder answers -- and that is not a
- * fallback for tidiness: a plugin with no parameters has no threshold to set,
- * and saying so through the resident one would be a lie in the other direction.
+ * A plugin owns its own threshold, so before issue #103 routed this, `nn thresh`
+ * changed a firmware number the loaded plugin never read.  Since issue #104 the
+ * other case is not "the resident decoder answers" but "nobody does": with no
+ * plugin there is no decoder, and a classifier plugin declares no parameters
+ * because it has no threshold to declare.  Both say so, rather than borrowing a
+ * number from something that is not deciding anything.
  */
 #define NN_ACTIVE_PARAM_THRESH_MILLI 0u
 
@@ -180,7 +174,7 @@ unsigned nn_active_get_thresh_milli(void)
 	if (nn_active_is_plugin() && fn != NULL &&
 	    fn(NN_ACTIVE_PARAM_THRESH_MILLI, &v) == 0)
 		return (unsigned)v;
-	return nn_decoder_get_thresh_milli();
+	return NN_SVC_THRESH_NONE;
 }
 
 int nn_active_set_thresh_milli(unsigned milli)
@@ -189,6 +183,7 @@ int nn_active_set_thresh_milli(unsigned milli)
 		(plugin_param_set_fn)plugin_run_slot(PLUGIN_SLOT_PARAM_SET);
 
 	if (nn_active_is_plugin() && fn != NULL)
-		return fn(NN_ACTIVE_PARAM_THRESH_MILLI, (uint32_t)milli) == 0;
-	return nn_decoder_set_thresh_milli(milli) == BF_OK;
+		return fn(NN_ACTIVE_PARAM_THRESH_MILLI, (uint32_t)milli) == 0
+		               ? NN_ACTIVE_THRESH_OK : NN_ACTIVE_THRESH_REFUSED;
+	return NN_ACTIVE_THRESH_NO_DECODER;
 }

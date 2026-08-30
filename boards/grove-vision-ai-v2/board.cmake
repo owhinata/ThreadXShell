@@ -1527,7 +1527,7 @@ endforeach()
 # enforce.  Step 1b measures the three terms and sets the admission policy; the
 # plan is explicit that a plugin passing HERE is not thereby safe to execute.
 add_custom_command(
-    OUTPUT "${GROVE_PLUGIN_OUT}/plugin.elf"
+    OUTPUT "${GROVE_PLUGIN_OUT}/plugin.elf" "${GROVE_PLUGIN_OUT}/plugin.stacks.json"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${GROVE_PLUGIN_OUT}"
     COMMAND "${CMAKE_C_COMPILER}" -nostdlib -nostartfiles
             -T "${GROVE_PLUGIN_DIR}/plugin.ld"
@@ -1544,10 +1544,105 @@ add_custom_command(
             "${GROVE_PLUGIN_OUT}/plugin.elf"
             --nm "${CMAKE_NM}" --objdump "${CMAKE_OBJDUMP}"
             --su ${_plugin_sus}
-            --entry pl_entry=8192 pl_decode=8192 pl_draw=1024 pl_report=4096
+            # [!] EVERY SLOT THE PLUGIN EXPORTS, not just the interesting ones.
+            # The packer refuses to declare a stack for a slot nobody measured,
+            # so a short list here does not under-report -- it stops the
+            # container being built at all, which is the right direction but a
+            # confusing place to discover it.
+            --entry pl_entry=8192 pl_shapes_ok=8192 pl_decode=8192
+                    pl_draw=1024 pl_report=4096
+                    pl_param_set=4096 pl_param_get=4096
+            --emit-stacks "${GROVE_PLUGIN_OUT}/plugin.stacks.json"
     DEPENDS ${_plugin_objs} "${GROVE_PLUGIN_DIR}/plugin.ld"
             "${BOARD_DIR}/cmake/check_plugin_image.py"
     COMMENT "plugin ld + gate -> plugin.elf"
     VERBATIM)
 
 add_custom_target(plugin ALL DEPENDS "${GROVE_PLUGIN_OUT}/plugin.elf")
+
+# --- the container chain (issue #101) ---------------------------------------
+#
+# Three host tools, all built the same way verify_vela_model is: explicit
+# commands driving the host compiler, because every CMake target in this project
+# cross-compiles.
+#
+#   abi_layout        prints svc/plugin_abi.h's field offsets as JSON, so the
+#                     packer is TOLD the format rather than transcribing it
+#   slot_table        prints the blob slot capacities through the firmware's own
+#                     accessors, so the sender can refuse an oversized container
+#                     BEFORE the device erases a slot to find out
+#   verify_container  runs svc/plugin_load.c -- the DEVICE's validator -- over a
+#                     packed container, so it cannot pass here and fail there
+set(GROVE_ABI_LAYOUT_JSON "${CMAKE_BINARY_DIR}/plugin/abi_layout.json")
+set(GROVE_SLOT_TABLE_JSON "${CMAKE_BINARY_DIR}/plugin/slot_table.json")
+set(GROVE_CONTAINER_VERIFIER "${CMAKE_BINARY_DIR}/verify_container")
+set(GROVE_PACKER "${BOARD_DIR}/scripts/pack_container.py")
+set(GROVE_PLUGIN_ELF "${GROVE_PLUGIN_OUT}/plugin.elf")
+set(GROVE_PLUGIN_STACKS "${GROVE_PLUGIN_OUT}/plugin.stacks.json")
+set(GROVE_PLUGIN_BASE "0x341E0000")
+set(GROVE_PLUGIN_MAX  "131072")
+# cortex-m55 / fp-armv8 / hard float / little endian / CMSE, per
+# plugin_target_id() in svc/plugin_abi.h.  Stated here and computed there: the
+# container verifier recomputes it from the same header, so a disagreement is a
+# refusal rather than a silent mismatch.
+set(GROVE_PLUGIN_TARGET_ID "0x9302")
+set(GROVE_PLUGIN_BUILD_ID "${CMAKE_PROJECT_VERSION}")
+
+if(HOST_CXX)
+    find_program(HOST_CC NAMES cc gcc clang)
+endif()
+
+if(HOST_CC)
+    add_custom_command(
+        OUTPUT "${GROVE_ABI_LAYOUT_JSON}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/plugin"
+        COMMAND "${HOST_CC}" -std=c11 -O1 -I "${CMAKE_SOURCE_DIR}/svc"
+                "${BOARD_DIR}/scripts/abi_layout.c"
+                -o "${CMAKE_BINARY_DIR}/plugin/abi_layout"
+        COMMAND "${CMAKE_BINARY_DIR}/plugin/abi_layout"
+                > "${GROVE_ABI_LAYOUT_JSON}"
+        DEPENDS "${BOARD_DIR}/scripts/abi_layout.c" "${CMAKE_SOURCE_DIR}/svc/plugin_abi.h"
+        COMMENT "host cc -> abi_layout.json (the packer's view of the ABI)"
+        VERBATIM)
+
+    add_custom_command(
+        OUTPUT "${GROVE_SLOT_TABLE_JSON}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/plugin"
+        COMMAND "${HOST_CC}" -std=c11 -O1 -w
+                -I "${BOARD_DIR}/src" -I "${CMAKE_SOURCE_DIR}/svc"
+                "${BOARD_DIR}/scripts/slot_table.c" "${BOARD_DIR}/src/blob_map.c"
+                -o "${CMAKE_BINARY_DIR}/plugin/slot_table"
+        COMMAND "${CMAKE_BINARY_DIR}/plugin/slot_table" "${GROVE_ERASE_GRAN}"
+                > "${GROVE_SLOT_TABLE_JSON}"
+        DEPENDS "${BOARD_DIR}/scripts/slot_table.c" "${BOARD_DIR}/src/blob_map.c"
+        COMMENT "host cc -> slot_table.json (payload capacity per blob slot)"
+        VERBATIM)
+
+    add_custom_command(
+        OUTPUT "${GROVE_CONTAINER_VERIFIER}"
+        COMMAND "${HOST_CC}" -std=c11 -O1 -Wall -Wextra
+                -I "${CMAKE_SOURCE_DIR}/svc"
+                "${BOARD_DIR}/scripts/verify_container.c"
+                "${CMAKE_SOURCE_DIR}/svc/plugin_load.c"
+                "${CMAKE_SOURCE_DIR}/svc/crc32.c"
+                -o "${GROVE_CONTAINER_VERIFIER}"
+        DEPENDS "${BOARD_DIR}/scripts/verify_container.c"
+                "${CMAKE_SOURCE_DIR}/svc/plugin_load.c"
+                "${CMAKE_SOURCE_DIR}/svc/plugin_load.h"
+                "${CMAKE_SOURCE_DIR}/svc/plugin_abi.h"
+        COMMENT "host cc -> verify_container (the device's own validator)"
+        VERBATIM)
+
+    add_custom_target(container-tools ALL
+        DEPENDS "${GROVE_ABI_LAYOUT_JSON}" "${GROVE_SLOT_TABLE_JSON}"
+                "${GROVE_CONTAINER_VERIFIER}")
+else()
+    message(STATUS "No host C compiler: the container chain will refuse to send")
+endif()
+
+configure_file("${BOARD_DIR}/scripts/send_verified_container.sh.in"
+               "${CMAKE_BINARY_DIR}/send_verified_container.sh"
+               FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                                GROUP_READ GROUP_EXECUTE
+                                WORLD_READ WORLD_EXECUTE
+               @ONLY)

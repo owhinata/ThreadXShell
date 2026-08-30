@@ -208,6 +208,8 @@ def main():
     ap.add_argument("--su", nargs="*", default=[])
     ap.add_argument("--entry", nargs="*", default=[],
                     help="functions to bound the stack below, name=limit")
+    ap.add_argument("--emit-stacks",
+                    help="write the derived bounds here, for the packer")
     args = ap.parse_args()
 
     errors = []
@@ -299,6 +301,16 @@ def main():
         for e in errors:
             print("  - " + e, file=sys.stderr)
         return 1
+
+    # [!] THE MANIFEST'S STACK NUMBERS ARE THIS ANALYSIS, not a second opinion.
+    # Handing the packer the bounds derived here is what makes "the manifest
+    # agrees with the gate" true by construction; the check that still has teeth
+    # is the DEVICE comparing those numbers against what its threads can spare,
+    # which no host knows.
+    if args.emit_stacks:
+        import json
+        with open(args.emit_stacks, "w") as fh:
+            json.dump(bounds, fh, indent=2, sort_keys=True)
 
     t = secs.get(".text", (0, 0, set()))[1]
     d = secs.get(".data", (0, 0, set()))[1]

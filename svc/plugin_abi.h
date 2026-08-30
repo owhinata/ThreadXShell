@@ -350,6 +350,128 @@ struct plugin_manifest {
 #define PLUGIN_CAP_PARAMS       0x00000004u   /**< PARAM_SET and PARAM_GET   */
 #define PLUGIN_CAP_KNOWN_MASK   0x00000007u
 
+/* ---- the call interface -------------------------------------------------- */
+
+/**
+ * A rectangle in frame pixels.  Signed and half-open, like lcd_rect_wire().
+ *
+ * Signed because a detection routinely runs past the edge of the image it was
+ * found in, and clipping is the painter's job -- a plugin that had to clamp
+ * first would be doing the same arithmetic twice, differently.
+ */
+struct plugin_rect {
+	int32_t x0, y0, x1, y1;
+};
+
+/**
+ * What a plugin may paint with, handed to its draw callback.
+ *
+ * [!] NO RAW FRAMEBUFFER POINTER.  The base keeps the buffer and its geometry
+ * in @ref ctx and validates every rectangle against them, so a bug in loaded
+ * code cannot write outside the frame.  That is the ONE property this boundary
+ * provides; it is not a sandbox, and everything in plugin_load.h's honest-scope
+ * note still applies.
+ *
+ * [!] AND IT IS DELIBERATELY NOT JUST `rect`.  A painter that could only draw
+ * hollow boxes would be a detector-only painter, which reproduces the very
+ * asymmetry issue #78 exists to remove, one layer up.  @ref blit is the general
+ * escape hatch: a plugin rasterises glyphs, a segmentation mask or a pose
+ * skeleton into its OWN buffer and hands over spans, so the vocabulary is
+ * unlimited while the bounds check stays with the base.
+ *
+ * WHERE THE WORK GOES.  draw() runs on the panel thread with the panel guard
+ * held, so it must be cheap; the expensive rasterising belongs in decode(),
+ * which runs on the camera producer with no guard and may take as long as it
+ * needs.  The frame pipeline pre-pins one delivery per sink, so the two never
+ * overlap and what decode() leaves for draw() needs no lock.
+ */
+struct plugin_painter {
+	void *ctx;
+	void (*rect)(void *ctx, const struct plugin_rect *r, uint16_t rgb565,
+	             uint16_t stroke);
+	void (*fill_rect)(void *ctx, const struct plugin_rect *r, uint16_t rgb565);
+	/**
+	 * Copy @p src into the frame at @p r's origin, @p r's width and height.
+	 * A source pixel equal to @p key is not written; pass a negative @p key
+	 * for an opaque blit.  @p src_stride is in pixels.
+	 */
+	void (*blit)(void *ctx, const struct plugin_rect *r, const uint16_t *src,
+	             uint32_t src_stride, int32_t key);
+};
+
+/**
+ * Where a plugin's report goes, handed to its report callback.
+ *
+ * Length-bearing and not varargs: the plugin formats its own text, so no
+ * formatter crosses the ABI.  svc/fmt.c implements no %f, and a plugin that
+ * could ask for one would pull a float formatter into three firmwares.
+ *
+ * @return the number of bytes taken, or negative on failure.  A plugin must
+ *         propagate a failure rather than continuing to write into a sink that
+ *         has already said no.
+ */
+struct plugin_printer {
+	void *ctx;
+	int (*write)(void *ctx, const char *s, size_t len);
+};
+
+/**
+ * What the base offers a plugin.
+ *
+ * [!] SMALLER THAN THE PLAN CALLED FOR, BECAUSE THE CONTROL FLOW RUNS THE OTHER
+ * WAY.  The plan listed preprocessing, invoke and tensor fetching here.  Reading
+ * the code they would have wrapped settles it: nn_overlay.c already drives the
+ * sequence -- it counts the outputs, fills the input, invokes the NPU and then
+ * CALLS the decoder with the tensors.  The decoder is called; it never calls up.
+ * Putting those three in the vtable would have exported base machinery that no
+ * plugin can reach for, and every entry here is a typed indirect call the stack
+ * gate must account for, so the smaller surface is also the cheaper one.
+ *
+ * @ref version and @ref size are checked before any member is used, so a base
+ * older than the plugin refuses rather than calling through a short struct.
+ */
+struct plugin_base_api {
+	uint32_t version;      /**< == PLUGIN_ABI_VERSION                      */
+	uint32_t size;         /**< == sizeof(struct plugin_base_api)          */
+	void    *ctx;          /**< opaque; passed back to every call below    */
+
+	/** Diagnostics.  The producer thread has no console, so this is the only
+	 *  way a decode failure can explain itself. */
+	void (*log)(void *ctx, const char *s, size_t len);
+
+	/**
+	 * Map a box in MODEL INPUT coordinates (normalised 0..1) to frame pixels.
+	 *
+	 * The inverse of the transform the input was built with, and a function
+	 * rather than four multiplications in the plugin because it also rejects
+	 * the non-finite box a degenerate model can produce, before anything is
+	 * cast to an integer.
+	 *
+	 * @return 0 on success; non-zero when the box is not representable, and
+	 *         then @p out is untouched.
+	 */
+	int (*to_frame)(void *ctx, float x, float y, float w, float h,
+	                struct plugin_rect *out);
+};
+
+/*
+ * The plugin's own entry points, in the order enum plugin_slot names them.
+ *
+ * [!] FROZEN.  The stack gate has to recognise a typed call site in the linked
+ * plugin, which it can only do if these signatures are fixed before the packer,
+ * the device decoder and the plugin's linker are written.  Changing one is an
+ * ABI break.
+ */
+struct tensor_desc;   /* svc/tensor.h; a plugin includes it, this header need not */
+
+typedef int  (*plugin_entry_fn)(const struct plugin_base_api *base);
+typedef int  (*plugin_shapes_ok_fn)(const struct tensor_desc *outs, unsigned n);
+typedef int  (*plugin_decode_fn)(const struct tensor_desc *outs, unsigned n);
+typedef void (*plugin_draw_fn)(const struct plugin_painter *paint);
+typedef int  (*plugin_report_fn)(const struct plugin_printer *out);
+typedef int  (*plugin_param_set_fn)(uint32_t id, uint32_t value);
+typedef int  (*plugin_param_get_fn)(uint32_t id, uint32_t *value);
+
 /* ---- layout pins -------------------------------------------------------- */
 
 /*

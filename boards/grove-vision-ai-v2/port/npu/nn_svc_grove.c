@@ -1324,3 +1324,62 @@ int nn_svc_thresh_set(unsigned milli)
 	return (nn_decoder_set_thresh_milli(milli) == BF_OK) ? NN_SVC_OK
 	                                                     : NN_SVC_ERR_ARG;
 }
+
+/* ---- `nn info` extras (issue #101) --------------------------------------- */
+
+/*
+ * The plugin reservation, from the linker.  Declared as arrays so a bare
+ * reference is already the address.
+ */
+extern uint8_t __plugin_start[], __plugin_end[];
+
+/*
+ * A bounded line builder.  The writer is length-bearing, so this port formats
+ * its own text and hands over the length -- no formatter crosses the boundary,
+ * which is what keeps a %f out of three firmwares.
+ *
+ * fmt_vsnformat() is svc/fmt.c's bounded formatter, the same one cli_print uses
+ * underneath, so what appears here and what the shell prints elsewhere are
+ * formatted by one implementation.
+ */
+static int nn_info_line(nn_svc_write_fn write, void *ctx, const char *f, ...)
+{
+	char line[80];
+	va_list ap;
+	int n;
+
+	va_start(ap, f);
+	n = fmt_vsnformat(line, sizeof line, f, ap);
+	va_end(ap);
+	if (n < 0)
+		return -1;
+	if ((size_t)n >= sizeof line)
+		n = (int)sizeof line - 1;
+	return write(ctx, line, (size_t)n);
+}
+
+/*
+ * What this board adds: where a loaded plugin would live, and whether one is
+ * there.
+ *
+ * [!] NOTHING IS HELD WHILE THIS PRINTS.  The reservation's bounds are linker
+ * constants and need no claim at all; when Step 1b has a manifest to report it
+ * must SNAPSHOT the fields under its claim, release, and only then write.  A
+ * console line takes as long as a UART takes, and holding the inference gate
+ * across one would stall the camera producer for exactly that long.
+ */
+void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
+{
+	uint32_t base = (uint32_t)(uintptr_t)__plugin_start;
+	uint32_t size = (uint32_t)(__plugin_end - __plugin_start);
+
+	if (write == NULL)
+		return;
+
+	/* Step 1a loads nothing, and says so rather than leaving the line out: a
+	 * missing line reads as a board with no plugin support at all, which is a
+	 * different and wrong fact. */
+	(void)nn_info_line(write, ctx,
+	                   "plugin  : (none) -- reservation %lu B at 0x%08lx\r\n",
+	                   (unsigned long)size, (unsigned long)base);
+}

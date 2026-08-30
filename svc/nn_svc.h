@@ -328,6 +328,50 @@ static inline void nn_svc_str(char *dst, size_t cap, const char *src)
 typedef int (*nn_svc_cancel_fn)(void *ctx);
 
 /**
+ * Where a board's extra report lines go (issue #101).
+ *
+ * The same shape as @ref nn_svc_cancel_fn and for the same reason: the thing
+ * that can print is a shell instance, which must not cross into a board's port.
+ * A plain function and an opaque context say nothing about a shell.
+ *
+ * [!] LENGTH-BEARING AND NOT VARARGS.  The caller formats its own text.  A
+ * printf-shaped callback here would put a formatter in the ABI, and svc/fmt.c
+ * implements no %f -- so the first board that wanted a fraction would pull a
+ * float formatter into three firmwares at once.  This is also the shape a
+ * loaded plugin's report() takes in Step 1b, so there is one convention rather
+ * than two.
+ *
+ * [!] AND FAILURE PROPAGATES.  A sink that has said no has said no; a caller
+ * that kept writing would turn one refused line into a run of them and the
+ * operator would see only the last.
+ *
+ * @return the bytes taken, or negative on failure.
+ */
+typedef int (*nn_svc_write_fn)(void *ctx, const char *s, size_t len);
+
+/**
+ * @brief  Emit whatever this board wants to add to `nn info`.
+ *
+ * Called after the shared lines are printed.  A board with nothing to say does
+ * nothing -- silence is a legal answer, unlike the withheld/unavailable
+ * distinction the shared fields carry, because these lines are the board's own
+ * subject and their absence cannot be mistaken for a fact.
+ *
+ * [!] THE PORT MUST NOT STORE @p write.  It is valid for the duration of the
+ * call and no longer; keeping it would let a later path print from a thread
+ * that owns no console.
+ *
+ * [!] AND IT MUST NOT BE CALLED WITH INTERRUPTS MASKED OR A GATE HELD.  A board
+ * that needs state from under a claim SNAPSHOTS it, releases, and then writes:
+ * printing is slow, and holding an inference gate across a console write would
+ * stall a producer thread for the length of a UART line.
+ *
+ * @param write  never NULL when called
+ * @param ctx    opaque, passed straight back
+ */
+void nn_svc_info_extra(nn_svc_write_fn write, void *ctx);
+
+/**
  * Read a whole file into a buffer.
  *
  * A board whose model source is a filesystem path needs one of these, and the

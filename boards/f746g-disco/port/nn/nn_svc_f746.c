@@ -893,3 +893,18 @@ int nn_svc_thresh_set(unsigned milli)
 	return (nn_decoder_set_thresh_milli(milli) == BF_OK) ? NN_SVC_OK
 	                                                     : NN_SVC_ERR_ARG;
 }
+
+/*
+ * Nothing to add (issue #101).
+ *
+ * The plugin container is a Grove path today; this board has no second source of
+ * model-adjacent facts, so it says nothing.  Silence is a legal answer here --
+ * unlike the shared fields, whose absence the command reports as withheld,
+ * because these lines are the board's own subject and no reader can mistake
+ * their absence for a fact about the model.
+ */
+void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
+{
+	(void)write;
+	(void)ctx;
+}

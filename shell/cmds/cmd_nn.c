@@ -175,6 +175,45 @@ static void nn_print_tensor(struct cli_instance *sh, const char *tag, int idx,
 static const char nn_withheld[] =
 	"-- held by a running stream (`nn stream stats`, or stop it)";
 
+/*
+ * Adapt the board's length-bearing writer onto the shell's printer.
+ *
+ * [!] THE BUFFER IS A LOCAL, NOT A STATIC.  This file owns no mutable storage
+ * and cmake/check_no_mutable_storage.py audits that per board; a scratch buffer
+ * here would be exactly the static the gate exists to refuse.  A local is the
+ * caller's stack, which the board that called in already accounted for.
+ *
+ * svc/fmt.c implements no precision, so a length-bearing string cannot be handed
+ * to cli_print directly -- it is copied, terminated, and emitted in chunks.  A
+ * board that writes more than fits in one chunk gets several calls, which is
+ * why the writer reports what it TOOK rather than assuming everything landed.
+ */
+struct nn_info_sink {
+	struct cli_instance *sh;
+};
+
+static int nn_info_write(void *ctx, const char *s, size_t len)
+{
+	struct nn_info_sink *sink = (struct nn_info_sink *)ctx;
+	char chunk[64];
+	size_t done = 0u;
+
+	if (sink == NULL || sink->sh == NULL || (s == NULL && len != 0u))
+		return -1;
+
+	while (done < len) {
+		size_t n = len - done;
+
+		if (n > sizeof chunk - 1u)
+			n = sizeof chunk - 1u;
+		memcpy(chunk, s + done, n);
+		chunk[n] = '\0';
+		cli_print(sink->sh, "%s", chunk);
+		done += n;
+	}
+	return (int)done;
+}
+
 static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 {
 	struct nn_svc_info info;
@@ -242,6 +281,15 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	cli_print(sh, "thresh  : %u/1000\r\n", nn_svc_thresh_get());
+
+	/* Whatever this board wants to add, in its own words.  Last, so the shared
+	 * lines always appear in the same place whatever a board says after them. */
+	{
+		struct nn_info_sink sink;
+
+		sink.sh = sh;
+		nn_svc_info_extra(nn_info_write, &sink);
+	}
 	return 0;
 }
 

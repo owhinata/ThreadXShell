@@ -43,6 +43,7 @@ static const char *name(enum fp_enforce_verdict v)
 	case FP_ENFORCE_OK:            return "ok";
 	case FP_ENFORCE_LSPACT:        return "lspact";
 	case FP_ENFORCE_ASPEN_REFUSED: return "aspen-refused";
+	case FP_ENFORCE_TS_REFUSED:    return "ts-refused";
 	}
 	return "?";
 }
@@ -53,6 +54,36 @@ static void expect(uint32_t before, uint32_t after, enum fp_enforce_verdict want
 
 	CHECK(got == want, "judge(%08x, %08x) = %s, want %s",
 	      before, after, name(got), name(want));
+}
+
+/*
+ * TS (issue #103).
+ *
+ * [!] JUDGED ON `after`, NOT ON `before`, and that is the whole point.  The
+ * caller CLEARS this bit in the same write that sets ASPEN, so an inherited
+ * TS == 1 is not a refusal -- it is the ordinary case the write exists to fix.
+ * What must be refused is a TS that SURVIVED the write, because then every
+ * exception taken from Secure state stacks s16-s31 on top of the extended
+ * frame: 64 B more than the reserve the plugin admission policy is computed
+ * from, and a reserve that is wrong by 64 B is not a reserve.
+ */
+static void test_ts(void)
+{
+	printf(" case: FPCCR.TS (issue #103)\n");
+
+	/* The ordinary case: inherited set, cleared by the write. */
+	expect(FP_FPCCR_TS, FP_FPCCR_ASPEN, FP_ENFORCE_OK);
+
+	/* The one that must be caught. */
+	expect(0u, FP_FPCCR_ASPEN | FP_FPCCR_TS, FP_ENFORCE_TS_REFUSED);
+
+	/* Ordering.  An outstanding lazy save is the older and more serious fact,
+	 * so it is reported even when TS also failed to clear: diagnosing a
+	 * bootloader handover starts from the frame nobody owns.  And a refused
+	 * ASPEN outranks TS too -- without automatic context creation the frame
+	 * size question is moot. */
+	expect(FP_FPCCR_LSPACT, FP_FPCCR_ASPEN | FP_FPCCR_TS, FP_ENFORCE_LSPACT);
+	expect(0u, FP_FPCCR_TS, FP_ENFORCE_ASPEN_REFUSED);
 }
 
 int main(void)
@@ -100,6 +131,7 @@ int main(void)
 		printf("test_fp_enforce: %d failure(s)\n", failures);
 		return 1;
 	}
+	test_ts();
 	printf("test_fp_enforce: ok\n");
 	return 0;
 }

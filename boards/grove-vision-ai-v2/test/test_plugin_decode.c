@@ -4,35 +4,43 @@
  */
 /**
  * @file    test_plugin_decode.c
- * @brief   The active-decoder shim, and the resident decoder against the plugin
- *          that replaces it (issue #103).
+ * @brief   The active-decoder shim, and the plugin decoder against a reference
+ *          this file builds (issues #103, #104).
  *
- * TWO SUBJECTS, ONE BINARY, BECAUSE THE POINT IS THE COMPARISON.  The real
- * port/npu/nn_active.c is compiled here together with BOTH decoders it routes
- * between: the resident adapter (port/npu/nn_decoder.c) and the REAL plugin
- * source (plugin/blazeface/plugin_main.c, linked against the same
- * svc/blazeface.c the firmware links).  Neither is stubbed, so what is measured
- * is what runs.
+ * [!] WHAT THIS COMPARES CHANGED WITH ISSUE #104, AND SO DID THE CLAIM.  It used
+ * to hold two decoders that both shipped -- the firmware's resident adapter and
+ * the plugin -- and to check they agreed.  The firmware no longer HAS a decoder,
+ * so the second half is now a reference this test builds for itself, directly on
+ * svc/blazeface.c.  That is a weaker statement about the product (nothing is
+ * being cross-checked against another shipped implementation) and it is still
+ * worth making: the plugin's wrapper, not the arithmetic, is what this catches.
  *
- * [!] WHY THE ARITHMETIC BEING SHARED DOES NOT MAKE THIS TAUTOLOGICAL.  Both
- * decoders call one blazeface_decode(), so of course they agree about anchors
- * and NMS -- that is settled in shell/test/test_blazeface.c.  What differs is
- * everything AROUND it, and every one of those has a way to be wrong that the
- * board reports as a working preview:
+ * A test whose stated subject and contents disagree is worse than one with no
+ * comment at all, which is why this paragraph exists rather than a rename.
  *
- *   - the two hold SEPARATE state and SEPARATE thresholds, so a threshold that
- *     reached the wrong one leaves `nn thresh` reporting a number the boxes do
- *     not obey.  Issue #103's own plan calls that out as the divergence a
- *     differential test which gives BOTH decoders the same threshold cannot
- *     see -- so this file sets the threshold through the SHIM and checks the
- *     other decoder did not move;
+ * [!] WHY THE SHARED ARITHMETIC DOES NOT MAKE IT TAUTOLOGICAL.  The reference
+ * and the plugin both call one blazeface_decode(), so of course they agree about
+ * anchors and NMS -- that is settled in shell/test/test_blazeface.c.  What is
+ * tested is everything AROUND it, and each has a way to be wrong that hardware
+ * reports as a working preview:
+ *
+ *   - the plugin holds its OWN state and its OWN threshold.  Since issue #104
+ *     the firmware has none to diverge from, so what is checked is that the shim
+ *     reaches the plugin's and that there is no second number anywhere: with no
+ *     plugin loaded the shim reports NN_SVC_THRESH_NONE rather than borrowing
+ *     one.  Setting through the SHIM and reading the reference is what would
+ *     catch a threshold that went somewhere else;
  *   - the plugin's result is PRIVATE.  It comes back only through draw() and
  *     report(), so those are the only surfaces on which its boxes can be
- *     compared with the resident ones at all;
+ *     compared with the reference's at all;
  *   - the coordinate transform is published separately from the decode, and
- *     wiring it to the wrong one of the two publishers is what made every box
- *     `nn run` produced come back "outside the frame" on hardware.  Here that
- *     is a case, not a session next to the old output.
+ *     wiring it to the wrong publisher is what made every box `nn run` produced
+ *     come back "outside the frame" on hardware.  Here that is a case, not a
+ *     session next to the old output;
+ *   - with NO plugin the shim must REFUSE rather than decode.  On the board
+ *     nothing should reach that backstop -- the service adapter decides
+ *     plugin-or-raw in one helper and the stream refuses admission -- but a shim
+ *     that quietly decoded instead would be invisible from outside.
  *
  * [!] AND THE SHIM IS COMPILED, NOT MODELLED.  Turning a slot offset into a
  * callable address is plugin_run.c's job on the board; here the test supplies
@@ -43,11 +51,11 @@
  * the container tests.
  *
  * npu_tensor_is_int8() and log_write() are defined here for the same reason
- * test_nn_decoder.c defines them: on the board the first lives in npu_tflm.cc,
- * the one translation unit that can see TfLiteType.
+ * test_npu_desc.c defines the first: on the board it lives in npu_tflm.cc, the
+ * one translation unit that can see TfLiteType.
  */
 #include "nn_active.h"
-#include "nn_decoder.h"
+#include "npu_desc.h"
 #include "nn_preproc.h"
 #include "plugin_run.h"
 
@@ -115,7 +123,7 @@ static void expect(const char *what, int cond, const char *fmt, ...)
 /* ---- the synthetic model -------------------------------------------------- */
 
 /*
- * The real model's quantisation, as in test_nn_decoder.c and the core decoder
+ * The real model's quantisation, as in test_npu_desc.c and the core decoder
  * test.  The four tensors carry four DIFFERENT scales and zero points, which is
  * the property a shared dequantisation constant would break.
  */
@@ -137,7 +145,7 @@ static int8_t scr512[A512];
 static int8_t box384[A384 * STRIDE];
 static int8_t scr384[A384];
 
-static struct npu_tensor tens[NN_DECODER_MAX_OUTPUTS];
+static struct npu_tensor tens[NPU_DESC_MAX_OUTPUTS];
 
 static void set_tensor(struct npu_tensor *t, void *data, size_t bytes,
                        int32_t anchors, int32_t chan, float scale, int32_t zp)
@@ -360,58 +368,119 @@ static int out_still_poisoned(void)
 	return 1;
 }
 
+/* ---- the reference decoder, built HERE (issue #104) ----------------------
+ *
+ * It used to be port/npu/nn_decoder.c, which the firmware linked.  With that
+ * gone this is the test's own instance of the same shared arithmetic: its own
+ * state, its own scratch, its own threshold, reached by nobody else.  That
+ * independence is the point -- a threshold set through the shim must not move
+ * it, and if it ever did, the shim would be writing somewhere unexpected.
+ */
+static struct bf_cand   ref_scratch[BF_MAX_CAND];
+static struct blazeface ref_bf;
+
+static unsigned ref_to_desc(const struct npu_tensor *outs, unsigned n,
+                            struct tensor_desc *d, unsigned cap)
+{
+	unsigned i;
+
+	if (n > cap)
+		n = cap;
+	for (i = 0u; i < n; i++)
+		npu_desc_of(&d[i], &outs[i]);
+	return n;
+}
+
+static int ref_shapes_ok(const struct npu_tensor *outs, unsigned n)
+{
+	struct tensor_desc d[NPU_DESC_MAX_OUTPUTS];
+	unsigned m;
+
+	if (outs == NULL)
+		return 0;
+	m = ref_to_desc(outs, n, d, NPU_DESC_MAX_OUTPUTS);
+	return blazeface_shapes_ok(d, m);
+}
+
+static int ref_run(const struct npu_tensor *outs, unsigned n,
+                   struct bf_det *out, int max, struct bf_result *r)
+{
+	struct tensor_desc d[NPU_DESC_MAX_OUTPUTS];
+	unsigned m;
+
+	if (outs == NULL) {
+		memset(r, 0, sizeof(*r));
+		r->status = BF_ERR_ARG;
+		return BF_ERR_ARG;
+	}
+	m = ref_to_desc(outs, n, d, NPU_DESC_MAX_OUTPUTS);
+	return blazeface_decode(&ref_bf, d, m, out, max, r);
+}
+
 int main(void)
 {
 	struct bf_det    ref_det[BF_MAX_DET];
 	struct bf_result ref_res;
 	int ref_n, n, i;
-	unsigned resident_thresh;
+	unsigned ref_thresh;
 
 	printf("test_plugin_decode\n");
 
 	/* ================================================================
-	 * 1.  With no plugin, everything routes to the resident decoder
-	 * ================================================================ */
+	 * 1.  With no plugin there is NO DECODER (issue #104)
+	 * ================================================================
+	 *
+	 * [!] THE SHIM MUST REFUSE, NOT DECODE.  Nothing on the board should reach
+	 * this -- the service adapter picks plugin-or-raw in the one helper both its
+	 * console callers go through, and the stream refuses admission before a
+	 * camera is lit -- so a shim that quietly decoded here would be invisible
+	 * from outside.  It is checked precisely because it is unreachable.
+	 */
 	pl_loaded = 0;
 	reset_tensors();
 	put_the_scene();
 	publish_geom();
 
+	expect("the reference decoder initialises",
+	       blazeface_init(&ref_bf, ref_scratch, sizeof ref_scratch) == BF_OK,
+	       "refused");
+
 	expect("no plugin loaded: the shim says so",
 	       nn_active_is_plugin() == 0, "claims a plugin");
-	expect("shapes_ok is the resident answer",
-	       nn_active_shapes_ok(tens, 4) == nn_decoder_shapes_ok(tens, 4),
-	       "disagree");
+	expect("and it reads no shape, even one the reference accepts",
+	       nn_active_shapes_ok(tens, 4) == 0 && ref_shapes_ok(tens, 4) != 0,
+	       "shim %d, reference %d", nn_active_shapes_ok(tens, 4),
+	       ref_shapes_ok(tens, 4));
 
-	memset(det, 0, sizeof det);
-	memset(&res, 0, sizeof res);
-	n = nn_active_decode(tens, 4, det, BF_MAX_DET, &res);
-	expect("the resident decode runs and fills the boxes in",
-	       n > 0 && res.status == BF_OK && res.thresh_milli != 0u,
-	       "n %d status %d thresh %u", n, res.status, res.thresh_milli);
+	n = nn_active_decode(tens, 4);
+	expect("a decode says no decoder is bound, and does not say 'not a "
+	       "detector'", n == BF_ERR_UNINIT, "got %d", n);
 
 	rec_reset();
 	nn_active_draw(&rec_painter);
-	expect("and the shim paints nothing -- the base draws those boxes",
-	       rec_n == 0u && rec_other == 0u, "%u rect(s), %u other", rec_n,
-	       rec_other);
+	expect("nothing paints", rec_n == 0u && rec_other == 0u,
+	       "%u rect(s), %u other", rec_n, rec_other);
+	expect("and a stream would be refused for having nothing to draw",
+	       nn_active_can_draw() == 0, "claims it draws");
 
 	cap_reset();
 	expect("and reports nothing, successfully",
 	       nn_active_report(cap_write, NULL) == 0 && cap_len == 0u,
 	       "wrote %zu B", cap_len);
 
-	expect("the threshold read back is the resident one",
-	       nn_active_get_thresh_milli() == nn_decoder_get_thresh_milli(),
-	       "%u vs %u", nn_active_get_thresh_milli(),
-	       nn_decoder_get_thresh_milli());
+	expect("the threshold is reported absent, not borrowed from anywhere",
+	       nn_active_get_thresh_milli() == NN_SVC_THRESH_NONE, "%u",
+	       nn_active_get_thresh_milli());
+	expect("and setting one is refused as a state, not as a bad value",
+	       nn_active_set_thresh_milli(700u) == NN_ACTIVE_THRESH_NO_DECODER,
+	       "got %d", nn_active_set_thresh_milli(700u));
 
 	/* Keep the reference for the differential section below, decoded at the
 	 * DEFAULT threshold and with the geometry published. */
-	ref_n = nn_decoder_run(tens, 4, ref_det, BF_MAX_DET, &ref_res);
+	ref_n = ref_run(tens, 4, ref_det, BF_MAX_DET, &ref_res);
 	expect("the reference decode found more than one face",
 	       ref_n > 1, "n %d -- the scene is not exercising order", ref_n);
-	resident_thresh = nn_decoder_get_thresh_milli();
+	ref_thresh = blazeface_get_thresh_milli(&ref_bf);
 
 	/* ================================================================
 	 * 2.  Load the plugin -- its own entry point, with the real vtable
@@ -449,14 +518,21 @@ int main(void)
 	}
 
 	/* ================================================================
-	 * 3.  The plugin decodes, and leaves the resident output alone
-	 * ================================================================ */
+	 * 3.  The plugin decodes, and the caller's boxes stay untouched
+	 * ================================================================
+	 *
+	 * [!] SINCE ISSUE #104 THE SIGNATURE IS WHAT GUARANTEES THAT, not this
+	 * check: nn_active_decode() no longer TAKES a box array, because with no
+	 * decoder in the firmware nothing is left to fill one.  The poison stays
+	 * because it is free and because it pins the property the signature now
+	 * carries -- if a box array ever comes back, this says what it may not do.
+	 */
 	poison_out();
-	n = nn_active_decode(tens, 4, det, BF_MAX_DET, &res);
-	expect("the plugin decode returns the same count as the resident one",
-	       n == ref_n, "plugin %d, resident %d", n, ref_n);
-	expect("[!] and did not write the caller's boxes or diagnostics",
-	       out_still_poisoned(), "the shim let a plugin fill them in");
+	n = nn_active_decode(tens, 4);
+	expect("the plugin decode returns the same count as the reference",
+	       n == ref_n, "plugin %d, reference %d", n, ref_n);
+	expect("[!] and nothing wrote the caller's boxes or diagnostics",
+	       out_still_poisoned(), "something filled them in");
 
 	expect("shapes_ok goes to the plugin and agrees",
 	       nn_active_shapes_ok(tens, 4) != 0, "the plugin refused the tensors");
@@ -500,7 +576,7 @@ int main(void)
 		expect("and names the same number of faces", strstr(cap_buf, want) != NULL,
 		       "no '%s' in:\n%s", want, cap_buf);
 
-		snprintf(want, sizeof want, "thresh %u/1000", resident_thresh);
+		snprintf(want, sizeof want, "thresh %u/1000", ref_thresh);
 		expect("at the threshold the decode applied",
 		       strstr(cap_buf, want) != NULL, "no '%s' in:\n%s", want, cap_buf);
 
@@ -533,40 +609,43 @@ int main(void)
 	 * 7.  [!] The threshold follows the decoder that will use it
 	 * ================================================================ */
 	expect("with a plugin loaded, the threshold read back is the plugin's",
-	       nn_active_get_thresh_milli() == resident_thresh,
+	       nn_active_get_thresh_milli() == ref_thresh,
 	       "%u vs %u -- they start equal", nn_active_get_thresh_milli(),
-	       resident_thresh);
+	       ref_thresh);
 
 	expect("the shim accepts a new threshold",
-	       nn_active_set_thresh_milli(800u) != 0, "refused");
+	       nn_active_set_thresh_milli(800u) == NN_ACTIVE_THRESH_OK, "refused");
 	expect("and reads it back", nn_active_get_thresh_milli() == 800u,
 	       "got %u", nn_active_get_thresh_milli());
-	expect("[!] while the RESIDENT decoder's threshold has not moved",
-	       nn_decoder_get_thresh_milli() == resident_thresh,
-	       "resident is now %u -- the shim wrote the wrong decoder",
-	       nn_decoder_get_thresh_milli());
+	expect("[!] while the reference decoder's threshold has not moved",
+	       blazeface_get_thresh_milli(&ref_bf) == ref_thresh,
+	       "reference is now %u -- the shim wrote somewhere unexpected",
+	       blazeface_get_thresh_milli(&ref_bf));
 
 	/* And it is the number the next decode really applies. */
 	cap_reset();
-	(void)nn_active_decode(tens, 4, det, BF_MAX_DET, &res);
+	(void)nn_active_decode(tens, 4);
 	(void)nn_active_report(cap_write, NULL);
 	expect("[!] and the plugin's next decode applies it",
 	       strstr(cap_buf, "thresh 800/1000") != NULL,
 	       "the report says otherwise:\n%s", cap_buf);
 
 	expect("an out-of-range threshold is refused through the shim too",
-	       nn_active_set_thresh_milli(1000u) == 0, "accepted");
+	       nn_active_set_thresh_milli(1000u) == NN_ACTIVE_THRESH_REFUSED,
+	       "accepted");
 	expect("and changed nothing", nn_active_get_thresh_milli() == 800u,
 	       "got %u", nn_active_get_thresh_milli());
 
-	/* Unloading gives the question back to the resident decoder, with the
-	 * value it has had all along. */
+	/* [!] AND UNLOADING LEAVES NOTHING HOLDING ONE (issue #104).  It used to
+	 * hand the question back to the resident decoder; there is no such thing to
+	 * hand it to, and reporting the plugin's last value would describe a setting
+	 * nothing would apply. */
 	pl_loaded = 0;
-	expect("unloaded, the threshold is the resident one again",
-	       nn_active_get_thresh_milli() == resident_thresh,
-	       "got %u, want %u", nn_active_get_thresh_milli(), resident_thresh);
+	expect("unloaded, the threshold is absent rather than the plugin's last",
+	       nn_active_get_thresh_milli() == NN_SVC_THRESH_NONE, "got %u",
+	       nn_active_get_thresh_milli());
 	pl_loaded = 1;
-	(void)nn_active_set_thresh_milli(resident_thresh);
+	(void)nn_active_set_thresh_milli(ref_thresh);
 
 	/* ================================================================
 	 * 8.  [!] No geometry: nothing is drawn and the report says so
@@ -576,7 +655,7 @@ int main(void)
 	 * publishes a different one, produced "outside the frame" every time.
 	 */
 	nn_active_clear_geom();
-	(void)nn_active_decode(tens, 4, det, BF_MAX_DET, &res);
+	(void)nn_active_decode(tens, 4);
 	rec_reset();
 	nn_active_draw(&rec_painter);
 	expect("[!] with no published geometry a plugin draws nothing",
@@ -605,12 +684,12 @@ int main(void)
 		put_the_scene();
 		tens[1].type = (int8_t)(T_INT8 + 1);
 		pl_loaded = 0;
-		ref_n = nn_decoder_run(tens, 4, ref_det, BF_MAX_DET, &ref_res);
+		ref_n = ref_run(tens, 4, ref_det, BF_MAX_DET, &ref_res);
 		pl_loaded = 1;
 		poison_out();
-		n = nn_active_decode(tens, 4, det, BF_MAX_DET, &res);
+		n = nn_active_decode(tens, 4);
 		expect("a non-int8 tensor: both refuse with the same code",
-		       n == ref_n && n == BF_ERR_MODEL, "plugin %d, resident %d", n,
+		       n == ref_n && n == BF_ERR_MODEL, "plugin %d, reference %d", n,
 		       ref_n);
 		expect("and the plugin still left the caller's arrays alone",
 		       out_still_poisoned(), "it wrote them");
@@ -622,11 +701,11 @@ int main(void)
 		put_the_scene();
 		tens[3].rank = 0;
 		pl_loaded = 0;
-		ref_n = nn_decoder_run(tens, 4, ref_det, BF_MAX_DET, &ref_res);
+		ref_n = ref_run(tens, 4, ref_det, BF_MAX_DET, &ref_res);
 		pl_loaded = 1;
-		n = nn_active_decode(tens, 4, det, BF_MAX_DET, &res);
+		n = nn_active_decode(tens, 4);
 		expect("a rank-0 tensor: both refuse with the same code",
-		       n == ref_n && n == BF_ERR_MODEL, "plugin %d, resident %d", n,
+		       n == ref_n && n == BF_ERR_MODEL, "plugin %d, reference %d", n,
 		       ref_n);
 
 		/* (c) a refusal the plugin has to REPORT, since it has no boxes */
@@ -641,19 +720,24 @@ int main(void)
 		       rec_n == 0u, "%u rectangle(s) from a failed decode", rec_n);
 
 		/* (d) a null tensor array.  Unreachable from either caller in the
-		 * firmware -- which is why the two branches could have disagreed about
-		 * it forever; the resident one checks and a plugin cannot. */
+		 * firmware, which is why the answer has to be checked here: a plugin
+		 * cannot defend against it -- to_desc() would walk the pointer -- so the
+		 * shim does it ONCE, ahead of the branch.  Both settings of pl_loaded
+		 * are exercised because the value of putting the check before the branch
+		 * is precisely that the two cannot answer differently; move it into a
+		 * branch and this is what notices.
+		 *
+		 * [!] It is BF_ERR_ARG, not the no-decoder code: the caller's mistake is
+		 * a different thing from there being nothing loaded. */
 		for (c = 0u; c < 2u; c++) {
 			pl_loaded = (int)c;
-			memset(&res, 0, sizeof res);
-			n = nn_active_decode(NULL, 4, det, BF_MAX_DET, &res);
+			n = nn_active_decode(NULL, 4);
 			expect("a null tensor array is an argument error either way",
-			       n == BF_ERR_ARG && res.status == BF_ERR_ARG,
-			       "%s: n %d status %d", c ? "plugin" : "resident", n,
-			       res.status);
+			       n == BF_ERR_ARG, "%s: n %d",
+			       c ? "plugin loaded" : "no plugin", n);
 			expect("and shapes_ok refuses it either way",
 			       nn_active_shapes_ok(NULL, 4) == 0, "%s: accepted",
-			       c ? "plugin" : "resident");
+			       c ? "plugin loaded" : "no plugin");
 		}
 		pl_loaded = 1;
 	}
@@ -664,13 +748,12 @@ int main(void)
 	reset_tensors();
 	put_the_scene();
 	pl_loaded = 0;
-	ref_n = nn_decoder_run(tens, NN_DECODER_MAX_OUTPUTS + 4u, ref_det,
-	                       BF_MAX_DET, &ref_res);
+	ref_n = ref_run(tens, NPU_DESC_MAX_OUTPUTS + 4u, ref_det, BF_MAX_DET,
+	                &ref_res);
 	pl_loaded = 1;
-	n = nn_active_decode(tens, NN_DECODER_MAX_OUTPUTS + 4u, det, BF_MAX_DET,
-	                     &res);
+	n = nn_active_decode(tens, NPU_DESC_MAX_OUTPUTS + 4u);
 	expect("an output count past the descriptor array is clamped, not walked",
-	       n == ref_n && n > 0, "plugin %d, resident %d", n, ref_n);
+	       n == ref_n && n > 0, "plugin %d, reference %d", n, ref_n);
 
 	expect("the plugin never needed the log channel for a good decode",
 	       base_logs == 0u, "%u log line(s)", base_logs);

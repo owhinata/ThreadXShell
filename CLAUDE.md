@@ -709,6 +709,16 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   上限付き top-N（donor は満杯で打ち切るためピークが前半の最大になり、後方 384 群の
   最強顔を落とす）。出力 4 本は **shape で探す**。**4 本の scale/zp は全部違う**
   （8x8 のスコアは zp 126 / scale 1.22 で実質 3 値）ので共有の脱量子化定数を作らない。
+  [!] **ただし Grove のファームはこれをリンクしない**（#104）。**デコーダは container
+  でしか届かない** — `svc/blazeface.c` を Grove でコンパイルするのは plugin だけで、
+  **no-storage 監査もその plugin の実オブジェクトに対して走る**（`grove_add_plugin` の
+  `AUDIT_SHARED`）。**ファームに常駐デコーダを戻さない。**
+  素の `.tflite` は **`nn run` で出力テンソルをそのまま報告**する（推論は走る）。
+  **class report に落とさない** — 4 本の回帰テンソルに top-5 を出すのは無意味。
+  `nn stream` は**デコーダが無い時点で拒否**（shape や draw の前）。
+  **入力量子化の検査は持ち主ごと消えた** — `pixel - 128` はボードの規約で、
+  container がそれに合わせて書かれる（board README）。
+  `nn thresh` は誰も閾値を持たなければ **`none`**（`NN_SVC_THRESH_NONE` = 0）。
   **int8 と float32 の両方**を扱う（Grove は int8、他 2 ボードは float32 で、
   float32 は affine を通さない — 2 ボードは未量子化テンソルに scale 0 を publish する）。
   [!] **共有 TU は可変記憶域を 1 バイトも持たない。** 閾値は普通の RAM に board が

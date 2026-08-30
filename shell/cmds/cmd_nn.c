@@ -176,6 +176,26 @@ static const char nn_withheld[] =
 	"-- held by a running stream (`nn stream stats`, or stop it)";
 
 /*
+ * The threshold line, in one place because two subcommands print it (#104).
+ *
+ * [!] ABSENCE HAS ITS OWN SPELLING.  A board can hold no threshold at all -- no
+ * decoder loaded, or a loaded one that takes no parameters -- and rendering that
+ * as `0/1000` offers the operator a setting to adjust that nothing would read.
+ * The contract names the value (NN_SVC_THRESH_NONE); this is where it is said
+ * out loud, once, so `nn info` and `nn thresh` cannot drift apart about it.
+ */
+static void nn_print_thresh(struct cli_instance *sh)
+{
+	unsigned milli = nn_svc_thresh_get();
+
+	if (milli == NN_SVC_THRESH_NONE)
+		cli_print(sh, "thresh  : none -- the active decoder has no "
+		              "threshold\r\n");
+	else
+		cli_print(sh, "thresh  : %u/1000\r\n", milli);
+}
+
+/*
  * Adapt the board's length-bearing writer onto the shell's printer.
  *
  * [!] THE BUFFER IS A LOCAL, NOT A STATIC.  This file owns no mutable storage
@@ -280,7 +300,7 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 #endif
 	}
 
-	cli_print(sh, "thresh  : %u/1000\r\n", nn_svc_thresh_get());
+	nn_print_thresh(sh);
 
 	/* Whatever this board wants to add, in its own words.  Last, so the shared
 	 * lines always appear in the same place whatever a board says after them. */
@@ -595,6 +615,50 @@ static void nn_print_top(struct cli_instance *sh, unsigned index)
 	}
 }
 
+/*
+ * The outputs, as they are, for a board that has no decoder for them (#104).
+ *
+ * [!] THIS DESCRIBES, IT DOES NOT INTERPRET.  Every other report here says what
+ * the numbers MEAN -- faces, classes -- and each of those readings belongs to a
+ * decoder that agreed to it.  With no decoder there is no such agreement, so
+ * what can honestly be printed is the shape of the buffers and where to read
+ * them; `nn out` already does the reading, and repeating it here would be a
+ * second value-dumping loop that could disagree with the first.
+ *
+ * Pinned across the whole walk for the reason nn_print_top() is: these are
+ * descriptors of arena buffers, and an unload on another console closes the
+ * interpreter underneath them.
+ */
+static void nn_print_raw_outputs(struct cli_instance *sh)
+{
+	int n, i;
+
+	if (nn_svc_tensors_pin() != NN_SVC_OK) {
+		cli_warn(sh, "out     : the model is busy or gone\r\n");
+		return;
+	}
+	n = nn_svc_output_count();
+	if (n < 0) {
+		nn_svc_tensors_unpin();
+		cli_warn(sh, "out     : the outputs are unavailable just now\r\n");
+		return;
+	}
+
+	cli_print(sh, "decoder : none -- %d output(s), undecoded\r\n", n);
+	for (i = 0; i < n; i++) {
+		struct tensor_desc t;
+
+		if (nn_svc_output((unsigned)i, &t) == NN_SVC_OK)
+			nn_print_tensor(sh, "out", i, &t);
+		else
+			cli_warn(sh, "  out[%d]  unavailable just now\r\n", i);
+	}
+	nn_svc_tensors_unpin();
+
+	cli_print(sh, "note    : `nn out <tensor> <count>` reads the values; a "
+	              "container carrying a decoder interprets them\r\n");
+}
+
 static void nn_print_dets(struct cli_instance *sh,
                           const struct nn_det_snapshot *snap,
                           const struct bf_det *dets)
@@ -617,13 +681,24 @@ static void nn_print_dets(struct cli_instance *sh,
 	 * codes belong to the resident decoder's vocabulary, and a plugin's count
 	 * is its own.
 	 */
-	if (snap->external) {
+	if (snap->kind == (uint8_t)NN_DET_PLUGIN_REPORT) {
 		struct nn_info_sink sink;
 
 		sink.sh = sh;
 		if (nn_svc_report(nn_info_write, &sink) < 0)
 			cli_warn(sh, "nn: the decoder stopped part way through its own "
 			             "report\r\n");
+		return;
+	}
+	/*
+	 * [!] NOTHING DECODED THIS, so nothing here interprets it (issue #104).  A
+	 * board with no decoder ran the model and has raw outputs; the honest report
+	 * is the tensors themselves.  Not the class report: that reads output 0 as a
+	 * vector of class scores, which for a detector's regression tensor is a tidy
+	 * table of numbers that mean nothing.
+	 */
+	if (snap->kind == (uint8_t)NN_DET_RAW_TENSORS) {
+		nn_print_raw_outputs(sh);
 		return;
 	}
 
@@ -841,9 +916,10 @@ out:
 static int cmd_nn_thresh(struct cli_instance *sh, int argc, char **argv)
 {
 	uint32_t milli;
+	int rc;
 
 	if (argc < 2) {
-		cli_print(sh, "thresh  : %u/1000\r\n", nn_svc_thresh_get());
+		nn_print_thresh(sh);
 		return 0;
 	}
 	if (cli_parse_u32(argv[1], &milli) != 0 || milli == 0u || milli > 999u) {
@@ -851,11 +927,21 @@ static int cmd_nn_thresh(struct cli_instance *sh, int argc, char **argv)
 		              "(milli-probability)\r\n");
 		return 1;
 	}
-	if (nn_svc_thresh_set((unsigned)milli) != NN_SVC_OK) {
+	rc = nn_svc_thresh_set((unsigned)milli);
+	if (rc == NN_SVC_ERR_STATE) {
+		/* [!] NOT "the threshold was not accepted" (issue #104).  The value was
+		 * fine; there is nothing here that holds one.  Told apart because the
+		 * two send an operator to different places -- a number to change, or a
+		 * container to load. */
+		cli_error(sh, "nn: no decoder is loaded, so there is no threshold to "
+		              "set\r\n");
+		return 1;
+	}
+	if (rc != NN_SVC_OK) {
 		cli_error(sh, "nn: the threshold was not accepted\r\n");
 		return 1;
 	}
-	cli_print(sh, "thresh  : %u/1000\r\n", nn_svc_thresh_get());
+	nn_print_thresh(sh);
 	return 0;
 }
 

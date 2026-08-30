@@ -11,7 +11,7 @@
 
 #include "tx_api.h"        /* tx_time_get(): ThreadX ticks, 1 ms here */
 
-#include "nn_decoder.h"
+#include "npu_desc.h"
 #include "nn_active.h"
 #include "plugin_paint.h"
 #include "plugin_abi.h"
@@ -22,15 +22,6 @@
 #include "nn_preproc.h"
 #include "npu.h"
 #include "tx_glue.h"       /* the EPK's TIMER2: the stage clock (issue #60) */
-
-/* Enough descriptors for any model handed to the decoder; BlazeFace needs
- * four.  Matches the cap in cmd_nn.c for the same reason it exists there. */
-
-/* Box colour and thickness.  Green because it is the one hue the camera's
- * unbalanced output never produces at full saturation, so a box is never
- * mistaken for something in the scene. */
-#define NN_OVERLAY_RGB565  0x07E0u
-#define NN_OVERLAY_STROKE  2u
 
 /*
  * [!] Set from the SHELL thread, read on the PRODUCER thread.
@@ -89,14 +80,16 @@ static uint32_t nn_ov_prof_frames;
  *
  * Static because nothing here may ever be freed under a producer -- or now a
  * panel thread -- that did not acknowledge a stop (see nn_overlay.h).
+ *
+ * [!] NO BOX ARRAY SINCE ISSUE #104.  A stream only runs with a plugin loaded,
+ * and a plugin's result is its own -- it paints through the painter, and this
+ * file never learns what shape the result has.
  */
-static struct bf_det nn_ov_det[BF_MAX_DET];
 /* The most recent decode's status, so `nn stream`'s summary can say WHY it
  * annotated nothing rather than only that it did not. */
 static int           nn_ov_last_status;
 static int           nn_ov_ndet;
 static struct nn_preproc_geom nn_ov_geom;
-static int           nn_ov_geom_ok;
 
 /*
  * How deep the stack already is at the instant a decoder is CALLED (issue #103).
@@ -175,11 +168,10 @@ static int nn_overlay_process(void *ctx, const void *pixels,
                               uint16_t w, uint16_t h)
 {
 	struct npu_tensor in;
-	struct npu_tensor outs[NN_DECODER_MAX_OUTPUTS];
+	struct npu_tensor outs[NPU_DESC_MAX_OUTPUTS];
 	unsigned n_out, i;
 	uint32_t t0, t1;
 	uint32_t e0, e1, e2, e3;
-	struct bf_result bfr;
 	int nd;
 
 	(void)ctx;
@@ -205,7 +197,6 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	(void)pixels;
 
 	nn_ov_ndet    = 0;
-	nn_ov_geom_ok = 0;
 
 	/* Stop check 1 of 3: nothing started yet, so this is free. */
 	if (nn_ov_stop) {
@@ -243,7 +234,7 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	}
 
 	n_out = npu_output_count();
-	if (n_out > NN_DECODER_MAX_OUTPUTS) {
+	if (n_out > NPU_DESC_MAX_OUTPUTS) {
 		nn_ov_stats.errors++;
 		return -1;
 	}
@@ -287,7 +278,7 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	 * depth a callee inherits rather than the depth including it. */
 	nn_ov_note_depth(&nn_ov_depth_decode);
 
-	nd = nn_active_decode(outs, n_out, nn_ov_det, BF_MAX_DET, &bfr);
+	nd = nn_active_decode(outs, n_out);
 	if (nd < 0) {
 		/* [!] There is no console on this path, so the only way a decode
 		 * failure can be told apart afterwards is if it is counted apart
@@ -314,7 +305,6 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	nn_ov_decode_ticks += (uint32_t)(e3 - e2);
 	nn_ov_prof_frames++;
 	nn_ov_ndet    = nd;
-	nn_ov_geom_ok = 1;
 	nn_active_set_geom(&nn_ov_geom);   /* issue #103 */
 
 	/* Stop check 3 of 3: a stop that arrived during the inference should not
@@ -336,12 +326,17 @@ static void nn_overlay_draw(void *ctx, uint16_t *fb, uint16_t fb_w,
 	nn_ov_note_depth(&nn_ov_depth_draw);
 
 	/*
-	 * A plugin paints its own result (issue #103), because the firmware does
+	 * The plugin paints its own result (issue #103), because the firmware does
 	 * not know what shape that result has -- which is the whole point of
-	 * issue #78.  The resident path below stays for a container that carries
-	 * no plugin.
+	 * issue #78.
+	 *
+	 * [!] AND THERE IS NO OTHER BRANCH SINCE ISSUE #104.  A resident path used
+	 * to follow this one, mapping bf_det boxes through nn_preproc_box() and
+	 * drawing them here.  With no decoder in the firmware nothing can reach it:
+	 * nn_detector_ready() refuses to start a stream unless a plugin is loaded
+	 * AND draws, so by the time the panel thread is calling this, both are true.
 	 */
-	if (nn_active_is_plugin()) {
+	{
 		struct plugin_painter paint;
 		struct plugin_paint_budget bud;
 
@@ -356,34 +351,6 @@ static void nn_overlay_draw(void *ctx, uint16_t *fb, uint16_t fb_w,
 		if (NN_OV_DRAW_PIXELS - bud.pixels > nn_ov_draw_spent)
 			nn_ov_draw_spent = NN_OV_DRAW_PIXELS - bud.pixels;
 		nn_ov_draw_refused += bud.refused;
-		return;
-	}
-
-	/*
-	 * Bound by lcd_st7789.h's callback contract: the panel guard is held,
-	 * so nothing here blocks, sleeps, re-enters the driver or takes another
-	 * lock.  lcd_rect_wire() is pure, which is what makes it the exception.
-	 */
-	if (!nn_ov_geom_ok)
-		return;
-
-	for (int k = 0; k < nn_ov_ndet; k++) {
-		struct nn_preproc_box b;
-
-		/* The SAME transform the input was built with, inverted -- and
-		 * the reason it is a function rather than four multiplications
-		 * here.  It also rejects the non-finite box a degenerate model
-		 * can produce, before anything is cast to an integer. */
-		if (nn_preproc_box(&nn_ov_geom, nn_ov_det[k].x, nn_ov_det[k].y,
-		                   nn_ov_det[k].w, nn_ov_det[k].h, &b) != 0)
-			continue;
-
-		/* The frame maps 1:1 onto the panel at the origin (the sink
-		 * blits the whole 320x240 frame at 0,0 in landscape), so frame
-		 * pixels ARE framebuffer pixels.  If that ever stops being
-		 * true, this is the line that has to know. */
-		lcd_rect_wire(fb, fb_w, fb_h, b.x0, b.y0, b.x1, b.y1,
-		              NN_OVERLAY_RGB565, NN_OVERLAY_STROKE);
 	}
 }
 
@@ -409,7 +376,6 @@ const struct cam_lcd_overlay *nn_overlay_arm(void)
 	nn_ov_decode_ticks     = 0u;
 	nn_ov_prof_frames      = 0u;
 	nn_ov_ndet             = 0;
-	nn_ov_geom_ok          = 0;
 	nn_ov_stop             = 0u;
 	return &nn_ov_vtable;
 }

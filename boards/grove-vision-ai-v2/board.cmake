@@ -589,19 +589,17 @@ target_compile_options(tflm_obj PRIVATE
 # executable so the seam probe below can link the SAME objects a second time
 # without recompiling them (issue #30).  Nothing else changes: `shell` still
 # links exactly this object set in exactly this order.
-# [!] ONE VARIABLE FOR THE SHARED DECODER'S PATH, used by the source list, the
-# -O3 property and the storage gate below (issue #97).  set_source_files_properties()
-# SILENTLY IGNORES a path that is not a source of the target, so a file moved out
-# from under it loses its optimisation level with no warning and no gate -- and
-# the board README's frame rates depend on this one being built -O3.  Spelling the
-# path once removes the way those two can drift apart; the checks after the target
-# is defined catch the other way, where the path is stale on both.
+# [!] ONE VARIABLE FOR THE SHARED DECODER'S PATH.  Since issue #104 the FIRMWARE
+# does not compile this file at all -- the plugin that carries the decoder does
+# (grove_add_plugin below), and that is the only compile of it that ships on this
+# board.  The path is still spelled once, because the plugin build and the
+# storage gate both name it and two spellings could drift.
 get_filename_component(GROVE_SHARED_DECODER
                        "${CMAKE_SOURCE_DIR}/svc/blazeface.c" ABSOLUTE)
 if(NOT EXISTS "${GROVE_SHARED_DECODER}")
     message(FATAL_ERROR
         "shared BlazeFace decoder not found:\n  ${GROVE_SHARED_DECODER}\n"
-        "This board builds it (issue #97); it is not optional.")
+        "The blazeface plugin builds it (issue #97); it is not optional.")
 endif()
 
 add_library(shell_objs OBJECT
@@ -673,15 +671,14 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/npu/npu_hw.c"
     "${BOARD_DIR}/port/npu/nn_preproc.c"
     "${BOARD_DIR}/port/npu/nn_overlay.c"
-    # Model-specific post-processing (issue #45), now SHARED with the other two
-    # boards (issue #97).  The decoder is above npu.h, which stays model-agnostic;
-    # it sees tensor DESCRIPTORS and not the interpreter, which is what lets the
-    # host test drive the real decoder.  nn_decoder.c is this board's translation
-    # from npu_tensor into svc/tensor.h -- the only file here that knows both --
-    # and it owns the decoder's state and scratch, because the shared TU owns
-    # nothing (see the storage gate below).
-    "${GROVE_SHARED_DECODER}"
-    "${BOARD_DIR}/port/npu/nn_decoder.c"
+    # npu_tensor -> tensor_desc (issues #97, #104).  The only file here that
+    # knows both types, and all that is left of what used to be nn_decoder.c:
+    # THE DECODER ITSELF IS NO LONGER IN THIS FIRMWARE.  svc/blazeface.c is
+    # compiled by the plugin that carries it (grove_add_plugin below), so a
+    # container's decoder is the only one on this board.  `nn out`, `nn info`
+    # and the active-decoder shim need this translation whatever interprets the
+    # tensors, or whether anything does.
+    "${BOARD_DIR}/port/npu/npu_desc.c"
     "${BOARD_DIR}/port/npu/nn_svc_grove.c"
     "${BOARD_DIR}/port/npu/nn_stream_state.c"
     "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"
@@ -813,9 +810,13 @@ target_compile_options(shell_objs PRIVATE -Os)
 # option buys them is ordinary scalar quality: unrolling and scheduling.  The
 # numbers that justify it are in issue #76 and the board README, measured on the
 # board -- if they ever stop justifying it, take it out.
+# [!] THE SHARED DECODER IS NOT HERE SINCE ISSUE #104.  shell_objs no longer
+# builds it, and the check below deliberately FATAL_ERRORs on a -O3 path the
+# target does not compile.  What executes on this board is the plugin's copy,
+# built with the plugin's own flags -- so the decode arithmetic's optimisation
+# level is stated in GROVE_PLUGIN_CFLAGS and nowhere else.
 set(GROVE_O3_SOURCES
     "${BOARD_DIR}/port/camera/cam_convert.c"
-    "${GROVE_SHARED_DECODER}"
     "${BOARD_DIR}/port/npu/nn_preproc.c"
     "${BOARD_DIR}/port/lcd/lcd_st7789.c")
 set_source_files_properties(${GROVE_O3_SOURCES}
@@ -887,19 +888,24 @@ foreach(_o3 IN LISTS GROVE_O3_SOURCES)
     if(NOT _o3_last STREQUAL "-O3")
         message(FATAL_ERROR
             "the effective optimisation for\n  ${_o3}\nis '${_o3_last}', not -O3 "
-            "(its per-source options are: ${_o3_opts}).\nThese four files carry the "
+            "(its per-source options are: ${_o3_opts}).\nThese files carry the "
             "per-frame pixel loops and the board README's frame rates are measured "
             "with them at -O3; a different level here is a silent regression.")
     endif()
 endforeach()
-# --- the shared decoder must own no storage (issue #97) -----------------------
+# --- the shared files must own no storage (issue #97) -------------------------
 #
 # See cmake/shared_storage_gate.cmake for what this checks and why it has to be
 # THIS board's compile rather than a generic one.
+#
+# [!] THE DECODER'S AUDIT IS NOT HERE ANY MORE (issue #104).  This helper builds
+# its audit object from a CONSUMER TARGET's properties so that the audit is the
+# board's real compile -- and shell_objs stopped compiling svc/blazeface.c.
+# Reconstructing the plugin's flags here would have produced an object no shipped
+# artifact contains, which is the second of the two mistakes that file's header
+# records.  The audit moved into grove_add_plugin(), where it runs on the REAL
+# object that gets linked into the plugin image.
 include("${CMAKE_SOURCE_DIR}/cmake/shared_storage_gate.cmake")
-add_shared_storage_gate(NAME grove_decoder_audit SOURCE "${GROVE_SHARED_DECODER}"
-                         IFACE bsp_iface CONSUMER shell_objs)
-add_dependencies(shell grove_decoder_audit_check)
 
 # The same rule on the one shared `nn` command and its pure half (issue #50).
 # Same property, same failure mode: a static in either lands in memory no board
@@ -1471,14 +1477,14 @@ add_custom_target(flash
 # lookup away from inheriting the firmware's settings; explicit commands, the
 # way verify_vela_model is built, keep the two graphs from touching.
 #
-# The flags are stated here rather than inherited for the same reason.  The
-# shared decoder is compiled at -O3 inside shell_objs through a directory
-# property; the plugin gets -Os and -ffreestanding, because it links no libc and
-# lives in a 128 KiB reservation.
+# The flags are stated here rather than inherited for the same reason: the
+# plugin gets -Os and -ffreestanding, because it links no libc and lives in a
+# 128 KiB reservation.  Since issue #104 these are also the only flags the
+# shared decoder is ever built with on this board.
 #
-# [!] AND svc/blazeface.c IS THE SAME FILE THE FIRMWARE LINKS.  Compiling a copy
-# would fork the decoder issue #97 spent itself merging.  It is the wrapper that
-# is new, not the arithmetic.
+# [!] AND svc/blazeface.c IS THE SAME FILE THE OTHER TWO BOARDS LINK.  Compiling
+# a copy would fork the decoder issue #97 spent itself merging.  It is the
+# wrapper that is new, not the arithmetic.
 # What each thread may lend a plugin callback (issue #103).  DERIVED, not
 # guessed any more:
 #
@@ -1492,9 +1498,17 @@ add_custom_target(flash
 # FPCCR.TS is enforced to zero, plus ThreadX's own 100 B PendSV save, which can
 # coexist with it while a callback is suspended).
 #
-#   producer  8192 - 577 - 208 = 7407 available   (plugin decode measures 192 B)
-#   panel     2048 - 233 - 208 = 1607 available   (plugin draw   measures 300 B)
+#   producer  8192 - 553 - 208 = 7431 available   (plugin decode measures 192 B)
+#   panel     2048 - 217 - 208 = 1623 available   (plugin draw   measures 300 B)
 #   shell     4096 - (not measured) - 208
+#
+# [!] RE-MEASURED FOR ISSUE #104, AND THE TWO EARLIER RECORDS DISAGREED.  This
+# comment said 233 B at the panel call site and the board README said 249 B for
+# the same one, so one of them had been wrong since issue #103 -- and the
+# allowances are derived from it.  Both are superseded by 553 / 217, measured on
+# hardware with this build.  The frames got SMALLER because #104 shrank them:
+# nn_active_decode() lost three parameters and the overlay lost the locals that
+# went with its resident draw path.
 #
 # [!] TWO OF THE PROVISIONAL VALUES WERE ABOVE THE CEILING, not merely generous.
 # PRODUCER was 8192 -- the whole thread stack -- and SHELL was 4096, likewise.
@@ -1536,13 +1550,46 @@ set(GROVE_PLUGIN_CFLAGS
     -fstack-usage
     -I "${CMAKE_SOURCE_DIR}/svc" -I "${GROVE_PLUGIN_COMMON}")
 
-# grove_add_plugin(<name> SOURCES <extra .c ...> ENTRIES <sym=limit ...>)
+# grove_add_plugin(<name> SOURCES <extra .c ...> ENTRIES <sym=limit ...>
+#                          AUDIT_SHARED <src ...>)
 #
 # The sources named are the plugin's OWN; plugin/common's three are added here
 # so that a new plugin cannot forget the veneers the gate insists every indirect
 # call goes through.
+#
+# [!] AUDIT_SHARED NAMES A FILE THAT THREE BOARDS COMPILE, and it must own no
+# mutable storage (issue #97): each board passes in its own scratch so that the
+# scratch keeps that board's placement and that board's residency gate keeps
+# naming a symbol the board owns.  A plugin's OWN sources are not audited -- a
+# plugin has .bss and is supposed to.
+#
+# [!] AND IT AUDITS THE REAL OBJECT, INSIDE THE RULE THAT PRODUCES IT.  Until
+# issue #104 this file was in shell_objs and cmake/shared_storage_gate.cmake
+# recompiled it from that target's properties.  With the firmware no longer
+# building it, the compile that ships on this board is the one below -- and
+# reconstructing these flags in a separate audit target would inspect an object
+# no artifact contains, which is exactly the mistake that helper's header
+# records twice.  Auditing the linked object in its own command makes a
+# differently-compiled audited copy impossible rather than merely unlikely.
 function(grove_add_plugin _name)
-    cmake_parse_arguments(P "" "" "SOURCES;ENTRIES" ${ARGN})
+    cmake_parse_arguments(P "" "" "SOURCES;ENTRIES;AUDIT_SHARED" ${ARGN})
+    # An argument that landed nowhere.  cmake_parse_arguments() reports these
+    # silently in UNPARSED_ARGUMENTS, so without this a stray token is simply
+    # ignored.
+    #
+    # [!] IT IS NOT WHAT CATCHES A MISSPELLED KEYWORD, and it was written
+    # believing that it was.  A token after a multi-value keyword CONTINUES that
+    # keyword's list rather than becoming unparsed, so `AUDIT_SHARD "<path>"`
+    # written after SOURCES appends both to SOURCES and never reaches here.
+    # Measured, not reasoned about.  What catches that is the derived membership
+    # rule below -- the decoder ends up compiled with nothing auditing it, which
+    # is the condition that rule refuses -- and the reason the rule is derived
+    # from where a file LIVES rather than from a keyword being spelled right.
+    if(P_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR
+            "grove_add_plugin(${_name}): unrecognised argument(s):\n  "
+            "${P_UNPARSED_ARGUMENTS}")
+    endif()
     set(_dir "${BOARD_DIR}/plugin/${_name}")
     set(_out "${CMAKE_BINARY_DIR}/plugin/${_name}")
     set(_srcs "${_dir}/plugin_main.c"
@@ -1553,16 +1600,88 @@ function(grove_add_plugin _name)
 
     set(_objs "")
     set(_sus "")
+    # [!] THE MEMBERSHIP RULE RUNS BOTH WAYS, and the second direction is the one
+    # that matters.  Checking only that each AUDIT_SHARED entry is compiled
+    # catches a stale path; it does NOT catch the omission -- a shared file left
+    # out of AUDIT_SHARED is compiled into the image, linked, and never audited,
+    # with nothing to say so.  That is the exact fail-open this interface exists
+    # to prevent, so the requirement is derived rather than declared: a source
+    # this plugin compiles that is NOT the plugin's own must be audited.
+    #
+    # "The plugin's own" is everything under boards/<board>/plugin/, which covers
+    # its plugin_main.c and the shared veneers in plugin/common/.  Those legally
+    # own storage -- a plugin has .bss and is supposed to.  Anything reached from
+    # OUTSIDE that tree is a file other boards also build, and the no-storage
+    # rule (issue #97) applies to it.
+    get_filename_component(_plugin_root "${BOARD_DIR}/plugin" ABSOLUTE)
+    foreach(_src ${_srcs})
+        get_filename_component(_src_abs "${_src}" ABSOLUTE)
+        string(FIND "${_src_abs}" "${_plugin_root}/" _own)
+        set(_aud_found FALSE)
+        foreach(_aud ${P_AUDIT_SHARED})
+            get_filename_component(_aud_abs "${_aud}" ABSOLUTE)
+            if(_src_abs STREQUAL _aud_abs)
+                set(_aud_found TRUE)
+                break()
+            endif()
+        endforeach()
+        if(NOT _own EQUAL 0 AND NOT _aud_found)
+            message(FATAL_ERROR
+                "plugin ${_name} compiles a file from outside "
+                "${_plugin_root}:\n  ${_src}\nand does not name it in "
+                "AUDIT_SHARED.  A file other boards also build must own no "
+                "mutable storage (issue #97), and nothing would check it.")
+        endif()
+    endforeach()
+
+    # And the other direction, which catches a stale path rather than an
+    # omission: an AUDIT_SHARED entry this plugin does not compile would audit
+    # nothing while looking like it audited something.
+    foreach(_aud ${P_AUDIT_SHARED})
+        get_filename_component(_aud_abs "${_aud}" ABSOLUTE)
+        set(_aud_found FALSE)
+        foreach(_src ${_srcs})
+            get_filename_component(_src_abs "${_src}" ABSOLUTE)
+            if(_src_abs STREQUAL _aud_abs)
+                set(_aud_found TRUE)
+                break()
+            endif()
+        endforeach()
+        if(NOT _aud_found)
+            message(FATAL_ERROR
+                "plugin ${_name}: AUDIT_SHARED names a file this plugin does "
+                "not compile:\n  ${_aud}\nNothing would audit it, and nothing "
+                "would say so.")
+        endif()
+    endforeach()
+
+    set(_objs "")
+    set(_sus "")
     foreach(_src ${_srcs})
         get_filename_component(_stem "${_src}" NAME_WE)
+        get_filename_component(_src_abs "${_src}" ABSOLUTE)
         set(_obj "${_out}/${_stem}.o")
+        set(_audit_cmd "")
+        foreach(_aud ${P_AUDIT_SHARED})
+            get_filename_component(_aud_abs "${_aud}" ABSOLUTE)
+            if(_src_abs STREQUAL _aud_abs)
+                set(_audit_cmd
+                    COMMAND "${Python3_EXECUTABLE}"
+                            "${CMAKE_SOURCE_DIR}/cmake/check_no_mutable_storage.py"
+                            --objdump "${CMAKE_OBJDUMP}" --nm "${CMAKE_NM}"
+                            --label "${_src} (${BOARD} plugin ${_name})"
+                            "${_obj}")
+            endif()
+        endforeach()
         add_custom_command(
             OUTPUT "${_obj}" "${_out}/${_stem}.su"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${_out}"
             COMMAND "${CMAKE_C_COMPILER}" ${GROVE_PLUGIN_CFLAGS}
                     -I "${_dir}"
                     -c "${_src}" -o "${_obj}"
+            ${_audit_cmd}
             DEPENDS "${_src}"
+                    "${CMAKE_SOURCE_DIR}/cmake/check_no_mutable_storage.py"
             WORKING_DIRECTORY "${_out}"
             COMMENT "plugin ${_name}: cc ${_stem}.c"
             VERBATIM)
@@ -1609,11 +1728,14 @@ function(grove_add_plugin _name)
     set(GROVE_PLUGIN_ELFS ${GROVE_PLUGIN_ELFS} "${_out}/plugin.elf" PARENT_SCOPE)
 endfunction()
 
-# [!] svc/blazeface.c IS THE SAME FILE THE FIRMWARE LINKS.  Compiling a copy
-# would fork the decoder issue #97 spent itself merging.  It is the wrapper that
-# is new, not the arithmetic.
+# [!] svc/blazeface.c IS THE SAME FILE THE OTHER TWO BOARDS LINK.  Compiling a
+# copy would fork the decoder issue #97 spent itself merging.  It is the wrapper
+# that is new, not the arithmetic -- and since issue #104 this is the ONLY
+# compile of that decoder on this board, which is why the no-storage audit runs
+# on the object this rule produces.
 grove_add_plugin(blazeface
-    SOURCES "${CMAKE_SOURCE_DIR}/svc/blazeface.c"
+    SOURCES "${GROVE_SHARED_DECODER}"
+    AUDIT_SHARED "${GROVE_SHARED_DECODER}"
     ENTRIES pl_entry=${GROVE_PLUGIN_STACK_PRODUCER}
             pl_shapes_ok=${GROVE_PLUGIN_STACK_PRODUCER}
             pl_decode=${GROVE_PLUGIN_STACK_PRODUCER}

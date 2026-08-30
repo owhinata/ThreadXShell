@@ -91,6 +91,24 @@ int main(void)
 	expect("a fresh record reports nothing decoded yet", snap.valid == 0,
 	       "valid %d", snap.valid);
 
+	/*
+	 * --- the kind is WRITTEN, not inherited (issue #104) --------------
+	 *
+	 * [!] THE DESTINATION IS DIRTIED FIRST, ON PURPOSE.  Every caller in the
+	 * tree happens to memset its snapshot before the first read, which is what
+	 * hid this: the field was the one member the projection did not write, and
+	 * the zero it needed arrived from somewhere else.  With a third kind that
+	 * omission has teeth -- a snapshot read twice would carry the earlier
+	 * routing, and the shared command would go looking elsewhere for boxes that
+	 * are sitting in the caller's array.  This record only ever holds caller
+	 * boxes, so there is exactly one right answer and it must be stated.
+	 */
+	snap.kind = (uint8_t)NN_DET_RAW_TENSORS;      /* a previous read's routing */
+	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	expect("a snapshot states its kind rather than inheriting one",
+	       snap.kind == (uint8_t)NN_DET_CALLER_BOXES, "kind %u",
+	       (unsigned)snap.kind);
+
 	/* --- the ordinary path ------------------------------------------- */
 	nn_det_record_reset(&rec);          /* start a session */
 	g0 = nn_det_record_gen(&rec);
@@ -107,6 +125,9 @@ int main(void)
 	       "ndet %d x %.3f", snap.ndet, (double)dets[0].x);
 	expect("and the diagnostics that belong to them", snap.res.npass == 3,
 	       "npass %d", snap.res.npass);
+	expect("and they are the caller's boxes",
+	       snap.kind == (uint8_t)NN_DET_CALLER_BOXES, "kind %u",
+	       (unsigned)snap.kind);
 
 	/* --- THE CASE THIS FILE EXISTS FOR ------------------------------- */
 	/*
@@ -200,7 +221,11 @@ int main(void)
 	/* --- null tolerance ----------------------------------------------- */
 	expect("publishing into a null record is refused",
 	       nn_det_record_publish(NULL, &one, 1, NULL, 0u) == 0, "taken");
+	snap.kind = (uint8_t)NN_DET_PLUGIN_REPORT;    /* a previous read's routing */
 	nn_det_record_snapshot(NULL, &snap, NULL, 0);
+	expect("a snapshot of nothing carries no routing either",
+	       snap.kind == (uint8_t)NN_DET_CALLER_BOXES, "kind %u",
+	       (unsigned)snap.kind);
 	expect("a snapshot of nothing is not valid", snap.valid == 0,
 	       "valid %d", snap.valid);
 

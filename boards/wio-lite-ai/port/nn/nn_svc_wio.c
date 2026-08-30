@@ -507,6 +507,12 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	snap->valid = dec.valid;
 	snap->ndet  = dec.ndet;
 	snap->res   = dec.res;
+	/* [!] STATED, NOT LEFT TO THE CALLER'S memset (issue #104).  This board has
+	   one decoder and it fills the caller's array, so the value is never in
+	   doubt -- but the projection through struct nn_camera_decode drops
+	   everything it is not told to carry, and a snapshot reused across two reads
+	   would otherwise keep whatever routing the previous one had. */
+	snap->kind  = (uint8_t)NN_DET_CALLER_BOXES;
 
 	nn_camera_stats_get(&st);
 	stop_rc = nn_camera_stop();
@@ -537,6 +543,12 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
 	snap->valid = dec.valid;
 	snap->ndet  = dec.ndet;
 	snap->res   = dec.res;
+	/* [!] STATED, NOT LEFT TO THE CALLER'S memset (issue #104).  This board has
+	   one decoder and it fills the caller's array, so the value is never in
+	   doubt -- but the projection through struct nn_camera_decode drops
+	   everything it is not told to carry, and a snapshot reused across two reads
+	   would otherwise keep whatever routing the previous one had. */
+	snap->kind  = (uint8_t)NN_DET_CALLER_BOXES;
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
 

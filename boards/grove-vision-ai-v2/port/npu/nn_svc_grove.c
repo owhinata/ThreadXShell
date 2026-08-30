@@ -38,6 +38,7 @@
 #include "camera.h"
 #include "cam_dp.h"
 #include "fmt.h"
+#include "plugin_load.h"
 #include "cam_lcd_sink.h"
 #include "camera.h"
 #include "nn_decoder.h"
@@ -392,6 +393,74 @@ static int nn_scan_slots(struct nn_op_result *res, uint32_t token,
 	return 0;
 }
 
+/* ---- containers (issue #101) ---------------------------------------------- */
+
+/*
+ * This board's policy for a plugin image.  svc/plugin_load.c holds no board
+ * address, so the reservation, the target identity and what each thread can
+ * spare arrive from here.
+ *
+ * [!] THE STACK LIMITS ARE PROVISIONAL.  They are what a thread has, minus
+ * nothing: the depth at the point a callback is CALLED and the reserve for
+ * exception frames -- which Cortex-M stacks on the thread's own PSP, 32 B or
+ * 104 B once the FP context goes -- are not measured yet.  Step 1b measures
+ * them and sets the admission policy.  1a only ever validates; it never calls
+ * through any of these, so a number that is too generous here cannot yet do
+ * harm.  It must not be inherited unexamined when it can.
+ */
+/*
+ * [!] EVERY NUMBER COMES FROM THE BUILD, NOT FROM HERE.  The host sender runs
+ * the same validator (verify_container links this very file's plugin_load.c)
+ * with the same policy, and if the two were declared separately a container
+ * could pass on the host and be refused on the board -- which is exactly the
+ * shape issue #93 hit when its host gate used the flatbuffer verifier's default
+ * limits and the firmware used its own.  board.cmake defines these once and
+ * passes them both ways.
+ *
+ * This is NOT the hazard issue #85 names.  There, a layout and the gate that
+ * checked it came from one CACHE variable, so a single -D moved the rule and
+ * its verification together.  Here the two consumers must AGREE -- it is one
+ * rule applied in two places, not a rule and its check -- and the reservation's
+ * address is still verified independently, by the linker script and
+ * check_placement_budget.py, which state it separately on purpose.
+ */
+#ifndef GROVE_PLUGIN_TARGET_ID
+#error "board.cmake must define GROVE_PLUGIN_TARGET_ID"
+#endif
+#ifndef GROVE_PLUGIN_BASE
+#error "board.cmake must define GROVE_PLUGIN_BASE"
+#endif
+#ifndef GROVE_PLUGIN_MAX
+#error "board.cmake must define GROVE_PLUGIN_MAX"
+#endif
+
+static const struct plugin_policy nn_plugin_policy = {
+	.target_id      = GROVE_PLUGIN_TARGET_ID,
+	.link_addr      = GROVE_PLUGIN_BASE,
+	.capacity       = GROVE_PLUGIN_MAX,
+	.image_align    = PLUGIN_IMAGE_ALIGN,
+	.caps_supported = PLUGIN_CAP_KNOWN_MASK,
+	.stack_limit    = {
+		[PLUGIN_SLOT_ENTRY]     = GROVE_PLUGIN_STACK_PRODUCER,
+		[PLUGIN_SLOT_SHAPES_OK] = GROVE_PLUGIN_STACK_PRODUCER,
+		[PLUGIN_SLOT_DECODE]    = GROVE_PLUGIN_STACK_PRODUCER,
+		[PLUGIN_SLOT_DRAW]      = GROVE_PLUGIN_STACK_PANEL,
+		[PLUGIN_SLOT_REPORT]    = GROVE_PLUGIN_STACK_SHELL,
+		[PLUGIN_SLOT_PARAM_SET] = GROVE_PLUGIN_STACK_SHELL,
+		[PLUGIN_SLOT_PARAM_GET] = GROVE_PLUGIN_STACK_SHELL,
+	},
+};
+
+/*
+ * The manifest of the container the open model came from, or zeroed.
+ *
+ * [!] PLAIN DATA, AND NOTHING HERE IS EVER CALLED.  struct plugin_view carries
+ * integer offsets, not function pointers -- that is what makes "Step 1a does not
+ * execute a plugin" a property of the types rather than a rule someone keeps.
+ */
+static struct plugin_view nn_container;
+static int                nn_has_container;
+
 /*
  * A blob name -> the address and length npu_open() will be given.
  *
@@ -448,6 +517,41 @@ static int nn_resolve_blob(struct nn_op_result *res, uint32_t token,
 		nn_detail_set("slot %u ('%s') has no payload to parse", slot, name);
 		return -1;
 	}
+	/*
+	 * [!] THE CONTAINER SPLIT HAPPENS HERE, INSIDE THE SAME LEASE (issue #101).
+	 * Everything above established that these bytes are what their CRC says
+	 * they are and cannot change while the lease is held; deciding what they
+	 * MEAN has to happen before that grip is released, or a background
+	 * `blob write` could replace the slot between the decision and the open.
+	 *
+	 * A payload that is not a container is a bare model, exactly as before.
+	 * That is not a fallback for tidiness -- `det` and `cls` are on the device
+	 * now, sent before containers existed, and a change that required
+	 * re-sending them would cost two erases of a part whose endurance is not
+	 * documented.
+	 */
+	nn_has_container = 0;
+	if (plugin_probe((const void *)(uintptr_t)(NOR_XIP_BASE + payload),
+	                 info.length) == PLUGIN_KIND_CONTAINER) {
+		enum plugin_result pr;
+
+		pr = plugin_parse((const void *)(uintptr_t)(NOR_XIP_BASE + payload),
+		                  info.length, &nn_plugin_policy, &nn_container);
+		if (pr != PLUGIN_OK) {
+			nn_detail_set("slot %u ('%s') is a container this firmware "
+			              "refuses: %s", slot, name,
+			              plugin_result_name(pr));
+			return -1;
+		}
+		nn_has_container = 1;
+		/* The MODEL section, not the container: npu_open() parses a
+		 * flatbuffer and the rest of the payload is not one. */
+		*addr = NOR_XIP_BASE + payload + nn_container.model_off;
+		*len  = nn_container.model_len;
+		nn_model_slot = (int)slot;
+		return 0;
+	}
+
 	*addr = NOR_XIP_BASE + payload;
 	*len  = info.length;
 	nn_model_slot = (int)slot;
@@ -1376,10 +1480,35 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	if (write == NULL)
 		return;
 
-	/* Step 1a loads nothing, and says so rather than leaving the line out: a
-	 * missing line reads as a board with no plugin support at all, which is a
-	 * different and wrong fact. */
+	if (!nn_has_container) {
+		/* Says so rather than leaving the line out: a missing line reads as a
+		 * board with no plugin support at all, which is a different and wrong
+		 * fact. */
+		(void)nn_info_line(write, ctx,
+		                   "plugin  : (none) -- reservation %lu B at 0x%08lx\r\n",
+		                   (unsigned long)size, (unsigned long)base);
+		return;
+	}
+
+	/*
+	 * [!] REPORTED, NOT LOADED.  These numbers come from a validated manifest
+	 * and nothing has branched into the image they describe.  The wording says
+	 * so; Step 1b is what changes it.
+	 */
+	if (nn_info_line(write, ctx, "plugin  : %s (build %s), not loaded\r\n",
+	                 nn_container.name, nn_container.build_id) < 0)
+		return;
+	if (nn_info_line(write, ctx,
+	                 "  image : %lu B file / %lu B mem, link 0x%08lx "
+	                 "(reservation %lu B at 0x%08lx)\r\n",
+	                 (unsigned long)nn_container.file_size,
+	                 (unsigned long)nn_container.mem_size,
+	                 (unsigned long)nn_container.link_addr,
+	                 (unsigned long)size, (unsigned long)base) < 0)
+		return;
 	(void)nn_info_line(write, ctx,
-	                   "plugin  : (none) -- reservation %lu B at 0x%08lx\r\n",
-	                   (unsigned long)size, (unsigned long)base);
+	                   "  code %lu B  data %lu B  bss %lu B\r\n",
+	                   (unsigned long)nn_container.code_len,
+	                   (unsigned long)nn_container.data_seg_len,
+	                   (unsigned long)nn_container.bss_len);
 }

@@ -410,6 +410,13 @@ set(SHELL_SOURCES
     # this board does not link.  Freestanding, and host-tested against zlib and
     # against a table-free reference (shell/test/test_crc32.c).
     "${CMAKE_SOURCE_DIR}/svc/crc32.c"
+    # Container and manifest validation (issue #101).  Everything that must hold
+    # BEFORE a plugin's first instruction is fetched -- and in Step 1a that is
+    # all of it: nothing here yields a callable address, so the firmware
+    # validates a container and never branches into one.  Board-independent
+    # (the policy is passed in) and host-tested, and the SAME file the host-side
+    # verify_container links, so the two cannot disagree.
+    "${CMAKE_SOURCE_DIR}/svc/plugin_load.c"
     # Camera frame ring (issue #35).  Freestanding: it depends on <stdint.h>
     # and an injected lock vtable only, which is why the same file serves all
     # three boards and has a host unit test (shell/test/test_frame_pipeline.c).
@@ -1581,12 +1588,30 @@ set(GROVE_PLUGIN_ELF "${GROVE_PLUGIN_OUT}/plugin.elf")
 set(GROVE_PLUGIN_STACKS "${GROVE_PLUGIN_OUT}/plugin.stacks.json")
 set(GROVE_PLUGIN_BASE "0x341E0000")
 set(GROVE_PLUGIN_MAX  "131072")
+# What each thread may lend a plugin callback.  PROVISIONAL: see the note in
+# the plugin gate wiring above -- the depth at the call site and the exception
+# reserve are not measured, and Step 1b sets the real admission policy.
+set(GROVE_PLUGIN_STACK_PRODUCER 8192)
+set(GROVE_PLUGIN_STACK_PANEL    1024)
+set(GROVE_PLUGIN_STACK_SHELL    4096)
+
 # cortex-m55 / fp-armv8 / hard float / little endian / CMSE, per
 # plugin_target_id() in svc/plugin_abi.h.  Stated here and computed there: the
 # container verifier recomputes it from the same header, so a disagreement is a
 # refusal rather than a silent mismatch.
 set(GROVE_PLUGIN_TARGET_ID "0x9302")
 set(GROVE_PLUGIN_BUILD_ID "${CMAKE_PROJECT_VERSION}")
+# One declaration, two consumers: the firmware's validator and the host sender
+# that must agree with it.  See nn_svc_grove.c for why this is not the issue #85
+# hazard.
+target_compile_definitions(shell_objs PRIVATE
+    GROVE_PLUGIN_TARGET_ID=${GROVE_PLUGIN_TARGET_ID}
+    GROVE_PLUGIN_BASE=${GROVE_PLUGIN_BASE}u
+    GROVE_PLUGIN_MAX=${GROVE_PLUGIN_MAX}u
+    GROVE_PLUGIN_STACK_PRODUCER=${GROVE_PLUGIN_STACK_PRODUCER}u
+    GROVE_PLUGIN_STACK_PANEL=${GROVE_PLUGIN_STACK_PANEL}u
+    GROVE_PLUGIN_STACK_SHELL=${GROVE_PLUGIN_STACK_SHELL}u)
+
 
 if(HOST_CXX)
     find_program(HOST_CC NAMES cc gcc clang)

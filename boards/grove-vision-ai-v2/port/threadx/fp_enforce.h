@@ -46,11 +46,13 @@ extern "C" {
 #define FP_FPCCR_ASPEN   (1u << 31)  /**< automatic FP context creation       */
 #define FP_FPCCR_LSPEN   (1u << 30)  /**< lazy state preservation enabled     */
 #define FP_FPCCR_LSPACT  (1u << 0)   /**< a lazy save is OUTSTANDING          */
+#define FP_FPCCR_TS      (1u << 26)  /**< FP state is Treated as Secure       */
 
 enum fp_enforce_verdict {
 	FP_ENFORCE_OK = 0,          /**< ASPEN is set and nothing is pending  */
 	FP_ENFORCE_LSPACT,          /**< a lazy save was already active       */
 	FP_ENFORCE_ASPEN_REFUSED,   /**< the write did not take               */
+	FP_ENFORCE_TS_REFUSED,      /**< TS would not clear (issue #103)      */
 };
 
 /**
@@ -71,6 +73,27 @@ enum fp_enforce_verdict {
  * here (under lazy, the port's own `{s16-s31}` save is the FP instruction that
  * materialises the deferred frame first), and which one is in force is the
  * bootloader's choice to make.
+ *
+ * [!] TS IS ENFORCED TO ZERO, AND THAT IS A DIFFERENT KIND OF ACT FROM
+ * REFUSING LSPACT (issue #103).  Both bits arrive inherited, and the difference
+ * is what they describe:
+ *
+ *   LSPACT is BOOKKEEPING about somebody else's outstanding frame.  Nothing
+ *   here can make that frame consistent, so the only honest response is to
+ *   refuse.
+ *
+ *   TS is a POLICY bit about how FUTURE floating-point context is treated, and
+ *   in this application the policy is ours to set: the whole image is Secure
+ *   with the SAU disabled, so there is no Non-secure world for TS to protect FP
+ *   state from.
+ *
+ * What TS costs when set is stack.  With TS == 1 an exception taken from Secure
+ * state stacks `s16-s31` on top of the standard extended frame -- 64 B more,
+ * turning a 108 B worst case into 172 B on the stack of whatever thread was
+ * interrupted.  Issue #103 has to state an exception reserve for threads that
+ * call into a loaded plugin, and a reserve derived from a bit the bootloader
+ * happens to leave clear is not a reserve.  So it is written, read back, and
+ * the boot is refused if it did not take.
  */
 enum fp_enforce_verdict fp_enforce_judge(uint32_t before, uint32_t after);
 

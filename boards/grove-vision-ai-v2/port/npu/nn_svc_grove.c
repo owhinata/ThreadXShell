@@ -1400,6 +1400,33 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 		             (unsigned long)os.detections);
 		return 1;
 	case 1u:
+		/*
+		 * How much stack was already spent where a decoder is CALLED
+		 * (issue #103).  Reported because it is the term the plugin
+		 * admission policy is computed from, and because it cannot be
+		 * derived from anything else the shell prints: `thread` gives a
+		 * PEAK -- the deepest a thread ever got anywhere -- and issue #101
+		 * wrote 2048 - 544 as though a peak answered this question.
+		 *
+		 * [!] BEFORE THE PROFILE SPLIT, AND THE ORDER IS LOAD-BEARING.  The
+		 * caller stops at the first line a board declines to emit, so an
+		 * index that returns 0 hides every index after it.  The profile
+		 * split declines whenever the EPK clock is not trusted -- a
+		 * condition that has nothing to do with this measurement -- so with
+		 * the two the other way round an untrusted clock silently deleted
+		 * the depth line.  These two are only both absent when nothing has
+		 * run at all, which is the one case where neither has anything to
+		 * say.
+		 */
+		if (os.depth_decode == 0u && os.depth_draw == 0u)
+			return 0;                /* nothing has run yet */
+		nn_detail_to(buf, cap,
+		             "at call : %lu B spent on the producer, %lu B on the "
+		             "panel (high-water)",
+		             (unsigned long)os.depth_decode,
+		             (unsigned long)os.depth_draw);
+		return 1;
+	case 2u:
 		/* The producer-side split (issue #60).  Only when the clock behind it
 		   is trusted -- an untrusted number here would be read as a
 		   measurement. */

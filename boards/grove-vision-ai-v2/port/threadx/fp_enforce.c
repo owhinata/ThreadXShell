@@ -28,6 +28,13 @@ enum fp_enforce_verdict fp_enforce_judge(uint32_t before, uint32_t after)
 	if ((after & FP_FPCCR_LSPACT) != 0u)
 		return FP_ENFORCE_LSPACT;
 
+	/* TS on the READ-BACK, not on `before`: the caller clears it, and what
+	 * matters is whether the clear took.  A TS that survives the write means
+	 * every exception from Secure state stacks 64 B more than the reserve this
+	 * port computes for a plugin callback -- see fp_enforce.h. */
+	if ((after & FP_FPCCR_TS) != 0u)
+		return FP_ENFORCE_TS_REFUSED;
+
 	return FP_ENFORCE_OK;
 }
 
@@ -40,6 +47,8 @@ const char *fp_enforce_strerror(enum fp_enforce_verdict v)
 		return "a lazy FP save was already outstanding";
 	case FP_ENFORCE_ASPEN_REFUSED:
 		return "FPCCR.ASPEN did not take";
+	case FP_ENFORCE_TS_REFUSED:
+		return "FPCCR.TS would not clear";
 	}
 	return "unknown";
 }

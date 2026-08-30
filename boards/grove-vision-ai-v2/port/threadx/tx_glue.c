@@ -398,6 +398,8 @@ _Static_assert(FP_FPCCR_LSPEN == FPU_FPCCR_LSPEN_Msk,
                "FP_FPCCR_LSPEN does not match CMSIS");
 _Static_assert(FP_FPCCR_LSPACT == FPU_FPCCR_LSPACT_Msk,
                "FP_FPCCR_LSPACT does not match CMSIS");
+_Static_assert(FP_FPCCR_TS == FPU_FPCCR_TS_Msk,
+               "FP_FPCCR_TS does not match CMSIS");
 
 static void fp_enforce_preconditions(void)
 {
@@ -405,9 +407,15 @@ static void fp_enforce_preconditions(void)
     uint32_t after;
     enum fp_enforce_verdict v;
 
-    /* Read-modify-write: FPCCR is not just these three bits -- it also carries
-     * the security and the "which handler was ready" state of a lazy save. */
-    FPU->FPCCR = before | FP_FPCCR_ASPEN;
+    /* Read-modify-write: FPCCR is not just these bits -- it also carries the
+     * security and the "which handler was ready" state of a lazy save.
+     *
+     * ASPEN is set and TS is CLEARED in one write.  Clearing an inherited bit is
+     * something this port refuses to do for LSPACT and does here, and
+     * fp_enforce.h says why the two are not the same kind of bit: one is
+     * bookkeeping about a frame we do not own, the other is a policy about
+     * future context that is ours to set in a Secure-only image. */
+    FPU->FPCCR = (before | FP_FPCCR_ASPEN) & ~FP_FPCCR_TS;
     __DSB();
     __ISB();
     after = FPU->FPCCR;

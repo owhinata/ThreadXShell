@@ -156,6 +156,58 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_nn_decoder"
 "$out/test_nn_decoder"
 
+# issue #103 -- the active-decoder shim, and the resident decoder against the
+# plugin that replaces it (port/npu/nn_active.c).
+#
+# The one branch point issue #103 built, compiled with BOTH decoders it routes
+# between -- the resident adapter and the REAL plugin source, linked against the
+# same svc/blazeface.c the firmware links.  Nothing is stubbed but the seam that
+# turns a slot offset into an address, because a host function address does not
+# fit the uint32_t a manifest carries.
+#
+# The shared arithmetic is NOT what is tested (shell/test/test_blazeface.c owns
+# that).  What is tested is everything around it, and each of these fails on the
+# board as a working-looking preview: a threshold set through the shim that
+# reached the OTHER decoder's copy -- the divergence the plan says a differential
+# test giving both the same threshold cannot see; a plugin allowed to write the
+# caller's box array, which the firmware would then print as its own; and a
+# coordinate transform published by one path and consulted from another, which
+# is what made every box `nn run` produced come back "outside the frame" until a
+# session next to the old output found it.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/npu" -I "$board/port/plugin" -I "$board/svc" \
+    -I "$board/plugin/blazeface" -I "$board/plugin/common" -I "$HOST_TEST_SVC" \
+    "$here/test_plugin_decode.c" \
+    "$board/port/npu/nn_active.c" "$board/port/npu/nn_decoder.c" \
+    "$board/port/npu/nn_preproc.c" \
+    "$board/plugin/blazeface/plugin_main.c" \
+    "$board/plugin/common/plugin_base.c" "$board/plugin/common/plugin_fmt.c" \
+    "$HOST_TEST_SVC/blazeface.c" \
+    $LDFLAGS -o "$out/test_plugin_decode"
+"$out/test_plugin_decode"
+
+# issue #103 (#78 Step 1b) -- the classifier plugin (plugin/cifar10).
+#
+# The point of issue #78, in one file: a model's LABELS travel with the model,
+# so the firmware never learns them and nothing here can be checked by reading
+# the base.  Its own binary, because two plugins are two programs and each
+# exports `plugin_slot_table` -- on the board they never coexist either.
+#
+# Every failure this plugin can have is a confident sentence about the wrong
+# thing, and none of them looks like an error on hardware: a label lookup off by
+# one is a working demo to anyone not holding a deer, a reversed ranking still
+# prints three tidy rows, and a 1000-class output accepted as a 10-class one
+# names a CIFAR-10 label for an ImageNet score.  The label order is pinned
+# against the vendor scenario app's, which is where the ten names come from.
+gcc $CFLAGS \
+    -I "$here" -I "$board/plugin/cifar10" -I "$board/plugin/common" \
+    -I "$HOST_TEST_SVC" \
+    "$here/test_plugin_cifar10.c" \
+    "$board/plugin/cifar10/plugin_main.c" \
+    "$board/plugin/common/plugin_base.c" "$board/plugin/common/plugin_fmt.c" \
+    $LDFLAGS -o "$out/test_plugin_cifar10"
+"$out/test_plugin_cifar10"
+
 # issue #45 -- the flash partition check (cmake/check_flash_partitions.py).
 # A gate over a destructive, unrecoverable-in-place operation: the model and the
 # firmware are written to the same NOR by an xmodem tool that erases blocks and

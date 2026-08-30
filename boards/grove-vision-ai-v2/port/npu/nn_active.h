@@ -88,7 +88,10 @@ int nn_active_shapes_ok(const struct npu_tensor *outs, unsigned n);
 /**
  * @brief  Decode one set of outputs.
  *
- * @param out, max, res  filled ONLY when nn_active_is_plugin() is false
+ * @param out, max, res  filled ONLY when nn_active_is_plugin() is false -- the
+ *                       one exception being a null @p outs, which decoded
+ *                       nothing and says so in @p res whichever decoder is in
+ *                       force
  * @return the detection count, or a negative BF_ERR_*
  *
  * [!] A PLUGIN LEAVES @p out AND @p res ALONE.  Its result has a shape this
@@ -107,6 +110,17 @@ int nn_active_decode(const struct npu_tensor *outs, unsigned n,
  * knows what they are.
  */
 void nn_active_draw(const struct plugin_painter *paint);
+
+/**
+ * @brief  Will the active decoder put anything on the panel?
+ *
+ * A plugin need not draw: DRAW is an optional slot, and a classifier has
+ * nothing to draw until there is a font to draw it with.  A caller that is
+ * about to light a camera and a panel for a live preview has to know, because
+ * "the stream runs and never annotates" is indistinguishable from a broken one.
+ * Always true for the resident decoder -- the base paints those boxes itself.
+ */
+int nn_active_can_draw(void);
 
 /**
  * @brief  Let the active decoder describe its own result.

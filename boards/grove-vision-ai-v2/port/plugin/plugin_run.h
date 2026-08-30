@@ -79,9 +79,23 @@ void plugin_run_unload(void);
 /** Is a plugin loaded and started? */
 int plugin_run_active(void);
 
-/** The active plugin's slot offsets, or NULL.  Callers turn these into
- *  addresses; nothing here does it for them. */
-const struct plugin_view *plugin_run_view(void);
+/**
+ * @brief  The address of one entry point of the active plugin, or NULL.
+ *
+ * [!] THE ONE PLACE AN OFFSET BECOMES SOMETHING CALLABLE.  svc/plugin_load.c
+ * deliberately hands back integers and no function pointers, so that "the
+ * validation step does not execute anything" is a property of its types rather
+ * than a discipline someone keeps.  Here is where the arithmetic happens, and
+ * it happens for the loader's own entry call as well -- the earlier shape had
+ * this file compute the entry address and the decoder shim compute the other
+ * six, which is two places claiming to be one.
+ *
+ * @return NULL for an absent slot, an out-of-range index, or any time no plugin
+ *         has completed its entry point.  A caller casts the result to the
+ *         prototype enum plugin_slot names for that slot; the Thumb bit is kept,
+ *         because the manifest carried it and plugin_load.c insisted on it.
+ */
+void *plugin_run_slot(unsigned slot);
 
 /**
  * @brief  Name the plugin an address belongs to, for the fault reporter.

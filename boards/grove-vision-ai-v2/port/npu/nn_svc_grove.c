@@ -613,6 +613,32 @@ static int nn_resolve_blob(struct nn_op_result *res, uint32_t token,
 
 /* ---- model lifecycle ----------------------------------------------------- */
 
+/*
+ * Undo a load that got part way.
+ *
+ * [!] THE PLUGIN IS PART OF THE LOAD, SO IT IS PART OF THE UNWIND (issue #103).
+ * nn_resolve_blob() starts the plugin before npu_open() is even called -- it has
+ * to, because the image is read from the XIP window and only this lease pins it
+ * -- so a load that fails AFTER that point left one running.  `nn_open_done`
+ * stays 0, the next `nn model load` is therefore allowed, and if that one is a
+ * bare model or a container with no plugin then nothing calls plugin_run_load()
+ * at all: the previous model's decoder reads the new model's outputs.
+ *
+ * That was wrong before this issue and is worse after it, because
+ * nn_active_is_plugin() now also waives the resident decoder's input-quantisation
+ * precondition -- so the one check that would have noticed the mismatch is the
+ * one the stale plugin switches off.
+ *
+ * Written as the mirror of nn_svc_model_unload()'s order, plugin first, so the
+ * two cannot drift.
+ */
+static void nn_load_undo(void)
+{
+	plugin_run_unload();
+	nn_has_container = 0;
+	npu_hw_deinit();
+}
+
 void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
                        void *ctx, struct nn_op_result *res,
                        enum nn_model_state *state)
@@ -710,7 +736,7 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 		/* Every failure from here leaves the hardware DOWN: an NPU that is up
 		 * with no model is a state nothing would use, and it would hold the
 		 * flash lease against `blob write` for as long as it lasted. */
-		npu_hw_deinit();
+		nn_load_undo();
 		nn_result(res, NN_SVC_ERR_ARG, NN_CLAIM_NONE);
 		nn_release();
 		return;
@@ -720,7 +746,7 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	if (rc != NPU_OK) {
 		nn_detail_set("%s (0x%08lx, %lu B)", npu_status_name(rc),
 		              (unsigned long)addr, (unsigned long)len);
-		npu_hw_deinit();
+		nn_load_undo();
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
 		nn_release();
 		return;
@@ -823,6 +849,34 @@ int nn_svc_input(struct tensor_desc *out)
 /* ---- one shot ------------------------------------------------------------ */
 
 /*
+ * Can this board fill the model's input at all?
+ *
+ * [!] THE BOARD'S PRECONDITION, NOT THE DECODER'S, AND THE TWO WERE ONE
+ * FUNCTION UNTIL ISSUE #103.  nn_preproc_fill() writes ONE BYTE per element:
+ * on a tensor of any other element type it fills a fraction of the buffer with
+ * values of the wrong width, and the length check in nn_fill_input() passes,
+ * because a float32 tensor of the same shape is LARGER than the bytes being
+ * written.  The NPU is then invoked on a mostly-untouched arena.
+ *
+ * That is true whoever decodes the outputs, so it is asked whoever decodes
+ * them.  Splitting it out of nn_input_quant_ok() is what makes that possible:
+ * waiving the whole of that function for a plugin -- which the first cut of
+ * this change did -- waived this too, and nothing downstream looks at the type.
+ */
+static int nn_input_fillable(struct nn_op_result *res,
+                             const struct npu_tensor *in)
+{
+	(void)res;
+	if (!npu_tensor_is_int8(in->type)) {
+		nn_detail_set("this board fills the input a byte at a time, so it "
+		              "needs an int8 input; this model has %s",
+		              npu_type_name(in->type));
+		return -1;
+	}
+	return 0;
+}
+
+/*
  * Does the model's input quantisation match what the preprocessor produces?
  *
  * [!] NOT A FORMALITY.  nn_preproc_fill() writes `pixel - 128` -- a fixed shift,
@@ -831,17 +885,18 @@ int nn_svc_input(struct tensor_desc *out)
  * Being wrong here does not look like an error: the boxes are still boxes, just
  * in the wrong places, on an image nobody can see.  So it refuses rather than
  * warns.  Compared in millionths so no float formatting is needed.
+ *
+ * [!] THIS ONE BELONGS TO THE RESIDENT DECODER ALONE, and a plugin is not held
+ * to it -- see nn_svc_run_once().  The element type is a separate question and
+ * is asked separately, above.
  */
 static int nn_input_quant_ok(struct nn_op_result *res,
                              const struct npu_tensor *in)
 {
 	long micro = (long)(in->scale * 1000000.0f + 0.5f);
 
-	if (!npu_tensor_is_int8(in->type)) {
-		nn_detail_set("detection needs an int8 input, this model has %s",
-		              npu_type_name(in->type));
+	if (nn_input_fillable(res, in) != 0)
 		return -1;
-	}
 	if (in->zero_point != -128 || micro < 3882 || micro > 3961) {
 		nn_detail_set("this model wants scale %ld/1e6 zp %ld, but the frame is "
 		              "filled as (pixel - 128), which is scale 3922/1e6 zp -128",
@@ -856,6 +911,8 @@ static int nn_fill_input(struct nn_op_result *res, const uint8_t *raw,
 {
 	uint32_t w, h;
 
+	if (nn_input_fillable(res, in) != 0)
+		return -1;
 	if (in->rank != 4 || in->dims[3] != 3) {
 		nn_detail_set("model input is not HxWx3 (rank %u)", in->rank);
 		return -1;
@@ -985,10 +1042,27 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		return;
 	}
 
-	/* The quantisation check happens only once there is something to decode:
-	 * a classifier is a legitimate model here and must not be refused for not
-	 * being a detector. */
-	if (nn_input_quant_ok(res, &in) == 0) {
+	/*
+	 * WHO DECODES, AND THE ONE QUESTION THAT DECIDES IT.
+	 *
+	 * The quantisation check runs only once there is something to decode: a
+	 * classifier is a legitimate model here and must not be refused for not
+	 * being a detector.
+	 *
+	 * [!] AND IT IS THE RESIDENT DECODER'S PRECONDITION, NOT A STATEMENT ABOUT
+	 * THIS BOARD (issue #103).  nn_preproc_fill() writes `pixel - 128` and
+	 * BlazeFace's arithmetic assumes the model reads that as scale 1/255 zero
+	 * point -128; a model whose input says otherwise is not a detector, which is
+	 * exactly what the fallback below reports.  A PLUGIN ships WITH its model,
+	 * and shipping it is the statement that the two agree -- the vendor's own
+	 * CIFAR-10 app writes `pixel - 128` into an input tensor recorded at scale
+	 * 0.0203 zero point -8 and is right to.  Asking the base's question about a
+	 * model the base does not know would route every classifier container to the
+	 * built-in class report, and the labels the container carries would never be
+	 * read: the whole of issue #78 refused by a check about somebody else's
+	 * decoder.
+	 */
+	if (nn_active_is_plugin() || nn_input_quant_ok(res, &in) == 0) {
 		nn_decode_into(snap, dets, max);
 	} else {
 		/* Not a detector's input -- say so through the decoder's own vocabulary
@@ -1175,7 +1249,15 @@ static int nn_detector_ready(struct nn_op_result *res)
 		nn_detail_set("the model has no input tensor");
 		return -1;
 	}
-	if (nn_input_quant_ok(res, &in) != 0)
+	/* [!] THE BOARD'S PRECONDITION FIRST, AND FOR EVERY DECODER.  The producer
+	 * fills this tensor a byte at a time on every frame; a plugin cannot see
+	 * the input tensor and so cannot check it, which makes this the last place
+	 * anything can. */
+	if (nn_input_fillable(res, &in) != 0)
+		return -1;
+	/* The resident decoder's precondition, and only its own -- see
+	 * nn_svc_run_once() for why a plugin is not held to it. */
+	if (!nn_active_is_plugin() && nn_input_quant_ok(res, &in) != 0)
 		return -1;
 	n_out = npu_output_count();
 	if (n_out > NN_DECODER_MAX_OUTPUTS) {
@@ -1190,7 +1272,26 @@ static int nn_detector_ready(struct nn_op_result *res)
 		}
 	}
 	if (!nn_active_shapes_ok(outs, n_out)) {
-		nn_detail_set("the loaded model is not BlazeFace-shaped");
+		/* Whose refusal it is, because the two send you to different places:
+		 * the resident decoder wants a different MODEL, a plugin wants a
+		 * different CONTAINER. */
+		if (nn_active_is_plugin())
+			nn_detail_set("the loaded plugin cannot read this model's outputs");
+		else
+			nn_detail_set("the loaded model is not BlazeFace-shaped");
+		return -1;
+	}
+	/*
+	 * [!] AND WOULD IT ANNOTATE ANYTHING?  A plugin need not draw -- the
+	 * classifier container carries no draw(), because a label on the panel needs
+	 * a font and that is #78 Step 2.  Starting a stream for it would light the
+	 * camera and the panel and show a live picture that is never marked, which
+	 * is the exact failure this function exists to refuse before anything is
+	 * acquired.  `nn run` still reports its classes.
+	 */
+	if (!nn_active_can_draw()) {
+		nn_detail_set("the loaded decoder does not draw, so a stream would "
+		              "annotate nothing -- `nn run` reports its result");
 		return -1;
 	}
 	return 0;
@@ -1598,9 +1699,15 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	}
 
 	/*
-	 * [!] REPORTED, NOT LOADED.  These numbers come from a validated manifest
-	 * and nothing has branched into the image they describe.  The wording says
-	 * so; Step 1b is what changes it.
+	 * [!] THE LAST FIELD IS THE ONE TO READ.  The rest come from a validated
+	 * manifest, which says what the container CLAIMS; "loaded" is the only word
+	 * here that means anything branched into the image.  A container can be
+	 * parsed and reported and still not be running -- a load that failed after
+	 * the parse, or one that carries no plugin at all.
+	 *
+	 * And the CRC is the identity that moves.  The build id is a source
+	 * revision stamped at configure time, so editing a plugin and rebuilding
+	 * does not change it, and the image size often does not change either.
 	 */
 	if (nn_info_line(write, ctx, "plugin  : %s (build %s, crc %08lx), %s\r\n",
 	                 nn_container.name, nn_container.build_id,

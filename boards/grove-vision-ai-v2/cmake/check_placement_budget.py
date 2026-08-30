@@ -46,6 +46,13 @@ DTCM = (0x30000000, 0x40000)
 # reservations only; SRAM is the part where a section with CONTENTS is safe.
 SRAM_LDR = (0x3401F000, 0x2E000)
 SRAM     = (0x3404D000, 0x1B3000)
+# The plugin load image's reservation (issue #101), anchored at the TOP of the
+# loadable window.  Stated here rather than read from the linker script: the
+# whole point is that this gate and the script are two independent declarations
+# that have to agree, so that neither can move on its own.
+PLUGIN_SECTION = ".plugin"
+PLUGIN_BASE    = 0x341E0000
+PLUGIN_END     = 0x34200000
 # Whole window, for the checks that do not care which half a section is in.
 SRAM_ALL = (SRAM_LDR[0], SRAM_LDR[1] + SRAM[1])
 
@@ -485,26 +492,36 @@ def main():
                 "the 2nd bootloader executes there while loading")
 
     # 7. the `free` command's region accounting still covers everything
-    #    (issue #26).  `free` reports SRAM usage as __sram_end - ORIGIN and
-    #    DTCM statics as __HeapBase - ORIGIN.  Both are high-water marks that
-    #    only stay honest while nothing is placed past them -- and the bug this
-    #    check exists to prevent is exactly that: a section was added to a
-    #    region and `free` went on reporting the old number (0 B of a 64 KB
-    #    SRAM reservation) with nothing to catch it.
-    sram_end = by_name.get("__sram_end")
+    #    (issue #26).  `free` reports the SEQUENTIAL SRAM span as
+    #    __sram_seq_end - ORIGIN and DTCM statics as __HeapBase - ORIGIN.  Both
+    #    are high-water marks that only stay honest while nothing is placed past
+    #    them -- and the bug this check exists to prevent is exactly that: a
+    #    section was added to a region and `free` went on reporting the old
+    #    number (0 B of a 64 KB SRAM reservation) with nothing to catch it.
+    #
+    #    [!] SINCE ISSUE #101 THE LOADABLE WINDOW HAS TWO OCCUPIED SPANS: the
+    #    sequential sections growing up from the floor, and .plugin PINNED at
+    #    the top.  The mark was renamed rather than redefined so that every
+    #    consumer had to be revisited; reusing the old name would have made this
+    #    rule reject the reservation for sitting past it, and `free` count the
+    #    growth gap as spent.  .plugin is exempted from the high-water rule and
+    #    pinned by check 8 instead.
+    sram_end = by_name.get("__sram_seq_end")
     sram_ldr_end = by_name.get("__sram_ldr_end")
     heap_base = by_name.get("__HeapBase")
     if sram_end is None:
-        errors.append("__sram_end missing; `free` cannot report SRAM usage")
+        errors.append("__sram_seq_end missing; `free` cannot report SRAM usage")
     if sram_ldr_end is None:
         errors.append("__sram_ldr_end missing; `free` cannot report the "
                       "loader window")
     if heap_base is None:
         errors.append("__HeapBase missing; `free` cannot report DTCM statics")
     for lo, hi, name in placed:
-        if sram_end is not None and inside(SRAM, lo, hi) and hi > sram_end:
-            errors.append(f"section {name} ends at 0x{hi:08x}, past __sram_end "
-                          f"0x{sram_end:08x} -- `free` would under-report SRAM")
+        if (sram_end is not None and name != PLUGIN_SECTION
+                and inside(SRAM, lo, hi) and hi > sram_end):
+            errors.append(f"section {name} ends at 0x{hi:08x}, past "
+                          f"__sram_seq_end 0x{sram_end:08x} -- `free` would "
+                          "under-report SRAM")
         if (sram_ldr_end is not None and inside(SRAM_LDR, lo, hi)
                 and hi > sram_ldr_end):
             errors.append(f"section {name} ends at 0x{hi:08x}, past "
@@ -515,6 +532,41 @@ def main():
             errors.append(f"section {name} [0x{lo:08x},0x{hi:08x}) straddles "
                           f"__HeapBase 0x{heap_base:08x} -- `free` would "
                           "mis-report DTCM statics")
+
+    # 8. the plugin reservation is exactly where every prelinked plugin expects
+    #    it (issue #101).  A plugin services no relocations, so this address is
+    #    part of the ABI the host packer and the plugin's own link both bake in:
+    #    it cannot be allowed to drift the way a sequentially placed section
+    #    would the day a neighbour grew.  Declared here INDEPENDENTLY of the
+    #    linker script on purpose -- a gate that read the expected address out
+    #    of the thing it is checking would pass whatever it was given.
+    #
+    #    NOBITS is required as well as the address: a reservation that acquired
+    #    CONTENTS would put 128 KB of nothing into the boot image and, worse,
+    #    would mean something had been placed in the window the loader fills at
+    #    run time.
+    plugin = secs.get(PLUGIN_SECTION)
+    if plugin is None:
+        errors.append(f"{PLUGIN_SECTION} missing -- the reservation a prelinked "
+                      "plugin is built for is not in the image")
+    else:
+        vma, size, flags = plugin
+        lo, hi = vma, vma + size
+        if lo != PLUGIN_BASE or hi != PLUGIN_END:
+            errors.append(
+                f"{PLUGIN_SECTION} is [0x{lo:08x},0x{hi:08x}), expected "
+                f"[0x{PLUGIN_BASE:08x},0x{PLUGIN_END:08x}) -- every plugin "
+                "already built is prelinked for the expected base")
+        if "CONTENTS" in flags:
+            errors.append(f"{PLUGIN_SECTION} has CONTENTS; it must be NOLOAD")
+        if "ALLOC" not in flags:
+            errors.append(f"{PLUGIN_SECTION} is not ALLOC; nothing reserves it")
+        for olo, ohi, oname in placed:
+            if oname == PLUGIN_SECTION:
+                continue
+            if olo < hi and lo < ohi:
+                errors.append(f"section {oname} [0x{olo:08x},0x{ohi:08x}) "
+                              f"overlaps the plugin reservation")
 
     if errors:
         print("check_placement_budget: FAIL", file=sys.stderr)

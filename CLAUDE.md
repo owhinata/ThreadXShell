@@ -725,6 +725,29 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   ワーカーは**フレームを arm / claim した時点**で控え、publish のロック内で照合する
   （`svc/nn_det_record.c`。実機では決定論的に注入できないのでホストテストが唯一の検査）。
   詳細は board README。
+- **[!] plugin container（#101 = #78 Step 1a）**: モデルと、その出力を解釈するコードを
+  1 blob で運ぶ。**Step 1a はロードも実行もしない** — 検証して `nn info` に出すだけ。
+  説明は board README。破ってはいけないこと:
+  - **`svc/plugin_load.c` は呼び出し可能なポインタを返さない**（`plugin_view` は整数
+    オフセットとコピー済みバイトのみ）。「実行しない」は規律ではなく**型の性質**。
+  - **ゲートは plugin ELF にも適用する**（対象外にしない）。ただし
+    **メモリ安全性も渡したポインタの使用範囲も証明せず、MMIO 検査は存在しない**
+    （リテラルは定数と区別できず、ペリフェラルが SRAM と同じ 0x34 窓に居る）。
+    **plugin は board code と同格の信頼された native code**。
+    **ダイジェストは署名ではない**（転送後の同一性のみ。由来は packer の
+    プロセス制約が担保）。
+  - **container は組んでから検査し、その同一ファイルを送る**。ホストは
+    `verify_container` で**デバイスと同じ `svc/plugin_load.c`** を走らせる（#93 の
+    「ホストで通り実機で落ちる」の再発防止）。**`--profile` / `--slot` は必須**で、
+    後者はホストが知り得ない（`blob write` は**サイズヘッダ前にスロット全体を消去する**）。
+  - **[!] モデル区画は 16 バイト整列**。`npu_payload.c` の 4 は flatbuffer の規則で、
+    **Ethos-U ドライバは全ベースアドレスに 16 を要求する**。container 以前は
+    4 KB 整列の payload アドレスに載っていたので**事故的に満たされていた**。
+  - **`.plugin` は固定絶対アドレス**（`0x341E0000..0x34200000`、上端アンカー）。
+    prelink されるので動かすと既存 plugin が全て無効。**ldscript と placement gate が
+    独立に宣言する。**
+  - **スタック上限は provisional で、1a を通った plugin は「実行して安全」ではない**
+    （呼び出し地点の深さ・例外フレームの取り分・余裕が未測定。決めるのは Step 1b）。
 - **[!] ベンダの NOR 書込み経路へ届いてよいのは seam だけ**（#88 Part D）。
   内側 4 本（`hx_lib_qspi_eeprom_{erase_sector,write,erase_all,word_write}`）を
   `-Wl,--wrap` で `port/sdk_seam/nor_seam.c` に寄せる。**外側 `hx_lib_spi_eeprom_*` を

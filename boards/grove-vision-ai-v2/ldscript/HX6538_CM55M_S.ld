@@ -398,14 +398,56 @@ SECTIONS
         __blob_stage_end = .;
     } > CM55M_S_SRAM
 
-    /* High-water mark of the SRAM window, for the `free` command (issue #26).
-     * MUST stay after every section assigned to CM55M_S_SRAM -- the location
-     * counter here still belongs to that region, and the next output section
-     * switches it back to DTCM.  Order-sensitive by nature, so
-     * check_placement_budget.py fails the build if any allocated section ever
+    /* High-water mark of the SEQUENTIALLY PLACED part of the SRAM window, for
+     * the `free` command (issue #26).  MUST stay after every bump-placed
+     * section assigned to CM55M_S_SRAM -- the location counter here still
+     * belongs to that region.  Order-sensitive by nature, so
+     * check_placement_budget.py fails the build if any such section ever
      * extends past this symbol; that is what stops the report going stale the
-     * way it did when .sram_bench was added and `free` kept printing 0. */
-    __sram_end = .;
+     * way it did when .sram_bench was added and `free` kept printing 0.
+     *
+     * [!] RENAMED FROM __sram_end IN ISSUE #101, BECAUSE IT NO LONGER MEANS
+     * "the end of SRAM usage".  .plugin below is pinned to a fixed address at
+     * the TOP of the window, so the region now has two occupied spans with a
+     * growth gap between them, and a single high-water mark cannot describe
+     * that.  Reading the old name would have made `free` count the gap as used
+     * and the gate reject the reservation for sitting past the mark. */
+    __sram_seq_end = .;
+
+    /*
+     * The plugin load image's reservation (issue #101 = #78 Step 1a).
+     *
+     * [!] A FIXED ABSOLUTE ADDRESS, AND THAT IS THE POINT.  A plugin is
+     * PRELINKED for this base -- the loader services no relocations -- so the
+     * address is part of the ABI that the host packer and the plugin's own link
+     * both bake in.  Placed sequentially it would move the day .rodata or
+     * .nn_arena grew, and every plugin ever built would silently target the
+     * wrong window.  Anchoring at the TOP of the region instead leaves the
+     * sequential sections above free to grow into the gap below it.
+     *
+     * NOLOAD: the image arrives over the wire at run time, so there is nothing
+     * to put in the boot image.  check_image_coherence.py only carries
+     * ALLOC+CONTENTS sections, so this reservation never reaches the image
+     * generator.
+     *
+     * The size is 128 KiB as an opening number: the shared decoder links to
+     * ~2.5 KB, and the rest is data, bss and a band-sized raster scratch --
+     * a full-frame raster is deliberately NOT provided for, because the panel
+     * callback's per-draw budget means a full frame is painted in bands anyway.
+     * Step 1b revisits it against the first real plugin's measured sizes.
+     *
+     * [!] THE END MATTERS AS MUCH AS THE START.  Cache maintenance for loaded
+     * code is by address and rounds outward to whole 32-byte lines, so a
+     * reservation whose end were ragged would let that rounding reach into
+     * whatever followed it.  Both edges are 32-byte multiples here, and
+     * plugin_load.c refuses a mem_size that is not.
+     */
+    .plugin 0x341E0000 (NOLOAD) :
+    {
+        __plugin_start = .;
+        . += 0x20000;
+        __plugin_end = .;
+    } > CM55M_S_SRAM
 
     .bss :
     {
@@ -479,6 +521,16 @@ SECTIONS
            "loader window overflowed -- .lcd_fb no longer fits below 0x3404D000")
     ASSERT(__rodata_start >= ORIGIN(CM55M_S_SRAM),
            ".rodata must not start below the loadable-SRAM floor")
+
+    /* The growth gap has not been consumed (issue #101).  The sequential
+     * sections grow upward and .plugin is pinned at the top, so this is the one
+     * thing ld itself can state about the two of them: the day a buffer grows
+     * past 0x341E0000 the build stops here rather than overlapping a
+     * reservation whose address is baked into every plugin ever linked. */
+    ASSERT(__sram_seq_end <= __plugin_start,
+           "SRAM sequential sections grew into the .plugin reservation")
+    ASSERT(__plugin_end == ORIGIN(CM55M_S_SRAM) + LENGTH(CM55M_S_SRAM),
+           ".plugin must be anchored at the top of the SRAM window")
 
     /* The SDK's scripts define _image_start/_image_end/_image_size here.  They
      * are NOT carried over (issue #29 audit): nothing reads them -- not the

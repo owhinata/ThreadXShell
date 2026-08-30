@@ -58,7 +58,8 @@ extern uint8_t _end_noinit[];                 /* end of .noinit (log ring) */
 extern uint8_t __HeapBase[], __HeapLimit[];
 extern uint8_t __StackLimit[], __StackTop[];  /* MSP stack (top of DTCM) */
 extern uint8_t __sram_ldr_end[];              /* after every loader-window section */
-extern uint8_t __sram_end[];                  /* after every SRAM section */
+extern uint8_t __sram_seq_end[];              /* after the SEQUENTIAL SRAM sections */
+extern uint8_t __plugin_start[], __plugin_end[];  /* the pinned reservation */
 
 static uint32_t sym(const uint8_t s[])
 {
@@ -94,7 +95,23 @@ static int cmd_free(struct cli_instance *sh, int argc, char **argv)
 
 	/* SRAM: explicit placement only, so each high-water mark IS the usage. */
 	uint32_t sraml_used  = sym(__sram_ldr_end) - SRAML_ORIGIN;
-	uint32_t sram_used   = sym(__sram_end) - SRAM_ORIGIN;
+
+	/*
+	 * [!] THE LOADABLE WINDOW HAS TWO OCCUPIED SPANS SINCE ISSUE #101, so one
+	 * high-water mark can no longer describe it.  The sequential sections grow
+	 * up from the floor; .plugin is PINNED at the top because a plugin is
+	 * prelinked for that address and could not survive the reservation moving.
+	 * Between them is a growth gap that belongs to the sequential half.
+	 *
+	 * Reporting `__plugin_end - ORIGIN` as "used" -- which is what the old
+	 * single mark would have become -- would have counted that entire gap as
+	 * spent and hidden the only number worth watching here, namely how much
+	 * room the sequential sections have left before they collide with a
+	 * reservation whose address is baked into every plugin ever linked.
+	 */
+	uint32_t sram_seq    = sym(__sram_seq_end) - SRAM_ORIGIN;
+	uint32_t plugin_len  = sym(__plugin_end) - sym(__plugin_start);
+	uint32_t sram_used   = sram_seq + plugin_len;
 
 	(void)argc;
 	(void)argv;
@@ -103,6 +120,12 @@ static int cmd_free(struct cli_instance *sh, int argc, char **argv)
 	row(sh, "DTCM", DTCM_ORIGIN, DTCM_LENGTH, dtcm_used);
 	row(sh, "SRAMl", SRAML_ORIGIN, SRAML_LENGTH, sraml_used);
 	row(sh, "SRAM", SRAM_ORIGIN, SRAM_LENGTH, sram_used);
+	cli_print(sh, "  seq   %7lu B used, %7lu B to grow before 0x%08lx\r\n",
+	          (unsigned long)sram_seq,
+	          (unsigned long)(sym(__plugin_start) - sym(__sram_seq_end)),
+	          (unsigned long)sym(__plugin_start));
+	cli_print(sh, "  plugin %6lu B reserved at 0x%08lx (issue #101)\r\n",
+	          (unsigned long)plugin_len, (unsigned long)sym(__plugin_start));
 
 	cli_print(sh, "data:   %lu B  bss+noinit: %lu B\r\n",
 	          (unsigned long)(sym(__data_end__) - sym(__data_start__)),

@@ -74,6 +74,12 @@ struct nn_overlay_stats {
 	 */
 	uint32_t depth_decode; /**< producer thread, at the decode call site  */
 	uint32_t depth_draw;   /**< panel thread, at the draw call site       */
+
+	/* What a plugin's draw() actually spends of its painter budget, and how
+	 * often it was refused (issue #103).  Reported so the cap is judged
+	 * against a measurement rather than defended in the abstract. */
+	uint32_t draw_spent;   /**< high-water pixels charged in one draw     */
+	uint32_t draw_refused; /**< primitives refused for want of budget     */
 };
 
 struct plugin_rect;

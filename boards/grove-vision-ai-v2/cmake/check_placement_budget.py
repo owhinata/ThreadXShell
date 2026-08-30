@@ -202,6 +202,15 @@ REQUIRED = [
     # MVE, so this is not optional and never was; the judgement lives in
     # port/threadx/fp_enforce.c and is called from _tx_initialize_low_level().
     ("fp_enforce_judge", "the FP context precondition (issue #42)"),
+    # issue #103: the MPU verdict decides whether a loaded plugin may be
+    # branched into, and the fault reporter is the only thing that can name the
+    # plugin an address belongs to.  Both are pure, both are called from exactly
+    # one place, and --gc-sections deletes what nothing references -- so their
+    # presence is the evidence that the call is still there.  A loader that
+    # stopped checking the MPU, or a fault handler that stopped attributing,
+    # would otherwise be a silent change.
+    ("plugin_mpu_judge", "the plugin reservation's MPU verdict (issue #103)"),
+    ("plugin_run_attribute", "plugin fault attribution (issue #103)"),
 ]
 
 # Benchmark buffers -- issue #25.  membench labels every row with a memory

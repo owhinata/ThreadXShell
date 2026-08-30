@@ -29,6 +29,8 @@
 #define LOG_TAG "fault"
 #include "log.h"
 
+#include "plugin_run.h"
+
 #include <stdint.h>
 
 #include "WE2_device.h"
@@ -130,10 +132,38 @@ __attribute__((used)) void fault_handler_c(uint32_t *frame, uint32_t exc_return)
 	        (unsigned long)mmfar, (unsigned long)bfar);
 	LOG_ERR("sfsr=%08lx sfar=%08lx",
 	        (unsigned long)sfsr, (unsigned long)sfar);
-	if (frame_ok)
+	if (frame_ok) {
 		LOG_ERR("pc=%08lx lr=%08lx psr=%08lx sp=%08lx exc=%08lx",
 		        (unsigned long)pc, (unsigned long)lr, (unsigned long)xpsr,
 		        (unsigned long)sp, (unsigned long)exc_return);
+
+		/*
+		 * Was it a loaded plugin? (issue #103)
+		 *
+		 * [!] ONLY WHEN THE FRAME IS READABLE.  Without a frame there is no pc,
+		 * and naming a plugin from a stale or absent one would be worse than
+		 * saying nothing -- the operator would go and read code that had
+		 * nothing to do with it.
+		 *
+		 * [!] AND THE CLAIM STOPS AT "INSIDE".  An imprecise fault does not
+		 * promise that the stacked pc is the instruction that caused it, so
+		 * this says where the pc IS, not what did it.  A plugin's symbols are
+		 * not on this board in any case: the offset is what a developer feeds
+		 * to `arm-none-eabi-addr2line` against the plugin ELF that was packed.
+		 *
+		 * plugin_run_attribute() reads one atomically published pointer and
+		 * then only immutable, loader-owned memory.  It never follows anything
+		 * into the plugin, which is what makes it callable from here.
+		 */
+		{
+			uint32_t off = 0u;
+			const char *who = plugin_run_attribute(pc, &off);
+
+			if (who != NULL)
+				LOG_ERR("pc is in plugin '%s' +0x%lx", who,
+				        (unsigned long)off);
+		}
+	}
 	else
 		LOG_ERR("frame lost (stacking fault?) frame=%08lx exc=%08lx",
 		        (unsigned long)(uintptr_t)frame, (unsigned long)exc_return);

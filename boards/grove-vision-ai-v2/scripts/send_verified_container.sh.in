@@ -171,8 +171,10 @@ sys.exit("no model section in the container")
 # And the device's own validator over the whole thing.
 "$CONTAINER_VERIFIER" "$container" \
     --target "$PLUGIN_TARGET_ID" --link "$PLUGIN_BASE" --capacity "$PLUGIN_MAX" \
-    --stack 0=8192 --stack 1=8192 --stack 2=8192 --stack 3=1024 \
-    --stack 4=4096 --stack 5=4096 --stack 6=4096 >&2 || \
+    --stack 0=@GROVE_PLUGIN_STACK_PRODUCER@ --stack 1=@GROVE_PLUGIN_STACK_PRODUCER@ \
+    --stack 2=@GROVE_PLUGIN_STACK_PRODUCER@ --stack 3=@GROVE_PLUGIN_STACK_PANEL@ \
+    --stack 4=@GROVE_PLUGIN_STACK_SHELL@ --stack 5=@GROVE_PLUGIN_STACK_SHELL@ \
+    --stack 6=@GROVE_PLUGIN_STACK_SHELL@ >&2 || \
     die "the device's validator rejected the container; nothing was sent"
 
 # Will it fit the slot the operator named?

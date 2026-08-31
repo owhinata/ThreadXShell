@@ -5268,8 +5268,33 @@ they cost a read and a compare whether or not they are written), and one charge
 per call so a primitive that clips away entirely is not free.  The charge is made
 **before** the primitive touches the framebuffer, so a refusal leaves the frame
 unchanged rather than half drawn.  Budget: 19,200 pixels and 64 operations per
-frame; the detector plugin has been measured at 10,185 over a live stream and
-has never been refused.
+frame.
+
+**[!] An outline is charged what it WRITES, not the box it encloses (issue
+#105).**  It used to be charged the enclosing area, on the grounds that this was
+"simpler and safely pessimistic".  Pessimistic it was; safe it was not.  One
+close-up face is a 200x200 box -- 40,000 by that reckoning, twice the whole
+per-frame cap -- so it was refused outright, and a refused primitive draws
+nothing at all: **a face with no box round it, at exactly the distance where the
+detector works best**, with the count sitting in `nn stream stats` where nobody
+was looking.  The real cost of that outline is about 800 stores.
+
+The count is **stores, not distinct pixels**.  On an odd, narrow rectangle the
+clamped stroke makes the left and right bands overlap and the loop writes that
+column twice; what the budget bounds is time under the guard, so the second write
+is real work.  A 1x10 box costs 18, not 10 -- which is the number an intuitive
+"perimeter x stroke" would have given, and it would have under-charged.
+
+**[!] And the agreement between the charge and the loop is now checkable.**  The
+primitive moved out of `lcd_st7789.c` -- which cannot be built on the host, so
+`test_plugin_paint.c` had stubbed it with a call counter -- into `lcd_rect.c`.
+The painter and the drawing loop share ONE normalisation (`lcd_rect_norm`: the
+clip and the stroke clamp) and nothing else; the test counts the stores the real
+loop issues through a seam inside the driver and compares them against the budget
+the painter deducted, and pins golden numbers besides, so the charge is never
+checked against itself.  `lcd_rect.c` carries `-O3` in `GROVE_O3_SOURCES` because
+the file it left had it: a refactor that does not mean to change what runs has to
+carry the compile options with the code.
 
 **[!] It is not a bound on arbitrary computation inside `draw()`.**  A plugin is
 trusted native code; nothing stops it spending a millisecond on arithmetic before
@@ -5281,7 +5306,193 @@ The painter is deliberately more than `rect`: a painter that could only draw
 hollow boxes would be a detector-only painter, reproducing one layer up the very
 asymmetry issue #78 exists to remove.  `blit` is the escape hatch -- a plugin
 rasterises glyphs, a mask or a skeleton into its OWN buffer during `decode()`, on
-the producer thread with no guard held, and hands over spans.
+the producer thread with no guard held, and hands over spans.  Issue #105 is that
+escape hatch being used: see below.
+
+**[!] `draw_spent` and `draw_refused` are one snapshot.**  The panel thread
+writes both under a critical section, `nn_overlay_stats()` copies both under one,
+and `nn_overlay_arm()` resets both under one.  A reader-side critical section
+alone was not enough -- a console preempting the panel thread BETWEEN its two
+stores sees this frame's spend beside the previous count, and disabling
+interrupts afterwards does not reach backwards.  The reset at arm time was
+missing entirely until issue #105: the pair survived across generations, so
+measuring the classifier and then the detector reported the classifier's
+high-water for both.
+
+## The classifier annotates the panel (issue #105 = #78 Step 2)
+
+Step 1b made a plugin run: it decoded, it painted boxes, it wrote to the
+console.  What it could not do was put a WORD on the panel, and that was the
+last thing standing between the store and the application.  `plugin/cifar10`
+declared no `DRAW` slot, so `nn_detector_ready()` refused to start a stream for
+it -- correctly, because a live preview that never annotates anything is
+indistinguishable from a broken one -- and the classifier could only be read one
+frame at a time through `nn run`.
+
+```
+nn model load --name cls
+nn stream start
+```
+
+now puts `cat  -783` on the panel, over the picture, at frame rate.
+
+### The font is in the plugin
+
+`plugin/common/plugin_text.c`: a conventional 5x7 ASCII cell in a 6x8 box, a
+rasteriser that writes into a caller-owned buffer, and a `plugin_printer` backed
+by a char array so the EXISTING `pl_fmt_*` helpers format the numbers -- a second
+integer formatter would be a second chance to spell the INT32_MIN case wrong.
+
+It is compiled into each plugin image rather than sitting in the firmware, and
+the reason is the same one the labels have: **meaning travels with the model**.
+A `text()` primitive on the painter would put a typeface in three firmwares and
+make every later question about it -- a bigger cell, a glyph the font lacks, a
+second script -- a firmware change, which is the errand issue #78 removes.  It
+would also cost an ABI break: `struct plugin_painter` carries no version or size
+field (unlike `struct plugin_base_api`), so a member appended to it cannot be
+detected by a plugin built against the older shape, and `PLUGIN_ABI_VERSION` is
+compared for exact equality -- every container in the store would have to be
+rebuilt and re-sent.  The duplication costs about 1 KB per image.
+
+**[!] `grove_add_plugin()` does not glob `plugin/common/`.**  Its `_srcs` names
+the files one by one, so a new common `.c` that is not added there is simply not
+linked.
+
+### Rasterise on the producer, blit on the panel
+
+The split is the one `cam_lcd_sink.h` already documents and no new discipline was
+invented for loaded code:
+
+| | thread | guard | budget |
+|---|---|---|---|
+| `decode()` | camera producer | none | a frame period |
+| `draw()` | panel | held | 19,200 charged pixels |
+
+So `decode()` formats the string and draws the glyphs into the plugin's own
+strip, and `draw()` is a single `blit`.  The detector does the same thing per
+box: a 24x8 chip holding the score, rasterised in `decode()` into an eight-cell
+atlas and blitted beside each rectangle in `draw()`.  That second user is why the
+rasteriser is in `plugin/common/` at all -- **a shared file with one caller is
+not shared, it is misfiled**.
+
+**[!] The strip is anchored at the frame origin, and that is a limitation, not a
+taste.**  A plugin is not told the framebuffer's geometry: the base publishes
+only `to_frame`, which maps the MODEL INPUT rectangle -- for a square model on
+this frame, the centre 240x240 at +40+0, not the frame.  Putting the bar along
+the bottom edge would mean adding the frame size to `struct plugin_base_api`,
+which is an ABI change for a cosmetic gain.  A segmentation mask does not hit
+this: `to_frame(0,0,1,1)` is exactly the rectangle its output covers.
+
+**[!] Nothing stale reaches the panel.**  `decode()` drops its draw-valid flag on
+entry and raises it only on the fully successful path.  The firmware already
+declines to call `draw()` for a frame whose decode failed -- `nn_overlay.c`
+returns non-zero and the sink never installs the hook -- so this is the second
+line of defence, and it is the one that survives someone adding an early return
+to `decode()` later.  Without it the panel keeps showing the last good label over
+a live picture, which reads as a working classifier.
+
+### What it costs
+
+| | text | data | bss | entry | shapes_ok | decode | draw | report |
+|---|---|---|---|---|---|---|---|---|
+| `blazeface` #103 | 2,736 | 0 | 1,740 | 8 | 40 | 192 | 300 | 344 |
+| `blazeface` #105 | 4,040 | 0 | 4,816 | 8 | 40 | 392 | 332 | 344 |
+| `cifar10` #103 | 1,392 | 0 | 48 | 0 | 16 | 48 | -- | 336 |
+| `cifar10` #105 | 2,660 | 0 | 8,852 | 0 | 16 | 432 | 292 | 336 |
+
+The bss is the strip and the atlas; the reservation is 128 KiB.  `draw` stays far
+under the 1,024 B panel allowance and `decode` under the 4,096 B producer one.
+`pl_sbuf_write` measures 16 B and is bounded by name in `board.cmake` at 64 --
+it is reached through the `pl_print_write` veneer, and the stack gate cannot see
+across a veneer, so it charges a flat allowance there for what is normally the
+BASE.  A plugin-supplied printer puts its own code on the other side of that
+assumption, so the assumption is checked rather than commented.
+
+**The firmware grew 32 bytes of ITCM** (234,784 -> 234,816), which is the whole
+of the painter's new charge, the critical sections and the neutral wording.
+
+### Measured on hardware
+
+| | before | after |
+|---|---:|---:|
+| detector `held` | 206 us | **212 us** |
+| detector `drew` | 4,356 px | **736 px** |
+| detector fps | 36.99 | **37.00** |
+| detector `decode` | 126 us | **148 us** |
+| `camera preview` `held` (no overlay) | 195 us | **195 us** |
+| classifier `held` | -- | **296 us** |
+| classifier `drew` | -- | **4,400 px** |
+| classifier fps | -- | **8.9** |
+
+**The charge fell by a factor of six on the same kind of scene** (4,356 -> 736),
+which is the enclosing area giving way to the outline's real cost: 736 is a
+70x70 box's 544 stores plus one 24x8 chip.  `held` rose 6 us for eight chips and
+`decode` 22 us for rasterising them on the producer, and the frame rate did not
+move.  Nothing was refused in any run.
+
+**`camera preview` is unchanged at 195 us**, which is the control that matters:
+it does not go through `draw()`, so it is where moving `lcd_rect_wire()` into its
+own translation unit would have shown up if the compile options had not moved
+with it.
+
+**[!] The classifier's 296 us was predicted at 250-260, and the prediction was
+wrong by 40 us.**  It was derived from the detector's cost per pixel -- and an
+outline WRITES a pixel while a blit reads it, compares it against the key, swaps
+its bytes and then writes it.  The measurement is 101 us for 4,400 px, about 9.2
+cycles a pixel at 400 MHz, which is what a blit's inner loop should cost.  Do not
+carry one primitive's per-pixel figure to another.
+
+**[!] And 8.9 fps is the NPU, not the panel.**  MobileNet invokes in 91 ms
+against BlazeFace's 12.7, so `wait` falls to 36 us -- the sensor pacing that
+bounds every other mode on this board (issue #60) is simply gone, and `sink` is
+93.5% of the frame.  A classifier on the panel is inference-bound, and the 296 us
+of guard time is 0.26% of a 112 ms frame.
+
+### The output stopped naming a species
+
+A classifier can hold the panel now, so every sentence the firmware printed about
+faces and boxes became a lie whenever the loaded container decodes something
+else.  `nn stream stats` said `last : 3 face(s)`; `camera stats` said
+`decode : ... anchors -> boxes` on an ORDINARY classifier stream.
+
+**[!] The lines were enumerated three times and the enumeration was wrong twice**
+-- one line, then three, then five.  So the sweep is a gate:
+`cmake/check_output_vocabulary.py` runs POST_BUILD and fails when a word it
+cannot justify appears.
+
+**[!] It reads `.rodata`, not the sources, and the first version did the
+opposite.**  That one was a regex over C string literals in a hand-picked set of
+directories, and the adversarial review of this issue took it apart: the image
+links many more directories than it scanned, and `"fa" "ce"`, a line
+continuation, a stringifying macro and a literal on a line beginning with `/*`
+all walked straight past.  Reading the section the linker produced answers all of
+them at once -- by then the string is one string, and every translation unit that
+reached the image is in scope.  It was checked by putting `"fa" "ce"` into
+`cmd_nn.c`: the source scanner passed it, the section scanner did not.
+
+**[!] It still does not prove the firmware cannot say "face".**  A string
+assembled at run time out of char literals is not in `.rodata`.  That is a
+deliberate act, and this gate is aimed at the slip -- the ordinary edit made by
+someone thinking about a detector.
+
+Plugin images are a separate artifact and are never linked into this ELF, so
+`plugin/` is out of scope by construction rather than by a rule that could be got
+wrong: `plugin/blazeface` saying "faces" is not a defect, it is the point of
+issue #78.  Two strings are allowlisted, **whole and one entry each** -- the
+caller-boxes path prints a `struct bf_det`, so it is BlazeFace by type and a
+classifier cannot reach it -- and an entry that stops matching anything fails the
+gate as a stale exemption.
+
+`svc/nn_svc.h` now states what `last_ndet` means: **items the decoder produced**.
+A face detector returns boxes; the classifier returns how many entries of its
+class vector it kept, and shows one of them.  How many it SHOWS is its own
+business, and a console that wants to know what they were asks the decoder with
+`nn dets`.
+
+Because nothing in this project gates what a command prints, the four cases of
+that `last` line -- never decoded, retired after a stop, an unrecognised model,
+a real count -- are chosen by a pure function in `nn_cmd_core.c` and their exact
+sentences are pinned in `shell/test/test_nn_cmd_core.c`.
 
 ### A fault inside a plugin is named
 

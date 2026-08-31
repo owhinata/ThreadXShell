@@ -37,6 +37,8 @@
 #define GROVE_LCD_ST7789_H
 
 #include <stdint.h>
+
+#include "lcd_rect.h"   /* lcd_wire(), lcd_rect_wire() -- issue #105 */
 #include <stddef.h>
 
 /*
@@ -306,8 +308,8 @@ struct lcd_blit_hooks {
  *   - it may write ONLY the framebuffer it is handed, and only within the
  *     w * h pixels it is told about, and must not retain the pointer.
  *
- * The single exception, and the reason it is enough: lcd_rect_wire() below is
- * PURE. It touches no driver state and takes no lock, so calling it from here
+ * The single exception, and the reason it is enough: lcd_rect_wire()
+ * (lcd_rect.h) is PURE. It touches no driver state and takes no lock, so calling it from here
  * is not re-entry in any sense that matters.
  *
  * @p staged is a SECOND callback with a DIFFERENT contract -- see the note on
@@ -339,9 +341,9 @@ int lcd_blit_le_overlay(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
  * @param stroke    edge thickness in pixels; a box thinner than twice this
  *                  comes out solid, which is the honest rendering of it
  */
-void lcd_rect_wire(uint16_t *fb, uint16_t fb_w, uint16_t fb_h,
-                   int32_t x0, int32_t y0, int32_t x1, int32_t y1,
-                   uint16_t rgb565, uint16_t stroke);
+/* lcd_rect_wire() is declared in lcd_rect.h, included above: the primitive
+ * moved to its own translation unit in issue #105 so a host test can link the
+ * real loop rather than a stub of it. */
 
 int lcd_fill(uint16_t rgb565, int (*stop)(void *), void *stop_arg);
 

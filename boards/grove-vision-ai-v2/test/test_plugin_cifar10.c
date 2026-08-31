@@ -161,7 +161,76 @@ static int milli_of(int8_t q)
 static plugin_entry_fn     pl_entry;
 static plugin_shapes_ok_fn pl_shapes_ok;
 static plugin_decode_fn    pl_decode;
+static plugin_draw_fn      pl_draw;
 static plugin_report_fn    pl_report;
+
+/* ---- what draw() hands the base (issue #105) ------------------------------ */
+
+/*
+ * A recording painter.  What matters is not what the label LOOKS like -- a
+ * bitmap comparison would pin the font and break on every glyph edit -- but the
+ * shape of the hand-off: exactly one blit, of a rectangle whose extents match
+ * the source it declares, and nothing at all when there is no valid decode.
+ * That last one is the property with teeth: the alternative to "nothing" is last
+ * frame's label painted over a live picture indefinitely.
+ */
+static unsigned draw_blits, draw_rects, draw_fills;
+static struct plugin_rect draw_last;
+static uint32_t draw_last_stride;
+static int32_t  draw_last_key;
+static const uint16_t *draw_last_src;
+
+static void rec_rect(void *ctx, const struct plugin_rect *r, uint16_t c,
+                     uint16_t stroke)
+{
+	(void)ctx; (void)r; (void)c; (void)stroke;
+	draw_rects++;
+}
+
+static void rec_fill(void *ctx, const struct plugin_rect *r, uint16_t c)
+{
+	(void)ctx; (void)r; (void)c;
+	draw_fills++;
+}
+
+static void rec_blit(void *ctx, const struct plugin_rect *r,
+                     const uint16_t *src, uint32_t stride, int32_t key)
+{
+	(void)ctx;
+	draw_blits++;
+	draw_last        = *r;
+	draw_last_src    = src;
+	draw_last_stride = stride;
+	draw_last_key    = key;
+}
+
+static const struct plugin_painter rec_painter = {
+	NULL, rec_rect, rec_fill, rec_blit,
+};
+
+static void draw_reset(void)
+{
+	draw_blits = 0u;
+	draw_rects = 0u;
+	draw_fills = 0u;
+	draw_last_src = NULL;
+}
+
+/* Is every pixel of the declared source rectangle the same value? */
+static int strip_uniform(void)
+{
+	uint32_t w = (uint32_t)(draw_last.x1 - draw_last.x0);
+	uint32_t h = (uint32_t)(draw_last.y1 - draw_last.y0);
+	uint32_t x, y;
+
+	if (draw_last_src == NULL || w == 0u || h == 0u)
+		return 1;
+	for (y = 0u; y < h; y++)
+		for (x = 0u; x < w; x++)
+			if (draw_last_src[y * draw_last_stride + x] != draw_last_src[0])
+				return 0;
+	return 1;
+}
 
 int main(void)
 {
@@ -174,22 +243,28 @@ int main(void)
 	pl_shapes_ok =
 		(plugin_shapes_ok_fn)(uintptr_t)plugin_slot_table[PLUGIN_SLOT_SHAPES_OK];
 	pl_decode = (plugin_decode_fn)(uintptr_t)plugin_slot_table[PLUGIN_SLOT_DECODE];
+	pl_draw = (plugin_draw_fn)(uintptr_t)plugin_slot_table[PLUGIN_SLOT_DRAW];
 	pl_report = (plugin_report_fn)(uintptr_t)plugin_slot_table[PLUGIN_SLOT_REPORT];
 
 	/* ---- the manifest this build will produce -------------------------- */
 	/*
 	 * [!] THE ABSENT SLOTS ARE PART OF THE DESIGN, not an oversight.  The packer
 	 * derives the capability word from this table, so a NULL here is what makes
-	 * the container say "no draw" -- and `nn stream` refuses a decoder that
-	 * cannot draw rather than running a preview that annotates nothing.
+	 * the container say so -- and `nn stream` refuses a decoder that cannot draw
+	 * rather than running a preview that annotates nothing.
+	 *
+	 * [!] DRAW IS NO LONGER ONE OF THEM (issue #105 = #78 Step 2).  This
+	 * assertion used to read "draw is deliberately absent (a label needs a
+	 * font)", and flipping it is the whole of Step 2: the font is in the plugin
+	 * now, so the classifier can hold the panel and `nn stream` admits it.
 	 */
 	expect("the three mandatory slots are exported",
 	       pl_entry != NULL && pl_shapes_ok != NULL && pl_decode != NULL,
 	       "one of them is absent");
 	expect("report is exported -- it is the whole point of this plugin",
 	       pl_report != NULL, "absent");
-	expect("[!] draw is deliberately absent (a label needs a font: Step 2)",
-	       plugin_slot_table[PLUGIN_SLOT_DRAW] == NULL, "present");
+	expect("[!] draw is exported -- the classifier annotates the panel (#105)",
+	       pl_draw != NULL, "absent");
 	expect("[!] and so are the parameters -- a classifier has no threshold",
 	       plugin_slot_table[PLUGIN_SLOT_PARAM_SET] == NULL &&
 	       plugin_slot_table[PLUGIN_SLOT_PARAM_GET] == NULL, "present");
@@ -400,6 +475,73 @@ int main(void)
 	       pl_report(&printer) < 0, "reported success");
 	expect("and nothing was written after the refusal", cap_calls == 2u,
 	       "%u write(s) -- it carried on", cap_calls);
+
+	/* ---- the panel (issue #105 = #78 Step 2) --------------------------- */
+
+	/*
+	 * [!] ONE BLIT, AND NOTHING ELSE.  draw() runs on the panel thread with the
+	 * panel guard held; the glyphs are rasterised in decode() on the producer.
+	 * A fill_rect or a run of rects here would mean the plugin had started
+	 * painting through the base under the guard, which is the split
+	 * cam_lcd_sink.h exists to keep.
+	 */
+	quiet();
+	scores[3] = 100;
+	(void)pl_decode(&out, 1u);
+	draw_reset();
+	pl_draw(&rec_painter);
+	expect("a decoded frame paints exactly one blit and nothing else",
+	       draw_blits == 1u && draw_rects == 0u && draw_fills == 0u,
+	       "%u blit(s), %u rect(s), %u fill(s)",
+	       draw_blits, draw_rects, draw_fills);
+	expect("the strip is anchored at the frame origin",
+	       draw_last.x0 == 0 && draw_last.y0 == 0,
+	       "at %ld,%ld", (long)draw_last.x0, (long)draw_last.y0);
+	expect("its stride matches the width it declares",
+	       draw_last_stride == (uint32_t)(draw_last.x1 - draw_last.x0),
+	       "stride %lu for width %ld", (unsigned long)draw_last_stride,
+	       (long)(draw_last.x1 - draw_last.x0));
+	expect("and the blit is opaque, so the label stays legible over the scene",
+	       draw_last_key < 0, "keyed on %ld", (long)draw_last_key);
+	expect("[!] something was actually rasterised, not a blank bar",
+	       !strip_uniform(), "every pixel is the same value");
+
+	expect("a null painter is survivable", (pl_draw(NULL), 1), "");
+	{
+		struct plugin_painter half = { NULL, rec_rect, rec_fill, NULL };
+
+		draw_reset();
+		pl_draw(&half);
+		expect("and so is a painter with no blit",
+		       draw_rects == 0u && draw_fills == 0u,
+		       "it painted something else instead");
+	}
+
+	/*
+	 * [!] A FAILED DECODE LEAVES NOTHING ON THE PANEL.  The firmware already
+	 * declines to call draw() for such a frame -- nn_overlay.c returns non-zero
+	 * and the sink never installs the hook -- so this is the second line of
+	 * defence, and it is the one that survives someone adding an early return
+	 * to decode() later.  Without it the panel would keep showing the last good
+	 * label over a live picture, which reads as a working classifier.
+	 */
+	quiet();
+	(void)pl_decode(NULL, 1u);
+	draw_reset();
+	pl_draw(&rec_painter);
+	expect("[!] after a failed decode the panel gets nothing at all",
+	       draw_blits == 0u && draw_rects == 0u && draw_fills == 0u,
+	       "%u blit(s) -- last frame's label would still be showing",
+	       draw_blits);
+
+	/* And a fresh good decode brings it back, so the flag is not one-way. */
+	quiet();
+	scores[3] = 100;
+	(void)pl_decode(&out, 1u);
+	draw_reset();
+	pl_draw(&rec_painter);
+	expect("and the next good decode restores it", draw_blits == 1u,
+	       "%u blit(s)", draw_blits);
 
 	if (failures) {
 		printf("test_plugin_cifar10: %d failure(s)\n", failures);

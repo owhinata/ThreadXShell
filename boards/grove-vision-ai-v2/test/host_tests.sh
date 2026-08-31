@@ -181,6 +181,7 @@ gcc $CFLAGS \
     "$board/port/npu/nn_preproc.c" \
     "$board/plugin/blazeface/plugin_main.c" \
     "$board/plugin/common/plugin_base.c" "$board/plugin/common/plugin_fmt.c" \
+    "$board/plugin/common/plugin_text.c" \
     "$HOST_TEST_SVC/blazeface.c" \
     $LDFLAGS -o "$out/test_plugin_decode"
 "$out/test_plugin_decode"
@@ -204,6 +205,7 @@ gcc $CFLAGS \
     "$here/test_plugin_cifar10.c" \
     "$board/plugin/cifar10/plugin_main.c" \
     "$board/plugin/common/plugin_base.c" "$board/plugin/common/plugin_fmt.c" \
+    "$board/plugin/common/plugin_text.c" \
     $LDFLAGS -o "$out/test_plugin_cifar10"
 "$out/test_plugin_cifar10"
 
@@ -303,12 +305,19 @@ gcc $CFLAGS \
 # and a refused primitive leaving the framebuffer untouched rather than half
 # drawn.
 #
-# lcd_rect_wire() is stubbed in the test: it is the driver's own pure primitive
-# with its own rules, and pulling lcd_st7789.c onto the host would drag in the
-# SPI driver for nothing.  The subject here is the painter.
-gcc $CFLAGS \
+# [!] AND SINCE ISSUE #105 IT LINKS THE REAL lcd_rect_wire().  It used to be
+# stubbed with a call counter, which was fine while the painter charged a number
+# of its own devising.  Then the charge became a claim ABOUT that loop -- an
+# outline costs the pixels it WRITES, not the area it encloses -- and a test that
+# replaced the loop could not check it.  So the primitive moved out of
+# lcd_st7789.c (which drags the SPI driver onto the host) into lcd_rect.c, built
+# here with LCD_RECT_COUNT_STORES so every store is counted at the point it
+# happens.  The test compares that count against the budget the painter deducted,
+# and pins golden numbers besides, so the two sides are not one side twice.
+gcc $CFLAGS -DLCD_RECT_COUNT_STORES \
     -I "$here" -I "$board/port/plugin" -I "$board/port/lcd" -I "$board/../../svc" \
     "$here/test_plugin_paint.c" "$board/port/plugin/plugin_paint.c" \
+    "$board/port/lcd/lcd_rect.c" \
     $LDFLAGS -o "$out/test_plugin_paint"
 "$out/test_plugin_paint"
 
@@ -475,3 +484,21 @@ gcc $CFLAGS \
     "$board/src/blob_state.c" "$board/src/blob_stage.c" "$svc/crc32.c" \
     $LDFLAGS -o "$out/test_blob_write"
 "$out/test_blob_write"
+
+# issue #105 (#78 Step 2) -- the plugin font and its rasteriser
+# (plugin/common/plugin_text.c).
+#
+# The subject is BOUNDS and INDEXING, not typography.  A glyph written past the
+# end of a plugin's strip lands in whatever the plugin put next to it and the
+# label still looks right; the base validates the rectangle it is handed by
+# blit(), not the buffer behind the pointer, and no plugin gate proves a bounded
+# write.  So the buffer here has canaries either side, and every case checks
+# them.  The font is not compared bitmap-for-bitmap -- that would pin the
+# typeface and break on a glyph edit -- but the two ends of the table are, since
+# an index off by one shows up at exactly two characters.
+gcc $CFLAGS \
+    -I "$here" -I "$board/plugin/common" -I "$HOST_TEST_SVC" \
+    "$here/test_plugin_text.c" "$board/plugin/common/plugin_text.c" \
+    "$board/plugin/common/plugin_fmt.c" "$board/plugin/common/plugin_base.c" \
+    $LDFLAGS -o "$out/test_plugin_text"
+"$out/test_plugin_text"

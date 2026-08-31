@@ -232,7 +232,8 @@ struct rec_rect {
 
 static struct rec_rect rec_v[BF_MAX_DET * 4];
 static unsigned        rec_n;
-static unsigned        rec_other;   /* fill_rect / blit calls */
+static unsigned        rec_other;   /* fill_rect calls                       */
+static unsigned        rec_blits;   /* blit calls -- the score chips (#105)  */
 
 static void rec_rect_fn(void *ctx, const struct plugin_rect *r, uint16_t rgb,
                         uint16_t stroke)
@@ -256,7 +257,7 @@ static void rec_blit_fn(void *ctx, const struct plugin_rect *r,
                         const uint16_t *src, uint32_t stride, int32_t key)
 {
 	(void)ctx; (void)r; (void)src; (void)stride; (void)key;
-	rec_other++;
+	rec_blits++;
 }
 
 static struct plugin_painter rec_painter = {
@@ -267,6 +268,7 @@ static void rec_reset(void)
 {
 	rec_n = 0u;
 	rec_other = 0u;
+	rec_blits = 0u;
 	memset(rec_v, 0, sizeof rec_v);
 }
 
@@ -458,8 +460,9 @@ int main(void)
 
 	rec_reset();
 	nn_active_draw(&rec_painter);
-	expect("nothing paints", rec_n == 0u && rec_other == 0u,
-	       "%u rect(s), %u other", rec_n, rec_other);
+	expect("nothing paints",
+	       rec_n == 0u && rec_other == 0u && rec_blits == 0u,
+	       "%u rect(s), %u fill(s), %u blit(s)", rec_n, rec_other, rec_blits);
 	expect("and a stream would be refused for having nothing to draw",
 	       nn_active_can_draw() == 0, "claims it draws");
 
@@ -542,9 +545,16 @@ int main(void)
 	 * ================================================================ */
 	rec_reset();
 	nn_active_draw(&rec_painter);
-	expect("the plugin drew one rectangle per detection",
-	       rec_n == (unsigned)ref_n && rec_other == 0u,
-	       "%u rect(s) for %d face(s), %u other", rec_n, ref_n, rec_other);
+	/* [!] AND ONE SCORE CHIP PER DETECTION SINCE ISSUE #105.  The chip is
+	 * rasterised on the producer during decode() and handed over here as a
+	 * single blit, which is the split the panel guard demands: draw() does no
+	 * glyph work, it hands over spans.  A fill_rect would mean the plugin had
+	 * started painting backgrounds through the base instead. */
+	expect("the plugin drew one rectangle and one score chip per detection",
+	       rec_n == (unsigned)ref_n && rec_blits == (unsigned)ref_n &&
+	       rec_other == 0u,
+	       "%u rect(s), %u chip(s) for %d face(s), %u fill(s)",
+	       rec_n, rec_blits, ref_n, rec_other);
 
 	for (i = 0; i < ref_n && (unsigned)i < rec_n; i++) {
 		struct nn_preproc_box b;

@@ -30,6 +30,7 @@
 #include "plugin_abi.h"
 #include "plugin_base.h"
 #include "plugin_fmt.h"
+#include "plugin_text.h"
 #include "blazeface.h"
 #include "tensor.h"
 
@@ -58,6 +59,44 @@ static const struct plugin_base_api *pl_base;
  * two paths can be compared on the panel as well as in a test. */
 #define PL_RGB565   0x07E0u   /* green */
 #define PL_STROKE   2u
+
+/* ---- the score beside each box (issue #105) -------------------------------- */
+
+/*
+ * [!] THE SAME RASTERISER THE CLASSIFIER USES, AND THAT IS WHY IT IS SHARED.
+ * plugin_text.c was written for the classifier's label; a shared file with one
+ * caller is not shared, it is just misfiled.  Putting the score on the box is
+ * what makes the escape hatch general -- glyphs into a plugin-owned buffer,
+ * spans through blit -- rather than a one-off for one container.
+ *
+ * SCALE 1, four characters: the milli score is at most "1000", and the chip has
+ * to sit inside a face box without covering the face.  Opaque, because a
+ * colour-keyed blit is charged for every source pixel it READS anyway, so
+ * transparency would buy nothing from the budget and would leave green digits
+ * over a bright cheek.
+ */
+#define PL_LBL_SCALE  1u
+#define PL_LBL_CHARS  4u
+#define PL_LBL_W      (PL_TEXT_CELL_W * PL_LBL_CHARS * PL_LBL_SCALE)
+#define PL_LBL_H      (PL_TEXT_CELL_H * PL_LBL_SCALE)
+#define PL_LBL_BG     0x0000u   /* black */
+
+/*
+ * One cell per detection, stacked into a single column so a cell is a
+ * contiguous run at the atlas stride -- which is exactly what blit wants.
+ *
+ * The _Static_asserts are the bounds check: blit reads the rectangle's width and
+ * height through the stride it is handed and proves nothing about the buffer
+ * behind the pointer, and neither does the image gate.
+ */
+static uint16_t pl_atlas[PL_LBL_W * PL_LBL_H * BF_MAX_DET];
+static int      pl_nlbl;
+
+_Static_assert(sizeof pl_atlas / sizeof pl_atlas[0] ==
+               PL_LBL_W * PL_LBL_H * BF_MAX_DET,
+               "the atlas is not the rectangle its extents describe");
+_Static_assert(PL_LBL_W >= PL_TEXT_CELL_W * PL_LBL_CHARS * PL_LBL_SCALE,
+               "a cell is narrower than the longest score it must hold");
 
 /* ---- entry ---------------------------------------------------------------- */
 
@@ -99,9 +138,54 @@ static int pl_shapes_ok(const struct tensor_desc *outs, unsigned n)
  * copies used to do -- turns a question about the model into a picture with no
  * boxes and no explanation.
  */
+/** Milli, on the same scale `report` and the threshold use. */
+static uint32_t pl_score_milli(const struct bf_det *d)
+{
+	return (uint32_t)(d->score * 1000.0f);
+}
+
+/*
+ * Rasterise one chip per detection.
+ *
+ * On the producer thread with no panel guard held -- the split cam_lcd_sink.h
+ * documents, and the reason draw() below can stay a run of blits.
+ */
+static void pl_stage_labels(void)
+{
+	struct pl_text_target t;
+	int i;
+
+	t.px     = pl_atlas;
+	t.w      = PL_LBL_W;
+	t.h      = PL_LBL_H * BF_MAX_DET;
+	t.stride = PL_LBL_W;
+
+	for (i = 0; i < pl_ndet && i < BF_MAX_DET; i++) {
+		struct plugin_printer out;
+		struct pl_sbuf sb;
+		char line[PL_LBL_CHARS + 1u];
+		int32_t y = (int32_t)((uint32_t)i * PL_LBL_H);
+
+		pl_sbuf_init(&sb, line, sizeof line);
+		pl_sbuf_printer(&out, &sb);
+		(void)pl_fmt_u32(&out, pl_score_milli(&pl_det[i]));
+
+		pl_text_fill(&t, 0, y, (int32_t)PL_LBL_W, (int32_t)PL_LBL_H,
+		             PL_LBL_BG);
+		(void)pl_text_draw(&t, 0, y, line, PL_LBL_SCALE, PL_RGB565);
+		pl_nlbl = i + 1;
+	}
+}
+
 static int pl_decode(const struct tensor_desc *outs, unsigned n)
 {
+	/* Before anything can return: a chip must never outlive the decode that
+	 * produced it, however this function later grows an early exit. */
+	pl_nlbl = 0;
+
 	pl_ndet = blazeface_decode(&pl_bf, outs, n, pl_det, BF_MAX_DET, &pl_res);
+	if (pl_ndet > 0)
+		pl_stage_labels();
 	return pl_ndet;
 }
 
@@ -130,13 +214,29 @@ static void pl_draw(const struct plugin_painter *paint)
 		return;   /* a negative count is a diagnostic, not a box to draw */
 
 	for (i = 0; i < pl_ndet && i < BF_MAX_DET; i++) {
-		struct plugin_rect r;
+		struct plugin_rect r, lr;
 
 		/* Through the veneer, never the pointer: see plugin_base.c. */
 		if (pl_base_to_frame(pl_base, pl_det[i].x, pl_det[i].y,
 		                     pl_det[i].w, pl_det[i].h, &r) != 0)
 			continue;
 		pl_paint_rect(paint, &r, PL_RGB565, PL_STROKE);
+
+		/*
+		 * The score chip, inside the box's top-left corner so it never
+		 * hides the edge the box is there to show.  The painter clips it,
+		 * which is what makes a box running off the frame -- the ordinary
+		 * case for a face at the edge -- need no arithmetic here.
+		 */
+		if (i >= pl_nlbl || paint->blit == NULL)
+			continue;
+		lr.x0 = r.x0 + (int32_t)PL_STROKE;
+		lr.y0 = r.y0 + (int32_t)PL_STROKE;
+		lr.x1 = lr.x0 + (int32_t)PL_LBL_W;
+		lr.y1 = lr.y0 + (int32_t)PL_LBL_H;
+		pl_paint_blit(paint, &lr,
+		              pl_atlas + (size_t)i * PL_LBL_W * PL_LBL_H,
+		              PL_LBL_W, -1);
 	}
 }
 

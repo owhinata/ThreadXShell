@@ -225,3 +225,35 @@ const char *nn_status_name(int status)
 	default:                   return "failed";
 	}
 }
+
+/*
+ * The `last` line's four cases (issue #105).  See nn_cmd_core.h for why the
+ * choice is a function rather than a chain of ternaries at the print site.
+ *
+ * The order matters and is not arbitrary: validity is asked first, because an
+ * invalid reading's ndet field means nothing at all, and only then is the
+ * sentinel separated from a count.
+ */
+enum nn_last_kind nn_last_kind_of(uint8_t last_valid, uint32_t infers,
+                                  int32_t last_ndet)
+{
+	if (!last_valid)
+		return infers != 0u ? NN_LAST_RETIRED : NN_LAST_NEVER;
+	if (last_ndet < 0)
+		return NN_LAST_UNRECOGNISED;
+	return NN_LAST_COUNT;
+}
+
+const char *nn_last_text(enum nn_last_kind kind)
+{
+	switch (kind) {
+	case NN_LAST_NEVER:
+		return "nothing decoded yet";
+	case NN_LAST_RETIRED:
+		return "the result is dropped when a stream stops";
+	case NN_LAST_UNRECOGNISED:
+		return "this model is not one the decoder recognises";
+	default:
+		return NULL;   /* NN_LAST_COUNT prints its count, not a sentence */
+	}
+}

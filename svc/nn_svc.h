@@ -581,8 +581,8 @@ struct nn_stream_stats {
 	uint8_t  running;      /**< the stream is still producing               */
 	/**
 	 * [!] "NEVER DECODED" IS NOT "DECODED NOTHING".  Without this a console
-	 * prints "0 faces" for a stream that has not finished its first frame,
-	 * which reads as a working detector finding nobody.  One board's own
+	 * prints "0 results" for a stream that has not finished its first frame,
+	 * which reads as a working decoder finding nothing.  One board's own
 	 * contract already required the two apart and this keeps that true.
 	 */
 	uint8_t  last_valid;
@@ -598,7 +598,19 @@ struct nn_stream_stats {
 	uint32_t decoder_errors;
 	uint32_t last_us;      /**< the most recent inference                   */
 	uint32_t elapsed_ms;   /**< since this generation started               */
-	int32_t  last_ndet;    /**< valid only when @ref last_valid             */
+	/**
+	 * How many ITEMS the decoder produced, or a negative BF_ERR_*.  Valid only
+	 * when @ref last_valid.
+	 *
+	 * [!] ITEMS, NOT FACES (issue #105).  A decoder's result is private to it
+	 * -- that is the whole of issue #78 -- so this is a count and not a
+	 * description: a face detector returns boxes, and a classifier plugin
+	 * returns how many entries of its class vector it kept.  How many of them
+	 * it then SHOWS is its own business; the classifier reports three and paints
+	 * one.  A console that wants to know what they were asks the decoder, with
+	 * `nn dets`.
+	 */
+	int32_t  last_ndet;
 };
 
 /** Which set of board lines is being asked for. */

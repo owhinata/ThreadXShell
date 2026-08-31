@@ -24,6 +24,16 @@
  *   C. THE TWO REFUSALS ARE DIFFERENT.  A tag this grammar does not have at all
  *      and a tag with a malformed operand send a reader to different places, so
  *      they must not collapse into one code.
+ *
+ *   D. WHAT `nn stream stats` SAYS ON ITS `last` LINE (issue #105).  Nothing in
+ *      this project gates what a command PRINTS -- the board README says so in
+ *      as many words -- and this line has four cases that send an operator to
+ *      four different places: wait, look at the picture, load a different model,
+ *      or read the count.  Two of them were introduced because folding them
+ *      together had already misled someone (issues #97, #99), and the noun in
+ *      the fourth stopped being "face(s)" when a classifier plugin could hold
+ *      the panel.  A build that compiles proves none of that, so the choice was
+ *      made a pure function and the sentences are pinned here.
  */
 #include <assert.h>
 #include <stddef.h>
@@ -32,6 +42,8 @@
 #include <string.h>
 
 #include "nn_cmd_core.h"
+
+static int last_failures;
 
 /* ---- A: scaled-integer float decomposition ------------------------------- */
 
@@ -231,6 +243,82 @@ static void test_names(void)
 	printf("  E. names and element sizes                                ok\n");
 }
 
+/* ---- D: the `last` line of `nn stream stats` ----------------------------- */
+
+static void expect_last(const char *what, uint8_t valid, uint32_t infers,
+                        int32_t ndet, enum nn_last_kind kind, const char *text)
+{
+	enum nn_last_kind got = nn_last_kind_of(valid, infers, ndet);
+	const char *got_text = nn_last_text(got);
+
+	if (got != kind) {
+		printf("  FAIL %s: kind %d, wanted %d\n", what, (int)got, (int)kind);
+		last_failures++;
+		return;
+	}
+	if (text == NULL) {
+		if (got_text != NULL) {
+			printf("  FAIL %s: expected no sentence, got \"%s\"\n",
+			       what, got_text);
+			last_failures++;
+			return;
+		}
+	} else if (got_text == NULL || strcmp(got_text, text) != 0) {
+		printf("  FAIL %s: \"%s\"\n", what,
+		       got_text ? got_text : "(none)");
+		last_failures++;
+		return;
+	}
+	printf("  ok   %s\n", what);
+}
+
+static void test_last_line(void)
+{
+	printf(" case: the `last` line of `nn stream stats`\n");
+
+	/* Nothing has decoded yet.  "0 result(s)" here would read as a working
+	 * decoder that found nothing, which is the confusion issue #97 named. */
+	expect_last("a stream that has not finished its first frame",
+	            0u, 0u, 0, NN_LAST_NEVER, "nothing decoded yet");
+
+	/*
+	 * [!] AND THE SAME FIELDS AFTER A RUN MEAN SOMETHING ELSE.  One board
+	 * retires its result when a stream stops, deliberately, so that a stopped
+	 * stream does not leave a stale annotation on view.  Saying "nothing
+	 * decoded yet" after hundreds of inferences reads as a broken decoder.
+	 */
+	expect_last("a stopped stream that did infer",
+	            0u, 412u, 0, NN_LAST_RETIRED,
+	            "the result is dropped when a stream stops");
+
+	/*
+	 * [!] A NEGATIVE COUNT IS NOT A COUNT.  It is the decoder saying the open
+	 * model is not one it recognises -- load a different model, rather than
+	 * look at the picture -- and printing "-1 result(s)" hands the reader
+	 * arithmetic to do on a sentinel.
+	 */
+	expect_last("a model the decoder does not recognise",
+	            1u, 40u, -1, NN_LAST_UNRECOGNISED,
+	            "this model is not one the decoder recognises");
+	expect_last("and any other negative sentinel, not just -1",
+	            1u, 40u, -3, NN_LAST_UNRECOGNISED,
+	            "this model is not one the decoder recognises");
+
+	/* A real count, including zero -- which is a measurement, not an absence. */
+	expect_last("a decode that produced nothing is still a decode",
+	            1u, 40u, 0, NN_LAST_COUNT, NULL);
+	expect_last("and one that produced items", 1u, 40u, 3, NN_LAST_COUNT, NULL);
+
+	/*
+	 * [!] VALIDITY IS ASKED FIRST.  An invalid reading's ndet field means
+	 * nothing at all, so a negative value sitting in it must not be reported as
+	 * "the decoder does not recognise this model" -- that would send someone to
+	 * re-flash a model over a stream that had simply not decoded yet.
+	 */
+	expect_last("an invalid reading is never read for a sentinel",
+	            0u, 0u, -1, NN_LAST_NEVER, "nothing decoded yet");
+}
+
 int main(void)
 {
 	printf("test_nn_cmd_core:\n");
@@ -239,6 +327,11 @@ int main(void)
 	test_spec_accepts();
 	test_spec_refuses();
 	test_names();
+	test_last_line();
+	if (last_failures != 0) {
+		printf("test_nn_cmd_core: %d failure(s)\n", last_failures);
+		return 1;
+	}
 	printf("test_nn_cmd_core: all passed\n");
 	return 0;
 }

@@ -768,8 +768,8 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 			          (unsigned long)(ns.prep_us / ns.prof_frames));
 			cli_print(sh, "  invoke : %6lu us/frame   NPU inference\r\n",
 			          (unsigned long)(ns.invoke_us / ns.prof_frames));
-			cli_print(sh, "  decode : %6lu us/frame   anchors -> "
-			              "boxes\r\n",
+			cli_print(sh, "  decode : %6lu us/frame   outputs -> "
+			              "the decoder's result\r\n",
 			          (unsigned long)(ns.decode_us / ns.prof_frames));
 		} else if (ns.prof_frames != 0u) {
 			cli_print(sh, "nn sink  : -- (the EPK time source is not "
@@ -790,10 +790,10 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 	if (sk.fault != NULL)
 		cli_print(sh, "sink err : %s\r\n", sk.fault);
 	/* Only ever non-zero after an `nn stream`: a frame whose inference was
-	 * refused is still SHOWN, just without boxes, so it counts here and not
-	 * as a sink error. */
+	 * refused is still SHOWN, just with nothing drawn on it, so it counts here
+	 * and not as a sink error. */
 	if (sk.overlay_errors != 0u)
-		cli_print(sh, "overlay  : %lu frame(s) shown without boxes\r\n",
+		cli_print(sh, "overlay  : %lu frame(s) shown unannotated\r\n",
 		          (unsigned long)sk.overlay_errors);
 	if (st.fault != NULL)
 		cli_print(sh, "fault    : %s\r\n", st.fault);

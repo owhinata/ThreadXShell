@@ -649,6 +649,7 @@ add_library(shell_objs OBJECT
     # timer_seam.c: a board-owned definition of a name -Wl,--wrap redirects.
     "${BOARD_DIR}/port/sdk_seam/nor_seam.c"
     "${BOARD_DIR}/port/lcd/lcd_st7789.c"
+    "${BOARD_DIR}/port/lcd/lcd_rect.c"
     "${BOARD_DIR}/port/camera/cam_convert.c"
     "${BOARD_DIR}/port/camera/cam_mipi_calc.c"
     "${BOARD_DIR}/port/camera/cam_auto.c"
@@ -815,10 +816,17 @@ target_compile_options(shell_objs PRIVATE -Os)
 # target does not compile.  What executes on this board is the plugin's copy,
 # built with the plugin's own flags -- so the decode arithmetic's optimisation
 # level is stated in GROVE_PLUGIN_CFLAGS and nowhere else.
+# [!] lcd_rect.c IS HERE BECAUSE IT LEFT lcd_st7789.c (issue #105).  The outline
+# primitive was compiled -O3 by virtue of the file it sat in; moving it to a
+# translation unit of its own -- so a host test could link the real loop -- would
+# otherwise have dropped it to the default -Os without a line of the diff saying
+# so.  A refactor that does not intend to change what runs has to carry the
+# compile options with the code.
 set(GROVE_O3_SOURCES
     "${BOARD_DIR}/port/camera/cam_convert.c"
     "${BOARD_DIR}/port/npu/nn_preproc.c"
-    "${BOARD_DIR}/port/lcd/lcd_st7789.c")
+    "${BOARD_DIR}/port/lcd/lcd_st7789.c"
+    "${BOARD_DIR}/port/lcd/lcd_rect.c")
 set_source_files_properties(${GROVE_O3_SOURCES}
     TARGET_DIRECTORY shell_objs
     PROPERTIES COMPILE_OPTIONS "-O3")
@@ -1168,6 +1176,22 @@ add_custom_command(TARGET shell POST_BUILD
             --nm "${CMAKE_NM}" --objdump "${CMAKE_OBJDUMP}"
             "$<TARGET_FILE:shell>"
     COMMENT "check_placement_budget.py (ITCM/DTCM budget + forbidden refs)")
+# 2b. Output vocabulary (issue #105): the firmware may not name a species it
+#    cannot know.  A classifier plugin can hold the panel, so every sentence
+#    about "faces" and "boxes" is wrong whenever the loaded container decodes
+#    something else -- and nothing else in this project gates what a command
+#    PRINTS.  It reads .rodata rather than the sources: the first version was a
+#    regex over C literals and the adversarial review walked it past with
+#    `"fa" "ce"`, a line continuation, a stringifying macro, and a literal on a
+#    line beginning with a comment.  By the time a string is in .rodata it is
+#    one string, and every translation unit that reached the image is in scope.
+#    Plugin images are a separate artifact and are never linked here, which is
+#    the right scope: a decoder shipping its own vocabulary is issue #78.
+add_custom_command(TARGET shell POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/check_output_vocabulary.py"
+            --objcopy "${CMAKE_OBJCOPY}"
+            "$<TARGET_FILE:shell>"
+    COMMENT "check_output_vocabulary.py (the firmware does not name a species)")
 # 3. (was the MVE predication scan; deleted by issue #42.)  It barred predicated
 #    MVE because the ThreadX port was believed not to save VPR.  The Armv8-M ARM
 #    says the HARDWARE saves it -- with FPCCR.ASPEN set, which is now enforced
@@ -1524,6 +1548,12 @@ set(GROVE_PLUGIN_STACK_PRODUCER 4096)
 set(GROVE_PLUGIN_STACK_PANEL    1024)
 set(GROVE_PLUGIN_STACK_SHELL    1024)
 
+# What the plugin's own string sink may spend (issue #105).  It is a leaf that
+# copies bytes into a caller-owned buffer, so this is a ceiling it can actually
+# be pushed past -- give it a call and the transitive bound jumps well over 64.
+# That is the point: the number is small enough for the check to fire.
+set(GROVE_PLUGIN_SBUF_WRITE_MAX 64)
+
 # --- one build rule, two plugins (issue #103 = #78 Step 1b) ------------------
 #
 # [!] EACH PLUGIN IS A SEPARATE PROGRAM, not a configuration of one.  They are
@@ -1592,10 +1622,16 @@ function(grove_add_plugin _name)
     endif()
     set(_dir "${BOARD_DIR}/plugin/${_name}")
     set(_out "${CMAKE_BINARY_DIR}/plugin/${_name}")
+    # [!] plugin/common IS ENUMERATED, NOT GLOBBED, and every file it gains has
+    # to be added HERE.  A new common .c that is not in this list simply is not
+    # linked: the plugin builds, the gate passes, and the entry point that
+    # needed it fails at link time or -- worse, if it was only referenced from
+    # one path -- not at all.
     set(_srcs "${_dir}/plugin_main.c"
               "${GROVE_PLUGIN_COMMON}/plugin_base.c"
               "${GROVE_PLUGIN_COMMON}/plugin_fmt.c"
               "${GROVE_PLUGIN_COMMON}/plugin_libc.c"
+              "${GROVE_PLUGIN_COMMON}/plugin_text.c"
               ${P_SOURCES})
 
     set(_objs "")
@@ -1712,6 +1748,15 @@ function(grove_add_plugin _name)
                 # measured, so a short list here does not under-report -- it
                 # stops the container being built at all, which is the right
                 # direction but a confusing place to discover it.
+                #
+                # [!] AND ONE NAME THAT IS NOT A SLOT.  pl_sbuf_write is reached
+                # through the pl_print_write veneer, and the gate cannot see
+                # across a veneer -- it charges a flat allowance there for
+                # whatever is on the other side, which is normally the BASE.
+                # A plugin-supplied printer puts its own code there instead, so
+                # that assumption is bounded here by name rather than trusted to
+                # a comment.  The sender filters the gate's output down to the
+                # slot names, so an extra bound reaches no manifest.
                 # [!] THE SAME VARIABLES THE FIRMWARE'S POLICY USES.  Written
                 # out again here, the gate and the device would be two
                 # declarations of one rule, and a plugin could pass the build
@@ -1742,16 +1787,20 @@ grove_add_plugin(blazeface
             pl_draw=${GROVE_PLUGIN_STACK_PANEL}
             pl_report=${GROVE_PLUGIN_STACK_SHELL}
             pl_param_set=${GROVE_PLUGIN_STACK_SHELL}
-            pl_param_get=${GROVE_PLUGIN_STACK_SHELL})
+            pl_param_get=${GROVE_PLUGIN_STACK_SHELL}
+            pl_sbuf_write=${GROVE_PLUGIN_SBUF_WRITE_MAX})
 
-# The classifier.  Four entry points, because it neither draws nor takes a
-# parameter -- see plugin/cifar10/plugin_main.c for why each absence is a
-# decision.
+# The classifier.  Five entry points since issue #105: it DRAWS now -- a label
+# on the panel, rasterised in decode() and blitted in draw() -- and still takes
+# no parameter, because a threshold is a detector's idea.  See
+# plugin/cifar10/plugin_main.c for why each remaining absence is a decision.
 grove_add_plugin(cifar10
     ENTRIES pl_entry=${GROVE_PLUGIN_STACK_PRODUCER}
             pl_shapes_ok=${GROVE_PLUGIN_STACK_PRODUCER}
             pl_decode=${GROVE_PLUGIN_STACK_PRODUCER}
-            pl_report=${GROVE_PLUGIN_STACK_SHELL})
+            pl_draw=${GROVE_PLUGIN_STACK_PANEL}
+            pl_report=${GROVE_PLUGIN_STACK_SHELL}
+            pl_sbuf_write=${GROVE_PLUGIN_SBUF_WRITE_MAX})
 
 add_custom_target(plugin ALL DEPENDS ${GROVE_PLUGIN_ELFS})
 

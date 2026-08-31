@@ -476,8 +476,8 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   **EPK 容量 32**（`GROVE_EPK_WRAP_MAX` == `TX_GLUE_EPK_MAX_IRQ`）。
   **Timer0 の割込み到達は probe で検証済み**（M-G3a 申し送りを解消。PRIMASK 外で
   実行し、失敗したら bring-up ごと拒否）。詳細は board README。
-- ポストビルドゲート **4 本**（`boards/grove-vision-ai-v2/cmake/`。#42 で MVE 述語
-  スキャンを削除し、#88 で NOR seam を足した）: イメージ整合
+- ポストビルドゲート **5 本**（`boards/grove-vision-ai-v2/cmake/`。#42 で MVE 述語
+  スキャンを削除し、#88 で NOR seam、#105 で出力語彙を足した）: イメージ整合
   （生成 `.img` と ELF の突き合わせ + `.rodata` 内のコマンドレジストリ検証）/
   配置・予算（ITCM/DTCM headroom、ベクタ常駐、静的スタック、禁止シンボル残存、
   **必須シンボル残存**（#42。`--gc-sections` が未呼び出し関数を落とすので、
@@ -485,7 +485,9 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   **timer seam**（`check_timer_seam.py`。カメラアーカイブ込みの `seam_probe` リンクで
   「ベンダ timer コードが 1 バイトも残らない」ことを検査）/
   **NOR seam**（`check_nor_seam.py`、#88。ベンダの erase/program に届いてよいのは
-  `port/sdk_seam/nor_seam.c` だけ。判定は **ELF ではなく ld の map**）。
+  `port/sdk_seam/nor_seam.c` だけ。判定は **ELF ではなく ld の map**）/
+  **出力語彙**（`check_output_vocabulary.py`、#105。ファームは知り得ない「種」を
+  名乗らない。判定は **`.rodata`** で、ソースの literal ではない）。
   negative test はいずれも `cmake/fixtures/run_fixture_tests.py`。
   **外す・弱める変更は不可**（f746/wio のゲートと同格）。
 - **推論（`nn` / #44）**: TFLM は**ソースからビルド**（プリビルトは CMSIS-NN 版のみ＝MVE を
@@ -778,10 +780,39 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
     0 を宣言してよい。absent の綴りは slot 側で、`stack_limit == 0` の拒否は明示的に書く）。
   - **[!] painter の予算はガード保持時間に比例する仕事の上界**であって `draw()` 内の
     任意計算の上界ではない。課金は**フレームバッファを触る前**。
+    **[!] 輪郭は「書く画素数」で課金する**（#105。外接面積だと近距離の顔 1 つ
+    200x200 = 40,000 が上限 19,200 を超えて**黙って箱が消える**）。**数えるのは
+    store であって相異なる画素ではない** — 奇数幅の細い矩形は左右バンドが重なり
+    同じ列を 2 度書く。**共有するのは幾何規則（`lcd_rect_norm`）だけで期待値は共有しない**:
+    テストは**実ループが発行した store 数**を数え、golden 値も別に置く
+    （`lcd_rect.c` はそのためにホストへリンクできる TU に分離した。`-O3` も一緒に運ぶ）。
+    `draw_spent` / `draw_refused` は **writer / reader / arm の 3 箇所**を同じ
+    クリティカルセクション規則に揃える（reader 側だけでは writer の 2 代入の途中を
+    遡って防げない）。
   - **[!] `nn_input_quant_ok()` は常駐デコーダの前提条件**で、plugin は縛られない
     （ベンダの分類器アプリ自身が scale 0.0203 / zp -8 に `pixel - 128` を書く）。
     縛ると分類器 container が全て組込み class report に流れ、ラベルが読まれない。
-    **`nn stream` は描けないデコーダを拒否する**（分類器に DRAW は無い＝Step 2）。
+    **`nn stream` は描けないデコーダを拒否する**（DRAW は任意スロット。
+    **#105 で分類器も DRAW を持つようになった**が、拒否そのものは残す）。
+  - **[!] フォントは plugin 側**（#105 = Step 2。`plugin/common/plugin_text.c`）。
+    painter に `text()` を足さない — `plugin_painter` に version/size が無いので
+    末尾拡張は **abi_version bump = 全 container 再生成**になり、字体・グリフ範囲・
+    多言語が以後ファーム変更になる（#78 が消そうとしている用事）。
+    **ラスタライズは `decode()`（producer・ガード無し）、`draw()` は blit だけ。**
+    **plugin はフレームの縦横を知らない**（`to_frame` が返すのはモデル入力の矩形）ので
+    ストリップは**原点アンカー**。**`decode()` は冒頭で draw-valid を落とし成功時のみ立てる**
+    （さもないと前フレームのラベルが live 画像の上に残り続ける）。
+    **バッファの extent は 1 定数から導出し `_Static_assert`** する（`blit` は
+    範囲外読みを証明しない）。
+  - **[!] 共有コアと Grove の印字は「種」を名乗らない**（#105）。`last_ndet` の契約は
+    **「デコーダが返した item 数」**で、**何件見せるかは plugin の裁量**。
+    **列挙で潰さない** — 3 回数えて 2 回間違えた（1 行 → 3 行 → 5 行）。
+    `cmake/check_output_vocabulary.py` が **POST_BUILD で `.rodata` を** negative scan する。
+    **ソースの literal を regex で見ない** — 初版はそれで、`"fa" "ce"` / 行継続 /
+    stringify マクロ / 行頭が `/*` の行に素通りされた（#105 の adversarial review）。
+    **plugin は別成果物なのでリンクされず、対象外は構成上自明**（検出器 plugin が
+    `faces` と言うのは正しい）。**ただし実行時に組み立てた文字列は見えない** —
+    「通った」を「言えない」と読まない。
   - **ファームと plugin は別成果物で、間違いは両方向**。`--target flash` は container を
     更新しない／**plugin だけの変更に焼き直しは不要**（実測: plugin を触っても
     `shell.img` はバイト一致、`shell.elf` の入力に `plugin/` は 0 件）。

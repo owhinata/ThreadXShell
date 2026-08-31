@@ -211,8 +211,9 @@
    （`check_image_coherence.py` = 生成 .img と ELF の突き合わせ + .rodata 内
    コマンドレジストリ / `check_placement_budget.py` = 配置・予算・ベンチバッファの
    常駐・禁止シンボル・**必須シンボル**）＋ **#88 で 4 本目 `check_nor_seam.py`**
-   （NOR 書込み経路に触れてよいのは `port/sdk_seam/nor_seam.c` だけ）を
-   外す・弱める変更は不可。
+   （NOR 書込み経路に触れてよいのは `port/sdk_seam/nor_seam.c` だけ）＋
+   **#105 で 5 本目 `check_output_vocabulary.py`**（ファームは知り得ない「種」を
+   名乗らない。判定は `.rodata`）を外す・弱める変更は不可。
    [!] **4 本目の `check_mve_predication.py` は #42 で削除した** — 前提
    （移植が VPR を保存しない）が誤りで、実際は**ハードウェアが保存する**うえ、
    そのスキャンは #66 のとおり 1 命令も検出できなかった。代わりに立っているのは
@@ -833,14 +834,44 @@
    - **[!] painter の予算はガード保持時間に比例する仕事の上界であって、`draw()` 内の
      任意の計算の上界ではない。** 課金はフレームバッファを触る**前**（部分描画を残さない）。
      colour-key blit は**透明でも読んだソース画素を全部数える**。
+   - **[!] 輪郭は外接面積ではなく「実際に書く store 数」で課金する**（#105）。
+     外接面積だと近距離の顔 1 つ（200x200 = 40,000）が上限 19,200 を超え、
+     **箱が黙って消える**。奇数幅の細い矩形は左右バンドが重なって同じ列を 2 度書くので、
+     **相異なる画素ではなく store を数える**。painter と描画ループが共有してよいのは
+     **幾何規則（`lcd_rect_norm`）だけ**で、テストの期待値は共有しない —
+     `test_plugin_paint.c` は**実ループの store をドライバ内の seam で数え**、
+     golden 値を別に置く。`lcd_rect.c` はそのために分離した TU で、`-O3` を
+     `GROVE_O3_SOURCES` で一緒に運ぶ（移すと黙って `-Os` に落ちる）。
+   - **[!] `draw_spent` / `draw_refused` は writer / reader / arm の 3 箇所で
+     同じクリティカルセクション規則に揃える**（#105）。reader 側だけでは、パネル側の
+     2 代入の途中で preempt された状態を遡って防げない。arm での reset を欠くと
+     世代を跨いで残り、cls → det の順に測ると前者の high-water を両方に報告する。
    - **[!] `nn_input_quant_ok()` は常駐デコーダの前提条件**であって、このボードが
      モデルを食わせられるかの話ではない（#103）。**plugin はこれに縛られない** —
      ベンダの分類器アプリ自身が scale 0.0203 / zp -8 の入力に `pixel - 128` を書く。
      縛ると全ての分類器 container が組込みの class report に流れ、container が運ぶ
      ラベルは一度も読まれない。
-   - **[!] `nn stream` は描けないデコーダを拒否する。** DRAW は任意スロットで、
-     分類器は持たない（パネルのラベルは Step 2）。拒否しないと「動いているが
-     一度も注釈されないプレビュー」になる。
+   - **[!] `nn stream` は描けないデコーダを拒否する。** DRAW は任意スロット。
+     拒否しないと「動いているが一度も注釈されないプレビュー」になる。
+     **#105 で分類器も DRAW を持つようになったが、拒否そのものは残す。**
+   - **[!] フォントは plugin 側に置く**（#105 = #78 Step 2）。painter に `text()` を
+     足さない — `plugin_painter` には version/size が無いので末尾拡張は
+     **abi_version bump = 全 container 再生成**であり、字体・グリフ範囲・多言語が
+     以後ファーム変更になる（#78 が消そうとしている用事そのもの）。
+     **ラスタライズは `decode()`、`draw()` は blit だけ。** plugin はフレームの
+     縦横を知らない（`to_frame` はモデル入力の矩形を返す）ので**原点アンカー**。
+     **`decode()` は冒頭で draw-valid を落とし、成功時にだけ立てる。**
+     バッファの extent は**1 定数から導出して `_Static_assert`**（`blit` は範囲外読みを
+     証明しない）。`grove_add_plugin()` は `plugin/common/` を glob しないので、
+     新しい共通 `.c` は `_srcs` に足す。
+   - **[!] ファームの印字は「種」を名乗らない**（#105）。`last_ndet` は
+     **「デコーダが返した item 数」**で、何件見せるかは plugin の裁量。
+     **列挙で潰さない**（3 回数えて 2 回間違えた）— `cmake/check_output_vocabulary.py` が
+     **POST_BUILD で `.rodata` を** negative scan する。**ソースの literal を regex で
+     見ない**: 初版はそれで、`"fa" "ce"` / 行継続 / stringify マクロ / 行頭が `/*` の行に
+     素通りされた。plugin は別成果物でリンクされないので**対象外は構成上自明**であり、
+     検出器 plugin が `faces` と言うのは正しい。**実行時に組み立てた文字列は見えない**ので
+     「通った」を「言えない」と読まないこと。
    - **ファームと plugin は別成果物で、間違いは両方向に起きる。** 別の artifact
      graph であり（`ninja -t inputs shell.elf` に `plugin/` は 1 つも現れず、plugin の
      ソースを触っても `shell.img` はバイト一致）、**`--target flash` は container を

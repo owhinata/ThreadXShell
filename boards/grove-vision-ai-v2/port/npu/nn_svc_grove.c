@@ -1321,7 +1321,7 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	}
 	/* From here every failure gives BOTH the lifecycle and the claim back. */
 	if (!nn_open_done) {
-		nn_detail_set("no model is loaded -- `nn model load --name det`");
+		nn_detail_set("no model is loaded -- `nn model load --name <name>`");
 		nn_stream_abort();
 		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
 		return;
@@ -1369,7 +1369,8 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
 		return;
 	}
-	nn_detail_set("inference stream started -- boxes are on the panel");
+	nn_detail_set("inference stream started -- the decoder is annotating "
+	              "the panel");
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
 
@@ -1545,7 +1546,11 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 	nn_overlay_stats(&os);
 	switch (index) {
 	case 0u:
-		nn_detail_to(buf, cap, "faces   : %lu drawn since the stream started",
+		/* [!] ITEMS, NOT FACES (issue #105).  This is the sum of what the
+		 * decoder returned, and since a classifier plugin can hold the panel
+		 * the decoder need not be a detector.  The firmware has no decoder at
+		 * all (issue #104), so it cannot name what it counted. */
+		nn_detail_to(buf, cap, "items   : %lu decoded since the stream started",
 		             (unsigned long)os.detections);
 		return 1;
 	case 1u:

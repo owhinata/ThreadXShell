@@ -105,6 +105,54 @@ const char *nn_model_state_name(uint8_t state);
  *  alongside it.  Always non-NULL. */
 const char *nn_status_name(int status);
 
+/**
+ * Which sentence `nn stream stats` puts on its `last` line.
+ *
+ * [!] HERE BECAUSE NOTHING GATES WHAT A COMMAND PRINTS (issue #105).  This
+ * project has learned twice that a refactor can leave the machinery correct and
+ * the words wrong, and the words are what an operator acts on -- the four cases
+ * below send a reader to four different places.  Making the CHOICE a pure
+ * function is what lets a host test pin all four; the printing stays in
+ * cmd_nn.c, where it belongs.
+ *
+ * The distinctions are the ones issues #97 and #99 established and must not be
+ * folded back together:
+ *
+ *   - "never decoded" is not "decoded nothing".  A stream that has not finished
+ *     its first frame reporting "0 results" reads as a working decoder finding
+ *     nothing;
+ *   - a stream that HAS inferred and then stopped has retired its result on
+ *     purpose, so that a stopped stream does not leave a stale annotation on
+ *     view.  Saying "nothing decoded yet" after hundreds of frames reads as a
+ *     broken decoder;
+ *   - a negative count is not a count.  It is the decoder saying the open model
+ *     is not one it recognises, which calls for loading a different model rather
+ *     than for looking at the picture.  Printing it as "-1 result(s)" hands the
+ *     reader arithmetic to do on a sentinel.
+ */
+enum nn_last_kind {
+	NN_LAST_NEVER = 0,      /**< no decode has completed yet               */
+	NN_LAST_RETIRED,        /**< there were decodes; the stream stopped    */
+	NN_LAST_UNRECOGNISED,   /**< the decoder does not know this model      */
+	NN_LAST_COUNT,          /**< a real, non-negative item count           */
+};
+
+/** Choose, from exactly the three fields the shared struct carries. */
+enum nn_last_kind nn_last_kind_of(uint8_t last_valid, uint32_t infers,
+                                  int32_t last_ndet);
+
+/**
+ * The parenthetical for a kind that has no number, or NULL for
+ * @ref NN_LAST_COUNT, which prints its count instead.
+ *
+ * [!] THE NOUN IS NEUTRAL.  A decoder's result is private to it -- that is the
+ * whole of issue #78 -- so this counts ITEMS.  A face detector returns boxes and
+ * a classifier plugin returns how many entries of its class vector it kept, and
+ * the shared command cannot tell which it has.  `nn dets` reaches the decoder's
+ * own report, which can.
+ */
+const char *nn_last_text(enum nn_last_kind kind);
+
 #ifdef __cplusplus
 }
 #endif

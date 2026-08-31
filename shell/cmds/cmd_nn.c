@@ -1125,23 +1125,32 @@ static void nn_stream_report_stats(struct cli_instance *sh,
 	 * "decoded nobody", and a negative count is not a count at all -- it is the
 	 * decoder saying the open model is not one it recognises, which calls for
 	 * loading a different model rather than for looking at the picture.
-	 * Printing it as "-1 face(s)" hands the reader arithmetic to do on a
+	 * Printing it as "-1 result(s)" hands the reader arithmetic to do on a
 	 * sentinel.
+	 *
+	 * [!] AND THE NOUN IS NEUTRAL SINCE ISSUE #105.  This said "face(s)", which
+	 * was true while every decoder any board could load was a face detector.
+	 * A classifier plugin decodes a class vector and returns how many entries
+	 * it kept, and there is nothing here that could tell the two apart: a
+	 * decoder's result is private to it, which is the whole of issue #78.  So
+	 * the shared command counts ITEMS and lets the decoder describe them --
+	 * `nn dets` reaches the plugin's own report.  Boards whose decoder really
+	 * is BlazeFace lose a word and no fact.
 	 */
-	if (!st->last_valid)
-		/* [!] Two reasons for no decode, and they are not the same fact.  One
-		 * board drops its boxes when a stream stops -- deliberately, so a
-		 * stopped stream does not leave stale detections on view -- and saying
-		 * "nothing decoded yet" after a run that inferred hundreds of frames
-		 * reads as a broken detector. */
-		cli_print(sh, "last    : -- (%s)\r\n",
-		          st->infers ? "the boxes are dropped when a stream stops"
-		                     : "nothing decoded yet");
-	else if (st->last_ndet < 0)
-		cli_print(sh, "last    : -- (this model is not one the decoder "
-		              "recognises)\r\n");
-	else
-		cli_print(sh, "last    : %ld face(s)\r\n", (long)st->last_ndet);
+	/* [!] THE CHOICE IS IN nn_cmd_core.c, WHERE A TEST CAN REACH IT (issue
+	 * #105).  Nothing in this project gates what a command prints, and these
+	 * four cases send an operator to four different places; the sentences and
+	 * the branch that picks them are pinned by test_nn_cmd_core.c. */
+	{
+		enum nn_last_kind kind = nn_last_kind_of(st->last_valid, st->infers,
+		                                         st->last_ndet);
+
+		if (kind == NN_LAST_COUNT)
+			cli_print(sh, "last    : %ld result(s)\r\n",
+			          (long)st->last_ndet);
+		else
+			cli_print(sh, "last    : -- (%s)\r\n", nn_last_text(kind));
+	}
 }
 
 /*
@@ -1359,19 +1368,19 @@ CLI_SUBCMD_SET_CREATE(nn_subcmds,
 	                  "[iterations]", cmd_nn_bench, 1, 1),
 #endif
 #if NN_SVC_HAS_CAMERA
-	CLI_CMD(run, NULL, "one frame: capture, infer, print the boxes", cmd_nn_run),
+	CLI_CMD(run, NULL, "one frame: capture, infer, report the result", cmd_nn_run),
 #endif
 	CLI_CMD_ARG_USAGE(out, NULL, "dequantised values of an output tensor",
 	                  "[tensor] [count]", cmd_nn_out, 1, 2),
-	CLI_CMD(dets, NULL, "decode the current outputs into boxes", cmd_nn_dets),
-	CLI_CMD_ARG_USAGE(thresh, NULL, "detection score threshold",
+	CLI_CMD(dets, NULL, "decode the current outputs and report", cmd_nn_dets),
+	CLI_CMD_ARG_USAGE(thresh, NULL, "the decoder's score threshold",
 	                  "[1..999]", cmd_nn_thresh, 1, 1),
 #if NN_SVC_HAS_NORM
 	CLI_CMD_ARG_USAGE(norm, NULL, "float input normalisation",
 	                  "<0|1>", cmd_nn_norm, 1, 1),
 #endif
 #if NN_SVC_HAS_OVERLAY
-	CLI_CMD_ARG_USAGE(overlay, NULL, "draw the boxes on the live preview",
+	CLI_CMD_ARG_USAGE(overlay, NULL, "annotate the live preview",
 	                  "<on|off>", cmd_nn_overlay, 1, 1),
 #endif
 #if NN_SVC_HAS_STREAM

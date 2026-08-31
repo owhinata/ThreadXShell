@@ -5430,6 +5430,23 @@ which is the enclosing area giving way to the outline's real cost: 736 is a
 `decode` 22 us for rasterising them on the producer, and the frame rate did not
 move.  Nothing was refused in any run.
 
+**[!] And a later run caught the case the old charge actually broke.**  A face
+close enough to the camera produced `drew 1452 px, 0 refused`.  Take off the
+192-pixel chip and the outline cost 1,260, which for stroke 2 solves to
+`w + h = 319` -- a BlazeFace box is roughly square, so about 160x160.  Its
+ENCLOSING AREA is around 25,000 pixels, well past the 19,200 cap: before this
+change that box was refused and **nothing was drawn round the face at all**.
+The 70x70 box in the row above never reached the cap either way (4,900), so it
+could not have shown this.  The deterministic 200x200 case in
+`test_plugin_paint.c` is the proof; this is the confirmation that the regime it
+describes is one a person standing in front of the board actually reaches.
+
+`held` reads 205 us in that run, below the 212 above, and the reason is not that
+a bigger box is cheaper: `items` was 401 over 1,110 frames, so the face was
+present in under half of them, while `held` is a mean over every frame and
+`drew` is a high-water over frames that drew.  Two numbers with different
+denominators -- do not read them against each other.
+
 **`camera preview` is unchanged at 195 us**, which is the control that matters:
 it does not go through `draw()`, so it is where moving `lcd_rect_wire()` into its
 own translation unit would have shown up if the compile options had not moved

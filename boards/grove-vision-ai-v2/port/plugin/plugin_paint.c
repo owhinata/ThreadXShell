@@ -8,6 +8,7 @@
  */
 #include "plugin_paint.h"
 
+#include "lcd_rect.h"
 #include "lcd_st7789.h"
 
 #include <stddef.h>
@@ -77,27 +78,47 @@ static int charge(struct paint_ctx *c, uint32_t pixels)
 
 /* ---- the primitives ------------------------------------------------------ */
 
+/*
+ * [!] THE OUTLINE IS CHARGED FOR WHAT IT WRITES, NOT FOR THE BOX IT ENCLOSES
+ * (issue #105).
+ *
+ * It used to be charged the enclosing area, described as "simpler and safely
+ * pessimistic".  Pessimistic it was; safe it was not.  The cap is 19,200 pixels
+ * a frame, so ONE close-up face -- a 200x200 box, 40,000 by that reckoning --
+ * was refused outright, and a refusal draws nothing at all: the operator sees a
+ * face with no box and no explanation, at exactly the distance where the
+ * detector works best.  Adding a label beside each box only tightens it.
+ *
+ * The real cost is the stores lcd_rect_wire() issues, which lcd_rect.c computes
+ * from the SAME normalisation the drawing loop uses, so the charge and the loop
+ * cannot disagree about clipping or about a clamped stroke.  What that sharing
+ * deliberately does NOT extend to is the test's expectation: test_plugin_paint.c
+ * counts the stores the real loop makes and compares them with the budget this
+ * deducted, and pins golden numbers besides -- otherwise the charge would be
+ * checked against itself.
+ */
 static void paint_rect(void *ctx, const struct plugin_rect *r, uint16_t rgb565,
                        uint16_t stroke)
 {
 	struct paint_ctx *c = (struct paint_ctx *)ctx;
-	int32_t x0, y0, x1, y1;
-	uint32_t cost;
+	struct lcd_rect_geom g;
 
-	if (c == NULL || c->fb == NULL)
+	if (c == NULL || c->fb == NULL || r == NULL)
 		return;
-	if (!clip(c, r, &x0, &y0, &x1, &y1)) {
+	/* No separate clip() here: lcd_rect_norm() is the clip, and asking it is
+	 * what keeps this from being a second opinion about the same rectangle.
+	 * It also answers "nothing to draw" for a stroke of zero, which the
+	 * driver rejects before it clips anything. */
+	if (!lcd_rect_norm(c->fb, c->w, c->h, r->x0, r->y0, r->x1, r->y1,
+	                   stroke, &g)) {
 		(void)charge(c, 0u);       /* a dispatch that drew nothing still costs */
 		return;
 	}
-	/* An outline visits its edges, but charging the enclosing area is both
-	 * simpler and safely pessimistic -- and it is what a solid box (a rectangle
-	 * thinner than two strokes) actually costs. */
-	cost = (uint32_t)(x1 - x0) * (uint32_t)(y1 - y0);
-	if (!charge(c, cost))
+	if (!charge(c, lcd_rect_writes(&g)))
 		return;
 
-	lcd_rect_wire(c->fb, c->w, c->h, x0, y0, x1, y1, rgb565, stroke);
+	lcd_rect_wire(c->fb, c->w, c->h, r->x0, r->y0, r->x1, r->y1, rgb565,
+	              stroke);
 }
 
 static void paint_fill_rect(void *ctx, const struct plugin_rect *r,
@@ -145,9 +166,20 @@ static void paint_blit(void *ctx, const struct plugin_rect *r,
 
 	/* Which part of the source survived the clip.  The source is the plugin's
 	 * own buffer and its extent is r's width and height -- clipping moves the
-	 * origin, so the source offset moves with it. */
-	sx0  = (uint32_t)(x0 - r->x0);
-	sy0  = (uint32_t)(y0 - r->y0);
+	 * origin, so the source offset moves with it.
+	 *
+	 * [!] WIDENED BEFORE THE SUBTRACTION, ON BOTH AXES.  `x0 - r->x0` is signed
+	 * arithmetic and r->x0 comes from loaded code: at INT32_MIN the difference
+	 * is not representable and the subtraction is undefined.  That is not a
+	 * theoretical input when the coordinate was computed from a model's output.
+	 *
+	 * The offset itself is in range by construction, and it is worth writing
+	 * down because it is the only reason this is safe: clip() keeps x0 >= r->x0
+	 * and x0 < x1 <= r->x1, so sx0 is strictly less than the source width r
+	 * declares.  What that width DESCRIBES is still the plugin's claim about
+	 * its own buffer, which this boundary does not verify -- see plugin_abi.h. */
+	sx0  = (uint32_t)((int64_t)x0 - (int64_t)r->x0);
+	sy0  = (uint32_t)((int64_t)y0 - (int64_t)r->y0);
 	cols = (uint32_t)(x1 - x0);
 	rows = (uint32_t)(y1 - y0);
 

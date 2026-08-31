@@ -114,15 +114,24 @@ static struct nn_preproc_geom nn_ov_geom;
  * What one plugin draw() may spend, and why these numbers.
  *
  * The panel guard is held for the whole of draw(), and everything else that
- * wants the panel is failing its non-blocking acquire meanwhile.  The staged
- * blit that follows costs about 775 us (issue #71), so a draw that approached
- * that would double the window.
+ * wants the panel is failing its non-blocking acquire meanwhile, so the work the
+ * base does on a plugin's behalf is capped at a quarter of a frame.
  *
- * A full frame is 320 x 240 = 76,800 pixels, and at roughly four cycles a pixel
- * on a 400 MHz core that is already about 770 us -- the whole staging budget.
- * So the cap is a quarter of a frame: enough for a label bar (320 x 16 = 5,120)
- * or for every box BF_MAX_DET allows, and far enough below the frame that the
- * panel path's timing is not the thing being spent.
+ * [!] THE JUSTIFICATION USED TO QUOTE 775 us FOR THE STAGED BLIT, AND THAT
+ * NUMBER IS SIX MONTHS STALE (issue #105).  The staging loops were compiled -O3
+ * when issue #42 removed the MVE ban that had forced -Os on them, and `held`
+ * dropped to 197 us -- the board README carries the before/after table.  The
+ * cap did not need changing, but the reasoning behind it was being read off a
+ * measurement that no longer described the machine, and a plan for this issue
+ * copied 775 into a hardware acceptance criterion before anyone noticed: it
+ * would have passed a threefold regression as "no change".  Take a fresh
+ * baseline; do not transcribe a constant out of a comment.
+ *
+ * A full frame is 320 x 240 = 76,800 pixels, so a quarter of a frame is 19,200:
+ * enough for a label bar (320 x 16 = 5,120), and enough for every box
+ * BF_MAX_DET allows now that an outline is charged for the pixels it writes
+ * rather than the area it encloses (issue #105 -- before that, one 200x200 box
+ * was refused on its own).
  *
  * [!] A CAP THAT CANNOT BE EXCEEDED IS NOT A CAP.  The stack allowances of this
  * issue were first written at the size of the whole thread stack, which made
@@ -337,8 +346,10 @@ static void nn_overlay_draw(void *ctx, uint16_t *fb, uint16_t fb_w,
 	 * AND draws, so by the time the panel thread is calling this, both are true.
 	 */
 	{
+		TX_INTERRUPT_SAVE_AREA
 		struct plugin_painter paint;
 		struct plugin_paint_budget bud;
+		uint32_t spent;
 
 		bud.pixels  = NN_OV_DRAW_PIXELS;
 		bud.ops     = NN_OV_DRAW_OPS;
@@ -346,11 +357,24 @@ static void nn_overlay_draw(void *ctx, uint16_t *fb, uint16_t fb_w,
 		plugin_paint_bind(&paint, &bud, fb, fb_w, fb_h);
 		nn_active_draw(&paint);
 
-		/* What it actually spent, so the cap can be judged against something
-		 * rather than defended in the abstract. */
-		if (NN_OV_DRAW_PIXELS - bud.pixels > nn_ov_draw_spent)
-			nn_ov_draw_spent = NN_OV_DRAW_PIXELS - bud.pixels;
+		/*
+		 * What it actually spent, so the cap can be judged against something
+		 * rather than defended in the abstract.
+		 *
+		 * [!] BOTH IN ONE CRITICAL SECTION (issue #105).  A console reading
+		 * these two is asking one question -- how close did a frame come to
+		 * the cap, and did anything get refused -- and a preemption between
+		 * the two stores answers it with this frame's spend beside the
+		 * previous count.  The reader disabling interrupts cannot undo that,
+		 * so the writer has to be atomic as well.  It is a handful of
+		 * instructions on the panel thread, off the pixel path.
+		 */
+		spent = NN_OV_DRAW_PIXELS - bud.pixels;
+		TX_DISABLE
+		if (spent > nn_ov_draw_spent)
+			nn_ov_draw_spent = spent;
 		nn_ov_draw_refused += bud.refused;
+		TX_RESTORE
 	}
 }
 
@@ -362,6 +386,26 @@ static const struct cam_lcd_overlay nn_ov_vtable = {
 
 const struct cam_lcd_overlay *nn_overlay_arm(void)
 {
+	TX_INTERRUPT_SAVE_AREA
+
+	/*
+	 * [!] THE DRAW PAIR IS RESET HERE, AND IT WAS NOT (issue #105).  Every
+	 * other counter in this function is per-stream; these two survived across
+	 * generations, so measuring the classifier and then the detector reported
+	 * the classifier's high-water for both -- which is precisely the number
+	 * the budget is judged by.
+	 *
+	 * Under the same critical section the writer and the reader use, so the
+	 * three agree on what one snapshot means.  There is no writer to race
+	 * here -- arm() runs after the old stream is quiescent and before the new
+	 * sink is attached -- and the reset is deliberately NOT done on stop, so
+	 * `nn stream stats` after a stop still describes the run that just ended.
+	 */
+	TX_DISABLE
+	nn_ov_draw_spent   = 0u;
+	nn_ov_draw_refused = 0u;
+	TX_RESTORE
+
 	nn_ov_stats.inferences = 0u;
 	nn_ov_stats.detections = 0u;
 	nn_ov_stats.skipped    = 0u;
@@ -415,6 +459,16 @@ void nn_overlay_stats(struct nn_overlay_stats *out)
 	invoke = nn_ov_invoke_ticks;
 	decode = nn_ov_decode_ticks;
 	frames = nn_ov_prof_frames;
+	/*
+	 * [!] THE DRAW PAIR IS COPIED HERE, INSIDE, and the panel thread updates
+	 * it inside one too (issue #105).  A reader-side critical section alone
+	 * cannot make these two agree: the panel thread writes the high-water and
+	 * then adds to the refusals, and a console preempting BETWEEN those two
+	 * stores sees the new spend beside the old refusal count no matter what it
+	 * disables afterwards.  Disabling interrupts does not reach backwards.
+	 */
+	out->draw_spent   = nn_ov_draw_spent;
+	out->draw_refused = nn_ov_draw_refused;
 	TX_RESTORE
 
 	/* The stage rows are only as good as their clock, and this port has the
@@ -427,6 +481,4 @@ void nn_overlay_stats(struct nn_overlay_stats *out)
 	out->decode_us   = out->prof_ok ? nn_ov_us(decode, hz) : 0u;
 	out->depth_decode  = nn_ov_depth_decode;
 	out->depth_draw    = nn_ov_depth_draw;
-	out->draw_spent    = nn_ov_draw_spent;
-	out->draw_refused  = nn_ov_draw_refused;
 }

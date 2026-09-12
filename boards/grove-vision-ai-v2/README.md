@@ -4910,6 +4910,22 @@ would justify shrinking the reservation is not in yet -- and shrinking it can be
 done ONCE, because a plugin is prelinked and moving the reservation invalidates
 every container already in the store.
 
+**[!] Since issue #106 the address is this board's half of a link script split in
+two.**  `boards/grove-vision-ai-v2/ldscript/plugin_memory.ld` carries the
+`MEMORY` block and nothing else; `asset/common/plugin.ld` carries the `SECTIONS`
+layout, which is not this board's -- that order IS the file format
+`svc/plugin_abi.h` defines, and its boundary symbols become the manifest's
+offsets.  The build binds the two with a generated wrapper holding **absolute**
+`INCLUDE` paths, because ld resolves a bare `INCLUDE` against its search
+directories and the working directory, and the plugin link runs from the plugin
+output directory -- a stale same-named fragment there would silently win.
+
+The address is still declared FOUR times independently: that fragment, the
+firmware's own script, `check_plugin_image.py` and `check_placement_budget.py`.
+That is the point.  **Do not generate the fragment and a gate's constants from
+one CMake variable** -- it would turn four statements that can disagree into one
+that cannot, and the gates into decoration.
+
 ### What the gates do and do not prove
 
 `check_plugin_image.py` applies the firmware's own checks to the plugin ELF --
@@ -4922,6 +4938,17 @@ routine are all link errors, so those gate checks are unreachable in the normal
 build.  `cmake/fixtures/run_plugin_gate_tests.py` records which defence catches
 which shape, so a passing gate is not read as evidence that all of its checks
 ran.
+
+**[!] And until issue #106 that file ran nowhere.**  It arrived with #101 and was
+reached by nothing -- not `board.cmake`, not the host-test runner, not CI -- while
+opening with "A GATE NOBODY HAS WATCHED FAIL IS NOT A GATE".  By the time it was
+wired up it could no longer even link: #105 added `plugin_text.c` to the build's
+source list and not to the fixture's, and nothing said so, because nothing asked.
+It now runs from `test/host_tests.sh`, this board's dispatcher, rather than the
+shared runner -- the fixtures link Cortex-M55 images and need the cross
+toolchain, which the shared runner does not otherwise require.  When that
+toolchain is absent the dispatcher SKIPS and says so loudly; a skip that reads
+like a pass is the failure this whole paragraph is about.
 
 **[!] None of it proves memory safety.**  It cannot see an ordinary
 out-of-bounds write, a bad tensor pointer, a scratch overrun, or wrong
@@ -4971,9 +4998,9 @@ the step that branches, and with it **a new model family costs no firmware
 change**: the container carries the code that reads the model's output, and that
 code decodes, draws on the panel and writes to the console.
 
-Two plugins ship in the tree.  `plugin/blazeface` is the face detector -- the
+Two plugins ship in the tree.  `asset/plugins/blazeface` is the face detector -- the
 same `svc/blazeface.c` the firmware links, wrapped -- and exists so the two
-paths can be compared.  `plugin/cifar10` is the point: it interprets the
+paths can be compared.  `asset/plugins/cifar10` is the point: it interprets the
 classification model's ten-element output and **prints class names**, which no
 amount of firmware generalisation could do, because the names come with the
 model and nowhere else.
@@ -5323,7 +5350,7 @@ high-water for both.
 
 Step 1b made a plugin run: it decoded, it painted boxes, it wrote to the
 console.  What it could not do was put a WORD on the panel, and that was the
-last thing standing between the store and the application.  `plugin/cifar10`
+last thing standing between the store and the application.  `asset/plugins/cifar10`
 declared no `DRAW` slot, so `nn_detector_ready()` refused to start a stream for
 it -- correctly, because a live preview that never annotates anything is
 indistinguishable from a broken one -- and the classifier could only be read one
@@ -5338,7 +5365,7 @@ now puts `cat  -783` on the panel, over the picture, at frame rate.
 
 ### The font is in the plugin
 
-`plugin/common/plugin_text.c`: a conventional 5x7 ASCII cell in a 6x8 box, a
+`asset/common/plugin_text.c`: a conventional 5x7 ASCII cell in a 6x8 box, a
 rasteriser that writes into a caller-owned buffer, and a `plugin_printer` backed
 by a char array so the EXISTING `pl_fmt_*` helpers format the numbers -- a second
 integer formatter would be a second chance to spell the INT32_MIN case wrong.
@@ -5354,7 +5381,7 @@ detected by a plugin built against the older shape, and `PLUGIN_ABI_VERSION` is
 compared for exact equality -- every container in the store would have to be
 rebuilt and re-sent.  The duplication costs about 1 KB per image.
 
-**[!] `grove_add_plugin()` does not glob `plugin/common/`.**  Its `_srcs` names
+**[!] `add_plugin()` does not glob `asset/common/`.**  Its `_srcs` names
 the files one by one, so a new common `.c` that is not added there is simply not
 linked.
 
@@ -5372,7 +5399,7 @@ So `decode()` formats the string and draws the glyphs into the plugin's own
 strip, and `draw()` is a single `blit`.  The detector does the same thing per
 box: a 24x8 chip holding the score, rasterised in `decode()` into an eight-cell
 atlas and blitted beside each rectangle in `draw()`.  That second user is why the
-rasteriser is in `plugin/common/` at all -- **a shared file with one caller is
+rasteriser is in `asset/common/` at all -- **a shared file with one caller is
 not shared, it is misfiled**.
 
 **[!] The strip is anchored at the frame origin, and that is a limitation, not a
@@ -5494,7 +5521,7 @@ someone thinking about a detector.
 
 Plugin images are a separate artifact and are never linked into this ELF, so
 `plugin/` is out of scope by construction rather than by a rule that could be got
-wrong: `plugin/blazeface` saying "faces" is not a defect, it is the point of
+wrong: `asset/plugins/blazeface` saying "faces" is not a defect, it is the point of
 issue #78.  Two strings are allowlisted, **whole and one entry each** -- the
 caller-boxes path prints a `struct bf_det`, so it is BlazeFace by type and a
 classifier cannot reach it -- and an entry that stops matching anything fails the
@@ -5602,7 +5629,7 @@ Both were walked into during this work, and neither announces itself.
       feels like it updates everything.
     - and the reverse: a plugin-only change needs **no flash at all**, only a
       re-send.  This one was walked into second, one message after the first was
-      written down: a formatting fix inside `plugin/cifar10` was reported as
+      written down: a formatting fix inside `asset/plugins/cifar10` was reported as
       needing a firmware rebuild.  A hazard recorded in one direction reads as
       settled, and the other half of it is still live.
 

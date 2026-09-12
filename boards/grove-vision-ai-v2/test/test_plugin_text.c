@@ -339,7 +339,7 @@ static void test_sbuf(void)
 
 int main(void)
 {
-	printf("test_plugin_text (plugin/common/plugin_text.c):\n");
+	printf("test_plugin_text (asset/common/plugin_text.c):\n");
 	test_geometry();
 	test_target();
 	test_fill();

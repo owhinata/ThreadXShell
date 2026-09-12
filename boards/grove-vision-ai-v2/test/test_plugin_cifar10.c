@@ -7,7 +7,7 @@
  * @brief   The classifier plugin: what it accepts, what it ranks, what it says
  *          (issue #103 = #78 Step 1b).
  *
- * The REAL plugin/cifar10/plugin_main.c, driven through its own slot table -- a
+ * The REAL asset/plugins/cifar10/plugin_main.c, driven through its own slot table -- a
  * second binary rather than a section of test_plugin_decode.c because two
  * plugins are two PROGRAMS and each exports `plugin_slot_table`.  On the board
  * they never coexist either: one reservation, one loaded image.

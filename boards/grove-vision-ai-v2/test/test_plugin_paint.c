@@ -379,7 +379,7 @@ static void test_rect(void)
  * number of faces, their size and the width of each score is whatever happened
  * to be in front of the camera, so observing `refused == 0` there says the scene
  * was easy and nothing more.  Here the inventory is fixed: BF_MAX_DET boxes and
- * the label chip plugin/blazeface blits beside each one.
+ * the label chip asset/plugins/blazeface blits beside each one.
  *
  * Two cases, because "it always fits" is not true and claiming it would be the
  * kind of comfortable statement this project keeps having to retract:
@@ -404,7 +404,7 @@ static uint16_t chip[WORST_LBL_W * WORST_LBL_H];
 static struct plugin_paint_budget wb;
 static struct plugin_painter wp;
 
-/* Boxes and chips, alternating, exactly as plugin/blazeface's draw() does. */
+/* Boxes and chips, alternating, exactly as asset/plugins/blazeface's draw() does. */
 static void run_boxes(uint32_t w, uint32_t h)
 {
 	unsigned i;

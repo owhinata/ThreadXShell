@@ -80,7 +80,7 @@ void log_write(unsigned level, const char *tag, const char *fmt, ...)
 	(void)fmt;
 }
 
-/* The plugin's slot table, from plugin/blazeface/plugin_main.c.  On the board
+/* The plugin's slot table, from asset/plugins/blazeface/plugin_main.c.  On the board
  * the loader copies the image into the reservation and adds the manifest's
  * offsets to its base; here the linker has already placed the functions and the
  * table already holds their addresses. */

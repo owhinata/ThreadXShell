@@ -31,11 +31,18 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))   # cmake/fixtures -> repo root
-PLUGIN = os.path.join(REPO, "boards", "grove-vision-ai-v2", "plugin", "blazeface")
+PLUGIN = os.path.join(REPO, "asset", "plugins", "blazeface")
 # The link script, the base veneers and the freestanding libc remnant are shared
 # by every plugin (issue #103), so a fixture assembles the two directories the
 # real build does.
-COMMON = os.path.join(REPO, "boards", "grove-vision-ai-v2", "plugin", "common")
+COMMON = os.path.join(REPO, "asset", "common")
+# [!] THE LINK SCRIPT IS TWO FILES SINCE #106.  The SECTIONS half is the ABI's
+# and lives beside the plugin sources; the MEMORY half is the board's.  A fixture
+# that staged only the shared half would fail to link for a reason that has
+# nothing to do with the check under test, so it stages both and writes the same
+# absolute-path wrapper the real build generates.
+MEMORY_LD = os.path.join(REPO, "boards", "grove-vision-ai-v2", "ldscript",
+                         "plugin_memory.ld")
 GATE = os.path.join(REPO, "boards", "grove-vision-ai-v2", "cmake",
                     "check_plugin_image.py")
 
@@ -54,14 +61,26 @@ def build(cc, nm, objdump, work, mutate=None, cflags=None):
     shutil.copytree(PLUGIN, src)
     shutil.copytree(COMMON, src, dirs_exist_ok=True)
     shutil.copy(os.path.join(REPO, "svc", "blazeface.c"), src)
+    shutil.copy(MEMORY_LD, os.path.join(src, "plugin_memory.ld"))
     if mutate:
         mutate(src)
+
+    # The wrapper the real build generates, with the same absolute INCLUDEs --
+    # so a fixture that mutates either half is linking what the board links.
+    with open(os.path.join(src, "plugin_link.ld"), "w") as fh:
+        fh.write('INCLUDE %s\nINCLUDE %s\n'
+                 % (os.path.join(src, "plugin_memory.ld"),
+                    os.path.join(src, "plugin.ld")))
 
     cflags = (cflags if cflags is not None else BASE_CFLAGS + NO_UNWIND) + [
         "-I", os.path.join(REPO, "svc"), "-I", src]
     objs, sus = [], []
+    # [!] KEEP THIS IN STEP WITH add_plugin()'s source list.  plugin_text.c
+    # arrived with #105 and was added there and NOT here, which nothing noticed
+    # for two issues because nothing ran this file (fixed in #106).  A fixture
+    # that cannot link is not a fixture that passes -- it is one nobody asked.
     for name in ("plugin_main", "plugin_base", "plugin_fmt", "plugin_libc",
-                 "blazeface"):
+                 "plugin_text", "blazeface"):
         obj = os.path.join(work, name + ".o")
         r = subprocess.run([cc] + cflags + ["-c", os.path.join(src, name + ".c"),
                                             "-o", obj],
@@ -93,7 +112,7 @@ def build(cc, nm, objdump, work, mutate=None, cflags=None):
 
     elf = os.path.join(work, "plugin.elf")
     r = subprocess.run([cc, "-nostdlib", "-nostartfiles",
-                        "-T", os.path.join(src, "plugin.ld"),
+                        "-T", os.path.join(src, "plugin_link.ld"),
                         "-Wl,--gc-sections", "-Wl,--no-warn-rwx-segments",
                         "-mcpu=cortex-m55", "-mthumb", "-mfloat-abi=hard"]
                        + objs + ["-o", elf],

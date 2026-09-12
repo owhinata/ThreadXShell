@@ -21,6 +21,8 @@ set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
 board=$(cd "$here/.." && pwd)
+repo=$(cd "$board/../.." && pwd)
+asset="$repo/asset"      # plugin sources are repository-wide since #106
 out="$HOST_TEST_OUT"
 CFLAGS="$HOST_TEST_CFLAGS"
 LDFLAGS="$HOST_TEST_LDFLAGS"
@@ -175,18 +177,18 @@ gcc $CFLAGS \
 # of refusing, which nothing outside this file could see.
 gcc $CFLAGS \
     -I "$here" -I "$board/port/npu" -I "$board/port/plugin" -I "$board/svc" \
-    -I "$board/plugin/blazeface" -I "$board/plugin/common" -I "$HOST_TEST_SVC" \
+    -I "$asset/plugins/blazeface" -I "$asset/common" -I "$HOST_TEST_SVC" \
     "$here/test_plugin_decode.c" \
     "$board/port/npu/nn_active.c" "$board/port/npu/npu_desc.c" \
     "$board/port/npu/nn_preproc.c" \
-    "$board/plugin/blazeface/plugin_main.c" \
-    "$board/plugin/common/plugin_base.c" "$board/plugin/common/plugin_fmt.c" \
-    "$board/plugin/common/plugin_text.c" \
+    "$asset/plugins/blazeface/plugin_main.c" \
+    "$asset/common/plugin_base.c" "$asset/common/plugin_fmt.c" \
+    "$asset/common/plugin_text.c" \
     "$HOST_TEST_SVC/blazeface.c" \
     $LDFLAGS -o "$out/test_plugin_decode"
 "$out/test_plugin_decode"
 
-# issue #103 (#78 Step 1b) -- the classifier plugin (plugin/cifar10).
+# issue #103 (#78 Step 1b) -- the classifier plugin (asset/plugins/cifar10).
 #
 # The point of issue #78, in one file: a model's LABELS travel with the model,
 # so the firmware never learns them and nothing here can be checked by reading
@@ -200,12 +202,12 @@ gcc $CFLAGS \
 # names a CIFAR-10 label for an ImageNet score.  The label order is pinned
 # against the vendor scenario app's, which is where the ten names come from.
 gcc $CFLAGS \
-    -I "$here" -I "$board/plugin/cifar10" -I "$board/plugin/common" \
+    -I "$here" -I "$asset/plugins/cifar10" -I "$asset/common" \
     -I "$HOST_TEST_SVC" \
     "$here/test_plugin_cifar10.c" \
-    "$board/plugin/cifar10/plugin_main.c" \
-    "$board/plugin/common/plugin_base.c" "$board/plugin/common/plugin_fmt.c" \
-    "$board/plugin/common/plugin_text.c" \
+    "$asset/plugins/cifar10/plugin_main.c" \
+    "$asset/common/plugin_base.c" "$asset/common/plugin_fmt.c" \
+    "$asset/common/plugin_text.c" \
     $LDFLAGS -o "$out/test_plugin_cifar10"
 "$out/test_plugin_cifar10"
 
@@ -486,7 +488,7 @@ gcc $CFLAGS \
 "$out/test_blob_write"
 
 # issue #105 (#78 Step 2) -- the plugin font and its rasteriser
-# (plugin/common/plugin_text.c).
+# (asset/common/plugin_text.c).
 #
 # The subject is BOUNDS and INDEXING, not typography.  A glyph written past the
 # end of a plugin's strip lands in whatever the plugin put next to it and the
@@ -497,8 +499,36 @@ gcc $CFLAGS \
 # typeface and break on a glyph edit -- but the two ends of the table are, since
 # an index off by one shows up at exactly two characters.
 gcc $CFLAGS \
-    -I "$here" -I "$board/plugin/common" -I "$HOST_TEST_SVC" \
-    "$here/test_plugin_text.c" "$board/plugin/common/plugin_text.c" \
-    "$board/plugin/common/plugin_fmt.c" "$board/plugin/common/plugin_base.c" \
+    -I "$here" -I "$asset/common" -I "$HOST_TEST_SVC" \
+    "$here/test_plugin_text.c" "$asset/common/plugin_text.c" \
+    "$asset/common/plugin_fmt.c" "$asset/common/plugin_base.c" \
     $LDFLAGS -o "$out/test_plugin_text"
 "$out/test_plugin_text"
+
+# --- the plugin image gate's negative tests (issue #106) --------------------
+#
+# [!] THIS RUNS HERE, NOT IN shell/test/run_host_tests.sh.  The fixtures compile
+# and link Cortex-M55 images, so they need the cross cc / nm / objdump; the
+# shared runner needs only native tools and runs for every board.  Wiring them
+# there would have made a Grove-shaped prerequisite everyone's problem.
+#
+# [!] AND UNTIL #106 THEY RAN NOWHERE AT ALL.  cmake/fixtures/run_plugin_gate_tests.py
+# arrived with #101 and was reached by nothing but one line of README prose --
+# while opening with "A GATE NOBODY HAS WATCHED FAIL IS NOT A GATE".  It had
+# been unable to link since #105 added plugin_text.c to the build's source list
+# and not to the fixture's, and nothing said so, because nothing asked.
+#
+# The toolchain is the repository-pinned one (cmake/arm-none-eabi-toolchain.cmake
+# fetches it into tools/).  If it is absent this SKIPS -- loudly, because a skip
+# that reads like a pass is the failure this whole section is about.
+gate_cc=$(ls -d "$repo"/tools/arm-gnu-toolchain-*/bin/arm-none-eabi-gcc 2>/dev/null | tail -1)
+if [ -n "$gate_cc" ] && [ -x "$gate_cc" ]; then
+    gate_bin=$(dirname "$gate_cc")
+    python3 "$repo/cmake/fixtures/run_plugin_gate_tests.py" \
+        --cc "$gate_cc" \
+        --nm "$gate_bin/arm-none-eabi-nm" \
+        --objdump "$gate_bin/arm-none-eabi-objdump"
+else
+    echo "run_plugin_gate_tests: SKIPPED -- no arm-none-eabi toolchain under" \
+         "$repo/tools/ (configure a Grove build once to fetch it)" >&2
+fi

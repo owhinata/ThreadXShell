@@ -28,7 +28,7 @@ making it was thinking about a detector.  Do not read a pass as a proof.
 
 [!] PLUGINS ARE OUT OF SCOPE BY CONSTRUCTION, and that is the right scope.  A
 container carries the code that interprets its model and the vocabulary comes
-with it -- plugin/blazeface saying "faces" is the entire point of issue #78, not
+with it -- asset/plugins/blazeface saying "faces" is the entire point of issue #78, not
 a defect.  Plugin images are a separate artifact and are never linked into this
 ELF, so no exclusion rule is needed and none can be got wrong.
 """

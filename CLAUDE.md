@@ -64,6 +64,8 @@ boot ツリーの正は**本リポジトリ**（元リポジトリではない�
 
 ```
 shell/            # ボード非依存: core/ cmds/ backend/ include/ test/
+asset/            # ボード非依存: plugin ソースと container ツール (#106)
+                  #   common/ plugins/<name>/ tools/
 lib/              # upstream submodules (f7 系と h7 系が同居)
 cmake/
 boards/
@@ -713,7 +715,7 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   （8x8 のスコアは zp 126 / scale 1.22 で実質 3 値）ので共有の脱量子化定数を作らない。
   [!] **ただし Grove のファームはこれをリンクしない**（#104）。**デコーダは container
   でしか届かない** — `svc/blazeface.c` を Grove でコンパイルするのは plugin だけで、
-  **no-storage 監査もその plugin の実オブジェクトに対して走る**（`grove_add_plugin` の
+  **no-storage 監査もその plugin の実オブジェクトに対して走る**（`add_plugin()` の
   `AUDIT_SHARED`）。**ファームに常駐デコーダを戻さない。**
   素の `.tflite` は **`nn run` で出力テンソルをそのまま報告**する（推論は走る）。
   **class report に落とさない** — 4 本の回帰テンソルに top-5 を出すのは無意味。
@@ -739,7 +741,7 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   詳細は board README。
 - **[!] plugin container（#101 = Step 1a / #103 = Step 1b）**: モデルと、その出力を
   解釈するコードを 1 blob で運ぶ。**#103 以降、plugin は実際に走る**（デコード・
-  パネル描画・閾値・report）。分類器 plugin（`plugin/cifar10`）がラベルを出すのが
+  パネル描画・閾値・report）。分類器 plugin（`asset/plugins/cifar10`）がラベルを出すのが
   #78 の目的の実証点。説明は board README。破ってはいけないこと:
   - **`svc/plugin_load.c` は呼び出し可能なポインタを返さない**（`plugin_view` は整数
     オフセットとコピー済みバイトのみ）。「実行しない」は規律ではなく**型の性質**。
@@ -789,12 +791,26 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
     `draw_spent` / `draw_refused` は **writer / reader / arm の 3 箇所**を同じ
     クリティカルセクション規則に揃える（reader 側だけでは writer の 2 代入の途中を
     遡って防げない）。
+  - **[!] plugin のビルド規則は共有（`cmake/add_plugin.cmake`、#106）で、ボードは
+    自分の事実だけを引数で渡す**。helper は `GROVE_*` も `BOARD_DIR` も読まない。
+    **owned source root は helper が導出し、引数で受け取らない** — 受け取る形は
+    それ自体が fail-open（`${CMAKE_SOURCE_DIR}` を渡せば共有ファイル全部が監査免除）。
+    plugin 名は **positive whitelist**（`^[A-Za-z0-9][A-Za-z0-9._-]*$`）で検証する。
+    境界はパス空間ではなく **CMake リスト空間**で、`foo;tools` は区切り文字を含まないのに
+    `;` で 2 要素に割れる。
+    **[!] リンク入力も列挙する** — ボードが渡せるのは `ARCH_FLAGS`（`-m*` のみ）で、
+    `.o` / `.a` / `-l` / `-T` は拒否。MEMORY fragment の `INPUT`/`GROUP`/`INCLUDE` も拒否。
+    ソース経路だけ塞いでリンク入力を開けておくと、**分類も監査も経ずにコードが画像に入る**
+    （#104 と同じ事故が別の扉から来る）。
+    **[!] 監査は success stamp で守る** — stamp を **compile 前に消し**、audit 通過後に作る。
+    audit が落ちた時点で `.o` は既に書かれており、通過後に書くだけでは**前回成功時の stamp**
+    が残って、別の依存で走ったリンクがそれを拾う。
   - **[!] `nn_input_quant_ok()` は常駐デコーダの前提条件**で、plugin は縛られない
     （ベンダの分類器アプリ自身が scale 0.0203 / zp -8 に `pixel - 128` を書く）。
     縛ると分類器 container が全て組込み class report に流れ、ラベルが読まれない。
     **`nn stream` は描けないデコーダを拒否する**（DRAW は任意スロット。
     **#105 で分類器も DRAW を持つようになった**が、拒否そのものは残す）。
-  - **[!] フォントは plugin 側**（#105 = Step 2。`plugin/common/plugin_text.c`）。
+  - **[!] フォントは plugin 側**（#105 = Step 2。`asset/common/plugin_text.c`）。
     painter に `text()` を足さない — `plugin_painter` に version/size が無いので
     末尾拡張は **abi_version bump = 全 container 再生成**になり、字体・グリフ範囲・
     多言語が以後ファーム変更になる（#78 が消そうとしている用事）。

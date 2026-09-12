@@ -518,7 +518,11 @@
    `npu_tensor` -> `tensor_desc` の変換だけ（`nn out` / `nn info` / シムが
    デコーダの有無に関わらず必要とする）。Grove で `svc/blazeface.c` を
    コンパイルするのは plugin だけなので、**no-storage 監査は plugin が実際に
-   リンクするオブジェクトに対して走る**（`grove_add_plugin` の `AUDIT_SHARED`）。
+   リンクするオブジェクトに対して走る**（`add_plugin()` の `AUDIT_SHARED`。**helper は owned root を導出し引数で受け取らない**（受け取る形は
+   `${CMAKE_SOURCE_DIR}` を渡すだけで全免除になる fail-open）。**リンク入力も列挙**し、
+   ボードが渡せるのは `ARCH_FLAGS`（`-m*` のみ）。`.o`/`.a`/`-l`/`-T` と MEMORY fragment の
+   `INPUT`/`GROUP`/`INCLUDE` は拒否する — ソース経路だけ塞いでも、リンク入力から
+   無監査のコードが画像に入る。**audit の success stamp は compile 前に消す**）。
    **別フラグで組み直した監査対象を作らない** — 出荷物に無いオブジェクトを
    検査することになる。**常駐デコーダをファームに戻さない。**
    素の `.tflite` は `nn run` で**出力テンソルをそのまま報告**し、
@@ -862,7 +866,7 @@
      縦横を知らない（`to_frame` はモデル入力の矩形を返す）ので**原点アンカー**。
      **`decode()` は冒頭で draw-valid を落とし、成功時にだけ立てる。**
      バッファの extent は**1 定数から導出して `_Static_assert`**（`blit` は範囲外読みを
-     証明しない）。`grove_add_plugin()` は `plugin/common/` を glob しないので、
+     証明しない）。`add_plugin()` は `asset/common/` を glob しないので、
      新しい共通 `.c` は `_srcs` に足す。
    - **[!] ファームの印字は「種」を名乗らない**（#105）。`last_ndet` は
      **「デコーダが返した item 数」**で、何件見せるかは plugin の裁量。

@@ -2,13 +2,14 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Link script for a Grove plugin image (issue #101 = #78 Step 1a).
+ * Link script for a plugin image: the SECTIONS half, shared by every board
+ * (issue #101 = #78 Step 1a; split out of the board in #106).
  *
  * [!] PRELINKED AT AN ABSOLUTE ADDRESS.  The loader services no relocations and
  * builds no veneers, so this image must already be correct for the one place it
- * will ever live: the .plugin reservation the firmware's own script pins at
- * 0x341E0000.  The two scripts state that address independently -- a plugin that
- * read it out of the firmware would agree with whatever it was handed, and
+ * will ever live: the .plugin reservation, which the board's MEMORY fragment
+ * and the firmware's own script state independently -- a plugin that read the
+ * address out of the firmware would agree with whatever it was handed, and
  * check_placement_budget.py exists precisely to catch the day they diverge.
  *
  * THE IMAGE IS FLAT, AND ITS SHAPE IS THE ABI'S.  svc/plugin_abi.h defines the
@@ -17,10 +18,19 @@
  * and the boundary symbols below are what the packer turns into the manifest's
  * code/data/bss/scratch offsets.  Reordering anything here changes the format.
  */
-MEMORY
-{
-  PLUGIN (rwx) : ORIGIN = 0x341E0000, LENGTH = 128K
-}
+/*
+ * [!] NO `MEMORY` HERE.  The board supplies it (issue #106): the region PLUGIN
+ * this script places into comes from boards/<board>/ldscript/, and the two are
+ * bound together by a wrapper the build generates with ABSOLUTE INCLUDE paths.
+ * A bare `INCLUDE plugin_memory.ld` would be resolved against ld's search
+ * directories and the working directory -- and the plugin link runs with its
+ * working directory set to the plugin output dir, so a stale same-named
+ * fragment could win.
+ *
+ * The ASSERT at the end reads ORIGIN(PLUGIN)/LENGTH(PLUGIN) from that fragment.
+ * That is one linker program reading its own MEMORY, not a second declaration
+ * of the address.
+ */
 
 ENTRY(plugin_slot_table)
 

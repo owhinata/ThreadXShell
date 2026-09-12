@@ -591,7 +591,7 @@ target_compile_options(tflm_obj PRIVATE
 # links exactly this object set in exactly this order.
 # [!] ONE VARIABLE FOR THE SHARED DECODER'S PATH.  Since issue #104 the FIRMWARE
 # does not compile this file at all -- the plugin that carries the decoder does
-# (grove_add_plugin below), and that is the only compile of it that ships on this
+# (add_plugin below), and that is the only compile of it that ships on this
 # board.  The path is still spelled once, because the plugin build and the
 # storage gate both name it and two spellings could drift.
 get_filename_component(GROVE_SHARED_DECODER
@@ -675,7 +675,7 @@ add_library(shell_objs OBJECT
     # npu_tensor -> tensor_desc (issues #97, #104).  The only file here that
     # knows both types, and all that is left of what used to be nn_decoder.c:
     # THE DECODER ITSELF IS NO LONGER IN THIS FIRMWARE.  svc/blazeface.c is
-    # compiled by the plugin that carries it (grove_add_plugin below), so a
+    # compiled by the plugin that carries it (add_plugin below), so a
     # container's decoder is the only one on this board.  `nn out`, `nn info`
     # and the active-decoder shim need this translation whatever interprets the
     # tensors, or whether anything does.
@@ -911,7 +911,7 @@ endforeach()
 # board's real compile -- and shell_objs stopped compiling svc/blazeface.c.
 # Reconstructing the plugin's flags here would have produced an object no shipped
 # artifact contains, which is the second of the two mistakes that file's header
-# records.  The audit moved into grove_add_plugin(), where it runs on the REAL
+# records.  The audit moved into add_plugin(), where it runs on the REAL
 # object that gets linked into the plugin image.
 include("${CMAKE_SOURCE_DIR}/cmake/shared_storage_gate.cmake")
 
@@ -1559,12 +1559,17 @@ set(GROVE_PLUGIN_SBUF_WRITE_MAX 64)
 # [!] EACH PLUGIN IS A SEPARATE PROGRAM, not a configuration of one.  They are
 # prelinked for the SAME reservation and only one is ever loaded, so they share
 # a link script, the base veneers and the freestanding libc remnant -- those
-# moved to plugin/common/ when the second one arrived -- and nothing else.  Each
+# moved to asset/common/ when the second one arrived -- and nothing else.  Each
 # has its own plugin_main.c, its own slot table and its own set of exports, and
 # the last of those is why the gate's --entry list is per plugin: it derives a
 # transitive bound for every entry point BY NAME, so naming one a plugin does
 # not export is not a permissive short list, it is a build failure.
-set(GROVE_PLUGIN_COMMON "${BOARD_DIR}/plugin/common")
+set(GROVE_PLUGIN_COMMON "${CMAKE_SOURCE_DIR}/asset/common")
+# The two halves of the plugin link script (issue #106).  The SECTIONS half is
+# the ABI's and is shared; the MEMORY half is this board's reservation.  They are
+# bound by an absolute-path wrapper generated per plugin -- see plugin_link.ld.in.
+set(GROVE_PLUGIN_SECTIONS_LD "${GROVE_PLUGIN_COMMON}/plugin.ld")
+set(GROVE_PLUGIN_MEMORY_LD   "${BOARD_DIR}/ldscript/plugin_memory.ld")
 
 set(GROVE_PLUGIN_CFLAGS
     -mcpu=cortex-m55 -mthumb -mfloat-abi=hard
@@ -1579,206 +1584,32 @@ set(GROVE_PLUGIN_CFLAGS
     # the gate says so rather than guessing.
     -fstack-usage
     -I "${CMAKE_SOURCE_DIR}/svc" -I "${GROVE_PLUGIN_COMMON}")
+# The build rule itself is repository-wide (issue #106): the plugin sources are
+# not this board's, so neither is the rule that compiles them.  What IS this
+# board's -- the flags carrying -mcpu, the .plugin MEMORY fragment, the post-link
+# image gate and the output directory -- is passed in, so a second board cannot
+# inherit Grove's by omission.
+include("${CMAKE_SOURCE_DIR}/cmake/add_plugin.cmake")
 
-# grove_add_plugin(<name> SOURCES <extra .c ...> ENTRIES <sym=limit ...>
-#                          AUDIT_SHARED <src ...>)
-#
-# The sources named are the plugin's OWN; plugin/common's three are added here
-# so that a new plugin cannot forget the veneers the gate insists every indirect
-# call goes through.
-#
-# [!] AUDIT_SHARED NAMES A FILE THAT THREE BOARDS COMPILE, and it must own no
-# mutable storage (issue #97): each board passes in its own scratch so that the
-# scratch keeps that board's placement and that board's residency gate keeps
-# naming a symbol the board owns.  A plugin's OWN sources are not audited -- a
-# plugin has .bss and is supposed to.
-#
-# [!] AND IT AUDITS THE REAL OBJECT, INSIDE THE RULE THAT PRODUCES IT.  Until
-# issue #104 this file was in shell_objs and cmake/shared_storage_gate.cmake
-# recompiled it from that target's properties.  With the firmware no longer
-# building it, the compile that ships on this board is the one below -- and
-# reconstructing these flags in a separate audit target would inspect an object
-# no artifact contains, which is exactly the mistake that helper's header
-# records twice.  Auditing the linked object in its own command makes a
-# differently-compiled audited copy impossible rather than merely unlikely.
-function(grove_add_plugin _name)
-    cmake_parse_arguments(P "" "" "SOURCES;ENTRIES;AUDIT_SHARED" ${ARGN})
-    # An argument that landed nowhere.  cmake_parse_arguments() reports these
-    # silently in UNPARSED_ARGUMENTS, so without this a stray token is simply
-    # ignored.
-    #
-    # [!] IT IS NOT WHAT CATCHES A MISSPELLED KEYWORD, and it was written
-    # believing that it was.  A token after a multi-value keyword CONTINUES that
-    # keyword's list rather than becoming unparsed, so `AUDIT_SHARD "<path>"`
-    # written after SOURCES appends both to SOURCES and never reaches here.
-    # Measured, not reasoned about.  What catches that is the derived membership
-    # rule below -- the decoder ends up compiled with nothing auditing it, which
-    # is the condition that rule refuses -- and the reason the rule is derived
-    # from where a file LIVES rather than from a keyword being spelled right.
-    if(P_UNPARSED_ARGUMENTS)
-        message(FATAL_ERROR
-            "grove_add_plugin(${_name}): unrecognised argument(s):\n  "
-            "${P_UNPARSED_ARGUMENTS}")
-    endif()
-    set(_dir "${BOARD_DIR}/plugin/${_name}")
-    set(_out "${CMAKE_BINARY_DIR}/plugin/${_name}")
-    # [!] plugin/common IS ENUMERATED, NOT GLOBBED, and every file it gains has
-    # to be added HERE.  A new common .c that is not in this list simply is not
-    # linked: the plugin builds, the gate passes, and the entry point that
-    # needed it fails at link time or -- worse, if it was only referenced from
-    # one path -- not at all.
-    set(_srcs "${_dir}/plugin_main.c"
-              "${GROVE_PLUGIN_COMMON}/plugin_base.c"
-              "${GROVE_PLUGIN_COMMON}/plugin_fmt.c"
-              "${GROVE_PLUGIN_COMMON}/plugin_libc.c"
-              "${GROVE_PLUGIN_COMMON}/plugin_text.c"
-              ${P_SOURCES})
+# Only the architecture: add_plugin() owns -nostdlib/-nostartfiles/gc-sections,
+# because those are what makes a plugin a plugin rather than a board's choice --
+# and because a free-form link flag list is a way to put unaudited code in the
+# image.
+set(GROVE_PLUGIN_ARCH_FLAGS -mcpu=cortex-m55 -mthumb -mfloat-abi=hard)
 
-    set(_objs "")
-    set(_sus "")
-    # [!] THE MEMBERSHIP RULE RUNS BOTH WAYS, and the second direction is the one
-    # that matters.  Checking only that each AUDIT_SHARED entry is compiled
-    # catches a stale path; it does NOT catch the omission -- a shared file left
-    # out of AUDIT_SHARED is compiled into the image, linked, and never audited,
-    # with nothing to say so.  That is the exact fail-open this interface exists
-    # to prevent, so the requirement is derived rather than declared: a source
-    # this plugin compiles that is NOT the plugin's own must be audited.
-    #
-    # "The plugin's own" is everything under boards/<board>/plugin/, which covers
-    # its plugin_main.c and the shared veneers in plugin/common/.  Those legally
-    # own storage -- a plugin has .bss and is supposed to.  Anything reached from
-    # OUTSIDE that tree is a file other boards also build, and the no-storage
-    # rule (issue #97) applies to it.
-    get_filename_component(_plugin_root "${BOARD_DIR}/plugin" ABSOLUTE)
-    foreach(_src ${_srcs})
-        get_filename_component(_src_abs "${_src}" ABSOLUTE)
-        string(FIND "${_src_abs}" "${_plugin_root}/" _own)
-        set(_aud_found FALSE)
-        foreach(_aud ${P_AUDIT_SHARED})
-            get_filename_component(_aud_abs "${_aud}" ABSOLUTE)
-            if(_src_abs STREQUAL _aud_abs)
-                set(_aud_found TRUE)
-                break()
-            endif()
-        endforeach()
-        if(NOT _own EQUAL 0 AND NOT _aud_found)
-            message(FATAL_ERROR
-                "plugin ${_name} compiles a file from outside "
-                "${_plugin_root}:\n  ${_src}\nand does not name it in "
-                "AUDIT_SHARED.  A file other boards also build must own no "
-                "mutable storage (issue #97), and nothing would check it.")
-        endif()
-    endforeach()
-
-    # And the other direction, which catches a stale path rather than an
-    # omission: an AUDIT_SHARED entry this plugin does not compile would audit
-    # nothing while looking like it audited something.
-    foreach(_aud ${P_AUDIT_SHARED})
-        get_filename_component(_aud_abs "${_aud}" ABSOLUTE)
-        set(_aud_found FALSE)
-        foreach(_src ${_srcs})
-            get_filename_component(_src_abs "${_src}" ABSOLUTE)
-            if(_src_abs STREQUAL _aud_abs)
-                set(_aud_found TRUE)
-                break()
-            endif()
-        endforeach()
-        if(NOT _aud_found)
-            message(FATAL_ERROR
-                "plugin ${_name}: AUDIT_SHARED names a file this plugin does "
-                "not compile:\n  ${_aud}\nNothing would audit it, and nothing "
-                "would say so.")
-        endif()
-    endforeach()
-
-    set(_objs "")
-    set(_sus "")
-    foreach(_src ${_srcs})
-        get_filename_component(_stem "${_src}" NAME_WE)
-        get_filename_component(_src_abs "${_src}" ABSOLUTE)
-        set(_obj "${_out}/${_stem}.o")
-        set(_audit_cmd "")
-        foreach(_aud ${P_AUDIT_SHARED})
-            get_filename_component(_aud_abs "${_aud}" ABSOLUTE)
-            if(_src_abs STREQUAL _aud_abs)
-                set(_audit_cmd
-                    COMMAND "${Python3_EXECUTABLE}"
-                            "${CMAKE_SOURCE_DIR}/cmake/check_no_mutable_storage.py"
-                            --objdump "${CMAKE_OBJDUMP}" --nm "${CMAKE_NM}"
-                            --label "${_src} (${BOARD} plugin ${_name})"
-                            "${_obj}")
-            endif()
-        endforeach()
-        add_custom_command(
-            OUTPUT "${_obj}" "${_out}/${_stem}.su"
-            COMMAND "${CMAKE_COMMAND}" -E make_directory "${_out}"
-            COMMAND "${CMAKE_C_COMPILER}" ${GROVE_PLUGIN_CFLAGS}
-                    -I "${_dir}"
-                    -c "${_src}" -o "${_obj}"
-            ${_audit_cmd}
-            DEPENDS "${_src}"
-                    "${CMAKE_SOURCE_DIR}/cmake/check_no_mutable_storage.py"
-            WORKING_DIRECTORY "${_out}"
-            COMMENT "plugin ${_name}: cc ${_stem}.c"
-            VERBATIM)
-        list(APPEND _objs "${_obj}")
-        list(APPEND _sus "${_out}/${_stem}.su")
-    endforeach()
-
-    add_custom_command(
-        OUTPUT "${_out}/plugin.elf" "${_out}/plugin.stacks.json"
-        COMMAND "${CMAKE_COMMAND}" -E make_directory "${_out}"
-        COMMAND "${CMAKE_C_COMPILER}" -nostdlib -nostartfiles
-                -T "${GROVE_PLUGIN_COMMON}/plugin.ld"
-                -Wl,--gc-sections -Wl,--no-warn-rwx-segments
-                # [!] THE QUOTES GO ROUND THE WHOLE ARGUMENT.  Written as
-                # -Wl,-Map="${...}" under VERBATIM, CMake escapes the inner
-                # quotes and ld is handed a filename that literally contains
-                # them: the map is silently never written, and the only sign is
-                # a warning in a build that otherwise succeeds.
-                "-Wl,-Map=${_out}/plugin.map"
-                -mcpu=cortex-m55 -mthumb -mfloat-abi=hard
-                ${_objs} -o "${_out}/plugin.elf"
-        COMMAND "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/check_plugin_image.py"
-                "${_out}/plugin.elf"
-                --nm "${CMAKE_NM}" --objdump "${CMAKE_OBJDUMP}"
-                --su ${_sus}
-                # [!] EVERY SLOT THE PLUGIN EXPORTS, not just the interesting
-                # ones.  The packer refuses to declare a stack for a slot nobody
-                # measured, so a short list here does not under-report -- it
-                # stops the container being built at all, which is the right
-                # direction but a confusing place to discover it.
-                #
-                # [!] AND ONE NAME THAT IS NOT A SLOT.  pl_sbuf_write is reached
-                # through the pl_print_write veneer, and the gate cannot see
-                # across a veneer -- it charges a flat allowance there for
-                # whatever is on the other side, which is normally the BASE.
-                # A plugin-supplied printer puts its own code there instead, so
-                # that assumption is bounded here by name rather than trusted to
-                # a comment.  The sender filters the gate's output down to the
-                # slot names, so an extra bound reaches no manifest.
-                # [!] THE SAME VARIABLES THE FIRMWARE'S POLICY USES.  Written
-                # out again here, the gate and the device would be two
-                # declarations of one rule, and a plugin could pass the build
-                # and be refused on the board -- the shape issue #93 hit.  The
-                # numbers are derived where they are set, from the measured
-                # call-site depth.
-                --entry ${P_ENTRIES}
-                --emit-stacks "${_out}/plugin.stacks.json"
-        DEPENDS ${_objs} "${GROVE_PLUGIN_COMMON}/plugin.ld"
-                "${BOARD_DIR}/cmake/check_plugin_image.py"
-        COMMENT "plugin ${_name}: ld + gate -> plugin.elf"
-        VERBATIM)
-
-    set(GROVE_PLUGIN_ELFS ${GROVE_PLUGIN_ELFS} "${_out}/plugin.elf" PARENT_SCOPE)
-endfunction()
 
 # [!] svc/blazeface.c IS THE SAME FILE THE OTHER TWO BOARDS LINK.  Compiling a
 # copy would fork the decoder issue #97 spent itself merging.  It is the wrapper
 # that is new, not the arithmetic -- and since issue #104 this is the ONLY
 # compile of that decoder on this board, which is why the no-storage audit runs
 # on the object this rule produces.
-grove_add_plugin(blazeface
+add_plugin(blazeface
+    CFLAGS ${GROVE_PLUGIN_CFLAGS}
+    ARCH_FLAGS ${GROVE_PLUGIN_ARCH_FLAGS}
+    MEMORY_LD "${GROVE_PLUGIN_MEMORY_LD}"
+    IMAGE_GATE "${BOARD_DIR}/cmake/check_plugin_image.py"
+    OUT_DIR "${CMAKE_BINARY_DIR}/plugin"
+    OUT_VAR GROVE_PLUGIN_ELFS
     SOURCES "${GROVE_SHARED_DECODER}"
     AUDIT_SHARED "${GROVE_SHARED_DECODER}"
     ENTRIES pl_entry=${GROVE_PLUGIN_STACK_PRODUCER}
@@ -1793,8 +1624,14 @@ grove_add_plugin(blazeface
 # The classifier.  Five entry points since issue #105: it DRAWS now -- a label
 # on the panel, rasterised in decode() and blitted in draw() -- and still takes
 # no parameter, because a threshold is a detector's idea.  See
-# plugin/cifar10/plugin_main.c for why each remaining absence is a decision.
-grove_add_plugin(cifar10
+# asset/plugins/cifar10/plugin_main.c for why each remaining absence is a decision.
+add_plugin(cifar10
+    CFLAGS ${GROVE_PLUGIN_CFLAGS}
+    ARCH_FLAGS ${GROVE_PLUGIN_ARCH_FLAGS}
+    MEMORY_LD "${GROVE_PLUGIN_MEMORY_LD}"
+    IMAGE_GATE "${BOARD_DIR}/cmake/check_plugin_image.py"
+    OUT_DIR "${CMAKE_BINARY_DIR}/plugin"
+    OUT_VAR GROVE_PLUGIN_ELFS
     ENTRIES pl_entry=${GROVE_PLUGIN_STACK_PRODUCER}
             pl_shapes_ok=${GROVE_PLUGIN_STACK_PRODUCER}
             pl_decode=${GROVE_PLUGIN_STACK_PRODUCER}
@@ -1820,7 +1657,7 @@ add_custom_target(plugin ALL DEPENDS ${GROVE_PLUGIN_ELFS})
 set(GROVE_ABI_LAYOUT_JSON "${CMAKE_BINARY_DIR}/plugin/abi_layout.json")
 set(GROVE_SLOT_TABLE_JSON "${CMAKE_BINARY_DIR}/plugin/slot_table.json")
 set(GROVE_CONTAINER_VERIFIER "${CMAKE_BINARY_DIR}/verify_container")
-set(GROVE_PACKER "${BOARD_DIR}/scripts/pack_container.py")
+set(GROVE_PACKER "${CMAKE_SOURCE_DIR}/asset/tools/pack_container.py")
 set(GROVE_PLUGIN_ROOT "${CMAKE_BINARY_DIR}/plugin")
 set(GROVE_PLUGIN_BASE "0x341E0000")
 set(GROVE_PLUGIN_MAX  "131072")
@@ -1861,11 +1698,11 @@ if(HOST_CC)
         OUTPUT "${GROVE_ABI_LAYOUT_JSON}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/plugin"
         COMMAND "${HOST_CC}" -std=c11 -O1 -I "${CMAKE_SOURCE_DIR}/svc"
-                "${BOARD_DIR}/scripts/abi_layout.c"
+                "${CMAKE_SOURCE_DIR}/asset/tools/abi_layout.c"
                 -o "${CMAKE_BINARY_DIR}/plugin/abi_layout"
         COMMAND "${CMAKE_BINARY_DIR}/plugin/abi_layout"
                 > "${GROVE_ABI_LAYOUT_JSON}"
-        DEPENDS "${BOARD_DIR}/scripts/abi_layout.c" "${CMAKE_SOURCE_DIR}/svc/plugin_abi.h"
+        DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/abi_layout.c" "${CMAKE_SOURCE_DIR}/svc/plugin_abi.h"
         COMMENT "host cc -> abi_layout.json (the packer's view of the ABI)"
         VERBATIM)
 
@@ -1886,11 +1723,11 @@ if(HOST_CC)
         OUTPUT "${GROVE_CONTAINER_VERIFIER}"
         COMMAND "${HOST_CC}" -std=c11 -O1 -Wall -Wextra
                 -I "${CMAKE_SOURCE_DIR}/svc"
-                "${BOARD_DIR}/scripts/verify_container.c"
+                "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
                 "${CMAKE_SOURCE_DIR}/svc/plugin_load.c"
                 "${CMAKE_SOURCE_DIR}/svc/crc32.c"
                 -o "${GROVE_CONTAINER_VERIFIER}"
-        DEPENDS "${BOARD_DIR}/scripts/verify_container.c"
+        DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
                 "${CMAKE_SOURCE_DIR}/svc/plugin_load.c"
                 "${CMAKE_SOURCE_DIR}/svc/plugin_load.h"
                 "${CMAKE_SOURCE_DIR}/svc/plugin_abi.h"

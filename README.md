@@ -69,12 +69,24 @@ cmake/                toolchain file (fetches ARM GNU on first configure), versi
 shell/                board-independent: core/ include/ backend/ cmds/ test/
 svc/                  board-independent services (fmt, crc32, ymodem, frame pipeline,
                       gfx, and the BlazeFace decoder every board shares)
+asset/                board-independent plugin sources and the container toolchain --
+                      common/ (veneers and the ABI's section layout), plugins/<name>/,
+                      tools/ (packer, ABI layout, container verifier)
 lib/                  upstream mirror submodules (read-only)
 boards/<board>/       board.cmake, src/ port/ cmds/ backend/ svc/ include/ ldscript/ cmake/
 ```
 
 Anything that reaches for the HAL, a peripheral or a specific memory map lives
 under `boards/<board>/`; `shell/` and `svc/` carry no board conditionals.
+
+`asset/` is a third board-independent tree, and a different kind of thing from
+the other two: it is not linked into the firmware at all.  A plugin is a SECOND
+program, prelinked to an absolute address and shipped inside a blob next to the
+model whose output it decodes (issue #78).  Its sources reach only `svc/`, so
+they are not any one board's -- what IS the board's is the reservation address,
+which lives in `boards/<board>/ldscript/`, and the flags and post-link gate,
+which the board passes to `cmake/add_plugin.cmake` as arguments rather than
+leaving the helper to read a global.
 
 ## Building
 

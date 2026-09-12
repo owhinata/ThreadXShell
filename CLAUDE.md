@@ -549,10 +549,9 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   置き換えにならず（単一サブグラフ / 全 op が Ethos-U / int8 I/O / offline plan /
   アリーナ / BlazeFace の shape を見ない）、しかも**書込みの後**に走るので malformed でも
   既に ~40 秒の消去と転送を消費している。公式経路は
-  **`build/<board>/send_verified_model.sh`**（picocom の `--send-cmd`）で
-  **staging コピー → 検証 → 同一ファイル送信**、**`--profile cls|det` は明示引数**
-  （ファイル名から推測しない）、**出力は stderr**（YMODEM 線に流さない）、
-  **ホスト C++ 不在は fail-closed**。
+  **`--target asset-<name>`**（#107。ビルド時に fetch → strip → vela → pack →
+  組んだものを検証 → **通ってから公開**）。**profile は宣言の属性**で、ファイル名から
+  推測しない。**ホスト C++ 不在は fail-closed**。
 - **ライブ推論オーバーレイ（`nn stream` / #48、#99）**: 推論は**カメラ producer スレッド上・
   sink の `consume()` 内**で走る（モデルが読むのは完了済みの landing buffer で、
   次の frame-ready まで面は flip しない — #59 で 2 面化して「consume まで」から
@@ -632,7 +631,7 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   大きいブロックで消す writer が現れたらこの丸めは守らない。
   **モデルの送信は staging コピーに対して 検査 → `verify_vela_model` → 送信**を
   同一ファイルで行う（検証を README の手順に残さない。ホスト C++ が無ければ skip せず拒否）。
-  #94 で flash ターゲットが消えた後もこの鎖は `build/<board>/send_verified_model.sh` に残る。
+  #94 で flash ターゲットが消えた後もこの鎖は `asset-<name>` target に残る（#107）。
   **[!] firmware 予約は 2 MB で、ブートローダ自身の算術から導出する**（#85。A/B 2 スロット ×
   `Image max size 0x100000`。`GROVE_FW_SLOT_SIZE` × `GROVE_FW_SLOTS` で、`0x200000` を
   ベタ書きしてコメントで説明しない）。**[!] `GROVE_FLASH_SIZE` / `GROVE_ERASE_GRAN` / `GROVE_SLOT_HDR_COPIES` /
@@ -688,6 +687,12 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   `0x900000` にあり、もうスロット基底ではないため）。
   **現在の配置: `cls` = slot 1 `0x600000`（payload `0x3A601000`、crc32 `8E679A3F`）/
   `det` = slot 9 `0xE80000`（payload `0x3AE81000`、crc32 `F6DA1D1E`）。**
+  **[!] #107 がこれを `cifar10` / `blazeface` に改名する。移行は実機作業で、
+  済むまでこの表が正**。改名後の期待値は `cifar10` crc32 `6BEA56B6`（1,707,712 B）/
+  `blazeface` crc32 `C9AEEFA8`（168,928 B）で、**`blob list` がこの値を見せることが
+  移行完了の確認**。手順は `nn stream stop` → `nn model unload` →
+  `blob erase <slot>` → `blob write <name> <slot>`（**erase は必須** —
+  スロットが別名の VALID を持っていると `OCCUPIED` で拒否される）。
   cls を 4 MB スロットから退かしてあるのは、そこを「他に入らないモデル」用に空けておくため。
   実測: cls = **30 NOR トランザクション**（#49 Step 2 の予算どおり）/ det = **6**。
   **[!] blob の移動は `erase` → `write` の順**。`cls` が slot 0 で VALID のまま
@@ -834,6 +839,31 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
     `shell.img` はバイト一致、`shell.elf` の入力に `plugin/` は 0 件）。
     **片方向だけ書いた危険は解決済みに読める。**（`nn info` の **CRC** は前者のため。
     build id は configure 時の revision）。
+- **[!] アセットのビルドと送信（#107 = #78 Step 2.5）**: ダウンロードイメージは
+  **`--target asset-<name>`** が作る（fetch → strip → vela → pack → 組んだものを検証
+  → **通ってから公開**）。picocom は**一通りに固定**:
+  `picocom -b 921600 --send-cmd "sb -k" --receive-cmd "rb" /dev/ttyACM0`。
+  破ってはいけないこと:
+  - **[!] ゲートは送信時ではなくビルド時にある。** `sb -k` は打ったパスをそのまま送るので、
+    **貼り付けたパスが本当にその成果物かは誰も検査しない**。古い成果物・生 `.tflite`・
+    別構成の container は無検査で届く。**「ビルド時に検査済み」を「何も起きない」と
+    書き換えない** — board README の表（実機が何を捕まえ何を捕まえないか）を維持する。
+    デバイスが見るのは**構造と ABI target だけ**で、同一性でも新しさでもない
+  - **[!] 閉じ手は CRC**。`asset-<name>` が**ファイル全体の CRC32**（`zlib.crc32` と同値）を
+    レシートに印字し、転送後に `blob list` と突き合わせる。これが唯一の
+    「ビルドしたバイト＝格納されたバイト」の確認。**`nn info` の CRC は plugin セクションの
+    ダイジェストで、これには使えない**
+  - **組んでから検査し、通るまで公開しない**。private path で組み、全ゲート通過後に rename。
+    最終パスに直接書くと、後段が落ちた時「完成して見える `.nnc`」が手順書のパスに残る
+  - **モデルは commit と SHA256 の両方で pin**。**Git LFS なので git-lfs 不在だと 131 バイトの
+    ポインタが exit 0 で置かれる** — ハッシュが権威で、ポインタ検出はメッセージのため。
+    pin が消えたら **fail closed。ブランチ先端にフォールバックしない**
+  - **fetch は build 時**（configure 時ではない）。モデル網に届かないツリーでも
+    `--target flash` は通る（#94）。`asset-*` は ALL に入れない
+  - **1 アセット 1 名前**（`blazeface` / `cifar10`）。ただし**実機側の名前は規約**で、
+    manifest 名と blob key を比較する仕組みは無い
+  - **ビルドはスロットを検査しない**。`blob write` は**サイズヘッダ到着前にスロット全体を
+    消去する**ので、取り違えの代償は「拒否が遅れる」ではなく**旧 blob の消滅＋耐久 1 回**
 - **[!] ベンダの NOR 書込み経路へ届いてよいのは seam だけ**（#88 Part D）。
   内側 4 本（`hx_lib_qspi_eeprom_{erase_sector,write,erase_all,word_write}`）を
   `-Wl,--wrap` で `port/sdk_seam/nor_seam.c` に寄せる。**外側 `hx_lib_spi_eeprom_*` を

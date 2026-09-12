@@ -1404,24 +1404,25 @@ else()
     set(GROVE_SEND_VERIFIER "")
 endif()
 
-# --- The verified send path (issue #93) ---------------------------------------
+# --- Where the model gate lives now (issues #93, #107) ------------------------
 #
 # `blob write` receives whatever arrives on the wire.  The models used to be
-# flashed by `--target flash-model-cls|det`, and the host gate ran INSIDE that
+# flashed by `--target flash-model-cls|det` with the host gate INSIDE that
 # target, so there was no way to write one without it; over the console there is
-# no such chain.  This puts the chain back, on the PC side, as the thing picocom
-# is pointed at:
+# no such chain.  Issue #93 put the chain back as a sender picocom was pointed
+# at; issue #107 moved it again, into the build:
 #
-#     picocom -b 921600 /dev/ttyACM0 \
-#         --send-cmd "${CMAKE_BINARY_DIR}/send_verified_model.sh --profile det"
+#     cmake --build <build> --target asset-blazeface
+#     picocom -b 921600 --send-cmd "sb -k" --receive-cmd "rb" /dev/ttyACM0
 #
-# [!] AND IT IS GENERATED EVEN WITH NO HOST C++, with an empty verifier path,
-# because the script refuses on that with a sentence saying why.  Generating
-# nothing would make the failure "no such file" from inside picocom's send hook,
-# which is a worse thing to read than a refusal -- and the refusal is the fail
-# closed the gate is for.  The board-side bounds checks in npu_open() do not
-# replace this one: they say a flatbuffer holds together, not that it is a model
-# this firmware can run, and they run after the erase and the transfer.
+# [!] AND THAT IS A REAL TRADE, NOT A TIDY-UP.  The sender verified and sent ONE
+# file, so the gate ran on whatever was typed at picocom's prompt.  `sb -k` sends
+# whatever is typed.  The gates still all run -- earlier, and on an artifact that
+# is published only after passing -- but nothing now checks that the path an
+# operator pastes IS that artifact.  The board README carries the table of what
+# still catches what, and `asset-<name>` prints a CRC32 the operator compares
+# with `blob list` afterwards.  Do not paper over this in the docs: the device
+# checks structure and ABI target, never identity or freshness.
 find_program(GROVE_SB_TOOL NAMES sb DOC "lrzsz YMODEM sender, for the model send path")
 if(GROVE_SB_TOOL)
     set(GROVE_SEND_SB "${GROVE_SB_TOOL}")
@@ -1430,12 +1431,173 @@ else()
     # configured, and PATH at send time is the honest place to look it up.
     set(GROVE_SEND_SB "sb")
 endif()
-configure_file("${BOARD_DIR}/scripts/send_verified_model.sh.in"
-               "${CMAKE_BINARY_DIR}/send_verified_model.sh"
-               @ONLY
-               FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
-                                GROUP_READ GROUP_EXECUTE
-                                WORLD_READ WORLD_EXECUTE)
+# ---------------------------------------------------------------------------
+# Sendable assets (issue #107 = #78 Step 2.5)
+# ---------------------------------------------------------------------------
+#
+# `--target asset-<name>` produces build/<board>/asset/<name>.nnc: a container
+# that has already been through every gate.  picocom then needs no send hook and
+# never varies per model -- it is started once, as
+#
+#     picocom -b 921600 --send-cmd "sb -k" --receive-cmd "rb" /dev/ttyACM0
+#
+# and the path printed by the target is what gets pasted at its `*** file:`
+# prompt.  The chain is the one send_verified_container.sh ran, moved to build
+# time; cmake/build_asset.py records why its ORDER is the load-bearing part and
+# why nothing is published before it has passed.
+#
+# [!] THIS IS GROVE'S, AND DELIBERATELY NOT SHARED.  The ingest half is Ethos-U's:
+# verify_vela_model links THIS port's npu_payload.c and npu_arena.c, and
+# tflite_strip_boundary exists because this port registers one operator and
+# offloads everything else.  Wio has no NPU, so its ingest is a different
+# pipeline; asset/tools/ is the half it will reuse.
+#
+# [!] AND NEITHER TARGET IS IN ALL.  The detection model cannot be committed
+# (model-zoo licensed) and is fetched on demand, so a tree with no access to the
+# model host must still build the firmware.  That is issue #94's shape: a gate
+# that blocks the operation it is not protecting is a gate somebody removes.
+#
+# [!] THE BUILD DOES NO SLOT ARITHMETIC.  SLOT is printed on the receipt and
+# checked by nothing here: the device refuses an oversized payload itself, on the
+# YMODEM size header.  Be clear about what that costs -- blob_write_run() erases
+# the WHOLE SLOT before that header arrives, so the previous blob is gone and one
+# endurance event is spent before the refusal.
+#
+# grove_add_asset(<name>
+#     PROFILE cls|det        which model checks run; never guessed from a name
+#     PLUGIN  <dir>          the plugin under asset/plugins/
+#     SLOT    <n>            printed on the receipt
+#     FILE <path> | URL <git> COMMIT <sha> PATH_IN <p> SHA256 <hash>
+#     [STRIP] [VELA]         the ingest steps this model needs
+# )
+set(GROVE_ASSET_DIR "${CMAKE_BINARY_DIR}/asset")
+
+function(grove_add_asset _name)
+    cmake_parse_arguments(A "STRIP;VELA"
+        "PROFILE;PLUGIN;SLOT;FILE;URL;COMMIT;PATH_IN;SHA256" "" ${ARGN})
+    if(A_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR
+            "grove_add_asset(${_name}): unrecognised: ${A_UNPARSED_ARGUMENTS}")
+    endif()
+    # [!] THE PROFILE IS DECLARED, NEVER INFERRED.  The detector's shape checks
+    # are det-only, and deriving them from a filename would make the strength of
+    # the gate depend on what somebody named a file.
+    if(A_PROFILE STREQUAL "det")
+        set(_verify_args "--blazeface")
+    elseif(A_PROFILE STREQUAL "cls")
+        set(_verify_args "")
+    else()
+        message(FATAL_ERROR
+            "grove_add_asset(${_name}): PROFILE is cls or det")
+    endif()
+
+    set(_model_dir "${CMAKE_BINARY_DIR}/model/${_name}")
+    # An operator's own copy instead of the pin.  NOT hash-checked: an override
+    # deliberately supplies different content, and checking it against the
+    # upstream pin would make the escape hatch unusable.  The strip / vela / pack
+    # / verify chain is what stands behind it.
+    set(GROVE_ASSET_${_name}_FILE "" CACHE FILEPATH
+        "Local model for asset '${_name}' instead of the pinned upstream one")
+    if(GROVE_ASSET_${_name}_FILE)
+        set(_src "${GROVE_ASSET_${_name}_FILE}")
+    elseif(A_FILE)
+        set(_src "${A_FILE}")
+    else()
+        set(_src "${_model_dir}/fetched.tflite")
+        add_custom_command(
+            OUTPUT "${_src}"
+            COMMAND "${CMAKE_COMMAND}"
+                    "-DURL=${A_URL}" "-DCOMMIT=${A_COMMIT}"
+                    "-DPATH_IN=${A_PATH_IN}" "-DSHA256=${A_SHA256}"
+                    "-DOUT=${_src}" "-DWORK=${_model_dir}/fetch-work"
+                    -P "${BOARD_DIR}/cmake/fetch_model.cmake"
+            DEPENDS "${BOARD_DIR}/cmake/fetch_model.cmake"
+            COMMENT "asset ${_name}: fetch the pinned model"
+            VERBATIM)
+    endif()
+
+    if(A_STRIP)
+        set(_stripped "${_model_dir}/stripped.tflite")
+        add_custom_command(
+            OUTPUT "${_stripped}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${_model_dir}"
+            COMMAND "${CMAKE_BINARY_DIR}/tflite_strip_boundary"
+                    "${_src}" "${_stripped}"
+            DEPENDS "${_src}" "${CMAKE_BINARY_DIR}/tflite_strip_boundary"
+            COMMENT "asset ${_name}: strip the boundary conversions"
+            VERBATIM)
+        set(_src "${_stripped}")
+    endif()
+
+    if(A_VELA)
+        # [!] vela names its output after its INPUT and drops it in --output-dir,
+        # so the rename is not cosmetic: without it the next edge would have to
+        # guess the name vela chose.
+        get_filename_component(_stem "${_src}" NAME_WE)
+        set(_velaed "${_model_dir}/vela.tflite")
+        add_custom_command(
+            OUTPUT "${_velaed}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${_model_dir}/vela"
+            COMMAND "${GROVE_VENV}/bin/vela" --accelerator-config ethos-u55-64
+                    --output-dir "${_model_dir}/vela" "${_src}"
+            COMMAND "${CMAKE_COMMAND}" -E rename
+                    "${_model_dir}/vela/${_stem}_vela.tflite" "${_velaed}"
+            DEPENDS "${_src}"
+            COMMENT "asset ${_name}: vela -> Ethos-U55 command stream"
+            VERBATIM)
+        set(_src "${_velaed}")
+    endif()
+
+    set(_plugin_dir "${CMAKE_BINARY_DIR}/plugin/${A_PLUGIN}")
+    set(_nnc "${GROVE_ASSET_DIR}/${_name}.nnc")
+    add_custom_command(
+        OUTPUT "${_nnc}"
+        COMMAND "${CMAKE_COMMAND}" -E env
+                "ASSET_NM=${CMAKE_NM}" "ASSET_OBJCOPY=${CMAKE_OBJCOPY}"
+                "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/build_asset.py"
+                --name "${_name}" --model "${_src}"
+                --plugin-elf "${_plugin_dir}/plugin.elf"
+                --plugin-stacks "${_plugin_dir}/plugin.stacks.json"
+                --packer "${GROVE_PACKER}" --layout "${GROVE_ABI_LAYOUT_JSON}"
+                --model-verifier "${GROVE_SEND_VERIFIER}"
+                --container-verifier "${GROVE_CONTAINER_VERIFIER}"
+                "--verify-args=${_verify_args}"
+                --build-id "${GROVE_PLUGIN_BUILD_ID}"
+                --target-id "${GROVE_PLUGIN_TARGET_ID}"
+                --link-addr "${GROVE_PLUGIN_BASE}"
+                --capacity "${GROVE_PLUGIN_MAX}"
+                # The firmware's own policy, from the same variables it compiles
+                # in -- written out again here and the two could disagree.
+                --policy-stack "0=${GROVE_PLUGIN_STACK_PRODUCER}"
+                --policy-stack "1=${GROVE_PLUGIN_STACK_PRODUCER}"
+                --policy-stack "2=${GROVE_PLUGIN_STACK_PRODUCER}"
+                --policy-stack "3=${GROVE_PLUGIN_STACK_PANEL}"
+                --policy-stack "4=${GROVE_PLUGIN_STACK_SHELL}"
+                --policy-stack "5=${GROVE_PLUGIN_STACK_SHELL}"
+                --policy-stack "6=${GROVE_PLUGIN_STACK_SHELL}"
+                # The declaration names a slot, and the packed size is known
+                # here, so the fit is checked before the device would erase that
+                # slot to discover it.  This asks nothing of the operator: the
+                # slot is declared once in cmake, not typed at send time.
+                --slot "${A_SLOT}" --slot-table "${GROVE_SLOT_TABLE_JSON}"
+                --out "${_nnc}"
+        DEPENDS "${_src}" "${_plugin_dir}/plugin.elf"
+                "${_plugin_dir}/plugin.stacks.json"
+                "${GROVE_PACKER}" "${GROVE_ABI_LAYOUT_JSON}"
+                "${GROVE_CONTAINER_VERIFIER}" "${GROVE_SLOT_TABLE_JSON}"
+                "${BOARD_DIR}/cmake/build_asset.py"
+        COMMENT "asset ${_name}: pack, verify what was packed, publish"
+        VERBATIM)
+
+    # [!] THE RECEIPT PRINTS FROM A PHONY, not from the command above -- that one
+    # does not rerun once its output is current, so the number an operator needs
+    # would appear exactly once and never again.
+    add_custom_target(asset-${_name}
+        COMMAND "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/asset_receipt.py"
+                "${_nnc}.json" "${A_SLOT}"
+        DEPENDS "${_nnc}"
+        VERBATIM)
+endfunction()
 
 # --- The layout check, and the one flashing target left (issues #44, #45, #94)-
 #
@@ -1456,9 +1618,8 @@ configure_file("${BOARD_DIR}/scripts/send_verified_model.sh.in"
 # wrote the first two are gone: since issue #93 a model is an asset in the
 # store, put there over the console by `blob write` and read by `nn open
 # <name>`.  What checked the model before it was transmitted has NOT gone with
-# them -- it moved to send_verified_model.sh above, which is the same chain
-# (stage, verify, send exactly the file that was verified) on the path the
-# console uses.
+# them -- it moved to the `asset-<name>` targets (issue #107), which run the same
+# chain (assemble, verify what was assembled, publish only then) at build time.
 #
 # [!] --image-max, not just the reservation.  The firmware reservation covers
 # BOTH slots, but a single image has to fit in ONE -- the bootloader refuses a
@@ -1741,9 +1902,39 @@ else()
     message(STATUS "No host C compiler: the container chain will refuse to send")
 endif()
 
-configure_file("${BOARD_DIR}/scripts/send_verified_container.sh.in"
-               "${CMAKE_BINARY_DIR}/send_verified_container.sh"
-               FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
-                                GROUP_READ GROUP_EXECUTE
-                                WORLD_READ WORLD_EXECUTE
-               @ONLY)
+# --- the two assets this board ships (issue #107) ---------------------------
+#
+# [!] ONE NAME, FROM THE SOURCE DIRECTORY TO WHAT IS TYPED ON THE BOARD.  Until
+# #107 there were two namespaces -- the plugin directories blazeface/cifar10 and
+# the blob names det/cls -- joined by a table in the sender that mapped one to
+# the other.  The sender itself called that one more pair an operator can get out
+# of step.  Using the same name throughout does not maintain the table; it makes
+# it stop existing.
+#
+# [!] AND THE NAME ON THE DEVICE IS STILL A CONVENTION.  Nothing on the board
+# compares the container manifest's name with the blob key it was stored under:
+# the YMODEM filename is logged and discarded, and container parsing never sees
+# the key.  `blob write anything 9` will happily store a manifest named
+# blazeface.  Written down here so it is not mistaken for a check.
+grove_add_asset(blazeface
+    PROFILE det  PLUGIN blazeface  SLOT 9
+    # ST model zoo, pinned to a commit and to the CONTENT of the file.  The model
+    # is Git LFS: without git-lfs the checkout yields a 131-byte pointer, exit 0,
+    # no diagnostic -- see cmake/fetch_model.cmake.  Licence: the weights are
+    # ST model-zoo licensed and are NOT redistributed here; this fetches them
+    # into the build tree, where they stay untracked.
+    URL     "https://github.com/STMicroelectronics/stm32ai-modelzoo.git"
+    COMMIT  "1423c78953a830903485135febe1dd98ff31aed8"
+    PATH_IN "face_detection/facedetect_front/Public_pretrainedmodel_public_dataset/widerface/blazeface_front_128/blazeface_front_128_int8.tflite"
+    SHA256  "e803bb4e93b10f7a19d4243bcc39698599a723f3128e19d3f90e0b1c0bc88dd8"
+    # "An int8 model" from the zoo means int8 WEIGHTS and float32 I/O, so the
+    # boundary QUANTIZE/DEQUANTIZE come off the FILE before vela sees it -- this
+    # port registers one operator and intends to keep it that way.
+    STRIP VELA)
+
+# Already a vela-compiled model, shipped with the SDK, so neither ingest step
+# applies.  It is the classifier whose labels are the point of issue #78.
+grove_add_asset(cifar10
+    PROFILE cls  PLUGIN cifar10  SLOT 1
+    FILE "${GROVE_SDK_ROOT}/model_zoo/tflm_mb_cls/qat_pruning_model_vela.tflite")
+

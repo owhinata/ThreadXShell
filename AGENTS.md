@@ -270,7 +270,7 @@
    置き換えにならない（単一サブグラフ / 全 op が Ethos-U / int8 I/O / offline plan /
    アリーナ / BlazeFace の shape は見ない）し、**デバイスの検査は書込みの後**で、
    malformed でも既に ~40 秒の消去と転送を消費している。公式経路は
-   **`build/<board>/send_verified_model.sh`**（picocom の `--send-cmd`）:
+   **`--target asset-<name>`**（#107）:
    **staging コピー → 検証 → 同一ファイル送信**、**`--profile cls|det` は明示引数**
    （ファイル名から推測しない）、**出力は stderr**（YMODEM 線に流さない）、
    **ホスト C++ 不在は fail-closed**（skip しない）。
@@ -338,7 +338,7 @@
    **モデルの送信は staging コピーに対して検査 → `verify_vela_model` →
    同じファイルを送信**の順で、検証を README の手順に出さない（ホスト C++ が
    無ければ skip せず拒否）。#94 で `--target flash-model-*` が消えた後もこの鎖は
-   `build/<board>/send_verified_model.sh`（picocom の `--send-cmd`）に残る。
+   `asset-<name>` target に残る（#107）。
    **これらのゲートを外す・緩める変更は不可**。
    **firmware 予約は 2 MB で、ブートローダ自身の算術から導出する**（#85。A/B 2 スロット
    x `Image max size 0x100000`。`GROVE_FW_SLOT_SIZE` x `GROVE_FW_SLOTS`。`0x200000` を
@@ -520,6 +520,15 @@
    コンパイルするのは plugin だけなので、**no-storage 監査は plugin が実際に
    リンクするオブジェクトに対して走る**（`add_plugin()` の `AUDIT_SHARED`。**helper は owned root を導出し引数で受け取らない**（受け取る形は
    `${CMAKE_SOURCE_DIR}` を渡すだけで全免除になる fail-open）。**リンク入力も列挙**し、
+   **[!] アセットは `--target asset-<name>` が作る（#107）。ゲートは送信時ではなく
+   ビルド時にある** — picocom は `--send-cmd "sb -k"` に固定で、**貼り付けたパスが
+   その成果物かは誰も検査しない**。閉じ手は `asset-<name>` が印字する**ファイル全体の
+   CRC32** を転送後に `blob list` と突き合わせること（`nn info` の CRC は plugin
+   セクションのダイジェストなので使えない）。**組んでから検査し、通るまで公開しない**。
+   モデルは commit + SHA256 で pin し、**Git LFS なので git-lfs 不在だとポインタが
+   exit 0 で置かれる**。pin が消えたら fail closed で、**ブランチ先端に逃げない**。
+   `asset-*` は ALL に入れない（モデル網に届かないツリーでも `--target flash` は通る）。
+
    ボードが渡せるのは `ARCH_FLAGS`（`-m*` のみ）。`.o`/`.a`/`-l`/`-T` と MEMORY fragment の
    `INPUT`/`GROUP`/`INCLUDE` は拒否する — ソース経路だけ塞いでも、リンク入力から
    無監査のコードが画像に入る。**audit の success stamp は compile 前に消す**）。

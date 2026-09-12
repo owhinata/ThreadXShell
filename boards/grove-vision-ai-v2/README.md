@@ -2099,20 +2099,57 @@ of a part whose endurance is not documented (#89).
 
 It used to be impossible to write a model without it, because the verifier ran
 inside `--target flash-model-*`.  `blob write` takes whatever arrives on the
-wire, so the chain is put back on the PC side:
+wire.  Issue #93 put the chain back as a sender picocom was pointed at; **issue
+#107 moved it into the build**, so the thing you download is a build product:
 
 ```
-picocom -b 921600 /dev/ttyACM0 \
-    --send-cmd "build/grove-vision-ai-v2/send_verified_model.sh --profile det"
+cmake --build build/grove-vision-ai-v2 --target asset-blazeface
+picocom -b 921600 --send-cmd "sb -k" --receive-cmd "rb" /dev/ttyACM0
 ```
 
-then `blob write det <slot>` on the board and `C-a C-s` in picocom.  The script
-**stages a copy, verifies THAT copy, and sends the same file** -- verifying one
-path and sending it again is a gap a build could step into.  It writes the
-verifier's output to **stderr**, because picocom connects the send command's
-stdout to the serial line.  The profile is an explicit argument and never a
-guess from a filename: the strength of a gate must not depend on what somebody
-called a file.
+picocom is now started **one way, forever** -- no `--profile`, no `--slot`, no
+restarting it to change models.  `--receive-cmd "rb"` is inert on this board:
+nothing here sends a file to the PC.  The target prints the path to paste and a
+CRC32 to check afterwards; see **Sending an asset** below.
+
+The profile is still declared and never guessed -- it is now a property of the
+`grove_add_asset()` declaration in `board.cmake` rather than something typed at
+the PC, so the strength of a gate does not depend on what somebody called a file.
+
+### [!] What moving the gate to build time gives up
+
+The sender verified and sent **one file**, so the gate ran on whatever path was
+typed at picocom's prompt.  `sb -k` sends whatever is typed.  The gates still all
+run, earlier, and an artifact is published only after passing them -- but
+**nothing now checks that the path you paste is that artifact**.
+
+Bypassing used to require starting picocom unusually; now the ordinary
+configuration is the unchecking one.  So here is precisely what still catches
+what, rather than "the gates ran at build time":
+
+| what you could send by mistake | what catches it | when |
+|---|---|---|
+| malformed `.tflite` | `npu_open()`'s bounded verifier | `nn model load`, after erase + transfer |
+| a **recognised** container with malformed internals, incompatible plugin target, or a damaged **plugin** section | `plugin_load.c` | `nn model load` |
+| a container whose **magic** is damaged | probes as `UNKNOWN` and falls through as a bare model, so `npu_open()` -- **not** `plugin_load.c` | `nn model load` |
+| **model-section** damage that still satisfies `npu_open()` | **nothing** -- only the plugin section has a digest | -- |
+| a **stale** artifact from another build | **nothing refuses it** | -- |
+| content that was never gated: a model that never passed `verify_vela_model`, or a container pairing the wrong model with the wrong plugin | **nothing** | -- |
+| stored under the wrong **name** | not enforced, but observable -- `nn model load --name` refuses a key that is not there, and `blob list` shows slot and key | at load |
+
+**The device checks structure and ABI target, never identity, freshness, or that
+the right model met the right plugin.**
+
+[!] **`nn info` is not the check it looks like.**  Its CRC is the plugin-section
+digest, and the build id is stamped at configure time, so neither moves when a
+model changes.
+
+**What you actually check is the CRC on the receipt.**  `svc/crc32.h` says why
+the number exists: from zero it is standard CRC-32/ISO-HDLC, the same value as
+Python's `zlib.crc32`, "so a value printed by `blob list` can be checked against
+the file that was sent".  Each `asset-<name>` target prints it, and comparing it
+with `blob list` after the transfer is the one end-to-end **built bytes = stored
+bytes** check available.
 
 [!] **`--profile` SELECTS A CHECK SET.  It does not name the model** (#95).
 `det` is `cls` plus the four BlazeFace output shapes, so the two directions are
@@ -3150,7 +3187,7 @@ tell you which sectors hold bytes.  Only the scan does.
 
 ### Where the models live now
 
-Both were re-sent over the console through `send_verified_model.sh`, and `cls`
+Both were re-sent over the console through the verified send path, and `cls`
 was moved out of the 4 MB slot so that slot stays available for a model that
 needs it:
 
@@ -3302,7 +3339,7 @@ Host tests: `test/test_flash_partitions.py`, `test/test_flash_geometry.py`.
 **The staged-copy chain outlived the targets it was built for.**  The two
 `flash-model-*` targets staged a copy, ran the partition check and
 `verify_vela_model` **on that staged copy**, and sent **that same file**.  Both
-targets are gone (#94) and the chain moved to `send_verified_model.sh`, which
+targets are gone (#94) and the chain moved to the `asset-<name>` targets, which
 does the same three steps on the path the console uses.  With no host C++
 compiler the verifier cannot be built and the script refuses; skipping the check
 would be the fail-open the arrangement exists to prevent.
@@ -3809,27 +3846,46 @@ nn thresh 500          # more sensitive; 1..999, milli-probability
 
 ### Building the model (it cannot be committed)
 
-The weights are model-zoo licensed, so `*.tflite` is gitignored and the pipeline
-is documented instead.  Everything it needs is in the build tree: `vela` is
-pinned in `requirements.txt` and installed into `build/<board>/venv`, and the two
-host tools come from `--target model-tools`.
+The weights are model-zoo licensed, so `*.tflite` is gitignored.  Since issue
+#107 the pipeline is a target rather than a procedure:
 
 ```
-cmake --build build/grove-vision-ai-v2 --target model-tools
-cd build/grove-vision-ai-v2
-
-./tflite_strip_boundary <path>/blazeface_front_128_int8.tflite \
-                        model/blazeface_stripped.tflite
-./venv/bin/vela --accelerator-config ethos-u55-64 \
-                --output-dir model model/blazeface_stripped.tflite
-mv model/blazeface_stripped_vela.tflite model/blazeface_vela.tflite
-./verify_vela_model model/blazeface_vela.tflite --blazeface
+cmake --build build/grove-vision-ai-v2 --target asset-blazeface
 ```
 
-That last file is what goes into the store: point `send_verified_model.sh
---profile det` at it from picocom and run `blob write det <slot>` on the board.
-The script stages, verifies and sends the same copy, so the manual
-`./verify_vela_model` above is for reading the report, not for safety.
+which fetches the pinned model, strips its boundary conversions, runs vela,
+packs the container, verifies what it packed, and publishes
+`build/<board>/asset/blazeface.nnc` with a receipt.  `vela` is pinned in
+`requirements.txt` and installed into `build/<board>/venv`; the host gates come
+from `--target model-tools`.
+
+**Where the model comes from, and on whose terms.**  It is fetched at BUILD time
+from the ST model zoo, pinned to both a commit and the SHA-256 of the file:
+
+| | |
+|---|---|
+| repository | `github.com/STMicroelectronics/stm32ai-modelzoo` |
+| commit | `1423c78953a830903485135febe1dd98ff31aed8` |
+| path | `face_detection/facedetect_front/.../blazeface_front_128_int8.tflite` |
+| sha256 | `e803bb4e...0bc88dd8` (189,816 B) |
+
+Nothing about it is redistributed here: it lands in the build tree, which is
+untracked, and **the upstream model-zoo licence is yours to comply with**.
+`-DGROVE_ASSET_blazeface_FILE=<path>` uses a local copy instead and skips the
+network; that path is deliberately not hash-checked, because an override exists
+to supply different content, and the strip/vela/pack/verify chain is what stands
+behind it either way.
+
+[!] **The model is stored with Git LFS, and a missing git-lfs fails open.**  A
+checkout without it leaves a **131-byte pointer file, exit code 0, no
+diagnostic** -- which is why the content hash is the authority and not a
+formality.  The fetch recognises a complete pointer and says "install git-lfs"
+rather than reporting a hash mismatch, but the hash is what decides.
+
+[!] **If the pinned commit ever disappears** -- garbage-collected, or the
+repository moves -- the target fails closed.  **Do not retarget it at a branch
+tip**: that silently changes which model this board ships.  Either pass a local
+file, or update URL, commit and SHA-256 together as a reviewed change.
 
 **Why the stripping step.** "An int8 model" from the model zoo means int8
 WEIGHTS and float32 I/O: the graph starts with a `QUANTIZE` and ends with four
@@ -4830,39 +4886,63 @@ Loading and calling it is Step 1b -- issue #103, the next section.
 ### Sending one
 
 ```
-# on the board
-blob write det 9
-
-# in picocom: C-a C-s, then type the model path at the "*** file:" prompt
-build/grove-vision-ai-v2/model/blazeface_vela.tflite
+cmake --build build/grove-vision-ai-v2 --target asset-blazeface
 ```
 
-with picocom started as
+which ends by printing what you need:
 
 ```
-picocom -b 921600 /dev/ttyACM0 \
-    --send-cmd "<build>/send_verified_container.sh --profile det --slot 9"
+  asset blazeface    /home/.../build/grove-vision-ai-v2/asset/blazeface.nnc
+  slot 9             168928 B   crc32 C9AEEFA8
 ```
 
-`--profile` and `--slot` are both mandatory.  The profile decides which model
-checks run and is never guessed from a filename.  The slot has to be given
-because **the host cannot discover it**: `blob write` picks a slot on the DEVICE
-and erases the whole slot before the YMODEM size header arrives, so an oversized
-container is discovered after ~40 s with the old contents already gone.  The two
-slot numbers must match and nothing can check that for you.
+Then, with picocom started the one way it is ever started:
+
+```
+picocom -b 921600 --send-cmd "sb -k" --receive-cmd "rb" /dev/ttyACM0
+```
+
+```
+# on the board -- the slot must be EMPTY first; see below
+blob erase 9
+blob write blazeface 9
+
+# in picocom: C-a C-s, then paste the path from the receipt
+```
+
+and afterwards `blob list` must show `crc32 C9AEEFA8`.  That comparison is the
+check; see **What moving the gate to build time gives up** above for why it is
+the one that matters.
+
+[!] **`blob write` will not overwrite an occupied slot**, whatever the name.  A
+slot holding a VALID blob under *any* other name gives `OCCUPIED`, not a fresh
+write -- so the `blob erase` above is required, not tidiness.  (The duplicate
+rule is a different one: it refuses the same NAME in two slots.)
+
+[!] **And the slot number is not checked anywhere on the host.**  `blob write`
+picks the slot on the DEVICE and **erases the whole slot before the YMODEM size
+header arrives**, so an oversized container is discovered with the old contents
+already gone.  The build prints the intended slot on the receipt; it verifies
+nothing about it.
 
 ### What the chain does, and why in that order
 
 ```
-stage -> pack ONCE -> re-parse the container -> extract the model and the plugin
-image FROM IT -> verify_vela_model on the extracted model -> verify_container
-(the device's own validator) -> check it fits the named slot -> send that file
+fetch (hash-checked) -> strip -> vela -> pack ONCE -> re-parse the container
+-> extract the model FROM IT -> verify_vela_model on those extracted bytes
+-> verify_container (the device's own validator) -> publish
 ```
 
-Checking the parts and then assembling is not equivalent.  The strength of
-`send_verified_model.sh` is that the file it verified and the file it sent are
-one file; verifying components leaves the packer free to read the inputs again
-and nothing downstream would notice.
+Checking the parts and then assembling is not equivalent: verifying components
+leaves the packer free to read its inputs again, and nothing downstream would
+notice.  So the container is assembled first and everything after that reads only
+the assembled file.
+
+[!] **And nothing is published until every gate has passed.**  The container is
+built at a private path and renamed into `asset/` only at the end.  If the packer
+wrote straight to the output, a verifier failing -- or the build being
+interrupted between them -- would leave a complete-looking `.nnc` at the path
+this README tells you to send.
 
 `verify_container` links `svc/plugin_load.c` -- the same validator the firmware
 runs -- so a container cannot pass on the host and be refused on the board.
@@ -5583,22 +5663,29 @@ exists to prevent.  `nn run` still reports its classes.
 
 ### Sending a container
 
-`--profile` chooses the model checks **and the plugin**; `--plugin` overrides it.
+One declaration per asset, in `board.cmake`, and **one name** from the source
+directory to what is typed on the board:
 
-| profile | model gate | plugin |
-|---|---|---|
-| `det` | `--blazeface` (the four output shapes pinned) | `blazeface` |
-| `cls` | shape checks only | `cifar10` |
-
-```
-picocom -b 921600 /dev/ttyACM0 \
-    --send-cmd "<build>/send_verified_container.sh --profile cls --slot 1"
+```cmake
+grove_add_asset(cifar10  PROFILE cls  PLUGIN cifar10  SLOT 1  FILE ...)
 ```
 
-Deriving the plugin from the profile rather than asking separately is
-deliberate: they would be one more pair to get out of step, and a container
-carrying the wrong decoder is one the device ACCEPTS -- the manifest is well
-formed, the shapes simply never match.  The choice is printed on every run.
+```
+cmake --build build/grove-vision-ai-v2 --target asset-cifar10
+# then: blob erase 1 ; blob write cifar10 1 ; C-a C-s ; paste the printed path
+```
+
+Until issue #107 there were two namespaces -- the plugin directories
+`blazeface`/`cifar10` and the blob names `det`/`cls` -- joined by a table inside
+the sender, which that sender itself called one more pair an operator can get out
+of step.  Using the same name throughout does not maintain the table; it makes it
+stop existing.  `--profile` and `--plugin` are gone as things anyone types: the
+profile is a property of the declaration, and the plugin is named beside it.
+
+[!] **The name on the device is still a convention.**  Nothing on the board
+compares the container manifest's name with the blob key it was stored under: the
+YMODEM filename is logged and discarded, and container parsing never sees the
+key.  `blob write anything 1` will happily store a manifest named `cifar10`.
 
 **[!] But the profile now carries two facts, and it was already asymmetric.**
 `--profile det` on the classifier is rejected by the model gate; `--profile cls`
@@ -5636,13 +5723,14 @@ Both were walked into during this work, and neither announces itself.
   `nn info` prints the loaded plugin's **CRC** because of the first of those --
   the build id is a source revision stamped at configure time and does not move
   when a plugin is edited and rebuilt, and the image size often does not either.
-- **picocom's `--send-cmd` decides which sender runs.**  Start picocom with
-  `send_verified_model.sh` and then send a container, and the bare-model path
-  transfers it; start it with no `--send-cmd` and a raw `.tflite` goes down the
-  wire with no gate at all.  Neither can be refused on the device: a bare model
-  is a legitimate payload and takes the pre-container path by design.  It is
-  backward compatibility working exactly as intended, and it looks like the
-  plugin silently not being there.
+- **Nothing on the PC checks what you actually send** (issue #107).  picocom runs
+  `sb -k`, which transfers whatever path you type: a stale artifact, a raw
+  `.tflite`, a container built for another configuration.  A bare model cannot be
+  refused on the device either -- it is a legitimate payload and takes the
+  pre-container path by design -- so it looks like the plugin silently not being
+  there.  The gates all ran at build time; what closes the loop is comparing the
+  receipt's CRC32 with `blob list` afterwards.  The table under **What moving the
+  gate to build time gives up** says what the device still catches.
 
 ### What the host tests cover, and two gate bugs they turned up
 

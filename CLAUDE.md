@@ -685,14 +685,17 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   ではない**（128 KB 先）ので、予約から推測すると外す。
   **[!] `det` と `test-small` は #94 の後に送り直した**（ヘッダが `0xAC0000` /
   `0x900000` にあり、もうスロット基底ではないため）。
-  **現在の配置: `cls` = slot 1 `0x600000`（payload `0x3A601000`、crc32 `8E679A3F`）/
-  `det` = slot 9 `0xE80000`（payload `0x3AE81000`、crc32 `F6DA1D1E`）。**
-  **[!] #107 がこれを `cifar10` / `blazeface` に改名する。移行は実機作業で、
-  済むまでこの表が正**。改名後の期待値は `cifar10` crc32 `6BEA56B6`（1,707,712 B）/
-  `blazeface` crc32 `C9AEEFA8`（168,928 B）で、**`blob list` がこの値を見せることが
-  移行完了の確認**。手順は `nn stream stop` → `nn model unload` →
-  `blob erase <slot>` → `blob write <name> <slot>`（**erase は必須** —
-  スロットが別名の VALID を持っていると `OCCUPIED` で拒否される）。
+  **現在の配置（#107 で改名、実機確認済み）: `cifar10` = slot 1 `0x600000`
+  （payload `0x3A601000`、1,707,712 B、crc32 `6BEA56B6`）/ `blazeface` = slot 9
+  `0xE80000`（payload `0x3AE81000`、168,928 B、crc32 `C9AEEFA8`）。**
+  旧 `cls` / `det` は消滅した。**[!] `blob write` は別名の VALID が載ったスロットを
+  上書きしない**（`OCCUPIED`。重複規則とは別の規則で、`test_blob_state.c` が pin）ので
+  **`blob erase <slot>` が先に要る**。移行手順は `nn stream stop` → `nn model unload`
+  → `blob erase` → `blob write`。
+  **[!] この crc32 は PC 側の `zlib.crc32(ファイル全体)` と一致する** — 実機で確認
+  （転送 168,960 B → 格納 168,928 B、YMODEM のパディングはトリムされてから CRC される）。
+  `sb -k` は打ったパスをそのまま送るので、**この照合が「ビルドしたバイト＝格納された
+  バイト」の唯一の確認**。`asset-<name>` がレシートとして印字する。
   cls を 4 MB スロットから退かしてあるのは、そこを「他に入らないモデル」用に空けておくため。
   実測: cls = **30 NOR トランザクション**（#49 Step 2 の予算どおり）/ det = **6**。
   **[!] blob の移動は `erase` → `write` の順**。`cls` が slot 0 で VALID のまま

@@ -1812,6 +1812,23 @@ set(GROVE_PLUGIN_FORBIDDEN
 # the M55 veneers call into nn_svc_grove.c / plugin_paint.c.
 set(GROVE_PLUGIN_VENEER_BASE_COST 256)
 
+# cortex-m55 / fp-armv8 / hard float / little endian / CMSE, per
+# plugin_target_id() in svc/plugin_abi.h.  ONE value, handed to the packer, the
+# container verifier and the firmware's policy.
+#
+# [!] AND UNTIL ISSUE #108 THIS COMMENT CLAIMED A CHECK THAT DID NOT EXIST.  It
+# said "the container verifier recomputes it from the same header, so a
+# disagreement is a refusal".  Nothing recomputed it: plugin_target_id() was
+# called by no build path, and all three consumers took this variable, so a
+# mistyped word would have been stamped, accepted and loaded consistently.  It
+# is checked now at the two ends that can each see part of it -- the image gate
+# derives CPU / FPU / float ABI / endianness from the plugin ELF (add_plugin()'s
+# TARGET_ID below), and nn_svc_grove.c static-asserts the whole word, CMSE bit
+# included, against this firmware's own predefined macros (svc/plugin_target.h).
+# The CMSE bit says the BASE runs Secure; no image records it, so only the
+# firmware can check it.
+set(GROVE_PLUGIN_TARGET_ID "0x9302")
+
 
 # [!] svc/blazeface.c IS THE SAME FILE THE OTHER TWO BOARDS LINK.  Compiling a
 # copy would fork the decoder issue #97 spent itself merging.  It is the wrapper
@@ -1826,6 +1843,7 @@ add_plugin(blazeface
     IMAGE_END  ${GROVE_PLUGIN_GATE_END}
     FORBIDDEN  ${GROVE_PLUGIN_FORBIDDEN}
     VENEER_BASE_COST ${GROVE_PLUGIN_VENEER_BASE_COST}
+    TARGET_ID  ${GROVE_PLUGIN_TARGET_ID}
     OUT_DIR "${CMAKE_BINARY_DIR}/plugin"
     OUT_VAR GROVE_PLUGIN_ELFS
     SOURCES "${GROVE_SHARED_DECODER}"
@@ -1851,6 +1869,7 @@ add_plugin(cifar10
     IMAGE_END  ${GROVE_PLUGIN_GATE_END}
     FORBIDDEN  ${GROVE_PLUGIN_FORBIDDEN}
     VENEER_BASE_COST ${GROVE_PLUGIN_VENEER_BASE_COST}
+    TARGET_ID  ${GROVE_PLUGIN_TARGET_ID}
     OUT_DIR "${CMAKE_BINARY_DIR}/plugin"
     OUT_VAR GROVE_PLUGIN_ELFS
     ENTRIES pl_entry=${GROVE_PLUGIN_STACK_PRODUCER}
@@ -1883,11 +1902,6 @@ set(GROVE_PLUGIN_ROOT "${CMAKE_BINARY_DIR}/plugin")
 set(GROVE_PLUGIN_BASE "0x341E0000")
 set(GROVE_PLUGIN_MAX  "131072")
 
-# cortex-m55 / fp-armv8 / hard float / little endian / CMSE, per
-# plugin_target_id() in svc/plugin_abi.h.  Stated here and computed there: the
-# container verifier recomputes it from the same header, so a disagreement is a
-# refusal rather than a silent mismatch.
-set(GROVE_PLUGIN_TARGET_ID "0x9302")
 # [!] NOT CMAKE_PROJECT_VERSION -- this project sets none, so the manifest
 # carried an empty build id and `nn info` printed "build )".  The build id is
 # what a fault report names, so it has to identify something.

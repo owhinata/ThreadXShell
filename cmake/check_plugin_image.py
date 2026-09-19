@@ -34,6 +34,7 @@ board code on whichever board runs it -- each board's README says what that
 standing is there.  Do not read a pass here as isolation.
 
 Checks:
+  0. the board's target word describes what the image was built for
   1. no undefined symbols          -- a plugin resolves everything within itself
   2. allocated-section whitelist   -- nothing the loader would have to service
   3. no relocation sections        -- the loader fixes up nothing
@@ -45,8 +46,209 @@ Checks:
 """
 import argparse
 import re
+import struct
 import subprocess
 import sys
+
+# ---- the target word (issue #108) ------------------------------------------
+#
+# The board declares one word (svc/plugin_abi.h, plugin_target_id()) and hands
+# it to the packer, the host container verifier and its firmware policy.  Until
+# #108 nothing checked the word itself: the three agreed because they read the
+# same CMake variable.  This half derives what the PLUGIN IMAGE says about
+# itself and compares; the firmware's half (svc/plugin_target.h) derives the
+# environment from its own predefined macros.
+#
+# [!] THESE VALUES ARE THE ABI'S, TRANSCRIBED -- and pinned.  The gate runs at
+# plugin link time with no host C compiler guaranteed, so it cannot read
+# plugin_abi.h itself; cmake/fixtures/run_plugin_gate_tests.py compiles a
+# program against the real header and fails if any entry here disagrees.  Keyed
+# by the header's own names so that comparison is mechanical.
+ABI = {
+    "PLUGIN_CPU_CORTEX_M7": 1,
+    "PLUGIN_CPU_CORTEX_M55": 2,
+    "PLUGIN_FPU_NONE": 0,
+    "PLUGIN_FPU_FPV5_SP_D16": 1,
+    "PLUGIN_FPU_FPV5_D16": 2,
+    "PLUGIN_FPU_FP_ARMV8": 3,
+    "PLUGIN_FLOAT_ABI_SOFT": 0,
+    "PLUGIN_FLOAT_ABI_HARD": 1,
+    "PLUGIN_TARGET_CPU_SHIFT": 0,
+    "PLUGIN_TARGET_CPU_MASK": 0x000000FF,
+    "PLUGIN_TARGET_FPU_SHIFT": 8,
+    "PLUGIN_TARGET_FPU_MASK": 0x00000F00,
+    "PLUGIN_TARGET_FLOAT_SHIFT": 12,
+    "PLUGIN_TARGET_FLOAT_MASK": 0x00003000,
+    "PLUGIN_TARGET_BIG_ENDIAN": 0x00004000,
+    "PLUGIN_TARGET_CMSE": 0x00008000,
+    "PLUGIN_TARGET_RESERVED_MASK": 0xFFFF0000,
+}
+
+# Tag_CPU_name -> (the ABI's CPU, the Tag_CPU_arch that CPU must report).
+# By NAME, not by architecture: v7E-M is also a Cortex-M4, and "7E-M" is what a
+# -march build records -- neither says which core the word means.  A name not
+# listed here is refused rather than guessed.
+CPU_BY_NAME = {
+    "cortex-m7": ("PLUGIN_CPU_CORTEX_M7", 13),     # Tag_CPU_arch v7E-M
+    "cortex-m55": ("PLUGIN_CPU_CORTEX_M55", 21),   # v8.1-M.mainline
+}
+# (CPU, Tag_FP_arch, single-precision only) -> the ABI's FPU.  The PAIR is the
+# key, for the same reason svc/plugin_target.h maps (__ARM_ARCH, __ARM_FP):
+# Tag_FP_arch is 8 ("FPv5/FP-D16 for ARMv8") for fpv5-d16, fpv5-sp-d16 AND the
+# M55's FPU alike.
+FPU_BY_ATTR = {
+    ("PLUGIN_CPU_CORTEX_M7", 8, True): "PLUGIN_FPU_FPV5_SP_D16",
+    ("PLUGIN_CPU_CORTEX_M7", 8, False): "PLUGIN_FPU_FPV5_D16",
+    ("PLUGIN_CPU_CORTEX_M55", 8, False): "PLUGIN_FPU_FP_ARMV8",
+}
+
+
+def _uleb(buf, pos):
+    val = shift = 0
+    while True:
+        b = buf[pos]
+        pos += 1
+        val |= (b & 0x7F) << shift
+        shift += 7
+        if not b & 0x80:
+            return val, pos
+
+
+def _ntbs(buf, pos):
+    end = buf.index(b"\0", pos)
+    return buf[pos:end].decode("ascii", "replace"), end + 1
+
+
+def elf_target(path):
+    """({tag: value} from .ARM.attributes' aeabi File scope, EI_DATA).
+
+    Read out of the ELF directly rather than from `readelf -A` text: a gate
+    that parses a tool's prose is a gate that depends on that tool's vocabulary
+    (issues #42/#66), and this format is small and specified (ARM IHI 0045).
+    """
+    raw = open(path, "rb").read()
+    if raw[:4] != b"\x7fELF" or raw[4] != 1:
+        raise ValueError("not a 32-bit ELF")
+    ei_data = raw[5]
+    e = "<" if ei_data == 1 else ">"
+    shoff, = struct.unpack_from(e + "I", raw, 0x20)
+    shentsize, shnum, shstrndx = struct.unpack_from(e + "HHH", raw, 0x2E)
+    shdrs = [struct.unpack_from(e + "IIIIIIIIII", raw, shoff + i * shentsize)
+             for i in range(shnum)]
+    stro = shdrs[shstrndx][4]
+    attrs = None
+    for sh in shdrs:
+        name, _ = _ntbs(raw, stro + sh[0])
+        if name == ".ARM.attributes":
+            attrs = raw[sh[4]:sh[4] + sh[5]]
+    if attrs is None:
+        raise ValueError("no .ARM.attributes section")
+    if attrs[:1] != b"A":
+        raise ValueError(".ARM.attributes is not format version 'A'")
+
+    tags = {}
+    pos = 1
+    while pos < len(attrs):
+        sublen, = struct.unpack_from(e + "I", attrs, pos)
+        vendor, vpos = _ntbs(attrs, pos + 4)
+        end = pos + sublen
+        if vendor == "aeabi":
+            q = vpos
+            while q < end:
+                scope, q2 = _uleb(attrs, q)
+                sslen, = struct.unpack_from(e + "I", attrs, q2)
+                ssend = q + sslen
+                if scope != 1:
+                    # Section/symbol scoped attributes would make the image's
+                    # answer depend on WHERE -- not something to summarise.
+                    raise ValueError("section- or symbol-scoped attributes")
+                r = q2 + 4
+                while r < ssend:
+                    tag, r = _uleb(attrs, r)
+                    if tag in (4, 5, 67) or (tag > 32 and tag % 2 == 1):
+                        val, r = _ntbs(attrs, r)
+                    elif tag == 32:                 # Tag_compatibility
+                        _, r = _uleb(attrs, r)
+                        val, r = _ntbs(attrs, r)
+                    else:
+                        val, r = _uleb(attrs, r)
+                    tags[tag] = val
+                q = ssend
+        pos = end
+    return tags, ei_data
+
+
+def check_target(elf, word, errors):
+    """Compare the board's word with what the image says; return a summary."""
+    a = ABI
+    if word & a["PLUGIN_TARGET_RESERVED_MASK"]:
+        errors.append(f"target: 0x{word:08x} sets reserved bits")
+        return None
+    try:
+        tags, ei_data = elf_target(elf)
+    except (ValueError, IndexError, struct.error) as exc:
+        errors.append(f"target: cannot read the image's attributes ({exc}); "
+                      "the word cannot be checked, so it is not accepted")
+        return None
+
+    cpu_name = tags.get(5)
+    if cpu_name not in CPU_BY_NAME:
+        errors.append(f"target: Tag_CPU_name {cpu_name!r} is not a core any "
+                      "board here builds plugins for -- the word cannot be "
+                      "derived from it")
+        return None
+    cpu, arch = CPU_BY_NAME[cpu_name]
+    if tags.get(6) != arch:
+        errors.append(f"target: {cpu_name} with Tag_CPU_arch {tags.get(6)}, "
+                      f"expected {arch}")
+        return None
+    fp_arch = tags.get(10, 0)
+    if fp_arch == 0:
+        fpu = "PLUGIN_FPU_NONE"
+    else:
+        # Tag_ABI_HardFP_use: 1 = single precision only; 0/3 = as Tag_FP_arch.
+        sp_only = tags.get(27, 0) == 1
+        fpu = FPU_BY_ATTR.get((cpu, fp_arch, sp_only))
+        if fpu is None:
+            errors.append(f"target: {cpu_name} with Tag_FP_arch {fp_arch}"
+                          f"{' (SP only)' if sp_only else ''} is not an FPU "
+                          "the ABI names")
+            return None
+    vfp_args = tags.get(28, 0)
+    if vfp_args not in (0, 1):
+        errors.append(f"target: Tag_ABI_VFP_args {vfp_args} is neither the "
+                      "base nor the VFP calling convention")
+        return None
+    fabi = "PLUGIN_FLOAT_ABI_HARD" if vfp_args == 1 else "PLUGIN_FLOAT_ABI_SOFT"
+    if ei_data not in (1, 2):
+        errors.append(f"target: EI_DATA {ei_data} is neither endianness")
+        return None
+    big = ei_data == 2
+
+    derived = (((a[cpu] << a["PLUGIN_TARGET_CPU_SHIFT"])
+                & a["PLUGIN_TARGET_CPU_MASK"])
+               | ((a[fpu] << a["PLUGIN_TARGET_FPU_SHIFT"])
+                  & a["PLUGIN_TARGET_FPU_MASK"])
+               | ((a[fabi] << a["PLUGIN_TARGET_FLOAT_SHIFT"])
+                  & a["PLUGIN_TARGET_FLOAT_MASK"])
+               | (a["PLUGIN_TARGET_BIG_ENDIAN"] if big else 0))
+    # [!] THE CMSE BIT IS MASKED OUT, AND SAYING SO IS PART OF THE CHECK.  It
+    # describes the environment the plugin is loaded into, not the plugin, and
+    # .ARM.attributes carries no trace of it.  Claiming to derive it would be
+    # the same false comment #108 removed from plugin_abi.h.
+    given = word & ~a["PLUGIN_TARGET_CMSE"]
+    what = f"{cpu_name} / {fpu[len('PLUGIN_FPU_'):].lower()} / " \
+           f"{'hard' if vfp_args == 1 else 'soft'} / " \
+           f"{'big' if big else 'little'}"
+    if given != derived:
+        errors.append(f"target: the board's word 0x{word:04x} does not "
+                      f"describe this image, which is {what} = "
+                      f"0x{derived:04x} (CMSE bit excluded: no image records "
+                      "it)")
+        return None
+    return (f"target 0x{word:04x} = {what}; CMSE bit "
+            f"{'set' if word & a['PLUGIN_TARGET_CMSE'] else 'clear'} and NOT "
+            "checked here (no image records it -- the firmware asserts it)")
 
 # Allocated sections a plugin image may contain.  Anything else either needs a
 # loader service that does not exist (init_array wants constructors run, .got
@@ -263,6 +465,8 @@ def main():
                     help="entry points a plugin may never reach on this board")
     ap.add_argument("--veneer-base-cost", required=True, type=int,
                     help="stack the base may spend below one veneer, in bytes")
+    ap.add_argument("--target-id", required=True, type=lambda v: int(v, 0),
+                    help="the board's plugin target word (svc/plugin_abi.h)")
     args = ap.parse_args()
     if args.end <= args.base:
         print("check_plugin_image: FAIL\n  - --end 0x%08x is not above --base "
@@ -273,6 +477,9 @@ def main():
     errors = []
     secs = sections(args.objdump, args.elf)
     funcs = disassemble(args.objdump, args.elf)
+
+    # 0. the target word
+    target_note = check_target(args.elf, args.target_id, errors)
 
     # 1. undefined symbols
     und = [l.split()[-1] for l in run([args.nm, "-u", args.elf]).splitlines()
@@ -373,6 +580,7 @@ def main():
     summary = ", ".join(f"{k} {v} B" for k, v in sorted(bounds.items()))
     print(f"check_plugin_image: OK (text {t} B, data {d} B, bss {b} B"
           + (f"; stack {summary}" if summary else "") + ")")
+    print(f"check_plugin_image: {target_note}")
     return 0
 
 

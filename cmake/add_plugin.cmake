@@ -27,6 +27,8 @@
 #      IMAGE_END    <addr>         see below for why this is not the fragment
 #      FORBIDDEN    <sym ...>    entry points a plugin may never reach here
 #      VENEER_BASE_COST <bytes>  stack the base spends behind one veneer
+#      TARGET_ID    <word>       the board's plugin target word, which the gate
+#                                checks against what the image was built for
 #      OUT_DIR      <dir>        build dir to put <name>/ under
 #      OUT_VAR      <var>        list variable the plugin.elf path is appended to
 #      ENTRIES      <sym=limit>  every slot the plugin exports
@@ -40,7 +42,8 @@ get_filename_component(_ADD_PLUGIN_DIR "${CMAKE_CURRENT_LIST_DIR}" REALPATH)
 # Until then each board would have carried its own copy, which is the decision
 # issue #106 deferred until a second board existed to show where the seam was.
 # It is three facts -- the reservation, the forbidden table and the base's cost
-# behind a veneer -- and all three are required below, so a second board cannot
+# behind a veneer -- plus the target word the gate checks the image against
+# (issue #108 too), and all four are required below, so a second board cannot
 # inherit the first one's by omission.
 set(_ADD_PLUGIN_GATE "${_ADD_PLUGIN_DIR}/check_plugin_image.py")
 get_filename_component(_ADD_PLUGIN_ASSET_ROOT
@@ -69,23 +72,23 @@ get_filename_component(_ADD_PLUGIN_ASSET_ROOT
 # differently-compiled audited copy impossible rather than merely unlikely.
 function(add_plugin _name)
     cmake_parse_arguments(P ""
-        "MEMORY_LD;IMAGE_BASE;IMAGE_END;VENEER_BASE_COST;OUT_DIR;OUT_VAR"
+        "MEMORY_LD;IMAGE_BASE;IMAGE_END;VENEER_BASE_COST;TARGET_ID;OUT_DIR;OUT_VAR"
         "CFLAGS;ARCH_FLAGS;SOURCES;ENTRIES;AUDIT_SHARED;FORBIDDEN" ${ARGN})
     # Presence only.  `if(NOT P_x)` would call a literal 0 "missing", which is
     # the wrong refusal for VENEER_BASE_COST 0 -- that one is refused below for
     # what it is.  The numbers are checked as numbers after this.
     foreach(_req MEMORY_LD IMAGE_BASE IMAGE_END VENEER_BASE_COST FORBIDDEN
-                 OUT_DIR OUT_VAR CFLAGS ARCH_FLAGS ENTRIES)
+                 TARGET_ID OUT_DIR OUT_VAR CFLAGS ARCH_FLAGS ENTRIES)
         if(NOT DEFINED P_${_req} OR "${P_${_req}}" STREQUAL "")
             message(FATAL_ERROR "add_plugin(${_name}): ${_req} is required")
         endif()
     endforeach()
     # The gate's reservation is a statement the board makes to the GATE, and a
     # malformed one would reach Python as a traceback in the middle of a build.
-    foreach(_req IMAGE_BASE IMAGE_END)
+    foreach(_req IMAGE_BASE IMAGE_END TARGET_ID)
         if(NOT P_${_req} MATCHES "^0x[0-9A-Fa-f]+$")
             message(FATAL_ERROR
-                "add_plugin(${_name}): ${_req} must be a hex address, got "
+                "add_plugin(${_name}): ${_req} must be a hex number, got "
                 "'${P_${_req}}'")
         endif()
     endforeach()
@@ -351,6 +354,11 @@ function(add_plugin _name)
                 --base "${P_IMAGE_BASE}" --end "${P_IMAGE_END}"
                 --forbid ${P_FORBIDDEN}
                 --veneer-base-cost "${P_VENEER_BASE_COST}"
+                # [!] THE WORD THE PACKER WILL STAMP, checked here against the
+                # image's own .ARM.attributes (issue #108).  Until then the
+                # packer, the verifier and the firmware all read this one value
+                # and nothing asked whether it was true.
+                --target-id "${P_TARGET_ID}"
                 --su ${_sus}
                 # [!] EVERY SLOT THE PLUGIN EXPORTS, not just the interesting
                 # ones.  The packer refuses to declare a stack for a slot nobody

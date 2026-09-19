@@ -40,6 +40,7 @@
 #include "fmt.h"
 #include "plugin_load.h"
 #include "plugin_run.h"
+#include "plugin_target.h"   /* the target word this build provides (#108) */
 #include "cam_lcd_sink.h"
 #include "camera.h"
 #include "npu_desc.h"
@@ -428,6 +429,18 @@ static int nn_scan_slots(struct nn_op_result *res, uint32_t token,
 #ifndef GROVE_PLUGIN_TARGET_ID
 #error "board.cmake must define GROVE_PLUGIN_TARGET_ID"
 #endif
+/*
+ * [!] THE WORD IS CHECKED HERE, against this firmware's own build (issue #108).
+ * board.cmake hands the same value to the packer, the host verifier and this
+ * policy, so those three agreeing proved nothing about the value.  This derives
+ * it from the compiler's predefined macros instead -- and it is the ONLY check
+ * of the CMSE bit, which says this base runs Secure (the -mcmse on shell_objs)
+ * and which no plugin image records.  The image gate checks the other bits
+ * against the plugin ELF.
+ */
+_Static_assert(GROVE_PLUGIN_TARGET_ID == PLUGIN_TARGET_ID_HERE,
+               "GROVE_PLUGIN_TARGET_ID does not describe this firmware's build "
+               "(svc/plugin_target.h)");
 #ifndef GROVE_PLUGIN_BASE
 #error "board.cmake must define GROVE_PLUGIN_BASE"
 #endif

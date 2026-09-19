@@ -36,9 +36,25 @@
 #include "nn.h"
 #include "nn_camera.h"
 #include "nn_decoder.h"
+#include "plugin_target.h"   /* the target word this build provides (#108) */
 #include "psram.h"
 #include "stm32h7xx_hal.h"   /* SystemCoreClock -- the DWT counter's clock */
 #include "tx_api.h"
+
+/*
+ * [!] THE PLUGIN TARGET WORD IS CHECKED HERE, against this firmware's own build
+ * (issue #108).  board.cmake hands one value to the packer, the host container
+ * verifier and this firmware, so their agreeing proves nothing about the value.
+ * This derives the word from the compiler's predefined macros instead -- and it
+ * is the only check of the CMSE bit, which no plugin image records (this part
+ * has no Security Extension, so the bit must be clear).
+ */
+#ifndef WIO_PLUGIN_TARGET_ID
+#error "board.cmake must define WIO_PLUGIN_TARGET_ID"
+#endif
+_Static_assert(WIO_PLUGIN_TARGET_ID == PLUGIN_TARGET_ID_HERE,
+               "WIO_PLUGIN_TARGET_ID does not describe this firmware's build "
+               "(svc/plugin_target.h)");
 
 /*
  * [!] THERE IS NO SHARED DIAGNOSTIC BUFFER, and that is the fix for a hazard the

@@ -5025,6 +5025,19 @@ build.  `cmake/fixtures/run_plugin_gate_tests.py` records which defence catches
 which shape, so a passing gate is not read as evidence that all of its checks
 ran.
 
+**[!] The target word (`0x9302`) was checked by nothing until issue #108.**
+`board.cmake` hands one value to the packer, the container verifier and the
+firmware's policy, so the three always agreed -- and its comment claimed the
+verifier "recomputes it from the same header", which nothing did.  It is now
+checked at the two ends that can each see part of it: the gate derives CPU, FPU,
+float ABI and endianness from the plugin ELF's `.ARM.attributes` and ELF header,
+and `nn_svc_grove.c` static-asserts the whole word against this firmware's own
+predefined macros (`svc/plugin_target.h`).  **The CMSE bit is only checked by the
+second.**  It says this BASE runs Secure -- `shell_objs` is built `-mcmse`, the
+plugins are not, and they run correctly, because `-mcmse` exists to build
+Non-secure entry points and a plugin defines none.  No image records it, so the
+gate masks it out and prints that it did not check it.
+
 **[!] And until issue #106 that file ran nowhere.**  It arrived with #101 and was
 reached by nothing -- not `board.cmake`, not the host-test runner, not CI -- while
 opening with "A GATE NOBODY HAS WATCHED FAIL IS NOT A GATE".  By the time it was

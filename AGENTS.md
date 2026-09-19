@@ -537,6 +537,12 @@
    `add_plugin()` の**必須引数**で、省くと configure で落ちる。**ゲートに告げる予約を
    MEMORY fragment と同じ変数から作らない**（ゲートが自分の検査対象から期待値を読むと
    何でも通る）。`VENEER_BASE_COST` は base 側のコストで、他ボードの値を流用しない。
+   **[!] plugin target word は 2 端で検査する（#108）**: firmware が `svc/plugin_target.h`
+   に対する `_Static_assert`、gate が plugin ELF の `.ARM.attributes` / `EI_DATA`。
+   **CMSE ビットは base の実行環境を表し plugin の作り方ではない**ので image に記録されず、
+   **firmware の assert が唯一の検査**（gate はマスクして「未検査」と印字する）。
+   `__ARM_FP` 単独で FPU を決めない / CMSE は `__ARM_FEATURE_CMSE == 3` で判定 /
+   写像できない組は `#error`（推測しない）。
    **別フラグで組み直した監査対象を作らない** — 出荷物に無いオブジェクトを
    検査することになる。**常駐デコーダをファームに戻さない。**
    素の `.tflite` は `nn run` で**出力テンソルをそのまま報告**し、

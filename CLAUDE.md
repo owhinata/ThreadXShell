@@ -819,6 +819,16 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
     （`cmake/fixtures/run_add_plugin_arg_tests.py`）。**ゲートに告げる予約は MEMORY
     fragment と別の宣言**で、1 つの変数から両方を作らない（作ると任意のアドレスが通る）。
     `VENEER_BASE_COST` は **base 側**のコストなので他ボードの値を流用しない。
+    **[!] target word は 2 端で検査する**（#108。それまでは packer / verifier / firmware が
+    同じ cmake 変数を読むだけで、**値そのものは誰も検査していなかった**）: firmware が
+    `svc/plugin_target.h`（predefined macro から導出）に対して `_Static_assert`、
+    image gate が plugin ELF の `.ARM.attributes` + `EI_DATA` から CPU/FPU/float/endian を導出。
+    **CMSE ビットは「plugin の作り方」ではなく「base の実行環境」**（Grove のファームは
+    `-mcmse`、plugin は付けない）で、どの image にも記録されないので **firmware の assert が
+    唯一の検査**。gate はマスクして**「検査していない」と印字する**。
+    **`__ARM_FP` 単独で FPU を決めない**（wio と Grove は両方 14、`__ARM_ARCH` で割れる）/
+    **CMSE は `__ARM_FEATURE_CMSE == 3`**（`-mcmse` 無しの M55 でも 1 で定義される）/
+    **(7, 4) は写像しない**（f746 と Cortex-M4+fpv4 が区別できない）。
     アセットの fetch / pack-verify-publish / receipt（`cmake/{fetch_model.cmake,
     build_asset.py,asset_receipt.py}`）も共有で、receipt が印字する基板上のコマンドは
     ボードが `--step` で渡す（Grove は名前 + スロット、wio はスロットだけ）。

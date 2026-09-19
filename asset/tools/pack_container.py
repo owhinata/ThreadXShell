@@ -5,7 +5,7 @@ Issue #101 (#78 Step 1a).
 
 [!] THE ORDER IS THE WHOLE POINT.  The obvious shape -- check the parts, then
 staple them together -- is not equivalent to what
-boards/grove-vision-ai-v2/cmake/build_asset.py guarantees today (#107).
+cmake/build_asset.py guarantees today (#107; shared by both boards since #108).
 That script copies the model into a staging directory, verifies THE COPY, and
 sends THE SAME COPY: what was checked and what goes on the wire are one file.
 Checking the parts and then assembling leaves the assembler free to read the

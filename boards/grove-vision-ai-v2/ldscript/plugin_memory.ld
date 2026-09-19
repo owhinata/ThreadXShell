@@ -11,8 +11,9 @@
  * only thing here.
  *
  * [!] AND THE ADDRESS IS DECLARED MORE THAN ONCE, ON PURPOSE.  The firmware's
- * own script pins the same reservation, and check_plugin_image.py and
- * check_placement_budget.py each hold it as their own literal.  A plugin that
+ * own script pins the same reservation, board.cmake states it again to the
+ * shared check_plugin_image.py (GROVE_PLUGIN_GATE_BASE/END, issue #108), and
+ * check_placement_budget.py holds it as its own literal.  A plugin that
  * read the address out of the firmware would agree with whatever it was handed;
  * the gates exist to catch the day the declarations diverge.  DO NOT generate
  * this file and a gate's constants from one CMake variable -- that would turn

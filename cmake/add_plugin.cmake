@@ -23,7 +23,10 @@
 #      CFLAGS       <...>        compile flags, carrying the board's -mcpu
 #      ARCH_FLAGS   <-m...>      the board's architecture flags, and ONLY those
 #      MEMORY_LD    <path>       the board's .plugin MEMORY fragment
-#      IMAGE_GATE   <path>       the board's post-link image gate
+#      IMAGE_BASE   <addr>       the reservation, as the GATE is told it --
+#      IMAGE_END    <addr>         see below for why this is not the fragment
+#      FORBIDDEN    <sym ...>    entry points a plugin may never reach here
+#      VENEER_BASE_COST <bytes>  stack the base spends behind one veneer
 #      OUT_DIR      <dir>        build dir to put <name>/ under
 #      OUT_VAR      <var>        list variable the plugin.elf path is appended to
 #      ENTRIES      <sym=limit>  every slot the plugin exports
@@ -33,6 +36,13 @@
 # ============================================================================
 
 get_filename_component(_ADD_PLUGIN_DIR "${CMAKE_CURRENT_LIST_DIR}" REALPATH)
+# [!] THE GATE IS SHARED SINCE ISSUE #108, AND ITS BOARD FACTS ARE ARGUMENTS.
+# Until then each board would have carried its own copy, which is the decision
+# issue #106 deferred until a second board existed to show where the seam was.
+# It is three facts -- the reservation, the forbidden table and the base's cost
+# behind a veneer -- and all three are required below, so a second board cannot
+# inherit the first one's by omission.
+set(_ADD_PLUGIN_GATE "${_ADD_PLUGIN_DIR}/check_plugin_image.py")
 get_filename_component(_ADD_PLUGIN_ASSET_ROOT
                        "${CMAKE_CURRENT_LIST_DIR}/../asset" REALPATH)
 
@@ -58,13 +68,33 @@ get_filename_component(_ADD_PLUGIN_ASSET_ROOT
 # records twice.  Auditing the linked object in its own command makes a
 # differently-compiled audited copy impossible rather than merely unlikely.
 function(add_plugin _name)
-    cmake_parse_arguments(P "" "MEMORY_LD;IMAGE_GATE;OUT_DIR;OUT_VAR"
-                      "CFLAGS;ARCH_FLAGS;SOURCES;ENTRIES;AUDIT_SHARED" ${ARGN})
-    foreach(_req MEMORY_LD IMAGE_GATE OUT_DIR OUT_VAR CFLAGS ARCH_FLAGS ENTRIES)
-        if(NOT P_${_req})
+    cmake_parse_arguments(P ""
+        "MEMORY_LD;IMAGE_BASE;IMAGE_END;VENEER_BASE_COST;OUT_DIR;OUT_VAR"
+        "CFLAGS;ARCH_FLAGS;SOURCES;ENTRIES;AUDIT_SHARED;FORBIDDEN" ${ARGN})
+    # Presence only.  `if(NOT P_x)` would call a literal 0 "missing", which is
+    # the wrong refusal for VENEER_BASE_COST 0 -- that one is refused below for
+    # what it is.  The numbers are checked as numbers after this.
+    foreach(_req MEMORY_LD IMAGE_BASE IMAGE_END VENEER_BASE_COST FORBIDDEN
+                 OUT_DIR OUT_VAR CFLAGS ARCH_FLAGS ENTRIES)
+        if(NOT DEFINED P_${_req} OR "${P_${_req}}" STREQUAL "")
             message(FATAL_ERROR "add_plugin(${_name}): ${_req} is required")
         endif()
     endforeach()
+    # The gate's reservation is a statement the board makes to the GATE, and a
+    # malformed one would reach Python as a traceback in the middle of a build.
+    foreach(_req IMAGE_BASE IMAGE_END)
+        if(NOT P_${_req} MATCHES "^0x[0-9A-Fa-f]+$")
+            message(FATAL_ERROR
+                "add_plugin(${_name}): ${_req} must be a hex address, got "
+                "'${P_${_req}}'")
+        endif()
+    endforeach()
+    if(NOT P_VENEER_BASE_COST MATCHES "^[1-9][0-9]*$")
+        message(FATAL_ERROR
+            "add_plugin(${_name}): VENEER_BASE_COST must be a positive byte "
+            "count, got '${P_VENEER_BASE_COST}'.  Zero is not a cost -- it is "
+            "the analysis assuming the base spends nothing behind a veneer.")
+    endif()
     if(NOT EXISTS "${P_MEMORY_LD}")
         message(FATAL_ERROR
             "add_plugin(${_name}): no MEMORY fragment at ${P_MEMORY_LD}")
@@ -311,9 +341,16 @@ function(add_plugin _name)
                 # a warning in a build that otherwise succeeds.
                 "-Wl,-Map=${_out}/plugin.map"
                 ${_objs} -o "${_out}/plugin.elf"
-        COMMAND "${Python3_EXECUTABLE}" "${P_IMAGE_GATE}"
+        COMMAND "${Python3_EXECUTABLE}" "${_ADD_PLUGIN_GATE}"
                 "${_out}/plugin.elf"
                 --nm "${CMAKE_NM}" --objdump "${CMAKE_OBJDUMP}"
+                # [!] THE BOARD'S OWN STATEMENT OF THE RESERVATION, NOT THE
+                # FRAGMENT'S.  The plugin was linked against MEMORY_LD; checking
+                # it against an address read out of that same file would pass
+                # any address at all.
+                --base "${P_IMAGE_BASE}" --end "${P_IMAGE_END}"
+                --forbid ${P_FORBIDDEN}
+                --veneer-base-cost "${P_VENEER_BASE_COST}"
                 --su ${_sus}
                 # [!] EVERY SLOT THE PLUGIN EXPORTS, not just the interesting
                 # ones.  The packer refuses to declare a stack for a slot nobody
@@ -344,7 +381,7 @@ function(add_plugin _name)
         DEPENDS ${_stamps} ${_objs} ${_sus}
                 "${_out}/plugin_link.ld"
                 "${_ADD_PLUGIN_ASSET_ROOT}/common/plugin.ld" "${P_MEMORY_LD}"
-                "${P_IMAGE_GATE}"
+                "${_ADD_PLUGIN_GATE}"
         COMMENT "plugin ${_name}: ld + gate -> plugin.elf"
         VERBATIM)
 

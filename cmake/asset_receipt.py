@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print one asset's receipt (issue #107).
+"""Print one asset's receipt (issue #107; shared in #108).
 
 Separate from the build so it can run from an always-out-of-date target: the
 command that PRODUCES the .nnc does not rerun once its output is current, so the
@@ -11,12 +11,27 @@ arrived, and svc/crc32.h says in so many words that the number exists so it can
 be compared against the file that was sent.  This is the operator's only
 end-to-end "built bytes = stored bytes" check, so it is printed every time
 alongside the path to paste.
+
+[!] THE COMMANDS TYPED ON THE BOARD ARE THE BOARD'S, AND ARRIVE AS --step.  The
+two boards spell the store differently -- Grove names a blob and a slot, wio
+only a slot -- and a receipt that printed one board's syntax on the other would
+send an operator to a command that does not exist, at the one moment they are
+following it to the letter.  Each --step is a template over {name} and {slot};
+the first is printed as "on the board", the rest under it in order.  What is
+NOT a board's -- the CRC and the instruction to compare it -- stays here.
 """
+import argparse
 import json
 import sys
 import zlib
 
-receipt, slot = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "")
+ap = argparse.ArgumentParser()
+ap.add_argument("receipt")
+ap.add_argument("slot", nargs="?", default="")
+ap.add_argument("--step", action="append", default=[], required=True,
+                help="a board command, as a template over {name} and {slot}")
+args = ap.parse_args()
+receipt, slot = args.receipt, args.slot
 r = json.load(open(receipt))
 
 # [!] RECOMPUTED FROM THE FILE, NOT TRUSTED FROM THE RECEIPT.  The receipt and
@@ -35,8 +50,9 @@ print("")
 print("  asset %-12s %s" % (r["name"], r["path"]))
 print("  %-18s %d B   crc32 %s" % (slot_txt, r["bytes"], r["crc32"]))
 print("")
-print("  on the board:  blob erase %s   (the slot must be empty first)" % (slot or "<slot>"))
-print("                 blob write %s %s" % (r["name"], slot or "<slot>"))
+for i, step in enumerate(args.step):
+    print("%s%s" % ("  on the board:  " if i == 0 else " " * 17,
+                    step.format(name=r["name"], slot=slot or "<slot>")))
 print("  in picocom:    C-a C-s, then the path above")
 print("  afterwards:    `blob list` must show crc32 %s -- that is how you know" % r["crc32"])
 print("                 the bytes that were built are the bytes that were stored.")

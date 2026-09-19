@@ -43,8 +43,13 @@ COMMON = os.path.join(REPO, "asset", "common")
 # absolute-path wrapper the real build generates.
 MEMORY_LD = os.path.join(REPO, "boards", "grove-vision-ai-v2", "ldscript",
                          "plugin_memory.ld")
-GATE = os.path.join(REPO, "boards", "grove-vision-ai-v2", "cmake",
-                    "check_plugin_image.py")
+GATE = os.path.join(REPO, "cmake", "check_plugin_image.py")
+# The board facts the gate takes as arguments since issue #108, as Grove states
+# them in its board.cmake.  Only the ones a fixture can tell apart matter here:
+# the forbidden table needs just the entry point m_forbidden reaches for.
+GATE_FACTS = ["--base", "0x341E0000", "--end", "0x34200000",
+              "--forbid", "hx_lib_qspi_eeprom_write",
+              "--veneer-base-cost", "256"]
 
 BASE_CFLAGS = [
     "-mcpu=cortex-m55", "-mthumb", "-mfloat-abi=hard",
@@ -122,7 +127,8 @@ def build(cc, nm, objdump, work, mutate=None, cflags=None):
 
     r = subprocess.run([sys.executable, GATE, elf, "--nm", nm,
                         "--objdump", objdump, "--su"] + sus
-                       + ["--entry", "pl_draw=1024", "pl_decode=8192"],
+                       + ["--entry", "pl_draw=1024", "pl_decode=8192"]
+                       + GATE_FACTS,
                        capture_output=True, text=True)
     return r.returncode, r.stdout + r.stderr
 

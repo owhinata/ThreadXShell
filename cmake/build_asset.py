@@ -4,6 +4,13 @@
 This is the chain send_verified_container.sh ran at SEND time, moved to BUILD
 time -- and it keeps the property that made that script worth having.
 
+[!] SHARED SINCE ISSUE #108, AND IT KNOWS NO BOARD.  Every board fact arrives as
+an argument: which model gate runs (and with what profile), the target identity,
+the reservation, the thread allowances, and the slot table -- which each board
+EMITS from its own firmware headers in one schema ({"slots": [{"index",
+"payload_max"}]}), so this file reads one shape and neither board restates its
+geometry here.  What stays here is what is not a board's: the ORDER below.
+
 [!] ASSEMBLE FIRST, THEN VERIFY WHAT WAS ASSEMBLED.  The obvious shape -- check
 the parts, staple them together, publish -- is NOT equivalent.  Verifying
 components leaves the packer free to read its inputs again, and nothing

@@ -5001,14 +5001,20 @@ directories and the working directory, and the plugin link runs from the plugin
 output directory -- a stale same-named fragment there would silently win.
 
 The address is still declared FOUR times independently: that fragment, the
-firmware's own script, `check_plugin_image.py` and `check_placement_budget.py`.
+firmware's own script, `board.cmake`'s statement to the image gate
+(`GROVE_PLUGIN_GATE_BASE`/`_END`) and `check_placement_budget.py`.
 That is the point.  **Do not generate the fragment and a gate's constants from
 one CMake variable** -- it would turn four statements that can disagree into one
 that cannot, and the gates into decoration.
 
 ### What the gates do and do not prove
 
-`check_plugin_image.py` applies the firmware's own checks to the plugin ELF --
+`cmake/check_plugin_image.py` applies the firmware's own checks to the plugin
+ELF.  **It is shared since issue #108**, and this board's facts reach it as
+`add_plugin()` arguments from `board.cmake`: the reservation, the forbidden
+table (`GROVE_PLUGIN_FORBIDDEN` -- the NOR write path first, because that flash
+holds the bootloader), and `GROVE_PLUGIN_VENEER_BASE_COST` = 256, the stack
+charged for this base's work behind an indirect veneer.  The checks are
 forbidden symbols, an allocated-section whitelist, no relocations, storage in
 the declared segments, indirect branches only in the named veneers, and a
 transitive stack bound per entry point.  The linker enforces some of the same

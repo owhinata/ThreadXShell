@@ -813,6 +813,15 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
     **[!] 監査は success stamp で守る** — stamp を **compile 前に消し**、audit 通過後に作る。
     audit が落ちた時点で `.o` は既に書かれており、通過後に書くだけでは**前回成功時の stamp**
     が残って、別の依存で走ったリンクがそれを拾う。
+    **[!] image gate も共有（`cmake/check_plugin_image.py`、#108）** で、ボードの事実は
+    **3 つとも `add_plugin()` の必須引数**（ゲートに告げる予約 `IMAGE_BASE`/`IMAGE_END` /
+    禁止シンボル表 `FORBIDDEN` / `VENEER_BASE_COST`）。省くと **configure で落ちる**
+    （`cmake/fixtures/run_add_plugin_arg_tests.py`）。**ゲートに告げる予約は MEMORY
+    fragment と別の宣言**で、1 つの変数から両方を作らない（作ると任意のアドレスが通る）。
+    `VENEER_BASE_COST` は **base 側**のコストなので他ボードの値を流用しない。
+    アセットの fetch / pack-verify-publish / receipt（`cmake/{fetch_model.cmake,
+    build_asset.py,asset_receipt.py}`）も共有で、receipt が印字する基板上のコマンドは
+    ボードが `--step` で渡す（Grove は名前 + スロット、wio はスロットだけ）。
   - **[!] `nn_input_quant_ok()` は常駐デコーダの前提条件**で、plugin は縛られない
     （ベンダの分類器アプリ自身が scale 0.0203 / zp -8 に `pixel - 128` を書く）。
     縛ると分類器 container が全て組込み class report に流れ、ラベルが読まれない。

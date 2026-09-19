@@ -312,6 +312,14 @@ gcc $CFLAGS -I "$svc" \
 python3 "$repo/cmake/fixtures/run_storage_gate_tests.py" \
     --cc gcc --objdump objdump --nm nm
 
+# issue #108 -- the plugin image gate is shared, and the three facts that differ
+# per board (the reservation it checks against, the forbidden table, the stack
+# the base spends behind a veneer) reach it only as add_plugin() arguments.
+# Leaving one out must fail at CONFIGURE rather than inherit another board's
+# value, so the refusal itself is tested, through a real `cmake` over the real
+# helper.  Needs cmake only -- no toolchain -- which is why it runs here.
+python3 "$repo/cmake/fixtures/run_add_plugin_arg_tests.py"
+
 # issue #97 -- the published decode record (svc/nn_det_record.c).  A camera stream
 # decodes on a worker and a console prints on another thread, so what the two
 # exchange has a rule: the boxes and the diagnostics that describe them travel

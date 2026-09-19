@@ -1,25 +1,44 @@
 #!/usr/bin/env python3
 """Gate a plugin image before it is ever allowed near the device (issue #101).
 
-A plugin is loaded from a rewritable blob and runs Secure and privileged, with
-the same standing as board code.  The reviewed plan settled the trust boundary
-as "apply the firmware's gates to the plugin too" rather than "declare the
-plugin out of scope" -- the checks do not stop, their target widens.
+The reviewed plan settled the trust boundary as "apply the firmware's gates to
+the plugin too" rather than "declare the plugin out of scope" -- the checks do
+not stop, their target widens.
+
+[!] SHARED SINCE ISSUE #108, AND THE BOARD'S FACTS ARE ARGUMENTS.  Three things
+differ per board and every one is required on the command line -- a board that
+omits one fails before anything is checked, rather than inheriting another
+board's value:
+
+  --base/--end         the reservation the plugin is prelinked for.  Stated by
+                       the board SEPARATELY from its MEMORY fragment -- a gate
+                       that read the expected value out of what it is checking
+                       would pass anything, so the two must never come from one
+                       variable.
+  --forbid             the board's table of entry points a plugin may never
+                       reach.
+  --veneer-base-cost   the stack charged for the firmware work behind an
+                       indirect veneer.  That is the BASE's cost, not the
+                       plugin's, so one board's number silently becoming
+                       another's would make every bound derived here a guess.
+
+Everything else -- the section whitelist, the veneer set, the disassembly and
+the call-graph walk -- is the ABI's and is the same for every board.
 
 [!] AND THIS DOES NOT PROVE MEMORY SAFETY.  It cannot see an ordinary
 out-of-bounds write, a bad tensor pointer, scratch overrun, or wrong arithmetic
 on a base pointer the vtable legitimately handed over.  It also only ever sees
 the plugin the BUILD produced; a hand-written container never passes through
-here at all.  A plugin is REVIEWED, TRUSTED NATIVE CODE.  Do not read a pass
-here as isolation -- the same caveat AGENTS.md records for the NOR absence
-check, with a wider reach.
+here at all.  A plugin is REVIEWED, TRUSTED NATIVE CODE, with the standing of
+board code on whichever board runs it -- each board's README says what that
+standing is there.  Do not read a pass here as isolation.
 
 Checks:
   1. no undefined symbols          -- a plugin resolves everything within itself
   2. allocated-section whitelist   -- nothing the loader would have to service
   3. no relocation sections        -- the loader fixes up nothing
-  4. no forbidden symbols          -- the firmware's table, applied here
-  5. (no MMIO check: not soundly possible here -- see the note in main)
+  4. no forbidden symbols          -- the board's table, applied here
+  5. (no MMIO check: not soundly possible -- see the note in main)
   6. storage lives inside the declared segments, and no COMMON
   7. indirect branches only inside the named veneers
   8. a transitive stack bound per entry point, fail-closed
@@ -28,12 +47,6 @@ import argparse
 import re
 import subprocess
 import sys
-
-# The reservation a plugin is prelinked for.  Stated here independently of the
-# linker scripts for the same reason check_placement_budget.py states it: a gate
-# that read the expected value out of what it is checking would pass anything.
-PLUGIN_BASE = 0x341E0000
-PLUGIN_END = 0x34200000
 
 # Allocated sections a plugin image may contain.  Anything else either needs a
 # loader service that does not exist (init_array wants constructors run, .got
@@ -56,33 +69,6 @@ BANNED_SECTIONS = {
     ".tbss": "thread-local storage: a plugin has no thread of its own",
 }
 
-# Vendor entry points a plugin may never reach.  The firmware keeps the same
-# table; the NOR write path is the one that matters most, because that flash
-# holds the bootloader.
-FORBIDDEN_SYMBOLS = {
-    "hx_lib_qspi_eeprom_erase_sector",
-    "hx_lib_qspi_eeprom_write",
-    "hx_lib_qspi_eeprom_erase_all",
-    "hx_lib_qspi_eeprom_word_write",
-    "hx_lib_spi_eeprom_erase_sector",
-    "hx_lib_spi_eeprom_write",
-    "hx_lib_spi_eeprom_erase_all",
-    "hx_lib_spi_eeprom_word_write",
-    "Send_Op_code",
-    "Send_Op_Read_Data",
-    "hx_lib_pm_enter_lp",
-    "hx_lib_pm_enter_ulp",
-    "EPII_NVIC_SetVector",
-    "NVIC_EnableIRQ",
-    "NVIC_DisableIRQ",
-    "SCB_EnableDCache",
-    "SCB_DisableDCache",
-    "SCB_InvalidateICache",
-    "ARM_MPU_Enable",
-    "ARM_MPU_Disable",
-    "ARM_MPU_SetRegion",
-}
-
 # The ONLY functions allowed to contain an indirect branch.  Every base, painter
 # and printer call funnels through one of these so that the stack analyser sees
 # an ordinary direct edge and exactly one accounted indirect site.  See
@@ -95,12 +81,6 @@ VENEERS = {
     "pl_paint_blit",
     "pl_print_write",
 }
-
-# What the base itself may spend below a veneer, per slot, worst case.  The
-# analyser adds this at each veneer because it cannot see across the boundary.
-# Deliberately generous: it is added once per veneer and the whole point is that
-# a plugin must not be sized against an optimistic guess.
-VENEER_BASE_COST = 256
 
 # [!] REGISTER NAMES, NOT NUMBERS.  objdump spells r12 as `ip`, r13 `sp`, r14
 # `lr` and r15 `pc`, and it used exactly that spelling for the painter veneer's
@@ -218,8 +198,13 @@ def frame_of(fn, frames):
     return None
 
 
-def bound_stack(entry, funcs, frames, errors):
-    """Transitive stack bound below `entry`, fail-closed on anything unclear."""
+def bound_stack(entry, funcs, frames, errors, veneer_base_cost):
+    """Transitive stack bound below `entry`, fail-closed on anything unclear.
+
+    `veneer_base_cost` is what the base itself may spend below a veneer, worst
+    case.  It is added at each veneer because the walk cannot see across the
+    boundary, and it is the BOARD's number (see the module docstring).
+    """
     seen = set()
 
     def walk(fn, path):
@@ -242,7 +227,7 @@ def bound_stack(entry, funcs, frames, errors):
             if INDIRECT_RE.search(line):
                 # Only ever legal inside a veneer, which check 7 enforces; the
                 # base's own worst case is charged here.
-                worst = max(worst, VENEER_BASE_COST)
+                worst = max(worst, veneer_base_cost)
                 continue
             m = DIRECT_CALL_RE.search(line) or TAIL_CALL_RE.search(line)
             if m:
@@ -269,7 +254,21 @@ def main():
                     help="functions to bound the stack below, name=limit")
     ap.add_argument("--emit-stacks",
                     help="write the derived bounds here, for the packer")
+    # The board's facts.  Required, every one: see the module docstring.
+    ap.add_argument("--base", required=True, type=lambda v: int(v, 0),
+                    help="the reservation's first byte, as the board states it")
+    ap.add_argument("--end", required=True, type=lambda v: int(v, 0),
+                    help="one past the reservation's last byte")
+    ap.add_argument("--forbid", nargs="+", required=True,
+                    help="entry points a plugin may never reach on this board")
+    ap.add_argument("--veneer-base-cost", required=True, type=int,
+                    help="stack the base may spend below one veneer, in bytes")
     args = ap.parse_args()
+    if args.end <= args.base:
+        print("check_plugin_image: FAIL\n  - --end 0x%08x is not above --base "
+              "0x%08x" % (args.end, args.base), file=sys.stderr)
+        return 1
+    forbidden = set(args.forbid)
 
     errors = []
     secs = sections(args.objdump, args.elf)
@@ -295,31 +294,27 @@ def main():
             errors.append(f"allocated section {name} is not one of "
                           f"{sorted(ALLOWED_ALLOC)}")
         if "ALLOC" in flags and size:
-            if vma < PLUGIN_BASE or vma + size > PLUGIN_END:
+            if vma < args.base or vma + size > args.end:
                 errors.append(f"section {name} [0x{vma:08x},0x{vma + size:08x}) "
                               "is outside the plugin reservation")
 
     # 4. forbidden symbols, defined or referenced
     for line in run([args.nm, args.elf]).splitlines():
         parts = line.split()
-        if parts and parts[-1] in FORBIDDEN_SYMBOLS:
+        if parts and parts[-1] in forbidden:
             errors.append(f"forbidden symbol {parts[-1]}")
 
     # 5. THERE IS NO MMIO CHECK, AND THAT IS A FINDING, NOT AN OMISSION.
     #
     # The trust boundary as planned listed "no MMIO address constants".  It
-    # cannot be implemented soundly on this part, for two independent reasons,
-    # and a check that cannot do its job is worse than none: it gets believed.
-    #
-    #   a. A literal-pool word is a CONSTANT, not necessarily an address.  The
-    #      first draft flagged 0x447a0000 and 0x3c000000 -- 1000.0f and
-    #      0.0078125f, the decoder's own scale factors -- and the bytes of the
-    #      string "blazeface: decode refused".  Nothing distinguishes those from
-    #      a pointer by inspection.
-    #   b. Even a perfect address decoder would have nothing to compare against:
-    #      on the HX6538 the peripherals live at 0x34001000, 0x34080000,
-    #      0x340C0000, 0x34100000 -- INSIDE the same 0x34 window as the SRAM the
-    #      plugin legitimately occupies.  There is no aperture to test for.
+    # cannot be implemented soundly, and a check that cannot do its job is worse
+    # than none: it gets believed.  A literal-pool word is a CONSTANT, not
+    # necessarily an address -- the first draft flagged 0x447a0000 and
+    # 0x3c000000, which are 1000.0f and 0.0078125f, the decoder's own scale
+    # factors, and the bytes of a string.  Nothing distinguishes those from a
+    # pointer by inspection.  Whether a board has a second, independent reason
+    # (Grove does: its peripherals share the 0x34 window with the reservation)
+    # is recorded in that board's README, not here.
     #
     # This is the same call issue #42/#66 made when the MVE predication scan
     # turned out to decode nothing: the gate was deleted rather than kept as
@@ -350,7 +345,8 @@ def main():
                           "derived from the ELF alone")
         for spec in args.entry:
             name, _, limit = spec.partition("=")
-            got = bound_stack(name, funcs, frames, errors)
+            got = bound_stack(name, funcs, frames, errors,
+                              args.veneer_base_cost)
             bounds[name] = got
             if limit and got > int(limit):
                 errors.append(f"stack: {name} needs {got} B, limit {limit} B")

@@ -1443,14 +1443,17 @@ endif()
 #
 # and the path printed by the target is what gets pasted at its `*** file:`
 # prompt.  The chain is the one send_verified_container.sh ran, moved to build
-# time; cmake/build_asset.py records why its ORDER is the load-bearing part and
-# why nothing is published before it has passed.
+# time; the repository's cmake/build_asset.py records why its ORDER is the
+# load-bearing part and why nothing is published before it has passed.
 #
-# [!] THIS IS GROVE'S, AND DELIBERATELY NOT SHARED.  The ingest half is Ethos-U's:
-# verify_vela_model links THIS port's npu_payload.c and npu_arena.c, and
-# tflite_strip_boundary exists because this port registers one operator and
+# [!] THE INGEST HALF IS GROVE'S; THE REST IS SHARED (issue #108).  Ethos-U owns
+# the ingest: verify_vela_model links THIS port's npu_payload.c and npu_arena.c,
+# and tflite_strip_boundary exists because this port registers one operator and
 # offloads everything else.  Wio has no NPU, so its ingest is a different
-# pipeline; asset/tools/ is the half it will reuse.
+# pipeline.  What both boards run is the fetch (cmake/fetch_model.cmake), the
+# pack-verify-publish chain (cmake/build_asset.py) and the receipt
+# (cmake/asset_receipt.py) -- each of which takes this board's facts as
+# arguments below and holds none of its own.
 #
 # [!] AND NEITHER TARGET IS IN ALL.  The detection model cannot be committed
 # (model-zoo licensed) and is fetched on demand, so a tree with no access to the
@@ -1510,8 +1513,9 @@ function(grove_add_asset _name)
                     "-DURL=${A_URL}" "-DCOMMIT=${A_COMMIT}"
                     "-DPATH_IN=${A_PATH_IN}" "-DSHA256=${A_SHA256}"
                     "-DOUT=${_src}" "-DWORK=${_model_dir}/fetch-work"
-                    -P "${BOARD_DIR}/cmake/fetch_model.cmake"
-            DEPENDS "${BOARD_DIR}/cmake/fetch_model.cmake"
+                    "-DOVERRIDE=GROVE_ASSET_${_name}_FILE"
+                    -P "${CMAKE_SOURCE_DIR}/cmake/fetch_model.cmake"
+            DEPENDS "${CMAKE_SOURCE_DIR}/cmake/fetch_model.cmake"
             COMMENT "asset ${_name}: fetch the pinned model"
             VERBATIM)
     endif()
@@ -1554,7 +1558,7 @@ function(grove_add_asset _name)
         OUTPUT "${_nnc}"
         COMMAND "${CMAKE_COMMAND}" -E env
                 "ASSET_NM=${CMAKE_NM}" "ASSET_OBJCOPY=${CMAKE_OBJCOPY}"
-                "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/build_asset.py"
+                "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/cmake/build_asset.py"
                 --name "${_name}" --model "${_src}"
                 --plugin-elf "${_plugin_dir}/plugin.elf"
                 --plugin-stacks "${_plugin_dir}/plugin.stacks.json"
@@ -1585,16 +1589,21 @@ function(grove_add_asset _name)
                 "${_plugin_dir}/plugin.stacks.json"
                 "${GROVE_PACKER}" "${GROVE_ABI_LAYOUT_JSON}"
                 "${GROVE_CONTAINER_VERIFIER}" "${GROVE_SLOT_TABLE_JSON}"
-                "${BOARD_DIR}/cmake/build_asset.py"
+                "${CMAKE_SOURCE_DIR}/cmake/build_asset.py"
         COMMENT "asset ${_name}: pack, verify what was packed, publish"
         VERBATIM)
 
     # [!] THE RECEIPT PRINTS FROM A PHONY, not from the command above -- that one
     # does not rerun once its output is current, so the number an operator needs
     # would appear exactly once and never again.
+    #
+    # The commands it prints are this board's: a Grove blob has a NAME as well as
+    # a slot, and `blob write` will not overwrite a VALID blob of another name.
     add_custom_target(asset-${_name}
-        COMMAND "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/asset_receipt.py"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/cmake/asset_receipt.py"
                 "${_nnc}.json" "${A_SLOT}"
+                --step "blob erase {slot}   (the slot must be empty first)"
+                --step "blob write {name} {slot}"
         DEPENDS "${_nnc}"
         VERBATIM)
 endfunction()
@@ -1758,6 +1767,51 @@ include("${CMAKE_SOURCE_DIR}/cmake/add_plugin.cmake")
 # image.
 set(GROVE_PLUGIN_ARCH_FLAGS -mcpu=cortex-m55 -mthumb -mfloat-abi=hard)
 
+# --- what the shared image gate is told about this board (issue #108) --------
+#
+# The gate (cmake/check_plugin_image.py) was this board's until #108 and held
+# these three as its own constants.  They are still this board's; only the
+# mechanics moved.
+#
+# [!] THE RESERVATION IS WRITTEN OUT HERE AGAIN, ON PURPOSE.  It is also in
+# ldscript/plugin_memory.ld (what the plugin links against), in the firmware's
+# own script, and in check_placement_budget.py.  Deriving this from any of them
+# would turn statements that can disagree into one that cannot -- and the gate
+# checks the plugin against exactly this, so it would then pass any address.
+set(GROVE_PLUGIN_GATE_BASE 0x341E0000)
+set(GROVE_PLUGIN_GATE_END  0x34200000)
+# Entry points a plugin may never reach.  check_placement_budget.py keeps the
+# firmware's table; the NOR write path is the one that matters most, because
+# that flash holds the bootloader.
+set(GROVE_PLUGIN_FORBIDDEN
+    hx_lib_qspi_eeprom_erase_sector
+    hx_lib_qspi_eeprom_write
+    hx_lib_qspi_eeprom_erase_all
+    hx_lib_qspi_eeprom_word_write
+    hx_lib_spi_eeprom_erase_sector
+    hx_lib_spi_eeprom_write
+    hx_lib_spi_eeprom_erase_all
+    hx_lib_spi_eeprom_word_write
+    Send_Op_code
+    Send_Op_Read_Data
+    hx_lib_pm_enter_lp
+    hx_lib_pm_enter_ulp
+    EPII_NVIC_SetVector
+    NVIC_EnableIRQ
+    NVIC_DisableIRQ
+    SCB_EnableDCache
+    SCB_DisableDCache
+    SCB_InvalidateICache
+    ARM_MPU_Enable
+    ARM_MPU_Disable
+    ARM_MPU_SetRegion)
+# What the base itself may spend below a veneer, per slot, worst case.  The
+# gate adds this at each veneer because it cannot see across the boundary.
+# Deliberately generous: it is added once per veneer and the whole point is that
+# a plugin must not be sized against an optimistic guess.  THIS base's number --
+# the M55 veneers call into nn_svc_grove.c / plugin_paint.c.
+set(GROVE_PLUGIN_VENEER_BASE_COST 256)
+
 
 # [!] svc/blazeface.c IS THE SAME FILE THE OTHER TWO BOARDS LINK.  Compiling a
 # copy would fork the decoder issue #97 spent itself merging.  It is the wrapper
@@ -1768,7 +1822,10 @@ add_plugin(blazeface
     CFLAGS ${GROVE_PLUGIN_CFLAGS}
     ARCH_FLAGS ${GROVE_PLUGIN_ARCH_FLAGS}
     MEMORY_LD "${GROVE_PLUGIN_MEMORY_LD}"
-    IMAGE_GATE "${BOARD_DIR}/cmake/check_plugin_image.py"
+    IMAGE_BASE ${GROVE_PLUGIN_GATE_BASE}
+    IMAGE_END  ${GROVE_PLUGIN_GATE_END}
+    FORBIDDEN  ${GROVE_PLUGIN_FORBIDDEN}
+    VENEER_BASE_COST ${GROVE_PLUGIN_VENEER_BASE_COST}
     OUT_DIR "${CMAKE_BINARY_DIR}/plugin"
     OUT_VAR GROVE_PLUGIN_ELFS
     SOURCES "${GROVE_SHARED_DECODER}"
@@ -1790,7 +1847,10 @@ add_plugin(cifar10
     CFLAGS ${GROVE_PLUGIN_CFLAGS}
     ARCH_FLAGS ${GROVE_PLUGIN_ARCH_FLAGS}
     MEMORY_LD "${GROVE_PLUGIN_MEMORY_LD}"
-    IMAGE_GATE "${BOARD_DIR}/cmake/check_plugin_image.py"
+    IMAGE_BASE ${GROVE_PLUGIN_GATE_BASE}
+    IMAGE_END  ${GROVE_PLUGIN_GATE_END}
+    FORBIDDEN  ${GROVE_PLUGIN_FORBIDDEN}
+    VENEER_BASE_COST ${GROVE_PLUGIN_VENEER_BASE_COST}
     OUT_DIR "${CMAKE_BINARY_DIR}/plugin"
     OUT_VAR GROVE_PLUGIN_ELFS
     ENTRIES pl_entry=${GROVE_PLUGIN_STACK_PRODUCER}

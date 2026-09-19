@@ -532,6 +532,11 @@
    ボードが渡せるのは `ARCH_FLAGS`（`-m*` のみ）。`.o`/`.a`/`-l`/`-T` と MEMORY fragment の
    `INPUT`/`GROUP`/`INCLUDE` は拒否する — ソース経路だけ塞いでも、リンク入力から
    無監査のコードが画像に入る。**audit の success stamp は compile 前に消す**）。
+   **[!] plugin image gate も共有（`cmake/check_plugin_image.py`、#108）**。ボード固有の
+   事実 3 つ — **ゲートに告げる予約・禁止シンボル表・`VENEER_BASE_COST`** — は
+   `add_plugin()` の**必須引数**で、省くと configure で落ちる。**ゲートに告げる予約を
+   MEMORY fragment と同じ変数から作らない**（ゲートが自分の検査対象から期待値を読むと
+   何でも通る）。`VENEER_BASE_COST` は base 側のコストで、他ボードの値を流用しない。
    **別フラグで組み直した監査対象を作らない** — 出荷物に無いオブジェクトを
    検査することになる。**常駐デコーダをファームに戻さない。**
    素の `.tflite` は `nn run` で**出力テンソルをそのまま報告**し、

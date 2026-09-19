@@ -1,5 +1,5 @@
 # ============================================================================
-#  Fetch one pinned model into the build tree (issue #107).
+#  Fetch one pinned model into the build tree (issue #107; shared in #108).
 #
 #  Run as `cmake -P`, from a build-time custom command -- NOT at configure time.
 #  A model is an optional input: a tree with no access to the model host must
@@ -13,6 +13,15 @@
 #     SHA256   the CONTENT hash, which is the authority here
 #     OUT      where to publish the verified file
 #     WORK     a private staging directory this invocation owns
+#     OVERRIDE the name of the board's cache variable that points an asset at a
+#              local copy instead -- it appears only in the diagnostics, but it
+#              is the one sentence an operator on an offline machine acts on,
+#              so it names the variable THAT board reads, not another board's
+#
+#  [!] BOARD-INDEPENDENT SINCE ISSUE #108.  Nothing below knows which board is
+#  fetching: the pin, the destination and the override's name are all arguments.
+#  Fetching a pinned file and refusing anything but its exact bytes is the same
+#  job whoever asks for it.
 #
 #  [!] THE CONTENT HASH IS NOT BELT AND BRACES.  The model is stored with Git
 #  LFS, and the failure mode is silent: with git-lfs absent the checkout leaves a
@@ -27,7 +36,7 @@
 #  is never evidence of completion.
 # ============================================================================
 
-foreach(_v URL COMMIT PATH_IN SHA256 OUT WORK)
+foreach(_v URL COMMIT PATH_IN SHA256 OUT WORK OVERRIDE)
     if(NOT DEFINED ${_v})
         message(FATAL_ERROR "fetch_model: -D${_v}= is required")
     endif()
@@ -51,7 +60,7 @@ function(_run_git)
             "  If the pinned commit no longer exists (garbage-collected, or the\n"
             "  repository moved), do NOT retarget this at a branch tip -- that\n"
             "  would silently change which model this board ships.  Either pass\n"
-            "  -DGROVE_ASSET_<NAME>_FILE=<path to a local copy>, or update URL,\n"
+            "  -D${OVERRIDE}=<path to a local copy>, or update URL,\n"
             "  COMMIT and SHA256 together as a reviewed change.")
     endif()
 endfunction()
@@ -85,7 +94,7 @@ if(_got_size LESS 1024)
             "fetch_model: ${PATH_IN} came back as a ${_got_size} B Git LFS\n"
             "  POINTER, not the model.  git-lfs is not installed, or the smudge\n"
             "  filter was skipped.  Install git-lfs (and `git lfs install`), or\n"
-            "  pass -DGROVE_ASSET_<NAME>_FILE=<path to a local copy>.\n"
+            "  pass -D${OVERRIDE}=<path to a local copy>.\n"
             "  The pointer names the content this build expects:\n${_head}")
     endif()
 endif()

@@ -56,6 +56,21 @@ BOARDS = {
                   "--veneer-base-cost": "256", "--target-id": "0x9302"},
     },
 }
+# Other cores, linked into Grove's reservation.  Only the TARGET check differs
+# between them, so borrowing a reservation that exists keeps every other check
+# passing and each refusal below about the one thing it tests.
+_GROVE = BOARDS["grove"]
+for _name, _arch, _word in (
+        ("m7_dp", ["-mcpu=cortex-m7", "-mthumb", "-mfpu=fpv5-d16",
+                   "-mfloat-abi=hard"], "0x1201"),
+        ("m7_sp", ["-mcpu=cortex-m7", "-mthumb", "-mfpu=fpv5-sp-d16",
+                   "-mfloat-abi=hard"], "0x1101"),
+        ("m4", ["-mcpu=cortex-m4", "-mthumb", "-mfpu=fpv4-sp-d16",
+                "-mfloat-abi=hard"], "0x1101"),
+        ("m85", ["-mcpu=cortex-m85", "-mthumb", "-mfloat-abi=hard"],
+         "0x1302")):
+    BOARDS[_name] = {"arch": _arch, "memory_ld": _GROVE["memory_ld"],
+                     "facts": dict(_GROVE["facts"], **{"--target-id": _word})}
 
 BASE_FLAGS = [
     "-Os", "-std=c11", "-ffreestanding", "-fno-builtin", "-fno-common",
@@ -275,7 +290,7 @@ CASES = [
     # a Cortex-M7 for an image whose .ARM.attributes say cortex-m55.
     ("target_cpu", "grove", None, None, {"--target-id": "0x9301"}, "gate",
      "does not describe this image",
-     "gate: a word claiming the wrong CPU -- derived from Tag_CPU_name"),
+     "gate: a word claiming the wrong CPU -- derived from the attributes"),
     # [!] AND A WRONG CMSE BIT IS NOT, BY DESIGN -- but the gate must SAY it did
     # not look.  An accept here that stayed silent about it would be the false
     # claim #108 removed from plugin_abi.h, made again in a log line.  The
@@ -283,6 +298,21 @@ CASES = [
     ("target_cmse", "grove", None, None, {"--target-id": "0x1302"}, "accept",
      "NOT checked here",
      "accepted, and says the CMSE bit was not checked (no image records it)"),
+    # [!] THE M7 RECORDS NO CORE NAME, and the first version of the gate keyed
+    # on it (issue #108): it refused every M7 plugin -- the safe direction, but a
+    # table nobody had run on an M7 image.  These run it.
+    ("target_m7", "m7_dp", None, None, None, "accept", "cortex_m7 / fpv5_d16",
+     "a Cortex-M7 is known by v7E-M + FPv5, not by Tag_CPU_name (\"7E-M\")"),
+    ("target_m7_fpu", "m7_dp", None, None, {"--target-id": "0x1101"}, "gate",
+     "does not describe this image",
+     "gate: a single-precision claim for a double-precision image"),
+    ("target_m7_sp", "m7_sp", None, None, None, "accept", "fpv5_sp_d16",
+     "fpv5-sp-d16 is told apart by Tag_ABI_HardFP_use"),
+    ("target_m4", "m4", None, None, None, "gate",
+     "is not a core and FPU any board here builds plugins for",
+     "gate: a Cortex-M4 records the same name as an M7; FPv4 is what refuses it"),
+    ("target_m85", "m85", None, None, None, "gate", "names its core",
+     "gate: an M85 has the M55's arch and FPU; on v8.1-M the NAME decides"),
 ]
 
 

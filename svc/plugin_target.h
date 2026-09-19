@@ -41,7 +41,9 @@
  * it is what f746's fpv5-sp-d16 predefines, and ALSO exactly what a Cortex-M4
  * with fpv4-sp-d16 predefines -- the macros cannot tell the two apart, and f746
  * builds no plugins.  Mapping it would state a CPU this header cannot know.
- * The gate reads Tag_CPU_name, which does distinguish them, for the plugin side.
+ * (The gate CAN tell them apart on the plugin side, but not by the core's name:
+ * an M7 object records Tag_CPU_name "7E-M", the same as an M4.  What differs is
+ * Tag_FP_arch -- FPv4 against FPv5 -- which __ARM_FP does not carry.)
  */
 #ifndef PLUGIN_TARGET_H
 #define PLUGIN_TARGET_H

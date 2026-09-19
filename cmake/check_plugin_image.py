@@ -84,23 +84,32 @@ ABI = {
     "PLUGIN_TARGET_RESERVED_MASK": 0xFFFF0000,
 }
 
-# Tag_CPU_name -> (the ABI's CPU, the Tag_CPU_arch that CPU must report).
-# By NAME, not by architecture: v7E-M is also a Cortex-M4, and "7E-M" is what a
-# -march build records -- neither says which core the word means.  A name not
-# listed here is refused rather than guessed.
-CPU_BY_NAME = {
-    "cortex-m7": ("PLUGIN_CPU_CORTEX_M7", 13),     # Tag_CPU_arch v7E-M
-    "cortex-m55": ("PLUGIN_CPU_CORTEX_M55", 21),   # v8.1-M.mainline
+# (Tag_CPU_arch, Tag_FP_arch, single-precision only) -> (the ABI's CPU, the ABI's
+# FPU, the Tag_CPU_name the image must ALSO carry, or None).
+#
+# [!] THE KEY IS THE ARCHITECTURE AND THE FPU, NOT THE CPU NAME, and the first
+# version of this table (issue #108) had it the other way round.  Measured with
+# the pinned GCC 15.2: for -mcpu=cortex-m7 the compiler emits `.cpu cortex-m7`
+# and then `.arch armv7e-m`, and the second wins -- a Cortex-M7 object records
+# Tag_CPU_name "7E-M", exactly what a Cortex-M4 records.  The name-keyed table
+# refused every M7 plugin (which is the direction it should fail in), and a
+# comment beside it claimed the name "does distinguish them".  Nothing had ever
+# run it on an M7 image.
+#
+# What does distinguish them on v7E-M is the FPU: the Cortex-M4's is FPv4
+# (Tag_FP_arch 6), and FPv5 on v7E-M exists only on the Cortex-M7.  On v8.1-M the
+# reverse holds -- a Cortex-M85 records the same architecture and the same FPU as
+# the M55 -- but there the compiler DOES record the core ("cortex-m55" /
+# "cortex-m85"), so the name is required.  A key not listed here is refused
+# rather than guessed, which includes any image with no FPU at all (a soft-float
+# M7 is indistinguishable from an M4).
+TARGET_BY_ATTR = {
+    (13, 8, True):  ("PLUGIN_CPU_CORTEX_M7", "PLUGIN_FPU_FPV5_SP_D16", None),
+    (13, 8, False): ("PLUGIN_CPU_CORTEX_M7", "PLUGIN_FPU_FPV5_D16", None),
+    (21, 8, False): ("PLUGIN_CPU_CORTEX_M55", "PLUGIN_FPU_FP_ARMV8",
+                     "cortex-m55"),
 }
-# (CPU, Tag_FP_arch, single-precision only) -> the ABI's FPU.  The PAIR is the
-# key, for the same reason svc/plugin_target.h maps (__ARM_ARCH, __ARM_FP):
-# Tag_FP_arch is 8 ("FPv5/FP-D16 for ARMv8") for fpv5-d16, fpv5-sp-d16 AND the
-# M55's FPU alike.
-FPU_BY_ATTR = {
-    ("PLUGIN_CPU_CORTEX_M7", 8, True): "PLUGIN_FPU_FPV5_SP_D16",
-    ("PLUGIN_CPU_CORTEX_M7", 8, False): "PLUGIN_FPU_FPV5_D16",
-    ("PLUGIN_CPU_CORTEX_M55", 8, False): "PLUGIN_FPU_FP_ARMV8",
-}
+ARCH_NAME = {13: "v7E-M", 21: "v8.1-M.mainline"}
 
 
 def _uleb(buf, pos):
@@ -191,29 +200,24 @@ def check_target(elf, word, errors):
                       "the word cannot be checked, so it is not accepted")
         return None
 
+    arch = tags.get(6)
+    fp_arch = tags.get(10, 0)
+    # Tag_ABI_HardFP_use: 1 = single precision only; 0/3 = as Tag_FP_arch.
+    sp_only = tags.get(27, 0) == 1
     cpu_name = tags.get(5)
-    if cpu_name not in CPU_BY_NAME:
-        errors.append(f"target: Tag_CPU_name {cpu_name!r} is not a core any "
-                      "board here builds plugins for -- the word cannot be "
+    hit = TARGET_BY_ATTR.get((arch, fp_arch, sp_only))
+    if hit is None:
+        errors.append(f"target: Tag_CPU_arch {arch} with Tag_FP_arch {fp_arch}"
+                      f"{' (SP only)' if sp_only else ''} is not a core and FPU "
+                      "any board here builds plugins for -- the word cannot be "
                       "derived from it")
         return None
-    cpu, arch = CPU_BY_NAME[cpu_name]
-    if tags.get(6) != arch:
-        errors.append(f"target: {cpu_name} with Tag_CPU_arch {tags.get(6)}, "
-                      f"expected {arch}")
+    cpu, fpu, must_name = hit
+    if must_name is not None and cpu_name != must_name:
+        errors.append(f"target: {ARCH_NAME.get(arch, arch)} image names its "
+                      f"core {cpu_name!r}, not {must_name!r} -- on this "
+                      "architecture the name is what tells the cores apart")
         return None
-    fp_arch = tags.get(10, 0)
-    if fp_arch == 0:
-        fpu = "PLUGIN_FPU_NONE"
-    else:
-        # Tag_ABI_HardFP_use: 1 = single precision only; 0/3 = as Tag_FP_arch.
-        sp_only = tags.get(27, 0) == 1
-        fpu = FPU_BY_ATTR.get((cpu, fp_arch, sp_only))
-        if fpu is None:
-            errors.append(f"target: {cpu_name} with Tag_FP_arch {fp_arch}"
-                          f"{' (SP only)' if sp_only else ''} is not an FPU "
-                          "the ABI names")
-            return None
     vfp_args = tags.get(28, 0)
     if vfp_args not in (0, 1):
         errors.append(f"target: Tag_ABI_VFP_args {vfp_args} is neither the "
@@ -237,7 +241,8 @@ def check_target(elf, word, errors):
     # .ARM.attributes carries no trace of it.  Claiming to derive it would be
     # the same false comment #108 removed from plugin_abi.h.
     given = word & ~a["PLUGIN_TARGET_CMSE"]
-    what = f"{cpu_name} / {fpu[len('PLUGIN_FPU_'):].lower()} / " \
+    what = f"{cpu[len('PLUGIN_CPU_'):].lower()} / " \
+           f"{fpu[len('PLUGIN_FPU_'):].lower()} / " \
            f"{'hard' if vfp_args == 1 else 'soft'} / " \
            f"{'big' if big else 'little'}"
     if given != derived:

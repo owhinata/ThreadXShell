@@ -6,7 +6,7 @@
 Since #108 the plugin image gate is shared, and the three facts that differ per
 board -- the reservation the gate checks against, the forbidden table and the
 stack the BASE spends behind a veneer -- reach it only as add_plugin()
-arguments.  The value of that shape is entirely in the refusal: a second board
+arguments, as does the target word it checks the image against.  The value of that shape is entirely in the refusal: a second board
 that leaves one out must fail at configure, not inherit the first board's
 number.  So the refusal is what is tested, through a real `cmake` configure of a
 project(NONE) that includes the real helper -- no toolchain, no board, a
@@ -37,6 +37,7 @@ FULL = {
     "IMAGE_END": "0x24050000",
     "FORBIDDEN": "HAL_FLASH_Program",
     "VENEER_BASE_COST": "256",
+    "TARGET_ID": "0x1201",
     "OUT_DIR": '"${CMAKE_BINARY_DIR}/plugin"',
     "OUT_VAR": "ELFS",
     "ENTRIES": "pl_entry=64",
@@ -49,13 +50,14 @@ CASES = [
     ("no_base", "IMAGE_BASE", {}, "IMAGE_BASE is required"),
     ("no_end", "IMAGE_END", {}, "IMAGE_END is required"),
     ("no_forbidden", "FORBIDDEN", {}, "FORBIDDEN is required"),
+    ("no_target_id", "TARGET_ID", {}, "TARGET_ID is required"),
     # Present but not a cost: the analysis would assume the base is free.
     ("zero_veneer_cost", None, {"VENEER_BASE_COST": "0"},
      "VENEER_BASE_COST must be a positive byte count"),
     # A variable that was never set expands to nothing and trips the presence
     # check; one that holds a NAME rather than a number must trip this.
     ("symbolic_base", None, {"IMAGE_BASE": "PLUGIN_BASE"},
-     "IMAGE_BASE must be a hex address"),
+     "IMAGE_BASE must be a hex number"),
 ]
 
 

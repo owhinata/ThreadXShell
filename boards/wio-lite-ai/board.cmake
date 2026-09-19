@@ -1219,3 +1219,20 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         COMMENT "report the deepest tflm stack frames"
         VERBATIM)
 endif()
+
+# ---------------------------------------------------------------------------
+# The plugin target word (issue #108 = #78 Step 3a)
+# ---------------------------------------------------------------------------
+#
+# cortex-m7 / fpv5-d16 / hard float / little endian, no CMSE (this part has no
+# Security Extension), per plugin_target_id() in svc/plugin_abi.h.  One value,
+# and it is checked rather than trusted: nn_svc_wio.c static-asserts it against
+# this firmware's own predefined macros (svc/plugin_target.h), which is also the
+# only check of the CMSE bit.  The plugin image gate checks the other bits
+# against each plugin ELF.
+#
+# Defined for every backend: it describes the environment this firmware
+# provides, which does not depend on whether a model can be loaded.
+set(WIO_PLUGIN_TARGET_ID "0x1201")
+target_compile_definitions(shell PRIVATE
+    WIO_PLUGIN_TARGET_ID=${WIO_PLUGIN_TARGET_ID})

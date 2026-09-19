@@ -41,18 +41,23 @@ COMMON = os.path.join(REPO, "asset", "common")
 # that staged only the shared half would fail to link for a reason that has
 # nothing to do with the check under test, so it stages both and writes the same
 # absolute-path wrapper the real build generates.
-MEMORY_LD = os.path.join(REPO, "boards", "grove-vision-ai-v2", "ldscript",
-                         "plugin_memory.ld")
 GATE = os.path.join(REPO, "cmake", "check_plugin_image.py")
-# The board facts the gate takes as arguments since issue #108, as Grove states
-# them in its board.cmake.  Only the ones a fixture can tell apart matter here:
-# the forbidden table needs just the entry point m_forbidden reaches for.
-GATE_FACTS = ["--base", "0x341E0000", "--end", "0x34200000",
-              "--forbid", "hx_lib_qspi_eeprom_write",
-              "--veneer-base-cost", "256"]
 
-BASE_CFLAGS = [
-    "-mcpu=cortex-m55", "-mthumb", "-mfloat-abi=hard",
+# The board facts the gate takes as arguments since issue #108, as each board
+# states them in its board.cmake.  Only the ones a fixture can tell apart matter
+# here: the forbidden table needs just the entry point m_forbidden reaches for.
+BOARDS = {
+    "grove": {
+        "arch": ["-mcpu=cortex-m55", "-mthumb", "-mfloat-abi=hard"],
+        "memory_ld": os.path.join(REPO, "boards", "grove-vision-ai-v2",
+                                  "ldscript", "plugin_memory.ld"),
+        "facts": {"--base": "0x341E0000", "--end": "0x34200000",
+                  "--forbid": "hx_lib_qspi_eeprom_write",
+                  "--veneer-base-cost": "256", "--target-id": "0x9302"},
+    },
+}
+
+BASE_FLAGS = [
     "-Os", "-std=c11", "-ffreestanding", "-fno-builtin", "-fno-common",
     "-ffunction-sections", "-fdata-sections", "-fno-stack-protector",
     "-fstack-usage",
@@ -60,13 +65,17 @@ BASE_CFLAGS = [
 NO_UNWIND = ["-fno-unwind-tables", "-fno-asynchronous-unwind-tables"]
 
 
-def build(cc, nm, objdump, work, mutate=None, cflags=None):
-    """Build a plugin image, optionally mutated.  Returns (rc, output)."""
+def build(cc, nm, objdump, work, board, mutate=None, cflags=None, facts=None):
+    """Build a plugin image for `board`, optionally mutated.
+
+    `cflags` replaces the non-architecture flags; `facts` overrides what the
+    gate is told.  Returns (rc, output)."""
+    b = BOARDS[board]
     src = os.path.join(work, "src")
     shutil.copytree(PLUGIN, src)
     shutil.copytree(COMMON, src, dirs_exist_ok=True)
     shutil.copy(os.path.join(REPO, "svc", "blazeface.c"), src)
-    shutil.copy(MEMORY_LD, os.path.join(src, "plugin_memory.ld"))
+    shutil.copy(b["memory_ld"], os.path.join(src, "plugin_memory.ld"))
     if mutate:
         mutate(src)
 
@@ -77,7 +86,8 @@ def build(cc, nm, objdump, work, mutate=None, cflags=None):
                  % (os.path.join(src, "plugin_memory.ld"),
                     os.path.join(src, "plugin.ld")))
 
-    cflags = (cflags if cflags is not None else BASE_CFLAGS + NO_UNWIND) + [
+    cflags = b["arch"] + (cflags if cflags is not None
+                          else BASE_FLAGS + NO_UNWIND) + [
         "-I", os.path.join(REPO, "svc"), "-I", src]
     objs, sus = [], []
     # [!] KEEP THIS IN STEP WITH add_plugin()'s source list.  plugin_text.c
@@ -118,17 +128,18 @@ def build(cc, nm, objdump, work, mutate=None, cflags=None):
     elf = os.path.join(work, "plugin.elf")
     r = subprocess.run([cc, "-nostdlib", "-nostartfiles",
                         "-T", os.path.join(src, "plugin_link.ld"),
-                        "-Wl,--gc-sections", "-Wl,--no-warn-rwx-segments",
-                        "-mcpu=cortex-m55", "-mthumb", "-mfloat-abi=hard"]
-                       + objs + ["-o", elf],
+                        "-Wl,--gc-sections", "-Wl,--no-warn-rwx-segments"]
+                       + b["arch"] + objs + ["-o", elf],
                        capture_output=True, text=True, cwd=work)
     if r.returncode != 0:
         return 98, "link failed:\n" + r.stderr
 
+    gate_facts = dict(b["facts"])
+    gate_facts.update(facts or {})
     r = subprocess.run([sys.executable, GATE, elf, "--nm", nm,
                         "--objdump", objdump, "--su"] + sus
                        + ["--entry", "pl_draw=1024", "pl_decode=8192"]
-                       + GATE_FACTS,
+                       + [x for kv in gate_facts.items() for x in kv],
                        capture_output=True, text=True)
     return r.returncode, r.stdout + r.stderr
 
@@ -234,27 +245,120 @@ def m_recursion(src):
 # point that is nowhere in the image -- is a link error, so the gate's undefined
 # and forbidden checks are unreachable in the normal build.  Recording that here
 # keeps anyone from reading a passing gate as evidence those checks ran.
+#
+# Each case: (name, board, mutate, cflags, gate facts, expected, must-say, why).
+# `must-say` is a substring the gate's output has to contain -- for an ACCEPT
+# that is only honest if the gate says what it did not check.
 CASES = [
-    ("clean", None, None, "accept",
+    ("clean", "grove", None, None, None, "accept", None,
      "accepted (the plugin as built)"),
-    ("veneer_bypass", m_veneer_bypass, None, "gate",
+    ("veneer_bypass", "grove", m_veneer_bypass, None, None, "gate", None,
      "gate: an indirect call outside a veneer -- the stack bound would stop "
      "being a bound"),
-    ("forbidden", m_forbidden, None, "link",
+    ("forbidden", "grove", m_forbidden, None, None, "link", None,
      "linker: a vendor NOR entry point resolves to nothing in a -nostdlib link"),
-    ("undefined", m_undefined, None, "link",
+    ("undefined", "grove", m_undefined, None, None, "link", None,
      "linker: an unresolved symbol never reaches the gate"),
-    ("unwind", None, BASE_CFLAGS + ["-funwind-tables"], "link",
+    ("unwind", "grove", None, BASE_FLAGS + ["-funwind-tables"], None, "link",
+     None,
      "linker: unwind tables pull in a personality routine that does not exist"),
-    ("recursion", m_recursion, None, "gate",
+    ("recursion", "grove", m_recursion, None, None, "gate", None,
      "gate: a cycle the compiler could not flatten -- no bound exists"),
-    ("dup_su", m_dup_su, None, "gate",
+    ("dup_su", "grove", m_dup_su, None, None, "gate", None,
      "gate: a duplicate record with no static bound is not outvoted by a "
      "larger static one"),
-    ("no_frame", m_no_frame, None, "gate",
+    ("no_frame", "grove", m_no_frame, None, None, "gate", None,
      "gate: a function in the image with no measurement -- still fail-closed "
      "after the clone-name fix"),
+    # --- the target word (issue #108) -----------------------------------------
+    # A wrong bit the IMAGE can speak for is refused by the gate.  0x9301 claims
+    # a Cortex-M7 for an image whose .ARM.attributes say cortex-m55.
+    ("target_cpu", "grove", None, None, {"--target-id": "0x9301"}, "gate",
+     "does not describe this image",
+     "gate: a word claiming the wrong CPU -- derived from Tag_CPU_name"),
+    # [!] AND A WRONG CMSE BIT IS NOT, BY DESIGN -- but the gate must SAY it did
+    # not look.  An accept here that stayed silent about it would be the false
+    # claim #108 removed from plugin_abi.h, made again in a log line.  The
+    # firmware's static assert is the check for this bit (see below).
+    ("target_cmse", "grove", None, None, {"--target-id": "0x1302"}, "accept",
+     "NOT checked here",
+     "accepted, and says the CMSE bit was not checked (no image records it)"),
 ]
+
+
+# --- the firmware's half: svc/plugin_target.h (issue #108) --------------------
+#
+# The same word checked from the other end: a board adapter static-asserts its
+# declared word against PLUGIN_TARGET_ID_HERE, derived from the compiler's own
+# predefined macros.  Compiled here with each board's REAL firmware flags, so
+# what is exercised is the mapping those flags reach, including the two traps
+# the header records (__ARM_FP alone, and CMSE as defined() instead of == 3).
+# (name, flags, word, expect "ok" | "refuse", why)
+FW_M55 = ["-mcpu=cortex-m55", "-mthumb", "-mfloat-abi=hard"]
+FW_M7 = ["-mcpu=cortex-m7", "-mthumb", "-mfpu=fpv5-d16", "-mfloat-abi=hard"]
+ASSERT_CASES = [
+    ("grove_word", FW_M55 + ["-mcmse"], "0x9302", "ok",
+     "Grove's firmware flags describe 0x9302"),
+    ("grove_no_cmse", FW_M55 + ["-mcmse"], "0x1302", "refuse",
+     "a Grove word with the CMSE bit clear -- ONLY this check can see it"),
+    ("grove_cpu", FW_M55 + ["-mcmse"], "0x9301", "refuse",
+     "a Grove word naming the wrong CPU"),
+    ("m55_without_mcmse", FW_M55, "0x9302", "refuse",
+     "a Cortex-M55 build without -mcmse still predefines __ARM_FEATURE_CMSE "
+     "(as 1); the bit must not follow it"),
+    ("wio_word", FW_M7, "0x1201", "ok",
+     "wio's firmware flags describe 0x1201"),
+    ("wio_cmse", FW_M7, "0x9201", "refuse",
+     "a wio word with the CMSE bit set -- the part has no Security Extension"),
+    ("wio_fpu", FW_M7, "0x1301", "refuse",
+     "a wio word naming Grove's FPU: __ARM_FP is 14 on both, __ARM_ARCH is not"),
+    ("f746_unmapped", ["-mcpu=cortex-m7", "-mthumb", "-mfpu=fpv5-sp-d16",
+                       "-mfloat-abi=hard"], "0x1101", "refuse",
+     "f746's (7, 4) is also a Cortex-M4's, so it is refused rather than mapped"),
+]
+
+
+def fw_assert(cc, work, flags, word):
+    src = os.path.join(work, "t.c")
+    with open(src, "w") as fh:
+        fh.write('#include "plugin_target.h"\n'
+                 "_Static_assert(%s == PLUGIN_TARGET_ID_HERE, \"word\");\n"
+                 % word)
+    r = subprocess.run([cc] + flags + ["-std=c11", "-I",
+                                       os.path.join(REPO, "svc"),
+                                       "-c", src, "-o",
+                                       os.path.join(work, "t.o")],
+                       capture_output=True, text=True)
+    return r.returncode, r.stderr
+
+
+# --- the gate's copy of the ABI, pinned against the header --------------------
+#
+# The gate runs at plugin link time with no host C compiler guaranteed, so it
+# carries the enum values it needs as a table.  That is a transcription, and a
+# transcription nobody compares is the drift #106 found in this very file.  So
+# it is compared: a program built against the REAL svc/plugin_abi.h prints every
+# name the table uses, and one disagreement fails the run.
+def abi_table_mismatches(work):
+    sys.path.insert(0, os.path.dirname(GATE))
+    import check_plugin_image as gate          # noqa: E402 -- path set above
+    names = sorted(gate.ABI)
+    prog = os.path.join(work, "abi.c")
+    with open(prog, "w") as fh:
+        fh.write('#include <stdio.h>\n#include "plugin_abi.h"\n'
+                 "int main(void) {\n")
+        for n in names:
+            fh.write('  printf("%s %%lu\\n", (unsigned long)(%s));\n' % (n, n))
+        fh.write("  return 0;\n}\n")
+    exe = os.path.join(work, "abi")
+    r = subprocess.run(["gcc", "-std=c11", "-I", os.path.join(REPO, "svc"),
+                        prog, "-o", exe], capture_output=True, text=True)
+    if r.returncode != 0:
+        return ["cannot build the ABI probe:\n" + r.stderr]
+    out = subprocess.run([exe], capture_output=True, text=True).stdout
+    got = dict(ln.split() for ln in out.splitlines())
+    return ["%s: gate says %d, plugin_abi.h says %s" % (n, gate.ABI[n], got[n])
+            for n in names if int(got[n]) != gate.ABI[n]]
 
 
 def main():
@@ -266,22 +370,58 @@ def main():
 
     print(f"run_plugin_gate_tests: {os.path.basename(args.cc)}")
     bad = 0
-    for name, mutate, cflags, expect_fail, why in CASES:
+    for name, board, mutate, cflags, facts, expect_fail, must_say, why in CASES:
         with tempfile.TemporaryDirectory() as work:
-            rc, out = build(args.cc, args.nm, args.objdump, work, mutate, cflags)
+            rc, out = build(args.cc, args.nm, args.objdump, work, board,
+                            mutate, cflags, facts)
         got = "link" if rc == 98 else ("build" if rc == 99 else
                                        ("gate" if rc != 0 else "accept"))
+        label = f"{board}:{name}"
         if got != expect_fail:
             if got == "build":
-                print(f"  FAIL {name:14s} did not compile -- "
+                print(f"  FAIL {label:24s} did not compile -- "
                       f"{out.splitlines()[0] if out else ''}")
                 bad += 1
                 continue
-            print(f"  FAIL {name:14s} expected {expect_fail}, got {got}"
+            print(f"  FAIL {label:24s} expected {expect_fail}, got {got}"
                   f"\n        {out.strip()[:300]}")
             bad += 1
+        elif must_say and must_say not in out:
+            print(f"  FAIL {label:24s} {got} as expected, but the output does "
+                  f"not say '{must_say}':\n        {out.strip()[:300]}")
+            bad += 1
         else:
-            print(f"  ok   {name:14s} {why}")
+            print(f"  ok   {label:24s} {why}")
+
+    for name, flags, word, expect, why in ASSERT_CASES:
+        with tempfile.TemporaryDirectory() as work:
+            rc, err = fw_assert(args.cc, work, flags, word)
+        # [!] A REFUSAL COUNTS ONLY FOR ITS OWN REASON.  Any compile error
+        # would otherwise "refuse" -- a missing include would pass every
+        # negative case here while testing nothing.
+        if rc == 0:
+            got = "ok"
+        elif ("static assertion failed" in err and '"word"' in err) or \
+                "no plugin target is defined" in err:
+            got = "refuse"
+        else:
+            got = "error"
+        if got != expect:
+            print(f"  FAIL {'firmware:' + name:24s} expected {expect}, got "
+                  f"{got}\n        {err.strip()[:300]}")
+            bad += 1
+        else:
+            print(f"  ok   {'firmware:' + name:24s} {why}")
+
+    with tempfile.TemporaryDirectory() as work:
+        mism = abi_table_mismatches(work)
+    if mism:
+        for m in mism:
+            print(f"  FAIL {'abi_table':24s} {m}")
+        bad += 1
+    else:
+        print(f"  ok   {'abi_table':24s} the gate's ABI values match "
+              "svc/plugin_abi.h")
 
     if bad:
         print("run_plugin_gate_tests: FAILED", file=sys.stderr)

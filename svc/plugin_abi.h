@@ -236,10 +236,60 @@ enum plugin_float_abi {
 #define PLUGIN_TARGET_FLOAT_SHIFT     12
 #define PLUGIN_TARGET_FLOAT_MASK      0x00003000u
 #define PLUGIN_TARGET_BIG_ENDIAN      0x00004000u
+/**
+ * The ENVIRONMENT bit: the base the plugin is loaded into runs in the Armv8-M
+ * Security Extension's Secure state (issue #108).
+ *
+ * [!] THE BITS ARE NOT ALL THE SAME KIND OF FACT.  CPU, FPU, float ABI and
+ * endianness describe how the PLUGIN was compiled.  This one describes where it
+ * RUNS.  Grove's firmware is built with -mcmse and its plugins are not, yet
+ * Grove's word carries this bit and the plugins run correctly -- because -mcmse
+ * exists to build Non-secure entry points, and a plugin never defines one.  So
+ * this is not a plugin build flag, and nothing that inspects a plugin image can
+ * derive it: .ARM.attributes does not record it (checked on Grove's artifacts,
+ * where neither plugin.elf nor the -mcmse shell.elf carries it).  Only the
+ * firmware can check it, against its own build -- see plugin_target.h.
+ */
 #define PLUGIN_TARGET_CMSE            0x00008000u
 
 /**
- * Compose a target word.  Both the packer and the device call this.
+ * Compose a target word, as a constant expression.
+ *
+ * A macro as well as the function below because the firmware compares its
+ * board's declared word with this at COMPILE time (plugin_target.h), and a C
+ * _Static_assert cannot call a function.  The function is this macro, so there
+ * is one composition, not two.
+ */
+#define PLUGIN_TARGET_ID(cpu, fpu, float_abi, big_endian, cmse)               \
+	((((uint32_t)(cpu) << PLUGIN_TARGET_CPU_SHIFT) & PLUGIN_TARGET_CPU_MASK)  \
+	 | (((uint32_t)(fpu) << PLUGIN_TARGET_FPU_SHIFT) & PLUGIN_TARGET_FPU_MASK) \
+	 | (((uint32_t)(float_abi) << PLUGIN_TARGET_FLOAT_SHIFT)                 \
+	    & PLUGIN_TARGET_FLOAT_MASK)                                          \
+	 | ((big_endian) ? PLUGIN_TARGET_BIG_ENDIAN : 0u)                         \
+	 | ((cmse) ? PLUGIN_TARGET_CMSE : 0u))
+
+/**
+ * Compose a target word.
+ *
+ * [!] NO BUILD PATH CALLS THIS, and until issue #108 this comment said "both the
+ * packer and the device call this".  Neither did.  The packer stamps the word it
+ * is given on its command line, the host container verifier compares against the
+ * word it is given on ITS command line, and the firmware's policy is a compile
+ * definition -- and all three were handed the same CMake variable, so a mistyped
+ * constant would have been stamped, accepted and loaded consistently.  Grove-to-
+ * wio was still refused (the two boards' words differ), but nothing checked that
+ * either word was right.
+ *
+ * Since #108 the board's word is checked at the two ends that can each see part
+ * of it, neither of them reading the word itself:
+ *
+ *   - the FIRMWARE static-asserts it against PLUGIN_TARGET_ID_HERE, derived from
+ *     its own predefined macros (plugin_target.h) -- the word must describe the
+ *     environment this firmware provides, CMSE bit included;
+ *   - the plugin IMAGE GATE derives CPU, FPU and float ABI from the plugin ELF's
+ *     .ARM.attributes and endianness from its ELF header, and compares those --
+ *     the word must describe what the plugin was built for.  It masks
+ *     PLUGIN_TARGET_CMSE out and says so, because no image records it.
  *
  * Bits above CMSE are reserved and stay zero, so a container built by a future
  * packer that sets one is refused here rather than silently accepted with the
@@ -249,12 +299,7 @@ static inline uint32_t plugin_target_id(unsigned cpu, unsigned fpu,
                                         unsigned float_abi, int big_endian,
                                         int cmse)
 {
-	return (((uint32_t)cpu << PLUGIN_TARGET_CPU_SHIFT) & PLUGIN_TARGET_CPU_MASK)
-	     | (((uint32_t)fpu << PLUGIN_TARGET_FPU_SHIFT) & PLUGIN_TARGET_FPU_MASK)
-	     | (((uint32_t)float_abi << PLUGIN_TARGET_FLOAT_SHIFT)
-	        & PLUGIN_TARGET_FLOAT_MASK)
-	     | (big_endian ? PLUGIN_TARGET_BIG_ENDIAN : 0u)
-	     | (cmse ? PLUGIN_TARGET_CMSE : 0u);
+	return PLUGIN_TARGET_ID(cpu, fpu, float_abi, big_endian, cmse);
 }
 
 /** Bits a decoder must see as zero. */

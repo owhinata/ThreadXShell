@@ -643,6 +643,17 @@ int nn_camera_start(int colorbar, int require_draw)
 		 * Refusing here instead would make `nn stream stats`' own advice ("re-issue
 		 * `nn stream start` to re-arm") wrong, which is worse than having no
 		 * recovery hint at all.
+		 *
+		 * [!] AND THIS PATH NEVER LOOKS AT `require_draw`.  A legitimate re-arm
+		 * is safe -- the session that admitted the stream is still held, so the
+		 * decoder cannot have been replaced since it was asked -- but `nn run`
+		 * runs the same worker WITHOUT claiming the stream lifecycle, so a
+		 * `nn stream start` arriving from the other console while a one-shot's
+		 * band stream is lost returns OK here with nothing having asked whether
+		 * anything can draw.  The route predates issue #116; what #116 widened
+		 * is what it lets past, because can_draw() now answers 0 where it used
+		 * to answer 1.  Tracked as issue #120; do not "fix" it by refusing
+		 * above, which is what the comment before this one is about.
 		 */
 		if (!cam_band_stream_lost())
 			return NNCAM_ERR_RUNNING;

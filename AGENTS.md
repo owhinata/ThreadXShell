@@ -207,6 +207,12 @@
      - **admission は `nn run` と `nn stream start` の共有**なので **shape の問いは
        no-plugin で通す**（refuse すると素のモデルの `nn run` が消える）。
        **stream を止めるのは `nn_active_can_draw()` 1 本**で、panel を要求した時だけ聞く。
+       **[!] この規則には穴がある（#120）** — `nn_camera_start()` の **re-arm 早期
+       return は `require_draw` を見ない**うえ `nn run` は stream のライフサイクルを
+       claim しないので、「単発の最中に lost → 別コンソールから `nn stream start`」が
+       検査なしで通る（**#110 から在る経路で、#116 は通る幅を広げた**）。**正規の
+       re-arm は安全**（stream 中は model の load/unload が弾かれる）。#120 が
+       片付いたらこの併記を消す。
      - **worker が非同期**なので「**誰も解釈していない**」も**世代規則の下で publish**
        する（`nn_det_record_publish_raw()`。同じロック・arm 時点の世代・**成功時だけ
        推論カウンタを進める**）。publish しないと `nn run` が timeout する。

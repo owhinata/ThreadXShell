@@ -808,7 +808,11 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   **f746 はまだ常駐デコーダを持つ**（#78 Step 4。そこは変えない）。
   素の `.tflite` は **`nn run` で出力テンソルをそのまま報告**する（推論は走る）。
   **class report に落とさない** — 4 本の回帰テンソルに top-5 を出すのは無意味。
-  `nn stream` は**デコーダが無い時点で拒否**（shape や draw の前）。
+  **[!] `nn stream` の拒否の仕方はボードで違う。同じにしようとしない**:
+  **Grove** は `nn_svc_grove.c` が**デコーダが無い時点で拒否**する（shape や draw の前）。
+  **wio** は admission を `nn run` と共有しているので**shape は通し、
+  `nn_active_can_draw()` 1 本で止める** — ここを「揃える」と素のモデルの `nn run` が
+  消える（wio 節を見ること）。
   **入力量子化の検査は持ち主ごと消えた** — `pixel - 128` はボードの規約で、
   container がそれに合わせて書かれる（board README）。
   `nn thresh` は誰も閾値を持たなければ **`none`**（`NN_SVC_THRESH_NONE` = 0）。

@@ -1090,10 +1090,21 @@ static const char *nn_nncam_strerror(int rc)
 	case NNCAM_ERR_SHAPES:  return "the container's decoder cannot read this "
 	                               "model's outputs -- its two halves do not "
 	                               "belong together (`nn info`)";
-	/* [!] IT ALSO COVERS "THERE IS NO DECODER AT ALL" (issue #116).  This
+	/*
+	 * [!] IT ALSO COVERS "THERE IS NO DECODER AT ALL" (issue #116).  This
 	 * firmware carries none, so a bare model -- or a container whose plugin
 	 * was refused -- reaches the same refusal as a plugin with no draw()
-	 * slot, and the words have to fit all three. */
+	 * slot, and the words have to fit all three.
+	 *
+	 * [!] AND THAT FOLDING IS DELIBERATE, unlike grove-vision-ai-v2, which
+	 * words the two separately.  Three paths arrive at this ONE code -- the
+	 * answer they share is `nn_active_can_draw() == 0`, and the admission
+	 * cannot tell an absent decoder from a present one with no draw() slot
+	 * without asking a second question it has no reason to ask.  So the
+	 * sentence names both possibilities and points at `nn info`, which does
+	 * know which it is.  Splitting the code would mean splitting the
+	 * question.
+	 */
 	case NNCAM_ERR_NODRAW:  return "nothing would annotate a live preview: no "
 	                               "decoder is loaded, or the one that is "
 	                               "draws nothing (`nn info`); `nn run` still "

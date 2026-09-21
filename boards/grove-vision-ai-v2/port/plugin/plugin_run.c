@@ -4,7 +4,7 @@
  */
 /**
  * @file    plugin_run.c
- * @brief   The loader.  See plugin_run.h.
+ * @brief   This board's half of the loader.  See plugin_run.h.
  */
 #define LOG_TAG "plugin"
 #include "log.h"
@@ -16,36 +16,23 @@
 #include "npu_hw.h"              /* npu_cache_clean()                      */
 #include "nor_flash.h"           /* nor_lease_held()                       */
 
-#include <string.h>
+#include <stddef.h>
 
 /* The reservation, from the linker script.  Declared as arrays so a bare
  * reference is already the address. */
 extern uint8_t __plugin_start[], __plugin_end[];
 
 /*
- * What the fault reporter is allowed to see.
- *
- * [!] IMMUTABLE ONCE PUBLISHED, AND THE NAME IS A COPY.  A fault can arrive at
- * any instant, including while a container is being replaced, so the reporter
- * must never follow a pointer into the plugin or into anything the loader is
- * still writing.  The loader fills one of these completely, then publishes a
- * pointer to it with a single store; unpublishing is another single store, and
- * it happens BEFORE the slot is touched again.
+ * [!] STATIC AND PERMANENT, AND THE ENVIRONMENT IS A CONSTANT OVER IT.
+ * plugin_run_attribute() is reachable from a fault handler, so the path from
+ * "this board" to "the published pointer" has to be safe from cold boot: no
+ * lazy initialisation, no allocation, no lock, and no pointer anybody can swap
+ * for another object.  A file scope object plus a file scope const referring to
+ * it is the whole of it.
  */
-struct plugin_active {
-	uint32_t base;                       /* image base address            */
-	uint32_t len;                        /* mem_size                      */
-	char     name[PLUGIN_NAME_MAX];
-	char     build_id[PLUGIN_BUILD_ID_MAX];
-};
+static struct plugin_exec_state pl_state;
 
-static struct plugin_active   pl_slot;
-static struct plugin_active  *volatile pl_active;   /* published pointer */
-
-static struct plugin_view     pl_view;
-static int                    pl_started;
-
-/* ---- helpers ------------------------------------------------------------- */
+/* ---- the three board-specific things ------------------------------------- */
 
 /*
  * Take a consistent MPU snapshot and judge it.
@@ -57,10 +44,11 @@ static int                    pl_started;
  * and is not what this does -- what holds the configuration still for the
  * plugin's lifetime is the flash lease the caller already holds (plugin_run.h).
  */
-static enum plugin_mpu_verdict plugin_mpu_now(uint32_t lo, uint32_t hi)
+static int pl_exec_ok(uint32_t lo, uint32_t hi, const char **why)
 {
 	struct plugin_mpu_region rgn[PLUGIN_MPU_REGION_MAX];
 	uint32_t ctrl, type, mair0, mair1, saved_rnr;
+	enum plugin_mpu_verdict v;
 	unsigned n, i;
 	uint32_t pm = __get_PRIMASK();
 
@@ -83,7 +71,12 @@ static enum plugin_mpu_verdict plugin_mpu_now(uint32_t lo, uint32_t hi)
 	if (pm == 0u)
 		__enable_irq();
 
-	return plugin_mpu_judge(ctrl, type, rgn, n, mair0, mair1, lo, hi);
+	v = plugin_mpu_judge(ctrl, type, rgn, n, mair0, mair1, lo, hi);
+	if (v == PLUGIN_MPU_OK)
+		return 0;
+	if (why != NULL)
+		*why = plugin_mpu_strerror(v);
+	return -1;
 }
 
 /*
@@ -93,187 +86,98 @@ static enum plugin_mpu_verdict plugin_mpu_now(uint32_t lo, uint32_t hi)
  * The I- and D-caches are separate and an instruction fetch does not snoop the
  * D-cache, so the image has to be pushed out of the data side and the stale
  * instruction side dropped, in that order, with barriers between.
- *
- * [!] THE WHOLE RESERVATION, NOT JUST THE IMAGE.  Maintenance is by address and
- * rounds outward to whole 32-byte lines; maintaining only the image would let
- * that rounding reach whatever follows it.  The reservation's start and end are
- * both 32-byte multiples (the linker script pins them), so maintaining all of
- * it touches nothing else.
  */
-static void plugin_sync_caches(void)
+static void pl_sync_caches(uint32_t base, uint32_t len)
 {
-	uint32_t base = (uint32_t)(uintptr_t)__plugin_start;
-	uint32_t len  = (uint32_t)(__plugin_end - __plugin_start);
-
 	npu_cache_clean((const void *)(uintptr_t)base, len);
 	__DSB();
-	SCB_InvalidateICache_by_Addr((volatile void *)(uintptr_t)base, (int32_t)len);
+	SCB_InvalidateICache_by_Addr((volatile void *)(uintptr_t)base,
+	                             (int32_t)len);
 	__DSB();
 	__ISB();
 }
 
-/*
- * Turn a slot offset into something callable.  See plugin_run.h.
- *
- * Split out so that the entry call below and plugin_run_slot() cannot disagree:
- * they are the same arithmetic, over the same view, with the same absent-slot
- * rule.  Static, because the only thing outside this file that may form one of
- * these addresses is a caller of plugin_run_slot(), which is gated on the
- * plugin having completed its entry point -- and the entry call obviously
- * cannot be.
- */
-static void *plugin_slot_addr(const struct plugin_view *v, uint32_t base,
-                              unsigned slot)
+/* The XIP window the image is read from must be pinned by the caller. */
+static int pl_source_ok(const void *container, uintptr_t token,
+                        const char **why)
 {
-	if (v == NULL || slot >= (unsigned)PLUGIN_SLOT_COUNT)
-		return NULL;
-	if (v->slot[slot] == PLUGIN_SLOT_ABSENT)
-		return NULL;
-	return (void *)(uintptr_t)(base + v->slot[slot]);
+	(void)container;
+	if (nor_lease_held((uint32_t)token))
+		return 0;
+	if (why != NULL)
+		*why = "the flash lease is not live";
+	return -1;
 }
 
-/* ---- load / unload ------------------------------------------------------- */
+static const struct plugin_exec_port pl_port = {
+	.sync_caches = pl_sync_caches,
+	.exec_ok     = pl_exec_ok,
+	.source_ok   = pl_source_ok,
+};
+
+static const struct plugin_exec_env pl_env = {
+	.state    = &pl_state,
+	.port     = &pl_port,
+	/* [!] THE RESERVATION IS THIS BOARD'S FACT, stated here rather than
+	 * looked up inside the shared loader.  Link-time constants in an
+	 * initialiser, so the environment stays in .rodata. */
+	.res_lo = __plugin_start,
+	.res_hi = __plugin_end,
+};
+
+/* ---- the board-facing API ------------------------------------------------ */
 
 enum plugin_run_result plugin_run_load(const struct plugin_view *v,
                                        const void *container, uint32_t lease,
                                        const struct plugin_base_api *base)
 {
-	uint32_t res_base = (uint32_t)(uintptr_t)__plugin_start;
-	uint32_t res_len  = (uint32_t)(__plugin_end - __plugin_start);
-	enum plugin_mpu_verdict mv;
-	plugin_entry_fn entry;
+	const char *why = NULL;
+	enum plugin_run_result r;
 
-	if (v == NULL || container == NULL || base == NULL)
-		return PLUGIN_RUN_ARG;
-
-	/*
-	 * Whatever was there is gone from this point on.
-	 *
-	 * [!] BEFORE THE has_plugin TEST, NOT AFTER IT.  A container that carries
-	 * only a model is a legal container and NO_PLUGIN is not an error -- but it
-	 * is still a request to load something else, and returning it early left the
-	 * PREVIOUS plugin published and callable.  A caller reading NO_PLUGIN as
-	 * success would then decode a new model with an old model's decoder.  The
-	 * argument check above stays in front: a null pointer is not a request.
-	 */
-	plugin_run_unload();
-
-	if (!v->has_plugin)
-		return PLUGIN_RUN_NO_PLUGIN;
-
-	/* The window the image is read from must be pinned by the caller.  See
-	 * plugin_run.h for why this is a check and not a new mechanism. */
-	if (!nor_lease_held(lease)) {
-		LOG_ERR("the flash lease is not live; refusing to read the image");
-		return PLUGIN_RUN_NO_LEASE;
-	}
-
-	if (v->mem_size > res_len || v->link_addr != res_base) {
+	r = plugin_exec_load(&pl_env, v, container, (uintptr_t)lease, base, &why);
+	switch (r) {
+	case PLUGIN_RUN_OK:
+		LOG_INF("'%s' (build %s) loaded: %lu B at 0x%08lx",
+		        pl_state.slot.name, pl_state.slot.build_id,
+		        (unsigned long)v->mem_size,
+		        (unsigned long)(uintptr_t)pl_env.res_lo);
+		break;
+	case PLUGIN_RUN_NO_PLUGIN:
+		break;                      /* legal; the caller carries on */
+	case PLUGIN_RUN_TOO_BIG:
 		LOG_ERR("image wants %lu B at 0x%08lx, reservation is %lu B at 0x%08lx",
 		        (unsigned long)v->mem_size, (unsigned long)v->link_addr,
-		        (unsigned long)res_len, (unsigned long)res_base);
-		return PLUGIN_RUN_TOO_BIG;
+		        (unsigned long)(pl_env.res_hi - pl_env.res_lo),
+		        (unsigned long)(uintptr_t)pl_env.res_lo);
+		break;
+	case PLUGIN_RUN_ENTRY:
+		LOG_ERR("'%.*s' refused its own entry point or declares none",
+		        (int)sizeof v->name, v->name);
+		break;
+	default:
+		LOG_ERR("%s%s%s", plugin_run_strerror(r),
+		        why != NULL ? ": " : "", why != NULL ? why : "");
+		break;
 	}
-
-	/* Copy, then zero what has no initialiser.  bss and scratch are described
-	 * separately by the manifest and both are memory-only, so neither is in the
-	 * bytes that arrived. */
-	memcpy((void *)(uintptr_t)res_base,
-	       (const uint8_t *)container + v->image_off, v->file_size);
-	memset((void *)(uintptr_t)(res_base + v->file_size), 0,
-	       v->mem_size - v->file_size);
-
-	plugin_sync_caches();
-
-	/* [!] AFTER the caches, BEFORE the branch.  The vendor's enable_XIP()
-	 * reconfigures the MPU, so this port cannot assume the reservation is still
-	 * Normal and executable just because it was when the firmware started. */
-	mv = plugin_mpu_now(res_base, res_base + res_len);
-	if (mv != PLUGIN_MPU_OK) {
-		LOG_ERR("the reservation is not executable: %s",
-		        plugin_mpu_strerror(mv));
-		return PLUGIN_RUN_MPU;
-	}
-
-	/* Publish before the branch: a fault inside entry() should name the plugin
-	 * that caused it. */
-	pl_view = *v;
-	pl_slot.base = res_base;
-	pl_slot.len  = v->mem_size;
-	memcpy(pl_slot.name, v->name, sizeof pl_slot.name);
-	memcpy(pl_slot.build_id, v->build_id, sizeof pl_slot.build_id);
-	__DMB();
-	pl_active = &pl_slot;            /* single aligned store; see the header */
-
-	entry = (plugin_entry_fn)plugin_slot_addr(&pl_view, res_base,
-	                                          PLUGIN_SLOT_ENTRY);
-	if (entry == NULL) {
-		/* plugin_parse() refuses a manifest whose ENTRY is absent, so this is
-		 * unreachable through the one caller -- and a branch to 0 is not the
-		 * way to find out it stopped being. */
-		LOG_ERR("'%s' declares no entry point", pl_slot.name);
-		plugin_run_unload();
-		return PLUGIN_RUN_ENTRY;
-	}
-
-	if (entry(base) != 0) {
-		LOG_ERR("'%s' refused its own entry point", pl_slot.name);
-		plugin_run_unload();
-		return PLUGIN_RUN_ENTRY;
-	}
-
-	pl_started = 1;
-	LOG_INF("'%s' (build %s) loaded: %lu B at 0x%08lx",
-	        pl_slot.name, pl_slot.build_id,
-	        (unsigned long)v->mem_size, (unsigned long)res_base);
-	return PLUGIN_RUN_OK;
+	return r;
 }
 
 void plugin_run_unload(void)
 {
-	/* Unpublish FIRST.  Everything below rewrites what the fault reporter
-	 * would have been reading. */
-	pl_active = NULL;
-	__DMB();
-
-	pl_started = 0;
-	memset(&pl_view, 0, sizeof pl_view);
-	memset(&pl_slot, 0, sizeof pl_slot);
+	plugin_exec_unload(&pl_env);
 }
 
 int plugin_run_active(void)
 {
-	return pl_started;
+	return plugin_exec_active(&pl_env);
 }
 
 void *plugin_run_slot(unsigned slot)
 {
-	return pl_started ? plugin_slot_addr(&pl_view, pl_slot.base, slot) : NULL;
+	return plugin_exec_slot(&pl_env, slot);
 }
 
 const char *plugin_run_attribute(uint32_t pc, uint32_t *off)
 {
-	const struct plugin_active *a = pl_active;   /* one load, then immutable */
-
-	if (a == NULL)
-		return NULL;
-	if (pc < a->base || pc - a->base >= a->len)
-		return NULL;
-	if (off != NULL)
-		*off = pc - a->base;
-	return a->name;
-}
-
-const char *plugin_run_strerror(enum plugin_run_result r)
-{
-	switch (r) {
-	case PLUGIN_RUN_OK:        return "ok";
-	case PLUGIN_RUN_ARG:       return "bad argument";
-	case PLUGIN_RUN_NO_PLUGIN: return "the container carries no plugin";
-	case PLUGIN_RUN_NO_LEASE:  return "the flash lease is not live";
-	case PLUGIN_RUN_TOO_BIG:   return "it does not fit the reservation";
-	case PLUGIN_RUN_MPU:       return "the reservation is not executable";
-	case PLUGIN_RUN_ENTRY:     return "the plugin refused its own entry point";
-	}
-	return "unknown";
+	return plugin_exec_attribute(&pl_env, pc, off);
 }

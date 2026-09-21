@@ -422,6 +422,9 @@ set(SHELL_SOURCES
     # covered by two regions, or execute-never -- are reachable from a host
     # test; no board can be arranged to produce them.
     "${BOARD_DIR}/port/plugin/plugin_mpu.c"
+    # The loader: the machine in svc/, this board's state, reservation, cache
+    # maintenance, MPU read-back and source precondition in port/ (issue #110).
+    "${CMAKE_SOURCE_DIR}/svc/plugin_exec.c"
     "${BOARD_DIR}/port/plugin/plugin_run.c"
     "${BOARD_DIR}/port/plugin/plugin_paint.c"
     # The one place that decides which decoder is in force (issue #103).
@@ -954,6 +957,17 @@ add_shared_storage_gate(NAME grove_rect_geom_audit
                         SOURCE "${CMAKE_SOURCE_DIR}/svc/rect_geom.c"
                         IFACE bsp_iface CONSUMER shell_objs)
 add_dependencies(shell grove_rect_geom_audit_check)
+
+# ...and the shared loader (issue #110).  This one is the reason the rule
+# matters rather than an application of it: the fault reporter reads the
+# published pointer from an exception, so the object it points into has to be
+# the BOARD's -- permanent, never reallocated, reachable with no initialisation.
+# A static appearing in the machine would be memory no board placed and no
+# board's residency gate names.
+add_shared_storage_gate(NAME grove_plugin_exec_audit
+                        SOURCE "${CMAKE_SOURCE_DIR}/svc/plugin_exec.c"
+                        IFACE bsp_iface CONSUMER shell_objs)
+add_dependencies(shell grove_plugin_exec_audit_check)
 
 # And the negative tests for that checker, run with THIS board's cross compiler
 # so the __arm__-only fixture is meaningful (it passes under the host compiler,

@@ -372,13 +372,35 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   空き 34,552 B）。SD 既定 OFF は `NOT DEFINED` でしか効かないので**古いビルドツリーは SD ON の
   まま残る** — configure 警告が出たら `-DBSP_ENABLE_SD=OFF`。フラッシュ不足に見えたらまず
   キャッシュの `BSP_ENABLE_SD` を見る。
-- [!] **plugin container（#108 = 3a / #110 = 3b）**: `nn model load --slot` は PSRAM コピーの CRC 後に
+- [!] **plugin container（#108 = 3a / #110 = 3b / #116 = 3c）**: `nn model load --slot` は
+  PSRAM コピーの CRC 後に
   `plugin_probe` → container なら `plugin_parse`（policy は firmware とホスト verifier で
   1 宣言）→ **モデル区画を in-place で backend に渡す**（TFLM は staging スロット「内部」かつ
   `NN_MODEL_ALIGN`=16 の範囲を受ける。先頭へコピーしない — CRC を取った container を
   未検査のバイトで上書きする）。**#110 以降 plugin は実際に走る**（decode / draw / report /
-  閾値）。**常駐デコーダは残す** — 両腕が在ることが差分テストの成立条件で、
-  Grove の #104 に相当する削除は別 Issue。**`nn info` の claim は開いているモデルに従う**:
+  閾値）。
+  **[!] #116 以降デコーダは container でしか届かない**（Grove の #104 と同じ。
+  **ファームに常駐デコーダを戻さない**）: 素の `.tflite` の
+  **`nn run` は出力テンソルをそのまま報告**（class report に落とさない）/
+  **`nn stream start` は描けるデコーダが無ければカメラを点ける前に拒否** /
+  **`nn thresh` は none**（set は「値が不正」ではなく **state** で拒否）/
+  **`null` backend も同じ答え**（plugin 機構ごと無いので**拒否は null 側にも置く**。
+  ビルド自体は残す）。
+  **[!] admission は `nn run` と `nn stream start` の共有**なので、**shape の問いは
+  no-plugin で通す**（refuse すると素のモデルの `nn run` が消える）。**stream を止めるのは
+  `nn_active_can_draw()` 1 本**で、panel を要求した時だけ聞く。
+  **[!] worker は非同期**なので「**誰も解釈していない**」も**世代規則の下で record に
+  publish する**（`nn_det_record_publish_raw()`。同じロック・arm 時点の世代・
+  **成功時だけ推論カウンタを進める**）。publish しないと `nn run` が timeout する。
+  **panel は `valid` だけでなく kind も見る** — RAW_TENSORS の record は valid だが
+  plugin のものではないので描かない。
+  **`nn dets` はこのボードでは record を読むだけ**で、`nn run` は snapshot 後に stop し
+  stop は record を reset する → **素のモデルでは常に「未推論」**。`valid` を上書きして
+  作らない（3 ボードでの意味の統一は #118）。
+  **`svc/blazeface.c` の監査はファーム側から消え、`add_plugin()` の `AUDIT_SHARED`
+  だけ**になった（出荷物に無いオブジェクトを監査しない）。wio が未監査で持つ
+  共有 TU 3 本は **#117**。
+  **`nn info` の claim は開いているモデルに従う**:
   reload 後にのみ確定、拒否されて前のモデルが残れば前の claim のまま、bare / unload で
   消す（session を返す前に確定）。**`nn info` は無ロックなので reload〜確定の窓は
   「load in progress」と言い**、claim は出所（slot / blob 名）を持つ — 片方の検査だけでは
@@ -779,10 +801,11 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   上限付き top-N（donor は満杯で打ち切るためピークが前半の最大になり、後方 384 群の
   最強顔を落とす）。出力 4 本は **shape で探す**。**4 本の scale/zp は全部違う**
   （8x8 のスコアは zp 126 / scale 1.22 で実質 3 値）ので共有の脱量子化定数を作らない。
-  [!] **ただし Grove のファームはこれをリンクしない**（#104）。**デコーダは container
-  でしか届かない** — `svc/blazeface.c` を Grove でコンパイルするのは plugin だけで、
-  **no-storage 監査もその plugin の実オブジェクトに対して走る**（`add_plugin()` の
-  `AUDIT_SHARED`）。**ファームに常駐デコーダを戻さない。**
+  [!] **ただし Grove（#104）と wio（#116）のファームはこれをリンクしない**。
+  **この 2 枚ではデコーダは container でしか届かない** — `svc/blazeface.c` を
+  コンパイルするのは plugin だけで、**no-storage 監査もその plugin の実オブジェクトに
+  対して走る**（`add_plugin()` の `AUDIT_SHARED`）。**ファームに常駐デコーダを戻さない。**
+  **f746 はまだ常駐デコーダを持つ**（#78 Step 4。そこは変えない）。
   素の `.tflite` は **`nn run` で出力テンソルをそのまま報告**する（推論は走る）。
   **class report に落とさない** — 4 本の回帰テンソルに top-5 を出すのは無意味。
   `nn stream` は**デコーダが無い時点で拒否**（shape や draw の前）。
@@ -791,10 +814,12 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   `nn thresh` は誰も閾値を持たなければ **`none`**（`NN_SVC_THRESH_NONE` = 0）。
   **int8 と float32 の両方**を扱う（Grove は int8、他 2 ボードは float32 で、
   float32 は affine を通さない — 2 ボードは未量子化テンソルに scale 0 を publish する）。
-  [!] **共有 TU は可変記憶域を 1 バイトも持たない。** 閾値は普通の RAM に board が
-  静的確保し、候補バッファは board が**自分の配置属性を付けて**注入する
-  （wio `.psram_ai` / f746 `.sdram.ai` / Grove 素の `.bss`）。**両方を 1 つに
-  まとめてはいけない** — 前 2 者は NOLOAD なので初期化子が載らず、しかもウォーム
+  [!] **共有 TU は可変記憶域を 1 バイトも持たない。** 閾値は普通の RAM に持ち主が
+  静的確保し、候補バッファは持ち主が**自分の配置属性を付けて**注入する
+  （f746 のファームは `.sdram.ai`、plugin は素の `.bss`。**wio のファームは
+  #116 でこの注入をやめた** — 常駐デコーダごと消え、`.psram_ai` の
+  `nn_dec_scratch` も無い）。**両方を 1 つに
+  まとめてはいけない** — NOLOAD 配置では初期化子が載らず、しかもウォーム
   リセットを跨いで前の値が残るため「たまたま動く」形で壊れる。強制は
   `cmake/check_no_mutable_storage.py`（**ボードごとの監査コンパイル**。ホスト 1 回では
   `#if defined(__arm__)` 下の記憶域を見逃す。負のテストは `cmake/fixtures/`)。**外さない。**

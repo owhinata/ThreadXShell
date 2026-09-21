@@ -197,7 +197,28 @@
      「受理された宣言が実行を bound する」は成り立たない** — 既存 container は
      pack し直して送り直す。恒久的に閉じるには manifest が会計世代を持つ必要があり、
      それは ABI 変更（別 Issue）。
-   - **常駐デコーダは残す**（Grove の #104 に相当する削除は別 Issue）。
+   - **[!] #116（#78 Step 3c）以降、デコーダは container でしか届かない。**
+     Grove の #104 と同じで、**ファームに常駐デコーダを戻さない**。素の `.tflite` は
+     **`nn run` で出力テンソルをそのまま報告**し（class report に落とさない）、
+     **`nn stream start` は描けるデコーダが無ければカメラを点ける前に拒否**、
+     **`nn thresh` は none**（set は「値が不正」ではなく **state** で拒否）。
+     **`null` backend も同じ答え**で、plugin 機構ごと無いので**拒否は null 側にも置く**
+     （ビルド自体は残す）。wio 固有で破ってはいけないこと:
+     - **admission は `nn run` と `nn stream start` の共有**なので **shape の問いは
+       no-plugin で通す**（refuse すると素のモデルの `nn run` が消える）。
+       **stream を止めるのは `nn_active_can_draw()` 1 本**で、panel を要求した時だけ聞く。
+     - **worker が非同期**なので「**誰も解釈していない**」も**世代規則の下で publish**
+       する（`nn_det_record_publish_raw()`。同じロック・arm 時点の世代・**成功時だけ
+       推論カウンタを進める**）。publish しないと `nn run` が timeout する。
+     - **`nn dets` は record を読むだけ**で、`nn run` は snapshot 後に stop し stop は
+       record を reset する → **素のモデルでは常に「未推論」**。`valid` を上書きして
+       作らない（3 ボードでの意味の統一は #118）。
+     - **panel は valid だけでなく kind も見る** — RAW_TENSORS は valid だが plugin の
+       ものではないので描かない。
+     - **`svc/blazeface.c` の監査はファーム側から消え、`add_plugin()` の
+       `AUDIT_SHARED` だけ**になった（出荷物に無いオブジェクトを監査しない）。
+       wio が未監査で持つ共有 TU 3 本は **#117**。
+     - **f746g-disco はまだ常駐デコーダを持つ**（#78 Step 4）。そこは変えない。
 
 8. **リンカスクリプトの `ASSERT` は LTO 下で空振りする。** 配置保証はポストリンクの
    residency チェックスクリプトで行う。配置を変える変更はこのゲートを維持すること。
@@ -557,11 +578,12 @@
    コンパイルできる条件）。**共有 TU は可変記憶域を 1 バイトも持たない**
    （各ボードが自分の配置とゲートを保てる条件で、
    `cmake/check_no_mutable_storage.py` が監査コンパイルで強制する。**緩めない**）。
-   [!] **Grove のファームはこのデコーダをリンクしない**（#104）— **デコーダは
-   container でしか届かない**。`port/npu/npu_desc.c` に残るのは
-   `npu_tensor` -> `tensor_desc` の変換だけ（`nn out` / `nn info` / シムが
-   デコーダの有無に関わらず必要とする）。Grove で `svc/blazeface.c` を
-   コンパイルするのは plugin だけなので、**no-storage 監査は plugin が実際に
+   [!] **Grove（#104）と wio（#116）のファームはこのデコーダをリンクしない** —
+   **この 2 枚ではデコーダは container でしか届かない**（f746 はまだ持つ）。
+   ファームに残るのは記述子の変換だけで、これは `nn out` / `nn info` / シムが
+   デコーダの有無に関わらず必要とする（Grove `port/npu/npu_desc.c` /
+   wio `port/nn/nn_desc.c`）。**`svc/blazeface.c` をコンパイルするのは plugin だけ**
+   なので、**no-storage 監査は plugin が実際に
    リンクするオブジェクトに対して走る**（`add_plugin()` の `AUDIT_SHARED`。**helper は owned root を導出し引数で受け取らない**（受け取る形は
    `${CMAKE_SOURCE_DIR}` を渡すだけで全免除になる fail-open）。**リンク入力も列挙**し、
    **[!] アセットは `--target asset-<name>` が作る（#107）。ゲートは送信時ではなく

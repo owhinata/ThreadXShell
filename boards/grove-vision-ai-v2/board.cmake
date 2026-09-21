@@ -425,6 +425,7 @@ set(SHELL_SOURCES
     # The loader: the machine in svc/, this board's state, reservation, cache
     # maintenance, MPU read-back and source precondition in port/ (issue #110).
     "${CMAKE_SOURCE_DIR}/svc/plugin_exec.c"
+    "${CMAKE_SOURCE_DIR}/svc/plugin_paint_budget.c"
     "${BOARD_DIR}/port/plugin/plugin_run.c"
     "${BOARD_DIR}/port/plugin/plugin_paint.c"
     # The one place that decides which decoder is in force (issue #103).
@@ -968,6 +969,10 @@ add_shared_storage_gate(NAME grove_plugin_exec_audit
                         SOURCE "${CMAKE_SOURCE_DIR}/svc/plugin_exec.c"
                         IFACE bsp_iface CONSUMER shell_objs)
 add_dependencies(shell grove_plugin_exec_audit_check)
+add_shared_storage_gate(NAME grove_paint_budget_audit
+                        SOURCE "${CMAKE_SOURCE_DIR}/svc/plugin_paint_budget.c"
+                        IFACE bsp_iface CONSUMER shell_objs)
+add_dependencies(shell grove_paint_budget_audit_check)
 
 # And the negative tests for that checker, run with THIS board's cross compiler
 # so the __arm__-only fixture is meaningful (it passes under the host compiler,

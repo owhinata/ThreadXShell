@@ -4,7 +4,7 @@
  */
 /**
  * @file    test_nn_det_record.c
- * @brief   Host tests for svc/nn_det_record.c (issue #97).
+ * @brief   Host tests for svc/nn_det_record.c (issues #97, #110).
  *
  * THIS IS THE ONLY PLACE THE RULE CAN BE CHECKED.  What it guards is an ordering:
  *
@@ -217,6 +217,85 @@ int main(void)
 	expect("a caller asking for fewer boxes gets fewer",
 	       snap.ndet == BF_MAX_DET, "ndet %d (the count is not clamped, the "
 	       "copy is)", snap.ndet);
+
+	/* --- an external result (issue #110) ------------------------------ */
+	{
+		struct bf_det canary[BF_MAX_DET];
+		struct bf_result r_ext = mk_res(1);
+		uint32_t g;
+		unsigned i;
+		int untouched;
+
+		/* Start from a live caller-boxes record so the transition is the
+		 * thing under test, not a fresh one. */
+		nn_det_record_reset(&rec);
+		g = nn_det_record_gen(&rec);
+		(void)nn_det_record_publish(&rec, &one, 1, &r_ext, g);
+
+		for (i = 0u; i < (unsigned)BF_MAX_DET; i++)
+			canary[i].score = 1234;
+		nn_det_record_snapshot(&rec, &snap, canary, BF_MAX_DET);
+		expect("a caller-boxes record still says so",
+		       snap.kind == (uint8_t)NN_DET_CALLER_BOXES, "kind %u",
+		       (unsigned)snap.kind);
+		expect("and still fills the caller's array", canary[0].score != 1234,
+		       "untouched");
+
+		expect("an external publish is taken",
+		       nn_det_record_publish_external(&rec, 3, g) != 0, "dropped");
+		for (i = 0u; i < (unsigned)BF_MAX_DET; i++)
+			canary[i].score = 1234;
+		nn_det_record_snapshot(&rec, &snap, canary, BF_MAX_DET);
+		expect("[!] the snapshot routes the caller elsewhere",
+		       snap.kind == (uint8_t)NN_DET_PLUGIN_REPORT, "kind %u",
+		       (unsigned)snap.kind);
+		expect("it carries the count", snap.ndet == 3, "ndet %d", snap.ndet);
+		untouched = 1;
+		for (i = 0u; i < (unsigned)BF_MAX_DET; i++)
+			if (canary[i].score != 1234)
+				untouched = 0;
+		expect("[!] and the caller's array is untouched, every element of it",
+		       untouched, "a box was written");
+		expect("the previous decoder's diagnostics do not travel with it",
+		       snap.res.thresh_milli == 0u && snap.res.npass == 0,
+		       "thresh %u npass %d", (unsigned)snap.res.thresh_milli,
+		       snap.res.npass);
+
+		expect("[!] a negative external result keeps its own value",
+		       nn_det_record_publish_external(&rec, -7, g) != 0, "dropped");
+		nn_det_record_snapshot(&rec, &snap, NULL, 0);
+		expect("not folded to -1 the way the shared decoder's is",
+		       snap.ndet == -7, "ndet %d", snap.ndet);
+
+		expect("[!] and a count larger than the box array is not clamped",
+		       nn_det_record_publish_external(&rec, BF_MAX_DET + 5, g) != 0,
+		       "dropped");
+		nn_det_record_snapshot(&rec, &snap, canary, BF_MAX_DET);
+		expect("there is no array for it to be clamped to",
+		       snap.ndet == BF_MAX_DET + 5, "ndet %d", snap.ndet);
+
+		/* Back the other way: the kind must not stick. */
+		(void)nn_det_record_publish(&rec, &one, 1, &r_ext, g);
+		nn_det_record_snapshot(&rec, &snap, canary, BF_MAX_DET);
+		expect("a later caller-boxes publish routes back",
+		       snap.kind == (uint8_t)NN_DET_CALLER_BOXES, "kind %u",
+		       (unsigned)snap.kind);
+		expect("and fills the array again", canary[0].score != 1234,
+		       "untouched");
+
+		/* The generation rule is the same rule. */
+		nn_det_record_reset(&rec);
+		expect("[!] an external publish from a retired session lands nowhere",
+		       nn_det_record_publish_external(&rec, 2, g) == 0, "taken");
+		nn_det_record_snapshot(&rec, &snap, NULL, 0);
+		expect("the reset record is not valid and routes nowhere",
+		       snap.valid == 0 &&
+		               snap.kind == (uint8_t)NN_DET_CALLER_BOXES,
+		       "valid %d kind %u", snap.valid, (unsigned)snap.kind);
+
+		expect("an external publish into a null record is refused",
+		       nn_det_record_publish_external(NULL, 1, 0u) == 0, "taken");
+	}
 
 	/* --- null tolerance ----------------------------------------------- */
 	expect("publishing into a null record is refused",

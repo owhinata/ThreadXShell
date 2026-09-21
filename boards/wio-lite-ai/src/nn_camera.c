@@ -621,7 +621,7 @@ del_start:
 
 int nn_camera_running(void) { return nncam_run; }
 
-int nn_camera_start(int colorbar)
+int nn_camera_start(int colorbar, int require_draw)
 {
 	struct nn_model *m = NULL;
 	struct nn_tensor *in;
@@ -761,16 +761,28 @@ int nn_camera_start(int colorbar)
 	{
 		/* Under the lease like every other entry into a plugin: the NN session
 		 * is held here so no load can replace it, but a console's param_set
-		 * takes no session and would otherwise run concurrently with this. */
-		int ok = plugin_lease_take(NNCAM_LEASE_WAIT_TICKS);
+		 * takes no session and would otherwise run concurrently with this.
+		 *
+		 * [!] AND A TIMEOUT IS NOT A YES.  Both questions below decide whether
+		 * to light a camera; answering either from an unheld plugin is the
+		 * shape the review caught in the stream's old pre-check. */
+		int shapes, draws;
 
-		if (ok) {
-			ok = nn_active_shapes_ok(m);
-			plugin_lease_give();
+		if (!plugin_lease_take(NNCAM_LEASE_WAIT_TICKS)) {
+			nncam_guards_give();
+			return NNCAM_ERR_DECBUSY;
 		}
-		if (!ok) {
+		shapes = nn_active_shapes_ok(m);
+		draws  = require_draw ? nn_active_can_draw() : 1;
+		plugin_lease_give();
+
+		if (!shapes) {
 			nncam_guards_give();
 			return NNCAM_ERR_SHAPES;
+		}
+		if (!draws) {
+			nncam_guards_give();
+			return NNCAM_ERR_NODRAW;
 		}
 	}
 #endif

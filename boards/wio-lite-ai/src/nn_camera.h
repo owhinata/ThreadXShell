@@ -58,6 +58,8 @@
 #define NNCAM_ERR_REARM  (-10)  /**< re-arm after a lost stream failed; stop first */
 #define NNCAM_ERR_QUANT  (-11)  /**< int8 input without a per-tensor quant scale   */
 #define NNCAM_ERR_SHAPES (-12)  /**< the loaded decoder cannot read these outputs  */
+#define NNCAM_ERR_NODRAW (-13)  /**< a preview was asked for; the decoder draws none */
+#define NNCAM_ERR_DECBUSY (-14) /**< the decoder could not be held still to ask it */
 
 /**
  * The worker thread's (`nn_work`) stack, in DTCM.  Published here since issue #108
@@ -156,7 +158,20 @@ struct nn_camera_stats {
  * `lcd on` / `lcd reset` / `camera capture` / `camera preview on` while held -- the
  * same behaviour `nn bench` has, for the same reason.
  */
-int nn_camera_start(int colorbar);
+/**
+ * @param require_draw  the caller is about to light a PANEL, so a decoder that
+ *                      draws nothing is a preview that runs and never
+ *                      annotates -- indistinguishable from a broken one.
+ *                      `nn run` passes 0: a report-only plugin serves it
+ *                      perfectly well.
+ *
+ * [!] ASKED HERE AND NOWHERE ELSE (issue #110).  It was a pre-check in the
+ * stream's service entry, which answered before the NN session was held: a
+ * load landing in between changed the decoder after the question, and a
+ * timed-out lease there was read as "yes".  Under the session and the lease
+ * this is the decoder that will actually run.
+ */
+int nn_camera_start(int colorbar, int require_draw);
 
 /**
  * Stop inferring, drain, and release the guards.

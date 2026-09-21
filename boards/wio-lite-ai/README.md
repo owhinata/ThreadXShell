@@ -378,10 +378,30 @@ inside the plugin, so there is nothing to copy.
   existing preview counters see a frame that was presented, not one presented
   bare;
 - **a console asking for a report waits, but not forever.**  Measuring how long
-  a wait took is not the same as bounding it.
+  a wait took is not the same as bounding it;
+- **and every other way into a plugin holds it too** -- `nn thresh`
+  (param_get/param_set), the admission that asks `shapes_ok` and `can_draw`,
+  and `nn model load` / `nn model unload`.  The NN session excludes the
+  WORKER; it does not exclude another CONSOLE's callback, and `nn thresh`
+  takes no session.  **A load takes the lease before anything changes and a
+  timeout refuses the load** -- taking it later and discarding the result is
+  the same as not taking it, because after the deadline the replacement
+  happened anyway.
 
 One decoder annotates a frame, never two: with a plugin loaded the resident
-overlay does not run.
+overlay does not run.  And a held lease is not by itself a reason to draw --
+the panel also requires `nn overlay` to be on and the record to hold a VALID
+decode of the plugin's kind.  Without that, `nn overlay off` was ignored on
+this path, a preview outliving its inference kept drawing retained detections,
+and a decode whose publication the generation check REJECTED -- which leaves
+fresh private state no accepted record describes -- reached the panel by a
+route the publication gate does not guard.
+
+`nn stream start` needs a decoder that draws, and **asks under the session and
+the lease**, inside `nn_camera_start()`.  A pre-check in the service entry
+answered before the session was held, so a load landing in between changed the
+decoder after the question -- and a timed-out lease there was read as "yes".
+`nn run` passes no such requirement: a report-only plugin serves it.
 
 ### [!] Reporting: captured where the result still exists
 

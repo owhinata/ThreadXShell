@@ -28,6 +28,17 @@
  * one, so it is still a check: the bytes must lie inside the region the backend
  * handed out, because a board with no hook is indistinguishable from a board
  * that forgot to write one.
+ *
+ * [!] AND THE CALLER STATES THAT REGION; THIS FILE DOES NOT ASK FOR IT.  The
+ * first version re-queried nn_model_load_region() from inside the check, and
+ * the backend is DOUBLE-SLOTTED: load_region() hands out the INACTIVE slot, so
+ * the moment nn_model_reload() adopted the staged model that slot became the
+ * active one and the query started answering with the other.  The check then
+ * refused every container on hardware -- fail-closed, and for a reason that had
+ * nothing to do with the container.  Asking a question the operation in between
+ * has already changed the answer to is the same mistake nn_model_open() taught
+ * this file's neighbour (issue #108's review); the fact travels from the caller
+ * that was handed it.
  */
 #ifndef PLUGIN_RUN_H
 #define PLUGIN_RUN_H
@@ -46,9 +57,11 @@ extern "C" {
  * @brief  Copy, verify and start the plugin @p v describes.
  *
  * @param v          the validated view, from plugin_parse()
- * @param container  where the container lies: inside the backend's staging
- *                   buffer, which the caller obtained from
- *                   nn_model_load_region() while holding the NN session
+ * @param container  where the container lies: inside the staging region below
+ * @param stage      the staging region the caller was handed by
+ *                   nn_model_load_region(), and @p cap its size.  Passed in,
+ *                   not looked up -- see above
+ * @param cap        the size of that region
  * @param base       the vtable handed to the plugin; must outlive the plugin
  *
  * @return PLUGIN_RUN_OK, or a reason.  PLUGIN_RUN_NO_PLUGIN when the container
@@ -59,6 +72,7 @@ extern "C" {
  */
 enum plugin_run_result plugin_run_load(const struct plugin_view *v,
                                        const void *container,
+                                       const void *stage, uint32_t cap,
                                        const struct plugin_base_api *base);
 
 /** Forget the active plugin.  Idempotent. */

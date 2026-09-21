@@ -692,7 +692,14 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 			/* The deepest of the shell-thread call sites: a plugin's entry()
 			 * is reached from here, several frames below the command. */
 			nn_camera_note_depth(NNCAM_SITE_SHELL);
-			(void)plugin_run_load(&claims.view, stage, nn_active_base());
+			/* [!] THE STAGING REGION IS PASSED, NOT LOOKED UP.  The backend
+			 * is double-slotted: nn_model_load_region() hands out the
+			 * INACTIVE slot, so now that the reload above has adopted the
+			 * staged model, asking again would answer with the OTHER slot.
+			 * `stage` and `cap` are what this function was handed before any
+			 * of that happened. */
+			(void)plugin_run_load(&claims.view, stage, stage, cap,
+			                      nn_active_base());
 		}
 		/* A container whose plugin would not load leaves the model open with
 		 * the resident decoder reading it -- which is what a container with no

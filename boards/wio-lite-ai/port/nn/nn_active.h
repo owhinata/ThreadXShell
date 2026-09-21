@@ -8,11 +8,16 @@
  *          (issue #110 = #78 Step 3b).
  *
  * A container may carry a plugin.  When one is loaded it decodes, draws and
- * describes its own result; when none is, the resident BlazeFace decoder does
- * what it has always done.  Both arms exist on this board -- unlike
- * grove-vision-ai-v2, where issue #104 removed the resident one -- and keeping
- * them is what makes the routing testable: set a threshold through this shim
- * and observe that the OTHER decoder did not move.
+ * describes its own result; WHEN NONE IS, NOTHING DECODES AT ALL.
+ *
+ * [!] THAT SECOND ARM IS EMPTY SINCE ISSUE #116 (= #78 Step 3c), as it has been
+ * on grove-vision-ai-v2 since #104: this firmware carries no decoder of its own,
+ * so a model with no plugin beside it runs and its OUTPUT TENSORS are what get
+ * reported.  What this shim decides is therefore no longer "which of two", but
+ * "is there one" -- and every answer below has to agree about that.  They did
+ * not have to before: a firmware decoder made each of them a sensible fallback,
+ * and the ones that are now wrong (a threshold, a panel that annotates) would
+ * have read as working.
  *
  * [!] ONE BRANCH POINT, NOT ONE PER CALLER.  The obvious change was to route
  * the worker's decode call and stop there.  Grove's code said otherwise: its
@@ -73,11 +78,13 @@ int nn_active_is_plugin(void);
  * finding out per frame that the wrong model is open is a stream that runs and
  * silently never annotates.
  *
- * With no plugin this answers for the RESIDENT decoder, which is the honest
- * answer to "will anything read these shapes": non-zero, because the resident
- * one discovers a mismatch per frame and says BF_ERR_MODEL rather than
- * refusing up front, and refusing here would change what `nn run` does to
- * every non-BlazeFace model this board has always accepted.
+ * [!] WITH NO PLUGIN THIS ANSWERS YES, AND THAT IS NOT A FALLBACK (issue #116).
+ * Nothing is going to read the outputs, so nothing can object to their shape --
+ * and this is the admission `nn run` passes through too, which on a bare model
+ * runs the inference and reports the tensors themselves.  Refusing here would
+ * take that away.  A stream with no decoder is stopped one question further
+ * down, by @ref nn_active_can_draw, which is only asked when a panel was
+ * requested.
  */
 int nn_active_shapes_ok(struct nn_model *m);
 
@@ -87,10 +94,11 @@ int nn_active_shapes_ok(struct nn_model *m);
  * @return the plugin's own count, or a negative BF_ERR_*.  The RESULT ITSELF
  *         stays with the plugin -- ask it to draw or to report.
  *
- * Only ever called when @ref nn_active_is_plugin; the resident decoder has its
- * own entry point because it fills the caller's array and this one cannot.
- * With no plugin it answers BF_ERR_UNINIT, deliberately not BF_ERR_MODEL --
- * that means "not a detector" and routes to the shared class report.
+ * Only ever called when @ref nn_active_is_plugin: with no plugin the worker
+ * publishes "an inference ran and nothing decoded it" instead of calling this
+ * at all.  Reached anyway it answers BF_ERR_UNINIT -- deliberately not
+ * BF_ERR_MODEL, which means "not a detector" and routes to the shared class
+ * report.
  *
  * [!] THE CALLER MUST HOLD THE RESULT LEASE.  See plugin_lease.h: the panel
  * runs at a higher priority than the worker, so without it a draw can read
@@ -106,8 +114,13 @@ void nn_active_draw(const struct plugin_painter *paint);
  *
  * A plugin need not draw: DRAW is an optional slot.  A caller about to light a
  * camera and a panel has to know, because "the stream runs and never
- * annotates" is indistinguishable from a broken one.  Non-zero with no plugin:
- * the resident overlay draws its boxes as it always has.
+ * annotates" is indistinguishable from a broken one.
+ *
+ * [!] AND WITH NO PLUGIN THE ANSWER IS NO (issue #116).  It used to be yes,
+ * because a resident overlay drew the firmware decoder's boxes; there is
+ * neither now, so this is the ONE question that refuses a live overlay on a
+ * bare model.  @ref nn_active_shapes_ok deliberately does not, because it is
+ * also `nn run`'s admission.
  */
 int nn_active_can_draw(void);
 
@@ -122,9 +135,12 @@ int nn_active_report(nn_svc_write_fn write, void *ctx);
  * The threshold, from whichever decoder will actually use it.
  *
  * [!] A PLUGIN OWNS ITS OWN.  Routed here, `nn thresh` reaches the number that
- * decides something; reaching past this shim would change a firmware variable
- * the loaded decoder never reads.  A plugin that declares no parameters has
- * none, and says so rather than borrowing the resident decoder's.
+ * decides something; reaching past this shim would change a variable the loaded
+ * decoder never reads.  A plugin that declares no parameters has none, and says
+ * so -- as does a board with no plugin loaded, which since issue #116 holds no
+ * threshold anywhere: NN_SVC_THRESH_NONE from the getter and
+ * NN_ACTIVE_THRESH_NO_DECODER from the setter, which is not the same answer as
+ * refusing the value.
  */
 unsigned nn_active_get_thresh_milli(void);
 
@@ -143,9 +159,9 @@ int nn_active_set_thresh_milli(unsigned milli);
  */
 const struct plugin_base_api *nn_active_base(void);
 
-/** The base's transform -- model input coordinates to frame pixels.  Public
- *  because the resident overlay maps boxes the same way and a second copy of
- *  the arithmetic is a second answer. */
+/** The base's transform -- model input coordinates to frame pixels.  Declared
+ *  here so that what a plugin is handed can be exercised directly: it is the
+ *  one piece of the base vtable with arithmetic in it. */
 int nn_active_to_frame(void *ctx, float x, float y, float w, float h,
                        struct plugin_rect *out);
 

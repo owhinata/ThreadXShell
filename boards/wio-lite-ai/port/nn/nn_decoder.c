@@ -4,8 +4,9 @@
  */
 /**
  * @file    nn_decoder.c
- * @brief   nn_tensor -> tensor_desc, plus this board's decoder state.  See
- *          nn_decoder.h.
+ * @brief   This board's decoder state and the decode it drives.  See
+ *          nn_decoder.h.  The descriptor translation it used to carry is
+ *          nn_desc.c (issue #116).
  */
 #include "nn_decoder.h"
 
@@ -13,6 +14,7 @@
 #include <string.h>
 
 #include "mem_sections.h"
+#include "nn_desc.h"
 
 /*
  * The candidate scratch, in the PSRAM AI carve-out it has always been in.
@@ -54,43 +56,6 @@ static int nn_decoder_bind(void)
 	return BF_OK;
 }
 
-/* enum nn_dtype -> enum tensor_dtype.  Anything this decoder cannot read maps to
- * UNSUPPORTED so it is refused rather than read as some other type. */
-static uint8_t nn_dtype_to_tensor(uint8_t dtype)
-{
-	switch (dtype) {
-	case NN_DTYPE_INT8:    return (uint8_t)TENSOR_DTYPE_INT8;
-	case NN_DTYPE_UINT8:   return (uint8_t)TENSOR_DTYPE_UINT8;
-	case NN_DTYPE_INT16:   return (uint8_t)TENSOR_DTYPE_INT16;
-	case NN_DTYPE_INT32:   return (uint8_t)TENSOR_DTYPE_INT32;
-	case NN_DTYPE_FLOAT32: return (uint8_t)TENSOR_DTYPE_FLOAT32;
-	default:               return (uint8_t)TENSOR_DTYPE_UNSUPPORTED;
-	}
-}
-
-/*
- * Translate one output tensor.
- *
- * [!] A RANK ABOVE FOUR IS REFUSED, NOT TRUNCATED.  A shortened shape can still
- * match a lookup, and then the decoder reads a tensor it was not looking for
- * while every check it makes passes.  Rank 0 says "not representable" and every
- * shape test downstream fails on it.
- */
-void nn_decoder_desc(struct tensor_desc *d, const struct nn_tensor *t)
-{
-	memset(d, 0, sizeof(*d));
-	d->data  = t->data;
-	d->bytes = t->bytes;
-	if (t->ndim <= TENSOR_MAX_DIMS) {
-		d->rank = t->ndim;
-		for (unsigned i = 0; i < t->ndim; i++)
-			d->dims[i] = (int32_t)t->dims[i];
-	}
-	d->dtype      = nn_dtype_to_tensor(t->dtype);
-	d->scale      = t->scale;
-	d->zero_point = t->zero_point;
-}
-
 int nn_decoder_run(struct nn_model *m, struct bf_det *out, int max,
                    struct bf_result *res)
 {
@@ -122,7 +87,7 @@ int nn_decoder_run(struct nn_model *m, struct bf_det *out, int max,
 			memset(&desc[i], 0, sizeof desc[i]);
 			continue;
 		}
-		nn_decoder_desc(&desc[i], t);
+		nn_desc_of(&desc[i], t);
 	}
 	return blazeface_decode(&nn_dec, desc, (unsigned)n_out, out, max, res);
 

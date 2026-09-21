@@ -11,7 +11,8 @@
 
 #include "nn_active.h"
 
-#include "nn_decoder.h"      /* nn_decoder_desc(), the resident threshold */
+#include "nn_decoder.h"      /* the resident decoder's threshold */
+#include "nn_desc.h"         /* nn_tensor -> tensor_desc */
 #include "plugin_run.h"
 
 #include <string.h>
@@ -21,9 +22,8 @@
 /*
  * The outputs reach a plugin as svc/tensor.h descriptors, which is the contract
  * issue #97 established so that one decoder can read any board's tensors.  The
- * conversion is nn_decoder_desc(), reused rather than repeated: a second
- * translation could disagree with `nn out` and `nn info` about what a tensor
- * is.
+ * conversion is nn_desc_of(), reused rather than repeated: a second translation
+ * could disagree with `nn out` and `nn info` about what a tensor is.
  *
  * A hole in the output set becomes a zeroed descriptor -- UNSUPPORTED -- for
  * the same reason the resident path does it: it is not a model-shape problem,
@@ -46,7 +46,7 @@ static unsigned to_desc(struct nn_model *m, struct tensor_desc *d, unsigned cap)
 		if (t == NULL)
 			memset(&d[i], 0, sizeof d[i]);
 		else
-			nn_decoder_desc(&d[i], t);
+			nn_desc_of(&d[i], t);
 	}
 	return out;
 }

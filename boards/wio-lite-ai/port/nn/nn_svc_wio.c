@@ -39,6 +39,7 @@
 #include "nn.h"
 #include "nn_camera.h"
 #include "nn_decoder.h"
+#include "nn_desc.h"
 #include "nn_active.h"
 #include "plugin_load.h"
 #include "plugin_lease.h"
@@ -828,7 +829,7 @@ int nn_svc_output(unsigned index, struct tensor_desc *out)
 	t = nn_output(m, (int)index);
 	if (t == NULL)
 		return NN_SVC_ERR_ARG;
-	nn_decoder_desc(out, t);
+	nn_desc_of(out, t);
 	return NN_SVC_OK;
 }
 
@@ -842,7 +843,7 @@ int nn_svc_input(struct tensor_desc *out)
 	t = nn_input(m, 0);
 	if (t == NULL)
 		return NN_SVC_ERR_ARG;
-	nn_decoder_desc(out, t);
+	nn_desc_of(out, t);
 	return NN_SVC_OK;
 }
 

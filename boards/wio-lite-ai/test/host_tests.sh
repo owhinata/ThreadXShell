@@ -44,18 +44,39 @@ gcc $CFLAGS -Wno-unused-parameter \
     $LDFLAGS -o "$out/test_crc32"
 "$out/test_crc32"
 
+# issues #97, #116 -- nn_tensor -> tensor_desc (port/nn/nn_desc.c), on its own.
+#
+# This was half of test_nn_decoder.c below.  The translation never had a model in
+# it: `nn out`, `nn info` and the active-decoder shim all need it whatever
+# interprets the tensors -- or whether anything does -- so NOTHING IS LINKED WITH
+# IT HERE, svc/blazeface.c included.  Linking a decoder would only prove it still
+# compiles.
+#
+# It is a board test because the point is the REAL nn.h: `struct nn_tensor` and
+# `enum nn_dtype` are this port's, and a shimmed copy could drift from the
+# firmware's without anything noticing.  The cases are the translation's own
+# failure modes -- an unsupported dtype mapped onto one a reader does read, a
+# rank above four truncated into a match, a field inherited from the tensor
+# described before, and a quantisation not passed through as it stands (this
+# board publishes scale 0 for an unquantised tensor and its graphs are float32,
+# so an invented scale would multiply every value by zero).
+gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" \
+    "$here/test_nn_desc.c" "$board/port/nn/nn_desc.c" \
+    $LDFLAGS -o "$out/test_nn_desc"
+"$out/test_nn_desc"
+
 # issue #97 -- the adapter onto the SHARED BlazeFace decoder (port/nn/nn_decoder.c).
 # The decoder's arithmetic moved to svc/blazeface.c and is covered by
 # shell/test/test_blazeface.c, which is board-independent; what stays here is the
-# half that cannot be -- nn_tensor -> tensor_desc, against this board's real nn.h.
-# struct nn_model is opaque (defined in nn.c), so the test supplies its own
+# half that cannot be -- the decoder's state, its scratch, and the pull of the
+# open model's outputs through the translation above, against this board's real
+# nn.h.  struct nn_model is opaque (defined in nn.c), so the test supplies its own
 # nn_output_count() / nn_output(), which is also what makes the adapter testable.
 #
-# The cases are the translation's own failure modes: an unsupported dtype mapped
-# onto one the decoder reads, float32 put through the affine form (this board
-# publishes scale 0 for an unquantised tensor, so that would zero every value), a
-# rank above four truncated into a match, and a hole in the output set reported as
-# a model-shape problem.
+# The cases are what the adapter can get wrong end to end: an unsupported dtype or
+# an over-long rank reaching the decoder as something it reads, float32 put
+# through the affine form, a hole in the output set reported as a model-shape
+# problem, and the threshold this board owns.
 #
 # Built against the REAL boards/<board>/include/mem_sections.h so the PSRAM_AI
 # attribute on the host is the same one the firmware uses -- a shimmed copy could
@@ -63,7 +84,7 @@ gcc $CFLAGS -Wno-unused-parameter \
 # `nn_dec_scratch` on the linked image as the other end of that.
 gcc $CFLAGS -I "$board/include" -I "$board/port/nn" -I "$HOST_TEST_SVC" \
     "$here/test_nn_decoder.c" "$board/port/nn/nn_decoder.c" \
-    "$HOST_TEST_SVC/blazeface.c" \
+    "$board/port/nn/nn_desc.c" "$HOST_TEST_SVC/blazeface.c" \
     $LDFLAGS -lm -o "$out/test_nn_decoder"
 "$out/test_nn_decoder"
 

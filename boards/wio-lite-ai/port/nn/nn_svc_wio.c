@@ -601,6 +601,34 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	}
 #endif
 
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/*
+	 * [!] THE LEASE IS TAKEN BEFORE ANYTHING CHANGES, AND ITS FAILURE IS AN
+	 * ANSWER (issue #110).
+	 *
+	 * The NN session keeps the WORKER out -- a stream holds it for its
+	 * lifetime, a one-shot for its duration -- but it does not keep another
+	 * CONSOLE's plugin callback out: `nn thresh` takes no session.  Without
+	 * this, a background job could be inside a plugin's param_set while this
+	 * overwrote the reservation under it, and unpublishing a slot table does
+	 * not revoke a pointer somebody already holds.
+	 *
+	 * The first version took it just before the replacement and DISCARDED the
+	 * result, which is the same as not taking it: after the timeout the load
+	 * proceeded anyway.  Priority inheritance schedules the holder; it does
+	 * not promise the holder finishes.  Taken here, before nn_claims_begin()
+	 * and before the backend is touched, a timeout costs nothing -- the model
+	 * and the plugin are both exactly as they were.  Refusing a load because a
+	 * console is mid-`nn thresh` is the right outcome.
+	 */
+	if (!plugin_lease_take(NN_PLUGIN_LEASE_WAIT_TICKS)) {
+		nn_detail_set("the decoder is busy -- try again");
+		nn_guards_give();
+		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
+		return;
+	}
+#endif
+
 	nn_claims_begin();
 	rc = nn_model_reload(model_at, model_len, info.name, &open_after);
 
@@ -634,19 +662,6 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	 * nothing here).
 	 */
 #if defined(CONFIG_NN_BACKEND_TFLM)
-	/*
-	 * [!] AND UNDER THE RESULT LEASE.  The NN session keeps the WORKER out --
-	 * a stream holds it for its lifetime and a one-shot for its duration --
-	 * but it does not keep another CONSOLE's plugin callback out: `nn thresh`
-	 * takes no session, so without this a background job could be inside a
-	 * plugin's param_set while this overwrites the reservation under it.  A
-	 * bounded wait, not a try: this is the operation that has to happen, and
-	 * the only holders are short.
-	 *
-	 * Waited for OUTSIDE the claims window on purpose -- see below.
-	 */
-	(void)plugin_lease_take(NN_PLUGIN_LEASE_WAIT_TICKS);
-
 	/*
 	 * [!] THE PLUGIN IS REPLACED ONLY AFTER THE BACKEND SUCCEEDED (issue #110),
 	 * and the order is the whole of it.  Loading first would destroy the
@@ -684,7 +699,6 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 		 * plugin does anyway, and plugin_run_load() has already unpublished
 		 * whatever it refused.  It logs its own reason. */
 	}
-	plugin_lease_give();
 #endif
 
 	/*
@@ -701,6 +715,10 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 		nn_claims_settle(0, NULL);
 	else
 		nn_claims_settle(1, NULL);     /* the previous model, its claims */
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/* Held from before the first change to after the last one. */
+	plugin_lease_give();
+#endif
 	nn_guards_give();
 
 	if (rc != 0) {
@@ -730,18 +748,30 @@ void nn_svc_model_unload(struct nn_op_result *res)
 	}
 	/* Idempotent: the model is a singleton that is rebuilt rather than
 	   destroyed, so unloading returns it to the built-in one. */
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/* Before anything changes, and its failure is an answer -- see the load
+	 * path for why the session is not enough on its own. */
+	if (!plugin_lease_take(NN_PLUGIN_LEASE_WAIT_TICKS)) {
+		nn_detail_set("the decoder is busy -- try again");
+		nn_guards_give();
+		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
+		return;
+	}
+#endif
 	nn_claims_begin();
 	if (nn_model_open(&m) == 0 && m != NULL)
 		(void)nn_model_reload(NULL, 0u, NULL, NULL);
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/* No decoder either (issue #110): a plugin left loaded would be a decoder
+	   for a model that is gone, waiting to interpret the next one.  BEFORE the
+	   claims are settled, like the load path -- settling first would publish
+	   "no container" beside a plugin that was still live. */
+	plugin_run_unload();
+#endif
 	/* No model is open now, so no container's claims describe it (issue #108).
 	   Under the session, for the same reason as in the load path. */
 	nn_claims_settle(0, NULL);
 #if defined(CONFIG_NN_BACKEND_TFLM)
-	/* And no decoder either (issue #110): a plugin left loaded would be a
-	   decoder for a model that is gone, waiting to interpret the next one.
-	   Under the lease, for the reason the load path states. */
-	(void)plugin_lease_take(NN_PLUGIN_LEASE_WAIT_TICKS);
-	plugin_run_unload();
 	plugin_lease_give();
 #endif
 	nn_guards_give();
@@ -830,7 +860,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		return;
 	}
 
-	rc = nn_camera_start(0);
+	rc = nn_camera_start(0, 0);   /* no panel: a report-only decoder serves this */
 	if (rc != NNCAM_OK) {
 		nn_detail_set("start failed (%d): NN busy, PSRAM down, or no model "
 		              "loaded?", rc);
@@ -1035,6 +1065,11 @@ static const char *nn_nncam_strerror(int rc)
 	case NNCAM_ERR_SHAPES:  return "the container's decoder cannot read this "
 	                               "model's outputs -- its two halves do not "
 	                               "belong together (`nn info`)";
+	case NNCAM_ERR_NODRAW:  return "the container's decoder draws nothing, so a "
+	                               "live preview would never annotate; `nn run` "
+	                               "still works";
+	case NNCAM_ERR_DECBUSY: return "the decoder could not be held still long "
+	                               "enough to ask it -- try again";
 	case NNCAM_ERR_INIT:    return "the worker thread or its objects could not be "
 	                               "created";
 	case NNCAM_ERR_TEARING: return "still tearing down (a callback or an inference "
@@ -1178,39 +1213,12 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		return;
 	}
 
-#if defined(CONFIG_NN_BACKEND_TFLM)
-	/*
-	 * [!] REFUSE A DECODER THAT CANNOT DRAW, before anything is admitted
-	 * (issue #110).  DRAW is an optional slot, so a container may carry a
-	 * decoder that only reports -- and such a plugin still serves `nn run`,
-	 * which is why this refusal belongs to the STREAM and not to the load.
-	 * Without it a live preview runs, annotates nothing, and is
-	 * indistinguishable from a broken one.
+	/* [!] THE DRAW-CAPABILITY CHECK IS NOT HERE ANY MORE (issue #110).  It was,
+	 * and it answered before the NN session was held -- so a load landing in
+	 * between changed the decoder after the question, and a timed-out lease
+	 * was read as "yes".  nn_camera_start() asks it under the session and the
+	 * lease, which is the decoder that will actually run.
 	 */
-	{
-		/* Under the lease: this reads the loaded plugin's slot table, which a
-		 * concurrent `nn model load` replaces.  Advisory either way -- the
-		 * admission below takes the NN session, which is what actually
-		 * excludes a load -- but asking a question about a plugin without
-		 * holding it still is the habit that produced the holes this issue
-		 * closed. */
-		int draws = plugin_lease_take(NN_PLUGIN_LEASE_WAIT_TICKS);
-
-		if (draws) {
-			draws = nn_active_can_draw();
-			plugin_lease_give();
-		} else {
-			draws = 1;      /* busy is not "it cannot draw"; let admission speak */
-		}
-		if (!draws) {
-			nn_detail_to(res->detail, sizeof res->detail,
-			             "the container's decoder draws nothing, so a live "
-			             "preview would never annotate; `nn run` still works");
-			nn_result(res, NN_SVC_ERR_NOSUP, NN_CLAIM_NONE);
-			return;
-		}
-	}
-#endif
 
 	/* Sampled BEFORE the call, because a successful re-arm clears the latch. */
 	rearm = nn_camera_running() && cam_band_stream_lost();
@@ -1241,7 +1249,7 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		return;
 	}
 
-	rc = nn_camera_start(spec->test ? 1 : 0);
+	rc = nn_camera_start(spec->test ? 1 : 0, 1);   /* a panel: DRAW is required */
 	if (rc != NNCAM_OK) {
 		nn_stream_unadmit();      /* a failed re-arm goes back to RUNNING */
 		nn_detail_to(res->detail, sizeof res->detail, "%s",

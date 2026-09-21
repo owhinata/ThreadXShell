@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host unit test for port/plugin/plugin_mpu.c (issue #103).
+ * Host unit test for port/plugin/plugin_mpu.c (issues #103, #114).
  *
  * WHY THIS FILE IS THE ONLY CHECK.  Every refusal here describes a board this
  * project cannot arrange to have: the plugin reservation covered by two MPU
@@ -11,6 +11,10 @@
  * #42/#66 spent themselves on, where a gate passed seven shapes it could not
  * decode.  Taking the register values as arguments is what makes every branch
  * reachable from here.
+ *
+ * [!] AND ONE OF THOSE BRANCHES USED TO BE EXPECTED TO SUCCEED.  Until issue
+ * #114 a DREGION larger than the table handed over was silently clamped, and
+ * this file expected that to come out OK.  See test_truncated().
  */
 #include "plugin_mpu.h"
 
@@ -46,6 +50,12 @@ static uint32_t mair0, mair1;
 
 #define TYPE_2   (2u << PLUGIN_MPU_TYPE_DREGION_SHIFT)
 #define CTRL_ON  PLUGIN_MPU_CTRL_ENABLE
+
+/* MPU_TYPE as it reads on an implementation with @p n data regions. */
+static uint32_t type_of(unsigned n)
+{
+	return (uint32_t)n << PLUGIN_MPU_TYPE_DREGION_SHIFT;
+}
 
 static void reset(void)
 {
@@ -131,6 +141,70 @@ static void test_coverage(void)
 	       run(CTRL_ON), PLUGIN_MPU_OK);
 }
 
+/*
+ * A snapshot shorter than MPU_TYPE.DREGION says so (issue #114).
+ *
+ * [!] THE PAIR AT THE END IS THE POINT.  This decoder used to clamp DREGION to
+ * the table it was handed and carry on, and this file used to expect that to
+ * succeed.  The entries a clamp drops are the HIGHER-numbered ones, and under
+ * PMSAv8 a higher region intersecting the range is exactly what makes the
+ * access fault -- so the last two cases are the SAME MPU, read short and read
+ * in full, and they used to come out PLUGIN_MPU_OK and PLUGIN_MPU_MULTIPLE.
+ * The clamp did not give half an answer, it gave the opposite one.
+ */
+static void test_truncated(void)
+{
+	struct plugin_mpu_region tbl[PLUGIN_MPU_REGION_MAX + 1u];
+	unsigned i;
+
+	printf(" case: a snapshot shorter than DREGION\n");
+	reset();                                 /* for mair0 / mair1 */
+
+	for (i = 0u; i < sizeof tbl / sizeof tbl[0]; i++) {
+		tbl[i].rbar = 0u;
+		tbl[i].rlar = 0u;                    /* EN clear: says nothing */
+	}
+	/* Region 0 covers the reservation exactly, as it does on this board. */
+	tbl[0].rbar = 0x341E0000u | (1u << PLUGIN_MPU_RBAR_AP_SHIFT);
+	tbl[0].rlar = 0x341FFFE0u | PLUGIN_MPU_RLAR_EN;
+
+	/* The boundary, both sides of it: every region read is complete, one more
+	 * than was read is not.  Four rather than sixteen so this pins DREGION
+	 * against nregion and not against PLUGIN_MPU_REGION_MAX. */
+	expect("DREGION equal to the entries read is complete",
+	       plugin_mpu_judge(CTRL_ON, type_of(4u), tbl, 4u, mair0, mair1,
+	                        LO, HI), PLUGIN_MPU_OK);
+	expect("one more region than was read is refused",
+	       plugin_mpu_judge(CTRL_ON, type_of(5u), tbl, 4u, mair0, mair1,
+	                        LO, HI), PLUGIN_MPU_TRUNCATED);
+
+	/* And the decoder's own ceiling, which is the other half of the same
+	 * refusal: it will not walk past PLUGIN_MPU_REGION_MAX even when the
+	 * caller says it read that many. */
+	expect("the largest table this decoder walks is complete",
+	       plugin_mpu_judge(CTRL_ON, type_of(PLUGIN_MPU_REGION_MAX), tbl,
+	                        PLUGIN_MPU_REGION_MAX, mair0, mair1, LO, HI),
+	       PLUGIN_MPU_OK);
+	expect("one past it is refused even though the caller read it",
+	       plugin_mpu_judge(CTRL_ON, type_of(PLUGIN_MPU_REGION_MAX + 1u), tbl,
+	                        PLUGIN_MPU_REGION_MAX + 1u, mair0, mair1, LO, HI),
+	       PLUGIN_MPU_TRUNCATED);
+	expect("a DREGION of 64 is refused, not walked to 16",
+	       plugin_mpu_judge(CTRL_ON, type_of(64u), tbl,
+	                        PLUGIN_MPU_REGION_MAX, mair0, mair1, LO, HI),
+	       PLUGIN_MPU_TRUNCATED);
+
+	/* [!] The same snapshot, short and whole.  Region 2 intersects. */
+	tbl[2].rbar = 0x341F0000u | (1u << PLUGIN_MPU_RBAR_AP_SHIFT);
+	tbl[2].rlar = 0x341F8000u | PLUGIN_MPU_RLAR_EN;
+	expect("three regions and only two read is refused",
+	       plugin_mpu_judge(CTRL_ON, type_of(3u), tbl, 2u, mair0, mair1,
+	                        LO, HI), PLUGIN_MPU_TRUNCATED);
+	expect("...and the region it skipped is the one that faults",
+	       plugin_mpu_judge(CTRL_ON, type_of(3u), tbl, 3u, mair0, mair1,
+	                        LO, HI), PLUGIN_MPU_MULTIPLE);
+}
+
 static void test_permissions(void)
 {
 	printf(" case: permissions\n");
@@ -205,6 +279,14 @@ static void test_default_map(void)
 	                        0x60000000u, 0x60001000u),
 	       PLUGIN_MPU_DEFAULT_MAP);
 
+	/* [!] AND DREGION IS NOT CHECKED ON THIS PATH.  With the MPU off the table
+	 * is not consulted at all, so a snapshot too short to judge an enabled MPU
+	 * still answers this question completely.  Deliberate, and pinned here so
+	 * that it reads as a decision rather than as an oversight (issue #114). */
+	expect("MPU disabled, DREGION beyond the table read, still the default map",
+	       plugin_mpu_judge(0u, type_of(64u), good, 2u, mair0, mair1, LO, HI),
+	       PLUGIN_MPU_OK);
+
 	/*
 	 * [!] PRIVDEFENA IS PER-ADDRESS, so it may only be leaned on when NO
 	 * enabled region touches ANY part of the range.  A partial match never
@@ -237,14 +319,6 @@ static void test_arguments(void)
 	expect("a NULL table with the MPU on",
 	       plugin_mpu_judge(CTRL_ON, TYPE_2, NULL, 2u, mair0, mair1, LO, HI),
 	       PLUGIN_MPU_ARG);
-
-	/* DREGION larger than what the caller actually read must not walk past the
-	 * table it was given. */
-	reset();
-	expect("DREGION beyond the table given is clamped",
-	       plugin_mpu_judge(CTRL_ON, 16u << PLUGIN_MPU_TYPE_DREGION_SHIFT,
-	                        good, 2u, mair0, mair1, LO, HI),
-	       PLUGIN_MPU_OK);
 }
 
 int main(void)
@@ -253,6 +327,7 @@ int main(void)
 	test_ok();
 	test_limit_decoding();
 	test_coverage();
+	test_truncated();
 	test_permissions();
 	test_attributes();
 	test_default_map();

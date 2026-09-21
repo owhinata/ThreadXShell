@@ -39,11 +39,14 @@
  * reachable from a host test.  Same reasoning as Grove's, and #42/#66 is what
  * happens without it.
  *
- * [!] AN INCOMPLETE SNAPSHOT IS REFUSED.  Grove's judge clamps MPU_TYPE.DREGION
- * to the size of the table it was handed and carries on, and its host test
- * expects that to succeed.  On this architecture the region it would skip is a
- * HIGHER-numbered one, which is precisely the one that would have won -- so a
- * truncated read cannot answer the question at all.  It says so instead.
+ * [!] AN INCOMPLETE SNAPSHOT IS REFUSED.  Clamping MPU_TYPE.DREGION to the size
+ * of the table handed over and carrying on is what Grove's judge did until
+ * issue #114, with a host test that expected it to succeed.  On this
+ * architecture the region a clamp would skip is a HIGHER-numbered one, which is
+ * precisely the one that would have won -- so a truncated read cannot answer
+ * the question at all.  It says so instead.  (Grove refuses now too, for the
+ * mirror-image reason: there the skipped region is the one that makes the
+ * access fault.)
  *
  * WHAT THE CALLER MUST DO, AND THIS FILE CANNOT.  The snapshot has to be
  * consistent: MPU_CTRL, MPU_TYPE and every region read without the MPU changing

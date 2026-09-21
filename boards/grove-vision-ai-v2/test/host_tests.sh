@@ -290,6 +290,11 @@ gcc $CFLAGS \
 # compares against the masked value and so reads every region 31 bytes short),
 # and "not Device" is not the same question as "Normal" -- outer set with inner
 # zero is a RESERVED encoding that an inequality would wave through.
+#
+# And one case exists because of a mistake made here: until issue #114 the judge
+# clamped MPU_TYPE.DREGION to the table it was handed, and this file expected
+# that to come out OK.  test_truncated() now holds the same snapshot read short
+# and read whole -- refused, and a fault.
 gcc $CFLAGS \
     -I "$here" -I "$board/port/plugin" \
     "$here/test_plugin_mpu.c" "$board/port/plugin/plugin_mpu.c" \

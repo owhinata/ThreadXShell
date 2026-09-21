@@ -5250,6 +5250,27 @@ Three of its rules are there because of mistakes made next door:
 - The region count comes from **`MPU_TYPE.DREGION`**, not the 16 that the
   diagnostic capture hard-codes.
 
+**An incomplete snapshot is refused, not clamped** (issue #114).  The loader's
+read is bounded by the table it has room for, but `type` reaches the judge as it
+was read, so a `DREGION` larger than that comes back as "the MPU snapshot is
+incomplete" rather than as a verdict about the first sixteen regions.  Until
+#114 it was clamped, and the host test said so approvingly -- a refusal nobody
+could reach on this board, which is the shape issue #66 is about.  The entries a
+clamp drops are the **higher-numbered** ones, and by the first rule above a
+higher region intersecting the range is exactly what makes the access fault, so
+the clamp could only ever err towards yes.  The test holds the pair: one table,
+read short and read whole, refused and a fault.
+
+`DREGION` is not checked with the MPU disabled, because the table is not
+consulted there at all -- the default map is the whole answer.  A test case pins
+that so it reads as a decision.
+
+Measured on the board (issue #114, the conditions block of `membench`):
+`MPU->TYPE 00001000`, i.e. `DREGION` = 16 = `PLUGIN_MPU_REGION_MAX`, with
+`CTRL 00000005` (`ENABLE` and `PRIVDEFENA`).  So the loader's table is exactly
+large enough, the refusal cannot fire on this silicon, and the host test is the
+only place it is ever seen to say no.
+
 The fallback to the default memory map is taken only with the MPU disabled, or
 enabled with `PRIVDEFENA` and no region matching any address in the range.  A
 partial or multiple match never falls back.

@@ -80,10 +80,20 @@ enum plugin_mpu_verdict plugin_mpu_judge(uint32_t ctrl, uint32_t type,
 
 	dregion = (type >> PLUGIN_MPU_TYPE_DREGION_SHIFT)
 	          & PLUGIN_MPU_TYPE_DREGION_MASK;
-	if (dregion > PLUGIN_MPU_REGION_MAX)
-		dregion = PLUGIN_MPU_REGION_MAX;
-	if (dregion > nregion)
-		dregion = nregion;              /* never read past what we were given */
+
+	/*
+	 * [!] REFUSED, NOT CLAMPED (issue #114).  Stopping at what we were handed
+	 * and answering anyway would be an answer about a different MPU: the
+	 * entries dropped are the HIGHER-numbered ones, and under PMSAv8 a second
+	 * enabled region intersecting the range is exactly what makes the access
+	 * fault.  So a short walk can only err towards "yes" -- an incomplete
+	 * snapshot is not a partial answer, it is the wrong one.
+	 *
+	 * (Not reachable with the MPU off: that path returns above without
+	 * consulting the table, because the default map is the whole answer.)
+	 */
+	if (dregion > nregion || dregion > PLUGIN_MPU_REGION_MAX)
+		return PLUGIN_MPU_TRUNCATED;
 
 	for (i = 0u; i < dregion; i++) {
 		uint32_t base, limit;
@@ -141,6 +151,7 @@ const char *plugin_mpu_strerror(enum plugin_mpu_verdict v)
 	switch (v) {
 	case PLUGIN_MPU_OK:          return "ok";
 	case PLUGIN_MPU_ARG:         return "bad argument";
+	case PLUGIN_MPU_TRUNCATED:   return "the MPU snapshot is incomplete";
 	case PLUGIN_MPU_NO_REGION:   return "no region covers it and no default map";
 	case PLUGIN_MPU_PARTIAL:     return "a region covers only part of it";
 	case PLUGIN_MPU_MULTIPLE:    return "more than one region intersects it";

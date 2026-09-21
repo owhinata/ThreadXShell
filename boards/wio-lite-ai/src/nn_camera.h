@@ -41,7 +41,9 @@
 
 #include <stdint.h>
 
-#include "blazeface.h"   /* struct bf_det / bf_result / BF_MAX_DET (svc/) */
+#include "blazeface.h"      /* struct bf_det / bf_result / BF_MAX_DET (svc/) */
+#include "nn_det_record.h"  /* enum nn_det_kind                              */
+#include "nn_svc.h"         /* struct nn_report_capture                      */
 
 #define NNCAM_OK           0
 #define NNCAM_ERR_RUNNING (-1)  /**< a stream is already running                 */
@@ -55,6 +57,7 @@
 #define NNCAM_ERR_TEARING (-9)  /**< stop: still tearing down -- see below        */
 #define NNCAM_ERR_REARM  (-10)  /**< re-arm after a lost stream failed; stop first */
 #define NNCAM_ERR_QUANT  (-11)  /**< int8 input without a per-tensor quant scale   */
+#define NNCAM_ERR_SHAPES (-12)  /**< the loaded decoder cannot read these outputs  */
 
 /**
  * The worker thread's (`nn_work`) stack, in DTCM.  Published here since issue #108
@@ -179,14 +182,36 @@ int nn_camera_dets_get(struct bf_det *out, int max);
  */
 struct nn_camera_decode {
 	int              valid;  /**< 0 = nothing decoded in this session yet     */
-	int              ndet;   /**< faces, or -1 for "not a BlazeFace model"    */
+	int              ndet;   /**< items; @ref kind says what they are         */
 	struct bf_result res;    /**< status, peak, pass/kept, threshold APPLIED  */
+	/**
+	 * [!] CARRIED, NOT RESTATED (issue #110).  This projection used to drop
+	 * the record's kind and the service layer asserted NN_DET_CALLER_BOXES
+	 * afterwards -- true while that was the only thing a record could hold,
+	 * and exactly the sort of statement that outlives the fact behind it.
+	 */
+	uint8_t          kind;   /**< one of @ref nn_det_kind                     */
 };
 
 /**
  * Take a coherent snapshot of the last published decode.
  *
- * @param dets  optional; the boxes, up to @p max of them
+ * @param dets  optional; the boxes, up to @p max of them.  Untouched when the
+ *              last decode was an external decoder's -- there are no boxes
+ * @param rep   optional.  When given AND the last decode belongs to a loaded
+ *              plugin, the plugin is asked to describe it and the bytes land
+ *              here.
+ *
+ * [!] THE CAPTURE AND THE SNAPSHOT ARE ONE TRANSACTION, which is why they are
+ * one call.  The plugin's result is private and it is rewritten by the next
+ * decode, so the only moment its account of it is guaranteed to describe THIS
+ * snapshot is while the result lease is held -- and taking the lease at one
+ * call site and the record at another would leave a decode able to land
+ * between them.  The order is lease, then the record lock; nothing takes them
+ * the other way round.
+ *
+ * Asking for a capture therefore costs a bounded wait behind a decode.  The
+ * panel does not ask (it passes NULL) precisely so that it never waits.
  * @return non-zero if a snapshot was taken (zero before the first stream start,
  *         when the lock does not exist yet).  A snapshot with `valid == 0` means
  *         the session has not decoded a frame yet -- which is NOT the same as a
@@ -197,7 +222,7 @@ struct nn_camera_decode {
  * boxes at all.
  */
 int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
-                         int max);
+                         int max, struct nn_report_capture *rep);
 
 /** Input normalization: 1 = [-1,1], 0 = [0,1] (default).  Applies to float32 and
  *  quantized inputs alike -- a quantized input is the normalized value put through

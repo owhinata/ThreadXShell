@@ -210,6 +210,17 @@ void *plugin_run_slot(unsigned slot)
 	return plugin_exec_slot(&pl_env, slot);
 }
 
+/*
+ * [!] noinline, AND THAT IS A PLACEMENT DECISION.  Its one caller is the fault
+ * handler, which lives in ITCM for interrupt latency, and
+ * cmake/check_itcm_residency.py refuses any reference out of ITCM that is not
+ * named with a reason.  Inlined, LTO left the shared loader's argument check
+ * out of line and the veneer pointed at an internal clone -- a target whose
+ * NAME is an artefact of this month's inlining.  Out of line, the handler
+ * makes exactly one call to a symbol that means something, and the allowance
+ * says why a fault may cost a flash fetch.
+ */
+__attribute__((noinline))
 const char *plugin_run_attribute(uint32_t pc, uint32_t *off)
 {
 	return plugin_exec_attribute(&pl_env, pc, off);

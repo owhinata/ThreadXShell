@@ -55,7 +55,12 @@
 #include "cam_band.h"    /* issue #9 P3: the band stream is shared with the NN now */
 #include "camera.h"
 #include "ltdc_display.h"
-#include "nn_camera.h"   /* issue #9 P4: the face boxes this thread draws */
+#include "nn_camera.h"
+#if defined(CONFIG_NN_BACKEND_TFLM)
+#include "nn_active.h"
+#include "plugin_lease.h"
+#include "plugin_paint.h"
+#endif   /* issue #9 P4: the face boxes this thread draws */
 #include "stm32h7xx.h"   /* DWT->CYCCNT: time the rotating blit */
 #include "tx_api.h"
 
@@ -244,6 +249,112 @@ static void preview_draw_overlay(void)
 		preview_box(&preview_dets[i]);
 }
 
+#if defined(CONFIG_NN_BACKEND_TFLM)
+/*
+ * The surface this panel draws on and the frame nn_active maps boxes into are
+ * the same rectangle, stated in two places because port/nn may not include
+ * port/ltdc.  This file sees both -- at RUN TIME, because the panel's own
+ * dimensions are private to ltdc_display.c and reachable only through its
+ * accessors, which is a deliberate property of that driver and not one to
+ * unpick for an assertion.  Checked once at init, where a mismatch is a line
+ * on the console rather than a plugin quietly drawing in the wrong place.
+ */
+static void preview_check_plugin_frame(void)
+{
+	if (ltdc_surface_w() != (uint16_t)NN_ACTIVE_FRAME_W ||
+	    ltdc_surface_h() != (uint16_t)NN_ACTIVE_FRAME_H)
+		LOG_ERR("the plugin's frame (%ux%u) is not the drawing surface "
+		        "(%ux%u); boxes will land in the wrong place",
+		        (unsigned)NN_ACTIVE_FRAME_W, (unsigned)NN_ACTIVE_FRAME_H,
+		        (unsigned)ltdc_surface_w(), (unsigned)ltdc_surface_h());
+}
+
+/*
+ * What one plugin draw() may spend.
+ *
+ * A quarter of the surface, which is where the other board started, taken here
+ * as an INITIAL TEST CEILING rather than a shipping one: what the budget bounds
+ * is time spent with the frame lock held, and on this board those pixels are
+ * CPU stores into non-cacheable external PSRAM.  The board README carries the
+ * measurement and the acceptance criteria; if they are not met this comes down.
+ */
+#define PREVIEW_PLUGIN_DRAW_PIXELS  (NN_ACTIVE_FRAME_W * NN_ACTIVE_FRAME_H / 4u)
+#define PREVIEW_PLUGIN_DRAW_OPS     64u
+
+/*
+ * [!] WRITER, READER AND ARM UNDER ONE RULE.  The writer below sets two words;
+ * a reader that masked interrupts only on its own side could still see the
+ * high-water from after one assignment beside the refusals from before the
+ * other.  Masking cannot reach backwards, so all three sites mask.
+ */
+static uint32_t preview_draw_spent;
+static uint32_t preview_draw_refused;
+
+void cam_preview_plugin_draw_stats(uint32_t *spent, uint32_t *refused)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	if (spent != NULL)
+		*spent = preview_draw_spent;
+	if (refused != NULL)
+		*refused = preview_draw_refused;
+	TX_RESTORE
+}
+
+void cam_preview_plugin_draw_arm(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	preview_draw_spent   = 0u;
+	preview_draw_refused = 0u;
+	TX_RESTORE
+	plugin_lease_misses_reset();
+}
+
+/*
+ * Let the loaded plugin paint, if it is willing to let go of its result.
+ *
+ * [!] THE LEASE IS TAKEN BEFORE THE FRAME LOCK, AND WITHOUT WAITING.  The order
+ * is the one every other holder uses, so there is no inversion; the no-wait is
+ * because this thread outranks the worker and blocking here would hold a lock
+ * wider than the thing it protects for as long as a decode takes.  A refusal
+ * presents the picture unannotated, which is the failure this pipeline already
+ * has for a process() that declines -- and plugin_lease_try() counts it,
+ * because the existing preview counters see a frame that was PRESENTED, not
+ * one presented bare.
+ *
+ * @return non-zero if the plugin drew, so the resident overlay does not also.
+ */
+static int preview_draw_plugin(void)
+{
+	struct plugin_painter paint;
+	struct plugin_paint_budget bud;
+	TX_INTERRUPT_SAVE_AREA
+
+	if (!nn_active_is_plugin())
+		return 0;
+	if (!plugin_lease_try())
+		return 1;        /* the plugin's frame, even though it drew nothing */
+
+	bud.pixels  = PREVIEW_PLUGIN_DRAW_PIXELS;
+	bud.ops     = PREVIEW_PLUGIN_DRAW_OPS;
+	bud.refused = 0u;
+	plugin_paint_bind(&paint, &bud, ltdc_back_buffer(),
+	                  ltdc_surface_w(), ltdc_surface_h());
+	nn_active_draw(&paint);
+	plugin_lease_give();
+
+	TX_DISABLE
+	if (PREVIEW_PLUGIN_DRAW_PIXELS - bud.pixels > preview_draw_spent)
+		preview_draw_spent = PREVIEW_PLUGIN_DRAW_PIXELS - bud.pixels;
+	preview_draw_refused += bud.refused;
+	TX_RESTORE
+	return 1;
+}
+#endif /* CONFIG_NN_BACKEND_TFLM */
+
 static void preview_entry(ULONG arg)
 {
 	(void)arg;
@@ -257,12 +368,21 @@ static void preview_entry(ULONG arg)
 			   removing up to 32 separate acquisitions from the window between
 			   the last band and the flip. */
 			ltdc_lock_frame();
-			/* Where a plugin's draw() will stand (issue #108): here, inside
-			   the frame lock and just ahead of the resident overlay -- not in
-			   preview_box(), which is deeper than a plugin will ever be
-			   called from and would over-report. */
+			/* Where a plugin's draw() stands (issue #108 placed the probe,
+			   #110 put the call beside it): here, inside the frame lock and
+			   INSTEAD OF the resident overlay -- not in preview_box(), which
+			   is deeper than a plugin is ever called from and would
+			   over-report. */
 			nn_camera_note_depth(NNCAM_SITE_DRAW);
+#if defined(CONFIG_NN_BACKEND_TFLM)
+			/* One decoder annotates a frame, not two: the plugin's boxes and
+			   the resident decoder's would be different readings of different
+			   models. */
+			if (!preview_draw_plugin())
+				preview_draw_overlay();
+#else
 			preview_draw_overlay();
+#endif
 			if (ltdc_flip() == LTDC_OK)
 				preview_shown++;
 			else
@@ -281,6 +401,9 @@ int cam_preview_init(void)
 		LOG_ERR("preview semaphore create failed");
 		return -1;
 	}
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	preview_check_plugin_frame();
+#endif
 	if (tx_thread_create(&preview_thread, "cam_prev", preview_entry, 0,
 	                     preview_stack, sizeof preview_stack,
 	                     PREVIEW_PRIO, PREVIEW_PRIO,

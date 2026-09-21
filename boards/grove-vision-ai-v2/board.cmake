@@ -692,6 +692,9 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/npu/nn_svc_grove.c"
     "${BOARD_DIR}/port/npu/nn_stream_state.c"
     "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"
+    # The bounded sink a board captures an external decoder's report into
+    # (issue #110); the buffer itself belongs to the shared command.
+    "${CMAKE_SOURCE_DIR}/svc/nn_report.c"
     ${SHELL_SOURCES}
     ${SDK_SOURCES}
     ${TX_CORE} ${TX_ASM} ${TX_EPK})

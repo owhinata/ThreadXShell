@@ -451,6 +451,7 @@ add_executable(shell
     "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
     "${BOARD_DIR}/cmds/cmd_nn_board.c"
     "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn_report.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/fs_cmd_core.c"
     "${BOARD_DIR}/port/qspi/qspi_flash.c"
     "${BOARD_DIR}/port/sd/sd_card.c"

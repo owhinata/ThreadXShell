@@ -107,6 +107,15 @@ int nn_active_decode(const struct npu_tensor *outs, unsigned n);
 void nn_active_draw(const struct plugin_painter *paint);
 
 /**
+ * @brief  Will the active decoder describe its own result in words?
+ *
+ * REPORT is an optional slot, and "it said nothing" and "it has nothing to say
+ * with" are different answers to an operator -- so the caller asks first
+ * rather than reading an empty capture as either (issue #110).
+ */
+int nn_active_can_report(void);
+
+/**
  * @brief  Will the active decoder put anything on the panel?
  *
  * A plugin need not draw: DRAW is an optional slot, and a classifier has

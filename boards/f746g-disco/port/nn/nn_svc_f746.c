@@ -23,6 +23,7 @@
  * prints.
  */
 #include "nn_svc.h"
+#include "nn_report.h"
 
 #include <stdarg.h>
 #include <string.h>
@@ -342,6 +343,7 @@ int nn_svc_input(struct tensor_desc *out)
 /* ---- one shot ------------------------------------------------------------ */
 
 void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
+                     struct nn_report_capture *rep,
                      nn_svc_cancel_fn cancel, void *ctx,
                      struct nn_op_result *res)
 {
@@ -410,6 +412,10 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	   everything it is not told to carry, and a snapshot reused across two reads
 	   would otherwise keep whatever routing the previous one had. */
 	snap->kind  = (uint8_t)NN_DET_CALLER_BOXES;
+	/* No external decoder on this board, so nothing was captured -- stated
+	 * rather than left to the caller's initialiser, for the same reason the
+	 * kind is (issue #110). */
+	nn_report_set(rep, NN_REPORT_NONE);
 
 	stop_rc = nn_camera_stop();
 	nn_result(res, NN_SVC_OK, nn_claim_of_stop(stop_rc));
@@ -419,7 +425,8 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 }
 
 void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
-                           int max, struct nn_op_result *res)
+                           int max, struct nn_report_capture *rep,
+                           struct nn_op_result *res)
 {
 	struct nn_camera_decode dec;
 
@@ -435,6 +442,7 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
 	   everything it is not told to carry, and a snapshot reused across two reads
 	   would otherwise keep whatever routing the previous one had. */
 	snap->kind  = (uint8_t)NN_DET_CALLER_BOXES;
+	nn_report_set(rep, NN_REPORT_NONE);
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
 
@@ -921,18 +929,3 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	(void)ctx;
 }
 
-/*
- * Nothing to say (issue #103).
- *
- * The shared command only calls this when a board has already set
- * nn_det_snapshot::external -- "the boxes are not in your array" -- and this
- * board never does, because it has no loadable decoder.  So this is not a stub
- * kept for symmetry: it is unreachable here, and if it ever ran it would mean
- * this board had contradicted itself.
- */
-int nn_svc_report(nn_svc_write_fn write, void *ctx)
-{
-	(void)write;
-	(void)ctx;
-	return 0;
-}

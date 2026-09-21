@@ -661,7 +661,8 @@ static void nn_print_raw_outputs(struct cli_instance *sh)
 
 static void nn_print_dets(struct cli_instance *sh,
                           const struct nn_det_snapshot *snap,
-                          const struct bf_det *dets)
+                          const struct bf_det *dets,
+                          const struct nn_report_capture *rep)
 {
 	int i;
 
@@ -682,12 +683,38 @@ static void nn_print_dets(struct cli_instance *sh,
 	 * is its own.
 	 */
 	if (snap->kind == (uint8_t)NN_DET_PLUGIN_REPORT) {
-		struct nn_info_sink sink;
-
-		sink.sh = sh;
-		if (nn_svc_report(nn_info_write, &sink) < 0)
+		/*
+		 * [!] THE BYTES WERE CAPTURED WHEN THE SNAPSHOT WAS TAKEN (issue #110),
+		 * under whatever protection made the result still the one this snapshot
+		 * describes.  By now that is long gone -- the session was released
+		 * before this function was reached, and another console may have
+		 * replaced the plugin -- so there is nothing left to ask.  Which is why
+		 * this prints a buffer rather than calling a decoder.
+		 */
+		if (rep != NULL && rep->len != 0u)
+			cli_write(sh, rep->buf, (size_t)rep->len);
+		/* Length is not a status: zero bytes is a legal report, and each of
+		 * these is a different thing to tell an operator. */
+		switch (rep != NULL ? rep->status : (uint8_t)NN_REPORT_NONE) {
+		case NN_REPORT_TRUNCATED:
+			cli_warn(sh, "nn: the decoder had more to say than there was room "
+			             "for\r\n");
+			break;
+		case NN_REPORT_REFUSED:
 			cli_warn(sh, "nn: the decoder stopped part way through its own "
 			             "report\r\n");
+			break;
+		case NN_REPORT_UNSUPPORTED:
+			cli_warn(sh, "nn: this decoder does not describe its own "
+			             "result\r\n");
+			break;
+		case NN_REPORT_STALE:
+			cli_warn(sh, "nn: the result was gone before it could be "
+			             "read\r\n");
+			break;
+		default:
+			break;
+		}
 		return;
 	}
 	/*
@@ -736,6 +763,14 @@ static int cmd_nn_run(struct cli_instance *sh, int argc, char **argv)
 	struct nn_det_snapshot snap;
 	struct bf_det dets[BF_MAX_DET];
 	struct nn_op_result res;
+	/* [!] THE CAPTURE BUFFER IS THIS FRAME'S (issue #110).  An external
+	 * decoder's account of its result is taken while the result is still
+	 * protected, which is inside the call below; putting the bytes anywhere a
+	 * second console could reach would hand this console the other one's
+	 * report. */
+	char rbuf[NN_REPORT_CAPTURE_MAX];
+	struct nn_report_capture rep = { rbuf, (uint32_t)sizeof rbuf, 0u,
+	                                 (uint8_t)NN_REPORT_NONE };
 
 	(void)argc; (void)argv;
 
@@ -743,7 +778,7 @@ static int cmd_nn_run(struct cli_instance *sh, int argc, char **argv)
 	memset(dets, 0, sizeof dets);
 	memset(&res, 0, sizeof res);
 
-	nn_svc_run_once(&snap, dets, BF_MAX_DET, nn_cancel_shim, sh, &res);
+	nn_svc_run_once(&snap, dets, BF_MAX_DET, &rep, nn_cancel_shim, sh, &res);
 	if (res.status != NN_SVC_OK) {
 		nn_report(sh, "run", &res);
 		return 1;
@@ -756,7 +791,7 @@ static int cmd_nn_run(struct cli_instance *sh, int argc, char **argv)
 		cli_warn(sh, "nn: no decode was published for that frame\r\n");
 		return 1;
 	}
-	nn_print_dets(sh, &snap, dets);
+	nn_print_dets(sh, &snap, dets, &rep);
 	return 0;
 }
 #endif /* NN_SVC_HAS_CAMERA */
@@ -766,6 +801,9 @@ static int cmd_nn_dets(struct cli_instance *sh, int argc, char **argv)
 	struct nn_det_snapshot snap;
 	struct bf_det dets[BF_MAX_DET];
 	struct nn_op_result res;
+	char rbuf[NN_REPORT_CAPTURE_MAX];      /* this frame's; see cmd_nn_run */
+	struct nn_report_capture rep = { rbuf, (uint32_t)sizeof rbuf, 0u,
+	                                 (uint8_t)NN_REPORT_NONE };
 
 	(void)argc; (void)argv;
 
@@ -773,7 +811,7 @@ static int cmd_nn_dets(struct cli_instance *sh, int argc, char **argv)
 	memset(dets, 0, sizeof dets);
 	memset(&res, 0, sizeof res);
 
-	nn_svc_decode_current(&snap, dets, BF_MAX_DET, &res);
+	nn_svc_decode_current(&snap, dets, BF_MAX_DET, &rep, &res);
 	if (res.status != NN_SVC_OK) {
 		nn_report(sh, "dets", &res);
 		return 1;
@@ -784,7 +822,7 @@ static int cmd_nn_dets(struct cli_instance *sh, int argc, char **argv)
 		cli_warn(sh, "nn: nothing has been inferred yet\r\n");
 		return 1;
 	}
-	nn_print_dets(sh, &snap, dets);
+	nn_print_dets(sh, &snap, dets, &rep);
 	return 0;
 }
 

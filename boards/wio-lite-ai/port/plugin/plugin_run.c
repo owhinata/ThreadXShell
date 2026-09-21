@@ -12,7 +12,15 @@
 #include "plugin_run.h"
 #include "plugin_mpu_v7m.h"
 
-#include "nn.h"                  /* nn_model_load_region() */
+/*
+ * [!] port/nn/nn.h IS DELIBERATELY NOT INCLUDED.  It was, for
+ * nn_model_load_region(), and asking that question here is the bug this file's
+ * header describes: the backend is double-slotted and the answer changes under
+ * the very operation this runs after.  With the header gone the mistake is not
+ * available to make again, which is a better guard than a comment saying not
+ * to.
+ */
+
 #include "stm32h7xx_hal.h"       /* CMSIS core: MPU, SCB, caches, barriers */
 
 #include <stddef.h>
@@ -103,17 +111,35 @@ static void pl_sync_caches(uint32_t base, uint32_t len)
 }
 
 /*
+ * The staging region the CALLER was handed, travelling as the port token.
+ *
+ * [!] A STACK OBJECT OF plugin_run_load()'s, not a file-scope one.  It is
+ * valid for exactly the call that passes it, which is the whole lifetime the
+ * check needs -- and a static would be a second place for "which region" to
+ * live, on a board where getting that wrong is what this hook exists to
+ * catch.
+ */
+struct pl_source {
+	const uint8_t *lo;
+	uint32_t       cap;
+};
+
+/*
  * The image is read out of the backend's staging buffer, and the whole of what
  * will be read has to be inside it.
  *
  * [!] THIS IS A WEAKER OBLIGATION THAN GROVE'S, AND STILL A CHECK.  There is no
  * window here to be taken down -- the container is a copy in RAM whose CRC the
  * caller has already verified -- so what can go wrong is not a lifetime but a
- * provenance: a caller handing over a pointer into some other buffer.  Asking
- * the backend where its staging region is, and requiring [container, +len) to
- * lie inside it, is what makes "the caller went through nn_model_load_region()
- * while holding the NN session" something this file establishes rather than
- * assumes.
+ * provenance: a caller handing over a pointer into some other buffer.
+ *
+ * [!] AND THE REGION IS THE CALLER'S TOKEN, NOT A QUERY.  This asked
+ * nn_model_load_region() itself, and the backend is DOUBLE-SLOTTED: that call
+ * hands out the INACTIVE slot, so once nn_model_reload() adopted the staged
+ * model the query began answering with the other one and every container was
+ * refused on hardware.  The caller holds the NN session across load_region()
+ * and reload() -- that is the rule port/nn/nn.h states -- so the region it was
+ * handed is the fact, and it hands it here.
  *
  * It deliberately does NOT claim the session is still held.  A predicate for
  * that would answer "somebody holds it", which is a fact about another
@@ -122,21 +148,18 @@ static void pl_sync_caches(uint32_t base, uint32_t len)
 static int pl_source_ok(const void *container, uint32_t len, uintptr_t token,
                         const char **why)
 {
-	const uint8_t *lo, *hi, *c = (const uint8_t *)container;
-	void *buf = NULL;
-	uint32_t cap = 0u;
+	const struct pl_source *src = (const struct pl_source *)(uintptr_t)token;
+	const uint8_t *c = (const uint8_t *)container;
 
-	(void)token;
-	if (nn_model_load_region(&buf, &cap) != 0 || buf == NULL) {
+	if (src == NULL || src->lo == NULL || src->cap == 0u) {
 		if (why != NULL)
-			*why = "the backend has no staging region";
+			*why = "the caller named no staging region";
 		return -1;
 	}
-	lo = (const uint8_t *)buf;
-	hi = lo + cap;
-	if (c < lo || len > cap || c + len > hi) {
+	if (c < src->lo || len > src->cap || c + len > src->lo + src->cap) {
 		if (why != NULL)
-			*why = "the image is not inside the backend's staging region";
+			*why = "the image is not inside the staging region the caller "
+			       "was handed";
 		return -1;
 	}
 	return 0;
@@ -162,12 +185,14 @@ static const struct plugin_exec_env pl_env = {
 
 enum plugin_run_result plugin_run_load(const struct plugin_view *v,
                                        const void *container,
+                                       const void *stage, uint32_t cap,
                                        const struct plugin_base_api *base)
 {
+	struct pl_source src = { (const uint8_t *)stage, cap };
 	const char *why = NULL;
 	enum plugin_run_result r;
 
-	r = plugin_exec_load(&pl_env, v, container, 0u, base, &why);
+	r = plugin_exec_load(&pl_env, v, container, (uintptr_t)&src, base, &why);
 	switch (r) {
 	case PLUGIN_RUN_OK:
 		LOG_INF("'%s' (build %s) loaded: %lu B at 0x%08lx",

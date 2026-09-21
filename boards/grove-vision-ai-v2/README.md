@@ -5556,6 +5556,22 @@ of the painter's new charge, the critical sections and the neutral wording.
 | classifier `drew` | -- | **4,400 px** |
 | classifier fps | -- | **8.9** |
 
+**Re-measured after issue #110** moved the loader, the outline geometry rule and
+the paint charge into `svc/` so that wio-lite-ai could share them.  Nothing on
+this board was meant to change, and nothing did:
+
+| | #105 | after #110 |
+|---|---:|---:|
+| `at call` producer / panel | 553 / 217 B | **553 / 217 B** |
+| detector fps | 37.00 | **37.02** |
+| detector `decode` | 148 us | **138 us** |
+| primitives refused | 0 | **0** |
+
+The call-site depths coming back bit-identical is the useful one: it is what
+says the extraction did not change where this board's plugin callbacks stand.
+(`drew` is a high-water over the run and moves with the scene -- 736 px was one
+face; a run with two of them charges more, by the same rule.)
+
 **The charge fell by a factor of six on the same kind of scene** (4,356 -> 736),
 which is the enclosing area giving way to the outline's real cost: 736 is a
 70x70 box's 544 stores plus one 24x8 chip.  `held` rose 6 us for eight chips and

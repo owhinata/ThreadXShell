@@ -609,20 +609,36 @@ declaration from a current one.**  `svc/plugin_load.c` checks the declaration ag
   ABI change -- its own issue.  Neither shipped plugin is near its allowance,
   so this is a guarantee weaker than it reads rather than a fault in flight.
 
-### Acceptance criteria (to be met before this is called done)
+### What the panel costs, measured
 
 A counter that goes up with no threshold beside it does not establish that
-anything works.  Before the hardware run, freeze: the workload, how long it
-runs, the acceptable overlay-miss fraction and maximum consecutive run, the
-maximum draw and frame-transaction time, and the maximum lease wait a console
-sees.  Require zero new DCMI errors, LTDC underruns or band corruption
-attributable to the plugin, against a baseline taken with the resident decoder.
-Define the miss denominator too, and count a refused or partly drawn overlay as
-a miss, not a success -- and require useful progress (presented frames,
-inferences, successful overlay opportunities), because a decode that stalls
-improves the miss fraction.
+anything works.  The run below is CHARACTERISATION -- it discovered the
+numbers; it did not test them against requirements agreed beforehand, which is
+what an acceptance run is.  The thresholds for future runs are derived from it,
+and a failed run does not become a pass by relaxing one afterwards.
 
-A failed run does not become a pass by relaxing a threshold afterwards.
+`nn stream start` with the preview on and a face moving in and out of frame,
+35 s, 479 frames in and 67 inferences:
+
+| | measured | threshold for a future run |
+|---|---:|---|
+| draw charge, high-water per frame | **896 px** of 19,200 | under half the cap |
+| primitives refused for want of budget | **0** | 0 -- a refusal is a box that silently vanished |
+| frames the panel could not get the lease for | **0** | under 5% of presented frames |
+| worst consecutive run of those | **0** | 2 -- a run is what reads as blinking |
+| inference rate | 1.90 inf/s, 411 ms | within 5% of the resident decoder's |
+| worker errors / raced tensors | **0 / 0** | 0 |
+| ingest, worst band | 1,009 us | under the ~18,500 us band deadline |
+| DCMI errors, LTDC underruns, torn bands | **0** | 0, against a resident-decoder baseline |
+
+The lease misses being zero is the result worth keeping: the panel outranks the
+worker and acquires without waiting, so a decode long enough to matter would
+show up here as a run of skipped overlays.  It does not -- the plugin's decode
+is short beside the 411 ms the inference itself takes.
+
+Count a refused or partly drawn overlay as a miss rather than a success, and
+read the miss fraction beside the progress numbers: a decode that stalls
+improves it.
 
 DTCM is the ceiling if 3b has to grow `nn_work`: `free` reports 12,736 B free,
 but 8,192 of that is the main stack's reservation at the top of the region.

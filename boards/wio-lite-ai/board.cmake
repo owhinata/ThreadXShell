@@ -814,17 +814,6 @@ set(NN_SOURCES "${BOARD_DIR}/port/nn/nn.c"
 # backend was selected, and CMake is the only place that knows.  When the list was
 # hard-coded in the script, the script itself refused every tflm build -- the `null`
 # stub's buffers are not in that image.
-# [!] ONE VARIABLE FOR THE SHARED DECODER'S PATH (issue #97): the source list and
-# the residency gate below must name the same file, and spelling it twice is how
-# they drift.
-get_filename_component(WIO_SHARED_DECODER
-                       "${CMAKE_SOURCE_DIR}/svc/blazeface.c" ABSOLUTE)
-if(NOT EXISTS "${WIO_SHARED_DECODER}")
-    message(FATAL_ERROR
-        "shared BlazeFace decoder not found:\n  ${WIO_SHARED_DECODER}\n"
-        "This board builds it (issue #97); it is not optional.")
-endif()
-
 set(NN_PSRAM_AI_REQUIRED "")
 if(CONFIG_NN_BACKEND STREQUAL "null")
     list(APPEND NN_SOURCES "${BOARD_DIR}/port/nn/nn_null.c")
@@ -1469,6 +1458,24 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # it this board produces, and AUDIT_SHARED is what keeps the
     # no-mutable-storage rule on it -- on the object that actually ships inside
     # a container.
+    #
+    # [!] ONE VARIABLE FOR ITS PATH, and the reason is no longer the one issue
+    # #97 had.  It used to keep the firmware's source list and the residency
+    # gate naming the same file; both of those consumers went with the resident
+    # decoder.  What it keeps in step now is SOURCES and AUDIT_SHARED below --
+    # spell the path twice and they can drift, which would audit one file and
+    # compile another.  That is a fail-OPEN, so the file is also required to
+    # exist, HERE rather than at the top of this script: nothing outside this
+    # block compiles it, and a `null` build that refused to configure over a
+    # file it never reads would be a gate firing for a build it does not guard.
+    get_filename_component(WIO_SHARED_DECODER
+                           "${CMAKE_SOURCE_DIR}/svc/blazeface.c" ABSOLUTE)
+    if(NOT EXISTS "${WIO_SHARED_DECODER}")
+        message(FATAL_ERROR
+            "shared BlazeFace decoder not found:\n  ${WIO_SHARED_DECODER}\n"
+            "The blazeface plugin is built from it; it is not optional.")
+    endif()
+
     set(WIO_PLUGIN_ELFS "")
     add_plugin(blazeface
         CFLAGS ${WIO_PLUGIN_CFLAGS}

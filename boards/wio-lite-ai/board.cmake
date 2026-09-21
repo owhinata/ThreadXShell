@@ -1415,22 +1415,30 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # was measured with -fstack-usage over its callbacks, LTO off, summed along
     # the deepest chain a plugin veneer can reach:
     #
-    #   nn_plugin_log 16 + log_write 16 + log_vwrite 192
-    #     + fmt_vsnformat 32 + fmt_vformat 80 + fmt_utoa 64          = 400 B
+    #   nn_plugin_log       80   (16 + the 64 B buffer it copies into)
+    #   log_write          200   (LTO folds log_vwrite into it)
+    #   fmt_vsnformat       32
+    #   fmt_vformat         80
+    #   fmt_utoa            64
+    #   __aeabi_uldivmod    16   (fmt_utoa divides 64-bit)
+    #   __udivmoddi4        40
+    #                      ---
+    #                      512 B
     #
-    # (fmt_utoa and fmt_padded are called in sequence, not nested, so the
-    # deeper of the two ends the chain.  The painter is far shallower --
-    # paint_rect 64 + rect_geom_norm 16 -- and to_frame and the report sink are
-    # leaves.)
+    # [!] THE FIRST VERSION OF THIS SUM STOPPED AT fmt_utoa, at 400 B, and was
+    # short by the two division helpers underneath it.  The review that caught
+    # it makes the general point: measuring a callback's own frame is not
+    # measuring what is below the crossing.  (fmt_utoa and fmt_padded are
+    # called in SEQUENCE, so the deeper one ends the chain; the painter is far
+    # shallower -- paint_rect 64 + rect_geom_norm 16 -- and to_frame and the
+    # report sink are leaves.)
     #
-    # 512 rather than 400: the measurement is per-TU frames with LTO off, and
-    # the shipped build inlines across these boundaries.  OVER-estimating is
-    # the safe direction here, because the gate charges this at every crossing
-    # and a larger charge makes a plugin's declared requirement larger, not
-    # smaller.  RE-DERIVE IT whenever the base gains a callback or one of them
-    # gains a call -- the old number would still pass, which is the shape of
-    # the mistake this replaces.
-    set(WIO_PLUGIN_VENEER_BASE_COST 512)
+    # 640 rather than 512: over-estimating is the safe direction here, because
+    # the gate charges this at every crossing and a larger charge makes a
+    # plugin's computed requirement larger, not smaller.  RE-DERIVE IT whenever
+    # the base gains a callback or one of them gains a call -- the old number
+    # would still pass, which is the shape of the mistake this replaces.
+    set(WIO_PLUGIN_VENEER_BASE_COST 640)
 
     set(WIO_PLUGIN_COMMON "${CMAKE_SOURCE_DIR}/asset/common")
     set(WIO_PLUGIN_MEMORY_LD "${BOARD_DIR}/ldscript/plugin_memory.ld")

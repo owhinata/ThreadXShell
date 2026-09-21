@@ -709,8 +709,11 @@ static void nn_print_dets(struct cli_instance *sh,
 			             "result\r\n");
 			break;
 		case NN_REPORT_STALE:
-			cli_warn(sh, "nn: the result was gone before it could be "
-			             "read\r\n");
+			/* [!] NOT "the result was gone": this covers a decoder that was
+			 * merely BUSY when the capture was attempted, and a result that
+			 * is intact but unreachable is a different thing to be told. */
+			cli_warn(sh, "nn: the decoder could not be reached to describe "
+			             "it\r\n");
 			break;
 		default:
 			break;

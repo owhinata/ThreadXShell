@@ -127,10 +127,14 @@ struct plugin_exec_port {
 	 * hook is indistinguishable from a board that forgot.
 	 *
 	 * @param container  the address the image will be read from
+	 * @param len        how many bytes from there the loader will read, so a
+	 *                   board can bound the question rather than answering it
+	 *                   about an address alone
 	 * @param token      whatever the board's caller passes as proof
 	 * @return 0 when it is; non-zero with @p why set to a short reason.
 	 */
-	int (*source_ok)(const void *container, uintptr_t token, const char **why);
+	int (*source_ok)(const void *container, uint32_t len, uintptr_t token,
+	                 const char **why);
 };
 
 /**

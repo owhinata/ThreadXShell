@@ -93,8 +93,13 @@ enum plugin_run_result plugin_exec_load(const struct plugin_exec_env *env,
 	/* The memory the image is read from must still be guaranteed by the
 	 * caller.  See plugin_exec.h for why this is a check and not a new
 	 * mechanism. */
+	/* How far into the container the loader will actually read.  plugin_parse()
+	 * has already established that this lies inside the container it validated,
+	 * so the addition cannot overflow here -- and it is the extent a board needs
+	 * in order to answer about a range rather than about one address. */
 	if (env->port->source_ok != NULL &&
-	    env->port->source_ok(container, token, &reason) != 0) {
+	    env->port->source_ok(container, v->image_off + v->file_size, token,
+	                         &reason) != 0) {
 		if (why != NULL)
 			*why = reason;
 		return PLUGIN_RUN_NO_SOURCE;

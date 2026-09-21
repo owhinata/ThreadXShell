@@ -898,6 +898,18 @@ list(APPEND SHELL_SOURCES ${NN_SOURCES}
      "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c" # its pure half
      "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c")     # the shared stream lifecycle
 
+# The plugin loader (issue #110 = #78 Step 3b): the machine in svc/, this
+# board's state, reservation, cache maintenance, Armv7-M MPU read-back and
+# source precondition in port/plugin/.  Only the tflm backend can carry a
+# container -- the null backend has no model to carry one with -- so this
+# follows CONFIG_NN_BACKEND, exactly as the container validation of #108 does.
+if(CONFIG_NN_BACKEND STREQUAL "tflm")
+    list(APPEND SHELL_SOURCES
+         "${CMAKE_SOURCE_DIR}/svc/plugin_exec.c"
+         "${BOARD_DIR}/port/plugin/plugin_run.c"
+         "${BOARD_DIR}/port/plugin/plugin_mpu_v7m.c")
+endif()
+
 # The MLPerf Tiny v1.4 benchmark harness.  Like CONFIG_NN_BACKEND above and
 # for the same reason, this is NOT a BSP_ENABLE_* switch -- those all name a piece of
 # hardware, and the point of each is a firmware that leaves those pins alone while
@@ -979,6 +991,7 @@ target_include_directories(shell PRIVATE
     "${BOARD_DIR}/port/nor"                      # nor_flash.h
     "${BOARD_DIR}/port/nn"                       # nn.h / nn_backend.h
     "${BOARD_DIR}/port/nn/models"                # blazeface.h
+    "${BOARD_DIR}/port/plugin"                   # plugin_run.h / plugin_mpu_v7m.h
     # Our fdb_cfg.h / fal_cfg.h must be found BEFORE FlashDB's own inc/,
     # which ships fdb_cfg_template.h only -- FlashDB includes <fdb_cfg.h> by name.
     "${BOARD_DIR}/port/flashdb"

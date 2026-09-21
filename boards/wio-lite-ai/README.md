@@ -316,8 +316,13 @@ operator sees on a model with no plugin:
 | `nn run` | runs the inference and reports the **output tensors themselves** |
 | `nn stream start` | **refused before the camera is lit** -- nothing would annotate the preview |
 | `nn thresh` | `none -- the active decoder has no threshold`; setting one is refused as a state, not as a bad value |
+| `nn info` | its `thresh` line says the same thing, for the same reason -- it asks the same service call |
 | `nn dets` | *nothing decoded yet* -- always, on this board (below) |
 | the panel | presents the picture exactly as the bands built it |
+
+(The `nn info` row is the one the plan did not count.  It listed five
+observable changes; there are six, because `nn info` prints the threshold
+through `nn_svc_thresh_get()` like `nn thresh` does.)
 
 The tensors are reported as tensors and **not** through the shared class
 report: that one reads output 0 as a vector of class scores, which for a
@@ -581,15 +586,22 @@ when a model changes.
 
 | | measured |
 |---|---|
-| blazeface plugin (M7) | text 4,016 B, bss 4,816 B, load image 8,832 B; requirement with #110's veneer charge: decode 648, draw 588 B |
-| cifar10 plugin (M7) | text 2,704 B, bss 8,852 B, load image 11,584 B; requirement: decode 688, draw 548, report 592 B |
+| blazeface plugin (M7) | text 4,016 B, bss 4,816 B, load image 8,832 B; requirement at the declared 640 B veneer charge: decode 776, draw 716 B |
+| cifar10 plugin (M7) | text 2,704 B, bss 8,852 B, load image 11,584 B; requirement: decode 816, draw 676, report 720 B |
 | blazeface container | 194,120 B (model 189,816 B at +4,304) |
 | `.plugin` reservation | 32 KB -- 2.8x the larger load image (cifar10's 11,584 B) |
-| app flash, default build (SD off) | **362,380 B of 384 KB (92.2%), 30,836 B free** -- #116 gave back 1,840 B of the 4,628 B #110's wiring cost over #108 |
-| AXI-SRAM heap room | **102,944 B** (`end` to `__heap_end`, SD off) -- #116 added 192 B |
-| `.psram_ai` carve-out in use | **1,638,400 B** -- #116 gave back the 1,536 B candidate scratch (`BF_MAX_CAND` x `sizeof(struct bf_cand)`), which the resident decoder owned |
+| app flash, default build (SD off) | **362,372 B of 384 KB (92%), 30,844 B free** -- what `free` reports on hardware at e09ce56.  #116 gave back **1,840 B** of the 4,628 B #110's wiring cost over #108 (below) |
+| AXI-SRAM heap room | **102,944 B** (`end` to `__heap_end`, SD off) -- #116 added 192 B.  `free` says 102,912 for that region, which is the same number less the 32 B already handed out |
+| `.psram_ai` carve-out in use | **1,638,400 B**, and `free` agrees -- #116 gave back the 1,536 B candidate scratch (`BF_MAX_CAND` x `sizeof(struct bf_cand)`), which the resident decoder owned |
 | DTCM ceiling for growing `nn_work` | **4,544 B** (`_smsp_stack - _dtcm_used_end`; the 8 KB main-stack reservation is not free) |
-| stack already spent at the plugin call sites | **641 B of 3,072 on `nn_work`** (decode), **137 B of 1,536 on `cam_prev`** (draw), **1,593 B of 4,096 on the shell** (report / load / admission) -- measured at #110 with a plugin actually running |
+| stack already spent at the plugin call sites | **49 B of 3,072 on `nn_work`** (decode), **105 B of 1,536 on `cam_prev`** (draw), **1,593 B of 4,096 on the shell** -- measured at #116 with a plugin running; #110 measured 641 / 137 / 1,593 |
+
+**[!] The two flash figures are not each other's difference.**  1,840 B is what
+the change cost, comparing builds whose version string is the same length.  The
+baseline this was flashed over reported 364,220 B, from a `-dirty` build -- and
+that suffix costs this image 8 B (six characters, rounded up by alignment;
+measured both ways).  Subtracting the two `free` lines gives 1,848 and is
+wrong.
 
 The call-site depths are measured where a plugin stands: on `nn_work` in the
 worker step immediately before the decode, on the preview thread inside the
@@ -600,9 +612,25 @@ safe direction -- and it sits AT the call rather than in the caller, so the
 number does not depend on whether the caller was inlined this month.
 
 (The #108 figures were 609 and 105, taken when nothing was called at those
-sites.  **The three above are #110's**, taken while the firmware still had a
-resident decoder to stand beside; #116 removed it, so they are due to be taken
-again.)
+sites.  The panel's figure landing on 105 again at #116 is a measurement on a
+different firmware, not a number carried over.)
+
+**[!] The decode site got 592 B shallower, and that is the resident decoder's
+frame leaving.**  `nn_work`'s figure went 641 -> 49 between #110 and #116, which
+is large enough to be worth checking rather than asserting: in the #110 image
+`nncam_step` opens with `sub sp, sp, #564` and saves nine registers, and in the
+#116 image it is inlined into `nncam_entry`, which reserves **no local area at
+all**.  What was in those 564 bytes is what went: the worker's box array
+(`struct bf_det tmp[BF_MAX_DET]`), the `bf_result` beside it, the descriptor
+array `nn_decoder_run()` contributed once LTO inlined it, and
+`blazeface_decode`'s own 64-byte `used[]`.  The panel's site moved by 32 B
+(137 -> 105) for the same kind of reason; the shell's did not move at all,
+which is the expected answer -- nothing on that path changed.
+
+A shallower call site does not make a plugin's allowance larger: the allowances
+below are declared, and a container is packed against them.  It makes the
+headroom between them and the thread's stack larger, which is the thing being
+checked.
 
 ### The stack budget, and what is still owed to it (issue #110)
 
@@ -676,17 +704,22 @@ today's plugin happens to need is how a limit stops being one, so the thread is
 
 | thread | stack | at call | reserve | derived room | declared | plugin needs |
 |---|---:|---:|---:|---:|---:|---:|
-| `nn_work` (decode) | 3,072 | 641 | 208 | 2,223 | 1,024 | 776 |
-| `cam_prev` (draw) | 1,536 | 137 | 208 | 1,191 | 1,024 | 716 |
+| `nn_work` (decode) | 3,072 | 49 | 208 | 2,815 | 1,024 | 776 |
+| `cam_prev` (draw) | 1,536 | 105 | 208 | 1,223 | 1,024 | 716 |
 | shell (entry / shapes / report / params) | 4,096 | 1,593 | 208 | 2,295 | 1,024 | 728 |
 
-**The `at call` column is issue #110's measurement**, taken with a plugin
-running on a firmware that still carried a resident decoder.  Every allowance
-sits under its derived room, and the shipped plugin well under the allowance.
-Issue #116 removed the decoder and the overlay, which changes what stands below
-those call sites, so the column is due to be taken again -- the allowances
-themselves do not move, because a container declares itself against them and
-this firmware cannot tell a stale declaration from a current one (below).
+**The `at call` column is issue #116's measurement**, taken on hardware with a
+plugin running (#110's was 641 / 137 / 1,593, on the firmware that still carried
+a decoder).  Every allowance sits under its derived room, and the shipped plugin
+well under the allowance.
+
+**The allowances did not move, and that is deliberate.**  A shallower call site
+widens the room the declaration has to fit in; it is not a reason to declare
+more.  A container is packed against these numbers and this firmware cannot tell
+a stale declaration from a current one (below), so changing one means re-packing
+and re-sending every container that exists.  The measurements are here to show
+that each allowance still FITS -- the check issue #103 found two placeholders
+failing.
 
 **[!] STILL OWED:** more than operationally, **the firmware cannot tell a stale
 declaration from a current one.**  `svc/plugin_load.c` checks the declaration against the
@@ -697,34 +730,35 @@ declaration from a current one.**  `svc/plugin_load.c` checks the declaration ag
   ABI change -- its own issue.  Neither shipped plugin is near its allowance,
   so this is a guarantee weaker than it reads rather than a fault in flight.
 
-### What the panel costs, measured (issue #110's run)
+### What the panel costs, measured
 
 A counter that goes up with no threshold beside it does not establish that
-anything works.  The run below is CHARACTERISATION -- it discovered the
+anything works.  Issue #110's run was CHARACTERISATION -- it discovered the
 numbers; it did not test them against requirements agreed beforehand, which is
-what an acceptance run is.  The thresholds for future runs are derived from it,
-and a failed run does not become a pass by relaxing one afterwards.
+what an acceptance run is.  The thresholds came out of it, and a failed run
+does not become a pass by relaxing one afterwards.  **Issue #116's run is the
+first one held against them.**
 
-**These are issue #110's figures**, taken on the firmware that still carried a
-resident decoder.  The decoder never ran during them -- a plugin was loaded, so
-the plugin decoded and drew -- which is why they remain the numbers to hold a
-post-#116 run against.  The two thresholds that used to be phrased as
-"the resident decoder's" now say "the figures recorded here", because there is
-no other arm left to compare with.
+Both are `nn stream start` with the preview on and a face moving in and out of
+frame.  #110: 35 s, 479 frames in, 67 inferences, on the firmware that still
+carried a resident decoder (which never ran -- a plugin was loaded, so the
+plugin decoded and drew).  #116: 40 s, 549 frames in, 77 inferences, on a
+firmware with no decoder of its own at all.
 
-`nn stream start` with the preview on and a face moving in and out of frame,
-35 s, 479 frames in and 67 inferences:
+| | #110 measured | threshold | #116 measured | |
+|---|---:|---|---:|---|
+| draw charge, high-water per frame | 896 px of 19,200 | under half the cap | **672 px** | pass |
+| primitives refused for want of budget | 0 | 0 -- a refusal is a box that silently vanished | **0** | pass |
+| frames the panel could not get the lease for | 0 | under 5% of presented frames | **0** | pass |
+| worst consecutive run of those | 0 | 2 -- a run is what reads as blinking | **0** | pass |
+| inference rate | 1.90 inf/s, 411 ms | within 5% of the rate recorded here | **1.91 inf/s, 411.1 ms** | pass (0.5%) |
+| worker errors / raced tensors | 0 / 0 | 0 | **0 / 0** | pass |
+| ingest, worst band | 1,009 us | under the ~18,500 us band deadline | **1,021 us** | pass |
+| DCMI errors, LTDC underruns, torn bands | 0 | 0, against the figures recorded here | not sampled | -- |
 
-| | measured | threshold for a future run |
-|---|---:|---|
-| draw charge, high-water per frame | **896 px** of 19,200 | under half the cap |
-| primitives refused for want of budget | **0** | 0 -- a refusal is a box that silently vanished |
-| frames the panel could not get the lease for | **0** | under 5% of presented frames |
-| worst consecutive run of those | **0** | 2 -- a run is what reads as blinking |
-| inference rate | 1.90 inf/s, 411 ms | within 5% of the rate recorded here |
-| worker errors / raced tensors | **0 / 0** | 0 |
-| ingest, worst band | 1,009 us | under the ~18,500 us band deadline |
-| DCMI errors, LTDC underruns, torn bands | **0** | 0, against the figures recorded here |
+The last row was not taken in the #116 session: the camera's own counters are a
+separate command and that session did not run it.  Recorded as not sampled
+rather than carried over, because a number nobody read is not a number.
 
 The lease misses being zero is the result worth keeping: the panel outranks the
 worker and acquires without waiting, so a decode long enough to matter would
@@ -735,10 +769,13 @@ Count a refused or partly drawn overlay as a miss rather than a success, and
 read the miss fraction beside the progress numbers: a decode that stalls
 improves it.
 
-DTCM is the ceiling if 3b has to grow `nn_work`: `free` reports 12,736 B free,
-but 8,192 of that is the main stack's reservation at the top of the region.
-What the linker actually enforces is `_dtcm_used_end <= _smsp_stack`, which is
-**4,544 B**.
+DTCM is the ceiling if `nn_work` ever has to grow: `free` reports **12,224 B**
+free, but 8,192 of that is the main stack's reservation at the top of the
+region.  What the linker actually enforces is `_dtcm_used_end <= _smsp_stack`,
+which is **4,544 B**.  (This section said 12,736 B until #116's run; the
+baseline taken on the pre-#116 firmware reports 12,224 too, so the figure was
+already stale and #116 is only where it was noticed.  #116 did not move DTCM --
+`.dtcm_bss` is unchanged at 57,344 B.)
 
 ### What the hardware runs established
 
@@ -784,6 +821,31 @@ then, which is what several of these were read against):
   adopted the staged model the query answered with the OTHER slot.  It failed
   closed.  The caller passes the region it was handed now, and port/plugin no
   longer includes the header that would let the question be asked again.
+
+**Issue #116's run** (e09ce56, flashed once over the #110 firmware and driven
+through the same commands in the same order):
+
+- **The container is unaffected by the firmware change.**  Slot 5 loads, `nn
+  info` says `running` with the same build id and the same `crc 07111c0d`, and
+  the declared stacks print unchanged -- which is the observable end of "the
+  plugin image is byte for byte what it was, so nothing needs re-sending".
+- **`nn run` on the bare model in slot 4 reports tensors**:
+  `decoder : none -- 4 output(s), undecoded`, the four shapes, and a note
+  pointing at `nn out`.  On the baseline the same slot printed
+  `dets : 1 ... score 871` through the resident decoder.
+- **`nn stream start` on that model is refused before anything is lit**:
+  *nothing would annotate a live preview: no decoder is loaded, or the one
+  that is draws nothing* (-76), and the `nn stream stop` after it says
+  *not running* -- so the refusal left no session behind.
+- **`nn thresh` and `nn info` both say `none -- the active decoder has no
+  threshold`** where the baseline said `644/1000`.
+- **`nn dets` is unchanged**: *nothing has been inferred yet*, on both
+  firmwares, for the reason in the section above.
+- **The container path is unmoved**: `nn run` finds the face
+  (`faces 1 ... score 871`), `nn thresh 700` reads back through the plugin,
+  the stream runs at 1.91 inf/s with 0 errors and 0 raced tensors, overlay
+  off/on mid-run does not disturb it, and `--frames 30` stops itself.
+- **`dmesg` carries no new warning or error.**
 
 ## Commands
 

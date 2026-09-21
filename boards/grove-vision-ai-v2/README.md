@@ -5414,13 +5414,19 @@ is real work.  A 1x10 box costs 18, not 10 -- which is the number an intuitive
 **[!] And the agreement between the charge and the loop is now checkable.**  The
 primitive moved out of `lcd_st7789.c` -- which cannot be built on the host, so
 `test_plugin_paint.c` had stubbed it with a call counter -- into `lcd_rect.c`.
-The painter and the drawing loop share ONE normalisation (`lcd_rect_norm`: the
+The painter and the drawing loop share ONE normalisation (`rect_geom_norm`: the
 clip and the stroke clamp) and nothing else; the test counts the stores the real
 loop issues through a seam inside the driver and compares them against the budget
 the painter deducted, and pins golden numbers besides, so the charge is never
-checked against itself.  `lcd_rect.c` carries `-O3` in `GROVE_O3_SOURCES` because
-the file it left had it: a refactor that does not mean to change what runs has to
-carry the compile options with the code.
+checked against itself.
+
+Issue #110 split that normalisation out once more, into `svc/rect_geom.c`, because
+wio-lite-ai's painter charges by the same rule while drawing with its own loop
+into a surface with the opposite byte order.  What stayed here is what is this
+board's: the loop, the store seam, and `lcd_wire()`.  Both translation units carry
+`-O3` in `GROVE_O3_SOURCES` because the file they came from had it: a refactor
+that does not mean to change what runs has to carry the compile options with the
+code, every time it moves.
 
 **[!] It is not a bound on arbitrary computation inside `draw()`.**  A plugin is
 trusted native code; nothing stops it spending a millisecond on arithmetic before

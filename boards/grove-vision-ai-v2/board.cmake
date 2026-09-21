@@ -430,6 +430,11 @@ set(SHELL_SOURCES
     # and an injected lock vtable only, which is why the same file serves all
     # three boards and has a host unit test (shell/test/test_frame_pipeline.c).
     "${CMAKE_SOURCE_DIR}/svc/frame_pipeline.c"
+    # The outline geometry rule and its cost (issue #110).  Shared because
+    # wio-lite-ai's painter charges by the same rule while drawing with its own
+    # loop into a differently ordered surface; the loop itself stays in
+    # port/lcd/lcd_rect.c.
+    "${CMAKE_SOURCE_DIR}/svc/rect_geom.c"
     "${BOARD_DIR}/svc/timebase.c"
     "${BOARD_DIR}/svc/log.c")
 
@@ -816,17 +821,20 @@ target_compile_options(shell_objs PRIVATE -Os)
 # target does not compile.  What executes on this board is the plugin's copy,
 # built with the plugin's own flags -- so the decode arithmetic's optimisation
 # level is stated in GROVE_PLUGIN_CFLAGS and nowhere else.
-# [!] lcd_rect.c IS HERE BECAUSE IT LEFT lcd_st7789.c (issue #105).  The outline
+# [!] lcd_rect.c IS HERE BECAUSE IT LEFT lcd_st7789.c (issue #105), AND
+# svc/rect_geom.c IS HERE BECAUSE IT LEFT lcd_rect.c (issue #110).  The outline
 # primitive was compiled -O3 by virtue of the file it sat in; moving it to a
 # translation unit of its own -- so a host test could link the real loop -- would
 # otherwise have dropped it to the default -Os without a line of the diff saying
-# so.  A refactor that does not intend to change what runs has to carry the
-# compile options with the code.
+# so, and splitting its geometry out again for a second board would have done it
+# a second time.  A refactor that does not intend to change what runs has to
+# carry the compile options with the code, every time it moves.
 set(GROVE_O3_SOURCES
     "${BOARD_DIR}/port/camera/cam_convert.c"
     "${BOARD_DIR}/port/npu/nn_preproc.c"
     "${BOARD_DIR}/port/lcd/lcd_st7789.c"
-    "${BOARD_DIR}/port/lcd/lcd_rect.c")
+    "${BOARD_DIR}/port/lcd/lcd_rect.c"
+    "${CMAKE_SOURCE_DIR}/svc/rect_geom.c")
 set_source_files_properties(${GROVE_O3_SOURCES}
     TARGET_DIRECTORY shell_objs
     PROPERTIES COMPILE_OPTIONS "-O3")
@@ -936,6 +944,16 @@ add_shared_storage_gate(NAME grove_nn_life_audit
                         SOURCE "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"
                         IFACE bsp_iface CONSUMER shell_objs)
 add_dependencies(shell grove_nn_life_audit_check)
+
+# ...and the outline geometry rule (issue #110).  It is pure today and has no
+# reason to gain state -- which is exactly when a file stops being audited and
+# nobody notices it acquiring a cache.  The rule is "every shared translation
+# unit this board compiles", stated in that direction, because the direction
+# that was missing once before was "is every shared file actually audited?".
+add_shared_storage_gate(NAME grove_rect_geom_audit
+                        SOURCE "${CMAKE_SOURCE_DIR}/svc/rect_geom.c"
+                        IFACE bsp_iface CONSUMER shell_objs)
+add_dependencies(shell grove_rect_geom_audit_check)
 
 # And the negative tests for that checker, run with THIS board's cross compiler
 # so the __arm__-only fixture is meaningful (it passes under the host compiler,

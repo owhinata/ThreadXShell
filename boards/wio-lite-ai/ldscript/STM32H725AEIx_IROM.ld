@@ -8,6 +8,9 @@
  *   RAM   : 320 KB @ 0x24000000 -- AXI-SRAM (D1).  Reserved for what a BUS MASTER
  *                                  has to reach: DMA1/DMA2 and the SDMMC1 IDMA
  *                                  cannot see either TCM (owhinata/wio-lite-ai#46).
+ *                                  ONE STATED EXCEPTION: the top 32 KB is the
+ *                                  .plugin reservation (issue #108), because
+ *                                  CODE cannot live in DTCM -- see .plugin.
  *   DTCM  : 128 KB @ 0x20000000 -- tightly-coupled RAM: reset-persistent log, the
  *                                  NetX packet pool, every thread stack, and the
  *                                  main (ISR) stack at its top -- _estack =
@@ -74,6 +77,14 @@ _smsp_stack = _estack - _msp_size;       /* bottom of the main stack */
  * and separating them is not cosmetic: app/retarget.c bounds the newlib heap with it,
  * so leaving _estack in place there would have set the heap ceiling to a DTCM address
  * below the heap itself and made every malloc fail, in a build that links cleanly.
+ *
+ * [!] AND SINCE ISSUE #108 IT IS NO LONGER THE HEAP CEILING.  The .plugin
+ * reservation now sits at the top of AXI-SRAM, so "where AXI-SRAM ends" and "how
+ * far the heap may grow" have become two facts again -- the same split as above,
+ * one level down.  The ceiling is __heap_end (defined with .plugin, below), and
+ * this symbol keeps meaning exactly what its name says.  Redefining __ram_end to the
+ * reservation's base instead would have made the one symbol carry two facts for
+ * the second time.
  */
 __ram_end = ORIGIN(RAM) + LENGTH(RAM);
 
@@ -508,6 +519,64 @@ SECTIONS
     . = ALIGN(8);
   } >RAM
 
+  /* The end of everything placed sequentially in AXI-SRAM.  Kept as its own
+   * symbol because the region now has TWO occupied spans -- this, and .plugin
+   * pinned at the top -- with the heap's growth gap between them, and one
+   * high-water mark cannot describe that (the same reason Grove renamed its
+   * __sram_end to __sram_seq_end in issue #101). */
+  __ram_seq_end = .;
+
+  /*
+   * The plugin load image's reservation (issue #108 = #78 Step 3a).
+   *
+   * [!] A FIXED ABSOLUTE ADDRESS, AND THAT IS THE POINT.  A plugin is PRELINKED
+   * for this base -- the loader services no relocations -- so the address is part
+   * of the ABI that the host packer and every plugin's own link bake in.  Placed
+   * sequentially it would move the day .bss grew, and every container ever built
+   * for this board would silently target the wrong window.  Anchored at the TOP of
+   * AXI-SRAM instead, the sequential sections above stay free to grow up into the
+   * gap below it.  Moving it later invalidates every container built for wio.
+   *
+   * [!] WHY AXI-SRAM, WHICH THIS FILE RESERVES FOR BUS MASTERS.  That policy exists
+   * so CPU-only DATA goes to DTCM.  Code cannot follow it: the Cortex-M7 does not
+   * fetch instructions from DTCM at all.  The alternatives were measured and
+   * rejected -- the PSRAM window is XN in MPU regions 0 and 3, and ITCM is
+   * read-only in region 1, which is the NULL-write guard.  AXI-SRAM needs no MPU
+   * change: no region covers it, so PRIVDEFENA's default map applies (Normal,
+   * cacheable, executable).  This is a STATED exception, recorded here, in the
+   * board README and in CLAUDE.md -- not a quiet one.
+   *
+   * NOLOAD: the image arrives over the wire at run time.  Step 3a only validates
+   * and reports containers; nothing is copied here yet.  When Step 3b does copy
+   * one, the M7's instruction fetch does not snoop the D-cache, so the loader must
+   * clean the D-cache and invalidate the I-cache over this range first.
+   *
+   * 32 KB, both edges 32-byte multiples (cache maintenance rounds outward to whole
+   * lines, and a ragged end would let that reach past the reservation).  The size
+   * is checked against the M7 plugins this build produces; see the board README.
+   *
+   * [!] DECLARED TWICE, INDEPENDENTLY: here, and as its own literal in
+   * cmake/check_plugin_reservation.py, which fails the build if .plugin is not
+   * exactly this, if anything else lands inside it, or if the heap's ceiling is
+   * above its base.  The plugin's MEMORY fragment (ldscript/plugin_memory.ld) and
+   * board.cmake's statement to the image gate are two more.  Do not generate any
+   * of them from another.
+   */
+  .plugin 0x24048000 (NOLOAD) :
+  {
+    __plugin_start = .;
+    . += 0x8000;
+    __plugin_end = .;
+  } >RAM
+
+  /*
+   * The newlib heap's ceiling (src/retarget.c).  Until issue #108 that was
+   * __ram_end, the top of AXI-SRAM -- which is now inside .plugin, so the heap
+   * could have grown straight into a plugin's code.  The heap runs from `end` to
+   * here and nowhere else.
+   */
+  __heap_end = __plugin_start;
+
   /* Scratch working buffer for `membench`'s ITCM read row (cmd_membench.c).  ITCM
    * continues from the end of .itcm above -- ld keeps a location counter per memory
    * region, so putting this down here with the other NOLOAD sections (rather than
@@ -587,6 +656,19 @@ SECTIONS
   /* Growing .psram_noinit into the carve-out would make DMA buffers cacheable. */
   ASSERT(_psram_end <= _psram_ai_start,
          ".psram_noinit has grown into the .psram_ai cacheable carve-out")
+
+  /* The growth gap has not been consumed (issue #108).  The sequential sections
+   * grow upward and .plugin is pinned at the top, so the day .bss grows past
+   * 0x24048000 the build stops here rather than overlapping a reservation whose
+   * address is baked into every plugin built for this board.  These name section
+   * boundaries, not functions, so LTO cannot rename them out from under the
+   * ASSERT; cmake/check_plugin_reservation.py checks the linked image as well. */
+  ASSERT(__ram_seq_end <= __plugin_start,
+         "AXI-SRAM sequential sections grew into the .plugin reservation")
+  ASSERT(__plugin_end == ORIGIN(RAM) + LENGTH(RAM),
+         ".plugin must be anchored at the top of AXI-SRAM")
+  ASSERT(__heap_end <= __plugin_start,
+         "the heap ceiling is above the .plugin reservation")
 
   /* The DTCM residents must fit UNDER the main stack, not merely inside DTCM.  ld
    * does not diagnose an overflowing NOLOAD region on its own, and it has no idea

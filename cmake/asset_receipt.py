@@ -19,6 +19,8 @@ send an operator to a command that does not exist, at the one moment they are
 following it to the letter.  Each --step is a template over {name} and {slot};
 the first is printed as "on the board", the rest under it in order.  What is
 NOT a board's -- the CRC and the instruction to compare it -- stays here.
+A --then is printed after the CRC comparison, for what to type once the bytes
+are known to be the right ones (wio names its model load there).
 """
 import argparse
 import json
@@ -30,6 +32,8 @@ ap.add_argument("receipt")
 ap.add_argument("slot", nargs="?", default="")
 ap.add_argument("--step", action="append", default=[], required=True,
                 help="a board command, as a template over {name} and {slot}")
+ap.add_argument("--then", action="append", default=[],
+                help="a board command for after the CRC check, same template")
 args = ap.parse_args()
 receipt, slot = args.receipt, args.slot
 r = json.load(open(receipt))
@@ -56,4 +60,7 @@ for i, step in enumerate(args.step):
 print("  in picocom:    C-a C-s, then the path above")
 print("  afterwards:    `blob list` must show crc32 %s -- that is how you know" % r["crc32"])
 print("                 the bytes that were built are the bytes that were stored.")
+for i, step in enumerate(args.then):
+    print("%s%s" % ("  then:          " if i == 0 else " " * 17,
+                    step.format(name=r["name"], slot=slot or "<slot>")))
 print("")

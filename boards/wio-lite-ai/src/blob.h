@@ -144,9 +144,22 @@ struct blob_info {
 
 /* ---- read side (no exclusion: see the locking note above) ----------------- */
 
-/** Device offset of a slot's header sector / of its payload.  Slot must be valid. */
-uint32_t blob_slot_addr(unsigned slot);
-uint32_t blob_payload_addr(unsigned slot);
+/**
+ * Device offset of a slot's header sector / of its payload.  Slot must be valid.
+ *
+ * Inline in the header (issue #108) so that the host tool which emits this
+ * board's slot table (scripts/slot_table.c) runs THESE, not a restatement of
+ * them: it includes this header and never scrapes it.
+ */
+static inline uint32_t blob_slot_addr(unsigned slot)
+{
+	return BLOB_REGION_BASE + slot * BLOB_SLOT_SIZE;
+}
+
+static inline uint32_t blob_payload_addr(unsigned slot)
+{
+	return blob_slot_addr(slot) + BLOB_HDR_SIZE;
+}
 
 /**
  * Decode @p slot's header into @p out.  Returns BLOB_OK whenever the header sector

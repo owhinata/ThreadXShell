@@ -28,6 +28,13 @@
 
 #include <stdint.h>
 
+/**
+ * The preview thread's stack, in DTCM.  Published here since issue #108 because
+ * the plugin policy in port/nn/nn_svc_wio.c asserts its provisional allowance for
+ * a draw callback strictly below it.
+ */
+#define CAM_PREVIEW_STACK_BYTES  1024u
+
 #ifdef __cplusplus
 extern "C" {
 #endif

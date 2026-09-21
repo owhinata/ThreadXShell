@@ -61,12 +61,24 @@
 #define PLUGIN_CPU_HERE  PLUGIN_CPU_CORTEX_M7
 #define PLUGIN_FPU_HERE  PLUGIN_FPU_FPV5_D16
 #elif __ARM_ARCH == 8 && defined(__ARM_ARCH_8M_MAIN__) && defined(__ARM_FP) && \
-    __ARM_FP == 14
-/* -mcpu=cortex-m55 (grove-vision-ai-v2) */
+    __ARM_FP == 14 && !defined(__ARM_FEATURE_PAUTH) && !defined(__ARM_FEATURE_BTI)
+/*
+ * -mcpu=cortex-m55 (grove-vision-ai-v2).
+ *
+ * [!] NOT EVERY v8.1-M CORE WITH THIS FPU IS AN M55.  A Cortex-M85 has the same
+ * architecture and FPU macros; by default it also predefines
+ * __ARM_FEATURE_PAUTH and __ARM_FEATURE_BTI (PACBTI), which an M55 cannot, so
+ * those are refused here.  -mcpu=cortex-m85+nopacbti predefines EXACTLY what an
+ * M55 does (measured, GCC 15.2) and passes here.  The macros cannot know; the
+ * linked firmware can -- v8.1-M images record the core's name -- so
+ * cmake/check_target_word.py checks the same word against the firmware
+ * image's own attributes after the link, and the plugin gate does the same for
+ * each plugin.
+ */
 #define PLUGIN_CPU_HERE  PLUGIN_CPU_CORTEX_M55
 #define PLUGIN_FPU_HERE  PLUGIN_FPU_FP_ARMV8
 #else
-#error "no plugin target is defined for this (__ARM_ARCH, __ARM_FP) pair"
+#error "no plugin target is defined for this (__ARM_ARCH, __ARM_FP) pair and feature set"
 #endif
 
 #if defined(__ARM_PCS_VFP)

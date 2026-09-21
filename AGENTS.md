@@ -158,11 +158,21 @@
    必要があるものだけ（**DMA が届く唯一の RAM**）/ DTCM（128KB @ 0x20000000）= CPU 専用 /
    ITCM = ISR コード。**DMA1/DMA2・SDMMC1 IDMA は TCM に届かない**（RM0468
    §2.1.2/§2.1.5/§2.1.6）。**DTCM の DMA バッファは fault せず無言で転送されない。**
+   **[!] 唯一の明文化した例外: AXI-SRAM 上端 32 KB（`0x24048000..0x24050000`）は `.plugin`
+   予約（#108）**。M7 は DTCM から命令フェッチできないためで、prelink なので動かさない。
+   heap の天井は `__heap_end`（予約の底）で `__ram_end` を再定義しない。予約は ldscript /
+   `plugin_memory.ld` / board.cmake のゲート引数 / `check_plugin_reservation.py` の
+   **4 箇所で独立に宣言し、1 つの変数から生成しない**。`check_plugin_reservation.py`
+   （位置・サイズ・NOLOAD・内部に何も無い・heap 天井）を外す・弱める変更は不可。
+   **#78 Step 3a の wio は container を検証・記録するだけで plugin を実行しない**
+   （コピーも呼び出しもしない）。モデル区画は in-place で backend に渡し、
+   `nn info` の claim は開いているモデルに従う（reload 成功後に publish）。
 
 8. **リンカスクリプトの `ASSERT` は LTO 下で空振りする。** 配置保証はポストリンクの
    residency チェックスクリプトで行う。配置を変える変更はこのゲートを維持すること。
    - **wio-lite-ai** は LTO を使うので、`check_itcm_residency.py` /
-     `check_dtcm_residency.py` / `check_psram_ai_residency.py` が唯一の砦。
+     `check_dtcm_residency.py` / `check_psram_ai_residency.py` /
+     `check_plugin_reservation.py`（#108）が唯一の砦。
    - **f746g-disco** は逆に **LTO を禁止**する（`board.cmake` が `-flto` /
      `CMAKE_INTERPROCEDURAL_OPTIMIZATION` を per-config 変種込みで FATAL_ERROR にする）。
      ldscript の ASSERT 群が invariant の本体だから。加えて `check_f746_layout.py` が

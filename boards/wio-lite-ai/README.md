@@ -114,6 +114,49 @@ reason the placement policy exists:
 - **DTCM**: CPU-private hot data (stacks, the ISR ring)
 - **ITCM**: interrupt service code
 
+### [!] The top 32 KB of AXI-SRAM is the plugin reservation (issue #108)
+
+`.plugin` is a fixed NOLOAD reservation at `0x24048000..0x24050000`, anchored at
+the top of AXI-SRAM, for the load image of a model post-processing plugin
+(#78; see [Plugin containers](#plugin-containers-issue-108--78-step-3a)).  A
+plugin is **prelinked** for that address -- the loader services no relocations --
+so it cannot drift the way a sequential section would the day `.bss` grew, and
+moving it later invalidates every container built for this board.
+
+**It is a stated exception to the placement policy above.**  That policy keeps
+CPU-only *data* out of AXI-SRAM, and it can, because DTCM takes it.  Code cannot
+follow: the Cortex-M7 does not fetch instructions from DTCM.  The alternatives
+were measured and rejected -- the PSRAM window is execute-never in MPU regions 0
+and 3, and ITCM is read-only in region 1, which is the NULL-write guard.
+AXI-SRAM needs no MPU change: no region covers it, so the default map
+(`PRIVDEFENA`) makes it Normal, cacheable and executable.  When Step 3b copies a
+plugin there it must clean the D-cache and invalidate the I-cache over the range
+first, because the M7's instruction fetch does not snoop the D-cache.
+
+**The heap's ceiling moved below it.**  `_sbrk` (`src/retarget.c`) used to be
+bounded by `__ram_end`, the top of AXI-SRAM -- now inside the reservation.  It is
+bounded by `__heap_end` (= the reservation's base) instead, and `__ram_end` keeps
+meaning only "where AXI-SRAM ends".  `free` reports AXI-SRAM as two rows, `RAM`
+(up to the heap ceiling) and `Plugin` (the reservation), so the reservation is
+never counted as spendable headroom.
+
+The address is declared four times, independently, on purpose: the firmware's
+linker script, the plugin `MEMORY` fragment (`ldscript/plugin_memory.ld`),
+`board.cmake`'s statement to the shared image gate (`WIO_PLUGIN_GATE_BASE/END`),
+and `cmake/check_plugin_reservation.py`, which checks the linked image: the
+section at exactly that address and size, NOLOAD, nothing else allocated or
+named inside it, the heap ceiling at or below its base -- and that the linked
+`_sbrk` names that ceiling and no address above it, read from its own
+constants, because a correct `__heap_end` beside an `_sbrk` still using
+`__ram_end` would pass every symbol check.  Naming a constant is not using it as
+the bound, so the behaviour is checked separately: `test/test_sbrk.c` compiles
+the real `src/retarget.c` on the host, with `__ram_end` above the ceiling, and
+requires the break to stop at the ceiling.  **Do not generate
+any of them from another** -- a gate that reads its expected value out of what
+it checks passes anything.  `cmake/fixtures/run_reservation_tests.py` watches
+each refusal (one shape, a section overlapping the reservation, is refused by
+ld itself in a normal link; the fixture records that rather than skipping it).
+
 ### [!] The linker script's `ASSERT`s do not hold here
 
 This board builds with LTO on by default (`BSP_ENABLE_LTO`), and LTO renames
@@ -126,6 +169,12 @@ maintenance obligation that the asserts did not.
 `cmake/check_psram_ai_residency.py` does the same job for the cacheable PSRAM
 carve-out, and `cmake/check_cxx_runtime.py` bounds what the C++ (TFLM) backend
 is allowed to drag in.
+
+The `.plugin` ASSERTs (issue #108) are the exception that proves the rule: they
+name section boundaries (`__ram_seq_end`, `__plugin_start`, `__heap_end`), not
+functions, so LTO has nothing to rename.  They are still the linker checking its
+own script, which is why `cmake/check_plugin_reservation.py` checks the image as
+well.
 
 Since issue #97 there is one more, and it protects something less obvious.  The
 BlazeFace decoder is shared by all three boards (`svc/blazeface.c`), and sharing
@@ -213,24 +262,186 @@ is what pays for it.  Measured:
 
 | build | app partition | free |
 |---|---|---|
-| `null` (+ SD) | 305,584 B, 77.7% | 87,632 B |
-| **`tflm`, SD dropped (the default)** | **350,096 B, 89.0%** | **43,120 B** |
-| `tflm` + SD | 384,572 B, 97.8% | 8,644 B |
+| `null` (+ SD), at #98 | 305,584 B, 77.7% | 87,632 B |
+| **`tflm`, SD dropped (the default)**, at #98 | **350,096 B, 89.0%** | **43,120 B** |
+| `tflm` + SD, at #98 | 384,572 B, 97.8% | 8,644 B |
+| **`tflm`, SD dropped (the default)**, at #108 | **358,664 B, 91.2%** | **34,552 B** |
+| `tflm` + SD, at #108 | 393,124 B, 99.98% | **92 B** |
 
-The last row links and leaves no room to add anything, which is why the tflm
-default also turns `BSP_ENABLE_SD` off.  `-DBSP_ENABLE_SD=ON` brings it back, but
-wanting the SD back is a reason to audit the space first, not to pass a flag.
+The `tflm` + SD row links and leaves no room to add anything, which is why the
+tflm default also turns `BSP_ENABLE_SD` off.  `-DBSP_ENABLE_SD=ON` brings it
+back, but wanting the SD back is a reason to audit the space first, not to pass
+a flag -- and since #108 the plugin loader of #78 Step 3b will not fit beside
+it at all.
 
 [!] The switch only affects NEW build directories.  `CONFIG_NN_BACKEND` is a cache
 variable, so a tree already configured as `null` stays `null` until it is
 reconfigured -- which is also why the SD default, keyed on `NOT DEFINED
-BSP_ENABLE_SD`, does not fire in one of those.
+BSP_ENABLE_SD`, does not fire in one of those.  **This bit issue #108**: its
+development tree had been configured with SD on, and the plugin work measured as
+overflowing the partition when the default configuration had 34 KB free.  Since
+then a tflm tree with SD on prints a configure WARNING saying so; reconfigure
+with `-DBSP_ENABLE_SD=OFF`.
 
 [!] **The tflm build has not been run on hardware.**  It builds and passes every
 gate in both configurations, and `check_cxx_runtime.py` -- which only runs for
 tflm -- is now part of the default build.  But no image from this configuration
 has been flashed, so the first `--target flash` after this change ships something
 new.
+
+## Plugin containers (issue #108 = #78 Step 3a)
+
+A **container** carries a model together with the code that interprets its
+output (a *plugin*), so a new model family needs no firmware change.  The format,
+the validator and the build rules are shared with Grove Vision AI V2 (its README
+has the full design); this section is what is different here.
+
+**Step 3a delivers, validates and measures.  It never executes a plugin.**
+`nn model load --slot <n>` reads the blob into the PSRAM staging buffer and
+CRC-checks that copy exactly as before, then:
+
+- a payload that is not a container is a bare model and takes the old path
+  unchanged (models already in the store do not need re-sending);
+- a container goes through `svc/plugin_load.c` -- the same validator the host
+  build runs -- with this board's policy, and its **model section is handed to
+  the backend in place**, at its offset inside the staged container.  The TFLM
+  backend accepts any range inside the staging slot it handed out that starts
+  on `NN_MODEL_ALIGN` (16 B); a container's model section is 16-aligned by the
+  format's own rule, which `nn_svc_wio.c` asserts meets the backend's;
+- the **plugin section is validated and recorded -- never copied into `.plugin`,
+  never called**.  The resident decoder keeps decoding, so a blazeface
+  container's model finds faces through exactly the path a bare model does.
+
+`nn info` then shows what the container **claims** (`plugin : <name> (build
+<id>, crc <digest>), validated, NOT executed`, `from : slot <n>, blob '<name>'`,
+the image sizes and each slot's declared stack).  The claims follow the model
+that is actually open: they are settled only after the backend adopted (or
+refused) the model; a refused load that left the previous model active keeps the
+previous claims; a bare load and `nn model unload` clear them.  `nn info` takes
+no lock (it has to answer while a stream holds the NN session), so between the
+backend adopting a model and the claims being settled it says `a model load is
+in progress` rather than pairing one model with the other's claims -- and the
+`from` line names the blob the claims came with, so a load that lands between
+`nn info`'s model line and its plugin line shows up as a mismatch instead of
+passing silently.
+
+### The target word
+
+The plugin target word for this board is `0x1201` (Cortex-M7 / FPv5-D16 / hard
+float / little-endian, no CMSE).  Until #108 nothing checked such a word on any
+board -- the packer, the verifier and the firmware all read one CMake variable.
+It is now checked at both ends: `nn_svc_wio.c` static-asserts it against this
+firmware's own predefined macros (`svc/plugin_target.h`), and the shared image
+gate derives the core, FPU, float ABI and endianness from each plugin ELF.
+[!] An M7 object does not record its core's name -- GCC's `.arch armv7e-m`
+overrides `.cpu cortex-m7`, leaving `Tag_CPU_name "7E-M"`, the same as a
+Cortex-M4 -- so the gate knows an M7 by v7E-M **plus** an FPv5 FPU, which only
+the M7 has.
+
+### Sending an asset
+
+```bash
+cmake --build build/wio-lite-ai --target asset-blazeface
+picocom -b 115200 --send-cmd "sb -k" --receive-cmd "rb" /dev/ttyACM0
+```
+
+The target fetches the pinned model (the same commit and SHA-256 Grove uses),
+checks it with this board's `verify_tflite` (the operators THIS firmware
+registers), packs it with the M7 blazeface plugin, runs the device's validator
+over the packed file, and publishes only then.  It prints a receipt:
+
+```
+  on the board:  blob write 5   (erases the slot, then waits for the file)
+  in picocom:    C-a C-s, then the path above
+  afterwards:    `blob list` must show crc32 <CRC> -- ...
+  then:          nn model load --slot 5
+```
+
+**Slot 5 is only the declaration in `board.cmake`.**  The build refuses a
+container too large for it; nothing refuses the *wrong* slot, and `blob write`
+erases the whole slot before the transfer.  Read `blob list` first.
+
+The ingest is this board's: float32 I/O as the model zoo ships it (the shared
+decoder reads float32), no boundary strip and no vela -- there is no NPU here.
+No cifar10 asset exists yet (no CIFAR-10 model is established on this board);
+the cifar10 plugin is built for M7 anyway, to prove the build and measure it.
+
+### [!] What still catches what
+
+The gates run at **build** time.  `sb -k` sends whatever path is typed, so
+nothing checks that the file sent is the file built:
+
+| what you could send by mistake | what catches it | when |
+|---|---|---|
+| a container built for another board | `plugin_load.c` (target word) | `nn model load` |
+| a recognised container with malformed internals or a damaged plugin section | `plugin_load.c` | `nn model load` |
+| a container whose magic is damaged | probes as unknown and falls through as a bare model, so the TFLM backend -- **not** `plugin_load.c` | `nn model load` |
+| a malformed `.tflite` (bare, or as a container's model section) | the backend's parse only; `VerifyModelBuffer()` runs on the board only with `NN_TFLM_VERIFY=ON` (off by default) | `nn model load` |
+| a stale artifact, or a model that never passed `verify_tflite` | **nothing** | -- |
+| the wrong slot | **nothing** -- and the slot's previous contents are gone | `blob write` |
+
+The **receipt CRC compared with `blob list`** is the one "built bytes = stored
+bytes" check.  `nn info`'s CRC is the plugin-section digest and does not move
+when a model changes.
+
+### What Step 3a measures (for 3b to budget from)
+
+| | measured |
+|---|---|
+| blazeface plugin (M7) | text 4,016 B, bss 4,816 B, load image 8,832 B; declared stack: decode 392, draw 332, report 344, entry 8, shapes 40, params 8/16 B |
+| cifar10 plugin (M7) | text 2,704 B, bss 8,852 B, load image 11,584 B; declared stack: decode 432, draw 292, report 336, entry 0, shapes 20 B |
+| blazeface container | 194,120 B (model 189,816 B at +4,304) |
+| `.plugin` reservation | 32 KB -- 2.8x the larger load image (cifar10's 11,584 B) |
+| AXI-SRAM heap room | 103,200 B (`end` to `__heap_end`, SD off) |
+| DTCM ceiling for growing `nn_work` | **4,544 B** (`_smsp_stack - _dtcm_used_end`; the 8 KB main-stack reservation is not free) |
+| stack already spent at the decode / draw call sites | **609 B of 3,072 on `nn_work`** (decode), **105 B of 1,024 on `cam_prev`** (draw), measured on hardware |
+
+The call-site depths are measured where a plugin will stand: on `nn_work`
+immediately before the resident decoder is called, and on the preview thread
+inside the frame lock just before the overlay is drawn (not in the per-box
+helper, which is deeper than a plugin will ever be called from).  The probe is
+out of line, so each figure includes its own few bytes -- an over-report, the
+safe direction -- and **it stays in place through 3b**: removing or reshaping
+it means measuring again, not reusing these numbers.
+
+The per-callback stack limits in the policy are **provisional** (decode 1,024 B
+of 3,072; draw 512 of 1,024; report 1,024 of 4,096), each statically asserted
+below its thread's stack.  3b replaces them with values derived from these
+measurements.  3a reports; it does not decide the budget -- but the arithmetic
+3b will use is `thread stack - depth at the call site - asynchronous reserve -
+margin`, and with the reserve derived rather than measured (one exception frame
+on the thread's PSP, 104 B extended plus alignment, plus ThreadX's own
+callee-saved save -- about 208 B worst case) the measured room is **2,255 B for
+decode** and **711 B for draw**.  Both provisional limits already fit under
+those, and the two plugins' declared needs (decode 392/432, draw 332/292) fit
+with room to spare.
+
+DTCM is the ceiling if 3b has to grow `nn_work`: `free` reports 12,736 B free,
+but 8,192 of that is the main stack's reservation at the top of the region.
+What the linker actually enforces is `_dtcm_used_end <= _smsp_stack`, which is
+**4,544 B**.
+
+### What the first hardware run established
+
+The container path was exercised against the model this board was already
+running, in slot 4, and two things came out of it:
+
+- **The models are the same bytes.**  Slot 4's stored CRC-32 is `3A210F57`,
+  which is exactly what `verify_tflite` reports for the pinned file this build
+  fetches (189,816 B).  The plan deliberately did not claim that -- no size or
+  hash for the board's existing model existed anywhere in the tree -- and
+  planned a differential check ("both must find the same face") instead.  The
+  blob store's own CRC turned out to record the identity all along, so the
+  weaker check is not needed: the bare path and the container path run the same
+  model, and the differences between two `nn run` outputs are just different
+  camera frames.
+- **The container costs 4,304 B of slot and nothing else.**  Loading it
+  reported the same tensors, the same 470,352 B arena and the same threshold as
+  the bare model, and `nn info`'s plugin lines match what the host's
+  `verify_container` printed for the same file, field for field.
+
+One operating note that is not a fault: `camera preview on` refuses with "the
+display is down or its scanout is off" until `lcd on` has run.
 
 ## Commands
 

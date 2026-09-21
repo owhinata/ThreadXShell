@@ -146,16 +146,6 @@ static int slot_ok(unsigned slot)
 	return slot < BLOB_SLOT_COUNT;
 }
 
-uint32_t blob_slot_addr(unsigned slot)
-{
-	return BLOB_REGION_BASE + slot * BLOB_SLOT_SIZE;
-}
-
-uint32_t blob_payload_addr(unsigned slot)
-{
-	return blob_slot_addr(slot) + BLOB_HDR_SIZE;
-}
-
 /* ------------------------------------------------------------------ *
  *  Read side
  * ------------------------------------------------------------------ */

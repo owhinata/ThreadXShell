@@ -56,6 +56,43 @@
 #define NNCAM_ERR_REARM  (-10)  /**< re-arm after a lost stream failed; stop first */
 #define NNCAM_ERR_QUANT  (-11)  /**< int8 input without a per-tensor quant scale   */
 
+/**
+ * The worker thread's (`nn_work`) stack, in DTCM.  Published here since issue #108
+ * because the plugin policy in port/nn/nn_svc_wio.c asserts its provisional
+ * allowance for a decode callback strictly below it -- an allowance equal to the
+ * whole stack is a check that cannot fire (issue #103).  See nn_camera.c for how
+ * the number was chosen.
+ */
+#define NNCAM_STACK_BYTES  3072u
+
+/**
+ * The two places a plugin callback will stand (issue #108 = #78 Step 3a).
+ *
+ * DECODE is on `nn_work`, immediately before the resident decoder is called in the
+ * worker step.  DRAW is on the preview thread, where the plugin's draw() will
+ * replace or precede the resident overlay -- NOT inside the per-box helper, which
+ * is a deeper, resident-only path and would over-report.
+ */
+enum nn_camera_site {
+	NNCAM_SITE_DECODE = 0,
+	NNCAM_SITE_DRAW   = 1,
+};
+
+/**
+ * Record how much of the CALLING thread's stack is already spent here.
+ *
+ * Grove's probe shape (issue #103): the address of a local, checked to lie inside
+ * the identified ThreadX thread's stack, kept as a high-water per site.  Called
+ * BEFORE the call it describes, so the number is the depth a callee inherits.
+ *
+ * [!] THE PROBE PERTURBS THE FRAME IT SITS IN.  It is out of line (noinline), so
+ * the value includes the probe's own few bytes -- an over-report, which is the
+ * safe direction -- and does not move with inlining.  The same probe, in the same
+ * places, stays through Step 3b: removing or reshaping it means measuring again,
+ * not reusing 3a's number.
+ */
+void nn_camera_note_depth(enum nn_camera_site site);
+
 struct nn_camera_stats {
 	uint8_t  running;
 	uint8_t  holds_guards;   /**< the session + OCTOSPI1 guard are still held  */
@@ -77,6 +114,10 @@ struct nn_camera_stats {
 	uint32_t infer_last_cyc;
 	uint32_t elapsed_ms;
 	int      ndet;
+	/**< bytes already spent at each plugin call site, high-water since start
+	 *   (issue #108); 0 until the site has run */
+	uint32_t depth_decode;
+	uint32_t depth_draw;
 };
 
 /**

@@ -514,7 +514,7 @@ when a model changes.
 | app flash, default build (SD off) | 363,620 B of 384 KB (92.5%), 29,596 B free -- #110's wiring cost 4,628 B over #108 |
 | AXI-SRAM heap room | 103,200 B (`end` to `__heap_end`, SD off) |
 | DTCM ceiling for growing `nn_work` | **4,544 B** (`_smsp_stack - _dtcm_used_end`; the 8 KB main-stack reservation is not free) |
-| stack already spent at the decode / draw call sites | **609 B of 3,072 on `nn_work`** (decode), **105 B of 1,024 on `cam_prev`** (draw), measured on hardware at #108 -- see the caveat below |
+| stack already spent at the plugin call sites | **641 B of 3,072 on `nn_work`** (decode), **137 B of 1,536 on `cam_prev`** (draw), **1,593 B of 4,096 on the shell** (report / load / admission) -- measured at #110 with a plugin actually running |
 
 The call-site depths are measured where a plugin will stand: on `nn_work`
 immediately before the resident decoder is called, and on the preview thread
@@ -526,8 +526,8 @@ bytes -- an over-report, the safe direction -- and it sits AT the call rather
 than in the caller, so the number does not depend on whether the caller was
 inlined this month.
 
-**[!] The two figures above predate #110's call sites.**  They were taken when
-nothing was called there; re-measure them.
+(The #108 figures were 609 and 105, taken when nothing was called at those
+sites.)
 
 ### The stack budget, and what is still owed to it (issue #110)
 
@@ -591,24 +591,17 @@ that any plugin with a label to draw would not.  Sizing an allowance to what
 today's plugin happens to need is how a limit stops being one, so the thread is
 1,536 B now -- 512 B out of the 4,544 DTCM has spare -- and the allowances are:
 
-| thread | stack | at call | reserve | derived room | declared |
-|---|---:|---:|---:|---:|---:|
-| `nn_work` (decode) | 3,072 | 609 | 208 | 2,255 | 1,024 |
-| `cam_prev` (draw) | 1,536 | 105 | 208 | 1,223 | 1,024 |
-| shell (entry / shapes / report / params) | 4,096 | *to measure* | 208 | -- | 1,024 |
+| thread | stack | at call | reserve | derived room | declared | plugin needs |
+|---|---:|---:|---:|---:|---:|---:|
+| `nn_work` (decode) | 3,072 | 641 | 208 | 2,223 | 1,024 | 776 |
+| `cam_prev` (draw) | 1,536 | 137 | 208 | 1,191 | 1,024 | 716 |
+| shell (entry / shapes / report / params) | 4,096 | 1,593 | 208 | 2,295 | 1,024 | 728 |
 
-**[!] STILL OWED, and the remaining ways for this to fail open:**
+All three are measured with a plugin running, and every allowance sits under
+its derived room with the shipped plugin well under the allowance.
 
-- the shell figure has no measurement behind it, and the two that do were taken
-  before the call sites moved and before `nn run` started carrying a 512 B
-  capture buffer in the same frame.  There is also **no probe at the shapes
-  callback**, which is reached while `cmd_nn_run`'s own large frame is live --
-  so "model load is the deepest shell site" is an assumption, not a reading;
-- **the container already stored in slot 5 has a manifest packed with the OLD
-  veneer cost**, so its declared stacks are smaller than the requirements
-  above.  Rebuild the asset and send it again;
-- and more than operationally: **the firmware cannot tell a stale declaration
-  from a current one.**  `svc/plugin_load.c` checks the declaration against the
+**[!] STILL OWED:** more than operationally, **the firmware cannot tell a stale
+declaration from a current one.**  `svc/plugin_load.c` checks the declaration against the
   policy allowance; nothing establishes which accounting produced it, and the
   device cannot recompute a plugin's call graph.  So "an accepted declaration
   bounds execution" is not true across a change to the base cost.  Closing that
@@ -636,7 +629,7 @@ but 8,192 of that is the main stack's reservation at the top of the region.
 What the linker actually enforces is `_dtcm_used_end <= _smsp_stack`, which is
 **4,544 B**.
 
-### What the first hardware run established
+### What the hardware runs established
 
 The container path was exercised against the model this board was already
 running, in slot 4, and two things came out of it:
@@ -657,6 +650,27 @@ running, in slot 4, and two things came out of it:
 
 One operating note that is not a fault: `camera preview on` refuses with "the
 display is down or its scanout is off" until `lcd on` has run.
+
+**Issue #110's runs** (plugin executing):
+
+- **`nn info` says `running`, and `dmesg` names the image**: `'blazeface'
+  (build ...) loaded: 8832 B at 0x24048000`.
+- **`nn run` prints the PLUGIN's own words**, not the shared box printer:
+  `faces 1  thresh 644/1000` / `face 0  x 124 y 115 w 63 h 47 px  score 857`.
+  The units are the tell -- pixels, through the base's `to_frame`, where the
+  resident decoder's line is `dets : 1 ... x 44% of frame`.
+- **`nn thresh 700` reaches the plugin**: the value echoed back is read through
+  the plugin's own `param_get`, not from a firmware variable.
+- **The plugin costs the inference nothing measurable**: 411 ms per inference
+  and 1.93 inf/s with a plugin decoding, the same as the resident decoder, with
+  0 errors and 0 raced tensors.
+- **The first run of all failed, and the check that failed was mine.**  Every
+  container was refused with *the image is not inside the backend's staging
+  region*, because the source check asked `nn_model_load_region()` where that
+  region was -- and the backend is double-slotted, so once the reload had
+  adopted the staged model the query answered with the OTHER slot.  It failed
+  closed.  The caller passes the region it was handed now, and port/plugin no
+  longer includes the header that would let the question be asked again.
 
 ## Commands
 

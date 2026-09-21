@@ -772,6 +772,10 @@ int nn_camera_start(int colorbar, int require_draw)
 			nncam_guards_give();
 			return NNCAM_ERR_DECBUSY;
 		}
+		/* The other shell-thread call site.  Recorded separately from the load
+		 * path's because the two reach it down different chains, and "the load
+		 * is the deeper one" was an assumption nobody had read. */
+		nn_camera_note_depth(NNCAM_SITE_SHELL);
 		shapes = nn_active_shapes_ok(m);
 		draws  = require_draw ? nn_active_can_draw() : 1;
 		plugin_lease_give();

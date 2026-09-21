@@ -122,8 +122,8 @@ static const struct plugin_policy nn_plugin_policy = {
 	.image_align    = PLUGIN_IMAGE_ALIGN,
 	.caps_supported = PLUGIN_CAP_KNOWN_MASK,
 	.stack_limit    = {
-		[PLUGIN_SLOT_ENTRY]     = WIO_PLUGIN_STACK_NN_WORK,
-		[PLUGIN_SLOT_SHAPES_OK] = WIO_PLUGIN_STACK_NN_WORK,
+		[PLUGIN_SLOT_ENTRY]     = WIO_PLUGIN_STACK_SHELL,
+		[PLUGIN_SLOT_SHAPES_OK] = WIO_PLUGIN_STACK_SHELL,
 		[PLUGIN_SLOT_DECODE]    = WIO_PLUGIN_STACK_NN_WORK,
 		[PLUGIN_SLOT_DRAW]      = WIO_PLUGIN_STACK_PREVIEW,
 		[PLUGIN_SLOT_REPORT]    = WIO_PLUGIN_STACK_SHELL,
@@ -659,6 +659,9 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 			 * accident this ordering exists to prevent. */
 			plugin_run_unload();
 		} else {
+			/* The deepest of the shell-thread call sites: a plugin's entry()
+			 * is reached from here, several frames below the command. */
+			nn_camera_note_depth(NNCAM_SITE_SHELL);
 			(void)plugin_run_load(&claims.view, stage, nn_active_base());
 		}
 		/* A container whose plugin would not load leaves the model open with
@@ -1438,7 +1441,8 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 		if (i == 1u && !st.stream_lost)
 			continue;                       /* only worth a line when true */
 		/* Nothing has reached either site yet: no number, so no line. */
-		if (i == 5u && st.depth_decode == 0u && st.depth_draw == 0u)
+		if (i == 5u && st.depth_decode == 0u && st.depth_draw == 0u &&
+		    st.depth_shell == 0u)
 			continue;
 		if (n++ != index)
 			continue;
@@ -1483,14 +1487,22 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 			 * over its thread's stack, so the headroom is read, not recalled.
 			 * A site that has not run reads 0 -- the draw site runs only while
 			 * the preview is on.
+			 *
+			 * [!] THE SHELL SITE IS HERE BECAUSE FOUR OF THE SEVEN SLOTS ARE
+			 * CALLED ON IT (issue #110): entry, shapes_ok, report and the
+			 * parameters.  3a measured the other two and board.cmake declared
+			 * the WORKER's allowance for these -- a bound on the wrong
+			 * thread's stack.
 			 */
 			nn_detail_to(buf, cap,
-			             "at call : %lu/%lu B on nn_work (decode), "
-			             "%lu/%lu B on cam_prev (draw); high-water",
+			             "at call : %lu/%lu nn_work (decode), %lu/%lu "
+			             "cam_prev (draw), %lu/%lu shell (report); high-water",
 			             (unsigned long)st.depth_decode,
 			             (unsigned long)NNCAM_STACK_BYTES,
 			             (unsigned long)st.depth_draw,
-			             (unsigned long)CAM_PREVIEW_STACK_BYTES);
+			             (unsigned long)CAM_PREVIEW_STACK_BYTES,
+			             (unsigned long)st.depth_shell,
+			             (unsigned long)CLI_INSTANCE_STACK_SIZE);
 			return 1;
 		}
 	}

@@ -1318,19 +1318,33 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
 
     # What each thread may lend a plugin callback.
     #
-    # [!] PROVISIONAL.  The honest figure is "thread stack - depth already spent
-    # at the call site - asynchronous reserve - margin", and the call-site depth
-    # on this board is what Step 3a MEASURES (`nn stream stats`, "at call").  3b
-    # replaces these with derived values.  Until then each is well below its
-    # thread -- nn_svc_wio.c static-asserts it -- because Grove's issue #103
+    # The honest figure is "thread stack - depth already spent at the call site
+    # - asynchronous reserve - margin", and the call-site depth is what
+    # `nn stream stats` measures ("at call") on hardware.  Each is well below
+    # its thread -- nn_svc_wio.c static-asserts it -- because Grove's issue #103
     # found two placeholders equal to a whole thread stack, which a plugin could
     # have declared, been admitted with, and overflowed.
     #
-    #   nn_work   3072 B  (entry / shapes_ok / decode)
-    #   cam_prev  1024 B  (draw)
-    #   shell     4096 B  (report / params; CLI_INSTANCE and BG_JOB alike)
+    #   nn_work   3072 B  (decode)     at call 609 -> 3072-609-208 = 2255
+    #   cam_prev  1536 B  (draw)       at call 105 -> 1536-105-208 = 1223
+    #   shell     4096 B  (entry / shapes_ok / report / params)  at call: see below
+    #
+    # [!] WHICH THREAD EACH SLOT IS CALLED ON WAS WRONG UNTIL ISSUE #110, and
+    # the ENTRIES mapping below is where it shows.  Step 3a declared the
+    # WORKER's allowance for entry and shapes_ok on the reasoning that a
+    # decoder's callbacks belong to the decoding thread.  They do not: entry is
+    # called from `nn model load` and shapes_ok from the admission that both
+    # `nn run` and `nn stream start` pass through, and BOTH are console
+    # commands.  A bound on the wrong thread's stack is not a bound.
+    #
+    # [!] AND THE SHELL FIGURE IS STILL AWAITING ITS MEASUREMENT.  3a measured
+    # the worker and the panel; nothing measured this one, and `nn run` now
+    # carries a report capture buffer in the same frame.  NNCAM_SITE_SHELL
+    # records it and `nn stream stats` prints it -- derive this from that
+    # number, and do not read the fact that it is conservative as the fact that
+    # it is derived.
     set(WIO_PLUGIN_STACK_NN_WORK 1024)
-    set(WIO_PLUGIN_STACK_PREVIEW  512)
+    set(WIO_PLUGIN_STACK_PREVIEW 1024)
     set(WIO_PLUGIN_STACK_SHELL   1024)
     # The plugin's own string sink (asset/common) -- a leaf that copies bytes
     # into a caller-owned buffer, so a ceiling small enough to fire.
@@ -1396,13 +1410,27 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # What the base itself may spend below one veneer, charged at each indirect
     # call because the gate cannot see across it.
     #
-    # [!] THIS BOARD HAS NO BASE BEHIND THE VENEERS YET, so this cannot be a
-    # measurement: 3a never calls a plugin, and the painter, log and to_frame a
-    # plugin would reach are 3b's to write.  The number is Grove's 256, taken
-    # OVER on purpose and written down as such, so that it is not mistaken for
-    # an M7 figure -- 3b derives it from the base it writes, and the stack
-    # bounds it budgets from are not measurements until then.
-    set(WIO_PLUGIN_VENEER_BASE_COST 256)
+    # [!] DERIVED FROM THE BASE THIS BOARD ACTUALLY HAS (issue #110).  Step 3a
+    # carried Grove's 256 as an admitted placeholder; the base now exists and
+    # was measured with -fstack-usage over its callbacks, LTO off, summed along
+    # the deepest chain a plugin veneer can reach:
+    #
+    #   nn_plugin_log 16 + log_write 16 + log_vwrite 192
+    #     + fmt_vsnformat 32 + fmt_vformat 80 + fmt_utoa 64          = 400 B
+    #
+    # (fmt_utoa and fmt_padded are called in sequence, not nested, so the
+    # deeper of the two ends the chain.  The painter is far shallower --
+    # paint_rect 64 + rect_geom_norm 16 -- and to_frame and the report sink are
+    # leaves.)
+    #
+    # 512 rather than 400: the measurement is per-TU frames with LTO off, and
+    # the shipped build inlines across these boundaries.  OVER-estimating is
+    # the safe direction here, because the gate charges this at every crossing
+    # and a larger charge makes a plugin's declared requirement larger, not
+    # smaller.  RE-DERIVE IT whenever the base gains a callback or one of them
+    # gains a call -- the old number would still pass, which is the shape of
+    # the mistake this replaces.
+    set(WIO_PLUGIN_VENEER_BASE_COST 512)
 
     set(WIO_PLUGIN_COMMON "${CMAKE_SOURCE_DIR}/asset/common")
     set(WIO_PLUGIN_MEMORY_LD "${BOARD_DIR}/ldscript/plugin_memory.ld")
@@ -1444,8 +1472,8 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         OUT_VAR WIO_PLUGIN_ELFS
         SOURCES "${WIO_SHARED_DECODER}"
         AUDIT_SHARED "${WIO_SHARED_DECODER}"
-        ENTRIES pl_entry=${WIO_PLUGIN_STACK_NN_WORK}
-                pl_shapes_ok=${WIO_PLUGIN_STACK_NN_WORK}
+        ENTRIES pl_entry=${WIO_PLUGIN_STACK_SHELL}
+                pl_shapes_ok=${WIO_PLUGIN_STACK_SHELL}
                 pl_decode=${WIO_PLUGIN_STACK_NN_WORK}
                 pl_draw=${WIO_PLUGIN_STACK_PREVIEW}
                 pl_report=${WIO_PLUGIN_STACK_SHELL}
@@ -1467,8 +1495,8 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         TARGET_ID  ${WIO_PLUGIN_TARGET_ID}
         OUT_DIR "${CMAKE_BINARY_DIR}/plugin"
         OUT_VAR WIO_PLUGIN_ELFS
-        ENTRIES pl_entry=${WIO_PLUGIN_STACK_NN_WORK}
-                pl_shapes_ok=${WIO_PLUGIN_STACK_NN_WORK}
+        ENTRIES pl_entry=${WIO_PLUGIN_STACK_SHELL}
+                pl_shapes_ok=${WIO_PLUGIN_STACK_SHELL}
                 pl_decode=${WIO_PLUGIN_STACK_NN_WORK}
                 pl_draw=${WIO_PLUGIN_STACK_PREVIEW}
                 pl_report=${WIO_PLUGIN_STACK_SHELL}

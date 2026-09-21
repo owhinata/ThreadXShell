@@ -30,10 +30,19 @@
 
 /**
  * The preview thread's stack, in DTCM.  Published here since issue #108 because
- * the plugin policy in port/nn/nn_svc_wio.c asserts its provisional allowance for
- * a draw callback strictly below it.
+ * the plugin policy in port/nn/nn_svc_wio.c asserts its allowance for a draw
+ * callback strictly below it.
+ *
+ * [!] 1024 UNTIL ISSUE #110, WHEN THE THREAD GOT A NEW JOB.  It used to flip
+ * buffers and draw up to eight rectangles; it now hosts a loaded plugin's
+ * draw() and the painter under it, and the derived allowance at 1024 --
+ * 1024 - 105 measured at the call site - 208 asynchronous reserve = 711 -- left
+ * the detector's 588 B fitting by margin thin enough that any plugin with a
+ * label to draw would not.  Sizing the allowance to what today's plugin happens
+ * to need is how a limit stops being one; the thread is sized for its work
+ * instead.  512 B out of the 4,544 DTCM has spare.
  */
-#define CAM_PREVIEW_STACK_BYTES  1024u
+#define CAM_PREVIEW_STACK_BYTES  1536u
 
 #ifdef __cplusplus
 extern "C" {

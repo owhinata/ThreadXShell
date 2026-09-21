@@ -343,6 +343,10 @@ static int preview_draw_plugin(void)
 	bud.refused = 0u;
 	plugin_paint_bind(&paint, &bud, ltdc_back_buffer(),
 	                  ltdc_surface_w(), ltdc_surface_h());
+	/* [!] THE PROBE SITS AT THE CALL, not in the caller.  Both are the same
+	 * frame while this function is inlined, and "while it is inlined" is not
+	 * something the number should depend on. */
+	nn_camera_note_depth(NNCAM_SITE_DRAW);
 	nn_active_draw(&paint);
 	plugin_lease_give();
 
@@ -373,14 +377,15 @@ static void preview_entry(ULONG arg)
 			   INSTEAD OF the resident overlay -- not in preview_box(), which
 			   is deeper than a plugin is ever called from and would
 			   over-report. */
-			nn_camera_note_depth(NNCAM_SITE_DRAW);
 #if defined(CONFIG_NN_BACKEND_TFLM)
 			/* One decoder annotates a frame, not two: the plugin's boxes and
 			   the resident decoder's would be different readings of different
-			   models. */
+			   models.  The depth probe moved into preview_draw_plugin(), at
+			   the call it describes. */
 			if (!preview_draw_plugin())
 				preview_draw_overlay();
 #else
+			nn_camera_note_depth(NNCAM_SITE_DRAW);
 			preview_draw_overlay();
 #endif
 			if (ltdc_flip() == LTDC_OK)

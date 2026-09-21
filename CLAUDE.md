@@ -372,12 +372,13 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   空き 34,552 B）。SD 既定 OFF は `NOT DEFINED` でしか効かないので**古いビルドツリーは SD ON の
   まま残る** — configure 警告が出たら `-DBSP_ENABLE_SD=OFF`。フラッシュ不足に見えたらまず
   キャッシュの `BSP_ENABLE_SD` を見る。
-- [!] **plugin container（#108 = #78 Step 3a）**: `nn model load --slot` は PSRAM コピーの CRC 後に
+- [!] **plugin container（#108 = 3a / #110 = 3b）**: `nn model load --slot` は PSRAM コピーの CRC 後に
   `plugin_probe` → container なら `plugin_parse`（policy は firmware とホスト verifier で
   1 宣言）→ **モデル区画を in-place で backend に渡す**（TFLM は staging スロット「内部」かつ
   `NN_MODEL_ALIGN`=16 の範囲を受ける。先頭へコピーしない — CRC を取った container を
-  未検査のバイトで上書きする）。**plugin 区画は検証・記録のみで、コピーも呼び出しもしない**
-  （3a）。常駐デコーダはそのまま動く。**`nn info` の claim は開いているモデルに従う**:
+  未検査のバイトで上書きする）。**#110 以降 plugin は実際に走る**（decode / draw / report /
+  閾値）。**常駐デコーダは残す** — 両腕が在ることが差分テストの成立条件で、
+  Grove の #104 に相当する削除は別 Issue。**`nn info` の claim は開いているモデルに従う**:
   reload 後にのみ確定、拒否されて前のモデルが残れば前の claim のまま、bare / unload で
   消す（session を返す前に確定）。**`nn info` は無ロックなので reload〜確定の窓は
   「load in progress」と言い**、claim は出所（slot / blob 名）を持つ — 片方の検査だけでは
@@ -389,9 +390,30 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   M55 と macro が同一で、static assert だけでは素通り）。reload 後のモデル状態は
   **`nn_model_reload()` 自身が返す `open_after`** で決める — 後から問い合わせない
   （`nn_model_open()` は閉じた singleton を開き直すうえ、無ロックの `nn info` が別コンソールから
-  それを呼ぶので、reload 直後の読み戻しは他人が作った状態を見る）。stack 上限は**暫定で、各スレッドの stack 未満を
-  `_Static_assert`**。呼び出し地点の深さプローブ（`nn_camera_note_depth()`、noinline）は
-  **3b まで同じ形で残す** — 動かしたら測り直し。**DTCM で `nn_work` を伸ばせる上限は
+  それを呼ぶので、reload 直後の読み戻しは他人が作った状態を見る）。
+  **[!] plugin の差し替えは backend が成功してから**（#110）— 先に load すると、
+  固定予約上の前の plugin を壊してから「前のモデルが復元された」に落ち、デコーダの無い
+  モデルが残る。bare model は必ず unload する（新モデル + 旧デコーダを作らない）。
+  **[!] decode と draw を隔てるものが無い**（preview 優先度 12 > worker 18）ので
+  **結果リース**（`port/plugin/plugin_lease.c`）で囲う: 順序は**常にリース → フレームロック**、
+  worker は **decode と publish の全体**を保持、**パネルは待たない**（取れなければ overlay を
+  飛ばし、それを数える）。**report は snapshot と同じ保護区間で採取し、バッファは
+  呼び出し側のフレーム**（board 側スロットは 2 コンソールで取り合う。予約プロトコルを
+  足すより所有権を C の呼び出しスタックにする）。**長さは状態ではない** —
+  空・REPORT 無し・切り詰め・拒否・到達不能を別々に返す。
+  **[!] painter は全部 CPU**（DMA2D は「所有権を返す前に静止を確かめる」機構が無い。
+  ポーリングはタイムアウトしても中断せず `ltdc_fill_rect` は void）。輪郭は
+  **書く画素数**で課金（外接面積だと近距離の顔 1 つで箱が黙って消える）。予算は
+  **初期の試験上限**で、受入基準は board README。
+  **[!] スタックは 2 つの量**（呼び出し地点の空き / veneer の下でファームが使う量）。
+  後者は **#110 で 400 B と実測し 512 を宣言**（過大が安全側）— **ベースに callback が
+  増えたら導出し直す**。**どのスレッドで呼ばれるかを間違えない**: entry / shapes_ok /
+  report / param は **shell スレッド**（3a は worker の枠を宣言していた）。
+  **許容値を「今の plugin が必要な値」に合わせない** — 足りなければスレッドを広げる
+  （`cam_prev` は #110 で 1,024 → 1,536）。深さプローブ（`nn_camera_note_depth()`、noinline）は
+  **呼び出し地点そのものに置く**（呼び出し元に置くとインライン化に依存する）。
+  **[!] veneer コストを変えたら、既に載っている container の宣言は古い** — pack し直して
+  送り直す。**DTCM で `nn_work` を伸ばせる上限は
   `_smsp_stack - _dtcm_used_end` = 4,544 B**（main stack 8 KB を空きに数えない）。
 - [!] **リンカスクリプトの `ASSERT` は LTO 下で空振りする**。配置の最終ガードはポストリンクの
   residency チェック（`check_itcm_residency.py` / `check_dtcm_residency.py` を移植して維持する）。

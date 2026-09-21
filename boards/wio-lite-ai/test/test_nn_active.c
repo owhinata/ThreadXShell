@@ -92,8 +92,11 @@ struct nn_tensor *nn_output(struct nn_model *m, int idx)
 {
 	if (m == NULL || idx < 0 || idx >= m->n)
 		return NULL;
+	/* A hole in the set: the backend counts an output it cannot hand over.
+	 * Section 2b below is what walks in here -- a branch nothing reaches is
+	 * a branch that only looks covered. */
 	if (m->out[idx].data == NULL && m->out[idx].bytes == 0u)
-		return NULL;   /* a hole in the set, deliberately */
+		return NULL;
 	return &m->out[idx];
 }
 
@@ -326,6 +329,50 @@ int main(void)
 	expect("it describes its own result", nn_active_can_report() != 0 &&
 	       nn_active_report(cap_write, NULL) >= 0 && cap_len > 0u,
 	       "wrote %lu B", (unsigned long)cap_len);
+
+	/* ================================================================
+	 * 2b.  A HOLE IN THE OUTPUT SET, which the shim must translate
+	 * ================================================================
+	 *
+	 * [!] THIS IS THE ONLY THING THAT EXERCISES to_desc()'s NULL BRANCH.
+	 * `nn_output()` answers NULL for an output the backend does not have, and
+	 * the shim writes a ZEROED descriptor for it rather than refusing: a hole
+	 * is not a model-shape problem, and letting the decoder decide whether the
+	 * four tensors it wants are still there reaches the same answer by a
+	 * defensible route.  Delete that branch and nn_desc_of() dereferences the
+	 * NULL, which these cases turn into a crash rather than a wrong answer.
+	 *
+	 * [!] WHAT THEY CANNOT PIN is the memset itself: a branch that takes the
+	 * hole and writes nothing leaves whatever the caller's stack held, and an
+	 * assertion about that would be an assertion about stack residue.  The
+	 * zeroing is why a hole is a hole; there is no observation from out here
+	 * that separates it from a lucky stack.
+	 *
+	 * These two cases came over from test_nn_decoder.c, which drove the
+	 * resident decoder through the same translation until issue #116 deleted
+	 * it.  They are the reason the stub's NULL return exists.
+	 */
+	reset_model();
+	put_one_face();
+	stub.out[1].data  = NULL;
+	stub.out[1].bytes = 0u;      /* nn_output() answers NULL for this one */
+	expect("[!] a hole where one of the four should be is not readable",
+	       nn_active_shapes_ok(&stub) == 0, "accepted");
+	n = nn_active_decode(&stub);
+	expect("and decoding it is a model error, not a crash and not zero faces",
+	       n == BF_ERR_MODEL, "got %d", n);
+
+	reset_model();
+	put_one_face();
+	stub.n = NN_MAX_IO;          /* out[4..7] are zeroed, i.e. more holes */
+	expect("extra empty outputs do not stop the four being found",
+	       nn_active_shapes_ok(&stub) != 0, "refused");
+	n = nn_active_decode(&stub);
+	expect("and the decode still finds the face past them", n == 1,
+	       "got %d", n);
+
+	reset_model();
+	put_one_face();
 
 	/* ================================================================
 	 * 3.  The threshold belongs to the plugin, and goes with it

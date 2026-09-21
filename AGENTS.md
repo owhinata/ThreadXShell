@@ -612,7 +612,12 @@
    **別フラグで組み直した監査対象を作らない** — 出荷物に無いオブジェクトを
    検査することになる。**常駐デコーダをファームに戻さない。**
    素の `.tflite` は `nn run` で**出力テンソルをそのまま報告**し、
-   **class report には落とさない**。`nn stream` は**デコーダが無い時点で拒否**する。
+   **class report には落とさない**。
+   **[!] `nn stream` の拒否の仕方はボードで違う。揃えない**: **Grove** は
+   `nn_svc_grove.c` が**デコーダが無い時点で**（shape や draw の前に）拒否し、
+   **wio** は admission を `nn run` と共有するので**shape は通し
+   `nn_active_can_draw()` 1 本で**止める（不変条件 7。揃えると素のモデルの
+   `nn run` が消える）。
    `nn thresh` は誰も閾値を持たなければ **`none`**（`NN_SVC_THRESH_NONE` = 0）で、
    set は **`NN_SVC_ERR_STATE`**（値の拒否 `NN_SVC_ERR_ARG` と畳まない）。
    **全 896 アンカーを必ず走査**し、候補は上限付き top-N にする — 満杯で打ち切ると

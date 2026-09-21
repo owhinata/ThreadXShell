@@ -4,7 +4,7 @@
  */
 /**
  * @file    test_nn_det_record.c
- * @brief   Host tests for svc/nn_det_record.c (issues #97, #110).
+ * @brief   Host tests for svc/nn_det_record.c (issues #97, #110, #116).
  *
  * THIS IS THE ONLY PLACE THE RULE CAN BE CHECKED.  What it guards is an ordering:
  *
@@ -295,6 +295,112 @@ int main(void)
 
 		expect("an external publish into a null record is refused",
 		       nn_det_record_publish_external(NULL, 1, 0u) == 0, "taken");
+	}
+
+	/* --- an inference nothing decoded (issue #116) --------------------- */
+	/*
+	 * [!] THIS IS A PUBLISHED RESULT, NOT THE ABSENCE OF ONE.  A firmware that
+	 * carries no decoder still runs the model; the outputs exist and only the
+	 * interpretation is missing.  The console's wait is on the INFERENCE
+	 * COUNTER, which a caller may only bump for a publish that was taken, so a
+	 * board that cannot say "one ran and nobody read it" would leave `nn run`
+	 * waiting out its timeout over an inference that had already finished.
+	 *
+	 * And it is under the same generation rule as the other two, for the same
+	 * reason -- a stop cannot cancel an inference in flight.  That is easier to
+	 * get wrong here than on the box path, because there are no boxes arriving
+	 * from the dead session to notice; all that lands is a `valid` flag.
+	 */
+	{
+		struct bf_det canary[BF_MAX_DET];
+		struct bf_result r_live = mk_res(7);
+		uint32_t g, stale;
+		unsigned i;
+		int untouched, boxes_left;
+
+		/* Start from a LIVE caller-boxes record, so what is under test is the
+		 * transition and not a record that was already empty. */
+		nn_det_record_reset(&rec);
+		g = nn_det_record_gen(&rec);
+		(void)nn_det_record_publish(&rec, &one, 1, &r_live, g);
+
+		expect("an inference nothing decoded is published",
+		       nn_det_record_publish_raw(&rec, g) != 0, "dropped");
+
+		for (i = 0u; i < (unsigned)BF_MAX_DET; i++)
+			canary[i].score = 1234;
+		nn_det_record_snapshot(&rec, &snap, canary, BF_MAX_DET);
+		expect("[!] and it routes the caller to the tensors themselves",
+		       snap.kind == (uint8_t)NN_DET_RAW_TENSORS, "kind %u",
+		       (unsigned)snap.kind);
+		expect("it counts as a result this session produced", snap.valid != 0,
+		       "valid %d", snap.valid);
+		expect("[!] with a count of zero, which is not a measurement",
+		       snap.ndet == 0, "ndet %d", snap.ndet);
+		untouched = 1;
+		for (i = 0u; i < (unsigned)BF_MAX_DET; i++)
+			if (canary[i].score != 1234)
+				untouched = 0;
+		expect("the caller's array is untouched, every element of it",
+		       untouched, "a box was written");
+		expect("[!] no decoder ran, so no diagnostics travel with it",
+		       snap.res.npass == 0 && snap.res.nkept == 0 &&
+		               snap.res.max_score == 0.0f &&
+		               snap.res.thresh_milli == 0u,
+		       "npass %d nkept %d max %.3f thresh %u", snap.res.npass,
+		       snap.res.nkept, (double)snap.res.max_score,
+		       (unsigned)snap.res.thresh_milli);
+		boxes_left = 0;
+		for (i = 0u; i < (unsigned)BF_MAX_DET; i++)
+			if (rec.dets[i].x != 0.0f || rec.dets[i].score != 0.0f)
+				boxes_left = 1;
+		expect("[!] and the boxes it replaced are gone from the record itself",
+		       !boxes_left, "a box of the decode before it survived");
+
+		/* The kind must not stick, the same way the external one does not. */
+		(void)nn_det_record_publish(&rec, &one, 1, &r_live, g);
+		for (i = 0u; i < (unsigned)BF_MAX_DET; i++)
+			canary[i].x = 1234.0f;
+		nn_det_record_snapshot(&rec, &snap, canary, BF_MAX_DET);
+		expect("a later caller-boxes publish routes back",
+		       snap.kind == (uint8_t)NN_DET_CALLER_BOXES && canary[0].x == 0.25f,
+		       "kind %u x %.3f", (unsigned)snap.kind, (double)canary[0].x);
+
+		/*
+		 * [!] A MISMATCH CHANGES NOTHING -- checked against a record that has
+		 * something to lose.  An implementation that clears first and tests the
+		 * generation afterwards passes the "lands nowhere" case below (an empty
+		 * record stays empty) while destroying the live session's result.
+		 */
+		stale = g;
+		nn_det_record_reset(&rec);
+		g = nn_det_record_gen(&rec);
+		(void)nn_det_record_publish(&rec, &one, 1, &r_live, g);
+		expect("[!] an inference from a retired session is dropped",
+		       nn_det_record_publish_raw(&rec, stale) == 0, "taken");
+		for (i = 0u; i < (unsigned)BF_MAX_DET; i++)
+			canary[i].x = 1234.0f;
+		nn_det_record_snapshot(&rec, &snap, canary, BF_MAX_DET);
+		expect("and the live session's result is exactly as it was",
+		       snap.valid != 0 && snap.ndet == 1 &&
+		               snap.kind == (uint8_t)NN_DET_CALLER_BOXES &&
+		               snap.res.npass == 7 && canary[0].x == 0.25f,
+		       "valid %d ndet %d kind %u npass %d x %.3f", snap.valid,
+		       snap.ndet, (unsigned)snap.kind, snap.res.npass,
+		       (double)canary[0].x);
+
+		/* And the plain form of the same rule: nothing of a retired session
+		 * survives into the record it tried to land in. */
+		nn_det_record_reset(&rec);
+		expect("a retired session cannot make an empty record valid either",
+		       nn_det_record_publish_raw(&rec, g) == 0, "taken");
+		nn_det_record_snapshot(&rec, &snap, NULL, 0);
+		expect("which still reports nothing published yet", snap.valid == 0,
+		       "valid %d", snap.valid);
+
+		expect("publishing an undecoded inference into a null record is "
+		       "refused",
+		       nn_det_record_publish_raw(NULL, 0u) == 0, "taken");
 	}
 
 	/* --- null tolerance ----------------------------------------------- */

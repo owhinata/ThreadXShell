@@ -53,7 +53,14 @@ struct nn_det_record {
 	struct bf_det    dets[BF_MAX_DET];
 	int              ndet;   /**< items; see @ref nn_det_kind for what they are */
 	struct bf_result res;    /**< what that decode reported, thresh included */
-	int              valid;  /**< 0 = this session has not decoded yet       */
+	/**
+	 * [!] "THIS SESSION HAS PUBLISHED AN INFERENCE RESULT", which is not the
+	 * same as "a decode ran" (issue #116).  A board with no decoder publishes
+	 * the fact that the model ran and nothing interpreted its outputs, and that
+	 * is a result of the current generation like any other -- @ref nn_det_kind
+	 * is what says which it is.  0 means this session has published none yet.
+	 */
+	int              valid;
 	uint8_t          kind;   /**< one of @ref nn_det_kind (issue #110)       */
 	uint32_t         gen;    /**< session generation; see the file comment   */
 };
@@ -93,7 +100,9 @@ enum nn_det_kind {
 	 * [!] NOTHING DECODED THESE OUTPUTS (issue #104).  A board with no decoder
 	 * ran the model and has raw output tensors and no interpretation of them.
 	 * The count means nothing here and neither do the boxes; a consumer reports
-	 * the tensors themselves.
+	 * the tensors themselves.  Issue #116 gave it a publish of its own
+	 * (@ref nn_det_record_publish_raw), for a board that decodes -- or here,
+	 * does not -- on a worker thread and has to say so through the record.
 	 *
 	 * Deliberately NOT spelled as a BF_ERR_* code: those are a decoder's
 	 * vocabulary, and BF_ERR_MODEL in particular means "not a detector", which
@@ -160,6 +169,36 @@ int nn_det_record_publish(struct nn_det_record *r, const struct bf_det *d, int n
  * function state something about a result it cannot see.
  */
 int nn_det_record_publish_external(struct nn_det_record *r, int n, uint32_t gen);
+
+/**
+ * Publish the fact that AN INFERENCE RAN AND NOTHING DECODED IT (issue #116).
+ *
+ * A firmware that carries no decoder still runs the model: the outputs are
+ * there and what is missing is an interpretation of them.  That is a result --
+ * it is reported as the tensors themselves -- and on a board whose inference
+ * finishes on a worker thread it has to travel through the record like any
+ * other, because a console waits on the inference counter and a caller must not
+ * count a publish that was dropped.  Without this the counter could never move
+ * for a bare model, and `nn run` would wait out its timeout over an inference
+ * that had already finished.
+ *
+ * Same generation rule and same return as @ref nn_det_record_publish: a result
+ * from a retired session lands nowhere, and a mismatch leaves the record
+ * exactly as it was.
+ *
+ * [!] THE COUNT IS ZERO BECAUSE THERE IS NOTHING TO COUNT, not because a
+ * decoder looked and found nothing.  @ref NN_DET_RAW_TENSORS is what tells
+ * those apart; the number beside it is not a measurement anybody took, so there
+ * is no other number to put there.
+ *
+ * [!] AND IT IS NOT SPELLED AS A BF_ERR_* CODE.  Those are a decoder's
+ * vocabulary, and BF_ERR_MODEL in particular routes to the shared class report
+ * -- the top 5 of a detector's regression tensor, printed as though the numbers
+ * were classes.  The boxes and @ref bf_result's diagnostics are cleared for the
+ * same reason they are on the external path: they describe a decoder that did
+ * not run, and stale ones must not be left standing beside this.
+ */
+int nn_det_record_publish_raw(struct nn_det_record *r, uint32_t gen);
 
 /**
  * Take a coherent snapshot, and up to @p max boxes with it.

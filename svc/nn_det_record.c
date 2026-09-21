@@ -85,6 +85,25 @@ int nn_det_record_publish_external(struct nn_det_record *r, int n, uint32_t gen)
 	return 1;
 }
 
+int nn_det_record_publish_raw(struct nn_det_record *r, uint32_t gen)
+{
+	if (r == NULL)
+		return 0;
+	if (gen != r->gen)
+		return 0;          /* the same rule, for the same reason */
+
+	/* Zero because there is nothing to count, not because a decoder found
+	 * nothing -- see the header.  The boxes and the diagnostics describe a
+	 * decoder that did not run, so whatever ran before this does not get to
+	 * stand beside the inference that did. */
+	r->ndet  = 0;
+	memset(r->dets, 0, sizeof r->dets);
+	memset(&r->res, 0, sizeof r->res);
+	r->kind  = (uint8_t)NN_DET_RAW_TENSORS;
+	r->valid = 1;
+	return 1;
+}
+
 void nn_det_record_snapshot(const struct nn_det_record *r,
                             struct nn_det_snapshot *out,
                             struct bf_det *dets, int max)

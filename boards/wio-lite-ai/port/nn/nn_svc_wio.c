@@ -1502,9 +1502,20 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 	}
 
 	nn_camera_stats_get(&st);
-	for (i = 0u, n = 0u; i < 6u; i++) {
+	for (i = 0u, n = 0u; i < 7u; i++) {
 		if (i == 1u && !st.stream_lost)
 			continue;                       /* only worth a line when true */
+#if defined(CONFIG_NN_BACKEND_TFLM) && BSP_ENABLE_LCD
+		/* [!] THE PANEL'S PLUGIN NUMBERS, and only when a plugin is what
+		 * draws.  Without a line nobody can read them, and counters nobody
+		 * reads are counters nobody can hold to a threshold -- which is the
+		 * whole of the acceptance criteria this board's README states. */
+		if (i == 6u && !nn_active_is_plugin())
+			continue;
+#else
+		if (i == 6u)
+			continue;
+#endif
 		/* Nothing has reached either site yet: no number, so no line. */
 		if (i == 5u && st.depth_decode == 0u && st.depth_draw == 0u &&
 		    st.depth_shell == 0u)
@@ -1569,6 +1580,33 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 			             (unsigned long)st.depth_shell,
 			             (unsigned long)CLI_INSTANCE_STACK_SIZE);
 			return 1;
+#if defined(CONFIG_NN_BACKEND_TFLM) && BSP_ENABLE_LCD
+		case 6u: {
+			uint32_t spent = 0u, refused = 0u, miss = 0u, run = 0u;
+
+			/*
+			 * What the loaded decoder cost the panel: the high-water pixel
+			 * charge of any one frame against its cap, primitives it refused
+			 * for want of budget, and the frames it was not let near at all.
+			 *
+			 * [!] A RUN OF MISSES IS THE ONE THAT SHOWS.  One skipped overlay
+			 * is invisible; a run of them is a panel that has stopped
+			 * annotating, and the preview's own counters cannot see it --
+			 * they count a frame that was PRESENTED, not one presented bare.
+			 */
+			cam_preview_plugin_draw_stats(&spent, &refused);
+			plugin_lease_misses(&miss, &run);
+			nn_detail_to(buf, cap,
+			             "plugin  : drew %lu px max/frame of %lu, %lu "
+			             "refused; %lu frame(s) missed (run of %lu)",
+			             (unsigned long)spent,
+			             (unsigned long)(NN_ACTIVE_FRAME_W *
+			                             NN_ACTIVE_FRAME_H / 4u),
+			             (unsigned long)refused,
+			             (unsigned long)miss, (unsigned long)run);
+			return 1;
+		}
+#endif
 		}
 	}
 	return 0;

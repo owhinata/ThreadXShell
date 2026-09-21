@@ -59,6 +59,10 @@ static int pl_exec_ok(uint32_t lo, uint32_t hi, const char **why)
 	mair1     = MPU->MAIR1;
 	saved_rnr = MPU->RNR;
 
+	/* [!] THIS CLAMP BOUNDS THE READ, IT DOES NOT ANSWER FOR THE REGIONS IT
+	 * SKIPS.  `type` goes to the judge as it was read, so a DREGION larger
+	 * than the table above comes back as PLUGIN_MPU_TRUNCATED rather than as a
+	 * verdict about the first sixteen (issue #114). */
 	n = (type >> PLUGIN_MPU_TYPE_DREGION_SHIFT) & PLUGIN_MPU_TYPE_DREGION_MASK;
 	if (n > PLUGIN_MPU_REGION_MAX)
 		n = PLUGIN_MPU_REGION_MAX;

@@ -838,7 +838,8 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   - **[!] オフセット → アドレスは `plugin_run_slot()` の 1 箇所**（ローダの entry も同じ
     ヘルパ）。**実行前に MPU を読み戻して fail-closed**（`enable_XIP()` が再構成する。
     Armv8-M に「番号の大きいリージョンが勝つ」は無い / `limit` は最後の 32 B を含む /
-    MAIR は完全復号 / リージョン数は `MPU_TYPE.DREGION`）。判定は純関数・ホストテスト必須。
+    MAIR は完全復号 / リージョン数は `MPU_TYPE.DREGION` で、**読めた表より大きければ
+    clamp せず拒否**（#114。落とすのは番号の大きい側 = fault を生む側）。判定は純関数・ホストテスト必須。
     **窓を守る新しい機構は作らない**（既存の NOR リースが守る。`nor_lease_held()` で assert）。
   - **[!] plugin の fault は `CAM_ST_LOST` に行かない。リセットが teardown である。**
     帰属は「pc が active plugin 内」まで。handler は publish 済みメタデータだけ読む。

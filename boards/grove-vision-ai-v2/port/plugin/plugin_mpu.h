@@ -66,12 +66,14 @@ struct plugin_mpu_region {
 
 /** Most regions this decoder will look at.  MPU_TYPE.DREGION is 8 bits, but no
  *  Armv8-M implementation defines more than 16 and this port has no reason to
- *  walk a table that large. */
+ *  walk a table that large.  A DREGION larger than this is refused, not
+ *  clamped -- see PLUGIN_MPU_TRUNCATED. */
 #define PLUGIN_MPU_REGION_MAX 16u
 
 enum plugin_mpu_verdict {
 	PLUGIN_MPU_OK = 0,
 	PLUGIN_MPU_ARG,        /**< nonsense arguments                        */
+	PLUGIN_MPU_TRUNCATED,  /**< DREGION exceeds the table handed over     */
 	PLUGIN_MPU_NO_REGION,  /**< enabled, no default map, nothing covers   */
 	PLUGIN_MPU_PARTIAL,    /**< a region covers only part of the range    */
 	PLUGIN_MPU_MULTIPLE,   /**< more than one enabled region intersects   */
@@ -88,7 +90,8 @@ enum plugin_mpu_verdict {
  * @param ctrl     MPU_CTRL
  * @param type     MPU_TYPE; only DREGION is used
  * @param rgn      the region table, @p nregion entries, Secure bank
- * @param nregion  entries in @p rgn; the caller clamps DREGION to what it read
+ * @param nregion  entries in @p rgn: how many the caller actually read.  A
+ *                 DREGION larger than this is PLUGIN_MPU_TRUNCATED
  * @param mair0    MPU_MAIR0
  * @param mair1    MPU_MAIR1
  * @param lo, hi   the range, @p hi exclusive
@@ -97,6 +100,19 @@ enum plugin_mpu_verdict {
  * number; PMSAv8 does not -- a matching address in more than one enabled region
  * invalidates the match and the access faults.  So more than one intersecting
  * region is a refusal, not something to resolve.
+ *
+ * [!] AN INCOMPLETE SNAPSHOT IS REFUSED, NOT CLAMPED (issue #114).  Walking
+ * only the first @p nregion entries and answering anyway would be answering
+ * about a different MPU, and in the one direction that matters: the entries
+ * left out are the HIGHER-numbered ones, and by the rule above a higher region
+ * intersecting the range is precisely what turns a single clean cover into a
+ * fault.  A clamp can therefore only ever err towards "yes".  The host test
+ * holds the pair: the same table read short used to come out PLUGIN_MPU_OK and
+ * read in full is PLUGIN_MPU_MULTIPLE.
+ *
+ * The table is not consulted at all with the MPU disabled -- the default map is
+ * the whole answer there -- so DREGION is not checked on that path.  A host
+ * test case pins that rather than leaving it to be inferred.
  *
  * [!] AND THE LIMIT INCLUDES ITS LAST 32-BYTE BLOCK.  RLAR holds the limit with
  * the low five bits stripped, and the region runs to the end of that block:

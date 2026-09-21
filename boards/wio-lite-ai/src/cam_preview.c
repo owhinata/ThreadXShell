@@ -67,7 +67,7 @@
    producer costs a band.  Above the shell (16) so a busy console cannot stall the
    display. */
 #define PREVIEW_PRIO   12u
-#define PREVIEW_STACK  1024u
+#define PREVIEW_STACK  CAM_PREVIEW_STACK_BYTES   /* cam_preview.h (#108) */
 
 /* The camera frame and the landscape drawing surface are the same size, so the
  * preview is a full-surface blit at the origin -- no crop, no offsets, and each
@@ -257,6 +257,11 @@ static void preview_entry(ULONG arg)
 			   removing up to 32 separate acquisitions from the window between
 			   the last band and the flip. */
 			ltdc_lock_frame();
+			/* Where a plugin's draw() will stand (issue #108): here, inside
+			   the frame lock and just ahead of the resident overlay -- not in
+			   preview_box(), which is deeper than a plugin will ever be
+			   called from and would over-report. */
+			nn_camera_note_depth(NNCAM_SITE_DRAW);
 			preview_draw_overlay();
 			if (ltdc_flip() == LTDC_OK)
 				preview_shown++;

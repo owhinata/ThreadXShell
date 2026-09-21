@@ -411,14 +411,38 @@ static int tflm_bk_reload(const void *data, uint32_t len, const char *name,
 	 * wherever the caller points -- would put the flatbuffer's lifetime and alignment
 	 * in the caller's hands, and TFLM keeps pointers INTO the model for as long as the
 	 * interpreter lives.  Refusing here is what makes the double-buffering above mean
-	 * anything. */
-	if (data == nn_tflm_model_buf[0])
-		new_slot = 0;
-	else if (data == nn_tflm_model_buf[1])
-		new_slot = 1;
-	else {
+	 * anything.
+	 *
+	 * [!] A SLOT IS IDENTIFIED BY CONTAINMENT, NOT BY EQUALITY (issue #108).  A plugin
+	 * container is staged whole and its MODEL SECTION is handed over in place, at an
+	 * offset inside the slot -- copying it down to the slot's start would overwrite
+	 * the container that the model's CRC was checked as part of, with bytes nobody
+	 * checked.  What equality used to guarantee is still required, just stated as
+	 * what it meant: the whole model lies inside one slot we own, and it starts on
+	 * the alignment the flatbuffer's internal buffers were laid out against
+	 * (NN_MODEL_ALIGN, nn.h).  A slot base met that by construction; an offset has
+	 * to be checked. */
+	new_slot = -1;
+	for (unsigned i = 0u; i < NN_TFLM_MODEL_SLOTS; i++) {
+		const uintptr_t base = (uintptr_t)nn_tflm_model_buf[i];
+		const uintptr_t p    = (uintptr_t)data;
+
+		if (p >= base && p - base < NN_TFLM_MODEL_MAX) {
+			if (len > NN_TFLM_MODEL_MAX - (uint32_t)(p - base)) {
+				*impl_out = &g_tm;        /* runs off the end of the slot */
+				return NN_MODEL_ERR_SLOT;
+			}
+			new_slot = (int)i;
+			break;
+		}
+	}
+	if (new_slot < 0) {
 		*impl_out = &g_tm;                /* nothing changed */
 		return NN_MODEL_ERR_SLOT;
+	}
+	if (((uintptr_t)data & (NN_MODEL_ALIGN - 1u)) != 0u) {
+		*impl_out = &g_tm;
+		return NN_MODEL_ERR_ALIGN;
 	}
 	/* Never adopt the slot the LIVE model is in.  load_region() hands out the inactive
 	 * one, so reaching here means the caller used an answer from before some other

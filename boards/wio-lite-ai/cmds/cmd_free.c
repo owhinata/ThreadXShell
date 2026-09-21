@@ -28,6 +28,15 @@
  *          NOT here -- it moved to DTCM, which is what makes this number honest:
  *          the free bytes reported are genuinely available, rather than doubling
  *          as the main stack's unaccounted headroom.
+ *          [!] Since issue #108 the row's TOTAL stops at the .plugin reservation
+ *          (__heap_end), not at the end of AXI-SRAM, for the same reason: the top
+ *          32 KB is prelinked plugin space the heap can never have, and counting
+ *          it here would overstate spendable headroom by exactly 32 KB -- in the
+ *          step whose purpose is to measure resources.
+ *   Plugin the .plugin reservation itself, on its own row, so the 320 KB of
+ *          AXI-SRAM is still accounted for in full across the two.  Nothing is
+ *          loaded into it yet (#78 Step 3a validates containers and never copies
+ *          one), so its used count is 0 by construction, not by measurement.
  *   DTCM   used = _dtcm_used_end - ORIGIN(DTCM).  The resident block (.log_noinit,
  *          .nx_pool, .dtcm_bench, then .dtcm_bss = every thread stack + the RTL8720
  *          UART rings) is bump-placed from ORIGIN, so its high-water mark
@@ -93,7 +102,8 @@
 extern uint8_t _sdata[], _edata[];   /* .data run image in RAM   */
 extern uint8_t _sidata[];            /* .data load image in FLASH */
 extern uint8_t _end[];               /* top of static RAM = heap base */
-extern uint8_t __ram_end[];          /* top of AXI-SRAM (heap ceiling) */
+extern uint8_t __heap_end[];         /* heap ceiling = base of .plugin (#108) */
+extern uint8_t __plugin_start[], __plugin_end[];   /* the .plugin reservation */
 extern uint8_t _estack[];            /* top of DTCM = initial MSP (owhinata/wio-lite-ai#46) */
 extern uint8_t _smsp_stack[];        /* bottom of the main stack */
 extern uint8_t _dtcm_used_end[];     /* top of the DTCM resident block */
@@ -194,8 +204,16 @@ static int cmd_free(struct cli_instance *sh, int argc, char **argv)
 	             ".itcm ISR paths + .itcm_bench (membench)");
 	print_region(sh, "DTCM",  DTCM_ORIGIN,  DTCM_LENGTH,  dtcm_used,
 	             "dmesg + nx pool + membench + stacks/rings; main stack on top");
-	print_region(sh, "RAM",   RAM_ORIGIN,   RAM_LENGTH,   ram_used,
+	/* Two rows for AXI-SRAM, like the PSRAM below: the base row is bounded by the
+	 * heap's ceiling so its free bytes stay spendable, and the plugin reservation
+	 * at the top gets a row of its own (issue #108).  Between them they account
+	 * for the whole RAM_LENGTH. */
+	print_region(sh, "RAM",   RAM_ORIGIN,   sym(__heap_end) - RAM_ORIGIN,
+	             ram_used,
 	             ".data/.bss + DMA scratch + heap (bus-master reachable)");
+	print_region(sh, "Plugin", sym(__plugin_start),
+	             sym(__plugin_end) - sym(__plugin_start), 0u,
+	             "prelinked plugin image; not heap (none loaded: #78 Step 3a)");
 	print_region(sh, "Flash", flash_origin, flash_length, flash_used,
 	             ".isr/.text/.rodata/.data (internal)");
 	/* Two rows for one device.  The base row's total stops at the carve-out because

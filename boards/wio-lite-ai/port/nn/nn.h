@@ -78,7 +78,23 @@ enum nn_dtype {
 #define NN_MODEL_ERR_SHAPE    (-5)  /**< I/O tensor count outside 1..NN_MAX_IO       */
 #define NN_MODEL_ERR_EMPTY    (-6)  /**< zero-length or impossibly short model       */
 #define NN_MODEL_ERR_FORMAT   (-7)  /**< not a valid flatbuffer for this runtime     */
-#define NN_MODEL_ERR_SLOT     (-8)  /**< buffer is not the one load_region() gave    */
+#define NN_MODEL_ERR_SLOT     (-8)  /**< not inside the region load_region() gave    */
+#define NN_MODEL_ERR_ALIGN    (-9)  /**< model does not start on NN_MODEL_ALIGN       */
+
+/**
+ * The alignment a model handed to nn_model_reload() must start on (issue #108).
+ *
+ * Until issue #108 a model always sat at the very start of a staging buffer, which
+ * is 32-byte aligned, so no caller ever had to think about it.  A plugin container
+ * now hands its MODEL SECTION over in place, at an offset inside that buffer, and
+ * the question became visible.  A converted .tflite aligns the buffers inside it
+ * relative to the start of the FILE -- 16 bytes -- and the kernels read float32
+ * weights with word loads that fault on this core if misaligned, so the file must
+ * start on a boundary at least that strict for its internal alignments to survive.
+ * The container's own rule (PLUGIN_MODEL_ALIGN, svc/plugin_abi.h) is 16, and
+ * nn_svc_wio.c asserts that it meets this one; the backend checks it anyway.
+ */
+#define NN_MODEL_ALIGN        16u
 
 /**
  * A single input or output tensor.  @p data points at the backend/model-owned
@@ -190,11 +206,27 @@ int nn_model_load_region(void **buf, uint32_t *cap);
  * @p name for display.  @p data == NULL unloads, which leaves the backend open with no
  * model rather than closed (`nn info` still works, `nn bench` refuses).
  *
+ * @p data need not be the START of the buffer load_region() handed out (issue #108):
+ * a container's model section is adopted in place, at its offset inside the staged
+ * container.  It must lie INSIDE that buffer -- [data, data + len) contained in it --
+ * and start on NN_MODEL_ALIGN; anything else is refused (NN_MODEL_ERR_SLOT /
+ * NN_MODEL_ERR_ALIGN) rather than interpreted from memory the backend does not own.
+ *
+ * @p open_after, when not NULL, receives whether the singleton is open once THIS
+ * call has finished: 0 only in the documented case where the model was refused
+ * AND the previous one could not be rebuilt.  It is the reload's own outcome,
+ * not a readback -- and that distinction is the point (issue #108 review).
+ * Asking afterwards cannot answer it: `nn info` on another console takes no
+ * session and calls nn_model_open(), which re-opens a closed singleton as an
+ * EMPTY one, so any read after this returns may see a state this call did not
+ * leave.
+ *
  * TRANSACTIONAL.  A model the backend cannot build is reported without disturbing the
  * one already loaded, so a truncated file costs nothing but the message.  Returns 0,
  * NN_ERR_NOSUP / NN_ERR_STATE, or the backend's own <0 reason for the rejection.
  */
-int nn_model_reload(const void *data, uint32_t len, const char *name);
+int nn_model_reload(const void *data, uint32_t len, const char *name,
+                    int *open_after);
 
 /**
  * One short sentence for a code returned by nn_model_reload(), never NULL.  Handles

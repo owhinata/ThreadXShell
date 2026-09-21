@@ -108,3 +108,43 @@ if [ -f "$mlperf/api/internally_implemented.cpp" ]; then
 else
     echo "test_mlperf: SKIP (lib/mlperf-tiny not checked out)"
 fi
+
+# issue #108 (#78 Step 3a) -- the heap's bound by BEHAVIOUR: the real
+# src/retarget.c must grow the break to exactly __heap_end (the base of the
+# .plugin reservation) and no further.  The post-link gate below checks that the
+# linked _sbrk NAMES that ceiling; it cannot check that the ceiling GOVERNS the
+# comparison, and this can.  The three linker symbols are renamed for
+# retarget.c only (so no system header meets a macro called `end`) to labels
+# test_sbrk.c lays out in a fixed order, with __ram_end placed above the
+# ceiling: a regression to the pre-#108 bound links and fails, rather than
+# failing to link.
+gcc $CFLAGS -Dend=wio_test_heap_floor -D__heap_end=wio_test_heap_ceiling \
+    -D__ram_end=wio_test_ram_end \
+    -c "$board/src/retarget.c" -o "$out/retarget_host.o"
+gcc $CFLAGS "$here/test_sbrk.c" "$out/retarget_host.o" \
+    $LDFLAGS -o "$out/test_sbrk"
+"$out/test_sbrk"
+
+# issue #108 (#78 Step 3a) -- negative tests for cmake/check_plugin_reservation.py,
+# the post-link gate on the .plugin reservation at the top of AXI-SRAM and the
+# heap ceiling below it.  Synthetic images, because the firmware's own linker
+# ASSERTs would refuse a broken layout before the gate got a say -- and the gate
+# is the check that still holds when an ASSERT is edited.  One shape (a section
+# overlapping the reservation) is refused by ld itself in a normal link; the
+# fixture records that rather than skipping it.
+#
+# The fixtures link Cortex-M7 images, so they need the repository-pinned cross
+# toolchain (cmake/arm-none-eabi-toolchain.cmake fetches it into tools/).  If it
+# is absent this SKIPS -- loudly, because a skip that reads like a pass is how a
+# gate ends up never having been seen to fail.
+gate_cc=$(ls -d "$HOST_TEST_REPO"/tools/arm-gnu-toolchain-*/bin/arm-none-eabi-gcc 2>/dev/null | tail -1)
+if [ -n "$gate_cc" ] && [ -x "$gate_cc" ]; then
+    gate_bin=$(dirname "$gate_cc")
+    python3 "$board/cmake/fixtures/run_reservation_tests.py" \
+        --cc "$gate_cc" \
+        --nm "$gate_bin/arm-none-eabi-nm" \
+        --objdump "$gate_bin/arm-none-eabi-objdump"
+else
+    echo "run_reservation_tests: SKIPPED -- no arm-none-eabi toolchain under" \
+         "$HOST_TEST_REPO/tools/ (configure a wio build once to fetch it)" >&2
+fi

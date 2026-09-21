@@ -1915,6 +1915,14 @@ endif()
 # One declaration, two consumers: the firmware's validator and the host sender
 # that must agree with it.  See nn_svc_grove.c for why this is not the issue #85
 # hazard.
+# The same word against the FIRMWARE image's own attributes (issue #108): the
+# static assert in nn_svc_grove.c reads macros, and -mcpu=cortex-m85+nopacbti
+# predefines exactly what an M55 does.  The linked image names its core.
+add_custom_command(TARGET shell POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/cmake/check_target_word.py"
+            $<TARGET_FILE:shell> --target-id "${GROVE_PLUGIN_TARGET_ID}"
+    COMMENT "check the plugin target word against the firmware image"
+    VERBATIM)
 target_compile_definitions(shell_objs PRIVATE
     GROVE_PLUGIN_TARGET_ID=${GROVE_PLUGIN_TARGET_ID}
     GROVE_PLUGIN_BASE=${GROVE_PLUGIN_BASE}u

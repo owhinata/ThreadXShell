@@ -12,17 +12,18 @@
  *   lower  &end       the linker's start of the heap region.  A negative incr may
  *                     return the break to it but never below -- newlib does shrink
  *                     the break on some free() paths.
- *   upper  &__ram_end the end of AXI-SRAM.  This used to be _estack, back when the
- *                     main stack sat at the top of AXI-SRAM and growing the heap
- *                     into it was the hazard worth 4 KB of clearance.  Issue #46
- *                     moved the main stack to the top of DTCM, so _estack is now
- *                     0x20020000 -- BELOW the heap.  Keeping it would have made
- *                     every comparison below true and turned _sbrk into an
- *                     unconditional ENOMEM: malloc failing everywhere, in a
- *                     firmware that links without a warning.  __ram_end is the
- *                     linker symbol that means what this needs; nothing lives
- *                     above the heap in AXI-SRAM, so the rest of the region is
- *                     available (see the linker script).
+ *   upper  &__heap_end the base of the .plugin reservation (issue #108), which
+ *                     sits at the top of AXI-SRAM.  This used to be _estack, back
+ *                     when the main stack sat at the top of AXI-SRAM and growing
+ *                     the heap into it was the hazard worth 4 KB of clearance.
+ *                     Issue #46 moved the main stack to the top of DTCM, so
+ *                     _estack became 0x20020000 -- BELOW the heap -- and the
+ *                     ceiling became __ram_end, the end of AXI-SRAM.  Issue #108
+ *                     then pinned the plugin reservation at that end, and a heap
+ *                     still bounded by __ram_end could have grown straight into a
+ *                     plugin's code.  __heap_end is the linker symbol that means
+ *                     "how far the heap may grow"; __ram_end still means "where
+ *                     AXI-SRAM ends", and the two are different facts again.
  *
  * All comparisons are done on uintptr_t in a form that cannot overflow or
  * underflow: the magnitude of a negative incr is computed by unsigned negation
@@ -35,14 +36,14 @@
 #include <stdint.h>
 
 extern char end;                 /* heap start (from the linker script) */
-extern char __ram_end;           /* end of AXI-SRAM (NOT _estack; see above)  */
+extern char __heap_end;          /* base of .plugin (NOT __ram_end; see above) */
 
 void *_sbrk(int incr)
 {
   static uintptr_t heap;
 
   const uintptr_t base  = (uintptr_t)&end;
-  const uintptr_t limit = (uintptr_t)&__ram_end;
+  const uintptr_t limit = (uintptr_t)&__heap_end;
   uintptr_t prev;
 
   if (heap == 0u) heap = base;

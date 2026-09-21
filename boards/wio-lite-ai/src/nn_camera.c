@@ -47,7 +47,7 @@
  * high-water mark for exactly this reason -- there is no MSPLIM on ARMv7-M and an
  * MPU guard page would lock the part up rather than report (see mem_sections.h).
  */
-#define NNCAM_STACK  3072u
+#define NNCAM_STACK  NNCAM_STACK_BYTES   /* the value is in nn_camera.h (#108) */
 
 /*
  * How long the worker waits for a frame before re-checking the run flag.  Without a
@@ -95,6 +95,13 @@ static uint32_t nncam_infers, nncam_frames, nncam_skipped, nncam_errors;
 static uint32_t nncam_raced, nncam_stale_posts;
 static uint32_t nncam_ingest_last, nncam_ingest_max, nncam_infer_cyc;
 static uint32_t nncam_start_tick;
+
+/* Stack already spent at the two sites a plugin will occupy (issue #108).  One
+ * writer each -- the worker for DECODE, the preview thread for DRAW -- and a u32
+ * store cannot tear here, so a reader may see a stale value but never a torn
+ * one.  Only ever written with a real measurement (see nn_camera_note_depth()),
+ * so the reset at start cannot be raced into reporting a stale high-water. */
+static uint32_t nncam_depth_decode, nncam_depth_draw;
 
 static int nncam_norm_signed;   /* 0 = [0,1] (default), 1 = [-1,1] */
 static int nncam_overlay;
@@ -361,6 +368,29 @@ static uint32_t nncam_gen_now(void)
 	return g;
 }
 
+/* See nn_camera.h.  noinline so the shape of the frame it measures from cannot
+ * change with the caller's inlining decisions -- the number is about the PLACE. */
+__attribute__((noinline)) void nn_camera_note_depth(enum nn_camera_site site)
+{
+	TX_THREAD *t = tx_thread_identify();
+	volatile uint8_t here = 0u;
+	uintptr_t  sp = (uintptr_t)&here;
+	uintptr_t  lo, hi;
+	uint32_t   used;
+	uint32_t  *hw = (site == NNCAM_SITE_DRAW) ? &nncam_depth_draw
+	                                          : &nncam_depth_decode;
+
+	if (t == NULL)
+		return;                     /* not on a thread; nothing to say */
+	lo = (uintptr_t)t->tx_thread_stack_start;
+	hi = lo + (uintptr_t)t->tx_thread_stack_size;
+	if (sp < lo || sp > hi)
+		return;                     /* not this thread's stack after all */
+	used = (uint32_t)(hi - sp);
+	if (used > *hw)
+		*hw = used;
+}
+
 static void nncam_step(void)
 {
 	struct bf_det tmp[BF_MAX_DET];
@@ -440,6 +470,10 @@ static void nncam_step(void)
 	}
 	nncam_infer_cyc = nn_last_cycles(nncam_model);
 
+	/* Where a plugin's decode() will be called (issue #108): immediately before
+	 * the resident decoder, recorded BEFORE the call so the number is the depth
+	 * a callee inherits rather than the depth including it. */
+	nn_camera_note_depth(NNCAM_SITE_DECODE);
 	n = nn_decoder_run(nncam_model, tmp, BF_MAX_DET, &bfr);
 	/* Bumped LAST, after the boxes are published, and ONLY IF THEY WERE: `nn run`
 	   waits for this counter to move and then reads the detections, so
@@ -651,6 +685,10 @@ int nn_camera_start(int colorbar)
 	nncam_ingest_last = 0u;
 	nncam_ingest_max  = 0u;
 	nncam_infer_cyc   = 0u;
+	/* Per start, like every counter here: measuring one model and then another
+	 * would otherwise report the first one's high-water for both. */
+	nncam_depth_decode = 0u;
+	nncam_depth_draw   = 0u;
 	nncam_start_tick  = HAL_GetTick();
 	nncam_want_frame  = 0;
 	nncam_filling     = 0;
@@ -759,6 +797,8 @@ void nn_camera_stats_get(struct nn_camera_stats *out)
 	   taking the mutex here would make this function unusable before the first
 	   start() has created it (`nn stream stats` on a cold boot). */
 	out->ndet = nncam_rec.ndet;
+	out->depth_decode = nncam_depth_decode;
+	out->depth_draw   = nncam_depth_draw;
 }
 
 int nn_camera_dets_get(struct bf_det *out, int max)

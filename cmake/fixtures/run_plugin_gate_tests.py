@@ -56,6 +56,16 @@ BOARDS = {
                   "--veneer-base-cost": "256", "--target-id": "0x9302"},
     },
 }
+# Wio Lite AI (issue #108), as its board.cmake states itself to the gate.
+BOARDS["wio"] = {
+    "arch": ["-mcpu=cortex-m7", "-mthumb", "-mfpu=fpv5-d16",
+             "-mfloat-abi=hard"],
+    "memory_ld": os.path.join(REPO, "boards", "wio-lite-ai", "ldscript",
+                              "plugin_memory.ld"),
+    "facts": {"--base": "0x24048000", "--end": "0x24050000",
+              "--forbid": "HAL_FLASH_Program",
+              "--veneer-base-cost": "256", "--target-id": "0x1201"},
+}
 # Other cores, linked into Grove's reservation.  Only the TARGET check differs
 # between them, so borrowing a reservation that exists keeps every other check
 # passing and each refusal below about the one thing it tests.
@@ -234,6 +244,17 @@ def m_dup_su(src):
         fh.write("plugin_main.c:0:0:pl_decode\t16\tdynamic\n")
 
 
+def m_memory_moved(src):
+    """[!] THE FRAGMENT AND THE GATE ARE TWO DECLARATIONS, AND THIS IS WHY.  A
+    MEMORY fragment that says another address still LINKS -- the plugin is
+    simply prelinked for the wrong window -- and the only thing that notices is
+    the gate comparing the image with the board's own separate statement of the
+    reservation.  Generated from one variable, both would move together and this
+    would pass."""
+    sub(os.path.join(src, "plugin_memory.ld"),
+        "ORIGIN = 0x24048000", "ORIGIN = 0x24040000")
+
+
 def m_recursion(src):
     """[!] IT MUST BE RECURSION THE COMPILER CANNOT REMOVE.  A tail call was the
     obvious fixture and the wrong one: GCC inlined the helper and turned the
@@ -301,6 +322,15 @@ CASES = [
     # [!] THE M7 RECORDS NO CORE NAME, and the first version of the gate keyed
     # on it (issue #108): it refused every M7 plugin -- the safe direction, but a
     # table nobody had run on an M7 image.  These run it.
+    # --- wio (issue #108) -----------------------------------------------------
+    ("clean", "wio", None, None, None, "accept", "cortex_m7 / fpv5_d16",
+     "accepted (the M7 plugin, against wio's own statement of the reservation)"),
+    ("memory_moved", "wio", m_memory_moved, None, None, "gate",
+     "is outside the plugin reservation",
+     "gate: a MEMORY fragment at another address links; the gate refuses it"),
+    ("target_grove", "wio", None, None, {"--target-id": "0x9302"}, "gate",
+     "does not describe this image",
+     "gate: Grove's word on an M7 image"),
     ("target_m7", "m7_dp", None, None, None, "accept", "cortex_m7 / fpv5_d16",
      "a Cortex-M7 is known by v7E-M + FPv5, not by Tag_CPU_name (\"7E-M\")"),
     ("target_m7_fpu", "m7_dp", None, None, {"--target-id": "0x1101"}, "gate",
@@ -333,6 +363,9 @@ ASSERT_CASES = [
      "a Grove word with the CMSE bit clear -- ONLY this check can see it"),
     ("grove_cpu", FW_M55 + ["-mcmse"], "0x9301", "refuse",
      "a Grove word naming the wrong CPU"),
+    ("m85", ["-mcpu=cortex-m85", "-mthumb", "-mfloat-abi=hard", "-mcmse"],
+     "0x9302", "refuse",
+     "an M85 predefines the M55's arch and FP macros; PACBTI is what refuses it"),
     ("m55_without_mcmse", FW_M55, "0x9302", "refuse",
      "a Cortex-M55 build without -mcmse still predefines __ARM_FEATURE_CMSE "
      "(as 1); the bit must not follow it"),
@@ -360,6 +393,42 @@ def fw_assert(cc, work, flags, word):
                                        os.path.join(work, "t.o")],
                        capture_output=True, text=True)
     return r.returncode, r.stderr
+
+
+# --- the third end: the FIRMWARE image (cmake/check_target_word.py) ----------
+#
+# The macros cannot tell -mcpu=cortex-m85+nopacbti from an M55; the linked image
+# can, because v8.1-M records the core's name.  Each case links a small image
+# with a board's firmware flags and checks a word against it.
+# (name, flags, word, expect "ok" | "refuse", why)
+TARGET_WORD = os.path.join(REPO, "cmake", "check_target_word.py")
+FW_ELF_CASES = [
+    ("grove_image", FW_M55 + ["-mcmse"], "0x9302", "ok",
+     "Grove's firmware image describes 0x9302 (CMSE left to the assert)"),
+    ("m85_nopacbti_image", ["-mcpu=cortex-m85+nopacbti", "-mthumb",
+                            "-mfloat-abi=hard", "-mcmse"], "0x9302", "refuse",
+     "an M85 without PACBTI passes the macros; its image names the core"),
+    ("wio_image", FW_M7, "0x1201", "ok",
+     "wio's firmware image describes 0x1201"),
+    ("wio_image_sp", FW_M7, "0x1101", "refuse",
+     "a single-precision claim against wio's double-precision image"),
+]
+
+
+def fw_image(cc, work, flags, word):
+    src = os.path.join(work, "t.c")
+    with open(src, "w") as fh:
+        fh.write("int start(void) { return 0; }\n")
+    elf = os.path.join(work, "t.elf")
+    r = subprocess.run([cc] + flags + ["-nostdlib", "-nostartfiles",
+                                       "-Wl,-e,start", "-Wl,-Ttext=0x0",
+                                       src, "-o", elf],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return 99, r.stderr
+    r = subprocess.run([sys.executable, TARGET_WORD, elf,
+                        "--target-id", word], capture_output=True, text=True)
+    return r.returncode, r.stdout + r.stderr
 
 
 # --- the gate's copy of the ABI, pinned against the header --------------------
@@ -442,6 +511,22 @@ def main():
             bad += 1
         else:
             print(f"  ok   {'firmware:' + name:24s} {why}")
+
+    for name, flags, word, expect, why in FW_ELF_CASES:
+        with tempfile.TemporaryDirectory() as work:
+            rc, out = fw_image(args.cc, work, flags, word)
+        if rc == 0:
+            got = "ok"
+        elif rc == 1 and "check_target_word: FAIL" in out:
+            got = "refuse"
+        else:
+            got = "error"
+        if got != expect:
+            print(f"  FAIL {'image:' + name:24s} expected {expect}, got {got}"
+                  f"\n        {out.strip()[:300]}")
+            bad += 1
+        else:
+            print(f"  ok   {'image:' + name:24s} {why}")
 
     with tempfile.TemporaryDirectory() as work:
         mism = abi_table_mismatches(work)

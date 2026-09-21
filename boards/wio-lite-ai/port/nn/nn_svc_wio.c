@@ -32,10 +32,13 @@
 #include "blob.h"
 #include "camera.h"
 #include "cam_band.h"
+#include "cam_preview.h"     /* CAM_PREVIEW_STACK_BYTES -- the draw allowance's ceiling */
+#include "cli_config.h"      /* CLI_INSTANCE/BG_JOB_STACK_SIZE -- report's ceiling */
 #include "fmt.h"
 #include "nn.h"
 #include "nn_camera.h"
 #include "nn_decoder.h"
+#include "plugin_load.h"
 #include "plugin_target.h"   /* the target word this build provides (#108) */
 #include "psram.h"
 #include "stm32h7xx_hal.h"   /* SystemCoreClock -- the DWT counter's clock */
@@ -55,6 +58,172 @@
 _Static_assert(WIO_PLUGIN_TARGET_ID == PLUGIN_TARGET_ID_HERE,
                "WIO_PLUGIN_TARGET_ID does not describe this firmware's build "
                "(svc/plugin_target.h)");
+
+/* ---- plugin containers (issue #108 = #78 Step 3a) ------------------------- */
+
+/*
+ * This board's policy for a plugin image.  svc/plugin_load.c holds no board
+ * address, so the reservation, the target identity and what each thread can
+ * spare arrive from here.
+ *
+ * [!] EVERY NUMBER COMES FROM THE BUILD, NOT FROM HERE.  The host asset build
+ * runs the same validator (verify_container links the very plugin_load.c this
+ * board runs) with the same numbers, and if the two were declared separately a
+ * container could pass on the host and be refused on the board -- the shape
+ * issue #93 hit.  board.cmake defines them once and passes them both ways.  That
+ * is not the issue #85 hazard: there, a layout and the gate CHECKING it came from
+ * one variable.  Here the two consumers must AGREE; the reservation's address is
+ * still verified independently, by the linker script and
+ * cmake/check_plugin_reservation.py, which state it separately on purpose.
+ *
+ * [!] 3a NEVER CALLS THROUGH ANY OF THIS.  A container is validated and its
+ * claims recorded; the plugin section is never copied and never branched into.
+ */
+#if defined(CONFIG_NN_BACKEND_TFLM)
+#if !defined(WIO_PLUGIN_BASE) || !defined(WIO_PLUGIN_MAX) ||                  \
+    !defined(WIO_PLUGIN_STACK_NN_WORK) || !defined(WIO_PLUGIN_STACK_PREVIEW) || \
+    !defined(WIO_PLUGIN_STACK_SHELL)
+#error "board.cmake must define the WIO_PLUGIN_* policy for a tflm build"
+#endif
+
+/*
+ * [!] THE STACK LIMITS ARE PROVISIONAL, AND EACH IS STRICTLY BELOW ITS THREAD.
+ * The honest allowance is "thread stack - depth already spent at the call site -
+ * the asynchronous reserve - margin", and on this board the second term is what
+ * Step 3a exists to MEASURE (`nn stream stats` prints it).  So these are
+ * placeholders until 3b derives them -- but Grove's issue #103 found two of its
+ * placeholders equal to the WHOLE thread stack, where a declaration of that size
+ * would have been admitted and overflowed.  A limit that cannot be exceeded is not
+ * a limit, so each one is pinned below its ceiling here, where both are visible.
+ */
+_Static_assert(WIO_PLUGIN_STACK_NN_WORK < NNCAM_STACK_BYTES,
+               "decode's provisional allowance must be below nn_work's stack");
+_Static_assert(WIO_PLUGIN_STACK_PREVIEW < CAM_PREVIEW_STACK_BYTES,
+               "draw's provisional allowance must be below the preview stack");
+_Static_assert(WIO_PLUGIN_STACK_SHELL < CLI_INSTANCE_STACK_SIZE &&
+               WIO_PLUGIN_STACK_SHELL < CLI_BG_JOB_STACK_SIZE,
+               "report's provisional allowance must be below a shell stack");
+/*
+ * The container's model section starts on PLUGIN_MODEL_ALIGN; the backend adopts
+ * it in place and needs NN_MODEL_ALIGN.  Stated as MET, not assumed -- the Grove
+ * lesson is that an alignment an old placement over-satisfied is invisible until
+ * something places differently (svc/plugin_abi.h, PLUGIN_MODEL_ALIGN).
+ */
+_Static_assert(PLUGIN_MODEL_ALIGN % NN_MODEL_ALIGN == 0u,
+               "a container's model section must meet the backend's alignment");
+
+static const struct plugin_policy nn_plugin_policy = {
+	.target_id      = WIO_PLUGIN_TARGET_ID,
+	.link_addr      = WIO_PLUGIN_BASE,
+	.capacity       = WIO_PLUGIN_MAX,
+	.image_align    = PLUGIN_IMAGE_ALIGN,
+	.caps_supported = PLUGIN_CAP_KNOWN_MASK,
+	.stack_limit    = {
+		[PLUGIN_SLOT_ENTRY]     = WIO_PLUGIN_STACK_NN_WORK,
+		[PLUGIN_SLOT_SHAPES_OK] = WIO_PLUGIN_STACK_NN_WORK,
+		[PLUGIN_SLOT_DECODE]    = WIO_PLUGIN_STACK_NN_WORK,
+		[PLUGIN_SLOT_DRAW]      = WIO_PLUGIN_STACK_PREVIEW,
+		[PLUGIN_SLOT_REPORT]    = WIO_PLUGIN_STACK_SHELL,
+		[PLUGIN_SLOT_PARAM_SET] = WIO_PLUGIN_STACK_SHELL,
+		[PLUGIN_SLOT_PARAM_GET] = WIO_PLUGIN_STACK_SHELL,
+	},
+};
+#endif /* CONFIG_NN_BACKEND_TFLM */
+
+/*
+ * What the container of the OPEN model claimed, or nothing.
+ *
+ * [!] THE CLAIMS FOLLOW THE MODEL THAT IS ACTUALLY OPEN.  They are settled only
+ * after nn_model_reload() has adopted (or refused) that model -- never before,
+ * because a reload can refuse and leave the PREVIOUS model active, and then these
+ * must still be the previous model's.  A successful bare-model load clears them,
+ * as do an unload and a reload that left nothing open.
+ *
+ * [!] AND THERE IS A WINDOW, SO IT IS NAMED RATHER THAN HIDDEN (the #108
+ * adversarial review).  The backend makes the new model visible inside
+ * nn_model_reload(); the claims are settled after it returns.  `nn info` does not
+ * take the NN session -- it has to answer while a stream holds it -- so a console
+ * that preempts a background `nn model load` between those two points would read
+ * the new model beside the old claims.  `loading` is raised before the reload and
+ * dropped in the same critical section that settles the claims, and a reader
+ * that sees it says "a load is in progress" instead of reporting either set.
+ * The claims also carry the slot and blob name they were read from: `nn info`
+ * prints the model and the plugin lines from two separate calls, and naming the
+ * model on the plugin line is what makes a load landing BETWEEN those calls
+ * visible to whoever reads them, rather than a silent mismatch.
+ *
+ * PLAIN DATA: struct plugin_view carries integer offsets and copied bytes, no
+ * callable pointer -- "3a does not execute a plugin" is a property of the type.
+ *
+ * Written by `nn model load` / `nn model unload` (which hold the NN session);
+ * every read and write copies inside one interrupt-masked section, a couple of
+ * hundred bytes, so a reader never sees half of one container's claims.
+ */
+struct nn_claims {
+	struct plugin_view view;
+	uint32_t           slot;                     /* the blob it came from */
+	char               model[BLOB_NAME_MAX + 1u];
+};
+
+enum nn_claims_seen {
+	NN_CLAIMS_NONE    = 0,   /* the open model is not a container's    */
+	NN_CLAIMS_VALID   = 1,   /* *out describes the open model           */
+	NN_CLAIMS_LOADING = 2,   /* a load/unload is between its two steps  */
+};
+
+static struct nn_claims nn_claims;
+static uint8_t          nn_claims_valid;
+static uint8_t          nn_claims_loading;
+
+/* Raised immediately before nn_model_reload(); every path that raises it
+ * settles it (nn_claims_settle) before giving the session back. */
+static void nn_claims_begin(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	nn_claims_loading = 1u;
+	TX_RESTORE
+}
+
+/*
+ * @p keep non-zero leaves the previous claims standing (a refused reload that
+ * restored the previous model); otherwise @p c replaces them, or NULL clears.
+ */
+static void nn_claims_settle(int keep, const struct nn_claims *c)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	if (!keep) {
+		if (c != NULL) {
+			nn_claims       = *c;
+			nn_claims_valid = 1u;
+		} else {
+			nn_claims_valid = 0u;
+		}
+	}
+	nn_claims_loading = 0u;
+	TX_RESTORE
+}
+
+static enum nn_claims_seen nn_claims_snapshot(struct nn_claims *out)
+{
+	enum nn_claims_seen seen;
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	if (nn_claims_loading) {
+		seen = NN_CLAIMS_LOADING;
+	} else if (nn_claims_valid) {
+		*out = nn_claims;
+		seen = NN_CLAIMS_VALID;
+	} else {
+		seen = NN_CLAIMS_NONE;
+	}
+	TX_RESTORE
+	return seen;
+}
 
 /*
  * [!] THERE IS NO SHARED DIAGNOSTIC BUFFER, and that is the fix for a hazard the
@@ -217,9 +386,13 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
                        enum nn_model_state *state)
 {
 	struct blob_info info;
+	struct nn_claims claims;
 	struct nn_model *m = NULL;
 	void     *stage = NULL;
-	uint32_t  cap = 0u, crc;
+	const void *model_at;
+	uint32_t  cap = 0u, crc, model_len;
+	int is_container = 0;
+	int open_after = 0;
 	int rc;
 
 	/* This board reads its model out of the NOR asset store itself; it never
@@ -359,8 +532,52 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 		return;
 	}
 
-	rc = nn_model_reload(stage, info.length, info.name);
-	nn_guards_give();
+	/*
+	 * [!] THE CONTAINER SPLIT HAPPENS HERE, ON THE COPY THE CRC WAS JUST CHECKED
+	 * AGAINST (issue #108).  Everything above established that these bytes are the
+	 * bytes that were stored; deciding what they MEAN has to be done on those same
+	 * bytes, not on a second read.  A payload that is not a container is a bare
+	 * model and takes the path it always took -- the models already in the store
+	 * were sent before containers existed and must not need re-sending.
+	 *
+	 * A container's MODEL section is handed to the backend IN PLACE, at its offset
+	 * inside the staged container: the backend adopts any 16-byte-aligned range
+	 * inside the slot it handed out (nn.h, NN_MODEL_ALIGN).  Copying it down to the
+	 * slot's start would overwrite the checked container with unchecked bytes.
+	 *
+	 * [!] THE PLUGIN SECTION IS VALIDATED AND RECORDED -- NEVER COPIED, NEVER
+	 * CALLED.  Step 3a stops there, as Grove's 1a did.  A container accepted here
+	 * is not "safe to run"; nothing on this board runs it yet.  The resident
+	 * decoder keeps decoding, and a container's model runs through it exactly as
+	 * a bare model does.
+	 */
+	model_at  = stage;
+	model_len = info.length;
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	if (plugin_probe(stage, info.length) == PLUGIN_KIND_CONTAINER) {
+		enum plugin_result pr;
+
+		pr = plugin_parse(stage, info.length, &nn_plugin_policy,
+		                  &claims.view);
+		if (pr != PLUGIN_OK) {
+			nn_detail_set("slot %lu is a container this firmware refuses: %s "
+			              "-- the previous model is untouched",
+			              (unsigned long)spec->slot, plugin_result_name(pr));
+			nn_guards_give();
+			nn_result(res, NN_SVC_ERR_ARG, NN_CLAIM_NONE);
+			return;
+		}
+		is_container = 1;
+		claims.slot = spec->slot;
+		(void)memcpy(claims.model, info.name, sizeof claims.model);
+		claims.model[sizeof claims.model - 1u] = '\0';
+		model_at  = (const uint8_t *)stage + claims.view.model_off;
+		model_len = claims.view.model_len;
+	}
+#endif
+
+	nn_claims_begin();
+	rc = nn_model_reload(model_at, model_len, info.name, &open_after);
 
 	/*
 	 * [!] THE RESULTING MODEL STATE IS READ BACK, NOT ASSUMED.  This board's
@@ -368,12 +585,36 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	 * `open` when that is NULL -- which is the documented case where even the
 	 * PREVIOUS model could not be rebuilt.  Reporting "rejected, previous
 	 * unchanged" there would leave an operator believing a model is loaded.
+	 *
+	 * [!] AND IT IS THE RELOAD'S OWN OUTCOME, NOT A QUESTION ASKED AFTERWARDS.
+	 * This used to ask nn_model_open(), which on a closed singleton opens a
+	 * fresh EMPTY one and succeeds -- so exactly the case above was reported as
+	 * PREVIOUS, and since issue #108 it also kept the previous container's
+	 * claims beside a model that was gone.  A non-mutating query does not fix
+	 * it either: `nn info` on another console takes no session and calls
+	 * nn_model_open() itself, so it can re-open the singleton between the
+	 * reload returning and any read here (the #108 review, rounds 2 and 3).
+	 * nn_model_reload() reports what it left.
 	 */
-	m = NULL;
-	if (nn_model_open(&m) == 0 && m != NULL)
+	if (open_after)
 		*state = (rc == 0) ? NN_MODEL_NEW : NN_MODEL_PREVIOUS;
 	else
 		*state = NN_MODEL_EMPTY;
+
+	/*
+	 * The claims follow what is now open, and are settled BEFORE the session is
+	 * given back -- after it, another console's load could publish its own and
+	 * then have them overwritten with this one's.  A refused reload that restored
+	 * the previous model keeps the previous claims (NN_MODEL_PREVIOUS changes
+	 * nothing here).
+	 */
+	if (*state == NN_MODEL_NEW)
+		nn_claims_settle(0, is_container ? &claims : NULL);
+	else if (*state == NN_MODEL_EMPTY)
+		nn_claims_settle(0, NULL);
+	else
+		nn_claims_settle(1, NULL);     /* the previous model, its claims */
+	nn_guards_give();
 
 	if (rc != 0) {
 		nn_detail_set("%s", nn_model_strerror(rc));
@@ -402,8 +643,12 @@ void nn_svc_model_unload(struct nn_op_result *res)
 	}
 	/* Idempotent: the model is a singleton that is rebuilt rather than
 	   destroyed, so unloading returns it to the built-in one. */
+	nn_claims_begin();
 	if (nn_model_open(&m) == 0 && m != NULL)
-		(void)nn_model_reload(NULL, 0u, NULL);
+		(void)nn_model_reload(NULL, 0u, NULL, NULL);
+	/* No model is open now, so no container's claims describe it (issue #108).
+	   Under the session, for the same reason as in the load path. */
+	nn_claims_settle(0, NULL);
 	nn_guards_give();
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
@@ -1110,9 +1355,12 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 	}
 
 	nn_camera_stats_get(&st);
-	for (i = 0u, n = 0u; i < 5u; i++) {
+	for (i = 0u, n = 0u; i < 6u; i++) {
 		if (i == 1u && !st.stream_lost)
 			continue;                       /* only worth a line when true */
+		/* Nothing has reached either site yet: no number, so no line. */
+		if (i == 5u && st.depth_decode == 0u && st.depth_draw == 0u)
+			continue;
 		if (n++ != index)
 			continue;
 		switch (i) {
@@ -1141,10 +1389,29 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 			             (unsigned long)nn_cyc_to_us(st.ingest_last_cyc),
 			             (unsigned long)nn_cyc_to_us(st.ingest_max_cyc));
 			return 1;
-		default:
+		case 4u:
 			nn_detail_to(buf, cap, "norm    : %s   overlay: %s",
 			             st.norm_signed ? "[-1,1]" : "[0,1]",
 			             st.overlay ? "on" : "off");
+			return 1;
+		default:
+			/*
+			 * How much stack is already spent where a plugin will be CALLED
+			 * (issue #108 = #78 Step 3a) -- the term Step 3b's allowances are
+			 * computed from, and one nothing else prints: `thread` gives a
+			 * PEAK, the deepest a thread ever got anywhere, which is not this
+			 * question (issue #101 made exactly that mistake).  Each is printed
+			 * over its thread's stack, so the headroom is read, not recalled.
+			 * A site that has not run reads 0 -- the draw site runs only while
+			 * the preview is on.
+			 */
+			nn_detail_to(buf, cap,
+			             "at call : %lu/%lu B on nn_work (decode), "
+			             "%lu/%lu B on cam_prev (draw); high-water",
+			             (unsigned long)st.depth_decode,
+			             (unsigned long)NNCAM_STACK_BYTES,
+			             (unsigned long)st.depth_draw,
+			             (unsigned long)CAM_PREVIEW_STACK_BYTES);
 			return 1;
 		}
 	}
@@ -1197,19 +1464,111 @@ int nn_svc_thresh_set(unsigned milli)
 	                                                     : NN_SVC_ERR_ARG;
 }
 
+/* One `nn info` line through a bounded formatter.  128 and not 80: Grove's
+ * image line once ran past 80 and truncation ate its CRLF, so the next line ran
+ * on (issue #103). */
+static int nn_info_line(nn_svc_write_fn write, void *ctx, const char *f, ...)
+{
+	char line[128];
+	va_list ap;
+	int n;
+
+	va_start(ap, f);
+	n = fmt_vsnformat(line, sizeof line, f, ap);
+	va_end(ap);
+	if (n < 0)
+		return -1;
+	if ((size_t)n >= sizeof line)
+		n = (int)sizeof line - 1;
+	return write(ctx, line, (size_t)n);
+}
+
 /*
- * Nothing to add (issue #101).
+ * What this board adds: what the open model's container CLAIMS about its plugin
+ * (issue #108 = #78 Step 3a), and where a plugin would live.
  *
- * The plugin container is a Grove path today; this board has no second source of
- * model-adjacent facts, so it says nothing.  Silence is a legal answer here --
- * unlike the shared fields, whose absence the command reports as withheld,
- * because these lines are the board's own subject and no reader can mistake
- * their absence for a fact about the model.
+ * [!] CLAIMS, AND THE LINE SAYS SO.  Every field below comes from a manifest
+ * plugin_parse() validated -- structure, target, link address, sizes, digest --
+ * which is what the container SAYS about itself.  "not executed" is the only word
+ * that describes this board's behaviour, and it is true of every container in
+ * Step 3a: the plugin section is never copied and never branched into.
+ *
+ * The CRC is the identity that moves when the bytes do; the build id is a source
+ * revision stamped at configure time and does not.
+ *
+ * [!] NOTHING IS HELD WHILE THIS PRINTS.  The claims are copied out under a
+ * short interrupt-masked section (nn_claims_snapshot) and written afterwards; a
+ * console line takes as long as the USB CDC takes.
  */
+extern uint8_t __plugin_start[], __plugin_end[];   /* the linker's reservation */
+
 void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 {
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	struct nn_claims c;
+	const struct plugin_view *v = &c.view;
+	enum nn_claims_seen seen;
+	const uint32_t base = (uint32_t)(uintptr_t)__plugin_start;
+	const uint32_t size = (uint32_t)(__plugin_end - __plugin_start);
+
+	if (write == NULL)
+		return;
+
+	/* One snapshot, and every word below is read from it: re-reading the flag
+	 * afterwards could describe a load another console finished in between. */
+	seen = nn_claims_snapshot(&c);
+	if (seen == NN_CLAIMS_LOADING) {
+		(void)nn_info_line(write, ctx,
+		                   "plugin  : (a model load is in progress -- ask "
+		                   "again)\r\n");
+		return;
+	}
+	if (seen == NN_CLAIMS_NONE || !v->has_plugin) {
+		/* Says so rather than leaving the line out: a missing line reads as a
+		 * board with no plugin support at all, which is a different and wrong
+		 * fact. */
+		(void)nn_info_line(write, ctx,
+		                   "plugin  : (none%s) -- reservation %lu B at 0x%08lx"
+		                   "\r\n",
+		                   seen == NN_CLAIMS_VALID ? " in this container" : "",
+		                   (unsigned long)size, (unsigned long)base);
+		return;
+	}
+	if (nn_info_line(write, ctx,
+	                 "plugin  : %s (build %s, crc %08lx), validated, NOT "
+	                 "executed (#78 Step 3a)\r\n",
+	                 v->name, v->build_id, (unsigned long)v->digest) < 0)
+		return;
+	/* Which model these claims came with -- see struct nn_claims. */
+	if (nn_info_line(write, ctx, "  from  : slot %lu, blob '%s'\r\n",
+	                 (unsigned long)c.slot, c.model) < 0)
+		return;
+	if (nn_info_line(write, ctx,
+	                 "  image : %lu B file / %lu B mem (code %lu, data %lu, "
+	                 "bss %lu), link 0x%08lx\r\n",
+	                 (unsigned long)v->file_size, (unsigned long)v->mem_size,
+	                 (unsigned long)v->code_len, (unsigned long)v->data_seg_len,
+	                 (unsigned long)v->bss_len,
+	                 (unsigned long)v->link_addr) < 0)
+		return;
+	/* The bounds the host gate derived and the manifest declares, per slot --
+	 * what 3b's admission policy will compare with the call-site depths
+	 * `nn stream stats` measures.  An absent slot declares 0. */
+	(void)nn_info_line(write, ctx,
+	                   "  stack : entry %lu  shapes %lu  decode %lu  draw %lu  "
+	                   "report %lu  param %lu/%lu B (declared)\r\n",
+	                   (unsigned long)v->stack[PLUGIN_SLOT_ENTRY],
+	                   (unsigned long)v->stack[PLUGIN_SLOT_SHAPES_OK],
+	                   (unsigned long)v->stack[PLUGIN_SLOT_DECODE],
+	                   (unsigned long)v->stack[PLUGIN_SLOT_DRAW],
+	                   (unsigned long)v->stack[PLUGIN_SLOT_REPORT],
+	                   (unsigned long)v->stack[PLUGIN_SLOT_PARAM_SET],
+	                   (unsigned long)v->stack[PLUGIN_SLOT_PARAM_GET]);
+#else
+	/* The null backend cannot load a model, so no container can be open. */
 	(void)write;
 	(void)ctx;
+#endif
 }
 
 /*
@@ -1217,7 +1576,9 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
  *
  * The shared command only calls this when a board has already set
  * nn_det_snapshot::external -- "the boxes are not in your array" -- and this
- * board never does, because it has no loadable decoder.  So this is not a stub
+ * board never does, because it has no loadable decoder.  Still true after issue
+ * #108: a container's plugin is validated and reported by nn_svc_info_extra(),
+ * never run, so every box still comes from the resident decoder.  So this is not a stub
  * kept for symmetry: it is unreachable here, and if it ever ran it would mean
  * this board had contradicted itself.
  */

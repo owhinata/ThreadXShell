@@ -361,6 +361,38 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   見える必要があるものだけ / DTCM（128KB @ 0x20000000）= CPU 専用のホットなもの /
   ITCM（64KB）= ISR コード**。**DMA1/DMA2・SDMMC1 IDMA は TCM に届かない**
   （RM0468 §2.1.2/§2.1.5/§2.1.6）。**DTCM の DMA バッファは fault せず無言で転送されない**。
+  **[!] 明文化した例外が 1 つ: AXI-SRAM 上端 32 KB は `.plugin` 予約**（#108、
+  `0x24048000..0x24050000`、NOLOAD・上端アンカー・prelink なので動かすと全 container 無効）。
+  **M7 は DTCM から命令フェッチできない**のでコードはこの方針に従えない（PSRAM は MPU で XN、
+  ITCM は NULL 書込みガードで RO）。**heap の天井は `__heap_end`（= 予約の底）**で、
+  `__ram_end` を再定義しない（1 シンボルに 2 事実を載せない）。予約は **4 箇所で独立に宣言**
+  （ldscript / `plugin_memory.ld` / board.cmake のゲート引数 / `check_plugin_reservation.py`）
+  — **1 つの変数から生成しない**。`free` は `RAM`（天井まで）と `Plugin` の 2 行。
+- [!] **tflm + SD はフラッシュに入らない**（#108 実測: SD ON 99.98% / 空き 92 B、既定の SD OFF は
+  空き 34,552 B）。SD 既定 OFF は `NOT DEFINED` でしか効かないので**古いビルドツリーは SD ON の
+  まま残る** — configure 警告が出たら `-DBSP_ENABLE_SD=OFF`。フラッシュ不足に見えたらまず
+  キャッシュの `BSP_ENABLE_SD` を見る。
+- [!] **plugin container（#108 = #78 Step 3a）**: `nn model load --slot` は PSRAM コピーの CRC 後に
+  `plugin_probe` → container なら `plugin_parse`（policy は firmware とホスト verifier で
+  1 宣言）→ **モデル区画を in-place で backend に渡す**（TFLM は staging スロット「内部」かつ
+  `NN_MODEL_ALIGN`=16 の範囲を受ける。先頭へコピーしない — CRC を取った container を
+  未検査のバイトで上書きする）。**plugin 区画は検証・記録のみで、コピーも呼び出しもしない**
+  （3a）。常駐デコーダはそのまま動く。**`nn info` の claim は開いているモデルに従う**:
+  reload 後にのみ確定、拒否されて前のモデルが残れば前の claim のまま、bare / unload で
+  消す（session を返す前に確定）。**`nn info` は無ロックなので reload〜確定の窓は
+  「load in progress」と言い**、claim は出所（slot / blob 名）を持つ — 片方の検査だけでは
+  「正しいシンボル + 無視する実装」「新モデル + 旧 claim」が素通りする（#108 の
+  adversarial review）。reservation ゲートも同じ理由で **`_sbrk` 自身の定数**を読み、
+  「名指す」≠「上限として使う」なので**振る舞いは `test/test_sbrk.c`**（実 `retarget.c` を
+  ホストで、`__ram_end` を天井の上に置いて）で見る。target word は**firmware 像の
+  `.ARM.attributes` でも検査**する（`cmake/check_target_word.py`。`cortex-m85+nopacbti` は
+  M55 と macro が同一で、static assert だけでは素通り）。reload 後のモデル状態は
+  **`nn_model_reload()` 自身が返す `open_after`** で決める — 後から問い合わせない
+  （`nn_model_open()` は閉じた singleton を開き直すうえ、無ロックの `nn info` が別コンソールから
+  それを呼ぶので、reload 直後の読み戻しは他人が作った状態を見る）。stack 上限は**暫定で、各スレッドの stack 未満を
+  `_Static_assert`**。呼び出し地点の深さプローブ（`nn_camera_note_depth()`、noinline）は
+  **3b まで同じ形で残す** — 動かしたら測り直し。**DTCM で `nn_work` を伸ばせる上限は
+  `_smsp_stack - _dtcm_used_end` = 4,544 B**（main stack 8 KB を空きに数えない）。
 - [!] **リンカスクリプトの `ASSERT` は LTO 下で空振りする**。配置の最終ガードはポストリンクの
   residency チェック（`check_itcm_residency.py` / `check_dtcm_residency.py` を移植して維持する）。
 - **オプションバイト / RDP / DBGMCU / SWD 端子（PA13/PA14）は絶対に触らない。**

@@ -322,6 +322,7 @@ gcc $CFLAGS -DLCD_RECT_COUNT_STORES \
     -I "$here" -I "$board/port/plugin" -I "$board/port/lcd" -I "$board/../../svc" \
     "$here/test_plugin_paint.c" "$board/port/plugin/plugin_paint.c" \
     "$board/port/lcd/lcd_rect.c" "$board/../../svc/rect_geom.c" \
+    "$board/../../svc/plugin_paint_budget.c" \
     $LDFLAGS -o "$out/test_plugin_paint"
 "$out/test_plugin_paint"
 

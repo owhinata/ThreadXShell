@@ -147,6 +147,22 @@ gcc $CFLAGS -I "$board/port/plugin" \
     $LDFLAGS -o "$out/test_plugin_mpu_v7m"
 "$out/test_plugin_mpu_v7m"
 
+# issue #110 (#78 Step 3b) -- the painter's budget, clipping and rotation
+# (port/plugin/plugin_paint.c).
+#
+# [!] THE COUNT COMES FROM THE LOOP, NOT FROM THE FORMULA.  The charge is a
+# claim ABOUT these loops, so comparing it against rect_geom_writes() would be
+# checking one side against itself.  Built with PLUGIN_PAINT_COUNT_STORES so
+# every store is counted where it happens, with golden numbers pinned beside
+# it -- and those goldens are the OTHER board's, because rect_geom.c is shared
+# and an 8x8 outline of stroke 2 must cost 48 on both.
+gcc $CFLAGS -DPLUGIN_PAINT_COUNT_STORES \
+    -I "$board/port/plugin" -I "$board/../../svc" \
+    "$here/test_plugin_paint.c" "$board/port/plugin/plugin_paint.c" \
+    "$board/../../svc/plugin_paint_budget.c" "$board/../../svc/rect_geom.c" \
+    $LDFLAGS -o "$out/test_plugin_paint"
+"$out/test_plugin_paint"
+
 # issue #108 (#78 Step 3a) -- negative tests for cmake/check_plugin_reservation.py,
 # the post-link gate on the .plugin reservation at the top of AXI-SRAM and the
 # heap ceiling below it.  Synthetic images, because the firmware's own linker

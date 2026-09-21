@@ -906,8 +906,11 @@ list(APPEND SHELL_SOURCES ${NN_SOURCES}
 if(CONFIG_NN_BACKEND STREQUAL "tflm")
     list(APPEND SHELL_SOURCES
          "${CMAKE_SOURCE_DIR}/svc/plugin_exec.c"
+         "${CMAKE_SOURCE_DIR}/svc/plugin_paint_budget.c"
+         "${CMAKE_SOURCE_DIR}/svc/rect_geom.c"
          "${BOARD_DIR}/port/plugin/plugin_run.c"
-         "${BOARD_DIR}/port/plugin/plugin_mpu_v7m.c")
+         "${BOARD_DIR}/port/plugin/plugin_mpu_v7m.c"
+         "${BOARD_DIR}/port/plugin/plugin_paint.c")
 endif()
 
 # The MLPerf Tiny v1.4 benchmark harness.  Like CONFIG_NN_BACKEND above and

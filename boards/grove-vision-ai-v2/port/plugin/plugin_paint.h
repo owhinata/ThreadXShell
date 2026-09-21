@@ -40,21 +40,16 @@
 #include <stdint.h>
 
 #include "plugin_abi.h"
+#include "plugin_paint_budget.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/** What one draw() may spend, in "pixels visited" plus a charge per call. */
-struct plugin_paint_budget {
-	uint32_t pixels;      /**< remaining; decremented as work is charged  */
-	uint32_t ops;         /**< remaining primitive calls                  */
-	uint32_t refused;     /**< primitives refused for want of budget      */
-};
-
-/** Charged per primitive call, on top of the pixels it visits: a call that
- *  clips away entirely still costs a dispatch. */
-#define PLUGIN_PAINT_OP_COST 1u
+/* The budget and the charge are shared with the other board that lets a plugin
+ * paint (svc/plugin_paint_budget.h, issue #110): the loops have nothing in
+ * common, the accounting is the part issue #105 got wrong, and a rule that
+ * subtle should have one implementation. */
 
 /**
  * @brief  Bind a painter to a framebuffer for the duration of one draw().

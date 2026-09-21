@@ -51,29 +51,11 @@ static int clip(const struct paint_ctx *c, const struct plugin_rect *r,
 	return *x1 > *x0 && *y1 > *y0;
 }
 
-/*
- * Charge @p pixels of work plus one dispatch, or refuse.
- *
- * [!] CHECKED BEFORE THE FRAMEBUFFER IS TOUCHED, and written so the check
- * cannot itself overflow: the form is `cost <= remaining`, never
- * `spent + cost <= limit`.  The second is exactly what a nonsense rectangle
- * would wrap, and then the comparison that was supposed to be the guard passes.
- * A refused primitive draws nothing at all -- half a box is worse than none,
- * because it looks like a rendering bug rather than a budget.
- */
+/* The charge is shared (svc/plugin_paint_budget.c); this is the local spelling
+ * of it, so the call sites below read as they did. */
 static int charge(struct paint_ctx *c, uint32_t pixels)
 {
-	struct plugin_paint_budget *b = c->bud;
-
-	if (b == NULL)
-		return 0;
-	if (b->ops < PLUGIN_PAINT_OP_COST || pixels > b->pixels) {
-		b->refused++;
-		return 0;
-	}
-	b->ops    -= PLUGIN_PAINT_OP_COST;
-	b->pixels -= pixels;
-	return 1;
+	return plugin_paint_charge(c->bud, pixels);
 }
 
 /* ---- the primitives ------------------------------------------------------ */

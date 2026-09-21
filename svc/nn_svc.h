@@ -393,10 +393,12 @@ enum nn_report_status {
 	/** Its own report failed part way through; what came first is kept. */
 	NN_REPORT_REFUSED,
 	/**
-	 * It could not be taken: the result is gone, or whoever was holding it
-	 * did not let go inside the bound the board waits for.  Either way the
-	 * bytes that would have described it do not exist, which is a different
-	 * thing to tell an operator than a decoder that said nothing.
+	 * It could not be REACHED: the result is gone, or whoever was holding it
+	 * did not let go inside the bound the board waits for.  The bytes that
+	 * would have described it do not exist, which is a different thing to
+	 * tell an operator than a decoder that said nothing -- and the wording a
+	 * consumer chooses must not promise the first case, because the second
+	 * leaves the result perfectly intact.
 	 */
 	NN_REPORT_STALE,
 };

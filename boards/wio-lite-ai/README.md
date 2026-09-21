@@ -523,15 +523,27 @@ now derived from the base this board actually has, measured with
 can reach:
 
 ```
-nn_plugin_log 16 + log_write 16 + log_vwrite 192
-  + fmt_vsnformat 32 + fmt_vformat 80 + fmt_utoa 64        = 400 B
+nn_plugin_log       80   (16 + the 64 B buffer it copies into)
+log_write          200   (LTO folds log_vwrite into it)
+fmt_vsnformat       32
+fmt_vformat         80
+fmt_utoa            64
+__aeabi_uldivmod    16   (fmt_utoa divides 64-bit)
+__udivmoddi4        40
+                   ---
+                   512 B
 ```
 
-(`fmt_utoa` and `fmt_padded` are called in sequence, not nested.  The painter
-is far shallower -- `paint_rect` 64 + `rect_geom_norm` 16 -- and `to_frame` and
-the report sink are leaves.)  **512 is declared**, because the measurement is
-per-TU with LTO off and over-estimating is the safe direction here: the gate
-charges it at every crossing, so a larger number makes a plugin's computed
+**[!] The first version of this sum stopped at `fmt_utoa`, at 400 B**, and was
+short by the two division helpers underneath it.  The general point the review
+made is the one worth keeping: measuring a callback's own frame is not
+measuring what is below the crossing.  (`fmt_utoa` and `fmt_padded` are called
+in sequence, so the deeper one ends the chain.  The painter is far shallower --
+`paint_rect` 64 + `rect_geom_norm` 16 -- and `to_frame` and the report sink are
+leaves.)
+
+**640 is declared**: over-estimating is the safe direction here, because the
+gate charges it at every crossing, so a larger number makes a plugin's computed
 requirement larger, not smaller.  **Re-derive it whenever the base gains a
 callback** -- the old number would still pass, which is the shape of the
 mistake it replaces.
@@ -540,8 +552,8 @@ With the real charge, the recomputed requirements are:
 
 | | decode | draw | report |
 |---|---:|---:|---:|
-| blazeface | 648 B | 588 B | -- |
-| cifar10 | 688 B | 548 B | 592 B |
+| blazeface | 776 B | 716 B | -- |
+| cifar10 | 816 B | 676 B | 720 B |
 
 **[!] Which thread each slot is called on was wrong until #110.**  Step 3a
 declared the WORKER's allowance for `entry` and `shapes_ok`, on the reasoning
@@ -565,13 +577,24 @@ today's plugin happens to need is how a limit stops being one, so the thread is
 | `cam_prev` (draw) | 1,536 | 105 | 208 | 1,223 | 1,024 |
 | shell (entry / shapes / report / params) | 4,096 | *to measure* | 208 | -- | 1,024 |
 
-**[!] STILL OWED, and the biggest remaining way for this to fail open:** the
-shell figure has no measurement behind it, the two that do were taken before
-the call sites moved and before `nn run` started carrying a 512 B capture
-buffer in the same frame, and **the container already stored in slot 5 has a
-manifest packed with the OLD veneer cost** -- its declared stacks are smaller
-than the requirements above.  Rebuild the asset and send it again; do not read
-"it was accepted before" as "it still bounds execution".
+**[!] STILL OWED, and the remaining ways for this to fail open:**
+
+- the shell figure has no measurement behind it, and the two that do were taken
+  before the call sites moved and before `nn run` started carrying a 512 B
+  capture buffer in the same frame.  There is also **no probe at the shapes
+  callback**, which is reached while `cmd_nn_run`'s own large frame is live --
+  so "model load is the deepest shell site" is an assumption, not a reading;
+- **the container already stored in slot 5 has a manifest packed with the OLD
+  veneer cost**, so its declared stacks are smaller than the requirements
+  above.  Rebuild the asset and send it again;
+- and more than operationally: **the firmware cannot tell a stale declaration
+  from a current one.**  `svc/plugin_load.c` checks the declaration against the
+  policy allowance; nothing establishes which accounting produced it, and the
+  device cannot recompute a plugin's call graph.  So "an accepted declaration
+  bounds execution" is not true across a change to the base cost.  Closing that
+  needs the manifest to carry the accounting it was built against, which is an
+  ABI change -- its own issue.  Neither shipped plugin is near its allowance,
+  so this is a guarantee weaker than it reads rather than a fault in flight.
 
 ### Acceptance criteria (to be met before this is called done)
 

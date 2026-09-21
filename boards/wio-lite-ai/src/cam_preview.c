@@ -314,29 +314,39 @@ void cam_preview_plugin_draw_arm(void)
 }
 
 /*
- * Let the loaded plugin paint, if it is willing to let go of its result.
+ * Let the loaded plugin paint.
  *
- * [!] THE LEASE IS TAKEN BEFORE THE FRAME LOCK, AND WITHOUT WAITING.  The order
- * is the one every other holder uses, so there is no inversion; the no-wait is
- * because this thread outranks the worker and blocking here would hold a lock
- * wider than the thing it protects for as long as a decode takes.  A refusal
- * presents the picture unannotated, which is the failure this pipeline already
- * has for a process() that declines -- and plugin_lease_try() counts it,
- * because the existing preview counters see a frame that was PRESENTED, not
- * one presented bare.
+ * [!] THE LEASE IS TAKEN BY THE CALLER, BEFORE THE FRAME LOCK.  It used to be
+ * taken in here, which is AFTER ltdc_lock_frame() -- the exact inversion of
+ * the order this port documents, with the comment beside it asserting the
+ * opposite.  A no-wait acquire meant no deadlock could follow, so the code
+ * worked and the rule it was written to obey did not exist.
  *
- * @return non-zero if the plugin drew, so the resident overlay does not also.
+ * [!] AND A HELD LEASE IS NOT A REASON TO DRAW.  The lease says the plugin's
+ * result is not being rewritten; it says nothing about whether there IS one
+ * that belongs to now.  Three reachable cases need the record as well:
+ * `nn overlay off` (which this path ignored entirely), a preview still running
+ * after inference stopped, and a decode whose publication the generation check
+ * REJECTED -- that one leaves fresh private state in the plugin that no
+ * accepted record describes, and drawing it puts a retired session's
+ * detections on a live picture.
  */
-static int preview_draw_plugin(void)
+static void preview_draw_plugin(void)
 {
 	struct plugin_painter paint;
 	struct plugin_paint_budget bud;
+	struct nn_camera_decode dec;
 	TX_INTERRUPT_SAVE_AREA
 
-	if (!nn_active_is_plugin())
-		return 0;
-	if (!plugin_lease_try())
-		return 1;        /* the plugin's frame, even though it drew nothing */
+	if (!nn_camera_get_overlay())
+		return;
+	/* No capture and no boxes: this is the panel asking "is there a current
+	 * result, and is it the plugin's". */
+	memset(&dec, 0, sizeof dec);
+	if (!nn_camera_decode_get(&dec, NULL, 0, NULL))
+		return;
+	if (!dec.valid || dec.kind != (uint8_t)NN_DET_PLUGIN_REPORT)
+		return;
 
 	bud.pixels  = PREVIEW_PLUGIN_DRAW_PIXELS;
 	bud.ops     = PREVIEW_PLUGIN_DRAW_OPS;
@@ -348,15 +358,14 @@ static int preview_draw_plugin(void)
 	 * something the number should depend on. */
 	nn_camera_note_depth(NNCAM_SITE_DRAW);
 	nn_active_draw(&paint);
-	plugin_lease_give();
 
 	TX_DISABLE
 	if (PREVIEW_PLUGIN_DRAW_PIXELS - bud.pixels > preview_draw_spent)
 		preview_draw_spent = PREVIEW_PLUGIN_DRAW_PIXELS - bud.pixels;
 	preview_draw_refused += bud.refused;
 	TX_RESTORE
-	return 1;
 }
+
 #endif /* CONFIG_NN_BACKEND_TFLM */
 
 static void preview_entry(ULONG arg)
@@ -366,6 +375,22 @@ static void preview_entry(ULONG arg)
 		if (tx_semaphore_get(&preview_flip_sem, TX_WAIT_FOREVER) != TX_SUCCESS)
 			continue;
 		if (preview_on) {
+#if defined(CONFIG_NN_BACKEND_TFLM)
+			/* [!] THE LEASE COMES BEFORE THE FRAME LOCK (issue #110), because
+			   that is the order every other holder uses and an inversion is a
+			   deadlock waiting for somebody to make one of these waits
+			   blocking.  It is a TRY: this thread outranks the worker, and
+			   blocking here would hold a lock wider than what it protects for
+			   as long as a decode takes.  A refusal presents the picture
+			   unannotated -- the failure this pipeline already has for a
+			   process() that declines -- and is counted, because the preview
+			   counters below see a frame that was PRESENTED, not one presented
+			   bare.
+			   [!] And `plug` is sampled once: taking it twice could light the
+			   plugin path without the lease, or leak the lease. */
+			int plug   = nn_active_is_plugin();
+			int leased = plug ? plugin_lease_try() : 0;
+#endif
 			/* One outer lock around the boxes AND the flip.  ltdc_lock_frame()
 			   is recursive, and ltdc_flip() already holds it across its entire
 			   VBR wait, so this adds only the fills to the held time while
@@ -381,9 +406,19 @@ static void preview_entry(ULONG arg)
 			/* One decoder annotates a frame, not two: the plugin's boxes and
 			   the resident decoder's would be different readings of different
 			   models.  The depth probe moved into preview_draw_plugin(), at
-			   the call it describes. */
-			if (!preview_draw_plugin())
+			   the call it describes.
+			   [!] The lease is released BEFORE the flip: holding it across the
+			   VBR wait would stop the worker decoding while this thread
+			   sleeps, for nothing -- the drawing is already done. */
+			if (plug) {
+				if (leased) {
+					preview_draw_plugin();
+					plugin_lease_give();
+				}
+			} else {
+				nn_camera_note_depth(NNCAM_SITE_DRAW);
 				preview_draw_overlay();
+			}
 #else
 			nn_camera_note_depth(NNCAM_SITE_DRAW);
 			preview_draw_overlay();

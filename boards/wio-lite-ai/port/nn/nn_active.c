@@ -198,13 +198,30 @@ int nn_active_to_frame(void *ctx, float x, float y, float w, float h,
 	return 0;
 }
 
-/* The producer thread has no console, so this is the only way a decode failure
- * can explain itself. */
+/*
+ * The producer thread has no console, so this is the only way a decode failure
+ * can explain itself.
+ *
+ * [!] COPIED AND TERMINATED, NOT PRINTED WITH A PRECISION.  This said
+ * `LOG_INF("plugin: %.*s", (int)len, s)`, and svc/fmt.c implements neither a
+ * precision nor `*` -- deliberately, it is a clean-room minimal formatter --
+ * so the plugin's explanation came out as the format string plus whatever the
+ * varargs were read as.  The bytes a plugin hands over are not NUL-terminated,
+ * so they have to be copied somewhere that is.  The buffer is charged to
+ * WIO_PLUGIN_VENEER_BASE_COST, which is derived with it included.
+ */
 static void nn_plugin_log(void *ctx, const char *s, size_t len)
 {
+	char line[64];
+	size_t n;
+
 	(void)ctx;
-	if (s != NULL && len != 0u)
-		LOG_INF("plugin: %.*s", (int)len, s);
+	if (s == NULL || len == 0u)
+		return;
+	n = len < sizeof line - 1u ? len : sizeof line - 1u;
+	memcpy(line, s, n);
+	line[n] = '\0';
+	LOG_INF("plugin: %s%s", line, n < len ? " ..." : "");
 }
 
 static const struct plugin_base_api nn_plugin_base = {

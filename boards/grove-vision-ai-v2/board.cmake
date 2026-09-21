@@ -1847,9 +1847,21 @@ set(GROVE_PLUGIN_FORBIDDEN
     ARM_MPU_SetRegion)
 # What the base itself may spend below a veneer, per slot, worst case.  The
 # gate adds this at each veneer because it cannot see across the boundary.
-# Deliberately generous: it is added once per veneer and the whole point is that
-# a plugin must not be sized against an optimistic guess.  THIS base's number --
-# the M55 veneers call into nn_svc_grove.c / plugin_paint.c.
+#
+# [!] ASSERTED, NOT DERIVED, AND KNOWN TO BE OPTIMISTIC.  "Deliberately
+# generous" is what this comment used to say, and issue #110 derived the other
+# board's the same way it should have been derived here -- by summing frames
+# along the deepest chain a veneer reaches -- and got 512 before rounding.  The
+# chain that dominates is the logging callback: nn_plugin_log -> LOG_INF ->
+# the formatter -> its 64-bit division helpers, and it is well past 256 on this
+# board too.  Nothing here has been observed to overflow, and the plugins this
+# board ships compute far below their allowances, so this is a guarantee that
+# is weaker than it reads rather than a fault in flight.
+#
+# Deriving it means re-packing and re-sending this board's containers, because
+# their declared stacks were computed against this number -- which is why it is
+# its own issue rather than a line changed here.  Do not read the fact that the
+# gate passes as the fact that the charge is right.
 set(GROVE_PLUGIN_VENEER_BASE_COST 256)
 
 # cortex-m55 / fp-armv8 / hard float / little endian / CMSE, per

@@ -758,9 +758,20 @@ int nn_camera_start(int colorbar)
 	 * whose two halves do not belong together, and finding that out per frame
 	 * is a stream that runs and silently never annotates.
 	 */
-	if (!nn_active_shapes_ok(m)) {
-		nncam_guards_give();
-		return NNCAM_ERR_SHAPES;
+	{
+		/* Under the lease like every other entry into a plugin: the NN session
+		 * is held here so no load can replace it, but a console's param_set
+		 * takes no session and would otherwise run concurrently with this. */
+		int ok = plugin_lease_take(NNCAM_LEASE_WAIT_TICKS);
+
+		if (ok) {
+			ok = nn_active_shapes_ok(m);
+			plugin_lease_give();
+		}
+		if (!ok) {
+			nncam_guards_give();
+			return NNCAM_ERR_SHAPES;
+		}
 	}
 #endif
 

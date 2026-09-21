@@ -41,6 +41,7 @@
 #include "nn_decoder.h"
 #include "nn_active.h"
 #include "plugin_load.h"
+#include "plugin_lease.h"
 #include "plugin_run.h"
 #include "plugin_target.h"   /* the target word this build provides (#108) */
 #include "psram.h"
@@ -61,6 +62,14 @@
 _Static_assert(WIO_PLUGIN_TARGET_ID == PLUGIN_TARGET_ID_HERE,
                "WIO_PLUGIN_TARGET_ID does not describe this firmware's build "
                "(svc/plugin_target.h)");
+
+/*
+ * How long a console waits for the result lease before giving up (issue #110).
+ * Finite, and with an answer on the other side of it: measuring how long a wait
+ * took is not the same as bounding it, and a shell that stopped responding
+ * behind a wedged worker with no line of output would be worse than a refusal.
+ */
+#define NN_PLUGIN_LEASE_WAIT_TICKS  50u
 
 /* ---- plugin containers (issue #108 = #78 Step 3a) ------------------------- */
 
@@ -624,14 +633,20 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	 * the previous model keeps the previous claims (NN_MODEL_PREVIOUS changes
 	 * nothing here).
 	 */
-	if (*state == NN_MODEL_NEW)
-		nn_claims_settle(0, is_container ? &claims : NULL);
-	else if (*state == NN_MODEL_EMPTY)
-		nn_claims_settle(0, NULL);
-	else
-		nn_claims_settle(1, NULL);     /* the previous model, its claims */
-
 #if defined(CONFIG_NN_BACKEND_TFLM)
+	/*
+	 * [!] AND UNDER THE RESULT LEASE.  The NN session keeps the WORKER out --
+	 * a stream holds it for its lifetime and a one-shot for its duration --
+	 * but it does not keep another CONSOLE's plugin callback out: `nn thresh`
+	 * takes no session, so without this a background job could be inside a
+	 * plugin's param_set while this overwrites the reservation under it.  A
+	 * bounded wait, not a try: this is the operation that has to happen, and
+	 * the only holders are short.
+	 *
+	 * Waited for OUTSIDE the claims window on purpose -- see below.
+	 */
+	(void)plugin_lease_take(NN_PLUGIN_LEASE_WAIT_TICKS);
+
 	/*
 	 * [!] THE PLUGIN IS REPLACED ONLY AFTER THE BACKEND SUCCEEDED (issue #110),
 	 * and the order is the whole of it.  Loading first would destroy the
@@ -669,7 +684,23 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 		 * plugin does anyway, and plugin_run_load() has already unpublished
 		 * whatever it refused.  It logs its own reason. */
 	}
+	plugin_lease_give();
 #endif
+
+	/*
+	 * [!] SETTLED AFTER THE DECODER MOVED, NOT BEFORE (issue #110).  This ran
+	 * first, and the comment beside the block above said the replacement was
+	 * "inside the claims window" while settling had already closed it -- so
+	 * another console could read the NEW container's claims beside the OLD
+	 * plugin.  Settling last is what makes `a model load is in progress` cover
+	 * the whole of it.
+	 */
+	if (*state == NN_MODEL_NEW)
+		nn_claims_settle(0, is_container ? &claims : NULL);
+	else if (*state == NN_MODEL_EMPTY)
+		nn_claims_settle(0, NULL);
+	else
+		nn_claims_settle(1, NULL);     /* the previous model, its claims */
 	nn_guards_give();
 
 	if (rc != 0) {
@@ -707,8 +738,11 @@ void nn_svc_model_unload(struct nn_op_result *res)
 	nn_claims_settle(0, NULL);
 #if defined(CONFIG_NN_BACKEND_TFLM)
 	/* And no decoder either (issue #110): a plugin left loaded would be a
-	   decoder for a model that is gone, waiting to interpret the next one. */
+	   decoder for a model that is gone, waiting to interpret the next one.
+	   Under the lease, for the reason the load path states. */
+	(void)plugin_lease_take(NN_PLUGIN_LEASE_WAIT_TICKS);
 	plugin_run_unload();
+	plugin_lease_give();
 #endif
 	nn_guards_give();
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
@@ -1153,12 +1187,28 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	 * Without it a live preview runs, annotates nothing, and is
 	 * indistinguishable from a broken one.
 	 */
-	if (!nn_active_can_draw()) {
-		nn_detail_to(res->detail, sizeof res->detail,
-		             "the container's decoder draws nothing, so a live "
-		             "preview would never annotate; `nn run` still works");
-		nn_result(res, NN_SVC_ERR_NOSUP, NN_CLAIM_NONE);
-		return;
+	{
+		/* Under the lease: this reads the loaded plugin's slot table, which a
+		 * concurrent `nn model load` replaces.  Advisory either way -- the
+		 * admission below takes the NN session, which is what actually
+		 * excludes a load -- but asking a question about a plugin without
+		 * holding it still is the habit that produced the holes this issue
+		 * closed. */
+		int draws = plugin_lease_take(NN_PLUGIN_LEASE_WAIT_TICKS);
+
+		if (draws) {
+			draws = nn_active_can_draw();
+			plugin_lease_give();
+		} else {
+			draws = 1;      /* busy is not "it cannot draw"; let admission speak */
+		}
+		if (!draws) {
+			nn_detail_to(res->detail, sizeof res->detail,
+			             "the container's decoder draws nothing, so a live "
+			             "preview would never annotate; `nn run` still works");
+			nn_result(res, NN_SVC_ERR_NOSUP, NN_CLAIM_NONE);
+			return;
+		}
 	}
 #endif
 
@@ -1555,7 +1605,19 @@ int nn_svc_box_to_frame(const struct bf_det *in, struct bf_det *out)
 unsigned nn_svc_thresh_get(void)
 {
 #if defined(CONFIG_NN_BACKEND_TFLM)
-	return nn_active_get_thresh_milli();
+	unsigned v;
+
+	/* [!] UNDER THE LEASE (issue #110).  This reaches a plugin's param_get,
+	 * which reads plugin state that a decode may be rewriting and that a
+	 * concurrent `nn model load` may be REPLACING -- and this command takes no
+	 * NN session, so nothing else keeps either out.  If the lease cannot be
+	 * had, say there is no answer rather than reading one from a plugin
+	 * somebody else is in the middle of. */
+	if (!plugin_lease_take(NN_PLUGIN_LEASE_WAIT_TICKS))
+		return NN_SVC_THRESH_NONE;
+	v = nn_active_get_thresh_milli();
+	plugin_lease_give();
+	return v;
 #else
 	return nn_decoder_get_thresh_milli();
 #endif
@@ -1564,7 +1626,15 @@ unsigned nn_svc_thresh_get(void)
 int nn_svc_thresh_set(unsigned milli)
 {
 #if defined(CONFIG_NN_BACKEND_TFLM)
-	switch (nn_active_set_thresh_milli(milli)) {
+	int r;
+
+	/* No detail to set: this entry point returns a status only, and the
+	 * shared command has a line for BUSY. */
+	if (!plugin_lease_take(NN_PLUGIN_LEASE_WAIT_TICKS))
+		return NN_SVC_ERR_BUSY;
+	r = nn_active_set_thresh_milli(milli);
+	plugin_lease_give();
+	switch (r) {
 	case NN_ACTIVE_THRESH_OK:
 		return NN_SVC_OK;
 	case NN_ACTIVE_THRESH_NO_DECODER:

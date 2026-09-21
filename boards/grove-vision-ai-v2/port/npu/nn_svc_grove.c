@@ -479,10 +479,26 @@ static const struct plugin_policy nn_plugin_policy = {
  */
 static void nn_plugin_log(void *ctx, const char *s, size_t len)
 {
+	char line[64];
+	size_t n;
+
 	(void)ctx;
 	/* The producer thread has no console, so this is the only way a plugin can
-	 * explain itself.  Bounded by the log ring's own message limit. */
-	LOG_INF("plugin: %.*s", (int)len, s);
+	 * explain itself.
+	 *
+	 * [!] COPIED AND TERMINATED, NOT PRINTED WITH A PRECISION (issue #110).
+	 * This said `%.*s`, and svc/fmt.c implements neither a precision nor `*` --
+	 * deliberately, it is a clean-room minimal formatter -- so a plugin's
+	 * explanation came out as the format string plus whatever its varargs were
+	 * read as.  The bytes a plugin hands over are not NUL-terminated, so they
+	 * have to be copied somewhere that is.  Present since issue #103 and found
+	 * by the review of the port to the other board. */
+	if (s == NULL || len == 0u)
+		return;
+	n = len < sizeof line - 1u ? len : sizeof line - 1u;
+	(void)memcpy(line, s, n);
+	line[n] = '\0';
+	LOG_INF("plugin: %s%s", line, n < len ? " ..." : "");
 }
 
 static const struct plugin_base_api nn_plugin_base = {

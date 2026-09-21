@@ -153,101 +153,17 @@ static void preview_band(unsigned band, const uint16_t *px, unsigned rows)
 }
 
 /*
- * One detection box, in landscape surface coordinates (owhinata/wio-lite-ai#9 phase
- * 4).
+ * [!] THE RESIDENT OVERLAY IS GONE (issue #116 = #78 Step 3c).  This file used
+ * to hold a box painter of its own, drawing what the firmware's BlazeFace
+ * decoder had published.  There is no such decoder now: the only thing that can
+ * annotate a frame is a LOADED PLUGIN, through the one path below.
  *
- * The boxes are normalized to the model's square input, which the downsample maps
- * onto the WHOLE 320x240 frame (it squashes rather than crops), and the landscape
- * surface is that same 320x240 -- so the mapping is a straight multiply.  A 90
- * degree rotation takes an axis-aligned rectangle to an axis-aligned rectangle, so
- * four thin ltdc_fill_rect() calls need no new drawing primitive: each one clips and
- * transposes itself.
- *
- * [!] THE CLAMP IS IN SIGNED ARITHMETIC, BEFORE THE uint16_t CAST.  The decoder
- * computes x = cx - w/2, which is routinely negative for a face at the edge of the
- * frame, and surf_clip() only clips the FAR edges -- it takes uint16_t and assumes
- * non-negative input.  A negative value cast to uint16_t becomes ~65535 and sails
- * straight through the clip.
+ * What was deleted with it, and is therefore not a thing to look for: a static
+ * box array on this thread's 1,024 B stack budget, and a
+ * ltdc_fill_rect -> fb_fill_rect -> ltdc_dma2d_fill chain that only the overlay
+ * reached from here.  The plugin path paints on the CPU (see plugin_paint.c),
+ * which is a different decision made for a different reason.
  */
-#define PREVIEW_BOX_RGB565 0x07E0u   /* green: no red bits at all (see issue #43) */
-#define PREVIEW_BOX_THICK  2u
-
-static void preview_box(const struct bf_det *d)
-{
-	/* The LTDC_SURFACE_* macros expand to constants private to ltdc_display.c;
-	   the accessors are the public way to ask, and they answer the same. */
-	const int sw = (int)ltdc_surface_w();
-	const int sh = (int)ltdc_surface_h();
-	int x0, y0, x1, y1, w, h, t;
-
-	x0 = (int)(d->x * (float)sw);
-	y0 = (int)(d->y * (float)sh);
-	x1 = (int)((d->x + d->w) * (float)sw);
-	y1 = (int)((d->y + d->h) * (float)sh);
-
-	if (x0 < 0)
-		x0 = 0;
-	if (y0 < 0)
-		y0 = 0;
-	if (x1 > sw)
-		x1 = sw;
-	if (y1 > sh)
-		y1 = sh;
-	if (x1 <= x0 || y1 <= y0)
-		return;                   /* entirely off the surface */
-
-	w = x1 - x0;
-	h = y1 - y0;
-	t = (int)PREVIEW_BOX_THICK;
-	if (t > w)
-		t = w;                    /* a box thinner than the stroke becomes solid */
-	if (t > h)
-		t = h;
-
-	ltdc_fill_rect((uint16_t)x0, (uint16_t)y0, (uint16_t)w, (uint16_t)t,
-	               PREVIEW_BOX_RGB565);
-	ltdc_fill_rect((uint16_t)x0, (uint16_t)(y1 - t), (uint16_t)w, (uint16_t)t,
-	               PREVIEW_BOX_RGB565);
-	ltdc_fill_rect((uint16_t)x0, (uint16_t)y0, (uint16_t)t, (uint16_t)h,
-	               PREVIEW_BOX_RGB565);
-	ltdc_fill_rect((uint16_t)(x1 - t), (uint16_t)y0, (uint16_t)t, (uint16_t)h,
-	               PREVIEW_BOX_RGB565);
-}
-
-/*
- * Drawn HERE, on the flip thread, and not in the band callback: this thread has
- * ~74 ms of slack per frame while the band callback has ~18.5 ms, and every
- * microsecond spent there costs real pixels.  The boxes go into the back buffer
- * after the fourth band and before the flip, and the next frame's bands overwrite
- * the whole surface, so nothing has to erase them.
- *
- * If `band late` ever climbs with the overlay on, the lever is to cap the number of
- * boxes drawn (the top few by score are the ones worth seeing) -- NOT a frame-wide
- * display lock, which cannot be written at all: a TX_MUTEX may only be released by
- * the thread that took it, and the bands and the flip are on different threads.
- */
-/*
- * Static rather than a local, and that is a stack decision, not a style one: this
- * thread's stack is 1,024 B and BF_MAX_DET detections are 160 B of it, on top of a
- * call chain (ltdc_fill_rect -> fb_fill_rect -> ltdc_dma2d_fill) that did not exist
- * on this thread before -- preview_entry() used to do nothing but ltdc_flip().  Float
- * arithmetic here also means an interrupt now stacks the extended VFP frame (the
- * ThreadX M7 port adds s16-s31 on top of the hardware's s0-s15 + FPSCR), which is a
- * further ~136 B whenever this thread is preempted.  Safe as a static because
- * preview_entry() is its only caller and there is exactly one of it.
- */
-static struct bf_det preview_dets[BF_MAX_DET];
-
-static void preview_draw_overlay(void)
-{
-	int n, i;
-
-	if (!nn_camera_get_overlay())
-		return;
-	n = nn_camera_dets_get(preview_dets, BF_MAX_DET);
-	for (i = 0; i < n; i++)
-		preview_box(&preview_dets[i]);
-}
 
 #if defined(CONFIG_NN_BACKEND_TFLM)
 /*
@@ -340,10 +256,12 @@ static void preview_draw_plugin(void)
 
 	if (!nn_camera_get_overlay())
 		return;
-	/* No capture and no boxes: this is the panel asking "is there a current
-	 * result, and is it the plugin's". */
+	/* No capture: this is the panel asking "is there a current result, and is
+	 * it the plugin's".  A RAW_TENSORS record answers the first and not the
+	 * second -- an inference ran that nothing decoded, and there is nothing to
+	 * put on the picture (issue #116). */
 	memset(&dec, 0, sizeof dec);
-	if (!nn_camera_decode_get(&dec, NULL, 0, NULL))
+	if (!nn_camera_decode_get(&dec, NULL))
 		return;
 	if (!dec.valid || dec.kind != (uint8_t)NN_DET_PLUGIN_REPORT)
 		return;
@@ -398,30 +316,21 @@ static void preview_entry(ULONG arg)
 			   the last band and the flip. */
 			ltdc_lock_frame();
 			/* Where a plugin's draw() stands (issue #108 placed the probe,
-			   #110 put the call beside it): here, inside the frame lock and
-			   INSTEAD OF the resident overlay -- not in preview_box(), which
-			   is deeper than a plugin is ever called from and would
-			   over-report. */
-#if defined(CONFIG_NN_BACKEND_TFLM)
-			/* One decoder annotates a frame, not two: the plugin's boxes and
-			   the resident decoder's would be different readings of different
-			   models.  The depth probe moved into preview_draw_plugin(), at
-			   the call it describes.
+			   #110 put the call beside it): here, inside the frame lock.  The
+			   depth probe is inside preview_draw_plugin(), at the call it
+			   describes.
+			   [!] AND THIS IS THE ONLY WAY A FRAME GETS ANNOTATED (issue
+			   #116).  With no plugin -- or a container whose plugin was
+			   refused -- the picture is presented exactly as the bands built
+			   it; there is no second painter to fall back to.
 			   [!] The lease is released BEFORE the flip: holding it across the
 			   VBR wait would stop the worker decoding while this thread
 			   sleeps, for nothing -- the drawing is already done. */
-			if (plug) {
-				if (leased) {
-					preview_draw_plugin();
-					plugin_lease_give();
-				}
-			} else {
-				nn_camera_note_depth(NNCAM_SITE_DRAW);
-				preview_draw_overlay();
+#if defined(CONFIG_NN_BACKEND_TFLM)
+			if (plug && leased) {
+				preview_draw_plugin();
+				plugin_lease_give();
 			}
-#else
-			nn_camera_note_depth(NNCAM_SITE_DRAW);
-			preview_draw_overlay();
 #endif
 			if (ltdc_flip() == LTDC_OK)
 				preview_shown++;

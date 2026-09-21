@@ -38,7 +38,6 @@
 #include "fmt.h"
 #include "nn.h"
 #include "nn_camera.h"
-#include "nn_decoder.h"
 #include "nn_desc.h"
 #include "nn_active.h"
 #include "plugin_load.h"
@@ -571,11 +570,11 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	 * inside the slot it handed out (nn.h, NN_MODEL_ALIGN).  Copying it down to the
 	 * slot's start would overwrite the checked container with unchecked bytes.
 	 *
-	 * [!] THE PLUGIN SECTION IS VALIDATED AND RECORDED -- NEVER COPIED, NEVER
-	 * CALLED.  Step 3a stops there, as Grove's 1a did.  A container accepted here
-	 * is not "safe to run"; nothing on this board runs it yet.  The resident
-	 * decoder keeps decoding, and a container's model runs through it exactly as
-	 * a bare model does.
+	 * [!] SINCE ISSUE #110 THE PLUGIN SECTION IS ACTUALLY RUN.  Step 3a validated
+	 * and recorded it and stopped there; 3b copies it into the reservation and
+	 * branches into it, and 3c (issue #116) took the firmware's own decoder away
+	 * -- so a container's plugin is now the ONLY thing that reads a model's
+	 * outputs, and a bare model's are reported as the tensors they are.
 	 */
 	model_at  = stage;
 	model_len = info.length;
@@ -684,10 +683,11 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 		plugin_run_unload();
 	} else if (*state == NN_MODEL_NEW) {
 		if (!is_container) {
-			/* A bare model is a legal thing to load, and it means the
-			 * resident decoder is what reads it.  Whatever was loaded before
-			 * must go: a new model with an old model's decoder is the exact
-			 * accident this ordering exists to prevent. */
+			/* A bare model is a legal thing to load, and since issue #116 it
+			 * means NOTHING reads its outputs -- `nn run` reports the tensors
+			 * themselves and a live overlay is refused.  Whatever was loaded
+			 * before must go: a new model with an old model's decoder is the
+			 * exact accident this ordering exists to prevent. */
 			plugin_run_unload();
 		} else {
 			/* The deepest of the shell-thread call sites: a plugin's entry()
@@ -702,10 +702,18 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 			(void)plugin_run_load(&claims.view, stage, stage, cap,
 			                      nn_active_base());
 		}
-		/* A container whose plugin would not load leaves the model open with
-		 * the resident decoder reading it -- which is what a container with no
-		 * plugin does anyway, and plugin_run_load() has already unpublished
-		 * whatever it refused.  It logs its own reason. */
+		/* [!] A CONTAINER WHOSE PLUGIN WOULD NOT LOAD LEAVES THE MODEL OPEN
+		 * WITH NOTHING READING IT (issue #116).  Until Step 3c that landed on
+		 * the resident decoder, so a refused plugin still produced boxes of a
+		 * sort; now the model behaves exactly like a bare one -- `nn run`
+		 * reports its output tensors and `nn stream start` is refused.
+		 * plugin_run_load() has already unpublished whatever it refused and
+		 * logs its own reason, which is the only place that says WHY.
+		 *
+		 * [!] THIS BRANCH IS NOT COVERED BY A TEST.  There is no way to build
+		 * a container whose plugin the device refuses -- the host packer runs
+		 * the device's own validator over what it packs -- so what is written
+		 * here is a claim about an unexercised path.  See the board README. */
 	}
 #endif
 
@@ -901,8 +909,14 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	/* [!] AND THE CAPTURE HAPPENS IN HERE (issue #110), under the result lease,
 	   because a plugin's account of its result has to be taken while that
 	   result is still the one the snapshot describes.  By the time this
-	   function returns the session is gone. */
-	(void)nn_camera_decode_get(&dec, dets, max, rep);
+	   function returns the session is gone.
+	   [!] AND NO BOXES COME BACK (issue #116).  The shared command reads its
+	   own array only for NN_DET_CALLER_BOXES, and nothing on this board
+	   publishes that kind any more -- a plugin keeps its result, a bare model
+	   has none -- so the array it lends us is left exactly as it arrived. */
+	(void)dets;
+	(void)max;
+	(void)nn_camera_decode_get(&dec, rep);
 	snap->valid = dec.valid;
 	snap->ndet  = dec.ndet;
 	/* [!] CARRIED FROM THE RECORD, NOT ASSERTED (issues #104, #110).  It used
@@ -938,7 +952,10 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
 
 	nn_detail_clear();
 	memset(&dec, 0, sizeof dec);
-	(void)nn_camera_decode_get(&dec, dets, max, rep);
+	/* No boxes -- see nn_svc_run_once. */
+	(void)dets;
+	(void)max;
+	(void)nn_camera_decode_get(&dec, rep);
 	snap->valid = dec.valid;
 	snap->ndet  = dec.ndet;
 	snap->kind  = dec.kind;     /* carried, not asserted -- see nn_svc_run_once */
@@ -1073,9 +1090,14 @@ static const char *nn_nncam_strerror(int rc)
 	case NNCAM_ERR_SHAPES:  return "the container's decoder cannot read this "
 	                               "model's outputs -- its two halves do not "
 	                               "belong together (`nn info`)";
-	case NNCAM_ERR_NODRAW:  return "the container's decoder draws nothing, so a "
-	                               "live preview would never annotate; `nn run` "
-	                               "still works";
+	/* [!] IT ALSO COVERS "THERE IS NO DECODER AT ALL" (issue #116).  This
+	 * firmware carries none, so a bare model -- or a container whose plugin
+	 * was refused -- reaches the same refusal as a plugin with no draw()
+	 * slot, and the words have to fit all three. */
+	case NNCAM_ERR_NODRAW:  return "nothing would annotate a live preview: no "
+	                               "decoder is loaded, or the one that is "
+	                               "draws nothing (`nn info`); `nn run` still "
+	                               "works";
 	case NNCAM_ERR_DECBUSY: return "the decoder could not be held still long "
 	                               "enough to ask it -- try again";
 	case NNCAM_ERR_INIT:    return "the worker thread or its objects could not be "
@@ -1338,7 +1360,7 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	/* Outside the critical section: these take their own locks. */
 	nn_camera_stats_get(&st);
 	dec.valid = 0;
-	(void)nn_camera_decode_get(&dec, NULL, 0, NULL);
+	(void)nn_camera_decode_get(&dec, NULL);
 
 	TX_DISABLE
 	nn_stream_life_snapshot(&nn_life, NULL, NULL, &seq1);
@@ -1673,7 +1695,10 @@ unsigned nn_svc_thresh_get(void)
 	plugin_lease_give();
 	return v;
 #else
-	return nn_decoder_get_thresh_milli();
+	/* [!] NO PLUGIN MECHANISM AND NO DECODER (issue #116).  The `null` backend
+	 * cannot load a container at all, so nothing in this build holds a
+	 * threshold -- the same answer the TFLM build gives with none loaded. */
+	return NN_SVC_THRESH_NONE;
 #endif
 }
 
@@ -1699,8 +1724,10 @@ int nn_svc_thresh_set(unsigned milli)
 		return NN_SVC_ERR_ARG;
 	}
 #else
-	return (nn_decoder_set_thresh_milli(milli) == BF_OK) ? NN_SVC_OK
-	                                                     : NN_SVC_ERR_ARG;
+	/* Nothing holds one here either -- and "there is nothing to set" is not
+	 * "that value is out of range" (issue #116). */
+	(void)milli;
+	return NN_SVC_ERR_STATE;
 #endif
 }
 
@@ -1781,8 +1808,8 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	 * and a load landing between the two would print one container's manifest
 	 * beside another's -- or beside no plugin at all.  `running` is what this
 	 * board's loader actually has branched into; `validated` is a container
-	 * whose plugin was refused or never reached, with the resident decoder
-	 * reading its model.
+	 * whose plugin was refused or never reached -- since issue #116 that means
+	 * nothing is reading its model.
 	 */
 	if (nn_info_line(write, ctx,
 	                 "plugin  : %s (build %s, crc %08lx), %s\r\n",
@@ -1823,7 +1850,8 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 
 /* There is no separate report call any more (issue #110): a board captures an
  * external decoder's account of its result beside the snapshot that describes
- * it, into the shared command's own buffer.  Nothing on this board produces
- * one yet -- the resident decoder fills the caller's array -- so both entry
- * points above state NN_REPORT_NONE. */
+ * it, into the shared command's own buffer.  On this board that capture happens
+ * inside nn_camera_decode_get(), under the same lease as the snapshot, and it
+ * is a LOADED PLUGIN that produces it -- with none loaded there is no result to
+ * describe and the capture states NN_REPORT_NONE. */
 

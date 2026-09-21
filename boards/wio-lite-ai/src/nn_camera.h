@@ -75,9 +75,9 @@
  * the third and the calls beside all of them).
  *
  * DECODE is on `nn_work`, immediately before the decode in the worker step.
- * DRAW is on the preview thread, where the plugin's draw() replaces the
- * resident overlay -- NOT inside the per-box helper, which is a deeper,
- * resident-only path and would over-report.
+ * DRAW is on the preview thread, at the call that lets the plugin paint -- and
+ * at that call rather than in its caller, so the number is the depth the
+ * callback inherits and does not depend on what the compiler inlined.
  *
  * [!] SHELL IS THE ONE 3a DID NOT MEASURE, and it is where four of the seven
  * slots are actually called: entry (from `nn model load`), shapes_ok (from the
@@ -189,16 +189,6 @@ int nn_camera_running(void);
 void nn_camera_stats_get(struct nn_camera_stats *out);
 
 /**
- * Copy the most recently published detections.  Returns how many were copied, or -1
- * if the decoder does not recognise the loaded model's outputs at all -- the same
- * convention blazeface_decode() uses, because it is the same answer travelling
- * through the worker.  -1 and 0 are different facts and the caller must not merge
- * them: one is "this is not a face model", the other is "no faces"
- * (owhinata/wio-lite-ai#57).
- */
-int nn_camera_dets_get(struct bf_det *out, int max);
-
-/**
  * One decode's boxes and the diagnostics that belong to them.
  *
  * [!] READ TOGETHER OR NOT AT ALL (issue #97).  The worker publishes both under
@@ -222,11 +212,15 @@ struct nn_camera_decode {
 /**
  * Take a coherent snapshot of the last published decode.
  *
- * @param dets  optional; the boxes, up to @p max of them.  Untouched when the
- *              last decode was an external decoder's -- there are no boxes
  * @param rep   optional.  When given AND the last decode belongs to a loaded
  *              plugin, the plugin is asked to describe it and the bytes land
  *              here.
+ *
+ * [!] IT HANDS BACK NO BOXES (issue #116).  It used to take an array to fill;
+ * since the resident decoder went there is no publisher on this board that
+ * writes one -- a plugin keeps its result and a bare model has none -- so the
+ * kind in the snapshot is what a caller routes on, and the boxes were never
+ * this function's to give.
  *
  * [!] THE CAPTURE AND THE SNAPSHOT ARE ONE TRANSACTION, which is why they are
  * one call.  The plugin's result is private and it is rewritten by the next
@@ -240,15 +234,15 @@ struct nn_camera_decode {
  * panel does not ask (it passes NULL) precisely so that it never waits.
  * @return non-zero if a snapshot was taken (zero before the first stream start,
  *         when the lock does not exist yet).  A snapshot with `valid == 0` means
- *         the session has not decoded a frame yet -- which is NOT the same as a
- *         decode that found nothing, and must not be printed as one.
+ *         this session has published no inference result yet -- which is NOT the
+ *         same as a decode that found nothing, and must not be printed as one.
  *
  * Cumulative counters stay in nn_camera_stats_get(): they are updated outside
  * this lock, and one of the callers polls them every 10 ms without wanting the
  * boxes at all.
  */
-int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
-                         int max, struct nn_report_capture *rep);
+int nn_camera_decode_get(struct nn_camera_decode *out,
+                         struct nn_report_capture *rep);
 
 /** Input normalization: 1 = [-1,1], 0 = [0,1] (default).  Applies to float32 and
  *  quantized inputs alike -- a quantized input is the normalized value put through

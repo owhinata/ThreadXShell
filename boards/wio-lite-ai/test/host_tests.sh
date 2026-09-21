@@ -22,6 +22,8 @@ set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
 board=$(cd "$here/.." && pwd)
+repo=$(cd "$board/../.." && pwd)
+asset="$repo/asset"      # plugin sources are repository-wide since #106
 out="$HOST_TEST_OUT"
 inc="$HOST_TEST_INC"
 svc="$HOST_TEST_SVC"
@@ -65,28 +67,40 @@ gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" \
     $LDFLAGS -o "$out/test_nn_desc"
 "$out/test_nn_desc"
 
-# issue #97 -- the adapter onto the SHARED BlazeFace decoder (port/nn/nn_decoder.c).
-# The decoder's arithmetic moved to svc/blazeface.c and is covered by
-# shell/test/test_blazeface.c, which is board-independent; what stays here is the
-# half that cannot be -- the decoder's state, its scratch, and the pull of the
-# open model's outputs through the translation above, against this board's real
-# nn.h.  struct nn_model is opaque (defined in nn.c), so the test supplies its own
-# nn_output_count() / nn_output(), which is also what makes the adapter testable.
+# issues #110, #116 -- the active-decoder shim (port/nn/nn_active.c), with a
+# plugin loaded and with none.
 #
-# The cases are what the adapter can get wrong end to end: an unsupported dtype or
-# an over-long rank reaching the decoder as something it reads, float32 put
-# through the affine form, a hole in the output set reported as a model-shape
-# problem, and the threshold this board owns.
+# This replaces test_nn_decoder.c, which drove the resident BlazeFace decoder
+# this board carried until issue #116.  There is no such decoder now: a plugin
+# is the only thing that reads a model's outputs, so what needs pinning is the
+# ROUTING -- and in particular the answers the shim gives with nothing loaded,
+# every one of which used to fall back on the resident decoder and so used to
+# read as something working.
 #
-# Built against the REAL boards/<board>/include/mem_sections.h so the PSRAM_AI
-# attribute on the host is the same one the firmware uses -- a shimmed copy could
-# drift from it without anything noticing, and check_psram_ai_residency.py names
-# `nn_dec_scratch` on the linked image as the other end of that.
-gcc $CFLAGS -I "$board/include" -I "$board/port/nn" -I "$HOST_TEST_SVC" \
-    "$here/test_nn_decoder.c" "$board/port/nn/nn_decoder.c" \
-    "$board/port/nn/nn_desc.c" "$HOST_TEST_SVC/blazeface.c" \
-    $LDFLAGS -lm -o "$out/test_nn_decoder"
-"$out/test_nn_decoder"
+# [!] NOTHING ON THE BOARD SHOULD REACH THE NO-PLUGIN DECODE.  The worker asks
+# nn_active_is_plugin() first and publishes "nothing decoded this" instead, and
+# a stream is refused admission before a camera is lit.  A shim that quietly
+# decoded there, or that kept answering `nn thresh` with a number nothing
+# reads, is invisible from a console -- which is why it is checked here.
+#
+# [!] AND THE PLUGIN ARM IS CHECKED TOO, because "with no plugin it refuses" is
+# also true of a shim that refuses always.  The threshold is set THROUGH the
+# shim, read back through it, and then the plugin is unloaded and the shim must
+# report none rather than a number of its own.
+#
+# The plugin linked in is the real asset/plugins/blazeface (its own slot table,
+# the same one the packer reads), and the shared decoder it carries comes with
+# it -- the firmware image no longer links svc/blazeface.c at all.
+gcc $CFLAGS -I "$board/port/nn" -I "$board/port/plugin" -I "$board/svc" \
+    -I "$asset/plugins/blazeface" -I "$asset/common" -I "$HOST_TEST_SVC" \
+    "$here/test_nn_active.c" \
+    "$board/port/nn/nn_active.c" "$board/port/nn/nn_desc.c" \
+    "$asset/plugins/blazeface/plugin_main.c" \
+    "$asset/common/plugin_base.c" "$asset/common/plugin_fmt.c" \
+    "$asset/common/plugin_text.c" \
+    "$HOST_TEST_SVC/blazeface.c" \
+    $LDFLAGS -lm -o "$out/test_nn_active"
+"$out/test_nn_active"
 
 # issue #55 -- the MLPerf Tiny harness (port/mlperf/mlperf_th.cc), driven through
 # UPSTREAM'S OWN PARSER (lib/mlperf-tiny/benchmark/api/internally_implemented.cpp,

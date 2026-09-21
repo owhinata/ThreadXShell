@@ -17,7 +17,6 @@
 #endif
 #include "nn_active.h"
 #include "nn_report.h"
-#include "nn_decoder.h"
 #include "plugin_lease.h"
 #include "nn_det_record.h"
 #include "psram.h"
@@ -340,21 +339,25 @@ static void nncam_band(unsigned band, const uint16_t *px, unsigned rows)
 /* ---------------------------------------------------------------- worker ------ */
 
 /*
- * Publish one decode's boxes and diagnostics together, under the detection lock.
+ * Publish "an inference ran and nothing decoded it", under the detection lock
+ * (issue #116).
  *
- * @return non-zero if they were taken.  A publish from a session that has since
+ * This is what the worker has to say for a model with no plugin beside it: this
+ * firmware carries no decoder, the outputs are there, and only an
+ * interpretation of them is missing.
+ *
+ * @return non-zero if it was taken.  A publish from a session that has since
  *         ended is DROPPED -- svc/nn_det_record.c has the rule and the reason --
  *         and the caller must not count it, because `nn run` waits on the
  *         inference counter and then reads the record.
  */
-static int nncam_publish(const struct bf_det *d, int n,
-                         const struct bf_result *res, uint32_t gen)
+static int nncam_publish_raw(uint32_t gen)
 {
 	int took;
 
 	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) != TX_SUCCESS)
 		return 0;
-	took = nn_det_record_publish(&nncam_rec, d, n, res, gen);
+	took = nn_det_record_publish_raw(&nncam_rec, gen);
 	(void)tx_mutex_put(&nncam_det_lock);
 	return took;
 }
@@ -363,14 +366,14 @@ static int nncam_publish(const struct bf_det *d, int n,
 /*
  * The same, for a decode whose RESULT STAYED WITH THE PLUGIN (issue #110).
  *
- * What travels is the count and the generation rule; the boxes and the
- * resident decoder's diagnostics do not, because they describe a decoder that
- * did not run.
+ * What travels is the count and the generation rule; the boxes and the shared
+ * decoder's diagnostics do not, because they describe a decoder that did not
+ * run.
  *
  * [!] CALLED WITH THE RESULT LEASE STILL HELD.  Releasing it between the decode
  * and this would let the panel see the new private state paired with the old
- * record -- a count from the previous frame beside boxes from this one, which
- * is the pairing the lock in here exists to prevent for the resident path.
+ * record -- a count from the previous frame beside a picture from this one,
+ * which is exactly the pairing the lock in here exists to prevent.
  */
 static int nncam_publish_plugin(int n, uint32_t gen)
 {
@@ -433,8 +436,6 @@ __attribute__((noinline)) void nn_camera_note_depth(enum nn_camera_site site)
 
 static void nncam_step(void)
 {
-	struct bf_det tmp[BF_MAX_DET];
-	struct bf_result bfr;
 	uint32_t gen;
 	int n;
 
@@ -511,9 +512,8 @@ static void nncam_step(void)
 	nncam_infer_cyc = nn_last_cycles(nncam_model);
 
 	/* Where a plugin's decode() is called (issue #108 placed the probe, #110
-	 * put the call beside it): immediately before the resident decoder,
-	 * recorded BEFORE the call so the number is the depth a callee inherits
-	 * rather than the depth including it. */
+	 * put the call beside it), recorded BEFORE the call so the number is the
+	 * depth a callee inherits rather than the depth including it. */
 #if defined(CONFIG_NN_BACKEND_TFLM)
 	if (nn_active_is_plugin()) {
 		int took;
@@ -546,14 +546,19 @@ static void nncam_step(void)
 	}
 #endif
 
-	nn_camera_note_depth(NNCAM_SITE_DECODE);
-	n = nn_decoder_run(nncam_model, tmp, BF_MAX_DET, &bfr);
-	/* Bumped LAST, after the boxes are published, and ONLY IF THEY WERE: `nn run`
-	   waits for this counter to move and then reads the detections, so
-	   incrementing first would let it read the PREVIOUS inference's boxes and
-	   report them as this one's -- and so would incrementing for a publish that
-	   the generation check dropped. */
-	if (nncam_publish(tmp, n, &bfr, gen))
+	/*
+	 * [!] NO PLUGIN MEANS NOBODY DECODED THIS (issue #116), and that still has
+	 * to be PUBLISHED.  The inference ran; what is missing is an
+	 * interpretation of its outputs, and `nn run` waits on the counter below
+	 * and then reads the record -- so a worker that published nothing here
+	 * would leave it waiting out its timeout over an inference that had
+	 * already finished.
+	 *
+	 * Bumped LAST and ONLY IF THE PUBLISH WAS TAKEN, for the same reason as on
+	 * the plugin path: counting one the generation check dropped would hand
+	 * `nn run` a retired session's record as this run's.
+	 */
+	if (nncam_publish_raw(gen))
 		nncam_infers++;
 }
 
@@ -750,13 +755,18 @@ int nn_camera_start(int colorbar, int require_draw)
 	 * tile onto it, whether its quantisation is usable.  Nothing has asked
 	 * whether anything can read the OUTPUTS.
 	 *
-	 * For the resident decoder that question stays unasked, as it always has:
-	 * it discovers a mismatch per frame and answers BF_ERR_MODEL, and refusing
-	 * here would change what this board does with every non-BlazeFace model it
-	 * has accepted since #45.  A plugin is different -- it was shipped WITH the
-	 * model it reads, so a plugin that cannot read this one is a container
-	 * whose two halves do not belong together, and finding that out per frame
-	 * is a stream that runs and silently never annotates.
+	 * A plugin was shipped WITH the model it reads, so a plugin that cannot
+	 * read this one is a container whose two halves do not belong together,
+	 * and finding that out per frame is a stream that runs and silently never
+	 * annotates.
+	 *
+	 * [!] WITH NO PLUGIN THE SHAPE QUESTION PASSES AND THE DRAW QUESTION DOES
+	 * NOT (issue #116).  Nothing reads the outputs at all now, so no shape can
+	 * be wrong -- and this is the admission `nn run` shares, which on a bare
+	 * model runs the inference and reports the tensors themselves.  What is
+	 * refused is the PANEL: `require_draw` is set only by `nn stream start`,
+	 * and a live overlay with nothing to draw is the failure this pair of
+	 * questions exists to catch.
 	 */
 	{
 		/* Under the lease like every other entry into a plugin: the NN session
@@ -788,6 +798,20 @@ int nn_camera_start(int colorbar, int require_draw)
 			nncam_guards_give();
 			return NNCAM_ERR_NODRAW;
 		}
+	}
+#else
+	/*
+	 * [!] THE SAME ANSWER WITHOUT THE MACHINERY (issue #116).  The `null`
+	 * backend has no plugin mechanism compiled in at all, so there is nothing
+	 * that could ever decode here -- which makes the answer to "will anything
+	 * annotate this stream" a constant no.  Saying it here rather than
+	 * leaving the block out is the point: a refusal that exists only inside
+	 * the TFLM branch is a build where `nn stream start` lights a camera and
+	 * a panel for a stream that can never draw.
+	 */
+	if (require_draw) {
+		nncam_guards_give();
+		return NNCAM_ERR_NODRAW;
 	}
 #endif
 
@@ -932,22 +956,8 @@ void nn_camera_stats_get(struct nn_camera_stats *out)
 	out->depth_shell  = nncam_depth_shell;
 }
 
-int nn_camera_dets_get(struct bf_det *out, int max)
-{
-	struct nn_camera_decode snap;
-
-	if (out == NULL || max <= 0)
-		return 0;
-	/* No capture: this is the panel, and the panel never waits (issue #110). */
-	if (nn_camera_decode_get(&snap, out, max, NULL) == 0)
-		return 0;
-	if (snap.kind != (uint8_t)NN_DET_CALLER_BOXES)
-		return 0;       /* the boxes are somebody else's; none were written */
-	return snap.ndet > max ? max : snap.ndet;
-}
-
-int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
-                         int max, struct nn_report_capture *rep)
+int nn_camera_decode_get(struct nn_camera_decode *out,
+                         struct nn_report_capture *rep)
 {
 	struct nn_det_snapshot snap;
 #if defined(CONFIG_NN_BACKEND_TFLM)
@@ -993,8 +1003,13 @@ int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
 	 * calls lets a frame land in between, and then a console prints this
 	 * frame's boxes beside the next frame's peak score with nothing to show
 	 * they disagree (issue #97).
+	 *
+	 * [!] AND NO BOX ARRAY IS OFFERED (issue #116).  Nothing on this board
+	 * publishes into the caller's array any more -- a plugin keeps its result
+	 * and a bare model has none -- so passing one would be offering a
+	 * destination for boxes that no publisher here can produce.
 	 */
-	nn_det_record_snapshot(&nncam_rec, &snap, dets, max);
+	nn_det_record_snapshot(&nncam_rec, &snap, NULL, 0);
 	(void)tx_mutex_put(&nncam_det_lock);
 	out->valid = snap.valid;
 	out->ndet  = snap.ndet;

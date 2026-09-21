@@ -849,43 +849,27 @@ else()
 endif()
 # membench's cacheable row is in the carve-out whichever backend is built.
 list(APPEND NN_PSRAM_AI_REQUIRED --require psram_ai_bench_buf)
-# The descriptor translation, and model-specific post-processing above the
+# The descriptor translation, and the published decode record, above the
 # model-agnostic nn API.
 #
 # port/nn/nn_desc.c is `nn_tensor` -> `tensor_desc` and nothing else (issue
 # #116).  It is not a decoder's: `nn out`, `nn info` and the active-decoder shim
-# need it whatever interprets the tensors, or whether anything does.
+# need it whatever interprets the tensors, or whether anything does.  Built in
+# BOTH backends, because neither changes what a descriptor is.
 #
-# The decoder itself is SHARED with the other two boards since issue #97;
-# port/nn/nn_decoder.c is this board's half of THAT -- the ownership of the
-# decoder's state and its candidate scratch, because the shared translation unit
-# owns no storage at all.
+# [!] AND THERE IS NO DECODER HERE ANY MORE (issue #116 = #78 Step 3c).  This
+# board linked svc/blazeface.c and a port/nn/nn_decoder.c that owned its state
+# and its candidate scratch; both are gone, and with them the `.psram_ai`
+# requirement for `nn_dec_scratch` and the pair of --internal-ram lines that
+# kept the decoder's state OUT of that NOLOAD carve-out.  A DECODER REACHES THIS
+# BOARD ONLY INSIDE A CONTAINER now: the plugin below compiles the same shared
+# decoder, and its own placement and its own audit come with it.
 #
-# BOTH ARE BUILT UNCONDITIONALLY -- including in the `null` build, whose stub
-# tensors the decoder simply does not recognise (it returns BF_ERR_MODEL without
-# touching anything).  That is what lets `ai dets` be registered unconditionally,
-# and keeping the reference in every build is also what keeps the --require line
-# below honest: a symbol --gc-sections dropped would be reported as "no such
-# object in the image", which reads like a placement regression and is not one.
-#
-# [!] The two anchor tables are gone -- the shared decoder computes the centres --
-# so only the candidate scratch is still placed, and it is the BOARD's object, not
-# the shared file's.  That is the whole reason the scratch is passed in: it keeps
-# the residency gate pointing at something this board owns.
+# [!] DO NOT PUT ONE BACK to make a gate or a test easier.  grove-vision-ai-v2
+# removed its resident decoder first (issue #104) and the reason is the same on
+# both: issue #78 exists so that the model-specific half ships with the model.
 list(APPEND NN_SOURCES "${BOARD_DIR}/port/nn/nn_desc.c"
-                       "${WIO_SHARED_DECODER}"
-                       "${CMAKE_SOURCE_DIR}/svc/nn_det_record.c"
-                       "${BOARD_DIR}/port/nn/nn_decoder.c")
-list(APPEND NN_PSRAM_AI_REQUIRED --require nn_dec_scratch)
-# [!] AND THE STATE MUST STAY OUT (issue #97).  The scratch requirement above says
-# nothing about the decoder's state, and moving `nn_dec` / `nn_dec_ready` into the
-# carve-out would leave every gate green -- while .psram_ai is NOLOAD, so the
-# threshold would come up holding the previous run's bytes and a `ready` flag that
-# followed it would survive a warm reset still saying ready, skipping
-# initialisation over stale state.  It would also break the fail-soft rule: the
-# shell runs when the PSRAM bring-up failed, and `ai thresh` has to keep answering.
-list(APPEND NN_PSRAM_AI_REQUIRED
-     --internal-ram nn_dec --internal-ram nn_dec_ready)
+                       "${CMAKE_SOURCE_DIR}/svc/nn_det_record.c")
 # The other half of that gate: PSRAM buffers a bus master owns, which must stay OUT
 # of the cacheable carve-out.  Named here rather than in the script for the same
 # reason as the DTCM list above -- each belongs to a BSP_ENABLE_* option, and a name
@@ -1212,9 +1196,12 @@ add_shared_storage_gate(NAME wio_nn_life_audit
                         IFACE bsp_iface CONSUMER shell)
 add_dependencies(shell wio_nn_life_audit_check)
 
-add_shared_storage_gate(NAME wio_decoder_audit SOURCE "${WIO_SHARED_DECODER}"
-                         IFACE bsp_iface CONSUMER shell)
-add_dependencies(shell wio_decoder_audit_check)
+# [!] AND NOT ON svc/blazeface.c ANY MORE (issue #116).  The firmware used to
+# link the shared decoder and audited THAT compile here.  It no longer links it,
+# and auditing an object that is not in the image would be a gate answering
+# about something nobody ships.  The decoder still gets audited -- by
+# add_plugin()'s AUDIT_SHARED below, on the object the PLUGIN actually links,
+# which is the only compile of it this board produces.
 
 add_custom_command(TARGET shell POST_BUILD
     COMMAND "${Python3_EXECUTABLE}"
@@ -1304,11 +1291,11 @@ add_custom_command(TARGET shell POST_BUILD
 # Plugin containers: deliver, validate, measure (issue #108 = #78 Step 3a)
 # ---------------------------------------------------------------------------
 #
-# Step 3a builds the plugins for this board, packs them with a model, and lets
+# Step 3a built the plugins for this board, packed them with a model, and let
 # `nn model load --slot` split a container, validate it and report what it
-# claims.  [!] IT NEVER EXECUTES ONE: the plugin section is never copied into
-# .plugin and never branched into, and the resident decoder keeps decoding.  3b
-# executes; 3c drops the resident decoder.  See the board README.
+# claims -- without ever executing one.  3b (issue #110) copies the section into
+# .plugin and branches into it.  3c (issue #116) took the resident decoder away,
+# so A PLUGIN IS NOW THE ONLY DECODER THIS BOARD HAS.  See the board README.
 #
 # tflm only: the null backend cannot load a model, so a container would have
 # nowhere to go.
@@ -1332,9 +1319,16 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # found two placeholders equal to a whole thread stack, which a plugin could
     # have declared, been admitted with, and overflowed.
     #
-    #   nn_work   3072 B  (decode)     at call 609 -> 3072-609-208 = 2255
-    #   cam_prev  1536 B  (draw)       at call 105 -> 1536-105-208 = 1223
-    #   shell     4096 B  (entry / shapes_ok / report / params)  at call: see below
+    # [!] THESE ARE ISSUE #110's MEASUREMENTS, not step 3a's.  3a's figures
+    # (609 / 105, and no measurement at all for the shell) stood in this comment
+    # after #110 had replaced them in the board README -- a stale number beside
+    # a live one, which is how a reader ends up deriving from the wrong half.
+    # The README's table is the record; this comment follows it.
+    #
+    #   nn_work   3072 B  (decode)     at call  641 -> 3072-641-208  = 2223
+    #   cam_prev  1536 B  (draw)       at call  137 -> 1536-137-208  = 1191
+    #   shell     4096 B  (entry / shapes_ok / report / params)
+    #                                  at call 1593 -> 4096-1593-208 = 2295
     #
     # [!] WHICH THREAD EACH SLOT IS CALLED ON WAS WRONG UNTIL ISSUE #110, and
     # the ENTRIES mapping below is where it shows.  Step 3a declared the
@@ -1344,12 +1338,13 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # `nn run` and `nn stream start` pass through, and BOTH are console
     # commands.  A bound on the wrong thread's stack is not a bound.
     #
-    # [!] AND THE SHELL FIGURE IS STILL AWAITING ITS MEASUREMENT.  3a measured
-    # the worker and the panel; nothing measured this one, and `nn run` now
-    # carries a report capture buffer in the same frame.  NNCAM_SITE_SHELL
-    # records it and `nn stream stats` prints it -- derive this from that
-    # number, and do not read the fact that it is conservative as the fact that
-    # it is derived.
+    # [!] AND THE ALLOWANCES THEMSELVES ARE NOT DERIVED FROM THOSE NUMBERS.
+    # 1,024 B on each thread is what the shipped containers were packed
+    # against, and the firmware cannot tell a stale declaration from a current
+    # one (see the board README) -- so changing one of these means re-packing
+    # and re-sending every container that exists.  The measurements above are
+    # here to show that each allowance still FITS, which is the check issue
+    # #103 found two placeholders failing.
     set(WIO_PLUGIN_STACK_NN_WORK 1024)
     set(WIO_PLUGIN_STACK_PREVIEW 1024)
     set(WIO_PLUGIN_STACK_SHELL   1024)
@@ -1469,10 +1464,11 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
 
     include("${CMAKE_SOURCE_DIR}/cmake/add_plugin.cmake")
 
-    # [!] svc/blazeface.c IS THE SAME FILE THIS FIRMWARE ALSO LINKS, as the
-    # resident decoder (port/nn/nn_decoder.c).  Both compiles are audited for
-    # mutable storage: the firmware's by wio_decoder_audit above, the plugin's
-    # by add_plugin() on the object it actually links.
+    # [!] svc/blazeface.c IS NOW COMPILED ONLY HERE (issue #116).  The firmware
+    # used to link it too, as the resident decoder; this is the one compile of
+    # it this board produces, and AUDIT_SHARED is what keeps the
+    # no-mutable-storage rule on it -- on the object that actually ships inside
+    # a container.
     set(WIO_PLUGIN_ELFS "")
     add_plugin(blazeface
         CFLAGS ${WIO_PLUGIN_CFLAGS}

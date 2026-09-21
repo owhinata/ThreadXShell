@@ -11,7 +11,6 @@
 
 #include "nn_active.h"
 
-#include "nn_decoder.h"      /* the resident decoder's threshold */
 #include "nn_desc.h"         /* nn_tensor -> tensor_desc */
 #include "plugin_run.h"
 
@@ -25,10 +24,10 @@
  * conversion is nn_desc_of(), reused rather than repeated: a second translation
  * could disagree with `nn out` and `nn info` about what a tensor is.
  *
- * A hole in the output set becomes a zeroed descriptor -- UNSUPPORTED -- for
- * the same reason the resident path does it: it is not a model-shape problem,
- * and letting the decoder decide whether the tensors it wants are still there
- * reaches the same answer by a defensible route.
+ * A hole in the output set becomes a zeroed descriptor -- UNSUPPORTED -- rather
+ * than a refusal here: it is not a model-shape problem, and letting the decoder
+ * decide whether the tensors it wants are still there reaches the same answer by
+ * a defensible route.
  */
 static unsigned to_desc(struct nn_model *m, struct tensor_desc *d, unsigned cap)
 {
@@ -71,7 +70,14 @@ int nn_active_shapes_ok(struct nn_model *m)
 
 		return fn(d, n);
 	}
-	/* The resident decoder answers per frame, as it always has. */
+	/*
+	 * [!] NOBODY IS GOING TO READ THEM, SO NOBODY OBJECTS (issue #116).  This
+	 * is the admission both `nn run` and `nn stream start` pass through, and
+	 * refusing here would refuse `nn run` on every bare model -- which still
+	 * runs the inference and reports the output tensors themselves.  What
+	 * stops a STREAM with no decoder is nn_active_can_draw(), one question
+	 * lower down and only asked when a panel was requested.
+	 */
 	return 1;
 }
 
@@ -89,9 +95,12 @@ int nn_active_decode(struct nn_model *m)
 	}
 	/*
 	 * A backstop, not a path: the worker asks nn_active_is_plugin() first and
-	 * calls the resident decoder otherwise.  It answers "no decoder is bound"
-	 * rather than pretending -- and deliberately not BF_ERR_MODEL, which means
-	 * "not a detector" and routes to the shared class report.
+	 * publishes "an inference ran and nothing decoded it" otherwise.  Since
+	 * issue #116 there is no second decoder behind this, so a caller arriving
+	 * here is a caller that skipped the question -- it is told nothing is
+	 * bound rather than being quietly decoded for, and deliberately not with
+	 * BF_ERR_MODEL, which means "not a detector" and routes to the shared
+	 * class report.
 	 */
 	return BF_ERR_UNINIT;
 }
@@ -107,14 +116,14 @@ void nn_active_draw(const struct plugin_painter *paint)
 int nn_active_can_draw(void)
 {
 	if (!nn_active_is_plugin())
-		return 1;        /* the resident overlay draws its boxes */
+		return 0;        /* nothing decodes, so nothing has boxes to draw */
 	return plugin_run_slot(PLUGIN_SLOT_DRAW) != NULL;
 }
 
 int nn_active_can_report(void)
 {
 	if (!nn_active_is_plugin())
-		return 0;        /* the resident result IS the boxes already printed */
+		return 0;        /* there is no result for anyone to describe */
 	return plugin_run_slot(PLUGIN_SLOT_REPORT) != NULL;
 }
 
@@ -144,11 +153,12 @@ unsigned nn_active_get_thresh_milli(void)
 	if (nn_active_is_plugin()) {
 		if (fn != NULL && fn(NN_ACTIVE_PARAM_THRESH_MILLI, &v) == 0)
 			return (unsigned)v;
-		/* A plugin with no threshold has none -- borrowing the resident
-		 * decoder's would report a number nothing is deciding with. */
+		/* A plugin with no threshold has none -- inventing one here would
+		 * report a number nothing is deciding with. */
 		return NN_SVC_THRESH_NONE;
 	}
-	return nn_decoder_get_thresh_milli();
+	/* And with no plugin there is no decoder at all (issue #116). */
+	return NN_SVC_THRESH_NONE;
 }
 
 int nn_active_set_thresh_milli(unsigned milli)
@@ -162,8 +172,10 @@ int nn_active_set_thresh_milli(unsigned milli)
 		return fn(NN_ACTIVE_PARAM_THRESH_MILLI, (uint32_t)milli) == 0
 		               ? NN_ACTIVE_THRESH_OK : NN_ACTIVE_THRESH_REFUSED;
 	}
-	return nn_decoder_set_thresh_milli(milli) == BF_OK
-	               ? NN_ACTIVE_THRESH_OK : NN_ACTIVE_THRESH_REFUSED;
+	/* [!] NOT REFUSED -- THERE IS NOBODY TO REFUSE (issue #116).  "The value
+	 * is out of range" and "nothing here holds a threshold" are different
+	 * things to be told, and the shared command has a line for each. */
+	return NN_ACTIVE_THRESH_NO_DECODER;
 }
 
 /* ---- the base vtable ----------------------------------------------------- */

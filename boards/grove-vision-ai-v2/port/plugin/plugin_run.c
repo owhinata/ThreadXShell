@@ -98,10 +98,13 @@ static void pl_sync_caches(uint32_t base, uint32_t len)
 }
 
 /* The XIP window the image is read from must be pinned by the caller. */
-static int pl_source_ok(const void *container, uintptr_t token,
+static int pl_source_ok(const void *container, uint32_t len, uintptr_t token,
                         const char **why)
 {
-	(void)container;
+	/* The extent is not checked here: the window is memory-mapped flash whose
+	 * bounds plugin_parse() already validated the container against, and what
+	 * can go wrong is the window being taken down, not the range being wrong. */
+	(void)container; (void)len;
 	if (nor_lease_held((uint32_t)token))
 		return 0;
 	if (why != NULL)

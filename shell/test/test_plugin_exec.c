@@ -69,6 +69,7 @@ static struct {
 	int      copied_at_caches;     /* had the image landed by then?         */
 	int      copied_at_exec;
 	uint32_t caches_base, caches_len;
+	uint32_t source_len;
 	int      source_refuse, exec_refuse, entry_refuse;
 } saw;
 
@@ -89,10 +90,12 @@ static int image_landed(void)
 	return res_lo[0] != 0u;
 }
 
-static int hook_source(const void *container, uintptr_t token, const char **why)
+static int hook_source(const void *container, uint32_t len, uintptr_t token,
+                       const char **why)
 {
 	(void)container; (void)token;
 	saw.source_at = ++saw.seq;
+	saw.source_len = len;
 	saw.published_at_source = published();
 	if (saw.source_refuse) {
 		if (why != NULL)
@@ -325,6 +328,9 @@ static void test_order(void)
 	CHECK(saw.caches_base == (uint32_t)(uintptr_t)res_lo &&
 	              saw.caches_len == RES_BYTES,
 	      "[!] the WHOLE reservation is maintained, not just the image");
+	CHECK(saw.source_len == IMAGE_OFF + view.file_size,
+	      "the source hook is told how far the loader will read, not just "
+	      "where from");
 }
 
 static void test_unload_precedes_the_has_plugin_test(void)

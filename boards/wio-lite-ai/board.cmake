@@ -849,24 +849,31 @@ else()
 endif()
 # membench's cacheable row is in the carve-out whichever backend is built.
 list(APPEND NN_PSRAM_AI_REQUIRED --require psram_ai_bench_buf)
-# Model-specific post-processing, above the model-agnostic nn API.  The decoder
-# itself is SHARED with the other two boards since issue #97; port/nn/nn_decoder.c
-# is this board's half -- nn_tensor -> tensor_desc, and the ownership of the
+# The descriptor translation, and model-specific post-processing above the
+# model-agnostic nn API.
+#
+# port/nn/nn_desc.c is `nn_tensor` -> `tensor_desc` and nothing else (issue
+# #116).  It is not a decoder's: `nn out`, `nn info` and the active-decoder shim
+# need it whatever interprets the tensors, or whether anything does.
+#
+# The decoder itself is SHARED with the other two boards since issue #97;
+# port/nn/nn_decoder.c is this board's half of THAT -- the ownership of the
 # decoder's state and its candidate scratch, because the shared translation unit
 # owns no storage at all.
 #
-# Built UNCONDITIONALLY -- including in the `null` build, whose stub tensors it
-# simply does not recognise (the decoder returns BF_ERR_MODEL without touching
-# anything).  That is what lets `ai dets` be registered unconditionally, and
-# keeping the reference in every build is also what keeps the --require line below
-# honest: a symbol --gc-sections dropped would be reported as "no such object in
-# the image", which reads like a placement regression and is not one.
+# BOTH ARE BUILT UNCONDITIONALLY -- including in the `null` build, whose stub
+# tensors the decoder simply does not recognise (it returns BF_ERR_MODEL without
+# touching anything).  That is what lets `ai dets` be registered unconditionally,
+# and keeping the reference in every build is also what keeps the --require line
+# below honest: a symbol --gc-sections dropped would be reported as "no such
+# object in the image", which reads like a placement regression and is not one.
 #
 # [!] The two anchor tables are gone -- the shared decoder computes the centres --
 # so only the candidate scratch is still placed, and it is the BOARD's object, not
 # the shared file's.  That is the whole reason the scratch is passed in: it keeps
 # the residency gate pointing at something this board owns.
-list(APPEND NN_SOURCES "${WIO_SHARED_DECODER}"
+list(APPEND NN_SOURCES "${BOARD_DIR}/port/nn/nn_desc.c"
+                       "${WIO_SHARED_DECODER}"
                        "${CMAKE_SOURCE_DIR}/svc/nn_det_record.c"
                        "${BOARD_DIR}/port/nn/nn_decoder.c")
 list(APPEND NN_PSRAM_AI_REQUIRED --require nn_dec_scratch)

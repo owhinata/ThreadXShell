@@ -8,8 +8,11 @@
  *          shared BlazeFace decoder (issue #97).
  *
  * The decoder's arithmetic is covered by shell/test/test_blazeface.c, which is
- * board-independent.  What lives HERE is the half that cannot be: `nn_tensor` ->
- * `tensor_desc`, compiled against this board's REAL headers.
+ * board-independent, and the translation it pulls its tensors through has its own
+ * file since issue #116 (test_nn_desc.c -- it is not a decoder's, and is tested
+ * without one).  What lives HERE is the adapter END TO END: the decoder's state
+ * and scratch, and the outputs of an open model reaching it, compiled against
+ * this board's REAL headers.
  *
  * [!] AND AGAINST THE REAL mem_sections.h.  The candidate scratch carries
  * PSRAM_AI, and building this test with the firmware's own definition of that

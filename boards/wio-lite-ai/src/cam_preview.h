@@ -64,6 +64,27 @@ int cam_preview_enabled(void);
  * NULL. */
 void cam_preview_stats(uint32_t *shown, uint32_t *dropped, uint32_t *blit_us);
 
+#if defined(CONFIG_NN_BACKEND_TFLM)
+/**
+ * What a loaded plugin's draw() has spent on the panel: the high-water pixel
+ * charge of any one frame, and how many primitives were refused for want of
+ * budget (issue #110).  Either argument may be NULL.
+ *
+ * A pixel budget is not a bound on hold time -- these pixels are CPU stores
+ * into non-cacheable external PSRAM -- so this is one of the numbers the board
+ * README's acceptance criteria are stated against, not the whole of it.
+ */
+void cam_preview_plugin_draw_stats(uint32_t *spent, uint32_t *refused);
+
+/**
+ * Begin a fresh accounting period for the above and for the lease misses.
+ *
+ * Called when a stream is ARMED, not when one stops: `nn stream stats` right
+ * after a stop still has to describe the run that just ended.
+ */
+void cam_preview_plugin_draw_arm(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

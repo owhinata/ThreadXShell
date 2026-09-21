@@ -82,7 +82,18 @@ REQUIRED_RESIDENTS = (
 #   __NVIC_SystemReset  the reset instruction at the tail of fault_rest().  Inlined
 #                     at -O2; under LTO it becomes a call.  It is the last thing
 #                     the CPU executes before the reset takes effect.
-ALLOWED_VENEER_TARGETS = ("log_write", "__NVIC_SystemReset")
+# Targets an ITCM-resident path may reach in the flash, each with its reason.
+#
+#   log_write            the fault handler records two lines before resetting
+#   __NVIC_SystemReset   ...and then resets
+#   plugin_run_attribute the same handler asks whether the pc was inside a
+#                        loaded plugin (issue #110).  A fault is not a latency
+#                        path -- the board is about to reset -- and the callee
+#                        is deliberately noinline so this veneer points at a
+#                        name that means something rather than at whatever
+#                        clone LTO happened to leave out of line.
+ALLOWED_VENEER_TARGETS = ("log_write", "__NVIC_SystemReset",
+                          "plugin_run_attribute")
 
 # GCC clone/localisation suffixes.  They stack -- `.lto_priv.0.lto_priv.0` is real
 # (observed on __NVIC_SystemReset) -- so stripping is applied repeatedly.  The

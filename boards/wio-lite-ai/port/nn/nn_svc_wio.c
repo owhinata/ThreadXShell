@@ -39,7 +39,9 @@
 #include "nn.h"
 #include "nn_camera.h"
 #include "nn_decoder.h"
+#include "nn_active.h"
 #include "plugin_load.h"
+#include "plugin_run.h"
 #include "plugin_target.h"   /* the target word this build provides (#108) */
 #include "psram.h"
 #include "stm32h7xx_hal.h"   /* SystemCoreClock -- the DWT counter's clock */
@@ -208,7 +210,18 @@ static void nn_claims_settle(int keep, const struct nn_claims *c)
 	TX_RESTORE
 }
 
-static enum nn_claims_seen nn_claims_snapshot(struct nn_claims *out)
+/*
+ * @param running  optional; whether a plugin is LOADED AND STARTED, taken in
+ *                 the same masked section as the claims.
+ *
+ * [!] ONE SECTION FOR BOTH (issue #110).  Asking the loader afterwards would
+ * be a second question at a later moment, and a load landing between the two
+ * would print one container's manifest beside another's runtime state -- or
+ * beside no plugin at all.  plugin_run_active() reads one word, so taking it
+ * here costs nothing.
+ */
+static enum nn_claims_seen nn_claims_snapshot(struct nn_claims *out,
+                                              int *running)
 {
 	enum nn_claims_seen seen;
 	TX_INTERRUPT_SAVE_AREA
@@ -222,6 +235,8 @@ static enum nn_claims_seen nn_claims_snapshot(struct nn_claims *out)
 	} else {
 		seen = NN_CLAIMS_NONE;
 	}
+	if (running != NULL)
+		*running = plugin_run_active();
 	TX_RESTORE
 	return seen;
 }
@@ -615,6 +630,43 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 		nn_claims_settle(0, NULL);
 	else
 		nn_claims_settle(1, NULL);     /* the previous model, its claims */
+
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/*
+	 * [!] THE PLUGIN IS REPLACED ONLY AFTER THE BACKEND SUCCEEDED (issue #110),
+	 * and the order is the whole of it.  Loading first would destroy the
+	 * previous plugin's state at the fixed reservation before knowing whether
+	 * the model that needs it can be built -- and a backend that then restored
+	 * the PREVIOUS model would be left with no decoder for it.  So: the
+	 * previous plugin is untouched while nn_model_reload() runs above, and only
+	 * the outcomes that changed what is open change what decodes it.
+	 *
+	 * NN_MODEL_PREVIOUS is deliberately absent: nothing moved, so nothing here
+	 * moves either.
+	 *
+	 * All of it is still inside nn_claims_begin()/settle() and before
+	 * nn_guards_give(), so `nn info` on another console sees "a load is in
+	 * progress" rather than a model from one load beside a plugin from
+	 * another.
+	 */
+	if (*state == NN_MODEL_EMPTY) {
+		plugin_run_unload();
+	} else if (*state == NN_MODEL_NEW) {
+		if (!is_container) {
+			/* A bare model is a legal thing to load, and it means the
+			 * resident decoder is what reads it.  Whatever was loaded before
+			 * must go: a new model with an old model's decoder is the exact
+			 * accident this ordering exists to prevent. */
+			plugin_run_unload();
+		} else {
+			(void)plugin_run_load(&claims.view, stage, nn_active_base());
+		}
+		/* A container whose plugin would not load leaves the model open with
+		 * the resident decoder reading it -- which is what a container with no
+		 * plugin does anyway, and plugin_run_load() has already unpublished
+		 * whatever it refused.  It logs its own reason. */
+	}
+#endif
 	nn_guards_give();
 
 	if (rc != 0) {
@@ -650,6 +702,11 @@ void nn_svc_model_unload(struct nn_op_result *res)
 	/* No model is open now, so no container's claims describe it (issue #108).
 	   Under the session, for the same reason as in the load path. */
 	nn_claims_settle(0, NULL);
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/* And no decoder either (issue #110): a plugin left loaded would be a
+	   decoder for a model that is gone, waiting to interpret the next one. */
+	plugin_run_unload();
+#endif
 	nn_guards_give();
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
@@ -766,20 +823,19 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 * invalidates the published record on purpose, so the boxes this run is
 	 * about have to be read while the session that produced them is current. */
 	memset(&dec, 0, sizeof dec);
-	(void)nn_camera_decode_get(&dec, dets, max);
+	/* [!] AND THE CAPTURE HAPPENS IN HERE (issue #110), under the result lease,
+	   because a plugin's account of its result has to be taken while that
+	   result is still the one the snapshot describes.  By the time this
+	   function returns the session is gone. */
+	(void)nn_camera_decode_get(&dec, dets, max, rep);
 	snap->valid = dec.valid;
 	snap->ndet  = dec.ndet;
+	/* [!] CARRIED FROM THE RECORD, NOT ASSERTED (issues #104, #110).  It used
+	   to say NN_DET_CALLER_BOXES here, which was true while that was the only
+	   thing a record could hold; now a loaded plugin keeps its own result and
+	   the routing has to come from whoever decoded. */
+	snap->kind  = dec.kind;
 	snap->res   = dec.res;
-	/* [!] STATED, NOT LEFT TO THE CALLER'S memset (issue #104).  This board has
-	   one decoder and it fills the caller's array, so the value is never in
-	   doubt -- but the projection through struct nn_camera_decode drops
-	   everything it is not told to carry, and a snapshot reused across two reads
-	   would otherwise keep whatever routing the previous one had. */
-	snap->kind  = (uint8_t)NN_DET_CALLER_BOXES;
-	/* No external decoder runs on this board yet, so nothing was captured --
-	 * stated rather than left to the caller's initialiser, for the same reason
-	 * the kind is (issue #110). */
-	nn_report_set(rep, NN_REPORT_NONE);
 
 	nn_camera_stats_get(&st);
 	stop_rc = nn_camera_stop();
@@ -807,17 +863,11 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
 
 	nn_detail_clear();
 	memset(&dec, 0, sizeof dec);
-	(void)nn_camera_decode_get(&dec, dets, max);
+	(void)nn_camera_decode_get(&dec, dets, max, rep);
 	snap->valid = dec.valid;
 	snap->ndet  = dec.ndet;
+	snap->kind  = dec.kind;     /* carried, not asserted -- see nn_svc_run_once */
 	snap->res   = dec.res;
-	/* [!] STATED, NOT LEFT TO THE CALLER'S memset (issue #104).  This board has
-	   one decoder and it fills the caller's array, so the value is never in
-	   doubt -- but the projection through struct nn_camera_decode drops
-	   everything it is not told to carry, and a snapshot reused across two reads
-	   would otherwise keep whatever routing the previous one had. */
-	snap->kind  = (uint8_t)NN_DET_CALLER_BOXES;
-	nn_report_set(rep, NN_REPORT_NONE);
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
 
@@ -945,6 +995,9 @@ static const char *nn_nncam_strerror(int rc)
 	case NNCAM_ERR_QUANT:   return "the int8 input carries no per-tensor quantization "
 	                               "scale (`nn info` shows q(s=0.000000)) -- a "
 	                               "per-axis quantized input is not supported";
+	case NNCAM_ERR_SHAPES:  return "the container's decoder cannot read this "
+	                               "model's outputs -- its two halves do not "
+	                               "belong together (`nn info`)";
 	case NNCAM_ERR_INIT:    return "the worker thread or its objects could not be "
 	                               "created";
 	case NNCAM_ERR_TEARING: return "still tearing down (a callback or an inference "
@@ -1088,6 +1141,24 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		return;
 	}
 
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/*
+	 * [!] REFUSE A DECODER THAT CANNOT DRAW, before anything is admitted
+	 * (issue #110).  DRAW is an optional slot, so a container may carry a
+	 * decoder that only reports -- and such a plugin still serves `nn run`,
+	 * which is why this refusal belongs to the STREAM and not to the load.
+	 * Without it a live preview runs, annotates nothing, and is
+	 * indistinguishable from a broken one.
+	 */
+	if (!nn_active_can_draw()) {
+		nn_detail_to(res->detail, sizeof res->detail,
+		             "the container's decoder draws nothing, so a live "
+		             "preview would never annotate; `nn run` still works");
+		nn_result(res, NN_SVC_ERR_NOSUP, NN_CLAIM_NONE);
+		return;
+	}
+#endif
+
 	/* Sampled BEFORE the call, because a successful re-arm clears the latch. */
 	rearm = nn_camera_running() && cam_band_stream_lost();
 
@@ -1198,7 +1269,7 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	/* Outside the critical section: these take their own locks. */
 	nn_camera_stats_get(&st);
 	dec.valid = 0;
-	(void)nn_camera_decode_get(&dec, NULL, 0);
+	(void)nn_camera_decode_get(&dec, NULL, 0, NULL);
 
 	TX_DISABLE
 	nn_stream_life_snapshot(&nn_life, NULL, NULL, &seq1);
@@ -1461,15 +1532,40 @@ int nn_svc_box_to_frame(const struct bf_det *in, struct bf_det *out)
 	return NN_SVC_OK;
 }
 
+/*
+ * [!] THROUGH THE SHIM, NOT STRAIGHT TO THE RESIDENT DECODER (issue #110).  A
+ * loaded plugin carries its OWN threshold; reaching past nn_active would change
+ * a firmware number the decoder in force never reads, and `nn thresh 700` would
+ * report success while deciding nothing.  This is the divergence an operator
+ * meets in the first minute, and the one a differential test that gives both
+ * decoders the same threshold cannot see.
+ */
 unsigned nn_svc_thresh_get(void)
 {
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	return nn_active_get_thresh_milli();
+#else
 	return nn_decoder_get_thresh_milli();
+#endif
 }
 
 int nn_svc_thresh_set(unsigned milli)
 {
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	switch (nn_active_set_thresh_milli(milli)) {
+	case NN_ACTIVE_THRESH_OK:
+		return NN_SVC_OK;
+	case NN_ACTIVE_THRESH_NO_DECODER:
+		/* The slot the shared command already has for it: the loaded decoder
+		 * holds no threshold, which is not the same as refusing the value. */
+		return NN_SVC_ERR_STATE;
+	default:
+		return NN_SVC_ERR_ARG;
+	}
+#else
 	return (nn_decoder_set_thresh_milli(milli) == BF_OK) ? NN_SVC_OK
 	                                                     : NN_SVC_ERR_ARG;
+#endif
 }
 
 /* One `nn info` line through a bounded formatter.  128 and not 80: Grove's
@@ -1516,6 +1612,7 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	struct nn_claims c;
 	const struct plugin_view *v = &c.view;
 	enum nn_claims_seen seen;
+	int running = 0;
 	const uint32_t base = (uint32_t)(uintptr_t)__plugin_start;
 	const uint32_t size = (uint32_t)(__plugin_end - __plugin_start);
 
@@ -1524,7 +1621,7 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 
 	/* One snapshot, and every word below is read from it: re-reading the flag
 	 * afterwards could describe a load another console finished in between. */
-	seen = nn_claims_snapshot(&c);
+	seen = nn_claims_snapshot(&c, &running);
 	if (seen == NN_CLAIMS_LOADING) {
 		(void)nn_info_line(write, ctx,
 		                   "plugin  : (a model load is in progress -- ask "
@@ -1542,10 +1639,19 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 		                   (unsigned long)size, (unsigned long)base);
 		return;
 	}
+	/*
+	 * [!] THE RUNTIME STATUS COMES FROM THE SAME SNAPSHOT AS THE CLAIMS
+	 * (issue #110).  Reading it here would be a second question asked later,
+	 * and a load landing between the two would print one container's manifest
+	 * beside another's -- or beside no plugin at all.  `running` is what this
+	 * board's loader actually has branched into; `validated` is a container
+	 * whose plugin was refused or never reached, with the resident decoder
+	 * reading its model.
+	 */
 	if (nn_info_line(write, ctx,
-	                 "plugin  : %s (build %s, crc %08lx), validated, NOT "
-	                 "executed (#78 Step 3a)\r\n",
-	                 v->name, v->build_id, (unsigned long)v->digest) < 0)
+	                 "plugin  : %s (build %s, crc %08lx), %s\r\n",
+	                 v->name, v->build_id, (unsigned long)v->digest,
+	                 running ? "running" : "validated, not loaded") < 0)
 		return;
 	/* Which model these claims came with -- see struct nn_claims. */
 	if (nn_info_line(write, ctx, "  from  : slot %lu, blob '%s'\r\n",
@@ -1560,8 +1666,8 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	                 (unsigned long)v->link_addr) < 0)
 		return;
 	/* The bounds the host gate derived and the manifest declares, per slot --
-	 * what 3b's admission policy will compare with the call-site depths
-	 * `nn stream stats` measures.  An absent slot declares 0. */
+	 * compared with the call-site depths `nn stream stats` measures.  An
+	 * absent slot declares 0. */
 	(void)nn_info_line(write, ctx,
 	                   "  stack : entry %lu  shapes %lu  decode %lu  draw %lu  "
 	                   "report %lu  param %lu/%lu B (declared)\r\n",

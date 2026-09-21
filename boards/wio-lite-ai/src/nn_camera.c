@@ -12,7 +12,13 @@
 #include "cam_band.h"
 #include "camera.h"
 #include "nn.h"
+#if BSP_ENABLE_LCD
+#include "cam_preview.h"
+#endif
+#include "nn_active.h"
+#include "nn_report.h"
 #include "nn_decoder.h"
+#include "plugin_lease.h"
 #include "nn_det_record.h"
 #include "psram.h"
 
@@ -35,6 +41,14 @@
  * (10) so inference never delays the display or the band deadline.
  */
 #define NNCAM_PRIO   18u
+
+/*
+ * How long this thread will wait for the result lease before giving up on a
+ * frame (issue #110).  Generous against the things that legitimately hold it --
+ * a console capturing a report, a panel drawing -- and finite so that a wedged
+ * holder costs frames rather than the worker.
+ */
+#define NNCAM_LEASE_WAIT_TICKS  50u
 /*
  * 3,072 B in DTCM.  The same inference measured a 1,940 B peak on the CLI thread in
  * phase 2c, and blazeface_decode() adds ~250 B (a 64-byte NMS bitmap plus the
@@ -345,6 +359,31 @@ static int nncam_publish(const struct bf_det *d, int n,
 	return took;
 }
 
+#if defined(CONFIG_NN_BACKEND_TFLM)
+/*
+ * The same, for a decode whose RESULT STAYED WITH THE PLUGIN (issue #110).
+ *
+ * What travels is the count and the generation rule; the boxes and the
+ * resident decoder's diagnostics do not, because they describe a decoder that
+ * did not run.
+ *
+ * [!] CALLED WITH THE RESULT LEASE STILL HELD.  Releasing it between the decode
+ * and this would let the panel see the new private state paired with the old
+ * record -- a count from the previous frame beside boxes from this one, which
+ * is the pairing the lock in here exists to prevent for the resident path.
+ */
+static int nncam_publish_plugin(int n, uint32_t gen)
+{
+	int took;
+
+	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) != TX_SUCCESS)
+		return 0;
+	took = nn_det_record_publish_external(&nncam_rec, n, gen);
+	(void)tx_mutex_put(&nncam_det_lock);
+	return took;
+}
+#endif
+
 /* Start or end a session: invalidate the record and move the generation, both
  * under the lock, so an in-flight decode from the previous one lands nowhere. */
 static void nncam_record_reset(void)
@@ -470,10 +509,43 @@ static void nncam_step(void)
 	}
 	nncam_infer_cyc = nn_last_cycles(nncam_model);
 
-	/* Where a plugin's decode() will be called (issue #108): immediately before
-	 * the resident decoder, recorded BEFORE the call so the number is the depth
-	 * a callee inherits rather than the depth including it. */
+	/* Where a plugin's decode() is called (issue #108 placed the probe, #110
+	 * put the call beside it): immediately before the resident decoder,
+	 * recorded BEFORE the call so the number is the depth a callee inherits
+	 * rather than the depth including it. */
 	nn_camera_note_depth(NNCAM_SITE_DECODE);
+
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	if (nn_active_is_plugin()) {
+		int took;
+
+		/*
+		 * [!] THE LEASE SPANS THE DECODE AND THE PUBLISH, and it is taken
+		 * BEFORE the slot is looked up.  The panel runs at a higher priority
+		 * than this thread and nothing else separates them, so every part of
+		 * "ask the plugin, then say what it answered" has to be one
+		 * transaction: a panel that preempted between them would draw from
+		 * state this call is halfway through writing, or pair a new count with
+		 * an old picture.
+		 *
+		 * A wait, not a try: this thread is the one that has work to do, and
+		 * the only other holders are a console command and a draw that does
+		 * not wait.  The bound keeps a wedged holder from taking the worker
+		 * with it.
+		 */
+		if (!plugin_lease_take(NNCAM_LEASE_WAIT_TICKS)) {
+			nncam_errors++;
+			return;
+		}
+		n = nn_active_decode(nncam_model);
+		took = nncam_publish_plugin(n, gen);
+		plugin_lease_give();
+		if (took)
+			nncam_infers++;
+		return;
+	}
+#endif
+
 	n = nn_decoder_run(nncam_model, tmp, BF_MAX_DET, &bfr);
 	/* Bumped LAST, after the boxes are published, and ONLY IF THEY WERE: `nn run`
 	   waits for this counter to move and then reads the detections, so
@@ -669,6 +741,28 @@ int nn_camera_start(int colorbar)
 	}
 	nncam_holds_guards = 1;
 
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/*
+	 * [!] ASK THE DECODER BEFORE LIGHTING A CAMERA (issue #110).  This is the
+	 * one admission point both `nn run` and `nn stream start` pass through, and
+	 * everything above it has checked the INPUT tensor -- whether the bands
+	 * tile onto it, whether its quantisation is usable.  Nothing has asked
+	 * whether anything can read the OUTPUTS.
+	 *
+	 * For the resident decoder that question stays unasked, as it always has:
+	 * it discovers a mismatch per frame and answers BF_ERR_MODEL, and refusing
+	 * here would change what this board does with every non-BlazeFace model it
+	 * has accepted since #45.  A plugin is different -- it was shipped WITH the
+	 * model it reads, so a plugin that cannot read this one is a container
+	 * whose two halves do not belong together, and finding that out per frame
+	 * is a stream that runs and silently never annotates.
+	 */
+	if (!nn_active_shapes_ok(m)) {
+		nncam_guards_give();
+		return NNCAM_ERR_SHAPES;
+	}
+#endif
+
 	rc = nncam_create_objects();
 	if (rc != NNCAM_OK) {
 		nncam_guards_give();
@@ -689,6 +783,11 @@ int nn_camera_start(int colorbar)
 	 * would otherwise report the first one's high-water for both. */
 	nncam_depth_decode = 0u;
 	nncam_depth_draw   = 0u;
+#if defined(CONFIG_NN_BACKEND_TFLM) && BSP_ENABLE_LCD
+	/* Armed here and not reset on stop, so `nn stream stats` right after a
+	 * stop still describes the run that just ended (issue #110). */
+	cam_preview_plugin_draw_arm();
+#endif
 	nncam_start_tick  = HAL_GetTick();
 	nncam_want_frame  = 0;
 	nncam_filling     = 0;
@@ -807,20 +906,52 @@ int nn_camera_dets_get(struct bf_det *out, int max)
 
 	if (out == NULL || max <= 0)
 		return 0;
-	if (nn_camera_decode_get(&snap, out, max) == 0)
+	/* No capture: this is the panel, and the panel never waits (issue #110). */
+	if (nn_camera_decode_get(&snap, out, max, NULL) == 0)
 		return 0;
+	if (snap.kind != (uint8_t)NN_DET_CALLER_BOXES)
+		return 0;       /* the boxes are somebody else's; none were written */
 	return snap.ndet > max ? max : snap.ndet;
 }
 
 int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
-                         int max)
+                         int max, struct nn_report_capture *rep)
 {
 	struct nn_det_snapshot snap;
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	int leased = 0;
+#endif
 
 	if (out == NULL || !nncam_created)
 		return 0;
-	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) != TX_SUCCESS)
+
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/*
+	 * [!] THE LEASE FIRST, AND ONLY FOR A CAPTURE.  A plugin's account of its
+	 * result has to be taken in the same breath as the snapshot that describes
+	 * it -- the next decode overwrites the private state -- so both happen
+	 * inside one hold.  The order is lease then record lock, the same way the
+	 * worker takes them, and the panel asks for no capture precisely so it
+	 * never waits here.
+	 */
+	if (rep != NULL && nn_active_is_plugin()) {
+		leased = plugin_lease_take(NNCAM_LEASE_WAIT_TICKS);
+		if (!leased) {
+			/* The result exists; nobody let go of it in time.  Saying so is
+			 * better than printing a count with no account beside it and no
+			 * sign that one was meant to be there. */
+			nn_report_set(rep, NN_REPORT_STALE);
+		}
+	}
+#endif
+
+	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) != TX_SUCCESS) {
+#if defined(CONFIG_NN_BACKEND_TFLM)
+		if (leased)
+			plugin_lease_give();
+#endif
 		return 0;
+	}
 	/*
 	 * [!] ONE LOCK FOR BOTH.  The boxes and the diagnostics that describe them
 	 * are published together and have to be read together: taking them in two
@@ -833,6 +964,26 @@ int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
 	out->valid = snap.valid;
 	out->ndet  = snap.ndet;
 	out->res   = snap.res;
+	out->kind  = snap.kind;
+
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	if (leased) {
+		/* Still under the lease: the snapshot above and this account of it
+		 * describe the same decode because nothing has run in between. */
+		if (snap.valid && snap.kind == (uint8_t)NN_DET_PLUGIN_REPORT) {
+			nn_report_begin(rep);
+			if (!nn_active_can_report())
+				nn_report_set(rep, NN_REPORT_UNSUPPORTED);
+			else
+				nn_report_end(rep, nn_active_report(nn_report_write, rep));
+		} else {
+			/* A plugin is loaded but this record is not its work -- nothing
+			 * has been decoded yet in this session, say. */
+			nn_report_set(rep, NN_REPORT_NONE);
+		}
+		plugin_lease_give();
+	}
+#endif
 	return 1;
 }
 

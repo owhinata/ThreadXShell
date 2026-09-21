@@ -28,6 +28,10 @@
 #define LOG_TAG "fault"
 #include "log.h"
 
+#if defined(CONFIG_NN_BACKEND_TFLM)
+#include "plugin_run.h"
+#endif
+
 #include <stdint.h>
 
 #include "stm32h7xx_hal.h"
@@ -137,11 +141,39 @@ __attribute__((used)) void fault_handler_c(uint32_t *frame, uint32_t exc_return)
 	LOG_ERR("%s cfsr=%08lx hfsr=%08lx mmfar=%08lx bfar=%08lx",
 	        name, (unsigned long)cfsr, (unsigned long)hfsr,
 	        (unsigned long)mmfar, (unsigned long)bfar);
-	if (frame_ok)
+	if (frame_ok) {
 		LOG_ERR("pc=%08lx lr=%08lx psr=%08lx sp=%08lx exc=%08lx",
 		        (unsigned long)pc, (unsigned long)lr, (unsigned long)xpsr,
 		        (unsigned long)sp, (unsigned long)exc_return);
-	else
+#if defined(CONFIG_NN_BACKEND_TFLM)
+		/*
+		 * Was it a loaded plugin (issue #110)?
+		 *
+		 * [!] IT SAYS WHERE THE PC IS, NOT WHAT DID IT.  An imprecise fault
+		 * can honestly claim no more, and a plugin's symbols are not in this
+		 * image -- the offset is what feeds `arm-none-eabi-addr2line` against
+		 * the plugin ELF that was packed.
+		 *
+		 * plugin_run_attribute() reads one atomically published pointer and
+		 * then only immutable, loader-owned metadata.  It never follows a
+		 * pointer INTO the plugin, which is what makes it callable from here;
+		 * naming a plugin out of a half-written slot would be worse than
+		 * naming none.
+		 *
+		 * [!] AND THIS DOES NOT UNWIND ANYTHING.  fault_rest() resets, and the
+		 * reset IS the teardown -- there is no camera to stop, no lease to
+		 * return and no session to release, because none of them survive it.
+		 */
+		{
+			uint32_t off = 0u;
+			const char *who = plugin_run_attribute(pc, &off);
+
+			if (who != NULL)
+				LOG_ERR("pc is in plugin '%s' +0x%lx", who,
+				        (unsigned long)off);
+		}
+#endif
+	} else
 		LOG_ERR("frame lost (stacking fault?) frame=%08lx exc=%08lx",
 		        (unsigned long)(uintptr_t)frame, (unsigned long)exc_return);
 

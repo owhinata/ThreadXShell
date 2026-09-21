@@ -176,26 +176,29 @@ functions, so LTO has nothing to rename.  They are still the linker checking its
 own script, which is why `cmake/check_plugin_reservation.py` checks the image as
 well.
 
-Since issue #97 there is one more, and it protects something less obvious.  The
-BlazeFace decoder is shared by all three boards (`svc/blazeface.c`), and sharing
-it is only possible because it owns NO storage: this board passes in its own
-candidate scratch, which is how that buffer stays in `.psram_ai` and how
-`check_psram_ai_residency.py` keeps naming a symbol this board owns
-(`nn_dec_scratch`, in `port/nn/nn_decoder.c`).  A static added to the shared file
-would become state nobody placed and no gate mentions.
-`cmake/check_no_mutable_storage.py` refuses that, by compiling the shared file
-with this board's real definitions and requiring the object to have no allocated,
-writable section.  It measures sections rather than symbols because thread-local
-storage is not an `STT_OBJECT` and inline asm can place anonymous writable bytes;
-`cmake/fixtures/run_storage_gate_tests.py` demonstrates both, and demonstrates
-why the check runs against the cross compiler rather than on the host.
+Since issue #97 there is one more, and it protects something less obvious.  A
+file shared by three boards may own NO storage -- each board places what the
+shared code works on, so that its own residency gate keeps naming a symbol it
+owns, and a static added to the shared file would be state nobody placed and no
+gate mentions.  `cmake/check_no_mutable_storage.py` refuses that by compiling
+the shared file with this board's real definitions and requiring the object to
+have no allocated, writable section.  It measures sections rather than symbols
+because thread-local storage is not an `STT_OBJECT` and inline asm can place
+anonymous writable bytes; `cmake/fixtures/run_storage_gate_tests.py`
+demonstrates both, and demonstrates why the check runs against the cross
+compiler rather than on the host.
 
-[!] Only the SCRATCH is placed.  The decoder's state -- the threshold -- stays in
-ordinary internal RAM, and that is deliberate twice over: `.psram_ai` is NOLOAD,
-so an initialised field there would never be loaded (and NOLOAD keeps the
-previous run's bytes, so it would fail by appearing to work), and the PSRAM
-bring-up is fail-soft, so `nn thresh` has to keep answering on a board whose
-external memory did not come up.
+**[!] Which compile it audits moved with issue #116.**  The rule's first
+subject was `svc/blazeface.c`, which this firmware used to link as its resident
+decoder, with the candidate scratch it passes in pinned in `.psram_ai` as
+`nn_dec_scratch`.  The firmware links neither now: the decoder arrives inside a
+container, and `add_plugin()`'s `AUDIT_SHARED` runs the same gate on the
+PLUGIN's object -- the only compile of that file this board produces.  Auditing
+a compile that is not in the image would be a gate answering about something
+nobody ships.  What the firmware still audits for itself is `cmd_nn.c`,
+`nn_cmd_core.c` and `svc/nn_stream_life.c`.  (Three shared translation units
+this board compiles are not audited at all, which Grove does audit; that is
+issue #117, not something #116 changed.)
 
 ## Console
 
@@ -289,7 +292,7 @@ tflm -- is now part of the default build.  But no image from this configuration
 has been flashed, so the first `--target flash` after this change ships something
 new.
 
-## Plugin containers (issues #108, #110 = #78 Steps 3a and 3b)
+## Plugin containers (issues #108, #110, #116 = #78 Steps 3a, 3b and 3c)
 
 A **container** carries a model together with the code that interprets its
 output (a *plugin*), so a new model family needs no firmware change.  The format,
@@ -298,10 +301,45 @@ has the full design); this section is what is different here.
 
 Step 3a delivered, validated and measured without ever executing one.  **Since
 issue #110 a container's plugin RUNS**: it decodes, draws on the panel,
-describes its result on the console and holds the threshold.  The resident
-BlazeFace decoder is still here and still does all of that when no plugin is
-loaded -- both arms exist on this board, unlike Grove, where issue #104 removed
-the resident one.
+describes its result on the console and holds the threshold.
+
+**[!] And since issue #116 it is the ONLY thing that does.**  This firmware
+carried a BlazeFace decoder of its own until then, which read any model with no
+plugin beside it, drew boxes through an overlay in `src/cam_preview.c` and held
+a threshold.  All of that is gone -- as it went on Grove in issue #104, and for
+the same reason: issue #78 exists so that the model-specific half ships with
+the model.  **A decoder reaches this board only inside a container.**  What an
+operator sees on a model with no plugin:
+
+| | with no plugin loaded (a bare `.tflite`, or a container whose plugin was refused) |
+|---|---|
+| `nn run` | runs the inference and reports the **output tensors themselves** |
+| `nn stream start` | **refused before the camera is lit** -- nothing would annotate the preview |
+| `nn thresh` | `none -- the active decoder has no threshold`; setting one is refused as a state, not as a bad value |
+| `nn dets` | *nothing decoded yet* -- always, on this board (below) |
+| the panel | presents the picture exactly as the bands built it |
+
+The tensors are reported as tensors and **not** through the shared class
+report: that one reads output 0 as a vector of class scores, which for a
+detector's regression tensor is a tidy table of numbers that mean nothing.
+
+`nn dets` is the answer that surprises.  On THIS board it only reads the last
+published decode: `nn run` takes its snapshot and then stops the stream, and a
+stop clears the record, so with no plugin there is never a record left for it
+to read.  (Grove decodes synchronously inside `nn dets`, f746g-disco reads the
+record as this board does, and unifying the three is issue #118.)
+
+The `null` backend answers the same way and refuses `nn stream start` in its
+own right: it has no plugin mechanism compiled in at all, so nothing there
+could ever decode.  f746g-disco still carries a resident decoder -- that is
+#78's Step 4, not this one.
+
+**[!] The shape question is deliberately NOT the one that refuses.**
+`nn_camera_start()` is one admission point that `nn run` and `nn stream start`
+share.  "Can the decoder read these outputs" passes with no plugin, because
+nothing is going to read them and refusing would take the bare-model `nn run`
+away; the single question that stops a stream is "will anything draw"
+(`nn_active_can_draw()`), and it is only asked when a panel was requested.
 
 `nn model load --slot <n>` reads the blob into the PSRAM staging buffer and
 CRC-checks that copy exactly as before, then:
@@ -327,10 +365,21 @@ that changed what is open change what decodes it:
 
 | reload outcome | what happens to the decoder |
 |---|---|
-| a bare model loaded | whatever was loaded is unloaded -- a new model with an old model's decoder is the accident this ordering prevents |
-| a container loaded | its plugin is loaded; if it refuses, the resident decoder reads the model and the loader logs why |
-| the previous model was restored | nothing moved, so nothing moves here |
+| a bare model loaded | whatever was loaded is unloaded -- a new model with an old model's decoder is the accident this ordering prevents.  Since #116 that leaves the model with NO decoder, which is the bare-model behaviour above |
+| a container loaded | its plugin is loaded; **if it refuses, the model stays open with nothing reading it** and the loader logs why.  Until #116 it fell back on the resident decoder |
+| the previous model was restored | nothing moved, so nothing moves here -- the previous plugin keeps reading the previous model |
 | nothing is open | the plugin is unloaded too |
+
+**[!] Two of those rows are not exercised by any test.**  "A new model adopted
+and its plugin refused" and "the reload failed and the previous model was
+restored" differ only in which one keeps its decoder, and telling them apart
+needs a container the DEVICE refuses -- which the build cannot produce, because
+the host packer runs the device's own validator (`svc/plugin_load.c`) over what
+it packs and publishes nothing that would be refused.  The host tests reach the
+no-decoder STATE (that is what `test_nn_active.c` pins) but not this branch
+that arrives at it.  Recorded here rather than left as an assumption: what the
+table says about those two rows is a claim about code that has been read, not
+about code that has been run.
 
 All of it happens inside the claims window and before the session is given
 back, so `nn info` on another console says *a model load is in progress* rather
@@ -338,8 +387,8 @@ than pairing one load's model with another's plugin.
 
 `nn info` then shows what the container **claims** (`plugin : <name> (build
 <id>, crc <digest>), running` -- or `validated, not loaded` when the plugin was
-refused and the resident decoder is reading the model -- `from : slot <n>,
-blob '<name>'`,
+refused or never reached, which since #116 means nothing is reading the model
+-- `from : slot <n>, blob '<name>'`,
 the image sizes and each slot's declared stack).  The claims follow the model
 that is actually open: they are settled only after the backend adopted (or
 refused) the model; a refused load that left the previous model active keeps the
@@ -388,20 +437,22 @@ inside the plugin, so there is nothing to copy.
   the same as not taking it, because after the deadline the replacement
   happened anyway.
 
-One decoder annotates a frame, never two: with a plugin loaded the resident
-overlay does not run.  And a held lease is not by itself a reason to draw --
-the panel also requires `nn overlay` to be on and the record to hold a VALID
-decode of the plugin's kind.  Without that, `nn overlay off` was ignored on
-this path, a preview outliving its inference kept drawing retained detections,
-and a decode whose publication the generation check REJECTED -- which leaves
-fresh private state no accepted record describes -- reached the panel by a
-route the publication gate does not guard.
+A held lease is not by itself a reason to draw -- the panel also requires
+`nn overlay` to be on and the record to hold a VALID decode of the plugin's
+kind.  That last condition does work since #116: a record can now say "an
+inference ran and nothing decoded it", which is valid and is not the plugin's,
+and the panel must leave such a frame alone.  Without the condition,
+`nn overlay off` was ignored on this path, a preview outliving its inference
+kept drawing retained detections, and a decode whose publication the generation
+check REJECTED -- which leaves fresh private state no accepted record describes
+-- reached the panel by a route the publication gate does not guard.
 
 `nn stream start` needs a decoder that draws, and **asks under the session and
 the lease**, inside `nn_camera_start()`.  A pre-check in the service entry
 answered before the session was held, so a load landing in between changed the
 decoder after the question -- and a timed-out lease there was read as "yes".
-`nn run` passes no such requirement: a report-only plugin serves it.
+`nn run` passes no such requirement: a report-only plugin serves it, and so
+does no plugin at all, which reports the output tensors.
 
 ### [!] Reporting: captured where the result still exists
 
@@ -481,7 +532,8 @@ container too large for it; nothing refuses the *wrong* slot, and `blob write`
 erases the whole slot before the transfer.  Read `blob list` first.
 
 The ingest is this board's: float32 I/O as the model zoo ships it (the shared
-decoder reads float32), no boundary strip and no vela -- there is no NPU here.
+decoder the plugin carries reads float32), no boundary strip and no vela --
+there is no NPU here.
 No cifar10 asset exists yet (no CIFAR-10 model is established on this board);
 the cifar10 plugin is built for M7 anyway, to prove the build and measure it.
 
@@ -511,23 +563,24 @@ when a model changes.
 | cifar10 plugin (M7) | text 2,704 B, bss 8,852 B, load image 11,584 B; requirement: decode 688, draw 548, report 592 B |
 | blazeface container | 194,120 B (model 189,816 B at +4,304) |
 | `.plugin` reservation | 32 KB -- 2.8x the larger load image (cifar10's 11,584 B) |
-| app flash, default build (SD off) | 363,620 B of 384 KB (92.5%), 29,596 B free -- #110's wiring cost 4,628 B over #108 |
-| AXI-SRAM heap room | 103,200 B (`end` to `__heap_end`, SD off) |
+| app flash, default build (SD off) | **362,380 B of 384 KB (92.2%), 30,836 B free** -- #116 gave back 1,840 B of the 4,628 B #110's wiring cost over #108 |
+| AXI-SRAM heap room | **102,944 B** (`end` to `__heap_end`, SD off) -- #116 added 192 B |
+| `.psram_ai` carve-out in use | **1,638,400 B** -- #116 gave back the 1,536 B candidate scratch (`BF_MAX_CAND` x `sizeof(struct bf_cand)`), which the resident decoder owned |
 | DTCM ceiling for growing `nn_work` | **4,544 B** (`_smsp_stack - _dtcm_used_end`; the 8 KB main-stack reservation is not free) |
 | stack already spent at the plugin call sites | **641 B of 3,072 on `nn_work`** (decode), **137 B of 1,536 on `cam_prev`** (draw), **1,593 B of 4,096 on the shell** (report / load / admission) -- measured at #110 with a plugin actually running |
 
-The call-site depths are measured where a plugin will stand: on `nn_work`
-immediately before the resident decoder is called, and on the preview thread
-inside the frame lock just before the overlay is drawn (not in the per-box
-helper, which is deeper than a plugin is ever called from).  There is a third
-site since #110, on the shell thread, where four of the seven slots are
-actually called.  The probe is out of line, so each figure includes its own few
-bytes -- an over-report, the safe direction -- and it sits AT the call rather
-than in the caller, so the number does not depend on whether the caller was
-inlined this month.
+The call-site depths are measured where a plugin stands: on `nn_work` in the
+worker step immediately before the decode, on the preview thread inside the
+frame lock at the call that lets the plugin paint, and -- since #110 -- on the
+shell thread, where four of the seven slots are actually called.  The probe is
+out of line, so each figure includes its own few bytes -- an over-report, the
+safe direction -- and it sits AT the call rather than in the caller, so the
+number does not depend on whether the caller was inlined this month.
 
 (The #108 figures were 609 and 105, taken when nothing was called at those
-sites.)
+sites.  **The three above are #110's**, taken while the firmware still had a
+resident decoder to stand beside; #116 removed it, so they are due to be taken
+again.)
 
 ### The stack budget, and what is still owed to it (issue #110)
 
@@ -543,16 +596,24 @@ now derived from the base this board actually has, measured with
 can reach:
 
 ```
-nn_plugin_log       80   (16 + the 64 B buffer it copies into)
-log_write          200   (LTO folds log_vwrite into it)
+nn_plugin_log       88   (the frame plus the 64 B buffer it copies into)
+log_write           16
+log_vwrite         192
 fmt_vsnformat       32
 fmt_vformat         80
 fmt_utoa            64
 __aeabi_uldivmod    16   (fmt_utoa divides 64-bit)
 __udivmoddi4        40
                    ---
-                   512 B
+                   528 B
 ```
+
+(Re-measured for issue #116, with `-fstack-usage` and LTO off over the board's
+real flags.  #110 recorded 512 with the same chain: it counted `log_write` and
+`log_vwrite` as one 200 B frame, which is what LTO folds them into, and
+`nn_plugin_log` as 80.  **Nothing in the chain changed** -- `nn_plugin_log`
+measures 88 B both before and after #116 -- so the declared 640 stands and no
+container needs re-packing.)
 
 **[!] The first version of this sum stopped at `fmt_utoa`, at 400 B**, and was
 short by the two division helpers underneath it.  The general point the review
@@ -597,8 +658,13 @@ today's plugin happens to need is how a limit stops being one, so the thread is
 | `cam_prev` (draw) | 1,536 | 137 | 208 | 1,191 | 1,024 | 716 |
 | shell (entry / shapes / report / params) | 4,096 | 1,593 | 208 | 2,295 | 1,024 | 728 |
 
-All three are measured with a plugin running, and every allowance sits under
-its derived room with the shipped plugin well under the allowance.
+**The `at call` column is issue #110's measurement**, taken with a plugin
+running on a firmware that still carried a resident decoder.  Every allowance
+sits under its derived room, and the shipped plugin well under the allowance.
+Issue #116 removed the decoder and the overlay, which changes what stands below
+those call sites, so the column is due to be taken again -- the allowances
+themselves do not move, because a container declares itself against them and
+this firmware cannot tell a stale declaration from a current one (below).
 
 **[!] STILL OWED:** more than operationally, **the firmware cannot tell a stale
 declaration from a current one.**  `svc/plugin_load.c` checks the declaration against the
@@ -609,13 +675,20 @@ declaration from a current one.**  `svc/plugin_load.c` checks the declaration ag
   ABI change -- its own issue.  Neither shipped plugin is near its allowance,
   so this is a guarantee weaker than it reads rather than a fault in flight.
 
-### What the panel costs, measured
+### What the panel costs, measured (issue #110's run)
 
 A counter that goes up with no threshold beside it does not establish that
 anything works.  The run below is CHARACTERISATION -- it discovered the
 numbers; it did not test them against requirements agreed beforehand, which is
 what an acceptance run is.  The thresholds for future runs are derived from it,
 and a failed run does not become a pass by relaxing one afterwards.
+
+**These are issue #110's figures**, taken on the firmware that still carried a
+resident decoder.  The decoder never ran during them -- a plugin was loaded, so
+the plugin decoded and drew -- which is why they remain the numbers to hold a
+post-#116 run against.  The two thresholds that used to be phrased as
+"the resident decoder's" now say "the figures recorded here", because there is
+no other arm left to compare with.
 
 `nn stream start` with the preview on and a face moving in and out of frame,
 35 s, 479 frames in and 67 inferences:
@@ -626,10 +699,10 @@ and a failed run does not become a pass by relaxing one afterwards.
 | primitives refused for want of budget | **0** | 0 -- a refusal is a box that silently vanished |
 | frames the panel could not get the lease for | **0** | under 5% of presented frames |
 | worst consecutive run of those | **0** | 2 -- a run is what reads as blinking |
-| inference rate | 1.90 inf/s, 411 ms | within 5% of the resident decoder's |
+| inference rate | 1.90 inf/s, 411 ms | within 5% of the rate recorded here |
 | worker errors / raced tensors | **0 / 0** | 0 |
 | ingest, worst band | 1,009 us | under the ~18,500 us band deadline |
-| DCMI errors, LTDC underruns, torn bands | **0** | 0, against a resident-decoder baseline |
+| DCMI errors, LTDC underruns, torn bands | **0** | 0, against the figures recorded here |
 
 The lease misses being zero is the result worth keeping: the panel outranks the
 worker and acquires without waiting, so a decode long enough to matter would
@@ -667,19 +740,21 @@ running, in slot 4, and two things came out of it:
 One operating note that is not a fault: `camera preview on` refuses with "the
 display is down or its scanout is off" until `lcd on` has run.
 
-**Issue #110's runs** (plugin executing):
+**Issue #110's runs** (plugin executing; the firmware still had its own decoder
+then, which is what several of these were read against):
 
 - **`nn info` says `running`, and `dmesg` names the image**: `'blazeface'
   (build ...) loaded: 8832 B at 0x24048000`.
 - **`nn run` prints the PLUGIN's own words**, not the shared box printer:
   `faces 1  thresh 644/1000` / `face 0  x 124 y 115 w 63 h 47 px  score 857`.
-  The units are the tell -- pixels, through the base's `to_frame`, where the
-  resident decoder's line is `dets : 1 ... x 44% of frame`.
+  The units were the tell -- pixels, through the base's `to_frame`, where the
+  resident decoder's line was `dets : 1 ... x 44% of frame`.  Since #116 the
+  shared box printer has no producer on this board at all.
 - **`nn thresh 700` reaches the plugin**: the value echoed back is read through
   the plugin's own `param_get`, not from a firmware variable.
 - **The plugin costs the inference nothing measurable**: 411 ms per inference
-  and 1.93 inf/s with a plugin decoding, the same as the resident decoder, with
-  0 errors and 0 raced tensors.
+  and 1.93 inf/s with a plugin decoding, the same as the resident decoder was
+  measured at, with 0 errors and 0 raced tensors.
 - **The first run of all failed, and the check that failed was mine.**  Every
   container was refused with *the image is not inside the backend's staging
   region*, because the source check asked `nn_model_load_region()` where that

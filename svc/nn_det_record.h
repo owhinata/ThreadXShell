@@ -51,9 +51,10 @@ extern "C" {
  */
 struct nn_det_record {
 	struct bf_det    dets[BF_MAX_DET];
-	int              ndet;   /**< faces, or -1 for "not a BlazeFace model"   */
+	int              ndet;   /**< items; see @ref nn_det_kind for what they are */
 	struct bf_result res;    /**< what that decode reported, thresh included */
 	int              valid;  /**< 0 = this session has not decoded yet       */
+	uint8_t          kind;   /**< one of @ref nn_det_kind (issue #110)       */
 	uint32_t         gen;    /**< session generation; see the file comment   */
 };
 
@@ -123,7 +124,7 @@ void nn_det_record_reset(struct nn_det_record *r);
 uint32_t nn_det_record_gen(const struct nn_det_record *r);
 
 /**
- * Publish one decode.
+ * Publish one decode from a decoder whose boxes this firmware understands.
  *
  * @param n    the decoder's return: >= 0 faces, or a negative BF_ERR_* code
  * @param gen  what @ref nn_det_record_gen returned when this frame was ARMED
@@ -141,17 +142,48 @@ int nn_det_record_publish(struct nn_det_record *r, const struct bf_det *d, int n
                           const struct bf_result *res, uint32_t gen);
 
 /**
+ * Publish one decode whose RESULT STAYED WITH THE DECODER (issue #110).
+ *
+ * A loaded plugin keeps its own result -- the firmware does not know its shape,
+ * which is the point of issue #78 -- so what travels here is the fact that a
+ * decode happened, how many items it produced, and the generation rule.  The
+ * boxes do not, and neither do @ref bf_result's diagnostics, which belong to a
+ * decoder that did not run.
+ *
+ * Same generation rule and same return as @ref nn_det_record_publish: a decode
+ * from a retired session lands nowhere.
+ *
+ * [!] @p n IS NOT CLAMPED AND NOT NORMALISED.  The cap on the other path is the
+ * size of the box array, and there is no box array here; the negative
+ * normalisation is issue #57's rule about the SHARED decoder's vocabulary, and
+ * a plugin's negative values are its own.  Folding either would make this
+ * function state something about a result it cannot see.
+ */
+int nn_det_record_publish_external(struct nn_det_record *r, int n, uint32_t gen);
+
+/**
  * Take a coherent snapshot, and up to @p max boxes with it.
  *
  * @param dets  optional
  *
- * [!] IT SETS @ref nn_det_snapshot::kind, rather than leaving the zero to the
- * caller's memset.  This record only ever holds caller boxes, so the value is
- * never in doubt -- but it used to be the one member this function did not
- * write, and every caller happened to clear the destination first.  With a third
- * kind in the field that omission becomes reachable: a snapshot reused across
- * two reads would keep the earlier one's routing and the shared command would
- * look somewhere else for boxes that are right there.
+ * [!] IT SETS @ref nn_det_snapshot::kind FROM THE RECORD (issue #110).  It used
+ * to assert NN_DET_CALLER_BOXES, which was true while that was the only thing a
+ * record could hold and is the sort of statement that survives the fact it was
+ * based on.
+ *
+ * [!] AND THE BOXES ARE COPIED ONLY FOR THAT KIND.  The rule is written as "copy
+ * when the record says caller boxes", not "copy unless it says otherwise": a
+ * kind this function has not heard of must leave the caller's array alone, and
+ * the version of that test which asks what the kind is NOT fails open the day
+ * a fourth one appears.  A caller's array is therefore untouched by an external
+ * result, canaries and all.
+ *
+ * [!] A BOARD'S OWN PROJECTION MUST CARRY THE KIND TOO.  Several boards copy
+ * this snapshot into a struct of their own before the shared command sees it,
+ * and a projection that drops the field restores exactly the bug above.
+ * f746g-disco's projection does not carry it and its service layer restates
+ * NN_DET_CALLER_BOXES instead -- correct there, because nothing on that board
+ * produces another kind yet, and a thing to revisit when something does.
  */
 void nn_det_record_snapshot(const struct nn_det_record *r,
                             struct nn_det_snapshot *out,

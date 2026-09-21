@@ -24,6 +24,7 @@ void nn_det_record_reset(struct nn_det_record *r)
 	r->gen++;
 	r->ndet  = 0;
 	r->valid = 0;
+	r->kind  = (uint8_t)NN_DET_CALLER_BOXES;
 	memset(&r->res, 0, sizeof r->res);
 }
 
@@ -61,6 +62,25 @@ int nn_det_record_publish(struct nn_det_record *r, const struct bf_det *d, int n
 		r->res = *res;
 	else
 		memset(&r->res, 0, sizeof r->res);
+	r->kind  = (uint8_t)NN_DET_CALLER_BOXES;
+	r->valid = 1;
+	return 1;
+}
+
+int nn_det_record_publish_external(struct nn_det_record *r, int n, uint32_t gen)
+{
+	if (r == NULL)
+		return 0;
+	if (gen != r->gen)
+		return 0;          /* the same rule, for the same reason */
+
+	/* Neither clamped nor normalised -- see the header.  The boxes and the
+	 * diagnostics are not this decoder's to describe, so the stale ones from
+	 * whatever ran before must not be left standing beside the new count. */
+	r->ndet  = n;
+	memset(r->dets, 0, sizeof r->dets);
+	memset(&r->res, 0, sizeof r->res);
+	r->kind  = (uint8_t)NN_DET_PLUGIN_REPORT;
 	r->valid = 1;
 	return 1;
 }
@@ -80,10 +100,12 @@ void nn_det_record_snapshot(const struct nn_det_record *r,
 	out->valid = r->valid;
 	out->ndet  = r->ndet;
 	out->res   = r->res;
-	/* Every member, this one included -- see the header for why leaving it to
-	   the caller's memset stopped being safe once there was a third kind. */
-	out->kind  = (uint8_t)NN_DET_CALLER_BOXES;
-	if (dets != NULL && max > 0) {
+	/* From the record, not asserted -- see the header. */
+	out->kind  = r->kind;
+	/* [!] ENUMERATED, NOT NEGATED.  "Copy when it says caller boxes" leaves a
+	   kind nobody has written yet alone; "copy unless it says plugin" would
+	   hand that kind the previous decoder's boxes. */
+	if (r->kind == (uint8_t)NN_DET_CALLER_BOXES && dets != NULL && max > 0) {
 		n = r->ndet;
 		if (n > max)
 			n = max;

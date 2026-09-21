@@ -1308,16 +1308,23 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # found two placeholders equal to a whole thread stack, which a plugin could
     # have declared, been admitted with, and overflowed.
     #
-    # [!] THESE ARE ISSUE #110's MEASUREMENTS, not step 3a's.  3a's figures
-    # (609 / 105, and no measurement at all for the shell) stood in this comment
-    # after #110 had replaced them in the board README -- a stale number beside
-    # a live one, which is how a reader ends up deriving from the wrong half.
-    # The README's table is the record; this comment follows it.
+    # [!] THESE ARE ISSUE #116's MEASUREMENTS, taken on hardware with a plugin
+    # running.  Step 3a's figures (609 / 105, and no measurement at all for the
+    # shell) stood in this comment long after #110 had replaced them in the
+    # board README -- a stale number beside a live one, which is how a reader
+    # ends up deriving from the wrong half.  The README's table is the record;
+    # this comment follows it.
     #
-    #   nn_work   3072 B  (decode)     at call  641 -> 3072-641-208  = 2223
-    #   cam_prev  1536 B  (draw)       at call  137 -> 1536-137-208  = 1191
+    #   nn_work   3072 B  (decode)     at call   49 -> 3072-49-208   = 2815
+    #   cam_prev  1536 B  (draw)       at call  105 -> 1536-105-208  = 1223
     #   shell     4096 B  (entry / shapes_ok / report / params)
     #                                  at call 1593 -> 4096-1593-208 = 2295
+    #
+    # (#110 measured 641 / 137 / 1593.  The decode site lost 592 B when the
+    # resident decoder went: its frame held the worker's box array, the
+    # bf_result, and what nn_decoder_run() and blazeface_decode() contributed
+    # once LTO inlined them.  A shallower call site does not enlarge the
+    # allowances below -- see the note after them.)
     #
     # [!] WHICH THREAD EACH SLOT IS CALLED ON WAS WRONG UNTIL ISSUE #110, and
     # the ENTRIES mapping below is where it shows.  Step 3a declared the

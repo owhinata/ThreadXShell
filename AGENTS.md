@@ -164,15 +164,35 @@
    `plugin_memory.ld` / board.cmake のゲート引数 / `check_plugin_reservation.py` の
    **4 箇所で独立に宣言し、1 つの変数から生成しない**。`check_plugin_reservation.py`
    （位置・サイズ・NOLOAD・内部に何も無い・heap 天井）を外す・弱める変更は不可。
-   **#78 Step 3a の wio は container を検証・記録するだけで plugin を実行しない**
-   （コピーも呼び出しもしない）。モデル区画は in-place で backend に渡し、
-   `nn info` の claim は開いているモデルに従う（reload 成功後に publish）。
+   **#110（#78 Step 3b）以降、wio の plugin は実際に走る**（3a は検証・記録のみだった）。
+   モデル区画は in-place で backend に渡し、`nn info` の claim は開いているモデルに従う
+   （reload 成功後に publish）。wio 固有で破ってはいけないこと:
+   - **plugin の差し替えは backend が成功してから。** 先に load すると固定予約上の前の
+     plugin を壊してから「前のモデルを復元」に落ち、デコーダの無いモデルが残る。
+     bare model は必ず unload する。
+   - **[!] decode と draw を隔てる構造が無い**（preview 優先度 12 > worker 18。Grove は
+     frame pipeline が 1 配送を pin するので不要）。**結果リース**で囲い、順序は
+     **常にリース → フレームロック**、worker は **decode と publish の全体**を保持、
+     **パネルは待たず**取れなければ overlay を飛ばして**数える**。
+   - **report は snapshot と同じ保護区間で採取し、バッファは呼び出し側のフレーム。**
+     board 側スロットは 2 コンソールで取り合う。**長さは状態ではない**。
+   - **[!] painter は全部 CPU。** DMA2D には「所有権を返す前に静止を確かめる」機構が
+     無い（ポーリングはタイムアウトしても中断せず、`ltdc_fill_rect` は void）。
+   - **[!] スタックは 2 つの量**で、veneer の下のファーム側コストは **実測して導出する**
+     （#110: 400 B 実測 / 512 宣言。過大が安全側）。**どのスレッドで呼ばれるか**を
+     間違えない（entry / shapes_ok / report / param は shell）。許容値を今の plugin に
+     合わせず、足りなければスレッドを広げる。**veneer コストを変えたら既存 container の
+     宣言は古い** — pack し直して送り直す。
+   - **常駐デコーダは残す**（Grove の #104 に相当する削除は別 Issue）。
 
 8. **リンカスクリプトの `ASSERT` は LTO 下で空振りする。** 配置保証はポストリンクの
    residency チェックスクリプトで行う。配置を変える変更はこのゲートを維持すること。
    - **wio-lite-ai** は LTO を使うので、`check_itcm_residency.py` /
      `check_dtcm_residency.py` / `check_psram_ai_residency.py` /
-     `check_plugin_reservation.py`（#108）が唯一の砦。
+     `check_plugin_reservation.py`（#108）が唯一の砦。**`check_itcm_residency.py` の
+     `ALLOWED_VENEER_TARGETS` は理由つきで増やす**（#110 で fault handler の plugin 帰属
+     呼び出しが 3 つ目。noinline にして、LTO が残したクローン名ではなく意味のある名前へ
+     veneer が向くようにしてある）。
    - **f746g-disco** は逆に **LTO を禁止**する（`board.cmake` が `-flto` /
      `CMAKE_INTERPROCEDURAL_OPTIMIZATION` を per-config 変種込みで FATAL_ERROR にする）。
      ldscript の ASSERT 群が invariant の本体だから。加えて `check_f746_layout.py` が

@@ -289,14 +289,20 @@ tflm -- is now part of the default build.  But no image from this configuration
 has been flashed, so the first `--target flash` after this change ships something
 new.
 
-## Plugin containers (issue #108 = #78 Step 3a)
+## Plugin containers (issues #108, #110 = #78 Steps 3a and 3b)
 
 A **container** carries a model together with the code that interprets its
 output (a *plugin*), so a new model family needs no firmware change.  The format,
 the validator and the build rules are shared with Grove Vision AI V2 (its README
 has the full design); this section is what is different here.
 
-**Step 3a delivers, validates and measures.  It never executes a plugin.**
+Step 3a delivered, validated and measured without ever executing one.  **Since
+issue #110 a container's plugin RUNS**: it decodes, draws on the panel,
+describes its result on the console and holds the threshold.  The resident
+BlazeFace decoder is still here and still does all of that when no plugin is
+loaded -- both arms exist on this board, unlike Grove, where issue #104 removed
+the resident one.
+
 `nn model load --slot <n>` reads the blob into the PSRAM staging buffer and
 CRC-checks that copy exactly as before, then:
 
@@ -308,12 +314,32 @@ CRC-checks that copy exactly as before, then:
   backend accepts any range inside the staging slot it handed out that starts
   on `NN_MODEL_ALIGN` (16 B); a container's model section is 16-aligned by the
   format's own rule, which `nn_svc_wio.c` asserts meets the backend's;
-- the **plugin section is validated and recorded -- never copied into `.plugin`,
-  never called**.  The resident decoder keeps decoding, so a blazeface
-  container's model finds faces through exactly the path a bare model does.
+- the **plugin section is copied into `.plugin`, the caches are made to agree
+  about it, the reservation is read back and its entry point is called** --
+  but only after the backend has accepted the model.
+
+**[!] The order matters and is not an implementation detail.**  Loading the
+plugin first would destroy the previous one's state at the fixed reservation
+before knowing whether the model that needs it can be built, and a backend that
+then restored the PREVIOUS model would be left with no decoder for it.  So the
+previous plugin is untouched while the backend works, and only the outcomes
+that changed what is open change what decodes it:
+
+| reload outcome | what happens to the decoder |
+|---|---|
+| a bare model loaded | whatever was loaded is unloaded -- a new model with an old model's decoder is the accident this ordering prevents |
+| a container loaded | its plugin is loaded; if it refuses, the resident decoder reads the model and the loader logs why |
+| the previous model was restored | nothing moved, so nothing moves here |
+| nothing is open | the plugin is unloaded too |
+
+All of it happens inside the claims window and before the session is given
+back, so `nn info` on another console says *a model load is in progress* rather
+than pairing one load's model with another's plugin.
 
 `nn info` then shows what the container **claims** (`plugin : <name> (build
-<id>, crc <digest>), validated, NOT executed`, `from : slot <n>, blob '<name>'`,
+<id>, crc <digest>), running` -- or `validated, not loaded` when the plugin was
+refused and the resident decoder is reading the model -- `from : slot <n>,
+blob '<name>'`,
 the image sizes and each slot's declared stack).  The claims follow the model
 that is actually open: they are settled only after the backend adopted (or
 refused) the model; a refused load that left the previous model active keeps the
@@ -323,7 +349,80 @@ backend adopting a model and the claims being settled it says `a model load is
 in progress` rather than pairing one model with the other's claims -- and the
 `from` line names the blob the claims came with, so a load that lands between
 `nn info`'s model line and its plugin line shows up as a mismatch instead of
-passing silently.
+passing silently.  The *running* word comes out of that same masked section, so
+it cannot describe a different load from the manifest printed beside it.
+
+### [!] What decodes, draws and reports, and the lease that separates them
+
+Grove needs no lock around a plugin's private result: its frame pipeline pins
+one delivery per sink, so the producer's decode and the panel's draw
+structurally cannot overlap.  **This board has no such exclusion.** The preview
+(flip) thread runs at priority 12 and the inference worker at 18, with nothing
+between them -- the worker is preemptible mid-decode and the panel is what
+preempts it.  That was harmless while the worker handed over BOXES: it filled a
+local array, took the detection mutex, copied and released, so a reader saw
+either the old decode or the new one.  A plugin's result is private and stays
+inside the plugin, so there is nothing to copy.
+
+`port/plugin/plugin_lease.c` is the answer, and the rules are:
+
+- **the order is always the lease, then the frame lock.**  The panel takes it
+  first and the frame lock second; the worker takes it and then the detection
+  mutex.  Nothing takes them the other way round;
+- **the worker holds it across the decode AND the publish.**  Releasing between
+  them would let the panel see new private state beside an old count;
+- **the panel does not wait.**  A draw that blocked would hold a lock wider
+  than what it protects for as long as a decode takes.  On a refusal it
+  presents the picture unannotated -- the failure this pipeline already has for
+  a `process()` that declines -- and the refusal is COUNTED, because the
+  existing preview counters see a frame that was presented, not one presented
+  bare;
+- **a console asking for a report waits, but not forever.**  Measuring how long
+  a wait took is not the same as bounding it.
+
+One decoder annotates a frame, never two: with a plugin loaded the resident
+overlay does not run.
+
+### [!] Reporting: captured where the result still exists
+
+`nn run` and `nn dets` print a plugin's account of its result from bytes
+captured in the same breath as the snapshot, under the lease.  They do not ask
+the plugin afterwards, because by then the session has been released and
+another console may have replaced it -- the bytes would not have to describe
+the count printed beside them.
+
+**The capture buffer belongs to the shell command's own frame.**  A board-owned
+slot does not fix that window, it moves it: console A captures, console B
+captures over the top, A prints B's bytes.  Repairing that needs a reservation
+with a lock order and a release on every path including a cancelled command;
+putting the bytes where the caller already keeps its snapshot makes the
+lifetime the C call stack instead.  512 B, and truncation is reported rather
+than hidden -- as are "this decoder has no report to give", "it stopped part
+way" and "it could not be reached in time", because length is not a status.
+
+### [!] The painter draws with the CPU, fills included
+
+The panel's own `ltdc_fill_rect()` runs on DMA2D and a plugin's `draw()` must
+not.  The frame transaction ends when `ltdc_flip()` presents, and this port
+cannot establish that an outstanding DMA2D transfer has stopped writing before
+then: the small-transfer path polls with a HAL call that returns WITHOUT
+aborting on timeout, `ltdc_dma2d_fill()` discards that result and
+`ltdc_fill_rect()` returns void.  A timed-out fill can therefore still be in
+flight when its destination becomes the displayed buffer, and suppressing that
+one flip does not help because the next producer frame reuses the buffer.
+**Repairing that is the port's own problem and its own issue.**  A painter that
+never arms a transfer does not have it, and the rotating blit this panel
+already uses writes the same framebuffer with the CPU, so this is an access the
+panel already performs.
+
+The budget is a quarter of the surface (19,200 pixels) plus 64 dispatches,
+charged BEFORE the framebuffer is touched so a refused primitive leaves nothing
+half-drawn.  An outline is charged for the pixels it WRITES, not the area it
+encloses -- by area a 200x200 box costs 40,000 and vanishes silently, which is
+how issue #105 found the rule; it actually costs 1,584.  **That cap is an
+initial test ceiling, not a shipping one**: these pixels are CPU stores into
+non-cacheable external PSRAM, and a pixel budget is not a bound on hold time.
+See the acceptance criteria below.
 
 ### The target word
 
@@ -384,37 +483,110 @@ The **receipt CRC compared with `blob list`** is the one "built bytes = stored
 bytes" check.  `nn info`'s CRC is the plugin-section digest and does not move
 when a model changes.
 
-### What Step 3a measures (for 3b to budget from)
+### Measured sizes
 
 | | measured |
 |---|---|
-| blazeface plugin (M7) | text 4,016 B, bss 4,816 B, load image 8,832 B; declared stack: decode 392, draw 332, report 344, entry 8, shapes 40, params 8/16 B |
-| cifar10 plugin (M7) | text 2,704 B, bss 8,852 B, load image 11,584 B; declared stack: decode 432, draw 292, report 336, entry 0, shapes 20 B |
+| blazeface plugin (M7) | text 4,016 B, bss 4,816 B, load image 8,832 B; requirement with #110's veneer charge: decode 648, draw 588 B |
+| cifar10 plugin (M7) | text 2,704 B, bss 8,852 B, load image 11,584 B; requirement: decode 688, draw 548, report 592 B |
 | blazeface container | 194,120 B (model 189,816 B at +4,304) |
 | `.plugin` reservation | 32 KB -- 2.8x the larger load image (cifar10's 11,584 B) |
+| app flash, default build (SD off) | 363,620 B of 384 KB (92.5%), 29,596 B free -- #110's wiring cost 4,628 B over #108 |
 | AXI-SRAM heap room | 103,200 B (`end` to `__heap_end`, SD off) |
 | DTCM ceiling for growing `nn_work` | **4,544 B** (`_smsp_stack - _dtcm_used_end`; the 8 KB main-stack reservation is not free) |
-| stack already spent at the decode / draw call sites | **609 B of 3,072 on `nn_work`** (decode), **105 B of 1,024 on `cam_prev`** (draw), measured on hardware |
+| stack already spent at the decode / draw call sites | **609 B of 3,072 on `nn_work`** (decode), **105 B of 1,024 on `cam_prev`** (draw), measured on hardware at #108 -- see the caveat below |
 
 The call-site depths are measured where a plugin will stand: on `nn_work`
 immediately before the resident decoder is called, and on the preview thread
 inside the frame lock just before the overlay is drawn (not in the per-box
-helper, which is deeper than a plugin will ever be called from).  The probe is
-out of line, so each figure includes its own few bytes -- an over-report, the
-safe direction -- and **it stays in place through 3b**: removing or reshaping
-it means measuring again, not reusing these numbers.
+helper, which is deeper than a plugin is ever called from).  There is a third
+site since #110, on the shell thread, where four of the seven slots are
+actually called.  The probe is out of line, so each figure includes its own few
+bytes -- an over-report, the safe direction -- and it sits AT the call rather
+than in the caller, so the number does not depend on whether the caller was
+inlined this month.
 
-The per-callback stack limits in the policy are **provisional** (decode 1,024 B
-of 3,072; draw 512 of 1,024; report 1,024 of 4,096), each statically asserted
-below its thread's stack.  3b replaces them with values derived from these
-measurements.  3a reports; it does not decide the budget -- but the arithmetic
-3b will use is `thread stack - depth at the call site - asynchronous reserve -
-margin`, and with the reserve derived rather than measured (one exception frame
-on the thread's PSP, 104 B extended plus alignment, plus ThreadX's own
-callee-saved save -- about 208 B worst case) the measured room is **2,255 B for
-decode** and **711 B for draw**.  Both provisional limits already fit under
-those, and the two plugins' declared needs (decode 392/432, draw 332/292) fit
-with room to spare.
+**[!] The two figures above predate #110's call sites.**  They were taken when
+nothing was called there; re-measure them.
+
+### The stack budget, and what is still owed to it (issue #110)
+
+There are **two quantities**, and Step 3a only had one of them:
+
+1. what is free at the call site -- the probes above;
+2. what the FIRMWARE spends below an outbound plugin veneer, which the image
+   gate charges at every crossing because it cannot see across one.
+
+The second was Grove's 256 B, carried over as an admitted placeholder.  It is
+now derived from the base this board actually has, measured with
+`-fstack-usage` over its callbacks and summed along the deepest chain a veneer
+can reach:
+
+```
+nn_plugin_log 16 + log_write 16 + log_vwrite 192
+  + fmt_vsnformat 32 + fmt_vformat 80 + fmt_utoa 64        = 400 B
+```
+
+(`fmt_utoa` and `fmt_padded` are called in sequence, not nested.  The painter
+is far shallower -- `paint_rect` 64 + `rect_geom_norm` 16 -- and `to_frame` and
+the report sink are leaves.)  **512 is declared**, because the measurement is
+per-TU with LTO off and over-estimating is the safe direction here: the gate
+charges it at every crossing, so a larger number makes a plugin's computed
+requirement larger, not smaller.  **Re-derive it whenever the base gains a
+callback** -- the old number would still pass, which is the shape of the
+mistake it replaces.
+
+With the real charge, the recomputed requirements are:
+
+| | decode | draw | report |
+|---|---:|---:|---:|
+| blazeface | 648 B | 588 B | -- |
+| cifar10 | 688 B | 548 B | 592 B |
+
+**[!] Which thread each slot is called on was wrong until #110.**  Step 3a
+declared the WORKER's allowance for `entry` and `shapes_ok`, on the reasoning
+that a decoder's callbacks belong to the decoding thread.  They do not: `entry`
+is called from `nn model load` and `shapes_ok` from the admission both `nn run`
+and `nn stream start` pass through, and both are console commands.  A bound on
+the wrong thread's stack is not a bound.  Four of the seven slots are on the
+shell thread; `NNCAM_SITE_SHELL` measures it and `nn stream stats` prints it.
+
+**[!] And the panel thread got a bigger stack rather than a smaller
+allowance.**  `cam_prev` was 1,024 B when it did nothing but flip buffers and
+draw rectangles.  At that size the derived allowance is
+`1024 - 105 - 208 = 711`, and the detector's 588 fits by a margin thin enough
+that any plugin with a label to draw would not.  Sizing an allowance to what
+today's plugin happens to need is how a limit stops being one, so the thread is
+1,536 B now -- 512 B out of the 4,544 DTCM has spare -- and the allowances are:
+
+| thread | stack | at call | reserve | derived room | declared |
+|---|---:|---:|---:|---:|---:|
+| `nn_work` (decode) | 3,072 | 609 | 208 | 2,255 | 1,024 |
+| `cam_prev` (draw) | 1,536 | 105 | 208 | 1,223 | 1,024 |
+| shell (entry / shapes / report / params) | 4,096 | *to measure* | 208 | -- | 1,024 |
+
+**[!] STILL OWED, and the biggest remaining way for this to fail open:** the
+shell figure has no measurement behind it, the two that do were taken before
+the call sites moved and before `nn run` started carrying a 512 B capture
+buffer in the same frame, and **the container already stored in slot 5 has a
+manifest packed with the OLD veneer cost** -- its declared stacks are smaller
+than the requirements above.  Rebuild the asset and send it again; do not read
+"it was accepted before" as "it still bounds execution".
+
+### Acceptance criteria (to be met before this is called done)
+
+A counter that goes up with no threshold beside it does not establish that
+anything works.  Before the hardware run, freeze: the workload, how long it
+runs, the acceptable overlay-miss fraction and maximum consecutive run, the
+maximum draw and frame-transaction time, and the maximum lease wait a console
+sees.  Require zero new DCMI errors, LTDC underruns or band corruption
+attributable to the plugin, against a baseline taken with the resident decoder.
+Define the miss denominator too, and count a refused or partly drawn overlay as
+a miss, not a success -- and require useful progress (presented frames,
+inferences, successful overlay opportunities), because a decode that stalls
+improves the miss fraction.
+
+A failed run does not become a pass by relaxing a threshold afterwards.
 
 DTCM is the ceiling if 3b has to grow `nn_work`: `free` reports 12,736 B free,
 but 8,192 of that is the main stack's reservation at the top of the region.

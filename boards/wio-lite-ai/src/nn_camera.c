@@ -115,7 +115,7 @@ static uint32_t nncam_start_tick;
  * store cannot tear here, so a reader may see a stale value but never a torn
  * one.  Only ever written with a real measurement (see nn_camera_note_depth()),
  * so the reset at start cannot be raced into reporting a stale high-water. */
-static uint32_t nncam_depth_decode, nncam_depth_draw;
+static uint32_t nncam_depth_decode, nncam_depth_draw, nncam_depth_shell;
 
 static int nncam_norm_signed;   /* 0 = [0,1] (default), 1 = [-1,1] */
 static int nncam_overlay;
@@ -416,8 +416,9 @@ __attribute__((noinline)) void nn_camera_note_depth(enum nn_camera_site site)
 	uintptr_t  sp = (uintptr_t)&here;
 	uintptr_t  lo, hi;
 	uint32_t   used;
-	uint32_t  *hw = (site == NNCAM_SITE_DRAW) ? &nncam_depth_draw
-	                                          : &nncam_depth_decode;
+	uint32_t  *hw = (site == NNCAM_SITE_DRAW)  ? &nncam_depth_draw :
+	                (site == NNCAM_SITE_SHELL) ? &nncam_depth_shell :
+	                                             &nncam_depth_decode;
 
 	if (t == NULL)
 		return;                     /* not on a thread; nothing to say */
@@ -513,8 +514,6 @@ static void nncam_step(void)
 	 * put the call beside it): immediately before the resident decoder,
 	 * recorded BEFORE the call so the number is the depth a callee inherits
 	 * rather than the depth including it. */
-	nn_camera_note_depth(NNCAM_SITE_DECODE);
-
 #if defined(CONFIG_NN_BACKEND_TFLM)
 	if (nn_active_is_plugin()) {
 		int took;
@@ -537,6 +536,7 @@ static void nncam_step(void)
 			nncam_errors++;
 			return;
 		}
+		nn_camera_note_depth(NNCAM_SITE_DECODE);
 		n = nn_active_decode(nncam_model);
 		took = nncam_publish_plugin(n, gen);
 		plugin_lease_give();
@@ -546,6 +546,7 @@ static void nncam_step(void)
 	}
 #endif
 
+	nn_camera_note_depth(NNCAM_SITE_DECODE);
 	n = nn_decoder_run(nncam_model, tmp, BF_MAX_DET, &bfr);
 	/* Bumped LAST, after the boxes are published, and ONLY IF THEY WERE: `nn run`
 	   waits for this counter to move and then reads the detections, so
@@ -783,6 +784,9 @@ int nn_camera_start(int colorbar)
 	 * would otherwise report the first one's high-water for both. */
 	nncam_depth_decode = 0u;
 	nncam_depth_draw   = 0u;
+	/* [!] depth_shell is NOT reset here.  Its deepest site is `nn model load`,
+	 * which happens before any stream and would otherwise be forgotten by the
+	 * first start -- the one number a per-start reset would always erase. */
 #if defined(CONFIG_NN_BACKEND_TFLM) && BSP_ENABLE_LCD
 	/* Armed here and not reset on stop, so `nn stream stats` right after a
 	 * stop still describes the run that just ended (issue #110). */
@@ -898,6 +902,7 @@ void nn_camera_stats_get(struct nn_camera_stats *out)
 	out->ndet = nncam_rec.ndet;
 	out->depth_decode = nncam_depth_decode;
 	out->depth_draw   = nncam_depth_draw;
+	out->depth_shell  = nncam_depth_shell;
 }
 
 int nn_camera_dets_get(struct bf_det *out, int max)
@@ -935,6 +940,9 @@ int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
 	 * never waits here.
 	 */
 	if (rep != NULL && nn_active_is_plugin()) {
+		/* This runs on whichever thread asked -- a console.  Recorded before
+		 * the call it describes, like the other two sites. */
+		nn_camera_note_depth(NNCAM_SITE_SHELL);
 		leased = plugin_lease_take(NNCAM_LEASE_WAIT_TICKS);
 		if (!leased) {
 			/* The result exists; nobody let go of it in time.  Saying so is

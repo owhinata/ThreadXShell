@@ -69,16 +69,26 @@
 #define NNCAM_STACK_BYTES  3072u
 
 /**
- * The two places a plugin callback will stand (issue #108 = #78 Step 3a).
+ * The three places a plugin callback stands (issue #108 placed two, #110 added
+ * the third and the calls beside all of them).
  *
- * DECODE is on `nn_work`, immediately before the resident decoder is called in the
- * worker step.  DRAW is on the preview thread, where the plugin's draw() will
- * replace or precede the resident overlay -- NOT inside the per-box helper, which
- * is a deeper, resident-only path and would over-report.
+ * DECODE is on `nn_work`, immediately before the decode in the worker step.
+ * DRAW is on the preview thread, where the plugin's draw() replaces the
+ * resident overlay -- NOT inside the per-box helper, which is a deeper,
+ * resident-only path and would over-report.
+ *
+ * [!] SHELL IS THE ONE 3a DID NOT MEASURE, and it is where four of the seven
+ * slots are actually called: entry (from `nn model load`), shapes_ok (from the
+ * admission both `nn run` and `nn stream start` pass through), report and the
+ * parameters.  board.cmake declared the WORKER's allowance for them, which is
+ * a bound on the wrong thread's stack -- and the capture buffer `nn run` now
+ * carries in its own frame comes out of this one.  Recorded at the deepest of
+ * those sites; `nn info` prints it.
  */
 enum nn_camera_site {
 	NNCAM_SITE_DECODE = 0,
 	NNCAM_SITE_DRAW   = 1,
+	NNCAM_SITE_SHELL  = 2,
 };
 
 /**
@@ -121,6 +131,7 @@ struct nn_camera_stats {
 	 *   (issue #108); 0 until the site has run */
 	uint32_t depth_decode;
 	uint32_t depth_draw;
+	uint32_t depth_shell;
 };
 
 /**

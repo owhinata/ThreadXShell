@@ -284,6 +284,19 @@ gcc $CFLAGS -I "$svc" \
     $LDFLAGS -o "$out/test_plugin_load"
 "$out/test_plugin_load"
 
+# issue #110 (#78 Step 3b) -- the capture of an external decoder's own account
+# of its result (svc/nn_report.c).  A contract about OUTCOMES: zero bytes is a
+# legal report, "no report to give" is a different answer, truncation is a
+# third and a decoder's own refusal a fourth, and a consumer that inferred any
+# of them from the length would tell an operator the wrong one.  The last case
+# demonstrates the ownership -- two callers, two frames -- because a
+# board-owned capture slot, which is the obvious first design and the wrong
+# one, passes every other case in the file.
+gcc $CFLAGS -I "$svc" -I "$inc" \
+    "$here/test_nn_report.c" "$svc/nn_report.c" \
+    $LDFLAGS -o "$out/test_nn_report"
+"$out/test_nn_report"
+
 # issue #110 (#78 Step 3b) -- the loader that runs AFTER that validation
 # (svc/plugin_exec.c), shared by grove-vision-ai-v2 and wio-lite-ai.
 #

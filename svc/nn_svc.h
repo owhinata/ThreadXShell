@@ -371,22 +371,63 @@ typedef int (*nn_svc_write_fn)(void *ctx, const char *s, size_t len);
  */
 void nn_svc_info_extra(nn_svc_write_fn write, void *ctx);
 
+/* ---- an external decoder's own account of its result --------------------- */
+
 /**
- * @brief  Let the board's active decoder describe its own last result.
+ * What became of the attempt to capture it.
  *
- * Called by `nn run` and `nn dets` when @ref nn_det_snapshot::external says the
- * boxes are not in the caller's array.  A board with no such decoder does
- * nothing and returns 0 -- and that is not a stub for symmetry: the shared
- * command only calls this when a board has already said the result is
- * elsewhere, so silence here would be a board contradicting itself.
- *
- * Same rules as @ref nn_svc_info_extra: @p write is valid for the call only,
- * must not be stored, and must not be invoked with interrupts masked or an
- * inference gate held.
- *
- * @return 0, or negative when the writer refused.
+ * [!] LENGTH IS NOT A STATUS.  Zero bytes is a legal report, "this decoder has
+ * no report to give" is a different answer, and a decoder that refused part way
+ * through is a third.  A consumer that inferred any of them from @ref
+ * nn_report_capture::len would tell an operator the wrong one.
  */
-int nn_svc_report(nn_svc_write_fn write, void *ctx);
+enum nn_report_status {
+	/** No external result: the boxes are in the caller's array as usual. */
+	NN_REPORT_NONE = 0,
+	/** Captured, and complete.  @ref nn_report_capture::len may be zero. */
+	NN_REPORT_OK,
+	/** There is an external result, but its decoder offers no report. */
+	NN_REPORT_UNSUPPORTED,
+	/** It had more to say than the buffer holds; what fits is kept. */
+	NN_REPORT_TRUNCATED,
+	/** Its own report failed part way through; what came first is kept. */
+	NN_REPORT_REFUSED,
+	/** It was gone before it could be taken -- see below. */
+	NN_REPORT_STALE,
+};
+
+/**
+ * Where an external decoder's account of its result is captured.
+ *
+ * [!] THE BUFFER IS THE CALLER'S, AND THAT IS THE WHOLE DESIGN (issue #110).
+ * A loaded plugin keeps its result -- this firmware does not know its shape --
+ * so the only way to print it is to ask the plugin, and the only safe moment to
+ * ask is the one in which the result is still protected.  That moment is inside
+ * the service call that takes the snapshot, and it is long over by the time the
+ * shared command prints: the session has been released and another console may
+ * have replaced the plugin.
+ *
+ * Capturing into a board-owned buffer does not fix that, it moves it -- console
+ * A captures, console B captures over the top, A prints B's bytes.  Repairing
+ * THAT needs a reservation with a lock order and a release on every path,
+ * including a cancelled command.  Putting the bytes in the caller's frame
+ * removes the whole problem: the lifetime is the C call stack.
+ *
+ * [!] AND THE CAPTURE WRITER MAY RUN UNDER A GATE, unlike the console writer of
+ * @ref nn_svc_info_extra.  It copies into memory and cannot block; the
+ * prohibition there is about holding an inference gate across a UART line.
+ */
+struct nn_report_capture {
+	char    *buf;     /**< the caller's storage; may be NULL with cap 0     */
+	uint32_t cap;     /**< its size in bytes                                */
+	uint32_t len;     /**< bytes captured, <= cap                           */
+	uint8_t  status;  /**< one of @ref nn_report_status                     */
+};
+
+/** A capture buffer that is big enough for the reports this project's plugins
+ *  emit, and small enough to sit in a shell command's frame.  Truncation is
+ *  reported rather than hidden, so this is a comfort, not a contract. */
+#define NN_REPORT_CAPTURE_MAX 512u
 
 /**
  * Read a whole file into a buffer.
@@ -475,6 +516,7 @@ int nn_svc_input(struct tensor_desc *out);
  * @param dets  optional; up to @p max boxes, normalised to the MODEL INPUT
  */
 void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
+                     struct nn_report_capture *rep,
                      nn_svc_cancel_fn cancel, void *ctx,
                      struct nn_op_result *res);
 
@@ -491,7 +533,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
  * numbers.
  */
 void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
-                           int max, struct nn_op_result *res);
+                           int max, struct nn_report_capture *rep, struct nn_op_result *res);
 
 /**
  * Fill every input with a deterministic pattern, so runs are comparable.

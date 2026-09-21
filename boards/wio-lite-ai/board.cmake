@@ -896,7 +896,8 @@ endif()
 list(APPEND SHELL_SOURCES ${NN_SOURCES}
      "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"      # the one shared command
      "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c" # its pure half
-     "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c")     # the shared stream lifecycle
+     "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"      # the shared stream lifecycle
+     "${CMAKE_SOURCE_DIR}/svc/nn_report.c")          # the report capture sink
 
 # The plugin loader (issue #110 = #78 Step 3b): the machine in svc/, this
 # board's state, reservation, cache maintenance, Armv7-M MPU read-back and
@@ -910,7 +911,8 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
          "${CMAKE_SOURCE_DIR}/svc/rect_geom.c"
          "${BOARD_DIR}/port/plugin/plugin_run.c"
          "${BOARD_DIR}/port/plugin/plugin_mpu_v7m.c"
-         "${BOARD_DIR}/port/plugin/plugin_paint.c")
+         "${BOARD_DIR}/port/plugin/plugin_paint.c"
+         "${BOARD_DIR}/port/plugin/plugin_lease.c")
 endif()
 
 # The MLPerf Tiny v1.4 benchmark harness.  Like CONFIG_NN_BACKEND above and

@@ -45,7 +45,10 @@
 #if BSP_ENABLE_CAMERA
 #include "camera.h"     /* FPC-24 DVP camera: XCLK + SCCB bring-up (issue #8) */
 #if BSP_ENABLE_LCD
-#include "cam_preview.h" /* live camera preview on the LCD (issue #8 phase 3c) */
+#include "cam_preview.h"
+#endif
+#if defined(CONFIG_NN_BACKEND_TFLM)
+#include "plugin_lease.h" /* who may touch a plugin's result (issue #110)      */
 #endif
 #endif
 /* [!] UNCONDITIONAL, and it has to be (issue #50).  usb_stack and iwdg_stack
@@ -212,6 +215,17 @@ void tx_application_define(void *first_unused_memory)
    * blocks on its first sleep, so it is safe here like every other service. */
   (void) cam_preview_init();
 #endif
+#endif
+
+#if defined(CONFIG_NN_BACKEND_TFLM)
+  /* The lease that decides who may touch a loaded plugin's private result
+   * (issue #110).  Created here because three threads reach for it -- the
+   * inference worker, the preview and a console -- and the first of them may
+   * be the one that loads a model, before any camera object exists.  Object
+   * creation only.  Fail-soft: without it plugin_lease_try() answers "no",
+   * which is the same answer a contended lease gives, so a panel presents its
+   * picture bare rather than reading half-written state. */
+  (void) plugin_lease_init();
 #endif
 
   /* Telnet console service (owhinata/wio-lite-ai#21 increment 9): owns the module's listening/session

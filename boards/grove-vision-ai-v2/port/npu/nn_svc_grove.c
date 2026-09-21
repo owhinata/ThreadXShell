@@ -27,6 +27,7 @@
  * Losing them would have made every failure read the same.
  */
 #include "nn_svc.h"
+#include "nn_report.h"
 
 #include <stdarg.h>
 #include <string.h>
@@ -942,7 +943,8 @@ static int nn_fill_input(struct nn_op_result *res, const uint8_t *raw,
  * A negative return from a PLUGIN is published as it is, not folded into zero
  * faces (issue #57) and not folded into one code (issue #97).
  */
-static void nn_decode_into(struct nn_det_snapshot *snap)
+static void nn_decode_into(struct nn_det_snapshot *snap,
+                           struct nn_report_capture *rep)
 {
 	struct npu_tensor outs[NPU_DESC_MAX_OUTPUTS];
 	struct bf_result bfr;
@@ -958,6 +960,7 @@ static void nn_decode_into(struct nn_det_snapshot *snap)
 		   an operator could read as a measurement. */
 		snap->ndet = 0;
 		snap->kind = (uint8_t)NN_DET_RAW_TENSORS;
+		nn_report_set(rep, NN_REPORT_NONE);
 		return;
 	}
 
@@ -971,6 +974,10 @@ static void nn_decode_into(struct nn_det_snapshot *snap)
 			   below, and a reused snapshot would otherwise keep the routing of
 			   whatever ran last (issue #104). */
 			snap->kind = (uint8_t)NN_DET_PLUGIN_REPORT;
+			/* No decode ran, so there is no result to describe -- and asking
+			 * the plugin anyway would have it describe an OLDER frame as
+			 * though it were this one (issue #110). */
+			nn_report_set(rep, NN_REPORT_STALE);
 			return;
 		}
 
@@ -980,9 +987,27 @@ static void nn_decode_into(struct nn_det_snapshot *snap)
 	 * so a consumer that printed it would print whatever was there before --
 	 * zeros on the first run and a stale decode after that, which is worse. */
 	snap->kind = (uint8_t)NN_DET_PLUGIN_REPORT;
+
+	/*
+	 * [!] AND TAKE ITS ACCOUNT OF THAT RESULT NOW, IN THE SAME BREATH AS THE
+	 * DECODE (issue #110).  The shared command used to call back here after it
+	 * returned, by which time nn_release() has happened and another console may
+	 * have replaced the plugin -- so the bytes printed need not have described
+	 * the count printed beside them.  Captured here they cannot disagree,
+	 * because nothing has run in between.  The sink writes into the CALLER's
+	 * buffer, so this is the only copy and nobody can overwrite it.
+	 */
+	if (rep != NULL) {
+		nn_report_begin(rep);
+		if (!nn_active_can_report())
+			nn_report_set(rep, NN_REPORT_UNSUPPORTED);
+		else
+			nn_report_end(rep, nn_active_report(nn_report_write, rep));
+	}
 }
 
 void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
+                     struct nn_report_capture *rep,
                      nn_svc_cancel_fn cancel, void *ctx,
                      struct nn_op_result *res)
 {
@@ -1062,14 +1087,15 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 * inference.  The convention is stated in the board README rather than
 	 * enforced by a check no decoder stands behind.
 	 */
-	nn_decode_into(snap);
+	nn_decode_into(snap, rep);
 
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 	nn_release();
 }
 
 void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
-                           int max, struct nn_op_result *res)
+                           int max, struct nn_report_capture *rep,
+                           struct nn_op_result *res)
 {
 	nn_detail_clear();
 
@@ -1083,7 +1109,7 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
 		nn_release();
 		return;
 	}
-	nn_decode_into(snap);
+	nn_decode_into(snap, rep);
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 	nn_release();
 }
@@ -1738,14 +1764,6 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	                   (unsigned long)nn_container.bss_len);
 }
 
-/* ---- the active decoder's own report (issue #103) ------------------------- */
-
-/*
- * Only a plugin has anything to say here.  The resident decoder's result IS the
- * boxes the shared command already prints, and printing it twice in two
- * spellings is the divergence issue #50 spent itself removing.
- */
-int nn_svc_report(nn_svc_write_fn write, void *ctx)
-{
-	return nn_active_report(write, ctx);
-}
+/* The active decoder's own report is no longer a call the shared command makes
+ * after this one returns (issue #110): it is captured in nn_decode_into(),
+ * beside the count it describes and before nn_release(). */

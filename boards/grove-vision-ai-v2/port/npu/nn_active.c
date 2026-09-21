@@ -139,6 +139,13 @@ int nn_active_can_draw(void)
 	return plugin_run_slot(PLUGIN_SLOT_DRAW) != NULL;
 }
 
+int nn_active_can_report(void)
+{
+	if (!nn_active_is_plugin())
+		return 0;
+	return plugin_run_slot(PLUGIN_SLOT_REPORT) != NULL;
+}
+
 int nn_active_report(nn_svc_write_fn write, void *ctx)
 {
 	plugin_report_fn fn = (plugin_report_fn)plugin_run_slot(PLUGIN_SLOT_REPORT);

@@ -89,8 +89,8 @@ static int charge(struct paint_ctx *c, uint32_t pixels)
  * face with no box and no explanation, at exactly the distance where the
  * detector works best.  Adding a label beside each box only tightens it.
  *
- * The real cost is the stores lcd_rect_wire() issues, which lcd_rect.c computes
- * from the SAME normalisation the drawing loop uses, so the charge and the loop
+ * The real cost is the stores lcd_rect_wire() issues, which svc/rect_geom.c
+ * computes from the SAME normalisation the drawing loop uses, so the charge and the loop
  * cannot disagree about clipping or about a clamped stroke.  What that sharing
  * deliberately does NOT extend to is the test's expectation: test_plugin_paint.c
  * counts the stores the real loop makes and compares them with the budget this
@@ -101,20 +101,20 @@ static void paint_rect(void *ctx, const struct plugin_rect *r, uint16_t rgb565,
                        uint16_t stroke)
 {
 	struct paint_ctx *c = (struct paint_ctx *)ctx;
-	struct lcd_rect_geom g;
+	struct rect_geom g;
 
 	if (c == NULL || c->fb == NULL || r == NULL)
 		return;
-	/* No separate clip() here: lcd_rect_norm() is the clip, and asking it is
+	/* No separate clip() here: rect_geom_norm() is the clip, and asking it is
 	 * what keeps this from being a second opinion about the same rectangle.
 	 * It also answers "nothing to draw" for a stroke of zero, which the
 	 * driver rejects before it clips anything. */
-	if (!lcd_rect_norm(c->fb, c->w, c->h, r->x0, r->y0, r->x1, r->y1,
-	                   stroke, &g)) {
+	if (!rect_geom_norm(c->w, c->h, r->x0, r->y0, r->x1, r->y1,
+	                    stroke, &g)) {
 		(void)charge(c, 0u);       /* a dispatch that drew nothing still costs */
 		return;
 	}
-	if (!charge(c, lcd_rect_writes(&g)))
+	if (!charge(c, rect_geom_writes(&g)))
 		return;
 
 	lcd_rect_wire(c->fb, c->w, c->h, r->x0, r->y0, r->x1, r->y1, rgb565,

@@ -314,12 +314,14 @@ gcc $CFLAGS \
 # replaced the loop could not check it.  So the primitive moved out of
 # lcd_st7789.c (which drags the SPI driver onto the host) into lcd_rect.c, built
 # here with LCD_RECT_COUNT_STORES so every store is counted at the point it
-# happens.  The test compares that count against the budget the painter deducted,
+# happens.  Issue #110 split the geometry rule out again into svc/rect_geom.c,
+# shared with wio-lite-ai's painter; both translation units are linked here so
+# the loop under test is still the real one.  The test compares that count against the budget the painter deducted,
 # and pins golden numbers besides, so the two sides are not one side twice.
 gcc $CFLAGS -DLCD_RECT_COUNT_STORES \
     -I "$here" -I "$board/port/plugin" -I "$board/port/lcd" -I "$board/../../svc" \
     "$here/test_plugin_paint.c" "$board/port/plugin/plugin_paint.c" \
-    "$board/port/lcd/lcd_rect.c" \
+    "$board/port/lcd/lcd_rect.c" "$board/../../svc/rect_geom.c" \
     $LDFLAGS -o "$out/test_plugin_paint"
 "$out/test_plugin_paint"
 

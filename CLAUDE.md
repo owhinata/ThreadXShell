@@ -389,6 +389,13 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   **[!] admission は `nn run` と `nn stream start` の共有**なので、**shape の問いは
   no-plugin で通す**（refuse すると素のモデルの `nn run` が消える）。**stream を止めるのは
   `nn_active_can_draw()` 1 本**で、panel を要求した時だけ聞く。
+  **[!] ただしこの規則には現に穴がある（#120）**: `nn_camera_start()` 冒頭の
+  **re-arm 早期 return は `require_draw` を見ず**、`nn run` は stream のライフサイクルを
+  claim せずに同じ worker を起こすので、「単発の最中に band stream が lost →
+  別コンソールから `nn stream start`」が描画の検査なしで通る（**経路は #110 から在り、
+  #116 は `can_draw` が 0 を返すようになったぶん通る幅を広げた**）。**正規の re-arm は
+  安全**（stream 中は model の load/unload が弾かれるので、admission が聞いた時の答えが
+  まだ有効）。**#120 が片付いたらこの併記を消す。**
   **[!] worker は非同期**なので「**誰も解釈していない**」も**世代規則の下で record に
   publish する**（`nn_det_record_publish_raw()`。同じロック・arm 時点の世代・
   **成功時だけ推論カウンタを進める**）。publish しないと `nn run` が timeout する。

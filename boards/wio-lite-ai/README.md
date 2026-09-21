@@ -323,6 +323,13 @@ The tensors are reported as tensors and **not** through the shared class
 report: that one reads output 0 as a vector of class scores, which for a
 detector's regression tensor is a tidy table of numbers that mean nothing.
 
+**[!] KNOWN GAP: that report asks for the model again (issue #121).**  The
+shared printer pins and re-opens the model when it prints, after the run's
+session has been given back -- so what it describes is whichever model is open
+at print time, not provably the one that ran.  The other console can load a
+different one in between.  The numbers are always some model's real tensors,
+never garbage; what is not established is that they are THIS run's.
+
 `nn dets` is the answer that surprises.  On THIS board it only reads the last
 published decode: `nn run` takes its snapshot and then stops the stream, and a
 stop clears the record, so with no plugin there is never a record left for it
@@ -340,6 +347,21 @@ share.  "Can the decoder read these outputs" passes with no plugin, because
 nothing is going to read them and refusing would take the bare-model `nn run`
 away; the single question that stops a stream is "will anything draw"
 (`nn_active_can_draw()`), and it is only asked when a panel was requested.
+
+**[!] KNOWN GAP: one route reaches the worker without passing that question
+(issue #120).**  The first thing `nn_camera_start()` does is notice that a
+session is already running and, if the band stream died underneath it, re-arm
+and return -- and that early return never looks at `require_draw`.  A
+legitimate re-arm is safe: the session that admitted the stream is still held,
+so the decoder cannot have been swapped since it was asked.  But `nn run` drives
+the same worker WITHOUT claiming the stream lifecycle, and this board has two
+consoles (USB CDC and telnet).  So `nn stream start` typed on one console while
+a one-shot's band stream is lost on the other returns OK with nothing having
+asked whether anything can draw.  **The route predates issue #116** -- what #116
+widened is what it lets past, because `can_draw()` now answers 0 where it used
+to answer 1.  It is deliberately not patched here: refusing at that early return
+would break the re-arm `nn stream stats` tells an operator to perform.  Issue
+#120 is where the fix belongs, and this paragraph goes when it lands.
 
 `nn model load --slot <n>` reads the blob into the PSRAM staging buffer and
 CRC-checks that copy exactly as before, then:

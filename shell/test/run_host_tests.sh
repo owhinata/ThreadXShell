@@ -284,6 +284,27 @@ gcc $CFLAGS -I "$svc" \
     $LDFLAGS -o "$out/test_plugin_load"
 "$out/test_plugin_load"
 
+# issue #110 (#78 Step 3b) -- the loader that runs AFTER that validation
+# (svc/plugin_exec.c), shared by grove-vision-ai-v2 and wio-lite-ai.
+#
+# What it must get right is an ORDER, and every step of that order is invisible
+# from a console: a board can show that a plugin ran, not that the fault
+# reporter would have named it had a fault arrived between two particular
+# instructions.  The port hooks are the observation points -- each records when
+# it was called and what the world looked like from there -- so the rules
+# AGENTS.md states about this one mechanism are checked where they are made.
+#
+# [!] AND THE ENTRY POINT IS REALLY BRANCHED TO.  Testing it with an "entry
+# absent" manifest would exercise a shape plugin_parse() refuses to emit and
+# leave publish-before-branch checked by nothing, so the image copied in is
+# twelve bytes of position-independent machine code that jumps back into the
+# test.  That part is host-specific and SKIPs elsewhere; the ordering cases run
+# everywhere.
+gcc $CFLAGS -I "$svc" \
+    "$here/test_plugin_exec.c" "$svc/plugin_exec.c" \
+    $LDFLAGS -o "$out/test_plugin_exec"
+"$out/test_plugin_exec"
+
 # issue #97 -- the shared BlazeFace decoder (svc/blazeface.c), folded from three
 # diverged board copies.  The REAL decoder is compiled here against synthetic
 # tensors, which it permits because it takes descriptors (svc/tensor.h) rather

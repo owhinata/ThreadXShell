@@ -916,66 +916,7 @@ foreach(_o3 IN LISTS GROVE_O3_SOURCES)
             "with them at -O3; a different level here is a silent regression.")
     endif()
 endforeach()
-# --- the shared files must own no storage (issue #97) -------------------------
-#
-# See cmake/shared_storage_gate.cmake for what this checks and why it has to be
-# THIS board's compile rather than a generic one.
-#
-# [!] THE DECODER'S AUDIT IS NOT HERE ANY MORE (issue #104).  This helper builds
-# its audit object from a CONSUMER TARGET's properties so that the audit is the
-# board's real compile -- and shell_objs stopped compiling svc/blazeface.c.
-# Reconstructing the plugin's flags here would have produced an object no shipped
-# artifact contains, which is the second of the two mistakes that file's header
-# records.  The audit moved into add_plugin(), where it runs on the REAL
-# object that gets linked into the plugin image.
-include("${CMAKE_SOURCE_DIR}/cmake/shared_storage_gate.cmake")
-
-# The same rule on the one shared `nn` command and its pure half (issue #50).
-# Same property, same failure mode: a static in either lands in memory no board
-# placed.  Audited with THIS board's compile for the reason above -- and here it
-# also decides which subcommands exist, because the capability macros come from
-# this board's nn_svc_config.h.
-add_shared_storage_gate(NAME grove_nn_cmd_audit
-                        SOURCE "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
-                        IFACE bsp_iface CONSUMER shell_objs)
-add_dependencies(shell grove_nn_cmd_audit_check)
-add_shared_storage_gate(NAME grove_nn_core_audit
-                        SOURCE "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
-                        IFACE bsp_iface CONSUMER shell_objs)
-add_dependencies(shell grove_nn_core_audit_check)
-
-# ...and the shared stream lifecycle (issue #99), for the same reason: the state
-# is the BOARD's struct, so a static appearing in here would be memory no board
-# placed and no board's residency gate names.
-add_shared_storage_gate(NAME grove_nn_life_audit
-                        SOURCE "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"
-                        IFACE bsp_iface CONSUMER shell_objs)
-add_dependencies(shell grove_nn_life_audit_check)
-
-# ...and the outline geometry rule (issue #110).  It is pure today and has no
-# reason to gain state -- which is exactly when a file stops being audited and
-# nobody notices it acquiring a cache.  The rule is "every shared translation
-# unit this board compiles", stated in that direction, because the direction
-# that was missing once before was "is every shared file actually audited?".
-add_shared_storage_gate(NAME grove_rect_geom_audit
-                        SOURCE "${CMAKE_SOURCE_DIR}/svc/rect_geom.c"
-                        IFACE bsp_iface CONSUMER shell_objs)
-add_dependencies(shell grove_rect_geom_audit_check)
-
-# ...and the shared loader (issue #110).  This one is the reason the rule
-# matters rather than an application of it: the fault reporter reads the
-# published pointer from an exception, so the object it points into has to be
-# the BOARD's -- permanent, never reallocated, reachable with no initialisation.
-# A static appearing in the machine would be memory no board placed and no
-# board's residency gate names.
-add_shared_storage_gate(NAME grove_plugin_exec_audit
-                        SOURCE "${CMAKE_SOURCE_DIR}/svc/plugin_exec.c"
-                        IFACE bsp_iface CONSUMER shell_objs)
-add_dependencies(shell grove_plugin_exec_audit_check)
-add_shared_storage_gate(NAME grove_paint_budget_audit
-                        SOURCE "${CMAKE_SOURCE_DIR}/svc/plugin_paint_budget.c"
-                        IFACE bsp_iface CONSUMER shell_objs)
-add_dependencies(shell grove_paint_budget_audit_check)
+# Shared service storage checks are derived after this file by the root CMake.
 
 # And the negative tests for that checker, run with THIS board's cross compiler
 # so the __arm__-only fixture is meaningful (it passes under the host compiler,
@@ -988,6 +929,17 @@ add_custom_target(grove_decoder_storage_fixtures
     COMMENT "storage gate negative tests (cross compiler)"
     VERBATIM)
 add_dependencies(shell grove_decoder_storage_fixtures)
+
+# Exercise coverage/replay failure paths as well as the section checker. The
+# real-context mutations use this consumer's flags for the three shared TUs.
+add_custom_target(grove_shared_storage_build_fixtures
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/cmake/fixtures/run_shared_storage_build_tests.py"
+            --cc "${CMAKE_C_COMPILER}" --objdump "${CMAKE_OBJDUMP}"
+            --nm "${CMAKE_NM}" --board-build "${CMAKE_BINARY_DIR}"
+    COMMENT "derived storage gate integration tests (cross compiler)"
+    VERBATIM)
+add_dependencies(shell grove_shared_storage_build_fixtures)
 
 target_link_options(shell PRIVATE
     "-T${LDSCRIPT_APP}" -Wl,-Map=shell.map,--cref)
@@ -2071,4 +2023,3 @@ grove_add_asset(blazeface
 grove_add_asset(cifar10
     PROFILE cls  PLUGIN cifar10  SLOT 1
     FILE "${GROVE_SDK_ROOT}/model_zoo/tflm_mb_cls/qat_pruning_model_vela.tflite")
-

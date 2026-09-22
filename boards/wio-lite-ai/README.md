@@ -176,9 +176,9 @@ functions, so LTO has nothing to rename.  They are still the linker checking its
 own script, which is why `cmake/check_plugin_reservation.py` checks the image as
 well.
 
-Since issue #97 there is one more, and it protects something less obvious.  A
-file shared by three boards may own NO storage -- each board places what the
-shared code works on, so that its own residency gate keeps naming a symbol it
+Since issue #97 there is one more, and it protects something less obvious.  The
+stateless service and nn translation units may own NO storage -- each board
+places what the shared code works on, so that its own residency gate keeps naming a symbol it
 owns, and a static added to the shared file would be state nobody placed and no
 gate mentions.  `cmake/check_no_mutable_storage.py` refuses that by compiling
 the shared file with this board's real definitions and requiring the object to
@@ -195,10 +195,12 @@ decoder, with the candidate scratch it passes in pinned in `.psram_ai` as
 container, and `add_plugin()`'s `AUDIT_SHARED` runs the same gate on the
 PLUGIN's object -- the only compile of that file this board produces.  Auditing
 a compile that is not in the image would be a gate answering about something
-nobody ships.  What the firmware still audits for itself is `cmd_nn.c`,
-`nn_cmd_core.c` and `svc/nn_stream_life.c`.  (Three shared translation units
-this board compiles are not audited at all, which Grove does audit; that is
-issue #117, not something #116 changed.)
+nobody ships. Since issue #117, firmware coverage is derived from the configured
+build, including `plugin_exec.c`, `plugin_paint_budget.c` and `rect_geom.c` when
+the backend enables them. A null-backend build audits only its actual sources;
+it does not create firmware decoder/plugin objects. See the
+[shared storage gate contract](../../cmake/README.md) for scope, the existing
+YMODEM exception, command replay, and negative tests.
 
 ## Console
 

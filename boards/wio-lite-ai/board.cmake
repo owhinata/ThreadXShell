@@ -1162,35 +1162,7 @@ add_custom_command(TARGET shell POST_BUILD
 # 2 MB stopped being non-cacheable, and that rule has no runtime enforcement at all: a
 # DMA buffer in there transfers correctly and is then read back stale from the data
 # cache, intermittently, only under cache pressure.  `shell` only, like the two above.
-# --- the shared decoder must own no storage (issue #97) -----------------------
-#
-# See cmake/shared_storage_gate.cmake for what this checks and why it has to be
-# THIS board's compile rather than a generic one.
-include("${CMAKE_SOURCE_DIR}/cmake/shared_storage_gate.cmake")
-# The same rule on the one shared `nn` command and its pure half (issue #50).
-add_shared_storage_gate(NAME wio_nn_cmd_audit
-                        SOURCE "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
-                        IFACE bsp_iface CONSUMER shell)
-add_dependencies(shell wio_nn_cmd_audit_check)
-add_shared_storage_gate(NAME wio_nn_core_audit
-                        SOURCE "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
-                        IFACE bsp_iface CONSUMER shell)
-add_dependencies(shell wio_nn_core_audit_check)
-
-# ...and the shared stream lifecycle (issue #99), for the same reason: the state
-# is the BOARD's struct, so a static appearing in here would be memory no board
-# placed and no board's residency gate names.
-add_shared_storage_gate(NAME wio_nn_life_audit
-                        SOURCE "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"
-                        IFACE bsp_iface CONSUMER shell)
-add_dependencies(shell wio_nn_life_audit_check)
-
-# [!] AND NOT ON svc/blazeface.c ANY MORE (issue #116).  The firmware used to
-# link the shared decoder and audited THAT compile here.  It no longer links it,
-# and auditing an object that is not in the image would be a gate answering
-# about something nobody ships.  The decoder still gets audited -- by
-# add_plugin()'s AUDIT_SHARED below, on the object the PLUGIN actually links,
-# which is the only compile of it this board produces.
+# Shared service storage checks are derived after this file by the root CMake.
 
 add_custom_command(TARGET shell POST_BUILD
     COMMAND "${Python3_EXECUTABLE}"

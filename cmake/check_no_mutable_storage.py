@@ -28,8 +28,10 @@ object each TARGET build produces.  The host and the boards differ in predefined
 macros, ABI and compile options, so code that generates storage only under
 __arm__ -- or only under one board's definitions -- passes a host check and fails
 on the device.  Each board therefore compiles the shared TU with its own real
-definitions, includes and architecture flags (optimisation, LTO and common are
-overridden for the audit, so this is an audit compile and not the build's own).
+definitions, includes, architecture and optimisation flags. Firmware audits
+only force -fno-lto, since bytecode has no native sections to inspect; common
+storage is rejected by this checker rather than hidden with -fno-common. Plugin
+gates inspect the actual linked native object.
 
 [!] WHAT IT DOES NOT PROVE.  It proves that THIS object owns no storage expressed
 as writable or common.  It is not:

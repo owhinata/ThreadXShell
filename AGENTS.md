@@ -40,6 +40,13 @@
      （#97 のデコーダと同一機構）。**ホストの結果は当てにならない** — host では
      コマンド表が `.data.rel.ro` に落ちて偽陽性になり、実機の cortex-m 向けでは
      `READONLY` になる。状態を持ってよいのはアダプタだけ。
+   - **#117: ファーム監査はビルドから導出する。** 実際にコンパイルする `svc/` の TU と
+     上記 nn 共有 TU 2 本が対象。唯一の既存例外は `svc/ymodem.c`（送受信バッファと
+     診断状態）。shell 全体は stateless ではない。評価済み CMake target/source 一覧と
+     compile DB を `(target, source)` ごとに両方向照合し、実引数で直接監査コンパイルする
+     （出力先・依存ファイル以外は `-fno-lto` だけ上書き）。`shell` の毎ビルドで実行し、
+     target 別 export OFF / unity / 未対応形式を拒否する。plugin の実オブジェクト監査は
+     別に維持する。**導出・照合・失敗伝播を弱めない。** 詳細は `cmake/README.md`。
    - **capability マクロは性質であってボード名ではない**
      （`boards/<board>/svc/nn_svc_config.h`）。`#ifdef <BOARD>` の言い換えを作らない。
      バックエンド依存の能力は `CONFIG_NN_BACKEND` に従う（f746/wio の `model load`）。
@@ -223,7 +230,7 @@
        ものではないので描かない。
      - **`svc/blazeface.c` の監査はファーム側から消え、`add_plugin()` の
        `AUDIT_SHARED` だけ**になった（出荷物に無いオブジェクトを監査しない）。
-       wio が未監査で持つ共有 TU 3 本は **#117**。
+       ファームの共有 TU は **#117 のビルドから導出する監査**が対象に含める。
      - **f746g-disco はまだ常駐デコーダを持つ**（#78 Step 4）。そこは変えない。
 
 8. **リンカスクリプトの `ASSERT` は LTO 下で空振りする。** 配置保証はポストリンクの

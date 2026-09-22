@@ -635,35 +635,7 @@ if(CONFIG_NN_BACKEND STREQUAL "stedgeai_reloc")
     list(APPEND F746_LAYOUT_REQUIRED --require-model-window g_model_slot)
 endif()
 
-# --- the shared decoder must own no storage (issue #97) -----------------------
-#
-# See cmake/shared_storage_gate.cmake for what this checks and why it has to be
-# THIS board's compile rather than a generic one.
-include("${CMAKE_SOURCE_DIR}/cmake/shared_storage_gate.cmake")
-add_shared_storage_gate(NAME f746_decoder_audit SOURCE "${F746_SHARED_DECODER}"
-                         IFACE bsp_iface CONSUMER shell)
-add_dependencies(shell f746_decoder_audit_check)
-
-# The same rule on the one shared `nn` command and its pure half (issue #50).
-# [!] THIS BOARD IS THE ONE THE GATE MATTERS MOST FOR: it has no residency check
-# that would notice a buffer quietly landing in internal SRAM, so a static added
-# to a shared unit would regress placement here as a SUCCESSFUL build.
-add_shared_storage_gate(NAME f746_nn_cmd_audit
-                        SOURCE "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
-                        IFACE bsp_iface CONSUMER shell)
-add_dependencies(shell f746_nn_cmd_audit_check)
-add_shared_storage_gate(NAME f746_nn_core_audit
-                        SOURCE "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
-                        IFACE bsp_iface CONSUMER shell)
-add_dependencies(shell f746_nn_core_audit_check)
-
-# ...and the shared stream lifecycle (issue #99), for the same reason: the state
-# is the BOARD's struct, so a static appearing in here would be memory no board
-# placed and no board's residency gate names.
-add_shared_storage_gate(NAME f746_nn_life_audit
-                        SOURCE "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"
-                        IFACE bsp_iface CONSUMER shell)
-add_dependencies(shell f746_nn_life_audit_check)
+# Shared service storage checks are derived after this file by the root CMake.
 
 add_custom_command(TARGET shell POST_BUILD
     COMMAND "${Python3_EXECUTABLE}"

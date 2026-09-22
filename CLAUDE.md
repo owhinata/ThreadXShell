@@ -156,6 +156,26 @@ boards/
 
 **動作確認前にコミットしない。ドキュメント／メモリ更新を忘れない。**
 
+### メインは管理、作業は subagent
+
+**メインのセッション（ユーザーと話している側）は管理だけを担当し、各 Issue（タスク）の作業は
+subagent に任せる**（2026-09-21 ユーザー指示、2026-09-22 に明文化）。メインのコンテキストは
+進め方の判断・ユーザーとのやり取り・報告の裏取りに使い、実装の詳細や Codex の出力で埋めない。
+
+- **メインがやること**: Issue と範囲を決める / subagent を起動し報告を**実物で裏取り**する /
+  ユーザーに選択肢と CONCERN の採否を聞く / plan mode と `ExitPlanMode` /
+  ビルド・テスト・差分の再確認 / 実機確認の依頼 / commit・merge・push / Issue コメントとクローズ。
+- **subagent がやること**: 下調べ / plan 素案 / `codex-review` skill による plan レビュー /
+  実装 / 実装後の Codex レビュー（**実装した本人とは別の fresh subagent**）。
+- [!] **subagent は token 消費を抑えるため `model: opus` で起動する**（メインのモデルを継承させない）。
+  機械的な作業と読むだけの下調べは **`sonnet`** でよい。迷ったら opus。
+- subagent への指示に毎回書くこと: CLAUDE.md を最初に読む / git の add・commit・push をしない /
+  **marker（`~/.claude/.threadx-shell-plan-codex-reviewed`）に触らない — touch するのはメインだけ** /
+  **実機に焼かない** / `lib/`・SDK・boot ツリーを編集しない / plan と実物が食い違ったら
+  読み替えずに止まって報告する / 報告に「plan から外れた点・自分で決めた点」を必ず書く。
+- **Codex を回す subagent は同時に 1 つまで**。subagent が実装している間はメインが plan mode に
+  入らない。実装は plan のコミット単位で 1 段ずつ止めさせ、メインが確認してコミットしてから次へ送る。
+
 ### Plan + Codex review ワークフロー
 
 **Phase 系 / architecture を変える plan は、plan 確定前と実装後の両方で codex-review を実施する。**

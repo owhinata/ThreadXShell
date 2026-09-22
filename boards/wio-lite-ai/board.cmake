@@ -1380,34 +1380,21 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # What the base itself may spend below one veneer, charged at each indirect
     # call because the gate cannot see across it.
     #
-    # [!] DERIVED FROM THE BASE THIS BOARD ACTUALLY HAS (issue #110).  Step 3a
-    # carried Grove's 256 as an admitted placeholder; the base now exists and
-    # was measured with -fstack-usage over its callbacks, LTO off, summed along
-    # the deepest chain a plugin veneer can reach:
+    # [!] DERIVED FROM THE SHIPPED IMAGE AND CHECKED HERE, EVERY BUILD (issue
+    # #112).  It was hand-summed before: issue #110 measured the callbacks with
+    # -fstack-usage and added up the deepest chain a veneer reaches, which ran
+    # through the formatter and its 64-bit division helpers and came to 528 B.
+    # #112 took the formatter out from under that veneer -- a plugin's bytes go
+    # to the log ring by length -- and derives what is left from the LTO image:
+    # 176 B, the ring append.  A hand sum is what the check below replaces; it
+    # is no longer re-derived by anyone reading this file.
     #
-    #   nn_plugin_log       80   (16 + the 64 B buffer it copies into)
-    #   log_write          200   (LTO folds log_vwrite into it)
-    #   fmt_vsnformat       32
-    #   fmt_vformat         80
-    #   fmt_utoa            64
-    #   __aeabi_uldivmod    16   (fmt_utoa divides 64-bit)
-    #   __udivmoddi4        40
-    #                      ---
-    #                      512 B
-    #
-    # [!] THE FIRST VERSION OF THIS SUM STOPPED AT fmt_utoa, at 400 B, and was
-    # short by the two division helpers underneath it.  The review that caught
-    # it makes the general point: measuring a callback's own frame is not
-    # measuring what is below the crossing.  (fmt_utoa and fmt_padded are
-    # called in SEQUENCE, so the deeper one ends the chain; the painter is far
-    # shallower -- paint_rect 64 + rect_geom_norm 16 -- and to_frame and the
-    # report sink are leaves.)
-    #
-    # 640 rather than 512: over-estimating is the safe direction here, because
-    # the gate charges this at every crossing and a larger charge makes a
-    # plugin's computed requirement larger, not smaller.  RE-DERIVE IT whenever
-    # the base gains a callback or one of them gains a call -- the old number
-    # would still pass, which is the shape of the mistake this replaces.
+    # 640 rather than the derived number: over-estimating is the safe direction,
+    # because the gate charges this at every crossing and a larger charge makes
+    # a plugin's computed requirement larger, not smaller.  RAISING it costs a
+    # re-pack and a re-send of every container that exists (their declared
+    # stacks were computed against this number, and the firmware cannot tell a
+    # stale declaration from a current one); lowering it buys nothing.
     set(WIO_PLUGIN_VENEER_BASE_COST 640)
 
     # The firmware side of that charge (issue #112): the build derives the

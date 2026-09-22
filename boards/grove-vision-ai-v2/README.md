@@ -4958,6 +4958,11 @@ and afterwards `blob list` must show `crc32 C9AEEFA8`.  That comparison is the
 check; see **What moving the gate to build time gives up** above for why it is
 the one that matters.
 
+[!] **The `.nnc` under `build/` is the last one PACKED, not the last one SENT.**
+What a device holds is established by `blob list`'s crc32 against the receipt of
+a transfer you actually made -- never by reading the build tree, which a rebuild
+moves without touching the board.
+
 [!] **`blob write` will not overwrite an occupied slot**, whatever the name.  A
 slot holding a VALID blob under *any* other name gives `OCCUPIED`, not a fresh
 write -- so the `blob erase` above is required, not tidiness.  (The duplicate
@@ -5058,9 +5063,9 @@ ELF.  **It is shared since issue #108**, and this board's facts reach it as
 `add_plugin()` arguments from `board.cmake`: the reservation, the forbidden
 table (`GROVE_PLUGIN_FORBIDDEN` -- the NOR write path first, because that flash
 holds the bootloader), and `GROVE_PLUGIN_VENEER_BASE_COST` = 256, the stack
-charged for this base's work behind an indirect veneer -- known to be short of
-this image's 456 B (see **The veneer charge is known to be short**; issue
-#112).  The checks are
+charged for this base's work behind an indirect veneer -- derived from the
+shipped image and checked on every build since issue #112 (see **The veneer
+charge is derived from the image, and checked**).  The checks are
 forbidden symbols, an allocated-section whitelist, no relocations, storage in
 the declared segments, indirect branches only in the named veneers, and a
 transitive stack bound per entry point.  The linker enforces some of the same
@@ -5500,24 +5505,57 @@ deepest path, on the console to decode: `cli_thread_entry` 40 > `cli_input_byte`
 `nn_svc_model_load` 216 > `plugin_run_load` 48 > `plugin_exec_load` 56.
 "real need" is the next section's.
 
-#### The veneer charge is known to be short, and what that costs here
+#### The veneer charge is derived from the image, and checked
 
-The shipped declarations were derived with `GROVE_PLUGIN_VENEER_BASE_COST` = 256.
-The firmware's worst case behind a veneer in this image is **456 B**, the log
-callback: `nn_plugin_log` 16 > `log_write` 24 > `log_vwrite` 192 >
-`fmt_vsnformat` 32 > `fmt_vformat` 80 > `fmt_utoa` 56 > `__aeabi_uldivmod` 16 >
-`__udivmoddi4` 40 (the formatter's putter is `snbuf_putc`, 8).  The others are
-well under 256: `to_frame` 48, the painter's rect 232, fill 32 and blit 48, the
-report writer 24.
+`GROVE_PLUGIN_VENEER_BASE_COST` = 256 is what the image gate charges a plugin at
+every crossing into the base, because it cannot see across a veneer.  Since
+issue #112 the build derives the other side of that charge from the firmware it
+ships -- `shell.elf`, after the link -- and refuses a declaration that does not
+cover it:
 
-Re-running the image gate over the shipped plugin ELFs with 456 at every veneer
-gives the "real need" column -- blazeface decode 592, draw 532, report 544;
-cifar10 decode 632, draw 492, report 536; entry, shapes_ok and the params do not
-change.  (With 256 the same run reproduces the shipped declarations exactly,
-which is the control.)  Every one is under its `L(slot)`.  Correcting the charge
-is issue #112, and it reopens this check: with today's plugins cifar10's decode
-is 176 B plus the charge, so 1,024 holds while the charge stays at or under
-848 B.
+| veneer | firmware function | derived | deepest chain |
+|---|---|---:|---|
+| `pl_paint_rect` | `paint_rect` | **232 B** | `paint_rect` 72 > `lcd_rect_wire` 136 > `rect_geom_norm` 24 |
+| `pl_base_log` | `nn_plugin_log` | 208 B | `nn_plugin_log` 16 > `log_write_bytes` 72 > `log_append` 88 > `ring_get` 24 > `memcpy` 8 |
+| `pl_base_to_frame` | `nn_active_to_frame` | 48 B | `nn_active_to_frame` 24 > `nn_preproc_box` 24 |
+| `pl_paint_blit` | `paint_blit` | 48 B | `paint_blit` 48 > `charge.isra.0` 0 > `plugin_paint_charge` 0 |
+| `pl_paint_fill_rect` | `paint_fill_rect` | 32 B | `paint_fill_rect` 32 > `charge.isra.0` 0 > `plugin_paint_charge` 0 |
+| `pl_print_write` | `nn_report_write` | 24 B | `nn_report_write` 16 > `memcpy` 8 |
+
+**256 >= 232, with 24 B of headroom, and the declaration did not have to
+change.**  It used to be short: the log callback went through the formatter and
+its 64-bit division helpers and needed **456 B** against the 256 declared.  #112
+took the formatter out from under that veneer -- a plugin's bytes reach the log
+ring by length now, not through `LOG_INF` -- which leaves that chain at 208 B
+and the painter's rect as the deepest thing under any veneer.
+
+(The chains are printed with the names the LINK produced: `charge.isra.0` is
+what the compiler made of `plugin_paint_charge`'s wrapper, and the check reads
+the image, not the sources.)
+
+The numbers above are the build's, printed by the check itself; `ninja -C
+build/grove-vision-ai-v2 veneer_cost_check` prints them after removing
+`veneer_cost/shell.checked`.  Do not hand-sum them from `-fstack-usage`: that is
+what this replaced, and it is how the 456 went unnoticed.
+
+That matters for what is already on a device: **every container out there was
+packed against 256, and the build now proves the firmware stays under it**.  No
+re-pack and no re-send, and none is owed -- the correction this section used to
+say was outstanding was paid by removing the chain, not by raising the number.
+Raising it is what would cost a re-send of every container that exists, because
+the firmware cannot tell a stale declaration from a current one.
+
+Each plugin's own printer bound goes to the same check (`pl_sbuf_write` = 64
+here, from `add_plugin()`): the printer veneer lands in the plugin as well as in
+the base, so it has to fit under the declared charge too.
+
+**Nothing ships past a failed check.**  Its success is a stamp
+(`build/grove-vision-ai-v2/veneer_cost/shell.checked`), deleted before the check
+runs and written only when it passes, and `flash` and every `asset-*` target
+depend on it.  A failure therefore stops the flash AND the container pack, and
+leaves no stamp for the next build to trust.  The mechanism is shared with
+wio-lite-ai: `cmake/veneer_cost_gate.cmake`, `cmake/check_veneer_base_cost.py`
+and `cmake/README.md`.
 
 #### What holds these numbers up, which no gate checks
 

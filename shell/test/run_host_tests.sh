@@ -66,6 +66,38 @@ for b in $boards; do
     fi
 done
 
+# issue #123 -- the agent-instruction files stay invariants-only, and the only
+# thing that had ever enforced that was intent.  Both had grown into per-issue
+# work logs (1,164 and 1,072 lines) because "CLAUDE.md holds only what must not
+# be broken" had no ceiling: every issue closed by adding its measured values and
+# its story as though they were rules.  A line budget is a crude proxy for
+# "invariants only", but it is one a person notices BEFORE the commit, and the
+# choice it forces -- board README for measurements, persistent memory for the
+# story -- is exactly the split those files already declare.
+#
+# The limit is written once, here.  Both counts are printed before anything
+# fails, because reporting one file's overflow while hiding the other's would
+# send someone back for a second round.
+doc_limits="CLAUDE.md:350 AGENTS.md:300"
+doc_over=0
+for entry in $doc_limits; do
+    f=${entry%:*}
+    max=${entry#*:}
+    n=$(wc -l < "$repo/$f")
+    if [ "$n" -gt "$max" ]; then
+        echo "doc size: $f $n lines (limit $max) -- OVER" >&2
+        doc_over=1
+    else
+        echo "doc size: $f $n lines (limit $max)"
+    fi
+done
+if [ "$doc_over" -ne 0 ]; then
+    echo "run_host_tests: an agent-instruction file is over its line budget." \
+         "Measured values belong in boards/<board>/README.md and the story in" \
+         "persistent memory; only a new invariant earns a line here." >&2
+    exit 1
+fi
+
 # Flags mirror the target link so the tests exercise the real retention path:
 #   -ffunction-sections -fdata-sections + -Wl,--gc-sections : same GC as the
 #       firmware; proves `used` + linker KEEP keep the (otherwise unreferenced)

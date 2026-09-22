@@ -547,6 +547,20 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_nn_probe"
 "$out/test_nn_probe"
 
+# issue #112 -- the RAM log ring (svc/log.c) and its two ways in.  log_write()
+# formats; log_write_bytes() takes a plugin's bytes by length and never touches
+# the formatter.  Both must end in ONE append, so every ring property -- wrap
+# behind a SKIP, whole-record eviction, the LOG_MSG_MAX cut, the level filter,
+# PRIMASK restored as it was, and the order of the seq bump, the head commit
+# and the read-backs -- is checked through both, and the two are required to
+# write byte-identical records for the same text.  The REAL log.c is compiled
+# (by #include, to read the ring back); log_shim/ supplies only the intrinsics
+# it uses, traced, and -DLOG_HOST_TEST switches on its read-back tap.
+gcc $CFLAGS -DLOG_HOST_TEST -I "$here/log_shim" -I "$board/svc" -I "$svc" \
+    "$here/test_log.c" "$svc/fmt.c" \
+    $LDFLAGS -o "$out/test_log"
+"$out/test_log"
+
 # --- the plugin image gate's negative tests (issue #106) --------------------
 #
 # [!] THIS RUNS HERE, NOT IN shell/test/run_host_tests.sh.  The fixtures compile

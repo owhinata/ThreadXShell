@@ -54,6 +54,25 @@ void log_write(unsigned level, const char *tag, const char *fmt, ...)
 	(void)fmt;
 }
 
+/* The byte path the plugin's log callback takes since issue #112.  Recorded
+ * rather than rendered: what is pinned here is the ADAPTER's wiring (prefix,
+ * marker, the empty / NULL drop); the rendering itself is test_log.c's. */
+static unsigned    lb_calls;
+static const char *lb_prefix, *lb_s, *lb_more;
+static size_t      lb_len;
+
+void log_write_bytes(unsigned level, const char *tag, const char *prefix,
+                     const char *s, size_t len, const char *more)
+{
+	(void)level;
+	(void)tag;
+	lb_calls++;
+	lb_prefix = prefix;
+	lb_s      = s;
+	lb_len    = len;
+	lb_more   = more;
+}
+
 /* The plugin's slot table, from asset/plugins/blazeface/plugin_main.c.  On the
  * board the loader copies the image into the reservation and adds the
  * manifest's offsets to its base; here the linker has already placed the
@@ -417,6 +436,31 @@ int main(void)
 		expect("and a null destination too",
 		       nn_active_to_frame(NULL, 0.0f, 0.0f, 1.0f, 1.0f, NULL) != 0,
 		       "accepted");
+	}
+
+	/*
+	 * issue #112 -- the plugin's log callback hands the bytes on by length:
+	 * no copy, no formatter, "plugin: " before them and " ..." if they are cut;
+	 * nothing at all for an empty or NULL text.
+	 */
+	{
+		const struct plugin_base_api *b = nn_active_base();
+		static const char msg[5] = { 'h', 'e', 'l', 'l', 'o' };  /* no NUL */
+
+		lb_calls = 0u;
+		b->log(b->ctx, NULL, 5u);
+		b->log(b->ctx, msg, 0u);
+		expect("an empty or NULL plugin text writes no record",
+		       lb_calls == 0u, "%u calls", lb_calls);
+		b->log(b->ctx, msg, sizeof msg);
+		expect("the plugin's bytes go to the log by length, unterminated",
+		       lb_calls == 1u && lb_s == msg && lb_len == sizeof msg,
+		       "%u calls, s %p len %zu", lb_calls, (const void *)lb_s, lb_len);
+		expect("with the wio prefix and cut marker",
+		       lb_prefix && strcmp(lb_prefix, "plugin: ") == 0 &&
+		               lb_more && strcmp(lb_more, " ...") == 0,
+		       "prefix '%s' more '%s'", lb_prefix ? lb_prefix : "(null)",
+		       lb_more ? lb_more : "(null)");
 	}
 
 	if (failures) {

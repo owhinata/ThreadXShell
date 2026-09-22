@@ -470,27 +470,31 @@ static const struct plugin_policy nn_plugin_policy = {
  * three more indirect call sites for the stack analysis to account for and
  * nothing gained.
  */
+/*
+ * The producer thread has no console, so this is the only way a plugin can
+ * explain itself.
+ *
+ * [!] THE BYTES GO TO THE LOG WITHOUT THE FORMATTER (issue #112).  This said
+ * `LOG_INF("plugin: %.*s", (int)len, s)`, and svc/fmt.c implements neither a
+ * precision nor `*` -- deliberately, it is a clean-room minimal formatter -- so
+ * a plugin's explanation came out as that format string plus whatever the
+ * varargs were read as (present since issue #103).  log_write_bytes() takes
+ * the bytes by length, so they need no terminator and no copy; a text too long
+ * for the record is cut and ends " ...", and an empty or NULL one writes
+ * nothing -- the shape the wio-lite-ai adapter already had.
+ *
+ * It also takes the formatter out from below the log veneer.  The formatter
+ * was the deepest chain behind it and the only indirect calls there (its
+ * putters), so what the plugin veneer charges for is now derived by
+ * cmake/check_veneer_base_cost.py without an exception.
+ */
 static void nn_plugin_log(void *ctx, const char *s, size_t len)
 {
 	(void)ctx;
-	/* The producer thread has no console, so this is the only way a plugin can
-	 * explain itself.  Bounded by the log ring's own message limit.
-	 *
-	 * [!] AND IT IS BROKEN: svc/fmt.c implements neither a precision nor `*`
-	 * -- deliberately, it is a clean-room minimal formatter -- so a plugin's
-	 * explanation comes out as this format string plus whatever the varargs
-	 * are read as.  Present since issue #103 and found by the review of the
-	 * port to wio-lite-ai (issue #110), where it is fixed by copying into a
-	 * terminated buffer.
-	 *
-	 * NOT fixed here, on purpose.  That buffer costs stack below a veneer, and
-	 * GROVE_PLUGIN_VENEER_BASE_COST is 256 while the chain that gets here is
-	 * already over 300 before the formatter -- an undercharge this board's
-	 * containers were packed against.  Making a known-inadequate charge worse
-	 * and writing a comment about it is not a fix.  The two land together in
-	 * issue #112, with the derivation and the re-pack that follows from it.
-	 */
-	LOG_INF("plugin: %.*s", (int)len, s);
+	if (s == NULL || len == 0u)
+		return;
+	if (LOG_LEVEL_INF <= LOG_COMPILE_LEVEL)
+		log_write_bytes(LOG_LEVEL_INF, LOG_TAG, "plugin: ", s, len, " ...");
 }
 
 static const struct plugin_base_api nn_plugin_base = {

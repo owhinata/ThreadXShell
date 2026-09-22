@@ -174,6 +174,12 @@ threshold stays in ordinary internal RAM, because `.sdram` is NOLOAD and an
 initialised field there would never be loaded (and NOLOAD keeps the previous
 run's bytes, so it would fail by appearing to work).
 
+Since issue #117, coverage is derived across the actual `svc_obj` and `shell`
+producers. `cmd_nn.c`, `nn_cmd_core.c` and the resident decoder compile in
+`shell`. Each audit replays its producer's compile command. The resident
+decoder remains covered in every backend configuration. See the
+[shared storage gate contract](../../cmake/README.md).
+
 ## Commands
 
 ```

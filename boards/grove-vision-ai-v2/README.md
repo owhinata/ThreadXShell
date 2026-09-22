@@ -3962,6 +3962,15 @@ on Wio, `.sdram.ai` on F746) and its own residency gate.  A build gate enforces
 it, and on THIS board it runs on the object the plugin build actually links
 (`cmake/check_no_mutable_storage.py`, negative tests in `cmake/fixtures/`).
 
+Firmware services have a separate derived audit since issue #117. It replays
+`shell_objs` compile contexts (including the geometry source's `-O3`) and runs
+on every shipping `shell` build. Building `seam_probe` alone does not invoke this
+gate; that image is an inspection link. Every `shell` build also runs both the
+section-checker and derived-gate integration fixtures with the cross compiler,
+including mutations compiled with this board's actual service flags. The
+plugin's actual-object audit remains independent. See the
+[shared storage gate contract](../../cmake/README.md).
+
 `port/npu/npu_desc.c` is what remains of this board's half: `npu_tensor` ->
 `tensor_desc`, and nothing else.  `nn out`, `nn info` and the active-decoder shim
 all need that translation whatever interprets the tensors -- or whether anything

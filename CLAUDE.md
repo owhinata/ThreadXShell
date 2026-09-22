@@ -84,6 +84,13 @@ boards/
     `check_no_mutable_storage.py` が**ボードごとの監査コンパイル**で強制する
     （デコーダ #97 と同じ理由・同じスクリプト。ホストの答えは別物なので当てにしない）。
     状態はアダプタが持つ。
+  - **#117: ファーム監査は列挙せずビルドから導出する。** 対象は実際にコンパイルする
+    `svc/` の TU と上記 nn 共有 TU 2 本。唯一の既存例外は `svc/ymodem.c`
+    （送受信バッファと診断状態）で、shell 全体を stateless とする規則ではない。
+    評価済み CMake target/source 一覧と compile DB の `(target, source)` を両方向照合し、
+    実引数で直接再コンパイルする（出力先・依存ファイル以外は `-fno-lto` だけ上書き）。
+    `shell` の毎ビルドで実行し、対象別 export OFF / unity / 未対応の入力形式は拒否。
+    plugin の実オブジェクト監査は別に維持する。詳細は `cmake/README.md`。
   - **capability マクロは「性質」であって「ボード名」ではない**
     （`boards/<board>/svc/nn_svc_config.h`）。`#ifdef <BOARD>` の言い換えを作らない。
     バックエンドで変わる能力は `CONFIG_NN_BACKEND` に従わせる。
@@ -425,8 +432,8 @@ DFU 手順・ゲートの中身）。復旧手順は `boards/wio-lite-ai/boot/RE
   stop は record を reset する → **素のモデルでは常に「未推論」**。`valid` を上書きして
   作らない（3 ボードでの意味の統一は #118）。
   **`svc/blazeface.c` の監査はファーム側から消え、`add_plugin()` の `AUDIT_SHARED`
-  だけ**になった（出荷物に無いオブジェクトを監査しない）。wio が未監査で持つ
-  共有 TU 3 本は **#117**。
+  だけ**になった（出荷物に無いオブジェクトを監査しない）。ファームの共有 TU は
+  **#117 のビルドから導出する監査**が対象に含める。
   **`nn info` の claim は開いているモデルに従う**:
   reload 後にのみ確定、拒否されて前のモデルが残れば前の claim のまま、bare / unload で
   消す（session を返す前に確定）。**`nn info` は無ロックなので reload〜確定の窓は

@@ -56,6 +56,10 @@ endif()
 
 project(ThreadXShell C ASM)
 
+# Required input to the derived shared-storage gate. Set before creating targets;
+# the gate also checks target-local overrides and independent source membership.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 set(CMAKE_EXECUTABLE_SUFFIX ".elf")
 
 # REQUIRED, not optional: the boards' post-build residency checks
@@ -119,6 +123,9 @@ endif()
 # Declares BOARD_DIR, BOARD_FW_NAME and GEN_DIR, and builds the board's targets.
 set(BOARD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD}")
 include("${BOARD_CMAKE}")
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/shared_storage_gate.cmake")
+add_shared_storage_build_gate()
 
 # --- cli_version.h -----------------------------------------------------------
 # AFTER the board: configure_file() evaluates immediately, so BOARD_FW_NAME (set

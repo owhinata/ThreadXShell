@@ -1,1072 +1,300 @@
 # ThreadX Shell — Codex 向けプロジェクト指示
 
-マルチボード対応の **Eclipse ThreadX + シェルコンソール** ファームウェア。
-`stm32f746g-disco` と `wio-lite-ai` の shell 実装を統合し、1 つの shell コアで複数ボードを
-サポートする。ST 公式 HAL、CMake + Ninja、ARM GNU ツールチェーン。
+マルチボード対応の **Eclipse ThreadX + シェルコンソール** ファームウェア（`stm32f746g-disco` と
+`wio-lite-ai` の shell を 1 コアに統合、CMake + Ninja）。このファイルは Codex が**毎回読む前提の不変
+条件表**で、**レビュー時はここを最優先の判定基準にする**。置くのは「破ると BLOCKING になること」だけで、
+**説明・実測値・アドレス・経緯は `boards/<board>/README.md` が正**。人間向けの同じ規則は `CLAUDE.md` で、
+**不変条件を変えたら両方を直す**（上限 300 行を `shell/test/run_host_tests.sh` が強制する）。
 
-このファイルは Codex（`/codex:review` の内蔵レビュアーを含む）が**毎回読む前提の要約**。
-人間向けの詳細は `CLAUDE.md` にある。**レビュー時はここの不変条件を最優先の判定基準にする。**
-
-## 対応ボード
-
-| ボード | MCU | クロック | コンソール | 書込 |
-|---|---|---|---|---|
-| STM32F746G-DISCO | STM32F746NGH6 (M7, 216 MHz 自前設定) | VCP: USART1 PA9/PB7 115200 | ST-Link |
-| Wio Lite AI | STM32H725AEI6 (M7, 550 MHz **DFU boot から継承**) | USB CDC (OTG_HS FS / TinyUSB, `0483:5740`) | **DFU のみ** |
-| Grove Vision AI V2 | Himax HX6538 WiseEye2 (dual M55 + U55; app = CM55M / **Secure**, 400 MHz **bootloader から継承**) | UART0 (CH343P ブリッジ) 921600 | **UART xmodem のみ** |
+| ボード | MCU | 書込 | 説明の正 |
+|---|---|---|---|
+| STM32F746G-DISCO | STM32F746NGH6（M7、クロックは自前設定） | ST-Link | `boards/f746g-disco/README.md` |
+| Wio Lite AI | STM32H725AEI6（M7、**DFU boot から継承**） | **DFU のみ** | `boards/wio-lite-ai/README.md` |
+| Grove Vision AI V2 | Himax HX6538（dual M55 + U55、app = CM55M / **Secure**、**bootloader から継承**） | **UART xmodem のみ** | `boards/grove-vision-ai-v2/README.md` |
 
 ## [!] 不変条件（違反はそれだけで BLOCKING）
 
 1. **レイヤリング**: 一方向依存 **HAL/CMSIS/ThreadX（`lib/`）← port（ボード別）← shell ← app**。
-   shell コアはボード非依存 — `#ifdef <BOARD>` やペリフェラル直叩きを shell の core/cmds に
-   入れない。ボード差は transport 抽象（`struct cli_transport_api`）と port 側グルーで吸収する。
-   ボード固有物は `boards/<board>/`（port/ ldscript/ src/）に置く。
-   **Wio の DFU ブートローダ（`boards/wio-lite-ai/boot/`）は独立ツリー**で、app / shell と
-   ソースを共有しない。
-   `shell/test/` も同じ規律の下にある — ボード所有のコードを実ヘッダ込みでホストコンパイル
-   するテストは `boards/<board>/test/host_tests.sh`（`shell/test/run_host_tests.sh` が
-   同じフラグで呼ぶ）に置き、`shell/test/` にボード参照を持ち込まない。
-   **ドキュメントも同じ**: ボード固有の説明（手順 / ピン / メモリマップ / ハマりどころ /
-   復旧手順）は **`boards/<board>/README.md` が正**。このファイルとルート `README.md` は
-   要点・不変条件・リンクに留め、同じ事実を写経しない（食い違いの温床になる）。
-
+   shell コアはボード非依存で、`#ifdef <BOARD>` やペリフェラル直叩きを core/cmds に入れない（ボード差は
+   transport 抽象 `struct cli_transport_api` と port 側グルーで吸収）。ボード固有物は `boards/<board>/`
+   で **Wio の boot ツリーは独立**。ボード所有コードのホストテストは `boards/<board>/test/host_tests.sh`
+   に置き `shell/test/` にボード参照を持ち込まない。**ドキュメントも同じで board README が正。**
 2. **共有コアに触れる変更は全対応ボードで成立すること。** 片方のボードだけを見て LGTM しない。
+3. **upstream submodule（`lib/` 配下）と Grove の Himax SDK ツリーは read-only**（調整は port 側で）。
+4. **shell の常設状態は静的割当**で、init / dispatch / 出力経路は heap を要求しない。board 固有コマンドの
+   ペイロードは board が bounded heap・排他・失敗処理を明示的に提供する場合のみ heap 可。スタック
+   サイズ・優先度は `cli_config.h` で `_Static_assert` を通すこと。
+5. **ビルドは `_ref/` を読まない**（git 管理外なので参照するとクローンしただけでは configure できない）。
 
-2a. **`nn` は 3 ボード共有の 1 コマンド（#50）。** `shell/cmds/cmd_nn.c` が唯一の実装で、
-   契約は `svc/nn_svc.h`、ボード側は `boards/*/port/*/nn_svc_*.c` のアダプタ。以下は
-   **緩めた時点で BLOCKING**:
-   - **共有 TU（`cmd_nn.c` / `nn_cmd_core.c`）は可変記憶域を持たない。**
-     `check_no_mutable_storage.py` を**ボードごとの監査コンパイル**で当てる
-     （#97 のデコーダと同一機構）。**ホストの結果は当てにならない** — host では
-     コマンド表が `.data.rel.ro` に落ちて偽陽性になり、実機の cortex-m 向けでは
-     `READONLY` になる。状態を持ってよいのはアダプタだけ。
-   - **#117: ファーム監査はビルドから導出する。** 実際にコンパイルする `svc/` の TU と
-     上記 nn 共有 TU 2 本が対象。唯一の既存例外は `svc/ymodem.c`（送受信バッファと
-     診断状態）。shell 全体は stateless ではない。評価済み CMake target/source 一覧と
-     compile DB を `(target, source)` ごとに両方向照合し、実引数で直接監査コンパイルする
-     （出力先・依存ファイル以外は `-fno-lto` だけ上書き）。`shell` の毎ビルドで実行し、
-     target 別 export OFF / unity / 未対応形式を拒否する。plugin の実オブジェクト監査は
-     別に維持する。**導出・照合・失敗伝播を弱めない。** 詳細は `cmake/README.md`。
-   - **capability マクロは性質であってボード名ではない**
-     （`boards/<board>/svc/nn_svc_config.h`）。`#ifdef <BOARD>` の言い換えを作らない。
-     バックエンド依存の能力は `CONFIG_NN_BACKEND` に従う（f746/wio の `model load`）。
-   - **status と claim disposition は別フィールドで、4 値を畳まない。**
-     `none`（解放するな。ボードが巻き戻し済み）/ `caller`（1 回だけ解放）/
-     `retryable`（解放権限なし。worker が片付けうる。stop の再試行が正解）/
-     `terminal`（解放権限なし。再起動しかない）。**`retryable` と `terminal` の混同は
-     実害**（前者で再起動させる / 後者で永久に再試行させる）。
-     **判断できないボードは `terminal` に fail-closed。**
-     disposition は「いま誰が持っているか」ではなく**呼び出し側の解放権限**
-     （wio では worker とコンソールが最後の 1 人を競うので、読んだ時点の保持は保証できない）。
-   - **モデル指定はタグ付き**（`--name` / `--slot` / `--path` / `builtin` /
-     `--addr <a> <len>`）で、**裸の文字列は拒否**。同じ語が Grove では blob 名、
-     f746 では SD パス、wio では無意味なので、受理は shell にボード知識を戻すこと。
-     **`--addr` の長さは必須**（FlatBuffer verifier の境界。「窓の残り全部」は不可）。
-   - **port のアダプタは `struct cli_instance` を取らない。** 印字・待ち・キャンセル判定・
-     ファイル読みが要るものは `boards/<board>/cmds/` に置き、**下へ関数ポインタで渡す**
-     （`nn_svc_cancel_fn` / `nn_svc_read_fn`）。port が cmds/ を名指ししない。
-   - **ライブ推論は 3 ボードとも `nn stream start/stop/stats`**（#99 で統一、`preview` は
-     削除済み。復活させない）。`start` は非ブロッキングで、待ちは共有コマンドの
-     `--frames <n>` が 1 実装で持つ。
-   - **[!] stream には世代がある。** `start` が返す generation を待ち手が持ち、`stop` は
-     **遷移を claim するのと同じクリティカルセクション内で**照合する。`NN_STREAM_GEN_ANY`
-     は操作者の `nn stream stop` 専用で **待ち手は渡さない**（渡すと他人の stream を畳んで
-     カメラ / NPU / バスガードを奪う）。**照合と claim は 1 呼び出し**（分けると 2 者が同じ stream に入り、
-     負けた方が後から後継 stream を畳む）。機械は `svc/nn_stream_life.c` の 1 本。
-   - **[!] start の admission も機械が持つ。** 下位 worker を触る**前に** STARTING を
-     claim し、失敗なら abort。後から記録すると re-arm が進行中の stop を上書きする。
-     `commit()` は STARTING 以外を拒否（LOST の蘇生防止）、finish/retry/poison も
-     STOPPING 以外を拒否。**worker のカウンタは世代と一致しない**ので、poll は
-     commit 時に latch した基準を引く（wio の re-arm はカウンタを継続する）。
-     re-arm は decode record も retire する。**遷移が拒否されたら wrapper の副作用も
-     走らせない**（成否を返す。claim 解放を無条件にすると不変条件違反で fail open）。
-   - **[!] poll は 2 相 + 遷移カウンタ。** 数値は自分のロックを持つ側から来るので割込み
-     禁止下では集められず、世代と状態だけでは retryable な stop を跨いだ読みを弾けない。
-   - **[!] Grove の teardown 分類**（`port/npu/nn_stream_state.c`、純関数・ホストテスト）:
-     カメラの `CAM_ERR_LOCKED` と detach の `CAM_ERR_BUSY` は **retryable**、join timeout /
-     poison / 恒久拒否は **terminal**。**terminal に畳み直さない。**
+### 6. Wio Lite AI（ブリックリスク。提案は特に厳格に）
 
-2b. **`svc/frame_pipeline` の sink registry: attach は拒否する、直列化は呼び出し元（#72 / #79）。**
-   `frame_pipeline_attach()` は **未 drain の sink（pin を持ったまま）** と
-   **既に link 済みの sink** を拒否する。**緩めない** — 前者を通すと sink の pin カウントだけが
-   0 になり、pipeline 側の slot refcount は上がったままでリングが恒久的に 1 スロット短くなる
-   （#72 の本体）。後者は `s->_next = s` を作り、**以後の registry 走査が終わらない**。
-   拒否は**全部 `open()` の前**に決まる（副作用ゼロ。`open()` はボードが consume() の読む
-   状態をリセットする場所なので、未 drain の sink に対して呼んではいけない）。
-   `open()` の負値は**単一のコアエラーに正規化する** — 透過するとコアが自分の戻り値を
-   所有できない（ボードが同じ値を返せる）。判定順は
-   **already-linked → pins → capacity**（満杯時の再 attach を FULL と誤報しないため）。
-   [!] **並行性はコアが持つ（#79）。** attach は `open()` の前に sink を claim し、
-   detach は `close()` を跨いで claim する。**claim 済みの sink は全入口が拒否する**。
-   sink の所有状態は `UNOWNED -> ATTACHING -> ATTACHED -> DETACHING -> DRAINING -> UNOWNED` で、
-   **DRAINING を出る条件は `_pins == 0 && _callbacks == 0`**（「pin が返った」ではない ——
-   `publish()` は `consume()` をロック外で呼び、**戻ってから統計を書く**ので、
-   pin が 0 でもコアはまだ sink に触っている。#72 の put-last 規則の裏返し）。
-   - **state は唯一の真実ではない。** registry membership・owner・2 つのカウンタは独立した
-     事実で、3 入口とも**共通の整合検査**を通す。冗長に見える行が噛む ——
-     `ATTACHED + owner NULL` は破壊的 detach へ直行してボードの `close()` を呼ぶし、
-     `UNOWNED + linked` は detach に裸の pin 数を返させる
-   - **3 入口は同じ破損を同じ分類にする。** port が行動を変えるのは
-     **retryable（transition / not-quiescent）か terminal か**だけ。1 つの入口だけが
-     破損を retryable と呼ぶと、**port が壊れた sink を永久に retry する**
-   - `detach()` は**非負の pin 数 または 負の error**を返す。**非負（0 を含む）は
-     それ単独では teardown 許可ではない**
-   - **走査は有界**（cycle は state error。ループしたリストで exactly once を数えるのは
-     この issue が閉じたハングの再現方法）
-   - **caller に残る条件は 3 つ**: `set_format()` は attach と重ならない /
-     sink は同時に 1 つの pipeline にしか属さず全 sink-scoped 呼び出しは owner を使う /
-     `init()` は完全に quiescent なときだけ。**「全 registry 操作を直列化する」とは書かない** ——
-     Grove の `camera_unsubscribe()` は API mutex を取らないので現状の説明として嘘になる
+- **[!] app はクロックツリーを再設定しない**（system/PLL、FLASH ACR、電源供給選択・VOS）。書き換えると
+  低速クロックに落ちるのに latency は高速用のまま残る。bus clock gate と kernel mux は許可。**例外は
+  board README が名指しする 2 つだけ。** `SystemInit` は **FPU + VTOR + TCM 初期化のみ**（VTOR は
+  リンカの `g_pfnVectors` から取る）。
+- **[!] boot ツリーと ROM リンカスクリプトは不変。** 内蔵 Flash セクタ0 に DFU ブートローダが常駐し、
+  焼き直しはブリック本番で**現存する実機は 1 枚しかない**。**boot の `iflash.c` のセクタ範囲チェックは
+  セクタ0 を守る唯一の砦**で緩める変更は不可。app はセクタ1-3 から実行し書込は DFU のみ。
+  **書換え耐久は有限で自動ループで焼く提案は不可。DFU フォールバック**（erased/invalid app は必ず DFU に
+  入る）を app 側から壊す変更も、**オプションバイト / RDP / DBGMCU / SWD 端子**に触れる提案も不可。
+  boot は**参照ビルドとしてのみ**ビルドし、**セクタ0 に書けるターゲットも `dfu-boot` も新設しない**。
+  boot は app のヘッダを include せず LTO 有効化も不可。boot ソース / ROM ldscript の変更は manifest と
+  golden hash の更新とレビュー済み例外を要する。
+- **[!] RAM 配置ポリシー**: AXI-SRAM = バスマスタから見える必要があるものだけ（**DMA が届く唯一の
+  RAM**）/ DTCM = CPU 専用 / ITCM = ISR コード。**DMA1/DMA2・SDMMC1 IDMA は TCM に届かず、DTCM の
+  DMA バッファは fault せず無言で転送されない。** **唯一の明文化した例外は AXI-SRAM 上端の `.plugin`
+  予約**（prelink なので動かすと既存 plugin が全て無効）。heap の天井は `__heap_end` で `__ram_end` を
+  再定義しない。予約は ldscript / `plugin_memory.ld` / board.cmake のゲート引数 /
+  `check_plugin_reservation.py` の **4 箇所で独立に宣言し、1 つの変数から生成しない**。
+- **plugin の差し替えは backend が成功してから**（先だと前の plugin を壊す）。bare model は必ず unload。
+- **[!] decode と draw を隔てる構造が無い**ので**結果リース**で囲い、順序は**常にリース → フレーム
+  ロック**、worker は **decode と publish の全体**を保持、**パネルは待たず**飛ばして**数える**。
+  **plugin に入る経路は全部リースを取る**（param・admission・load/unload も）。**リース保持は
+  「描いてよい」ではない。**
+- **report は snapshot と同じ保護区間で採取しバッファは呼び出し側のフレーム。長さは状態ではない。**
+  **[!] painter は全部 CPU。** **[!] スタックは 2 つの量**で veneer の下のファーム側コストは**実測して
+  導出する**（過大が安全側。**コールバック自身のフレームだけでは「crossing の下」にならない**）。
+  **どのスレッドで呼ばれるか**を間違えない（entry / shapes_ok / report / param は shell）。
+- **[!] デコーダは container でしか届かない**（**常駐デコーダを戻さない**）。素の `.tflite` は
+  **`nn run` でテンソルをそのまま報告**、**`nn stream start` は拒否**、**`nn thresh` は none**（set は
+  **state** で拒否）。**`null` backend も同じ答え。**
+- **admission は `nn run` と共有**なので**shape の問いは no-plugin で通す**（refuse すると素のモデルの
+  `nn run` が消える）。**stream を止めるのは `nn_active_can_draw()` 1 本。** **[!] この規則には穴がある
+  （#120）** — re-arm 早期 return は `require_draw` を見ず `nn run` は stream を claim しない。
+- **worker が非同期**なので「誰も解釈していない」も**世代規則の下で publish する**。**`nn dets` は
+  record を読むだけ、panel は kind も見る。`nn info` の claim は開いているモデルに従い**、reload 後の
+  状態は `nn_model_reload()` 自身の戻り値で決める。**監査は `AUDIT_SHARED` だけで、f746g-disco はまだ
+  常駐デコーダを持つ（変えない）。**
 
-3. **upstream submodule（`lib/` 配下）は read-only。** HAL / CMSIS / ThreadX 系 / TinyUSB /
-   CoreMark ほか。編集は不可、調整は port 側で。
+### 7. `nn` は 3 ボード共有の 1 コマンド
 
-4. **shell の常設状態は静的割当。** 共有 shell コア（インスタンス / スタック / ジョブプール）と
-   transport の常設状態は静的割当で、init / dispatch / 出力経路は heap を要求しない。
-   board 固有コマンドのペイロードは、board が bounded heap・排他（`malloc_lock`）・失敗処理を
-   明示的に提供する場合に限り heap を使用できる（wio の coremark が実例）。
-   スタックサイズ・優先度は `cli_config.h`、`_Static_assert` を通すこと。
+`cmd_nn.c` が唯一の実装、契約は `svc/nn_svc.h`、ボード側は `nn_svc_*.c`。**緩めた時点で BLOCKING。**
 
-5. **Wio Lite AI: app はクロックツリーを再設定しない。**
-   app は boot から継承した system/PLL クロックツリー（クロックソース、D1/D2/D3 プリスケーラ、
-   PLL1/PLL2、および下記例外以外の PLL3 設定）、FLASH ACR、電源供給選択（SMPS/LDO）・VOS を
-   再設定しない。書き換えると全部壊れる（HSI 64 MHz に落ちるのに latency は 550 MHz 用のまま）。
-   ペリフェラルの bus clock gate と kernel clock mux の設定は許可する。
-   **例外は次の 2 つのみ**:
-   (a) `ltdc_clock_init()` が USB クロック供給前に行う 3 フィールド・成功パス計 4 書込み
-   （`RCC_CR.PLL3ON` clear / `RCC_PLL3DIVR.DIVR3` 更新 / `RCC_PLLCFGR.DIVR3EN` set /
-   `RCC_CR.PLL3ON` set。RM0468 §8.7.1 / §8.7.11 / §8.7.16）、
-   (b) `HAL_PWREx_EnableUSBVoltageDetector()` による `PWR_CR3.USB33DEN` set（RM0468 §6.8.4）。
-   継承値は 550 MHz / PLL3Q 48 MHz USB / FLASH latency 3（DFU ブートローダ =
-   本リポジトリの `boards/wio-lite-ai/boot/` が構成）。`SystemInit` は
-   **FPU + VTOR + TCM 初期化のみ**（RCC / PWR / FLASH ACR は触らない）。
-   VTOR はリンカの `g_pfnVectors` から取る（ハードコード不可）。
+- **共有 TU（`cmd_nn.c` / `nn_cmd_core.c`）は可変記憶域を持たない**（状態はアダプタだけ）。強制は
+  `cmake/check_no_mutable_storage.py` を**ボードごとの監査コンパイル**で当てること — **ホストの結果は
+  当てにならない**（host ではコマンド表が `.data.rel.ro` に落ちて偽陽性になる）。
+- **ファーム監査は列挙せずビルドから導出する**（`cmake/shared_storage_gate.cmake`。対象は実際に
+  コンパイルする `svc/` の TU と上記 2 本で、唯一の既存例外は `svc/ymodem.c`）。評価済み CMake
+  target/source と compile DB を両方向照合し実引数で監査コンパイルする。**導出・照合・失敗伝播を
+  弱めない。** plugin の実オブジェクト監査は別に維持する。詳細は `cmake/README.md`。
+- **capability マクロは性質であってボード名ではない**（バックエンド依存は `CONFIG_NN_BACKEND` に従う）。
+- **status と claim disposition は別フィールドで 4 値を畳まない**（`none` / `caller` / `retryable` /
+  `terminal`）。**混同は実害**で**判断できないボードは `terminal` に fail-closed**。disposition は
+  保持者ではなく**呼び出し側の解放権限**である。
+- **モデル指定はタグ付きで裸の文字列は拒否**（同じ語がボードごとに別物を指す）。**`--addr` の長さは必須。**
+- **port のアダプタは `struct cli_instance` を取らない**（印字・待ち・キャンセルは `boards/*/cmds/` で、
+  **下へ関数ポインタで渡す**）。
+- **ライブ推論は 3 ボードとも `nn stream start/stop/stats`**（`preview` は復活させない）。`start` は
+  非ブロッキングで、待ちは共有コマンドの `--frames <n>` が 1 実装で持つ。
+- **[!] stream には世代がある。** 待ち手は `start` の generation を持ち、`stop` は**遷移を claim するのと
+  同じクリティカルセクション内で**照合する（`NN_STREAM_GEN_ANY` は操作者専用で**待ち手は渡さない**）。
+  機械は `svc/nn_stream_life.c` の 1 本。
+- **[!] start の admission も機械が持つ** — worker を触る**前に** STARTING を claim し失敗なら abort。
+  `commit()` は STARTING 以外を、`finish/retry/poison` は STOPPING 以外を拒否する。**worker のカウンタは
+  世代と一致しない**ので poll は commit 時に latch した基準を引く。**遷移が拒否されたら wrapper の
+  副作用も走らせない。**
+- **[!] poll は 2 相 + 遷移カウンタ**（数値は他ロック配下なので割込み禁止下では集められず、世代と
+  状態だけでは retryable な stop を跨いだ読みを弾けない）。
+- **[!] 分類表はボードが持ち既定は fail-closed**（Grove の `nn_stream_state.c` では `CAM_ERR_LOCKED` と
+  `CAM_ERR_BUSY` が **retryable**）。**terminal に畳み直さない。**
+- **[!] デコーダの負値を 1 つに畳まない**（どれも「0 件」ではない）。**停止は推論を取り消せない**ので
+  worker は arm 時点の世代を控え publish のロック内で照合（`svc/nn_det_record.c`）。
 
-6. **Wio Lite AI: boot ツリー（`boards/wio-lite-ai/boot/`）と ROM リンカスクリプト
-   （`STM32H725AEIx_ROM.ld`）は不変。**
-   内蔵 Flash セクタ0 `0x08000000`（128KB）に DFU ブートローダが常駐する。ここを焼き直す
-   操作はブリック本番で、**現存する実機は 1 枚しかない**（board #1 は恒久文鎮化済み）。
-   **boot の `iflash.c` の書込先セクタ範囲チェックはセクタ0 を守る唯一の砦**で、緩める変更は不可。
-   app は `0x08020000`（セクタ1-3, 384KB）から実行し、書込は DFU 経由のみ。
-   **書換え耐久 ~10k サイクル** — 自動ループで焼く提案は不可。DFU フォールバック
-   （erased/invalid app は必ず DFU モードに入る）を app 側から壊す変更も不可。
-   オプションバイト / RDP / DBGMCU / SWD 端子（PA13/PA14）に触れる提案も不可。
-   boot は **参照ビルドとしてのみ**ビルドする（`boot` → `boot-reference/`）。
-   **セクタ0 に書けるターゲットの新設は不可。`dfu-boot` の新設も不可**（boot を app
-   パーティションに焼くターゲットになる）。boot は app のヘッダを一切 include しない
-   （`boot_iface` が `${BOARD_DIR}/include` を持たないので include すればコンパイルエラー）。
-   boot ターゲットの LTO 有効化も不可（ゲートが読む呼び出しグラフの辺が消える）。
-   boot ソース / ROM ldscript の変更は `cmake/boot_manifest.sha256` と golden hash の
-   両方の更新を伴い、レビュー済み例外を要する。
-   ブート経路・継承クロック・ゲートの中身は `boards/wio-lite-ai/README.md`、
-   復旧手順は `boards/wio-lite-ai/boot/README.md`。
+### 8. `svc/frame_pipeline` の sink registry: attach は拒否する、直列化は呼び出し元
 
-7. **Wio Lite AI: RAM 配置ポリシー**: AXI-SRAM（320KB @ 0x24000000）= バスマスタから見える
-   必要があるものだけ（**DMA が届く唯一の RAM**）/ DTCM（128KB @ 0x20000000）= CPU 専用 /
-   ITCM = ISR コード。**DMA1/DMA2・SDMMC1 IDMA は TCM に届かない**（RM0468
-   §2.1.2/§2.1.5/§2.1.6）。**DTCM の DMA バッファは fault せず無言で転送されない。**
-   **[!] 唯一の明文化した例外: AXI-SRAM 上端 32 KB（`0x24048000..0x24050000`）は `.plugin`
-   予約（#108）**。M7 は DTCM から命令フェッチできないためで、prelink なので動かさない。
-   heap の天井は `__heap_end`（予約の底）で `__ram_end` を再定義しない。予約は ldscript /
-   `plugin_memory.ld` / board.cmake のゲート引数 / `check_plugin_reservation.py` の
-   **4 箇所で独立に宣言し、1 つの変数から生成しない**。`check_plugin_reservation.py`
-   （位置・サイズ・NOLOAD・内部に何も無い・heap 天井）を外す・弱める変更は不可。
-   **#110（#78 Step 3b）以降、wio の plugin は実際に走る**（3a は検証・記録のみだった）。
-   モデル区画は in-place で backend に渡し、`nn info` の claim は開いているモデルに従う
-   （reload 成功後に publish）。wio 固有で破ってはいけないこと:
-   - **plugin の差し替えは backend が成功してから。** 先に load すると固定予約上の前の
-     plugin を壊してから「前のモデルを復元」に落ち、デコーダの無いモデルが残る。
-     bare model は必ず unload する。
-   - **[!] decode と draw を隔てる構造が無い**（preview 優先度 12 > worker 18。Grove は
-     frame pipeline が 1 配送を pin するので不要）。**結果リース**で囲い、順序は
-     **常にリース → フレームロック**、worker は **decode と publish の全体**を保持、
-     **パネルは待たず**取れなければ overlay を飛ばして**数える**。
-     **[!] plugin に入る経路は全部リースを取る** — decode / draw / report だけでなく
-     **param（`nn thresh`）と admission と load/unload も**。前者 3 つだけ囲った初版は、
-     セッションを取らない `nn thresh` の最中に別コンソールが予約を上書きできた
-     （セッションは worker を排除するが他コンソールの callback は排除しない）。
-     **[!] リースを持っていることは「描いてよい」ではない** — overlay スイッチと
-     記録の valid / kind も見る。世代検査で publish が棄却された decode は、
-     plugin 側に新しい状態を残したまま記録に載らない。
-   - **report は snapshot と同じ保護区間で採取し、バッファは呼び出し側のフレーム。**
-     board 側スロットは 2 コンソールで取り合う。**長さは状態ではない**。
-   - **[!] painter は全部 CPU。** DMA2D には「所有権を返す前に静止を確かめる」機構が
-     無い（ポーリングはタイムアウトしても中断せず、`ltdc_fill_rect` は void）。
-   - **[!] スタックは 2 つの量**で、veneer の下のファーム側コストは **実測して導出する**
-     （#110: 512 B 実測 / 640 宣言。過大が安全側）。**コールバック自身のフレームだけを
-     測るのは「crossing の下」を測ったことにならない** — 最初の導出は `fmt_utoa` で
-     止めて 64 bit 除算ヘルパ 2 本を落とし 112 B 足りなかった。**どのスレッドで
-     呼ばれるか**を間違えない（entry / shapes_ok / report / param は shell）。
-     許容値を今の plugin に合わせず、足りなければスレッドを広げる。
-   - **[!] ファームは古い宣言と現在の宣言を区別できない。** `plugin_load.c` は宣言を
-     policy と比べるだけで、**どの会計で作られた宣言か**は誰も確かめず、デバイスは
-     plugin の call graph を再計算できない。だから **veneer コストを変えたら
-     「受理された宣言が実行を bound する」は成り立たない** — 既存 container は
-     pack し直して送り直す。恒久的に閉じるには manifest が会計世代を持つ必要があり、
-     それは ABI 変更（別 Issue）。
-   - **[!] #116（#78 Step 3c）以降、デコーダは container でしか届かない。**
-     Grove の #104 と同じで、**ファームに常駐デコーダを戻さない**。素の `.tflite` は
-     **`nn run` で出力テンソルをそのまま報告**し（class report に落とさない）、
-     **`nn stream start` は描けるデコーダが無ければカメラを点ける前に拒否**、
-     **`nn thresh` は none**（set は「値が不正」ではなく **state** で拒否）。
-     **`null` backend も同じ答え**で、plugin 機構ごと無いので**拒否は null 側にも置く**
-     （ビルド自体は残す）。wio 固有で破ってはいけないこと:
-     - **admission は `nn run` と `nn stream start` の共有**なので **shape の問いは
-       no-plugin で通す**（refuse すると素のモデルの `nn run` が消える）。
-       **stream を止めるのは `nn_active_can_draw()` 1 本**で、panel を要求した時だけ聞く。
-       **[!] この規則には穴がある（#120）** — `nn_camera_start()` の **re-arm 早期
-       return は `require_draw` を見ない**うえ `nn run` は stream のライフサイクルを
-       claim しないので、「単発の最中に lost → 別コンソールから `nn stream start`」が
-       検査なしで通る（**#110 から在る経路で、#116 は通る幅を広げた**）。**正規の
-       re-arm は安全**（stream 中は model の load/unload が弾かれる）。#120 が
-       片付いたらこの併記を消す。
-     - **worker が非同期**なので「**誰も解釈していない**」も**世代規則の下で publish**
-       する（`nn_det_record_publish_raw()`。同じロック・arm 時点の世代・**成功時だけ
-       推論カウンタを進める**）。publish しないと `nn run` が timeout する。
-     - **`nn dets` は record を読むだけ**で、`nn run` は snapshot 後に stop し stop は
-       record を reset する → **素のモデルでは常に「未推論」**。`valid` を上書きして
-       作らない（3 ボードでの意味の統一は #118）。
-     - **panel は valid だけでなく kind も見る** — RAW_TENSORS は valid だが plugin の
-       ものではないので描かない。
-     - **`svc/blazeface.c` の監査はファーム側から消え、`add_plugin()` の
-       `AUDIT_SHARED` だけ**になった（出荷物に無いオブジェクトを監査しない）。
-       ファームの共有 TU は **#117 のビルドから導出する監査**が対象に含める。
-     - **f746g-disco はまだ常駐デコーダを持つ**（#78 Step 4）。そこは変えない。
+- `frame_pipeline_attach()` は**未 drain の sink** と**既に link 済みの sink** を拒否する。**緩めない**
+  — 前者を通すとリングが恒久的に 1 スロット短くなり、後者は `s->_next = s` を作り走査が終わらない。
+  拒否は**全部 `open()` の前**に決まり、`open()` の負値は**単一のコアエラーに正規化**、判定順は
+  **already-linked → pins → capacity**。**走査は有界**（cycle は state error）。
+- **[!] 並行性はコアが持つ。** attach は `open()` の前に、detach は `close()` を跨いで sink を claim し、
+  **claim 済みの sink は全入口が拒否する**。**DRAINING を出る条件は `_pins == 0 && _callbacks == 0`**
+  （`publish()` は `consume()` をロック外で呼び、戻ってから統計を書く）。
+- **state は唯一の真実ではない**（membership・owner・2 カウンタは独立した事実で、3 入口とも共通の整合
+  検査を通す）。**3 入口は同じ破損を同じ分類にする**（1 つだけが retryable と呼ぶと port が壊れた sink を
+  永久に retry する）。`detach()` の**非負の pin 数は単独では teardown 許可ではない**。
+- **caller に残る条件は 3 つ**（`set_format()` は attach と重ならない / sink は同時に 1 pipeline のみ /
+  `init()` は quiescent なときだけ）。**「全 registry 操作を直列化する」とは書かない。**
 
-8. **リンカスクリプトの `ASSERT` は LTO 下で空振りする。** 配置保証はポストリンクの
-   residency チェックスクリプトで行う。配置を変える変更はこのゲートを維持すること。
-   - **wio-lite-ai** は LTO を使うので、`check_itcm_residency.py` /
-     `check_dtcm_residency.py` / `check_psram_ai_residency.py` /
-     `check_plugin_reservation.py`（#108）が唯一の砦。**`check_itcm_residency.py` の
-     `ALLOWED_VENEER_TARGETS` は理由つきで増やす**（#110 で fault handler の plugin 帰属
-     呼び出しが 3 つ目。noinline にして、LTO が残したクローン名ではなく意味のある名前へ
-     veneer が向くようにしてある）。
-   - **f746g-disco** は逆に **LTO を禁止**する（`board.cmake` が `-flto` /
-     `CMAKE_INTERPROCEDURAL_OPTIMIZATION` を per-config 変種込みで FATAL_ERROR にする）。
-     ldscript の ASSERT 群が invariant の本体だから。加えて `check_f746_layout.py` が
-     シンボル常駐 / ベクタ / float ランタイムを実イメージで検査する。
-     **どちらのボードでも、この 2 系統のゲートを外す・弱める変更は不可。**
-   - **wio-lite-ai の boot ツリー**は `check_boot_safety.py`（不変条件 6）。
-     `boot_precheck`（ソース manifest + compile command 監査）と POST_BUILD（リンク済み
-     イメージ検査）の 2 段で、`boot_image` は毎ビルド再リンクさせて迂回経路を消してある。
-     この always-relink（`boot_precheck` の stamp → `boot_image` の `LINK_DEPENDS`）を
-     外す変更は、ゲートを無効化するのと同じ。negative test は
-     `cmake/fixtures/run_fixture_tests.py`。
+### 9. plugin container と asset（3 ボード共有部）
 
-8b. **f746g-disco: メモリ配置ポリシー**: DTCM 64KB @ 0x20000000 = D-cache を経由しない
-   もの（reset 跨ぎのログリング `g_log`、membench の DTCM 行）/ SRAM1 = D-cache 管理を
-   1 バッファに閉じ込める SDMMC DMA バウンス（`sd_bounce`）/ SDRAM 8MB @ 0xC0000000 は
-   MPU Normal non-cacheable で、FMC 内部バンクごとに用途が固定されている
-   （bank0 = LTDC スキャンアウト面と固定居住者 / bank1 = カメラ DMA アリーナ 2MB /
-   bank2 = ETH ディスクリプタ + プール / bank3 = NN アリーナ、上半分 1MB は reloc モデルの
-   実行窓 0xC0700000）。**バンクをまたぐ配置変更は FE / キャッシュコヒーレンシに直結する**。
-   `.sdram` は単一出力セクションで境界シンボルが常設されるため、ASSERT だけでは
-   属性の脱落を検出できない — だから `check_f746_layout.py` のシンボル常駐検査がある。
-   詳細（クロック / コンソール / バンク割当ての理由 / ゲート）は
-   `boards/f746g-disco/README.md`。
+plugin は board code と同格の**信頼された native code**。ゲートが証明するのは**スタック上限だけ**で、
+**メモリ安全性も、渡したポインタの使用範囲も、MMIO も証明しない**。
 
-8c. **f746g-disco: 3 つの割込みハンドラは強シンボルでなければならない**
-   （`PendSV_Handler` / `SysTick_Handler` / `USART1_IRQHandler`）。stock CMSIS startup は
-   3 つとも `.weak` + `Default_Handler`（無限ループ）エイリアスを供給するので、
-   実装が落ちてもリンクは通り「定義されている」ようにも見える。
-   `check_f746_layout.py` が strong `T` / `Default_Handler` 非同値 / `.isr_vector` の
-   該当 slot 一致の 3 条件で検査する。
+- **`svc/plugin_load.c` は呼び出し可能なポインタを 1 つも返さない**（整数オフセットとコピー済みバイト
+  のみ）。「実行しない」は規律ではなく**型の性質**。**ゲートは plugin ELF にも適用し対象外にしない。
+  ダイジェストは署名ではない**（由来は packer のプロセス制約が担保する）。
+- **container は組んでから検査し、その同一ファイルを送る**。ホストは `verify_container` で**デバイスと
+  同じ `svc/plugin_load.c`** を走らせ、**全ゲート通過まで公開しない**。**`--profile` と `--slot` は必須**
+  で前者はファイル名から推測しない。**`--profile` はチェック集合の選択であって識別ではない**ので非対称
+  — 対処は**拒否ではなく警告**で、**`cls` 側に出力 shape 固定を足さない**。
+- **[!] モデル区画は 16 バイト整列**（flatbuffer の 4 ではなく Ethos-U ドライバの要求）。
+  **[!] オフセット → アドレスの変換は `plugin_run_slot()` の 1 箇所**で、**実行前に MPU を読み戻して
+  fail-closed**: Armv8-M に「番号の大きいリージョンが勝つ」規則は無く、`limit` は最後の 32 B を含み、
+  MAIR は完全復号、リージョン数は `MPU_TYPE.DREGION` で**読めた表より大きければ clamp せず拒否**。判定は
+  純関数でホストテスト必須。**検査から実行までの窓に新しい機構を作らない。**
+- **[!] plugin の fault は `CAM_ST_LOST` に行かず、記録して即リセット**（リセットが teardown。handler は
+  publish 済みメタデータしか読まない）。
+- **[!] スタック上限は実測から導出する。超えられない上限は上限ではない**（非同期予約の前提は
+  `FPCCR.TS == 0` の強制。**導出値 0 は「未測定」ではない**）。**[!] ファームは古い宣言と現在の宣言を
+  区別できない** — veneer コストを変えたら既存 container は pack し直して送り直す。
+- **[!] painter の予算はガード保持時間に比例する仕事の上界**であって `draw()` 内の任意計算の上界では
+  ない（課金は**フレームバッファを触る前**）。**輪郭は外接面積ではなく実際に書く store 数で課金する**
+  （外接面積だと近距離の顔 1 つで箱が黙って消える）。共有してよいのは幾何規則（`svc/rect_geom.c`）
+  だけで**期待値は共有せず実ループの store を数える**。
+- **[!] 分岐点は `port/npu/nn_active.c` の 1 つだけ**（一発デコード / stream の admission・decode・draw /
+  **閾値** / report が全部そこを通る）。**plugin は自分の閾値を持つ**ので片方だけ繋ぐと `nn thresh` が
+  届かず、**両者に同じ閾値を与える differential test はこれを見逃す**。**幾何も 1 つで decode 結果は
+  private**。
+- **[!] plugin のビルド規則は共有**（`cmake/add_plugin.cmake`）で**ボードは自分の事実だけを引数で渡す**。
+  **owned source root は helper が導出し引数で受け取らない**（受け取る形自体が fail-open）。**リンク
+  入力も列挙する**（渡せるのは `ARCH_FLAGS` の `-m*` だけ）。**success stamp は compile 前に消す。**
+- **[!] image gate も共有**（`cmake/check_plugin_image.py`）。ボード固有の 3 つ（**予約 / 禁止シンボル
+  表 / `VENEER_BASE_COST`**）は `add_plugin()` の**必須引数**。**ゲートに告げる予約を MEMORY fragment と
+  同じ変数から作らない**（検査対象から期待値を読むゲートは何でも通す）。
+- **[!] target word は 2 端で検査する**（firmware の `_Static_assert` + gate の `.ARM.attributes`）。
+  **CMSE ビットは image に記録されないので firmware の assert が唯一の検査**。`__ARM_FP` 単独で FPU を
+  決めず、写像できない組は `#error`。
+- **[!] アセットは `--target asset-<name>` が作る。ゲートは送信時ではなくビルド時にある** — 送信は打った
+  パスをそのまま送り**それがその成果物かは誰も検査しない**ので、閉じ手は receipt の **CRC32** を転送後に
+  `blob list` と突き合わせること。**モデルは commit + SHA256 で pin**（Git LFS 不在だとポインタが
+  exit 0 で置かれる）、**pin が消えたら fail closed**。**ファームと plugin は別成果物で間違いは両方向。**
 
-8d. **grove-vision-ai-v2: Himax SDK は read-only、ThreadX は Secure 単一モード、
-   ゲート 3 本を外さない。**
-   SDK は submodule ではなく configure 時の pin fetch（`cmake/himax_sdk.cmake`、
-   933810cc）。`boards/grove-vision-ai-v2/sdk/` は lib/ と同じ read-only。ドライバは
-   プリビルト（libdriver.a）で ISR を実行時にベクタテーブルへ登録する。
-   app は **XIP ではない**（2nd bootloader が ITCM/DTCM へ展開）、クロックは継承
-   （SCU 読み戻しが唯一の真実）、**全空間 Secure（SEC_ONLY、SAU 無効）で
-   `TX_SINGLE_MODE_SECURE` 必須**。優先度は 3-bit（PendSV=7 / SysTick=6）。
-   `platform_driver_init()` は PRIMASK 下 + カーネル入場前に IRQ 0..200 を
-   disable/clear（プリビルトが IRQ を勝手に開くため）。**毎回の flash は bootloader
-   領域も書く**（Himax 標準。耐久 ~100k は**回路図の W25Q128JWSIQ 由来で、実装品は
-   Zbit ZB25LQ128C**（#89。刻印と JEDEC `5e 50 18` で一致）。**耐久は未確認**。消去単位は
-   **4 KB のみ実測済み**（#88。2nd BL が毎回の flash で発行する）で 32/64 KB は未実証。自動ループ焼き不可。復旧 =
-   boot ROM + BOOT_OPT + factory image）。ポストリンクゲート 3 本
-   （`check_image_coherence.py` = 生成 .img と ELF の突き合わせ + .rodata 内
-   コマンドレジストリ / `check_placement_budget.py` = 配置・予算・ベンチバッファの
-   常駐・禁止シンボル・**必須シンボル**）＋ **#88 で 4 本目 `check_nor_seam.py`**
-   （NOR 書込み経路に触れてよいのは `port/sdk_seam/nor_seam.c` だけ）＋
-   **#105 で 5 本目 `check_output_vocabulary.py`**（ファームは知り得ない「種」を
-   名乗らない。判定は `.rodata`）を外す・弱める変更は不可。
-   [!] **4 本目の `check_mve_predication.py` は #42 で削除した** — 前提
-   （移植が VPR を保存しない）が誤りで、実際は**ハードウェアが保存する**うえ、
-   そのスキャンは #66 のとおり 1 命令も検出できなかった。代わりに立っているのは
-   **強制**の方: `FPCCR.ASPEN` をカーネル入場前に set → 読み戻し → 駄目なら halt
-   （`port/threadx/fp_enforce.c`。継承 `LSPACT` も拒否。判断は純関数でホストテスト、
-   `check_placement_budget.py` がシンボルを要求し、`cmake/fixtures/` の P2 が
-   「呼び出しを消すと落ちる」ことを実証する）。**MVE は解禁済み**で、実機で
-   確認する手段は `mve` コマンド。**LTO 不使用**（実測で ITCM が 3,616 B 増える。
-   ITCM の 63% が IR を持たないプリビルトで元が取れない）。
+### 10. 配置ゲート: リンカスクリプトの `ASSERT` は LTO 下で空振りする
 
-   **SRAM 窓は 2 領域**（#29）: `0x3401F000` は 2nd bootloader の実行窓で
-   **NOLOAD 専用**、loadable は `0x3404D000` 以上。「CONTENTS を持つセクションが
-   低位窓に降りていないか」は **ldscript には書けない規則**（ld は NOBITS を
-   区別しない）ので配置ゲートが ELF のフラグで検査する。
+配置保証はポストリンクのチェックで行う。**どのボードでも、以下を外す・弱める変更は不可。**
 
-   **推論（#44）**: **`lib_spi_eeprom.a` の erase/write 系と、任意オペコード送出 4 本
-   （`Send_Op_code` / `Send_Op_Read_Data` の spi/qspi 両形）は禁止シンボル**
-   （このフラッシュにブートローダが載る。wio のセクタ0 と同格。`setWriteEnable`
-   のみ QUAD 有効化に必要なので明示的に許可）。**アリーナのキャッシュ保守は
-   「範囲ごと」にしない**（#46） — TFLM は 16 B 整列・ラインは 32 B で、外側丸めが隣の
-   半ラインを巻き込む。潰すのは **`ethosu_invalidate_dcache()` だけ**（完了セマフォより前に
-   呼ばれる）で、`ethosu_flush_dcache()` は本物のまま。引き渡しは `ethosu_inference_begin/end`
-   に置き、アリーナ**全体**を clean / invalidate する。成功条件は
-   **`job.state == DONE` かつ `job.result == OK`**。異常時はリセットの**成功を確認してから**
-   invalidate、失敗なら fail-stop。**呼び出し側でキャッシュ保守を足さない**
-   （TFLM は `Invoke()` 復帰前にアリーナを書く）。**`npu_open()` のペイロード検査**
-   （`COMMAND_STREAM` が 1 個かつ最後 / 対象は `custom_options` ではなく入力テンソル 0 /
-   `is_variable()` は拒否）は緩めない。
+- **wio-lite-ai**（LTO を使う）: `check_{itcm,dtcm,psram_ai}_residency.py` と
+  `check_plugin_reservation.py` が唯一の砦（`ALLOWED_VENEER_TARGETS` は**理由つきで**増やす）。
+- **f746g-disco**: 逆に **LTO を禁止**する（`board.cmake` が per-config 変種込みで FATAL_ERROR。
+  ldscript の ASSERT 群が invariant の本体だから）。加えて `check_f746_layout.py` がシンボル常駐 /
+  ベクタ / float ランタイムを実イメージで検査する。
+- **wio-lite-ai の boot ツリー**: `check_boot_safety.py`（precheck + POST_BUILD）。`boot_image` の
+  always-relink を外す変更はゲートの無効化と同じ。negative test は `cmake/fixtures/`。
+- **grove-vision-ai-v2**: ポストビルド 5 本（`check_image_coherence.py` / `check_placement_budget.py` /
+  `check_timer_seam.py` / `check_nor_seam.py` / `check_output_vocabulary.py`）。LTO は使わない。
+  `check_mve_predication.py` は削除済み（1 命令も検出できなかった）。**戻さない。**
 
-   **モデルは blob の名前で開く（#93 / #49 Step 4a）**:
-   [!] **`npu_open()` は長さを取り、`GetModel()` の前に境界付き FlatBuffer verifier を
-   通す**。`GetModel()` は cast で、以後の accessor は全て offset を辿る —
-   **blob の CRC は「届いたバイト列」に対するもの**なので、PC 側で既に壊れていた
-   モデルは CRC を通って無傷で着く。順序は **範囲 → 長さ → identifier → verifier →
-   ペイロード走査**。長さには**下限も要る**（identifier を `raw+4` から読むため）。
-   **生アドレス形にも長さ必須**（`nn open --addr <addr> <len>`。「窓の残り全部」は
-   境界検査にならない）。**verifier の limits は明示**（既定は depth 64 / table 100 万で、
-   生成 verifier は再帰し**シェルスタックは 4,096 B**。実測: 再帰の各フレームは 24 B 以下
-   ＝ 1 段 ~64 B なので既定 64 段は ~4.1 KB ＝スタック全部。実モデルは **depth 4 /
-   table 19**、出荷値は 16 / 4096）。**limits と verifier 呼び出しは
-   `port/npu/npu_verify.h` の 1 箇所**で、ホストゲートが同じものをリンクする
-   （既定 limits でホストが通し実機が落ちる、を作らない）。
-   `NPU_ERR_MODEL_FORMAT` は magic / schema / payload と別。
-   [!] **`nn open <name>` はリースを切らさない**: nn ゲート → **`npu_hw_init()` を先に**
-   （`NOR_LEASE_NPU` を確保）→ その内側で**全スロット走査**（候補は VALID のみ・
-   **重複拒否**・0 件 / BUSY / FAULT / MAP を別々に分類し「見つからない」に畳まない・
-   **読めないスロットが 1 つでもあれば拒否**）→ **`blob_verify_leased()` で CRC** →
-   `npu_open()` → **途中失敗は必ず `npu_hw_deinit()`**。
-   `blob_stat_leased` / `blob_verify_leased` は**呼び出し元のトークンを取り、live か
-   検査する**（「誰かがリースを持っている」は他人の寿命の話）。
-   `blob_verify_leased` は **`NOR_LEASE_BLOB` も取る** — 窓ではなく
-   **`blob_stage_buf` の排他**のため。
-   [!] **ホスト側の検証ゲートを外さない**（`verify_vela_model`）。デバイス側の境界検査は
-   置き換えにならない（単一サブグラフ / 全 op が Ethos-U / int8 I/O / offline plan /
-   アリーナ / BlazeFace の shape は見ない）し、**デバイスの検査は書込みの後**で、
-   malformed でも既に ~40 秒の消去と転送を消費している。公式経路は
-   **`--target asset-<name>`**（#107）:
-   **staging コピー → 検証 → 同一ファイル送信**、**`--profile cls|det` は明示引数**
-   （ファイル名から推測しない）、**出力は stderr**（YMODEM 線に流さない）、
-   **ホスト C++ 不在は fail-closed**（skip しない）。
-   [!] **`--profile` はチェック集合の選択であってモデルの識別ではない**（#95）。
-   `det` は `cls` + BlazeFace の 4 出力 shape なので**非対称**で、
-   `--profile cls` に det を渡すと通って送信される（実際に初回運用で起きた。
-   ラッパーは PC 側起動・スロット名はボード側入力なので検知できない）。
-   対処は**拒否ではなく警告** — 4 shape を持つのに `--blazeface` が無ければ
-   `verify_vela_model` が `[!]` 行を出す（shape 一致は強い証拠であって証明ではないので、
-   拒否するとゲートが establish できない identity を主張することになる）。
-   **`cls` 側に shape 固定を足さない**（分類器に固定の出力契約は無く、`1x10` を
-   pin すると正当な分類器を弾く）。
-   [!] **verifier が言うのは「offset が宣言された長さの内側に落ちる」ことだけ** —
-   **U55 のコマンドストリームは読まない**（opaque なバイト列。`npu_payload.c` が見るのは
-   アクションの封筒であって中の命令ではなく、ドライバは整列検査の後そのまま device へ渡す。
-   #93 以前からそうで、これは新しい検査の限界であって退行ではない）/ **Vela 出力として
-   妥当かも言わない**（ホストゲートの仕事）/ **生 `--addr` 形は窓で境界され、スロットでは
-   境界されない**（意図的に store を迂回するので、隣のスロットへ伸びる長さは
-   バイト列が verify すれば通る。16 MB エイリアスの外へは出られない。
-   スロット隔離が要るなら名前で開く）。
-   フラッシュのメモリマップ読み出し窓は**アプリが開ける**（開けるまで窓全体が
-   同一レジスタにエイリアスし、フォルトも 0xFF も返さない）。その open は
-   **DMAC1 の IRQ 133 を有効化する** — EPK は番号を列挙せず ISER スナップショットで
-   測ること。
+### 11. STM32F746G-DISCO
 
-   **推論の前処理（#48）**: 入力は **240x240（フレーム中央の最大正方形）を SCALE** する
-   （従来は 128x128 の中央 crop で、実用距離では画角が狭すぎた）。実装は
-   `port/npu/nn_preproc.c` — 依存ゼロ（HW も ThreadX も singleton も無し）なので
-   **ホストテストが本体を直接叩く**。**外さない・薄めない**: この 3 つはどれも目視で
-   気付けない。(a) **half-pixel 中心**の bilinear、(b) **箱の「辺」には半ピクセル項を
-   付けない**（サンプリングの規約を辺に当てると全部の箱が半ソースピクセルずれる。
-   同一変換の 2 表現なので `nn detect` の表示も overlay と同じ関数を通す）、
-   (c) **負座標は数学的 floor**（C の 0 方向切り捨ては upscale で 1 ずれる）。
-   Q8 の重みは `w1 = f` / `w0 = 256 - f` で**構成上必ず和が 256**なので
-   累算は `255*256*256` = 2^24 に収まる（32 bit で足りる根拠がこれ）。
-   デコーダの float は clamp も finite 保証もしないので、**int 化の前に
-   非有限を弾き範囲を clamp する**。
+- **メモリ配置**: DTCM = D-cache を経由しないもの / SRAM1 = SDMMC DMA バウンス / SDRAM は **FMC 内部
+  バンクごとに用途固定**（**またぐ変更は FE とキャッシュコヒーレンシに直結**）。ASSERT では `.sdram` の
+  属性脱落を検出できないので `check_f746_layout.py` のシンボル常駐検査が見る。
+- **3 つの割込みハンドラは強シンボルでなければならない**（`PendSV_Handler` / `SysTick_Handler` /
+  `USART1_IRQHandler`）— stock CMSIS が weak な `Default_Handler` を供給するので落ちてもリンクは通る。
+  ゲートは strong `T` / `Default_Handler` 非同値 / `.isr_vector` slot 一致の 3 条件で見る。
+- **`CLI_INSTANCE_TIME_SLICE=0`（TX_NO_TIME_SLICE）を維持**する（CPU-bound コマンドが多重実行に非再入。
+  スライス有効化は再入ガード整備とセット）。
+- **カメラ subscriber の drain と owner lifecycle**: `camera_frame_put()` は**全 `consume()` の最後の
+  文**、`CAM_OWN_DRAINING` は `camera_unsubscribe()` の**前**、直列化（PRIMASK）は作業を跨がない。判定は
+  `cam_drain.c` / `cam_own.c` の純関数が**唯一の判断点**で**両方 fail-closed**、**`default:` を足さない**。
+  **DONE は `pins == 0` ちょうどだけ。失敗は呼び出し元まで返す。**
 
-   **ライブ overlay（#48）**: 推論は **camera producer スレッド・`consume()` 内**。
-   順序は **推論（パネルガード無し）→ ガード 1 回で stage/draw/present**。
-   overlay callback は**パネルガード保持中**なので block / sleep / 推論 / 他ロック /
-   LCD API 再入は禁止（ガードは再帰的 = 再入は deadlock ではなくトランザクション破壊）。
-   唯一の例外は純関数 `lcd_rect_wire()`。stop-pending は **join 要求より前**に立て、
-   前処理前 / invoke 直前 / 推論後の 3 点で見る。
-   **推論タイムアウトの定義は `port/npu/npu_hw.h` の 1 箇所**（board.cmake が parse。
-   2 箇所に書かない — 以前は片方が dead だった）。
+### 12. Grove Vision AI V2
 
-   **顔検出（#45）**: op resolver は **`MicroMutableOpResolver<1>` のまま**維持する。
-   理由は「キャッシュ的に危険だから」ではない（#46 で消えた） — **CMSIS-NN（= Helium）を
-   持ち込まない / Vela が全面 offload していないモデルを `AllocateTensors` で
-   うるさく落とす**という設計判断である。境界の型変換は**ファイル側で剥がす**
-   （`scripts/tflite_strip_boundary.cc`）。
-   **モデルは blob のアセットで、固定アドレスの予約を持たない**（#93 / #94）。
-   `nn open <name>` がスロットから読む。`GROVE_MODEL_*` / `--target flash-model-*` /
-   `model-cls` / `model-det` / `blob-tail` は **#94 で削除済み。復活させない**。
-   **配置は「予約」であってファイルではない** — `cmake/check_flash_partitions.py` は
-   予約どうしの非重複と 16 MB 収容を**成果物が 1 つも無くても**検査し、
-   **存在必須なのは今から書く成果物だけ**にする（全ファイルを要求すると、
-   コミットできない検出モデルのせいで**ただのファーム焼きが止まる**。
-   守っていない操作を止めるゲートは消される）。比較は**ファイル範囲ではなく
-   破壊フットプリント**（xmodem の 128 B パディング + 消去ブロック丸め **4 KB**
-   ＝常駐 2nd BL が実際に発行する唯一の消去単位。#88 で逆アセンブルにより確定。
-   `0x52`/`0xD8`/chip erase は 1 度も発行されない。**全 receiver への上界ではなく
-   この経路の実測値**）。
-   **モデルの送信は staging コピーに対して検査 → `verify_vela_model` →
-   同じファイルを送信**の順で、検証を README の手順に出さない（ホスト C++ が
-   無ければ skip せず拒否）。#94 で `--target flash-model-*` が消えた後もこの鎖は
-   `asset-<name>` target に残る（#107）。
-   **これらのゲートを外す・緩める変更は不可**。
-   **firmware 予約は 2 MB で、ブートローダ自身の算術から導出する**（#85。A/B 2 スロット
-   x `Image max size 0x100000`。`GROVE_FW_SLOT_SIZE` x `GROVE_FW_SLOTS`。`0x200000` を
-   ベタ書きしてコメントで説明しない）。**[!] `GROVE_FLASH_SIZE` / `GROVE_ERASE_GRAN` / `GROVE_SLOT_HDR_COPIES` /
-   `GROVE_FW_SLOT_SIZE` / `GROVE_FW_SLOTS` は実測値でノブではない** — `cmake/flash_geometry.cmake`
-   が非キャッシュで持ち、食い違う `-D` は configure 時に FATAL_ERROR。**CACHE に戻すと
-   宣言と検査が同じ値から出るため `-D` 1 つで両方動き、検査は OK のまま通る**（4 通り実測）。
-   **キャッシュ化に戻す変更は不可**。
-   **[!] `GROVE_ERASE_GRAN` と `GROVE_SLOT_HDR_COPIES` は別の事実で、束ね直さない**（#88）。
-   スロットヘッダ予約を「1 消去ブロック」から導くと、粒度を実測の 4 KB へ絞った瞬間に
-   予約が 1 セクタに縮み、**backup ヘッダが blob（当時の blob-tail）に落ちる**
-   （`flash_geometry.cmake` が fail-open として名指しで却下している当のもの）。
-   **[!] 外付け NOR のライフサイクルは `port/nor/` 所有**（#86）。QSPI/XIP の立ち上げと
-   **IRQ 133 の EPK wrapset は `port/nor/` のもの**で、NPU の snapshot はその後に取る。
-   **NPU 側へ戻すと `nn close` が IRQ 133 を disable する**（#86 の欠陥そのもの）。
-   リースは `npu_hw_init` 取得 / `npu_hw_deinit` 解放（`npu_open`/`npu_close` は触らない）で、
-   トークンは成功時にのみ `hw_ready` と同時コミット。ベンダの `enable_XIP` は MPU を
-   再構成して戻り値を検査しないので読み戻しはこちら持ち。**JEDEC ID は XIP 前にしか読めない**。
-   `nor` に **生オペコードを足さない**（境界付き `write`/`erase` は #88 Part C/E で
-   着地済み。追加するなら writer 経由で、`nor_span.c` の判断を通す）。
-   [!] **NOR 書込み seam（#88 Part D）**: 内側 4 本
-   （`hx_lib_qspi_eeprom_{erase_sector,write,erase_all,word_write}`）を `-Wl,--wrap` で
-   `port/sdk_seam/nor_seam.c` へ寄せる。**外側 `hx_lib_spi_eeprom_*` ではなく内側**を
-   wrap する（外側は薄いフォワーダで、外側だけ wrap すると内側が直に届く）。
-   **`erase_all` と `word_write` の wrapper は `__real_*` を名指ししない** — これが
-   ベンダ実装を GC させ、`check_placement_budget.py` の absence をこの 2 本について
-   恒久的に有効に保つ。書けるのは **`blob` だけ**（#94 以降は
-   `0x200000..0xFFE000` の一本。`slot-header` は含めない）、消去は
-   **4 KB / enum 0 のみ**、境界は減算ベース、`NOR_ST_WRITING` 以外は拒否。
-   [!] **ゲートは ELF ではなく ld の map で live/discarded を判定する** — GC 後の ELF に
-   入力セクションの出自は残らず、しかも `spi_eeprom_comm.o` は `open`/`read_ID`/
-   `enable_XIP` のため**既にリンク入力**で、その外側フォワーダが内側名への
-   リロケーションを持つ。だからオブジェクト単位の規則は正しいリンクでも常時 fail し、
-   かといって許可すると別 TU が外側を生かすだけで穴が開く。**単位は入力セクション。**
-   map は **PRE_LINK で消し BYPRODUCTS で宣言**する（古い map は別のリンクについて
-   答える）。**入力マニフェストは `$<TARGET_OBJECTS:>` から生成**し、map の `LOAD` と
-   突き合わせて未計上を拒否。**LTO は拒否**（IR にはリロケーションが無く、
-   リンカの実入力は `/tmp/cc*.ltrans.o` になる）。**アドレス取得のリロケーションも拒否**。
-   [!] **これは defence in depth であって能力の証明ではない**（#87）— 読み出し経路が
-   `hx_drv_spi_mst_get_dev` / `hx_drv_dmac_get_dev` / `DMA_send` 系を既に引き込んでおり、
-   禁止・監査のどの名前にも触れずに WREN + 任意オペコードを組める。
-   [!] **ベンダの戻り値は成否を報告しない**（`erase_sector` は WP 解除の結果で、
-   その `clear_write_protect` は出口が `movs r0,#0` の 1 つだけ / `write` は定数 0）。
-   **唯一の真実は読み戻し**で、それは writer（`port/nor/nor_write.c`）の責務。
-   ただし**負の値は wire に出る前の拒否**なので意味がある（`-28` = 窓が落ちていない、
-   `-50` = WEL が 21 回で立たなかった）。
-   **Part C 着地に伴い `hx_lib_qspi_eeprom_{erase_sector,write}` と
-   `hx_lib_spi_eeprom_clear_write_protect` の 3 名は FORBIDDEN から外れた**
-   （`erase_all` / `word_write` は外さない。**戻す変更は不可**）。
-   [!] **書込みトランザクションは 1 本の手続きで、途中で返らない**（#88 Part C）:
-   claim → 窓を落とす（SCU 読み戻しで確定）→ **JEDEC 再読（canary）** →
-   操作 → 窓を戻す → **読み戻し照合** → commit。**窓の復帰と commit は
-   操作が失敗しても必ず走る。**
-   [!] **canary は liveness のための唯一の手** — ベンダの write 経路は全部
-   `DMA_send_recv` のタイムアウト無しスピンで、窓を落とした直後の最初の 1 本で
-   実際にコンソールが固まったことがある。**最初の 1 本を「何も変えない read_ID」に
-   する**（`nor cycle` がその preamble/postamble だけを実行する）。
-   [!] **読み戻し不一致は terminal `FAULTED`** — 「配列が受け付けなかった」と
-   「窓が嘘をついている」を区別できず、後者なら以後の全読み出し（`nn` が
-   その場で parse するモデルを含む）が疑わしくなる。**ベンダが wire 前に拒否した
-   場合と transport 無応答は fault させない**（曖昧さが無いので `incomplete` /
-   `no transport` として窓を戻して継続）。
-   [!] **照合対象はベンダが受け付けた prefix だけ**。ページ分割（256 B 境界を
-   跨がない）が「どこで止まったか」を正確にする — 長いバッファを渡すと
-   ベンダは複数ページを書いてから失敗し得るので `done` が嘘になる。
-   [!] **staging バッファの理由は DMA reachability ではない** — ベンダの `write` は
-   `uint8_t *` を取り `word_switch` 経路で**呼び出し元バッファを in-place で
-   byte-swap する**。TCM 禁止則は SSPI/WDMA3 の話（ベンダは自分の DTCM プールへ
-   memcpy してから DMA する）。
-   [!] **1 トランザクションは無データでもステータスレジスタを 2 回書く** —
-   窓を落とすと `set_quad_mode` が QE を落とし、戻すと立てる（値が同じなら
-   書かないので 2 回で頭打ち）。`nor cycle` も無料ではない。
-   途中でリセットしても QE=0 は工場状態かつ 2nd BL が焼込み後に残す状態なので起動する。
-   [!] **XIP 窓を読む者は全員リースを持つ**（#90。`NPU` / `SCAN` / `DEVMEM` の 3 スロット）。
-   `devmem` は無リースだった — 立っていない窓を読むと fault も 0xFF も返さず
-   **16 MB 全体が 1 レジスタにエイリアスして嘘の内容を印字**した（実機で観測）。
-   writer が背景アクセスの足元で XIP を落とす方は実在するが有界（dump は
-   `CLI_DEVMEM_DUMP_MAX_LEN` 上限、bg は前景より低優先度 + NO_TIME_SLICE）。
-   **acquire が窓を立てる操作なので 1 つで両方閉じる。**
-   [!] **単一インスタンスの拒否はコンソールから再現不能** — ホストテストが唯一の検査。
-   **XIP probe は writable interval の外**（`_Static_assert`。#90 以前は blob 内の 0xB00000）。
-   [!] **probe は読む前に自分で invalidate する**（#88）— ベンダの `enable_XIP` は
-   **base から 512 B しか無効化しない**ので、probe B も writer が変えた範囲も含まれない。
-   [!] **`NOR_ST_WRITING`**（#88）: write は XIP を落とすので readers を締め出す。
-   **state と reader マスクは同一クリティカルセクションで読み、GO を得た者が
-   publish してから抜ける**（別々だと間に `nor_acquire` が入る）。
-   **`NOR_ST_OFF` は BUSY で「bring it up」ではない** — bring-up は reader の仕事。
-   [!] **`NOR_ST_RESERVED` と予約トークン**（#91）: **トランザクションを跨いで持つ
-   所有権**。commit は `NOR_ST_XIP` ではなく **RESERVED に戻す**（XIP を publish
-   するとトランザクションの隙に reader が入る。`blob write` は 30 トランザクション
-   から成り、その間 YMODEM が前景を塞ぐので背景ジョブが実際に走る）。
-   **リースの 4 枠目にはしない**（mask に足すと writer が自分を BUSY にする）。
-   **state と owner は同時に publish する**。**owner と state の不整合は terminal**
-   — `RESERVED + owner==0` を「トークン違い」で拒否すると誰も解放できず永久 BUSY。
-   **予約は全ての出口で返す**（トークンはローカル・単一解放点・console 解放は内側）。
-   契約は**シェルの協調的 kill まで**で `tx_thread_terminate()` は対象外。
-   [!] **`nor info` はリースを取らない**（#91）— エイリアスを読まないので不要な上、
-   予約中に取れず「なぜ busy か」を言う唯一のコマンドが使えなくなっていた。
-   `OFF` のときだけ bring-up 目的で取る。**レジスタは窓が上がっている状態
-   （XIP / RESERVED）でのみ採取し、`WRITING` では古い値を出さず「未採取」と言う**。
-   **スナップショットは state 込みで単一クリティカルセクション**。
-   [!] **長い消去はトランザクションを割らない**（#91）— 割ると窓の down/up ごとに
-   不揮発ステータスレジスタが 2 回増え、無界スピンを踏む機会も増える。
-   **1 トランザクションのまま `erase_run()` にコールバックを注入**する。
-   コールバックは**窓が落ちた状態**で走る（許可は `cli_cancel_requested` /
-   `cli_print` / `log_write` のみ。エイリアス読み・リース取得・`nor_write_*` 再入は
-   禁止）。**呼ぶのは 1 ユニット消し終えた後**（先頭はヘッダセクタなので、前で
-   中断できると古いヘッダが残る）。**cancel とベンダ拒否はどちらも INCOMPLETE だが
-   保証が違う** — 「消去が失敗した＝空になった」とは読まない。
-   [!] **「read-only」とは書かない** — 配列は触らないが初回 bring-up は QE ビット
-   （NOR の不揮発ステータスレジスタ）を書く。`nn open` も従来から同じ。
-   `nor scan` は**全バイト読む**（サンプリングは偽の隙間を作り、占有を過少報告する）。
-   予約は 2 スロット分だが**1 イメージは 1 スロットに
-   収まる必要がある**ので `--image-max` で別に検査する（無いと 1〜2 MB のイメージが
-   ビルドを通り、実機で `ERR_IMAGE_SZ` になる）。**焼き先はスロット交替なので
-   `0x0` も `0x100000` も「ファーム」であり、どちらか一方ではない。**
-   `0x200000..0xFFE000` は **blob 予約の一本**（14,671,872 B。#94 でモデル予約と
-   `blob-tail` を畳んだ結果）。**境界付き writer は #88 Part C/E で入り**、
-   **実データの書き手は #92 で入った**。
-   **読み側は #92 で入った**（`blob list`/`info`/`read`/`free`）:
-   **スロット表は `nor_seam_limits` の consumer で、第二の宣言を作らない**
-   （`blob_map_check()` が `lo`/`hi`/`unit` を引数で受ける）/
-   **identity は基底アドレスで添字ではない**（永続する物に添字を書かない）/
-   **読み手は `NOR_LEASE_BLOB` を取り、読む前に自分で invalidate する**
-   （ベンダの XIP 復帰は窓先頭 512 B しか無効化しない）/
-   **`empty` は「ヘッダが無い」であって「空きフラッシュ」ではない**
-   （実機 baseline: スロット 1 だけ `invalid` = 工場データがヘッダセクタを覆う）。
-   **書き側も #92 で入った**（`blob write`/`verify`/`erase`）:
-   [!] **QSPI の書込み経路は 32 bit ワード内のバイトを反転する**。`nor_write.c` が
-   自前のページバッファで戻し、**短い末尾は 0xFF でワード境界までパディング**する
-   （ベンダの `word_switch_func` は長さが 4 の倍数でないと**黙って何もしない**）。
-   **program アドレスは 4 バイト整列必須**（`nor_span` と seam の両方が拒否）/
-   [!] **定数バイトのテストではこの種の壊れ方は原理的に見えない** — `nor write` の
-   既定はアドレスで種を振った可変パターン。**「通った」を「経路が正しい」と読まない** /
-   [!] **未消去への program は拒否**（terminal fault ではない。窓を落とす前に読んで判定）。
-   **読み戻し不一致の terminal は残す** / 消去は**スロット選択の後・コンソール確保の前**、
-   **消去が OK の時だけ受信を始める** / **警告文はスロットが決まってから出す**
-   （拒否の前に「全部消えます」と言わない）/ **キャンセルの結果は `dmesg` にしか出ない** /
-   **受信中はローカル Ctrl+C が無い**（0x03 はファイルの一部）。
-   （`0xB70000..0xB7B000` の 44 KB は #88 で blob に入り、実機の `nor scan` で
-   **全 0xFF を確認済み**。）**スロット表は #94 で全面 re-carve した**
-   （`0x200000` から大きい順: 4M x1 / 2M x2 / 1M x3 / 512K x3 / 256K x2 = 11 スロット、
-   13 MB、`0xF00000` 終端。`0xF00000..0xFFE000` の 1,040,384 B は**意図的に未 carve**）。
-   [!] **全面 re-carve は規則ではなく一度きりの支払い** — identity は基底アドレスなので
-   通常許されるのは **append だけ**。#94 でやったのは、当時 store にあったのが
-   `cls`（基底 `0x200000` のままで生き残る）+ `det` + テスト 1 件で**再送が安い唯一の
-   瞬間だった**から。**次の re-carve はその時点の中身を全部払う。以後は append。**
-   `test/test_blob_map.c` が表全体を要素ごとに pin し、連続性とクラス降順も見る。
-   [!] **4 MB クラスは実機が動かせる大きさで決めてあり、今の中身とは無関係**。
-   モデルサイズを縛るのは**スロットだけ**（flatbuffer は XIP 窓から in-place で読まれ
-   コピーされない / アリーナは重みでなく feature map で決まる — **164,512 B の det の方が
-   1,704,672 B の cls よりアリーナが大きい**）。
-   [!] **旧モデルのバイトは消えていない。表示は各スロットの「ヘッダセクタ」だけで決まる**
-   （旧パーティションの位置ではない）: 再フラッシュ後は 0=`valid`(cls) /
-   2・3=`empty`（座礁した `test-small`/`det` がペイロードに。`empty` は「ヘッダが無い」で
-   あって「空きフラッシュ」ではない）/ 5・6=`invalid`（旧 MobileNet がヘッダセクタを覆う。
-   `blob erase` が要る）。**`det` と `test-small` は送り直した。**
-   **現在: `cls` = slot 1 `0x600000` / `det` = slot 9 `0xE80000`**（cls を 4 MB スロットから
-   退かして、そこは「他に入らないモデル」用に空けてある）。実測 cls 30 / det 6 トランザクション。
-   [!] **blob の移動は `erase` → `write`** — VALID なまま別スロットへ書くと `DUPLICATE` で拒否。
-   **最終ブロック `0xFFE000..0x1000000` は `slot-header` 予約で絶対に書かない** —
-   **ブートローダのスロットヘッダ**（`flash_end - 0x1000` と `- 0x2000` に 20 バイト、
-   magic `"HIMAXWE2"` + チェックサム）。壊すとフォールバックで**黙って前のビルドが起動する**。
-   **地図はパートの全バイトを claim する**（未宣言の run は空きではなく無防備な容量）。
-   [!] **ここは空ではなく、工場 SenseCraft の FlashDB KVDB（`0x300000`）とデータ
-   （`0x400000`/`0x500000`）が載っている**。最初の書込みで恒久的に消える
-   （2026-08-23 ユーザー決定で了承済み）。**我々の `lib/flashdb` とは別物**
-   （wio は `FDB_WRITE_GRAN=8`、実機は `32`）。占有の確認は 17 点のサンプリングでしか
-   していないので、**実際に書き始める前に read-only の走査が要る**。
-   デコーダは **3 ボード共有の `svc/blazeface.c`**（#97）で、**npu シングルトンに
-   依存せず** `svc/tensor.h` の記述子配列を受け取る（ホストテストが本物を
-   コンパイルできる条件）。**共有 TU は可変記憶域を 1 バイトも持たない**
-   （各ボードが自分の配置とゲートを保てる条件で、
-   `cmake/check_no_mutable_storage.py` が監査コンパイルで強制する。**緩めない**）。
-   [!] **Grove（#104）と wio（#116）のファームはこのデコーダをリンクしない** —
-   **この 2 枚ではデコーダは container でしか届かない**（f746 はまだ持つ）。
-   ファームに残るのは記述子の変換だけで、これは `nn out` / `nn info` / シムが
-   デコーダの有無に関わらず必要とする（Grove `port/npu/npu_desc.c` /
-   wio `port/nn/nn_desc.c`）。**`svc/blazeface.c` をコンパイルするのは plugin だけ**
-   なので、**no-storage 監査は plugin が実際に
-   リンクするオブジェクトに対して走る**（`add_plugin()` の `AUDIT_SHARED`。**helper は owned root を導出し引数で受け取らない**（受け取る形は
-   `${CMAKE_SOURCE_DIR}` を渡すだけで全免除になる fail-open）。**リンク入力も列挙**し、
-   **[!] アセットは `--target asset-<name>` が作る（#107）。ゲートは送信時ではなく
-   ビルド時にある** — picocom は `--send-cmd "sb -k"` に固定で、**貼り付けたパスが
-   その成果物かは誰も検査しない**。閉じ手は `asset-<name>` が印字する**ファイル全体の
-   CRC32** を転送後に `blob list` と突き合わせること（`nn info` の CRC は plugin
-   セクションのダイジェストなので使えない）。**組んでから検査し、通るまで公開しない**。
-   モデルは commit + SHA256 で pin し、**Git LFS なので git-lfs 不在だとポインタが
-   exit 0 で置かれる**。pin が消えたら fail closed で、**ブランチ先端に逃げない**。
-   `asset-*` は ALL に入れない（モデル網に届かないツリーでも `--target flash` は通る）。
+**外付け NOR にブートローダが載っている。NOR 関連は wio のセクタ0 と同格。** 根拠・実測値・状態遷移表は
+board README が正。
 
-   ボードが渡せるのは `ARCH_FLAGS`（`-m*` のみ）。`.o`/`.a`/`-l`/`-T` と MEMORY fragment の
-   `INPUT`/`GROUP`/`INCLUDE` は拒否する — ソース経路だけ塞いでも、リンク入力から
-   無監査のコードが画像に入る。**audit の success stamp は compile 前に消す**）。
-   **[!] plugin image gate も共有（`cmake/check_plugin_image.py`、#108）**。ボード固有の
-   事実 3 つ — **ゲートに告げる予約・禁止シンボル表・`VENEER_BASE_COST`** — は
-   `add_plugin()` の**必須引数**で、省くと configure で落ちる。**ゲートに告げる予約を
-   MEMORY fragment と同じ変数から作らない**（ゲートが自分の検査対象から期待値を読むと
-   何でも通る）。`VENEER_BASE_COST` は base 側のコストで、他ボードの値を流用しない。
-   **[!] plugin target word は 2 端で検査する（#108）**: firmware が `svc/plugin_target.h`
-   に対する `_Static_assert`、gate が plugin ELF の `.ARM.attributes` / `EI_DATA`。
-   **CMSE ビットは base の実行環境を表し plugin の作り方ではない**ので image に記録されず、
-   **firmware の assert が唯一の検査**（gate はマスクして「未検査」と印字する）。
-   `__ARM_FP` 単独で FPU を決めない / CMSE は `__ARM_FEATURE_CMSE == 3` で判定 /
-   写像できない組は `#error`（推測しない）。
-   **別フラグで組み直した監査対象を作らない** — 出荷物に無いオブジェクトを
-   検査することになる。**常駐デコーダをファームに戻さない。**
-   素の `.tflite` は `nn run` で**出力テンソルをそのまま報告**し、
-   **class report には落とさない**。
-   **[!] `nn stream` の拒否の仕方はボードで違う。揃えない**: **Grove** は
-   `nn_svc_grove.c` が**デコーダが無い時点で**（shape や draw の前に）拒否し、
-   **wio** は admission を `nn run` と共有するので**shape は通し
-   `nn_active_can_draw()` 1 本で**止める（不変条件 7。揃えると素のモデルの
-   `nn run` が消える）。
-   `nn thresh` は誰も閾値を持たなければ **`none`**（`NN_SVC_THRESH_NONE` = 0）で、
-   set は **`NN_SVC_ERR_STATE`**（値の拒否 `NN_SVC_ERR_ARG` と畳まない）。
-   **全 896 アンカーを必ず走査**し、候補は上限付き top-N にする — 満杯で打ち切ると
-   ピークスコアが前半の最大になり、NMS が「最初の 64 個」を見る。
-   出力 4 本は **shape で探す**（生成順は文書順と違い、Vela 前後でも変わる）。
-   4 本の scale/zp は**全部違う**ので、共有の脱量子化定数を作らない。
-
-8e. **grove-vision-ai-v2: TIMER2 は EPK 専有、WFI の前提は強制する（#25）。**
-   `thread` の cpu%（Execution Profile Kit）の時間源は **Himax TIMER2**。
-   **触ってよいのは `port/threadx/tx_glue.c` の bring-up 1 箇所だけ**で、SCU
-   （クロック許可 / 分周 / CPU 所有）と TIMER2 の 4 レジスタを MMIO 直叩きし、
-   **RELOAD 全 1・割込み不許可の自由走行**にする。RELOAD が全 1 なのは時間源の要件
-   （ダウンカウンタの反転が mod 2^32 アップカウンタになるのは全 1 のときだけ）。
-   **ベンダの `hx_drv_timer_*` は API 丸ごと禁止シンボル**（例外は
-   `hx_drv_timer_init` のみ — SDK の platform init が全 9 個に対して呼ぶが base を
-   記録するだけ）。名前リストでは `hx_drv_timer_hw_start(TIMER_ID_2, ...)` が抜けるので
-   接頭辞で塞ぐ。**この禁止を緩めてはならない。**
-   プリビルトのカメラ系アーカイブがこの 4 シンボル
-   （`hw_start` / `hw_stop` / `cm55x_delay_ms` / `_us`）を参照するが、対処は
-   **ゲートの緩和ではなくリンカ `--wrap` による board 所有の seam**
-   （`port/sdk_seam/timer_seam.c`、#30）。`__real_*` は呼ばない ので最終 ELF に
-   禁止接頭辞のシンボルは 1 つも残らず、ゲートも本項の不変条件もそのまま維持される。
-   seam は **id != TIMER_ID_0 と再現しない設定をレジスタ非書込みで拒否**し、
-   `hw_stop()` は ISR から呼ばれ得るので **ISR-safe**（ログ / mutex / TX API /
-   fail-stop ループを入れない）。**引数認識ゲートは採らない**（tail-call・
-   address-taken relocation・関数ポインタ・veneer を追う脆い全プログラム解析になる）。
-   加えて **`tx_glue_profile_ok()` が毎回実行時に再検証する**
-   （TIMER2 の CTRL/RELOAD と計数、登録した全ベクタの同一性、
-   **有効 IRQ 集合 ⊆ 登録集合**、EPK ネストカウンタが 0）。
-   ビルド時ゲートは唯一の砦ではなく多層防御の一枚。
-   **EPK の会計対象 IRQ は集合**（`tx_glue_profile_register_irq()`、#30）。
-   **「有効だが未ラップ」というカテゴリを作らない** — 有効にするなら必ずラップして
-   登録し、駄目なら**無効のままステータスをポーリング**する。ベンダ由来で
-   IRQ 番号が事前に分からない周辺は、**実測して決める**
-   （`port/sdk_seam/epk_irq_wrap.c`: ISER をスナップショット →
-   PRIMASK 下でベンダ bring-up → 増えた線を全部ラップ・登録。
-   1 本でも失敗したら bring-up ごと諦める）。
-   時間源の分担: EPK = TIMER2（スリープ中も進む必要がある）/ udelay と membench =
-   DWT CYCCNT / CoreMark = `tx_time_get()`。混ぜない。
-   **`TX_ENABLE_WFI` も `TX_EXECUTION_PROFILE_ENABLE` もコンパイル時スイッチ**で
-   実行時に降りられない。だから WFI は前提を**強制**する（カーネル入場前に
-   `SCB->SCR` の SLEEPDEEP / SLEEPONEXIT を clear → 読み戻し → 駄目なら fail-stop。
-   `TX_LOW_POWER` は使わない）。`hx_lib_pm_*`（Himax PM）は禁止シンボル接頭辞。
-   EPK 側は「信用できない」ことを**言える**ようにするのが唯一の手段 —
-   ベンダ UART0 ベクタのラップに失敗したら**ベクタを戻してコンソールを生かし**、
-   共有 `thread` が `--` と理由を出す（`cli_thread_cpu_source_ok` 弱シンボル）。
-   ベンチマークは絶対値を出すので、入口で ThreadX tick と SCU の CM55M 周波数を
-   検査して駄目なら実行拒否し、実行後に再読み出しして動いていたら警告する
-   （`cmds/bench_gate.c`）。DWT を tick で較正するのは循環（SysTick reload が同じ値
-   由来）なので採らない。**SCU の値が「正しい」ことは証明できない**（独立した時間源が
-   このボードには無い）ので、結果は「検証済みの絶対値」ではなく
-   「明示したクロックの下での実測値」として出す。
-   **CoreMark の翻訳単位だけ `-fno-tree-vectorize`** を残す（#42）。MVE 禁止では
-   なく、公表値 3.13 CoreMark/MHz との**基準線の連続性**のため — 外すなら測り直して
-   比較記述を全部書き直すところまでが 1 セット。
-   membench のバッファは NOLOAD セクションなので **測定前に明示的に全書き込み**が要る
-   （startup の copy/zero を通らない。TCM の ECC 未初期化読み出しも避ける）。
-   MPU / キャッシュ属性は firmware で decode せず**生レジスタをダンプ**する
-   （継承状態で TRM も無い。SRAM 行を cacheable と断定しない）。
-
-8f. **grove-vision-ai-v2: カメラ（OV5647 / #35, #54）。**
-   データパスは固定（640x480 RAW10 2 lane（センサ側でビニング済み）→ INP crop 無し →
-   4:2 binning → 320x240 → HW5x5 demosaic BGGR → WDMA3）。
-   **IMX219 は #54 で削除済み**。ソフト自動露出（`cam_ae_step`）・`camera depth`・
-   frame_lines 引数（0x0160/0x0161）も一緒に消えた。`camera auto` は
-   **センサのオンチップ AEC + このポートのソフト WB**。
-   センサ記述子の関数ポインタ seam は 1 エントリでも維持する
-   （register map は部品ごとに全く違い、SCCB は未実装レジスタも ACK するため）。
-   **WDMA3 出力はプレーナ B/G/R**（インタリーブ RGB565 ではない。HXCSC は入力
-   アンパッカーであってパッカーではない）。パックはソフト
-   （`port/camera/cam_convert.c`、`-fno-tree-vectorize`）。
-   - **DMA が触るバッファを TCM に置かない**（fault せず無言で転送されない）。
-     `.cam_raw` / `.cam_slots` は SRAM NOLOAD で、`check_placement_budget.py` の
-     RESIDENCY がシンボル→サイズ→セクション→領域を pin する。**外さない。**
-   - **WDMA3 バッファは frame-ready 後・CPU 読取前に、完了した面だけ全長 invalidate する**
-     （ベンダのグルーは 32B の JPEG サイズ語しか invalidate しない。真似しない。
-     #59 以降 landing buffer は 2 面で、DMA が書いている側の面には触れない）。
-   - **[!] WDMA3 のチャネルアドレスを書くのは `cam_wdma3.c` だけ、かつ xDMA を
-     disable してから**（enable 中の書換えは根拠が無い。#59）。disable を跨ぐ
-     マスクは **WDMA3 専用の `hx_drv_xdma_get/set_WDMA3INTMask` ペア**で行い、
-     `hx_drv_xdma_set_mask()` は使わない（両マスクレジスタを丸ごと書き潰す）。
-     マスクは fault 経路も含む**全ての出口で復元**する。arm 時のステータス監査は
-     fail-closed（acknowledge してよいのは premature-disable のみ・カウント必須・
-     再読出しで clean を要求）。**緩める変更は不可。**
-   - **停止は単一ルーチン `cam_imx219_full_stop()` に収束させる**（正常停止 /
-     timeout / terminal / bring-up 失敗の 4 経路とも）。**再開はバリア**:
-     フル停止で静止させてから clear → pending clear → semaphore drain → 再 arm。
-     **クリアの前に必ず停止**（callback は status だけで世代を持たないので、
-     走ったままクリアすると遅延イベントが新ストリームの初フレームに化ける）。
-   - **エラーはフレームより優先**（sticky ラッチを先に見る）。**未知の負値は terminal**。
-   - **DP/CSIRX 構成は swreset を跨いで信用しない** — フル停止のたびに未構成へ倒し、
-     次の start で再構成する。
-   - `lcd_blit()` は **wire order (BE)** を要求し、pipeline の `FRAME_FMT_RGB565` は
-     **LE**。swap は `lcd_blit_le()`（ドライバ所有）。**slot を wire order で publish して
-     format を偽らない。**
-   - [!] **`camera_stream_stop()` は成功時のみ join を保証する（#48）。**
-     `CAM_OK` = producer 停止済み。**timeout は何も証明しない**（待ちは有界で、
-     sink は `consume()` 内で推論を回せる）。**全呼び出し元は `CAM_OK` の時だけ
-     detach する。** publish() は sink を pre-pin して lock を離してから
-     consume() を呼ぶので、走っている sink の unlink は pipeline が耐えられない。
-     未確認 join は **`CAM_ST_LOST`** = **再起動まで全ハードウェア操作を拒否**
-     （`cam_api_enter()` で、mutex を取る前に）。**`CAM_ST_FAULTED` で代用しない**
-     — あれは「次の bring-up で作り直す」状態で、ここでは最悪の動作になる。
-     この経路では detach も teardown も所有権解放もしない。
-     `camera_stream_stats()` は mutex もハードウェアも触らないので拒否理由は必ず読める。
-   - [!] **stop だけが API mutex を有界待ちする（#65）。** 他の入口は `TX_NO_WAIT` の
-     まま。**両方向に戻さない** — 元の `TX_NO_WAIT` では単なるロック競合が
-     「producer 未確認」として返り、preview が自分の sink を捨てていた。
-     **poison の判定は待ちの向こう側でもう一度**（`CAM_ST_LOST` は「not streaming」でも
-     あるので、近道を前に置くと**起きていない stop を `CAM_OK` として報告する**）。
-     この順序は `port/camera/cam_state.c` の `cam_stop_decide()` が**唯一の判断点**で、
-     `camera_stream_stop()` に近道を書き戻すと `test/test_cam_stop.c` が
-     検査できなくなる（実機では作れない分岐）。取得失敗は **`CAM_ERR_LOCKED`（-8、
-     このボード固有）で poison しない** — 何も聞いていないので何も証明していない。
-     判定は**両 enum とも fail-closed**（「HELD でなければ拒否」/ 成功を返す状態は
-     列挙する）。**`default:` を足して塞がない** — メンバ追加時に `-Wall` が鳴るのと
-     "future member" ベクタが落ちるのが検知経路。
-   - [!] **センサーバスの所有者は mutex 保持下で決める（#74 / #77）。** producer は
-     API mutex を取らないので、コンソールをバスから遠ざけているのは mutex ではなく
-     **状態検査**。そして `camera_stream_start()` は **mutex 保持下で**
-     `CAM_ST_STREAMING` を publish するので、**acquire より前に取った検査は無価値**
-     （stream start 丸ごとに追い越され、`cam_bringup()` が「もう上がっている」と返して
-     fall-through が producer の持つ CIS ドライバを叩く。`TX_NO_WAIT` では閉じない）。
-     入口は **`cam_bus_enter()` 1 本**で、`cam_state.c` の `cam_bus_decide()` が
-     **「何をすべきか」ではなく「誰がバスを持っているか」**を返す
-     （probe / capture / VTS read-back / **stream start** は producer を拒否へ、
-     4 つの setter は queue へ）。**`camera_stream_start()` も必ずここを通す** ——
-     poison を direct に落とすと `cam_bringup()` が**ポートを再構築**する（setter の
-     I2C 1 回とは被害が違う）。**sink 予約は代わりにならない**:
-     `camera bench` は `camera_stream_start(NULL)` で sink 無しなので registry が空。
-     契約は **`CAM_OK` ⇒ mutex 保持 + owner は DIRECT か PRODUCER のみ /
-     負値 ⇒ 非保持**（ThreadX の mutex は再帰的なので、入れ子取得は
-     デッドロックせず「1 回の put で保持が残る」形で壊れる）。
-     **bring-up はヘルパに入れない** — `camera_set_auto()` の
-     「上がらなくても CAM_OK」と「そもそも入れなかった」を別の答えにするため。
-     [!] **`CAM_ST_LOST` は保持下で到達する**（poison 検査は mutex の前なので、
-     preflight と acquire の間に stop の join 失敗が挟まる）。ここを direct に落とすと
-     `cam_bringup()` が**ポートを再構築**する = #48 が防ぐ最悪の動作。
-     [!] **判定は「STREAMING 以外」ではなく状態を列挙する** —— #65 と違って順序の
-     ハザードではなく（enum は同時に両方にならない）、**広い検査**が fail open する。
-     `default:` は書かない。**新しい `CAM_ERR_BUSY` の意味はコマンドごとに違う**:
-     probe と read-back は「stream または API」、4 つの setter は
-     **API のみ**（stream 中は queue = 成功なので「preview を止めろ」は誤誘導）。
-     queue の書き込みは **`TX_DISABLE` で値とビットを一括**（mutex は producer に対して
-     何も守らない）。**`cam_raw_mode` は mutex 保持区間にスコープする** ——
-     `cam_step_dp()` が読み、producer もタイムアウト再起動でそこを通るので、
-     API に入る前に立てると**拒否された `camera raw` でも走行中の stream を
-     one-shot 用に再構成し得る**。`CAM_BUS_DIRECT` を得た後にだけ立て、
-     `cam_api_exit()` が落とす（`volatile`）。
-     [!] **`cmds/` は producer が消費するデータパス設定を書かない（#80）。**
-     `camera bayer` が `cam_dp_set_bayer()` を直接呼んでいた —— レジスタを触らないので
-     I2C / bring-up を探す掃除では見えず、**「次の capture / preview で効く」という
-     印字が嘘**になっていた（producer が再起動経路で拾う）。入口は
-     `camera_set_bayer()` で、**queue ではなく拒否**（phase を読むのはデータパス構成時で
-     フレームごとではない = どちらにせよライブでは効かない）。
-     `cmds/` が触ってよい `cam_dp_*` は**読み取りと幾何定数だけ**。
-     [!] **ただし規則は「producer が消費する状態は全部所有権を通す」ではない。**
-     `cam_wb`（`camera wb` / `black` / `sat` / `gamma`）は**意図的にライブ**で、
-     所有権を要求すると走行中の色調整ができなくなる（#67 がまさにそれを要る）。
-     境界は**消費のされ方**: bayer は**データパス構成時**に読まれるので、遅れて効く =
-     嘘になる。`cam_wb` は `cam_tone_sync()` が**フレームごとに 1 回スナップショット**して
-     LUT を組むので、最悪でも 1 フレームが新旧混在になって次で収束する。
-     **ここに所有権を足さない。**
-     **`cam_auto_on` を書くのは API mutex を保持したスレッドだけ** ——
-     `cam_manual_control_taken()` を `cam_api_exit()` の**後**に置くと、
-     `tx_mutex_put()` はスケジューリング点なので、その隙に入った `camera auto on` の
-     結果を上書きして「センサーは auto、フラグは off」を作る（#39 の食い違いの裏返し）。
-   - [!] **teardown の失敗にコンソールからの回収路を足さない（#75、決定済み）。**
-     失敗時に「全部握ったまま」が正解で、持ち主のいない sink を安全に外せると主張するのは
-     #48 が検討して否定した内容。**#79 が唯一の実害ケース（retryable な detach 失敗が
-     恒久 `SINK_LOST` にラッチ）を根で直した**ので、残るのは
-     「保持者が 8 秒 wedge した `CAM_ERR_LOCKED`」1 行だけで、そこでは producer が
-     **止まっていない**（回収する対象が無い）。drain timeout の行は sink が既に unlink
-     済みで予約も切れており、失うのは preview だけ。**証拠は `dmesg`** —— Ctrl+C 経路では
-     コンソールに出せない（`cancel_req` 中の出力は共有コアが捨てる）が、
-     `camera_stream_stop()` は両方の失敗を `LOG_ERR` でリングに落とす。
-   - [!] **`camera_unsubscribe()` はストリーム中も拒否する（#65）。** poison だけを
-     見ていたのでは backstop になっていない（`publish()` は pre-pin して lock を
-     離してから `consume()` を呼ぶので、ストリーム中の unlink は進行中の配送と競合し、
-     直後の drain は古い受け渡しカウントを見て idle と判定し得る）。
-     **API mutex は取らないまま**でよいが、理由を間違えない —— **core は競合 detach を
-     拒否しない**（`frame_pipeline_detach()` は ATTACHED な sink をカメラが streaming でも
-     unlink する。拒否するのは遷移中と未返却 callback だけで、`cam_state` を知らない）。
-     安全にしているのは **呼び出し元 1 箇所 + 確認済み stop の後だけ + sink 予約**
-     （unlink までは registry に残り、`frame_pipeline_sink_count() != 0` が start を弾く、#63）。
-   - `cam_state` は **volatile**。stop が mutex 待ちの**後にもう一度読む**ため
-     （アドレスを取らない file-static はレジスタに保持され得る）。
-   - **EPK 容量は `GROVE_EPK_WRAP_MAX` == `TX_GLUE_EPK_MAX_IRQ` == 32**
-     （`_Static_assert` で結んである。片方だけ動かさない）。
-     **[!] `nn stream`（#48/#99）で 31/32 に達する**（camera 26 + UART0 1 + LCD 2 +
-     QSPI/U55 2。UART の DMA fallback を使うと 32）。余裕は無い。fail-closed なので
-     症状は「camera が上がらない」であって黙った誤計上ではない。
-     measure-then-wrap は **2 ラウンド**（間の I2C モードテーブルは PRIMASK 外。
-     1 ラウンドにすると ~10 ms 割込み禁止で tick を落とす）。
-   - **Timer0 の割込み到達 probe（`grove_timer_seam_probe_delivery()`）を外さない。**
-     `hw_start` は「カウンタが回る」しか証明しない。probe は **PRIMASK 外・IRQ 有効**で
-     実行し、失敗したら **camera bring-up ごと拒否**する。両方向の host test あり
-     （`test/test_timer_probe.c`、probe はラッチするので 2 プロセス）。
-   - **4 つの `__wrap_hx_drv_timer_*` は `noipa`**。`check_timer_seam.py` が名前で
-     逆アセンブルを検査するので、`.part.0` に分割されるとゲートが空振りする。
-   - SDK ツリーは read-only。センサのモードテーブル `.i` は**コピーせず SDK から
-     include** する（pin した SHA に紐付けるため）。
-
-8g. **f746g-disco: カメラ subscriber の drain と owner lifecycle（#72）。**
-   GUI preview / `nn stream` / `net mjpeg` は 1 つの base capture の subscriber で、
-   `camera_unsubscribe()` は **base を止めずに** detach する。`publish()` は sink を
-   pre-pin して lock を離してから `consume()` を呼ぶので、unlink を跨いだ配送が実在する。
-   - **`camera_frame_put()` は全 `consume()` の最後の文**（3 sink とも）。これが drain の
-     唯一の根拠で、後ろに仕事を足すと **pin カウントは 0 のまま** owner がその仕事の
-     読んでいるものを解放する。**証明できるのは「関数が返った」ではなく
-     「そのコールバックが owner の所有物にもう触らない」** — sink が静的だから足りる。
-   - **`CAM_OWN_DRAINING` は `camera_unsubscribe()` の前に入る。** 逆にすると drain 区間が
-     丸ごと無防備で、そこに入った start が sink を再 attach し、
-     `frame_pipeline_attach()` が `_pins` をリセットして**証拠を消す**。
-   - **直列化（PRIMASK）は作業を跨いで保持しない**: 取る → 遷移 → 離す → drain と
-     teardown → 取り直して commit。跨ぐと `tx_thread_sleep()` を跨ぎ、
-     `nncam_lock` / `ltdc_lock` とロック順が逆転して teardown が deadlock になる。
-   - **判定は `port/camera/cam_drain.c` と `cam_own.c` の純関数が唯一の判断点**。
-     owner 側に近道を書き戻さない（実機で作れない分岐なので
-     `test/test_cam_drain.c` / `test_cam_own.c` だけが検査できる）。**両方 fail-closed**
-     （カウントを先に見て deadline は境界だけ / 未知の状態は refuse）。
-     **`default:` を足して塞がない** — メンバ追加時に `-Wall` が鳴るのと
-     "future member" ベクタが落ちるのが検知経路。
-   - **DONE は `pins == 0` ちょうどだけ。`pins < 0` を released 扱いにしない。**
-     `unpin_locked()` は 0 で飽和するのでパイプラインは負を作れず、負は
-     「誰かが sink の帳簿を書いた」しか意味しない。それを「解放済み」と読むのは
-     説明のつかない値の上で teardown を通す fail-open。
-   - **遅延 start（GUIX preview）はイベントに claim を持たせる。** 既に RUNNING の
-     `gui start` は AUTOSTART を post しない（claim の無いイベントは、`gui stop` が
-     drain を終えた後に届いて sink を再 attach しうる）。ハンドラ側も
-     `cam_own_start_claimed()` で自分の claim が生きていることを確認してから subscribe する。
-   - **worker は session を返してから「parked」を公開する**（nn の
-     `nncam_release_session()` → `nncam_active = 0` の順）。逆にすると、stop が parked を
-     見て IDLE を commit → 新しい start が新 session を acquire → 旧 worker の release が
-     **新しい session を解放する**。
-   - **失敗は呼び出し元まで返す**: `CAM_DRAIN_PINNED` のとき GUI は `guix_stop()` を
-     呼ばず「display returned to lcd」と言わない。`nn_camera_stop()` は -7、
-     `nx_mjpeg_stop()` は `NX_MJPEG_PINS` を返し、**次の start を拒否し続ける**
-     （retryable だが両方向に fail-closed）。詳細は `boards/f746g-disco/README.md`。
-
-9. **[!] plugin container（#101 = Step 1a / #103 = Step 1b）。** モデルと、その出力を
-   解釈するコードを 1 つの blob で運ぶ。**#103 以降、plugin は実際にロードされて走る**
-   （デコード・パネル描画・閾値・report）。説明は
-   `boards/grove-vision-ai-v2/README.md`。破ってはいけないこと:
-   - **`svc/plugin_load.c` は呼び出し可能なポインタを 1 つも返さない。** `struct
-     plugin_view` は整数オフセットとコピー済みバイトだけ。「1a は plugin を実行しない」は
-     規律ではなく**型の性質**であり、そこに関数ポインタを足した瞬間に消える。
-   - **ゲートは plugin ELF にも適用する。対象外にしない。** ただし
-     **[!] メモリ安全性も、vtable が渡したポインタの使用範囲も証明しない。**
-     境界外書込み・壊れた tensor ポインタ・scratch 溢れ・ポインタ演算の誤りは見えない。
-     **MMIO 検査は存在しない**（リテラルは定数と区別できず、このパートはペリフェラルが
-     SRAM と同じ 0x34 窓に同居する）。**plugin は board code と同格の
-     「レビュー済み・信頼された native code」**として扱う。
-   - **ダイジェストは署名ではない。** 示すのは転送後の同一性だけで**由来を示さない**。
-     由来は「公式 packer がゲートを不可分に実行する」プロセス制約が担保する。
-   - **container は組んでから検査し、その同一ファイルを送る。** 部品を検査してから組むと
-     packer が入力を読み直せてしまい、「検査したファイルを送る」保証が消える。
-   - **ホストは `verify_container` でデバイスと同じ `svc/plugin_load.c` を走らせる。**
-     別実装にすると #93 の再発（ホストで通り実機で落ちる）になる。
-   - **`--profile` と `--slot` は必須。** 前者はファイル名から推測しない。後者はホストが
-     知り得ない（`blob write` はデバイス側でスロットを選び、**サイズヘッダ到着前に
-     スロット全体を消去する**）。**2 つのスロット指定の一致は誰も検査できない。**
-   - **[!] モデル区画は 16 バイト整列**（4 ではない）。`npu_payload.c` の 4 は flatbuffer の
-     規則で、**Ethos-U ドライバは全ベースアドレスに 16 を要求する**。container 以前は
-     モデルが常に 4 KB 整列の payload アドレスに載っていたので**事故的に満たされていた**。
-   - **`.plugin` は固定絶対アドレス**（`0x341E0000..0x34200000`）。plugin は prelink され
-     ローダは再配置を一切しないので、動かすと既存の全 plugin が無効になる。
-     **ldscript と `check_placement_budget.py` が独立に宣言する**（検査対象から期待値を
-     読むゲートは何を渡されても通る）。
-   - **ゲートを通った plugin を「実行して安全」と読まない。** メモリ安全性は誰も
-     証明していない。上限が守るのは**スタックだけ**である。
-   - **[!] 分岐点は `port/npu/nn_active.c` の 1 つだけ**（#103）。一発デコード /
-     stream の admission・decode・draw / **閾値** / report の全部がそこを通る。
-     `nn_overlay.c` だけを分岐させない — `nn run` は独自経路を持ち、`nn thresh` は
-     常駐デコーダを直接叩いていた。**plugin は自分の閾値を持つ**ので、片方だけ
-     繋ぐと `nn thresh 700` が plugin に届かない。**両者に同じ閾値を明示的に与える
-     differential test はこれを見逃す**ので、テストは**シム経由で設定して
-     もう一方が動いていないことを見る**。
-   - **[!] plugin の decode 結果は private。** `nn_active_decode()` は呼び出し側の
-     `bf_det[]` / `bf_result` を**書かない**（`snap->external` がそれを伝える）。
-     箱を読む代わりに draw / report を頼む。
-   - **[!] 幾何は 1 つ**（#103）。`nn run` と `nn stream` は別々の
-     `nn_preproc_geom` を作るので、**両方がシムに publish する**。片方だけ繋ぐと
-     もう片方の箱が毎回 `outside the frame` になる（実際にそうなった）。
-   - **[!] オフセットをアドレスに変えてよいのは `plugin_run_slot()` の 1 箇所**。
-     ローダ自身の entry 呼び出しも同じヘルパを通す。
-   - **[!] 実行前に MPU を読み戻して fail-closed**（ベンダの `enable_XIP()` が MPU を
-     再構成する）。**Armv8-M に「番号の大きいリージョンが勝つ」規則は無い**（複数一致は
-     アクセス無効）/ **`limit = (RLAR.LIMIT << 5) | 0x1F`** で最後の 32 B ブロックを
-     含む（`nor_flash.c` の診断用 capture はマスク後の値と比べており、**流用しない**）/
-     **MAIR は完全に復号する**（「Device でない」では予約エンコーディングを通す）/
-     リージョン数は **`MPU_TYPE.DREGION`** で、**読めた表より大きければ clamp せず
-     拒否する**（#114）。判定は純関数でホストテスト必須。
-   - **検査から実行までの窓に新しい機構を作らない。** 既存の NOR リースが守っている
-     （`enable_XIP()` は `nor_flash.c` の 2 箇所 / `npu_hw_init()` がモデル生存期間
-     リースを保持 / writer の予約は live reader 0 のときだけ）。`nor_lease_held()` で
-     assert するだけにする。
-   - **[!] plugin の fault は `CAM_ST_LOST` に行かない。`fault.c` は記録して即リセットし、
-     リセットが teardown である。** カメラの後始末は起きず、起きる必要もない。
-     帰属は「pc が active plugin の範囲内」までで、handler は publish 済みの
-     不変メタデータしか読まない（**plugin メモリを deref しない**）。
-   - **[!] スタック上限は実測から導出する。超えられない上限は上限ではない。**
-     `allowance = スレッドのスタック − 呼び出し地点の深さ − 非同期予約 208 B − 余裕`。
-     暫定値のうち 2 つが天井（スレッドスタック全体）と同値で、**検査が発火できなかった**。
-     208 B の前提は **`FPCCR.TS == 0` の強制**（`fp_enforce.c`。継承値なので検査では
-     足りない）。
-   - **[!] 導出値 0 は「未測定」ではない**（#103）。present なスロットは 0 を宣言してよい
-     （分類器の entry はフレームレス）。**absent の綴りは slot 側**にあり、
-     `stack_limit == 0` の拒否は**明示的に書く**（比較に相乗りさせない）。
-   - **[!] painter の予算はガード保持時間に比例する仕事の上界であって、`draw()` 内の
-     任意の計算の上界ではない。** 課金はフレームバッファを触る**前**（部分描画を残さない）。
-     colour-key blit は**透明でも読んだソース画素を全部数える**。
-   - **[!] 輪郭は外接面積ではなく「実際に書く store 数」で課金する**（#105）。
-     外接面積だと近距離の顔 1 つ（200x200 = 40,000）が上限 19,200 を超え、
-     **箱が黙って消える**。奇数幅の細い矩形は左右バンドが重なって同じ列を 2 度書くので、
-     **相異なる画素ではなく store を数える**。painter と描画ループが共有してよいのは
-     **幾何規則（`svc/rect_geom.c` の `rect_geom_norm`）だけ**で、テストの期待値は
-     共有しない — `test_plugin_paint.c` は**実ループの store をドライバ内の seam で
-     数え**、golden 値を別に置く。`lcd_rect.c` はそのために分離した TU で、#110 で
-     さらに幾何だけが `svc/` へ出た（wio が同じ規則で課金し、描画は別だから）。
-     **`-O3` は動かすたびに一緒に運ぶ** — `GROVE_O3_SOURCES` は両方を名指しする
-     （移すと黙って `-Os` に落ちる）。
-   - **[!] `draw_spent` / `draw_refused` は writer / reader / arm の 3 箇所で
-     同じクリティカルセクション規則に揃える**（#105）。reader 側だけでは、パネル側の
-     2 代入の途中で preempt された状態を遡って防げない。arm での reset を欠くと
-     世代を跨いで残り、cls → det の順に測ると前者の high-water を両方に報告する。
-   - **[!] `nn_input_quant_ok()` は常駐デコーダの前提条件**であって、このボードが
-     モデルを食わせられるかの話ではない（#103）。**plugin はこれに縛られない** —
-     ベンダの分類器アプリ自身が scale 0.0203 / zp -8 の入力に `pixel - 128` を書く。
-     縛ると全ての分類器 container が組込みの class report に流れ、container が運ぶ
-     ラベルは一度も読まれない。
-   - **[!] `nn stream` は描けないデコーダを拒否する。** DRAW は任意スロット。
-     拒否しないと「動いているが一度も注釈されないプレビュー」になる。
-     **#105 で分類器も DRAW を持つようになったが、拒否そのものは残す。**
-   - **[!] フォントは plugin 側に置く**（#105 = #78 Step 2）。painter に `text()` を
-     足さない — `plugin_painter` には version/size が無いので末尾拡張は
-     **abi_version bump = 全 container 再生成**であり、字体・グリフ範囲・多言語が
-     以後ファーム変更になる（#78 が消そうとしている用事そのもの）。
-     **ラスタライズは `decode()`、`draw()` は blit だけ。** plugin はフレームの
-     縦横を知らない（`to_frame` はモデル入力の矩形を返す）ので**原点アンカー**。
-     **`decode()` は冒頭で draw-valid を落とし、成功時にだけ立てる。**
-     バッファの extent は**1 定数から導出して `_Static_assert`**（`blit` は範囲外読みを
-     証明しない）。`add_plugin()` は `asset/common/` を glob しないので、
-     新しい共通 `.c` は `_srcs` に足す。
-   - **[!] ファームの印字は「種」を名乗らない**（#105）。`last_ndet` は
-     **「デコーダが返した item 数」**で、何件見せるかは plugin の裁量。
-     **列挙で潰さない**（3 回数えて 2 回間違えた）— `cmake/check_output_vocabulary.py` が
-     **POST_BUILD で `.rodata` を** negative scan する。**ソースの literal を regex で
-     見ない**: 初版はそれで、`"fa" "ce"` / 行継続 / stringify マクロ / 行頭が `/*` の行に
-     素通りされた。plugin は別成果物でリンクされないので**対象外は構成上自明**であり、
-     検出器 plugin が `faces` と言うのは正しい。**実行時に組み立てた文字列は見えない**ので
-     「通った」を「言えない」と読まないこと。
-   - **ファームと plugin は別成果物で、間違いは両方向に起きる。** 別の artifact
-     graph であり（`ninja -t inputs shell.elf` に `plugin/` は 1 つも現れず、plugin の
-     ソースを触っても `shell.img` はバイト一致）、**`--target flash` は container を
-     更新しない**／逆に **plugin だけの変更に焼き直しは不要**（再送だけ）。
-     前者は 1 度、後者はその直後に踏んだ。**片方向だけ書き留めた危険は「解決済み」に
-     読めて、残り半分が生きたままになる。** `nn info` が **CRC** を出すのは前者のため
-     （build id は configure 時の source revision で、plugin を直して再ビルドしても動かない）。
-
-10. **ビルドは `_ref/` を読まない。** `_ref/`（および `../*/_ref/`）は git 管理外の資料置き場。
-   CMake / スクリプトが参照するとクローンしただけでは configure できなくなる。
-   C コード中の言及は出典コメントのみ可。
+- **[!] ブートローダ領域とスロットヘッダ予約は絶対に書かない**（壊すと黙って前のビルドが起動する）。
+  **地図は全バイトを claim** し、**工場データは最初の書込みで消える**ので書く前に read-only の全走査を。
+  **[!] 毎回の flash はブートローダ領域も書き直すので自動ループで焼かない。**
+- **[!] ベンダの NOR erase/program へ届いてよいのは `nor_seam.c` だけ**（`--wrap` は内側 4 本。
+  **`erase_all` と `word_write` の wrapper は `__real_*` を名指ししない**）。**blob だけ・実測した 1 粒度
+  のみ・`NOR_ST_WRITING` 以外は拒否。FORBIDDEN から外した 3 名は戻さない。[!] seam ゲートは ELF では
+  なく ld の map で判定**（LTO は拒否）。**能力の証明ではなく defence in depth。**
+- **[!] 書込みは 1 トランザクションで途中で返らない**（`port/nor/nor_write.c` が唯一の認可呼び出し元）:
+  claim → 窓 down → **JEDEC 再読（canary）** → 操作 → 窓 up → **読み戻し照合** → commit。**窓の復帰と
+  commit は失敗しても必ず走る。canary が liveness の唯一の手段。**
+- **[!] 読み戻し不一致は terminal `FAULTED`。wire 前の拒否と transport 無応答は fault させない。照合は
+  受け付けた prefix だけ。未消去への program は拒否。ベンダの戻り値は成否を報告しない**（真実は読み戻し。
+  **負の値は wire 前の拒否**）。**[!] QSPI は 32 bit ワード内のバイトを反転する**ので writer が自前の
+  ページで戻す（**4 バイト整列必須**）。**定数バイトのテストでは見えない**ので既定は可変。
+- **[!] XIP 窓を読む者は全員リースを持ち、probe は writable interval の外で読む前に自分で invalidate
+  する。`nor` に生オペコードを足さない。「read-only」とは書かない**（bring-up が QE を書く）。**NOR の
+  ライフサイクルと QSPI/XIP と EPK wrapset は `port/nor/` 所有**（NPU へ戻すと unload が IRQ を切る）。
+- **[!] 弱めない**: **`NOR_ST_WRITING` は state と reader マスクを同一クリティカルセクションで読む /
+  `NOR_ST_RESERVED` は跨ぐ所有権で commit は RESERVED に戻し owner と同時に publish、不整合は terminal、
+  予約は全出口で返す / `nor info` はリースを取らない / blob の identity は基底アドレス、`empty` は
+  「空きフラッシュ」ではない、全面 re-carve は一度きりで以後 append のみ。**
+- **[!] flash geometry は実測値でノブではない**（非キャッシュ。**CACHE 化は不可** — 宣言と検査が同じ値
+  から出る）。**消去粒度とヘッダ複製数は束ね直さない。firmware 予約はブートローダの算術から導出**し
+  **1 イメージ 1 スロットは `--image-max` で検査**。**`check_flash_partitions.py` は予約の非重複を成果物
+  ゼロでも検査し存在必須は今から書く物だけ。削除済みの予約・ターゲットを復活させない。**
+- **Himax SDK は pin fetch でツリーは read-only。** app は **XIP ではない**（**ITCM 溢れはリンク
+  エラー**）。**SRAM 窓は 2 領域**で低位は **NOLOAD 専用**（配置ゲートが ELF のフラグで検査する）。
+  **DMA が触るバッファを TCM に置かない。クロックは継承**（SCU 読み戻しが唯一の真実）。**SEC_ONLY なので
+  `TX_SINGLE_MODE_SECURE` 必須**、優先度は 3-bit（**M7 の値を流用しない**）。`platform_driver_init()` は
+  PRIMASK 下 + 入場前に IRQ 停止。
+- **[!] TIMER2 は EPK 専有で触ってよいのは `tx_glue.c` の bring-up 1 箇所だけ。`hx_drv_timer_*` は API
+  丸ごと禁止シンボル**（例外は init のみ。接頭辞で塞ぐ）。**緩めない。** プリビルト参照分は**ゲート緩和
+  ではなくリンカ `--wrap` の seam**で吸収し、**`tx_glue_profile_ok()` が毎回再検証する。[!] EPK の会計
+  対象 IRQ は集合で「有効だが未ラップ」を作らない**（番号不明は **ISER で実測**）。**時間源を混ぜない。**
+- **[!] WFI と EPK はコンパイル時スイッチ**なので前提は**強制**する（読み戻して駄目なら fail-stop。
+  `hx_lib_pm_*` は禁止接頭辞）。**[!] MVE は解禁済みだが `FPCCR.ASPEN` は入場前に強制 → 読み戻し →
+  halt**（**継承 `LSPACT` は拒否**）。**CoreMark の TU だけ `-fno-tree-vectorize`**（基準線の連続性）。
+- **[!] WDMA3 のチャネルアドレスを書くのは `cam_wdma3.c` だけ、かつ xDMA disable 中**（マスクは専用
+  ペアで**全出口で復元**、arm 時の監査は **fail-closed**）。**完了した面だけを読取前に全長 invalidate。
+  停止は単一ルーチン、再開はバリア**（**クリアの前に必ず停止**）。**エラーはフレームより優先・未知の
+  負値は terminal。**
+- **[!] `camera_stream_stop()` は成功時のみ join を保証する**ので**呼び出し元は `CAM_OK` の時だけ
+  detach する**。未確認 join は **`CAM_ST_LOST`**（**`FAULTED` で代用しない**）で、detach も teardown も
+  所有権解放も**回収路**も無い。**[!] stop だけが API mutex を有界待ちし**（他は `TX_NO_WAIT`）、
+  **poison の判定は待ちの向こう側でもう一度**行う（取得失敗は poison しない）。
+- **[!] センサーバスの所有者は mutex 保持下で決める**（**acquire より前の検査は無価値**）。入口は
+  **`cam_bus_enter()` 1 本**、契約は **`CAM_OK` ⇒ mutex 保持 + owner は DIRECT か PRODUCER のみ**。
+  **bring-up はヘルパに入れない。判定は状態を列挙し `default:` を足さない。cmds/ は producer が消費する
+  データパス設定を書かない**（境界は**消費のされ方**）。
+- **op resolver は 1 個のまま**（**CMSIS-NN を持ち込まない**）。**境界の型変換はファイル側で剥がす。
+  [!] `npu_open()` は長さを取り `GetModel()` の前に境界付き verifier を通す**（**範囲 → 長さ →
+  identifier → verifier → 走査**。**長さには下限も要り生アドレス形にも必須**、**limits は呼び出しと
+  ともに `npu_verify.h` の 1 箇所**）。**ペイロード検査も緩めない**（`COMMAND_STREAM` が 1 個かつ
+  最後 / 対象は**入力テンソル 0** / `is_variable()` は拒否）。
+- **[!] `nn model load --name` はリースを切らさない**（`npu_hw_init()` が先 → 走査 → CRC → `npu_open()`
+  → **失敗は必ず `npu_hw_deinit()`**）。候補は **VALID のみ・重複拒否・失敗理由は別々・読めなければ拒否。
+  ホスト側の `verify_vela_model` を外さない**（**書込みの後**に走る。**C++ 不在は fail-closed**）。
+- **[!] アリーナのキャッシュ保守は「範囲ごと」にしない。** 潰すのは **`ethosu_invalidate_dcache()`
+  だけ**で、引き渡しは `ethosu_inference_begin/end` でアリーナ**全体**を、成功条件は **`job.state` と
+  `job.result` の両方**、異常時はリセットの**成功を確認してから**。**呼び出し側で保守しない。推論は
+  camera producer スレッド・`consume()` 内**で**推論（ガード無し）→ ガード 1 回で stage/draw/present**
+  （callback 中の block / sleep / 推論 / LCD 再入は禁止）。**タイムアウトは `npu_hw.h` の 1 箇所。**
+- **[!] `nn stream` の拒否の仕方はボードで違う。揃えない**（Grove は**デコーダが無い時点で**、wio は
+  **shape は通し `can_draw` 1 本で**）。**[!] `nn_input_quant_ok()` は常駐デコーダの前提条件で plugin は
+  縛られない。[!] ファームの印字は「種」を名乗らない** — ゲートは **`.rodata`** を negative scan する。
+- **[!] Grove と wio のファームは共有デコーダをリンクしない** — **デコーダは container でしか届かない**
+  （f746 はまだ持つ）。**常駐デコーダを戻さない。別フラグで組み直した監査対象を作らない。** 素の
+  `.tflite` は**テンソルをそのまま報告**し、`nn thresh` は **`none`**、set は **`NN_SVC_ERR_STATE`**。
+  デコーダは**全アンカーを走査**し出力は **shape で探す**。**[!] フォントは plugin 側で painter に
+  `text()` を足さない**（ラスタライズは `decode()`、`draw()` は blit だけで**原点アンカー**。
+  **`decode()` は冒頭で draw-valid を落とし成功時にだけ立てる**）。
 
 ## ThreadX 統合（全ボード共通）
 
-- **SysTick > PendSV**（優先度）。同一だと idle 時 PendSV スピンを tick が割り込めず tick 停止 →
-  デッドロック（F746 で実証済み）。PendSV は最低優先度。
-- ThreadX が自前で `PendSV_Handler` を供給（`stm32xxxx_it.c` のものと競合させない）。
-- クリティカルセクションは **PRIMASK ベース**（`TX_PORT_USE_BASEPRI` 未定義）。
-- `__disable_irq` 下の `tx_application_define` で `HAL_GetTick` 依存の init を呼ばない。
-  **ただし前提を確認してから適用すること**: 現在どちらのボードも `tx_kernel_enter()` の前で
-  割込みをマスクしていない（wio は `src/main.c` で明示的に「`__disable_irq()` を置かない」と
-  記録している）。ThreadX の `tx_initialize_kernel_enter.c` も `tx_application_define()` を
-  TX_DISABLE で囲まない。SysTick は `HAL_Init()` 以降走り続け、両ボードの `SysTick_Handler` は
-  `tx_timer_active` ゲートより**前**で `HAL_IncTick()` を無条件に呼ぶ。
-  ∴ `tx_application_define` 内で `HAL_GetTick` ベースのタイムアウトは正常に期限切れする
-  （f746g-disco の `eth_init()` / MDIO がこれに依存して fail-soft する）。
-  この規則が効くのは「誰かが実際に割込みをマスクした場合」であって、マスクの有無を
-  確認せずに違反と判定しない。
-- 割込みは TX オブジェクト生成後に有効化。
-
-## ボード要点
-
-- **STM32F746G-DISCO**: 216 MHz = HSE 25 MHz → PLL M25 N432 P2、VOS1 + over-drive、Flash 7WS。
-  **PA9 は VCP_TX と OTG_FS_VBUS の共用**（UM1907 ソルダーブリッジ）。LED LD1 = PI1。
-  メモリ: Flash 1MB @ 0x08000000 / ITCM 16KB / DTCM 64KB @ 0x20000000 / SRAM 256KB @ 0x20010000。
-  I/D-cache 有効時、ITCM 配置の効果は ~0.6%。
-  **udelay は DWT ではなく TIM2（2×PCLK1 = 108 MHz）** — コアは 216 MHz だが
-  `CLI_CPU_CYCLES_PER_US=108` が正（EPK の time source と共用）。
-  **`CLI_INSTANCE_TIME_SLICE=0`（TX_NO_TIME_SLICE）を維持する** — VCP + telnet の 2 インスタンスが
-  同一優先度で並ぶが、coremark / membench / nn_run が静的状態と DWT CYCCNT を共有していて
-  多重実行に非再入なため（ThreadXShell#4）。スライス有効化は再入ガード整備とセットで行う。
-  FPU は**単精度のみ**（fpv5-sp-d16）— double は `__aeabi_d*` 経由。
-- **Wio Lite AI**: USB は単一で **USB1_OTG_HS を FS（内蔵 PHY）動作**。CMSIS に
-  `USB2_OTG_FS` / `OTG_FS_IRQn` は無く、TinyUSB(dwc2) は rhport0 を OTG_HS base +
-  `OTG_HS_IRQHandler` にエイリアス（`tud_int_handler(0)`）。GPIO = PA11/PA12
-  `GPIO_AF10_OTG1_FS`、USB クロック PLL3Q 48 MHz。LED0 = PC13 / LED1 = PF0 / USER = PF1
-  （active-low、保持リセットで DFU）。`.axi_dma` 等 DMA 共有バッファは両端 32B align
-  （D-Cache コヒーレンシ）。
-- **Grove Vision AI V2**: USB-C は **CH343P USB-UART ブリッジ**（チップに USB は無い）で
-  UART0（RX=PB0/TX=PB1、921600）へ。コンソールと xmodem 書込が同一ワイヤ。
-  メモリ（Secure alias）: ITCM 256KB @0x10000000 / DTCM 256KB @0x30000000 /
-  SRAM0+1 2MB @0x34000000 / SRAM2 384KB @0x36000000 / FLASH XIP 窓 @0x3A000000
-  （M-G1 では devmem からも触らない — XIP 経路の残存状態が未検証）。
-  UART0 IRQ=90、fallback 用 DMA3 combined IRQ=69、TIMER2 IRQ=36（EPK が専有し、
-  割込みは常に無効）。`__NVIC_PRIO_BITS=3`。
-  udelay = DWT CYCCNT + 実行時 SystemCoreClock。`CLI_CPU_CYCLES_PER_US=400` は
-  実機確認済み（起動バナーが読み戻し値との不一致を常時警告する）。
-  詳細（時間源の分担 / cpu% とベンダ ISR ラップ / WFI / ベンチの読み方）は
-  `boards/grove-vision-ai-v2/README.md`。
+- **SysTick > PendSV**（同一だと idle 時 PendSV スピンを tick が割り込めず tick 停止 → デッドロック）。
+  PendSV は最低優先度で、ThreadX が自前で `PendSV_Handler` を供給する（`stm32xxxx_it.c` と競合させない）。
+  クリティカルセクションは **PRIMASK ベース**。割込みは TX オブジェクト生成後に有効化。
+- `__disable_irq` 下の `tx_application_define` で `HAL_GetTick` 依存の init を呼ばない。**ただし前提を
+  確認してから適用すること** — 現在どのボードも `tx_kernel_enter()` の前で割込みをマスクせず ThreadX も
+  `tx_application_define()` を TX_DISABLE で囲まないので、SysTick は走り続け `HAL_GetTick` ベースの
+  タイムアウトは正常に期限切れする（f746 の `eth_init()` がこれに依存）。**マスクの有無を確認せずに
+  違反と判定しない。**
 
 ## レビュー時の作法
 
-- **「コンパイルが通る」は根拠にならない。** レジスタ/能力の主張は対象ボードの RM
-  （F746 = RM0385 / H725 = RM0468。**Grove は公開 TRM が無い — SDK の WE2_S.svd と
-  SDK 実装が正**）の節番号等で、配線の主張は UM1907 / schematic で裏を取る。
-  裏が取れない推測は推測として明示する。
-- 存在しないファイル・行・レジスタ・実機挙動を作らない。Wio の実機は 1 枚しかないので
-  「焼いて試せばわかる」は安いコストではない。
-- 指摘には影響（何がどう壊れるか）と具体的な修正案を付ける。
+- **「コンパイルが通る」は根拠にならない。** レジスタ/能力の主張は対象ボードの RM（F746 = RM0385 /
+  H725 = RM0468。**Grove は公開 TRM が無い — SDK の `WE2_S.svd` と SDK 実装が正**）で、配線の主張は
+  UM1907 / schematic で裏を取る。**実測値・メモリマップ・ピン・手順は board README が正**で、見ずに
+  数値を作らない。裏が取れない推測は推測として明示する。
+- 存在しないファイル・行・レジスタ・実機挙動を作らない（Wio の実機は 1 枚だけ）。
+- 指摘には影響と具体的な修正案を付ける。
 
 ## ビルド / フラッシュ
 
-1 ビルドディレクトリ = 1 ボード。`-DBOARD` に既定は無い（誤ったボードのイメージを黙って
-作らせないため）。各ボードが必要とする submodule は `boards/<board>/submodules.cmake` が
-宣言し、fetch はそこから導出される（wio の configure が F7 系 5 本を引かないための分割）。
+1 ビルドディレクトリ = 1 ボード。`-DBOARD` に既定は無い（誤ったボードのイメージを黙って作らせないため）。
+submodule は `boards/<board>/submodules.cmake` が宣言し fetch はそこから導出される。
 
 ```bash
 cmake -B build/<board> -G Ninja \
       -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi-toolchain.cmake -DBOARD=<board>
 cmake --build build/<board>
-# f746g-disco: cmake --build build/f746g-disco --target flash   (ST-Link)
-# wio-lite-ai: cmake --build build/wio-lite-ai --target flash    (DFU のみ。
-#              dfu-shell のエイリアス。PF1 保持リセットで DFU モードに入ってから)
-# grove-vision-ai-v2: cmake --build build/grove-vision-ai-v2 --target flash
-#              (UART xmodem のみ。ターミナルを閉じ、プロンプトでリセットボタン押下。
-#               初回 configure は Himax SDK ~480 MB を pin fetch する)
+# 書込は --target flash: f746 = ST-Link / wio = DFU のみ（PF1 保持リセットで DFU へ）/
+#                        grove = UART xmodem のみ（ターミナルを閉じ、プロンプトでリセット押下）
 ```

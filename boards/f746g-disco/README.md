@@ -153,6 +153,17 @@ Two gates back that up:
 - `cmake/check_f746_layout.py`, POST_BUILD, which checks the real image for
   symbol residency, the vector table and the float runtime
 
+### [!] Three interrupt handlers have to be STRONG symbols
+
+`PendSV_Handler`, `SysTick_Handler` and `USART1_IRQHandler`.  The stock CMSIS
+startup supplies all three as `.weak` aliases of `Default_Handler`, an infinite
+loop -- so losing an implementation still links, `nm` still shows the name
+defined, and the vector table still points at something.  The board stops
+scheduling, or the console stops answering, with no build diagnostic at all.
+`check_f746_layout.py` therefore tests three things per handler: the symbol is a
+strong `T`, its address is NOT `Default_Handler`'s, and the matching
+`.isr_vector` slot holds that address.
+
 [!] The ASSERTs are weaker than they look for `.sdram.ai` in particular: they
 bound where the section STARTS, so an EMPTY one satisfies all of them, and the
 section uses `KEEP` so `--gc-sections` cannot even produce the "no such object"

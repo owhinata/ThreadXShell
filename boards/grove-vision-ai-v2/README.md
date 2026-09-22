@@ -23,9 +23,12 @@ picocom -b 921600 /dev/ttyACM0
 ```
 
 The first configure fetches the Himax SDK (~480 MB) into
-`boards/grove-vision-ai-v2/sdk/` -- a pinned, git-ignored, read-only checkout
-(see `cmake/himax_sdk.cmake`; `-DGROVE_SDK_DIR=<path>` points at an existing
-checkout at the same commit instead).  The serial device defaults to
+`boards/grove-vision-ai-v2/sdk/` -- a git-ignored, read-only checkout pinned to
+commit **`933810cc`**, the same one the donor port used (the pin itself is in
+`boards/grove-vision-ai-v2/cmake/himax_sdk.cmake`; `-DGROVE_SDK_DIR=<path>`
+points at an existing checkout at that commit instead).  It is NOT a submodule,
+and the tree is treated exactly like `lib/`: read-only, adjustments belong in
+`port/`.  The serial device defaults to
 `/dev/ttyACM0` (`-DGROVE_SERIAL_PORT=` to override); note the CH343P can
 enumerate as `/dev/ttyUSB*` depending on the host driver.
 
@@ -68,8 +71,22 @@ the settings are also lost when the USB device re-enumerates.
 - **Not XIP.**  The flashed `.img` is a full flash image (bootloader + 2nd
   bootloader + memory descriptors + signed app).  At boot the 2nd bootloader
   loads the ELF into ITCM 256 KB @`0x10000000` (vectors+code+rodata) and DTCM
-  256 KB @`0x30000000` (data+stacks); the SRAM0 window from `0x3401F000` is
-  explicit-placement only and empty in this milestone.
+  256 KB @`0x30000000` (data+stacks).  ITCM overflow is a link error -- nothing
+  spills into SRAM by itself.
+- **[!] There are TWO SRAM windows, and only one of them may be loaded**
+  (issue #29).  `CM55M_S_SRAM_LDR`, 188 KB @`0x3401F000`, is the window the
+  2nd-stage bootloader executes from while it is loading us, so it is
+  **NOLOAD only**; `CM55M_S_SRAM`, 1.7 MB @`0x3404D000`, may hold loadable
+  content and is where `.rodata` goes.  "No section WITH CONTENTS may land in
+  the low window" is a rule the linker script cannot express -- `ld` does not
+  distinguish NOBITS when it places an output section -- so
+  `cmake/check_placement_budget.py` checks the ELF's section flags instead, and
+  `cmake/fixtures/` holds the negative test.
+- **No LTO.**  Measured in issue #40 Step 1.5: turning it on *grows* ITCM by
+  **3,616 B**.  63% of ITCM is prebuilt vendor code with no IR in it, so the
+  optimiser's reach is small and does not pay for what it costs.  Introducing
+  it later means redesigning the gates that read the linker's map, not just
+  flipping a flag.
 - **Clock inheritance.**  The app never configures PLLs; it reads the CM55M
   frequency back through the SCU driver (measured: 400 MHz) and derives
   SysTick from that value at runtime (`port/threadx/tx_glue.c` sanity-checks
@@ -251,6 +268,14 @@ The seam's own rules:
 - A `hw_start()` whose interrupt cannot be registered with the accounting
   registry is refused outright rather than started with an unaccounted line.
 - The delays spend DWT cycles (`udelay()`), not a Himax timer.
+- [!] **The four `__wrap_hx_drv_timer_*` wrappers keep `__attribute__((noipa))`**
+  (`SEAM_WRAPPER` in `timer_seam.c`).  `check_timer_seam.py` disassembles them
+  BY NAME, and GCC is free to split a wrapper's body into a `.part.0` sibling --
+  it did, once, when the probe started calling `hw_stop()`, and the gate failed
+  because the symbol it was told to inspect no longer held the register writes.
+  Teaching the gate to follow `.part.N` suffixes would be weakening it to
+  accommodate an optimisation nobody needs on a function called a few times per
+  stream, so the attribute is the rule.
 
 Three independent things hold this down:
 
@@ -3187,19 +3212,29 @@ tell you which sectors hold bytes.  Only the scan does.
 
 ### Where the models live now
 
-Both were re-sent over the console through the verified send path, and `cls`
-was moved out of the 4 MB slot so that slot stays available for a model that
-needs it:
+The store holds CONTAINERS now, not bare `.tflite` models, and each one carries
+the name of the asset target that builds it (issue #107).  Both were sent over
+the console through the verified path, and the classifier was moved out of the
+4 MB slot so that slot stays available for a model that needs it:
 
 | blob | slot | base | payload address | size | crc32 |
 |---|---|---|---|---|---|
-| `cls` | 1 | `0x600000` | `0x3A601000` | 1,704,672 B | `8E679A3F` |
-| `det` | 9 | `0xE80000` | `0x3AE81000` | 164,512 B | `F6DA1D1E` |
+| `cifar10` | 1 | `0x600000` | `0x3A601000` | 1,707,712 B | `6BEA56B6` |
+| `blazeface` | 9 | `0xE80000` | `0x3AE81000` | 168,928 B | `C9AEEFA8` |
 
-Measured on the way: **30 NOR transactions for `cls`** -- the #49 Step 2 budget
-exactly -- and **6 for `det`**.  Slot 9 is above `0xD6B000`, which was this
-board's high-water mark, so that write was also the first this port has made to
-flash nothing had ever touched.
+[!] **That crc32 is `zlib.crc32` over the WHOLE FILE**, and it has been checked
+on hardware: `blazeface.nnc` is 168,928 B on the host, the transfer moves
+168,960 B, and YMODEM's padding is trimmed before the store computes its CRC.
+`sb -k` sends whatever path was typed at it, so comparing the receipt's CRC
+against `blob list` is the only thing that says the bytes the build produced are
+the bytes the board stored -- which is why `asset-<name>` prints it.
+
+The entries these replaced were the bare models `cls` (1,704,672 B, crc32
+`8E679A3F`) and `det` (164,512 B, crc32 `F6DA1D1E`) in the same two slots; those
+names are gone.  Measured on the way in: **30 NOR transactions for the
+classifier** -- the #49 Step 2 budget exactly -- and **6 for the detector**.
+Slot 9 is above `0xD6B000`, which was this board's high-water mark, so that
+write was also the first this port has made to flash nothing had ever touched.
 
 [!] **Moving a blob is `erase` then `write`, in that order.**  `blob write cls 1`
 while `cls` was still valid in slot 0 is refused with `DUPLICATE`:

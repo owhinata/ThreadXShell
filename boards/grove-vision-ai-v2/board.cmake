@@ -1824,20 +1824,19 @@ set(GROVE_PLUGIN_FORBIDDEN
 # What the base itself may spend below a veneer, per slot, worst case.  The
 # gate adds this at each veneer because it cannot see across the boundary.
 #
-# [!] ASSERTED, NOT DERIVED, AND KNOWN TO BE OPTIMISTIC.  "Deliberately
-# generous" is what this comment used to say, and issue #110 derived the other
-# board's the same way it should have been derived here -- by summing frames
-# along the deepest chain a veneer reaches -- and got 512 before rounding.  The
-# chain that dominates is the logging callback: nn_plugin_log -> LOG_INF ->
-# the formatter -> its 64-bit division helpers, and it is well past 256 on this
-# board too.  Nothing here has been observed to overflow, and the plugins this
-# board ships compute far below their allowances, so this is a guarantee that
-# is weaker than it reads rather than a fault in flight.
+# [!] DERIVED FROM THE SHIPPED IMAGE AND CHECKED HERE, EVERY BUILD (issue #112).
+# It used to be asserted, and known to be optimistic: the chain that dominated
+# was the logging callback through the formatter and its 64-bit division
+# helpers, 456 B on this image against the 256 declared.  #112 took the
+# formatter out from under that veneer -- a plugin's bytes go to the log ring by
+# length -- and derives what is left from shell.elf: 232 B, the painter's rect.
 #
-# Deriving it means re-packing and re-sending this board's containers, because
-# their declared stacks were computed against this number -- which is why it is
-# its own issue rather than a line changed here.  Do not read the fact that the
-# gate passes as the fact that the charge is right.
+# [!] AND THE NUMBER DID NOT MOVE.  256 still covers the image (headroom 24 B),
+# so no container has to be re-packed: every one on a device was packed against
+# 256, and the check below is what keeps that true.  RAISING it is what costs a
+# re-pack and a re-send of every container that exists, because their declared
+# stacks were computed against this number and the firmware cannot tell a stale
+# declaration from a current one.  Lowering it buys nothing.
 set(GROVE_PLUGIN_VENEER_BASE_COST 256)
 
 # The firmware side of that charge (issue #112): the build derives the stack

@@ -560,6 +560,11 @@ over the packed file, and publishes only then.  It prints a receipt:
 container too large for it; nothing refuses the *wrong* slot, and `blob write`
 erases the whole slot before the transfer.  Read `blob list` first.
 
+[!] **The `.nnc` under `build/` is the last one PACKED, not the last one SENT.**
+What the board holds is established by `blob list`'s crc32 against the receipt
+of a transfer you actually made -- never by reading the build tree, which a
+rebuild moves without touching the board.
+
 The ingest is this board's: float32 I/O as the model zoo ships it (the shared
 decoder the plugin carries reads float32), no boundary strip and no vela --
 there is no NPU here.
@@ -642,46 +647,55 @@ There are **two quantities**, and Step 3a only had one of them:
 2. what the FIRMWARE spends below an outbound plugin veneer, which the image
    gate charges at every crossing because it cannot see across one.
 
-The second was Grove's 256 B, carried over as an admitted placeholder.  It is
-now derived from the base this board actually has, measured with
-`-fstack-usage` over its callbacks and summed along the deepest chain a veneer
-can reach:
+The second was Grove's 256 B, carried over as an admitted placeholder.  **Since
+issue #112 the build derives it from the firmware this board ships** -- the
+linked LTO image, after the link -- and refuses a declaration that does not
+cover it:
 
-```
-nn_plugin_log       88   (the frame plus the 64 B buffer it copies into)
-log_write           16
-log_vwrite         192
-fmt_vsnformat       32
-fmt_vformat         80
-fmt_utoa            64
-__aeabi_uldivmod    16   (fmt_utoa divides 64-bit)
-__udivmoddi4        40
-                   ---
-                   528 B
-```
+| veneer | firmware function | derived | deepest chain |
+|---|---|---:|---|
+| `pl_base_log` | `nn_plugin_log` | **176 B** | `nn_plugin_log` 56 > `log_append.lto_priv.0` 88 > `ring_get.lto_priv.0` 24 > `memcpy` 8 |
+| `pl_paint_rect` | `paint_rect` | 56 B | `paint_rect` 56 > `charge.isra.0` 0 |
+| `pl_paint_blit` | `paint_blit` | 48 B | `paint_blit` 48 > `charge.isra.0` 0 |
+| `pl_paint_fill_rect` | `paint_fill_rect` | 32 B | `paint_fill_rect` 32 > `charge.isra.0` 0 |
+| `pl_print_write` | `nn_report_write` | 24 B | `nn_report_write` 16 > `memcpy` 8 |
+| `pl_base_to_frame` | `nn_active_to_frame` | 0 B | leaf, no frame |
 
-(Re-measured for issue #116, with `-fstack-usage` and LTO off over the board's
-real flags.  #110 recorded 512 with the same chain: it counted `log_write` and
-`log_vwrite` as one 200 B frame, which is what LTO folds them into, and
-`nn_plugin_log` as 80.  **Nothing in the chain changed** -- `nn_plugin_log`
-measures 88 B both before and after #116 -- so the declared 640 stands and no
-container needs re-packing.)
+(The chains carry the names the LINK produced -- LTO privatises the two log
+bodies and clones the painter's charge wrapper -- because the check reads the
+image, not the sources.)
 
-**[!] The first version of this sum stopped at `fmt_utoa`, at 400 B**, and was
-short by the two division helpers underneath it.  The general point the review
-made is the one worth keeping: measuring a callback's own frame is not
-measuring what is below the crossing.  (`fmt_utoa` and `fmt_padded` are called
-in sequence, so the deeper one ends the chain.  The painter is far shallower --
-`paint_rect` 64 + `rect_geom_norm` 16 -- and `to_frame` and the report sink are
-leaves.)
+**640 >= 176, with 464 B of headroom.**  This used to be a hand sum, and it came
+to 528 B: the chain ran through the formatter -- `log_write` > `log_vwrite` >
+`fmt_vsnformat` > `fmt_vformat` > `fmt_utoa` > `__aeabi_uldivmod` >
+`__udivmoddi4` -- and its first version stopped at `fmt_utoa`, at 400 B, short
+by the two division helpers underneath it.  #112 removed that chain (a plugin's
+bytes reach the log ring by length, not through the formatter) and then removed
+the hand sum: **do not re-derive these by hand.**  `ninja -C build/wio-lite-ai
+veneer_cost_check`, after removing `veneer_cost/shell.checked`, prints the table
+above.
 
-**640 is declared**: over-estimating is the safe direction here, because the
-gate charges it at every crossing, so a larger number makes a plugin's computed
-requirement larger, not smaller.  **Re-derive it whenever the base gains a
-callback** -- the old number would still pass, which is the shape of the
-mistake it replaces.
+The general point the old sum's mistake made is still the one worth keeping:
+measuring a callback's own frame is not measuring what is below the crossing.
 
-With the real charge, the recomputed requirements are:
+**Nothing ships past a failed check.**  Its success is a stamp
+(`build/wio-lite-ai/veneer_cost/shell.checked`), deleted before the check runs
+and written only when it passes; `dfu-shell`, `flash` and every `asset-*` target
+depend on it, so a failure stops the DFU write AND the container pack.  Each
+plugin's own `pl_sbuf_write` bound (64 B) is checked against the declaration in
+the same run.  The mechanism is shared with Grove:
+`cmake/veneer_cost_gate.cmake`, `cmake/check_veneer_base_cost.py` and
+`cmake/README.md`.
+
+**640 is declared, and stays declared**: over-estimating is the safe direction
+here, because the gate charges it at every crossing, so a larger number makes a
+plugin's computed requirement larger, not smaller.  Lowering it to the derived
+number would buy nothing and cost a re-pack and a re-send of every container
+that exists -- their declared stacks were computed against 640.  Whether the
+base still fits is no longer anyone's job to remember: the check above runs on
+every build.
+
+At the declared 640 B, the plugins' computed requirements are:
 
 | | decode | draw | report |
 |---|---:|---:|---:|
@@ -731,6 +745,10 @@ declaration from a current one.**  `svc/plugin_load.c` checks the declaration ag
   needs the manifest to carry the accounting it was built against, which is an
   ABI change -- its own issue.  Neither shipped plugin is near its allowance,
   so this is a guarantee weaker than it reads rather than a fault in flight.
+  **Issue #112 closed the BUILD side of this and not this side**: the firmware
+  is now proved to stay under the declaration it ships with, while what a device
+  still cannot establish is which declaration the container in its flash was
+  packed against.
 
 ### What the panel costs, measured
 

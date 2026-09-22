@@ -533,8 +533,15 @@ python3 "$here/test_plugin_stack.py"
 # minimum that starts at 0, a console sample marking the background job as
 # covered, a "not measured" that prints nothing and hides the lines after it.
 # The half that asks ThreadX who is running is nn_probe_rtos.c and is not here.
+#
+# It reads the report's real per-slot thread masks from nn_plugin_stack.h, which
+# will not compile without its allowances and the four thread stacks; the -D
+# numbers below are placeholders the masks do not depend on.
 gcc $CFLAGS \
-    -I "$board/port/npu" -I "$HOST_TEST_SVC" \
+    -I "$board/port/npu" -I "$board/port/plugin" -I "$HOST_TEST_SVC" \
+    -I "$HOST_TEST_INC" \
+    -DGROVE_PLUGIN_STACK_SHELL=1024u -DGROVE_PLUGIN_STACK_PANEL=1024u \
+    -DCAM_PRODUCER_STACK_BYTES=8192u -DCAM_PANEL_STACK_BYTES=2048u \
     "$here/test_nn_probe.c" "$board/port/npu/nn_probe.c" \
     "$HOST_TEST_SVC/fmt.c" \
     $LDFLAGS -o "$out/test_nn_probe"

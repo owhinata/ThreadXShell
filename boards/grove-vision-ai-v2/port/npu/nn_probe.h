@@ -20,8 +20,9 @@
  *     with the same stack pointer, and the hook samples there: the hook's own
  *     frame is on top, so the number is an UPPER BOUND on the entry depth and
  *     needs no constant read off an ELF.  The sample waits in a
- *     struct nn_probe_pending until plugin_run_load() knows whether the load
- *     succeeded; only then is it recorded (see nn_probe_pending_settle()).
+ *     struct nn_probe_pending until plugin_run_load() knows whether entry()
+ *     was CALLED -- the load succeeded, or entry() ran and refused -- and is
+ *     recorded only then (see nn_probe_pending_settle()).
  *
  * [!] A SAMPLE NOBODY CAN ATTRIBUTE IS NOT A MEASUREMENT.  No current thread,
  * an exception handler, a thread this board cannot name, or a stack pointer
@@ -63,7 +64,10 @@ enum nn_probe_ctx {
 
 /** How a thread of each context is recognised. */
 struct nn_probe_thread_class {
-	uint32_t prio;    /**< the priority it was CREATED with            */
+	uint32_t prio;    /**< tx_thread_user_priority: what it was created
+	                       with, moved only by tx_thread_priority_change()
+	                       -- which nothing here calls -- and never by
+	                       priority inheritance                          */
 	uint32_t stack;   /**< its stack size, as given to tx_thread_create */
 };
 
@@ -120,8 +124,9 @@ void nn_probe_reject(struct nn_probe_row *r);
  * as `depth/stack` when observed and `--` when not; one it was observed on but
  * is not supposed to run on is shown too, flagged `!`, because that would mean
  * the table in nn_plugin_stack.h is wrong.  Then `left N`, the least left over
- * what was observed, or "not measured" when nothing was; then @p note if not
- * NULL; then `inv N` if any sample could not be attributed.
+ * what was observed, or "not measured" when nothing was; then `inv N` if any
+ * sample could not be attributed (`inv >99999` past that); then @p note if not
+ * NULL.  The note is the one field the widest lines may lose.
  *
  * @return the length written (always NUL-terminated when @p cap > 0), which is
  *         never 0 when @p cap > 1 -- the caller stops at the first empty line,
@@ -131,19 +136,32 @@ int nn_probe_line(char *buf, size_t cap, const char *label,
                   const struct nn_probe_row *r, unsigned runs,
                   const char *note);
 
-/* ---- a sample that waits for its load to succeed ------------------------ */
+/** The largest invalid count a line spells out in full. */
+#define NN_PROBE_INV_SHOWN_MAX 99999u
+
+/** A slot's name in the report, and what its number includes that a plain
+ *  sample would not (NULL when nothing): one table, so the report and the test
+ *  of its widest line read the same words. */
+const char *nn_probe_slot_label(unsigned slot);
+const char *nn_probe_slot_note(unsigned slot);
+
+/* ---- a sample that waits to learn whether entry() was called ------------ */
 
 /**
  * entry()'s sample, between the hook that takes it and the load that decides
  * whether it happened (plugin_run.c).
  *
- * [!] A SAMPLE COUNTS ONLY IF IT IS THIS LOAD'S, TAKEN ONCE, AND THE LOAD GOT
- * ALL THE WAY.  The hook runs after the image is copied and before the branch;
- * a load that fails after it -- entry() refusing, say -- took the sample and
- * must not record it, and a hook called when no load is in flight, or from
- * another thread, or twice in one load, is not "immediately before entry()"
- * and is not a depth anybody can attribute.  Plain data: the owner keeps it,
- * and the one thread that loads is the only one that touches it.
+ * [!] A SAMPLE COUNTS ONLY IF IT IS THIS LOAD'S, TAKEN ONCE, AND entry() WAS
+ * THEN CALLED.  The hook runs after the image is copied and before the
+ * branch, and the hook's own verdict can still stop the load there -- a sample
+ * of a branch that never happened is not a depth.  But entry() REFUSING is
+ * not that: entry() ran, at exactly the depth sampled, and dropping it would
+ * let an earlier, shallower success stand in the report unmarked (issue
+ * #119's review: the console's depth differs by 32 B between a line ended with
+ * CR and one ended with LF).  A hook called from another thread, or twice in
+ * one load, is not "immediately before entry()" and is not a depth anybody can
+ * attribute.  Plain data: the owner keeps it, and the one thread that loads
+ * is the only one that touches it.
  */
 struct nn_probe_pending {
 	uintptr_t   sp;      /**< the stack pointer the hook read             */
@@ -154,9 +172,10 @@ struct nn_probe_pending {
 
 /** What to do with the sample once the load has answered. */
 enum nn_probe_settle {
-	NN_PROBE_SETTLE_NONE = 0,  /**< the load failed, or none was in flight  */
+	NN_PROBE_SETTLE_NONE = 0,  /**< entry() was not called, or no load was
+	                                in flight                             */
 	NN_PROBE_SETTLE_RECORD,    /**< one sample, this load's: record it      */
-	NN_PROBE_SETTLE_REJECT,    /**< the load succeeded but the samples do
+	NN_PROBE_SETTLE_REJECT,    /**< entry() was called but the samples do
 	                                not describe its branch: count invalid */
 };
 
@@ -169,12 +188,13 @@ void nn_probe_pending_take(struct nn_probe_pending *p, const void *who,
                            uintptr_t sp);
 
 /**
- * The load has answered (@p load_ok nonzero for PLUGIN_RUN_OK).  Disarms, and
- * says whether the sample is to be recorded, counted invalid, or dropped; on
- * NN_PROBE_SETTLE_RECORD, @p sp is set.
+ * The load has answered; @p entered is nonzero when entry() was called
+ * (plugin_run_entered()).  Disarms, and says whether the sample is to be
+ * recorded, counted invalid, or dropped; on NN_PROBE_SETTLE_RECORD, @p sp is
+ * set.
  */
 enum nn_probe_settle nn_probe_pending_settle(struct nn_probe_pending *p,
-                                             int load_ok, uintptr_t *sp);
+                                             int entered, uintptr_t *sp);
 
 /* ---- firmware only (nn_probe_rtos.c) -------------------------------------- */
 

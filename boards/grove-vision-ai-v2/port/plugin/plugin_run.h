@@ -55,15 +55,33 @@ extern "C" {
  * printing them, precisely so that the board decides where they go.
  *
  * [!] AND IT RECORDS HOW DEEP THE STACK WAS WHERE entry() WAS CALLED (issue
- * #119), on a load that succeeded and on no other.  The call is inside the
- * shared loader, which may own no storage, so the sample is taken in this
- * board's exec_ok hook -- which the loader calls from the same frame, with the
- * stack pointer it will branch to entry() with -- and the hook's own small frame
- * makes it an upper bound, never an under-count (see plugin_run.c).
+ * #119), whenever it was called -- see plugin_run_entered().  The call is
+ * inside the shared loader, which may own no storage, so the sample is taken in
+ * this board's exec_ok hook -- which the loader calls from the same frame, with
+ * the stack pointer it will branch to entry() with -- and the hook's own small
+ * frame makes it an upper bound, never an under-count (see plugin_run.c).
  */
 enum plugin_run_result plugin_run_load(const struct plugin_view *v,
                                        const void *container, uint32_t lease,
                                        const struct plugin_base_api *base);
+
+/**
+ * Did this result come from a load that CALLED entry()?  PLUGIN_RUN_OK, and
+ * PLUGIN_RUN_ENTRY -- entry() ran and refused.  Everything else returns before
+ * the branch: the argument, source, size and MPU refusals (the last of them in
+ * the very hook that takes entry()'s stack sample), and NO_PLUGIN.
+ *
+ * [!] ENTRY IS IN, ON PURPOSE (issue #119).  A refused entry() still ran at the
+ * depth sampled, and leaving it out let a shallower earlier success stand in
+ * the stack report unmarked.  PLUGIN_RUN_ENTRY is also what svc/plugin_exec.c
+ * returns for a null entry slot, which plugin_parse() refuses long before this;
+ * were it ever reached, the sample would be counted once too often -- the safe
+ * direction for a stack bound.
+ */
+static inline int plugin_run_entered(enum plugin_run_result r)
+{
+	return r == PLUGIN_RUN_OK || r == PLUGIN_RUN_ENTRY;
+}
 
 /** Forget the active plugin.  Idempotent. */
 void plugin_run_unload(void);

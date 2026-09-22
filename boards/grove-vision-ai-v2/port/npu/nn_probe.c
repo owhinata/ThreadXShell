@@ -16,6 +16,7 @@
 #include <stdarg.h>
 
 #include "fmt.h"
+#include "plugin_abi.h"     /* PLUGIN_SLOT_* */
 
 enum nn_probe_ctx nn_probe_classify(
 	const struct nn_probe_thread_class tab[NN_PROBE_CTX_COUNT],
@@ -85,7 +86,7 @@ void nn_probe_reject(struct nn_probe_row *r)
 		r->invalid++;
 }
 
-/* ---- a sample that waits for its load to succeed ------------------------ */
+/* ---- a sample that waits to learn whether entry() was called ------------ */
 
 void nn_probe_pending_arm(struct nn_probe_pending *p, const void *who)
 {
@@ -111,7 +112,7 @@ void nn_probe_pending_take(struct nn_probe_pending *p, const void *who,
 }
 
 enum nn_probe_settle nn_probe_pending_settle(struct nn_probe_pending *p,
-                                             int load_ok, uintptr_t *sp)
+                                             int entered, uintptr_t *sp)
 {
 	int armed;
 
@@ -119,10 +120,10 @@ enum nn_probe_settle nn_probe_pending_settle(struct nn_probe_pending *p,
 		return NN_PROBE_SETTLE_NONE;
 	armed    = p->armed != 0u;
 	p->armed = 0u;
-	if (!armed || !load_ok)
+	if (!armed || !entered)
 		return NN_PROBE_SETTLE_NONE;
 	/*
-	 * [!] A SUCCESSFUL LOAD WITHOUT EXACTLY ONE SAMPLE IS REPORTED, NOT
+	 * [!] A CALLED entry() WITHOUT EXACTLY ONE SAMPLE IS REPORTED, NOT
 	 * SKIPPED.  Zero means the loader stopped calling the hook before entry();
 	 * two mean it calls it somewhere else as well, and which of them stood
 	 * beside the branch cannot be told.  Either is the probe no longer
@@ -198,12 +199,54 @@ int nn_probe_line(char *buf, size_t cap, const char *label,
 		nn_probe_put(buf, cap, &at, "; left %lu", (unsigned long)least);
 	else
 		nn_probe_put(buf, cap, &at, "; not measured");
-	/* Last, because it is the one field with no bound on its width: a count
-	 * past five digits pushes the end of the line off the caller's 96 B, and
-	 * what is lost then is only the tail of the count. */
+	/*
+	 * [!] THE INVALID COUNT BEFORE THE NOTE, AND AT MOST ELEVEN CHARACTERS
+	 * (issue #119's review).  It used to come last, after the note, and a
+	 * line carrying two threads the table does not list ran out of the
+	 * caller's 96 B first: the count vanished whole, not just its tail.  It is
+	 * the field that says the numbers before it are incomplete, so it may not
+	 * be the one that falls off.  Every other number here is bounded by the
+	 * stacks (four digits); this one is a counter, so past five digits it
+	 * says only that it is large.  What can still be cut, on the widest lines,
+	 * is the note -- which describes the method, not this measurement.
+	 */
+	if (r->invalid > NN_PROBE_INV_SHOWN_MAX)
+		nn_probe_put(buf, cap, &at, " inv >%lu",
+		             (unsigned long)NN_PROBE_INV_SHOWN_MAX);
+	else if (r->invalid != 0u)
+		nn_probe_put(buf, cap, &at, " inv %lu", (unsigned long)r->invalid);
 	if (note != NULL)
 		nn_probe_put(buf, cap, &at, " %s", note);
-	if (r->invalid != 0u)
-		nn_probe_put(buf, cap, &at, " inv %lu", (unsigned long)r->invalid);
 	return (int)at;
+}
+
+/* ---- what each slot's line is called, and what its number includes ------- */
+
+static const char *const nn_probe_labels[PLUGIN_SLOT_COUNT] = {
+	[PLUGIN_SLOT_ENTRY]     = "entry",
+	[PLUGIN_SLOT_SHAPES_OK] = "shapes_ok",
+	[PLUGIN_SLOT_DECODE]    = "decode",
+	[PLUGIN_SLOT_DRAW]      = "draw",
+	[PLUGIN_SLOT_REPORT]    = "report",
+	[PLUGIN_SLOT_PARAM_SET] = "param_set",
+	[PLUGIN_SLOT_PARAM_GET] = "param_get",
+};
+
+static const char *const nn_probe_notes[PLUGIN_SLOT_COUNT] = {
+	/* Sampled inside the board's exec_ok hook, which the loader calls from the
+	 * frame it then calls entry() from: the hook's own frame is on top. */
+	[PLUGIN_SLOT_ENTRY] = "(upper bound)",
+	/* Sampled inside nn_active_draw(), which tail-calls the plugin and so pops
+	 * its own frame first: the number is at or above the entry, never below. */
+	[PLUGIN_SLOT_DRAW]  = "(upper bound)",
+};
+
+const char *nn_probe_slot_label(unsigned slot)
+{
+	return slot < (unsigned)PLUGIN_SLOT_COUNT ? nn_probe_labels[slot] : "?";
+}
+
+const char *nn_probe_slot_note(unsigned slot)
+{
+	return slot < (unsigned)PLUGIN_SLOT_COUNT ? nn_probe_notes[slot] : NULL;
 }

@@ -1581,31 +1581,14 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 
 /*
  * The stack report (issue #119): one line per plugin slot, in slot order, from
- * port/npu/nn_probe_rtos.c.  The label is the slot's; the threads are the ones
- * nn_plugin_stack.h says it runs on.  A note says what the number includes that
- * the sample itself did not.
+ * port/npu/nn_probe_rtos.c.  The label and the note are nn_probe.c's (one
+ * table, which the widest-line test reads too); the threads are the ones
+ * nn_plugin_stack.h says the slot runs on.
  *
  * [!] NOT THE THREAD'S PEAK.  `thread` reports the deepest a thread ever got,
  * anywhere; what an allowance is derived from is how much is ALREADY SPENT at
  * the instant a plugin is entered (issue #103), which nothing else prints.
  */
-static const char *const nn_slot_label[PLUGIN_SLOT_COUNT] = {
-	[PLUGIN_SLOT_ENTRY]     = "entry",
-	[PLUGIN_SLOT_SHAPES_OK] = "shapes_ok",
-	[PLUGIN_SLOT_DECODE]    = "decode",
-	[PLUGIN_SLOT_DRAW]      = "draw",
-	[PLUGIN_SLOT_REPORT]    = "report",
-	[PLUGIN_SLOT_PARAM_SET] = "param_set",
-	[PLUGIN_SLOT_PARAM_GET] = "param_get",
-};
-static const char *const nn_slot_note[PLUGIN_SLOT_COUNT] = {
-	/* Sampled inside the board's exec_ok hook, which the loader calls from the
-	 * frame it then calls entry() from: the hook's own frame is on top. */
-	[PLUGIN_SLOT_ENTRY] = "(upper bound)",
-	/* Sampled inside nn_active_draw(), which tail-calls the plugin and so pops
-	 * its own frame first: the number is at or above the entry, never below. */
-	[PLUGIN_SLOT_DRAW]  = "(upper bound)",
-};
 static const uint8_t nn_slot_runs[PLUGIN_SLOT_COUNT] = GROVE_PLUGIN_STACK_RUNS;
 
 int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
@@ -1634,8 +1617,8 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 		unsigned slot = index - 1u;
 
 		nn_probe_snapshot(slot, &row);
-		(void)nn_probe_line(buf, cap, nn_slot_label[slot], &row,
-		                    nn_slot_runs[slot], nn_slot_note[slot]);
+		(void)nn_probe_line(buf, cap, nn_probe_slot_label(slot), &row,
+		                    nn_slot_runs[slot], nn_probe_slot_note(slot));
 		return 1;
 	}
 

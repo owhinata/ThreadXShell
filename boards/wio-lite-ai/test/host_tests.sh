@@ -251,3 +251,20 @@ else
     echo "run_veneer_cost_tests: SKIPPED -- no arm-none-eabi toolchain under" \
          "$HOST_TEST_REPO/tools/ (configure a wio build once to fetch it)" >&2
 fi
+
+# issue #112 -- and the wiring that makes that check a gate
+# (cmake/veneer_cost_gate.cmake): a small real project, configured by cmake and
+# built by ninja with the same toolchain, in which flash and the assets refuse
+# on their own unless a passed check's stamp is newer than the image.  It
+# covers the stamp's lifetime (deleted before the check, never surviving a
+# failure), the dependencies of flash / an asset alone / the default build,
+# reruns on a script or image change, the witnesses of every compile the image
+# is made of (object libraries included, an unrelated executable excluded), and
+# an LTO link that writes fewer partitions than the last.  Same loud SKIP.
+if [ -n "$gate_cc" ] && [ -x "$gate_cc" ]; then
+    python3 "$HOST_TEST_REPO/cmake/fixtures/run_veneer_gate_build_tests.py" \
+        --cc "$gate_cc"
+else
+    echo "run_veneer_gate_build_tests: SKIPPED -- no arm-none-eabi toolchain" \
+         "under $HOST_TEST_REPO/tools/ (configure a wio build once to fetch it)" >&2
+fi

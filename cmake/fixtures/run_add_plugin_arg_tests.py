@@ -9,8 +9,16 @@ stack the BASE spends behind a veneer -- reach it only as add_plugin()
 arguments, as does the target word it checks the image against.  The value of that shape is entirely in the refusal: a second board
 that leaves one out must fail at configure, not inherit the first board's
 number.  So the refusal is what is tested, through a real `cmake` configure of a
-project(NONE) that includes the real helper -- no toolchain, no board, a
+small project that includes the real helpers -- no cross toolchain, no board, a
 fraction of a second per case.
+
+Since issue #112 add_plugin() also requires the FIRMWARE side of the veneer
+cost to be registered (cmake/veneer_cost_gate.cmake): a plugin's charge that
+nothing checks against the shipped firmware is refused at configure.  So every
+case registers a real gate -- against a host-compiled dummy executable, which is
+why the project enables C -- and the cases below also cover that registration's
+own refusals, and the check that the value it verifies is the value every
+add_plugin() was charged with.
 
 [!] THE CONTROL CASE IS A PASS.  Every refusal below differs from it by one
 argument, so a refusal proves that argument was the reason -- rather than the
@@ -18,7 +26,9 @@ harness being unable to configure anything at all, which would make every case
 "refuse" and every case look fine.
 """
 
+import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +36,8 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
+# Where the helpers under test are; --cmake-dir points it at a mutated copy.
+CMAKE_DIR = os.path.join(REPO, "cmake")
 
 # A complete call.  The plugin name has to be a real one: add_plugin() resolves
 # the plugin's sources from where they live, and refuses a path that does not.
@@ -40,10 +52,23 @@ FULL = {
     "TARGET_ID": "0x1201",
     "OUT_DIR": '"${CMAKE_BINARY_DIR}/plugin"',
     "OUT_VAR": "ELFS",
-    "ENTRIES": "pl_entry=64",
+    "ENTRIES": "pl_entry=64 pl_sbuf_write=64",
+}
+
+# A complete gate registration, as a board makes it.  Its DECLARED matches
+# FULL's VENEER_BASE_COST: the two are one fact.
+GATE = {
+    "FIRMWARE": "fw",
+    "MAP": '"${CMAKE_BINARY_DIR}/fw.map"',
+    "DECLARED": "256",
+    "ROOTS": ("pl_base_log=f pl_base_to_frame=f pl_paint_rect=f "
+              "pl_paint_fill_rect=f pl_paint_blit=f pl_print_write=f"),
+    "PREBUILT_ROOTS": '"${CMAKE_BINARY_DIR}/prebuilt"',
+    "DELIVERY": "fake_flash",
 }
 
 # (name, argument to drop or None, override dict, expected substring or None)
+# -- add_plugin()'s own arguments, with the gate registered as a board would.
 CASES = [
     ("control", None, {}, None),
     ("no_veneer_cost", "VENEER_BASE_COST", {}, "VENEER_BASE_COST is required"),
@@ -58,29 +83,117 @@ CASES = [
     # check; one that holds a NAME rather than a number must trip this.
     ("symbolic_base", None, {"IMAGE_BASE": "PLUGIN_BASE"},
      "IMAGE_BASE must be a hex number"),
+    # issue #112: the plugin's own printer bound is part of what the veneer
+    # cost must cover; a plugin that states none cannot be checked.
+    ("no_printer_limit", None, {"ENTRIES": "pl_entry=64"},
+     "ENTRIES has no pl_sbuf_write"),
+]
+
+# -- the firmware-side registration (issue #112).
+# (name, gate override dict or None to register no gate, add_plugin override,
+#  register twice?, expected substring or None)
+GATE_CASES = [
+    ("gate_control", {}, {}, False, None),
+    # [!] THE REFUSAL #112 EXISTS FOR: a plugin charged a cost nothing checks.
+    ("no_gate", None, {}, False,
+     "has not registered the firmware side of the veneer cost"),
+    # [!] AND THE ONE DECLARATION: the checked value is the charged value.
+    ("cost_mismatch", {"DECLARED": "300"}, {}, False,
+     "is charged VENEER_BASE_COST 256, but the firmware is checked against "
+     "300"),
+    ("gate_no_roots", {"ROOTS": None}, {}, False, "ROOTS is required"),
+    ("gate_no_delivery", {"DELIVERY": None}, {}, False,
+     "DELIVERY is required"),
+    ("gate_no_prebuilt", {"PREBUILT_ROOTS": None}, {}, False,
+     "PREBUILT_ROOTS is required"),
+    ("gate_zero_declared", {"DECLARED": "0"}, {"VENEER_BASE_COST": "0"}, False,
+     "DECLARED must be a positive byte count"),
+    ("gate_bad_root", {"ROOTS": "pl_base_log"}, {}, False,
+     "ROOTS takes VENEER=FUNCTION"),
+    ("gate_no_firmware", {"FIRMWARE": "no_such_fw"}, {}, False,
+     "FIRMWARE 'no_such_fw' is not a target"),
+    ("gate_firmware_not_exe", {"FIRMWARE": "fake_flash"}, {}, False,
+     "is a UTILITY, not the executable that ships"),
+    ("gate_delivery_missing", {"DELIVERY": "no_such_flash"}, {}, False,
+     "DELIVERY 'no_such_flash' is not a target"),
+    ("gate_twice", {}, {}, True, "already registered"),
 ]
 
 
-def configure(work, args):
+def configure(work, args, gate=GATE, plugin=True, twice=False):
     src = os.path.join(work, "src")
     os.makedirs(src)
     with open(os.path.join(src, "mem.ld"), "w") as fh:
         fh.write("MEMORY { PLUGIN (rwx) : ORIGIN = 0x24048000, "
                  "LENGTH = 32K }\n")
+    with open(os.path.join(src, "fw.c"), "w") as fh:
+        fh.write("int main(void) { return 0; }\n")
     call = "\n".join("    %s %s" % (k, v) for k, v in args.items())
+    reg = ""
+    if gate is not None:
+        gcall = "\n".join("    %s %s" % (k, v) for k, v in gate.items()
+                          if v is not None)
+        reg = ('include("%s")\n' % os.path.join(CMAKE_DIR,
+                                                "veneer_cost_gate.cmake")
+               + "veneer_cost_gate(\n%s)\n" % gcall) * (2 if twice else 1)
     with open(os.path.join(src, "CMakeLists.txt"), "w") as fh:
         fh.write("cmake_minimum_required(VERSION 3.20)\n"
-                 "project(add_plugin_args NONE)\n"
+                 "project(add_plugin_args C)\n"
                  "set(Python3_EXECUTABLE python3)\n"
-                 'include("%s")\n'
-                 "add_plugin(cifar10\n%s)\n"
-                 % (os.path.join(REPO, "cmake", "add_plugin.cmake"), call))
+                 "add_executable(fw fw.c)\n"
+                 "add_custom_target(fake_flash)\n"
+                 + reg
+                 + 'include("%s")\n' % os.path.join(CMAKE_DIR,
+                                                    "add_plugin.cmake")
+                 + ("add_plugin(cifar10\n%s)\n" % call if plugin else ""))
     r = subprocess.run(["cmake", "-S", src, "-B", os.path.join(work, "b")],
                        capture_output=True, text=True)
     return r.returncode, r.stdout + r.stderr
 
 
+def wired(work):
+    """[!] WHAT add_plugin() RECORDED MUST REACH THE CHECK'S COMMAND LINE.  The
+    refusals above are configure-time; the printer bound and the declaration
+    are consumed only when the check runs, so a helper that recorded them and
+    never passed them on would configure every case correctly.  The generated
+    build files carry the command: look for both there."""
+    text = ""
+    for root, _, files in os.walk(os.path.join(work, "b")):
+        for f in files:
+            try:
+                with open(os.path.join(root, f), errors="replace") as fh:
+                    text += fh.read()
+            except OSError:
+                pass
+    missing = [w for w in (r"--declared\s+256\b",
+                           r"--printer-limit\s+cifar10=64\b")
+               if not re.search(w, text)]
+    return missing
+
+
+def judge(name, rc, out, expect, why_ok):
+    if expect is None:
+        ok = rc == 0
+        why = why_ok
+    else:
+        # cmake wraps a long message across lines: match it as words.
+        ok = rc != 0 and " ".join(expect.split()) in " ".join(out.split())
+        why = "refused: " + expect
+    if ok:
+        print("  ok   %-22s %s" % (name, why))
+        return 0
+    print("  FAIL %-22s rc=%d, expected %s\n%s"
+          % (name, rc, expect or "success", out[-800:]))
+    return 1
+
+
 def main():
+    global CMAKE_DIR
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--cmake-dir", default=CMAKE_DIR,
+                    help="where add_plugin.cmake and veneer_cost_gate.cmake "
+                         "are (a mutated copy, to test these tests)")
+    CMAKE_DIR = os.path.abspath(ap.parse_args().cmake_dir)
     if shutil.which("cmake") is None:
         print("run_add_plugin_arg_tests: SKIPPED -- no cmake on PATH",
               file=sys.stderr)
@@ -94,19 +207,27 @@ def main():
         args.update(override)
         with tempfile.TemporaryDirectory() as work:
             rc, out = configure(work, args)
-        if expect is None:
-            ok = rc == 0
-            why = "configures (every other case differs from this by one "
-            why += "argument)"
-        else:
-            ok = rc != 0 and expect in out
-            why = "refused: " + expect
-        if ok:
-            print("  ok   %-17s %s" % (name, why))
-        else:
+        bad += judge(name, rc, out, expect,
+                     "configures (every other case differs from this by one "
+                     "argument)")
+    for name, goverride, poverride, twice, expect in GATE_CASES:
+        gate = None
+        if goverride is not None:
+            gate = dict(GATE)
+            gate.update(goverride)
+        args = dict(FULL)
+        args.update(poverride)
+        with tempfile.TemporaryDirectory() as work:
+            rc, out = configure(work, args, gate=gate, twice=twice)
+            missing = wired(work) if expect is None and rc == 0 else []
+        if missing:
+            print("  FAIL %-22s configures, but the check's command line "
+                  "lacks %s" % (name, missing))
             bad += 1
-            print("  FAIL %-17s rc=%d, expected %s\n%s"
-                  % (name, rc, expect or "success", out[-800:]))
+            continue
+        bad += judge(name, rc, out, expect,
+                     "configures with the gate registered, and the check "
+                     "gets --declared 256 --printer-limit cifar10=64")
     if bad:
         print("run_add_plugin_arg_tests: FAILED", file=sys.stderr)
         return 1

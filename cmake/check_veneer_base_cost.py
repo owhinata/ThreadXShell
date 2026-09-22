@@ -1777,7 +1777,25 @@ def main(argv=None):
     ap.add_argument("--ltrans-su", action="append", default=[],
                     metavar="FILE",
                     help="an LTO partition's -fstack-usage record")
+    ap.add_argument("--ltrans-prefix", action="append", default=[],
+                    metavar="PREFIX",
+                    help="take every PREFIX.ltransN.ltrans.su that exists as "
+                         "--ltrans-su (the build cannot name them: they only "
+                         "exist once the link has run).  None found is not an "
+                         "error -- a non-LTO link writes none -- but then a "
+                         "body in an LTO partition has no record, and fails")
     args = ap.parse_args(argv)
+    # [!] ONLY THE RECORDS OF THE LINK THAT PRODUCED THIS IMAGE.  The build
+    # deletes PREFIX's partition records before each link (veneer_cost_gate
+    # .cmake); one that is still here but names a partition the map does not
+    # load is refused by Witnesses as a record left by an earlier link.
+    for prefix in args.ltrans_prefix:
+        d = os.path.dirname(os.path.abspath(prefix)) or "."
+        base = os.path.basename(prefix) + ".ltrans"
+        if os.path.isdir(d):
+            for f in sorted(os.listdir(d)):
+                if f.startswith(base) and LTRANS_SU_RE.search(f):
+                    args.ltrans_su.append(os.path.join(d, f))
     try:
         return run(args)
     except InputError as exc:

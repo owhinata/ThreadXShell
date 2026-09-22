@@ -103,6 +103,44 @@ function(add_plugin _name)
             "add_plugin(${_name}): no MEMORY fragment at ${P_MEMORY_LD}")
     endif()
 
+    # [!] NO PLUGIN WITHOUT THE FIRMWARE-SIDE CHECK (issue #112).  The charge
+    # this plugin is packed against is only true if the firmware's stack below
+    # each veneer fits in it, and that is checked by the target and stamp that
+    # veneer_cost_gate() registers -- a target and a stamp, not a flag a board
+    # could set without having wired anything.
+    get_property(_gate  GLOBAL PROPERTY VENEER_GATE_TARGET)
+    get_property(_stamp GLOBAL PROPERTY VENEER_GATE_STAMP)
+    if(NOT _gate OR NOT _stamp OR NOT TARGET "${_gate}")
+        message(FATAL_ERROR
+            "add_plugin(${_name}): this board has not registered the firmware "
+            "side of the veneer cost (veneer_cost_gate() in "
+            "cmake/veneer_cost_gate.cmake).  VENEER_BASE_COST "
+            "${P_VENEER_BASE_COST} would be a charge nothing checks against "
+            "the firmware that ships.")
+    endif()
+    # What this plugin was given, for veneer_cost_gate() to compare with what
+    # it checks.  The printer bound is the plugin's OWN pl_sbuf_write limit: the
+    # printer veneer lands there as well as in the firmware, so the declared
+    # cost has to cover it too, and it has to be the limit this plugin actually
+    # got rather than a board variable that merely starts out equal.
+    set(_printer "")
+    foreach(_e IN LISTS P_ENTRIES)
+        if(_e MATCHES "^pl_sbuf_write=([0-9]+)$")
+            set(_printer "${CMAKE_MATCH_1}")
+        endif()
+    endforeach()
+    if(_printer STREQUAL "")
+        message(FATAL_ERROR
+            "add_plugin(${_name}): ENTRIES has no pl_sbuf_write=<limit>.  The "
+            "printer veneer reaches the plugin's own sink, so its bound is part "
+            "of what VENEER_BASE_COST must cover, and an unbounded one cannot "
+            "be checked.")
+    endif()
+    set_property(GLOBAL APPEND PROPERTY VENEER_GATE_PLUGIN_COSTS
+                 "${_name}=${P_VENEER_BASE_COST}")
+    set_property(GLOBAL APPEND PROPERTY VENEER_GATE_PRINTER_LIMITS
+                 "${_name}=${_printer}")
+
     # [!] THE LINK INPUTS ARE ENUMERATED HERE, AND A CALLER CANNOT ADD ONE.
     # Deriving the owned source roots closes the path a SOURCE takes into the
     # image; it does nothing about the path a LINK INPUT takes.  An unrestricted

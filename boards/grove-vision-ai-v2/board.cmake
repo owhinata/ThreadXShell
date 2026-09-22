@@ -1551,6 +1551,11 @@ function(grove_add_asset _name)
 
     set(_plugin_dir "${CMAKE_BINARY_DIR}/plugin/${A_PLUGIN}")
     set(_nnc "${GROVE_ASSET_DIR}/${_name}.nnc")
+    get_property(_veneer_gate GLOBAL PROPERTY VENEER_GATE_TARGET)
+    if(NOT _veneer_gate)
+        message(FATAL_ERROR
+            "grove_add_asset(${_name}): no veneer_cost_gate() registered")
+    endif()
     add_custom_command(
         OUTPUT "${_nnc}"
         COMMAND "${CMAKE_COMMAND}" -E env
@@ -1587,6 +1592,9 @@ function(grove_add_asset _name)
                 "${GROVE_PACKER}" "${GROVE_ABI_LAYOUT_JSON}"
                 "${GROVE_CONTAINER_VERIFIER}" "${GROVE_SLOT_TABLE_JSON}"
                 "${CMAKE_SOURCE_DIR}/cmake/build_asset.py"
+                # [!] No container is packed before the firmware passes its
+                # veneer-cost check (issue #112) -- even built by path.
+                ${_veneer_gate}
         COMMENT "asset ${_name}: pack, verify what was packed, publish"
         VERBATIM)
 
@@ -1831,6 +1839,27 @@ set(GROVE_PLUGIN_FORBIDDEN
 # its own issue rather than a line changed here.  Do not read the fact that the
 # gate passes as the fact that the charge is right.
 set(GROVE_PLUGIN_VENEER_BASE_COST 256)
+
+# The firmware side of that charge (issue #112): the build derives the stack
+# below each veneer from shell.elf and refuses a declaration under it, and
+# `flash` and every container's pack wait for that to pass.  What is stated
+# here is this board's: the function it binds behind each veneer (see
+# nn_plugin_base and plugin_paint_bind()), the charge -- the SAME variable
+# every add_plugin() below is given -- and where the toolchain's and Himax's
+# prebuilt archives live.  What gets -fstack-usage is derived by the helper.
+include("${CMAKE_SOURCE_DIR}/cmake/veneer_cost_gate.cmake")
+veneer_cost_gate(
+    FIRMWARE shell
+    MAP      "${CMAKE_BINARY_DIR}/shell.map"
+    DECLARED ${GROVE_PLUGIN_VENEER_BASE_COST}
+    ROOTS    pl_base_log=nn_plugin_log
+             pl_base_to_frame=nn_active_to_frame
+             pl_paint_rect=paint_rect
+             pl_paint_fill_rect=paint_fill_rect
+             pl_paint_blit=paint_blit
+             pl_print_write=nn_report_write
+    PREBUILT_ROOTS "${GROVE_TOOLCHAIN_ROOT}" "${SDK}/prebuilt_libs"
+    DELIVERY flash)
 
 # cortex-m55 / fp-armv8 / hard float / little endian / CMSE, per
 # plugin_target_id() in svc/plugin_abi.h.  ONE value, handed to the packer, the

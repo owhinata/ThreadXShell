@@ -10,6 +10,7 @@
 
 #include "npu_desc.h"
 #include "nn_preproc.h"
+#include "nn_probe.h"
 #include "plugin_run.h"
 
 #include <string.h>
@@ -61,6 +62,16 @@ int nn_active_is_plugin(void)
 	return plugin_run_active() && plugin_run_slot(PLUGIN_SLOT_DECODE) != NULL;
 }
 
+/*
+ * [!] EVERY INDIRECT CALL BELOW IS PRECEDED BY nn_probe_note() (issue #119).
+ * The stack pointer is read HERE, in the function that makes the call and after
+ * everything it builds -- the tensor descriptor array lives in this very frame
+ * -- so the depth recorded is the depth the plugin is entered at, not the depth
+ * of whoever called this file.  The note is a call of its own, and its frame is
+ * gone again before the plugin's begins.  Taken only on the branch that really
+ * calls the plugin: a "no decoder" answer entered nothing.
+ */
+
 /* The tensors reach a plugin as svc/tensor.h descriptors, which is the contract
  * issue #97 established so that one decoder can read any board's tensors.  The
  * conversion is npu_desc_of(), reused rather than repeated: a second translation
@@ -94,6 +105,7 @@ int nn_active_shapes_ok(const struct npu_tensor *outs, unsigned n)
 		struct tensor_desc d[NPU_DESC_MAX_OUTPUTS];
 		unsigned m = to_desc(outs, n, d, NPU_DESC_MAX_OUTPUTS);
 
+		nn_probe_note(PLUGIN_SLOT_SHAPES_OK, NN_PROBE_SP(), 0u);
 		return fn(d, m);
 	}
 	return 0;   /* no decoder: nothing here can read any shape */
@@ -109,6 +121,7 @@ int nn_active_decode(const struct npu_tensor *outs, unsigned n)
 		struct tensor_desc d[NPU_DESC_MAX_OUTPUTS];
 		unsigned m = to_desc(outs, n, d, NPU_DESC_MAX_OUTPUTS);
 
+		nn_probe_note(PLUGIN_SLOT_DECODE, NN_PROBE_SP(), 0u);
 		return fn(d, m);
 	}
 	/*
@@ -126,8 +139,10 @@ void nn_active_draw(const struct plugin_painter *paint)
 {
 	plugin_draw_fn fn = (plugin_draw_fn)plugin_run_slot(PLUGIN_SLOT_DRAW);
 
-	if (nn_active_is_plugin() && fn != NULL && paint != NULL)
+	if (nn_active_is_plugin() && fn != NULL && paint != NULL) {
+		nn_probe_note(PLUGIN_SLOT_DRAW, NN_PROBE_SP(), 0u);
 		fn(paint);
+	}
 	/* Otherwise nothing, and there is nothing else it could be: with no plugin
 	 * there is no decoder, so there is no result to paint. */
 }
@@ -156,6 +171,7 @@ int nn_active_report(nn_svc_write_fn write, void *ctx)
 
 	out.ctx   = ctx;
 	out.write = write;
+	nn_probe_note(PLUGIN_SLOT_REPORT, NN_PROBE_SP(), 0u);
 	return fn(&out);
 }
 
@@ -178,8 +194,10 @@ unsigned nn_active_get_thresh_milli(void)
 		(plugin_param_get_fn)plugin_run_slot(PLUGIN_SLOT_PARAM_GET);
 	uint32_t v = 0u;
 
-	if (nn_active_is_plugin() && fn != NULL &&
-	    fn(NN_ACTIVE_PARAM_THRESH_MILLI, &v) == 0)
+	if (!nn_active_is_plugin() || fn == NULL)
+		return NN_SVC_THRESH_NONE;
+	nn_probe_note(PLUGIN_SLOT_PARAM_GET, NN_PROBE_SP(), 0u);
+	if (fn(NN_ACTIVE_PARAM_THRESH_MILLI, &v) == 0)
 		return (unsigned)v;
 	return NN_SVC_THRESH_NONE;
 }
@@ -189,8 +207,9 @@ int nn_active_set_thresh_milli(unsigned milli)
 	plugin_param_set_fn fn =
 		(plugin_param_set_fn)plugin_run_slot(PLUGIN_SLOT_PARAM_SET);
 
-	if (nn_active_is_plugin() && fn != NULL)
-		return fn(NN_ACTIVE_PARAM_THRESH_MILLI, (uint32_t)milli) == 0
-		               ? NN_ACTIVE_THRESH_OK : NN_ACTIVE_THRESH_REFUSED;
-	return NN_ACTIVE_THRESH_NO_DECODER;
+	if (!nn_active_is_plugin() || fn == NULL)
+		return NN_ACTIVE_THRESH_NO_DECODER;
+	nn_probe_note(PLUGIN_SLOT_PARAM_SET, NN_PROBE_SP(), 0u);
+	return fn(NN_ACTIVE_PARAM_THRESH_MILLI, (uint32_t)milli) == 0
+	               ? NN_ACTIVE_THRESH_OK : NN_ACTIVE_THRESH_REFUSED;
 }

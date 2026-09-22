@@ -11,7 +11,8 @@
  * builds nn_plugin_policy from, not a copy of it:
  *
  *   - prints it, one `limit <slot> <bytes>` line per slot, so the driver can
- *     check WHICH allowance each slot got.  Compiled with the two allowances set
+ *     check WHICH allowance each slot got (and `runs <slot> <mask>`, the
+ *     threads the header says it runs on).  Compiled with the two allowances set
  *     to different sentinel values, a slot wired to the wrong one shows up as
  *     the wrong number; with the real values (both 1,024) it could not.
  *   - runs svc/plugin_load.c -- the device's validator -- over a container that
@@ -158,6 +159,14 @@ int main(void)
 
 	for (i = 0u; i < PLUGIN_SLOT_COUNT; i++)
 		printf("limit %u %lu\n", i, (unsigned long)pol.stack_limit[i]);
+	/* And which threads the header says each slot runs on -- the masks the
+	 * asserts are gated by and the stack report marks coverage with. */
+	{
+		static const unsigned runs[PLUGIN_SLOT_COUNT] = GROVE_PLUGIN_STACK_RUNS;
+
+		for (i = 0u; i < PLUGIN_SLOT_COUNT; i++)
+			printf("runs %u %u\n", i, runs[i]);
+	}
 
 	for (i = 0u; i < PLUGIN_SLOT_COUNT; i++) {
 		uint32_t lim = pol.stack_limit[i];

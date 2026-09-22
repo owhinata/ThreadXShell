@@ -48,6 +48,7 @@
 #include "nn_active.h"
 #include "nn_overlay.h"
 #include "nn_plugin_stack.h"  /* after camera.h and cam_lcd_sink.h (#119) */
+#include "nn_probe.h"
 #include "nn_preproc.h"
 #include "nn_stream_state.h"
 #include "nor_flash.h"    /* NOR_XIP_BASE */
@@ -606,16 +607,23 @@ static int nn_resolve_blob(struct nn_op_result *res, uint32_t token,
 		 */
 		{
 			enum plugin_run_result pr;
+			uintptr_t sp = 0u;
 
 			pr = plugin_run_load(&nn_container,
 			                     (const void *)(uintptr_t)(NOR_XIP_BASE +
 			                                               payload),
-			                     token, &nn_plugin_base);
+			                     token, &nn_plugin_base, &sp);
 			if (pr != PLUGIN_RUN_OK && pr != PLUGIN_RUN_NO_PLUGIN) {
 				nn_detail_set("slot %u ('%s'): %s", slot, name,
 				              plugin_run_strerror(pr));
 				return -1;
 			}
+			/* entry() ran only if the load got all the way (issue #119):
+			 * NO_PLUGIN and every refusal return before the branch, and a
+			 * sample of a branch that was never taken is not a depth. */
+			if (pr == PLUGIN_RUN_OK)
+				nn_probe_note(PLUGIN_SLOT_ENTRY, sp,
+				              (uint32_t)PLUGIN_RUN_ENTRY_FRAME);
 		}
 		/* The MODEL section, not the container: npu_open() parses a
 		 * flatbuffer and the rest of the payload is not one. */
@@ -1578,6 +1586,36 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 	}
 }
 
+/*
+ * The stack report (issue #119): one line per plugin slot, in slot order, from
+ * port/npu/nn_probe_rtos.c.  The label is the slot's; the threads are the ones
+ * nn_plugin_stack.h says it runs on.  A note says what the number includes that
+ * the sample itself did not.
+ *
+ * [!] NOT THE THREAD'S PEAK.  `thread` reports the deepest a thread ever got,
+ * anywhere; what an allowance is derived from is how much is ALREADY SPENT at
+ * the instant a plugin is entered (issue #103), which nothing else prints.
+ */
+#define NN_STR_(x) #x
+#define NN_STR(x)  NN_STR_(x)
+static const char *const nn_slot_label[PLUGIN_SLOT_COUNT] = {
+	[PLUGIN_SLOT_ENTRY]     = "entry",
+	[PLUGIN_SLOT_SHAPES_OK] = "shapes_ok",
+	[PLUGIN_SLOT_DECODE]    = "decode",
+	[PLUGIN_SLOT_DRAW]      = "draw",
+	[PLUGIN_SLOT_REPORT]    = "report",
+	[PLUGIN_SLOT_PARAM_SET] = "param_set",
+	[PLUGIN_SLOT_PARAM_GET] = "param_get",
+};
+static const char *const nn_slot_note[PLUGIN_SLOT_COUNT] = {
+	/* Sampled in front of the shared loader; its frame is added (plugin_run.h). */
+	[PLUGIN_SLOT_ENTRY] = "(+" NN_STR(PLUGIN_RUN_ENTRY_FRAME) " loader)",
+	/* Sampled inside nn_active_draw(), which tail-calls the plugin and so pops
+	 * its own frame first: the number is at or above the entry, never below. */
+	[PLUGIN_SLOT_DRAW]  = "(upper bound)",
+};
+static const uint8_t nn_slot_runs[PLUGIN_SLOT_COUNT] = GROVE_PLUGIN_STACK_RUNS;
+
 int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
                         char *buf, size_t cap)
 {
@@ -1589,6 +1627,26 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 	if (ctx != NN_STREAM_LINES_STATS)
 		return 0;                        /* nothing to add at start */
 
+	/*
+	 * [!] THE ORDER IS LOAD-BEARING.  The caller stops at the first line a
+	 * board declines to emit, so an index that returns 0 hides every index
+	 * after it.  The stack lines therefore come before the profile split --
+	 * which declines whenever the EPK clock is not trusted, a condition that
+	 * has nothing to do with them -- and every one of them returns a line,
+	 * "not measured" included.  Ten lines at most, against a cap of twelve,
+	 * so the caller's "more than N lines" warning never fires on a report
+	 * that ended normally.
+	 */
+	if (index >= 1u && index <= (unsigned)PLUGIN_SLOT_COUNT) {
+		struct nn_probe_row row;
+		unsigned slot = index - 1u;
+
+		nn_probe_snapshot(slot, &row);
+		(void)nn_probe_line(buf, cap, nn_slot_label[slot], &row,
+		                    nn_slot_runs[slot], nn_slot_note[slot]);
+		return 1;
+	}
+
 	nn_overlay_stats(&os);
 	switch (index) {
 	case 0u:
@@ -1599,46 +1657,22 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 		nn_detail_to(buf, cap, "items   : %lu decoded since the stream started",
 		             (unsigned long)os.detections);
 		return 1;
-	case 1u:
-		/*
-		 * How much stack was already spent where a decoder is CALLED
-		 * (issue #103).  Reported because it is the term the plugin
-		 * admission policy is computed from, and because it cannot be
-		 * derived from anything else the shell prints: `thread` gives a
-		 * PEAK -- the deepest a thread ever got anywhere -- and issue #101
-		 * wrote 2048 - 544 as though a peak answered this question.
-		 *
-		 * [!] BEFORE THE PROFILE SPLIT, AND THE ORDER IS LOAD-BEARING.  The
-		 * caller stops at the first line a board declines to emit, so an
-		 * index that returns 0 hides every index after it.  The profile
-		 * split declines whenever the EPK clock is not trusted -- a
-		 * condition that has nothing to do with this measurement -- so with
-		 * the two the other way round an untrusted clock silently deleted
-		 * the depth line.  These two are only both absent when nothing has
-		 * run at all, which is the one case where neither has anything to
-		 * say.
-		 */
-		if (os.depth_decode == 0u && os.depth_draw == 0u)
-			return 0;                /* nothing has run yet */
+	case 1u + (unsigned)PLUGIN_SLOT_COUNT:
+		/* What the plugin's draw() spent of its painter budget, so the cap
+		 * can be judged rather than argued about (issue #103).  Always a
+		 * line, for the same reason as the stack lines above. */
 		if (os.draw_spent != 0u || os.draw_refused != 0u)
 			nn_detail_to(buf, cap,
-			             "at call : %lu B producer, %lu B panel; plugin drew "
-			             "%lu px, %lu refused",
-			             (unsigned long)os.depth_decode,
-			             (unsigned long)os.depth_draw,
+			             "painter : at most %lu px in one frame, %lu refused",
 			             (unsigned long)os.draw_spent,
 			             (unsigned long)os.draw_refused);
 		else
-			nn_detail_to(buf, cap,
-			             "at call : %lu B spent on the producer, %lu B on the "
-			             "panel (high-water)",
-			             (unsigned long)os.depth_decode,
-			             (unsigned long)os.depth_draw);
+			nn_detail_to(buf, cap, "painter : nothing drawn yet");
 		return 1;
-	case 2u:
+	case 2u + (unsigned)PLUGIN_SLOT_COUNT:
 		/* The producer-side split (issue #60).  Only when the clock behind it
 		   is trusted -- an untrusted number here would be read as a
-		   measurement. */
+		   measurement.  Last, because it may decline. */
 		if (!os.prof_ok || os.prof_frames == 0u)
 			return 0;
 		nn_detail_to(buf, cap,
@@ -1653,6 +1687,8 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 		return 0;
 	}
 }
+_Static_assert(3u + (unsigned)PLUGIN_SLOT_COUNT < (unsigned)NN_STREAM_LINES_MAX,
+               "the stream report must end before the caller's line cap");
 
 unsigned nn_svc_thresh_get(void)
 {

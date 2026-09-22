@@ -73,7 +73,47 @@ _Static_assert(PLUGIN_SLOT_COUNT == 7,
                "plugin stack [slots]: a new plugin slot needs a row in "
                "nn_plugin_stack.h");
 
-/* Slot -> the allowance it is declared against: the table above. */
+/*
+ * The table above, as data: which threads each slot runs on.  It is stated ONCE,
+ * here, and both of its readers take it from here -- the asserts below, and the
+ * stack report (`nn stream stats`), which marks a thread a slot runs on that no
+ * observation has covered yet.  The bit order is enum nn_probe_ctx's
+ * (nn_probe.h); nn_probe_rtos.c asserts the two agree.
+ */
+#define GROVE_PLUGIN_ON_PRODUCER  0x1u
+#define GROVE_PLUGIN_ON_PANEL     0x2u
+#define GROVE_PLUGIN_ON_CONSOLE   0x4u
+#define GROVE_PLUGIN_ON_BG        0x8u
+#define GROVE_PLUGIN_ON_SHELL     (GROVE_PLUGIN_ON_CONSOLE | GROVE_PLUGIN_ON_BG)
+
+#define GROVE_PLUGIN_RUNS_ENTRY      GROVE_PLUGIN_ON_SHELL
+#define GROVE_PLUGIN_RUNS_SHAPES_OK  GROVE_PLUGIN_ON_SHELL
+#define GROVE_PLUGIN_RUNS_DECODE     (GROVE_PLUGIN_ON_PRODUCER | GROVE_PLUGIN_ON_SHELL)
+#define GROVE_PLUGIN_RUNS_DRAW       GROVE_PLUGIN_ON_PANEL
+#define GROVE_PLUGIN_RUNS_REPORT     GROVE_PLUGIN_ON_SHELL
+#define GROVE_PLUGIN_RUNS_PARAM_SET  GROVE_PLUGIN_ON_SHELL
+#define GROVE_PLUGIN_RUNS_PARAM_GET  GROVE_PLUGIN_ON_SHELL
+
+#define GROVE_PLUGIN_STACK_RUNS {                                    \
+	[PLUGIN_SLOT_ENTRY]     = GROVE_PLUGIN_RUNS_ENTRY,           \
+	[PLUGIN_SLOT_SHAPES_OK] = GROVE_PLUGIN_RUNS_SHAPES_OK,       \
+	[PLUGIN_SLOT_DECODE]    = GROVE_PLUGIN_RUNS_DECODE,          \
+	[PLUGIN_SLOT_DRAW]      = GROVE_PLUGIN_RUNS_DRAW,            \
+	[PLUGIN_SLOT_REPORT]    = GROVE_PLUGIN_RUNS_REPORT,          \
+	[PLUGIN_SLOT_PARAM_SET] = GROVE_PLUGIN_RUNS_PARAM_SET,       \
+	[PLUGIN_SLOT_PARAM_GET] = GROVE_PLUGIN_RUNS_PARAM_GET,       \
+}
+
+/* Each thread's own stack -- the ceiling a slot running there is held under. */
+#define GROVE_PLUGIN_CEILING_PRODUCER  CAM_PRODUCER_STACK_BYTES
+#define GROVE_PLUGIN_CEILING_PANEL     CAM_PANEL_STACK_BYTES
+#define GROVE_PLUGIN_CEILING_CONSOLE   CLI_INSTANCE_STACK_SIZE
+#define GROVE_PLUGIN_CEILING_BG        CLI_BG_JOB_STACK_SIZE
+
+/*
+ * Slot -> the allowance it is declared against.  A slot that runs on more than
+ * one thread takes the allowance of the shallowest of them.
+ */
 #define GROVE_PLUGIN_LIMIT_ENTRY      GROVE_PLUGIN_STACK_SHELL
 #define GROVE_PLUGIN_LIMIT_SHAPES_OK  GROVE_PLUGIN_STACK_SHELL
 #define GROVE_PLUGIN_LIMIT_DECODE     GROVE_PLUGIN_STACK_SHELL
@@ -99,44 +139,39 @@ _Static_assert(PLUGIN_SLOT_COUNT == 7,
 }
 
 /*
- * One assert per slot and per thread it runs on, each on its own line and each
- * naming itself.  Folded into one assert per thread, all the slots of that
- * thread share a single refusal, so the host test could not tell a missing row
- * from a present one while those slots share an allowance.  Separate, a row
- * deleted here is a name missing from what the test sees fire.
+ * One assert per slot and per thread, over the whole matrix, each naming itself
+ * and each vacuous where the slot does not run on that thread.  Folded into one
+ * assert per thread, all the slots of that thread would share a single refusal,
+ * and the host test could not tell a missing row from a present one while those
+ * slots share an allowance.  Separate, a row deleted here -- or a thread wrongly
+ * added to or dropped from a slot above -- changes the set of names the test
+ * sees fire.
  */
-#define GROVE_PLUGIN_STACK_BELOW(slot, stack, what)                     \
-	_Static_assert(GROVE_PLUGIN_LIMIT_##slot < (stack),              \
-	               "plugin stack [" what "]: an allowance must be "  \
+#define GROVE_PLUGIN_STACK_BELOW(slot, thread, what)                    \
+	_Static_assert(!(GROVE_PLUGIN_RUNS_##slot &                      \
+	                 GROVE_PLUGIN_ON_##thread) ||                     \
+	               GROVE_PLUGIN_LIMIT_##slot <                        \
+	                   GROVE_PLUGIN_CEILING_##thread,                 \
+	               "plugin stack [" what "]: an allowance must be "   \
 	               "below every stack its slot runs on")
-/* A zero limit is plugin_load.c's spelling of "this callback may not run", and
- * this board calls every slot. */
-#define GROVE_PLUGIN_STACK_NONZERO(slot, what)                          \
+#define GROVE_PLUGIN_STACK_ROW(slot, name)                              \
+	GROVE_PLUGIN_STACK_BELOW(slot, PRODUCER, name " < producer");   \
+	GROVE_PLUGIN_STACK_BELOW(slot, PANEL,    name " < panel");      \
+	GROVE_PLUGIN_STACK_BELOW(slot, CONSOLE,  name " < console");    \
+	GROVE_PLUGIN_STACK_BELOW(slot, BG,       name " < bg");         \
 	_Static_assert(GROVE_PLUGIN_LIMIT_##slot > 0u,                   \
-	               "plugin stack [" what "]: an allowance of 0 "     \
-	               "refuses a slot this board calls")
+	               "plugin stack [" name " > 0]: an allowance of 0 "  \
+	               "refuses a slot this board calls");                \
+	_Static_assert(GROVE_PLUGIN_RUNS_##slot != 0u,                   \
+	               "plugin stack [" name " runs]: a slot that runs "  \
+	               "on no thread is held under no ceiling")
 
-GROVE_PLUGIN_STACK_NONZERO(ENTRY,     "entry > 0");
-GROVE_PLUGIN_STACK_NONZERO(SHAPES_OK, "shapes_ok > 0");
-GROVE_PLUGIN_STACK_NONZERO(DECODE,    "decode > 0");
-GROVE_PLUGIN_STACK_NONZERO(DRAW,      "draw > 0");
-GROVE_PLUGIN_STACK_NONZERO(REPORT,    "report > 0");
-GROVE_PLUGIN_STACK_NONZERO(PARAM_SET, "param_set > 0");
-GROVE_PLUGIN_STACK_NONZERO(PARAM_GET, "param_get > 0");
-
-GROVE_PLUGIN_STACK_BELOW(ENTRY,     CLI_INSTANCE_STACK_SIZE,  "entry < console");
-GROVE_PLUGIN_STACK_BELOW(ENTRY,     CLI_BG_JOB_STACK_SIZE,    "entry < bg");
-GROVE_PLUGIN_STACK_BELOW(SHAPES_OK, CLI_INSTANCE_STACK_SIZE,  "shapes_ok < console");
-GROVE_PLUGIN_STACK_BELOW(SHAPES_OK, CLI_BG_JOB_STACK_SIZE,    "shapes_ok < bg");
-GROVE_PLUGIN_STACK_BELOW(DECODE,    CAM_PRODUCER_STACK_BYTES, "decode < producer");
-GROVE_PLUGIN_STACK_BELOW(DECODE,    CLI_INSTANCE_STACK_SIZE,  "decode < console");
-GROVE_PLUGIN_STACK_BELOW(DECODE,    CLI_BG_JOB_STACK_SIZE,    "decode < bg");
-GROVE_PLUGIN_STACK_BELOW(DRAW,      CAM_PANEL_STACK_BYTES,    "draw < panel");
-GROVE_PLUGIN_STACK_BELOW(REPORT,    CLI_INSTANCE_STACK_SIZE,  "report < console");
-GROVE_PLUGIN_STACK_BELOW(REPORT,    CLI_BG_JOB_STACK_SIZE,    "report < bg");
-GROVE_PLUGIN_STACK_BELOW(PARAM_SET, CLI_INSTANCE_STACK_SIZE,  "param_set < console");
-GROVE_PLUGIN_STACK_BELOW(PARAM_SET, CLI_BG_JOB_STACK_SIZE,    "param_set < bg");
-GROVE_PLUGIN_STACK_BELOW(PARAM_GET, CLI_INSTANCE_STACK_SIZE,  "param_get < console");
-GROVE_PLUGIN_STACK_BELOW(PARAM_GET, CLI_BG_JOB_STACK_SIZE,    "param_get < bg");
+GROVE_PLUGIN_STACK_ROW(ENTRY,     "entry");
+GROVE_PLUGIN_STACK_ROW(SHAPES_OK, "shapes_ok");
+GROVE_PLUGIN_STACK_ROW(DECODE,    "decode");
+GROVE_PLUGIN_STACK_ROW(DRAW,      "draw");
+GROVE_PLUGIN_STACK_ROW(REPORT,    "report");
+GROVE_PLUGIN_STACK_ROW(PARAM_SET, "param_set");
+GROVE_PLUGIN_STACK_ROW(PARAM_GET, "param_get");
 
 #endif /* NN_PLUGIN_STACK_H */

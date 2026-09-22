@@ -61,7 +61,7 @@ const char *camera_strerror(int rc);
  *
  * Exported since issue #57, when this port grew a SECOND frame-path thread: the
  * LCD sink's panel thread is placed relative to THIS number, and since issue #64
- * it sits strictly above it.  The reasoning lives at CAM_PANEL_PRIO, next to the
+ * it sits strictly above it.  The reasoning lives in cam_lcd_sink.c, next to the
  * assert that enforces it -- a relationship that matters is asserted where the
  * second thread is declared rather than restated as a second literal, because
  * two numbers describing one ordering is how the ordering gets broken.

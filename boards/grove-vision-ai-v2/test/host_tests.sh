@@ -526,6 +526,20 @@ gcc $CFLAGS \
 # nothing here needs the cross toolchain, so nothing here skips.
 python3 "$here/test_plugin_stack.py"
 
+# issue #119 -- the pure half of the stack probe that measures where each plugin
+# callback is entered (port/npu/nn_probe.c).  Its output becomes the input to
+# the allowances above, and every way it can be wrong reads as a smaller depth
+# or a walked path: a sample on a stack nobody can name turned into a depth, a
+# minimum that starts at 0, a console sample marking the background job as
+# covered, a "not measured" that prints nothing and hides the lines after it.
+# The half that asks ThreadX who is running is nn_probe_rtos.c and is not here.
+gcc $CFLAGS \
+    -I "$board/port/npu" -I "$HOST_TEST_SVC" \
+    "$here/test_nn_probe.c" "$board/port/npu/nn_probe.c" \
+    "$HOST_TEST_SVC/fmt.c" \
+    $LDFLAGS -o "$out/test_nn_probe"
+"$out/test_nn_probe"
+
 # --- the plugin image gate's negative tests (issue #106) --------------------
 #
 # [!] THIS RUNS HERE, NOT IN shell/test/run_host_tests.sh.  The fixtures compile

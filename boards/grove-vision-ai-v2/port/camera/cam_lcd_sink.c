@@ -55,7 +55,8 @@
 /* ---- the panel thread ---------------------------------------------------- */
 
 /*
- * Strictly between the producer and the console.
+ * CAM_PANEL_PRIO (cam_lcd_sink.h): strictly between the producer and the
+ * console.
  *
  * Above the console because a 26 ms blit that waits behind whatever the shell is
  * printing would stutter the picture for no reason.
@@ -75,9 +76,9 @@
  * the producer spends on the same frame.
  *
  * The asserts below are the point of exporting CAM_PRODUCER_PRIO from camera.h:
- * the ordering is checked, not restated.
+ * the ordering is checked, not restated.  The number itself moved to the header
+ * with issue #119, because the plugin stack probe names this thread by it.
  */
-#define CAM_PANEL_PRIO  9u
 /*
  * The deepest call here is lcd_blit_le_overlay() -> lcd_blit() ->
  * lcd_dma_burst() -> the vendor SSPI driver, plus the overlay's draw() (box

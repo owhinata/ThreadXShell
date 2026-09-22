@@ -11,6 +11,7 @@
 
 #include "plugin_run.h"
 #include "plugin_mpu.h"
+#include "nn_probe.h"            /* NN_PROBE_SP() -- the read, nothing else */
 
 #include "WE2_device.h"          /* CMSIS core: MPU, SCB, caches, barriers */
 #include "npu_hw.h"              /* npu_cache_clean()                      */
@@ -136,11 +137,17 @@ static const struct plugin_exec_env pl_env = {
 
 enum plugin_run_result plugin_run_load(const struct plugin_view *v,
                                        const void *container, uint32_t lease,
-                                       const struct plugin_base_api *base)
+                                       const struct plugin_base_api *base,
+                                       uintptr_t *sp_at_load)
 {
 	const char *why = NULL;
 	enum plugin_run_result r;
 
+	/* Read in this frame, immediately before the call: the stack does not move
+	 * between here and the `bl`, so what the loader adds on top is exactly
+	 * PLUGIN_RUN_ENTRY_FRAME (issue #119). */
+	if (sp_at_load != NULL)
+		*sp_at_load = NN_PROBE_SP();
 	r = plugin_exec_load(&pl_env, v, container, (uintptr_t)lease, base, &why);
 	switch (r) {
 	case PLUGIN_RUN_OK:

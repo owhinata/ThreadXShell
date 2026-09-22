@@ -63,17 +63,9 @@ struct nn_overlay_stats {
 	uint32_t decode_us;    /**< anchor decode into boxes                 */
 	int      prof_ok;      /**< the EPK clock backing them is trusted    */
 
-	/*
-	 * Stack already spent at each decoder call site (issue #103), high-water.
-	 *
-	 * [!] NOT THE THREAD'S PEAK.  `thread` scans ThreadX's fill and reports the
-	 * deepest a thread ever got anywhere; this is how much is spent AT THE
-	 * INSTANT a decoder is entered, which is the only one of the two that says
-	 * what a callee may have.  The plugin admission policy of issue #103 is
-	 * computed from these, not from the peak.
-	 */
-	uint32_t depth_decode; /**< producer thread, at the decode call site  */
-	uint32_t depth_draw;   /**< panel thread, at the draw call site       */
+	/* The stack depth where a plugin is entered is not here any more: it is
+	 * per slot and per thread, and taken at the entry itself rather than in
+	 * this file's call sites (port/npu/nn_probe.h, issue #119). */
 
 	/* What a plugin's draw() actually spends of its painter budget, and how
 	 * often it was refused (issue #103).  Reported so the cap is judged

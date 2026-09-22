@@ -246,11 +246,13 @@ def run_probe(work, values):
     if r.returncode != 0:
         return None, "did not build:\n" + r.stderr
     r = subprocess.run([exe], capture_output=True, text=True)
-    table = {}
+    table, runs = {}, {}
     for ln in r.stdout.splitlines():
-        m = re.match(r"limit (\d+) (\d+)$", ln)
+        m = re.match(r"(limit|runs) (\d+) (\d+)$", ln)
         if m:
-            table[SLOTS[int(m.group(1))]] = int(m.group(2))
+            (table if m.group(1) == "limit" else runs)[
+                SLOTS[int(m.group(2))]] = int(m.group(3))
+    table["_runs"] = runs
     return (table if r.returncode == 0 else None), r.stdout
 
 
@@ -292,6 +294,20 @@ def run_rt(real):
         else:
             print("  ok   %-58s every slot got the allowance of its threads"
                   % (label + ": slot -> allowance"))
+    # The thread masks (GROVE_PLUGIN_STACK_RUNS), against this file's table.
+    # The bit order is nn_probe.h's contexts, asserted in nn_probe_rtos.c.
+    bit = {"producer": 1, "panel": 2, "console": 4, "bg": 8}
+    runs = table["_runs"] if table else {}
+    wrong = ["%s=%#x (want %#x)" % (s, runs.get(s, -1),
+                                    sum(bit[t] for t in THREADS[s]))
+             for s in SLOTS
+             if runs.get(s) != sum(bit[t] for t in THREADS[s])]
+    if wrong:
+        print("  FAIL %-58s %s" % ("slot -> threads", ", ".join(wrong)))
+        bad += 1
+    else:
+        print("  ok   %-58s the report's masks are the table's"
+              % "slot -> threads")
     return bad
 
 

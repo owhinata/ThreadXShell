@@ -5058,7 +5058,9 @@ ELF.  **It is shared since issue #108**, and this board's facts reach it as
 `add_plugin()` arguments from `board.cmake`: the reservation, the forbidden
 table (`GROVE_PLUGIN_FORBIDDEN` -- the NOR write path first, because that flash
 holds the bootloader), and `GROVE_PLUGIN_VENEER_BASE_COST` = 256, the stack
-charged for this base's work behind an indirect veneer.  The checks are
+charged for this base's work behind an indirect veneer -- known to be short of
+this image's 456 B (see **The veneer charge is known to be short**; issue
+#112).  The checks are
 forbidden symbols, an allocated-section whitelist, no relocations, storage in
 the declared segments, indirect branches only in the named veneers, and a
 transitive stack bound per entry point.  The linker enforces some of the same
@@ -5112,10 +5114,12 @@ assembling the container indivisibly, not on the digest.
 
 ### Stack, and why there is a limit at all
 
-Each callback runs on a different thread's stack, and they are not the same
-size: decode on the camera producer (8 KiB), draw on the panel thread (2,048 B,
-whose measured peak at issue #64 is already 544 B), report on the shell thread
-(4 KiB).  These stacks are statically allocated and do not grow.  An overflow is
+Each callback runs on a thread's stack, and they are not the same size: draw on
+the panel thread (2,048 B, whose measured peak at issue #64 is already 544 B),
+decode on the camera producer (8 KiB) for `nn stream` and on the shell (4 KiB)
+for `nn run` and `nn dets`, and everything else on the shell -- a console or a
+background job.  `port/npu/nn_plugin_stack.h` is the table.  These stacks are
+statically allocated and do not grow.  An overflow is
 caught here -- the ThreadX M55 port sets PSPLIM per thread, so it raises a
 UsageFault with `CFSR.STKOF` and lands in `fault.c` -- but the M7 boards have no
 such register and would corrupt a neighbour silently.
@@ -5131,8 +5135,9 @@ The limits were provisional while Step 1a was all there was, and **two of the
 three were above the ceiling they were supposed to be under** -- the producer's
 was 8192, the whole thread stack, so a plugin declaring it would have been
 admitted and would then have overflowed.  A limit that cannot be exceeded is not
-a limit.  The measured allowances, and the arithmetic behind them, are in the
-next section.
+a limit.  The allowances, the depths they are derived from and the arithmetic
+behind them are in **What a plugin may spend, and where the numbers come from**,
+further down.
 
 ## The plugin runs (issue #103 = #78 Step 1b)
 
@@ -5322,23 +5327,35 @@ partial or multiple match never falls back.
 ### What a plugin may spend, and where the numbers come from
 
 ```
-allowance = thread stack - depth already spent at the call site
-                         - the asynchronous reserve - margin
+allowance(slot) <= min over every path that reaches the slot of
+                   [ thread stack - depth at the plugin's entry - 208 B - margin ]
 ```
 
-The **call-site depth is measured on the board** -- the shim reads SP just before
-it calls, keeps the high-water and `nn stream stats` prints it.
+**A slot is declared against the shallowest thread that can call it.** Which
+thread each slot runs on is stated once, in `port/npu/nn_plugin_stack.h`, as data
+(`GROVE_PLUGIN_RUNS_*`).  Both of its readers take it from there: the header's
+asserts -- one per slot and thread, every allowance strictly below every stack
+its slot runs on -- and the stack report's coverage marks.  Read the table there;
+it is not copied here.  Both allowances are 1,024 B: `GROVE_PLUGIN_STACK_SHELL`
+for every slot a console or a background job can reach -- entry, shapes_ok,
+decode, report and the two params; decode because `nn run` and `nn dets` call it
+on the shell as well as `nn stream` on the producer -- and
+`GROVE_PLUGIN_STACK_PANEL` for draw.
 
-[!] **Re-measured for issue #104, and the two records of it disagreed.**
-`board.cmake` derived the panel allowance from 233 B while this file recorded
-249 B for the same call site, so one had been wrong since #103 -- and the
-allowances come from it.  Both are superseded by the figures below, measured with
-the #104 build.  They went DOWN because that change shrank the frames:
-`nn_active_decode()` lost three parameters and the overlay lost the locals that
-went with its resident draw path.  That is a
-different number from the thread's peak (`thread`'s 0xEF scan, 544 B at issue
-#64): that one is the maximum anywhere on the path, this one is the depth a
-callee inherits.
+**[!] Two of the provisional numbers (issues #103 / #104) were above the
+ceiling.**  `PRODUCER` was 8192 -- the entire thread stack -- and `SHELL` was
+4096, likewise.  A plugin declaring those would have been admitted and would
+then have overflowed: the check could not fire for the case it exists to catch.
+That is worse than a wrong number, and it is the shape to look for whenever a
+limit is written before the thing it limits has been measured.
+
+**[!] Until issue #119 three slots were declared against the wrong thread.**
+entry, shapes_ok and decode took `GROVE_PLUGIN_STACK_PRODUCER` = 4,096: half the
+producer's 8 KiB, and ALL of the 4,096 B shell stack each of them is also called
+on.  A plugin declaring 4,096 for decode would have been admitted and would have
+overflowed the console.  It is the provisional numbers' mistake one level up --
+a limit on another thread's stack is not a limit.  `PRODUCER` is gone, and
+`nn_plugin_stack.h` refuses to compile if it comes back.
 
 The **asynchronous reserve is 208 B, derived rather than measured**: at most one
 hardware exception frame lands on a thread's PSP -- nested and tail-chained
@@ -5352,21 +5369,214 @@ is 172 B.  `fp_enforce.c` checked `ASPEN` and `LSPACT` and not this one, so
 `TS == 0` is now **enforced and read back** beside them, on the same principle --
 inherited FP state is forced, not trusted.
 
-Measured on the board, and what the policy is set to:
+`WE2_S.svd` documents `FPCCR.TS` as RAZ/WI on this part, so the 172 B frame is
+the architecture's possibility rather than anything observed here; the read-back
+refusal stays either way.
+
+#### Where the depth is taken
+
+At the plugin's entry, one record per slot and per thread (`port/npu/nn_probe.h`):
+
+- **the six callbacks `nn_active.c` calls through** are sampled in the function
+  that makes the indirect call, immediately before it.  The stack pointer is read
+  explicitly (`mov rX, sp`), after that function has built everything it passes
+  -- the tensor descriptor array included.
+- **entry()** is called inside the shared loader, `svc/plugin_exec.c`, which may
+  own no storage.  The loader calls this board's `exec_ok` hook (`pl_exec_ok()`
+  in `port/plugin/plugin_run.c`) from the same frame, with the stack pointer it
+  then branches to entry() with, and the hook samples there.  The sample is
+  recorded whenever entry() was then CALLED -- `PLUGIN_RUN_OK`, or
+  `PLUGIN_RUN_ENTRY` when it ran and refused -- and never for a refusal before
+  the branch, the hook's own MPU verdict included (`plugin_run_entered()`).
+  Dropping a refused entry() would let a shallower earlier success stand in the
+  report unmarked.
+
+The thread is named by the priority it was created with and the size of its
+stack -- producer 10/8192, panel 9/2048, console 16/4096, background job
+17/4096, asserted distinct in `nn_probe_rtos.c`.  A sample with no current
+thread, taken in an exception, on a thread that matches none of those, or with a
+stack pointer outside the thread's own stack is not a depth: it is counted as
+`inv` and nothing else.  The records are kept from boot and never reset, because
+entry() is measured before any stream exists.
+
+**[!] Until issue #119 the probe stood in the wrong place.**  It sat in
+`nn_overlay.c`, before the call into `nn_active_*()`, so the frame
+`nn_active_decode()` builds before it calls through -- 320 B, the descriptors --
+was not in the number, and nothing measured the shell thread, where the deepest
+path is.  The 553 / 217 B of issues #104 and #110 were that probe.  They are not
+depths at a plugin's entry, and nothing is derived from them any more.
+
+#### Reading `nn stream stats`
+
+The old `at call :` line is gone.  After `items` come one line per slot, then the
+painter's spend on a line of its own, then the producer profile -- last, because
+it is the one line that may decline, and the caller stops at the first line a
+board declines.  As the board printed them (build `4bcf219`):
 
 ```
-at call     553 B (camera producer)   217 B (panel thread)
-producer    8192 - 553 - 208 = 7431 available    ->  GROVE_PLUGIN_STACK_PRODUCER 4096
-panel       2048 - 217 - 208 = 1623 available    ->  GROVE_PLUGIN_STACK_PANEL    1024
-shell       4096 - (not instrumented) - 208      ->  GROVE_PLUGIN_STACK_SHELL    1024
+entry    : con 1080/4096 bg 992/4096; left 3016 (upper bound)
+shapes_ok: con 1528/4096 bg 1440/4096; left 2568
+decode   : prod 864/8192 con 2072/4096 bg 1984/4096; left 2024
+draw     : panel 216/2048; left 1832 (upper bound)
+report   : con 1776/4096 bg 1688/4096; left 2320
+param_set: con 440/4096 bg 352/4096; left 3656
+param_get: con 744/4096 bg 656/4096; left 3352
+painter : at most 800 px in one frame, 0 refused
 ```
 
-**[!] Two of the provisional numbers were above the ceiling.**  `PRODUCER` was
-8192 -- the entire thread stack -- and `SHELL` was 4096, likewise.  A plugin
-declaring those would have been admitted and would then have overflowed: the
-check could not fire for the case it exists to catch.  That is worse than a
-wrong number, and it is the shape to look for whenever a limit is written before
-the thing it limits has been measured.
+Each thread shows `depth/stack`, a high-water since boot.  `--` is a thread the
+slot runs on that nothing has observed yet; `!` in front of a thread means the
+slot was seen on a thread `nn_plugin_stack.h` does not list, i.e. the table is
+wrong.  `left N` is the least `stack - depth` over what was observed, `inv N`
+the samples that could not be attributed (`inv >99999` past that), and a slot
+nothing has reached still prints its line, as `not measured`.  `nn stream stats`
+answers only once a stream has been started since boot (`NN_SVC_ERR_STATE`
+otherwise), so start one before reading.
+
+The two `(upper bound)`s:
+
+- **draw** is sampled inside `nn_active_draw()`, which tail-calls the plugin
+  (`ldmia sp!, {r4, r5, r6, lr}` then `bx r3`) and so pops its own 16 B first.
+  The plugin is entered at 200 B; the report says 216.
+- **entry** is sampled in `pl_exec_ok()` after its own `push {r4, r5, r6, lr}`,
+  16 B.  entry() is entered at 1,064 B on the console and 976 B on a job; the
+  report says 1,080 and 992.  The MPU check that holds the 192 B region table is
+  a separate `noinline` function the hook tail-calls, so it is not in the hook's
+  frame.
+
+#### Measured on hardware
+
+Build `4bcf219`, lines ended with CR.  Every number in the block above is what the
+board printed, and every one equals the final ELF's arithmetic below, cell for
+cell -- no `--`, no `inv`, no `!`.  The least `left` is 2,024 B (decode, on the
+console), against the 1,232 B that a 1,024 B allowance needs (1,024 + 208).
+
+| | before #119 | after #119 |
+|---|---:|---:|
+| detector | 36.95 inf/s | **36.92 inf/s** (camera 37.0 fps) |
+| detector `decode` | 145 us | **130-135 us** |
+| classifier | 8.85 inf/s | **8.89 inf/s** |
+| classifier `decode` | 145 us | **128 us** |
+| frame errors / painter refused / `sink lcd` dropped, busy, err | 0 | **0** |
+
+The painter's pixel count follows the scene (detector 1,856 -> 800 was the size
+of the face; the classifier drew 4,400 both times).  The containers on the board
+were the ones sent for issue #107 -- `blob list` said blazeface `C9AEEFA8` and
+cifar10 `6BEA56B6`, not the build tree's `BCB8BA68` / `A68CD123` of the same
+lengths -- and the new firmware loaded both without a re-pack.
+
+#### The same numbers from the final ELF
+
+depth at entry = 8 B (ThreadX builds a thread's first frame 8-byte aligned below
+the top of its stack) + 16 B (`_tx_thread_shell_entry`) + the frames on the
+deepest call path.  A frame is what the prologue takes: push, stmdb, vpush,
+`sub sp` and pre-indexed write-back.  The indirect edges are resolved by hand:
+the shell's dispatch into `cmd_nn_*`, the frame pipeline into `cam_lcd_consume`
+and on into `nn_overlay_process`, and the blit into `cam_lcd_draw`, which
+tail-calls `nn_overlay_draw`.
+
+| slot | thread (deepest path) | depth | stack - depth - 208 | L(slot) | over 1,024 | real need |
+|---|---|---:|---:|---:|---:|---:|
+| entry | console (`nn model load`) | 1,064 | 2,824 | **2,824** | 1,800 | 8 |
+| | background job | 976 | 2,912 | | | |
+| shapes_ok | console (`nn stream start`) | 1,528 | 2,360 | **2,360** | 1,336 | 40 |
+| | background job | 1,440 | 2,448 | | | |
+| decode | console (`nn run`) | 2,072 | 1,816 | **1,816** | 792 | 632 |
+| | background job (`nn run &`) | 1,984 | 1,904 | | | |
+| | producer (`nn stream`) | 864 | 7,120 | | | |
+| draw | panel | 200 | 1,640 | **1,640** | 616 | 532 |
+| report | console (`nn run`) | 1,776 | 2,112 | **2,112** | 1,088 | 544 |
+| | background job | 1,688 | 2,200 | | | |
+| param_set | console (`nn thresh N`) | 440 | 3,448 | **3,448** | 2,424 | 8 |
+| | background job | 352 | 3,536 | | | |
+| param_get | console (`nn info`) | 744 | 3,144 | **3,144** | 2,120 | 16 |
+| | background job | 656 | 3,232 | | | |
+
+`L(slot)` is before any margin; "over 1,024" is what is left for one.  The
+deepest path, on the console to decode: `cli_thread_entry` 40 > `cli_input_byte`
+32 (CR only) > `cli_dispatch_line` 24 > `cli_dispatch_segment` 280 >
+`cmd_nn_run` 928 > `nn_svc_run_once` 88 > `nn_decode_into` 336 >
+`nn_active_decode` 320.  To entry: ... > `cmd_nn_model_load` 344 >
+`nn_svc_model_load` 216 > `plugin_run_load` 48 > `plugin_exec_load` 56.
+"real need" is the next section's.
+
+#### The veneer charge is known to be short, and what that costs here
+
+The shipped declarations were derived with `GROVE_PLUGIN_VENEER_BASE_COST` = 256.
+The firmware's worst case behind a veneer in this image is **456 B**, the log
+callback: `nn_plugin_log` 16 > `log_write` 24 > `log_vwrite` 192 >
+`fmt_vsnformat` 32 > `fmt_vformat` 80 > `fmt_utoa` 56 > `__aeabi_uldivmod` 16 >
+`__udivmoddi4` 40 (the formatter's putter is `snbuf_putc`, 8).  The others are
+well under 256: `to_frame` 48, the painter's rect 232, fill 32 and blit 48, the
+report writer 24.
+
+Re-running the image gate over the shipped plugin ELFs with 456 at every veneer
+gives the "real need" column -- blazeface decode 592, draw 532, report 544;
+cifar10 decode 632, draw 492, report 536; entry, shapes_ok and the params do not
+change.  (With 256 the same run reproduces the shipped declarations exactly,
+which is the control.)  Every one is under its `L(slot)`.  Correcting the charge
+is issue #112, and it reopens this check: with today's plugins cifar10's decode
+is 176 B plus the charge, so 1,024 holds while the charge stays at or under
+848 B.
+
+#### What holds these numbers up, which no gate checks
+
+**[!] The probe is right only while the code keeps two shapes.** Both were
+confirmed by reading the final ELF and neither is enforced by anything:
+
+1. **At each of the six sites, the stack pointer does not move between the sample
+   and the call.**  `nn_active_shapes_ok`, `_decode`, `_draw`, `_report`,
+   `_get_thresh_milli` and `_set_thresh_milli` read `mov rX, sp` after their
+   prologue and reach `blx rN` -- draw: `bx r3`, the tail call -- with no push,
+   pop or `sp` arithmetic in between.
+2. **The loader calls the `exec_ok` hook and entry() from the same frame.**  In
+   `plugin_exec_load` (`stmdb sp!, {r4-r11, lr}`, 36 B, then `sub sp, #20`) the
+   third `blx r3` is the hook and the fourth is entry(), with no `sp` change
+   between them; `pl_exec_ok` pushes its 16 B before its `mov r2, sp`.
+
+To check after a change, read `<nn_active_*>`, `<pl_exec_ok>` and
+`<plugin_exec_load>` in
+`arm-none-eabi-objdump -d --no-show-raw-insn build/grove-vision-ai-v2/shell.elf`.
+A second hook call in one load shows up as `inv`.  What does NOT show up is
+`svc/plugin_exec.c` putting a helper between the hook's frame and entry(), a
+site that starts passing arguments on the stack, or anything else that moves
+`sp` between a sample and its call: the depth reads short, with no mark, and the
+tables above have to be derived again.
+
+#### What the measurement does not cover
+
+**Coverage is per slot and thread, not per path.**  A thread counts as measured
+once any path has reached the slot on it, however shallow, and the paths differ:
+a console line ended by CR keeps `cli_input_byte`'s 32 B on the stack while one
+ended by LF alone tail-calls past it; `nn dets` reaches decode and report 72 B
+shallower than `nn run`; `nn thresh` reaches param_get at 448 B against `nn
+info`'s 744.  Measure with CR, picocom's default, and the deepest command for
+each slot, waiting for each background job to finish (`jobs` empty) before the
+next line:
+
+```
+nn model load --name <det>      # entry, on the console
+nn info                         # param_get
+nn thresh 500                   # param_set (and param_get)
+nn run                          # decode and report
+nn model load --name <det> &    # the same four, on a background job
+nn info &
+nn thresh 500 &
+nn run &
+nn stream start &               # shapes_ok on a job; producer decode, panel draw
+nn stream stats
+nn stream stop
+nn stream start                 # shapes_ok, on the console
+nn stream stats
+nn stream stop
+```
+
+The least `left` is a diagnostic, not a proof: a path nobody walked is in
+neither the high-water nor the minimum.  What covers the paths is the ELF table,
+and the probe agreeing with it cell for cell is what says the two describe the
+same code.
+
+#### What the plugins declare (issue #103)
 
 The declared bound may legitimately be **zero**: the classifier's entry point is
 frameless.  That collided with the ABI's original rule, where zero on a present
@@ -5597,8 +5807,9 @@ a live picture, which reads as a working classifier.
 | `cifar10` #103 | 1,392 | 0 | 48 | 0 | 16 | 48 | -- | 336 |
 | `cifar10` #105 | 2,660 | 0 | 8,852 | 0 | 16 | 432 | 292 | 336 |
 
-The bss is the strip and the atlas; the reservation is 128 KiB.  `draw` stays far
-under the 1,024 B panel allowance and `decode` under the 4,096 B producer one.
+The bss is the strip and the atlas; the reservation is 128 KiB.  `draw` and
+`decode` both stay far under their 1,024 B allowances (issue #119 moved decode's
+off the producer's 4,096, which was the whole of the shell's stack).
 `pl_sbuf_write` measures 16 B and is bounded by name in `board.cmake` at 64 --
 it is reached through the `pl_print_write` veneer, and the stack gate cannot see
 across a veneer, so it charges a flat allowance there for what is normally the
@@ -5627,13 +5838,16 @@ this board was meant to change, and nothing did:
 
 | | #105 | after #110 |
 |---|---:|---:|
-| `at call` producer / panel | 553 / 217 B | **553 / 217 B** |
+| `at call` producer / panel (the retired probe; see below) | 553 / 217 B | **553 / 217 B** |
 | detector fps | 37.00 | **37.02** |
 | detector `decode` | 148 us | **138 us** |
 | primitives refused | 0 | **0** |
 
 The call-site depths coming back bit-identical is the useful one: it is what
 says the extraction did not change where this board's plugin callbacks stand.
+(`at call` was the probe issue #119 retired: taken before `nn_active_*()`, on the
+producer and the panel only, so it is not the depth at a plugin's entry.  The
+depths now are in **What a plugin may spend**.)
 (`drew` is a high-water over the run and moves with the scene -- 736 px was one
 face; a run with two of them charges more, by the same rule.)
 

@@ -102,6 +102,15 @@ static void test_formatter_boundaries(void)
 	print_raw(&sh, "%q");                     /* unknown spec: verbatim */
 	assert(strcmp(cli_dummy_output_str(&tr), "%q") == 0);
 
+	/* [!] A PRECISION IS AN UNKNOWN SPEC, AND "%.*s" PRINTS ITSELF.  Bounding
+	 * a non-terminated string with it is the mistake issue #112 found twice
+	 * (a plugin's text, then a plugin's name): it consumes no argument, so
+	 * the caller's bytes never appear.  Asserted so that it is a known
+	 * property of this formatter rather than an assumption. */
+	setup();
+	print_raw(&sh, "%.*s", 3, "abcdef");
+	assert(strcmp(cli_dummy_output_str(&tr), "%.*s") == 0);
+
 	setup();
 	print_raw(&sh, "end%");                   /* trailing '%' */
 	assert(strcmp(cli_dummy_output_str(&tr), "end%") == 0);

@@ -11,7 +11,8 @@
 
 #include "plugin_run.h"
 #include "plugin_mpu.h"
-#include "nn_probe.h"            /* NN_PROBE_SP() -- the read, nothing else */
+#include "nn_probe.h"            /* entry()'s stack sample (issue #119)     */
+#include "tx_api.h"              /* tx_thread_identify() -- whose sample    */
 
 #include "WE2_device.h"          /* CMSIS core: MPU, SCB, caches, barriers */
 #include "npu_hw.h"              /* npu_cache_clean()                      */
@@ -33,6 +34,14 @@ extern uint8_t __plugin_start[], __plugin_end[];
  */
 static struct plugin_exec_state pl_state;
 
+/*
+ * entry()'s stack sample, from the exec_ok hook to the end of the load (issue
+ * #119).  Touched only by the thread inside plugin_run_load() -- the caller's
+ * claim keeps loads one at a time -- and a hook call from anywhere else is not
+ * kept (nn_probe_pending_take()).
+ */
+static struct nn_probe_pending pl_entry_probe;
+
 /* ---- the three board-specific things ------------------------------------- */
 
 /*
@@ -45,7 +54,11 @@ static struct plugin_exec_state pl_state;
  * and is not what this does -- what holds the configuration still for the
  * plugin's lifetime is the flash lease the caller already holds (plugin_run.h).
  */
-static int pl_exec_ok(uint32_t lo, uint32_t hi, const char **why)
+/* [!] NOT INLINED, so that pl_exec_ok() below -- where the stack pointer is
+ * sampled -- keeps a frame of its own that is small, instead of taking on this
+ * one's region table (issue #119). */
+static __attribute__((noinline)) int pl_exec_check(uint32_t lo, uint32_t hi,
+                                                   const char **why)
 {
 	struct plugin_mpu_region rgn[PLUGIN_MPU_REGION_MAX];
 	uint32_t ctrl, type, mair0, mair1, saved_rnr;
@@ -82,6 +95,25 @@ static int pl_exec_ok(uint32_t lo, uint32_t hi, const char **why)
 	if (why != NULL)
 		*why = plugin_mpu_strerror(v);
 	return -1;
+}
+
+/*
+ * The exec_ok hook, and where entry()'s stack depth is taken (issue #119).
+ *
+ * [!] THE LOADER CALLS THIS FROM THE FRAME IT CALLS entry() FROM.  entry() is
+ * called inside svc/plugin_exec.c, which may own no storage, so no probe can go
+ * beside that branch -- but this hook is called in the same function, after the
+ * copy and the cache maintenance and before the branch, with the stack pointer
+ * the branch will use.  Read here, the depth is the entry depth plus THIS
+ * function's frame: an upper bound, never an under-count, and one no constant
+ * copied off an ELF can drift away from.  The sample is kept only if the load
+ * then succeeds (plugin_run_load()).
+ */
+static int pl_exec_ok(uint32_t lo, uint32_t hi, const char **why)
+{
+	nn_probe_pending_take(&pl_entry_probe, tx_thread_identify(),
+	                      NN_PROBE_SP());
+	return pl_exec_check(lo, hi, why);
 }
 
 /*
@@ -137,18 +169,28 @@ static const struct plugin_exec_env pl_env = {
 
 enum plugin_run_result plugin_run_load(const struct plugin_view *v,
                                        const void *container, uint32_t lease,
-                                       const struct plugin_base_api *base,
-                                       uintptr_t *sp_at_load)
+                                       const struct plugin_base_api *base)
 {
 	const char *why = NULL;
 	enum plugin_run_result r;
+	uintptr_t sp = 0u;
 
-	/* Read in this frame, immediately before the call: the stack does not move
-	 * between here and the `bl`, so what the loader adds on top is exactly
-	 * PLUGIN_RUN_ENTRY_FRAME (issue #119). */
-	if (sp_at_load != NULL)
-		*sp_at_load = NN_PROBE_SP();
+	nn_probe_pending_arm(&pl_entry_probe, tx_thread_identify());
 	r = plugin_exec_load(&pl_env, v, container, (uintptr_t)lease, base, &why);
+	/* entry() ran and accepted only on PLUGIN_RUN_OK: every refusal, NO_PLUGIN
+	 * included, returns before the branch or undoes it, and a sample of a load
+	 * that did not happen is not a depth (issue #119). */
+	switch (nn_probe_pending_settle(&pl_entry_probe, r == PLUGIN_RUN_OK, &sp)) {
+	case NN_PROBE_SETTLE_RECORD:
+		nn_probe_note(PLUGIN_SLOT_ENTRY, sp, 0u);
+		break;
+	case NN_PROBE_SETTLE_REJECT:
+		nn_probe_discard(PLUGIN_SLOT_ENTRY);
+		break;
+	case NN_PROBE_SETTLE_NONE:
+	default:
+		break;
+	}
 	switch (r) {
 	case PLUGIN_RUN_OK:
 		LOG_INF("'%s' (build %s) loaded: %lu B at 0x%08lx",

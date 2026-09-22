@@ -252,10 +252,10 @@ static void test_line(void)
 	r.cell[NN_PROBE_PRODUCER].hits = 0u;
 	r.cell[NN_PROBE_PANEL].hits = 0u;
 	n = nn_probe_line(buf, sizeof buf, "entry", &r, ON_SHELL,
-	                  "(+56 loader)");
+	                  "(upper bound)");
 	expect("and so does the widest line with a note",
 	       n < (int)sizeof buf - 1 &&
-	       strcmp(buf + n - 22, "(+56 loader) inv 99999") == 0,
+	       strcmp(buf + n - 23, "(upper bound) inv 99999") == 0,
 	       "%zu B: '%s'", strlen(buf), buf);
 
 	r.cell[NN_PROBE_PRODUCER] = (struct nn_probe_cell){ 99999u, 99999u,
@@ -265,7 +265,7 @@ static void test_line(void)
 	r.cell[NN_PROBE_BG]       = r.cell[NN_PROBE_PRODUCER];
 	r.invalid = UINT32_MAX;
 	n = nn_probe_line(buf, sizeof buf, "shapes_ok", &r, ON_PROD | ON_SHELL,
-	                  "(+56 loader)");
+	                  "(upper bound)");
 	expect("past that it is cut at the caller's buffer, and terminated",
 	       n == (int)sizeof buf - 1 && strlen(buf) == sizeof buf - 1u,
 	       "n %d len %zu", n, strlen(buf));
@@ -282,6 +282,80 @@ static void test_line(void)
 	       n > 0 && strstr(buf, "not measured") != NULL, "'%s'", buf);
 }
 
+/*
+ * entry()'s sample waits in a nn_probe_pending between the exec_ok hook that
+ * takes it and the end of the load (issue #119).  What it must never do is turn
+ * into a depth for a branch that did not happen: a load that failed after the
+ * hook, a hook call from outside a load or from another thread, or a loader
+ * that calls the hook more than once, so that which call stood beside entry()
+ * cannot be told.
+ */
+static void test_pending(void)
+{
+	struct nn_probe_pending p;
+	int a, b;                      /* two "threads", by address */
+	uintptr_t sp;
+
+	printf("pending (entry):\n");
+	memset(&p, 0, sizeof p);
+
+	nn_probe_pending_arm(&p, &a);
+	nn_probe_pending_take(&p, &a, 0x30001234u);
+	sp = 0u;
+	expect("one sample, this load's, and the load succeeded: recorded",
+	       nn_probe_pending_settle(&p, 1, &sp) == NN_PROBE_SETTLE_RECORD &&
+	       sp == 0x30001234u, "sp %#lx", (unsigned long)sp);
+	nn_probe_pending_take(&p, &a, 0x30000100u);
+	expect("[!] and the settle disarmed it: a later hook call is nobody's",
+	       nn_probe_pending_settle(&p, 1, &sp) == NN_PROBE_SETTLE_NONE, "kept");
+
+	nn_probe_pending_arm(&p, &a);
+	nn_probe_pending_take(&p, &a, 0x30001234u);
+	expect("[!] the hook ran, then the load failed (entry refused): dropped",
+	       nn_probe_pending_settle(&p, 0, &sp) == NN_PROBE_SETTLE_NONE,
+	       "recorded");
+
+	nn_probe_pending_arm(&p, &a);
+	nn_probe_pending_take(&p, &a, 0x30000800u);
+	expect("[!] and the next load starts from nothing: its one sample is "
+	       "recorded, not counted as the failed load's second",
+	       nn_probe_pending_settle(&p, 1, &sp) == NN_PROBE_SETTLE_RECORD &&
+	       sp == 0x30000800u, "sp %#lx", (unsigned long)sp);
+
+	nn_probe_pending_arm(&p, &a);
+	expect("[!] a load that succeeded without the hook ever running is "
+	       "counted invalid, not taken for 'entry never ran'",
+	       nn_probe_pending_settle(&p, 1, &sp) == NN_PROBE_SETTLE_REJECT,
+	       "not rejected");
+
+	nn_probe_pending_arm(&p, &a);
+	nn_probe_pending_take(&p, &a, 0x30001234u);
+	nn_probe_pending_take(&p, &a, 0x30001200u);
+	expect("[!] two hook calls in one load: which stood beside entry() cannot "
+	       "be told, so neither is recorded",
+	       nn_probe_pending_settle(&p, 1, &sp) == NN_PROBE_SETTLE_REJECT,
+	       "one was kept");
+
+	nn_probe_pending_take(&p, &a, 0x30001234u);
+	nn_probe_pending_arm(&p, &a);
+	expect("a hook call before the load began does not count towards it",
+	       nn_probe_pending_settle(&p, 1, &sp) == NN_PROBE_SETTLE_REJECT,
+	       "counted");
+
+	nn_probe_pending_arm(&p, &a);
+	nn_probe_pending_take(&p, &b, 0x30001234u);
+	expect("[!] a hook call from another thread is not this load's",
+	       nn_probe_pending_settle(&p, 1, &sp) == NN_PROBE_SETTLE_REJECT,
+	       "counted");
+
+	expect("nothing armed is nothing to settle",
+	       nn_probe_pending_settle(&p, 1, &sp) == NN_PROBE_SETTLE_NONE, "no");
+	nn_probe_pending_arm(NULL, &a);
+	nn_probe_pending_take(NULL, &a, 1u);
+	expect("and no record is no crash",
+	       nn_probe_pending_settle(NULL, 1, &sp) == NN_PROBE_SETTLE_NONE, "no");
+}
+
 int main(void)
 {
 	printf("test_nn_probe\n");
@@ -289,6 +363,7 @@ int main(void)
 	test_measure();
 	test_record();
 	test_line();
+	test_pending();
 	if (failures) {
 		printf("test_nn_probe: %d failure(s)\n", failures);
 		return 1;

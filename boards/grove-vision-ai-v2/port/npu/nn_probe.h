@@ -15,11 +15,13 @@
  *     that makes the indirect call, immediately before it (NN_PROBE_SP() reads
  *     the stack pointer there, explicitly -- not the address of a local);
  *   - entry() is called from inside the shared loader (svc/plugin_exec.c),
- *     which owns no storage, so plugin_run_load() samples the stack pointer
- *     just before it calls the loader, and the loader's own frame is ADDED
- *     (PLUGIN_RUN_ENTRY_FRAME, derived from the final ELF).  An entry sample
- *     is recorded only when the load succeeded, so a refusal before the branch
- *     is never counted as the branch.
+ *     which owns no storage and so cannot hold a probe.  The loader calls the
+ *     board's exec_ok hook from the very frame it then calls entry() from,
+ *     with the same stack pointer, and the hook samples there: the hook's own
+ *     frame is on top, so the number is an UPPER BOUND on the entry depth and
+ *     needs no constant read off an ELF.  The sample waits in a
+ *     struct nn_probe_pending until plugin_run_load() knows whether the load
+ *     succeeded; only then is it recorded (see nn_probe_pending_settle()).
  *
  * [!] A SAMPLE NOBODY CAN ATTRIBUTE IS NOT A MEASUREMENT.  No current thread,
  * an exception handler, a thread this board cannot name, or a stack pointer
@@ -129,6 +131,51 @@ int nn_probe_line(char *buf, size_t cap, const char *label,
                   const struct nn_probe_row *r, unsigned runs,
                   const char *note);
 
+/* ---- a sample that waits for its load to succeed ------------------------ */
+
+/**
+ * entry()'s sample, between the hook that takes it and the load that decides
+ * whether it happened (plugin_run.c).
+ *
+ * [!] A SAMPLE COUNTS ONLY IF IT IS THIS LOAD'S, TAKEN ONCE, AND THE LOAD GOT
+ * ALL THE WAY.  The hook runs after the image is copied and before the branch;
+ * a load that fails after it -- entry() refusing, say -- took the sample and
+ * must not record it, and a hook called when no load is in flight, or from
+ * another thread, or twice in one load, is not "immediately before entry()"
+ * and is not a depth anybody can attribute.  Plain data: the owner keeps it,
+ * and the one thread that loads is the only one that touches it.
+ */
+struct nn_probe_pending {
+	uintptr_t   sp;      /**< the stack pointer the hook read             */
+	const void *who;     /**< the thread the load runs on                 */
+	uint32_t    takes;   /**< hook calls by that thread during the load   */
+	uint8_t     armed;   /**< a load is in flight                         */
+};
+
+/** What to do with the sample once the load has answered. */
+enum nn_probe_settle {
+	NN_PROBE_SETTLE_NONE = 0,  /**< the load failed, or none was in flight  */
+	NN_PROBE_SETTLE_RECORD,    /**< one sample, this load's: record it      */
+	NN_PROBE_SETTLE_REJECT,    /**< the load succeeded but the samples do
+	                                not describe its branch: count invalid */
+};
+
+/** A load is starting on thread @p who; forget any earlier sample. */
+void nn_probe_pending_arm(struct nn_probe_pending *p, const void *who);
+
+/** The hook: keep @p sp if it was taken on the loading thread @p who.  A call
+ *  outside a load is harmless: arm() starts over and settle() ignores it. */
+void nn_probe_pending_take(struct nn_probe_pending *p, const void *who,
+                           uintptr_t sp);
+
+/**
+ * The load has answered (@p load_ok nonzero for PLUGIN_RUN_OK).  Disarms, and
+ * says whether the sample is to be recorded, counted invalid, or dropped; on
+ * NN_PROBE_SETTLE_RECORD, @p sp is set.
+ */
+enum nn_probe_settle nn_probe_pending_settle(struct nn_probe_pending *p,
+                                             int load_ok, uintptr_t *sp);
+
 /* ---- firmware only (nn_probe_rtos.c) -------------------------------------- */
 
 /**
@@ -148,6 +195,9 @@ int nn_probe_line(char *buf, size_t cap, const char *label,
 /** Record one sample for @p slot, taken on the current thread at @p sp, with
  *  @p extra bytes still to be pushed before the plugin is entered. */
 void nn_probe_note(unsigned slot, uintptr_t sp, uint32_t extra);
+
+/** Count one invalid sample for @p slot -- one that cannot be attributed. */
+void nn_probe_discard(unsigned slot);
 
 /** One slot's row, copied in one critical section. */
 void nn_probe_snapshot(unsigned slot, struct nn_probe_row *out);

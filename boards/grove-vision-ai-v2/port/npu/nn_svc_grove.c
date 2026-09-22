@@ -607,23 +607,16 @@ static int nn_resolve_blob(struct nn_op_result *res, uint32_t token,
 		 */
 		{
 			enum plugin_run_result pr;
-			uintptr_t sp = 0u;
 
 			pr = plugin_run_load(&nn_container,
 			                     (const void *)(uintptr_t)(NOR_XIP_BASE +
 			                                               payload),
-			                     token, &nn_plugin_base, &sp);
+			                     token, &nn_plugin_base);
 			if (pr != PLUGIN_RUN_OK && pr != PLUGIN_RUN_NO_PLUGIN) {
 				nn_detail_set("slot %u ('%s'): %s", slot, name,
 				              plugin_run_strerror(pr));
 				return -1;
 			}
-			/* entry() ran only if the load got all the way (issue #119):
-			 * NO_PLUGIN and every refusal return before the branch, and a
-			 * sample of a branch that was never taken is not a depth. */
-			if (pr == PLUGIN_RUN_OK)
-				nn_probe_note(PLUGIN_SLOT_ENTRY, sp,
-				              (uint32_t)PLUGIN_RUN_ENTRY_FRAME);
 		}
 		/* The MODEL section, not the container: npu_open() parses a
 		 * flatbuffer and the rest of the payload is not one. */
@@ -1596,8 +1589,6 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
  * anywhere; what an allowance is derived from is how much is ALREADY SPENT at
  * the instant a plugin is entered (issue #103), which nothing else prints.
  */
-#define NN_STR_(x) #x
-#define NN_STR(x)  NN_STR_(x)
 static const char *const nn_slot_label[PLUGIN_SLOT_COUNT] = {
 	[PLUGIN_SLOT_ENTRY]     = "entry",
 	[PLUGIN_SLOT_SHAPES_OK] = "shapes_ok",
@@ -1608,8 +1599,9 @@ static const char *const nn_slot_label[PLUGIN_SLOT_COUNT] = {
 	[PLUGIN_SLOT_PARAM_GET] = "param_get",
 };
 static const char *const nn_slot_note[PLUGIN_SLOT_COUNT] = {
-	/* Sampled in front of the shared loader; its frame is added (plugin_run.h). */
-	[PLUGIN_SLOT_ENTRY] = "(+" NN_STR(PLUGIN_RUN_ENTRY_FRAME) " loader)",
+	/* Sampled inside the board's exec_ok hook, which the loader calls from the
+	 * frame it then calls entry() from: the hook's own frame is on top. */
+	[PLUGIN_SLOT_ENTRY] = "(upper bound)",
 	/* Sampled inside nn_active_draw(), which tail-calls the plugin and so pops
 	 * its own frame first: the number is at or above the entry, never below. */
 	[PLUGIN_SLOT_DRAW]  = "(upper bound)",

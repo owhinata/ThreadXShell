@@ -26,6 +26,13 @@
  */
 #include "nn_probe.h"
 #include "nn_svc.h"      /* NN_STREAM_LINE_MAX */
+#include "plugin_run.h"  /* plugin_run_entered() */
+/*
+ * The real table of which threads each slot runs on (GROVE_PLUGIN_STACK_RUNS).
+ * The header wants its allowances and ceilings defined; host_tests.sh passes
+ * placeholder numbers, which reach nothing below -- only the masks are read.
+ */
+#include "nn_plugin_stack.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -222,42 +229,71 @@ static void test_line(void)
 	n = nn_probe_line(buf, sizeof buf, "decode", &r, ON_PROD | ON_SHELL,
 	                  "(note)");
 	expect("[!] a thread the slot is not supposed to run on is SHOWN and "
-	       "flagged, then the note, then the invalid count",
+	       "flagged, then the invalid count, then the note",
 	       strcmp(buf, "decode   : prod 1072/8192 !panel 200/2048 con "
-	                   "1840/4096 bg --; left 1848 (note) inv 1") == 0,
+	                   "1840/4096 bg --; left 1848 inv 1 (note)") == 0,
 	       "'%s'", buf);
 
 	/*
-	 * [!] THE WIDEST LINES THE BOARD CAN MAKE WITHOUT A BROKEN TABLE.  Every
-	 * stack here is at most 8,192 B, so a depth or a stack is at most four
-	 * digits -- five only past the bottom of the stack.  The two cases are the
-	 * widest slot of each kind: decode on all four threads (one of them the
-	 * table's mistake) with a five-digit invalid count, and entry, which is
-	 * the slot with a note.
+	 * [!] THE WIDEST LINES, FROM THE BOARD'S OWN TABLE (issue #119's review).
+	 * Each slot's line is built with the report's real label, note and thread
+	 * mask.  Every depth, stack and "left" is bounded by the stacks, which are
+	 * at most 8,192 B, so four digits; the invalid count is the one unbounded
+	 * field, and it is shown at most as `inv >99999`.  The worst case puts
+	 * all four threads on every slot -- the ones the table does not list come
+	 * out flagged `!` and wider -- and the invalid count at its maximum: the
+	 * count must still be there, whole.  The note, after it, is the field that
+	 * may go.
 	 */
-	memset(&r, 0, sizeof r);
-	r.cell[NN_PROBE_PRODUCER] = (struct nn_probe_cell){ 8192u, 9999u,
-	                                                     8192u, 1u };
-	r.cell[NN_PROBE_PANEL]    = r.cell[NN_PROBE_PRODUCER];
-	r.cell[NN_PROBE_CONSOLE]  = r.cell[NN_PROBE_PRODUCER];
-	r.cell[NN_PROBE_BG]       = r.cell[NN_PROBE_PRODUCER];
-	r.invalid = 99999u;
-	n = nn_probe_line(buf, sizeof buf, "shapes_ok", &r, ON_PROD | ON_SHELL,
-	                  NULL);
-	expect("the widest noteless line -- four threads, four-digit numbers, a "
-	       "five-digit invalid count -- fits the caller's 96 B whole",
-	       n == (int)strlen(buf) && n < (int)sizeof buf - 1 &&
-	       strcmp(buf + n - 10, " inv 99999") == 0,
-	       "%zu B: '%s'", strlen(buf), buf);
-	r.cell[NN_PROBE_PRODUCER].hits = 0u;
-	r.cell[NN_PROBE_PANEL].hits = 0u;
-	n = nn_probe_line(buf, sizeof buf, "entry", &r, ON_SHELL,
-	                  "(upper bound)");
-	expect("and so does the widest line with a note",
-	       n < (int)sizeof buf - 1 &&
-	       strcmp(buf + n - 23, "(upper bound) inv 99999") == 0,
-	       "%zu B: '%s'", strlen(buf), buf);
+	{
+		static const unsigned runs[PLUGIN_SLOT_COUNT] =
+			GROVE_PLUGIN_STACK_RUNS;
+		unsigned slot, worst = 0u, c;
+		int whole = 1, kept = 1, notes = 1;
 
+		for (slot = 0u; slot < (unsigned)PLUGIN_SLOT_COUNT; slot++) {
+			const char *note = nn_probe_slot_note(slot);
+
+			memset(&r, 0, sizeof r);
+			for (c = 0u; c < (unsigned)NN_PROBE_CTX_COUNT; c++)
+				r.cell[c] = (struct nn_probe_cell){ 8192u, 8192u,
+				                                    8192u, 1u };
+			r.invalid = UINT32_MAX;
+			n = nn_probe_line(buf, sizeof buf, nn_probe_slot_label(slot),
+			                  &r, runs[slot], note);
+			if ((unsigned)n > worst)
+				worst = (unsigned)n;
+			if (strstr(buf, "; left 8192 inv >99999") == NULL) {
+				printf("        slot %u: '%s'\n", slot, buf);
+				kept = 0;
+			}
+			if (n != (int)strlen(buf) || strlen(buf) >= sizeof buf)
+				whole = 0;
+
+			/* And a line that only has the threads it should, and a
+			 * five-digit count: nothing is cut, the note included. */
+			memset(&r, 0, sizeof r);
+			for (c = 0u; c < (unsigned)NN_PROBE_CTX_COUNT; c++)
+				if (runs[slot] & (1u << c))
+					r.cell[c] = (struct nn_probe_cell){ 8192u, 8192u,
+					                                    8192u, 1u };
+			r.invalid = NN_PROBE_INV_SHOWN_MAX;
+			n = nn_probe_line(buf, sizeof buf, nn_probe_slot_label(slot),
+			                  &r, runs[slot], note);
+			if (note != NULL && (n < (int)strlen(note) ||
+			                     strcmp(buf + n - strlen(note), note) != 0)) {
+				printf("        slot %u: '%s'\n", slot, buf);
+				notes = 0;
+			}
+		}
+		expect("[!] every slot, all four threads, the largest count: `inv` "
+		       "survives the caller's 96 B whole", kept && whole,
+		       "worst %u B", worst);
+		expect("and every slot's line as the table lists it keeps its note",
+		       notes, "a note was cut");
+	}
+
+	memset(&r, 0, sizeof r);
 	r.cell[NN_PROBE_PRODUCER] = (struct nn_probe_cell){ 99999u, 99999u,
 	                                                     99999u, 1u };
 	r.cell[NN_PROBE_PANEL]    = r.cell[NN_PROBE_PRODUCER];
@@ -266,7 +302,8 @@ static void test_line(void)
 	r.invalid = UINT32_MAX;
 	n = nn_probe_line(buf, sizeof buf, "shapes_ok", &r, ON_PROD | ON_SHELL,
 	                  "(upper bound)");
-	expect("past that it is cut at the caller's buffer, and terminated",
+	expect("past what the stacks allow, it is cut at the caller's buffer, "
+	       "and terminated",
 	       n == (int)sizeof buf - 1 && strlen(buf) == sizeof buf - 1u,
 	       "n %d len %zu", n, strlen(buf));
 
@@ -293,7 +330,7 @@ static void test_line(void)
 static void test_pending(void)
 {
 	struct nn_probe_pending p;
-	int a, b;                      /* two "threads", by address */
+	static int a, b;               /* two "threads", by address */
 	uintptr_t sp;
 
 	printf("pending (entry):\n");
@@ -302,7 +339,7 @@ static void test_pending(void)
 	nn_probe_pending_arm(&p, &a);
 	nn_probe_pending_take(&p, &a, 0x30001234u);
 	sp = 0u;
-	expect("one sample, this load's, and the load succeeded: recorded",
+	expect("one sample, this load's, and entry() accepted: recorded",
 	       nn_probe_pending_settle(&p, 1, &sp) == NN_PROBE_SETTLE_RECORD &&
 	       sp == 0x30001234u, "sp %#lx", (unsigned long)sp);
 	nn_probe_pending_take(&p, &a, 0x30000100u);
@@ -310,8 +347,17 @@ static void test_pending(void)
 	       nn_probe_pending_settle(&p, 1, &sp) == NN_PROBE_SETTLE_NONE, "kept");
 
 	nn_probe_pending_arm(&p, &a);
+	nn_probe_pending_take(&p, &a, 0x30001240u);
+	sp = 0u;
+	expect("[!] the hook ran and entry() was called but refused: recorded -- "
+	       "it ran at that depth",
+	       nn_probe_pending_settle(&p, 1, &sp) == NN_PROBE_SETTLE_RECORD &&
+	       sp == 0x30001240u, "sp %#lx", (unsigned long)sp);
+
+	nn_probe_pending_arm(&p, &a);
 	nn_probe_pending_take(&p, &a, 0x30001234u);
-	expect("[!] the hook ran, then the load failed (entry refused): dropped",
+	expect("[!] the hook ran, then its own verdict stopped the load before "
+	       "the branch: dropped",
 	       nn_probe_pending_settle(&p, 0, &sp) == NN_PROBE_SETTLE_NONE,
 	       "recorded");
 
@@ -323,8 +369,8 @@ static void test_pending(void)
 	       sp == 0x30000800u, "sp %#lx", (unsigned long)sp);
 
 	nn_probe_pending_arm(&p, &a);
-	expect("[!] a load that succeeded without the hook ever running is "
-	       "counted invalid, not taken for 'entry never ran'",
+	expect("[!] entry() called without the hook ever running is counted "
+	       "invalid, not taken for 'entry never ran'",
 	       nn_probe_pending_settle(&p, 1, &sp) == NN_PROBE_SETTLE_REJECT,
 	       "not rejected");
 
@@ -356,6 +402,37 @@ static void test_pending(void)
 	       nn_probe_pending_settle(NULL, 1, &sp) == NN_PROBE_SETTLE_NONE, "no");
 }
 
+/*
+ * Which loader results mean entry() was CALLED (plugin_run_entered()), because
+ * that is what decides whether the hook's sample is a depth.  A refused entry()
+ * ran; everything before the branch -- the hook's own MPU verdict included --
+ * did not.
+ */
+static void test_entered(void)
+{
+	static const struct { enum plugin_run_result r; int want; const char *n; }
+	cases[] = {
+		{ PLUGIN_RUN_OK,        1, "OK" },
+		{ PLUGIN_RUN_ENTRY,     1, "ENTRY (entry() ran and refused)" },
+		{ PLUGIN_RUN_MPU,       0, "MPU (the hook's own refusal)" },
+		{ PLUGIN_RUN_TOO_BIG,   0, "TOO_BIG" },
+		{ PLUGIN_RUN_NO_SOURCE, 0, "NO_SOURCE" },
+		{ PLUGIN_RUN_NO_PLUGIN, 0, "NO_PLUGIN" },
+		{ PLUGIN_RUN_ARG,       0, "ARG" },
+	};
+	unsigned i;
+
+	printf("entered:\n");
+	for (i = 0u; i < sizeof cases / sizeof cases[0]; i++) {
+		char what[80];
+
+		snprintf(what, sizeof what, "%s %s", cases[i].n,
+		         cases[i].want ? "called entry()" : "never reached it");
+		expect(what, plugin_run_entered(cases[i].r) == cases[i].want,
+		       "got %d", plugin_run_entered(cases[i].r));
+	}
+}
+
 int main(void)
 {
 	printf("test_nn_probe\n");
@@ -364,6 +441,7 @@ int main(void)
 	test_record();
 	test_line();
 	test_pending();
+	test_entered();
 	if (failures) {
 		printf("test_nn_probe: %d failure(s)\n", failures);
 		return 1;

@@ -36,7 +36,7 @@ static struct plugin_exec_state pl_state;
 
 /*
  * entry()'s stack sample, from the exec_ok hook to the end of the load (issue
- * #119).  Touched only by the thread inside plugin_run_load() -- the caller's
+ * #119), kept if entry() was then called.  Touched only by the thread inside plugin_run_load() -- the caller's
  * claim keeps loads one at a time -- and a hook call from anywhere else is not
  * kept (nn_probe_pending_take()).
  */
@@ -106,8 +106,9 @@ static __attribute__((noinline)) int pl_exec_check(uint32_t lo, uint32_t hi,
  * copy and the cache maintenance and before the branch, with the stack pointer
  * the branch will use.  Read here, the depth is the entry depth plus THIS
  * function's frame: an upper bound, never an under-count, and one no constant
- * copied off an ELF can drift away from.  The sample is kept only if the load
- * then succeeds (plugin_run_load()).
+ * copied off an ELF can drift away from.  The sample is kept only if entry()
+ * is then called, whether it accepts or not (plugin_run_load()).  If this
+ * hook's own verdict stops the load, entry() never runs and nothing is kept.
  */
 static int pl_exec_ok(uint32_t lo, uint32_t hi, const char **why)
 {
@@ -177,10 +178,11 @@ enum plugin_run_result plugin_run_load(const struct plugin_view *v,
 
 	nn_probe_pending_arm(&pl_entry_probe, tx_thread_identify());
 	r = plugin_exec_load(&pl_env, v, container, (uintptr_t)lease, base, &why);
-	/* entry() ran and accepted only on PLUGIN_RUN_OK: every refusal, NO_PLUGIN
-	 * included, returns before the branch or undoes it, and a sample of a load
-	 * that did not happen is not a depth (issue #119). */
-	switch (nn_probe_pending_settle(&pl_entry_probe, r == PLUGIN_RUN_OK, &sp)) {
+	/* Recorded whenever entry() was CALLED -- accepted or refused -- and never
+	 * for a refusal before the branch, the hook's own included (issue #119;
+	 * plugin_run_entered()). */
+	switch (nn_probe_pending_settle(&pl_entry_probe, plugin_run_entered(r),
+	                                &sp)) {
 	case NN_PROBE_SETTLE_RECORD:
 		nn_probe_note(PLUGIN_SLOT_ENTRY, sp, 0u);
 		break;

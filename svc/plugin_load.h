@@ -97,6 +97,13 @@ struct plugin_view {
 	 * what somebody looking at `nn info` after a re-send actually needs.
 	 */
 	uint32_t digest;
+	/*
+	 * [!] BOTH ARE NUL-TERMINATED BY plugin_parse(), which truncates rather
+	 * than trusting the container's bytes to carry a terminator.  A console
+	 * and the fault reporter print them with "%s", and svc/fmt.c implements
+	 * neither a precision nor `*` -- so "%.*s" is not the way to bound them
+	 * here, it is a format that prints itself (issue #112).
+	 */
 	char     name[PLUGIN_NAME_MAX];
 	char     build_id[PLUGIN_BUILD_ID_MAX];
 };

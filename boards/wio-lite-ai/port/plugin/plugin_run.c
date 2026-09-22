@@ -209,8 +209,12 @@ enum plugin_run_result plugin_run_load(const struct plugin_view *v,
 		        (unsigned long)plugin_run_res_base());
 		break;
 	case PLUGIN_RUN_ENTRY:
-		LOG_ERR("'%.*s' refused its own entry point or declares none",
-		        (int)sizeof v->name, v->name);
+		/* [!] %s, NOT %.*s (issue #112).  svc/fmt.c implements neither a
+		 * precision nor `*`, so the precision form printed the format string
+		 * itself instead of the name.  plugin_parse() terminates this field
+		 * (svc/plugin_load.h), which is what makes %s the right answer here
+		 * rather than a copy. */
+		LOG_ERR("'%s' refused its own entry point or declares none", v->name);
 		break;
 	default:
 		LOG_ERR("%s%s%s", plugin_run_strerror(r),

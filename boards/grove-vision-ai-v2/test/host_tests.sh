@@ -574,3 +574,19 @@ else
     echo "run_plugin_gate_tests: SKIPPED -- no arm-none-eabi toolchain under" \
          "$repo/tools/ (configure a Grove build once to fetch it)" >&2
 fi
+
+# --- the firmware-side veneer cost gate's tests (issue #112) ----------------
+#
+# cmake/check_veneer_base_cost.py derives the stack the FIRMWARE spends below a
+# plugin veneer from the shipped image and refuses a VENEER_BASE_COST below
+# it.  The fixtures link small Cortex-M55 AND Cortex-M7 images (the script is
+# shared and names no core, so both are run from every board that uses it),
+# and every case is asserted for its own reason: an exact derived value for an
+# accept, the stage, the diagnostic and the number of refusals for a refusal.
+# Same pinned toolchain as above, and the same loud SKIP without it.
+if [ -n "$gate_cc" ] && [ -x "$gate_cc" ]; then
+    python3 "$repo/cmake/fixtures/run_veneer_cost_tests.py" --cc "$gate_cc"
+else
+    echo "run_veneer_cost_tests: SKIPPED -- no arm-none-eabi toolchain under" \
+         "$repo/tools/ (configure a Grove build once to fetch it)" >&2
+fi

@@ -221,3 +221,19 @@ else
     echo "run_reservation_tests: SKIPPED -- no arm-none-eabi toolchain under" \
          "$HOST_TEST_REPO/tools/ (configure a wio build once to fetch it)" >&2
 fi
+
+# issue #112 -- negative tests for cmake/check_veneer_base_cost.py, the gate that
+# derives the stack the FIRMWARE spends below a plugin veneer from the shipped
+# image and refuses a VENEER_BASE_COST below it.  The fixtures link small
+# Cortex-M7 AND Cortex-M55 images -- the script is shared and names no core, so
+# both are run from every board that uses it -- and every case is asserted for
+# its own reason: an exact derived value for an accept, the stage, the
+# diagnostic and the number of refusals for a refusal.  Same pinned toolchain
+# as above, and the same loud SKIP without it.
+if [ -n "$gate_cc" ] && [ -x "$gate_cc" ]; then
+    python3 "$HOST_TEST_REPO/cmake/fixtures/run_veneer_cost_tests.py" \
+        --cc "$gate_cc"
+else
+    echo "run_veneer_cost_tests: SKIPPED -- no arm-none-eabi toolchain under" \
+         "$HOST_TEST_REPO/tools/ (configure a wio build once to fetch it)" >&2
+fi

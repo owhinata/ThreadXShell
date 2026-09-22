@@ -98,6 +98,17 @@ void nn_probe_note(unsigned slot, uintptr_t sp, uint32_t extra)
 	TX_RESTORE
 }
 
+void nn_probe_discard(unsigned slot)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	if (slot >= (unsigned)PLUGIN_SLOT_COUNT)
+		return;
+	TX_DISABLE
+	nn_probe_reject(&nn_probe_rows[slot]);
+	TX_RESTORE
+}
+
 void nn_probe_snapshot(unsigned slot, struct nn_probe_row *out)
 {
 	TX_INTERRUPT_SAVE_AREA

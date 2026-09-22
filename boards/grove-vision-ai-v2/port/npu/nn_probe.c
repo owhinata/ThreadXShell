@@ -85,6 +85,57 @@ void nn_probe_reject(struct nn_probe_row *r)
 		r->invalid++;
 }
 
+/* ---- a sample that waits for its load to succeed ------------------------ */
+
+void nn_probe_pending_arm(struct nn_probe_pending *p, const void *who)
+{
+	if (p == NULL)
+		return;
+	p->sp    = 0u;
+	p->who   = who;
+	p->takes = 0u;
+	p->armed = 1u;
+}
+
+void nn_probe_pending_take(struct nn_probe_pending *p, const void *who,
+                           uintptr_t sp)
+{
+	/* Not the loading thread's: not the branch.  A call when no load is in
+	 * flight needs no test of its own -- arm() starts every load over and
+	 * settle() answers nothing unarmed, so what it leaves is never read. */
+	if (p == NULL || who != p->who)
+		return;
+	p->sp = sp;
+	if (p->takes != UINT32_MAX)
+		p->takes++;
+}
+
+enum nn_probe_settle nn_probe_pending_settle(struct nn_probe_pending *p,
+                                             int load_ok, uintptr_t *sp)
+{
+	int armed;
+
+	if (p == NULL)
+		return NN_PROBE_SETTLE_NONE;
+	armed    = p->armed != 0u;
+	p->armed = 0u;
+	if (!armed || !load_ok)
+		return NN_PROBE_SETTLE_NONE;
+	/*
+	 * [!] A SUCCESSFUL LOAD WITHOUT EXACTLY ONE SAMPLE IS REPORTED, NOT
+	 * SKIPPED.  Zero means the loader stopped calling the hook before entry();
+	 * two mean it calls it somewhere else as well, and which of them stood
+	 * beside the branch cannot be told.  Either is the probe no longer
+	 * measuring what it says, and a count of invalid samples is how the report
+	 * says so -- silence would read as "entry was not exercised".
+	 */
+	if (p->takes != 1u)
+		return NN_PROBE_SETTLE_REJECT;
+	if (sp != NULL)
+		*sp = p->sp;
+	return NN_PROBE_SETTLE_RECORD;
+}
+
 /* ---- the report line ----------------------------------------------------- */
 
 static const char *const nn_probe_names[NN_PROBE_CTX_COUNT] = {

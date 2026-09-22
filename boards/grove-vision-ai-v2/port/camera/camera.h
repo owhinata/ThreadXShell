@@ -64,10 +64,23 @@ const char *camera_strerror(int rc);
  * it sits strictly above it.  The reasoning lives at CAM_PANEL_PRIO, next to the
  * assert that enforces it -- a relationship that matters is asserted where the
  * second thread is declared rather than restated as a second literal, because
- * two numbers describing one ordering is how the ordering gets broken.  Its
- * stack size stays private to camera.c; nothing else needs it.
+ * two numbers describing one ordering is how the ordering gets broken.
  */
 #define CAM_PRODUCER_PRIO 10u
+
+/**
+ * The producer thread's stack, in DTCM.  See camera.c for how the number was
+ * chosen; the array and the TX_THREAD stay there.
+ *
+ * [!] PRIVATE TO camera.c UNTIL ISSUE #119, and "nothing else needs it" was
+ * wrong by then.  A plugin's decode() runs on this thread under `nn stream`, and
+ * the plugin policy (port/npu/nn_plugin_stack.h) asserts decode's allowance
+ * strictly below every stack it can be called on -- an allowance equal to the
+ * whole stack is a check that cannot fire (issue #103).  An assert cannot name a
+ * number another file keeps to itself, so it is published here, the way the
+ * priority is.
+ */
+#define CAM_PRODUCER_STACK_BYTES 8192u
 
 /**
  * @brief  Create the driver's ThreadX objects.

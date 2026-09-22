@@ -513,6 +513,19 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_plugin_text"
 "$out/test_plugin_text"
 
+# issue #119 -- what each plugin callback may ask of the stack it runs on
+# (port/npu/nn_plugin_stack.h).  Three slots were declared against the camera
+# producer's figure while also running on a shell stack exactly that size, so a
+# plugin declaring the whole shell stack would have been admitted.  The header
+# now asserts every allowance below each thread its slot runs on, and those
+# asserts are compile-time only -- the firmware build can show them passing but
+# never failing.  So the driver compiles the REAL header once per ceiling at,
+# below and above it (the others out of the way), and builds the runtime half
+# (test_plugin_stack.c) with sentinel allowances to catch a slot wired to the
+# wrong one, and with the real ones against svc/plugin_load.c.  Host cc only:
+# nothing here needs the cross toolchain, so nothing here skips.
+python3 "$here/test_plugin_stack.py"
+
 # --- the plugin image gate's negative tests (issue #106) --------------------
 #
 # [!] THIS RUNS HERE, NOT IN shell/test/run_host_tests.sh.  The fixtures compile

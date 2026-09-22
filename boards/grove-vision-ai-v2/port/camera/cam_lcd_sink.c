@@ -87,7 +87,7 @@
  * MEASURED at issue #64: 544 B of 2048, across `camera preview`, `nn preview`
  * and a frame skipped because the console held the panel.
  */
-#define CAM_PANEL_STACK 2048u
+#define CAM_PANEL_STACK CAM_PANEL_STACK_BYTES   /* cam_lcd_sink.h (#119) */
 
 _Static_assert(CAM_PANEL_PRIO < CAM_PRODUCER_PRIO,
                "the panel thread must outrank the camera producer: below it, a "

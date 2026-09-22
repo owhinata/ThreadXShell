@@ -85,7 +85,7 @@
  * reports over 150 KB of DTCM gap.  Shrink this when a run that restarts has
  * been measured, not before.
  */
-#define CAM_PRODUCER_STACK  8192u
+#define CAM_PRODUCER_STACK  CAM_PRODUCER_STACK_BYTES   /* camera.h (#119) */
 
 /*
  * These stay in this PORT and not in shell/include/cli_config.h.  That header is
@@ -97,8 +97,10 @@
  *
  * What the shared header IS the authority on is where this thread has to sit
  * relative to the console, so that is asserted against it rather than restated.
- * The stack stays private to this file; only the priority is exported, because
- * only the priority is part of a relationship another file has to honour.
+ * Both numbers are exported through camera.h, because each is part of a
+ * relationship another file has to honour: the priority orders the panel thread
+ * (issue #57), and the stack bounds what a plugin's decode() may be lent here
+ * (issue #119).  The array and the thread stay private to this file.
  */
 _Static_assert(CAM_PRODUCER_PRIO < CLI_INSTANCE_PRIORITY,
                "the camera producer must outrank the console: at or below it, "

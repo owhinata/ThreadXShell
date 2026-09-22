@@ -1663,9 +1663,12 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
                     --link-addr "${WIO_PLUGIN_BASE}"
                     --capacity "${WIO_PLUGIN_MAX}"
                     # The firmware's own policy, from the same variables it
-                    # compiles in.
-                    --policy-stack "0=${WIO_PLUGIN_STACK_NN_WORK}"
-                    --policy-stack "1=${WIO_PLUGIN_STACK_NN_WORK}"
+                    # compiles in -- and slot for slot the SAME mapping, which
+                    # until issue #119 it was not: entry and shapes_ok said
+                    # NN_WORK here and SHELL in nn_svc_wio.c.  Both are 1,024,
+                    # so nothing a container carried could tell them apart.
+                    --policy-stack "0=${WIO_PLUGIN_STACK_SHELL}"
+                    --policy-stack "1=${WIO_PLUGIN_STACK_SHELL}"
                     --policy-stack "2=${WIO_PLUGIN_STACK_NN_WORK}"
                     --policy-stack "3=${WIO_PLUGIN_STACK_PREVIEW}"
                     --policy-stack "4=${WIO_PLUGIN_STACK_SHELL}"

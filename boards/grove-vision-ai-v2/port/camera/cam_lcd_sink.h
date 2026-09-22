@@ -66,6 +66,17 @@ struct cam_lcd_overlay {
 };
 
 /**
+ * The panel thread's stack, in DTCM.  See cam_lcd_sink.c for how the number was
+ * chosen; the array and the TX_THREAD stay there.
+ *
+ * Published since issue #119 because a plugin's draw() runs on this thread, and
+ * the plugin policy (port/npu/nn_plugin_stack.h) asserts draw's allowance
+ * strictly below it -- an allowance equal to the whole stack is a check that
+ * cannot fire (issue #103).
+ */
+#define CAM_PANEL_STACK_BYTES 2048u
+
+/**
  * @brief  Create the panel thread and its ThreadX objects (issue #57).
  *
  * Call from tx_application_define(), next to lcd_create_objects() and

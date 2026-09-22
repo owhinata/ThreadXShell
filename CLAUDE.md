@@ -90,7 +90,8 @@ code** で、ゲートが証明するのはスタック上限だけ（**メモ�
 - **オフセット → アドレスの変換は `plugin_run_slot()` の 1 箇所**で、**実行前に MPU を読み戻して
   fail-closed**（純関数・ホストテスト必須）。**窓を守る新しい機構は作らない**。
 - **上限は実測から導出する。超えられない上限は上限ではない。導出値 0 は「未測定」ではない**
-  （absent の綴りは slot 側で、`stack_limit == 0` の拒否は明示的に書く）。
+  （absent の綴りは slot 側で、`stack_limit == 0` の拒否は明示的に書く）。**許容値は slot に到達しうる
+  全スレッドの最も浅い天井に対して宣言し、深さは callback 入口で測る**（表はボード、深さの正は README）。
 - **[!] ファームは古い宣言を見分けられない** — veneer コストを変えたら既存 container は pack し直す。
 - **plugin のビルド規則は共有**（`cmake/add_plugin.cmake`）で**ボードは自分の事実だけを引数で渡す**。
   **owned source root は helper が導出する**（受け取る形自体が fail-open）。**リンク入力も列挙する**
@@ -243,8 +244,7 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
   （param・admission・load/unload も）。**リース保持は「描いてよい」ではない**。
 - **report は snapshot と同じ保護区間で採取し、バッファは呼び出し側のフレーム**。**長さは状態ではない**。
 - **painter は全部 CPU**（DMA2D に静止を確かめる機構が無い）。**輪郭は書く画素数で課金する**。
-- **スタックは 2 つの量**（呼び出し地点の空き / veneer の下のファーム側）で、後者は**実測して導出する**。
-  **どのスレッドで呼ばれるかを間違えない**。足りなければスレッドを広げ、深さプローブは呼び出し地点に。
+- **スタックは 2 つの量**（入口の空き / veneer の下）で後者は**実測して導出**。不足ならスレッドを広げる。
 - **`nn info` の claim は開いているモデルに従い**、reload 後の状態は `nn_model_reload()` の戻り値で
   決める（無ロックの `nn info` が別コンソールから呼ぶので後から問い合わせない）。
 - リファレンス: RM0468 / PM0253 / 基板 schematic（`_ref/wio-lite-ai/`、read-only）。

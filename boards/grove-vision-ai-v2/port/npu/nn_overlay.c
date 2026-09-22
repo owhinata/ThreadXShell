@@ -92,23 +92,14 @@ static int           nn_ov_ndet;
 static struct nn_preproc_geom nn_ov_geom;
 
 /*
- * How deep the stack already is at the instant a decoder is CALLED (issue #103).
- *
- * [!] THIS IS NOT THE THREAD'S PEAK, AND THE DIFFERENCE IS THE WHOLE REASON IT
- * EXISTS.  `thread` reports a peak by scanning ThreadX's 0xEF fill: the deepest
- * the thread ever got, anywhere on any path.  What a plugin admission policy
- * needs is how much is ALREADY SPENT at the one instant a plugin is entered,
- * because what it may have is the rest.  Issue #101 wrote `2048 - 544` as if the
- * peak answered that question; it does not, and this is the measurement that
- * does.
- *
- * Taken at the resident decoder's call sites, which are exactly the sites a
- * plugin will occupy in Step 1b -- so the number is about the PLACE, not about
- * whoever is standing in it, and it is worth having before the plugin exists.
- *
- * The address of a local is used rather than __get_PSP(): in Thread mode SP is
- * PSP, and a local sits within a few bytes of it without assuming which stack
- * pointer the compiler kept anything in.
+ * [!] THE STACK PROBE THAT STOOD HERE MOVED TO THE PLUGIN'S ENTRY (issue #119).
+ * It was taken at this file's two call sites -- before nn_active_decode() and
+ * nn_active_draw() -- so the frame nn_active_decode() builds before it calls
+ * through was never in it, and the number read as the depth a plugin is entered
+ * at was short of it.  It also saw only the producer and the panel, while the
+ * same decode runs on a shell thread for `nn run` and `nn dets`.  The probe is
+ * now in nn_active.c, beside each indirect call, one record per slot and per
+ * thread (nn_probe.h).
  */
 /*
  * What one plugin draw() may spend, and why these numbers.
@@ -145,33 +136,6 @@ static struct nn_preproc_geom nn_ov_geom;
 
 static uint32_t nn_ov_draw_spent;     /* high-water, pixels charged  */
 static uint32_t nn_ov_draw_refused;   /* primitives refused for want */
-
-static uint32_t nn_ov_depth_decode;   /* high-water, producer thread */
-static uint32_t nn_ov_depth_draw;     /* high-water, panel thread    */
-
-static void nn_ov_note_depth(uint32_t *hw)
-{
-	TX_THREAD *t = tx_thread_identify();
-	uint8_t    here;
-	uintptr_t  sp = (uintptr_t)&here;
-	uintptr_t  lo, hi;
-	uint32_t   used;
-
-	if (t == NULL)
-		return;                     /* not on a thread; nothing to say */
-	lo = (uintptr_t)t->tx_thread_stack_start;
-	hi = lo + (uintptr_t)t->tx_thread_stack_size;
-	if (sp < lo || sp > hi)
-		return;                     /* not this thread's stack after all */
-
-	used = (uint32_t)(hi - sp);
-	if (used > *hw)
-		*hw = used;
-	/* One writer per site -- process() only ever runs on the producer and
-	 * draw() only on the panel thread, and the pipeline's one-outstanding-frame
-	 * rule keeps even those two from overlapping.  A reader may see a stale
-	 * value; it cannot see a torn one, because a u32 store is atomic here. */
-}
 
 static int nn_overlay_process(void *ctx, const void *pixels,
                               uint16_t w, uint16_t h)
@@ -283,10 +247,6 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	t1 = (uint32_t)tx_time_get();
 	e2 = tx_glue_epk_timer_ticks();
 
-	/* The producer's call site.  Recorded BEFORE the call, so the number is the
-	 * depth a callee inherits rather than the depth including it. */
-	nn_ov_note_depth(&nn_ov_depth_decode);
-
 	nd = nn_active_decode(outs, n_out);
 	if (nd < 0) {
 		/* [!] There is no console on this path, so the only way a decode
@@ -329,10 +289,6 @@ static void nn_overlay_draw(void *ctx, uint16_t *fb, uint16_t fb_w,
                             uint16_t fb_h)
 {
 	(void)ctx;
-
-	/* The panel thread's call site -- the tight one.  This is the number the
-	 * draw allowance is computed from. */
-	nn_ov_note_depth(&nn_ov_depth_draw);
 
 	/*
 	 * The plugin paints its own result (issue #103), because the firmware does
@@ -479,6 +435,4 @@ void nn_overlay_stats(struct nn_overlay_stats *out)
 	out->prep_us     = out->prof_ok ? nn_ov_us(prep,   hz) : 0u;
 	out->invoke_us   = out->prof_ok ? nn_ov_us(invoke, hz) : 0u;
 	out->decode_us   = out->prof_ok ? nn_ov_us(decode, hz) : 0u;
-	out->depth_decode  = nn_ov_depth_decode;
-	out->depth_draw    = nn_ov_depth_draw;
 }

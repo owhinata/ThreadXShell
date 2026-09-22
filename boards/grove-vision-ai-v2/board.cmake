@@ -430,6 +430,11 @@ set(SHELL_SOURCES
     "${BOARD_DIR}/port/plugin/plugin_paint.c"
     # The one place that decides which decoder is in force (issue #103).
     "${BOARD_DIR}/port/npu/nn_active.c"
+    # The stack depth where each plugin callback is entered, per slot and per
+    # thread (issue #119): the pure half has a host test, the other half is
+    # what only the board can do -- ask ThreadX who is running.
+    "${BOARD_DIR}/port/npu/nn_probe.c"
+    "${BOARD_DIR}/port/npu/nn_probe_rtos.c"
     # Camera frame ring (issue #35).  Freestanding: it depends on <stdint.h>
     # and an injected lock vtable only, which is why the same file serves all
     # three boards and has a host unit test (shell/test/test_frame_pipeline.c).
@@ -1678,35 +1683,28 @@ add_custom_target(flash
 #                      [ thread stack - depth at the plugin's entry
 #                                     - the asynchronous reserve - margin ]
 #
-# The depth is measured on hardware and reported by `nn stream stats`; the
-# reserve is 208 B, derived rather than measured (at most one hardware exception
-# frame lands on a thread's PSP -- nested and tail-chained exceptions run in
-# Handler mode on MSP -- which is 104 B extended plus 4 B alignment now that
-# FPCCR.TS is enforced to zero, plus ThreadX's own 100 B PendSV save, which can
-# coexist with it while a callback is suspended).
+# The depth is taken at the plugin's entry and has two sources, which have to
+# agree: `nn stream stats` prints the high-water per slot and per thread from the
+# probe beside each indirect call (port/npu/nn_probe.h), and the same depth is
+# the sum of the frames on the deepest call path in the final ELF.  The board
+# README carries both (issue #119).  The reserve is 208 B, derived rather than
+# measured (at most one hardware exception frame lands on a thread's PSP --
+# nested and tail-chained exceptions run in Handler mode on MSP -- which is 104 B
+# extended plus 4 B alignment now that FPCCR.TS is enforced to zero, plus
+# ThreadX's own 100 B PendSV save, which can coexist with it while a callback is
+# suspended).
 #
 # Which thread each slot runs on is the table in port/npu/nn_plugin_stack.h,
 # where the firmware also asserts every allowance below each of those stacks:
 # the shell's (a console, or a background job) for every slot but draw, the
 # producer's as well for decode, the panel's for draw.
 #
-#   producer  8192 - 553 - 208 = 7431 available
-#   panel     2048 - 217 - 208 = 1623 available
-#   shell     4096 - (not measured yet) - 208
-#
-# [!] THOSE TWO DEPTHS ARE NOT THE DEPTH AT THE PLUGIN'S ENTRY.  They were taken
-# in nn_overlay.c, before the call into nn_active_*(), so the frame that
-# function builds before it calls through is not in them -- and the shell has
-# no probe at all.  Issue #119 moves the probe to the entry itself; until those
-# figures are in the board README, the right-hand column is not a derivation.
-#
-# [!] RE-MEASURED FOR ISSUE #104, AND THE TWO EARLIER RECORDS DISAGREED.  This
-# comment said 233 B at the panel call site and the board README said 249 B for
-# the same one, so one of them had been wrong since issue #103 -- and the
-# allowances are derived from it.  Both are superseded by 553 / 217, measured on
-# hardware with this build.  The frames got SMALLER because #104 shrank them:
-# nn_active_decode() lost three parameters and the overlay lost the locals that
-# went with its resident draw path.
+# [!] UNTIL ISSUE #119 THE DEPTH WAS TAKEN IN THE WRONG PLACE AND ON TWO THREADS.
+# The probe sat in nn_overlay.c, before the call into nn_active_*(), so the frame
+# that function builds before it calls through -- the tensor descriptors -- was
+# not in the number, and nothing measured the shell thread, where decode also
+# runs and where the deepest path is.  The 553 / 217 B figures of issue #104
+# were of that probe and are not depths at a plugin's entry.
 #
 # [!] TWO OF THE PROVISIONAL VALUES WERE ABOVE THE CEILING, not merely generous.
 # PRODUCER was 8192 -- the whole thread stack -- and SHELL was 4096, likewise.

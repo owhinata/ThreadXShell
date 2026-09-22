@@ -77,6 +77,17 @@ struct cam_lcd_overlay {
 #define CAM_PANEL_STACK_BYTES 2048u
 
 /**
+ * The panel thread's ThreadX priority.  Why it sits where it does, and the
+ * asserts that keep it there, are in cam_lcd_sink.c.
+ *
+ * Published since issue #119 for the same reason as the stack above: the plugin
+ * stack probe (port/npu/nn_probe_rtos.c) recognises this thread by the priority
+ * it was created with and the size of its stack, and cannot recognise it by a
+ * number it cannot see.
+ */
+#define CAM_PANEL_PRIO 9u
+
+/**
  * @brief  Create the panel thread and its ThreadX objects (issue #57).
  *
  * Call from tx_application_define(), next to lcd_create_objects() and

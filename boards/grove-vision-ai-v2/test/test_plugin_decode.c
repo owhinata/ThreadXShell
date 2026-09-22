@@ -57,6 +57,7 @@
 #include "nn_active.h"
 #include "npu_desc.h"
 #include "nn_preproc.h"
+#include "nn_probe.h"
 #include "plugin_run.h"
 
 #include <stdarg.h>
@@ -98,6 +99,48 @@ void *plugin_run_slot(unsigned slot)
 	if (!pl_loaded || slot >= (unsigned)PLUGIN_SLOT_COUNT)
 		return NULL;
 	return (void *)(uintptr_t)plugin_slot_table[slot];
+}
+
+/*
+ * The stack probe (issue #119).  On the board this is nn_probe_rtos.c, which asks
+ * ThreadX what is running; here it counts, per slot, so the file can check that
+ * the shim takes a sample before each indirect call it makes -- and none when it
+ * calls nothing, because a sample of a call that did not happen is a depth
+ * nobody was ever at.
+ */
+static unsigned probe_notes[PLUGIN_SLOT_COUNT];
+
+void nn_probe_note(unsigned slot, uintptr_t sp, uint32_t extra)
+{
+	(void)sp;
+	(void)extra;
+	if (slot < (unsigned)PLUGIN_SLOT_COUNT)
+		probe_notes[slot]++;
+}
+
+static void probe_reset(void)
+{
+	memset(probe_notes, 0, sizeof probe_notes);
+}
+
+/* Exactly one note, for `slot`, since the last reset. */
+static int probe_only(unsigned slot)
+{
+	unsigned i;
+
+	for (i = 0u; i < (unsigned)PLUGIN_SLOT_COUNT; i++)
+		if (probe_notes[i] != (i == slot ? 1u : 0u))
+			return 0;
+	return 1;
+}
+
+static unsigned probe_total(void)
+{
+	unsigned i, n = 0u;
+
+	for (i = 0u; i < (unsigned)PLUGIN_SLOT_COUNT; i++)
+		n += probe_notes[i];
+	return n;
 }
 
 /* ---- reporting ------------------------------------------------------------ */
@@ -439,6 +482,7 @@ int main(void)
 	 * from outside.  It is checked precisely because it is unreachable.
 	 */
 	pl_loaded = 0;
+	probe_reset();
 	reset_tensors();
 	put_the_scene();
 	publish_geom();
@@ -477,6 +521,8 @@ int main(void)
 	expect("and setting one is refused as a state, not as a bad value",
 	       nn_active_set_thresh_milli(700u) == NN_ACTIVE_THRESH_NO_DECODER,
 	       "got %d", nn_active_set_thresh_milli(700u));
+	expect("[!] and with nothing entered, no stack sample was taken (#119)",
+	       probe_total() == 0u, "%u sample(s)", probe_total());
 
 	/* Keep the reference for the differential section below, decoded at the
 	 * DEFAULT threshold and with the geometry published. */
@@ -531,20 +577,29 @@ int main(void)
 	 * carries -- if a box array ever comes back, this says what it may not do.
 	 */
 	poison_out();
+	probe_reset();
 	n = nn_active_decode(tens, 4);
 	expect("the plugin decode returns the same count as the reference",
 	       n == ref_n, "plugin %d, reference %d", n, ref_n);
 	expect("[!] and nothing wrote the caller's boxes or diagnostics",
 	       out_still_poisoned(), "something filled them in");
+	expect("a decode took one stack sample, for decode (#119)",
+	       probe_only(PLUGIN_SLOT_DECODE), "%u sample(s)", probe_total());
 
+	probe_reset();
 	expect("shapes_ok goes to the plugin and agrees",
 	       nn_active_shapes_ok(tens, 4) != 0, "the plugin refused the tensors");
+	expect("and took one stack sample, for shapes_ok",
+	       probe_only(PLUGIN_SLOT_SHAPES_OK), "%u sample(s)", probe_total());
 
 	/* ================================================================
 	 * 4.  Differential: the plugin's boxes, through draw()
 	 * ================================================================ */
 	rec_reset();
+	probe_reset();
 	nn_active_draw(&rec_painter);
+	expect("a draw took one stack sample, for draw",
+	       probe_only(PLUGIN_SLOT_DRAW), "%u sample(s)", probe_total());
 	/* [!] AND ONE SCORE CHIP PER DETECTION SINCE ISSUE #105.  The chip is
 	 * rasterised on the producer during decode() and handed over here as a
 	 * single blit, which is the split the panel guard demands: draw() does no
@@ -627,6 +682,18 @@ int main(void)
 	       nn_active_set_thresh_milli(800u) == NN_ACTIVE_THRESH_OK, "refused");
 	expect("and reads it back", nn_active_get_thresh_milli() == 800u,
 	       "got %u", nn_active_get_thresh_milli());
+	probe_reset();
+	(void)nn_active_set_thresh_milli(800u);
+	expect("a threshold set took one stack sample, for param_set",
+	       probe_only(PLUGIN_SLOT_PARAM_SET), "%u sample(s)", probe_total());
+	probe_reset();
+	(void)nn_active_get_thresh_milli();
+	expect("a threshold read took one stack sample, for param_get",
+	       probe_only(PLUGIN_SLOT_PARAM_GET), "%u sample(s)", probe_total());
+	probe_reset();
+	(void)nn_active_report(cap_write, NULL);
+	expect("a report took one stack sample, for report",
+	       probe_only(PLUGIN_SLOT_REPORT), "%u sample(s)", probe_total());
 	expect("[!] while the reference decoder's threshold has not moved",
 	       blazeface_get_thresh_milli(&ref_bf) == ref_thresh,
 	       "reference is now %u -- the shim wrote somewhere unexpected",

@@ -47,6 +47,7 @@
 #include "npu_desc.h"
 #include "nn_active.h"
 #include "nn_overlay.h"
+#include "nn_plugin_stack.h"  /* after camera.h and cam_lcd_sink.h (#119) */
 #include "nn_preproc.h"
 #include "nn_stream_state.h"
 #include "nor_flash.h"    /* NOR_XIP_BASE */
@@ -403,13 +404,12 @@ static int nn_scan_slots(struct nn_op_result *res, uint32_t token,
  * address, so the reservation, the target identity and what each thread can
  * spare arrive from here.
  *
- * [!] THE STACK LIMITS ARE PROVISIONAL.  They are what a thread has, minus
- * nothing: the depth at the point a callback is CALLED and the reserve for
- * exception frames -- which Cortex-M stacks on the thread's own PSP, 32 B or
- * 104 B once the FP context goes -- are not measured yet.  Step 1b measures
- * them and sets the admission policy.  1a only ever validates; it never calls
- * through any of these, so a number that is too generous here cannot yet do
- * harm.  It must not be inherited unexamined when it can.
+ * [!] THE STACK LIMITS ARE nn_plugin_stack.h's, slot by slot (issue #119).  That
+ * header says which thread each slot runs on and asserts every allowance below
+ * each of those threads' stacks; it is a header so that the host test compiles
+ * the same asserts and the same table this initialiser uses.  Until #119 three
+ * slots were declared against the producer's figure while running on a shell
+ * stack the same size as the allowance.
  */
 /*
  * [!] EVERY NUMBER COMES FROM THE BUILD, NOT FROM HERE.  The host sender runs
@@ -455,15 +455,7 @@ static const struct plugin_policy nn_plugin_policy = {
 	.capacity       = GROVE_PLUGIN_MAX,
 	.image_align    = PLUGIN_IMAGE_ALIGN,
 	.caps_supported = PLUGIN_CAP_KNOWN_MASK,
-	.stack_limit    = {
-		[PLUGIN_SLOT_ENTRY]     = GROVE_PLUGIN_STACK_PRODUCER,
-		[PLUGIN_SLOT_SHAPES_OK] = GROVE_PLUGIN_STACK_PRODUCER,
-		[PLUGIN_SLOT_DECODE]    = GROVE_PLUGIN_STACK_PRODUCER,
-		[PLUGIN_SLOT_DRAW]      = GROVE_PLUGIN_STACK_PANEL,
-		[PLUGIN_SLOT_REPORT]    = GROVE_PLUGIN_STACK_SHELL,
-		[PLUGIN_SLOT_PARAM_SET] = GROVE_PLUGIN_STACK_SHELL,
-		[PLUGIN_SLOT_PARAM_GET] = GROVE_PLUGIN_STACK_SHELL,
-	},
+	.stack_limit    = GROVE_PLUGIN_STACK_LIMITS,   /* nn_plugin_stack.h */
 };
 
 /*

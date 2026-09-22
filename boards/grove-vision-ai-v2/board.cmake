@@ -1564,9 +1564,9 @@ function(grove_add_asset _name)
                 --capacity "${GROVE_PLUGIN_MAX}"
                 # The firmware's own policy, from the same variables it compiles
                 # in -- written out again here and the two could disagree.
-                --policy-stack "0=${GROVE_PLUGIN_STACK_PRODUCER}"
-                --policy-stack "1=${GROVE_PLUGIN_STACK_PRODUCER}"
-                --policy-stack "2=${GROVE_PLUGIN_STACK_PRODUCER}"
+                --policy-stack "0=${GROVE_PLUGIN_STACK_SHELL}"
+                --policy-stack "1=${GROVE_PLUGIN_STACK_SHELL}"
+                --policy-stack "2=${GROVE_PLUGIN_STACK_SHELL}"
                 --policy-stack "3=${GROVE_PLUGIN_STACK_PANEL}"
                 --policy-stack "4=${GROVE_PLUGIN_STACK_SHELL}"
                 --policy-stack "5=${GROVE_PLUGIN_STACK_SHELL}"
@@ -1671,11 +1671,12 @@ add_custom_target(flash
 # [!] AND svc/blazeface.c IS THE SAME FILE THE OTHER TWO BOARDS LINK.  Compiling
 # a copy would fork the decoder issue #97 spent itself merging.  It is the
 # wrapper that is new, not the arithmetic.
-# What each thread may lend a plugin callback (issue #103).  DERIVED, not
-# guessed any more:
+# What each thread may lend a plugin callback (issue #103), slot by slot since
+# issue #119.  DERIVED, not guessed:
 #
-#   allowance = thread stack - depth already spent at the call site
-#                            - the asynchronous reserve - margin
+#   allowance(slot) <= min over every path that reaches the slot of
+#                      [ thread stack - depth at the plugin's entry
+#                                     - the asynchronous reserve - margin ]
 #
 # The depth is measured on hardware and reported by `nn stream stats`; the
 # reserve is 208 B, derived rather than measured (at most one hardware exception
@@ -1684,9 +1685,20 @@ add_custom_target(flash
 # FPCCR.TS is enforced to zero, plus ThreadX's own 100 B PendSV save, which can
 # coexist with it while a callback is suspended).
 #
-#   producer  8192 - 553 - 208 = 7431 available   (plugin decode measures 192 B)
-#   panel     2048 - 217 - 208 = 1623 available   (plugin draw   measures 300 B)
-#   shell     4096 - (not measured) - 208
+# Which thread each slot runs on is the table in port/npu/nn_plugin_stack.h,
+# where the firmware also asserts every allowance below each of those stacks:
+# the shell's (a console, or a background job) for every slot but draw, the
+# producer's as well for decode, the panel's for draw.
+#
+#   producer  8192 - 553 - 208 = 7431 available
+#   panel     2048 - 217 - 208 = 1623 available
+#   shell     4096 - (not measured yet) - 208
+#
+# [!] THOSE TWO DEPTHS ARE NOT THE DEPTH AT THE PLUGIN'S ENTRY.  They were taken
+# in nn_overlay.c, before the call into nn_active_*(), so the frame that
+# function builds before it calls through is not in them -- and the shell has
+# no probe at all.  Issue #119 moves the probe to the entry itself; until those
+# figures are in the board README, the right-hand column is not a derivation.
 #
 # [!] RE-MEASURED FOR ISSUE #104, AND THE TWO EARLIER RECORDS DISAGREED.  This
 # comment said 233 B at the panel call site and the board README said 249 B for
@@ -1702,11 +1714,17 @@ add_custom_target(flash
 # the check could not fire for the case it exists to catch.  That is worse than
 # a wrong number, because a limit that cannot be exceeded is not a limit.
 #
-# The panel figure keeps 583 B of the 1607 as margin, because 233 B is a
-# high-water over the paths that were exercised and the panel thread serves more
-# than the overlay.  The shell figure stays conservative because its call site is
-# not instrumented yet; the shim of implementation step 7 adds it.
-set(GROVE_PLUGIN_STACK_PRODUCER 4096)
+# [!] AND THREE SLOTS WERE DECLARED AGAINST THE WRONG THREAD (issue #119).  After
+# #104, entry, shapes_ok and decode took PRODUCER = 4096 -- half the producer's
+# stack, and ALL of the 4,096 B shell stack each of them is also called on.  The
+# same shape one level up: a limit on another thread's stack is not a limit.
+# PRODUCER is gone.  No slot runs on the producer alone, and a slot reached from
+# two threads is declared against the shallower of them.
+#
+# Both allowances stay 1,024 B.  That is what the shipped containers were packed
+# against, and the firmware cannot tell a stale declaration from a current one,
+# so changing either means re-packing and re-sending every container.  The
+# depths are there to show that 1,024 FITS the rule above.
 set(GROVE_PLUGIN_STACK_PANEL    1024)
 set(GROVE_PLUGIN_STACK_SHELL    1024)
 
@@ -1852,9 +1870,9 @@ add_plugin(blazeface
     OUT_VAR GROVE_PLUGIN_ELFS
     SOURCES "${GROVE_SHARED_DECODER}"
     AUDIT_SHARED "${GROVE_SHARED_DECODER}"
-    ENTRIES pl_entry=${GROVE_PLUGIN_STACK_PRODUCER}
-            pl_shapes_ok=${GROVE_PLUGIN_STACK_PRODUCER}
-            pl_decode=${GROVE_PLUGIN_STACK_PRODUCER}
+    ENTRIES pl_entry=${GROVE_PLUGIN_STACK_SHELL}
+            pl_shapes_ok=${GROVE_PLUGIN_STACK_SHELL}
+            pl_decode=${GROVE_PLUGIN_STACK_SHELL}
             pl_draw=${GROVE_PLUGIN_STACK_PANEL}
             pl_report=${GROVE_PLUGIN_STACK_SHELL}
             pl_param_set=${GROVE_PLUGIN_STACK_SHELL}
@@ -1876,9 +1894,9 @@ add_plugin(cifar10
     TARGET_ID  ${GROVE_PLUGIN_TARGET_ID}
     OUT_DIR "${CMAKE_BINARY_DIR}/plugin"
     OUT_VAR GROVE_PLUGIN_ELFS
-    ENTRIES pl_entry=${GROVE_PLUGIN_STACK_PRODUCER}
-            pl_shapes_ok=${GROVE_PLUGIN_STACK_PRODUCER}
-            pl_decode=${GROVE_PLUGIN_STACK_PRODUCER}
+    ENTRIES pl_entry=${GROVE_PLUGIN_STACK_SHELL}
+            pl_shapes_ok=${GROVE_PLUGIN_STACK_SHELL}
+            pl_decode=${GROVE_PLUGIN_STACK_SHELL}
             pl_draw=${GROVE_PLUGIN_STACK_PANEL}
             pl_report=${GROVE_PLUGIN_STACK_SHELL}
             pl_sbuf_write=${GROVE_PLUGIN_SBUF_WRITE_MAX})
@@ -1931,7 +1949,6 @@ target_compile_definitions(shell_objs PRIVATE
     GROVE_PLUGIN_TARGET_ID=${GROVE_PLUGIN_TARGET_ID}
     GROVE_PLUGIN_BASE=${GROVE_PLUGIN_BASE}u
     GROVE_PLUGIN_MAX=${GROVE_PLUGIN_MAX}u
-    GROVE_PLUGIN_STACK_PRODUCER=${GROVE_PLUGIN_STACK_PRODUCER}u
     GROVE_PLUGIN_STACK_PANEL=${GROVE_PLUGIN_STACK_PANEL}u
     GROVE_PLUGIN_STACK_SHELL=${GROVE_PLUGIN_STACK_SHELL}u)
 

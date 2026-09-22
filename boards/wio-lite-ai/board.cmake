@@ -1410,6 +1410,31 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # would still pass, which is the shape of the mistake this replaces.
     set(WIO_PLUGIN_VENEER_BASE_COST 640)
 
+    # The firmware side of that charge (issue #112): the build derives the
+    # stack below each veneer from the shipped LTO image and refuses a
+    # declaration under it, and `dfu-shell` / `flash` and every container's
+    # pack wait for that to pass.  What is stated here is this board's: the
+    # function it binds behind each veneer (nn_plugin_base, plugin_paint_bind()),
+    # the charge -- the SAME variable every add_plugin() below is given -- and
+    # where the toolchain's archives live.  What gets -fstack-usage, the LTO
+    # partition records included, is derived by the helper; the boot reference
+    # build is not one of the firmware's link inputs and is never touched.
+    get_filename_component(_wio_gcc_bin "${CMAKE_C_COMPILER}" DIRECTORY)
+    get_filename_component(WIO_TOOLCHAIN_ROOT "${_wio_gcc_bin}" DIRECTORY)
+    include("${CMAKE_SOURCE_DIR}/cmake/veneer_cost_gate.cmake")
+    veneer_cost_gate(
+        FIRMWARE shell
+        MAP      "${CMAKE_BINARY_DIR}/shell.map"
+        DECLARED ${WIO_PLUGIN_VENEER_BASE_COST}
+        ROOTS    pl_base_log=nn_plugin_log
+                 pl_base_to_frame=nn_active_to_frame
+                 pl_paint_rect=paint_rect
+                 pl_paint_fill_rect=paint_fill_rect
+                 pl_paint_blit=paint_blit
+                 pl_print_write=nn_report_write
+        PREBUILT_ROOTS "${WIO_TOOLCHAIN_ROOT}"
+        DELIVERY dfu-shell flash)
+
     set(WIO_PLUGIN_COMMON "${CMAKE_SOURCE_DIR}/asset/common")
     set(WIO_PLUGIN_MEMORY_LD "${BOARD_DIR}/ldscript/plugin_memory.ld")
     # The firmware's own architecture, and only that -- add_plugin() owns what
@@ -1647,6 +1672,11 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
 
         set(_plugin_dir "${CMAKE_BINARY_DIR}/plugin/${A_PLUGIN}")
         set(_nnc "${WIO_ASSET_DIR}/${_name}.nnc")
+        get_property(_veneer_gate GLOBAL PROPERTY VENEER_GATE_TARGET)
+        if(NOT _veneer_gate)
+            message(FATAL_ERROR
+                "wio_add_asset(${_name}): no veneer_cost_gate() registered")
+        endif()
         add_custom_command(
             OUTPUT "${_nnc}"
             COMMAND "${CMAKE_COMMAND}" -E env
@@ -1682,6 +1712,9 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
                     "${WIO_CONTAINER_VERIFIER}" "${WIO_SLOT_TABLE_JSON}"
                     "${CMAKE_SOURCE_DIR}/cmake/build_asset.py"
                     ${WIO_MODEL_VERIFIER}
+                    # [!] No container is packed before the firmware passes
+                    # its veneer-cost check (issue #112) -- even built by path.
+                    ${_veneer_gate}
             COMMENT "asset ${_name}: pack, verify what was packed, publish"
             VERBATIM)
 

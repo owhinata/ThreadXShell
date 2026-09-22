@@ -384,6 +384,9 @@ python3 "$repo/cmake/fixtures/run_storage_gate_tests.py" \
 # Leaving one out must fail at CONFIGURE rather than inherit another board's
 # value, so the refusal itself is tested, through a real `cmake` over the real
 # helper.  Needs cmake only -- no toolchain -- which is why it runs here.
+# Since #112 the same configure also registers the firmware-side veneer cost
+# gate (add_plugin() refuses without it) against a dummy executable, so it
+# needs the host C compiler too -- still no cross toolchain.
 python3 "$repo/cmake/fixtures/run_add_plugin_arg_tests.py"
 
 # issue #97 -- the published decode record (svc/nn_det_record.c).  A camera stream

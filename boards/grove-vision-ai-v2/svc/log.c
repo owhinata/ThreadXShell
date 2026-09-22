@@ -34,6 +34,13 @@
  * call), so thread, ISR and fault context all share it safely.  Formatting
  * into a stack buffer happens before the section.
  *
+ * [!] ONE APPEND, TWO WAYS IN (issue #112).  log_write()/log_vwrite() format
+ * their text; log_write_bytes() takes it as a length-delimited run of bytes
+ * and never touches the formatter.  Both end in log_append(), the only code
+ * that writes a record -- eviction, the SKIP on wrap, NUL and padding, seq
+ * before head, and the read-back order exist once, so the two ways in cannot
+ * drift apart.
+ *
  * Clean-room: concept from NuttX ramlog / Zephyr logging; no code reused.
  */
 #include "log.h"
@@ -152,8 +159,19 @@ static uint16_t rec_total_at(uint32_t off)
 
 typedef uint32_t log_word_t __attribute__((may_alias));
 
+/* The host test's tap on every read-back (test/test_log.c), so that WHERE the
+ * read-backs happen relative to the head commit can be asserted -- a volatile
+ * load is otherwise invisible off the board.  Compiled out of the firmware. */
+#ifdef LOG_HOST_TEST
+void log_test_persist(const void *addr, uint32_t len);
+#define LOG_PERSIST_TAP(a, l) log_test_persist((a), (l))
+#else
+#define LOG_PERSIST_TAP(a, l) ((void)0)
+#endif
+
 static void persist_words(const void *addr, uint32_t len)
 {
+	LOG_PERSIST_TAP(addr, len);
 	uintptr_t p   = (uintptr_t)addr;
 	uintptr_t end = p + ((len + 3u) & ~(uint32_t)3u);
 	for (; p < end; p += 4u)
@@ -245,17 +263,40 @@ const char *log_reset_cause(void)
 
 /* ---- append ------------------------------------------------------------ */
 
-void log_vwrite(unsigned level, const char *tag, const char *fmt, va_list ap)
+/* One piece of a record's text: @p n bytes at @p p, not necessarily
+ * terminated. */
+struct log_seg {
+	const char *p;
+	uint32_t    n;
+};
+
+/* Clamp @p level and say whether a record at it is kept right now. */
+static int log_admit(unsigned *level)
 {
-	if (level > LOG_LEVEL_DBG)
-		level = LOG_LEVEL_DBG;
-	if (!log_ready || level > log_level)
+	if (*level > LOG_LEVEL_DBG)
+		*level = LOG_LEVEL_DBG;
+	return log_ready && *level <= log_level;
+}
+
+/*
+ * THE append.  Every record -- formatted or given as bytes -- is written here
+ * and nowhere else.  @p seg holds the text in pieces; their total is cut to
+ * LOG_MSG_MAX here too, and the NUL is added here, so no caller has to
+ * terminate anything.  Copying the pieces in is the only work done with
+ * interrupts masked: nothing in this function formats.
+ */
+static void log_append(unsigned level, const char *tag,
+                       const struct log_seg *seg, unsigned nseg)
+{
+	if (!log_admit(&level))
 		return;
 
-	char text[LOG_MSG_MAX + 1];
-	int  n = fmt_vsnformat(text, sizeof text, fmt, ap);
-	uint32_t stored  = (uint32_t)(n < 0 ? 0 : n) + 1u;      /* incl. NUL */
-	uint32_t padded  = (stored + 3u) & ~3u;
+	uint32_t n = 0u;
+	for (unsigned k = 0u; k < nseg; k++)
+		n += seg[k].n <= LOG_MSG_MAX ? seg[k].n : LOG_MSG_MAX;
+	if (n > LOG_MSG_MAX)
+		n = LOG_MSG_MAX;
+	uint32_t padded  = ((n + 1u) + 3u) & ~3u;               /* text + NUL */
 	uint32_t rec_len = LOG_HDR_SIZE + padded;               /* 24..LOG_REC_MAX */
 
 	struct log_rec_hdr h;
@@ -299,11 +340,19 @@ void log_vwrite(unsigned level, const char *tag, const char *fmt, va_list ap)
 		}
 
 		ring_put(g_log.head, &h, LOG_HDR_SIZE);
-		ring_put(g_log.head + LOG_HDR_SIZE, text, stored);
-		if (padded > stored) {
-			static const uint8_t zeros[4] = { 0, 0, 0, 0 };
-			ring_put(g_log.head + LOG_HDR_SIZE + stored, zeros, padded - stored);
+		uint32_t at   = g_log.head + LOG_HDR_SIZE;
+		uint32_t left = n;
+		for (unsigned k = 0u; k < nseg && left; k++) {
+			uint32_t c = seg[k].n < left ? seg[k].n : left;
+			if (c) {
+				ring_put(at, seg[k].p, c);
+				at   += c;
+				left -= c;
+			}
 		}
+		/* The NUL, then the padding to a word: padded - n is 1..4 zeros. */
+		static const uint8_t zeros[4] = { 0, 0, 0, 0 };
+		ring_put(at, zeros, padded - n);
 		/* Bump seq before committing head: a reset between the two then leaves
 		 * a gap in the sequence (the lost record is invisible), never a
 		 * duplicate. */
@@ -319,12 +368,71 @@ void log_vwrite(unsigned level, const char *tag, const char *fmt, va_list ap)
 	LOG_CRIT_EXIT();
 }
 
+void log_vwrite(unsigned level, const char *tag, const char *fmt, va_list ap)
+{
+	/* Admitted first so that a dropped record costs no formatting;
+	 * log_append() asks again, and is the one that decides. */
+	if (!log_admit(&level))
+		return;
+
+	char text[LOG_MSG_MAX + 1];
+	int  n = fmt_vsnformat(text, sizeof text, fmt, ap);
+	struct log_seg seg = { text, (uint32_t)(n < 0 ? 0 : n) };
+	log_append(level, tag, &seg, 1u);
+}
+
 void log_write(unsigned level, const char *tag, const char *fmt, ...)
 {
 	va_list ap;
 	va_start(ap, fmt);
 	log_vwrite(level, tag, fmt, ap);
 	va_end(ap);
+}
+
+/* strnlen() without the libc call: the length of @p s up to @p max, 0 for
+ * NULL.  Here so that the byte path reaches nothing it does not need. */
+static uint32_t log_strnlen(const char *s, uint32_t max)
+{
+	uint32_t i = 0u;
+	if (s == NULL)
+		return 0u;
+	while (i < max && s[i] != '\0')
+		i++;
+	return i;
+}
+
+void log_write_bytes(unsigned level, const char *tag, const char *prefix,
+                     const char *s, size_t len, const char *more)
+{
+	if (!log_admit(&level))
+		return;
+
+	uint32_t pn   = log_strnlen(prefix, LOG_MSG_MAX);
+	uint32_t mn   = log_strnlen(more, LOG_MSG_MAX);
+	uint32_t room = LOG_MSG_MAX - pn;
+	uint32_t take;
+	int      cut  = 0;
+
+	/* [!] THE LENGTH IS CUT BEFORE ANY ARITHMETIC IS DONE WITH IT.  It comes
+	 * from a plugin and can be anything a size_t holds; it is only ever
+	 * compared until it is known to fit. */
+	if (s == NULL)
+		len = 0u;
+	if (len <= room) {
+		take = (uint32_t)len;
+	} else {
+		cut  = 1;
+		take = room > mn ? room - mn : 0u;
+	}
+	/* A NUL inside the bytes ends the text there, as it would a string. */
+	take = log_strnlen(s, take);
+
+	struct log_seg seg[3] = {
+		{ prefix, pn },
+		{ s,      take },
+		{ more,   cut ? mn : 0u },
+	};
+	log_append(level, tag, seg, 3u);
 }
 
 /* ---- query / control --------------------------------------------------- */

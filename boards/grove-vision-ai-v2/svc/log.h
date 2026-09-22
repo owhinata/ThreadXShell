@@ -90,6 +90,19 @@ void log_write(unsigned level, const char *tag, const char *fmt, ...)
 	__attribute__((format(printf, 3, 4)));
 void log_vwrite(unsigned level, const char *tag, const char *fmt, va_list ap);
 
+/**
+ * Append one record whose text is @p prefix, then @p len bytes of @p s, WITHOUT
+ * the formatter (issue #112).  @p s need not be terminated; a NUL inside it
+ * ends the text there.  When @p prefix and the bytes do not fit in LOG_MSG_MAX,
+ * the bytes are cut so that @p more (e.g. " ...") still fits after them, and
+ * @p more is appended.  @p prefix / @p more are terminated strings or NULL.
+ * Same record, same ring discipline and same contexts as log_write(): the two
+ * share one append.  For text that did not come from this firmware -- a
+ * plugin's bytes -- where a format string would be the wrong tool.
+ */
+void log_write_bytes(unsigned level, const char *tag, const char *prefix,
+                     const char *s, size_t len, const char *more);
+
 /** Drop all stored records, keeping the sequence counter (dmesg -c). */
 void log_clear(void);
 

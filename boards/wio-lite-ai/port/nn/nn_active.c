@@ -214,26 +214,27 @@ int nn_active_to_frame(void *ctx, float x, float y, float w, float h,
  * The producer thread has no console, so this is the only way a decode failure
  * can explain itself.
  *
- * [!] COPIED AND TERMINATED, NOT PRINTED WITH A PRECISION.  This said
- * `LOG_INF("plugin: %.*s", (int)len, s)`, and svc/fmt.c implements neither a
- * precision nor `*` -- deliberately, it is a clean-room minimal formatter --
- * so the plugin's explanation came out as the format string plus whatever the
- * varargs were read as.  The bytes a plugin hands over are not NUL-terminated,
- * so they have to be copied somewhere that is.  The buffer is charged to
- * WIO_PLUGIN_VENEER_BASE_COST, which is derived with it included.
+ * [!] THE BYTES GO TO THE LOG WITHOUT THE FORMATTER (issue #112).  The bytes a
+ * plugin hands over are not NUL-terminated.  Until #112 they were copied into a
+ * 64-byte stack buffer and terminated so that "%s" could print them (the
+ * earlier `LOG_INF("plugin: %.*s", ...)` printed the format string instead:
+ * svc/fmt.c implements neither a precision nor `*`).  log_write_bytes() takes
+ * them by length, so they need neither the copy nor the buffer; a text too long
+ * for the record is cut and ends " ...", and an empty or NULL one writes nothing,
+ * as before.  The line is now bounded by the record (LOG_MSG_MAX) rather than by
+ * the buffer.
+ *
+ * It also takes the formatter out from below the log veneer, so what the plugin
+ * veneer charges for is derived by cmake/check_veneer_base_cost.py without an
+ * exception.
  */
 static void nn_plugin_log(void *ctx, const char *s, size_t len)
 {
-	char line[64];
-	size_t n;
-
 	(void)ctx;
 	if (s == NULL || len == 0u)
 		return;
-	n = len < sizeof line - 1u ? len : sizeof line - 1u;
-	memcpy(line, s, n);
-	line[n] = '\0';
-	LOG_INF("plugin: %s%s", line, n < len ? " ..." : "");
+	if (LOG_LEVEL_INF <= LOG_COMPILE_LEVEL)
+		log_write_bytes(LOG_LEVEL_INF, LOG_TAG, "plugin: ", s, len, " ...");
 }
 
 static const struct plugin_base_api nn_plugin_base = {

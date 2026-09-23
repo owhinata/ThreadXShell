@@ -171,6 +171,7 @@ static enum plugin_result check_manifest(const uint8_t *p, uint32_t sect_off,
 	const uint8_t *m = p + sect_off;
 	uint32_t struct_size, target, cap, image_off, file_size, mem_size;
 	uint32_t seg_off[4], seg_len[4];
+	uint32_t crossing, sink, charge;
 	unsigned i, j;
 
 	if (sect_len < sizeof(struct plugin_manifest))
@@ -191,6 +192,25 @@ static enum plugin_result check_manifest(const uint8_t *p, uint32_t sect_off,
 	for (i = 0u; i < 4u; i++)
 		if (rd32(m, offsetof(struct plugin_manifest, reserved) + i * 4u) != 0u)
 			return PLUGIN_ERR_RESERVED;
+
+	/*
+	 * [!] A POLICY WITH NO COST, OR NO ACCOUNTING, IS THE BOARD'S MISTAKE AND IS
+	 * REFUSED AS ONE (issue #111).  A zero c would admit every crossing slot on
+	 * its own frames alone -- the fail-open direction -- and a zero accounting
+	 * version would match a manifest that never set its field.
+	 */
+	if (pol->veneer_cost == 0u || pol->stack_accounting == 0u)
+		return PLUGIN_ERR_ARG;
+
+	/*
+	 * [!] THE ANALYSIS, BEFORE ANY NUMBER IT PRODUCED IS READ.  A declaration
+	 * made under another walk is not "too big" or "too small" -- it is in a unit
+	 * this firmware does not know how to add c to.  Its own refusal, so that an
+	 * operator re-packs rather than hunting for a stack that is fine.
+	 */
+	if (rd32(m, offsetof(struct plugin_manifest, stack_accounting)) !=
+	    pol->stack_accounting)
+		return PLUGIN_ERR_STACK_ACCOUNTING;
 
 	target = rd32(m, offsetof(struct plugin_manifest, target_id));
 	if ((target & PLUGIN_TARGET_RESERVED_MASK) != 0u)
@@ -258,20 +278,40 @@ static enum plugin_result check_manifest(const uint8_t *p, uint32_t sect_off,
 			if (overlaps(seg_off[i], seg_len[i], seg_off[j], seg_len[j]))
 				return PLUGIN_ERR_SEG_OVERLAP;
 
+	/*
+	 * The stack declaration (ABI 2, issue #111): per slot, the plugin's own
+	 * deepest frames A0 and its own frames at a crossing A1, a crossing bit, and
+	 * one sink bound S for the whole plugin.  None of it contains the firmware's
+	 * veneer cost; the charge at a crossing is this policy's c, or S when the
+	 * plugin's own sink is the deeper thing on the far side of the printer
+	 * veneer.  Uniform over every veneer, as the gate charged it.
+	 */
+	crossing = rd32(m, offsetof(struct plugin_manifest, stack_crossing));
+	sink     = rd32(m, offsetof(struct plugin_manifest, stack_sink));
+	/* Bits for slots that do not exist are reserved, like any other. */
+	if ((crossing >> (PLUGIN_SLOT_COUNT - 1u) >> 1) != 0u)
+		return PLUGIN_ERR_RESERVED;
+	charge = pol->veneer_cost > sink ? pol->veneer_cost : sink;
+
 	for (i = 0u; i < PLUGIN_SLOT_COUNT; i++) {
 		uint32_t v = rd32(m, offsetof(struct plugin_manifest, slot) + i * 4u);
-		uint32_t st = rd32(m, offsetof(struct plugin_manifest, stack) + i * 4u);
+		uint32_t own = rd32(m, offsetof(struct plugin_manifest, stack_own) +
+		                       i * 4u);
+		uint32_t cr = rd32(m, offsetof(struct plugin_manifest, stack_cross) +
+		                      i * 4u);
+		uint32_t crosses = (crossing >> i) & 1u;
 		uint32_t cbit = slot_cap(i);
-		uint32_t at;
+		uint32_t at, need;
 
 		if (v == PLUGIN_SLOT_ABSENT) {
 			if (slot_mandatory(i))
 				return PLUGIN_ERR_SLOT_MISSING;
 			if (cbit != 0u && (cap & cbit) != 0u)
 				return PLUGIN_ERR_CAPABILITY;
-			/* An absent slot declares no stack: one canonical spelling of
-			 * absence, so a stale number cannot survive here. */
-			if (st != 0u)
+			/* An absent slot declares no stack and no crossing: one
+			 * canonical spelling of absence, so a stale number cannot
+			 * survive here. */
+			if (own != 0u || cr != 0u || crosses != 0u)
 				return PLUGIN_ERR_STACK;
 			out->slot[i]  = PLUGIN_SLOT_ABSENT;
 			out->stack[i] = 0u;
@@ -293,6 +333,28 @@ static enum plugin_result check_manifest(const uint8_t *p, uint32_t sect_off,
 			return PLUGIN_ERR_SLOT_RANGE;
 
 		/*
+		 * [!] THE CANONICAL FORM, BEFORE ANY ARITHMETIC.  A slot that does not
+		 * cross has no "own frames at a crossing", so A1 is 0 there rather than
+		 * a number nothing reads; and a crossing path's own frames are part of
+		 * the walk A0 maximises over, so A1 above A0 is not a measurement --
+		 * it is a declaration with its two fields swapped, which would charge
+		 * c on top of the SHALLOWER number.
+		 */
+		if (!crosses && cr != 0u)
+			return PLUGIN_ERR_STACK;
+		if (cr > own)
+			return PLUGIN_ERR_STACK;
+
+		need = own;
+		if (crosses) {
+			/* A sum that wraps would come out small, which is the one
+			 * direction a stack requirement must never err in. */
+			if (cr > UINT32_MAX - charge)
+				return PLUGIN_ERR_STACK;
+			if (cr + charge > need)
+				need = cr + charge;
+		}
+		/*
 		 * [!] A DERIVED BOUND OF ZERO IS A MEASUREMENT, NOT AN OMISSION
 		 * (issue #103).  This used to read `st == 0u || st > limit`, which
 		 * made zero a second spelling of "absent" -- and the second plugin's
@@ -306,12 +368,16 @@ static enum plugin_result check_manifest(const uint8_t *p, uint32_t sect_off,
 		 * refuse the slot even when the plugin asks for nothing, because the
 		 * limit is the board saying this callback may not run at all.
 		 */
-		if (pol->stack_limit[i] == 0u || st > pol->stack_limit[i])
+		if (pol->stack_limit[i] == 0u || need > pol->stack_limit[i])
 			return PLUGIN_ERR_STACK;
 
-		out->slot[i]  = v;
-		out->stack[i] = st;
+		out->slot[i]        = v;
+		out->stack_own[i]   = own;
+		out->stack_cross[i] = cr;
+		out->stack[i]       = need;
 	}
+	out->stack_crossing = crossing;
+	out->stack_sink     = sink;
 
 	/* PARAM_SET and PARAM_GET share one bit, so neither may stand alone. */
 	if ((out->slot[PLUGIN_SLOT_PARAM_SET] == PLUGIN_SLOT_ABSENT) !=
@@ -481,6 +547,7 @@ const char *plugin_result_name(enum plugin_result r)
 	case PLUGIN_ERR_SLOT_RANGE:      return "slot outside code";
 	case PLUGIN_ERR_SLOT_THUMB:      return "slot not thumb";
 	case PLUGIN_ERR_STACK:           return "stack request refused";
+	case PLUGIN_ERR_STACK_ACCOUNTING: return "stack declared under another analysis";
 	case PLUGIN_ERR_DIGEST:          return "digest mismatch";
 	case PLUGIN_ERR_ARG:             return "bad argument";
 	}

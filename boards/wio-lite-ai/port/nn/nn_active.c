@@ -135,8 +135,12 @@ int nn_active_report(nn_svc_write_fn write, void *ctx)
 	if (!nn_active_is_plugin() || fn == NULL || write == NULL)
 		return 0;
 
-	out.ctx   = ctx;
-	out.write = write;
+	/* Version and size first: the plugin's veneer refuses a printer without
+	 * them (issue #111). */
+	out.version = PLUGIN_ABI_VERSION;
+	out.size    = (uint32_t)sizeof(out);
+	out.ctx     = ctx;
+	out.write   = write;
 	return fn(&out);
 }
 

@@ -21,6 +21,11 @@
  *
  * The board's policy arrives on the command line rather than being baked in:
  * svc/ owns no board address, and neither does this.
+ *
+ * [!] THE VENEER COST AND THE STACK ACCOUNTING ARE REQUIRED (issue #111).  The
+ * device adds its own c to what a manifest declares, so a verifier with no c
+ * would be checking a requirement the device never computes.  There is no
+ * default: a default is a second declaration of the board's number.
  */
 #include "plugin_load.h"
 
@@ -32,7 +37,8 @@ static void usage(void)
 {
 	fprintf(stderr,
 	        "usage: verify_container <container> --target <id> --link <addr>\n"
-	        "                        --capacity <bytes> [--stack <slot=bytes>]\n");
+	        "                        --capacity <bytes> --veneer-cost <bytes>\n"
+	        "                        --accounting <n> [--stack <slot=bytes>]\n");
 	exit(2);
 }
 
@@ -62,6 +68,10 @@ int main(int argc, char **argv)
 			pol.link_addr = (uint32_t)strtoul(argv[++i], NULL, 0);
 		} else if (!strcmp(argv[i], "--capacity") && i + 1 < argc) {
 			pol.capacity = (uint32_t)strtoul(argv[++i], NULL, 0);
+		} else if (!strcmp(argv[i], "--veneer-cost") && i + 1 < argc) {
+			pol.veneer_cost = (uint32_t)strtoul(argv[++i], NULL, 0);
+		} else if (!strcmp(argv[i], "--accounting") && i + 1 < argc) {
+			pol.stack_accounting = (uint32_t)strtoul(argv[++i], NULL, 0);
 		} else if (!strcmp(argv[i], "--stack") && i + 1 < argc) {
 			/* slot index = bytes; the caller knows the enum. */
 			char *eq = strchr(argv[++i], '=');
@@ -76,7 +86,8 @@ int main(int argc, char **argv)
 			usage();
 		}
 	}
-	if (path == NULL || pol.capacity == 0u)
+	if (path == NULL || pol.capacity == 0u || pol.veneer_cost == 0u ||
+	    pol.stack_accounting == 0u)
 		usage();
 
 	fh = fopen(path, "rb");
@@ -115,10 +126,20 @@ int main(int argc, char **argv)
 	        view.model_len, view.model_off,
 	        view.file_size, view.mem_size, view.image_off, view.link_addr,
 	        view.code_len, view.data_seg_len, view.bss_len, view.scratch_len);
-	for (i = 0; i < PLUGIN_SLOT_COUNT; i++)
-		if (view.slot[i] != PLUGIN_SLOT_ABSENT)
-			fprintf(stderr, "  slot %d at +0x%x, stack %u B\n",
+	fprintf(stderr, "  stack at veneer cost %u B, sink %u B\n",
+	        pol.veneer_cost, view.stack_sink);
+	for (i = 0; i < PLUGIN_SLOT_COUNT; i++) {
+		if (view.slot[i] == PLUGIN_SLOT_ABSENT)
+			continue;
+		if (view.stack_crossing & (1u << i))
+			fprintf(stderr, "  slot %d at +0x%x, stack %u B "
+			        "(own %u, %u at a crossing)\n",
+			        i, view.slot[i] & ~1u, view.stack[i],
+			        view.stack_own[i], view.stack_cross[i]);
+		else
+			fprintf(stderr, "  slot %d at +0x%x, stack %u B (own)\n",
 			        i, view.slot[i] & ~1u, view.stack[i]);
+	}
 	free(buf);
 	return 0;
 }

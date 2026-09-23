@@ -1390,11 +1390,12 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # is no longer re-derived by anyone reading this file.
     #
     # 640 rather than the derived number: over-estimating is the safe direction,
-    # because the gate charges this at every crossing and a larger charge makes
-    # a plugin's computed requirement larger, not smaller.  RAISING it costs a
-    # re-pack and a re-send of every container that exists (their declared
-    # stacks were computed against this number, and the firmware cannot tell a
-    # stale declaration from a current one); lowering it buys nothing.
+    # because a larger charge makes a plugin's computed requirement larger, not
+    # smaller.  Since ABI 2 (issue #111) a container no longer carries this
+    # number -- the loader adds it to the plugin's own frames at load time, from
+    # the PLUGIN_VENEER_BASE_COST that veneer_cost_gate() compiles in -- so
+    # changing it re-packs nothing; a container whose crossing no longer fits
+    # under a raised cost is refused on the device, as "stack request refused".
     set(WIO_PLUGIN_VENEER_BASE_COST 640)
 
     # The firmware side of that charge (issue #112): the build derives the
@@ -1664,6 +1665,10 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
             message(FATAL_ERROR
                 "wio_add_asset(${_name}): no veneer_cost_gate() registered")
         endif()
+        # The c the firmware adds at load time (issue #111), from the helper
+        # that checked it and compiled it in -- not a board variable that
+        # starts out equal.
+        veneer_cost_gate_declared(_veneer_cost)
         add_custom_command(
             OUTPUT "${_nnc}"
             COMMAND "${CMAKE_COMMAND}" -E env
@@ -1691,6 +1696,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
                     --policy-stack "4=${WIO_PLUGIN_STACK_SHELL}"
                     --policy-stack "5=${WIO_PLUGIN_STACK_SHELL}"
                     --policy-stack "6=${WIO_PLUGIN_STACK_SHELL}"
+                    --veneer-cost "${_veneer_cost}"
                     --slot "${A_SLOT}" --slot-table "${WIO_SLOT_TABLE_JSON}"
                     --out "${_nnc}"
             DEPENDS "${_src}" "${_plugin_dir}/plugin.elf"

@@ -72,16 +72,27 @@ def extract_model(layout_path, container_path, out_path):
 
 
 def stack_args(stacks_path):
-    """The bounds the plugin gate derived, as --stack arguments.  The packer
-    refuses to declare a stack for a slot nobody measured."""
+    """What the plugin gate derived, as the packer's arguments.  The packer
+    refuses to declare a stack for a slot nobody measured.
+
+    [!] THE PARTS, NEVER `bound` (issue #111).  The gate also reports each slot's
+    bound at this build's veneer cost, for a person to read; packing that would
+    put the firmware's cost back into the manifest, which is the whole defect
+    ABI 2 exists to remove."""
     names = {"pl_entry": "entry", "pl_shapes_ok": "shapes_ok",
              "pl_decode": "decode", "pl_draw": "draw", "pl_report": "report",
              "pl_param_set": "param_set", "pl_param_get": "param_get"}
     b = json.load(open(stacks_path))
-    out = []
-    for k, v in b.items():
+    for key in ("accounting", "sink", "entries"):
+        if b.get(key) is None:
+            die("%s has no %r -- it was not written by this gate"
+                % (stacks_path, key))
+    out = ["--accounting", "%d" % b["accounting"], "--sink", "%d" % b["sink"]]
+    for k, v in b["entries"].items():
         if k in names:
-            out += ["--stack", "%s=%d" % (names[k], v)]
+            out += ["--stack", "%s=%d,%s" % (
+                names[k], v["own"],
+                ("%d" % v["cross"]) if v["crossing"] else "-")]
     return out
 
 
@@ -101,6 +112,10 @@ def main():
     ap.add_argument("--link-addr", required=True)
     ap.add_argument("--capacity", required=True)
     ap.add_argument("--policy-stack", action="append", default=[])
+    # The firmware's veneer cost, which the device adds to what the manifest
+    # declares (issue #111).  The board passes cmake/veneer_cost_gate.cmake's
+    # value, the one the firmware is compiled with -- never its own variable.
+    ap.add_argument("--veneer-cost", required=True)
     ap.add_argument("--slot")
     ap.add_argument("--slot-table")
     ap.add_argument("--out", required=True)
@@ -154,9 +169,16 @@ def main():
         policy = []
         for e in args.policy_stack:
             policy += ["--stack", e]
+        # The accounting version the FIRMWARE is compiled with is the header's,
+        # which the layout carries; the one the gate stamped was compared with
+        # it by the packer.  Passing the layout's here keeps the verifier's
+        # policy the firmware's, not the gate's.
+        accounting = json.load(open(args.layout))["stack_accounting"]
         run([args.container_verifier, container,
              "--target", args.target_id, "--link", args.link_addr,
-             "--capacity", args.capacity] + policy,
+             "--capacity", args.capacity,
+             "--veneer-cost", args.veneer_cost,
+             "--accounting", "%d" % accounting] + policy,
             "the device's own validator")
 
         blob = open(container, "rb").read()

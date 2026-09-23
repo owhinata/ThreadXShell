@@ -5,7 +5,7 @@
  * Host unit test for svc/plugin_load.c -- container and manifest validation
  * (issue #101 = #78 Step 1a).
  *
- * WHY THIS FILE CARRIES SO MANY CASES.  plugin_load.h names thirty-one distinct
+ * WHY THIS FILE CARRIES SO MANY CASES.  plugin_load.h names thirty-two distinct
  * refusals on purpose: "the container is malformed" is true of every failure and
  * tells whoever is holding the board nothing, and several of these are ordinary
  * operator mistakes (a container built for another board, a stale ABI) that must
@@ -82,6 +82,15 @@ static uint8_t buf[TOTAL];
  * very leak svc/ is not allowed to have. */
 static const uint32_t TEST_LINK_ADDR = 0x20010000u;
 static struct plugin_policy pol;
+
+/* The stack declaration build() writes (issue #111), and the policy's c.  Chosen
+ * so that every term of max(A0, A1 + max(c, S)) is distinguishable. */
+#define TEST_COST     256u
+#define SINK          16u
+#define DRAW_OWN      96u
+#define DRAW_CROSS    64u
+#define REPORT_OWN    128u
+#define REPORT_CROSS  100u
 
 static void wr32(uint32_t at, uint32_t v)
 {
@@ -168,7 +177,21 @@ static void build(void)
 	wr32(MF(slot) + 4u * PLUGIN_SLOT_REPORT,    0x81u);
 	for (i = 0u; i < PLUGIN_SLOT_COUNT; i++)
 		if (rd(MF(slot) + 4u * i) != PLUGIN_SLOT_ABSENT)
-			wr32(MF(stack) + 4u * i, 256u);
+			wr32(MF(stack_own) + 4u * i, 256u);
+	/*
+	 * Two slots reach a veneer (issue #111), with their own frames at the
+	 * crossing SHALLOWER than their deepest own frames, so that swapping the
+	 * two fields is visible: draw needs max(DRAW_OWN, DRAW_CROSS + c), which
+	 * with the test policy's c is the second term, and report likewise.
+	 */
+	wr32(MF(stack_own) + 4u * PLUGIN_SLOT_DRAW,   DRAW_OWN);
+	wr32(MF(stack_cross) + 4u * PLUGIN_SLOT_DRAW, DRAW_CROSS);
+	wr32(MF(stack_own) + 4u * PLUGIN_SLOT_REPORT,   REPORT_OWN);
+	wr32(MF(stack_cross) + 4u * PLUGIN_SLOT_REPORT, REPORT_CROSS);
+	wr32(MF(stack_crossing), (1u << PLUGIN_SLOT_DRAW) |
+	                         (1u << PLUGIN_SLOT_REPORT));
+	wr32(MF(stack_sink), SINK);
+	wr32(MF(stack_accounting), PLUGIN_STACK_ACCOUNTING);
 
 	memcpy(buf + MF(name), "unittest", 8);
 	memcpy(buf + MF(build_id), "deadbeef", 8);
@@ -265,6 +288,17 @@ static void test_valid(void)
 	assert(view.slot[PLUGIN_SLOT_PARAM_SET] == PLUGIN_SLOT_ABSENT);
 	assert(strcmp(view.name, "unittest") == 0);
 	assert(strcmp(view.build_id, "deadbeef") == 0);
+	/* The declaration comes back as declared, and the requirement is the
+	 * loader's own sum at the policy's c (issue #111). */
+	assert(view.stack_own[PLUGIN_SLOT_DRAW] == DRAW_OWN);
+	assert(view.stack_cross[PLUGIN_SLOT_DRAW] == DRAW_CROSS);
+	assert(view.stack_crossing == ((1u << PLUGIN_SLOT_DRAW) |
+	                               (1u << PLUGIN_SLOT_REPORT)));
+	assert(view.stack_sink == SINK);
+	assert(view.stack[PLUGIN_SLOT_DRAW] == DRAW_CROSS + TEST_COST);
+	assert(view.stack[PLUGIN_SLOT_REPORT] == REPORT_CROSS + TEST_COST);
+	assert(view.stack[PLUGIN_SLOT_DECODE] == 256u);
+	assert(view.stack[PLUGIN_SLOT_PARAM_SET] == 0u);
 	printf("  view is POD, rebased, and keeps the Thumb bit\n");
 }
 
@@ -459,8 +493,8 @@ static void test_slots(void)
 	    MF(slot) + 4u * PLUGIN_SLOT_DECODE, IMAGE_CODE | 1u,
 	    PLUGIN_ERR_SLOT_RANGE, 1);
 	one("a slot asks for more stack than the thread has",
-	    MF(stack) + 4u * PLUGIN_SLOT_DRAW,
-	    pol.stack_limit[PLUGIN_SLOT_DRAW] + 1u, PLUGIN_ERR_STACK, 1);
+	    MF(stack_own) + 4u * PLUGIN_SLOT_DECODE,
+	    pol.stack_limit[PLUGIN_SLOT_DECODE] + 1u, PLUGIN_ERR_STACK, 1);
 	/* [!] AND ZERO IS NOT ONE OF THEM (issue #103).  This case used to assert a
 	 * refusal, on the reasoning that zero meant "nobody measured it".  A
 	 * frameless callback measures zero -- the classifier plugin's entry point
@@ -468,10 +502,10 @@ static void test_slots(void)
 	 * derived.  Absence has its own spelling in the SLOT field, checked
 	 * separately below, so nothing needs zero to mean it here. */
 	one("a present slot may declare a derived bound of zero",
-	    MF(stack) + 4u * PLUGIN_SLOT_DRAW, 0u, PLUGIN_OK, 1);
+	    MF(stack_own) + 4u * PLUGIN_SLOT_DECODE, 0u, PLUGIN_OK, 1);
 
 	/* An absent slot must declare no stack either: one spelling of absence. */
-	wr32(MF(stack) + 4u * PLUGIN_SLOT_PARAM_SET, 64u);
+	wr32(MF(stack_own) + 4u * PLUGIN_SLOT_PARAM_SET, 64u);
 	restamp();
 	expect("an absent slot carries a stale stack", PLUGIN_ERR_STACK);
 	build();
@@ -487,7 +521,7 @@ static void test_slots(void)
 	wr32(MF(capability), PLUGIN_CAP_DRAW | PLUGIN_CAP_REPORT |
 	                     PLUGIN_CAP_PARAMS);
 	wr32(MF(slot) + 4u * PLUGIN_SLOT_PARAM_SET, 0xA1u);
-	wr32(MF(stack) + 4u * PLUGIN_SLOT_PARAM_SET, 128u);
+	wr32(MF(stack_own) + 4u * PLUGIN_SLOT_PARAM_SET, 128u);
 	restamp();
 	expect("param_set without param_get", PLUGIN_ERR_CAPABILITY);
 	build();
@@ -524,8 +558,12 @@ static void test_policy_and_digest(void)
 	 * `st == 0u ||`; now that a plugin may legitimately declare zero, the two
 	 * meet -- and a limit of zero has to win, because it is the board saying
 	 * this callback may not run at all rather than a size comparison. */
-	wr32(MF(stack) + 4u * PLUGIN_SLOT_DRAW, 0u);
+	wr32(MF(stack_own) + 4u * PLUGIN_SLOT_DRAW, 0u);
+	wr32(MF(stack_cross) + 4u * PLUGIN_SLOT_DRAW, 0u);
+	wr32(MF(stack_crossing), 1u << PLUGIN_SLOT_REPORT);
 	restamp();
+	assert(plugin_parse(buf, sizeof buf, &pol, &view) == PLUGIN_OK);
+	assert(view.stack[PLUGIN_SLOT_DRAW] == 0u);
 	assert(plugin_parse(buf, sizeof buf, &narrow, &view) == PLUGIN_ERR_STACK);
 	printf("  %-46s -> %s\n", "... even for a plugin that asks for nothing",
 	       plugin_result_name(PLUGIN_ERR_STACK));
@@ -571,12 +609,190 @@ static void test_view_is_cleared_on_refusal(void)
 	 * re-zeroes keeps the promise true instead of relying on every caller to
 	 * check the code first.
 	 */
-	wr32(MF(stack) + 4u * PLUGIN_SLOT_REPORT,
+	wr32(MF(stack_own) + 4u * PLUGIN_SLOT_REPORT,
 	     pol.stack_limit[PLUGIN_SLOT_REPORT] + 1u);
 	restamp();
 	assert(run() == PLUGIN_ERR_STACK);
 	assert(memcmp(&view, &zero, sizeof view) == 0);
 	printf("  a late refusal leaves nothing behind\n");
+	build();
+}
+
+/* ---- ABI 2: the declaration without the firmware's cost (issue #111) ----- */
+
+static enum plugin_result parse_with(const struct plugin_policy *p)
+{
+	return plugin_parse(buf, sizeof buf, p, &view);
+}
+
+static void report(const char *what, enum plugin_result got,
+                   enum plugin_result want)
+{
+	if (got != want) {
+		printf("  FAIL: %s -- wanted %s, got %s\n", what,
+		       plugin_result_name(want), plugin_result_name(got));
+		assert(0);
+	}
+	printf("  %-46s -> %s\n", what, plugin_result_name(got));
+}
+
+/*
+ * (a) THE POINT OF #111.  One container, unchanged, parsed under two firmwares
+ * that differ only in c: the one whose c still fits accepts it, the one whose c
+ * does not refuses it.  Under ABI 1 the container carried a c of its own and
+ * both would have given the same answer.
+ */
+static void test_cost_is_the_firmware_s(void)
+{
+	struct plugin_policy p = pol;
+	uint32_t fits = pol.stack_limit[PLUGIN_SLOT_REPORT] - REPORT_CROSS;
+
+	printf(" case: the same container under two veneer costs\n");
+	build();
+	p.veneer_cost = fits;
+	report("c at which report's crossing just fits", parse_with(&p),
+	       PLUGIN_OK);
+	assert(view.stack[PLUGIN_SLOT_REPORT] ==
+	       pol.stack_limit[PLUGIN_SLOT_REPORT]);
+	p.veneer_cost = fits + 1u;
+	report("... and one byte more, no re-pack", parse_with(&p),
+	       PLUGIN_ERR_STACK);
+
+	/* A policy with no cost is a board mistake, never a free crossing. */
+	p.veneer_cost = 0u;
+	report("a policy with c = 0", parse_with(&p), PLUGIN_ERR_ARG);
+	p = pol;
+	p.stack_accounting = 0u;
+	report("a policy with no accounting version", parse_with(&p),
+	       PLUGIN_ERR_ARG);
+	assert(run() == PLUGIN_OK);
+}
+
+/* (b) An ABI 1 container -- one number per slot, c inside it -- is refused at
+ * the header, before a single stack field is read under the new layout. */
+static void test_old_abi(void)
+{
+	printf(" case: an ABI 1 container\n");
+	build();
+	one("header says ABI 1", HF(abi_version), 1u, PLUGIN_ERR_ABI, 0);
+	one("manifest says ABI 1", MF(abi_version), 1u, PLUGIN_ERR_ABI, 1);
+	assert(run() == PLUGIN_OK);
+}
+
+/* (c) One canonical form.  Each case breaks exactly one rule of it. */
+static void test_canonical_form(void)
+{
+	printf(" case: the canonical form of the stack declaration\n");
+	build();
+	one("an absent slot declares frames at a crossing",
+	    MF(stack_cross) + 4u * PLUGIN_SLOT_PARAM_SET, 8u,
+	    PLUGIN_ERR_STACK, 1);
+	one("an absent slot carries a crossing bit", MF(stack_crossing),
+	    rd(MF(stack_crossing)) | (1u << PLUGIN_SLOT_PARAM_SET),
+	    PLUGIN_ERR_STACK, 1);
+	one("a slot that does not cross declares A1",
+	    MF(stack_cross) + 4u * PLUGIN_SLOT_DECODE, 8u,
+	    PLUGIN_ERR_STACK, 1);
+	/* [!] THE SWAP.  A1 above A0 is the two fields exchanged; accepted, it
+	 * would charge c on top of the shallower number. */
+	one("A1 above A0 (the two parts swapped)",
+	    MF(stack_cross) + 4u * PLUGIN_SLOT_DRAW, DRAW_OWN + 1u,
+	    PLUGIN_ERR_STACK, 1);
+	one("A1 equal to A0 is canonical",
+	    MF(stack_cross) + 4u * PLUGIN_SLOT_DRAW, DRAW_OWN, PLUGIN_OK, 1);
+	one("a crossing bit for a slot that does not exist", MF(stack_crossing),
+	    rd(MF(stack_crossing)) | (1u << PLUGIN_SLOT_COUNT),
+	    PLUGIN_ERR_RESERVED, 1);
+	one("the top crossing bit", MF(stack_crossing),
+	    rd(MF(stack_crossing)) | 0x80000000u, PLUGIN_ERR_RESERVED, 1);
+	assert(run() == PLUGIN_OK);
+}
+
+/*
+ * (d) A1 + max(c, S) that wraps.  The limit is opened all the way so that the
+ * ONLY thing between this container and an accept is the overflow check: the
+ * wrapped sum would come out tiny, A0 would win the max, and A0 fits.
+ */
+static void test_overflow(void)
+{
+	struct plugin_policy p = pol;
+
+	printf(" case: the sum at a crossing wraps\n");
+	build();
+	p.stack_limit[PLUGIN_SLOT_DRAW] = 0xFFFFFFFFu;
+	wr32(MF(stack_own) + 4u * PLUGIN_SLOT_DRAW, 0xFFFFFF80u);
+	wr32(MF(stack_cross) + 4u * PLUGIN_SLOT_DRAW, 0xFFFFFF80u);
+	restamp();
+	report("A1 + c past 2^32", parse_with(&p), PLUGIN_ERR_STACK);
+	/* And the same declaration without the crossing is fine: A0 alone fits
+	 * the widened limit, so the refusal above was the sum's. */
+	wr32(MF(stack_cross) + 4u * PLUGIN_SLOT_DRAW, 0u);
+	wr32(MF(stack_crossing), 1u << PLUGIN_SLOT_REPORT);
+	restamp();
+	report("... the same A0 with no crossing", parse_with(&p), PLUGIN_OK);
+	build();
+}
+
+/* (e) The plugin's own sink deeper than the firmware's c: S is charged. */
+static void test_sink(void)
+{
+	struct plugin_policy p = pol;
+	uint32_t s = TEST_COST * 2u;
+
+	printf(" case: a sink deeper than c\n");
+	build();
+	wr32(MF(stack_sink), s);
+	restamp();
+	p.stack_limit[PLUGIN_SLOT_DRAW] = DRAW_CROSS + s;
+	report("draw's crossing charged S, at the limit", parse_with(&p),
+	       PLUGIN_OK);
+	assert(view.stack[PLUGIN_SLOT_DRAW] == DRAW_CROSS + s);
+	p.stack_limit[PLUGIN_SLOT_DRAW] = DRAW_CROSS + s - 1u;
+	report("... one byte under it (c alone would fit)", parse_with(&p),
+	       PLUGIN_ERR_STACK);
+	build();
+}
+
+/* (f) Another analysis is its own refusal, not a stack that is too big. */
+static void test_accounting(void)
+{
+	struct plugin_policy p = pol;
+
+	printf(" case: the stack accounting version\n");
+	build();
+	one("manifest declared under another analysis", MF(stack_accounting),
+	    PLUGIN_STACK_ACCOUNTING + 1u, PLUGIN_ERR_STACK_ACCOUNTING, 1);
+	one("manifest never set it", MF(stack_accounting), 0u,
+	    PLUGIN_ERR_STACK_ACCOUNTING, 1);
+	p.stack_accounting = PLUGIN_STACK_ACCOUNTING + 1u;
+	report("firmware reads another analysis", parse_with(&p),
+	       PLUGIN_ERR_STACK_ACCOUNTING);
+	assert(run() == PLUGIN_OK);
+}
+
+/* (g) A slot that reaches no veneer needs its own frames and nothing else,
+ * however large c is. */
+static void test_no_crossing_ignores_cost(void)
+{
+	struct plugin_policy p = pol;
+	unsigned i;
+
+	printf(" case: no crossing, no charge\n");
+	build();
+	wr32(MF(stack_cross) + 4u * PLUGIN_SLOT_DRAW, 0u);
+	wr32(MF(stack_cross) + 4u * PLUGIN_SLOT_REPORT, 0u);
+	wr32(MF(stack_crossing), 0u);
+	restamp();
+	p.veneer_cost = 0xFFFFFFF0u;
+	report("c near 2^32 and nothing crosses", parse_with(&p), PLUGIN_OK);
+	for (i = 0u; i < PLUGIN_SLOT_COUNT; i++)
+		assert(view.stack[i] == view.stack_own[i]);
+	/* And one crossing slot under that c is refused, so the accept above
+	 * was the mask's doing. */
+	wr32(MF(stack_crossing), 1u << PLUGIN_SLOT_DRAW);
+	restamp();
+	report("... the same c with draw crossing", parse_with(&p),
+	       PLUGIN_ERR_STACK);
 	build();
 }
 
@@ -595,6 +811,8 @@ int main(void)
 	pol.caps_supported = PLUGIN_CAP_KNOWN_MASK;
 	for (i = 0u; i < PLUGIN_SLOT_COUNT; i++)
 		pol.stack_limit[i] = 1024u;
+	pol.veneer_cost      = TEST_COST;
+	pol.stack_accounting = PLUGIN_STACK_ACCOUNTING;
 
 	test_probe();
 	test_valid();
@@ -607,6 +825,13 @@ int main(void)
 	test_policy_and_digest();
 	test_arguments();
 	test_view_is_cleared_on_refusal();
+	test_cost_is_the_firmware_s();
+	test_old_abi();
+	test_canonical_form();
+	test_overflow();
+	test_sink();
+	test_accounting();
+	test_no_crossing_ignores_cost();
 
 	printf("test_plugin_load: all passed\n");
 	return 0;

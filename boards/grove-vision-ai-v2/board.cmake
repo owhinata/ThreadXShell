@@ -1556,6 +1556,9 @@ function(grove_add_asset _name)
         message(FATAL_ERROR
             "grove_add_asset(${_name}): no veneer_cost_gate() registered")
     endif()
+    # The c the firmware adds at load time (issue #111), from the helper that
+    # checked it and compiled it in -- not a board variable that starts out equal.
+    veneer_cost_gate_declared(_veneer_cost)
     add_custom_command(
         OUTPUT "${_nnc}"
         COMMAND "${CMAKE_COMMAND}" -E env
@@ -1581,6 +1584,7 @@ function(grove_add_asset _name)
                 --policy-stack "4=${GROVE_PLUGIN_STACK_SHELL}"
                 --policy-stack "5=${GROVE_PLUGIN_STACK_SHELL}"
                 --policy-stack "6=${GROVE_PLUGIN_STACK_SHELL}"
+                --veneer-cost "${_veneer_cost}"
                 # The declaration names a slot, and the packed size is known
                 # here, so the fit is checked before the device would erase that
                 # slot to discover it.  This asks nothing of the operator: the
@@ -1832,11 +1836,11 @@ set(GROVE_PLUGIN_FORBIDDEN
 # length -- and derives what is left from shell.elf: 232 B, the painter's rect.
 #
 # [!] AND THE NUMBER DID NOT MOVE.  256 still covers the image (headroom 24 B),
-# so no container has to be re-packed: every one on a device was packed against
-# 256, and the check below is what keeps that true.  RAISING it is what costs a
-# re-pack and a re-send of every container that exists, because their declared
-# stacks were computed against this number and the firmware cannot tell a stale
-# declaration from a current one.  Lowering it buys nothing.
+# and the check below is what keeps that true.  Since ABI 2 (issue #111) a
+# container no longer carries this number: the loader adds it to the plugin's
+# own frames at load time, from the PLUGIN_VENEER_BASE_COST that
+# veneer_cost_gate() compiles in, so changing it re-packs nothing -- a container
+# whose crossing no longer fits under a raised cost is refused on the device.
 set(GROVE_PLUGIN_VENEER_BASE_COST 256)
 
 # The firmware side of that charge (issue #112): the build derives the stack

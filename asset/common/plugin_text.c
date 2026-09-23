@@ -347,6 +347,9 @@ void pl_sbuf_printer(struct plugin_printer *out, struct pl_sbuf *sb)
 {
 	if (out == NULL)
 		return;
-	out->ctx   = sb;
-	out->write = pl_sbuf_write;
+	/* The plugin's own veneer checks these like any base's (issue #111). */
+	out->version = PLUGIN_ABI_VERSION;
+	out->size    = (uint32_t)sizeof(*out);
+	out->ctx     = sb;
+	out->write   = pl_sbuf_write;
 }

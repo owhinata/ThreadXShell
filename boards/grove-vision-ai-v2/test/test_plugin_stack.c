@@ -20,9 +20,10 @@
  *     (PLUGIN_ERR_STACK), and then the whole stack of each thread a slot runs
  *     on: the declaration issue #119 found ACCEPTED for decode.
  *
- * Only the stack table is the firmware's.  The target, prelink base and capacity
- * below are whatever lets the parse reach the stack check; they are not under
- * test here.
+ * Only the stack table is the firmware's.  The target, prelink base, capacity
+ * and veneer cost below are whatever lets the parse reach the stack check; they
+ * are not under test here.  Every slot declares its own frames only (no
+ * crossing), so what the loader requires of it is exactly what it declares.
  */
 #include "nn_plugin_stack.h"
 #include "plugin_load.h"
@@ -38,6 +39,8 @@ static const struct plugin_policy pol = {
 	.image_align    = PLUGIN_IMAGE_ALIGN,
 	.caps_supported = PLUGIN_CAP_KNOWN_MASK,
 	.stack_limit    = GROVE_PLUGIN_STACK_LIMITS,
+	.veneer_cost    = 256u,
+	.stack_accounting = PLUGIN_STACK_ACCOUNTING,
 };
 
 /* ---- a container with all seven slots ------------------------------------ */
@@ -118,8 +121,9 @@ static void build(void)
 	wr32(MF(scratch_len), IMAGE_SCRATCH);
 	for (i = 0u; i < PLUGIN_SLOT_COUNT; i++) {
 		wr32(MF(slot) + 4u * i, 0x20u * i + 1u);   /* Thumb bit set */
-		wr32(MF(stack) + 4u * i, 8u);
+		wr32(MF(stack_own) + 4u * i, 8u);
 	}
+	wr32(MF(stack_accounting), PLUGIN_STACK_ACCOUNTING);
 }
 
 static enum plugin_result parse_with(unsigned slot, uint32_t declared)
@@ -127,7 +131,7 @@ static enum plugin_result parse_with(unsigned slot, uint32_t declared)
 	struct plugin_view view;
 
 	build();
-	wr32(MF(stack) + 4u * slot, declared);
+	wr32(MF(stack_own) + 4u * slot, declared);
 	wr32(HF(plugin_digest), crc32_update(0u, buf + SECT_OFF, SECT_LEN));
 	return plugin_parse(buf, sizeof buf, &pol, &view);
 }

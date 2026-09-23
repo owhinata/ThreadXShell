@@ -33,6 +33,7 @@ int main(void)
 {
 	printf("{\n");
 	printf("  \"abi_version\": %u,\n", (unsigned)PLUGIN_ABI_VERSION);
+	printf("  \"stack_accounting\": %u,\n", (unsigned)PLUGIN_STACK_ACCOUNTING);
 	printf("  \"magic\": \"%c%c%c%c\",\n",
 	       PLUGIN_CONTAINER_MAGIC0, PLUGIN_CONTAINER_MAGIC1,
 	       PLUGIN_CONTAINER_MAGIC2, PLUGIN_CONTAINER_MAGIC3);
@@ -108,7 +109,11 @@ int main(void)
 	F(plugin_manifest, scratch_off);
 	F(plugin_manifest, scratch_len);
 	F(plugin_manifest, slot);
-	F(plugin_manifest, stack);
+	F(plugin_manifest, stack_own);
+	F(plugin_manifest, stack_cross);
+	F(plugin_manifest, stack_crossing);
+	F(plugin_manifest, stack_sink);
+	F(plugin_manifest, stack_accounting);
 	F(plugin_manifest, name);
 	printf("    \"build_id\": %u\n",
 	       (unsigned)offsetof(struct plugin_manifest, build_id));

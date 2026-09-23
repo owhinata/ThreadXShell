@@ -248,6 +248,11 @@ void plugin_paint_bind(struct plugin_painter *p,
 	paint_ctx.sw  = sw;
 	paint_ctx.sh  = sh;
 
+	/* Version and size first: the plugin's veneer refuses a painter without
+	 * them (issue #111), so a member left out here is a draw that silently
+	 * does nothing. */
+	p->version   = PLUGIN_ABI_VERSION;
+	p->size      = (uint32_t)sizeof(*p);
 	p->ctx       = &paint_ctx;
 	p->rect      = paint_rect;
 	p->fill_rect = paint_fill_rect;

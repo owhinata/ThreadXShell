@@ -300,7 +300,7 @@ gcc $CFLAGS -I "$svc" \
 # issue #101 (#78 Step 1a) -- container and manifest validation (svc/plugin_load.c):
 # everything that must hold BEFORE a plugin's first instruction is fetched.
 #
-# [!] EVERY ONE OF THE THIRTY REFUSAL CODES IS PROVOKED HERE.  plugin_load.h names
+# [!] EVERY ONE OF THE THIRTY-TWO REFUSAL CODES IS PROVOKED HERE.  plugin_load.h names
 # them separately on purpose -- several are ordinary operator mistakes (a container
 # built for another board, a stale ABI) that must not read like corruption -- and a
 # reason no input can reach is not a reason.  Each case mutates ONE field of an
@@ -315,6 +315,17 @@ gcc $CFLAGS -I "$svc" \
     "$here/test_plugin_load.c" "$svc/plugin_load.c" "$svc/crc32.c" \
     $LDFLAGS -o "$out/test_plugin_load"
 "$out/test_plugin_load"
+
+# issue #111 -- the plugin's painter and printer veneers (asset/common/
+# plugin_base.c).  ABI 2 gave both vtables a version and a size, and every call
+# through them now waits on "is this ABI's, and does the size reach this member".
+# Board-independent -- every board's plugins link it -- so it runs here: a
+# version mismatch, a size one byte short of each member and a size ending
+# exactly at it, per member.
+gcc $CFLAGS -I "$svc" -I "$repo/asset/common" \
+    "$here/test_plugin_veneer.c" "$repo/asset/common/plugin_base.c" \
+    $LDFLAGS -o "$out/test_plugin_veneer"
+"$out/test_plugin_veneer"
 
 # issue #110 (#78 Step 3b) -- the capture of an external decoder's own account
 # of its result (svc/nn_report.c).  A contract about OUTCOMES: zero bytes is a

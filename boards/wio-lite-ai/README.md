@@ -408,20 +408,30 @@ that changed what is open change what decodes it:
 | reload outcome | what happens to the decoder |
 |---|---|
 | a bare model loaded | whatever was loaded is unloaded -- a new model with an old model's decoder is the accident this ordering prevents.  Since #116 that leaves the model with NO decoder, which is the bare-model behaviour above |
-| a container loaded | its plugin is loaded; **if it refuses, the model stays open with nothing reading it** and the loader logs why.  Until #116 it fell back on the resident decoder |
+| a container loaded | its plugin is loaded; **if it refuses, the model stays open with nothing reading it**, the plugin is unloaded explicitly and **the load fails** with the loader's reason in the detail, state `new` -- the shared command says `the new model is open, but it has no decoder` (issue #122 D6; until then this reported success).  Until #116 it fell back on the resident decoder |
 | the previous model was restored | nothing moved, so nothing moves here -- the previous plugin keeps reading the previous model |
 | nothing is open | the plugin is unloaded too |
 
-**[!] Two of those rows are not exercised by any test.**  "A new model adopted
+The table is `port/nn/nn_load_end.c`, and `test/test_nn_load_end.c` walks every
+row.  **"Nothing is open" means no MODEL, not a closed singleton** (issue #122
+P2): the TFLM singleton opens empty and stays open, so `nn_model_reload()`
+reports whether a model is left (`nn_model_present()`: open and describing at
+least one input), and `nn info` says `model : (none)` until the first load.
+Before, an empty board reported `model_active` and a refused first load said
+`the previous model is still active`.
+
+**[!] Two of those rows are not exercised on hardware.**  "A new model adopted
 and its plugin refused" and "the reload failed and the previous model was
 restored" differ only in which one keeps its decoder, and telling them apart
 needs a container the DEVICE refuses -- which the build cannot produce, because
 the host packer runs the device's own validator (`svc/plugin_load.c`) over what
 it packs and publishes nothing that would be refused.  The host tests reach the
 no-decoder STATE (that is what `test_nn_active.c` pins) but not this branch
-that arrives at it.  Recorded here rather than left as an assumption: what the
-table says about those two rows is a claim about code that has been read, not
-about code that has been run.
+that arrives at it; since #122 the ending table's host test reaches the
+decision, and the adapter's one call site is what acts on it.  Recorded here
+rather than left as an assumption: what the table says about those two rows on
+hardware is a claim about code that has been read, not about code that has been
+run.
 
 All of it happens inside the claims window and before the session is given
 back, so `nn info` on another console says *a model load is in progress* rather

@@ -212,21 +212,38 @@ int nn_model_load_region(void **buf, uint32_t *cap);
  * and start on NN_MODEL_ALIGN; anything else is refused (NN_MODEL_ERR_SLOT /
  * NN_MODEL_ERR_ALIGN) rather than interpreted from memory the backend does not own.
  *
- * @p open_after, when not NULL, receives whether the singleton is open once THIS
- * call has finished: 0 only in the documented case where the model was refused
- * AND the previous one could not be rebuilt.  It is the reload's own outcome,
- * not a readback -- and that distinction is the point (issue #108 review).
- * Asking afterwards cannot answer it: `nn info` on another console takes no
- * session and calls nn_model_open(), which re-opens a closed singleton as an
- * EMPTY one, so any read after this returns may see a state this call did not
- * leave.
+ * @p model_after, when not NULL, receives whether a MODEL is active once THIS
+ * call has finished (nn_model_present()): 0 when the model was refused and there
+ * was no previous one, or the previous one could not be rebuilt.  It is the
+ * reload's own outcome, not a readback -- and that distinction is the point
+ * (issue #108 review).  Asking afterwards cannot answer it: `nn info` on another
+ * console takes no session and calls nn_model_open(), which re-opens a closed
+ * singleton as an EMPTY one, so any read after this returns may see a state this
+ * call did not leave.
+ *
+ * [!] "OPEN" IS NOT "A MODEL IS ACTIVE" (issue #122 P2).  This used to report
+ * whether the singleton was open, and a TFLM singleton is open with no model --
+ * that is its normal state after boot -- so a first load that was refused came
+ * back as "the previous model is still active" when there had never been one.
  *
  * TRANSACTIONAL.  A model the backend cannot build is reported without disturbing the
  * one already loaded, so a truncated file costs nothing but the message.  Returns 0,
  * NN_ERR_NOSUP / NN_ERR_STATE, or the backend's own <0 reason for the rejection.
  */
 int nn_model_reload(const void *data, uint32_t len, const char *name,
-                    int *open_after);
+                    int *model_after);
+
+/**
+ * Whether @p m has a model: open AND describing at least one input.
+ *
+ * [!] NOT nn_model_open()'s success.  The TFLM backend opens with no model and
+ * publishes zero tensors (its steady state before the first load and after an
+ * unload), and it refuses to build a model whose input count is outside
+ * 1 .. NN_MAX_IO -- so zero inputs means exactly "nothing loaded".  The `null`
+ * backend's synthetic model has inputs and is reported as present, as it always
+ * was (issue #122 P2).
+ */
+int nn_model_present(const struct nn_model *m);
 
 /**
  * One short sentence for a code returned by nn_model_reload(), never NULL.  Handles

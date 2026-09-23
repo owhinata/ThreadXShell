@@ -237,15 +237,26 @@ int nn_model_load_region(void **buf, uint32_t *cap)
 	return nn_backend_vt_selected.load_region(buf, cap);
 }
 
+/* A handle describes a model when it has inputs -- see nn_model_present(). */
+static int nn_impl_has_model(void *impl)
+{
+	return impl != NULL && nn_backend_vt_selected.in_count(impl) > 0;
+}
+
+int nn_model_present(const struct nn_model *m)
+{
+	return (m && m->open) ? nn_impl_has_model(m->impl) : 0;
+}
+
 int nn_model_reload(const void *data, uint32_t len, const char *name,
-                    int *open_after)
+                    int *model_after)
 {
 	void *impl = NULL;
 	int rc;
 
 	/* Unchanged on the two early refusals below: nothing was touched. */
-	if (open_after)
-		*open_after = g_model.open ? 1 : 0;
+	if (model_after)
+		*model_after = nn_model_present(&g_model);
 	if (!nn_backend_vt_selected.reload)
 		return NN_ERR_NOSUP;
 	/* The singleton must already exist: reload REPLACES a model, and the open path
@@ -265,8 +276,8 @@ int nn_model_reload(const void *data, uint32_t len, const char *name,
 	g_model.open = impl ? 1u : 0u;
 	g_model.last_cycles = 0;   /* the previous timing measured a different model */
 	/* This call's outcome, from the value it just decided -- see nn.h. */
-	if (open_after)
-		*open_after = impl ? 1 : 0;
+	if (model_after)
+		*model_after = nn_impl_has_model(impl);
 	return rc;
 }
 

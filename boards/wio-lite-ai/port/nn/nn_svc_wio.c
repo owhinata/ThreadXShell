@@ -41,6 +41,7 @@
 #include "nn_camera.h"
 #include "nn_desc.h"
 #include "nn_active.h"
+#include "nn_load_end.h"
 #include "plugin_load.h"
 #include "plugin_lease.h"
 #include "plugin_run.h"
@@ -389,7 +390,6 @@ void nn_svc_info(struct nn_svc_info *out)
 
 	/* Copied, not borrowed: the backend owns this name and a reload replaces
 	   it, so the caller must not hold a pointer into it while printing. */
-	out->model_active = 1u;
 	out->arena_used  = 0u;   /* this backend reports only the reservation */
 	/*
 	 * [!] THE NAME IS COPIED UNDER THE SESSION WHEN THE SESSION IS FREE, and
@@ -410,6 +410,11 @@ void nn_svc_info(struct nn_svc_info *out)
 	 * it always was, and no diagnostic is lost.
 	 */
 	held = (nn_session_try_acquire() == 0);
+	/* [!] "A MODEL IS ACTIVE", NOT "THE SINGLETON OPENED" (issue #122 P2).
+	 * nn_model_open() succeeds on an empty TFLM singleton -- its state after
+	 * boot and after an unload -- so this said 1 with nothing loaded, and the
+	 * load command took that to mean a previous model existed. */
+	out->model_active = nn_model_present(m) ? 1u : 0u;
 	nn_svc_str(out->model, sizeof out->model, nn_model_name(m));
 	out->arena_bytes = nn_activations_bytes(m);
 	if (held)
@@ -419,7 +424,8 @@ void nn_svc_info(struct nn_svc_info *out)
 	   the copy above (issue #99 made this explicit rather than implied). */
 	out->avail_identity = (uint8_t)NN_AVAIL_OK;
 	out->avail_runtime  = (uint8_t)NN_AVAIL_OK;
-	out->avail_tensors  = (uint8_t)NN_AVAIL_OK;
+	out->avail_tensors  = out->model_active ? (uint8_t)NN_AVAIL_OK
+	                                        : (uint8_t)NN_AVAIL_NA;
 
 
 	/* [!] Say plainly when nothing is being inferred, so a latency from
@@ -441,8 +447,10 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	void     *stage = NULL;
 	const void *model_at;
 	uint32_t  cap = 0u, crc, model_len;
+	struct nn_load_verdict v;
 	int is_container = 0;
-	int open_after = 0;
+	int model_after = 0;
+	int plugin_refused = 0;
 	int rc;
 
 	/* This board reads its model out of the NOR asset store itself; it never
@@ -451,8 +459,10 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	(void)ctx;
 
 	nn_detail_clear();
-	*state = (nn_model_open(&m) == 0 && m != NULL) ? NN_MODEL_PREVIOUS
-	                                              : NN_MODEL_EMPTY;
+	/* What an early refusal leaves: whatever was there.  "There" is a MODEL,
+	 * not an open singleton (issue #122 P2) -- see nn_model_present(). */
+	*state = (nn_model_open(&m) == 0 && nn_model_present(m))
+	         ? NN_MODEL_PREVIOUS : NN_MODEL_EMPTY;
 
 	if (spec->tag != NN_SPEC_SLOT) {
 		nn_detail_set("this board loads a model from a NOR asset slot "
@@ -655,47 +665,20 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 #endif
 
 	nn_claims_begin();
-	rc = nn_model_reload(model_at, model_len, info.name, &open_after);
+	rc = nn_model_reload(model_at, model_len, info.name, &model_after);
 
 	/*
-	 * [!] THE RESULTING MODEL STATE IS READ BACK, NOT ASSUMED.  This board's
-	 * dispatcher adopts whatever handle the backend ended up with and clears
-	 * `open` when that is NULL -- which is the documented case where even the
-	 * PREVIOUS model could not be rebuilt.  Reporting "rejected, previous
-	 * unchanged" there would leave an operator believing a model is loaded.
-	 *
-	 * [!] AND IT IS THE RELOAD'S OWN OUTCOME, NOT A QUESTION ASKED AFTERWARDS.
-	 * This used to ask nn_model_open(), which on a closed singleton opens a
-	 * fresh EMPTY one and succeeds -- so exactly the case above was reported as
-	 * PREVIOUS, and since issue #108 it also kept the previous container's
-	 * claims beside a model that was gone.  A non-mutating query does not fix
-	 * it either: `nn info` on another console takes no session and calls
-	 * nn_model_open() itself, so it can re-open the singleton between the
-	 * reload returning and any read here (the #108 review, rounds 2 and 3).
-	 * nn_model_reload() reports what it left.
-	 */
-	if (open_after)
-		*state = (rc == 0) ? NN_MODEL_NEW : NN_MODEL_PREVIOUS;
-	else
-		*state = NN_MODEL_EMPTY;
-
-	/*
-	 * [!] THE LAST RESULT GOES WITH THE MODEL IT CAME FROM (issue #118), and
-	 * it goes whenever what is open changed -- a new model, a new model whose
-	 * plugin is then refused below, or a rollback that left nothing -- not
-	 * only when the load reports success.  Here, under the session and the
-	 * lease and before the claims settle, so no reader can see the new
-	 * identity beside the old result.  PREVIOUS changed nothing and keeps it.
-	 */
-	if (*state != NN_MODEL_PREVIOUS)
-		nn_camera_record_invalidate();
-
-	/*
-	 * The claims follow what is now open, and are settled BEFORE the session is
-	 * given back -- after it, another console's load could publish its own and
-	 * then have them overwritten with this one's.  A refused reload that restored
-	 * the previous model keeps the previous claims (NN_MODEL_PREVIOUS changes
-	 * nothing here).
+	 * [!] THE RESULTING MODEL STATE IS THE RELOAD'S OWN OUTCOME, NOT A QUESTION
+	 * ASKED AFTERWARDS.  This board's dispatcher adopts whatever handle the
+	 * backend ended up with and clears `open` when that is NULL -- the
+	 * documented case where even the PREVIOUS model could not be rebuilt.  This
+	 * used to ask nn_model_open(), which on a closed singleton opens a fresh
+	 * EMPTY one and succeeds, so exactly that case was reported as PREVIOUS; a
+	 * non-mutating query does not fix it either, because `nn info` on another
+	 * console takes no session and calls nn_model_open() itself (the #108
+	 * review, rounds 2 and 3).  nn_model_reload() reports what it left -- and
+	 * since issue #122 P2 it reports whether a MODEL is left, not whether the
+	 * singleton is open: an empty singleton is open.
 	 */
 #if defined(CONFIG_NN_BACKEND_TFLM)
 	/*
@@ -703,21 +686,15 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	 * and the order is the whole of it.  Loading first would destroy the
 	 * previous plugin's state at the fixed reservation before knowing whether
 	 * the model that needs it can be built -- and a backend that then restored
-	 * the PREVIOUS model would be left with no decoder for it.  So: the
-	 * previous plugin is untouched while nn_model_reload() runs above, and only
-	 * the outcomes that changed what is open change what decodes it.
-	 *
-	 * NN_MODEL_PREVIOUS is deliberately absent: nothing moved, so nothing here
-	 * moves either.
+	 * the PREVIOUS model would be left with no decoder for it.  A rollback
+	 * changes nothing here; an EMPTY ending unloads below (nn_load_decide()).
 	 *
 	 * All of it is still inside nn_claims_begin()/settle() and before
 	 * nn_guards_give(), so `nn info` on another console sees "a load is in
 	 * progress" rather than a model from one load beside a plugin from
 	 * another.
 	 */
-	if (*state == NN_MODEL_EMPTY) {
-		plugin_run_unload();
-	} else if (*state == NN_MODEL_NEW) {
+	if (nn_load_swaps_plugin(rc, model_after)) {
 		if (!is_container) {
 			/* A bare model is a legal thing to load, and since issue #116 it
 			 * means NOTHING reads its outputs -- `nn run` reports the tensors
@@ -726,6 +703,8 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 			 * exact accident this ordering exists to prevent. */
 			plugin_run_unload();
 		} else {
+			enum plugin_run_result pr;
+
 			/* The deepest of the shell-thread call sites: a plugin's entry()
 			 * is reached from here, several frames below the command. */
 			nn_camera_note_depth(NNCAM_SITE_SHELL);
@@ -735,35 +714,63 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 			 * staged model, asking again would answer with the OTHER slot.
 			 * `stage` and `cap` are what this function was handed before any
 			 * of that happened. */
-			(void)plugin_run_load(&claims.view, stage, stage, cap,
-			                      nn_active_base());
+			pr = plugin_run_load(&claims.view, stage, stage, cap,
+			                     nn_active_base());
+			/* [!] A REFUSED PLUGIN IS A FAILED LOAD OF A MODEL THAT IS NOW
+			 * OPEN (issue #122 D6).  The copy into the reservation has
+			 * already destroyed the previous plugin, so there is no rollback:
+			 * the model stays open with nothing reading it -- `nn run`
+			 * reports its output tensors and `nn stream start` is refused --
+			 * and the status says the load did not give what was asked for.
+			 * Until #122 this reported success.  plugin_run_load() also logs
+			 * its own reason.
+			 *
+			 * [!] THIS BRANCH IS NOT COVERED ON HARDWARE.  There is no way to
+			 * build a container whose plugin the device refuses -- the host
+			 * packer runs the device's own validator over what it packs --
+			 * so the table's host test is what holds it (see the board
+			 * README). */
+			if (pr != PLUGIN_RUN_OK && pr != PLUGIN_RUN_NO_PLUGIN) {
+				plugin_refused = 1;
+				nn_detail_set("slot %lu: %s",
+				              (unsigned long)spec->slot,
+				              plugin_run_strerror(pr));
+			}
 		}
-		/* [!] A CONTAINER WHOSE PLUGIN WOULD NOT LOAD LEAVES THE MODEL OPEN
-		 * WITH NOTHING READING IT (issue #116).  Until Step 3c that landed on
-		 * the resident decoder, so a refused plugin still produced boxes of a
-		 * sort; now the model behaves exactly like a bare one -- `nn run`
-		 * reports its output tensors and `nn stream start` is refused.
-		 * plugin_run_load() has already unpublished whatever it refused and
-		 * logs its own reason, which is the only place that says WHY.
-		 *
-		 * [!] THIS BRANCH IS NOT COVERED BY A TEST.  There is no way to build
-		 * a container whose plugin the device refuses -- the host packer runs
-		 * the device's own validator over what it packs -- so what is written
-		 * here is a claim about an unexercised path.  See the board README. */
 	}
 #endif
 
+	nn_load_decide(rc, model_after, plugin_refused, &v);
+	*state = (enum nn_model_state)v.state;
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/* Explicit, whatever the loader already did on its way out: every failure
+	 * that leaves no decoder says so here (issue #122 D6). */
+	if (v.unload)
+		plugin_run_unload();
+#endif
+
 	/*
-	 * [!] SETTLED AFTER THE DECODER MOVED, NOT BEFORE (issue #110).  This ran
-	 * first, and the comment beside the block above said the replacement was
-	 * "inside the claims window" while settling had already closed it -- so
-	 * another console could read the NEW container's claims beside the OLD
-	 * plugin.  Settling last is what makes `a model load is in progress` cover
-	 * the whole of it.
+	 * [!] THE LAST RESULT GOES WITH THE MODEL IT CAME FROM (issue #118), and
+	 * it goes whenever what is open changed -- a new model, a new model whose
+	 * plugin was refused, or a rollback that left nothing -- not only when the
+	 * load reports success.  Under the session and the lease and before the
+	 * claims settle, so no reader can see the new identity beside the old
+	 * result.  PREVIOUS changed nothing and keeps it.
 	 */
-	if (*state == NN_MODEL_NEW)
+	if (v.invalidate)
+		nn_camera_record_invalidate();
+
+	/*
+	 * [!] SETTLED AFTER THE DECODER MOVED, NOT BEFORE (issue #110), and BEFORE
+	 * the session is given back -- after it, another console's load could
+	 * publish its own claims and then have them overwritten with this one's.
+	 * Settling last is what makes `a model load is in progress` cover the
+	 * whole of it.  A refused reload that restored the previous model keeps
+	 * the previous claims.
+	 */
+	if (v.claims == (unsigned char)NN_LOAD_CLAIMS_NEW)
 		nn_claims_settle(0, is_container ? &claims : NULL);
-	else if (*state == NN_MODEL_EMPTY)
+	else if (v.claims == (unsigned char)NN_LOAD_CLAIMS_NONE)
 		nn_claims_settle(0, NULL);
 	else
 		nn_claims_settle(1, NULL);     /* the previous model, its claims */
@@ -773,12 +780,15 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 #endif
 	nn_guards_give();
 
-	if (rc != 0) {
-		nn_detail_set("%s", nn_model_strerror(rc));
-		nn_result(res, NN_SVC_ERR_ARG, NN_CLAIM_NONE);
+	if (v.ok) {
+		nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 		return;
 	}
-	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
+	/* The plugin's reason is already in the detail; a reload's is set here. */
+	if (rc != 0 || !plugin_refused)
+		nn_detail_set("%s", rc != 0 ? nn_model_strerror(rc)
+		                            : "the backend left no model open");
+	nn_result(res, NN_SVC_ERR_ARG, NN_CLAIM_NONE);
 }
 
 void nn_svc_model_unload(struct nn_op_result *res)
@@ -798,8 +808,9 @@ void nn_svc_model_unload(struct nn_op_result *res)
 		nn_result(res, rc, NN_CLAIM_NONE);
 		return;
 	}
-	/* Idempotent: the model is a singleton that is rebuilt rather than
-	   destroyed, so unloading returns it to the built-in one. */
+	/* Idempotent: the model is a singleton that stays open, so unloading
+	   leaves it open with NO model (nn_model_present() is 0) -- not a
+	   built-in one; this board has none (issue #122 P11). */
 #if defined(CONFIG_NN_BACKEND_TFLM)
 	/* Before anything changes, and its failure is an answer -- see the load
 	 * path for why the session is not enough on its own. */

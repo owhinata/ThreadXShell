@@ -88,6 +88,9 @@ ABI = {
     # in svc/plugin_abi.h -- and here, where the fixture will insist on it -- when
     # the walk changes what it charges or where it stops.
     "PLUGIN_STACK_ACCOUNTING": 1,
+    # The ABI each plugin TU records (svc/plugin_abi.h, pl_abi_mark): the
+    # image is refused unless every record is this (issue #111).
+    "PLUGIN_ABI_VERSION": 2,
 }
 
 # (Tag_CPU_arch, Tag_FP_arch, single-precision only) -> (the ABI's CPU, the ABI's
@@ -191,6 +194,40 @@ def elf_target(path):
                 q = ssend
         pos = end
     return tags, ei_data
+
+
+def abi_marks(path):
+    """[(value, address)] of every pl_abi_mark in the image's symbol table.
+
+    Read out of the ELF itself, like elf_target(): the symbol table for where
+    each TU's record is, and the loadable section bytes for what it says."""
+    raw = open(path, "rb").read()
+    if raw[:4] != b"\x7fELF" or raw[4] != 1 or raw[5] != 1:
+        raise ValueError("not a 32-bit little-endian ELF")
+    shoff, = struct.unpack_from("<I", raw, 0x20)
+    shentsize, shnum, _ = struct.unpack_from("<HHH", raw, 0x2E)
+    shdrs = [struct.unpack_from("<10I", raw, shoff + i * shentsize)
+             for i in range(shnum)]
+    out = []
+    for sh in shdrs:
+        if sh[1] != 2:                              # SHT_SYMTAB
+            continue
+        strtab = shdrs[sh[6]]
+        for off in range(sh[4], sh[4] + sh[5], 16):
+            name_off, value, size, _info, _other, shndx = struct.unpack_from(
+                "<IIIBBH", raw, off)
+            name, _ = _ntbs(raw, strtab[4] + name_off)
+            if name != "pl_abi_mark":
+                continue
+            if size != 4 or shndx == 0 or shndx >= len(shdrs):
+                raise ValueError(f"pl_abi_mark at 0x{value:08x} is not a "
+                                 "defined 4-byte object")
+            s = shdrs[shndx]
+            if s[1] == 8 or not s[3] <= value <= s[3] + s[5] - 4:  # NOBITS
+                raise ValueError(f"pl_abi_mark at 0x{value:08x} has no bytes")
+            v, = struct.unpack_from("<I", raw, s[4] + value - s[3])
+            out.append((v, value))
+    return out
 
 
 def check_target(elf, word, errors):
@@ -520,6 +557,26 @@ def main():
 
     # 0. the target word
     target_note = check_target(args.elf, args.target_id, errors)
+
+    # 0b. the ABI every TU was compiled against (issue #111)
+    try:
+        marks = abi_marks(args.elf)
+    except (ValueError, IndexError, struct.error) as exc:
+        errors.append(f"abi: cannot read the image's ABI records ({exc})")
+        marks = None
+    if marks is not None:
+        want = ABI["PLUGIN_ABI_VERSION"]
+        if not marks:
+            errors.append("abi: no pl_abi_mark in the image -- it was not "
+                          "compiled by add_plugin() (PLUGIN_IMAGE_BUILD), so "
+                          "which ABI its code expects is unknown")
+        for v, at in marks:
+            if v != want:
+                errors.append(f"abi: a TU of this image was compiled against "
+                              f"ABI {v} (pl_abi_mark at 0x{at:08x}), the "
+                              f"header is ABI {want} -- a stale object; the "
+                              "packer would stamp the header's ABI over code "
+                              "that expects another")
 
     # 1. undefined symbols
     und = [l.split()[-1] for l in run([args.nm, "-u", args.elf]).splitlines()

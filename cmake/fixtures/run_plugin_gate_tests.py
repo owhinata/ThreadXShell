@@ -85,7 +85,7 @@ for _name, _arch, _word in (
 BASE_FLAGS = [
     "-Os", "-std=c11", "-ffreestanding", "-fno-builtin", "-fno-common",
     "-ffunction-sections", "-fdata-sections", "-fno-stack-protector",
-    "-fstack-usage",
+    "-fstack-usage", "-DPLUGIN_IMAGE_BUILD",
 ]
 NO_UNWIND = ["-fno-unwind-tables", "-fno-asynchronous-unwind-tables"]
 
@@ -300,6 +300,18 @@ def m_sink_crosses(src):
         "\t\tpl_base_log((const struct plugin_base_api *)ctx, s, len);\n")
 
 
+def m_stale_tu(src):
+    """[!] ONE OBJECT COMPILED AGAINST THE OLD ABI (issue #111).  What the
+    hardware showed: plugin_main.o was a day older than svc/plugin_abi.h and
+    still compared the base against ABI 1.  Rebuilding against a stale header
+    copy is awkward in a fixture, so the stale TU's record is written directly:
+    a TU that says ABI 1 in an image whose other TUs say 2."""
+    sub(os.path.join(src, "plugin_libc.c"), "#include <stddef.h>",
+        "#include <stddef.h>\n#include <stdint.h>\n"
+        "__attribute__((used, section(\".plugin_abi_mark\")))\n"
+        "static const uint32_t pl_abi_mark = 1u;")
+
+
 # ---- the declaration the gate emits (issue #111) ---------------------------
 #
 # [!] AN ORACLE THAT IS NOT THE CODE UNDER TEST.  The gate now emits each slot's
@@ -489,6 +501,14 @@ CASES = [
      "gate: a Cortex-M4 records the same name as an M7; FPv4 is what refuses it"),
     ("target_m85", "m85", None, None, None, "gate", "names its core",
      "gate: an M85 has the M55's arch and FPU; on v8.1-M the NAME decides"),
+    # --- the ABI each TU was compiled against (issue #111) ---------------------
+    ("stale_tu", "grove", m_stale_tu, None, None, "gate",
+     "was compiled against ABI 1",
+     "gate: one TU recorded ABI 1 in an ABI 2 image -- a stale object"),
+    ("no_marks", "grove", None,
+     [f for f in BASE_FLAGS if f != "-DPLUGIN_IMAGE_BUILD"] + NO_UNWIND, None,
+     "gate", "no pl_abi_mark in the image",
+     "gate: an image compiled without PLUGIN_IMAGE_BUILD states no ABI"),
 ]
 
 # (name, board, mutate, entries, expected, must-say, why): the same build, but

@@ -81,6 +81,27 @@ extern "C" {
  */
 #define PLUGIN_STACK_ACCOUNTING 1u
 
+/*
+ * [!] EVERY PLUGIN TU SAYS WHICH ABI IT WAS COMPILED AGAINST (issue #111).  The
+ * packer stamps the manifest's abi_version from THIS header at pack time; the
+ * code in the image was compiled from whatever this header said when each
+ * object was last built.  Those two disagreed on the hardware -- stale objects
+ * compared the base against ABI 1 inside a manifest that said 2 -- and nothing
+ * saw it, because every check read a self-consistent image.  So each plugin TU
+ * that includes this header leaves one word behind, kept by asset/common/
+ * plugin.ld, and cmake/check_plugin_image.py refuses an image in which any of
+ * them is not the header's ABI.  add_plugin() defines PLUGIN_IMAGE_BUILD; the
+ * firmware never does, so it carries none of these.
+ *
+ * It catches a TU compiled against an OLD value of this header.  A TU that
+ * does not include it cannot state an ABI and is not checked -- the build's
+ * header dependencies (add_plugin()'s depfile) are what keep objects current.
+ */
+#if defined(PLUGIN_IMAGE_BUILD)
+__attribute__((used, section(".plugin_abi_mark")))
+static const uint32_t pl_abi_mark = PLUGIN_ABI_VERSION;
+#endif
+
 /* ---- the container ------------------------------------------------------- */
 
 /**

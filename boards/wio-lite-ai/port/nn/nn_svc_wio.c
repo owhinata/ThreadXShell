@@ -204,6 +204,11 @@ enum nn_claims_seen {
 static struct nn_claims nn_claims;
 static uint8_t          nn_claims_valid;
 static uint8_t          nn_claims_loading;
+/* Bumped at nn_claims_begin() and again at nn_claims_settle(), so it is ODD for
+ * exactly as long as a load or unload is between them (issue #122).  `nn info`
+ * reads it on both sides of its copy: `loading` alone cannot say that a whole
+ * load started AND finished between two reads. */
+static uint32_t         nn_claims_seq;
 
 /* Raised immediately before nn_model_reload(); every path that raises it
  * settles it (nn_claims_settle) before giving the session back. */
@@ -213,7 +218,19 @@ static void nn_claims_begin(void)
 
 	TX_DISABLE
 	nn_claims_loading = 1u;
+	nn_claims_seq++;
 	TX_RESTORE
+}
+
+static uint32_t nn_claims_seq_read(void)
+{
+	uint32_t v;
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	v = nn_claims_seq;
+	TX_RESTORE
+	return v;
 }
 
 /*
@@ -234,6 +251,7 @@ static void nn_claims_settle(int keep, const struct nn_claims *c)
 		}
 	}
 	nn_claims_loading = 0u;
+	nn_claims_seq++;
 	TX_RESTORE
 }
 
@@ -379,6 +397,7 @@ void nn_svc_info(struct nn_svc_info *out)
 {
 	const struct nn_backend_info *bi = nn_backend();
 	struct nn_model *m = NULL;
+	uint32_t seq0, seq1;
 	int held;
 
 	memset(out, 0, sizeof *out);
@@ -409,6 +428,7 @@ void nn_svc_info(struct nn_svc_info *out)
 	 * common case is now provably clean; when it is held the behaviour is what
 	 * it always was, and no diagnostic is lost.
 	 */
+	seq0 = nn_claims_seq_read();
 	held = (nn_session_try_acquire() == 0);
 	/* [!] "A MODEL IS ACTIVE", NOT "THE SINGLETON OPENED" (issue #122 P2).
 	 * nn_model_open() succeeds on an empty TFLM singleton -- its state after
@@ -419,6 +439,27 @@ void nn_svc_info(struct nn_svc_info *out)
 	out->arena_bytes = nn_activations_bytes(m);
 	if (held)
 		nn_session_release();
+	seq1 = nn_claims_seq_read();
+
+	/*
+	 * [!] A LOAD IN FLIGHT IS BUSY, NOT "NO MODEL" (issue #122).  The backend
+	 * publishes zero tensors while it rebuilds -- the new model, or the previous
+	 * one on a rollback -- so a copy taken then says nothing is loaded, and the
+	 * load goes on to report NEW or PREVIOUS.  When the session was free no load
+	 * can have run; when it was not, the copy stands only if no load or unload
+	 * was between its two steps at either end of it, nor ran whole in between.
+	 * A stream holds the session and never moves the counter, so its report is
+	 * what it was.
+	 */
+	if (!held && ((seq0 & 1u) != 0u || seq0 != seq1)) {
+		out->model_active   = 0u;
+		out->model[0]       = '\0';
+		out->arena_bytes    = 0u;
+		out->avail_identity = (uint8_t)NN_AVAIL_BUSY;
+		out->avail_runtime  = (uint8_t)NN_AVAIL_BUSY;
+		out->avail_tensors  = (uint8_t)NN_AVAIL_BUSY;
+		return;
+	}
 
 	/* Every section is answered here, streaming or not -- which is the point of
 	   the copy above (issue #99 made this explicit rather than implied). */

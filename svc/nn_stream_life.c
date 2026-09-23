@@ -44,6 +44,11 @@ enum nn_stream_start_claim nn_stream_life_begin(struct nn_stream_life *l,
 		return NN_STREAM_START_DEAD;
 	case NN_STREAM_PHASE_STARTING:
 	case NN_STREAM_PHASE_STOPPING:
+		/* [!] A one-shot coming up or going down is still a `nn run`, and
+		 * says so: its start and its stop take most of its life, and "a start
+		 * or a stop is in progress" names nobody. */
+		return (l->kind == (uint8_t)NN_STREAM_KIND_ONESHOT)
+		       ? NN_STREAM_START_ONESHOT : NN_STREAM_START_BUSY;
 	default:
 		return NN_STREAM_START_BUSY;
 	}
@@ -125,9 +130,16 @@ enum nn_stream_stop_claim nn_stream_life_claim_stop(struct nn_stream_life *l,
 		break;
 	case NN_STREAM_PHASE_STARTING:
 	case NN_STREAM_PHASE_STOPPING:
+		/* Somebody else owns the transition.  When that somebody is a `nn run`
+		 * the answer names it, as it does while the run is RUNNING -- unless
+		 * the operator already owns this teardown (orphan), when the owner is
+		 * another stop. */
+		if (l->kind == (uint8_t)NN_STREAM_KIND_ONESHOT && !l->orphan)
+			return NN_STREAM_STOP_ONESHOT;
+		return NN_STREAM_STOP_BUSY;
 	default:
-		/* Somebody else owns the transition.  Fail closed on an unknown phase
-		   too: a value this does not recognise is not permission. */
+		/* Fail closed on an unknown phase too: a value this does not
+		   recognise is not permission. */
 		return NN_STREAM_STOP_BUSY;
 	}
 

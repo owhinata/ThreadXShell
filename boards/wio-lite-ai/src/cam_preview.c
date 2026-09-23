@@ -261,7 +261,7 @@ static void preview_draw_plugin(void)
 	 * second -- an inference ran that nothing decoded, and there is nothing to
 	 * put on the picture (issue #116). */
 	memset(&dec, 0, sizeof dec);
-	if (!nn_camera_decode_get(&dec, NULL))
+	if (!nn_camera_decode_get(&dec, NULL, NULL))
 		return;
 	/* [!] AND IT MUST BE THIS SESSION'S (issue #118).  The record keeps the
 	 * last result across a stop now, so `valid` alone would leave a stopped

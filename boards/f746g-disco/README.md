@@ -248,6 +248,10 @@ capture.
 > the record's accepted-publish count, not the worker's inference counter, which
 > this board bumps before the decode is published. The GUI boxes are drawn only
 > from a result of the session in force, so they still clear on `nn stream stop`.
+> For a model the decoder does not recognise, the worker takes the top 5 classes
+> of output 0 before its next inference and publishes them with the result
+> (issue #121, `svc/nn_top.c`); `nn run` and `nn dets` print those, never the
+> output tensor as it is at print time.
 
 Stopping one of them detaches its sink while the base keeps running --
 that is the whole point of a subscriber -- so a delivery can already be in

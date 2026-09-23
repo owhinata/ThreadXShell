@@ -928,7 +928,7 @@ static void nn_snap_of(const struct nn_camera_decode *dec,
 }
 
 void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
-                     struct nn_report_capture *rep,
+                     struct nn_report_capture *rep, struct nn_result_extra *ext,
                      nn_svc_cancel_fn cancel, void *ctx,
                      struct nn_op_result *res)
 {
@@ -1009,7 +1009,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 * only this run's publishes.
 	 */
 	memset(&dec, 0, sizeof dec);
-	(void)nn_camera_decode_get(&dec, NULL);
+	(void)nn_camera_decode_get(&dec, NULL, NULL);
 	base = dec.accepted;
 
 	/* [!] Wall-clock deadline, not a count of completed sleeps: a sleep that
@@ -1017,7 +1017,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 * and report a timeout that never happened. */
 	deadline = tx_time_get() + (NN_RUN_WAIT_S * TX_TIMER_TICKS_PER_SECOND);
 	for (;;) {
-		(void)nn_camera_decode_get(&dec, NULL);
+		(void)nn_camera_decode_get(&dec, NULL, NULL);
 		if (dec.accepted != base) {
 			why = RUN_INFERRED;
 			break;
@@ -1052,12 +1052,14 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	   has none -- so the array it lends us is left exactly as it arrived. */
 	(void)dets;
 	(void)max;
-	(void)nn_camera_decode_get(&dec, rep);
+	(void)nn_camera_decode_get(&dec, rep, ext);
 	nn_snap_of(&dec, snap);
 	/* [!] THIS RUN'S, OR NOT VALID (issue #118).  The record's own `valid`
 	 * would be true of whatever ran last -- a stream stopped an hour ago --
 	 * and the shared command prints a valid snapshot as this run's result. */
 	snap->valid = nn_det_last_valid(snap, base);
+	if (!snap->valid && ext != NULL)
+		ext->what = (uint8_t)NN_EXTRA_NONE;     /* not this run's either */
 
 	/* [!] A RESULT THAT MADE IT IS NOT A TIMEOUT (issue #122, review).  The
 	 * deadline can pass in the same moment the inference publishes; the record
@@ -1138,6 +1140,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 
 void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
                            int max, struct nn_report_capture *rep,
+                           struct nn_result_extra *ext,
                            struct nn_op_result *res)
 {
 	struct nn_camera_decode dec;
@@ -1150,7 +1153,7 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
 	/* [!] THE LAST RESULT, WHOEVER PRODUCED IT (issue #118): a `nn run`, a
 	 * running stream, or one that has stopped.  Only a model change clears
 	 * it, so `valid` is the record's own and is not narrowed to a session. */
-	(void)nn_camera_decode_get(&dec, rep);
+	(void)nn_camera_decode_get(&dec, rep, ext);
 	nn_snap_of(&dec, snap);
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
@@ -1640,7 +1643,7 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		 * record's lock is taken here, outside the commit's critical
 		 * section, which may not take it. */
 		memset(&rec, 0, sizeof rec);
-		(void)nn_camera_decode_get(&rec, NULL);
+		(void)nn_camera_decode_get(&rec, NULL, NULL);
 		nn_stream_mint(&base, rec.accepted, gen);
 	}
 	if (*gen == NN_STREAM_GEN_ANY) {
@@ -1712,7 +1715,7 @@ static void nn_stream_take_final(struct nn_stream_end *final)
 	 * afterwards takes the result away and the latched line must follow.
 	 */
 	memset(&dec, 0, sizeof dec);
-	(void)nn_camera_decode_get(&dec, NULL);
+	(void)nn_camera_decode_get(&dec, NULL, NULL);
 	nn_snap_of(&dec, &snap);
 	final->stats.last_valid = nn_det_last_valid(&snap, acc0) ? 1u : 0u;
 	final->stats.last_ndet  = (int32_t)snap.ndet;
@@ -1741,7 +1744,7 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	 * the record's lock cannot be taken inside the critical section; a model
 	 * change landing after it is caught by the next poll. */
 	memset(&dec0, 0, sizeof dec0);
-	(void)nn_camera_decode_get(&dec0, NULL);
+	(void)nn_camera_decode_get(&dec0, NULL, NULL);
 
 	TX_DISABLE
 	nn_stream_life_snapshot(&nn_life, &g, &phase, &seq0, &kind);
@@ -1778,7 +1781,7 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	/* Outside the critical section: these take their own locks. */
 	nn_camera_stats_get(&st);
 	memset(&dec, 0, sizeof dec);
-	(void)nn_camera_decode_get(&dec, NULL);
+	(void)nn_camera_decode_get(&dec, NULL, NULL);
 
 	TX_DISABLE
 	nn_stream_life_snapshot(&nn_life, NULL, NULL, &seq1, NULL);
@@ -1816,6 +1819,13 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	 */
 	nn_snap_of(&dec, &snap);
 	out->last_valid = nn_det_last_valid(&snap, acc0) ? 1u : 0u;
+	/* [!] AND NEVER WHILE THE LIFECYCLE NAMES A ONE-SHOT (issue #118,
+	 * review).  The base is the last STREAM's and a `nn run` publishes into
+	 * the same record; a stream whose end was latched answers above, so this
+	 * is the path of one that was not -- and there a one-shot's publish would
+	 * count against the stream's base and print as its last result. */
+	if (kind != (uint8_t)NN_STREAM_KIND_STREAM)
+		out->last_valid = 0u;
 	out->last_ndet  = (int32_t)dec.ndet;
 	return NN_SVC_OK;
 }

@@ -56,10 +56,82 @@
 #include <stdint.h>
 
 #include "blazeface.h"
+#include "tensor.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/*
+ * ---- what travels WITH a result (issue #121) ------------------------------
+ *
+ * [!] A REPORT THAT NEEDS THE MODEL IS TAKEN WHEN THE RESULT IS PUBLISHED, NOT
+ * WHEN IT IS PRINTED.  Two of the reports the shared command gives read the
+ * model: the output descriptors of an inference nothing decoded, and the top
+ * classes of an output a resident decoder did not recognise.  Both used to be
+ * read at PRINT time, by pinning whatever model was open then -- after the
+ * session that ran had been released, so another console's load could put a
+ * different model's shapes under this result, and on a stream stop the
+ * classes of a frame whose publish had been dropped.  The publisher holds the
+ * model while it publishes; that is the moment the two belong together, so
+ * that is when they are taken, and they live and die with the result.
+ */
+
+/** Output descriptors carried: at least every board's own output limit. */
+#define NN_RAW_OUTPUTS_MAX 8
+
+/**
+ * The outputs of an inference nothing decoded, as they were when it ran.
+ *
+ * [!] `data` IS CLEARED IN EVERY DESCRIPTOR.  The buffers belong to the model
+ * and are overwritten by the next inference; what is kept is what describes the
+ * result -- shape, type, quantisation, size -- which is exactly what the report
+ * prints.  A pointer kept here would be an invitation to read a later frame.
+ */
+struct nn_raw_outputs {
+	int32_t            count;  /**< outputs the model has                  */
+	uint8_t            n;      /**< descriptors kept, <= NN_RAW_OUTPUTS_MAX */
+	struct tensor_desc out[NN_RAW_OUTPUTS_MAX];
+};
+
+#define NN_TOP_N 5
+
+/** What became of a top-classes computation. */
+enum nn_top_status {
+	NN_TOP_NONE = 0,     /**< not computed                                 */
+	NN_TOP_OK,           /**< @ref nn_top5::n entries of @ref count         */
+	NN_TOP_NO_OUTPUT,    /**< the output could not be read                  */
+	NN_TOP_NO_STRIDE,    /**< its element type has no stride this reads at  */
+};
+
+/** The top classes of output 0, computed by the thread that ran the inference
+ *  before its next one (issue #121, decision D3). */
+struct nn_top5 {
+	uint8_t  status;          /**< enum nn_top_status                        */
+	uint8_t  n;               /**< entries filled, <= NN_TOP_N              */
+	uint8_t  integer_scored;  /**< raw codes are meaningful                  */
+	uint8_t  dtype;           /**< enum tensor_dtype of the output           */
+	uint32_t count;           /**< classes in the output                     */
+	int32_t  idx[NN_TOP_N];
+	float    v[NN_TOP_N];     /**< dequantised scores                        */
+	int32_t  raw[NN_TOP_N];   /**< the stored codes (integer types)          */
+};
+
+/** Which of the two a result carries, if either. */
+enum nn_extra_what {
+	NN_EXTRA_NONE = 0,
+	NN_EXTRA_RAW,        /**< @ref nn_result_extra::u raw                  */
+	NN_EXTRA_TOP,        /**< @ref nn_result_extra::u top                  */
+};
+
+/** The model-dependent part of a result; one of the two, by @ref what. */
+struct nn_result_extra {
+	uint8_t what;        /**< enum nn_extra_what */
+	union {
+		struct nn_raw_outputs raw;
+		struct nn_top5        top;
+	} u;
+};
 
 /**
  * The last decode a session published.
@@ -99,6 +171,8 @@ struct nn_det_record {
 	/** The generation the result was published under -- see
 	 *  @ref nn_det_snapshot::current. */
 	uint32_t         pub_gen;
+	/** What the report needs from the model, taken with the result (#121). */
+	struct nn_result_extra extra;
 };
 
 /**
@@ -229,6 +303,12 @@ int nn_det_record_admits(const struct nn_det_record *r, uint32_t gen);
  *         result of mine" waits on that count and never on a counter the
  *         board bumps beside it (issue #118).
  *
+ * @param top  optional; the top classes of this inference's output 0, for a
+ *             decoder that did not recognise the model (issue #121).  Kept
+ *             with the result, replaced by the next publish, cleared by a
+ *             model change -- and left alone by a publish that is dropped,
+ *             because the record still holds the result they describe.
+ *
  * [!] A NEGATIVE @p n IS PUBLISHED AS ITSELF, NOT AS ZERO FACES (issue #57) AND
  * NOT AS -1 (issue #118).  Zero reads as a measurement.  And the codes are not
  * interchangeable: BF_ERR_MODEL means "not a detector" and routes to the class
@@ -237,7 +317,8 @@ int nn_det_record_admits(const struct nn_det_record *r, uint32_t gen);
  * model that was fine.
  */
 int nn_det_record_publish(struct nn_det_record *r, const struct bf_det *d, int n,
-                          const struct bf_result *res, uint32_t gen);
+                          const struct bf_result *res, uint32_t gen,
+                          const struct nn_top5 *top);
 
 /**
  * Publish one decode whose RESULT STAYED WITH THE DECODER (issue #110).
@@ -282,6 +363,9 @@ int nn_det_record_publish_external(struct nn_det_record *r, int n, uint32_t gen)
  * from a retired session lands nowhere, and a mismatch leaves the record
  * exactly as it was.
  *
+ * @param raw  optional; the model's output descriptors as they were when it
+ *             ran (issue #121).  The `data` pointers are cleared on the way in.
+ *
  * [!] THE COUNT IS ZERO BECAUSE THERE IS NOTHING TO COUNT, not because a
  * decoder looked and found nothing.  @ref NN_DET_RAW_TENSORS is what tells
  * those apart; the number beside it is not a measurement anybody took, so there
@@ -294,7 +378,15 @@ int nn_det_record_publish_external(struct nn_det_record *r, int n, uint32_t gen)
  * same reason they are on the external path: they describe a decoder that did
  * not run, and stale ones must not be left standing beside this.
  */
-int nn_det_record_publish_raw(struct nn_det_record *r, uint32_t gen);
+int nn_det_record_publish_raw(struct nn_det_record *r, uint32_t gen,
+                              const struct nn_raw_outputs *raw);
+
+/**
+ * The model-dependent part of the result, in the same breath as a snapshot --
+ * called under the same lock hold (issue #121).
+ */
+void nn_det_record_extra(const struct nn_det_record *r,
+                         struct nn_result_extra *out);
 
 /**
  * Take a coherent snapshot, and up to @p max boxes with it.

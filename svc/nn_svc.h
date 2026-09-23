@@ -548,26 +548,33 @@ int nn_svc_input(struct tensor_desc *out);
  *
  * @param snap  the decode, boxes and diagnostics together (issue #97)
  * @param dets  optional; up to @p max boxes, normalised to the MODEL INPUT
+ * @param ext   the model-dependent part of the report -- output descriptors of
+ *              an undecoded inference, or the top classes a resident decoder
+ *              could not interpret -- copied from the record in the same hold
+ *              as @p snap (issue #121).  THE CALLER'S FRAME, like @p rep: the
+ *              shared command prints it and never goes back to the model.
  */
 void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
-                     struct nn_report_capture *rep,
+                     struct nn_report_capture *rep, struct nn_result_extra *ext,
                      nn_svc_cancel_fn cancel, void *ctx,
                      struct nn_op_result *res);
 
 /**
- * Decode the model's CURRENT outputs, without capturing anything.
+ * The last published result -- what `nn dets` prints (issue #118).
  *
- * What `nn dets` is for: the tensors are whatever the last inference left, so
- * this says what the decoder makes of them.  The decoder's state and its
- * candidate scratch belong to the board (issue #97), which is why this is an
- * operation here and not something the shared command does for itself.
+ * [!] IT DECODES NOTHING, on any board.  It reads the record a `nn run` or a
+ * stream last published, which a stop does not clear and a model change does;
+ * a plugin's own account of it is captured only while the board can still ask
+ * for it (@ref nn_report_status), and the model-dependent report comes from
+ * the record in @p ext (issue #121), never from the model as it is now.
  *
  * The snapshot carries the boxes AND the diagnostics together, on purpose: read
  * separately, a console pairs one frame's boxes with a different frame's
  * numbers.
  */
 void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
-                           int max, struct nn_report_capture *rep, struct nn_op_result *res);
+                           int max, struct nn_report_capture *rep,
+                           struct nn_result_extra *ext, struct nn_op_result *res);
 
 /**
  * Fill every input with a deterministic pattern, so runs are comparable.

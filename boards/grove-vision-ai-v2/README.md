@@ -4217,7 +4217,10 @@ unload` do.  **A stop takes its record boundary only after
 the producer publishes there immediately after each decode -- so no decode can
 follow the boundary and be dropped, which is how wio's stop used to lose the
 stopped stream's account (c88d0ab).  The start's boundary, and the base the
-stream counts its own publishes from, come before the sink is attached.
+stream counts its own publishes from, come before the sink is attached.  A bare
+model's `nn run` publishes its output descriptors with the result, under the
+gate (issue #121), so `nn run` and `nn dets` print the shapes of the model that
+ran rather than of whatever is open when they print.
 - **`lcd rot` and `lcd madctl` are refused** while any camera sink owns the
   panel. They move the driver's PERSISTENT geometry, and the sink blits a fixed
   size the driver validates internally -- so a rotation mid-stream leaves every

@@ -33,6 +33,7 @@
 
 #include "camera.h"            /* enum camera_res */
 #include "blazeface.h"  /* struct bf_det */
+#include "nn_det_record.h" /* struct nn_result_extra (issue #121) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -130,13 +131,15 @@ void nn_camera_record_invalidate(void);
  * Take a coherent snapshot of the last published decode.
  *
  * @param dets  optional; the boxes, up to @p max of them
+ * @param ext   optional; the classes the result was published with, for a
+ *              model the decoder did not recognise (issue #121)
  * @return non-zero if a snapshot was taken (zero before the first attach, when
  *         the lock does not exist yet).  `valid == 0` means nothing has been
  *         decoded since the model went in -- which is NOT a decode that found
  *         nothing, and must not be printed as one.
  */
 int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
-                         int max);
+                         int max, struct nn_result_extra *ext);
 
 /** Runtime float32 input normalization: 1 = [-1,1], 0 = [0,1] (tuning, no reflash). */
 void nn_camera_set_norm(int signed_range);

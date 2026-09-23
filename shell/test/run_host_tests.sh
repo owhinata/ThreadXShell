@@ -425,6 +425,14 @@ gcc $CFLAGS -I "$svc" \
     $LDFLAGS -o "$out/test_nn_det_record"
 "$out/test_nn_det_record"
 
+# issue #121 -- the top classes a worker publishes with a result it could not
+# decode (svc/nn_top.c).  The walk moved out of the shared command, which read
+# the output tensor at print time -- after a stream stop, the dropped frame's.
+gcc $CFLAGS -I "$svc" \
+    "$here/test_nn_top.c" "$svc/nn_top.c" \
+    $LDFLAGS -o "$out/test_nn_top"
+"$out/test_nn_top"
+
 # issue #50 -- the pure parts of the ONE shared `nn` command (shell/cmds).  Two
 # things live here that a console cannot check:
 #

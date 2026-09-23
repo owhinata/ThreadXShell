@@ -592,8 +592,7 @@ static int cmd_nn_bench(struct cli_instance *sh, int argc, char **argv)
  * a different thing to go and look at.
  */
 /*
- * Top classes of an output vector, by insertion -- N is small and the vector is
- * a class count, so nothing cleverer earns its code size.
+ * The top classes of an output vector.
  *
  * [!] THIS IS WHAT MAKES ONE `run` SERVE BOTH KINDS OF MODEL.  The three boards
  * used to split classification and detection into separate subcommands, so the
@@ -601,89 +600,37 @@ static int cmd_nn_bench(struct cli_instance *sh, int argc, char **argv)
  * What is loaded already decides that, and the decoder says so: only
  * BF_ERR_MODEL means "not a detector", and it is the one code that routes here
  * instead of being reported as a failure.
+ *
+ * [!] AND IT PRINTS WHAT THE RECORD CARRIES, NOT WHAT THE TENSOR HOLDS NOW
+ * (issue #121).  The classes are computed by the thread that ran the inference,
+ * before its next one, and published with the result (svc/nn_top.c).  Reading
+ * the output tensor here, after the session was released, printed whatever the
+ * next inference -- a dropped frame after a stop, another console's `nn bench`
+ * -- had left in it.
  */
-static void nn_print_top(struct cli_instance *sh, unsigned index)
+static void nn_print_top(struct cli_instance *sh,
+                         const struct nn_result_extra *ext)
 {
-	struct tensor_desc td;
-	const struct tensor_desc *t = &td;
-	enum { TOP_N = 5 };
-	int   best_i[TOP_N];
-	float best_v[TOP_N];
-	int32_t best_raw[TOP_N];
-	unsigned n = 0u, k;
-	uint32_t esz, count, i;
-	int integer_scored;
+	const struct nn_top5 *t = &ext->u.top;
+	unsigned k;
 
-	/* [!] PINNED ACROSS THE FETCH AND THE WALK.  The buffer is in the arena, and
-	 * an unload on another console would close the interpreter underneath it. */
-	if (nn_svc_tensors_pin() != NN_SVC_OK) {
-		cli_warn(sh, "top     : the model is busy or gone\r\n");
+	if (ext->what != (uint8_t)NN_EXTRA_TOP) {
+		cli_warn(sh, "top     : no classes were taken with this result\r\n");
 		return;
 	}
-	if (nn_svc_output(index, &td) != NN_SVC_OK) {
-		nn_svc_tensors_unpin();
-		cli_warn(sh, "top     : output %u is unreadable\r\n", index);
+	if (t->status == (uint8_t)NN_TOP_NO_OUTPUT) {
+		cli_warn(sh, "top     : output 0 was unreadable\r\n");
 		return;
 	}
-	esz = nn_dtype_size(t->dtype);
-	integer_scored = (t->dtype != TENSOR_DTYPE_FLOAT32);
-	if (esz == 0u || t->data == NULL) {
-		nn_svc_tensors_unpin();
+	if (t->status != (uint8_t)NN_TOP_OK) {
 		cli_warn(sh, "top     : the output cannot be read at a known "
 		             "stride (%s)\r\n", nn_dtype_name(t->dtype));
 		return;
 	}
-	count = (uint32_t)(t->bytes / esz);
 
-	for (k = 0u; k < TOP_N; k++) {
-		best_i[k] = -1;
-		best_v[k] = -1e30f;
-		best_raw[k] = 0;
-	}
-	for (i = 0u; i < count; i++) {
-		int32_t raw;
-		float v;
-
-		switch (t->dtype) {
-		case TENSOR_DTYPE_INT8:
-			raw = ((const int8_t *)t->data)[i];
-			v = ((float)raw - (float)t->zero_point) * t->scale;
-			break;
-		case TENSOR_DTYPE_UINT8:
-			raw = ((const uint8_t *)t->data)[i];
-			v = ((float)raw - (float)t->zero_point) * t->scale;
-			break;
-		case TENSOR_DTYPE_FLOAT32:
-			raw = 0;
-			v = ((const float *)t->data)[i];
-			break;
-		default:
-			nn_svc_tensors_unpin();
-			return;   /* refused above for anything without a stride */
-		}
-		for (k = 0u; k < TOP_N; k++) {
-			if (v > best_v[k]) {
-				unsigned j;
-
-				for (j = TOP_N - 1u; j > k; j--) {
-					best_v[j] = best_v[j - 1u];
-					best_i[j] = best_i[j - 1u];
-					best_raw[j] = best_raw[j - 1u];
-				}
-				best_v[k] = v;
-				best_i[k] = (int)i;
-				best_raw[k] = raw;
-				if (n < TOP_N)
-					n++;
-				break;
-			}
-		}
-	}
-
-	nn_svc_tensors_unpin();   /* the values are copied out; printing is safe */
-
-	cli_print(sh, "top     : %u of %lu class(es)\r\n", n, (unsigned long)count);
-	for (k = 0u; k < n; k++) {
+	cli_print(sh, "top     : %u of %lu class(es)\r\n", (unsigned)t->n,
+	          (unsigned long)t->count);
+	for (k = 0u; k < t->n; k++) {
 		/*
 		 * [!] THE RAW CODE AND THE SCORE IN MILLI, matching what this report
 		 * looked like before three commands became one.  The raw int8 is what
@@ -692,17 +639,17 @@ static void nn_print_top(struct cli_instance *sh, unsigned index)
 		 * is the unit `dets` already prints, so one command does not carry
 		 * two spellings of "score".
 		 */
-		long milli = (long)(best_v[k] * 1000.0f);
+		long milli = (long)(t->v[k] * 1000.0f);
 
-		if (best_v[k] != best_v[k])          /* NaN */
-			cli_print(sh, "  #%u  class %-4d  raw %4ld  score nan\r\n",
-			          k + 1u, best_i[k], (long)best_raw[k]);
-		else if (integer_scored)
-			cli_print(sh, "  #%u  class %-4d  raw %4ld  score %ld/1000\r\n",
-			          k + 1u, best_i[k], (long)best_raw[k], milli);
+		if (t->v[k] != t->v[k])              /* NaN */
+			cli_print(sh, "  #%u  class %-4ld  raw %4ld  score nan\r\n",
+			          k + 1u, (long)t->idx[k], (long)t->raw[k]);
+		else if (t->integer_scored)
+			cli_print(sh, "  #%u  class %-4ld  raw %4ld  score %ld/1000\r\n",
+			          k + 1u, (long)t->idx[k], (long)t->raw[k], milli);
 		else
-			cli_print(sh, "  #%u  class %-4d  score %ld/1000\r\n",
-			          k + 1u, best_i[k], milli);
+			cli_print(sh, "  #%u  class %-4ld  score %ld/1000\r\n",
+			          k + 1u, (long)t->idx[k], milli);
 	}
 }
 
@@ -712,39 +659,34 @@ static void nn_print_top(struct cli_instance *sh, unsigned index)
  * [!] THIS DESCRIBES, IT DOES NOT INTERPRET.  Every other report here says what
  * the numbers MEAN -- faces, classes -- and each of those readings belongs to a
  * decoder that agreed to it.  With no decoder there is no such agreement, so
- * what can honestly be printed is the shape of the buffers and where to read
- * them; `nn out` already does the reading, and repeating it here would be a
- * second value-dumping loop that could disagree with the first.
+ * what can honestly be printed is the shape of the buffers; `nn out` already
+ * does the reading, and repeating it here would be a second value-dumping loop
+ * that could disagree with the first.
  *
- * Pinned across the whole walk for the reason nn_print_top() is: these are
- * descriptors of arena buffers, and an unload on another console closes the
- * interpreter underneath them.
+ * [!] THE DESCRIPTORS ARE THE ONES THE RESULT WAS PUBLISHED WITH (issue #121).
+ * This used to pin whatever model was open at print time -- after the run's
+ * session had been released, so another console's load could put a different
+ * model's shapes under this run's result with nothing to show for it.  Nothing
+ * here touches the model now.
  */
-static void nn_print_raw_outputs(struct cli_instance *sh)
+static void nn_print_raw_outputs(struct cli_instance *sh,
+                                 const struct nn_result_extra *ext)
 {
-	int n, i;
+	const struct nn_raw_outputs *r = &ext->u.raw;
+	unsigned i;
 
-	if (nn_svc_tensors_pin() != NN_SVC_OK) {
-		cli_warn(sh, "out     : the model is busy or gone\r\n");
+	if (ext->what != (uint8_t)NN_EXTRA_RAW) {
+		cli_warn(sh, "out     : no output shapes were taken with this "
+		             "result\r\n");
 		return;
 	}
-	n = nn_svc_output_count();
-	if (n < 0) {
-		nn_svc_tensors_unpin();
-		cli_warn(sh, "out     : the outputs are unavailable just now\r\n");
-		return;
-	}
-
-	cli_print(sh, "decoder : none -- %d output(s), undecoded\r\n", n);
-	for (i = 0; i < n; i++) {
-		struct tensor_desc t;
-
-		if (nn_svc_output((unsigned)i, &t) == NN_SVC_OK)
-			nn_print_tensor(sh, "out", i, &t);
-		else
-			cli_warn(sh, "  out[%d]  unavailable just now\r\n", i);
-	}
-	nn_svc_tensors_unpin();
+	cli_print(sh, "decoder : none -- %ld output(s), undecoded\r\n",
+	          (long)r->count);
+	for (i = 0u; i < r->n; i++)
+		nn_print_tensor(sh, "out", (int)i, &r->out[i]);
+	if (r->count > (int32_t)r->n)
+		cli_warn(sh, "  ... %ld more not carried with the result\r\n",
+		         (long)(r->count - (int32_t)r->n));
 
 	cli_print(sh, "note    : `nn out <tensor> <count>` reads the values; a "
 	              "container carrying a decoder interprets them\r\n");
@@ -753,7 +695,8 @@ static void nn_print_raw_outputs(struct cli_instance *sh)
 static void nn_print_dets(struct cli_instance *sh,
                           const struct nn_det_snapshot *snap,
                           const struct bf_det *dets,
-                          const struct nn_report_capture *rep)
+                          const struct nn_report_capture *rep,
+                          const struct nn_result_extra *ext)
 {
 	int i;
 
@@ -828,12 +771,12 @@ static void nn_print_dets(struct cli_instance *sh,
 	 * table of numbers that mean nothing.
 	 */
 	if (snap->kind == (uint8_t)NN_DET_RAW_TENSORS) {
-		nn_print_raw_outputs(sh);
+		nn_print_raw_outputs(sh, ext);
 		return;
 	}
 
 	if (snap->ndet == BF_ERR_MODEL) {
-		nn_print_top(sh, 0u);
+		nn_print_top(sh, ext);
 		return;
 	}
 	if (snap->ndet < 0) {
@@ -874,14 +817,19 @@ static int cmd_nn_run(struct cli_instance *sh, int argc, char **argv)
 	char rbuf[NN_REPORT_CAPTURE_MAX];
 	struct nn_report_capture rep = { rbuf, (uint32_t)sizeof rbuf, 0u,
 	                                 (uint8_t)NN_REPORT_NONE };
+	/* The model-dependent report, taken with the result (issue #121); this
+	 * frame's for the same reason the capture buffer is. */
+	struct nn_result_extra ext;
 
 	(void)argc; (void)argv;
 
 	memset(&snap, 0, sizeof snap);
 	memset(dets, 0, sizeof dets);
 	memset(&res, 0, sizeof res);
+	memset(&ext, 0, sizeof ext);
 
-	nn_svc_run_once(&snap, dets, BF_MAX_DET, &rep, nn_cancel_shim, sh, &res);
+	nn_svc_run_once(&snap, dets, BF_MAX_DET, &rep, &ext, nn_cancel_shim, sh,
+	                &res);
 	if (res.status != NN_SVC_OK) {
 		nn_report(sh, "run", &res);
 		return 1;
@@ -894,7 +842,7 @@ static int cmd_nn_run(struct cli_instance *sh, int argc, char **argv)
 		cli_warn(sh, "nn: no decode was published for that frame\r\n");
 		return 1;
 	}
-	nn_print_dets(sh, &snap, dets, &rep);
+	nn_print_dets(sh, &snap, dets, &rep, &ext);
 	return 0;
 }
 #endif /* NN_SVC_HAS_CAMERA */
@@ -907,14 +855,16 @@ static int cmd_nn_dets(struct cli_instance *sh, int argc, char **argv)
 	char rbuf[NN_REPORT_CAPTURE_MAX];      /* this frame's; see cmd_nn_run */
 	struct nn_report_capture rep = { rbuf, (uint32_t)sizeof rbuf, 0u,
 	                                 (uint8_t)NN_REPORT_NONE };
+	struct nn_result_extra ext;            /* likewise (issue #121) */
 
 	(void)argc; (void)argv;
 
 	memset(&snap, 0, sizeof snap);
 	memset(dets, 0, sizeof dets);
 	memset(&res, 0, sizeof res);
+	memset(&ext, 0, sizeof ext);
 
-	nn_svc_decode_current(&snap, dets, BF_MAX_DET, &rep, &res);
+	nn_svc_decode_current(&snap, dets, BF_MAX_DET, &rep, &ext, &res);
 	if (res.status != NN_SVC_OK) {
 		nn_report(sh, "dets", &res);
 		return 1;
@@ -925,7 +875,7 @@ static int cmd_nn_dets(struct cli_instance *sh, int argc, char **argv)
 		cli_warn(sh, "nn: nothing has been inferred yet\r\n");
 		return 1;
 	}
-	nn_print_dets(sh, &snap, dets, &rep);
+	nn_print_dets(sh, &snap, dets, &rep, &ext);
 	return 0;
 }
 

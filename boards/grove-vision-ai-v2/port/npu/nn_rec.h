@@ -46,10 +46,12 @@ void     nn_rec_invalidate(void);
 uint32_t nn_rec_gen(void);
 /** A plugin's decode, negative values included; @return non-zero if taken. */
 int      nn_rec_publish_external(int n, uint32_t gen);
-/** An inference nothing decoded; @return non-zero if taken. */
-int      nn_rec_publish_raw(uint32_t gen);
-/** The result, all of it, in one critical section. */
-void     nn_rec_snapshot(struct nn_det_snapshot *out);
+/** An inference nothing decoded, with its model's output shapes (#121);
+ *  @return non-zero if taken. */
+int      nn_rec_publish_raw(uint32_t gen, const struct nn_raw_outputs *raw);
+/** The result, all of it, in one critical section; @p ext optional (#121). */
+void     nn_rec_snapshot(struct nn_det_snapshot *out,
+                         struct nn_result_extra *ext);
 
 #ifdef __cplusplus
 }

@@ -1120,13 +1120,40 @@ static int nn_fill_input(struct nn_op_result *res, const uint8_t *raw,
  * @return 0 when a result was published; -1 when no decode could be run (an
  *         output is unreadable), with the detail set and nothing published
  */
+/*
+ * The output shapes of the model that ran, taken under the gate that keeps it
+ * open (issue #121) -- not at print time.
+ *
+ * [!] NOT INLINED, AND THAT IS A STACK DECISION.  The descriptors are ~300 B,
+ * and inlined into nn_decode_publish() they would sit in the frame the plugin's
+ * decode() is entered below -- a slot declared against the shell's ceiling.
+ * Only the path with no plugin needs them.
+ */
+static __attribute__((noinline)) void nn_publish_raw_outputs(uint32_t gen)
+{
+	struct nn_raw_outputs raw;
+	unsigned n = npu_output_count(), i;
+
+	memset(&raw, 0, sizeof raw);
+	raw.count = (int32_t)n;
+	for (i = 0u; i < n && i < NN_RAW_OUTPUTS_MAX; i++) {
+		struct npu_tensor t;
+
+		if (npu_output(i, &t) != NPU_OK)
+			break;
+		npu_desc_of(&raw.out[i], &t);
+		raw.n = (uint8_t)(i + 1u);
+	}
+	(void)nn_rec_publish_raw(gen, &raw);
+}
+
 static int nn_decode_publish(uint32_t gen, struct nn_op_result *res)
 {
 	struct npu_tensor outs[NPU_DESC_MAX_OUTPUTS];
 	unsigned n_out, i;
 
 	if (!nn_active_is_plugin()) {
-		(void)nn_rec_publish_raw(gen);
+		nn_publish_raw_outputs(gen);
 		return 0;
 	}
 
@@ -1188,7 +1215,7 @@ static void nn_oneshot_finish(uint32_t gen, struct nn_op_result *res)
 }
 
 void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
-                     struct nn_report_capture *rep,
+                     struct nn_report_capture *rep, struct nn_result_extra *ext,
                      nn_svc_cancel_fn cancel, void *ctx,
                      struct nn_op_result *res)
 {
@@ -1307,12 +1334,15 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	/* [!] READ BACK FROM THE RECORD, AND ONLY THIS RUN'S (issue #118): the
 	 * answer `nn dets` will give next is the one printed now.  The account is
 	 * captured before the gate goes. */
-	nn_rec_snapshot(snap);
+	nn_rec_snapshot(snap, ext);
 	snap->valid = nn_det_last_valid(snap, base);
-	if (snap->valid)
+	if (snap->valid) {
 		nn_capture_report(snap, rep);
-	else
+	} else {
 		nn_report_set(rep, NN_REPORT_NONE);
+		if (ext != NULL)
+			ext->what = (uint8_t)NN_EXTRA_NONE;
+	}
 
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 	nn_oneshot_finish(gen, res);
@@ -1320,6 +1350,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 
 void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
                            int max, struct nn_report_capture *rep,
+                           struct nn_result_extra *ext,
                            struct nn_op_result *res)
 {
 	int gated;
@@ -1343,7 +1374,7 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
 	 * stream holds the gate until its stop.
 	 */
 	gated = nn_try_acquire();
-	nn_rec_snapshot(snap);
+	nn_rec_snapshot(snap, ext);
 	if (gated) {
 		nn_capture_report(snap, rep);
 		nn_release();
@@ -1708,7 +1739,7 @@ static uint32_t nn_stream_take_final(struct nn_stream_stats *final)
 	TX_RESTORE
 	camera_stream_stats(&cs);
 	nn_overlay_stats(&os);
-	nn_rec_snapshot(&rec);
+	nn_rec_snapshot(&rec, NULL);
 	memset(final, 0, sizeof *final);
 	nn_stream_counts(&cs, &os, &rec, frames0, acc0, final);
 	return rec.epoch;     /* latched with the line it qualifies */
@@ -1740,7 +1771,7 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 		/* [!] ...except that a model change since the stop took its last
 		 * result away (issue #118).  The record's lock is its own critical
 		 * section, so the epoch is compared just after. */
-		nn_rec_snapshot(&rec);
+		nn_rec_snapshot(&rec, NULL);
 		if (rec.epoch != ep)
 			out->last_valid = 0u;
 		return NN_SVC_OK;
@@ -1763,7 +1794,7 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	 */
 	camera_stream_stats(&cs);
 	nn_overlay_stats(&os);
-	nn_rec_snapshot(&rec);
+	nn_rec_snapshot(&rec, NULL);
 
 	/*
 	 * Phase 3: accept only if nothing moved.  The counter, not the generation
@@ -1781,6 +1812,11 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	out->running        = (phase == (uint8_t)NN_STREAM_PHASE_RUNNING &&
 	                       kind == (uint8_t)NN_STREAM_KIND_STREAM) ? 1u : 0u;
 	nn_stream_counts(&cs, &os, &rec, frames0, acc0, out);
+	/* [!] NEVER WHILE THE LIFECYCLE NAMES A ONE-SHOT (issue #118, review):
+	 * the base is the last STREAM's, and `nn run` publishes into the same
+	 * record -- see the same guard in the wio adapter. */
+	if (kind != (uint8_t)NN_STREAM_KIND_STREAM)
+		out->last_valid = 0u;
 	out->elapsed_ms     = out->running
 	                    ? (uint32_t)(((uint32_t)tx_time_get() - t0) * 1000u /
 	                                 TX_TIMER_TICKS_PER_SECOND)

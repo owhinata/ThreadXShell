@@ -330,12 +330,13 @@ The tensors are reported as tensors and **not** through the shared class
 report: that one reads output 0 as a vector of class scores, which for a
 detector's regression tensor is a tidy table of numbers that mean nothing.
 
-**[!] KNOWN GAP: that report asks for the model again (issue #121).**  The
-shared printer pins and re-opens the model when it prints, after the run's
-session has been given back -- so what it describes is whichever model is open
-at print time, not provably the one that ran.  The other console can load a
-different one in between.  The numbers are always some model's real tensors,
-never garbage; what is not established is that they are THIS run's.
+**The shapes are the ones the run published (issue #121).**  The worker takes
+the output descriptors of the model it ran -- it holds the session, so the
+model cannot change under it -- and publishes them with the result; the shared
+printer prints those and touches no model.  Until #121 it pinned whatever model
+was open at PRINT time, after the run's session had been given back, so the
+other console could load a different model in between and have its shapes
+printed as this run's.  A model change clears the record, shapes included.
 
 `nn dets` only reads the last published result -- it captures nothing, infers
 nothing and decodes nothing.  Since issue #118 that result **outlives the

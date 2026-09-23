@@ -38,6 +38,7 @@ void nn_det_record_invalidate(struct nn_det_record *r)
 	r->kind       = (uint8_t)NN_DET_CALLER_BOXES;
 	memset(r->dets, 0, sizeof r->dets);
 	memset(&r->res, 0, sizeof r->res);
+	memset(&r->extra, 0, sizeof r->extra);   /* the old model's shapes too */
 	/* `accepted` is NOT reset: a reader's base is a point on that count, and
 	 * moving the count underneath it would turn "none since" into "some". */
 }
@@ -54,7 +55,8 @@ int nn_det_record_admits(const struct nn_det_record *r, uint32_t gen)
 }
 
 int nn_det_record_publish(struct nn_det_record *r, const struct bf_det *d, int n,
-                          const struct bf_result *res, uint32_t gen)
+                          const struct bf_result *res, uint32_t gen,
+                          const struct nn_top5 *top)
 {
 	int copy;
 
@@ -85,6 +87,13 @@ int nn_det_record_publish(struct nn_det_record *r, const struct bf_det *d, int n
 		memset(&r->res, 0, sizeof r->res);
 	r->kind       = (uint8_t)NN_DET_CALLER_BOXES;
 	r->reportable = 0u;    /* nothing to ask: the boxes are all here */
+	/* The classes go with THIS result or not at all: a previous result's must
+	 * not be left beside it (issue #121). */
+	memset(&r->extra, 0, sizeof r->extra);
+	if (top != NULL) {
+		r->extra.what  = (uint8_t)NN_EXTRA_TOP;
+		r->extra.u.top = *top;
+	}
 	r->valid      = 1;
 	r->pub_gen    = gen;
 	r->accepted++;
@@ -111,14 +120,21 @@ int nn_det_record_publish_external(struct nn_det_record *r, int n, uint32_t gen)
 	memset(&r->res, 0, sizeof r->res);
 	r->kind       = (uint8_t)NN_DET_PLUGIN_REPORT;
 	r->reportable = 1u;
+	/* The plugin describes itself; the union's contents mean nothing once
+	 * this says NONE, and clearing all of it would put ~300 B of stores in the
+	 * producer's interrupt-disabled publish on one board. */
+	r->extra.what = (uint8_t)NN_EXTRA_NONE;
 	r->valid      = 1;
 	r->pub_gen    = gen;
 	r->accepted++;
 	return 1;
 }
 
-int nn_det_record_publish_raw(struct nn_det_record *r, uint32_t gen)
+int nn_det_record_publish_raw(struct nn_det_record *r, uint32_t gen,
+                              const struct nn_raw_outputs *raw)
 {
+	unsigned i, n;
+
 	if (r == NULL)
 		return 0;
 	if (gen != r->gen)
@@ -133,6 +149,21 @@ int nn_det_record_publish_raw(struct nn_det_record *r, uint32_t gen)
 	memset(&r->res, 0, sizeof r->res);
 	r->kind       = (uint8_t)NN_DET_RAW_TENSORS;
 	r->reportable = 0u;    /* no decoder, so nobody to ask */
+	/* The descriptors of THIS inference's model, with no way back into its
+	 * buffers -- see nn_raw_outputs (issue #121). */
+	memset(&r->extra, 0, sizeof r->extra);
+	if (raw != NULL) {
+		n = raw->n;
+		if (n > NN_RAW_OUTPUTS_MAX)
+			n = NN_RAW_OUTPUTS_MAX;
+		r->extra.what        = (uint8_t)NN_EXTRA_RAW;
+		r->extra.u.raw.count = raw->count;
+		r->extra.u.raw.n     = (uint8_t)n;
+		for (i = 0u; i < n; i++) {
+			r->extra.u.raw.out[i]      = raw->out[i];
+			r->extra.u.raw.out[i].data = NULL;
+		}
+	}
 	r->valid      = 1;
 	r->pub_gen    = gen;
 	r->accepted++;
@@ -181,4 +212,16 @@ int nn_det_last_valid(const struct nn_det_snapshot *s, uint32_t base)
 		return 0;
 	/* Both halves -- see the header.  Inequality, not order: the count wraps. */
 	return (s->valid != 0 && s->accepted != base) ? 1 : 0;
+}
+
+void nn_det_record_extra(const struct nn_det_record *r,
+                         struct nn_result_extra *out)
+{
+	if (out == NULL)
+		return;
+	if (r == NULL) {
+		memset(out, 0, sizeof *out);
+		return;
+	}
+	*out = r->extra;
 }

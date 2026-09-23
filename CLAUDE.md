@@ -76,7 +76,7 @@ src cmds svc cmake test README。wio のみ boot も）。
   （純関数・ホストテスト必須）、**未文書コードは `nn_stream_disp_of()` が terminal に fail-closed**。
 - **[!] 負値を 1 つに畳まない**（「モデル非認識」/ 未初期化 / 引数不正は別コードで**どれも「0 件」ではない**）。
 - **[!] 停止は走行中の推論を取り消せない** — worker は arm 時点の世代を控え、publish のロック内で照合
-  する（`svc/nn_det_record.c`）。
+  する（`svc/nn_det_record.c`）。**RAW 記述子・top-5 は publish 時に record へ載せ、印字時にモデルを取り直さない**（#121）。
 
 ### [!] plugin container と asset（3 ボード共有部）
 

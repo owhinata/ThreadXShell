@@ -19,6 +19,7 @@
 #include "nn_report.h"
 #include "plugin_lease.h"
 #include "nn_det_record.h"
+#include "nn_desc.h"         /* nn_tensor -> tensor_desc (issue #121) */
 #include "psram.h"
 
 #include "stm32h7xx_hal.h"   /* HAL_GetTick, SystemCoreClock, DWT */
@@ -357,11 +358,33 @@ static void nncam_band(unsigned band, const uint16_t *px, unsigned rows)
  */
 static int nncam_publish_raw(uint32_t gen)
 {
-	int took;
+	/*
+	 * [!] THE OUTPUT SHAPES OF THE MODEL THAT RAN, TAKEN HERE (issue #121).
+	 * This thread holds the session, so the model cannot change under it; the
+	 * console that prints the report later holds nothing of the kind, and
+	 * used to read the shapes of whatever model was open by then.  Built
+	 * outside the lock; only the copy into the record is under it.  Static,
+	 * not a local: only this thread builds it, and 300 B is not something
+	 * nn_work's stack should carry for the one path that needs it.
+	 */
+	static struct nn_raw_outputs raw;
+	int took, i, n;
+
+	n = nn_output_count(nncam_model);
+	raw.count = n;
+	raw.n = 0u;
+	for (i = 0; i < n && i < NN_RAW_OUTPUTS_MAX; i++) {
+		struct nn_tensor *t = nn_output(nncam_model, i);
+
+		if (t == NULL)
+			break;
+		nn_desc_of(&raw.out[i], t);
+		raw.n = (uint8_t)(i + 1);
+	}
 
 	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) != TX_SUCCESS)
 		return 0;
-	took = nn_det_record_publish_raw(&nncam_rec, gen);
+	took = nn_det_record_publish_raw(&nncam_rec, gen, &raw);
 	(void)tx_mutex_put(&nncam_det_lock);
 	return took;
 }
@@ -1041,7 +1064,8 @@ void nn_camera_stats_get(struct nn_camera_stats *out)
 }
 
 int nn_camera_decode_get(struct nn_camera_decode *out,
-                         struct nn_report_capture *rep)
+                         struct nn_report_capture *rep,
+                         struct nn_result_extra *ext)
 {
 	struct nn_det_snapshot snap;
 #if defined(CONFIG_NN_BACKEND_TFLM)
@@ -1094,6 +1118,9 @@ int nn_camera_decode_get(struct nn_camera_decode *out,
 	 * destination for boxes that no publisher here can produce.
 	 */
 	nn_det_record_snapshot(&nncam_rec, &snap, NULL, 0);
+	/* In the same hold as the snapshot (issue #121). */
+	if (ext != NULL)
+		nn_det_record_extra(&nncam_rec, ext);
 	(void)tx_mutex_put(&nncam_det_lock);
 	out->valid      = snap.valid;
 	out->ndet       = snap.ndet;

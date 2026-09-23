@@ -67,9 +67,10 @@ int  nn_svc_output_count(void) { return NN_SVC_ERR_STATE; }
 int  nn_svc_output(unsigned i, struct tensor_desc *o) { (void)i; (void)o; return NN_SVC_ERR_STATE; }
 int  nn_svc_input(struct tensor_desc *o) { (void)o; return NN_SVC_ERR_STATE; }
 void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *d, int max,
-                           struct nn_report_capture *rep, struct nn_op_result *res)
+                           struct nn_report_capture *rep,
+                           struct nn_result_extra *ext, struct nn_op_result *res)
 {
-	(void)snap; (void)d; (void)max; (void)rep;
+	(void)snap; (void)d; (void)max; (void)rep; (void)ext;
 	res->status = NN_SVC_ERR_STATE;
 }
 int  nn_svc_box_to_frame(const struct bf_det *in, struct bf_det *out) { *out = *in; return NN_SVC_OK; }

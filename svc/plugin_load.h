@@ -73,6 +73,47 @@ struct plugin_policy {
 	uint32_t stack_accounting; /**< PLUGIN_STACK_ACCOUNTING, exact         */
 };
 
+/**
+ * What the build reads back out of the linked firmware (issue #111).
+ *
+ * [!] THE VALUE THAT WAS CHECKED IS NOT THE VALUE THAT WAS COMPILED UNLESS
+ * SOMETHING LOOKS.  cmake/veneer_cost_gate.cmake hands @ref veneer_cost to the
+ * board as a -D, and any later -D or #define of the same name overrides it with
+ * a warning -- after which the device would charge a smaller c than the one the
+ * build checked the firmware against, and every container it admitted would be
+ * under-charged.  So the board exports, next to its policy, one record that
+ * points AT that policy, and cmake/check_policy_probe.py reads the policy's
+ * fields out of the shipped ELF by symbol, through this record, before the
+ * veneer-cost stamp is written.  Everything in it is a constant expression, so
+ * it survives LTO as written, and the offsets travel with it so the checker
+ * transcribes no layout.
+ */
+struct plugin_policy_probe {
+	uint32_t magic;           /**< PLUGIN_POLICY_PROBE_MAGIC               */
+	uint32_t size;            /**< sizeof(struct plugin_policy)            */
+	uint32_t off_veneer_cost; /**< offsetof(..., veneer_cost)              */
+	uint32_t off_accounting;  /**< offsetof(..., stack_accounting)         */
+	uint32_t off_stack_limit; /**< offsetof(..., stack_limit)              */
+	const struct plugin_policy *policy; /**< the policy plugin_parse() gets */
+};
+
+#define PLUGIN_POLICY_PROBE_MAGIC 0x4C4F5050u   /* "PPOL" */
+
+/**
+ * Export @p pol -- the board's plugin policy object, the one it passes to
+ * plugin_parse() -- as the symbol `plugin_policy_probe`.  Once per firmware.
+ */
+#define PLUGIN_POLICY_PROBE(pol)                                              \
+	__attribute__((used)) const struct plugin_policy_probe                \
+	plugin_policy_probe = {                                               \
+		PLUGIN_POLICY_PROBE_MAGIC,                                    \
+		(uint32_t)sizeof(struct plugin_policy),                       \
+		(uint32_t)offsetof(struct plugin_policy, veneer_cost),        \
+		(uint32_t)offsetof(struct plugin_policy, stack_accounting),   \
+		(uint32_t)offsetof(struct plugin_policy, stack_limit),        \
+		&(pol),                                                       \
+	}
+
 /* ---- what a caller gets back -------------------------------------------- */
 
 /**

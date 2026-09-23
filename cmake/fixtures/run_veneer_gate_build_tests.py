@@ -79,7 +79,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 COPIED = ("veneer_cost_gate.cmake", "check_veneer_base_cost.py",
-          "check_plugin_image.py")
+          "check_plugin_image.py", "check_policy_probe.py")
 
 LINKER_SCRIPT = """
 MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 1M
@@ -132,10 +132,19 @@ int main(void)
     # The board's plugin policy stands here: it reads the c the helper
     # defines, and its SIZE carries the value into the object, where nm reads it.
     "policy.c": """
+#include "plugin_load.h"
 #ifndef PLUGIN_VENEER_BASE_COST
 #error "PLUGIN_VENEER_BASE_COST did not reach this compile"
 #endif
 __attribute__((used)) char policy_cost_probe[PLUGIN_VENEER_BASE_COST];
+/* A board's policy and its probe, as nn_svc_grove.c / nn_svc_wio.c write them:
+ * the stamp waits for check_policy_probe.py to read this back from shell.elf. */
+static const struct plugin_policy fix_policy = {
+    .stack_limit      = { 1, 2, 3, 4, 5, 6, 7 },
+    .veneer_cost      = PLUGIN_VENEER_BASE_COST,
+    .stack_accounting = PLUGIN_STACK_ACCOUNTING,
+};
+PLUGIN_POLICY_PROBE(fix_policy);
 """,
     "record.py": """import sys
 open(sys.argv[2], "w").write(sys.argv[1] + "\\n")
@@ -163,6 +172,7 @@ set(DECLARED 4096 CACHE STRING "")
 set(FIX_LTO OFF CACHE STRING "")
 
 add_library(fw_objs OBJECT objsrc.c policy.c)
+target_include_directories(fw_objs PRIVATE "@SVC@")
 add_library(fw_objlink OBJECT objlink.c)
 add_library(fw_lib STATIC lib.c)
 add_library(fw_iface INTERFACE)
@@ -247,7 +257,8 @@ class Project:
         prebuilt = os.path.dirname(os.path.dirname(cc))
         with open(os.path.join(self.src, "CMakeLists.txt"), "w") as fh:
             fh.write(CMAKELISTS.replace("@PYTHON@", sys.executable)
-                     .replace("@PREBUILT@", prebuilt))
+                     .replace("@PREBUILT@", prebuilt)
+                     .replace("@SVC@", os.path.join(REPO, "svc")))
         with open(os.path.join(work, "toolchain.cmake"), "w") as fh:
             fh.write(
                 "set(CMAKE_SYSTEM_NAME Generic)\n"
@@ -261,6 +272,10 @@ class Project:
                 'set(CMAKE_EXE_LINKER_FLAGS_INIT "-nostdlib -nostartfiles '
                 '-Wl,--no-warn-rwx-segments")\n' % cc)
         self.toolchain = os.path.join(work, "toolchain.cmake")
+        self.c_init = ("-mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 "
+                       "-mfloat-abi=hard -Os -ffreestanding -fno-builtin "
+                       "-ffunction-sections -fno-unwind-tables "
+                       "-fno-asynchronous-unwind-tables")
         self.cc = cc
         self.stamp = os.path.join(self.bld, "veneer_cost", "shell.checked")
         self.elf = os.path.join(self.bld, "shell.elf")
@@ -491,6 +506,42 @@ def cost_tree(p, results):
     results.append(("cost_wiring", "DECLARED %s reached the policy TU and "
                                    "the asset, and followed the change"
                                    % " -> ".join(map(str, seen))))
+
+    # [!] AN OVERRIDE THAT COMPILES.  A -D later on the command line than the
+    # helper's wins with only a warning, so the image carries c = 1 while the
+    # build checked 5000.  Nothing may be delivered from it: the check reads the
+    # policy back from shell.elf and refuses, and neither flash nor an asset
+    # proceeds.
+    for f in ("flashed", "packed.nnc"):
+        p.rm(f)
+    p.configure(DECLARED="5000",
+                CMAKE_C_FLAGS=p.c_init + " -DPLUGIN_VENEER_BASE_COST=1u")
+    rc, out = p.ninja("shell")
+    expect(rc == 0, "cost_override: the overridden image should still link",
+           out)
+    for target, made in (("flash", "flashed"), ("asset-packed", "packed.nnc")):
+        rc, out = p.ninja(target)
+        flat = " ".join(out.split())
+        expect(rc != 0 and not os.path.exists(p.path(made))
+               and "check_policy_probe: FAIL" in flat
+               and "its veneer_cost is 1 B" in flat
+               and "DECLARED 5000 B" in flat,
+               "cost_override: `ninja %s` should fail in check_policy_probe"
+               % target, out)
+    expect(not os.path.exists(p.stamp),
+           "cost_override: a stamp survived the refused probe")
+    results.append(("cost_override", "CMAKE_C_FLAGS -DPLUGIN_VENEER_BASE_COST="
+                                     "1u links, and the probe stops flash and "
+                                     "the asset: " + next(
+                                         ln.strip() for ln in out.splitlines()
+                                         if "check_policy_probe: FAIL" in ln)
+                                     [:110] + "..."))
+
+    # And back: the same tree without the override passes again.
+    p.configure(DECLARED="5000", CMAKE_C_FLAGS=p.c_init)
+    rc, out = p.ninja("flash")
+    expect(rc == 0 and "check_policy_probe: OK" in out,
+           "cost_override: removing the override should pass again", out)
 
 
 def main():

@@ -470,6 +470,10 @@ static const struct plugin_policy nn_plugin_policy = {
 	.veneer_cost    = PLUGIN_VENEER_BASE_COST,     /* veneer_cost_gate() */
 	.stack_accounting = PLUGIN_STACK_ACCOUNTING,
 };
+/* What the build reads back from shell.elf: the c and accounting this policy
+ * really holds, whatever -D reached this compile (cmake/check_policy_probe.py,
+ * issue #111). */
+PLUGIN_POLICY_PROBE(nn_plugin_policy);
 
 /*
  * What this board offers a plugin (issue #103).

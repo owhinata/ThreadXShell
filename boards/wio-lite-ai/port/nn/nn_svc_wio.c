@@ -36,6 +36,7 @@
 #include "cam_preview.h"     /* CAM_PREVIEW_STACK_BYTES -- the draw allowance's ceiling */
 #include "cli_config.h"      /* CLI_INSTANCE/BG_JOB_STACK_SIZE -- report's ceiling */
 #include "fmt.h"
+#include "plugin_info.h"
 #include "nn.h"
 #include "nn_camera.h"
 #include "nn_desc.h"
@@ -1851,19 +1852,10 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	                 (unsigned long)v->bss_len,
 	                 (unsigned long)v->link_addr) < 0)
 		return;
-	/* The bounds the host gate derived and the manifest declares, per slot --
-	 * compared with the call-site depths `nn stream stats` measures.  An
-	 * absent slot declares 0. */
-	(void)nn_info_line(write, ctx,
-	                   "  stack : entry %lu  shapes %lu  decode %lu  draw %lu  "
-	                   "report %lu  param %lu/%lu B (declared)\r\n",
-	                   (unsigned long)v->stack[PLUGIN_SLOT_ENTRY],
-	                   (unsigned long)v->stack[PLUGIN_SLOT_SHAPES_OK],
-	                   (unsigned long)v->stack[PLUGIN_SLOT_DECODE],
-	                   (unsigned long)v->stack[PLUGIN_SLOT_DRAW],
-	                   (unsigned long)v->stack[PLUGIN_SLOT_REPORT],
-	                   (unsigned long)v->stack[PLUGIN_SLOT_PARAM_SET],
-	                   (unsigned long)v->stack[PLUGIN_SLOT_PARAM_GET]);
+	/* What each slot needs at this firmware's c, and what the manifest
+	 * declared -- compared with the call-site depths `nn stream stats`
+	 * measures.  See svc/plugin_info.h. */
+	(void)plugin_info_stack(write, ctx, v, nn_plugin_policy.veneer_cost);
 #else
 	/* The null backend cannot load a model, so no container can be open. */
 	(void)write;

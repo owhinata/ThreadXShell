@@ -417,6 +417,8 @@ set(SHELL_SOURCES
     # (the policy is passed in) and host-tested, and the SAME file the host-side
     # verify_container links, so the two cannot disagree.
     "${CMAKE_SOURCE_DIR}/svc/plugin_load.c"
+    # `nn info`'s plugin stack lines, shared with wio (issue #111).
+    "${CMAKE_SOURCE_DIR}/svc/plugin_info.c"
     # The loader and its MPU verdict (issue #103).  plugin_mpu.c is a pure
     # function so that the refusals -- a reservation that is Device memory, or
     # covered by two regions, or execute-never -- are reachable from a host

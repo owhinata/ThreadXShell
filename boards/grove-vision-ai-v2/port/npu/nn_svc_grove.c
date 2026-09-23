@@ -39,6 +39,7 @@
 #include "camera.h"
 #include "cam_dp.h"
 #include "fmt.h"
+#include "plugin_info.h"
 #include "plugin_load.h"
 #include "plugin_run.h"
 #include "plugin_target.h"   /* the target word this build provides (#108) */
@@ -1790,11 +1791,18 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	if (nn_info_line(write, ctx, "  where : %lu B reserved at 0x%08lx\r\n",
 	                 (unsigned long)size, (unsigned long)base) < 0)
 		return;
-	(void)nn_info_line(write, ctx,
-	                   "  code %lu B  data %lu B  bss %lu B\r\n",
-	                   (unsigned long)nn_container.code_len,
-	                   (unsigned long)nn_container.data_seg_len,
-	                   (unsigned long)nn_container.bss_len);
+	if (nn_info_line(write, ctx,
+	                 "  code %lu B  data %lu B  bss %lu B\r\n",
+	                 (unsigned long)nn_container.code_len,
+	                 (unsigned long)nn_container.data_seg_len,
+	                 (unsigned long)nn_container.bss_len) < 0)
+		return;
+	/* What each slot needs at this firmware's c, and what the manifest
+	 * declared (issue #111).  See svc/plugin_info.h.  A container with no
+	 * plugin section has no stack to describe. */
+	if (nn_container.has_plugin)
+		(void)plugin_info_stack(write, ctx, &nn_container,
+		                        nn_plugin_policy.veneer_cost);
 }
 
 /* The active decoder's own report is no longer a call the shared command makes

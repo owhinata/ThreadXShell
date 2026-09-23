@@ -155,6 +155,35 @@ static uint32_t nn_stream_final_gen;   /**< whose they are; ANY = nobody's */
    section, because they are one decision: a start that took the claim and then
    found the lifecycle busy would have to unwind a claim another job may have
    taken in between. */
+/*
+ * Why the gate is held, for a start that found it held.  Called under the
+ * gate's own critical section, so the answer describes the holder that refused
+ * it (issue #122).
+ *
+ * [!] THE HOLDER DECIDES THE WORDS.  Every refusal used to read "another nn
+ * job", including a `nn run` over a running stream -- where the other two
+ * boards say "a stream is already running".  The lifecycle knows which holder
+ * it is; an idle lifecycle means an ordinary operation (a load, a bench) has
+ * the gate.  Read without a transition, so a refused start moves nothing.
+ */
+static enum nn_stream_start_claim nn_gate_refusal(void)
+{
+	uint8_t phase = 0u, kind = 0u;
+
+	nn_stream_life_snapshot(&nn_life, NULL, &phase, NULL, &kind);
+	switch ((enum nn_stream_phase)phase) {
+	case NN_STREAM_PHASE_LOST:
+		return NN_STREAM_START_DEAD;
+	case NN_STREAM_PHASE_IDLE:
+		return NN_STREAM_START_BUSY;           /* an operation holds it */
+	default:
+		if (kind == (uint8_t)NN_STREAM_KIND_ONESHOT)
+			return NN_STREAM_START_ONESHOT;
+		return (phase == (uint8_t)NN_STREAM_PHASE_RUNNING)
+		       ? NN_STREAM_START_RUNNING : NN_STREAM_START_BUSY;
+	}
+}
+
 static enum nn_stream_start_claim nn_stream_begin(void)
 {
 	enum nn_stream_start_claim r;
@@ -162,9 +191,9 @@ static enum nn_stream_start_claim nn_stream_begin(void)
 
 	TX_DISABLE
 	/* The transient claim and the lifecycle are one decision here, so the gate
-	   is tested first and reported as BUSY -- another nn job, not a stream. */
+	   is tested first -- and its holder decides how the refusal reads. */
 	if (nn_busy) {
-		r = NN_STREAM_START_BUSY;
+		r = nn_gate_refusal();
 	} else {
 		r = nn_stream_life_begin(&nn_life, NN_STREAM_KIND_STREAM);
 		if (r == NN_STREAM_START_GO) {
@@ -195,7 +224,7 @@ static uint32_t nn_oneshot_claim(enum nn_stream_start_claim *why)
 
 	TX_DISABLE
 	if (nn_busy) {
-		*why = NN_STREAM_START_BUSY;
+		*why = nn_gate_refusal();
 	} else {
 		*why = nn_stream_life_begin(&nn_life, NN_STREAM_KIND_ONESHOT);
 		if (*why == NN_STREAM_START_GO) {
@@ -1179,7 +1208,13 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 			nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
 			return;
 		case NN_STREAM_START_RUNNING:
-			nn_detail_set("a stream is running (`nn stream stats`)");
+			/* The same words as the other two boards (issue #122). */
+			nn_detail_set("a stream is already running -- `nn stream "
+			              "stats`");
+			break;
+		case NN_STREAM_START_ONESHOT:
+			nn_detail_set("another `nn run` holds the NPU -- retry when it "
+			              "returns");
 			break;
 		default:
 			break;

@@ -34,6 +34,7 @@
  */
 #include "nn.h"
 #include "nn_backend.h"
+#include "nn_detail.h"   /* NN_SVC_DETAIL_LIT: these reach `nn` (#122) */
 
 #include "tx_api.h"          /* tx_thread_sleep (open/init serialization) */
 #include "stm32h7xx_hal.h"   /* DWT / CoreDebug / __DSB / __ISB / PRIMASK */
@@ -275,23 +276,23 @@ _Static_assert(NN_MODEL_ALIGN == 16u,
 const char *nn_model_strerror(int rc)
 {
 	switch (rc) {
-	case 0:                    return "ok";
-	case NN_MODEL_ERR_VERSION: return "schema version this runtime cannot read";
-	case NN_MODEL_ERR_OPS:     return "operator resolver could not be built";
-	case NN_MODEL_ERR_ARENA:   return "activations do not fit the arena, or the model "
-	                                  "uses an operator this build did not register";
-	case NN_MODEL_ERR_TENSOR:  return "a tensor has no buffer or too many dimensions";
-	case NN_MODEL_ERR_SHAPE:   return "input/output tensor count out of range";
-	case NN_MODEL_ERR_EMPTY:   return "empty or impossibly short model";
-	case NN_MODEL_ERR_FORMAT:  return "not a valid model for this runtime";
-	case NN_MODEL_ERR_SLOT:    return "model is not inside the staging region "
-	                                  "handed out";
-	case NN_MODEL_ERR_ALIGN:   return "model does not start on a 16-byte boundary";
+	case 0:                    return NN_SVC_DETAIL_LIT("ok");
+	case NN_MODEL_ERR_VERSION: return NN_SVC_DETAIL_LIT("schema version this runtime cannot read");
+	case NN_MODEL_ERR_OPS:     return NN_SVC_DETAIL_LIT("operator resolver could not be built");
+	case NN_MODEL_ERR_ARENA:   return NN_SVC_DETAIL_LIT("activations do not fit the arena, or the model "
+	                                                    "uses an operator this build did not register");
+	case NN_MODEL_ERR_TENSOR:  return NN_SVC_DETAIL_LIT("a tensor has no buffer or too many dimensions");
+	case NN_MODEL_ERR_SHAPE:   return NN_SVC_DETAIL_LIT("input/output tensor count out of range");
+	case NN_MODEL_ERR_EMPTY:   return NN_SVC_DETAIL_LIT("empty or impossibly short model");
+	case NN_MODEL_ERR_FORMAT:  return NN_SVC_DETAIL_LIT("not a valid model for this runtime");
+	case NN_MODEL_ERR_SLOT:    return NN_SVC_DETAIL_LIT("model is not inside the staging region "
+	                                                    "handed out");
+	case NN_MODEL_ERR_ALIGN:   return NN_SVC_DETAIL_LIT("model does not start on a 16-byte boundary");
 	/* ^ the sentence names the number; nn.h owns it -- see the assert below */
-	case NN_ERR_ARG:           return "bad argument";
-	case NN_ERR_NOSUP:         return "this backend cannot load a model at run time";
-	case NN_ERR_STATE:         return "no model session is open";
-	default:                   return "unknown error";
+	case NN_ERR_ARG:           return NN_SVC_DETAIL_LIT("bad argument");
+	case NN_ERR_NOSUP:         return NN_SVC_DETAIL_LIT("this backend cannot load a model at run time");
+	case NN_ERR_STATE:         return NN_SVC_DETAIL_LIT("no model session is open");
+	default:                   return NN_SVC_DETAIL_LIT("unknown error");
 	}
 }
 

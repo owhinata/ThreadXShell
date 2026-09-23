@@ -97,7 +97,7 @@
 - **[!] 分類表はボードが持ち既定は fail-closed**（Grove の `nn_stream_state.c` では `CAM_ERR_LOCKED` と
   `CAM_ERR_BUSY` が **retryable**）。**terminal に畳み直さない。**
 - **[!] デコーダの負値を 1 つに畳まない**（どれも「0 件」ではない）。**停止は推論を取り消せない**ので
-  worker は arm 時点の世代を控え publish のロック内で照合（`svc/nn_det_record.c`）。
+  worker は arm 時点の世代を控え publish のロック内で照合（`svc/nn_det_record.c`）。**RAW 記述子と top-5 は publish 時に record へ載せ、印字時にモデルを取り直さない**（#121）。
 
 ### 8. `svc/frame_pipeline` の sink registry: attach は拒否する、直列化は呼び出し元
 

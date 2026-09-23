@@ -97,7 +97,7 @@ static void test_outlives_session(void)
 	nn_det_record_boundary(&rec);                  /* a session starts */
 	g0 = nn_det_record_gen(&rec);
 	expect("a publish of the session is taken",
-	       nn_det_record_publish(&rec, &one, 1, &r3, g0) != 0, "dropped");
+	       nn_det_record_publish(&rec, &one, 1, &r3, g0, NULL) != 0, "dropped");
 	nn_det_record_snapshot(&rec, &snap, NULL, 0);
 	acc = snap.accepted;
 	ep  = snap.epoch;
@@ -126,7 +126,7 @@ static void test_outlives_session(void)
 	 * -- the part that is new -- it does not disturb the result it failed to
 	 * replace. */
 	expect("[!] a decode armed before the boundary is dropped",
-	       nn_det_record_publish(&rec, &late, 1, &r9, g0) == 0, "taken");
+	       nn_det_record_publish(&rec, &late, 1, &r9, g0, NULL) == 0, "taken");
 	memset(dets, 0, sizeof dets);
 	nn_det_record_snapshot(&rec, &snap, dets, BF_MAX_DET);
 	expect("and the kept result is exactly as it was, and still not current",
@@ -152,14 +152,14 @@ static void test_outlives_session(void)
 	       nn_det_last_valid(&snap, base));
 
 	/* A late publish of the PREVIOUS session is not counted as this one's. */
-	(void)nn_det_record_publish(&rec, &late, 1, &r9, g0);
+	(void)nn_det_record_publish(&rec, &late, 1, &r9, g0, NULL);
 	nn_det_record_snapshot(&rec, &snap, NULL, 0);
 	expect("[!] a dropped publish is not counted",
 	       snap.accepted == base && nn_det_last_valid(&snap, base) == 0,
 	       "accepted %u base %u", (unsigned)snap.accepted, (unsigned)base);
 
 	expect("the session's own publish is taken",
-	       nn_det_record_publish(&rec, &late, 1, &r9, g1) != 0, "dropped");
+	       nn_det_record_publish(&rec, &late, 1, &r9, g1, NULL) != 0, "dropped");
 	nn_det_record_snapshot(&rec, &snap, NULL, 0);
 	expect("[!] a publish of the session in force is current",
 	       snap.current != 0u, "current 0");
@@ -172,15 +172,15 @@ static void test_outlives_session(void)
 	/* Every kind counts, and every refusal of every kind does not. */
 	acc = snap.accepted;
 	(void)nn_det_record_publish_external(&rec, 2, g0);
-	(void)nn_det_record_publish_raw(&rec, g0);
-	(void)nn_det_record_publish(&rec, &one, 1, &r3, g0);
+	(void)nn_det_record_publish_raw(&rec, g0, NULL);
+	(void)nn_det_record_publish(&rec, &one, 1, &r3, g0, NULL);
 	nn_det_record_snapshot(&rec, &snap, NULL, 0);
 	expect("[!] no refused publish of any kind is counted",
 	       snap.accepted == acc, "accepted %u -> %u", (unsigned)acc,
 	       (unsigned)snap.accepted);
 	(void)nn_det_record_publish_external(&rec, 2, g1);
-	(void)nn_det_record_publish_raw(&rec, g1);
-	(void)nn_det_record_publish(&rec, &one, 1, &r3, g1);
+	(void)nn_det_record_publish_raw(&rec, g1, NULL);
+	(void)nn_det_record_publish(&rec, &one, 1, &r3, g1, NULL);
 	nn_det_record_snapshot(&rec, &snap, NULL, 0);
 	expect("and every accepted publish of every kind is",
 	       snap.accepted == acc + 3u, "accepted %u -> %u", (unsigned)acc,
@@ -198,12 +198,12 @@ static void test_outlives_session(void)
 	 */
 	nn_det_record_boundary(&rec);
 	g1 = nn_det_record_gen(&rec);
-	(void)nn_det_record_publish_raw(&rec, g1);     /* before the sample */
+	(void)nn_det_record_publish_raw(&rec, g1, NULL);     /* before the sample */
 	nn_det_record_snapshot(&rec, &snap, NULL, 0);
 	base = snap.accepted;
 	expect("a publish before the sample is absorbed (reads as none yet)",
 	       nn_det_last_valid(&snap, base) == 0, "last_valid 1");
-	(void)nn_det_record_publish_raw(&rec, g1);     /* after the sample */
+	(void)nn_det_record_publish_raw(&rec, g1, NULL);     /* after the sample */
 	nn_det_record_snapshot(&rec, &snap, NULL, 0);
 	expect("a publish after the sample is counted",
 	       nn_det_last_valid(&snap, base) != 0, "last_valid 0");
@@ -297,14 +297,14 @@ static void test_outlives_session(void)
 	       (unsigned)snap.reportable, snap.ndet);
 	nn_det_record_boundary(&rec);
 	g1 = nn_det_record_gen(&rec);
-	(void)nn_det_record_publish_raw(&rec, g1);
+	(void)nn_det_record_publish_raw(&rec, g1, NULL);
 	nn_det_record_snapshot(&rec, &snap, NULL, 0);
 	expect("a result no plugin produced has no account to give",
 	       snap.reportable == 0u, "reportable 1");
 	expect("[!] and an undecoded result of the session in force is current",
 	       snap.current != 0u, "current 0");
 	(void)nn_det_record_publish_external(&rec, 3, g1);
-	(void)nn_det_record_publish(&rec, &one, 1, &r3, g1);
+	(void)nn_det_record_publish(&rec, &one, 1, &r3, g1, NULL);
 	nn_det_record_snapshot(&rec, &snap, NULL, 0);
 	expect("nor does the resident decoder's (its boxes are all here)",
 	       snap.reportable == 0u, "reportable 1");
@@ -319,7 +319,7 @@ static void test_outlives_session(void)
 
 			memset(&r, 0, sizeof r);
 			r.status = codes[i];
-			(void)nn_det_record_publish(&rec, NULL, codes[i], &r, g1);
+			(void)nn_det_record_publish(&rec, NULL, codes[i], &r, g1, NULL);
 			nn_det_record_snapshot(&rec, &snap, NULL, 0);
 			expect("[!] a negative decode code is published as itself",
 			       snap.ndet == codes[i] && snap.valid != 0,
@@ -347,6 +347,112 @@ static void test_outlives_session(void)
 	/* Null tolerance of the two new operations. */
 	nn_det_record_boundary(NULL);
 	nn_det_record_invalidate(NULL);
+}
+
+/*
+ * --- issue #121: the model-dependent report travels WITH the result -------
+ *
+ * [!] What is pinned: the shapes and the classes are the ones the PUBLISHER
+ * handed over, they stay exactly as long as the result they describe, and a
+ * dropped publish leaves the kept result's own extras alone.
+ */
+static void test_extra_travels(void)
+{
+	struct nn_det_record rec;
+	struct nn_result_extra ext;
+	struct nn_raw_outputs raw;
+	struct nn_top5 top;
+	struct bf_det one = mk_det(0.25f);
+	struct bf_result r3 = mk_res(3);
+	static const int dummy = 7;
+	uint32_t g, old;
+	unsigned i;
+	int nulled;
+
+	printf("test_nn_det_record: the report travels with the result (#121)\n");
+	memset(&rec, 0, sizeof rec);
+	nn_det_record_boundary(&rec);
+	g = nn_det_record_gen(&rec);
+
+	memset(&raw, 0, sizeof raw);
+	raw.count = 11;
+	raw.n = 10;                                   /* more than the record keeps */
+	for (i = 0u; i < NN_RAW_OUTPUTS_MAX; i++) {
+		raw.out[i].data    = &dummy;
+		raw.out[i].dims[0] = (int32_t)(i + 1u);
+		raw.out[i].rank    = 1u;
+	}
+	(void)nn_det_record_publish_raw(&rec, g, &raw);
+	memset(&ext, 0x5A, sizeof ext);
+	nn_det_record_extra(&rec, &ext);
+	expect("[!] an undecoded result carries its model's output shapes",
+	       ext.what == (uint8_t)NN_EXTRA_RAW && ext.u.raw.count == 11,
+	       "what %u count %ld", (unsigned)ext.what, (long)ext.u.raw.count);
+	expect("no more of them than the record holds",
+	       ext.u.raw.n == (uint8_t)NN_RAW_OUTPUTS_MAX, "n %u",
+	       (unsigned)ext.u.raw.n);
+	nulled = 1;
+	for (i = 0u; i < ext.u.raw.n; i++)
+		if (ext.u.raw.out[i].data != NULL)
+			nulled = 0;
+	expect("[!] and no way back into the model's buffers", nulled,
+	       "a data pointer survived");
+	expect("the shapes are the publisher's", ext.u.raw.out[1].dims[0] == 2,
+	       "dims %ld", (long)ext.u.raw.out[1].dims[0]);
+
+	/* A dropped publish leaves the kept result's shapes as they were. */
+	old = g;
+	nn_det_record_boundary(&rec);
+	g = nn_det_record_gen(&rec);
+	raw.count = 2;
+	(void)nn_det_record_publish_raw(&rec, old, &raw);
+	nn_det_record_extra(&rec, &ext);
+	expect("[!] a dropped publish does not replace the kept result's shapes",
+	       ext.what == (uint8_t)NN_EXTRA_RAW && ext.u.raw.count == 11,
+	       "what %u count %ld", (unsigned)ext.what, (long)ext.u.raw.count);
+
+	/* The classes, published with a result the decoder did not recognise. */
+	memset(&top, 0, sizeof top);
+	top.status = (uint8_t)NN_TOP_OK;
+	top.n = 1u;
+	top.count = 10u;
+	top.idx[0] = 3;
+	(void)nn_det_record_publish(&rec, NULL, BF_ERR_MODEL, NULL, g, &top);
+	nn_det_record_extra(&rec, &ext);
+	expect("[!] a result's classes are the ones published with it",
+	       ext.what == (uint8_t)NN_EXTRA_TOP && ext.u.top.idx[0] == 3,
+	       "what %u idx %ld", (unsigned)ext.what, (long)ext.u.top.idx[0]);
+	(void)nn_det_record_publish(&rec, &one, 1, &r3, old, NULL);
+	nn_det_record_extra(&rec, &ext);
+	expect("and a dropped publish leaves them standing",
+	       ext.what == (uint8_t)NN_EXTRA_TOP, "what %u", (unsigned)ext.what);
+	(void)nn_det_record_publish(&rec, &one, 1, &r3, g, NULL);
+	nn_det_record_extra(&rec, &ext);
+	expect("[!] a later result without classes does not inherit them",
+	       ext.what == (uint8_t)NN_EXTRA_NONE, "what %u", (unsigned)ext.what);
+
+	(void)nn_det_record_publish(&rec, NULL, BF_ERR_MODEL, NULL, g, &top);
+	(void)nn_det_record_publish_external(&rec, 2, g);
+	nn_det_record_extra(&rec, &ext);
+	expect("nor does a plugin's result",
+	       ext.what == (uint8_t)NN_EXTRA_NONE, "what %u", (unsigned)ext.what);
+	(void)nn_det_record_publish_raw(&rec, g, NULL);
+	nn_det_record_extra(&rec, &ext);
+	expect("nor an undecoded result published without shapes",
+	       ext.what == (uint8_t)NN_EXTRA_NONE, "what %u", (unsigned)ext.what);
+
+	(void)nn_det_record_publish(&rec, NULL, BF_ERR_MODEL, NULL, g, &top);
+	nn_det_record_invalidate(&rec);
+	nn_det_record_extra(&rec, &ext);
+	expect("[!] a model change takes the classes with the result",
+	       ext.what == (uint8_t)NN_EXTRA_NONE && ext.u.top.idx[0] == 0,
+	       "what %u", (unsigned)ext.what);
+
+	memset(&ext, 0x5A, sizeof ext);
+	nn_det_record_extra(NULL, &ext);
+	expect("the extras of nothing are nothing",
+	       ext.what == (uint8_t)NN_EXTRA_NONE, "what %u", (unsigned)ext.what);
+	nn_det_record_extra(&rec, NULL);           /* tolerated */
 }
 
 int main(void)
@@ -392,7 +498,7 @@ int main(void)
 	{
 		struct bf_result r = mk_res(3);
 
-		took = nn_det_record_publish(&rec, &one, 1, &r, g0);
+		took = nn_det_record_publish(&rec, &one, 1, &r, g0, NULL);
 	}
 	expect("a publish from the current session is taken", took != 0, "dropped");
 	nn_det_record_snapshot(&rec, &snap, dets, BF_MAX_DET);
@@ -417,7 +523,7 @@ int main(void)
 		struct bf_result r = mk_res(9);
 		struct bf_det late = mk_det(0.75f);
 
-		took = nn_det_record_publish(&rec, &late, 1, &r, g0);
+		took = nn_det_record_publish(&rec, &late, 1, &r, g0, NULL);
 	}
 	expect("a decode that outlived its session is DROPPED", took == 0,
 	       "taken");
@@ -440,7 +546,7 @@ int main(void)
 		struct bf_result r = mk_res(9);
 		struct bf_det late = mk_det(0.75f);
 
-		took = nn_det_record_publish(&rec, &late, 1, &r, g0);
+		took = nn_det_record_publish(&rec, &late, 1, &r, g0, NULL);
 	}
 	expect("the old session's decode does not land in the new one", took == 0,
 	       "taken");
@@ -453,7 +559,7 @@ int main(void)
 		struct bf_result r = mk_res(5);
 		struct bf_det d = mk_det(0.5f);
 
-		took = nn_det_record_publish(&rec, &d, 1, &r, g1);
+		took = nn_det_record_publish(&rec, &d, 1, &r, g1, NULL);
 	}
 	expect("the new session's own decode is taken", took != 0, "dropped");
 	nn_det_record_snapshot(&rec, &snap, dets, BF_MAX_DET);
@@ -466,7 +572,7 @@ int main(void)
 
 		memset(&r, 0, sizeof r);
 		r.status = BF_ERR_MODEL;
-		took = nn_det_record_publish(&rec, NULL, BF_ERR_MODEL, &r, g1);
+		took = nn_det_record_publish(&rec, NULL, BF_ERR_MODEL, &r, g1, NULL);
 	}
 	expect("a model error publishes", took != 0, "dropped");
 	nn_det_record_snapshot(&rec, &snap, dets, BF_MAX_DET);
@@ -484,7 +590,7 @@ int main(void)
 
 		for (int i = 0; i < BF_MAX_DET; i++)
 			many[i] = mk_det((float)i / 100.0f);
-		took = nn_det_record_publish(&rec, many, BF_MAX_DET + 4, &r, g1);
+		took = nn_det_record_publish(&rec, many, BF_MAX_DET + 4, &r, g1, NULL);
 	}
 	expect("more boxes than the record holds are clamped", took != 0,
 	       "dropped");
@@ -508,7 +614,7 @@ int main(void)
 		 * thing under test, not a fresh one. */
 		nn_det_record_invalidate(&rec);
 		g = nn_det_record_gen(&rec);
-		(void)nn_det_record_publish(&rec, &one, 1, &r_ext, g);
+		(void)nn_det_record_publish(&rec, &one, 1, &r_ext, g, NULL);
 
 		for (i = 0u; i < (unsigned)BF_MAX_DET; i++)
 			canary[i].score = 1234;
@@ -553,7 +659,7 @@ int main(void)
 		       snap.ndet == BF_MAX_DET + 5, "ndet %d", snap.ndet);
 
 		/* Back the other way: the kind must not stick. */
-		(void)nn_det_record_publish(&rec, &one, 1, &r_ext, g);
+		(void)nn_det_record_publish(&rec, &one, 1, &r_ext, g, NULL);
 		nn_det_record_snapshot(&rec, &snap, canary, BF_MAX_DET);
 		expect("a later caller-boxes publish routes back",
 		       snap.kind == (uint8_t)NN_DET_CALLER_BOXES, "kind %u",
@@ -600,10 +706,10 @@ int main(void)
 		 * transition and not a record that was already empty. */
 		nn_det_record_invalidate(&rec);
 		g = nn_det_record_gen(&rec);
-		(void)nn_det_record_publish(&rec, &one, 1, &r_live, g);
+		(void)nn_det_record_publish(&rec, &one, 1, &r_live, g, NULL);
 
 		expect("an inference nothing decoded is published",
-		       nn_det_record_publish_raw(&rec, g) != 0, "dropped");
+		       nn_det_record_publish_raw(&rec, g, NULL) != 0, "dropped");
 
 		for (i = 0u; i < (unsigned)BF_MAX_DET; i++)
 			canary[i].score = 1234;
@@ -636,7 +742,7 @@ int main(void)
 		       !boxes_left, "a box of the decode before it survived");
 
 		/* The kind must not stick, the same way the external one does not. */
-		(void)nn_det_record_publish(&rec, &one, 1, &r_live, g);
+		(void)nn_det_record_publish(&rec, &one, 1, &r_live, g, NULL);
 		for (i = 0u; i < (unsigned)BF_MAX_DET; i++)
 			canary[i].x = 1234.0f;
 		nn_det_record_snapshot(&rec, &snap, canary, BF_MAX_DET);
@@ -653,9 +759,9 @@ int main(void)
 		stale = g;
 		nn_det_record_invalidate(&rec);
 		g = nn_det_record_gen(&rec);
-		(void)nn_det_record_publish(&rec, &one, 1, &r_live, g);
+		(void)nn_det_record_publish(&rec, &one, 1, &r_live, g, NULL);
 		expect("[!] an inference from a retired session is dropped",
-		       nn_det_record_publish_raw(&rec, stale) == 0, "taken");
+		       nn_det_record_publish_raw(&rec, stale, NULL) == 0, "taken");
 		for (i = 0u; i < (unsigned)BF_MAX_DET; i++)
 			canary[i].x = 1234.0f;
 		nn_det_record_snapshot(&rec, &snap, canary, BF_MAX_DET);
@@ -671,19 +777,19 @@ int main(void)
 		 * survives into the record it tried to land in. */
 		nn_det_record_invalidate(&rec);
 		expect("a retired session cannot make an empty record valid either",
-		       nn_det_record_publish_raw(&rec, g) == 0, "taken");
+		       nn_det_record_publish_raw(&rec, g, NULL) == 0, "taken");
 		nn_det_record_snapshot(&rec, &snap, NULL, 0);
 		expect("which still reports nothing published yet", snap.valid == 0,
 		       "valid %d", snap.valid);
 
 		expect("publishing an undecoded inference into a null record is "
 		       "refused",
-		       nn_det_record_publish_raw(NULL, 0u) == 0, "taken");
+		       nn_det_record_publish_raw(NULL, 0u, NULL) == 0, "taken");
 	}
 
 	/* --- null tolerance ----------------------------------------------- */
 	expect("publishing into a null record is refused",
-	       nn_det_record_publish(NULL, &one, 1, NULL, 0u) == 0, "taken");
+	       nn_det_record_publish(NULL, &one, 1, NULL, 0u, NULL) == 0, "taken");
 	snap.kind = (uint8_t)NN_DET_PLUGIN_REPORT;    /* a previous read's routing */
 	nn_det_record_snapshot(NULL, &snap, NULL, 0);
 	expect("a snapshot of nothing carries no routing either",
@@ -693,6 +799,7 @@ int main(void)
 	       "valid %d", snap.valid);
 
 	test_outlives_session();
+	test_extra_travels();
 
 	if (failures) {
 		printf("test_nn_det_record: %d failure(s)\n", failures);

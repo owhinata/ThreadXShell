@@ -367,6 +367,9 @@ set(NN_SOURCES
     # the unconditional --require-sdram-ai below honest.
     "${F746_SHARED_DECODER}"
     "${CMAKE_SOURCE_DIR}/svc/nn_det_record.c"
+    # The top classes of a model the decoder does not recognise, taken by the
+    # worker before its next inference (issue #121, decision D3).
+    "${CMAKE_SOURCE_DIR}/svc/nn_top.c"
     "${BOARD_DIR}/port/nn/nn_decoder.c")
 if(CONFIG_NN_BACKEND STREQUAL "null")
     list(APPEND NN_SOURCES "${BOARD_DIR}/port/nn/nn_null.c")

@@ -36,6 +36,7 @@
 #include "nn_camera.h"
 #include "nn_decoder.h"   /* the shared BlazeFace decoder, via this board's adapter */
 #include "nn_det_record.h"
+#include "nn_top.h"          /* the classes, taken before the next inference (#121) */
 #include "camera.h"          /* camera_subscribe / camera_unsubscribe / camera_frame_put */
 #include "cam_own.h"         /* the owner lifecycle (issue #72)                        */
 #include "frame_pipeline.h"  /* struct frame_sink / frame_desc / FRAME_POLICY_* */
@@ -410,7 +411,28 @@ static int nncam_step(void)
 	{
 		struct bf_det tmp[BF_MAX_DET];
 		struct bf_result bfr;
+		struct nn_top5 top;
 		int nd = nn_decoder_run(nncam_model, tmp, BF_MAX_DET, &bfr);
+
+		/*
+		 * [!] NOT A DETECTOR: THE CLASSES ARE TAKEN NOW (issue #121, D3).
+		 * This thread is the only writer of the output tensor and the next
+		 * nn_run() overwrites it, so this is the one moment its classes are
+		 * still this result's.  The shared command used to read them at print
+		 * time -- after a stream stop, from the frame whose publish had been
+		 * dropped.  The walk is outside nncam_lock; only the copy is under it.
+		 */
+		if (nd == BF_ERR_MODEL) {
+			struct tensor_desc d;
+			struct nn_tensor *o = nn_output(nncam_model, 0);
+
+			if (o != NULL) {
+				nn_decoder_desc(&d, o);
+				nn_top_of(&d, &top);
+			} else {
+				nn_top_of(NULL, &top);
+			}
+		}
 
 		tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
 		/*
@@ -426,7 +448,8 @@ static int nncam_step(void)
 		 * `infers` above counts inferences and keeps that meaning; `nn run`
 		 * waits on the record's accepted count, which moves here, under this
 		 * lock, only for a publish the generation rule took. */
-		(void)nn_det_record_publish(&nncam_rec, tmp, nd, &bfr, gen);
+		(void)nn_det_record_publish(&nncam_rec, tmp, nd, &bfr, gen,
+		                            (nd == BF_ERR_MODEL) ? &top : NULL);
 		tx_mutex_put(&nncam_lock);
 		nnstat.detections = (nd > 0) ? (uint32_t)nd : 0u;
 	}
@@ -752,7 +775,7 @@ int nn_camera_dets_get(struct bf_det *out, int max)
 
 	if (!out || max <= 0)
 		return 0;
-	if (!nn_camera_decode_get(&snap, out, max))
+	if (!nn_camera_decode_get(&snap, out, max, NULL))
 		return 0;
 	/* [!] ONLY THE SESSION IN FORCE (issue #118).  The record keeps its last
 	 * boxes across a stop now, and this is what the GUI stamps on a LIVE
@@ -768,7 +791,7 @@ int nn_camera_dets_get(struct bf_det *out, int max)
 }
 
 int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
-                         int max)
+                         int max, struct nn_result_extra *ext)
 {
 	struct nn_det_snapshot snap;
 
@@ -783,6 +806,8 @@ int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
 	 * frame's peak score with nothing to show they disagree (issue #97).
 	 */
 	nn_det_record_snapshot(&nncam_rec, &snap, dets, max);
+	if (ext != NULL)
+		nn_det_record_extra(&nncam_rec, ext);   /* same hold (issue #121) */
 	tx_mutex_put(&nncam_lock);
 	out->valid    = snap.valid;
 	out->ndet     = snap.ndet;

@@ -66,18 +66,20 @@ int nn_rec_publish_external(int n, uint32_t gen)
 	return took;
 }
 
-int nn_rec_publish_raw(uint32_t gen)
+int nn_rec_publish_raw(uint32_t gen, const struct nn_raw_outputs *raw)
 {
 	int took;
 	TX_INTERRUPT_SAVE_AREA
 
+	/* Only `nn run` publishes this kind (a stream needs a plugin), so the
+	 * ~300 B copy is never on the producer's path. */
 	TX_DISABLE
-	took = nn_det_record_publish_raw(&nn_rec, gen);
+	took = nn_det_record_publish_raw(&nn_rec, gen, raw);
 	TX_RESTORE
 	return took;
 }
 
-void nn_rec_snapshot(struct nn_det_snapshot *out)
+void nn_rec_snapshot(struct nn_det_snapshot *out, struct nn_result_extra *ext)
 {
 	TX_INTERRUPT_SAVE_AREA
 
@@ -85,5 +87,7 @@ void nn_rec_snapshot(struct nn_det_snapshot *out)
 		return;
 	TX_DISABLE
 	nn_det_record_snapshot(&nn_rec, out, NULL, 0);
+	if (ext != NULL)
+		nn_det_record_extra(&nn_rec, ext);
 	TX_RESTORE
 }

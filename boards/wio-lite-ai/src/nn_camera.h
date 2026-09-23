@@ -234,6 +234,8 @@ void nn_camera_record_invalidate(void);
  * @param rep   optional.  When given AND the last decode belongs to a loaded
  *              plugin, the plugin is asked to describe it and the bytes land
  *              here.
+ * @param ext   optional; the model-dependent part the result was published
+ *              with (issue #121), copied under the same lock hold.
  *
  * [!] IT HANDS BACK NO BOXES (issue #116).  It used to take an array to fill;
  * since the resident decoder went there is no publisher on this board that
@@ -261,7 +263,8 @@ void nn_camera_record_invalidate(void);
  * boxes at all.
  */
 int nn_camera_decode_get(struct nn_camera_decode *out,
-                         struct nn_report_capture *rep);
+                         struct nn_report_capture *rep,
+                         struct nn_result_extra *ext);
 
 /** Input normalization: 1 = [-1,1], 0 = [0,1] (default).  Applies to float32 and
  *  quantized inputs alike -- a quantized input is the normalized value put through

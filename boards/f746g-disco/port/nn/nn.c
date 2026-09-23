@@ -219,11 +219,15 @@ int nn_model_load_region(void **buf, uint32_t *cap)
 	return nn_backend_vt_selected.load_region(buf, cap);
 }
 
-int nn_model_reload(const void *data, uint32_t len, const char *name)
+int nn_model_reload(const void *data, uint32_t len, const char *name,
+                    int *open_after)
 {
 	void *impl = NULL;
 	int rc;
 
+	/* Unchanged on the two early refusals below: nothing was touched. */
+	if (open_after)
+		*open_after = g_model.open ? 1 : 0;
 	if (!g_model.open)                  /* caller must nn_model_open() first */
 		return -1;
 	if (!nn_backend_vt_selected.reload)
@@ -241,6 +245,9 @@ int nn_model_reload(const void *data, uint32_t len, const char *name)
 		g_model.impl = NULL;
 		g_model.open = 0;
 	}
+	/* This call's outcome, from the handle it just adopted -- see nn.h. */
+	if (open_after)
+		*open_after = impl ? 1 : 0;
 	return rc;
 }
 

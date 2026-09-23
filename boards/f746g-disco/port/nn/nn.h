@@ -129,9 +129,20 @@ uint32_t nn_last_cycles(const struct nn_model *m);
  * nn_model_reload is transactional -- on failure the previous model stays active
  * (or, only if even that could not be rebuilt, the model is closed and a later
  * nn_model_open() rebuilds it).  Both return 0 on success, <0 on error.
+ *
+ * @p open_after, when not NULL, receives whether a model is open once THIS call
+ * has finished: 0 only when the model was refused AND the previous one could not
+ * be rebuilt (issue #122 P1).  It is the reload's own outcome, not a readback.
+ * Asking nn_model_open() afterwards cannot answer it: on a closed singleton that
+ * call OPENS one -- this board's tflm backend adopts the built-in model -- and
+ * succeeds, so exactly the case above would read as "the previous model is still
+ * active"; and `nn info` on another console calls it without the session, so a
+ * read after the session is released may see a state this call did not leave.
+ * wio-lite-ai's reload has had the same out-parameter since its issue #108.
  */
 int nn_model_load_region(void **buf, uint32_t *cap);
-int nn_model_reload(const void *data, uint32_t len, const char *name);
+int nn_model_reload(const void *data, uint32_t len, const char *name,
+                    int *open_after);
 
 /*
  * Coarse single-session guard.  The singleton model + the backends are NOT

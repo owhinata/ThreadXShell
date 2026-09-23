@@ -166,6 +166,7 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	struct nn_model *m = NULL;
 	void *buf = NULL;
 	uint32_t cap = 0u, len = 0u;
+	int open_after = 0;
 	int rc;
 
 	nn_detail_clear();
@@ -214,7 +215,7 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	}
 
 	if (spec->tag == NN_SPEC_BUILTIN) {
-		rc = nn_model_reload(NULL, 0u, NULL);
+		rc = nn_model_reload(NULL, 0u, NULL, &open_after);
 	} else {
 		rc = nn_model_load_region(&buf, &cap);
 		if (rc != 0) {
@@ -237,36 +238,37 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 			nn_result(res, NN_SVC_ERR_ARG, NN_CLAIM_NONE);
 			return;
 		}
-		rc = nn_model_reload(buf, len, spec->path);
+		rc = nn_model_reload(buf, len, spec->path, &open_after);
 	}
 
 	/*
-	 * [!] THE LAST RESULT GOES WITH THE MODEL (issue #118), and on this board
-	 * it goes on EVERY reload attempt, refused ones included.  A refusal
-	 * normally leaves the previous model in force, but the backend documents
-	 * that the rebuild can fail and leave it closed -- and which of the two
-	 * happened is only asked after the session is released, below (Phase 2
-	 * stage 4 makes the reload say so).  Keeping a result for a model that may
-	 * be gone is the wrong way round; clearing one for a model that stayed
-	 * costs a `nn run`.  Under the session, so no worker is publishing.
+	 * [!] THE RESULTING MODEL STATE IS THE RELOAD'S OWN OUTCOME, NOT A QUESTION
+	 * ASKED AFTERWARDS (issue #122 P1).  This backend's reload is transactional
+	 * -- on a refusal the previous model normally stays active -- but it
+	 * documents one exception: if even that could not be rebuilt, the model is
+	 * left CLOSED.  This used to ask nn_model_open() after the session was
+	 * released, and that call is not a question: on a closed singleton it OPENS
+	 * one (the tflm backend adopts the built-in model) and succeeds -- so the
+	 * exception read as PREVIOUS, and a console that asked in between could
+	 * change the answer.  wio-lite-ai learned this in its issue #108.
 	 */
-	nn_camera_record_invalidate();
-
-	nn_session_release();
-
-	/*
-	 * [!] THE RESULTING MODEL STATE IS READ BACK, NOT ASSUMED.  This backend's
-	 * reload is transactional -- on a refusal the previous model normally stays
-	 * active -- but it documents one exception: if even that could not be
-	 * rebuilt, the model is left CLOSED.  Reporting "rejected, previous
-	 * unchanged" there would leave an operator believing a model is loaded
-	 * when none is, so the answer comes from asking.
-	 */
-	m = NULL;
-	if (nn_model_open(&m) == 0 && m != NULL)
+	if (open_after)
 		*state = (rc == 0) ? NN_MODEL_NEW : NN_MODEL_PREVIOUS;
 	else
 		*state = NN_MODEL_EMPTY;
+
+	/*
+	 * [!] THE LAST RESULT GOES WITH THE MODEL IT CAME FROM (issue #118), and
+	 * it goes whenever what is open changed -- a new model, or a rollback that
+	 * left nothing -- decided from the outcome above, not on every attempt.
+	 * Until P1 this cleared on refusals too, because which of the two had
+	 * happened was only known after the session was gone.  PREVIOUS changed
+	 * nothing and keeps it.  Under the session, so no worker is publishing.
+	 */
+	if (*state != NN_MODEL_PREVIOUS)
+		nn_camera_record_invalidate();
+
+	nn_session_release();
 
 	if (rc != 0) {
 		nn_detail_set("the model was refused (%d)", rc);
@@ -295,7 +297,7 @@ void nn_svc_model_unload(struct nn_op_result *res)
 	/* Idempotent: this board's model is a singleton that is rebuilt rather than
 	   destroyed, so "unload" returns it to the built-in one. */
 	if (nn_model_open(&m) == 0 && m != NULL)
-		(void)nn_model_reload(NULL, 0u, NULL);
+		(void)nn_model_reload(NULL, 0u, NULL, NULL);
 	/* The model went back to the built-in one, and the last result goes with
 	 * the one it came from (issue #118) -- under the session. */
 	nn_camera_record_invalidate();

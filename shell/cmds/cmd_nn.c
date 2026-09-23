@@ -401,11 +401,17 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 #define NN_MODEL_SOURCES_ \
 	NN_SRC_NAME_ NN_SRC_SLOT_ NN_SRC_PATH_ NN_SRC_BUILTIN_ NN_SRC_ADDR_
 
-/* [!] TWO SPELLINGS, BECAUSE THERE ARE TWO CONSUMERS.  A .usage field carries
- * the ARGUMENT SPELLING only -- the dispatcher prints "usage: <command path> "
- * in front of it -- while the parser below prints a whole line of its own.  One
- * string used for both is how every wrong-argument line in this file came to
- * read "usage: nn bench usage: nn bench [iterations]". */
+/* [!] THREE SPELLINGS, BECAUSE THERE ARE THREE CONSUMERS.  A .usage field
+ * carries the ARGUMENT SPELLING only, and the dispatcher prints "usage: <command
+ * path> " in front of it -- so what follows the path depends on WHICH entry the
+ * path ends at.  The `load` leaf gets its operands alone; the `model` parent,
+ * whose path stops one word earlier, gets "load" in front of them.  Sharing one
+ * string between the two printed "usage: nn model load load <...>" on every
+ * board (issue #122).  The parser below prints a whole line of its own; one
+ * string used for both of those is how every wrong-argument line in this file
+ * came to read "usage: nn bench usage: nn bench [iterations]".  All three are
+ * pinned through the real dispatcher by shell/test/test_nn_cmd_usage.c. */
+static const char nn_model_load_args[] = "<" NN_MODEL_SOURCES_ ">";
 static const char nn_model_args[] = "load <" NN_MODEL_SOURCES_ ">";
 static const char nn_model_usage[] =
 	"usage: nn model load <" NN_MODEL_SOURCES_ ">\r\n";
@@ -1473,7 +1479,7 @@ static const struct cli_cmd nn_stream_subcmds[] = {
 #if NN_SVC_HAS_MODEL_LOAD
 CLI_SUBCMD_SET_CREATE(nn_model_subcmds,
 	CLI_CMD_ARG_USAGE(load, NULL, "point the model at a source",
-	                  nn_model_args, cmd_nn_model_load, 2, 3),
+	                  nn_model_load_args, cmd_nn_model_load, 2, 3),
 	CLI_CMD(unload, NULL, "release the model and what it holds",
 	        cmd_nn_model_unload),
 	CLI_SUBCMD_SET_END);

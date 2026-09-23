@@ -475,6 +475,32 @@ for neg in NN_DC_OVER_LIT NN_DC_OVER_FMT NN_DC_NOT_LITERAL; do
     echo "  ok   $neg refused at compile time"
 done
 
+# issue #122 -- what `nn model load` prints on a wrong invocation, through the REAL
+# dispatcher and the REAL shell/cmds/cmd_nn.c, once per source set a board
+# declares.  The line is joined from two halves -- the dispatcher's command path
+# and the command's argument spelling -- and it read "usage: nn model load load
+# <...>" on every board because the parent and the leaf shared one spelling.
+# Neither half is wrong on its own, so only the joined line can be tested.  The
+# adapters are stubs (nothing is loaded); nn_cfg/ stands in for a board's
+# nn_svc_config.h with the loader on, and -D picks the sources.
+for shape in "-DNN_SVC_HAS_MODEL_SLOT=1" \
+             "-DNN_SVC_HAS_MODEL_NAME=1 -DNN_SVC_HAS_MODEL_ADDR=1" \
+             "-DNN_SVC_HAS_MODEL_PATH=1 -DNN_SVC_HAS_MODEL_BUILTIN=1"; do
+    # -Wno-unused-function: the stub config has no camera or bench, so the
+    # cancel shim they share is unused here and nowhere on a real board.
+    # shellcheck disable=SC2086  # $shape is deliberately word-split
+    gcc $CFLAGS -Wno-unused-function -DCLI_USE_COLOR=0 $shape \
+        $glue_inc -I "$here/shim" -I "$here/nn_cfg" -I "$inc" -I "$core" \
+        -I "$here/../cmds" -I "$svc" \
+        "$here/test_nn_cmd_usage.c" "$here/../cmds/cmd_nn.c" \
+        "$here/../cmds/nn_cmd_core.c" \
+        "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
+        "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_parse.c" "$core/cli_complete.c" \
+        $glue \
+        $LDFLAGS -o "$out/test_nn_cmd_usage"
+    "$out/test_nn_cmd_usage"
+done
+
 # issue #99 -- the shared stream lifecycle (svc/nn_stream_life.c).
 #
 # A `--frames` waiter and a second console racing over one stream: the waiter

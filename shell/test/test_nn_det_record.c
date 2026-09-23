@@ -115,6 +115,8 @@ static void test_outlives_session(void)
 	               snap.kind == (uint8_t)NN_DET_CALLER_BOXES,
 	       "valid %d ndet %d npass %d x %.3f kind %u", snap.valid, snap.ndet,
 	       snap.res.npass, (double)dets[0].x, (unsigned)snap.kind);
+	expect("[!] but it is no longer the CURRENT session's result",
+	       snap.current == 0u, "current %u", (unsigned)snap.current);
 	expect("a boundary is not a publish and not a model change",
 	       snap.accepted == acc && snap.epoch == ep,
 	       "accepted %u->%u epoch %u->%u", (unsigned)acc,
@@ -127,9 +129,9 @@ static void test_outlives_session(void)
 	       nn_det_record_publish(&rec, &late, 1, &r9, g0) == 0, "taken");
 	memset(dets, 0, sizeof dets);
 	nn_det_record_snapshot(&rec, &snap, dets, BF_MAX_DET);
-	expect("and the kept result is exactly as it was",
+	expect("and the kept result is exactly as it was, and still not current",
 	       snap.valid != 0 && snap.res.npass == 3 && dets[0].x == 0.25f &&
-	               snap.accepted == acc,
+	               snap.accepted == acc && snap.current == 0u,
 	       "valid %d npass %d x %.3f accepted %u", snap.valid,
 	       snap.res.npass, (double)dets[0].x, (unsigned)snap.accepted);
 
@@ -159,6 +161,8 @@ static void test_outlives_session(void)
 	expect("the session's own publish is taken",
 	       nn_det_record_publish(&rec, &late, 1, &r9, g1) != 0, "dropped");
 	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	expect("[!] a publish of the session in force is current",
+	       snap.current != 0u, "current 0");
 	expect("and counted: accepted moves by exactly one",
 	       snap.accepted == base + 1u, "accepted %u base %u",
 	       (unsigned)snap.accepted, (unsigned)base);
@@ -216,6 +220,7 @@ static void test_outlives_session(void)
 	nn_det_record_snapshot(&rec, &snap, dets, BF_MAX_DET);
 	expect("[!] a model change clears the result",
 	       snap.valid == 0 && snap.ndet == 0 && snap.reportable == 0u &&
+	               snap.current == 0u &&
 	               snap.kind == (uint8_t)NN_DET_CALLER_BOXES &&
 	               snap.res.npass == 0,
 	       "valid %d ndet %d reportable %u kind %u npass %d", snap.valid,
@@ -258,6 +263,8 @@ static void test_outlives_session(void)
 	nn_det_record_snapshot(&rec, &snap, NULL, 0);
 	expect("its decoder can describe it", snap.reportable != 0u,
 	       "reportable 0");
+	expect("[!] and it is the current session's, whichever kind published it",
+	       snap.current != 0u, "current 0");
 	nn_det_record_boundary(&rec);                  /* the stream stops */
 	nn_det_record_snapshot(&rec, &snap, NULL, 0);
 	expect("[!] a boundary runs no decoder, so the account stays",
@@ -280,10 +287,14 @@ static void test_outlives_session(void)
 	expect("the next accepted decode can be described again",
 	       snap.reportable != 0u && snap.ndet == 3, "reportable %u ndet %d",
 	       (unsigned)snap.reportable, snap.ndet);
+	nn_det_record_boundary(&rec);
+	g1 = nn_det_record_gen(&rec);
 	(void)nn_det_record_publish_raw(&rec, g1);
 	nn_det_record_snapshot(&rec, &snap, NULL, 0);
 	expect("a result no plugin produced has no account to give",
 	       snap.reportable == 0u, "reportable 1");
+	expect("[!] and an undecoded result of the session in force is current",
+	       snap.current != 0u, "current 0");
 	(void)nn_det_record_publish_external(&rec, 3, g1);
 	(void)nn_det_record_publish(&rec, &one, 1, &r3, g1);
 	nn_det_record_snapshot(&rec, &snap, NULL, 0);
@@ -313,7 +324,7 @@ static void test_outlives_session(void)
 	nn_det_record_snapshot(&rec, &snap, NULL, 0);
 	expect("[!] the snapshot states the count, the epoch and the account",
 	       snap.accepted == rec.accepted && snap.epoch == rec.epoch &&
-	               snap.reportable == rec.reportable,
+	               snap.reportable == rec.reportable && snap.current == 1u,
 	       "accepted %u/%u epoch %u/%u reportable %u/%u",
 	       (unsigned)snap.accepted, (unsigned)rec.accepted,
 	       (unsigned)snap.epoch, (unsigned)rec.epoch,
@@ -328,20 +339,6 @@ static void test_outlives_session(void)
 	/* Null tolerance of the two new operations. */
 	nn_det_record_boundary(NULL);
 	nn_det_record_invalidate(NULL);
-
-	/* --- the transitional reset is exactly both halves --------------- */
-	nn_det_record_snapshot(&rec, &snap, NULL, 0);
-	acc = snap.accepted;
-	ep  = snap.epoch;
-	g0  = nn_det_record_gen(&rec);
-	nn_det_record_reset(&rec);
-	nn_det_record_snapshot(&rec, &snap, NULL, 0);
-	expect("reset clears, moves the generation and the epoch, keeps the count",
-	       snap.valid == 0 && nn_det_record_gen(&rec) != g0 &&
-	               snap.epoch != ep && snap.accepted == acc,
-	       "valid %d epoch %u->%u accepted %u->%u", snap.valid,
-	       (unsigned)ep, (unsigned)snap.epoch, (unsigned)acc,
-	       (unsigned)snap.accepted);
 }
 
 int main(void)
@@ -381,7 +378,7 @@ int main(void)
 	       (unsigned)snap.kind);
 
 	/* --- the ordinary path ------------------------------------------- */
-	nn_det_record_reset(&rec);          /* start a session */
+	nn_det_record_invalidate(&rec);          /* a model goes in */
 	g0 = nn_det_record_gen(&rec);
 	one = mk_det(0.25f);
 	{
@@ -402,10 +399,12 @@ int main(void)
 
 	/* --- THE CASE THIS FILE EXISTS FOR ------------------------------- */
 	/*
-	 * The worker armed under g0 and is now inside an inference.  A stop runs
-	 * (reset), and only afterwards does that inference finish and publish.
+	 * The worker armed under g0 and is now inside an inference.  Something ends
+	 * the session -- here the harsher of the two, a model change, which also
+	 * clears -- and only afterwards does that inference finish and publish.  The boundary, which
+	 * keeps the result, has its own cases in test_outlives_session().
 	 */
-	nn_det_record_reset(&rec);          /* the stop */
+	nn_det_record_invalidate(&rec);          /* the model changes */
 	{
 		struct bf_result r = mk_res(9);
 		struct bf_det late = mk_det(0.75f);
@@ -415,17 +414,17 @@ int main(void)
 	expect("a decode that outlived its session is DROPPED", took == 0,
 	       "taken");
 	nn_det_record_snapshot(&rec, &snap, dets, BF_MAX_DET);
-	expect("the stopped session leaves nothing behind", snap.valid == 0,
+	expect("the retired model leaves nothing behind", snap.valid == 0,
 	       "valid %d", snap.valid);
 	expect("not even a box count", snap.ndet == 0, "ndet %d", snap.ndet);
 
 	/* --- and it stays dropped across a restart ----------------------- */
 	/*
-	 * The nastier shape: stop, then START, and only then the old inference
+	 * The nastier shape: two changes, and only then the old inference
 	 * lands.  Without a generation it would look like the new session's first
 	 * frame -- valid, plausible, and from a stream that no longer exists.
 	 */
-	nn_det_record_reset(&rec);          /* the new start */
+	nn_det_record_invalidate(&rec);          /* ...and changes again */
 	g1 = nn_det_record_gen(&rec);
 	expect("a new session has a new generation", g1 != g0, "g0 %u g1 %u",
 	       (unsigned)g0, (unsigned)g1);
@@ -499,7 +498,7 @@ int main(void)
 
 		/* Start from a live caller-boxes record so the transition is the
 		 * thing under test, not a fresh one. */
-		nn_det_record_reset(&rec);
+		nn_det_record_invalidate(&rec);
 		g = nn_det_record_gen(&rec);
 		(void)nn_det_record_publish(&rec, &one, 1, &r_ext, g);
 
@@ -555,11 +554,11 @@ int main(void)
 		       "untouched");
 
 		/* The generation rule is the same rule. */
-		nn_det_record_reset(&rec);
+		nn_det_record_invalidate(&rec);
 		expect("[!] an external publish from a retired session lands nowhere",
 		       nn_det_record_publish_external(&rec, 2, g) == 0, "taken");
 		nn_det_record_snapshot(&rec, &snap, NULL, 0);
-		expect("the reset record is not valid and routes nowhere",
+		expect("the invalidated record is not valid and routes nowhere",
 		       snap.valid == 0 &&
 		               snap.kind == (uint8_t)NN_DET_CALLER_BOXES,
 		       "valid %d kind %u", snap.valid, (unsigned)snap.kind);
@@ -591,7 +590,7 @@ int main(void)
 
 		/* Start from a LIVE caller-boxes record, so what is under test is the
 		 * transition and not a record that was already empty. */
-		nn_det_record_reset(&rec);
+		nn_det_record_invalidate(&rec);
 		g = nn_det_record_gen(&rec);
 		(void)nn_det_record_publish(&rec, &one, 1, &r_live, g);
 
@@ -644,7 +643,7 @@ int main(void)
 		 * record stays empty) while destroying the live session's result.
 		 */
 		stale = g;
-		nn_det_record_reset(&rec);
+		nn_det_record_invalidate(&rec);
 		g = nn_det_record_gen(&rec);
 		(void)nn_det_record_publish(&rec, &one, 1, &r_live, g);
 		expect("[!] an inference from a retired session is dropped",
@@ -662,7 +661,7 @@ int main(void)
 
 		/* And the plain form of the same rule: nothing of a retired session
 		 * survives into the record it tried to land in. */
-		nn_det_record_reset(&rec);
+		nn_det_record_invalidate(&rec);
 		expect("a retired session cannot make an empty record valid either",
 		       nn_det_record_publish_raw(&rec, g) == 0, "taken");
 		nn_det_record_snapshot(&rec, &snap, NULL, 0);

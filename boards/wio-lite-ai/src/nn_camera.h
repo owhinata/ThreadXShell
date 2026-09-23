@@ -197,7 +197,10 @@ void nn_camera_stats_get(struct nn_camera_stats *out);
  * by the time it got round to printing -- while a stream runs, a different frame.
  */
 struct nn_camera_decode {
-	int              valid;  /**< 0 = nothing decoded in this session yet     */
+	/** 0 = nothing published since the model went in.  [!] NOT "this
+	 *  session": the result outlives a stop (issue #118) -- @ref current and
+	 *  @ref accepted answer that. */
+	int              valid;
 	int              ndet;   /**< items; @ref kind says what they are         */
 	struct bf_result res;    /**< status, peak, pass/kept, threshold APPLIED  */
 	/**
@@ -207,7 +210,23 @@ struct nn_camera_decode {
 	 * and exactly the sort of statement that outlives the fact behind it.
 	 */
 	uint8_t          kind;   /**< one of @ref nn_det_kind                     */
+	/* Carried from the record in the same snapshot (issue #118) -- see
+	 * svc/nn_det_record.h for each. */
+	uint8_t          reportable;  /**< the plugin can still describe it      */
+	uint8_t          current;     /**< published in the session in force     */
+	uint32_t         accepted;    /**< publishes the record has ever taken   */
+	uint32_t         epoch;       /**< moves when a model change clears it   */
 };
+
+/**
+ * The model or its decoder changed: clear the last result (issue #118).
+ *
+ * Called by the load and the unload whenever what is open is not what was open
+ * before -- whatever the operation's status -- and before the new identity is
+ * published.  [!] WITH THE RESULT LEASE HELD where the build has one: the
+ * order is lease, then the record lock, the same as every other holder.
+ */
+void nn_camera_record_invalidate(void);
 
 /**
  * Take a coherent snapshot of the last published decode.
@@ -234,7 +253,7 @@ struct nn_camera_decode {
  * panel does not ask (it passes NULL) precisely so that it never waits.
  * @return non-zero if a snapshot was taken (zero before the first stream start,
  *         when the lock does not exist yet).  A snapshot with `valid == 0` means
- *         this session has published no inference result yet -- which is NOT the
+ *         nothing has been published since the model went in -- which is NOT the
  *         same as a decode that found nothing, and must not be printed as one.
  *
  * Cumulative counters stay in nn_camera_stats_get(): they are updated outside

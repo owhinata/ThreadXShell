@@ -239,7 +239,17 @@ capture.
 > until the base is started, which is not a hung command. The start says so when
 > the base is not running. (Issue #99 also removed the `[qqvga|qvga]` word this
 > command used to take -- the port discarded it and derived the geometry from
-> whatever the base publishes, so it had not selected anything for some time.)  Stopping one of them detaches its sink while the base keeps running --
+> whatever the base publishes, so it had not selected anything for some time.)
+>
+> **The last result outlives the session** (issue #118). `nn dets` reads the
+> last published decode after a `nn run`, during a stream and after its stop;
+> only `nn model load` (any reload attempt -- this board cannot yet say which
+> model a refused reload left) and `nn model unload` clear it. `nn run` waits on
+> the record's accepted-publish count, not the worker's inference counter, which
+> this board bumps before the decode is published. The GUI boxes are drawn only
+> from a result of the session in force, so they still clear on `nn stream stop`.
+
+Stopping one of them detaches its sink while the base keeps running --
 that is the whole point of a subscriber -- so a delivery can already be in
 flight across the unlink: `frame_pipeline_publish()` copies the sinks it will
 deliver to into a local array, drops the pipeline lock, and only then calls

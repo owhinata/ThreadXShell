@@ -322,14 +322,15 @@ static void test_last_line(void)
 	            0u, 0u, 0, NN_LAST_NEVER, "nothing decoded yet");
 
 	/*
-	 * [!] AND THE SAME FIELDS AFTER A RUN MEAN SOMETHING ELSE.  One board
-	 * retires its result when a stream stops, deliberately, so that a stopped
-	 * stream does not leave a stale annotation on view.  Saying "nothing
-	 * decoded yet" after hundreds of inferences reads as a broken decoder.
+	 * [!] AND THE SAME FIELDS AFTER A RUN MEAN SOMETHING ELSE.  A stream's
+	 * result outlives its stop (issue #118); what takes it away is a model
+	 * change.  Saying "nothing decoded yet" after hundreds of inferences reads
+	 * as a broken decoder -- and "dropped when a stream stops", which this said
+	 * until #118, is no longer true of any board.
 	 */
-	expect_last("a stopped stream that did infer",
+	expect_last("a stream that did infer, under a model since replaced",
 	            0u, 412u, 0, NN_LAST_RETIRED,
-	            "the result is dropped when a stream stops");
+	            "the model was replaced since, and its result with it");
 
 	/*
 	 * [!] A NEGATIVE COUNT IS NOT A COUNT.  It is the decoder saying the open

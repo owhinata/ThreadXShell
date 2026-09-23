@@ -240,9 +240,11 @@ static void nncam_session_reset(void)
 {
 	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
 	nncam_producer_dead = 0;
-	/* Drop stale detections from a prior session AND move the generation, so an
-	 * inference still running under the old one cannot publish into this one. */
-	nn_det_record_reset(&nncam_rec);
+	/* Move the generation, so an inference still running under the old session
+	 * cannot publish into this one.  [!] The last result STAYS (issue #118):
+	 * `nn dets` reads it until a model change clears it, and what a session
+	 * produced is counted from a base taken after this boundary. */
+	nn_det_record_boundary(&nncam_rec);
 	for (int i = 0; i < NNCAM_STAGE_N; i++)
 		if (nncam_state[i] != ST_RUNNING)
 			nncam_state[i] = ST_FREE;   /* leave a stage the worker is copying out of */
@@ -343,10 +345,11 @@ static void nncam_close(void *ctx)
 	for (int i = 0; i < NNCAM_STAGE_N; i++)
 		if (nncam_state[i] == ST_READY)
 			nncam_state[i] = ST_FREE;       /* drop pending; ST_RUNNING/FILLING left */
-	/* Clear the boxes: no live frames while paused.  Moving the generation with
-	 * them is what stops the ST_RUNNING stage this function deliberately leaves
-	 * alone from publishing after the pause. */
-	nn_det_record_reset(&nncam_rec);
+	/* Move the generation: that is what stops the ST_RUNNING stage this
+	 * function deliberately leaves alone from publishing after the pause.  The
+	 * boxes stay in the record (issue #118); a live picture asks whether they
+	 * are CURRENT, and after this boundary they are not. */
+	nn_det_record_boundary(&nncam_rec);
 	tx_mutex_put(&nncam_lock);
 	(void)tx_semaphore_put(&nncam_sem);     /* wake worker (idles until re-attach)  */
 }
@@ -416,8 +419,13 @@ static int nncam_step(void)
 		 * as a measurement, so a decoder that had never been initialised --
 		 * a build fault, permanent, on every frame -- would have shown up as a
 		 * perfectly healthy stream finding nobody.  The record keeps -1, and
-		 * the status with it.
+		 * the status with it -- and since issue #118 it keeps its own code:
+		 * BF_ERR_UNINIT is not BF_ERR_MODEL.
 		 */
+		/* [!] WHETHER IT WAS TAKEN IS THE RECORD'S TO COUNT (issue #118).
+		 * `infers` above counts inferences and keeps that meaning; `nn run`
+		 * waits on the record's accepted count, which moves here, under this
+		 * lock, only for a publish the generation rule took. */
 		(void)nn_det_record_publish(&nncam_rec, tmp, nd, &bfr, gen);
 		tx_mutex_put(&nncam_lock);
 		nnstat.detections = (nd > 0) ? (uint32_t)nd : 0u;
@@ -606,6 +614,18 @@ int nn_camera_start(enum camera_res res)
 	 * and RGB565 (calls nncam_open -> session reset); otherwise the subscriber stays
 	 * enabled + idle and attaches at the next `camera stream start`.  A non-zero rc
 	 * is a hard failure (registry full / immediate attach rejected) -> unwind. */
+	/*
+	 * [!] A BOUNDARY OF ITS OWN, BEFORE THE SUBSCRIBE (issue #118).  The
+	 * attach below is one only if the base is running; with it idle the
+	 * attach comes later, and the caller samples its accepted-count base
+	 * after this call returns.  Moving the generation here makes "everything
+	 * accepted after the base is this session's" true on both paths.  The
+	 * worker is parked (checked above), so nothing is in flight to drop.
+	 */
+	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
+	nn_det_record_boundary(&nncam_rec);
+	tx_mutex_put(&nncam_lock);
+
 	nncam_run = 1;
 	rc = camera_subscribe(&nncam_sink, CAM_FMT_RGB565);
 	if (rc != 0) {
@@ -661,6 +681,12 @@ int nn_camera_stop(void)
 	 * with the lifecycle held but NO serialiser held: these waits sleep, and one
 	 * of the callbacks takes nncam_lock. */
 	nncam_run = 0;                          /* disable: worker exits its run loop   */
+	/* [!] The stop is a boundary whether or not the sink is attached (issue
+	 * #118): the close below moves the generation only if there is a base to
+	 * detach from, and an inference in flight must land nowhere either way. */
+	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
+	nn_det_record_boundary(&nncam_rec);
+	tx_mutex_put(&nncam_lock);
 	(void)tx_semaphore_put(&nncam_sem);     /* wake the worker if waiting           */
 	(void)camera_unsubscribe(&nncam_sink);  /* detach (close); base keeps running   */
 
@@ -728,6 +754,11 @@ int nn_camera_dets_get(struct bf_det *out, int max)
 		return 0;
 	if (!nn_camera_decode_get(&snap, out, max))
 		return 0;
+	/* [!] ONLY THE SESSION IN FORCE (issue #118).  The record keeps its last
+	 * boxes across a stop now, and this is what the GUI stamps on a LIVE
+	 * picture: a new stream would open wearing the previous one's faces. */
+	if (!snap.current)
+		return 0;
 	/* A count of boxes actually copied.  A negative ndet means "not a BlazeFace
 	 * model" and there are no boxes to hand back; callers that need to tell that
 	 * apart from an honest zero use nn_camera_decode_get(). */
@@ -753,10 +784,24 @@ int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
 	 */
 	nn_det_record_snapshot(&nncam_rec, &snap, dets, max);
 	tx_mutex_put(&nncam_lock);
-	out->valid = snap.valid;
-	out->ndet  = snap.ndet;
-	out->res   = snap.res;
+	out->valid    = snap.valid;
+	out->ndet     = snap.ndet;
+	out->res      = snap.res;
+	out->current  = snap.current;
+	out->accepted = snap.accepted;
+	out->epoch    = snap.epoch;
 	return 1;
+}
+
+void nn_camera_record_invalidate(void)
+{
+	/* Before the first start the lock does not exist, and nothing has ever
+	 * published into the record. */
+	if (!nncam_created)
+		return;
+	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
+	nn_det_record_invalidate(&nncam_rec);
+	tx_mutex_put(&nncam_lock);
 }
 
 void nn_camera_set_norm(int signed_range) { nncam_norm_signed = signed_range ? 1 : 0; }

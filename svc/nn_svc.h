@@ -419,6 +419,15 @@ enum nn_report_status {
 	 * leaves the result perfectly intact.
 	 */
 	NN_REPORT_STALE,
+	/**
+	 * [!] THE DECODER HAS MOVED ON (issue #118).  The result is in the record
+	 * and its count is true, but a later decode ran whose publish was dropped
+	 * -- a stream stopped under it -- and that decode rewrote the private
+	 * result the decoder would describe.  Its account now belongs to a frame
+	 * the record does not hold, so it is not asked for.  Not STALE: nothing
+	 * was busy, and asking again will not help until the next result lands.
+	 */
+	NN_REPORT_SUPERSEDED,
 };
 
 /**

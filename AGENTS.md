@@ -88,9 +88,9 @@
   同じクリティカルセクション内で**照合する（`NN_STREAM_GEN_ANY` は操作者専用で**待ち手は渡さない**）。
   機械は `svc/nn_stream_life.c` の 1 本。
 - **[!] start の admission も機械が持つ** — worker を触る**前に** STARTING を claim し失敗なら abort。
-  `commit()` は STARTING 以外を、`finish/retry/poison` は STOPPING 以外を拒否する。**worker のカウンタは
-  世代と一致しない**ので poll は commit 時に latch した基準を引く。**遷移が拒否されたら wrapper の
-  副作用も走らせない。**
+  `commit()` は STARTING 以外を、`finish/retry/poison` は STOPPING 以外を拒否する。**worker のカウンタも
+  record の `valid` も世代と一致しない**（record は境界で消えずモデル変更で消える、#118）ので poll は
+  commit 時に latch した基準（record の受理数を含む）を引く。**遷移拒否なら wrapper の副作用も走らせない。**
 - **[!] `nn run` も one-shot で同じ機械を claim**（re-arm/操作者 stop 不可。種類は claim 内で判定、#120）。
 - **[!] poll は 2 相 + 遷移カウンタ**（数値は他ロック配下なので割込み禁止下では集められず、世代と
   状態だけでは retryable な stop を跨いだ読みを弾けない）。

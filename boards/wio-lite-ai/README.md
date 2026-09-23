@@ -337,11 +337,20 @@ at print time, not provably the one that ran.  The other console can load a
 different one in between.  The numbers are always some model's real tensors,
 never garbage; what is not established is that they are THIS run's.
 
-`nn dets` is the answer that surprises.  On THIS board it only reads the last
-published decode: `nn run` takes its snapshot and then stops the stream, and a
-stop clears the record, so with no plugin there is never a record left for it
-to read.  (Grove decodes synchronously inside `nn dets`, f746g-disco reads the
-record as this board does, and unifying the three is issue #118.)
+`nn dets` only reads the last published result -- it captures nothing, infers
+nothing and decodes nothing.  Since issue #118 that result **outlives the
+session that produced it**: a `nn run`, a stream that is still running, or one
+that has stopped all leave it readable, and only a model change (`nn model
+load` that changed what is open, or `nn model unload`) clears it, after which
+`nn dets` says *nothing has been inferred yet* again.  What a session produced
+is counted rather than read off `valid`: the record counts every publish it
+accepts under its own lock, `nn run` waits on that count, and `nn stream
+stats`' `last` line is the stream's only when the record has accepted one since
+the stream's commit.  If a stream stopped in the middle of a decode, the count
+stays and the plugin's own account is withheld (*the decoder has decoded a later
+frame since*), because the dropped decode rewrote what the plugin would
+describe.  (f746g-disco reads the record the same way; Grove moves to it in
+Phase 2 stage 3c.)
 
 The `null` backend answers the same way and refuses `nn stream start` in its
 own right: it has no plugin mechanism compiled in at all, so nothing there
@@ -465,7 +474,9 @@ inside the plugin, so there is nothing to copy.
 
 A held lease is not by itself a reason to draw -- the panel also requires
 `nn overlay` to be on and the record to hold a VALID decode of the plugin's
-kind.  That last condition does work since #116: a record can now say "an
+kind, published IN THE SESSION NOW IN FORCE (`current`, issue #118: the record
+keeps its last result across a stop, and a live preview must not keep wearing
+it).  That last condition does work since #116: a record can now say "an
 inference ran and nothing decoded it", which is valid and is not the plugin's,
 and the panel must leave such a frame alone.  Without the condition,
 `nn overlay off` was ignored on this path, a preview outliving its inference

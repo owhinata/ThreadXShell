@@ -267,7 +267,7 @@ const char *nn_last_text(enum nn_last_kind kind)
 	case NN_LAST_NEVER:
 		return "nothing decoded yet";
 	case NN_LAST_RETIRED:
-		return "the result is dropped when a stream stops";
+		return "the model was replaced since, and its result with it";
 	case NN_LAST_UNRECOGNISED:
 		return "this model is not one the decoder recognises";
 	default:

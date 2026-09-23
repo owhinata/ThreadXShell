@@ -493,10 +493,11 @@ static const struct cell tab[2][S_N][O_N] = {
 },
 [NN_STREAM_KIND_ONESHOT] = {
 	[S_IDLE]     = {{GO_,pA},{GO_,pA},{0,pI},{0,pI},{0,pI},{tIDL,pI},{tIDL,pI},{tIDL,pI},{0,pI},{0,pI},{0,pI}},
-	[S_STARTING] = {{sBSY,pA},{sBSY,pA},{0,pA},{1,pR},{1,pI},{tBSY,pA},{tBSY,pA},{tBSY,pA},{0,pA},{0,pA},{0,pA}},
+	/* [!] a `nn run` coming up or going down is still named (wio bench run) */
+	[S_STARTING] = {{s1SH,pA},{s1SH,pA},{0,pA},{1,pR},{1,pI},{t1SH,pA},{t1SH,pA},{t1SH,pA},{0,pA},{0,pA},{0,pA}},
 	/* [!] the #120 row: no re-arm, no operator stop, no second start */
 	[S_RUNNING]  = {{s1SH,pR},{s1SH,pR},{0,pR},{0,pR},{0,pR},{t1SH,pR},{GO_,pS},{tWRG,pR},{0,pR},{0,pR},{0,pR}},
-	[S_STOPPING] = {{sBSY,pS},{sBSY,pS},{0,pS},{0,pS},{0,pS},{tBSY,pS},{tBSY,pS},{tBSY,pS},{1,pI},{1,pR},{1,pL}},
+	[S_STOPPING] = {{s1SH,pS},{s1SH,pS},{0,pS},{0,pS},{0,pS},{t1SH,pS},{t1SH,pS},{t1SH,pS},{1,pI},{1,pR},{1,pL}},
 	[S_LOST]     = {{sDED,pL},{sDED,pL},{0,pL},{0,pL},{0,pL},{tDED,pL},{tDED,pL},{tDED,pL},{0,pL},{0,pL},{0,pL}},
 	/* [!] returned with its teardown unfinished: now the operator's to stop,
 	 * and still nobody's to re-arm or start over */

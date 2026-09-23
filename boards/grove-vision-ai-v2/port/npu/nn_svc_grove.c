@@ -142,6 +142,14 @@ static struct nn_stream_life nn_life;
 static uint32_t nn_stream_frames0;   /**< camera frame count when it started  */
 static uint32_t nn_stream_t0;        /**< ticks when it started               */
 static uint32_t nn_stream_ms;        /**< frozen elapsed, once it has stopped */
+/*
+ * [!] A STREAM'S NUMBERS ARE LATCHED WHEN IT ENDS (issue #120).  Its frame
+ * count is the camera's, which a `nn run` capture also advances, so a poll that
+ * kept deriving it after the stream ended drifted with every `nn run`.  The
+ * stop takes the final numbers; a poll of that generation reads them here.
+ */
+static struct nn_stream_stats nn_stream_final;
+static uint32_t nn_stream_final_gen;   /**< whose they are; ANY = nobody's */
 
 /* Claim IDLE -> STARTING together with the transient claim.  ONE critical
    section, because they are one decision: a start that took the claim and then
@@ -276,18 +284,30 @@ static enum nn_stream_stop_claim nn_stream_claim_stop(uint32_t gen)
 	return r;
 }
 
-/* Both halves confirmed. */
-static void nn_stream_finish(void)
+/* Publish an ended stream's numbers.  Called inside the settle's critical
+   section, only when the settle took. */
+static void nn_stream_latch(uint32_t ending, const struct nn_stream_stats *final)
 {
+	nn_stream_final = *final;
+	nn_stream_final.elapsed_ms = nn_stream_ms;
+	nn_stream_final_gen = ending;
+}
+
+/* Both halves confirmed. */
+static void nn_stream_finish(const struct nn_stream_stats *final)
+{
+	uint32_t ending;
 	TX_INTERRUPT_SAVE_AREA
 
 	TX_DISABLE
+	ending = nn_life.gen;
 	/* [!] THE CLAIM IS RELEASED ONLY IF THE TRANSITION HAPPENED.  Clearing it
 	 * regardless would hand the NPU back on exactly the invariant failure the
 	 * guard exists to catch -- and something may still be inside it. */
 	if (nn_stream_life_finish(&nn_life)) {
 		nn_stream_ms = (uint32_t)(((uint32_t)tx_time_get() - nn_stream_t0) *
 		                          1000u / TX_TIMER_TICKS_PER_SECOND);
+		nn_stream_latch(ending, final);
 		nn_owner = (uint8_t)NN_OWNER_NONE;
 		nn_busy  = 0u;
 	}
@@ -305,14 +325,18 @@ static void nn_stream_unclaim_stop(void)
 }
 
 /* Unconfirmed: the claim is never given back. */
-static void nn_stream_poison(void)
+static void nn_stream_poison(const struct nn_stream_stats *final)
 {
+	uint32_t ending;
 	TX_INTERRUPT_SAVE_AREA
 
 	TX_DISABLE
-	if (nn_stream_life_poison(&nn_life))
+	ending = nn_life.gen;
+	if (nn_stream_life_poison(&nn_life)) {
 		nn_stream_ms = (uint32_t)(((uint32_t)tx_time_get() - nn_stream_t0) *
 		                          1000u / TX_TIMER_TICKS_PER_SECOND);
+		nn_stream_latch(ending, final);
+	}
 	TX_RESTORE
 }
 
@@ -1555,6 +1579,42 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
 
+/* The per-stream counts -- the one computation a poll and a stop's latch
+   share. */
+static void nn_stream_counts(const struct camera_stats *cs,
+                             const struct nn_overlay_stats *os,
+                             uint32_t frames0, struct nn_stream_stats *out)
+{
+	out->frames         = cs->frames - frames0;
+	out->skipped        = os->skipped;
+	out->infers         = os->inferences;
+	out->errors         = os->errors;
+	out->model_errors   = os->model_errors;
+	out->decoder_errors = os->decoder_errors;
+	out->last_us        = os->last_ms * 1000u;
+	/* [!] Nothing decoded yet is not "decoded nobody". */
+	out->last_valid = (os->inferences != 0u) ? 1u : 0u;
+	out->last_ndet  = (int32_t)os->last_ndet;
+}
+
+/* A stopping stream's final numbers.  Outside any critical section: the
+   camera's stats end in the frame pipeline's mutex. */
+static void nn_stream_take_final(struct nn_stream_stats *final)
+{
+	struct camera_stats cs;
+	struct nn_overlay_stats os;
+	uint32_t frames0;
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	frames0 = nn_stream_frames0;
+	TX_RESTORE
+	camera_stream_stats(&cs);
+	nn_overlay_stats(&os);
+	memset(final, 0, sizeof *final);
+	nn_stream_counts(&cs, &os, frames0, final);
+}
+
 int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 {
 	struct camera_stats cs;
@@ -1569,6 +1629,14 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	/* Phase 1: identity and baselines. */
 	TX_DISABLE
 	nn_stream_life_snapshot(&nn_life, &g, &phase, &seq0, &kind);
+	/* [!] An ended stream answers from its latch, taken in the same critical
+	 * section as the generation it belongs to -- see nn_stream_final. */
+	if (g != NN_STREAM_GEN_ANY && g == nn_stream_final_gen &&
+	    (gen == NN_STREAM_GEN_ANY || gen == g)) {
+		*out = nn_stream_final;
+		TX_RESTORE
+		return NN_SVC_OK;
+	}
 	frames0 = nn_stream_frames0;
 	t0      = nn_stream_t0;
 	ms      = nn_stream_ms;
@@ -1602,20 +1670,11 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	 * the baselines below are still the last stream's. */
 	out->running        = (phase == (uint8_t)NN_STREAM_PHASE_RUNNING &&
 	                       kind == (uint8_t)NN_STREAM_KIND_STREAM) ? 1u : 0u;
-	out->frames         = cs.frames - frames0;
-	out->skipped        = os.skipped;
-	out->infers         = os.inferences;
-	out->errors         = os.errors;
-	out->model_errors   = os.model_errors;
-	out->decoder_errors = os.decoder_errors;
-	out->last_us        = os.last_ms * 1000u;
+	nn_stream_counts(&cs, &os, frames0, out);
 	out->elapsed_ms     = out->running
 	                    ? (uint32_t)(((uint32_t)tx_time_get() - t0) * 1000u /
 	                                 TX_TIMER_TICKS_PER_SECOND)
 	                    : ms;
-	/* [!] Nothing decoded yet is not "decoded nobody". */
-	out->last_valid = (os.inferences != 0u) ? 1u : 0u;
-	out->last_ndet  = (int32_t)os.last_ndet;
 	return NN_SVC_OK;
 }
 
@@ -1654,6 +1713,7 @@ static const char *nn_stream_why_text(unsigned char why)
 
 void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 {
+	struct nn_stream_stats final;
 	struct nn_stream_verdict v;
 	int cam_rc, detach_rc = 0, attempted = 0;
 
@@ -1711,10 +1771,12 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 		detach_rc = cam_lcd_sink_detach();
 	}
 	nn_stream_stop_decide(cam_rc, attempted, detach_rc, &v);
+	/* The stream's final numbers, latched only if the settle below takes. */
+	nn_stream_take_final(&final);
 
 	switch ((enum nn_stream_act)v.act) {
 	case NN_STREAM_ACT_DONE:
-		nn_stream_finish();
+		nn_stream_finish(&final);
 		nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 		return;
 	case NN_STREAM_ACT_RETRY:
@@ -1724,7 +1786,7 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 		return;
 	case NN_STREAM_ACT_TERMINAL:
 	default:
-		nn_stream_poison();
+		nn_stream_poison(&final);
 		nn_detail_set("%s", nn_stream_why_text(v.why));
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
 		return;

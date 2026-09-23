@@ -348,12 +348,19 @@ int nn_svc_input(struct tensor_desc *out)
 /** How long `nn run` waits for its one inference, in seconds. */
 #define NN_RUN_WAIT_S 2u
 
+/* nn_camera_start()'s refusal, in the one wording both `nn run` and `nn stream
+ * start` use (a literal, so nn_detail_set checks its length). */
+#define NN_CAMERA_START_FAILED \
+	"start failed (%d): NN busy (bench or another stream), SDRAM down, or " \
+	"no model loaded?"
+
 /* The lifecycle helpers, defined with the lifecycle below (issue #120). */
 static enum nn_stream_start_claim nn_oneshot_admit(void);
 static uint32_t nn_oneshot_commit(void);
 static void nn_stream_unadmit(void);
 static enum nn_stream_stop_claim nn_stream_claim_stop(uint32_t gen);
-static void nn_stream_settle(enum nn_claim claim);
+static void nn_stream_settle(enum nn_claim claim,
+                             const struct nn_stream_stats *final);
 
 void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
                      struct nn_report_capture *rep,
@@ -413,8 +420,11 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	rc = nn_camera_start(CAM_RES_QVGA);
 	if (rc != 0) {
 		nn_stream_unadmit();
-		nn_detail_set("start failed (%d): NN busy, or no model loaded", rc);
-		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
+		/* The same words and status as `nn stream start` -- one refusal from
+		 * one worker reads the same from either command. */
+		nn_detail_set(NN_CAMERA_START_FAILED, rc);
+		nn_result(res, (rc == -2) ? NN_SVC_ERR_STATE : NN_SVC_ERR_HW,
+		          NN_CLAIM_NONE);
 		return;
 	}
 	gen = nn_oneshot_commit();
@@ -490,7 +500,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	stop_rc = nn_camera_stop();
 	/* A retryable teardown leaves the one-shot RUNNING and the operator's to
 	 * finish with `nn stream stop` -- see nn_stream_life.h. */
-	nn_stream_settle(nn_claim_of_stop(stop_rc));
+	nn_stream_settle(nn_claim_of_stop(stop_rc), NULL);
 
 	/*
 	 * [!] WHY THE WAIT ENDED IS THE STATUS (issue #122 P7).  A cancelled or
@@ -658,6 +668,16 @@ void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
 static struct nn_stream_life nn_life;
 static uint32_t nn_stream_t0;
 static uint32_t nn_stream_ms;
+/*
+ * [!] A STREAM'S NUMBERS ARE LATCHED WHEN IT ENDS (issue #120).  The worker's
+ * per-stream counts restart with every nn_camera_start(), and `nn run` starts
+ * the worker too -- so a poll that kept reading them after the stream ended
+ * reported the last `nn run` as though it were the stream.  The stop takes the
+ * stream's final numbers once the worker is quiet; a poll of that generation
+ * reads them from here.
+ */
+static struct nn_stream_stats nn_stream_final;
+static uint32_t nn_stream_final_gen;   /**< whose they are; ANY = nobody's */
 
 /* Admit a start BEFORE the worker is touched.  This board has no re-arm, so
    IDLE is the only phase a start may come from. */
@@ -748,7 +768,8 @@ static enum nn_stream_stop_claim nn_stream_claim_stop(uint32_t gen)
  * And only a STREAM's end is dated -- a one-shot ending must not overwrite the
  * last stream's clock, which `nn stream stats` reports.
  */
-static void nn_stream_settle(enum nn_claim claim)
+static void nn_stream_settle(enum nn_claim claim,
+                             const struct nn_stream_stats *final)
 {
 	TX_INTERRUPT_SAVE_AREA
 
@@ -757,16 +778,36 @@ static void nn_stream_settle(enum nn_claim claim)
 		(void)nn_stream_life_retry(&nn_life);  /* stoppable again, same gen */
 	} else {
 		int stream = (nn_life.kind == (uint8_t)NN_STREAM_KIND_STREAM);
+		uint32_t ending = nn_life.gen;
 		int took = (claim == NN_CLAIM_TERMINAL)
 		         ? nn_stream_life_poison(&nn_life)
 		         : nn_stream_life_finish(&nn_life);  /* the generation is kept */
 
-		if (took && stream)
+		if (took && stream) {
 			nn_stream_ms = (uint32_t)(((uint32_t)tx_time_get() -
 			                           nn_stream_t0) * 1000u /
 			                          TX_TIMER_TICKS_PER_SECOND);
+			/* The ended stream's numbers, for every poll from here on. */
+			if (final != NULL) {
+				nn_stream_final = *final;
+				nn_stream_final.elapsed_ms = nn_stream_ms;
+				nn_stream_final_gen = ending;
+			}
+		}
 	}
 	TX_RESTORE
+}
+
+/* The per-stream counts -- the one computation a poll and a stop's latch
+   share.  See the notes in the poll. */
+static void nn_stream_counts(const struct nn_camera_stats *st,
+                             struct nn_stream_stats *out)
+{
+	out->skipped = st->gen_drops;
+	out->frames  = st->gen_frames + st->gen_drops;
+	out->infers  = st->gen_infers;
+	out->errors  = st->gen_errors;
+	out->last_us = st->last_us;
 }
 
 
@@ -820,8 +861,7 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	rc = nn_camera_start(CAM_RES_QVGA);
 	if (rc != 0) {
 		nn_stream_unadmit();
-		nn_detail_set("start failed (%d): NN busy (bench or another stream), "
-		              "SDRAM down, or no model loaded?", rc);
+		nn_detail_set(NN_CAMERA_START_FAILED, rc);
 		nn_result(res, (rc == -2) ? NN_SVC_ERR_STATE : NN_SVC_ERR_HW,
 		          NN_CLAIM_NONE);
 		return;
@@ -870,6 +910,14 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 
 	TX_DISABLE
 	nn_stream_life_snapshot(&nn_life, &g, &phase, &seq0, &kind);
+	/* [!] An ended stream answers from its latch, taken in the same critical
+	 * section as the generation it belongs to -- see nn_stream_final. */
+	if (g != NN_STREAM_GEN_ANY && g == nn_stream_final_gen &&
+	    (gen == NN_STREAM_GEN_ANY || gen == g)) {
+		*out = nn_stream_final;
+		TX_RESTORE
+		return NN_SVC_OK;
+	}
 	t0 = nn_stream_t0;
 	ms = nn_stream_ms;
 	TX_RESTORE
@@ -903,11 +951,7 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	 * 0 skipped, which cannot all be true of one period. */
 	/* [!] OFFERED, not staged: a frame dropped for want of a free stage was
 	 * still offered, and `skipped` has to be a subset of `frames`. */
-	out->skipped = st.gen_drops;
-	out->frames  = st.gen_frames + st.gen_drops;
-	out->infers  = st.gen_infers;
-	out->errors  = st.gen_errors;
-	out->last_us = st.last_us;
+	nn_stream_counts(&st, out);
 	out->elapsed_ms = out->running
 	                ? (uint32_t)(((uint32_t)tx_time_get() - t0) * 1000u /
 	                             TX_TIMER_TICKS_PER_SECOND)
@@ -919,6 +963,7 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 
 void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 {
+	struct nn_stream_stats final;
 	enum nn_claim claim;
 	int rc;
 
@@ -971,7 +1016,17 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 	 */
 	rc = nn_camera_stop();
 	claim = nn_claim_of_stop(rc);
-	nn_stream_settle(claim);
+	/* The stream's final numbers, once the worker is stopped (no locks held:
+	   nn_camera_stats_get() takes its own).  No last result: the stop retires
+	   the decode record. */
+	{
+		struct nn_camera_stats st;
+
+		nn_camera_stats_get(&st);
+		memset(&final, 0, sizeof final);
+		nn_stream_counts(&st, &final);
+	}
+	nn_stream_settle(claim, &final);
 
 	if (rc == -1) {
 		nn_detail_set("not running");

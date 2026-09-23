@@ -66,6 +66,8 @@ src cmds svc cmake test README。wio のみ boot も）。
   `NN_STREAM_GEN_ANY` は操作者専用で**待ち手は渡さない**。機械は `svc/nn_stream_life.c` の 1 本。
 - **[!] start の admission も機械が持つ** — **worker を触る前に STARTING を claim し失敗なら abort**。
   `commit()` は STARTING 以外、`finish/retry/poison` は STOPPING 以外を拒否する。
+- **[!] `nn run` も one-shot として同じ機械を claim する**（re-arm 不可・操作者の stop は拒否・自分の世代で
+  止め、retryable なら操作者が回収）。**種類は claim と同じ 1 呼び出しで判定する**（#120）。
 - **[!] worker のカウンタは世代と一致しない**ので stats は commit 時に基準を latch する（re-arm は
   decode record も retire）。**遷移が拒否されたら wrapper の副作用も走らせない**（解放は成功時のみ）。
 - **[!] poll は 2 相 + 遷移カウンタ**（数値は他ロック配下なので**割込み禁止下では集められない**。
@@ -234,8 +236,6 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
   テンソルをそのまま報告、`nn stream start` は拒否、`nn thresh` は none。**`null` backend も同じ答え**。
 - **admission は `nn run` と共有**なので**shape の問いは no-plugin で通す**（refuse すると素のモデルの
   `nn run` が消える）。**stream を止めるのは `nn_active_can_draw()` 1 本。**
-  **[!] この規則には現に穴がある（#120）** — re-arm 早期 return が `require_draw` を見ず、`nn run` は
-  stream のライフサイクルを claim しない。**#120 が片付いたらこの併記を消す。**
 - **worker は非同期**なので「誰も解釈していない」も**世代規則の下で publish する**（しないと `nn run`
   が timeout する）。**panel は `valid` だけでなく kind も見る**。
 - **plugin の差し替えは backend が成功してから**（先だと前の plugin を壊す）。bare model は必ず unload。

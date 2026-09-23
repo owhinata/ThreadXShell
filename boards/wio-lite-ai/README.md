@@ -355,20 +355,17 @@ nothing is going to read them and refusing would take the bare-model `nn run`
 away; the single question that stops a stream is "will anything draw"
 (`nn_active_can_draw()`), and it is only asked when a panel was requested.
 
-**[!] KNOWN GAP: one route reaches the worker without passing that question
-(issue #120).**  The first thing `nn_camera_start()` does is notice that a
-session is already running and, if the band stream died underneath it, re-arm
-and return -- and that early return never looks at `require_draw`.  A
-legitimate re-arm is safe: the session that admitted the stream is still held,
-so the decoder cannot have been swapped since it was asked.  But `nn run` drives
-the same worker WITHOUT claiming the stream lifecycle, and this board has two
-consoles (USB CDC and telnet).  So `nn stream start` typed on one console while
-a one-shot's band stream is lost on the other returns OK with nothing having
-asked whether anything can draw.  **The route predates issue #116** -- what #116
-widened is what it lets past, because `can_draw()` now answers 0 where it used
-to answer 1.  It is deliberately not patched here: refusing at that early return
-would break the re-arm `nn stream stats` tells an operator to perform.  Issue
-#120 is where the fix belongs, and this paragraph goes when it lands.
+**[!] `nn run` claims the stream lifecycle too, as a one-shot (issue #120).**
+It drives the same worker as `nn stream`, and it used to do so with the
+lifecycle saying idle: `nn stream start` from the other console (USB CDC and
+telnet) was admitted over it, and the re-arm at the top of `nn_camera_start()`
+took the one-shot's session back up without the draw question ever being asked.
+Now the one-shot is admitted before the worker is touched, cannot be re-armed,
+and is stopped by its own generation; while it runs, `nn stream start` and
+`nn stream stop` are refused ("a `nn run` holds / owns the camera").  If its own
+teardown comes back retryable, `nn stream stop` is what finishes it.  The
+re-arm in `nn_camera_start()` also takes back up only a session that
+`nn stream start` created.
 
 `nn model load --slot <n>` reads the blob into the PSRAM staging buffer and
 CRC-checks that copy exactly as before, then:

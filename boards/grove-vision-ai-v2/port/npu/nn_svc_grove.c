@@ -158,7 +158,7 @@ static enum nn_stream_start_claim nn_stream_begin(void)
 	if (nn_busy) {
 		r = NN_STREAM_START_BUSY;
 	} else {
-		r = nn_stream_life_begin(&nn_life);
+		r = nn_stream_life_begin(&nn_life, NN_STREAM_KIND_STREAM);
 		if (r == NN_STREAM_START_GO) {
 			nn_busy  = 1u;
 			nn_owner = (uint8_t)NN_OWNER_STREAM;
@@ -166,6 +166,70 @@ static enum nn_stream_start_claim nn_stream_begin(void)
 	}
 	TX_RESTORE
 	return r;
+}
+
+/*
+ * `nn run`: the gate, and the lifecycle as a one-shot, in ONE critical section
+ * (issue #120) -- the same single decision the stream start makes above.
+ *
+ * On this board the one-shot is synchronous on the calling thread, so it is
+ * begun and committed together: nothing asynchronous comes up in between that
+ * could fail.  The gate is held as an ordinary OPERATION, which is what `nn
+ * info` should say about it.
+ *
+ * @return the one-shot's generation, or NN_STREAM_GEN_ANY with nothing held;
+ *         @p why says which refusal
+ */
+static uint32_t nn_oneshot_claim(enum nn_stream_start_claim *why)
+{
+	uint32_t g = NN_STREAM_GEN_ANY;
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	if (nn_busy) {
+		*why = NN_STREAM_START_BUSY;
+	} else {
+		*why = nn_stream_life_begin(&nn_life, NN_STREAM_KIND_ONESHOT);
+		if (*why == NN_STREAM_START_GO) {
+			g = nn_stream_life_commit(&nn_life);
+			if (g == NN_STREAM_GEN_ANY) {
+				(void)nn_stream_life_abort(&nn_life);
+				*why = NN_STREAM_START_BUSY;
+			} else {
+				nn_busy  = 1u;
+				nn_owner = (uint8_t)NN_OWNER_OP;
+			}
+		}
+	}
+	TX_RESTORE
+	return g;
+}
+
+/*
+ * ...and its end: claim the stop by its own generation, settle it, and give the
+ * gate back -- one critical section, so nothing can be admitted between the
+ * lifecycle going IDLE and the NPU being free.
+ *
+ * [!] THE GATE IS RELEASED ONLY IF THE TRANSITION HAPPENED.  Nothing else can
+ * have claimed this one-shot's stop, so a refusal is an invariant failure; the
+ * gate then stays held rather than handing the NPU back on it.
+ *
+ * @return non-zero if it settled
+ */
+static int nn_oneshot_end(uint32_t gen)
+{
+	int ok = 0;
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	if (nn_stream_life_claim_stop(&nn_life, gen) == NN_STREAM_STOP_GO &&
+	    nn_stream_life_finish(&nn_life)) {
+		nn_owner = (uint8_t)NN_OWNER_NONE;
+		nn_busy  = 0u;
+		ok = 1;
+	}
+	TX_RESTORE
+	return ok;
 }
 
 /* Everything came up: mint the generation and publish the baselines with it. */
@@ -1045,12 +1109,26 @@ static void nn_decode_into(struct nn_det_snapshot *snap,
 	}
 }
 
+/* Every exit of `nn run` after its claim: settle the one-shot, and if that is
+ * refused -- an invariant failure -- say so over whatever the run concluded,
+ * because the gate is still held and nothing will release it. */
+static void nn_oneshot_finish(uint32_t gen, struct nn_op_result *res)
+{
+	if (nn_oneshot_end(gen))
+		return;
+	nn_detail_set("the stream lifecycle moved underneath this run; the NPU "
+	              "stays held");
+	nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
+}
+
 void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
                      struct nn_report_capture *rep,
                      nn_svc_cancel_fn cancel, void *ctx,
                      struct nn_op_result *res)
 {
 	struct npu_tensor in;
+	enum nn_stream_start_claim why = NN_STREAM_START_BUSY;
+	uint32_t gen;
 	int rc;
 
 	nn_detail_clear();
@@ -1062,20 +1140,39 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		return;
 	}
 
-	if (!nn_try_acquire()) {
+	/*
+	 * [!] THE LIFECYCLE IS CLAIMED WITH THE GATE, BEFORE THE CAMERA (issue
+	 * #120).  `nn run` is a stream of one inference: while it runs the
+	 * lifecycle says so, so `nn stream stop` is refused rather than told "no
+	 * stream is running" about a camera this command holds.
+	 */
+	gen = nn_oneshot_claim(&why);
+	if (gen == NN_STREAM_GEN_ANY) {
+		switch (why) {
+		case NN_STREAM_START_DEAD:
+			nn_detail_set("a previous teardown was never confirmed; only "
+			              "a reboot clears it");
+			nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
+			return;
+		case NN_STREAM_START_RUNNING:
+			nn_detail_set("a stream is running (`nn stream stats`)");
+			break;
+		default:
+			break;
+		}
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 		return;
 	}
 	if (!nn_open_done) {
 		nn_detail_set("no model is loaded");
 		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
-		nn_release();
+		nn_oneshot_finish(gen, res);
 		return;
 	}
 	if (npu_input(&in) != NPU_OK) {
 		nn_detail_set("the model has no input tensor");
 		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
-		nn_release();
+		nn_oneshot_finish(gen, res);
 		return;
 	}
 
@@ -1091,12 +1188,12 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	if (rc != 0) {
 		nn_detail_set("capture failed (%d)", rc);
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
-		nn_release();
+		nn_oneshot_finish(gen, res);
 		return;
 	}
 	if (nn_fill_input(res, camera_raw_frame(), &in) != 0) {
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
-		nn_release();
+		nn_oneshot_finish(gen, res);
 		return;
 	}
 
@@ -1105,7 +1202,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	if (npu_invoke() != NPU_OK) {
 		nn_detail_set("inference failed");
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
-		nn_release();
+		nn_oneshot_finish(gen, res);
 		return;
 	}
 
@@ -1129,7 +1226,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	nn_decode_into(snap, rep);
 
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
-	nn_release();
+	nn_oneshot_finish(gen, res);
 }
 
 void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
@@ -1386,6 +1483,12 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		nn_detail_set("a stream is already running (`nn stream stats`)");
 		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
 		return;
+	case NN_STREAM_START_ONESHOT:
+		/* The gate is tested first above, so a live `nn run` reads as BUSY;
+		 * this is the lifecycle saying the same thing (issue #120). */
+		nn_detail_set("a `nn run` holds the NPU -- retry when it returns");
+		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
+		return;
 	case NN_STREAM_START_DEAD:
 		nn_detail_set("a previous teardown was never confirmed; only a reboot "
 		              "clears it");
@@ -1457,7 +1560,7 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	struct camera_stats cs;
 	struct nn_overlay_stats os;
 	uint32_t seq0, seq1, g, frames0, t0, ms;
-	uint8_t  phase;
+	uint8_t  phase, kind;
 	TX_INTERRUPT_SAVE_AREA
 
 	if (out == NULL)
@@ -1465,7 +1568,7 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 
 	/* Phase 1: identity and baselines. */
 	TX_DISABLE
-	nn_stream_life_snapshot(&nn_life, &g, &phase, &seq0);
+	nn_stream_life_snapshot(&nn_life, &g, &phase, &seq0, &kind);
 	frames0 = nn_stream_frames0;
 	t0      = nn_stream_t0;
 	ms      = nn_stream_ms;
@@ -1489,13 +1592,16 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	 * and the state -- a retryable stop returns to both of those unchanged.
 	 */
 	TX_DISABLE
-	nn_stream_life_snapshot(&nn_life, NULL, NULL, &seq1);
+	nn_stream_life_snapshot(&nn_life, NULL, NULL, &seq1, NULL);
 	TX_RESTORE
 	if (seq1 != seq0)
 		return NN_SVC_ERR_STALE;
 
 	memset(out, 0, sizeof *out);
-	out->running        = (phase == (uint8_t)NN_STREAM_PHASE_RUNNING) ? 1u : 0u;
+	/* [!] A `nn run` holding the lifecycle is not a running STREAM (#120);
+	 * the baselines below are still the last stream's. */
+	out->running        = (phase == (uint8_t)NN_STREAM_PHASE_RUNNING &&
+	                       kind == (uint8_t)NN_STREAM_KIND_STREAM) ? 1u : 0u;
 	out->frames         = cs.frames - frames0;
 	out->skipped        = os.skipped;
 	out->infers         = os.inferences;
@@ -1570,6 +1676,13 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 		nn_detail_set("a previous teardown was never confirmed; only a reboot "
 		              "clears it");
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
+		return;
+	case NN_STREAM_STOP_ONESHOT:
+		/* [!] Refused, not "no stream is running" (issue #120): a `nn run`
+		 * holds the camera and the NPU and ends by itself. */
+		nn_detail_set("a `nn run` holds the camera and stops it itself -- "
+		              "retry when it returns");
+		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 		return;
 	case NN_STREAM_STOP_BUSY:
 	default:

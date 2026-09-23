@@ -2071,6 +2071,18 @@ same bytes it was opened from; no `blob write` can have moved them, because the
 lease never dropped.  Nothing the resolution parses is the adapter's until the
 load commits, so a refusal leaves `nn info` describing exactly what it did before.
 
+**A load or unload is refused while `nn thresh` is inside the plugin** (issue
+#122).  `nn thresh` takes no gate -- a stream holds that, and a threshold is what
+gets adjusted while one runs -- so a load on the other console could copy a new
+plugin over the code a threshold call was executing.  Now a threshold call is
+counted in around its call into the plugin's param function, refused (`busy`)
+only while a load or unload holds the gate, and a load or unload is refused
+(`busy`) while the count is not zero; nobody waits.  Each test is in the same
+critical section as the change it guards (`port/npu/nn_param_calls.c`,
+`test/test_nn_param_calls.c`).  What stays open is the
+camera producer's decode and a threshold call inside the same plugin at once on
+a running stream -- neither replaces it (issue #122 P5, Phase 3a).
+
 `blob_stat()` and `blob_verify()` take a lease and give it back; the leased
 forms (`blob_stat_leased`, `blob_verify_leased`) take the CALLER'S token and
 check it is live, so the sequence is safe by construction rather than by
@@ -5548,10 +5560,10 @@ tail-calls `nn_overlay_draw`.
 | report | console (`nn run`) | 2,080 | 1,808 | **1,808** | 784 | 544 |
 | | background job | 1,992 | 1,896 | | | |
 | | console (`nn dets`) | 1,696 | 2,192 | | | |
-| param_set | console (`nn thresh N`) | 440 | 3,448 | **3,448** | 2,424 | 8 |
-| | background job | 352 | 3,536 | | | |
-| param_get | console (`nn info`) | 744 | 3,144 | **3,144** | 2,120 | 16 |
-| | background job | 656 | 3,232 | | | |
+| param_set | console (`nn thresh N`) | 448 | 3,440 | **3,440** | 2,416 | 8 |
+| | background job | 360 | 3,528 | | | |
+| param_get | console (`nn info`) | 752 | 3,136 | **3,136** | 2,112 | 16 |
+| | background job | 664 | 3,224 | | | |
 
 `L(slot)` is before any margin; "over 1,024" is what is left for one.  The
 deepest path, on the console to decode (issue #121's build `5cb217f`, which
@@ -5709,8 +5721,10 @@ tables above have to be derived again.
 once any path has reached the slot on it, however shallow, and the paths differ:
 a console line ended by CR keeps `cli_input_byte`'s 32 B on the stack while one
 ended by LF alone tail-calls past it; `nn dets` reached decode and report 72 B
-shallower than `nn run` (since issue #118 it reaches report only); `nn thresh` reaches param_get at 448 B against `nn
-info`'s 744.  Measure with CR, picocom's default, and the deepest command for
+shallower than `nn run` (since issue #118 it reaches report only); `nn thresh` reaches param_get at 456 B against `nn
+info`'s 752.  (Issue #122 added 8 B to both param rows: `nn_svc_thresh_get/set`
+16, was 8 -- a threshold call is counted in so a load cannot replace the plugin
+under it.  The hardware lines above are the build before.)  Measure with CR, picocom's default, and the deepest command for
 each slot, waiting for each background job to finish (`jobs` empty) before the
 next line:
 

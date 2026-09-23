@@ -48,6 +48,7 @@
 #include "npu_desc.h"
 #include "nn_active.h"
 #include "nn_overlay.h"
+#include "nn_param_calls.h"
 #include "nn_plugin_stack.h"  /* after camera.h and cam_lcd_sink.h (#119) */
 #include "nn_probe.h"
 #include "nn_preproc.h"
@@ -102,25 +103,62 @@ static uint8_t nn_geom_valid;
  * different holders: no unload can begin while the stream holds this, so the
  * identity below is safe to read; an op may be dismantling exactly that.
  */
-enum nn_owner {
-	NN_OWNER_NONE = 0,
-	NN_OWNER_OP,      /**< one operation, which releases before it returns */
-	NN_OWNER_STREAM,  /**< a running stream, until its stop               */
-};
+/* enum nn_owner is nn_param_calls.h's, beside the count it is judged with. */
+
+/* Threshold calls inside the plugin right now (issue #122; nn_param_calls.h). */
+static uint16_t nn_param_calls;
+
+static int nn_claim_as(uint8_t who)
+{
+	int got;
+	TX_INTERRUPT_SAVE_AREA
+
+	/* [!] THE TEST AND THE CLAIM ARE ONE CRITICAL SECTION, the threshold-call
+	 * count included: reading the count first and claiming afterwards would
+	 * let a threshold call enter the plugin in between and have it replaced
+	 * under it. */
+	TX_DISABLE
+	got = nn_gate_claim(&nn_busy, &nn_owner, nn_param_calls, who);
+	TX_RESTORE
+	return got;
+}
 
 static int nn_try_acquire(void)
+{
+	return nn_claim_as((uint8_t)NN_OWNER_OP);
+}
+
+/* For what replaces or removes the plugin -- a load, an unload.  Refused while
+ * a threshold call is inside it (issue #122). */
+static int nn_try_acquire_swap(void)
+{
+	return nn_claim_as((uint8_t)NN_OWNER_SWAP);
+}
+
+/*
+ * A threshold call entering and leaving the plugin (issue #122).  Not the gate:
+ * a stream holds that for its whole life, and a threshold is what an operator
+ * adjusts while watching one.  Entering is refused only while a load or an
+ * unload holds the gate.
+ */
+static int nn_param_enter(void)
 {
 	int got;
 	TX_INTERRUPT_SAVE_AREA
 
 	TX_DISABLE
-	got = !nn_busy;
-	if (got) {
-		nn_busy  = 1u;
-		nn_owner = (uint8_t)NN_OWNER_OP;
-	}
+	got = nn_param_calls_enter(nn_busy, nn_owner, &nn_param_calls);
 	TX_RESTORE
 	return got;
+}
+
+static void nn_param_leave(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	nn_param_calls_leave(&nn_param_calls);
+	TX_RESTORE
 }
 
 static void nn_release(void)
@@ -924,7 +962,9 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 		return;
 	}
 
-	if (!nn_try_acquire()) {
+	/* [!] AS A SWAP: a load can replace the plugin, so it is refused while a
+	 * threshold call is inside it (issue #122) -- not waited for. */
+	if (!nn_try_acquire_swap()) {
 		*state = nn_open_done ? NN_MODEL_PREVIOUS : NN_MODEL_EMPTY;
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 		return;
@@ -1036,7 +1076,8 @@ void nn_svc_model_unload(struct nn_op_result *res)
 {
 	nn_detail_clear();
 
-	if (!nn_try_acquire()) {
+	/* As a swap: it removes the plugin (issue #122). */
+	if (!nn_try_acquire_swap()) {
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 		return;
 	}
@@ -2116,19 +2157,36 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 _Static_assert(3u + (unsigned)PLUGIN_SLOT_COUNT < (unsigned)NN_STREAM_LINES_MAX,
                "the stream report must end before the caller's line cap");
 
+/*
+ * [!] BOTH THRESHOLD CALLS ARE COUNTED IN AROUND THE CALL INTO THE PLUGIN
+ * (issue #122).  They take no gate -- a stream holds that, and this is what an
+ * operator adjusts while one runs -- so until the count nothing stopped a load
+ * on another console copying a new plugin over the code this was executing.
+ * Entering is refused only while a load or unload holds the gate, and a load or
+ * unload is refused while any call is in; neither waits.  The camera producer's decode can
+ * still be inside the same plugin at once (P5, Phase 3a); it replaces nothing.
+ */
 int nn_svc_thresh_get(unsigned *milli)
 {
-	/* Always answers: nothing is taken here, so there is nothing to be busy
-	 * on (whether that is safe is issue #122 P5, not this contract). */
 	if (milli == NULL)
 		return NN_SVC_ERR_ARG;
+	*milli = NN_SVC_THRESH_NONE;
+	if (!nn_param_enter())
+		return NN_SVC_ERR_BUSY;
 	*milli = nn_active_get_thresh_milli();
+	nn_param_leave();
 	return NN_SVC_OK;
 }
 
 int nn_svc_thresh_set(unsigned milli)
 {
-	switch (nn_active_set_thresh_milli(milli)) {
+	int r;
+
+	if (!nn_param_enter())
+		return NN_SVC_ERR_BUSY;
+	r = nn_active_set_thresh_milli(milli);
+	nn_param_leave();
+	switch (r) {
 	case NN_ACTIVE_THRESH_OK:
 		return NN_SVC_OK;
 	case NN_ACTIVE_THRESH_NO_DECODER:

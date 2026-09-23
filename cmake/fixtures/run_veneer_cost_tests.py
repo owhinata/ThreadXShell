@@ -629,10 +629,70 @@ static __attribute__((noinline)) int sr(const int *p, int unused)
 { volatile int v[5]; v[*p & 3] = *p; return v[1]; }
 int sr_root(int x) { return sr(&x, 0) + sr(&x, 0) + 1; }
 """,
+    # [!] A LIMIT, RECORDED -- NOT A SHAPE THAT OUGHT TO PASS.  A return is
+    # proven here by lr's STATE (was it saved?), never by the IDENTITY of the
+    # slot it comes back from, so a body that saves lr and then stores over
+    # that slot transfers to an arbitrary address and is still read as a
+    # return: only its own frame is charged, and whatever it reaches is
+    # charged nothing.  The cases below pin what happens today so that a
+    # change to it cannot be silent; slot identity belongs to the shared walk
+    # (issue #111).  In C, in the tree, so it has a -fstack-usage record and
+    # reaches the walk -- which is exactly why the witness rule is not a
+    # defence against this.
+    "lr_slot.c": r"""
+__attribute__((noinline, used)) int lr_slot_target(void)
+{ volatile char b[64]; b[0] = 1; return b[0]; }
+__attribute__((naked, used)) void lr_slot_naked(void)
+{
+    __asm__ volatile("push {r4, lr}\n\t"
+                     "movw r0, #:lower16:lr_slot_target\n\t"
+                     "movt r0, #:upper16:lr_slot_target\n\t"
+                     "str  r0, [sp, #4]\n\t"
+                     "pop  {r4, pc}\n\t");
+}
+__attribute__((naked, used)) void lr_slot_moved(void)
+{
+    /* lr saved, then sp moved so the pop takes a DIFFERENT word: no store
+     * needed to leave the slot behind. */
+    __asm__ volatile("push {lr}\n\t"
+                     "sub  sp, #4\n\t"
+                     "pop  {pc}\n\t");
+}
+__attribute__((naked, used)) void lr_never_saved(void)
+{
+    /* The other side of the line, and a real defence: lr is never saved, so
+     * the pop is not a return at all. */
+    __asm__ volatile("sub  sp, #4\n\t"
+                     "movw r0, #:lower16:lr_slot_target\n\t"
+                     "movt r0, #:upper16:lr_slot_target\n\t"
+                     "str  r0, [sp, #0]\n\t"
+                     "pop  {pc}\n\t");
+}
+""",
 }
 # in link order
 C_ORDER = ["c_chain.c", "varargs.c", "indirect.c", "recur.c", "alloca.c",
-           "tu_a1.c", "tu_b1.c", "tu_b2.c", "tu_a2.c", "clone.c"]
+           "tu_a1.c", "tu_b1.c", "tu_b2.c", "tu_a2.c", "clone.c", "lr_slot.c"]
+
+# The same shape in hand-written assembler, in an object of the tree's own --
+# NOT in the prebuilt archive.  It has no -fstack-usage record, which is what
+# stops it: the witness rule refuses a compiled body below a veneer whose
+# record cannot be named.  That is a real defence, and it is the one this pins.
+INTREE_ASM = r"""
+    .syntax unified
+    .thumb
+    .section .text.lr_slot_asm,"ax",%progbits
+    .global lr_slot_asm
+    .type lr_slot_asm, %function
+    .thumb_func
+lr_slot_asm:
+    push {r4, lr}
+    movw r0, #:lower16:lr_slot_target
+    movt r0, #:upper16:lr_slot_target
+    str  r0, [sp, #4]
+    pop  {r4, pc}
+    .size lr_slot_asm, . - lr_slot_asm
+"""
 # An archive the build made itself, NOT under the prebuilt root.
 TREE_SOURCE = r"""
 int tree_fn(int x) { volatile int t[3]; t[x & 1] = x; return t[0]; }
@@ -689,6 +749,10 @@ def build_main(tools, arch, work):
         obj = f"obj/{name}.obj"
         sh([tools.cc] + flags + CFLAGS + ["-c", name, "-o", obj], work)
         objs.append(obj)
+    with open(os.path.join(work, "intree.S"), "w") as fh:
+        fh.write(INTREE_ASM)
+    sh([tools.cc] + flags + ["-c", "intree.S", "-o", "obj/intree.obj"], work)
+    objs.append("obj/intree.obj")
     with open(os.path.join(work, "tree.c"), "w") as fh:
         fh.write(TREE_SOURCE)
     # [!] prebuilt_tree/, NOT lib/: a sibling whose name begins with the
@@ -1233,6 +1297,36 @@ CASES = [
     ("in_tree_archive", "main", BOTH, {"pl_base_log": "tree_fn"}, 1024,
      p_none, ("reject", [("witness", "is not under a --prebuilt-root")]),
      "an archive this build made is not a vendor's"),
+    # --- the lr slot: a limit, pinned so that changing it cannot be silent --
+    # [!] THE SECOND OF THESE RECORDS SOMETHING UNDESIRABLE.  A return is
+    # proven by lr's STATE, not by the IDENTITY of the slot it is reloaded
+    # from, so a body that saves lr and then stores over that slot is read as
+    # a return: the walk charges ITS frame (8 B) and charges NOTHING for the
+    # address it actually transfers to -- lr_slot_target, whose own frame is
+    # 64 B and never appears.  Closing that needs slot identity, which belongs
+    # to the shared walk (issue #111).  Until then: if somebody adds slot
+    # identity, this case turns into a refusal and MUST be rewritten as one --
+    # that is what it is here to force.  If instead somebody widens what
+    # counts as a return, the number moves and the case fails too.
+    ("lr_slot_asm_in_tree", "main", BOTH, {"pl_base_log": "lr_slot_asm"},
+     1024, p_none, ("reject", [("witness", "no record file")]),
+     "the same shape in the tree's own assembler is stopped -- by the "
+     "WITNESS rule, not by the walk: it has no -fstack-usage record"),
+    ("lr_slot_naked_c", "main", BOTH, {"pl_base_log": "lr_slot_naked"}, 1024,
+     p_none, ("accept", {"pl_base_log": 8}),
+     "[!] KNOWN LIMIT, NOT DESIRED BEHAVIOUR: storing over the saved lr slot "
+     "passes as a return, charging the frame alone and nothing for the "
+     "64 B body it reaches"),
+    ("lr_slot_moved_sp", "main", BOTH, {"pl_base_log": "lr_slot_moved"}, 1024,
+     p_none, ("accept", {"pl_base_log": 8}),
+     "[!] KNOWN LIMIT: and no store is needed -- moving sp after saving lr "
+     "pops a different word, which is the same missing slot identity"),
+    ("lr_never_saved", "main", BOTH, {"pl_base_log": "lr_never_saved"}, 1024,
+     p_none,
+     ("reject", [("walk", "is not proven to be a return: lr was not saved "
+                          "on every path")]),
+     "the line that IS held: with lr never saved, `pop {..., pc}` is refused "
+     "-- so the two accepts above turn on lr's state, not on the slot"),
     ("ltrans_partition_missing", "lto", BOTH,
      {"*": "lto_leaf", "pl_base_log": "lto_root"}, 1024,
      p_ltrans_delete("lto_mid"),

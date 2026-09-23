@@ -83,10 +83,15 @@ cannot exist):
   - The decoder's per-encoding "unallocated / based on pc / empty list"
     refusals are one class: an encoding it does not model.  The `undecoded`
     fixture fires that path and proves it is fatal; the `decoder_vs_objdump`
-    fixtures prove the decoder agrees with objdump over ~180k real
-    instructions, so none of them misfires and nothing real is mis-decoded.
-    A fixture per unallocated bit pattern is neither tractable nor emitted by
-    any compiler.
+    fixtures compare every instruction of the fixture images with objdump --
+    a few hundred per core, the vocabulary those cases themselves use, and
+    each run prints how many -- so none of these refusals misfires on the
+    shapes tested here.  That nothing REAL is mis-decoded rests on a wider
+    run, made once over the two shipped firmware images (~180,000
+    instructions, no disagreement); it is not what the fixtures repeat.  No
+    instruction count is written here on purpose: adding a case moves it, and
+    nothing would keep this sentence in step.  A fixture per unallocated bit
+    pattern is neither tractable nor emitted by any compiler.
   - "ARM-state symbol", "entry is not an instruction in a Thumb region",
     "code covered by no mapping symbol": on M-profile the assembler forces the
     Thumb bit on every function symbol (measured), so these need a corrupt or
@@ -107,12 +112,28 @@ cannot exist):
     missing-map fixture.
 
 What this does NOT prove: that the declared bindings are the real ones (above);
-that a stack slot reloaded into lr is the slot it was saved to (returns are
-proven by lr's state, not by slot identity); anything about exception entry,
-whose stacking is a separate reserve; anything about the plugin side, which is
-check_plugin_image.py's.  And the image-wide comparison reaches only bodies
-whose record can be named: a C++ record is spelled demangled, so C++ bodies are
-counted "without a record" -- which below a veneer is a refusal.
+anything about exception entry, whose stacking is a separate reserve; anything
+about the plugin side, which is check_plugin_image.py's.  And the image-wide
+comparison reaches only bodies whose record can be named: a C++ record is
+spelled demangled, so C++ bodies are counted "without a record" -- which below
+a veneer is a refusal.
+
+[!] NOR THAT A RETURN RETURNS.  A `pop {..., pc}` is accepted as a return when
+lr was SAVED on every path; which word the pop then takes is not checked, and
+slot identity is not tracked at all.  So a body that saves lr and then leaves
+by some other word is still read as a return -- `push {lr}` then `str` over
+that slot, or `push {lr}` then `sub sp, #4` so the pop takes a different word
+with no store at all (both measured) -- and only that body's own frame is
+charged, with nothing charged for wherever it goes.  What IS held is the
+condition itself: with lr never saved, the same `pop {..., pc}` is refused
+(measured), so this is not a way past the walk for ordinary code.  No compiler
+emits any of it; the witness rule stops the hand-written spellings that could
+reach a veneer from this tree (no -fstack-usage record, so no walk), but C with
+__attribute__((naked)) and inline asm has a record and does reach it.
+cmake/fixtures/run_veneer_cost_tests.py pins all four shapes
+(`lr_slot_asm_in_tree`, `lr_slot_naked_c`, `lr_slot_moved_sp`,
+`lr_never_saved`) so the limit cannot move in silence; closing it needs slot
+identity, in the shared walk (issue #111).
 """
 import argparse
 import bisect

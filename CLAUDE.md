@@ -307,9 +307,9 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
 - **推論は producer スレッド・`consume()` 内**で**推論（ガード無し）→ ガード 1 回で stage/draw/present**
   （callback 中の block / sleep / 推論 / 他ロック / LCD 再入は禁止）。**タイムアウトは `npu_hw.h` に 1 つ。**
 - **`nn stream` はデコーダが無い時点で拒否する**（shape や draw の前）。**wio と揃えようとしない。
-  `nn_input_quant_ok()` は常駐デコーダの前提条件で plugin は縛られない。**
+  `nn_input_quant_ok()` は常駐デコーダの前提条件で plugin は縛られない。** stop の record 境界は停止確認後（#118）。
 - **ファームの印字は「種」を名乗らない**（ゲートは **`.rodata`** を読む。**literal を regex で見ない**）。
-  **フォントは plugin 側**で `text()` を足さない。**`nn dets` は record を読むだけ**で `valid` を作らない。
+  **フォントは plugin 側**で `text()` を足さない。**`nn dets` は record を読むだけ**（stream 中は件数+STALE）。
 
 ## SWD デバッグ（共通）
 

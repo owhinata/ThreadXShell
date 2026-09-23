@@ -1993,7 +1993,7 @@ nn info                   # tensors, arena use, which interrupts got wrapped
 nn run                    # one frame -> whatever the LOADED MODEL produces:
                           #   top-5 classes, or face boxes.  See below.
 nn out [t] [n]            # dequantised values of an output tensor
-nn dets                   # decode the current outputs into boxes
+nn dets                   # the last published result (issue #118); no decode
 nn thresh [<1..999>]      # the detector's score threshold, milli-probability
 nn run &                  # in the background; the prompt comes straight back
 nn model unload
@@ -4198,9 +4198,26 @@ Three things behave differently now that the stream outlives the command:
   It reports the model and where it came from, and says plainly which sections it
   is withholding -- the arena figure and the tensors need the claim the stream is
   holding, and the arena is being rewritten every frame anyway.
-- **`nn model unload`, `nn run`, `nn bench`, `nn out` and `nn dets` are refused**
-  while a stream runs, by the same claim. `nn thresh` still works: the shared
-  decoder's threshold is an atomic snapshot each decode samples once.
+- **`nn model unload`, `nn run`, `nn bench` and `nn out` are refused** while a
+  stream runs, by the same claim. `nn thresh` still works: the shared decoder's
+  threshold is an atomic snapshot each decode samples once.
+- **`nn dets` answers with the count and without the plugin's account**
+  (issue #118, decision D2): *nn: N item(s); the decoder could not be reached
+  to describe them*.  The count is the record's -- the producer publishes every
+  decode, refusals included, in a short interrupt-disabled section inside
+  `consume()` -- while the account needs the gate the stream holds, and the
+  producer is decoding the next frame over it.  After the stop `nn dets` gives
+  the stream's last result in the plugin's own words.
+
+**The record (issue #118).**  `nn dets` reads the last result `nn run` or a
+stream published (`port/npu/nn_rec.c`, the decisions in `svc/nn_det_record.c`);
+it no longer decodes.  A stop does not clear it; `nn model load` and `nn model
+unload` do.  **A stop takes its record boundary only after
+`camera_stream_stop()` has confirmed the producer is out of `consume()`**, and
+the producer publishes there immediately after each decode -- so no decode can
+follow the boundary and be dropped, which is how wio's stop used to lose the
+stopped stream's account (c88d0ab).  The start's boundary, and the base the
+stream counts its own publishes from, come before the sink is attached.
 - **`lcd rot` and `lcd madctl` are refused** while any camera sink owns the
   panel. They move the driver's PERSISTENT geometry, and the sink blits a fixed
   size the driver validates internally -- so a rotation mid-stream leaves every
@@ -5123,7 +5140,7 @@ assembling the container indivisibly, not on the digest.
 Each callback runs on a thread's stack, and they are not the same size: draw on
 the panel thread (2,048 B, whose measured peak at issue #64 is already 544 B),
 decode on the camera producer (8 KiB) for `nn stream` and on the shell (4 KiB)
-for `nn run` and `nn dets`, and everything else on the shell -- a console or a
+for `nn run` (and, until issue #118, `nn dets`), and everything else on the shell -- a console or a
 background job.  `port/npu/nn_plugin_stack.h` is the table.  These stacks are
 statically allocated and do not grow.  An overflow is
 caught here -- the ThreadX M55 port sets PSPLIM per thread, so it raises a
@@ -5344,8 +5361,9 @@ asserts -- one per slot and thread, every allowance strictly below every stack
 its slot runs on -- and the stack report's coverage marks.  Read the table there;
 it is not copied here.  Both allowances are 1,024 B: `GROVE_PLUGIN_STACK_SHELL`
 for every slot a console or a background job can reach -- entry, shapes_ok,
-decode, report and the two params; decode because `nn run` and `nn dets` call it
-on the shell as well as `nn stream` on the producer -- and
+decode, report and the two params; decode because `nn run` calls it on the
+shell (and `nn dets` did until issue #118) as well as `nn stream` on the
+producer -- and
 `GROVE_PLUGIN_STACK_PANEL` for draw.
 
 **[!] Two of the provisional numbers (issues #103 / #104) were above the
@@ -5643,8 +5661,8 @@ tables above have to be derived again.
 **Coverage is per slot and thread, not per path.**  A thread counts as measured
 once any path has reached the slot on it, however shallow, and the paths differ:
 a console line ended by CR keeps `cli_input_byte`'s 32 B on the stack while one
-ended by LF alone tail-calls past it; `nn dets` reaches decode and report 72 B
-shallower than `nn run`; `nn thresh` reaches param_get at 448 B against `nn
+ended by LF alone tail-calls past it; `nn dets` reached decode and report 72 B
+shallower than `nn run` (since issue #118 it reaches report only); `nn thresh` reaches param_get at 448 B against `nn
 info`'s 744.  Measure with CR, picocom's default, and the deepest command for
 each slot, waiting for each background job to finish (`jobs` empty) before the
 next line:

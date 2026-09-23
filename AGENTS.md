@@ -143,8 +143,7 @@ plugin は board code と同格の**信頼された native code**。ゲートが
   だけで**期待値は共有せず実ループの store を数える**。
 - **[!] 分岐点は `port/npu/nn_active.c` の 1 つだけ**（一発デコード / stream の admission・decode・draw /
   **閾値** / report が全部そこを通る）。**plugin は自分の閾値を持つ**ので片方だけ繋ぐと `nn thresh` が
-  届かず、**両者に同じ閾値を与える differential test はこれを見逃す**。**幾何も 1 つで decode 結果は
-  private**。
+  届かず、**両者に同じ閾値を与える differential test はこれを見逃す**。**幾何も 1 つで decode 結果は private**。
 - **[!] plugin のビルド規則は共有**（`cmake/add_plugin.cmake`）で**ボードは自分の事実だけを引数で渡す**。
   **owned source root は helper が導出し引数で受け取らない**（受け取る形自体が fail-open）。**リンク
   入力も列挙する**（渡せるのは `ARCH_FLAGS` の `-m*` だけ）。**success stamp は compile 前に消す。ヘッダも依存。**
@@ -258,7 +257,8 @@ board README が正。
   （callback 中の block / sleep / 推論 / LCD 再入は禁止）。**タイムアウトは `npu_hw.h` の 1 箇所。**
 - **[!] `nn stream` の拒否の仕方はボードで違う。揃えない**（Grove は**デコーダが無い時点で**、wio は
   **shape は通し `can_draw` 1 本で**）。**[!] `nn_input_quant_ok()` は常駐デコーダの前提条件で plugin は
-  縛られない。[!] ファームの印字は「種」を名乗らない** — ゲートは **`.rodata`** を negative scan する。
+  縛られない。[!] ファームの印字は「種」を名乗らない** — ゲートは **`.rodata`** を negative scan する。**`nn dets` は
+  record を読むだけ**（stream 中は件数 + STALE）、**stop の record 境界は producer の停止確認後**（#118）。
 - **[!] Grove と wio のファームは共有デコーダをリンクしない** — **デコーダは container でしか届かない**
   （f746 はまだ持つ）。**常駐デコーダを戻さない。別フラグで組み直した監査対象を作らない。** 素の
   `.tflite` は**テンソルをそのまま報告**し、`nn thresh` は **`none`**、set は **`NN_SVC_ERR_STATE`**。

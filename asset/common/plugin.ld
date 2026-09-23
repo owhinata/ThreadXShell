@@ -46,6 +46,12 @@ SECTIONS
          * reaches the entry points through the manifest's offsets, so
          * --gc-sections would drop the table and every function it names.  It is
          * also what the packer reads to fill those offsets in. */
+        /* One word per TU: the ABI it was compiled against (svc/plugin_abi.h,
+         * PLUGIN_IMAGE_BUILD).  KEEP because nothing refers to them; the gate
+         * reads them. */
+        . = ALIGN(4);
+        KEEP(*(.plugin_abi_mark))
+
         . = ALIGN(4);
         __plugin_slots_start = .;
         KEEP(*(.plugin_slots))

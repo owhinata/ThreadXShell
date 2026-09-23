@@ -361,6 +361,9 @@ function(add_plugin _name)
             COMMAND "${CMAKE_C_COMPILER}" ${P_CFLAGS}
                     -I "${_dir}"
                     -MMD -MF "${_dep}" -MT "${_stamp}"
+                    # Each TU leaves the ABI it saw (svc/plugin_abi.h); the
+                    # image gate compares them with the header's.
+                    -DPLUGIN_IMAGE_BUILD
                     -c "${_src_abs}" -o "${_obj}"
             ${_audit_cmd}
             COMMAND "${CMAKE_COMMAND}" -E touch "${_stamp}"

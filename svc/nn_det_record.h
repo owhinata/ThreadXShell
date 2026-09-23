@@ -204,6 +204,20 @@ void nn_det_record_invalidate(struct nn_det_record *r);
 uint32_t nn_det_record_gen(const struct nn_det_record *r);
 
 /**
+ * Would a publish armed at @p gen still be taken?  Asked BEFORE a decode that
+ * writes private state (issue #118).
+ *
+ * [!] A DROPPED PLUGIN PUBLISH IS NOT FREE: the decode that preceded it has
+ * rewritten the plugin's own result, and the record then has to withhold the
+ * account of what it holds (@ref nn_det_record::reportable).  A stop lands
+ * while the worker is almost always inside an inference, so without this
+ * question every stop cost the stopped stream's last account.  A worker that
+ * asks it -- under whatever also excludes the boundary -- and skips the decode
+ * when the answer is no leaves the plugin's result describing the record.
+ */
+int nn_det_record_admits(const struct nn_det_record *r, uint32_t gen);
+
+/**
  * Publish one decode from a decoder whose boxes this firmware understands.
  *
  * @param n    the decoder's return: >= 0 faces, or a negative BF_ERR_* code

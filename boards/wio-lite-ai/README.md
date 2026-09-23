@@ -346,10 +346,14 @@ load` that changed what is open, or `nn model unload`) clears it, after which
 is counted rather than read off `valid`: the record counts every publish it
 accepts under its own lock, `nn run` waits on that count, and `nn stream
 stats`' `last` line is the stream's only when the record has accepted one since
-the stream's commit.  If a stream stopped in the middle of a decode, the count
-stays and the plugin's own account is withheld (*the decoder has decoded a later
-frame since*), because the dropped decode rewrote what the plugin would
-describe.  (f746g-disco reads the record the same way; Grove moves to it in
+the stream's commit.  A stop almost always lands inside an inference (~410 ms),
+so the worker asks, under the result lease, whether its generation is still
+current before it lets the plugin decode, and the stop takes its boundary under
+the same lease: the frame in flight is then either published or never decoded,
+and the plugin's account still describes the record.  Only if the stop's
+bounded lease wait expires can a dropped decode rewrite that account; the count
+then stays and the account is withheld (*the decoder has decoded a later frame
+since*).  (f746g-disco reads the record the same way; Grove moves to it in
 Phase 2 stage 3c.)
 
 The `null` backend answers the same way and refuses `nn stream start` in its

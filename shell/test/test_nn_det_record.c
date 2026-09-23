@@ -271,6 +271,14 @@ static void test_outlives_session(void)
 	       snap.reportable != 0u && snap.valid != 0, "reportable %u valid %d",
 	       (unsigned)snap.reportable, snap.valid);
 	acc = snap.accepted;
+	expect("[!] a decode armed before the boundary is not admitted -- asked "
+	       "before it runs",
+	       nn_det_record_admits(&rec, g1) == 0, "admitted");
+	expect("and one armed after it is",
+	       nn_det_record_admits(&rec, nn_det_record_gen(&rec)) != 0,
+	       "refused");
+	expect("a null record admits nothing",
+	       nn_det_record_admits(NULL, 0u) == 0, "admitted");
 	expect("the in-flight decode's publish is dropped",
 	       nn_det_record_publish_external(&rec, 6, g1) == 0, "taken");
 	nn_det_record_snapshot(&rec, &snap, NULL, 0);

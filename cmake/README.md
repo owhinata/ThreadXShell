@@ -53,18 +53,35 @@ already exercise them, while Wio still audits its own compiled services.
 
 `veneer_cost_check` runs on every shipping `shell` build of a board that
 registers it (#112: Grove Vision AI V2 and Wio Lite AI). `check_plugin_image.py`
-cannot see across a plugin veneer, so at every crossing into the base it charges
-a flat allowance, `VENEER_BASE_COST`. This is the other side of that charge:
+cannot see across a plugin veneer, so a crossing into the base is charged a flat
+allowance c, `VENEER_BASE_COST`. This is the other side of that charge:
 `check_veneer_base_cost.py` derives the stack the FIRMWARE spends below each
 veneer from the image that ships, and the build fails unless the declaration
 covers it.
 
-It CHECKS; it does not generate. A generated number would follow the firmware
-silently, and the containers already on a device -- whose stack declarations
-were computed with the old number -- would go on being loaded by a firmware that
-can no longer tell, because the loader compares a manifest with a policy and not
-with this build. Raising the declaration is a diff someone writes, and that diff
-is the signal that containers must be re-packed and re-sent.
+It CHECKS; it does not generate. Since plugin ABI 2 (#111) a container no
+longer carries c: its manifest declares the plugin's own frames (A0, A1 at a
+crossing, and the sink bound S), and the device's loader adds its own c at load
+time as `max(A0, A1 + max(c, S))`. So changing the declaration re-packs nothing
+-- a container whose crossing no longer fits under a raised c is refused on the
+device -- but the c the loader adds must be the one checked here, which the
+next two paragraphs make sure of.
+
+The helper hands the declaration to the firmware itself, as the compile
+definition `PLUGIN_VENEER_BASE_COST` on every compile of the image (the set
+that gets `-fstack-usage`), and to the asset rules through
+`veneer_cost_gate_declared()`, which the host container verifier's
+`--veneer-cost` comes from. A board restates it nowhere.
+
+A `-D` is not a guarantee: a later `-D` (CMAKE_C_FLAGS, add_compile_definitions)
+or a `#define` overrides it with only a warning. So the board exports its policy
+with `PLUGIN_POLICY_PROBE()` (`svc/plugin_load.h`) -- a constant record holding a
+pointer to the policy `plugin_parse()` gets and the offsets of its fields -- and
+`check_policy_probe.py` reads, from the shipped ELF, the `veneer_cost` and
+`stack_accounting` that policy actually holds. Anything but DECLARED and the
+ABI's accounting version refuses the stamp. The helper links with
+`--require-defined=plugin_policy_probe`, which keeps the record past
+`--gc-sections` (and LTO) and fails the link of a board that exports none.
 
 The derivation walks the linked ELF, not the sources: for each veneer it starts
 at the firmware function the board binds behind it, decodes Thumb-2 instructions
@@ -103,7 +120,7 @@ deleted before the check runs and written only when the check passes, it is
 built by `all`, and the board's delivery targets (`flash`, and `dfu-shell` on
 wio) and every `asset-*` target depend on it. So a failed check leaves nothing
 for a later build to trust, and stops both the flash and the container pack. The
-check re-runs when the image, either script or the command line changes; the
+check re-runs when the image, any of its scripts or the command line changes; the
 witness records are not listed as dependencies because each is written by the
 same compile or link that rewrites the image.
 
@@ -115,6 +132,11 @@ building a real project whose fake flash and assets refuse unless a passed
 check's stamp is newer than the image: the stamp's lifetime, the dependencies,
 reruns on a script or image change, the witnesses of every compile, and an LTO
 link that writes fewer partitions than the last.
+It also covers the c the firmware compiles in: `cost_wiring` changes DECLARED and
+reads the value back from a policy TU in a `$<TARGET_OBJECTS:>` library and from
+an asset's command line, and `cost_override` adds `-DPLUGIN_VENEER_BASE_COST=1u`
+through CMAKE_C_FLAGS -- the image links, and flash and the asset stop in
+`check_policy_probe.py`.
 `fixtures/run_add_plugin_arg_tests.py` covers the configure-time refusals and
 that the declared value and printer bounds reach the check's command line.
 
@@ -123,3 +145,24 @@ a different callback without updating the declaration is invisible here);
 anything about exception entry, whose stacking is a separate reserve; anything
 about the plugin side, which is `check_plugin_image.py`'s; and anything about a
 container already on a device, which no build can reach.
+
+# Plugin objects and the ABI they were compiled against
+
+Two rules in `add_plugin.cmake` and `check_plugin_image.py` exist because of one
+defect found on hardware in #111: the plugin compile depended on its `.c` alone,
+so bumping `PLUGIN_ABI_VERSION` in `svc/plugin_abi.h` rebuilt only the TUs whose
+source had also changed. The shipped images compared the base against ABI 1
+while the packer, which reads the header, stamped ABI 2 -- the loader accepted
+them and each plugin refused its own entry point. Every gate passed, because
+every gate reads the linked image and it was self-consistent.
+
+- Each plugin compile writes a depfile (`-MMD -MF <stem>.d -MT <stamp>`, CMake
+  `DEPFILE`), so a header change recompiles -- and re-audits -- every TU that
+  read it. `run_add_plugin_arg_tests.py`'s `header_rebuild` builds one plugin's
+  objects on the host, touches `svc/plugin_abi.h`, and requires them rebuilt.
+- `add_plugin()` compiles with `-DPLUGIN_IMAGE_BUILD`, under which every TU that
+  includes `plugin_abi.h` leaves one word, `pl_abi_mark`, in `.plugin_abi_mark`
+  (kept by `asset/common/plugin.ld`). The image gate refuses an image with no
+  record, or with any record that is not the header's ABI (`stale_tu` and
+  `no_marks` in `run_plugin_gate_tests.py`). This is the backstop, not the fix:
+  a TU that does not include the header states no ABI.

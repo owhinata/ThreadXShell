@@ -347,7 +347,9 @@ load` that changed what is open, or `nn model unload`) clears it, after which
 is counted rather than read off `valid`: the record counts every publish it
 accepts under its own lock, `nn run` waits on that count, and `nn stream
 stats`' `last` line is the stream's only when the record has accepted one since
-the stream's commit.  A stop almost always lands inside an inference (~410 ms),
+the stream's commit.  `infers` and `last` are read in separate critical
+sections, so on a running stream they can be one frame apart -- `last` from a
+frame `infers` has not counted yet, or the reverse.  A stop almost always lands inside an inference (~410 ms),
 so the worker asks, under the result lease, whether its generation is still
 current before it lets the plugin decode, and the stop takes its boundary under
 the same lease: the frame in flight is then either published or never decoded,
@@ -614,7 +616,7 @@ when a model changes.
 | AXI-SRAM heap room | **102,944 B** (`end` to `__heap_end`, SD off) -- #116 added 192 B.  `free` says 102,912 for that region, which is the same number less the 32 B already handed out |
 | `.psram_ai` carve-out in use | **1,638,400 B**, and `free` agrees -- #116 gave back the 1,536 B candidate scratch (`BF_MAX_CAND` x `sizeof(struct bf_cand)`), which the resident decoder owned |
 | DTCM ceiling for growing `nn_work` | **4,544 B** (`_smsp_stack - _dtcm_used_end`; the 8 KB main-stack reservation is not free) |
-| stack already spent at the plugin call sites | **49 B of 3,072 on `nn_work`** (decode), **105 B of 1,536 on `cam_prev`** (draw), **1,593 B of 4,096 on the shell** -- measured at #116 with a plugin running; #110 measured 641 / 137 / 1,593 |
+| stack already spent at the plugin call sites | **49 B of 3,072 on `nn_work`** (decode), **105 B of 1,536 on `cam_prev`** (draw), **1,977 B of 4,096 on the shell** -- the first two measured at #116 with a plugin running (#110 measured 641 / 137); the shell re-measured at #121 (build `5cb217f`), whose report buffers in the shared command's frame added about 300 B |
 
 **[!] The two flash figures are not each other's difference.**  1,840 B is what
 the change cost, comparing builds whose version string is the same length.  The
@@ -746,14 +748,16 @@ today's plugin happens to need is how a limit stops being one, so the thread is
 |---|---:|---:|---:|---:|---:|---:|
 | `nn_work` (decode) | 3,072 | 49 | 208 | 2,815 | 1,024 | 784 |
 | `cam_prev` (draw) | 1,536 | 105 | 208 | 1,223 | 1,024 | 716 |
-| shell (entry / shapes / report / params) | 4,096 | 1,593 | 208 | 2,295 | 1,024 | 728 |
+| shell (entry / shapes / report / params) | 4,096 | 1,977 | 208 | 1,911 | 1,024 | 728 |
 
-**The `at call` column is issue #116's measurement**, taken on hardware with a
-plugin running (#110's was 641 / 137 / 1,593, on the firmware that still carried
-a decoder).  Every allowance sits under its derived room, and the shipped plugin
-well under the allowance.  Re-measured on issue #111's firmware (build
-`4cd3126`), `nn stream` at call: `nn_work` 49/3072 (decode), `cam_prev`
-113/1536 (draw), shell 1601/4096 (report) -- still inside every derived room.
+**The `at call` column is measured on hardware with a plugin running**: the
+first two rows at issue #116 (#110's were 641 / 137, on the firmware that still
+carried a decoder; issue #111's build `4cd3126` read 49 / 113), the shell at
+issue #121 (build `5cb217f`, reached by `nn run`'s report).  The shell grew
+there because the shared command's `nn run` frame now carries the result's
+output shapes or classes (`struct nn_result_extra`, about 300 B).  Every
+allowance sits under its derived room, and the shipped plugin well under the
+allowance.
 
 **The allowances did not move, and that is deliberate.**  A shallower call site
 widens the room the declaration has to fit in; it is not a reason to declare

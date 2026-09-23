@@ -5438,18 +5438,22 @@ depths at a plugin's entry, and nothing is derived from them any more.
 The old `at call :` line is gone.  After `items` come one line per slot, then the
 painter's spend on a line of its own, then the producer profile -- last, because
 it is the one line that may decline, and the caller stops at the first line a
-board declines.  As the board printed them (build `4bcf219`):
+board declines.  As the board printed them (build `4bcf219`, before issue #121 -- the decode and
+report lines are left out here because that build's depths no longer hold; issue
+#121's build `5cb217f` printed `con 2360/4096` for decode and `con 2080/4096`
+for report, and the ELF table below has every thread):
 
 ```
 entry    : con 1080/4096 bg 992/4096; left 3016 (upper bound)
 shapes_ok: con 1528/4096 bg 1440/4096; left 2568
-decode   : prod 864/8192 con 2072/4096 bg 1984/4096; left 2024
 draw     : panel 216/2048; left 1832 (upper bound)
-report   : con 1776/4096 bg 1688/4096; left 2320
 param_set: con 440/4096 bg 352/4096; left 3656
 param_get: con 744/4096 bg 656/4096; left 3352
 painter : at most 800 px in one frame, 0 refused
 ```
+
+`infers` and `last` are read in separate critical sections, so on a running
+stream the two can be one frame apart (issue #118).
 
 Each thread shows `depth/stack`, a high-water since boot.  `--` is a thread the
 slot runs on that nothing has observed yet; `!` in front of a thread means the
@@ -5508,22 +5512,28 @@ tail-calls `nn_overlay_draw`.
 | | background job | 976 | 2,912 | | | |
 | shapes_ok | console (`nn stream start`) | 1,528 | 2,360 | **2,360** | 1,336 | 40 |
 | | background job | 1,440 | 2,448 | | | |
-| decode | console (`nn run`) | 2,072 | 1,816 | **1,816** | 792 | 632 |
-| | background job (`nn run &`) | 1,984 | 1,904 | | | |
+| decode | console (`nn run`) | 2,360 | 1,528 | **1,528** | 504 | 632 |
+| | background job (`nn run &`) | 2,272 | 1,616 | | | |
 | | producer (`nn stream`) | 864 | 7,120 | | | |
 | draw | panel | 200 | 1,640 | **1,640** | 616 | 532 |
-| report | console (`nn run`) | 1,776 | 2,112 | **2,112** | 1,088 | 544 |
-| | background job | 1,688 | 2,200 | | | |
+| report | console (`nn run`) | 2,080 | 1,808 | **1,808** | 784 | 544 |
+| | background job | 1,992 | 1,896 | | | |
+| | console (`nn dets`) | 1,696 | 2,192 | | | |
 | param_set | console (`nn thresh N`) | 440 | 3,448 | **3,448** | 2,424 | 8 |
 | | background job | 352 | 3,536 | | | |
 | param_get | console (`nn info`) | 744 | 3,144 | **3,144** | 2,120 | 16 |
 | | background job | 656 | 3,232 | | | |
 
 `L(slot)` is before any margin; "over 1,024" is what is left for one.  The
-deepest path, on the console to decode: `cli_thread_entry` 40 > `cli_input_byte`
-32 (CR only) > `cli_dispatch_line` 24 > `cli_dispatch_segment` 280 >
-`cmd_nn_run` 928 > `nn_svc_run_once` 88 > `nn_decode_into` 336 >
-`nn_active_decode` 320.  To entry: ... > `cmd_nn_model_load` 344 >
+deepest path, on the console to decode (issue #121's build `5cb217f`, which
+also measured 2,360 on hardware): 8 + 16 + `cli_thread_entry` 40 >
+`cli_input_byte` 32 (CR only) > `cli_dispatch_line` 24 > `cli_dispatch_segment`
+280 > `cmd_nn_run` 1,240 > `nn_svc_run_once` 400 > `nn_active_decode` 320.
+Report takes the same path to `nn_svc_run_once` and then `nn_capture_report` 8
+> `nn_active_report` 32 (2,080, also measured).  `cmd_nn_run` grew by about
+300 B at #121 -- the result's output shapes or classes travel in its frame --
+and `nn dets` reaches report only, through `cmd_nn_dets` 1,232 >
+`nn_svc_decode_current` 24.  To entry: ... > `cmd_nn_model_load` 344 >
 `nn_svc_model_load` 216 > `plugin_run_load` 48 > `plugin_exec_load` 56.
 "real need" is the next section's.
 
@@ -5632,8 +5642,9 @@ ABI 1 containers were refused on load as `abi mismatch`:
 `blob list` matched both receipts.  blazeface streamed at 36.95 inf/s with 0
 painter refusals and `nn run` found 1 face; cifar10 streamed at 8.85 inf/s.
 `nn stream stats` depths at the plugin's entry on that run: entry console
-1080/4096, shapes_ok 1528, decode producer 864/8192 and console 2072/4096, draw
-panel 224/2048, report console 1784/4096, param_get 744.
+1080/4096, shapes_ok 1528, decode producer 864/8192, draw panel 224/2048,
+param_get 744 (the console decode and report depths of that build are
+superseded by issue #121's, in the ELF table).
 
 #### What holds these numbers up, which no gate checks
 

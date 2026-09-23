@@ -124,6 +124,16 @@ _Static_assert(WIO_PLUGIN_STACK_SHELL < CLI_INSTANCE_STACK_SIZE &&
 _Static_assert(PLUGIN_MODEL_ALIGN % NN_MODEL_ALIGN == 0u,
                "a container's model section must meet the backend's alignment");
 
+/*
+ * [!] THE VENEER COST IS NOT THIS BOARD'S VARIABLE HERE (issue #111).  The loader
+ * adds it to what a manifest declares, so it must be the number the build checked
+ * against shell.elf -- and cmake/veneer_cost_gate.cmake defines it on this very
+ * compile from that check's own DECLARED.  board.cmake does not pass it.
+ */
+#ifndef PLUGIN_VENEER_BASE_COST
+#error "cmake/veneer_cost_gate.cmake defines PLUGIN_VENEER_BASE_COST; is veneer_cost_gate() registered?"
+#endif
+
 static const struct plugin_policy nn_plugin_policy = {
 	.target_id      = WIO_PLUGIN_TARGET_ID,
 	.link_addr      = WIO_PLUGIN_BASE,
@@ -139,6 +149,8 @@ static const struct plugin_policy nn_plugin_policy = {
 		[PLUGIN_SLOT_PARAM_SET] = WIO_PLUGIN_STACK_SHELL,
 		[PLUGIN_SLOT_PARAM_GET] = WIO_PLUGIN_STACK_SHELL,
 	},
+	.veneer_cost    = PLUGIN_VENEER_BASE_COST,     /* veneer_cost_gate() */
+	.stack_accounting = PLUGIN_STACK_ACCOUNTING,
 };
 #endif /* CONFIG_NN_BACKEND_TFLM */
 

@@ -304,6 +304,7 @@ static void rec_blit_fn(void *ctx, const struct plugin_rect *r,
 }
 
 static struct plugin_painter rec_painter = {
+	PLUGIN_ABI_VERSION, sizeof(struct plugin_painter),
 	NULL, rec_rect_fn, rec_fill_fn, rec_blit_fn
 };
 

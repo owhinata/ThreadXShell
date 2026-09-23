@@ -42,7 +42,8 @@ Checks:
   5. (no MMIO check: not soundly possible -- see the note in main)
   6. storage lives inside the declared segments, and no COMMON
   7. indirect branches only inside the named veneers
-  8. a transitive stack bound per entry point, fail-closed
+  8. a transitive stack bound per entry point, fail-closed -- emitted in
+     parts that do not contain the board's veneer cost (issue #111)
 """
 import argparse
 import re
@@ -82,6 +83,11 @@ ABI = {
     "PLUGIN_TARGET_BIG_ENDIAN": 0x00004000,
     "PLUGIN_TARGET_CMSE": 0x00008000,
     "PLUGIN_TARGET_RESERVED_MASK": 0xFFFF0000,
+    # What the walk below MEANS (issue #111): stamped into --emit-stacks and from
+    # there into the manifest, and compared for equality by the loader.  Raise it
+    # in svc/plugin_abi.h -- and here, where the fixture will insist on it -- when
+    # the walk changes what it charges or where it stops.
+    "PLUGIN_STACK_ACCOUNTING": 1,
 }
 
 # (Tag_CPU_arch, Tag_FP_arch, single-precision only) -> (the ABI's CPU, the ABI's
@@ -289,6 +295,12 @@ VENEERS = {
     "pl_print_write",
 }
 
+# The plugin's own printer sink (asset/common/plugin_text.c).  A plugin that
+# formats into its own buffer hands pl_print_write a printer whose write is THIS,
+# so the far side of the printer veneer is sometimes the plugin itself.  Its
+# bound is emitted as S, and the loader charges max(c, S) at a crossing.
+SINK = "pl_sbuf_write"
+
 # [!] REGISTER NAMES, NOT NUMBERS.  objdump spells r12 as `ip`, r13 `sp`, r14
 # `lr` and r15 `pc`, and it used exactly that spelling for the painter veneer's
 # tail call (`bx ip`).  A scan written as r[0-9]+ misses those and reports an
@@ -405,36 +417,51 @@ def frame_of(fn, frames):
     return None
 
 
-def bound_stack(entry, funcs, frames, errors, veneer_base_cost):
-    """Transitive stack bound below `entry`, fail-closed on anything unclear.
+def bound_stack(entry, funcs, frames, errors):
+    """The plugin's own stack below `entry`, as (A0, A1), fail-closed.
 
-    `veneer_base_cost` is what the base itself may spend below a veneer, worst
-    case.  It is added at each veneer because the walk cannot see across the
-    boundary, and it is the BOARD's number (see the module docstring).
+    [!] NO VENEER COST GOES IN HERE (issue #111).  Until then this took the
+    board's cost c and added it at every indirect call, returning one number --
+    and that number went into the manifest, where the firmware could not tell
+    which c it had been made with.  The walk stops at an indirect call (only a
+    veneer has one, which check 7 enforces), so a path crosses into the base at
+    most once and the old number decomposes exactly:
+
+        old(entry) = max(A0, A1 + c)            (the second term only if A1)
+
+      A0  the deepest the plugin's OWN frames go, over every path -- a path
+          that reaches a crossing counts up to and including the veneer's frame;
+      A1  the deepest its own frames go on a path that REACHES a crossing, or
+          None when no path does.  A1 <= A0 by construction.
+
+    The firmware adds its own c at load time (svc/plugin_load.c), so neither
+    number goes stale when c moves.  Proof that this is the old walk and not a
+    new one: old(f) = frame + max(c, old(g)...) = max(frame + A0(g),
+    frame + c, frame + A1(g) + c) = max(A0(f), A1(f) + c), with A0(f) =
+    frame + max(0, A0(g)...) and A1(f) = frame + max(0 if f crosses, A1(g)...).
+    cmake/fixtures/run_plugin_gate_tests.py checks it against a transcription of
+    the old walk at three values of c.
     """
-    seen = set()
-
     def walk(fn, path):
         if fn in path:
             errors.append(f"stack: recursion through {fn} ({' -> '.join(path)})")
-            return 0
+            return 0, None
         su = frame_of(fn, frames)
         if su is None:
             errors.append(f"stack: no frame recorded for {fn} -- the .su input "
                           "does not match the linked image")
-            return 0
+            return 0, None
         frame, qual = su
         if qual != "static":
             errors.append(f"stack: {fn} has a {qual} frame (alloca/VLA); a "
                           "bound cannot be stated")
-            return 0
-        seen.add(fn)
-        worst = 0
+            return 0, None
+        own, cross = 0, None
         for line in funcs.get(fn, []):
             if INDIRECT_RE.search(line):
-                # Only ever legal inside a veneer, which check 7 enforces; the
-                # base's own worst case is charged here.
-                worst = max(worst, veneer_base_cost)
+                # Only ever legal inside a veneer, which check 7 enforces.  The
+                # far side is charged by whoever knows it: the firmware adds c.
+                cross = 0 if cross is None else max(cross, 0)
                 continue
             m = DIRECT_CALL_RE.search(line) or TAIL_CALL_RE.search(line)
             if m:
@@ -445,10 +472,18 @@ def bound_stack(entry, funcs, frames, errors, veneer_base_cost):
                 if callee == fn and m.group(2):
                     continue
                 if callee in funcs or frame_of(callee, frames) is not None:
-                    worst = max(worst, walk(callee, path + [fn]))
-        return frame + worst
+                    o, x = walk(callee, path + [fn])
+                    own = max(own, o)
+                    if x is not None:
+                        cross = x if cross is None else max(cross, x)
+        return frame + own, (None if cross is None else frame + cross)
 
     return walk(entry, [])
+
+
+def bound_at(own, cross, cost):
+    """What a slot needs once `cost` is charged at its crossing."""
+    return own if cross is None else max(own, cross + cost)
 
 
 def main():
@@ -551,17 +586,38 @@ def main():
     # 8. stack bounds
     frames = stack_usage(args.su) if args.su else {}
     bounds = {}
+    parts = {}
     if args.entry:
         if not frames:
             errors.append("stack: --entry given without --su; a bound cannot be "
                           "derived from the ELF alone")
         for spec in args.entry:
             name, _, limit = spec.partition("=")
-            got = bound_stack(name, funcs, frames, errors,
-                              args.veneer_base_cost)
+            own, cross = bound_stack(name, funcs, frames, errors)
+            parts[name] = (own, cross)
+            # The limit is still checked at THIS board's cost, as it always
+            # was: the build refuses what this firmware would refuse.
+            got = bound_at(own, cross, args.veneer_base_cost)
             bounds[name] = got
             if limit and got > int(limit):
                 errors.append(f"stack: {name} needs {got} B, limit {limit} B")
+
+    # [!] S IS A NUMBER THE LOADER ADDS, SO IT MUST NOT DEPEND ON c.  The sink is
+    # reached through the printer veneer; if it crossed a veneer itself, its
+    # bound would be one more c-dependent sum, and the manifest would be back to
+    # carrying the firmware's cost.  Refused rather than folded in.
+    sink = None
+    if args.emit_stacks:
+        if SINK not in parts:
+            errors.append(f"stack: --emit-stacks needs --entry {SINK}=<limit>: "
+                          "the sink bound S is part of the declaration, and an "
+                          "unmeasured one cannot be declared")
+        elif parts[SINK][1] is not None:
+            errors.append(f"stack: {SINK} reaches a veneer itself; its bound "
+                          "would contain the board's cost, which a manifest "
+                          "no longer carries")
+        else:
+            sink = parts[SINK][0]
 
     if errors:
         print("check_plugin_image: FAIL", file=sys.stderr)
@@ -570,19 +626,32 @@ def main():
         return 1
 
     # [!] THE MANIFEST'S STACK NUMBERS ARE THIS ANALYSIS, not a second opinion.
-    # Handing the packer the bounds derived here is what makes "the manifest
+    # Handing the packer the parts derived here is what makes "the manifest
     # agrees with the gate" true by construction; the check that still has teeth
-    # is the DEVICE comparing those numbers against what its threads can spare,
-    # which no host knows.
+    # is the DEVICE adding its own c and comparing against what its threads can
+    # spare, which no host knows.  `bound` is informational -- it is at THIS
+    # build's cost, and nothing downstream may pack it.
     if args.emit_stacks:
         import json
+        out = {
+            "accounting": ABI["PLUGIN_STACK_ACCOUNTING"],
+            "sink": sink,
+            "veneer_base_cost": args.veneer_base_cost,
+            "entries": {
+                k: {"own": o, "cross": 0 if x is None else x,
+                    "crossing": x is not None, "bound": bounds[k]}
+                for k, (o, x) in parts.items()},
+        }
         with open(args.emit_stacks, "w") as fh:
-            json.dump(bounds, fh, indent=2, sort_keys=True)
+            json.dump(out, fh, indent=2, sort_keys=True)
 
     t = secs.get(".text", (0, 0, set()))[1]
     d = secs.get(".data", (0, 0, set()))[1]
     b = secs.get(".bss", (0, 0, set()))[1]
-    summary = ", ".join(f"{k} {v} B" for k, v in sorted(bounds.items()))
+    summary = ", ".join(
+        f"{k} {v} B" + (f" (A0 {parts[k][0]} / A1 {parts[k][1]})"
+                        if parts[k][1] is not None else "")
+        for k, v in sorted(bounds.items()))
     print(f"check_plugin_image: OK (text {t} B, data {d} B, bss {b} B"
           + (f"; stack {summary}" if summary else "") + ")")
     print(f"check_plugin_image: {target_note}")

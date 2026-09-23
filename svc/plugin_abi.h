@@ -59,7 +59,27 @@ extern "C" {
  * mean a device deciding it understands enough of a newer container to run it,
  * and the thing it would be guessing about is which bytes to execute.
  */
-#define PLUGIN_ABI_VERSION      1u
+#define PLUGIN_ABI_VERSION      2u
+
+/**
+ * What a manifest's stack declaration MEANS -- the version of the analysis that
+ * produced it (issue #111).
+ *
+ * [!] THIS IS THE PLUGIN GATE'S WALK, NOT THE FIRMWARE'S COST.  The declaration
+ * is split into quantities the gate measures without knowing what the base
+ * spends below a veneer (see struct plugin_manifest), and the firmware adds its
+ * own veneer cost at load time.  So changing that cost moves nothing here.  What
+ * does move this is a change to what the walk charges or where it stops -- for
+ * instance charging per veneer, or following a crossing into the plugin's own
+ * sink -- because a declaration made under the old rules would then be read
+ * under new ones.  Raise it on such a change; the loader compares it for EXACT
+ * equality and refuses a mismatch as its own reason, so an old declaration is
+ * re-packed rather than silently reinterpreted.
+ *
+ * cmake/check_plugin_image.py carries a copy (its ABI table) and stamps it into
+ * what it emits; cmake/fixtures/run_plugin_gate_tests.py pins the copy to this.
+ */
+#define PLUGIN_STACK_ACCOUNTING 1u
 
 /* ---- the container ------------------------------------------------------- */
 
@@ -374,11 +394,40 @@ enum plugin_slot {
  * match it -- see plugin_load.h for what the loader does with these, and
  * AGENTS.md for why matching is still not the same as being admissible.
  *
- * [!] ZERO IS A LEGAL BOUND FOR A PRESENT SLOT, and only for a present one.  A
- * frameless entry point really does need no stack of its own, and the second
- * plugin's has one; an ABSENT slot must still declare zero, because absence is
- * spelled in @ref slot and a stale number beside it would be a second, weaker
- * spelling of the same fact.
+ * [!] THE DECLARATION CARRIES NO FIRMWARE COST (ABI 2, issue #111).  Until
+ * then each slot declared ONE number: the gate's bound with the board's veneer
+ * cost c already added at every crossing into the base.  The firmware could not
+ * tell which c a number had been made with, so lowering c on a board left every
+ * container on it declaring against the old one, and raising it let an old
+ * declaration under-state the new requirement while still being accepted.  The
+ * gate's walk adds c at a crossing and stops there, so on any one path there is
+ * at most one crossing, and the bound it computed decomposes exactly:
+ *
+ *     bound = max(A0, A1 + c)                       (A1 only if the slot crosses)
+ *
+ *   A0  @ref stack_own    the deepest the plugin's OWN frames go on any path,
+ *                         crossing paths included (so A1 <= A0);
+ *   A1  @ref stack_cross  the deepest its own frames go on a path that reaches
+ *                         a veneer's indirect call, the veneer's frame included;
+ *   @ref stack_crossing   one bit per slot: set when that slot reaches a veneer.
+ *
+ * Neither depends on c, so the firmware adds its OWN c at load time
+ * (plugin_load.c) and a container stays correct across a change of it.  What
+ * lies beyond the printer veneer is not only the base, though: a plugin that
+ * formats into its own buffer (asset/common/plugin_text.c) puts its sink there,
+ * and @ref stack_sink (S) is that sink's measured bound.  The loader charges
+ * max(c, S) at the crossing -- one uniform charge for every veneer -- so a
+ * container whose sink is deeper than some later, smaller c is still bounded.
+ * @ref stack_accounting says which analysis produced these numbers; see
+ * PLUGIN_STACK_ACCOUNTING.
+ *
+ * [!] ONE CANONICAL FORM, AND ANYTHING ELSE IS REFUSED.  An absent slot declares
+ * 0 / 0 and no crossing bit; a slot that does not cross declares A1 = 0; A1 is
+ * never above A0; crossing bits above PLUGIN_SLOT_COUNT are zero.  Zero is a
+ * MEASUREMENT (a frameless entry point needs no stack of its own -- the second
+ * plugin's has one), so absence is spelled only in @ref slot and in the mask;
+ * a stale number beside an absent slot would be a second, weaker spelling of
+ * the same fact.
  */
 struct plugin_manifest {
 	uint8_t  magic[4];          /**< "PMAN"                                */
@@ -402,7 +451,11 @@ struct plugin_manifest {
 	uint32_t scratch_len;
 
 	uint32_t slot[PLUGIN_SLOT_COUNT];   /**< offsets; Thumb bit in bit 0   */
-	uint32_t stack[PLUGIN_SLOT_COUNT];  /**< bytes, per slot               */
+	uint32_t stack_own[PLUGIN_SLOT_COUNT];   /**< A0: deepest own frames   */
+	uint32_t stack_cross[PLUGIN_SLOT_COUNT]; /**< A1: own frames at a crossing */
+	uint32_t stack_crossing;    /**< bit per slot: it reaches a veneer     */
+	uint32_t stack_sink;        /**< S: the plugin's own printer sink      */
+	uint32_t stack_accounting;  /**< == PLUGIN_STACK_ACCOUNTING, exact     */
 
 	uint8_t  name[PLUGIN_NAME_MAX];
 	uint8_t  build_id[PLUGIN_BUILD_ID_MAX];
@@ -455,8 +508,18 @@ struct plugin_rect {
  * which runs on the camera producer with no guard and may take as long as it
  * needs.  The frame pipeline pre-pins one delivery per sink, so the two never
  * overlap and what decode() leaves for draw() needs no lock.
+ *
+ * [!] @ref version AND @ref size LEAD, AS IN struct plugin_base_api (ABI 2,
+ * issue #111).  Until then a member appended here could not be detected by a
+ * plugin built against the shorter shape, so any addition was an ABI break.
+ * The plugin's veneer (asset/common/plugin_base.c) now checks the version and
+ * that @ref size covers the member it is about to call through before calling
+ * it; a later member appended at the end is therefore NOT an ABI break.  Every
+ * producer of a painter fills both -- see PLUGIN_CALLS_HAS().
  */
 struct plugin_painter {
+	uint32_t version;      /**< == PLUGIN_ABI_VERSION                      */
+	uint32_t size;         /**< sizeof(struct plugin_painter) of the base  */
 	void *ctx;
 	void (*rect)(void *ctx, const struct plugin_rect *r, uint16_t rgb565,
 	             uint16_t stroke);
@@ -480,8 +543,13 @@ struct plugin_painter {
  * @return the number of bytes taken, or negative on failure.  A plugin must
  *         propagate a failure rather than continuing to write into a sink that
  *         has already said no.
+ *
+ * Versioned and sized exactly like struct plugin_painter, and for the same
+ * reason (issue #111).
  */
 struct plugin_printer {
+	uint32_t version;      /**< == PLUGIN_ABI_VERSION                      */
+	uint32_t size;         /**< sizeof(struct plugin_printer) of the base  */
 	void *ctx;
 	int (*write)(void *ctx, const char *s, size_t len);
 };
@@ -525,6 +593,19 @@ struct plugin_base_api {
 	                struct plugin_rect *out);
 };
 
+/**
+ * Does the vtable at @p p -- a painter or a printer -- carry @p member?
+ *
+ * True when its version is this ABI's and its declared size reaches the END of
+ * that member.  "At least", not "exactly": a base built after a member was
+ * appended hands over a larger struct, and a plugin that uses only the older
+ * members must still be able to run against it.  The plugin's veneers ask this
+ * before every call through the vtable (asset/common/plugin_base.c).
+ */
+#define PLUGIN_CALLS_HAS(p, type, member)                                     \
+	((p)->version == PLUGIN_ABI_VERSION &&                                \
+	 (p)->size >= offsetof(type, member) + sizeof(((type *)0)->member))
+
 /*
  * The plugin's own entry points, in the order enum plugin_slot names them.
  *
@@ -564,9 +645,17 @@ _Static_assert(offsetof(struct plugin_container_hdr, sections) == 32,
                "the section table follows the fixed header");
 
 _Static_assert(sizeof(struct plugin_manifest) ==
-               24 + 12 + 32 + 4 * PLUGIN_SLOT_COUNT * 2 +
+               24 + 12 + 32 + 4 * PLUGIN_SLOT_COUNT * 3 + 12 +
                PLUGIN_NAME_MAX + PLUGIN_BUILD_ID_MAX + 16,
                "plugin_manifest is wire format");
+_Static_assert(PLUGIN_SLOT_COUNT <= 32,
+               "stack_crossing holds one bit per slot");
+_Static_assert(offsetof(struct plugin_painter, version) == 0 &&
+               offsetof(struct plugin_painter, size) == 4,
+               "a painter leads with its version and size");
+_Static_assert(offsetof(struct plugin_printer, version) == 0 &&
+               offsetof(struct plugin_printer, size) == 4,
+               "a printer leads with its version and size");
 _Static_assert(offsetof(struct plugin_manifest, magic) == 0,
                "a manifest starts with its magic");
 _Static_assert(PLUGIN_SLOT_COUNT == 7,

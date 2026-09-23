@@ -50,6 +50,17 @@ extern "C" {
  * not the same as what the plugin says it needs: a manifest that agrees with
  * the host gate's analysis can still ask for more than the panel thread has.
  * A limit of 0 refuses that slot outright.
+ *
+ * @ref veneer_cost is c, the stack THIS firmware spends below one veneer, worst
+ * case (issue #111).  A manifest no longer carries it: the loader adds it to
+ * what the plugin declared, so it must be the value this firmware was checked
+ * against -- cmake/veneer_cost_gate.cmake hands it to the build as
+ * PLUGIN_VENEER_BASE_COST, the same number its check holds the shipped image
+ * to, and a board takes it from there rather than restating it.  Zero is not a
+ * cost and is refused as a bad argument.
+ *
+ * @ref stack_accounting is PLUGIN_STACK_ACCOUNTING as this firmware was built
+ * with it: the analysis whose numbers it knows how to read.
  */
 struct plugin_policy {
 	uint32_t target_id;        /**< plugin_target_id(), compared exactly   */
@@ -58,6 +69,8 @@ struct plugin_policy {
 	uint32_t image_align;      /**< usually PLUGIN_IMAGE_ALIGN             */
 	uint32_t caps_supported;   /**< capability bits this base implements   */
 	uint32_t stack_limit[PLUGIN_SLOT_COUNT];
+	uint32_t veneer_cost;      /**< c, bytes; never 0                      */
+	uint32_t stack_accounting; /**< PLUGIN_STACK_ACCOUNTING, exact         */
 };
 
 /* ---- what a caller gets back -------------------------------------------- */
@@ -83,6 +96,22 @@ struct plugin_view {
 	uint32_t bss_off,     bss_len;
 	uint32_t scratch_off, scratch_len;
 	uint32_t slot[PLUGIN_SLOT_COUNT];  /**< image-relative, or ABSENT     */
+	/*
+	 * What the manifest DECLARED (issue #111): the plugin's own frames, the
+	 * crossing mask and its sink -- none of which contains the firmware's cost
+	 * -- and what the loader REQUIRES of each slot under this policy's c:
+	 *
+	 *     stack[i] = max(own[i], cross[i] + max(c, sink))   if slot i crosses
+	 *              = own[i]                                 otherwise
+	 *
+	 * stack[] is the number compared with stack_limit[], so it is what a
+	 * console should call the requirement; the declared parts say where it came
+	 * from.  0 for an absent slot, like everything else here.
+	 */
+	uint32_t stack_own[PLUGIN_SLOT_COUNT];
+	uint32_t stack_cross[PLUGIN_SLOT_COUNT];
+	uint32_t stack_crossing;
+	uint32_t stack_sink;
 	uint32_t stack[PLUGIN_SLOT_COUNT];
 	uint32_t capability;
 	uint32_t link_addr;
@@ -150,7 +179,9 @@ enum plugin_result {
 	PLUGIN_ERR_SLOT_MISSING,   /**< a mandatory slot is absent             */
 	PLUGIN_ERR_SLOT_RANGE,     /**< a slot does not land in code           */
 	PLUGIN_ERR_SLOT_THUMB,     /**< Thumb bit clear, or misaligned         */
-	PLUGIN_ERR_STACK,          /**< a slot asks for more than the thread   */
+	PLUGIN_ERR_STACK,          /**< a slot asks for more than the thread,
+	                                *   or declares it in a non-canonical form */
+	PLUGIN_ERR_STACK_ACCOUNTING, /**< declared under another analysis     */
 	PLUGIN_ERR_DIGEST,
 	PLUGIN_ERR_ARG,
 };

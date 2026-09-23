@@ -449,6 +449,15 @@ _Static_assert(GROVE_PLUGIN_TARGET_ID == PLUGIN_TARGET_ID_HERE,
 #ifndef GROVE_PLUGIN_MAX
 #error "board.cmake must define GROVE_PLUGIN_MAX"
 #endif
+/*
+ * [!] THE VENEER COST IS NOT THIS BOARD'S VARIABLE HERE (issue #111).  The loader
+ * adds it to what a manifest declares, so it must be the number the build checked
+ * against shell.elf -- and cmake/veneer_cost_gate.cmake defines it on this very
+ * compile from that check's own DECLARED.  board.cmake does not pass it.
+ */
+#ifndef PLUGIN_VENEER_BASE_COST
+#error "cmake/veneer_cost_gate.cmake defines PLUGIN_VENEER_BASE_COST; is veneer_cost_gate() registered?"
+#endif
 
 static const struct plugin_policy nn_plugin_policy = {
 	.target_id      = GROVE_PLUGIN_TARGET_ID,
@@ -457,6 +466,8 @@ static const struct plugin_policy nn_plugin_policy = {
 	.image_align    = PLUGIN_IMAGE_ALIGN,
 	.caps_supported = PLUGIN_CAP_KNOWN_MASK,
 	.stack_limit    = GROVE_PLUGIN_STACK_LIMITS,   /* nn_plugin_stack.h */
+	.veneer_cost    = PLUGIN_VENEER_BASE_COST,     /* veneer_cost_gate() */
+	.stack_accounting = PLUGIN_STACK_ACCOUNTING,
 };
 
 /*

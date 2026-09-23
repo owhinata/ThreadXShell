@@ -107,7 +107,9 @@ static int cap_write(void *ctx, const char *s, size_t len)
 	return (int)len;
 }
 
-static struct plugin_printer printer = { NULL, cap_write };
+static struct plugin_printer printer = {
+	PLUGIN_ABI_VERSION, sizeof(struct plugin_printer), NULL, cap_write
+};
 
 static void cap_reset(void)
 {
@@ -205,6 +207,7 @@ static void rec_blit(void *ctx, const struct plugin_rect *r,
 }
 
 static const struct plugin_painter rec_painter = {
+	PLUGIN_ABI_VERSION, sizeof(struct plugin_painter),
 	NULL, rec_rect, rec_fill, rec_blit,
 };
 
@@ -508,7 +511,10 @@ int main(void)
 
 	expect("a null painter is survivable", (pl_draw(NULL), 1), "");
 	{
-		struct plugin_painter half = { NULL, rec_rect, rec_fill, NULL };
+		struct plugin_painter half = {
+			PLUGIN_ABI_VERSION, sizeof(struct plugin_painter),
+			NULL, rec_rect, rec_fill, NULL
+		};
 
 		draw_reset();
 		pl_draw(&half);

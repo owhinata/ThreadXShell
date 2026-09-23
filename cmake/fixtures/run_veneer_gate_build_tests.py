@@ -60,6 +60,13 @@ Cases:
   ltrans_drop       an LTO link that writes fewer partitions than the last
                     (max -> one) still passes: the old records are removed
                     before the link, not left for the check to refuse.
+  cost_wiring       (issue #111) DECLARED reaches BOTH places the loader's c
+                    is read from, and follows a change of it: the compile of a
+                    TU in the $<TARGET_OBJECTS:> library (where Grove's policy
+                    lives) as PLUGIN_VENEER_BASE_COST, and an asset rule's
+                    command line through veneer_cost_gate_declared() (where the
+                    host container verifier gets it).  A loader test cannot see
+                    this: it is handed a policy, never the build's.
 """
 import argparse
 import os
@@ -122,6 +129,17 @@ int main(void)
 }
 """,
     "objsrc.c": LEAF % ("obj_src_leaf", 40),
+    # The board's plugin policy stands here: it reads the c the helper
+    # defines, and its SIZE carries the value into the object, where nm reads it.
+    "policy.c": """
+#ifndef PLUGIN_VENEER_BASE_COST
+#error "PLUGIN_VENEER_BASE_COST did not reach this compile"
+#endif
+__attribute__((used)) char policy_cost_probe[PLUGIN_VENEER_BASE_COST];
+""",
+    "record.py": """import sys
+open(sys.argv[2], "w").write(sys.argv[1] + "\\n")
+""",
     "objlink.c": LEAF % ("obj_link_leaf", 48),
     "lib.c": LEAF % ("lib_leaf", 56),
     "other.c": "int main(void) { volatile char b[8]; b[0] = 1; "
@@ -144,7 +162,7 @@ set(Python3_EXECUTABLE "@PYTHON@")
 set(DECLARED 4096 CACHE STRING "")
 set(FIX_LTO OFF CACHE STRING "")
 
-add_library(fw_objs OBJECT objsrc.c)
+add_library(fw_objs OBJECT objsrc.c policy.c)
 add_library(fw_objlink OBJECT objlink.c)
 add_library(fw_lib STATIC lib.c)
 add_library(fw_iface INTERFACE)
@@ -199,6 +217,13 @@ add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/packed.nnc"
     COMMAND ${DELIVER} "${CMAKE_BINARY_DIR}/packed.nnc"
     DEPENDS ${_gate} VERBATIM)
 add_custom_target(asset-packed DEPENDS "${CMAKE_BINARY_DIR}/packed.nnc")
+# The c an asset hands the host container verifier, as grove/wio_add_asset()
+# take it (issue #111).
+veneer_cost_gate_declared(_cost)
+add_custom_target(asset-cost
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/record.py"
+            "${_cost}" "${CMAKE_BINARY_DIR}/asset_cost.txt"
+    VERBATIM)
 """
 
 
@@ -236,6 +261,7 @@ class Project:
                 'set(CMAKE_EXE_LINKER_FLAGS_INIT "-nostdlib -nostartfiles '
                 '-Wl,--no-warn-rwx-segments")\n' % cc)
         self.toolchain = os.path.join(work, "toolchain.cmake")
+        self.cc = cc
         self.stamp = os.path.join(self.bld, "veneer_cost", "shell.checked")
         self.elf = os.path.join(self.bld, "shell.elf")
 
@@ -436,6 +462,37 @@ def lto_tree(p, results):
                                    "passes" % len(many)))
 
 
+def cost_tree(p, results):
+    """DECLARED -> the policy TU's compile and the asset's command line."""
+    nm = p.cc[:-len("gcc")] + "nm"
+    seen = []
+    for declared in (4096, 5000):
+        p.configure(DECLARED=str(declared))
+        rc, out = p.ninja("shell", "asset-cost")
+        expect(rc == 0, "cost_wiring: build at DECLARED %d failed" % declared,
+               out)
+        objs = [os.path.join(r, f) for r, _, fs in os.walk(p.bld)
+                for f in fs if f.startswith("policy.c.") and
+                f.endswith((".o", ".obj"))]
+        expect(len(objs) == 1, "cost_wiring: policy.c object not found: %r"
+               % objs)
+        r = subprocess.run([nm, "-S", objs[0]], capture_output=True,
+                           text=True)
+        m = re.search(r"^[0-9a-f]+ ([0-9a-f]+) \S+ policy_cost_probe$",
+                      r.stdout, re.M)
+        expect(m is not None, "cost_wiring: no probe in policy.c.o", r.stdout)
+        fw = int(m.group(1), 16)
+        with open(p.path("asset_cost.txt")) as fh:
+            asset = int(fh.read().strip())
+        expect(fw == declared and asset == declared,
+               "cost_wiring: DECLARED %d, but the policy TU was compiled with "
+               "%d and the asset was handed %d" % (declared, fw, asset))
+        seen.append(declared)
+    results.append(("cost_wiring", "DECLARED %s reached the policy TU and "
+                                   "the asset, and followed the change"
+                                   % " -> ".join(map(str, seen))))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--cc", required=True,
@@ -460,6 +517,7 @@ def main():
                                               "packed.nnc", results,
                                               "asset_packed")),
         ("ltrans_drop", lambda p: lto_tree(p, results)),
+        ("cost_wiring", lambda p: cost_tree(p, results)),
     ]
     for name, fn in runs:
         with tempfile.TemporaryDirectory() as work:

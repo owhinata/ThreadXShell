@@ -12,12 +12,10 @@
  * class NAMES travel with the weights and nowhere else.  A `text()` primitive on
  * the painter would put a typeface in three firmwares and make every later
  * question about it -- a bigger cell, a glyph the font lacks, a second script --
- * a firmware change, which is the errand this issue removes.  It would also cost
- * an ABI break: struct plugin_painter carries no version or size field (unlike
- * struct plugin_base_api), so a member appended to it cannot be detected by a
- * plugin built against the older shape, and PLUGIN_ABI_VERSION is compared for
- * exact equality -- every container in the store would have to be rebuilt and
- * re-sent.
+ * a firmware change, which is the errand this issue removes.  (It was also an
+ * ABI break when this was written: struct plugin_painter had no version or size
+ * field.  ABI 2 gave it both (issue #111), so a member appended now is
+ * detectable -- but the font still belongs to the plugin, for the reason above.)
  *
  * So the escape hatch the painter was BUILT with is the one used here: a plugin
  * rasterises into its OWN buffer and hands the base spans through `blit`.  The

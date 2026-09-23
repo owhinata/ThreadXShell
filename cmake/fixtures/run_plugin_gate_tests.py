@@ -90,11 +90,14 @@ BASE_FLAGS = [
 NO_UNWIND = ["-fno-unwind-tables", "-fno-asynchronous-unwind-tables"]
 
 
-def build(cc, nm, objdump, work, board, mutate=None, cflags=None, facts=None):
+def build(cc, nm, objdump, work, board, mutate=None, cflags=None, facts=None,
+          entries=None, inspect=None):
     """Build a plugin image for `board`, optionally mutated.
 
     `cflags` replaces the non-architecture flags; `facts` overrides what the
-    gate is told.  Returns (rc, output)."""
+    gate is told; `entries` replaces the --entry list, and with `inspect` the
+    gate also writes --emit-stacks and `inspect(elf, sus, emitted)` runs while
+    the tree still exists.  Returns (rc, output)."""
     b = BOARDS[board]
     src = os.path.join(work, "src")
     shutil.copytree(PLUGIN, src)
@@ -161,12 +164,20 @@ def build(cc, nm, objdump, work, board, mutate=None, cflags=None, facts=None):
 
     gate_facts = dict(b["facts"])
     gate_facts.update(facts or {})
+    emitted = os.path.join(work, "stacks.json")
     r = subprocess.run([sys.executable, GATE, elf, "--nm", nm,
                         "--objdump", objdump, "--su"] + sus
-                       + ["--entry", "pl_draw=1024", "pl_decode=8192"]
+                       + ["--entry"] + (entries or ["pl_draw=1024",
+                                                    "pl_decode=8192"])
+                       + (["--emit-stacks", emitted] if inspect else [])
                        + [x for kv in gate_facts.items() for x in kv],
                        capture_output=True, text=True)
-    return r.returncode, r.stdout + r.stderr
+    out = r.stdout + r.stderr
+    if r.returncode == 0 and inspect:
+        msg = inspect(elf, sus, emitted)
+        if msg:
+            return 97, msg
+    return r.returncode, out
 
 
 def sub(path, old, new):
@@ -273,6 +284,141 @@ def m_recursion(src):
         "  return (int)pl_sink + pl_deep(o, n - 1u); }\n/* ---- state ---")
 
 
+def m_sink_crosses(src):
+    """[!] S MUST NOT CONTAIN c (issue #111).  The sink's bound is a number the
+    loader adds at a crossing; if the sink crossed a veneer itself, that number
+    would carry the board's cost, which is what ABI 2 took out of the manifest.
+    The call is guarded so the image stays reachable-but-unexecuted, and it goes
+    through a real veneer so the only thing wrong is the crossing."""
+    sub(os.path.join(src, "plugin_text.c"),
+        '#include "plugin_text.h"',
+        '#include "plugin_text.h"\n#include "plugin_base.h"')
+    sub(os.path.join(src, "plugin_text.c"),
+        "\tstruct pl_sbuf *sb = (struct pl_sbuf *)ctx;\n\tsize_t i;\n",
+        "\tstruct pl_sbuf *sb = (struct pl_sbuf *)ctx;\n\tsize_t i;\n\n"
+        "\tif (len == 0xDEADu)\n"
+        "\t\tpl_base_log((const struct plugin_base_api *)ctx, s, len);\n")
+
+
+# ---- the declaration the gate emits (issue #111) ---------------------------
+#
+# [!] AN ORACLE THAT IS NOT THE CODE UNDER TEST.  The gate now emits each slot's
+# bound in two parts, (A0, A1), and the loader adds the board's c.  The claim is
+# that this is the OLD walk decomposed, not a new one -- so the old walk is kept
+# here, transcribed from the gate as it stood before #111 (one number, c added
+# at every indirect call), and the emitted parts must reproduce it at three
+# values of c.  One value would not do: a swapped pair, or an A0 that was really
+# the old bound at the build's c, can agree with the oracle at the c it was
+# made with.  At c = 1, 256 and 2^20 every such mistake shows.
+ORACLE_COSTS = (1, 256, 1 << 20)
+ALL_SLOTS = ["pl_entry", "pl_shapes_ok", "pl_decode", "pl_draw", "pl_report",
+             "pl_param_set", "pl_param_get", "pl_sbuf_write"]
+
+
+def _gate():
+    sys.path.insert(0, os.path.dirname(GATE))
+    import check_plugin_image as gate          # noqa: E402 -- path set above
+    return gate
+
+
+def old_walk(entry, funcs, frames, cost):
+    """check_plugin_image.bound_stack() before issue #111, transcribed."""
+    g = _gate()
+
+    def walk(fn, path):
+        if fn in path:
+            raise ValueError("recursion")
+        frame, qual = g.frame_of(fn, frames)
+        assert qual == "static"
+        worst = 0
+        for line in funcs.get(fn, []):
+            if g.INDIRECT_RE.search(line):
+                worst = max(worst, cost)
+                continue
+            m = g.DIRECT_CALL_RE.search(line) or g.TAIL_CALL_RE.search(line)
+            if m:
+                callee = m.group(1)
+                if callee == fn and m.group(2):
+                    continue
+                if callee in funcs or g.frame_of(callee, frames) is not None:
+                    worst = max(worst, walk(callee, path + [fn]))
+        return frame + worst
+    return walk(entry, [])
+
+
+def inspect_emitted(objdump):
+    """An `inspect` for build(): the emitted parts against the oracle."""
+    import json
+
+    def check(elf, sus, emitted):
+        g = _gate()
+        funcs = g.disassemble(objdump, elf)
+        frames = g.stack_usage(sus)
+        with open(emitted) as fh:
+            e = json.load(fh)
+        if e.get("accounting") != g.ABI["PLUGIN_STACK_ACCOUNTING"]:
+            return "emitted accounting %r, gate ABI says %r" % (
+                e.get("accounting"), g.ABI["PLUGIN_STACK_ACCOUNTING"])
+        crossed = 0
+        for name in ALL_SLOTS:
+            d = e["entries"].get(name)
+            if d is None:
+                return "no emitted entry for %s" % name
+            if d["own"] < d["cross"]:
+                return "%s: A1 %d above A0 %d" % (name, d["cross"], d["own"])
+            if not d["crossing"] and d["cross"] != 0:
+                return "%s: A1 %d without a crossing" % (name, d["cross"])
+            crossed += bool(d["crossing"])
+            for c in ORACLE_COSTS:
+                want = old_walk(name, funcs, frames, c)
+                got = max(d["own"], d["cross"] + c) if d["crossing"] \
+                    else d["own"]
+                if got != want:
+                    return ("%s at c=%d: max(A0 %d, A1 %d + c) = %d, the old "
+                            "walk says %d" % (name, c, d["own"], d["cross"],
+                                              got, want))
+        # Something must cross, or the checks above never met a crossing.
+        if not crossed:
+            return "no entry crosses a veneer; the oracle tested nothing"
+        # [!] S is the sink's bound, and it is the same at every c.
+        s = [old_walk("pl_sbuf_write", funcs, frames, c) for c in ORACLE_COSTS]
+        if len(set(s)) != 1 or e.get("sink") != s[0]:
+            return "emitted sink %r; the old walk bounds pl_sbuf_write at %r" % (
+                e.get("sink"), s)
+        return None
+    return check
+
+
+def walk_units():
+    """The decomposition on call graphs small enough to write by hand.
+
+    Frames are chosen so that every wrong answer is a different number: a
+    swapped (A0, A1) pair, a dropped crossing and an A1 that forgot the
+    veneer's own frame each come out distinct from the right one."""
+    g = _gate()
+    bl = "   0:\tf000 f800 \tbl\t100 <%s>"
+    frames = {k: (v, "static") for k, v in
+              {"e": 8, "a": 100, "v": 16, "b": 40, "leaf": 4}.items()}
+    funcs = {
+        "e": [bl % "a", bl % "v"],   # a deep sibling, and a veneer
+        "a": [],
+        "v": ["   4:\t4798      \tblx\tr3"],
+        "b": [bl % "v"],
+        "n": [bl % "b", bl % "a"],   # the crossing one level down
+        "leaf": [],
+    }
+    frames["n"] = (12, "static")
+    cases = [("e", (108, 24)), ("n", (112, 68)), ("leaf", (4, None)),
+             ("a", (100, None)), ("v", (16, 16))]
+    bad = []
+    for entry, want in cases:
+        errors = []
+        got = g.bound_stack(entry, funcs, frames, errors)
+        if errors or tuple(got) != want:
+            bad.append("%s: got %r %s, want %r" % (entry, got, errors, want))
+    return bad
+
+
 # Expected outcome per fixture: "accept", "gate" (check_plugin_image refuses) or
 # "link" (the linker refuses first, and the gate never gets a say).
 #
@@ -343,6 +489,25 @@ CASES = [
      "gate: a Cortex-M4 records the same name as an M7; FPv4 is what refuses it"),
     ("target_m85", "m85", None, None, None, "gate", "names its core",
      "gate: an M85 has the M55's arch and FPU; on v8.1-M the NAME decides"),
+]
+
+# (name, board, mutate, entries, expected, must-say, why): the same build, but
+# the gate also EMITS the declaration, and for an accept it is checked against
+# the pre-#111 walk (inspect_emitted).
+EMIT_CASES = [
+    ("emit_grove", "grove", None, [n + "=1048576" for n in ALL_SLOTS],
+     "accept", None,
+     "grove: every slot's (A0, A1) reproduces the old walk at c = 1, 256, "
+     "2^20, and S is c-free"),
+    ("emit_wio", "wio", None, [n + "=1048576" for n in ALL_SLOTS],
+     "accept", None,
+     "wio: the same, on the M7 image"),
+    ("emit_no_sink", "grove", None, ["pl_draw=1048576", "pl_decode=1048576"],
+     "gate", "--emit-stacks needs --entry pl_sbuf_write",
+     "gate: a declaration cannot be emitted without S"),
+    ("sink_crosses", "grove", m_sink_crosses,
+     [n + "=1048576" for n in ALL_SLOTS], "gate", "reaches a veneer itself",
+     "gate: a sink that crosses a veneer would put c back into S"),
 ]
 
 
@@ -474,7 +639,8 @@ def main():
             rc, out = build(args.cc, args.nm, args.objdump, work, board,
                             mutate, cflags, facts)
         got = "link" if rc == 98 else ("build" if rc == 99 else
-                                       ("gate" if rc != 0 else "accept"))
+                                       ("inspect" if rc == 97 else
+                                        ("gate" if rc != 0 else "accept")))
         label = f"{board}:{name}"
         if got != expect_fail:
             if got == "build":
@@ -527,6 +693,32 @@ def main():
             bad += 1
         else:
             print(f"  ok   {'image:' + name:24s} {why}")
+
+    for name, board, mutate, entries, expect_fail, must_say, why in EMIT_CASES:
+        with tempfile.TemporaryDirectory() as work:
+            rc, out = build(args.cc, args.nm, args.objdump, work, board,
+                            mutate, None, None, entries,
+                            inspect_emitted(args.objdump))
+        got = "inspect" if rc == 97 else ("gate" if rc not in (0, 98, 99)
+                                          else ("accept" if rc == 0
+                                                else "build"))
+        label = f"{board}:{name}"
+        if got != expect_fail or (must_say and must_say not in out):
+            print(f"  FAIL {label:24s} expected {expect_fail}, got {got}"
+                  f"\n        {out.strip()[:400]}")
+            bad += 1
+        else:
+            print(f"  ok   {label:24s} {why}")
+
+    wbad = walk_units()
+    if wbad:
+        for m in wbad:
+            print(f"  FAIL {'walk_units':24s} {m}")
+        bad += 1
+    else:
+        print(f"  ok   {'walk_units':24s} (A0, A1) on hand-written graphs: a "
+              "sibling deeper than the crossing, a crossing one level down, "
+              "no crossing, a bare veneer")
 
     with tempfile.TemporaryDirectory() as work:
         mism = abi_table_mismatches(work)

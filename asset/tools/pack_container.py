@@ -68,7 +68,7 @@ def put(buf, off, fmt, *vals):
     struct.pack_into(fmt, buf, off, *vals)
 
 
-def build_container(L, elf_info, model, data, name, build_id, stacks):
+def build_container(L, elf_info, model, data, name, build_id, stacks, sink):
     """Lay the container out and return the bytes.  Called exactly once."""
     hdr_sz = L["hdr_size"]
     man_sz = L["manifest_size"]
@@ -130,9 +130,22 @@ def build_container(L, elf_info, model, data, name, build_id, stacks):
     for f in ("code", "data", "bss", "scratch"):
         put(buf, m + mm[f + "_off"], "<I", elf_info[f][0])
         put(buf, m + mm[f + "_len"], "<I", elf_info[f][1])
+    # The stack declaration (ABI 2, issue #111): the plugin's own frames and
+    # its crossings, none of it containing the board's veneer cost -- the
+    # firmware adds that.  An absent slot declares 0 / 0 and no crossing, which
+    # is the only spelling of absence the loader accepts.
+    crossing = 0
     for i, v in enumerate(elf_info["slots"]):
         put(buf, m + mm["slot"] + 4 * i, "<I", v)
-        put(buf, m + mm["stack"] + 4 * i, "<I", stacks[i] if v else 0)
+        own, cross = stacks[i] if v else (0, None)
+        put(buf, m + mm["stack_own"] + 4 * i, "<I", own)
+        put(buf, m + mm["stack_cross"] + 4 * i, "<I",
+            0 if cross is None else cross)
+        if cross is not None:
+            crossing |= 1 << i
+    put(buf, m + mm["stack_crossing"], "<I", crossing)
+    put(buf, m + mm["stack_sink"], "<I", sink)
+    put(buf, m + mm["stack_accounting"], "<I", L["stack_accounting"])
     nb = name.encode()[:L["name_max"] - 1]
     buf[m + mm["name"]:m + mm["name"] + len(nb)] = nb
     bb = build_id.encode()[:L["build_id_max"] - 1]
@@ -194,7 +207,12 @@ def main():
     ap.add_argument("--objcopy", required=True)
     ap.add_argument("--target-id", required=True, type=lambda s: int(s, 0))
     ap.add_argument("--stack", action="append", default=[],
-                    help="slot=bytes, from the plugin gate's analysis")
+                    help="slot=A0,A1 (or slot=A0,- for a slot that reaches no "
+                         "veneer), from the plugin gate's analysis")
+    ap.add_argument("--sink", required=True, type=int,
+                    help="S, the gate's bound of the plugin's own printer sink")
+    ap.add_argument("--accounting", required=True, type=int,
+                    help="the analysis the gate says produced the numbers")
     args = ap.parse_args()
 
     with open(args.layout) as fh:
@@ -238,14 +256,38 @@ def main():
     if slots[L["slot"]["param_set"]]:
         cap |= L["cap"]["params"]
 
+    # [!] THE GATE'S ANALYSIS, AND THIS HEADER'S, MUST BE ONE (issue #111).  The
+    # gate stamps the version of its walk; the loader compares the manifest's
+    # with the one it was compiled with.  Stamping the gate's number without
+    # this check would pack a container every firmware of this ABI refuses --
+    # safe, but found on the device after the erase.
+    if args.accounting != L["stack_accounting"]:
+        die(f"the gate's stack accounting is {args.accounting} but "
+            f"svc/plugin_abi.h says {L['stack_accounting']}; one of them was "
+            "changed without the other")
+    if args.sink < 0:
+        die("--sink is a byte count")
+
     # [!] "MEASURED ZERO" AND "NEVER MEASURED" ARE DIFFERENT (issue #103).  This
     # tested the VALUE -- `if v and not stacks[i]` -- which reads a frameless
     # callback as an omission and refuses to build a perfectly good container.
     # The classifier plugin's entry point is exactly that, so the two are told
     # apart by which arguments arrived, not by what they said.
-    stacks = [0] * L["slot_count"]
+    stacks = [(0, None)] * L["slot_count"]
     given = set()
-    named = {k: int(v) for k, v in (s.split("=") for s in args.stack)}
+    named = {}
+    for spec in args.stack:
+        k, _, v = spec.partition("=")
+        own, _, cross = v.partition(",")
+        if not own.isdigit() or not (cross == "-" or cross.isdigit()):
+            die(f"--stack {spec}: expected slot=A0,A1 or slot=A0,-")
+        own = int(own)
+        cross = None if cross == "-" else int(cross)
+        # The loader refuses this shape; refusing it here says why, at build
+        # time, instead of as "stack request refused" after a send.
+        if cross is not None and cross > own:
+            die(f"--stack {spec}: A1 above A0 -- the two parts are swapped")
+        named[k] = (own, cross)
     for slot_name, idx in L["slot"].items():
         if slot_name in named:
             stacks[idx] = named[slot_name]
@@ -279,7 +321,7 @@ def main():
             extra = fh.read()
 
     blob = build_container(L, elf_info, model, extra, args.name,
-                           args.build_id, stacks)
+                           args.build_id, stacks, args.sink)
 
     # Everything from here reads the ASSEMBLED artifact, never the inputs again.
     secs = reparse(L, blob)

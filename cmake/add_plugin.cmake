@@ -410,8 +410,10 @@ function(add_plugin _name)
                 # whatever is on the other side, which is normally the BASE.
                 # A plugin-supplied printer puts its own code there instead, so
                 # that assumption is bounded here by name rather than trusted to
-                # a comment.  The sender filters the gate's output down to the
-                # slot names, so an extra bound reaches no manifest.
+                # a comment.  Since ABI 2 (issue #111) its bound also reaches
+                # the manifest, as S: the loader charges max(c, S) at a
+                # crossing, so a later, smaller c cannot under-charge a sink
+                # this plugin carries.
                 # [!] THE SAME VARIABLES THE FIRMWARE'S POLICY USES.  Written
                 # out again here, the gate and the device would be two
                 # declarations of one rule, and a plugin could pass the build

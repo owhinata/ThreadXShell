@@ -41,6 +41,15 @@
 #  [!] THE REGISTRATION IS A TARGET AND A STAMP, NOT A FLAG.  add_plugin()
 #  refuses to configure on a board that has not called this: a plugin whose
 #  charge nothing checks is exactly the state #112 exists to end.
+#
+#  [!] AND DECLARED IS ALSO WHAT THE FIRMWARE ADDS (issue #111).  A manifest no
+#  longer carries the veneer cost; the device's loader adds its own.  So the
+#  number checked here is handed to the firmware by THIS helper, as the compile
+#  definition PLUGIN_VENEER_BASE_COST on every compile of the image (the same
+#  set that gets -fstack-usage), and to the host container verifier through
+#  veneer_cost_gate_declared().  A board that restated it in a variable of its
+#  own could check one number and load with another; here there is only the one
+#  that was checked.
 # ============================================================================
 
 # Script mode: what a LINK invalidates, removed before every link.
@@ -134,6 +143,20 @@ function(veneer_cost_gate)
     add_custom_target(veneer_cost_check ALL DEPENDS "${_stamp}")
     cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}"
                    CALL _veneer_cost_gate_finish)
+endfunction()
+
+# veneer_cost_gate_declared(<var>) -- the DECLARED this board registered.
+#
+# For the asset rules, which must hand the host container verifier the same c
+# the firmware adds at load time.  Refuses to answer on a board that has not
+# registered, rather than handing back an empty string.
+function(veneer_cost_gate_declared _var)
+    get_property(_declared GLOBAL PROPERTY VENEER_GATE_DECLARED)
+    if(NOT _declared)
+        message(FATAL_ERROR
+            "veneer_cost_gate_declared(): no veneer_cost_gate() registered")
+    endif()
+    set(${_var} "${_declared}" PARENT_SCOPE)
 endfunction()
 
 # Every non-imported target that compiles objects into @p fw's image: fw itself,
@@ -242,6 +265,11 @@ function(_veneer_cost_gate_finish)
     foreach(_t IN LISTS _compiles)
         target_compile_options("${_t}" PRIVATE
             $<$<COMPILE_LANGUAGE:C,CXX>:-fstack-usage>)
+        # [!] THE CHARGE THE LOADER ADDS (issue #111), onto the same compiles:
+        # whichever TU holds the board's plugin_policy, it is one of these.  A
+        # board does not pass it -- see the header of this file.
+        target_compile_definitions("${_t}" PRIVATE
+            PLUGIN_VENEER_BASE_COST=${declared}u)
     endforeach()
     target_link_options("${fw}" PRIVATE -fstack-usage)
     add_custom_command(TARGET "${fw}" PRE_LINK

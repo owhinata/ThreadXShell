@@ -4,7 +4,7 @@
  */
 /**
  * @file    test_nn_det_record.c
- * @brief   Host tests for svc/nn_det_record.c (issues #97, #110, #116).
+ * @brief   Host tests for svc/nn_det_record.c (issues #97, #110, #116, #118).
  *
  * THIS IS THE ONLY PLACE THE RULE CAN BE CHECKED.  What it guards is an ordering:
  *
@@ -71,6 +71,277 @@ static struct bf_det mk_det(float x)
 	d.h = 0.1f;
 	d.score = 0.9f;
 	return d;
+}
+
+/*
+ * --- issue #118: a result outlives its session ----------------------------
+ *
+ * [!] THE BOUNDARY AND THE MODEL CHANGE ARE TWO OPERATIONS NOW.  Every case
+ * below starts from a record that HOLDS something, because every mistake worth
+ * catching here is one that destroys or resurrects a live result -- and an empty
+ * record cannot show either.
+ */
+static void test_outlives_session(void)
+{
+	struct nn_det_record rec;
+	struct nn_det_snapshot snap;
+	struct bf_det dets[BF_MAX_DET];
+	struct bf_det one = mk_det(0.25f), late = mk_det(0.75f);
+	struct bf_result r3 = mk_res(3), r9 = mk_res(9);
+	uint32_t g0, g1, base, acc, ep;
+
+	printf("test_nn_det_record: a result outlives its session (#118)\n");
+	memset(&rec, 0, sizeof rec);
+
+	/* --- a boundary moves the generation and keeps the result ------- */
+	nn_det_record_boundary(&rec);                  /* a session starts */
+	g0 = nn_det_record_gen(&rec);
+	expect("a publish of the session is taken",
+	       nn_det_record_publish(&rec, &one, 1, &r3, g0) != 0, "dropped");
+	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	acc = snap.accepted;
+	ep  = snap.epoch;
+
+	nn_det_record_boundary(&rec);                  /* ...and stops */
+	g1 = nn_det_record_gen(&rec);
+	expect("[!] a boundary moves the generation", g1 != g0, "g0 %u g1 %u",
+	       (unsigned)g0, (unsigned)g1);
+	memset(dets, 0, sizeof dets);
+	nn_det_record_snapshot(&rec, &snap, dets, BF_MAX_DET);
+	expect("[!] and the result stays -- it is still the last thing the model "
+	       "produced",
+	       snap.valid != 0 && snap.ndet == 1 && snap.res.npass == 3 &&
+	               dets[0].x == 0.25f &&
+	               snap.kind == (uint8_t)NN_DET_CALLER_BOXES,
+	       "valid %d ndet %d npass %d x %.3f kind %u", snap.valid, snap.ndet,
+	       snap.res.npass, (double)dets[0].x, (unsigned)snap.kind);
+	expect("a boundary is not a publish and not a model change",
+	       snap.accepted == acc && snap.epoch == ep,
+	       "accepted %u->%u epoch %u->%u", (unsigned)acc,
+	       (unsigned)snap.accepted, (unsigned)ep, (unsigned)snap.epoch);
+
+	/* The in-flight inference of the ended session still lands nowhere, and
+	 * -- the part that is new -- it does not disturb the result it failed to
+	 * replace. */
+	expect("[!] a decode armed before the boundary is dropped",
+	       nn_det_record_publish(&rec, &late, 1, &r9, g0) == 0, "taken");
+	memset(dets, 0, sizeof dets);
+	nn_det_record_snapshot(&rec, &snap, dets, BF_MAX_DET);
+	expect("and the kept result is exactly as it was",
+	       snap.valid != 0 && snap.res.npass == 3 && dets[0].x == 0.25f &&
+	               snap.accepted == acc,
+	       "valid %d npass %d x %.3f accepted %u", snap.valid,
+	       snap.res.npass, (double)dets[0].x, (unsigned)snap.accepted);
+
+	/* --- what a session produced is COUNTED, not inferred from valid -- */
+	/*
+	 * [!] THIS IS THE READER'S VIEW OF THE CHANGE.  `valid` stays set across the
+	 * boundary now, so a reader that asked "is there a result?" would be told
+	 * yes about a session that has published nothing.  The base is taken after
+	 * the boundary, as a board takes it at its commit.
+	 */
+	nn_det_record_boundary(&rec);                  /* a new session */
+	g1 = nn_det_record_gen(&rec);
+	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	base = snap.accepted;
+	expect("[!] a new session with an old result has no result of its own",
+	       snap.valid != 0 && nn_det_last_valid(&snap, base) == 0,
+	       "valid %d last_valid %d", snap.valid,
+	       nn_det_last_valid(&snap, base));
+
+	/* A late publish of the PREVIOUS session is not counted as this one's. */
+	(void)nn_det_record_publish(&rec, &late, 1, &r9, g0);
+	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	expect("[!] a dropped publish is not counted",
+	       snap.accepted == base && nn_det_last_valid(&snap, base) == 0,
+	       "accepted %u base %u", (unsigned)snap.accepted, (unsigned)base);
+
+	expect("the session's own publish is taken",
+	       nn_det_record_publish(&rec, &late, 1, &r9, g1) != 0, "dropped");
+	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	expect("and counted: accepted moves by exactly one",
+	       snap.accepted == base + 1u, "accepted %u base %u",
+	       (unsigned)snap.accepted, (unsigned)base);
+	expect("so the session has a result of its own",
+	       nn_det_last_valid(&snap, base) != 0, "last_valid 0");
+
+	/* Every kind counts, and every refusal of every kind does not. */
+	acc = snap.accepted;
+	(void)nn_det_record_publish_external(&rec, 2, g0);
+	(void)nn_det_record_publish_raw(&rec, g0);
+	(void)nn_det_record_publish(&rec, &one, 1, &r3, g0);
+	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	expect("[!] no refused publish of any kind is counted",
+	       snap.accepted == acc, "accepted %u -> %u", (unsigned)acc,
+	       (unsigned)snap.accepted);
+	(void)nn_det_record_publish_external(&rec, 2, g1);
+	(void)nn_det_record_publish_raw(&rec, g1);
+	(void)nn_det_record_publish(&rec, &one, 1, &r3, g1);
+	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	expect("and every accepted publish of every kind is",
+	       snap.accepted == acc + 3u, "accepted %u -> %u", (unsigned)acc,
+	       (unsigned)snap.accepted);
+
+	/*
+	 * The two interleavings a board's commit sees (plan review r5/r6).  The
+	 * base is sampled after the boundary and before the commit:
+	 *   - a publish between the boundary and the sample is ABSORBED into the
+	 *     base -- the session says "none yet" about a result it has: the safe
+	 *     direction;
+	 *   - a publish between the sample and the commit is COUNTED, and it is
+	 *     this session's, because the generation rule admits nothing else
+	 *     after the boundary.
+	 */
+	nn_det_record_boundary(&rec);
+	g1 = nn_det_record_gen(&rec);
+	(void)nn_det_record_publish_raw(&rec, g1);     /* before the sample */
+	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	base = snap.accepted;
+	expect("a publish before the sample is absorbed (reads as none yet)",
+	       nn_det_last_valid(&snap, base) == 0, "last_valid 1");
+	(void)nn_det_record_publish_raw(&rec, g1);     /* after the sample */
+	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	expect("a publish after the sample is counted",
+	       nn_det_last_valid(&snap, base) != 0, "last_valid 0");
+
+	/* --- a model change clears, whatever it is counted as ----------- */
+	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	acc = snap.accepted;
+	ep  = snap.epoch;
+	(void)nn_det_record_publish_external(&rec, 4, g1);
+	g0 = g1;
+	nn_det_record_invalidate(&rec);
+	g1 = nn_det_record_gen(&rec);
+	memset(dets, 0x5A, sizeof dets);
+	nn_det_record_snapshot(&rec, &snap, dets, BF_MAX_DET);
+	expect("[!] a model change clears the result",
+	       snap.valid == 0 && snap.ndet == 0 && snap.reportable == 0u &&
+	               snap.kind == (uint8_t)NN_DET_CALLER_BOXES &&
+	               snap.res.npass == 0,
+	       "valid %d ndet %d reportable %u kind %u npass %d", snap.valid,
+	       snap.ndet, (unsigned)snap.reportable, (unsigned)snap.kind,
+	       snap.res.npass);
+	{
+		unsigned i;
+		int left = 0;
+
+		for (i = 0u; i < (unsigned)BF_MAX_DET; i++)
+			if (rec.dets[i].x != 0.0f || rec.dets[i].score != 0.0f)
+				left = 1;
+		expect("the boxes of the old model are gone from the record", !left,
+		       "a box survived");
+	}
+	expect("[!] so a session that published under the old model has no "
+	       "result any more",
+	       nn_det_last_valid(&snap, acc) == 0, "last_valid 1");
+	expect("[!] and the epoch moved, so a reader's latch can tell",
+	       snap.epoch != ep, "epoch %u", (unsigned)snap.epoch);
+	expect("[!] but the count did not go back: a base on it stays a base",
+	       snap.accepted == acc + 1u, "accepted %u (was %u)",
+	       (unsigned)snap.accepted, (unsigned)acc);
+	expect("the generation moved too", g1 != g0, "g %u", (unsigned)g1);
+	expect("[!] so a publish armed under the old model lands nowhere",
+	       nn_det_record_publish_external(&rec, 5, g0) == 0, "taken");
+	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	expect("and the cleared record stays clear", snap.valid == 0,
+	       "valid %d", snap.valid);
+
+	/* --- a dropped DECODE withholds the account, not the count ------- */
+	/*
+	 * [!] A plugin keeps its result privately; the record holds its count.  A
+	 * decode whose publish is dropped has still rewritten the plugin's private
+	 * state -- so what the record holds and what the plugin would describe no
+	 * longer agree, and only one of them may be shown.
+	 */
+	expect("an external publish of the session is taken",
+	       nn_det_record_publish_external(&rec, 2, g1) != 0, "dropped");
+	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	expect("its decoder can describe it", snap.reportable != 0u,
+	       "reportable 0");
+	nn_det_record_boundary(&rec);                  /* the stream stops */
+	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	expect("[!] a boundary runs no decoder, so the account stays",
+	       snap.reportable != 0u && snap.valid != 0, "reportable %u valid %d",
+	       (unsigned)snap.reportable, snap.valid);
+	acc = snap.accepted;
+	expect("the in-flight decode's publish is dropped",
+	       nn_det_record_publish_external(&rec, 6, g1) == 0, "taken");
+	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	expect("[!] after it the account is withheld",
+	       snap.reportable == 0u, "reportable 1");
+	expect("[!] and the count and the result are exactly as they were",
+	       snap.valid != 0 && snap.ndet == 2 && snap.accepted == acc &&
+	               snap.kind == (uint8_t)NN_DET_PLUGIN_REPORT,
+	       "valid %d ndet %d accepted %u kind %u", snap.valid, snap.ndet,
+	       (unsigned)snap.accepted, (unsigned)snap.kind);
+	g1 = nn_det_record_gen(&rec);
+	(void)nn_det_record_publish_external(&rec, 3, g1);
+	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	expect("the next accepted decode can be described again",
+	       snap.reportable != 0u && snap.ndet == 3, "reportable %u ndet %d",
+	       (unsigned)snap.reportable, snap.ndet);
+	(void)nn_det_record_publish_raw(&rec, g1);
+	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	expect("a result no plugin produced has no account to give",
+	       snap.reportable == 0u, "reportable 1");
+	(void)nn_det_record_publish_external(&rec, 3, g1);
+	(void)nn_det_record_publish(&rec, &one, 1, &r3, g1);
+	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	expect("nor does the resident decoder's (its boxes are all here)",
+	       snap.reportable == 0u, "reportable 1");
+
+	/* --- the decoder's negative codes are not interchangeable -------- */
+	{
+		static const int codes[] = { BF_ERR_MODEL, BF_ERR_UNINIT, BF_ERR_ARG };
+		unsigned i;
+
+		for (i = 0u; i < sizeof codes / sizeof codes[0]; i++) {
+			struct bf_result r;
+
+			memset(&r, 0, sizeof r);
+			r.status = codes[i];
+			(void)nn_det_record_publish(&rec, NULL, codes[i], &r, g1);
+			nn_det_record_snapshot(&rec, &snap, NULL, 0);
+			expect("[!] a negative decode code is published as itself",
+			       snap.ndet == codes[i] && snap.valid != 0,
+			       "code %d published as %d", codes[i], snap.ndet);
+		}
+	}
+
+	/* --- the snapshot writes every field it hands out ---------------- */
+	memset(&snap, 0xA5, sizeof snap);              /* a previous read's */
+	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	expect("[!] the snapshot states the count, the epoch and the account",
+	       snap.accepted == rec.accepted && snap.epoch == rec.epoch &&
+	               snap.reportable == rec.reportable,
+	       "accepted %u/%u epoch %u/%u reportable %u/%u",
+	       (unsigned)snap.accepted, (unsigned)rec.accepted,
+	       (unsigned)snap.epoch, (unsigned)rec.epoch,
+	       (unsigned)snap.reportable, (unsigned)rec.reportable);
+	nn_det_record_snapshot(NULL, &snap, NULL, 0);
+	expect("a snapshot of nothing is nothing, counts included",
+	       snap.valid == 0 && snap.accepted == 0u && snap.reportable == 0u,
+	       "valid %d accepted %u", snap.valid, (unsigned)snap.accepted);
+	expect("and a null snapshot has no result since anything",
+	       nn_det_last_valid(NULL, 0u) == 0, "last_valid 1");
+
+	/* Null tolerance of the two new operations. */
+	nn_det_record_boundary(NULL);
+	nn_det_record_invalidate(NULL);
+
+	/* --- the transitional reset is exactly both halves --------------- */
+	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	acc = snap.accepted;
+	ep  = snap.epoch;
+	g0  = nn_det_record_gen(&rec);
+	nn_det_record_reset(&rec);
+	nn_det_record_snapshot(&rec, &snap, NULL, 0);
+	expect("reset clears, moves the generation and the epoch, keeps the count",
+	       snap.valid == 0 && nn_det_record_gen(&rec) != g0 &&
+	               snap.epoch != ep && snap.accepted == acc,
+	       "valid %d epoch %u->%u accepted %u->%u", snap.valid,
+	       (unsigned)ep, (unsigned)snap.epoch, (unsigned)acc,
+	       (unsigned)snap.accepted);
 }
 
 int main(void)
@@ -264,7 +535,7 @@ int main(void)
 		expect("[!] a negative external result keeps its own value",
 		       nn_det_record_publish_external(&rec, -7, g) != 0, "dropped");
 		nn_det_record_snapshot(&rec, &snap, NULL, 0);
-		expect("not folded to -1 the way the shared decoder's is",
+		expect("not folded to -1",
 		       snap.ndet == -7, "ndet %d", snap.ndet);
 
 		expect("[!] and a count larger than the box array is not clamped",
@@ -413,6 +684,8 @@ int main(void)
 	       (unsigned)snap.kind);
 	expect("a snapshot of nothing is not valid", snap.valid == 0,
 	       "valid %d", snap.valid);
+
+	test_outlives_session();
 
 	if (failures) {
 		printf("test_nn_det_record: %d failure(s)\n", failures);

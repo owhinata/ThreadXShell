@@ -16,17 +16,35 @@
  *      a console pairs this frame's boxes with whatever the decoder was last
  *      asked -- a different frame, while a stream runs.
  *   2. STOPPING A STREAM DOES NOT STOP AN INFERENCE ALREADY RUNNING.  A stop
- *      clears the record and then waits for the worker, which may be M?ms into an
- *      inference that will finish and publish afterwards.  Clearing under the
- *      same lock does not help: the clear happens first and the stale publish
- *      second.  So each session carries a GENERATION, the worker remembers it
- *      when it ARMS for a frame, and a publish whose generation no longer matches
- *      is dropped.
+ *      marks the boundary and then waits for the worker, which may be
+ *      milliseconds into an inference that will finish and publish afterwards.
+ *      Doing it under the same lock does not help: the boundary happens first
+ *      and the stale publish second.  So each session carries a GENERATION, the
+ *      worker remembers it when it ARMS for a frame, and a publish whose
+ *      generation no longer matches is dropped.
  *
  * [!] THE WORKER MUST SAMPLE THE GENERATION AT THE ARM, not after its wait
  * returns.  A stop and a fresh start can both happen while it is waiting, and a
  * value read afterwards would be the NEW session's -- so the old frame would
  * publish into it looking current.
+ *
+ * [!] A SESSION BOUNDARY IS NOT A MODEL CHANGE (issue #118).  They used to be
+ * one call, which cleared the record at every start and stop -- so `nn dets`
+ * after a `nn run` or a stopped stream said "nothing inferred", on two boards
+ * and not the third.  They are two operations now:
+ *
+ *   - @ref nn_det_record_boundary: a session starts, re-arms or ends.  The
+ *     generation moves, so an inference still in flight lands nowhere, and the
+ *     last result STAYS -- it is still the last thing this model produced.
+ *   - @ref nn_det_record_invalidate: the model or its decoder is replaced.  The
+ *     result is cleared whatever became of the replacement, because it
+ *     describes a model that is no longer the one a reader would ask about.
+ *
+ * With the result outliving its session, "valid" can no longer mean "this
+ * session produced it", and nothing may use it that way.  What a session
+ * produced is counted instead: the record counts every publish it ACCEPTS, under
+ * the same lock as the publish, and hands the count out with every snapshot --
+ * see @ref nn_det_last_valid.
  *
  * THIS FILE OWNS NO STORAGE.  The board declares the record and provides the
  * mutual exclusion; these are the decisions, factored out so they can be tested.
@@ -62,7 +80,22 @@ struct nn_det_record {
 	 */
 	int              valid;
 	uint8_t          kind;   /**< one of @ref nn_det_kind (issue #110)       */
+	/**
+	 * [!] THE DECODER'S OWN ACCOUNT STILL DESCRIBES THIS RESULT (issue #118).
+	 * Set only by an ACCEPTED external publish.  A loaded plugin keeps its
+	 * result privately, so its report is asked of the plugin -- and a decode
+	 * whose publish the generation rule dropped has already rewritten that
+	 * private state.  Asking it now would print a later frame's account beside
+	 * this record's count.  The count stays; only the account is withheld.
+	 */
+	uint8_t          reportable;
 	uint32_t         gen;    /**< session generation; see the file comment   */
+	/** Publishes this record has accepted, ever.  Never reset: a reader keeps
+	 *  its own base and subtracts (issue #118). */
+	uint32_t         accepted;
+	/** Moves on every @ref nn_det_record_invalidate, and only there: whether
+	 *  the result a reader latched is still the one in force. */
+	uint32_t         epoch;
 };
 
 /**
@@ -118,14 +151,47 @@ struct nn_det_snapshot {
 	int              ndet;
 	struct bf_result res;
 	uint8_t          kind;   /**< one of @ref nn_det_kind */
+	/** @ref nn_det_record::reportable, read in the same breath (issue #118). */
+	uint8_t          reportable;
+	/** @ref nn_det_record::accepted at this snapshot (issue #118). */
+	uint32_t         accepted;
+	/** @ref nn_det_record::epoch at this snapshot (issue #118). */
+	uint32_t         epoch;
 };
 
 /**
- * Begin a new session: invalidate the record and move the generation on.
+ * A session boundary: move the generation on and KEEP the result (issue #118).
  *
- * Called at start AND at stop.  At stop it is what makes an in-flight decode
- * harmless; at start it is what stops a fresh session showing the previous one's
- * numbers.
+ * Called where a session starts, re-arms or ends.  At the end it is what makes
+ * an in-flight decode harmless; at a start it is what keeps a decode armed under
+ * the previous session out of this one.  The result it leaves standing is the
+ * last one this model produced, and a reader that wants to know whether a
+ * SESSION produced it compares @ref nn_det_record::accepted against a base it
+ * took after this call -- see @ref nn_det_last_valid.
+ *
+ * [!] IT DOES NOT CLEAR, AND THAT IS THE CHANGE.  Until issue #118 the boundary
+ * and the model change were one call, so the last result vanished at every stop
+ * and `nn dets` after a `nn run` had nothing to read.
+ */
+void nn_det_record_boundary(struct nn_det_record *r);
+
+/**
+ * The model or its decoder changed: CLEAR the result (issue #118).
+ *
+ * Called whenever the identity a reader would ask about has actually changed --
+ * a load that replaced the model, a load whose decoder was refused after the
+ * model went in, a rollback that failed, an unload -- WHATEVER THE STATUS of the
+ * operation that changed it, and before the new identity is visible to anyone.
+ * The generation moves too, so a publish armed under the old identity cannot
+ * land beside the new one; @ref nn_det_record::epoch moves so that a reader who
+ * latched the old result can tell it has gone.
+ */
+void nn_det_record_invalidate(struct nn_det_record *r);
+
+/**
+ * Both of the above, which is what every board called at every boundary until
+ * issue #118.  [!] TRANSITIONAL: it exists only so the record could change
+ * before the boards that call it, and it goes when they call the two halves.
  */
 void nn_det_record_reset(struct nn_det_record *r);
 
@@ -138,14 +204,18 @@ uint32_t nn_det_record_gen(const struct nn_det_record *r);
  * @param n    the decoder's return: >= 0 faces, or a negative BF_ERR_* code
  * @param gen  what @ref nn_det_record_gen returned when this frame was ARMED
  *
- * @return non-zero if it was taken.  A caller must not count a decode that was
- *         dropped: `nn run` waits on the inference counter and then reads the
- *         record, so a counter bumped for a publish that did not happen hands it
- *         the previous frame's boxes as this one's.
+ * @return non-zero if it was taken.  A taken publish is counted in
+ *         @ref nn_det_record::accepted by this call, under the caller's lock;
+ *         a dropped one is not counted anywhere, so a reader waiting for "a
+ *         result of mine" waits on that count and never on a counter the
+ *         board bumps beside it (issue #118).
  *
- * [!] A NEGATIVE @p n IS PUBLISHED AS -1, NOT AS ZERO FACES (issue #57).  Zero
- * reads as a measurement, and it would sit next to diagnostics the decoder
- * returned too early to touch.
+ * [!] A NEGATIVE @p n IS PUBLISHED AS ITSELF, NOT AS ZERO FACES (issue #57) AND
+ * NOT AS -1 (issue #118).  Zero reads as a measurement.  And the codes are not
+ * interchangeable: BF_ERR_MODEL means "not a detector" and routes to the class
+ * report, while BF_ERR_UNINIT and BF_ERR_ARG mean this firmware is wired wrong
+ * -- folded into -1, both of them sent the operator to a class report of a
+ * model that was fine.
  */
 int nn_det_record_publish(struct nn_det_record *r, const struct bf_det *d, int n,
                           const struct bf_result *res, uint32_t gen);
@@ -161,6 +231,13 @@ int nn_det_record_publish(struct nn_det_record *r, const struct bf_det *d, int n
  *
  * Same generation rule and same return as @ref nn_det_record_publish: a decode
  * from a retired session lands nowhere.
+ *
+ * [!] BUT A DROPPED ONE IS NOT HARMLESS HERE (issue #118).  The decode that was
+ * dropped has already run, and it rewrote the plugin's private result -- the
+ * thing its report describes.  So a refusal clears
+ * @ref nn_det_record::reportable: the count in the record stands, and asking the
+ * plugin to describe it would describe the dropped frame instead.  An accepted
+ * publish sets it again.
  *
  * [!] @p n IS NOT CLAMPED AND NOT NORMALISED.  The cap on the other path is the
  * size of the box array, and there is no box array here; the negative
@@ -227,6 +304,27 @@ int nn_det_record_publish_raw(struct nn_det_record *r, uint32_t gen);
 void nn_det_record_snapshot(const struct nn_det_record *r,
                             struct nn_det_snapshot *out,
                             struct bf_det *dets, int max);
+
+/**
+ * Whether @p s holds a result produced since @p base was taken (issue #118).
+ *
+ * @param base  @ref nn_det_snapshot::accepted from a snapshot taken AFTER the
+ *              session boundary that began the session asking, and before that
+ *              session could publish -- everything accepted after the boundary
+ *              is that session's, by the generation rule, so the difference is
+ *              exactly its own publishes.  Taken late, it absorbs some of them
+ *              and this answers "no" about a session that has a result: the
+ *              safe direction, and the only one a late sample can err in.
+ *
+ * [!] BOTH HALVES, ALWAYS.  A count alone would call a result "this session's"
+ * after the model it came from was unloaded; `valid` alone would call the
+ * previous session's result this one's, which is exactly what stopped being
+ * impossible when the boundary stopped clearing.
+ *
+ * The count is compared for inequality, not order: it wraps, and a session
+ * would need four billion publishes before this misread one.
+ */
+int nn_det_last_valid(const struct nn_det_snapshot *s, uint32_t base);
 
 #ifdef __cplusplus
 }

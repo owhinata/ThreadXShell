@@ -96,6 +96,9 @@ struct nn_det_record {
 	/** Moves on every @ref nn_det_record_invalidate, and only there: whether
 	 *  the result a reader latched is still the one in force. */
 	uint32_t         epoch;
+	/** The generation the result was published under -- see
+	 *  @ref nn_det_snapshot::current. */
+	uint32_t         pub_gen;
 };
 
 /**
@@ -157,6 +160,15 @@ struct nn_det_snapshot {
 	uint32_t         accepted;
 	/** @ref nn_det_record::epoch at this snapshot (issue #118). */
 	uint32_t         epoch;
+	/**
+	 * [!] THE RESULT WAS PUBLISHED IN THE SESSION NOW IN FORCE (issue #118).
+	 * `valid` survives a boundary now, so it no longer says this.  A reader
+	 * that paints the result onto a LIVE picture needs exactly this answer:
+	 * the panel keeps running after a stream stops, and a new stream's first
+	 * frames would otherwise wear the previous stream's boxes.  A reader that
+	 * reports the last result -- `nn dets` -- does not ask it.
+	 */
+	uint8_t          current;
 };
 
 /**
@@ -187,13 +199,6 @@ void nn_det_record_boundary(struct nn_det_record *r);
  * latched the old result can tell it has gone.
  */
 void nn_det_record_invalidate(struct nn_det_record *r);
-
-/**
- * Both of the above, which is what every board called at every boundary until
- * issue #118.  [!] TRANSITIONAL: it exists only so the record could change
- * before the boards that call it, and it goes when they call the two halves.
- */
-void nn_det_record_reset(struct nn_det_record *r);
 
 /** The generation a worker should remember when it arms for a frame. */
 uint32_t nn_det_record_gen(const struct nn_det_record *r);

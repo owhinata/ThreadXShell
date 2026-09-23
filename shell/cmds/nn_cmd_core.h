@@ -134,10 +134,10 @@ const char *nn_avail_text(uint8_t avail);
  *   - "never decoded" is not "decoded nothing".  A stream that has not finished
  *     its first frame reporting "0 results" reads as a working decoder finding
  *     nothing;
- *   - a stream that HAS inferred and then stopped has retired its result on
- *     purpose, so that a stopped stream does not leave a stale annotation on
- *     view.  Saying "nothing decoded yet" after hundreds of frames reads as a
- *     broken decoder;
+ *   - a stream that HAS inferred and whose result is gone lost it to a model
+ *     change: the result outlives the stream's stop (issue #118) and only a
+ *     load or an unload clears it.  Saying "nothing decoded yet" after hundreds
+ *     of frames reads as a broken decoder;
  *   - a negative count is not a count.  It is the decoder saying the open model
  *     is not one it recognises, which calls for loading a different model rather
  *     than for looking at the picture.  Printing it as "-1 result(s)" hands the
@@ -145,7 +145,7 @@ const char *nn_avail_text(uint8_t avail);
  */
 enum nn_last_kind {
 	NN_LAST_NEVER = 0,      /**< no decode has completed yet               */
-	NN_LAST_RETIRED,        /**< there were decodes; the stream stopped    */
+	NN_LAST_RETIRED,        /**< there were decodes; the model changed since */
 	NN_LAST_UNRECOGNISED,   /**< the decoder does not know this model      */
 	NN_LAST_COUNT,          /**< a real, non-negative item count           */
 };

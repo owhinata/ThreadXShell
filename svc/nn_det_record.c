@@ -42,11 +42,6 @@ void nn_det_record_invalidate(struct nn_det_record *r)
 	 * moving the count underneath it would turn "none since" into "some". */
 }
 
-void nn_det_record_reset(struct nn_det_record *r)
-{
-	nn_det_record_invalidate(r);   /* moves the generation as a boundary does */
-}
-
 uint32_t nn_det_record_gen(const struct nn_det_record *r)
 {
 	return r != NULL ? r->gen : 0u;
@@ -85,6 +80,7 @@ int nn_det_record_publish(struct nn_det_record *r, const struct bf_det *d, int n
 	r->kind       = (uint8_t)NN_DET_CALLER_BOXES;
 	r->reportable = 0u;    /* nothing to ask: the boxes are all here */
 	r->valid      = 1;
+	r->pub_gen    = gen;
 	r->accepted++;
 	return 1;
 }
@@ -110,6 +106,7 @@ int nn_det_record_publish_external(struct nn_det_record *r, int n, uint32_t gen)
 	r->kind       = (uint8_t)NN_DET_PLUGIN_REPORT;
 	r->reportable = 1u;
 	r->valid      = 1;
+	r->pub_gen    = gen;
 	r->accepted++;
 	return 1;
 }
@@ -131,6 +128,7 @@ int nn_det_record_publish_raw(struct nn_det_record *r, uint32_t gen)
 	r->kind       = (uint8_t)NN_DET_RAW_TENSORS;
 	r->reportable = 0u;    /* no decoder, so nobody to ask */
 	r->valid      = 1;
+	r->pub_gen    = gen;
 	r->accepted++;
 	return 1;
 }
@@ -158,6 +156,7 @@ void nn_det_record_snapshot(const struct nn_det_record *r,
 	out->reportable = r->reportable;
 	out->accepted   = r->accepted;
 	out->epoch      = r->epoch;
+	out->current    = (r->valid != 0 && r->pub_gen == r->gen) ? 1u : 0u;
 	/* [!] ENUMERATED, NOT NEGATED.  "Copy when it says caller boxes" leaves a
 	   kind nobody has written yet alone; "copy unless it says plugin" would
 	   hand that kind the previous decoder's boxes. */

@@ -680,6 +680,17 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 		*state = NN_MODEL_EMPTY;
 
 	/*
+	 * [!] THE LAST RESULT GOES WITH THE MODEL IT CAME FROM (issue #118), and
+	 * it goes whenever what is open changed -- a new model, a new model whose
+	 * plugin is then refused below, or a rollback that left nothing -- not
+	 * only when the load reports success.  Here, under the session and the
+	 * lease and before the claims settle, so no reader can see the new
+	 * identity beside the old result.  PREVIOUS changed nothing and keeps it.
+	 */
+	if (*state != NN_MODEL_PREVIOUS)
+		nn_camera_record_invalidate();
+
+	/*
 	 * The claims follow what is now open, and are settled BEFORE the session is
 	 * given back -- after it, another console's load could publish its own and
 	 * then have them overwritten with this one's.  A refused reload that restored
@@ -802,6 +813,9 @@ void nn_svc_model_unload(struct nn_op_result *res)
 	nn_claims_begin();
 	if (nn_model_open(&m) == 0 && m != NULL)
 		(void)nn_model_reload(NULL, 0u, NULL, NULL);
+	/* The model and its decoder are gone, and the last result with them
+	 * (issue #118) -- under the lease, before anything is settled. */
+	nn_camera_record_invalidate();
 #if defined(CONFIG_NN_BACKEND_TFLM)
 	/* No decoder either (issue #110): a plugin left loaded would be a decoder
 	   for a model that is gone, waiting to interpret the next one.  BEFORE the
@@ -895,6 +909,24 @@ struct nn_stream_end;
 static void nn_stream_settle(enum nn_claim claim,
                              const struct nn_stream_end *final);
 
+/*
+ * The worker's snapshot, as the shared command reads it.  [!] EVERY FIELD,
+ * carried rather than asserted (issues #104, #110, #118): a projection that
+ * drops one hands the caller whatever its initialiser left there.
+ */
+static void nn_snap_of(const struct nn_camera_decode *dec,
+                       struct nn_det_snapshot *snap)
+{
+	snap->valid      = dec->valid;
+	snap->ndet       = dec->ndet;
+	snap->kind       = dec->kind;
+	snap->res        = dec->res;
+	snap->reportable = dec->reportable;
+	snap->current    = dec->current;
+	snap->accepted   = dec->accepted;
+	snap->epoch      = dec->epoch;
+}
+
 void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
                      struct nn_report_capture *rep,
                      nn_svc_cancel_fn cancel, void *ctx,
@@ -968,19 +1000,29 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		return;
 	}
 
-	nn_camera_stats_get(&st);
-	base = st.infers;
+	/*
+	 * [!] WHAT THIS RUN PRODUCED IS COUNTED BY THE RECORD (issue #118).  The
+	 * record keeps the last result across sessions now, so "valid" says
+	 * nothing about this run; the count of accepted publishes does, and it is
+	 * taken under the same lock as the publish.  The base is sampled after
+	 * nn_camera_start()'s boundary: from there on the generation rule admits
+	 * only this run's publishes.
+	 */
+	memset(&dec, 0, sizeof dec);
+	(void)nn_camera_decode_get(&dec, NULL);
+	base = dec.accepted;
 
 	/* [!] Wall-clock deadline, not a count of completed sleeps: a sleep that
 	 * returns early on an already-pending tick would burn the budget instantly
 	 * and report a timeout that never happened. */
 	deadline = tx_time_get() + (NN_RUN_WAIT_S * TX_TIMER_TICKS_PER_SECOND);
 	for (;;) {
-		nn_camera_stats_get(&st);
-		if (st.infers > base) {
+		(void)nn_camera_decode_get(&dec, NULL);
+		if (dec.accepted != base) {
 			why = RUN_INFERRED;
 			break;
 		}
+		nn_camera_stats_get(&st);
 		if (st.stream_lost) {
 			why = RUN_LOST;
 			break;
@@ -996,9 +1038,9 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		tx_thread_sleep(1u);
 	}
 
-	/* [!] The boxes are taken BEFORE the stop: stopping ends the session, which
-	 * invalidates the published record on purpose, so the boxes this run is
-	 * about have to be read while the session that produced them is current. */
+	/* [!] The result is taken BEFORE the stop.  The record keeps it across the
+	 * stop now (issue #118), but a plugin's account of it is only this
+	 * result's while the session that produced it is the one in force. */
 	memset(&dec, 0, sizeof dec);
 	/* [!] AND THE CAPTURE HAPPENS IN HERE (issue #110), under the result lease,
 	   because a plugin's account of its result has to be taken while that
@@ -1011,24 +1053,19 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	(void)dets;
 	(void)max;
 	(void)nn_camera_decode_get(&dec, rep);
-	snap->valid = dec.valid;
-	snap->ndet  = dec.ndet;
-	/* [!] CARRIED FROM THE RECORD, NOT ASSERTED (issues #104, #110).  It used
-	   to say NN_DET_CALLER_BOXES here, which was true while that was the only
-	   thing a record could hold; now a loaded plugin keeps its own result and
-	   the routing has to come from whoever decoded. */
-	snap->kind  = dec.kind;
-	snap->res   = dec.res;
+	nn_snap_of(&dec, snap);
+	/* [!] THIS RUN'S, OR NOT VALID (issue #118).  The record's own `valid`
+	 * would be true of whatever ran last -- a stream stopped an hour ago --
+	 * and the shared command prints a valid snapshot as this run's result. */
+	snap->valid = nn_det_last_valid(snap, base);
 
 	/* [!] A RESULT THAT MADE IT IS NOT A TIMEOUT (issue #122, review).  The
 	 * deadline can pass in the same moment the inference publishes; the record
 	 * was read after that, so reporting a timeout would throw away an answer
 	 * that is sitting right here.  ONLY a timeout is promoted: a cancel is the
 	 * operator's decision and a lost stream is a hardware fact, and a valid
-	 * record does not overrule either.
-	 * [!] "valid means this run's" holds because the record is reset at this
-	 * run's start; stage 3 lets the record outlive session boundaries, and
-	 * this test must then become the accepted-publish count instead. */
+	 * record does not overrule either.  "Made it" is the accepted count
+	 * against this run's base (issue #118), not the record's `valid`. */
 	if (why == RUN_TIMEOUT && snap->valid)
 		why = RUN_INFERRED;
 
@@ -1110,11 +1147,11 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
 	/* No boxes -- see nn_svc_run_once. */
 	(void)dets;
 	(void)max;
+	/* [!] THE LAST RESULT, WHOEVER PRODUCED IT (issue #118): a `nn run`, a
+	 * running stream, or one that has stopped.  Only a model change clears
+	 * it, so `valid` is the record's own and is not narrowed to a session. */
 	(void)nn_camera_decode_get(&dec, rep);
-	snap->valid = dec.valid;
-	snap->ndet  = dec.ndet;
-	snap->kind  = dec.kind;     /* carried, not asserted -- see nn_svc_run_once */
-	snap->res   = dec.res;
+	nn_snap_of(&dec, snap);
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
 
@@ -1347,6 +1384,9 @@ struct nn_stream_end {
 	struct nn_stream_stats stats;
 	struct nn_camera_stats cam;          /* the worker's, at the stop       */
 	uint32_t spent, refused, miss, run;  /* the panel's plugin numbers      */
+	/* The record's epoch when `last` was latched: a model change since then
+	 * took the result away, and the latched line must say so (issue #118). */
+	uint32_t epoch;
 };
 static struct nn_stream_end nn_stream_final;
 static uint32_t nn_stream_final_gen;   /**< whose they are; ANY = nobody's */
@@ -1363,6 +1403,15 @@ static uint32_t nn_stream_frames0;
 static uint32_t nn_stream_skipped0;
 static uint32_t nn_stream_infers0;
 static uint32_t nn_stream_errors0;
+/*
+ * [!] AND THE RECORD'S ACCEPTED COUNT (issue #118).  The last result outlives
+ * a stop now, so a new generation opens with the previous one's result still
+ * in the record; `last` is this generation's only if the record has accepted a
+ * publish since this base.  Sampled after the start's boundary and before the
+ * commit -- see nn_det_last_valid() for why that order errs only towards "none
+ * yet".
+ */
+static uint32_t nn_stream_acc0;
 
 /* Counters only ever move forwards, but the latch is taken outside the critical
    section that commits, so a frame can land in between.  Clamp rather than
@@ -1432,7 +1481,8 @@ static void nn_stream_unadmit(void)
 	TX_RESTORE
 }
 
-static void nn_stream_mint(const struct nn_camera_stats *base, uint32_t *gen)
+static void nn_stream_mint(const struct nn_camera_stats *base, uint32_t acc0,
+                           uint32_t *gen)
 {
 	TX_INTERRUPT_SAVE_AREA
 
@@ -1445,6 +1495,7 @@ static void nn_stream_mint(const struct nn_camera_stats *base, uint32_t *gen)
 		nn_stream_skipped0 = base->skipped;
 		nn_stream_infers0  = base->infers;
 		nn_stream_errors0  = base->errors;
+		nn_stream_acc0     = acc0;
 		nn_stream_t0 = (uint32_t)tx_time_get();
 		nn_stream_ms = 0u;
 	}
@@ -1581,9 +1632,16 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		/* Latched AFTER the start, so a re-arm's carried-over totals become
 		   this generation's zero. */
 		struct nn_camera_stats base;
+		struct nn_camera_decode rec;
 
 		nn_camera_stats_get(&base);
-		nn_stream_mint(&base, gen);
+		/* After the start's record boundary, before the commit: the two
+		 * interleavings are in svc/nn_det_record.h (issue #118).  The
+		 * record's lock is taken here, outside the commit's critical
+		 * section, which may not take it. */
+		memset(&rec, 0, sizeof rec);
+		(void)nn_camera_decode_get(&rec, NULL);
+		nn_stream_mint(&base, rec.accepted, gen);
 	}
 	if (*gen == NN_STREAM_GEN_ANY) {
 		/*
@@ -1631,19 +1689,34 @@ static void nn_stream_counts(const struct nn_camera_stats *st, uint32_t f0,
    before the lifecycle is settled. */
 static void nn_stream_take_final(struct nn_stream_end *final)
 {
-	uint32_t f0, sk0, in0, er0;
+	struct nn_camera_decode dec;
+	struct nn_det_snapshot snap;
+	uint32_t f0, sk0, in0, er0, acc0;
 	TX_INTERRUPT_SAVE_AREA
 
 	TX_DISABLE
-	f0  = nn_stream_frames0;
-	sk0 = nn_stream_skipped0;
-	in0 = nn_stream_infers0;
-	er0 = nn_stream_errors0;
+	f0   = nn_stream_frames0;
+	sk0  = nn_stream_skipped0;
+	in0  = nn_stream_infers0;
+	er0  = nn_stream_errors0;
+	acc0 = nn_stream_acc0;
 	TX_RESTORE
 	memset(final, 0, sizeof *final);
 	nn_camera_stats_get(&final->cam);  /* takes its own locks: outside */
 	nn_stream_counts(&final->cam, f0, sk0, in0, er0, &final->stats);
-	/* The stop retires the decode record, so there is no last result. */
+	/*
+	 * [!] THE STREAM'S LAST RESULT IS LATCHED WITH ITS NUMBERS (issue #118).
+	 * The stop no longer retires the record, so there is a last result to
+	 * report -- and it is taken now, after the stop's boundary, so a later
+	 * `nn run` cannot show through it.  Its epoch goes with it: a model change
+	 * afterwards takes the result away and the latched line must follow.
+	 */
+	memset(&dec, 0, sizeof dec);
+	(void)nn_camera_decode_get(&dec, NULL);
+	nn_snap_of(&dec, &snap);
+	final->stats.last_valid = nn_det_last_valid(&snap, acc0) ? 1u : 0u;
+	final->stats.last_ndet  = (int32_t)snap.ndet;
+	final->epoch            = snap.epoch;
 #if defined(CONFIG_NN_BACKEND_TFLM) && BSP_ENABLE_LCD
 	cam_preview_plugin_draw_stats(&final->spent, &final->refused);
 	plugin_lease_misses(&final->miss, &final->run);
@@ -1653,15 +1726,22 @@ static void nn_stream_take_final(struct nn_stream_end *final)
 int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 {
 	struct nn_camera_stats st;
-	struct nn_camera_decode dec;
+	struct nn_camera_decode dec, dec0;
+	struct nn_det_snapshot snap;
 	uint32_t seq0, seq1, g, t0, ms;
-	uint32_t f0, sk0, in0, er0;
+	uint32_t f0, sk0, in0, er0, acc0;
 	uint8_t  phase, kind;
 	int      live;
 	TX_INTERRUPT_SAVE_AREA
 
 	if (out == NULL)
 		return NN_SVC_ERR_ARG;
+
+	/* The record's epoch, for a latched answer below.  Taken first because
+	 * the record's lock cannot be taken inside the critical section; a model
+	 * change landing after it is caught by the next poll. */
+	memset(&dec0, 0, sizeof dec0);
+	(void)nn_camera_decode_get(&dec0, NULL);
 
 	TX_DISABLE
 	nn_stream_life_snapshot(&nn_life, &g, &phase, &seq0, &kind);
@@ -1670,15 +1750,21 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	if (g != NN_STREAM_GEN_ANY && g == nn_stream_final_gen &&
 	    (gen == NN_STREAM_GEN_ANY || gen == g)) {
 		*out = nn_stream_final.stats;
+		/* [!] ...except that a model change since the stop took its last
+		 * result away (issue #118): the latch is history, but `last` says
+		 * what is still there to read with `nn dets`. */
+		if (dec0.epoch != nn_stream_final.epoch)
+			out->last_valid = 0u;
 		TX_RESTORE
 		return NN_SVC_OK;
 	}
-	t0  = nn_stream_t0;
-	ms  = nn_stream_ms;
-	f0  = nn_stream_frames0;
-	sk0 = nn_stream_skipped0;
-	in0 = nn_stream_infers0;
-	er0 = nn_stream_errors0;
+	t0   = nn_stream_t0;
+	ms   = nn_stream_ms;
+	f0   = nn_stream_frames0;
+	sk0  = nn_stream_skipped0;
+	in0  = nn_stream_infers0;
+	er0  = nn_stream_errors0;
+	acc0 = nn_stream_acc0;
 	TX_RESTORE
 
 	if (g == NN_STREAM_GEN_ANY)
@@ -1691,7 +1777,7 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 
 	/* Outside the critical section: these take their own locks. */
 	nn_camera_stats_get(&st);
-	dec.valid = 0;
+	memset(&dec, 0, sizeof dec);
 	(void)nn_camera_decode_get(&dec, NULL);
 
 	TX_DISABLE
@@ -1721,13 +1807,15 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	 * contract already required these apart, and -1 means "not a BlazeFace
 	 * model", which is a third answer again.
 	 *
-	 * [!] AND IT IS GATED ON THIS GENERATION'S OWN INFERENCES.  The worker
-	 * retires its decode record on a re-arm, but belt and braces: a record that
-	 * outlived a generation boundary would report the previous stream's faces
-	 * as this one's opening state, which is exactly the confusion `last_valid`
-	 * exists to prevent.
+	 * [!] AND IT IS THIS GENERATION'S ONLY IF THE RECORD SAYS SO (issue
+	 * #118).  The record keeps the previous stream's result across the
+	 * boundary now, so `valid` alone would open this generation with the last
+	 * one's items; and this board's inference counter is bumped outside the
+	 * record's lock, so it cannot vouch for the record either.  The record's
+	 * own accepted count, against the base the commit latched, can.
 	 */
-	out->last_valid = (dec.valid && out->infers != 0u) ? 1u : 0u;
+	nn_snap_of(&dec, &snap);
+	out->last_valid = nn_det_last_valid(&snap, acc0) ? 1u : 0u;
 	out->last_ndet  = (int32_t)dec.ndet;
 	return NN_SVC_OK;
 }

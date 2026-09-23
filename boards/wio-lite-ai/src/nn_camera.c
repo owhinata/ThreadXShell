@@ -391,13 +391,28 @@ static int nncam_publish_plugin(int n, uint32_t gen)
 }
 #endif
 
-/* Start or end a session: invalidate the record and move the generation, both
- * under the lock, so an in-flight decode from the previous one lands nowhere. */
-static void nncam_record_reset(void)
+/* Start, re-arm or end a session: move the generation under the lock, so an
+ * in-flight decode from the previous one lands nowhere.  [!] THE RESULT STAYS
+ * (issue #118): it is still the last thing this model produced, and `nn dets`
+ * after a `nn run` or a stopped stream reads it. */
+static void nncam_record_boundary(void)
 {
 	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) != TX_SUCCESS)
 		return;
-	nn_det_record_reset(&nncam_rec);
+	nn_det_record_boundary(&nncam_rec);
+	(void)tx_mutex_put(&nncam_det_lock);
+}
+
+/* See nn_camera.h. */
+void nn_camera_record_invalidate(void)
+{
+	/* Before the first start the lock does not exist, and neither does a
+	 * result: nothing has ever published into the record. */
+	if (!nncam_created)
+		return;
+	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) != TX_SUCCESS)
+		return;
+	nn_det_record_invalidate(&nncam_rec);
 	(void)tx_mutex_put(&nncam_det_lock);
 }
 
@@ -674,18 +689,19 @@ int nn_camera_start(int colorbar, int require_draw)
 		nncam_want_frame = 0;
 
 		/*
-		 * [!] AND THE DECODE RECORD IS RETIRED TOO (issue #99).  A re-arm is a
-		 * NEW generation as far as `nn stream` is concerned, and this reset is
-		 * what makes the worker agree: it clears the last decode, so the new
-		 * generation does not open by reporting the old one's faces, and it
-		 * advances the record generation, so an inference that was still in
-		 * flight when the stream died cannot publish across the boundary and be
-		 * counted as this generation's work.
+		 * [!] AND THE DECODE RECORD CROSSES A BOUNDARY TOO (issue #99).  A
+		 * re-arm is a NEW generation as far as `nn stream` is concerned, and
+		 * this is what makes the worker agree: it advances the record
+		 * generation, so an inference that was still in flight when the stream
+		 * died cannot publish across the boundary and be counted as this
+		 * generation's work.  The last result stays (issue #118); the new
+		 * generation does not claim it, because what it produced is counted
+		 * from a base its commit takes after this call.
 		 *
 		 * BEFORE the band is re-claimed, so the producer never resumes while the
 		 * old generation is still the current one.
 		 */
-		nncam_record_reset();
+		nncam_record_boundary();
 
 		if (cam_band_claim(CAM_BAND_NN, colorbar, nncam_band) != CAM_BAND_OK) {
 			/* cam_band_claim() unwound our claim, but nncam_run and the guards
@@ -860,7 +876,7 @@ int nn_camera_start(int colorbar, int require_draw)
 	nncam_start_tick  = HAL_GetTick();
 	nncam_want_frame  = 0;
 	nncam_filling     = 0;
-	nncam_record_reset();
+	nncam_record_boundary();
 	while (tx_semaphore_get(&nncam_frame_sem, TX_NO_WAIT) == TX_SUCCESS)
 		;
 
@@ -889,10 +905,11 @@ int nn_camera_stop(void)
 	 * [!] MOVE THE GENERATION BEFORE WAITING FOR THE WORKER.  The wait below is
 	 * bounded and the worker may be most of an inference away from noticing, so a
 	 * decode that started under the old session can still complete after this
-	 * returns.  Bumping here means its publish is dropped rather than resurrecting
-	 * a stopped session's boxes.
+	 * returns.  Bumping here means its publish is dropped rather than replacing
+	 * the stopped session's last result with a frame nobody asked for -- and
+	 * the record then marks that the plugin has moved on (issue #118).
 	 */
-	nncam_record_reset();
+	nncam_record_boundary();
 	/* Poke the worker out of its bounded wait so it notices immediately rather
 	   than after the remainder of a 100 ms timeout. */
 	(void)tx_semaphore_put(&nncam_frame_sem);
@@ -1026,16 +1043,26 @@ int nn_camera_decode_get(struct nn_camera_decode *out,
 	 */
 	nn_det_record_snapshot(&nncam_rec, &snap, NULL, 0);
 	(void)tx_mutex_put(&nncam_det_lock);
-	out->valid = snap.valid;
-	out->ndet  = snap.ndet;
-	out->res   = snap.res;
-	out->kind  = snap.kind;
+	out->valid      = snap.valid;
+	out->ndet       = snap.ndet;
+	out->res        = snap.res;
+	out->kind       = snap.kind;
+	out->reportable = snap.reportable;
+	out->current    = snap.current;
+	out->accepted   = snap.accepted;
+	out->epoch      = snap.epoch;
 
 #if defined(CONFIG_NN_BACKEND_TFLM)
 	if (leased) {
 		/* Still under the lease: the snapshot above and this account of it
 		 * describe the same decode because nothing has run in between. */
-		if (snap.valid && snap.kind == (uint8_t)NN_DET_PLUGIN_REPORT) {
+		if (snap.valid && snap.kind == (uint8_t)NN_DET_PLUGIN_REPORT &&
+		    !snap.reportable) {
+			/* [!] A later decode ran and its publish was dropped (issue
+			 * #118): the plugin's result is that frame's now, and asking it
+			 * would describe a frame this record does not hold. */
+			nn_report_set(rep, NN_REPORT_SUPERSEDED);
+		} else if (snap.valid && snap.kind == (uint8_t)NN_DET_PLUGIN_REPORT) {
 			nn_report_begin(rep);
 			if (!nn_active_can_report())
 				nn_report_set(rep, NN_REPORT_UNSUPPORTED);

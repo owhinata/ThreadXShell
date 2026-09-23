@@ -240,6 +240,18 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 		rc = nn_model_reload(buf, len, spec->path);
 	}
 
+	/*
+	 * [!] THE LAST RESULT GOES WITH THE MODEL (issue #118), and on this board
+	 * it goes on EVERY reload attempt, refused ones included.  A refusal
+	 * normally leaves the previous model in force, but the backend documents
+	 * that the rebuild can fail and leave it closed -- and which of the two
+	 * happened is only asked after the session is released, below (Phase 2
+	 * stage 4 makes the reload say so).  Keeping a result for a model that may
+	 * be gone is the wrong way round; clearing one for a model that stayed
+	 * costs a `nn run`.  Under the session, so no worker is publishing.
+	 */
+	nn_camera_record_invalidate();
+
 	nn_session_release();
 
 	/*
@@ -284,6 +296,9 @@ void nn_svc_model_unload(struct nn_op_result *res)
 	   destroyed, so "unload" returns it to the built-in one. */
 	if (nn_model_open(&m) == 0 && m != NULL)
 		(void)nn_model_reload(NULL, 0u, NULL);
+	/* The model went back to the built-in one, and the last result goes with
+	 * the one it came from (issue #118) -- under the session. */
+	nn_camera_record_invalidate();
 	nn_session_release();
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
@@ -360,16 +375,37 @@ static uint32_t nn_oneshot_commit(void);
 static void nn_stream_unadmit(void);
 static enum nn_stream_stop_claim nn_stream_claim_stop(uint32_t gen);
 static void nn_stream_settle(enum nn_claim claim,
-                             const struct nn_stream_stats *final);
+                             const struct nn_stream_stats *final,
+                             uint32_t epoch);
+
+/*
+ * The worker's snapshot, as the shared command reads it.  [!] EVERY FIELD IS
+ * WRITTEN (issues #104, #110, #118): a projection that drops one hands the
+ * caller whatever its initialiser left there.
+ */
+static void nn_snap_of(const struct nn_camera_decode *dec,
+                       struct nn_det_snapshot *snap)
+{
+	snap->valid      = dec->valid;
+	snap->ndet       = dec->ndet;
+	snap->res        = dec->res;
+	/* [!] STATED, NOT CARRIED: this board has one decoder and it fills the
+	 * caller's array, so the kind is never in doubt -- and the resident
+	 * decoder keeps no account of its own, so there is none to withhold. */
+	snap->kind       = (uint8_t)NN_DET_CALLER_BOXES;
+	snap->reportable = 0u;
+	snap->current    = dec->current;
+	snap->accepted   = dec->accepted;
+	snap->epoch      = dec->epoch;
+}
 
 void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
                      struct nn_report_capture *rep,
                      nn_svc_cancel_fn cancel, void *ctx,
                      struct nn_op_result *res)
 {
-	struct nn_camera_stats s;
 	struct nn_camera_decode dec;
-	uint32_t gen;
+	uint32_t gen, base;
 	int rc, stop_rc;
 	/* Why the wait ended -- the run's status, decided below (issue #122 P7). */
 	enum { RUN_INFERRED, RUN_CANCELLED, RUN_TIMEOUT } why = RUN_TIMEOUT;
@@ -439,6 +475,18 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	}
 
 	/*
+	 * [!] WHAT THIS RUN PRODUCED IS COUNTED BY THE RECORD (issue #118).  It
+	 * used to wait on the worker's inference counter, which this board bumps
+	 * BEFORE the decode and the publish -- so the wait could end with nothing
+	 * published yet.  The record's accepted count moves under the publish's
+	 * own lock and only for a publish the generation rule took.  The base is
+	 * sampled after nn_camera_start()'s boundary.
+	 */
+	memset(&dec, 0, sizeof dec);
+	(void)nn_camera_decode_get(&dec, NULL, 0);
+	base = dec.accepted;
+
+	/*
 	 * Bounded wait for one inference -- NN_RUN_WAIT_S.  The worker is below
 	 * this thread in priority, so sleeping is what lets it run at all.
 	 *
@@ -452,8 +500,8 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		                 (NN_RUN_WAIT_S * TX_TIMER_TICKS_PER_SECOND);
 
 		for (;;) {
-			nn_camera_stats_get(&s);
-			if (s.infers >= 1u) {
+			(void)nn_camera_decode_get(&dec, NULL, 0);
+			if (dec.accepted != base) {
 				why = RUN_INFERRED;
 				break;
 			}
@@ -469,20 +517,16 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		}
 	}
 
-	/* [!] The boxes are taken BEFORE the stop: stopping ends the session, which
-	 * invalidates the published record on purpose, so what this run is about has
-	 * to be read while the session that produced them is still current. */
+	/* The boxes are taken BEFORE the stop -- the record keeps them across it
+	 * now (issue #118), but reading first keeps this in the order the other
+	 * boards use. */
 	memset(&dec, 0, sizeof dec);
 	(void)nn_camera_decode_get(&dec, dets, max);
-	snap->valid = dec.valid;
-	snap->ndet  = dec.ndet;
-	snap->res   = dec.res;
-	/* [!] STATED, NOT LEFT TO THE CALLER'S memset (issue #104).  This board has
-	   one decoder and it fills the caller's array, so the value is never in
-	   doubt -- but the projection through struct nn_camera_decode drops
-	   everything it is not told to carry, and a snapshot reused across two reads
-	   would otherwise keep whatever routing the previous one had. */
-	snap->kind  = (uint8_t)NN_DET_CALLER_BOXES;
+	nn_snap_of(&dec, snap);
+	/* [!] THIS RUN'S, OR NOT VALID (issue #118): the record's own `valid` is
+	 * true of whatever ran last, and a valid snapshot is printed as this run's
+	 * result. */
+	snap->valid = nn_det_last_valid(snap, base);
 	/* No external decoder on this board, so nothing was captured -- stated
 	 * rather than left to the caller's initialiser, for the same reason the
 	 * kind is (issue #110). */
@@ -492,11 +536,8 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 * deadline can pass in the same moment the inference publishes; the record
 	 * was read after that, so reporting a timeout would throw away an answer
 	 * that is sitting right here.  ONLY a timeout is promoted: a cancel is the
-	 * operator's decision and a lost stream is a hardware fact, and a valid
-	 * record does not overrule either.
-	 * [!] "valid means this run's" holds because the record is reset at this
-	 * run's start; stage 3 lets the record outlive session boundaries, and
-	 * this test must then become the accepted-publish count instead. */
+	 * operator's decision, and a valid record does not overrule it.  "Made
+	 * it" is the accepted count against this run's base (issue #118). */
 	if (why == RUN_TIMEOUT && snap->valid)
 		why = RUN_INFERRED;
 
@@ -512,7 +553,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	stop_rc = nn_camera_stop();
 	/* A retryable teardown leaves the one-shot RUNNING and the operator's to
 	 * finish with `nn stream stop` -- see nn_stream_life.h. */
-	nn_stream_settle(nn_claim_of_stop(stop_rc), NULL);
+	nn_stream_settle(nn_claim_of_stop(stop_rc), NULL, 0u);
 
 	/*
 	 * [!] WHY THE WAIT ENDED IS THE STATUS (issue #122 P7).  A cancelled or
@@ -556,16 +597,10 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
 
 	nn_detail_clear();
 	memset(&dec, 0, sizeof dec);
+	/* [!] THE LAST RESULT, WHOEVER PRODUCED IT (issue #118) -- a `nn run`, a
+	 * running stream or a stopped one.  Only a model change clears it. */
 	(void)nn_camera_decode_get(&dec, dets, max);
-	snap->valid = dec.valid;
-	snap->ndet  = dec.ndet;
-	snap->res   = dec.res;
-	/* [!] STATED, NOT LEFT TO THE CALLER'S memset (issue #104).  This board has
-	   one decoder and it fills the caller's array, so the value is never in
-	   doubt -- but the projection through struct nn_camera_decode drops
-	   everything it is not told to carry, and a snapshot reused across two reads
-	   would otherwise keep whatever routing the previous one had. */
-	snap->kind  = (uint8_t)NN_DET_CALLER_BOXES;
+	nn_snap_of(&dec, snap);
 	nn_report_set(rep, NN_REPORT_NONE);
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
@@ -692,6 +727,16 @@ static uint32_t nn_stream_ms;
  */
 static struct nn_stream_stats nn_stream_final;
 static uint32_t nn_stream_final_gen;   /**< whose they are; ANY = nobody's */
+/* The record's epoch when `last` was latched: a model change since then took
+ * the result away, and the latched line follows it (issue #118). */
+static uint32_t nn_stream_final_epoch;
+/*
+ * [!] THE RECORD'S ACCEPTED COUNT WHEN THIS STREAM WAS COMMITTED (issue
+ * #118).  The last result outlives a stop now, so a new stream opens with the
+ * previous one's result in the record; `last` is this stream's only once the
+ * record has accepted a publish since this base.
+ */
+static uint32_t nn_stream_acc0;
 
 /* Admit a start BEFORE the worker is touched.  This board has no re-arm, so
    IDLE is the only phase a start may come from. */
@@ -740,7 +785,7 @@ static void nn_stream_unadmit(void)
 	TX_RESTORE
 }
 
-static void nn_stream_mint(uint32_t *gen)
+static void nn_stream_mint(uint32_t acc0, uint32_t *gen)
 {
 	TX_INTERRUPT_SAVE_AREA
 
@@ -749,6 +794,7 @@ static void nn_stream_mint(uint32_t *gen)
 	 * svc/nn_stream_life.h on applying side effects to a refused transition. */
 	*gen = nn_stream_life_commit(&nn_life);
 	if (*gen != NN_STREAM_GEN_ANY) {
+		nn_stream_acc0 = acc0;
 		nn_stream_t0 = (uint32_t)tx_time_get();
 		nn_stream_ms = 0u;
 	}
@@ -783,7 +829,8 @@ static enum nn_stream_stop_claim nn_stream_claim_stop(uint32_t gen)
  * last stream's clock, which `nn stream stats` reports.
  */
 static void nn_stream_settle(enum nn_claim claim,
-                             const struct nn_stream_stats *final)
+                             const struct nn_stream_stats *final,
+                             uint32_t epoch)
 {
 	TX_INTERRUPT_SAVE_AREA
 
@@ -806,6 +853,7 @@ static void nn_stream_settle(enum nn_claim claim,
 				nn_stream_final = *final;
 				nn_stream_final.elapsed_ms = nn_stream_ms;
 				nn_stream_final_gen = ending;
+				nn_stream_final_epoch = epoch;
 			}
 		}
 	}
@@ -880,7 +928,17 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		          NN_CLAIM_NONE);
 		return;
 	}
-	nn_stream_mint(gen);
+	{
+		/* After the start's record boundary, before the commit: the two
+		 * interleavings are in svc/nn_det_record.h (issue #118).  The
+		 * record's lock is taken here, outside the commit's critical
+		 * section, which may not take it. */
+		struct nn_camera_decode rec;
+
+		memset(&rec, 0, sizeof rec);
+		(void)nn_camera_decode_get(&rec, NULL, 0);
+		nn_stream_mint(rec.accepted, gen);
+	}
 	if (*gen == NN_STREAM_GEN_ANY) {
 		/*
 		 * [!] REFUSED, WHICH MEANS THIS CALLER NO LONGER OWNS THE START -- and
@@ -914,13 +972,20 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 {
 	struct nn_camera_stats st;
-	struct nn_camera_decode dec;
-	uint32_t seq0, seq1, g, t0, ms;
+	struct nn_camera_decode dec, dec0;
+	struct nn_det_snapshot snap;
+	uint32_t seq0, seq1, g, t0, ms, acc0;
 	uint8_t  phase, kind;
 	TX_INTERRUPT_SAVE_AREA
 
 	if (out == NULL)
 		return NN_SVC_ERR_ARG;
+
+	/* The record's epoch, for a latched answer below.  Taken first because
+	 * the record's lock cannot be taken inside the critical section; a model
+	 * change landing after it is caught by the next poll. */
+	memset(&dec0, 0, sizeof dec0);
+	(void)nn_camera_decode_get(&dec0, NULL, 0);
 
 	TX_DISABLE
 	nn_stream_life_snapshot(&nn_life, &g, &phase, &seq0, &kind);
@@ -929,11 +994,16 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	if (g != NN_STREAM_GEN_ANY && g == nn_stream_final_gen &&
 	    (gen == NN_STREAM_GEN_ANY || gen == g)) {
 		*out = nn_stream_final;
+		/* [!] ...except that a model change since the stop took its last
+		 * result away (issue #118). */
+		if (dec0.epoch != nn_stream_final_epoch)
+			out->last_valid = 0u;
 		TX_RESTORE
 		return NN_SVC_OK;
 	}
-	t0 = nn_stream_t0;
-	ms = nn_stream_ms;
+	t0   = nn_stream_t0;
+	ms   = nn_stream_ms;
+	acc0 = nn_stream_acc0;
 	TX_RESTORE
 
 	if (g == NN_STREAM_GEN_ANY)
@@ -946,7 +1016,7 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 
 	/* Outside the critical section: these take their own locks. */
 	nn_camera_stats_get(&st);
-	dec.valid = 0;
+	memset(&dec, 0, sizeof dec);
 	(void)nn_camera_decode_get(&dec, NULL, 0);
 
 	TX_DISABLE
@@ -970,7 +1040,12 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	                ? (uint32_t)(((uint32_t)tx_time_get() - t0) * 1000u /
 	                             TX_TIMER_TICKS_PER_SECOND)
 	                : ms;
-	out->last_valid = dec.valid ? 1u : 0u;
+	/* [!] THIS STREAM'S, OR NONE (issue #118): the record keeps the previous
+	 * stream's result across the boundary, so `valid` alone would open this
+	 * one with the last one's faces.  The accepted count against the base the
+	 * commit latched says whether this stream has published. */
+	nn_snap_of(&dec, &snap);
+	out->last_valid = nn_det_last_valid(&snap, acc0) ? 1u : 0u;
 	out->last_ndet  = (int32_t)dec.ndet;
 	return NN_SVC_OK;
 }
@@ -979,6 +1054,7 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 {
 	struct nn_stream_stats final;
 	enum nn_claim claim;
+	uint32_t epoch;
 	int rc;
 
 	if (res == NULL)
@@ -1031,16 +1107,30 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 	rc = nn_camera_stop();
 	claim = nn_claim_of_stop(rc);
 	/* The stream's final numbers, once the worker is stopped (no locks held:
-	   nn_camera_stats_get() takes its own).  No last result: the stop retires
-	   the decode record. */
+	   nn_camera_stats_get() takes its own).  [!] AND ITS LAST RESULT (issue
+	   #118): the stop no longer retires the record, and taking it now, after
+	   the stop's boundary, keeps a later `nn run` from showing through. */
 	{
 		struct nn_camera_stats st;
+		struct nn_camera_decode dec;
+		struct nn_det_snapshot snap;
+		uint32_t acc0;
+		TX_INTERRUPT_SAVE_AREA
 
+		TX_DISABLE
+		acc0 = nn_stream_acc0;
+		TX_RESTORE
 		nn_camera_stats_get(&st);
 		memset(&final, 0, sizeof final);
 		nn_stream_counts(&st, &final);
+		memset(&dec, 0, sizeof dec);
+		(void)nn_camera_decode_get(&dec, NULL, 0);
+		nn_snap_of(&dec, &snap);
+		final.last_valid = nn_det_last_valid(&snap, acc0) ? 1u : 0u;
+		final.last_ndet  = (int32_t)snap.ndet;
+		epoch = snap.epoch;
 	}
-	nn_stream_settle(claim, &final);
+	nn_stream_settle(claim, &final, epoch);
 
 	if (rc == -1) {
 		nn_detail_set("not running");

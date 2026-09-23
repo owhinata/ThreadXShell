@@ -263,7 +263,11 @@ static void preview_draw_plugin(void)
 	memset(&dec, 0, sizeof dec);
 	if (!nn_camera_decode_get(&dec, NULL))
 		return;
-	if (!dec.valid || dec.kind != (uint8_t)NN_DET_PLUGIN_REPORT)
+	/* [!] AND IT MUST BE THIS SESSION'S (issue #118).  The record keeps the
+	 * last result across a stop now, so `valid` alone would leave a stopped
+	 * stream's boxes on a live preview, and open a new stream wearing them. */
+	if (!dec.valid || !dec.current ||
+	    dec.kind != (uint8_t)NN_DET_PLUGIN_REPORT)
 		return;
 
 	bud.pixels  = PREVIEW_PLUGIN_DRAW_PIXELS;

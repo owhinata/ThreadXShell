@@ -806,6 +806,13 @@ static void nn_print_dets(struct cli_instance *sh,
 			cli_warn(sh, "nn: the decoder could not be reached to describe "
 			             "it\r\n");
 			break;
+		case NN_REPORT_SUPERSEDED:
+			/* The count above is true; the account would be of a later,
+			 * dropped frame (issue #118). */
+			cli_warn(sh, "nn: %d item(s); the decoder has decoded a later "
+			             "frame since, so it cannot describe them\r\n",
+			         snap->ndet);
+			break;
 		default:
 			break;
 		}

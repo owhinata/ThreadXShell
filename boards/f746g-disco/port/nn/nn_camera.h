@@ -94,7 +94,8 @@ bool nn_camera_running(void);
 /** Snapshot current stats (any time). */
 void nn_camera_stats_get(struct nn_camera_stats *out);
 
-/** Copy the latest detections into @p out[0..max); returns the count copied. */
+/** Copy the latest detections OF THE SESSION IN FORCE into @p out[0..max);
+ *  returns the count copied (issue #118: a stopped session's are not). */
 int nn_camera_dets_get(struct bf_det *out, int max);
 
 /**
@@ -107,19 +108,32 @@ int nn_camera_dets_get(struct bf_det *out, int max);
  * by the time it got round to printing.
  */
 struct nn_camera_decode {
-	int              valid;  /**< 0 = nothing decoded in this session yet     */
-	int              ndet;   /**< faces, or -1 for "not a BlazeFace model"    */
+	/** 0 = nothing decoded since the model went in.  [!] NOT "this session":
+	 *  the result outlives a stop (issue #118). */
+	int              valid;
+	int              ndet;   /**< faces, or a negative BF_ERR_* code          */
 	struct bf_result res;    /**< status, peak, pass/kept, threshold APPLIED  */
+	/* Carried from the record in the same snapshot (issue #118) -- see
+	 * svc/nn_det_record.h for each. */
+	uint8_t          current;   /**< published in the session in force        */
+	uint32_t         accepted;  /**< publishes the record has ever taken      */
+	uint32_t         epoch;     /**< moves when a model change clears it      */
 };
+
+/**
+ * The model changed: clear the last result (issue #118).  Called by the load
+ * and the unload under the nn session, before the session is given back.
+ */
+void nn_camera_record_invalidate(void);
 
 /**
  * Take a coherent snapshot of the last published decode.
  *
  * @param dets  optional; the boxes, up to @p max of them
  * @return non-zero if a snapshot was taken (zero before the first attach, when
- *         the lock does not exist yet).  `valid == 0` means this session has not
- *         decoded a frame -- which is NOT a decode that found nothing, and must
- *         not be printed as one.
+ *         the lock does not exist yet).  `valid == 0` means nothing has been
+ *         decoded since the model went in -- which is NOT a decode that found
+ *         nothing, and must not be printed as one.
  */
 int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
                          int max);

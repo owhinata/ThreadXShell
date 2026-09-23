@@ -68,8 +68,8 @@ src cmds svc cmake test README。wio のみ boot も）。
   `commit()` は STARTING 以外、`finish/retry/poison` は STOPPING 以外を拒否する。
 - **[!] `nn run` も one-shot として同じ機械を claim する**（re-arm 不可・操作者の stop は拒否・自分の世代で
   止め、retryable なら操作者が回収）。**種類は claim と同じ 1 呼び出しで判定する**（#120）。
-- **[!] worker のカウンタは世代と一致しない**ので stats は commit 時に基準を latch する（re-arm は
-  decode record も retire）。**遷移が拒否されたら wrapper の副作用も走らせない**（解放は成功時のみ）。
+- **[!] worker のカウンタは世代と一致しない**ので stats は commit 時に基準を latch する。**record は境界で
+  消えずモデル変更で消える**ので「この世代の結果か」は受理数で問う（#118）。**遷移拒否なら副作用なし**。
 - **[!] poll は 2 相 + 遷移カウンタ**（数値は他ロック配下なので**割込み禁止下では集められない**。
   世代と状態だけでは retryable な stop を跨いだ読みを弾けない）。
 - **[!] retryable / terminal の分類は「その時点で何ができるか」で決まる**。表はボードが出し

@@ -135,8 +135,8 @@ plugin は board code と同格の**信頼された native code**。ゲートが
   publish 済みメタデータしか読まない）。
 - **[!] スタック上限は実測から導出する。超えられない上限は上限ではない**（非同期予約の前提は
   `FPCCR.TS == 0` の強制。**導出値 0 は「未測定」ではない**）。**[!] slot に到達しうる全スレッドの最も
-  浅い天井に対して宣言し、深さは callback 入口で測る**（表はボード、深さの正は README）。**[!] veneer の
-  下はビルドが出荷 ELF から導出し 宣言 >= 導出 を検査**。ファームは古い宣言を見分けないので pack し直す。
+  浅い天井に対して宣言し、深さは callback 入口で測る**（表はボード、深さの正は README）。**[!] 宣言は c を
+  含まずファームが足す**（walk を変えたら会計の版）。**c は出荷 ELF から導出・検査し、実効値も読み戻す**。
 - **[!] painter の予算はガード保持時間に比例する仕事の上界**であって `draw()` 内の任意計算の上界では
   ない（課金は**フレームバッファを触る前**）。**輪郭は外接面積ではなく実際に書く store 数で課金する**
   （外接面積だと近距離の顔 1 つで箱が黙って消える）。共有してよいのは幾何規則（`svc/rect_geom.c`）
@@ -147,10 +147,10 @@ plugin は board code と同格の**信頼された native code**。ゲートが
   private**。
 - **[!] plugin のビルド規則は共有**（`cmake/add_plugin.cmake`）で**ボードは自分の事実だけを引数で渡す**。
   **owned source root は helper が導出し引数で受け取らない**（受け取る形自体が fail-open）。**リンク
-  入力も列挙する**（渡せるのは `ARCH_FLAGS` の `-m*` だけ）。**success stamp は compile 前に消す。**
+  入力も列挙する**（渡せるのは `ARCH_FLAGS` の `-m*` だけ）。**success stamp は compile 前に消す。ヘッダも依存。**
 - **[!] image gate も共有**（`cmake/check_plugin_image.py`）。ボード固有の 3 つ（**予約 / 禁止シンボル
   表 / `VENEER_BASE_COST`**）は `add_plugin()` の**必須引数**。**ゲートに告げる予約を MEMORY fragment と
-  同じ変数から作らない**（検査対象から期待値を読むゲートは何でも通す）。
+  同じ変数から作らない**（検査対象から期待値を読むゲートは何でも通す）。**各 TU の ABI 版も照合する。**
 - **[!] target word は 2 端で検査する**（firmware の `_Static_assert` + gate の `.ARM.attributes`）。
   **CMSE ビットは image に記録されないので firmware の assert が唯一の検査**。`__ARM_FP` 単独で FPU を
   決めず、写像できない組は `#error`。

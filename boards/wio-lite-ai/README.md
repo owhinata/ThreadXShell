@@ -688,19 +688,30 @@ the same run.  The mechanism is shared with Grove:
 `cmake/README.md`.
 
 **640 is declared, and stays declared**: over-estimating is the safe direction
-here, because the gate charges it at every crossing, so a larger number makes a
-plugin's computed requirement larger, not smaller.  Lowering it to the derived
-number would buy nothing and cost a re-pack and a re-send of every container
-that exists -- their declared stacks were computed against 640.  Whether the
-base still fits is no longer anyone's job to remember: the check above runs on
-every build.
+here, because a larger c makes a plugin's requirement larger, not smaller.
+Since plugin ABI 2 (issue #111) a container does not carry c at all -- see
+**Plugin ABI 2** below -- so changing it re-packs nothing; lowering it would
+still buy nothing.  Whether the base still fits is no longer anyone's job to
+remember: the check above runs on every build, and `check_policy_probe.py`
+reads back from `shell.elf` that the policy really charges 640.
 
-At the declared 640 B, the plugins' computed requirements are:
+What each plugin declares (c-free) and needs at c = 640 B, build `4cd3126`
+(S = 16 B for both; "-" = the slot reaches no veneer):
 
-| | decode | draw | report |
-|---|---:|---:|---:|
-| blazeface | 776 B | 716 B | -- |
-| cifar10 | 816 B | 676 B | 720 B |
+| | slot | own (A0) | at a crossing (A1) | needed at c 640 |
+|---|---|---:|---:|---:|
+| blazeface | decode | 280 | 144 | 784 B |
+| blazeface | draw | 76 | 76 | 716 B |
+| blazeface | report | 92 | 88 | 728 B |
+| blazeface | entry / shapes_ok / param_set / param_get | 8 / 40 / 8 / 16 | - | 8 / 40 / 8 / 16 B |
+| cifar10 | decode | 232 | 184 | 824 B |
+| cifar10 | draw | 36 | 36 | 676 B |
+| cifar10 | report | 84 | 80 | 720 B |
+| cifar10 | entry / shapes_ok | 0 / 20 | - | 0 / 20 B |
+
+(Decode is 8 B above the numbers issue #110-#112 printed: until issue #111 fixed
+the plugin build's header dependencies, those came from objects compiled
+against an older `plugin_abi.h`.)
 
 **[!] Which thread each slot is called on was wrong until #110.**  Step 3a
 declared the WORKER's allowance for `entry` and `shapes_ok`, on the reasoning
@@ -720,35 +731,49 @@ today's plugin happens to need is how a limit stops being one, so the thread is
 
 | thread | stack | at call | reserve | derived room | declared | plugin needs |
 |---|---:|---:|---:|---:|---:|---:|
-| `nn_work` (decode) | 3,072 | 49 | 208 | 2,815 | 1,024 | 776 |
+| `nn_work` (decode) | 3,072 | 49 | 208 | 2,815 | 1,024 | 784 |
 | `cam_prev` (draw) | 1,536 | 105 | 208 | 1,223 | 1,024 | 716 |
 | shell (entry / shapes / report / params) | 4,096 | 1,593 | 208 | 2,295 | 1,024 | 728 |
 
 **The `at call` column is issue #116's measurement**, taken on hardware with a
 plugin running (#110's was 641 / 137 / 1,593, on the firmware that still carried
 a decoder).  Every allowance sits under its derived room, and the shipped plugin
-well under the allowance.
+well under the allowance.  Re-measured on issue #111's firmware (build
+`4cd3126`), `nn stream` at call: `nn_work` 49/3072 (decode), `cam_prev`
+113/1536 (draw), shell 1601/4096 (report) -- still inside every derived room.
 
 **The allowances did not move, and that is deliberate.**  A shallower call site
 widens the room the declaration has to fit in; it is not a reason to declare
-more.  A container is packed against these numbers and this firmware cannot tell
-a stale declaration from a current one (below), so changing one means re-packing
-and re-sending every container that exists.  The measurements are here to show
-that each allowance still FITS -- the check issue #103 found two placeholders
-failing.
+more.  The allowances are the board's policy, compiled in; a container's
+declaration no longer depends on them (or on c), so a change here re-packs
+nothing -- a container that no longer fits is refused on the device.  The
+measurements are here to show that each allowance still FITS -- the check issue
+#103 found two placeholders failing.
 
-**[!] STILL OWED:** more than operationally, **the firmware cannot tell a stale
-declaration from a current one.**  `svc/plugin_load.c` checks the declaration against the
-  policy allowance; nothing establishes which accounting produced it, and the
-  device cannot recompute a plugin's call graph.  So "an accepted declaration
-  bounds execution" is not true across a change to the base cost.  Closing that
-  needs the manifest to carry the accounting it was built against, which is an
-  ABI change -- its own issue.  Neither shipped plugin is near its allowance,
-  so this is a guarantee weaker than it reads rather than a fault in flight.
-  **Issue #112 closed the BUILD side of this and not this side**: the firmware
-  is now proved to stay under the declaration it ships with, while what a device
-  still cannot establish is which declaration the container in its flash was
-  packed against.
+#### Plugin ABI 2: the declaration without c (issue #111)
+
+What used to be owed here -- **the firmware could not tell a stale declaration
+from a current one** -- is closed.  Until ABI 2 each slot declared one number
+with c already inside it, and the loader could not know which c.  Now the
+manifest declares, per slot, the plugin's own deepest frames A0, its own frames
+at a crossing A1 and a crossing bit, plus the plugin's sink bound S, and the
+loader requires `max(A0, A1 + max(c, S))` with this firmware's c
+(`svc/plugin_load.c`).  A stack-accounting version in the manifest says which
+analysis produced the numbers; a mismatch is its own refusal.  The c is the one
+the build checked, read back out of `shell.elf` (`cmake/check_policy_probe.py`).
+
+`nn info` prints both, e.g. the blazeface container on hardware:
+
+```
+  stack : entry 8  shapes 40  decode 784  draw 716  report 728  param 8/16 B needed at c 640 B
+  decl  : own 8/40/280/76/92/8/16  at a crossing -/-/144/76/88/-/-  sink 16 B
+```
+
+Re-sent on 2026-09-23 with the ABI 2 firmware (build `4cd3126`): blazeface,
+slot 5, 194,232 B, crc32 `E07F7D79`; `blob list` matched the receipt.  The ABI 1
+container that was in the slot is refused by the new firmware as `abi mismatch`,
+as it must be.  `nn model load --slot 5`, `nn run` (1 face) and `nn stream`
+behaved as before.
 
 ### What the panel costs, measured
 

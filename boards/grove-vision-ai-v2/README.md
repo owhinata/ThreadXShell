@@ -5067,8 +5067,9 @@ charged for this base's work behind an indirect veneer -- derived from the
 shipped image and checked on every build since issue #112 (see **The veneer
 charge is derived from the image, and checked**).  The checks are
 forbidden symbols, an allocated-section whitelist, no relocations, storage in
-the declared segments, indirect branches only in the named veneers, and a
-transitive stack bound per entry point.  The linker enforces some of the same
+the declared segments, indirect branches only in the named veneers, a
+transitive stack bound per entry point (emitted c-free since issue #111), and
+that every TU was compiled against the header's ABI.  The linker enforces some of the same
 things first: under `-nostdlib` an unresolved symbol, a forbidden vendor entry
 point that is nowhere in the image, and unwind tables that need a personality
 routine are all link errors, so those gate checks are unreachable in the normal
@@ -5538,12 +5539,10 @@ build/grove-vision-ai-v2 veneer_cost_check` prints them after removing
 `veneer_cost/shell.checked`.  Do not hand-sum them from `-fstack-usage`: that is
 what this replaced, and it is how the 456 went unnoticed.
 
-That matters for what is already on a device: **every container out there was
-packed against 256, and the build now proves the firmware stays under it**.  No
-re-pack and no re-send, and none is owed -- the correction this section used to
-say was outstanding was paid by removing the chain, not by raising the number.
-Raising it is what would cost a re-send of every container that exists, because
-the firmware cannot tell a stale declaration from a current one.
+The correction this section used to say was outstanding was paid by removing the
+chain, not by raising the number.  And since plugin ABI 2 (issue #111, below)
+a container no longer carries this number at all: the loader adds the
+firmware's own c at load time, so changing it re-packs nothing.
 
 Each plugin's own printer bound goes to the same check (`pl_sbuf_write` = 64
 here, from `add_plugin()`): the printer veneer lands in the plugin as well as in
@@ -5556,6 +5555,64 @@ depend on it.  A failure therefore stops the flash AND the container pack, and
 leaves no stamp for the next build to trust.  The mechanism is shared with
 wio-lite-ai: `cmake/veneer_cost_gate.cmake`, `cmake/check_veneer_base_cost.py`
 and `cmake/README.md`.
+
+#### Plugin ABI 2: the declaration without c (issue #111)
+
+Until ABI 2 a manifest declared ONE number per slot, the gate's bound with c
+already added at every crossing, and the firmware could not tell which c a
+number had been made with.  The gate's walk adds c at a crossing and stops
+there, so the bound decomposes exactly, and that is what a manifest now carries:
+per slot the plugin's own deepest frames **A0**, its own frames on a path that
+reaches a veneer **A1** plus a crossing bit, and for the whole plugin the bound
+**S** of its own printer sink (`pl_sbuf_write`, which sits on the far side of
+the printer veneer).  The loader (`svc/plugin_load.c`) requires
+
+    max(A0, A1 + max(c, S))    for a slot that crosses,   A0 otherwise
+
+with this firmware's c, which the build checked against `shell.elf` and reads
+back out of it (`cmake/check_policy_probe.py`).  A stack-accounting version in
+the manifest says which analysis produced the numbers; a mismatch is refused as
+its own reason.  Build `4cd3126`, c = 256 B, S = 16 B for both plugins:
+
+| | slot | own (A0) | at a crossing (A1) | needed at c 256 |
+|---|---|---:|---:|---:|
+| blazeface | decode | 280 | 144 | 400 B |
+| blazeface | draw | 76 | 76 | 332 B |
+| blazeface | report | 96 | 88 | 344 B |
+| blazeface | entry / shapes_ok / param_set / param_get | 8 / 40 / 8 / 16 | - | 8 / 40 / 8 / 16 B |
+| cifar10 | decode | 240 | 184 | 440 B |
+| cifar10 | draw | 36 | 36 | 292 B |
+| cifar10 | report | 88 | 80 | 336 B |
+| cifar10 | entry / shapes_ok | 0 / 16 | - | 0 / 16 B |
+
+Decode is 8 B above what issues #105-#112 printed.  Those came from plugin
+objects compiled against an older `plugin_abi.h`: until issue #111 the plugin
+compile depended on its `.c` alone, and it took the ABI 2 containers refusing
+their own entry point on this board ("the plugin refused its own entry point
+(-70)") to show it.  The build now tracks headers and the image gate checks the
+ABI every TU was compiled against (`cmake/README.md`).
+
+`nn info` prints the requirement and the declaration after the image lines;
+the blazeface container on hardware:
+
+```
+  stack : entry 8  shapes 40  decode 400  draw 332  report 344  param 8/16 B needed at c 256 B
+  decl  : own 8/40/280/76/96/8/16  at a crossing -/-/144/76/88/-/-  sink 16 B
+```
+
+Re-sent on 2026-09-23 with the ABI 2 firmware (build `4cd3126`), after the old
+ABI 1 containers were refused on load as `abi mismatch`:
+
+| asset | slot | bytes | crc32 |
+|---|---:|---:|---|
+| blazeface | 9 | 169,040 | `5F88E843` |
+| cifar10 | 1 | 1,707,808 | `23D7B349` |
+
+`blob list` matched both receipts.  blazeface streamed at 36.95 inf/s with 0
+painter refusals and `nn run` found 1 face; cifar10 streamed at 8.85 inf/s.
+`nn stream stats` depths at the plugin's entry on that run: entry console
+1080/4096, shapes_ok 1528, decode producer 864/8192 and console 2072/4096, draw
+panel 224/2048, report console 1784/4096, param_get 744.
 
 #### What holds these numbers up, which no gate checks
 
@@ -5793,11 +5850,10 @@ the reason is the same one the labels have: **meaning travels with the model**.
 A `text()` primitive on the painter would put a typeface in three firmwares and
 make every later question about it -- a bigger cell, a glyph the font lacks, a
 second script -- a firmware change, which is the errand issue #78 removes.  It
-would also cost an ABI break: `struct plugin_painter` carries no version or size
-field (unlike `struct plugin_base_api`), so a member appended to it cannot be
-detected by a plugin built against the older shape, and `PLUGIN_ABI_VERSION` is
-compared for exact equality -- every container in the store would have to be
-rebuilt and re-sent.  The duplication costs about 1 KB per image.
+would also have cost an ABI break when this was written: `struct plugin_painter`
+had no version or size field.  ABI 2 (issue #111) gave it both, so an appended
+member is now detectable -- but the font still belongs to the plugin, for the
+reason above.  The duplication costs about 1 KB per image.
 
 **[!] `add_plugin()` does not glob `asset/common/`.**  Its `_srcs` names
 the files one by one, so a new common `.c` that is not added there is simply not

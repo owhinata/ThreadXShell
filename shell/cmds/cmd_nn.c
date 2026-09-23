@@ -74,6 +74,20 @@
 #ifndef NN_SVC_HAS_MODEL_PATH
 #define NN_SVC_HAS_MODEL_PATH  0
 #endif
+/* Which model sources `nn model load` takes -- one macro per tag of the
+ * grammar, beside NN_SVC_HAS_MODEL_PATH above (issue #122 P9). */
+#ifndef NN_SVC_HAS_MODEL_NAME
+#define NN_SVC_HAS_MODEL_NAME    0
+#endif
+#ifndef NN_SVC_HAS_MODEL_SLOT
+#define NN_SVC_HAS_MODEL_SLOT    0
+#endif
+#ifndef NN_SVC_HAS_MODEL_BUILTIN
+#define NN_SVC_HAS_MODEL_BUILTIN 0
+#endif
+#ifndef NN_SVC_HAS_MODEL_ADDR
+#define NN_SVC_HAS_MODEL_ADDR    0
+#endif
 #ifndef NN_SVC_HAS_OVERLAY
 #define NN_SVC_HAS_OVERLAY     0
 #endif
@@ -171,10 +185,6 @@ static void nn_print_tensor(struct cli_instance *sh, const char *tag, int idx,
 	}
 }
 
-/* One wording for every withheld section, so an operator learns it once. */
-static const char nn_withheld[] =
-	"-- held by a running stream (`nn stream stats`, or stop it)";
-
 /*
  * The threshold line, in one place because two subcommands print it (#104).
  *
@@ -184,15 +194,26 @@ static const char nn_withheld[] =
  * The contract names the value (NN_SVC_THRESH_NONE); this is where it is said
  * out loud, once, so `nn info` and `nn thresh` cannot drift apart about it.
  */
-static void nn_print_thresh(struct cli_instance *sh)
+static int nn_print_thresh(struct cli_instance *sh)
 {
-	unsigned milli = nn_svc_thresh_get();
+	unsigned milli = NN_SVC_THRESH_NONE;
+	int rc = nn_svc_thresh_get(&milli);
 
-	if (milli == NN_SVC_THRESH_NONE)
+	/* [!] NOT "none" (issue #122 P6).  A decoder that could not be asked is
+	 * not a decoder without a threshold, and an operator told the second goes
+	 * off to load a container over one that works. */
+	if (rc == NN_SVC_ERR_BUSY)
+		cli_print(sh, "thresh  : -- the decoder is busy just now; ask "
+		              "again\r\n");
+	else if (rc != NN_SVC_OK)
+		cli_print(sh, "thresh  : -- unavailable: %s (%d)\r\n",
+		          nn_status_name(rc), rc);
+	else if (milli == NN_SVC_THRESH_NONE)
 		cli_print(sh, "thresh  : none -- the active decoder has no "
 		              "threshold\r\n");
 	else
 		cli_print(sh, "thresh  : %u/1000\r\n", milli);
+	return rc;
 }
 
 /*
@@ -249,8 +270,10 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 	else
 		cli_print(sh, "backend : %s\r\n",
 		          info.backend[0] ? info.backend : "-");
-	if (info.avail_identity == NN_AVAIL_WITHHELD) {
-		cli_print(sh, "model   : %s\r\n", nn_withheld);
+	/* [!] WHO HAS IT DECIDES THE SENTENCE (issue #122 P4) -- see
+	 * nn_avail_text().  One wording per cause, so an operator learns it once. */
+	if (nn_avail_text(info.avail_identity) != NULL) {
+		cli_print(sh, "model   : %s\r\n", nn_avail_text(info.avail_identity));
 	} else {
 		cli_print(sh, "model   : %s\r\n",
 		          info.model_active ? (info.model[0] ? info.model : "(unnamed)")
@@ -260,8 +283,8 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 	}
 	cli_print(sh, "arena   : %lu B reserved\r\n",
 	          (unsigned long)info.arena_bytes);
-	if (info.avail_runtime == NN_AVAIL_WITHHELD)
-		cli_print(sh, "used    : %s\r\n", nn_withheld);
+	if (nn_avail_text(info.avail_runtime) != NULL)
+		cli_print(sh, "used    : %s\r\n", nn_avail_text(info.avail_runtime));
 	else if (info.arena_used)
 		cli_print(sh, "used    : %lu B (activations)\r\n",
 		          (unsigned long)info.arena_used);
@@ -274,8 +297,8 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 	 * The board's answer is checked first, and the probe itself still reports
 	 * a refusal, because the claim can be taken between the two.
 	 */
-	if (info.avail_tensors == NN_AVAIL_WITHHELD) {
-		cli_print(sh, "tensors : %s\r\n", nn_withheld);
+	if (nn_avail_text(info.avail_tensors) != NULL) {
+		cli_print(sh, "tensors : %s\r\n", nn_avail_text(info.avail_tensors));
 	} else if (info.model_active) {
 		struct tensor_desc t;
 
@@ -300,7 +323,7 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 #endif
 	}
 
-	nn_print_thresh(sh);
+	(void)nn_print_thresh(sh);
 
 	/* Whatever this board wants to add, in its own words.  Last, so the shared
 	 * lines always appear in the same place whatever a board says after them. */
@@ -316,17 +339,76 @@ static int cmd_nn_info(struct cli_instance *sh, int argc, char **argv)
 /* ---- nn model load / unload ---------------------------------------------- */
 
 #if NN_SVC_HAS_MODEL_LOAD
+/*
+ * [!] THE SOURCES LISTED ARE THIS BOARD'S (issue #122 P9).  The usage used to
+ * list all five tags on every board, while `help` is otherwise an inventory of
+ * the board it runs on -- so an operator reading it was offered `--path` on a
+ * board with no filesystem and learned otherwise only from the refusal.  The
+ * PARSER still takes all five: a tag this board lacks is refused by the board
+ * in its own words, and a bare word by the grammar, which is the point of it.
+ *
+ * Each alternative carries the separator in front of it exactly when an
+ * earlier one is present, so the list reads "a | b" with no stray bar.
+ */
+#if NN_SVC_HAS_MODEL_NAME
+#define NN_SRC_NAME_ "--name <name>"
+#else
+#define NN_SRC_NAME_ ""
+#endif
+#define NN_SRC_ANY1_ (NN_SVC_HAS_MODEL_NAME)
+#if NN_SVC_HAS_MODEL_SLOT
+#if NN_SRC_ANY1_
+#define NN_SRC_SLOT_ " | --slot <n>"
+#else
+#define NN_SRC_SLOT_ "--slot <n>"
+#endif
+#else
+#define NN_SRC_SLOT_ ""
+#endif
+#define NN_SRC_ANY2_ (NN_SRC_ANY1_ || NN_SVC_HAS_MODEL_SLOT)
+#if NN_SVC_HAS_MODEL_PATH
+#if NN_SRC_ANY2_
+#define NN_SRC_PATH_ " | --path <p>"
+#else
+#define NN_SRC_PATH_ "--path <p>"
+#endif
+#else
+#define NN_SRC_PATH_ ""
+#endif
+#define NN_SRC_ANY3_ (NN_SRC_ANY2_ || NN_SVC_HAS_MODEL_PATH)
+#if NN_SVC_HAS_MODEL_BUILTIN
+#if NN_SRC_ANY3_
+#define NN_SRC_BUILTIN_ " | builtin"
+#else
+#define NN_SRC_BUILTIN_ "builtin"
+#endif
+#else
+#define NN_SRC_BUILTIN_ ""
+#endif
+#define NN_SRC_ANY4_ (NN_SRC_ANY3_ || NN_SVC_HAS_MODEL_BUILTIN)
+#if NN_SVC_HAS_MODEL_ADDR
+#if NN_SRC_ANY4_
+#define NN_SRC_ADDR_ " | --addr <addr> <len>"
+#else
+#define NN_SRC_ADDR_ "--addr <addr> <len>"
+#endif
+#else
+#define NN_SRC_ADDR_ ""
+#endif
+#if !(NN_SRC_ANY4_ || NN_SVC_HAS_MODEL_ADDR)
+#error "NN_SVC_HAS_MODEL_LOAD with no model source: say which tags this board takes"
+#endif
+#define NN_MODEL_SOURCES_ \
+	NN_SRC_NAME_ NN_SRC_SLOT_ NN_SRC_PATH_ NN_SRC_BUILTIN_ NN_SRC_ADDR_
+
 /* [!] TWO SPELLINGS, BECAUSE THERE ARE TWO CONSUMERS.  A .usage field carries
  * the ARGUMENT SPELLING only -- the dispatcher prints "usage: <command path> "
  * in front of it -- while the parser below prints a whole line of its own.  One
  * string used for both is how every wrong-argument line in this file came to
  * read "usage: nn bench usage: nn bench [iterations]". */
-static const char nn_model_args[] =
-	"load <--name <name> | --slot <n> | --path <p> | builtin | "
-	"--addr <addr> <len>>";
+static const char nn_model_args[] = "load <" NN_MODEL_SOURCES_ ">";
 static const char nn_model_usage[] =
-	"usage: nn model load <--name <name> | --slot <n> | --path <p> | "
-	"builtin | --addr <addr> <len>>\r\n";
+	"usage: nn model load <" NN_MODEL_SOURCES_ ">\r\n";
 
 static int cmd_nn_model_load(struct cli_instance *sh, int argc, char **argv)
 {
@@ -959,10 +1041,8 @@ static int cmd_nn_thresh(struct cli_instance *sh, int argc, char **argv)
 	uint32_t milli;
 	int rc;
 
-	if (argc < 2) {
-		nn_print_thresh(sh);
-		return 0;
-	}
+	if (argc < 2)
+		return (nn_print_thresh(sh) == NN_SVC_OK) ? 0 : 1;
 	if (cli_parse_u32(argv[1], &milli) != 0 || milli == 0u || milli > 999u) {
 		cli_error(sh, "nn: usage: nn thresh [1..999]  "
 		              "(milli-probability)\r\n");
@@ -978,11 +1058,18 @@ static int cmd_nn_thresh(struct cli_instance *sh, int argc, char **argv)
 		              "set\r\n");
 		return 1;
 	}
+	if (rc == NN_SVC_ERR_BUSY) {
+		/* [!] NOT "not accepted" either (issue #122 P6): the value was never
+		 * looked at.  The same number, repeated, may well be taken. */
+		cli_error(sh, "nn: the decoder is busy just now, so the threshold "
+		              "was not changed -- try again\r\n");
+		return 1;
+	}
 	if (rc != NN_SVC_OK) {
 		cli_error(sh, "nn: the threshold was not accepted\r\n");
 		return 1;
 	}
-	nn_print_thresh(sh);
+	(void)nn_print_thresh(sh);
 	return 0;
 }
 

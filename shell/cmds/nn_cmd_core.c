@@ -222,7 +222,24 @@ const char *nn_status_name(int status)
 	case NN_SVC_ERR_HW:        return "the hardware refused or did not settle";
 	case NN_SVC_ERR_STALE:     return "the reading moved while it was taken";
 	case NN_SVC_ERR_GEN:       return "that stream has been replaced by another";
+	case NN_SVC_ERR_TIMEOUT:   return "it did not finish in time";
 	default:                   return "failed";
+	}
+}
+
+const char *nn_avail_text(uint8_t avail)
+{
+	switch (avail) {
+	case NN_AVAIL_OK:
+	case NN_AVAIL_NA:
+		return NULL;
+	case NN_AVAIL_WITHHELD:
+		return "-- held by a running stream (`nn stream stats`, or stop it)";
+	case NN_AVAIL_BUSY:
+		return "-- another nn command is using the model; ask again when it "
+		       "returns";
+	default:
+		return "-- not available just now";
 	}
 }
 

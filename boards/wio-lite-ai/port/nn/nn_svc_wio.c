@@ -287,9 +287,17 @@ static void nn_detail_to(char *dst, size_t cap, const char *fmt, ...)
 	va_end(ap);
 }
 
+/* [!] A legal asset name must survive `nn info`'s copy whole (issue #122 P10):
+ * a truncated one can read as a different, equally legal, name. */
+_Static_assert(NN_SVC_MODEL_MAX >= BLOB_NAME_MAX,
+               "nn info would truncate this board's longest asset name");
+
 /* Every failure path writes into the result it is about to return. */
-#define nn_detail_set(...) \
-	nn_detail_to(res->detail, sizeof res->detail, __VA_ARGS__)
+/* [!] Its format is checked against NN_SVC_DETAIL_MAX at build time (issue
+ * #122 P15): the copy truncates, and a truncated sentence does not look it. */
+#define nn_detail_set(...)                                                  \
+	((void)NN_SVC_DETAIL_CHECK_FMT(__VA_ARGS__),                        \
+	 nn_detail_to(res->detail, sizeof res->detail, __VA_ARGS__))
 #define nn_detail_clear()  (res->detail[0] = '\0')
 
 /* [!] The detail is COPIED into the caller's result here, at the one place a
@@ -874,6 +882,9 @@ int nn_svc_input(struct tensor_desc *out)
 
 /* ---- one shot ------------------------------------------------------------ */
 
+/** How long `nn run` waits for its one inference, in seconds. */
+#define NN_RUN_WAIT_S 3u
+
 void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
                      struct nn_report_capture *rep,
                      nn_svc_cancel_fn cancel, void *ctx,
@@ -884,6 +895,8 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	uint32_t base;
 	int rc, stop_rc;
 	ULONG deadline;
+	/* Why the wait ended -- the run's status, decided below (issue #122 P7). */
+	enum { RUN_INFERRED, RUN_LOST, RUN_CANCELLED, RUN_TIMEOUT } why = RUN_TIMEOUT;
 
 	nn_detail_clear();
 
@@ -907,15 +920,25 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	/* [!] Wall-clock deadline, not a count of completed sleeps: a sleep that
 	 * returns early on an already-pending tick would burn the budget instantly
 	 * and report a timeout that never happened. */
-	deadline = tx_time_get() + (3u * TX_TIMER_TICKS_PER_SECOND);
+	deadline = tx_time_get() + (NN_RUN_WAIT_S * TX_TIMER_TICKS_PER_SECOND);
 	for (;;) {
 		nn_camera_stats_get(&st);
-		if (st.infers > base || st.stream_lost)
+		if (st.infers > base) {
+			why = RUN_INFERRED;
 			break;
-		if (nn_svc_cancelled(cancel, ctx))
+		}
+		if (st.stream_lost) {
+			why = RUN_LOST;
 			break;
-		if ((LONG)(tx_time_get() - deadline) >= 0)
+		}
+		if (nn_svc_cancelled(cancel, ctx)) {
+			why = RUN_CANCELLED;
 			break;
+		}
+		if ((LONG)(tx_time_get() - deadline) >= 0) {
+			why = RUN_TIMEOUT;
+			break;
+		}
 		tx_thread_sleep(1u);
 	}
 
@@ -953,12 +976,44 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 * session and the OCTOSPI1 guard still held -- was reported as a clean run.
 	 * The next start would then be refused for a reason nobody had been told.
 	 */
-	nn_result(res, NN_SVC_OK, nn_claim_of_stop(stop_rc));
-	if (res->claim != NN_CLAIM_NONE)
-		nn_detail_set("the teardown did not finish (%d); the claims are still "
-		              "held", stop_rc);
-	else if (st.stream_lost)
-		nn_detail_set("the band stream was lost during the run");
+	/*
+	 * [!] AND WHY THE WAIT ENDED IS THE STATUS (issue #122 P7).  A cancelled or
+	 * timed-out run used to come back NN_SVC_OK with nothing published, which
+	 * the shared command could only print as "no decode was published for that
+	 * frame" -- the same words for an operator's Ctrl+C, a worker that never
+	 * got a frame, and a stream that died.  The disposition stays its own
+	 * field: an unfinished teardown is reported beside any of them.
+	 */
+	switch (why) {
+	case RUN_INFERRED:
+		nn_result(res, NN_SVC_OK, nn_claim_of_stop(stop_rc));
+		if (res->claim != NN_CLAIM_NONE)
+			nn_detail_set("the teardown did not finish (%d); the claims "
+			              "are still held", stop_rc);
+		else if (st.stream_lost)
+			nn_detail_set("the band stream was lost during the run");
+		return;
+	case RUN_LOST:
+		nn_result(res, NN_SVC_ERR_HW, nn_claim_of_stop(stop_rc));
+		nn_detail_set("the band stream was lost before an inference "
+		              "completed%s", (res->claim != NN_CLAIM_NONE)
+		              ? "; the teardown did not finish either" : "");
+		return;
+	case RUN_CANCELLED:
+		nn_result(res, NN_SVC_ERR_CANCEL, nn_claim_of_stop(stop_rc));
+		nn_detail_set("cancelled before an inference completed%s",
+		              (res->claim != NN_CLAIM_NONE)
+		              ? "; the teardown did not finish either" : "");
+		return;
+	case RUN_TIMEOUT:
+	default:
+		nn_result(res, NN_SVC_ERR_TIMEOUT, nn_claim_of_stop(stop_rc));
+		nn_detail_set("no inference completed within %u s%s",
+		              (unsigned)NN_RUN_WAIT_S,
+		              (res->claim != NN_CLAIM_NONE)
+		              ? "; the teardown did not finish either" : "");
+		return;
+	}
 }
 
 void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
@@ -1085,28 +1140,49 @@ void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
    where the codes are produced, and it is the port that can name them. */
 static const char *nn_nncam_strerror(int rc)
 {
+	/* [!] EVERY SENTENCE IS CHECKED AGAINST NN_SVC_DETAIL_MAX AT BUILD TIME
+	 * (issue #122 P15).  Each is copied whole into a result's detail, and one
+	 * of them used to be longer than that: on hardware it ended "or see `d",
+	 * the half the copy cut off being the advice. */
 	switch (rc) {
-	case NNCAM_ERR_RUNNING: return "a stream is already running (`nn stream stats`)";
-	case NNCAM_ERR_NOTRUN:  return "not running";
-	case NNCAM_ERR_MODEL:   return "no model loaded, or it has no usable input "
-	                               "tensor (`blob list`, then `nn model load --slot <n>`)";
-	case NNCAM_ERR_SESSION: return "the NN session is busy (`nn bench` or "
-	                               "`nn model load` is running)";
-	case NNCAM_ERR_PSRAM:   return "PSRAM not ready, or OCTOSPI1 is held by a "
-	                               "psram/membench/devmem/wifi flash command";
-	case NNCAM_ERR_BAND:    return "the camera would not start a band stream -- a "
-	                               "frame stream may own the DCMI "
-	                               "(`camera stream stop`), the other console may be "
-	                               "starting or stopping it, or see `dmesg`";
-	case NNCAM_ERR_GEOM:    return "the model input does not tile onto the camera's "
-	                               "4 bands, or its dtype is neither int8 nor "
-	                               "float32 (`nn info`)";
-	case NNCAM_ERR_QUANT:   return "the int8 input carries no per-tensor quantization "
-	                               "scale (`nn info` shows q(s=0.000000)) -- a "
-	                               "per-axis quantized input is not supported";
-	case NNCAM_ERR_SHAPES:  return "the container's decoder cannot read this "
-	                               "model's outputs -- its two halves do not "
-	                               "belong together (`nn info`)";
+	case NNCAM_ERR_RUNNING:
+		return NN_SVC_DETAIL_LIT(
+			"a stream is already running (`nn stream stats`)");
+	case NNCAM_ERR_NOTRUN:
+		return NN_SVC_DETAIL_LIT(
+			"not running");
+	case NNCAM_ERR_MODEL:
+		return NN_SVC_DETAIL_LIT(
+			"no model loaded, or it has no usable input "
+			"tensor (`blob list`, then `nn model load --slot <n>`)");
+	case NNCAM_ERR_SESSION:
+		return NN_SVC_DETAIL_LIT(
+			"the NN session is busy (`nn bench` or "
+			"`nn model load` is running)");
+	case NNCAM_ERR_PSRAM:
+		return NN_SVC_DETAIL_LIT(
+			"PSRAM not ready, or OCTOSPI1 is held by a "
+			"psram/membench/devmem/wifi flash command");
+	case NNCAM_ERR_BAND:
+		return NN_SVC_DETAIL_LIT(
+			"the camera would not start a band stream: a frame "
+			"stream may own the DCMI (`camera stream stop`), or the "
+			"other console is starting/stopping one; see `dmesg`");
+	case NNCAM_ERR_GEOM:
+		return NN_SVC_DETAIL_LIT(
+			"the model input does not tile onto the camera's "
+			"4 bands, or its dtype is neither int8 nor "
+			"float32 (`nn info`)");
+	case NNCAM_ERR_QUANT:
+		return NN_SVC_DETAIL_LIT(
+			"the int8 input carries no per-tensor quantization "
+			"scale (`nn info` shows q(s=0.000000)) -- a "
+			"per-axis quantized input is not supported");
+	case NNCAM_ERR_SHAPES:
+		return NN_SVC_DETAIL_LIT(
+			"the container's decoder cannot read this "
+			"model's outputs -- its two halves do not "
+			"belong together (`nn info`)");
 	/*
 	 * [!] IT ALSO COVERS "THERE IS NO DECODER AT ALL" (issue #116).  This
 	 * firmware carries none, so a bare model -- or a container whose plugin
@@ -1122,20 +1198,31 @@ static const char *nn_nncam_strerror(int rc)
 	 * know which it is.  Splitting the code would mean splitting the
 	 * question.
 	 */
-	case NNCAM_ERR_NODRAW:  return "nothing would annotate a live preview: no "
-	                               "decoder is loaded, or the one that is "
-	                               "draws nothing (`nn info`); `nn run` still "
-	                               "works";
-	case NNCAM_ERR_DECBUSY: return "the decoder could not be held still long "
-	                               "enough to ask it -- try again";
-	case NNCAM_ERR_INIT:    return "the worker thread or its objects could not be "
-	                               "created";
-	case NNCAM_ERR_TEARING: return "still tearing down (a callback or an inference "
-	                               "has not returned) -- run `nn stream stop` again";
-	case NNCAM_ERR_REARM:   return "the stream could not be re-armed (the DCMI may "
-	                               "be owned elsewhere) -- run `nn stream stop`, "
-	                               "then `nn stream start`";
-	default:                return "unknown error";
+	case NNCAM_ERR_NODRAW:
+		return NN_SVC_DETAIL_LIT(
+			"nothing would annotate a live preview: no "
+			"decoder is loaded, or the one that is "
+			"draws nothing (`nn info`); `nn run` still "
+			"works");
+	case NNCAM_ERR_DECBUSY:
+		return NN_SVC_DETAIL_LIT(
+			"the decoder could not be held still long "
+			"enough to ask it -- try again");
+	case NNCAM_ERR_INIT:
+		return NN_SVC_DETAIL_LIT(
+			"the worker thread or its objects could not be "
+			"created");
+	case NNCAM_ERR_TEARING:
+		return NN_SVC_DETAIL_LIT(
+			"still tearing down (a callback or an inference "
+			"has not returned) -- run `nn stream stop` again");
+	case NNCAM_ERR_REARM:
+		return NN_SVC_DETAIL_LIT(
+			"the stream could not be re-armed (the DCMI may "
+			"be owned elsewhere) -- run `nn stream stop`, "
+			"then `nn stream start`");
+	default:
+		return NN_SVC_DETAIL_LIT("unknown error");
 	}
 }
 
@@ -1289,20 +1376,17 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	case NN_STREAM_START_GO:
 		break;
 	case NN_STREAM_START_RUNNING:
-		nn_detail_to(res->detail, sizeof res->detail,
-		             "a stream is already running (`nn stream stats`)");
+		nn_detail_set("a stream is already running (`nn stream stats`)");
 		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
 		return;
 	case NN_STREAM_START_DEAD:
-		nn_detail_to(res->detail, sizeof res->detail,
-		             "a previous teardown was never confirmed; only a "
-		             "reboot clears it");
+		nn_detail_set("a previous teardown was never confirmed; only a "
+		              "reboot clears it");
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
 		return;
 	case NN_STREAM_START_BUSY:
 	default:
-		nn_detail_to(res->detail, sizeof res->detail,
-		             "a start or a stop is already in progress -- retry");
+		nn_detail_set("a start or a stop is already in progress -- retry");
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 		return;
 	}
@@ -1310,8 +1394,7 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	rc = nn_camera_start(spec->test ? 1 : 0, 1);   /* a panel: DRAW is required */
 	if (rc != NNCAM_OK) {
 		nn_stream_unadmit();      /* a failed re-arm goes back to RUNNING */
-		nn_detail_to(res->detail, sizeof res->detail, "%s",
-		             nn_nncam_strerror(rc));
+		nn_detail_set("%s", nn_nncam_strerror(rc));
 		nn_result(res, (rc == NNCAM_ERR_RUNNING) ? NN_SVC_ERR_STATE
 		                                         : NN_SVC_ERR_HW,
 		          NN_CLAIM_NONE);
@@ -1335,9 +1418,8 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		 * and releasing the claim could free something a live thread is inside.
 		 * Report terminal and leave everything exactly as it is.
 		 */
-		nn_detail_to(res->detail, sizeof res->detail,
-		             "the stream lifecycle moved underneath this start; what "
-		             "owns the hardware now cannot be established");
+		nn_detail_set("the stream lifecycle moved underneath this start; what "
+		              "owns the hardware now cannot be established");
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
 		return;
 	}
@@ -1346,12 +1428,10 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	   re-armed would hide that an outage occurred at all, and the counters
 	   deliberately keep running across it, so they do not show it either. */
 	if (rearm)
-		nn_detail_to(res->detail, sizeof res->detail,
-		             "stream re-armed after a lost stream (counters continue)");
+		nn_detail_set("stream re-armed after a lost stream (counters continue)");
 	else
-		nn_detail_to(res->detail, sizeof res->detail,
-		             "inference stream started (worker prio 18%s)",
-		             spec->test ? ", colorbar" : "");
+		nn_detail_set("inference stream started (worker prio 18%s)",
+		              spec->test ? ", colorbar" : "");
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
 
@@ -1444,8 +1524,7 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 	case NN_STREAM_STOP_GO:
 		break;
 	case NN_STREAM_STOP_WRONG_GEN:
-		nn_detail_to(res->detail, sizeof res->detail,
-		             "that stream has already been replaced by another");
+		nn_detail_set("that stream has already been replaced by another");
 		nn_result(res, NN_SVC_ERR_GEN, NN_CLAIM_NONE);
 		return;
 	case NN_STREAM_STOP_BUSY:
@@ -1456,19 +1535,17 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 		 * moment tearing down perfectly well.  The claim is somebody else's and
 		 * they are settling it; the retry advice belongs in the detail, not in
 		 * a warning about a teardown this caller never began. */
-		nn_detail_to(res->detail, sizeof res->detail,
-		             "a start or another stop owns the stream -- retry");
+		nn_detail_set("a start or another stop owns the stream -- retry");
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 		return;
 	case NN_STREAM_STOP_DEAD:
-		nn_detail_to(res->detail, sizeof res->detail,
-		             "a previous teardown was never confirmed; only a reboot "
-		             "clears it");
+		nn_detail_set("a previous teardown was never confirmed; only a reboot "
+		              "clears it");
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
 		return;
 	case NN_STREAM_STOP_IDLE:
 	default:
-		nn_detail_to(res->detail, sizeof res->detail, "not running");
+		nn_detail_set("not running");
 		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
 		return;
 	}
@@ -1500,7 +1577,7 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 	TX_RESTORE
 
 	if (rc == NNCAM_ERR_NOTRUN) {
-		nn_detail_to(res->detail, sizeof res->detail, "not running");
+		nn_detail_set("not running");
 		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
 		return;
 	}
@@ -1508,8 +1585,7 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 		/* [!] The incomplete teardowns are RETRYABLE, not failures: the release
 		 * is idempotent and repeating the stop is what settles it.  Anything
 		 * this board does not document is TERMINAL -- see nn_stop_disp[]. */
-		nn_detail_to(res->detail, sizeof res->detail, "%s",
-		             nn_nncam_strerror(rc));
+		nn_detail_set("%s", nn_nncam_strerror(rc));
 		nn_result(res, NN_SVC_ERR_HW, claim);
 		return;
 	}
@@ -1706,27 +1782,32 @@ int nn_svc_box_to_frame(const struct bf_det *in, struct bf_det *out)
  * meets in the first minute, and the one a differential test that gives both
  * decoders the same threshold cannot see.
  */
-unsigned nn_svc_thresh_get(void)
+int nn_svc_thresh_get(unsigned *milli)
 {
+	if (milli == NULL)
+		return NN_SVC_ERR_ARG;
+	*milli = NN_SVC_THRESH_NONE;
 #if defined(CONFIG_NN_BACKEND_TFLM)
-	unsigned v;
-
 	/* [!] UNDER THE LEASE (issue #110).  This reaches a plugin's param_get,
 	 * which reads plugin state that a decode may be rewriting and that a
 	 * concurrent `nn model load` may be REPLACING -- and this command takes no
 	 * NN session, so nothing else keeps either out.  If the lease cannot be
 	 * had, say there is no answer rather than reading one from a plugin
-	 * somebody else is in the middle of. */
+	 * somebody else is in the middle of.
+	 *
+	 * [!] AND "NO ANSWER" IS BUSY, NOT "NONE" (issue #122 P6).  Returning
+	 * NN_SVC_THRESH_NONE here told the operator the decoder held no threshold
+	 * when it merely could not be asked. */
 	if (!plugin_lease_take(NN_PLUGIN_LEASE_WAIT_TICKS))
-		return NN_SVC_THRESH_NONE;
-	v = nn_active_get_thresh_milli();
+		return NN_SVC_ERR_BUSY;
+	*milli = nn_active_get_thresh_milli();
 	plugin_lease_give();
-	return v;
+	return NN_SVC_OK;
 #else
 	/* [!] NO PLUGIN MECHANISM AND NO DECODER (issue #116).  The `null` backend
 	 * cannot load a container at all, so nothing in this build holds a
 	 * threshold -- the same answer the TFLM build gives with none loaded. */
-	return NN_SVC_THRESH_NONE;
+	return NN_SVC_OK;
 #endif
 }
 
@@ -1736,7 +1817,7 @@ int nn_svc_thresh_set(unsigned milli)
 	int r;
 
 	/* No detail to set: this entry point returns a status only, and the
-	 * shared command has a line for BUSY. */
+	 * shared command has a line for BUSY (issue #122 P6 gave it one). */
 	if (!plugin_lease_take(NN_PLUGIN_LEASE_WAIT_TICKS))
 		return NN_SVC_ERR_BUSY;
 	r = nn_active_set_thresh_milli(milli);

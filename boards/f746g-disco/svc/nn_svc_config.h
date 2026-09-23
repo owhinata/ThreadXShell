@@ -26,6 +26,9 @@
 /** ...and the source is a path on the SD card, so this board also supplies the
  *  whole-file read the shared command passes down (see nn_svc.h). */
 #define NN_SVC_HAS_MODEL_PATH  1
+/** ...or the model built into the image.  These two are the sources `nn model
+ *  load` lists here, and the only two the adapter accepts. */
+#define NN_SVC_HAS_MODEL_BUILTIN 1
 #endif
 
 /** One-shot capture and infer.  The camera is on the DCMI header. */

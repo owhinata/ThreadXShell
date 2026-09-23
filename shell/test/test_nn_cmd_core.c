@@ -164,6 +164,20 @@ static void test_spec_accepts(void)
 	assert(parse(&s, 3, "--addr", "0x3AE81000", "164512") == NN_SVC_OK);
 	assert(s.tag == NN_SPEC_ADDR && s.addr == 0x3AE81000u && s.len == 164512u);
 
+	/* [!] THE LONGEST NAME A BOARD CAN STORE IS CARRIED WHOLE (issue #122
+	 * P10).  grove-vision-ai-v2's asset store takes 64 characters and this
+	 * limit was 31, so a legal name was refused here as a malformed operand
+	 * before the board could look it up.  64 literally, not NN_SPEC_NAME_MAX:
+	 * a test written in the limit's own terms passes whatever the limit is. */
+	{
+		char name64[64 + 1];
+
+		memset(name64, 'b', 64u);
+		name64[64] = '\0';
+		assert(parse(&s, 2, "--name", name64, NULL) == NN_SVC_OK);
+		assert(s.tag == NN_SPEC_NAME && strcmp(s.name, name64) == 0);
+	}
+
 	printf("  C. every source form parses                               ok\n");
 }
 
@@ -230,6 +244,32 @@ static void test_names(void)
 
 	assert(nn_status_name(NN_SVC_OK) != NULL);
 	assert(nn_status_name(-12345) != NULL);
+	/* A run that did not finish in time is its own answer (issue #122 P7),
+	   not the catch-all an unknown code gets, nor a cancellation. */
+	assert(strcmp(nn_status_name(NN_SVC_ERR_TIMEOUT),
+	              nn_status_name(-12345)) != 0);
+	assert(strcmp(nn_status_name(NN_SVC_ERR_TIMEOUT),
+	              nn_status_name(NN_SVC_ERR_CANCEL)) != 0);
+
+	/*
+	 * [!] WHO HOLDS A SECTION DECIDES THE SENTENCE (issue #122 P4).  A stream
+	 * and an ordinary command send an operator to different places -- stop the
+	 * stream, or simply ask again -- and there used to be one sentence, naming
+	 * the stream, for both.  A filled section and one with nothing to report
+	 * have no sentence at all; a value this build does not know is not read as
+	 * either of those.
+	 */
+	assert(nn_avail_text(NN_AVAIL_OK) == NULL);
+	assert(nn_avail_text(NN_AVAIL_NA) == NULL);
+	assert(nn_avail_text(NN_AVAIL_WITHHELD) != NULL);
+	assert(strstr(nn_avail_text(NN_AVAIL_WITHHELD), "stream") != NULL);
+	assert(nn_avail_text(NN_AVAIL_BUSY) != NULL);
+	assert(strstr(nn_avail_text(NN_AVAIL_BUSY), "stream") == NULL);
+	assert(strcmp(nn_avail_text(NN_AVAIL_BUSY),
+	              nn_avail_text(NN_AVAIL_WITHHELD)) != 0);
+	assert(nn_avail_text(99u) != NULL);
+	assert(strcmp(nn_avail_text(99u), nn_avail_text(NN_AVAIL_WITHHELD)) != 0);
+	assert(strcmp(nn_avail_text(99u), nn_avail_text(NN_AVAIL_BUSY)) != 0);
 
 	/* Types: a tag this build does not know must read as unknown, not as
 	   int8 -- a consumer that believed it would read the buffer wrongly. */

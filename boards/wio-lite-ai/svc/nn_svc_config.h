@@ -21,6 +21,9 @@
  */
 #if defined(CONFIG_NN_BACKEND_TFLM) && BSP_ENABLE_KV
 #define NN_SVC_HAS_MODEL_LOAD  1
+/** The one source `nn model load` lists here: a NOR asset slot by index.  This
+ *  store has no lookup by name, so `--name` is not offered. */
+#define NN_SVC_HAS_MODEL_SLOT  1
 #endif
 
 /** One-shot capture and infer, from the camera's band stream. */

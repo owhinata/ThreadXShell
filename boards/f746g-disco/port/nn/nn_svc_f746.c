@@ -53,8 +53,11 @@ static void nn_detail_to(char *dst, size_t cap, const char *fmt, ...)
 }
 
 /* Every failure path writes into the result it is about to return. */
-#define nn_detail_set(...) \
-	nn_detail_to(res->detail, sizeof res->detail, __VA_ARGS__)
+/* [!] Its format is checked against NN_SVC_DETAIL_MAX at build time (issue
+ * #122 P15): the copy truncates, and a truncated sentence does not look it. */
+#define nn_detail_set(...)                                                  \
+	((void)NN_SVC_DETAIL_CHECK_FMT(__VA_ARGS__),                        \
+	 nn_detail_to(res->detail, sizeof res->detail, __VA_ARGS__))
 #define nn_detail_clear()  (res->detail[0] = '\0')
 
 /* [!] The detail is COPIED into the caller's result here, at the one place a
@@ -342,6 +345,9 @@ int nn_svc_input(struct tensor_desc *out)
 
 /* ---- one shot ------------------------------------------------------------ */
 
+/** How long `nn run` waits for its one inference, in seconds. */
+#define NN_RUN_WAIT_S 2u
+
 void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
                      struct nn_report_capture *rep,
                      nn_svc_cancel_fn cancel, void *ctx,
@@ -350,6 +356,8 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	struct nn_camera_stats s;
 	struct nn_camera_decode dec;
 	int rc, stop_rc;
+	/* Why the wait ended -- the run's status, decided below (issue #122 P7). */
+	enum { RUN_INFERRED, RUN_CANCELLED, RUN_TIMEOUT } why = RUN_TIMEOUT;
 
 	nn_detail_clear();
 
@@ -375,7 +383,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	}
 
 	/*
-	 * Bounded wait for one inference -- about two seconds.  The worker is below
+	 * Bounded wait for one inference -- NN_RUN_WAIT_S.  The worker is below
 	 * this thread in priority, so sleeping is what lets it run at all.
 	 *
 	 * [!] THE DEADLINE IS WALL CLOCK, not a count of completed sleeps: a
@@ -384,16 +392,23 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 * never happened.
 	 */
 	{
-		ULONG deadline = tx_time_get() + (2u * TX_TIMER_TICKS_PER_SECOND);
+		ULONG deadline = tx_time_get() +
+		                 (NN_RUN_WAIT_S * TX_TIMER_TICKS_PER_SECOND);
 
 		for (;;) {
 			nn_camera_stats_get(&s);
-			if (s.infers >= 1u)
+			if (s.infers >= 1u) {
+				why = RUN_INFERRED;
 				break;
-			if (nn_svc_cancelled(cancel, ctx))
+			}
+			if (nn_svc_cancelled(cancel, ctx)) {
+				why = RUN_CANCELLED;
 				break;
-			if ((LONG)(tx_time_get() - deadline) >= 0)
+			}
+			if ((LONG)(tx_time_get() - deadline) >= 0) {
+				why = RUN_TIMEOUT;
 				break;
+			}
 			tx_thread_sleep(1u);
 		}
 	}
@@ -418,10 +433,37 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	nn_report_set(rep, NN_REPORT_NONE);
 
 	stop_rc = nn_camera_stop();
-	nn_result(res, NN_SVC_OK, nn_claim_of_stop(stop_rc));
-	if (res->claim != NN_CLAIM_NONE)
-		nn_detail_set("the camera has not released the inference frame (%d)",
-		              stop_rc);
+
+	/*
+	 * [!] WHY THE WAIT ENDED IS THE STATUS (issue #122 P7).  A cancelled or
+	 * timed-out run used to come back NN_SVC_OK with nothing published, which
+	 * the shared command could only print as "no decode was published for that
+	 * frame".  The disposition stays its own field beside either answer.
+	 */
+	switch (why) {
+	case RUN_INFERRED:
+		nn_result(res, NN_SVC_OK, nn_claim_of_stop(stop_rc));
+		if (res->claim != NN_CLAIM_NONE)
+			nn_detail_set("the camera has not released the inference "
+			              "frame (%d)", stop_rc);
+		return;
+	case RUN_CANCELLED:
+		nn_result(res, NN_SVC_ERR_CANCEL, nn_claim_of_stop(stop_rc));
+		nn_detail_set("cancelled before an inference completed%s",
+		              (res->claim != NN_CLAIM_NONE)
+		              ? "; the camera has not released the frame either"
+		              : "");
+		return;
+	case RUN_TIMEOUT:
+	default:
+		nn_result(res, NN_SVC_ERR_TIMEOUT, nn_claim_of_stop(stop_rc));
+		nn_detail_set("no inference completed within %u s%s",
+		              (unsigned)NN_RUN_WAIT_S,
+		              (res->claim != NN_CLAIM_NONE)
+		              ? "; the camera has not released the frame either"
+		              : "");
+		return;
+	}
 }
 
 void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
@@ -903,9 +945,14 @@ int nn_svc_box_to_frame(const struct bf_det *in, struct bf_det *out)
 	return NN_SVC_OK;
 }
 
-unsigned nn_svc_thresh_get(void)
+int nn_svc_thresh_get(unsigned *milli)
 {
-	return nn_decoder_get_thresh_milli();
+	/* Always answers: the resident decoder's threshold is a plain value
+	 * behind no lock, so there is nothing to be busy on here. */
+	if (milli == NULL)
+		return NN_SVC_ERR_ARG;
+	*milli = nn_decoder_get_thresh_milli();
+	return NN_SVC_OK;
 }
 
 int nn_svc_thresh_set(unsigned milli)

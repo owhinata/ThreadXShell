@@ -702,6 +702,9 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/npu/npu_desc.c"
     "${BOARD_DIR}/port/npu/nn_svc_grove.c"
     "${BOARD_DIR}/port/npu/nn_stream_state.c"
+    # Where a `nn model load` ends and what that obliges (issue #122): a pure
+    # table, so the host test walks the endings a console cannot produce.
+    "${BOARD_DIR}/port/npu/nn_swap.c"
     "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"
     # The bounded sink a board captures an external decoder's report into
     # (issue #110); the buffer itself belongs to the shared command.

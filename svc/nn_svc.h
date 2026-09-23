@@ -164,7 +164,9 @@ _Static_assert((int)NN_CLAIM_TERMINAL  == NN_STREAM_CLAIM_TERMINAL,  "claim move
 enum nn_model_state {
 	NN_MODEL_EMPTY = 0,   /**< nothing active -- including after a failed roll
 	                       *   back, which is NOT the same as a plain refusal */
-	NN_MODEL_NEW,         /**< the model just asked for is active             */
+	NN_MODEL_NEW,         /**< the model just asked for is active.  With a
+	                       *   FAILED status: open, but its decoder was
+	                       *   refused and none is running (issue #122 D6) */
 	NN_MODEL_PREVIOUS,    /**< the request was refused; the old one is active */
 };
 
@@ -495,6 +497,13 @@ void nn_svc_info(struct nn_svc_info *out);
  * the board runs its OWN ordered sequence -- Grove brings the NPU and lease up
  * before it resolves a name, because the lookup reads through the window that
  * bring-up opens -- and unwinds it itself on failure.
+ *
+ * Over an open model it is a REPLACEMENT on every board (issue #122): refused
+ * before the backend moves, the previous model stays (PREVIOUS); refused by the
+ * backend, the previous one is rebuilt (PREVIOUS) or, failing that, nothing is
+ * left (EMPTY).  A plugin is swapped only after the backend took the new model,
+ * and a plugin refused THEN is a failed status with state NEW -- the model is
+ * open without a decoder, since the previous plugin is already gone.
  *
  * @param state  where the lifecycle ended up, independent of the status
  */

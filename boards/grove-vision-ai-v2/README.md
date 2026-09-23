@@ -2039,8 +2039,37 @@ load-bearing:
    **`BLOB_VALID` is a statement about the HEADER**, and a consumer that PARSES
    a payload in place has to check the payload.
 5. `npu_open()`, with the length from the header the CRC ran against.
-6. any failure on the way down: `npu_hw_deinit()`, so the flash lease is never
-   held by a half-open NPU.
+6. the plugin, if the payload is a container that carries one -- **only after
+   `npu_open()` took the model** (issue #122).
+7. any failure that leaves no model open: `npu_hw_deinit()`, so the flash lease
+   is never held by a half-open NPU.
+
+#### Loading over an open model replaces it (issue #122)
+
+`nn model load` no longer answers "unload first".  With a model open the NPU is
+already up and holding the lease, so steps 3-5 run under that lease; the old
+interpreter is closed only once the new model has resolved and verified, and the
+plugin is swapped only once the backend has taken the new model -- the
+executable reservation is one region, and copying a new image into it destroys
+the one that is there.  Where it ends (`port/npu/nn_swap.c`, walked by
+`test/test_nn_swap.c`):
+
+| stopped at | status | state | plugin | NPU / lease | last result |
+|---|---|---|---|---|---|
+| name, CRC, container (nothing touched) | failed | `previous` | kept | kept | kept |
+| `npu_open()` refused the new model, the previous one reopened | failed | `previous` | kept (never touched) | kept | kept |
+| `npu_open()` refused it and the previous one too | failed | `empty` | unloaded | down | gone |
+| the new model's plugin refused (`entry()` or earlier) | **failed** | **`new`** | unloaded | kept, for the new model | gone |
+| opened, plugin started or none carried | ok | `new` | the new one, or none | kept | gone |
+
+The fourth row is not a rollback because there is nothing to roll back to: the
+copy has already destroyed the previous plugin.  The new model stays open with no
+decoder -- `nn run` reports its raw tensors and `nn stream start` refuses -- the
+shared command says `the new model is open, but it has no decoder`, and `nn info`
+shows the container with `not loaded`.  The previous model is reopened from the
+same bytes it was opened from; no `blob write` can have moved them, because the
+lease never dropped.  Nothing the resolution parses is the adapter's until the
+load commits, so a refusal leaves `nn info` describing exactly what it did before.
 
 `blob_stat()` and `blob_verify()` take a lease and give it back; the leased
 forms (`blob_stat_leased`, `blob_verify_leased`) take the CALLER'S token and
@@ -5508,8 +5537,8 @@ tail-calls `nn_overlay_draw`.
 
 | slot | thread (deepest path) | depth | stack - depth - 208 | L(slot) | over 1,024 | real need |
 |---|---|---:|---:|---:|---:|---:|
-| entry | console (`nn model load`) | 1,064 | 2,824 | **2,824** | 1,800 | 8 |
-| | background job | 976 | 2,912 | | | |
+| entry | console (`nn model load`) | 976 | 2,912 | **2,912** | 1,888 | 8 |
+| | background job | 888 | 3,000 | | | |
 | shapes_ok | console (`nn stream start`) | 1,528 | 2,360 | **2,360** | 1,336 | 40 |
 | | background job | 1,440 | 2,448 | | | |
 | decode | console (`nn run`) | 2,360 | 1,528 | **1,528** | 504 | 632 |
@@ -5533,8 +5562,12 @@ Report takes the same path to `nn_svc_run_once` and then `nn_capture_report` 8
 > `nn_active_report` 32 (2,080, also measured).  `cmd_nn_run` grew by about
 300 B at #121 -- the result's output shapes or classes travel in its frame --
 and `nn dets` reaches report only, through `cmd_nn_dets` 1,232 >
-`nn_svc_decode_current` 24.  To entry: ... > `cmd_nn_model_load` 344 >
-`nn_svc_model_load` 216 > `plugin_run_load` 48 > `plugin_exec_load` 56.
+`nn_svc_decode_current` 24.  To entry (issue #122 stage 4, which moved the
+plugin load out of the name resolution and after `npu_open()`): ... >
+`cmd_nn_model_load` 376 > `nn_svc_model_load` 96 > `plugin_run_load` 48 >
+`plugin_exec_load` 56.  The resolution's slot table (`nn_resolve_blob` 200,
+`noinline`) has returned by then; before, the call sat inside it and the path
+was 1,096.
 "real need" is the next section's.
 
 #### The veneer charge is derived from the image, and checked

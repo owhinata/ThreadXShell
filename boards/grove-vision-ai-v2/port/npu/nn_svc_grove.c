@@ -53,6 +53,7 @@
 #include "nn_preproc.h"
 #include "nn_rec.h"
 #include "nn_stream_state.h"
+#include "nn_swap.h"
 #include "nor_flash.h"    /* NOR_XIP_BASE */
 #include "npu.h"
 #include "npu_hw.h"
@@ -673,6 +674,25 @@ static struct plugin_view nn_container;
 static int                nn_has_container;
 
 /*
+ * [!] WHERE A LOAD PARSES INTO, AND NOT THE ADAPTER'S OWN STATE (issue #122).
+ * A load over an open model may end with the previous model reopened, and then
+ * nothing about it -- its manifest included, which `nn info` prints -- may have
+ * moved.  So a resolution writes here and the adapter copies it across only
+ * when the load commits the new model.  Static rather than a local: the load
+ * calls a plugin's entry() on this same stack, and a view is a few hundred
+ * bytes that entry() would otherwise be charged for.
+ */
+static struct plugin_view nn_container_next;
+
+/** What a resolution found.  Nothing in here is the adapter's until committed. */
+struct nn_resolved {
+	uint32_t addr, len;   /**< the MODEL: what npu_open() is given           */
+	uint32_t src;         /**< the container's first byte, or 0 for a bare
+	                       *   model -- where the plugin image is read from  */
+	int      slot;        /**< -1 for the raw form                           */
+};
+
+/*
  * A blob name -> the address and length npu_open() will be given.
  *
  * [!] THE ORDER IS THE POINT (issue #93): the caller already holds the NPU lease
@@ -682,9 +702,18 @@ static int                nn_has_container;
  * HEADER only; and blob_stat()'s lease is taken and returned per slot, so
  * resolving through it would leave a gap in which a background `blob write`
  * could replace the very slot that was chosen.
+ *
+ * [!] IT NO LONGER STARTS THE PLUGIN (issue #122).  It used to, straight after
+ * the container split, and that was harmless only while a load could not begin
+ * over an open model: the copy into the one executable reservation destroys
+ * whatever plugin is there, so starting the new one before the backend has
+ * taken the new model would leave nothing to roll back to.  The plugin is now
+ * the load's LAST step (nn_svc_model_load()).  Not inlined, so that this frame
+ * -- the slot table -- is gone before that step calls a plugin's entry().
  */
-static int nn_resolve_blob(struct nn_op_result *res, uint32_t token,
-                           const char *name, uint32_t *addr, uint32_t *len)
+static __attribute__((noinline)) int
+nn_resolve_blob(struct nn_op_result *res, uint32_t token, const char *name,
+                struct nn_resolved *out)
 {
 	struct blob_slot_view v[BLOB_MAX_SLOTS];
 	struct blob_info info;
@@ -741,93 +770,102 @@ static int nn_resolve_blob(struct nn_op_result *res, uint32_t token,
 	 * re-sending them would cost two erases of a part whose endurance is not
 	 * documented.
 	 */
-	nn_has_container = 0;
+	out->slot = (int)slot;
 	if (plugin_probe((const void *)(uintptr_t)(NOR_XIP_BASE + payload),
 	                 info.length) == PLUGIN_KIND_CONTAINER) {
 		enum plugin_result pr;
 
 		pr = plugin_parse((const void *)(uintptr_t)(NOR_XIP_BASE + payload),
-		                  info.length, &nn_plugin_policy, &nn_container);
+		                  info.length, &nn_plugin_policy, &nn_container_next);
 		if (pr != PLUGIN_OK) {
 			nn_detail_set("slot %u ('%s') is a container this firmware "
 			              "refuses: %s", slot, name,
 			              plugin_result_name(pr));
 			return -1;
 		}
-		nn_has_container = 1;
-
-		/*
-		 * [!] STILL INSIDE THE LEASE.  The image is read from the XIP window,
-		 * and the window is only pinned while this lease is live -- which is
-		 * exactly why the load happens here rather than after the caller has
-		 * finished with the model.  plugin_run_load() checks it too, because a
-		 * later caller may not know that.
-		 *
-		 * A container with no plugin is not a failure: the model half of it is
-		 * still perfectly usable, and NO_PLUGIN says so.
-		 */
-		{
-			enum plugin_run_result pr;
-
-			pr = plugin_run_load(&nn_container,
-			                     (const void *)(uintptr_t)(NOR_XIP_BASE +
-			                                               payload),
-			                     token, &nn_plugin_base);
-			if (pr != PLUGIN_RUN_OK && pr != PLUGIN_RUN_NO_PLUGIN) {
-				nn_detail_set("slot %u ('%s'): %s", slot, name,
-				              plugin_run_strerror(pr));
-				return -1;
-			}
-		}
 		/* The MODEL section, not the container: npu_open() parses a
 		 * flatbuffer and the rest of the payload is not one. */
-		*addr = NOR_XIP_BASE + payload + nn_container.model_off;
-		*len  = nn_container.model_len;
-		nn_model_slot = (int)slot;
+		out->src  = NOR_XIP_BASE + payload;
+		out->addr = out->src + nn_container_next.model_off;
+		out->len  = nn_container_next.model_len;
 		return 0;
 	}
 
-	*addr = NOR_XIP_BASE + payload;
-	*len  = info.length;
-	nn_model_slot = (int)slot;
+	out->src  = 0u;
+	out->addr = NOR_XIP_BASE + payload;
+	out->len  = info.length;
 	return 0;
 }
 
 /* ---- model lifecycle ----------------------------------------------------- */
 
 /*
- * Undo a load that got part way.
+ * The plugin half of a load, run only once the backend has taken the new model.
  *
- * [!] THE PLUGIN IS PART OF THE LOAD, SO IT IS PART OF THE UNWIND (issue #103).
- * nn_resolve_blob() starts the plugin before npu_open() is even called -- it has
- * to, because the image is read from the XIP window and only this lease pins it
- * -- so a load that fails AFTER that point left one running.  `nn_open_done`
- * stays 0, the next `nn model load` is therefore allowed, and if that one is a
- * bare model or a container with no plugin then nothing calls plugin_run_load()
- * at all: the previous model's decoder reads the new model's outputs.
+ * [!] STILL INSIDE THE LEASE.  The image is read from the XIP window, and the
+ * window is only pinned while this lease is live -- which is why the NPU keeps
+ * it for as long as the model is open.  plugin_run_load() checks it too,
+ * because a later caller may not know that.
  *
- * That was wrong before this issue and is worse after it, because
- * nn_active_is_plugin() now also waives the resident decoder's input-quantisation
- * precondition -- so the one check that would have noticed the mismatch is the
- * one the stale plugin switches off.
+ * A container with no plugin is not a failure: the model half of it is still
+ * perfectly usable, and NO_PLUGIN says so -- the loader has already unpublished
+ * the previous plugin by then.  A BARE model loads nothing, and so it unloads:
+ * the previous model's decoder must not read the new model's outputs, and
+ * nn_active_is_plugin() would also waive the one input precondition that might
+ * have noticed.
  *
- * Written as the mirror of nn_svc_model_unload()'s order, plugin first, so the
- * two cannot drift.
+ * @return 0, or -1 with the detail set: the plugin was refused
  */
-static void nn_load_undo(void)
+static int nn_swap_plugin(struct nn_op_result *res, const struct nn_resolved *r,
+                          const char *name)
 {
-	plugin_run_unload();
-	nn_has_container = 0;
-	npu_hw_deinit();
+	enum plugin_run_result pr;
+
+	if (r->src == 0u) {
+		plugin_run_unload();
+		return 0;
+	}
+	pr = plugin_run_load(&nn_container_next,
+	                     (const void *)(uintptr_t)r->src,
+	                     npu_hw_flash_lease(), &nn_plugin_base);
+	if (pr == PLUGIN_RUN_OK || pr == PLUGIN_RUN_NO_PLUGIN)
+		return 0;
+	nn_detail_set("slot %d ('%s'): %s", r->slot, name,
+	              plugin_run_strerror(pr));
+	return -1;
 }
 
+/*
+ * Point the model lifecycle at @p spec -- over an open model too (issue #122).
+ *
+ * ONE ORDER, AND THE FIRST STEP THAT FAILS ENDS IT: bring the NPU up if nothing
+ * is open (issue #93: before the lookup, because the lookup reads through the
+ * window the bring-up opens) -> resolve and verify the new model under that
+ * lease, into staging -> close the old interpreter -> open the new one ->
+ * swap the plugin.  What each ending obliges is port/npu/nn_swap.c's table, so
+ * the rules are one list and a host test walks it.
+ *
+ * [!] THE PLUGIN IS SWAPPED AFTER THE BACKEND TOOK THE NEW MODEL, NEVER BEFORE.
+ * There is one executable reservation and loading into it destroys what was
+ * there.  Done first, a backend refusal would leave the previous model reopened
+ * under the NEW model's decoder, or under none.  Done last, a backend refusal
+ * reopens the previous model with its plugin never touched.
+ *
+ * [!] THE PREVIOUS MODEL IS REOPENED FROM THE SAME BYTES, UNDER THE SAME LEASE.
+ * The NPU and its flash lease stay up across the whole replacement, so no
+ * `blob write` can have moved the slot it was opened from.  If even that reopen
+ * fails, everything comes down: an NPU that is up with no model is a state
+ * nothing uses, and it would hold the lease against `blob write`.
+ */
 void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
                        void *ctx, struct nn_op_result *res,
                        enum nn_model_state *state)
 {
-	uint32_t addr = 0u, len = 0u;
+	struct nn_resolved r;
+	struct nn_swap_verdict v;
+	enum nn_swap_end end;
 	const char *name = NULL;
-	int rc;
+	int status = NN_SVC_OK, had_open, rc;
 
 	/* This board's models come from the asset store or a raw window; it never
 	   reads a file, so the reader is not used. */
@@ -836,6 +874,8 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 
 	nn_detail_clear();
 	*state = NN_MODEL_EMPTY;
+	memset(&r, 0, sizeof r);
+	r.slot = -1;
 
 	/*
 	 * [!] THE TAG IS REFUSED BEFORE ANYTHING IS ACQUIRED.  A source this board
@@ -855,17 +895,18 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 		name = spec->name;
 		break;
 	case NN_SPEC_ADDR:
-		addr = spec->addr;
-		len  = spec->len;
+		r.addr = spec->addr;
+		r.len  = spec->len;
 		/* Refused in this board's own words rather than as a bare error from
 		 * three layers down, because here the operator can see WHICH of the
 		 * two numbers is wrong. */
-		if (len < npu_model_len_min() || len > npu_model_len_max(addr)) {
+		if (r.len < npu_model_len_min() ||
+		    r.len > npu_model_len_max(r.addr)) {
 			nn_detail_set("length %lu is not between %lu and %lu for 0x%08lx",
-			              (unsigned long)len,
+			              (unsigned long)r.len,
 			              (unsigned long)npu_model_len_min(),
-			              (unsigned long)npu_model_len_max(addr),
-			              (unsigned long)addr);
+			              (unsigned long)npu_model_len_max(r.addr),
+			              (unsigned long)r.addr);
 			*state = nn_open_done ? NN_MODEL_PREVIOUS : NN_MODEL_EMPTY;
 			nn_result(res, NN_SVC_ERR_ARG, NN_CLAIM_NONE);
 			return;
@@ -888,18 +929,8 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 		return;
 	}
-	if (nn_open_done) {
-		nn_detail_set("a model is already open -- `nn model unload` first");
-		*state = NN_MODEL_PREVIOUS;
-		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
-		nn_release();
-		return;
-	}
-	/* [!] From here the plugin and the model can change, whatever this load
-	 * then reports, so the last result goes now (issue #118) -- under the
-	 * gate, before any new identity is visible.  Nothing is open at this point
-	 * (a load over an open model is refused above), so nothing is lost. */
-	nn_rec_invalidate();
+	/* Read under the gate: no unload, and no other load, can move it now. */
+	had_open = nn_open_done ? 1 : 0;
 
 	/*
 	 * [!] THE BRING-UP COMES BEFORE THE LOOKUP, and the whole load is built
@@ -907,9 +938,10 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	 * lease, so from here to the end of the model's life the window is up and
 	 * no writer can take the part.  Resolving a name first and bringing the
 	 * hardware up afterwards would put a gap between the answer and the parse
-	 * -- and the answer is an ADDRESS.
+	 * -- and the answer is an ADDRESS.  Over an open model the NPU is already
+	 * up and holding that lease, and the lookup runs under it.
 	 */
-	if (npu_hw_init() != 0) {
+	if (!had_open && npu_hw_init() != 0) {
 		nn_detail_set("%s", npu_hw_fail_reason() ? npu_hw_fail_reason()
 		                                         : "bring-up failed");
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
@@ -917,41 +949,86 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 		return;
 	}
 
-	nn_model_slot = -1;
-	if (name != NULL && nn_resolve_blob(res, npu_hw_flash_lease(), name,
-	                                    &addr, &len) != 0) {
-		/* Every failure from here leaves the hardware DOWN: an NPU that is up
-		 * with no model is a state nothing would use, and it would hold the
-		 * flash lease against `blob write` for as long as it lasted. */
-		nn_load_undo();
-		nn_result(res, NN_SVC_ERR_ARG, NN_CLAIM_NONE);
-		nn_release();
-		return;
+	if (name != NULL &&
+	    nn_resolve_blob(res, npu_hw_flash_lease(), name, &r) != 0) {
+		end    = NN_SWAP_REFUSED;
+		status = NN_SVC_ERR_ARG;
+		goto settle;
 	}
 
-	rc = npu_open(addr, len, npu_arena_base(), npu_arena_bytes());
+	/* One interpreter: the old one goes before the new one can be built.
+	 * Nothing can reach it meanwhile -- every path in holds this gate. */
+	if (had_open)
+		npu_close();
+	rc = npu_open(r.addr, r.len, npu_arena_base(), npu_arena_bytes());
 	if (rc != NPU_OK) {
 		nn_detail_set("%s (0x%08lx, %lu B)", npu_status_name(rc),
-		              (unsigned long)addr, (unsigned long)len);
-		nn_load_undo();
-		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
-		nn_release();
-		return;
+		              (unsigned long)r.addr, (unsigned long)r.len);
+		status = NN_SVC_ERR_HW;
+		end    = NN_SWAP_LOST;
+		if (had_open && npu_open(nn_model_addr, nn_model_len,
+		                         npu_arena_base(),
+		                         npu_arena_bytes()) == NPU_OK)
+			end = NN_SWAP_RESTORED;
+		goto settle;
 	}
 
-	nn_open_done  = 1u;
-	nn_model_addr = addr;
-	nn_model_len  = len;
-	nn_geom_valid = 0u;
-	if (name != NULL) {
-		(void)strncpy(nn_model_from, name, sizeof nn_model_from - 1u);
-		nn_model_from[sizeof nn_model_from - 1u] = '\0';
+	if (nn_swap_plugin(res, &r, name) != 0) {
+		end    = NN_SWAP_UNDECODED;
+		status = NN_SVC_ERR_ARG;
 	} else {
+		end = NN_SWAP_OPENED;
+	}
+
+settle:
+	nn_swap_decide(had_open, end, &v);
+	/* Unload's order: plugin -> model -> NPU -> lease. */
+	if (v.unload)
+		plugin_run_unload();
+	if (v.hw_down) {
+		npu_close();
+		npu_hw_deinit();
+	}
+	/* [!] The last result goes BEFORE any new identity is visible, and under
+	 * the gate (issue #118) -- and only when what is open changed: a refusal
+	 * or a rollback leaves the result of the model that is still open. */
+	if (v.invalidate)
+		nn_rec_invalidate();
+	if (v.forget) {
+		nn_open_done     = 0u;
+		nn_has_container = 0;
+		nn_model_addr    = 0u;
+		nn_model_len     = 0u;
+		nn_model_slot    = -1;
 		nn_model_from[0] = '\0';
 	}
+	if (v.commit) {
+		/* [!] COMMITTED EVEN WHEN THE PLUGIN WAS REFUSED (issue #122 D6):
+		 * the new model IS open, so it is what `nn info` names and what the
+		 * lease is now held for.  The manifest stays too, and `nn info` reads
+		 * it as "not loaded" -- which is the fact. */
+		nn_open_done     = 1u;
+		nn_model_addr    = r.addr;
+		nn_model_len     = r.len;
+		nn_model_slot    = r.slot;
+		nn_has_container = (r.src != 0u);
+		if (nn_has_container)
+			nn_container = nn_container_next;
+		if (name != NULL) {
+			(void)strncpy(nn_model_from, name, sizeof nn_model_from - 1u);
+			nn_model_from[sizeof nn_model_from - 1u] = '\0';
+		} else {
+			nn_model_from[0] = '\0';
+		}
+	}
+	if (v.state != (unsigned char)NN_MODEL_PREVIOUS) {
+		/* A capture's geometry belongs to the model it was taken for. */
+		nn_geom_valid = 0u;
+		nn_active_clear_geom();
+	}
 
-	*state = NN_MODEL_NEW;
-	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
+	*state = (enum nn_model_state)v.state;
+	nn_result(res, v.ok ? NN_SVC_OK : status, NN_CLAIM_NONE);
 	nn_release();
 }
 
@@ -2107,20 +2184,57 @@ static int nn_info_line(nn_svc_write_fn write, void *ctx, const char *f, ...)
  * there.
  *
  * [!] NOTHING IS HELD WHILE THIS PRINTS.  The reservation's bounds are linker
- * constants and need no claim at all; when Step 1b has a manifest to report it
- * must SNAPSHOT the fields under its claim, release, and only then write.  A
- * console line takes as long as a UART takes, and holding the inference gate
- * across one would stall the camera producer for exactly that long.
+ * constants and need no claim at all; the manifest is SNAPSHOT under the claim,
+ * released, and only then written.  A console line takes as long as a UART
+ * takes, and holding the inference gate across one would stall the camera
+ * producer for exactly that long.
+ *
+ * [!] AND THE SNAPSHOT IS NOT OPTIONAL SINCE A LOAD CAN REPLACE AN OPEN MODEL
+ * (issue #122).  Before that, the manifest only changed while nothing was open;
+ * now a load on another console rewrites it under an open model, and a line
+ * blocked on the UART would print half of each.  The rule is nn_svc_info()'s:
+ * take the gate, or -- when a STREAM holds it, and so no load can run -- copy
+ * in the same critical section that saw the stream; an operation holding it may
+ * be rewriting exactly this, so that is BUSY.
  */
 void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 {
 	uint32_t base = (uint32_t)(uintptr_t)__plugin_start;
 	uint32_t size = (uint32_t)(__plugin_end - __plugin_start);
+	struct plugin_view view;
+	int has = 0, active = 0;
+	uint8_t owner = (uint8_t)NN_OWNER_NONE;
+	TX_INTERRUPT_SAVE_AREA
 
 	if (write == NULL)
 		return;
 
-	if (!nn_has_container) {
+	if (nn_try_acquire()) {
+		has = nn_has_container;
+		if (has)
+			view = nn_container;
+		active = plugin_run_active();
+		nn_release();
+	} else {
+		TX_DISABLE
+		owner = nn_owner;
+		if (owner == (uint8_t)NN_OWNER_STREAM) {
+			has = nn_has_container;
+			if (has)
+				view = nn_container;
+			active = plugin_run_active();
+		}
+		TX_RESTORE
+		if (owner != (uint8_t)NN_OWNER_STREAM) {
+			(void)nn_info_line(write, ctx,
+			                   "plugin  : busy (another nn command) -- "
+			                   "reservation %lu B at 0x%08lx\r\n",
+			                   (unsigned long)size, (unsigned long)base);
+			return;
+		}
+	}
+
+	if (!has) {
 		/* Says so rather than leaving the line out: a missing line reads as a
 		 * board with no plugin support at all, which is a different and wrong
 		 * fact. */
@@ -2142,29 +2256,29 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	 * does not change it, and the image size often does not change either.
 	 */
 	if (nn_info_line(write, ctx, "plugin  : %s (build %s, crc %08lx), %s\r\n",
-	                 nn_container.name, nn_container.build_id,
-	                 (unsigned long)nn_container.digest,
-	                 plugin_run_active() ? "loaded" : "not loaded") < 0)
+	                 view.name, view.build_id,
+	                 (unsigned long)view.digest,
+	                 active ? "loaded" : "not loaded") < 0)
 		return;
 	if (nn_info_line(write, ctx, "  image : %lu B file / %lu B mem, link 0x%08lx\r\n",
-	                 (unsigned long)nn_container.file_size,
-	                 (unsigned long)nn_container.mem_size,
-	                 (unsigned long)nn_container.link_addr) < 0)
+	                 (unsigned long)view.file_size,
+	                 (unsigned long)view.mem_size,
+	                 (unsigned long)view.link_addr) < 0)
 		return;
 	if (nn_info_line(write, ctx, "  where : %lu B reserved at 0x%08lx\r\n",
 	                 (unsigned long)size, (unsigned long)base) < 0)
 		return;
 	if (nn_info_line(write, ctx,
 	                 "  code %lu B  data %lu B  bss %lu B\r\n",
-	                 (unsigned long)nn_container.code_len,
-	                 (unsigned long)nn_container.data_seg_len,
-	                 (unsigned long)nn_container.bss_len) < 0)
+	                 (unsigned long)view.code_len,
+	                 (unsigned long)view.data_seg_len,
+	                 (unsigned long)view.bss_len) < 0)
 		return;
 	/* What each slot needs at this firmware's c, and what the manifest
 	 * declared (issue #111).  See svc/plugin_info.h.  A container with no
 	 * plugin section has no stack to describe. */
-	if (nn_container.has_plugin)
-		(void)plugin_info_stack(write, ctx, &nn_container,
+	if (view.has_plugin)
+		(void)plugin_info_stack(write, ctx, &view,
 		                        nn_plugin_policy.veneer_cost);
 }
 

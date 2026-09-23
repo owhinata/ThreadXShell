@@ -299,9 +299,9 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
   `is_variable()` 拒否）。
 - **`npu_open()` は長さを取り `GetModel()` の前に境界付き verifier を通す**（範囲 → 長さ → identifier →
   verifier → 走査。**長さには下限も要る**）。**limits は呼び出しとともに `npu_verify.h` の 1 箇所。**
-- **`nn model load --name` はリースを切らさない**（`npu_hw_init()` が先 → 走査 → CRC → `npu_open()`、失敗は
-  必ず `npu_hw_deinit()`）。**候補は VALID のみ・重複拒否・失敗理由は別々・読めなければ拒否。**
-- **ホストの `verify_vela_model` を外さない**（代替にならない）。**C++ 不在は fail-closed。**
+- **`nn model load --name` はリースを切らさない**（`npu_hw_init()` が先 → 走査 → CRC → `npu_open()` → plugin、
+  モデルが残らない失敗は必ず `npu_hw_deinit()`）。**開いた上の load は差し替えで plugin は backend 成功後**（`nn_swap.c`）。
+- **候補は VALID のみ・重複拒否・失敗理由は別々・読めなければ拒否。ホストの `verify_vela_model` を外さない**（代替にならない。C++ 不在は fail-closed）。
 - **アリーナの保守は範囲ごとでなく全体を 2 点で**（潰すのは `ethosu_invalidate_dcache()` だけ、成功条件は
   state と result の**両方**、異常時はリセット成功を確認してから）。**呼び出し側で保守しない。**
 - **推論は producer スレッド・`consume()` 内**で**推論（ガード無し）→ ガード 1 回で stage/draw/present**

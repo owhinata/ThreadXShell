@@ -362,6 +362,17 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_nn_stream"
 "$out/test_nn_stream"
 
+# issue #122 -- where a `nn model load` ends (port/npu/nn_swap.c).  A load over
+# an open model is a replacement with a rollback, and the ending that matters
+# most -- the backend refuses the new model AND the previous one it was running
+# a moment ago -- cannot be typed.  The real contract header supplies the
+# operator's vocabulary (enum nn_model_state), so the two cannot drift.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/npu" -I "$svc" \
+    "$here/test_nn_swap.c" "$board/port/npu/nn_swap.c" \
+    $LDFLAGS -o "$out/test_nn_swap"
+"$out/test_nn_swap"
+
 gcc $CFLAGS \
     -I "$here" -I "$board/port/nor" \
     "$here/test_nor_state.c" "$board/port/nor/nor_state.c" \

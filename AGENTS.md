@@ -248,8 +248,8 @@ board README が正。
   ともに `npu_verify.h` の 1 箇所**）。**ペイロード検査も緩めない**（`COMMAND_STREAM` が 1 個かつ
   最後 / 対象は**入力テンソル 0** / `is_variable()` は拒否）。
 - **[!] `nn model load --name` はリースを切らさない**（`npu_hw_init()` が先 → 走査 → CRC → `npu_open()`
-  → **失敗は必ず `npu_hw_deinit()`**）。候補は **VALID のみ・重複拒否・失敗理由は別々・読めなければ拒否。
-  ホスト側の `verify_vela_model` を外さない**（**書込みの後**に走る。**C++ 不在は fail-closed**）。
+  → plugin、**モデルが残らない失敗は必ず `npu_hw_deinit()`**。**開いた上は差し替え・plugin は backend 成功後**、表は `nn_swap.c`）。
+  候補は **VALID のみ・重複拒否・失敗理由は別々・読めなければ拒否。ホスト側の `verify_vela_model` を外さない**（**書込みの後**に走る。**C++ 不在は fail-closed**）。
 - **[!] アリーナのキャッシュ保守は「範囲ごと」にしない。** 潰すのは **`ethosu_invalidate_dcache()`
   だけ**で、引き渡しは `ethosu_inference_begin/end` でアリーナ**全体**を、成功条件は **`job.state` と
   `job.result` の両方**、異常時はリセットの**成功を確認してから**。**呼び出し側で保守しない。推論は

@@ -474,6 +474,13 @@ static int cmd_nn_model_load(struct cli_instance *sh, int argc, char **argv)
 			cli_print(sh, "nn: nothing is loaded\r\n");
 		else if (state == NN_MODEL_PREVIOUS)
 			cli_print(sh, "nn: the previous model is still active\r\n");
+		else if (state == NN_MODEL_NEW)
+			/* [!] A FAILURE THAT STILL CHANGED THE MODEL (issue #122 D6):
+			 * the backend took it and its plugin was refused, after the
+			 * previous plugin was already gone.  Nothing interprets what
+			 * it outputs until a load that brings a decoder. */
+			cli_warn(sh, "nn: the new model is open, but it has no "
+			             "decoder\r\n");
 		return 1;
 	}
 

@@ -327,6 +327,14 @@ gcc $CFLAGS -I "$svc" -I "$repo/asset/common" \
     $LDFLAGS -o "$out/test_plugin_veneer"
 "$out/test_plugin_veneer"
 
+# issue #111 -- `nn info`'s plugin stack lines (svc/plugin_info.c), shared by
+# grove-vision-ai-v2 and wio-lite-ai.  Pinned byte for byte: no gate compares
+# what a command prints, and the widest line must keep its CRLF.
+gcc $CFLAGS -I "$svc" \
+    "$here/test_plugin_info.c" "$svc/plugin_info.c" "$svc/fmt.c" \
+    $LDFLAGS -o "$out/test_plugin_info"
+"$out/test_plugin_info"
+
 # issue #110 (#78 Step 3b) -- the capture of an external decoder's own account
 # of its result (svc/nn_report.c).  A contract about OUTCOMES: zero bytes is a
 # legal report, "no report to give" is a different answer, truncation is a

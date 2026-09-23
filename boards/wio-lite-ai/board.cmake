@@ -1325,6 +1325,8 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # the one FlashDB already provides (port/nn/crc32_fdb.c says why).
     target_sources(shell PRIVATE
         "${CMAKE_SOURCE_DIR}/svc/plugin_load.c"
+        # `nn info`'s plugin stack lines, shared with Grove (issue #111).
+        "${CMAKE_SOURCE_DIR}/svc/plugin_info.c"
         "${BOARD_DIR}/port/nn/crc32_fdb.c")
 
     target_compile_definitions(shell PRIVATE

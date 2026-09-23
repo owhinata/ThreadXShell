@@ -48,8 +48,12 @@
 #  definition PLUGIN_VENEER_BASE_COST on every compile of the image (the same
 #  set that gets -fstack-usage), and to the host container verifier through
 #  veneer_cost_gate_declared().  A board that restated it in a variable of its
-#  own could check one number and load with another; here there is only the one
-#  that was checked.
+#  own could check one number and load with another.  And a -D is not a
+#  guarantee either -- a later -D or #define of the same name overrides it with
+#  a warning -- so the stamp also waits for cmake/check_policy_probe.py, which
+#  reads the veneer_cost the board's policy ACTUALLY HOLDS out of the shipped
+#  image (PLUGIN_POLICY_PROBE, svc/plugin_load.h) and refuses anything but the
+#  number that was checked.
 # ============================================================================
 
 # Script mode: what a LINK invalidates, removed before every link.
@@ -272,6 +276,14 @@ function(_veneer_cost_gate_finish)
             PLUGIN_VENEER_BASE_COST=${declared}u)
     endforeach()
     target_link_options("${fw}" PRIVATE -fstack-usage)
+    # [!] THE PROBE IS A LINK ROOT (issue #111).  __attribute__((used)) keeps it
+    # from the compiler, not from --gc-sections, and nothing in the image reads
+    # it -- so without this both boards linked it away and the check below
+    # (rightly) refused.  --require-defined also makes a board that exports no
+    # policy fail at the link, naming the symbol, and marks it referenced for
+    # the LTO plugin.
+    target_link_options("${fw}" PRIVATE
+        "-Wl,--require-defined=plugin_policy_probe")
     add_custom_command(TARGET "${fw}" PRE_LINK
         COMMAND "${CMAKE_COMMAND}"
                 "-DVENEER_GATE_CLEAN_LTRANS=$<TARGET_FILE:${fw}>"
@@ -309,10 +321,16 @@ function(_veneer_cost_gate_finish)
                 --declared "${declared}"
                 --ltrans-prefix "$<TARGET_FILE:${fw}>"
                 ${_args}
+        # [!] AND WHAT THE FIRMWARE WILL ACTUALLY CHARGE (issue #111): the -D
+        # above can be overridden, so the value is read back from the image.
+        COMMAND "${Python3_EXECUTABLE}"
+                "${_VENEER_GATE_DIR}/check_policy_probe.py"
+                "$<TARGET_FILE:${fw}>" --declared "${declared}"
         COMMAND "${CMAKE_COMMAND}" -E touch "${stamp}"
         DEPENDS "${fw}"
                 "${_VENEER_GATE_DIR}/check_veneer_base_cost.py"
                 "${_VENEER_GATE_DIR}/check_plugin_image.py"
+                "${_VENEER_GATE_DIR}/check_policy_probe.py"
                 "${_VENEER_GATE_SELF}"
         COMMENT "check_veneer_base_cost.py (VENEER_BASE_COST ${declared} B against the stack below each veneer of ${fw})"
         VERBATIM)

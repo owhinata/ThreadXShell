@@ -137,8 +137,11 @@ static void nn_report(struct cli_instance *sh, const char *what,
 
 	switch (res->claim) {
 	case NN_CLAIM_RETRYABLE:
+		/* [!] NAMES THE COMMAND (issue #120 review): after `nn run` there is
+		 * no "the stop" to repeat -- the run stopped itself, and what finishes
+		 * its teardown is the operator's `nn stream stop`. */
 		cli_warn(sh, "nn: teardown did not finish; nn is still held.  It may "
-		             "settle on its own -- repeat the stop to find out\r\n");
+		             "settle on its own -- `nn stream stop` finishes it\r\n");
 		break;
 	case NN_CLAIM_TERMINAL:
 		cli_warn(sh, "nn: teardown could not be confirmed, so nn stays held "

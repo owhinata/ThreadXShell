@@ -891,8 +891,9 @@ static enum nn_stream_start_claim nn_oneshot_admit(void);
 static uint32_t nn_oneshot_commit(void);
 static void nn_stream_unadmit(void);
 static enum nn_stream_stop_claim nn_stream_claim_stop(uint32_t gen);
+struct nn_stream_end;
 static void nn_stream_settle(enum nn_claim claim,
-                             const struct nn_stream_stats *final);
+                             const struct nn_stream_end *final);
 
 void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
                      struct nn_report_capture *rep,
@@ -1019,6 +1020,18 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	snap->kind  = dec.kind;
 	snap->res   = dec.res;
 
+	/* [!] A RESULT THAT MADE IT IS NOT A TIMEOUT (issue #122, review).  The
+	 * deadline can pass in the same moment the inference publishes; the record
+	 * was read after that, so reporting a timeout would throw away an answer
+	 * that is sitting right here.  ONLY a timeout is promoted: a cancel is the
+	 * operator's decision and a lost stream is a hardware fact, and a valid
+	 * record does not overrule either.
+	 * [!] "valid means this run's" holds because the record is reset at this
+	 * run's start; stage 3 lets the record outlive session boundaries, and
+	 * this test must then become the accepted-publish count instead. */
+	if (why == RUN_TIMEOUT && snap->valid)
+		why = RUN_INFERRED;
+
 	nn_camera_stats_get(&st);
 
 	/* [!] STOPPED BY ITS OWN GENERATION, claimed like any stop (issue #120).
@@ -1064,13 +1077,15 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		nn_result(res, NN_SVC_ERR_HW, nn_claim_of_stop(stop_rc));
 		nn_detail_set("the band stream was lost before an inference "
 		              "completed%s", (res->claim != NN_CLAIM_NONE)
-		              ? "; the teardown did not finish either" : "");
+		              ? "; the teardown did not finish either (`nn stream "
+		                "stop` finishes it)" : "");
 		return;
 	case RUN_CANCELLED:
 		nn_result(res, NN_SVC_ERR_CANCEL, nn_claim_of_stop(stop_rc));
 		nn_detail_set("cancelled before an inference completed%s",
 		              (res->claim != NN_CLAIM_NONE)
-		              ? "; the teardown did not finish either" : "");
+		              ? "; the teardown did not finish either (`nn stream "
+		                "stop` finishes it)" : "");
 		return;
 	case RUN_TIMEOUT:
 	default:
@@ -1078,7 +1093,8 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		nn_detail_set("no inference completed within %u s%s",
 		              (unsigned)NN_RUN_WAIT_S,
 		              (res->claim != NN_CLAIM_NONE)
-		              ? "; the teardown did not finish either" : "");
+		              ? "; the teardown did not finish either (`nn stream "
+		                "stop` finishes it)" : "");
 		return;
 	}
 }
@@ -1320,7 +1336,19 @@ static uint32_t nn_stream_ms;
  * The stop takes the stream's final numbers once the worker is quiet; a poll of
  * that generation reads them from here and never the worker again.
  */
-static struct nn_stream_stats nn_stream_final;
+/*
+ * ...AND SO ARE THE BOARD LINES THAT DESCRIBE THE STREAM.  `ingest`, `tensor`,
+ * `at call` and `plugin` come from the same worker counters (or from the panel's,
+ * which the worker re-arms), so they moved with every `nn run` too.  What is
+ * kept live is only what is not about the stream: the session, a lost band,
+ * and the norm/overlay settings.
+ */
+struct nn_stream_end {
+	struct nn_stream_stats stats;
+	struct nn_camera_stats cam;          /* the worker's, at the stop       */
+	uint32_t spent, refused, miss, run;  /* the panel's plugin numbers      */
+};
+static struct nn_stream_end nn_stream_final;
 static uint32_t nn_stream_final_gen;   /**< whose they are; ANY = nobody's */
 /*
  * [!] THE WORKER'S COUNTERS DO NOT RESET ON A RE-ARM, DELIBERATELY -- it keeps
@@ -1451,7 +1479,7 @@ static enum nn_stream_stop_claim nn_stream_claim_stop(uint32_t gen)
  * `nn stream stats` reports, and a one-shot ending must not overwrite it.
  */
 static void nn_stream_settle(enum nn_claim claim,
-                             const struct nn_stream_stats *final)
+                             const struct nn_stream_end *final)
 {
 	TX_INTERRUPT_SAVE_AREA
 
@@ -1472,7 +1500,7 @@ static void nn_stream_settle(enum nn_claim claim,
 			/* The ended stream's numbers, for every poll from here on. */
 			if (final != NULL) {
 				nn_stream_final = *final;
-				nn_stream_final.elapsed_ms = nn_stream_ms;
+				nn_stream_final.stats.elapsed_ms = nn_stream_ms;
 				nn_stream_final_gen = ending;
 			}
 		}
@@ -1601,9 +1629,8 @@ static void nn_stream_counts(const struct nn_camera_stats *st, uint32_t f0,
 
 /* A stopping stream's final numbers, taken after the worker is stopped and
    before the lifecycle is settled. */
-static void nn_stream_take_final(struct nn_stream_stats *final)
+static void nn_stream_take_final(struct nn_stream_end *final)
 {
-	struct nn_camera_stats st;
 	uint32_t f0, sk0, in0, er0;
 	TX_INTERRUPT_SAVE_AREA
 
@@ -1613,10 +1640,14 @@ static void nn_stream_take_final(struct nn_stream_stats *final)
 	in0 = nn_stream_infers0;
 	er0 = nn_stream_errors0;
 	TX_RESTORE
-	nn_camera_stats_get(&st);          /* takes its own locks: outside */
 	memset(final, 0, sizeof *final);
-	nn_stream_counts(&st, f0, sk0, in0, er0, final);
+	nn_camera_stats_get(&final->cam);  /* takes its own locks: outside */
+	nn_stream_counts(&final->cam, f0, sk0, in0, er0, &final->stats);
 	/* The stop retires the decode record, so there is no last result. */
+#if defined(CONFIG_NN_BACKEND_TFLM) && BSP_ENABLE_LCD
+	cam_preview_plugin_draw_stats(&final->spent, &final->refused);
+	plugin_lease_misses(&final->miss, &final->run);
+#endif
 }
 
 int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
@@ -1638,7 +1669,7 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	 * section as the generation it belongs to -- see nn_stream_final. */
 	if (g != NN_STREAM_GEN_ANY && g == nn_stream_final_gen &&
 	    (gen == NN_STREAM_GEN_ANY || gen == g)) {
-		*out = nn_stream_final;
+		*out = nn_stream_final.stats;
 		TX_RESTORE
 		return NN_SVC_OK;
 	}
@@ -1703,7 +1734,7 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 
 void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 {
-	struct nn_stream_stats final;
+	struct nn_stream_end final;
 	enum nn_claim claim;
 	int rc;
 
@@ -1790,6 +1821,10 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 {
 	struct nn_camera_stats st;
 	unsigned i, n;
+	int ended = 0;
+#if defined(CONFIG_NN_BACKEND_TFLM) && BSP_ENABLE_LCD
+	uint32_t fin_spent = 0u, fin_refused = 0u, fin_miss = 0u, fin_run = 0u;
+#endif
 
 	if (buf == NULL || cap == 0u)
 		return NN_SVC_ERR_ARG;
@@ -1813,6 +1848,33 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 	}
 
 	nn_camera_stats_get(&st);
+	/* [!] AN ENDED STREAM IS DESCRIBED BY ITS LATCH (issue #120) -- see
+	 * nn_stream_end.  Only what is not about the stream stays live. */
+	{
+		uint32_t g;
+		TX_INTERRUPT_SAVE_AREA
+
+		TX_DISABLE
+		nn_stream_life_snapshot(&nn_life, &g, NULL, NULL, NULL);
+		ended = (g != NN_STREAM_GEN_ANY && g == nn_stream_final_gen);
+		if (ended) {
+			struct nn_camera_stats live = st;
+
+			st = nn_stream_final.cam;
+			st.holds_guards = live.holds_guards;
+			st.stream_lost  = live.stream_lost;
+			st.norm_signed  = live.norm_signed;
+			st.overlay      = live.overlay;
+#if defined(CONFIG_NN_BACKEND_TFLM) && BSP_ENABLE_LCD
+			fin_spent   = nn_stream_final.spent;
+			fin_refused = nn_stream_final.refused;
+			fin_miss    = nn_stream_final.miss;
+			fin_run     = nn_stream_final.run;
+#endif
+		}
+		TX_RESTORE
+	}
+	(void)ended;   /* read only by the plugin line, which some builds lack */
 	for (i = 0u, n = 0u; i < 7u; i++) {
 		if (i == 1u && !st.stream_lost)
 			continue;                       /* only worth a line when true */
@@ -1905,8 +1967,15 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 			 * annotating, and the preview's own counters cannot see it --
 			 * they count a frame that was PRESENTED, not one presented bare.
 			 */
-			cam_preview_plugin_draw_stats(&spent, &refused);
-			plugin_lease_misses(&miss, &run);
+			if (ended) {
+				spent   = fin_spent;
+				refused = fin_refused;
+				miss    = fin_miss;
+				run     = fin_run;
+			} else {
+				cam_preview_plugin_draw_stats(&spent, &refused);
+				plugin_lease_misses(&miss, &run);
+			}
 			nn_detail_to(buf, cap,
 			             "plugin  : drew %lu px max/frame of %lu, %lu "
 			             "refused; %lu frame(s) missed (run of %lu)",

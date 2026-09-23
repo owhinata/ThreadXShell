@@ -488,6 +488,18 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 * kind is (issue #110). */
 	nn_report_set(rep, NN_REPORT_NONE);
 
+	/* [!] A RESULT THAT MADE IT IS NOT A TIMEOUT (issue #122, review).  The
+	 * deadline can pass in the same moment the inference publishes; the record
+	 * was read after that, so reporting a timeout would throw away an answer
+	 * that is sitting right here.  ONLY a timeout is promoted: a cancel is the
+	 * operator's decision and a lost stream is a hardware fact, and a valid
+	 * record does not overrule either.
+	 * [!] "valid means this run's" holds because the record is reset at this
+	 * run's start; stage 3 lets the record outlive session boundaries, and
+	 * this test must then become the accepted-publish count instead. */
+	if (why == RUN_TIMEOUT && snap->valid)
+		why = RUN_INFERRED;
+
 	/* [!] STOPPED BY ITS OWN GENERATION, claimed like any stop (issue #120).
 	 * Nothing else can have claimed it -- an operator's stop is refused while
 	 * this runs -- so a refusal is an invariant failure and fails closed. */
@@ -519,7 +531,8 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		nn_result(res, NN_SVC_ERR_CANCEL, nn_claim_of_stop(stop_rc));
 		nn_detail_set("cancelled before an inference completed%s",
 		              (res->claim != NN_CLAIM_NONE)
-		              ? "; the camera has not released the frame either"
+		              ? "; the camera has not released the frame either "
+		                "(`nn stream stop` finishes it)"
 		              : "");
 		return;
 	case RUN_TIMEOUT:
@@ -528,7 +541,8 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		nn_detail_set("no inference completed within %u s%s",
 		              (unsigned)NN_RUN_WAIT_S,
 		              (res->claim != NN_CLAIM_NONE)
-		              ? "; the camera has not released the frame either"
+		              ? "; the camera has not released the frame either "
+		                "(`nn stream stop` finishes it)"
 		              : "");
 		return;
 	}

@@ -64,6 +64,7 @@
  * that scripts/verify_vela_model.cc reaches THIS verdict and not one that
  * resembles it (issue #93). */
 #include "npu_verify.h"
+#include "nn_detail.h"   /* NN_SVC_DETAIL_LIT: these reach `nn` (#122) */
 
 namespace {
 
@@ -288,19 +289,19 @@ extern "C" size_t npu_arena_used(void)
 extern "C" const char *npu_status_name(int status)
 {
 	switch (status) {
-	case NPU_OK:              return "ok";
-	case NPU_ERR_STATE:       return "wrong state";
-	case NPU_ERR_MODEL_ADDR:  return "model address outside the flash window";
-	case NPU_ERR_MODEL_MAGIC: return "no TFL3 model at that address";
-	case NPU_ERR_SCHEMA:      return "model schema version mismatch";
-	case NPU_ERR_OPS:         return "operator set not supported";
-	case NPU_ERR_ARENA:       return "arena too small for this model";
-	case NPU_ERR_TENSORS:     return "unexpected tensor layout";
-	case NPU_ERR_INVOKE:      return "inference failed";
-	case NPU_ERR_PAYLOAD:     return "model payload has actions after the "
-	                                 "command stream";
-	case NPU_ERR_MODEL_FORMAT: return "model flatbuffer is malformed";
-	default:                  return "unknown";
+	case NPU_OK:              return NN_SVC_DETAIL_LIT("ok");
+	case NPU_ERR_STATE:       return NN_SVC_DETAIL_LIT("wrong state");
+	case NPU_ERR_MODEL_ADDR:  return NN_SVC_DETAIL_LIT("model address outside the flash window");
+	case NPU_ERR_MODEL_MAGIC: return NN_SVC_DETAIL_LIT("no TFL3 model at that address");
+	case NPU_ERR_SCHEMA:      return NN_SVC_DETAIL_LIT("model schema version mismatch");
+	case NPU_ERR_OPS:         return NN_SVC_DETAIL_LIT("operator set not supported");
+	case NPU_ERR_ARENA:       return NN_SVC_DETAIL_LIT("arena too small for this model");
+	case NPU_ERR_TENSORS:     return NN_SVC_DETAIL_LIT("unexpected tensor layout");
+	case NPU_ERR_INVOKE:      return NN_SVC_DETAIL_LIT("inference failed");
+	case NPU_ERR_PAYLOAD:     return NN_SVC_DETAIL_LIT("model payload has actions after the "
+	                                                   "command stream");
+	case NPU_ERR_MODEL_FORMAT: return NN_SVC_DETAIL_LIT("model flatbuffer is malformed");
+	default:                  return NN_SVC_DETAIL_LIT("unknown");
 	}
 }
 
@@ -324,11 +325,11 @@ extern "C" bool npu_tensor_is_int8(int8_t type)
 extern "C" const char *npu_type_name(int8_t type)
 {
 	switch (static_cast<TfLiteType>(type)) {
-	case kTfLiteInt8:    return "int8";
-	case kTfLiteUInt8:   return "uint8";
-	case kTfLiteInt16:   return "int16";
-	case kTfLiteInt32:   return "int32";
-	case kTfLiteFloat32: return "f32";
-	default:             return "?";
+	case kTfLiteInt8:    return NN_SVC_DETAIL_LIT("int8");
+	case kTfLiteUInt8:   return NN_SVC_DETAIL_LIT("uint8");
+	case kTfLiteInt16:   return NN_SVC_DETAIL_LIT("int16");
+	case kTfLiteInt32:   return NN_SVC_DETAIL_LIT("int32");
+	case kTfLiteFloat32: return NN_SVC_DETAIL_LIT("f32");
+	default:             return NN_SVC_DETAIL_LIT("?");
 	}
 }

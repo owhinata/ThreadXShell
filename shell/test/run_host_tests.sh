@@ -453,27 +453,74 @@ gcc $CFLAGS -I "$inc" -I "$here/../cmds" -I "$core" -I "$svc" \
 # compiling: the boundary must build and run, and each over-long or non-literal
 # form must fail to build with the assertion's own message -- a compile that
 # fails for some other reason proves nothing about the gate.
+#
+# [!] "ON THE GATE" IS CHECKED, not assumed.  Every error in the log must be in
+# svc/nn_detail.h -- the gate -- or on a test line marked "must not compile";
+# an unrelated error elsewhere fails this rather than passing for the gate.  And
+# each case names what it must show: the assertion's message for the over-long
+# ones, and for a pointer the syntax error that `"" s` produces INSIDE the
+# gate's own macro (the only thing that stops a pointer being "checked").
+detail_gate_failed() {  # <log> <source> <want>
+    marked=$(grep -n "must not compile" "$2" | cut -d: -f1 | tr '\n' ' ')
+    src=$(basename "$2")
+    LC_ALL=C grep "error:" "$1" | while IFS= read -r line; do
+        case "$line" in
+        *nn_detail.h:*) ;;
+        *"$src":*)
+            ln=$(printf '%s\n' "$line" | sed -n "s/^.*$src:\([0-9]*\):.*/\1/p")
+            case " $marked " in
+            *" $ln "*) ;;
+            *) echo "unmarked error: $line"; return 0 ;;
+            esac ;;
+        *) echo "error outside the gate: $line"; return 0 ;;
+        esac
+    done | grep -q . && return 1
+    LC_ALL=C grep -q "$3" "$1"
+}
 gcc $CFLAGS -I "$svc" "$here/test_nn_detail_check.c" \
     $LDFLAGS -o "$out/test_nn_detail_check"
 "$out/test_nn_detail_check"
-for neg in NN_DC_OVER_LIT NN_DC_OVER_FMT NN_DC_NOT_LITERAL; do
-    if gcc $CFLAGS -D"$neg" -I "$svc" "$here/test_nn_detail_check.c" \
-           $LDFLAGS -o "$out/test_nn_detail_check_neg" \
-           > "$out/detail_neg.log" 2>&1; then
-        echo "test_nn_detail_check: $neg COMPILED -- the length gate did not fire" >&2
-        exit 1
-    fi
-    case "$neg" in
-    NN_DC_NOT_LITERAL) want='expected' ;;   # `"" p` is a syntax error, by design
-    *)                 want='detail literal is longer than NN_SVC_DETAIL_MAX' ;;
-    esac
-    if ! grep -q "$want" "$out/detail_neg.log"; then
-        echo "test_nn_detail_check: $neg failed to compile, but not on the gate:" >&2
-        cat "$out/detail_neg.log" >&2
-        exit 1
-    fi
-    echo "  ok   $neg refused at compile time"
+g++ -std=c++17 -Wall -Wextra -I "$svc" "$here/test_nn_detail_check_cxx.cc" \
+    -o "$out/test_nn_detail_check_cxx"
+"$out/test_nn_detail_check_cxx"
+for lang in c cxx; do
+    for neg in NN_DC_OVER_LIT NN_DC_OVER_FMT NN_DC_NOT_LITERAL; do
+        if [ "$lang" = c ]; then
+            src="$here/test_nn_detail_check.c"
+            cc="gcc $CFLAGS"
+            notlit="in definition of macro 'NN_SVC_DETAIL_CHECK'"
+        else
+            [ "$neg" = NN_DC_OVER_FMT ] && continue   # no C++ formatter check
+            src="$here/test_nn_detail_check_cxx.cc"
+            cc="g++ -std=c++17 -Wall -Wextra"
+            notlit="in definition of macro 'NN_SVC_DETAIL_LIT'"
+        fi
+        # shellcheck disable=SC2086  # $cc is deliberately word-split
+        if LC_ALL=C $cc -D"$neg" -I "$svc" "$src" -o "$out/detail_neg" \
+               > "$out/detail_neg.log" 2>&1; then
+            echo "test_nn_detail_check ($lang): $neg COMPILED -- the length gate did not fire" >&2
+            exit 1
+        fi
+        case "$neg" in
+        NN_DC_NOT_LITERAL) want="$notlit" ;;
+        *)                 want='detail literal is longer than NN_SVC_DETAIL_MAX' ;;
+        esac
+        if ! detail_gate_failed "$out/detail_neg.log" "$src" "$want"; then
+            echo "test_nn_detail_check ($lang): $neg failed to compile, but not on the gate:" >&2
+            cat "$out/detail_neg.log" >&2
+            exit 1
+        fi
+        echo "  ok   $neg ($lang) refused at compile time, by the gate"
+    done
 done
+
+# issue #122 review -- the svc/ SHARED sentence tables a board copies whole into
+# its explanation (plugin_result_name, plugin_run_strerror).  They must not depend
+# on the `nn` contract, so they are enumerated here instead of wrapped.
+gcc $CFLAGS -I "$svc" \
+    "$here/test_nn_detail_tables.c" "$svc/plugin_load.c" "$svc/plugin_exec.c" \
+    "$svc/crc32.c" $LDFLAGS -o "$out/test_nn_detail_tables"
+"$out/test_nn_detail_tables"
 
 # issue #122 -- what `nn model load` prints on a wrong invocation, through the REAL
 # dispatcher and the REAL shell/cmds/cmd_nn.c, once per source set a board

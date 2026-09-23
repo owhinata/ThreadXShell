@@ -14,6 +14,7 @@
  * than in src/blob.c.
  */
 #include "blob_state.h"
+#include "nn_detail.h"   /* NN_SVC_DETAIL_LIT: `nn model load` prints these (#122) */
 
 #include <string.h>
 
@@ -58,13 +59,13 @@ static int all_erased(const uint8_t *p, uint32_t n)
 const char *blob_name_verdict_name(enum blob_name_verdict v)
 {
 	switch (v) {
-	case BLOB_NAME_OK:    return "ok";
-	case BLOB_NAME_EMPTY: return "name is empty";
-	case BLOB_NAME_LONG:  return "name is too long";
-	case BLOB_NAME_CHAR:  return "name has a character that is not printable ASCII";
+	case BLOB_NAME_OK:    return NN_SVC_DETAIL_LIT("ok");
+	case BLOB_NAME_EMPTY: return NN_SVC_DETAIL_LIT("name is empty");
+	case BLOB_NAME_LONG:  return NN_SVC_DETAIL_LIT("name is too long");
+	case BLOB_NAME_CHAR:  return NN_SVC_DETAIL_LIT("name has a character that is not printable ASCII");
 	default:              break;
 	}
-	return "?";
+	return NN_SVC_DETAIL_LIT("?");
 }
 
 enum blob_name_verdict blob_name_check(const char *name, uint32_t *len_out)
@@ -367,13 +368,13 @@ enum blob_choice blob_choose_target(const struct blob_slot_view *v,
 const char *blob_lookup_name(enum blob_lookup l)
 {
 	switch (l) {
-	case BLOB_LOOKUP_FOUND:     return "found";
-	case BLOB_LOOKUP_NONE:      return "no slot holds that name";
-	case BLOB_LOOKUP_DUPLICATE: return "more than one slot holds that name";
-	case BLOB_LOOKUP_REFUSE:    return "the slot scan does not hold together";
+	case BLOB_LOOKUP_FOUND:     return NN_SVC_DETAIL_LIT("found");
+	case BLOB_LOOKUP_NONE:      return NN_SVC_DETAIL_LIT("no slot holds that name");
+	case BLOB_LOOKUP_DUPLICATE: return NN_SVC_DETAIL_LIT("more than one slot holds that name");
+	case BLOB_LOOKUP_REFUSE:    return NN_SVC_DETAIL_LIT("the slot scan does not hold together");
 	default:                    break;
 	}
-	return "?";
+	return NN_SVC_DETAIL_LIT("?");
 }
 
 enum blob_lookup blob_resolve_name(const struct blob_slot_view *v,

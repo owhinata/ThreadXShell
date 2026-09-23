@@ -47,6 +47,7 @@
  * the point of doing it this way rather than naming 192 and hoping.
  */
 #include "npu_hw.h"
+#include "nn_detail.h"   /* NN_SVC_DETAIL_LIT on the bring-up reasons (#122) */
 
 #include "nor_flash.h"
 
@@ -71,12 +72,16 @@ static uint8_t     hw_ready;
 /* The committed flash lease: non-zero exactly while hw_ready is (issue #86). */
 static uint32_t    nor_lease;
 
-static int fail(const char *why)
+static int fail_with(const char *why)
 {
 	fail_reason = why;
 	LOG_ERR("bring-up refused: %s", why);
 	return -1;
 }
+/* [!] A LITERAL reason is checked against NN_SVC_DETAIL_MAX at build time:
+ * npu_hw_fail_reason() is copied whole into `nn model load`'s explanation
+ * (issue #122).  A reason passed through from elsewhere goes to fail_with(). */
+#define fail(lit) fail_with(NN_SVC_DETAIL_LIT(lit))
 
 /*
  * The SCU half of the sequence, each write followed by its getter.
@@ -160,9 +165,9 @@ int npu_hw_init(void)
 	 * when npu_hw_init() returns non-zero -- so each of those returns has to
 	 * hand the lease back itself. */
 	if (nor_acquire(NOR_LEASE_NPU, &lease) != 0)
-		return fail(nor_fail_reason() != NULL
-		            ? nor_fail_reason()
-		            : "the flash window is unavailable; the model is unreadable");
+		return fail_with(nor_fail_reason() != NULL
+		                 ? nor_fail_reason()
+		                 : "the flash window is unavailable; the model is unreadable");
 
 	/* Everything the NPU bring-up enables must end up wrapped; take the
 	 * reference point after the flash, so this set is only the NPU's own. */

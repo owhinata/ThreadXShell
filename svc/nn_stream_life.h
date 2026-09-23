@@ -59,6 +59,22 @@ extern "C" {
  */
 #define NN_STREAM_GEN_ANY  0u
 
+/**
+ * What was started (issue #120).
+ *
+ * [!] `nn run` IS A STREAM OF ONE INFERENCE, AND IT GOES THROUGH THIS MACHINE.
+ * Until issue #120 it drove the same worker as `nn stream` without claiming
+ * the lifecycle, so the machine said IDLE while a one-shot held the camera: a
+ * `nn stream start` from the other console was admitted over it and re-armed
+ * the one-shot's session -- without the draw question the stream admission
+ * asks -- and the one-shot's own stop then tore down a stream it never started.
+ * The kind is what lets the one machine refuse both.
+ */
+enum nn_stream_kind {
+	NN_STREAM_KIND_STREAM = 0,   /**< `nn stream start`: runs until stopped   */
+	NN_STREAM_KIND_ONESHOT,      /**< `nn run`: one inference, stops itself   */
+};
+
 /** Where one board's live inference has got to. */
 enum nn_stream_phase {
 	NN_STREAM_PHASE_IDLE = 0,
@@ -80,7 +96,26 @@ struct nn_stream_life {
 	/** What STARTING was entered from, so an abort puts it back rather than
 	 *  guessing IDLE -- a re-armed stream aborts to RUNNING. */
 	uint8_t  prev;
+	/** enum nn_stream_kind of what was last begun.  Set by begin() and only
+	 *  there: a re-arm is refused for a one-shot, so it never changes it. */
+	uint8_t  kind;
+	/**
+	 * [!] A ONE-SHOT WHOSE OWN TEARDOWN CAME BACK RETRYABLE.  A one-shot is
+	 * stopped by the command that started it, and an operator's "stop whatever
+	 * is running" is refused while it lives -- that is what keeps `nn stream
+	 * stop` on another console from tearing a `nn run` down underneath it.  But
+	 * once the one-shot has returned with its teardown unfinished, nobody holds
+	 * its generation any more; without this the stream would say "a `nn run`
+	 * owns it" for ever and there would be no way to finish the stop.  Set by
+	 * retry() on a one-shot, cleared by begin().  Read ONLY inside
+	 * claim_stop(), under the same critical section as the claim.
+	 */
+	uint8_t  orphan;
 	uint32_t gen;    /**< the last generation minted; KEPT after it ends  */
+	/** The last generation minted by a STREAM (issue #120).  A one-shot mints
+	 *  one too -- it is what it stops itself by -- but `nn stream stats` is
+	 *  about streams, so a poll reads this one. */
+	uint32_t sgen;
 	uint32_t next;   /**< the next to mint; 0 means "start at 1"          */
 	/**
 	 * [!] BUMPED ON EVERY TRANSITION, and that is not the same information as
@@ -128,6 +163,10 @@ enum nn_stream_stop_claim {
 	NN_STREAM_STOP_WRONG_GEN,/**< that stream has already been replaced     */
 	NN_STREAM_STOP_BUSY,     /**< a start or another stop owns the transition */
 	NN_STREAM_STOP_DEAD,     /**< a previous teardown was never confirmed   */
+	/** A running `nn run` owns it and stops it itself; an operator's stop is
+	 *  refused until it returns (issue #120).  Appended: the values above keep
+	 *  their numbers. */
+	NN_STREAM_STOP_ONESHOT,
 };
 
 /** Why a start was or was not admitted.  Three refusals, because they call for
@@ -138,10 +177,19 @@ enum nn_stream_start_claim {
 	NN_STREAM_START_RUNNING,  /**< a stream is already up                     */
 	NN_STREAM_START_BUSY,     /**< a start or a stop owns the transition      */
 	NN_STREAM_START_DEAD,     /**< a previous teardown was never confirmed    */
+	/** A `nn run` holds it -- running, or returned with its teardown unfinished
+	 *  (an operator's `nn stream stop` completes that).  Not RUNNING: that
+	 *  sends an operator to stop a stream, and a re-arm tries to take it over,
+	 *  which is exactly what issue #120 was (issue #120).  Appended. */
+	NN_STREAM_START_ONESHOT,
 };
 
 /**
- * Claim IDLE -> STARTING.
+ * Claim IDLE -> STARTING, for a start of kind @p kind.
+ *
+ * [!] THE KIND IS AN ARGUMENT, NOT A DEFAULT.  A caller that could leave it out
+ * would get STREAM, and a one-shot that forgot to say so would be re-armable
+ * and stoppable by anyone -- the hole issue #120 closes.
  *
  * [!] CLAIM IT BEFORE STARTING THE HARDWARE, NOT AFTER.  Recording the start
  * once the worker is already running leaves a window in which this says IDLE
@@ -153,7 +201,8 @@ enum nn_stream_start_claim {
  * @return NN_STREAM_START_GO if it was taken -- the caller must then commit or
  *         abort -- or which of the three refusals it was
  */
-enum nn_stream_start_claim nn_stream_life_begin(struct nn_stream_life *l);
+enum nn_stream_start_claim nn_stream_life_begin(struct nn_stream_life *l,
+                                                enum nn_stream_kind kind);
 
 /**
  * Claim RUNNING -> STARTING, for a start that re-arms a stream already up.
@@ -163,6 +212,12 @@ enum nn_stream_start_claim nn_stream_life_begin(struct nn_stream_life *l);
  * stopped.  That is a real transition and it needs admitting like any other --
  * begin() cannot represent it, and letting a re-arm skip admission is what let
  * it stamp on a teardown already in progress.
+ *
+ * [!] ONLY A STREAM IS RE-ARMED.  A one-shot's session belongs to the `nn run`
+ * that started it; re-arming it would hand that command's worker to somebody
+ * else's stream, admitted by nothing that asked whether it can draw (issue
+ * #120).  The kind is tested HERE, in the same call as the phase, so no caller
+ * can ask one and act on the other.
  *
  * @return non-zero if it was taken; abort() returns it to RUNNING
  */
@@ -195,6 +250,13 @@ int nn_stream_life_abort(struct nn_stream_life *l);
  * runs its teardown against whatever is there by the time it gets round to it.
  * On NN_STREAM_STOP_GO the phase is already STOPPING, so nothing else is
  * admitted until the caller reports back.
+ *
+ * [!] AND THE KIND IS PART OF THE SAME TEST (issue #120).  A one-shot is stopped
+ * by its own generation; NN_STREAM_GEN_ANY -- the operator's `nn stream stop` --
+ * is refused with NN_STREAM_STOP_ONESHOT while it lives, and admitted once its
+ * own teardown came back retryable (see @ref nn_stream_life::orphan).  Asking
+ * "is it a one-shot?" separately and then claiming would reopen the window
+ * between the two for a second stop.
  */
 enum nn_stream_stop_claim nn_stream_life_claim_stop(struct nn_stream_life *l,
                                                     uint32_t gen);
@@ -207,7 +269,8 @@ int nn_stream_life_finish(struct nn_stream_life *l);
 
 /**
  * The teardown did not finish but can be repeated: STOPPING -> RUNNING, same
- * generation.
+ * generation.  On a one-shot this also makes it the operator's to finish
+ * (@ref nn_stream_life::orphan): the command that started it is returning.
  *
  * [!] RETRYABLE MEANS STOPPABLE AGAIN.  Leaving it in STOPPING would turn one
  * moment of lock contention into a stream nothing can ever tear down, which is
@@ -221,9 +284,15 @@ int nn_stream_life_retry(struct nn_stream_life *l);
  *  @return non-zero if the transition happened */
 int nn_stream_life_poison(struct nn_stream_life *l);
 
-/** Coherent snapshot for a poll's first phase.  Any argument may be NULL. */
+/** Coherent snapshot for a poll's first phase.  Any argument may be NULL.
+ *
+ *  [!] @p gen IS THE LAST STREAM'S (@ref nn_stream_life::sgen), not the last
+ *  one-shot's: a `nn run` must neither make `nn stream stats` answer on a board
+ *  that has never streamed, nor tell a `--frames` waiter its stream was
+ *  "replaced" when it had merely ended.  @p kind is what was last begun, so a
+ *  poll reports a running one-shot as no running stream. */
 void nn_stream_life_snapshot(const struct nn_stream_life *l, uint32_t *gen,
-                             uint8_t *phase, uint32_t *seq);
+                             uint8_t *phase, uint32_t *seq, uint8_t *kind);
 
 /* ---- disposition ---------------------------------------------------------
  *

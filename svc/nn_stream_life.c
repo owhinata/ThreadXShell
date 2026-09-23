@@ -14,9 +14,13 @@
 
 #include <stddef.h>   /* NULL */
 
-enum nn_stream_start_claim nn_stream_life_begin(struct nn_stream_life *l)
+enum nn_stream_start_claim nn_stream_life_begin(struct nn_stream_life *l,
+                                                enum nn_stream_kind kind)
 {
 	if (l == NULL)
+		return NN_STREAM_START_BUSY;
+	/* An unknown kind is not permission to start anything. */
+	if (kind != NN_STREAM_KIND_STREAM && kind != NN_STREAM_KIND_ONESHOT)
 		return NN_STREAM_START_BUSY;
 	/*
 	 * [!] ONLY FROM IDLE, enumerated rather than excluded.  "Not running" would
@@ -31,7 +35,11 @@ enum nn_stream_start_claim nn_stream_life_begin(struct nn_stream_life *l)
 	case NN_STREAM_PHASE_IDLE:
 		break;
 	case NN_STREAM_PHASE_RUNNING:
-		return NN_STREAM_START_RUNNING;
+		/* [!] WHAT is running decides the answer (issue #120): a one-shot is
+		 * not a stream to be stopped or re-armed, and a caller told RUNNING
+		 * tries exactly that. */
+		return (l->kind == (uint8_t)NN_STREAM_KIND_ONESHOT)
+		       ? NN_STREAM_START_ONESHOT : NN_STREAM_START_RUNNING;
 	case NN_STREAM_PHASE_LOST:
 		return NN_STREAM_START_DEAD;
 	case NN_STREAM_PHASE_STARTING:
@@ -39,8 +47,10 @@ enum nn_stream_start_claim nn_stream_life_begin(struct nn_stream_life *l)
 	default:
 		return NN_STREAM_START_BUSY;
 	}
-	l->prev  = l->phase;
-	l->phase = (uint8_t)NN_STREAM_PHASE_STARTING;
+	l->prev   = l->phase;
+	l->phase  = (uint8_t)NN_STREAM_PHASE_STARTING;
+	l->kind   = (uint8_t)kind;
+	l->orphan = 0u;
 	l->seq++;
 	return NN_STREAM_START_GO;
 }
@@ -53,6 +63,9 @@ int nn_stream_life_rearm(struct nn_stream_life *l)
 	 * and a re-arm that pushed through would destroy its claim -- and not from
 	 * LOST, which is unrecoverable by construction. */
 	if (l->phase != (uint8_t)NN_STREAM_PHASE_RUNNING)
+		return 0;
+	/* [!] AND ONLY A STREAM (issue #120) -- see the header. */
+	if (l->kind != (uint8_t)NN_STREAM_KIND_STREAM)
 		return 0;
 	l->prev  = l->phase;
 	l->phase = (uint8_t)NN_STREAM_PHASE_STARTING;
@@ -76,6 +89,8 @@ uint32_t nn_stream_life_commit(struct nn_stream_life *l)
 	 * cannot produce it either. */
 	if (l->next == NN_STREAM_GEN_ANY)
 		l->next = 1u;
+	if (l->kind == (uint8_t)NN_STREAM_KIND_STREAM)
+		l->sgen = l->gen;          /* what a poll reports -- see the header */
 	l->phase = (uint8_t)NN_STREAM_PHASE_RUNNING;
 	l->seq++;
 	return l->gen;
@@ -115,6 +130,18 @@ enum nn_stream_stop_claim nn_stream_life_claim_stop(struct nn_stream_life *l,
 		   too: a value this does not recognise is not permission. */
 		return NN_STREAM_STOP_BUSY;
 	}
+
+	/*
+	 * [!] A ONE-SHOT IS STOPPED BY ITS OWN COMMAND (issue #120), tested here in
+	 * the claim itself.  Only "whatever is running" needs a ruling: a stale
+	 * generation is refused below as for any stream, and the one-shot's own
+	 * generation is admitted.  The operator's is refused while the one-shot
+	 * lives, and admitted once it has returned with its teardown unfinished --
+	 * after that nobody else holds the generation that could finish it.
+	 */
+	if (l->kind == (uint8_t)NN_STREAM_KIND_ONESHOT &&
+	    gen == NN_STREAM_GEN_ANY && !l->orphan)
+		return NN_STREAM_STOP_ONESHOT;
 
 	switch (nn_stream_gen_check(l->gen, gen)) {
 	case NN_STREAM_GEN_GO:
@@ -164,6 +191,11 @@ int nn_stream_life_retry(struct nn_stream_life *l)
 	if (l->phase != (uint8_t)NN_STREAM_PHASE_STOPPING)
 		return 0;
 	l->phase = (uint8_t)NN_STREAM_PHASE_RUNNING;
+	/* [!] A one-shot's teardown that did not finish is the operator's to
+	 * finish from here (issue #120).  Whoever retried -- the one-shot itself
+	 * or an operator already finishing it -- nobody else will. */
+	if (l->kind == (uint8_t)NN_STREAM_KIND_ONESHOT)
+		l->orphan = 1u;
 	l->seq++;
 	return 1;
 }
@@ -183,16 +215,18 @@ int nn_stream_life_poison(struct nn_stream_life *l)
 }
 
 void nn_stream_life_snapshot(const struct nn_stream_life *l, uint32_t *gen,
-                             uint8_t *phase, uint32_t *seq)
+                             uint8_t *phase, uint32_t *seq, uint8_t *kind)
 {
 	if (l == NULL)
 		return;
 	if (gen != NULL)
-		*gen = l->gen;
+		*gen = l->sgen;
 	if (phase != NULL)
 		*phase = l->phase;
 	if (seq != NULL)
 		*seq = l->seq;
+	if (kind != NULL)
+		*kind = l->kind;
 }
 
 unsigned char nn_stream_disp_of(int rc, const struct nn_stream_disp *tab,

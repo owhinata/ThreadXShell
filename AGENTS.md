@@ -58,8 +58,7 @@
   **`nn run` でテンソルをそのまま報告**、**`nn stream start` は拒否**、**`nn thresh` は none**（set は
   **state** で拒否）。**`null` backend も同じ答え。**
 - **admission は `nn run` と共有**なので**shape の問いは no-plugin で通す**（refuse すると素のモデルの
-  `nn run` が消える）。**stream を止めるのは `nn_active_can_draw()` 1 本。** **[!] この規則には穴がある
-  （#120）** — re-arm 早期 return は `require_draw` を見ず `nn run` は stream を claim しない。
+  `nn run` が消える）。**stream を止めるのは `nn_active_can_draw()` 1 本。**
 - **worker が非同期**なので「誰も解釈していない」も**世代規則の下で publish する**。**`nn dets` は
   record を読むだけ、panel は kind も見る。`nn info` の claim は開いているモデルに従い**、reload 後の
   状態は `nn_model_reload()` 自身の戻り値で決める。**監査は `AUDIT_SHARED` だけで、f746g-disco はまだ
@@ -92,6 +91,7 @@
   `commit()` は STARTING 以外を、`finish/retry/poison` は STOPPING 以外を拒否する。**worker のカウンタは
   世代と一致しない**ので poll は commit 時に latch した基準を引く。**遷移が拒否されたら wrapper の
   副作用も走らせない。**
+- **[!] `nn run` も one-shot で同じ機械を claim**（re-arm/操作者 stop 不可。種類は claim 内で判定、#120）。
 - **[!] poll は 2 相 + 遷移カウンタ**（数値は他ロック配下なので割込み禁止下では集められず、世代と
   状態だけでは retryable な stop を跨いだ読みを弾けない）。
 - **[!] 分類表はボードが持ち既定は fail-closed**（Grove の `nn_stream_state.c` では `CAM_ERR_LOCKED` と

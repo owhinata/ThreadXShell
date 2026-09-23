@@ -88,6 +88,10 @@ static struct nn_model *nncam_model;
 
 /* Set by start/stop (thread context), read by the worker and the band callback. */
 static volatile int nncam_run;
+/* The running session was started by `nn stream start` (a panel was required),
+ * so it is the one kind a re-arm may take back up (issue #120).  Written only
+ * by nn_camera_start() on the shell side, before nncam_run is raised. */
+static int nncam_rearmable;
 /* The worker is inside nn_run().  While set, the input tensor belongs to it -- the
  * arena reuses that space for intermediates, so a producer write here is corruption. */
 static volatile int nncam_infer_active;
@@ -644,18 +648,17 @@ int nn_camera_start(int colorbar, int require_draw)
 		 * `nn stream start` to re-arm") wrong, which is worse than having no
 		 * recovery hint at all.
 		 *
-		 * [!] AND THIS PATH NEVER LOOKS AT `require_draw`.  A legitimate re-arm
-		 * is safe -- the session that admitted the stream is still held, so the
-		 * decoder cannot have been replaced since it was asked -- but `nn run`
-		 * runs the same worker WITHOUT claiming the stream lifecycle, so a
-		 * `nn stream start` arriving from the other console while a one-shot's
-		 * band stream is lost returns OK here with nothing having asked whether
-		 * anything can draw.  The route predates issue #116; what #116 widened
-		 * is what it lets past, because can_draw() now answers 0 where it used
-		 * to answer 1.  Tracked as issue #120; do not "fix" it by refusing
-		 * above, which is what the comment before this one is about.
+		 * [!] ONLY A STREAM'S SESSION IS RE-ARMED, AND ONLY BY A STREAM START
+		 * (issue #120).  This path does not ask the draw question -- a
+		 * legitimate re-arm needs no answer, because the session that admitted
+		 * the stream is still held and the decoder cannot have been replaced
+		 * since it was asked.  A `nn run`'s session never asked it at all, so a
+		 * `nn stream start` that re-armed one would light a panel nothing had
+		 * agreed to draw on.  The lifecycle already refuses that start (a
+		 * one-shot is never re-armed, svc/nn_stream_life.c); this is the same
+		 * rule stated where the worker is, so the two cannot drift apart.
 		 */
-		if (!cam_band_stream_lost())
+		if (!cam_band_stream_lost() || !nncam_rearmable || !require_draw)
 			return NNCAM_ERR_RUNNING;
 
 		/* Clear the fill latch before the stream comes back.  A stream that died
@@ -861,6 +864,7 @@ int nn_camera_start(int colorbar, int require_draw)
 	while (tx_semaphore_get(&nncam_frame_sem, TX_NO_WAIT) == TX_SUCCESS)
 		;
 
+	nncam_rearmable = require_draw ? 1 : 0;   /* see the re-arm above */
 	nncam_run = 1;
 	rc = cam_band_claim(CAM_BAND_NN, colorbar, nncam_band);
 	if (rc != CAM_BAND_OK) {

@@ -43,16 +43,32 @@
 #  charge nothing checks is exactly the state #112 exists to end.
 # ============================================================================
 
-# Script mode: the pre-link clean of this firmware's LTO partition records.
-# [!] ONLY THIS TARGET'S RECORDS, AND BEFORE EVERY LINK.  A link that makes
-# fewer partitions than the last one would otherwise leave the old ones behind,
-# and the check refuses a record the map does not load.
-if(CMAKE_SCRIPT_MODE_FILE AND DEFINED VENEER_GATE_CLEAN_LTRANS)
-    get_filename_component(_dir "${VENEER_GATE_CLEAN_LTRANS}" DIRECTORY)
-    get_filename_component(_base "${VENEER_GATE_CLEAN_LTRANS}" NAME)
-    file(GLOB _old "${_dir}/${_base}.ltrans*.ltrans.su")
-    if(_old)
-        file(REMOVE ${_old})
+# Script mode: what a LINK invalidates, removed before every link.
+#
+# [!] THE STAMP IS A CLAIM ABOUT ONE IMAGE, SO THE LINK THAT REPLACES THAT IMAGE
+# RETRACTS IT.  Without this, building the image alone (`ninja shell.img`, or
+# any target that needs the ELF but not the check) relinks and leaves the
+# previous run's passing stamp behind, newer-looking than it is: the delivery
+# targets still wait for the check, but the stamp itself goes on asserting that
+# the firmware now on disk passed.  A stamp that can outlive what it describes
+# is not evidence.  Removing it here means it can only ever mean "the image as
+# it is now was checked".
+#
+# [!] AND ONLY THIS TARGET'S LTO RECORDS, ALSO BEFORE EVERY LINK.  A link that
+# makes fewer partitions than the last one would otherwise leave the old ones
+# behind, and the check refuses a record the map does not load.
+if(CMAKE_SCRIPT_MODE_FILE AND (DEFINED VENEER_GATE_CLEAN_LTRANS
+                               OR DEFINED VENEER_GATE_CLEAN_STAMP))
+    if(DEFINED VENEER_GATE_CLEAN_STAMP)
+        file(REMOVE "${VENEER_GATE_CLEAN_STAMP}")
+    endif()
+    if(DEFINED VENEER_GATE_CLEAN_LTRANS)
+        get_filename_component(_dir "${VENEER_GATE_CLEAN_LTRANS}" DIRECTORY)
+        get_filename_component(_base "${VENEER_GATE_CLEAN_LTRANS}" NAME)
+        file(GLOB _old "${_dir}/${_base}.ltrans*.ltrans.su")
+        if(_old)
+            file(REMOVE ${_old})
+        endif()
     endif()
     return()
 endif()
@@ -231,6 +247,7 @@ function(_veneer_cost_gate_finish)
     add_custom_command(TARGET "${fw}" PRE_LINK
         COMMAND "${CMAKE_COMMAND}"
                 "-DVENEER_GATE_CLEAN_LTRANS=$<TARGET_FILE:${fw}>"
+                "-DVENEER_GATE_CLEAN_STAMP=${stamp}"
                 -P "${_VENEER_GATE_SELF}"
         VERBATIM)
 
@@ -269,8 +286,7 @@ function(_veneer_cost_gate_finish)
                 "${_VENEER_GATE_DIR}/check_veneer_base_cost.py"
                 "${_VENEER_GATE_DIR}/check_plugin_image.py"
                 "${_VENEER_GATE_SELF}"
-        COMMENT "check_veneer_base_cost.py (VENEER_BASE_COST ${declared} B "
-                "against the stack below each veneer of ${fw})"
+        COMMENT "check_veneer_base_cost.py (VENEER_BASE_COST ${declared} B against the stack below each veneer of ${fw})"
         VERBATIM)
 
     # Delivery: nothing puts this firmware on the device before it passes.

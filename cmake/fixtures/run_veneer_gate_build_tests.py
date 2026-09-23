@@ -45,6 +45,9 @@ Cases:
   script_change     editing either script (the veneer set lives in
                     check_plugin_image.py) reruns the check without a relink.
   image_change      a source edit that relinks the image reruns the check.
+  relink_retracts   building the IMAGE alone relinks without checking, and
+                    that link removes the stamp: a pass cannot outlive the
+                    image it was about.
   failure           DECLARED one below the derived value: the build fails
                     naming the chain, no stamp survives, and neither flash nor
                     either asset proceeds.
@@ -376,6 +379,31 @@ def main_tree(p, results):
            "recovery: flash should proceed", out)
     results.append(("recovery", "DECLARED %d: stamp back, flash proceeds"
                                 % derived))
+
+    # [!] A STAMP MUST NOT OUTLIVE THE IMAGE IT DESCRIBES.  Building the image
+    # alone -- `ninja shell.img` on a board, anything that needs the ELF but
+    # not the check -- relinks without checking, and before this the previous
+    # run's passing stamp stayed behind, describing an image that no longer
+    # existed.  Delivery still waited for the check, so nothing unchecked
+    # shipped; what was wrong is that the stamp went on asserting a pass.
+    with open(os.path.join(p.src, "root.c"), "a") as fh:
+        fh.write("\nint relink_marker(void) { return 4; }\n")
+    before = os.path.getmtime(p.elf)
+    rc, out = p.ninja("shell")
+    expect(rc == 0 and os.path.getmtime(p.elf) != before,
+           "relink_retracts_stamp: the image should have been relinked", out)
+    expect(not ran_check(out),
+           "relink_retracts_stamp: `ninja shell` should not run the check "
+           "(if it does, this case no longer tests anything)", out)
+    expect(not os.path.exists(p.stamp),
+           "relink_retracts_stamp: a passing stamp survived a relink that "
+           "did not re-run the check", out)
+    rc, out = p.ninja("flash")
+    expect(rc == 0 and ran_check(out) and os.path.exists(p.stamp),
+           "relink_retracts_stamp: the next delivery should check and stamp "
+           "again", out)
+    results.append(("relink_retracts_stamp",
+                    "`ninja shell` alone relinks and leaves no stamp"))
 
 
 def asset_tree(p, target, made, results, name):

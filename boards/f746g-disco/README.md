@@ -246,7 +246,9 @@ capture.
 > only `nn model load` (any reload attempt -- this board cannot yet say which
 > model a refused reload left) and `nn model unload` clear it. `nn run` waits on
 > the record's accepted-publish count, not the worker's inference counter, which
-> this board bumps before the decode is published. The GUI boxes are drawn only
+> this board bumps before the decode is published. `nn stream stats` reads
+> `infers` and `last` in separate critical sections, so on a running stream the
+> two can be one frame apart. The GUI boxes are drawn only
 > from a result of the session in force, so they still clear on `nn stream stop`.
 > For a model the decoder does not recognise, the worker takes the top 5 classes
 > of output 0 before its next inference and publishes them with the result

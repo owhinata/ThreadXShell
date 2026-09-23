@@ -705,6 +705,9 @@ add_library(shell_objs OBJECT
     # Where a `nn model load` ends and what that obliges (issue #122): a pure
     # table, so the host test walks the endings a console cannot produce.
     "${BOARD_DIR}/port/npu/nn_swap.c"
+    # The gate's claim and the count of threshold calls inside the plugin
+    # (issue #122): one transition each, walked by test/test_nn_param_calls.c.
+    "${BOARD_DIR}/port/npu/nn_param_calls.c"
     "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"
     # The bounded sink a board captures an external decoder's report into
     # (issue #110); the buffer itself belongs to the shared command.

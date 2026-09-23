@@ -373,6 +373,16 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_nn_swap"
 "$out/test_nn_swap"
 
+# issue #122 -- the gate's claim and the count of threshold calls inside the
+# plugin (port/npu/nn_param_calls.c).  A threshold call in a background job
+# preempted by a load on the other console is a window of microseconds; it
+# cannot be typed.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/npu" \
+    "$here/test_nn_param_calls.c" "$board/port/npu/nn_param_calls.c" \
+    $LDFLAGS -o "$out/test_nn_param_calls"
+"$out/test_nn_param_calls"
+
 gcc $CFLAGS \
     -I "$here" -I "$board/port/nor" \
     "$here/test_nor_state.c" "$board/port/nor/nor_state.c" \

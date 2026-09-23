@@ -232,8 +232,7 @@ board README が正。
   halt**（**継承 `LSPACT` は拒否**）。**CoreMark の TU だけ `-fno-tree-vectorize`**（基準線の連続性）。
 - **[!] WDMA3 のチャネルアドレスを書くのは `cam_wdma3.c` だけ、かつ xDMA disable 中**（マスクは専用
   ペアで**全出口で復元**、arm 時の監査は **fail-closed**）。**完了した面だけを読取前に全長 invalidate。
-  停止は単一ルーチン、再開はバリア**（**クリアの前に必ず停止**）。**エラーはフレームより優先・未知の
-  負値は terminal。**
+  停止は単一ルーチン、再開はバリア**（**クリアの前に必ず停止**）。**エラーはフレームより優先・未知の負値は terminal。**
 - **[!] `camera_stream_stop()` は成功時のみ join を保証する**ので**呼び出し元は `CAM_OK` の時だけ
   detach する**。未確認 join は **`CAM_ST_LOST`**（**`FAULTED` で代用しない**）で、detach も teardown も
   所有権解放も**回収路**も無い。**[!] stop だけが API mutex を有界待ちし**（他は `TX_NO_WAIT`）、
@@ -250,6 +249,7 @@ board README が正。
 - **[!] `nn model load --name` はリースを切らさない**（`npu_hw_init()` が先 → 走査 → CRC → `npu_open()`
   → plugin、**モデルが残らない失敗は必ず `npu_hw_deinit()`**。**開いた上は差し替え・plugin は backend 成功後**、表は `nn_swap.c`）。
   候補は **VALID のみ・重複拒否・失敗理由は別々・読めなければ拒否。ホスト側の `verify_vela_model` を外さない**（**書込みの後**に走る。**C++ 不在は fail-closed**）。
+- **[!] `nn thresh` は gate を取らない代わりに param 呼び出し中の数に入り、load/unload はその数が 0 でなければ BUSY**（判定は claim と同じクリティカルセクション、`nn_param_calls.c`。待たない）。
 - **[!] アリーナのキャッシュ保守は「範囲ごと」にしない。** 潰すのは **`ethosu_invalidate_dcache()`
   だけ**で、引き渡しは `ethosu_inference_begin/end` でアリーナ**全体**を、成功条件は **`job.state` と
   `job.result` の両方**、異常時はリセットの**成功を確認してから**。**呼び出し側で保守しない。推論は

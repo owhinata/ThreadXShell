@@ -295,12 +295,12 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
   join は `CAM_ST_LOST`（`FAULTED` で代用しない）で、detach も teardown も回収路も無い。**`cmds/` は
   producer が消費するデータパス設定を書かない**（境界は**消費のされ方**。毎フレーム読む物は可）。
 - **op resolver は 1 個のまま**（CMSIS-NN 排除 / 全面 offload でないモデルを落とす）。**境界の型変換は
-  ファイル側で剥がす。ペイロード検査も緩めない**（`COMMAND_STREAM` が 1 個かつ最後 / 入力テンソル 0 /
-  `is_variable()` 拒否）。
+  ファイル側で剥がす。ペイロード検査も緩めない**（`COMMAND_STREAM` が 1 個かつ最後 / 入力テンソル 0 / `is_variable()` 拒否）。
 - **`npu_open()` は長さを取り `GetModel()` の前に境界付き verifier を通す**（範囲 → 長さ → identifier →
   verifier → 走査。**長さには下限も要る**）。**limits は呼び出しとともに `npu_verify.h` の 1 箇所。**
 - **`nn model load --name` はリースを切らさない**（`npu_hw_init()` が先 → 走査 → CRC → `npu_open()` → plugin、
   モデルが残らない失敗は必ず `npu_hw_deinit()`）。**開いた上の load は差し替えで plugin は backend 成功後**（`nn_swap.c`）。
+- **`nn thresh` は param 呼び出し中の数に入り、load/unload はそれが 0 でなければ BUSY**（判定は claim と同じ CS、`nn_param_calls.c`）。
 - **候補は VALID のみ・重複拒否・失敗理由は別々・読めなければ拒否。ホストの `verify_vela_model` を外さない**（代替にならない。C++ 不在は fail-closed）。
 - **アリーナの保守は範囲ごとでなく全体を 2 点で**（潰すのは `ethosu_invalidate_dcache()` だけ、成功条件は
   state と result の**両方**、異常時はリセット成功を確認してから）。**呼び出し側で保守しない。**

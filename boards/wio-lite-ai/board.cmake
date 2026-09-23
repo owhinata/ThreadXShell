@@ -809,7 +809,10 @@ endif()
 # CONFIG_NN_BACKEND itself is declared much earlier in this file, above the BSP_ENABLE_*
 # block, because BSP_ENABLE_SD's default depends on which backend was selected.
 set(NN_SOURCES "${BOARD_DIR}/port/nn/nn.c"
-               "${BOARD_DIR}/port/nn/nn_svc_wio.c")  # the shared `nn` command's adapter
+               "${BOARD_DIR}/port/nn/nn_svc_wio.c"   # the shared `nn` command's adapter
+               # where a `nn model load` ends (issue #122): a pure table, walked
+               # by test/test_nn_load_end.c
+               "${BOARD_DIR}/port/nn/nn_load_end.c")
 # Which buffers the cacheable-carve-out gate must find in the image depends on which
 # backend was selected, and CMake is the only place that knows.  When the list was
 # hard-coded in the script, the script itself refused every tflm build -- the `null`

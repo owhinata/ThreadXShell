@@ -446,6 +446,35 @@ gcc $CFLAGS -I "$inc" -I "$here/../cmds" -I "$core" -I "$svc" \
     $LDFLAGS -o "$out/test_nn_cmd_core"
 "$out/test_nn_cmd_core"
 
+# issue #122 P15 -- a board's `nn` wording is checked against NN_SVC_DETAIL_MAX at
+# build time, because the copy into a result truncates and a truncated sentence
+# does not look truncated (one of wio's refusals was 164 characters and ended
+# "or see `d" on hardware).  The check fires in the COMPILER, so it is tested by
+# compiling: the boundary must build and run, and each over-long or non-literal
+# form must fail to build with the assertion's own message -- a compile that
+# fails for some other reason proves nothing about the gate.
+gcc $CFLAGS -I "$svc" "$here/test_nn_detail_check.c" \
+    $LDFLAGS -o "$out/test_nn_detail_check"
+"$out/test_nn_detail_check"
+for neg in NN_DC_OVER_LIT NN_DC_OVER_FMT NN_DC_NOT_LITERAL; do
+    if gcc $CFLAGS -D"$neg" -I "$svc" "$here/test_nn_detail_check.c" \
+           $LDFLAGS -o "$out/test_nn_detail_check_neg" \
+           > "$out/detail_neg.log" 2>&1; then
+        echo "test_nn_detail_check: $neg COMPILED -- the length gate did not fire" >&2
+        exit 1
+    fi
+    case "$neg" in
+    NN_DC_NOT_LITERAL) want='expected' ;;   # `"" p` is a syntax error, by design
+    *)                 want='detail literal is longer than NN_SVC_DETAIL_MAX' ;;
+    esac
+    if ! grep -q "$want" "$out/detail_neg.log"; then
+        echo "test_nn_detail_check: $neg failed to compile, but not on the gate:" >&2
+        cat "$out/detail_neg.log" >&2
+        exit 1
+    fi
+    echo "  ok   $neg refused at compile time"
+done
+
 # issue #99 -- the shared stream lifecycle (svc/nn_stream_life.c).
 #
 # A `--frames` waiter and a second console racing over one stream: the waiter

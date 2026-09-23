@@ -70,6 +70,13 @@ static uint8_t  nn_open_done;       /**< a model is active                    */
 static uint32_t nn_model_addr;
 static uint32_t nn_model_len;
 static char     nn_model_from[BLOB_NAME_MAX + 1];  /**< label, never a key    */
+
+/* [!] A legal name must survive both copies it takes through the shared
+ * command: the parser's (`--name`) and `nn info`'s (issue #122 P10). */
+_Static_assert(NN_SPEC_NAME_MAX >= BLOB_NAME_MAX,
+               "nn model load --name cannot carry this board's longest blob name");
+_Static_assert(NN_SVC_MODEL_MAX >= BLOB_NAME_MAX,
+               "nn info would truncate this board's longest blob name");
 static int      nn_model_slot;      /**< -1 for the raw form                  */
 
 /** The geometry the last capture used.  Kept because a box has to be mapped
@@ -255,8 +262,11 @@ static void nn_detail_to(char *dst, size_t cap, const char *fmt, ...)
 }
 
 /* Every failure path writes into the result it is about to return. */
-#define nn_detail_set(...) \
-	nn_detail_to(res->detail, sizeof res->detail, __VA_ARGS__)
+/* [!] Its format is checked against NN_SVC_DETAIL_MAX at build time (issue
+ * #122 P15): the copy truncates, and a truncated sentence does not look it. */
+#define nn_detail_set(...)                                                  \
+	((void)NN_SVC_DETAIL_CHECK_FMT(__VA_ARGS__),                        \
+	 nn_detail_to(res->detail, sizeof res->detail, __VA_ARGS__))
 #define nn_detail_clear()  (res->detail[0] = '\0')
 
 /* Fill a result in one place, so no path can set a status and forget the
@@ -332,12 +342,13 @@ void nn_svc_info(struct nn_svc_info *out)
 
 	if (owner_snap != (uint8_t)NN_OWNER_STREAM) {
 		/* An operation has it.  Only what CANNOT be in flight is reported: the
-		   arena reservation above is a link-time constant, and nothing else. */
-		nn_svc_str(out->source, sizeof out->source,
-		           "(busy -- another nn job holds it)");
-		out->avail_identity = (uint8_t)NN_AVAIL_WITHHELD;
-		out->avail_runtime  = (uint8_t)NN_AVAIL_WITHHELD;
-		out->avail_tensors  = (uint8_t)NN_AVAIL_WITHHELD;
+		   arena reservation above is a link-time constant, and nothing else.
+		   [!] BUSY, NOT WITHHELD (issue #122 P4): WITHHELD tells the operator
+		   to go and stop a stream, and none is running -- a load, a run or a
+		   bench is, and it lets go by itself. */
+		out->avail_identity = (uint8_t)NN_AVAIL_BUSY;
+		out->avail_runtime  = (uint8_t)NN_AVAIL_BUSY;
+		out->avail_tensors  = (uint8_t)NN_AVAIL_BUSY;
 		return;
 	}
 
@@ -1506,24 +1517,32 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
    mean "nothing was touched" and "something is still running in there". */
 static const char *nn_stream_why_text(unsigned char why)
 {
+	/* Each sentence is checked against NN_SVC_DETAIL_MAX at build time -- it
+	 * is copied whole into a result's detail (issue #122 P15). */
 	switch ((enum nn_stream_why)why) {
 	case NN_STREAM_WHY_CAM_LOCKED:
-		return "the camera API stayed locked, so the stop was never requested "
-		       "and nothing was touched -- run `nn stream stop` again";
+		return NN_SVC_DETAIL_LIT(
+			"the camera API stayed locked, so the stop was never "
+			"requested and nothing was touched -- run `nn stream stop` "
+			"again");
 	case NN_STREAM_WHY_CAM_LOST:
-		return "the producer never acknowledged the stop; the camera is "
-		       "unusable until reboot";
+		return NN_SVC_DETAIL_LIT(
+			"the producer never acknowledged the stop; the camera is "
+			"unusable until reboot");
 	case NN_STREAM_WHY_CAM_STATE:
-		return "the camera refused the stop; it is unusable until reboot";
+		return NN_SVC_DETAIL_LIT(
+			"the camera refused the stop; it is unusable until reboot");
 	case NN_STREAM_WHY_SINK_BUSY:
-		return "the panel has not finished with this stream's frames -- run "
-		       "`nn stream stop` again";
+		return NN_SVC_DETAIL_LIT(
+			"the panel has not finished with this stream's frames -- "
+			"run `nn stream stop` again");
 	case NN_STREAM_WHY_SINK_LOST:
-		return "the panel thread did not finish; the preview is unusable "
-		       "until reboot";
+		return NN_SVC_DETAIL_LIT(
+			"the panel thread did not finish; the preview is unusable "
+			"until reboot");
 	case NN_STREAM_WHY_OK:
 	default:
-		return "stopped";
+		return NN_SVC_DETAIL_LIT("stopped");
 	}
 }
 
@@ -1685,9 +1704,14 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 _Static_assert(3u + (unsigned)PLUGIN_SLOT_COUNT < (unsigned)NN_STREAM_LINES_MAX,
                "the stream report must end before the caller's line cap");
 
-unsigned nn_svc_thresh_get(void)
+int nn_svc_thresh_get(unsigned *milli)
 {
-	return nn_active_get_thresh_milli();
+	/* Always answers: nothing is taken here, so there is nothing to be busy
+	 * on (whether that is safe is issue #122 P5, not this contract). */
+	if (milli == NULL)
+		return NN_SVC_ERR_ARG;
+	*milli = nn_active_get_thresh_milli();
+	return NN_SVC_OK;
 }
 
 int nn_svc_thresh_set(unsigned milli)

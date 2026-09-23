@@ -106,6 +106,19 @@ const char *nn_model_state_name(uint8_t state);
 const char *nn_status_name(int status);
 
 /**
+ * What `nn info` prints in place of a section the board did not fill, or NULL
+ * when the section is an answer (@ref NN_AVAIL_OK) or has nothing to report
+ * (@ref NN_AVAIL_NA) -- the caller prints the section, or leaves it out.
+ *
+ * [!] "A STREAM HAS IT" AND "ANOTHER COMMAND HAS IT" ARE DIFFERENT SENTENCES
+ * (issue #122 P4).  There was one, and it named the stream: an operator asking
+ * while a `nn model load` or `nn bench` ran was told to stop a stream that did
+ * not exist.  A value this build does not know is still not an answer, so it
+ * gets a sentence of its own rather than being printed as though filled.
+ */
+const char *nn_avail_text(uint8_t avail);
+
+/**
  * Which sentence `nn stream stats` puts on its `last` line.
  *
  * [!] HERE BECAUSE NOTHING GATES WHAT A COMMAND PRINTS (issue #105).  This

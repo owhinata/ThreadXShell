@@ -86,6 +86,11 @@ extern "C" {
 #define NN_SVC_ERR_HW       (-76)  /**< the hardware refused or did not settle   */
 #define NN_SVC_ERR_STALE    (-77)  /**< the sample straddled a transition; retry */
 #define NN_SVC_ERR_GEN      (-78)  /**< that stream generation is not current    */
+/** The operation was started and did not finish inside the bound the board
+ *  waits for.  NOT NN_SVC_ERR_HW: nothing refused, and the same request may
+ *  well succeed when repeated -- and NOT a success with nothing to show, which
+ *  is what `nn run` used to say (issue #122 P7). */
+#define NN_SVC_ERR_TIMEOUT  (-79)
 
 /**
  * What the CALLER may do about the board's transient claim afterwards.
@@ -165,6 +170,37 @@ enum nn_model_state {
 /** Longest board-written explanation carried back with a result. */
 #define NN_SVC_DETAIL_MAX 159
 
+/*
+ * [!] A BOARD'S LITERAL WORDING IS CHECKED AGAINST THAT BOUND AT BUILD TIME
+ * (issue #122 P15).  The copy into @ref nn_op_result::detail truncates, and a
+ * truncated sentence does not look truncated -- one board's refusal ended
+ * "... or see `d (-76)" on hardware, the half it cut being the advice.  Nothing
+ * noticed, because nothing compared the sentence with the field.
+ *
+ * NN_SVC_DETAIL_CHECK(s) is a compile-time zero that fails the build when the
+ * string LITERAL @p s (a format included) is longer than NN_SVC_DETAIL_MAX;
+ * NN_SVC_DETAIL_LIT(s) is @p s itself, checked.  `"" s` refuses anything that
+ * is not a literal, so a pointer cannot slip past as "checked".
+ *
+ * WHAT IT CANNOT SEE: text a conversion expands at run time -- a name, a
+ * number, a sentence picked from a table.  A table of whole sentences is
+ * checkable, so a board wraps each of its entries in NN_SVC_DETAIL_LIT; a
+ * composition of a literal with an argument is not, and remains the author's
+ * arithmetic.
+ */
+#define NN_SVC_DETAIL_CHECK(s)                                                 \
+	(0u * sizeof(struct {                                                  \
+		_Static_assert(sizeof("" s) <= (size_t)NN_SVC_DETAIL_MAX + 1u, \
+		               "detail literal is longer than NN_SVC_DETAIL_MAX"); \
+		char nn_detail_check_;                                         \
+	}))
+#define NN_SVC_DETAIL_LIT(s)  (NN_SVC_DETAIL_CHECK(s) + ("" s))
+/** The same check on the FORMAT of a printf-shaped call: its first argument.
+ *  A board's `nn_detail_set(fmt, ...)` puts this in front of the formatter. */
+#define NN_SVC_DETAIL_FIRST_(fmt, ...) fmt
+#define NN_SVC_DETAIL_CHECK_FMT(...) \
+	NN_SVC_DETAIL_CHECK(NN_SVC_DETAIL_FIRST_(__VA_ARGS__, 0))
+
 /**
  * The two answers every operation gives.  Never collapse them into one.
  *
@@ -210,8 +246,13 @@ enum nn_spec_tag {
 
 /** Longest model name the shared parser will carry.  A board with a shorter
  *  limit of its own refuses the overlong ones it cannot hold; this is only the
- *  bound on what shell/ is willing to copy. */
-#define NN_SPEC_NAME_MAX 31
+ *  bound on what shell/ is willing to copy.
+ *
+ *  [!] AT LEAST THE LONGEST NAME ANY BOARD CAN STORE (issue #122 P10).  It was
+ *  31 while one board's asset store takes 64, so a legal blob name was refused
+ *  by the parser as a malformed argument before the board could look it up.
+ *  Each board asserts its own limit against this one. */
+#define NN_SPEC_NAME_MAX 64
 
 /** Where a load is pointed.  Filled by the shared parser before ANY acquisition
  *  or hardware access, so that an unsupported tag is refused while nothing is
@@ -260,6 +301,11 @@ enum nn_avail {
 	NN_AVAIL_OK = 0,      /**< filled and true                                */
 	NN_AVAIL_NA,          /**< this board has nothing to report here          */
 	NN_AVAIL_WITHHELD,    /**< a stream owns the claim; ask again after it stops */
+	/** Another nn OPERATION holds the claim -- a load, a run, a bench.  Not
+	 *  WITHHELD: that tells an operator to go and stop a stream, and there is
+	 *  none; this one clears by itself when the operation returns (issue #122
+	 *  P4).  Appended, so the values above keep their numbers. */
+	NN_AVAIL_BUSY,
 };
 
 #define NN_SVC_BACKEND_MAX 31
@@ -269,10 +315,11 @@ enum nn_avail {
  * rather than a shortened one -- and the half it removed was the caveat. */
 #define NN_SVC_VERSION_MAX 63
 /* [!] LONG ENOUGH FOR THE LONGEST NAME ANY BOARD CAN PRODUCE.  wio's asset
- * store allows 63 characters, and a field that truncates would report two
- * distinct legal models under one prefix -- a name that is wrong rather than
- * merely short. */
-#define NN_SVC_MODEL_MAX   63
+ * store allows 63 characters and grove-vision-ai-v2's 64 (this said 63 until
+ * issue #122 and cut the last character off a legal Grove name); a field that
+ * truncates would report two distinct legal models under one prefix -- a name
+ * that is wrong rather than merely short.  Each board asserts its limit. */
+#define NN_SVC_MODEL_MAX   64
 #define NN_SVC_SOURCE_MAX  79
 
 struct nn_svc_info {
@@ -804,16 +851,27 @@ int nn_svc_box_to_frame(const struct bf_det *in, struct bf_det *out);
 /**
  * Score threshold in milli-probability, held by whichever decoder is in force.
  *
- * @return 1..999, or @ref NN_SVC_THRESH_NONE when nothing holds one.
+ * [!] "NONE" AND "NOT NOW" ARE TWO ANSWERS (issue #122 P6).  This used to return
+ * the value alone, so a board that could not take the lock guarding its decoder
+ * had only NN_SVC_THRESH_NONE to say it with -- and `nn thresh` printed "the
+ * active decoder has no threshold" about a decoder that had one and was merely
+ * busy.  The status is now separate from the value.
+ *
+ * @param milli  set to 1..999, or @ref NN_SVC_THRESH_NONE when nothing holds
+ *               one; set to NN_SVC_THRESH_NONE on any failure as well, but a
+ *               caller reads it only on NN_SVC_OK
+ * @return NN_SVC_OK, or NN_SVC_ERR_BUSY when the decoder could not be asked
+ *         just now
  */
-unsigned nn_svc_thresh_get(void);
+int nn_svc_thresh_get(unsigned *milli);
 
 /**
- * @return NN_SVC_OK, NN_SVC_ERR_ARG if the value was refused, or
- *         NN_SVC_ERR_STATE if there is no decoder to hold one.
+ * @return NN_SVC_OK, NN_SVC_ERR_ARG if the value was refused,
+ *         NN_SVC_ERR_STATE if there is no decoder to hold one, or
+ *         NN_SVC_ERR_BUSY if the decoder could not be reached just now.
  *
- * The last two are separate because they send an operator to different places:
- * one is a number to change, the other is a container to load.
+ * They are separate because they send an operator to different places: a
+ * number to change, a container to load, or simply a retry.
  */
 int      nn_svc_thresh_set(unsigned milli);
 

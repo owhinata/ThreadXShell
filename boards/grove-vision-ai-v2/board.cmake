@@ -688,6 +688,10 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/npu/npu_hw.c"
     "${BOARD_DIR}/port/npu/nn_preproc.c"
     "${BOARD_DIR}/port/npu/nn_overlay.c"
+    # The decode record `nn dets` reads (issue #118): the storage and its
+    # interrupt-disabled lock here, the decisions in the shared svc/ file.
+    "${BOARD_DIR}/port/npu/nn_rec.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn_det_record.c"
     # npu_tensor -> tensor_desc (issues #97, #104).  The only file here that
     # knows both types, and all that is left of what used to be nn_decoder.c:
     # THE DECODER ITSELF IS NO LONGER IN THIS FIRMWARE.  svc/blazeface.c is

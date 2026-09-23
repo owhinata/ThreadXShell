@@ -51,6 +51,7 @@
 #include "nn_plugin_stack.h"  /* after camera.h and cam_lcd_sink.h (#119) */
 #include "nn_probe.h"
 #include "nn_preproc.h"
+#include "nn_rec.h"
 #include "nn_stream_state.h"
 #include "nor_flash.h"    /* NOR_XIP_BASE */
 #include "npu.h"
@@ -150,6 +151,12 @@ static uint32_t nn_stream_ms;        /**< frozen elapsed, once it has stopped */
  */
 static struct nn_stream_stats nn_stream_final;
 static uint32_t nn_stream_final_gen;   /**< whose they are; ANY = nobody's */
+/* The record's epoch when `last` was latched: a model change since took the
+ * result away, and the latched line follows it (issue #118). */
+static uint32_t nn_stream_final_epoch;
+/* The record's accepted count at this stream's boundary (issue #118): `last`
+ * is the stream's only once the record has accepted a publish since. */
+static uint32_t nn_stream_acc0;
 
 /* Claim IDLE -> STARTING together with the transient claim.  ONE critical
    section, because they are one decision: a start that took the claim and then
@@ -270,7 +277,8 @@ static int nn_oneshot_end(uint32_t gen)
 }
 
 /* Everything came up: mint the generation and publish the baselines with it. */
-static void nn_stream_commit(uint32_t frames0, uint32_t t0, uint32_t *gen)
+static void nn_stream_commit(uint32_t frames0, uint32_t t0, uint32_t acc0,
+                             uint32_t *gen)
 {
 	TX_INTERRUPT_SAVE_AREA
 
@@ -281,6 +289,7 @@ static void nn_stream_commit(uint32_t frames0, uint32_t t0, uint32_t *gen)
 	if (*gen != NN_STREAM_GEN_ANY) {
 		nn_stream_frames0 = frames0;
 		nn_stream_t0      = t0;
+		nn_stream_acc0    = acc0;
 		nn_stream_ms      = 0u;
 	}
 	TX_RESTORE
@@ -315,15 +324,18 @@ static enum nn_stream_stop_claim nn_stream_claim_stop(uint32_t gen)
 
 /* Publish an ended stream's numbers.  Called inside the settle's critical
    section, only when the settle took. */
-static void nn_stream_latch(uint32_t ending, const struct nn_stream_stats *final)
+static void nn_stream_latch(uint32_t ending, const struct nn_stream_stats *final,
+                            uint32_t epoch)
 {
 	nn_stream_final = *final;
 	nn_stream_final.elapsed_ms = nn_stream_ms;
 	nn_stream_final_gen = ending;
+	nn_stream_final_epoch = epoch;
 }
 
 /* Both halves confirmed. */
-static void nn_stream_finish(const struct nn_stream_stats *final)
+static void nn_stream_finish(const struct nn_stream_stats *final,
+                             uint32_t epoch)
 {
 	uint32_t ending;
 	TX_INTERRUPT_SAVE_AREA
@@ -336,7 +348,7 @@ static void nn_stream_finish(const struct nn_stream_stats *final)
 	if (nn_stream_life_finish(&nn_life)) {
 		nn_stream_ms = (uint32_t)(((uint32_t)tx_time_get() - nn_stream_t0) *
 		                          1000u / TX_TIMER_TICKS_PER_SECOND);
-		nn_stream_latch(ending, final);
+		nn_stream_latch(ending, final, epoch);
 		nn_owner = (uint8_t)NN_OWNER_NONE;
 		nn_busy  = 0u;
 	}
@@ -354,7 +366,8 @@ static void nn_stream_unclaim_stop(void)
 }
 
 /* Unconfirmed: the claim is never given back. */
-static void nn_stream_poison(const struct nn_stream_stats *final)
+static void nn_stream_poison(const struct nn_stream_stats *final,
+                             uint32_t epoch)
 {
 	uint32_t ending;
 	TX_INTERRUPT_SAVE_AREA
@@ -364,7 +377,7 @@ static void nn_stream_poison(const struct nn_stream_stats *final)
 	if (nn_stream_life_poison(&nn_life)) {
 		nn_stream_ms = (uint32_t)(((uint32_t)tx_time_get() - nn_stream_t0) *
 		                          1000u / TX_TIMER_TICKS_PER_SECOND);
-		nn_stream_latch(ending, final);
+		nn_stream_latch(ending, final, epoch);
 	}
 	TX_RESTORE
 }
@@ -882,6 +895,11 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 		nn_release();
 		return;
 	}
+	/* [!] From here the plugin and the model can change, whatever this load
+	 * then reports, so the last result goes now (issue #118) -- under the
+	 * gate, before any new identity is visible.  Nothing is open at this point
+	 * (a load over an open model is refused above), so nothing is lost. */
+	nn_rec_invalidate();
 
 	/*
 	 * [!] THE BRING-UP COMES BEFORE THE LOOKUP, and the whole load is built
@@ -955,6 +973,9 @@ void nn_svc_model_unload(struct nn_op_result *res)
 	nn_has_container = 0;
 	npu_close();
 	npu_hw_deinit();
+	/* The model and its decoder are gone, and the last result with them
+	 * (issue #118) -- under the gate. */
+	nn_rec_invalidate();
 	nn_open_done     = 0u;
 	nn_model_addr    = 0u;
 	nn_model_len     = 0u;
@@ -1081,43 +1102,32 @@ static int nn_fill_input(struct nn_op_result *res, const uint8_t *raw,
 }
 
 /*
- * Decode whatever the outputs currently hold -- or say that nothing did.
+ * Decode what `nn run` just inferred -- or say that nothing did -- and PUBLISH
+ * it to the record `nn dets` reads (issue #118).
  *
- * [!] THE ONE PLACE THIS BOARD DECIDES (issue #104).  `nn run` and `nn dets`
- * both arrive here, and the plugin-or-raw choice lives INSIDE rather than at
- * each of them, so the two cannot be routed differently.  That is the shape
- * issue #103 got wrong once: a single branch point was built for the decoder and
- * the neighbouring question -- the geometry -- was left at two sources, and
- * every box `nn run` produced came back "outside the frame".
+ * [!] THE ONE PLACE THIS BOARD DECIDES (issue #104), and since issue #118 the
+ * only caller is `nn run`: `nn dets` reads the record and decodes nothing.  The
+ * plugin-or-raw choice lives here, so the two routes cannot be taken
+ * differently -- the shape issue #103 got wrong once.
  *
- * [!] AND WITH NO PLUGIN THERE IS NO DECODER AT ALL.  This firmware stopped
- * carrying one, so the outputs are reported as the tensors they are.  Not as a
- * BF_ERR_* code: BF_ERR_MODEL means "not a detector" and routes to the shared
- * class report, which would print the top 5 of a detector's regression tensor as
- * though the numbers were class scores.
+ * [!] AND WITH NO PLUGIN THERE IS NO DECODER AT ALL.  The outputs are reported
+ * as the tensors they are (NN_DET_RAW_TENSORS), never as a BF_ERR_* code:
+ * BF_ERR_MODEL routes to the shared class report, which would print the top 5
+ * of a detector's regression tensor as though the numbers were class scores.
  *
- * A negative return from a PLUGIN is published as it is, not folded into zero
- * faces (issue #57) and not folded into one code (issue #97).
+ * A plugin's negative return is published as it is (issues #57, #97, #118).
+ *
+ * @return 0 when a result was published; -1 when no decode could be run (an
+ *         output is unreadable), with the detail set and nothing published
  */
-static void nn_decode_into(struct nn_det_snapshot *snap,
-                           struct nn_report_capture *rep)
+static int nn_decode_publish(uint32_t gen, struct nn_op_result *res)
 {
 	struct npu_tensor outs[NPU_DESC_MAX_OUTPUTS];
-	struct bf_result bfr;
 	unsigned n_out, i;
-	int nd;
-
-	memset(&bfr, 0, sizeof bfr);
-	snap->valid = 1;
-	snap->res   = bfr;
 
 	if (!nn_active_is_plugin()) {
-		/* Nothing interprets these.  The count means nothing, so it is not one
-		   an operator could read as a measurement. */
-		snap->ndet = 0;
-		snap->kind = (uint8_t)NN_DET_RAW_TENSORS;
-		nn_report_set(rep, NN_REPORT_NONE);
-		return;
+		(void)nn_rec_publish_raw(gen);
+		return 0;
 	}
 
 	n_out = npu_output_count();
@@ -1125,41 +1135,44 @@ static void nn_decode_into(struct nn_det_snapshot *snap,
 		n_out = NPU_DESC_MAX_OUTPUTS;
 	for (i = 0u; i < n_out; i++)
 		if (npu_output(i, &outs[i]) != NPU_OK) {
-			snap->ndet = BF_ERR_ARG;
-			/* This exit writes the kind too: it returns before the decision
-			   below, and a reused snapshot would otherwise keep the routing of
-			   whatever ran last (issue #104). */
-			snap->kind = (uint8_t)NN_DET_PLUGIN_REPORT;
-			/* No decode ran, so there is no result to describe -- and asking
-			 * the plugin anyway would have it describe an OLDER frame as
-			 * though it were this one (issue #110). */
-			nn_report_set(rep, NN_REPORT_STALE);
-			return;
+			/* No decode ran, so there is nothing to publish -- and the
+			 * record keeps describing what the plugin last decoded. */
+			nn_detail_set("output %u of the model is unreadable", i);
+			return -1;
 		}
 
-	nd = nn_active_decode(outs, n_out);
-	snap->ndet = nd;
-	/* [!] SAY WHERE THE RESULT IS.  The plugin never touched the caller's array,
-	 * so a consumer that printed it would print whatever was there before --
-	 * zeros on the first run and a stale decode after that, which is worse. */
-	snap->kind = (uint8_t)NN_DET_PLUGIN_REPORT;
+	(void)nn_rec_publish_external(nn_active_decode(outs, n_out), gen);
+	return 0;
+}
 
-	/*
-	 * [!] AND TAKE ITS ACCOUNT OF THAT RESULT NOW, IN THE SAME BREATH AS THE
-	 * DECODE (issue #110).  The shared command used to call back here after it
-	 * returned, by which time nn_release() has happened and another console may
-	 * have replaced the plugin -- so the bytes printed need not have described
-	 * the count printed beside them.  Captured here they cannot disagree,
-	 * because nothing has run in between.  The sink writes into the CALLER's
-	 * buffer, so this is the only copy and nobody can overwrite it.
-	 */
-	if (rep != NULL) {
-		nn_report_begin(rep);
-		if (!nn_active_can_report())
-			nn_report_set(rep, NN_REPORT_UNSUPPORTED);
-		else
-			nn_report_end(rep, nn_active_report(nn_report_write, rep));
+/*
+ * Ask the plugin for its account of the result the record holds.
+ *
+ * [!] ONLY UNDER THE GATE (issue #110), which is what excludes every other
+ * decode -- `nn run` holds it, and a stream holds it for its whole life.  So
+ * the snapshot is taken here, under it too: taken before, a `nn run` finishing
+ * in between would leave this pairing its count with the next frame's account.
+ */
+static void nn_capture_report(const struct nn_det_snapshot *snap,
+                              struct nn_report_capture *rep)
+{
+	if (rep == NULL)
+		return;
+	if (!snap->valid || snap->kind != (uint8_t)NN_DET_PLUGIN_REPORT) {
+		nn_report_set(rep, NN_REPORT_NONE);
+		return;
 	}
+	if (!snap->reportable) {
+		/* A decode ran whose publish was dropped (issue #118) -- not a stop
+		 * on this board (see nn_rec.h), but the record's rule holds anyway. */
+		nn_report_set(rep, NN_REPORT_SUPERSEDED);
+		return;
+	}
+	nn_report_begin(rep);
+	if (!nn_active_can_report())
+		nn_report_set(rep, NN_REPORT_UNSUPPORTED);
+	else
+		nn_report_end(rep, nn_active_report(nn_report_write, rep));
 }
 
 /* Every exit of `nn run` after its claim: settle the one-shot, and if that is
@@ -1181,7 +1194,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 {
 	struct npu_tensor in;
 	enum nn_stream_start_claim why = NN_STREAM_START_BUSY;
-	uint32_t gen;
+	uint32_t gen, rgen, base;
 	int rc;
 
 	nn_detail_clear();
@@ -1222,6 +1235,10 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 		return;
 	}
+	/* The run's record boundary and the base it counts from, under the gate
+	 * that excludes every other publisher (issue #118). */
+	base = nn_rec_boundary_base();
+	rgen = nn_rec_gen();
 	if (!nn_open_done) {
 		nn_detail_set("no model is loaded");
 		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
@@ -1282,7 +1299,20 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 * inference.  The convention is stated in the board README rather than
 	 * enforced by a check no decoder stands behind.
 	 */
-	nn_decode_into(snap, rep);
+	if (nn_decode_publish(rgen, res) != 0) {
+		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
+		nn_oneshot_finish(gen, res);
+		return;
+	}
+	/* [!] READ BACK FROM THE RECORD, AND ONLY THIS RUN'S (issue #118): the
+	 * answer `nn dets` will give next is the one printed now.  The account is
+	 * captured before the gate goes. */
+	nn_rec_snapshot(snap);
+	snap->valid = nn_det_last_valid(snap, base);
+	if (snap->valid)
+		nn_capture_report(snap, rep);
+	else
+		nn_report_set(rep, NN_REPORT_NONE);
 
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 	nn_oneshot_finish(gen, res);
@@ -1292,21 +1322,37 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
                            int max, struct nn_report_capture *rep,
                            struct nn_op_result *res)
 {
+	int gated;
+
+	(void)dets;
+	(void)max;
 	nn_detail_clear();
 
-	if (!nn_try_acquire()) {
-		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
-		return;
-	}
-	if (!nn_open_done) {
-		nn_detail_set("no model is loaded");
-		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
+	/*
+	 * [!] THE RECORD, NOT A DECODE (issue #118).  This used to take the gate
+	 * and decode whatever the outputs held -- a second decode of a frame, on
+	 * the shell thread, that `nn run` had already decoded; the other two
+	 * boards read their record.  Now all three do: the last result `nn run`
+	 * or a stream published, which a stop does not clear and a model change
+	 * does.
+	 *
+	 * [!] THE PLUGIN'S ACCOUNT NEEDS THE GATE, AND A STREAM HOLDS IT (decision
+	 * D2).  The count is read regardless; the account is taken only when the
+	 * gate is free, and otherwise said to be unreachable (STALE) -- the
+	 * producer is decoding the next frame over it.  Not waited for: the
+	 * stream holds the gate until its stop.
+	 */
+	gated = nn_try_acquire();
+	nn_rec_snapshot(snap);
+	if (gated) {
+		nn_capture_report(snap, rep);
 		nn_release();
-		return;
+	} else if (snap->valid && snap->kind == (uint8_t)NN_DET_PLUGIN_REPORT) {
+		nn_report_set(rep, NN_REPORT_STALE);
+	} else {
+		nn_report_set(rep, NN_REPORT_NONE);
 	}
-	nn_decode_into(snap, rep);
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
-	nn_release();
 }
 
 /* ---- bench --------------------------------------------------------------- */
@@ -1518,6 +1564,7 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
                          struct nn_op_result *res, uint32_t *gen)
 {
 	struct camera_stats cs;
+	uint32_t acc0;
 	int rc;
 
 	if (res == NULL)
@@ -1580,6 +1627,14 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	 * the NPU could not be released.  The camera does both under its API mutex,
 	 * so a failure here means nothing was attached and nothing started.
 	 */
+	/*
+	 * [!] THE RECORD BOUNDARY COMES BEFORE THE ATTACH (issue #118), and the
+	 * base this stream counts its own publishes from is taken in the same
+	 * critical section.  From here only this stream's producer can publish,
+	 * and it cannot start until the attach below -- so nothing it produces is
+	 * absorbed into the base, and nothing before it is counted as its own.
+	 */
+	acc0 = nn_rec_boundary_base();
 	rc = cam_lcd_sink_attach_and_stream(nn_overlay_arm());
 	if (rc != CAM_OK) {
 		if (rc == CAM_ERR_BUSY)
@@ -1593,7 +1648,7 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	}
 
 	camera_stream_stats(&cs);
-	nn_stream_commit(cs.frames, (uint32_t)tx_time_get(), gen);
+	nn_stream_commit(cs.frames, (uint32_t)tx_time_get(), acc0, gen);
 	if (*gen == NN_STREAM_GEN_ANY) {
 		/*
 		 * [!] REFUSED, WHICH MEANS THIS CALLER NO LONGER OWNS THE START -- and
@@ -1618,7 +1673,9 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
    share. */
 static void nn_stream_counts(const struct camera_stats *cs,
                              const struct nn_overlay_stats *os,
-                             uint32_t frames0, struct nn_stream_stats *out)
+                             const struct nn_det_snapshot *rec,
+                             uint32_t frames0, uint32_t acc0,
+                             struct nn_stream_stats *out)
 {
 	out->frames         = cs->frames - frames0;
 	out->skipped        = os->skipped;
@@ -1627,34 +1684,42 @@ static void nn_stream_counts(const struct camera_stats *cs,
 	out->model_errors   = os->model_errors;
 	out->decoder_errors = os->decoder_errors;
 	out->last_us        = os->last_ms * 1000u;
-	/* [!] Nothing decoded yet is not "decoded nobody". */
-	out->last_valid = (os->inferences != 0u) ? 1u : 0u;
-	out->last_ndet  = (int32_t)os->last_ndet;
+	/* [!] Nothing decoded yet is not "decoded nobody".  And `last` is the
+	 * RECORD's, counted against this stream's base (issue #118): the producer
+	 * publishes every decode there, refusals included, and a model change
+	 * clears it -- which the producer's own counter cannot know. */
+	out->last_valid = nn_det_last_valid(rec, acc0) ? 1u : 0u;
+	out->last_ndet  = (int32_t)rec->ndet;
 }
 
 /* A stopping stream's final numbers.  Outside any critical section: the
    camera's stats end in the frame pipeline's mutex. */
-static void nn_stream_take_final(struct nn_stream_stats *final)
+static uint32_t nn_stream_take_final(struct nn_stream_stats *final)
 {
 	struct camera_stats cs;
 	struct nn_overlay_stats os;
-	uint32_t frames0;
+	struct nn_det_snapshot rec;
+	uint32_t frames0, acc0;
 	TX_INTERRUPT_SAVE_AREA
 
 	TX_DISABLE
 	frames0 = nn_stream_frames0;
+	acc0    = nn_stream_acc0;
 	TX_RESTORE
 	camera_stream_stats(&cs);
 	nn_overlay_stats(&os);
+	nn_rec_snapshot(&rec);
 	memset(final, 0, sizeof *final);
-	nn_stream_counts(&cs, &os, frames0, final);
+	nn_stream_counts(&cs, &os, &rec, frames0, acc0, final);
+	return rec.epoch;     /* latched with the line it qualifies */
 }
 
 int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 {
 	struct camera_stats cs;
 	struct nn_overlay_stats os;
-	uint32_t seq0, seq1, g, frames0, t0, ms;
+	struct nn_det_snapshot rec;
+	uint32_t seq0, seq1, g, frames0, t0, ms, acc0;
 	uint8_t  phase, kind;
 	TX_INTERRUPT_SAVE_AREA
 
@@ -1668,13 +1733,22 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	 * section as the generation it belongs to -- see nn_stream_final. */
 	if (g != NN_STREAM_GEN_ANY && g == nn_stream_final_gen &&
 	    (gen == NN_STREAM_GEN_ANY || gen == g)) {
+		uint32_t ep = nn_stream_final_epoch;
+
 		*out = nn_stream_final;
 		TX_RESTORE
+		/* [!] ...except that a model change since the stop took its last
+		 * result away (issue #118).  The record's lock is its own critical
+		 * section, so the epoch is compared just after. */
+		nn_rec_snapshot(&rec);
+		if (rec.epoch != ep)
+			out->last_valid = 0u;
 		return NN_SVC_OK;
 	}
 	frames0 = nn_stream_frames0;
 	t0      = nn_stream_t0;
 	ms      = nn_stream_ms;
+	acc0    = nn_stream_acc0;
 	TX_RESTORE
 
 	if (g == NN_STREAM_GEN_ANY)
@@ -1689,6 +1763,7 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	 */
 	camera_stream_stats(&cs);
 	nn_overlay_stats(&os);
+	nn_rec_snapshot(&rec);
 
 	/*
 	 * Phase 3: accept only if nothing moved.  The counter, not the generation
@@ -1705,7 +1780,7 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	 * the baselines below are still the last stream's. */
 	out->running        = (phase == (uint8_t)NN_STREAM_PHASE_RUNNING &&
 	                       kind == (uint8_t)NN_STREAM_KIND_STREAM) ? 1u : 0u;
-	nn_stream_counts(&cs, &os, frames0, out);
+	nn_stream_counts(&cs, &os, &rec, frames0, acc0, out);
 	out->elapsed_ms     = out->running
 	                    ? (uint32_t)(((uint32_t)tx_time_get() - t0) * 1000u /
 	                                 TX_TIMER_TICKS_PER_SECOND)
@@ -1750,6 +1825,7 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 {
 	struct nn_stream_stats final;
 	struct nn_stream_verdict v;
+	uint32_t epoch;
 	int cam_rc, detach_rc = 0, attempted = 0;
 
 	if (res == NULL)
@@ -1798,6 +1874,19 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 	nn_overlay_request_stop();
 	cam_rc = camera_stream_stop();
 
+	/*
+	 * [!] THE RECORD BOUNDARY ONLY ONCE THE PRODUCER IS CONFIRMED OUT (issue
+	 * #118).  It publishes inside consume(), immediately after each decode, so
+	 * after a confirmed stop every decode it ran has been published and none
+	 * can follow -- the stream's last result keeps an account the plugin can
+	 * still give.  A boundary taken earlier would drop the frame in flight
+	 * AFTER its decode had rewritten the plugin's result, which is what wio
+	 * had to close with its lease.  Unconfirmed, there is no boundary: the
+	 * lifecycle goes DEAD and nothing admits a new session.
+	 */
+	if (nn_stream_may_detach(cam_rc))
+		nn_rec_boundary();
+
 	/* [!] AND THE DETACH IS THE SECOND HALF OF THE STOP (issue #57), reached
 	 * only on a confirmed producer stop -- the blit runs on the panel thread,
 	 * so a confirmed stop alone does not prove nothing is using the frame. */
@@ -1807,11 +1896,11 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 	}
 	nn_stream_stop_decide(cam_rc, attempted, detach_rc, &v);
 	/* The stream's final numbers, latched only if the settle below takes. */
-	nn_stream_take_final(&final);
+	epoch = nn_stream_take_final(&final);
 
 	switch ((enum nn_stream_act)v.act) {
 	case NN_STREAM_ACT_DONE:
-		nn_stream_finish(&final);
+		nn_stream_finish(&final, epoch);
 		nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 		return;
 	case NN_STREAM_ACT_RETRY:
@@ -1821,7 +1910,7 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 		return;
 	case NN_STREAM_ACT_TERMINAL:
 	default:
-		nn_stream_poison(&final);
+		nn_stream_poison(&final, epoch);
 		nn_detail_set("%s", nn_stream_why_text(v.why));
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
 		return;
@@ -2044,5 +2133,5 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 }
 
 /* The active decoder's own report is no longer a call the shared command makes
- * after this one returns (issue #110): it is captured in nn_decode_into(),
- * beside the count it describes and before nn_release(). */
+ * after this one returns (issue #110): it is captured in nn_capture_report(),
+ * under the gate, beside the record snapshot it describes (issue #118). */

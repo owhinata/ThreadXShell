@@ -803,8 +803,10 @@ static void nn_print_dets(struct cli_instance *sh,
 			/* [!] NOT "the result was gone": this covers a decoder that was
 			 * merely BUSY when the capture was attempted, and a result that
 			 * is intact but unreachable is a different thing to be told. */
-			cli_warn(sh, "nn: the decoder could not be reached to describe "
-			             "it\r\n");
+			/* [!] WITH THE COUNT (decision D2): the record's count is true
+			 * and is all a board can give while a stream holds its decoder. */
+			cli_warn(sh, "nn: %d item(s); the decoder could not be reached "
+			             "to describe them\r\n", snap->ndet);
 			break;
 		case NN_REPORT_SUPERSEDED:
 			/* The count above is true; the account would be of a later,

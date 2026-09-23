@@ -20,6 +20,7 @@
 #include "cam_sensor.h"
 #include "lcd_st7789.h"
 #include "nn_preproc.h"
+#include "nn_rec.h"
 #include "npu.h"
 #include "tx_glue.h"       /* the EPK's TIMER2: the stage clock (issue #60) */
 
@@ -145,6 +146,7 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	unsigned n_out, i;
 	uint32_t t0, t1;
 	uint32_t e0, e1, e2, e3;
+	uint32_t gen;
 	int nd;
 
 	(void)ctx;
@@ -176,6 +178,11 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 		nn_ov_stats.skipped++;
 		return -1;
 	}
+	/* The record generation this frame publishes under (issue #118).  No
+	 * boundary can move it while this producer is inside consume(): the
+	 * stream's start takes its boundary before the sink is attached and its
+	 * stop only after camera_stream_stop() has confirmed this thread is out. */
+	gen = nn_rec_gen();
 
 	/*
 	 * Stage clocks (issue #60).  Everything from here to the invoke is
@@ -248,6 +255,16 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	e2 = tx_glue_epk_timer_ticks();
 
 	nd = nn_active_decode(outs, n_out);
+	/*
+	 * [!] PUBLISHED AT ONCE, WHATEVER IT SAYS (issue #118).  `nn dets` reads
+	 * the record, and the plugin's private result has just been rewritten --
+	 * so the record must describe this decode before anything else can ask,
+	 * negative values included: "the decoder refused" is a result too, and
+	 * leaving the previous frame's count beside the new private state is the
+	 * pairing the record exists to prevent.  A short interrupt-disabled
+	 * section; no block, no sleep, no other lock on this thread.
+	 */
+	(void)nn_rec_publish_external(nd, gen);
 	if (nd < 0) {
 		/* [!] There is no console on this path, so the only way a decode
 		 * failure can be told apart afterwards is if it is counted apart

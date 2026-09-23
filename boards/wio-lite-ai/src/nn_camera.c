@@ -397,11 +397,51 @@ static int nncam_publish_plugin(int n, uint32_t gen)
  * after a `nn run` or a stopped stream reads it. */
 static void nncam_record_boundary(void)
 {
-	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) != TX_SUCCESS)
-		return;
-	nn_det_record_boundary(&nncam_rec);
-	(void)tx_mutex_put(&nncam_det_lock);
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/*
+	 * [!] UNDER THE RESULT LEASE WHEN IT CAN BE HAD (issue #118).  The worker
+	 * asks "is my generation still current?" and then decodes and publishes,
+	 * all under the lease -- so a boundary taken under it too lands either
+	 * before the question (no decode runs, the plugin's result still describes
+	 * the record) or after the publish (the frame is the last result).  Never
+	 * in between, which is what left a stopped stream's last result with no
+	 * account: wio infers for ~410 ms, so a stop almost always lands inside
+	 * one, and the decode that followed rewrote the plugin's result for a
+	 * publish that was then dropped.
+	 *
+	 * The wait is bounded by one decode.  If it expires the boundary is taken
+	 * anyway -- a stop does not wait on a plugin -- and the record's own
+	 * reportable rule covers the decode that may then run: the count stays,
+	 * the account is withheld.  Lease before the record lock, as everywhere.
+	 */
+	int leased = plugin_lease_take(NNCAM_LEASE_WAIT_TICKS);
+#endif
+
+	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) == TX_SUCCESS) {
+		nn_det_record_boundary(&nncam_rec);
+		(void)tx_mutex_put(&nncam_det_lock);
+	}
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	if (leased)
+		plugin_lease_give();
+#endif
 }
+
+#if defined(CONFIG_NN_BACKEND_TFLM)
+/* Is a decode armed at @p gen still going to be published?  Asked by the worker
+ * UNDER THE LEASE, before it lets a plugin rewrite its private result -- see
+ * nncam_record_boundary() and nn_det_record_admits(). */
+static int nncam_admits(uint32_t gen)
+{
+	int ok;
+
+	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) != TX_SUCCESS)
+		return 0;
+	ok = nn_det_record_admits(&nncam_rec, gen);
+	(void)tx_mutex_put(&nncam_det_lock);
+	return ok;
+}
+#endif
 
 /* See nn_camera.h. */
 void nn_camera_record_invalidate(void)
@@ -553,6 +593,18 @@ static void nncam_step(void)
 		 */
 		if (!plugin_lease_take(NNCAM_LEASE_WAIT_TICKS)) {
 			nncam_errors++;
+			return;
+		}
+		/*
+		 * [!] AND THE GENERATION IS ASKED BEFORE THE DECODE, UNDER THE
+		 * LEASE (issue #118).  A session boundary that landed during the
+		 * inference means this frame can no longer be published, and
+		 * decoding it anyway would rewrite the plugin's result -- the
+		 * account of the result the record still holds -- for nothing.
+		 * Not an error: the frame belonged to a session that has ended.
+		 */
+		if (!nncam_admits(gen)) {
+			plugin_lease_give();
 			return;
 		}
 		nn_camera_note_depth(NNCAM_SITE_DECODE);

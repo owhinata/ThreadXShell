@@ -47,6 +47,12 @@ uint32_t nn_det_record_gen(const struct nn_det_record *r)
 	return r != NULL ? r->gen : 0u;
 }
 
+int nn_det_record_admits(const struct nn_det_record *r, uint32_t gen)
+{
+	/* The publish's own test, asked early -- the same rule, not a second one. */
+	return (r != NULL && gen == r->gen) ? 1 : 0;
+}
+
 int nn_det_record_publish(struct nn_det_record *r, const struct bf_det *d, int n,
                           const struct bf_result *res, uint32_t gen)
 {

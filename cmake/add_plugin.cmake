@@ -342,6 +342,17 @@ function(add_plugin _name)
                         --label "${_src_abs} (plugin ${_name})"
                         "${_obj}")
         endif()
+        # [!] THE HEADERS ARE DEPENDENCIES TOO (issue #111).  This rule used to
+        # depend on its .c alone, so bumping PLUGIN_ABI_VERSION in
+        # svc/plugin_abi.h rebuilt only the TUs whose .c had also changed: the
+        # shipped blazeface and cifar10 images compared the base against ABI 1
+        # while the packer, which reads the header, stamped ABI 2 -- the device
+        # loaded them and each refused its own entry point.  Every gate passed,
+        # because every gate reads the linked image and it was self-consistent.
+        # The compiler now writes what it read (-MMD) as a depfile keyed to the
+        # STAMP, which is this rule's output; the audit is in the same command,
+        # so a header change re-audits the object as well.
+        set(_dep "${_out}/${_stem}.d")
         add_custom_command(
             OUTPUT "${_stamp}"
             BYPRODUCTS "${_obj}" "${_out}/${_stem}.su"
@@ -349,11 +360,13 @@ function(add_plugin _name)
             COMMAND "${CMAKE_COMMAND}" -E rm -f "${_stamp}"
             COMMAND "${CMAKE_C_COMPILER}" ${P_CFLAGS}
                     -I "${_dir}"
+                    -MMD -MF "${_dep}" -MT "${_stamp}"
                     -c "${_src_abs}" -o "${_obj}"
             ${_audit_cmd}
             COMMAND "${CMAKE_COMMAND}" -E touch "${_stamp}"
             DEPENDS "${_src_abs}"
                     "${_ADD_PLUGIN_DIR}/check_no_mutable_storage.py"
+            DEPFILE "${_dep}"
             WORKING_DIRECTORY "${_out}"
             COMMENT "plugin ${_name}: cc ${_stem}.c"
             VERBATIM)

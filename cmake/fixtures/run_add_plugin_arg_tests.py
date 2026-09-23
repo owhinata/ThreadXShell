@@ -171,6 +171,100 @@ def wired(work):
     return missing
 
 
+def header_rebuild(cmake_dir):
+    """[!] A SHARED HEADER CHANGES, EVERY PLUGIN OBJECT THAT READ IT REBUILDS.
+
+    Found on the hardware in issue #111: the compile rule depended on its .c
+    alone, so bumping PLUGIN_ABI_VERSION in svc/plugin_abi.h recompiled only the
+    plugin TUs whose .c had also changed.  plugin_main.o kept comparing the base
+    against ABI 1, the packer (which reads the header) stamped ABI 2 into the
+    manifest, the device's loader accepted it -- and the plugin refused its own
+    entry point.  No gate saw it: every one of them reads the linked image, and
+    the image was self-consistent.
+
+    So this BUILDS, on the host compiler: a copy of cmake/, asset/ and svc/ (so
+    the header can be touched without touching the tree), the compile edges of
+    one plugin, then the header is made newer and the same edges are built
+    again.  Every object whose source includes plugin_abi.h must be rewritten.
+    plugin_libc.c includes nothing of the ABI and is not required to be.
+    Returns an error string, or None."""
+    if shutil.which("ninja") is None:
+        return "ninja not found"
+    with tempfile.TemporaryDirectory() as work:
+        repo = os.path.join(work, "repo")
+        shutil.copytree(cmake_dir, os.path.join(repo, "cmake"),
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(os.path.join(REPO, "asset"), os.path.join(repo, "asset"),
+                        ignore=shutil.ignore_patterns("*.tflite"))
+        shutil.copytree(os.path.join(REPO, "svc"), os.path.join(repo, "svc"))
+        src = os.path.join(work, "src")
+        os.makedirs(src)
+        with open(os.path.join(src, "mem.ld"), "w") as fh:
+            fh.write("MEMORY { PLUGIN (rwx) : ORIGIN = 0x24048000, "
+                     "LENGTH = 32K }\n")
+        with open(os.path.join(src, "fw.c"), "w") as fh:
+            fh.write("int main(void) { return 0; }\n")
+        args = dict(FULL)
+        # -fstack-usage as the boards pass it: without it the .su byproducts
+        # never appear and ninja reruns every edge, so every case would pass.
+        args["CFLAGS"] = '-O1 -ffreestanding -fstack-usage -I "%s" -I "%s"' % (
+            os.path.join(repo, "svc"), os.path.join(repo, "asset", "common"))
+        call = "\n".join("    %s %s" % (k, v) for k, v in args.items())
+        gcall = "\n".join("    %s %s" % (k, v) for k, v in GATE.items())
+        with open(os.path.join(src, "CMakeLists.txt"), "w") as fh:
+            fh.write("cmake_minimum_required(VERSION 3.20)\n"
+                     "project(add_plugin_deps C)\n"
+                     "set(Python3_EXECUTABLE python3)\n"
+                     "add_executable(fw fw.c)\n"
+                     "add_custom_target(fake_flash)\n"
+                     'include("%s/cmake/veneer_cost_gate.cmake")\n' % repo
+                     + "veneer_cost_gate(\n%s)\n" % gcall
+                     + 'include("%s/cmake/add_plugin.cmake")\n' % repo
+                     + "add_plugin(cifar10\n%s)\n" % call
+                     # As the boards do; without a consumer the rules are
+                     # not generated at all.
+                     + "add_custom_target(plugin DEPENDS ${ELFS})\n")
+        bld = os.path.join(work, "b")
+        r = subprocess.run(["cmake", "-G", "Ninja", "-S", src, "-B", bld],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            return "configure failed:\n" + (r.stdout + r.stderr)[-800:]
+        out = os.path.join(bld, "plugin", "cifar10")
+        stems = ("plugin_main", "plugin_base", "plugin_fmt", "plugin_text",
+                 "plugin_libc")
+        stamps = [os.path.join(out, x + ".audited") for x in stems]
+
+        def build():
+            r = subprocess.run(["ninja", "-C", bld] + stamps,
+                               capture_output=True, text=True)
+            return r.returncode, r.stdout + r.stderr
+        rc, log = build()
+        if rc != 0:
+            return "first build of the compile edges failed:\n" + log[-800:]
+        # The control: with nothing changed, nothing is rebuilt -- or the
+        # rebuild below would prove nothing about the header.
+        rc, log = build()
+        if rc != 0 or "no work to do" not in log:
+            return "a second build with nothing changed did work:\n" + log[-800:]
+        before = {x: os.stat(os.path.join(out, x + ".o")).st_mtime_ns
+                  for x in stems}
+        hdr = os.path.join(repo, "svc", "plugin_abi.h")
+        future = max(before.values()) + 10 ** 9
+        os.utime(hdr, ns=(future, future))
+        rc, log = build()
+        if rc != 0:
+            return "rebuild failed:\n" + log[-800:]
+        stale = [x for x in stems[:4]
+                 if os.stat(os.path.join(out, x + ".o")).st_mtime_ns
+                 == before[x]]
+        if stale:
+            return ("svc/plugin_abi.h is newer, but %s.o %s not recompiled "
+                    "-- the compile rule does not know the headers it reads"
+                    % (".o, ".join(stale), "was" if len(stale) == 1
+                       else "were"))
+    return None
+
+
 def judge(name, rc, out, expect, why_ok):
     if expect is None:
         ok = rc == 0
@@ -228,6 +322,13 @@ def main():
         bad += judge(name, rc, out, expect,
                      "configures with the gate registered, and the check "
                      "gets --declared 256 --printer-limit cifar10=64")
+    err = header_rebuild(CMAKE_DIR)
+    if err:
+        print("  FAIL %-22s %s" % ("header_rebuild", err))
+        bad += 1
+    else:
+        print("  ok   %-22s touching svc/plugin_abi.h recompiles plugin_main, "
+              "plugin_base, plugin_fmt and plugin_text" % "header_rebuild")
     if bad:
         print("run_add_plugin_arg_tests: FAILED", file=sys.stderr)
         return 1

@@ -892,6 +892,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
          "${BOARD_DIR}/port/nn/nn_active.c"
          "${CMAKE_SOURCE_DIR}/svc/plugin_exec.c"
          "${CMAKE_SOURCE_DIR}/svc/plugin_paint_budget.c"
+         "${CMAKE_SOURCE_DIR}/svc/plugin_paint_span.c"
          "${CMAKE_SOURCE_DIR}/svc/rect_geom.c"
          "${BOARD_DIR}/port/plugin/plugin_run.c"
          "${CMAKE_SOURCE_DIR}/svc/plugin_mpu_v7m.c"

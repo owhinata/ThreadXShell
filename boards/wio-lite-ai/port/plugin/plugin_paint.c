@@ -5,9 +5,15 @@
 /**
  * @file    plugin_paint.c
  * @brief   The painter's loops.  See plugin_paint.h.
+ *
+ * What each primitive decides before its first store -- the clip, a blit's
+ * source offset, the charge -- is shared with grove-vision-ai-v2
+ * (svc/plugin_paint_span.c).  What is here is what this panel makes different:
+ * native RGB565 stored into a rotated surface, columns contiguous.
  */
 #include "plugin_paint.h"
 
+#include "plugin_paint_span.h"
 #include "rect_geom.h"
 
 #include <stddef.h>
@@ -64,30 +70,6 @@ static uint16_t *at(const struct paint_ctx *c, int32_t x, int32_t y)
 	                       (size_t)c->sh + (size_t)(uint32_t)y;
 }
 
-/*
- * Clip a half-open rectangle to the surface.
- *
- * Signed and clipped for the same reason rect_geom_norm() is: a detection
- * routinely runs past the edge of the image it was found in, and making the
- * plugin clamp first would be the same arithmetic done twice, differently.
- */
-static int clip(const struct paint_ctx *c, const struct plugin_rect *r,
-                int32_t *x0, int32_t *y0, int32_t *x1, int32_t *y1)
-{
-	if (r == NULL)
-		return 0;
-	*x0 = r->x0 < 0 ? 0 : r->x0;
-	*y0 = r->y0 < 0 ? 0 : r->y0;
-	*x1 = r->x1 > (int32_t)c->sw ? (int32_t)c->sw : r->x1;
-	*y1 = r->y1 > (int32_t)c->sh ? (int32_t)c->sh : r->y1;
-	return *x1 > *x0 && *y1 > *y0;
-}
-
-static int charge(struct paint_ctx *c, uint32_t pixels)
-{
-	return plugin_paint_charge(c->bud, pixels);
-}
-
 /* ---- the primitives ------------------------------------------------------ */
 
 /*
@@ -113,14 +95,9 @@ static void paint_rect(void *ctx, const struct plugin_rect *r, uint16_t rgb565,
 
 	if (c == NULL || c->fb == NULL || r == NULL)
 		return;
-	/* No separate clip() here: rect_geom_norm() is the clip, and asking it is
-	 * what keeps this from being a second opinion about the same rectangle.
-	 * It also answers "nothing to draw" for a stroke of zero. */
-	if (!rect_geom_norm(c->sw, c->sh, r->x0, r->y0, r->x1, r->y1, stroke, &g)) {
-		(void)charge(c, 0u);       /* a dispatch that drew nothing still costs */
-		return;
-	}
-	if (!charge(c, rect_geom_writes(&g)))
+	/* The normalisation is the clip, and it answers "nothing to draw" for a
+	 * stroke of zero. */
+	if (!plugin_paint_rect_begin(c->bud, c->sw, c->sh, r, stroke, &g))
 		return;
 
 	for (y = g.y0; y < g.y0 + g.h; y++) {
@@ -142,24 +119,21 @@ static void paint_fill_rect(void *ctx, const struct plugin_rect *r,
                             uint16_t rgb565)
 {
 	struct paint_ctx *c = (struct paint_ctx *)ctx;
-	int32_t x0, y0, x1, y1, x, y;
+	struct plugin_paint_box b;
+	int32_t x, y;
 
 	if (c == NULL || c->fb == NULL)
 		return;
-	if (!clip(c, r, &x0, &y0, &x1, &y1)) {
-		(void)charge(c, 0u);
-		return;
-	}
-	if (!charge(c, (uint32_t)(x1 - x0) * (uint32_t)(y1 - y0)))
+	if (!plugin_paint_fill_begin(c->bud, c->sw, c->sh, r, &b))
 		return;
 
 	/* Column-major: one landscape column is one contiguous run in the frame
 	 * buffer.  Nothing counts spans here, so the order is free to be the fast
 	 * one. */
-	for (x = x0; x < x1; x++) {
-		uint16_t *d = at(c, x, y0);
+	for (x = b.x0; x < b.x1; x++) {
+		uint16_t *d = at(c, x, b.y0);
 
-		for (y = y0; y < y1; y++)
+		for (y = b.y0; y < b.y1; y++)
 			PAINT_PUT(d++, rgb565);
 	}
 }
@@ -168,57 +142,26 @@ static void paint_blit(void *ctx, const struct plugin_rect *r,
                        const uint16_t *src, uint32_t src_stride, int32_t key)
 {
 	struct paint_ctx *c = (struct paint_ctx *)ctx;
-	int32_t x0, y0, x1, y1, x, y;
-	uint32_t rows, cols, sx0, sy0;
+	struct plugin_paint_blit_span sp;
+	int32_t x, y;
 
 	if (c == NULL || c->fb == NULL || src == NULL || r == NULL)
 		return;
-	if (src_stride == 0u) {
-		(void)charge(c, 0u);
-		return;
-	}
-	if (!clip(c, r, &x0, &y0, &x1, &y1)) {
-		(void)charge(c, 0u);
-		return;
-	}
-
-	/* Which part of the source survived the clip.  The source is the plugin's
-	 * own buffer and its extent is r's width and height -- clipping moves the
-	 * origin, so the source offset moves with it.
-	 *
-	 * [!] WIDENED BEFORE THE SUBTRACTION, ON BOTH AXES.  `x0 - r->x0` is signed
-	 * arithmetic and r->x0 comes from loaded code: at INT32_MIN the difference
-	 * is not representable and the subtraction is undefined.  That is not a
-	 * theoretical input when the coordinate was computed from a model's output.
-	 *
-	 * The offset itself is in range by construction: clip() keeps x0 >= r->x0
-	 * and x0 < x1 <= r->x1, so sx0 is strictly less than the source width r
-	 * declares.  What that width DESCRIBES is still the plugin's claim about
-	 * its own buffer, which this boundary does not verify -- see plugin_abi.h. */
-	sx0  = (uint32_t)((int64_t)x0 - (int64_t)r->x0);
-	sy0  = (uint32_t)((int64_t)y0 - (int64_t)r->y0);
-	cols = (uint32_t)(x1 - x0);
-	rows = (uint32_t)(y1 - y0);
-
-	/*
-	 * [!] EVERY SOURCE PIXEL IS CHARGED, INCLUDING THE TRANSPARENT ONES.  What
-	 * the budget bounds is time spent with the panel guard held, and a
-	 * colour-keyed pixel costs a read and a compare whether or not it is
-	 * written.  Charging only what lands would let a mostly-transparent bitmap
-	 * of any size through for almost nothing.
-	 */
-	if (!charge(c, cols * rows))
+	/* The clip, the source offset and its safety argument, and the charge for
+	 * every source pixel -- transparent ones included -- are all there. */
+	if (!plugin_paint_blit_begin(c->bud, c->sw, c->sh, r, src_stride, &sp))
 		return;
 
 	/* Column-major again, gathering down a strided source column into a
 	 * contiguous destination run -- the same shape svc/gfx_rot.c uses, without
 	 * its staging buffer, because a plugin's chips are small and the colour key
 	 * has to be tested per pixel anyway. */
-	for (x = 0; x < (int32_t)cols; x++) {
-		const uint16_t *s = src + (size_t)sy0 * src_stride + (sx0 + (uint32_t)x);
-		uint16_t *d = at(c, x0 + x, y0);
+	for (x = 0; x < (int32_t)sp.cols; x++) {
+		const uint16_t *s = src + (size_t)sp.sy0 * src_stride +
+		                    (sp.sx0 + (uint32_t)x);
+		uint16_t *d = at(c, sp.x0 + x, sp.y0);
 
-		for (y = 0; y < (int32_t)rows; y++) {
+		for (y = 0; y < (int32_t)sp.rows; y++) {
 			uint16_t px = *s;
 
 			s += src_stride;
@@ -248,13 +191,5 @@ void plugin_paint_bind(struct plugin_painter *p,
 	paint_ctx.sw  = sw;
 	paint_ctx.sh  = sh;
 
-	/* Version and size first: the plugin's veneer refuses a painter without
-	 * them (issue #111), so a member left out here is a draw that silently
-	 * does nothing. */
-	p->version   = PLUGIN_ABI_VERSION;
-	p->size      = (uint32_t)sizeof(*p);
-	p->ctx       = &paint_ctx;
-	p->rect      = paint_rect;
-	p->fill_rect = paint_fill_rect;
-	p->blit      = paint_blit;
+	plugin_paint_vtable(p, &paint_ctx, paint_rect, paint_fill_rect, paint_blit);
 }

@@ -4,12 +4,19 @@
  */
 /**
  * @file    plugin_paint.c
- * @brief   The painter.  See plugin_paint.h.
+ * @brief   The painter's loops.  See plugin_paint.h.
+ *
+ * What each primitive decides before its first store -- the clip, a blit's
+ * source offset, the charge -- is shared with wio-lite-ai
+ * (svc/plugin_paint_span.c).  What is here is what this panel makes different:
+ * pixels in wire byte order, row-major into the staged frame, and outlines
+ * through the driver's own lcd_rect_wire().
  */
 #include "plugin_paint.h"
 
 #include "lcd_rect.h"
 #include "lcd_st7789.h"
+#include "plugin_paint_span.h"
 
 #include <stddef.h>
 
@@ -32,32 +39,6 @@ struct paint_ctx {
  * bind live at the same time. */
 static struct paint_ctx paint_ctx;
 
-/*
- * Clip a half-open rectangle to the framebuffer.
- *
- * Signed and clipped for the same reason lcd_rect_wire() is: a detection
- * routinely runs past the edge of the image it was found in, and making the
- * plugin clamp first would be the same arithmetic done twice, differently.
- */
-static int clip(const struct paint_ctx *c, const struct plugin_rect *r,
-                int32_t *x0, int32_t *y0, int32_t *x1, int32_t *y1)
-{
-	if (r == NULL)
-		return 0;
-	*x0 = r->x0 < 0 ? 0 : r->x0;
-	*y0 = r->y0 < 0 ? 0 : r->y0;
-	*x1 = r->x1 > (int32_t)c->w ? (int32_t)c->w : r->x1;
-	*y1 = r->y1 > (int32_t)c->h ? (int32_t)c->h : r->y1;
-	return *x1 > *x0 && *y1 > *y0;
-}
-
-/* The charge is shared (svc/plugin_paint_budget.c); this is the local spelling
- * of it, so the call sites below read as they did. */
-static int charge(struct paint_ctx *c, uint32_t pixels)
-{
-	return plugin_paint_charge(c->bud, pixels);
-}
-
 /* ---- the primitives ------------------------------------------------------ */
 
 /*
@@ -72,8 +53,9 @@ static int charge(struct paint_ctx *c, uint32_t pixels)
  * detector works best.  Adding a label beside each box only tightens it.
  *
  * The real cost is the stores lcd_rect_wire() issues, which svc/rect_geom.c
- * computes from the SAME normalisation the drawing loop uses, so the charge and the loop
- * cannot disagree about clipping or about a clamped stroke.  What that sharing
+ * computes from the SAME normalisation the drawing loop uses, so the charge
+ * (plugin_paint_rect_begin()) and the loop cannot disagree about clipping or
+ * about a clamped stroke.  What that sharing
  * deliberately does NOT extend to is the test's expectation: test_plugin_paint.c
  * counts the stores the real loop makes and compares them with the budget this
  * deducted, and pins golden numbers besides -- otherwise the charge would be
@@ -87,16 +69,9 @@ static void paint_rect(void *ctx, const struct plugin_rect *r, uint16_t rgb565,
 
 	if (c == NULL || c->fb == NULL || r == NULL)
 		return;
-	/* No separate clip() here: rect_geom_norm() is the clip, and asking it is
-	 * what keeps this from being a second opinion about the same rectangle.
-	 * It also answers "nothing to draw" for a stroke of zero, which the
-	 * driver rejects before it clips anything. */
-	if (!rect_geom_norm(c->w, c->h, r->x0, r->y0, r->x1, r->y1,
-	                    stroke, &g)) {
-		(void)charge(c, 0u);       /* a dispatch that drew nothing still costs */
-		return;
-	}
-	if (!charge(c, rect_geom_writes(&g)))
+	/* The normalisation is the clip, and a stroke of zero -- which the driver
+	 * rejects before it clips anything -- is "nothing to draw" there too. */
+	if (!plugin_paint_rect_begin(c->bud, c->w, c->h, r, stroke, &g))
 		return;
 
 	lcd_rect_wire(c->fb, c->w, c->h, r->x0, r->y0, r->x1, r->y1, rgb565,
@@ -107,23 +82,20 @@ static void paint_fill_rect(void *ctx, const struct plugin_rect *r,
                             uint16_t rgb565)
 {
 	struct paint_ctx *c = (struct paint_ctx *)ctx;
-	int32_t x0, y0, x1, y1, x, y;
+	struct plugin_paint_box b;
+	int32_t x, y;
 	uint16_t wire;
 
 	if (c == NULL || c->fb == NULL)
 		return;
-	if (!clip(c, r, &x0, &y0, &x1, &y1)) {
-		(void)charge(c, 0u);
-		return;
-	}
-	if (!charge(c, (uint32_t)(x1 - x0) * (uint32_t)(y1 - y0)))
+	if (!plugin_paint_fill_begin(c->bud, c->w, c->h, r, &b))
 		return;
 
 	wire = paint_wire(rgb565);
-	for (y = y0; y < y1; y++) {
+	for (y = b.y0; y < b.y1; y++) {
 		uint16_t *row = c->fb + (size_t)y * (size_t)c->w;
 
-		for (x = x0; x < x1; x++)
+		for (x = b.x0; x < b.x1; x++)
 			row[x] = wire;
 	}
 }
@@ -132,54 +104,22 @@ static void paint_blit(void *ctx, const struct plugin_rect *r,
                        const uint16_t *src, uint32_t src_stride, int32_t key)
 {
 	struct paint_ctx *c = (struct paint_ctx *)ctx;
-	int32_t x0, y0, x1, y1, x, y;
-	uint32_t rows, cols, sx0, sy0;
+	struct plugin_paint_blit_span sp;
+	int32_t x, y;
 
 	if (c == NULL || c->fb == NULL || src == NULL || r == NULL)
 		return;
-	if (src_stride == 0u) {
-		(void)charge(c, 0u);
-		return;
-	}
-	if (!clip(c, r, &x0, &y0, &x1, &y1)) {
-		(void)charge(c, 0u);
-		return;
-	}
-
-	/* Which part of the source survived the clip.  The source is the plugin's
-	 * own buffer and its extent is r's width and height -- clipping moves the
-	 * origin, so the source offset moves with it.
-	 *
-	 * [!] WIDENED BEFORE THE SUBTRACTION, ON BOTH AXES.  `x0 - r->x0` is signed
-	 * arithmetic and r->x0 comes from loaded code: at INT32_MIN the difference
-	 * is not representable and the subtraction is undefined.  That is not a
-	 * theoretical input when the coordinate was computed from a model's output.
-	 *
-	 * The offset itself is in range by construction, and it is worth writing
-	 * down because it is the only reason this is safe: clip() keeps x0 >= r->x0
-	 * and x0 < x1 <= r->x1, so sx0 is strictly less than the source width r
-	 * declares.  What that width DESCRIBES is still the plugin's claim about
-	 * its own buffer, which this boundary does not verify -- see plugin_abi.h. */
-	sx0  = (uint32_t)((int64_t)x0 - (int64_t)r->x0);
-	sy0  = (uint32_t)((int64_t)y0 - (int64_t)r->y0);
-	cols = (uint32_t)(x1 - x0);
-	rows = (uint32_t)(y1 - y0);
-
-	/*
-	 * [!] EVERY SOURCE PIXEL IS CHARGED, INCLUDING THE TRANSPARENT ONES.  What
-	 * the budget bounds is time spent with the panel guard held, and a
-	 * colour-keyed pixel costs a read and a compare whether or not it is
-	 * written.  Charging only what lands would let a mostly-transparent bitmap
-	 * of any size through for almost nothing.
-	 */
-	if (!charge(c, cols * rows))
+	/* The clip, the source offset and its safety argument, and the charge for
+	 * every source pixel -- transparent ones included -- are all there. */
+	if (!plugin_paint_blit_begin(c->bud, c->w, c->h, r, src_stride, &sp))
 		return;
 
-	for (y = 0; y < (int32_t)rows; y++) {
-		const uint16_t *s = src + (size_t)(sy0 + (uint32_t)y) * src_stride + sx0;
-		uint16_t *d = c->fb + (size_t)(y0 + y) * (size_t)c->w + x0;
+	for (y = 0; y < (int32_t)sp.rows; y++) {
+		const uint16_t *s = src + (size_t)(sp.sy0 + (uint32_t)y) * src_stride +
+		                    sp.sx0;
+		uint16_t *d = c->fb + (size_t)(sp.y0 + y) * (size_t)c->w + sp.x0;
 
-		for (x = 0; x < (int32_t)cols; x++) {
+		for (x = 0; x < (int32_t)sp.cols; x++) {
 			uint16_t px = s[x];
 
 			/* The key is compared in the plugin's own colour space, before the
@@ -206,13 +146,5 @@ void plugin_paint_bind(struct plugin_painter *p,
 	paint_ctx.w   = w;
 	paint_ctx.h   = h;
 
-	/* Version and size first: the plugin's veneer refuses a painter without
-	 * them (issue #111), so a member left out here is a draw that silently
-	 * does nothing. */
-	p->version   = PLUGIN_ABI_VERSION;
-	p->size      = (uint32_t)sizeof(*p);
-	p->ctx       = &paint_ctx;
-	p->rect      = paint_rect;
-	p->fill_rect = paint_fill_rect;
-	p->blit      = paint_blit;
+	plugin_paint_vtable(p, &paint_ctx, paint_rect, paint_fill_rect, paint_blit);
 }

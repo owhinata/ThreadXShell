@@ -428,6 +428,7 @@ set(SHELL_SOURCES
     # maintenance, MPU read-back and source precondition in port/ (issue #110).
     "${CMAKE_SOURCE_DIR}/svc/plugin_exec.c"
     "${CMAKE_SOURCE_DIR}/svc/plugin_paint_budget.c"
+    "${CMAKE_SOURCE_DIR}/svc/plugin_paint_span.c"
     "${BOARD_DIR}/port/plugin/plugin_run.c"
     "${BOARD_DIR}/port/plugin/plugin_paint.c"
     # The one place that decides which decoder is in force (issue #103).

@@ -423,7 +423,7 @@ set(SHELL_SOURCES
     # function so that the refusals -- a reservation that is Device memory, or
     # covered by two regions, or execute-never -- are reachable from a host
     # test; no board can be arranged to produce them.
-    "${BOARD_DIR}/port/plugin/plugin_mpu.c"
+    "${CMAKE_SOURCE_DIR}/svc/plugin_mpu.c"
     # The loader: the machine in svc/, this board's state, reservation, cache
     # maintenance, MPU read-back and source precondition in port/ (issue #110).
     "${CMAKE_SOURCE_DIR}/svc/plugin_exec.c"

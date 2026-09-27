@@ -170,28 +170,6 @@ gcc $CFLAGS "$here/test_sbrk.c" "$out/retarget_host.o" \
     $LDFLAGS -o "$out/test_sbrk"
 "$out/test_sbrk"
 
-# issue #110 (#78 Step 3b) -- the Armv7-M MPU verdict
-# (port/plugin/plugin_mpu_v7m.c), read back immediately before the loader
-# branches into a plugin image.
-#
-# [!] EVERY FAILING CASE IS ONE THIS BOARD CANNOT BE MADE TO HAVE.  The four
-# regions mpu.c programs are fixed, none of them covers the plugin reservation,
-# and nothing reconfigures the MPU after boot -- so a check written inline in
-# the loader would be a check nobody has ever seen say no, which is the shape
-# issues #42 and #66 removed from this repository.  The verdict is a pure
-# function of the register values, so every branch is reachable here.
-#
-# [!] AND IT IS NOT grove-vision-ai-v2's JUDGEMENT.  On Armv7-M the
-# highest-numbered matching region wins; on Armv8-M two matches is a fault.
-# This board RELIES on the v7-M rule -- mpu.c carves a cacheable window out of a
-# larger non-cacheable one -- so the other board's judgement would refuse the
-# configuration this one ships with.  Sub-regions and the background map have no
-# counterpart there either.
-gcc $CFLAGS -I "$board/port/plugin" \
-    "$here/test_plugin_mpu_v7m.c" "$board/port/plugin/plugin_mpu_v7m.c" \
-    $LDFLAGS -o "$out/test_plugin_mpu_v7m"
-"$out/test_plugin_mpu_v7m"
-
 # issue #110 (#78 Step 3b) -- the painter's budget, clipping and rotation
 # (port/plugin/plugin_paint.c).
 #

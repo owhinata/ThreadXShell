@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host tests for port/plugin/plugin_mpu_v7m.c (issue #110).
+ * Host tests for svc/plugin_mpu_v7m.c (issue #110).
  *
  * WHY A HOST TEST IS THE ONLY TEST.  Every case below except the first is a
  * configuration this board cannot be made to have: the four regions mpu.c
@@ -332,7 +332,7 @@ static void test_malformed_and_truncated(void)
 
 int main(void)
 {
-	printf("test_plugin_mpu_v7m (port/plugin/plugin_mpu_v7m.c):\n");
+	printf("test_plugin_mpu_v7m (svc/plugin_mpu_v7m.c):\n");
 	test_this_board();
 	test_no_region_and_the_background_map();
 	test_permissions_and_attributes();

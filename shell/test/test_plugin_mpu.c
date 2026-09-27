@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host unit test for port/plugin/plugin_mpu.c (issues #103, #114).
+ * Host unit test for svc/plugin_mpu.c (issues #103, #114).
  *
  * WHY THIS FILE IS THE ONLY CHECK.  Every refusal here describes a board this
  * project cannot arrange to have: the plugin reservation covered by two MPU
@@ -323,7 +323,7 @@ static void test_arguments(void)
 
 int main(void)
 {
-	printf("test_plugin_mpu (port/plugin/plugin_mpu.c):\n");
+	printf("test_plugin_mpu (svc/plugin_mpu.c):\n");
 	test_ok();
 	test_limit_decoding();
 	test_coverage();

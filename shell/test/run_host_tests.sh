@@ -335,6 +335,52 @@ gcc $CFLAGS -I "$svc" \
     $LDFLAGS -o "$out/test_plugin_info"
 "$out/test_plugin_info"
 
+# issue #103 -- is the plugin reservation executable?  (svc/plugin_mpu.c, the
+# Armv8-M verdict grove-vision-ai-v2 links)
+#
+# The loader reads the MPU back before it branches into a loaded image, because
+# the vendor's enable_XIP() reconfigures the MPU; but a board on which the reservation is
+# Device memory, or covered by two regions, or execute-never, is not a board
+# this project can arrange to have.  Every refusal in that check is therefore
+# unreachable from hardware, and this file is the only thing that can see one.
+#
+# Two cases here exist because of mistakes made next door: the RLAR limit
+# includes its last 32-byte block (port/nor/nor_flash.c's diagnostic capture
+# compares against the masked value and so reads every region 31 bytes short),
+# and "not Device" is not the same question as "Normal" -- outer set with inner
+# zero is a RESERVED encoding that an inequality would wave through.
+#
+# And one case exists because of a mistake made here: until issue #114 the judge
+# clamped MPU_TYPE.DREGION to the table it was handed, and this file expected
+# that to come out OK.  test_truncated() now holds the same snapshot read short
+# and read whole -- refused, and a fault.
+gcc $CFLAGS -I "$svc" \
+    "$here/test_plugin_mpu.c" "$svc/plugin_mpu.c" \
+    $LDFLAGS -o "$out/test_plugin_mpu"
+"$out/test_plugin_mpu"
+
+# issue #110 (#78 Step 3b) -- the Armv7-M MPU verdict wio-lite-ai links
+# (svc/plugin_mpu_v7m.c), read back immediately before the loader
+# branches into a plugin image.
+#
+# [!] EVERY FAILING CASE IS ONE THIS BOARD CANNOT BE MADE TO HAVE.  The four
+# regions mpu.c programs are fixed, none of them covers the plugin reservation,
+# and nothing reconfigures the MPU after boot -- so a check written inline in
+# the loader would be a check nobody has ever seen say no, which is the shape
+# issues #42 and #66 removed from this repository.  The verdict is a pure
+# function of the register values, so every branch is reachable here.
+#
+# [!] AND IT IS NOT grove-vision-ai-v2's JUDGEMENT.  On Armv7-M the
+# highest-numbered matching region wins; on Armv8-M two matches is a fault.
+# This board RELIES on the v7-M rule -- mpu.c carves a cacheable window out of a
+# larger non-cacheable one -- so the other board's judgement would refuse the
+# configuration this one ships with.  Sub-regions and the background map have no
+# counterpart there either.
+gcc $CFLAGS -I "$svc" \
+    "$here/test_plugin_mpu_v7m.c" "$svc/plugin_mpu_v7m.c" \
+    $LDFLAGS -o "$out/test_plugin_mpu_v7m"
+"$out/test_plugin_mpu_v7m"
+
 # issue #110 (#78 Step 3b) -- the capture of an external decoder's own account
 # of its result (svc/nn_report.c).  A contract about OUTCOMES: zero bytes is a
 # legal report, "no report to give" is a different answer, truncation is a

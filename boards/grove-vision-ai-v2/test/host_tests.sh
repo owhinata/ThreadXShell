@@ -276,31 +276,6 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_fp_enforce"
 "$out/test_fp_enforce"
 
-# issue #103 -- is the plugin reservation executable?  (port/plugin/plugin_mpu.c)
-#
-# Same reasoning as the file above, one step further along.  The loader reads
-# the MPU back before it branches into a loaded image, because the vendor's
-# enable_XIP() reconfigures the MPU; but a board on which the reservation is
-# Device memory, or covered by two regions, or execute-never, is not a board
-# this project can arrange to have.  Every refusal in that check is therefore
-# unreachable from hardware, and this file is the only thing that can see one.
-#
-# Two cases here exist because of mistakes made next door: the RLAR limit
-# includes its last 32-byte block (port/nor/nor_flash.c's diagnostic capture
-# compares against the masked value and so reads every region 31 bytes short),
-# and "not Device" is not the same question as "Normal" -- outer set with inner
-# zero is a RESERVED encoding that an inequality would wave through.
-#
-# And one case exists because of a mistake made here: until issue #114 the judge
-# clamped MPU_TYPE.DREGION to the table it was handed, and this file expected
-# that to come out OK.  test_truncated() now holds the same snapshot read short
-# and read whole -- refused, and a fault.
-gcc $CFLAGS \
-    -I "$here" -I "$board/port/plugin" \
-    "$here/test_plugin_mpu.c" "$board/port/plugin/plugin_mpu.c" \
-    $LDFLAGS -o "$out/test_plugin_mpu"
-"$out/test_plugin_mpu"
-
 # issue #103 -- the painter's budget and clipping (port/plugin/plugin_paint.c).
 #
 # A plugin's draw() runs on the panel thread with the panel guard held, and

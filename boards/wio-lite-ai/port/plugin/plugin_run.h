@@ -16,7 +16,7 @@
  *     because a Cortex-M7 cannot fetch instructions from DTCM;
  *   - cache maintenance: the M7's I- and D-caches are separate and an
  *     instruction fetch does not snoop the D-cache;
- *   - the Armv7-M MPU read-back and its verdict (port/plugin/plugin_mpu_v7m.c),
+ *   - the Armv7-M MPU read-back and its verdict (svc/plugin_mpu_v7m.c),
  *     which is NOT the other board's judgement -- see that file;
  *   - the precondition on the image's source.
  *

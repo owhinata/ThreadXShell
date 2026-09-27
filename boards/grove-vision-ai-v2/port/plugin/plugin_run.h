@@ -12,7 +12,7 @@
  *   - the state, in permanently allocated static memory;
  *   - the reservation, from this board's linker script;
  *   - cache maintenance for a Cortex-M55 with split I- and D-caches;
- *   - the Armv8-M MPU read-back and its verdict (port/plugin/plugin_mpu.c);
+ *   - the Armv8-M MPU read-back and its verdict (svc/plugin_mpu.c);
  *   - the precondition on the image's source -- here, the flash lease.
  *
  * [!] AND THE CALLER MUST ALREADY HOLD THE FLASH LEASE.  The container is read

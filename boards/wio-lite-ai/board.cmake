@@ -894,7 +894,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
          "${CMAKE_SOURCE_DIR}/svc/plugin_paint_budget.c"
          "${CMAKE_SOURCE_DIR}/svc/rect_geom.c"
          "${BOARD_DIR}/port/plugin/plugin_run.c"
-         "${BOARD_DIR}/port/plugin/plugin_mpu_v7m.c"
+         "${CMAKE_SOURCE_DIR}/svc/plugin_mpu_v7m.c"
          "${BOARD_DIR}/port/plugin/plugin_paint.c"
          "${BOARD_DIR}/port/plugin/plugin_lease.c")
 endif()
@@ -980,7 +980,7 @@ target_include_directories(shell PRIVATE
     "${BOARD_DIR}/port/nor"                      # nor_flash.h
     "${BOARD_DIR}/port/nn"                       # nn.h / nn_backend.h
     "${BOARD_DIR}/port/nn/models"                # blazeface.h
-    "${BOARD_DIR}/port/plugin"                   # plugin_run.h / plugin_mpu_v7m.h
+    "${BOARD_DIR}/port/plugin"                   # plugin_run.h
     # Our fdb_cfg.h / fal_cfg.h must be found BEFORE FlashDB's own inc/,
     # which ships fdb_cfg_template.h only -- FlashDB includes <fdb_cfg.h> by name.
     "${BOARD_DIR}/port/flashdb"

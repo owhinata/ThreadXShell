@@ -117,7 +117,7 @@ static uint32_t nncam_start_tick;
 /* Stack already spent at the two sites a plugin will occupy (issue #108).  One
  * writer each -- the worker for DECODE, the preview thread for DRAW -- and a u32
  * store cannot tear here, so a reader may see a stale value but never a torn
- * one.  Only ever written with a real measurement (see nn_camera_note_depth()),
+ * one.  Only ever written with a real measurement (see nn_camera_note_depth_at()),
  * so the reset at start cannot be raced into reporting a stale high-water. */
 static uint32_t nncam_depth_decode, nncam_depth_draw, nncam_depth_shell;
 
@@ -492,13 +492,10 @@ static uint32_t nncam_gen_now(void)
 	return g;
 }
 
-/* See nn_camera.h.  noinline so the shape of the frame it measures from cannot
- * change with the caller's inlining decisions -- the number is about the PLACE. */
-__attribute__((noinline)) void nn_camera_note_depth(enum nn_camera_site site)
+/* See nn_camera.h. */
+void nn_camera_note_depth_at(enum nn_camera_site site, uintptr_t sp)
 {
 	TX_THREAD *t = tx_thread_identify();
-	volatile uint8_t here = 0u;
-	uintptr_t  sp = (uintptr_t)&here;
 	uintptr_t  lo, hi;
 	uint32_t   used;
 	uint32_t  *hw = (site == NNCAM_SITE_DRAW)  ? &nncam_depth_draw :
@@ -593,9 +590,8 @@ static void nncam_step(void)
 	}
 	nncam_infer_cyc = nn_last_cycles(nncam_model);
 
-	/* Where a plugin's decode() is called (issue #108 placed the probe, #110
-	 * put the call beside it), recorded BEFORE the call so the number is the
-	 * depth a callee inherits rather than the depth including it. */
+	/* Where a plugin's decode() is called (issue #110).  Its depth is sampled
+	 * inside, at the indirect call (svc/nn_active_core.c, issue #126). */
 #if defined(CONFIG_NN_BACKEND_TFLM)
 	if (nn_active_is_plugin()) {
 		int took;
@@ -630,7 +626,6 @@ static void nncam_step(void)
 			plugin_lease_give();
 			return;
 		}
-		nn_camera_note_depth(NNCAM_SITE_DECODE);
 		n = nn_active_decode(nncam_model);
 		took = nncam_publish_plugin(n, gen);
 		plugin_lease_give();
@@ -887,10 +882,6 @@ int nn_camera_start(int colorbar, int require_draw)
 			nncam_guards_give();
 			return NNCAM_ERR_DECBUSY;
 		}
-		/* The other shell-thread call site.  Recorded separately from the load
-		 * path's because the two reach it down different chains, and "the load
-		 * is the deeper one" was an assumption nobody had read. */
-		nn_camera_note_depth(NNCAM_SITE_SHELL);
 		shapes = nn_active_shapes_ok(m);
 		draws  = require_draw ? nn_active_can_draw() : 1;
 		plugin_lease_give();
@@ -1085,9 +1076,6 @@ int nn_camera_decode_get(struct nn_camera_decode *out,
 	 * never waits here.
 	 */
 	if (rep != NULL && nn_active_is_plugin()) {
-		/* This runs on whichever thread asked -- a console.  Recorded before
-		 * the call it describes, like the other two sites. */
-		nn_camera_note_depth(NNCAM_SITE_SHELL);
 		leased = plugin_lease_take(NNCAM_LEASE_WAIT_TICKS);
 		if (!leased) {
 			/* The result exists; nobody let go of it in time.  Saying so is

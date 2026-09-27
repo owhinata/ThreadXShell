@@ -34,6 +34,7 @@
 #include <stdint.h>
 
 #include "blazeface.h"  /* BF_ERR_* -- the shared decode vocabulary */
+#include "nn_active_core.h" /* NN_ACTIVE_THRESH_* -- the shared branch */
 #include "npu.h"          /* struct npu_tensor */
 #include "nn_svc.h"       /* nn_svc_write_fn, NN_SVC_THRESH_NONE */
 #include "plugin_abi.h"
@@ -144,17 +145,9 @@ int nn_active_report(nn_svc_write_fn write, void *ctx);
 unsigned nn_active_get_thresh_milli(void);
 
 /**
- * @brief  Set it.
- *
- * [!] THREE ANSWERS, NOT TWO (issue #104).  "The value was refused" and "there
- * is nothing here to hold one" send an operator to different places -- a number
- * to change, or a container to load -- so they are not folded together the way a
- * plain success/failure return would have folded them.
+ * @brief  Set it: NN_ACTIVE_THRESH_OK, _REFUSED or _NO_DECODER
+ *         (svc/nn_active_core.h, which says why there are three).
  */
-#define NN_ACTIVE_THRESH_OK           0
-#define NN_ACTIVE_THRESH_REFUSED    (-1)
-#define NN_ACTIVE_THRESH_NO_DECODER (-2)
-
 int nn_active_set_thresh_milli(unsigned milli);
 
 #ifdef __cplusplus

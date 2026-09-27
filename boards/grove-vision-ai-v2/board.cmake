@@ -431,7 +431,10 @@ set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/svc/plugin_paint_span.c"
     "${BOARD_DIR}/port/plugin/plugin_run.c"
     "${BOARD_DIR}/port/plugin/plugin_paint.c"
-    # The one place that decides which decoder is in force (issue #103).
+    # The one place that decides which decoder is in force (issue #103): the
+    # decision and the calls into the plugin shared with wio (issue #126), this
+    # board's tensors, geometry and depth record beside it.
+    "${CMAKE_SOURCE_DIR}/svc/nn_active_core.c"
     "${BOARD_DIR}/port/npu/nn_active.c"
     # The stack depth where each plugin callback is entered, per slot and per
     # thread (issue #119): the pure half has a host test, the other half is

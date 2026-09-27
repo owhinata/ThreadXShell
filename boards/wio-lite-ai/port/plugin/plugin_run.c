@@ -11,6 +11,7 @@
 
 #include "plugin_run.h"
 #include "plugin_mpu_v7m.h"
+#include "nn_active_core.h"     /* NN_ACTIVE_CORE_SP() */
 
 /*
  * [!] port/nn/nn.h IS DELIBERATELY NOT INCLUDED.  It was, for
@@ -55,8 +56,13 @@ static struct plugin_exec_state pl_state;
  * after mpu_config() runs at boot.  "Nothing does" is a claim about today's
  * source; this is the check that survives tomorrow's, and it costs one read of
  * a handful of registers once per model load.
+ *
+ * [!] NOT INLINED, so that pl_exec_ok() below -- where entry()'s stack depth is
+ * sampled -- keeps a small frame of its own instead of taking on this one's
+ * region table (issue #126, as grove-vision-ai-v2 did in #119).
  */
-static int pl_exec_ok(uint32_t lo, uint32_t hi, const char **why)
+static __attribute__((noinline)) int pl_exec_check(uint32_t lo, uint32_t hi,
+                                                   const char **why)
 {
 	struct pl_mpu7_region rgn[PL_MPU7_REGION_MAX] = { { 0u, 0u } };
 	uint32_t ctrl, type, saved_rnr;
@@ -89,6 +95,27 @@ static int pl_exec_ok(uint32_t lo, uint32_t hi, const char **why)
 	if (why != NULL)
 		*why = pl_mpu7_strerror(v);
 	return -1;
+}
+
+/*
+ * The exec_ok hook, and where entry()'s stack depth is taken (issue #126).
+ *
+ * [!] THE LOADER CALLS THIS FROM THE FRAME IT CALLS entry() FROM.  entry() is
+ * called inside svc/plugin_exec.c, which may own no storage, so no probe can go
+ * beside that branch -- but this hook is called in the same function, after
+ * the copy and the cache maintenance and before the branch, with the stack
+ * pointer the branch will use.  Read here, the depth is the entry depth plus
+ * THIS function's frame: an upper bound, never an under-count.
+ *
+ * Recorded even when the verdict below then stops the load: this board keeps a
+ * high-water, not a count, and a load stopped here was at exactly the depth an
+ * entry() would have been.  Until issue #126 the sample was taken in
+ * nn_svc_wio.c, several frames above, and missed all of them.
+ */
+static int pl_exec_ok(uint32_t lo, uint32_t hi, const char **why)
+{
+	plugin_run_note_entry(NN_ACTIVE_CORE_SP());
+	return pl_exec_check(lo, hi, why);
 }
 
 /*

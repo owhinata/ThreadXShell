@@ -102,9 +102,11 @@ gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" \
 # the same one the packer reads), and the shared decoder it carries comes with
 # it -- the firmware image no longer links svc/blazeface.c at all.
 gcc $CFLAGS -I "$board/port/nn" -I "$board/port/plugin" -I "$board/svc" \
+    -I "$board/src" \
     -I "$asset/plugins/blazeface" -I "$asset/common" -I "$HOST_TEST_SVC" \
     "$here/test_nn_active.c" \
     "$board/port/nn/nn_active.c" "$board/port/nn/nn_desc.c" \
+    "$HOST_TEST_SVC/nn_active_core.c" \
     "$asset/plugins/blazeface/plugin_main.c" \
     "$asset/common/plugin_base.c" "$asset/common/plugin_fmt.c" \
     "$asset/common/plugin_text.c" \

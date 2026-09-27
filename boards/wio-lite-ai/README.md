@@ -769,6 +769,14 @@ output shapes or classes (`struct nn_result_extra`, about 300 B).  Every
 allowance sits under its derived room, and the shipped plugin well under the
 allowance.
 
+**[!] Issue #126 moved every sample, and the column above predates it.**  The
+callers used to sample before calling into `port/nn/nn_active.c`, which left
+out everything below them -- the descriptor array above all, about 300 B at
+decode and shapes_ok.  The stack pointer is now read in `svc/nn_active_core.c`,
+at the indirect call itself, and entry()'s in the loader's `exec_ok` hook
+(`pl_exec_ok()`, 16 B above the branch).  Expect decode and the shell row to
+read higher; the bound each must stay under is `stack - 208 - 1,024`.
+
 **The allowances did not move, and that is deliberate.**  A shallower call site
 widens the room the declaration has to fit in; it is not a reason to declare
 more.  The allowances are the board's policy, compiled in; a container's

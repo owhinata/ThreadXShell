@@ -48,6 +48,7 @@
 #include <stdint.h>
 
 #include "blazeface.h"    /* BF_ERR_* -- the shared decode vocabulary */
+#include "nn_active_core.h" /* NN_ACTIVE_THRESH_* -- the shared branch */
 #include "nn.h"           /* struct nn_model */
 #include "nn_svc.h"       /* nn_svc_write_fn, NN_SVC_THRESH_NONE */
 #include "plugin_abi.h"
@@ -144,12 +145,8 @@ int nn_active_report(nn_svc_write_fn write, void *ctx);
  */
 unsigned nn_active_get_thresh_milli(void);
 
-enum {
-	NN_ACTIVE_THRESH_OK = 0,
-	NN_ACTIVE_THRESH_REFUSED,      /**< the decoder rejected the value   */
-	NN_ACTIVE_THRESH_NO_DECODER,   /**< nothing holds a threshold        */
-};
-
+/** Set it: NN_ACTIVE_THRESH_OK, _REFUSED (the decoder rejected the value) or
+ *  _NO_DECODER (nothing holds a threshold) -- svc/nn_active_core.h. */
 int nn_active_set_thresh_milli(unsigned milli);
 
 /**

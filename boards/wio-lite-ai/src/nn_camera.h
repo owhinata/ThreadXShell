@@ -71,13 +71,14 @@
 #define NNCAM_STACK_BYTES  3072u
 
 /**
- * The three places a plugin callback stands (issue #108 placed two, #110 added
- * the third and the calls beside all of them).
+ * The three threads a plugin callback is entered on (issue #108 placed two,
+ * #110 added the third).
  *
- * DECODE is on `nn_work`, immediately before the decode in the worker step.
- * DRAW is on the preview thread, at the call that lets the plugin paint -- and
- * at that call rather than in its caller, so the number is the depth the
- * callback inherits and does not depend on what the compiler inlined.
+ * DECODE is `nn_work`, the worker.  DRAW is the preview thread.  Since issue
+ * #126 all of them are sampled in svc/nn_active_core.c, in the function that
+ * makes the indirect call, immediately before it -- and entry() in the
+ * loader's exec_ok hook -- so the number is the depth the callback is entered
+ * at and does not depend on what the compiler inlined above it.
  *
  * [!] SHELL IS THE ONE 3a DID NOT MEASURE, and it is where four of the seven
  * slots are actually called: entry (from `nn model load`), shapes_ok (from the
@@ -94,19 +95,19 @@ enum nn_camera_site {
 };
 
 /**
- * Record how much of the CALLING thread's stack is already spent here.
+ * Record how much of the CALLING thread's stack is spent at @p sp, a stack
+ * pointer its caller read immediately before calling a plugin.
  *
- * Grove's probe shape (issue #103): the address of a local, checked to lie inside
- * the identified ThreadX thread's stack, kept as a high-water per site.  Called
- * BEFORE the call it describes, so the number is the depth a callee inherits.
+ * Checked to lie inside the identified ThreadX thread's stack and kept as a
+ * high-water per site.  A pointer outside it -- a host build passes 0 -- is not
+ * a measurement and is dropped.
  *
- * [!] THE PROBE PERTURBS THE FRAME IT SITS IN.  It is out of line (noinline), so
- * the value includes the probe's own few bytes -- an over-report, which is the
- * safe direction -- and does not move with inlining.  The same probe, in the same
- * places, stays through Step 3b: removing or reshaping it means measuring again,
- * not reusing 3a's number.
+ * [!] UNTIL ISSUE #126 THIS SAMPLED ITS OWN FRAME, from call sites in the
+ * callers of port/nn/nn_active.c, so everything between those sites and the
+ * plugin -- the descriptor array above all -- was missing: an under-count.
+ * The stack pointer now comes from the frame that makes the call.
  */
-void nn_camera_note_depth(enum nn_camera_site site);
+void nn_camera_note_depth_at(enum nn_camera_site site, uintptr_t sp);
 
 struct nn_camera_stats {
 	uint8_t  running;

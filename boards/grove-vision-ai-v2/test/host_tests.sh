@@ -180,6 +180,7 @@ gcc $CFLAGS \
     -I "$asset/plugins/blazeface" -I "$asset/common" -I "$HOST_TEST_SVC" \
     "$here/test_plugin_decode.c" \
     "$board/port/npu/nn_active.c" "$board/port/npu/npu_desc.c" \
+    "$HOST_TEST_SVC/nn_active_core.c" \
     "$board/port/npu/nn_preproc.c" \
     "$asset/plugins/blazeface/plugin_main.c" \
     "$asset/common/plugin_base.c" "$asset/common/plugin_fmt.c" \

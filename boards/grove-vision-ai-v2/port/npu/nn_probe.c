@@ -236,8 +236,10 @@ static const char *const nn_probe_notes[PLUGIN_SLOT_COUNT] = {
 	/* Sampled inside the board's exec_ok hook, which the loader calls from the
 	 * frame it then calls entry() from: the hook's own frame is on top. */
 	[PLUGIN_SLOT_ENTRY] = "(upper bound)",
-	/* Sampled inside nn_active_draw(), which tail-calls the plugin and so pops
-	 * its own frame first: the number is at or above the entry, never below. */
+	/* Sampled inside nn_active_core_draw(), which tail-calls the plugin and so
+	 * pops its own frame first: the number is at or above the entry, never
+	 * below.  (Since issue #126 shapes_ok and decode are tail calls too, 24 B
+	 * over, and are not marked here.) */
 	[PLUGIN_SLOT_DRAW]  = "(upper bound)",
 };
 

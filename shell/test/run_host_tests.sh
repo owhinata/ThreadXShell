@@ -394,6 +394,19 @@ gcc $CFLAGS -I "$svc" \
     $LDFLAGS -o "$out/test_plugin_paint_span"
 "$out/test_plugin_paint_span"
 
+# issue #126 -- the one place that decides whether a plugin decodes
+# (svc/nn_active_core.c), shared by grove-vision-ai-v2 and wio-lite-ai: which
+# slot is called, with what, how often, and what is answered when none is.
+# The no-plugin answer to shapes_ok is the BOARD's and is tried both ways --
+# grove refuses, wio accepts -- and with a plugin loaded neither may leak
+# through.  Every call into a slot is preceded by exactly one depth sample for
+# it, and a question that calls nothing samples nothing.  Each board's own
+# test drives its port nn_active.c through this file with the real plugin.
+gcc $CFLAGS -I "$svc" \
+    "$here/test_nn_active_core.c" "$svc/nn_active_core.c" \
+    $LDFLAGS -o "$out/test_nn_active_core"
+"$out/test_nn_active_core"
+
 # issue #110 (#78 Step 3b) -- the capture of an external decoder's own account
 # of its result (svc/nn_report.c).  A contract about OUTCOMES: zero bytes is a
 # legal report, "no report to give" is a different answer, truncation is a

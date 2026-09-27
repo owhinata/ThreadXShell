@@ -5266,9 +5266,12 @@ of formatting.
 
 ### One branch point, not one per caller
 
-`port/npu/nn_active.c` is the only place that decides which decoder is in force,
-and **everything** goes through it: the one-shot decode, the stream's admission,
-decode and draw, the threshold, and the report.
+`svc/nn_active_core.c` is the only place that decides which decoder is in force
+-- shared with wio-lite-ai since issue #126 and reached through this board's
+`port/npu/nn_active.c`, which converts the tensors and states the board's facts
+-- and **everything** goes through it: the one-shot decode, the stream's
+admission, decode and draw, the threshold, and the report.  This board's fact
+that differs from wio's: with no plugin loaded, `shapes_ok` refuses.
 
 Routing only the obvious call -- the stream's decode -- was the first design and
 the code says why it is not enough.  `nn run` has its own decode path, stream
@@ -5445,10 +5448,12 @@ refusal stays either way.
 
 At the plugin's entry, one record per slot and per thread (`port/npu/nn_probe.h`):
 
-- **the six callbacks `nn_active.c` calls through** are sampled in the function
-  that makes the indirect call, immediately before it.  The stack pointer is read
-  explicitly (`mov rX, sp`), after that function has built everything it passes
-  -- the tensor descriptor array included.
+- **the six callbacks `svc/nn_active_core.c` calls through** are sampled in the
+  function that makes the indirect call, immediately before it, and handed to
+  this board's record through the `note` it is given (issue #126).  The stack
+  pointer is read explicitly (`mov rX, sp`), after everything passed has been
+  built -- the tensor descriptor array, in `port/npu/nn_active.c`'s frame above
+  it, included.
 - **entry()** is called inside the shared loader, `svc/plugin_exec.c`, which may
   own no storage.  The loader calls this board's `exec_ok` hook (`pl_exec_ok()`
   in `port/plugin/plugin_run.c`) from the same frame, with the stack pointer it
@@ -5507,9 +5512,11 @@ otherwise), so start one before reading.
 
 The two `(upper bound)`s:
 
-- **draw** is sampled inside `nn_active_draw()`, which tail-calls the plugin
-  (`ldmia sp!, {r4, r5, r6, lr}` then `bx r3`) and so pops its own 16 B first.
-  The plugin is entered at 200 B; the report says 216.
+- **draw** is sampled inside `nn_active_core_draw()`, which tail-calls the
+  plugin (`ldmia sp!, {r4, r5, r6, lr}` then `bx r3`) and so pops its own 16 B
+  first.  The plugin is entered at 200 B; the report says 216.  Since issue
+  #126 **shapes_ok and decode** are tail calls too (the descriptor array is in
+  the caller's frame now), so their numbers are 24 B over the entry depth.
 - **entry** is sampled in `pl_exec_ok()` after its own `push {r4, r5, r6, lr}`,
   16 B.  entry() is entered at 1,064 B on the console and 976 B on a job; the
   report says 1,080 and 992.  The MPU check that holds the 192 B region table is
@@ -5700,16 +5707,17 @@ superseded by issue #121's, in the ELF table).
 confirmed by reading the final ELF and neither is enforced by anything:
 
 1. **At each of the six sites, the stack pointer does not move between the sample
-   and the call.**  `nn_active_shapes_ok`, `_decode`, `_draw`, `_report`,
+   and the call.**  `nn_active_core_shapes_ok`, `_decode`, `_draw`, `_report`,
    `_get_thresh_milli` and `_set_thresh_milli` read `mov rX, sp` after their
-   prologue and reach `blx rN` -- draw: `bx r3`, the tail call -- with no push,
-   pop or `sp` arithmetic in between.
+   prologue and reach `blx rN` -- shapes_ok, decode and draw: `bx r3`, the tail
+   call, after popping their own registers -- with no push or `sp` arithmetic in
+   between.
 2. **The loader calls the `exec_ok` hook and entry() from the same frame.**  In
    `plugin_exec_load` (`stmdb sp!, {r4-r11, lr}`, 36 B, then `sub sp, #20`) the
    third `blx r3` is the hook and the fourth is entry(), with no `sp` change
    between them; `pl_exec_ok` pushes its 16 B before its `mov r2, sp`.
 
-To check after a change, read `<nn_active_*>`, `<pl_exec_ok>` and
+To check after a change, read `<nn_active_core_*>`, `<pl_exec_ok>` and
 `<plugin_exec_load>` in
 `arm-none-eabi-objdump -d --no-show-raw-insn build/grove-vision-ai-v2/shell.elf`.
 A second hook call in one load shows up as `inv`.  What does NOT show up is

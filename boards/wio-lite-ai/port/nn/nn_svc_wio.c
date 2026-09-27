@@ -746,9 +746,8 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 		} else {
 			enum plugin_run_result pr;
 
-			/* The deepest of the shell-thread call sites: a plugin's entry()
-			 * is reached from here, several frames below the command. */
-			nn_camera_note_depth(NNCAM_SITE_SHELL);
+			/* entry()'s depth is sampled in the loader's exec_ok hook
+			 * (issue #126), several frames below this one. */
 			/* [!] THE STAGING REGION IS PASSED, NOT LOOKED UP.  The backend
 			 * is double-slotted: nn_model_load_region() hands out the
 			 * INACTIVE slot, so now that the reload above has adopted the

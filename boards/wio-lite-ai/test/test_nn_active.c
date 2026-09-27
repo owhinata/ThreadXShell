@@ -37,6 +37,7 @@
  * are supplied here -- which is also what makes the shim testable at all.
  */
 #include "nn_active.h"
+#include "nn_camera.h"
 #include "nn_desc.h"
 #include "plugin_run.h"
 
@@ -91,6 +92,18 @@ void *plugin_run_slot(unsigned slot)
 	if (!pl_loaded || slot >= (unsigned)PLUGIN_SLOT_COUNT)
 		return NULL;
 	return (void *)(uintptr_t)plugin_slot_table[slot];
+}
+
+/* Where the shim records the depth a slot is entered at (issue #126).  On the
+ * board this is nn_camera.c, which asks ThreadX what is running; here it only
+ * counts, per site. */
+static unsigned depth_notes[3];
+
+void nn_camera_note_depth_at(enum nn_camera_site site, uintptr_t sp)
+{
+	(void)sp;
+	if ((unsigned)site < 3u)
+		depth_notes[site]++;
 }
 
 /* ---- the model handle the shim pulls tensors from ------------------------ */
@@ -437,6 +450,60 @@ int main(void)
 		expect("and a null destination too",
 		       nn_active_to_frame(NULL, 0.0f, 0.0f, 1.0f, 1.0f, NULL) != 0,
 		       "accepted");
+	}
+
+	/* ================================================================
+	 * 5.  Which record a slot's depth goes to (issue #126)
+	 * ================================================================
+	 *
+	 * The shared branch samples every slot at its indirect call; this board
+	 * keeps one high-water per THREAD, so the mapping is the board's: decode
+	 * to the worker's, draw to the preview's, everything else to the
+	 * console's.  And nothing is sampled for a call that was not made.
+	 */
+	{
+		unsigned site_sum;
+
+		reset_model();
+		put_one_face();
+		pl_loaded = 1;
+		memset(depth_notes, 0, sizeof depth_notes);
+		(void)nn_active_decode(&stub);
+		expect("a decode is sampled once, on the worker's record",
+		       depth_notes[NNCAM_SITE_DECODE] == 1u &&
+		               depth_notes[NNCAM_SITE_DRAW] == 0u &&
+		               depth_notes[NNCAM_SITE_SHELL] == 0u,
+		       "%u/%u/%u", depth_notes[0], depth_notes[1], depth_notes[2]);
+		memset(depth_notes, 0, sizeof depth_notes);
+		nn_active_draw(&rec_painter);
+		expect("a draw on the preview's",
+		       depth_notes[NNCAM_SITE_DRAW] == 1u &&
+		               depth_notes[NNCAM_SITE_DECODE] == 0u &&
+		               depth_notes[NNCAM_SITE_SHELL] == 0u,
+		       "%u/%u/%u", depth_notes[0], depth_notes[1], depth_notes[2]);
+		memset(depth_notes, 0, sizeof depth_notes);
+		(void)nn_active_shapes_ok(&stub);
+		(void)nn_active_report(cap_write, NULL);
+		(void)nn_active_get_thresh_milli();
+		(void)nn_active_set_thresh_milli(500u);
+		plugin_run_note_entry(0u);
+		expect("shapes_ok, report, both parameters and entry on the console's",
+		       depth_notes[NNCAM_SITE_SHELL] == 5u &&
+		               depth_notes[NNCAM_SITE_DECODE] == 0u &&
+		               depth_notes[NNCAM_SITE_DRAW] == 0u,
+		       "%u/%u/%u", depth_notes[0], depth_notes[1], depth_notes[2]);
+
+		pl_loaded = 0;
+		memset(depth_notes, 0, sizeof depth_notes);
+		(void)nn_active_decode(&stub);
+		nn_active_draw(&rec_painter);
+		(void)nn_active_shapes_ok(&stub);
+		(void)nn_active_report(cap_write, NULL);
+		(void)nn_active_get_thresh_milli();
+		(void)nn_active_set_thresh_milli(500u);
+		site_sum = depth_notes[0] + depth_notes[1] + depth_notes[2];
+		expect("[!] with no plugin nothing is entered, so nothing is sampled",
+		       site_sum == 0u, "%u sample(s)", site_sum);
 	}
 
 	/*

@@ -85,6 +85,14 @@ int plugin_run_active(void);
 void *plugin_run_slot(unsigned slot);
 
 /**
+ * Record entry()'s stack depth: @p sp was read in the loader's exec_ok hook,
+ * in the frame entry() is then called from.  NOT DEFINED HERE -- the board's
+ * nn layer keeps the depth records (port/nn/nn_active.c), and this file does
+ * not reach up into it (issue #126).
+ */
+void plugin_run_note_entry(uintptr_t sp);
+
+/**
  * @brief  Name the plugin an address belongs to, for the fault reporter.
  *
  * [!] SAFE TO CALL FROM AN EXCEPTION -- see plugin_exec.h.  This board's

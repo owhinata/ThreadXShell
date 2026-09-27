@@ -141,7 +141,7 @@ plugin は board code と同格の**信頼された native code**。ゲートが
   ない（課金は**フレームバッファを触る前**）。**輪郭は外接面積ではなく実際に書く store 数で課金する**
   （外接面積だと近距離の顔 1 つで箱が黙って消える）。共有してよいのは幾何規則（`svc/rect_geom.c`）
   だけで**期待値は共有せず実ループの store を数える**。
-- **[!] 分岐点は `port/npu/nn_active.c` の 1 つだけ**（一発デコード / stream の admission・decode・draw /
+- **[!] 分岐点は `svc/nn_active_core.c` の 1 つだけ**（一発デコード / stream の admission・decode・draw /
   **閾値** / report が全部そこを通る）。**plugin は自分の閾値を持つ**ので片方だけ繋ぐと `nn thresh` が
   届かず、**両者に同じ閾値を与える differential test はこれを見逃す**。**幾何も 1 つで decode 結果は private**。
 - **[!] plugin のビルド規則は共有**（`cmake/add_plugin.cmake`）で**ボードは自分の事実だけを引数で渡す**。

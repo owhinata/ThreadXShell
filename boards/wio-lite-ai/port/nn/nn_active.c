@@ -5,12 +5,19 @@
 /**
  * @file    nn_active.c
  * @brief   Which decoder is in force.  See nn_active.h.
+ *
+ * The decision and every call into the plugin's decoder slots are
+ * svc/nn_active_core.c's, shared with grove-vision-ai-v2 (issue #126).  What is
+ * here is this board's: the conversion from nn_tensor, the transform and the
+ * log sink of the base vtable, and the three facts the shared file is handed.
  */
 #define LOG_TAG "nn"
 #include "log.h"
 
 #include "nn_active.h"
 
+#include "nn_active_core.h"
+#include "nn_camera.h"       /* nn_camera_note_depth_at() */
 #include "nn_desc.h"         /* nn_tensor -> tensor_desc */
 #include "plugin_run.h"
 
@@ -50,136 +57,110 @@ static unsigned to_desc(struct nn_model *m, struct tensor_desc *d, unsigned cap)
 	return out;
 }
 
+/* ---- the three facts the shared branch is handed ------------------------ */
+
+/*
+ * Where a sample goes (issue #126).  This board keeps one high-water per
+ * THREAD a plugin is entered on, not per slot: decode runs on the worker, draw
+ * on the preview thread, and every other slot -- shapes_ok, report and the
+ * parameters -- on a console.  entry() is a console slot too, sampled in the
+ * loader's exec_ok hook (port/plugin/plugin_run.c).
+ *
+ * [!] UNTIL ISSUE #126 THESE WERE SAMPLED BY THE CALLERS, before they called
+ * into this file, so the frames between -- the descriptor array above all --
+ * were not in the number: an under-count, in the unsafe direction.  The stack
+ * pointer is now read in the shared function that makes the indirect call,
+ * immediately before it.
+ */
+static void nn_active_note(unsigned slot, uintptr_t sp)
+{
+	nn_camera_note_depth_at(slot == PLUGIN_SLOT_DECODE ? NNCAM_SITE_DECODE :
+	                        slot == PLUGIN_SLOT_DRAW   ? NNCAM_SITE_DRAW :
+	                                                     NNCAM_SITE_SHELL,
+	                        sp);
+}
+
+/* entry(), from the loader's exec_ok hook: a console slot (plugin_run.h). */
+void plugin_run_note_entry(uintptr_t sp)
+{
+	nn_camera_note_depth_at(NNCAM_SITE_SHELL, sp);
+}
+
+static const struct nn_active_board nn_active_board = {
+	.active = plugin_run_active,
+	.slot   = plugin_run_slot,
+	.note   = nn_active_note,
+	/*
+	 * [!] NOBODY IS GOING TO READ THEM, SO NOBODY OBJECTS (issue #116) -- this
+	 * board's answer, and not grove-vision-ai-v2's.  This is the admission both
+	 * `nn run` and `nn stream start` pass through, and refusing here would
+	 * refuse `nn run` on every bare model -- which still runs the inference and
+	 * reports the output tensors themselves.  What stops a STREAM with no
+	 * decoder is nn_active_can_draw(), one question lower down and only asked
+	 * when a panel was requested.
+	 */
+	.shapes_without_plugin = 1,
+};
+
 /* ---- the branch ---------------------------------------------------------- */
 
 int nn_active_is_plugin(void)
 {
-	return plugin_run_active() && plugin_run_slot(PLUGIN_SLOT_DECODE) != NULL;
+	return nn_active_core_is_plugin(&nn_active_board);
 }
 
 int nn_active_shapes_ok(struct nn_model *m)
 {
-	plugin_shapes_ok_fn fn =
-		(plugin_shapes_ok_fn)plugin_run_slot(PLUGIN_SLOT_SHAPES_OK);
+	struct tensor_desc d[NN_MAX_IO];
+	unsigned n;
 
 	if (m == NULL)
 		return 0;
-	if (nn_active_is_plugin() && fn != NULL) {
-		struct tensor_desc d[NN_MAX_IO];
-		unsigned n = to_desc(m, d, NN_MAX_IO);
-
-		return fn(d, n);
-	}
-	/*
-	 * [!] NOBODY IS GOING TO READ THEM, SO NOBODY OBJECTS (issue #116).  This
-	 * is the admission both `nn run` and `nn stream start` pass through, and
-	 * refusing here would refuse `nn run` on every bare model -- which still
-	 * runs the inference and reports the output tensors themselves.  What
-	 * stops a STREAM with no decoder is nn_active_can_draw(), one question
-	 * lower down and only asked when a panel was requested.
-	 */
-	return 1;
+	n = to_desc(m, d, NN_MAX_IO);
+	return nn_active_core_shapes_ok(&nn_active_board, d, n);
 }
 
 int nn_active_decode(struct nn_model *m)
 {
-	plugin_decode_fn fn = (plugin_decode_fn)plugin_run_slot(PLUGIN_SLOT_DECODE);
+	struct tensor_desc d[NN_MAX_IO];
+	unsigned n;
 
 	if (m == NULL)
 		return BF_ERR_ARG;
-	if (nn_active_is_plugin() && fn != NULL) {
-		struct tensor_desc d[NN_MAX_IO];
-		unsigned n = to_desc(m, d, NN_MAX_IO);
-
-		return fn(d, n);
-	}
-	/*
-	 * A backstop, not a path: the worker asks nn_active_is_plugin() first and
-	 * publishes "an inference ran and nothing decoded it" otherwise.  Since
-	 * issue #116 there is no second decoder behind this, so a caller arriving
-	 * here is a caller that skipped the question -- it is told nothing is
-	 * bound rather than being quietly decoded for, and deliberately not with
-	 * BF_ERR_MODEL, which means "not a detector" and routes to the shared
-	 * class report.
-	 */
-	return BF_ERR_UNINIT;
+	n = to_desc(m, d, NN_MAX_IO);
+	return nn_active_core_decode(&nn_active_board, d, n);
 }
 
 void nn_active_draw(const struct plugin_painter *paint)
 {
-	plugin_draw_fn fn = (plugin_draw_fn)plugin_run_slot(PLUGIN_SLOT_DRAW);
-
-	if (nn_active_is_plugin() && fn != NULL && paint != NULL)
-		fn(paint);
+	nn_active_core_draw(&nn_active_board, paint);
 }
 
 int nn_active_can_draw(void)
 {
-	if (!nn_active_is_plugin())
-		return 0;        /* nothing decodes, so nothing has boxes to draw */
-	return plugin_run_slot(PLUGIN_SLOT_DRAW) != NULL;
+	return nn_active_core_can_draw(&nn_active_board);
 }
 
 int nn_active_can_report(void)
 {
-	if (!nn_active_is_plugin())
-		return 0;        /* there is no result for anyone to describe */
-	return plugin_run_slot(PLUGIN_SLOT_REPORT) != NULL;
+	return nn_active_core_can_report(&nn_active_board);
 }
 
 int nn_active_report(nn_svc_write_fn write, void *ctx)
 {
-	plugin_report_fn fn = (plugin_report_fn)plugin_run_slot(PLUGIN_SLOT_REPORT);
-	struct plugin_printer out;
-
-	if (!nn_active_is_plugin() || fn == NULL || write == NULL)
-		return 0;
-
-	/* Version and size first: the plugin's veneer refuses a printer without
-	 * them (issue #111). */
-	out.version = PLUGIN_ABI_VERSION;
-	out.size    = (uint32_t)sizeof(out);
-	out.ctx     = ctx;
-	out.write   = write;
-	return fn(&out);
+	return nn_active_core_report(&nn_active_board, write, ctx);
 }
 
 /* ---- the threshold ------------------------------------------------------- */
 
-#define NN_ACTIVE_PARAM_THRESH_MILLI 0u
-
 unsigned nn_active_get_thresh_milli(void)
 {
-	plugin_param_get_fn fn =
-		(plugin_param_get_fn)plugin_run_slot(PLUGIN_SLOT_PARAM_GET);
-	uint32_t v = 0u;
-
-	if (nn_active_is_plugin()) {
-		if (fn != NULL && fn(NN_ACTIVE_PARAM_THRESH_MILLI, &v) == 0)
-			return (unsigned)v;
-		/* A plugin with no threshold has none -- inventing one here would
-		 * report a number nothing is deciding with. */
-		return NN_SVC_THRESH_NONE;
-	}
-	/* And with no plugin there is no decoder at all (issue #116). */
-	return NN_SVC_THRESH_NONE;
+	return nn_active_core_get_thresh_milli(&nn_active_board);
 }
 
 int nn_active_set_thresh_milli(unsigned milli)
 {
-	plugin_param_set_fn fn =
-		(plugin_param_set_fn)plugin_run_slot(PLUGIN_SLOT_PARAM_SET);
-
-	if (nn_active_is_plugin()) {
-		if (fn == NULL)
-			return NN_ACTIVE_THRESH_NO_DECODER;
-		return fn(NN_ACTIVE_PARAM_THRESH_MILLI, (uint32_t)milli) == 0
-		               ? NN_ACTIVE_THRESH_OK : NN_ACTIVE_THRESH_REFUSED;
-	}
-	/* [!] NOT REFUSED -- THERE IS NOBODY TO REFUSE (issue #116).  "The value
-	 * is out of range" and "nothing here holds a threshold" are different
-	 * things to be told, and the shared command has a line for each. */
-	return NN_ACTIVE_THRESH_NO_DECODER;
+	return nn_active_core_set_thresh_milli(&nn_active_board, milli);
 }
 
 /* ---- the base vtable ----------------------------------------------------- */

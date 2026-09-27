@@ -889,6 +889,7 @@ list(APPEND SHELL_SOURCES ${NN_SOURCES}
 # follows CONFIG_NN_BACKEND, exactly as the container validation of #108 does.
 if(CONFIG_NN_BACKEND STREQUAL "tflm")
     list(APPEND SHELL_SOURCES
+         "${CMAKE_SOURCE_DIR}/svc/nn_active_core.c"
          "${BOARD_DIR}/port/nn/nn_active.c"
          "${CMAKE_SOURCE_DIR}/svc/plugin_exec.c"
          "${CMAKE_SOURCE_DIR}/svc/plugin_paint_budget.c"

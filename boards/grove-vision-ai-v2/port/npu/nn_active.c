@@ -5,12 +5,18 @@
 /**
  * @file    nn_active.c
  * @brief   Which decoder is in force.  See nn_active.h.
+ *
+ * The decision and every call into the plugin's decoder slots are
+ * svc/nn_active_core.c's, shared with wio-lite-ai (issue #126).  What is here
+ * is this board's: the geometry and the transform, the conversion from
+ * npu_tensor, and the three facts the shared file is handed below.
  */
 #include "nn_active.h"
 
 #include "npu_desc.h"
 #include "nn_preproc.h"
 #include "nn_probe.h"
+#include "nn_active_core.h"
 #include "plugin_run.h"
 
 #include <string.h>
@@ -57,20 +63,31 @@ int nn_active_to_frame(void *ctx, float x, float y, float w, float h,
 	return 0;
 }
 
-int nn_active_is_plugin(void)
+/* ---- the three facts the shared branch is handed ---------------------- */
+
+/* Every sample the shared file takes goes to this board's per-slot, per-thread
+ * record (issue #119).  The stack pointer was read in the shared function that
+ * makes the call, immediately before it; nothing is pushed in between. */
+static void nn_active_note(unsigned slot, uintptr_t sp)
 {
-	return plugin_run_active() && plugin_run_slot(PLUGIN_SLOT_DECODE) != NULL;
+	nn_probe_note(slot, sp, 0u);
 }
 
-/*
- * [!] EVERY INDIRECT CALL BELOW IS PRECEDED BY nn_probe_note() (issue #119).
- * The stack pointer is read HERE, in the function that makes the call and after
- * everything it builds -- the tensor descriptor array lives in this very frame
- * -- so the depth recorded is the depth the plugin is entered at, not the depth
- * of whoever called this file.  The note is a call of its own, and its frame is
- * gone again before the plugin's begins.  Taken only on the branch that really
- * calls the plugin: a "no decoder" answer entered nothing.
- */
+static const struct nn_active_board nn_active_board = {
+	.active = plugin_run_active,
+	.slot   = plugin_run_slot,
+	.note   = nn_active_note,
+	/* [!] NO PLUGIN, NO SHAPE IS READABLE -- this board's answer, and not
+	 * wio-lite-ai's.  Here the question is asked by the stream's admission
+	 * only, and nothing without a plugin can read any shape; refusing is what
+	 * stops a camera being lit for a preview that never annotates. */
+	.shapes_without_plugin = 0,
+};
+
+int nn_active_is_plugin(void)
+{
+	return nn_active_core_is_plugin(&nn_active_board);
+}
 
 /* The tensors reach a plugin as svc/tensor.h descriptors, which is the contract
  * issue #97 established so that one decoder can read any board's tensors.  The
@@ -89,131 +106,57 @@ static unsigned to_desc(const struct npu_tensor *outs, unsigned n,
 }
 
 /*
- * [!] THE NULL CHECK IS HERE, NOT IN A BRANCH.  A plugin has no way to defend
- * against a null tensor array -- to_desc() would walk it -- and this is the one
- * place every caller passes through.  No caller in this firmware can pass null,
- * which is exactly why an omission here would have sat unnoticed.
+ * [!] THE NULL CHECK IS HERE AS WELL AS IN THE SHARED FILE.  to_desc() would
+ * walk a null tensor array before the shared file ever saw it.  No caller in
+ * this firmware can pass null, which is exactly why an omission here would
+ * have sat unnoticed.
  */
 int nn_active_shapes_ok(const struct npu_tensor *outs, unsigned n)
 {
-	plugin_shapes_ok_fn fn =
-		(plugin_shapes_ok_fn)plugin_run_slot(PLUGIN_SLOT_SHAPES_OK);
+	struct tensor_desc d[NPU_DESC_MAX_OUTPUTS];
 
 	if (outs == NULL)
 		return 0;
-	if (nn_active_is_plugin() && fn != NULL) {
-		struct tensor_desc d[NPU_DESC_MAX_OUTPUTS];
-		unsigned m = to_desc(outs, n, d, NPU_DESC_MAX_OUTPUTS);
-
-		nn_probe_note(PLUGIN_SLOT_SHAPES_OK, NN_PROBE_SP(), 0u);
-		return fn(d, m);
-	}
-	return 0;   /* no decoder: nothing here can read any shape */
+	n = to_desc(outs, n, d, NPU_DESC_MAX_OUTPUTS);
+	return nn_active_core_shapes_ok(&nn_active_board, d, n);
 }
 
 int nn_active_decode(const struct npu_tensor *outs, unsigned n)
 {
-	plugin_decode_fn fn = (plugin_decode_fn)plugin_run_slot(PLUGIN_SLOT_DECODE);
+	struct tensor_desc d[NPU_DESC_MAX_OUTPUTS];
 
 	if (outs == NULL)
 		return BF_ERR_ARG;   /* see nn_active_shapes_ok */
-	if (nn_active_is_plugin() && fn != NULL) {
-		struct tensor_desc d[NPU_DESC_MAX_OUTPUTS];
-		unsigned m = to_desc(outs, n, d, NPU_DESC_MAX_OUTPUTS);
-
-		nn_probe_note(PLUGIN_SLOT_DECODE, NN_PROBE_SP(), 0u);
-		return fn(d, m);
-	}
-	/*
-	 * [!] A BACKSTOP, NOT A PATH (issue #104).  There is no decoder in this
-	 * firmware any more, so nobody should arrive here: nn_svc_grove.c decides
-	 * plugin-or-raw in the one helper both its callers reach, and the stream
-	 * refuses admission before a camera is lit.  It still answers rather than
-	 * pretending, and it answers "no decoder is bound" -- not BF_ERR_MODEL,
-	 * which means "not a detector" and routes to the shared class report.
-	 */
-	return BF_ERR_UNINIT;
+	n = to_desc(outs, n, d, NPU_DESC_MAX_OUTPUTS);
+	return nn_active_core_decode(&nn_active_board, d, n);
 }
 
 void nn_active_draw(const struct plugin_painter *paint)
 {
-	plugin_draw_fn fn = (plugin_draw_fn)plugin_run_slot(PLUGIN_SLOT_DRAW);
-
-	if (nn_active_is_plugin() && fn != NULL && paint != NULL) {
-		nn_probe_note(PLUGIN_SLOT_DRAW, NN_PROBE_SP(), 0u);
-		fn(paint);
-	}
-	/* Otherwise nothing, and there is nothing else it could be: with no plugin
-	 * there is no decoder, so there is no result to paint. */
+	nn_active_core_draw(&nn_active_board, paint);
 }
 
 int nn_active_can_draw(void)
 {
-	if (!nn_active_is_plugin())
-		return 0;   /* nothing decodes, so nothing annotates */
-	return plugin_run_slot(PLUGIN_SLOT_DRAW) != NULL;
+	return nn_active_core_can_draw(&nn_active_board);
 }
 
 int nn_active_can_report(void)
 {
-	if (!nn_active_is_plugin())
-		return 0;
-	return plugin_run_slot(PLUGIN_SLOT_REPORT) != NULL;
+	return nn_active_core_can_report(&nn_active_board);
 }
 
 int nn_active_report(nn_svc_write_fn write, void *ctx)
 {
-	plugin_report_fn fn = (plugin_report_fn)plugin_run_slot(PLUGIN_SLOT_REPORT);
-	struct plugin_printer out;
-
-	if (!nn_active_is_plugin() || fn == NULL || write == NULL)
-		return 0;
-
-	/* Version and size first: the plugin's veneer refuses a printer without
-	 * them (issue #111). */
-	out.version = PLUGIN_ABI_VERSION;
-	out.size    = (uint32_t)sizeof(out);
-	out.ctx     = ctx;
-	out.write   = write;
-	nn_probe_note(PLUGIN_SLOT_REPORT, NN_PROBE_SP(), 0u);
-	return fn(&out);
+	return nn_active_core_report(&nn_active_board, write, ctx);
 }
-
-/*
- * [!] THE THRESHOLD BELONGS TO THE DECODER THAT WILL USE IT, AND THERE MAY BE
- * NONE (issues #103, #104).
- *
- * A plugin owns its own threshold, so before issue #103 routed this, `nn thresh`
- * changed a firmware number the loaded plugin never read.  Since issue #104 the
- * other case is not "the resident decoder answers" but "nobody does": with no
- * plugin there is no decoder, and a classifier plugin declares no parameters
- * because it has no threshold to declare.  Both say so, rather than borrowing a
- * number from something that is not deciding anything.
- */
-#define NN_ACTIVE_PARAM_THRESH_MILLI 0u
 
 unsigned nn_active_get_thresh_milli(void)
 {
-	plugin_param_get_fn fn =
-		(plugin_param_get_fn)plugin_run_slot(PLUGIN_SLOT_PARAM_GET);
-	uint32_t v = 0u;
-
-	if (!nn_active_is_plugin() || fn == NULL)
-		return NN_SVC_THRESH_NONE;
-	nn_probe_note(PLUGIN_SLOT_PARAM_GET, NN_PROBE_SP(), 0u);
-	if (fn(NN_ACTIVE_PARAM_THRESH_MILLI, &v) == 0)
-		return (unsigned)v;
-	return NN_SVC_THRESH_NONE;
+	return nn_active_core_get_thresh_milli(&nn_active_board);
 }
 
 int nn_active_set_thresh_milli(unsigned milli)
 {
-	plugin_param_set_fn fn =
-		(plugin_param_set_fn)plugin_run_slot(PLUGIN_SLOT_PARAM_SET);
-
-	if (!nn_active_is_plugin() || fn == NULL)
-		return NN_ACTIVE_THRESH_NO_DECODER;
-	nn_probe_note(PLUGIN_SLOT_PARAM_SET, NN_PROBE_SP(), 0u);
-	return fn(NN_ACTIVE_PARAM_THRESH_MILLI, (uint32_t)milli) == 0
-	               ? NN_ACTIVE_THRESH_OK : NN_ACTIVE_THRESH_REFUSED;
+	return nn_active_core_set_thresh_milli(&nn_active_board, milli);
 }

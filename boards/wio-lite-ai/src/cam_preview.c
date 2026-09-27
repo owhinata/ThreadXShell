@@ -275,10 +275,7 @@ static void preview_draw_plugin(void)
 	bud.refused = 0u;
 	plugin_paint_bind(&paint, &bud, ltdc_back_buffer(),
 	                  ltdc_surface_w(), ltdc_surface_h());
-	/* [!] THE PROBE SITS AT THE CALL, not in the caller.  Both are the same
-	 * frame while this function is inlined, and "while it is inlined" is not
-	 * something the number should depend on. */
-	nn_camera_note_depth(NNCAM_SITE_DRAW);
+	/* The depth is sampled inside, at the indirect call (issue #126). */
 	nn_active_draw(&paint);
 
 	TX_DISABLE
@@ -321,8 +318,8 @@ static void preview_entry(ULONG arg)
 			ltdc_lock_frame();
 			/* Where a plugin's draw() stands (issue #108 placed the probe,
 			   #110 put the call beside it): here, inside the frame lock.  The
-			   depth probe is inside preview_draw_plugin(), at the call it
-			   describes.
+			   depth is sampled at the indirect call itself
+			   (svc/nn_active_core.c, issue #126).
 			   [!] AND THIS IS THE ONLY WAY A FRAME GETS ANNOTATED (issue
 			   #116).  With no plugin -- or a container whose plugin was
 			   refused -- the picture is presented exactly as the bands built

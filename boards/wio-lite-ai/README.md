@@ -680,15 +680,15 @@ cover it:
 | veneer | firmware function | derived | deepest chain |
 |---|---|---:|---|
 | `pl_base_log` | `nn_plugin_log` | **176 B** | `nn_plugin_log` 56 > `log_append.lto_priv.0` 88 > `ring_get.lto_priv.0` 24 > `memcpy` 8 |
-| `pl_paint_rect` | `paint_rect` | 56 B | `paint_rect` 56 > `charge.isra.0` 0 |
-| `pl_paint_blit` | `paint_blit` | 48 B | `paint_blit` 48 > `charge.isra.0` 0 |
-| `pl_paint_fill_rect` | `paint_fill_rect` | 32 B | `paint_fill_rect` 32 > `charge.isra.0` 0 |
+| `pl_paint_rect` | `paint_rect` | 56 B | `paint_rect` 56 > `plugin_paint_charge` 0 |
+| `pl_paint_blit` | `paint_blit` | 48 B | `paint_blit` 48 > `plugin_paint_charge` 0 |
+| `pl_paint_fill_rect` | `paint_fill_rect` | 32 B | `paint_fill_rect` 32 > `plugin_paint_charge` 0 |
 | `pl_print_write` | `nn_report_write` | 24 B | `nn_report_write` 16 > `memcpy` 8 |
 | `pl_base_to_frame` | `nn_active_to_frame` | 0 B | leaf, no frame |
 
 (The chains carry the names the LINK produced -- LTO privatises the two log
-bodies and clones the painter's charge wrapper -- because the check reads the
-image, not the sources.)
+bodies, and inlines the shared clip-and-charge of svc/plugin_paint_span.c into
+each primitive -- because the check reads the image, not the sources.)
 
 **640 >= 176, with 464 B of headroom.**  This used to be a hand sum, and it came
 to 528 B: the chain ran through the formatter -- `log_write` > `log_vwrite` >

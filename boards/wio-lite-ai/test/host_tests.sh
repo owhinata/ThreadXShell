@@ -183,6 +183,7 @@ gcc $CFLAGS -DPLUGIN_PAINT_COUNT_STORES \
     -I "$board/port/plugin" -I "$board/../../svc" \
     "$here/test_plugin_paint.c" "$board/port/plugin/plugin_paint.c" \
     "$board/../../svc/plugin_paint_budget.c" "$board/../../svc/rect_geom.c" \
+    "$board/../../svc/plugin_paint_span.c" \
     $LDFLAGS -o "$out/test_plugin_paint"
 "$out/test_plugin_paint"
 

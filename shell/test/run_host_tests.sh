@@ -381,6 +381,19 @@ gcc $CFLAGS -I "$svc" \
     $LDFLAGS -o "$out/test_plugin_mpu_v7m"
 "$out/test_plugin_mpu_v7m"
 
+# issue #126 -- what a painter primitive decides before its first store
+# (svc/plugin_paint_span.c): the clip, a blit's source offset, the charge, and
+# how the painter is filled in.  Shared by grove-vision-ai-v2 and wio-lite-ai;
+# their loops stay theirs, and each board's test_plugin_paint.c counts the
+# stores its own loop makes against what this charged.  Every geometry case
+# runs on 320x240 and on 240x320 with the rectangle transposed, so a w/h mix-up
+# cannot pass on the one surface both boards happen to use.
+gcc $CFLAGS -I "$svc" \
+    "$here/test_plugin_paint_span.c" "$svc/plugin_paint_span.c" \
+    "$svc/plugin_paint_budget.c" "$svc/rect_geom.c" \
+    $LDFLAGS -o "$out/test_plugin_paint_span"
+"$out/test_plugin_paint_span"
+
 # issue #110 (#78 Step 3b) -- the capture of an external decoder's own account
 # of its result (svc/nn_report.c).  A contract about OUTCOMES: zero bytes is a
 # legal report, "no report to give" is a different answer, truncation is a

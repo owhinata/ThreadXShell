@@ -5594,9 +5594,9 @@ cover it:
 |---|---|---:|---|
 | `pl_paint_rect` | `paint_rect` | **232 B** | `paint_rect` 72 > `lcd_rect_wire` 136 > `rect_geom_norm` 24 |
 | `pl_base_log` | `nn_plugin_log` | 208 B | `nn_plugin_log` 16 > `log_write_bytes` 72 > `log_append` 88 > `ring_get` 24 > `memcpy` 8 |
+| `pl_paint_blit` | `paint_blit` | 128 B | `paint_blit` 80 > `plugin_paint_blit_begin` 32 > `plugin_paint_clip` 16 |
+| `pl_paint_fill_rect` | `paint_fill_rect` | 80 B | `paint_fill_rect` 48 > `plugin_paint_fill_begin` 16 > `plugin_paint_clip` 16 |
 | `pl_base_to_frame` | `nn_active_to_frame` | 48 B | `nn_active_to_frame` 24 > `nn_preproc_box` 24 |
-| `pl_paint_blit` | `paint_blit` | 48 B | `paint_blit` 48 > `charge.isra.0` 0 > `plugin_paint_charge` 0 |
-| `pl_paint_fill_rect` | `paint_fill_rect` | 32 B | `paint_fill_rect` 32 > `charge.isra.0` 0 > `plugin_paint_charge` 0 |
 | `pl_print_write` | `nn_report_write` | 24 B | `nn_report_write` 16 > `memcpy` 8 |
 
 **256 >= 232, with 24 B of headroom, and the declaration did not have to
@@ -5606,9 +5606,12 @@ took the formatter out from under that veneer -- a plugin's bytes reach the log
 ring by length now, not through `LOG_INF` -- which leaves that chain at 208 B
 and the painter's rect as the deepest thing under any veneer.
 
-(The chains are printed with the names the LINK produced: `charge.isra.0` is
-what the compiler made of `plugin_paint_charge`'s wrapper, and the check reads
-the image, not the sources.)
+(The chains are printed with the names the LINK produced, because the check
+reads the image, not the sources.  Since issue #126 the blit and fill chains go
+through the clip-and-charge shared with wio-lite-ai (`svc/plugin_paint_span.c`),
+which this build -- no LTO -- keeps as real calls with the clipped span in the
+caller's frame: blit 48 -> 128 B and fill 32 -> 80 B, both still under the
+rect's 232 B, so the derived value did not move.)
 
 The numbers above are the build's, printed by the check itself; `ninja -C
 build/grove-vision-ai-v2 veneer_cost_check` prints them after removing

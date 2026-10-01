@@ -15,6 +15,18 @@ actually HOLDS, from the linked image:
       -> magic, sizeof(struct plugin_policy), the field offsets, and a pointer
       -> the policy object the board passes to plugin_parse()
       -> veneer_cost == --declared, stack_accounting == the ABI's
+      -> stack_limit[slot] == --stack-limit slot=bytes, for EVERY slot (#126)
+
+[!] THE STACK ALLOWANCES ARE THE SAME CLASS OF NUMBER (issue #126).  They reach
+the policy as board-named -D's from plugin_stack_table(), and a later -D wins
+over them in the same way.  The table is the one the plugin image gate and the
+host container verifier were given, so a policy that holds anything else --
+lower or higher, by an override or by the firmware mapping a slot to another
+allowance -- is a device that admits by a limit nothing on the host checked.
+What this cannot see: two allowances of EQUAL value swapped between slots (the
+device enforces the same numbers either way), and whether the table itself is
+right (that is the firmware's assert against each thread's stack, and the
+measured depths in the board README).
 
 [!] SYMBOL VALUES AND IMAGE BYTES, NOT SOURCE TEXT.  A regex over the C would
 see the macro's name, not what the compiler made of it.  And the probe carries
@@ -54,14 +66,41 @@ def main():
     ap.add_argument("elf")
     ap.add_argument("--declared", required=True, type=int,
                     help="the DECLARED veneer_cost_gate() checked")
-    ap.add_argument("--show-limits", action="store_true",
-                    help="also print the stack_limit[] the policy holds")
+    ap.add_argument("--stack-limit", action="append", default=[],
+                    metavar="SLOT=BYTES",
+                    help="the board's plugin_stack_table(), one per slot; "
+                         "every slot of the ABI is required")
     args = ap.parse_args()
     want_acct = check_plugin_image.ABI["PLUGIN_STACK_ACCOUNTING"]
 
     def fail(msg):
         print(f"check_policy_probe: FAIL -- {msg}", file=sys.stderr)
         return 1
+
+    # The table, by slot NAME.  The indices are the ABI's (check_plugin_image
+    # carries them, pinned to svc/plugin_abi.h by run_plugin_gate_tests.py), so
+    # neither the caller nor this file states an order.  Every slot is required:
+    # a missing row would leave one number of the policy unchecked.
+    abi = check_plugin_image.ABI
+    count = abi["PLUGIN_SLOT_COUNT"]
+    slots = {k[len("PLUGIN_SLOT_"):].lower(): v for k, v in abi.items()
+             if k.startswith("PLUGIN_SLOT_") and k != "PLUGIN_SLOT_COUNT"}
+    if sorted(slots.values()) != list(range(count)):
+        return fail(f"the ABI table names slots {sorted(slots.values())}, "
+                    f"not 0..{count - 1}")
+    want = {}
+    for e in args.stack_limit:
+        name, eq, val = e.partition("=")
+        if not eq or name not in slots or not val.isdigit() or int(val) <= 0:
+            return fail(f"--stack-limit {e!r}: expected <slot>=<bytes> with a "
+                        f"positive byte count and one of {sorted(slots)}")
+        if name in want:
+            return fail(f"--stack-limit names slot {name} twice")
+        want[name] = int(val)
+    missing = sorted(set(slots) - set(want))
+    if missing:
+        return fail(f"--stack-limit has no row for {', '.join(missing)}; the "
+                    "board's plugin_stack_table() declares every slot")
 
     try:
         elf = Elf(args.elf)
@@ -84,9 +123,13 @@ def main():
     for off in (off_cost, off_acct):
         if off + 4 > psize:
             return fail(f"offset {off} lies outside a {psize} B policy")
+    if off_lim + 4 * count > psize:
+        return fail(f"stack_limit[{count}] at offset {off_lim} lies outside a "
+                    f"{psize} B policy")
     cost = loaded_u32(elf, ptr + off_cost)
     acct = loaded_u32(elf, ptr + off_acct)
-    if cost is None or acct is None:
+    lims = [loaded_u32(elf, ptr + off_lim + 4 * i) for i in range(count)]
+    if cost is None or acct is None or None in lims:
         return fail(f"the policy at 0x{ptr:08x} is not in loadable bytes")
     bad = []
     if cost != args.declared:
@@ -97,15 +140,24 @@ def main():
                    "that instead")
     if acct != want_acct:
         bad.append(f"its stack_accounting is {acct}, the ABI's is {want_acct}")
+    off = [f"slot {name} holds a stack limit of {lims[idx]} B where the "
+           f"table declares {want[name]} B"
+           for name, idx in sorted(slots.items(), key=lambda kv: kv[1])
+           if lims[idx] != want[name]]
+    if off:
+        bad.append("; ".join(off) + " -- the board's plugin_stack_table() is "
+                   "not what the policy holds: a later -D or #define of an "
+                   "allowance overrode the table's, or the firmware maps a "
+                   "slot to another allowance, and the device would admit by "
+                   "a limit the plugin gate and the host verifier did not use")
     if bad:
         return fail(f"the plugin policy at 0x{ptr:08x} in {args.elf}: "
                     + "; ".join(bad))
-    msg = (f"check_policy_probe: OK -- the policy at 0x{ptr:08x} charges "
-           f"c = {cost} B (= DECLARED) under stack accounting {acct}")
-    if args.show_limits:
-        lims = [loaded_u32(elf, ptr + off_lim + 4 * i) for i in range(7)]
-        msg += f"; stack_limit {lims}"
-    print(msg)
+    table = ", ".join(f"{n} {lims[i]}" for n, i in
+                      sorted(slots.items(), key=lambda kv: kv[1]))
+    print(f"check_policy_probe: OK -- the policy at 0x{ptr:08x} charges "
+          f"c = {cost} B (= DECLARED) under stack accounting {acct}, and its "
+          f"stack limits are the board's table ({table} B)")
     return 0
 
 

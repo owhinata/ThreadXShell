@@ -138,13 +138,75 @@ an asset's command line, and `cost_override` adds `-DPLUGIN_VENEER_BASE_COST=1u`
 through CMAKE_C_FLAGS -- the image links, and flash and the asset stop in
 `check_policy_probe.py`.
 `fixtures/run_add_plugin_arg_tests.py` covers the configure-time refusals and
-that the declared value and printer bounds reach the check's command line.
+that the declared value, the printer bounds and the stack table reach the
+check's command line.
 
 What this does NOT prove: that the declared bindings are the real ones (binding
 a different callback without updating the declaration is invisible here);
 anything about exception entry, whose stacking is a separate reserve; anything
 about the plugin side, which is `check_plugin_image.py`'s; and anything about a
 container already on a device, which no build can reach.
+
+# Plugin stack allowances: one table, read back from the image
+
+What each plugin slot may ask of the stack it runs on is one fact with four
+consumers: the firmware's policy (`stack_limit[]`, which the device's loader
+enforces), the plugin image gate (`add_plugin()`'s `--entry`), the host
+container verifier (`build_asset.py`'s `--policy-stack`), and the read-back
+below. Until #126 a board wrote it out four times and nothing compared them.
+
+A board now states it once, with `plugin_stack_table()`
+(`plugin_stack_table.cmake`):
+
+```cmake
+plugin_stack_table(
+    DEFINE_ON  shell_objs                       # the compile holding the policy
+    ALLOWANCES GROVE_PLUGIN_STACK_SHELL=1024    # defined there as <MACRO>=<n>u
+               GROVE_PLUGIN_STACK_PANEL=1024
+    SLOTS      entry=GROVE_PLUGIN_STACK_SHELL ... draw=GROVE_PLUGIN_STACK_PANEL ...)
+```
+
+Every slot of the ABI must have exactly one row, every allowance must be
+positive (the loader reads 0 as a refused slot) and used by some slot, and the
+table is registered once. `add_plugin()` takes `SLOTS <slot ...>` (which slots
+the plugin exports) and derives `--entry pl_<slot>=<limit>` from the table; it
+refuses `ENTRIES` by name. `add_asset()` (`add_asset.cmake`, shared by both
+boards' asset rules) derives `--policy-stack <slot>=<limit>`, which
+`build_asset.py` maps to the validator's slot indices through the
+`abi_layout.json` the host compiler prints from `svc/plugin_abi.h`. The slot
+indices the read-back uses are `check_plugin_image.ABI`'s, pinned to the same
+header by `run_plugin_gate_tests.py`.
+
+The read-back is `check_policy_probe.py`, in the veneer-cost stamp's command:
+it is handed the table as `--stack-limit <slot>=<bytes>` (every slot required)
+and compares it with the seven numbers the shipped policy holds, through the
+same `PLUGIN_POLICY_PROBE` record. The probe already carried the offset of
+`stack_limit`, so no firmware byte changed to add this.
+
+What it CATCHES: a later `-D` or `#define` of an allowance (CMAKE_C_FLAGS wins
+over the definition the table makes, with only a warning), lowering or raising
+it; and the firmware mapping a slot to a different allowance than the table --
+both boards' firmware still states its own slot -> allowance mapping, next to
+the asserts that hold each allowance under the threads its slot runs on
+(Grove `port/npu/nn_plugin_stack.h`, wio `port/nn/nn_svc_wio.c`).
+
+What it does NOT catch: a mapping disagreement between two allowances of EQUAL
+value -- today every allowance on both boards is 1,024 B, so the device enforces
+the table's numbers either way and the disagreement stays invisible (and
+harmless) until the values differ; and whether the table itself is right. The
+table moves every consumer together, so no comparison among them can say a
+number fits its thread: that is the firmware's `_Static_assert` (strictly below
+each stack) and the measured depths in each board README.
+
+`fixtures/run_veneer_gate_build_tests.py` builds it: `stack_wiring` (the table
+reaches the policy and is read back, following a change), `stack_override_down`
+/ `stack_override_up` (a `-D` through CMAKE_C_FLAGS links, and flash and the
+asset stop), `stack_every_slot` (each slot one byte off, alone, is named),
+`stack_mismap`, `stack_mismap_equal` (the limit above, as a passing case) and
+`stack_rows` (the probe's own refusals). `fixtures/run_add_plugin_arg_tests.py`
+covers the table's, `add_plugin()`'s and `add_asset()`'s configure-time
+refusals, that the table reaches all three command lines, and
+`build_asset.py`'s name-to-index mapping against a layout numbered in reverse.
 
 # Plugin objects and the ABI they were compiled against
 

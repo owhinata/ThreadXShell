@@ -54,6 +54,14 @@
 #  reads the veneer_cost the board's policy ACTUALLY HOLDS out of the shipped
 #  image (PLUGIN_POLICY_PROBE, svc/plugin_load.h) and refuses anything but the
 #  number that was checked.
+#
+#  [!] THE SAME READ-BACK HOLDS THE STACK ALLOWANCES TO THE BOARD'S TABLE
+#  (issue #126).  The policy's stack_limit[] reaches the firmware the same way
+#  -- board-named -D's, from plugin_stack_table() -- and is overridden the same
+#  way.  So the probe check is also handed the table, slot by slot, and refuses
+#  a policy that holds any other number: the device would then admit (or
+#  refuse) containers by a limit that neither the image gate nor the host
+#  container verifier used.  A board that registered no table is refused here.
 # ============================================================================
 
 # Script mode: what a LINK invalidates, removed before every link.
@@ -88,6 +96,7 @@ endif()
 
 set(_VENEER_GATE_SELF "${CMAKE_CURRENT_LIST_FILE}")
 set(_VENEER_GATE_DIR "${CMAKE_CURRENT_LIST_DIR}")
+include("${CMAKE_CURRENT_LIST_DIR}/plugin_stack_table.cmake")
 
 function(veneer_cost_gate)
     cmake_parse_arguments(G "" "FIRMWARE;MAP;DECLARED"
@@ -301,6 +310,12 @@ function(_veneer_cost_gate_finish)
     foreach(_p IN LISTS printers)
         list(APPEND _args --printer-limit "${_p}")
     endforeach()
+    # The per-slot allowances the firmware's policy must hold (issue #126).
+    plugin_stack_table_limits(_limits "veneer_cost_gate()")
+    set(_probe_args "")
+    foreach(_l IN LISTS _limits)
+        list(APPEND _probe_args --stack-limit "${_l}")
+    endforeach()
 
     # [!] THE STAMP IS DELETED BEFORE THE CHECK and written only after it
     # passes, so a failed check leaves no stamp for a later build to trust.
@@ -322,15 +337,18 @@ function(_veneer_cost_gate_finish)
                 --ltrans-prefix "$<TARGET_FILE:${fw}>"
                 ${_args}
         # [!] AND WHAT THE FIRMWARE WILL ACTUALLY CHARGE (issue #111): the -D
-        # above can be overridden, so the value is read back from the image.
+        # above can be overridden, so the value is read back from the image --
+        # and with it the stack allowances, against the board's table (#126).
         COMMAND "${Python3_EXECUTABLE}"
                 "${_VENEER_GATE_DIR}/check_policy_probe.py"
                 "$<TARGET_FILE:${fw}>" --declared "${declared}"
+                ${_probe_args}
         COMMAND "${CMAKE_COMMAND}" -E touch "${stamp}"
         DEPENDS "${fw}"
                 "${_VENEER_GATE_DIR}/check_veneer_base_cost.py"
                 "${_VENEER_GATE_DIR}/check_plugin_image.py"
                 "${_VENEER_GATE_DIR}/check_policy_probe.py"
+                "${_VENEER_GATE_DIR}/plugin_stack_table.cmake"
                 "${_VENEER_GATE_SELF}"
         COMMENT "check_veneer_base_cost.py (VENEER_BASE_COST ${declared} B against the stack below each veneer of ${fw})"
         VERBATIM)

@@ -60,6 +60,24 @@ Cases:
   ltrans_drop       an LTO link that writes fewer partitions than the last
                     (max -> one) still passes: the old records are removed
                     before the link, not left for the check to refuse.
+  stack_wiring      (issue #126) the board's plugin_stack_table() reaches
+                    the policy TU as its allowances, and the read-back of the
+                    shipped image reports the table's numbers slot by slot --
+                    following a change of the table.
+  stack_override_down / stack_override_up
+                    a later -D of one allowance (CMAKE_C_FLAGS), lower and
+                    then higher than the table: the image links, and the
+                    read-back stops flash and the asset, naming the slot.
+  stack_every_slot  each slot's limit, one byte off on its own: refused,
+                    naming that slot and no other.
+  stack_mismap      the firmware maps draw to the other allowance: refused,
+                    because the two allowances differ in value.
+  stack_mismap_equal
+                    the same mismapping with EQUAL allowances PASSES -- what
+                    the read-back cannot see, stated as a case so that it is
+                    a documented limit rather than a surprise.
+  stack_rows        the probe itself, on the built image, refuses a table
+                    with a slot missing or an unknown slot.
   cost_wiring       (issue #111) DECLARED reaches BOTH places the loader's c
                     is read from, and follows a change of it: the compile of a
                     TU in the $<TARGET_OBJECTS:> library (where Grove's policy
@@ -79,7 +97,8 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 COPIED = ("veneer_cost_gate.cmake", "check_veneer_base_cost.py",
-          "check_plugin_image.py", "check_policy_probe.py")
+          "check_plugin_image.py", "check_policy_probe.py",
+          "plugin_stack_table.cmake")
 
 LINKER_SCRIPT = """
 MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 1M
@@ -138,9 +157,29 @@ int main(void)
 #endif
 __attribute__((used)) char policy_cost_probe[PLUGIN_VENEER_BASE_COST];
 /* A board's policy and its probe, as nn_svc_grove.c / nn_svc_wio.c write them:
- * the stamp waits for check_policy_probe.py to read this back from shell.elf. */
+ * the stamp waits for check_policy_probe.py to read this back from shell.elf.
+ * The allowances arrive from plugin_stack_table(), and this TU maps each slot
+ * to one of them on its own, as the boards' firmware does (issue #126). */
+#if !defined(FIX_STACK_A) || !defined(FIX_STACK_B)
+#error "plugin_stack_table() did not define the allowances on this compile"
+#endif
+#ifdef FIX_POLICY_MISMAP
+#define FIX_DRAW FIX_STACK_A
+#else
+#define FIX_DRAW FIX_STACK_B
+#endif
+/* One slot nudged by a byte, so a case can show that EVERY slot is compared
+ * -- with A on six of them, an override of A alone would let a check that
+ * skipped five go unnoticed. */
+#ifndef FIX_BUMP_SLOT
+#define FIX_BUMP_SLOT 99
+#endif
+#define FIX_B_(i) ((FIX_BUMP_SLOT) == (i) ? 1u : 0u)
 static const struct plugin_policy fix_policy = {
-    .stack_limit      = { 1, 2, 3, 4, 5, 6, 7 },
+    .stack_limit      = { FIX_STACK_A + FIX_B_(0), FIX_STACK_A + FIX_B_(1),
+                          FIX_STACK_A + FIX_B_(2), FIX_DRAW + FIX_B_(3),
+                          FIX_STACK_A + FIX_B_(4), FIX_STACK_A + FIX_B_(5),
+                          FIX_STACK_A + FIX_B_(6) },
     .veneer_cost      = PLUGIN_VENEER_BASE_COST,
     .stack_accounting = PLUGIN_STACK_ACCOUNTING,
 };
@@ -170,6 +209,8 @@ project(veneer_gate_build C)
 set(Python3_EXECUTABLE "@PYTHON@")
 set(DECLARED 4096 CACHE STRING "")
 set(FIX_LTO OFF CACHE STRING "")
+set(FIX_A 300 CACHE STRING "")
+set(FIX_B 500 CACHE STRING "")
 
 add_library(fw_objs OBJECT objsrc.c policy.c)
 target_include_directories(fw_objs PRIVATE "@SVC@")
@@ -216,6 +257,15 @@ veneer_cost_gate(
              pl_print_write=nn_report_write
     PREBUILT_ROOTS "@PREBUILT@"
     DELIVERY flash)
+
+# The board's stack table (issue #126): the allowances reach the policy TU in
+# fw_objs, and the read-back holds the image's policy to these rows.
+plugin_stack_table(
+    DEFINE_ON  fw_objs
+    ALLOWANCES FIX_STACK_A=${FIX_A} FIX_STACK_B=${FIX_B}
+    SLOTS      entry=FIX_STACK_A shapes_ok=FIX_STACK_A decode=FIX_STACK_A
+               draw=FIX_STACK_B report=FIX_STACK_A param_set=FIX_STACK_A
+               param_get=FIX_STACK_A)
 
 # An asset with no dependency of its own: only the helper's name match stands
 # between it and an unchecked firmware.
@@ -477,6 +527,133 @@ def lto_tree(p, results):
                                    "passes" % len(many)))
 
 
+def probe_fail(out):
+    return " ".join(out.split())
+
+
+def stack_tree(p, results):
+    """The board's table -> the policy TU -> the read-back (issue #126)."""
+    seen = []
+    for b in ("500", "600"):
+        p.configure(DECLARED="4096", FIX_A="300", FIX_B=b)
+        p.rm("flashed")
+        rc, out = p.ninja("flash")
+        flat = probe_fail(out)
+        expect(rc == 0 and os.path.exists(p.path("flashed"))
+               and "check_policy_probe: OK" in flat
+               and ("(entry 300, shapes_ok 300, decode 300, draw %s, "
+                    "report 300, param_set 300, param_get 300 B)" % b) in flat,
+               "stack_wiring: FIX_B=%s should pass and read back draw %s"
+               % (b, b), out)
+        seen.append(b)
+    results.append(("stack_wiring", "the table reached the policy TU and the "
+                                    "read-back saw draw %s"
+                                    % " -> ".join(seen)))
+
+    # [!] AN OVERRIDE THAT COMPILES, in both directions.  The helper's -D comes
+    # first on the command line, so CMAKE_C_FLAGS wins with only a warning:
+    # the image holds a limit nothing on the host side used.
+    for name, flag, slot, held in (
+            ("stack_override_down", "-DFIX_STACK_B=100u", "draw", 100),
+            ("stack_override_up", "-DFIX_STACK_A=4000u", "entry", 4000)):
+        for f in ("flashed", "packed.nnc"):
+            p.rm(f)
+        p.configure(DECLARED="4096", FIX_A="300", FIX_B="600",
+                    CMAKE_C_FLAGS=p.c_init + " " + flag)
+        rc, out = p.ninja("shell")
+        expect(rc == 0, "%s: the overridden image should still link" % name,
+               out)
+        for target, made in (("flash", "flashed"),
+                             ("asset-packed", "packed.nnc")):
+            rc, out = p.ninja(target)
+            flat = probe_fail(out)
+            expect(rc != 0 and not os.path.exists(p.path(made))
+                   and "check_policy_probe: FAIL" in flat
+                   and ("slot %s holds a stack limit of %d B" % (slot, held))
+                   in flat,
+                   "%s: `ninja %s` should fail in check_policy_probe naming "
+                   "slot %s" % (name, target, slot), out)
+        expect(not os.path.exists(p.stamp),
+               "%s: a stamp survived the refused probe" % name)
+        results.append((name, "CMAKE_C_FLAGS %s links; flash and the asset "
+                              "stop: slot %s holds %d B" % (flag, slot, held)))
+
+    # Every slot is compared: each one, nudged by a byte on its own, is named.
+    names = ("entry", "shapes_ok", "decode", "draw", "report", "param_set",
+             "param_get")
+    for i, slot in enumerate(names):
+        p.rm("flashed")
+        p.configure(DECLARED="4096", FIX_A="300", FIX_B="600",
+                    CMAKE_C_FLAGS=p.c_init + " -DFIX_BUMP_SLOT=%d" % i)
+        rc, out = p.ninja("flash")
+        flat = probe_fail(out)
+        want = 601 if slot == "draw" else 301
+        expect(rc != 0 and not os.path.exists(p.path("flashed"))
+               and ("slot %s holds a stack limit of %d B" % (slot, want))
+               in flat
+               and flat.count("holds a stack limit") == 1,
+               "stack_every_slot: slot %s off by one byte should be refused, "
+               "and only it named" % slot, out)
+    results.append(("stack_every_slot", "each of the 7 slots, off by one "
+                                        "byte on its own, is refused by name"))
+
+    # The firmware's own mapping disagreeing with the table.
+    p.rm("flashed")
+    p.configure(DECLARED="4096", FIX_A="300", FIX_B="600",
+                CMAKE_C_FLAGS=p.c_init + " -DFIX_POLICY_MISMAP")
+    rc, out = p.ninja("flash")
+    flat = probe_fail(out)
+    expect(rc != 0 and not os.path.exists(p.path("flashed"))
+           and "slot draw holds a stack limit of 300 B" in flat
+           and "declares 600 B" in flat,
+           "stack_mismap: the firmware mapping draw to A should be refused",
+           out)
+    results.append(("stack_mismap", "draw mapped to the other allowance: "
+                                    "300 held, 600 declared, refused"))
+
+    # [!] AND WHAT IT CANNOT SEE.  The same mismapping with equal values: the
+    # device enforces exactly the table's numbers, so nothing differs to read.
+    p.configure(DECLARED="4096", FIX_A="300", FIX_B="300",
+                CMAKE_C_FLAGS=p.c_init + " -DFIX_POLICY_MISMAP")
+    rc, out = p.ninja("flash")
+    expect(rc == 0 and "check_policy_probe: OK" in out,
+           "stack_mismap_equal: expected to pass (equal values), which is the "
+           "documented limit; if this now fails, update the docs", out)
+    results.append(("stack_mismap_equal", "the same mismapping with equal "
+                                          "allowances passes (documented "
+                                          "limit)"))
+
+    # The probe's own refusals of the rows it is handed, on this image.
+    p.configure(DECLARED="4096", FIX_A="300", FIX_B="600",
+                CMAKE_C_FLAGS=p.c_init)
+    rc, out = p.ninja("flash")
+    expect(rc == 0, "stack_rows: the clean tree should pass", out)
+    probe = os.path.join(p.src, "cmake", "check_policy_probe.py")
+    full = ["entry=300", "shapes_ok=300", "decode=300", "draw=600",
+            "report=300", "param_set=300", "param_get=300"]
+    for rows, says in ((full[:-1], "has no row for param_get"),
+                       (full + ["preview=300"], "--stack-limit 'preview=300'"),
+                       (full[:3] + ["draw=0"] + full[4:],
+                        "--stack-limit 'draw=0'"),
+                       (full + ["draw=600"], "names slot draw twice")):
+        cmd = [sys.executable, probe, p.elf, "--declared", "4096"]
+        for r in rows:
+            cmd += ["--stack-limit", r]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        expect(r.returncode != 0 and says in r.stdout + r.stderr,
+               "stack_rows: the probe should refuse (%s)" % says,
+               r.stdout + r.stderr)
+    cmd = [sys.executable, probe, p.elf, "--declared", "4096"]
+    for r in full:
+        cmd += ["--stack-limit", r]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    expect(r.returncode == 0, "stack_rows: the full table should pass",
+           r.stdout + r.stderr)
+    results.append(("stack_rows", "a missing slot, an unknown slot, a 0 and "
+                                  "a duplicate are refused; the full table "
+                                  "passes"))
+
+
 def cost_tree(p, results):
     """DECLARED -> the policy TU's compile and the asset's command line."""
     nm = p.cc[:-len("gcc")] + "nm"
@@ -569,6 +746,7 @@ def main():
                                               "asset_packed")),
         ("ltrans_drop", lambda p: lto_tree(p, results)),
         ("cost_wiring", lambda p: cost_tree(p, results)),
+        ("stack_wiring", lambda p: stack_tree(p, results)),
     ]
     for name, fn in runs:
         with tempfile.TemporaryDirectory() as work:

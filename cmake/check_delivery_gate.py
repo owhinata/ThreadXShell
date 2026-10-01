@@ -37,9 +37,13 @@ Then, in both directions:
      run before it has been looked at.
 
 [!] WHAT THIS CANNOT SEE.  A command that reaches the image without naming it
-or depending on it -- a script that hard-codes or computes the path, a glob, an
-environment variable -- does not use the firmware as far as the graph says, and
-neither does anything run outside the build (a shell alias, picocom by hand).
+or depending on it -- a script that hard-codes or computes the path, a glob, a
+name assembled by shell quoting, an environment variable, a response file
+written at configure time -- does not use the firmware as far as the graph
+says, and neither does anything run outside the build (a shell alias, picocom
+by hand).  Another name for the same bytes is not an artifact either: a symlink
+made at configure time, or a copy a POST_BUILD writes without declaring it as a
+BYPRODUCT (Grove declares its image tool's two copies for this reason).
 And a POST_BUILD or PRE_LINK step on the FIRMWARE target is part of its link
 edge, which runs before any gate can: nothing here, or anywhere in a build
 graph, can order a gate between a link and its own post-build step.
@@ -219,11 +223,16 @@ def main():
     link, gate = links[0], producer[stamp]
     artifacts = set(link.outs)
     names = sorted({os.path.basename(a) for a in artifacts})
-    # The file name as a whole path component, wherever the command puts it:
-    # after a space, a quote, '=', ':' or '/', and not continued by anything
-    # that would make it another name (shell.elf.ltrans0.ltrans.su is not it).
-    name_re = re.compile(r"(?:^|[\s'\"=:/])(" + "|".join(map(re.escape, names))
-                         + r")(?=$|[\s'\";,)])")
+    # The file name wherever the command puts it, and not continued by
+    # anything that would make it another name (shell.elf.ltrans0.ltrans.su is
+    # not it).  [!] NOTHING IS REQUIRED BEFORE IT, AND ONLY NAME CHARACTERS STOP
+    # IT AFTER (issue #126 review): listing the separators that may follow --
+    # space, quote, `;,)` -- let `shell.bin&&true`, `{shell.elf}`, `<shell.elf`,
+    # `shell.elf:0x08000000`, `-Dshell.bin`, `shell.bin>` through, and a shell
+    # has more separators than any list.  What this matches too much --
+    # `myshell.bin` -- is refused, which is the side to err on.
+    name_re = re.compile("(" + "|".join(map(re.escape, names))
+                         + r")(?![A-Za-z0-9_.+~-])")
     with open(args.targets) as fh:
         listed = [t.strip() for t in fh if t.strip()]
     for t in [args.gate_target, args.self_target] + args.delivery:

@@ -246,6 +246,28 @@ function(_veneer_cost_gate_targets directory result)
 endfunction()
 
 function(_veneer_cost_gate_finish)
+    # [!] NOTHING MAY BE CREATED AFTER THIS RUNS (issue #126 review).  The
+    # wiring below gives every target that exists NOW the delivery check as a
+    # dependency; a target made by a call deferred after this one would not get
+    # it, and `ninja <that target>` would run without the check.  Deferred
+    # calls of this directory still queued are exactly those, so they are
+    # refused here.  (A subdirectory's deferred calls run when that directory
+    # ends, which is before this, the top level's end.)
+    cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" GET_CALL_IDS _pending)
+    if(_pending)
+        set(_what "")
+        foreach(_id IN LISTS _pending)
+            cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}"
+                           GET_CALL ${_id} _call)
+            list(GET _call 0 _cmd)
+            list(APPEND _what "${_id}: ${_cmd}()")
+        endforeach()
+        message(FATAL_ERROR
+            "veneer_cost_gate(): deferred call(s) still pending after the "
+            "gate's end-of-configure wiring: ${_what}.  A target created there "
+            "would not wait for the delivery check.  Defer it before "
+            "veneer_cost_gate() is called, or do not defer it.")
+    endif()
     get_property(fw GLOBAL PROPERTY VENEER_GATE_FIRMWARE)
     get_property(gate GLOBAL PROPERTY VENEER_GATE_TARGET)
     get_property(stamp GLOBAL PROPERTY VENEER_GATE_STAMP)

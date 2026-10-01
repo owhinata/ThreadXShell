@@ -45,6 +45,7 @@ import check_plugin_image  # noqa: E402 -- the ABI's accounting, pinned there
 from check_veneer_base_cost import Elf, InputError  # noqa: E402
 
 SHT_NOBITS = 8
+SHF_WRITE = 0x1
 SHF_ALLOC = 0x2
 PROBE = "plugin_policy_probe"
 MAGIC = 0x4C4F5050          # svc/plugin_load.h PLUGIN_POLICY_PROBE_MAGIC
@@ -123,6 +124,24 @@ def main():
     for off in (off_cost, off_acct):
         if off + 4 > psize:
             return fail(f"offset {off} lies outside a {psize} B policy")
+    # [!] THE POLICY MUST BE DECLARED READ-ONLY (issue #126 review).  What is
+    # read here is the object's INITIAL bytes; a policy in a writable section
+    # (a non-const object in .data) can hold something else by the time
+    # plugin_parse() reads it.  This sees only the section's flags: Grove's
+    # .rodata is SRAM, writable by the CPU, so it catches a policy DECLARED
+    # writable, not one written through a cast.  Nor does anything here show
+    # that this object is the one the board passes to plugin_parse() -- the
+    # same root as parity P13.
+    home = [s for s in elf.sections
+            if s.flags & SHF_ALLOC and s.type != SHT_NOBITS and s.size
+            and s.addr <= ptr and ptr + psize <= s.addr + s.size]
+    if len(home) != 1:
+        return fail(f"the policy at 0x{ptr:08x} ({psize} B) is not inside one "
+                    "loadable section")
+    if home[0].flags & SHF_WRITE:
+        return fail(f"the policy at 0x{ptr:08x} is in {home[0].name}, a "
+                    "writable section: what the image holds there is only its "
+                    "initial value.  Declare the board's policy const.")
     if off_lim + 4 * count > psize:
         return fail(f"stack_limit[{count}] at offset {off_lim} lies outside a "
                     f"{psize} B policy")

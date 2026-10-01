@@ -1473,11 +1473,14 @@ endif()
 # model host must still build the firmware.  That is issue #94's shape: a gate
 # that blocks the operation it is not protecting is a gate somebody removes.
 #
-# [!] THE BUILD DOES NO SLOT ARITHMETIC.  SLOT is printed on the receipt and
-# checked by nothing here: the device refuses an oversized payload itself, on the
-# YMODEM size header.  Be clear about what that costs -- blob_write_run() erases
-# the WHOLE SLOT before that header arrives, so the previous blob is gone and one
-# endurance event is spent before the refusal.
+# [!] THE BUILD CHECKS THE FIT, THE DEVICE ONLY REFUSES IT.  SLOT is printed on
+# the receipt, and cmake/build_asset.py refuses to publish a container larger
+# than that slot's payload (from slot_table.json, which this board emits from
+# its own headers).  The device refuses an oversized payload too, on the YMODEM
+# size header -- but blob_write_run() erases the WHOLE SLOT before that header
+# arrives, so a file that reaches it some other way costs the previous blob and
+# one endurance event before the refusal.  The build cannot check that the slot
+# typed at send time is the one declared here.
 #
 # grove_add_asset(<name>
 #     PROFILE cls|det        which model checks run; never guessed from a name
@@ -1687,9 +1690,10 @@ add_custom_target(flash
 # PRODUCER is gone.  No slot runs on the producer alone, and a slot reached from
 # two threads is declared against the shallower of them.
 #
-# Both allowances stay 1,024 B.  That is what the shipped containers were packed
-# against, and the firmware cannot tell a stale declaration from a current one,
-# so changing either means re-packing and re-sending every container.  The
+# Both allowances stay 1,024 B.  Since plugin ABI 2 (issue #111) a container
+# carries the plugin's own frames and no allowance, so changing one re-packs
+# nothing; lowering one can make the device refuse a container it admits today
+# ("stack request refused"), which is the reason they have not moved.  The
 # depths are there to show that 1,024 FITS the rule above.
 set(GROVE_PLUGIN_STACK_PANEL    1024)
 set(GROVE_PLUGIN_STACK_SHELL    1024)

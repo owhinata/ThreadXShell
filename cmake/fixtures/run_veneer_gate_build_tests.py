@@ -78,6 +78,14 @@ Cases:
                     a documented limit rather than a surprise.
   stack_rows        the probe itself, on the built image, refuses a table
                     with a slot missing or an unknown slot.
+  delivery_*        (issue #126, P14) the delivery check over build.ninja:
+                    the plain tree passes; a new target that copies the image
+                    -- by dependency, by name in its command alone, from
+                    another executable's POST_BUILD, or gated through flash
+                    but not declared -- is refused BEFORE it runs; DELIVERY
+                    naming a target that uses no artifact is refused; a target
+                    created after the wiring is named; and a script that
+                    computes the path itself gets through (documented limit).
   cost_wiring       (issue #111) DECLARED reaches BOTH places the loader's c
                     is read from, and follows a change of it: the compile of a
                     TU in the $<TARGET_OBJECTS:> library (where Grove's policy
@@ -98,7 +106,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 COPIED = ("veneer_cost_gate.cmake", "check_veneer_base_cost.py",
           "check_plugin_image.py", "check_policy_probe.py",
-          "plugin_stack_table.cmake")
+          "plugin_stack_table.cmake", "check_delivery_gate.py")
 
 LINKER_SCRIPT = """
 MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 1M
@@ -193,6 +201,11 @@ open(sys.argv[2], "w").write(sys.argv[1] + "\\n")
     "other.c": "int main(void) { volatile char b[8]; b[0] = 1; "
                "return b[0]; }\n",
     # The delivery's own refusal (see the module docstring).
+    # The blind spot of the delivery check: it finds the image on its own.
+    "hidden.py": """import os, shutil, sys
+shutil.copy(os.path.join(sys.argv[1], "shell" + "." + "elf"),
+            os.path.join(sys.argv[1], sys.argv[2]))
+""",
     "deliver.py": """import os, sys
 stamp, image, out = sys.argv[1:4]
 if not os.path.exists(stamp):
@@ -210,6 +223,8 @@ set(Python3_EXECUTABLE "@PYTHON@")
 set(DECLARED 4096 CACHE STRING "")
 set(FIX_LTO OFF CACHE STRING "")
 set(FIX_A 300 CACHE STRING "")
+set(FIX_DELIVERY flash CACHE STRING "")
+set(FIX_EXTRA "" CACHE STRING "")
 set(FIX_B 500 CACHE STRING "")
 
 add_library(fw_objs OBJECT objsrc.c policy.c)
@@ -256,7 +271,58 @@ veneer_cost_gate(
              pl_paint_blit=paint_blit
              pl_print_write=nn_report_write
     PREBUILT_ROOTS "@PREBUILT@"
-    DELIVERY flash)
+    DELIVERY ${FIX_DELIVERY})
+
+# --- issue #126 (P14): targets the delivery check must see ------------------
+# FIX_EXTRA picks one; each "delivers" by writing a file, and must not get to.
+set(_img "${CMAKE_BINARY_DIR}/shell.elf")
+if(FIX_EXTRA STREQUAL "undeclared")
+    # A new flashing target, wired to the image and not to the gate.  Its
+    # command does not name the image: only the dependency says it uses it.
+    add_custom_target(flash2
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/hidden.py"
+                "${CMAKE_BINARY_DIR}" flashed2
+        DEPENDS shell VERBATIM)
+elseif(FIX_EXTRA STREQUAL "by_command")
+    # No dependency at all: the image is named only in the command, relative
+    # to the build directory (wio's dfu-shell shape).
+    add_custom_target(flash3
+        COMMAND "${CMAKE_COMMAND}" -E copy shell.elf flashed3
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" VERBATIM)
+elseif(FIX_EXTRA STREQUAL "post_build_other")
+    # Another executable's POST_BUILD that ships this firmware.
+    add_custom_command(TARGET other POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy "${_img}"
+                "${CMAKE_BINARY_DIR}/flashed4" VERBATIM)
+elseif(FIX_EXTRA STREQUAL "gated_undeclared")
+    # Waits for the gate -- by accident, through flash -- but is not named.
+    add_custom_target(flash5
+        COMMAND "${CMAKE_COMMAND}" -E copy "${_img}" "${CMAKE_BINARY_DIR}/flashed5"
+        DEPENDS shell VERBATIM)
+    add_dependencies(flash5 flash)
+elseif(FIX_EXTRA STREQUAL "declares_nothing")
+    # On DELIVERY (FIX_DELIVERY), but uses no artifact of the firmware.
+    add_custom_target(noop_deliver COMMAND "${CMAKE_COMMAND}" -E true)
+elseif(FIX_EXTRA STREQUAL "hidden_path")
+    # [!] THE DOCUMENTED BLIND SPOT: the path is computed inside a script, and
+    # the only link to the firmware is a target-level (order-only) dependency.
+    add_custom_target(flash6
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/hidden.py"
+                "${CMAKE_BINARY_DIR}" flashed6 VERBATIM)
+    add_dependencies(flash6 shell)
+elseif(FIX_EXTRA STREQUAL "self_post_build")
+    # Owned by no target the naming rule looks at (the check's own target),
+    # so only "every user waits for the gate" can refuse it.
+    cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL
+                   add_custom_command TARGET delivery_gate_check POST_BUILD
+                   COMMAND "${CMAKE_COMMAND}" -E copy "${_img}"
+                           "${CMAKE_BINARY_DIR}/flashed7")
+elseif(FIX_EXTRA STREQUAL "late")
+    # A target created after the gate's own end-of-configure step, so it was
+    # never given the check as a dependency.
+    cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL
+                   add_custom_target late_target COMMAND "${CMAKE_COMMAND}" -E true)
+endif()
 
 # The board's stack table (issue #126): the allowances reach the policy TU in
 # fw_objs, and the read-back holds the image's policy to these rows.
@@ -654,6 +720,79 @@ def stack_tree(p, results):
                                   "passes"))
 
 
+def delivery_tree(p, results):
+    """issue #126 (P14): DELIVERY is checked against the build graph."""
+    def dcheck(out):
+        return " ".join(out.split())
+
+    p.configure(DECLARED="4096", FIX_EXTRA="", FIX_DELIVERY="flash")
+    rc, out = p.ninja()
+    expect(rc == 0 and "check_delivery_gate: OK" in out,
+           "delivery_clean: the plain tree should pass the delivery check", out)
+    results.append(("delivery_clean", next(
+        ln.strip() for ln in out.splitlines()
+        if "check_delivery_gate: OK" in ln)[:110] + "..."))
+
+    for extra, target, made, says in (
+            ("undeclared", "flash2", "flashed2",
+             "depends on shell.elf and does not wait for"),
+            ("by_command", "flash3", "flashed3",
+             "names shell.elf in its command and does not wait for"),
+            ("post_build_other", "other", "flashed4",
+             "names shell.elf in its POST_BUILD and does not wait for"),
+            ("gated_undeclared", "flash5", "flashed5",
+             "target 'flash5' uses the firmware"),
+            ("self_post_build", "delivery_gate_check", "flashed7",
+             "names shell.elf in its command and does not wait for"),
+    ):
+        p.configure(DECLARED="4096", FIX_EXTRA=extra, FIX_DELIVERY="flash")
+        p.rm(made)
+        rc, out = p.ninja(target)
+        flat = dcheck(out)
+        expect(rc != 0 and not os.path.exists(p.path(made))
+               and "check_delivery_gate: FAIL" in flat and says in flat,
+               "delivery_%s: `ninja %s` should stop in the delivery check, "
+               "before it delivers" % (extra, target), out)
+        line = next(ln.strip() for ln in out.splitlines()
+                    if ("uses the firmware" in ln or "does not wait" in ln))
+        results.append(("delivery_" + extra, "`ninja %s` refused before it "
+                        "ran: %s" % (target, line[:90])))
+
+    # The other direction: DELIVERY names a target that delivers nothing.
+    p.configure(DECLARED="4096", FIX_EXTRA="declares_nothing",
+                FIX_DELIVERY="flash;noop_deliver")
+    rc, out = p.ninja()
+    flat = dcheck(out)
+    expect(rc != 0 and "DELIVERY names 'noop_deliver', which uses no firmware "
+                       "artifact" in flat,
+           "delivery_declares_nothing: should be refused", out)
+    results.append(("delivery_declares_nothing", "DELIVERY flash;noop_deliver "
+                    "refused: noop_deliver uses no firmware artifact"))
+
+    # A target that missed the end-of-configure wiring is named by any build
+    # that runs the check.
+    p.configure(DECLARED="4096", FIX_EXTRA="late", FIX_DELIVERY="flash")
+    rc, out = p.ninja()
+    flat = dcheck(out)
+    expect(rc != 0 and "target 'late_target' does not wait for this check"
+           in flat, "delivery_late: should be refused", out)
+    results.append(("delivery_late", "a target created after the wiring is "
+                    "named: late_target does not wait for this check"))
+
+    # [!] AND WHAT IT CANNOT SEE: a script that finds the image itself, with
+    # only a target-level dependency on the firmware.  This one DELIVERS --
+    # stated as a case so the limit is written down, not discovered.
+    p.configure(DECLARED="4096", FIX_EXTRA="hidden_path", FIX_DELIVERY="flash")
+    p.rm("flashed6")
+    rc, out = p.ninja("flash6")
+    expect(rc == 0 and os.path.exists(p.path("flashed6")),
+           "delivery_hidden_path: expected to get through (the documented "
+           "limit); if this is now refused, update the docs", out)
+    results.append(("delivery_hidden_path", "a script that computes the path "
+                    "itself gets through (documented limit)"))
+    p.configure(DECLARED="4096", FIX_EXTRA="", FIX_DELIVERY="flash")
+
+
 def cost_tree(p, results):
     """DECLARED -> the policy TU's compile and the asset's command line."""
     nm = p.cc[:-len("gcc")] + "nm"
@@ -747,6 +886,7 @@ def main():
         ("ltrans_drop", lambda p: lto_tree(p, results)),
         ("cost_wiring", lambda p: cost_tree(p, results)),
         ("stack_wiring", lambda p: stack_tree(p, results)),
+        ("delivery", lambda p: delivery_tree(p, results)),
     ]
     for name, fn in runs:
         with tempfile.TemporaryDirectory() as work:

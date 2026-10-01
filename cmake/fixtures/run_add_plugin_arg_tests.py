@@ -264,7 +264,7 @@ def table_call(table):
 
 
 def configure(work, args, gate=GATE, plugin=True, twice=False, table=TABLE,
-              tail=""):
+              tail="", generator="Ninja"):
     src = os.path.join(work, "src")
     os.makedirs(src)
     with open(os.path.join(src, "mem.ld"), "w") as fh:
@@ -291,7 +291,7 @@ def configure(work, args, gate=GATE, plugin=True, twice=False, table=TABLE,
                  "project(add_plugin_args C)\n"
                  "set(Python3_EXECUTABLE python3)\n"
                  "add_executable(fw fw.c)\n"
-                 "add_custom_target(fake_flash)\n"
+                 "add_custom_target(fake_flash COMMAND \"${CMAKE_COMMAND}\" -E true DEPENDS fw)\n"
                  + reg + treg
                  + 'include("%s")\n' % os.path.join(CMAKE_DIR,
                                                     "add_plugin.cmake")
@@ -302,7 +302,10 @@ def configure(work, args, gate=GATE, plugin=True, twice=False, table=TABLE,
                  + ("add_custom_target(plugin DEPENDS ${ELFS})\n"
                     if plugin else "")
                  + tail)
-    r = subprocess.run(["cmake", "-S", src, "-B", os.path.join(work, "b")],
+    # Ninja: the delivery check (issue #126) reads build.ninja, and the gate
+    # refuses any other generator -- which GATE_CASES' not_ninja tests.
+    r = subprocess.run(["cmake", "-G", generator, "-S", src,
+                        "-B", os.path.join(work, "b")],
                        capture_output=True, text=True)
     return r.returncode, r.stdout + r.stderr
 
@@ -390,7 +393,7 @@ def header_rebuild(cmake_dir):
                      "project(add_plugin_deps C)\n"
                      "set(Python3_EXECUTABLE python3)\n"
                      "add_executable(fw fw.c)\n"
-                     "add_custom_target(fake_flash)\n"
+                     "add_custom_target(fake_flash COMMAND \"${CMAKE_COMMAND}\" -E true DEPENDS fw)\n"
                      'include("%s/cmake/veneer_cost_gate.cmake")\n' % repo
                      + "veneer_cost_gate(\n%s)\n" % gcall
                      + table_call(TABLE)
@@ -599,6 +602,11 @@ def main():
                            "OUT_VAR _src %s)\n" % sargs)
         bad += judge(name, rc, out, expect, "configures")
     bad += policy_args_cases()
+    with tempfile.TemporaryDirectory() as work:
+        rc, out = configure(work, dict(FULL), generator="Unix Makefiles")
+    bad += judge("not_ninja", rc, out,
+                 "the delivery check reads build.ninja, and the generator is "
+                 "'Unix Makefiles'", "")
     err = header_rebuild(CMAKE_DIR)
     if err:
         print("  FAIL %-22s %s" % ("header_rebuild", err))

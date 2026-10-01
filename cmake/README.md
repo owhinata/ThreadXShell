@@ -147,6 +147,59 @@ anything about exception entry, whose stacking is a separate reserve; anything
 about the plugin side, which is `check_plugin_image.py`'s; and anything about a
 container already on a device, which no build can reach.
 
+# Delivery targets: declared, and checked against the build graph (P14)
+
+`veneer_cost_gate()` makes the targets named in `DELIVERY` (and every
+`asset-*`, found by name) wait for its stamp. A list is only as good as whoever
+keeps it, and which targets use the firmware cannot be asked of CMake at
+configure time: a custom target's `COMMAND` and `DEPENDS` are not properties.
+So the declaration stays, and `check_delivery_gate.py` compares it, in both
+directions, with what it derives from the `build.ninja` CMake wrote.
+
+| board | firmware artifacts (outputs of the link edge) | edges that use them | owning targets = DELIVERY |
+|---|---|---|---|
+| Grove | `shell.elf`, `shell.map`, `shell.img` | `flash` (layout check + `xmodem_send.py --file=.../shell.img`) | `flash` |
+| wio | `shell.elf`, `shell.bin`, `shell.hex` | `dfu-shell` (`dfu-util -D shell.bin`) | `dfu-shell`, `flash` (depends on `dfu-shell`) |
+
+An edge USES the firmware when, other than the link edge, the gate's check and
+this check, an explicit or implicit input (resolved through phony nodes) is a
+firmware artifact, or any of its variables but the description names one by file
+name (`COMMAND`, and a link edge's `POST_BUILD` / `PRE_LINK`). Order-only inputs
+do not count: CMake writes every target a rule's target transitively waits for
+there. Then: every using edge must reach the gate's stamp; every target whose
+phony closure owns a using edge must be in `DELIVERY` (or be an `asset-*`);
+every `DELIVERY` target must own one; and every target -- the list the gate
+writes at the end of configure plus every phony name in `build.ninja` -- must
+wait for this check. That last rule is enforced by construction: at the end of
+configure the gate gives every non-interface target of the tree this check as a
+dependency, so `ninja <new-target>` runs it first; the graph scan names any
+target that missed the wiring (one created by a later deferred call) on the next
+build that runs the check. The stamp depends on `build.ninja`, so the check
+reruns after every regeneration and costs nothing otherwise. Only single-config
+Ninja is supported, and any other generator is refused at configure.
+
+What it CANNOT see: a command that reaches the image without naming it or
+depending on it as a file -- a script that computes or hard-codes the path, a
+glob, an environment variable, with at most a target-level dependency; anything
+run outside the build (a shell alias, picocom by hand); and a `POST_BUILD` /
+`PRE_LINK` step on the FIRMWARE target itself, which is part of its link edge and
+runs before any gate can. The match is by file name, so it errs towards
+flagging. Other firmware (wio's `blink` and `dfu-blink`, f746) is not this
+gate's: only the registered firmware's artifacts are looked for.
+
+`fixtures/run_veneer_gate_build_tests.py`'s `delivery_*` cases: the plain tree
+passes; a new target that uses the image by file dependency
+(`delivery_undeclared`), by name in its command alone (`delivery_by_command`),
+from another executable's `POST_BUILD` (`delivery_post_build_other`), gated only
+through `flash` but not declared (`delivery_gated_undeclared`), or as a
+`POST_BUILD` of this check's own target (`delivery_self_post_build`, which only
+the "waits for the gate" rule can refuse) is stopped BEFORE it runs; `DELIVERY`
+naming a target that uses nothing is refused (`delivery_declares_nothing`); a
+target created after the wiring is named (`delivery_late`); and a script that
+computes the path itself gets through (`delivery_hidden_path`, the documented
+limit, as a passing case). `run_add_plugin_arg_tests.py`'s `not_ninja` covers
+the generator refusal.
+
 # Plugin stack allowances: one table, read back from the image
 
 What each plugin slot may ask of the stack it runs on is one fact with four

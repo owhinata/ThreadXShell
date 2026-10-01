@@ -361,12 +361,74 @@ function(_veneer_cost_gate_finish)
         endif()
         add_dependencies("${_d}" "${gate}")
     endforeach()
+
     # And no container is packed before it passes: every asset-* waits for it,
     # found by name so that a new asset cannot be added past it.
     _veneer_cost_gate_targets("${CMAKE_SOURCE_DIR}" _all)
+    set(_assets "")
     foreach(_t IN LISTS _all)
         if(_t MATCHES "^asset-")
             add_dependencies("${_t}" "${gate}")
+            list(APPEND _assets "${_t}")
+        endif()
+    endforeach()
+
+    # [!] AND DELIVERY IS CHECKED AGAINST THE BUILD GRAPH (issue #126, P14).
+    # The list above is the board's; a new target that flashes the image and
+    # is not on it would be outside the gate with nothing to say so.  Which
+    # targets use the image cannot be asked of CMake at configure time -- a
+    # custom target's COMMAND and DEPENDS are not properties -- so
+    # check_delivery_gate.py reads the build.ninja CMake writes, derives every
+    # edge that uses a firmware artifact, and requires each to wait for the
+    # stamp above and each owning target to be in DELIVERY, and every DELIVERY
+    # target to use one.  It runs before EVERY target of the build (each one is
+    # given it as a dependency here, derived from the directory tree, not
+    # listed), so `ninja <new-target>` cannot get ahead of it.
+    if(NOT CMAKE_GENERATOR STREQUAL "Ninja")
+        message(FATAL_ERROR
+            "veneer_cost_gate(): the delivery check reads build.ninja, and the "
+            "generator is '${CMAKE_GENERATOR}'.  Only single-config Ninja is "
+            "supported; a graph it cannot read is not checked.")
+    endif()
+    set(_dstamp "${CMAKE_BINARY_DIR}/veneer_cost/delivery_graph.checked")
+    set(_dlist "${CMAKE_BINARY_DIR}/veneer_cost/targets.txt")
+    set(_dtarget "delivery_gate_check")
+    _veneer_cost_gate_targets("${CMAKE_SOURCE_DIR}" _every)
+    set(_built "${_dtarget}")
+    foreach(_t IN LISTS _every)
+        get_target_property(_ty "${_t}" TYPE)
+        if(NOT _ty STREQUAL "INTERFACE_LIBRARY")
+            list(APPEND _built "${_t}")
+        endif()
+    endforeach()
+    string(REPLACE ";" "\n" _dl "${_built}")
+    file(WRITE "${_dlist}" "${_dl}\n")
+    add_custom_command(
+        OUTPUT "${_dstamp}"
+        COMMAND "${CMAKE_COMMAND}" -E rm -f "${_dstamp}"
+        COMMAND "${Python3_EXECUTABLE}"
+                "${_VENEER_GATE_DIR}/check_delivery_gate.py"
+                --ninja "${CMAKE_BINARY_DIR}/build.ninja"
+                # By NAME: $<TARGET_FILE:> here would make this check depend on
+                # the firmware, and every target -- the firmware's own objects
+                # included -- depends on this check.
+                --firmware-target "${fw}"
+                --gate-stamp "${stamp}" --gate-target "${gate}"
+                --self-stamp "${_dstamp}" --self-target "${_dtarget}"
+                --targets "${_dlist}"
+                --delivery ${delivery}
+                # Wired above by name, so declared by derivation: an asset
+                # that reads the image is gated without being listed.
+                --by-name ${_assets}
+        COMMAND "${CMAKE_COMMAND}" -E touch "${_dstamp}"
+        DEPENDS "${CMAKE_BINARY_DIR}/build.ninja" "${_dlist}"
+                "${_VENEER_GATE_DIR}/check_delivery_gate.py"
+        COMMENT "check_delivery_gate.py (every user of ${fw}'s image waits for ${gate})"
+        VERBATIM)
+    add_custom_target(${_dtarget} ALL DEPENDS "${_dstamp}")
+    foreach(_t IN LISTS _built)
+        if(NOT _t STREQUAL _dtarget)
+            add_dependencies("${_t}" "${_dtarget}")
         endif()
     endforeach()
 endfunction()

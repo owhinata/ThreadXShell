@@ -1314,12 +1314,13 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # commands.  A bound on the wrong thread's stack is not a bound.
     #
     # [!] AND THE ALLOWANCES THEMSELVES ARE NOT DERIVED FROM THOSE NUMBERS.
-    # 1,024 B on each thread is what the shipped containers were packed
-    # against, and the firmware cannot tell a stale declaration from a current
-    # one (see the board README) -- so changing one of these means re-packing
-    # and re-sending every container that exists.  The measurements above are
-    # here to show that each allowance still FITS, which is the check issue
-    # #103 found two placeholders failing.
+    # 1,024 B on each thread is the policy the shipped containers are admitted
+    # under.  Since plugin ABI 2 (issue #111) a container carries the plugin's
+    # own frames and no allowance, so changing one re-packs nothing; lowering
+    # one can make the device refuse a container it admits today ("stack
+    # request refused").  The measurements above are here to show that each
+    # allowance still FITS, which is the check issue #103 found two
+    # placeholders failing.
     set(WIO_PLUGIN_STACK_NN_WORK 1024)
     set(WIO_PLUGIN_STACK_PREVIEW 1024)
     set(WIO_PLUGIN_STACK_SHELL   1024)

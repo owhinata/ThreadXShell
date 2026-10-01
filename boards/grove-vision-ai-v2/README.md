@@ -5413,6 +5413,15 @@ shell (and `nn dets` did until issue #118) as well as `nn stream` on the
 producer -- and
 `GROVE_PLUGIN_STACK_PANEL` for draw.
 
+**The build states the same table once, and holds the firmware to it** (issue
+#126).  `board.cmake`'s `plugin_stack_table()` is where both numbers and the
+slot -> allowance rows are written; the plugin gate's `--entry`, every
+container's `--policy-stack` and the `GROVE_PLUGIN_STACK_*` definitions are
+derived from it, and `cmake/check_policy_probe.py` reads the seven limits the
+shipped policy holds out of `shell.elf` and refuses any that differs (a `-D`
+through CMAKE_C_FLAGS, or this header mapping a slot elsewhere -- where the two
+allowances differ in value).  See `cmake/README.md`.
+
 **[!] Two of the provisional numbers (issues #103 / #104) were above the
 ceiling.**  `PRODUCER` was 8192 -- the entire thread stack -- and `SHELL` was
 4096, likewise.  A plugin declaring those would have been admitted and would

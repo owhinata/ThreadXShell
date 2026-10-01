@@ -789,6 +789,16 @@ nothing -- a container that no longer fits is refused on the device.  The
 measurements are here to show that each allowance still FITS -- the check issue
 #103 found two placeholders failing.
 
+**The allowances are stated once, and the firmware is held to them** (issue
+#126).  `board.cmake`'s `plugin_stack_table()` holds the three numbers and the
+slot -> allowance rows (entry / shapes_ok / report / params on `SHELL`, decode
+on `NN_WORK`, draw on `PREVIEW`); the plugin gate's `--entry`, the container's
+`--policy-stack` and the `WIO_PLUGIN_STACK_*` definitions are derived from it,
+and `cmake/check_policy_probe.py` reads the seven limits the shipped policy holds
+out of `shell.elf` and refuses any that differs -- a `-D` through
+CMAKE_C_FLAGS, or `nn_svc_wio.c` mapping a slot elsewhere, where the two
+allowances differ in value.  See `cmake/README.md`.
+
 #### Plugin ABI 2: the declaration without c (issue #111)
 
 What used to be owed here -- **the firmware could not tell a stale declaration

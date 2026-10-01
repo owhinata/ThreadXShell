@@ -1481,12 +1481,18 @@ endif()
 #
 # grove_add_asset(<name>
 #     PROFILE cls|det        which model checks run; never guessed from a name
-#     PLUGIN  <dir>          the plugin under asset/plugins/
+#     PLUGIN  <name>         a plugin built by add_plugin() below
 #     SLOT    <n>            printed on the receipt
 #     FILE <path> | URL <git> COMMIT <sha> PATH_IN <p> SHA256 <hash>
 #     [STRIP] [VELA]         the ingest steps this model needs
 # )
-set(GROVE_ASSET_DIR "${CMAKE_BINARY_DIR}/asset")
+#
+# The fetch, the pack-verify-publish chain and the receipt are shared with wio
+# (cmake/add_asset.cmake, issue #126) and take the stack policy, the veneer cost
+# and the plugin's image from their own registrations.  What stays here is this
+# board's: the profile, the ingest (strip + vela), its tools and the receipt's
+# commands.
+include("${CMAKE_SOURCE_DIR}/cmake/add_asset.cmake")
 
 function(grove_add_asset _name)
     cmake_parse_arguments(A "STRIP;VELA"
@@ -1507,32 +1513,16 @@ function(grove_add_asset _name)
             "grove_add_asset(${_name}): PROFILE is cls or det")
     endif()
 
-    set(_model_dir "${CMAKE_BINARY_DIR}/model/${_name}")
-    # An operator's own copy instead of the pin.  NOT hash-checked: an override
-    # deliberately supplies different content, and checking it against the
-    # upstream pin would make the escape hatch unusable.  The strip / vela / pack
-    # / verify chain is what stands behind it.
-    set(GROVE_ASSET_${_name}_FILE "" CACHE FILEPATH
-        "Local model for asset '${_name}' instead of the pinned upstream one")
-    if(GROVE_ASSET_${_name}_FILE)
-        set(_src "${GROVE_ASSET_${_name}_FILE}")
-    elseif(A_FILE)
-        set(_src "${A_FILE}")
-    else()
-        set(_src "${_model_dir}/fetched.tflite")
-        add_custom_command(
-            OUTPUT "${_src}"
-            COMMAND "${CMAKE_COMMAND}"
-                    "-DURL=${A_URL}" "-DCOMMIT=${A_COMMIT}"
-                    "-DPATH_IN=${A_PATH_IN}" "-DSHA256=${A_SHA256}"
-                    "-DOUT=${_src}" "-DWORK=${_model_dir}/fetch-work"
-                    "-DOVERRIDE=GROVE_ASSET_${_name}_FILE"
-                    -P "${CMAKE_SOURCE_DIR}/cmake/fetch_model.cmake"
-            DEPENDS "${CMAKE_SOURCE_DIR}/cmake/fetch_model.cmake"
-            COMMENT "asset ${_name}: fetch the pinned model"
-            VERBATIM)
-    endif()
+    set(_pin "")
+    foreach(_k FILE URL COMMIT PATH_IN SHA256)
+        if(DEFINED A_${_k})
+            list(APPEND _pin ${_k} "${A_${_k}}")
+        endif()
+    endforeach()
+    asset_model_source(${_name}
+        OVERRIDE_VAR GROVE_ASSET_${_name}_FILE OUT_VAR _src ${_pin})
 
+    set(_model_dir "${CMAKE_BINARY_DIR}/model/${_name}")
     if(A_STRIP)
         set(_stripped "${_model_dir}/stripped.tflite")
         add_custom_command(
@@ -1565,72 +1555,22 @@ function(grove_add_asset _name)
         set(_src "${_velaed}")
     endif()
 
-    set(_plugin_dir "${CMAKE_BINARY_DIR}/plugin/${A_PLUGIN}")
-    set(_nnc "${GROVE_ASSET_DIR}/${_name}.nnc")
-    get_property(_veneer_gate GLOBAL PROPERTY VENEER_GATE_TARGET)
-    if(NOT _veneer_gate)
-        message(FATAL_ERROR
-            "grove_add_asset(${_name}): no veneer_cost_gate() registered")
-    endif()
-    # The c the firmware adds at load time (issue #111), from the helper that
-    # checked it and compiled it in -- not a board variable that starts out equal.
-    veneer_cost_gate_declared(_veneer_cost)
-    add_custom_command(
-        OUTPUT "${_nnc}"
-        COMMAND "${CMAKE_COMMAND}" -E env
-                "ASSET_NM=${CMAKE_NM}" "ASSET_OBJCOPY=${CMAKE_OBJCOPY}"
-                "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/cmake/build_asset.py"
-                --name "${_name}" --model "${_src}"
-                --plugin-elf "${_plugin_dir}/plugin.elf"
-                --plugin-stacks "${_plugin_dir}/plugin.stacks.json"
-                --packer "${GROVE_PACKER}" --layout "${GROVE_ABI_LAYOUT_JSON}"
-                --model-verifier "${GROVE_SEND_VERIFIER}"
-                --container-verifier "${GROVE_CONTAINER_VERIFIER}"
-                "--verify-args=${_verify_args}"
-                --build-id "${GROVE_PLUGIN_BUILD_ID}"
-                --target-id "${GROVE_PLUGIN_TARGET_ID}"
-                --link-addr "${GROVE_PLUGIN_BASE}"
-                --capacity "${GROVE_PLUGIN_MAX}"
-                # The firmware's own policy, from the same variables it compiles
-                # in -- written out again here and the two could disagree.
-                --policy-stack "0=${GROVE_PLUGIN_STACK_SHELL}"
-                --policy-stack "1=${GROVE_PLUGIN_STACK_SHELL}"
-                --policy-stack "2=${GROVE_PLUGIN_STACK_SHELL}"
-                --policy-stack "3=${GROVE_PLUGIN_STACK_PANEL}"
-                --policy-stack "4=${GROVE_PLUGIN_STACK_SHELL}"
-                --policy-stack "5=${GROVE_PLUGIN_STACK_SHELL}"
-                --policy-stack "6=${GROVE_PLUGIN_STACK_SHELL}"
-                --veneer-cost "${_veneer_cost}"
-                # The declaration names a slot, and the packed size is known
-                # here, so the fit is checked before the device would erase that
-                # slot to discover it.  This asks nothing of the operator: the
-                # slot is declared once in cmake, not typed at send time.
-                --slot "${A_SLOT}" --slot-table "${GROVE_SLOT_TABLE_JSON}"
-                --out "${_nnc}"
-        DEPENDS "${_src}" "${_plugin_dir}/plugin.elf"
-                "${_plugin_dir}/plugin.stacks.json"
-                "${GROVE_PACKER}" "${GROVE_ABI_LAYOUT_JSON}"
-                "${GROVE_CONTAINER_VERIFIER}" "${GROVE_SLOT_TABLE_JSON}"
-                "${CMAKE_SOURCE_DIR}/cmake/build_asset.py"
-                # [!] No container is packed before the firmware passes its
-                # veneer-cost check (issue #112) -- even built by path.
-                ${_veneer_gate}
-        COMMENT "asset ${_name}: pack, verify what was packed, publish"
-        VERBATIM)
-
-    # [!] THE RECEIPT PRINTS FROM A PHONY, not from the command above -- that one
-    # does not rerun once its output is current, so the number an operator needs
-    # would appear exactly once and never again.
-    #
-    # The commands it prints are this board's: a Grove blob has a NAME as well as
-    # a slot, and `blob write` will not overwrite a VALID blob of another name.
-    add_custom_target(asset-${_name}
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/cmake/asset_receipt.py"
-                "${_nnc}.json" "${A_SLOT}"
-                --step "blob erase {slot}   (the slot must be empty first)"
-                --step "blob write {name} {slot}"
-        DEPENDS "${_nnc}"
-        VERBATIM)
+    # The commands the receipt prints are this board's: a Grove blob has a
+    # NAME as well as a slot, and `blob write` will not overwrite a VALID blob
+    # of another name.
+    add_asset(${_name}
+        MODEL "${_src}"  PLUGIN ${A_PLUGIN}  SLOT ${A_SLOT}
+        PACKER "${GROVE_PACKER}"  LAYOUT "${GROVE_ABI_LAYOUT_JSON}"
+        MODEL_VERIFIER "${GROVE_SEND_VERIFIER}"
+        VERIFY_ARGS ${_verify_args}
+        CONTAINER_VERIFIER "${GROVE_CONTAINER_VERIFIER}"
+        SLOT_TABLE "${GROVE_SLOT_TABLE_JSON}"
+        BUILD_ID "${GROVE_PLUGIN_BUILD_ID}"
+        TARGET_ID "${GROVE_PLUGIN_TARGET_ID}"
+        LINK_ADDR "${GROVE_PLUGIN_BASE}"
+        CAPACITY "${GROVE_PLUGIN_MAX}"
+        RECEIPT_STEPS "blob erase {slot}   (the slot must be empty first)"
+                      "blob write {name} {slot}")
 endfunction()
 
 # --- The layout check, and the one flashing target left (issues #44, #45, #94)-
@@ -1753,6 +1693,26 @@ add_custom_target(flash
 # depths are there to show that 1,024 FITS the rule above.
 set(GROVE_PLUGIN_STACK_PANEL    1024)
 set(GROVE_PLUGIN_STACK_SHELL    1024)
+
+# [!] THE ONE DECLARATION OF THE SLOT -> ALLOWANCE TABLE (issue #126).  The
+# plugin gate's --entry, every container's --policy-stack and the firmware's
+# GROVE_PLUGIN_STACK_* definitions are derived from it by the shared helpers,
+# and the build reads the seven numbers the shipped policy holds back out of
+# shell.elf and compares them with it (cmake/check_policy_probe.py).  The
+# firmware states its own mapping in port/npu/nn_plugin_stack.h -- with the
+# asserts against each thread -- and that is what the read-back holds to this.
+include("${CMAKE_SOURCE_DIR}/cmake/plugin_stack_table.cmake")
+plugin_stack_table(
+    DEFINE_ON  shell_objs
+    ALLOWANCES GROVE_PLUGIN_STACK_SHELL=${GROVE_PLUGIN_STACK_SHELL}
+               GROVE_PLUGIN_STACK_PANEL=${GROVE_PLUGIN_STACK_PANEL}
+    SLOTS      entry=GROVE_PLUGIN_STACK_SHELL
+               shapes_ok=GROVE_PLUGIN_STACK_SHELL
+               decode=GROVE_PLUGIN_STACK_SHELL
+               draw=GROVE_PLUGIN_STACK_PANEL
+               report=GROVE_PLUGIN_STACK_SHELL
+               param_set=GROVE_PLUGIN_STACK_SHELL
+               param_get=GROVE_PLUGIN_STACK_SHELL)
 
 # What the plugin's own string sink may spend (issue #105).  It is a leaf that
 # copies bytes into a caller-owned buffer, so this is a ceiling it can actually
@@ -1916,14 +1876,8 @@ add_plugin(blazeface
     OUT_VAR GROVE_PLUGIN_ELFS
     SOURCES "${GROVE_SHARED_DECODER}"
     AUDIT_SHARED "${GROVE_SHARED_DECODER}"
-    ENTRIES pl_entry=${GROVE_PLUGIN_STACK_SHELL}
-            pl_shapes_ok=${GROVE_PLUGIN_STACK_SHELL}
-            pl_decode=${GROVE_PLUGIN_STACK_SHELL}
-            pl_draw=${GROVE_PLUGIN_STACK_PANEL}
-            pl_report=${GROVE_PLUGIN_STACK_SHELL}
-            pl_param_set=${GROVE_PLUGIN_STACK_SHELL}
-            pl_param_get=${GROVE_PLUGIN_STACK_SHELL}
-            pl_sbuf_write=${GROVE_PLUGIN_SBUF_WRITE_MAX})
+    SLOTS   entry shapes_ok decode draw report param_set param_get
+    SBUF_WRITE_MAX ${GROVE_PLUGIN_SBUF_WRITE_MAX})
 
 # The classifier.  Five entry points since issue #105: it DRAWS now -- a label
 # on the panel, rasterised in decode() and blitted in draw() -- and still takes
@@ -1940,12 +1894,8 @@ add_plugin(cifar10
     TARGET_ID  ${GROVE_PLUGIN_TARGET_ID}
     OUT_DIR "${CMAKE_BINARY_DIR}/plugin"
     OUT_VAR GROVE_PLUGIN_ELFS
-    ENTRIES pl_entry=${GROVE_PLUGIN_STACK_SHELL}
-            pl_shapes_ok=${GROVE_PLUGIN_STACK_SHELL}
-            pl_decode=${GROVE_PLUGIN_STACK_SHELL}
-            pl_draw=${GROVE_PLUGIN_STACK_PANEL}
-            pl_report=${GROVE_PLUGIN_STACK_SHELL}
-            pl_sbuf_write=${GROVE_PLUGIN_SBUF_WRITE_MAX})
+    SLOTS   entry shapes_ok decode draw report
+    SBUF_WRITE_MAX ${GROVE_PLUGIN_SBUF_WRITE_MAX})
 
 add_custom_target(plugin ALL DEPENDS ${GROVE_PLUGIN_ELFS})
 
@@ -1994,9 +1944,8 @@ add_custom_command(TARGET shell POST_BUILD
 target_compile_definitions(shell_objs PRIVATE
     GROVE_PLUGIN_TARGET_ID=${GROVE_PLUGIN_TARGET_ID}
     GROVE_PLUGIN_BASE=${GROVE_PLUGIN_BASE}u
-    GROVE_PLUGIN_MAX=${GROVE_PLUGIN_MAX}u
-    GROVE_PLUGIN_STACK_PANEL=${GROVE_PLUGIN_STACK_PANEL}u
-    GROVE_PLUGIN_STACK_SHELL=${GROVE_PLUGIN_STACK_SHELL}u)
+    GROVE_PLUGIN_MAX=${GROVE_PLUGIN_MAX}u)
+# (GROVE_PLUGIN_STACK_* are defined on shell_objs by plugin_stack_table().)
 
 
 if(HOST_CXX)

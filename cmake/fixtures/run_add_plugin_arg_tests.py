@@ -20,6 +20,15 @@ why the project enables C -- and the cases below also cover that registration's
 own refusals, and the check that the value it verifies is the value every
 add_plugin() was charged with.
 
+Since issue #126 the per-slot stack limits are not an add_plugin() argument
+either: a board registers them once with plugin_stack_table()
+(cmake/plugin_stack_table.cmake), and add_plugin(), add_asset() and the policy
+read-back in veneer_cost_gate() each take them from there.  So every case below
+also registers a table -- with two DIFFERENT allowances, so that a number taken
+from the wrong slot shows on the generated command line -- and the TABLE_CASES
+and ASSET_CASES cover that registration's refusals, the shared asset rule's
+required arguments, and that the table reaches all three command lines.
+
 [!] THE CONTROL CASE IS A PASS.  Every refusal below differs from it by one
 argument, so a refusal proves that argument was the reason -- rather than the
 harness being unable to configure anything at all, which would make every case
@@ -52,7 +61,38 @@ FULL = {
     "TARGET_ID": "0x1201",
     "OUT_DIR": '"${CMAKE_BINARY_DIR}/plugin"',
     "OUT_VAR": "ELFS",
-    "ENTRIES": "pl_entry=64 pl_sbuf_write=64",
+    "SLOTS": "entry decode draw",
+    "SBUF_WRITE_MAX": "64",
+}
+
+# A complete table, as a board registers it (issue #126).  Two allowances of
+# different value, so that the derived command lines show which slot got which.
+TABLE = {
+    "DEFINE_ON": "fw",
+    "ALLOWANCES": "FIX_STACK_A=100 FIX_STACK_B=200",
+    "SLOTS": ("entry=FIX_STACK_A shapes_ok=FIX_STACK_A decode=FIX_STACK_A "
+              "draw=FIX_STACK_B report=FIX_STACK_A param_set=FIX_STACK_A "
+              "param_get=FIX_STACK_A"),
+}
+# What that table must turn into on each consumer's command line.
+TABLE_ROWS = ("entry=100", "shapes_ok=100", "decode=100", "draw=200",
+              "report=100", "param_set=100", "param_get=100")
+
+# A complete shared asset rule (issue #126), over FULL's plugin.
+ASSET = {
+    "MODEL": '"${CMAKE_BINARY_DIR}/m.tflite"',
+    "PLUGIN": "cifar10",
+    "SLOT": "5",
+    "PACKER": '"${CMAKE_BINARY_DIR}/pack.py"',
+    "LAYOUT": '"${CMAKE_BINARY_DIR}/layout.json"',
+    "MODEL_VERIFIER": '"${CMAKE_BINARY_DIR}/verify_model"',
+    "CONTAINER_VERIFIER": '"${CMAKE_BINARY_DIR}/verify_container"',
+    "SLOT_TABLE": '"${CMAKE_BINARY_DIR}/slots.json"',
+    "BUILD_ID": "abc1234",
+    "TARGET_ID": "0x1201",
+    "LINK_ADDR": "0x24048000",
+    "CAPACITY": "32768",
+    "RECEIPT_STEPS": '"blob write {slot}"',
 }
 
 # A complete gate registration, as a board makes it.  Its DECLARED matches
@@ -85,8 +125,105 @@ CASES = [
      "IMAGE_BASE must be a hex number"),
     # issue #112: the plugin's own printer bound is part of what the veneer
     # cost must cover; a plugin that states none cannot be checked.
-    ("no_printer_limit", None, {"ENTRIES": "pl_entry=64"},
-     "ENTRIES has no pl_sbuf_write"),
+    ("no_printer_limit", "SBUF_WRITE_MAX", {}, "SBUF_WRITE_MAX is required"),
+    ("zero_printer_limit", None, {"SBUF_WRITE_MAX": "0"},
+     "SBUF_WRITE_MAX must be a positive byte count"),
+    # issue #126: the limits are the board's table.  The old argument is
+    # refused BY NAME wherever it lands -- after a multi-value keyword it would
+    # otherwise be absorbed into that keyword's list.
+    ("entries_refused", None, {"ENTRIES": "pl_entry=64"},
+     "ENTRIES is not an argument any more"),
+    ("no_slots", "SLOTS", {}, "SLOTS is required"),
+    ("unknown_slot", None, {"SLOTS": "entry bogus"},
+     "'bogus' is not a slot of the board's plugin_stack_table()"),
+    # Compared as a string: a regex would let "e.try" match the entry row.
+    ("regex_slot", None, {"SLOTS": "e.try"},
+     "'e.try' is not a slot of the board's plugin_stack_table()"),
+    ("duplicate_slot", None, {"SLOTS": "entry draw entry"},
+     "slot entry is named twice in SLOTS"),
+]
+
+# -- the table itself (issue #126).  (name, table override or None to register
+# no table, register add_plugin?, expected substring or None)
+TABLE_CASES = [
+    ("table_control", {}, True, None),
+    # [!] THE REFUSAL #126 EXISTS FOR, from each consumer: nothing takes the
+    # limits from anywhere else.
+    ("no_table_plugin", None, True,
+     "add_plugin(cifar10): no plugin_stack_table() registered"),
+    ("no_table_gate", None, False,
+     "veneer_cost_gate(): no plugin_stack_table() registered"),
+    ("table_no_define_on", {"DEFINE_ON": None}, True, "DEFINE_ON is required"),
+    ("table_no_allowances", {"ALLOWANCES": None}, True,
+     "ALLOWANCES is required"),
+    ("table_no_slots", {"SLOTS": None}, True, "SLOTS is required"),
+    ("table_define_on_missing", {"DEFINE_ON": "no_such_target"}, True,
+     "DEFINE_ON 'no_such_target' is not a target"),
+    ("table_zero", {"ALLOWANCES": "FIX_STACK_A=0 FIX_STACK_B=200"}, True,
+     "allowance FIX_STACK_A is '0'"),
+    ("table_bad_allowance", {"ALLOWANCES": "FIX_STACK_A FIX_STACK_B=200"},
+     True, "ALLOWANCES takes MACRO=bytes"),
+    ("table_twice_allowance",
+     {"ALLOWANCES": "FIX_STACK_A=100 FIX_STACK_B=200 FIX_STACK_A=300"}, True,
+     "allowance FIX_STACK_A is declared twice"),
+    ("table_missing_row",
+     {"SLOTS": TABLE["SLOTS"].replace(" param_get=FIX_STACK_A", "")}, True,
+     "slot param_get has no row"),
+    ("table_unknown_slot",
+     {"SLOTS": TABLE["SLOTS"] + " preview=FIX_STACK_A"}, True,
+     "'preview' is not a plugin slot"),
+    ("table_duplicate_row",
+     {"SLOTS": TABLE["SLOTS"] + " draw=FIX_STACK_A"}, True,
+     "slot draw is declared twice"),
+    ("table_undeclared",
+     {"SLOTS": TABLE["SLOTS"].replace("draw=FIX_STACK_B", "draw=FIX_STACK_C")},
+     True, "declared against FIX_STACK_C, which ALLOWANCES does not declare"),
+    ("table_unused",
+     {"ALLOWANCES": TABLE["ALLOWANCES"] + " FIX_STACK_C=300"}, True,
+     "allowance FIX_STACK_C is declared against no slot"),
+    ("table_registered_twice", "twice", True, "already registered"),
+]
+
+# -- the shared asset rule (issue #126).  (name, argument to drop or None,
+# override dict, expected substring or None)
+ASSET_CASES = [
+    ("asset_control", None, {}, None),
+    # Empty is a board with no model gate; build_asset.py refuses at build
+    # time.  It must configure -- the firmware does not need the gate.
+    ("asset_empty_verifier", None, {"MODEL_VERIFIER": '""'}, None),
+    # Absent is a board that forgot it, and must not look like the above.
+    ("asset_no_verifier", "MODEL_VERIFIER", {}, "MODEL_VERIFIER is required"),
+    ("asset_no_model", "MODEL", {}, "MODEL is required"),
+    ("asset_no_plugin", "PLUGIN", {}, "PLUGIN is required"),
+    ("asset_no_slot", "SLOT", {}, "SLOT is required"),
+    ("asset_no_packer", "PACKER", {}, "PACKER is required"),
+    ("asset_no_layout", "LAYOUT", {}, "LAYOUT is required"),
+    ("asset_no_container_verifier", "CONTAINER_VERIFIER", {},
+     "CONTAINER_VERIFIER is required"),
+    ("asset_no_slot_table", "SLOT_TABLE", {}, "SLOT_TABLE is required"),
+    ("asset_no_build_id", "BUILD_ID", {}, "BUILD_ID is required"),
+    ("asset_no_target_id", "TARGET_ID", {}, "TARGET_ID is required"),
+    ("asset_no_link_addr", "LINK_ADDR", {}, "LINK_ADDR is required"),
+    ("asset_no_capacity", "CAPACITY", {}, "CAPACITY is required"),
+    ("asset_no_receipt", "RECEIPT_STEPS", {}, "RECEIPT_STEPS is required"),
+    ("asset_unknown_plugin", None, {"PLUGIN": "blazeface"},
+     "no add_plugin(blazeface) on this board"),
+    ("asset_bad_slot", None, {"SLOT": "five"}, "SLOT must be a slot number"),
+    # A policy of the asset's own is not an argument.  Placed FIRST: after a
+    # multi-value keyword (RECEIPT_STEPS) cmake_parse_arguments() would absorb
+    # it into that list as receipt text -- measured -- where it can reach no
+    # command line but the receipt's.
+    ("asset_policy_refused", None, {"^POLICY_STACK": "draw=4096"},
+     "unrecognised: POLICY_STACK"),
+]
+
+# -- the model source (issue #126).  (name, arguments, expected or None)
+SOURCE_CASES = [
+    ("source_file", 'FILE "${CMAKE_BINARY_DIR}/m.tflite"', None),
+    ("source_pin", "URL u COMMIT c PATH_IN p SHA256 h", None),
+    ("source_both", 'FILE "${CMAKE_BINARY_DIR}/m.tflite" URL u', "FILE and URL both given"),
+    ("source_short_pin", "URL u COMMIT c PATH_IN p", "the pin has no SHA256"),
+    ("source_none", "", "no FILE, and the pin has no URL"),
 ]
 
 # -- the firmware-side registration (issue #112).
@@ -120,7 +257,14 @@ GATE_CASES = [
 ]
 
 
-def configure(work, args, gate=GATE, plugin=True, twice=False):
+def table_call(table):
+    tcall = "\n".join("    %s %s" % (k, v) for k, v in table.items()
+                      if v is not None)
+    return "plugin_stack_table(\n%s)\n" % tcall
+
+
+def configure(work, args, gate=GATE, plugin=True, twice=False, table=TABLE,
+              tail=""):
     src = os.path.join(work, "src")
     os.makedirs(src)
     with open(os.path.join(src, "mem.ld"), "w") as fh:
@@ -136,27 +280,34 @@ def configure(work, args, gate=GATE, plugin=True, twice=False):
         reg = ('include("%s")\n' % os.path.join(CMAKE_DIR,
                                                 "veneer_cost_gate.cmake")
                + "veneer_cost_gate(\n%s)\n" % gcall) * (2 if twice else 1)
+    treg = 'include("%s")\n' % os.path.join(CMAKE_DIR,
+                                            "plugin_stack_table.cmake")
+    if table == "twice":
+        treg += table_call(TABLE) * 2
+    elif table is not None:
+        treg += table_call(table)
     with open(os.path.join(src, "CMakeLists.txt"), "w") as fh:
         fh.write("cmake_minimum_required(VERSION 3.20)\n"
                  "project(add_plugin_args C)\n"
                  "set(Python3_EXECUTABLE python3)\n"
                  "add_executable(fw fw.c)\n"
                  "add_custom_target(fake_flash)\n"
-                 + reg
+                 + reg + treg
                  + 'include("%s")\n' % os.path.join(CMAKE_DIR,
                                                     "add_plugin.cmake")
-                 + ("add_plugin(cifar10\n%s)\n" % call if plugin else ""))
+                 + ("add_plugin(cifar10\n%s)\n" % call if plugin else "")
+                 # A consumer, as the boards have: without one the plugin's
+                 # link-and-gate rule is not generated, and its --entry could
+                 # not be looked for.
+                 + ("add_custom_target(plugin DEPENDS ${ELFS})\n"
+                    if plugin else "")
+                 + tail)
     r = subprocess.run(["cmake", "-S", src, "-B", os.path.join(work, "b")],
                        capture_output=True, text=True)
     return r.returncode, r.stdout + r.stderr
 
 
-def wired(work):
-    """[!] WHAT add_plugin() RECORDED MUST REACH THE CHECK'S COMMAND LINE.  The
-    refusals above are configure-time; the printer bound and the declaration
-    are consumed only when the check runs, so a helper that recorded them and
-    never passed them on would configure every case correctly.  The generated
-    build files carry the command: look for both there."""
+def build_text(work):
     text = ""
     for root, _, files in os.walk(os.path.join(work, "b")):
         for f in files:
@@ -165,8 +316,31 @@ def wired(work):
                     text += fh.read()
             except OSError:
                 pass
+    return text
+
+
+# [!] THE TABLE ON EACH CONSUMER'S COMMAND LINE (issue #126), and in the
+# table's order: the gate's --entry for FULL's three slots (draw is the one
+# that takes FIX_STACK_B), and every slot for the policy read-back.
+ENTRY_LINE = r"--entry\s+pl_entry=100\s+pl_decode=100\s+pl_draw=200\s+" \
+             r"pl_sbuf_write=64\b"
+PROBE_LINE = r"\s+".join(r"--stack-limit\s+" + re.escape(r)
+                         for r in TABLE_ROWS) + r"\b"
+POLICY_LINE = r"\s+".join(r"--policy-stack\s+" + re.escape(r)
+                          for r in TABLE_ROWS) + r"\b"
+
+
+def wired(work):
+    """[!] WHAT add_plugin() RECORDED MUST REACH THE CHECK'S COMMAND LINE.  The
+    refusals above are configure-time; the printer bound and the declaration
+    are consumed only when the check runs, so a helper that recorded them and
+    never passed them on would configure every case correctly.  The generated
+    build files carry the command: look for both there -- and, since #126, the
+    board's table on the gate's --entry and on the policy read-back."""
+    text = build_text(work)
     missing = [w for w in (r"--declared\s+256\b",
-                           r"--printer-limit\s+cifar10=64\b")
+                           r"--printer-limit\s+cifar10=64\b",
+                           ENTRY_LINE, PROBE_LINE)
                if not re.search(w, text)]
     return missing
 
@@ -219,6 +393,7 @@ def header_rebuild(cmake_dir):
                      "add_custom_target(fake_flash)\n"
                      'include("%s/cmake/veneer_cost_gate.cmake")\n' % repo
                      + "veneer_cost_gate(\n%s)\n" % gcall
+                     + table_call(TABLE)
                      + 'include("%s/cmake/add_plugin.cmake")\n' % repo
                      + "add_plugin(cifar10\n%s)\n" % call
                      # As the boards do; without a consumer the rules are
@@ -263,6 +438,58 @@ def header_rebuild(cmake_dir):
                     % (".o, ".join(stale), "was" if len(stale) == 1
                        else "were"))
     return None
+
+
+def policy_args_cases():
+    """build_asset.py's --policy-stack, by slot NAME (issue #126).  The layout
+    here numbers the slots in REVERSE of the header, so a translation that used
+    the order of the arguments, or the header's order from anywhere but the
+    layout, produces the wrong --stack for every slot but the middle one."""
+    sys.path.insert(0, CMAKE_DIR)
+    try:
+        import build_asset                    # noqa: E402 -- path set above
+    finally:
+        sys.path.pop(0)
+    names = ["entry", "shapes_ok", "decode", "draw", "report", "param_set",
+             "param_get"]
+    bad = 0
+    with tempfile.TemporaryDirectory() as work:
+        layout = os.path.join(work, "layout.json")
+        with open(layout, "w") as fh:
+            fh.write('{"slot": {%s}}' % ", ".join(
+                '"%s": %d' % (n, 6 - i) for i, n in enumerate(names)))
+        full = ["%s=%d" % (n, 100 + i) for i, n in enumerate(names)]
+        want = []
+        for i in range(7):
+            want += ["--stack", "%d=%d" % (i, 100 + (6 - i))]
+        got = build_asset.policy_args(layout, full)
+        if got != want:
+            print("  FAIL %-22s %s, not %s" % ("policy_args", got, want))
+            bad += 1
+        else:
+            print("  ok   %-22s by name through the layout's indices"
+                  % "policy_args")
+        for name, rows, says in (
+                ("policy_args_missing", full[:-1], "no row for param_get"),
+                ("policy_args_unknown", full + ["preview=1"], "'preview=1'"),
+                ("policy_args_zero", full[:1] + ["shapes_ok=0"] + full[2:],
+                 "'shapes_ok=0'"),
+                ("policy_args_twice", full + ["draw=5"],
+                 "names slot draw twice")):
+            try:
+                build_asset.policy_args(layout, rows)
+                msg = None
+            except SystemExit as e:
+                msg = str(e)
+            except Exception as e:            # a crash is not the refusal
+                msg = "%s: %s" % (type(e).__name__, e)
+            if msg is None or says not in msg:
+                print("  FAIL %-22s expected a refusal saying %r, got %r"
+                      % (name, says, msg))
+                bad += 1
+            else:
+                print("  ok   %-22s refused: %s" % (name, says))
+    return bad
 
 
 def judge(name, rc, out, expect, why_ok):
@@ -322,6 +549,56 @@ def main():
         bad += judge(name, rc, out, expect,
                      "configures with the gate registered, and the check "
                      "gets --declared 256 --printer-limit cifar10=64")
+    for name, toverride, plugin, expect in TABLE_CASES:
+        if toverride is None or toverride == "twice":
+            table = toverride
+        else:
+            table = dict(TABLE)
+            table.update(toverride)
+        with tempfile.TemporaryDirectory() as work:
+            rc, out = configure(work, dict(FULL), plugin=plugin, table=table)
+            missing = wired(work) if expect is None and rc == 0 else []
+        if missing:
+            print("  FAIL %-22s configures, but a command line lacks %s"
+                  % (name, missing))
+            bad += 1
+            continue
+        bad += judge(name, rc, out, expect,
+                     "configures; --entry and the policy read-back carry the "
+                     "table, draw at 200 and the rest at 100")
+    inc = 'include("%s")\n' % os.path.join(CMAKE_DIR, "add_asset.cmake")
+    for name, drop, override, expect in ASSET_CASES:
+        a = {k[1:]: v for k, v in override.items() if k.startswith("^")}
+        a.update(ASSET)
+        if drop:
+            del a[drop]
+        a.update({k: v for k, v in override.items() if not k.startswith("^")})
+        acall = "\n".join("    %s %s" % (k, v) for k, v in a.items())
+        with tempfile.TemporaryDirectory() as work:
+            rc, out = configure(work, dict(FULL),
+                                tail=inc + "add_asset(fix\n%s)\n" % acall)
+            text = build_text(work) if expect is None and rc == 0 else ""
+        if expect is None and rc == 0:
+            need = [w for w in (POLICY_LINE, r"--veneer-cost\s+256\b",
+                                r"plugin/cifar10/plugin\.elf",
+                                r"asset_receipt\.py")
+                    if not re.search(w, text)]
+            if need:
+                print("  FAIL %-22s configures, but the asset's command lacks "
+                      "%s" % (name, need))
+                bad += 1
+                continue
+        bad += judge(name, rc, out, expect,
+                     "configures; the pack gets the table as --policy-stack, "
+                     "the gate's c and add_plugin()'s image")
+    for name, sargs, expect in SOURCE_CASES:
+        with tempfile.TemporaryDirectory() as work:
+            rc, out = configure(
+                work, dict(FULL),
+                tail=inc + "asset_model_source(fix OVERRIDE_VAR FIX_FILE "
+                           "OUT_VAR _src %s)\n" % sargs)
+        bad += judge(name, rc, out, expect, "configures")
+    bad += policy_args_cases()
     err = header_rebuild(CMAKE_DIR)
     if err:
         print("  FAIL %-22s %s" % ("header_rebuild", err))

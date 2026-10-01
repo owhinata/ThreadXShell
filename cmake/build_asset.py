@@ -96,6 +96,29 @@ def stack_args(stacks_path):
     return out
 
 
+def policy_args(layout_path, entries):
+    """--policy-stack <slot>=<bytes> -> the validator's --stack <index>=<bytes>,
+    in index order, one per slot of the ABI."""
+    index = json.load(open(layout_path))["slot"]
+    got = {}
+    for e in entries:
+        name, eq, val = e.partition("=")
+        if not eq or name not in index or not val.isdigit() or int(val) <= 0:
+            die("--policy-stack %r: expected <slot>=<bytes> with a positive "
+                "byte count and one of %s" % (e, sorted(index)))
+        if name in got:
+            die("--policy-stack names slot %s twice" % name)
+        got[name] = int(val)
+    missing = sorted(set(index) - set(got))
+    if missing:
+        die("--policy-stack has no row for %s; the board's "
+            "plugin_stack_table() declares every slot" % ", ".join(missing))
+    out = []
+    for name, i in sorted(index.items(), key=lambda kv: kv[1]):
+        out += ["--stack", "%d=%d" % (i, got[name])]
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", required=True)
@@ -111,6 +134,12 @@ def main():
     ap.add_argument("--target-id", required=True)
     ap.add_argument("--link-addr", required=True)
     ap.add_argument("--capacity", required=True)
+    # The board's plugin_stack_table(), as <slot>=<bytes> by slot NAME (issue
+    # #126).  The index each name has is the header's, from the layout the host
+    # compiler printed from svc/plugin_abi.h -- so no order is transcribed here
+    # or in cmake -- and every slot is required: a missing one would reach the
+    # device's validator as a limit of 0, a refused slot, for a reason nobody
+    # stated.
     ap.add_argument("--policy-stack", action="append", default=[])
     # The firmware's veneer cost, which the device adds to what the manifest
     # declares (issue #111).  The board passes cmake/veneer_cost_gate.cmake's
@@ -146,6 +175,9 @@ def main():
             die("%s is not set; the packer cannot read the plugin image without "
                 "the cross binutils" % _v)
 
+    # Before anything is packed: a table that cannot be read is a refusal.
+    policy = policy_args(args.layout, args.policy_stack)
+
     out_dir = os.path.dirname(os.path.abspath(args.out))
     os.makedirs(out_dir, exist_ok=True)
     # Staged in the OUTPUT directory so the publishing rename is same-filesystem
@@ -166,9 +198,6 @@ def main():
         extract_model(args.layout, container, extracted)
         run([args.model_verifier, extracted] + args.verify_args.split(),
             "the model gate")
-        policy = []
-        for e in args.policy_stack:
-            policy += ["--stack", e]
         # The accounting version the FIRMWARE is compiled with is the header's,
         # which the layout carries; the one the gate stamped was compared with
         # it by the packer.  Passing the layout's here keeps the verifier's

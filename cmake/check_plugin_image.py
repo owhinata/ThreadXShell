@@ -91,6 +91,17 @@ ABI = {
     # The ABI each plugin TU records (svc/plugin_abi.h, pl_abi_mark): the
     # image is refused unless every record is this (issue #111).
     "PLUGIN_ABI_VERSION": 2,
+    # The slot indices, for cmake/check_policy_probe.py to read a policy's
+    # stack_limit[] by slot NAME against the board's table (issue #126).  Not
+    # used by this gate, which names a slot by its symbol.
+    "PLUGIN_SLOT_ENTRY": 0,
+    "PLUGIN_SLOT_SHAPES_OK": 1,
+    "PLUGIN_SLOT_DECODE": 2,
+    "PLUGIN_SLOT_DRAW": 3,
+    "PLUGIN_SLOT_REPORT": 4,
+    "PLUGIN_SLOT_PARAM_SET": 5,
+    "PLUGIN_SLOT_PARAM_GET": 6,
+    "PLUGIN_SLOT_COUNT": 7,
 }
 
 # (Tag_CPU_arch, Tag_FP_arch, single-precision only) -> (the ABI's CPU, the ABI's

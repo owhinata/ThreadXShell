@@ -31,13 +31,26 @@
 #                                checks against what the image was built for
 #      OUT_DIR      <dir>        build dir to put <name>/ under
 #      OUT_VAR      <var>        list variable the plugin.elf path is appended to
-#      ENTRIES      <sym=limit>  every slot the plugin exports
+#      SLOTS        <slot ...>   every slot the plugin exports (entry, decode,
+#                                ...); the limit of each is the board's table
+#      SBUF_WRITE_MAX <bytes>    the bound on the plugin's own string sink
 #      [SOURCES     <.c ...>]    the plugin's own extra sources
 #      [AUDIT_SHARED <path ...>] sources from outside the owned roots
 #  )
+#
+#  [!] THE STACK LIMITS ARE NOT AN ARGUMENT (issue #126).  They are the board's
+#  plugin_stack_table() (cmake/plugin_stack_table.cmake), registered once and
+#  read here, by the asset rule and by the read-back of the firmware's policy.
+#  Until #126 each add_plugin() was handed ENTRIES pl_<slot>=<limit>, a second
+#  and third copy of the same mapping that nothing compared with the firmware;
+#  ENTRIES is now refused by name, so the old form cannot come back quietly.
+#  Which slots a plugin EXPORTS is still its own fact, and the gate checks that
+#  list against the image in both directions (a slot named but not exported
+#  fails the link's gate; one exported but not named fails the pack).
 # ============================================================================
 
 get_filename_component(_ADD_PLUGIN_DIR "${CMAKE_CURRENT_LIST_DIR}" REALPATH)
+include("${CMAKE_CURRENT_LIST_DIR}/plugin_stack_table.cmake")
 # [!] THE GATE IS SHARED SINCE ISSUE #108, AND ITS BOARD FACTS ARE ARGUMENTS.
 # Until then each board would have carried its own copy, which is the decision
 # issue #106 deferred until a second board existed to show where the seam was.
@@ -49,8 +62,8 @@ set(_ADD_PLUGIN_GATE "${_ADD_PLUGIN_DIR}/check_plugin_image.py")
 get_filename_component(_ADD_PLUGIN_ASSET_ROOT
                        "${CMAKE_CURRENT_LIST_DIR}/../asset" REALPATH)
 
-# grove_add_plugin(<name> SOURCES <extra .c ...> ENTRIES <sym=limit ...>
-#                          AUDIT_SHARED <src ...>)
+# add_plugin(<name> ... SOURCES <extra .c ...> SLOTS <slot ...>
+#                    AUDIT_SHARED <src ...>)
 #
 # The sources named are the plugin's OWN; asset/common's are added here
 # so that a new plugin cannot forget the veneers the gate insists every indirect
@@ -71,14 +84,25 @@ get_filename_component(_ADD_PLUGIN_ASSET_ROOT
 # records twice.  Auditing the linked object in its own command makes a
 # differently-compiled audited copy impossible rather than merely unlikely.
 function(add_plugin _name)
+    # [!] ENTRIES IS REFUSED BY NAME, before parsing (issue #126).  Left to
+    # cmake_parse_arguments() it would not reliably reach UNPARSED_ARGUMENTS: a
+    # token after a multi-value keyword is absorbed into that keyword's list
+    # (see below), so where it landed would depend on the argument order.
+    if("ENTRIES" IN_LIST ARGN)
+        message(FATAL_ERROR
+            "add_plugin(${_name}): ENTRIES is not an argument any more.  The "
+            "stack limit of each slot comes from the board's "
+            "plugin_stack_table(); name the slots this plugin exports with "
+            "SLOTS and its string sink's bound with SBUF_WRITE_MAX.")
+    endif()
     cmake_parse_arguments(P ""
-        "MEMORY_LD;IMAGE_BASE;IMAGE_END;VENEER_BASE_COST;TARGET_ID;OUT_DIR;OUT_VAR"
-        "CFLAGS;ARCH_FLAGS;SOURCES;ENTRIES;AUDIT_SHARED;FORBIDDEN" ${ARGN})
+        "MEMORY_LD;IMAGE_BASE;IMAGE_END;VENEER_BASE_COST;TARGET_ID;OUT_DIR;OUT_VAR;SBUF_WRITE_MAX"
+        "CFLAGS;ARCH_FLAGS;SOURCES;SLOTS;AUDIT_SHARED;FORBIDDEN" ${ARGN})
     # Presence only.  `if(NOT P_x)` would call a literal 0 "missing", which is
     # the wrong refusal for VENEER_BASE_COST 0 -- that one is refused below for
     # what it is.  The numbers are checked as numbers after this.
     foreach(_req MEMORY_LD IMAGE_BASE IMAGE_END VENEER_BASE_COST FORBIDDEN
-                 TARGET_ID OUT_DIR OUT_VAR CFLAGS ARCH_FLAGS ENTRIES)
+                 TARGET_ID OUT_DIR OUT_VAR CFLAGS ARCH_FLAGS SLOTS SBUF_WRITE_MAX)
         if(NOT DEFINED P_${_req} OR "${P_${_req}}" STREQUAL "")
             message(FATAL_ERROR "add_plugin(${_name}): ${_req} is required")
         endif()
@@ -123,19 +147,46 @@ function(add_plugin _name)
     # printer veneer lands there as well as in the firmware, so the declared
     # cost has to cover it too, and it has to be the limit this plugin actually
     # got rather than a board variable that merely starts out equal.
-    set(_printer "")
-    foreach(_e IN LISTS P_ENTRIES)
-        if(_e MATCHES "^pl_sbuf_write=([0-9]+)$")
-            set(_printer "${CMAKE_MATCH_1}")
-        endif()
-    endforeach()
-    if(_printer STREQUAL "")
+    if(NOT P_SBUF_WRITE_MAX MATCHES "^[1-9][0-9]*$")
         message(FATAL_ERROR
-            "add_plugin(${_name}): ENTRIES has no pl_sbuf_write=<limit>.  The "
-            "printer veneer reaches the plugin's own sink, so its bound is part "
-            "of what VENEER_BASE_COST must cover, and an unbounded one cannot "
-            "be checked.")
+            "add_plugin(${_name}): SBUF_WRITE_MAX must be a positive byte "
+            "count, got '${P_SBUF_WRITE_MAX}'.  The printer veneer reaches the "
+            "plugin's own sink, so its bound is part of what VENEER_BASE_COST "
+            "must cover, and an unbounded one cannot be checked.")
     endif()
+    set(_printer "${P_SBUF_WRITE_MAX}")
+
+    # [!] THE LIMITS ARE THE BOARD'S TABLE, looked up by slot (issue #126).
+    # The gate's --entry list is derived here and nowhere else: the asset rule
+    # and the read-back of the firmware's policy take the same registration.
+    plugin_stack_table_limits(_limits "add_plugin(${_name})")
+    set(_entries "")
+    set(_named "")
+    foreach(_slot IN LISTS P_SLOTS)
+        if(_slot IN_LIST _named)
+            message(FATAL_ERROR
+                "add_plugin(${_name}): slot ${_slot} is named twice in SLOTS")
+        endif()
+        set(_lim "")
+        # Compared as a string, not interpolated into a regex: a "slot" that
+        # carries regex syntax ("e.try") must not match a row it does not name.
+        foreach(_row IN LISTS _limits)
+            string(FIND "${_row}" "=" _eq)
+            string(SUBSTRING "${_row}" 0 ${_eq} _row_slot)
+            if(_row_slot STREQUAL _slot)
+                math(EXPR _vat "${_eq} + 1")
+                string(SUBSTRING "${_row}" ${_vat} -1 _lim)
+            endif()
+        endforeach()
+        if(_lim STREQUAL "")
+            message(FATAL_ERROR
+                "add_plugin(${_name}): '${_slot}' is not a slot of the board's "
+                "plugin_stack_table() (${_limits})")
+        endif()
+        list(APPEND _named "${_slot}")
+        list(APPEND _entries "pl_${_slot}=${_lim}")
+    endforeach()
+    list(APPEND _entries "pl_sbuf_write=${_printer}")
     set_property(GLOBAL APPEND PROPERTY VENEER_GATE_PLUGIN_COSTS
                  "${_name}=${P_VENEER_BASE_COST}")
     set_property(GLOBAL APPEND PROPERTY VENEER_GATE_PRINTER_LIMITS
@@ -210,6 +261,13 @@ function(add_plugin _name)
     endif()
     set(_dir "${_ADD_PLUGIN_ASSET_ROOT}/plugins/${_name}")
     set(_out "${P_OUT_DIR}/${_name}")
+    # Where this plugin's image and bounds are, for add_asset() to find by the
+    # plugin's NAME rather than by a path it would rebuild on its own.
+    get_property(_prev_out GLOBAL PROPERTY ADD_PLUGIN_OUT_${_name})
+    if(_prev_out)
+        message(FATAL_ERROR "add_plugin(${_name}): already added")
+    endif()
+    set_property(GLOBAL PROPERTY ADD_PLUGIN_OUT_${_name} "${_out}")
     # [!] asset/common IS ENUMERATED, NOT GLOBBED, and every file it gains has
     # to be added HERE.  A new common .c that is not in this list simply is not
     # linked: the plugin builds, the gate passes, and the entry point that
@@ -430,13 +488,13 @@ function(add_plugin _name)
                 # the manifest, as S: the loader charges max(c, S) at a
                 # crossing, so a later, smaller c cannot under-charge a sink
                 # this plugin carries.
-                # [!] THE SAME VARIABLES THE FIRMWARE'S POLICY USES.  Written
+                # [!] THE BOARD'S TABLE, NOT A COPY OF IT (issue #126).  Written
                 # out again here, the gate and the device would be two
                 # declarations of one rule, and a plugin could pass the build
                 # and be refused on the board -- the shape issue #93 hit.  The
-                # numbers are derived where they are set, from the measured
-                # call-site depth.
-                --entry ${P_ENTRIES}
+                # firmware's own copy is read back out of shell.elf and
+                # compared with the same table (veneer_cost_gate()).
+                --entry ${_entries}
                 --emit-stacks "${_out}/plugin.stacks.json"
         # [!] THE STAMPS, not just the objects: an object exists whether or not
         # its audit passed, so depending on it alone would let a rejected one

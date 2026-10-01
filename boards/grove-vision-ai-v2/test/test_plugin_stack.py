@@ -34,10 +34,14 @@ the allowances and the shell stacks, camera.h / cam_lcd_sink.h for the camera
 threads -- and each must be found exactly once.  A value this file could not
 find is a failure, not a default.
 
-[!] WHAT THIS DOES NOT SEE.  board.cmake states the same slot -> allowance
-mapping four more times (the host policy, both plugins' ENTRIES and the compile
-definitions); this file checks the firmware's table only.  Nor does it see
-nn_svc_grove.c stop using GROVE_PLUGIN_STACK_LIMITS: it tests the header.
+[!] WHAT THIS DOES NOT SEE.  board.cmake states the slot -> allowance mapping
+once more, as plugin_stack_table() (issue #126), and derives the plugin gate's
+--entry, the containers' --policy-stack and the compile definitions from it;
+this file checks the firmware's table only.  The two are held together by the
+build, not here: cmake/check_policy_probe.py reads the seven limits the shipped
+policy holds out of shell.elf and refuses any that differs from the table --
+which also covers nn_svc_grove.c no longer using GROVE_PLUGIN_STACK_LIMITS,
+except where the numbers it used instead happen to be equal.
 """
 
 import os

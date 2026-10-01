@@ -156,7 +156,7 @@ plugin は board code と同格の**信頼された native code**。ゲートが
 - **[!] アセットは `--target asset-<name>` が作る。ゲートは送信時ではなくビルド時にある** — 送信は打った
   パスをそのまま送り**それがその成果物かは誰も検査しない**ので、閉じ手は receipt の **CRC32** を転送後に
   `blob list` と突き合わせること。**モデルは commit + SHA256 で pin**（Git LFS 不在だとポインタが
-  exit 0 で置かれる）、**pin が消えたら fail closed**。**ファームと plugin は別成果物で間違いは両方向。**
+  exit 0 で置かれる）、**pin が消えたら fail closed**。**ファームと plugin は別成果物で間違いは両方向。** **[!] veneer ゲートの DELIVERY は build.ninja から導出したファーム成果物の使用者と両方向で照合し（`cmake/check_delivery_gate.py`）、全 target がその検査を先に待つ。外す・弱めない。**
 
 ### 10. 配置ゲート: リンカスクリプトの `ASSERT` は LTO 下で空振りする
 

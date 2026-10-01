@@ -1957,6 +1957,46 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 }
 
 /*
+ * [!] EVERY LINE BELOW FITS NN_STREAM_LINE_MAX AT ITS WORST, AND THE BUILD SAYS
+ * SO (issue #126).  The shared command hands each line 96 B and the copy
+ * truncates without a mark: `at call` lost its "high-water" on hardware, and
+ * the start note had been losing its advice since it was written.  A format's
+ * worst case is its literal less each conversion, plus the most that
+ * conversion can print: 10 digits for any uint32_t, 4 for a depth or a stack
+ * size (a depth is only recorded inside its thread's stack -- see
+ * nn_camera_note_depth_at() -- and the stacks are asserted below 10,000), and
+ * the longest of the strings a %s is given.  The arithmetic is the author's;
+ * what the asserts hold is that it was done, against the formats as written.
+ */
+#define NN_LINE_WORST(fmt, nconv, digits) \
+	(sizeof(fmt) - 1u - 2u * (nconv) - (nconv) + (digits))
+#define NN_LINE_NOTE_A  "note    : the OCTOSPI1 guard is held until `nn stream stop`, so start"
+#define NN_LINE_NOTE_B  "note    : `camera preview on` FIRST if you want to see the boxes"
+#define NN_LINE_LOST    "stream  : LOST -- re-issue `nn stream start` to re-arm"
+#define NN_LINE_TENSOR  "tensor  : %lu raced (must be 0), %lu stale post(s)"
+#define NN_LINE_INGEST  "ingest  : last %lu us  max %lu us  (band deadline ~18500 us)"
+#define NN_LINE_AT_WORK "at call : nn_work %lu/%lu (decode), cam_prev %lu/%lu (draw); high-water"
+#define NN_LINE_AT_SH   "at call : shell %lu/%lu (entry, shapes_ok, report, param); high-water"
+#define NN_LINE_PL_DREW "plugin  : drew %lu px max/frame of %lu, %lu refused"
+#define NN_LINE_PL_MISS "plugin  : %lu frame(s) missed (run of %lu)"
+_Static_assert(sizeof(NN_LINE_NOTE_A) <= NN_STREAM_LINE_MAX &&
+               sizeof(NN_LINE_NOTE_B) <= NN_STREAM_LINE_MAX &&
+               sizeof(NN_LINE_LOST) <= NN_STREAM_LINE_MAX,
+               "a stream line literal is longer than the caller's buffer");
+_Static_assert(NN_LINE_WORST(NN_LINE_TENSOR, 2u, 2u * 10u) < NN_STREAM_LINE_MAX &&
+               NN_LINE_WORST(NN_LINE_INGEST, 2u, 2u * 10u) < NN_STREAM_LINE_MAX &&
+               NN_LINE_WORST(NN_LINE_PL_DREW, 3u, 3u * 10u) < NN_STREAM_LINE_MAX &&
+               NN_LINE_WORST(NN_LINE_PL_MISS, 2u, 2u * 10u) < NN_STREAM_LINE_MAX,
+               "a stream line's worst case is longer than the caller's buffer");
+_Static_assert(NNCAM_STACK_BYTES < 10000u && CAM_PREVIEW_STACK_BYTES < 10000u &&
+               CLI_INSTANCE_STACK_SIZE < 10000u && CLI_BG_JOB_STACK_SIZE < 10000u,
+               "`at call` budgets four digits for a depth and its stack");
+_Static_assert(NN_LINE_WORST(NN_LINE_AT_WORK, 4u, 4u * 4u) < NN_STREAM_LINE_MAX &&
+               NN_LINE_WORST(NN_LINE_AT_SH, 2u, 2u * 4u) < NN_STREAM_LINE_MAX,
+               "an `at call` line's worst case is longer than the caller's buffer");
+/* session (30) and norm (26) take only fixed strings and are far inside. */
+
+/*
  * This board's extra lines.  They are not decoration: this port deleted the
  * donor's staging machinery on the argument that the inference-to-ingest ratio
  * made it unnecessary, and `raced` and `ingest max` are how it says whether that
@@ -1983,11 +2023,10 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 #if BSP_ENABLE_LCD
 		/* The ordering an operator has to know BEFORE they wonder why there
 		   are no boxes: the guard is held for the stream's whole lifetime. */
-		if (index == 0u && !cam_band_claimed(CAM_BAND_PREVIEW)) {
-			nn_detail_to(buf, cap,
-			             "note    : the OCTOSPI1 guard is held until "
-			             "`nn stream stop`, so start `camera preview on` "
-			             "FIRST if you want to see the boxes");
+		/* Two lines: as one it was 124 B and lost its advice (issue #126). */
+		if (index <= 1u && !cam_band_claimed(CAM_BAND_PREVIEW)) {
+			nn_detail_to(buf, cap, "%s",
+			             index == 0u ? NN_LINE_NOTE_A : NN_LINE_NOTE_B);
 			return 1;
 		}
 #else
@@ -2024,7 +2063,7 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 		TX_RESTORE
 	}
 	(void)ended;   /* read only by the plugin line, which some builds lack */
-	for (i = 0u, n = 0u; i < 7u; i++) {
+	for (i = 0u, n = 0u; i < 9u; i++) {
 		if (i == 1u && !st.stream_lost)
 			continue;                       /* only worth a line when true */
 #if defined(CONFIG_NN_BACKEND_TFLM) && BSP_ENABLE_LCD
@@ -2032,15 +2071,15 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 		 * draws.  Without a line nobody can read them, and counters nobody
 		 * reads are counters nobody can hold to a threshold -- which is the
 		 * whole of the acceptance criteria this board's README states. */
-		if (i == 6u && !nn_active_is_plugin())
+		if ((i == 7u || i == 8u) && !nn_active_is_plugin())
 			continue;
 #else
-		if (i == 6u)
+		if (i == 7u || i == 8u)
 			continue;
 #endif
-		/* Nothing has reached either site yet: no number, so no line. */
-		if (i == 5u && st.depth_decode == 0u && st.depth_draw == 0u &&
-		    st.depth_shell == 0u)
+		/* Nothing has reached any site yet: no number, so no lines. */
+		if ((i == 5u || i == 6u) && st.depth_decode == 0u &&
+		    st.depth_draw == 0u && st.depth_shell == 0u)
 			continue;
 		if (n++ != index)
 			continue;
@@ -2050,23 +2089,18 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 			             st.holds_guards ? "held (NN + OCTOSPI1)" : "free");
 			return 1;
 		case 1u:
-			nn_detail_to(buf, cap,
-			             "stream  : LOST -- re-issue `nn stream start` to "
-			             "re-arm");
+			nn_detail_to(buf, cap, "%s", NN_LINE_LOST);
 			return 1;
 		case 2u:
 			/* The ownership invariant, reported rather than assumed
 			   (owhinata/wio-lite-ai#54).  `raced` must be 0; anything else
 			   means part of the tensor the model saw was activations. */
-			nn_detail_to(buf, cap,
-			             "tensor  : %lu raced (must be 0), %lu stale post(s)",
+			nn_detail_to(buf, cap, NN_LINE_TENSOR,
 			             (unsigned long)st.raced,
 			             (unsigned long)st.stale_posts);
 			return 1;
 		case 3u:
-			nn_detail_to(buf, cap,
-			             "ingest  : last %lu us  max %lu us  (band deadline "
-			             "~18500 us)",
+			nn_detail_to(buf, cap, NN_LINE_INGEST,
 			             (unsigned long)nn_cyc_to_us(st.ingest_last_cyc),
 			             (unsigned long)nn_cyc_to_us(st.ingest_max_cyc));
 			return 1;
@@ -2075,7 +2109,8 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 			             st.norm_signed ? "[-1,1]" : "[0,1]",
 			             st.overlay ? "on" : "off");
 			return 1;
-		default:
+		case 5u:
+		case 6u:
 			/*
 			 * How much stack is already spent where a plugin will be CALLED
 			 * (issue #108 = #78 Step 3a) -- the term Step 3b's allowances are
@@ -2091,19 +2126,24 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 			 * parameters.  3a measured the other two and board.cmake declared
 			 * the WORKER's allowance for these -- a bound on the wrong
 			 * thread's stack.
+			 *
+			 * Two lines since issue #126: as one, the worst case was 101 B and
+			 * the 96 B line cut off "high-water" on hardware.
 			 */
-			nn_detail_to(buf, cap,
-			             "at call : %lu/%lu nn_work (decode), %lu/%lu "
-			             "cam_prev (draw), %lu/%lu shell (report); high-water",
-			             (unsigned long)st.depth_decode,
-			             (unsigned long)NNCAM_STACK_BYTES,
-			             (unsigned long)st.depth_draw,
-			             (unsigned long)CAM_PREVIEW_STACK_BYTES,
-			             (unsigned long)st.depth_shell,
-			             (unsigned long)CLI_INSTANCE_STACK_SIZE);
+			if (i == 5u)
+				nn_detail_to(buf, cap, NN_LINE_AT_WORK,
+				             (unsigned long)st.depth_decode,
+				             (unsigned long)NNCAM_STACK_BYTES,
+				             (unsigned long)st.depth_draw,
+				             (unsigned long)CAM_PREVIEW_STACK_BYTES);
+			else
+				nn_detail_to(buf, cap, NN_LINE_AT_SH,
+				             (unsigned long)st.depth_shell,
+				             (unsigned long)CLI_INSTANCE_STACK_SIZE);
 			return 1;
 #if defined(CONFIG_NN_BACKEND_TFLM) && BSP_ENABLE_LCD
-		case 6u: {
+		case 7u:
+		case 8u: {
 			uint32_t spent = 0u, refused = 0u, miss = 0u, run = 0u;
 
 			/*
@@ -2125,14 +2165,16 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 				cam_preview_plugin_draw_stats(&spent, &refused);
 				plugin_lease_misses(&miss, &run);
 			}
-			nn_detail_to(buf, cap,
-			             "plugin  : drew %lu px max/frame of %lu, %lu "
-			             "refused; %lu frame(s) missed (run of %lu)",
-			             (unsigned long)spent,
-			             (unsigned long)(NN_ACTIVE_FRAME_W *
-			                             NN_ACTIVE_FRAME_H / 4u),
-			             (unsigned long)refused,
-			             (unsigned long)miss, (unsigned long)run);
+			/* Two lines since issue #126: as one, the worst case was 110 B. */
+			if (i == 7u)
+				nn_detail_to(buf, cap, NN_LINE_PL_DREW,
+				             (unsigned long)spent,
+				             (unsigned long)(NN_ACTIVE_FRAME_W *
+				                             NN_ACTIVE_FRAME_H / 4u),
+				             (unsigned long)refused);
+			else
+				nn_detail_to(buf, cap, NN_LINE_PL_MISS,
+				             (unsigned long)miss, (unsigned long)run);
 			return 1;
 		}
 #endif

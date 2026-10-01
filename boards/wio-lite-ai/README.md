@@ -756,26 +756,30 @@ today's plugin happens to need is how a limit stops being one, so the thread is
 
 | thread | stack | at call | reserve | derived room | declared | plugin needs |
 |---|---:|---:|---:|---:|---:|---:|
-| `nn_work` (decode) | 3,072 | 49 | 208 | 2,815 | 1,024 | 784 |
-| `cam_prev` (draw) | 1,536 | 105 | 208 | 1,223 | 1,024 | 716 |
-| shell (entry / shapes / report / params) | 4,096 | 1,977 | 208 | 1,911 | 1,024 | 728 |
+| `nn_work` (decode) | 3,072 | 352 | 208 | 2,512 | 1,024 | 784 |
+| `cam_prev` (draw) | 1,536 | 112 | 208 | 1,216 | 1,024 | 716 |
+| shell (entry / shapes / report / params) | 4,096 | 2,216 | 208 | 1,672 | 1,024 | 728 |
 
-**The `at call` column is measured on hardware with a plugin running**: the
-first two rows at issue #116 (#110's were 641 / 137, on the firmware that still
-carried a decoder; issue #111's build `4cd3126` read 49 / 113), the shell at
-issue #121 (build `5cb217f`, reached by `nn run`'s report).  The shell grew
-there because the shared command's `nn run` frame now carries the result's
-output shapes or classes (`struct nn_result_extra`, about 300 B).  Every
-allowance sits under its derived room, and the shipped plugin well under the
-allowance.
+**The `at call` column is measured on hardware with a plugin running**, on
+build `ee045ff` (issue #126), as `nn stream stats` printed it.  Every allowance
+sits under its derived room, and the shipped plugin well under the allowance.
 
-**[!] Issue #126 moved every sample, and the column above predates it.**  The
+**[!] Issue #126 moved every sample, which is why the column rose.**  The
 callers used to sample before calling into `port/nn/nn_active.c`, which left
 out everything below them -- the descriptor array above all, about 300 B at
 decode and shapes_ok.  The stack pointer is now read in `svc/nn_active_core.c`,
 at the indirect call itself, and entry()'s in the loader's `exec_ok` hook
-(`pl_exec_ok()`, 16 B above the branch).  Expect decode and the shell row to
-read higher; the bound each must stay under is `stack - 208 - 1,024`.
+(`pl_exec_ok()`, 16 B above the branch).  Before that the column read 49 / 105
+(issue #116) and 1,977 for the shell (issue #121, build `5cb217f`); those were
+under-counts.  The bound each must stay under is `stack - 208 - 1,024`.
+
+`nn stream stats` prints them on two lines (issue #126 -- as one, the worst
+case was 101 B and the 96 B line cut it):
+
+```
+at call : nn_work 352/3072 (decode), cam_prev 112/1536 (draw); high-water
+at call : shell 2216/4096 (entry, shapes_ok, report, param); high-water
+```
 
 **The allowances did not move, and that is deliberate.**  A shallower call site
 widens the room the declaration has to fit in; it is not a reason to declare

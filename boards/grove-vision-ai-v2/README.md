@@ -5498,6 +5498,13 @@ param_get: con 744/4096 bg 656/4096; left 3352
 painter : at most 800 px in one frame, 0 refused
 ```
 
+Issue #126 moved the six samples into `svc/nn_active_core.c`, shared with
+wio-lite-ai.  On build `ee045ff` the board printed: entry con 992, shapes_ok
+con 1552, decode producer 880 and con 2376, draw panel 224, report con 2088,
+param_set con 456, param_get con 784 (all `/4096`, producer `/8192`, panel `/2048`), and the
+painter at most 816 px in one frame, 0 refused.  shapes_ok and decode are tail
+calls there, so those two read 24 B over the entry depth.
+
 `infers` and `last` are read in separate critical sections, so on a running
 stream the two can be one frame apart (issue #118).
 
@@ -5543,6 +5550,25 @@ of the face; the classifier drew 4,400 both times).  The containers on the board
 were the ones sent for issue #107 -- `blob list` said blazeface `C9AEEFA8` and
 cifar10 `6BEA56B6`, not the build tree's `BCB8BA68` / `A68CD123` of the same
 lengths -- and the new firmware loaded both without a re-pack.
+
+Issue #126 (build `ee045ff`, the plugin branch point and the painter's clip
+shared with wio-lite-ai) on the same two containers, again without a re-send:
+`blob list` said blazeface `5F88E843` and cifar10 `23D7B349`, and both loaded.
+
+| | after #119 | after #126 |
+|---|---:|---:|
+| detector | 36.92 inf/s | **36.83 inf/s** (300 frames in 8,145 ms) |
+| detector `decode` / `prep` / `invoke` | 130-135 us / - / - | **151 / 4,463 / 12,608 us** |
+| detector painter | 800 px | **952 px** |
+| classifier | 8.89 inf/s | **8.85 inf/s** (101 frames in 11,401 ms) |
+| classifier `decode` / `prep` / `invoke` | 128 us / - / - | **138 / 13,251 / 91,262 us** |
+| classifier painter | 4,400 px | **4,400 px** |
+| frame errors / painter refused | 0 | **0** |
+
+The detector's rate is not a regression: both its runs are a steady 27.03 ms per
+frame plus about 37 ms at the start (300 x 27.03 = 8,108 ms against 8,145; a
+30-frame run read 849 ms = 35.33 inf/s against 30 x 27.03 = 811), so the steady
+state is still the camera's 37.0 fps.
 
 #### The same numbers from the final ELF
 

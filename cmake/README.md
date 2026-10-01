@@ -158,13 +158,17 @@ directions, with what it derives from the `build.ninja` CMake wrote.
 
 | board | firmware artifacts (outputs of the link edge) | edges that use them | owning targets = DELIVERY |
 |---|---|---|---|
-| Grove | `shell.elf`, `shell.map`, `shell.img` | `flash` (layout check + `xmodem_send.py --file=.../shell.img`) | `flash` |
+| Grove | `shell.elf`, `shell.map`, `shell.img`, and the image tool's byte-identical copies `image_gen/output_case1_sec_wlcsp/output.img` and `image_gen/input_case1_secboot/EPII_CM55M_gnu_epii_evb_WLCSP65_s.elf` (declared as BYPRODUCTS) | `flash` (layout check + `xmodem_send.py --file=.../shell.img`) | `flash` |
 | wio | `shell.elf`, `shell.bin`, `shell.hex` | `dfu-shell` (`dfu-util -D shell.bin`) | `dfu-shell`, `flash` (depends on `dfu-shell`) |
 
 An edge USES the firmware when, other than the link edge, the gate's check and
 this check, an explicit or implicit input (resolved through phony nodes) is a
 firmware artifact, or any of its variables but the description names one by file
-name (`COMMAND`, and a link edge's `POST_BUILD` / `PRE_LINK`). Order-only inputs
+name (`COMMAND`, and a link edge's `POST_BUILD` / `PRE_LINK`). The name is matched
+with nothing required before it and only a name character (`[A-Za-z0-9_.+~-]`)
+refusing it after, so `shell.bin&&true`, `{shell.elf}`, `<shell.elf`,
+`shell.elf:0x08000000` and `-Dshell.bin` all count, and `myshell.bin` is refused
+too (the safe side); `shell.elf.ltrans0.ltrans.su` is not the ELF. Order-only inputs
 do not count: CMake writes every target a rule's target transitively waits for
 there. Then: every using edge must reach the gate's stamp; every target whose
 phony closure owns a using edge must be in `DELIVERY` (or be an `asset-*`);
@@ -172,32 +176,47 @@ every `DELIVERY` target must own one; and every target -- the list the gate
 writes at the end of configure plus every phony name in `build.ninja` -- must
 wait for this check. That last rule is enforced by construction: at the end of
 configure the gate gives every non-interface target of the tree this check as a
-dependency, so `ninja <new-target>` runs it first; the graph scan names any
-target that missed the wiring (one created by a later deferred call) on the next
-build that runs the check. The stamp depends on `build.ninja`, so the check
+dependency, so `ninja <new-target>` runs it first. A call deferred past that
+point would create a target the wiring never saw, so the gate refuses the
+configure if any deferred call of the top-level directory is still pending when
+it runs (a subdirectory's own deferred calls run when that directory ends,
+before it; one queued on the top level from anywhere is seen). The graph scan of
+rule 4 stays as a backstop and names any target that missed the wiring. The stamp depends on `build.ninja`, so the check
 reruns after every regeneration and costs nothing otherwise. Only single-config
 Ninja is supported, and any other generator is refused at configure.
 
 What it CANNOT see: a command that reaches the image without naming it or
 depending on it as a file -- a script that computes or hard-codes the path, a
-glob, an environment variable, with at most a target-level dependency; anything
-run outside the build (a shell alias, picocom by hand); and a `POST_BUILD` /
-`PRE_LINK` step on the FIRMWARE target itself, which is part of its link edge and
-runs before any gate can. The match is by file name, so it errs towards
-flagging. Other firmware (wio's `blink` and `dfu-blink`, f746) is not this
+glob or a name assembled by shell quoting (`shel''l.bin`, `$'\x73hell.bin'`), an
+environment variable, a response file written at configure time, a copy of the
+whole build directory, with at most a target-level dependency; another name for
+the same file -- a symlink or hard link made at configure time, or a copy a
+`POST_BUILD` writes WITHOUT declaring it as a BYPRODUCT (declared, it is an
+artifact; undeclared, it is not, which is why Grove declares the image tool's
+two copies); the image tool's derived intermediates on Grove
+(`cm55m_s_application.img`, `inter_files/...`), which are not the same bytes and
+are not declared; anything run outside the build (a shell alias, picocom by
+hand); and a `POST_BUILD` / `PRE_LINK` step on the FIRMWARE target itself, which
+is part of its link edge and runs before any gate can. A target named `asset-*`
+is exempt from the naming rule (rule 2) -- it still waits for the gate. The
+match is by file name, so it errs towards flagging. Other firmware (wio's `blink` and `dfu-blink`, f746) is not this
 gate's: only the registered firmware's artifacts are looked for.
 
 `fixtures/run_veneer_gate_build_tests.py`'s `delivery_*` cases: the plain tree
 passes; a new target that uses the image by file dependency
 (`delivery_undeclared`), by name in its command alone (`delivery_by_command`),
 from another executable's `POST_BUILD` (`delivery_post_build_other`), gated only
-through `flash` but not declared (`delivery_gated_undeclared`), or as a
-`POST_BUILD` of this check's own target (`delivery_self_post_build`, which only
-the "waits for the gate" rule can refuse) is stopped BEFORE it runs; `DELIVERY`
-naming a target that uses nothing is refused (`delivery_declares_nothing`); a
-target created after the wiring is named (`delivery_late`); and a script that
-computes the path itself gets through (`delivery_hidden_path`, the documented
-limit, as a passing case). `run_add_plugin_arg_tests.py`'s `not_ninja` covers
+through `flash` but not declared (`delivery_gated_undeclared`), with a shell
+separator or braces right after the name (`delivery_amp`, `delivery_brace`), or
+through a `POST_BUILD` copy declared as a BYPRODUCT (`delivery_copy_alias`) is
+stopped BEFORE it runs; `DELIVERY` naming a target that uses nothing is refused
+(`delivery_declares_nothing`); a target deferred past the wiring refuses the
+configure and `ninja <it>` does not run (`delivery_late`); on an edited copy of
+the graph, an unwired target is named (`delivery_rule4_graph`) and an edge no
+target owns fails the "waits for the gate" rule alone (`delivery_rule1_graph`);
+and a script that computes the path itself, or a copy nobody declared, gets
+through (`delivery_hidden_path`, `delivery_copy_undeclared`: the documented
+limits, as passing cases). `run_add_plugin_arg_tests.py`'s `not_ninja` covers
 the generator refusal.
 
 # Plugin stack allowances: one table, read back from the image
@@ -246,7 +265,13 @@ the asserts that hold each allowance under the threads its slot runs on
 What it does NOT catch: a mapping disagreement between two allowances of EQUAL
 value -- today every allowance on both boards is 1,024 B, so the device enforces
 the table's numbers either way and the disagreement stays invisible (and
-harmless) until the values differ; and whether the table itself is right. The
+harmless) until the values differ; that the object the probe points at is the
+one the board passes to `plugin_parse()` -- a copy, or a second policy, passed
+at run time is invisible (the same root as parity P13, unchanged since #111);
+and whether the table itself is right. The read-back also refuses a policy in a
+WRITABLE section (`stack_writable_policy`), since only its initial value is in
+the image -- by the section's flags, so it catches a policy declared writable,
+not Grove's `.rodata`, which is SRAM and writable by the CPU. The
 table moves every consumer together, so no comparison among them can say a
 number fits its thread: that is the firmware's `_Static_assert` (strictly below
 each stack) and the measured depths in each board README.

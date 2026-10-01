@@ -1163,7 +1163,16 @@ add_custom_command(TARGET shell POST_BUILD
             "${IMAGE_GEN_DIR}/output_case1_sec_wlcsp/output.img"
             "${CMAKE_BINARY_DIR}/shell.img"
     WORKING_DIRECTORY "${IMAGE_GEN_DIR}"
+    # [!] EVERY BYTE-IDENTICAL COPY OF THE FIRMWARE THIS STEP LEAVES IS
+    # DECLARED (issue #126 review), not only shell.img: the delivery check
+    # (cmake/check_delivery_gate.py) counts the link edge's declared outputs
+    # as the firmware, and a target that shipped the tool's own output.img --
+    # or the ELF copy it is fed -- would otherwise be invisible to it.  The
+    # tool's derived intermediates (cm55m_s_application.img, inter_files/...)
+    # are not the same bytes and are not declared; see cmake/README.md.
     BYPRODUCTS "${CMAKE_BINARY_DIR}/shell.img"
+               "${IMAGE_GEN_DIR}/output_case1_sec_wlcsp/output.img"
+               "${IMAGE_GEN_DIR}/input_case1_secboot/EPII_CM55M_gnu_epii_evb_WLCSP65_s.elf"
     COMMENT "we2_local_image_gen -> shell.img")
 
 # --- Post-build gates --------------------------------------------------------

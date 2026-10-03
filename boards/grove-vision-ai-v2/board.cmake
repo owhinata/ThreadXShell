@@ -711,6 +711,11 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/npu/npu_desc.c"
     "${BOARD_DIR}/port/npu/nn_svc_grove.c"
     "${BOARD_DIR}/port/npu/nn_stream_state.c"
+    # The inference worker and who may touch its input (issue #129): the
+    # thread and its join here, the hand-over table a pure function beside it,
+    # walked by test/test_nn_handoff.c.
+    "${BOARD_DIR}/port/npu/nn_worker.c"
+    "${BOARD_DIR}/port/npu/nn_handoff.c"
     # Where a `nn model load` ends and what that obliges (issue #122): a pure
     # table, so the host test walks the endings a console cannot produce.
     "${BOARD_DIR}/port/npu/nn_swap.c"

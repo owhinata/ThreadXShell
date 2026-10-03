@@ -2118,6 +2118,10 @@ static const char *nn_stream_why_text(unsigned char why)
 		return NN_SVC_DETAIL_LIT(
 			"the panel thread did not finish; the preview is unusable "
 			"until reboot");
+	case NN_STREAM_WHY_WORKER_LOST:
+		return NN_SVC_DETAIL_LIT(
+			"the inference worker did not finish; inference is unusable "
+			"until reboot");
 	case NN_STREAM_WHY_OK:
 	default:
 		return NN_SVC_DETAIL_LIT("stopped");
@@ -2197,7 +2201,10 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 		attempted = 1;
 		detach_rc = cam_lcd_sink_detach();
 	}
-	nn_stream_stop_decide(cam_rc, attempted, detach_rc, &v);
+	/* The worker join is stage 2 of issue #129; until then nothing arms the
+	 * worker and the table reads NOT_TRIED as it read the stop before. */
+	nn_stream_stop_decide(cam_rc, NN_STREAM_WJOIN_NOT_TRIED, attempted,
+	                      detach_rc, &v);
 	/* The stream's final numbers, latched only if the settle below takes. */
 	epoch = nn_stream_take_final(&final);
 

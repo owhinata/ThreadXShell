@@ -47,6 +47,7 @@
 
 #include "tx_api.h"
 #include "WE2_device.h"   /* CMSIS core: __disable_irq / __enable_irq */
+#include "nn_worker.h"    /* NN_WORKER_PRIO, for the order below */
 
 #define LOG_TAG "mve"
 #include "log.h"
@@ -56,6 +57,11 @@
  * has no business outranking. */
 #define MVE_WORKER_PRIO   (CLI_INSTANCE_PRIORITY - 1)
 #define MVE_WORKER_STACK  1024u
+
+/* The inference worker sits below this one and apart from it (issue #129): the
+ * other half of the order nn_worker.c asserts. */
+_Static_assert(NN_WORKER_PRIO < (unsigned)MVE_WORKER_PRIO,
+               "panel < producer < nn worker < mve < console (issue #129)");
 
 static TX_THREAD mve_worker;
 static UCHAR     mve_worker_stack[MVE_WORKER_STACK] __attribute__((aligned(8)));

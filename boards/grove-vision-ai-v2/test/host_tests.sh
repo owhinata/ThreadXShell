@@ -329,7 +329,8 @@ gcc $CFLAGS \
 # a level up: npu_hw_init() acquires and can then fail three more ways, and its
 # caller does NOT tear down on failure -- so the last section walks that
 # sequence, which an acquire/release table alone would pass while it leaked.
-# issue #99 -- the live-inference teardown table (port/npu/nn_stream_state.c).
+# issue #99 -- the live-inference teardown table (port/npu/nn_stream_state.c),
+# and since #129 the worker join between its two halves.
 # Two halves that can each come back unconfirmed, and the two answers -- retry or
 # reboot -- are opposite mistakes.  None of the vectors can be typed on a board
 # with one console whose background jobs run below the foreground shell.
@@ -338,6 +339,17 @@ gcc $CFLAGS \
     "$here/test_nn_stream.c" "$board/port/npu/nn_stream_state.c" \
     $LDFLAGS -o "$out/test_nn_stream"
 "$out/test_nn_stream"
+
+# issue #129 -- who may touch the inference worker's input (port/npu/nn_handoff.c).
+# The producer writes the input tensor in place, so this word is the only thing
+# keeping it and the worker apart, and the sequences that would break it -- a
+# stop while a frame is handed over, a stale wake-up -- are windows between
+# three threads that cannot be typed.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/npu" \
+    "$here/test_nn_handoff.c" "$board/port/npu/nn_handoff.c" \
+    $LDFLAGS -o "$out/test_nn_handoff"
+"$out/test_nn_handoff"
 
 # issue #122 -- where a `nn model load` ends (port/npu/nn_swap.c).  A load over
 # an open model is a replacement with a rollback, and the ending that matters

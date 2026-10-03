@@ -4,8 +4,9 @@
  */
 /**
  * @file    nn_stream_state.c
- * @brief   The live-inference teardown table (issue #99).  See the header for
- *          why this is a pure function that nothing else lives beside.
+ * @brief   The live-inference teardown table (issues #99, #129).  See the
+ *          header for why this is a pure function that nothing else lives
+ *          beside.
  */
 #include <stddef.h>   /* NULL */
 
@@ -23,8 +24,15 @@ int nn_stream_may_detach(int cam_rc)
 	return (cam_rc == NN_STREAM_CAM_OK);
 }
 
-void nn_stream_stop_decide(int cam_rc, int detach_attempted, int detach_rc,
-                           struct nn_stream_verdict *out)
+int nn_stream_may_join_worker(int cam_rc)
+{
+	/* The same single value as the detach, for the same reason one step
+	 * earlier: a producer that may still be running may still hand over. */
+	return (cam_rc == NN_STREAM_CAM_OK);
+}
+
+void nn_stream_stop_decide(int cam_rc, int worker_join, int detach_attempted,
+                           int detach_rc, struct nn_stream_verdict *out)
 {
 	if (out == NULL)
 		return;
@@ -49,6 +57,28 @@ void nn_stream_stop_decide(int cam_rc, int detach_attempted, int detach_rc,
 			out->why = (unsigned char)NN_STREAM_WHY_CAM_STATE;
 			return;
 		}
+	}
+
+	/*
+	 * The worker, between the producer and the panel (issue #129).  Reached
+	 * only on a confirmed producer stop; above it the join is not attempted
+	 * and whatever was passed is ignored, like a leftover detach code.
+	 */
+	switch (worker_join) {
+	case NN_STREAM_WJOIN_NOT_TRIED:
+		/* Stage 1: nothing arms the worker, so there is nothing to join and
+		 * the verdict is the panel's alone.  See the header. */
+		break;
+	case NN_STREAM_WJOIN_OK:
+		break;
+	case NN_STREAM_WJOIN_FAILED:
+	default:
+		/* [!] Fail closed, whatever the detach said: a worker that may
+		 * still be inside the NPU or the plugin is not quiescent, and an
+		 * unrecognised join result is not evidence that it is. */
+		out->act = (unsigned char)NN_STREAM_ACT_TERMINAL;
+		out->why = (unsigned char)NN_STREAM_WHY_WORKER_LOST;
+		return;
 	}
 
 	if (!detach_attempted) {

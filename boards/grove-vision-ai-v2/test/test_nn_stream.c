@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host test for the live-inference teardown table (issue #99,
+ * Host test for the live-inference teardown table (issues #99, #129,
  * port/npu/nn_stream_state.c).
  *
  * WHY THIS EXISTS.  `nn stream stop` runs two halves -- stop the camera
@@ -47,12 +47,13 @@ static const char *act_name(int a)
 	}
 }
 
-static void check(const char *what, int cam_rc, int attempted, int detach_rc,
-                  enum nn_stream_act want_act, enum nn_stream_why want_why)
+static void check_w(const char *what, int cam_rc, int wjoin, int attempted,
+                    int detach_rc, enum nn_stream_act want_act,
+                    enum nn_stream_why want_why)
 {
 	struct nn_stream_verdict v = { 0, 0 };
 
-	nn_stream_stop_decide(cam_rc, attempted, detach_rc, &v);
+	nn_stream_stop_decide(cam_rc, wjoin, attempted, detach_rc, &v);
 	if (v.act != (unsigned char)want_act || v.why != (unsigned char)want_why) {
 		printf("  FAIL %-56s -> %s/%u, wanted %s/%u\n", what,
 		       act_name(v.act), (unsigned)v.why,
@@ -60,6 +61,125 @@ static void check(const char *what, int cam_rc, int attempted, int detach_rc,
 		fails++;
 	} else {
 		printf("  ok   %-56s %s\n", what, act_name(v.act));
+	}
+}
+
+/* The issue #99 lines, which predate the worker: the stop did not join it, and
+ * NOT_TRIED is what reproduces them (issue #129 stage 1). */
+static void check(const char *what, int cam_rc, int attempted, int detach_rc,
+                  enum nn_stream_act want_act, enum nn_stream_why want_why)
+{
+	check_w(what, cam_rc, NN_STREAM_WJOIN_NOT_TRIED, attempted, detach_rc,
+	        want_act, want_why);
+}
+
+/*
+ * [!] A FROZEN COPY OF THE TABLE AS IT WAS BEFORE THE WORKER (e295d7e), for the
+ * sweep below.  Not a second implementation to keep in step: it must NOT be
+ * edited when the table changes, because what it proves is that an input the
+ * old table never had -- the worker join -- changes nothing where it says it
+ * does not.
+ */
+static void decide_before_129(int cam_rc, int attempted, int detach_rc,
+                              struct nn_stream_verdict *out)
+{
+	if (cam_rc != NN_STREAM_CAM_OK) {
+		switch (cam_rc) {
+		case NN_STREAM_CAM_LOCKED:
+			out->act = NN_STREAM_ACT_RETRY;
+			out->why = NN_STREAM_WHY_CAM_LOCKED;
+			return;
+		case NN_STREAM_CAM_TIMEOUT:
+			out->act = NN_STREAM_ACT_TERMINAL;
+			out->why = NN_STREAM_WHY_CAM_LOST;
+			return;
+		default:
+			out->act = NN_STREAM_ACT_TERMINAL;
+			out->why = NN_STREAM_WHY_CAM_STATE;
+			return;
+		}
+	}
+	if (!attempted) {
+		out->act = NN_STREAM_ACT_TERMINAL;
+		out->why = NN_STREAM_WHY_SINK_LOST;
+		return;
+	}
+	switch (detach_rc) {
+	case NN_STREAM_CAM_OK:
+		out->act = NN_STREAM_ACT_DONE;
+		out->why = NN_STREAM_WHY_OK;
+		return;
+	case NN_STREAM_CAM_BUSY:
+		out->act = NN_STREAM_ACT_RETRY;
+		out->why = NN_STREAM_WHY_SINK_BUSY;
+		return;
+	default:
+		out->act = NN_STREAM_ACT_TERMINAL;
+		out->why = NN_STREAM_WHY_SINK_LOST;
+		return;
+	}
+}
+
+/*
+ * Every combination of the four inputs (issue #129).  Three properties, each
+ * stated over the whole product rather than picked cases:
+ *   1. NOT_TRIED reproduces the table before the worker, everywhere.
+ *   2. A join that SUCCEEDED changes nothing either: the verdict is the
+ *      producer's and the panel's, exactly as without a worker.
+ *   3. A join that failed, or reported a value nobody defined, is terminal
+ *      "worker did not return" on every confirmed producer stop, whatever the
+ *      detach said -- and is ignored when the producer was not confirmed, where
+ *      it should never have been attempted.
+ */
+static void sweep(void)
+{
+	static const int cams[] = {
+		NN_STREAM_CAM_OK, NN_STREAM_CAM_TIMEOUT, NN_STREAM_CAM_STATE,
+		NN_STREAM_CAM_BUSY, NN_STREAM_CAM_LOCKED, -99, 1,
+	};
+	static const int joins[] = {
+		NN_STREAM_WJOIN_NOT_TRIED, NN_STREAM_WJOIN_OK,
+		NN_STREAM_WJOIN_FAILED, 3, -1, 99,
+	};
+	static const int detaches[] = {
+		NN_STREAM_CAM_OK, NN_STREAM_CAM_TIMEOUT, NN_STREAM_CAM_STATE,
+		NN_STREAM_CAM_BUSY, NN_STREAM_CAM_LOCKED, -99, 1,
+	};
+	unsigned c, j, a, d, n = 0u, bad = 0u;
+
+	for (c = 0u; c < sizeof cams / sizeof cams[0]; c++)
+	for (j = 0u; j < sizeof joins / sizeof joins[0]; j++)
+	for (a = 0u; a < 2u; a++)
+	for (d = 0u; d < sizeof detaches / sizeof detaches[0]; d++) {
+		struct nn_stream_verdict got = { 0xEE, 0xEE };
+		struct nn_stream_verdict want = { 0xEE, 0xEE };
+		int jn = joins[j];
+
+		nn_stream_stop_decide(cams[c], jn, (int)a, detaches[d], &got);
+		if (cams[c] == NN_STREAM_CAM_OK &&
+		    jn != NN_STREAM_WJOIN_NOT_TRIED && jn != NN_STREAM_WJOIN_OK) {
+			want.act = NN_STREAM_ACT_TERMINAL;
+			want.why = NN_STREAM_WHY_WORKER_LOST;
+		} else {
+			decide_before_129(cams[c], (int)a, detaches[d], &want);
+		}
+		n++;
+		if (got.act != want.act || got.why != want.why) {
+			if (bad < 8u)
+				printf("  FAIL cam %d join %d attempted %u detach %d "
+				       "-> %s/%u, wanted %s/%u\n",
+				       cams[c], jn, a, detaches[d],
+				       act_name(got.act), (unsigned)got.why,
+				       act_name(want.act), (unsigned)want.why);
+			bad++;
+		}
+	}
+	if (bad) {
+		printf("  FAIL %u of %u combinations\n", bad, n);
+		fails++;
+	} else {
+		printf("  ok   all %u combinations of (camera, worker join, "
+		       "detach run, detach)\n", n);
 	}
 }
 
@@ -91,6 +211,31 @@ int main(void)
 	check_detach("the producer never acknowledged", NN_STREAM_CAM_TIMEOUT, 0);
 	check_detach("the camera refused", NN_STREAM_CAM_STATE, 0);
 	check_detach("an unknown code", -99, 0);
+
+	printf("nn_stream_may_join_worker (issue #129)\n");
+	{
+		/* The worker is joined on the producer's confirmation and nothing
+		 * else: before it, the producer can still hand the worker a job. */
+		static const int rcs[] = {
+			NN_STREAM_CAM_OK, NN_STREAM_CAM_LOCKED, NN_STREAM_CAM_TIMEOUT,
+			NN_STREAM_CAM_STATE, NN_STREAM_CAM_BUSY, -99, 1,
+		};
+		unsigned i;
+
+		for (i = 0u; i < sizeof rcs / sizeof rcs[0]; i++) {
+			int got = nn_stream_may_join_worker(rcs[i]);
+			int want = (rcs[i] == NN_STREAM_CAM_OK);
+
+			if (!got != !want) {
+				printf("  FAIL may_join_worker(%d) -> %d, wanted %d\n",
+				       rcs[i], got, want);
+				fails++;
+			} else {
+				printf("  ok   may_join_worker(%d) %s\n", rcs[i],
+				       got ? "join" : "do not try");
+			}
+		}
+	}
 
 	printf("nn_stream_stop_decide\n");
 
@@ -156,6 +301,55 @@ int main(void)
 	check("a stop that was refused ignores a leftover detach code",
 	      NN_STREAM_CAM_LOCKED, 0, NN_STREAM_CAM_TIMEOUT,
 	      NN_STREAM_ACT_RETRY, NN_STREAM_WHY_CAM_LOCKED);
+
+	printf("nn_stream_stop_decide: the worker join (issue #129)\n");
+
+	/* [!] THE ORDINARY PATH ONCE THE STOP JOINS: nothing changes. */
+	check_w("producer, worker and panel all confirmed",
+	        NN_STREAM_CAM_OK, NN_STREAM_WJOIN_OK, 1, NN_STREAM_CAM_OK,
+	        NN_STREAM_ACT_DONE, NN_STREAM_WHY_OK);
+	/* A retryable detach stays retryable behind a joined worker: the
+	 * worker's half is settled and a second stop joins it again at once. */
+	check_w("worker joined, the detach found work in flight: retry",
+	        NN_STREAM_CAM_OK, NN_STREAM_WJOIN_OK, 1, NN_STREAM_CAM_BUSY,
+	        NN_STREAM_ACT_RETRY, NN_STREAM_WHY_SINK_BUSY);
+
+	/*
+	 * [!] THE NEW TERMINAL.  A worker that did not come back may still be in
+	 * the NPU or the plugin; the detach should not even have run, and if it
+	 * did, its success is not the worker's.
+	 */
+	check_w("the worker did not return (detach not run)",
+	        NN_STREAM_CAM_OK, NN_STREAM_WJOIN_FAILED, 0, 0,
+	        NN_STREAM_ACT_TERMINAL, NN_STREAM_WHY_WORKER_LOST);
+	check_w("the worker did not return, whatever the detach said",
+	        NN_STREAM_CAM_OK, NN_STREAM_WJOIN_FAILED, 1, NN_STREAM_CAM_OK,
+	        NN_STREAM_ACT_TERMINAL, NN_STREAM_WHY_WORKER_LOST);
+	check_w("the worker did not return; a retryable detach is not retry",
+	        NN_STREAM_CAM_OK, NN_STREAM_WJOIN_FAILED, 1, NN_STREAM_CAM_BUSY,
+	        NN_STREAM_ACT_TERMINAL, NN_STREAM_WHY_WORKER_LOST);
+	/* [!] Fail closed on a join result nobody defined. */
+	check_w("an unknown join result is not evidence of a parked worker",
+	        NN_STREAM_CAM_OK, 99, 1, NN_STREAM_CAM_OK,
+	        NN_STREAM_ACT_TERMINAL, NN_STREAM_WHY_WORKER_LOST);
+
+	/* The producer unconfirmed: the join is not tried, and a stray value
+	 * passed anyway does not move the producer's verdict either way. */
+	check_w("camera locked: retry, and the join was never tried",
+	        NN_STREAM_CAM_LOCKED, NN_STREAM_WJOIN_NOT_TRIED, 0, 0,
+	        NN_STREAM_ACT_RETRY, NN_STREAM_WHY_CAM_LOCKED);
+	check_w("camera locked: a stray failed join does not make it terminal",
+	        NN_STREAM_CAM_LOCKED, NN_STREAM_WJOIN_FAILED, 0, 0,
+	        NN_STREAM_ACT_RETRY, NN_STREAM_WHY_CAM_LOCKED);
+	check_w("producer lost: still the producer's terminal, not the worker's",
+	        NN_STREAM_CAM_TIMEOUT, NN_STREAM_WJOIN_FAILED, 0, 0,
+	        NN_STREAM_ACT_TERMINAL, NN_STREAM_WHY_CAM_LOST);
+	check_w("producer lost: a stray joined worker does not rescue it",
+	        NN_STREAM_CAM_TIMEOUT, NN_STREAM_WJOIN_OK, 0, 0,
+	        NN_STREAM_ACT_TERMINAL, NN_STREAM_WHY_CAM_LOST);
+
+	printf("nn_stream_stop_decide: every combination (issue #129)\n");
+	sweep();
 
 	if (fails) {
 		printf("FAILED (%d)\n", fails);

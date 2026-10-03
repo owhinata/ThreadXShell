@@ -14,6 +14,7 @@
 #include "npu_desc.h"
 #include "nn_active.h"
 #include "plugin_paint.h"
+#include "plugin_lease.h"
 #include "plugin_abi.h"
 #include "camera.h"
 #include "cam_dp.h"
@@ -78,6 +79,10 @@ static uint32_t nn_ov_prof_frames;
  *
  * Note that NONE of that is an argument about priorities, which is why issue #64
  * could reverse the two threads' ranking without touching this file.
+ *
+ * The plugin lease both of them now try (issue #127) is a different matter: it
+ * keeps a CONSOLE out of the plugin while either is inside, not process() away
+ * from draw() -- the hand-off above still does that.
  *
  * Static because nothing here may ever be freed under a producer -- or now a
  * panel thread -- that did not acknowledge a stop (see nn_overlay.h).
@@ -254,6 +259,42 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	t1 = (uint32_t)tx_time_get();
 	e2 = tx_glue_epk_timer_ticks();
 
+	/*
+	 * [!] THE PLUGIN LEASE, TRIED ONCE AND NEVER WAITED FOR (issue #127).  A
+	 * console calling into the same plugin -- `nn thresh`, `nn dets` -- holds
+	 * it, and the plugin's state is private and half-written while either of
+	 * them is inside.  The producer does not wait for a console: a refusal
+	 * skips this frame's decode, and the frame goes to the panel bare.
+	 *
+	 * ON A REFUSAL NOTHING OF THIS FRAME IS PUBLISHED: not the decode, not
+	 * the record, not the geometry.  The record and the plugin's own result
+	 * still describe the previous frame, together, which is the pairing the
+	 * record exists for.  process() declines the frame the way it declines any
+	 * other it could not annotate, so draw() is not called for it -- and the
+	 * panel never asks for the lease on its behalf, which is what makes this
+	 * refusal the frame's ONE miss (plugin_lease_miss.h).  Counted there, not
+	 * in skipped or errors: the frame was inferred and nothing failed.
+	 *
+	 * Taken after the invoke, not before it: the NPU does not touch the
+	 * plugin, and holding the lease for the whole inference would make every
+	 * console wait out a frame.  The `decode` stage row (e2 to e3) now
+	 * includes the try and the give -- about 2 us a frame when measured
+	 * (Epic #122 U1) -- and a refused frame adds to no row, like any other
+	 * frame that did not complete.
+	 */
+	if (!plugin_lease_try(PLUGIN_LEASE_PRODUCER))
+		return -1;
+	/*
+	 * [!] THE GEOMETRY BEFORE THE DECODE, AND UNDER THE SAME HOLD (issue
+	 * #127).  It is part of the plugin's result: decode() may call the base's
+	 * to_frame(), which reads it, and a console holding the lease after this
+	 * frame may ask the plugin for a report that does the same.  Published
+	 * after the decode, as it was, a decode ran against the previous frame's
+	 * transform -- the same one on a running stream, but the order should not
+	 * depend on that.  Written whatever the decode then says, because the
+	 * record below is too.
+	 */
+	nn_active_set_geom(&nn_ov_geom);   /* issue #103 */
 	nd = nn_active_decode(outs, n_out);
 	/*
 	 * [!] PUBLISHED AT ONCE, WHATEVER IT SAYS (issue #118).  `nn dets` reads
@@ -263,8 +304,12 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	 * leaving the previous frame's count beside the new private state is the
 	 * pairing the record exists to prevent.  A short interrupt-disabled
 	 * section; no block, no sleep, no other lock on this thread.
+	 *
+	 * Still inside the lease, so a console that takes it next sees the record
+	 * and the plugin's result describe the same frame.
 	 */
 	(void)nn_rec_publish_external(nd, gen);
+	plugin_lease_give();
 	if (nd < 0) {
 		/* [!] There is no console on this path, so the only way a decode
 		 * failure can be told apart afterwards is if it is counted apart
@@ -291,7 +336,6 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	nn_ov_decode_ticks += (uint32_t)(e3 - e2);
 	nn_ov_prof_frames++;
 	nn_ov_ndet    = nd;
-	nn_active_set_geom(&nn_ov_geom);   /* issue #103 */
 
 	/* Stop check 3 of 3: a stop that arrived during the inference should not
 	 * be followed by drawing on a panel the caller is about to stop using. */
@@ -324,11 +368,30 @@ static void nn_overlay_draw(void *ctx, uint16_t *fb, uint16_t fb_w,
 		struct plugin_paint_budget bud;
 		uint32_t spent;
 
+		/*
+		 * [!] THE PLUGIN LEASE, TRIED ONCE INSIDE THE PANEL GUARD (issue
+		 * #127).  Nothing a console does can be inside this plugin while it
+		 * paints.  A refusal shows the frame without an overlay and is
+		 * counted as this frame's miss; it is the only one the frame can have,
+		 * because a frame the producer could not decode never reaches here.
+		 *
+		 * [!] THE ORDER IS PANEL GUARD, THEN LEASE -- wio's is the other way
+		 * round (lease, then frame lock), because here draw() is called from
+		 * inside the guard and there is no earlier point to ask.  It cannot
+		 * close a cycle because this thread only TRIES: it never waits while
+		 * holding the guard.  What would close one is a lease holder that
+		 * waits for the panel guard, a camera API mutex or a pipeline lock;
+		 * no holder does, and none touches the LCD.  Released before the
+		 * callback returns, and nothing else is waited for in between.
+		 */
+		if (!plugin_lease_try(PLUGIN_LEASE_PANEL))
+			return;
 		bud.pixels  = NN_OV_DRAW_PIXELS;
 		bud.ops     = NN_OV_DRAW_OPS;
 		bud.refused = 0u;
 		plugin_paint_bind(&paint, &bud, fb, fb_w, fb_h);
 		nn_active_draw(&paint);
+		plugin_lease_give();
 
 		/*
 		 * What it actually spent, so the cap can be judged against something
@@ -378,6 +441,9 @@ const struct cam_lcd_overlay *nn_overlay_arm(void)
 	nn_ov_draw_spent   = 0u;
 	nn_ov_draw_refused = 0u;
 	TX_RESTORE
+	/* The lease's frames missed, per stream like the rest (issue #127), and
+	 * likewise not on stop.  Its own critical section, inside the call. */
+	plugin_lease_misses_reset();
 
 	nn_ov_stats.inferences = 0u;
 	nn_ov_stats.detections = 0u;

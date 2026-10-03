@@ -370,6 +370,21 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_plugin_lease_miss"
 "$out/test_plugin_lease_miss"
 
+# issue #127 -- the loader's two plugin-lease checks (port/plugin/plugin_run.c):
+# before the shared loader touches the reservation, and again in the exec_ok
+# hook at the branch.  A load is the one path that destroys the plugin it
+# replaces, and no console can aim one at a decode, so these refusals are
+# never seen on hardware.  The REAL plugin_run.c and svc/plugin_exec.c, with
+# the device, ThreadX and the NOR lease stubbed (test/plugin_run_shim).
+gcc $CFLAGS \
+    -I "$here/plugin_run_shim" -I "$board/port/plugin" -I "$board/port/npu" \
+    -I "$board/port/nor" -I "$board/svc" -I "$svc" \
+    "$here/test_plugin_run_lease.c" "$board/port/plugin/plugin_run.c" \
+    "$svc/plugin_exec.c" "$svc/plugin_mpu.c" "$svc/plugin_load.c" \
+    "$svc/crc32.c" \
+    $LDFLAGS -o "$out/test_plugin_run_lease"
+"$out/test_plugin_run_lease"
+
 gcc $CFLAGS \
     -I "$here" -I "$board/port/nor" \
     "$here/test_nor_state.c" "$board/port/nor/nor_state.c" \

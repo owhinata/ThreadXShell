@@ -12,6 +12,7 @@
 #include "plugin_lease.h"
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "tx_api.h"
 
@@ -44,6 +45,12 @@ static uint8_t  pl_lease_ready;
  * through.
  */
 static struct plugin_lease_miss pl_miss;
+
+/* Entries refused because their caller did not hold the lease, since boot --
+ * never reset, like the stack records: a correct build never counts one, and
+ * an arm must not wipe the evidence that one did.  Any thread can write it, so
+ * under the same rule as the misses. */
+static uint32_t pl_unheld;
 
 int plugin_lease_init(void)
 {
@@ -101,6 +108,27 @@ int plugin_lease_held(void)
 	                      NULL) != TX_SUCCESS)
 		return 0;
 	return count != 0u && owner == self;
+}
+
+void plugin_lease_note_unheld(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	if (pl_unheld != UINT32_MAX)
+		pl_unheld++;
+	TX_RESTORE
+}
+
+uint32_t plugin_lease_unheld(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+	uint32_t n;
+
+	TX_DISABLE
+	n = pl_unheld;
+	TX_RESTORE
+	return n;
 }
 
 void plugin_lease_misses(uint32_t *total, uint32_t *worst_run)

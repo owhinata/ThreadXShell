@@ -10,6 +10,14 @@
  * svc/nn_active_core.c's, shared with wio-lite-ai (issue #126).  What is here
  * is this board's: the geometry and the transform, the conversion from
  * npu_tensor, and the three facts the shared file is handed below.
+ *
+ * [!] AND EVERY ENTRY INTO THE PLUGIN REQUIRES THE PLUGIN LEASE (issue #127).
+ * Each wrapper below that can reach a plugin callback -- and the two that
+ * write the geometry a callback reads -- asks nn_active_held() first, and a
+ * caller that does not hold the lease gets NN_ACTIVE_NOT_HELD: not "no
+ * plugin", not a decoder's own error, an answer of its own.  The shared file
+ * stays ignorant of the lease (svc/nn_active_core.h); the board enforces it at
+ * the board's branch point, which is the only way in.
  */
 #include "nn_active.h"
 
@@ -18,6 +26,7 @@
 #include "nn_probe.h"
 #include "nn_active_core.h"
 #include "plugin_run.h"
+#include "plugin_lease.h"
 
 #include <string.h>
 
@@ -31,19 +40,44 @@
 static struct nn_preproc_geom nn_geom_cur;
 static uint8_t                nn_geom_cur_ok;
 
-void nn_active_set_geom(const struct nn_preproc_geom *g)
+/*
+ * Does the calling thread hold the plugin lease?  Counted when it does not, here
+ * and only here, so every refusal is counted exactly once whoever forgot.
+ */
+static int nn_active_held(void)
 {
+	if (plugin_lease_held())
+		return 1;
+	plugin_lease_note_unheld();
+	return 0;
+}
+
+/*
+ * [!] THE GEOMETRY IS PART OF THE PLUGIN'S RESULT (issue #127), so writing it
+ * needs the lease as much as calling the plugin does: to_frame() reads it from
+ * inside draw() and report(), and a write by a thread that does not hold the
+ * lease could land between a decode and the draw of the same frame.  Refused,
+ * the previous geometry stands.
+ */
+int nn_active_set_geom(const struct nn_preproc_geom *g)
+{
+	if (!nn_active_held())
+		return NN_ACTIVE_NOT_HELD;
 	if (g == NULL) {
 		nn_geom_cur_ok = 0u;
-		return;
+		return 0;
 	}
 	nn_geom_cur    = *g;
 	nn_geom_cur_ok = 1u;
+	return 0;
 }
 
-void nn_active_clear_geom(void)
+int nn_active_clear_geom(void)
 {
+	if (!nn_active_held())
+		return NN_ACTIVE_NOT_HELD;
 	nn_geom_cur_ok = 0u;
+	return 0;
 }
 
 int nn_active_to_frame(void *ctx, float x, float y, float w, float h,
@@ -117,6 +151,8 @@ int nn_active_shapes_ok(const struct npu_tensor *outs, unsigned n)
 
 	if (outs == NULL)
 		return 0;
+	if (!nn_active_held())
+		return NN_ACTIVE_NOT_HELD;
 	n = to_desc(outs, n, d, NPU_DESC_MAX_OUTPUTS);
 	return nn_active_core_shapes_ok(&nn_active_board, d, n);
 }
@@ -127,36 +163,59 @@ int nn_active_decode(const struct npu_tensor *outs, unsigned n)
 
 	if (outs == NULL)
 		return BF_ERR_ARG;   /* see nn_active_shapes_ok */
+	if (!nn_active_held())
+		return NN_ACTIVE_NOT_HELD;
 	n = to_desc(outs, n, d, NPU_DESC_MAX_OUTPUTS);
 	return nn_active_core_decode(&nn_active_board, d, n);
 }
 
-void nn_active_draw(const struct plugin_painter *paint)
+int nn_active_draw(const struct plugin_painter *paint)
 {
+	if (!nn_active_held())
+		return NN_ACTIVE_NOT_HELD;
 	nn_active_core_draw(&nn_active_board, paint);
+	return 0;
 }
 
+/* can_draw and can_report read the plugin's slot table rather than call into
+ * it, and are checked anyway: what they answer is about the plugin a holder is
+ * about to call, and a load replacing it between the question and the call is
+ * exactly what the lease excludes. */
 int nn_active_can_draw(void)
 {
+	if (!nn_active_held())
+		return NN_ACTIVE_NOT_HELD;
 	return nn_active_core_can_draw(&nn_active_board);
 }
 
 int nn_active_can_report(void)
 {
+	if (!nn_active_held())
+		return NN_ACTIVE_NOT_HELD;
 	return nn_active_core_can_report(&nn_active_board);
 }
 
 int nn_active_report(nn_svc_write_fn write, void *ctx)
 {
+	if (!nn_active_held())
+		return NN_ACTIVE_NOT_HELD;
 	return nn_active_core_report(&nn_active_board, write, ctx);
 }
 
-unsigned nn_active_get_thresh_milli(void)
+int nn_active_get_thresh_milli(unsigned *milli)
 {
-	return nn_active_core_get_thresh_milli(&nn_active_board);
+	if (milli == NULL)
+		return NN_ACTIVE_THRESH_REFUSED;
+	*milli = NN_SVC_THRESH_NONE;
+	if (!nn_active_held())
+		return NN_ACTIVE_NOT_HELD;
+	*milli = nn_active_core_get_thresh_milli(&nn_active_board);
+	return NN_ACTIVE_THRESH_OK;
 }
 
 int nn_active_set_thresh_milli(unsigned milli)
 {
+	if (!nn_active_held())
+		return NN_ACTIVE_NOT_HELD;
 	return nn_active_core_set_thresh_milli(&nn_active_board, milli);
 }

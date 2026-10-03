@@ -46,6 +46,29 @@ extern "C" {
 struct nn_preproc_geom;
 
 /**
+ * The caller does not hold the plugin lease (port/plugin/plugin_lease.h), so
+ * nothing was entered and nothing was written (issue #127).
+ *
+ * [!] AN ANSWER OF ITS OWN.  Not 0 ("no plugin", or "the plugin said no"), not
+ * a BF_ERR_* (the decoder's own refusal), not an NN_ACTIVE_THRESH_* -- a path
+ * that reached the plugin without the lease is a firmware bug, and folding it
+ * into an answer the operator already knows would send them to a different
+ * model or container instead.  Every refusal is also counted, once, by the
+ * entry check itself (plugin_lease_unheld()).
+ *
+ * [!] AND IT IS NEGATIVE, SO `if (!answer)` IS NOT A TEST FOR "NO".  The
+ * yes/no entries below return 1, 0 or this; compare against 1.
+ */
+#define NN_ACTIVE_NOT_HELD (-64)
+_Static_assert(NN_ACTIVE_NOT_HELD != BF_ERR_MODEL &&
+               NN_ACTIVE_NOT_HELD != BF_ERR_UNINIT &&
+               NN_ACTIVE_NOT_HELD != BF_ERR_ARG &&
+               NN_ACTIVE_NOT_HELD != NN_ACTIVE_THRESH_OK &&
+               NN_ACTIVE_NOT_HELD != NN_ACTIVE_THRESH_REFUSED &&
+               NN_ACTIVE_NOT_HELD != NN_ACTIVE_THRESH_NO_DECODER,
+               "NOT_HELD must not collide with another answer");
+
+/**
  * @brief  Publish the transform the current decode was built with.
  *
  * [!] ONE GEOMETRY, FOR THE SAME REASON THERE IS ONE DECODER.  `nn run` and
@@ -55,11 +78,16 @@ struct nn_preproc_geom;
  * because the geometry it consulted had never been set on that path.  Both
  * paths publish here now, and the nn gate is what makes "the last one set" the
  * right one: the two never run at once.
+ *
+ * Under the plugin lease, beside the decode it describes (issue #127).
+ *
+ * @return 0, or NN_ACTIVE_NOT_HELD with the previous geometry left as it was
  */
-void nn_active_set_geom(const struct nn_preproc_geom *g);
+int nn_active_set_geom(const struct nn_preproc_geom *g);
 
-/** Forget it: there is no current decode to map boxes for. */
-void nn_active_clear_geom(void);
+/** Forget it: there is no current decode to map boxes for.  Under the lease;
+ *  0 or NN_ACTIVE_NOT_HELD. */
+int nn_active_clear_geom(void);
 
 /**
  * @brief  The base vtable's transform -- model input coordinates to frame
@@ -82,14 +110,17 @@ int nn_active_is_plugin(void);
  * would be a preview that runs and silently never annotates.
  *
  * Always false with no plugin: there is then nothing that reads any shape.
+ *
+ * @return 1, 0, or NN_ACTIVE_NOT_HELD
  */
 int nn_active_shapes_ok(const struct npu_tensor *outs, unsigned n);
 
 /**
  * @brief  Decode one set of outputs.
  *
- * @return the plugin's own count, or a negative BF_ERR_*.  The RESULT ITSELF
- *         stays with the plugin -- ask it to draw or to report.
+ * @return the plugin's own count, a negative BF_ERR_*, or NN_ACTIVE_NOT_HELD
+ *         (nothing decoded).  The RESULT ITSELF stays with the plugin -- ask it
+ *         to draw or to report.
  *
  * With no plugin loaded this returns BF_ERR_UNINIT, which is a backstop rather
  * than a path: the service adapter decides plugin-or-raw in the one helper both
@@ -104,8 +135,10 @@ int nn_active_decode(const struct npu_tensor *outs, unsigned n);
  *
  * Called on the panel thread with the panel guard held.  A no-op with no plugin
  * loaded, which a stream can no longer be running under.
+ *
+ * @return 0, or NN_ACTIVE_NOT_HELD when nothing was painted for that reason
  */
-void nn_active_draw(const struct plugin_painter *paint);
+int nn_active_draw(const struct plugin_painter *paint);
 
 /**
  * @brief  Will the active decoder describe its own result in words?
@@ -113,6 +146,8 @@ void nn_active_draw(const struct plugin_painter *paint);
  * REPORT is an optional slot, and "it said nothing" and "it has nothing to say
  * with" are different answers to an operator -- so the caller asks first
  * rather than reading an empty capture as either (issue #110).
+ *
+ * @return 1, 0, or NN_ACTIVE_NOT_HELD
  */
 int nn_active_can_report(void);
 
@@ -124,13 +159,15 @@ int nn_active_can_report(void);
  * about to light a camera and a panel for a live preview has to know, because
  * "the stream runs and never annotates" is indistinguishable from a broken one.
  * False with no plugin, for the stronger reason that nothing decodes at all.
+ *
+ * @return 1, 0, or NN_ACTIVE_NOT_HELD
  */
 int nn_active_can_draw(void);
 
 /**
  * @brief  Let the active decoder describe its own result.
  *
- * @return 0, or negative when the writer refused
+ * @return 0, negative when the writer refused, or NN_ACTIVE_NOT_HELD
  *
  * A no-op returning 0 with no plugin loaded, for the same reason as
  * @ref nn_active_draw.
@@ -141,12 +178,22 @@ int nn_active_report(nn_svc_write_fn write, void *ctx);
  * The score threshold, in milli, of whichever decoder is in force -- or
  * NN_SVC_THRESH_NONE when nothing holds one (no plugin, or a plugin that
  * declares no parameters, such as the classifier).
+ *
+ * [!] A STATUS AND AN OUT-PARAMETER SINCE ISSUE #127.  The value alone had no
+ * room for "the caller does not hold the lease": every unsigned is either a
+ * threshold or NN_SVC_THRESH_NONE, and the second is an answer the operator
+ * reads as "this decoder has no threshold".
+ *
+ * @return NN_ACTIVE_THRESH_OK with @p milli set, NN_ACTIVE_NOT_HELD (and
+ *         @p milli NN_SVC_THRESH_NONE), or NN_ACTIVE_THRESH_REFUSED for a null
+ *         @p milli
  */
-unsigned nn_active_get_thresh_milli(void);
+int nn_active_get_thresh_milli(unsigned *milli);
 
 /**
  * @brief  Set it: NN_ACTIVE_THRESH_OK, _REFUSED or _NO_DECODER
- *         (svc/nn_active_core.h, which says why there are three).
+ *         (svc/nn_active_core.h, which says why there are three), or
+ *         NN_ACTIVE_NOT_HELD.
  */
 int nn_active_set_thresh_milli(unsigned milli);
 

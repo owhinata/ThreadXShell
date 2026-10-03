@@ -4,8 +4,8 @@
  */
 /**
  * @file    nn_param_calls.h
- * @brief   The `nn` gate's holder, and how many threshold calls are inside the
- *          plugin right now (issue #122).
+ * @brief   The `nn` gate's holder, and how many console calls are inside the
+ *          plugin from outside the gate right now (issues #122, #127).
  *
  * `nn thresh` does not take the gate: a stream holds it for its whole life, and
  * a threshold is what an operator adjusts while watching one.  So it did not
@@ -27,9 +27,17 @@
  * the caller does so is held by its short wrappers in nn_svc_grove.c, not by
  * this file.
  *
- * WHAT IT DOES NOT CLOSE: the camera producer's decode on a running stream and
- * a threshold call can still be inside the same plugin at once (issue #122 P5,
- * Phase 3a).  Neither of them replaces the plugin.
+ * [!] SINCE ISSUE #127 THE COUNT IS EVERY CONSOLE CALL THAT ENTERS THE PLUGIN
+ * FROM OUTSIDE THE GATE -- `nn thresh` and `nn dets` -- not threshold calls
+ * alone.  The names below kept "param" because the threshold was first.
+ *
+ * WHAT IT DOES NOT CLOSE, AND WHAT DOES: two callbacks of the same plugin
+ * running at once -- the camera producer's decode and a threshold call, say
+ * (issue #122 P5).  That is the plugin lease's (port/plugin/plugin_lease.h),
+ * which such a call takes AFTER it is counted in.  The two are not folded into
+ * one (issue #127 decision 3): the count is never waited for and refuses only
+ * a replacement; the lease is waited for, bounded, and excludes every other
+ * caller.
  */
 #ifndef NN_PARAM_CALLS_H
 #define NN_PARAM_CALLS_H
@@ -50,7 +58,7 @@ enum nn_owner {
 	                   *   -- a load or an unload (issue #122)           */
 };
 
-/** How many threshold calls can be counted in at once.  Far above the threads
+/** How many such calls can be counted in at once.  Far above the threads
  *  that could make one; reaching it is refused rather than wrapped to zero. */
 #define NN_PARAM_CALLS_MAX 0xFFFFu
 
@@ -63,7 +71,7 @@ enum nn_owner {
 int nn_gate_claim(uint8_t *busy, uint8_t *owner, uint16_t calls, uint8_t who);
 
 /**
- * Count a threshold call in.  Refused while an NN_OWNER_SWAP holds the gate;
+ * Count a console call into the plugin in (`nn thresh`, `nn dets`).  Refused while an NN_OWNER_SWAP holds the gate;
  * any other holder -- a stream, `nn run` -- leaves the plugin where it is and
  * does not refuse.
  *

@@ -137,10 +137,11 @@ static int nn_try_acquire_swap(void)
 }
 
 /*
- * A threshold call entering and leaving the plugin (issue #122).  Not the gate:
- * a stream holds that for its whole life, and a threshold is what an operator
- * adjusts while watching one.  Entering is refused only while a load or an
- * unload holds the gate.
+ * A console call entering and leaving the plugin from outside the gate -- a
+ * threshold (issue #122) or `nn dets` (issue #127).  Not the gate: a stream
+ * holds that for its whole life, and a threshold is what an operator adjusts
+ * while watching one.  Entering is refused only while a load or an unload
+ * holds the gate.  The plugin lease is taken after this, never before.
  */
 static int nn_param_enter(void)
 {
@@ -869,8 +870,7 @@ static int nn_swap_plugin(struct nn_op_result *res, const struct nn_resolved *r,
 	                     npu_hw_flash_lease(), &nn_plugin_base);
 	if (pr == PLUGIN_RUN_OK || pr == PLUGIN_RUN_NO_PLUGIN)
 		return 0;
-	nn_detail_set("slot %d ('%s'): %s", r->slot, name,
-	              plugin_run_strerror(pr));
+	nn_detail_set("slot %d ('%s'): %s", r->slot, name, plugin_run_why(pr));
 	return -1;
 }
 
@@ -904,7 +904,7 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	struct nn_swap_verdict v;
 	enum nn_swap_end end;
 	const char *name = NULL;
-	int status = NN_SVC_OK, had_open, rc;
+	int status = NN_SVC_OK, had_open, rc, leased = 0;
 
 	/* This board's models come from the asset store or a raw window; it never
 	   reads a file, so the reader is not used. */
@@ -997,6 +997,32 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 		goto settle;
 	}
 
+	/*
+	 * [!] THE PLUGIN LEASE, BEFORE THE FIRST THING THAT CHANGES WHAT IS OPEN
+	 * (issue #127).  What this load replaces -- the plugin, its ENTRY, the
+	 * record and the geometry -- is all after the backend has taken the new
+	 * model, and the backend's first step closes the old one; so the last
+	 * moment at which a refusal still leaves everything as it was is here,
+	 * after the lookup and before npu_close().  Refused, this is the REFUSED
+	 * ending: an open model stands untouched, and a bring-up this load did is
+	 * taken back down.
+	 *
+	 * The hold covers the backend's close and open, which the lease does not
+	 * protect, because there is no later point to take it from without a
+	 * rollback.  It costs nothing: the SWAP gate refuses every other path that
+	 * could ask for the lease (a stream, `nn run`, a threshold or `nn dets`
+	 * call), so nobody is waiting behind it.  The lookup -- the NOR scan and
+	 * the CRC -- stays outside.
+	 */
+	leased = plugin_lease_take();
+	if (!leased) {
+		nn_detail_set("the plugin lease was not released within %u ms",
+		              (unsigned)PLUGIN_LEASE_WAIT_MS);
+		end    = NN_SWAP_REFUSED;
+		status = NN_SVC_ERR_BUSY;
+		goto settle;
+	}
+
 	/* One interpreter: the old one goes before the new one can be built.
 	 * Nothing can reach it meanwhile -- every path in holds this gate. */
 	if (had_open)
@@ -1063,10 +1089,15 @@ settle:
 		}
 	}
 	if (v.state != (unsigned char)NN_MODEL_PREVIOUS) {
-		/* A capture's geometry belongs to the model it was taken for. */
+		/* A capture's geometry belongs to the model it was taken for.  The
+		 * plugin's copy needs the lease; without it (a refusal before it was
+		 * taken) nothing was opened that the geometry could describe. */
 		nn_geom_valid = 0u;
-		nn_active_clear_geom();
+		if (leased)
+			(void)nn_active_clear_geom();
 	}
+	if (leased)
+		plugin_lease_give();
 
 	*state = (enum nn_model_state)v.state;
 	nn_result(res, v.ok ? NN_SVC_OK : status, NN_CLAIM_NONE);
@@ -1082,26 +1113,40 @@ void nn_svc_model_unload(struct nn_op_result *res)
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 		return;
 	}
+	/* [!] AND UNDER THE PLUGIN LEASE, taken before anything changes (issue
+	 * #127): refused, nothing is unloaded.  Nobody else can be waiting for it
+	 * -- the SWAP gate refuses every path that could ask. */
+	if (!plugin_lease_take()) {
+		nn_detail_set("the plugin lease was not released within %u ms",
+		              (unsigned)PLUGIN_LEASE_WAIT_MS);
+		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
+		nn_release();
+		return;
+	}
 	/* Idempotent: unloading nothing succeeds.  Order is plugin -> model -> NPU
 	   -> lease, and npu_hw_deinit() is what returns the flash lease.
 	   [!] THE PLUGIN GOES FIRST.  It was loaded from the window this lease
 	   pins, and its code is about to stop being the code anyone should enter;
 	   unpublishing before the model is closed means no window exists in which
-	   the fault reporter names a plugin whose model is already gone. */
+	   the fault reporter names a plugin whose model is already gone.
+	   [!] AND WHAT THE PLUGIN'S RESULT IS MADE OF GOES WITH IT, under the
+	   plugin lease and before the backend (issue #127): the last result
+	   (issue #118, under the gate as before) and the geometry.  Moving them
+	   ahead of npu_close() is what lets the hold end before the backend work
+	   -- nothing reads either in between, the SWAP gate excludes every reader. */
 	plugin_run_unload();
 	nn_has_container = 0;
+	nn_rec_invalidate();
+	nn_geom_valid    = 0u;
+	(void)nn_active_clear_geom();
+	plugin_lease_give();
 	npu_close();
 	npu_hw_deinit();
-	/* The model and its decoder are gone, and the last result with them
-	 * (issue #118) -- under the gate. */
-	nn_rec_invalidate();
 	nn_open_done     = 0u;
 	nn_model_addr    = 0u;
 	nn_model_len     = 0u;
 	nn_model_slot    = -1;
 	nn_model_from[0] = '\0';
-	nn_geom_valid    = 0u;
-	nn_active_clear_geom();
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 	nn_release();
 }
@@ -1215,8 +1260,10 @@ static int nn_fill_input(struct nn_op_result *res, const uint8_t *raw,
 		nn_detail_set("preprocessing refused the frame");
 		return -1;
 	}
+	/* [!] NOT PUBLISHED TO THE PLUGIN HERE (issue #127).  The plugin's copy
+	 * is part of its result and is written under the plugin lease, beside the
+	 * decode it describes -- see nn_svc_run_once(). */
 	nn_geom_valid = 1u;
-	nn_active_set_geom(&nn_geom);   /* the plugin's transform, issue #103 */
 	return 0;
 }
 
@@ -1270,6 +1317,7 @@ static int nn_decode_publish(uint32_t gen, struct nn_op_result *res)
 {
 	struct npu_tensor outs[NPU_DESC_MAX_OUTPUTS];
 	unsigned n_out, i;
+	int nd;
 
 	if (!nn_active_is_plugin()) {
 		nn_publish_raw_outputs(gen);
@@ -1287,7 +1335,14 @@ static int nn_decode_publish(uint32_t gen, struct nn_op_result *res)
 			return -1;
 		}
 
-	(void)nn_rec_publish_external(nn_active_decode(outs, n_out), gen);
+	nd = nn_active_decode(outs, n_out);
+	if (nd == NN_ACTIVE_NOT_HELD) {
+		/* Nothing decoded, so nothing is published: the record keeps the
+		 * plugin's last result, which is still the plugin's state. */
+		nn_detail_set("the decode was refused: the plugin lease is not held");
+		return -1;
+	}
+	(void)nn_rec_publish_external(nd, gen);
 	return 0;
 }
 
@@ -1302,6 +1357,8 @@ static int nn_decode_publish(uint32_t gen, struct nn_op_result *res)
 static void nn_capture_report(const struct nn_det_snapshot *snap,
                               struct nn_report_capture *rep)
 {
+	int rc;
+
 	if (rep == NULL)
 		return;
 	if (!snap->valid || snap->kind != (uint8_t)NN_DET_PLUGIN_REPORT) {
@@ -1315,7 +1372,18 @@ static void nn_capture_report(const struct nn_det_snapshot *snap,
 		return;
 	}
 	nn_report_begin(rep);
-	if (!nn_active_can_report())
+	/*
+	 * [!] CALLED UNDER THE PLUGIN LEASE (issue #127), and compared against 1:
+	 * NN_ACTIVE_NOT_HELD is negative, so `!can_report` would read it as yes.
+	 * A refusal for want of the lease is REFUSED -- the account was not given
+	 * -- and never UNSUPPORTED (the plugin has one) or STALE (nobody else was
+	 * holding it).  Not reachable from a correct caller; counted where it is
+	 * refused.
+	 */
+	rc = nn_active_can_report();
+	if (rc == NN_ACTIVE_NOT_HELD)
+		nn_report_set(rep, NN_REPORT_REFUSED);
+	else if (rc != 1)
 		nn_report_set(rep, NN_REPORT_UNSUPPORTED);
 	else
 		nn_report_end(rep, nn_active_report(nn_report_write, rep));
@@ -1445,7 +1513,27 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 * inference.  The convention is stated in the board README rather than
 	 * enforced by a check no decoder stands behind.
 	 */
+	/*
+	 * [!] ONE HOLD OF THE PLUGIN LEASE FOR THE GEOMETRY, THE DECODE, THE
+	 * PUBLISH, THE SNAPSHOT AND THE REPORT (issue #127).  The gate keeps every
+	 * other decode out, but not a threshold call from another console, which
+	 * enters the same plugin without it; and the report has to describe the
+	 * decode this run published.  Taken after the invoke -- the NPU does not
+	 * touch the plugin -- and refused, nothing is published and nothing is
+	 * reported: the record still holds the last result there was.
+	 */
+	if (!plugin_lease_take()) {
+		nn_detail_set("the plugin lease was not released within %u ms; "
+		              "nothing was decoded", (unsigned)PLUGIN_LEASE_WAIT_MS);
+		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
+		nn_oneshot_finish(gen, res);
+		return;
+	}
+	/* The transform this frame was built with, before the decode that may ask
+	 * for it (issue #103). */
+	(void)nn_active_set_geom(&nn_geom);
 	if (nn_decode_publish(rgen, res) != 0) {
+		plugin_lease_give();
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
 		nn_oneshot_finish(gen, res);
 		return;
@@ -1462,6 +1550,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		if (ext != NULL)
 			ext->what = (uint8_t)NN_EXTRA_NONE;
 	}
+	plugin_lease_give();
 
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 	nn_oneshot_finish(gen, res);
@@ -1472,7 +1561,7 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
                            struct nn_result_extra *ext,
                            struct nn_op_result *res)
 {
-	int gated;
+	int counted, gated, leased;
 
 	(void)dets;
 	(void)max;
@@ -1492,16 +1581,35 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
 	 * producer is decoding the next frame over it.  Not waited for: the
 	 * stream holds the gate until its stop.
 	 */
-	gated = nn_try_acquire();
+	/*
+	 * [!] AND THE PLUGIN LEASE, ENTERED THE WAY `nn thresh` ENTERS (issue
+	 * #127): counted in first -- refused only while a load or unload holds
+	 * the gate, which may be replacing the plugin -- then the lease, bounded,
+	 * and the snapshot and the account inside ONE hold, so the count and the
+	 * words describe the same decode.  What a stream changes is not changed
+	 * yet: with the gate held by a stream the account is still STALE, and the
+	 * lease is not even asked for -- taking it only to report STALE would
+	 * cost the stream a frame for nothing (issue #127 stage 4 changes this).
+	 * A call refused its count, the gate or the lease reads the record alone,
+	 * as before.
+	 */
+	counted = nn_param_enter();
+	gated   = nn_try_acquire();
+	leased  = counted && gated && plugin_lease_take();
 	nn_rec_snapshot(snap, ext);
-	if (gated) {
+	if (leased) {
 		nn_capture_report(snap, rep);
-		nn_release();
 	} else if (snap->valid && snap->kind == (uint8_t)NN_DET_PLUGIN_REPORT) {
 		nn_report_set(rep, NN_REPORT_STALE);
 	} else {
 		nn_report_set(rep, NN_REPORT_NONE);
 	}
+	if (leased)
+		plugin_lease_give();
+	if (gated)
+		nn_release();
+	if (counted)
+		nn_param_leave();
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
 
@@ -1646,23 +1754,28 @@ _Static_assert(NN_STREAM_CAM_LOCKED  == CAM_ERR_LOCKED,  "CAM_ERR_LOCKED moved")
  * say why.  A stream that starts and then fails on every frame is a panel
  * showing a live picture with no boxes and no explanation -- the exact failure
  * live inference exists to make visible.
+ *
+ * @return NN_SVC_OK, NN_SVC_ERR_STATE with the detail set (this model or plugin
+ *         would not annotate), or NN_SVC_ERR_BUSY (the plugin lease was not
+ *         released in time, so neither question was asked -- issue #127)
  */
 static int nn_detector_ready(struct nn_op_result *res)
 {
 	struct npu_tensor in;
 	struct npu_tensor outs[NPU_DESC_MAX_OUTPUTS];
 	unsigned n_out, i;
+	int shapes, draws;
 
 	if (npu_input(&in) != NPU_OK) {
 		nn_detail_set("the model has no input tensor");
-		return -1;
+		return NN_SVC_ERR_STATE;
 	}
 	/* [!] THE BOARD'S PRECONDITION FIRST, AND FOR EVERY DECODER.  The producer
 	 * fills this tensor a byte at a time on every frame; a plugin cannot see
 	 * the input tensor and so cannot check it, which makes this the last place
 	 * anything can. */
 	if (nn_input_fillable(res, &in) != 0)
-		return -1;
+		return NN_SVC_ERR_STATE;
 	/*
 	 * [!] IS THERE A DECODER AT ALL, ASKED FIRST (issue #104).  Ahead of the
 	 * shape question and ahead of the draw question, because with no plugin
@@ -1676,38 +1789,61 @@ static int nn_detector_ready(struct nn_op_result *res)
 		nn_detail_set("no decoder is loaded, so a stream would annotate "
 		              "nothing -- load a container that carries one; "
 		              "`nn run` reports the raw outputs");
-		return -1;
+		return NN_SVC_ERR_STATE;
 	}
 	n_out = npu_output_count();
 	if (n_out > NPU_DESC_MAX_OUTPUTS) {
 		nn_detail_set("the model has %u outputs and this path reads %u",
 		              n_out, (unsigned)NPU_DESC_MAX_OUTPUTS);
-		return -1;
+		return NN_SVC_ERR_STATE;
 	}
 	for (i = 0u; i < n_out; i++) {
 		if (npu_output(i, &outs[i]) != NPU_OK) {
 			nn_detail_set("output %u is unreadable", i);
-			return -1;
+			return NN_SVC_ERR_STATE;
 		}
 	}
-	if (!nn_active_shapes_ok(outs, n_out)) {
+	/*
+	 * [!] BOTH QUESTIONS GO TO THE PLUGIN, SO BOTH ARE ASKED UNDER ITS LEASE
+	 * (issue #127), in one hold, before the camera is woken.  The gate this
+	 * stream holds keeps loads and `nn run` out; it does not keep out a
+	 * threshold or `nn dets` call from another console.  Refused, the start is
+	 * BUSY and nothing has been acquired but the claim the caller gives back.
+	 *
+	 * Compared against 1: NN_ACTIVE_NOT_HELD is negative, so `!answer` would
+	 * read it as yes.
+	 */
+	if (!plugin_lease_take()) {
+		nn_detail_set("the plugin lease was not released within %u ms",
+		              (unsigned)PLUGIN_LEASE_WAIT_MS);
+		return NN_SVC_ERR_BUSY;
+	}
+	shapes = nn_active_shapes_ok(outs, n_out);
+	draws  = (shapes == 1) ? nn_active_can_draw() : 0;
+	plugin_lease_give();
+	if (shapes == NN_ACTIVE_NOT_HELD || draws == NN_ACTIVE_NOT_HELD) {
+		nn_detail_set("the plugin refused a caller without its lease");
+		return NN_SVC_ERR_BUSY;
+	}
+	if (shapes != 1) {
 		nn_detail_set("the loaded plugin cannot read this model's outputs");
-		return -1;
+		return NN_SVC_ERR_STATE;
 	}
 	/*
-	 * [!] AND WOULD IT ANNOTATE ANYTHING?  A plugin need not draw -- the
-	 * classifier container carries no draw(), because a label on the panel needs
-	 * a font and that is #78 Step 2.  Starting a stream for it would light the
-	 * camera and the panel and show a live picture that is never marked, which
-	 * is the exact failure this function exists to refuse before anything is
-	 * acquired.  `nn run` still reports its classes.
+	 * [!] AND WOULD IT ANNOTATE ANYTHING?  A plugin need not draw: DRAW is an
+	 * optional slot.  Both containers this board ships draw today -- the
+	 * classifier gained a label painter with issue #105, and streams -- but a
+	 * plugin without draw() would light the camera and the panel and show a
+	 * live picture that is never marked, which is the exact failure this
+	 * function exists to refuse before anything is acquired.  `nn run` still
+	 * reports its result.
 	 */
-	if (!nn_active_can_draw()) {
+	if (draws != 1) {
 		nn_detail_set("the loaded plugin does not draw, so a stream would "
 		              "annotate nothing -- `nn run` reports its result");
-		return -1;
+		return NN_SVC_ERR_STATE;
 	}
-	return 0;
+	return NN_SVC_OK;
 }
 
 void nn_svc_stream_start(const struct nn_stream_spec *spec,
@@ -1763,9 +1899,10 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
 		return;
 	}
-	if (nn_detector_ready(res) != 0) {
+	rc = nn_detector_ready(res);
+	if (rc != NN_SVC_OK) {
 		nn_stream_abort();
-		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
+		nn_result(res, rc, NN_CLAIM_NONE);
 		return;
 	}
 
@@ -2097,6 +2234,17 @@ static const uint8_t nn_slot_runs[PLUGIN_SLOT_COUNT] = GROVE_PLUGIN_STACK_RUNS;
 _Static_assert(sizeof(NN_LINE_PL_MISS) - 1u - 2u * 3u + 2u * 10u <
                (size_t)NN_STREAM_LINE_MAX,
                "the plugin miss line is longer than the caller's buffer");
+/*
+ * The same line when an entry into the plugin has ever been refused because
+ * its caller did not hold the lease (issue #127).  A correct build never
+ * prints this form, so the line wio prints is the one an operator normally
+ * sees; the suffix exists so that a path which forgot the lease is visible
+ * somewhere other than a log.  Counted from boot.
+ */
+#define NN_LINE_PL_UNHELD NN_LINE_PL_MISS "; %lu entry(s) refused unheld"
+_Static_assert(sizeof(NN_LINE_PL_UNHELD) - 1u - 3u * 3u + 3u * 10u <
+               (size_t)NN_STREAM_LINE_MAX,
+               "the plugin unheld line is longer than the caller's buffer");
 
 int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
                         char *buf, size_t cap)
@@ -2159,9 +2307,16 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 		/* Always a line: 0 missed is the answer a quiet stream should give.
 		 * Reset when a stream is armed, not when it stops, so the report
 		 * after a stop still describes the run that ended. */
+		uint32_t unheld = plugin_lease_unheld();
+
 		plugin_lease_misses(&miss, &run);
-		nn_detail_to(buf, cap, NN_LINE_PL_MISS, (unsigned long)miss,
-		             (unsigned long)run);
+		if (unheld != 0u)
+			nn_detail_to(buf, cap, NN_LINE_PL_UNHELD,
+			             (unsigned long)miss, (unsigned long)run,
+			             (unsigned long)unheld);
+		else
+			nn_detail_to(buf, cap, NN_LINE_PL_MISS,
+			             (unsigned long)miss, (unsigned long)run);
 		return 1;
 	}
 	case 3u + (unsigned)PLUGIN_SLOT_COUNT:
@@ -2191,19 +2346,34 @@ _Static_assert(4u + (unsigned)PLUGIN_SLOT_COUNT < (unsigned)NN_STREAM_LINES_MAX,
  * operator adjusts while one runs -- so until the count nothing stopped a load
  * on another console copying a new plugin over the code this was executing.
  * Entering is refused only while a load or unload holds the gate, and a load or
- * unload is refused while any call is in; neither waits.  The camera producer's decode can
- * still be inside the same plugin at once (P5, Phase 3a); it replaces nothing.
+ * unload is refused while any call is in; neither waits.
+ *
+ * [!] AND INSIDE THE COUNT, THE PLUGIN LEASE (issue #127, P5).  The count keeps
+ * the plugin from being REPLACED under the call; it never kept the camera
+ * producer's decode or the panel's draw out of the same plugin at the same
+ * time.  The lease does: this waits for it, bounded, and a stream's producer
+ * that finds it held skips one frame's decode rather than wait.  Not taken, the
+ * call is BUSY -- the same answer as a refused count, and nothing was entered.
  */
 int nn_svc_thresh_get(unsigned *milli)
 {
+	int r;
+
 	if (milli == NULL)
 		return NN_SVC_ERR_ARG;
 	*milli = NN_SVC_THRESH_NONE;
 	if (!nn_param_enter())
 		return NN_SVC_ERR_BUSY;
-	*milli = nn_active_get_thresh_milli();
+	if (!plugin_lease_take()) {
+		nn_param_leave();
+		return NN_SVC_ERR_BUSY;
+	}
+	r = nn_active_get_thresh_milli(milli);
+	plugin_lease_give();
 	nn_param_leave();
-	return NN_SVC_OK;
+	/* NN_ACTIVE_NOT_HELD cannot come back from under the lease; if it ever
+	 * does, it is BUSY like any other call that did not get in. */
+	return r == NN_ACTIVE_THRESH_OK ? NN_SVC_OK : NN_SVC_ERR_BUSY;
 }
 
 int nn_svc_thresh_set(unsigned milli)
@@ -2212,7 +2382,12 @@ int nn_svc_thresh_set(unsigned milli)
 
 	if (!nn_param_enter())
 		return NN_SVC_ERR_BUSY;
+	if (!plugin_lease_take()) {
+		nn_param_leave();
+		return NN_SVC_ERR_BUSY;
+	}
 	r = nn_active_set_thresh_milli(milli);
+	plugin_lease_give();
 	nn_param_leave();
 	switch (r) {
 	case NN_ACTIVE_THRESH_OK:
@@ -2221,6 +2396,8 @@ int nn_svc_thresh_set(unsigned milli)
 		/* Not an argument error: the value was fine and there is nothing here
 		 * to hold it (issue #104). */
 		return NN_SVC_ERR_STATE;
+	case NN_ACTIVE_NOT_HELD:
+		return NN_SVC_ERR_BUSY;     /* nothing was entered; see _get */
 	default:
 		return NN_SVC_ERR_ARG;
 	}

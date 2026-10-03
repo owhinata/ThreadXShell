@@ -77,6 +77,7 @@ src cmds svc cmake test README。wio のみ boot も）。
 - **[!] 負値を 1 つに畳まない**（「モデル非認識」/ 未初期化 / 引数不正は別コードで**どれも「0 件」ではない**）。
 - **[!] 停止は走行中の推論を取り消せない** — worker は arm 時点の世代を控え、publish のロック内で照合
   する（`svc/nn_det_record.c`）。**RAW 記述子・top-5 は publish 時に record へ載せ、印字時にモデルを取り直さない**（#121）。
+- **[!] 推論を非同期の worker で回すボードは「誰も解釈していない」も世代規則の下で publish する**（しないと `nn run` が timeout する。wio・Grove）。
 
 ### [!] plugin container と asset（3 ボード共有部）
 
@@ -105,7 +106,7 @@ code** で、ゲートが証明するのはスタック上限だけ（**メモ�
   ので**閉じ手は CRC32 と `blob list` の照合**。「ビルド時に検査済み」を「何も起きない」と書き換えない。**配送 target（DELIVERY）は build.ninja から導出した使用者と両方向照合する**（`check_delivery_gate.py`、全 target が先に待つ）。
 - **モデルは commit と SHA256 で pin**し、消えたら **fail closed**。fetch は build 時で `asset-*` は ALL 外。
 - **ファームと plugin は別成果物で間違いは両方向**（焼いても container は更新されず、逆も焼き直し不要）。
-- **[!] 同じ plugin の callback は 2 つ同時に走らない**: plugin に入る全経路（param・admission・report・load/unload も）がボードの lease を取り、producer / panel は try だけで待たない。**入口は保持を検査し、無ければ「plugin 無し」と別の答え**（#127）。
+- **[!] 同じ plugin の callback は 2 つ同時に走らない**: plugin に入る全経路（param・admission・report・load/unload も）がボードの lease を取り、worker とコンソールは有界に待ち、panel は try だけ。**入口は保持を検査し、無ければ「plugin 無し」と別の答え**（#127）。
 
 ## 開発ワークフロー
 
@@ -237,8 +238,7 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
   テンソルをそのまま報告、`nn stream start` は拒否、`nn thresh` は none。**`null` backend も同じ答え**。
 - **admission は `nn run` と共有**なので**shape の問いは no-plugin で通す**（refuse すると素のモデルの
   `nn run` が消える）。**stream を止めるのは `nn_active_can_draw()` 1 本。**
-- **worker は非同期**なので「誰も解釈していない」も**世代規則の下で publish する**（しないと `nn run`
-  が timeout する）。**panel は `valid` だけでなく kind も見る**。
+- **panel は `valid` だけでなく kind も見る**（「誰も解釈していない」の publish は共有 `nn` 節）。
 - **plugin の差し替えは backend が成功してから**（先だと前の plugin を壊す）。bare model は必ず unload。
 - **decode と draw を隔てるものが無い**ので**結果リース**で囲う: **常にリース → フレームロック**、
   worker は decode と publish の全体を保持、**パネルは待たない**。**リース保持は「描いてよい」ではない**。
@@ -304,10 +304,10 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
 - **候補は VALID のみ・重複拒否・失敗理由は別々・読めなければ拒否。ホストの `verify_vela_model` を外さない**（代替にならない。C++ 不在は fail-closed）。
 - **アリーナの保守は範囲ごとでなく全体を 2 点で**（潰すのは `ethosu_invalidate_dcache()` だけ、成功条件は
   state と result の**両方**、異常時はリセット成功を確認してから）。**呼び出し側で保守しない。**
-- **推論は producer スレッド・`consume()` 内**で**推論（ガード無し）→ ガード 1 回で stage/draw/present**
-  （callback 中の block / sleep / 推論 / 待つロック / LCD 再入は禁止。plugin lease の try だけは可で、取れなければ描かない）。**タイムアウトは `npu_hw.h` に 1 つ。**
+- **prep は producer・`consume()` 内で worker が欲しいときだけ、invoke〜publish は worker**（callback 中の block / sleep /
+  推論 / 待つロック / LCD 再入は禁止。panel は lease の try だけ）。**stop は producer → worker の join の後に record 境界。タイムアウトは `npu_hw.h` に 1 つ。**
 - **`nn stream` はデコーダが無い時点で拒否する**（shape や draw の前）。**wio と揃えようとしない。
-  `nn_input_quant_ok()` は常駐デコーダの前提条件で plugin は縛られない。** stop の record 境界は停止確認後（#118）。
+  `nn_input_quant_ok()` は常駐デコーダの前提条件で plugin は縛られない。** `nn run` も同じ worker と同じ teardown（#129）。
 - **ファームの印字は「種」を名乗らない**（ゲートは **`.rodata`** を読む。**literal を regex で見ない**）。
   **フォントは plugin 側**で `text()` を足さない。**`nn dets` は record の snapshot と report を lease の 1 回の保持で採る**（stream 中も全文）。
 

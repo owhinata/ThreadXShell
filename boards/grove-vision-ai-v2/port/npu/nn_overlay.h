@@ -40,6 +40,7 @@ struct nn_overlay_stats {
 	uint32_t skipped;      /**< frames not inferred: a stop was pending, or
 	                            the worker was busy (issue #129)          */
 	uint32_t busy;         /**< of those, the worker was busy            */
+	uint32_t frames;       /**< frames handed to process() (issue #129)  */
 	uint32_t lease_timeouts; /**< inferred, but the lease was not had in
 	                              time: not decoded (also in errors)     */
 	uint32_t errors;       /**< invoke or decode refused                 */
@@ -56,17 +57,19 @@ struct nn_overlay_stats {
 	int      last_ndet;    /**< faces in the most recent frame           */
 
 	/*
-	 * The producer-side stage split (issue #60).  `camera stats` prints one
-	 * `sink` number for everything a sink does on the producer; under
-	 * `nn stream` almost all of it is this overlay's process(), and which
-	 * STAGE of process() owns it decides what is worth optimising.  Totals
-	 * since arm, over prof_frames frames -- only frames that completed all
-	 * three stages are counted, so the three rows describe the same set.
+	 * The stage split (issue #60), across two threads since issue #129:
+	 * `prep` is what the producer still spends inside consume() -- the part
+	 * of `camera stats`' `sink` number this overlay owns -- and invoke,
+	 * decode and the round trip are the worker's.  Totals since arm, over
+	 * prof_frames frames -- only frames that completed every stage are
+	 * counted, so the rows describe the same set.
 	 */
 	uint32_t prof_frames;  /**< frames in the stage totals below          */
 	uint32_t prep_us;      /**< tensor setup + crop/resize into the input */
 	uint32_t invoke_us;    /**< the NPU inference                        */
-	uint32_t decode_us;    /**< anchor decode into boxes                 */
+	uint32_t decode_us;    /**< the plugin's decode, under its lease     */
+	uint32_t cycle_us;     /**< the worker's round trip, hand-over to
+	                            publish (issue #129)                     */
 	int      prof_ok;      /**< the EPK clock backing them is trusted    */
 
 	/* The stack depth where a plugin is entered is not here any more: it is

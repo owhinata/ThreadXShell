@@ -58,6 +58,8 @@ static struct nn_overlay_stats nn_ov_stats;
 static uint64_t nn_ov_prep_ticks;
 static uint64_t nn_ov_invoke_ticks;
 static uint64_t nn_ov_decode_ticks;
+/* The worker's round trip, hand-over to publish, over the same frames (#129). */
+static uint64_t nn_ov_cycle_ticks;
 static uint32_t nn_ov_prof_frames;
 
 /*
@@ -165,6 +167,7 @@ struct nn_ov_job {
 	uint32_t frame;                /* the producer's frame number          */
 	uint32_t gen;                  /* the record generation (issue #118)   */
 	uint32_t prep_ticks;           /* the producer's prep, EPK ticks       */
+	uint32_t t_hand;               /* EPK ticks at the hand-over           */
 	struct nn_preproc_geom geom;   /* the transform this input was cut by  */
 };
 static struct nn_ov_job nn_ov_job;
@@ -262,6 +265,8 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 
 	nn_ov_frame_no++;
 	nn_ov_cur_frame = nn_ov_frame_no;
+	if (!oneshot)
+		nn_ov_stats.frames++;    /* producer only */
 
 	/*
 	 * [!] THE ANSWER IS "DRAW THIS FRAME OR NOT", NOT "WAS IT INFERRED" (issue
@@ -328,6 +333,7 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	nn_ov_job.frame      = nn_ov_frame_no;
 	nn_ov_job.gen        = nn_rec_gen();
 	nn_ov_job.prep_ticks = e1 - e0;
+	nn_ov_job.t_hand     = e1;
 	nn_ov_job.geom       = geom;
 	/* After the input is written and the job filled, never before. */
 	if (!nn_worker_hand() && !oneshot)
@@ -495,6 +501,7 @@ int nn_overlay_work(void)
 		nn_ov_prep_ticks   += job.prep_ticks;
 		nn_ov_invoke_ticks += (uint32_t)(e2 - e1);
 		nn_ov_decode_ticks += (uint32_t)(e3 - e2);
+		nn_ov_cycle_ticks  += (uint32_t)(e3 - job.t_hand);
 		nn_ov_prof_frames++;
 		nn_ov_ndet = nd;
 	}
@@ -633,6 +640,8 @@ const struct cam_lcd_overlay *nn_overlay_arm(void)
 	nn_ov_prep_ticks       = 0u;
 	nn_ov_invoke_ticks     = 0u;
 	nn_ov_decode_ticks     = 0u;
+	nn_ov_cycle_ticks      = 0u;
+	nn_ov_stats.frames     = 0u;
 	nn_ov_prof_frames      = 0u;
 	nn_ov_ndet             = 0;
 	nn_ov_frame_no         = 0u;
@@ -688,7 +697,7 @@ void nn_overlay_stats(struct nn_overlay_stats *out)
 {
 	TX_INTERRUPT_SAVE_AREA
 	const char *why = NULL;
-	uint64_t prep, invoke, decode;
+	uint64_t prep, invoke, decode, cycle;
 	uint32_t frames, hz;
 
 	if (out == NULL)
@@ -705,6 +714,7 @@ void nn_overlay_stats(struct nn_overlay_stats *out)
 	prep   = nn_ov_prep_ticks;
 	invoke = nn_ov_invoke_ticks;
 	decode = nn_ov_decode_ticks;
+	cycle  = nn_ov_cycle_ticks;
 	frames = nn_ov_prof_frames;
 	/*
 	 * [!] THE DRAW PAIR IS COPIED HERE, INSIDE, and the panel thread updates
@@ -726,4 +736,5 @@ void nn_overlay_stats(struct nn_overlay_stats *out)
 	out->prep_us     = out->prof_ok ? nn_ov_us(prep,   hz) : 0u;
 	out->invoke_us   = out->prof_ok ? nn_ov_us(invoke, hz) : 0u;
 	out->decode_us   = out->prof_ok ? nn_ov_us(decode, hz) : 0u;
+	out->cycle_us    = out->prof_ok ? nn_ov_us(cycle,  hz) : 0u;
 }

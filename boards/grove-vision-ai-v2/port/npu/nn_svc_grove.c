@@ -2449,6 +2449,32 @@ _Static_assert(sizeof(NN_LINE_PL_UNHELD) - 1u - 3u * 3u + 3u * 10u <
                (size_t)NN_STREAM_LINE_MAX,
                "the plugin unheld line is longer than the caller's buffer");
 
+/*
+ * The first line, which always prints (issue #129): what needs no clock.  The
+ * items the plugin returned (issues #104, #105: items, not faces -- the firmware
+ * cannot name what a plugin counts); the frames the producer offered while the
+ * worker was still on an earlier one, out of every frame it was handed -- the
+ * busy part of the shared `skipped`; and how many frames behind the picture the
+ * drawn result was, mean (two decimals) and worst.  The decodes themselves are
+ * the shared `infers` line.  Same worst-case form as the plugin line below.
+ */
+#define NN_LINE_ITEMS "items   : %lu decoded, busy %lu/%lu, lag %lu.%02lu/%lu"
+_Static_assert(sizeof(NN_LINE_ITEMS) - 1u - 5u * 3u - 5u + 5u * 10u + 2u <
+               (size_t)NN_STREAM_LINE_MAX,
+               "the items line is longer than the caller's buffer");
+/*
+ * The last line, only with a trusted clock (issue #60; split across two threads
+ * by issue #129): `prep` is what the producer still spends inside consume() --
+ * the hand-over's whole cost -- and invoke, decode and the worker's round trip
+ * from hand-over to publish are the worker's.  Means over the decodes that
+ * completed, the shared `infers`.
+ */
+#define NN_LINE_WORKER \
+	"worker  : %lu us prep, %lu us invoke, %lu us decode, %lu us cycle"
+_Static_assert(sizeof(NN_LINE_WORKER) - 1u - 4u * 3u + 4u * 10u <
+               (size_t)NN_STREAM_LINE_MAX,
+               "the worker line is longer than the caller's buffer");
+
 int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
                         char *buf, size_t cap)
 {
@@ -2484,14 +2510,22 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 
 	nn_overlay_stats(&os);
 	switch (index) {
-	case 0u:
+	case 0u: {
 		/* [!] ITEMS, NOT FACES (issue #105).  This is the sum of what the
 		 * decoder returned, and since a classifier plugin can hold the panel
 		 * the decoder need not be a detector.  The firmware has no decoder at
 		 * all (issue #104), so it cannot name what it counted. */
-		nn_detail_to(buf, cap, "items   : %lu decoded since the stream started",
-		             (unsigned long)os.detections);
+		uint32_t lag100 = (os.lag_n != 0u)
+		    ? (uint32_t)(((uint64_t)os.lag_sum * 100u) / os.lag_n) : 0u;
+
+		nn_detail_to(buf, cap, NN_LINE_ITEMS,
+		             (unsigned long)os.detections,
+		             (unsigned long)os.busy, (unsigned long)os.frames,
+		             (unsigned long)(lag100 / 100u),
+		             (unsigned long)(lag100 % 100u),
+		             (unsigned long)os.lag_max);
 		return 1;
+	}
 	case 1u + (unsigned)PLUGIN_SLOT_COUNT:
 		/* What the plugin's draw() spent of its painter budget, so the cap
 		 * can be judged rather than argued about (issue #103).  Always a
@@ -2523,18 +2557,16 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 		return 1;
 	}
 	case 3u + (unsigned)PLUGIN_SLOT_COUNT:
-		/* The producer-side split (issue #60).  Only when the clock behind it
-		   is trusted -- an untrusted number here would be read as a
+		/* The stage split (issues #60, #129).  Only when the clock behind
+		   it is trusted -- an untrusted number here would be read as a
 		   measurement.  Last, because it may decline. */
 		if (!os.prof_ok || os.prof_frames == 0u)
 			return 0;
-		nn_detail_to(buf, cap,
-		             "producer: %lu us prep, %lu us invoke, %lu us decode "
-		             "(%lu frames)",
+		nn_detail_to(buf, cap, NN_LINE_WORKER,
 		             (unsigned long)(os.prep_us / os.prof_frames),
 		             (unsigned long)(os.invoke_us / os.prof_frames),
 		             (unsigned long)(os.decode_us / os.prof_frames),
-		             (unsigned long)os.prof_frames);
+		             (unsigned long)(os.cycle_us / os.prof_frames));
 		return 1;
 	default:
 		return 0;

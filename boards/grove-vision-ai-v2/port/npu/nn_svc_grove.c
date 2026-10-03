@@ -1470,8 +1470,8 @@ static int nn_run_no_result(int shot, struct nn_op_result *res)
 		nn_detail_set("preprocessing refused the frame");
 		return NN_SVC_ERR_HW;
 	case NN_OV_SHOT_NO_OUTPUTS:
-		nn_detail_set("an output of the model is unreadable; nothing was "
-		              "decoded");
+		nn_detail_set("output %u of the model is unreadable",
+		              nn_overlay_shot_index());
 		return NN_SVC_ERR_HW;
 	case NN_OV_SHOT_INVOKE_FAILED:
 		nn_detail_set("inference failed");

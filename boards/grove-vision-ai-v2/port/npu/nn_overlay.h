@@ -119,7 +119,8 @@ int nn_overlay_work(void);
                                            to the record                    */
 #define NN_OV_SHOT_PREP_FAILED   2u   /**< the producer could not prepare it */
 #define NN_OV_SHOT_STOPPED       3u   /**< a stop came first; no invoke      */
-#define NN_OV_SHOT_NO_OUTPUTS    4u   /**< an output tensor was unreadable   */
+#define NN_OV_SHOT_NO_OUTPUTS    4u   /**< an output tensor was unreadable
+                                           (nn_overlay_shot_index())      */
 #define NN_OV_SHOT_INVOKE_FAILED 5u
 #define NN_OV_SHOT_LEASE_TIMEOUT 6u   /**< inferred, not decoded             */
 #define NN_OV_SHOT_NOT_HELD      7u   /**< the decode refused an unleased call */
@@ -139,6 +140,11 @@ const struct cam_lcd_overlay *nn_overlay_arm_oneshot(void);
 /** How the one-shot's frame ended, NN_OV_SHOT_*.  Read it BEFORE the record's
  *  count: the worker publishes and only then sets this. */
 int nn_overlay_shot(void);
+
+/** With NN_OV_SHOT_NO_OUTPUTS: the index of the output that could not be read
+ *  (review of a438f76 -- `nn run` used to name it).  Read after
+ *  nn_overlay_shot(). */
+unsigned nn_overlay_shot_index(void);
 
 /**
  * @brief  Ask the overlay to stop doing work.

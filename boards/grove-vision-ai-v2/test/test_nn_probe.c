@@ -56,9 +56,11 @@ static void expect(const char *what, int cond, const char *fmt, ...)
 	failures++;
 }
 
-/* Four contexts told apart by priority AND stack, like the board's. */
+/* Four contexts told apart by priority AND stack, like the board's -- with the
+ * camera producer (10 / 8192) beside them, the worker's stack at another
+ * priority, which since issue #129 is none of them. */
 static const struct nn_probe_thread_class tab[NN_PROBE_CTX_COUNT] = {
-	[NN_PROBE_PRODUCER] = { 10u, 8192u },
+	[NN_PROBE_WORKER]   = { 12u, 8192u },
 	[NN_PROBE_PANEL]    = {  9u, 2048u },
 	[NN_PROBE_CONSOLE]  = { 16u, 4096u },
 	[NN_PROBE_BG]       = { 17u, 4096u },
@@ -67,8 +69,8 @@ static const struct nn_probe_thread_class tab[NN_PROBE_CTX_COUNT] = {
 static void test_classify(void)
 {
 	printf("classify:\n");
-	expect("the producer", nn_probe_classify(tab, 10u, 8192u) ==
-	       NN_PROBE_PRODUCER, "no");
+	expect("the inference worker", nn_probe_classify(tab, 12u, 8192u) ==
+	       NN_PROBE_WORKER, "no");
 	expect("the panel", nn_probe_classify(tab, 9u, 2048u) == NN_PROBE_PANEL,
 	       "no");
 	expect("a console", nn_probe_classify(tab, 16u, 4096u) ==
@@ -78,8 +80,9 @@ static void test_classify(void)
 	       "no");
 	expect("[!] a console's priority on another stack is nobody",
 	       nn_probe_classify(tab, 16u, 2048u) == NN_PROBE_UNKNOWN, "matched");
-	expect("and the producer's stack at another priority is nobody",
-	       nn_probe_classify(tab, 15u, 8192u) == NN_PROBE_UNKNOWN, "matched");
+	expect("[!] the camera producer -- the worker's stack, its own priority "
+	       "-- is nobody (issue #129)",
+	       nn_probe_classify(tab, 10u, 8192u) == NN_PROBE_UNKNOWN, "matched");
 	expect("no table is nobody",
 	       nn_probe_classify(NULL, 16u, 4096u) == NN_PROBE_UNKNOWN, "matched");
 }
@@ -174,7 +177,7 @@ static void test_record(void)
 
 	expect("[!] coverage is per thread: a console sample does not measure "
 	       "the background job", r.cell[NN_PROBE_BG].hits == 0u &&
-	       r.cell[NN_PROBE_PRODUCER].hits == 0u &&
+	       r.cell[NN_PROBE_WORKER].hits == 0u &&
 	       r.cell[NN_PROBE_PANEL].hits == 0u, "bg %u", r.cell[NN_PROBE_BG].hits);
 
 	nn_probe_record(&r, NN_PROBE_UNKNOWN, 64u, 0u, 4096u);
@@ -198,7 +201,7 @@ static void test_record(void)
 	expect("and no record is no crash", 1, "");
 }
 
-#define ON_PROD   (1u << NN_PROBE_PRODUCER)
+#define ON_WORK   (1u << NN_PROBE_WORKER)
 #define ON_PANEL  (1u << NN_PROBE_PANEL)
 #define ON_SHELL  ((1u << NN_PROBE_CONSOLE) | (1u << NN_PROBE_BG))
 
@@ -216,21 +219,21 @@ static void test_line(void)
 	       "'%s'", buf);
 
 	nn_probe_record(&r, NN_PROBE_CONSOLE, 1840u, 2256u, 4096u);
-	nn_probe_record(&r, NN_PROBE_PRODUCER, 1072u, 7120u, 8192u);
-	n = nn_probe_line(buf, sizeof buf, "decode", &r, ON_PROD | ON_SHELL,
+	nn_probe_record(&r, NN_PROBE_WORKER, 1072u, 7120u, 8192u);
+	n = nn_probe_line(buf, sizeof buf, "decode", &r, ON_WORK | ON_SHELL,
 	                  NULL);
 	expect("observed threads as depth/stack, an unobserved one as --, and "
 	       "the least left over what was seen",
-	       n > 0 && strcmp(buf, "decode   : prod 1072/8192 con 1840/4096 "
+	       n > 0 && strcmp(buf, "decode   : work 1072/8192 con 1840/4096 "
 	                            "bg --; left 2256") == 0, "'%s'", buf);
 
 	nn_probe_record(&r, NN_PROBE_PANEL, 200u, 1848u, 2048u);
 	nn_probe_reject(&r);
-	n = nn_probe_line(buf, sizeof buf, "decode", &r, ON_PROD | ON_SHELL,
+	n = nn_probe_line(buf, sizeof buf, "decode", &r, ON_WORK | ON_SHELL,
 	                  "(note)");
 	expect("[!] a thread the slot is not supposed to run on is SHOWN and "
 	       "flagged, then the invalid count, then the note",
-	       strcmp(buf, "decode   : prod 1072/8192 !panel 200/2048 con "
+	       strcmp(buf, "decode   : work 1072/8192 !panel 200/2048 con "
 	                   "1840/4096 bg --; left 1848 inv 1 (note)") == 0,
 	       "'%s'", buf);
 
@@ -294,13 +297,13 @@ static void test_line(void)
 	}
 
 	memset(&r, 0, sizeof r);
-	r.cell[NN_PROBE_PRODUCER] = (struct nn_probe_cell){ 99999u, 99999u,
+	r.cell[NN_PROBE_WORKER] = (struct nn_probe_cell){ 99999u, 99999u,
 	                                                     99999u, 1u };
-	r.cell[NN_PROBE_PANEL]    = r.cell[NN_PROBE_PRODUCER];
-	r.cell[NN_PROBE_CONSOLE]  = r.cell[NN_PROBE_PRODUCER];
-	r.cell[NN_PROBE_BG]       = r.cell[NN_PROBE_PRODUCER];
+	r.cell[NN_PROBE_PANEL]    = r.cell[NN_PROBE_WORKER];
+	r.cell[NN_PROBE_CONSOLE]  = r.cell[NN_PROBE_WORKER];
+	r.cell[NN_PROBE_BG]       = r.cell[NN_PROBE_WORKER];
 	r.invalid = UINT32_MAX;
-	n = nn_probe_line(buf, sizeof buf, "shapes_ok", &r, ON_PROD | ON_SHELL,
+	n = nn_probe_line(buf, sizeof buf, "shapes_ok", &r, ON_WORK | ON_SHELL,
 	                  "(upper bound)");
 	expect("past what the stacks allow, it is cut at the caller's buffer, "
 	       "and terminated",

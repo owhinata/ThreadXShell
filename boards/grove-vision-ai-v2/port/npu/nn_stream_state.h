@@ -99,13 +99,11 @@ enum nn_stream_wjoin {
 	 * confirmed out (nn_stream_may_join_worker() says so): with a producer
 	 * still running, nothing the worker is doing is stable.
 	 *
-	 * [!] AND, IN STAGE 1 OF #129, WHAT EVERY STOP PASSES: the stream still
-	 * infers on the producer and nothing ever arms the worker, so there is
-	 * nothing to join.  This value reproduces the table as it was before the
-	 * worker existed, which test/test_nn_stream.c holds against a frozen copy
-	 * of it.  Once the stop does join (stage 2), a confirmed producer with the
-	 * join skipped is a caller bug, and the safe reading of one is terminal --
-	 * the same as the detach skipped below.
+	 * [!] ON A CONFIRMED PRODUCER STOP IT IS TERMINAL, "worker did not
+	 * return".  The stop joins the worker whenever it may, so a confirmed
+	 * producer with the join skipped is a caller bug, and the safe reading of
+	 * one is that the worker may still be inside the NPU or the plugin -- the
+	 * same reading as the detach skipped below.
 	 */
 	NN_STREAM_WJOIN_NOT_TRIED = 0,
 	/** The worker was parked with nothing handed over or running. */
@@ -120,17 +118,23 @@ struct nn_stream_verdict {
 };
 
 /**
- * May the sink be unlinked, given what the camera stop returned?
+ * May the record boundary be taken and the sink be unlinked, given what the
+ * camera stop and the worker join returned?
  *
- * [!] ONLY ON A CONFIRMED STOP.  This is camera.h's rule and the reason the
- * whole lost-producer state exists: anything but success means the producer may
- * still be inside consume(), and unlinking there is what the state was invented
- * to prevent.  Kept separate from the verdict so a host test can show that
- * widening it -- "not running is close enough" -- fails.
+ * [!] ONLY ON A CONFIRMED STOP OF BOTH.  The producer half is camera.h's rule
+ * and the reason the whole lost-producer state exists: anything but success
+ * means the producer may still be inside consume(), and unlinking there is what
+ * the state was invented to prevent.  The worker half is issue #129's: a worker
+ * that did not come back may still publish, so a boundary taken now would let
+ * its decode land in the next session.  Kept separate from the verdict so a
+ * host test can show that widening either -- "not running is close enough" --
+ * fails.
  *
- * @return non-zero when the detach may be attempted
+ * @param cam_rc       what camera_stream_stop() returned
+ * @param worker_join  enum nn_stream_wjoin
+ * @return non-zero when the boundary and the detach may be attempted
  */
-int nn_stream_may_detach(int cam_rc);
+int nn_stream_may_detach(int cam_rc, int worker_join);
 
 /**
  * May the inference worker be joined, given what the camera stop returned?

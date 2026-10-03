@@ -1687,7 +1687,8 @@ add_custom_target(flash
 # Which thread each slot runs on is the table in port/npu/nn_plugin_stack.h,
 # where the firmware also asserts every allowance below each of those stacks:
 # the shell's (a console, or a background job) for every slot but draw, the
-# producer's as well for decode, the panel's for draw.
+# inference worker's as well for decode (issue #129; the producer's before it),
+# the panel's for draw.
 #
 # [!] UNTIL ISSUE #119 THE DEPTH WAS TAKEN IN THE WRONG PLACE AND ON TWO THREADS.
 # The probe sat in nn_overlay.c, before the call into nn_active_*(), so the frame

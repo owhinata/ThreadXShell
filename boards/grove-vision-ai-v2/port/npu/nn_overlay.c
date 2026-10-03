@@ -23,10 +23,11 @@
 #include "nn_preproc.h"
 #include "nn_rec.h"
 #include "npu.h"
+#include "nn_worker.h"     /* the inference worker (issue #129) */
 #include "tx_glue.h"       /* the EPK's TIMER2: the stage clock (issue #60) */
 
 /*
- * [!] Set from the SHELL thread, read on the PRODUCER thread.
+ * [!] Set from the SHELL thread, read on the PRODUCER and WORKER threads.
  *
  * volatile, and that is the whole of the synchronisation: it is a single word,
  * every write is a plain store of 0 or 1, and no decision anywhere depends on
@@ -46,13 +47,12 @@ static struct nn_overlay_stats nn_ov_stats;
  * tx_glue_profile_ok(), and the sink number these stages have to sum against
  * is measured with it.  64-bit because a long preview overflows 32 at 6 MHz.
  *
- * Written on the producer thread only, with no critical section -- the same
- * discipline as camera.c's cam_prof, and sound for the same reason: every
- * reader snapshots under TX_DISABLE, and the console thread that reads them
- * cannot preempt the producer mid-add (it is strictly below it).  Only frames
- * that completed all three stages accumulate, so the three means describe the
- * same set of frames; a frame that failed mid-way vanishes into `sink`'s
- * remainder, which is where every other anomaly in that column already goes.
+ * Written by the inference worker only, inside a critical section since issue
+ * #129: the worker runs below the producer, which can preempt it mid-add, and
+ * every reader snapshots under TX_DISABLE.  `prep` is the producer's figure,
+ * carried in the job and added by the worker with the rest.  Only frames that
+ * completed all three stages accumulate, so the three means describe the same
+ * set of frames; a frame that failed mid-way adds to none of them.
  */
 static uint64_t nn_ov_prep_ticks;
 static uint64_t nn_ov_invoke_ticks;
@@ -60,7 +60,9 @@ static uint64_t nn_ov_decode_ticks;
 static uint32_t nn_ov_prof_frames;
 
 /*
- * This frame's detections, produced by process() and consumed by draw().
+ * What process() hands to draw() for the same frame -- since issue #129 only
+ * the frame's number; the result draw() paints is the worker's, behind the
+ * plugin lease.
  *
  * [!] THEY ARE NO LONGER THE SAME THREAD (issue #57).  process() runs on the
  * camera producer, inside consume(); draw() runs on the panel thread, inside the
@@ -80,12 +82,12 @@ static uint32_t nn_ov_prof_frames;
  * Note that NONE of that is an argument about priorities, which is why issue #64
  * could reverse the two threads' ranking without touching this file.
  *
- * The plugin lease both of them now try (issue #127) is a different matter: it
- * keeps a CONSOLE out of the plugin while either is inside, not process() away
- * from draw() -- the hand-off above still does that.
+ * The plugin lease (issue #127) is a different matter: it keeps the worker's
+ * decode, the panel's draw and a console's call out of the plugin at the same
+ * time.
  *
- * Static because nothing here may ever be freed under a producer -- or now a
- * panel thread -- that did not acknowledge a stop (see nn_overlay.h).
+ * Static because nothing here may ever be freed under a producer, a worker or a
+ * panel thread that did not acknowledge a stop (see nn_overlay.h).
  *
  * [!] NO BOX ARRAY SINCE ISSUE #104.  A stream only runs with a plugin loaded,
  * and a plugin's result is its own -- it paints through the painter, and this
@@ -95,7 +97,6 @@ static uint32_t nn_ov_prof_frames;
  * annotated nothing rather than only that it did not. */
 static int           nn_ov_last_status;
 static int           nn_ov_ndet;
-static struct nn_preproc_geom nn_ov_geom;
 
 /*
  * [!] THE STACK PROBE THAT STOOD HERE MOVED TO THE PLUGIN'S ENTRY (issue #119).
@@ -143,16 +144,65 @@ static struct nn_preproc_geom nn_ov_geom;
 static uint32_t nn_ov_draw_spent;     /* high-water, pixels charged  */
 static uint32_t nn_ov_draw_refused;   /* primitives refused for want */
 
+/*
+ * ---- The producer / worker split (issue #129, Epic #122 U1) ----------------
+ *
+ * The producer prepares a frame STRAIGHT INTO the model's input tensor, and
+ * only while the worker wants one (nn_handoff.h); the worker runs the invoke,
+ * the decode and the publish.  There is no staging copy: the input the model
+ * reads is the raw WDMA3 frame, which the pipeline's pin does not reach and the
+ * datapath rewrites two frames later, so it is either copied or prepared on
+ * the producer -- and the copy cost a quarter of the detector's frames (spike,
+ * 2026-10-03).
+ *
+ * WHAT CROSSES.  The job below is written by the producer only while the
+ * hand-over word is WANT, and read by the worker only after it TAKEs it; both
+ * transitions are critical sections, which are compiler barriers, and the
+ * worker copies the job out before it does anything else.
+ */
+struct nn_ov_job {
+	uint32_t frame;                /* the producer's frame number          */
+	uint32_t gen;                  /* the record generation (issue #118)   */
+	uint32_t prep_ticks;           /* the producer's prep, EPK ticks       */
+	struct nn_preproc_geom geom;   /* the transform this input was cut by  */
+};
+static struct nn_ov_job nn_ov_job;
+
+/* Frames this sink was handed since arm.  Producer writes; draw() reads it for
+ * the frame it is drawing (the one-delivery hand-off orders the two). */
+static uint32_t nn_ov_frame_no;
+static uint32_t nn_ov_cur_frame;
+
+/*
+ * What the latest publish of THIS stream was, for process()'s answer: draw this
+ * frame or not.  Written by the worker inside the lease, read by the producer
+ * as one byte.  NONE until the first decode is published.
+ */
+#define NN_OV_RES_NONE 0u
+#define NN_OV_RES_OK   1u
+#define NN_OV_RES_FAIL 2u
+static volatile uint8_t nn_ov_result;
+/* The producer's frame number of the result the plugin holds.  Written by the
+ * worker and read by draw(), both under the plugin lease. */
+static uint32_t nn_ov_res_frame;
+
+/* A counter both the producer and the worker write. */
+static void nn_ov_bump(uint32_t *c)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	(*c)++;
+	TX_RESTORE
+}
+
 static int nn_overlay_process(void *ctx, const void *pixels,
                               uint16_t w, uint16_t h)
 {
 	struct npu_tensor in;
-	struct npu_tensor outs[NPU_DESC_MAX_OUTPUTS];
-	unsigned n_out, i;
-	uint32_t t0, t1;
-	uint32_t e0, e1, e2, e3;
-	uint32_t gen;
-	int nd;
+	struct nn_preproc_geom geom;
+	uint32_t e0, e1;
+	int draw;
 
 	(void)ctx;
 	(void)w;
@@ -176,182 +226,195 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	 */
 	(void)pixels;
 
-	nn_ov_ndet    = 0;
-
-	/* Stop check 1 of 3: nothing started yet, so this is free. */
-	if (nn_ov_stop) {
-		nn_ov_stats.skipped++;
-		return -1;
-	}
-	/* The record generation this frame publishes under (issue #118).  No
-	 * boundary can move it while this producer is inside consume(): the
-	 * stream's start takes its boundary before the sink is attached and its
-	 * stop only after camera_stream_stop() has confirmed this thread is out. */
-	gen = nn_rec_gen();
+	nn_ov_frame_no++;
+	nn_ov_cur_frame = nn_ov_frame_no;
 
 	/*
-	 * Stage clocks (issue #60).  Everything from here to the invoke is
-	 * `prep`: the tensor and geometry setup is microseconds, so the row
-	 * effectively reads as the crop/resize -- but it is measured from HERE
-	 * so that prep + invoke + decode covers this function without a gap,
-	 * and the difference against `camera stats`' sink row is exactly the
-	 * hand-off plus whatever preempted the producer inside it.
+	 * [!] THE ANSWER IS "DRAW THIS FRAME OR NOT", NOT "WAS IT INFERRED" (issue
+	 * #129).  The plugin paints its LATEST result on whatever frame is shown,
+	 * so a frame the worker was too busy to take is still annotated -- one or
+	 * more frames late -- as long as the stream's latest decode succeeded.
+	 * Declined only before the first result, after a failed decode, and while
+	 * a stop is pending; the sink counts those as shown unannotated.
 	 */
+	draw = (nn_ov_result == NN_OV_RES_OK) ? 0 : -1;
+
+	/* Nothing started yet, so this is free; no draw on a panel about to be
+	 * given up. */
+	if (nn_ov_stop) {
+		nn_ov_bump(&nn_ov_stats.skipped);
+		return -1;
+	}
+
+	/*
+	 * [!] THE INPUT IS THE PRODUCER'S ONLY WHILE THE WORKER WANTS A FRAME.
+	 * WANT is stable from here to the HAND below: only this thread leaves it
+	 * (HAND), and the stop's JOIN runs after this thread is confirmed out.
+	 * Not wanted means the worker is still on an earlier frame -- this one is
+	 * not inferred (skipped, and counted as busy apart).
+	 */
+	if (!nn_worker_wants()) {
+		nn_ov_bump(&nn_ov_stats.skipped);
+		nn_ov_stats.busy++;      /* producer only */
+		return draw;
+	}
+
+	/* Stage clock (issue #60): `prep` is the producer's whole share now. */
 	e0 = tx_glue_epk_timer_ticks();
 
-	if (npu_input(&in) != NPU_OK) {
-		nn_ov_stats.errors++;
-		return -1;
-	}
-	if (in.rank != 4 || in.dims[3] != 3) {
-		nn_ov_stats.errors++;
-		return -1;
-	}
-	if (nn_preproc_geom(CAM_FRAME_WIDTH, CAM_FRAME_HEIGHT,
+	if (npu_input(&in) != NPU_OK ||
+	    in.rank != 4 || in.dims[3] != 3 ||
+	    nn_preproc_geom(CAM_FRAME_WIDTH, CAM_FRAME_HEIGHT,
 	                    (uint32_t)in.dims[2], (uint32_t)in.dims[1],
-	                    &nn_ov_geom) != 0) {
-		nn_ov_stats.errors++;
-		return -1;
+	                    &geom) != 0 ||
+	    in.bytes < (size_t)in.dims[2] * (size_t)in.dims[1] * 3u ||
+	    nn_preproc_fill(camera_raw_frame(), CAM_FRAME_WIDTH,
+	                    CAM_FRAME_HEIGHT, &geom, (uint8_t *)in.data) != 0) {
+		/* The worker still wants a frame; the next one tries again. */
+		nn_ov_bump(&nn_ov_stats.errors);
+		return draw;
 	}
-	if (in.bytes < (size_t)in.dims[2] * (size_t)in.dims[1] * 3u) {
-		nn_ov_stats.errors++;
-		return -1;
+	e1 = tx_glue_epk_timer_ticks();
+
+	/* The record generation this frame publishes under (issue #118).  No
+	 * boundary can move it while this producer is inside consume(): the
+	 * stream's start takes its boundary before the sink is attached, and its
+	 * stop only after the producer AND the worker are confirmed out. */
+	nn_ov_job.frame      = nn_ov_frame_no;
+	nn_ov_job.gen        = nn_rec_gen();
+	nn_ov_job.prep_ticks = e1 - e0;
+	nn_ov_job.geom       = geom;
+	/* After the input is written and the job filled, never before. */
+	if (!nn_worker_hand())
+		nn_ov_bump(&nn_ov_stats.errors);   /* not reachable: WANT above */
+	return draw;
+}
+
+void nn_overlay_work(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+	struct nn_ov_job job;
+	struct npu_tensor outs[NPU_DESC_MAX_OUTPUTS];
+	unsigned n_out, i;
+	uint32_t t0, t1;
+	uint32_t e1, e2, e3;
+	int nd;
+
+	job = nn_ov_job;
+
+	/*
+	 * [!] A PENDING STOP IS NOT FOLLOWED BY AN INVOKE.  This is the last
+	 * instant before the expensive, uninterruptible part; the stop's join
+	 * then waits out at most an invoke already running.
+	 */
+	if (nn_ov_stop) {
+		nn_ov_bump(&nn_ov_stats.skipped);
+		return;
 	}
 
 	n_out = npu_output_count();
 	if (n_out > NPU_DESC_MAX_OUTPUTS) {
-		nn_ov_stats.errors++;
-		return -1;
+		nn_ov_bump(&nn_ov_stats.errors);
+		return;
 	}
 	for (i = 0; i < n_out; i++)
 		if (npu_output(i, &outs[i]) != NPU_OK) {
-			nn_ov_stats.errors++;
-			return -1;
+			nn_ov_bump(&nn_ov_stats.errors);
+			return;
 		}
 
-	if (nn_preproc_fill(camera_raw_frame(), CAM_FRAME_WIDTH,
-	                    CAM_FRAME_HEIGHT, &nn_ov_geom,
-	                    (uint8_t *)in.data) != 0) {
-		nn_ov_stats.errors++;
-		return -1;
-	}
-	e1 = tx_glue_epk_timer_ticks();
-
-	/*
-	 * Stop check 2 of 3, and the one that matters: this is the last instant
-	 * before the expensive, uninterruptible part.  Everything above is
-	 * microseconds; what follows can be the whole NPU timeout if an
-	 * interrupt is lost.
-	 */
-	if (nn_ov_stop) {
-		nn_ov_stats.skipped++;
-		return -1;
-	}
-
 	/* No cache maintenance here.  The port does it inside Invoke(), at the
-	 * two instants the arena changes hands (issue #46); anything from out
-	 * here is either too early or too late. */
+	 * two instants the arena changes hands (issue #46) -- on this thread now,
+	 * the same two points; anything from out here is too early or too late. */
+	e1 = tx_glue_epk_timer_ticks();
 	t0 = (uint32_t)tx_time_get();
 	if (npu_invoke() != NPU_OK) {
-		nn_ov_stats.errors++;
-		return -1;
+		nn_ov_bump(&nn_ov_stats.errors);
+		return;
 	}
 	t1 = (uint32_t)tx_time_get();
 	e2 = tx_glue_epk_timer_ticks();
 
 	/*
-	 * [!] THE PLUGIN LEASE, TRIED ONCE AND NEVER WAITED FOR (issue #127).  A
-	 * console calling into the same plugin -- `nn thresh`, `nn dets` -- holds
-	 * it, and the plugin's state is private and half-written while either of
-	 * them is inside.  The producer does not wait for a console: a refusal
-	 * skips this frame's decode, and the frame goes to the panel bare.
-	 *
-	 * ON A REFUSAL NOTHING OF THIS FRAME IS PUBLISHED: not the decode, not
-	 * the record, not the geometry.  The record and the plugin's own result
-	 * still describe the previous frame, together, which is the pairing the
-	 * record exists for.  process() declines the frame the way it declines any
-	 * other it could not annotate, so draw() is not called for it -- and the
-	 * panel never asks for the lease on its behalf, which is what makes this
-	 * refusal the frame's ONE miss (plugin_lease_miss.h).  Counted there, not
-	 * in skipped or errors: the frame was inferred and nothing failed.
+	 * [!] THE PLUGIN LEASE, WAITED FOR AND BOUNDED (issue #129).  A console
+	 * calling into the same plugin -- `nn thresh`, `nn dets` -- holds it for
+	 * microseconds to milliseconds; the worker is not on the camera's or the
+	 * panel's clock, so it waits rather than throwing a finished inference
+	 * away.  A wait that runs out is an answer, not a licence: nothing of
+	 * this frame is published, not the decode, not the record, not the
+	 * geometry, and the record and the plugin's own result still describe the
+	 * previous frame together.  Counted as an error.
 	 *
 	 * Taken after the invoke, not before it: the NPU does not touch the
 	 * plugin, and holding the lease for the whole inference would make every
-	 * console wait out a frame.  The `decode` stage row (e2 to e3) now
-	 * includes the try and the give -- about 2 us a frame when measured
-	 * (Epic #122 U1) -- and a refused frame adds to no row, like any other
-	 * frame that did not complete.
+	 * console wait out a frame.
 	 */
-	if (!plugin_lease_try(PLUGIN_LEASE_PRODUCER))
-		return -1;
+	if (!plugin_lease_take()) {
+		TX_DISABLE
+		nn_ov_stats.errors++;
+		nn_ov_stats.lease_timeouts++;
+		TX_RESTORE
+		return;
+	}
 	/*
 	 * [!] THE GEOMETRY BEFORE THE DECODE, AND UNDER THE SAME HOLD (issue
 	 * #127).  It is part of the plugin's result: decode() may call the base's
 	 * to_frame(), which reads it, and a console holding the lease after this
-	 * frame may ask the plugin for a report that does the same.  Published
-	 * after the decode, as it was, a decode ran against the previous frame's
-	 * transform -- the same one on a running stream, but the order should not
-	 * depend on that.  Written whatever the decode then says, because the
-	 * record below is too.
+	 * frame may ask the plugin for a report that does the same.  It is the
+	 * geometry the producer cut THIS input by, carried in the job.  Written
+	 * whatever the decode then says, because the record below is too.
 	 */
-	(void)nn_active_set_geom(&nn_ov_geom);   /* issue #103 */
+	(void)nn_active_set_geom(&job.geom);   /* issue #103 */
 	nd = nn_active_decode(outs, n_out);
 	if (nd == NN_ACTIVE_NOT_HELD) {
-		/* [!] Not reachable while the try above stands -- and if it ever
-		 * does not, the decode did not run, so nothing is published and the
-		 * frame goes bare.  Counted by the entry check (plugin_lease_unheld()),
-		 * not as a decoder error: the decoder was never asked. */
+		/* [!] Not reachable while the take above stands -- and if it ever
+		 * does not, the decode did not run, so nothing is published.
+		 * Counted by the entry check (plugin_lease_unheld()), not as a
+		 * decoder error: the decoder was never asked. */
 		plugin_lease_give();
-		return -1;
+		return;
 	}
 	/*
-	 * [!] PUBLISHED AT ONCE, WHATEVER IT SAYS (issue #118).  `nn dets` reads
-	 * the record, and the plugin's private result has just been rewritten --
-	 * so the record must describe this decode before anything else can ask,
-	 * negative values included: "the decoder refused" is a result too, and
-	 * leaving the previous frame's count beside the new private state is the
-	 * pairing the record exists to prevent.  A short interrupt-disabled
-	 * section; no block, no sleep, no other lock on this thread.
-	 *
-	 * Still inside the lease, so a console that takes it next sees the record
-	 * and the plugin's result describe the same frame.
+	 * [!] PUBLISHED AT ONCE, WHATEVER IT SAYS (issue #118), under the
+	 * generation the producer handed over.  `nn dets` reads the record, and
+	 * the plugin's private result has just been rewritten -- so the record
+	 * must describe this decode before anything else can ask, negative values
+	 * included.  Still inside the lease, so a console that takes it next sees
+	 * the record and the plugin's result describe the same frame, and the
+	 * panel's lag reads the frame this result came from.
 	 */
-	(void)nn_rec_publish_external(nd, gen);
+	(void)nn_rec_publish_external(nd, job.gen);
+	nn_ov_res_frame = job.frame;
+	nn_ov_result    = (nd < 0) ? NN_OV_RES_FAIL : NN_OV_RES_OK;
 	plugin_lease_give();
+	e3 = tx_glue_epk_timer_ticks();
+
+	TX_DISABLE
 	if (nd < 0) {
 		/* [!] There is no console on this path, so the only way a decode
 		 * failure can be told apart afterwards is if it is counted apart
-		 * (issue #97).  A bare errors++ makes "the open model is not
-		 * BlazeFace" and "the decoder was never initialised" the same
-		 * number, and they call for opposite investigations. */
+		 * (issue #97). */
 		if (nd == BF_ERR_MODEL)
 			nn_ov_stats.model_errors++;
 		else
 			nn_ov_stats.decoder_errors++;
 		nn_ov_stats.errors++;
 		nn_ov_last_status = nd;
-		return -1;
+	} else {
+		nn_ov_last_status = BF_OK;
+		nn_ov_stats.inferences++;
+		nn_ov_stats.detections += (uint32_t)nd;
+		nn_ov_stats.last_ms   = t1 - t0;
+		nn_ov_stats.last_ndet = nd;
+		/* Only frames that completed every stage accumulate, so the three
+		 * means describe one set: prep from the producer, the rest here. */
+		nn_ov_prep_ticks   += job.prep_ticks;
+		nn_ov_invoke_ticks += (uint32_t)(e2 - e1);
+		nn_ov_decode_ticks += (uint32_t)(e3 - e2);
+		nn_ov_prof_frames++;
+		nn_ov_ndet = nd;
 	}
-	nn_ov_last_status = BF_OK;
-	e3 = tx_glue_epk_timer_ticks();
-
-	nn_ov_stats.inferences++;
-	nn_ov_stats.detections += (uint32_t)nd;
-	nn_ov_stats.last_ms   = t1 - t0;
-	nn_ov_stats.last_ndet = nd;
-	nn_ov_prep_ticks   += (uint32_t)(e1 - e0);
-	nn_ov_invoke_ticks += (uint32_t)(e2 - e1);
-	nn_ov_decode_ticks += (uint32_t)(e3 - e2);
-	nn_ov_prof_frames++;
-	nn_ov_ndet    = nd;
-
-	/* Stop check 3 of 3: a stop that arrived during the inference should not
-	 * be followed by drawing on a panel the caller is about to stop using. */
-	if (nn_ov_stop) {
-		nn_ov_stats.skipped++;
-		return -1;
-	}
-	return 0;
+	TX_RESTORE
 }
 
 static void nn_overlay_draw(void *ctx, uint16_t *fb, uint16_t fb_w,
@@ -374,14 +437,14 @@ static void nn_overlay_draw(void *ctx, uint16_t *fb, uint16_t fb_w,
 		TX_INTERRUPT_SAVE_AREA
 		struct plugin_painter paint;
 		struct plugin_paint_budget bud;
-		uint32_t spent;
+		uint32_t spent, lag;
 
 		/*
 		 * [!] THE PLUGIN LEASE, TRIED ONCE INSIDE THE PANEL GUARD (issue
-		 * #127).  Nothing a console does can be inside this plugin while it
-		 * paints.  A refusal shows the frame without an overlay and is
-		 * counted as this frame's miss; it is the only one the frame can have,
-		 * because a frame the producer could not decode never reaches here.
+		 * #127).  Nothing a console or the worker does can be inside this
+		 * plugin while it paints.  A refusal shows the frame without an
+		 * overlay and is counted as this frame's miss -- the only one it can
+		 * have, since the producer no longer asks (issue #129).
 		 *
 		 * [!] THE ORDER IS PANEL GUARD, THEN LEASE -- wio's is the other way
 		 * round (lease, then frame lock), because here draw() is called from
@@ -401,6 +464,10 @@ static void nn_overlay_draw(void *ctx, uint16_t *fb, uint16_t fb_w,
 		/* NN_ACTIVE_NOT_HELD paints nothing and is counted by the entry
 		 * check itself; there is nothing more to do with it here. */
 		(void)nn_active_draw(&paint);
+		/* How many frames behind the picture this result is (issue #129):
+		 * the frame being drawn less the frame the result was cut from,
+		 * read under the same hold the worker wrote it in. */
+		lag = nn_ov_cur_frame - nn_ov_res_frame;
 		plugin_lease_give();
 
 		/*
@@ -420,6 +487,10 @@ static void nn_overlay_draw(void *ctx, uint16_t *fb, uint16_t fb_w,
 		if (spent > nn_ov_draw_spent)
 			nn_ov_draw_spent = spent;
 		nn_ov_draw_refused += bud.refused;
+		nn_ov_stats.lag_sum += lag;
+		nn_ov_stats.lag_n++;
+		if (lag > nn_ov_stats.lag_max)
+			nn_ov_stats.lag_max = lag;
 		TX_RESTORE
 	}
 }
@@ -455,10 +526,20 @@ const struct cam_lcd_overlay *nn_overlay_arm(void)
 	 * likewise not on stop.  Its own critical section, inside the call. */
 	plugin_lease_misses_reset();
 
+	/*
+	 * The worker is parked -- the caller armed it IDLE -> WANT and nothing
+	 * hands it a frame until the attach -- so nothing below has a writer.
+	 */
+	TX_DISABLE
 	nn_ov_stats.inferences = 0u;
 	nn_ov_stats.detections = 0u;
 	nn_ov_stats.skipped    = 0u;
 	nn_ov_stats.errors     = 0u;
+	nn_ov_stats.busy           = 0u;
+	nn_ov_stats.lease_timeouts = 0u;
+	nn_ov_stats.lag_sum        = 0u;
+	nn_ov_stats.lag_n          = 0u;
+	nn_ov_stats.lag_max        = 0u;
 	nn_ov_stats.model_errors   = 0u;
 	nn_ov_stats.decoder_errors = 0u;
 	nn_ov_stats.last_ms    = 0u;
@@ -469,7 +550,12 @@ const struct cam_lcd_overlay *nn_overlay_arm(void)
 	nn_ov_decode_ticks     = 0u;
 	nn_ov_prof_frames      = 0u;
 	nn_ov_ndet             = 0;
+	nn_ov_frame_no         = 0u;
+	nn_ov_cur_frame        = 0u;
+	nn_ov_res_frame        = 0u;
+	nn_ov_result           = NN_OV_RES_NONE;
 	nn_ov_stop             = 0u;
+	TX_RESTORE
 	return &nn_ov_vtable;
 }
 
@@ -498,7 +584,7 @@ void nn_overlay_stats(struct nn_overlay_stats *out)
 
 	/*
 	 * One critical section for the lot: the 64-bit accumulators are written
-	 * by the producer thread, and half of a 64-bit add is not a slightly
+	 * by the worker thread, and half of a 64-bit add is not a slightly
 	 * wrong number but a wildly wrong one.  Same treatment as the camera's
 	 * profile and the panel sink's, for the same reason.
 	 */

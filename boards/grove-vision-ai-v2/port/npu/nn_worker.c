@@ -15,6 +15,7 @@
 #include "camera.h"         /* CAM_PRODUCER_PRIO                    */
 #include "cli_config.h"     /* CLI_INSTANCE_{PRIORITY,STACK_SIZE}   */
 #include "nn_handoff.h"
+#include "nn_overlay.h"     /* nn_overlay_work(): the job               */
 #include "npu_hw.h"         /* NPU_INFERENCE_TIMEOUT_TICKS          */
 #include "plugin_lease.h"   /* PLUGIN_LEASE_WAIT_MS                 */
 
@@ -98,9 +99,10 @@ static void nn_worker_entry(ULONG arg)
 		if (!nn_wk_step((uint8_t)NN_HO_OP_TAKE))
 			continue;
 
-		/* Stage 2 runs the job here: invoke, lease, geometry, decode,
-		 * publish.  Until then nothing arms the worker, so this point is
-		 * not reached. */
+		/* Invoke, lease, geometry, decode, publish.  The input and the
+		 * outputs are this thread's until the DONE below, which is said only
+		 * after the decode has finished reading them. */
+		nn_overlay_work();
 
 		(void)nn_wk_step((uint8_t)NN_HO_OP_DONE);
 		(void)tx_event_flags_set(&nn_worker_flags, NN_WK_SETTLED, TX_OR);
@@ -133,6 +135,17 @@ int nn_worker_arm(void)
 	if (!nn_worker_ok)
 		return 0;
 	return nn_wk_step((uint8_t)NN_HO_OP_ARM);
+}
+
+int nn_worker_wants(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+	int w;
+
+	TX_DISABLE
+	w = (nn_wk_state == (uint8_t)NN_HO_WANT);
+	TX_RESTORE
+	return w;
 }
 
 int nn_worker_hand(void)

@@ -187,8 +187,8 @@ int main(void)
 			                  : "declares a job stack",
 			       shell[k], PLUGIN_ERR_STACK);
 		if (i == PLUGIN_SLOT_DECODE)
-			expect(i, "declares the producer stack",
-			       CAM_PRODUCER_STACK_BYTES, PLUGIN_ERR_STACK);
+			expect(i, "declares the worker stack",
+			       NN_WORKER_STACK_BYTES, PLUGIN_ERR_STACK);
 	}
 
 	if (failures) {

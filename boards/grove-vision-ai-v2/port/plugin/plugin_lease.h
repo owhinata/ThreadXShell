@@ -12,7 +12,7 @@
  * entry, and its replacement or removal.  The two are separate files on
  * purpose for now; folding them into one type is Epic #122 Phase 3b.
  *
- * WHY THIS BOARD NEEDS ONE AT ALL.  Here the frame pipeline already keeps the
+ * WHY THIS BOARD NEEDS ONE AT ALL.  Here the frame pipeline kept the (then)
  * producer's decode and the panel's draw apart (one delivery per sink, released
  * only after draw() returns), so the window that is open is the CONSOLE's: a
  * `nn thresh` or `nn dets` on a running stream enters the same plugin the
@@ -21,10 +21,17 @@
  * plugin never run at once" a property of every path rather than of the
  * pipeline's shape.
  *
- * WHO WAITS.  Only a console, and only up to PLUGIN_LEASE_WAIT_MS.  The producer
- * and the panel TRY and never wait: a refused producer skips the decode of that
- * frame, a refused panel shows the frame without an overlay, and both are
- * counted (plugin_lease_miss.h says what is counted and when a run ends).
+ * [!] SINCE ISSUE #129 IT ALSO KEEPS THE DECODE AND THE DRAW APART.  The decode
+ * moved to the inference worker, which the pipeline's one-delivery hand-off
+ * does not reach: the worker decodes the next frame while the panel draws the
+ * last result.  This lock is now the only thing between the two.
+ *
+ * WHO WAITS.  A console and, since issue #129, the inference worker -- both only
+ * up to PLUGIN_LEASE_WAIT_MS.  A worker whose wait runs out does not decode
+ * that frame and counts it as an error.  The panel TRIES and never waits: a
+ * refused panel shows the frame without an overlay, counted as a miss
+ * (plugin_lease_miss.h says what is counted and when a run ends).  The producer
+ * no longer asks at all: it prepares the input and hands it to the worker.
  *
  * [!] THE ORDER IS THE PANEL GUARD, THEN THIS -- THE OPPOSITE OF wio.  The draw
  * runs inside the panel guard, so the panel can only ask for this after it holds
@@ -40,7 +47,8 @@
  *
  * TX_INHERIT: a background job (priority 17) holding this while a console (16)
  * waits for it would otherwise be starved by whatever runs between them.  The
- * producer and the panel never wait, so inheritance never lifts them.
+ * worker (12) waiting lifts a console holder to 12 at most -- still below the
+ * camera producer and the panel, which never wait.
  */
 #ifndef PLUGIN_LEASE_H
 #define PLUGIN_LEASE_H

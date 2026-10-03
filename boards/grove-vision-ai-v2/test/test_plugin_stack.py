@@ -30,8 +30,8 @@ separate reasons, and this file answers each:
      against the REAL allowances: one byte past each limit must be refused.
 
 The real values are read from where the firmware gets them -- board.cmake for
-the allowances and the shell stacks, camera.h / cam_lcd_sink.h for the camera
-threads -- and each must be found exactly once.  A value this file could not
+the allowances and the shell stacks, nn_worker.h / cam_lcd_sink.h for the
+inference worker and the panel -- and each must be found exactly once.  A value this file could not
 find is a failure, not a default.
 
 [!] WHAT THIS DOES NOT SEE.  board.cmake states the slot -> allowance mapping
@@ -69,7 +69,7 @@ CFLAGS += ["-Werror"]
 SLOTS = ["entry", "shapes_ok", "decode", "draw", "report", "param_set",
          "param_get"]
 THREADS = {"entry": ["console", "bg"], "shapes_ok": ["console", "bg"],
-           "decode": ["producer", "console", "bg"], "draw": ["panel"],
+           "decode": ["worker", "console", "bg"], "draw": ["panel"],
            "report": ["console", "bg"], "param_set": ["console", "bg"],
            "param_get": ["console", "bg"]}
 EXPECT = {"entry": "SHELL", "shapes_ok": "SHELL", "decode": "SHELL",
@@ -80,7 +80,7 @@ EXPECT = {"entry": "SHELL", "shapes_ok": "SHELL", "decode": "SHELL",
 CEILINGS = {
     "console":  ("CLI_INSTANCE_STACK_SIZE", "SHELL"),
     "bg":       ("CLI_BG_JOB_STACK_SIZE", "SHELL"),
-    "producer": ("CAM_PRODUCER_STACK_BYTES", "SHELL"),
+    "worker":   ("NN_WORKER_STACK_BYTES", "SHELL"),
     "panel":    ("CAM_PANEL_STACK_BYTES", "PANEL"),
 }
 
@@ -129,10 +129,10 @@ def real_values():
             cmake, r"^\s*CLI_INSTANCE_STACK_SIZE=(\d+)\b", "console stack"),
         "CLI_BG_JOB_STACK_SIZE": find_one(
             cmake, r"^\s*CLI_BG_JOB_STACK_SIZE=(\d+)\b", "job stack"),
-        "CAM_PRODUCER_STACK_BYTES": find_one(
-            os.path.join(cam, "camera.h"),
-            r"^#define\s+CAM_PRODUCER_STACK_BYTES\s+(\d+)u?\s*$",
-            "producer stack"),
+        "NN_WORKER_STACK_BYTES": find_one(
+            os.path.join(BOARD, "port", "npu", "nn_worker.h"),
+            r"^#define\s+NN_WORKER_STACK_BYTES\s+(\d+)u?\s*$",
+            "worker stack"),
         "CAM_PANEL_STACK_BYTES": find_one(
             os.path.join(cam, "cam_lcd_sink.h"),
             r"^#define\s+CAM_PANEL_STACK_BYTES\s+(\d+)u?\s*$",
@@ -159,7 +159,7 @@ def compile_header(work, values, extra=()):
 #
 # Two DIFFERENT allowances, so an assert that compared the wrong one is caught
 # too: the panel's "equal" case below leaves the shell allowance comfortably
-# under it, and the producer's "below" case would trip an assert that compared
+# under it, and the worker's "below" case would trip an assert that compared
 # draw's allowance there instead of decode's.
 ALLOW = {"SHELL": 1000, "PANEL": 1016}
 WIDE = 1 << 16          # a ceiling that is out of the way
@@ -197,9 +197,9 @@ def ct_cases(real):
                   ["-DGROVE_PLUGIN_STACK_PRODUCER=4096u"], None,
                   "was retired by issue #119"))
     v = base()
-    v["CAM_PRODUCER_STACK_BYTES"] = None
+    v["NN_WORKER_STACK_BYTES"] = None
     cases.append(("a ceiling the includer did not bring", v, [], None,
-                  "include camera.h and cam_lcd_sink.h"))
+                  "include nn_worker.h and cam_lcd_sink.h"))
     return cases
 
 
@@ -300,7 +300,7 @@ def run_rt(real):
                   % (label + ": slot -> allowance"))
     # The thread masks (GROVE_PLUGIN_STACK_RUNS), against this file's table.
     # The bit order is nn_probe.h's contexts, asserted in nn_probe_rtos.c.
-    bit = {"producer": 1, "panel": 2, "console": 4, "bg": 8}
+    bit = {"worker": 1, "panel": 2, "console": 4, "bg": 8}
     runs = table["_runs"] if table else {}
     wrong = ["%s=%#x (want %#x)" % (s, runs.get(s, -1),
                                     sum(bit[t] for t in THREADS[s]))
@@ -318,11 +318,11 @@ def run_rt(real):
 def main():
     real = real_values()
     print("test_plugin_stack: allowances shell %d / panel %d; stacks console "
-          "%d, job %d, producer %d, panel %d" % (
+          "%d, job %d, worker %d, panel %d" % (
               real["GROVE_PLUGIN_STACK_SHELL"],
               real["GROVE_PLUGIN_STACK_PANEL"],
               real["CLI_INSTANCE_STACK_SIZE"], real["CLI_BG_JOB_STACK_SIZE"],
-              real["CAM_PRODUCER_STACK_BYTES"],
+              real["NN_WORKER_STACK_BYTES"],
               real["CAM_PANEL_STACK_BYTES"]))
     print("the header's asserts, one ceiling at a time:")
     bad = run_ct(real)

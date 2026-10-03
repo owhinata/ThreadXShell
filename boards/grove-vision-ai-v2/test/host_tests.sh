@@ -351,6 +351,16 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_nn_handoff"
 "$out/test_nn_handoff"
 
+# issue #129 -- how `nn run`'s wait for its one inference ends
+# (port/npu/nn_run_wait.c).  A publish and the deadline, a publish and a
+# Ctrl+C, a finished worker and a lost stream can all hold in one poll, and
+# only the order decides the status; none of those coincidences can be typed.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/npu" \
+    "$here/test_nn_run_wait.c" "$board/port/npu/nn_run_wait.c" \
+    $LDFLAGS -o "$out/test_nn_run_wait"
+"$out/test_nn_run_wait"
+
 # issue #122 -- where a `nn model load` ends (port/npu/nn_swap.c).  A load over
 # an open model is a replacement with a rollback, and the ending that matters
 # most -- the backend refuses the new model AND the previous one it was running
@@ -576,7 +586,7 @@ gcc $CFLAGS \
     -I "$board/port/npu" -I "$board/port/plugin" -I "$HOST_TEST_SVC" \
     -I "$HOST_TEST_INC" \
     -DGROVE_PLUGIN_STACK_SHELL=1024u -DGROVE_PLUGIN_STACK_PANEL=1024u \
-    -DNN_WORKER_STACK_BYTES=8192u -DCAM_PANEL_STACK_BYTES=2048u \
+    -DGROVE_PLUGIN_STACK_WORKER=1024u -DNN_WORKER_STACK_BYTES=8192u -DCAM_PANEL_STACK_BYTES=2048u \
     "$here/test_nn_probe.c" "$board/port/npu/nn_probe.c" \
     "$HOST_TEST_SVC/fmt.c" \
     $LDFLAGS -o "$out/test_nn_probe"

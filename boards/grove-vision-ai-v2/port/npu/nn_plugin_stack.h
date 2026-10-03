@@ -19,8 +19,7 @@
  *
  *   entry       `nn model load` -> plugin_run_load()     console / bg
  *   shapes_ok   the `nn stream start` admission          console / bg
- *   decode      `nn stream` (nn_overlay_work)            worker (#129)
- *               `nn run`, `nn dets` (nn_decode_into)     console / bg
+ *   decode      `nn stream`, `nn run` (nn_overlay_work)  worker (#129)
  *   draw        the panel thread, under the panel guard  panel
  *   report      `nn run`, `nn dets`                      console / bg
  *   param_set   `nn thresh`                              console / bg
@@ -31,9 +30,11 @@
  * yet all three are called on a 4,096 B shell stack: an allowance EQUAL to the
  * stack it runs on, which is a check that cannot refuse the case it exists for.
  * A slot reached from more than one thread is declared against the SHALLOWEST,
- * so decode takes the shell's figure, and the worker keeps an assert of its
- * own below.  Since issue #129 nothing runs a slot on the producer at all: the
- * stream's decode moved to the inference worker.
+ * so the slots on the shell take the shell's figure.  Since issue #129 decode
+ * runs on the inference worker ALONE -- the stream's moved there from the
+ * producer, `nn run`'s from the console, and `nn dets` only reads the record --
+ * so it is declared against the worker (GROVE_PLUGIN_STACK_WORKER), and nothing
+ * runs a slot on the producer at all.
  *
  * [!] THE ASSERTS ARE A BACKSTOP, NOT THE DERIVATION.  An allowance is sound
  * only if, on every path that reaches its slot,
@@ -59,8 +60,9 @@
 #include "cli_config.h"   /* CLI_INSTANCE_STACK_SIZE, CLI_BG_JOB_STACK_SIZE */
 #include "plugin_abi.h"   /* PLUGIN_SLOT_* */
 
-#if !defined(GROVE_PLUGIN_STACK_SHELL) || !defined(GROVE_PLUGIN_STACK_PANEL)
-#error "board.cmake must define GROVE_PLUGIN_STACK_SHELL and GROVE_PLUGIN_STACK_PANEL"
+#if !defined(GROVE_PLUGIN_STACK_SHELL) || !defined(GROVE_PLUGIN_STACK_PANEL) || \
+    !defined(GROVE_PLUGIN_STACK_WORKER)
+#error "board.cmake must define GROVE_PLUGIN_STACK_SHELL, _PANEL and _WORKER"
 #endif
 #if defined(GROVE_PLUGIN_STACK_PRODUCER)
 #error "GROVE_PLUGIN_STACK_PRODUCER was retired by issue #119: no slot runs on the producer alone"
@@ -90,7 +92,7 @@ _Static_assert(PLUGIN_SLOT_COUNT == 7,
 
 #define GROVE_PLUGIN_RUNS_ENTRY      GROVE_PLUGIN_ON_SHELL
 #define GROVE_PLUGIN_RUNS_SHAPES_OK  GROVE_PLUGIN_ON_SHELL
-#define GROVE_PLUGIN_RUNS_DECODE     (GROVE_PLUGIN_ON_WORKER | GROVE_PLUGIN_ON_SHELL)
+#define GROVE_PLUGIN_RUNS_DECODE     GROVE_PLUGIN_ON_WORKER
 #define GROVE_PLUGIN_RUNS_DRAW       GROVE_PLUGIN_ON_PANEL
 #define GROVE_PLUGIN_RUNS_REPORT     GROVE_PLUGIN_ON_SHELL
 #define GROVE_PLUGIN_RUNS_PARAM_SET  GROVE_PLUGIN_ON_SHELL
@@ -118,7 +120,7 @@ _Static_assert(PLUGIN_SLOT_COUNT == 7,
  */
 #define GROVE_PLUGIN_LIMIT_ENTRY      GROVE_PLUGIN_STACK_SHELL
 #define GROVE_PLUGIN_LIMIT_SHAPES_OK  GROVE_PLUGIN_STACK_SHELL
-#define GROVE_PLUGIN_LIMIT_DECODE     GROVE_PLUGIN_STACK_SHELL
+#define GROVE_PLUGIN_LIMIT_DECODE     GROVE_PLUGIN_STACK_WORKER
 #define GROVE_PLUGIN_LIMIT_DRAW       GROVE_PLUGIN_STACK_PANEL
 #define GROVE_PLUGIN_LIMIT_REPORT     GROVE_PLUGIN_STACK_SHELL
 #define GROVE_PLUGIN_LIMIT_PARAM_SET  GROVE_PLUGIN_STACK_SHELL

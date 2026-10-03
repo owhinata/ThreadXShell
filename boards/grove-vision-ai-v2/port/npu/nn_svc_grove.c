@@ -44,6 +44,7 @@
 #include "plugin_run.h"
 #include "plugin_target.h"   /* the target word this build provides (#108) */
 #include "cam_lcd_sink.h"
+#include "cam_capture_sink.h"  /* `nn run`'s sink (#129) */
 #include "camera.h"
 #include "npu_desc.h"
 #include "nn_active.h"
@@ -55,6 +56,7 @@
 #include "plugin_lease.h"
 #include "nn_preproc.h"
 #include "nn_rec.h"
+#include "nn_run_wait.h"
 #include "nn_stream_state.h"
 #include "nn_swap.h"
 #include "nor_flash.h"    /* NOR_XIP_BASE */
@@ -258,10 +260,12 @@ static enum nn_stream_start_claim nn_stream_begin(void)
  * `nn run`: the gate, and the lifecycle as a one-shot, in ONE critical section
  * (issue #120) -- the same single decision the stream start makes above.
  *
- * On this board the one-shot is synchronous on the calling thread, so it is
- * begun and committed together: nothing asynchronous comes up in between that
- * could fail.  The gate is held as an ordinary OPERATION, which is what `nn
- * info` should say about it.
+ * It is begun and committed together, before anything is started: since issue
+ * #129 the camera and the worker come up AFTER the commit, and every way out
+ * from there is this generation's own -- a refusal with nothing started ends
+ * it at once (nn_oneshot_finish()), anything after the stream is up goes
+ * through the same teardown as a stream.  The gate is held as an ordinary
+ * OPERATION, which is what `nn info` should say about it.
  *
  * @return the one-shot's generation, or NN_STREAM_GEN_ANY with nothing held;
  *         @p why says which refusal
@@ -1237,8 +1241,16 @@ static int nn_input_fillable(struct nn_op_result *res,
 	return 0;
 }
 
-static int nn_fill_input(struct nn_op_result *res, const uint8_t *raw,
-                         const struct npu_tensor *in)
+/*
+ * Could the producer prepare a frame for this model?  `nn run`'s admission,
+ * asked before the camera is woken (issue #129): the producer prepares the
+ * frame into the input itself and can only say THAT it failed, so the reasons
+ * are given here, where refusing costs nothing.  The geometry is the one the
+ * producer will compute from the same dimensions, kept for
+ * nn_svc_box_to_frame().
+ */
+static int nn_run_input_ok(struct nn_op_result *res,
+                           const struct npu_tensor *in)
 {
 	uint32_t w, h;
 
@@ -1261,96 +1273,14 @@ static int nn_fill_input(struct nn_op_result *res, const uint8_t *raw,
 		nn_detail_set("input tensor is shorter than its own shape");
 		return -1;
 	}
-	if (nn_preproc_fill(raw, CAM_FRAME_WIDTH, CAM_FRAME_HEIGHT, &nn_geom,
-	                    (uint8_t *)in->data) != 0) {
-		nn_detail_set("preprocessing refused the frame");
-		return -1;
-	}
-	/* [!] NOT PUBLISHED TO THE PLUGIN HERE (issue #127).  The plugin's copy
-	 * is part of its result and is written under the plugin lease, beside the
-	 * decode it describes -- see nn_svc_run_once(). */
-	nn_geom_valid = 1u;
 	return 0;
 }
 
 /*
- * Decode what `nn run` just inferred -- or say that nothing did -- and PUBLISH
- * it to the record `nn dets` reads (issue #118).
- *
- * [!] THE ONE PLACE THIS BOARD DECIDES (issue #104), and since issue #118 the
- * only caller is `nn run`: `nn dets` reads the record and decodes nothing.  The
- * plugin-or-raw choice lives here, so the two routes cannot be taken
- * differently -- the shape issue #103 got wrong once.
- *
- * [!] AND WITH NO PLUGIN THERE IS NO DECODER AT ALL.  The outputs are reported
- * as the tensors they are (NN_DET_RAW_TENSORS), never as a BF_ERR_* code:
- * BF_ERR_MODEL routes to the shared class report, which would print the top 5
- * of a detector's regression tensor as though the numbers were class scores.
- *
- * A plugin's negative return is published as it is (issues #57, #97, #118).
- *
- * @return 0 when a result was published; -1 when no decode could be run (an
- *         output is unreadable), with the detail set and nothing published
+ * [!] `nn run` NO LONGER DECODES HERE (issue #129).  The decode -- or, with no
+ * plugin, the raw outputs (issue #104) -- is published by the inference worker
+ * (nn_overlay.c), the one thread every decode on this board now runs on.
  */
-/*
- * The output shapes of the model that ran, taken under the gate that keeps it
- * open (issue #121) -- not at print time.
- *
- * [!] NOT INLINED, AND THAT IS A STACK DECISION.  The descriptors are ~300 B,
- * and inlined into nn_decode_publish() they would sit in the frame the plugin's
- * decode() is entered below -- a slot declared against the shell's ceiling.
- * Only the path with no plugin needs them.
- */
-static __attribute__((noinline)) void nn_publish_raw_outputs(uint32_t gen)
-{
-	struct nn_raw_outputs raw;
-	unsigned n = npu_output_count(), i;
-
-	memset(&raw, 0, sizeof raw);
-	raw.count = (int32_t)n;
-	for (i = 0u; i < n && i < NN_RAW_OUTPUTS_MAX; i++) {
-		struct npu_tensor t;
-
-		if (npu_output(i, &t) != NPU_OK)
-			break;
-		npu_desc_of(&raw.out[i], &t);
-		raw.n = (uint8_t)(i + 1u);
-	}
-	(void)nn_rec_publish_raw(gen, &raw);
-}
-
-static int nn_decode_publish(uint32_t gen, struct nn_op_result *res)
-{
-	struct npu_tensor outs[NPU_DESC_MAX_OUTPUTS];
-	unsigned n_out, i;
-	int nd;
-
-	if (!nn_active_is_plugin()) {
-		nn_publish_raw_outputs(gen);
-		return 0;
-	}
-
-	n_out = npu_output_count();
-	if (n_out > NPU_DESC_MAX_OUTPUTS)
-		n_out = NPU_DESC_MAX_OUTPUTS;
-	for (i = 0u; i < n_out; i++)
-		if (npu_output(i, &outs[i]) != NPU_OK) {
-			/* No decode ran, so there is nothing to publish -- and the
-			 * record keeps describing what the plugin last decoded. */
-			nn_detail_set("output %u of the model is unreadable", i);
-			return -1;
-		}
-
-	nd = nn_active_decode(outs, n_out);
-	if (nd == NN_ACTIVE_NOT_HELD) {
-		/* Nothing decoded, so nothing is published: the record keeps the
-		 * plugin's last result, which is still the plugin's state. */
-		nn_detail_set("the decode was refused: the plugin lease is not held");
-		return -1;
-	}
-	(void)nn_rec_publish_external(nd, gen);
-	return 0;
-}
 
 /*
  * Ask the plugin for its account of the result the record holds.
@@ -1408,20 +1338,181 @@ static void nn_oneshot_finish(uint32_t gen, struct nn_op_result *res)
 	nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
 }
 
+/*
+ * ---- the one teardown (issues #99, #129) ---------------------------------
+ *
+ * A stream's stop and `nn run`'s end run the same sequence, with the same table
+ * deciding about it; only the sink differs (the panel's, or the capture sink's).
+ *
+ *   stop request -> producer join (camera_stream_stop) -> worker join
+ *   -> record boundary -> sink detach -> verdict
+ *
+ * The caller has claimed the stop; what it does with the verdict -- release,
+ * leave retryable, poison -- is its own.
+ */
+static void nn_teardown(int oneshot, struct nn_stream_verdict *v)
+{
+	int cam_rc, detach_rc = 0, attempted = 0;
+	int wjoin = NN_STREAM_WJOIN_NOT_TRIED;
+
+	/* [!] BEFORE the camera stop, always: it is what keeps the frame in flight
+	 * from starting an inference the join would then have to wait out. */
+	nn_overlay_request_stop();
+	cam_rc = camera_stream_stop();
+
+	/*
+	 * [!] THEN THE WORKER, AND ONLY ONCE THE PRODUCER IS CONFIRMED OUT (issue
+	 * #129).  Before that the producer could still hand it a frame, so
+	 * "parked" would not stay true.  The stop flag above keeps it from
+	 * starting another invoke, so this waits out at most the one running --
+	 * bounded by the wall clock, and a worker that does not come back is the
+	 * terminal "worker did not return": no boundary, no unlink, no release.
+	 */
+	if (nn_stream_may_join_worker(cam_rc))
+		wjoin = (nn_worker_join() == 0) ? NN_STREAM_WJOIN_OK
+		                                : NN_STREAM_WJOIN_FAILED;
+
+	/*
+	 * [!] THE RECORD BOUNDARY ONLY ONCE THE PRODUCER AND THE WORKER ARE
+	 * CONFIRMED OUT (issues #118, #129).  The worker publishes immediately
+	 * after each decode, so after both are confirmed every decode this session
+	 * ran has been published and none can follow -- the last result keeps an
+	 * account the plugin can still give.  A boundary taken earlier would drop
+	 * the frame in flight AFTER its decode had rewritten the plugin's result.
+	 * Unconfirmed, there is no boundary: the lifecycle goes DEAD and nothing
+	 * admits a new session.
+	 */
+	if (nn_stream_may_detach(cam_rc, wjoin))
+		nn_rec_boundary();
+
+	/* [!] AND THE DETACH IS THE LAST PART OF THE STOP (issue #57), reached
+	 * only on a confirmed stop of both -- the panel's blit runs on its own
+	 * thread, so a confirmed stop alone does not prove nothing is using the
+	 * frame.  The capture sink has no thread, and is asked the same way. */
+	if (nn_stream_may_detach(cam_rc, wjoin)) {
+		attempted = 1;
+		detach_rc = oneshot ? cam_capture_sink_detach()
+		                    : cam_lcd_sink_detach();
+	}
+	nn_stream_stop_decide(cam_rc, wjoin, attempted, detach_rc, v);
+}
+
+/*
+ * Settle a one-shot's teardown (issue #129).  Not nn_stream_finish() /
+ * nn_stream_poison(): those latch the STREAM's final numbers, which `nn run`
+ * never touched.  The gate goes back only on a finish that took.
+ */
+static void nn_oneshot_settle(unsigned char act)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	switch ((enum nn_stream_act)act) {
+	case NN_STREAM_ACT_DONE:
+		if (nn_stream_life_finish(&nn_life)) {
+			nn_owner = (uint8_t)NN_OWNER_NONE;
+			nn_busy  = 0u;
+		}
+		break;
+	case NN_STREAM_ACT_RETRY:
+		/* The one-shot stays RUNNING, the operator's to finish with `nn
+		 * stream stop` (svc/nn_stream_life.h). */
+		nn_stream_life_retry(&nn_life);
+		break;
+	case NN_STREAM_ACT_TERMINAL:
+	default:
+		(void)nn_stream_life_poison(&nn_life);
+		break;
+	}
+	TX_RESTORE
+}
+
+static enum nn_claim nn_claim_of_act(unsigned char act)
+{
+	switch ((enum nn_stream_act)act) {
+	case NN_STREAM_ACT_DONE:  return NN_CLAIM_NONE;
+	case NN_STREAM_ACT_RETRY: return NN_CLAIM_RETRYABLE;
+	default:                  return NN_CLAIM_TERMINAL;
+	}
+}
+
+static const char *nn_stream_why_text(unsigned char why, int oneshot);
+
+/*
+ * How long `nn run` waits for its one result, in ticks of the wall clock.
+ *
+ * [!] NOT THE WORKER JOIN'S NUMBER, and it must not be folded into it.  This
+ * one is "no result came" -- the first frame has to arrive and be inferred --
+ * and the join's is "a result that started did not come back".  Derived from:
+ *   - the first frame of a freshly started stream: the camera's own
+ *     frame timeout                                       CAM_FRAME_TIMEOUT_TICKS
+ *   - one inference at its worst: the ethos-u driver can take its semaphore
+ *     twice (npu_hw.h)                                    2 x NPU_INFERENCE_TIMEOUT_TICKS
+ *   - the plugin lease the worker waits for              PLUGIN_LEASE_WAIT_MS
+ *   - scheduling: the worker runs below the producer and
+ *     the panel                                           NN_RUN_WAIT_SLACK_MS
+ * Passing it is a TIMEOUT, not a fault: the teardown below still runs and
+ * decides what is safe, as it does for every ending.
+ */
+#define NN_RUN_WAIT_SLACK_MS 250u
+#define NN_RUN_MS_TO_TICKS(ms) \
+	(((ms) * (unsigned)TX_TIMER_TICKS_PER_SECOND + 999u) / 1000u)
+#define NN_RUN_WAIT_TICKS                                      \
+	(CAM_FRAME_TIMEOUT_TICKS + 2u * NPU_INFERENCE_TIMEOUT_TICKS + \
+	 NN_RUN_MS_TO_TICKS(PLUGIN_LEASE_WAIT_MS) +               \
+	 NN_RUN_MS_TO_TICKS(NN_RUN_WAIT_SLACK_MS))
+
+/* Why a one-shot's worker published nothing -- the detail and the status. */
+static int nn_run_no_result(int shot, struct nn_op_result *res)
+{
+	switch (shot) {
+	case NN_OV_SHOT_PREP_FAILED:
+		nn_detail_set("preprocessing refused the frame");
+		return NN_SVC_ERR_HW;
+	case NN_OV_SHOT_NO_OUTPUTS:
+		nn_detail_set("an output of the model is unreadable; nothing was "
+		              "decoded");
+		return NN_SVC_ERR_HW;
+	case NN_OV_SHOT_INVOKE_FAILED:
+		nn_detail_set("inference failed");
+		return NN_SVC_ERR_HW;
+	case NN_OV_SHOT_LEASE_TIMEOUT:
+		nn_detail_set("the plugin lease was not released within %u ms; "
+		              "nothing was decoded", (unsigned)PLUGIN_LEASE_WAIT_MS);
+		return NN_SVC_ERR_BUSY;
+	case NN_OV_SHOT_NOT_HELD:
+		nn_detail_set("the decode was refused: the plugin lease is not held");
+		return NN_SVC_ERR_HW;
+	case NN_OV_SHOT_PUBLISHED:
+		/* Finished and published, but the record did not take it (a
+		 * generation that moved): nothing of this run to report. */
+		nn_detail_set("the result was not accepted by the record");
+		return NN_SVC_ERR_HW;
+	case NN_OV_SHOT_STOPPED:
+	default:
+		nn_detail_set("the inference worker ended the run without a "
+		              "result (%d)", shot);
+		return NN_SVC_ERR_HW;
+	}
+}
+
 void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
                      struct nn_report_capture *rep, struct nn_result_extra *ext,
                      nn_svc_cancel_fn cancel, void *ctx,
                      struct nn_op_result *res)
 {
 	struct npu_tensor in;
+	struct nn_stream_verdict v;
+	struct nn_det_snapshot probe;
 	enum nn_stream_start_claim why = NN_STREAM_START_BUSY;
-	uint32_t gen, rgen, base;
-	int rc;
+	enum nn_run_end end = NN_RUN_WAITING;
+	uint32_t gen, base;
+	ULONG t0;
+	int rc, status;
 
+	(void)dets;
+	(void)max;
 	nn_detail_clear();
-	/* Nothing here waits long enough to poll: camera_capture() and npu_invoke()
-	   are each one blocking call into hardware.  Checked once so a Ctrl+C that
-	   arrived before the work starts is still honoured. */
 	if (nn_svc_cancelled(cancel, ctx)) {
 		nn_result(res, NN_SVC_ERR_CANCEL, NN_CLAIM_NONE);
 		return;
@@ -1447,8 +1538,9 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 			              "stats`");
 			break;
 		case NN_STREAM_START_ONESHOT:
-			nn_detail_set("another `nn run` holds the NPU -- retry when it "
-			              "returns");
+			nn_detail_set("another `nn run` holds the NPU, or one returned "
+			              "with its teardown unfinished (`nn stream stop` "
+			              "finishes it)");
 			break;
 		default:
 			break;
@@ -1457,9 +1549,14 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		return;
 	}
 	/* The run's record boundary and the base it counts from, under the gate
-	 * that excludes every other publisher (issue #118). */
+	 * that excludes every other publisher (issue #118).  The worker publishes
+	 * under the generation the producer reads when it hands the frame over,
+	 * which is this boundary's. */
 	base = nn_rec_boundary_base();
-	rgen = nn_rec_gen();
+
+	/*
+	 * ---- refusals with nothing started: give the one-shot back ----
+	 */
 	if (!nn_open_done) {
 		nn_detail_set("no model is loaded");
 		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
@@ -1472,95 +1569,153 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		nn_oneshot_finish(gen, res);
 		return;
 	}
-
+	if (nn_run_input_ok(res, &in) != 0) {
+		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
+		nn_oneshot_finish(gen, res);
+		return;
+	}
 	/*
-	 * camera_capture() quiesces the datapath on BOTH the success and the
-	 * failure path, and it refuses while a preview is running -- the
-	 * camera/NPU concurrency question answered by the layer that owns it.
-	 * That is why this is one hook and not "is it streaming?" then a capture:
-	 * the sensor bus owner is decided under the camera API mutex, so an
-	 * answer taken before it is stale before it is used (issue #77).
+	 * [!] THE SAME WORKER AS A STREAM, ARMED FROM PARKED (issue #129).  The
+	 * one-shot flavour of the overlay makes it want ONE frame: the producer
+	 * prepares the first it is offered, and the worker parks for good after
+	 * it.  Refused here -- a worker that does not exist, or is not parked --
+	 * nothing has been started.
 	 */
-	rc = camera_capture();
-	if (rc != 0) {
-		nn_detail_set("capture failed (%d)", rc);
+	if (!nn_worker_arm()) {
+		if (nn_worker_ready())
+			nn_detail_set("the inference worker is not parked; a "
+			              "previous stream was not joined");
+		else
+			nn_detail_set("the inference worker could not be created "
+			              "at boot");
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
 		nn_oneshot_finish(gen, res);
 		return;
 	}
-	if (nn_fill_input(res, camera_raw_frame(), &in) != 0) {
-		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
-		nn_oneshot_finish(gen, res);
-		return;
-	}
-
-	/* No cache maintenance here (issue #46): it lives in the port's own
-	 * lifecycle callbacks, at the only two instants that are correct. */
-	if (npu_invoke() != NPU_OK) {
-		nn_detail_set("inference failed");
+	/*
+	 * [!] A STREAM, NOT A CAPTURE (issue #129), through a sink with no panel.
+	 * Attaching and starting are one operation in the camera, and refused,
+	 * nothing is linked and nothing streams -- so the worker, armed and never
+	 * handed a frame, is parked again at once and the one-shot given back.
+	 */
+	rc = cam_capture_sink_attach_and_stream(nn_overlay_arm_oneshot());
+	if (rc != CAM_OK) {
+		if (rc == CAM_ERR_BUSY)
+			nn_detail_set("the camera is already streaming, or another "
+			              "command owns it");
+		else
+			nn_detail_set("capture failed (%d)", rc);
+		/* Were the join ever refused, the word stays armed and the next
+		 * start refuses at its arm -- closed, not tidied. */
+		(void)nn_worker_join();
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
 		nn_oneshot_finish(gen, res);
 		return;
 	}
 
 	/*
-	 * WHO DECODES.
+	 * ---- the wait: wall clock, cancellable, and the five endings ----
 	 *
-	 * [!] AND NOTHING ASKS ABOUT THE INPUT QUANTISATION ANY MORE (issue #104).
-	 * That check belonged to the resident decoder: nn_preproc_fill() writes
-	 * `pixel - 128` and BlazeFace's arithmetic assumed the model read that as
-	 * scale 1/255 zero point -128.  With that decoder gone the question has no
-	 * owner -- a plugin ships WITH its model, and shipping it is the statement
-	 * that the two agree (the vendor's own CIFAR-10 app writes `pixel - 128`
-	 * into an input recorded at scale 0.0203 zero point -8 and is right to).
-	 *
-	 * What that costs is a diagnostic, and it is worth naming: a bare model
-	 * whose input quantisation is not this board's convention is still fed, and
-	 * the tensors reported below are then a faithful reading of a meaningless
-	 * inference.  The convention is stated in the board README rather than
-	 * enforced by a check no decoder stands behind.
+	 * [!] "FINISHED" IS READ BEFORE "PUBLISHED" (nn_run_wait.h): the worker
+	 * publishes and only then says it is done, so this order cannot see a run
+	 * that published as one that did not.
 	 */
-	/*
-	 * [!] ONE HOLD OF THE PLUGIN LEASE FOR THE GEOMETRY, THE DECODE, THE
-	 * PUBLISH, THE SNAPSHOT AND THE REPORT (issue #127).  The gate keeps every
-	 * other decode out, but not a threshold call from another console, which
-	 * enters the same plugin without it; and the report has to describe the
-	 * decode this run published.  Taken after the invoke -- the NPU does not
-	 * touch the plugin -- and refused, nothing is published and nothing is
-	 * reported: the record still holds the last result there was.
-	 */
-	if (!plugin_lease_take()) {
-		nn_detail_set("the plugin lease was not released within %u ms; "
-		              "nothing was decoded", (unsigned)PLUGIN_LEASE_WAIT_MS);
-		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
-		nn_oneshot_finish(gen, res);
-		return;
-	}
-	/* The transform this frame was built with, before the decode that may ask
-	 * for it (issue #103). */
-	(void)nn_active_set_geom(&nn_geom);
-	if (nn_decode_publish(rgen, res) != 0) {
-		plugin_lease_give();
-		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
-		nn_oneshot_finish(gen, res);
-		return;
-	}
-	/* [!] READ BACK FROM THE RECORD, AND ONLY THIS RUN'S (issue #118): the
-	 * answer `nn dets` will give next is the one printed now.  The account is
-	 * captured before the gate goes. */
-	nn_rec_snapshot(snap, ext);
-	snap->valid = nn_det_last_valid(snap, base);
-	if (snap->valid) {
-		nn_capture_report(snap, rep);
-	} else {
-		nn_report_set(rep, NN_REPORT_NONE);
-		if (ext != NULL)
-			ext->what = (uint8_t)NN_EXTRA_NONE;
-	}
-	plugin_lease_give();
+	t0 = tx_time_get();
+	for (;;) {
+		struct camera_stats cs;
+		int finished = (nn_overlay_shot() != (int)NN_OV_SHOT_NONE);
+		int published;
 
-	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
-	nn_oneshot_finish(gen, res);
+		nn_rec_snapshot(&probe, NULL);
+		published = (probe.accepted != base);
+		camera_stream_stats(&cs);
+		end = nn_run_wait_step(published, finished, !cs.streaming,
+		                       nn_svc_cancelled(cancel, ctx),
+		                       (ULONG)(tx_time_get() - t0) >=
+		                       (ULONG)NN_RUN_WAIT_TICKS);
+		if (end != NN_RUN_WAITING)
+			break;
+		tx_thread_sleep(1u);
+	}
+	nn_rec_snapshot(&probe, NULL);
+	end = nn_run_wait_final(end, probe.accepted != base);
+
+	/*
+	 * [!] THE RESULT IS READ BEFORE THE STOP, IN ONE HOLD OF THE PLUGIN LEASE
+	 * (issue #127): the snapshot and the plugin's account describe the same
+	 * decode.  Nothing else can decode in between -- the worker parked after
+	 * this run's one frame, and the gate keeps every other session out.  A
+	 * lease not had in time keeps the record's answer and marks the account
+	 * STALE, as `nn dets` does.
+	 */
+	if (end == NN_RUN_INFERRED) {
+		int leased = plugin_lease_take();
+
+		nn_rec_snapshot(snap, ext);
+		snap->valid = nn_det_last_valid(snap, base);
+		if (!snap->valid) {
+			nn_report_set(rep, NN_REPORT_NONE);
+			if (ext != NULL)
+				ext->what = (uint8_t)NN_EXTRA_NONE;
+		} else if (leased) {
+			nn_capture_report(snap, rep);
+		} else if (snap->kind == (uint8_t)NN_DET_PLUGIN_REPORT) {
+			nn_report_set(rep, NN_REPORT_STALE);
+		} else {
+			nn_report_set(rep, NN_REPORT_NONE);
+		}
+		if (leased)
+			plugin_lease_give();
+		/* The transform this run's frame was cut by, for the box mapping. */
+		nn_geom_valid = 1u;
+	}
+
+	/*
+	 * ---- the teardown: by its own generation, every ending ----
+	 *
+	 * [!] Claimed like any stop (issue #120).  Nothing else can have claimed
+	 * it -- an operator's stop is refused while this runs -- so a refusal is
+	 * an invariant failure, and it fails closed: everything stays as it is.
+	 */
+	if (nn_stream_claim_stop(gen) != NN_STREAM_STOP_GO) {
+		nn_detail_set("the stream lifecycle moved underneath this run; what "
+		              "owns the hardware now cannot be established");
+		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
+		return;
+	}
+	nn_teardown(1, &v);
+	nn_oneshot_settle(v.act);
+
+	/*
+	 * [!] WHY THE WAIT ENDED IS THE STATUS (issue #122 P7), and the teardown's
+	 * disposition is its own field beside it.
+	 */
+	switch (end) {
+	case NN_RUN_INFERRED:
+		status = NN_SVC_OK;
+		break;
+	case NN_RUN_NO_RESULT:
+		status = nn_run_no_result(nn_overlay_shot(), res);
+		break;
+	case NN_RUN_LOST:
+		nn_detail_set("the camera stream was lost before an inference "
+		              "completed");
+		status = NN_SVC_ERR_HW;
+		break;
+	case NN_RUN_CANCELLED:
+		status = NN_SVC_ERR_CANCEL;
+		break;
+	case NN_RUN_TIMEOUT:
+	default:
+		nn_detail_set("no inference completed within %lu ms",
+		              (unsigned long)(NN_RUN_WAIT_TICKS * 1000u /
+		                              TX_TIMER_TICKS_PER_SECOND));
+		status = NN_SVC_ERR_TIMEOUT;
+		break;
+	}
+	if (v.act != (unsigned char)NN_STREAM_ACT_DONE)
+		nn_detail_set("%s", nn_stream_why_text(v.why, 1));
+	nn_result(res, status, nn_claim_of_act(v.act));
 }
 
 void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
@@ -1742,8 +1897,9 @@ int nn_svc_box_to_frame(const struct bf_det *in, struct bf_det *out)
 
 /* ---- live inference (issue #99) ------------------------------------------
  *
- * The work itself runs on the CAMERA PRODUCER THREAD, inside the panel sink's
- * consume() (nn_overlay.c).  What is here only starts it, reports on it and
+ * The work itself runs on the CAMERA PRODUCER (the frame's preparation, inside
+ * the panel sink's consume()) and the INFERENCE WORKER (the invoke, decode and
+ * publish) -- nn_overlay.c, issue #129.  What is here only starts it, reports on it and
  * stops it -- and, unlike the command file this replaces, it holds no shell
  * instance, because a port may not.  Everything that needs to print, wait or
  * notice Ctrl+C is the shared command's, above svc/nn_svc.h.
@@ -2117,8 +2273,9 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 }
 
 /* The sentence an operator gets.  They are not interchangeable -- two of these
-   mean "nothing was touched" and "something is still running in there". */
-static const char *nn_stream_why_text(unsigned char why)
+   mean "nothing was touched" and "something is still running in there".
+   @p oneshot: the sink was `nn run`'s capture sink, not the panel's. */
+static const char *nn_stream_why_text(unsigned char why, int oneshot)
 {
 	/* Each sentence is checked against NN_SVC_DETAIL_MAX at build time -- it
 	 * is copied whole into a result's detail (issue #122 P15). */
@@ -2136,10 +2293,18 @@ static const char *nn_stream_why_text(unsigned char why)
 		return NN_SVC_DETAIL_LIT(
 			"the camera refused the stop; it is unusable until reboot");
 	case NN_STREAM_WHY_SINK_BUSY:
+		if (oneshot)
+			return NN_SVC_DETAIL_LIT(
+				"the capture sink was not ready to unlink -- run "
+				"`nn stream stop` to finish this run's teardown");
 		return NN_SVC_DETAIL_LIT(
 			"the panel has not finished with this stream's frames -- "
 			"run `nn stream stop` again");
 	case NN_STREAM_WHY_SINK_LOST:
+		if (oneshot)
+			return NN_SVC_DETAIL_LIT(
+				"the capture sink could not be unlinked; the camera is "
+				"unusable until reboot");
 		return NN_SVC_DETAIL_LIT(
 			"the panel thread did not finish; the preview is unusable "
 			"until reboot");
@@ -2158,8 +2323,8 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 	struct nn_stream_stats final;
 	struct nn_stream_verdict v;
 	uint32_t epoch;
-	int cam_rc, detach_rc = 0, attempted = 0;
-	int wjoin = NN_STREAM_WJOIN_NOT_TRIED;
+	uint8_t kind = 0u;
+	int oneshot;
 
 	if (res == NULL)
 		return;
@@ -2202,44 +2367,29 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 		return;
 	}
 
-	/* [!] BEFORE the camera stop, always: it is what keeps the frame in flight
-	 * from starting an inference the join would then have to wait out. */
-	nn_overlay_request_stop();
-	cam_rc = camera_stream_stop();
-
 	/*
-	 * [!] THEN THE WORKER, AND ONLY ONCE THE PRODUCER IS CONFIRMED OUT (issue
-	 * #129).  Before that the producer could still hand it a frame, so
-	 * "parked" would not stay true.  The stop flag above keeps it from
-	 * starting another invoke, so this waits out at most the one running --
-	 * bounded by the wall clock, and a worker that does not come back is the
-	 * terminal "worker did not return": no boundary, no unlink, no release.
+	 * WHICH SESSION THIS IS -- read under the claim this call now holds, so it
+	 * cannot change.  A one-shot reaches here only once its own `nn run` left
+	 * its teardown retryable (svc/nn_stream_life.h); its sink is the capture
+	 * sink, and it latches no stream numbers.
 	 */
-	if (nn_stream_may_join_worker(cam_rc))
-		wjoin = (nn_worker_join() == 0) ? NN_STREAM_WJOIN_OK
-		                                : NN_STREAM_WJOIN_FAILED;
+	{
+		TX_INTERRUPT_SAVE_AREA
 
-	/*
-	 * [!] THE RECORD BOUNDARY ONLY ONCE THE PRODUCER AND THE WORKER ARE
-	 * CONFIRMED OUT (issues #118, #129).  The worker publishes immediately
-	 * after each decode, so after both are confirmed every decode this stream
-	 * ran has been published and none can follow -- the stream's last result
-	 * keeps an account the plugin can still give.  A boundary taken earlier
-	 * would drop the frame in flight AFTER its decode had rewritten the
-	 * plugin's result.  Unconfirmed, there is no boundary: the lifecycle goes
-	 * DEAD and nothing admits a new session.
-	 */
-	if (nn_stream_may_detach(cam_rc, wjoin))
-		nn_rec_boundary();
-
-	/* [!] AND THE DETACH IS THE LAST PART OF THE STOP (issue #57), reached
-	 * only on a confirmed stop of both -- the blit runs on the panel thread,
-	 * so a confirmed stop alone does not prove nothing is using the frame. */
-	if (nn_stream_may_detach(cam_rc, wjoin)) {
-		attempted = 1;
-		detach_rc = cam_lcd_sink_detach();
+		TX_DISABLE
+		nn_stream_life_snapshot(&nn_life, NULL, NULL, NULL, &kind);
+		TX_RESTORE
 	}
-	nn_stream_stop_decide(cam_rc, wjoin, attempted, detach_rc, &v);
+	oneshot = (kind == (uint8_t)NN_STREAM_KIND_ONESHOT);
+	nn_teardown(oneshot, &v);
+	if (oneshot) {
+		nn_oneshot_settle(v.act);
+		if (v.act != (unsigned char)NN_STREAM_ACT_DONE)
+			nn_detail_set("%s", nn_stream_why_text(v.why, 1));
+		nn_result(res, (v.act == (unsigned char)NN_STREAM_ACT_DONE)
+		               ? NN_SVC_OK : NN_SVC_ERR_HW, nn_claim_of_act(v.act));
+		return;
+	}
 	/* The stream's final numbers, latched only if the settle below takes. */
 	epoch = nn_stream_take_final(&final);
 
@@ -2250,13 +2400,13 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 		return;
 	case NN_STREAM_ACT_RETRY:
 		nn_stream_unclaim_stop();
-		nn_detail_set("%s", nn_stream_why_text(v.why));
+		nn_detail_set("%s", nn_stream_why_text(v.why, 0));
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_RETRYABLE);
 		return;
 	case NN_STREAM_ACT_TERMINAL:
 	default:
 		nn_stream_poison(&final, epoch);
-		nn_detail_set("%s", nn_stream_why_text(v.why));
+		nn_detail_set("%s", nn_stream_why_text(v.why, 0));
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
 		return;
 	}

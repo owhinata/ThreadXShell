@@ -24,7 +24,7 @@ separate reasons, and this file answers each:
 
   2. Every allowance was 1,024 B, so a slot wired to the wrong one was invisible.
      The runtime half (test_plugin_stack.c) prints the table the firmware builds
-     its policy from, compiled with the two allowances set to DIFFERENT sentinel
+     its policy from, compiled with the allowances set to DIFFERENT sentinel
      values, and it is checked here against this file's own statement of which
      slot runs where.  It also runs the device's validator (svc/plugin_load.c)
      against the REAL allowances: one byte past each limit must be refused.
@@ -69,10 +69,10 @@ CFLAGS += ["-Werror"]
 SLOTS = ["entry", "shapes_ok", "decode", "draw", "report", "param_set",
          "param_get"]
 THREADS = {"entry": ["console", "bg"], "shapes_ok": ["console", "bg"],
-           "decode": ["worker", "console", "bg"], "draw": ["panel"],
+           "decode": ["worker"], "draw": ["panel"],
            "report": ["console", "bg"], "param_set": ["console", "bg"],
            "param_get": ["console", "bg"]}
-EXPECT = {"entry": "SHELL", "shapes_ok": "SHELL", "decode": "SHELL",
+EXPECT = {"entry": "SHELL", "shapes_ok": "SHELL", "decode": "WORKER",
           "draw": "PANEL", "report": "SHELL", "param_set": "SHELL",
           "param_get": "SHELL"}
 
@@ -80,7 +80,7 @@ EXPECT = {"entry": "SHELL", "shapes_ok": "SHELL", "decode": "SHELL",
 CEILINGS = {
     "console":  ("CLI_INSTANCE_STACK_SIZE", "SHELL"),
     "bg":       ("CLI_BG_JOB_STACK_SIZE", "SHELL"),
-    "worker":   ("NN_WORKER_STACK_BYTES", "SHELL"),
+    "worker":   ("NN_WORKER_STACK_BYTES", "WORKER"),
     "panel":    ("CAM_PANEL_STACK_BYTES", "PANEL"),
 }
 
@@ -125,6 +125,9 @@ def real_values():
         "GROVE_PLUGIN_STACK_PANEL": find_one(
             cmake, r"^set\(GROVE_PLUGIN_STACK_PANEL\s+(\d+)\)\s*$",
             "panel allowance"),
+        "GROVE_PLUGIN_STACK_WORKER": find_one(
+            cmake, r"^set\(GROVE_PLUGIN_STACK_WORKER\s+(\d+)\)\s*$",
+            "worker allowance"),
         "CLI_INSTANCE_STACK_SIZE": find_one(
             cmake, r"^\s*CLI_INSTANCE_STACK_SIZE=(\d+)\b", "console stack"),
         "CLI_BG_JOB_STACK_SIZE": find_one(
@@ -161,13 +164,14 @@ def compile_header(work, values, extra=()):
 # too: the panel's "equal" case below leaves the shell allowance comfortably
 # under it, and the worker's "below" case would trip an assert that compared
 # draw's allowance there instead of decode's.
-ALLOW = {"SHELL": 1000, "PANEL": 1016}
+ALLOW = {"SHELL": 1000, "PANEL": 1016, "WORKER": 1032}
 WIDE = 1 << 16          # a ceiling that is out of the way
 
 
 def base():
     v = {"GROVE_PLUGIN_STACK_SHELL": ALLOW["SHELL"],
-         "GROVE_PLUGIN_STACK_PANEL": ALLOW["PANEL"]}
+         "GROVE_PLUGIN_STACK_PANEL": ALLOW["PANEL"],
+         "GROVE_PLUGIN_STACK_WORKER": ALLOW["WORKER"]}
     for macro, _ in CEILINGS.values():
         v[macro] = WIDE
     return v
@@ -187,7 +191,7 @@ def ct_cases(real):
             cases.append(("%s %s (%s %d, allowance %d)"
                           % (name, label, macro, ceiling, a), v, [], want,
                           None))
-    for allow in ("SHELL", "PANEL"):
+    for allow in ("SHELL", "PANEL", "WORKER"):
         v = base()
         v["GROVE_PLUGIN_STACK_" + allow] = 0
         cases.append(("%s allowance 0" % allow.lower(), v, [],
@@ -262,15 +266,17 @@ def run_probe(work, values):
 
 def run_rt(real):
     bad = 0
-    # Two sentinel pairs, swapped in order, so a slot that happened to be
-    # hard-wired to one of the numbers cannot match both times.
-    for label, shell, panel in (("real values", None, None),
-                                ("sentinels 1001 / 1013", 1001, 1013),
-                                ("sentinels 1019 / 997", 1019, 997)):
+    # Two sentinel triples, rotated, so a slot that happened to be hard-wired
+    # to one of the numbers cannot match both times.
+    for label, shell, panel, worker in (
+            ("real values", None, None, None),
+            ("sentinels 1001 / 1013 / 1021", 1001, 1013, 1021),
+            ("sentinels 1021 / 1001 / 1013", 1021, 1001, 1013)):
         v = dict(real)
         if shell is not None:
             v["GROVE_PLUGIN_STACK_SHELL"] = shell
             v["GROVE_PLUGIN_STACK_PANEL"] = panel
+            v["GROVE_PLUGIN_STACK_WORKER"] = worker
         with tempfile.TemporaryDirectory() as work:
             table, out = run_probe(work, v)
         if table is None:
@@ -317,10 +323,11 @@ def run_rt(real):
 
 def main():
     real = real_values()
-    print("test_plugin_stack: allowances shell %d / panel %d; stacks console "
-          "%d, job %d, worker %d, panel %d" % (
+    print("test_plugin_stack: allowances shell %d / panel %d / worker %d; "
+          "stacks console %d, job %d, worker %d, panel %d" % (
               real["GROVE_PLUGIN_STACK_SHELL"],
               real["GROVE_PLUGIN_STACK_PANEL"],
+              real["GROVE_PLUGIN_STACK_WORKER"],
               real["CLI_INSTANCE_STACK_SIZE"], real["CLI_BG_JOB_STACK_SIZE"],
               real["NN_WORKER_STACK_BYTES"],
               real["CAM_PANEL_STACK_BYTES"]))

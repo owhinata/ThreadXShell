@@ -102,9 +102,10 @@ static void nn_worker_entry(ULONG arg)
 		/* Invoke, lease, geometry, decode, publish.  The input and the
 		 * outputs are this thread's until the DONE below, which is said only
 		 * after the decode has finished reading them. */
-		nn_overlay_work();
-
-		(void)nn_wk_step((uint8_t)NN_HO_OP_DONE);
+		/* A stream asks for the next frame; a one-shot (`nn run`) wanted
+		 * one and parks for good (issue #129). */
+		(void)nn_wk_step(nn_overlay_work() ? (uint8_t)NN_HO_OP_DONE
+		                                   : (uint8_t)NN_HO_OP_DONE_LAST);
 		(void)tx_event_flags_set(&nn_worker_flags, NN_WK_SETTLED, TX_OR);
 	}
 }

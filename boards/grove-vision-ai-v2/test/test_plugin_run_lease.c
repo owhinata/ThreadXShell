@@ -20,6 +20,11 @@
  * PLUGIN_RUN_MPU and never branches into the image -- which on a host would be
  * a jump into data.  "It got as far as the MPU" is what proves the lease let it
  * through; "the reservation is untouched" is what proves a refusal came first.
+ *
+ * plugin_run_unload() is checked the same way (the review of issue #127): the
+ * shared loader's unload is linked through -Wl,--wrap so the test sees whether
+ * the board's unload reached it at all -- with no plugin publishable on a host,
+ * "it did not unpublish" can only be observed as "it did not call".
  */
 #include "plugin_run.h"
 #include "plugin_lease.h"
@@ -77,6 +82,19 @@ int nor_lease_held(uint32_t token)
 }
 
 static unsigned probe_arms, probe_notes;
+
+/* The shared loader's unload, seen from plugin_run.c (-Wl,--wrap).  Calls made
+ * inside plugin_exec.c itself -- the unload at the start of every load -- do
+ * not come through here. */
+static unsigned exec_unloads;
+
+void __real_plugin_exec_unload(const struct plugin_exec_env *env);
+
+void __wrap_plugin_exec_unload(const struct plugin_exec_env *env)
+{
+	exec_unloads++;
+	__real_plugin_exec_unload(env);
+}
 
 void nn_probe_pending_arm(struct nn_probe_pending *p, const void *who)
 {
@@ -288,6 +306,30 @@ int main(void)
 	r = load();
 	expect("the next held load is judged on its own", r == PLUGIN_RUN_MPU,
 	       "got %d", (int)r);
+
+	/* [!] An unload without the lease does nothing and is counted once: it
+	 * would clear the slot table a holder may be calling through. */
+	for (o = 0u; o < 2u; o++) {
+		setup();
+		lease_owner  = not_held[o];
+		exec_unloads = 0u;
+		u0 = unheld;
+		plugin_run_unload();
+		expect("[!] an unload without the lease does not reach the loader",
+		       exec_unloads == 0u, "%s: %u call(s)",
+		       o ? "another thread holds it" : "nobody holds it",
+		       exec_unloads);
+		expect("  ...and is counted once", unheld == u0 + 1u, "%u",
+		       unheld - u0);
+	}
+	setup();
+	lease_owner  = LEASE_SELF;
+	exec_unloads = 0u;
+	u0 = unheld;
+	plugin_run_unload();
+	expect("held, the unload reaches the loader once", exec_unloads == 1u,
+	       "%u call(s)", exec_unloads);
+	expect("  ...with nothing counted", unheld == u0, "%u", unheld - u0);
 
 	if (failures) {
 		printf("test_plugin_run_lease: %d failure(s)\n", failures);

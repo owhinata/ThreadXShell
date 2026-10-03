@@ -382,7 +382,7 @@ gcc $CFLAGS \
     "$here/test_plugin_run_lease.c" "$board/port/plugin/plugin_run.c" \
     "$svc/plugin_exec.c" "$svc/plugin_mpu.c" "$svc/plugin_load.c" \
     "$svc/crc32.c" \
-    $LDFLAGS -o "$out/test_plugin_run_lease"
+    $LDFLAGS -Wl,--wrap=plugin_exec_unload -o "$out/test_plugin_run_lease"
 "$out/test_plugin_run_lease"
 
 gcc $CFLAGS \

@@ -1049,8 +1049,13 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 
 settle:
 	nn_swap_decide(had_open, end, &v);
-	/* Unload's order: plugin -> model -> NPU -> lease. */
-	if (v.unload)
+	/* Unload's order: plugin -> model -> NPU -> lease.
+	 * [!] ONLY UNDER THE PLUGIN LEASE (issue #127).  A load refused before it
+	 * took the lease -- the lookup failed, or the lease timed out -- swapped
+	 * nothing in, so there is nothing of its own to take out; a plugin that
+	 * is published belongs to whoever holds the lease, and plugin_run_unload()
+	 * refuses an unheld caller anyway. */
+	if (v.unload && leased)
 		plugin_run_unload();
 	if (v.hw_down) {
 		npu_close();

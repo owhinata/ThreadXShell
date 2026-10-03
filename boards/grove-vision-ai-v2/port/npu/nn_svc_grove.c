@@ -1349,10 +1349,11 @@ static int nn_decode_publish(uint32_t gen, struct nn_op_result *res)
 /*
  * Ask the plugin for its account of the result the record holds.
  *
- * [!] ONLY UNDER THE GATE (issue #110), which is what excludes every other
- * decode -- `nn run` holds it, and a stream holds it for its whole life.  So
- * the snapshot is taken here, under it too: taken before, a `nn run` finishing
- * in between would leave this pairing its count with the next frame's account.
+ * [!] ONLY UNDER THE PLUGIN LEASE (issue #127; the gate until then, issue
+ * #110), which is what excludes every other decode: the stream's producer and
+ * `nn run` each decode AND publish inside one hold of it.  So the snapshot is
+ * taken under the same hold as this: taken before, a decode landing in between
+ * would leave this pairing its count with the next frame's account.
  */
 static void nn_capture_report(const struct nn_det_snapshot *snap,
                               struct nn_report_capture *rep)
@@ -1561,7 +1562,7 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
                            struct nn_result_extra *ext,
                            struct nn_op_result *res)
 {
-	int counted, gated, leased;
+	int leased;
 
 	(void)dets;
 	(void)max;
@@ -1575,41 +1576,46 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
 	 * or a stream published, which a stop does not clear and a model change
 	 * does.
 	 *
-	 * [!] THE PLUGIN'S ACCOUNT NEEDS THE GATE, AND A STREAM HOLDS IT (decision
-	 * D2).  The count is read regardless; the account is taken only when the
-	 * gate is free, and otherwise said to be unreachable (STALE) -- the
-	 * producer is decoding the next frame over it.  Not waited for: the
-	 * stream holds the gate until its stop.
+	 * [!] THE PLUGIN'S ACCOUNT NEEDS THE PLUGIN LEASE, NOT THE GATE (issue
+	 * #127, which reverses decision D2).  Until then the account was taken only
+	 * when the gate was free, and a running stream -- which holds the gate
+	 * until its stop -- got the count and STALE.  The gate was standing in for
+	 * what the lease now states directly: no decode runs while it is held,
+	 * because the producer and `nn run` decode and publish inside one hold.
+	 * So this waits for the lease, bounded, and takes the snapshot and the
+	 * account inside ONE hold, on a stream too.  The hold is a snapshot and a
+	 * report into the caller's buffer -- tens of microseconds -- so the stream
+	 * loses at most the one frame whose producer found it held, counted as a
+	 * miss.
+	 *
+	 * Entered the way `nn thresh` enters: counted in first, which is refused
+	 * only while a load or unload holds the gate and may be replacing the
+	 * plugin -- that is BUSY, as it is for `nn thresh`, and nothing is read.
+	 *
+	 * [!] STALE NOW MEANS ONE THING: the lease's holder did not let go within
+	 * PLUGIN_LEASE_WAIT_MS.  The record's count is still true and is printed;
+	 * the account was not taken.
+	 *
+	 * Which result the snapshot holds is the record's business, as before
+	 * (issue #118): it is the last one published, and `reportable` says
+	 * whether the plugin's private state still describes it.
 	 */
-	/*
-	 * [!] AND THE PLUGIN LEASE, ENTERED THE WAY `nn thresh` ENTERS (issue
-	 * #127): counted in first -- refused only while a load or unload holds
-	 * the gate, which may be replacing the plugin -- then the lease, bounded,
-	 * and the snapshot and the account inside ONE hold, so the count and the
-	 * words describe the same decode.  What a stream changes is not changed
-	 * yet: with the gate held by a stream the account is still STALE, and the
-	 * lease is not even asked for -- taking it only to report STALE would
-	 * cost the stream a frame for nothing (issue #127 stage 4 changes this).
-	 * A call refused its count, the gate or the lease reads the record alone,
-	 * as before.
-	 */
-	counted = nn_param_enter();
-	gated   = nn_try_acquire();
-	leased  = counted && gated && plugin_lease_take();
+	if (!nn_param_enter()) {
+		nn_detail_set("a model load or unload holds the plugin");
+		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
+		return;
+	}
+	leased = plugin_lease_take();
 	nn_rec_snapshot(snap, ext);
 	if (leased) {
 		nn_capture_report(snap, rep);
+		plugin_lease_give();
 	} else if (snap->valid && snap->kind == (uint8_t)NN_DET_PLUGIN_REPORT) {
 		nn_report_set(rep, NN_REPORT_STALE);
 	} else {
 		nn_report_set(rep, NN_REPORT_NONE);
 	}
-	if (leased)
-		plugin_lease_give();
-	if (gated)
-		nn_release();
-	if (counted)
-		nn_param_leave();
+	nn_param_leave();
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
 

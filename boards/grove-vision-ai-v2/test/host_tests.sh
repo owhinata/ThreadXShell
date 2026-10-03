@@ -360,6 +360,16 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_nn_param_calls"
 "$out/test_nn_param_calls"
 
+# issue #127 -- what a refused no-wait acquire of the plugin lease counts
+# (port/plugin/plugin_lease_miss.c).  A frame can be lost at the producer's
+# decode or at the panel's draw; a run reset by the producer's success, or a
+# frame counted at both, would each print a plausible stats line.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/plugin" \
+    "$here/test_plugin_lease_miss.c" "$board/port/plugin/plugin_lease_miss.c" \
+    $LDFLAGS -o "$out/test_plugin_lease_miss"
+"$out/test_plugin_lease_miss"
+
 gcc $CFLAGS \
     -I "$here" -I "$board/port/nor" \
     "$here/test_nor_state.c" "$board/port/nor/nor_state.c" \

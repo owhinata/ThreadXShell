@@ -1,0 +1,102 @@
+/*
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 ThreadX Shell Project
+ */
+/**
+ * @file    nn_handoff.h
+ * @brief   Who may touch the inference worker's input, and when (issue #129).
+ *
+ * The camera producer prepares a frame STRAIGHT INTO the model's input tensor
+ * and hands it to the inference worker (port/npu/nn_worker.h), which runs the
+ * invoke, the decode and the publish.  There is no staging copy, so the input
+ * tensor -- and the interpreter the producer asks about it -- has exactly one
+ * user at a time, and this word says which.  It is the same arrangement as
+ * wio-lite-ai's `want_frame`, written as one small state machine instead of two
+ * flags.
+ *
+ *   IDLE     the worker is parked and wants nothing.  Outside a stream.
+ *   WANT     the worker is parked and wants a frame.  The PRODUCER may now
+ *            query the interpreter and write the input tensor.
+ *   HANDED   the producer has finished writing and handed it over.  Nobody
+ *            writes the input; the worker has not started on it yet.
+ *   RUNNING  the worker is inside invoke .. publish.
+ *
+ * [!] THE STATE IS THE TRUTH, NOT A SEMAPHORE COUNT.  The worker is woken by a
+ * flag, and a wake-up can be stale (a hand-over that was already taken, a stop
+ * that came in between).  A worker that wakes and cannot TAKE goes back to
+ * sleep; it never runs on the strength of a token alone.
+ *
+ * [!] EACH FUNCTION IS ONE WHOLE TRANSITION -- the test and the change -- and
+ * the caller runs it inside ONE critical section.  Testing in one section and
+ * changing in another would let the producer and the stop each see the other's
+ * precondition and both proceed.  That the caller does so is held by the short
+ * wrappers in nn_worker.c, not by this file.
+ *
+ * WHY A PURE FUNCTION IN ITS OWN FILE.  None of the interesting sequences can be
+ * typed: a stop that lands while a hand-over is in flight, a stale wake-up after
+ * the worker already took the job.  So the table is separated from the threads
+ * that run it, and test/test_nn_handoff.c walks every (state, operation) pair.
+ */
+#ifndef NN_HANDOFF_H
+#define NN_HANDOFF_H
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+enum nn_handoff_state {
+	NN_HO_IDLE = 0,
+	NN_HO_WANT,
+	NN_HO_HANDED,
+	NN_HO_RUNNING,
+};
+
+/** What a thread asks of the word, with who may ask it. */
+enum nn_handoff_op {
+	/** Console, when a stream or a one-shot starts: IDLE -> WANT.  Refused
+	 *  from anything else -- a start that finds the worker not parked has
+	 *  broken an invariant and must not wait it out. */
+	NN_HO_OP_ARM = 0,
+	/** Producer, after it has written the input: WANT -> HANDED.  Refused
+	 *  from anything else, and a refusal means "the worker is busy, do not
+	 *  touch the input" -- the frame is not inferred. */
+	NN_HO_OP_HAND,
+	/** Worker, on waking: HANDED -> RUNNING.  A refusal is a stale wake-up. */
+	NN_HO_OP_TAKE,
+	/** Worker, after the publish and after it has finished reading the
+	 *  outputs: RUNNING -> WANT, asking for the next frame. */
+	NN_HO_OP_DONE,
+	/** Worker, the same but asking for nothing more: RUNNING -> IDLE.  What a
+	 *  one-shot ends with -- it wants one frame only. */
+	NN_HO_OP_DONE_LAST,
+	/** The stop, once the producer is confirmed out: IDLE or WANT -> IDLE.
+	 *  Refused (and nothing changes) while a job is handed over or running,
+	 *  which is what the stop then waits on. */
+	NN_HO_OP_JOIN,
+};
+
+/**
+ * Apply @p op to @p *state.
+ *
+ * Unknown states and unknown operations are refused and leave the word as it
+ * is: a word nobody can explain is not evidence that the input is free, and a
+ * JOIN refused for it keeps the stop waiting until its deadline says so.
+ *
+ * @return 1 moved (the new state is in *state), 0 refused (nothing changed)
+ */
+int nn_handoff_step(uint8_t *state, uint8_t op);
+
+/**
+ * Is the worker parked with nothing handed over and nothing running?  What a
+ * JOIN would accept.  Exposed for the test and for reports; the stop itself
+ * asks through NN_HO_OP_JOIN, which tests and changes in one.
+ */
+int nn_handoff_settled(uint8_t state);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* NN_HANDOFF_H */

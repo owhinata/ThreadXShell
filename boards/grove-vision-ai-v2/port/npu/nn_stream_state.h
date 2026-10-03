@@ -82,6 +82,36 @@ enum nn_stream_why {
 	/** The panel thread did not come back, or the unlink was refused for
 	 *  good.  The sink is latched lost. */
 	NN_STREAM_WHY_SINK_LOST,
+	/** The producer stopped, but the inference worker did not come back
+	 *  within its deadline (issue #129).  It may still be inside the NPU or
+	 *  the plugin, so nothing is unlinked or released. */
+	NN_STREAM_WHY_WORKER_LOST,
+};
+
+/**
+ * What the join of the inference worker came to (issue #129).  The stop joins
+ * the worker BETWEEN the producer and the detach: after a confirmed producer
+ * stop, before the record boundary and the unlink.
+ */
+enum nn_stream_wjoin {
+	/**
+	 * Not attempted.  The only right answer when the producer was not
+	 * confirmed out (nn_stream_may_join_worker() says so): with a producer
+	 * still running, nothing the worker is doing is stable.
+	 *
+	 * [!] AND, IN STAGE 1 OF #129, WHAT EVERY STOP PASSES: the stream still
+	 * infers on the producer and nothing ever arms the worker, so there is
+	 * nothing to join.  This value reproduces the table as it was before the
+	 * worker existed, which test/test_nn_stream.c holds against a frozen copy
+	 * of it.  Once the stop does join (stage 2), a confirmed producer with the
+	 * join skipped is a caller bug, and the safe reading of one is terminal --
+	 * the same as the detach skipped below.
+	 */
+	NN_STREAM_WJOIN_NOT_TRIED = 0,
+	/** The worker was parked with nothing handed over or running. */
+	NN_STREAM_WJOIN_OK,
+	/** The deadline passed with a job still handed over or running. */
+	NN_STREAM_WJOIN_FAILED,
 };
 
 struct nn_stream_verdict {
@@ -103,17 +133,28 @@ struct nn_stream_verdict {
 int nn_stream_may_detach(int cam_rc);
 
 /**
+ * May the inference worker be joined, given what the camera stop returned?
+ * Only on a confirmed producer stop: before it, the producer can still hand the
+ * worker a new job, so "parked" would not stay true (issue #129).
+ *
+ * @return non-zero when the join may be attempted
+ */
+int nn_stream_may_join_worker(int cam_rc);
+
+/**
  * Classify one whole teardown.
  *
  * @param cam_rc            what camera_stream_stop() returned
+ * @param worker_join       enum nn_stream_wjoin: what the worker join came to;
+ *                          ignored unless the producer stop was confirmed
  * @param detach_attempted  whether the detach was run at all
  * @param detach_rc         what it returned; ignored unless attempted
  *
- * Unknown codes fail closed to terminal on both halves: a board that cannot say
+ * Unknown codes fail closed to terminal on every part: a board that cannot say
  * whether an asynchronously used resource is quiescent must not guess.
  */
-void nn_stream_stop_decide(int cam_rc, int detach_attempted, int detach_rc,
-                           struct nn_stream_verdict *out);
+void nn_stream_stop_decide(int cam_rc, int worker_join, int detach_attempted,
+                           int detach_rc, struct nn_stream_verdict *out);
 
 #ifdef __cplusplus
 }

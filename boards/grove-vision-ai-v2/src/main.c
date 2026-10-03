@@ -35,6 +35,7 @@
 #include "lcd_st7789.h"
 #include "camera.h"
 #include "cam_lcd_sink.h"
+#include "nn_worker.h"
 #include "plugin_lease.h"
 
 #define LOG_TAG "main"
@@ -148,6 +149,11 @@ void tx_application_define(void *first_unused_memory)
 	 * camera_create_objects() only for readability -- the two are
 	 * independent, and neither touches hardware. */
 	cam_lcd_sink_create_objects();
+
+	/* The inference worker (issue #129): parks at once and is never armed
+	 * until a stream or a one-shot hands it a frame.  A failure is logged and
+	 * refuses those later, rather than inferring without it. */
+	nn_worker_create_objects();
 
 	/* The one lock every path into a loaded plugin takes (issue #127).  Here
 	 * because the producer and the panel only ever TRY it, from threads that

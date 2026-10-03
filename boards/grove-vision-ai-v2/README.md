@@ -6406,24 +6406,46 @@ frame.
 A single `nn thresh` or `nn dets` on a running stream costs at most one frame.
 On a stream with nobody else asking, the line reads 0 and 0.
 
-### Expected on hardware (expected, to be confirmed on hardware)
+### Measured on hardware, firmware `7ca2bf5`
 
-The depths are desk estimates from the `.su` files of the issue #127 builds
-against the last measured values (build `ee045ff`); the rates are the
-acceptance criteria.
+Measured 2026-10-03 on firmware `7ca2bf5`, with the containers already on the
+board (none re-sent). Before is build `ee045ff`. Depths are high-water `depth/stack` from
+`nn stream stats`; none was marked `!`.
 
-| quantity | before | expected |
+| quantity | before (`ee045ff`) | measured (`7ca2bf5`) |
 |---|---|---|
-| detector `--frames 300` | 36.83 inf/s | >= 36.8 inf/s, 0 missed |
-| classifier `--frames 100` | 8.85 inf/s | 8.85 inf/s, 0 missed |
-| `nn dets` x 3 on a running stream | count + STALE | full report each time, at most 3 missed |
+| detector `--frames 300` | 300 in 8145 ms, 36.83 inf/s | 300 in 8158 ms, 36.77 inf/s; again from a background job with `nn dets` x 3 during the stream: 8157 ms, 36.77 inf/s |
+| detector producer prep / invoke / decode | 4463 / 12608 / 151 us | 4460 / 12631 / 144 us; 4462 / 12633 / 155 us |
+| classifier `--frames 100` (background job, `nn dets` x 1 during the stream) | 101 in 11401 ms, 8.85 inf/s | 101 in 11389 ms, 8.86 inf/s (13251 / 91253 / 147 us) |
+| `plugin` line | -- | `0 frame(s) missed (run of 0)` in both streams |
+| `nn dets` on a running stream | count + STALE | the full report each time: detector `faces 1  thresh 644/1000` plus the face line (scores 770, 812, 842), classifier its top 3 |
+| painter refused / frame errors | 0 / 0 | 0 / 0 |
+| `refused unheld` suffix | -- | never printed, including after `nn model load --name nosuch` with nothing open (`no slot holds that name (-70)`) |
 | entry, console | 992 | 1000 |
-| shapes_ok, console | 1552 | 1552 |
+| shapes_ok, console / background | 1552 / -- | 1552 / 1464 |
 | decode, producer / console | 880 / 2376 | 880 / 2376 |
 | draw, panel | 224 | 240 |
-| report, console | 2088 | 2104 (via `nn run`) |
-| param_set, console | 456 | 456 |
+| report, console | 2088 (via `nn run`) | 1704 via `nn dets`; 2088 via `nn run` (on `eccf16c`) |
+| param_set, console | 456 | 448 |
 | param_get, console | 784 | 792 |
+
+The detector's 300 frames take 12 to 13 ms longer than on `ee045ff`. That is a
+fixed offset per run, not a per-frame cost: the classifier shows the same +13 ms
+over 101 frames, so it does not scale with the frame count. It is a shift at
+the start of the stream, and the steady rate is still 37.0 inf/s. The ">= 36.8 inf/s" acceptance
+criterion did not allow for a shift at the start. No `nn dets` or `nn thresh`
+issued on a running stream cost a frame: three and one `nn dets` here, and two
+`nn thresh` and one `nn dets` on `eccf16c`. The producer never found the lease
+held. Where the desk estimates in the plan were
+wrong, they were wrong in the safe direction: they predicted report 2104 and
+param_set 456, and the board measured lower.
+
+The intermediate firmwares, for the record:
+
+| firmware | detector `--frames 300` | classifier `--frames 100` | depths that moved |
+|---|---|---|---|
+| `b4bd0d0` (producer and panel take the lease) | 36.77 inf/s | 8.85 inf/s | draw panel 232 |
+| `eccf16c` (consoles take it, entries check it) | 36.76 inf/s | 8.84 inf/s | draw panel 240, entry 1000, param_get 792, shapes_ok background 1464; `nn thresh` x 2 and `nn dets` x 1 during a stream: 0 missed |
 
 ## Flashing and recovery
 

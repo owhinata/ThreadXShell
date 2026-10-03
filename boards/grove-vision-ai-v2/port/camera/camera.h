@@ -84,6 +84,17 @@ const char *camera_strerror(int rc);
 #define CAM_PRODUCER_STACK_BYTES 8192u
 
 /**
+ * How long to wait for a frame before deciding the datapath has stopped
+ * producing.  The sensor runs well above 10 fps even in the rev-C bounce case,
+ * so 2 seconds is "something is wrong", not "the exposure is long".
+ *
+ * Published since issue #129: `nn run` streams now, and the longest it waits for
+ * its one result is derived from this (port/npu/nn_svc_grove.c), rather than
+ * from a second number that would drift from it.
+ */
+#define CAM_FRAME_TIMEOUT_TICKS (2u * TX_TIMER_TICKS_PER_SECOND)
+
+/**
  * @brief  Create the driver's ThreadX objects.
  *
  * Call from tx_application_define(), next to lcd_create_objects().  The port's

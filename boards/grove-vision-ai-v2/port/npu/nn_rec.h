@@ -18,11 +18,11 @@
  * [!] WHY A STOP CANNOT SUPERSEDE THE LAST RESULT HERE.  On wio a stop lands in
  * the middle of an inference, the decode that follows rewrites the plugin's
  * result, and its publish is then dropped (issue #118, c88d0ab).  This board's
- * stop takes its boundary only AFTER camera_stream_stop() has confirmed the
- * producer is out of consume() -- and the producer publishes inside consume(),
- * immediately after the decode.  So every decode the producer ran was published
- * before the boundary, and no decode can follow it.  `nn run` decodes and
- * publishes under the `nn` gate, which also excludes every boundary.
+ * stop takes its boundary only AFTER the producer is confirmed out of consume()
+ * AND the inference worker is joined (issue #129) -- and the worker publishes
+ * immediately after each decode.  So every decode of the session was published
+ * before the boundary, and no decode can follow it.  `nn run` is a session of
+ * one frame on the same worker and ends with the same teardown.
  */
 #ifndef NN_REC_H
 #define NN_REC_H

@@ -115,12 +115,7 @@ _Static_assert(CAM_PRODUCER_STACK >= 1024u,
                "TFLM's Invoke() under `nn stream`; anything this small has not "
                "been thought about");
 
-/*
- * How long to wait for a frame before deciding the datapath has stopped
- * producing.  The sensor runs well above 10 fps even in the rev-C bounce case,
- * so 2 seconds is "something is wrong", not "the exposure is long".
- */
-#define CAM_FRAME_TIMEOUT_TICKS (2u * TX_TIMER_TICKS_PER_SECOND)
+/* CAM_FRAME_TIMEOUT_TICKS lives in camera.h since issue #129. */
 
 /*
  * How long camera_stream_stop() waits for the producer to acknowledge.

@@ -12,9 +12,9 @@
  *
  *   - prints it, one `limit <slot> <bytes>` line per slot, so the driver can
  *     check WHICH allowance each slot got (and `runs <slot> <mask>`, the
- *     threads the header says it runs on).  Compiled with the two allowances set
+ *     threads the header says it runs on).  Compiled with the allowances set
  *     to different sentinel values, a slot wired to the wrong one shows up as
- *     the wrong number; with the real values (both 1,024) it could not.
+ *     the wrong number; with the real values (all 1,024) it could not.
  *   - runs svc/plugin_load.c -- the device's validator -- over a container that
  *     declares, slot by slot, exactly the limit (accepted) and one byte more
  *     (PLUGIN_ERR_STACK), and then the whole stack of each thread a slot runs
@@ -182,13 +182,16 @@ int main(void)
 			       CAM_PANEL_STACK_BYTES, PLUGIN_ERR_STACK);
 			continue;
 		}
+		/* decode runs on the inference worker alone (issue #129). */
+		if (i == PLUGIN_SLOT_DECODE) {
+			expect(i, "declares the worker stack",
+			       NN_WORKER_STACK_BYTES, PLUGIN_ERR_STACK);
+			continue;
+		}
 		for (k = 0u; k < 2u; k++)
 			expect(i, k == 0u ? "declares a console stack"
 			                  : "declares a job stack",
 			       shell[k], PLUGIN_ERR_STACK);
-		if (i == PLUGIN_SLOT_DECODE)
-			expect(i, "declares the worker stack",
-			       NN_WORKER_STACK_BYTES, PLUGIN_ERR_STACK);
 	}
 
 	if (failures) {

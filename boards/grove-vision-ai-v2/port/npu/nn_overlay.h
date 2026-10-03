@@ -104,8 +104,38 @@ const struct cam_lcd_overlay *nn_overlay_arm(void);
  * Called by the inference worker only, after it has TAKEn a hand-over and
  * before it says DONE -- so the job the producer wrote is its alone, and the
  * input and output tensors are not the producer's until it returns.
+ *
+ * @return non-zero: a stream, ask for the next frame (DONE); 0: a one-shot,
+ *         ask for nothing more (DONE_LAST)
  */
-void nn_overlay_work(void);
+int nn_overlay_work(void);
+
+/** How a one-shot's frame ended (nn_overlay_shot()).  NONE until it has. */
+#define NN_OV_SHOT_NONE          0u
+#define NN_OV_SHOT_PUBLISHED     1u   /**< a result (or the raw outputs) went
+                                           to the record                    */
+#define NN_OV_SHOT_PREP_FAILED   2u   /**< the producer could not prepare it */
+#define NN_OV_SHOT_STOPPED       3u   /**< a stop came first; no invoke      */
+#define NN_OV_SHOT_NO_OUTPUTS    4u   /**< an output tensor was unreadable   */
+#define NN_OV_SHOT_INVOKE_FAILED 5u
+#define NN_OV_SHOT_LEASE_TIMEOUT 6u   /**< inferred, not decoded             */
+#define NN_OV_SHOT_NOT_HELD      7u   /**< the decode refused an unleased call */
+
+/**
+ * @brief  Arm the overlay for `nn run`: ONE frame, through the same producer
+ *         prep and worker as a stream (issue #129).
+ *
+ * The producer prepares the first frame the worker wants and declines every
+ * other; the worker parks for good after it (DONE_LAST).  Neither touches the
+ * stream's statistics.  The caller arms the worker first.
+ *
+ * @return the vtable to pass to cam_capture_sink_attach_and_stream()
+ */
+const struct cam_lcd_overlay *nn_overlay_arm_oneshot(void);
+
+/** How the one-shot's frame ended, NN_OV_SHOT_*.  Read it BEFORE the record's
+ *  count: the worker publishes and only then sets this. */
+int nn_overlay_shot(void);
 
 /**
  * @brief  Ask the overlay to stop doing work.

@@ -686,6 +686,8 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/camera/cam_edm.c"
     "${BOARD_DIR}/port/camera/camera.c"
     "${BOARD_DIR}/port/camera/cam_lcd_sink.c"
+    # `nn run`'s sink: no panel, no thread, one put per frame (issue #129).
+    "${BOARD_DIR}/port/camera/cam_capture_sink.c"
     # Ethos-U55 inference glue (issue #44).  The C++ interpreter is contained
     # behind port/npu/npu.h; nothing above it sees a TFLite type.
     "${BOARD_DIR}/port/npu/npu_tflm.cc"
@@ -716,6 +718,9 @@ add_library(shell_objs OBJECT
     # walked by test/test_nn_handoff.c.
     "${BOARD_DIR}/port/npu/nn_worker.c"
     "${BOARD_DIR}/port/npu/nn_handoff.c"
+    # How `nn run`'s wait for its one inference ends (issue #129): a pure
+    # table, walked by test/test_nn_run_wait.c.
+    "${BOARD_DIR}/port/npu/nn_run_wait.c"
     # Where a `nn model load` ends and what that obliges (issue #122): a pure
     # table, so the host test walks the endings a console cannot produce.
     "${BOARD_DIR}/port/npu/nn_swap.c"
@@ -1686,9 +1691,10 @@ add_custom_target(flash
 #
 # Which thread each slot runs on is the table in port/npu/nn_plugin_stack.h,
 # where the firmware also asserts every allowance below each of those stacks:
-# the shell's (a console, or a background job) for every slot but draw, the
-# inference worker's as well for decode (issue #129; the producer's before it),
-# the panel's for draw.
+# the shell's (a console, or a background job) for every slot but draw and
+# decode, the panel's for draw, and the inference worker's -- alone -- for decode
+# (issue #129: the stream's decode moved there from the producer, and `nn run`'s
+# from the console).
 #
 # [!] UNTIL ISSUE #119 THE DEPTH WAS TAKEN IN THE WRONG PLACE AND ON TWO THREADS.
 # The probe sat in nn_overlay.c, before the call into nn_active_*(), so the frame
@@ -1717,6 +1723,13 @@ add_custom_target(flash
 # depths are there to show that 1,024 FITS the rule above.
 set(GROVE_PLUGIN_STACK_PANEL    1024)
 set(GROVE_PLUGIN_STACK_SHELL    1024)
+# [!] decode's, declared against the inference worker since issue #129, when the
+# worker became the only thread decode runs on.  Its shallowest ceiling moved
+# from the shell's 4,096 B stack to the worker's 8,192 B, so the old figure
+# still fits with more room, and moving it would re-pack every container for no
+# reason: it stays 1,024.  The worker's entry depth is what the board README's
+# table must show inside it.
+set(GROVE_PLUGIN_STACK_WORKER   1024)
 
 # [!] THE ONE DECLARATION OF THE SLOT -> ALLOWANCE TABLE (issue #126).  The
 # plugin gate's --entry, every container's --policy-stack and the firmware's
@@ -1730,9 +1743,10 @@ plugin_stack_table(
     DEFINE_ON  shell_objs
     ALLOWANCES GROVE_PLUGIN_STACK_SHELL=${GROVE_PLUGIN_STACK_SHELL}
                GROVE_PLUGIN_STACK_PANEL=${GROVE_PLUGIN_STACK_PANEL}
+               GROVE_PLUGIN_STACK_WORKER=${GROVE_PLUGIN_STACK_WORKER}
     SLOTS      entry=GROVE_PLUGIN_STACK_SHELL
                shapes_ok=GROVE_PLUGIN_STACK_SHELL
-               decode=GROVE_PLUGIN_STACK_SHELL
+               decode=GROVE_PLUGIN_STACK_WORKER
                draw=GROVE_PLUGIN_STACK_PANEL
                report=GROVE_PLUGIN_STACK_SHELL
                param_set=GROVE_PLUGIN_STACK_SHELL

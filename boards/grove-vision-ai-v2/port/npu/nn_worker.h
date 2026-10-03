@@ -13,8 +13,8 @@
  *
  * A stream arms it at start (IDLE -> WANT) and its stop joins it after the
  * producer is confirmed out and before the record boundary.  The job it runs
- * is nn_overlay_work().  `nn run` still infers on the console (issue #129
- * stage 3 moves it here).
+ * is nn_overlay_work().  `nn run` arms it the same way and it parks after
+ * that one frame (DONE_LAST).
  *
  * OWNERSHIP.  Everything here is static and never freed, like the overlay's: a
  * stop whose join never came back leaves the worker possibly still running, and

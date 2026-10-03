@@ -8,6 +8,7 @@
 #include "nn_overlay.h"
 
 #include <stddef.h>
+#include <string.h>        /* memset */
 
 #include "tx_api.h"        /* tx_time_get(): ThreadX ticks, 1 ms here */
 
@@ -186,6 +187,22 @@ static volatile uint8_t nn_ov_result;
  * worker and read by draw(), both under the plugin lease. */
 static uint32_t nn_ov_res_frame;
 
+/*
+ * `nn run` (issue #129): the same producer and worker, for ONE frame.  Set by
+ * nn_overlay_arm_oneshot(), cleared by nn_overlay_arm(); written only while the
+ * worker is parked and nothing is attached.
+ *
+ * [!] A ONE-SHOT COUNTS NOTHING HERE.  The stream statistics are what `nn stream
+ * stats` reads after a stream has ended, and `nn run` never touched them; it
+ * still does not.  What it reports is its own ending, below.
+ */
+static uint8_t nn_ov_oneshot;
+/* How the one-shot's frame ended, NN_OV_SHOT_* (nn_overlay.h); NONE while it
+ * has not.  Written once, by the producer (a frame it could not prepare) or by
+ * the worker (after its publish, before it parks) -- never both, since the
+ * producer writes it only before the hand-over and the worker only after. */
+static volatile uint8_t nn_ov_shot;
+
 /* A counter both the producer and the worker write. */
 static void nn_ov_bump(uint32_t *c)
 {
@@ -196,6 +213,22 @@ static void nn_ov_bump(uint32_t *c)
 	TX_RESTORE
 }
 
+/*
+ * How the worker leaves one frame: a stream counts it in @p counter (if any) and
+ * asks for the next frame; a one-shot records @p shot for the console and asks
+ * for nothing more.  @return what nn_overlay_work() returns.
+ */
+static int nn_ov_end(int oneshot, uint32_t *counter, uint8_t shot)
+{
+	if (oneshot) {
+		nn_ov_shot = shot;
+		return 0;
+	}
+	if (counter != NULL)
+		nn_ov_bump(counter);
+	return 1;
+}
+
 static int nn_overlay_process(void *ctx, const void *pixels,
                               uint16_t w, uint16_t h)
 {
@@ -203,6 +236,7 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	struct nn_preproc_geom geom;
 	uint32_t e0, e1;
 	int draw;
+	const int oneshot = nn_ov_oneshot;
 
 	(void)ctx;
 	(void)w;
@@ -242,9 +276,14 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	/* Nothing started yet, so this is free; no draw on a panel about to be
 	 * given up. */
 	if (nn_ov_stop) {
-		nn_ov_bump(&nn_ov_stats.skipped);
+		if (!oneshot)
+			nn_ov_bump(&nn_ov_stats.skipped);
 		return -1;
 	}
+	/* A one-shot whose frame already ended -- handed over, or refused below --
+	 * takes no other: the frames after it go straight back. */
+	if (oneshot && nn_ov_shot != NN_OV_SHOT_NONE)
+		return -1;
 
 	/*
 	 * [!] THE INPUT IS THE PRODUCER'S ONLY WHILE THE WORKER WANTS A FRAME.
@@ -254,8 +293,10 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	 * not inferred (skipped, and counted as busy apart).
 	 */
 	if (!nn_worker_wants()) {
-		nn_ov_bump(&nn_ov_stats.skipped);
-		nn_ov_stats.busy++;      /* producer only */
+		if (!oneshot) {
+			nn_ov_bump(&nn_ov_stats.skipped);
+			nn_ov_stats.busy++;      /* producer only */
+		}
 		return draw;
 	}
 
@@ -270,8 +311,12 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	    in.bytes < (size_t)in.dims[2] * (size_t)in.dims[1] * 3u ||
 	    nn_preproc_fill(camera_raw_frame(), CAM_FRAME_WIDTH,
 	                    CAM_FRAME_HEIGHT, &geom, (uint8_t *)in.data) != 0) {
-		/* The worker still wants a frame; the next one tries again. */
-		nn_ov_bump(&nn_ov_stats.errors);
+		/* A stream's worker still wants a frame and the next one tries
+		 * again.  A one-shot ends here: the console is told why. */
+		if (oneshot)
+			nn_ov_shot = NN_OV_SHOT_PREP_FAILED;
+		else
+			nn_ov_bump(&nn_ov_stats.errors);
 		return draw;
 	}
 	e1 = tx_glue_epk_timer_ticks();
@@ -285,12 +330,40 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	nn_ov_job.prep_ticks = e1 - e0;
 	nn_ov_job.geom       = geom;
 	/* After the input is written and the job filled, never before. */
-	if (!nn_worker_hand())
+	if (!nn_worker_hand() && !oneshot)
 		nn_ov_bump(&nn_ov_stats.errors);   /* not reachable: WANT above */
 	return draw;
 }
 
-void nn_overlay_work(void)
+/*
+ * A frame nothing decodes -- `nn run` on a bare model (issue #104) -- is still a
+ * result: the outputs' shapes, published under the generation rule like any
+ * decode, so `nn dets` and `nn run` report the inference that ran (issue #121).
+ * Moved here from the console with `nn run` itself (issue #129).
+ *
+ * [!] NOT INLINED, AND THAT IS A STACK DECISION.  The descriptors are ~300 B;
+ * inlined into nn_overlay_work() they would sit in the frame the plugin's
+ * decode() is entered below.  Only the path with no plugin needs them.
+ */
+static __attribute__((noinline)) int nn_ov_publish_raw(uint32_t gen)
+{
+	struct nn_raw_outputs raw;
+	unsigned n = npu_output_count(), i;
+
+	memset(&raw, 0, sizeof raw);
+	raw.count = (int32_t)n;
+	for (i = 0u; i < n && i < NN_RAW_OUTPUTS_MAX; i++) {
+		struct npu_tensor t;
+
+		if (npu_output(i, &t) != NPU_OK)
+			break;
+		npu_desc_of(&raw.out[i], &t);
+		raw.n = (uint8_t)(i + 1u);
+	}
+	return nn_rec_publish_raw(gen, &raw);
+}
+
+int nn_overlay_work(void)
 {
 	TX_INTERRUPT_SAVE_AREA
 	struct nn_ov_job job;
@@ -299,6 +372,7 @@ void nn_overlay_work(void)
 	uint32_t t0, t1;
 	uint32_t e1, e2, e3;
 	int nd;
+	const int oneshot = nn_ov_oneshot;
 
 	job = nn_ov_job;
 
@@ -307,31 +381,26 @@ void nn_overlay_work(void)
 	 * instant before the expensive, uninterruptible part; the stop's join
 	 * then waits out at most an invoke already running.
 	 */
-	if (nn_ov_stop) {
-		nn_ov_bump(&nn_ov_stats.skipped);
-		return;
-	}
+	if (nn_ov_stop)
+		return nn_ov_end(oneshot, &nn_ov_stats.skipped, NN_OV_SHOT_STOPPED);
 
 	n_out = npu_output_count();
-	if (n_out > NPU_DESC_MAX_OUTPUTS) {
-		nn_ov_bump(&nn_ov_stats.errors);
-		return;
-	}
+	if (n_out > NPU_DESC_MAX_OUTPUTS)
+		return nn_ov_end(oneshot, &nn_ov_stats.errors,
+		                 NN_OV_SHOT_NO_OUTPUTS);
 	for (i = 0; i < n_out; i++)
-		if (npu_output(i, &outs[i]) != NPU_OK) {
-			nn_ov_bump(&nn_ov_stats.errors);
-			return;
-		}
+		if (npu_output(i, &outs[i]) != NPU_OK)
+			return nn_ov_end(oneshot, &nn_ov_stats.errors,
+			                 NN_OV_SHOT_NO_OUTPUTS);
 
 	/* No cache maintenance here.  The port does it inside Invoke(), at the
 	 * two instants the arena changes hands (issue #46) -- on this thread now,
 	 * the same two points; anything from out here is too early or too late. */
 	e1 = tx_glue_epk_timer_ticks();
 	t0 = (uint32_t)tx_time_get();
-	if (npu_invoke() != NPU_OK) {
-		nn_ov_bump(&nn_ov_stats.errors);
-		return;
-	}
+	if (npu_invoke() != NPU_OK)
+		return nn_ov_end(oneshot, &nn_ov_stats.errors,
+		                 NN_OV_SHOT_INVOKE_FAILED);
 	t1 = (uint32_t)tx_time_get();
 	e2 = tx_glue_epk_timer_ticks();
 
@@ -350,11 +419,23 @@ void nn_overlay_work(void)
 	 * console wait out a frame.
 	 */
 	if (!plugin_lease_take()) {
-		TX_DISABLE
-		nn_ov_stats.errors++;
-		nn_ov_stats.lease_timeouts++;
-		TX_RESTORE
-		return;
+		if (!oneshot)
+			nn_ov_bump(&nn_ov_stats.lease_timeouts);
+		return nn_ov_end(oneshot, &nn_ov_stats.errors,
+		                 NN_OV_SHOT_LEASE_TIMEOUT);
+	}
+	/*
+	 * [!] NOTHING TO DECODE WITH, ONLY ON A ONE-SHOT (issue #104): a stream is
+	 * refused at admission without a plugin.  The inference that ran is
+	 * reported as the tensors it produced, published like any result.  Under
+	 * the lease, because whether a plugin is there is decided by a load the
+	 * gate keeps out -- but the lease is the rule for every path in.
+	 */
+	if (!nn_active_is_plugin()) {
+		(void)nn_active_set_geom(&job.geom);   /* as `nn run` always did */
+		(void)nn_ov_publish_raw(job.gen);
+		plugin_lease_give();
+		return nn_ov_end(oneshot, NULL, NN_OV_SHOT_PUBLISHED);
 	}
 	/*
 	 * [!] THE GEOMETRY BEFORE THE DECODE, AND UNDER THE SAME HOLD (issue
@@ -372,7 +453,7 @@ void nn_overlay_work(void)
 		 * Counted by the entry check (plugin_lease_unheld()), not as a
 		 * decoder error: the decoder was never asked. */
 		plugin_lease_give();
-		return;
+		return nn_ov_end(oneshot, NULL, NN_OV_SHOT_NOT_HELD);
 	}
 	/*
 	 * [!] PUBLISHED AT ONCE, WHATEVER IT SAYS (issue #118), under the
@@ -388,6 +469,9 @@ void nn_overlay_work(void)
 	nn_ov_result    = (nd < 0) ? NN_OV_RES_FAIL : NN_OV_RES_OK;
 	plugin_lease_give();
 	e3 = tx_glue_epk_timer_ticks();
+
+	if (oneshot)
+		return nn_ov_end(oneshot, NULL, NN_OV_SHOT_PUBLISHED);
 
 	TX_DISABLE
 	if (nd < 0) {
@@ -415,6 +499,7 @@ void nn_overlay_work(void)
 		nn_ov_ndet = nd;
 	}
 	TX_RESTORE
+	return 1;
 }
 
 static void nn_overlay_draw(void *ctx, uint16_t *fb, uint16_t fb_w,
@@ -554,9 +639,36 @@ const struct cam_lcd_overlay *nn_overlay_arm(void)
 	nn_ov_cur_frame        = 0u;
 	nn_ov_res_frame        = 0u;
 	nn_ov_result           = NN_OV_RES_NONE;
+	nn_ov_oneshot          = 0u;
+	nn_ov_shot             = NN_OV_SHOT_NONE;
 	nn_ov_stop             = 0u;
 	TX_RESTORE
 	return &nn_ov_vtable;
+}
+
+const struct cam_lcd_overlay *nn_overlay_arm_oneshot(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	/*
+	 * Only what the producer and the worker read to decide; NOT the stream's
+	 * counters, which describe the last stream until the next one is armed.
+	 * Nothing writes these now: the worker is parked (the caller armed it
+	 * IDLE -> WANT and nothing has been attached to hand it a frame).
+	 */
+	TX_DISABLE
+	nn_ov_frame_no  = 0u;
+	nn_ov_cur_frame = 0u;
+	nn_ov_oneshot   = 1u;
+	nn_ov_shot      = NN_OV_SHOT_NONE;
+	nn_ov_stop      = 0u;
+	TX_RESTORE
+	return &nn_ov_vtable;
+}
+
+int nn_overlay_shot(void)
+{
+	return (int)nn_ov_shot;
 }
 
 void nn_overlay_request_stop(void)

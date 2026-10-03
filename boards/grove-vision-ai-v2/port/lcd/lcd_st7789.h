@@ -253,9 +253,11 @@ int lcd_blit_le(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
  * would let that thread start writing the next frame's annotations while draw()
  * is still reading this one's.
  *
- * What `staged` may do, where `overlay` may not: TAKE LOCKS. It runs at a point
- * where the driver holds only the panel guard and wants nothing back, so a
- * caller may complete a hand-off that needs its own mutex.
+ * What `staged` may do, where `overlay` may not: TAKE LOCKS IT WAITS FOR. It
+ * runs at a point where the driver holds only the panel guard and wants nothing
+ * back, so a caller may complete a hand-off that needs its own mutex. (`overlay`
+ * is allowed one non-waiting TRY of the plugin lease and nothing more -- see
+ * lcd_blit_le_overlay().)
  *
  * What it may NOT do, and here it is stricter than `overlay`:
  *
@@ -298,6 +300,11 @@ struct lcd_blit_hooks {
  * an invitation:
  *
  *   - it must NOT block, sleep, or wait on anything;
+ *   - it may make ONE non-waiting try of the plugin lease (issue #127,
+ *     port/plugin/plugin_lease.h) and no other lock: refused, it draws
+ *     nothing; granted, it waits for nothing else while holding it and
+ *     releases it before it returns. A try cannot block and so cannot invert
+ *     an order -- which is all the "no lock" rule was protecting;
  *   - it must NOT run inference or any other long operation -- it sits between
  *     a staged frame and the wire, and everything else that wants the panel is
  *     failing its non-blocking acquire meanwhile;

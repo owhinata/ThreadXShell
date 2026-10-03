@@ -361,6 +361,17 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_nn_run_wait"
 "$out/test_nn_run_wait"
 
+# issue #129 -- what the inference worker does with a model's outputs
+# (port/npu/nn_outputs.c).  A bare `nn run` counts every output and describes
+# what it can read; `nn run` with a plugin decodes the first eight and names an
+# unreadable one; a stream refuses past eight.  No model this board ships has
+# nine outputs or an unreadable one, so the cases are made up here.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/npu" -I "$HOST_TEST_SVC" \
+    "$here/test_nn_outputs.c" "$board/port/npu/nn_outputs.c" \
+    $LDFLAGS -o "$out/test_nn_outputs"
+"$out/test_nn_outputs"
+
 # issue #122 -- where a `nn model load` ends (port/npu/nn_swap.c).  A load over
 # an open model is a replacement with a rollback, and the ending that matters
 # most -- the backend refuses the new model AND the previous one it was running

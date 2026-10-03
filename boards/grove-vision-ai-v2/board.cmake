@@ -721,6 +721,10 @@ add_library(shell_objs OBJECT
     # How `nn run`'s wait for its one inference ends (issue #129): a pure
     # table, walked by test/test_nn_run_wait.c.
     "${BOARD_DIR}/port/npu/nn_run_wait.c"
+    # What the worker does with a model's outputs (issue #129): a stream, `nn
+    # run` with a plugin and a bare `nn run` each read them their own way.
+    # Pure, walked by test/test_nn_outputs.c.
+    "${BOARD_DIR}/port/npu/nn_outputs.c"
     # Where a `nn model load` ends and what that obliges (issue #122): a pure
     # table, so the host test walks the endings a console cannot produce.
     "${BOARD_DIR}/port/npu/nn_swap.c"

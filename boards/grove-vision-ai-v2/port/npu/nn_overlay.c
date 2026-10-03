@@ -25,6 +25,7 @@
 #include "nn_rec.h"
 #include "npu.h"
 #include "nn_worker.h"     /* the inference worker (issue #129) */
+#include "nn_outputs.h"    /* what the worker does with the outputs (#129) */
 #include "tx_glue.h"       /* the EPK's TIMER2: the stage clock (issue #60) */
 
 /*
@@ -205,6 +206,9 @@ static uint8_t nn_ov_oneshot;
  * the worker (after its publish, before it parks) -- never both, since the
  * producer writes it only before the hand-over and the worker only after. */
 static volatile uint8_t nn_ov_shot;
+/* With NN_OV_SHOT_NO_OUTPUTS: the output that could not be read.  Written
+ * before nn_ov_shot, by the same thread. */
+static volatile uint8_t nn_ov_shot_index;
 
 /* A counter both the producer and the worker write. */
 static void nn_ov_bump(uint32_t *c)
@@ -351,22 +355,35 @@ static int nn_overlay_process(void *ctx, const void *pixels,
  * inlined into nn_overlay_work() they would sit in the frame the plugin's
  * decode() is entered below.  Only the path with no plugin needs them.
  */
+/* One output, described for the record (nn_out_raw_fill()'s reader). */
+static int nn_ov_desc(void *ctx, unsigned i, struct tensor_desc *out)
+{
+	struct npu_tensor t;
+
+	(void)ctx;
+	if (npu_output(i, &t) != NPU_OK)
+		return -1;
+	npu_desc_of(out, &t);
+	return 0;
+}
+
 static __attribute__((noinline)) int nn_ov_publish_raw(uint32_t gen)
 {
 	struct nn_raw_outputs raw;
-	unsigned n = npu_output_count(), i;
 
-	memset(&raw, 0, sizeof raw);
-	raw.count = (int32_t)n;
-	for (i = 0u; i < n && i < NN_RAW_OUTPUTS_MAX; i++) {
-		struct npu_tensor t;
-
-		if (npu_output(i, &t) != NPU_OK)
-			break;
-		npu_desc_of(&raw.out[i], &t);
-		raw.n = (uint8_t)(i + 1u);
-	}
+	/* Every output counted, the first NN_RAW_OUTPUTS_MAX described until one
+	 * cannot be -- the report says how many there were and shows what it
+	 * could (nn_outputs.h). */
+	nn_out_raw_fill(&raw, npu_output_count(), nn_ov_desc, NULL);
 	return nn_rec_publish_raw(gen, &raw);
+}
+
+/* One output, into the array the decode is handed (nn_out_collect()'s reader). */
+static int nn_ov_read(void *ctx, unsigned i)
+{
+	struct npu_tensor *outs = ctx;
+
+	return (npu_output(i, &outs[i]) == NPU_OK) ? 0 : -1;
 }
 
 int nn_overlay_work(void)
@@ -389,15 +406,6 @@ int nn_overlay_work(void)
 	 */
 	if (nn_ov_stop)
 		return nn_ov_end(oneshot, &nn_ov_stats.skipped, NN_OV_SHOT_STOPPED);
-
-	n_out = npu_output_count();
-	if (n_out > NPU_DESC_MAX_OUTPUTS)
-		return nn_ov_end(oneshot, &nn_ov_stats.errors,
-		                 NN_OV_SHOT_NO_OUTPUTS);
-	for (i = 0; i < n_out; i++)
-		if (npu_output(i, &outs[i]) != NPU_OK)
-			return nn_ov_end(oneshot, &nn_ov_stats.errors,
-			                 NN_OV_SHOT_NO_OUTPUTS);
 
 	/* No cache maintenance here.  The port does it inside Invoke(), at the
 	 * two instants the arena changes hands (issue #46) -- on this thread now,
@@ -431,17 +439,42 @@ int nn_overlay_work(void)
 		                 NN_OV_SHOT_LEASE_TIMEOUT);
 	}
 	/*
-	 * [!] NOTHING TO DECODE WITH, ONLY ON A ONE-SHOT (issue #104): a stream is
-	 * refused at admission without a plugin.  The inference that ran is
-	 * reported as the tensors it produced, published like any result.  Under
-	 * the lease, because whether a plugin is there is decided by a load the
-	 * gate keeps out -- but the lease is the rule for every path in.
+	 * [!] THE PLUGIN QUESTION BEFORE THE OUTPUTS ARE READ (review of a438f76).
+	 * What may be done with the outputs depends on it: a bare model is
+	 * reported whatever its output count, and one unreadable output only
+	 * shortens the list; a decode is limited to NPU_DESC_MAX_OUTPUTS, which a
+	 * stream refuses past and `nn run` truncates to, as each always did
+	 * (nn_outputs.h).  Under the lease, because whether a plugin is there is
+	 * decided by a load the gate keeps out -- but the lease is the rule for
+	 * every path in.  The outputs are read here, after the invoke, and the
+	 * DONE that lets the producer write again comes only after this function.
 	 */
-	if (!nn_active_is_plugin()) {
+	switch (nn_out_plan(oneshot, nn_active_is_plugin(), npu_output_count(),
+	                    NPU_DESC_MAX_OUTPUTS, &n_out)) {
+	case NN_OUT_RAW:
+		/* Nothing to decode with -- only on a one-shot (issue #104): a
+		 * stream is refused at admission without a plugin.  The inference
+		 * that ran is reported as the tensors it produced. */
 		(void)nn_active_set_geom(&job.geom);   /* as `nn run` always did */
 		(void)nn_ov_publish_raw(job.gen);
 		plugin_lease_give();
 		return nn_ov_end(oneshot, NULL, NN_OV_SHOT_PUBLISHED);
+	case NN_OUT_DECODE:
+		break;
+	case NN_OUT_REFUSE:
+	default:
+		plugin_lease_give();
+		return nn_ov_end(oneshot, &nn_ov_stats.errors,
+		                 NN_OV_SHOT_NO_OUTPUTS);
+	}
+	i = nn_out_collect(n_out, nn_ov_read, outs);
+	if (i != n_out) {
+		/* Nothing decoded, so nothing is published: the record keeps the
+		 * plugin's last result, which is still the plugin's state. */
+		plugin_lease_give();
+		nn_ov_shot_index = (uint8_t)i;
+		return nn_ov_end(oneshot, &nn_ov_stats.errors,
+		                 NN_OV_SHOT_NO_OUTPUTS);
 	}
 	/*
 	 * [!] THE GEOMETRY BEFORE THE DECODE, AND UNDER THE SAME HOLD (issue
@@ -670,6 +703,7 @@ const struct cam_lcd_overlay *nn_overlay_arm_oneshot(void)
 	nn_ov_cur_frame = 0u;
 	nn_ov_oneshot   = 1u;
 	nn_ov_shot      = NN_OV_SHOT_NONE;
+	nn_ov_shot_index = 0u;
 	nn_ov_stop      = 0u;
 	TX_RESTORE
 	return &nn_ov_vtable;
@@ -678,6 +712,11 @@ const struct cam_lcd_overlay *nn_overlay_arm_oneshot(void)
 int nn_overlay_shot(void)
 {
 	return (int)nn_ov_shot;
+}
+
+unsigned nn_overlay_shot_index(void)
+{
+	return (unsigned)nn_ov_shot_index;
 }
 
 void nn_overlay_request_stop(void)

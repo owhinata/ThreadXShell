@@ -4446,7 +4446,11 @@ synchronous, one put per frame, attached only by `camera_stream_start()`,
 detached only after a confirmed stop and a zero pin count).  The producer
 prepares the first frame the worker wants and declines the rest; the worker
 decodes and publishes it -- or, with no plugin, publishes the raw output
-descriptors -- and parks for good (DONE_LAST).  The console waits on the record,
+descriptors -- and parks for good (DONE_LAST).  The outputs are read after the
+plugin question, under the lease, each caller its own way
+(`port/npu/nn_outputs.c`): a bare model counts every output and describes the
+first eight it can read; `nn run` with a plugin decodes the first eight and
+names an output it cannot read; a stream refuses a model with more than eight.  The console waits on the record,
 on the wall clock, at most **4,300 ms**: the camera's first-frame timeout
 (`CAM_FRAME_TIMEOUT_TICKS`, 2 s) + one inference at its worst (2 x 1 s) + the
 lease wait (50 ms) + 250 ms of slack.  That is deliberately not the join's

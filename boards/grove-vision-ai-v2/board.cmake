@@ -431,6 +431,11 @@ set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/svc/plugin_paint_span.c"
     "${BOARD_DIR}/port/plugin/plugin_run.c"
     "${BOARD_DIR}/port/plugin/plugin_paint.c"
+    # The one lock every path into the plugin takes (issue #127): the mutex
+    # and its holder check in plugin_lease.c, the miss rules a pure function
+    # beside it, walked by test/test_plugin_lease_miss.c.
+    "${BOARD_DIR}/port/plugin/plugin_lease.c"
+    "${BOARD_DIR}/port/plugin/plugin_lease_miss.c"
     # The one place that decides which decoder is in force (issue #103): the
     # decision and the calls into the plugin shared with wio (issue #126), this
     # board's tensors, geometry and depth record beside it.

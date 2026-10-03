@@ -35,6 +35,7 @@
 #include "lcd_st7789.h"
 #include "camera.h"
 #include "cam_lcd_sink.h"
+#include "plugin_lease.h"
 
 #define LOG_TAG "main"
 #include "log.h"
@@ -147,6 +148,12 @@ void tx_application_define(void *first_unused_memory)
 	 * camera_create_objects() only for readability -- the two are
 	 * independent, and neither touches hardware. */
 	cam_lcd_sink_create_objects();
+
+	/* The one lock every path into a loaded plugin takes (issue #127).  Here
+	 * because the producer and the panel only ever TRY it, from threads that
+	 * already exist: it has to exist before either can run.  A failure is
+	 * logged and leaves every acquire refused -- fail-closed, not unguarded. */
+	(void)plugin_lease_init();
 
 	/* Boot banner via printf -> _write -> the UART TX ring.  Pre-scheduler
 	 * _write only enqueues (never waits); the backend flushes the ring once

@@ -105,6 +105,7 @@ code** で、ゲートが証明するのはスタック上限だけ（**メモ�
   ので**閉じ手は CRC32 と `blob list` の照合**。「ビルド時に検査済み」を「何も起きない」と書き換えない。**配送 target（DELIVERY）は build.ninja から導出した使用者と両方向照合する**（`check_delivery_gate.py`、全 target が先に待つ）。
 - **モデルは commit と SHA256 で pin**し、消えたら **fail closed**。fetch は build 時で `asset-*` は ALL 外。
 - **ファームと plugin は別成果物で間違いは両方向**（焼いても container は更新されず、逆も焼き直し不要）。
+- **[!] 同じ plugin の callback は 2 つ同時に走らない**: plugin に入る全経路（param・admission・report・load/unload も）がボードの lease を取り、producer / panel は try だけで待たない。**入口は保持を検査し、無ければ「plugin 無し」と別の答え**（#127）。
 
 ## 開発ワークフロー
 
@@ -240,8 +241,7 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
   が timeout する）。**panel は `valid` だけでなく kind も見る**。
 - **plugin の差し替えは backend が成功してから**（先だと前の plugin を壊す）。bare model は必ず unload。
 - **decode と draw を隔てるものが無い**ので**結果リース**で囲う: **常にリース → フレームロック**、
-  worker は decode と publish の全体を保持、**パネルは待たない**。**plugin に入る経路は全部取る**
-  （param・admission・load/unload も）。**リース保持は「描いてよい」ではない**。
+  worker は decode と publish の全体を保持、**パネルは待たない**。**リース保持は「描いてよい」ではない**。
 - **report は snapshot と同じ保護区間で採取し、バッファは呼び出し側のフレーム**。**長さは状態ではない**。
 - **painter は全部 CPU**（DMA2D に静止を確かめる機構が無い）。**輪郭は書く画素数で課金する**。
 - **スタックは 2 つの量**（入口の空き / veneer の下）。不足ならスレッドを広げる。
@@ -300,16 +300,16 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
   verifier → 走査。**長さには下限も要る**）。**limits は呼び出しとともに `npu_verify.h` の 1 箇所。**
 - **`nn model load --name` はリースを切らさない**（`npu_hw_init()` が先 → 走査 → CRC → `npu_open()` → plugin、
   モデルが残らない失敗は必ず `npu_hw_deinit()`）。**開いた上の load は差し替えで plugin は backend 成功後**（`nn_swap.c`）。
-- **`nn thresh` は param 呼び出し中の数に入り、load/unload はそれが 0 でなければ BUSY**（判定は claim と同じ CS、`nn_param_calls.c`）。
+- **gate の外から plugin に入るコンソール呼び出し（thresh / dets）は数に入ってから lease を取る**。load/unload は数が 0 でなければ BUSY（判定は claim と同じ CS、`nn_param_calls.c`）。
 - **候補は VALID のみ・重複拒否・失敗理由は別々・読めなければ拒否。ホストの `verify_vela_model` を外さない**（代替にならない。C++ 不在は fail-closed）。
 - **アリーナの保守は範囲ごとでなく全体を 2 点で**（潰すのは `ethosu_invalidate_dcache()` だけ、成功条件は
   state と result の**両方**、異常時はリセット成功を確認してから）。**呼び出し側で保守しない。**
 - **推論は producer スレッド・`consume()` 内**で**推論（ガード無し）→ ガード 1 回で stage/draw/present**
-  （callback 中の block / sleep / 推論 / 他ロック / LCD 再入は禁止）。**タイムアウトは `npu_hw.h` に 1 つ。**
+  （callback 中の block / sleep / 推論 / 待つロック / LCD 再入は禁止。plugin lease の try だけは可で、取れなければ描かない）。**タイムアウトは `npu_hw.h` に 1 つ。**
 - **`nn stream` はデコーダが無い時点で拒否する**（shape や draw の前）。**wio と揃えようとしない。
   `nn_input_quant_ok()` は常駐デコーダの前提条件で plugin は縛られない。** stop の record 境界は停止確認後（#118）。
 - **ファームの印字は「種」を名乗らない**（ゲートは **`.rodata`** を読む。**literal を regex で見ない**）。
-  **フォントは plugin 側**で `text()` を足さない。**`nn dets` は record を読むだけ**（stream 中は件数+STALE）。
+  **フォントは plugin 側**で `text()` を足さない。**`nn dets` は record の snapshot と report を lease の 1 回の保持で採る**（stream 中も全文）。
 
 ## SWD デバッグ（共通）
 

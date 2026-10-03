@@ -2079,9 +2079,10 @@ counted in around its call into the plugin's param function, refused (`busy`)
 only while a load or unload holds the gate, and a load or unload is refused
 (`busy`) while the count is not zero; nobody waits.  Each test is in the same
 critical section as the change it guards (`port/npu/nn_param_calls.c`,
-`test/test_nn_param_calls.c`).  What stays open is the
-camera producer's decode and a threshold call inside the same plugin at once on
-a running stream -- neither replaces it (issue #122 P5, Phase 3a).
+`test/test_nn_param_calls.c`).  Since issue #127 the count covers `nn dets` as
+well, and both take the plugin lease after they are counted in, so the camera
+producer's decode and a threshold call are no longer inside the same plugin at
+once (#122 P5) -- see "One lock into the plugin".
 
 `blob_stat()` and `blob_verify()` take a lease and give it back; the leased
 forms (`blob_stat_leased`, `blob_verify_leased`) take the CALLER'S token and
@@ -4240,15 +4241,16 @@ Three things behave differently now that the stream outlives the command:
   is withholding -- the arena figure and the tensors need the claim the stream is
   holding, and the arena is being rewritten every frame anyway.
 - **`nn model unload`, `nn run`, `nn bench` and `nn out` are refused** while a
-  stream runs, by the same claim. `nn thresh` still works: the shared decoder's
-  threshold is an atomic snapshot each decode samples once.
-- **`nn dets` answers with the count and without the plugin's account**
-  (issue #118, decision D2): *nn: N item(s); the decoder could not be reached
-  to describe them*.  The count is the record's -- the producer publishes every
-  decode, refusals included, in a short interrupt-disabled section inside
-  `consume()` -- while the account needs the gate the stream holds, and the
-  producer is decoding the next frame over it.  After the stop `nn dets` gives
-  the stream's last result in the plugin's own words.
+  stream runs, by the same claim. `nn thresh` still works: it takes the plugin
+  lease, not the claim, and the producer skips the one frame it finds held
+  (issue #127).
+- **`nn dets` answers in full, in the plugin's own words** (issue #127; until
+  then the count only, *nn: N item(s); the decoder could not be reached to
+  describe them*, because the account needed the gate the stream holds).  The
+  record snapshot and the plugin's report are taken in one hold of the plugin
+  lease, and the producer decodes and publishes inside one hold of it, so the
+  two describe the same frame.  That message now appears only when the lease's
+  holder did not let go within the bound -- see "One lock into the plugin".
 
 **The record (issue #118).**  `nn dets` reads the last result `nn run` or a
 stream published (`port/npu/nn_rec.c`, the decisions in `svc/nn_det_record.c`);
@@ -5491,7 +5493,8 @@ depths at a plugin's entry, and nothing is derived from them any more.
 #### Reading `nn stream stats`
 
 The old `at call :` line is gone.  After `items` come one line per slot, then the
-painter's spend on a line of its own, then the producer profile -- last, because
+painter's spend on a line of its own, then the plugin lease's misses (issue #127,
+see "One lock into the plugin"), then the producer profile -- last, because
 it is the one line that may decline, and the caller stops at the first line a
 board declines.  As the board printed them (build `4bcf219`, before issue #121 -- the decode and
 report lines are left out here because that build's depths no longer hold; issue
@@ -6306,6 +6309,121 @@ real:
 
 Two mistakes cancelling is how a gate ends up never having been seen to fail for
 the reason it was written.
+
+## One lock into the plugin (issue #127)
+
+`port/plugin/plugin_lease.{c,h}` is a single ThreadX mutex (`TX_INHERIT`) that
+every path into a loaded plugin holds: its decode, its draw, its report, its
+parameters, its admission questions, its `entry()`, and its replacement or
+removal. It has the same name, API shape and miss semantics as wio-lite-ai's
+result lease (`boards/wio-lite-ai/port/plugin/plugin_lease.h`); the two are
+separate files until Epic #122 Phase 3b folds them into one type. What both
+boards now promise (`svc/plugin_abi.h`): **no two callbacks of one plugin run
+at once.**
+
+Why this board needed one at all: the frame pipeline already keeps the
+producer's decode and the panel's draw apart (one delivery per sink, released
+only after `draw()` returns), but nothing kept a console out. `nn thresh` on a
+running stream entered the same plugin the producer was decoding in (#122 P5),
+and `nn dets` on a running stream could only print the count and STALE,
+because the plugin's account was taken under the `nn` gate and a stream holds
+that gate until its stop (#122 P17).
+
+### Who takes it, and what happens when it is not there
+
+| caller | how | held across | not granted |
+|---|---|---|---|
+| camera producer | try, never waits | publishing the geometry, the decode, the record publish | that frame is not decoded; record, private state and geometry stay as they were; `process()` declines, so the frame goes to the panel bare and `draw()` is not called. Counted as a miss, not as `skipped` or `error(s)` |
+| panel | try, never waits, inside the panel guard | `draw()` | the frame is shown bare. Counted as a miss |
+| `nn thresh` get / set (and `nn info`'s thresh line) | counted in, then a bounded wait | the param call | `busy` |
+| `nn dets` | counted in, then a bounded wait | the record snapshot and the plugin's report, together | count refused (a load or unload holds the gate): `busy`. Wait timed out: the count and STALE |
+| `nn run` | a bounded wait, after the invoke | publishing the geometry, the decode, the publish, the snapshot, the report | `busy`, and nothing is published |
+| stream admission | a bounded wait | `shapes_ok` and `can_draw` | `busy`, before the camera is woken |
+| `nn model load` | after the SWAP gate and the NOR lookup, before the backend closes the open model | the backend close / open, the plugin swap and its `entry()`, the record invalidation, clearing the geometry | the REFUSED ending: an open model stands, a bring-up this load did is taken back down |
+| `nn model unload` | after the SWAP gate | unloading the plugin, invalidating the record, clearing the geometry (the backend comes down after the lease is released) | `busy`, nothing changed |
+
+A load holds the lease across the backend because the plugin swap comes after
+the backend has taken the new model, and there is no later point to take the
+lease from without a rollback. That costs nothing: while a load holds the SWAP
+gate, every path that could ask for the lease (a stream, `nn run`, a threshold
+or `nn dets` call) is refused without waiting, so nobody is queued behind it.
+
+**Order.** The panel holds the panel guard, then tries the lease. That is the
+opposite of wio-lite-ai, where the panel takes its lease first and the frame
+lock second. It cannot close a cycle here because the panel only tries: it never
+waits while holding the guard. What would close one is a lease holder that waits
+for the panel guard, a camera API mutex or a pipeline lock, and none does; no
+holder touches the LCD. The overlay callback contract in
+`port/lcd/lcd_st7789.h` allows that one non-waiting try and nothing else.
+
+**The bound.** A console waits at most `PLUGIN_LEASE_WAIT_MS` (50 ms) plus one
+tick for ThreadX's N-1 timeout, from the one constant in `plugin_lease.h`. The
+longest legitimate hold measured (Epic #122 U1 spike, 2026-10-03) was 12.7 ms:
+a console holding the lease while the producer (priority 10) and the panel (9)
+preempted it. A producer decode is about 150 us, a draw under 200 us, a
+threshold call a few us, a report tens of us. A timeout is an answer (`busy`
+or STALE); no path carries on into the plugin without the lease.
+
+**STALE now means one thing**: the lease's holder did not let go within the
+bound. The record's count is still true and is printed beside it.
+
+### The entry points check, and count what they refuse
+
+Holding the lease is enforced where the board branches into the plugin, not
+trusted at the call sites:
+
+- every `nn_active_*()` wrapper that reaches a plugin callback, and the two
+  that write the geometry its `to_frame()` reads, returns `NN_ACTIVE_NOT_HELD`
+  when the calling thread does not own the lease. That is an answer of its own:
+  never the no-plugin answer, never a `BF_ERR_*`;
+- `plugin_run_load()` refuses an unheld caller before the shared loader
+  unpublishes or copies anything, and the `exec_ok` hook asks again at the
+  branch to `entry()`. Both report `PLUGIN_RUN_NOT_HELD`, not the MPU refusal
+  the shared loader would make of a hook's "no".
+
+Each refusal is counted once, by the check that made it, from boot. A correct
+build never counts one. If one ever is, `nn stream stats` appends it to the
+lease line: `plugin  : N frame(s) missed (run of M); K entry(s) refused unheld`.
+`test/test_plugin_decode.c` walks every entry with the lease not held, held by
+another thread, and held by the caller; `test/test_plugin_run_lease.c` does the
+same for both loader checks against the real `plugin_run.c`.
+
+### The `plugin` line in `nn stream stats`
+
+`plugin  : N frame(s) missed (run of M)`, in wio-lite-ai's words. N is the
+frames shown bare because the lease was held, whether the producer or the panel
+found it so; a frame is counted once (a producer miss means the panel never
+asks). M is the longest run, and a run ends only on an annotated frame (the
+panel getting the lease), never on the producer's success. Both reset when a
+stream is armed, not when it stops. The line comes after `painter` and before
+the producer profile, which is left out when the clock is not trusted; the
+caller stops at the first line a board leaves out. `camera stats`' "overlay:
+shown unannotated" includes producer misses, because those frames were shown
+unannotated. `infers` stays the number of frames published. The producer
+profile's `decode` stage now includes the try and the release, about 2 us a
+frame.
+
+A single `nn thresh` or `nn dets` on a running stream costs at most one frame.
+On a stream with nobody else asking, the line reads 0 and 0.
+
+### Expected on hardware (expected, to be confirmed on hardware)
+
+The depths are desk estimates from the `.su` files of the issue #127 builds
+against the last measured values (build `ee045ff`); the rates are the
+acceptance criteria.
+
+| quantity | before | expected |
+|---|---|---|
+| detector `--frames 300` | 36.83 inf/s | >= 36.8 inf/s, 0 missed |
+| classifier `--frames 100` | 8.85 inf/s | 8.85 inf/s, 0 missed |
+| `nn dets` x 3 on a running stream | count + STALE | full report each time, at most 3 missed |
+| entry, console | 992 | 1000 |
+| shapes_ok, console | 1552 | 1552 |
+| decode, producer / console | 880 / 2376 | 880 / 2376 |
+| draw, panel | 224 | 240 |
+| report, console | 2088 | 2104 (via `nn run`) |
+| param_set, console | 456 | 456 |
+| param_get, console | 784 | 792 |
 
 ## Flashing and recovery
 

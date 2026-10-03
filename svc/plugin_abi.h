@@ -527,8 +527,9 @@ struct plugin_rect {
  * WHERE THE WORK GOES.  draw() runs on the panel thread with the panel guard
  * held, so it must be cheap; the expensive rasterising belongs in decode(),
  * which runs on the camera producer with no guard and may take as long as it
- * needs.  The frame pipeline pre-pins one delivery per sink, so the two never
- * overlap and what decode() leaves for draw() needs no lock.
+ * needs.  [!] NO TWO CALLBACKS OF ONE PLUGIN RUN AT ONCE, ON ANY BOARD (issue
+ * #127): every path into a plugin holds the board's plugin lease, so what
+ * decode() leaves for draw() and report() needs no lock of the plugin's own.
  *
  * [!] @ref version AND @ref size LEAD, AS IN struct plugin_base_api (ABI 2,
  * issue #111).  Until then a member appended here could not be detected by a

@@ -9,10 +9,12 @@
  * The NN half of cam_lcd_sink.h's overlay contract: inference on each published
  * frame, and the boxes drawn onto the staged image before it goes to the panel.
  *
- * WHY IT IS IN THE PORT AND NOT IN cmds/.  Both callbacks run on the CAMERA
- * PRODUCER THREAD, not on the shell thread that typed the command.  A file
- * under cmds/ that quietly executed there would be the kind of layering
- * accident that reads fine and is discovered during a debugging session.
+ * WHY IT IS IN THE PORT AND NOT IN cmds/.  None of it runs on the shell thread
+ * that typed the command: process() runs on the CAMERA PRODUCER, draw() on the
+ * panel thread, and since issue #129 the invoke, decode and publish on the
+ * INFERENCE WORKER (nn_worker.h), through nn_overlay_work().  A file under
+ * cmds/ that quietly executed there would be the kind of layering accident
+ * that reads fine and is discovered during a debugging session.
  *
  * OWNERSHIP.  All state here is static and none of it is ever freed, which is
  * what makes the camera's lost-producer path survivable (see camera.h): if a
@@ -35,7 +37,11 @@ extern "C" {
 struct nn_overlay_stats {
 	uint32_t inferences;   /**< frames run through the NPU               */
 	uint32_t detections;   /**< faces drawn, summed over frames          */
-	uint32_t skipped;      /**< frames not inferred (a stop was pending) */
+	uint32_t skipped;      /**< frames not inferred: a stop was pending, or
+	                            the worker was busy (issue #129)          */
+	uint32_t busy;         /**< of those, the worker was busy            */
+	uint32_t lease_timeouts; /**< inferred, but the lease was not had in
+	                              time: not decoded (also in errors)     */
 	uint32_t errors;       /**< invoke or decode refused                 */
 	/*
 	 * [!] Two kinds of decode failure, counted apart (issue #97).  There is no
@@ -72,6 +78,12 @@ struct nn_overlay_stats {
 	 * against a measurement rather than defended in the abstract. */
 	uint32_t draw_spent;   /**< high-water pixels charged in one draw     */
 	uint32_t draw_refused; /**< primitives refused for want of budget     */
+
+	/* How many frames the result drawn is behind the frame it is drawn on
+	 * (issue #129): summed and counted per draw, and the worst. */
+	uint32_t lag_sum;
+	uint32_t lag_n;
+	uint32_t lag_max;
 };
 
 /**
@@ -86,17 +98,28 @@ struct nn_overlay_stats {
 const struct cam_lcd_overlay *nn_overlay_arm(void);
 
 /**
+ * @brief  The worker's half of one frame: invoke, plugin lease, geometry,
+ *         decode, publish, account (issue #129).
+ *
+ * Called by the inference worker only, after it has TAKEn a hand-over and
+ * before it says DONE -- so the job the producer wrote is its alone, and the
+ * input and output tensors are not the producer's until it returns.
+ */
+void nn_overlay_work(void);
+
+/**
  * @brief  Ask the overlay to stop doing work.
  *
  * [!] CALL THIS BEFORE camera_stream_stop(), always.
  *
- * It is checked at three points -- before preprocessing, immediately before the
- * invoke, and again after inference before the panel is touched -- so a frame
- * that has not yet begun the expensive part abandons it. That is what keeps an
- * ordinary Ctrl+C from waiting on an inference.
+ * It is checked at two points -- on the producer before preprocessing, and on
+ * the worker immediately before the invoke -- so a frame that has not yet
+ * begun the expensive part abandons it. That is what keeps an ordinary Ctrl+C
+ * from waiting on an inference.
  *
  * It CANNOT cancel an invoke already waiting on the NPU: nothing can. It
- * narrows the window; the camera's lost-producer state is what makes the
+ * narrows the window; the camera's lost-producer state and the stop's bounded
+ * join of the worker (terminal when it runs out, issue #129) are what make the
  * remainder safe.
  */
 void nn_overlay_request_stop(void);

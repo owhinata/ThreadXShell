@@ -576,7 +576,7 @@ gcc $CFLAGS \
     -I "$board/port/npu" -I "$board/port/plugin" -I "$HOST_TEST_SVC" \
     -I "$HOST_TEST_INC" \
     -DGROVE_PLUGIN_STACK_SHELL=1024u -DGROVE_PLUGIN_STACK_PANEL=1024u \
-    -DCAM_PRODUCER_STACK_BYTES=8192u -DCAM_PANEL_STACK_BYTES=2048u \
+    -DNN_WORKER_STACK_BYTES=8192u -DCAM_PANEL_STACK_BYTES=2048u \
     "$here/test_nn_probe.c" "$board/port/npu/nn_probe.c" \
     "$HOST_TEST_SVC/fmt.c" \
     $LDFLAGS -o "$out/test_nn_probe"

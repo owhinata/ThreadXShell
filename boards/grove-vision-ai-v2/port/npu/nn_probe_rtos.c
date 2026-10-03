@@ -16,14 +16,15 @@
 #include <string.h>
 
 #include "cam_lcd_sink.h"     /* CAM_PANEL_PRIO, CAM_PANEL_STACK_BYTES       */
-#include "camera.h"           /* CAM_PRODUCER_PRIO, CAM_PRODUCER_STACK_BYTES */
+#include "camera.h"           /* CAM_PRODUCER_PRIO: told apart, not a context */
+#include "nn_worker.h"        /* NN_WORKER_PRIO, NN_WORKER_STACK_BYTES       */
 #include "cli_config.h"       /* CLI_{INSTANCE,BG_JOB}_{PRIORITY,STACK_SIZE} */
 #include "nn_plugin_stack.h"  /* GROVE_PLUGIN_ON_* -- the bit order         */
 #include "plugin_abi.h"       /* PLUGIN_SLOT_COUNT                           */
 #include "tx_api.h"
 
 /* The report marks coverage with nn_plugin_stack.h's masks, indexed by context. */
-_Static_assert(GROVE_PLUGIN_ON_PRODUCER == (1u << NN_PROBE_PRODUCER) &&
+_Static_assert(GROVE_PLUGIN_ON_WORKER   == (1u << NN_PROBE_WORKER) &&
                GROVE_PLUGIN_ON_PANEL    == (1u << NN_PROBE_PANEL) &&
                GROVE_PLUGIN_ON_CONSOLE  == (1u << NN_PROBE_CONSOLE) &&
                GROVE_PLUGIN_ON_BG       == (1u << NN_PROBE_BG),
@@ -35,18 +36,26 @@ _Static_assert(GROVE_PLUGIN_ON_PRODUCER == (1u << NN_PROBE_PRODUCER) &&
  * then at most one of them, and one that is none of them is not counted.
  */
 static const struct nn_probe_thread_class nn_probe_threads[NN_PROBE_CTX_COUNT] = {
-	[NN_PROBE_PRODUCER] = { CAM_PRODUCER_PRIO,     CAM_PRODUCER_STACK_BYTES },
+	[NN_PROBE_WORKER]   = { NN_WORKER_PRIO,        NN_WORKER_STACK_BYTES },
 	[NN_PROBE_PANEL]    = { CAM_PANEL_PRIO,        CAM_PANEL_STACK_BYTES },
 	[NN_PROBE_CONSOLE]  = { CLI_INSTANCE_PRIORITY, CLI_INSTANCE_STACK_SIZE },
 	[NN_PROBE_BG]       = { CLI_BG_JOB_PRIORITY,   CLI_BG_JOB_STACK_SIZE },
 };
-_Static_assert(CAM_PRODUCER_PRIO != CAM_PANEL_PRIO &&
-               CAM_PRODUCER_PRIO != CLI_INSTANCE_PRIORITY &&
-               CAM_PRODUCER_PRIO != CLI_BG_JOB_PRIORITY &&
+_Static_assert(NN_WORKER_PRIO != CAM_PANEL_PRIO &&
+               NN_WORKER_PRIO != CLI_INSTANCE_PRIORITY &&
+               NN_WORKER_PRIO != CLI_BG_JOB_PRIORITY &&
                CAM_PANEL_PRIO != CLI_INSTANCE_PRIORITY &&
                CAM_PANEL_PRIO != CLI_BG_JOB_PRIORITY &&
                CLI_INSTANCE_PRIORITY != CLI_BG_JOB_PRIORITY,
                "the probe tells the four plugin threads apart by priority");
+/* [!] AND THE PRODUCER IS NONE OF THEM (issue #129).  It has the worker's stack
+ * size, so only its priority keeps a sample taken on it out of the worker's
+ * row: no slot runs there any more, and one that did must land in `inv`. */
+_Static_assert(CAM_PRODUCER_PRIO != NN_WORKER_PRIO &&
+               CAM_PRODUCER_PRIO != CAM_PANEL_PRIO &&
+               CAM_PRODUCER_PRIO != CLI_INSTANCE_PRIORITY &&
+               CAM_PRODUCER_PRIO != CLI_BG_JOB_PRIORITY,
+               "the producer must not classify as a plugin thread");
 
 /* Written under TX_DISABLE only; read by nn_probe_snapshot() the same way. */
 static struct nn_probe_row nn_probe_rows[PLUGIN_SLOT_COUNT];

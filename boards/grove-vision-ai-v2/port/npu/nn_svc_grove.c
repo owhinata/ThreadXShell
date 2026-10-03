@@ -49,7 +49,8 @@
 #include "nn_active.h"
 #include "nn_overlay.h"
 #include "nn_param_calls.h"
-#include "nn_plugin_stack.h"  /* after camera.h and cam_lcd_sink.h (#119) */
+#include "nn_worker.h"        /* the inference worker (#129); before the next */
+#include "nn_plugin_stack.h"  /* after camera.h, cam_lcd_sink.h, nn_worker.h */
 #include "nn_probe.h"
 #include "plugin_lease.h"
 #include "nn_preproc.h"
@@ -669,7 +670,7 @@ PLUGIN_POLICY_PROBE(nn_plugin_policy);
  * nothing gained.
  */
 /*
- * The producer thread has no console, so this is the only way a plugin can
+ * The inference worker has no console, so this is the only way a plugin can
  * explain itself.
  *
  * [!] THE BYTES GO TO THE LOG WITHOUT THE FORMATTER (issue #112).  This said
@@ -1355,7 +1356,7 @@ static int nn_decode_publish(uint32_t gen, struct nn_op_result *res)
  * Ask the plugin for its account of the result the record holds.
  *
  * [!] ONLY UNDER THE PLUGIN LEASE (issue #127; the gate until then, issue
- * #110), which is what excludes every other decode: the stream's producer and
+ * #110), which is what excludes every other decode: the stream's worker and
  * `nn run` each decode AND publish inside one hold of it.  So the snapshot is
  * taken under the same hold as this: taken before, a decode landing in between
  * would leave this pairing its count with the next frame's account.
@@ -1586,12 +1587,12 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
 	 * when the gate was free, and a running stream -- which holds the gate
 	 * until its stop -- got the count and STALE.  The gate was standing in for
 	 * what the lease now states directly: no decode runs while it is held,
-	 * because the producer and `nn run` decode and publish inside one hold.
+	 * because the worker and `nn run` decode and publish inside one hold.
 	 * So this waits for the lease, bounded, and takes the snapshot and the
 	 * account inside ONE hold, on a stream too.  The hold is a snapshot and a
-	 * report into the caller's buffer -- tens of microseconds -- so the stream
-	 * loses at most the one frame whose producer found it held, counted as a
-	 * miss.
+	 * report into the caller's buffer -- tens of microseconds -- and the
+	 * stream's worker waits it out, bounded (issue #129); at most the panel
+	 * shows a frame bare, counted as a miss.
 	 *
 	 * Entered the way `nn thresh` enters: counted in first, which is refused
 	 * only while a load or unload holds the gate and may be replacing the
@@ -1932,6 +1933,25 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	 * and it cannot start until the attach below -- so nothing it produces is
 	 * absorbed into the base, and nothing before it is counted as its own.
 	 */
+	/*
+	 * [!] THE WORKER IS ARMED BEFORE ANYTHING CAN HAND IT A FRAME, AND ONLY
+	 * FROM PARKED (issue #129).  A worker that does not exist, or is not
+	 * parked, refuses the start here, before the camera is woken: a board
+	 * that cannot run the worker does not infer without it, and a worker
+	 * still on a previous stream's frame is an invariant broken (every stop
+	 * that released the gate joined it), which is not waited out.
+	 */
+	if (!nn_worker_arm()) {
+		if (nn_worker_ready())
+			nn_detail_set("the inference worker is not parked; a "
+			              "previous stream was not joined");
+		else
+			nn_detail_set("the inference worker could not be created "
+			              "at boot");
+		nn_stream_abort();
+		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
+		return;
+	}
 	acc0 = nn_rec_boundary_base();
 	rc = cam_lcd_sink_attach_and_stream(nn_overlay_arm());
 	if (rc != CAM_OK) {
@@ -1940,6 +1960,11 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 			              "command owns it");
 		else
 			nn_detail_set("the camera would not start (%d)", rc);
+		/* Nothing was attached, so nothing can have handed the worker a
+		 * frame: it is parked wanting one, and the join returns at once.
+		 * Were it ever to refuse, the word stays armed and the next start
+		 * refuses at the arm above -- closed, not tidied. */
+		(void)nn_worker_join();
 		nn_stream_abort();
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
 		return;
@@ -2134,6 +2159,7 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 	struct nn_stream_verdict v;
 	uint32_t epoch;
 	int cam_rc, detach_rc = 0, attempted = 0;
+	int wjoin = NN_STREAM_WJOIN_NOT_TRIED;
 
 	if (res == NULL)
 		return;
@@ -2182,29 +2208,38 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 	cam_rc = camera_stream_stop();
 
 	/*
-	 * [!] THE RECORD BOUNDARY ONLY ONCE THE PRODUCER IS CONFIRMED OUT (issue
-	 * #118).  It publishes inside consume(), immediately after each decode, so
-	 * after a confirmed stop every decode it ran has been published and none
-	 * can follow -- the stream's last result keeps an account the plugin can
-	 * still give.  A boundary taken earlier would drop the frame in flight
-	 * AFTER its decode had rewritten the plugin's result, which is what wio
-	 * had to close with its lease.  Unconfirmed, there is no boundary: the
-	 * lifecycle goes DEAD and nothing admits a new session.
+	 * [!] THEN THE WORKER, AND ONLY ONCE THE PRODUCER IS CONFIRMED OUT (issue
+	 * #129).  Before that the producer could still hand it a frame, so
+	 * "parked" would not stay true.  The stop flag above keeps it from
+	 * starting another invoke, so this waits out at most the one running --
+	 * bounded by the wall clock, and a worker that does not come back is the
+	 * terminal "worker did not return": no boundary, no unlink, no release.
 	 */
-	if (nn_stream_may_detach(cam_rc))
+	if (nn_stream_may_join_worker(cam_rc))
+		wjoin = (nn_worker_join() == 0) ? NN_STREAM_WJOIN_OK
+		                                : NN_STREAM_WJOIN_FAILED;
+
+	/*
+	 * [!] THE RECORD BOUNDARY ONLY ONCE THE PRODUCER AND THE WORKER ARE
+	 * CONFIRMED OUT (issues #118, #129).  The worker publishes immediately
+	 * after each decode, so after both are confirmed every decode this stream
+	 * ran has been published and none can follow -- the stream's last result
+	 * keeps an account the plugin can still give.  A boundary taken earlier
+	 * would drop the frame in flight AFTER its decode had rewritten the
+	 * plugin's result.  Unconfirmed, there is no boundary: the lifecycle goes
+	 * DEAD and nothing admits a new session.
+	 */
+	if (nn_stream_may_detach(cam_rc, wjoin))
 		nn_rec_boundary();
 
-	/* [!] AND THE DETACH IS THE SECOND HALF OF THE STOP (issue #57), reached
-	 * only on a confirmed producer stop -- the blit runs on the panel thread,
+	/* [!] AND THE DETACH IS THE LAST PART OF THE STOP (issue #57), reached
+	 * only on a confirmed stop of both -- the blit runs on the panel thread,
 	 * so a confirmed stop alone does not prove nothing is using the frame. */
-	if (nn_stream_may_detach(cam_rc)) {
+	if (nn_stream_may_detach(cam_rc, wjoin)) {
 		attempted = 1;
 		detach_rc = cam_lcd_sink_detach();
 	}
-	/* The worker join is stage 2 of issue #129; until then nothing arms the
-	 * worker and the table reads NOT_TRIED as it read the stop before. */
-	nn_stream_stop_decide(cam_rc, NN_STREAM_WJOIN_NOT_TRIED, attempted,
-	                      detach_rc, &v);
+	nn_stream_stop_decide(cam_rc, wjoin, attempted, detach_rc, &v);
 	/* The stream's final numbers, latched only if the settle below takes. */
 	epoch = nn_stream_take_final(&final);
 

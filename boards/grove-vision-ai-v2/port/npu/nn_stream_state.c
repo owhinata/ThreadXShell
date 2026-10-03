@@ -12,16 +12,17 @@
 
 #include "nn_stream_state.h"
 
-int nn_stream_may_detach(int cam_rc)
+int nn_stream_may_detach(int cam_rc, int worker_join)
 {
 	/*
 	 * [!] EXACTLY ONE VALUE, ENUMERATED RATHER THAN EXCLUDED.  "Anything that
 	 * is not an outright failure" would let CAM_ERR_LOCKED through -- which is
 	 * the answer that says the producer was never asked -- and unlinking a sink
 	 * a live producer may be inside is the failure the camera's lost-producer
-	 * state exists to prevent.
+	 * state exists to prevent.  And the worker likewise: joined, not "not
+	 * tried" and not anything else (issue #129).
 	 */
-	return (cam_rc == NN_STREAM_CAM_OK);
+	return (cam_rc == NN_STREAM_CAM_OK && worker_join == NN_STREAM_WJOIN_OK);
 }
 
 int nn_stream_may_join_worker(int cam_rc)
@@ -65,17 +66,15 @@ void nn_stream_stop_decide(int cam_rc, int worker_join, int detach_attempted,
 	 * and whatever was passed is ignored, like a leftover detach code.
 	 */
 	switch (worker_join) {
-	case NN_STREAM_WJOIN_NOT_TRIED:
-		/* Stage 1: nothing arms the worker, so there is nothing to join and
-		 * the verdict is the panel's alone.  See the header. */
-		break;
 	case NN_STREAM_WJOIN_OK:
 		break;
+	case NN_STREAM_WJOIN_NOT_TRIED:
 	case NN_STREAM_WJOIN_FAILED:
 	default:
 		/* [!] Fail closed, whatever the detach said: a worker that may
-		 * still be inside the NPU or the plugin is not quiescent, and an
-		 * unrecognised join result is not evidence that it is. */
+		 * still be inside the NPU or the plugin is not quiescent, a join
+		 * the caller skipped is not evidence that it is, and neither is an
+		 * unrecognised join result. */
 		out->act = (unsigned char)NN_STREAM_ACT_TERMINAL;
 		out->why = (unsigned char)NN_STREAM_WHY_WORKER_LOST;
 		return;

@@ -11,10 +11,10 @@
  * over, this thread runs the invoke, the decode and the publish, and the panel
  * draws whatever was published last.  The hand-over rules are nn_handoff.h's.
  *
- * [!] STAGE 1 OF #129: THE THREAD EXISTS AND SLEEPS.  Nothing arms it yet --
- * the stream still infers synchronously on the producer, and the stop does not
- * join this thread -- so the hand-over word stays IDLE from boot.  The job it
- * runs is stage 2's.
+ * A stream arms it at start (IDLE -> WANT) and its stop joins it after the
+ * producer is confirmed out and before the record boundary.  The job it runs
+ * is nn_overlay_work().  `nn run` still infers on the console (issue #129
+ * stage 3 moves it here).
  *
  * OWNERSHIP.  Everything here is static and never freed, like the overlay's: a
  * stop whose join never came back leaves the worker possibly still running, and
@@ -76,6 +76,11 @@ int nn_worker_join(void);
 /** IDLE -> WANT, when a stream or a one-shot starts.  @return 1 armed, 0
  *  refused: the worker is not parked or does not exist. */
 int nn_worker_arm(void);
+
+/** Whether the worker wants a frame -- the producer's licence to write the
+ *  input tensor.  Stable once seen: only nn_worker_hand() leaves WANT while a
+ *  producer runs. */
+int nn_worker_wants(void);
 
 /** The producer's half: WANT -> HANDED and wake the worker.  Call only after
  *  the input is written.  @return 1 handed over, 0 the worker did not want a

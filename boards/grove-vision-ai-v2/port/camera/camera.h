@@ -73,12 +73,13 @@ const char *camera_strerror(int rc);
  * chosen; the array and the TX_THREAD stay there.
  *
  * [!] PRIVATE TO camera.c UNTIL ISSUE #119, and "nothing else needs it" was
- * wrong by then.  A plugin's decode() runs on this thread under `nn stream`, and
+ * wrong by then.  A plugin's decode() ran on this thread under `nn stream`, and
  * the plugin policy (port/npu/nn_plugin_stack.h) asserts decode's allowance
  * strictly below every stack it can be called on -- an allowance equal to the
- * whole stack is a check that cannot fire (issue #103).  An assert cannot name a
- * number another file keeps to itself, so it is published here, the way the
- * priority is.
+ * whole stack is a check that cannot fire (issue #103).  Since issue #129 the
+ * decode runs on the inference worker instead (nn_worker.h), and no plugin slot
+ * runs here.  The worker's stack is the same size, which is why the stack
+ * probe tells the two apart by priority (port/npu/nn_probe_rtos.c).
  */
 #define CAM_PRODUCER_STACK_BYTES 8192u
 

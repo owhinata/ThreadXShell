@@ -64,13 +64,16 @@ static void check_w(const char *what, int cam_rc, int wjoin, int attempted,
 	}
 }
 
-/* The issue #99 lines, which predate the worker: the stop did not join it, and
- * NOT_TRIED is what reproduces them (issue #129 stage 1). */
+/* The issue #99 lines, which predate the worker, with the worker join the stop
+ * makes since issue #129: tried and joined on a confirmed producer stop, not
+ * tried otherwise. */
 static void check(const char *what, int cam_rc, int attempted, int detach_rc,
                   enum nn_stream_act want_act, enum nn_stream_why want_why)
 {
-	check_w(what, cam_rc, NN_STREAM_WJOIN_NOT_TRIED, attempted, detach_rc,
-	        want_act, want_why);
+	check_w(what, cam_rc,
+	        cam_rc == NN_STREAM_CAM_OK ? NN_STREAM_WJOIN_OK
+	                                   : NN_STREAM_WJOIN_NOT_TRIED,
+	        attempted, detach_rc, want_act, want_why);
 }
 
 /*
@@ -123,13 +126,20 @@ static void decide_before_129(int cam_rc, int attempted, int detach_rc,
 /*
  * Every combination of the four inputs (issue #129).  Three properties, each
  * stated over the whole product rather than picked cases:
- *   1. NOT_TRIED reproduces the table before the worker, everywhere.
- *   2. A join that SUCCEEDED changes nothing either: the verdict is the
- *      producer's and the panel's, exactly as without a worker.
- *   3. A join that failed, or reported a value nobody defined, is terminal
- *      "worker did not return" on every confirmed producer stop, whatever the
- *      detach said -- and is ignored when the producer was not confirmed, where
- *      it should never have been attempted.
+ *   1. On an UNCONFIRMED producer stop the join is never attempted, and
+ *      whatever is passed for it, the verdict is the table before the worker.
+ *   2. On a confirmed one, a join that SUCCEEDED changes nothing: the verdict
+ *      is the producer's and the panel's, exactly as without a worker.
+ *   3. On a confirmed one, every other join value -- failed, NOT TRIED, or one
+ *      nobody defined -- is terminal "worker did not return", whatever the
+ *      detach said.
+ *
+ * [!] WHY NOT_TRIED IS NOT HELD TO THE OLD TABLE ON A CONFIRMED STOP, though it
+ * was in stage 1 of #129: then the stop did not join the worker, so NOT_TRIED
+ * was what every stop passed and had to change nothing.  Since stage 2 the stop
+ * joins whenever the producer is confirmed, so NOT_TRIED there means a caller
+ * skipped the join -- and the safe reading of a skipped quiescence check is
+ * that the thing is not quiescent.
  */
 static void sweep(void)
 {
@@ -156,8 +166,7 @@ static void sweep(void)
 		int jn = joins[j];
 
 		nn_stream_stop_decide(cams[c], jn, (int)a, detaches[d], &got);
-		if (cams[c] == NN_STREAM_CAM_OK &&
-		    jn != NN_STREAM_WJOIN_NOT_TRIED && jn != NN_STREAM_WJOIN_OK) {
+		if (cams[c] == NN_STREAM_CAM_OK && jn != NN_STREAM_WJOIN_OK) {
 			want.act = NN_STREAM_ACT_TERMINAL;
 			want.why = NN_STREAM_WHY_WORKER_LOST;
 		} else {
@@ -185,7 +194,8 @@ static void sweep(void)
 
 static void check_detach(const char *what, int cam_rc, int want)
 {
-	int got = nn_stream_may_detach(cam_rc);
+	/* The producer half, with the worker joined (issue #129). */
+	int got = nn_stream_may_detach(cam_rc, NN_STREAM_WJOIN_OK);
 
 	if (!got != !want) {
 		printf("  FAIL %-56s -> %d, wanted %d\n", what, got, want);
@@ -211,6 +221,34 @@ int main(void)
 	check_detach("the producer never acknowledged", NN_STREAM_CAM_TIMEOUT, 0);
 	check_detach("the camera refused", NN_STREAM_CAM_STATE, 0);
 	check_detach("an unknown code", -99, 0);
+
+	/*
+	 * [!] AND THE WORKER HALF (issue #129): a confirmed producer is not enough.
+	 * A worker that did not come back -- or was never asked -- may still
+	 * publish, and a boundary or an unlink under it is what this refuses.
+	 */
+	{
+		static const int js[] = { NN_STREAM_WJOIN_NOT_TRIED,
+		                          NN_STREAM_WJOIN_FAILED, 3, -1 };
+		unsigned i;
+		int bad = 0;
+
+		for (i = 0u; i < sizeof js / sizeof js[0]; i++)
+			if (nn_stream_may_detach(NN_STREAM_CAM_OK, js[i])) {
+				printf("  FAIL may_detach(OK, join %d) -> detach\n",
+				       js[i]);
+				bad = 1;
+			}
+		if (nn_stream_may_detach(NN_STREAM_CAM_LOCKED, NN_STREAM_WJOIN_OK)) {
+			printf("  FAIL may_detach(LOCKED, joined) -> detach\n");
+			bad = 1;
+		}
+		if (bad)
+			fails++;
+		else
+			printf("  ok   %-56s %s\n", "a confirmed producer with the "
+			       "worker not joined", "leave it linked");
+	}
 
 	printf("nn_stream_may_join_worker (issue #129)\n");
 	{
@@ -327,6 +365,11 @@ int main(void)
 	        NN_STREAM_ACT_TERMINAL, NN_STREAM_WHY_WORKER_LOST);
 	check_w("the worker did not return; a retryable detach is not retry",
 	        NN_STREAM_CAM_OK, NN_STREAM_WJOIN_FAILED, 1, NN_STREAM_CAM_BUSY,
+	        NN_STREAM_ACT_TERMINAL, NN_STREAM_WHY_WORKER_LOST);
+	/* [!] A join the caller skipped on a confirmed producer stop is a caller
+	 * bug, and read as the worker not being back. */
+	check_w("the producer stopped but the worker join was never run",
+	        NN_STREAM_CAM_OK, NN_STREAM_WJOIN_NOT_TRIED, 1, NN_STREAM_CAM_OK,
 	        NN_STREAM_ACT_TERMINAL, NN_STREAM_WHY_WORKER_LOST);
 	/* [!] Fail closed on a join result nobody defined. */
 	check_w("an unknown join result is not evidence of a parked worker",

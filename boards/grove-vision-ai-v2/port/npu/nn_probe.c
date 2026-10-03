@@ -140,7 +140,7 @@ enum nn_probe_settle nn_probe_pending_settle(struct nn_probe_pending *p,
 /* ---- the report line ----------------------------------------------------- */
 
 static const char *const nn_probe_names[NN_PROBE_CTX_COUNT] = {
-	[NN_PROBE_PRODUCER] = "prod",
+	[NN_PROBE_WORKER]   = "work",
 	[NN_PROBE_PANEL]    = "panel",
 	[NN_PROBE_CONSOLE]  = "con",
 	[NN_PROBE_BG]       = "bg",

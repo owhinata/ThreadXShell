@@ -19,7 +19,7 @@
  *
  *   entry       `nn model load` -> plugin_run_load()     console / bg
  *   shapes_ok   the `nn stream start` admission          console / bg
- *   decode      `nn stream` (nn_overlay_process)         producer
+ *   decode      `nn stream` (nn_overlay_work)            worker (#129)
  *               `nn run`, `nn dets` (nn_decode_into)     console / bg
  *   draw        the panel thread, under the panel guard  panel
  *   report      `nn run`, `nn dets`                      console / bg
@@ -31,8 +31,9 @@
  * yet all three are called on a 4,096 B shell stack: an allowance EQUAL to the
  * stack it runs on, which is a check that cannot refuse the case it exists for.
  * A slot reached from more than one thread is declared against the SHALLOWEST,
- * so decode takes the shell's figure, and the producer keeps an assert of its
- * own below.
+ * so decode takes the shell's figure, and the worker keeps an assert of its
+ * own below.  Since issue #129 nothing runs a slot on the producer at all: the
+ * stream's decode moved to the inference worker.
  *
  * [!] THE ASSERTS ARE A BACKSTOP, NOT THE DERIVATION.  An allowance is sound
  * only if, on every path that reaches its slot,
@@ -46,10 +47,11 @@
  *
  * The ceilings are the threads' own numbers: CLI_INSTANCE_STACK_SIZE and
  * CLI_BG_JOB_STACK_SIZE from cli_config.h (board.cmake sets both), and
- * CAM_PRODUCER_STACK_BYTES and CAM_PANEL_STACK_BYTES, which the INCLUDER brings
- * with camera.h and cam_lcd_sink.h.  Those two are not included here: camera.h
- * reaches into the Himax SDK, which a host compiler cannot take, and the test
- * that compiles this header has to be able to set each ceiling on its own.
+ * NN_WORKER_STACK_BYTES and CAM_PANEL_STACK_BYTES, which the INCLUDER brings
+ * with nn_worker.h and cam_lcd_sink.h.  Those two are not included here:
+ * cam_lcd_sink.h reaches into the Himax SDK, which a host compiler cannot
+ * take, and the test that compiles this header has to be able to set each
+ * ceiling on its own.
  */
 #ifndef NN_PLUGIN_STACK_H
 #define NN_PLUGIN_STACK_H
@@ -63,8 +65,8 @@
 #if defined(GROVE_PLUGIN_STACK_PRODUCER)
 #error "GROVE_PLUGIN_STACK_PRODUCER was retired by issue #119: no slot runs on the producer alone"
 #endif
-#if !defined(CAM_PRODUCER_STACK_BYTES) || !defined(CAM_PANEL_STACK_BYTES)
-#error "include camera.h and cam_lcd_sink.h before nn_plugin_stack.h"
+#if !defined(NN_WORKER_STACK_BYTES) || !defined(CAM_PANEL_STACK_BYTES)
+#error "include nn_worker.h and cam_lcd_sink.h before nn_plugin_stack.h"
 #endif
 
 /* Seven rows, one per slot the ABI has.  A slot added there would otherwise be
@@ -80,7 +82,7 @@ _Static_assert(PLUGIN_SLOT_COUNT == 7,
  * observation has covered yet.  The bit order is enum nn_probe_ctx's
  * (nn_probe.h); nn_probe_rtos.c asserts the two agree.
  */
-#define GROVE_PLUGIN_ON_PRODUCER  0x1u
+#define GROVE_PLUGIN_ON_WORKER    0x1u
 #define GROVE_PLUGIN_ON_PANEL     0x2u
 #define GROVE_PLUGIN_ON_CONSOLE   0x4u
 #define GROVE_PLUGIN_ON_BG        0x8u
@@ -88,7 +90,7 @@ _Static_assert(PLUGIN_SLOT_COUNT == 7,
 
 #define GROVE_PLUGIN_RUNS_ENTRY      GROVE_PLUGIN_ON_SHELL
 #define GROVE_PLUGIN_RUNS_SHAPES_OK  GROVE_PLUGIN_ON_SHELL
-#define GROVE_PLUGIN_RUNS_DECODE     (GROVE_PLUGIN_ON_PRODUCER | GROVE_PLUGIN_ON_SHELL)
+#define GROVE_PLUGIN_RUNS_DECODE     (GROVE_PLUGIN_ON_WORKER | GROVE_PLUGIN_ON_SHELL)
 #define GROVE_PLUGIN_RUNS_DRAW       GROVE_PLUGIN_ON_PANEL
 #define GROVE_PLUGIN_RUNS_REPORT     GROVE_PLUGIN_ON_SHELL
 #define GROVE_PLUGIN_RUNS_PARAM_SET  GROVE_PLUGIN_ON_SHELL
@@ -105,7 +107,7 @@ _Static_assert(PLUGIN_SLOT_COUNT == 7,
 }
 
 /* Each thread's own stack -- the ceiling a slot running there is held under. */
-#define GROVE_PLUGIN_CEILING_PRODUCER  CAM_PRODUCER_STACK_BYTES
+#define GROVE_PLUGIN_CEILING_WORKER    NN_WORKER_STACK_BYTES
 #define GROVE_PLUGIN_CEILING_PANEL     CAM_PANEL_STACK_BYTES
 #define GROVE_PLUGIN_CEILING_CONSOLE   CLI_INSTANCE_STACK_SIZE
 #define GROVE_PLUGIN_CEILING_BG        CLI_BG_JOB_STACK_SIZE
@@ -155,7 +157,7 @@ _Static_assert(PLUGIN_SLOT_COUNT == 7,
 	               "plugin stack [" what "]: an allowance must be "   \
 	               "below every stack its slot runs on")
 #define GROVE_PLUGIN_STACK_ROW(slot, name)                              \
-	GROVE_PLUGIN_STACK_BELOW(slot, PRODUCER, name " < producer");   \
+	GROVE_PLUGIN_STACK_BELOW(slot, WORKER,   name " < worker");     \
 	GROVE_PLUGIN_STACK_BELOW(slot, PANEL,    name " < panel");      \
 	GROVE_PLUGIN_STACK_BELOW(slot, CONSOLE,  name " < console");    \
 	GROVE_PLUGIN_STACK_BELOW(slot, BG,       name " < bg");         \

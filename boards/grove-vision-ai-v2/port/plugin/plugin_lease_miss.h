@@ -20,6 +20,11 @@
  *   - the PANEL, before it draws a frame the producer did decode.  A refusal there
  *     is the same frame's only miss.
  *
+ * [!] SINCE ISSUE #129 ONLY THE PANEL ASKS.  The decode moved to the inference
+ * worker, which waits for the lease (bounded) instead of trying it, and counts a
+ * wait that runs out as an error, not here.  The producer's row stays for the
+ * rules below, and nothing calls it on this board now.
+ *
  * So each frame produces at most one refusal, and every refusal is one frame.
  * That is a property of the CALLERS (the producer's refusal ends the frame), not
  * something this file can see; the host test drives the two in the order the

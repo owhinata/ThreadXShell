@@ -54,7 +54,7 @@ extern "C" {
 /** Where a callback ran.  The order is the bit order of nn_plugin_stack.h's
  *  GROVE_PLUGIN_ON_* masks. */
 enum nn_probe_ctx {
-	NN_PROBE_PRODUCER = 0,   /**< the camera producer (`nn stream`)        */
+	NN_PROBE_WORKER   = 0,   /**< the inference worker (`nn stream`, #129) */
 	NN_PROBE_PANEL    = 1,   /**< the panel sink's thread (draw)           */
 	NN_PROBE_CONSOLE  = 2,   /**< a shell instance                         */
 	NN_PROBE_BG       = 3,   /**< a background job (`... &`)               */

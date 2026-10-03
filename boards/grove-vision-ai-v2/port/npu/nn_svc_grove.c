@@ -51,6 +51,7 @@
 #include "nn_param_calls.h"
 #include "nn_plugin_stack.h"  /* after camera.h and cam_lcd_sink.h (#119) */
 #include "nn_probe.h"
+#include "plugin_lease.h"
 #include "nn_preproc.h"
 #include "nn_rec.h"
 #include "nn_stream_state.h"
@@ -2083,6 +2084,20 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
  */
 static const uint8_t nn_slot_runs[PLUGIN_SLOT_COUNT] = GROVE_PLUGIN_STACK_RUNS;
 
+/*
+ * The frames the plugin lease cost (issue #127), in wio-lite-ai's words so the
+ * two boards' reports read alike.  Producer and panel misses are one number:
+ * either way the frame was shown bare.
+ *
+ * At its worst the line is the literal less its two conversions plus ten digits
+ * for each uint32_t, which the assert holds against the caller's buffer -- the
+ * copy truncates without a mark (issue #126).
+ */
+#define NN_LINE_PL_MISS "plugin  : %lu frame(s) missed (run of %lu)"
+_Static_assert(sizeof(NN_LINE_PL_MISS) - 1u - 2u * 3u + 2u * 10u <
+               (size_t)NN_STREAM_LINE_MAX,
+               "the plugin miss line is longer than the caller's buffer");
+
 int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
                         char *buf, size_t cap)
 {
@@ -2100,9 +2115,11 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 	 * after it.  The stack lines therefore come before the profile split --
 	 * which declines whenever the EPK clock is not trusted, a condition that
 	 * has nothing to do with them -- and every one of them returns a line,
-	 * "not measured" included.  Ten lines at most, against a cap of twelve,
-	 * so the caller's "more than N lines" warning never fires on a report
-	 * that ended normally.
+	 * "not measured" included.  Eleven lines at most, against a cap of
+	 * twelve, so the caller's "more than N lines" warning never fires on a
+	 * report that ended normally.  The plugin lease's miss line (issue #127)
+	 * is before the profile split for the same reason: a clock nobody trusts
+	 * says nothing about how many frames went bare.
 	 */
 	if (index >= 1u && index <= (unsigned)PLUGIN_SLOT_COUNT) {
 		struct nn_probe_row row;
@@ -2136,7 +2153,18 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 		else
 			nn_detail_to(buf, cap, "painter : nothing drawn yet");
 		return 1;
-	case 2u + (unsigned)PLUGIN_SLOT_COUNT:
+	case 2u + (unsigned)PLUGIN_SLOT_COUNT: {
+		uint32_t miss = 0u, run = 0u;
+
+		/* Always a line: 0 missed is the answer a quiet stream should give.
+		 * Reset when a stream is armed, not when it stops, so the report
+		 * after a stop still describes the run that ended. */
+		plugin_lease_misses(&miss, &run);
+		nn_detail_to(buf, cap, NN_LINE_PL_MISS, (unsigned long)miss,
+		             (unsigned long)run);
+		return 1;
+	}
+	case 3u + (unsigned)PLUGIN_SLOT_COUNT:
 		/* The producer-side split (issue #60).  Only when the clock behind it
 		   is trusted -- an untrusted number here would be read as a
 		   measurement.  Last, because it may decline. */
@@ -2154,7 +2182,7 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 		return 0;
 	}
 }
-_Static_assert(3u + (unsigned)PLUGIN_SLOT_COUNT < (unsigned)NN_STREAM_LINES_MAX,
+_Static_assert(4u + (unsigned)PLUGIN_SLOT_COUNT < (unsigned)NN_STREAM_LINES_MAX,
                "the stream report must end before the caller's line cap");
 
 /*

@@ -50,6 +50,7 @@ extern "C" {
  *
  * @return PLUGIN_RUN_OK, or a reason.  PLUGIN_RUN_NO_PLUGIN when the container
  *         carries only a model -- a legal container, and the caller carries on.
+ *         PLUGIN_RUN_NOT_HELD when the caller does not hold the plugin lease.
  *
  * Logs its own refusals: svc/plugin_exec.c returns diagnostics rather than
  * printing them, precisely so that the board decides where they go.
@@ -64,6 +65,19 @@ extern "C" {
 enum plugin_run_result plugin_run_load(const struct plugin_view *v,
                                        const void *container, uint32_t lease,
                                        const struct plugin_base_api *base);
+
+/**
+ * plugin_run_load()'s own refusal: the caller does not hold the plugin lease
+ * (port/plugin/plugin_lease.h, issue #127).  Never returned by the shared
+ * loader, whose enum this board cannot extend; outside its range on purpose, so
+ * it cannot be mistaken for any of them.  Before the loader runs it means
+ * nothing was touched -- the previous plugin is still published; from the
+ * exec_ok hook it means entry() was not called.  plugin_run_why() names it.
+ */
+#define PLUGIN_RUN_NOT_HELD ((enum plugin_run_result)0x40)
+
+/** plugin_run_strerror(), plus this board's PLUGIN_RUN_NOT_HELD. */
+const char *plugin_run_why(enum plugin_run_result r);
 
 /**
  * Did this result come from a load that CALLED entry()?  PLUGIN_RUN_OK, and

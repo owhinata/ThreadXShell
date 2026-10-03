@@ -59,6 +59,7 @@
 #include "nn_preproc.h"
 #include "nn_probe.h"
 #include "plugin_run.h"
+#include "plugin_lease.h"
 
 #include <stdarg.h>
 #include <stdbool.h>
@@ -99,6 +100,30 @@ void *plugin_run_slot(unsigned slot)
 	if (!pl_loaded || slot >= (unsigned)PLUGIN_SLOT_COUNT)
 		return NULL;
 	return (void *)(uintptr_t)plugin_slot_table[slot];
+}
+
+/*
+ * The plugin lease (issue #127).  On the board, plugin_lease_held() asks
+ * ThreadX whether the calling thread owns the mutex; here the owner is a
+ * variable, and the three values are the three cases the entry checks have to
+ * tell apart -- nobody holds it, ANOTHER thread holds it (which from the
+ * caller's side is the same "no", and must be refused the same way), and the
+ * caller holds it.  Every refusal the shim makes is counted by the shim itself,
+ * which is what pl_unheld checks.
+ */
+enum lease_owner { LEASE_NONE, LEASE_OTHER, LEASE_SELF };
+
+static enum lease_owner lease_owner = LEASE_SELF;
+static unsigned         pl_unheld;
+
+int plugin_lease_held(void)
+{
+	return lease_owner == LEASE_SELF;
+}
+
+void plugin_lease_note_unheld(void)
+{
+	pl_unheld++;
 }
 
 /*
@@ -384,7 +409,17 @@ static void publish_geom(void)
 		printf("  FAIL geometry setup returned %d\n", rc);
 		failures++;
 	}
-	nn_active_set_geom(&the_geom);
+	(void)nn_active_set_geom(&the_geom);
+}
+
+/* The threshold through the shim, as the value alone -- the status is checked
+ * where it matters (section 11). */
+static unsigned get_thresh(void)
+{
+	unsigned m = 12345u;
+
+	(void)nn_active_get_thresh_milli(&m);
+	return m;
 }
 
 /* Poison for the arrays a plugin must not touch. */
@@ -463,6 +498,183 @@ static int ref_run(const struct npu_tensor *outs, unsigned n,
 	return blazeface_decode(&ref_bf, d, m, out, max, r);
 }
 
+/* ================================================================
+ * 11.  [!] Every entry refuses a caller without the plugin lease (#127)
+ * ================================================================
+ *
+ * Each row is one way into the plugin, or into the geometry its callbacks
+ * read.  For each, in both "not held" cases and with and without a plugin
+ * loaded, the answer must be NN_ACTIVE_NOT_HELD -- never the no-plugin answer,
+ * never a decoder's own code -- nothing may be entered (no stack sample, no
+ * paint, no words, no threshold moved, no geometry written), and the refusal is
+ * counted exactly once.  Then the same row with the lease held must go in.
+ * Deleting any one wrapper's check turns its row red.
+ */
+enum entry_id {
+	E_SHAPES_OK, E_DECODE, E_DRAW, E_CAN_DRAW, E_CAN_REPORT, E_REPORT,
+	E_THRESH_GET, E_THRESH_SET, E_SET_GEOM, E_CLEAR_GEOM, E_COUNT
+};
+
+static const char *const entry_name[E_COUNT] = {
+	"shapes_ok", "decode", "draw", "can_draw", "can_report", "report",
+	"thresh get", "thresh set", "set_geom", "clear_geom",
+};
+
+/* The slot a held call enters, or PLUGIN_SLOT_COUNT for one that reads the
+ * slot table without calling through (and so takes no sample). */
+static const unsigned entry_slot[E_COUNT] = {
+	PLUGIN_SLOT_SHAPES_OK, PLUGIN_SLOT_DECODE, PLUGIN_SLOT_DRAW,
+	PLUGIN_SLOT_COUNT, PLUGIN_SLOT_COUNT, PLUGIN_SLOT_REPORT,
+	PLUGIN_SLOT_PARAM_GET, PLUGIN_SLOT_PARAM_SET,
+	PLUGIN_SLOT_COUNT, PLUGIN_SLOT_COUNT,
+};
+
+/* A geometry nobody else publishes, to tell a write from no write. */
+static struct nn_preproc_geom other_geom;
+
+/* Is the published geometry the_geom (1), other_geom (2), or none (0)? */
+static int geom_now(void)
+{
+	struct plugin_rect r, a, b;
+	struct nn_preproc_box pa, pb;
+
+	if (nn_active_to_frame(NULL, 0.25f, 0.25f, 0.3f, 0.3f, &r) != 0)
+		return 0;
+	if (nn_preproc_box(&the_geom, 0.25f, 0.25f, 0.3f, 0.3f, &pa) != 0 ||
+	    nn_preproc_box(&other_geom, 0.25f, 0.25f, 0.3f, 0.3f, &pb) != 0)
+		return -1;
+	a.x0 = pa.x0; a.y0 = pa.y0; a.x1 = pa.x1; a.y1 = pa.y1;
+	b.x0 = pb.x0; b.y0 = pb.y0; b.x1 = pb.x1; b.y1 = pb.y1;
+	if (memcmp(&r, &a, sizeof r) == 0)
+		return 1;
+	if (memcmp(&r, &b, sizeof r) == 0)
+		return 2;
+	return -1;
+}
+
+/* Call one entry; returns its answer as an int, and what it left behind. */
+static int call_entry(enum entry_id e, unsigned *thresh_out)
+{
+	int r;
+
+	switch (e) {
+	case E_SHAPES_OK:   return nn_active_shapes_ok(tens, 4);
+	case E_DECODE:      return nn_active_decode(tens, 4);
+	case E_DRAW:        rec_reset(); return nn_active_draw(&rec_painter);
+	case E_CAN_DRAW:    return nn_active_can_draw();
+	case E_CAN_REPORT:  return nn_active_can_report();
+	case E_REPORT:      cap_reset(); return nn_active_report(cap_write, NULL);
+	case E_THRESH_GET:
+		*thresh_out = 12345u;
+		return nn_active_get_thresh_milli(thresh_out);
+	case E_THRESH_SET:  return nn_active_set_thresh_milli(650u);
+	case E_SET_GEOM:    return nn_active_set_geom(&other_geom);
+	case E_CLEAR_GEOM:  return nn_active_clear_geom();
+	default:            break;
+	}
+	r = -9999;
+	return r;
+}
+
+static void test_lease_entries(void)
+{
+	static const enum lease_owner not_held[2] = { LEASE_NONE, LEASE_OTHER };
+	unsigned e, o, loaded;
+
+	printf("lease entries:\n");
+	if (nn_preproc_geom(320u, 240u, 160u, 120u, &other_geom) != 0) {
+		printf("  FAIL other geometry setup\n");
+		failures++;
+	}
+
+	reset_tensors();
+	put_the_scene();
+	for (e = 0u; e < (unsigned)E_COUNT; e++) {
+		for (loaded = 0u; loaded < 2u; loaded++) {
+			for (o = 0u; o < 2u; o++) {
+				unsigned th = 0u, before_thresh, unheld0;
+				int ans;
+
+				pl_loaded = (int)loaded;
+				lease_owner = LEASE_SELF;
+				publish_geom();
+				before_thresh = get_thresh();
+				lease_owner = not_held[o];
+				probe_reset();
+				rec_reset();
+				cap_reset();
+				unheld0 = pl_unheld;
+				ans = call_entry((enum entry_id)e, &th);
+				lease_owner = LEASE_SELF;
+
+				expect(entry_name[e], ans == NN_ACTIVE_NOT_HELD,
+				       "%s held by %s, %s: answered %d, not NOT_HELD",
+				       entry_name[e], o ? "another thread" : "nobody",
+				       loaded ? "plugin loaded" : "no plugin", ans);
+				expect("  ...entered nothing",
+				       probe_total() == 0u && rec_n == 0u &&
+				       rec_blits == 0u && cap_len == 0u,
+				       "%s: %u sample(s), %u rect(s), %zu B written",
+				       entry_name[e], probe_total(), rec_n, cap_len);
+				expect("  ...moved no threshold and no geometry",
+				       get_thresh() == before_thresh && geom_now() == 1,
+				       "%s: thresh %u -> %u, geometry %d",
+				       entry_name[e], before_thresh, get_thresh(),
+				       geom_now());
+				expect("  ...and was counted once",
+				       pl_unheld == unheld0 + 1u, "%s: %u refusal(s)",
+				       entry_name[e], pl_unheld - unheld0);
+				if (e == (unsigned)E_THRESH_GET)
+					expect("  ...and read back no threshold",
+					       th == NN_SVC_THRESH_NONE, "got %u", th);
+			}
+		}
+
+		/* The same row, held: it goes in. */
+		{
+			unsigned th = 0u, unheld0;
+			int ans;
+
+			pl_loaded = 1;
+			lease_owner = LEASE_SELF;
+			publish_geom();
+			(void)nn_active_decode(tens, 4);
+			probe_reset();
+			unheld0 = pl_unheld;
+			ans = call_entry((enum entry_id)e, &th);
+			expect("  held, it goes in",
+			       ans != NN_ACTIVE_NOT_HELD && pl_unheld == unheld0,
+			       "%s: answered %d", entry_name[e], ans);
+			if (entry_slot[e] < (unsigned)PLUGIN_SLOT_COUNT)
+				expect("  ...and enters its slot",
+				       probe_only(entry_slot[e]), "%s: %u sample(s)",
+				       entry_name[e], probe_total());
+			switch (e) {
+			case E_SHAPES_OK: case E_CAN_DRAW: case E_CAN_REPORT:
+				expect("  ...answering yes", ans == 1, "%s: %d",
+				       entry_name[e], ans);
+				break;
+			case E_SET_GEOM:
+				expect("  ...and writes the geometry",
+				       geom_now() == 2, "%d", geom_now());
+				break;
+			case E_CLEAR_GEOM:
+				expect("  ...and clears it", geom_now() == 0, "%d",
+				       geom_now());
+				break;
+			case E_THRESH_SET:
+				expect("  ...and sets it", get_thresh() == 650u,
+				       "%u", get_thresh());
+				break;
+			default:
+				break;
+			}
+		}
+	}
+	(void)nn_active_set_thresh_milli(blazeface_get_thresh_milli(&ref_bf));
+	publish_geom();
+}
+
 int main(void)
 {
 	struct bf_det    ref_det[BF_MAX_DET];
@@ -517,8 +729,8 @@ int main(void)
 	       "wrote %zu B", cap_len);
 
 	expect("the threshold is reported absent, not borrowed from anywhere",
-	       nn_active_get_thresh_milli() == NN_SVC_THRESH_NONE, "%u",
-	       nn_active_get_thresh_milli());
+	       get_thresh() == NN_SVC_THRESH_NONE, "%u",
+	       get_thresh());
 	expect("and setting one is refused as a state, not as a bad value",
 	       nn_active_set_thresh_milli(700u) == NN_ACTIVE_THRESH_NO_DECODER,
 	       "got %d", nn_active_set_thresh_milli(700u));
@@ -675,20 +887,20 @@ int main(void)
 	 * 7.  [!] The threshold follows the decoder that will use it
 	 * ================================================================ */
 	expect("with a plugin loaded, the threshold read back is the plugin's",
-	       nn_active_get_thresh_milli() == ref_thresh,
-	       "%u vs %u -- they start equal", nn_active_get_thresh_milli(),
+	       get_thresh() == ref_thresh,
+	       "%u vs %u -- they start equal", get_thresh(),
 	       ref_thresh);
 
 	expect("the shim accepts a new threshold",
 	       nn_active_set_thresh_milli(800u) == NN_ACTIVE_THRESH_OK, "refused");
-	expect("and reads it back", nn_active_get_thresh_milli() == 800u,
-	       "got %u", nn_active_get_thresh_milli());
+	expect("and reads it back", get_thresh() == 800u,
+	       "got %u", get_thresh());
 	probe_reset();
 	(void)nn_active_set_thresh_milli(800u);
 	expect("a threshold set took one stack sample, for param_set",
 	       probe_only(PLUGIN_SLOT_PARAM_SET), "%u sample(s)", probe_total());
 	probe_reset();
-	(void)nn_active_get_thresh_milli();
+	(void)get_thresh();
 	expect("a threshold read took one stack sample, for param_get",
 	       probe_only(PLUGIN_SLOT_PARAM_GET), "%u sample(s)", probe_total());
 	probe_reset();
@@ -711,8 +923,8 @@ int main(void)
 	expect("an out-of-range threshold is refused through the shim too",
 	       nn_active_set_thresh_milli(1000u) == NN_ACTIVE_THRESH_REFUSED,
 	       "accepted");
-	expect("and changed nothing", nn_active_get_thresh_milli() == 800u,
-	       "got %u", nn_active_get_thresh_milli());
+	expect("and changed nothing", get_thresh() == 800u,
+	       "got %u", get_thresh());
 
 	/* [!] AND UNLOADING LEAVES NOTHING HOLDING ONE (issue #104).  It used to
 	 * hand the question back to the resident decoder; there is no such thing to
@@ -720,8 +932,8 @@ int main(void)
 	 * nothing would apply. */
 	pl_loaded = 0;
 	expect("unloaded, the threshold is absent rather than the plugin's last",
-	       nn_active_get_thresh_milli() == NN_SVC_THRESH_NONE, "got %u",
-	       nn_active_get_thresh_milli());
+	       get_thresh() == NN_SVC_THRESH_NONE, "got %u",
+	       get_thresh());
 	pl_loaded = 1;
 	(void)nn_active_set_thresh_milli(ref_thresh);
 
@@ -732,7 +944,7 @@ int main(void)
 	 * transform was wired to the stream's geometry, so `nn run`, which
 	 * publishes a different one, produced "outside the frame" every time.
 	 */
-	nn_active_clear_geom();
+	(void)nn_active_clear_geom();
 	(void)nn_active_decode(tens, 4);
 	rec_reset();
 	nn_active_draw(&rec_painter);
@@ -835,6 +1047,11 @@ int main(void)
 
 	expect("the plugin never needed the log channel for a good decode",
 	       base_logs == 0u, "%u log line(s)", base_logs);
+
+	expect("[!] with the lease held throughout, nothing above was refused",
+	       pl_unheld == 0u, "%u refusal(s)", pl_unheld);
+
+	test_lease_entries();
 
 	if (failures) {
 		printf("test_plugin_decode: %d failure(s)\n", failures);

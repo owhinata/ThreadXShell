@@ -102,13 +102,25 @@ void plugin_lease_give(void);
  */
 int plugin_lease_held(void);
 
+/**
+ * Count one call into the plugin that its entry point refused because the
+ * caller did not hold the lease (issue #127).  Called by the entry checks
+ * themselves -- nn_active.c's wrappers and the loader -- once per refusal, so
+ * no caller has to remember to.  Not a miss: a miss is the lock doing its job,
+ * and this is a path that forgot to take it, which no correct build has.
+ */
+void plugin_lease_note_unheld(void);
+
+/** How many entries were refused for want of the lease, since boot. */
+uint32_t plugin_lease_unheld(void);
+
 /** How many no-wait acquires have been refused, and the longest run of them.
  *  A single refusal is ordinary; a run is an overlay that has stopped. */
 void plugin_lease_misses(uint32_t *total, uint32_t *worst_run);
 
-/** Start a fresh accounting period.  Called when a stream is armed, not when
- *  one stops: the stats right after a stop still describe the run that just
- *  ended. */
+/** Start a fresh accounting period for the misses (not the unheld entries,
+ *  which count from boot).  Called when a stream is armed, not when one stops: the stats right after a
+ *  stop still describe the run that just ended. */
 void plugin_lease_misses_reset(void);
 
 #ifdef __cplusplus

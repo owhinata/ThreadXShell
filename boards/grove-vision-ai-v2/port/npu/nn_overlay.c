@@ -294,8 +294,16 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	 * depend on that.  Written whatever the decode then says, because the
 	 * record below is too.
 	 */
-	nn_active_set_geom(&nn_ov_geom);   /* issue #103 */
+	(void)nn_active_set_geom(&nn_ov_geom);   /* issue #103 */
 	nd = nn_active_decode(outs, n_out);
+	if (nd == NN_ACTIVE_NOT_HELD) {
+		/* [!] Not reachable while the try above stands -- and if it ever
+		 * does not, the decode did not run, so nothing is published and the
+		 * frame goes bare.  Counted by the entry check (plugin_lease_unheld()),
+		 * not as a decoder error: the decoder was never asked. */
+		plugin_lease_give();
+		return -1;
+	}
 	/*
 	 * [!] PUBLISHED AT ONCE, WHATEVER IT SAYS (issue #118).  `nn dets` reads
 	 * the record, and the plugin's private result has just been rewritten --
@@ -390,7 +398,9 @@ static void nn_overlay_draw(void *ctx, uint16_t *fb, uint16_t fb_w,
 		bud.ops     = NN_OV_DRAW_OPS;
 		bud.refused = 0u;
 		plugin_paint_bind(&paint, &bud, fb, fb_w, fb_h);
-		nn_active_draw(&paint);
+		/* NN_ACTIVE_NOT_HELD paints nothing and is counted by the entry
+		 * check itself; there is nothing more to do with it here. */
+		(void)nn_active_draw(&paint);
 		plugin_lease_give();
 
 		/*

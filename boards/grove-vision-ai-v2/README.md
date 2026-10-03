@@ -1783,8 +1783,9 @@ VTS, which is the whole point: under the old ordering it stretched to 33,595 at
 this sort of producer duty.
 
 **[!] AND THE ZERO-DROP CONDITION IS NOT `B < period`.**  That is only the case
-where the sink does nothing on the producer.  The inference runs inside
-`consume()`, BEFORE the hand-off, so the panel starts its blit that much later:
+where the sink does nothing on the producer.  The inference ran inside
+`consume()` (only the preparation does since issue #129), BEFORE the hand-off,
+so the panel starts its blit that much later:
 
 ```
 hand-off      = inval + pack + S            S = the sink's producer-side work
@@ -2080,9 +2081,9 @@ only while a load or unload holds the gate, and a load or unload is refused
 (`busy`) while the count is not zero; nobody waits.  Each test is in the same
 critical section as the change it guards (`port/npu/nn_param_calls.c`,
 `test/test_nn_param_calls.c`).  Since issue #127 the count covers `nn dets` as
-well, and both take the plugin lease after they are counted in, so the camera
-producer's decode and a threshold call are no longer inside the same plugin at
-once (#122 P5) -- see "One lock into the plugin".
+well, and both take the plugin lease after they are counted in, so the stream's
+decode (the inference worker's since issue #129) and a threshold call are no
+longer inside the same plugin at once (#122 P5) -- see "One lock into the plugin".
 
 `blob_stat()` and `blob_verify()` take a lease and give it back; the leased
 forms (`blob_stat_leased`, `blob_verify_leased`) take the CALLER'S token and
@@ -3867,7 +3868,8 @@ which would burn the core for the length of a run -- the console would stop
 answering and Ctrl+C would not land.  A static ThreadX pool replaces it, so the
 inference thread suspends instead.  `nn run &` returns the prompt immediately.
 
-`ETHOSU_SEMAPHORE_WAIT_INFERENCE` is set to a finite 5000 ticks; the header
+`ETHOSU_SEMAPHORE_WAIT_INFERENCE` is set to a finite 1000 ticks
+(`NPU_INFERENCE_TIMEOUT_TICKS`, `port/npu/npu_hw.h`); the header
 would otherwise default it to "wait forever", and a lost NPU interrupt would
 suspend the calling job with no way back.
 
@@ -4242,28 +4244,29 @@ Three things behave differently now that the stream outlives the command:
   holding, and the arena is being rewritten every frame anyway.
 - **`nn model unload`, `nn run`, `nn bench` and `nn out` are refused** while a
   stream runs, by the same claim. `nn thresh` still works: it takes the plugin
-  lease, not the claim, and the producer skips the one frame it finds held
-  (issue #127).
+  lease, not the claim, and the inference worker waits it out (bounded) before
+  it decodes (issues #127, #129).
 - **`nn dets` answers in full, in the plugin's own words** (issue #127; until
   then the count only, *nn: N item(s); the decoder could not be reached to
   describe them*, because the account needed the gate the stream holds).  The
   record snapshot and the plugin's report are taken in one hold of the plugin
-  lease, and the producer decodes and publishes inside one hold of it, so the
-  two describe the same frame.  That message now appears only when the lease's
+  lease, and the inference worker decodes and publishes inside one hold of it,
+  so the two describe the same frame.  That message now appears only when the lease's
   holder did not let go within the bound -- see "One lock into the plugin".
 
 **The record (issue #118).**  `nn dets` reads the last result `nn run` or a
 stream published (`port/npu/nn_rec.c`, the decisions in `svc/nn_det_record.c`);
 it no longer decodes.  A stop does not clear it; `nn model load` and `nn model
 unload` do.  **A stop takes its record boundary only after
-`camera_stream_stop()` has confirmed the producer is out of `consume()`**, and
-the producer publishes there immediately after each decode -- so no decode can
-follow the boundary and be dropped, which is how wio's stop used to lose the
-stopped stream's account (c88d0ab).  The start's boundary, and the base the
-stream counts its own publishes from, come before the sink is attached.  A bare
-model's `nn run` publishes its output descriptors with the result, under the
-gate (issue #121), so `nn run` and `nn dets` print the shapes of the model that
-ran rather than of whatever is open when they print.
+`camera_stream_stop()` has confirmed the producer is out of `consume()` AND the
+inference worker is joined** (issue #129), and the worker publishes immediately
+after each decode -- so no decode can follow the boundary and be dropped, which
+is how wio's stop used to lose the stopped stream's account (c88d0ab).  The
+start's boundary, and the base the stream counts its own publishes from, come
+before the sink is attached.  A bare model's `nn run` publishes its output
+descriptors with the result (issue #121; the worker does it since #129), so
+`nn run` and `nn dets` print the shapes of the model that ran rather than of
+whatever is open when they print.
 - **`lcd rot` and `lcd madctl` are refused** while any camera sink owns the
   panel. They move the driver's PERSISTENT geometry, and the sink blits a fixed
   size the driver validates internally -- so a rotation mid-stream leaves every
@@ -4305,6 +4308,10 @@ staging seam, #59 double-buffered the capture, and #60 -- below -- cut the
 preprocessing.)
 
 ### Where `nn stream`'s producer time goes (issue #60)
+
+(A record of issue #60, when all three stages ran on the producer.  Since issue
+#129 only `prep` does; invoke and decode are the inference worker's -- see the
+next section.)
 
 `camera stats` prints one `sink` row for everything a sink does on the producer,
 and under `nn stream` that number was 24.0 ms with no way to see inside it.  It
@@ -4354,49 +4361,154 @@ W fell 32,381 -> 28,214 us, and the frame length was re-selected onto it (VTS
 at W < B = 26,439 us the panel's SPI wire time becomes the bound and nothing
 beats 37.8 fps.  There is 1.8 ms of room left before that.
 
-### Inference runs on the camera producer thread
+### Inference runs on a worker thread (issue #129)
 
-Not on a worker, and it STAYED there when the blit left (issue #57) and again
-when the capture went double-buffered (issue #59).  The raw frame the model
-reads is the COMPLETED landing buffer, which the datapath cannot touch again
-before the producer's next frame-ready flips the pair -- so it is stable for the
-producer's whole iteration, and `consume()` runs inside that iteration.  Moving
-the inference to another thread would take it outside that window and feed the
-model a buffer the datapath had been let loose on.  (Before #59 the guarantee
-was narrower -- the single buffer was stable only until the re-arm at the END of
-`consume()` -- so the early arm strengthened it rather than costing it.)
+Until issue #129 the whole inference ran on the camera producer, inside the panel
+sink's `consume()`.  Since #129 the work is split the way wio-lite-ai already
+splits it -- producer, worker, panel -- and only the frame's preparation is left
+on the producer:
 
-A worker thread would decouple the frame rate, at the price of drawing last
-frame's boxes on this frame.  That is the harder failure to see: at 8 fps a
-one-frame lag looks like a slightly slow tracker, not like a bug.
+| thread | priority | stack | per frame | woken by |
+|---|---:|---:|---|---|
+| panel (`cam_lcd_sink.c`) | 9 | 2,048 B (DTCM) | stage, `draw()` the latest result under the panel guard + plugin lease **try**, blit | the producer's hand-off semaphore |
+| camera producer (`camera.c`) | 10 | 8,192 B (DTCM) | count the frame; if the worker wants one, prepare it **straight into the model's input tensor** and hand it over | the datapath's frame-ready |
+| inference worker (`port/npu/nn_worker.c`) | 12 | 8,192 B (DTCM) | invoke, plugin lease (bounded wait), geometry, decode, record publish | an event flag the hand-over sets |
+| mve worker | 15 | 1,024 B | (`mve` only) | -- |
+| console | 16 | 4,096 B | `nn stream start/stop/stats`, `nn run`'s wait | UART |
+| background job | 17 | 4,096 B | `cmd &` | -- |
 
-The order inside `consume()` is the design:
+The order panel < producer < worker < mve < console is asserted where each
+number lives (`nn_worker.c`, `cmds/cmd_mve.c`).  The worker sits BELOW the
+producer and the panel (decision C of #129) so the camera's and the panel's
+timing is what it was -- the worker never preempts either -- and a console
+waiting for a lease the worker holds inherits at most priority 12.
 
-1. **inference, with NO panel guard held.**  It can take the whole NPU timeout
-   if an interrupt is lost, and holding the panel across that would block every
-   other `lcd` command for the duration.
-2. **hand the frame to the panel thread and return.**  Since issue #57 the blit
-   happens there; the pipeline's pre-pin keeps the slot alive across the
-   hand-off, and the panel thread balances it with exactly one
-   `frame_pipeline_put()`.
+**One frame, start to finish:**
 
-`draw()` therefore runs on the PANEL thread while `process()` runs on the
-producer, and the detections they share need no lock -- but the reason is
-exclusion, not proximity.  The pipeline pre-pins one delivery per sink and, under
-`FRAME_POLICY_DROP`, refuses a second while the first is outstanding, so
-`process()` cannot run again until the panel thread has released the frame, which
-it does only after `draw()` has returned.  The two alternate strictly.  That is
-why the policy is a named constant which `cam_lcd_sink_attach_and_stream()`
-checks: under
-`FRAME_POLICY_LATEST` the core re-enters `consume()` from inside `put()`, on the
-panel thread, and the inference would silently leave the producer.
+1. **producer, inside `consume()`**: if a stop is pending, skip.  If the worker
+   does not want a frame (it is still on an earlier one), the frame is not
+   inferred -- counted in the shared `skipped` and, apart, as `busy`.  Otherwise
+   query the input tensor, compute the geometry, prepare the frame from the raw
+   WDMA3 buffer into the input tensor, and hand over: frame number, record
+   generation, prep time and geometry go with it.
+2. **worker**: take the hand-over; if a stop is pending, do not invoke.  Invoke,
+   take the plugin lease (at most `PLUGIN_LEASE_WAIT_MS`), publish the geometry,
+   decode, publish to the record (negative values too), give the lease back, and
+   only then ask for the next frame.
+3. **panel**: try the lease and let the plugin draw its LATEST result on
+   whatever frame is being shown.  The overlay is therefore at least one frame
+   behind the picture.
+
+**Why the preparation stayed on the producer.**  The model reads the completed
+WDMA3 landing buffer, which the datapath does not touch again before the
+producer's next frame-ready flips the pair -- stable for the producer's whole
+iteration, and `consume()` runs inside it.  The pipeline's pin does not reach
+that buffer.  A worker that read it later would read a buffer the datapath had
+been let loose on, so the choice was a copy of the crop (172,800 B) or preparing
+on the producer; the spike behind #129 measured the copy costing a quarter of
+the detector's frames, and preparing in place costing nothing.
+
+**The hand-over is one word, not a flag pair** (`port/npu/nn_handoff.c`, a pure
+table with a host test over every state and operation): IDLE (parked, wants
+nothing) / WANT (the producer may write the input) / HANDED (written, not yet
+taken) / RUNNING (inside invoke .. publish).  Every transition is one critical
+section.  The worker is woken by an event flag, and a wake-up that finds nothing
+to TAKE is stale and ignored -- the word is the truth, not a token count.  The
+worker says WANT again only after the decode has finished reading the outputs,
+so the producer's next write cannot land under it.
+
+**`process()` answers "draw this frame", not "was it inferred".**  It returns 0
+whenever the stream's latest publish was a successful decode, busy frames
+included; it declines only before the first result, after a failed decode, and
+while a stop is pending.  Those are the frames `camera stats` counts as *shown
+unannotated*.
+
+**The stop** (`nn_teardown()` in `nn_svc_grove.c`, shared with `nn run`):
+stop request -> `camera_stream_stop()` (the producer's join) -> the worker's join
+-> record boundary -> sink detach -> the table in `nn_stream_state.c`.  The
+worker join waits, on the wall clock, until the hand-over word is parked with
+nothing handed over or running, at most **2,300 ms**: two NPU semaphore waits
+(`2 x NPU_INFERENCE_TIMEOUT_TICKS`, the ethos-u driver can take it twice) +
+`PLUGIN_LEASE_WAIT_MS` (50) + 250 ms of slack.  A pending stop keeps the worker
+from starting an invoke, so in practice it waits out at most the one running
+(13 ms detector, ~95 ms classifier).  **A join that runs out is terminal**
+("the inference worker did not finish"): no boundary, no detach, nothing
+released, the gate held until reboot -- the worker may still be inside the NPU
+or the plugin.  So is a join the caller skipped on a confirmed producer stop.
+The start arms the worker IDLE -> WANT and refuses (it does not wait) if the
+worker does not exist or is not parked.
+
+**`nn run` is a stream of one frame on the same threads.**  It claims the
+one-shot, checks the model's input (the reasons are given here, since the
+producer can only say that preparation failed), arms the worker and starts the
+camera through a **capture sink with no panel** (`port/camera/cam_capture_sink.c`:
+synchronous, one put per frame, attached only by `camera_stream_start()`,
+detached only after a confirmed stop and a zero pin count).  The producer
+prepares the first frame the worker wants and declines the rest; the worker
+decodes and publishes it -- or, with no plugin, publishes the raw output
+descriptors -- and parks for good (DONE_LAST).  The console waits on the record,
+on the wall clock, at most **4,300 ms**: the camera's first-frame timeout
+(`CAM_FRAME_TIMEOUT_TICKS`, 2 s) + one inference at its worst (2 x 1 s) + the
+lease wait (50 ms) + 250 ms of slack.  That is deliberately not the join's
+number: this one is "no result came", the join's is "a result that started did
+not come back".  The wait ends one of five ways (`nn_run_wait.c`, host-tested
+over every combination): **inferred** (the record accepted a publish; it wins
+over everything, and a timeout whose result made it is promoted to it),
+**no result** (the worker or the producer finished with the run and published
+nothing -- the reason is theirs: invoke failed, lease not had in time, ...),
+**lost** (the camera stopped streaming), **cancelled** (Ctrl+C), **timed out**.
+Every ending then runs the same teardown as a stream, by the run's own
+generation; a retryable teardown leaves the one-shot to `nn stream stop`.  The
+frame `nn run` sees is the first frame of a freshly started stream, where it used
+to be one stopped `camera_capture()` frame.  `camera capture` itself is
+unchanged.
+
+**The decode's stack allowance is declared against the worker**
+(`GROVE_PLUGIN_STACK_WORKER`, `board.cmake`), because since #129 the worker is
+the only thread decode runs on: the stream's moved there from the producer,
+`nn run`'s from the console, and `nn dets` only reads the record.  The
+shallowest ceiling for decode moved from the shell's 4,096 B to the worker's
+8,192 B, so the value stays **1,024 B** and no container was re-packed.  The
+stack report's `decode` line shows `work d/8192` only; a sample on any other
+thread shows up flagged or as `inv`.
+
+**`nn stream stats`, the two lines this changed** (still eleven lines):
+
+```
+items   : <items> decoded, busy <busy>/<frames>, lag <mean>/<max>
+...
+worker  : <p> us prep, <i> us invoke, <d> us decode, <c> us cycle
+```
+
+`busy` is the part of the shared `skipped` that the worker was too busy to take,
+out of every frame the producer was handed; `lag` is how many frames behind the
+picture the drawn result was, mean (two decimals) and worst.  The decodes are
+the shared `infers` line.  On the `worker` line `prep` is what the producer
+still spends inside `consume()` -- the hand-over's whole cost -- and `cycle` is
+the worker's round trip from hand-over to publish.  It is the last line and the
+only one left out when the EPK clock is not trusted.  `camera stats`' `nn sink`
+block prints the same split, labelled `[prep: producer; rest: worker]`.
+
+**Expected values (expected, to be confirmed on hardware, firmware `<hash>`)**,
+from the spike that preceded #129 (prep on the producer, invoke onward on a
+worker at priority 12):
+
+| | detector (BlazeFace 128) | classifier (CIFAR-10) |
+|---|---|---|
+| inferences per second | ~36.8 | ~7.3 |
+| `busy` / frames | ~0 | ~4 of 5 |
+| `lag` mean / max (frames) | 1.00 / 1 | ~6 / 7 |
+| `worker` prep / invoke / decode | ~4,400 / ~12,700 / ~150 us | -- / ~94,600 / -- us |
+| `cycle` | ~13,200 us | ~95,000 us |
+
+**What the split gave up.**  Under the synchronous design every frame on the
+panel carried its own result.  Now the detector's boxes are one frame (27 ms)
+late, and the classifier's label several frames late -- but the classifier's
+video runs at the camera's rate instead of the inference's.
 
 The overlay hook still runs between the staging copy and the DMA
-(`lcd_blit_le_overlay()`), so a box is never half-transferred.
-
-A failed inference means no boxes on that frame, not a blank preview -- the
-picture is worth more than the annotation.  `camera stats` counts those frames
-separately from sink errors.
+(`lcd_blit_le_overlay()`), so a box is never half-transferred.  A failed
+inference means no overlay on that frame, not a blank preview.
 
 ### [!] Starting a stream and attaching its sink are ONE operation (issue #63)
 
@@ -5185,9 +5297,10 @@ assembling the container indivisibly, not on the digest.
 
 Each callback runs on a thread's stack, and they are not the same size: draw on
 the panel thread (2,048 B, whose measured peak at issue #64 is already 544 B),
-decode on the camera producer (8 KiB) for `nn stream` and on the shell (4 KiB)
-for `nn run` (and, until issue #118, `nn dets`), and everything else on the shell -- a console or a
-background job.  `port/npu/nn_plugin_stack.h` is the table.  These stacks are
+decode on the inference worker (8 KiB) for both `nn stream` and `nn run` since
+issue #129 (before it: the camera producer for the stream, the shell for `nn run`
+and, until issue #118, `nn dets`), and everything else on the shell -- a console
+or a background job.  `port/npu/nn_plugin_stack.h` is the table.  These stacks are
 statically allocated and do not grow.  An overflow is
 caught here -- the ThreadX M55 port sets PSPLIM per thread, so it raises a
 UsageFault with `CFSR.STKOF` and lands in `fault.c` -- but the M7 boards have no
@@ -5408,12 +5521,12 @@ thread each slot runs on is stated once, in `port/npu/nn_plugin_stack.h`, as dat
 (`GROVE_PLUGIN_RUNS_*`).  Both of its readers take it from there: the header's
 asserts -- one per slot and thread, every allowance strictly below every stack
 its slot runs on -- and the stack report's coverage marks.  Read the table there;
-it is not copied here.  Both allowances are 1,024 B: `GROVE_PLUGIN_STACK_SHELL`
+it is not copied here.  All three allowances are 1,024 B: `GROVE_PLUGIN_STACK_SHELL`
 for every slot a console or a background job can reach -- entry, shapes_ok,
-decode, report and the two params; decode because `nn run` calls it on the
-shell (and `nn dets` did until issue #118) as well as `nn stream` on the
-producer -- and
-`GROVE_PLUGIN_STACK_PANEL` for draw.
+report and the two params -- `GROVE_PLUGIN_STACK_PANEL` for draw, and since
+issue #129 `GROVE_PLUGIN_STACK_WORKER` for decode, which runs on the inference
+worker alone (`nn stream` and `nn run`; until then decode was declared against
+the shell, because `nn run` called it there and `nn stream` on the producer).
 
 **The build states the same table once, and holds the firmware to it** (issue
 #126).  `board.cmake`'s `plugin_stack_table()` is where both numbers and the
@@ -5476,8 +5589,9 @@ At the plugin's entry, one record per slot and per thread (`port/npu/nn_probe.h`
   report unmarked.
 
 The thread is named by the priority it was created with and the size of its
-stack -- producer 10/8192, panel 9/2048, console 16/4096, background job
-17/4096, asserted distinct in `nn_probe_rtos.c`.  A sample with no current
+stack -- inference worker 12/8192 (the camera producer, 10/8192 before issue
+#129; it is no context now and a sample there is `inv`), panel 9/2048, console
+16/4096, background job 17/4096, asserted distinct in `nn_probe_rtos.c`.  A sample with no current
 thread, taken in an exception, on a thread that matches none of those, or with a
 stack pointer outside the thread's own stack is not a depth: it is counted as
 `inv` and nothing else.  The records are kept from boot and never reset, because
@@ -5494,7 +5608,8 @@ depths at a plugin's entry, and nothing is derived from them any more.
 
 The old `at call :` line is gone.  After `items` come one line per slot, then the
 painter's spend on a line of its own, then the plugin lease's misses (issue #127,
-see "One lock into the plugin"), then the producer profile -- last, because
+see "One lock into the plugin"), then the `worker` profile (the `producer` line
+before issue #129) -- last, because
 it is the one line that may decline, and the caller stops at the first line a
 board declines.  As the board printed them (build `4bcf219`, before issue #121 -- the decode and
 report lines are left out here because that build's depths no longer hold; issue
@@ -5987,14 +6102,15 @@ reason above.  The duplication costs about 1 KB per image.
 the files one by one, so a new common `.c` that is not added there is simply not
 linked.
 
-### Rasterise on the producer, blit on the panel
+### Rasterise in decode, blit on the panel
 
 The split is the one `cam_lcd_sink.h` already documents and no new discipline was
-invented for loaded code:
+invented for loaded code (the decode ran on the camera producer when this was
+written; since issue #129 it runs on the inference worker):
 
 | | thread | guard | budget |
 |---|---|---|---|
-| `decode()` | camera producer | none | a frame period |
+| `decode()` | inference worker | plugin lease | a frame period |
 | `draw()` | panel | held | 19,200 charged pixels |
 
 So `decode()` formats the string and draws the glyphs into the plugin's own
@@ -6014,8 +6130,9 @@ this: `to_frame(0,0,1,1)` is exactly the rectangle its output covers.
 
 **[!] Nothing stale reaches the panel.**  `decode()` drops its draw-valid flag on
 entry and raises it only on the fully successful path.  The firmware already
-declines to call `draw()` for a frame whose decode failed -- `nn_overlay.c`
-returns non-zero and the sink never installs the hook -- so this is the second
+declines to call `draw()` while the stream's latest decode is a failure --
+`nn_overlay.c`'s `process()` returns non-zero and the sink never installs the
+hook (issue #129: the latest decode, not this frame's) -- so this is the second
 line of defence, and it is the one that survives someone adding an early return
 to `decode()` later.  Without it the panel keeps showing the last good label over
 a live picture, which reads as a working classifier.
@@ -6321,9 +6438,11 @@ separate files until Epic #122 Phase 3b folds them into one type. What both
 boards now promise (`svc/plugin_abi.h`): **no two callbacks of one plugin run
 at once.**
 
-Why this board needed one at all: the frame pipeline already keeps the
+Why this board needed one at all: the frame pipeline then kept the
 producer's decode and the panel's draw apart (one delivery per sink, released
-only after `draw()` returns), but nothing kept a console out. `nn thresh` on a
+only after `draw()` returns), but nothing kept a console out.  **Since issue
+#129 the decode is on the inference worker, which that hand-off does not reach,
+so the lease is also the only thing between the decode and the draw.** `nn thresh` on a
 running stream entered the same plugin the producer was decoding in (#122 P5),
 and `nn dets` on a running stream could only print the count and STALE,
 because the plugin's account was taken under the `nn` gate and a stream holds
@@ -6333,11 +6452,11 @@ that gate until its stop (#122 P17).
 
 | caller | how | held across | not granted |
 |---|---|---|---|
-| camera producer | try, never waits | publishing the geometry, the decode, the record publish | that frame is not decoded; record, private state and geometry stay as they were; `process()` declines, so the frame goes to the panel bare and `draw()` is not called. Counted as a miss, not as `skipped` or `error(s)` |
+| inference worker (since #129; the camera producer tried it before) | a bounded wait, after the invoke | publishing the geometry, the decode, the record publish | that frame is not decoded; record, private state and geometry stay as they were. Counted in `error(s)`, not as a miss |
 | panel | try, never waits, inside the panel guard | `draw()` | the frame is shown bare. Counted as a miss |
 | `nn thresh` get / set (and `nn info`'s thresh line) | counted in, then a bounded wait | the param call | `busy` |
 | `nn dets` | counted in, then a bounded wait | the record snapshot and the plugin's report, together | count refused (a load or unload holds the gate): `busy`. Wait timed out: the count and STALE |
-| `nn run` | a bounded wait, after the invoke | publishing the geometry, the decode, the publish, the snapshot, the report | `busy`, and nothing is published |
+| `nn run` (console, since #129: the decode is the worker's, above) | a bounded wait, after the worker published | the snapshot and the report | the record's answer and STALE |
 | stream admission | a bounded wait | `shapes_ok` and `can_draw` | `busy`, before the camera is woken |
 | `nn model load` | after the SWAP gate and the NOR lookup, before the backend closes the open model | the backend close / open, the plugin swap and its `entry()`, the record invalidation, clearing the geometry | the REFUSED ending: an open model stands, a bring-up this load did is taken back down |
 | `nn model unload` | after the SWAP gate | unloading the plugin, invalidating the record, clearing the geometry (the backend comes down after the lease is released) | `busy`, nothing changed |
@@ -6360,7 +6479,9 @@ holder touches the LCD. The overlay callback contract in
 tick for ThreadX's N-1 timeout, from the one constant in `plugin_lease.h`. The
 longest legitimate hold measured (Epic #122 U1 spike, 2026-10-03) was 12.7 ms:
 a console holding the lease while the producer (priority 10) and the panel (9)
-preempted it. A producer decode is about 150 us, a draw under 200 us, a
+preempted it. The inference worker (12) waits by the same bound; a console it
+waits for inherits 12 at most, still below the producer and the panel. A decode
+is about 150 us, a draw under 200 us, a
 threshold call a few us, a report tens of us. A timeout is an answer (`busy`
 or STALE); no path carries on into the plugin without the lease.
 
@@ -6391,17 +6512,13 @@ same for both loader checks against the real `plugin_run.c`.
 ### The `plugin` line in `nn stream stats`
 
 `plugin  : N frame(s) missed (run of M)`, in wio-lite-ai's words. N is the
-frames shown bare because the lease was held, whether the producer or the panel
-found it so; a frame is counted once (a producer miss means the panel never
-asks). M is the longest run, and a run ends only on an annotated frame (the
-panel getting the lease), never on the producer's success. Both reset when a
-stream is armed, not when it stops. The line comes after `painter` and before
-the producer profile, which is left out when the clock is not trusted; the
-caller stops at the first line a board leaves out. `camera stats`' "overlay:
-shown unannotated" includes producer misses, because those frames were shown
-unannotated. `infers` stays the number of frames published. The producer
-profile's `decode` stage now includes the try and the release, about 2 us a
-frame.
+frames shown bare because the panel found the lease held (since issue #129 the
+panel is the only thread that tries; the worker waits, and the producer no
+longer asks). M is the longest run, and a run ends only on an annotated frame
+(the panel getting the lease). Both reset when a stream is armed, not when it
+stops. The line comes after `painter` and before the `worker` profile, which is
+left out when the clock is not trusted; the caller stops at the first line a
+board leaves out. `infers` stays the number of frames published.
 
 A single `nn thresh` or `nn dets` on a running stream costs at most one frame.
 On a stream with nobody else asking, the line reads 0 and 0.

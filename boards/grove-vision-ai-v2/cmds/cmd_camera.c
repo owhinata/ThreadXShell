@@ -530,10 +530,12 @@ static void cam_print_profile(struct cli_instance *sh,
 	              st->prof_iters, "planar B/G/R -> RGB565, 76800 px");
 	/* NOT the blit -- that left this thread in #57 and has its own row
 	 * below.  What is left is whatever the sinks do on the producer: the
-	 * inference under `nn stream`, and since #64 the panel thread's staging
-	 * copy, which now preempts this thread instead of queueing behind it. */
+	 * frame's preparation for the inference worker under `nn stream` (the
+	 * inference itself left this thread in #129), and since #64 the panel
+	 * thread's staging copy, which now preempts this thread instead of
+	 * queueing behind it. */
 	cam_prof_line(sh, "sink", st->prof_sink_us, st->prof_total_us,
-	              st->prof_iters, "sinks consume: inference + panel staging");
+	              st->prof_iters, "sinks consume: nn prep + panel staging");
 	cam_prof_line(sh, "other", st->prof_other_us, st->prof_total_us,
 	              st->prof_iters, "verify, error recheck, loop");
 }
@@ -712,7 +714,7 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 	 * [!] WHERE THE 26 ms WENT (issue #57).
 	 *
 	 * The producer's `sink` row above is now just the hand-off (plus the
-	 * inference under `nn stream`); the blit itself is timed on the panel
+	 * nn prep under `nn stream`); the blit itself is timed on the panel
 	 * thread and reported here.  Both numbers are needed: "the producer's
 	 * went down" is also what a sink that silently stopped drawing looks
 	 * like, and only this row distinguishes moved from lost.
@@ -746,9 +748,9 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 	 * (issue #60).  One number was carrying the whole of "preprocess +
 	 * inference + decode + hand-off", and which stage owns it decides what
 	 * is worth optimising -- so the overlay times its own stages and they
-	 * are printed HERE, next to the sink row they have to sum against.  The
-	 * remainder against that row is the hand-off plus whatever preempted
-	 * the producer inside it (the panel's staging copy, since #64).
+	 * are printed HERE.  Since issue #129 only `prep` is inside the sink row
+	 * (the producer prepares and hands over); invoke and decode run on the
+	 * inference worker and are printed for the same frames, outside it.
 	 *
 	 * The scope is in the header because it is NOT the profile's: these
 	 * reset when an `nn stream` arms the overlay, not at stream start, so
@@ -761,7 +763,7 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 		nn_overlay_stats(&ns);
 		if (ns.prof_frames != 0u && ns.prof_ok) {
 			cli_print(sh, "nn sink  : %lu frame(s), last nn stream "
-			              "[producer thread]\r\n",
+			              "[prep: producer; rest: worker]\r\n",
 			          (unsigned long)ns.prof_frames);
 			cli_print(sh, "  prep   : %6lu us/frame   setup + "
 			              "crop/resize\r\n",

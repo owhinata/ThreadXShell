@@ -58,10 +58,9 @@
   **state** で拒否）。**`null` backend も同じ答え。**
 - **admission は `nn run` と共有**なので**shape の問いは no-plugin で通す**（refuse すると素のモデルの
   `nn run` が消える）。**stream を止めるのは `nn_active_can_draw()` 1 本。**
-- **worker が非同期**なので「誰も解釈していない」も**世代規則の下で publish する**。**`nn dets` は
-  record を読むだけ、panel は kind も見る。`nn info` の claim は開いているモデルに従い**、reload 後の
-  状態は `nn_model_reload()` 自身の戻り値で決める。**監査は `AUDIT_SHARED` だけで、f746g-disco はまだ
-  常駐デコーダを持つ（変えない）。**
+- **`nn dets` は record を読むだけ、panel は kind も見る（無解釈の publish は 7 節）。`nn info` の claim は
+  開いているモデルに従い**、reload 後の状態は `nn_model_reload()` 自身の戻り値で決める。**監査は
+  `AUDIT_SHARED` だけで、f746g-disco はまだ常駐デコーダを持つ（変えない）。**
 
 ### 7. `nn` は 3 ボード共有の 1 コマンド
 
@@ -97,6 +96,7 @@
   `CAM_ERR_BUSY` が **retryable**）。**terminal に畳み直さない。**
 - **[!] デコーダの負値を 1 つに畳まない**（どれも「0 件」ではない）。**停止は推論を取り消せない**ので
   worker は arm 時点の世代を控え publish のロック内で照合（`svc/nn_det_record.c`）。**RAW 記述子と top-5 は publish 時に record へ載せ、印字時にモデルを取り直さない**（#121）。
+- **[!] 推論を非同期の worker で回すボードは「誰も解釈していない」も世代規則の下で publish する**（しないと `nn run` が timeout する。wio・Grove）。
 
 ### 8. `svc/frame_pipeline` の sink registry: attach は拒否する、直列化は呼び出し元
 
@@ -156,7 +156,7 @@ plugin は board code と同格の**信頼された native code**。ゲートが
   パスをそのまま送り**それがその成果物かは誰も検査しない**ので、閉じ手は receipt の **CRC32** を転送後に
   `blob list` と突き合わせること。**モデルは commit + SHA256 で pin**（Git LFS 不在だとポインタが
   exit 0 で置かれる）、**pin が消えたら fail closed**。**ファームと plugin は別成果物で間違いは両方向。** **[!] veneer ゲートの DELIVERY は build.ninja から導出したファーム成果物の使用者と両方向で照合し（`cmake/check_delivery_gate.py`）、全 target がその検査を先に待つ。外す・弱めない。**
-- **[!] 同じ plugin の callback は 2 つ同時に走らない**: plugin に入る全経路（param・admission・report・load/unload も）がボードの lease を取り、producer / panel は try だけで待たない。**入口（ボードの分岐点と ENTRY の直前）は保持を検査し、無ければ「plugin 無し」とは別の答えを返す**（#127）。
+- **[!] 同じ plugin の callback は 2 つ同時に走らない**: plugin に入る全経路（param・admission・report・load/unload も）がボードの lease を取り、worker とコンソールは有界に待ち、panel は try だけ。**入口（ボードの分岐点と ENTRY の直前）は保持を検査し、無ければ「plugin 無し」とは別の答えを返す**（#127）。
 
 ### 10. 配置ゲート: リンカスクリプトの `ASSERT` は LTO 下で空振りする
 
@@ -252,13 +252,13 @@ board README が正。
 - **[!] gate の外から plugin に入るコンソール呼び出し（`nn thresh` / `nn dets`）は数に入ってから lease を取り、load/unload はその数が 0 でなければ BUSY**（数の判定は claim と同じクリティカルセクション、`nn_param_calls.c`。数は待たず、lease は有界に待つ）。
 - **[!] アリーナのキャッシュ保守は「範囲ごと」にしない。** 潰すのは **`ethosu_invalidate_dcache()`
   だけ**で、引き渡しは `ethosu_inference_begin/end` でアリーナ**全体**を、成功条件は **`job.state` と
-  `job.result` の両方**、異常時はリセットの**成功を確認してから**。**呼び出し側で保守しない。推論は
-  camera producer スレッド・`consume()` 内**で**推論（ガード無し）→ ガード 1 回で stage/draw/present**
-  （callback 中の block / sleep / 推論 / 待つロック / LCD 再入は禁止。plugin lease の try だけは可で、取れなければ描かない）。**タイムアウトは `npu_hw.h` の 1 箇所。**
+  `job.result` の両方**、異常時はリセットの**成功を確認してから**。**呼び出し側で保守しない。prep は
+  camera producer・`consume()` 内で worker が欲しいときだけ、invoke〜publish は推論 worker**（#129。
+  callback 中の block / sleep / 推論 / 待つロック / LCD 再入は禁止。panel は lease の try だけ）。**タイムアウトは `npu_hw.h` の 1 箇所。**
 - **[!] `nn stream` の拒否の仕方はボードで違う。揃えない**（Grove は**デコーダが無い時点で**、wio は
   **shape は通し `can_draw` 1 本で**）。**[!] `nn_input_quant_ok()` は常駐デコーダの前提条件で plugin は
   縛られない。[!] ファームの印字は「種」を名乗らない** — ゲートは **`.rodata`** を negative scan する。**`nn dets` は
-  record の snapshot と report を lease の 1 回の保持で採る**（stream 中も全文。STALE は保持者が離さなかったときだけ）、**stop の record 境界は producer の停止確認後**（#118）。
+  record の snapshot と report を lease の 1 回の保持で採る**（stream 中も全文。STALE は保持者が離さなかったときだけ）、**stop の record 境界は producer の停止確認と worker の join の後**（#118, #129。`nn run` も同じ teardown）。
 - **[!] Grove と wio のファームは共有デコーダをリンクしない** — **デコーダは container でしか届かない**
   （f746 はまだ持つ）。**常駐デコーダを戻さない。別フラグで組み直した監査対象を作らない。** 素の
   `.tflite` は**テンソルをそのまま報告**し、`nn thresh` は **`none`**、set は **`NN_SVC_ERR_STATE`**。

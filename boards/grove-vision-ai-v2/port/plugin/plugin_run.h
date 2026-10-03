@@ -97,7 +97,9 @@ static inline int plugin_run_entered(enum plugin_run_result r)
 	return r == PLUGIN_RUN_OK || r == PLUGIN_RUN_ENTRY;
 }
 
-/** Forget the active plugin.  Idempotent. */
+/** Forget the active plugin.  Idempotent.  The caller must hold the plugin
+ *  lease (issue #127); without it this does nothing and counts the refusal
+ *  (plugin_lease_note_unheld()). */
 void plugin_run_unload(void);
 
 /** Is a plugin loaded and started? */

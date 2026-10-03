@@ -272,6 +272,15 @@ const char *plugin_run_why(enum plugin_run_result r)
 
 void plugin_run_unload(void)
 {
+	/* [!] UNDER THE PLUGIN LEASE, LIKE A LOAD (issue #127).  Unpublishing
+	 * clears the slot table a holder may be calling through.  Refused, the
+	 * published plugin is left exactly as it was, and the refusal is counted
+	 * like every other entry check's. */
+	if (!plugin_lease_held()) {
+		plugin_lease_note_unheld();
+		LOG_ERR("unload refused: %s", plugin_run_why(PLUGIN_RUN_NOT_HELD));
+		return;
+	}
 	plugin_exec_unload(&pl_env);
 }
 

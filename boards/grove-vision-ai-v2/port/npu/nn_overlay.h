@@ -46,7 +46,8 @@ struct nn_overlay_stats {
 	uint32_t errors;       /**< invoke or decode refused                 */
 	/*
 	 * [!] Two kinds of decode failure, counted apart (issue #97).  There is no
-	 * console on the producer thread, so a summary is the only place a failure
+	 * console on the thread that decodes (the producer then, the inference
+	 * worker since issue #129), so a summary is the only place a failure
 	 * can be explained -- and "the open model is not BlazeFace" calls for
 	 * opening a different model while "the decoder is not initialised" calls
 	 * for looking at the firmware.  One `errors` total cannot say which.

@@ -16,8 +16,8 @@
  * hollow boxes would be a detector-only painter, which reproduces the very
  * asymmetry issue #78 exists to remove, one layer up.  @ref plugin_painter's
  * `blit` is the general escape hatch: a plugin rasterises glyphs, a mask or a
- * skeleton into its OWN buffer during decode() -- on the producer thread, with
- * no guard held -- and hands over spans here.
+ * skeleton into its OWN buffer during decode() -- on the inference worker
+ * since issue #129, with no panel guard held -- and hands over spans here.
  *
  * THE BUDGET, AND WHAT IT IS AND IS NOT.  draw() runs on the panel thread with
  * the panel guard held, and everything else that wants the panel is failing its

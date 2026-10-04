@@ -455,10 +455,12 @@ it cannot describe a different load from the manifest printed beside it.
 
 ### [!] What decodes, draws and reports, and the lease that separates them
 
-Grove needs no lock between a plugin's decode and its draw: its frame pipeline
-pins one delivery per sink, so the producer's decode and the panel's draw
-structurally cannot overlap (its own plugin lease, issue #127, is what keeps the
-consoles out).  **This board has no such exclusion.** The preview
+Grove needed no lock between a plugin's decode and its draw while its producer
+decoded: its frame pipeline pins one delivery per sink, so that decode and the
+panel's draw structurally could not overlap (its plugin lease, issue #127, kept
+the consoles out).  Since issue #129 Grove decodes on an inference worker too,
+and its lease is now what keeps the decode and the draw apart there as well.
+**This board never had the structural exclusion.** The preview
 (flip) thread runs at priority 12 and the inference worker at 18, with nothing
 between them -- the worker is preemptible mid-decode and the panel is what
 preempts it.  That was harmless while the worker handed over BOXES: it filled a

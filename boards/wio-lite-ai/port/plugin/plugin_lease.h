@@ -8,10 +8,12 @@
  *          #78 Step 3b).
  *
  * [!] THIS BOARD HAS NO STRUCTURAL EXCLUSION BETWEEN decode() AND draw(), and
- * that is the difference that makes this file necessary.  On
- * grove-vision-ai-v2 the frame pipeline pre-pins one delivery per sink, so the
- * producer's decode and the panel's draw can never overlap and a plugin needs
- * no lock of its own.  Here the preview (flip) thread runs at a HIGHER priority
+ * that is the difference that made this file necessary.  On
+ * grove-vision-ai-v2 the frame pipeline pre-pins one delivery per sink, so
+ * while the producer decoded (until issue #129) its decode and the panel's draw
+ * could never overlap.  Since #129 the decode is on an inference worker there
+ * too, and Grove's own plugin lease is what keeps the two apart.  Here the
+ * preview (flip) thread runs at a HIGHER priority
  * than the inference worker and nothing separates them: the worker is
  * preemptible mid-decode, and the panel is what preempts it.
  *

@@ -251,19 +251,18 @@ static int pl_shapes_ok(const struct tensor_desc *outs, unsigned n)
  * Decode: dequantise the ten classes and keep the best PL_TOP.
  *
  * An insertion sort over three entries: the vector is ten long, so anything
- * cleverer would cost more code than it saves work, and this runs on the camera
- * producer thread where the budget is the whole frame period.
+ * cleverer would cost more code than it saves work, and this runs on the
+ * inference worker, off the panel.
  */
 /*
  * Rasterise the winning class into the strip.
  *
- * [!] ON THE PRODUCER THREAD, WITH NO PANEL GUARD HELD, and that is the whole
+ * [!] ON THE INFERENCE WORKER, WITH NO PANEL GUARD HELD, and that is the whole
  * reason it is here rather than in draw().  draw() runs on the panel thread
  * inside the guard, where everything else that wants the panel is failing its
- * non-blocking acquire; the frame pipeline pre-pins one delivery per sink, so
- * this and draw() strictly alternate and the hand-off needs no lock.  This is
- * the split cam_lcd_sink.h already documents -- no new discipline is invented
- * for loaded code.
+ * non-blocking acquire; the base's plugin lease keeps this and draw() from
+ * running at once (svc/plugin_abi.h), so the hand-off needs no lock of the
+ * plugin's own.
  *
  * The number is formatted through the EXISTING pl_fmt_* helpers, pointed at a
  * char buffer: a second integer formatter in plugin_text.c would be a second
@@ -355,8 +354,8 @@ static int pl_decode(const struct tensor_desc *outs, unsigned n)
 /*
  * Paint the last decode.
  *
- * One blit of a finished rectangle: everything expensive already happened on the
- * producer.  Opaque -- a negative key -- because a solid bar is what keeps a
+ * One blit of a finished rectangle: everything expensive already happened in
+ * decode().  Opaque -- a negative key -- because a solid bar is what keeps a
  * label legible over an arbitrary camera scene, and because a colour-keyed blit
  * is charged for every source pixel it READS anyway, so transparency would buy
  * nothing from the budget.
@@ -498,7 +497,7 @@ const void *const plugin_slot_table[PLUGIN_SLOT_COUNT] = {
 /*
  * The signatures are pinned here rather than trusted to review: an entry whose
  * type drifted from the ABI would still compile into the void* table above and
- * would fail on the board, in a callback, on the producer thread.
+ * would fail on the board, in a callback, on a thread with no console.
  */
 _Static_assert(sizeof((plugin_entry_fn)pl_entry) == sizeof(void *), "");
 _Static_assert(sizeof((plugin_shapes_ok_fn)pl_shapes_ok) == sizeof(void *), "");

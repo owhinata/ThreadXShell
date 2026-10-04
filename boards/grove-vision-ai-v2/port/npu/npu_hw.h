@@ -28,13 +28,15 @@
  * first time anyone tuned it.
  *
  * One second, down from five since issue #48.  Two things changed: inference
- * now runs on the camera producer thread, where the wait sits inside the
- * window camera_stream_stop() has to join; and the ethos-u driver takes this
- * semaphore TWICE on its timeout/interrupt race path, so the budget is 2x this
- * number.  One second is still about 11x the worst measured inference (92 ms
- * for classification, 13 ms for the detector) -- generous enough that a model
- * or clock change will not trip it, tight enough that two of them plus the
- * panel's DMA timeout stay well inside CAM_STOP_JOIN_TICKS.
+ * then ran on the camera producer thread, where the wait sat inside the window
+ * camera_stream_stop() has to join (since issue #129 it runs on the inference
+ * worker, and the window is the worker's join, NN_WORKER_JOIN_TICKS in
+ * nn_worker.c, which is derived from this number); and the ethos-u driver
+ * takes this semaphore TWICE on its timeout/interrupt race path, so the budget
+ * is 2x this number.  One second is still about 11x the worst measured
+ * inference (92 ms for classification, 13 ms for the detector) -- generous
+ * enough that a model or clock change will not trip it, tight enough that a
+ * stop's join still ends in seconds.
  */
 #define NPU_INFERENCE_TIMEOUT_TICKS 1000u
 

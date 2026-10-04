@@ -196,8 +196,8 @@ int nn_active_to_frame(void *ctx, float x, float y, float w, float h,
 }
 
 /*
- * The producer thread has no console, so this is the only way a decode failure
- * can explain itself.
+ * The inference worker has no console, so this is the only way a decode
+ * failure can explain itself.
  *
  * [!] THE BYTES GO TO THE LOG WITHOUT THE FORMATTER (issue #112).  The bytes a
  * plugin hands over are not NUL-terminated.  Until #112 they were copied into a

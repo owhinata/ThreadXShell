@@ -408,10 +408,11 @@ enum plugin_slot {
  * to land in executable bytes.
  *
  * STACK.  Each callback runs on a DIFFERENT THREAD'S STACK, and they are not
- * the same size: decode on the camera producer, draw on the panel thread inside
- * its guard, report on the shell thread.  The panel stack in particular is
- * small.  A self-declared number is not evidence, so the host gate derives a
- * transitive bound from the linked plugin and refuses a manifest that does not
+ * the same size: decode on the thread that ran the inference (the board's
+ * inference worker), draw on the panel thread inside its guard, report on the
+ * shell thread.  The panel stack in particular is small.  A self-declared
+ * number is not evidence, so the host gate derives a transitive bound from the
+ * linked plugin and refuses a manifest that does not
  * match it -- see plugin_load.h for what the loader does with these, and
  * AGENTS.md for why matching is still not the same as being admissible.
  *
@@ -526,8 +527,11 @@ struct plugin_rect {
  *
  * WHERE THE WORK GOES.  draw() runs on the panel thread with the panel guard
  * held, so it must be cheap; the expensive rasterising belongs in decode(),
- * which runs on the camera producer with no guard and may take as long as it
- * needs.  [!] NO TWO CALLBACKS OF ONE PLUGIN RUN AT ONCE, ON ANY BOARD (issue
+ * which runs on the thread that ran the inference (the board's inference
+ * worker, not the camera producer, which only prepares the input) with no panel
+ * guard held.  It does hold the plugin lease below, so a long decode costs the
+ * panel bare frames and a console a bounded wait, never the camera.  [!] NO TWO
+ * CALLBACKS OF ONE PLUGIN RUN AT ONCE, ON ANY BOARD (issue
  * #127): every path into a plugin holds the board's plugin lease, so what
  * decode() leaves for draw() and report() needs no lock of the plugin's own.
  *
@@ -596,8 +600,9 @@ struct plugin_base_api {
 	uint32_t size;         /**< == sizeof(struct plugin_base_api)          */
 	void    *ctx;          /**< opaque; passed back to every call below    */
 
-	/** Diagnostics.  The producer thread has no console, so this is the only
-	 *  way a decode failure can explain itself. */
+	/** Diagnostics.  decode() runs on a thread with no console (the board's
+	 *  inference worker), so this is the only way a decode failure can
+	 *  explain itself. */
 	void (*log)(void *ctx, const char *s, size_t len);
 
 	/**
@@ -635,6 +640,23 @@ struct plugin_base_api {
  * plugin, which it can only do if these signatures are fixed before the packer,
  * the device decoder and the plugin's linker are written.  Changing one is an
  * ABI break.
+ *
+ * [!] THE TENSORS ARE LENT FOR ONE CALL (issue #130).  The array @p outs that
+ * shapes_ok() and decode() receive, and every buffer its descriptors point at,
+ * are valid only until that call returns.  The descriptors are built on the
+ * caller's stack, and the buffers are the model's output tensors, which the
+ * next inference rewrites.  So a plugin must not keep @p outs, a descriptor or
+ * a data pointer past its return, and must not reach for one from draw(),
+ * report() or a param callback: whatever those need, decode() copies or
+ * derives into the plugin's own state.  shapes_ok() may be asked before any
+ * inference has filled the buffers, so it answers from the shapes alone.  No
+ * input tensor is lent at all -- the board prepares the input, and a plugin
+ * never sees it.
+ *
+ * This writes down what every board already does rather than asking anything
+ * new of one: the worker calls decode() under the plugin lease right after its
+ * invoke and before it can start the next one, and no other callback is
+ * handed a tensor.
  */
 struct tensor_desc;   /* svc/tensor.h; a plugin includes it, this header need not */
 

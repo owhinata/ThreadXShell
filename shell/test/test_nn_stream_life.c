@@ -604,7 +604,7 @@ static void issue_120_interleaving(void)
 		ok("...and a poll sees no stream generation", sg == NN_STREAM_GEN_ANY);
 	}
 
-	/* wio's nn_stream_admit(), verbatim in shape. */
+	/* nn_core_admit() on a re-arming board (svc/nn_core.c), verbatim in shape. */
 	r = nn_stream_life_begin(&l, NN_STREAM_KIND_STREAM);
 	if (r == NN_STREAM_START_RUNNING && nn_stream_life_rearm(&l))
 		r = NN_STREAM_START_GO;

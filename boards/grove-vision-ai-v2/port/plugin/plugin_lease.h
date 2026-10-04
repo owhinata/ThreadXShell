@@ -9,8 +9,12 @@
  * The same kind of exclusion as wio-lite-ai's port/plugin/plugin_lease.h, with
  * the same name and the same meaning of a miss: ONE lock that every path into
  * the plugin takes -- its decode, its draw, its report, its parameters, its
- * entry, and its replacement or removal.  The two are separate files on
- * purpose for now; folding them into one type is Epic #122 Phase 3b.
+ * entry, and its replacement or removal.
+ *
+ * [!] THE API IS svc/plugin_lease_api.h (issue #130).  This file adds what only
+ * this board knows -- the wait bound, the lock order, plugin_lease_init() -- and
+ * plugin_lease.c implements the API with a ThreadX mutex.  wio still has a
+ * plugin_lease.h of its own until it adopts the shared API.
  *
  * WHY THIS BOARD NEEDS ONE AT ALL.  Here the frame pipeline kept the (then)
  * producer's decode and the panel's draw apart (one delivery per sink, released
@@ -55,7 +59,7 @@
 
 #include <stdint.h>
 
-#include "plugin_lease_miss.h"
+#include "plugin_lease_api.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -77,59 +81,6 @@ extern "C" {
  *  @return 0, or -1 when the mutex could not be created -- every acquire then
  *  fails, which leaves consoles BUSY and frames bare rather than unguarded. */
 int plugin_lease_init(void);
-
-/**
- * Take it without waiting, as @p who, and count the outcome.
- * @return non-zero when it is held and the caller must release it.
- */
-int plugin_lease_try(enum plugin_lease_who who);
-
-/**
- * Take it, waiting at most PLUGIN_LEASE_WAIT_MS of wall-clock time.  Not
- * counted as a miss: a console that times out says so itself.
- *
- * [!] A FINITE DEADLINE, AND AN ANSWER WHEN IT PASSES.  A console that waited
- * forever behind a wedged holder would be a shell that stopped responding, with
- * no line of output saying why.
- *
- * @return non-zero when it is held and the caller must release it.
- */
-int plugin_lease_take(void);
-
-/** Release it.  Only the thread that took it may call this. */
-void plugin_lease_give(void);
-
-/**
- * Whether the CALLING THREAD holds the lease right now.  What the entry points
- * into the plugin check before they call through: a path that reached them
- * without taking the lease is refused, not trusted.
- *
- * Exact for the question it asks: only the caller can make itself the owner,
- * so a "yes" cannot go stale under it, and another thread's hold is a "no".
- * Never true outside a thread (an ISR, or before the scheduler runs).
- */
-int plugin_lease_held(void);
-
-/**
- * Count one call into the plugin that its entry point refused because the
- * caller did not hold the lease (issue #127).  Called by the entry checks
- * themselves -- nn_active.c's wrappers and the loader -- once per refusal, so
- * no caller has to remember to.  Not a miss: a miss is the lock doing its job,
- * and this is a path that forgot to take it, which no correct build has.
- */
-void plugin_lease_note_unheld(void);
-
-/** How many entries were refused for want of the lease, since boot. */
-uint32_t plugin_lease_unheld(void);
-
-/** How many no-wait acquires have been refused, and the longest run of them.
- *  A single refusal is ordinary; a run is an overlay that has stopped. */
-void plugin_lease_misses(uint32_t *total, uint32_t *worst_run);
-
-/** Start a fresh accounting period for the misses (not the unheld entries,
- *  which count from boot).  Called when a stream is armed, not when one stops: the stats right after a
- *  stop still describe the run that just ended. */
-void plugin_lease_misses_reset(void);
 
 #ifdef __cplusplus
 }

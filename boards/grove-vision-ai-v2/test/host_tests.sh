@@ -340,16 +340,9 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_nn_stream"
 "$out/test_nn_stream"
 
-# issue #129 -- who may touch the inference worker's input (port/npu/nn_handoff.c).
-# The producer writes the input tensor in place, so this word is the only thing
-# keeping it and the worker apart, and the sequences that would break it -- a
-# stop while a frame is handed over, a stale wake-up -- are windows between
-# three threads that cannot be typed.
-gcc $CFLAGS \
-    -I "$here" -I "$board/port/npu" \
-    "$here/test_nn_handoff.c" "$board/port/npu/nn_handoff.c" \
-    $LDFLAGS -o "$out/test_nn_handoff"
-"$out/test_nn_handoff"
+# issue #129 -- who may touch the inference worker's input: the hand-over word
+# and the frame path that runs it are shared since issue #130 and walked by
+# shell/test/test_nn_handoff.c and test_nn_core_frame.c.
 
 # issue #129 -- how `nn run`'s wait for its one inference ends
 # (port/npu/nn_run_wait.c).  A publish and the deadline, a publish and a

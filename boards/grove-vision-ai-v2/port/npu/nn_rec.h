@@ -44,6 +44,11 @@ uint32_t nn_rec_boundary_base(void);
 void     nn_rec_invalidate(void);
 /** The generation a publisher arms with. */
 uint32_t nn_rec_gen(void);
+/** Would a publish at @p gen still be taken?  Asked by the worker under the
+ *  plugin lease before the decode (svc/nn_core_frame.c, issue #130).  Always
+ *  yes during a session here -- no boundary falls inside one -- and asked all
+ *  the same, because the frame path that asks it is shared. */
+int      nn_rec_admits(uint32_t gen);
 /** A plugin's decode, negative values included; @return non-zero if taken. */
 int      nn_rec_publish_external(int n, uint32_t gen);
 /** An inference nothing decoded, with its model's output shapes (#121);

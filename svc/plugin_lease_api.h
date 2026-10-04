@@ -75,10 +75,8 @@ void plugin_lease_give(void);
  * [!] OUTSIDE A THREAD THE ANSWER IS THE BOARD'S, AND tx_thread_identify() IS
  * NOT ENOUGH.  Inside an ISR the Cortex-M ports leave it pointing at the
  * interrupted thread, so an implementation that compares only the owner with
- * it answers "yes" in an ISR that interrupted the holder.  wio-lite-ai's
- * refuses any exception and pre-scheduler context first (issue #130);
- * grove-vision-ai-v2's does not yet -- no entry point is called from an ISR
- * there today -- and gains the same test in #130 step 6a.
+ * it answers "yes" in an ISR that interrupted the holder.  Both boards'
+ * refuse any exception and pre-scheduler context first (issue #130).
  */
 int plugin_lease_held(void);
 

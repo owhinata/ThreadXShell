@@ -715,10 +715,12 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/npu/nn_svc_grove.c"
     "${BOARD_DIR}/port/npu/nn_stream_state.c"
     # The inference worker and who may touch its input (issue #129): the
-    # thread and its join here, the hand-over table a pure function beside it,
-    # walked by test/test_nn_handoff.c.
+    # thread and its join here; the hand-over table and the frame path that
+    # runs it are shared since issue #130 (svc/, walked by shell/test/
+    # test_nn_handoff.c and test_nn_core_frame.c).
     "${BOARD_DIR}/port/npu/nn_worker.c"
-    "${BOARD_DIR}/port/npu/nn_handoff.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn_handoff.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn_core_frame.c"
     # How `nn run`'s wait for its one inference ends (issue #129): a pure
     # table, walked by test/test_nn_run_wait.c.
     "${BOARD_DIR}/port/npu/nn_run_wait.c"

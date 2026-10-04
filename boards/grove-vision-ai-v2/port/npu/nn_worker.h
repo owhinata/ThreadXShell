@@ -9,7 +9,9 @@
  * The third of the producer / worker / panel threads wio-lite-ai already has:
  * the camera producer prepares a frame into the model's input and hands it
  * over, this thread runs the invoke, the decode and the publish, and the panel
- * draws whatever was published last.  The hand-over rules are nn_handoff.h's.
+ * draws whatever was published last.  The hand-over rules are
+ * svc/nn_handoff.h's, run by the shared frame path (svc/nn_core_frame.h,
+ * issue #130) on the overlay's state.
  *
  * A stream arms it at start (IDLE -> WANT) and its stop joins it after the
  * producer is confirmed out and before the record boundary.  The job it runs
@@ -77,15 +79,9 @@ int nn_worker_join(void);
  *  refused: the worker is not parked or does not exist. */
 int nn_worker_arm(void);
 
-/** Whether the worker wants a frame -- the producer's licence to write the
- *  input tensor.  Stable once seen: only nn_worker_hand() leaves WANT while a
- *  producer runs. */
-int nn_worker_wants(void);
-
-/** The producer's half: WANT -> HANDED and wake the worker.  Call only after
- *  the input is written.  @return 1 handed over, 0 the worker did not want a
- *  frame (it is busy, or not armed) and the input was not the caller's. */
-int nn_worker_hand(void);
+/** Wake the worker: the frame path's infer_start hook, called on the
+ *  producer after a hand-over (issue #130).  Never waits. */
+void nn_worker_wake(void);
 
 #ifdef __cplusplus
 }

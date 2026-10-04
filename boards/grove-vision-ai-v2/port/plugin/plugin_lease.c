@@ -15,6 +15,7 @@
 #include <stdint.h>
 
 #include "tx_api.h"
+#include "tx_thread.h"   /* TX_THREAD_GET_SYSTEM_STATE() -- held()'s ISR test */
 
 /*
  * The wait in ticks, from the one constant in the header.
@@ -100,10 +101,19 @@ int plugin_lease_held(void)
 
 	if (!pl_lease_ready)
 		return 0;
-	/* NULL outside a thread: an ISR or pre-scheduler code holds nothing, and
-	 * must not match an unowned mutex's NULL owner. */
-	/* TODO(#130 step 6a): add the ISR test -- inside an ISR tx_thread_identify()
-	 * is the INTERRUPTED thread (see wio-lite-ai's plugin_lease_held()). */
+	/*
+	 * [!] NOT IN AN ISR, AND NOT BEFORE THE SCHEDULER (issue #130).
+	 * tx_thread_identify() is no test for either: inside an ISR the Cortex-M
+	 * ports leave it pointing at the INTERRUPTED thread, so an ISR that
+	 * interrupted the holder would read "held".  The Cortex-M55 port's
+	 * TX_THREAD_GET_SYSTEM_STATE() ORs IPSR into the system state, so it is
+	 * non-zero in any exception and during initialisation -- exactly the
+	 * contexts that hold nothing.  The same test as wio-lite-ai's.
+	 */
+	if (TX_THREAD_GET_SYSTEM_STATE() != 0u)
+		return 0;
+	/* NULL with no thread running: holds nothing, and must not match an
+	 * unowned mutex's NULL owner. */
 	self = tx_thread_identify();
 	if (self == NULL)
 		return 0;

@@ -65,10 +65,10 @@
 #endif
 
 #define NNCAM_WORKER_PRIORITY 18          /* full best-effort (below BG-17)        */
-/* Sized from the measured high-water-mark (`thread` peak = 1024 B under the
- * stedgeai backend, owhinata/stm32f746g-disco#93); 4096 keeps ~4x margin.  NOTE: re-measure
- * if switching to the tflm/reloc backend -- CMSIS-NN kernels + the interpreter nest
- * deeper. */
+/* Sized from the measured high-water-mark: `thread` peak = 1808 B under the tflm
+ * backend (CMSIS-NN, BlazeFace pin) after `nn bench 10`, two `nn run` and a 300-frame
+ * `nn stream` (issue #130, 2026-10-04); 4096 keeps ~2.3x margin.  (The earlier
+ * 1024 B was the stedgeai backend, owhinata/stm32f746g-disco#93.) */
 #define NNCAM_WORKER_STACK    4096u
 #define NNCAM_POLL_TICKS      100u        /* sem wait -> stop latency               */
 /* Teardown budgets (ticks, WALL CLOCK; 1 tick = 1 ms).  The sink drain is short

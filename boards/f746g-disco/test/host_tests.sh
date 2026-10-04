@@ -68,3 +68,17 @@ gcc $CFLAGS -I "$board/port/camera" \
     "$board/port/camera/cam_drain.c" \
     $LDFLAGS -o "$out/test_cam_own"
 "$out/test_cam_own"
+
+# issue #130 -- negative tests for the tflm residents of cmake/check_f746_layout.py
+# (the activation arena and the SD model slots must sit in SDRAM bank3).  Driven
+# by fake nm/objdump, so no toolchain is needed: what is checked is the gate's
+# DECISION on the exact names board.cmake passes (read from board.cmake, not
+# copied), including that a null build is not asked for them.  That the compiler
+# spells them that way is the firmware build's job -- the same gate fails there
+# on a name that matches nothing.
+python3 "$board/cmake/fixtures/run_layout_tests.py"
+
+# issue #130 -- cmake/gen_model_array.py re-verifies the pinned model's SHA256
+# on the bytes it emits (the fetch verified it once, earlier), refuses an empty
+# or malformed expected hash, and leaves no output behind on a refusal.
+python3 "$board/cmake/fixtures/run_gen_model_array_tests.py"

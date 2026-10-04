@@ -327,23 +327,55 @@ option(CLI_ENABLE_DANGEROUS_CMDS "Build the dangerous shell commands (reboot, de
 set(CLI_DEVMEM_DUMP_MAX_LEN "256" CACHE STRING "Max bytes per devmem dump")
 
 # --- On-device NN inference backend ----------------------------------------
-# Backend-agnostic nn layer (port/nn) over one selectable runtime.  Default
-# `null` (no runtime -> the firmware always builds without the ST Edge AI Core
-# toolchain or any model; the `ai` command reports a BlazeFace-shaped stub).
+# Backend-agnostic nn layer (port/nn) over one selectable runtime.
+# `tflm` (tflite-micro, the DEFAULT since issue #130) is a C++ runtime whose
+# interpreter + backend live in a separate `tflm` static lib
+# (cmake/tflite-micro.cmake); it enables C++ only for that build.  Its built-in
+# model is the pinned upstream BlazeFace the other two boards ship, fetched and
+# sha256-verified at BUILD time -- so the default build needs the network (it
+# already did for tflite-micro itself).
+# `null` (no runtime -> builds offline, with no toolchain or model beyond the
+# cross compiler; the `nn` command reports a BlazeFace-shaped stub whose
+# inference does nothing).  It was the default until #130.
 # `stedgeai` (X-CUBE-AI) links generated sources + libNetworkRuntime.a from a
 # local ST Edge AI Core install; those ST-SLA artifacts are NOT committed (public
 # repo, see .gitignore + port/nn/generated/).
-# `tflm` (tflite-micro) is a C++ runtime whose interpreter + backend live in a
-# separate `tflm` static lib (cmake/tflite-micro.cmake); it enables C++ only for
-# that build so the default (null/stedgeai) firmware stays byte-identical and
-# needs no C++ toolchain.
 # `stedgeai_reloc` (X-CUBE-AI relocatable network) loads a position-independent
 # `network_rel.bin` (PIC code + weights) from SD at runtime and runs it XIP via the
 # ST host loader (ai_reloc_network.c) + the legacy ai_rel_network_* API -- no model is
 # baked into Flash and no runtime .a is linked (the PIC kernels are embedded in the
 # .bin).  Same SD-swap capability as tflm, but on the X-CUBE-AI runtime.
-set(CONFIG_NN_BACKEND "null" CACHE STRING "NN inference backend: null | stedgeai | stedgeai_reloc | tflm")
-set_property(CACHE CONFIG_NN_BACKEND PROPERTY STRINGS null stedgeai stedgeai_reloc tflm)
+#
+# [!] A CACHE DEFAULT DOES NOT REACH AN EXISTING TREE.  A build directory first
+# configured while `null` was the default keeps `null`, and nothing about its
+# build says so.  So: a tree that existed before this rule was seen (CMakeCache.txt
+# already on disk at configure time, and no F746_NN_DEFAULT_SEEN in it) and holds
+# `null` gets a WARNING once, and every `null` configure gets a STATUS line.  The
+# value is NOT forced -- `null` may be a choice, and overwriting it would break the
+# one tree that chose it.  A fresh configure with -DCONFIG_NN_BACKEND=null is not
+# warned (there was no earlier default for it to have inherited).
+if(EXISTS "${CMAKE_BINARY_DIR}/CMakeCache.txt" AND NOT DEFINED CACHE{F746_NN_DEFAULT_SEEN})
+    set(_f746_nn_tree_predates_tflm_default TRUE)
+else()
+    set(_f746_nn_tree_predates_tflm_default FALSE)
+endif()
+set(CONFIG_NN_BACKEND "tflm" CACHE STRING "NN inference backend: tflm | null | stedgeai | stedgeai_reloc")
+set_property(CACHE CONFIG_NN_BACKEND PROPERTY STRINGS tflm null stedgeai stedgeai_reloc)
+if(CONFIG_NN_BACKEND STREQUAL "null")
+    if(_f746_nn_tree_predates_tflm_default)
+        message(WARNING
+            "f746g-disco: the default NN backend is now `tflm` (issue #130), but "
+            "this build directory was configured earlier and keeps "
+            "CONFIG_NN_BACKEND=null from its cache -- its firmware runs no "
+            "inference.  To follow the new default, re-configure with "
+            "-DCONFIG_NN_BACKEND=tflm or use a fresh build directory.  If null is "
+            "what you want, nothing needs to change (this warning is shown once "
+            "per tree).")
+    endif()
+    message(STATUS "f746g-disco: CONFIG_NN_BACKEND=null (not the default `tflm`; no inference runtime)")
+endif()
+set(F746_NN_DEFAULT_SEEN "tflm" CACHE INTERNAL
+    "This tree has been configured since the NN backend default became tflm (#130)")
 
 # [!] ONE VARIABLE FOR THE SHARED DECODER'S PATH (issue #97): the source list and
 # the audit target below must name the same file.
@@ -631,6 +663,21 @@ list(APPEND F746_LAYOUT_REQUIRED
 if(CONFIG_NN_BACKEND STREQUAL "null")
     # port/nn/nn_null.c -- the stub backend's input buffer in the NN arena.
     list(APPEND F746_LAYOUT_REQUIRED --require-sdram-ai null_in_buf)
+endif()
+if(CONFIG_NN_BACKEND STREQUAL "tflm")
+    # port/nn/tflm/nn_tflm.cc -- the activation arena (g_arena) and the two SD
+    # model slots (g_sd_model_buf), the tflm backend's whole bank3 footprint
+    # (issue #130).  Both are in an ANONYMOUS namespace, so nm (demangling is not
+    # requested) reports them as the local symbols spelled below, as GCC mangles
+    # them: `12_GLOBAL__N_1` is the anonymous namespace, `L` marks internal
+    # linkage, and the length prefix is part of the name.  Spelling them mangled
+    # is deliberate -- renaming either object, or moving it out of the namespace,
+    # makes the name match NOTHING, which the gate reports as "no such object" (a
+    # failure), never as a pass.  (The first build of this rule, written without
+    # the `L`, failed exactly that way.)
+    list(APPEND F746_LAYOUT_REQUIRED
+         --require-sdram-ai _ZN12_GLOBAL__N_1L7g_arenaE
+         --require-sdram-ai _ZN12_GLOBAL__N_1L14g_sd_model_bufE)
 endif()
 if(CONFIG_NN_BACKEND STREQUAL "stedgeai_reloc")
     # port/nn/nn_stedgeai_reloc.c -- the executable model slots, which MUST sit in

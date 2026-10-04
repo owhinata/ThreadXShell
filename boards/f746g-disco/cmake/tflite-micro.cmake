@@ -1,9 +1,9 @@
 # tflite-micro (TFLM) C++ backend for CONFIG_NN_BACKEND=tflm (Epic owhinata/stm32f746g-disco#80 P3,
 # owhinata/stm32f746g-disco#86).
 #
-# Included ONLY from the tflm branch of CMakeLists.txt, so C++ is enabled for this
-# build alone; the default (null/stedgeai) firmware never sees enable_language(CXX)
-# and stays byte-identical.  All C++ is confined to this `tflm` STATIC lib so the
+# Included ONLY from the tflm branch of board.cmake, so C++ is enabled for this
+# build alone; a null/stedgeai firmware never sees enable_language(CXX) and stays
+# C-only.  All C++ is confined to this `tflm` STATIC lib so the
 # final shell link keeps the C driver (gcc) and does not auto-pull full libstdc++.
 #
 # The tflite-micro sources are NOT vendored.  At CONFIGURE time we fetch the pinned
@@ -31,7 +31,7 @@ set(TFLM_GEN   "${TFLM_SRC}/tensorflow/lite/micro/tools/project_generation/creat
 # reference conv/depthwise_conv/add/pad/pooling.  On Cortex-M7 (armv7e-m) GCC
 # defines __ARM_FEATURE_DSP, so the SIMD int8 path is compiled (a compile-time
 # canary in nn_tflm.cc asserts it).  OFF keeps pure reference kernels (M2a) for
-# an `ai bench` A/B.  The choice is part of the tree-generation stamp key, so
+# an `nn bench` A/B.  The choice is part of the tree-generation stamp key, so
 # flipping it regenerates the tree.
 set(NN_TFLM_CMSIS_NN ON CACHE BOOL "Use CMSIS-NN optimized kernels in the tflm backend (#88 M2b)")
 if(NN_TFLM_CMSIS_NN)
@@ -119,65 +119,129 @@ if(NOT EXISTS "${TFLM_STAMP}")
     file(WRITE "${TFLM_STAMP}" "${TFLM_GIT_SHA}\n")
 endif()
 
-# --- BlazeFace model -> compilable byte array (configure time) ---------------
+# --- BlazeFace model -> compilable byte array (BUILD time, issue #130) -------
 # The .tflite is NOT committed (public repo, model-zoo license -- see .gitignore
-# *.tflite).  We turn it into a C++ TU inside the `tflm` lib with a fixed symbol
-# name (g_blazeface_model_data) via our own generator (cmake/gen_model_array.py:
-# no numpy/Pillow, alignas(16) for tflite::GetModel's flatbuffer alignment).
+# *.tflite).  The built-in model is the SAME pinned upstream file wio-lite-ai and
+# grove-vision-ai-v2 ship as their blazeface asset: fetched at build time by the
+# shared cmake/fetch_model.cmake (exact commit, content SHA256 decides, a Git LFS
+# pointer is refused, nothing is published until it has passed), then turned into
+# a C++ TU inside the `tflm` lib with a fixed symbol name (g_blazeface_model_data)
+# by our own generator (cmake/gen_model_array.py: no numpy/Pillow, alignas(16)).
 #
-# There is deliberately NO default path.  The donor repository defaulted this to a
-# model under _ref/, which is git-ignored local reference material -- a build that
-# reads it is a build that a fresh clone cannot configure.  Nothing under the
-# build (CMake, scripts, anything tracked) may reference _ref/, so the model is a
-# required input: pass -DNN_TFLM_MODEL=<path to .tflite>.
-set(NN_TFLM_MODEL ""
-    CACHE FILEPATH "TFLite model fed to the tflm backend (int8 weights, float32 I/O)")
-if(NOT NN_TFLM_MODEL)
-    message(FATAL_ERROR
-        "tflm: no model selected.\n"
-        "  CONFIG_NN_BACKEND=tflm bakes a .tflite into the image, and this build\n"
-        "  ships none.  Re-configure with -DNN_TFLM_MODEL=<path to .tflite>\n"
-        "  (int8 weights, float32 I/O; the BlazeFace-front 128 model from the ST\n"
-        "  model zoo is what the backend was developed against).")
-endif()
-if(NOT EXISTS "${NN_TFLM_MODEL}")
-    message(FATAL_ERROR "tflm: model not found:\n  ${NN_TFLM_MODEL}\n"
-                        "Set -DNN_TFLM_MODEL=<path to .tflite>.")
-endif()
+# [!] THE ARRAY DEPENDS ON THE VERIFIED FILE, NOT ON A PATH THAT MIGHT HOLD IT.
+# Generation is a custom command whose input is the fetch's OUTPUT, so a pin that
+# can no longer be fetched (commit gone, LFS pointer, different bytes) fails the
+# build instead of leaving an older array -- or no model at all -- in the image.
+#
+# [!] A DELIBERATE DIFFERENCE FROM THE ASSET RULE (issue #94): an asset's fetch is
+# outside ALL so a tree that cannot reach the model host still builds firmware.
+# Here the model is part of the firmware image, so the default (tflm) firmware
+# needs the network once -- it already does, for tflite-micro itself above.  A
+# CONFIG_NN_BACKEND=null build never includes this file and stays offline.
+#
+# Nothing under the build may reference _ref/ (CLAUDE.md), so there is still no
+# path default: the pin is the default.
+set(TFLM_MODEL_URL     "https://github.com/STMicroelectronics/stm32ai-modelzoo.git")
+set(TFLM_MODEL_COMMIT  "1423c78953a830903485135febe1dd98ff31aed8")
+set(TFLM_MODEL_PATH_IN "face_detection/facedetect_front/Public_pretrainedmodel_public_dataset/widerface/blazeface_front_128/blazeface_front_128_int8.tflite")
+set(TFLM_MODEL_SHA256  "e803bb4e93b10f7a19d4243bcc39698599a723f3128e19d3f90e0b1c0bc88dd8")
 
 set(TFLM_MODEL_DIR    "${CMAKE_BINARY_DIR}/tflm-model")
 set(TFLM_MODEL_CC     "${TFLM_MODEL_DIR}/blazeface_model_data.cc")
 set(TFLM_MODEL_H      "${TFLM_MODEL_DIR}/blazeface_model_data.h")
 set(TFLM_MODEL_SYMBOL "g_blazeface_model_data")
+set(TFLM_MODEL_GEN    "${BOARD_DIR}/cmake/gen_model_array.py")
 
-# Re-run configure whenever the model file changes so the regeneration below is
-# actually reached on a swap (codex review: a timestamp check alone can miss it).
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${NN_TFLM_MODEL}")
-
-# Regenerate when the model IDENTITY (path + size + mtime) differs from the last
-# generated one, or the outputs are missing.  A pure IS_NEWER_THAN check would
-# reuse a stale array if -DNN_TFLM_MODEL is pointed at an OLDER file (codex review),
-# so we record the identity in a sidecar stamp and compare it instead.
-file(SIZE "${NN_TFLM_MODEL}" _model_size)
-file(TIMESTAMP "${NN_TFLM_MODEL}" _model_mtime "%Y%m%d%H%M%S" UTC)
-set(_model_stamp_want "${NN_TFLM_MODEL}|${_model_size}|${_model_mtime}")
-set(TFLM_MODEL_STAMP "${TFLM_MODEL_DIR}/.model-stamp")
-set(_model_stamp_have "")
-if(EXISTS "${TFLM_MODEL_STAMP}")
-    file(READ "${TFLM_MODEL_STAMP}" _model_stamp_have)
+# A local model instead of the pin, for trying another .tflite.  NOT hash-checked
+# (an override deliberately supplies different content) -- the same contract as
+# the asset rule's override.  Empty = the pin.
+#
+# [!] RENAMED FROM NN_TFLM_MODEL, AND THE OLD NAME IS IGNORED LOUDLY.  Until #130
+# that variable was required and existing trees hold it pointing into _ref/ (the
+# donor's layout).  Reading it would keep those trees building from a path no
+# clone has, and from a file nobody verified -- silently, since the build would
+# look exactly like the pinned one.  A new name means only someone who asks for
+# an override gets one; the warning is so an operator who did mean it is told.
+set(NN_TFLM_MODEL_OVERRIDE "" CACHE FILEPATH
+    "Local .tflite for the tflm built-in model instead of the pinned upstream one (not hash-checked)")
+if(DEFINED CACHE{NN_TFLM_MODEL} AND NOT "$CACHE{NN_TFLM_MODEL}" STREQUAL "")
+    message(WARNING
+        "tflm: NN_TFLM_MODEL is IGNORED since issue #130 -- this tree still holds "
+        "`${NN_TFLM_MODEL}`.  The built-in model is now the pinned upstream "
+        "BlazeFace (commit ${TFLM_MODEL_COMMIT}, sha256 verified).  To build from "
+        "a local file instead, pass -DNN_TFLM_MODEL_OVERRIDE=<path to .tflite>; "
+        "to silence this, pass -UNN_TFLM_MODEL.")
 endif()
-if(NOT _model_stamp_have STREQUAL _model_stamp_want OR
-   NOT EXISTS "${TFLM_MODEL_CC}" OR NOT EXISTS "${TFLM_MODEL_H}")
-    message(STATUS "tflm: generating model array from ${NN_TFLM_MODEL}")
-    execute_process(
-        COMMAND "${TFLM_PY}" "${BOARD_DIR}/cmake/gen_model_array.py"
-                "${NN_TFLM_MODEL}" "${TFLM_MODEL_CC}" "${TFLM_MODEL_H}" "${TFLM_MODEL_SYMBOL}"
-        RESULT_VARIABLE _rc)
-    if(NOT _rc EQUAL 0 OR NOT EXISTS "${TFLM_MODEL_CC}")
-        message(FATAL_ERROR "tflm: model array generation failed (cmake/gen_model_array.py)")
+
+if(NN_TFLM_MODEL_OVERRIDE)
+    if(NOT EXISTS "${NN_TFLM_MODEL_OVERRIDE}")
+        message(FATAL_ERROR "tflm: model not found:\n  ${NN_TFLM_MODEL_OVERRIDE}\n"
+                            "Fix -DNN_TFLM_MODEL_OVERRIDE, or clear it to use the pin.")
     endif()
-    file(WRITE "${TFLM_MODEL_STAMP}" "${_model_stamp_want}")
+    set(TFLM_MODEL_SRC "${NN_TFLM_MODEL_OVERRIDE}")
+    # ninja reruns on a NEWER input only, so a file replaced by an OLDER copy at
+    # the same path would keep the old array -- and a configure-time record
+    # would not see it either, since configure reruns on a newer file too.  So
+    # the change is detected at BUILD time: a step that runs on every build
+    # hashes the file's CONTENT into override.id, rewriting it only when the hash
+    # differs (restat: an unchanged record is not a reason to regenerate), and
+    # the array depends on that record.  This detects a change; it is not a
+    # check of WHAT the content is -- the override stays unverified.
+    set(TFLM_MODEL_ID "${TFLM_MODEL_DIR}/override.id")
+    set(TFLM_MODEL_ID_SCRIPT "${TFLM_MODEL_DIR}/override_id.cmake")
+    file(CONFIGURE OUTPUT "${TFLM_MODEL_ID_SCRIPT}" CONTENT [=[
+file(SHA256 "${SRC}" _h)
+set(_want "${SRC}|${_h}
+")
+set(_have "")
+if(EXISTS "${OUT}")
+    file(READ "${OUT}" _have)
 endif()
+if(NOT _have STREQUAL _want)
+    file(WRITE "${OUT}" "${_want}")
+endif()
+]=] @ONLY)
+    # A custom TARGET, not a command: it runs on every build, and declaring the
+    # record as its BYPRODUCT is what gives ninja the edge to the array below.
+    add_custom_target(tflm_override_id
+        BYPRODUCTS "${TFLM_MODEL_ID}"
+        COMMAND "${CMAKE_COMMAND}" "-DSRC=${TFLM_MODEL_SRC}" "-DOUT=${TFLM_MODEL_ID}"
+                -P "${TFLM_MODEL_ID_SCRIPT}"
+        COMMENT "tflm: hash the override model"
+        VERBATIM)
+    set(TFLM_MODEL_SRC_DEPENDS "${TFLM_MODEL_SRC}" "${TFLM_MODEL_ID}")
+    set(TFLM_MODEL_VERIFY "")     # an override is not hash-checked: no --sha256
+    message(STATUS "tflm: built-in model OVERRIDDEN by ${TFLM_MODEL_SRC} (not the pin, not hash-checked)")
+else()
+    set(TFLM_MODEL_SRC "${TFLM_MODEL_DIR}/pinned.tflite")
+    add_custom_command(
+        OUTPUT "${TFLM_MODEL_SRC}"
+        COMMAND "${CMAKE_COMMAND}"
+                "-DURL=${TFLM_MODEL_URL}" "-DCOMMIT=${TFLM_MODEL_COMMIT}"
+                "-DPATH_IN=${TFLM_MODEL_PATH_IN}" "-DSHA256=${TFLM_MODEL_SHA256}"
+                "-DOUT=${TFLM_MODEL_SRC}" "-DWORK=${TFLM_MODEL_DIR}/fetch-work"
+                "-DOVERRIDE=NN_TFLM_MODEL_OVERRIDE"
+                -P "${CMAKE_SOURCE_DIR}/cmake/fetch_model.cmake"
+        DEPENDS "${CMAKE_SOURCE_DIR}/cmake/fetch_model.cmake"
+        COMMENT "tflm: fetch the pinned BlazeFace model"
+        VERBATIM)
+    set(TFLM_MODEL_SRC_DEPENDS "${TFLM_MODEL_SRC}")
+    # [!] AND RE-VERIFIED AT USE: the fetch checked the file when it published
+    # it, the generator checks the bytes it emits.  The same variable feeds
+    # both, so the pin is written once.  An empty value reaches the generator
+    # as an empty --sha256, which it refuses.
+    set(TFLM_MODEL_VERIFY --sha256 "${TFLM_MODEL_SHA256}")
+    message(STATUS "tflm: built-in model = pinned BlazeFace front 128 int8 (fetched at build time)")
+endif()
+
+add_custom_command(
+    OUTPUT "${TFLM_MODEL_CC}" "${TFLM_MODEL_H}"
+    COMMAND "${Python3_EXECUTABLE}" "${TFLM_MODEL_GEN}"
+            "${TFLM_MODEL_SRC}" "${TFLM_MODEL_CC}" "${TFLM_MODEL_H}" "${TFLM_MODEL_SYMBOL}"
+            ${TFLM_MODEL_VERIFY}
+    DEPENDS ${TFLM_MODEL_SRC_DEPENDS} "${TFLM_MODEL_GEN}"
+    COMMENT "tflm: generate the built-in model array"
+    VERBATIM)
 
 # --- Compile the generated tree with our flags (ABI = ours) ------------------
 # create_tflm_tree emits only library sources under tensorflow/, but exclude the
@@ -207,8 +271,13 @@ endif()
 add_library(tflm STATIC
     ${TFLM_LIB_SOURCES}
     "${TFLM_MODEL_CC}"                                  # generated BlazeFace model bytes
+    "${TFLM_MODEL_H}"     # generated too: listed so nn_tflm.cc waits for it
     "${BOARD_DIR}/port/nn/tflm/cxx_runtime.cc"   # noexcept operator new/delete + traps
     "${BOARD_DIR}/port/nn/tflm/nn_tflm.cc")      # extern "C" nn_backend_vt_selected
+
+if(TARGET tflm_override_id)
+    add_dependencies(tflm tflm_override_id)
+endif()
 
 target_link_libraries(tflm PRIVATE bsp_iface)   # MCU_OPTS (fpv5-sp-d16) + CMSIS/HAL includes
 

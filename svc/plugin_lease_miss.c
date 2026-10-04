@@ -5,6 +5,9 @@
 /**
  * @file    plugin_lease_miss.c
  * @brief   The lease's miss accounting.  See plugin_lease_miss.h.
+ *
+ * A pure function over a state the caller owns: this TU holds no storage of
+ * its own (svc/, audited per board by cmake/shared_storage_gate.cmake).
  */
 #include "plugin_lease_miss.h"
 

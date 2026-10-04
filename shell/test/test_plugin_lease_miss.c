@@ -3,20 +3,21 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host test for the plugin lease's miss accounting (issue #127,
- * port/plugin/plugin_lease_miss.c).
+ * svc/plugin_lease_miss.c since issue #130).
  *
  * WHY THIS EXISTS.  A miss is a frame that reached the panel without an
- * overlay because the plugin was busy, and on this board a frame can be lost at
+ * overlay because the plugin was busy, and a frame can be lost at
  * two places -- the producer's decode and the panel's draw.  Two of the rules
  * cannot be told apart on hardware by eye: a run that the producer's success
  * resets reads 1 for a panel that never draws, and a frame counted at both
  * places reads as twice the contention there was.  Both look like a working
  * stats line.
  *
- * [!] WHAT IT DOES NOT COVER: that plugin_lease.c runs every one of these with
- * interrupts disabled, and that a producer's refusal really does keep the panel
- * from asking for that frame.  The first is plugin_lease.c's, the second is the
- * callers' (issue #127 stage 2); frame() below is the order they must keep.
+ * [!] WHAT IT DOES NOT COVER: that the board's plugin_lease.c runs every one of
+ * these with interrupts disabled, and that a producer's refusal really does keep
+ * the panel from asking for that frame.  The first is the board lease's, the
+ * second is the callers' (issue #127 stage 2); frame() below is the order they
+ * must keep.
  */
 #include <stdio.h>
 

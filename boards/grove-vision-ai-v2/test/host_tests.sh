@@ -393,16 +393,6 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_nn_param_calls"
 "$out/test_nn_param_calls"
 
-# issue #127 -- what a refused no-wait acquire of the plugin lease counts
-# (port/plugin/plugin_lease_miss.c).  A frame can be lost at the producer's
-# decode or at the panel's draw; a run reset by the producer's success, or a
-# frame counted at both, would each print a plausible stats line.
-gcc $CFLAGS \
-    -I "$here" -I "$board/port/plugin" \
-    "$here/test_plugin_lease_miss.c" "$board/port/plugin/plugin_lease_miss.c" \
-    $LDFLAGS -o "$out/test_plugin_lease_miss"
-"$out/test_plugin_lease_miss"
-
 # issue #127 -- the loader's two plugin-lease checks (port/plugin/plugin_run.c):
 # before the shared loader touches the reservation, and again in the exec_ok
 # hook at the branch.  A load is the one path that destroys the plugin it

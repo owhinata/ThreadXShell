@@ -7,12 +7,15 @@
  * @brief   What a refused no-wait acquire of the plugin lease counts, as a pure
  *          function over a state the caller owns (issue #127).
  *
- * Split out of plugin_lease.c so that the rules can be walked on the host; the
- * storage, and the critical section every caller runs these in, stay there.
+ * Split out of the board's plugin_lease.c so that the rules can be walked on the
+ * host; the storage, and the critical section every caller runs these in, stay
+ * there (the board's, since issue #130 put this half in svc/: the counters live
+ * in the board's lease, never here).
  *
  * WHAT IS COUNTED.  The same thing wio-lite-ai's lease counts: frames that were
  * presented without an overlay because the plugin was busy.  The difference is
- * that here TWO threads ask, and a frame can be lost at either of them:
+ * that on grove-vision-ai-v2 TWO threads ask, and a frame can be lost at either
+ * of them:
  *
  *   - the PRODUCER, before it decodes.  A refusal there means no decode for this
  *     frame, so process() declines and the panel never draws it -- the panel does
@@ -23,7 +26,7 @@
  * [!] SINCE ISSUE #129 ONLY THE PANEL ASKS.  The decode moved to the inference
  * worker, which waits for the lease (bounded) instead of trying it, and counts a
  * wait that runs out as an error, not here.  The producer's row stays for the
- * rules below, and nothing calls it on this board now.
+ * rules below, and nothing calls it on grove-vision-ai-v2 now.
  *
  * So each frame produces at most one refusal, and every refusal is one frame.
  * That is a property of the CALLERS (the producer's refusal ends the frame), not

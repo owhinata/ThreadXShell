@@ -24,8 +24,8 @@
  */
 #include "nn_svc.h"
 #include "nn_report.h"
+#include "nn_svc_adapter.h" /* nn_detail_set, nn_result, nn_info_line (#130) */
 
-#include <stdarg.h>
 #include <string.h>
 
 #include <flashdb.h>       /* fdb_calc_crc32 -- see the note in the load path */
@@ -286,48 +286,10 @@ static enum nn_claims_seen nn_claims_snapshot(struct nn_claims *out,
 	return seen;
 }
 
-/*
- * [!] THERE IS NO SHARED DIAGNOSTIC BUFFER, and that is the fix for a hazard the
- * first version of this file had.  A port adapter cannot print -- it holds no
- * shell instance -- so it writes WHY something failed, and the shared command
- * prints that.  Keeping those words in one static here meant two consoles
- * building results at once would overwrite each other's explanation: the second
- * console's sentence would appear under the first console's command.  Writing
- * straight into the caller's result removes the sharing instead of locking it,
- * so the words a command prints are the words that command produced.
- */
-
-static void nn_detail_to(char *dst, size_t cap, const char *fmt, ...)
-{
-	va_list ap;
-
-	va_start(ap, fmt);
-	(void)fmt_vsnformat(dst, cap, fmt, ap);
-	va_end(ap);
-}
-
 /* [!] A legal asset name must survive `nn info`'s copy whole (issue #122 P10):
  * a truncated one can read as a different, equally legal, name. */
 _Static_assert(NN_SVC_MODEL_MAX >= BLOB_NAME_MAX,
                "nn info would truncate this board's longest asset name");
-
-/* Every failure path writes into the result it is about to return. */
-/* [!] Its format is checked against NN_SVC_DETAIL_MAX at build time (issue
- * #122 P15): the copy truncates, and a truncated sentence does not look it. */
-#define nn_detail_set(...)                                                  \
-	((void)NN_SVC_DETAIL_CHECK_FMT(__VA_ARGS__),                        \
-	 nn_detail_to(res->detail, sizeof res->detail, __VA_ARGS__))
-#define nn_detail_clear()  (res->detail[0] = '\0')
-
-/* [!] The detail is COPIED into the caller's result here, at the one place a
- * result is built.  nn_detail is this file's buffer and the next command on
- * another console overwrites it -- so a pointer to it would be printed after it
- * had already become somebody else's sentence. */
-static void nn_result(struct nn_op_result *res, int status, enum nn_claim claim)
-{
-	res->status = status;
-	res->claim  = (uint8_t)claim;
-}
 
 /*
  * This board's stop codes, and nothing else (issue #99).
@@ -2282,25 +2244,6 @@ int nn_svc_thresh_set(unsigned milli)
 	(void)milli;
 	return NN_SVC_ERR_STATE;
 #endif
-}
-
-/* One `nn info` line through a bounded formatter.  128 and not 80: Grove's
- * image line once ran past 80 and truncation ate its CRLF, so the next line ran
- * on (issue #103). */
-static int nn_info_line(nn_svc_write_fn write, void *ctx, const char *f, ...)
-{
-	char line[128];
-	va_list ap;
-	int n;
-
-	va_start(ap, f);
-	n = fmt_vsnformat(line, sizeof line, f, ap);
-	va_end(ap);
-	if (n < 0)
-		return -1;
-	if ((size_t)n >= sizeof line)
-		n = (int)sizeof line - 1;
-	return write(ctx, line, (size_t)n);
 }
 
 /*

@@ -28,8 +28,8 @@
  */
 #include "nn_svc.h"
 #include "nn_report.h"
+#include "nn_svc_adapter.h" /* nn_detail_set, nn_result, nn_info_line (#130) */
 
-#include <stdarg.h>
 #include <string.h>
 
 #define LOG_TAG "nn"
@@ -426,35 +426,6 @@ static void nn_stream_poison(const struct nn_stream_stats *final,
 		nn_stream_latch(ending, final, epoch);
 	}
 	TX_RESTORE
-}
-
-static void nn_detail_to(char *dst, size_t cap, const char *fmt, ...)
-{
-	va_list ap;
-
-	va_start(ap, fmt);
-	(void)fmt_vsnformat(dst, cap, fmt, ap);
-	va_end(ap);
-}
-
-/* Every failure path writes into the result it is about to return. */
-/* [!] Its format is checked against NN_SVC_DETAIL_MAX at build time (issue
- * #122 P15): the copy truncates, and a truncated sentence does not look it. */
-#define nn_detail_set(...)                                                  \
-	((void)NN_SVC_DETAIL_CHECK_FMT(__VA_ARGS__),                        \
-	 nn_detail_to(res->detail, sizeof res->detail, __VA_ARGS__))
-#define nn_detail_clear()  (res->detail[0] = '\0')
-
-/* Fill a result in one place, so no path can set a status and forget the
-   disposition -- they are two answers and both are always given. */
-/* [!] The detail is COPIED into the caller's result here, at the one place a
- * result is built.  nn_detail is this file's buffer and the next command on
- * another console overwrites it -- so a pointer to it would be printed after it
- * had already become somebody else's sentence. */
-static void nn_result(struct nn_op_result *res, int status, enum nn_claim claim)
-{
-	res->status = status;
-	res->claim  = (uint8_t)claim;
 }
 
 /* ---- info ---------------------------------------------------------------- */
@@ -2645,37 +2616,6 @@ int nn_svc_thresh_set(unsigned milli)
  * reference is already the address.
  */
 extern uint8_t __plugin_start[], __plugin_end[];
-
-/*
- * A bounded line builder.  The writer is length-bearing, so this port formats
- * its own text and hands over the length -- no formatter crosses the boundary,
- * which is what keeps a %f out of three firmwares.
- *
- * fmt_vsnformat() is svc/fmt.c's bounded formatter, the same one cli_print uses
- * underneath, so what appears here and what the shell prints elsewhere are
- * formatted by one implementation.
- */
-static int nn_info_line(nn_svc_write_fn write, void *ctx, const char *f, ...)
-{
-	/* [!] 80 WAS TOO SHORT, AND TRUNCATION ATE THE LINE ENDING.  The image line
-	 * ran past it on the hardware and came out as
-	 *   "... (reservation 131072 B at 0x  code 2400 B ..."
-	 * -- cut mid-number AND missing its CRLF, so the next line ran on.  A
-	 * bounded formatter drops what does not fit, and what did not fit was the
-	 * terminator that separates this line from the next. */
-	char line[128];
-	va_list ap;
-	int n;
-
-	va_start(ap, f);
-	n = fmt_vsnformat(line, sizeof line, f, ap);
-	va_end(ap);
-	if (n < 0)
-		return -1;
-	if ((size_t)n >= sizeof line)
-		n = (int)sizeof line - 1;
-	return write(ctx, line, (size_t)n);
-}
 
 /*
  * What this board adds: where a loaded plugin would live, and whether one is

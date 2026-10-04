@@ -22,7 +22,10 @@ picocom -b 115200 /dev/ttyACM0                   # the ST-Link VCP
 ```
 
 The first configure downloads the pinned ARM GNU toolchain into `tools/` and
-the submodules this board needs (`boards/f746g-disco/submodules.cmake`).
+the submodules this board needs (`boards/f746g-disco/submodules.cmake`).  The
+default NN backend (`tflm`) also fetches tflite-micro at configure time and the
+pinned model at build time; `-DCONFIG_NN_BACKEND=null` builds offline (see
+[Build options](#build-options)).
 
 ## The board at a glance
 
@@ -119,25 +122,102 @@ knowing:
 | `BSP_ENABLE_IWDG` | ON | independent watchdog + the `wdt` command |
 | `CLI_ENABLE_DANGEROUS_CMDS` | ON | builds `reboot` and `devmem` |
 | `CLI_DEVMEM_DUMP_MAX_LEN` | 256 | bytes per `devmem` dump |
-| `CONFIG_NN_BACKEND` | `null` | `null` / `stedgeai` / `stedgeai_reloc` / `tflm` |
+| `CONFIG_NN_BACKEND` | `tflm` | `tflm` / `null` / `stedgeai` / `stedgeai_reloc` |
+| `NN_TFLM_MODEL_OVERRIDE` | empty | a local `.tflite` baked in instead of the pinned model (tflm only) |
 
-[!] `null` STAYS THE DEFAULT HERE, deliberately (issue #98).  wio-lite-ai defaults
-to `tflm`; this board cannot, because none of its other three backends configures
-in a clean tree:
+### The NN backend: `tflm` by default (issue #130)
 
-| backend | what a clean tree does not have |
+`tflm` runs tflite-micro with CMSIS-NN kernels and bakes one model into Flash
+as the built-in. That model is the same pinned file wio-lite-ai and
+grove-vision-ai-v2 ship as their `blazeface` asset: BlazeFace front 128 int8
+from the ST model zoo (`STMicroelectronics/stm32ai-modelzoo`, commit
+`1423c78953a830903485135febe1dd98ff31aed8`,
+`face_detection/facedetect_front/.../blazeface_front_128_int8.tflite`, SHA256
+`e803bb4e93b10f7a19d4243bcc39698599a723f3128e19d3f90e0b1c0bc88dd8`, 189,816 B). It is fetched at BUILD time by the shared
+`cmake/fetch_model.cmake` into `build/<dir>/tflm-model/pinned.tflite`, and the
+C array is generated from that fetched file, so a pin that can no longer be
+fetched -- a vanished commit, a Git LFS pointer instead of the file, different
+bytes -- fails the build rather than shipping an older array.  The hash is
+checked again at use: `cmake/gen_model_array.py` hashes the exact bytes it
+emits and refuses (leaving no array behind) if the file changed after the
+fetch verified it.
+
+[!] **The default build needs the network**, once per build directory: for the
+tflite-micro tree at configure time (this was already true of any tflm build)
+and for the model at build time. This is a deliberate difference from the
+`asset-*` rule (issue #94), whose fetch stays outside ALL because a container
+is not part of the firmware; here the model is. A `null` build needs neither and
+configures and builds offline.
+
+To try another model, pass `-DNN_TFLM_MODEL_OVERRIDE=<path to .tflite>` (int8
+weights, float32 I/O). An override is not hash-checked. The old variable,
+`NN_TFLM_MODEL`, is IGNORED with a configure warning: build trees from before
+#130 hold it pointing into the git-ignored `_ref/` tree, and reading it would
+keep building from a file no clone has. `-UNN_TFLM_MODEL` silences the warning.
+
+`null` stays available: no runtime, a BlazeFace-shaped stub whose inference
+does nothing, and no network or C++ needed. It was the default until #130
+(issue #98 kept it because `tflm` then needed a `.tflite` the repo does not
+ship; the pin removes that reason). `stedgeai` and `stedgeai_reloc` still need a
+local ST Edge AI Core install (ST-SLA) and do not configure in a clean tree.
+
+[!] **A changed default does not reach an existing build directory.** CMake
+keeps the cached `CONFIG_NN_BACKEND`, so a tree first configured while `null`
+was the default stays `null`. Such a tree prints a warning on its first
+configure after #130, and every `null` configure prints a status line. To move
+it: `cmake -B <dir> -DCONFIG_NN_BACKEND=tflm`, or use a fresh build directory.
+A fresh `-DCONFIG_NN_BACKEND=null` is not warned about.
+
+Measured on the default (`tflm`, CMSIS-NN) build at #130, fresh configure:
+
+| | null | tflm |
+|---|---|---|
+| `shell.bin` | 402,932 B | 777,280 B (74.1% of 1 MB) |
+| `size` text / data | 398,560 / 4,360 | 772,900 / 4,372 |
+
+Of the 374 KB difference, 189,816 B is the model array (`.rodata`); the rest
+is the interpreter, the kernels and the C++ runtime.
+
+SDRAM bank3 (`.sdram.ai`, `0xC0600000`, 2 MB) under `tflm`:
+
+| Object | Address | Size | Owner |
+|---|---|---|---|
+| `nncam_stage` | `0xC0600000` | 393,216 B (2 x 192 KB) | `port/nn/nn_camera.c`, camera -> input staging |
+| `nn_dec_scratch` | `0xC0660000` | 1,536 B | `port/nn/nn_decoder.c` |
+| `g_sd_model_buf` | `0xC0660600` | 1,048,576 B (2 x 512 KB) | `port/nn/tflm/nn_tflm.cc`, SD model slots |
+| `g_arena` | `0xC0760600` | 524,288 B | `port/nn/tflm/nn_tflm.cc`, activation arena |
+| free | `0xC07E0600` | 129,536 B | |
+
+`check_f746_layout.py` requires `g_arena` and `g_sd_model_buf` in bank3 in a
+`tflm` build only (they are in an anonymous namespace, so board.cmake names them
+by their mangled local symbols). A `null` build is not asked for them. The
+negative tests are `cmake/fixtures/run_layout_tests.py`, run by the host test
+suite.
+
+#### Hardware baseline for the tflm default (issue #130)
+
+Measured on the board on 2026-10-04 with firmware `5e676ec-dirty` (the #130
+step T working tree): the default `tflm` build above, built-in BlazeFace pin,
+216 MHz. This log is the reference the later f746 steps of #130 (the shared
+stream lifecycle, the producer writing the input tensor directly, and the
+per-board error classification) are compared against; the Flash and bank3
+figures are the tables above.
+
+| Measurement | Value |
 |---|---|
-| `tflm` | a `.tflite` -- it is baked into the image, and this repo ships none |
-| `stedgeai_reloc` | the ST Edge AI Core install (its loader source, ST-SLA) |
-| `stedgeai` | that install, its runtime `.a`, AND `stedgeai generate` output |
+| `nn bench 10` | min 628,234 / avg 631,212 / max 633,281 us |
+| `nn stream start --frames 300` | 300 frames in, 266 skipped, 0 errors; 30 inferences in 21,036 ms = 1.42 inf/s; latency 659,658 us (last) |
+| `nn info` arena line | `470352 B reserved` -- [!] labelled "reserved" but it is the arena TFLM actually USES; the reservation is `g_arena`, 524,288 B (to be corrected under #131) |
 
-Verified by trying each: `stedgeai` fails on the missing generated model even on a
-machine that HAS the ST install, and `stedgeai_reloc` only configures because such
-an install is present.  So defaulting to any of them would break
-`cmake -DBOARD=f746g-disco` for anyone who has not installed proprietary tooling.
-Changing that is not a default-value question -- it needs a backend that runs from
-an artifact this repo can ship, which is what wio already does by loading models
-from NOR at runtime.
+Stack high-water marks from `thread` after `nn bench 10`, two `nn run` and the
+300-frame stream (`peak` / size):
+
+| Thread | Before any inference | After | Notes |
+|---|---|---|---|
+| `nn-worker` | (not created yet) | 1,808 / 4,096 B (44%) | `NNCAM_WORKER_STACK` stays 4096, ~2.3x margin |
+| `cli` | 1,724 / 4,096 B | 2,156 / 4,096 B (52%) | `nn bench` infers on the console thread |
+| `cam_prod` | 364 / 1,024 B | 580 / 1,024 B (56%) | the rise is the preprocessing step |
+| `GUIX System Thread` | 816 / 4,096 B | 816 / 4,096 B | |
 
 ### [!] LTO is refused on this board
 
@@ -194,9 +274,9 @@ decoder remains covered in every backend configuration. See the
 ## Commands
 
 ```
-ai        camera    console   coremark  crash     devmem
-dmesg     echo      free      fs        gui       help
-jobs      kill      lcd       membench  net       qspi
+camera    console   coremark  crash     devmem    dmesg
+echo      free      fs        gui       help      jobs
+kill      lcd       membench  net       nn        qspi
 reboot    sd        sdram     sleep     thread    touch
 uptime    usleep    version   watch     wdt       xfer
 ```
@@ -230,7 +310,11 @@ console, and what the two columns mean, is in the root
 ### [!] Three subscribers share one capture, and each has to drain its sink
 
 The GUI preview, `nn stream` and `net mjpeg` are all *subscribers* of one base
-capture.
+capture.  When the LCD comes up at boot, the GUI preview subscribes and starts
+the base capture once (`ui/guix_camera_ui.c`, on the GUIX thread), so on a board
+with a working sensor the base is already running after boot: `camera stream
+start` then answers `busy (streaming or preview active)`, and `nn run` / `nn
+stream start` need no start of their own.
 
 > **`nn stream` is a subscriber, and `--frames` waits on that** (issue #99).
 > `nn stream start` enables inference whether or not the base capture is running:

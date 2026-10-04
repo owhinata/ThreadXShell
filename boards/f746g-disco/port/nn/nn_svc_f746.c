@@ -24,8 +24,8 @@
  */
 #include "nn_svc.h"
 #include "nn_report.h"
+#include "nn_svc_adapter.h" /* nn_detail_set, nn_result, nn_info_line (#130) */
 
-#include <stdarg.h>
 #include <string.h>
 
 #include "camera.h"
@@ -36,39 +36,6 @@
 #include "sdram.h"
 #include "stm32f7xx_hal.h"   /* HAL_RCC_GetHCLKFreq: the DWT counter's clock */
 #include "tx_api.h"
-
-/*
- * [!] THERE IS NO SHARED DIAGNOSTIC BUFFER -- see the note in the Grove adapter.
- * A failure's words go straight into the caller's result, so two consoles
- * building results at once cannot overwrite each other's explanation.
- */
-
-static void nn_detail_to(char *dst, size_t cap, const char *fmt, ...)
-{
-	va_list ap;
-
-	va_start(ap, fmt);
-	(void)fmt_vsnformat(dst, cap, fmt, ap);
-	va_end(ap);
-}
-
-/* Every failure path writes into the result it is about to return. */
-/* [!] Its format is checked against NN_SVC_DETAIL_MAX at build time (issue
- * #122 P15): the copy truncates, and a truncated sentence does not look it. */
-#define nn_detail_set(...)                                                  \
-	((void)NN_SVC_DETAIL_CHECK_FMT(__VA_ARGS__),                        \
-	 nn_detail_to(res->detail, sizeof res->detail, __VA_ARGS__))
-#define nn_detail_clear()  (res->detail[0] = '\0')
-
-/* [!] The detail is COPIED into the caller's result here, at the one place a
- * result is built.  nn_detail is this file's buffer and the next command on
- * another console overwrites it -- so a pointer to it would be printed after it
- * had already become somebody else's sentence. */
-static void nn_result(struct nn_op_result *res, int status, enum nn_claim claim)
-{
-	res->status = status;
-	res->claim  = (uint8_t)claim;
-}
 
 /*
  * This board's stop codes, and nothing else (issue #99).

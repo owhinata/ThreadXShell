@@ -37,7 +37,8 @@ static uint8_t  pl_lease_ready;
  * The miss counters.
  *
  * [!] TWO WRITERS, ONE READER, ONE RULE.  The producer and the panel both note
- * their tries, and the stats line reads total and worst as a pair.  Every one of
+ * their tries (since issue #129 only the panel does: plugin_lease_miss.h), and
+ * the stats line reads total and worst as a pair.  Every one of
  * them runs plugin_lease_miss_*() with interrupts disabled, so a reader never
  * sees a run from after one writer's update beside a total from before it, and
  * the two writers never lose each other's increments.  Masking on one side only

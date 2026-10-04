@@ -32,7 +32,7 @@
  * alone.  The names below kept "param" because the threshold was first.
  *
  * WHAT IT DOES NOT CLOSE, AND WHAT DOES: two callbacks of the same plugin
- * running at once -- the camera producer's decode and a threshold call, say
+ * running at once -- the inference worker's decode and a threshold call, say
  * (issue #122 P5).  That is the plugin lease's (port/plugin/plugin_lease.h),
  * which such a call takes AFTER it is counted in.  The two are not folded into
  * one (issue #127 decision 3): the count is never waited for and refuses only

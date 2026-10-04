@@ -2398,7 +2398,8 @@ static const uint8_t nn_slot_runs[PLUGIN_SLOT_COUNT] = GROVE_PLUGIN_STACK_RUNS;
 /*
  * The frames the plugin lease cost (issue #127), in wio-lite-ai's words so the
  * two boards' reports read alike.  Producer and panel misses are one number:
- * either way the frame was shown bare.
+ * either way the frame was shown bare.  (Since issue #129 only the panel tries
+ * the lease; the worker waits for it, and a wait that runs out is an error.)
  *
  * At its worst the line is the literal less its two conversions plus ten digits
  * for each uint32_t, which the assert holds against the caller's buffer -- the
@@ -2555,11 +2556,12 @@ _Static_assert(4u + (unsigned)PLUGIN_SLOT_COUNT < (unsigned)NN_STREAM_LINES_MAX,
  * unload is refused while any call is in; neither waits.
  *
  * [!] AND INSIDE THE COUNT, THE PLUGIN LEASE (issue #127, P5).  The count keeps
- * the plugin from being REPLACED under the call; it never kept the camera
- * producer's decode or the panel's draw out of the same plugin at the same
- * time.  The lease does: this waits for it, bounded, and a stream's producer
- * that finds it held skips one frame's decode rather than wait.  Not taken, the
- * call is BUSY -- the same answer as a refused count, and nothing was entered.
+ * the plugin from being REPLACED under the call; it never kept the stream's
+ * decode or the panel's draw out of the same plugin at the same time.  The
+ * lease does: this waits for it, bounded, and so does the inference worker
+ * before it decodes (since issue #129; a frame whose wait runs out is not
+ * decoded).  Not taken, the call is BUSY -- the same answer as a refused count,
+ * and nothing was entered.
  */
 int nn_svc_thresh_get(unsigned *milli)
 {

@@ -26,7 +26,7 @@
  * [!] AND IT IS NOT A BOUND ON WHAT draw() COMPUTES.  A plugin may do as much
  * arithmetic as it likes between primitives; what is capped is the work the
  * BASE performs on its behalf.  The expensive rasterising belongs in decode(),
- * which runs on the producer with no guard held.
+ * which runs on the board's inference worker with no panel guard held.
  */
 #ifndef PLUGIN_PAINT_BUDGET_H
 #define PLUGIN_PAINT_BUDGET_H

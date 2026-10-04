@@ -22,11 +22,11 @@
  * base still validates every rectangle, so the one property that boundary
  * provides -- loaded code cannot write outside the frame -- is unchanged.
  *
- * WHERE THE WORK GOES.  Rasterise in decode(), on the camera producer, with no
- * panel guard held and a whole frame period to spend.  draw() runs on the panel
- * thread inside the guard and should do nothing but hand over the finished
- * spans.  That is the split cam_lcd_sink.h already documents, and the pipeline's
- * one-outstanding-delivery rule is what makes the hand-off need no lock.
+ * WHERE THE WORK GOES.  Rasterise in decode(), on the board's inference worker,
+ * with no panel guard held.  draw() runs on the panel thread inside the guard
+ * and should do nothing but hand over the finished spans.  The base's plugin
+ * lease keeps the two from running at once (svc/plugin_abi.h), so the hand-off
+ * needs no lock of the plugin's own.
  *
  * [!] NOTHING HERE OWNS STORAGE.  Every entry point writes only the buffer the
  * caller describes, and the caller is expected to derive that buffer's extents

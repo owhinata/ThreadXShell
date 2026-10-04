@@ -67,8 +67,8 @@ extern "C" {
  *
  * From measurement (Epic #122 U1 spike, 2026-10-03): the longest legitimate
  * hold seen was 12.7 ms -- a console holding it while the producer (priority
- * 10) and the panel (9) preempted it.  A decode on the producer is tens of
- * microseconds.  Roughly four times the longest observed, the same figure wio
+ * 10) and the panel (9) preempted it.  A decode (on the inference worker since
+ * issue #129) is tens of microseconds.  Roughly four times the longest observed, the same figure wio
  * waits; re-measure when a new path starts holding it.
  */
 #define PLUGIN_LEASE_WAIT_MS  50u

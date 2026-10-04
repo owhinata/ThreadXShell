@@ -150,8 +150,8 @@ static uint32_t pl_score_milli(const struct bf_det *d)
 /*
  * Rasterise one chip per detection.
  *
- * On the producer thread with no panel guard held -- the split cam_lcd_sink.h
- * documents, and the reason draw() below can stay a run of blits.
+ * Inside decode(), on the inference worker with no panel guard held -- the
+ * reason draw() below can stay a run of blits.
  */
 static void pl_stage_labels(void)
 {
@@ -200,7 +200,7 @@ static int pl_decode(const struct tensor_desc *outs, unsigned n)
  * Runs on the panel thread with the panel guard held, so it does the least it
  * can: no arithmetic beyond the transform the base supplies, no allocation, no
  * blocking.  Everything expensive already happened in pl_decode() on the
- * producer thread.
+ * inference worker.
  *
  * The boxes come out of the decoder in MODEL INPUT coordinates, and to_frame()
  * is the inverse of the transform the input was built with -- a call rather than
@@ -384,7 +384,7 @@ const void *const plugin_slot_table[PLUGIN_SLOT_COUNT] = {
 /*
  * The signatures are pinned here rather than trusted to review: an entry whose
  * type drifted from the ABI would still compile into the void* table above and
- * would fail on the board, in a callback, on the producer thread.
+ * would fail on the board, in a callback, on a thread with no console.
  */
 _Static_assert(sizeof((plugin_entry_fn)pl_entry) == sizeof(void *), "");
 _Static_assert(sizeof((plugin_shapes_ok_fn)pl_shapes_ok) == sizeof(void *), "");

@@ -733,6 +733,8 @@ add_library(shell_objs OBJECT
     # (issue #122): one transition each, walked by test/test_nn_param_calls.c.
     "${BOARD_DIR}/port/npu/nn_param_calls.c"
     "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"
+    # The policy around it, and the stream's numbers (issue #130).
+    "${CMAKE_SOURCE_DIR}/svc/nn_core.c"
     # The bounded sink a board captures an external decoder's report into
     # (issue #110); the buffer itself belongs to the shared command.
     "${CMAKE_SOURCE_DIR}/svc/nn_report.c"

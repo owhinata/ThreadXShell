@@ -643,6 +643,18 @@ gcc $CFLAGS -I "$inc" -I "$svc" \
     $LDFLAGS -o "$out/test_nn_stream_life"
 "$out/test_nn_stream_life"
 
+# issue #130 -- the policy around that machine, written once for every board
+# (svc/nn_core.c): the baselines a commit latches, the two-phase poll and the
+# settle's disposition table, each walked under the three property sets the
+# boards differ by (plain / re-arming / gated).  The stand-in hooks also record
+# a counter or a record read INSIDE the critical section (a deadlock on hardware)
+# and a gate or a latch touched OUTSIDE it (a race) -- neither shows in a return.
+gcc $CFLAGS -I "$inc" -I "$svc" \
+    "$here/test_nn_core.c" "$svc/nn_core.c" "$svc/nn_stream_life.c" \
+    "$svc/nn_det_record.c" \
+    $LDFLAGS -o "$out/test_nn_core"
+"$out/test_nn_core"
+
 # issue #127 -- what a refused no-wait acquire of the plugin lease counts
 # (svc/plugin_lease_miss.c, moved out of grove-vision-ai-v2 by issue #130).  A
 # frame can be lost at the producer's decode or at the panel's draw; a run reset

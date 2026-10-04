@@ -27,6 +27,7 @@
  * Losing them would have made every failure read the same.
  */
 #include "nn_svc.h"
+#include "nn_core.h"
 #include "nn_report.h"
 #include "nn_svc_adapter.h" /* nn_detail_set, nn_result, nn_info_line (#130) */
 
@@ -176,257 +177,111 @@ static void nn_release(void)
 	TX_RESTORE
 }
 
-/* ---- the stream lifecycle (issue #99) ------------------------------------
+/* ---- the stream lifecycle (issues #99, #130) -----------------------------
  *
- * The machine itself is svc/nn_stream_life.c's, shared with the other two boards
- * -- see there for why one implementation rather than three.  What is here is
- * only this port's critical section around it and the two baselines a poll
- * subtracts.
+ * The machine is svc/nn_stream_life.c's and the policy around it svc/nn_core.c's
+ * -- one copy for every board.  What is here is only what this board is: its
+ * critical section, its clock, where its counters and its record are, and the
+ * transient claim that is decided together with the lifecycle.
  */
-static struct nn_stream_life nn_life;
-static uint32_t nn_stream_frames0;   /**< camera frame count when it started  */
-static uint32_t nn_stream_t0;        /**< ticks when it started               */
-static uint32_t nn_stream_ms;        /**< frozen elapsed, once it has stopped */
-/*
- * [!] A STREAM'S NUMBERS ARE LATCHED WHEN IT ENDS (issue #120).  Its frame
- * count is the camera's, which a `nn run` capture also advances, so a poll that
- * kept deriving it after the stream ended drifted with every `nn run`.  The
- * stop takes the final numbers; a poll of that generation reads them here.
- */
-static struct nn_stream_stats nn_stream_final;
-static uint32_t nn_stream_final_gen;   /**< whose they are; ANY = nobody's */
-/* The record's epoch when `last` was latched: a model change since took the
- * result away, and the latched line follows it (issue #118). */
-static uint32_t nn_stream_final_epoch;
-/* The record's accepted count at this stream's boundary (issue #118): `last`
- * is the stream's only once the record has accepted a publish since. */
-static uint32_t nn_stream_acc0;
+static struct nn_core nn_core;
 
-/* Claim IDLE -> STARTING together with the transient claim.  ONE critical
-   section, because they are one decision: a start that took the claim and then
-   found the lifecycle busy would have to unwind a claim another job may have
-   taken in between. */
-/*
- * Why the gate is held, for a start that found it held.  Called under the
- * gate's own critical section, so the answer describes the holder that refused
- * it (issue #122).
- *
- * [!] THE HOLDER DECIDES THE WORDS.  Every refusal used to read "another nn
- * job", including a `nn run` over a running stream -- where the other two
- * boards say "a stream is already running".  The lifecycle knows which holder
- * it is; an idle lifecycle means an ordinary operation (a load, a bench) has
- * the gate.  Read without a transition, so a refused start moves nothing.
- */
-static enum nn_stream_start_claim nn_gate_refusal(void)
+static unsigned nn_core_cs_enter(void)
 {
-	uint8_t phase = 0u, kind = 0u;
-
-	nn_stream_life_snapshot(&nn_life, NULL, &phase, NULL, &kind);
-	switch ((enum nn_stream_phase)phase) {
-	case NN_STREAM_PHASE_LOST:
-		return NN_STREAM_START_DEAD;
-	case NN_STREAM_PHASE_IDLE:
-		return NN_STREAM_START_BUSY;           /* an operation holds it */
-	default:
-		if (kind == (uint8_t)NN_STREAM_KIND_ONESHOT)
-			return NN_STREAM_START_ONESHOT;
-		return (phase == (uint8_t)NN_STREAM_PHASE_RUNNING)
-		       ? NN_STREAM_START_RUNNING : NN_STREAM_START_BUSY;
-	}
-}
-
-static enum nn_stream_start_claim nn_stream_begin(void)
-{
-	enum nn_stream_start_claim r;
 	TX_INTERRUPT_SAVE_AREA
 
 	TX_DISABLE
-	/* The transient claim and the lifecycle are one decision here, so the gate
-	   is tested first -- and its holder decides how the refusal reads. */
-	if (nn_busy) {
-		r = nn_gate_refusal();
-	} else {
-		r = nn_stream_life_begin(&nn_life, NN_STREAM_KIND_STREAM);
-		if (r == NN_STREAM_START_GO) {
-			nn_busy  = 1u;
-			nn_owner = (uint8_t)NN_OWNER_STREAM;
-		}
-	}
+	return (unsigned)interrupt_save;
+}
+
+static void nn_core_cs_exit(unsigned posture)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	interrupt_save = (UINT)posture;
 	TX_RESTORE
-	return r;
+}
+
+static uint32_t nn_core_ticks(void)
+{
+	return (uint32_t)tx_time_get();
 }
 
 /*
- * `nn run`: the gate, and the lifecycle as a one-shot, in ONE critical section
- * (issue #120) -- the same single decision the stream start makes above.
- *
- * It is begun and committed together, before anything is started: since issue
- * #129 the camera and the worker come up AFTER the commit, and every way out
- * from there is this generation's own -- a refusal with nothing started ends
- * it at once (nn_oneshot_finish()), anything after the stream is up goes
- * through the same teardown as a stream.  The gate is held as an ordinary
- * OPERATION, which is what `nn info` should say about it.
- *
- * @return the one-shot's generation, or NN_STREAM_GEN_ANY with nothing held;
- *         @p why says which refusal
+ * The stream's frame count is the CAMERA's -- frames offered, which a `nn run`
+ * capture also advances, hence the latch at the stop (nn_core::final).  The
+ * rest are the overlay's, which its arm clears before the stream's attach.
+ * Outside any critical section: the camera's stats end in the frame
+ * pipeline's mutex.
  */
-static uint32_t nn_oneshot_claim(enum nn_stream_start_claim *why)
+static void nn_core_counts_of(struct nn_core_raw *raw, void *keep)
 {
-	uint32_t g = NN_STREAM_GEN_ANY;
-	TX_INTERRUPT_SAVE_AREA
+	struct camera_stats cs;
+	struct nn_overlay_stats os;
 
-	TX_DISABLE
-	if (nn_busy) {
-		*why = nn_gate_refusal();
-	} else {
-		*why = nn_stream_life_begin(&nn_life, NN_STREAM_KIND_ONESHOT);
-		if (*why == NN_STREAM_START_GO) {
-			g = nn_stream_life_commit(&nn_life);
-			if (g == NN_STREAM_GEN_ANY) {
-				(void)nn_stream_life_abort(&nn_life);
-				*why = NN_STREAM_START_BUSY;
-			} else {
-				nn_busy  = 1u;
-				nn_owner = (uint8_t)NN_OWNER_OP;
-			}
-		}
-	}
-	TX_RESTORE
-	return g;
+	(void)keep;
+	camera_stream_stats(&cs);
+	nn_overlay_stats(&os);
+	raw->offered        = cs.frames;
+	raw->skipped        = os.skipped;
+	raw->infers         = os.inferences;
+	raw->errors         = os.errors;
+	raw->model_errors   = os.model_errors;
+	raw->decoder_errors = os.decoder_errors;
+	raw->last_us        = os.last_ms * 1000u;
+	raw->producing      = 1u;   /* `running` follows the lifecycle alone */
+}
+
+static void nn_core_record_of(struct nn_det_snapshot *snap)
+{
+	nn_rec_snapshot(snap, NULL);
 }
 
 /*
- * ...and its end: claim the stop by its own generation, settle it, and give the
- * gate back -- one critical section, so nothing can be admitted between the
- * lifecycle going IDLE and the NPU being free.
- *
- * [!] THE GATE IS RELEASED ONLY IF THE TRANSITION HAPPENED.  Nothing else can
- * have claimed this one-shot's stop, so a refusal is an invariant failure; the
- * gate then stays held rather than handing the NPU back on it.
- *
- * @return non-zero if it settled
+ * The transient claim and the lifecycle are ONE decision here, so the core asks
+ * about the claim in the same critical section as the transition: a start that
+ * took the claim and then found the lifecycle busy would have to unwind a claim
+ * another job may have taken in between.  The gate is tested first, and its
+ * holder decides how a refusal reads (nn_core_gate_refusal()).
  */
-static int nn_oneshot_end(uint32_t gen)
+static int nn_core_gate_held(void)
 {
-	int ok = 0;
-	TX_INTERRUPT_SAVE_AREA
-
-	TX_DISABLE
-	if (nn_stream_life_claim_stop(&nn_life, gen) == NN_STREAM_STOP_GO &&
-	    nn_stream_life_finish(&nn_life)) {
-		nn_owner = (uint8_t)NN_OWNER_NONE;
-		nn_busy  = 0u;
-		ok = 1;
-	}
-	TX_RESTORE
-	return ok;
+	return nn_busy != 0u;
 }
 
-/* Everything came up: mint the generation and publish the baselines with it. */
-static void nn_stream_commit(uint32_t frames0, uint32_t t0, uint32_t acc0,
-                             uint32_t *gen)
+/* A stream holds the claim as STREAM; `nn run` as an ordinary OPERATION, which
+ * is what `nn info` should say about it. */
+static void nn_core_gate_take(int oneshot)
 {
-	TX_INTERRUPT_SAVE_AREA
-
-	TX_DISABLE
-	/* [!] Baselines published only once the generation exists, so a refused
-	 * commit cannot leave this generation's numbers describing another's. */
-	*gen = nn_stream_life_commit(&nn_life);
-	if (*gen != NN_STREAM_GEN_ANY) {
-		nn_stream_frames0 = frames0;
-		nn_stream_t0      = t0;
-		nn_stream_acc0    = acc0;
-		nn_stream_ms      = 0u;
-	}
-	TX_RESTORE
+	nn_busy  = 1u;
+	nn_owner = (uint8_t)(oneshot ? NN_OWNER_OP : NN_OWNER_STREAM);
 }
 
-/* A start that failed after nn_stream_begin(): nothing is up, so give both the
-   lifecycle and the claim back. */
-static void nn_stream_abort(void)
+/* [!] Called only when the transition happened: clearing the claim regardless
+ * would hand the NPU back on exactly the invariant failure the guard exists to
+ * catch -- and something may still be inside it. */
+static void nn_core_gate_give(void)
 {
-	TX_INTERRUPT_SAVE_AREA
-
-	TX_DISABLE
-	if (nn_stream_life_abort(&nn_life)) {
-		nn_owner = (uint8_t)NN_OWNER_NONE;
-		nn_busy  = 0u;
-	}
-	TX_RESTORE
+	nn_owner = (uint8_t)NN_OWNER_NONE;
+	nn_busy  = 0u;
 }
 
-/* [!] Test and claim in one call, under one critical section -- see the note in
-   svc/nn_stream_life.h for the interleaving that separating them admits. */
-static enum nn_stream_stop_claim nn_stream_claim_stop(uint32_t gen)
-{
-	enum nn_stream_stop_claim r;
-	TX_INTERRUPT_SAVE_AREA
-
-	TX_DISABLE
-	r = nn_stream_life_claim_stop(&nn_life, gen);
-	TX_RESTORE
-	return r;
-}
-
-/* Publish an ended stream's numbers.  Called inside the settle's critical
-   section, only when the settle took. */
-static void nn_stream_latch(uint32_t ending, const struct nn_stream_stats *final,
-                            uint32_t epoch)
-{
-	nn_stream_final = *final;
-	nn_stream_final.elapsed_ms = nn_stream_ms;
-	nn_stream_final_gen = ending;
-	nn_stream_final_epoch = epoch;
-}
-
-/* Both halves confirmed. */
-static void nn_stream_finish(const struct nn_stream_stats *final,
-                             uint32_t epoch)
-{
-	uint32_t ending;
-	TX_INTERRUPT_SAVE_AREA
-
-	TX_DISABLE
-	ending = nn_life.gen;
-	/* [!] THE CLAIM IS RELEASED ONLY IF THE TRANSITION HAPPENED.  Clearing it
-	 * regardless would hand the NPU back on exactly the invariant failure the
-	 * guard exists to catch -- and something may still be inside it. */
-	if (nn_stream_life_finish(&nn_life)) {
-		nn_stream_ms = (uint32_t)(((uint32_t)tx_time_get() - nn_stream_t0) *
-		                          1000u / TX_TIMER_TICKS_PER_SECOND);
-		nn_stream_latch(ending, final, epoch);
-		nn_owner = (uint8_t)NN_OWNER_NONE;
-		nn_busy  = 0u;
-	}
-	TX_RESTORE
-}
-
-/* Retryable: stoppable again, same generation, claim still held. */
-static void nn_stream_unclaim_stop(void)
-{
-	TX_INTERRUPT_SAVE_AREA
-
-	TX_DISABLE
-	nn_stream_life_retry(&nn_life);
-	TX_RESTORE
-}
-
-/* Unconfirmed: the claim is never given back. */
-static void nn_stream_poison(const struct nn_stream_stats *final,
-                             uint32_t epoch)
-{
-	uint32_t ending;
-	TX_INTERRUPT_SAVE_AREA
-
-	TX_DISABLE
-	ending = nn_life.gen;
-	if (nn_stream_life_poison(&nn_life)) {
-		nn_stream_ms = (uint32_t)(((uint32_t)tx_time_get() - nn_stream_t0) *
-		                          1000u / TX_TIMER_TICKS_PER_SECOND);
-		nn_stream_latch(ending, final, epoch);
-	}
-	TX_RESTORE
-}
+static const struct nn_core_board nn_core_board = {
+	.cs_enter             = nn_core_cs_enter,
+	.cs_exit              = nn_core_cs_exit,
+	.ticks                = nn_core_ticks,
+	.ticks_per_s          = TX_TIMER_TICKS_PER_SECOND,
+	.counts               = nn_core_counts_of,
+	.record               = nn_core_record_of,
+	.gate_held            = nn_core_gate_held,
+	.gate_take            = nn_core_gate_take,
+	.gate_give            = nn_core_gate_give,
+	/* Only the camera's frame count runs from boot; the overlay's are zeroed
+	 * by its arm, before the boundary that took acc0 (nn_core_board::based). */
+	.based                = NN_CORE_BASED_OFFERED,
+	.rearm                = 0u,
+	.clock_needs_producer = 0u,
+};
 
 /* ---- info ---------------------------------------------------------------- */
 
@@ -1302,7 +1157,7 @@ static void nn_capture_report(const struct nn_det_snapshot *snap,
  * because the gate is still held and nothing will release it. */
 static void nn_oneshot_finish(uint32_t gen, struct nn_op_result *res)
 {
-	if (nn_oneshot_end(gen))
+	if (nn_core_oneshot_end(&nn_core, &nn_core_board, gen))
 		return;
 	nn_detail_set("the stream lifecycle moved underneath this run; the NPU "
 	              "stays held");
@@ -1366,36 +1221,6 @@ static void nn_teardown(int oneshot, struct nn_stream_verdict *v)
 		                    : cam_lcd_sink_detach();
 	}
 	nn_stream_stop_decide(cam_rc, wjoin, attempted, detach_rc, v);
-}
-
-/*
- * Settle a one-shot's teardown (issue #129).  Not nn_stream_finish() /
- * nn_stream_poison(): those latch the STREAM's final numbers, which `nn run`
- * never touched.  The gate goes back only on a finish that took.
- */
-static void nn_oneshot_settle(unsigned char act)
-{
-	TX_INTERRUPT_SAVE_AREA
-
-	TX_DISABLE
-	switch ((enum nn_stream_act)act) {
-	case NN_STREAM_ACT_DONE:
-		if (nn_stream_life_finish(&nn_life)) {
-			nn_owner = (uint8_t)NN_OWNER_NONE;
-			nn_busy  = 0u;
-		}
-		break;
-	case NN_STREAM_ACT_RETRY:
-		/* The one-shot stays RUNNING, the operator's to finish with `nn
-		 * stream stop` (svc/nn_stream_life.h). */
-		nn_stream_life_retry(&nn_life);
-		break;
-	case NN_STREAM_ACT_TERMINAL:
-	default:
-		(void)nn_stream_life_poison(&nn_life);
-		break;
-	}
-	TX_RESTORE
 }
 
 static enum nn_claim nn_claim_of_act(unsigned char act)
@@ -1495,7 +1320,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 * lifecycle says so, so `nn stream stop` is refused rather than told "no
 	 * stream is running" about a camera this command holds.
 	 */
-	gen = nn_oneshot_claim(&why);
+	gen = nn_core_oneshot_claim(&nn_core, &nn_core_board, &why);
 	if (gen == NN_STREAM_GEN_ANY) {
 		switch (why) {
 		case NN_STREAM_START_DEAD:
@@ -1648,14 +1473,18 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 * it -- an operator's stop is refused while this runs -- so a refusal is
 	 * an invariant failure, and it fails closed: everything stays as it is.
 	 */
-	if (nn_stream_claim_stop(gen) != NN_STREAM_STOP_GO) {
+	if (nn_core_claim_stop(&nn_core, &nn_core_board, gen) !=
+	    NN_STREAM_STOP_GO) {
 		nn_detail_set("the stream lifecycle moved underneath this run; what "
 		              "owns the hardware now cannot be established");
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
 		return;
 	}
 	nn_teardown(1, &v);
-	nn_oneshot_settle(v.act);
+	/* A one-shot's settle latches nothing: `nn run` never touched the
+	 * stream's numbers.  The gate goes back only on a finish that took. */
+	nn_core_settle(&nn_core, &nn_core_board, nn_claim_of_act(v.act), NULL,
+	               NULL);
 
 	/*
 	 * [!] WHY THE WAIT ENDED IS THE STATUS (issue #122 P7), and the teardown's
@@ -1988,7 +1817,6 @@ static int nn_detector_ready(struct nn_op_result *res)
 void nn_svc_stream_start(const struct nn_stream_spec *spec,
                          struct nn_op_result *res, uint32_t *gen)
 {
-	struct camera_stats cs;
 	uint32_t acc0;
 	int rc;
 
@@ -2007,7 +1835,7 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		return;
 	}
 
-	switch (nn_stream_begin()) {
+	switch (nn_core_admit(&nn_core, &nn_core_board)) {
 	case NN_STREAM_START_GO:
 		break;
 	case NN_STREAM_START_RUNNING:
@@ -2034,13 +1862,13 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	/* From here every failure gives BOTH the lifecycle and the claim back. */
 	if (!nn_open_done) {
 		nn_detail_set("no model is loaded -- `nn model load --name <name>`");
-		nn_stream_abort();
+		(void)nn_core_abort(&nn_core, &nn_core_board);
 		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
 		return;
 	}
 	rc = nn_detector_ready(res);
 	if (rc != NN_SVC_OK) {
-		nn_stream_abort();
+		(void)nn_core_abort(&nn_core, &nn_core_board);
 		nn_result(res, rc, NN_CLAIM_NONE);
 		return;
 	}
@@ -2075,7 +1903,7 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		else
 			nn_detail_set("the inference worker could not be created "
 			              "at boot");
-		nn_stream_abort();
+		(void)nn_core_abort(&nn_core, &nn_core_board);
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
 		return;
 	}
@@ -2092,13 +1920,12 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		 * Were it ever to refuse, the word stays armed and the next start
 		 * refuses at the arm above -- closed, not tidied. */
 		(void)nn_worker_join();
-		nn_stream_abort();
+		(void)nn_core_abort(&nn_core, &nn_core_board);
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
 		return;
 	}
 
-	camera_stream_stats(&cs);
-	nn_stream_commit(cs.frames, (uint32_t)tx_time_get(), acc0, gen);
+	*gen = nn_core_commit(&nn_core, &nn_core_board, &acc0);
 	if (*gen == NN_STREAM_GEN_ANY) {
 		/*
 		 * [!] REFUSED, WHICH MEANS THIS CALLER NO LONGER OWNS THE START -- and
@@ -2119,128 +1946,9 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
 
-/* The per-stream counts -- the one computation a poll and a stop's latch
-   share. */
-static void nn_stream_counts(const struct camera_stats *cs,
-                             const struct nn_overlay_stats *os,
-                             const struct nn_det_snapshot *rec,
-                             uint32_t frames0, uint32_t acc0,
-                             struct nn_stream_stats *out)
-{
-	out->frames         = cs->frames - frames0;
-	out->skipped        = os->skipped;
-	out->infers         = os->inferences;
-	out->errors         = os->errors;
-	out->model_errors   = os->model_errors;
-	out->decoder_errors = os->decoder_errors;
-	out->last_us        = os->last_ms * 1000u;
-	/* [!] Nothing decoded yet is not "decoded nobody".  And `last` is the
-	 * RECORD's, counted against this stream's base (issue #118): the producer
-	 * publishes every decode there, refusals included, and a model change
-	 * clears it -- which the producer's own counter cannot know. */
-	out->last_valid = nn_det_last_valid(rec, acc0) ? 1u : 0u;
-	out->last_ndet  = (int32_t)rec->ndet;
-}
-
-/* A stopping stream's final numbers.  Outside any critical section: the
-   camera's stats end in the frame pipeline's mutex. */
-static uint32_t nn_stream_take_final(struct nn_stream_stats *final)
-{
-	struct camera_stats cs;
-	struct nn_overlay_stats os;
-	struct nn_det_snapshot rec;
-	uint32_t frames0, acc0;
-	TX_INTERRUPT_SAVE_AREA
-
-	TX_DISABLE
-	frames0 = nn_stream_frames0;
-	acc0    = nn_stream_acc0;
-	TX_RESTORE
-	camera_stream_stats(&cs);
-	nn_overlay_stats(&os);
-	nn_rec_snapshot(&rec, NULL);
-	memset(final, 0, sizeof *final);
-	nn_stream_counts(&cs, &os, &rec, frames0, acc0, final);
-	return rec.epoch;     /* latched with the line it qualifies */
-}
-
 int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 {
-	struct camera_stats cs;
-	struct nn_overlay_stats os;
-	struct nn_det_snapshot rec;
-	uint32_t seq0, seq1, g, frames0, t0, ms, acc0;
-	uint8_t  phase, kind;
-	TX_INTERRUPT_SAVE_AREA
-
-	if (out == NULL)
-		return NN_SVC_ERR_ARG;
-
-	/* Phase 1: identity and baselines. */
-	TX_DISABLE
-	nn_stream_life_snapshot(&nn_life, &g, &phase, &seq0, &kind);
-	/* [!] An ended stream answers from its latch, taken in the same critical
-	 * section as the generation it belongs to -- see nn_stream_final. */
-	if (g != NN_STREAM_GEN_ANY && g == nn_stream_final_gen &&
-	    (gen == NN_STREAM_GEN_ANY || gen == g)) {
-		uint32_t ep = nn_stream_final_epoch;
-
-		*out = nn_stream_final;
-		TX_RESTORE
-		/* [!] ...except that a model change since the stop took its last
-		 * result away (issue #118).  The record's lock is its own critical
-		 * section, so the epoch is compared just after. */
-		nn_rec_snapshot(&rec, NULL);
-		if (rec.epoch != ep)
-			out->last_valid = 0u;
-		return NN_SVC_OK;
-	}
-	frames0 = nn_stream_frames0;
-	t0      = nn_stream_t0;
-	ms      = nn_stream_ms;
-	acc0    = nn_stream_acc0;
-	TX_RESTORE
-
-	if (g == NN_STREAM_GEN_ANY)
-		return NN_SVC_ERR_STATE;                  /* nothing has ever run */
-	if (gen != NN_STREAM_GEN_ANY && gen != g)
-		return NN_SVC_ERR_GEN;
-
-	/*
-	 * [!] PHASE 2 IS OUTSIDE THE CRITICAL SECTION, AND IT HAS TO BE.
-	 * camera_stream_stats() ends in the frame pipeline's mutex; waiting for a
-	 * mutex with interrupts disabled is a deadlock, not a slow path.
-	 */
-	camera_stream_stats(&cs);
-	nn_overlay_stats(&os);
-	nn_rec_snapshot(&rec, NULL);
-
-	/*
-	 * Phase 3: accept only if nothing moved.  The counter, not the generation
-	 * and the state -- a retryable stop returns to both of those unchanged.
-	 */
-	TX_DISABLE
-	nn_stream_life_snapshot(&nn_life, NULL, NULL, &seq1, NULL);
-	TX_RESTORE
-	if (seq1 != seq0)
-		return NN_SVC_ERR_STALE;
-
-	memset(out, 0, sizeof *out);
-	/* [!] A `nn run` holding the lifecycle is not a running STREAM (#120);
-	 * the baselines below are still the last stream's. */
-	out->running        = (phase == (uint8_t)NN_STREAM_PHASE_RUNNING &&
-	                       kind == (uint8_t)NN_STREAM_KIND_STREAM) ? 1u : 0u;
-	nn_stream_counts(&cs, &os, &rec, frames0, acc0, out);
-	/* [!] NEVER WHILE THE LIFECYCLE NAMES A ONE-SHOT (issue #118, review):
-	 * the base is the last STREAM's, and `nn run` publishes into the same
-	 * record -- see the same guard in the wio adapter. */
-	if (kind != (uint8_t)NN_STREAM_KIND_STREAM)
-		out->last_valid = 0u;
-	out->elapsed_ms     = out->running
-	                    ? (uint32_t)(((uint32_t)tx_time_get() - t0) * 1000u /
-	                                 TX_TIMER_TICKS_PER_SECOND)
-	                    : ms;
-	return NN_SVC_OK;
+	return nn_core_poll(&nn_core, &nn_core_board, gen, out);
 }
 
 /* The sentence an operator gets.  They are not interchangeable -- two of these
@@ -2291,9 +1999,8 @@ static const char *nn_stream_why_text(unsigned char why, int oneshot)
 
 void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 {
-	struct nn_stream_stats final;
+	struct nn_core_final final;
 	struct nn_stream_verdict v;
-	uint32_t epoch;
 	uint8_t kind = 0u;
 	int oneshot;
 
@@ -2301,7 +2008,7 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 		return;
 	nn_detail_clear();
 
-	switch (nn_stream_claim_stop(gen)) {
+	switch (nn_core_claim_stop(&nn_core, &nn_core_board, gen)) {
 	case NN_STREAM_STOP_GO:
 		break;
 	case NN_STREAM_STOP_IDLE:
@@ -2348,35 +2055,39 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 		TX_INTERRUPT_SAVE_AREA
 
 		TX_DISABLE
-		nn_stream_life_snapshot(&nn_life, NULL, NULL, NULL, &kind);
+		nn_stream_life_snapshot(&nn_core.life, NULL, NULL, NULL, &kind);
 		TX_RESTORE
 	}
 	oneshot = (kind == (uint8_t)NN_STREAM_KIND_ONESHOT);
 	nn_teardown(oneshot, &v);
 	if (oneshot) {
-		nn_oneshot_settle(v.act);
+		nn_core_settle(&nn_core, &nn_core_board, nn_claim_of_act(v.act),
+		               NULL, NULL);
 		if (v.act != (unsigned char)NN_STREAM_ACT_DONE)
 			nn_detail_set("%s", nn_stream_why_text(v.why, 1));
 		nn_result(res, (v.act == (unsigned char)NN_STREAM_ACT_DONE)
 		               ? NN_SVC_OK : NN_SVC_ERR_HW, nn_claim_of_act(v.act));
 		return;
 	}
-	/* The stream's final numbers, latched only if the settle below takes. */
-	epoch = nn_stream_take_final(&final);
+	/* The stream's final numbers, latched only if the settle below takes.
+	   Outside any critical section: the camera's stats end in the frame
+	   pipeline's mutex. */
+	nn_core_take_final(&nn_core, &nn_core_board, &final, NULL);
+	/* Done: IDLE and the claim released.  Retryable: stoppable again, same
+	   generation, claim still held.  Terminal: the claim is never given back. */
+	nn_core_settle(&nn_core, &nn_core_board, nn_claim_of_act(v.act), &final,
+	               NULL);
 
 	switch ((enum nn_stream_act)v.act) {
 	case NN_STREAM_ACT_DONE:
-		nn_stream_finish(&final, epoch);
 		nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 		return;
 	case NN_STREAM_ACT_RETRY:
-		nn_stream_unclaim_stop();
 		nn_detail_set("%s", nn_stream_why_text(v.why, 0));
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_RETRYABLE);
 		return;
 	case NN_STREAM_ACT_TERMINAL:
 	default:
-		nn_stream_poison(&final, epoch);
 		nn_detail_set("%s", nn_stream_why_text(v.why, 0));
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
 		return;

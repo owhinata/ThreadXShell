@@ -4493,22 +4493,69 @@ the worker's round trip from hand-over to publish.  It is the last line and the
 only one left out when the EPK clock is not trusted.  `camera stats`' `nn sink`
 block prints the same split, labelled `[prep: producer; rest: worker]`.
 
-**Expected values (expected, to be confirmed on hardware, firmware `<hash>`)**,
-from the spike that preceded #129 (prep on the producer, invoke onward on a
-worker at priority 12):
+**Measured on hardware, firmware `96235cf`** (2026-10-04; the containers already
+on the board, none re-sent -- `blob list` CRCs `23D7B349` / `5F88E843`
+unchanged).  The synchronous baseline is build `ee045ff`.
 
-| | detector (BlazeFace 128) | classifier (CIFAR-10) |
+| | detector (BlazeFace 128), `--frames 300` x 4 | classifier (CIFAR-10), `--frames 100` |
 |---|---|---|
-| inferences per second | ~36.8 | ~7.3 |
-| `busy` / frames | ~0 | ~4 of 5 |
-| `lag` mean / max (frames) | 1.00 / 1 | ~6 / 7 |
-| `worker` prep / invoke / decode | ~4,400 / ~12,700 / ~150 us | -- / ~94,600 / -- us |
-| `cycle` | ~13,200 us | ~95,000 us |
+| frames in / skipped / infers | 300 / 0 / 300 (each run) | 100 / 80 / 20 |
+| inferences per second | 36.82 / 36.90 / 36.82 / 36.91 (baseline 36.83) | 7.31 (baseline 8.85) |
+| `items` | `N decoded, busy 0/300, lag 1.00/1` | `60 decoded, busy 80/100, lag 6.00/8` |
+| `worker` prep / invoke / decode / cycle | 4,394 / 12,630 / 220 / 13,242 us (runs: 4,391-4,395 / 12,627-12,630 / 194-223 / 13,195-13,247) | 13,176 / 94,579 / 167 / 95,251 us |
+| errors, painter refused, `plugin` missed | 0, 0, 0 (no `unheld` suffix) | -- |
+
+`N` is the faces decoded, 8 to 300 depending on whether a face was in view.  The
+classifier's video ran at the camera's rate (37 fps) throughout.
+
+The plugin's entry depths on the same firmware, `depth/stack`, none flagged `!`:
+entry con 1000; shapes_ok con 1552, bg 1464; **decode work 776/8192 (left
+7416), with no `prod` or `con` row**; draw panel 240; report con 1704
+(`nn dets`), con 1976 (`nn run`, CIFAR-10), bg 1888 (`nn run &`); param_set con
+448; param_get con 496.
+
+`camera stats` under the detector stream: 27,004 us/frame (37.0 fps), pack
+6,743 us, `sink` 4,786 us (the nn prep, 4,395 us, plus the panel's staging),
+blit 25,879 us, held 217 us; the `nn sink` block, labelled `[prep: producer;
+rest: worker]`, read prep 4,395 / invoke 12,630 / decode 223 us; and
+`overlay: 1 frame(s) shown unannotated` -- the stream's first frame, before
+any result existed.
+
+Two figures differ from what the spike and the earlier tables led one to
+expect:
+
+- **decode is 220 us, not the synchronous design's 155 us.**  The worker's
+  `decode` stage runs from the end of the invoke, so it now also contains the
+  bounded take of the plugin lease and publishing the geometry, which the
+  producer's measurement did not; about 65 us more.
+- **report is entered at 1,704 / 1,976 B, not issue #119's 2,088.**  The
+  callback is the same; the likely cause is the console frames above it: `nn run`
+  no longer decodes on the console since #129 and enters report from a
+  different function (1,976), and `nn dets` enters from its own path (1,704).
+  This reading was not confirmed against the ELF; the figures are what the
+  board printed.
+
+Also observed on this firmware: a `nn thresh 500` on a running stream took
+effect at once; a `nn dets` on a running stream printed in full (`faces 1` and
+its face line); `nn run` on the detector printed `faces 1 thresh 500/1000` and
+its face line, and on the bare CIFAR-10 model `cifar10 top 3 of 10 (dequantised
+outputs, not probabilities)` and three lines -- both in the reference log's
+format; a `nn stream start --frames 30` straight after a `nn run` was admitted;
+and a stop that arrived during the classifier's 107 ms invoke
+(`nn stream start &; sleep 2; nn stream stop`) answered `nn: stopped`, with no
+worker-lost verdict.  Seven starts and stops in all went through.
+
+**Not exercised on hardware:** ten consecutive starts and stops; Ctrl+C during
+`nn run`; and the refusals while a `nn run &` holds the camera -- a `nn run`
+finishes in under a second, so a command typed after `sleep 1` missed the
+window.  Those refusals are the one-shot lifecycle of issue #120, unchanged here
+and held by its host tests.
 
 **What the split gave up.**  Under the synchronous design every frame on the
 panel carried its own result.  Now the detector's boxes are one frame (27 ms)
-late, and the classifier's label several frames late -- but the classifier's
-video runs at the camera's rate instead of the inference's.
+late -- `lag 1.00/1`, measured -- and the classifier's label six frames late on
+average, eight at worst; but the classifier's video runs at the camera's rate
+instead of the inference's.
 
 The overlay hook still runs between the staging copy and the DMA
 (`lcd_blit_le_overlay()`), so a box is never half-transferred.  A failed

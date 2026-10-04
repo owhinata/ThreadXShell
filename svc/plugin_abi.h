@@ -657,6 +657,12 @@ struct plugin_base_api {
  * new of one: the worker calls decode() under the plugin lease right after its
  * invoke and before it can start the next one, and no other callback is
  * handed a tensor.
+ *
+ * [!] shapes_ok() ANSWERS 1 FOR "YES" AND NOTHING ELSE DOES (issue #130).  1
+ * means the plugin can read these outputs; every other value -- 0, a negative
+ * one, 2 or more -- means it cannot, and the boards compare against 1 rather
+ * than test for non-zero (a board's own refusals are negative and must never
+ * read as yes).  Return exactly 1 or 0.
  */
 struct tensor_desc;   /* svc/tensor.h; a plugin includes it, this header need not */
 

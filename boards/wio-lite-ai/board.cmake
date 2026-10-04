@@ -898,7 +898,8 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
          "${BOARD_DIR}/port/plugin/plugin_run.c"
          "${CMAKE_SOURCE_DIR}/svc/plugin_mpu_v7m.c"
          "${BOARD_DIR}/port/plugin/plugin_paint.c"
-         "${BOARD_DIR}/port/plugin/plugin_lease.c")
+         "${BOARD_DIR}/port/plugin/plugin_lease.c"
+         "${CMAKE_SOURCE_DIR}/svc/plugin_lease_miss.c")  # its miss rules (#130)
 endif()
 
 # The MLPerf Tiny v1.4 benchmark harness.  Like CONFIG_NN_BACKEND above and

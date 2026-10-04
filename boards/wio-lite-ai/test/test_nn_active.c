@@ -35,10 +35,18 @@
  * linked in is the real asset/plugins/blazeface, and `struct nn_model` is
  * opaque in nn.h (it is defined in nn.c), so the two accessors the shim uses
  * are supplied here -- which is also what makes the shim testable at all.
+ *
+ * [!] AND EVERY ENTRY REQUIRES THE PLUGIN LEASE (issue #130).  Who holds it is a
+ * variable here; sections 1-5 run with the caller holding it, and section 6
+ * walks every entry with it NOT held.  The entries walked are the table below
+ * section 6, and test/check_lease_entries.py holds that table against the
+ * functions nn_active.c actually defines -- so an entry added without a row is
+ * a failure, not a gap.
  */
 #include "nn_active.h"
 #include "nn_camera.h"
 #include "nn_desc.h"
+#include "plugin_lease.h"
 #include "plugin_run.h"
 
 #include <stdarg.h>
@@ -104,6 +112,29 @@ void nn_camera_note_depth_at(enum nn_camera_site site, uintptr_t sp)
 	(void)sp;
 	if ((unsigned)site < 3u)
 		depth_notes[site]++;
+}
+
+/*
+ * The plugin lease (issue #130).  On the board, plugin_lease_held() asks
+ * ThreadX whether the calling thread owns the mutex; here who holds it is a
+ * variable, and "another thread holds it" and "nobody does" are distinct cases
+ * because a check that compared against the wrong owner would pass one of them.
+ * The refusals are counted by the entry checks themselves, which is what
+ * pl_unheld checks.
+ */
+enum lease_owner { LEASE_NONE, LEASE_OTHER, LEASE_SELF };
+
+static enum lease_owner lease_owner = LEASE_SELF;
+static unsigned         pl_unheld;
+
+int plugin_lease_held(void)
+{
+	return lease_owner == LEASE_SELF;
+}
+
+void plugin_lease_note_unheld(void)
+{
+	pl_unheld++;
 }
 
 /* ---- the model handle the shim pulls tensors from ------------------------ */
@@ -258,6 +289,182 @@ static int cap_write(void *ctx, const char *s, size_t len)
 	return (int)len;
 }
 
+/* The threshold as a number, through the shim's status-and-out-parameter form
+ * (issue #130); NN_SVC_THRESH_NONE for anything but OK. */
+static unsigned get_thresh(void)
+{
+	unsigned th = 0u;
+
+	if (nn_active_get_thresh_milli(&th) != NN_ACTIVE_THRESH_OK)
+		return NN_SVC_THRESH_NONE;
+	return th;
+}
+
+/* ================================================================
+ * 6.  [!] Every entry refuses a caller without the plugin lease (#130)
+ * ================================================================
+ *
+ * Each row is one way into the plugin.  For each, in both "not held" cases and
+ * with and without a plugin loaded, the answer must be NN_ACTIVE_NOT_HELD --
+ * never the no-plugin answer, never a decoder's own code -- nothing may be
+ * entered (no depth sample, no paint, no words, no threshold moved), and the
+ * refusal is counted exactly once.  Then the same row with the lease held must
+ * go in.  Deleting any one wrapper's check turns its row red.
+ *
+ * [!] THE NAMES ARE THE FUNCTIONS' OWN, and test/check_lease_entries.py reads
+ * them from between the two markers below and compares them with every
+ * function port/nn/nn_active.c defines: one that is neither walked here nor
+ * named there with a reason fails the suite.
+ */
+enum entry_id {
+	E_SHAPES_OK, E_DECODE, E_DRAW, E_CAN_DRAW, E_CAN_REPORT, E_REPORT,
+	E_THRESH_GET, E_THRESH_SET, E_COUNT
+};
+
+/* LEASE ENTRIES BEGIN */
+static const char *const entry_name[E_COUNT] = {
+	"nn_active_shapes_ok", "nn_active_decode", "nn_active_draw",
+	"nn_active_can_draw", "nn_active_can_report", "nn_active_report",
+	"nn_active_get_thresh_milli", "nn_active_set_thresh_milli",
+};
+/* LEASE ENTRIES END */
+
+/* Which thread's record a held call is sampled on, or -1 for one that reads the
+ * slot table without calling through (and so takes no sample). */
+static const int entry_site[E_COUNT] = {
+	NNCAM_SITE_SHELL, NNCAM_SITE_DECODE, NNCAM_SITE_DRAW, -1, -1,
+	NNCAM_SITE_SHELL, NNCAM_SITE_SHELL, NNCAM_SITE_SHELL,
+};
+
+static unsigned depth_total(void)
+{
+	return depth_notes[0] + depth_notes[1] + depth_notes[2];
+}
+
+/* Call one entry; returns its answer as an int. */
+static int call_entry(enum entry_id e, unsigned *thresh_out)
+{
+	switch (e) {
+	case E_SHAPES_OK:   return nn_active_shapes_ok(&stub);
+	case E_DECODE:      return nn_active_decode(&stub);
+	case E_DRAW:        rec_reset(); return nn_active_draw(&rec_painter);
+	case E_CAN_DRAW:    return nn_active_can_draw();
+	case E_CAN_REPORT:  return nn_active_can_report();
+	case E_REPORT:      cap_len = 0u; return nn_active_report(cap_write, NULL);
+	case E_THRESH_GET:
+		*thresh_out = 12345u;
+		return nn_active_get_thresh_milli(thresh_out);
+	case E_THRESH_SET:  return nn_active_set_thresh_milli(650u);
+	default:            break;
+	}
+	return -9999;
+}
+
+static void test_lease_entries(void)
+{
+	static const enum lease_owner not_held[2] = { LEASE_NONE, LEASE_OTHER };
+	unsigned e, o, loaded;
+
+	printf("lease entries:\n");
+	reset_model();
+	put_one_face();
+	for (e = 0u; e < (unsigned)E_COUNT; e++) {
+		for (loaded = 0u; loaded < 2u; loaded++) {
+			for (o = 0u; o < 2u; o++) {
+				unsigned th = 0u, before_thresh, unheld0;
+				int ans;
+
+				pl_loaded = (int)loaded;
+				lease_owner = LEASE_SELF;
+				if (loaded)
+					(void)nn_active_set_thresh_milli(600u);
+				before_thresh = get_thresh();
+				lease_owner = not_held[o];
+				memset(depth_notes, 0, sizeof depth_notes);
+				rec_reset();
+				cap_len = 0u;
+				unheld0 = pl_unheld;
+				ans = call_entry((enum entry_id)e, &th);
+				lease_owner = LEASE_SELF;
+
+				expect(entry_name[e], ans == NN_ACTIVE_NOT_HELD,
+				       "%s held by %s, %s: answered %d, not NOT_HELD",
+				       entry_name[e], o ? "another thread" : "nobody",
+				       loaded ? "plugin loaded" : "no plugin", ans);
+				expect("  ...entered nothing",
+				       depth_total() == 0u && rec_rects == 0u &&
+				       rec_fills == 0u && rec_blits == 0u &&
+				       cap_len == 0u,
+				       "%s: %u sample(s), %u+%u+%u paint(s), %zu B written",
+				       entry_name[e], depth_total(), rec_rects,
+				       rec_fills, rec_blits, cap_len);
+				expect("  ...moved no threshold",
+				       get_thresh() == before_thresh,
+				       "%s: thresh %u -> %u", entry_name[e],
+				       before_thresh, get_thresh());
+				expect("  ...and was counted once",
+				       pl_unheld == unheld0 + 1u, "%s: %u refusal(s)",
+				       entry_name[e], pl_unheld - unheld0);
+				if (e == (unsigned)E_THRESH_GET)
+					expect("  ...and read back no threshold",
+					       th == NN_SVC_THRESH_NONE, "got %u", th);
+			}
+		}
+
+		/* The same row, held: it goes in. */
+		{
+			unsigned th = 0u, unheld0;
+			int ans;
+
+			pl_loaded = 1;
+			lease_owner = LEASE_SELF;
+			(void)nn_active_decode(&stub);
+			memset(depth_notes, 0, sizeof depth_notes);
+			unheld0 = pl_unheld;
+			ans = call_entry((enum entry_id)e, &th);
+			expect("  held, it goes in",
+			       ans != NN_ACTIVE_NOT_HELD && pl_unheld == unheld0,
+			       "%s: answered %d", entry_name[e], ans);
+			if (entry_site[e] >= 0)
+				expect("  ...and enters its slot",
+				       depth_total() == 1u &&
+				       depth_notes[entry_site[e]] == 1u,
+				       "%s: %u sample(s)", entry_name[e],
+				       depth_total());
+			switch (e) {
+			case E_SHAPES_OK: case E_CAN_DRAW: case E_CAN_REPORT:
+				expect("  ...answering yes", ans == 1, "%s: %d",
+				       entry_name[e], ans);
+				break;
+			case E_DECODE:
+				expect("  ...finding the face", ans == 1, "%d", ans);
+				break;
+			case E_DRAW:
+				expect("  ...and paints",
+				       rec_rects + rec_fills + rec_blits > 0u,
+				       "nothing drawn");
+				break;
+			case E_REPORT:
+				expect("  ...and writes", cap_len > 0u, "nothing");
+				break;
+			case E_THRESH_GET:
+				expect("  ...and reads a threshold",
+				       ans == NN_ACTIVE_THRESH_OK &&
+				       th != NN_SVC_THRESH_NONE, "%d / %u", ans, th);
+				break;
+			case E_THRESH_SET:
+				expect("  ...and sets it",
+				       ans == NN_ACTIVE_THRESH_OK && get_thresh() == 650u,
+				       "%d / %u", ans, get_thresh());
+				break;
+			default:
+				break;
+			}
+		}
+	}
+	pl_loaded = 0;
+}
+
 int main(void)
 {
 	int n, rc;
@@ -298,14 +505,12 @@ int main(void)
 	       "claims a report");
 
 	expect("[!] the threshold is reported absent, not borrowed from anywhere",
-	       nn_active_get_thresh_milli() == NN_SVC_THRESH_NONE, "%u",
-	       nn_active_get_thresh_milli());
+	       get_thresh() == NN_SVC_THRESH_NONE, "%u", get_thresh());
 	rc = nn_active_set_thresh_milli(700u);
 	expect("[!] and setting one is refused as a state, not as a bad value",
 	       rc == NN_ACTIVE_THRESH_NO_DECODER, "got %d", rc);
 	expect("which changed nothing",
-	       nn_active_get_thresh_milli() == NN_SVC_THRESH_NONE, "%u",
-	       nn_active_get_thresh_milli());
+	       get_thresh() == NN_SVC_THRESH_NONE, "%u", get_thresh());
 
 	/*
 	 * [!] THE SHAPE QUESTION IS THE ONE THAT MUST STILL PASS.  It is the
@@ -413,13 +618,13 @@ int main(void)
 	rc = nn_active_set_thresh_milli(642u);
 	expect("a threshold set through the shim is accepted",
 	       rc == NN_ACTIVE_THRESH_OK, "got %d", rc);
-	th = nn_active_get_thresh_milli();
+	th = get_thresh();
 	expect("and reads back through it", th == 642u, "got %u", th);
 
 	pl_loaded = 0;
 	expect("[!] with the plugin gone the threshold is gone with it -- the shim "
-	       "kept no copy", nn_active_get_thresh_milli() == NN_SVC_THRESH_NONE,
-	       "%u", nn_active_get_thresh_milli());
+	       "kept no copy", get_thresh() == NN_SVC_THRESH_NONE,
+	       "%u", get_thresh());
 
 	/* And the decode does not resume from somewhere else, either. */
 	n = nn_active_decode(&stub);
@@ -484,7 +689,7 @@ int main(void)
 		memset(depth_notes, 0, sizeof depth_notes);
 		(void)nn_active_shapes_ok(&stub);
 		(void)nn_active_report(cap_write, NULL);
-		(void)nn_active_get_thresh_milli();
+		(void)get_thresh();
 		(void)nn_active_set_thresh_milli(500u);
 		plugin_run_note_entry(0u);
 		expect("shapes_ok, report, both parameters and entry on the console's",
@@ -499,7 +704,7 @@ int main(void)
 		nn_active_draw(&rec_painter);
 		(void)nn_active_shapes_ok(&stub);
 		(void)nn_active_report(cap_write, NULL);
-		(void)nn_active_get_thresh_milli();
+		(void)get_thresh();
 		(void)nn_active_set_thresh_milli(500u);
 		site_sum = depth_notes[0] + depth_notes[1] + depth_notes[2];
 		expect("[!] with no plugin nothing is entered, so nothing is sampled",
@@ -530,6 +735,11 @@ int main(void)
 		       "prefix '%s' more '%s'", lb_prefix ? lb_prefix : "(null)",
 		       lb_more ? lb_more : "(null)");
 	}
+
+	expect("[!] with the lease held throughout, nothing above was refused",
+	       pl_unheld == 0u, "%u refusal(s)", pl_unheld);
+
+	test_lease_entries();
 
 	if (failures) {
 		printf("test_nn_active: %d failure(s)\n", failures);

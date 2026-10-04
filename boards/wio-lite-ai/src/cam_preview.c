@@ -275,8 +275,10 @@ static void preview_draw_plugin(void)
 	bud.refused = 0u;
 	plugin_paint_bind(&paint, &bud, ltdc_back_buffer(),
 	                  ltdc_surface_w(), ltdc_surface_h());
-	/* The depth is sampled inside, at the indirect call (issue #126). */
-	nn_active_draw(&paint);
+	/* The depth is sampled inside, at the indirect call (issue #126).
+	 * NN_ACTIVE_NOT_HELD paints nothing and is counted by the entry check
+	 * itself (issue #130); there is nothing more to do with it here. */
+	(void)nn_active_draw(&paint);
 
 	TX_DISABLE
 	if (PREVIEW_PLUGIN_DRAW_PIXELS - bud.pixels > preview_draw_spent)
@@ -308,7 +310,7 @@ static void preview_entry(ULONG arg)
 			   [!] And `plug` is sampled once: taking it twice could light the
 			   plugin path without the lease, or leak the lease. */
 			int plug   = nn_active_is_plugin();
-			int leased = plug ? plugin_lease_try() : 0;
+			int leased = plug ? plugin_lease_try(PLUGIN_LEASE_PANEL) : 0;
 #endif
 			/* One outer lock around the boxes AND the flip.  ltdc_lock_frame()
 			   is recursive, and ltdc_flip() already holds it across its entire

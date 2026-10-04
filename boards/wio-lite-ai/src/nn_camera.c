@@ -43,12 +43,13 @@
 #define NNCAM_PRIO   18u
 
 /*
- * How long this thread will wait for the result lease before giving up on a
- * frame (issue #110).  Generous against the things that legitimately hold it --
- * a console capturing a report, a panel drawing -- and finite so that a wedged
- * holder costs frames rather than the worker.
+ * How long this thread waits for the result lease before giving up on a frame
+ * (issue #110) is the lease's own one bound since issue #130:
+ * PLUGIN_LEASE_WAIT_MS in port/plugin/plugin_lease.h.  Generous against the
+ * things that legitimately hold it -- a console capturing a report, a panel
+ * drawing -- and finite so that a wedged holder costs frames rather than the
+ * worker.
  */
-#define NNCAM_LEASE_WAIT_TICKS  50u
 /*
  * 3,072 B in DTCM.  The same inference measured a 1,940 B peak on the CLI thread in
  * phase 2c, and blazeface_decode() adds ~250 B (a 64-byte NMS bitmap plus the
@@ -437,7 +438,7 @@ static void nncam_record_boundary(void)
 	 * reportable rule covers the decode that may then run: the count stays,
 	 * the account is withheld.  Lease before the record lock, as everywhere.
 	 */
-	int leased = plugin_lease_take(NNCAM_LEASE_WAIT_TICKS);
+	int leased = plugin_lease_take();
 #endif
 
 	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) == TX_SUCCESS) {
@@ -610,7 +611,7 @@ static void nncam_step(void)
 		 * not wait.  The bound keeps a wedged holder from taking the worker
 		 * with it.
 		 */
-		if (!plugin_lease_take(NNCAM_LEASE_WAIT_TICKS)) {
+		if (!plugin_lease_take()) {
 			nncam_errors++;
 			return;
 		}
@@ -627,6 +628,15 @@ static void nncam_step(void)
 			return;
 		}
 		n = nn_active_decode(nncam_model);
+		if (n == NN_ACTIVE_NOT_HELD) {
+			/* [!] Not reachable while the take above stands -- and if it
+			 * ever does not, the decode did not run, so nothing is
+			 * published (issue #130, as on Grove).  Counted by the entry
+			 * check (plugin_lease_unheld()), not as a worker error: the
+			 * decoder was never asked. */
+			plugin_lease_give();
+			return;
+		}
 		took = nncam_publish_plugin(n, gen);
 		plugin_lease_give();
 		if (took)
@@ -878,7 +888,7 @@ int nn_camera_start(int colorbar, int require_draw)
 		 * shape the review caught in the stream's old pre-check. */
 		int shapes, draws;
 
-		if (!plugin_lease_take(NNCAM_LEASE_WAIT_TICKS)) {
+		if (!plugin_lease_take()) {
 			nncam_guards_give();
 			return NNCAM_ERR_DECBUSY;
 		}
@@ -886,11 +896,19 @@ int nn_camera_start(int colorbar, int require_draw)
 		draws  = require_draw ? nn_active_can_draw() : 1;
 		plugin_lease_give();
 
-		if (!shapes) {
+		/* [!] Compared against 1 (issue #130): NN_ACTIVE_NOT_HELD is
+		 * negative, so `!answer` would read it as yes.  Not reachable while
+		 * the take above stands; if it ever is, nothing was asked, and that
+		 * is the same answer as a lease that could not be had. */
+		if (shapes == NN_ACTIVE_NOT_HELD || draws == NN_ACTIVE_NOT_HELD) {
+			nncam_guards_give();
+			return NNCAM_ERR_DECBUSY;
+		}
+		if (shapes != 1) {
 			nncam_guards_give();
 			return NNCAM_ERR_SHAPES;
 		}
-		if (!draws) {
+		if (draws != 1) {
 			nncam_guards_give();
 			return NNCAM_ERR_NODRAW;
 		}
@@ -1076,7 +1094,7 @@ int nn_camera_decode_get(struct nn_camera_decode *out,
 	 * never waits here.
 	 */
 	if (rep != NULL && nn_active_is_plugin()) {
-		leased = plugin_lease_take(NNCAM_LEASE_WAIT_TICKS);
+		leased = plugin_lease_take();
 		if (!leased) {
 			/* The result exists; nobody let go of it in time.  Saying so is
 			 * better than printing a count with no account beside it and no
@@ -1130,8 +1148,19 @@ int nn_camera_decode_get(struct nn_camera_decode *out,
 			 * would describe a frame this record does not hold. */
 			nn_report_set(rep, NN_REPORT_SUPERSEDED);
 		} else if (snap.valid && snap.kind == (uint8_t)NN_DET_PLUGIN_REPORT) {
+			int rc;
+
 			nn_report_begin(rep);
-			if (!nn_active_can_report())
+			/* [!] Compared against 1 (issue #130): NN_ACTIVE_NOT_HELD is
+			 * negative, so `!can_report` would read it as yes.  A refusal
+			 * for want of the lease is REFUSED -- the account was not given
+			 * -- and never UNSUPPORTED (the plugin has one) or STALE (nobody
+			 * else was holding it).  Not reachable from here; counted where
+			 * it is refused. */
+			rc = nn_active_can_report();
+			if (rc == NN_ACTIVE_NOT_HELD)
+				nn_report_set(rep, NN_REPORT_REFUSED);
+			else if (rc != 1)
 				nn_report_set(rep, NN_REPORT_UNSUPPORTED);
 			else
 				nn_report_end(rep, nn_active_report(nn_report_write, rep));

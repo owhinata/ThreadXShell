@@ -13,8 +13,9 @@
  *
  * [!] THE API IS svc/plugin_lease_api.h (issue #130).  This file adds what only
  * this board knows -- the wait bound, the lock order, plugin_lease_init() -- and
- * plugin_lease.c implements the API with a ThreadX mutex.  wio still has a
- * plugin_lease.h of its own until it adopts the shared API.
+ * plugin_lease.c implements the API with a ThreadX mutex.  wio-lite-ai
+ * implements the same API since issue #130, with its own statement of the same
+ * 50 ms wait bound and the opposite lock order (below).
  *
  * WHY THIS BOARD NEEDS ONE AT ALL.  Here the frame pipeline kept the (then)
  * producer's decode and the panel's draw apart (one delivery per sink, released

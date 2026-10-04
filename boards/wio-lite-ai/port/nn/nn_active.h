@@ -69,6 +69,30 @@ extern "C" {
 #define NN_ACTIVE_FRAME_W 320
 #define NN_ACTIVE_FRAME_H 240
 
+/**
+ * The caller does not hold the plugin lease (port/plugin/plugin_lease.h), so
+ * nothing was entered (issue #130; grove-vision-ai-v2's since #127, and the
+ * same value).
+ *
+ * [!] AN ANSWER OF ITS OWN.  Not 0 ("no plugin", or "the plugin said no"), not
+ * a BF_ERR_* (the decoder's own refusal), not an NN_ACTIVE_THRESH_* -- a path
+ * that reached the plugin without the lease is a firmware bug, and folding it
+ * into an answer the operator already knows would send them to a different
+ * model or container instead.  Every refusal is also counted, once, by the
+ * entry check itself (plugin_lease_unheld()).
+ *
+ * [!] AND IT IS NEGATIVE, SO `if (!answer)` IS NOT A TEST FOR "NO".  The
+ * yes/no entries below return 1, 0 or this; compare against 1.
+ */
+#define NN_ACTIVE_NOT_HELD (-64)
+_Static_assert(NN_ACTIVE_NOT_HELD != BF_ERR_MODEL &&
+               NN_ACTIVE_NOT_HELD != BF_ERR_UNINIT &&
+               NN_ACTIVE_NOT_HELD != BF_ERR_ARG &&
+               NN_ACTIVE_NOT_HELD != NN_ACTIVE_THRESH_OK &&
+               NN_ACTIVE_NOT_HELD != NN_ACTIVE_THRESH_REFUSED &&
+               NN_ACTIVE_NOT_HELD != NN_ACTIVE_THRESH_NO_DECODER,
+               "NOT_HELD must not collide with another answer");
+
 /** Is a plugin in force?  When it is, the result belongs to it. */
 int nn_active_is_plugin(void);
 
@@ -86,14 +110,19 @@ int nn_active_is_plugin(void);
  * take that away.  A stream with no decoder is stopped one question further
  * down, by @ref nn_active_can_draw, which is only asked when a panel was
  * requested.
+ *
+ * Under the plugin lease.
+ *
+ * @return 1, 0, or NN_ACTIVE_NOT_HELD
  */
 int nn_active_shapes_ok(struct nn_model *m);
 
 /**
  * @brief  Decode this model's current outputs with the PLUGIN.
  *
- * @return the plugin's own count, or a negative BF_ERR_*.  The RESULT ITSELF
- *         stays with the plugin -- ask it to draw or to report.
+ * @return the plugin's own count, a negative BF_ERR_*, or NN_ACTIVE_NOT_HELD.
+ *         The RESULT ITSELF stays with the plugin -- ask it to draw or to
+ *         report.
  *
  * Only ever called when @ref nn_active_is_plugin: with no plugin the worker
  * publishes "an inference ran and nothing decoded it" instead of calling this
@@ -101,14 +130,18 @@ int nn_active_shapes_ok(struct nn_model *m);
  * BF_ERR_MODEL, which means "not a detector" and routes to the shared class
  * report.
  *
- * [!] THE CALLER MUST HOLD THE RESULT LEASE.  See plugin_lease.h: the panel
- * runs at a higher priority than the worker, so without it a draw can read
- * state this call is halfway through writing.
+ * [!] THE CALLER MUST HOLD THE RESULT LEASE, and this checks that it does.
+ * See plugin_lease.h: the panel runs at a higher priority than the worker, so
+ * without it a draw can read state this call is halfway through writing.
  */
 int nn_active_decode(struct nn_model *m);
 
-/** Let the active decoder paint its own result.  A no-op with no plugin. */
-void nn_active_draw(const struct plugin_painter *paint);
+/**
+ * Let the active decoder paint its own result.  A no-op with no plugin.
+ * Called on the preview thread, under the plugin lease and then the frame lock.
+ * @return 0, or NN_ACTIVE_NOT_HELD when nothing was painted for that reason
+ */
+int nn_active_draw(const struct plugin_painter *paint);
 
 /**
  * @brief  Will the active decoder put anything on the panel?
@@ -122,14 +155,18 @@ void nn_active_draw(const struct plugin_painter *paint);
  * neither now, so this is the ONE question that refuses a live overlay on a
  * bare model.  @ref nn_active_shapes_ok deliberately does not, because it is
  * also `nn run`'s admission.
+ *
+ * @return 1, 0, or NN_ACTIVE_NOT_HELD
  */
 int nn_active_can_draw(void);
 
 /** Will it describe its result in words?  REPORT is an optional slot, and
- *  "it said nothing" and "it has nothing to say with" are different answers. */
+ *  "it said nothing" and "it has nothing to say with" are different answers.
+ *  @return 1, 0, or NN_ACTIVE_NOT_HELD */
 int nn_active_can_report(void);
 
-/** Ask it to.  Returns what its own report returned, or 0 with no plugin. */
+/** Ask it to.  Returns what its own report returned, 0 with no plugin, or
+ *  NN_ACTIVE_NOT_HELD. */
 int nn_active_report(nn_svc_write_fn write, void *ctx);
 
 /**
@@ -142,11 +179,21 @@ int nn_active_report(nn_svc_write_fn write, void *ctx);
  * threshold anywhere: NN_SVC_THRESH_NONE from the getter and
  * NN_ACTIVE_THRESH_NO_DECODER from the setter, which is not the same answer as
  * refusing the value.
+ *
+ * [!] A STATUS AND AN OUT-PARAMETER SINCE ISSUE #130 (Grove's form since #127).
+ * The value alone had no room for "the caller does not hold the lease": every
+ * unsigned is either a threshold or NN_SVC_THRESH_NONE, and the second is an
+ * answer the operator reads as "this decoder has no threshold".
+ *
+ * @return NN_ACTIVE_THRESH_OK with @p milli set, NN_ACTIVE_NOT_HELD (and
+ *         @p milli NN_SVC_THRESH_NONE), or NN_ACTIVE_THRESH_REFUSED for a null
+ *         @p milli
  */
-unsigned nn_active_get_thresh_milli(void);
+int nn_active_get_thresh_milli(unsigned *milli);
 
 /** Set it: NN_ACTIVE_THRESH_OK, _REFUSED (the decoder rejected the value) or
- *  _NO_DECODER (nothing holds a threshold) -- svc/nn_active_core.h. */
+ *  _NO_DECODER (nothing holds a threshold) -- svc/nn_active_core.h -- or
+ *  NN_ACTIVE_NOT_HELD. */
 int nn_active_set_thresh_milli(unsigned milli);
 
 /**

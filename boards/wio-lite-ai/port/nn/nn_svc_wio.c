@@ -66,12 +66,13 @@ _Static_assert(WIO_PLUGIN_TARGET_ID == PLUGIN_TARGET_ID_HERE,
                "(svc/plugin_target.h)");
 
 /*
- * How long a console waits for the result lease before giving up (issue #110).
- * Finite, and with an answer on the other side of it: measuring how long a wait
- * took is not the same as bounding it, and a shell that stopped responding
- * behind a wedged worker with no line of output would be worse than a refusal.
+ * How long a console waits for the result lease before giving up (issue #110)
+ * is the lease's own one bound since issue #130: PLUGIN_LEASE_WAIT_MS in
+ * port/plugin/plugin_lease.h.  Finite, and with an answer on the other side of
+ * it: measuring how long a wait took is not the same as bounding it, and a
+ * shell that stopped responding behind a wedged worker with no line of output
+ * would be worse than a refusal.
  */
-#define NN_PLUGIN_LEASE_WAIT_TICKS  50u
 
 /* ---- plugin containers (issue #108 = #78 Step 3a) ------------------------- */
 
@@ -659,7 +660,7 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	 * and the plugin are both exactly as they were.  Refusing a load because a
 	 * console is mid-`nn thresh` is the right outcome.
 	 */
-	if (!plugin_lease_take(NN_PLUGIN_LEASE_WAIT_TICKS)) {
+	if (!plugin_lease_take()) {
 		nn_detail_set("the decoder is busy -- try again");
 		nn_guards_give();
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
@@ -734,9 +735,11 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 			 * README). */
 			if (pr != PLUGIN_RUN_OK && pr != PLUGIN_RUN_NO_PLUGIN) {
 				plugin_refused = 1;
+				/* plugin_run_why(): the strerror, plus the
+				 * board's own NOT_HELD by name (issue #130). */
 				nn_detail_set("slot %lu: %s",
 				              (unsigned long)spec->slot,
-				              plugin_run_strerror(pr));
+				              plugin_run_why(pr));
 			}
 		}
 	}
@@ -816,7 +819,7 @@ void nn_svc_model_unload(struct nn_op_result *res)
 #if defined(CONFIG_NN_BACKEND_TFLM)
 	/* Before anything changes, and its failure is an answer -- see the load
 	 * path for why the session is not enough on its own. */
-	if (!plugin_lease_take(NN_PLUGIN_LEASE_WAIT_TICKS)) {
+	if (!plugin_lease_take()) {
 		nn_detail_set("the decoder is busy -- try again");
 		nn_guards_give();
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
@@ -1941,6 +1944,11 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 #define NN_LINE_AT_SH   "at call : shell %lu/%lu (entry, shapes_ok, report, param); high-water"
 #define NN_LINE_PL_DREW "plugin  : drew %lu px max/frame of %lu, %lu refused"
 #define NN_LINE_PL_MISS "plugin  : %lu frame(s) missed (run of %lu)"
+/* The same line when an entry into the plugin has ever been refused because its
+ * caller did not hold the lease (issue #130; Grove's form since #127).  A
+ * correct build never prints it; the suffix exists so that a path which forgot
+ * the lease is visible somewhere other than a log.  Counted from boot. */
+#define NN_LINE_PL_UNHELD NN_LINE_PL_MISS "; %lu entry(s) refused unheld"
 _Static_assert(sizeof(NN_LINE_NOTE_A) <= NN_STREAM_LINE_MAX &&
                sizeof(NN_LINE_NOTE_B) <= NN_STREAM_LINE_MAX &&
                sizeof(NN_LINE_LOST) <= NN_STREAM_LINE_MAX,
@@ -1948,7 +1956,8 @@ _Static_assert(sizeof(NN_LINE_NOTE_A) <= NN_STREAM_LINE_MAX &&
 _Static_assert(NN_LINE_WORST(NN_LINE_TENSOR, 2u, 2u * 10u) < NN_STREAM_LINE_MAX &&
                NN_LINE_WORST(NN_LINE_INGEST, 2u, 2u * 10u) < NN_STREAM_LINE_MAX &&
                NN_LINE_WORST(NN_LINE_PL_DREW, 3u, 3u * 10u) < NN_STREAM_LINE_MAX &&
-               NN_LINE_WORST(NN_LINE_PL_MISS, 2u, 2u * 10u) < NN_STREAM_LINE_MAX,
+               NN_LINE_WORST(NN_LINE_PL_MISS, 2u, 2u * 10u) < NN_STREAM_LINE_MAX &&
+               NN_LINE_WORST(NN_LINE_PL_UNHELD, 3u, 3u * 10u) < NN_STREAM_LINE_MAX,
                "a stream line's worst case is longer than the caller's buffer");
 _Static_assert(NNCAM_STACK_BYTES < 10000u && CAM_PREVIEW_STACK_BYTES < 10000u &&
                CLI_INSTANCE_STACK_SIZE < 10000u && CLI_BG_JOB_STACK_SIZE < 10000u,
@@ -2107,6 +2116,7 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 		case 7u:
 		case 8u: {
 			uint32_t spent = 0u, refused = 0u, miss = 0u, run = 0u;
+			uint32_t unheld;
 
 			/*
 			 * What the loaded decoder cost the panel: the high-water pixel
@@ -2134,6 +2144,10 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 				             (unsigned long)(NN_ACTIVE_FRAME_W *
 				                             NN_ACTIVE_FRAME_H / 4u),
 				             (unsigned long)refused);
+			else if ((unheld = plugin_lease_unheld()) != 0u)
+				nn_detail_to(buf, cap, NN_LINE_PL_UNHELD,
+				             (unsigned long)miss, (unsigned long)run,
+				             (unsigned long)unheld);
 			else
 				nn_detail_to(buf, cap, NN_LINE_PL_MISS,
 				             (unsigned long)miss, (unsigned long)run);
@@ -2190,6 +2204,10 @@ int nn_svc_box_to_frame(const struct bf_det *in, struct bf_det *out)
  */
 int nn_svc_thresh_get(unsigned *milli)
 {
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	int r;
+#endif
+
 	if (milli == NULL)
 		return NN_SVC_ERR_ARG;
 	*milli = NN_SVC_THRESH_NONE;
@@ -2204,11 +2222,13 @@ int nn_svc_thresh_get(unsigned *milli)
 	 * [!] AND "NO ANSWER" IS BUSY, NOT "NONE" (issue #122 P6).  Returning
 	 * NN_SVC_THRESH_NONE here told the operator the decoder held no threshold
 	 * when it merely could not be asked. */
-	if (!plugin_lease_take(NN_PLUGIN_LEASE_WAIT_TICKS))
+	if (!plugin_lease_take())
 		return NN_SVC_ERR_BUSY;
-	*milli = nn_active_get_thresh_milli();
+	r = nn_active_get_thresh_milli(milli);
 	plugin_lease_give();
-	return NN_SVC_OK;
+	/* NN_ACTIVE_NOT_HELD cannot come back from under the lease; if it ever
+	 * does, it is BUSY like any other call that did not get in (issue #130). */
+	return r == NN_ACTIVE_THRESH_OK ? NN_SVC_OK : NN_SVC_ERR_BUSY;
 #else
 	/* [!] NO PLUGIN MECHANISM AND NO DECODER (issue #116).  The `null` backend
 	 * cannot load a container at all, so nothing in this build holds a
@@ -2224,7 +2244,7 @@ int nn_svc_thresh_set(unsigned milli)
 
 	/* No detail to set: this entry point returns a status only, and the
 	 * shared command has a line for BUSY (issue #122 P6 gave it one). */
-	if (!plugin_lease_take(NN_PLUGIN_LEASE_WAIT_TICKS))
+	if (!plugin_lease_take())
 		return NN_SVC_ERR_BUSY;
 	r = nn_active_set_thresh_milli(milli);
 	plugin_lease_give();
@@ -2235,6 +2255,8 @@ int nn_svc_thresh_set(unsigned milli)
 		/* The slot the shared command already has for it: the loaded decoder
 		 * holds no threshold, which is not the same as refusing the value. */
 		return NN_SVC_ERR_STATE;
+	case NN_ACTIVE_NOT_HELD:
+		return NN_SVC_ERR_BUSY;     /* nothing was entered; see _get */
 	default:
 		return NN_SVC_ERR_ARG;
 	}

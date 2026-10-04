@@ -11,6 +11,7 @@
 
 #include "plugin_run.h"
 #include "plugin_mpu_v7m.h"
+#include "plugin_lease.h"       /* the one lock into the plugin (#130)    */
 #include "nn_active_core.h"     /* NN_ACTIVE_CORE_SP() */
 
 /*
@@ -42,6 +43,15 @@ extern uint8_t __plugin_start[], __plugin_end[];
  * the reservation, which the loader overwrites.
  */
 static struct plugin_exec_state pl_state;
+
+/*
+ * Set by the exec_ok hook when it refused for want of the plugin lease, so
+ * plugin_run_load() can name that refusal rather than let the shared loader's
+ * PLUGIN_RUN_MPU stand for it (issue #130, as on grove-vision-ai-v2).  Touched
+ * only by the thread inside plugin_run_load(): the caller's NN session keeps
+ * loads one at a time.
+ */
+static uint8_t pl_exec_unheld;
 
 /* ---- the three board-specific things ------------------------------------- */
 
@@ -115,6 +125,17 @@ static __attribute__((noinline)) int pl_exec_check(uint32_t lo, uint32_t hi,
 static int pl_exec_ok(uint32_t lo, uint32_t hi, const char **why)
 {
 	plugin_run_note_entry(NN_ACTIVE_CORE_SP());
+	/* [!] THE LAST CHECK BEFORE entry() (issue #130).  plugin_run_load()
+	 * refuses an unheld caller before anything is touched; this is the same
+	 * question asked again at the branch, so a path into the loader that
+	 * skipped the first cannot reach entry() either. */
+	if (!plugin_lease_held()) {
+		plugin_lease_note_unheld();
+		pl_exec_unheld = 1u;
+		if (why != NULL)
+			*why = "the plugin lease is not held";
+		return -1;
+	}
 	return pl_exec_check(lo, hi, why);
 }
 
@@ -219,7 +240,27 @@ enum plugin_run_result plugin_run_load(const struct plugin_view *v,
 	const char *why = NULL;
 	enum plugin_run_result r;
 
+	/*
+	 * [!] THE LEASE FIRST, BEFORE THE SHARED LOADER TOUCHES ANYTHING (issue
+	 * #130, as grove-vision-ai-v2's since #127).  plugin_exec_load() begins by
+	 * unpublishing the previous plugin and then copies the new image over the
+	 * reservation it was running from; a caller without the lease could be
+	 * doing that under a decode or a draw.  Refused here, the previous plugin
+	 * is exactly as it was.
+	 */
+	if (!plugin_lease_held()) {
+		plugin_lease_note_unheld();
+		LOG_ERR("load refused: %s", plugin_run_why(PLUGIN_RUN_NOT_HELD));
+		return PLUGIN_RUN_NOT_HELD;
+	}
+	pl_exec_unheld = 0u;
 	r = plugin_exec_load(&pl_env, v, container, (uintptr_t)&src, base, &why);
+	if (r == PLUGIN_RUN_MPU && pl_exec_unheld) {
+		/* the hook's lease refusal, by name -- not the MPU's */
+		LOG_ERR("load refused at entry: %s",
+		        plugin_run_why(PLUGIN_RUN_NOT_HELD));
+		return PLUGIN_RUN_NOT_HELD;
+	}
 	switch (r) {
 	case PLUGIN_RUN_OK:
 		LOG_INF("'%s' (build %s) loaded: %lu B at 0x%08lx",
@@ -251,8 +292,25 @@ enum plugin_run_result plugin_run_load(const struct plugin_view *v,
 	return r;
 }
 
+const char *plugin_run_why(enum plugin_run_result r)
+{
+	if (r == PLUGIN_RUN_NOT_HELD)
+		return "the caller does not hold the plugin lease";
+	return plugin_run_strerror(r);
+}
+
 void plugin_run_unload(void)
 {
+	/* [!] UNDER THE PLUGIN LEASE, LIKE A LOAD (issue #130; the one entry
+	 * Grove's #127 first left unchecked).  Unpublishing clears the slot table
+	 * a holder may be calling through.  Refused, the published plugin is left
+	 * exactly as it was, and the refusal is counted like every other entry
+	 * check's. */
+	if (!plugin_lease_held()) {
+		plugin_lease_note_unheld();
+		LOG_ERR("unload refused: %s", plugin_run_why(PLUGIN_RUN_NOT_HELD));
+		return;
+	}
 	plugin_exec_unload(&pl_env);
 }
 

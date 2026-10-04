@@ -5,7 +5,8 @@
 /**
  * @file    nn_worker.c
  * @brief   The inference worker thread and its join (issue #129).  See
- *          nn_worker.h; the hand-over decisions are nn_handoff.c's.
+ *          nn_worker.h; the hand-over decisions are svc/nn_handoff.c's, run by
+ *          svc/nn_core_frame.c (issue #130).
  */
 #include "nn_worker.h"
 
@@ -14,8 +15,7 @@
 #include "cam_lcd_sink.h"   /* CAM_PANEL_PRIO                       */
 #include "camera.h"         /* CAM_PRODUCER_PRIO                    */
 #include "cli_config.h"     /* CLI_INSTANCE_{PRIORITY,STACK_SIZE}   */
-#include "nn_handoff.h"
-#include "nn_overlay.h"     /* nn_overlay_work(): the job               */
+#include "nn_overlay.h"     /* nn_overlay_work(): the job; the word */
 #include "npu_hw.h"         /* NPU_INFERENCE_TIMEOUT_TICKS          */
 #include "plugin_lease.h"   /* PLUGIN_LEASE_WAIT_MS                 */
 
@@ -70,20 +70,10 @@ static UCHAR                 nn_worker_stack[NN_WORKER_STACK_BYTES]
 static TX_EVENT_FLAGS_GROUP  nn_worker_flags;
 static volatile int          nn_worker_ok;
 
-/* The hand-over word (nn_handoff.h).  Read and changed only through
- * nn_wk_step(), one critical section per transition. */
-static uint8_t nn_wk_state = (uint8_t)NN_HO_IDLE;
-
-static int nn_wk_step(uint8_t op)
-{
-	TX_INTERRUPT_SAVE_AREA
-	int moved;
-
-	TX_DISABLE
-	moved = nn_handoff_step(&nn_wk_state, op);
-	TX_RESTORE
-	return moved;
-}
+/* The hand-over word (svc/nn_handoff.h) is the overlay's frame-path state
+ * since issue #130 -- svc/nn_core_frame.c steps it, one critical section per
+ * transition -- and this file reaches it through nn_overlay_take(),
+ * nn_overlay_want() and nn_overlay_join(). */
 
 static void nn_worker_entry(ULONG arg)
 {
@@ -96,16 +86,15 @@ static void nn_worker_entry(ULONG arg)
 		                         TX_OR_CLEAR, &got, TX_WAIT_FOREVER);
 		/* [!] A wake-up is not a job.  Only a hand-over this thread can
 		 * TAKE is one; anything else was already taken or never was. */
-		if (!nn_wk_step((uint8_t)NN_HO_OP_TAKE))
+		if (!nn_overlay_take())
 			continue;
 
 		/* Invoke, lease, geometry, decode, publish.  The input and the
-		 * outputs are this thread's until the DONE below, which is said only
-		 * after the decode has finished reading them. */
-		/* A stream asks for the next frame; a one-shot (`nn run`) wanted
-		 * one and parks for good (issue #129). */
-		(void)nn_wk_step(nn_overlay_work() ? (uint8_t)NN_HO_OP_DONE
-		                                   : (uint8_t)NN_HO_OP_DONE_LAST);
+		 * outputs are this thread's until the job's DONE, which the frame
+		 * path says only after the decode has finished reading them: a
+		 * stream asks for the next frame, a one-shot (`nn run`) wanted one
+		 * and parks for good (issue #129). */
+		nn_overlay_work();
 		(void)tx_event_flags_set(&nn_worker_flags, NN_WK_SETTLED, TX_OR);
 	}
 }
@@ -135,26 +124,16 @@ int nn_worker_arm(void)
 {
 	if (!nn_worker_ok)
 		return 0;
-	return nn_wk_step((uint8_t)NN_HO_OP_ARM);
+	return nn_overlay_want();
 }
 
-int nn_worker_wants(void)
+void nn_worker_wake(void)
 {
-	TX_INTERRUPT_SAVE_AREA
-	int w;
-
-	TX_DISABLE
-	w = (nn_wk_state == (uint8_t)NN_HO_WANT);
-	TX_RESTORE
-	return w;
-}
-
-int nn_worker_hand(void)
-{
-	if (!nn_worker_ok || !nn_wk_step((uint8_t)NN_HO_OP_HAND))
-		return 0;
-	(void)tx_event_flags_set(&nn_worker_flags, NN_WK_WAKE, TX_OR);
-	return 1;
+	/* Only an armed word can have been handed over, and only a worker that
+	 * exists can have armed it -- so this is a formality, kept so a wake-up
+	 * can never touch flags that were not created. */
+	if (nn_worker_ok)
+		(void)tx_event_flags_set(&nn_worker_flags, NN_WK_WAKE, TX_OR);
 }
 
 int nn_worker_join(void)
@@ -163,7 +142,7 @@ int nn_worker_join(void)
 	ULONG got, spent;
 
 	for (;;) {
-		if (nn_wk_step((uint8_t)NN_HO_OP_JOIN))
+		if (nn_overlay_join())
 			return 0;
 		/* Without the thread there is nothing that could ever settle the
 		 * word, and no flags to wait on. */

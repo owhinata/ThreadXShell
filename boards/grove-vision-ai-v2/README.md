@@ -4408,11 +4408,13 @@ been let loose on, so the choice was a copy of the crop (172,800 B) or preparing
 on the producer; the spike behind #129 measured the copy costing a quarter of
 the detector's frames, and preparing in place costing nothing.
 
-**The hand-over is one word, not a flag pair** (`port/npu/nn_handoff.c`, a pure
-table with a host test over every state and operation): IDLE (parked, wants
-nothing) / WANT (the producer may write the input) / HANDED (written, not yet
-taken) / RUNNING (inside invoke .. publish).  Every transition is one critical
-section.  The worker is woken by an event flag, and a wake-up that finds nothing
+**The hand-over is one word, not a flag pair** (`svc/nn_handoff.c` since #130,
+shared with wio-lite-ai and run by the shared frame path `svc/nn_core_frame.c`;
+a pure table with a host test over every state and operation): IDLE (parked,
+wants nothing) / WANT (the producer may begin a frame) / FILLING (the producer is
+writing the input; here the whole frame is one part, so it begins, writes and
+hands over in one `process()`) / HANDED (written, not yet taken) / RUNNING
+(inside invoke .. publish).  Every transition is one critical section.  The worker is woken by an event flag, and a wake-up that finds nothing
 to TAKE is stale and ignored -- the word is the truth, not a token count.  The
 worker says WANT again only after the decode has finished reading the outputs,
 so the producer's next write cannot land under it.

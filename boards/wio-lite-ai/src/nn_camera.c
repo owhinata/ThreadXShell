@@ -19,6 +19,7 @@
 #include "nn_report.h"
 #include "plugin_lease.h"
 #include "nn_det_record.h"
+#include "nn_core_frame.h"   /* the shared frame path (issue #130) */
 #include "nn_desc.h"         /* nn_tensor -> tensor_desc (issue #121) */
 #include "psram.h"
 
@@ -67,7 +68,7 @@
 /*
  * How long the worker waits for a frame before re-checking the run flag.  Without a
  * bound it would wedge on a semaphore nothing will post: a DCMI overrun or a stream
- * that stops underneath ends the band flow with want_frame still set.
+ * that stops underneath ends the band flow with the worker still wanting a frame.
  */
 #define NNCAM_FRAME_WAIT_TICKS 100u
 
@@ -94,23 +95,26 @@ static volatile int nncam_run;
  * so it is the one kind a re-arm may take back up (issue #120).  Written only
  * by nn_camera_start() on the shell side, before nncam_run is raised. */
 static int nncam_rearmable;
-/* The worker is inside nn_run().  While set, the input tensor belongs to it -- the
- * arena reuses that space for intermediates, so a producer write here is corruption. */
-static volatile int nncam_infer_active;
 /* The worker is inside the run loop, i.e. it may touch the tensors at any moment. */
 static volatile int nncam_worker_busy;
-/* The worker wants a frame; while this is 0 the producer does not touch the input. */
-static volatile int nncam_want_frame;
-/* Frame-level latch: a fill starts at band 0 and never mid-frame. */
-static volatile int nncam_filling;
+/*
+ * WHO MAY TOUCH THE INPUT TENSOR (issue #130): the shared hand-over word,
+ * svc/nn_handoff.h, stepped only by svc/nn_core_frame.c.  It replaced three
+ * flags that said the same thing in pieces -- `want_frame` (WANT), `filling`
+ * (FILLING, latched at band 0 and never mid-frame) and `infer_active` (RUNNING:
+ * the arena reuses the input's space for intermediates, so a producer write
+ * there is corruption).  One word cannot hold two of them at once.
+ */
+static struct nn_core_frame nncam_frame;
 /* Do we still hold the NN session + the OCTOSPI1 guard? */
 static volatile int nncam_holds_guards;
 
 static uint32_t nncam_infers, nncam_frames, nncam_skipped, nncam_errors;
 /* Diagnostics for the ownership invariant (owhinata/wio-lite-ai#54).  `raced` must stay
    0: it counts bands
- * that wrote the input tensor while an inference owned it.  `stale` counts posts the
- * pre-arm drain threw away -- each one is a race that WOULD have started. */
+ * that found the input taken from under them while they wrote it -- since issue #130
+ * the shared word's own check (NN_CORE_FR_RACED).  `stale` counts posts the
+ * pre-arm drain threw away, and wake-ups that found no hand-over to take. */
 static uint32_t nncam_raced, nncam_stale_posts;
 static uint32_t nncam_ingest_last, nncam_ingest_max, nncam_infer_cyc;
 static uint32_t nncam_start_tick;
@@ -270,37 +274,26 @@ static void nncam_rows(const uint16_t *src, unsigned src_y0,
 
 /* ----------------------------------------------------------- band ingest ------ */
 
+/* One band, as the frame path's prep hook sees it. */
+struct nncam_part {
+	const uint16_t *px;
+	unsigned        rows;
+};
+
 /*
- * One band, on the camera's producer thread, fanned out by app/cam_band.c after the
- * preview has had it.  Must finish well inside a band period (~18.5 ms); the DWT
- * cycles below are what proves it does, and `nn stream stats` reports the worst one.
+ * Write one band into the input tensor: the frame path's prep hook, called on the
+ * camera's producer thread only while the shared word is FILLING (issue #130).
+ * Must finish well inside a band period (~18.5 ms); the DWT cycles below are what
+ * proves it does, and `nn stream stats` reports the worst one.
  */
-static void nncam_band(unsigned band, const uint16_t *px, unsigned rows)
+static int nncam_prep(void *ctx, unsigned band, unsigned nparts)
 {
-	const int last = (band + 1u >= CAMERA_BANDS_PER_FRAME);
+	const struct nncam_part *p = ctx;
 	struct nn_tensor *in;
 	uint32_t t0, cyc;
 	unsigned oy0, oy_end;
 
-	/* The band tiling below is derived from CAMERA_BAND_ROWS, and the driver's
-	   contract is that every band is exactly that tall (port/camera/camera.h).  If
-	   that ever stops being true the rows would be sampled from the wrong source
-	   offsets and the image would simply be wrong -- so count it instead. */
-	if (rows != CAMERA_BAND_ROWS) {
-		nncam_filling = 0;
-		nncam_errors++;
-		return;
-	}
-
-	if (band == 0u && nncam_want_frame)
-		nncam_filling = 1;
-
-	if (!nncam_filling) {
-		if (last)
-			nncam_skipped++;   /* a whole frame went by while the worker ran */
-		return;
-	}
-
+	(void)nparts;
 	/* [!] Re-read every frame, never cached across a session: `nn model load`
 	   rebuilds the interpreter and re-plans the arena, so this pointer moves.
 	   (That load cannot happen WHILE we stream -- it needs the NN session, which
@@ -308,38 +301,21 @@ static void nncam_band(unsigned band, const uint16_t *px, unsigned rows)
 	in = nn_input(nncam_model, 0);
 	if (in == NULL || in->data == NULL) {
 		/* Abandon this frame WITHOUT posting: the worker must not run inference
-		   over a half-filled tensor, and its bounded wait is exactly what makes
-		   dropping the frame safe -- it re-arms want_frame on the next pass. */
-		nncam_filling = 0;
-		nncam_errors++;
-		return;
+		   over a half-filled tensor, and the frame path hands the input back
+		   to the next band 0 (ABANDON) -- the worker still wants a frame. */
+		return -1;
 	}
-
-	/* The invariant this stream depends on: the worker and the producer never hold the
-	 * input tensor at the same time.  Counted rather than assumed, because when it
-	 * breaks the picture stays plausible -- part camera, part activations. */
-	if (nncam_infer_active)
-		nncam_raced++;
 
 	oy0    = nncam_oy_bound(band, nncam_oh);
 	oy_end = nncam_oy_bound(band + 1u, nncam_oh);
 
 	t0 = DWT->CYCCNT;
-	nncam_rows(px, band * rows, oy0, oy_end, in);
+	nncam_rows(p->px, band * p->rows, oy0, oy_end, in);
 	cyc = DWT->CYCCNT - t0;
 	nncam_ingest_last = cyc;
 	if (cyc > nncam_ingest_max)
 		nncam_ingest_max = cyc;
-
-	if (last) {
-		nncam_frames++;
-		nncam_filling = 0;
-		/* Order matters: clearing want_frame is what tells the next band 0 not to
-		   start another fill, and it has to be clear before the worker -- which
-		   will own the tensor from the moment it wakes -- can run. */
-		nncam_want_frame = 0;
-		(void)tx_semaphore_put(&nncam_frame_sem);
-	}
+	return 0;
 }
 
 /* ---------------------------------------------------------------- worker ------ */
@@ -514,155 +490,275 @@ void nn_camera_note_depth_at(enum nn_camera_site site, uintptr_t sp)
 		*hw = used;
 }
 
-static void nncam_step(void)
+/* ---- the frame path's hooks (svc/nn_core_frame.h, issue #130) ------------- */
+
+static unsigned nncam_cs_enter(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	return (unsigned)interrupt_save;
+}
+
+static void nncam_cs_exit(unsigned posture)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	interrupt_save = (UINT)posture;
+	TX_RESTORE
+}
+
+/* The producer has finished writing the last band: wake the worker.  [!] After
+ * the hand-over, never before -- the post can only be observed once the
+ * producer has given up the input (owhinata/wio-lite-ai#54). */
+static void nncam_infer_start(void *ctx)
+{
+	(void)ctx;
+	(void)tx_semaphore_put(&nncam_frame_sem);
+}
+
+static int nncam_is_plugin(void *ctx)
+{
+	(void)ctx;
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	return nn_active_is_plugin();
+#else
+	return 0;   /* the null backend carries no plugin mechanism */
+#endif
+}
+
+static int nncam_publish_raw_hook(void *ctx, uint32_t gen)
+{
+	(void)ctx;
+	return nncam_publish_raw(gen);
+}
+
+#if defined(CONFIG_NN_BACKEND_TFLM)
+static int nncam_admits_hook(void *ctx, uint32_t gen)
+{
+	(void)ctx;
+	return nncam_admits(gen);
+}
+
+/* Where a plugin's decode() is called (issue #110).  Its depth is sampled
+ * inside, at the indirect call (svc/nn_active_core.c, issue #126). */
+static int nncam_decode(void *ctx, int *n)
+{
+	int nd = nn_active_decode(nncam_model);
+
+	(void)ctx;
+	/* [!] NN_ACTIVE_NOT_HELD: not reachable while the worker's take stands --
+	 * and if it ever does not, the decode did not run, so nothing is
+	 * published (issue #130, as on Grove).  Counted by the entry check
+	 * (plugin_lease_unheld()), not as a worker error: the decoder was never
+	 * asked. */
+	if (nd == NN_ACTIVE_NOT_HELD)
+		return -1;
+	*n = nd;
+	return 0;
+}
+
+static int nncam_publish_hook(void *ctx, int n, uint32_t gen)
+{
+	(void)ctx;
+	return nncam_publish_plugin(n, gen);
+}
+#endif
+
+/*
+ * This board's counting -- the table it always had: a publish the record took
+ * is an inference, whatever the decoder said; one the generation rule dropped
+ * is not counted (`nn run` waits on this counter and then reads the record).
+ * P8 changes the table, not this file's shape (#130 step 6c).
+ */
+static void nncam_account(void *ctx, enum nn_core_done what, int n, int took)
+{
+	(void)ctx;
+	(void)n;
+	if ((what == NN_CORE_DONE_RAW || what == NN_CORE_DONE_DECODED) && took)
+		nncam_infers++;
+}
+
+static const struct nn_core_frame_ops nncam_frame_ops = {
+	.cs_enter          = nncam_cs_enter,
+	.cs_exit           = nncam_cs_exit,
+	.present           = NULL,   /* the preview is its own band client */
+	.prep              = nncam_prep,
+	.infer_start       = nncam_infer_start,
+	.is_plugin         = nncam_is_plugin,
+	.publish_raw       = nncam_publish_raw_hook,
+	.outputs           = NULL,   /* nn_active_decode() reads them itself */
+	.account           = nncam_account,
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	.admits            = nncam_admits_hook,
+	.decode            = nncam_decode,
+	.publish           = nncam_publish_hook,
+	.lease_try         = plugin_lease_try,
+	.lease_held        = plugin_lease_held,
+	.lease_give        = plugin_lease_give,
+	.lease_note_unheld = plugin_lease_note_unheld,
+#endif
+};
+
+/* ----------------------------------------------------------- band ingest ------ */
+
+/*
+ * One band, on the camera's producer thread, fanned out by app/cam_band.c after the
+ * preview has had it.  The fill itself is the shared frame path's (issue #130): it
+ * begins only at band 0 while the worker wants a frame, writes each band through
+ * nncam_prep() while FILLING, and at band 3 hands the frame over and posts.
+ */
+static void nncam_band(unsigned band, const uint16_t *px, unsigned rows)
+{
+	struct nncam_part part;
+
+	/* The band tiling is derived from CAMERA_BAND_ROWS, and the driver's
+	   contract is that every band is exactly that tall (port/camera/camera.h).  If
+	   that ever stops being true the rows would be sampled from the wrong source
+	   offsets and the image would simply be wrong -- so count it instead, and
+	   drop the frame being filled (the producer's own ABANDON). */
+	if (rows != CAMERA_BAND_ROWS) {
+		(void)nn_core_frame_abandon(&nncam_frame, &nncam_frame_ops);
+		nncam_errors++;
+		return;
+	}
+
+	part.px   = px;
+	part.rows = rows;
+	switch (nn_core_on_frame(&nncam_frame, &nncam_frame_ops, &part, band,
+	                         CAMERA_BANDS_PER_FRAME)) {
+	case NN_CORE_FR_SKIPPED:
+		nncam_skipped++;   /* a whole frame went by while the worker ran */
+		break;
+	case NN_CORE_FR_ABANDONED:
+		nncam_errors++;
+		break;
+	case NN_CORE_FR_RACED:
+		/* The invariant this stream depends on: the worker and the producer
+		 * never hold the input tensor at the same time.  Counted rather than
+		 * assumed, because when it breaks the picture stays plausible -- part
+		 * camera, part activations. */
+		nncam_raced++;
+		break;
+	case NN_CORE_FR_HANDED:
+		nncam_frames++;
+		break;
+	default:
+		break;
+	}
+}
+
+/* ----------------------------------------------------------- worker loop ------ */
+
+static void nncam_step(int first)
 {
 	uint32_t gen;
-	int n;
+	unsigned drained = 0u;
 
 	/*
 	 * [!] DISCARD ANY POST THAT PREDATES THIS ARM, AND DO IT BEFORE ARMING.
 	 *
-	 * want_frame is what licenses the producer to write the input tensor, so it must
-	 * never still be set when nn_run() starts -- the tensor's arena space is reused by
-	 * the intermediates of the very inference that is running (measured: an Invoke()
-	 * rewrites 48,997 of the input's 49,152 bytes), so a producer writing into it
-	 * concurrently and an inference reading it are the same memory.
-	 *
-	 * Without this drain, one stale post is enough to break that invariant FOREVER:
-	 * the wait returns immediately, the inference starts with want_frame already set,
-	 * the next band 0 begins filling underneath it, that fill completes during the
-	 * inference and posts again -- and the next iteration repeats the whole thing.
-	 * The state is self-sustaining, which is why the symptom is not an occasional bad
-	 * frame but a stream that is wrong from some point onwards.
+	 * Before issue #130 a stale post was enough to break the ownership
+	 * invariant FOREVER: the wait returned at once, the inference started with
+	 * want_frame already set, the next band 0 began filling underneath it, and
+	 * the state sustained itself.  The shared word closes that by
+	 * construction -- a wake-up runs nothing unless it can TAKE a frame handed
+	 * over, and nothing can begin a fill while one is RUNNING -- so the drain
+	 * is now about WHICH frame runs, and it keeps the answer it always gave.
 	 *
 	 * The window that produces the stale post is real and routine: this wait times out
 	 * after NNCAM_FRAME_WAIT_TICKS (100 ms) while a fill can legitimately take up to
 	 * two frame periods (~148 ms) from arming, so the producer's post and the timeout
-	 * can land together.  Discarding it costs one frame; not discarding it costs every
-	 * frame after it.
-	 *
-	 * [!] What this does NOT establish is "the post I get back belongs to a fill that
-	 * started after I armed".  A fill already in flight when the previous step timed
-	 * out completes and posts after this arm, and that is fine -- the guarantee that
-	 * matters comes from the PRODUCER, which clears want_frame BEFORE it posts (see
-	 * nncam_band()).  So a post can only be observed after the producer has finished
-	 * writing and given up its licence, which is exactly the invariant nn_run() needs.
-	 * The drain's narrower job is to make sure the post being observed is not one from
-	 * a frame whose licence was granted by an ARM THAT IS STILL IN FORCE.
+	 * can land together.  A frame whose post is drained here was handed over under
+	 * the PREVIOUS arm, and it is thrown away with its post: discarding it costs
+	 * one frame, and this arm samples its own generation below.  The first step of
+	 * a session drops a frame left over from the last one the same way -- its
+	 * post went with the start's own drain.
 	 */
-	while (tx_semaphore_get(&nncam_frame_sem, TX_NO_WAIT) == TX_SUCCESS)
+	while (tx_semaphore_get(&nncam_frame_sem, TX_NO_WAIT) == TX_SUCCESS) {
 		nncam_stale_posts++;
+		drained++;
+	}
+	if (first || drained != 0u)
+		(void)nn_core_frame_discard(&nncam_frame, &nncam_frame_ops);
 
 	/*
 	 * [!] THE GENERATION IS SAVED HERE, at the arm, and not after the wait.
 	 * Saving it once the semaphore returns would leave the re-arm boundary open:
 	 * a stop and a fresh start could both happen while this thread sits in the
 	 * wait, and the value read afterwards would be the NEW session's -- so the
-	 * old frame would publish into it looking current.
+	 * old frame would publish into it looking current.  Hence this worker ends
+	 * every job parked (DONE_LAST) and arms itself here, after the sample.
 	 */
 	gen = nncam_gen_now();
-	nncam_want_frame = 1;
+	(void)nn_core_frame_want(&nncam_frame, &nncam_frame_ops);
 	if (tx_semaphore_get(&nncam_frame_sem, NNCAM_FRAME_WAIT_TICKS) != TX_SUCCESS) {
 		/* No frame within the bound.  The band flow may have ended without ever
 		   posting -- a DCMI overrun, or the stream stopped underneath us -- in
 		   which case there is nothing left to wait for.  cam_band_stream_lost()
 		   is evaluated lazily by whoever asks, and this is one of the askers.
-		   Drop the fill latch with it: the stream may have died part way through
-		   a frame, and leaving it set would let a re-armed stream resume that
-		   frame from whichever band arrives first.  No producer exists while the
-		   stream is lost, so this is the one place it can safely be cleared. */
-		if (cam_band_stream_lost()) {
-			nncam_want_frame = 0;
-			nncam_filling    = 0;
-		}
+		   Drop the fill with it (JOIN): the stream may have died part way
+		   through a frame, and leaving it FILLING would let a re-armed stream
+		   resume that frame from whichever band arrives first.  No producer
+		   exists while the stream is lost, so this is one place it can safely
+		   be dropped.  Otherwise a fill in flight is NOT taken away: the next
+		   step waits for it again. */
+		if (cam_band_stream_lost())
+			(void)nn_core_frame_join(&nncam_frame, &nncam_frame_ops);
 		return;
 	}
 	if (!nncam_run)
 		return;
+	/* [!] A wake-up is not a job.  Only a hand-over this thread can TAKE is
+	 * one; a post whose frame was already discarded above is stale. */
+	if (!nn_core_frame_take(&nncam_frame, &nncam_frame_ops)) {
+		nncam_stale_posts++;
+		return;
+	}
 
-	/* Guards the assertion above rather than any data: while this is set, NOTHING may
-	 * write the input tensor, and nncam_band() counts it if anything does. */
-	nncam_infer_active = 1;
-	n = nn_run(nncam_model);
-	nncam_infer_active = 0;
-	if (n != 0) {
+	/* RUNNING: while the word says so, NOTHING may write the input tensor. */
+	if (nn_run(nncam_model) != 0) {
 		nncam_errors++;
+		nn_core_frame_done(&nncam_frame, &nncam_frame_ops, 0);
 		return;
 	}
 	nncam_infer_cyc = nn_last_cycles(nncam_model);
 
-	/* Where a plugin's decode() is called (issue #110).  Its depth is sampled
-	 * inside, at the indirect call (svc/nn_active_core.c, issue #126). */
 #if defined(CONFIG_NN_BACKEND_TFLM)
-	if (nn_active_is_plugin()) {
-		int took;
-
-		/*
-		 * [!] THE LEASE SPANS THE DECODE AND THE PUBLISH, and it is taken
-		 * BEFORE the slot is looked up.  The panel runs at a higher priority
-		 * than this thread and nothing else separates them, so every part of
-		 * "ask the plugin, then say what it answered" has to be one
-		 * transaction: a panel that preempted between them would draw from
-		 * state this call is halfway through writing, or pair a new count with
-		 * an old picture.
-		 *
-		 * A wait, not a try: this thread is the one that has work to do, and
-		 * the only other holders are a console command and a draw that does
-		 * not wait.  The bound keeps a wedged holder from taking the worker
-		 * with it.
-		 */
-		if (!plugin_lease_take()) {
-			nncam_errors++;
-			return;
-		}
-		/*
-		 * [!] AND THE GENERATION IS ASKED BEFORE THE DECODE, UNDER THE
-		 * LEASE (issue #118).  A session boundary that landed during the
-		 * inference means this frame can no longer be published, and
-		 * decoding it anyway would rewrite the plugin's result -- the
-		 * account of the result the record still holds -- for nothing.
-		 * Not an error: the frame belonged to a session that has ended.
-		 */
-		if (!nncam_admits(gen)) {
-			plugin_lease_give();
-			return;
-		}
-		n = nn_active_decode(nncam_model);
-		if (n == NN_ACTIVE_NOT_HELD) {
-			/* [!] Not reachable while the take above stands -- and if it
-			 * ever does not, the decode did not run, so nothing is
-			 * published (issue #130, as on Grove).  Counted by the entry
-			 * check (plugin_lease_unheld()), not as a worker error: the
-			 * decoder was never asked. */
-			plugin_lease_give();
-			return;
-		}
-		took = nncam_publish_plugin(n, gen);
-		plugin_lease_give();
-		if (took)
-			nncam_infers++;
+	/*
+	 * [!] THE LEASE SPANS THE DECODE AND THE PUBLISH, and it is taken
+	 * BEFORE the slot is looked up.  The panel runs at a higher priority
+	 * than this thread and nothing else separates them, so every part of
+	 * "ask the plugin, then say what it answered" has to be one
+	 * transaction: a panel that preempted between them would draw from
+	 * state this call is halfway through writing, or pair a new count with
+	 * an old picture.
+	 *
+	 * A wait, not a try: this thread is the one that has work to do, and
+	 * the only other holders are a console command and a draw that does
+	 * not wait.  The bound keeps a wedged holder from taking the worker
+	 * with it.  The frame path checks the hold and gives it back; with no
+	 * plugin there is nothing to hold.
+	 */
+	if (nn_active_is_plugin() && !plugin_lease_take()) {
+		nncam_errors++;
+		nn_core_frame_done(&nncam_frame, &nncam_frame_ops, 0);
 		return;
 	}
 #endif
-
 	/*
-	 * [!] NO PLUGIN MEANS NOBODY DECODED THIS (issue #116), and that still has
-	 * to be PUBLISHED.  The inference ran; what is missing is an
-	 * interpretation of its outputs, and `nn run` waits on the counter below
-	 * and then reads the record -- so a worker that published nothing here
-	 * would leave it waiting out its timeout over an inference that had
-	 * already finished.
-	 *
-	 * Bumped LAST and ONLY IF THE PUBLISH WAS TAKEN, for the same reason as on
-	 * the plugin path: counting one the generation check dropped would hand
-	 * `nn run` a retired session's record as this run's.
+	 * The generation question, the decode and the publish under the lease --
+	 * or, with no plugin, the publish of an inference nothing decoded (issue
+	 * #116), which `nn run` waits on as much as on a decode.  Then this
+	 * board's count and the word back to IDLE: the next step arms again.
 	 */
-	if (nncam_publish_raw(gen))
-		nncam_infers++;
+	nn_core_on_infer_done(&nncam_frame, &nncam_frame_ops, NULL, gen, 0);
 }
 
 static void nncam_entry(ULONG arg)
 {
+	int first;
+
 	(void)arg;
 	for (;;) {
 		if (tx_semaphore_get(&nncam_start_sem, TX_WAIT_FOREVER) != TX_SUCCESS)
@@ -673,8 +769,8 @@ static void nncam_entry(ULONG arg)
 		   lands in the window between here and the test below simply finds the
 		   flag clear, and the loop it is racing never executes a single step. */
 		nncam_worker_busy = 1;
-		while (nncam_run)
-			nncam_step();
+		for (first = 1; nncam_run; first = 0)
+			nncam_step(first);
 		nncam_worker_busy = 0;
 
 		/* If a stop gave up waiting for us it left the guards held on purpose --
@@ -756,17 +852,18 @@ int nn_camera_start(int colorbar, int require_draw)
 		if (!cam_band_stream_lost() || !nncam_rearmable || !require_draw)
 			return NNCAM_ERR_RUNNING;
 
-		/* Clear the fill latch before the stream comes back.  A stream that died
-		   mid-frame leaves it set, and without clearing it the first re-armed band
-		   would resume a frame that began before the outage -- the first inference
-		   would then run over a tensor half of which is stale.  The worker's
-		   timeout path clears it too; doing it here as well is what makes the
-		   result independent of which of the two ran first (the re-arm can easily
-		   arrive inside the worker's 100 ms window, or while it is mid-inference).
-		   Safe to touch from here: the latch is only ever SET by the producer, and
-		   cam_band_stream_lost() being true means there is no producer right now. */
-		nncam_filling    = 0;
-		nncam_want_frame = 0;
+		/* Drop the fill before the stream comes back (JOIN, issue #130).  A
+		   stream that died mid-frame leaves it FILLING, and without dropping it
+		   the first re-armed band would resume a frame that began before the
+		   outage -- the first inference would then run over a tensor half of
+		   which is stale.  The worker's timeout path joins too; doing it here as
+		   well is what makes the result independent of which of the two ran
+		   first (the re-arm can easily arrive inside the worker's 100 ms window,
+		   or while it is mid-inference -- a frame handed over or running is not
+		   taken away, and its publish lands in the old generation).  Safe from
+		   here: cam_band_stream_lost() being true means there is no producer
+		   right now. */
+		(void)nn_core_frame_join(&nncam_frame, &nncam_frame_ops);
 
 		/*
 		 * [!] AND THE DECODE RECORD CROSSES A BOUNDARY TOO (issue #99).  A
@@ -958,8 +1055,22 @@ int nn_camera_start(int colorbar, int require_draw)
 	cam_preview_plugin_draw_arm();
 #endif
 	nncam_start_tick  = HAL_GetTick();
-	nncam_want_frame  = 0;
-	nncam_filling     = 0;
+	/*
+	 * The worker wants nothing until its first step arms it (issue #130): a
+	 * word left WANT or FILLING by the last session is joined here, as HEAD
+	 * cleared want_frame and filling at this same point -- no more and no
+	 * less.  A frame it left HANDED is dropped by the worker's first step.
+	 *
+	 * [!] THIS DOES NOT PROVE THE PRODUCER IS GONE.  The session lock says
+	 * the last session's worker left its loop; it does not say its band was
+	 * drained.  A stop whose band release failed (TEARING) leaves the guards
+	 * to the worker, which gives them back on its way out whatever the band
+	 * did -- so a callback that never returned may still be in flight here.
+	 * That hazard is older than this word and is not closed by it (a
+	 * separate issue); the JOIN only keeps the behaviour HEAD had.
+	 */
+	(void)nn_core_frame_join(&nncam_frame, &nncam_frame_ops);
+	nn_core_frame_reset(&nncam_frame, &nncam_frame_ops, 1);
 	nncam_record_boundary();
 	while (tx_semaphore_get(&nncam_frame_sem, TX_NO_WAIT) == TX_SUCCESS)
 		;
@@ -1013,6 +1124,11 @@ int nn_camera_stop(void)
 	 * cam_band_release() is idempotent, so calling it again is free.
 	 */
 	rc_band = cam_band_release(CAM_BAND_NN);
+	/* The producer is confirmed out once the drain succeeded: a frame it was
+	 * part way through filling will never be finished (JOIN, issue #130).  A
+	 * frame handed over or running is the worker's, and is left to it. */
+	if (rc_band == CAM_BAND_OK)
+		(void)nn_core_frame_join(&nncam_frame, &nncam_frame_ops);
 
 	/* Consumer side second: the worker may be up to one inference (~373 ms) away
 	   from noticing.  It is below us in priority, so sleeping is what lets it run. */
@@ -1173,6 +1289,16 @@ int nn_camera_decode_get(struct nn_camera_decode *out,
 	}
 #endif
 	return 1;
+}
+
+int nn_camera_draw(const struct nn_core_panel *p, void *ctx)
+{
+	return (int)nn_core_draw(&nncam_frame, &nncam_frame_ops, p, ctx);
+}
+
+void nn_camera_present_done(void)
+{
+	nn_core_on_present_done(&nncam_frame, &nncam_frame_ops);
 }
 
 void nn_camera_set_norm(int signed_range) { nncam_norm_signed = signed_range ? 1 : 0; }

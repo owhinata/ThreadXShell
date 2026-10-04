@@ -55,6 +55,17 @@ uint32_t nn_rec_gen(void)
 	return g;
 }
 
+int nn_rec_admits(uint32_t gen)
+{
+	int ok;
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	ok = nn_det_record_admits(&nn_rec, gen);
+	TX_RESTORE
+	return ok;
+}
+
 int nn_rec_publish_external(int n, uint32_t gen)
 {
 	int took;

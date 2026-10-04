@@ -2,25 +2,27 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host test for the inference worker's hand-over word (issue #129,
- * port/npu/nn_handoff.c).
+ * Host test for the inference worker's hand-over word (issue #129; shared and
+ * given FILLING by issue #130, svc/nn_handoff.c).
  *
  * WHY THIS EXISTS.  The camera producer writes the model's input tensor in
  * place, with no staging copy, so whether it may do so at a given instant is
  * this word and nothing else.  The sequences that would break it -- a stop that
  * lands while a frame is handed over but not yet taken, a stale wake-up after
- * the worker already took its job, a start that finds the worker not parked --
- * are microsecond windows between three threads and cannot be typed.
+ * the worker already took its job, a start that finds the worker not parked, a
+ * band that arrives after its frame was abandoned -- are microsecond windows
+ * between three threads and cannot be typed.
  *
  * [!] THE TABLE BELOW IS WRITTEN OUT, NOT COMPUTED.  Every (state, operation)
  * pair has its expected answer spelled in the test, including the states and
- * operations nobody defined.  A transition added by mistake (HAND from IDLE, a
- * JOIN that accepts HANDED) or one dropped (TAKE never moving) turns a line red.
+ * operations nobody defined.  A transition added by mistake (HAND from WANT, a
+ * BEGIN from FILLING, a JOIN that accepts HANDED) or one dropped (TAKE never
+ * moving, ABANDON going to IDLE) turns a line red.
  *
  * [!] AND WHAT IT DOES NOT COVER.  This compiles nn_handoff.c alone, so it says
- * nothing about whether nn_worker.c runs each step inside one critical section,
- * or whether the producer writes the input only after a WANT it saw.  Those are
- * held by the wrappers being short, not by this file.
+ * nothing about whether its caller runs each step inside one critical section,
+ * or whether the producer writes the input only while FILLING.  Those are
+ * svc/nn_core_frame.c's, walked by test_nn_core_frame.c.
  */
 #include <stdio.h>
 
@@ -28,14 +30,15 @@
 
 static int fails;
 
-#define BAD_STATE 4u     /* one past the last defined state */
-#define BAD_OP    6u     /* one past the last defined operation */
+#define BAD_STATE 5u     /* one past the last defined state */
+#define BAD_OP    8u     /* one past the last defined operation */
 
 static const char *st_name(unsigned s)
 {
 	switch (s) {
 	case NN_HO_IDLE:    return "IDLE";
 	case NN_HO_WANT:    return "WANT";
+	case NN_HO_FILLING: return "FILLING";
 	case NN_HO_HANDED:  return "HANDED";
 	case NN_HO_RUNNING: return "RUNNING";
 	default:            return "?";
@@ -46,7 +49,9 @@ static const char *op_name(unsigned o)
 {
 	switch (o) {
 	case NN_HO_OP_ARM:       return "ARM";
+	case NN_HO_OP_BEGIN:     return "BEGIN";
 	case NN_HO_OP_HAND:      return "HAND";
+	case NN_HO_OP_ABANDON:   return "ABANDON";
 	case NN_HO_OP_TAKE:      return "TAKE";
 	case NN_HO_OP_DONE:      return "DONE";
 	case NN_HO_OP_DONE_LAST: return "DONE_LAST";
@@ -63,17 +68,26 @@ struct row {
 	int      to[BAD_OP + 1u];   /* indexed by operation, BAD_OP last */
 };
 
-/*                 ARM      HAND       TAKE        DONE     DONE_LAST JOIN  ?op */
+#define I  NN_HO_IDLE
+#define W  NN_HO_WANT
+#define F  NN_HO_FILLING
+#define H  NN_HO_HANDED
+#define R  NN_HO_RUNNING
+/*               ARM BEGIN HAND ABANDON TAKE DONE DONE_LAST JOIN ?op */
 static const struct row table[] = {
-	{ NN_HO_IDLE,    { NN_HO_WANT, NO,      NO,         NO,      NO,       NN_HO_IDLE, NO } },
-	{ NN_HO_WANT,    { NO,      NN_HO_HANDED, NO,       NO,      NO,       NN_HO_IDLE, NO } },
-	{ NN_HO_HANDED,  { NO,      NO,      NN_HO_RUNNING, NO,      NO,       NO,         NO } },
-	{ NN_HO_RUNNING, { NO,      NO,      NO,         NN_HO_WANT, NN_HO_IDLE, NO,       NO } },
+	{ I,         { W,  NO,   NO,  NO,     NO,  NO,  NO,       I,   NO } },
+	{ W,         { NO, F,    NO,  NO,     NO,  NO,  NO,       I,   NO } },
+	/* [!] FILLING is left only by the producer (HAND, ABANDON) or by a JOIN
+	 * the stop calls once the producer is confirmed out.  A worker cannot
+	 * take it, and a second BEGIN cannot restart it. */
+	{ F,         { NO, NO,   H,   W,      NO,  NO,  NO,       I,   NO } },
+	{ H,         { NO, NO,   NO,  NO,     R,   NO,  NO,       NO,  NO } },
+	{ R,         { NO, NO,   NO,  NO,     NO,  W,   I,        NO,  NO } },
 	/* [!] A word nobody can explain is not evidence that the input is free:
 	 * every operation is refused, JOIN included, so a stop waits it out to
 	 * its deadline and reports the worker lost. */
-	{ BAD_STATE,     { NO,      NO,      NO,         NO,      NO,       NO,         NO } },
-	{ 0xFFu,         { NO,      NO,      NO,         NO,      NO,       NO,         NO } },
+	{ BAD_STATE, { NO, NO,   NO,  NO,     NO,  NO,  NO,       NO,  NO } },
+	{ 0xFFu,     { NO, NO,   NO,  NO,     NO,  NO,  NO,       NO,  NO } },
 };
 
 static void walk_table(void)
@@ -163,6 +177,9 @@ int main(void)
 	printf("nn_handoff_settled: what a join accepts\n");
 	check_settled(NN_HO_IDLE, 1);
 	check_settled(NN_HO_WANT, 1);
+	/* A frame part way through filling is joinable -- by a stop that has
+	 * confirmed the producer out, which is the only caller of JOIN. */
+	check_settled(NN_HO_FILLING, 1);
 	/* [!] Handed over but not yet taken is NOT parked: the worker will still
 	 * wake and run it.  A join that took this for parked would let the stop
 	 * cross the record boundary under a decode still to come. */
@@ -176,34 +193,65 @@ int main(void)
 	/* A stream: arm, two frames, a busy frame refused, the stop. */
 	w = (uint8_t)NN_HO_IDLE;
 	seq(&w, NN_HO_OP_ARM,  1, NN_HO_WANT,    "start arms a parked worker");
+	seq(&w, NN_HO_OP_HAND, 0, NN_HO_WANT,
+	    "a hand-over before anything was written is refused");
+	seq(&w, NN_HO_OP_BEGIN, 1, NN_HO_FILLING, "the producer begins frame 1");
+	seq(&w, NN_HO_OP_BEGIN, 0, NN_HO_FILLING,
+	    "a second first part does not restart the fill");
+	seq(&w, NN_HO_OP_TAKE, 0, NN_HO_FILLING,
+	    "the worker cannot take a frame still being written");
 	seq(&w, NN_HO_OP_HAND, 1, NN_HO_HANDED,  "the producer hands frame 1 over");
-	seq(&w, NN_HO_OP_HAND, 0, NN_HO_HANDED,
+	seq(&w, NN_HO_OP_BEGIN, 0, NN_HO_HANDED,
 	    "frame 2 while frame 1 waits: busy, the input is not the producer's");
+	seq(&w, NN_HO_OP_ABANDON, 0, NN_HO_HANDED,
+	    "a handed-over frame cannot be abandoned");
 	seq(&w, NN_HO_OP_JOIN, 0, NN_HO_HANDED,
 	    "a stop now waits: the handed frame will still run");
 	seq(&w, NN_HO_OP_TAKE, 1, NN_HO_RUNNING, "the worker takes frame 1");
 	seq(&w, NN_HO_OP_TAKE, 0, NN_HO_RUNNING,
 	    "a stale wake-up finds nothing to take");
-	seq(&w, NN_HO_OP_HAND, 0, NN_HO_RUNNING,
-	    "a frame during the invoke: busy, not inferred");
+	seq(&w, NN_HO_OP_BEGIN, 0, NN_HO_RUNNING,
+	    "a frame during the invoke: busy, not inferred -- the inference "
+	    "reuses the input");
 	seq(&w, NN_HO_OP_JOIN, 0, NN_HO_RUNNING, "a stop waits for the running job");
 	seq(&w, NN_HO_OP_DONE, 1, NN_HO_WANT,    "the worker asks for the next frame");
 	seq(&w, NN_HO_OP_TAKE, 0, NN_HO_WANT,
 	    "the wake-up that raced the job's own is stale too");
 	seq(&w, NN_HO_OP_JOIN, 1, NN_HO_IDLE,    "the stop joins a parked worker");
-	seq(&w, NN_HO_OP_HAND, 0, NN_HO_IDLE,
+	seq(&w, NN_HO_OP_BEGIN, 0, NN_HO_IDLE,
 	    "a producer frame after the join is refused");
 	seq(&w, NN_HO_OP_JOIN, 1, NN_HO_IDLE,    "a retried stop joins again at once");
 
 	/* A one-shot: it wants one frame and no more. */
 	w = (uint8_t)NN_HO_IDLE;
 	seq(&w, NN_HO_OP_ARM,       1, NN_HO_WANT,    "a one-shot arms");
-	seq(&w, NN_HO_OP_HAND,      1, NN_HO_HANDED,  "its frame is handed over");
+	seq(&w, NN_HO_OP_BEGIN,     1, NN_HO_FILLING, "its frame is begun");
+	seq(&w, NN_HO_OP_HAND,      1, NN_HO_HANDED,  "and handed over");
 	seq(&w, NN_HO_OP_TAKE,      1, NN_HO_RUNNING, "and taken");
 	seq(&w, NN_HO_OP_DONE_LAST, 1, NN_HO_IDLE,
 	    "it ends wanting nothing more");
-	seq(&w, NN_HO_OP_HAND,      0, NN_HO_IDLE,
+	seq(&w, NN_HO_OP_BEGIN,     0, NN_HO_IDLE,
 	    "so the next frame is not the worker's");
+
+	/* [!] THE TWO WAYS OUT OF FILLING ARE NOT THE SAME (issue #130).  The
+	 * producer's own ABANDON keeps the worker wanting; the stop's JOIN parks
+	 * it.  A mutation that sent ABANDON to IDLE would stop a stream for good
+	 * after one bad band; one that sent JOIN to WANT would leave a stopped
+	 * stream licensing a producer that comes back. */
+	w = (uint8_t)NN_HO_WANT;
+	seq(&w, NN_HO_OP_BEGIN,   1, NN_HO_FILLING, "a fill begins");
+	seq(&w, NN_HO_OP_ABANDON, 1, NN_HO_WANT,
+	    "ABANDON: the producer drops it; the worker still wants a frame");
+	seq(&w, NN_HO_OP_ABANDON, 0, NN_HO_WANT,
+	    "a second ABANDON finds nothing to drop");
+	seq(&w, NN_HO_OP_BEGIN,   1, NN_HO_FILLING,
+	    "the next first part begins again");
+	seq(&w, NN_HO_OP_JOIN,    1, NN_HO_IDLE,
+	    "JOIN: the stop parks it, the frame is gone");
+	seq(&w, NN_HO_OP_ABANDON, 0, NN_HO_IDLE,
+	    "an ABANDON after the join changes nothing");
+	seq(&w, NN_HO_OP_HAND,    0, NN_HO_IDLE,
+	    "nor does a late hand-over");
 
 	/* [!] A start that finds the worker not parked refuses: it does not wait
 	 * and it does not reset the word. */
@@ -212,6 +260,9 @@ int main(void)
 	w = (uint8_t)NN_HO_WANT;
 	seq(&w, NN_HO_OP_ARM, 0, NN_HO_WANT,
 	    "start refused over a stream never joined");
+	w = (uint8_t)NN_HO_FILLING;
+	seq(&w, NN_HO_OP_ARM, 0, NN_HO_FILLING,
+	    "start refused over a frame never joined");
 
 	if (fails) {
 		printf("FAILED (%d)\n", fails);

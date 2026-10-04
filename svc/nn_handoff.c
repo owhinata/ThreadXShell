@@ -4,7 +4,7 @@
  */
 /**
  * @file    nn_handoff.c
- * @brief   The worker hand-over table (issue #129).  See nn_handoff.h.
+ * @brief   The worker hand-over table (issues #129, #130).  See nn_handoff.h.
  */
 #include <stddef.h>   /* NULL */
 
@@ -13,7 +13,8 @@
 int nn_handoff_settled(uint8_t state)
 {
 	/* [!] ENUMERATED, NOT "NOT BUSY".  An unknown value is not parked. */
-	return state == (uint8_t)NN_HO_IDLE || state == (uint8_t)NN_HO_WANT;
+	return state == (uint8_t)NN_HO_IDLE || state == (uint8_t)NN_HO_WANT ||
+	       state == (uint8_t)NN_HO_FILLING;
 }
 
 int nn_handoff_step(uint8_t *state, uint8_t op)
@@ -29,9 +30,17 @@ int nn_handoff_step(uint8_t *state, uint8_t op)
 		want = (uint8_t)NN_HO_IDLE;
 		to   = (uint8_t)NN_HO_WANT;
 		break;
-	case NN_HO_OP_HAND:
+	case NN_HO_OP_BEGIN:
 		want = (uint8_t)NN_HO_WANT;
+		to   = (uint8_t)NN_HO_FILLING;
+		break;
+	case NN_HO_OP_HAND:
+		want = (uint8_t)NN_HO_FILLING;
 		to   = (uint8_t)NN_HO_HANDED;
+		break;
+	case NN_HO_OP_ABANDON:
+		want = (uint8_t)NN_HO_FILLING;
+		to   = (uint8_t)NN_HO_WANT;
 		break;
 	case NN_HO_OP_TAKE:
 		want = (uint8_t)NN_HO_HANDED;
@@ -46,8 +55,10 @@ int nn_handoff_step(uint8_t *state, uint8_t op)
 		to   = (uint8_t)NN_HO_IDLE;
 		break;
 	case NN_HO_OP_JOIN:
-		/* The one operation with two sources: a parked worker, wanting or
-		 * not.  A job handed over but not yet taken is NOT parked -- the
+		/* The one operation with several sources: a parked worker, wanting
+		 * or not, and a frame the producer was part way through -- the
+		 * caller has confirmed the producer is out, so nobody will finish
+		 * it.  A job handed over but not yet taken is NOT parked -- the
 		 * worker will still wake and run it -- so it is refused like a
 		 * running one. */
 		if (!nn_handoff_settled(from))

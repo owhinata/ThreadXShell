@@ -881,6 +881,8 @@ list(APPEND SHELL_SOURCES ${NN_SOURCES}
      "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c" # its pure half
      "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"      # the shared stream lifecycle
      "${CMAKE_SOURCE_DIR}/svc/nn_core.c"             # ...and the policy around it
+     "${CMAKE_SOURCE_DIR}/svc/nn_core_frame.c"       # the frame path (#130)
+     "${CMAKE_SOURCE_DIR}/svc/nn_handoff.c"          # ...and its hand-over word
      "${CMAKE_SOURCE_DIR}/svc/nn_report.c")          # the report capture sink
 
 # The plugin loader (issue #110 = #78 Step 3b): the machine in svc/, this

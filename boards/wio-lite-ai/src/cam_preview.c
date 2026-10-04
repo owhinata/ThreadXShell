@@ -230,46 +230,71 @@ void cam_preview_plugin_draw_arm(void)
 }
 
 /*
- * Let the loaded plugin paint.
+ * The panel's half of the shared frame path (svc/nn_core_frame.h, issue #130).
+ * nn_core_draw() tries the lease, then takes the frame lock below, then asks
+ * the hooks below whether to paint, then paints, then gives the lease back --
+ * the order and the questions this file used to spell out itself.
  *
- * [!] THE LEASE IS TAKEN BY THE CALLER, BEFORE THE FRAME LOCK.  It used to be
- * taken in here, which is AFTER ltdc_lock_frame() -- the exact inversion of
- * the order this port documents, with the comment beside it asserting the
- * opposite.  A no-wait acquire meant no deadlock could follow, so the code
- * worked and the rule it was written to obey did not exist.
+ * [!] THE LEASE IS TAKEN BEFORE THE FRAME LOCK.  It used to be taken in here,
+ * AFTER ltdc_lock_frame() -- the exact inversion of the order this port
+ * documents, with the comment beside it asserting the opposite.  A no-wait
+ * acquire meant no deadlock could follow, so the code worked and the rule it was
+ * written to obey did not exist.  The frame path takes the frame lock through
+ * preview_frame_lock() only once the lease is won, and LEAVES IT HELD for the
+ * flip.
  *
  * [!] AND A HELD LEASE IS NOT A REASON TO DRAW.  The lease says the plugin's
  * result is not being rewritten; it says nothing about whether there IS one
  * that belongs to now.  Three reachable cases need the record as well:
- * `nn overlay off` (which this path ignored entirely), a preview still running
- * after inference stopped, and a decode whose publication the generation check
+ * `nn overlay off` (preview_may_draw()), a preview still running after
+ * inference stopped, and a decode whose publication the generation check
  * REJECTED -- that one leaves fresh private state in the plugin that no
  * accepted record describes, and drawing it puts a retired session's
- * detections on a live picture.
+ * detections on a live picture.  The frame path checks the record it gets
+ * from preview_record(): valid, of THIS session (issue #118), and the
+ * plugin's.
  */
-static void preview_draw_plugin(void)
+static void preview_frame_lock(void *ctx)
+{
+	(void)ctx;
+	ltdc_lock_frame();
+}
+
+static int preview_may_draw(void *ctx)
+{
+	(void)ctx;
+	return nn_camera_get_overlay();
+}
+
+/* No capture: this is the panel asking "is there a current result, and is it
+ * the plugin's".  A RAW_TENSORS record answers the first and not the second --
+ * an inference ran that nothing decoded, and there is nothing to put on the
+ * picture (issue #116). */
+static int preview_record(void *ctx, struct nn_det_snapshot *snap)
+{
+	struct nn_camera_decode dec;
+
+	(void)ctx;
+	memset(&dec, 0, sizeof dec);
+	if (!nn_camera_decode_get(&dec, NULL, NULL))
+		return 0;
+	snap->valid      = dec.valid;
+	snap->ndet       = dec.ndet;
+	snap->kind       = dec.kind;
+	snap->reportable = dec.reportable;
+	snap->current    = dec.current;
+	snap->accepted   = dec.accepted;
+	snap->epoch      = dec.epoch;
+	return 1;
+}
+
+static void preview_paint(void *ctx)
 {
 	struct plugin_painter paint;
 	struct plugin_paint_budget bud;
-	struct nn_camera_decode dec;
 	TX_INTERRUPT_SAVE_AREA
 
-	if (!nn_camera_get_overlay())
-		return;
-	/* No capture: this is the panel asking "is there a current result, and is
-	 * it the plugin's".  A RAW_TENSORS record answers the first and not the
-	 * second -- an inference ran that nothing decoded, and there is nothing to
-	 * put on the picture (issue #116). */
-	memset(&dec, 0, sizeof dec);
-	if (!nn_camera_decode_get(&dec, NULL, NULL))
-		return;
-	/* [!] AND IT MUST BE THIS SESSION'S (issue #118).  The record keeps the
-	 * last result across a stop now, so `valid` alone would leave a stopped
-	 * stream's boxes on a live preview, and open a new stream wearing them. */
-	if (!dec.valid || !dec.current ||
-	    dec.kind != (uint8_t)NN_DET_PLUGIN_REPORT)
-		return;
-
+	(void)ctx;
 	bud.pixels  = PREVIEW_PLUGIN_DRAW_PIXELS;
 	bud.ops     = PREVIEW_PLUGIN_DRAW_OPS;
 	bud.refused = 0u;
@@ -286,6 +311,13 @@ static void preview_draw_plugin(void)
 	preview_draw_refused += bud.refused;
 	TX_RESTORE
 }
+
+static const struct nn_core_panel preview_panel = {
+	.frame_lock = preview_frame_lock,
+	.may_draw   = preview_may_draw,
+	.record     = preview_record,
+	.paint      = preview_paint,
+};
 
 #endif /* CONFIG_NN_BACKEND_TFLM */
 
@@ -306,40 +338,44 @@ static void preview_entry(ULONG arg)
 			   unannotated -- the failure this pipeline already has for a
 			   process() that declines -- and is counted, because the preview
 			   counters below see a frame that was PRESENTED, not one presented
-			   bare.
-			   [!] And `plug` is sampled once: taking it twice could light the
-			   plugin path without the lease, or leak the lease. */
-			int plug   = nn_active_is_plugin();
-			int leased = plug ? plugin_lease_try(PLUGIN_LEASE_PANEL) : 0;
-#endif
-			/* One outer lock around the boxes AND the flip.  ltdc_lock_frame()
-			   is recursive, and ltdc_flip() already holds it across its entire
-			   VBR wait, so this adds only the fills to the held time while
-			   removing up to 32 separate acquisitions from the window between
-			   the last band and the flip. */
-			ltdc_lock_frame();
-			/* Where a plugin's draw() stands (issue #108 placed the probe,
-			   #110 put the call beside it): here, inside the frame lock.  The
-			   depth is sampled at the indirect call itself
-			   (svc/nn_active_core.c, issue #126).
+			   bare.  The shared frame path asks whether a plugin is there once,
+			   tries the lease, and only then takes the frame lock (issue #130).
+
+			   Where a plugin's draw() stands (issue #108 placed the probe,
+			   #110 put the call beside it): inside the frame lock.  The depth
+			   is sampled at the indirect call itself (svc/nn_active_core.c,
+			   issue #126).
 			   [!] AND THIS IS THE ONLY WAY A FRAME GETS ANNOTATED (issue
 			   #116).  With no plugin -- or a container whose plugin was
 			   refused -- the picture is presented exactly as the bands built
 			   it; there is no second painter to fall back to.
-			   [!] The lease is released BEFORE the flip: holding it across the
-			   VBR wait would stop the worker decoding while this thread
-			   sleeps, for nothing -- the drawing is already done. */
-#if defined(CONFIG_NN_BACKEND_TFLM)
-			if (plug && leased) {
-				preview_draw_plugin();
-				plugin_lease_give();
-			}
+			   [!] The lease is released BEFORE the flip, inside the frame
+			   path: holding it across the VBR wait would stop the worker
+			   decoding while this thread sleeps, for nothing -- the drawing is
+			   already done. */
+			int drew = nn_camera_draw(&preview_panel, NULL);
+
+			/* One outer lock around the boxes AND the flip.  ltdc_lock_frame()
+			   is recursive, and ltdc_flip() already holds it across its entire
+			   VBR wait, so this adds only the fills to the held time while
+			   removing up to 32 separate acquisitions from the window between
+			   the last band and the flip.  The frame path left it held if it
+			   won the lease; otherwise it is taken here. */
+			if (drew != (int)NN_CORE_DRAW_DECLINED &&
+			    drew != (int)NN_CORE_DRAW_PAINTED)
+				ltdc_lock_frame();
+#else
+			ltdc_lock_frame();
 #endif
 			if (ltdc_flip() == LTDC_OK)
 				preview_shown++;
 			else
 				preview_dropped++;
 			ltdc_unlock_frame();
+#if defined(CONFIG_NN_BACKEND_TFLM)
+			/* The painted frame is out (svc/nn_core_frame.h). */
+			nn_camera_present_done();
+#endif
 		}
 		/* Unconditionally, including after a failed flip: leaving it set would
 		   stop the producer from ever starting another frame. */

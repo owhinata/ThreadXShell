@@ -102,17 +102,29 @@ struct nn_overlay_stats {
 const struct cam_lcd_overlay *nn_overlay_arm(void);
 
 /**
- * @brief  The worker's half of one frame: invoke, plugin lease, geometry,
- *         decode, publish, account (issue #129).
+ * @brief  The worker's half of one frame: invoke, plugin lease, then the shared
+ *         frame path's geometry, decode, publish and account (issues #129,
+ *         #130).
  *
- * Called by the inference worker only, after it has TAKEn a hand-over and
- * before it says DONE -- so the job the producer wrote is its alone, and the
- * input and output tensors are not the producer's until it returns.
- *
- * @return non-zero: a stream, ask for the next frame (DONE); 0: a one-shot,
- *         ask for nothing more (DONE_LAST)
+ * Called by the inference worker only, after nn_overlay_take() -- so the job
+ * the producer wrote is its alone, and the input and output tensors are not the
+ * producer's until it returns.  It ends the job itself: a stream asks for the
+ * next frame (DONE), a one-shot for nothing more (DONE_LAST).
  */
-int nn_overlay_work(void);
+void nn_overlay_work(void);
+
+/*
+ * The hand-over word (svc/nn_handoff.h), which lives with the overlay's
+ * frame-path state since issue #130 (svc/nn_core_frame.h).  For nn_worker.c.
+ */
+/** IDLE -> WANT.  @return non-zero if armed. */
+int nn_overlay_want(void);
+/** HANDED -> RUNNING.  @return non-zero if a job was taken (else a stale
+ *  wake-up). */
+int nn_overlay_take(void);
+/** IDLE / WANT / FILLING -> IDLE, once the producer is confirmed out.
+ *  @return non-zero if joined. */
+int nn_overlay_join(void);
 
 /** How a one-shot's frame ended (nn_overlay_shot()).  NONE until it has. */
 #define NN_OV_SHOT_NONE          0u

@@ -655,6 +655,31 @@ gcc $CFLAGS -I "$inc" -I "$svc" \
     $LDFLAGS -o "$out/test_nn_core"
 "$out/test_nn_core"
 
+# issue #129 / #130 -- who may touch the inference worker's input
+# (svc/nn_handoff.c, moved out of grove-vision-ai-v2 and given FILLING by issue
+# #130).  The producer writes the input tensor in place, so this word is the only
+# thing keeping it and the worker apart, and the sequences that would break it --
+# a stop while a frame is handed over, a stale wake-up, a band after its frame was
+# abandoned -- are windows between three threads that cannot be typed.  Every
+# (state, operation) pair is spelled out.
+gcc $CFLAGS -I "$svc" \
+    "$here/test_nn_handoff.c" "$svc/nn_handoff.c" \
+    $LDFLAGS -o "$out/test_nn_handoff"
+"$out/test_nn_handoff"
+
+# issue #130 -- the shared frame path that runs that word (svc/nn_core_frame.c):
+# a frame in four parts (wio-lite-ai's bands) and in one (grove-vision-ai-v2's),
+# the two ways out of FILLING (the producer's ABANDON, the stop's JOIN), the
+# worker's end of a job under and without the lease, and the panel's try.  The
+# stand-in hooks watch the ORDER -- the input written outside FILLING, a hook
+# inside the critical section, the lease given back after the board counted, a
+# paint without the lease or before the frame lock -- which no return shows.
+gcc $CFLAGS -I "$svc" \
+    "$here/test_nn_core_frame.c" "$svc/nn_core_frame.c" "$svc/nn_handoff.c" \
+    "$svc/nn_det_record.c" \
+    $LDFLAGS -o "$out/test_nn_core_frame"
+"$out/test_nn_core_frame"
+
 # issue #127 -- what a refused no-wait acquire of the plugin lease counts
 # (svc/plugin_lease_miss.c, moved out of grove-vision-ai-v2 by issue #130).  A
 # frame can be lost at the producer's decode or at the panel's draw; a run reset

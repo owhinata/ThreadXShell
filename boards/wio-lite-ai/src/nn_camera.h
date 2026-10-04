@@ -25,13 +25,16 @@
  * so a fresh frame is always available the moment one is wanted.  What is needed is
  * not buffering but a way to say "fill me one":
  *
- *     worker:   want_frame = 1 -> wait(sem) -> nn_run() -> decode -> publish -> repeat
- *     band cb:  band 0 && want_frame -> latch filling
- *               filling -> downsample this band's rows into nn_input()->data
- *               band 3  -> filling = 0; want_frame = 0; post(sem)
+ *     worker:   ARM (-> WANT) -> wait(sem) -> TAKE (-> RUNNING) -> nn_run()
+ *               -> decode -> publish -> DONE_LAST (-> IDLE) -> repeat
+ *     band cb:  band 0 && WANT -> BEGIN (-> FILLING)
+ *               FILLING -> downsample this band's rows into nn_input()->data
+ *               band 3  -> HAND (-> HANDED); post(sem)
  *
- * While want_frame is 0 the producer does not touch the input tensor at all, and the
- * worker owns it exclusively for the whole inference.  That removes the staging
+ * The states are ONE word, shared with grove-vision-ai-v2 since issue #130
+ * (svc/nn_handoff.h, stepped by svc/nn_core_frame.c); before that they were three
+ * flags.  Outside FILLING the producer does not touch the input tensor at all, and
+ * the worker owns it exclusively from TAKE to the end of its job.  That removes the staging
  * buffers, the state machine, the epoch counters and a 196,608 B memcpy per
  * inference -- but ONLY because of the properties spelled out on nn_camera_stop()
  * and nn_camera_start() below.  The handoff IS the correctness argument here.
@@ -43,6 +46,7 @@
 
 #include "blazeface.h"      /* struct bf_det / bf_result / BF_MAX_DET (svc/) */
 #include "nn_det_record.h"  /* enum nn_det_kind                              */
+#include "nn_core_frame.h"  /* struct nn_core_panel (issue #130)             */
 #include "nn_svc.h"         /* struct nn_report_capture                      */
 
 #define NNCAM_OK           0
@@ -272,6 +276,16 @@ int nn_camera_decode_get(struct nn_camera_decode *out,
  *  the tensor's own scale/zero_point. */
 void nn_camera_set_norm(int signed_range);
 int  nn_camera_get_norm(void);
+
+/**
+ * The panel's half of the shared frame path (issue #130): try the plugin lease,
+ * take @p p's frame lock, check the record and let the plugin paint, on this
+ * board's frame-path state.  Returns enum nn_core_draw; on DECLINED or PAINTED
+ * the frame lock is HELD for the caller to present under and release.
+ */
+int  nn_camera_draw(const struct nn_core_panel *p, void *ctx);
+/** The painted frame is out (svc/nn_core_frame.h). */
+void nn_camera_present_done(void);
 
 /** Draw the boxes on the LCD preview (app/cam_preview.c does the drawing). */
 void nn_camera_set_overlay(int on);

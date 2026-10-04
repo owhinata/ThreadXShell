@@ -16,9 +16,11 @@
  * miss counters, run through plugin_lease_miss.h) are the board's plugin_lease.c.
  * The board's own plugin_lease.h includes this and adds what only it knows: how
  * long plugin_lease_take() waits, the order against its other locks, and
- * plugin_lease_init().  A board that has not adopted this API yet keeps a
- * plugin_lease.h of its own; the different file name is what keeps the two
- * apart -- never the include order.
+ * plugin_lease_init().  Both boards with a plugin lease implement this API --
+ * grove-vision-ai-v2 since issue #127, wio-lite-ai since #130 -- and the two
+ * lock orders differ on purpose (each board's plugin_lease.h says why).  This
+ * file is named apart from the boards' own plugin_lease.h so that which one a
+ * TU means is said by the name, never by the include order.
  *
  * WHO WAITS.  A console and the inference worker wait, only up to the board's
  * one bound.  The panel TRIES and never waits: a refused panel shows the frame
@@ -69,7 +71,14 @@ void plugin_lease_give(void);
  *
  * Exact for the question it asks: only the caller can make itself the owner,
  * so a "yes" cannot go stale under it, and another thread's hold is a "no".
- * Never true outside a thread (an ISR, or before the scheduler runs).
+ *
+ * [!] OUTSIDE A THREAD THE ANSWER IS THE BOARD'S, AND tx_thread_identify() IS
+ * NOT ENOUGH.  Inside an ISR the Cortex-M ports leave it pointing at the
+ * interrupted thread, so an implementation that compares only the owner with
+ * it answers "yes" in an ISR that interrupted the holder.  wio-lite-ai's
+ * refuses any exception and pre-scheduler context first (issue #130);
+ * grove-vision-ai-v2's does not yet -- no entry point is called from an ISR
+ * there today -- and gains the same test in #130 step 6a.
  */
 int plugin_lease_held(void);
 

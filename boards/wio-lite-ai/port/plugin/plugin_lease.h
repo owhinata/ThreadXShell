@@ -33,6 +33,19 @@
  * mutex.  Nothing takes it the other way round, and a shortcut that acquired it
  * from inside an overlay helper -- after the frame lock -- would invert that.
  *
+ * [!] THE API IS svc/plugin_lease_api.h (issue #130, as grove-vision-ai-v2's
+ * since #127).  This file adds what only this board knows -- the wait bound,
+ * the lock order above, plugin_lease_init() -- and plugin_lease.c implements
+ * the API with a ThreadX mutex.  With it came the two things this board's lease
+ * lacked: plugin_lease_held(), which every entry into the plugin now asks
+ * before it calls through (port/nn/nn_active.c, port/plugin/plugin_run.c), and
+ * the count of entries refused because the caller did not hold it.
+ *
+ * [!] THE ORDER IS THE OPPOSITE OF GROVE'S, AND STAYS SO.  Grove's panel asks
+ * for its lease inside its panel guard; this panel takes the lease first and
+ * the frame lock second.  Both are safe for the same reason -- each panel only
+ * TRIES -- and neither is to be "aligned" with the other.
+ *
  * [!] AND THE PANEL DOES NOT WAIT.  A draw that blocked here would hold a lock
  * wider than the thing it is protecting, for as long as a decode takes.  It
  * asks, and on a refusal it presents the picture without an overlay -- which is
@@ -45,43 +58,32 @@
 
 #include <stdint.h>
 
+#include "plugin_lease_api.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/** Create the lease.  From tx_application_define(), before any thread runs. */
+/**
+ * How long a console -- and the inference worker, and a stop's record boundary
+ * -- waits for the lease, in milliseconds.  THE one bound:
+ * plugin_lease_take() takes no argument, so callers cannot each pick their own.
+ * Until issue #130 three files each passed 50 ticks of their own.
+ *
+ * The same figure as grove-vision-ai-v2's, and with the same extra tick
+ * (plugin_lease.c): a ThreadX timeout of N ticks can expire N-1 tick periods
+ * after the call, so the 50 ticks this board used to pass could give up after
+ * 49 ms.  Here the holders are the worker's decode-and-publish, the panel's
+ * draw and a console's report or parameter call -- all short beside the bound
+ * (the README's stream run reads 0 panel misses); re-measure when a new path
+ * starts holding it.
+ */
+#define PLUGIN_LEASE_WAIT_MS  50u
+
+/** Create the lease.  From tx_application_define(), before any thread runs.
+ *  @return 0, or -1 when the mutex could not be created -- every acquire then
+ *  fails, which leaves consoles BUSY and frames bare rather than unguarded. */
 int plugin_lease_init(void);
-
-/**
- * Take it without waiting.
- * @return non-zero when it is held and the caller must release it.
- */
-int plugin_lease_try(void);
-
-/**
- * Take it, waiting at most @p ticks.
- *
- * [!] A FINITE DEADLINE, AND AN ANSWER WHEN IT PASSES.  Measuring how long a
- * wait took is not the same as bounding it: a console that waited forever
- * behind a wedged worker would be a shell that stopped responding, with no
- * line of output saying why.
- *
- * @return non-zero when it is held and the caller must release it.
- */
-int plugin_lease_take(uint32_t ticks);
-
-/** Release it.  Only the thread that took it may call this. */
-void plugin_lease_give(void);
-
-/** How many times a no-wait acquire has been refused, and the longest run of
- *  consecutive refusals.  A single refusal is ordinary; a run of them is a
- *  panel that has stopped annotating, which looks like a broken overlay. */
-void plugin_lease_misses(uint32_t *total, uint32_t *worst_run);
-
-/** Start a fresh accounting period.  Called when a stream is armed, not when
- *  one stops: the stats right after a stop still describe the run that just
- *  ended. */
-void plugin_lease_misses_reset(void);
 
 #ifdef __cplusplus
 }

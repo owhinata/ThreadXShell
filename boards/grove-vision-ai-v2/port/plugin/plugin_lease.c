@@ -102,6 +102,8 @@ int plugin_lease_held(void)
 		return 0;
 	/* NULL outside a thread: an ISR or pre-scheduler code holds nothing, and
 	 * must not match an unowned mutex's NULL owner. */
+	/* TODO(#130 step 6a): add the ISR test -- inside an ISR tx_thread_identify()
+	 * is the INTERRUPTED thread (see wio-lite-ai's plugin_lease_held()). */
 	self = tx_thread_identify();
 	if (self == NULL)
 		return 0;

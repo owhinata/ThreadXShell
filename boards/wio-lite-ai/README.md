@@ -490,7 +490,36 @@ inside the plugin, so there is nothing to copy.
   takes no session.  **A load takes the lease before anything changes and a
   timeout refuses the load** -- taking it later and discarding the result is
   the same as not taking it, because after the deadline the replacement
-  happened anyway.
+  happened anyway;
+- **every waiter waits the same one bound**, `PLUGIN_LEASE_WAIT_MS` (50 ms) in
+  `port/plugin/plugin_lease.h`, rounded up to ticks plus one more (a ThreadX
+  timeout of N ticks can expire after N-1).  Until issue #130 the worker, the
+  stop's record boundary and the consoles each passed 50 ticks of their own;
+- **and every entry checks that its caller holds it** (issue #130, as on
+  grove-vision-ai-v2 since #127).  The API is the shared
+  `svc/plugin_lease_api.h`; `plugin_lease_held()` asks whether the CALLING
+  thread owns the mutex.  Every wrapper in `port/nn/nn_active.c` that reaches a
+  plugin callback or the slot table a holder is about to call through
+  (`shapes_ok`, `decode`, `draw`, `can_draw`, `can_report`, `report`, both
+  threshold calls), and the loader's three ways in (`plugin_run_load()` before
+  the shared loader touches anything, its exec_ok hook immediately before
+  `entry()`, and `plugin_run_unload()`), refuse a caller without it.  The answer
+  is one of its own -- `NN_ACTIVE_NOT_HELD` / `PLUGIN_RUN_NOT_HELD`, never "no
+  plugin" and never a decoder's error -- and every refusal is counted once, from
+  boot, by the check itself.  The count shows only as a suffix on the
+  `nn stream stats` miss line, `; N entry(s) refused unheld`, which a correct
+  build never prints.  The callers check the answer as well (compare against 1:
+  the refusal is negative), so a refusal is never read as "yes" -- and since
+  #130 that includes the plugin's own `shapes_ok()`, whose contract
+  (`svc/plugin_abi.h`) is 1 = readable and anything else, 2 or a negative value
+  included, = not.  `plugin_lease_held()` also answers no in any exception or
+  before the scheduler runs, where `tx_thread_identify()` alone would name the
+  interrupted thread.  Which entries
+  exist is derived, not listed: `test/check_lease_entries.py` holds every
+  function the two files define against the host tests' tables and its own
+  named exemptions (`nn_active_is_plugin()`, asked before the lease is taken;
+  the base transform, called from inside the plugin; the fault reporter's
+  `plugin_run_attribute()`; and constants).
 
 A held lease is not by itself a reason to draw -- the panel also requires
 `nn overlay` to be on and the record to hold a VALID decode of the plugin's

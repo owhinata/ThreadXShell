@@ -114,6 +114,69 @@ gcc $CFLAGS -I "$board/port/nn" -I "$board/port/plugin" -I "$board/svc" \
     $LDFLAGS -lm -o "$out/test_nn_active"
 "$out/test_nn_active"
 
+# issue #130 -- the loader's plugin-lease checks (port/plugin/plugin_run.c):
+# a load refused before the shared loader touches anything, the exec_ok hook
+# refusing again at the branch into entry(), and an unload that does not reach
+# the loader -- each without the lease, and each counted once.  The same test
+# grove-vision-ai-v2 has had since #127.  The REAL plugin_run.c and
+# svc/plugin_exec.c; the HAL is test/plugin_run_shim, and the shared loader's
+# unload is wrapped so "it did not unpublish" can be observed as "it did not
+# call".
+gcc $CFLAGS \
+    -I "$here/plugin_run_shim" -I "$board/port/plugin" -I "$board/svc" \
+    -I "$svc" \
+    "$here/test_plugin_run_lease.c" "$board/port/plugin/plugin_run.c" \
+    "$svc/plugin_exec.c" "$svc/plugin_mpu_v7m.c" "$svc/plugin_load.c" \
+    "$svc/crc32.c" \
+    $LDFLAGS -Wl,--wrap=plugin_exec_unload -o "$out/test_plugin_run_lease"
+"$out/test_plugin_run_lease"
+
+# issue #130 -- and the two tables above are the WHOLE list.  A mutation that
+# deletes one entry's check turns its row red; an entry that never had a row
+# cannot.  The list of entries is every external text symbol of nn_active.c and
+# plugin_run.c, each compiled ON ITS OWN with the includes its test uses (never
+# read off a linked test binary, whose stubs would count), held against the two
+# tests' tables and the script's named exemptions in both directions.
+lease_inc_active="-I $board/port/nn -I $board/port/plugin -I $board/svc -I $board/src -I $HOST_TEST_SVC"
+lease_inc_run="-I $here/plugin_run_shim -I $board/port/plugin -I $board/svc -I $svc"
+gcc $CFLAGS $lease_inc_active -c "$board/port/nn/nn_active.c" \
+    -o "$out/lease_nn_active.o"
+gcc $CFLAGS $lease_inc_run -c "$board/port/plugin/plugin_run.c" \
+    -o "$out/lease_plugin_run.o"
+lease_tests="--test $here/test_nn_active.c $here/test_plugin_run_lease.c"
+python3 "$here/check_lease_entries.py" \
+    --obj "$out/lease_nn_active.o" "$out/lease_plugin_run.o" $lease_tests
+
+# [!] And it is seen to fail, for the two spellings a source-text match missed
+# (the review of #130 step 4): a definition whose return type is on the line
+# above, and one behind __attribute__.  Each is appended to a copy of
+# nn_active.c, compiled like the original, and must be refused BY NAME.
+for lease_neg in two_line attribute; do
+    lease_src="$out/lease_neg_$lease_neg.c"
+    cp "$board/port/nn/nn_active.c" "$lease_src"
+    if [ "$lease_neg" = two_line ]; then
+        printf 'int\nnn_active_neg_two_line(void)\n{\n\treturn 0;\n}\n' >> "$lease_src"
+    else
+        printf '__attribute__((noinline)) int nn_active_neg_attribute(void)\n{\n\treturn 0;\n}\n' >> "$lease_src"
+    fi
+    gcc $CFLAGS -Wno-missing-prototypes $lease_inc_active -c "$lease_src" \
+        -o "$out/lease_neg_$lease_neg.o"
+    if python3 "$here/check_lease_entries.py" \
+            --obj "$out/lease_neg_$lease_neg.o" "$out/lease_plugin_run.o" \
+            $lease_tests > "$out/lease_neg_$lease_neg.txt" 2>&1; then
+        echo "check_lease_entries: FAIL -- the $lease_neg entry was not refused" >&2
+        exit 1
+    fi
+    if ! grep -q "nn_active_neg_$lease_neg is defined but neither walked" \
+            "$out/lease_neg_$lease_neg.txt"; then
+        echo "check_lease_entries: FAIL -- the $lease_neg entry was refused" \
+             "for some other reason:" >&2
+        cat "$out/lease_neg_$lease_neg.txt" >&2
+        exit 1
+    fi
+    echo "check_lease_entries: refuses an unwalked entry ($lease_neg spelling)"
+done
+
 # issue #55 -- the MLPerf Tiny harness (port/mlperf/mlperf_th.cc), driven through
 # UPSTREAM'S OWN PARSER (lib/mlperf-tiny/benchmark/api/internally_implemented.cpp,
 # unmodified).  So what is under test is the protocol itself, fed the way the host's

@@ -120,3 +120,18 @@ gcc $CFLAGS -DTEST_FIRST_BUILD_FAILS -I "$here/nn_shim" -I "$board/port/nn" \
     "$here/test_nn_model.c" "$board/port/nn/nn.c" "$HOST_TEST_SVC/nn_swap.c" \
     $LDFLAGS -o "$out/test_nn_model_fail"
 "$out/test_nn_model_fail"
+
+# issue #131 step 7d -- this board's `nn info` / `nn model load` / `nn model
+# unload` (port/nn/nn_svc_f746_model.c) behind the shared order
+# (svc/nn_core_model.c), against the real nn.c over a stub backend.  What a
+# console cannot produce on demand: a refusal from empty, a backend that
+# "restores" from nothing (EMPTY, released), a success that left no model (HW),
+# and `nn info` from another console in the middle of a swap (BUSY on all three
+# lines).  shell/test/test_nn_core_model.c walks the order itself.
+gcc $CFLAGS -I "$here/nn_shim" -I "$board/port/nn" -I "$board/port/camera" \
+    -I "$board/port/sdram" -I "$HOST_TEST_SVC" \
+    "$here/test_nn_model_life.c" "$board/port/nn/nn_svc_f746_model.c" \
+    "$board/port/nn/nn.c" "$HOST_TEST_SVC/nn_core_model.c" \
+    "$HOST_TEST_SVC/nn_swap.c" "$HOST_TEST_SVC/fmt.c" \
+    $LDFLAGS -o "$out/test_nn_model_life"
+"$out/test_nn_model_life"

@@ -20,8 +20,7 @@
  * name; past that, the backend's swap says what it returned and whether a model
  * was left, and nn_swap_end_of() turns those into the ending.  Either way
  * nn_swap_decide() is the one list of obligations.  The order that drives both
- * is svc/nn_core_model.c (issue #131; grove-vision-ai-v2 first, wio-lite-ai and
- * f746g-disco still walk their own until stage 7d).
+ * is svc/nn_core_model.c (issue #131), one copy for every board.
  *
  * WHY IT IS A PURE FUNCTION IN ITS OWN FILE.  The interesting ends cannot be
  * produced from a console on demand: a backend that refuses the new model and

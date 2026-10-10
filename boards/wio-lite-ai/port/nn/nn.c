@@ -253,6 +253,11 @@ int nn_model_present(const struct nn_model *m)
 	return (m && m->open) ? nn_impl_has_model(m->impl) : 0;
 }
 
+int nn_model_loaded(void)
+{
+	return nn_model_present(&g_model);
+}
+
 int nn_model_reload(const void *data, uint32_t len, const char *name,
                     int *model_after)
 {

@@ -251,6 +251,14 @@ int nn_model_reload(const void *data, uint32_t len, const char *name,
 int nn_model_present(const struct nn_model *m);
 
 /**
+ * nn_model_present() of the singleton, WITHOUT opening it: 0 before the first
+ * nn_model_open().  Builds nothing (issue #131 step 7d) -- the shared order in
+ * svc/nn_core_model.c asks it for a refusal before the claim and for had_open
+ * under the claim, and a question must not construct what it asks about.
+ */
+int nn_model_loaded(void);
+
+/**
  * One short sentence for a code returned by nn_model_reload(), never NULL.  Handles
  * both the NN_MODEL_ERR_* family and this layer's own NN_ERR_* codes.
  */

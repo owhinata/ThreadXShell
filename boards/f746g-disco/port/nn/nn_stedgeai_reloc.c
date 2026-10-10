@@ -17,7 +17,9 @@
  * nn vtable load_region()/reload() path and cmd_nn's `nn model load`.
  *
  * SD-only: there is NO built-in model.  open() returns an empty handle (0 in/out);
- * `nn model load --path <bin>` installs a model; `nn model load builtin` unloads it.
+ * `nn model load --path <bin>` installs a model; `nn model unload` (release())
+ * empties it again.  `nn model load builtin` is refused (has_builtin is 0) -- it
+ * used to unload, which is not what the word says (issue #131 P16).
  *
  * Memory (all in .sdram.ai / .sdram.ai.model, FMC bank3):
  *   - g_model_slot[2]  (.sdram.ai.model, bank3 UPPER half -> bsp.c MPU region2 makes
@@ -383,16 +385,33 @@ static int reloc_bk_init(void)
 	return 0;   /* the loader is stateless until load_and_create(); nothing global to init */
 }
 
-static int reloc_bk_open(void **impl_out)
+/* Empty: no network, no slot, no tensors, the name "(none)". */
+static void reloc_empty(void)
 {
-	/* SD-only: start empty.  A model appears only after `nn model load`. */
-	g_reloc.hdl   = AI_HANDLE_NULL;
-	g_reloc.slot  = -1;
-	g_reloc.n_in  = 0;
-	g_reloc.n_out = 0;
+	if (g_reloc.hdl != AI_HANDLE_NULL) {
+		(void)ai_rel_network_destroy(g_reloc.hdl);
+		g_reloc.hdl = AI_HANDLE_NULL;
+	}
+	g_reloc.slot = -1;
+	g_reloc.n_in = g_reloc.n_out = 0;
 	g_reloc.acts_bytes = 0;
 	strcpy(g_reloc.name, "(none)");
+}
+
+static int reloc_bk_open(void **impl_out)
+{
+	/* SD-only: start empty.  A model appears only after `nn model load`.
+	 * nn.c opens once (its singleton stays open), so this never runs over a
+	 * loaded model. */
+	reloc_empty();
 	*impl_out = &g_reloc;
+	return 0;
+}
+
+/* `nn model unload` (issue #131 P16): back to "(none)". */
+static int reloc_bk_release(void)
+{
+	reloc_empty();
 	return 0;
 }
 
@@ -440,7 +459,9 @@ static int reloc_bk_load_region(void **buf, uint32_t *cap)
 	return 0;
 }
 
-/* Rebuild the model from an SD-loaded .bin (transactional).  @p data==NULL unloads.
+/* Rebuild the model from an SD-loaded .bin (transactional).  @p data==NULL asks for
+ * a built-in model, which this backend does not have: refused, nothing changes
+ * (the adapter refuses `builtin` before it gets here; unload is release()).
  * *impl_out is ALWAYS &g_reloc (non-NULL): "no model" is the internal hdl==NULL state
  * (open stays true; model_name "(none)"; run() fails until a model loads). */
 static int reloc_bk_reload(const void *data, uint32_t len, const char *name, void **impl_out)
@@ -455,17 +476,8 @@ static int reloc_bk_reload(const void *data, uint32_t len, const char *name, voi
 
 	*impl_out = &g_reloc;
 
-	if (data == NULL) {                      /* unload -> "(none)" */
-		if (g_reloc.hdl != AI_HANDLE_NULL) {
-			(void)ai_rel_network_destroy(g_reloc.hdl);
-			g_reloc.hdl = AI_HANDLE_NULL;
-		}
-		g_reloc.slot = -1;
-		g_reloc.n_in = g_reloc.n_out = 0;
-		g_reloc.acts_bytes = 0;
-		strcpy(g_reloc.name, "(none)");
-		return 0;
-	}
+	if (data == NULL)                        /* no built-in model here */
+		return -1;
 
 	/* data must be the inactive slot returned by load_region(). */
 	if (data == g_model_slot[0])      new_slot = 0;
@@ -520,4 +532,7 @@ const struct nn_backend_vt nn_backend_vt_selected = {
 	.run = reloc_bk_run,
 	.load_region = reloc_bk_load_region,
 	.reload = reloc_bk_reload,
+	.release = reloc_bk_release,
+	.arena_reserved = RELOC_ACTS_CAP,         /* g_acts */
+	.has_builtin = 0u,                        /* SD-only */
 };

@@ -368,12 +368,17 @@ void nn_svc_info(struct nn_svc_info *out)
 	nn_svc_str(out->backend, sizeof out->backend, bi ? bi->name : NULL);
 	nn_svc_str(out->version, sizeof out->version, bi ? bi->version : NULL);
 
+	/* [!] THE RESERVATION, NOT THE USE (issue #131 P3).  This line used to
+	 * carry what the model's activations take, under the word "reserved"; that
+	 * is `used` now, as on grove-vision-ai-v2.  A fixed fact of the build, so it
+	 * needs no claim and stands even when the rest is busy. */
+	out->arena_bytes = nn_arena_reserved();
+
 	if (nn_model_open(&m) != 0 || m == NULL)
 		return;
 
 	/* Copied, not borrowed: the backend owns this name and a reload replaces
 	   it, so the caller must not hold a pointer into it while printing. */
-	out->arena_used  = 0u;   /* this backend reports only the reservation */
 	/*
 	 * [!] THE NAME IS COPIED UNDER THE SESSION WHEN THE SESSION IS FREE, and
 	 * copied anyway when it is not.  That is a deliberate middle, not an
@@ -400,7 +405,7 @@ void nn_svc_info(struct nn_svc_info *out)
 	 * load command took that to mean a previous model existed. */
 	out->model_active = nn_model_present(m) ? 1u : 0u;
 	nn_svc_str(out->model, sizeof out->model, nn_model_name(m));
-	out->arena_bytes = nn_activations_bytes(m);
+	out->arena_used  = out->model_active ? nn_activations_bytes(m) : 0u;
 	if (held)
 		nn_session_release();
 	seq1 = nn_claims_seq_read();
@@ -418,7 +423,7 @@ void nn_svc_info(struct nn_svc_info *out)
 	if (!held && ((seq0 & 1u) != 0u || seq0 != seq1)) {
 		out->model_active   = 0u;
 		out->model[0]       = '\0';
-		out->arena_bytes    = 0u;
+		out->arena_used     = 0u;
 		out->avail_identity = (uint8_t)NN_AVAIL_BUSY;
 		out->avail_runtime  = (uint8_t)NN_AVAIL_BUSY;
 		out->avail_tensors  = (uint8_t)NN_AVAIL_BUSY;
@@ -1304,6 +1309,16 @@ void nn_svc_bench_prepare(struct nn_op_result *res)
 		nn_result(res, rc, NN_CLAIM_NONE);
 		return;
 	}
+	/* [!] A MODEL, ASKED UNDER THE GUARDS (issue #131).  The singleton opens
+	 * empty -- after boot and after `nn model unload` -- and this used to
+	 * succeed on it, so the failure came later from the run as "inference
+	 * failed", a hardware answer for a state one. */
+	if (!nn_model_present(m)) {
+		nn_guards_give();
+		nn_detail_set("no model is loaded");
+		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
+		return;
+	}
 	/* [!] The carve-out is NOLOAD, so an input holds whatever survived the last
 	 * reset until something fills it.  A fixed pattern makes every run
 	 * comparable; which pattern does not matter, that there is one does. */
@@ -1337,6 +1352,13 @@ void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
 	rc = nn_guards_take(res);
 	if (rc != NN_SVC_OK) {
 		nn_result(res, rc, NN_CLAIM_NONE);
+		return;
+	}
+	/* Asked again under THIS hold: an unload may have run since prepare. */
+	if (!nn_model_present(m)) {
+		nn_guards_give();
+		nn_detail_set("no model is loaded");
+		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
 		return;
 	}
 

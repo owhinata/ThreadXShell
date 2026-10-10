@@ -431,7 +431,18 @@ the TFLM singleton opens empty and stays open, so `nn_model_reload()`
 reports whether a model is left (`nn_model_present()`: open and describing at
 least one input), and `nn info` says `model : (none)` until the first load.
 Before, an empty board reported `model_active` and a refused first load said
-`the previous model is still active`.
+`the previous model is still active`.  `nn bench` asks the same question under
+the NN session and the PSRAM guard, and with no model it is refused as `no
+model is loaded` (issue #131); it used to prepare successfully and then fail
+every run as `inference failed`.
+
+`nn info` prints two arena figures (issue #131 P3, the same two lines as
+grove-vision-ai-v2): `arena : N B reserved` is the activation arena the backend
+reserves -- `nn_tflm_arena`, 524,288 B on `tflm`, 0 on `null` -- whatever is
+open and even while another command holds the model; `used : N B (activations)`
+is what the open model's activations actually take of it (470,352 B for the
+BlazeFace pin), and is absent with no model.  Until #131 the `arena` line
+carried the used figure under the word "reserved".
 
 **[!] Two of those rows are not exercised on hardware.**  "A new model adopted
 and its plugin refused" and "the reload failed and the previous model was
@@ -931,7 +942,7 @@ running, in slot 4, and two things came out of it:
   model, and the differences between two `nn run` outputs are just different
   camera frames.
 - **The container costs 4,304 B of slot and nothing else.**  Loading it
-  reported the same tensors, the same 470,352 B arena and the same threshold as
+  reported the same tensors, the same 470,352 B of arena used and the same threshold as
   the bare model, and `nn info`'s plugin lines match what the host's
   `verify_container` printed for the same file, field for field.
 

@@ -245,4 +245,7 @@ const struct nn_backend_vt nn_backend_vt_selected = {
 	.output = stai_bk_output,
 	.activations_bytes = stai_bk_acts_bytes,
 	.run = stai_bk_run,
+	/* No reload / release: the model is compiled in. */
+	.arena_reserved = STAI_NETWORK_ACTIVATIONS_SIZE,   /* stai_acts */
+	.has_builtin = 1u,
 };

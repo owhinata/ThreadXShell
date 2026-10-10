@@ -531,9 +531,10 @@ static struct nn_tensor *tflm_bk_output(void *impl, int idx)
 	return (idx >= 0 && idx < m->n_out) ? &m->out[idx] : nullptr;
 }
 
-/* The arena TFLM actually PLANNED, not the NN_TFLM_ARENA_BYTES reservation.  The
- * reservation is a build-time guess; this is the number that says whether it was a
- * good one, and the only one worth printing. */
+/* The arena TFLM actually PLANNED for the open model (0 with none) -- the `used`
+ * line of `nn info`.  The NN_TFLM_ARENA_BYTES reservation is a build-time guess and
+ * this is the number that says whether it was a good one; since issue #131 P3 both
+ * are printed, the reservation from arena_reserved below. */
 static uint32_t tflm_bk_acts_bytes(void *impl)
 {
 	return ((struct tflm_model *)impl)->used;
@@ -606,6 +607,7 @@ const struct nn_backend_vt nn_backend_vt_selected = {
 	.load_region       = tflm_bk_load_region,
 	.reload            = tflm_bk_reload,
 	.heap_allocs       = tflm_bk_heap_allocs,
+	.arena_reserved    = NN_TFLM_ARENA_BYTES,     /* nn_tflm_arena */
 };
 
 }  /* extern "C" */

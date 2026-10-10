@@ -216,4 +216,5 @@ const struct nn_backend_vt nn_backend_vt_selected = {
 	.output            = null_output,
 	.activations_bytes = null_activations_bytes,
 	.run               = null_run,
+	.arena_reserved    = 0u,      /* no arena -- see null_activations_bytes() */
 };

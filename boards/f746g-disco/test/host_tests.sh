@@ -101,3 +101,22 @@ python3 "$board/cmake/fixtures/run_layout_tests.py"
 # on the bytes it emits (the fetch verified it once, earlier), refuses an empty
 # or malformed expected hash, and leaves no output behind on a refusal.
 python3 "$board/cmake/fixtures/run_gen_model_array_tests.py"
+
+# issue #131 P16 -- this board's model singleton (port/nn/nn.c) over a stub
+# backend that keeps the contract nn_backend.h states.  The two properties a
+# console cannot pin down on its own: only the first open after boot reaches the
+# backend (an `nn info` after `nn model unload` must not put the built-in model
+# back), and a reload's answer is whether a MODEL is left -- a refused load from
+# empty is EMPTY through the shared table, not PREVIOUS.  The HAL and ThreadX are
+# test/nn_shim.
+gcc $CFLAGS -I "$here/nn_shim" -I "$board/port/nn" -I "$HOST_TEST_SVC" \
+    "$here/test_nn_model.c" "$board/port/nn/nn.c" "$HOST_TEST_SVC/nn_swap.c" \
+    $LDFLAGS -o "$out/test_nn_model"
+"$out/test_nn_model"
+# ...and again with the one adoption failing: the next open must reach the
+# backend through a latch that was given back, build nothing and open empty.
+gcc $CFLAGS -DTEST_FIRST_BUILD_FAILS -I "$here/nn_shim" -I "$board/port/nn" \
+    -I "$HOST_TEST_SVC" \
+    "$here/test_nn_model.c" "$board/port/nn/nn.c" "$HOST_TEST_SVC/nn_swap.c" \
+    $LDFLAGS -o "$out/test_nn_model_fail"
+"$out/test_nn_model_fail"

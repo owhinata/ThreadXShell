@@ -186,6 +186,11 @@ uint32_t nn_activations_bytes(const struct nn_model *m)
 	return (m && m->open) ? nn_backend_vt_selected.activations_bytes(m->impl) : 0u;
 }
 
+uint32_t nn_arena_reserved(void)
+{
+	return nn_backend_vt_selected.arena_reserved;
+}
+
 int nn_run(struct nn_model *m)
 {
 	uint32_t c0, c1;

@@ -23,6 +23,15 @@
  * referencing, and reload() is transactional -- on any failure it rebuilds the
  * previous (known-good) model and reports it.
  *
+ * EMPTY, AND WHEN THE BUILT-IN COMES BACK (issue #131 P16).  The backend can hold
+ * no model: zero tensors, the name "(none)" -- after `nn model unload`
+ * (release()), or after a refused load that had nothing to restore.  The built-in
+ * model is adopted implicitly exactly ONCE, by the first open() after boot
+ * (g_adopted); after that only an explicit reload(NULL) -- `nn model load
+ * builtin` -- brings it back.  An open, an `nn info` or an `nn run` on an empty
+ * backend builds nothing.  This used to revert to the built-in model on unload
+ * and on any reopen, so `nn model unload` could not empty the board.
+ *
  * The interpreter is constructed lazily in open() (placement-new into a static
  * buffer, so no global ctor runs before SDRAM/clock are up, and the heap is never
  * touched).  ~MicroInterpreter() is NOT a no-op (it calls FreeSubgraphs()), so a
@@ -95,10 +104,15 @@ struct tflm_model {
 tflm_model g_tm;
 char g_model_name[64];
 
-/* The active flatbuffer + its length (for `nn model` display).  Defaults to the
- * built-in BlazeFace model; redirected to an SD slot by reload(). */
-const void *g_active_model = g_blazeface_model_data;
-uint32_t    g_active_len;                    /* lazily set to the built-in size */
+/* The active flatbuffer + its length, or nullptr / 0 when nothing is loaded.
+ * The first open() points it at the built-in BlazeFace model; reload() redirects
+ * it to an SD slot or back to the built-in one, release() clears it. */
+const void *g_active_model = nullptr;
+uint32_t    g_active_len   = 0u;
+
+/* The first open() has run, and with it the one implicit adoption of the
+ * built-in model (issue #131 P16).  Never cleared. */
+bool g_adopted = false;
 
 tflite::MicroInterpreter *g_interp = nullptr;
 
@@ -149,6 +163,26 @@ void set_model_name(const char *name, int slot)
 				g_model_name[n++] = *s;
 	}
 	g_model_name[n] = '\0';
+	g_tm.name = g_model_name;
+}
+
+/* No model: zero tensors, no activations, the name "(none)" (issue #131 P16).
+ * Only the descriptors change; the caller has destroyed the interpreter. */
+void publish_empty()
+{
+	g_tm.n_in  = 0;
+	g_tm.n_out = 0;
+	g_tm.used  = 0u;
+	{
+		const char *src = "(none)";
+		int n = 0;
+
+		while (src[n] && n < (int)sizeof(g_model_name) - 1) {
+			g_model_name[n] = src[n];
+			n++;
+		}
+		g_model_name[n] = '\0';
+	}
 	g_tm.name = g_model_name;
 }
 
@@ -275,20 +309,49 @@ static int tflm_bk_init(void)
 	return 0;   /* TFLM has no global runtime init */
 }
 
+/*
+ * [!] THE BUILT-IN MODEL IS ADOPTED HERE ONCE, ON THE FIRST OPEN AFTER BOOT, and
+ * never again (issue #131 P16).  g_adopted is set before the build, so a build
+ * that fails is reported to that first caller and the next open finds the
+ * backend EMPTY instead of trying again -- every later open, from `nn info`
+ * on another console included, builds nothing.  nn.c's latch keeps a second
+ * open out until this one has returned.
+ */
 static int tflm_bk_open(void **impl_out)
 {
 	if (g_tm.open) { *impl_out = &g_tm; return 0; }
 
-	if (g_active_len == 0)                   /* lazily default to the built-in model */
-		g_active_len = g_blazeface_model_data_size;
-
-	int rc = build_interp(g_active_model, g_active_len);
-	if (rc != 0)
-		return rc;
-
-	set_model_name(nullptr, g_sd_slot);      /* -1 => built-in name */
+	if (!g_adopted) {
+		g_adopted = true;
+		int rc = build_interp(g_blazeface_model_data,
+		                      g_blazeface_model_data_size);
+		if (rc != 0) {
+			publish_empty();             /* the next open finds it empty */
+			return rc;
+		}
+		g_active_model = g_blazeface_model_data;
+		g_active_len   = g_blazeface_model_data_size;
+		g_sd_slot      = -1;
+		set_model_name(nullptr, -1);         /* the built-in name */
+	} else if (g_interp == nullptr) {
+		publish_empty();
+	}
 	g_tm.open = true;
 	*impl_out = &g_tm;
+	return 0;
+}
+
+/* Unload (issue #131 P16): destroy the interpreter, keep the backend open with
+ * no model.  The SD slots keep their bytes, but none of them is ACTIVE, so the
+ * next load_region() hands out slot 0. */
+static int tflm_bk_release(void)
+{
+	destroy_interp();
+	g_active_model = nullptr;
+	g_active_len   = 0u;
+	g_sd_slot      = -1;
+	publish_empty();
+	g_tm.open = true;
 	return 0;
 }
 
@@ -306,10 +369,11 @@ static int tflm_bk_load_region(void **buf, uint32_t *cap)
 	return 0;
 }
 
-/* Transactional model swap.  data==NULL reverts to the built-in model; otherwise
+/* Transactional model swap.  data==NULL adopts the built-in model; otherwise
  * data must point at one of the two SD slots (the one load_region() handed out).
- * On failure the previous known-good model is rebuilt and reported.  *impl_out is
- * ALWAYS the resulting active handle (&g_tm), or NULL if even the restore failed. */
+ * On failure the previous known-good model is rebuilt and reported -- or, when
+ * nothing was loaded, the backend stays empty.  *impl_out is ALWAYS &g_tm: the
+ * empty handle when no model is left (issue #131 P16). */
 static int tflm_bk_reload(const void *data, uint32_t len, const char *name,
                           void **impl_out)
 {
@@ -345,8 +409,19 @@ static int tflm_bk_reload(const void *data, uint32_t len, const char *name,
 		return 0;
 	}
 
-	/* New model failed -> restore the previous (known-good) model.  Its flatbuffer
-	 * is intact (double-buffered slots / Flash built-in), so this should succeed.
+	/* New model failed.  build_interp() has destroyed the interpreter, so g_tm
+	 * describes tensors that are gone: something is published before returning.
+	 * Nothing was loaded before (issue #131 P16) -> stay empty. */
+	if (old_model == nullptr) {
+		g_sd_slot = -1;
+		publish_empty();
+		g_tm.open = true;
+		*impl_out = &g_tm;
+		return rc;
+	}
+
+	/* Restore the previous (known-good) model.  Its flatbuffer is intact
+	 * (double-buffered slots / Flash built-in), so this should succeed.
 	 * g_model_name still holds the old name (only success paths overwrite it), so
 	 * no re-derive -- just re-point g_tm.name after build_interp refilled g_tm. */
 	if (build_interp(old_model, old_len) == 0) {
@@ -359,10 +434,16 @@ static int tflm_bk_reload(const void *data, uint32_t len, const char *name,
 		return rc;                       /* report the original failure */
 	}
 
-	/* Catastrophic: even the previous model could not be rebuilt (leave closed so
-	 * a later nn_model_open() retries a fresh build). */
-	g_tm.open = false;
-	*impl_out = nullptr;
+	/* Catastrophic: even the previous model could not be rebuilt.  Empty, and
+	 * open (issue #131 P16): this used to close the handle, and the next open of
+	 * a closed backend adopted the built-in model on its own -- a model nobody
+	 * loaded, and one a racing `nn info` could install. */
+	g_active_model = nullptr;
+	g_active_len   = 0u;
+	g_sd_slot      = -1;
+	publish_empty();
+	g_tm.open = true;
+	*impl_out = &g_tm;
 	return rc;
 }
 
@@ -382,8 +463,8 @@ static struct nn_tensor *tflm_bk_output(void *impl, int idx)
 	return (idx >= 0 && idx < m->n_out) ? &m->out[idx] : nullptr;
 }
 
-/* Report the arena TFLM actually planned (not the 512 KB reservation), so `nn info`
- * compares apples-to-apples with the stedgeai backend's ACTIVATIONS_SIZE. */
+/* The arena TFLM actually planned for the open model (0 with none) -- the `used`
+ * line of `nn info`.  The 512 KB reservation is arena_reserved (issue #131 P3). */
 static uint32_t tflm_bk_acts_bytes(void *impl) { return ((struct tflm_model *)impl)->used; }
 
 static int tflm_bk_run(void *impl)
@@ -397,7 +478,8 @@ static const struct nn_backend_info g_info = { "tflm", "tflite-micro (BlazeFace)
 /* Positional init (C++17: no designated initializers).  Field order MUST match
  * struct nn_backend_vt in nn_backend.h:
  * info, init, open, close, model_name, in_count, out_count, input, output,
- * activations_bytes, run, load_region, reload. */
+ * activations_bytes, run, load_region, reload, release, arena_reserved,
+ * has_builtin. */
 const struct nn_backend_vt nn_backend_vt_selected = {
 	&g_info,
 	tflm_bk_init,
@@ -412,6 +494,9 @@ const struct nn_backend_vt nn_backend_vt_selected = {
 	tflm_bk_run,
 	tflm_bk_load_region,
 	tflm_bk_reload,
+	tflm_bk_release,
+	(uint32_t)kArenaSize,
+	1u,                                  /* the built-in BlazeFace */
 };
 
 }  /* extern "C" */

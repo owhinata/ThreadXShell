@@ -26,8 +26,12 @@
 /** ...and the source is a path on the SD card, so this board also supplies the
  *  whole-file read the shared command passes down (see nn_svc.h). */
 #define NN_SVC_HAS_MODEL_PATH  1
-/** ...or the model built into the image.  These two are the sources `nn model
- *  load` lists here, and the only two the adapter accepts. */
+#endif
+/** ...or the model built into the image -- which only `tflm` has among the two
+ *  that can load.  `stedgeai_reloc` is SD-only and refuses `builtin` (issue
+ *  #131 P16), so its usage does not list it.  These are the sources `nn model
+ *  load` lists here, and the only ones the adapter accepts. */
+#if defined(CONFIG_NN_BACKEND_TFLM)
 #define NN_SVC_HAS_MODEL_BUILTIN 1
 #endif
 

@@ -11,7 +11,8 @@
  * joins while a frame is half written, a wake-up whose frame was already taken,
  * a panel that wins the lease over a record from the last session -- and none
  * can be typed at a console.  Both shapes a board hands frames in are walked: a
- * frame in four parts (wio-lite-ai's bands) and in one (grove-vision-ai-v2).
+ * frame in four parts (wio-lite-ai's bands) and in one (grove-vision-ai-v2, and
+ * f746g-disco with no plugin mechanism at all).
  *
  * [!] THE STAND-INS WATCH THE ORDER, NOT ONLY THE ANSWER.  The input written
  * outside FILLING, a hook called inside the critical section (a mutex wait
@@ -511,6 +512,58 @@ static void test_infer_done(void)
 	      "a board with no plugin mechanism publishes raw with no lease hooks");
 }
 
+/*
+ * The shape f746g-disco has since issue #130: whole frames, no plugin mechanism at
+ * all (every lease hook NULL), a worker that stays armed between jobs, and a
+ * resident decoder that publishes through the no-plugin slot.
+ */
+static void test_bare_one_part(void)
+{
+	printf("a frame in one part with no plugin mechanism (f746g-disco)\n");
+	reset(NN_HO_IDLE);
+	CHECK(nn_core_on_frame(&fr, &ops_bare, NULL, 0u, 1u) == NN_CORE_FR_SKIPPED &&
+	      b.prep_calls == 0, "a worker not armed yet: skipped, nothing written");
+	CHECK(nn_core_frame_want(&fr, &ops_bare) == 1 &&
+	      nn_core_on_frame(&fr, &ops_bare, NULL, 0u, 1u) == NN_CORE_FR_HANDED &&
+	      b.prep_calls == 1 && b.infer_starts == 1,
+	      "armed: the one part is written and handed over");
+	CHECK(nn_core_frame_take(&fr, &ops_bare) == 1 &&
+	      nn_core_on_frame(&fr, &ops_bare, NULL, 0u, 1u) == NN_CORE_FR_SKIPPED &&
+	      b.prep_calls == 1,
+	      "[!] a frame that arrives during the inference is skipped, not staged");
+	nn_core_on_infer_done(&fr, &ops_bare, NULL, 0x77u, 1);
+	CHECK(b.raw_calls == 1 && b.pub_gen == 0x77u &&
+	      b.acc_what == NN_CORE_DONE_RAW && fr.word == (uint8_t)NN_HO_WANT,
+	      "published through the no-plugin slot under the job's generation; "
+	      "the worker wants the next frame");
+	CHECK(nn_core_on_frame(&fr, &ops_bare, NULL, 0u, 1u) == NN_CORE_FR_HANDED &&
+	      nn_core_frame_take(&fr, &ops_bare) == 1,
+	      "...which is written as soon as it arrives");
+	nn_core_on_infer_done(&fr, &ops_bare, NULL, 0x78u, 0);
+	CHECK(fr.word == (uint8_t)NN_HO_IDLE,
+	      "a job that ends after a stop parks the word (DONE_LAST)");
+
+	reset(NN_HO_HANDED);
+	CHECK(nn_core_frame_join(&fr, &ops_bare) == 0 &&
+	      fr.word == (uint8_t)NN_HO_HANDED,
+	      "a stop's JOIN leaves a frame handed over alone");
+	CHECK(nn_core_frame_discard(&fr, &ops_bare) == 1 &&
+	      nn_core_frame_join(&fr, &ops_bare) == 1 &&
+	      fr.word == (uint8_t)NN_HO_IDLE && b.raw_calls == 0,
+	      "...and the next start drops it without running it, then parks");
+
+	reset(NN_HO_RUNNING);
+	b.plugin = 1;
+	nn_core_on_infer_done(&fr, &ops_bare, NULL, 3u, 1);
+	CHECK(b.acc_what == NN_CORE_DONE_NOT_HELD && b.raw_calls == 0 &&
+	      b.pub_calls == 0 && b.decode_calls == 0 &&
+	      fr.word == (uint8_t)NN_HO_WANT,
+	      "[!] with no lease hooks a \"plugin\" is never held: nothing decoded "
+	      "or published -- such a board must answer is_plugin() with no");
+	CHECK(b.hook_in_cs == 0 && b.in_cs == 0,
+	      "no hook ran in the critical section, and every section closed");
+}
+
 /* ---- the panel ------------------------------------------------------------ */
 
 static void good_record(void)
@@ -612,6 +665,7 @@ int main(void)
 	test_abandon_and_join();
 	test_discard();
 	test_infer_done();
+	test_bare_one_part();
 	test_draw();
 	if (fails) {
 		printf("FAILED (%d)\n", fails);

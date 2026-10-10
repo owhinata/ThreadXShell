@@ -8,12 +8,13 @@
  * owhinata/stm32f746g-disco#80).
  *
  * Bridges the camera frame pipeline (port/camera) to the nn inference API
- * (port/nn/nn.h): a synchronous copy push sink resizes + converts each RGB565
- * camera frame into the model's int8 input, and a low-priority (prio 18)
- * best-effort worker thread runs inference on it.  Follows the nx_mjpeg.c
- * eth_sink lifecycle (thread created once + parked) and the codex-reviewed
- * double-buffer ownership rule (the buffer the worker feeds to nn_run() is never
- * written by the sink).  Since Epic owhinata/stm32f746g-disco#99 Phase 1
+ * (port/nn/nn.h): a synchronous push sink resizes + converts an RGB565 camera
+ * frame straight into the model's input tensor whenever the worker wants one,
+ * and a low-priority (prio 18) best-effort worker thread runs inference on it.
+ * Follows the nx_mjpeg.c eth_sink lifecycle (thread created once + parked) and
+ * the codex-reviewed ownership rule -- the input the worker feeds to nn_run() is
+ * never written by the sink -- which since issue #130 is the shared hand-over
+ * word of svc/nn_core_frame.h (it was two staging buffers and a copy).  Since Epic owhinata/stm32f746g-disco#99 Phase 1
  * (owhinata/stm32f746g-disco#100) nncam is a plain camera *subscriber*: `nn stream
  * start/stop` enable/disable it and it attaches to the base capture (`camera stream`)
  * only while the base runs. A base detach (stop / DCMI overrun / cascade) PAUSES it
@@ -42,8 +43,8 @@ extern "C" {
 struct nn_camera_stats {
 	bool     running;
 	uint8_t  res;          /**< enum camera_res of the active stream */
-	uint32_t frames;       /**< frames delivered to the sink          */
-	uint32_t drops;        /**< frames dropped (no free stage buffer)  */
+	uint32_t frames;       /**< frames written and handed to the worker */
+	uint32_t drops;        /**< frames skipped: the worker was busy (#130) */
 	uint32_t infers;       /**< inferences completed                   */
 	uint32_t errors;       /**< nn_run() failures                      */
 	uint32_t last_us;      /**< latency of the last inference (us)     */
@@ -82,7 +83,7 @@ int  nn_camera_start(enum camera_res res);
  *   -2   the worker is still mid-inference -- it releases the session as it
  *        exits, and the sink is already released, so this is not a refusal;
  *   -7   the sink did not hand its frame back (issue #72).  A producer callback
- *        may still be preprocessing into our staging buffers, so `nn stream
+ *        may still be preprocessing into the input tensor, so `nn stream
  *        start` is refused until a later stop re-polls and finds it clear.
  *        Retryable by design: if the callback never returns, every retry keeps
  *        refusing, which is what a terminal state would have given anyway;

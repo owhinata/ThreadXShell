@@ -56,9 +56,10 @@ namespace {
 /* Activation arena in .sdram.ai (bank3).  BlazeFace's activations measured
  * ~470 KB; 512 KB is a documented reservation with headroom -- the true figure is
  * reported by arena_used_bytes() (see tflm_bk_acts_bytes).  bank3 is 2 MB and also
- * holds the 2x192 KB camera staging (nn_camera.c), the 2x512 KB SD model slots
- * below, and the BlazeFace anchor tables (~8 KB, blazeface.c): 384 + 512 + 1024 + 8
- * = ~1928 KB < 2 MB.  The .sdram.ai.model exec split is reloc-only, so tflm gets the
+ * holds the 2x512 KB SD model slots below and the decoder's scratch; the camera
+ * staging that used to sit here (2x192 KB) went with issue #130, when the camera
+ * producer started writing the input tensor -- which is in THIS arena -- directly.
+ * 512 + 1024 + ~2 = ~1538 KB < 2 MB.  The .sdram.ai.model exec split is reloc-only, so tflm gets the
  * FULL 2 MB of bank3 (owhinata/stm32f746g-disco#95); the linker ASSERT enforces the 2 MB
  * fit. */
 constexpr int kArenaSize = 512 * 1024;

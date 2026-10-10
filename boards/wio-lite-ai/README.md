@@ -425,7 +425,25 @@ that changed what is open change what decodes it:
 | nothing is open | the plugin is unloaded too |
 
 The table is the one every board shares (`svc/nn_swap.c`, issue #131), and
-`shell/test/test_nn_swap.c` walks every row with this board's inputs.
+`shell/test/test_nn_swap.c` walks every row with this board's inputs.  Since
+#131 step 7d the **order around it is shared too** (`svc/nn_core_model.c`,
+walked hook by hook by `shell/test/test_nn_core_model.c`): the session, then
+whether a model is open (read under the session), the NOR read and CRC, the
+plugin lease, the reload, the plugin, the table and its duties, in that order
+on every board.  What that changed here:
+
+- "Restored" with nothing to restore is answered `nothing is loaded` and the
+  backend is emptied, rather than `the previous model is still active` --
+  a backend breaking its contract, not reachable with the TFLM backend.
+- `nn model unload` unloads the plugin and drops the last result first, under
+  the plugin lease, gives the lease back, and only then empties the backend.
+  It used to empty the backend first, which left a moment in which a plugin was
+  published for a model that was already gone.
+- Every load that ends with no model also empties the backend explicitly.
+- Statuses and wording are unchanged.  The claim (the NN session, and for an
+  unload the OCTOSPI1/PSRAM guard) is still taken in this board's own order and
+  words, as the last step of the admission check, because the shared order's
+  claim hook cannot say why it refused.
 **"Nothing is open" means no MODEL, not a closed singleton** (issue #122 P2):
 the TFLM singleton opens empty and stays open, so `nn_model_reload()`
 reports whether a model is left (`nn_model_present()`: open and describing at
@@ -457,9 +475,9 @@ rather than left as an assumption: what the table says about those two rows on
 hardware is a claim about code that has been read, not about code that has been
 run.
 
-All of it happens inside the claims window and before the session is given
-back, so `nn info` on another console says *a model load is in progress* rather
-than pairing one load's model with another's plugin.
+All of it happens while the shared order's transition counter is odd and
+before the session is given back, so `nn info` on another console says *a model
+load is in progress* rather than pairing one load's model with another's plugin.
 
 `nn info` then shows what the container **claims** (`plugin : <name> (build
 <id>, crc <digest>), running` -- or `validated, not loaded` when the plugin was
@@ -828,6 +846,16 @@ at the indirect call itself, and entry()'s in the loader's `exec_ok` hook
 (`pl_exec_ok()`, 16 B above the branch).  Before that the column read 49 / 105
 (issue #116) and 1,977 for the shell (issue #121, build `5cb217f`); those were
 under-counts.  The bound each must stay under is `stack - 208 - 1,024`.
+
+**Re-measured after issue #131 step 7d** (the load and unload order moved into
+the shared `svc/nn_core_model.c`; 2026-10-10, firmware `01200f2-dirty`).
+Procedure: reset -> `nn model load --slot 5` -> `nn stream start --frames 300`
+-> `nn stream stats`, with no `nn run`:
+`at call : shell 1376/4096 (entry, shapes_ok, report, param)`.  The same
+procedure before 7d (7a, `c86a7dc-dirty`) read 1408, so -32 B; well inside the
+ceiling of 2,864 (4096 - 208 - 1024).  The 2,216 in the table includes `nn
+run` and was not re-measured.  The other rows did not move (`nn_work` 352;
+`cam_prev` 0 with the preview off), and the veneer cost stays 176 / 640 B.
 
 `nn stream stats` prints them on two lines (issue #126 -- as one, the worst
 case was 101 B and the 96 B line cut it):

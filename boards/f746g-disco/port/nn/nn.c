@@ -196,6 +196,11 @@ int nn_model_present(const struct nn_model *m)
 	return (m && m->open) ? nn_impl_has_model(m->impl) : 0;
 }
 
+int nn_model_loaded(void)
+{
+	return nn_model_present(&g_model);
+}
+
 int nn_model_has_builtin(void)
 {
 	return nn_backend_vt_selected.has_builtin ? 1 : 0;

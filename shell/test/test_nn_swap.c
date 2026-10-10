@@ -20,12 +20,16 @@
  *   1. grove-vision-ai-v2's table: the ending it names itself x had_open, every
  *      entry spelled out (moved here from that board's test/test_nn_swap.c).
  *   2. wio-lite-ai's table: the reload's rc x whether a model was left x a
- *      refused plugin, through nn_swap_end_of() with had_open = 1 as that
- *      adapter passes it (moved from its test/test_nn_load_end.c).  Its
- *      "claims" column is commit (NEW) / forget (NONE) / neither (KEEP).
+ *      refused plugin, through nn_swap_end_of() with a model open when the load
+ *      began (moved from its test/test_nn_load_end.c; since issue #131 step 7d
+ *      the shared order reads had_open under the claim, and the rows with
+ *      nothing open are part 1's and part 4's).  Its "claims" column is commit
+ *      (NEW) / forget (NONE) / neither (KEEP).
  *   3. f746g-disco's: the reload's rc x whether a model was left, with no
- *      plugin; the state and the invalidation come from the table, the status
- *      from rc.  The one input where those disagree is unreachable, and says so.
+ *      plugin, over an open model.  Until step 7d the status came from rc, and
+ *      the one input where rc and the table disagree is unreachable, and says
+ *      so; since 7d the shared order answers that input as a failure too
+ *      (svc/nn_core_model.c, shell/test/test_nn_core_model.c).
  *   4. The rules the table must obey whatever its entries say, over every input
  *      of both ways in, including endings it does not know.
  * A change that moves an obligation from one row to another passes the rules
@@ -97,7 +101,8 @@ static void wio_row(const char *what, int rc, int after, int refused,
 	struct nn_swap_verdict v;
 	int s = nn_swap_swaps_plugin(rc, after) ? 1 : 0;
 
-	/* As port/nn/nn_svc_wio.c calls it: had_open is not read until #131 7d. */
+	/* A model open when the load began: the rows this board had until
+	 * #131 7d, when it called the table with had_open = 1 unread. */
 	nn_swap_decide(1, nn_swap_end_of(rc, after, refused), &v);
 	if (s != swaps || v.state != st || v.ok != ok || v.unload != unload ||
 	    v.invalidate != invalidate || claims_of(&v) != claims) {
@@ -272,7 +277,8 @@ int main(void)
 	/* [!] UNREACHABLE: every f746 backend's reload hands back a NULL handle
 	 * only together with a failure (tflm: the catastrophic restore; the reloc
 	 * backend never does), so rc == 0 with no model left cannot happen.  The
-	 * table says EMPTY and failed; the adapter would say EMPTY and ok. */
+	 * table says EMPTY and failed; until #131 7d the adapter would have said
+	 * EMPTY and ok, and since 7d the shared order says failed (HW). */
 	f746_row("success that left no model",           0, 0, 0, NN_MODEL_EMPTY,    1);
 
 	/* 4. the rules */

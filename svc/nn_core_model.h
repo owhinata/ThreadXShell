@@ -45,9 +45,11 @@
  * counter ODD -> plugin unload -> the last result -> the geometry -> lease back
  * -> backend release -> hw_down -> forget -> counter EVEN -> claim back.
  *
- * [!] BUSY IS ONLY EVER ANSWERED BEFORE THE BACKEND IS TOUCHED.  The two BUSY
- * refusals here are the claim and the lease, both before step 10, and a BUSY
- * returned by the swap or the plugin start is reported as NN_SVC_ERR_HW.  The
+ * [!] BUSY IS ONLY EVER ANSWERED BEFORE THE BACKEND IS TOUCHED.  This file's
+ * own BUSY refusals are the claim and the lease; a board's admit, prepare or
+ * fetch hook may answer BUSY too (wio-lite-ai's blob store and OCTOSPI1 guard)
+ * -- all of them before step 10 -- and a BUSY returned by the swap or the
+ * plugin start is reported as NN_SVC_ERR_HW.  The
  * shared command relies on this (issue #131 stage 8): a load refused BUSY has
  * changed nothing, so it has no model state to report.
  *
@@ -117,7 +119,8 @@ struct nn_core_model_backend {
 	/** Whether a model is open.  NO SIDE EFFECTS: it builds nothing.  Asked
 	 *  only for a refusal before the claim and for had_open. */
 	int  (*has_model)(void);
-	/** The board's words for a backend code; for `nn info`. */
+	/** The board's words for a backend code; for `nn info`.  This file never
+	 *  calls this or the two below: NULL where the board asks elsewhere. */
 	const char *(*strerror)(int rc);
 	/** The arena reserved for the model, and what the open model uses of
 	 *  it; for `nn info`.  0 when the backend reserves nothing. */
@@ -149,7 +152,13 @@ struct nn_core_model_board {
 	int  (*admit)(struct nn_core_model_job *j);
 	/** The claim.  A board that refuses a replacement for its own reasons
 	 *  decides them here, in the same critical section as the claim.
-	 *  @return non-zero if taken */
+	 *  @return non-zero if taken
+	 *
+	 *  It takes no job, so a refusal here has no words of its own.  A board
+	 *  whose claim has more than one answer to give (wio-lite-ai,
+	 *  f746g-disco) takes it as admit's LAST step instead -- admit holds
+	 *  nothing when it fails -- and answers this with a constant 1, so
+	 *  nothing runs between the two. */
 	int  (*claim_take)(void);
 	void (*claim_give)(void);
 	/** Bring up what the load needs, knowing j->had_open.  On failure it gives

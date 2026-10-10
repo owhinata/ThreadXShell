@@ -814,6 +814,10 @@ set(NN_SOURCES "${BOARD_DIR}/port/nn/nn.c"
                # shared by every board since issue #131, walked by
                # shell/test/test_nn_swap.c
                "${CMAKE_SOURCE_DIR}/svc/nn_swap.c"
+               # ...and the order of a load / unload around it (issue #131),
+               # one copy for every board, walked by
+               # shell/test/test_nn_core_model.c
+               "${CMAKE_SOURCE_DIR}/svc/nn_core_model.c"
                # how a decode's answer is counted (issue #130 step 6c): a pure
                # table, walked by test/test_nn_decode_count.c
                "${BOARD_DIR}/port/nn/nn_decode_count.c")

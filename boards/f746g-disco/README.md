@@ -195,6 +195,32 @@ emptied.
 - `null` and `stedgeai` cannot swap models: `nn model load` is unsupported and
   `nn model unload` answers as before without changing anything.
 
+Since #131 step 7d the order of a load and an unload is the one every board
+shares (`svc/nn_core_model.c`, walked by `shell/test/test_nn_core_model.c`);
+this board's half is `port/nn/nn_svc_f746_model.c`, and
+`test/test_nn_model_life.c` builds it against the real `nn.c` over a stub
+backend. What that changed here:
+
+- [!] **`nn info` from the other console while a load or an unload is
+  replacing the model answers busy** on the model, `used` and tensor lines
+  (`-- another nn command is using the model; ask again when it returns`),
+  instead of copying a name and a size that may come from
+  two different models. The same transition counter as wio-lite-ai and
+  grove-vision-ai-v2: it is odd only while the backend is being changed --
+  the SD read happens before it -- and a stream, which holds the NN session
+  but never moves it, still gets the full report. Not exercised on hardware:
+  the two-console race cannot be hit by typing, so
+  `test/test_nn_model_life.c` holds it (its stub reload asks `nn info` in the
+  middle of the swap).
+- Whether a model was open is read under the NN session, so a backend that
+  says it restored a model when none was open ends `nothing is loaded` and is
+  emptied, rather than `the previous model is still active`. Every load that
+  ends with no model empties the backend explicitly.
+- A reload that returns success with no model left (unreachable on these
+  backends) is reported as a failure, not `loaded`.
+- Statuses and wording are otherwise unchanged; the refusals before the
+  session (stream running, SDRAM down, the first open) come in the same order.
+
 `nn info` prints two arena figures: `arena : N B reserved` is the activation
 arena the backend reserves (`tflm`: `g_arena`, 524,288 B; `stedgeai_reloc`:
 `g_acts`, 393,216 B; `stedgeai`: the generated activations size; `null`: 0),

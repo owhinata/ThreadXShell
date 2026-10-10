@@ -78,6 +78,8 @@ src cmds svc cmake test README。wio のみ boot も）。
 - **[!] 停止は走行中の推論を取り消せない** — worker は arm 時点の世代を控え、publish のロック内で照合
   する（`svc/nn_det_record.c`）。**RAW 記述子・top-5 は publish 時に record へ載せ、印字時にモデルを取り直さない**（#121）。
 - **[!] 推論を非同期の worker で回すボードは「誰も解釈していない」も世代規則の下で publish する**（しないと `nn run` が timeout する。wio・Grove）。
+- **[!] モデルの load / unload の順序は `svc/nn_core_model` の 1 実装**（表は `svc/nn_swap`）: plugin の差し替えは backend 成功後、bare は plugin
+  unload、モデルが残らない終わり方は全部下ろす、**BUSY は swap より前だけ**（だから BUSY 拒否は状態行を出さない、#131）。
 
 ### [!] plugin container と asset（3 ボード共有部）
 
@@ -239,7 +241,6 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
 - **admission は `nn run` と共有**なので**shape の問いは no-plugin で通す**（refuse すると素のモデルの
   `nn run` が消える）。**stream を止めるのは `nn_active_can_draw()` 1 本。**
 - **panel は `valid` だけでなく kind も見る**（「誰も解釈していない」の publish は共有 `nn` 節）。
-- **plugin の差し替えは backend が成功してから**（先だと前の plugin を壊す）。bare model は必ず unload。
 - **decode と draw を隔てるものが無い**ので**結果リース**で囲う: **常にリース → フレームロック**、
   worker は decode と publish の全体を保持、**パネルは待たない**。**リース保持は「描いてよい」ではない**。
 - **report は snapshot と同じ保護区間で採取し、バッファは呼び出し側のフレーム**。**長さは状態ではない**。
@@ -299,7 +300,7 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
 - **`npu_open()` は長さを取り `GetModel()` の前に境界付き verifier を通す**（範囲 → 長さ → identifier →
   verifier → 走査。**長さには下限も要る**）。**limits は呼び出しとともに `npu_verify.h` の 1 箇所。**
 - **`nn model load --name` はリースを切らさない**（`npu_hw_init()` が先 → 走査 → CRC → `npu_open()` → plugin、
-  モデルが残らない失敗は必ず `npu_hw_deinit()`）。**開いた上の load は差し替えで plugin は backend 成功後**（`nn_swap.c`）。
+  モデルが残らない失敗は必ず `npu_hw_deinit()` = 共有の順序の hw_down フック）。
 - **gate の外から plugin に入るコンソール呼び出し（thresh / dets）は数に入ってから lease を取る**。load/unload は数が 0 でなければ BUSY（判定は claim と同じ CS、`nn_param_calls.c`）。
 - **候補は VALID のみ・重複拒否・失敗理由は別々・読めなければ拒否。ホストの `verify_vela_model` を外さない**（代替にならない。C++ 不在は fail-closed）。
 - **アリーナの保守は範囲ごとでなく全体を 2 点で**（潰すのは `ethosu_invalidate_dcache()` だけ、成功条件は

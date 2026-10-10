@@ -364,8 +364,8 @@ static void cam_subs_release_oneshot(void);
 
 static volatile int      cam_stream_active;  /* streaming mode gate             */
 static volatile int      cam_stop_req;       /* stop requested (producer drains)*/
-static volatile int      cam_stream_err;     /* DCMI OVR -> terminal stop       */
-static volatile uint32_t cam_stream_ovr;     /* DCMI overrun count              */
+static volatile int      cam_stream_err;     /* terminal error -> teardown      */
+static volatile uint32_t cam_stream_ovr;     /* DCMI overruns (resynced+terminal)*/
 static volatile uint32_t cam_ring_ovr;       /* free-slot exhaustion / lost     */
 static volatile uint32_t cam_stream_fe;      /* DMA FIFO/DME errors tolerated (owhinata/stm32f746g-disco#56) */
 static volatile uint32_t cam_ring_slots;     /* ring depth this stream (owhinata/stm32f746g-disco#65 arena) */
@@ -379,6 +379,9 @@ static struct frame_desc *cam_jpeg_slot;     /* JPEG stream: the single DMA targ
 static volatile uint32_t cam_jpeg_trunc;     /* JPEG stream: frames with no SOI/EOI (owhinata/stm32f746g-disco#63) */
 
 /* ---- base capture overrun auto-recovery (owhinata/stm32f746g-disco#100, contract 6) -----
+   Since issue #137 a raster overrun is first resynced in place (below); this path
+   now takes the terminal errors -- a JPEG-stream overrun, a DMA transfer error, a
+   DCMI sync error, a failed or persistent resync.
    A DCMI overrun is a producer-general fault, not a subscriber concern: the base
    tears down (cascade close() to every subscriber) and the producer re-arms
    itself at the same mode; subscribers re-attach via cam_subs_attach_all() and
@@ -393,6 +396,34 @@ static volatile int cam_recover_pending;   /* last teardown was an overrun (reco
 static int          cam_recover_rapid;     /* consecutive rapid recoveries           */
 static uint32_t     cam_recover_last;      /* HAL tick of the last recovery          */
 static int          cam_start_colorbar;    /* colorbar of the running base (recover) */
+
+/* ---- raster overrun: in-place resync (issue #137) --------------------------
+   A raster DCMI overrun is NOT a teardown any more.  RM0385 17.3.10: on an
+   overrun the DCMI resets its FIFO and waits for the next frame start, so the
+   capture itself survives; only the DMA's position inside the frame is lost.
+   HAL_DCMI_ErrorCallback therefore only asks for a resync and the producer
+   restarts DCMI + DMA in place under cam_lock (cam_stream_resync()): no
+   subscriber sees a close()/open(), nothing is published from the dropped
+   frame(s), and the 1-2 frames in flight are discarded.  Anything that is not a
+   plain overrun (DMA TE, DCMI sync error / stop timeout, a failed step) stays
+   terminal and takes the teardown + auto-recovery path above.
+   CAM_RESYNC_GIVEUP: consecutive resyncs with no frame published in between ->
+   terminal.  Every resync costs at least one frame (CAPTURE waits for the next
+   frame start), so 30 is about one second at the fastest streamed rate (30 fps)
+   and two at 15 fps -- a persistent overrun then falls back to the escalating
+   CAM_RECOVER_* path instead of resyncing forever.
+   CAM_RESYNC_CAPTURE_MS: bound for CAPTURE to read 0 after it is cleared (in
+   continuous mode the clear takes effect at the frame end, RM0385 17.5.1) --
+   a few frames even at night-mode frame rates.  CAM_RESYNC_DMA_MS: bound for the
+   stream EN bit to read 0 (RM0385 8.3.18: it drops once the current beat ends).
+   CAM_RESYNC_FIFO_READS: the DCMI FIFO is 8 words; reading DR more than that
+   without FNE clearing means the FIFO is still being filled -> terminal. */
+#define CAM_RESYNC_GIVEUP      30u    /* consecutive resyncs without a publish     */
+#define CAM_RESYNC_CAPTURE_MS  500u   /* ms: CAPTURE clear wait bound              */
+#define CAM_RESYNC_DMA_MS      10u    /* ms: DMA stream EN == 0 wait bound         */
+#define CAM_RESYNC_FIFO_READS  64u    /* DR reads to empty the 8-word DCMI FIFO    */
+static volatile int cam_resync_req;        /* raster OVR seen: producer resyncs     */
+static uint32_t     cam_resync_run;        /* consecutive resyncs since a publish   */
 
 /* ---- locking ------------------------------------------------------------ */
 /* Public API entries take the mutex here; all real work below lives in
@@ -1764,6 +1795,27 @@ static void drain_stream_sem(void)
 		;
 }
 
+/* Raster double-buffer arm, shared by the stream start and the in-place overrun
+   resync (issue #137): DMA DBM start on cam_m0/cam_m1 -> DCMI CM=0 (continuous,
+   before enable) -> enable -> ERR/OVR IT -> CAPTURE -> State BUSY.  The DMA is
+   running before CAPTURE, so the first word of the next frame lands at offset 0
+   of M0 (RM0385 17.5.1).  The caller has set the three raster DMA callbacks and
+   cleared the DCMI flags.  On a DMA start failure the DCMI is left untouched. */
+static HAL_StatusTypeDef cam_raster_arm(void)
+{
+	if (HAL_DMAEx_MultiBufferStart_IT(&hdma_dcmi,
+	        (uint32_t)&hdcmi.Instance->DR,
+	        (uint32_t)cam_m0->data, (uint32_t)cam_m1->data,
+	        mode.frame_words) != HAL_OK)
+		return HAL_ERROR;
+	hdcmi.Instance->CR &= ~DCMI_CR_CM;            /* continuous */
+	__HAL_DCMI_ENABLE(&hdcmi);
+	__HAL_DCMI_ENABLE_IT(&hdcmi, DCMI_IT_ERR | DCMI_IT_OVR);
+	hdcmi.Instance->CR |= DCMI_CR_CAPTURE;
+	hdcmi.State = HAL_DCMI_STATE_BUSY;
+	return HAL_OK;
+}
+
 static uint32_t cam_elapsed_ms;   /* frozen at teardown for post-stop `stats` */
 
 /* ---- subscriber registry helpers (all under cam_lock) --------------------- */
@@ -1955,6 +2007,23 @@ static void cam_subs_release_oneshot(void)
 	}
 }
 
+/* --frames / --secs target reached.  The one place the target is judged: the
+   stop conditions below and the teardown's auto-recovery decision (a stream
+   whose target is due is never re-armed, even when an error landed first --
+   issue #137) both read it. */
+static int cam_stream_target_due(void)
+{
+	return (cam_target_frames && cam_pipe.stats.published >= cam_target_frames) ||
+	       (cam_target_secs &&
+	        (HAL_GetTick() - cam_start_tick) >= cam_target_secs * 1000u);
+}
+
+/* Stop conditions shared by both stream services and the overrun resync. */
+static int cam_stream_should_stop(void)
+{
+	return cam_stop_req || cam_stream_err || cam_stream_target_due();
+}
+
 /* Stop the stream and restore a clean snapshot-ready DCMI/DMA.  Producer-thread
    only (single owner): start / stop / auto-stop / OVR all converge here, so the
    HW teardown never races the producer's repoint.  Short cam_lock for the state
@@ -1966,8 +2035,10 @@ static void cam_stream_teardown(void)
 		/* Auto-recover only an overrun/DMA-error stop that was NOT an explicit
 		   stop or a --frames/--secs target completion (owhinata/stm32f746g-disco#100 contract
 		   6). */
-		cam_recover_pending = cam_stream_err && !cam_stop_req;
+		cam_recover_pending = cam_stream_err && !cam_stop_req &&
+		                      !cam_stream_target_due();
 		cam_stream_active = 0;
+		cam_resync_req = 0;                   /* issue #137: nothing to resync */
 		cam_elapsed_ms = HAL_GetTick() - cam_start_tick;
 		(void)HAL_DCMI_Stop(&hdcmi);          /* aborts the DMA internally */
 		/* The JPEG snapshot-loop arms DCMI_IT_FRAME, but HAL_DCMI_Stop does NOT
@@ -2008,6 +2079,149 @@ static void cam_stream_teardown(void)
 	(void)tx_mutex_put(&cam_lock);
 }
 
+/* In-place restart of the raster capture after a DCMI overrun (issue #137).
+   Producer thread only, under cam_lock; IRQs of the DCMI and DMA2 Stream1 are
+   masked at the NVIC (not PRIMASK -- the tick sleeps below need SysTick).  Every
+   exit goes through `out` (unmask + unlock).  Any failure, timeout or non-overrun
+   indication latches cam_stream_err, so the next pass takes the existing teardown
+   + auto-recovery.  Returns without doing anything else when a stop / target is
+   due (the next pass tears down normally). */
+static void cam_stream_resync(void)
+{
+	uint32_t t0, dma_err, dcmi_err, ris, n;
+	int dma_te, ovr, why = 0, rearmed = 0;
+	static const char *const why_str[] = {
+		"", "capture did not stop", "DMA did not stop", "TE / sync / timeout",
+		"no overrun recorded", "persistent", "FIFO did not drain",
+		"DMA re-init failed", "DMA restart failed",
+	};
+
+	(void)tx_mutex_get(&cam_lock, TX_WAIT_FOREVER);
+	NVIC_DisableIRQ(DCMI_IRQn);
+	NVIC_DisableIRQ(DMA2_Stream1_IRQn);
+
+	/* a. Quiesced: nothing below races an ISR.  Stop / target due -> leave it
+	   to the teardown (an explicit stop waits on cam_lock, so it is delayed by
+	   at most this bounded transaction). */
+	if (!cam_stream_active || cam_stream_should_stop())
+		goto out;
+
+	/* b. Stop capturing (no HAL_DCMI_Stop: its busy-spin outlives a frame and
+	   it aborts the DMA through the handle state), then make sure the stream is
+	   off in hardware -- the HAL abort cleared EN; clearing it again is a no-op
+	   and covers an abort that never reached the stream. */
+	hdcmi.Instance->CR &= ~DCMI_CR_CAPTURE;
+	t0 = HAL_GetTick();
+	while (hdcmi.Instance->CR & DCMI_CR_CAPTURE) {
+		if (HAL_GetTick() - t0 >= CAM_RESYNC_CAPTURE_MS) {
+			why = 1;
+			goto fail;
+		}
+		tx_thread_sleep(1);
+	}
+	hdma_dcmi.Instance->CR &= ~DMA_SxCR_EN;
+	t0 = HAL_GetTick();
+	while (hdma_dcmi.Instance->CR & DMA_SxCR_EN) {
+		if (HAL_GetTick() - t0 >= CAM_RESYNC_DMA_MS) {
+			why = 2;
+			goto fail;
+		}
+		tx_thread_sleep(1);
+	}
+
+	/* c. Classify before anything is cleared, from the HAL codes AND the raw
+	   hardware flags (an ISR masked above never copied the latter into the HAL). */
+	dma_err  = hdma_dcmi.ErrorCode;
+	dcmi_err = hdcmi.ErrorCode;
+	ris      = hdcmi.Instance->RISR;
+	dma_te   = __HAL_DMA_GET_FLAG(&hdma_dcmi,
+	                              __HAL_DMA_GET_TE_FLAG_INDEX(&hdma_dcmi)) != 0u;
+	ovr      = (dcmi_err & HAL_DCMI_ERROR_OVR) || (ris & DCMI_RIS_OVR_RIS);
+	if (cam_stream_err)
+		goto out;   /* the error callback decided (and counted) it: terminal */
+	if (ovr)
+		cam_stream_ovr++;              /* one per resync, however many OVR IRQs */
+	if (dma_te || (dma_err & HAL_DMA_ERROR_TE) ||
+	    (dcmi_err & (HAL_DCMI_ERROR_SYNC | HAL_DCMI_ERROR_TIMEOUT)) ||
+	    (ris & DCMI_RIS_ERR_RIS)) {
+		why = 3;
+		goto fail;
+	}
+	if (!ovr) {
+		why = 4;
+		goto fail;
+	}
+	if (++cam_resync_run >= CAM_RESYNC_GIVEUP) {
+		why = 5;
+		goto fail;
+	}
+	if (cam_stream_should_stop())
+		goto out;
+
+	/* d. Empty the DCMI FIFO (17.5.2 / 17.5.11): neither the overrun reset nor
+	   clearing CAPTURE is taken to leave it empty. */
+	for (n = 0; hdcmi.Instance->SR & DCMI_SR_FNE; n++) {
+		if (n >= CAM_RESYNC_FIFO_READS) {
+			why = 6;
+			goto fail;
+		}
+		(void)hdcmi.Instance->DR;
+	}
+
+	/* e. Reset the stream exactly as the teardown does (clears CT, DBM and every
+	   stream flag), relink, restore the raster callbacks.  A completed but not
+	   yet serviced buffer is discarded with the wake tokens. */
+	if (HAL_DMA_DeInit(&hdma_dcmi) != HAL_OK) {
+		why = 7;
+		goto fail;
+	}
+	hdma_dcmi.Init.Mode = DMA_NORMAL;
+	if (HAL_DMA_Init(&hdma_dcmi) != HAL_OK) {
+		why = 7;
+		goto fail;
+	}
+	__HAL_LINKDMA(&hdcmi, DMA_Handle, hdma_dcmi);
+	hdma_dcmi.XferCpltCallback   = cam_stream_dma_cb;
+	hdma_dcmi.XferM1CpltCallback = cam_stream_dma_cb;
+	hdma_dcmi.XferErrorCallback  = cam_stream_dma_err_cb;
+	drain_stream_sem();
+	cam_last_ct = 0;
+
+	/* f. Clear the overrun's traces, then the IRQs' pending bits, and unmask. */
+	__HAL_DCMI_CLEAR_FLAG(&hdcmi, DCMI_FLAG_ERRRI | DCMI_FLAG_OVRRI |
+	                              DCMI_FLAG_FRAMERI | DCMI_FLAG_LINERI |
+	                              DCMI_FLAG_VSYNCRI);
+	hdcmi.ErrorCode = HAL_DCMI_ERROR_NONE;
+	cam_resync_req = 0;
+	NVIC_ClearPendingIRQ(DCMI_IRQn);
+	NVIC_ClearPendingIRQ(DMA2_Stream1_IRQn);
+	NVIC_EnableIRQ(DCMI_IRQn);
+	NVIC_EnableIRQ(DMA2_Stream1_IRQn);
+
+	/* g. Restart on the same cam_m0 / cam_m1 (still FILLING, never published).
+	   CAPTURE waits for the next frame start with the FIFO and DMA empty, so word
+	   0 lands at offset 0 of M0.  Nothing from here on clears a new failure. */
+	if (cam_raster_arm() != HAL_OK) {
+		why = 8;
+		goto fail;
+	}
+	rearmed = 1;
+	goto out;
+
+fail:
+	cam_stream_err = 1;
+out:
+	NVIC_EnableIRQ(DCMI_IRQn);
+	NVIC_EnableIRQ(DMA2_Stream1_IRQn);
+	n = cam_stream_ovr;
+	(void)tx_mutex_put(&cam_lock);
+	if (why)
+		LOG_WRN("DCMI overrun: in-place resync failed (%s); stopping", why_str[why]);
+	else if (rearmed)
+		LOG_INF("DCMI overrun: capture re-armed in place (ovr dcmi=%lu)",
+		        (unsigned long)n);
+}
+
 /* Service one completed frame: find the completed buffer via CT, secure a free
    slot, repoint the completed M-register away, THEN publish.  This ordering
    keeps a published slot off the live DMA target list, so a sink never reads a
@@ -2019,11 +2233,16 @@ static void cam_stream_service(int had_sem)
 	int published = 0;
 
 	/* Stop conditions (also handles the bounded-timeout wake with no frame). */
-	if (cam_stop_req || cam_stream_err ||
-	    (cam_target_frames && cam_pipe.stats.published >= cam_target_frames) ||
-	    (cam_target_secs &&
-	     (HAL_GetTick() - cam_start_tick) >= cam_target_secs * 1000u)) {
+	if (cam_stream_should_stop()) {
 		cam_stream_teardown();
+		return;
+	}
+
+	/* issue #137: an overrun (or a HAL DCMI state left in ERROR by an abort
+	   whose callback never came) -> restart in place.  This pass's wake tokens
+	   are not frames: no completion accounting. */
+	if (cam_resync_req || hdcmi.State == HAL_DCMI_STATE_ERROR) {
+		cam_stream_resync();
 		return;
 	}
 
@@ -2057,6 +2276,7 @@ static void cam_stream_service(int had_sem)
 			                       (uint16_t)(mode.width *
 			                                  mode.bytes_per_pixel));
 			published = 1;
+			cam_resync_run = 0;     /* issue #137: the resync run is over */
 		}
 		/* freed == NULL: no free slot, drop (do not publish); the M-reg keeps
 		   pointing at `done`, so the DMA simply refills it next cycle. */
@@ -2098,15 +2318,6 @@ static HAL_StatusTypeDef cam_jpeg_arm(struct frame_desc *slot)
 	__HAL_DMA_DISABLE_IT(&hdma_dcmi, DMA_IT_FE);
 	__HAL_DMA_DISABLE_IT(&hdma_dcmi, DMA_IT_DME);
 	return HAL_OK;
-}
-
-/* Stop conditions shared by both stream services. */
-static int cam_stream_should_stop(void)
-{
-	return cam_stop_req || cam_stream_err ||
-	       (cam_target_frames && cam_pipe.stats.published >= cam_target_frames) ||
-	       (cam_target_secs &&
-	        (HAL_GetTick() - cam_start_tick) >= cam_target_secs * 1000u);
 }
 
 /* Service one JPEG frame: finalise the current slot (Stop -> NDTR -> EOI trim),
@@ -2339,6 +2550,13 @@ static int stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 	cam_stream_err    = 0;
 	cam_stop_req      = 0;
 	cam_last_ct       = 0;
+	/* issue #137: a fresh stream starts with no resync pending and no stale HAL
+	   DCMI error bits -- HAL_DCMI_Stop() in the previous teardown ORs TIMEOUT in
+	   whenever CAPTURE outlives its busy-wait, and nothing else clears the code;
+	   HAL_DCMI_ErrorCallback reads it to tell an overrun from a terminal error. */
+	cam_resync_req    = 0;
+	cam_resync_run    = 0;
+	hdcmi.ErrorCode   = HAL_DCMI_ERROR_NONE;
 	cam_elapsed_ms    = 0;
 	cam_start_tick    = HAL_GetTick();
 	cam_target_frames = frames;
@@ -2400,21 +2618,13 @@ static int stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 	                              DCMI_FLAG_VSYNCRI);
 
 	cam_stream_active = 1;             /* arm the ISR + producer */
-	if (HAL_DMAEx_MultiBufferStart_IT(&hdma_dcmi,
-	        (uint32_t)&hdcmi.Instance->DR,
-	        (uint32_t)cam_m0->data, (uint32_t)cam_m1->data,
-	        mode.frame_words) != HAL_OK) {
+	if (cam_raster_arm() != HAL_OK) {
 		cam_stream_active = 0;
 		cam_subs_detach_all();
 		cam_stat_detach();
 		LOG_ERR("stream DMA start failed");
 		return CAM_ERR_HAL;
 	}
-	hdcmi.Instance->CR &= ~DCMI_CR_CM;            /* continuous */
-	__HAL_DCMI_ENABLE(&hdcmi);
-	__HAL_DCMI_ENABLE_IT(&hdcmi, DCMI_IT_ERR | DCMI_IT_OVR);
-	hdcmi.Instance->CR |= DCMI_CR_CAPTURE;
-	hdcmi.State = HAL_DCMI_STATE_BUSY;
 
 	/* Wake the producer out of its idle FOREVER wait on the dedicated start
 	   semaphore -- never the completion semaphore, so it cannot be miscounted. */
@@ -3030,13 +3240,26 @@ void HAL_DCMI_FrameEventCallback(DCMI_HandleTypeDef *h)
 void HAL_DCMI_ErrorCallback(DCMI_HandleTypeDef *h)
 {
 	(void)h;
-	/* Streaming (owhinata/stm32f746g-disco#46): a continuous-mode DCMI overrun is terminal --
-    the
-	   HAL DCMI IRQ has already aborted the DMA -- so flag it and wake the
-	   producer to tear down cleanly.  (Mode-exclusive with the snapshot gate.) */
+	/* Streaming (owhinata/stm32f746g-disco#46): the HAL DCMI IRQ has already
+	   aborted the DMA; flag what happened and wake the producer, which owns
+	   every reaction.  (Mode-exclusive with the snapshot gate.) */
 	if (cam_stream_active) {
-		cam_stream_err = 1;
-		cam_stream_ovr++;
+		/* issue #137: a raster overrun is resynced in place by the producer
+		   (cam_stream_resync): only ask for it here.  Terminal, as before: the
+		   JPEG stream, a DMA transfer error (the HAL's abort-complete branch
+		   records TE in the DMA error code but returns before the TE callback,
+		   so this is the only place it surfaces), a DCMI sync error / stop
+		   timeout, or any DCMI code without OVR. */
+		if (mode.is_jpeg ||
+		    (hdma_dcmi.ErrorCode & HAL_DMA_ERROR_TE) ||
+		    (hdcmi.ErrorCode & (HAL_DCMI_ERROR_SYNC | HAL_DCMI_ERROR_TIMEOUT)) ||
+		    !(hdcmi.ErrorCode & HAL_DCMI_ERROR_OVR)) {
+			cam_stream_err = 1;
+			if (hdcmi.ErrorCode & HAL_DCMI_ERROR_OVR)
+				cam_stream_ovr++;   /* an overrun, not a TE / sync error */
+		} else {
+			cam_resync_req = 1;
+		}
 		(void)tx_semaphore_put(&cam_stream_sem);
 		return;
 	}

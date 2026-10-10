@@ -405,6 +405,8 @@ static void nn_core_counts_of(struct nn_core_raw *raw, void *keep)
 	raw->skipped   = st.gen_drops;
 	raw->infers    = st.gen_infers;
 	raw->errors    = st.gen_errors;
+	/* model_errors stays 0: BF_ERR_MODEL is a result on this board (D6). */
+	raw->decoder_errors = st.gen_decoder_errors;
 	raw->last_us   = st.last_us;
 	raw->producing = st.running ? 1u : 0u;
 }
@@ -493,7 +495,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		return;
 	}
 
-	rc = nn_camera_start(CAM_RES_QVGA);
+	rc = nn_camera_start(CAM_RES_QVGA, 1);   /* a one-shot */
 	if (rc != 0) {
 		(void)nn_core_abort(&nn_core, &nn_core_board);
 		/* The same words and status as `nn stream start` -- one refusal from
@@ -803,7 +805,7 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		return;
 	}
 
-	rc = nn_camera_start(CAM_RES_QVGA);
+	rc = nn_camera_start(CAM_RES_QVGA, 0);
 	if (rc != 0) {
 		(void)nn_core_abort(&nn_core, &nn_core_board);
 		nn_detail_set(NN_CAMERA_START_FAILED, rc);

@@ -60,6 +60,10 @@ struct nn_camera_stats {
 	uint32_t gen_infers;   /**< ...and the same for these three, or the four   */
 	uint32_t gen_errors;   /**< numbers describe two different periods and do  */
 	uint32_t gen_drops;    /**< not add up (issue #99).                        */
+	/** Of @ref gen_errors: decodes the resident decoder refused as a wiring
+	 *  fault (issue #130 step 6c).  BF_ERR_MODEL is not one -- see
+	 *  nn_decode_count.h. */
+	uint32_t gen_decoder_errors;
 };
 
 /**
@@ -71,8 +75,10 @@ struct nn_camera_stats {
  * enabled + idle and attaches at the next `camera stream start`.  Non-blocking.
  * Returns 0 or <0 (-2 already running / still tearing down / a teardown owns the
  * sink, -3 model, -4 geometry, -5 objects, -6 nn session busy).
+ * @p oneshot is non-zero for `nn run`'s session, whose decodes are not counted
+ * in the stream's errors (issue #130 step 6c).
  */
-int  nn_camera_start(enum camera_res res);
+int  nn_camera_start(enum camera_res res, int oneshot);
 
 /** Disable live inference (`nn stream stop`): unsubscribe from the base (which
  *  keeps running for other subscribers), wait for the producer to hand this

@@ -1004,6 +1004,8 @@ static void nn_core_counts_of(struct nn_core_raw *raw, void *keep)
 	raw->skipped   = st.skipped;
 	raw->infers    = st.infers;
 	raw->errors    = st.errors;
+	raw->model_errors   = st.model_errors;
+	raw->decoder_errors = st.decoder_errors;
 	raw->last_us   = nn_cyc_to_us(st.infer_last_cyc);
 	raw->producing = st.running ? 1u : 0u;
 	if (keep != NULL)

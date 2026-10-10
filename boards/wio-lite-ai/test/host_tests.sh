@@ -77,6 +77,15 @@ gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" \
     $LDFLAGS -o "$out/test_nn_load_end"
 "$out/test_nn_load_end"
 
+# issue #130 step 6c (#122 P8) -- how a decode's answer is counted in `nn stream
+# stats` (port/nn/nn_decode_count.c): grove-vision-ai-v2's table.  A plugin that
+# answers BF_ERR_UNINIT, BF_ERR_ARG or an undocumented code cannot be typed, and
+# each must be counted as a decoder fault, never as "the model" or as nothing.
+gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" \
+    "$here/test_nn_decode_count.c" "$board/port/nn/nn_decode_count.c" \
+    $LDFLAGS -o "$out/test_nn_decode_count"
+"$out/test_nn_decode_count"
+
 # issues #110, #116 -- the active-decoder shim (port/nn/nn_active.c), with a
 # plugin loaded and with none.
 #

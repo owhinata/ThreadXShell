@@ -44,6 +44,7 @@
 #include "nn_det_record.h"
 #include "nn_core_frame.h"   /* the shared frame path and its hand-over word (#130) */
 #include "nn_sess_release.h" /* when the session may go back (#130)               */
+#include "nn_decode_count.h" /* how a decode's answer is counted (#130 6c)         */
 #include "nn_top.h"          /* the classes, taken before the next inference (#121) */
 #include "camera.h"          /* camera_subscribe / camera_unsubscribe / camera_frame_put */
 #include "cam_own.h"         /* the owner lifecycle (issue #72)                        */
@@ -149,6 +150,13 @@ static uint32_t     nncam_gen_frames;
 static uint32_t     nncam_gen_infers;
 static uint32_t     nncam_gen_errors;
 static uint32_t     nncam_gen_drops;
+/* Of nncam_gen_errors: decodes the resident decoder refused as a wiring fault
+ * (issue #130 step 6c, nn_decode_count.h -- BF_ERR_MODEL is a result here, not
+ * one of these).  Written by the worker only. */
+static uint32_t     nncam_gen_decoder_errors;
+/* The running stream is a `nn run`'s: its decodes are not counted (it reports
+ * its own result).  Written by nn_camera_start() before nncam_run is raised. */
+static int          nncam_oneshot;
 
 /* Session generation, bumped on every (re)attach + on a base detach.  An in-flight
  * prep that spans a session boundary is abandoned instead of handing over a stale frame. */
@@ -429,13 +437,23 @@ static int nncam_publish(void *ctx, uint32_t gen)
 	                             (nd == BF_ERR_MODEL) ? &top : NULL);
 	tx_mutex_put(&nncam_lock);
 	nnstat.detections = (nd > 0) ? (uint32_t)nd : 0u;
+	/* [!] A REFUSAL IS COUNTED APART (issue #130 step 6c, P8), HERE, because
+	 * this is where the decoder's answer is: the frame path hands this slot no
+	 * count to pass on.  BF_ERR_MODEL is the top-5 result above, not a
+	 * refusal (D6); any other negative is a wiring fault.  Counted like the
+	 * inference it belongs to -- whether or not the record took it. */
+	if (nn_decode_count_of(nd, nncam_oneshot) == NN_DC_DECODER) {
+		nnstat.errors++;
+		nncam_gen_errors++;
+		nncam_gen_decoder_errors++;
+	}
 	return took;
 }
 
 /* This board's counting is done where it always was: the inference when
  * nn_run() returned (before the publish -- see nn_core_board::based in
- * nn_svc_f746.c), the detections in the publish.  Nothing is left to count;
- * how a negative decode is counted is step 6c's (P8). */
+ * nn_svc_f746.c), the detections and a decoder refusal in the publish.
+ * Nothing is left to count here. */
 static void nncam_account(void *ctx, enum nn_core_done what, int n, int took)
 {
 	(void)ctx;
@@ -721,7 +739,7 @@ static int nncam_create_objects(void)
 
 /* ---- public API ----------------------------------------------------------- */
 
-int nn_camera_start(enum camera_res res)
+int nn_camera_start(enum camera_res res, int oneshot)
 {
 	enum cam_own_start act;
 	int rc;
@@ -799,6 +817,7 @@ int nn_camera_start(enum camera_res res)
 	nncam_sink_drained = 0;
 	tx_mutex_put(&nncam_lock);
 
+	nncam_oneshot = oneshot ? 1 : 0;
 	nncam_run = 1;
 	rc = camera_subscribe(&nncam_sink, CAM_FMT_RGB565);
 	if (rc != 0) {
@@ -814,6 +833,7 @@ int nn_camera_start(enum camera_res res)
 	nncam_gen_infers = 0u;
 	nncam_gen_errors = 0u;
 	nncam_gen_drops  = 0u;
+	nncam_gen_decoder_errors = 0u;
 	cam_own_start_finish(&nncam_own, 1);    /* STARTING -> RUNNING                  */
 	return 0;
 }
@@ -921,6 +941,7 @@ void nn_camera_stats_get(struct nn_camera_stats *out)
 	out->gen_infers = nncam_gen_infers;
 	out->gen_errors = nncam_gen_errors;
 	out->gen_drops  = nncam_gen_drops;
+	out->gen_decoder_errors = nncam_gen_decoder_errors;
 	out->frames     = nnstat.frames;
 	out->drops      = nnstat.drops;
 	out->infers     = nnstat.infers;

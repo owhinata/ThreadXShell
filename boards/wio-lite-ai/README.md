@@ -383,6 +383,18 @@ teardown comes back retryable, `nn stream stop` is what finishes it.  The
 re-arm in `nn_camera_start()` also takes back up only a session that
 `nn stream start` created.
 
+**A decode the plugin refuses is counted apart in `nn stream stats`** (issue
+#130 step 6c, #122 P8 -- grove-vision-ai-v2's table, in
+`port/nn/nn_decode_count.c`). `BF_ERR_MODEL` ("these outputs are not my
+model's shape": load a different model or container) counts in
+`model_errors`, any other negative (`BF_ERR_UNINIT`, `BF_ERR_ARG`, or a code
+nobody documented -- a wiring fault) in `decoder_errors`, and both in
+`errors`; the shared command then prints the `of those:` line. Before step 6c
+neither was counted, so a plugin that refused every frame read as a healthy
+stream. Only a decode the record took is counted -- the same rule as
+`infers`, which still counts it as an inference, because the inference ran --
+and a `nn run` counts nothing (it reports its own result).
+
 `nn model load --slot <n>` reads the blob into the PSRAM staging buffer and
 CRC-checks that copy exactly as before, then:
 

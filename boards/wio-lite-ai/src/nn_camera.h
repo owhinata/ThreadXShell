@@ -123,6 +123,10 @@ struct nn_camera_stats {
 	uint32_t frames;         /**< complete frames ingested into the tensor     */
 	uint32_t skipped;        /**< complete frames that passed while busy       */
 	uint32_t errors;
+	/**< of @ref errors: decodes the plugin refused as not its model's shape
+	 *   (BF_ERR_MODEL), and as anything else (issue #130 step 6c) */
+	uint32_t model_errors;
+	uint32_t decoder_errors;
 	/**< bands that wrote the tensor mid-inference (owhinata/wio-lite-ai#54) */
 	uint32_t raced;
 	/**< frame posts discarded by the pre-arm drain (owhinata/wio-lite-ai#54) */

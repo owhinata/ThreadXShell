@@ -392,6 +392,7 @@ set(NN_SOURCES
     "${BOARD_DIR}/port/nn/nn_svc_f746.c"   # the shared `nn` command's adapter
     "${BOARD_DIR}/port/nn/nn_camera.c"          # live camera -> inference glue
     "${BOARD_DIR}/port/nn/nn_sess_release.c"    # when the session may go back (#130)
+    "${BOARD_DIR}/port/nn/nn_decode_count.c"    # how a decode is counted (#130 6c)
     # Model post-processing.  The decoder is SHARED with the other two boards
     # (issue #97); port/nn/nn_decoder.c is this board's half -- nn_tensor ->
     # tensor_desc, and the ownership of the decoder's state and its candidate

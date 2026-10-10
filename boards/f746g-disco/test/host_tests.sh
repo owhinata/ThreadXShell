@@ -79,6 +79,15 @@ gcc $CFLAGS -I "$board/port/nn" \
     $LDFLAGS -o "$out/test_nn_sess_release"
 "$out/test_nn_sess_release"
 
+# issue #130 step 6c (#122 P8) -- how the resident decoder's answer is counted in
+# `nn stream stats` (port/nn/nn_decode_count.c).  BF_ERR_MODEL is the top-5
+# result of a classifier stream here and is NOT counted (D6); every other
+# negative is a decoder fault -- and none of those can be typed.
+gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" \
+    "$here/test_nn_decode_count.c" "$board/port/nn/nn_decode_count.c" \
+    $LDFLAGS -o "$out/test_nn_decode_count"
+"$out/test_nn_decode_count"
+
 # issue #130 -- negative tests for the tflm residents of cmake/check_f746_layout.py
 # (the activation arena and the SD model slots must sit in SDRAM bank3).  Driven
 # by fake nm/objdump, so no toolchain is needed: what is checked is the gate's

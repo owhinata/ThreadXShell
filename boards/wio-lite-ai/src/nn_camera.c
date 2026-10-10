@@ -21,6 +21,7 @@
 #include "nn_det_record.h"
 #include "nn_core_frame.h"   /* the shared frame path (issue #130) */
 #include "nn_desc.h"         /* nn_tensor -> tensor_desc (issue #121) */
+#include "nn_decode_count.h" /* how a decode's answer is counted (#130 6c) */
 #include "psram.h"
 
 #include "stm32h7xx_hal.h"   /* HAL_GetTick, SystemCoreClock, DWT */
@@ -95,6 +96,12 @@ static volatile int nncam_run;
  * so it is the one kind a re-arm may take back up (issue #120).  Written only
  * by nn_camera_start() on the shell side, before nncam_run is raised. */
 static int nncam_rearmable;
+/* The running session is a `nn run`'s (no panel was required), whose decodes
+ * are not counted in the stream's errors (issue #130 step 6c, as on
+ * grove-vision-ai-v2): it reports its own result.  Written only by
+ * nn_camera_start() on the shell side, before nncam_run is raised, and kept by
+ * a re-arm (which only a stream's session takes). */
+static int nncam_oneshot;
 /* The worker is inside the run loop, i.e. it may touch the tensors at any moment. */
 static volatile int nncam_worker_busy;
 /*
@@ -110,6 +117,9 @@ static struct nn_core_frame nncam_frame;
 static volatile int nncam_holds_guards;
 
 static uint32_t nncam_infers, nncam_frames, nncam_skipped, nncam_errors;
+/* Of nncam_errors: decodes the plugin refused, apart (issue #97 / #130 step 6c,
+ * nn_decode_count.h).  Written by the worker only. */
+static uint32_t nncam_model_errors, nncam_decoder_errors;
 /* Diagnostics for the ownership invariant (owhinata/wio-lite-ai#54).  `raced` must stay
    0: it counts bands
  * that found the input taken from under them while they wrote it -- since issue #130
@@ -566,17 +576,34 @@ static int nncam_publish_hook(void *ctx, int n, uint32_t gen)
 #endif
 
 /*
- * This board's counting -- the table it always had: a publish the record took
- * is an inference, whatever the decoder said; one the generation rule dropped
- * is not counted (`nn run` waits on this counter and then reads the record).
- * P8 changes the table, not this file's shape (#130 step 6c).
+ * This board's counting.  A publish the record took is an inference, whatever
+ * the decoder said; one the generation rule dropped is not counted, and neither
+ * is its decode.  A decode the plugin refused is counted apart by
+ * nn_decode_count_of() (issue #130 step 6c, P8: grove-vision-ai-v2's table) --
+ * there is no console on this thread, so a refusal not counted apart cannot be
+ * told apart afterwards (issue #97).
  */
 static void nncam_account(void *ctx, enum nn_core_done what, int n, int took)
 {
 	(void)ctx;
-	(void)n;
-	if ((what == NN_CORE_DONE_RAW || what == NN_CORE_DONE_DECODED) && took)
-		nncam_infers++;
+	if (!took || (what != NN_CORE_DONE_RAW && what != NN_CORE_DONE_DECODED))
+		return;
+	nncam_infers++;
+	if (what != NN_CORE_DONE_DECODED)
+		return;   /* no plugin: nothing decoded, nothing refused */
+	switch (nn_decode_count_of(n, nncam_oneshot)) {
+	case NN_DC_MODEL:
+		nncam_model_errors++;
+		nncam_errors++;
+		break;
+	case NN_DC_DECODER:
+		nncam_decoder_errors++;
+		nncam_errors++;
+		break;
+	case NN_DC_NONE:
+	default:
+		break;
+	}
 }
 
 static const struct nn_core_frame_ops nncam_frame_ops = {
@@ -1037,6 +1064,8 @@ int nn_camera_start(int colorbar, int require_draw)
 	nncam_frames      = 0u;
 	nncam_skipped     = 0u;
 	nncam_errors      = 0u;
+	nncam_model_errors   = 0u;
+	nncam_decoder_errors = 0u;
 	nncam_raced       = 0u;
 	nncam_stale_posts = 0u;
 	nncam_ingest_last = 0u;
@@ -1076,6 +1105,7 @@ int nn_camera_start(int colorbar, int require_draw)
 		;
 
 	nncam_rearmable = require_draw ? 1 : 0;   /* see the re-arm above */
+	nncam_oneshot   = require_draw ? 0 : 1;   /* `nn run` is the one without */
 	nncam_run = 1;
 	rc = cam_band_claim(CAM_BAND_NN, colorbar, nncam_band);
 	if (rc != CAM_BAND_OK) {
@@ -1167,6 +1197,8 @@ void nn_camera_stats_get(struct nn_camera_stats *out)
 	out->frames       = nncam_frames;
 	out->skipped      = nncam_skipped;
 	out->errors       = nncam_errors;
+	out->model_errors   = nncam_model_errors;
+	out->decoder_errors = nncam_decoder_errors;
 	out->raced        = nncam_raced;
 	out->stale_posts  = nncam_stale_posts;
 	out->ingest_last_cyc = nncam_ingest_last;

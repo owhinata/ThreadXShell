@@ -379,6 +379,19 @@ stream start` need no start of their own.
 > frames kept arriving into a free buffer during an inference, so `in -
 > skipped` ran ahead of the inferences (34 vs 30 in the baseline below) and
 > the frame inferred had usually sat in its buffer for most of an inference.
+>
+> **A decoder fault is counted apart; "not BlazeFace" is not a fault** (issue
+> #130 step 6c, #122 P8, decision D6; `port/nn/nn_decode_count.c`). The
+> resident decoder runs on every model, and for one that is not
+> BlazeFace-shaped it answers `BF_ERR_MODEL` and the worker publishes the top
+> 5 classes with it -- that is a classifier stream's normal result, so
+> `model_errors` stays 0 on this board. Any other negative (`BF_ERR_UNINIT`,
+> `BF_ERR_ARG`, or an undocumented code) is a wiring fault: it counts in
+> `decoder_errors` and in `errors`, and the shared command prints the `of
+> those:` line. Such an inference still counts in `infers` (it ran), so with
+> decoder faults `in - skipped` still equals the inferences. Before step 6c
+> neither was counted. A `nn run` counts no decode (it reports its own
+> result).
 
 Stopping one of them detaches its sink while the base keeps running --
 that is the whole point of a subscriber -- so a delivery can already be in

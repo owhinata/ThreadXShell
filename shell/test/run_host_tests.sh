@@ -667,6 +667,19 @@ gcc $CFLAGS -I "$svc" \
     $LDFLAGS -o "$out/test_nn_handoff"
 "$out/test_nn_handoff"
 
+# issue #122 / #131 -- where a `nn model load` ends and what that obliges
+# (svc/nn_swap.c, moved out of grove-vision-ai-v2 and given wio-lite-ai's and
+# f746g-disco's way in by issue #131).  A load over an open model is a
+# replacement with a rollback, and the endings that matter most -- the backend
+# refuses the new model AND the previous one, a plugin the device refuses after
+# the host packer validated it -- cannot be typed.  Every board's table is
+# spelled out against the one function, and the real contract header supplies
+# the operator's vocabulary (enum nn_model_state), so the two cannot drift.
+gcc $CFLAGS -I "$inc" -I "$svc" \
+    "$here/test_nn_swap.c" "$svc/nn_swap.c" \
+    $LDFLAGS -o "$out/test_nn_swap"
+"$out/test_nn_swap"
+
 # issue #130 -- the shared frame path that runs that word (svc/nn_core_frame.c):
 # a frame in four parts (wio-lite-ai's bands) and in one (grove-vision-ai-v2's),
 # the two ways out of FILLING (the producer's ABANDON, the stop's JOIN), the

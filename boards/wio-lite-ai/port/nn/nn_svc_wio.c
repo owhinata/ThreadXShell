@@ -42,7 +42,7 @@
 #include "nn_camera.h"
 #include "nn_desc.h"
 #include "nn_active.h"
-#include "nn_load_end.h"
+#include "nn_swap.h"     /* the shared load ending table (#122, #131) */
 #include "plugin_load.h"
 #include "plugin_lease.h"
 #include "plugin_run.h"
@@ -452,7 +452,7 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	void     *stage = NULL;
 	const void *model_at;
 	uint32_t  cap = 0u, crc, model_len;
-	struct nn_load_verdict v;
+	struct nn_swap_verdict v;
 	int is_container = 0;
 	int model_after = 0;
 	int plugin_refused = 0;
@@ -692,14 +692,14 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	 * previous plugin's state at the fixed reservation before knowing whether
 	 * the model that needs it can be built -- and a backend that then restored
 	 * the PREVIOUS model would be left with no decoder for it.  A rollback
-	 * changes nothing here; an EMPTY ending unloads below (nn_load_decide()).
+	 * changes nothing here; an EMPTY ending unloads below (nn_swap_decide()).
 	 *
 	 * All of it is still inside nn_claims_begin()/settle() and before
 	 * nn_guards_give(), so `nn info` on another console sees "a load is in
 	 * progress" rather than a model from one load beside a plugin from
 	 * another.
 	 */
-	if (nn_load_swaps_plugin(rc, model_after)) {
+	if (nn_swap_swaps_plugin(rc, model_after)) {
 		if (!is_container) {
 			/* A bare model is a legal thing to load, and since issue #116 it
 			 * means NOTHING reads its outputs -- `nn run` reports the tensors
@@ -746,7 +746,14 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	}
 #endif
 
-	nn_load_decide(rc, model_after, plugin_refused, &v);
+	/*
+	 * The shared table (svc/nn_swap.c).  This board does not read whether a
+	 * model was open when the load began -- its reload restores the previous
+	 * model or leaves none, and a RESTORED ending is reported as PREVIOUS --
+	 * so it says "open" here; reading it under the session is issue #131
+	 * step 7d.  hw_down has no use on this board: it has no NPU to bring down.
+	 */
+	nn_swap_decide(1, nn_swap_end_of(rc, model_after, plugin_refused), &v);
 	*state = (enum nn_model_state)v.state;
 #if defined(CONFIG_NN_BACKEND_TFLM)
 	/* Explicit, whatever the loader already did on its way out: every failure
@@ -774,9 +781,9 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	 * whole of it.  A refused reload that restored the previous model keeps
 	 * the previous claims.
 	 */
-	if (v.claims == (unsigned char)NN_LOAD_CLAIMS_NEW)
+	if (v.commit)
 		nn_claims_settle(0, is_container ? &claims : NULL);
-	else if (v.claims == (unsigned char)NN_LOAD_CLAIMS_NONE)
+	else if (v.forget)
 		nn_claims_settle(0, NULL);
 	else
 		nn_claims_settle(1, NULL);     /* the previous model, its claims */

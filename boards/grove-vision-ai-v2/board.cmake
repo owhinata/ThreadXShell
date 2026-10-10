@@ -729,8 +729,9 @@ add_library(shell_objs OBJECT
     # Pure, walked by test/test_nn_outputs.c.
     "${BOARD_DIR}/port/npu/nn_outputs.c"
     # Where a `nn model load` ends and what that obliges (issue #122): a pure
-    # table, so the host test walks the endings a console cannot produce.
-    "${BOARD_DIR}/port/npu/nn_swap.c"
+    # table shared by every board since issue #131, so shell/test/
+    # test_nn_swap.c walks the endings a console cannot produce.
+    "${CMAKE_SOURCE_DIR}/svc/nn_swap.c"
     # The gate's claim and the count of threshold calls inside the plugin
     # (issue #122): one transition each, walked by test/test_nn_param_calls.c.
     "${BOARD_DIR}/port/npu/nn_param_calls.c"

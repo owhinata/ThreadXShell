@@ -13,6 +13,9 @@
  * word.  Only the joined line shows that, so this drives the joined line: the
  * dummy backend in, the capture log out, with stub nn_svc_* adapters behind it.
  *
+ * Also (issue #131 P19): which model-state line a refused load prints, the
+ * BUSY refusal printing none -- the same printer, so the same harness.
+ *
  * Built once per source set a board declares (run_host_tests.sh passes the
  * NN_SVC_HAS_MODEL_* macros), so the list each board prints is pinned too.
  */
@@ -34,12 +37,15 @@
 #if defined(NN_SVC_HAS_MODEL_SLOT) && NN_SVC_HAS_MODEL_SLOT
 #define SHAPE    "slot (wio-lite-ai)"
 #define SOURCES  "<--slot <n>>"
+#define A_SOURCE "--slot 5"
 #elif defined(NN_SVC_HAS_MODEL_NAME) && NN_SVC_HAS_MODEL_NAME
 #define SHAPE    "name + addr (grove-vision-ai-v2)"
 #define SOURCES  "<--name <name> | --addr <addr> <len>>"
+#define A_SOURCE "--name person"
 #elif defined(NN_SVC_HAS_MODEL_PATH) && NN_SVC_HAS_MODEL_PATH
 #define SHAPE    "path + builtin (f746g-disco)"
 #define SOURCES  "<--path <p> | builtin>"
+#define A_SOURCE "builtin"
 #else
 #error "build this test with a board's NN_SVC_HAS_MODEL_* set"
 #endif
@@ -47,8 +53,18 @@
 /* ---- stub adapters: nothing below is reached by a wrong invocation ------- */
 
 static int load_calls;
+/* What the stub load answers and what `nn info` says was open before it -- set
+ * by the refusal cases below, reset to "refused SPEC, nothing open" between
+ * lines. */
+static int load_status;
+static enum nn_model_state load_state;
+static uint8_t info_model_active;
 
-void nn_svc_info(struct nn_svc_info *out) { memset(out, 0, sizeof *out); }
+void nn_svc_info(struct nn_svc_info *out)
+{
+	memset(out, 0, sizeof *out);
+	out->model_active = info_model_active;
+}
 void nn_svc_info_extra(nn_svc_write_fn write, void *ctx) { (void)write; (void)ctx; }
 void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
                        void *ctx, struct nn_op_result *res,
@@ -56,9 +72,9 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 {
 	(void)spec; (void)read; (void)ctx;
 	load_calls++;
-	res->status = NN_SVC_ERR_SPEC;
+	res->status = load_status;
 	res->claim = (uint8_t)NN_CLAIM_NONE;
-	*state = NN_MODEL_EMPTY;
+	*state = load_state;
 }
 void nn_svc_model_unload(struct nn_op_result *res) { res->status = NN_SVC_OK; }
 int  nn_svc_tensors_pin(void) { return NN_SVC_ERR_STATE; }
@@ -104,6 +120,9 @@ static void reset(void)
 	cli_test_set_tx_wait_hook(NULL, NULL);
 	cli_test_set_sleep_hook(NULL, NULL);
 	load_calls = 0;
+	load_status = NN_SVC_ERR_SPEC;
+	load_state = NN_MODEL_EMPTY;
+	info_model_active = 0;
 }
 
 static void run_line(const char *line)
@@ -113,9 +132,33 @@ static void run_line(const char *line)
 	cli_test_pump(&sh0);
 }
 
+/* A load the stub answers with (status, state), `nn info` having said whether a
+ * model was open before it. */
+static void run_load(int status, enum nn_model_state state, uint8_t had)
+{
+	static const char line[] = "nn model load " A_SOURCE "\r";
+
+	reset();
+	load_status = status;
+	load_state = state;
+	info_model_active = had;
+	cli_dummy_inject(&tr0, line, strlen(line));
+	cli_test_pump(&sh0);
+}
+
+
 static int has(const char *needle)
 {
 	return strstr(cli_dummy_output_str(&tr0), needle) != NULL;
+}
+
+/* Any of the lines a refused load may add about the model it left. */
+static int has_state_line(void)
+{
+	return has("nothing is loaded") ||
+	       has("the previous model is still active") ||
+	       has("the previous model could not be restored") ||
+	       has("the new model is open") || has("nn: loaded");
 }
 
 static int failures;
@@ -168,6 +211,49 @@ int main(void)
 	run_line("nn model a b c d e f\r");
 	expect("so does an over-long one",
 	       has("model: missing or unknown subcommand") && !has("load load"));
+
+	/*
+	 * [!] A BUSY REFUSAL PRINTS NO MODEL STATE (issue #131 P19).  The shared
+	 * order answers BUSY only before anything changed, so whatever the state
+	 * word says then describes another console's load, caught mid-way -- on
+	 * wio it read "nothing is loaded" while the other load had the model down.
+	 * Every state is tried, with and without a model before, so a fix that
+	 * only skipped one line of the four does not pass.
+	 */
+	{
+		static const enum nn_model_state all[] = {
+			NN_MODEL_EMPTY, NN_MODEL_PREVIOUS, NN_MODEL_NEW,
+		};
+		unsigned i;
+		uint8_t had;
+
+		for (i = 0; i < sizeof all / sizeof all[0]; i++) {
+			for (had = 0; had <= 1; had++) {
+				run_load(NN_SVC_ERR_BUSY, all[i], had);
+				expect("a BUSY load reaches the adapter and is reported",
+				       load_calls == 1 && has("busy"));
+				expect("and says nothing about the model it did not touch",
+				       !has_state_line());
+			}
+		}
+	}
+
+	/* The other refusals keep their state lines, word for word. */
+	run_load(NN_SVC_ERR_HW, NN_MODEL_EMPTY, 0);
+	expect("a non-BUSY refusal with nothing open says so",
+	       load_calls == 1 && has("nn: nothing is loaded\r\n"));
+	run_load(NN_SVC_ERR_HW, NN_MODEL_EMPTY, 1);
+	expect("a non-BUSY refusal that lost the previous model warns",
+	       has("the previous model could not be restored -- nothing is "
+	           "loaded now\r\n"));
+	run_load(NN_SVC_ERR_HW, NN_MODEL_PREVIOUS, 1);
+	expect("a non-BUSY refusal that kept the previous model says so",
+	       has("nn: the previous model is still active\r\n"));
+	run_load(NN_SVC_ERR_HW, NN_MODEL_NEW, 1);
+	expect("a non-BUSY refusal that changed the model says so",
+	       has("nn: the new model is open, but it has no decoder\r\n"));
+	run_load(NN_SVC_OK, NN_MODEL_NEW, 0);
+	expect("a load that succeeds says loaded", has("nn: loaded\r\n"));
 
 	if (failures != 0) {
 		printf("test_nn_cmd_usage: %d failure(s)\n", failures);

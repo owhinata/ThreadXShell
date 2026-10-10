@@ -45,7 +45,9 @@
  * counter ODD -> plugin unload -> the last result -> the geometry -> lease back
  * -> backend release -> hw_down -> forget -> counter EVEN -> claim back.
  *
- * [!] BUSY IS ONLY EVER ANSWERED BEFORE THE BACKEND IS TOUCHED.  This file's
+ * [!] A BUSY REFUSAL NEVER REPLACES OR LOSES THE OPEN MODEL (it is answered
+ * before the swap; staging into an inactive buffer or an empty-state cleanup
+ * may already have run).  This file's
  * own BUSY refusals are the claim and the lease; a board's admit, prepare or
  * fetch hook may answer BUSY too (wio-lite-ai's blob store and OCTOSPI1 guard)
  * -- all of them before step 10 -- and a BUSY returned by the swap or the

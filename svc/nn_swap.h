@@ -16,12 +16,12 @@
  * keeps, whether the plugin is unpublished, whether the hardware goes down and
  * whether the last result goes.
  *
- * TWO WAYS IN, ONE TABLE.  A board that knows where its load stopped names the
- * ending itself (grove-vision-ai-v2 closes and reopens its interpreter step by
- * step).  A board whose backend runs the whole replacement as one call
- * (wio-lite-ai, f746g-disco) only learns what that call returned and whether a
- * model was left; nn_swap_end_of() turns those into the same ending.  Either
- * way nn_swap_decide() is the one list of obligations.
+ * TWO WAYS IN, ONE TABLE.  A load refused before the backend is REFUSED by
+ * name; past that, the backend's swap says what it returned and whether a model
+ * was left, and nn_swap_end_of() turns those into the ending.  Either way
+ * nn_swap_decide() is the one list of obligations.  The order that drives both
+ * is svc/nn_core_model.c (issue #131; grove-vision-ai-v2 first, wio-lite-ai and
+ * f746g-disco still walk their own until stage 7d).
  *
  * WHY IT IS A PURE FUNCTION IN ITS OWN FILE.  The interesting ends cannot be
  * produced from a console on demand: a backend that refuses the new model and
@@ -34,10 +34,10 @@
  * RTOS or board header; the shared-storage audit compiles it in each board's
  * context.
  *
- * [!] WHAT IT DOES NOT COVER.  This decides; it does not act.  That an adapter
- * swaps the plugin only after the backend took the new model, and acts on
- * every flag it has a use for, is held down by there being one call site per
- * board and it being short -- not by this file.
+ * [!] WHAT IT DOES NOT COVER.  This decides; it does not act.  That the plugin
+ * is swapped only after the backend took the new model, and every flag is acted
+ * on, is svc/nn_core_model.c's (walked by shell/test/test_nn_core_model.c) --
+ * not this file's.
  */
 #ifndef NN_SWAP_H
 #define NN_SWAP_H

@@ -247,8 +247,7 @@ board README が正。
   identifier → verifier → 走査**。**長さには下限も要り生アドレス形にも必須**、**limits は呼び出しと
   ともに `npu_verify.h` の 1 箇所**）。**ペイロード検査も緩めない**（`COMMAND_STREAM` が 1 個かつ
   最後 / 対象は**入力テンソル 0** / `is_variable()` は拒否）。
-- **[!] `nn model load --name` はリースを切らさない**（`npu_hw_init()` が先 → 走査 → CRC → `npu_open()`
-  → plugin、**モデルが残らない失敗は必ず `npu_hw_deinit()`** = 共有の順序の hw_down フック）。
+- **[!] `nn model load --name` はリースを切らさない**（`npu_hw_init()` 先 → 走査 → CRC → `npu_open()` → plugin、**残らない失敗は必ず `npu_hw_deinit()`**）。
   候補は **VALID のみ・重複拒否・失敗理由は別々・読めなければ拒否。ホスト側の `verify_vela_model` を外さない**（**書込みの後**に走る。**C++ 不在は fail-closed**）。
 - **[!] gate の外から plugin に入るコンソール呼び出し（`nn thresh` / `nn dets`）は数に入ってから lease を取り、load/unload はその数が 0 でなければ BUSY**（数の判定は claim と同じクリティカルセクション、`nn_param_calls.c`。数は待たず、lease は有界に待つ）。
 - **[!] アリーナのキャッシュ保守は「範囲ごと」にしない。** 潰すのは **`ethosu_invalidate_dcache()`

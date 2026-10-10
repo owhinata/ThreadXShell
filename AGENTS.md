@@ -46,7 +46,6 @@
   予約**（prelink なので動かすと既存 plugin が全て無効）。heap の天井は `__heap_end` で `__ram_end` を
   再定義しない。予約は ldscript / `plugin_memory.ld` / board.cmake のゲート引数 /
   `check_plugin_reservation.py` の **4 箇所で独立に宣言し、1 つの変数から生成しない**。
-- **plugin の差し替えは backend が成功してから**（先だと前の plugin を壊す）。bare model は必ず unload。
 - **[!] decode と draw を隔てる構造が無い**ので**結果リース**で囲い、順序は**常にリース → フレーム
   ロック**、worker は **decode と publish の全体**を保持、**パネルは待たず**飛ばして**数える**。
   **リース保持は「描いてよい」ではない。**
@@ -97,6 +96,8 @@
 - **[!] デコーダの負値を 1 つに畳まない**（どれも「0 件」ではない）。**停止は推論を取り消せない**ので
   worker は arm 時点の世代を控え publish のロック内で照合（`svc/nn_det_record.c`）。**RAW 記述子と top-5 は publish 時に record へ載せ、印字時にモデルを取り直さない**（#121）。
 - **[!] 推論を非同期の worker で回すボードは「誰も解釈していない」も世代規則の下で publish する**（しないと `nn run` が timeout する。wio・Grove）。
+- **[!] モデルの load / unload の順序は `svc/nn_core_model` の 1 実装**（表は `svc/nn_swap`、3 ボードがフック + const 表で採る）: 差し替えは
+  backend 成功後、bare は plugin unload、モデルが残らない終わり方は全部下ろす、**BUSY は swap より前だけ**（BUSY 拒否は状態行を出さない、#131）。
 
 ### 8. `svc/frame_pipeline` の sink registry: attach は拒否する、直列化は呼び出し元
 
@@ -247,7 +248,7 @@ board README が正。
   ともに `npu_verify.h` の 1 箇所**）。**ペイロード検査も緩めない**（`COMMAND_STREAM` が 1 個かつ
   最後 / 対象は**入力テンソル 0** / `is_variable()` は拒否）。
 - **[!] `nn model load --name` はリースを切らさない**（`npu_hw_init()` が先 → 走査 → CRC → `npu_open()`
-  → plugin、**モデルが残らない失敗は必ず `npu_hw_deinit()`**。**開いた上は差し替え・plugin は backend 成功後**、表は `nn_swap.c`）。
+  → plugin、**モデルが残らない失敗は必ず `npu_hw_deinit()`** = 共有の順序の hw_down フック）。
   候補は **VALID のみ・重複拒否・失敗理由は別々・読めなければ拒否。ホスト側の `verify_vela_model` を外さない**（**書込みの後**に走る。**C++ 不在は fail-closed**）。
 - **[!] gate の外から plugin に入るコンソール呼び出し（`nn thresh` / `nn dets`）は数に入ってから lease を取り、load/unload はその数が 0 でなければ BUSY**（数の判定は claim と同じクリティカルセクション、`nn_param_calls.c`。数は待たず、lease は有界に待つ）。
 - **[!] アリーナのキャッシュ保守は「範囲ごと」にしない。** 潰すのは **`ethosu_invalidate_dcache()`

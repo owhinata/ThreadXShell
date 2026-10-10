@@ -168,6 +168,40 @@ configure after #130, and every `null` configure prints a status line. To move
 it: `cmake -B <dir> -DCONFIG_NN_BACKEND=tflm`, or use a fresh build directory.
 A fresh `-DCONFIG_NN_BACKEND=null` is not warned about.
 
+### The model: built in, loaded from SD, or nothing (issue #131)
+
+The backend can hold no model at all, and `nn model unload` leaves it that way:
+`nn info` then prints `model : (none)` and, in place of the tensor lines,
+`note : nothing loaded -- `nn model load ...``; `nn run`, `nn stream start` and
+`nn bench` are refused (`nn bench` with `no model is loaded`). Until #131 the
+`tflm` unload went back to the built-in model, so the board could never be
+emptied.
+
+- [!] **The built-in model is adopted implicitly once, by the first open after
+  boot** -- whichever of `nn info`, `nn run`, `nn bench`, `nn model load` or
+  `nn model unload` comes first. After that, nothing puts it back except an
+  explicit `nn model load builtin`: an open, an `nn info` from the other
+  console or an `nn run` on an empty backend builds nothing. The first open is
+  serialised by a latch and does not return until the build is done, so an
+  unload typed right after boot -- even while the other console's `nn info` is
+  doing that first open -- empties a finished model.
+- A refused `nn model load --path` restores the previous model; from empty it
+  stays empty and says `nothing is loaded`. The answer comes from the reload
+  itself (whether a model is left), not from whether the handle is open.
+- `stedgeai_reloc` has no built-in model: it starts empty, and `nn model load
+  builtin` is refused as a source this backend does not have (it used to mean
+  "unload"; use `nn model unload`). Its `nn info` shows `(none)` and the note
+  after boot and after an unload.
+- `null` and `stedgeai` cannot swap models: `nn model load` is unsupported and
+  `nn model unload` answers as before without changing anything.
+
+`nn info` prints two arena figures: `arena : N B reserved` is the activation
+arena the backend reserves (`tflm`: `g_arena`, 524,288 B; `stedgeai_reloc`:
+`g_acts`, 393,216 B; `stedgeai`: the generated activations size; `null`: 0),
+and `used : N B (activations)` is what the open model's activations actually
+take of it (absent with no model, and on `null`). The same two lines as
+wio-lite-ai and grove-vision-ai-v2.
+
 Measured on the default (`tflm`, CMSIS-NN) build at #130, fresh configure:
 
 | | null | tflm |
@@ -215,7 +249,7 @@ figures are the tables above.
 |---|---|
 | `nn bench 10` | min 628,234 / avg 631,212 / max 633,281 us |
 | `nn stream start --frames 300` | 300 frames in, 266 skipped, 0 errors; 30 inferences in 21,036 ms = 1.42 inf/s; latency 659,658 us (last) |
-| `nn info` arena line | `470352 B reserved` -- [!] labelled "reserved" but it is the arena TFLM actually USES; the reservation is `g_arena`, 524,288 B (to be corrected under #131) |
+| `nn info` arena line | `470352 B reserved` -- [!] labelled "reserved" but it was the arena TFLM actually USES; since #131 that figure is the `used` line and `arena` is the reservation, `g_arena`, 524,288 B |
 
 Stack high-water marks from `thread` after `nn bench 10`, two `nn run` and the
 300-frame stream (`peak` / size):

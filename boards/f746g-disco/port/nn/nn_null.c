@@ -98,7 +98,11 @@ static struct nn_tensor *null_output(void *impl, int idx)
 	return (idx >= 0 && idx < 2) ? &m->out[idx] : NULL;
 }
 
-static uint32_t null_activations_bytes(void *impl) { (void)impl; return NULL_IN_BYTES; }
+/* A stub has no intermediate tensors, so it has no activation arena: nothing
+ * used and nothing reserved (issue #131 P3).  This used to report the input's
+ * size here, which put a number on `nn info`'s arena line that meant nothing --
+ * wio-lite-ai's stub says 0 for the same reason. */
+static uint32_t null_activations_bytes(void *impl) { (void)impl; return 0u; }
 
 static int null_run(void *impl)
 {
@@ -118,4 +122,8 @@ const struct nn_backend_vt nn_backend_vt_selected = {
 	.output = null_output,
 	.activations_bytes = null_activations_bytes,
 	.run = null_run,
+	/* No reload / release: `nn model load` is unsupported, `nn model unload`
+	   keeps its old answer. */
+	.arena_reserved = 0u,
+	.has_builtin = 1u,                        /* the synthetic stub */
 };

@@ -53,6 +53,8 @@ struct nn_backend_vt {
 	int  (*out_count)(void *impl);
 	struct nn_tensor *(*input)(void *impl, int idx);
 	struct nn_tensor *(*output)(void *impl, int idx);
+	/** What the open model's activations take of the arena (issue #131 P3):
+	 *  0 with no model.  NOT the reservation -- that is arena_reserved. */
 	uint32_t (*activations_bytes)(void *impl);
 
 	/** Pure inference (no timing). Inputs pre-filled; 0 on success, <0 on error. */
@@ -96,6 +98,13 @@ struct nn_backend_vt {
 	 * it.  A backend with no runtime of its own leaves this NULL.
 	 */
 	uint32_t (*heap_allocs)(void);
+
+	/**
+	 * The activation arena this backend RESERVES, in bytes, whatever is open: the
+	 * `arena : N B reserved` line of `nn info` (issue #131 P3).  0 for a backend
+	 * that has none (the `null` stub).
+	 */
+	uint32_t arena_reserved;
 };
 
 /** The one backend selected at build time (provided by exactly one backend TU). */

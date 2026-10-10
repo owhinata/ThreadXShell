@@ -152,8 +152,13 @@ int  nn_output_count(const struct nn_model *m);
 struct nn_tensor *nn_input(struct nn_model *m, int idx);
 struct nn_tensor *nn_output(struct nn_model *m, int idx);
 
-/** Size of the activation arena (bytes), for `nn info`; 0 if unknown. */
+/** What the open model's activations take of the arena (bytes), for the `used`
+ *  line of `nn info`; 0 with no model or when the backend does not say. */
 uint32_t nn_activations_bytes(const struct nn_model *m);
+
+/** The arena the compiled-in backend reserves (bytes), whatever is open -- the
+ *  `arena : N B reserved` line of `nn info` (issue #131 P3); 0 when it has none. */
+uint32_t nn_arena_reserved(void);
 
 /**
  * Run one inference.  Inputs must be filled first; outputs are valid on return.

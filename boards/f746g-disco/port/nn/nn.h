@@ -90,6 +90,12 @@ const struct nn_backend_info *nn_backend(void);
  * (BlazeFace-128 with the stedgeai backend; a synthetic BlazeFace-shaped stub
  * with the null backend).  Returns 0 and sets @p *out on success, <0 otherwise.
  * The handle is a singleton; a second open returns the same instance.
+ *
+ * [!] ONLY THE FIRST OPEN AFTER BOOT BUILDS ANYTHING (issue #131 P16).  That is
+ * where the tflm backend adopts its built-in model; a later open -- from `nn
+ * info`, `nn run` or a load -- returns the singleton as it is, empty after an
+ * unload included.  The first one is serialised by a latch and does not return
+ * until the build is done, so a release can never run under it.
  */
 int  nn_model_open(struct nn_model **out);
 void nn_model_close(struct nn_model *m);
@@ -104,8 +110,25 @@ int  nn_output_count(const struct nn_model *m);
 struct nn_tensor *nn_input(struct nn_model *m, int idx);
 struct nn_tensor *nn_output(struct nn_model *m, int idx);
 
-/** Size of the activation arena (bytes), for `nn info`; 0 if unknown. */
+/** What the open model's activations take of the arena (bytes), for the `used`
+ *  line of `nn info`; 0 with no model or when the backend does not say. */
 uint32_t nn_activations_bytes(const struct nn_model *m);
+
+/** The arena the compiled-in backend reserves (bytes), whatever is open -- the
+ *  `arena : N B reserved` line of `nn info` (issue #131 P3); 0 when it has none. */
+uint32_t nn_arena_reserved(void);
+
+/**
+ * Whether @p m describes a MODEL, not merely an open singleton (issue #131 P16,
+ * wio-lite-ai's since its issue #122 P2).  The singleton stays open once the
+ * first nn_model_open() has run; what `nn model unload` takes away is the model
+ * in it, which leaves a handle with no inputs.  Asks; builds nothing.
+ */
+int nn_model_present(const struct nn_model *m);
+
+/** Whether `nn model load builtin` means anything to this backend: a model is
+ *  built into the image (tflm, stedgeai, null).  0 for stedgeai_reloc. */
+int nn_model_has_builtin(void);
 
 /**
  * Run one inference.  Inputs must be filled first; outputs are valid on return.
@@ -119,30 +142,38 @@ uint32_t nn_last_cycles(const struct nn_model *m);
 
 /*
  * Runtime model swap (owhinata/stm32f746g-disco#89 P2).  Only backends that
- * interpret a .tflite in RAM support it (tflm); others return <0 (unsupported).
+ * interpret a model in RAM support it (tflm, stedgeai_reloc); others return <0
+ * (unsupported).
  * Usage:
  *   nn_model_load_region(&buf,&cap);   // backend's writable staging buffer
  *   ...fill buf with up to cap bytes of a .tflite read from SD...
  *   nn_model_reload(buf, len, "name"); // activate it (data==NULL => built-in)
  * The caller MUST serialize these against inference: stop any live stream and
  * hold nn_session_try_acquire(), since the interpreter/arena/model are singletons.
- * nn_model_reload is transactional -- on failure the previous model stays active
- * (or, only if even that could not be rebuilt, the model is closed and a later
- * nn_model_open() rebuilds it).  Both return 0 on success, <0 on error.
+ * nn_model_reload is transactional -- on failure the previous model stays active,
+ * or, when there was none (or even it could not be rebuilt), the backend is left
+ * EMPTY: open, with no model (issue #131 P16).  Both return 0 on success, <0 on
+ * error.
  *
- * @p open_after, when not NULL, receives whether a model is open once THIS call
- * has finished: 0 only when the model was refused AND the previous one could not
- * be rebuilt (issue #122 P1).  It is the reload's own outcome, not a readback.
- * Asking nn_model_open() afterwards cannot answer it: on a closed singleton that
- * call OPENS one -- this board's tflm backend adopts the built-in model -- and
- * succeeds, so exactly the case above would read as "the previous model is still
- * active"; and `nn info` on another console calls it without the session, so a
- * read after the session is released may see a state this call did not leave.
- * wio-lite-ai's reload has had the same out-parameter since its issue #108.
+ * @p model_after, when not NULL, receives whether a MODEL is there once THIS call
+ * has finished -- not whether the singleton is open, which it stays (issue #131
+ * P16; wio-lite-ai's reload answers the same since its issue #122 P2).  It is
+ * the reload's own outcome, from the handle it just adopted, not a readback:
+ * `nn info` on another console asks without the session, so a read after the
+ * session is released may see a state this call did not leave (issue #122 P1).
  */
 int nn_model_load_region(void **buf, uint32_t *cap);
 int nn_model_reload(const void *data, uint32_t len, const char *name,
-                    int *open_after);
+                    int *model_after);
+
+/**
+ * Unload: the backend keeps its singleton open with NO model in it (issue #131
+ * P16).  Nothing comes back by itself afterwards -- not on the next open, not
+ * from `nn info` or `nn run`; the built-in model returns only through an
+ * explicit `nn model load builtin`.  Same serialization as nn_model_reload().
+ * 0 on success, -2 when the backend cannot swap models (null, stedgeai).
+ */
+int nn_model_release(void);
 
 /*
  * Coarse single-session guard.  The singleton model + the backends are NOT

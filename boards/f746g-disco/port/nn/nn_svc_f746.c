@@ -81,13 +81,17 @@ void nn_svc_info(struct nn_svc_info *out)
 	nn_svc_str(out->backend, sizeof out->backend, bi ? bi->name : NULL);
 	nn_svc_str(out->version, sizeof out->version, bi ? bi->version : NULL);
 
+	/* [!] THE RESERVATION, NOT THE USE (issue #131 P3).  This line used to
+	 * carry what the model's activations take, under the word "reserved"; that
+	 * is `used` now, as on grove-vision-ai-v2.  A fixed fact of the build, so it
+	 * needs no claim. */
+	out->arena_bytes = nn_arena_reserved();
+
 	if (nn_model_open(&m) != 0 || m == NULL)
 		return;
 
 	/* Copied, not borrowed: the backend owns this name and a reload replaces
 	   it, so the caller must not hold a pointer into it while printing. */
-	out->model_active = 1u;
-	out->arena_used  = 0u;   /* this backend reports only the reservation */
 	/*
 	 * [!] THE NAME IS COPIED UNDER THE SESSION WHEN THE SESSION IS FREE, and
 	 * copied anyway when it is not.  That is a deliberate middle, not an
@@ -107,8 +111,12 @@ void nn_svc_info(struct nn_svc_info *out)
 	 * it always was, and no diagnostic is lost.
 	 */
 	held = (nn_session_try_acquire() == 0);
+	/* [!] "A MODEL IS THERE", NOT "THE SINGLETON OPENED" (issue #131 P16, as
+	 * wio-lite-ai since its issue #122 P2).  The singleton stays open after
+	 * `nn model unload` with nothing in it; this said 1 regardless. */
+	out->model_active = nn_model_present(m) ? 1u : 0u;
 	nn_svc_str(out->model, sizeof out->model, nn_model_name(m));
-	out->arena_bytes = nn_activations_bytes(m);
+	out->arena_used  = out->model_active ? nn_activations_bytes(m) : 0u;
 	if (held)
 		nn_session_release();
 
@@ -123,7 +131,8 @@ void nn_svc_info(struct nn_svc_info *out)
 	   the copy above (issue #99 made this explicit rather than implied). */
 	out->avail_identity = (uint8_t)NN_AVAIL_OK;
 	out->avail_runtime  = (uint8_t)NN_AVAIL_OK;
-	out->avail_tensors  = (uint8_t)NN_AVAIL_OK;
+	out->avail_tensors  = out->model_active ? (uint8_t)NN_AVAIL_OK
+	                                        : (uint8_t)NN_AVAIL_NA;
 }
 
 /* ---- model lifecycle ----------------------------------------------------- */
@@ -136,14 +145,31 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	struct nn_swap_verdict v;
 	void *buf = NULL;
 	uint32_t cap = 0u, len = 0u;
-	int open_after = 0;
+	int model_after = 0;
 	int rc;
 
 	nn_detail_clear();
-	*state = (nn_model_open(&m) == 0 && m != NULL) ? NN_MODEL_PREVIOUS
-	                                              : NN_MODEL_EMPTY;
+	/*
+	 * What an early refusal leaves: whatever was there.  "There" is a MODEL,
+	 * not an open singleton (issue #131 P16).
+	 *
+	 * [!] THIS OPEN IS ALSO WHERE THE FIRST ONE AFTER BOOT HAPPENS, before any
+	 * claim: that is the one open that adopts the built-in model, and it does
+	 * not return until the build is done, so nothing under the session below
+	 * can run beside it.  Every later open builds nothing.
+	 */
+	*state = (nn_model_open(&m) == 0 && nn_model_present(m))
+	         ? NN_MODEL_PREVIOUS : NN_MODEL_EMPTY;
 
 	/* The tag is refused before anything is acquired. */
+	if (spec->tag == NN_SPEC_BUILTIN && !nn_model_has_builtin()) {
+		/* [!] NOT AN UNLOAD (issue #131 P16).  On the SD-only backend this
+		 * word used to empty the model; `nn model unload` does that. */
+		nn_detail_set("this backend loads a model from the SD card (--path); "
+		              "it has no built-in model");
+		nn_result(res, NN_SVC_ERR_SPEC, NN_CLAIM_NONE);
+		return;
+	}
 	if (spec->tag != NN_SPEC_PATH && spec->tag != NN_SPEC_BUILTIN) {
 		nn_detail_set("this board loads a model from the SD card (--path) or "
 		              "uses the one built into the image (builtin); it has no "
@@ -185,7 +211,7 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	}
 
 	if (spec->tag == NN_SPEC_BUILTIN) {
-		rc = nn_model_reload(NULL, 0u, NULL, &open_after);
+		rc = nn_model_reload(NULL, 0u, NULL, &model_after);
 	} else {
 		rc = nn_model_load_region(&buf, &cap);
 		if (rc != 0) {
@@ -208,19 +234,22 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 			nn_result(res, NN_SVC_ERR_ARG, NN_CLAIM_NONE);
 			return;
 		}
-		rc = nn_model_reload(buf, len, spec->path, &open_after);
+		rc = nn_model_reload(buf, len, spec->path, &model_after);
 	}
 
 	/*
 	 * [!] THE RESULTING MODEL STATE IS THE RELOAD'S OWN OUTCOME, NOT A QUESTION
 	 * ASKED AFTERWARDS (issue #122 P1).  This backend's reload is transactional
-	 * -- on a refusal the previous model normally stays active -- but it
-	 * documents one exception: if even that could not be rebuilt, the model is
-	 * left CLOSED.  This used to ask nn_model_open() after the session was
-	 * released, and that call is not a question: on a closed singleton it OPENS
-	 * one (the tflm backend adopts the built-in model) and succeeds -- so the
-	 * exception read as PREVIOUS, and a console that asked in between could
-	 * change the answer.  wio-lite-ai learned this in its issue #108.
+	 * -- on a refusal the previous model normally stays active -- but it leaves
+	 * NO model when there was none to restore, or when even that could not be
+	 * rebuilt.  This used to ask nn_model_open() after the session was released,
+	 * and that call was not a question: on a closed singleton it OPENED one (the
+	 * tflm backend adopted the built-in model) and succeeded -- so the exception
+	 * read as PREVIOUS, and a console that asked in between could change the
+	 * answer.  wio-lite-ai learned this in its issue #108.  And the answer is
+	 * whether a MODEL is left, not whether the handle is open (issue #131 P16):
+	 * the handle stays open empty, and a refused load from empty would
+	 * otherwise read as "the previous model is still active".
 	 *
 	 * The state comes from the table every board shares (svc/nn_swap.c,
 	 * issue #131); this board has no plugin, so none is ever refused.  It
@@ -232,7 +261,7 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	 * reload that returned 0 and left no model) is not reachable on this
 	 * board, and shell/test/test_nn_swap.c says so.
 	 */
-	nn_swap_decide(1, nn_swap_end_of(rc, open_after, 0), &v);
+	nn_swap_decide(1, nn_swap_end_of(rc, model_after, 0), &v);
 	*state = (enum nn_model_state)v.state;
 
 	/*
@@ -262,6 +291,16 @@ void nn_svc_model_unload(struct nn_op_result *res)
 
 	nn_detail_clear();
 
+	/*
+	 * [!] THE FIRST OPEN AFTER BOOT HAPPENS HERE, BEFORE THE CLAIM, if nothing
+	 * has opened the model yet (issue #131 P16).  That open adopts the built-in
+	 * model and does not return until it is built -- and if another console's
+	 * `nn info` got there first, this waits for that build -- so the release
+	 * below always runs on a singleton that is finished, and no later open
+	 * puts the built-in model back.
+	 */
+	(void)nn_model_open(&m);
+
 	if (nn_camera_running()) {
 		nn_detail_set("stop the inference stream first (`nn stream stop`)");
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
@@ -272,12 +311,13 @@ void nn_svc_model_unload(struct nn_op_result *res)
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 		return;
 	}
-	/* Idempotent: this board's model is a singleton that is rebuilt rather than
-	   destroyed, so "unload" returns it to the built-in one. */
-	if (nn_model_open(&m) == 0 && m != NULL)
-		(void)nn_model_reload(NULL, 0u, NULL, NULL);
-	/* The model went back to the built-in one, and the last result goes with
-	 * the one it came from (issue #118) -- under the session. */
+	/* Idempotent.  The singleton stays open with NO model in it (issue #131
+	 * P16); it used to go back to the built-in one, so this board could never
+	 * be emptied.  A backend that cannot swap (null, stedgeai) has no release
+	 * and keeps its model -- the old answer, unchanged. */
+	(void)nn_model_release();
+	/* The last result goes with the model it came from (issue #118) -- under
+	 * the session. */
 	nn_camera_record_invalidate();
 	nn_session_release();
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
@@ -681,6 +721,15 @@ void nn_svc_bench_prepare(struct nn_op_result *res)
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 		return;
 	}
+	/* [!] A MODEL, ASKED UNDER THE SESSION (issue #131): the singleton is open
+	 * with nothing in it after `nn model unload`, and a load cannot change the
+	 * answer while this holds the session. */
+	if (!nn_model_present(m)) {
+		nn_session_release();
+		nn_detail_set("no model is loaded");
+		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
+		return;
+	}
 	/* A fixed pattern so every run measures the same work. */
 	for (i = 0; i < nn_input_count(m); i++) {
 		struct nn_tensor *t = nn_input(m, i);
@@ -713,6 +762,15 @@ void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
 	if (nn_session_try_acquire() != 0) {
 		nn_detail_set("NN busy (a stream or run is active)");
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
+		return;
+	}
+	/* Asked again under THIS hold: an unload may have run between prepare and
+	 * here (issue #131).  Without it an empty model failed as "inference
+	 * failed" -- a hardware answer for a state one. */
+	if (!nn_model_present(m)) {
+		nn_session_release();
+		nn_detail_set("no model is loaded");
+		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
 		return;
 	}
 

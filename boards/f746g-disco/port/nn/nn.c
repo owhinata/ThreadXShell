@@ -180,6 +180,27 @@ uint32_t nn_activations_bytes(const struct nn_model *m)
 	return (m && m->open) ? nn_backend_vt_selected.activations_bytes(m->impl) : 0u;
 }
 
+uint32_t nn_arena_reserved(void)
+{
+	return nn_backend_vt_selected.arena_reserved;
+}
+
+/* A handle describes a model when it has inputs -- see nn_model_present(). */
+static int nn_impl_has_model(void *impl)
+{
+	return impl != NULL && nn_backend_vt_selected.in_count(impl) > 0;
+}
+
+int nn_model_present(const struct nn_model *m)
+{
+	return (m && m->open) ? nn_impl_has_model(m->impl) : 0;
+}
+
+int nn_model_has_builtin(void)
+{
+	return nn_backend_vt_selected.has_builtin ? 1 : 0;
+}
+
 int nn_run(struct nn_model *m)
 {
 	uint32_t c0, c1;
@@ -220,23 +241,26 @@ int nn_model_load_region(void **buf, uint32_t *cap)
 }
 
 int nn_model_reload(const void *data, uint32_t len, const char *name,
-                    int *open_after)
+                    int *model_after)
 {
 	void *impl = NULL;
 	int rc;
 
 	/* Unchanged on the two early refusals below: nothing was touched. */
-	if (open_after)
-		*open_after = g_model.open ? 1 : 0;
+	if (model_after)
+		*model_after = nn_model_present(&g_model);
 	if (!g_model.open)                  /* caller must nn_model_open() first */
 		return -1;
 	if (!nn_backend_vt_selected.reload)
 		return -2;                      /* backend cannot swap models        */
 
-	/* The backend is transactional and ALWAYS reports the resulting active handle
-	 * in *impl: the new model (rc==0), the restored previous model (rc<0), or NULL
-	 * if even the restore failed.  Mirror that into g_model so a NULL handle forces
-	 * a fresh open() next time rather than leaving a dangling impl. */
+	/* The backend is transactional and ALWAYS reports the resulting handle in
+	 * *impl: the new model (rc==0), the restored previous model (rc<0), or the
+	 * empty handle (rc<0) when there was nothing to restore or even the restore
+	 * failed (issue #131 P16).  NULL is no longer a backend's answer; it is still
+	 * mirrored -- the singleton closes, and the backend's next open builds
+	 * nothing, because it has adopted its built-in model once already -- rather
+	 * than left as a dangling impl. */
 	rc = nn_backend_vt_selected.reload(data, len, name, &impl);
 	if (impl) {
 		g_model.impl = impl;
@@ -245,10 +269,21 @@ int nn_model_reload(const void *data, uint32_t len, const char *name,
 		g_model.impl = NULL;
 		g_model.open = 0;
 	}
-	/* This call's outcome, from the handle it just adopted -- see nn.h. */
-	if (open_after)
-		*open_after = impl ? 1 : 0;
+	/* This call's outcome, from the handle it just adopted -- see nn.h.  A
+	 * MODEL, not an open handle: the empty handle is open and has none. */
+	if (model_after)
+		*model_after = nn_impl_has_model(impl);
 	return rc;
+}
+
+int nn_model_release(void)
+{
+	if (!nn_backend_vt_selected.release)
+		return -2;                      /* backend cannot swap models        */
+	if (nn_backend_vt_selected.release() != 0)
+		return -1;
+	g_model.last_cycles = 0;            /* it timed a model that is gone     */
+	return 0;
 }
 
 /* ---- single-session guard -------------------------------------------------- */

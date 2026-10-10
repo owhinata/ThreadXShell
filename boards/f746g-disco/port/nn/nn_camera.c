@@ -763,23 +763,36 @@ int nn_camera_start(enum camera_res res, int oneshot)
 		return -2;                          /* still tearing down                   */
 	}
 
+	/* Claim the single inference session first: refused (-6) if `nn bench` or a
+	 * stream is using the non-reentrant singleton model.  The session owner is this
+	 * `nn stream` enable; it is released only by nn_camera_stop() / the worker's
+	 * run-loop exit, NEVER by a base detach (contract owhinata/stm32f746g-disco#100.4).
+	 *
+	 * [!] BEFORE THE MODEL IS LOOKED AT (issue #131).  The model's shape is
+	 * latched below and the worker runs on it; with the session taken after,
+	 * an `nn model unload` on the other console could empty the model between
+	 * the two and this start would succeed on nothing -- every frame an error,
+	 * `nn run` a timeout.  Under the session no load or unload can run, so what
+	 * nncam_open_model() reads stays true for the stream.  If this is the
+	 * first nn command after boot, its open is the one that adopts the
+	 * built-in model -- under the session, and a load or unload racing it
+	 * waits on the open latch and then finds the session taken.  Otherwise the
+	 * open builds nothing. */
+	if (nn_session_try_acquire() != 0) {
+		cam_own_start_finish(&nncam_own, 0);
+		return -6;
+	}
+
 	rc = nncam_open_model();                /* model + input geometry (bounds-checked) */
 	if (rc != 0) {
+		nn_session_release();
 		cam_own_start_finish(&nncam_own, 0);
 		return rc;
 	}
 	if (nncam_create_objects() != 0) {
+		nn_session_release();
 		cam_own_start_finish(&nncam_own, 0);
 		return -5;
-	}
-
-	/* Claim the single inference session first: refused (-6) if `nn bench` or a
-	 * stream is using the non-reentrant singleton model.  The session owner is this
-	 * `nn stream` enable; it is released only by nn_camera_stop() / the worker's
-	 * run-loop exit, NEVER by a base detach (contract owhinata/stm32f746g-disco#100.4). */
-	if (nn_session_try_acquire() != 0) {
-		cam_own_start_finish(&nncam_own, 0);
-		return -6;
 	}
 	nncam_holds_session = 1;
 

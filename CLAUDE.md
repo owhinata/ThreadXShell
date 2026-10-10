@@ -70,11 +70,11 @@ src cmds svc cmake test README。wio のみ boot も）。
   止め、retryable なら操作者が回収）。**種類は claim と同じ 1 呼び出しで判定する**（#120）。
 - **[!] worker のカウンタは世代と一致しない**ので stats は commit 時に基準を latch する。**record は境界で
   消えずモデル変更で消える**ので「この世代の結果か」は受理数で問う（#118）。**遷移拒否なら副作用なし**。
-- **[!] poll は 2 相 + 遷移カウンタ**（数値は他ロック配下なので**割込み禁止下では集められない**。
-  世代と状態だけでは retryable な stop を跨いだ読みを弾けない）。
-- **[!] retryable / terminal の分類は「その時点で何ができるか」で決まる**。表はボードが出し
-  （純関数・ホストテスト必須）、**未文書コードは `nn_stream_disp_of()` が terminal に fail-closed**。
-- **[!] 負値を 1 つに畳まない**（「モデル非認識」/ 未初期化 / 引数不正は別コードで**どれも「0 件」ではない**）。
+- **[!] poll は 2 相 + 遷移カウンタ**（数値は他ロック配下で割込み禁止下では集められず、世代と状態だけでは retryable な stop 跨ぎを弾けない）。
+- **[!] retryable / terminal の分類は「その時点で何ができるか」**。表はボードが出し（純関数・ホストテスト必須）、未文書コードは
+  `nn_stream_disp_of()` が terminal に fail-closed。**負値を 1 つに畳まない**（モデル非認識 / 未初期化 / 引数不正は別コードで「0 件」ではない）。
+- **[!] 入力の受け渡し語 FILLING の出口は ABANDON（producer）と JOIN（worker の受理）だけ**（`svc/nn_handoff.h`。待ちが切れた
+  worker は FILLING を奪わず待ち直す。#130）。負値の decode の数え方もボードの純関数の表（P8、ホストテスト必須）。
 - **[!] 停止は走行中の推論を取り消せない** — worker は arm 時点の世代を控え、publish のロック内で照合
   する（`svc/nn_det_record.c`）。**RAW 記述子・top-5 は publish 時に record へ載せ、印字時にモデルを取り直さない**（#121）。
 - **[!] 推論を非同期の worker で回すボードは「誰も解釈していない」も世代規則の下で publish する**（しないと `nn run` が timeout する。wio・Grove）。

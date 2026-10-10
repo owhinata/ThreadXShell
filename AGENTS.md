@@ -78,8 +78,7 @@
   `terminal`）。**混同は実害**で**判断できないボードは `terminal` に fail-closed**。disposition は
   保持者ではなく**呼び出し側の解放権限**である。
 - **モデル指定はタグ付きで裸の文字列は拒否**（同じ語がボードごとに別物を指す）。**`--addr` の長さは必須。**
-- **port のアダプタは `struct cli_instance` を取らない**（印字・待ち・キャンセルは `boards/*/cmds/` で、
-  **下へ関数ポインタで渡す**）。
+- **port のアダプタは `struct cli_instance` を取らない**（印字・待ち・キャンセルは `boards/*/cmds/` から関数ポインタで下へ渡す）。
 - **ライブ推論は 3 ボードとも `nn stream start/stop/stats`**（`preview` は復活させない）。`start` は
   非ブロッキングで、待ちは共有コマンドの `--frames <n>` が 1 実装で持つ。
 - **[!] stream には世代がある。** 待ち手は `start` の generation を持ち、`stop` は**遷移を claim するのと
@@ -90,8 +89,9 @@
   record の `valid` も世代と一致しない**（record は境界で消えずモデル変更で消える、#118）ので poll は
   commit 時に latch した基準（record の受理数を含む）を引く。**遷移拒否なら wrapper の副作用も走らせない。**
 - **[!] `nn run` も one-shot で同じ機械を claim**（re-arm/操作者 stop 不可。種類は claim 内で判定、#120）。
-- **[!] poll は 2 相 + 遷移カウンタ**（数値は他ロック配下なので割込み禁止下では集められず、世代と
-  状態だけでは retryable な stop を跨いだ読みを弾けない）。
+- **[!] poll は 2 相 + 遷移カウンタ**（数値は他ロック配下で割込み禁止下では集められず、世代と状態だけでは stop 跨ぎを弾けない）。
+- **[!] 入力の受け渡し語 FILLING の出口は ABANDON（producer）と JOIN（worker の受理）だけ**（`svc/nn_handoff.h`、#130）。待ちが
+  切れた worker は FILLING を奪わず待ち直す。**負値の decode の数え方はボードの純関数の表**（P8、ホストテスト必須、Grove の規則）。
 - **[!] 分類表はボードが持ち既定は fail-closed**（Grove の `nn_stream_state.c` では `CAM_ERR_LOCKED` と
   `CAM_ERR_BUSY` が **retryable**）。**terminal に畳み直さない。**
 - **[!] デコーダの負値を 1 つに畳まない**（どれも「0 件」ではない）。**停止は推論を取り消せない**ので

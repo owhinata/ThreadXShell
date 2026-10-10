@@ -178,11 +178,11 @@ plugin は board code と同格の**信頼された native code**。ゲートが
 - **メモリ配置**: DTCM = D-cache を経由しないもの / SRAM1 = SDMMC DMA バウンス / SDRAM は **FMC 内部
   バンクごとに用途固定**（**またぐ変更は FE とキャッシュコヒーレンシに直結**）。ASSERT では `.sdram` の
   属性脱落を検出できないので `check_f746_layout.py` のシンボル常駐検査が見る。
-- **3 つの割込みハンドラは強シンボルでなければならない**（`PendSV_Handler` / `SysTick_Handler` /
-  `USART1_IRQHandler`）— stock CMSIS が weak な `Default_Handler` を供給するので落ちてもリンクは通る。
-  ゲートは strong `T` / `Default_Handler` 非同値 / `.isr_vector` slot 一致の 3 条件で見る。
-- **`CLI_INSTANCE_TIME_SLICE=0`（TX_NO_TIME_SLICE）を維持**する（CPU-bound コマンドが多重実行に非再入。
-  スライス有効化は再入ガード整備とセット）。
+- **`PendSV_Handler` / `SysTick_Handler` / `USART1_IRQHandler` は強シンボル**（stock CMSIS の weak
+  `Default_Handler` で落ちてもリンクは通る）。ゲートは strong `T` / 非同値 / `.isr_vector` slot 一致の 3 条件。
+- **`CLI_INSTANCE_TIME_SLICE=0` を維持**（CPU-bound コマンドが多重実行に非再入。スライス有効化は再入ガードとセット）。
+- **raster の DCMI OVR を終端に戻さない**（#137）: 復帰は producer の `cam_stream_resync()` 1 本（`cam_lock` 下・
+  NVIC マスク下、subscriber の close/open 無し）。teardown は `--frames`/`--secs` 到達後に auto-recovery しない。
 - **カメラ subscriber の drain と owner lifecycle**: `camera_frame_put()` は**全 `consume()` の最後の
   文**、`CAM_OWN_DRAINING` は `camera_unsubscribe()` の**前**、直列化（PRIMASK）は作業を跨がない。判定は
   `cam_drain.c` / `cam_own.c` の純関数が**唯一の判断点**で**両方 fail-closed**、**`default:` を足さない**。

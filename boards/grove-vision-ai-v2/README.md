@@ -2022,7 +2022,10 @@ nn run
 ```
 
 **The order inside `nn model load --name <name>` is the design**, and every step of it is
-load-bearing:
+load-bearing.  Since issue #131 the order itself is `svc/nn_core_model.c`, shared by every
+board and walked step by step by `shell/test/test_nn_core_model.c`; what this board supplies
+are the steps' contents (`port/npu/nn_svc_grove.c`: the claim, the bring-up, the lookup, the
+backend's close-and-reopen and the identity):
 
 1. the `nn` ownership gate, as every subcommand has.
 2. **`npu_hw_init()` FIRST**, which takes `NOR_LEASE_NPU`.  From here to
@@ -5762,8 +5765,8 @@ tail-calls `nn_overlay_draw`.
 
 | slot | thread (deepest path) | depth | stack - depth - 208 | L(slot) | over 1,024 | real need |
 |---|---|---:|---:|---:|---:|---:|
-| entry | console (`nn model load`) | 976 | 2,912 | **2,912** | 1,888 | 8 |
-| | background job | 888 | 3,000 | | | |
+| entry | console (`nn model load`) | 1,016 | 2,872 | **2,872** | 1,848 | 8 |
+| | background job | 928 | 2,960 | | | |
 | shapes_ok | console (`nn stream start`) | 1,528 | 2,360 | **2,360** | 1,336 | 40 |
 | | background job | 1,440 | 2,448 | | | |
 | decode | console (`nn run`) | 2,360 | 1,528 | **1,528** | 504 | 632 |
@@ -5792,7 +5795,21 @@ plugin load out of the name resolution and after `npu_open()`): ... >
 `cmd_nn_model_load` 376 > `nn_svc_model_load` 96 > `plugin_run_load` 48 >
 `plugin_exec_load` 56.  The resolution's slot table (`nn_resolve_blob` 200,
 `noinline`) has returned by then; before, the call sat inside it and the path
-was 1,096.
+was 1,096.  Issue #131 stage 7c put the shared load order
+(`svc/nn_core_model.c`) on that path: 8 + 16 + `cli_thread_entry` 40 >
+`cli_input_byte` 32 > `cli_dispatch_line` 24 > `cli_dispatch_segment` 280 >
+`cmd_nn_model_load` 376 > `nn_svc_model_load` 56 > `nn_core_model_load` 48 >
+`nn_life_plugin_start` 24 > `plugin_run_load` 56 > `plugin_exec_load` 56 =
+**1,016** (976 -> 1,016; the build just before it, `c86a7dc`, was 984 with
+`plugin_run_load` already at 56, so the stage itself added 32).  Measured on
+hardware 2026-10-10, firmware `e513053-dirty` (stage 7c): `nn stream stats`
+printed `entry : con 1032/4096 bg --; left 3064 (upper bound)` -- 1,032 is the
+sample in `pl_exec_ok()`, 16 B below entry (see "The two `(upper bound)`s"), so
+entry() is entered at 1,016, equal to the ELF; and stack - depth - 208 = 3,064 +
+16 - 208 = **2,872**.  The background-job row (928) is the ELF's console path
+less the same 88 B as before, not measured (`bg --`).  The other slots printed
+unchanged: shapes_ok con 1568, decode work 816, draw panel 272, param_get con
+792.
 "real need" is the next section's.
 
 #### The veneer charge is derived from the image, and checked

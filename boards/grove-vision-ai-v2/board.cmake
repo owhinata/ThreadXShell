@@ -732,6 +732,9 @@ add_library(shell_objs OBJECT
     # table shared by every board since issue #131, so shell/test/
     # test_nn_swap.c walks the endings a console cannot produce.
     "${CMAKE_SOURCE_DIR}/svc/nn_swap.c"
+    # The order of a load and an unload around that table (issue #131): one
+    # copy for every board, walked by shell/test/test_nn_core_model.c.
+    "${CMAKE_SOURCE_DIR}/svc/nn_core_model.c"
     # The gate's claim and the count of threshold calls inside the plugin
     # (issue #122): one transition each, walked by test/test_nn_param_calls.c.
     "${BOARD_DIR}/port/npu/nn_param_calls.c"

@@ -680,6 +680,17 @@ gcc $CFLAGS -I "$inc" -I "$svc" \
     $LDFLAGS -o "$out/test_nn_swap"
 "$out/test_nn_swap"
 
+# issue #131 -- the ORDER around that table (svc/nn_core_model.c): claim ->
+# preparation -> lookup -> plugin lease -> backend -> plugin -> obligations, and
+# the unload's.  A stand-in board traces every hook, and the hooks check what no
+# return shows: a hook inside the critical section, a plugin touched without the
+# lease, a change while the transition counter is even, BUSY answered after the
+# backend was touched (issue #131 stage 8 relies on that never happening).
+gcc $CFLAGS -I "$inc" -I "$svc" \
+    "$here/test_nn_core_model.c" "$svc/nn_core_model.c" "$svc/nn_swap.c" \
+    $LDFLAGS -o "$out/test_nn_core_model"
+"$out/test_nn_core_model"
+
 # issue #130 -- the shared frame path that runs that word (svc/nn_core_frame.c):
 # a frame in four parts (wio-lite-ai's bands) and in one (grove-vision-ai-v2's),
 # the two ways out of FILLING (the producer's ABANDON, the stop's JOIN), the

@@ -28,8 +28,9 @@
  *
  * WHAT STAYS WITH THE BOARD: its threads, how they wait and wake, how its camera
  * starts and stops, the order of its stop and where the record boundary falls,
- * the generation a job is published under (grove-vision-ai-v2 samples it on the
- * producer, wio-lite-ai on the worker when it arms -- issue #118 has why each),
+ * the generation a job is published under (grove-vision-ai-v2 and f746g-disco
+ * sample it on the producer, wio-lite-ai on the worker when it arms -- issue
+ * #118 has why each; f746g-disco's prep keeps it with its epoch test),
  * every counter and how it counts (the account hook), and the admission
  * questions.  svc/nn_active_core.c is unchanged and still knows nothing of a
  * result gate; the decoder is reached through a hook, so no shared decoder is

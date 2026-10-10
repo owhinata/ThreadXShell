@@ -178,21 +178,29 @@ Measured on the default (`tflm`, CMSIS-NN) build at #130, fresh configure:
 Of the 374 KB difference, 189,816 B is the model array (`.rodata`); the rest
 is the interpreter, the kernels and the C++ runtime.
 
-SDRAM bank3 (`.sdram.ai`, `0xC0600000`, 2 MB) under `tflm`:
+SDRAM bank3 (`.sdram.ai`, `0xC0600000`, 2 MB) under `tflm`, after #130 step 6b
+removed the camera staging buffers (`nncam_stage`, 393,216 B):
 
 | Object | Address | Size | Owner |
 |---|---|---|---|
-| `nncam_stage` | `0xC0600000` | 393,216 B (2 x 192 KB) | `port/nn/nn_camera.c`, camera -> input staging |
-| `nn_dec_scratch` | `0xC0660000` | 1,536 B | `port/nn/nn_decoder.c` |
-| `g_sd_model_buf` | `0xC0660600` | 1,048,576 B (2 x 512 KB) | `port/nn/tflm/nn_tflm.cc`, SD model slots |
-| `g_arena` | `0xC0760600` | 524,288 B | `port/nn/tflm/nn_tflm.cc`, activation arena |
-| free | `0xC07E0600` | 129,536 B | |
+| `nn_dec_scratch` | `0xC0600000` | 1,536 B | `port/nn/nn_decoder.c` |
+| `g_sd_model_buf` | `0xC0600600` | 1,048,576 B (2 x 512 KB) | `port/nn/tflm/nn_tflm.cc`, SD model slots |
+| `g_arena` | `0xC0700600` | 524,288 B | `port/nn/tflm/nn_tflm.cc`, activation arena (holds the input tensor) |
+| free | `0xC0780600` | 522,752 B | |
 
 `check_f746_layout.py` requires `g_arena` and `g_sd_model_buf` in bank3 in a
 `tflm` build only (they are in an anonymous namespace, so board.cmake names them
 by their mangled local symbols). A `null` build is not asked for them. The
 negative tests are `cmake/fixtures/run_layout_tests.py`, run by the host test
 suite.
+
+**What the camera producer writes is covered by the same requires.** Since #130
+the producer preprocesses each frame straight into the model's input tensor,
+and that tensor is not an object of its own: TFLM allocates it inside `g_arena`
+(and the `null` backend's is `null_in_buf`, required in a `null` build). So the
+`g_arena` require is also the placement guarantee for the producer's writes --
+bank3, CPU-only, never a DMA target. There was no require for the removed
+`nncam_stage`, so no gate changed.
 
 #### Hardware baseline for the tflm default (issue #130)
 
@@ -218,6 +226,18 @@ Stack high-water marks from `thread` after `nn bench 10`, two `nn run` and the
 | `cli` | 1,724 / 4,096 B | 2,156 / 4,096 B (52%) | `nn bench` infers on the console thread |
 | `cam_prod` | 364 / 1,024 B | 580 / 1,024 B (56%) | the rise is the preprocessing step |
 | `GUIX System Thread` | 816 / 4,096 B | 816 / 4,096 B | |
+
+After #130 step 6b (the producer preprocesses straight into the input tensor;
+measured 2026-10-10, firmware `34422df-dirty`, same procedure, with the #137
+overrun resync in place):
+
+| Measurement | Value |
+|---|---|
+| `nn bench 10` | min 623,232 / avg 629,820 / max 632,799 us (unchanged) |
+| `nn stream start --frames 300` | 300 in, 268 skipped, 0 errors; 32 inferences in 21,523 ms = 1.48 inf/s; latency 636,898 us -- `in - skipped` now equals the inferences |
+| `nn-worker` peak | 1,512 / 4,096 B (36%): the frame copy is gone |
+| `cam_prod` peak | 508 / 1,024 B (49%) before and after the stream |
+| `camera stream stats` after 145 s | 12 DCMI overruns (3 of them at 15.9-16.4 s after boot), all resynced in place, `ovr ring` 0, base capture never stopped; `dma fe/s` about 2,350 (up from about 1,500: the producer now writes the input tensor in bank3 as well) |
 
 ### [!] LTO is refused on this board
 
@@ -339,6 +359,26 @@ stream start` need no start of their own.
 > of output 0 before its next inference and publishes them with the result
 > (issue #121, `svc/nn_top.c`); `nn run` and `nn dets` print those, never the
 > output tensor as it is at print time.
+>
+> **A frame that arrives during an inference is skipped, not staged** (issue
+> #130 step 6b). The camera producer preprocesses a frame straight into the
+> model's input tensor, and only while the worker wants one; the shared
+> hand-over word (`svc/nn_handoff.h`, stepped by `svc/nn_core_frame.c`, the same
+> one grove-vision-ai-v2 and wio-lite-ai use) says who owns the input. In `nn
+> stream stats`, `frames in` counts every frame offered, `skipped` the ones that
+> arrived while the worker was busy (or before it armed), and the rest were
+> handed over and inferred -- so `in - skipped` equals the inferences, give or
+> take the one in flight when the stream stopped, and less any inference whose
+> `nn_run()` failed (that one is counted in `errors`, not in `infers`). A frame
+> whose preparation was abandoned is in neither `in` nor `skipped`: that
+> happens when its session ended part way through (a base detach or a stop
+> moved the epoch) -- such a frame belongs to no session, which is how the
+> staging buffers treated it too -- or when the input tensor was missing,
+> which is counted in `errors`. Before step 6b the producer
+> filled two SDRAM staging buffers and the worker copied one into the input:
+> frames kept arriving into a free buffer during an inference, so `in -
+> skipped` ran ahead of the inferences (34 vs 30 in the baseline below) and
+> the frame inferred had usually sat in its buffer for most of an inference.
 
 Stopping one of them detaches its sink while the base keeps running --
 that is the whole point of a subscriber -- so a delivery can already be in

@@ -8,9 +8,10 @@
  * owhinata/stm32f746g-disco#80). See nn_camera.h.
  *
  * Design (codex-reviewed, owhinata/stm32f746g-disco#81):
- *   - A SYNCHRONOUS copy push sink (like nx_mjpeg.c eth_sink): consume() runs in
- *     the camera producer thread, resizes + converts the RGB565 frame into an
- *     int8 staging buffer, and camera_frame_put()s the pin as its LAST STATEMENT.
+ *   - A SYNCHRONOUS push sink (like nx_mjpeg.c eth_sink): consume() runs in the
+ *     camera producer thread, resizes + converts the RGB565 frame STRAIGHT INTO
+ *     the model's input tensor when the worker wants one, and
+ *     camera_frame_put()s the pin as its LAST STATEMENT.
  *     The nearest-neighbour resize reads only WxH sampled source pixels (cheaper
  *     than copying the whole frame), keeping producer-thread load low.
  *     [!] This file used to claim the in-flight count is "always 0".  That is
@@ -18,17 +19,22 @@
  *     asks: camera_unsubscribe() detaches while the base keeps running, so a
  *     publish can already be in flight across the unlink.  nn_camera_stop() now
  *     drains that pin instead of assuming it away (issue #72).
- *   - NN-input ownership (the BLOCKING codex fix): the sink NEVER writes a buffer
- *     the worker is using.  Two staging buffers with a FREE/FILLING/READY/RUNNING
- *     state machine under a short TX_MUTEX; the worker copies a READY stage into
- *     the model input (the only writer of nn_input()->data) and runs inference.
- *     No free stage -> drop (FRAME_POLICY_DROP).
+ *   - NN-input ownership (the BLOCKING codex fix): the sink NEVER writes the
+ *     input while the worker is using it.  Since issue #130 that is the shared
+ *     hand-over word (svc/nn_handoff.h, stepped only by svc/nn_core_frame.c),
+ *     the one grove-vision-ai-v2 and wio-lite-ai use: the producer writes the
+ *     input tensor only while the word is FILLING, hands it over, and the worker
+ *     owns it from TAKE until the publish is done.  A frame that arrives while
+ *     the worker is busy is SKIPPED -- not staged for later.  This replaced two
+ *     SDRAM staging buffers (393,216 B together) and the worker's copy out of
+ *     them; the input tensor is in the TFLM arena (bank3, CPU-only), so nothing
+ *     but the CPU reaches the memory either way.
  *   - Worker priority 18 (below BG-17/CLI-16/GUIX-14/net-12/camera-10): fully
  *     best-effort, so inference never starves the DCMI ring, UI, net, or the CLI
  *     that must deliver `nn stream stop`.  Inference is monolithic (no mid-run
  *     yield), so a lower-than-CLI priority is what guarantees stop reaches us.
  */
-#include <string.h>          /* memcpy */
+#include <stdint.h>
 
 #include "tx_api.h"
 
@@ -36,6 +42,8 @@
 #include "nn_camera.h"
 #include "nn_decoder.h"   /* the shared BlazeFace decoder, via this board's adapter */
 #include "nn_det_record.h"
+#include "nn_core_frame.h"   /* the shared frame path and its hand-over word (#130) */
+#include "nn_sess_release.h" /* when the session may go back (#130)               */
 #include "nn_top.h"          /* the classes, taken before the next inference (#121) */
 #include "camera.h"          /* camera_subscribe / camera_unsubscribe / camera_frame_put */
 #include "cam_own.h"         /* the owner lifecycle (issue #72)                        */
@@ -45,16 +53,6 @@
 
 #define LOG_TAG "nncam"
 #include "log.h"
-
-/* Max model input: BlazeFace-128 is 128x128x3.  Two staging buffers in the NN
- * arena (.sdram.ai, bank3).  Sized for the worst case -- a FLOAT32 128x128x3
- * input (BlazeFace) = 196608 B/buffer; int8 models use a quarter.  Larger models
- * would bump these bounds. */
-#define NNCAM_IN_MAX_W    128u
-#define NNCAM_IN_MAX_H    128u
-#define NNCAM_IN_MAX_C    3u
-#define NNCAM_STAGE_BYTES (NNCAM_IN_MAX_W * NNCAM_IN_MAX_H * NNCAM_IN_MAX_C * 4u)
-#define NNCAM_STAGE_N     2
 
 /* Float32 input normalization.  BlazeFace's model card says [-1,1], but its ST
  * config says rescale 1/255 -> [0,1] -- and [0,1] is what actually detects faces
@@ -80,18 +78,30 @@
 #define NNCAM_DRAIN_TICKS     100u        /* sink pin -> release                    */
 #define NNCAM_SETTLE_TICKS    3000u       /* worker parks (may span an inference)   */
 
-/* Staging buffers live in the NN arena (bank3, .sdram.ai).  Raw bytes: hold either
- * int8 or float32 preprocessed input depending on the model's input dtype. */
-static uint8_t nncam_stage[NNCAM_STAGE_N][NNCAM_STAGE_BYTES]
-	__attribute__((aligned(32), section(".sdram.ai")));
-
-enum { ST_FREE = 0, ST_FILLING, ST_READY, ST_RUNNING };
-static uint8_t nncam_state[NNCAM_STAGE_N];
+/*
+ * WHO MAY TOUCH THE INPUT TENSOR (issue #130): the shared hand-over word, stepped
+ * only by svc/nn_core_frame.c.  It replaced two staging buffers and their
+ * FREE/FILLING/READY/RUNNING states -- the worker used to copy a READY stage
+ * into the input, so the producer never needed the input itself.  Now it writes
+ * the input directly, while the word says FILLING and at no other time: the
+ * interpreter may reuse that memory for intermediates while a job RUNs.
+ */
+static struct nn_core_frame nncam_frame;
+/*
+ * The generation the frame in the input was prepared under.  Sampled by the
+ * PRODUCER at the start of its prep, under nncam_lock (issue #118), written
+ * while the word is FILLING and read by the worker only after its TAKE -- the
+ * word orders the two.  [!] On the producer and not at the worker's take: a
+ * frame handed over before a base detach would otherwise be taken AFTER the
+ * detach's boundary and published into the next attach looking current, which
+ * is what the old stages' "drop READY at close" prevented.
+ */
+static uint32_t     nncam_job_gen;
 
 static TX_THREAD    nncam_thread;
 static UCHAR        nncam_stack[NNCAM_WORKER_STACK];
-static TX_MUTEX     nncam_lock;           /* guards nncam_state[]                   */
-static TX_SEMAPHORE nncam_sem;            /* consume posts a READY stage             */
+static TX_MUTEX     nncam_lock;           /* guards the record, the epoch, the session */
+static TX_SEMAPHORE nncam_sem;            /* wakes the worker: a hand-over, or a stop   */
 
 static struct frame_sink nncam_sink;
 static struct nn_model  *nncam_model;
@@ -104,6 +114,10 @@ static volatile int nncam_active;
 static volatile int nncam_producer_dead;
 /* the AI subscriber holds the nn session */
 static volatile int nncam_holds_session;
+/* A sink drain since this stream's start returned DONE: the producer is confirmed
+ * out of the input tensor (issue #130).  Cleared by the start, set only by a stop
+ * whose drain succeeded; read and the hold cleared together under nncam_lock. */
+static int          nncam_sink_drained;
 /* worker/objects created once */
 static int          nncam_created;
 
@@ -137,28 +151,33 @@ static uint32_t     nncam_gen_errors;
 static uint32_t     nncam_gen_drops;
 
 /* Session generation, bumped on every (re)attach + on a base detach.  An in-flight
- * ingest that spans a session boundary reverts instead of injecting a stale frame. */
+ * prep that spans a session boundary is abandoned instead of handing over a stale frame. */
 static volatile uint32_t nncam_epoch;
 
-/* Release the nn session iff the AI subscriber still holds it (exactly once per
- * `nn stream` lifetime; called only from nn_camera_stop()).  A base detach (close)
- * NEVER releases -- the session owner is the AI enabled intent (contract
- * owhinata/stm32f746g-disco#100.4). */
-static void nncam_release_session(void)
+/* Release the nn session iff the AI subscriber still holds it AND the sink drain
+ * has confirmed the producer out of the input tensor (issue #130 -- the producer
+ * writes the arena the session guards, see nn_sess_release.h).  Exactly once per
+ * `nn stream` lifetime: the decision and the clearing of the hold are one hold of
+ * nncam_lock, so of the stop and the worker only one gives it back.  Called by
+ * the worker as it leaves its run loop and by nn_camera_stop() after it waited
+ * for the worker.  A base detach (close) NEVER releases -- the session owner is
+ * the AI enabled intent (contract owhinata/stm32f746g-disco#100.4). */
+static void nncam_release_session(enum nn_sess_who who)
 {
-	int held;
+	int release;
 
 	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
-	held = nncam_holds_session;
-	nncam_holds_session = 0;
+	release = nn_sess_may_release(nncam_sink_drained, nncam_holds_session, who);
+	if (release)
+		nncam_holds_session = 0;
 	tx_mutex_put(&nncam_lock);
-	if (held)
+	if (release)
 		nn_session_release();
 }
 
 /* Model input geometry, latched at start from the input tensor. */
 static uint16_t nncam_in_w, nncam_in_h, nncam_in_c;
-static uint32_t nncam_in_bytes;
+static uint32_t nncam_in_bytes;   /* what the preprocess writes (<= the tensor's) */
 static uint8_t  nncam_in_dtype;   /* enum nn_dtype of the model input */
 
 /* Latest detections (BlazeFace), guarded by nncam_lock; read via nn_camera_dets_get(). */
@@ -231,12 +250,12 @@ static void nncam_preprocess(const struct frame_desc *f, void *dst)
 
 /* Reset per-session state on attach (nncam_open, the sole attach path in the
  * subscriber model).  Bumps the epoch so an in-flight ingest from a prior session
- * reverts, and clears producer_dead so a stale base-detach flag does not instantly
- * re-pause the fresh session.  Under nncam_lock and preserving any ST_RUNNING stage:
- * an overrun auto-recovery re-attaches (this reset) while the AI stays enabled, so
- * the prio-18 worker may be mid-copy out of a ST_RUNNING stage -- clobbering it to
- * ST_FREE would let the producer reuse that buffer under the worker (contract
- * owhinata/stm32f746g-disco#100.3, same discipline as nncam_close). */
+ * is abandoned, and clears producer_dead so a stale base-detach flag does not instantly
+ * re-pause the fresh session.  [!] The hand-over word is NOT touched: an overrun
+ * auto-recovery re-attaches (this reset) while the AI stays enabled, so the
+ * prio-18 worker may be inside a job, and a frame handed over before the detach is
+ * the worker's to take -- its publish is refused by the generation it was prepared
+ * under (contract owhinata/stm32f746g-disco#100.3, same discipline as nncam_close). */
 static void nncam_session_reset(void)
 {
 	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
@@ -246,9 +265,6 @@ static void nncam_session_reset(void)
 	 * `nn dets` reads it until a model change clears it, and what a session
 	 * produced is counted from a base taken after this boundary. */
 	nn_det_record_boundary(&nncam_rec);
-	for (int i = 0; i < NNCAM_STAGE_N; i++)
-		if (nncam_state[i] != ST_RUNNING)
-			nncam_state[i] = ST_FREE;   /* leave a stage the worker is copying out of */
 	nncam_epoch++;
 	tx_mutex_put(&nncam_lock);
 	memset(&nnstat, 0, sizeof nnstat);
@@ -273,46 +289,203 @@ static int nncam_open(void *ctx, enum frame_format fmt, uint16_t w, uint16_t h)
 	return 0;
 }
 
-/* Ingest one delivered frame: claim a FREE stage, preprocess @p f into it, and
- * (unless the session was torn down / rotated during preprocess) publish it READY
- * and wake the worker.  Reads f->data.  Does NOT release the pipeline pin -- the
+/* ---- the frame path's hooks (svc/nn_core_frame.h, issue #130) ------------- */
+
+static unsigned nncam_cs_enter(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	return (unsigned)interrupt_save;
+}
+
+static void nncam_cs_exit(unsigned posture)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	interrupt_save = (UINT)posture;
+	TX_RESTORE
+}
+
+/*
+ * Preprocess the frame (@p ctx, the frame_desc consume() was handed, pin held)
+ * STRAIGHT INTO the model's input tensor.  Called by the frame path only while
+ * the word is FILLING, so the worker is not inside the interpreter.  One part:
+ * this board is handed whole frames.
+ *
+ * [!] THE EPOCH TEST STAYS, and it is what makes a frame that straddles a base
+ * detach or a stop go nowhere: the session is latched before the write and
+ * re-read after it, and a frame whose session ended in between is refused --
+ * the frame path then ABANDONs it (FILLING -> WANT) and the next frame starts
+ * again.  Its generation is sampled under the same hold as the epoch, so even a
+ * frame that passes is published only if no boundary moved since.
+ */
+static int nncam_prep(void *ctx, unsigned part, unsigned nparts)
+{
+	const struct frame_desc *f = (const struct frame_desc *)ctx;
+	struct nn_tensor *in;
+	uint32_t epoch0;
+	int stale;
+
+	(void)part;
+	(void)nparts;
+	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
+	epoch0 = nncam_epoch;
+	nncam_job_gen = nn_det_record_gen(&nncam_rec);
+	tx_mutex_put(&nncam_lock);
+
+	/* The geometry was checked against this tensor at the start, and a model
+	 * cannot be loaded or unloaded while a stream runs; a tensor that has gone
+	 * anyway is an error, and nothing is written. */
+	in = nn_input(nncam_model, 0);
+	if (in == NULL || in->data == NULL || in->bytes < nncam_in_bytes) {
+		nnstat.errors++;
+		nncam_gen_errors++;
+		return -1;
+	}
+	/* Resize + convert while the slot is still pinned by the caller (reads f->data). */
+	nncam_preprocess(f, in->data);
+
+	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
+	stale = (nncam_epoch != epoch0 || !nncam_run);
+	tx_mutex_put(&nncam_lock);
+	return stale ? -1 : 0;
+}
+
+/* The producer has handed the frame over: wake the worker.  [!] After the
+ * hand-over, never before -- the post means nothing until the word says HANDED. */
+static void nncam_infer_start(void *ctx)
+{
+	(void)ctx;
+	(void)tx_semaphore_put(&nncam_sem);
+}
+
+/* This board has no plugin mechanism: no lease, no external decoder. */
+static int nncam_is_plugin(void *ctx)
+{
+	(void)ctx;
+	return 0;
+}
+
+/*
+ * The publish of one inference -- on this board, THE RESIDENT DECODER'S.  The
+ * frame path hands a board with no plugin mechanism this slot (its decode slot is
+ * the plugin's, reached only under the plugin lease, which this board does not
+ * have), so the BlazeFace decode that has always run here runs here: on the
+ * worker, while the word still says RUNNING -- the output tensors are read for
+ * the last time inside this call -- and published under @p gen, the generation
+ * the frame was prepared under.  Non-zero if the record took it.
+ */
+static int nncam_publish(void *ctx, uint32_t gen)
+{
+	struct bf_det tmp[BF_MAX_DET];
+	struct bf_result bfr;
+	struct nn_top5 top;
+	int nd, took;
+
+	(void)ctx;
+	/* Model-specific decode (BlazeFace).  A safe no-op (returns BF_ERR_MODEL) for
+	 * other models, so this stays model-agnostic at the sink level.  Publish the
+	 * boxes and the diagnostics that go with them under the lock. */
+	nd = nn_decoder_run(nncam_model, tmp, BF_MAX_DET, &bfr);
+
+	/*
+	 * [!] NOT A DETECTOR: THE CLASSES ARE TAKEN NOW (issue #121, D3).
+	 * This thread is the only reader of the output tensor while the word says
+	 * RUNNING, and the producer may write the input again -- which can share
+	 * the arena with the outputs -- the moment it does not, so this is the one
+	 * moment its classes are still this result's.  The shared command used to
+	 * read them at print time -- after a stream stop, from the frame whose
+	 * publish had been dropped.  The walk is outside nncam_lock; only the copy
+	 * is under it.
+	 */
+	if (nd == BF_ERR_MODEL) {
+		struct tensor_desc d;
+		struct nn_tensor *o = nn_output(nncam_model, 0);
+
+		if (o != NULL) {
+			nn_decoder_desc(&d, o);
+			nn_top_of(&d, &top);
+		} else {
+			nn_top_of(NULL, &top);
+		}
+	}
+
+	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
+	/*
+	 * [!] A NEGATIVE RETURN IS NO LONGER FOLDED INTO ZERO (issue #57/#97).
+	 * It used to be, and that was the worst place for it: "0 faces" reads
+	 * as a measurement, so a decoder that had never been initialised --
+	 * a build fault, permanent, on every frame -- would have shown up as a
+	 * perfectly healthy stream finding nobody.  The record keeps -1, and
+	 * the status with it -- and since issue #118 it keeps its own code:
+	 * BF_ERR_UNINIT is not BF_ERR_MODEL.
+	 */
+	/* [!] WHETHER IT WAS TAKEN IS THE RECORD'S TO COUNT (issue #118).
+	 * `infers` counts inferences and keeps that meaning; `nn run` waits on
+	 * the record's accepted count, which moves here, under this lock, only
+	 * for a publish the generation rule took. */
+	took = nn_det_record_publish(&nncam_rec, tmp, nd, &bfr, gen,
+	                             (nd == BF_ERR_MODEL) ? &top : NULL);
+	tx_mutex_put(&nncam_lock);
+	nnstat.detections = (nd > 0) ? (uint32_t)nd : 0u;
+	return took;
+}
+
+/* This board's counting is done where it always was: the inference when
+ * nn_run() returned (before the publish -- see nn_core_board::based in
+ * nn_svc_f746.c), the detections in the publish.  Nothing is left to count;
+ * how a negative decode is counted is step 6c's (P8). */
+static void nncam_account(void *ctx, enum nn_core_done what, int n, int took)
+{
+	(void)ctx;
+	(void)what;
+	(void)n;
+	(void)took;
+}
+
+/* No plugin mechanism: the admission / decode / lease slots stay NULL, as in
+ * wio-lite-ai's null build; the frame path never reaches them while
+ * is_plugin() says no. */
+static const struct nn_core_frame_ops nncam_frame_ops = {
+	.cs_enter    = nncam_cs_enter,
+	.cs_exit     = nncam_cs_exit,
+	.present     = NULL,   /* the GUI preview is its own subscriber */
+	.prep        = nncam_prep,
+	.infer_start = nncam_infer_start,
+	.is_plugin   = nncam_is_plugin,
+	.publish_raw = nncam_publish,
+	.account     = nncam_account,
+};
+
+/* Offer one delivered frame to the frame path, and count what became of it.
+ * Reads f->data (through the prep).  Does NOT release the pipeline pin -- the
  * consume() caller owns pin release. */
 static void nncam_ingest(const struct frame_desc *f)
 {
-	uint32_t epoch0;
-	int i = -1;
-
-	/* Claim a FREE staging buffer (short critical section), latching the epoch. */
-	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
-	epoch0 = nncam_epoch;
-	for (int k = 0; k < NNCAM_STAGE_N; k++) {
-		if (nncam_state[k] == ST_FREE) { nncam_state[k] = ST_FILLING; i = k; break; }
-	}
-	tx_mutex_put(&nncam_lock);
-
-	if (i < 0) {                            /* no free buffer -> drop this frame    */
+	switch (nn_core_on_frame(&nncam_frame, &nncam_frame_ops, (void *)f, 0u, 1u)) {
+	case NN_CORE_FR_HANDED:
+		nnstat.frames++;
+		nncam_gen_frames++;                 /* per stream, not per attach (#99)     */
+		break;
+	case NN_CORE_FR_SKIPPED:
+		/* The worker was inside a job (or not armed yet): this frame is not
+		 * inferred.  Not staged for later -- there is nowhere to stage it. */
 		nnstat.drops++;
 		nncam_gen_drops++;
-		return;
+		break;
+	case NN_CORE_FR_RACED:
+		/* The word left FILLING under a producer that was still writing:
+		 * an invariant broken, counted rather than assumed. */
+		nnstat.errors++;
+		nncam_gen_errors++;
+		break;
+	case NN_CORE_FR_ABANDONED:   /* the session ended mid-prep, or no tensor (counted there) */
+	case NN_CORE_FR_WROTE:       /* not reachable with one part                             */
+	case NN_CORE_FR_NONE:
+	default:
+		break;
 	}
-
-	/* Resize + convert while the slot is still pinned by the caller (reads f->data). */
-	nncam_preprocess(f, nncam_stage[i]);
-
-	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
-	if (nncam_epoch != epoch0 || !nncam_run) {
-		/* The session was aborted / rotated during preprocess: do NOT inject this
-		 * (now stale) frame into a new session.  Revert the stage to FREE. */
-		nncam_state[i] = ST_FREE;
-		tx_mutex_put(&nncam_lock);
-		return;
-	}
-	nncam_state[i] = ST_READY;
-	tx_mutex_put(&nncam_lock);
-
-	nnstat.frames++;
-	nncam_gen_frames++;                     /* per stream, not per attach (#99)     */
-	(void)tx_semaphore_put(&nncam_sem);     /* wake the worker                      */
 }
 
 /* [!] PUT LAST.  camera_frame_put() must stay the LAST STATEMENT here, as in
@@ -325,7 +498,7 @@ static int nncam_consume(void *ctx, const struct frame_desc *f)
 	(void)ctx;
 
 	if (nncam_run)
-		nncam_ingest(f);                    /* preprocess into staging (pin held)   */
+		nncam_ingest(f);                    /* into the input tensor (pin held)     */
 	camera_frame_put(&nncam_sink, f);       /* LAST -- see the rule above           */
 	return 0;
 }
@@ -333,23 +506,22 @@ static int nncam_consume(void *ctx, const struct frame_desc *f)
 /* Base detached this subscriber (base capture stopped / DCMI overrun / cascade).
  * A PAUSE, not a stop (contract owhinata/stm32f746g-disco#100.2/.4): keep the AI enabled
  * (nncam_run) and the nn session held -- the session owner is the `nn stream` intent,
- * released only by nn_camera_stop().  Bump the epoch so an in-flight ingest reverts, drop
- * any pending (non-RUNNING) staged frame so a stale frame is not inferred after a
- * later re-attach, and wake the worker to re-evaluate.  Non-blocking and no camera
- * API re-entry, so it is safe under the camera lock. */
+ * released only by nn_camera_stop().  Bump the epoch so an in-flight ingest is
+ * abandoned, move the generation so a frame already handed over is not published
+ * after a later re-attach, and wake the worker to re-evaluate.  Non-blocking and no
+ * camera API re-entry, so it is safe under the camera lock. */
 static void nncam_close(void *ctx)
 {
 	(void)ctx;
 	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
 	nncam_producer_dead = 1;
-	nncam_epoch++;                          /* an in-flight FILLING ingest reverts   */
-	for (int i = 0; i < NNCAM_STAGE_N; i++)
-		if (nncam_state[i] == ST_READY)
-			nncam_state[i] = ST_FREE;       /* drop pending; ST_RUNNING/FILLING left */
-	/* Move the generation: that is what stops the ST_RUNNING stage this
-	 * function deliberately leaves alone from publishing after the pause.  The
-	 * boxes stay in the record (issue #118); a live picture asks whether they
-	 * are CURRENT, and after this boundary they are not. */
+	nncam_epoch++;                          /* an in-flight prep is abandoned        */
+	/* Move the generation: that is what stops a frame handed over or running --
+	 * the word is deliberately left alone, a delivery may be in flight across
+	 * this detach -- from publishing after the pause, because it was prepared
+	 * under the generation this ends (issue #130; it used to drop READY stages
+	 * here).  The boxes stay in the record (issue #118); a live picture asks
+	 * whether they are CURRENT, and after this boundary they are not. */
 	nn_det_record_boundary(&nncam_rec);
 	tx_mutex_put(&nncam_lock);
 	(void)tx_semaphore_put(&nncam_sem);     /* wake worker (idles until re-attach)  */
@@ -357,103 +529,47 @@ static void nncam_close(void *ctx)
 
 /* ---- inference worker ----------------------------------------------------- */
 
-/* Run one inference from a READY stage, if any.  Returns 1 if an inference ran. */
-static int nncam_step(void)
+/*
+ * Run the frame handed over, if there is one (issue #130: the shared frame
+ * path's worker half).  The wait is a WAKE-UP, NOT A JOB: whether it returned a
+ * post or timed out, only a TAKE says there is a frame to run -- a post can be
+ * stale (a stop's, a detach's, or one whose frame was already taken), and a frame
+ * handed over can outlast its post (an attach drains the semaphore).
+ */
+static void nncam_step(void)
 {
 	uint32_t hclk = HAL_RCC_GetHCLKFreq();
 	uint32_t mhz = hclk / 1000000u ? hclk / 1000000u : 1u;
-	int j = -1;
-	int rc;
 	uint32_t gen;
 
-	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
-	for (int k = 0; k < NNCAM_STAGE_N; k++) {
-		if (nncam_state[k] == ST_READY) { nncam_state[k] = ST_RUNNING; j = k; break; }
-	}
-	/*
-	 * [!] THE GENERATION IS SAMPLED WITH THE CLAIM, under the same lock.  Taking
-	 * it later would leave a window: nncam_close() deliberately LEAVES an
-	 * ST_RUNNING stage alone and bumps the epoch, so this thread can be inside
-	 * the inference below when the session ends -- and a value read afterwards
-	 * would already be the next session's.
-	 */
-	gen = nn_det_record_gen(&nncam_rec);
-	tx_mutex_put(&nncam_lock);
+	(void)tx_semaphore_get(&nncam_sem, NNCAM_POLL_TICKS);
+	if (!nncam_run)
+		return;                             /* a stop: leave what was handed over   */
+	if (!nn_core_frame_take(&nncam_frame, &nncam_frame_ops))
+		return;
+	/* The producer's, sampled before it wrote the input; the TAKE orders it. */
+	gen = nncam_job_gen;
 
-	if (j < 0)
-		return 0;
-
-	/* Copy the READY stage into the model input (worker is the sole writer of
-	 * nn_input()->data), then free the stage so the sink can reuse it during the
-	 * inference -- the double-buffer benefit. */
-	{
-		struct nn_tensor *in = nn_input(nncam_model, 0);
-		if (in && in->data)
-			memcpy(in->data, nncam_stage[j], nncam_in_bytes);
-	}
-	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
-	nncam_state[j] = ST_FREE;
-	tx_mutex_put(&nncam_lock);
-
-	rc = nn_run(nncam_model);
-	if (rc != 0) {
+	/* RUNNING: while the word says so, NOTHING may write the input tensor. */
+	if (nn_run(nncam_model) != 0) {
 		nnstat.errors++;
 		nncam_gen_errors++;
-		return 1;
+		nn_core_frame_done(&nncam_frame, &nncam_frame_ops, nncam_run ? 1 : 0);
+		return;
 	}
 	nnstat.infers++;
 	nncam_gen_infers++;
 	nnstat.last_us = nn_last_cycles(nncam_model) / mhz;
 
-	/* Model-specific decode (BlazeFace).  A safe no-op (returns BF_ERR_MODEL) for
-	 * other models, so this stays model-agnostic at the sink level.  Publish the
-	 * boxes and the diagnostics that go with them under the lock. */
-	{
-		struct bf_det tmp[BF_MAX_DET];
-		struct bf_result bfr;
-		struct nn_top5 top;
-		int nd = nn_decoder_run(nncam_model, tmp, BF_MAX_DET, &bfr);
-
-		/*
-		 * [!] NOT A DETECTOR: THE CLASSES ARE TAKEN NOW (issue #121, D3).
-		 * This thread is the only writer of the output tensor and the next
-		 * nn_run() overwrites it, so this is the one moment its classes are
-		 * still this result's.  The shared command used to read them at print
-		 * time -- after a stream stop, from the frame whose publish had been
-		 * dropped.  The walk is outside nncam_lock; only the copy is under it.
-		 */
-		if (nd == BF_ERR_MODEL) {
-			struct tensor_desc d;
-			struct nn_tensor *o = nn_output(nncam_model, 0);
-
-			if (o != NULL) {
-				nn_decoder_desc(&d, o);
-				nn_top_of(&d, &top);
-			} else {
-				nn_top_of(NULL, &top);
-			}
-		}
-
-		tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
-		/*
-		 * [!] A NEGATIVE RETURN IS NO LONGER FOLDED INTO ZERO (issue #57/#97).
-		 * It used to be, and that was the worst place for it: "0 faces" reads
-		 * as a measurement, so a decoder that had never been initialised --
-		 * a build fault, permanent, on every frame -- would have shown up as a
-		 * perfectly healthy stream finding nobody.  The record keeps -1, and
-		 * the status with it -- and since issue #118 it keeps its own code:
-		 * BF_ERR_UNINIT is not BF_ERR_MODEL.
-		 */
-		/* [!] WHETHER IT WAS TAKEN IS THE RECORD'S TO COUNT (issue #118).
-		 * `infers` above counts inferences and keeps that meaning; `nn run`
-		 * waits on the record's accepted count, which moves here, under this
-		 * lock, only for a publish the generation rule took. */
-		(void)nn_det_record_publish(&nncam_rec, tmp, nd, &bfr, gen,
-		                            (nd == BF_ERR_MODEL) ? &top : NULL);
-		tx_mutex_put(&nncam_lock);
-		nnstat.detections = (nd > 0) ? (uint32_t)nd : 0u;
-	}
-	return 1;
+	/*
+	 * The decode and the publish under the generation the frame was prepared
+	 * under (nncam_publish(), this board's resident decoder), then the word back
+	 * to WANT -- or to IDLE when a stop has come in, so a stop that finds the
+	 * worker parked finds nothing armed.  [!] After the outputs are read for the
+	 * last time, never before: from WANT the producer may write the input again.
+	 */
+	nn_core_on_infer_done(&nncam_frame, &nncam_frame_ops, NULL, gen,
+	                      nncam_run ? 1 : 0);
 }
 
 static void nncam_entry(ULONG arg)
@@ -468,17 +584,19 @@ static void nncam_entry(ULONG arg)
 		 * without ever setting nncam_active -- so nn_camera_stop() never waits on
 		 * an active flag the worker will not clear (the BLOCKING stuck race). */
 		nncam_active = 1;
+		/* Ask for a frame (IDLE -> WANT).  nn_camera_start() parked the word
+		 * before raising nncam_run, so this is the arm a stream begins with;
+		 * refused only if a word left armed by the last session is still
+		 * armed, which asks for the same thing. */
+		(void)nn_core_frame_want(&nncam_frame, &nncam_frame_ops);
 		LOG_INF("inference running (prio %u)", (unsigned)NNCAM_WORKER_PRIORITY);
 		/* Run while enabled.  A base detach (producer_dead) is a PAUSE, not a stop
 		 * (owhinata/stm32f746g-disco#100): no frames flow so the worker just idles on the poll
 		 * timeout until the base re-attaches (nncam_open re-arms the session).  Only
 		 * nn_camera_stop clears nncam_run, so the session release stays with the AI intent
 		 * owner. */
-		while (nncam_run) {
-			if (tx_semaphore_get(&nncam_sem, NNCAM_POLL_TICKS) != TX_SUCCESS)
-				continue;                   /* timeout -> re-check run               */
-			(void)nncam_step();
-		}
+		while (nncam_run)
+			nncam_step();
 		/* [!] THE SESSION GOES BACK BEFORE WE ANNOUNCE THAT WE PARKED, and the
 		 * order is the correctness (issue #72).  nncam_active = 0 is what a stop
 		 * waits on; the moment it is visible the stop may release the session,
@@ -492,8 +610,11 @@ static void nncam_entry(ULONG arg)
 		 * The run loop exits only on nncam_run=0 (an `nn stream stop`) -- a base
 		 * detach is a pause that keeps run=1.  Releasing here is what frees the
 		 * session even when nn_camera_stop() timed out mid-nn_run() (idempotent
-		 * with nn_camera_stop's own release via the holds flag). */
-		nncam_release_session();
+		 * with nn_camera_stop's own release via the holds flag).  [!] Only once
+		 * that stop's sink drain succeeded (issue #130): before it, the producer
+		 * may still be writing the input tensor, and the hold stays for the
+		 * stop that confirms the drain. */
+		nncam_release_session(NN_SESS_WORKER_OUT);
 		nncam_active = 0;                   /* parked; nn_camera_stop() waits on this */
 		/* And finish the lifecycle if a stop gave up waiting for us: it committed
 		 * SETTLING and returned -2, so this parking is the event that lets a later
@@ -505,8 +626,9 @@ static void nncam_entry(ULONG arg)
 	}
 }
 
-/* Open the model + latch its input geometry, bounds-checked against the staging
- * buffers.  Returns 0, -3 (model open) or -4 (geometry).  Shared by both start paths. */
+/* Open the model + latch its input geometry, bounds-checked against the input
+ * tensor the producer writes into.  Returns 0, -3 (model open) or -4 (geometry).
+ * Shared by both start paths. */
 static int nncam_open_model(void)
 {
 	struct nn_tensor *in;
@@ -523,11 +645,22 @@ static int nncam_open_model(void)
 	nncam_in_h = in->dims[1];
 	nncam_in_w = in->dims[2];
 	nncam_in_c = (in->ndim >= 4) ? in->dims[3] : 1;
-	nncam_in_bytes = in->bytes;
 	nncam_in_dtype = in->dtype;
-	if (nncam_in_w > NNCAM_IN_MAX_W || nncam_in_h > NNCAM_IN_MAX_H ||
-	    nncam_in_c > NNCAM_IN_MAX_C || nncam_in_bytes > NNCAM_STAGE_BYTES)
-		return -4;                          /* model input exceeds the staging bound */
+	/*
+	 * [!] THE BOUND IS THE TENSOR ITSELF (issue #130).  The preprocess writes
+	 * H x W x C elements of 4 bytes (FLOAT32) or 1 (anything else) straight into
+	 * the input, so that is what the tensor must hold.  It used to be bounded by
+	 * the staging buffers (128 x 128 x 3 x 4), which are gone; what is left to
+	 * protect is the arena around the input.
+	 */
+	{
+		uint64_t need = (uint64_t)nncam_in_w * nncam_in_h * nncam_in_c *
+		                ((nncam_in_dtype == NN_DTYPE_FLOAT32) ? 4u : 1u);
+
+		if (in->data == NULL || need == 0u || need > (uint64_t)in->bytes)
+			return -4;                      /* the input cannot hold the frame      */
+		nncam_in_bytes = (uint32_t)need;
+	}
 	return 0;
 }
 
@@ -649,6 +782,23 @@ int nn_camera_start(enum camera_res res)
 	nn_det_record_boundary(&nncam_rec);
 	tx_mutex_put(&nncam_lock);
 
+	/*
+	 * [!] THE WORD IS PARKED HERE, BEFORE nncam_run IS RAISED (issue #130).  A
+	 * frame the last session handed over and never ran is dropped (TAKE +
+	 * DONE_LAST, as wio-lite-ai's worker drops one at its first step), and a word
+	 * it left armed or filling is joined.  Both are safe only because nothing
+	 * else can touch the word now: the worker is parked (checked above), and the
+	 * lifecycle said IDLE, which it reaches only through a stop whose sink drain
+	 * succeeded -- so the sink is unsubscribed and no consume() is in flight.
+	 */
+	(void)nn_core_frame_discard(&nncam_frame, &nncam_frame_ops);
+	(void)nn_core_frame_join(&nncam_frame, &nncam_frame_ops);
+
+	/* Nothing of this stream has been drained yet (issue #130). */
+	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
+	nncam_sink_drained = 0;
+	tx_mutex_put(&nncam_lock);
+
 	nncam_run = 1;
 	rc = camera_subscribe(&nncam_sink, CAM_FMT_RGB565);
 	if (rc != 0) {
@@ -714,17 +864,31 @@ int nn_camera_stop(void)
 	(void)camera_unsubscribe(&nncam_sink);  /* detach (close); base keeps running   */
 
 	/* The sink first.  A publish can have been in flight across the unlink, and
-	 * that consume() keeps preprocessing into a staging buffer until it puts its
+	 * that consume() keeps preprocessing into the input tensor until it puts its
 	 * pin back -- the thing this file used to assume away. */
 	step = camera_sink_drain(&nncam_sink, NNCAM_DRAIN_TICKS);
+	/* The producer is confirmed out once the drain succeeded: a frame it was
+	 * part way through preparing will never be finished (JOIN, issue #130).  A
+	 * frame handed over or running is the worker's, and is left to it -- the
+	 * worker parks the word on its way out, and the next start drops anything
+	 * it left. */
+	if (step == CAM_DRAIN_DONE) {
+		(void)nn_core_frame_join(&nncam_frame, &nncam_frame_ops);
+		/* [!] AND ONLY NOW MAY THE SESSION GO BACK (issue #130): the producer
+		 * writes the input tensor, inside the arena the session guards.  Set on
+		 * the first stop and on a retry alike; never on a drain that ran out. */
+		tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
+		nncam_sink_drained = 1;
+		tx_mutex_put(&nncam_lock);
+	}
 
 	/* Then the worker.  If it is still mid-nn_run(), keep the session: releasing
 	 * now would let another activity acquire the model while the worker still
 	 * reads it.  The worker releases the session itself when it leaves the run
-	 * loop, so the -2 below does not lose the release. */
+	 * loop, so the -2 below does not lose the release.  And a drain that ran out
+	 * keeps it too (-7): the retrying stop that confirms the drain releases. */
 	parked = nncam_settle_worker();
-	if (parked)
-		nncam_release_session();
+	nncam_release_session(parked ? NN_SESS_STOP_PARKED : NN_SESS_STOP_BUSY);
 
 	cam_own_drain_finish(&nncam_own, step, parked);
 	/* [!] The worker may have parked between that last poll and this commit, and

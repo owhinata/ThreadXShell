@@ -54,8 +54,8 @@
  * BlazeFace-front 128: .bin ~208 KB, acts_sz 320 KB, rt_ram_xip ~8 KB.  Caps give
  * headroom for a larger swapped-in model and are bounds-checked at load time.
  * Layout constraint (ldscript ASSERTs): the two model slots (upper half) must fit
- * in bank3's upper 1 MB; g_rt_ram + g_acts + nn_camera's staging (lower half) must
- * fit in the lower 1 MB. */
+ * in bank3's upper 1 MB; g_rt_ram + g_acts (lower half) must fit in the lower
+ * 1 MB (nn_camera's staging used to share it; issue #130 removed it). */
 #define RELOC_MODEL_SLOT_CAP  (448u * 1024u)   /* per slot; 2 x 448K = 896K < 1 MB */
 #define RELOC_RT_RAM_CAP      (48u  * 1024u)   /* per slot; BlazeFace RW image (data+got+bss) ~36K + headroom */
 #define RELOC_ACTS_CAP        (384u * 1024u)   /* acts_sz 320K + headroom */

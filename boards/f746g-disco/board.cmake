@@ -391,6 +391,7 @@ set(NN_SOURCES
     "${BOARD_DIR}/port/nn/nn.c"
     "${BOARD_DIR}/port/nn/nn_svc_f746.c"   # the shared `nn` command's adapter
     "${BOARD_DIR}/port/nn/nn_camera.c"          # live camera -> inference glue
+    "${BOARD_DIR}/port/nn/nn_sess_release.c"    # when the session may go back (#130)
     # Model post-processing.  The decoder is SHARED with the other two boards
     # (issue #97); port/nn/nn_decoder.c is this board's half -- nn_tensor ->
     # tensor_desc, and the ownership of the decoder's state and its candidate
@@ -487,6 +488,8 @@ add_executable(shell
     "${BOARD_DIR}/cmds/cmd_nn_board.c"
     "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"
     "${CMAKE_SOURCE_DIR}/svc/nn_core.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn_core_frame.c"   # the frame path (#130)
+    "${CMAKE_SOURCE_DIR}/svc/nn_handoff.c"      # ...and its hand-over word
     "${CMAKE_SOURCE_DIR}/svc/nn_report.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/fs_cmd_core.c"
     "${BOARD_DIR}/port/qspi/qspi_flash.c"

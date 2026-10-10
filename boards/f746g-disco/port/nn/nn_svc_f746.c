@@ -55,7 +55,7 @@ static const struct nn_stream_disp nn_stop_disp[] = {
 	   exits, and the sink is already released, so this is not a refusal. */
 	{ -2, NN_STREAM_CLAIM_RETRYABLE },
 	/* The sink did not hand its frame back: a producer callback may still be
-	   preprocessing into our staging buffers (issue #72). */
+	   preprocessing into the input tensor (issue #72). */
 	{ -7, NN_STREAM_CLAIM_RETRYABLE },
 	/* A start or another stop owns the lifecycle -- nothing was done. */
 	{ -8, NN_STREAM_CLAIM_RETRYABLE },
@@ -392,8 +392,9 @@ static uint32_t nn_core_ticks(void)
 /* [!] The per-STREAM counts, not the per-attach ones -- see nn_camera.h: the
  * per-attach ones go back to zero on a re-attach.  Mixing the two made `nn
  * stream stats` report 60 frames in, 36 infers and 0 skipped, which cannot all
- * be true of one period.  [!] OFFERED, not staged: a frame dropped for want of
- * a free stage was still offered. */
+ * be true of one period.  [!] OFFERED, not handed over: a frame skipped because
+ * the worker was inside a job was still offered (issue #130: skipped now means
+ * that, as on wio-lite-ai -- a frame is no longer staged to be run later). */
 static void nn_core_counts_of(struct nn_core_raw *raw, void *keep)
 {
 	struct nn_camera_stats st;
@@ -923,7 +924,7 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 		 * and anything this board does not document is TERMINAL -- see
 		 * nn_stop_disp[].
 		 * -7 means the sink is detached but still pinned, so a producer callback
-		 * may still be writing the staging buffers; -8 means another start or
+		 * may still be writing the input tensor; -8 means another start or
 		 * stop owns the transition.  In both the claim is still out and the
 		 * release is idempotent, so repeating the stop is what settles it.
 		 */

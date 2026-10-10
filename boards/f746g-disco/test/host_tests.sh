@@ -69,6 +69,16 @@ gcc $CFLAGS -I "$board/port/camera" \
     $LDFLAGS -o "$out/test_cam_own"
 "$out/test_cam_own"
 
+# issue #130 -- when `nn stream` may give the nn session back
+# (port/nn/nn_sess_release.c).  The producer now writes the input tensor, inside
+# the arena the session guards, so the release waits for a sink drain that
+# confirmed the producer out.  A drain that runs out cannot be typed; the table
+# and the four stop / worker interleavings are walked here instead.
+gcc $CFLAGS -I "$board/port/nn" \
+    "$here/test_nn_sess_release.c" "$board/port/nn/nn_sess_release.c" \
+    $LDFLAGS -o "$out/test_nn_sess_release"
+"$out/test_nn_sess_release"
+
 # issue #130 -- negative tests for the tflm residents of cmake/check_f746_layout.py
 # (the activation arena and the SD model slots must sit in SDRAM bank3).  Driven
 # by fake nm/objdump, so no toolchain is needed: what is checked is the gate's

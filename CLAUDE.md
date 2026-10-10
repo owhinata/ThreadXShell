@@ -205,14 +205,14 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
 - **LTO 禁止**（ldscript の ASSERT 群が配置 invariant の本体で、LTO はそれが依拠するシンボル名を改名
   する）。`board.cmake` の FATAL_ERROR と `boards/f746g-disco/cmake/check_f746_layout.py` を外さない。
 - **SDRAM は FMC 内部バンクで用途固定**（またぐ変更は FE とキャッシュ直結）。ASSERT の境界を緩めない。
-- **3 つの割込みハンドラ（PendSV / SysTick / USART1）は強シンボルであること** — stock CMSIS が weak な
-  `Default_Handler` エイリアスを供給するので、落ちてもリンクは通る。
-- **`CLI_INSTANCE_TIME_SLICE=0`（TX_NO_TIME_SLICE）を維持**する（CPU-bound コマンドは多重実行に非再入で、
-  その間他コンソールが応答しないのが**期待挙動**）。
+- **PendSV / SysTick / USART1 のハンドラは強シンボル**（stock CMSIS の weak `Default_Handler` で落ちてもリンクは通る）。
+- **`CLI_INSTANCE_TIME_SLICE=0` を維持**（CPU-bound コマンド中に他コンソールが応答しないのは**期待挙動**）。
+- **raster の DCMI OVR を終端に戻さない**（teardown → GUIX 再 open の全画面描画が最初のフレームで再発し復帰が
+  構造的に成立しない。復帰は producer の in-place resync 1 本、teardown は `--frames`/`--secs` 到達後に auto-recovery しない。#137）。
 - **`.sdram.ai` のスクラッチはボードが注入する**（常駐の require は `check_f746_layout.py` が持つ）。
 - **カメラの 3 subscriber は各自 sink を drain する**（`camera_frame_put()` は全 `consume()` の最後の
   文。所有権の終わりは quiescence = `_pins == 0 && _callbacks == 0`）。
-- リファレンス: RM0385 / UM1907（`_ref/f746g-disco/_ref/`、read-only）。
+- リファレンス: RM0385 / UM1907（`_ref/f746g-disco/`、read-only）。
 
 ### Wio Lite AI（[!] ブリック安全則あり）
 

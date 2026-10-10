@@ -424,9 +424,10 @@ that changed what is open change what decodes it:
 | the previous model was restored | nothing moved, so nothing moves here -- the previous plugin keeps reading the previous model |
 | nothing is open | the plugin is unloaded too |
 
-The table is `port/nn/nn_load_end.c`, and `test/test_nn_load_end.c` walks every
-row.  **"Nothing is open" means no MODEL, not a closed singleton** (issue #122
-P2): the TFLM singleton opens empty and stays open, so `nn_model_reload()`
+The table is the one every board shares (`svc/nn_swap.c`, issue #131), and
+`shell/test/test_nn_swap.c` walks every row with this board's inputs.
+**"Nothing is open" means no MODEL, not a closed singleton** (issue #122 P2):
+the TFLM singleton opens empty and stays open, so `nn_model_reload()`
 reports whether a model is left (`nn_model_present()`: open and describing at
 least one input), and `nn info` says `model : (none)` until the first load.
 Before, an empty board reported `model_active` and a refused first load said

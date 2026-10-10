@@ -26,6 +26,7 @@
 #include "nn_core.h"
 #include "nn_report.h"
 #include "nn_svc_adapter.h" /* nn_detail_set, nn_result, nn_info_line (#130) */
+#include "nn_swap.h"        /* the shared load ending table (#122, #131) */
 
 #include <string.h>
 
@@ -132,6 +133,7 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
                        enum nn_model_state *state)
 {
 	struct nn_model *m = NULL;
+	struct nn_swap_verdict v;
 	void *buf = NULL;
 	uint32_t cap = 0u, len = 0u;
 	int open_after = 0;
@@ -219,11 +221,19 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	 * one (the tflm backend adopts the built-in model) and succeeds -- so the
 	 * exception read as PREVIOUS, and a console that asked in between could
 	 * change the answer.  wio-lite-ai learned this in its issue #108.
+	 *
+	 * The state comes from the table every board shares (svc/nn_swap.c,
+	 * issue #131); this board has no plugin, so none is ever refused.  It
+	 * does not read whether a model was open when the load began -- the
+	 * reload restores the previous model or leaves none, and a RESTORED
+	 * ending is reported as PREVIOUS -- so it says "open" here (reading it
+	 * under the session is issue #131 step 7d).  [!] THE STATUS STILL COMES
+	 * FROM rc, not from the table's ok: the one input on which they differ (a
+	 * reload that returned 0 and left no model) is not reachable on this
+	 * board, and shell/test/test_nn_swap.c says so.
 	 */
-	if (open_after)
-		*state = (rc == 0) ? NN_MODEL_NEW : NN_MODEL_PREVIOUS;
-	else
-		*state = NN_MODEL_EMPTY;
+	nn_swap_decide(1, nn_swap_end_of(rc, open_after, 0), &v);
+	*state = (enum nn_model_state)v.state;
 
 	/*
 	 * [!] THE LAST RESULT GOES WITH THE MODEL IT CAME FROM (issue #118), and
@@ -233,7 +243,7 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	 * happened was only known after the session was gone.  PREVIOUS changed
 	 * nothing and keeps it.  Under the session, so no worker is publishing.
 	 */
-	if (*state != NN_MODEL_PREVIOUS)
+	if (v.invalidate)
 		nn_camera_record_invalidate();
 
 	nn_session_release();

@@ -67,16 +67,6 @@ gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" \
     $LDFLAGS -o "$out/test_nn_desc"
 "$out/test_nn_desc"
 
-# issue #122 -- where a `nn model load` ends (port/nn/nn_load_end.c).  Two of the
-# rows cannot be typed: a backend that refuses the new model and then the one it
-# was running, and a plugin the device refuses after the host packer ran the
-# device's own validator over it.  The real contract header supplies the
-# operator's vocabulary (enum nn_model_state).
-gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" \
-    "$here/test_nn_load_end.c" "$board/port/nn/nn_load_end.c" \
-    $LDFLAGS -o "$out/test_nn_load_end"
-"$out/test_nn_load_end"
-
 # issue #130 step 6c (#122 P8) -- how a decode's answer is counted in `nn stream
 # stats` (port/nn/nn_decode_count.c): grove-vision-ai-v2's table.  A plugin that
 # answers BF_ERR_UNINIT, BF_ERR_ARG or an undocumented code cannot be typed, and

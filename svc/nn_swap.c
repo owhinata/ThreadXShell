@@ -4,13 +4,33 @@
  */
 /**
  * @file    nn_swap.c
- * @brief   The load's ending table.  See nn_swap.h.
+ * @brief   The load's ending table, shared by every board (issues #122,
+ *          #131).  See nn_swap.h.
  */
 #include "nn_swap.h"
 
 #include <string.h>
 
 #include "nn_svc.h"   /* enum nn_model_state -- the operator's vocabulary */
+
+int nn_swap_swaps_plugin(int rc, int model_after)
+{
+	return rc == 0 && model_after;
+}
+
+enum nn_swap_end nn_swap_end_of(int rc, int model_after, int plugin_refused)
+{
+	/* Nothing is open: the new model was refused and there was no previous
+	 * one, or even the previous one could not be rebuilt -- or a "success"
+	 * that left nothing, which is the same fact. */
+	if (!model_after)
+		return NN_SWAP_LOST;
+	/* Refused and rolled back: the plugin step never ran, so its flag is not
+	 * read. */
+	if (rc != 0)
+		return NN_SWAP_RESTORED;
+	return plugin_refused ? NN_SWAP_UNDECODED : NN_SWAP_OPENED;
+}
 
 void nn_swap_decide(int had_open, enum nn_swap_end end,
                     struct nn_swap_verdict *v)
@@ -25,9 +45,10 @@ void nn_swap_decide(int had_open, enum nn_swap_end end,
 			v->state = (unsigned char)NN_MODEL_PREVIOUS;
 			return;
 		}
-		/* This load brought the NPU up itself, and an NPU that is up with
-		 * no model is a state nothing uses -- and one that would hold the
-		 * flash lease against `blob write` for as long as it lasted. */
+		/* Where the load brought hardware up itself (grove-vision-ai-v2's
+		 * NPU), hardware that is up with no model is a state nothing uses --
+		 * and one that would hold the flash lease against `blob write` for
+		 * as long as it lasted. */
 		break;
 	case NN_SWAP_RESTORED:
 		if (had_open) {

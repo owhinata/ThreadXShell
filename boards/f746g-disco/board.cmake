@@ -491,6 +491,7 @@ add_executable(shell
     "${CMAKE_SOURCE_DIR}/svc/nn_core.c"
     "${CMAKE_SOURCE_DIR}/svc/nn_core_frame.c"   # the frame path (#130)
     "${CMAKE_SOURCE_DIR}/svc/nn_handoff.c"      # ...and its hand-over word
+    "${CMAKE_SOURCE_DIR}/svc/nn_swap.c"         # where a load ends (#131)
     "${CMAKE_SOURCE_DIR}/svc/nn_report.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/fs_cmd_core.c"
     "${BOARD_DIR}/port/qspi/qspi_flash.c"

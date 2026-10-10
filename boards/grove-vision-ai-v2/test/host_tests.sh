@@ -365,17 +365,6 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_nn_outputs"
 "$out/test_nn_outputs"
 
-# issue #122 -- where a `nn model load` ends (port/npu/nn_swap.c).  A load over
-# an open model is a replacement with a rollback, and the ending that matters
-# most -- the backend refuses the new model AND the previous one it was running
-# a moment ago -- cannot be typed.  The real contract header supplies the
-# operator's vocabulary (enum nn_model_state), so the two cannot drift.
-gcc $CFLAGS \
-    -I "$here" -I "$board/port/npu" -I "$svc" \
-    "$here/test_nn_swap.c" "$board/port/npu/nn_swap.c" \
-    $LDFLAGS -o "$out/test_nn_swap"
-"$out/test_nn_swap"
-
 # issue #122 -- the gate's claim and the count of threshold calls inside the
 # plugin (port/npu/nn_param_calls.c).  A threshold call in a background job
 # preempted by a load on the other console is a window of microseconds; it

@@ -712,7 +712,7 @@ static int nn_swap_plugin(struct nn_op_result *res, const struct nn_resolved *r,
  * is open (issue #93: before the lookup, because the lookup reads through the
  * window the bring-up opens) -> resolve and verify the new model under that
  * lease, into staging -> close the old interpreter -> open the new one ->
- * swap the plugin.  What each ending obliges is port/npu/nn_swap.c's table, so
+ * swap the plugin.  What each ending obliges is svc/nn_swap.c's table, so
  * the rules are one list and a host test walks it.
  *
  * [!] THE PLUGIN IS SWAPPED AFTER THE BACKEND TOOK THE NEW MODEL, NEVER BEFORE.

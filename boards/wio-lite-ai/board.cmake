@@ -810,9 +810,10 @@ endif()
 # block, because BSP_ENABLE_SD's default depends on which backend was selected.
 set(NN_SOURCES "${BOARD_DIR}/port/nn/nn.c"
                "${BOARD_DIR}/port/nn/nn_svc_wio.c"   # the shared `nn` command's adapter
-               # where a `nn model load` ends (issue #122): a pure table, walked
-               # by test/test_nn_load_end.c
-               "${BOARD_DIR}/port/nn/nn_load_end.c"
+               # where a `nn model load` ends (issue #122): a pure table
+               # shared by every board since issue #131, walked by
+               # shell/test/test_nn_swap.c
+               "${CMAKE_SOURCE_DIR}/svc/nn_swap.c"
                # how a decode's answer is counted (issue #130 step 6c): a pure
                # table, walked by test/test_nn_decode_count.c
                "${BOARD_DIR}/port/nn/nn_decode_count.c")

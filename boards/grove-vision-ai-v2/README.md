@@ -2052,8 +2052,8 @@ already up and holding the lease, so steps 3-5 run under that lease; the old
 interpreter is closed only once the new model has resolved and verified, and the
 plugin is swapped only once the backend has taken the new model -- the
 executable reservation is one region, and copying a new image into it destroys
-the one that is there.  Where it ends (`port/npu/nn_swap.c`, walked by
-`test/test_nn_swap.c`):
+the one that is there.  Where it ends (`svc/nn_swap.c`, the table every board
+shares since issue #131, walked by `shell/test/test_nn_swap.c`):
 
 | stopped at | status | state | plugin | NPU / lease | last result |
 |---|---|---|---|---|---|

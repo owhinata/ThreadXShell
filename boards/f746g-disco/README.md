@@ -382,6 +382,54 @@ used to re-post carries no claim on the preview lifecycle, so a slow one could
 land after a `gui stop` had already drained and released the sink.  Use the
 settings screen's **Back** button to return to the preview.
 
+### A DCMI overrun is resynced in place, not torn down (issue #137)
+
+The DCMI FIFO overruns when a frame start arrives while the DMA cannot reach
+SDRAM in time -- a GUIX full-screen DMA2D repaint lined up with the frame start
+is enough, and moving code around shifts that alignment.  RM0385 17.3.10: the
+DCMI resets its FIFO and waits for the next frame start, so the capture
+survives; only the DMA's position inside the frame is lost.
+
+For the raster base stream the producer thread therefore restarts DCMI + DMA in
+place (`cam_stream_resync()` in `port/camera/camera.c`), under the camera lock
+with the DCMI and DMA2 Stream1 interrupts masked at the NVIC: stop CAPTURE and
+wait for it to read 0, make sure the stream's EN bit is 0, classify, empty the
+DCMI FIFO, re-initialise the DMA stream, and restart double buffering on the
+same two ring slots.  Nothing is published from the interrupted frame and no
+subscriber sees a close()/open(), so the GUI preview does not blink.  Each
+overrun costs at least 1-2 frames (the one being captured, plus a completed one
+the producer had not serviced yet; more if the producer runs late) and logs one
+line,
+`DCMI overrun: capture re-armed in place (ovr dcmi=<n>)`.
+
+`ovr dcmi` in `camera stream stats` counts overruns: one per in-place resync
+(however many OVR interrupts the DCMI raised before the producer got to it),
+plus the overruns that ended the stream.  A DMA transfer error or a DCMI sync
+error that ends the stream is not an overrun and is not counted.  It restarts from 0 with every stream
+start, an auto-recovery included.
+
+These are still terminal -- the stream tears down (`state: stopped (overrun)`)
+and the escalating auto-recovery of owhinata/stm32f746g-disco#100 takes over:
+
+- an overrun on the JPEG stream (snapshot-per-frame, not this path);
+- a DMA transfer error, or a DCMI synchronisation error or stop timeout, seen
+  either in the HAL error codes or in the raw DMA / DCMI flags;
+- an error indication without an overrun in it;
+- CAPTURE not clearing within 500 ms, EN not clearing within 10 ms, the FIFO not
+  draining, or a DMA re-init / restart failure;
+- the 30th resync in a row with no frame published between them (so at most 29
+  in-place restarts, about one second at 30 fps) -- a persistent overrun falls
+  back to the escalating path rather than resyncing forever.
+
+The terminals decided inside the resync (the last two items, and an error code
+or raw flag found there) log `DCMI overrun: in-place resync failed (<reason>);
+stopping` first.  Those decided in the error callbacks -- a JPEG-stream overrun,
+a DMA transfer error, a DCMI sync error -- do not.
+A stop, `--frames` or `--secs` that is due by the time the teardown decides
+wins: the stream is not auto-recovered, even when a resync (or any other
+terminal error, JPEG included) failed after the target was reached.  A terminal
+error that was latched still shows as `stopped (overrun)` in `stats`.
+
 ## Debugging
 
 SWD is available through the same ST-Link.  Use the system `gdb-multiarch` --

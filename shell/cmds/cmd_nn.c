@@ -467,6 +467,18 @@ static int cmd_nn_model_load(struct cli_instance *sh, int argc, char **argv)
 	 */
 	if (res.status != NN_SVC_OK) {
 		nn_report(sh, "model load", &res);
+		/* [!] A BUSY REFUSAL NEVER REPLACES OR LOSES THE OPEN MODEL, SO IT
+		 * HAS NO STATE TO REPORT (issue #131 P19).  The shared order
+		 * (svc/nn_core_model.h) answers BUSY only before the swap -- claim,
+		 * lease, the board's admit / prepare / fetch; staging into an
+		 * inactive buffer or an empty-state cleanup may have run, the model
+		 * that was open has not moved -- and maps a swap's or a plugin
+		 * start's BUSY to a hardware failure; test_nn_core_model.c pins
+		 * that.  Reading the state here anyway is what printed "nothing is
+		 * loaded" on wio while another load had the model down for a
+		 * moment: the line would describe someone else's operation. */
+		if (res.status == NN_SVC_ERR_BUSY)
+			return 1;
 		if (state == NN_MODEL_EMPTY && had_model)
 			cli_warn(sh, "nn: and the previous model could not be "
 			             "restored -- nothing is loaded now\r\n");

@@ -11,12 +11,18 @@
  * publishes decoded face boxes.
  *
  * WHERE THIS LIVES.  port/nn/, beside the adapter that drives it; it moved here
- * from src/ in issue #139.  It is still board integration -- it claims a band
- * stream (port/camera/cam_band.h), publishes boxes for the display and is driven
- * by a shell command -- so it still includes two src/ headers, cam_preview.h and
- * psram.h: port -> src includes that remain on purpose (the board README's
- * "nn files" section lists them).  nn.h is untouched by that and stays what
- * its own header claims to be: a model-agnostic, hardware-free inference API.
+ * from src/ in issue #139, and issue #140 split it by the thread a function runs
+ * on: nn_camera.c (console: start / stop / stats / record reads; owns the state
+ * and the frame path's ops table), nn_producer.c (the camera producer's band
+ * callback), nn_worker.c (`nn_work`) and nn_panel.c (the preview thread's nn
+ * half -- the display half stays in src/cam_preview.c and is handed in as hooks,
+ * nn_panel.h), sharing nn_camera_priv.h.  It is still board integration -- it
+ * claims a band stream (port/camera/cam_band.h), publishes results for the
+ * display and is driven by a shell command -- so it still includes one src/
+ * header, psram.h: a port -> src include that remains on purpose (the board
+ * README's "nn files" section lists it).  nn.h is untouched by that and stays
+ * what its own header claims to be: a model-agnostic, hardware-free inference
+ * API.
  *
  * NO STAGING BUFFER, AND THAT IS THE INTERESTING PART.  The donor stages frames
  * through two 192 KB buffers behind a four-state machine with epoch counters.  Here
@@ -280,17 +286,11 @@ int nn_camera_decode_get(struct nn_camera_decode *out,
 void nn_camera_set_norm(int signed_range);
 int  nn_camera_get_norm(void);
 
-/**
- * The panel's half of the shared frame path (issue #130): try the plugin lease,
- * take @p p's frame lock, check the record and let the plugin paint, on this
- * board's frame-path state.  Returns enum nn_core_draw; on DECLINED or PAINTED
- * the frame lock is HELD for the caller to present under and release.
- */
-int  nn_camera_draw(const struct nn_core_panel *p, void *ctx);
-/** The painted frame is out (svc/nn_core_frame.h). */
-void nn_camera_present_done(void);
+/* The panel's half of the shared frame path -- nn_camera_draw() and
+ * nn_camera_present_done() -- is declared in nn_panel.h (issue #140). */
 
-/** Draw the boxes on the LCD preview (src/cam_preview.c does the drawing). */
+/** Draw the boxes on the LCD preview (port/nn/nn_panel.c asks the plugin to
+ *  draw; src/cam_preview.c presents the frame). */
 void nn_camera_set_overlay(int on);
 int  nn_camera_get_overlay(void);
 

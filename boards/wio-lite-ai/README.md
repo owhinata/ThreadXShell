@@ -303,7 +303,10 @@ file (each `.c` with its `.h` unless only a header is listed):
 | File | Thread or context | Hardware reason |
 |---|---|---|
 | `port/nn/nn_svc_wio.c` | console | The adapter over this board's `nn.h` API; model bytes come out of the NOR asset store into the backend's PSRAM staging slot. |
-| `port/nn/nn_camera.c` | camera producer (band callback), inference worker (`nn_work`), panel (`nn_camera_draw()` from the preview thread), console (start / stop / stats) | Binds the shared frame path to the DCMI band stream (`port/camera/cam_band.h`) and the LTDC preview; the input frame lives in PSRAM behind its shared guard. |
+| `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (start / stop / stats / record reads) | Binds the shared frame path to the DCMI band stream (`port/camera/cam_band.h`) and holds the NN session plus the OCTOSPI1 PSRAM shared guard for the stream's lifetime; owns the glue's state (the private header lists each counter's writers and resets) and the frame path's ops table. |
+| `port/nn/nn_producer.c` | camera producer (band callback) | Downsamples each 60-row DCMI band straight into the model's input tensor on the CPU, inside one band period (~18.5 ms), and hands the frame over after the fourth band. |
+| `port/nn/nn_worker.c` | inference worker (`nn_work`, priority 18) | Inference runs on the CPU for ~373 ms with no yield, so the worker sits below the console, the preview and the producer; it holds the result lease across decode + publish because the preview thread outranks it. |
+| `port/nn/nn_panel.c` | panel (preview thread, priority 12) | The nn half of the LTDC preview: the may-draw question, the record snapshot and the plugin's `draw()`, with the lease only tried. The display half (frame lock, back buffer, flip) stays in `src/cam_preview.c` and is passed in as hooks (`nn_panel.h`), because `port/nn` may not include `port/ltdc`. Built only with the LCD. |
 | `port/nn/nn_active.c` | worker, panel, console, under the plugin lease | Turns `nn_tensor` into `svc/tensor.h` descriptors and states this board's frame geometry for `svc/nn_active_core.c`. |
 | `port/nn/nn_desc.c` | wherever a tensor is described | `nn_tensor` -> `tensor_desc`, the only place this board's tensor type meets the neutral one. |
 | `port/nn/nn_decode_count.c` | inference worker | No hardware reason: this board's table for counting a decoder's answer in `nn stream stats` (pure, host-tested). |
@@ -322,7 +325,7 @@ them:
 | `src/` header | Included by | Why |
 |---|---|---|
 | `psram.h` | `port/nn/nn_camera.c`, `port/nn/nn_svc_wio.c` | The OCTOSPI1 PSRAM shared guard (`psram_acquire_shared()` / `psram_release()`): the stream and `nn bench` read PSRAM, so a command that retunes the bus must be kept out. |
-| `cam_preview.h` | `port/nn/nn_camera.c`, `port/nn/nn_svc_wio.c` | The preview's plugin-draw counters, re-armed at stream start and printed by `nn stream stats`. |
+| `cam_preview.h` | `port/nn/nn_svc_wio.c` | `CAM_PREVIEW_STACK_BYTES`, the preview thread's stack: the ceiling the plugin draw allowance is asserted below. (The plugin-draw counters moved to `port/nn/nn_panel.h` in issue #140.) |
 | `blob.h` | `port/nn/nn_svc_wio.c` | The NOR asset store: `nn model load --name` reads a blob under the store's busy guard. |
 
 ## Plugin containers (issues #108, #110, #116 = #78 Steps 3a, 3b and 3c)

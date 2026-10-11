@@ -391,7 +391,7 @@ set(SHELL_SOURCES
     "${BOARD_DIR}/cmds/cmd_epk.c"
     "${BOARD_DIR}/cmds/cmd_lcd.c"
     "${BOARD_DIR}/cmds/cmd_mve.c"
-    "${BOARD_DIR}/cmds/cmd_camera.c"
+    "${BOARD_DIR}/cmds/cmd_camera_board.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
     "${BOARD_DIR}/cmds/cmd_nor.c"

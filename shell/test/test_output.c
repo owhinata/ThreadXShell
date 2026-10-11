@@ -214,7 +214,7 @@ static void unstall_and_ctrl_c(struct cli_instance *s, void *arg)
  * of the last completed row is still in out_buf.  The staging buffer is per-instance
  * and outlives the call, so those bytes would be flushed as the head of whatever is
  * printed next -- which is exactly what happens with the real callers that ignore
- * cli_hexdump's return value and keep printing (cmd_camera.c, cmd_nor.c, ...).
+ * cli_hexdump's return value and keep printing (cmd_camera_board.c, cmd_nor.c, ...).
  */
 static void test_hexdump_cancel(void)
 {

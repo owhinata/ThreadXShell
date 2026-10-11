@@ -14,7 +14,7 @@
  * Motivation: pulling a captured camera frame (owhinata/stm32f746g-disco#42) off
  * the board used to mean `camera save sd <p>` then physically removing the microSD
  * card. This streams any fs/sd file out the VCP instead; `camera send`
- * (cmd_camera.c) streams the RAM frame directly.  Both share xfer_send_source()
+ * (cmd_camera_board.c) streams the RAM frame directly.  Both share xfer_send_source()
  * below.
  *
  * The protocol core (svc/ymodem.c) is transport-agnostic; here we wire its IO

@@ -3,7 +3,7 @@
  * Copyright (c) 2026 Wio Lite AI ThreadX Shell Project
  */
 /**
- * @file    cmd_camera.c
+ * @file    cmd_camera_board.c
  * @brief   `camera` shell command: OV2640 bring-up, snapshot, continuous stream
  *          and LCD preview (owhinata/wio-lite-ai#8).
  *

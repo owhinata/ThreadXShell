@@ -343,7 +343,7 @@ def main():
     # leaving it in turns this fixture into an undefined-reference failure
     # instead of the vacuous link it is supposed to produce.
     f2_objs = re.sub(r"\S*shell_objs\.dir/boards/\S*/(?:port/camera/\S+|"
-                     r"cmds/cmd_camera\.c|cmds/cmd_nn\.c)\.obj\s+", "", f2)
+                     r"cmds/cmd_camera_board\.c|cmds/cmd_nn\.c)\.obj\s+", "", f2)
     if f2_objs == f2:
         raise SystemExit("run_fixture_tests: the probe link names no "
                          "port/camera objects; the fixture cannot remove them")

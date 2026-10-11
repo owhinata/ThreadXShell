@@ -14,7 +14,7 @@
  *
  * Each accessor is defined by the command file that owns the device instance, and
  * is used by the commands that write through another command's media:
- * `camera save` (cmds/cmd_camera.c), `send`/`recv` (cmds/cmd_xfer.c) and
+ * `camera save` (cmds/cmd_camera_board.c), `send`/`recv` (cmds/cmd_xfer.c) and
  * `nn model load` (cmds/cmd_nn.c) all go through the same ownership gates as the
  * `fs` / `sd` commands themselves.
  */

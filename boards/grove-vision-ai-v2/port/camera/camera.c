@@ -2293,7 +2293,7 @@ static void cam_manual_control_taken(void)
  * capture or probe.  That is a real change and it is the honest one: while a
  * stream is merely RUNNING the mutex is free (the producer never takes it), so
  * what a refusal reports is a genuinely concurrent operation and not the
- * steady state.  cmd_camera.c names both causes.
+ * steady state.  cmds/cmd_camera_board.c names both causes.
  */
 int camera_set_exposure(uint16_t lines)
 {

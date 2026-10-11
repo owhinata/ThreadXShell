@@ -363,7 +363,9 @@ int main(void)
 	     "check admit claim prepare(open) fetch lease ODD swap EVEN unlease "
 	     "unclaim");
 
-	/* [!] a "success" that left no model is a failure, and LOST */
+	/* [!] a "success" that left no model is a failure (HW), and LOST.  Every
+	 * board's swap returns OK here and leaves the status to this order --
+	 * wio-lite-ai answered ARG itself until issue #138. */
 	reset(1); r_swap = NN_SVC_OK; r_after = 0;
 	load("backend ok but no model left, open", N, NN_SVC_ERR_HW,
 	     NN_MODEL_EMPTY,

@@ -1444,13 +1444,16 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 * is left -- so the worker, armed and never handed a frame, is parked
 	 * again at once and the one-shot given back.
 	 */
-	rc = cam_lcd_sink_hold(&nn_cam_holder, nn_camera_arm_oneshot(), NULL);
+	rc = cam_lcd_sink_hold(&nn_cam_holder, nn_camera_arm_oneshot, NULL);
 	if (rc != CAM_OK) {
 		nn_hold_refused(res, rc);
 		/* Were the join ever refused, the word stays armed and the next
 		 * start refuses at its arm -- closed, not tidied. */
 		(void)nn_worker_join();
-		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
+		/* A transition in progress is BUSY, as the detail says: retry,
+		 * nothing of nn's was kept. */
+		nn_result(res, (rc == CAM_ERR_BUSY) ? NN_SVC_ERR_BUSY
+		                                    : NN_SVC_ERR_HW, NN_CLAIM_NONE);
 		nn_oneshot_finish(gen, res);
 		return;
 	}
@@ -1960,7 +1963,7 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	 * holding the operator's place too, so the camera keeps streaming after
 	 * nn stops -- if nothing is.
 	 */
-	rc = cam_lcd_sink_hold(&nn_cam_holder, nn_camera_arm(), NULL);
+	rc = cam_lcd_sink_hold(&nn_cam_holder, nn_camera_arm, NULL);
 	if (rc != CAM_OK) {
 		nn_hold_refused(res, rc);
 		/* Nothing of nn's was put on, so nothing can have handed the worker
@@ -1969,7 +1972,10 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		 * refuses at the arm above -- closed, not tidied. */
 		(void)nn_worker_join();
 		(void)nn_core_abort(&nn_core, &nn_core_board);
-		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
+		/* A transition in progress is BUSY, as the detail says: retry,
+		 * nothing of nn's was kept. */
+		nn_result(res, (rc == CAM_ERR_BUSY) ? NN_SVC_ERR_BUSY
+		                                    : NN_SVC_ERR_HW, NN_CLAIM_NONE);
 		return;
 	}
 

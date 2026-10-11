@@ -778,11 +778,11 @@ if(BSP_ENABLE_CAMERA)
         # the NN ingest), and port/camera holds exactly one callback.  The mux is
         # gated on the camera ALONE -- the NN client needs no display, and running
         # inference with the preview off is the fastest configuration this board has.
-        "${BOARD_DIR}/src/cam_band.c"
+        "${BOARD_DIR}/port/camera/cam_band.c"
         # The camera -> inference glue.  Camera-only for the same
         # reason as the mux; the overlay it feeds is drawn by cam_preview.c, which
         # is the file already gated on the pair.
-        "${BOARD_DIR}/src/nn_camera.c"
+        "${BOARD_DIR}/port/nn/nn_camera.c"
         "${BOARD_DIR}/cmds/cmd_camera.c")
     # The LCD preview needs BOTH drivers, so it is the one
     # source gated on the pair.  With either option off there is nothing to glue
@@ -1156,7 +1156,7 @@ if(BSP_ENABLE_KV)
 endif()
 if(BSP_ENABLE_CAMERA)
     list(APPEND DTCM_REQUIRED --require-dtcm cam_producer_stack) # port/camera/camera.c
-    list(APPEND DTCM_REQUIRED --require-dtcm nn_worker_stack)    # src/nn_camera.c
+    list(APPEND DTCM_REQUIRED --require-dtcm nn_worker_stack)    # port/nn/nn_camera.c
     list(APPEND DTCM_REQUIRED --require-axi  cam_band)           # DCMI via DMA2_Stream1
     if(BSP_ENABLE_LCD)
         list(APPEND DTCM_REQUIRED --require-dtcm preview_stack)  # src/cam_preview.c

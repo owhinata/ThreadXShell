@@ -9,8 +9,8 @@
  *
  * port/camera exposes ONE band callback (camera_band_start() overwrites a single
  * function pointer, and refuses outright while any stream is active).  Two consumers
- * now want 60-row bands: the LCD preview (app/cam_preview.c) and the NN ingest
- * (app/nn_camera.c).  Calling the NN from inside preview_band() would have worked
+ * now want 60-row bands: the LCD preview (src/cam_preview.c) and the NN ingest
+ * (port/nn/nn_camera.c).  Calling the NN from inside preview_band() would have worked
  * only while the preview was on -- and inference with the preview OFF is the fastest
  * configuration this board has, so that is exactly the case that must not be
  * second-class.  This module owns the one real callback and fans it out.

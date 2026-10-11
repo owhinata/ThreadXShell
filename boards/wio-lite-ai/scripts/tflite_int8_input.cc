@@ -13,7 +13,7 @@
  *
  * WHY THIS EXISTS
  *
- * app/nn_camera.c fills the model's input tensor from the camera.  When that tensor is
+ * port/nn/nn_camera.c fills the model's input tensor from the camera.  When that tensor is
  * quantized it does the quantization itself, using the TENSOR'S OWN scale/zero_point --
  * deliberately, because this board's struct nn_tensor carries those parameters and the
  * donor firmware's did not, so the donor had to hardcode (1/128, 0).  That int8 branch
@@ -425,7 +425,7 @@ int main(int argc, char **argv)
 	    q_t->quantization->zero_point.size() != 1u) {
 		printf("RESULT  : REJECT -- the QUANTIZE output is not per-tensor quantized.\n"
 		       "          The firmware needs one scale and one zero point on the input\n"
-		       "          (app/nn_camera.c), and a per-axis input reaches it as\n"
+		       "          (port/nn/nn_camera.c), and a per-axis input reaches it as\n"
 		       "          scale 0.\n");
 		return 1;
 	}
@@ -565,7 +565,7 @@ int main(int argc, char **argv)
 	printf("out     : %s (%u B)\n", argv[2], fbb.GetSize());
 	printf("RESULT  : PASS -- the graph input is now the quantized tensor.  The caller\n"
 	       "          must apply q = round(real / scale) + zero_point itself; that is\n"
-	       "          what app/nn_camera.c does, from the tensor's own parameters.\n"
+	       "          what port/nn/nn_camera.c does, from the tensor's own parameters.\n"
 	       "          Next, for the structural check and the CRC-32 that `blob list`\n"
 	       "          and `nn model load` display:\n"
 	       "            verify_tflite %s\n", argv[2]);

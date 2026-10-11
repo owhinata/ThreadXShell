@@ -9,7 +9,7 @@
  * svc/nn_svc.h is what shell/cmds/cmd_nn.c speaks; port/nn is what this board
  * has.  Like the f746 adapter and unlike the Grove one, this introduces no state
  * about the model: the singleton and the session gate live in port/nn/nn.c and
- * the worker's release authority lives in src/nn_camera.c, so this queries them.
+ * the worker's release authority lives in port/nn/nn_camera.c, so this queries them.
  *
  * [!] THE CLAIM IS A PAIR HERE, AND THE ORDER IS NOT ARBITRARY.  Anything that
  * touches tensors or the arena takes the NN session (the software claim) and
@@ -1581,7 +1581,7 @@ static const char *nn_nncam_strerror(int rc)
 
 /* ---- live inference (issue #99) ------------------------------------------
  *
- * The worker in src/nn_camera.c is unchanged and still owns the real lifecycle,
+ * The worker in port/nn/nn_camera.c is unchanged and still owns the real lifecycle,
  * the NN session and the OCTOSPI1 guard.  What this adds is an IDENTITY, so a
  * `--frames` waiter on one console cannot stop a stream that a second console
  * started after its own had gone.

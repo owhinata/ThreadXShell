@@ -259,7 +259,7 @@ static int cmd_camera_info(struct cli_instance *sh, int argc, char **argv)
 		/* "on, stream LOST" is the latched state, and it is worth distinguishing
 		   from a plain stop: it means the DCMI tore the stream down underneath a
 		   client that still believes it is running (owhinata/wio-lite-ai#9 phase 3,
-		   app/cam_band.c).  Nothing re-arms by itself -- re-issuing the command
+		   port/camera/cam_band.c).  Nothing re-arms by itself -- re-issuing the command
 		   does -- so this line has to say which of the two happened. */
 		cli_print(sh, "preview: %s (%u AXI-SRAM bands of %u rows, rotated to "
 		              "320x240 landscape), shown %lu dropped %lu, "

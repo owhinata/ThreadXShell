@@ -69,7 +69,7 @@ static int mlperf_guards_take(struct cli_instance *sh)
 	}
 	if (!psram_acquire_shared()) {
 		cli_error(sh, "mlperf: OCTOSPI1 busy (a psram/membench/wifi flash command "
-		              "holds it, or `nn stream` is running)\r\n");
+		              "holds it)\r\n");
 		nn_session_release();
 		return -1;
 	}
@@ -78,7 +78,7 @@ static int mlperf_guards_take(struct cli_instance *sh)
 
 static void mlperf_guards_give(void)
 {
-	psram_release();
+	psram_release_shared();
 	nn_session_release();
 }
 

@@ -39,7 +39,7 @@
 #include "ltdc_display.h"
 #include "psram.h"           /* psram_acquire(): OCTOSPI1 interlock (see lcd on) */
 #if BSP_ENABLE_CAMERA
-#include "camera.h"          /* camera_streaming(): name the right culprit in `lcd on` */
+#include "camera.h"          /* camera_still_claim(): `lcd reset` vs a stream (#142) */
 #endif
 #include "stm32h7xx_hal.h"   /* __HAL_RCC_DMA2D_IS_CLK_ENABLED (AHB3ENR read-back) */
 
@@ -311,14 +311,17 @@ static int cmd_lcd_on(struct cli_instance *sh, int argc, char **argv)
 	/* The SHARED guard: scan-out only reads the frame buffer, so it has to be
 	   kept away from a command that is reconfiguring OCTOSPI1 -- but not from a
 	   camera stream, which merely writes a different part of the same memory.
-	   That is what lets the preview exist at all (owhinata/wio-lite-ai#8 phase 3c). */
+	   That is what lets the preview exist at all (owhinata/wio-lite-ai#8 phase 3c).
+	   [!] Nor from `nn stream`, which holds the same shared guard for its whole
+	   run (issue #142): users do not exclude each other, and `lcd on` sets
+	   LTDCEN and the backlight and nothing in OCTOSPI1. */
 	if (!psram_acquire_shared()) {
-		cli_error(sh, "lcd: OCTOSPI1 busy (a psram/membench command or "
-		              "`nn stream` holds it)\r\n");
+		cli_error(sh, "lcd: OCTOSPI1 busy (a psram/membench/devmem/wifi flash "
+		              "command is reconfiguring it)\r\n");
 		return 1;
 	}
 	rc = ltdc_set_scanout(true);
-	psram_release();
+	psram_release_shared();
 	if (rc != LTDC_OK) {
 		cli_error(sh, "lcd: cannot start scanout\r\n");
 		return 1;
@@ -352,10 +355,22 @@ static int cmd_lcd_off(struct cli_instance *sh, int argc, char **argv)
  * `psram` subcommand could otherwise grab the bus and retune it underneath the
  * scanout we are about to bring back.  Same reasoning as `lcd on` above -- see
  * the time-of-check/time-of-use note on psram_acquire().
+ *
+ * [!] AND IT IS REFUSED WHILE A CAMERA STREAM RUNS, whoever runs it (issue #142
+ * D9).  The reset holds the frame lock for ~0.25 s, which a stream's preview
+ * transposes into and the producer cannot wait out.  It used to be kept away by
+ * the shared guard's accident -- `nn stream` held it -- which no longer
+ * excludes anything but a reconfigurer.  "Not streaming" is not enough on its
+ * own either (the first start could come right after the look), so the camera
+ * is held still for the whole reset: camera_still_claim() looks and claims in
+ * one step, and every stream start refuses while it is out.
  */
 static int cmd_lcd_reset(struct cli_instance *sh, int argc, char **argv)
 {
 	int rc;
+#if BSP_ENABLE_CAMERA
+	int held_still = 0;
+#endif
 
 	(void)argc;
 	(void)argv;
@@ -363,14 +378,35 @@ static int cmd_lcd_reset(struct cli_instance *sh, int argc, char **argv)
 		cli_error(sh, "lcd: display not initialized\r\n");
 		return 1;
 	}
+#if BSP_ENABLE_CAMERA
+	{
+		int still = camera_still_claim();
+
+		if (still == CAM_ERR_BUSY) {
+			cli_error(sh, "lcd: a camera stream is running -- stop it first "
+			              "(`camera stream stop` / `camera preview off` / "
+			              "`nn stream stop`)\r\n");
+			return 1;
+		}
+		held_still = (still == CAM_OK);
+	}
+#endif
 	if (!psram_acquire_shared()) {
-		cli_error(sh, "lcd: OCTOSPI1 busy (a psram/membench command or "
-		              "`nn stream` holds it)\r\n");
+		cli_error(sh, "lcd: OCTOSPI1 busy (a psram/membench/devmem/wifi flash "
+		              "command is reconfiguring it)\r\n");
+#if BSP_ENABLE_CAMERA
+		if (held_still)
+			camera_still_release();
+#endif
 		return 1;
 	}
 	cli_print(sh, "lcd: resetting the panel (~0.3 s)...\r\n");
 	rc = ltdc_panel_recover();
-	psram_release();
+	psram_release_shared();
+#if BSP_ENABLE_CAMERA
+	if (held_still)
+		camera_still_release();
+#endif
 	if (rc != LTDC_OK) {
 		cli_error(sh, "lcd: panel reset refused (display faulted)\r\n");
 		return 1;

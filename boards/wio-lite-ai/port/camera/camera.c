@@ -401,6 +401,18 @@ static struct camera_info info;
 
 /* ---- locking ------------------------------------------------------------- */
 
+/*
+ * "No stream may start" (issue #142 D9), held across a display reset.  `lcd
+ * reset` is refused while a stream runs, and "not running" is not enough on its
+ * own: the first start could come straight after the look.  So the look and
+ * the claim are one step under cam_lock, and every stream start refuses while
+ * the claim is out -- whoever comes second loses.  Held for the reset's whole
+ * ~0.3 s WITHOUT cam_lock (camera_still_release() takes it again).  Commit 5
+ * of #142 moves the start side onto the camera's holder table; the claim stays
+ * this one bit, next to the stream it keeps still.
+ */
+static volatile int cam_still_claimed;   /* cam_lock */
+
 static int op_lock(void)
 {
 	if (!info.ready)
@@ -1763,7 +1775,7 @@ static int cam_stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 	   further down is the operation this latch exists to stop. */
 	if (cam_pipe_unsafe)
 		return CAM_ERR_STATE;
-	if (cam_stream_active || cam_xfer_active)
+	if (cam_stream_active || cam_xfer_active || cam_still_claimed)
 		return CAM_ERR_BUSY;
 	if (!info.powered || info.sensor != CAM_SENSOR_OV2640) {
 		rc = camera_probe_locked();
@@ -1919,7 +1931,8 @@ static int cam_band_start_locked(int colorbar, camera_band_fn fn, void *ctx)
 
 	if (fn == NULL)
 		return CAM_ERR_PARAM;
-	if (cam_stream_active || cam_xfer_active)
+	/* A display reset holds the camera still (camera_still_claim()). */
+	if (cam_stream_active || cam_xfer_active || cam_still_claimed)
 		return CAM_ERR_BUSY;
 	if (!info.powered || info.sensor != CAM_SENSOR_OV2640) {
 		rc = camera_probe_locked();
@@ -2204,6 +2217,29 @@ int camera_stream_stop(void)
 int camera_streaming(void)
 {
 	return cam_stream_active;
+}
+
+int camera_still_claim(void)
+{
+	int rc = op_lock();
+
+	if (rc != CAM_OK)
+		return rc;              /* no camera: nothing can start either */
+	if (cam_stream_active || cam_still_claimed) {
+		op_unlock();
+		return CAM_ERR_BUSY;
+	}
+	cam_still_claimed = 1;
+	op_unlock();
+	return CAM_OK;
+}
+
+void camera_still_release(void)
+{
+	if (op_lock() != CAM_OK)
+		return;
+	cam_still_claimed = 0;
+	op_unlock();
 }
 
 int camera_stream_stats(struct camera_stream_stats *out)

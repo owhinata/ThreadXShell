@@ -7,8 +7,12 @@
  * @brief   One step of the camera sink: may the producer go in, and has it come
  *          out (issue #142).
  *
- * WHAT A STEP IS.  Since issue #142 this board has ONE camera sink for the GUIX
- * preview and the nn ingest (cam_sink.h).  Its consume() runs each of them in
+ * [!] SHARED, SO IT OWNS NO MUTABLE STORAGE AND KNOWS NO BOARD.  Each board
+ * keeps the state and the critical section: f746g-disco's camera sink
+ * (port/camera/cam_sink.c) and wio-lite-ai's band sink (port/camera/cam_band.c).
+ *
+ * WHAT A STEP IS.  Since issue #142 a board has ONE camera sink for the
+ * preview and the nn ingest (f746g-disco: cam_sink.h; wio-lite-ai: cam_band.h).  Its consume() runs each of them in
  * turn -- the display step, then the nn step -- and each can be switched off
  * while the base capture keeps running and the other step keeps working.  That
  * used to be two sinks, and switching one off was an unsubscribe followed by a
@@ -34,10 +38,10 @@
  * the record boundary, the counters, the wake-up token) cannot be read half-way
  * by a producer that was still inside from before.  A refused arm moves nothing.
  *
- * WHY A PURE TABLE.  As with cam_drain.h and cam_own.h: the interesting cases --
- * a disarm while the producer is inside, a leave without an enter -- cannot be
- * typed at a console.  test/test_cam_step.c walks them.  The critical section
- * and the waiting are cam_sink.c's.
+ * WHY A PURE TABLE.  The interesting cases -- a disarm while the producer is
+ * inside, a leave without an enter -- cannot be typed at a console.
+ * shell/test/test_cam_step.c walks them.  The critical section and the waiting
+ * are the board's.
  */
 #ifndef CAM_STEP_H
 #define CAM_STEP_H

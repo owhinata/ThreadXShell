@@ -45,10 +45,19 @@
  * between two bands.  Holding it across a frame would mean holding it ~95% of the
  * time at 13.5 fps -- any contention would then land squarely on the band deadline
  * and cost real pixels, whereas an interleaved draw costs one cosmetically mixed
- * frame that the next one replaces.  A drawing `lcd` command holds the lock for a
- * DMA2D fill plus a blanking wait, which is close enough to one band period that
- * `band late` / `band torn` can tick; `lcd reset` holds it for ~0.3 s and will.
- * Both recover on the next frame, which is what those counters are for.
+ * frame that the next one replaces.
+ *
+ * [!] AND THE PRODUCER NEVER WAITS FOR IT (issue #142).  The lock is TRIED per
+ * band (ltdc_blit_try()); a band that finds it held drops the rest of that frame
+ * from the display -- counted as `dropped` -- and the band still goes on to the
+ * NN step.  A drawing `lcd` command holds the lock for a DMA2D fill plus a
+ * blanking wait, close to a band period, and waiting for it used to tick
+ * `band late` / `band torn` for the NN too.
+ *
+ * WHEN IT SHOWS ANYTHING (issue #142).  There is no `camera preview on` any
+ * more: the preview is what you see while the camera streams AND the display is
+ * on.  Its step of the band sink is armed for the board's whole life and decides
+ * at each frame's first band from the display's state (ltdc_display_on()).
  */
 #include "cam_preview.h"
 
@@ -82,7 +91,6 @@ static TX_THREAD    preview_thread;
 static UCHAR        preview_stack[PREVIEW_STACK] DTCM_BSS __attribute__((aligned(8)));
 static TX_SEMAPHORE preview_flip_sem;
 
-static volatile int preview_on;
 /* Set by the producer thread when it has handed over a finished back buffer,
    cleared by the preview thread once the flip is done (or has failed).  One
    writer each, and the producer only ever tests it. */
@@ -106,19 +114,23 @@ static uint32_t     preview_blit_cyc;
  * invalidated it and guarantees bands arrive 0,1,2,3 with no gaps inside a frame,
  * so the only frame-level decision left here is whether to start one.
  *
- * Since owhinata/wio-lite-ai#9 phase 3 this is a cam_band client rather than the
- * camera's one registered callback -- port/camera/cam_band.c fans out to it first and to the
- * NN ingest second.  The frame-level decision below stays entirely ours: a frame this
- * thread skips because a flip is still pending is NOT a frame the NN skips.
+ * This is the PREVIEW step of the camera's band sink (port/camera/cam_band.c):
+ * it runs first, the NN ingest second.  The frame-level decision below stays
+ * entirely ours: a frame this thread skips -- the display off, a flip still
+ * pending, the frame lock busy -- is NOT a frame the NN skips.
  */
 static void preview_band(unsigned band, const uint16_t *px, unsigned rows)
 {
 	uint32_t t0;
 
-	if (!preview_on)
-		return;
-
 	if (band == 0u) {
+		/* Displayed only while the display is on (issue #142): nothing to
+		   transpose for a dark panel, and no flip to ask for.  Not counted --
+		   this is the preview being off, not a frame lost. */
+		if (!ltdc_display_on()) {
+			preview_in_frame = 0;
+			return;
+		}
 		if (preview_flip_pending) {
 			/* The previous frame is still on its way to the panel.  Drawing now
 			   would land in a buffer that is about to become the front one --
@@ -134,10 +146,17 @@ static void preview_band(unsigned band, const uint16_t *px, unsigned rows)
 		return;                   /* mid-frame remainder of a frame we skipped */
 
 	/* The band IS the surface here: full width, at its own landscape row offset.
-	   ltdc_blit() takes the display lock, clips, and transposes (svc/gfx_rot). */
+	   ltdc_blit_try() TRIES the display lock, clips, and transposes (svc/gfx_rot).
+	   [!] A lock somebody else holds drops the rest of this frame from the
+	   display rather than waiting: the producer has one band period, and the
+	   NN step comes after this one. */
 	t0 = DWT->CYCCNT;
-	ltdc_blit(px, 0, (uint16_t)(band * rows),
-	          (uint16_t)CAMERA_FRAME_WIDTH, (uint16_t)rows);
+	if (!ltdc_blit_try(px, 0, (uint16_t)(band * rows),
+	                   (uint16_t)CAMERA_FRAME_WIDTH, (uint16_t)rows)) {
+		preview_in_frame = 0;
+		preview_dropped++;
+		return;
+	}
 	preview_blit_acc += DWT->CYCCNT - t0;
 
 	if (band + 1u >= CAMERA_BANDS_PER_FRAME) {
@@ -205,7 +224,7 @@ static void preview_entry(ULONG arg)
 	for (;;) {
 		if (tx_semaphore_get(&preview_flip_sem, TX_WAIT_FOREVER) != TX_SUCCESS)
 			continue;
-		if (preview_on) {
+		{
 #if defined(CONFIG_NN_BACKEND_TFLM)
 			/* [!] THE LEASE COMES BEFORE THE FRAME LOCK (issue #110), because
 			   that is the order every other holder uses and an inversion is a
@@ -277,86 +296,14 @@ int cam_preview_init(void)
 		LOG_ERR("preview thread create failed");
 		return -1;
 	}
-	return 0;
-}
-
-int cam_preview_enable(int on, int colorbar)
-{
-	int rc;
-
-	if (!on) {
-		preview_on = 0;
-		rc = cam_band_release(CAM_BAND_PREVIEW);
-		if (rc == CAM_BAND_ERR_LOCK) {
-			/* The claim was never dropped -- the other console held the band API
-			   too long -- so the preview really is still on.  Put the flag back
-			   rather than leaving `camera info` reporting "off" over a claim that
-			   is still in the fan-out set; a retry works. */
-			preview_on = 1;
-			return -3;
-		}
-		/* Safe to clear regardless of rc: cam_band_release() has already dropped
-		   our claim, so the fan-out no longer reaches preview_band() at all, and
-		   on success its drain has also waited out any call still in flight.
-		   (Before owhinata/wio-lite-ai#9 phase 3 the equivalent guarantee came from the
-		   stream itself having stopped -- but the stream now outlives us when the NN is
-		   still claiming it, so the drain is what provides it.) */
-		preview_flip_pending = 0;
-		preview_in_frame     = 0;
-		return (rc == CAM_BAND_OK) ? 0 : -1;
-	}
-
-	if (!ltdc_is_up() || ltdc_scanout_off())
-		return -1;                 /* nothing would appear; say so instead */
-	/* Re-issuing `preview on` used to restart unconditionally so that `preview on
-	   test` could switch a running preview to the colour bars -- the test-pattern
-	   bit lives in the sensor's COM7 and only a restart rewrites it.  With the
-	   stream now shared, a restart is no longer ours alone to do: it would tear the
-	   stream out from under a running `nn stream`.  So restart only when the
-	   setting actually changes, and refuse when somebody else is on the stream. */
-	if (camera_band_streaming() && colorbar != cam_band_colorbar()) {
-		if (cam_band_claimed(CAM_BAND_NN))
-			return -2;
-		preview_on = 0;
-		/* [!] The result matters here.  If the release fails, the stream is still
-		   the OLD one, and the claim below would quietly JOIN it -- reporting a
-		   successful switch while the sensor's test-pattern bit never changed.
-		   Fail instead; the caller retries. */
-		rc = cam_band_release(CAM_BAND_PREVIEW);
-		if (rc != CAM_BAND_OK) {
-			if (cam_band_claimed(CAM_BAND_PREVIEW))
-				preview_on = 1;   /* still ours; keep the reported state true */
-			return (rc == CAM_BAND_ERR_LOCK) ? -3 : -1;
-		}
-	}
-
-	preview_shown        = 0u;
-	preview_dropped      = 0u;
-	preview_blit_acc     = 0u;
-	preview_blit_cyc     = 0u;
-	preview_flip_pending = 0;
-	preview_in_frame     = 0;
-	while (tx_semaphore_get(&preview_flip_sem, TX_NO_WAIT) == TX_SUCCESS)
-		;
-	/* Before the claim, not after: the first band can arrive the moment
-	   cam_band_claim() returns, and preview_band() drops what it gets while
-	   this is clear. */
-	preview_on = 1;
-
-	rc = cam_band_claim(CAM_BAND_PREVIEW, colorbar, preview_band);
-	if (rc != CAM_BAND_OK) {
-		preview_on = 0;
-		/* Distinguished from "the camera would not start": nothing is wrong, the
-		   other console is simply mid claim/release and a retry will work.  A
-		   catch-all here would send someone to `dmesg` for a healthy board. */
-		return (rc == CAM_BAND_ERR_LOCK) ? -3 : -1;
+	/* The preview's step of the band sink, armed for good (issue #142): it is
+	   fed whenever the camera streams, and decides per frame from the display
+	   whether to draw.  Nothing has been delivered yet, so it cannot refuse. */
+	if (cam_band_step_enable(CAM_BAND_PREVIEW, preview_band) != CAM_BAND_OK) {
+		LOG_ERR("preview step enable failed");
+		return -1;
 	}
 	return 0;
-}
-
-int cam_preview_enabled(void)
-{
-	return preview_on;
 }
 
 void cam_preview_stats(uint32_t *shown, uint32_t *dropped, uint32_t *blit_us)

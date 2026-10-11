@@ -166,7 +166,8 @@ static int cmd_mlperf(struct cli_instance *sh, int argc, char **argv)
 	cli_print(sh, "mlperf: EEMBC monitor -- model %s (%s)\r\n",
 	          mlperf_model_id(), nn_model_name(m));
 	cli_print(sh, "  this console and the PSRAM are held for the whole session; "
-	              "`lcd on`, `camera capture` and `psram` will report busy\r\n");
+	              "`psram`, `membench`, `devmem` and `wifi flash` will report "
+	              "busy\r\n");
 	cli_print(sh, "  close your terminal, then run the runner against this port; "
 	              "press Ctrl+] here to exit (Ctrl+C does NOT work)\r\n");
 

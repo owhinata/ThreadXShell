@@ -36,6 +36,9 @@
 #include "stm32h7xx_hal.h"
 #include "psram.h"
 #include "psram_guard.h"    /* the guard word's transitions (issue #142) */
+
+#define LOG_TAG "psram"
+#include "log.h"
 #if BSP_ENABLE_LCD
 #include "ltdc_display.h"   /* ltdc_scanout_active(): see psram_acquire() (issue #7) */
 #endif
@@ -694,12 +697,10 @@ int psram_acquire_shared(void)
 
 void psram_release_shared(void)
 {
-	(void)guard_apply(psram_guard_user_give);
-}
-
-uint32_t psram_guard_holders(void)
-{
-	return psram_guard_users(psram_guard_word);
+	/* Refused only when no user holds it -- a release of the wrong kind, or a
+	   second one.  Nothing moves, and it is said, once per occurrence. */
+	if (!guard_apply(psram_guard_user_give))
+		LOG_ERR("OCTOSPI1 guard: shared release with no user holding it");
 }
 
 /*
@@ -748,7 +749,8 @@ int psram_acquire(void)
 
 void psram_release(void)
 {
-	(void)guard_apply(psram_guard_reconf_give);
+	if (!guard_apply(psram_guard_reconf_give))
+		LOG_ERR("OCTOSPI1 guard: reconfigurer release without the mark");
 }
 
 uint32_t psram_clock_hz(void) { return PSRAM_KERNEL_HZ / (psram_presc + 1u); }

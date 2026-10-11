@@ -48,25 +48,20 @@
 extern "C" {
 #endif
 
-/** Create the preview thread (parked).  Call from tx_application_define(). */
+/** Create the preview thread (parked) and arm the preview's step of the band
+ *  sink.  Call from tx_application_define(). */
 int cam_preview_init(void);
 
-/**
- * Turn the preview on or off, starting / stopping the camera's band stream with
- * it.  @p colorbar selects the sensor's test pattern (ignored when turning off) --
- * the same picture `camera stream start test` produces, through the same path, so
- * a suspect image can be split into "optics" and "everything after the sensor".
- *
- * @return 0, or <0 when the LCD is down / its scan-out is off (turning the
- *         preview on then would silently do nothing, which is worse than a
- *         refusal that says why), or when the camera refuses to stream -- which
- *         it does while a `camera stream` or a `camera capture` owns the DCMI.
+/*
+ * There is no "turn the preview on" any more (issue #142): `camera preview
+ * on|off` is gone.  The preview is what the panel shows while the camera
+ * streams AND the display is on -- `camera stream start` / `nn stream start`
+ * and `lcd on`.  cam_preview_init() arms its step of the band sink for good.
  */
-int cam_preview_enable(int on, int colorbar);
-int cam_preview_enabled(void);
 
-/** Frames actually presented, frames skipped because the previous one had not
- *  been presented yet, and how long the most recent frame's transpose took in
+/** Frames actually presented, frames skipped (the previous one not presented
+ *  yet, or the frame lock held by another thread -- the producer never waits
+ *  for it, issue #142), and how long the most recent frame's transpose took in
  *  microseconds -- summed over its four bands, so it stays directly comparable to
  *  the 25.0 ms per frame the whole-frame-from-PSRAM version measured before issue
  *  owhinata/wio-lite-ai#35.  Reported by `camera info`.  Any argument may be

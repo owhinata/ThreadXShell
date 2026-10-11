@@ -272,6 +272,14 @@ bool ltdc_scanout_off(void)
 	return ltdc_is_up() && ltdc_disabled;
 }
 
+/* The display's on/off as the driver last set it (issue #142).  On this board
+   `lcd off` stops the scan-out together with the backlight, so the two are one
+   state; the name is the one f746g-disco's preview reads too. */
+bool ltdc_display_on(void)
+{
+	return ltdc_scanout_active();
+}
+
 void ltdc_panel_get(struct ltdc_panel *out)
 {
 	if (out != NULL)
@@ -1059,6 +1067,25 @@ void ltdc_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 		fb_fill_rect(back, fx, fy, fw, fh, rgb565);
 	}
 	ltdc_unlock_frame();
+}
+
+bool ltdc_blit_try(const uint16_t *src, uint16_t x, uint16_t y,
+                   uint16_t w, uint16_t h)
+{
+	uint32_t cx = x, cy = y, cw = w, ch = h;
+	uint16_t *back;
+
+	if (!ltdc_is_up())
+		return false;
+	/* TX_NO_WAIT: the caller is the camera producer, which has one band period
+	   and must not queue behind a flip or a drawing command (issue #142). */
+	if (tx_mutex_get(&ltdc_lock, TX_NO_WAIT) != TX_SUCCESS)
+		return false;
+	back = ltdc_back_buffer();
+	if (back != NULL && src != NULL && surf_clip(&cx, &cy, &cw, &ch))
+		gfx_blit_rot(src, w, back, LTDC_DEF_W, LTDC_DEF_H, cx, cy, cw, ch);
+	ltdc_unlock_frame();
+	return true;
 }
 
 void ltdc_blit(const uint16_t *src, uint16_t x, uint16_t y,

@@ -129,9 +129,6 @@ void psram_release(void);
 int psram_acquire_shared(void);
 void psram_release_shared(void);
 
-/* Users holding the shared guard now (a stats / diagnostic number). */
-uint32_t psram_guard_holders(void);
-
 /* Which bring-up stage failed (PSRAM_STAGE_*); PSRAM_STAGE_OK when ready, for
  * the `psram info` "init: failed at ..." line. */
 uint32_t psram_init_stage(void);

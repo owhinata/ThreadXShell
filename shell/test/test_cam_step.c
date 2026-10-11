@@ -2,10 +2,10 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host test for the camera sink's step machine (issue #142,
- * port/camera/cam_step.c).
+ * Host test for a camera sink's step machine (issue #142, svc/cam_step.c --
+ * shared by f746g-disco's camera sink and wio-lite-ai's band sink).
  *
- * WHY THIS EXISTS.  Since issue #142 the GUIX preview and the nn ingest are two
+ * WHY THIS EXISTS.  Since issue #142 the preview and the nn ingest are two
  * steps of one camera sink, and `gui stop` / `nn stream stop` switch their own
  * step off while the base keeps running.  What lets them release what the step
  * reads is "disarmed, and the count reached zero" -- the producer is out and

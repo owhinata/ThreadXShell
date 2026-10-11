@@ -39,7 +39,8 @@
  * and a failed look gives the mark back (psram_guard_reconf_give()).
  *
  * WHY PURE.  Each function maps the word to its successor, so the board
- * applies it with one LDREX/STREX retry loop and test/test_psram_guard.c walks
+ * applies it in one short PRIMASK section (psram.c says why not LDREX/STREX)
+ * and test/test_psram_guard.c walks
  * every pairing of the contention table on the host.
  */
 #ifndef PSRAM_GUARD_H

@@ -774,11 +774,16 @@ if(BSP_ENABLE_CAMERA)
     list(APPEND SHELL_SOURCES
         "${BOARD_DIR}/port/camera/camera.c"
         "${BOARD_DIR}/port/camera/ov2640_regs.c"
-        # The band stream now has two consumers (the preview and
-        # the NN ingest), and port/camera holds exactly one callback.  The mux is
+        # The band stream has two consumers (the preview and
+        # the NN ingest), and port/camera holds exactly one callback: the band
+        # sink, which runs them as two steps (issue #142).  It is
         # gated on the camera ALONE -- the NN client needs no display, and running
         # inference with the preview off is the fastest configuration this board has.
         "${BOARD_DIR}/port/camera/cam_band.c"
+        # ...its steps, and who holds the stream open (issue #142): the
+        # same two shared files f746g-disco runs its camera sink on.
+        "${CMAKE_SOURCE_DIR}/svc/cam_step.c"
+        "${CMAKE_SOURCE_DIR}/svc/cam_holders.c"
         # The camera -> inference glue.  Camera-only for the same
         # reason as the mux; the overlay it feeds is drawn from the preview
         # thread (nn_panel.c below), which is gated on the pair.

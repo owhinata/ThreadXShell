@@ -33,7 +33,6 @@
 
 #include "blob.h"
 #include "camera.h"
-#include "cam_band.h"
 #include "cam_preview.h"     /* CAM_PREVIEW_STACK_BYTES -- the draw allowance's ceiling */
 #include "cli_config.h"      /* CLI_INSTANCE/BG_JOB_STACK_SIZE -- report's ceiling */
 #include "fmt.h"
@@ -1050,7 +1049,7 @@ static struct nn_core nn_core;
  * (issue #120).  `ingest`, `tensor`, `at call` and `plugin` come from the same
  * worker counters (or from the panel's, which the worker re-arms), so they moved
  * with every `nn run` too.  What is kept live is only what is not about the
- * stream: the session, a lost band, and the norm/overlay settings.
+ * stream: the session, a lost band, and the norm setting.
  */
 struct nn_stream_end {
 	struct nn_camera_stats cam;          /* the worker's, at the stop       */
@@ -1487,7 +1486,7 @@ void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
 
-/* ---- norm, overlay, boxes and threshold ---------------------------------- */
+/* ---- norm, boxes and threshold ---------------------------------- */
 
 /* The worker's codes in words.  Moved here from this board's own `nn stream`
    command file when issue #99 replaced it with the shared one: the port is
@@ -1519,9 +1518,15 @@ static const char *nn_nncam_strerror(int rc)
 			"psram/membench/devmem/wifi flash command");
 	case NNCAM_ERR_BAND:
 		return NN_SVC_DETAIL_LIT(
-			"the camera would not start a band stream: a frame "
-			"stream may own the DCMI (`camera stream stop`), or the "
-			"other console is starting/stopping one; see `dmesg`");
+			"the camera would not start: a stop is still finishing "
+			"(retry), or see `dmesg`");
+	case NNCAM_ERR_STILL:
+		return NN_SVC_DETAIL_LIT(
+			"an `lcd reset` is holding the camera still -- retry");
+	case NNCAM_ERR_TEST:
+		return NN_SVC_DETAIL_LIT(
+			"the camera is streaming with another `test` setting -- "
+			"match it, or `camera stream stop` first");
 	case NNCAM_ERR_GEOM:
 		return NN_SVC_DETAIL_LIT(
 			"the model input does not tile onto the camera's "
@@ -1615,7 +1620,7 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	 */
 
 	/* Sampled BEFORE the call, because a successful re-arm clears the latch. */
-	rearm = nn_camera_running() && cam_band_stream_lost();
+	rearm = nn_camera_stream_lost();
 
 	/* [!] ADMITTED BEFORE THE WORKER IS TOUCHED.  Recording the start afterwards
 	 * left a window in which this said IDLE while the board was already
@@ -1791,8 +1796,6 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
  */
 #define NN_LINE_WORST(fmt, nconv, digits) \
 	(sizeof(fmt) - 1u - 2u * (nconv) - (nconv) + (digits))
-#define NN_LINE_NOTE_A  "note    : the OCTOSPI1 guard is held until `nn stream stop`, so start"
-#define NN_LINE_NOTE_B  "note    : `camera preview on` FIRST if you want to see the boxes"
 #define NN_LINE_LOST    "stream  : LOST -- re-issue `nn stream start` to re-arm"
 #define NN_LINE_TENSOR  "tensor  : %lu raced (must be 0), %lu stale post(s)"
 #define NN_LINE_INGEST  "ingest  : last %lu us  max %lu us  (band deadline ~18500 us)"
@@ -1805,9 +1808,7 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
  * correct build never prints it; the suffix exists so that a path which forgot
  * the lease is visible somewhere other than a log.  Counted from boot. */
 #define NN_LINE_PL_UNHELD NN_LINE_PL_MISS "; %lu entry(s) refused unheld"
-_Static_assert(sizeof(NN_LINE_NOTE_A) <= NN_STREAM_LINE_MAX &&
-               sizeof(NN_LINE_NOTE_B) <= NN_STREAM_LINE_MAX &&
-               sizeof(NN_LINE_LOST) <= NN_STREAM_LINE_MAX,
+_Static_assert(sizeof(NN_LINE_LOST) <= NN_STREAM_LINE_MAX,
                "a stream line literal is longer than the caller's buffer");
 _Static_assert(NN_LINE_WORST(NN_LINE_TENSOR, 2u, 2u * 10u) < NN_STREAM_LINE_MAX &&
                NN_LINE_WORST(NN_LINE_INGEST, 2u, 2u * 10u) < NN_STREAM_LINE_MAX &&
@@ -1847,18 +1848,10 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 	buf[0] = '\0';
 
 	if (ctx == NN_STREAM_LINES_STARTED) {
-#if BSP_ENABLE_LCD
-		/* The ordering an operator has to know BEFORE they wonder why there
-		   are no boxes: the guard is held for the stream's whole lifetime. */
-		/* Two lines: as one it was 124 B and lost its advice (issue #126). */
-		if (index <= 1u && !cam_band_claimed(CAM_BAND_PREVIEW)) {
-			nn_detail_to(buf, cap, "%s",
-			             index == 0u ? NN_LINE_NOTE_A : NN_LINE_NOTE_B);
-			return 1;
-		}
-#else
+		/* No start note any more (issue #142): the preview is not something
+		   to start first -- it shows whenever the camera streams and the
+		   display is on, and `lcd on` is admitted under a running stream. */
 		(void)index;
-#endif
 		return 0;
 	}
 
@@ -1877,7 +1870,6 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 			st.holds_guards = live.holds_guards;
 			st.stream_lost  = live.stream_lost;
 			st.norm_signed  = live.norm_signed;
-			st.overlay      = live.overlay;
 #if defined(CONFIG_NN_BACKEND_TFLM) && BSP_ENABLE_LCD
 			fin_spent   = nn_stream_final.spent;
 			fin_refused = nn_stream_final.refused;
@@ -1930,9 +1922,8 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 			             (unsigned long)nn_cyc_to_us(st.ingest_max_cyc));
 			return 1;
 		case 4u:
-			nn_detail_to(buf, cap, "norm    : %s   overlay: %s",
-			             st.norm_signed ? "[-1,1]" : "[0,1]",
-			             st.overlay ? "on" : "off");
+			nn_detail_to(buf, cap, "norm    : %s",
+			             st.norm_signed ? "[-1,1]" : "[0,1]");
 			return 1;
 		case 5u:
 		case 6u:
@@ -2021,16 +2012,6 @@ void nn_svc_norm_set(int signed_range)
 int nn_svc_norm_get(void)
 {
 	return nn_camera_get_norm();
-}
-
-void nn_svc_overlay_set(int on)
-{
-	nn_camera_set_overlay(on);
-}
-
-int nn_svc_overlay_get(void)
-{
-	return nn_camera_get_overlay();
 }
 
 int nn_svc_box_to_frame(const struct bf_det *in, struct bf_det *out)

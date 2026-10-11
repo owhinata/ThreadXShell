@@ -17,7 +17,8 @@
  * callback), nn_worker.c (`nn_work`) and nn_panel.c (the preview thread's nn
  * half -- the display half stays in src/cam_preview.c and is handed in as hooks,
  * nn_panel.h), sharing nn_camera_priv.h.  It is still board integration -- it
- * claims a band stream (port/camera/cam_band.h), publishes results for the
+ * holds the band stream and arms a step of its sink (port/camera/cam_band.h),
+ * publishes results for the
  * display and is driven by a shell command -- so it still includes one src/
  * header, psram.h: a port -> src include that remains on purpose (the board
  * README's "nn files" section lists it).  nn.h is untouched by that and stays
@@ -69,6 +70,8 @@
 #define NNCAM_ERR_SHAPES (-12)  /**< the loaded decoder cannot read these outputs  */
 #define NNCAM_ERR_NODRAW (-13)  /**< a preview was asked for; the decoder draws none */
 #define NNCAM_ERR_DECBUSY (-14) /**< the decoder could not be held still to ask it */
+#define NNCAM_ERR_TEST   (-15)  /**< the camera streams with another `test` setting */
+#define NNCAM_ERR_STILL  (-16)  /**< an `lcd reset` holds the camera still          */
 
 /**
  * The worker thread's (`nn_work`) stack, in DTCM.  Published here since issue #108
@@ -121,9 +124,10 @@ void nn_camera_note_depth_at(enum nn_camera_site site, uintptr_t sp);
 struct nn_camera_stats {
 	uint8_t  running;
 	uint8_t  holds_guards;   /**< the session + OCTOSPI1 guard are still held  */
-	uint8_t  stream_lost;    /**< the band stream died under us (latched)      */
+	uint8_t  stream_lost;    /**< the stream ended under us: nn's holder was
+	                          *   marked lost (issue #142) and nn has not
+	                          *   re-armed                                   */
 	uint8_t  norm_signed;    /**< input range: 1 = [-1,1], 0 = [0,1]           */
-	uint8_t  overlay;
 	uint32_t infers;
 	uint32_t frames;         /**< complete frames ingested into the tensor     */
 	uint32_t skipped;        /**< complete frames that passed while busy       */
@@ -151,7 +155,9 @@ struct nn_camera_stats {
 };
 
 /**
- * Claim the band stream and start inferring.
+ * Hold the band stream open and start inferring (issue #142: joins a running
+ * stream, or starts it holding the operator's place too, so it keeps streaming
+ * after nn stops), then arm nn's step of the band sink.
  *
  * Holds the NN session AND psram_acquire_shared() for the WHOLE lifetime of the
  * stream, not per inference.  Both are deliberate:
@@ -290,9 +296,13 @@ int  nn_camera_get_norm(void);
 /* The panel's half of the shared frame path -- nn_camera_draw() and
  * nn_camera_present_done() -- is declared in nn_panel.h (issue #140). */
 
-/** Draw the boxes on the LCD preview (port/nn/nn_panel.c asks the plugin to
- *  draw; src/cam_preview.c presents the frame). */
-void nn_camera_set_overlay(int on);
-int  nn_camera_get_overlay(void);
+/** Whether the LCD preview gets boxes: while an `nn stream` runs, not for a `nn
+ *  run` (issue #142: derived -- `nn overlay on|off` is gone).  port/nn/nn_panel.c
+ *  asks the plugin to draw; src/cam_preview.c presents the frame. */
+int  nn_camera_overlay(void);
+
+/** The stream ended under a running nn (nn's holder lost, issue #142): re-issue
+ *  `nn stream start` to re-arm. */
+int  nn_camera_stream_lost(void);
 
 #endif /* NN_CAMERA_H */

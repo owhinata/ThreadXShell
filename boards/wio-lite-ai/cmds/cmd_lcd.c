@@ -384,8 +384,12 @@ static int cmd_lcd_reset(struct cli_instance *sh, int argc, char **argv)
 
 		if (still == CAM_ERR_BUSY) {
 			cli_error(sh, "lcd: a camera stream is running -- stop it first "
-			              "(`camera stream stop` / `camera preview off` / "
-			              "`nn stream stop`)\r\n");
+			              "(`nn stream stop`, then `camera stream stop`)\r\n");
+			return 1;
+		}
+		if (still == CAM_ERR_STILL) {
+			cli_error(sh, "lcd: another `lcd reset` is running -- try "
+			              "again\r\n");
 			return 1;
 		}
 		held_still = (still == CAM_OK);

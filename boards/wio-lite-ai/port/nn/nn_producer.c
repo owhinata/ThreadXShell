@@ -168,14 +168,23 @@ void nncam_infer_start(void *ctx)
 /* ----------------------------------------------------------- band ingest ------ */
 
 /*
- * One band, on the camera's producer thread, fanned out by port/camera/cam_band.c after the
- * preview has had it.  The fill itself is the shared frame path's (issue #130): it
+ * One band, on the camera's producer thread: nn's step of the band sink
+ * (port/camera/cam_band.c), after the preview's.  The fill itself is the shared frame path's (issue #130): it
  * begins only at band 0 while the worker wants a frame, writes each band through
  * nncam_prep() while FILLING, and at band 3 hands the frame over and posts.
  */
 void nncam_band(unsigned band, const uint16_t *px, unsigned rows)
 {
 	struct nncam_part part;
+
+	/* [!] Not on a stream nn LOST (issue #142).  A confirmed end (a DCMI
+	   overrun) emptied the camera's holders and marked nn; if the operator
+	   restarts the camera, this step is still armed and is fed -- and must not
+	   resume until nn itself re-arms (camera_stream_join() clears the mark).
+	   First, so a lost step touches nothing: the worker drops the fill on its
+	   own timeout path. */
+	if (camera_stream_lost(&nncam_holder))
+		return;
 
 	/* The band tiling is derived from CAMERA_BAND_ROWS, and the driver's
 	   contract is that every band is exactly that tall (port/camera/camera.h).  If

@@ -74,12 +74,12 @@ const char *camera_strerror(int rc);
  *
  * [!] PRIVATE TO camera.c UNTIL ISSUE #119, and "nothing else needs it" was
  * wrong by then.  A plugin's decode() ran on this thread under `nn stream`, and
- * the plugin policy (port/npu/nn_plugin_stack.h) asserts decode's allowance
+ * the plugin policy (port/nn/nn_plugin_stack.h) asserts decode's allowance
  * strictly below every stack it can be called on -- an allowance equal to the
  * whole stack is a check that cannot fire (issue #103).  Since issue #129 the
  * decode runs on the inference worker instead (nn_worker.h), and no plugin slot
  * runs here.  The worker's stack is the same size, which is why the stack
- * probe tells the two apart by priority (port/npu/nn_probe_rtos.c).
+ * probe tells the two apart by priority (port/nn/nn_probe_rtos.c).
  */
 #define CAM_PRODUCER_STACK_BYTES 8192u
 
@@ -89,7 +89,7 @@ const char *camera_strerror(int rc);
  * so 2 seconds is "something is wrong", not "the exposure is long".
  *
  * Published since issue #129: `nn run` streams now, and the longest it waits for
- * its one result is derived from this (port/npu/nn_svc_grove.c), rather than
+ * its one result is derived from this (port/nn/nn_svc_grove.c), rather than
  * from a second number that would drift from it.
  */
 #define CAM_FRAME_TIMEOUT_TICKS (2u * TX_TIMER_TICKS_PER_SECOND)

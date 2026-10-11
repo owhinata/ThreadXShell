@@ -4,7 +4,7 @@
  */
 /**
  * @file    test_npu_desc.c
- * @brief   Host tests for port/npu/npu_desc.c -- npu_tensor -> tensor_desc
+ * @brief   Host tests for port/nn/npu/npu_desc.c -- npu_tensor -> tensor_desc
  *          (issues #97, #104).
  *
  * This file used to be test_nn_decoder.c and drove a BlazeFace decoder living in

@@ -31,7 +31,7 @@
  *     never repaired, the same answer cam_lcd_sink.c gives.
  *
  * The return codes are the camera's, so the stop's table
- * (port/npu/nn_stream_state.c) reads this detach exactly as it reads the panel's:
+ * (port/nn/nn_stream_state.c) reads this detach exactly as it reads the panel's:
  * CAM_ERR_BUSY is retryable, anything else but CAM_OK is terminal.
  */
 #ifndef CAM_CAPTURE_SINK_H

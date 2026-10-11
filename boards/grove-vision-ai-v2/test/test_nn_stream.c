@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host test for the live-inference teardown table (issues #99, #129,
- * port/npu/nn_stream_state.c).
+ * port/nn/nn_stream_state.c).
  *
  * WHY THIS EXISTS.  `nn stream stop` runs two halves -- stop the camera
  * producer, then unlink the panel sink -- and each can come back unconfirmed for

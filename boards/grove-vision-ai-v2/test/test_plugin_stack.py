@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 ThreadX Shell Project
-"""Host tests for port/npu/nn_plugin_stack.h (issue #119).
+"""Host tests for port/nn/nn_plugin_stack.h (issue #119).
 
 WHAT WENT WRONG, AND WHAT THIS HAS TO BE ABLE TO SEE
 
@@ -55,7 +55,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BOARD = os.path.dirname(HERE)
 REPO = os.path.dirname(os.path.dirname(BOARD))
 
-INCLUDES = ["-I", os.path.join(BOARD, "port", "npu"),
+INCLUDES = ["-I", os.path.join(BOARD, "port", "nn"),
+            "-I", os.path.join(BOARD, "port", "nn", "npu"),
             "-I", os.path.join(REPO, "shell", "include"),
             "-I", os.path.join(REPO, "svc")]
 CFLAGS = shlex.split(os.environ.get("HOST_TEST_CFLAGS", "-std=c11 -Wall -Wextra"))
@@ -133,7 +134,7 @@ def real_values():
         "CLI_BG_JOB_STACK_SIZE": find_one(
             cmake, r"^\s*CLI_BG_JOB_STACK_SIZE=(\d+)\b", "job stack"),
         "NN_WORKER_STACK_BYTES": find_one(
-            os.path.join(BOARD, "port", "npu", "nn_worker.h"),
+            os.path.join(BOARD, "port", "nn", "nn_worker.h"),
             r"^#define\s+NN_WORKER_STACK_BYTES\s+(\d+)u?\s*$",
             "worker stack"),
         "CAM_PANEL_STACK_BYTES": find_one(

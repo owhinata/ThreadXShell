@@ -7,7 +7,7 @@
  * @brief   Ethos-U55 bring-up and cache maintenance, port-internal (issue #44).
  *
  * Not part of npu.h: the shell command only ever calls npu_open/invoke/close,
- * while these are the pieces those depend on and that only port/npu/ arranges.
+ * while these are the pieces those depend on and that only port/nn/npu/ arranges.
  */
 #ifndef NPU_HW_H
 #define NPU_HW_H

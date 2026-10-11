@@ -70,7 +70,7 @@ struct cam_lcd_overlay {
  * chosen; the array and the TX_THREAD stay there.
  *
  * Published since issue #119 because a plugin's draw() runs on this thread, and
- * the plugin policy (port/npu/nn_plugin_stack.h) asserts draw's allowance
+ * the plugin policy (port/nn/nn_plugin_stack.h) asserts draw's allowance
  * strictly below it -- an allowance equal to the whole stack is a check that
  * cannot fire (issue #103).
  */
@@ -81,7 +81,7 @@ struct cam_lcd_overlay {
  * asserts that keep it there, are in cam_lcd_sink.c.
  *
  * Published since issue #119 for the same reason as the stack above: the plugin
- * stack probe (port/npu/nn_probe_rtos.c) recognises this thread by the priority
+ * stack probe (port/nn/nn_probe_rtos.c) recognises this thread by the priority
  * it was created with and the size of its stack, and cannot recognise it by a
  * number it cannot see.
  */

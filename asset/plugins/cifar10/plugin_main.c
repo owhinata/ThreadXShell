@@ -141,7 +141,7 @@ _Static_assert(PL_STRIP_H >= 2u * PL_PAD + PL_TEXT_CELL_H * PL_SCALE,
 
 /*
  * [!] SEPARATE FROM pl_status, AND CLEARED FIRST.  The firmware already
- * declines to call draw() for a frame whose decode failed -- nn_overlay.c
+ * declines to call draw() for a frame whose decode failed -- nn_camera.c
  * returns non-zero and the sink never sets its overlay hook -- so this is
  * defence in depth.  It is worth having anyway: it is the flag that makes "an
  * early return added later" show as a missing label rather than as LAST FRAME'S

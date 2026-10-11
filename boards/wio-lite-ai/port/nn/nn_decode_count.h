@@ -12,7 +12,7 @@
  * cannot be told apart afterwards (issue #97).  Until step 6c this board counted
  * neither -- `model_errors` and `decoder_errors` were always 0 and a plugin that
  * refused every frame read as a healthy stream.  It now counts by
- * grove-vision-ai-v2's rule (port/npu/nn_overlay.c):
+ * grove-vision-ai-v2's rule (port/nn/nn_camera.c):
  *
  *   count (>= 0)             not an error
  *   BF_ERR_MODEL             model_errors   -- load a different model

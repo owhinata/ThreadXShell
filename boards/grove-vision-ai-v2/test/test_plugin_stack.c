@@ -6,7 +6,7 @@
  * by test_plugin_stack.py, several times, each with a different set of -D; do
  * not run it on its own.
  *
- * It does two things with the table port/npu/nn_plugin_stack.h hands the
+ * It does two things with the table port/nn/nn_plugin_stack.h hands the
  * firmware -- the same GROVE_PLUGIN_STACK_LIMITS initialiser nn_svc_grove.c
  * builds nn_plugin_policy from, not a copy of it:
  *

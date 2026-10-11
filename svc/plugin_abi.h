@@ -585,7 +585,7 @@ struct plugin_printer {
  *
  * [!] SMALLER THAN THE PLAN CALLED FOR, BECAUSE THE CONTROL FLOW RUNS THE OTHER
  * WAY.  The plan listed preprocessing, invoke and tensor fetching here.  Reading
- * the code they would have wrapped settles it: nn_overlay.c already drives the
+ * the code they would have wrapped settles it: nn_camera.c already drives the
  * sequence -- it counts the outputs, fills the input, invokes the NPU and then
  * CALLS the decoder with the tensors.  The decoder is called; it never calls up.
  * Putting those three in the vtable would have exported base machinery that no

@@ -9,7 +9,7 @@
  *
  * Three boards run inference behind three different backends, and each has its
  * own tensor type: `struct nn_tensor` on f746g-disco and wio-lite-ai (port/nn),
- * `struct npu_tensor` on grove-vision-ai-v2 (port/npu).  Both live in board
+ * `struct npu_tensor` on grove-vision-ai-v2 (port/nn/npu).  Both live in board
  * headers, so neither can be included from svc/.  This is the neutral shape a
  * board's glue fills in so that ONE decoder can read tensors from any of them --
  * the same role svc/frame.h plays for the camera pipeline.

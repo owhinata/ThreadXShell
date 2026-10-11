@@ -17,7 +17,7 @@
  * interprets the tensors -- or whether anything does.  Issue #116 takes the
  * resident decoder away, and the name `nn_decoder.c` would then have described
  * only the part that went.  (grove-vision-ai-v2 split the same file the same
- * way for issue #104; its half is port/npu/npu_desc.c.)
+ * way for issue #104; its half is port/nn/npu/npu_desc.c.)
  *
  * IT IS BUILT IN BOTH BACKENDS.  Neither `null` nor `tflm` changes what a
  * descriptor is, and `nn out` / `nn info` exist in both.

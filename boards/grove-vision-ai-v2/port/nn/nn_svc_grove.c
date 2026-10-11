@@ -6,7 +6,7 @@
  * @file    nn_svc_grove.c
  * @brief   This board behind the shared `nn` command's contract (issue #50).
  *
- * svc/nn_svc.h is what shell/cmds/cmd_nn.c speaks; port/npu is what this board
+ * svc/nn_svc.h is what shell/cmds/cmd_nn.c speaks; port/nn/npu is what this board
  * has.  This is the translation, and it is the THICK one of the three adapters
  * because open here is not "parse a model": it brings the NPU up and takes a
  * lease on the external NOR window, and it must keep doing so in that order.
@@ -49,7 +49,7 @@
 #include "camera.h"
 #include "npu_desc.h"
 #include "nn_active.h"
-#include "nn_overlay.h"
+#include "nn_camera.h"
 #include "nn_param_calls.h"
 #include "nn_worker.h"        /* the inference worker (#129); before the next */
 #include "nn_plugin_stack.h"  /* after camera.h, cam_lcd_sink.h, nn_worker.h */
@@ -493,7 +493,7 @@ PLUGIN_POLICY_PROBE(nn_plugin_policy);
  *
  * [!] TWO ENTRIES, NOT SEVEN.  The reviewed plan listed preprocessing, invoke
  * and tensor fetching here as well.  Reading the code they would have wrapped
- * settles it: nn_overlay.c drives the sequence -- it counts the outputs, fills
+ * settles it: nn_camera.c drives the sequence -- it counts the outputs, fills
  * the input, invokes the NPU and then CALLS the decoder.  A decoder is called;
  * it never calls up.  Exporting machinery no plugin can reach for would be
  * three more indirect call sites for the stack analysis to account for and
@@ -1130,7 +1130,7 @@ static int nn_run_input_ok(struct nn_op_result *res,
 /*
  * [!] `nn run` NO LONGER DECODES HERE (issue #129).  The decode -- or, with no
  * plugin, the raw outputs (issue #104) -- is published by the inference worker
- * (nn_overlay.c), the one thread every decode on this board now runs on.
+ * (nn_camera.c), the one thread every decode on this board now runs on.
  */
 
 /*
@@ -1724,7 +1724,7 @@ int nn_svc_box_to_frame(const struct bf_det *in, struct bf_det *out)
  *
  * The work itself runs on the CAMERA PRODUCER (the frame's preparation, inside
  * the panel sink's consume()) and the INFERENCE WORKER (the invoke, decode and
- * publish) -- nn_overlay.c, issue #129.  What is here only starts it, reports on it and
+ * publish) -- nn_camera.c, issue #129.  What is here only starts it, reports on it and
  * stops it -- and, unlike the command file this replaces, it holds no shell
  * instance, because a port may not.  Everything that needs to print, wait or
  * notice Ctrl+C is the shared command's, above svc/nn_svc.h.
@@ -2121,7 +2121,7 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 
 /*
  * The stack report (issue #119): one line per plugin slot, in slot order, from
- * port/npu/nn_probe_rtos.c.  The label and the note are nn_probe.c's (one
+ * port/nn/nn_probe_rtos.c.  The label and the note are nn_probe.c's (one
  * table, which the widest-line test reads too); the threads are the ones
  * nn_plugin_stack.h says the slot runs on.
  *

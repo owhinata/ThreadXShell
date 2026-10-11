@@ -124,7 +124,7 @@ gcc $CFLAGS -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast \
     $LDFLAGS -o "$out/test_epk_irq_wrap"
 "$out/test_epk_irq_wrap"
 
-# issue #46 -- the Ethos-U command-stream payload check (port/npu/npu_payload.c).
+# issue #46 -- the Ethos-U command-stream payload check (port/nn/npu/npu_payload.c).
 # No shim and no SDK header: the walk is deliberately plain C over plain bytes,
 # which is why it was split out of npu_tflm.cc.  It is a SAFETY check -- it is
 # what stops npu_open() accepting a model whose driver actions continue past the
@@ -132,12 +132,12 @@ gcc $CFLAGS -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast \
 # the reject cases matter as much as the accept ones, and neither can be
 # exercised on the board without deliberately building a broken model.
 gcc $CFLAGS \
-    -I "$here" -I "$board/port/npu" \
-    "$here/test_npu_payload.c" "$board/port/npu/npu_payload.c" \
+    -I "$here" -I "$board/port/nn" -I "$board/port/nn/npu" \
+    "$here/test_npu_payload.c" "$board/port/nn/npu/npu_payload.c" \
     $LDFLAGS -o "$out/test_npu_payload"
 "$out/test_npu_payload"
 
-# issues #97, #104 -- npu_tensor -> tensor_desc (port/npu/npu_desc.c).
+# issues #97, #104 -- npu_tensor -> tensor_desc (port/nn/npu/npu_desc.c).
 #
 # This was test_nn_decoder.c and drove a decoder the firmware linked.  Issue #104
 # removed that decoder; the TRANSLATION stayed, because `nn out`, `nn info` and
@@ -153,13 +153,13 @@ gcc $CFLAGS \
 # NO svc/blazeface.c HERE ANY MORE.  There is no decoder in this half, so
 # linking one would only prove it still compiles.
 gcc $CFLAGS \
-    -I "$here" -I "$board/port/npu" -I "$board/svc" -I "$HOST_TEST_SVC" \
-    "$here/test_npu_desc.c" "$board/port/npu/npu_desc.c" \
+    -I "$here" -I "$board/port/nn" -I "$board/port/nn/npu" -I "$board/svc" -I "$HOST_TEST_SVC" \
+    "$here/test_npu_desc.c" "$board/port/nn/npu/npu_desc.c" \
     $LDFLAGS -o "$out/test_npu_desc"
 "$out/test_npu_desc"
 
 # issues #103, #104 -- the active-decoder shim, and the plugin decoder against a
-# reference the test builds (port/npu/nn_active.c).
+# reference the test builds (port/nn/nn_active.c).
 #
 # [!] WHAT THIS COMPARES CHANGED WITH ISSUE #104.  It used to hold the two
 # decoders that both shipped -- the firmware's resident adapter and the plugin.
@@ -176,12 +176,12 @@ gcc $CFLAGS \
 # -- new with #104 -- a shim that quietly DECODES with no plugin loaded instead
 # of refusing, which nothing outside this file could see.
 gcc $CFLAGS \
-    -I "$here" -I "$board/port/npu" -I "$board/port/plugin" -I "$board/svc" \
+    -I "$here" -I "$board/port/nn" -I "$board/port/nn/npu" -I "$board/port/plugin" -I "$board/svc" \
     -I "$asset/plugins/blazeface" -I "$asset/common" -I "$HOST_TEST_SVC" \
     "$here/test_plugin_decode.c" \
-    "$board/port/npu/nn_active.c" "$board/port/npu/npu_desc.c" \
+    "$board/port/nn/nn_active.c" "$board/port/nn/npu/npu_desc.c" \
     "$HOST_TEST_SVC/nn_active_core.c" \
-    "$board/port/npu/nn_preproc.c" \
+    "$board/port/nn/nn_preproc.c" \
     "$asset/plugins/blazeface/plugin_main.c" \
     "$asset/common/plugin_base.c" "$asset/common/plugin_fmt.c" \
     "$asset/common/plugin_text.c" \
@@ -241,15 +241,15 @@ gcc $CFLAGS \
 "$out/test_cam_convert"
 
 # issue #48 -- the camera frame -> input tensor resize, and the detection box ->
-# frame pixel map (port/npu/nn_preproc.c).  Two mappings that MUST be one
+# frame pixel map (port/nn/nn_preproc.c).  Two mappings that MUST be one
 # transform: sampling carries the half-pixel term and a box edge must not, and
 # getting that wrong shifts every box by half a source pixel -- invisible
 # against a face, and a flash cycle per hypothesis to chase on hardware.  Also
 # where the negative-coordinate upscale path is pinned, since C's toward-zero
 # cast is off by one exactly there.
 gcc $CFLAGS \
-    -I "$here" -I "$board/port/npu" \
-    "$here/test_nn_preproc.c" "$board/port/npu/nn_preproc.c" \
+    -I "$here" -I "$board/port/nn" -I "$board/port/nn/npu" \
+    "$here/test_nn_preproc.c" "$board/port/nn/nn_preproc.c" \
     $LDFLAGS -o "$out/test_nn_preproc"
 "$out/test_nn_preproc"
 
@@ -329,14 +329,14 @@ gcc $CFLAGS \
 # a level up: npu_hw_init() acquires and can then fail three more ways, and its
 # caller does NOT tear down on failure -- so the last section walks that
 # sequence, which an acquire/release table alone would pass while it leaked.
-# issue #99 -- the live-inference teardown table (port/npu/nn_stream_state.c),
+# issue #99 -- the live-inference teardown table (port/nn/nn_stream_state.c),
 # and since #129 the worker join between its two halves.
 # Two halves that can each come back unconfirmed, and the two answers -- retry or
 # reboot -- are opposite mistakes.  None of the vectors can be typed on a board
 # with one console whose background jobs run below the foreground shell.
 gcc $CFLAGS \
-    -I "$here" -I "$board/port/npu" \
-    "$here/test_nn_stream.c" "$board/port/npu/nn_stream_state.c" \
+    -I "$here" -I "$board/port/nn" -I "$board/port/nn/npu" \
+    "$here/test_nn_stream.c" "$board/port/nn/nn_stream_state.c" \
     $LDFLAGS -o "$out/test_nn_stream"
 "$out/test_nn_stream"
 
@@ -345,33 +345,33 @@ gcc $CFLAGS \
 # shell/test/test_nn_handoff.c and test_nn_core_frame.c.
 
 # issue #129 -- how `nn run`'s wait for its one inference ends
-# (port/npu/nn_run_wait.c).  A publish and the deadline, a publish and a
+# (port/nn/nn_run_wait.c).  A publish and the deadline, a publish and a
 # Ctrl+C, a finished worker and a lost stream can all hold in one poll, and
 # only the order decides the status; none of those coincidences can be typed.
 gcc $CFLAGS \
-    -I "$here" -I "$board/port/npu" \
-    "$here/test_nn_run_wait.c" "$board/port/npu/nn_run_wait.c" \
+    -I "$here" -I "$board/port/nn" -I "$board/port/nn/npu" \
+    "$here/test_nn_run_wait.c" "$board/port/nn/nn_run_wait.c" \
     $LDFLAGS -o "$out/test_nn_run_wait"
 "$out/test_nn_run_wait"
 
 # issue #129 -- what the inference worker does with a model's outputs
-# (port/npu/nn_outputs.c).  A bare `nn run` counts every output and describes
+# (port/nn/nn_outputs.c).  A bare `nn run` counts every output and describes
 # what it can read; `nn run` with a plugin decodes the first eight and names an
 # unreadable one; a stream refuses past eight.  No model this board ships has
 # nine outputs or an unreadable one, so the cases are made up here.
 gcc $CFLAGS \
-    -I "$here" -I "$board/port/npu" -I "$HOST_TEST_SVC" \
-    "$here/test_nn_outputs.c" "$board/port/npu/nn_outputs.c" \
+    -I "$here" -I "$board/port/nn" -I "$board/port/nn/npu" -I "$HOST_TEST_SVC" \
+    "$here/test_nn_outputs.c" "$board/port/nn/nn_outputs.c" \
     $LDFLAGS -o "$out/test_nn_outputs"
 "$out/test_nn_outputs"
 
 # issue #122 -- the gate's claim and the count of threshold calls inside the
-# plugin (port/npu/nn_param_calls.c).  A threshold call in a background job
+# plugin (port/nn/nn_param_calls.c).  A threshold call in a background job
 # preempted by a load on the other console is a window of microseconds; it
 # cannot be typed.
 gcc $CFLAGS \
-    -I "$here" -I "$board/port/npu" \
-    "$here/test_nn_param_calls.c" "$board/port/npu/nn_param_calls.c" \
+    -I "$here" -I "$board/port/nn" -I "$board/port/nn/npu" \
+    "$here/test_nn_param_calls.c" "$board/port/nn/nn_param_calls.c" \
     $LDFLAGS -o "$out/test_nn_param_calls"
 "$out/test_nn_param_calls"
 
@@ -382,7 +382,7 @@ gcc $CFLAGS \
 # never seen on hardware.  The REAL plugin_run.c and svc/plugin_exec.c, with
 # the device, ThreadX and the NOR lease stubbed (test/plugin_run_shim).
 gcc $CFLAGS \
-    -I "$here/plugin_run_shim" -I "$board/port/plugin" -I "$board/port/npu" \
+    -I "$here/plugin_run_shim" -I "$board/port/plugin" -I "$board/port/nn" -I "$board/port/nn/npu" \
     -I "$board/port/nor" -I "$board/svc" -I "$svc" \
     "$here/test_plugin_run_lease.c" "$board/port/plugin/plugin_run.c" \
     "$svc/plugin_exec.c" "$svc/plugin_mpu.c" "$svc/plugin_load.c" \
@@ -542,7 +542,7 @@ gcc $CFLAGS \
 "$out/test_plugin_text"
 
 # issue #119 -- what each plugin callback may ask of the stack it runs on
-# (port/npu/nn_plugin_stack.h).  Three slots were declared against the camera
+# (port/nn/nn_plugin_stack.h).  Three slots were declared against the camera
 # producer's figure while also running on a shell stack exactly that size, so a
 # plugin declaring the whole shell stack would have been admitted.  The header
 # now asserts every allowance below each thread its slot runs on, and those
@@ -555,7 +555,7 @@ gcc $CFLAGS \
 python3 "$here/test_plugin_stack.py"
 
 # issue #119 -- the pure half of the stack probe that measures where each plugin
-# callback is entered (port/npu/nn_probe.c).  Its output becomes the input to
+# callback is entered (port/nn/nn_probe.c).  Its output becomes the input to
 # the allowances above, and every way it can be wrong reads as a smaller depth
 # or a walked path: a sample on a stack nobody can name turned into a depth, a
 # minimum that starts at 0, a console sample marking the background job as
@@ -566,11 +566,11 @@ python3 "$here/test_plugin_stack.py"
 # will not compile without its allowances and the four thread stacks; the -D
 # numbers below are placeholders the masks do not depend on.
 gcc $CFLAGS \
-    -I "$board/port/npu" -I "$board/port/plugin" -I "$HOST_TEST_SVC" \
+    -I "$board/port/nn" -I "$board/port/nn/npu" -I "$board/port/plugin" -I "$HOST_TEST_SVC" \
     -I "$HOST_TEST_INC" \
     -DGROVE_PLUGIN_STACK_SHELL=1024u -DGROVE_PLUGIN_STACK_PANEL=1024u \
     -DGROVE_PLUGIN_STACK_WORKER=1024u -DNN_WORKER_STACK_BYTES=8192u -DCAM_PANEL_STACK_BYTES=2048u \
-    "$here/test_nn_probe.c" "$board/port/npu/nn_probe.c" \
+    "$here/test_nn_probe.c" "$board/port/nn/nn_probe.c" \
     "$HOST_TEST_SVC/fmt.c" \
     $LDFLAGS -o "$out/test_nn_probe"
 "$out/test_nn_probe"

@@ -50,7 +50,7 @@
 #include "cam_lcd_sink.h"
 #include "camera.h"
 #include "lcd_st7789.h"
-#include "nn_overlay.h"   /* the sink row's stage split under `nn stream` */
+#include "nn_camera.h"   /* the sink row's stage split under `nn stream` */
 
 #define CAM_PREVIEW_DEFAULT 0u   /* 0 = until Ctrl+C */
 #define CAM_BENCH_DEFAULT  60u   /* enough to average, ~4 s at 15 fps  */

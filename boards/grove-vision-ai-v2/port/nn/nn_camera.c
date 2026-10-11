@@ -2,10 +2,10 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Face detection over the live preview (issue #48).  See nn_overlay.h for why
+ * Face detection over the live preview (issue #48).  See nn_camera.h for why
  * this lives in the port rather than in cmds/.
  */
-#include "nn_overlay.h"
+#include "nn_camera.h"
 
 #include <stddef.h>
 #include <string.h>        /* memset */
@@ -92,7 +92,7 @@ static uint32_t nn_ov_prof_frames;
  * time.
  *
  * Static because nothing here may ever be freed under a producer, a worker or a
- * panel thread that did not acknowledge a stop (see nn_overlay.h).
+ * panel thread that did not acknowledge a stop (see nn_camera.h).
  *
  * [!] NO BOX ARRAY SINCE ISSUE #104.  A stream only runs with a plugin loaded,
  * and a plugin's result is its own -- it paints through the painter, and this
@@ -208,7 +208,7 @@ static volatile uint8_t nn_ov_result;   /* nn_ov_publish(), in the lease */
  * still does not.  What it reports is its own ending, below.
  */
 static uint8_t nn_ov_oneshot;
-/* How the one-shot's frame ended, NN_OV_SHOT_* (nn_overlay.h); NONE while it
+/* How the one-shot's frame ended, NN_OV_SHOT_* (nn_camera.h); NONE while it
  * has not.  Written once, by the producer (a frame it could not prepare) or by
  * the worker (after its publish, before it parks) -- never both, since the
  * producer writes it only before the hand-over and the worker only after. */

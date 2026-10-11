@@ -15,7 +15,7 @@
 #include "cam_lcd_sink.h"   /* CAM_PANEL_PRIO                       */
 #include "camera.h"         /* CAM_PRODUCER_PRIO                    */
 #include "cli_config.h"     /* CLI_INSTANCE_{PRIORITY,STACK_SIZE}   */
-#include "nn_overlay.h"     /* nn_overlay_work(): the job; the word */
+#include "nn_camera.h"     /* nn_overlay_work(): the job; the word */
 #include "npu_hw.h"         /* NPU_INFERENCE_TIMEOUT_TICKS          */
 #include "plugin_lease.h"   /* PLUGIN_LEASE_WAIT_MS                 */
 

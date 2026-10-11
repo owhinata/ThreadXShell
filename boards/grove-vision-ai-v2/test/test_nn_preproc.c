@@ -4,7 +4,7 @@
  */
 /**
  * @file    test_nn_preproc.c
- * @brief   Host tests for port/npu/nn_preproc.c (issue #48).
+ * @brief   Host tests for port/nn/nn_preproc.c (issue #48).
  *
  * The REAL preprocessing is compiled here, not a copy of its arithmetic -- the
  * same arrangement as test_blazeface.c, and for the same reason: a

@@ -5760,8 +5760,8 @@ the top of its stack) + 16 B (`_tx_thread_shell_entry`) + the frames on the
 deepest call path.  A frame is what the prologue takes: push, stmdb, vpush,
 `sub sp` and pre-indexed write-back.  The indirect edges are resolved by hand:
 the shell's dispatch into `cmd_nn_*`, the frame pipeline into `cam_lcd_consume`
-and on into `nn_overlay_process`, and the blit into `cam_lcd_draw`, which
-tail-calls `nn_overlay_draw`.
+and on into `nn_camera_process`, and the blit into `cam_lcd_draw`, which
+tail-calls `nn_camera_draw`.
 
 | slot | thread (deepest path) | depth | stack - depth - 208 | L(slot) | over 1,024 | real need |
 |---|---|---:|---:|---:|---:|---:|
@@ -6125,8 +6125,8 @@ the producer thread with no guard held, and hands over spans.  Issue #105 is tha
 escape hatch being used: see below.
 
 **[!] `draw_spent` and `draw_refused` are one snapshot.**  The panel thread
-writes both under a critical section, `nn_overlay_stats()` copies both under one,
-and `nn_overlay_arm()` resets both under one.  A reader-side critical section
+writes both under a critical section, `nn_camera_stats()` copies both under one,
+and `nn_camera_arm()` resets both under one.  A reader-side critical section
 alone was not enough -- a console preempting the panel thread BETWEEN its two
 stores sees this frame's spend beside the previous count, and disabling
 interrupts afterwards does not reach backwards.  The reset at arm time was

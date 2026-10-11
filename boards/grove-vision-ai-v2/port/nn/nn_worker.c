@@ -15,7 +15,7 @@
 #include "cam_lcd_sink.h"   /* CAM_PANEL_PRIO                       */
 #include "camera.h"         /* CAM_PRODUCER_PRIO                    */
 #include "cli_config.h"     /* CLI_INSTANCE_{PRIORITY,STACK_SIZE}   */
-#include "nn_camera.h"     /* nn_overlay_work(): the job; the word */
+#include "nn_camera.h"     /* nn_camera_work(): the job; the word */
 #include "npu_hw.h"         /* NPU_INFERENCE_TIMEOUT_TICKS          */
 #include "plugin_lease.h"   /* PLUGIN_LEASE_WAIT_MS                 */
 
@@ -72,8 +72,8 @@ static volatile int          nn_worker_ok;
 
 /* The hand-over word (svc/nn_handoff.h) is the overlay's frame-path state
  * since issue #130 -- svc/nn_core_frame.c steps it, one critical section per
- * transition -- and this file reaches it through nn_overlay_take(),
- * nn_overlay_want() and nn_overlay_join(). */
+ * transition -- and this file reaches it through nn_camera_take(),
+ * nn_camera_want() and nn_camera_join(). */
 
 static void nn_worker_entry(ULONG arg)
 {
@@ -86,7 +86,7 @@ static void nn_worker_entry(ULONG arg)
 		                         TX_OR_CLEAR, &got, TX_WAIT_FOREVER);
 		/* [!] A wake-up is not a job.  Only a hand-over this thread can
 		 * TAKE is one; anything else was already taken or never was. */
-		if (!nn_overlay_take())
+		if (!nn_camera_take())
 			continue;
 
 		/* Invoke, lease, geometry, decode, publish.  The input and the
@@ -94,7 +94,7 @@ static void nn_worker_entry(ULONG arg)
 		 * path says only after the decode has finished reading them: a
 		 * stream asks for the next frame, a one-shot (`nn run`) wanted one
 		 * and parks for good (issue #129). */
-		nn_overlay_work();
+		nn_camera_work();
 		(void)tx_event_flags_set(&nn_worker_flags, NN_WK_SETTLED, TX_OR);
 	}
 }
@@ -124,7 +124,7 @@ int nn_worker_arm(void)
 {
 	if (!nn_worker_ok)
 		return 0;
-	return nn_overlay_want();
+	return nn_camera_want();
 }
 
 void nn_worker_wake(void)
@@ -142,7 +142,7 @@ int nn_worker_join(void)
 	ULONG got, spent;
 
 	for (;;) {
-		if (nn_overlay_join())
+		if (nn_camera_join())
 			return 0;
 		/* Without the thread there is nothing that could ever settle the
 		 * word, and no flags to wait on. */

@@ -36,11 +36,11 @@
  * every write is a plain store of 0 or 1, and no decision anywhere depends on
  * two reads of it agreeing.  A missed update costs one more inference before
  * the stream stops, which is exactly the cost the design already accepts (see
- * nn_overlay_request_stop()).
+ * nn_camera_request_stop()).
  */
 static volatile uint8_t nn_ov_stop;
 
-static struct nn_overlay_stats nn_ov_stats;
+static struct nn_camera_stats nn_ov_stats;
 
 /*
  * The stage accumulators behind the struct's prep/invoke/decode (issue #60).
@@ -200,7 +200,7 @@ static volatile uint8_t nn_ov_result;   /* nn_ov_publish(), in the lease */
 
 /*
  * `nn run` (issue #129): the same producer and worker, for ONE frame.  Set by
- * nn_overlay_arm_oneshot(), cleared by nn_overlay_arm(); written only while the
+ * nn_camera_arm_oneshot(), cleared by nn_camera_arm(); written only while the
  * worker is parked and nothing is attached.
  *
  * [!] A ONE-SHOT COUNTS NOTHING HERE.  The stream statistics are what `nn stream
@@ -262,7 +262,7 @@ static void nn_ov_cs_exit(unsigned posture)
 
 /*
  * The producer's prep, into the input tensor, while the word is FILLING.
- * `pixels` is not used, and that is deliberate -- see nn_overlay_process().
+ * `pixels` is not used, and that is deliberate -- see nn_camera_process().
  */
 static int nn_ov_prep(void *ctx, unsigned part, unsigned nparts)
 {
@@ -531,22 +531,22 @@ static const struct nn_core_frame_ops nn_ov_ops = {
 	.lease_note_unheld = plugin_lease_note_unheld,
 };
 
-int nn_overlay_want(void)
+int nn_camera_want(void)
 {
 	return nn_core_frame_want(&nn_ov_core, &nn_ov_ops);
 }
 
-int nn_overlay_take(void)
+int nn_camera_take(void)
 {
 	return nn_core_frame_take(&nn_ov_core, &nn_ov_ops);
 }
 
-int nn_overlay_join(void)
+int nn_camera_join(void)
 {
 	return nn_core_frame_join(&nn_ov_core, &nn_ov_ops);
 }
 
-static int nn_overlay_process(void *ctx, const void *pixels,
+static int nn_camera_process(void *ctx, const void *pixels,
                               uint16_t w, uint16_t h)
 {
 	int draw;
@@ -633,7 +633,7 @@ static int nn_overlay_process(void *ctx, const void *pixels,
 	return draw;
 }
 
-void nn_overlay_work(void)
+void nn_camera_work(void)
 {
 	struct nn_ov_work w;
 	const int oneshot = nn_ov_oneshot;
@@ -751,7 +751,7 @@ static const struct nn_core_panel nn_ov_panel = {
 	.paint      = nn_ov_paint,
 };
 
-static void nn_overlay_draw(void *ctx, uint16_t *fb, uint16_t fb_w,
+static void nn_camera_draw(void *ctx, uint16_t *fb, uint16_t fb_w,
                             uint16_t fb_h)
 {
 	struct nn_ov_canvas cv;
@@ -795,11 +795,11 @@ static void nn_overlay_draw(void *ctx, uint16_t *fb, uint16_t fb_w,
 
 static const struct cam_lcd_overlay nn_ov_vtable = {
 	.ctx     = NULL,
-	.process = nn_overlay_process,
-	.draw    = nn_overlay_draw,
+	.process = nn_camera_process,
+	.draw    = nn_camera_draw,
 };
 
-const struct cam_lcd_overlay *nn_overlay_arm(void)
+const struct cam_lcd_overlay *nn_camera_arm(void)
 {
 	TX_INTERRUPT_SAVE_AREA
 
@@ -858,7 +858,7 @@ const struct cam_lcd_overlay *nn_overlay_arm(void)
 	return &nn_ov_vtable;
 }
 
-const struct cam_lcd_overlay *nn_overlay_arm_oneshot(void)
+const struct cam_lcd_overlay *nn_camera_arm_oneshot(void)
 {
 	TX_INTERRUPT_SAVE_AREA
 
@@ -879,17 +879,17 @@ const struct cam_lcd_overlay *nn_overlay_arm_oneshot(void)
 	return &nn_ov_vtable;
 }
 
-int nn_overlay_shot(void)
+int nn_camera_shot(void)
 {
 	return (int)nn_ov_shot;
 }
 
-unsigned nn_overlay_shot_index(void)
+unsigned nn_camera_shot_index(void)
 {
 	return (unsigned)nn_ov_shot_index;
 }
 
-void nn_overlay_request_stop(void)
+void nn_camera_request_stop(void)
 {
 	nn_ov_stop = 1u;
 }
@@ -902,7 +902,7 @@ static uint32_t nn_ov_us(uint64_t ticks, uint32_t hz)
 	return (hz != 0u) ? (uint32_t)((ticks * 1000000u) / hz) : 0u;
 }
 
-void nn_overlay_stats(struct nn_overlay_stats *out)
+void nn_camera_stats(struct nn_camera_stats *out)
 {
 	TX_INTERRUPT_SAVE_AREA
 	const char *why = NULL;

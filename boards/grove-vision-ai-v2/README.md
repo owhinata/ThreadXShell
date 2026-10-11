@@ -819,7 +819,8 @@ result; the separate capture sink it used to start the camera with is gone.
 skips the staging copy, the overlay's draw and the SPI DMA, and still returns
 the frame and the overlay count; the producer still prepares nn's frames, so
 inference goes on.  Such frames are counted as `dark`.  `lcd on` lights the
-panel again, and the next frame is drawn.  Neither takes the panel guard.  The
+panel again, and the next frame is drawn.  The setting survives a bring-up: a
+stream started after `lcd off` brings the panel up dark (issue #146).  Neither takes the panel guard.  The
 drawing commands (`lcd fill`, `clear`, `bar`, `orient`, `loop`) are refused
 while the sink is linked -- `lcd: the camera stream is drawing on the panel --
 `camera stream stop` first` -- because a dark panel's frames skip the guard,
@@ -829,8 +830,8 @@ when it lights again.
 **[!] `nn run` now brings the panel up, and leaves the camera and the panel
 running.**  Because `nn run` rides the panel's stream, a `nn run` typed while
 nothing streams starts that stream: it runs `lcd_init()` -- the pin mux, the SPI
-device, and PA2 driven high for the backlight -- and rotates the panel.  PA2 is
-also the Grove connector's I2C SCL through the level shifter (see the wiring
+device, and PA2 set as `lcd on`/`lcd off` last left it (high unless `lcd off`
+was typed since boot; issue #146) -- and rotates the panel.  PA2 is also the Grove connector's I2C SCL through the level shifter (see the wiring
 notes above), so on a board with a Grove I2C device attached the connector's
 behaviour changes from that point on.  It also takes the operator's place
 (issue #142 D6), so when the run has finished the camera and the panel keep

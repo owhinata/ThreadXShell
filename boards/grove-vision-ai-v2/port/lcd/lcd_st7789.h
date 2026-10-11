@@ -73,7 +73,9 @@ void lcd_create_objects(void);
 int  lcd_acquire(void);
 void lcd_release(void);
 
-/** Bring the panel up: pinmux, SSPI master, reset pulse, init table, backlight.
+/** Bring the panel up: pinmux, SSPI master, reset pulse, init table, and the
+ *  backlight as lcd_display_on() says -- lit unless `lcd off` asked for dark
+ *  (issue #146).  A call on a panel already up touches nothing.
  *  Thread context only.  Returns 0 on success, negative on failure (the panel
  *  is left powered down and no interrupt is left enabled). */
 int lcd_init(void);
@@ -92,7 +94,8 @@ void lcd_backlight(int on);
  * the logical "display on", the same role as the other two boards'
  * ltdc_display_on().  The camera's panel thread asks it, without the panel
  * guard, before each frame: a dark panel is not drawn on.  Commands set it only
- * through lcd_backlight().
+ * through lcd_backlight().  It is 1 from boot until someone says otherwise, and
+ * lcd_init() follows it rather than resetting it (issue #146).
  */
 int lcd_display_on(void);
 

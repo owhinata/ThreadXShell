@@ -248,6 +248,17 @@ static inline void lcd_dc(int level)
 /*
  * Whether the panel is lit, as lcd_backlight() last set it (issue #142).
  *
+ * [!] IT IS THE OPERATOR'S `lcd on|off`, AND IT OUTLIVES BRING-UP (issue #146).
+ * It starts at 1 -- nobody has asked for dark, so the first picture lights the
+ * panel as it always did -- and lcd_pins_init() does NOT clear it, although it
+ * drives the pin low for the reset pulse and the init table.  lcd_init() ends by
+ * putting the pin where this byte says (lcd_backlight_follow()).  Clearing it at
+ * pin setup and lighting unconditionally at the end, as #142 did, made the first
+ * `camera stream start` (or `nn run`) after `lcd off` light the panel: the sink's
+ * first attach is what brings the panel up.  Between the pin setup and the end
+ * of lcd_init() the pin is low while this byte may be 1; the panel is not ready
+ * then, so nothing is drawn on the strength of it.
+ *
  * The camera's panel thread reads this BEFORE it takes the panel guard and, while
  * it is clear, skips the staging copy, the overlay and the SPI transfer of each
  * frame: nobody can see them.  It is the logical state, not the pin -- a GPIO
@@ -265,7 +276,7 @@ static inline void lcd_dc(int level)
  * needs only the latest value: a frame drawn or skipped one late is what a
  * reader racing a writer costs.
  */
-static volatile uint8_t lcd_lit;
+static volatile uint8_t lcd_lit = 1u;
 
 void lcd_backlight(int on)
 {
@@ -275,6 +286,19 @@ void lcd_backlight(int on)
 	(void)hx_drv_gpio_set_out_value(LCD_PIN_BL,
 	                                on ? GPIO_OUT_HIGH : GPIO_OUT_LOW);
 	lcd_lit = on ? 1u : 0u;
+	TX_RESTORE
+}
+
+/* Put the pin where lcd_lit says, in the same kind of section as
+ * lcd_backlight(), so an `lcd on|off` racing the end of a bring-up cannot leave
+ * the two apart (issue #146).  Called only once the pin is muxed. */
+static void lcd_backlight_follow(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	(void)hx_drv_gpio_set_out_value(LCD_PIN_BL,
+	                                lcd_lit ? GPIO_OUT_HIGH : GPIO_OUT_LOW);
 	TX_RESTORE
 }
 
@@ -600,7 +624,8 @@ static int lcd_pins_init(void)
 		LOG_ERR("gpio output setup failed");
 		return -1;
 	}
-	lcd_lit = 0u;   /* the backlight pin was just driven low */
+	/* lcd_lit is deliberately left alone: it is the operator's `lcd on|off`,
+	 * and lcd_init() restores the pin from it once the panel is up (#146). */
 	return 0;
 }
 
@@ -842,7 +867,7 @@ int lcd_init(void)
 		src_hz = 0u;
 
 	lcd_ready_flag = 1u;
-	lcd_backlight(1);
+	lcd_backlight_follow();         /* lit unless `lcd off` asked (#146) */
 	LOG_INF("st7789 up: sclk %lu Hz (source %lu Hz), %ux%u madctl %02x, "
 	        "fb %u B in SRAM",
 	        (unsigned long)lcd_freq_hz, (unsigned long)src_hz,

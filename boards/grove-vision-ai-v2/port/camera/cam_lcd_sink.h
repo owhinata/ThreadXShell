@@ -147,16 +147,21 @@ struct cam_holder;   /* svc/cam_holders.h */
  * @brief  Take hold of the camera's stream to the panel.
  *
  * @param h        the holder; NULL for the operator (`camera stream start`)
- * @param ov       nn's overlay to put on the sink with this hold, or NULL
+ * @param arm      NULL, or the holder's arm: called once, under the holder
+ *                 lock, only after nothing can refuse this hold any more, and
+ *                 returning the overlay to put on the sink (never NULL)
  * @param started  out (may be NULL): non-zero if this call started the camera
  *
  * A holder other than the operator joins a running stream, or -- when nothing
  * streams -- takes the operator's place too and starts it (issue #142 D6: `nn
  * run` as well), so the camera keeps streaming after nn lets go.  Starting brings
  * the panel up, rotates it to landscape and starts the camera WITH this sink, in
- * the camera's own one-step transaction (issue #63).  The overlay is put on in
- * the same locked region; a refusal of it gives back exactly what this call
- * registered (svc/cam_holders.h's ticket) and stops nothing it did not start.
+ * the camera's own one-step transaction (issue #63).  Whether the overlay can go
+ * on is asked before the camera starts; a refusal gives back exactly what this
+ * call registered (svc/cam_holders.h's ticket) and stops nothing it did not
+ * start.  [!] The arm runs LAST, so a refused hold has no side effect on the
+ * holder (issue #142 review: a refused `nn stream start` keeps the last
+ * stream's statistics).
  *
  * [!] NEVER WAITS FOR THE HOLDER LOCK: a camera start or stop in progress makes
  * this CAM_ERR_BUSY, retryable (only a stop waits).
@@ -167,8 +172,9 @@ struct cam_holder;   /* svc/cam_holders.h */
  *         CAM_ERR_HAL / other CAM_ERR_* if the panel or the camera would not
  *         come up -- in every failure nothing this call added is left behind.
  */
-int cam_lcd_sink_hold(const struct cam_holder *h,
-                      const struct cam_lcd_overlay *ov, int *started);
+typedef const struct cam_lcd_overlay *(*cam_lcd_overlay_arm_fn)(void);
+int cam_lcd_sink_hold(const struct cam_holder *h, cam_lcd_overlay_arm_fn arm,
+                      int *started);
 
 /**
  * @brief  Let go of the camera's stream.

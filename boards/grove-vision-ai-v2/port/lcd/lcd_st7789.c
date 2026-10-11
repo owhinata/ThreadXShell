@@ -252,17 +252,30 @@ static inline void lcd_dc(int level)
  * it is clear, skips the staging copy, the overlay and the SPI transfer of each
  * frame: nobody can see them.  It is the logical state, not the pin -- a GPIO
  * read-back would answer the same question through a vendor call on every
- * frame.  One byte, one writer at a time (the console), read by one thread that
- * only needs the latest value: a frame drawn or skipped one late is the whole
- * cost of a race, and the next frame sees the new value.
+ * frame.
+ *
+ * [!] THE PIN AND THIS BYTE MOVE IN ONE CRITICAL SECTION (issue #142 review).
+ * Two consoles can call this at once -- `lcd off &` in the background, `lcd on`
+ * in the foreground -- and with the pin write and the store as separate steps
+ * the pin could end high and the byte 0: a lit panel the camera never draws on
+ * again until somebody types `lcd on` a second time.  Inside one section the
+ * last caller wins for both.  It is one vendor GPIO register write, so the
+ * section is short; the panel guard is not taken (the panel thread holds it for
+ * most of every frame, which is why `lcd on` never asks for it).  The reader
+ * needs only the latest value: a frame drawn or skipped one late is what a
+ * reader racing a writer costs.
  */
 static volatile uint8_t lcd_lit;
 
 void lcd_backlight(int on)
 {
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
 	(void)hx_drv_gpio_set_out_value(LCD_PIN_BL,
 	                                on ? GPIO_OUT_HIGH : GPIO_OUT_LOW);
 	lcd_lit = on ? 1u : 0u;
+	TX_RESTORE
 }
 
 int lcd_display_on(void)

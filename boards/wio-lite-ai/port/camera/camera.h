@@ -67,6 +67,9 @@ extern "C" {
 #define CAM_ERR_NO_SENSOR -5   /* nothing answered, or an unrecognised chip ID  */
 #define CAM_ERR_NO_FRAME  -6   /* no captured frame available                   */
 #define CAM_ERR_BUSY      -7   /* a capture or stream already owns the DCMI      */
+#define CAM_ERR_IN_USE    -8   /* another holder needs the stream (issue #142)  */
+#define CAM_ERR_TEST     -10   /* running with a different `test` setting       */
+#define CAM_ERR_STILL    -11   /* an `lcd reset` holds the camera still (#142)  */
 
 /** Sensors this phase knows how to identify.  CAM_SENSOR_UNKNOWN means "some
  *  device ACKed on the SCCB bus but its ID did not match any candidate" -- a
@@ -227,12 +230,14 @@ struct camera_stream_stats {
 };
 
 /**
- * Start / stop continuous capture.
+ * The FRAME-mode stream (PSRAM ring).  [!] No command starts it since issue
+ * #142 -- `camera stream` is the band stream now, held by the holder table
+ * below -- and the next commit removes it.  Kept, unused, until then.
  *
  * The DCMI runs in continuous mode with the DMA in double-buffer mode over a
  * ring of frame slots; a dedicated producer thread publishes each completed
- * frame into the pipeline.  @p frames / @p secs are optional self-stop limits
- * (0 = run until camera_stream_stop()).  @p colorbar selects the test pattern.
+ * frame into the pipeline.  @p frames / @p secs are optional self-stop limits.
+ * @p colorbar selects the test pattern.
  *
  * Streaming and camera_capture() share the DCMI and are mutually exclusive.
  *
@@ -242,8 +247,70 @@ struct camera_stream_stats {
  * (a stream is open-ended and can self-stop, so there would be no one left to
  * release it).
  */
-int camera_stream_start(int colorbar, uint32_t frames, uint32_t secs);
-int camera_stream_stop(void);
+int camera_frame_stream_start(int colorbar, uint32_t frames, uint32_t secs);
+
+/*
+ * ---- who holds the stream (issue #142) ----------------------------------------
+ *
+ * The BAND stream runs while, and only while, somebody holds it: the operator
+ * (`camera stream start`) or nn (camera_stream_join()).  It has no length of its
+ * own; it ends when the last holder leaves, or on an error -- which this board
+ * does not recover from, so it is a confirmed end that marks every holder lost.
+ */
+struct cam_holder;          /* svc/cam_holders.h */
+struct cam_holders_ticket;  /* svc/cam_holders.h */
+
+/**
+ * The operator takes hold (`camera stream start`): starts the band stream if
+ * nobody held it, otherwise only registers.  @p colorbar (the sensor's COM7 test
+ * pattern) takes effect only on a start; a running stream with a different
+ * setting refuses (CAM_ERR_TEST).  *@p already (may be NULL) is set when it was
+ * already running.  CAM_ERR_BUSY while a stop is still finishing (retry).
+ */
+int camera_stream_start(int colorbar, int *already);
+
+/**
+ * The operator lets go (`camera stream stop`).  [!] Refused with CAM_ERR_IN_USE
+ * while another holder needs the stream -- nothing changes and the operator
+ * stays (D8); their names go to @p users (up to @p max, *@p nusers; any may be
+ * NULL).  Otherwise the stream stops; this waits for the producer (<= 1 s).
+ */
+int camera_stream_stop(const char **users, int max, int *nusers);
+
+/**
+ * Holder @p h joins the stream, taking the operator's place too when nothing
+ * streams -- in which case it starts it with @p colorbar.  Joining a running
+ * stream with a different @p colorbar is refused (CAM_ERR_TEST).  *@p tk says
+ * what this call registered and under which generations, for
+ * camera_stream_leave() to undo.  Clears @p h's lost mark.
+ */
+int camera_stream_join(const struct cam_holder *h, int colorbar,
+                       struct cam_holders_ticket *tk);
+
+/**
+ * Holder @p h leaves.  @p undo is the join's ticket when this undoes a failed
+ * start (exactly what that join registered goes, and only while it is still the
+ * one it made); NULL for an ordinary leave (the operator stays, the stream runs
+ * on).  Waits for the stream to stop when this was the last holder.
+ */
+int camera_stream_leave(const struct cam_holder *h,
+                        const struct cam_holders_ticket *undo);
+
+/** The holders' names in registration order (static strings, up to @p max);
+ *  *@p lost (may be NULL): holders the last confirmed end lost. */
+int camera_stream_holders(const char **names, int max, int *lost);
+
+/** The names of the holders that keep the operator from stopping the stream. */
+int camera_stream_users(const char **users, int max);
+
+/**
+ * Was @p h lost at a confirmed end, and has not joined since?  A lost holder's
+ * consumer must not resume on a stream somebody else restarts.
+ */
+int camera_stream_lost(const struct cam_holder *h);
+
+/** The running (or last) band stream's `test` setting. */
+int camera_stream_colorbar(void);
 
 /**
  * Band consumer, called from the producer thread once per delivered band.
@@ -279,12 +346,11 @@ typedef void (*camera_band_fn)(void *ctx, unsigned band, const uint16_t *px,
  *
  * Band mode publishes nothing into svc/frame_pipeline and fills no ring, so
  * camera_stream_pin_latest() finds nothing and `camera save` / `send` keep
- * showing the last camera_capture().  It is exclusive with camera_stream_start()
- * and with camera_capture(); stop it with camera_stream_stop() like any stream.
- *
- * @return CAM_OK, CAM_ERR_PARAM (@p fn NULL), CAM_ERR_BUSY, CAM_ERR_HAL, ...
+ * showing the last camera_capture().  It is exclusive with the frame stream
+ * and with camera_capture().
  */
-int camera_band_start(int colorbar, camera_band_fn fn, void *ctx);
+/* Started only by the holder table above (issue #142): camera.c passes the one
+   band sink, port/camera/cam_band.c, so there is no public entry point. */
 
 /** Nonzero while a BAND stream specifically is running (camera_streaming() is
  *  true for either mode -- that one gates the OCTOSPI1 retune). */
@@ -295,9 +361,9 @@ int camera_band_streaming(void);
 int camera_streaming(void);
 
 /**
- * Keep the camera still: refused (CAM_ERR_BUSY) while a stream runs or another
- * claim is out; once granted, every stream start (frame or band) refuses with
- * CAM_ERR_BUSY until camera_still_release() (issue #142 D9: `lcd reset` holds
+ * Keep the camera still: refused with CAM_ERR_BUSY while a stream runs, and
+ * with CAM_ERR_STILL while another claim is out; once granted, every stream
+ * start (frame or band) refuses with CAM_ERR_STILL until camera_still_release() (issue #142 D9: `lcd reset` holds
  * it across the panel reset).  The look and the claim are one step under the
  * camera lock, so a start cannot slip in between them.  CAM_ERR_STATE when the
  * camera is not initialised -- nothing can start then, and nothing is owed.

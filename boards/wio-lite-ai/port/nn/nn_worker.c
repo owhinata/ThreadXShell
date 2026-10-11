@@ -15,7 +15,7 @@
  */
 #include "nn_camera_priv.h"
 
-#include "cam_band.h"        /* cam_band_stream_lost() */
+#include "camera.h"          /* camera_stream_lost(): nn's lost mark (#142) */
 #include "nn.h"
 #include "nn_active.h"
 #include "plugin_lease.h"
@@ -265,16 +265,16 @@ static void nncam_step(int first)
 	(void)nn_core_frame_want(&nncam_frame, &nncam_frame_ops);
 	if (tx_semaphore_get(&nncam_frame_sem, NNCAM_FRAME_WAIT_TICKS) != TX_SUCCESS) {
 		/* No frame within the bound.  The band flow may have ended without ever
-		   posting -- a DCMI overrun, or the stream stopped underneath us -- in
-		   which case there is nothing left to wait for.  cam_band_stream_lost()
-		   is evaluated lazily by whoever asks, and this is one of the askers.
-		   Drop the fill with it (JOIN): the stream may have died part way
-		   through a frame, and leaving it FILLING would let a re-armed stream
-		   resume that frame from whichever band arrives first.  No producer
-		   exists while the stream is lost, so this is one place it can safely
-		   be dropped.  Otherwise a fill in flight is NOT taken away: the next
-		   step waits for it again. */
-		if (cam_band_stream_lost())
+		   posting -- a DCMI overrun ended the stream, and nn's holder was
+		   marked lost (issue #142) -- in which case there is nothing left to
+		   wait for.  Drop the fill with it (JOIN): the stream may have died part
+		   way through a frame, and leaving it FILLING would let a re-armed
+		   stream resume that frame from whichever band arrives first.  While
+		   nn is lost the producer does not enter nn's step (nncam_band() returns
+		   at its first line, even on a stream the operator restarted), so this
+		   is one place it can safely be dropped.  Otherwise a fill in flight is
+		   NOT taken away: the next step waits for it again. */
+		if (camera_stream_lost(&nncam_holder))
 			(void)nn_core_frame_join(&nncam_frame, &nncam_frame_ops);
 		return;
 	}
@@ -342,10 +342,15 @@ void nncam_entry(ULONG arg)
 		nncam_worker_busy = 1;
 		for (first = 1; nncam_run; first = 0)
 			nncam_step(first);
-		nncam_worker_busy = 0;
 
 		/* If a stop gave up waiting for us it left the guards held on purpose --
-		   see nn_camera_stop().  We are now the last one out, so we release. */
+		   see nn_camera_stop().  We are now the last one out, so we release.
+		   [!] BEFORE clearing the busy flag (issue #142 review): with the order
+		   the other way round, a console stop could see the flag clear, release
+		   the old session itself, and a NEW start take the guards -- and this
+		   give, arriving late, would hand back the new session's.  Given first,
+		   no start can see this worker idle while its give is still to come. */
 		nncam_guards_give();
+		nncam_worker_busy = 0;
 	}
 }

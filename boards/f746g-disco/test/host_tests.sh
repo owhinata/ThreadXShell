@@ -69,17 +69,6 @@ gcc $CFLAGS -I "$board/port/camera" \
     $LDFLAGS -o "$out/test_cam_own"
 "$out/test_cam_own"
 
-# issue #142 -- a step of the camera sink (port/camera/cam_step.c).  The GUIX
-# preview and the nn ingest are two steps of one sink now, and each is switched
-# off while the base keeps running: disarm, then wait for the producer's count
-# to reach zero, which is what proves it out of the step for good.  A disarm
-# while the producer is inside, a re-arm before it has left and a leave with no
-# enter cannot be typed; they are walked here.
-gcc $CFLAGS -I "$board/port/camera" \
-    "$here/test_cam_step.c" "$board/port/camera/cam_step.c" \
-    $LDFLAGS -o "$out/test_cam_step"
-"$out/test_cam_step"
-
 # issue #142 -- this board's two decisions around the camera's holder table
 # (port/camera/cam_hold_rules.c): whether the producer's teardown still goes
 # ahead once a holder came back after the stop was asked for (an error teardown

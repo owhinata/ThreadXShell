@@ -724,6 +724,17 @@ gcc $CFLAGS -I "$svc" \
     $LDFLAGS -o "$out/test_cam_holders"
 "$out/test_cam_holders"
 
+# issue #142 -- a step of a camera sink (svc/cam_step.c; f746g-disco's camera
+# sink first, wio-lite-ai's band sink since).  The display and the nn ingest are
+# two steps of one sink, each switched off while the base keeps running: disarm,
+# then wait for the producer's count to reach zero, which is what proves it out
+# of the step for good.  A disarm while the producer is inside, a re-arm before
+# it has left and a leave with no enter cannot be typed; they are walked here.
+gcc $CFLAGS -I "$svc" \
+    "$here/test_cam_step.c" "$svc/cam_step.c" \
+    $LDFLAGS -o "$out/test_cam_step"
+"$out/test_cam_step"
+
 # ---- board-pinned tests --------------------------------------------------- *
 # Same toolchain flags and the same scratch dir, exported so a board test is built
 # exactly like a core one and cannot quietly diverge.  A board with no

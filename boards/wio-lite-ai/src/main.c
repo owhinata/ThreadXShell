@@ -211,8 +211,10 @@ void tx_application_define(void *first_unused_memory)
    * thread entry.  Fail-soft: without it the `camera` commands report it down. */
   (void) camera_init();
 #if BSP_ENABLE_LCD
-  /* Preview thread, parked until `camera preview on`.  Creation only -- it
-   * blocks on its first sleep, so it is safe here like every other service. */
+  /* Preview thread, and its step of the camera's band sink armed for good
+   * (issue #142: it shows whenever the camera streams and the display is on).
+   * Creation and a PRIMASK store only -- the thread blocks on its first wait,
+   * so it is safe here like every other service. */
   (void) cam_preview_init();
 #endif
 #endif

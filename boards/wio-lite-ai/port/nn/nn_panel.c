@@ -14,7 +14,7 @@
  * only with the LCD, like the preview itself.
  */
 #include "nn_panel.h"
-#include "nn_camera.h"       /* nn_camera_decode_get(), nn_camera_get_overlay() */
+#include "nn_camera.h"       /* nn_camera_decode_get(), nn_camera_overlay() */
 #include "nn_camera_priv.h"  /* nncam_frame, nncam_frame_ops */
 
 #if defined(CONFIG_NN_BACKEND_TFLM)
@@ -88,7 +88,7 @@ void cam_preview_plugin_draw_arm(void)
  * [!] AND A HELD LEASE IS NOT A REASON TO DRAW.  The lease says the plugin's
  * result is not being rewritten; it says nothing about whether there IS one
  * that belongs to now.  Three reachable cases need the record as well:
- * `nn overlay off` (preview_may_draw()), a preview still running after
+ * a `nn run` rather than a stream (preview_may_draw()), a preview still running after
  * inference stopped, and a decode whose publication the generation check
  * REJECTED -- that one leaves fresh private state in the plugin that no
  * accepted record describes, and drawing it puts a retired session's
@@ -103,10 +103,12 @@ static void preview_frame_lock(void *ctx)
 	d->frame_lock();
 }
 
+/* The overlay is DERIVED (issue #142: `nn overlay on|off` is gone): boxes go on
+ * the live picture while an `nn stream` runs, and not for a `nn run`. */
 static int preview_may_draw(void *ctx)
 {
 	(void)ctx;
-	return nn_camera_get_overlay();
+	return nn_camera_overlay();
 }
 
 /* No capture: this is the panel asking "is there a current result, and is it

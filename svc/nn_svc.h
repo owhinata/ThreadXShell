@@ -806,11 +806,8 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 void nn_svc_norm_set(int signed_range);
 int  nn_svc_norm_get(void);
 
-/** Draw the boxes on the board's live preview.  A capability because one board
- *  can turn it off independently while another draws whenever its preview runs
- *  -- "always on" is not the same answer as "there is a switch". */
-void nn_svc_overlay_set(int on);
-int  nn_svc_overlay_get(void);
+/* No overlay switch any more (issue #142): every board draws boxes while an
+ * `nn stream` runs and its preview shows -- derived, not set. */
 
 /* ---- boxes --------------------------------------------------------------- */
 

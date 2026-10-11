@@ -2,8 +2,9 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * The camera sink's step machine (issue #142).  See cam_step.h.  Pure: the
- * critical section every caller runs these in is cam_sink.c's.
+ * A camera sink's step machine (issue #142).  See cam_step.h.  Pure: the
+ * critical section every caller runs these in is the board's; this TU owns no
+ * storage (svc/, audited per board).
  */
 #include "cam_step.h"
 

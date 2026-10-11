@@ -381,6 +381,14 @@ void ltdc_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                     uint16_t rgb565);
 
 /** Copy a tightly-packed RGB565 source bitmap (w*h u16) to (x,y) (DMA2D M2M). */
+/** ltdc_blit() that does NOT wait for the frame lock: false (nothing drawn)
+ *  when another thread holds it.  For the camera producer (issue #142). */
+bool ltdc_blit_try(const uint16_t *src, uint16_t x, uint16_t y,
+                   uint16_t w, uint16_t h);
+
+/** Whether the display is on, as the driver last set it (issue #142). */
+bool ltdc_display_on(void);
+
 void ltdc_blit(const uint16_t *src, uint16_t x, uint16_t y,
                uint16_t w, uint16_t h);
 

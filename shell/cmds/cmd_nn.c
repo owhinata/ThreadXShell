@@ -88,9 +88,6 @@
 #ifndef NN_SVC_HAS_MODEL_ADDR
 #define NN_SVC_HAS_MODEL_ADDR    0
 #endif
-#ifndef NN_SVC_HAS_OVERLAY
-#define NN_SVC_HAS_OVERLAY     0
-#endif
 
 #if NN_SVC_HAS_MODEL_PATH
 /** The board's own whole-file read, for the `--path` source.  It lives in the
@@ -1083,26 +1080,6 @@ static int cmd_nn_norm(struct cli_instance *sh, int argc, char **argv)
 }
 #endif /* NN_SVC_HAS_NORM */
 
-#if NN_SVC_HAS_OVERLAY
-static int cmd_nn_overlay(struct cli_instance *sh, int argc, char **argv)
-{
-	if (argc < 2) {
-		cli_print(sh, "overlay : %s\r\n", nn_svc_overlay_get() ? "on" : "off");
-		return 0;
-	}
-	if (strcmp(argv[1], "on") == 0) {
-		nn_svc_overlay_set(1);
-	} else if (strcmp(argv[1], "off") == 0) {
-		nn_svc_overlay_set(0);
-	} else {
-		cli_error(sh, "nn: usage: nn overlay <on|off>\r\n");
-		return 1;
-	}
-	cli_print(sh, "overlay : %s\r\n", nn_svc_overlay_get() ? "on" : "off");
-	return 0;
-}
-#endif /* NN_SVC_HAS_OVERLAY */
-
 #if NN_SVC_HAS_STREAM
 /* ---- nn stream (issue #99) -----------------------------------------------
  *
@@ -1493,10 +1470,6 @@ CLI_SUBCMD_SET_CREATE(nn_subcmds,
 #if NN_SVC_HAS_NORM
 	CLI_CMD_ARG_USAGE(norm, NULL, "float input normalisation",
 	                  "<0|1>", cmd_nn_norm, 1, 1),
-#endif
-#if NN_SVC_HAS_OVERLAY
-	CLI_CMD_ARG_USAGE(overlay, NULL, "annotate the live preview",
-	                  "<on|off>", cmd_nn_overlay, 1, 1),
 #endif
 #if NN_SVC_HAS_STREAM
 	CLI_CMD_ARG_USAGE(stream, nn_stream_subcmds, "live inference",

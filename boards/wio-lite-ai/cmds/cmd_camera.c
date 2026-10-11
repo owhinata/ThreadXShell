@@ -54,7 +54,7 @@
  * The frames live in the PSRAM, so `capture`, `save`, `send` and `stream start`
  * all take the SHARED OCTOSPI1 guard -- which keeps out a command that is
  * reconfiguring the bus, but not the LTDC scanning out of it.  That distinction
- * is what lets `camera preview` put a live image on the display; see
+ * is what lets the preview put a live image on the display; see
  * cam_psram_take() and app/psram.h.
  *
  * `xclk` and `tune` used to sit here: seven run-time knobs for board facts the
@@ -73,7 +73,6 @@
  * Clean-room design; no third-party code reused.
  */
 #include "camera.h"
-#include "cam_band.h"     /* issue #9 P3: who is on the band stream, and is it alive */
 #include "cli.h"
 #if BSP_ENABLE_PSRAM
 #include "psram.h"        /* psram_acquire(): OCTOSPI1 interlock, see cam_psram_* */
@@ -83,11 +82,13 @@
 #include "fs_devices.h"   /* fs_sd_device(): the microSD media + its ownership gates */
 #endif
 #if BSP_ENABLE_LCD
-#include "cam_preview.h"  /* the LCD preview this command switches on and off */
+#include "cam_preview.h"  /* the LCD preview's counters (`camera info`) */
+#include "ltdc_display.h" /* ltdc_display_on(): whether the preview shows (#142) */
 #endif
 #include "cmd_xfer.h"     /* xfer_send_source(): YMODEM over the console */
 
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #define CAM_SCAN_MAX 16u
@@ -255,22 +256,15 @@ static int cmd_camera_info(struct cli_instance *sh, int argc, char **argv)
 		uint32_t shown, dropped, blit_us;
 
 		cam_preview_stats(&shown, &dropped, &blit_us);
-		/* "on, stream LOST" is the latched state, and it is worth distinguishing
-		   from a plain stop: it means the DCMI tore the stream down underneath a
-		   client that still believes it is running (owhinata/wio-lite-ai#9 phase 3,
-		   port/camera/cam_band.c).  Nothing re-arms by itself -- re-issuing the command
-		   does -- so this line has to say which of the two happened. */
+		/* Derived, not switched (issue #142): the preview is what the panel
+		   shows while the camera streams AND the display is on. */
 		cli_print(sh, "preview: %s (%u AXI-SRAM bands of %u rows, rotated to "
 		              "320x240 landscape), shown %lu dropped %lu, "
 		              "last blit %lu us\r\n",
-		          cam_preview_enabled()
-		                  ? (camera_band_streaming()
-		                             ? "on"
-		                             : (cam_band_stream_lost()
-		                                        ? "on, stream LOST -- re-issue "
-		                                          "`camera preview on`"
-		                                        : "on, stream stopped"))
-		                  : "off",
+		          camera_band_streaming()
+		                  ? (ltdc_display_on() ? "on"
+		                                       : "off (display off -- `lcd on`)")
+		                  : "off (camera not streaming)",
 		          (unsigned)CAMERA_BANDS_PER_FRAME, (unsigned)CAMERA_BAND_ROWS,
 		          (unsigned long)shown, (unsigned long)dropped,
 		          (unsigned long)blit_us);
@@ -717,66 +711,72 @@ static int cmd_camera_send(struct cli_instance *sh, int argc, char **argv)
 
 /*
  * `camera stream start` is the one command that does NOT hold the OCTOSPI1 guard
- * for its own duration: a stream is open-ended and can stop itself on
- * --frames/--secs, so there would be nobody left to release it.  It takes the
- * shared guard only across the arm -- long enough to be refused if another
- * command is reconfiguring the bus -- and hands over to camera_streaming(),
- * which app/psram.c consults from then on.  camera_stream_start() has set that
- * flag by the time it returns, so there is no gap between the two.
+ * for its own duration: a stream is open-ended, so there would be nobody left to
+ * release it.  It takes the shared guard only across the arm -- long enough to be
+ * refused if another command is reconfiguring the bus -- and hands over to
+ * camera_streaming(), which app/psram.c consults from then on.
+ *
+ * Since issue #142 it is the operator TAKING HOLD of the camera's band stream
+ * (port/camera/camera.c): it starts the stream if nobody held it, and the
+ * stream runs until the last holder lets go.  The preview shows it whenever the
+ * display is on; `nn stream start` / `nn run` hold the same stream.  There is no
+ * --frames / --secs any more -- only `nn stream start --frames` bounds anything.
  */
+static void stream_in_use(struct cli_instance *sh, const char **users, int n)
+{
+	char list[48];
+	size_t len = 0;
+
+	list[0] = '\0';
+	for (int i = 0; i < n; i++) {
+		int w = snprintf(list + len, sizeof list - len, "%s%s",
+		                 i ? ", " : "", users[i]);
+
+		if (w < 0 || (size_t)w >= sizeof list - len)
+			break;
+		len += (size_t)w;
+	}
+	cli_error(sh, "camera: still in use: %s\r\n", list);
+}
+
 static int cmd_stream_start(struct cli_instance *sh, int argc, char **argv)
 {
-	uint32_t frames = 0u, secs = 0u, v;
-	int colorbar = 0, rc;
+	int colorbar = 0, already = 0, rc;
 
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "test") == 0) {
 			colorbar = 1;
-		} else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
-			if (cli_parse_u32(argv[++i], &v) != 0 || v == 0u)
-				goto bad;
-			frames = v;
-		} else if (strcmp(argv[i], "--secs") == 0 && i + 1 < argc) {
-			if (cli_parse_u32(argv[++i], &v) != 0 || v == 0u)
-				goto bad;
-			secs = v;
 		} else {
-			goto bad;
+			cli_error(sh, "camera: usage: stream start [test]\r\n");
+			return 1;
 		}
-	}
-
-	if (camera_band_streaming()) {
-		cli_error(sh, "camera: the preview owns the DCMI -- "
-		              "`camera preview off` first\r\n");
-		return 1;
 	}
 	if (!cam_psram_take(sh))
 		return 1;
-	rc = camera_stream_start(colorbar, frames, secs);
+	rc = camera_stream_start(colorbar, &already);
 	cam_psram_give();
 	if (rc != CAM_OK) {
 		report(sh, rc);
 		return 1;
 	}
-	cli_print(sh, "camera: streaming %s", colorbar ? "colorbar" : "live");
-	if (frames)
-		cli_print(sh, ", stopping after %lu frames", (unsigned long)frames);
-	if (secs)
-		cli_print(sh, ", stopping after %lu s", (unsigned long)secs);
-	cli_print(sh, " -- `camera stream stats` / `stop`\r\n");
+	cli_print(sh, "camera: streaming %s%s -- `camera stream stats` / `stop`\r\n",
+	          colorbar ? "colorbar" : "live", already ? " (already running)" : "");
 	return 0;
-bad:
-	cli_error(sh, "camera: usage: stream start [test] [--frames N] [--secs S]\r\n");
-	return 1;
 }
 
 static int cmd_stream_stop(struct cli_instance *sh, int argc, char **argv)
 {
-	int rc;
+	const char *users[4];
+	int rc, n = 0;
 
 	(void)argc;
 	(void)argv;
-	rc = camera_stream_stop();
+	rc = camera_stream_stop(users, 4, &n);
+	if (rc == CAM_ERR_IN_USE) {
+		/* D8: nn holds it, so the operator stays and nothing changed. */
+		stream_in_use(sh, users, n);
+		return 1;
+	}
 	if (rc != CAM_OK) {
 		report(sh, rc);
 		return 1;
@@ -802,6 +802,22 @@ static int cmd_stream_stats(struct cli_instance *sh, int argc, char **argv)
 		return 0;
 	}
 	cli_print(sh, "state:     %s\r\n", st.active ? "streaming" : "stopped");
+	/* Who holds the stream open (issue #142): a snapshot taken under the
+	   camera lock, printed after it. */
+	{
+		const char *names[4];
+		int lost = 0;
+		int n = camera_stream_holders(names, 4, &lost);
+
+		cli_print(sh, "holders:  ");
+		if (n == 0)
+			cli_print(sh, " none");
+		for (int i = 0; i < n; i++)
+			cli_print(sh, "%s %s", i ? "," : "", names[i]);
+		if (lost)
+			cli_print(sh, "  (%d lost when the stream ended)", lost);
+		cli_print(sh, "\r\n");
+	}
 	cli_print(sh, "mode:      %s\r\n",
 	          st.mode == CAM_STREAM_BAND
 	                  ? "band (preview: 60-row slices in AXI-SRAM)"
@@ -861,90 +877,18 @@ static int cmd_camera_stream(struct cli_instance *sh, int argc, char **argv)
 {
 	if (argc > 1)
 		cli_error(sh, "camera: unknown stream subcommand '%s'\r\n", argv[1]);
-	cli_print(sh, "usage: camera stream <start [test] [--frames N] [--secs S]"
-	              " | stop | stats>\r\n");
+	cli_print(sh, "usage: camera stream <start [test] | stop | stats>\r\n");
 	return argc > 1 ? 1 : 0;
 }
 
 CLI_SUBCMD_SET_CREATE(camera_stream_subcmds,
 	CLI_CMD_ARG_USAGE(start, NULL,
-	                  "begin continuous capture (test, --frames N, --secs S)",
-	                  "[test] [--frames <n>] [--secs <s>]",
-	                  cmd_stream_start, 1, 5),
+	                  "hold the camera's stream open (test = colorbar)",
+	                  "[test]",
+	                  cmd_stream_start, 1, 1),
 	CLI_CMD(stop,  NULL, "stop the running stream", cmd_stream_stop),
 	CLI_CMD(stats, NULL, "frame / fps / overrun counters", cmd_stream_stats),
 	CLI_SUBCMD_SET_END);
-
-/* ---- preview ------------------------------------------------------------- */
-
-#if BSP_ENABLE_LCD
-/*
- * `camera preview on` starts its own stream (owhinata/wio-lite-ai#35): a BAND stream,
- * in which the DCMI lands 60-row slices in AXI-SRAM instead of whole frames in the
- * PSRAM ring.  That is the whole point of owhinata/wio-lite-ai#35 -- the rotation's
- * strided reads then come off internal RAM and the camera leaves OCTOSPI1 to the
- * display.
- *
- * `camera stream start` is untouched and still does whole frames into the ring,
- * for the pipeline counters and for anything later that wants frames rather than
- * a picture.  The two are exclusive because there is one DCMI.
- */
-static int cmd_camera_preview(struct cli_instance *sh, int argc, char **argv)
-{
-	int on, colorbar = 0, rc;
-
-	if (strcmp(argv[1], "on") == 0)
-		on = 1;
-	else if (strcmp(argv[1], "off") == 0)
-		on = 0;
-	else {
-		cli_error(sh, "camera: preview takes on|off [test]\r\n");
-		return 1;
-	}
-	if (argc > 2) {
-		if (!on || strcmp(argv[2], "test") != 0) {
-			cli_error(sh, "camera: usage: preview on|off [test]\r\n");
-			return 1;
-		}
-		colorbar = 1;
-	}
-	if (on && camera_streaming() && !camera_band_streaming()) {
-		cli_error(sh, "camera: a frame stream owns the DCMI -- "
-		              "`camera stream stop` first\r\n");
-		return 1;
-	}
-	/* Same OCTOSPI1 interlock as `stream start`, and for the same reason: held
-	   only across the arm, then handed over to camera_streaming(). */
-	if (on && !cam_psram_take(sh))
-		return 1;
-	rc = cam_preview_enable(on, colorbar);
-	if (rc != 0) {
-		if (on)
-			cam_psram_give();
-		/* -2 is its own case: everything is healthy, but switching the sensor's
-		   test pattern means restarting the shared band stream, and `nn stream` is
-		   on it.  The catch-all below would send someone to `dmesg` for a fault
-		   that is not there. */
-		if (rc == -2)
-			cli_error(sh, "camera: switching the test pattern restarts the band "
-			              "stream, which `nn stream` is using -- "
-			              "`nn stream stop` first\r\n");
-		else if (rc == -3)
-			cli_error(sh, "camera: the other console is starting or stopping the "
-			              "band stream -- try again\r\n");
-		else
-			cli_error(sh, "camera: the display is down or its scanout is off "
-			              "('lcd on'), or the camera would not start "
-			              "(see `dmesg`)\r\n");
-		return 1;
-	}
-	if (on)
-		cam_psram_give();
-	cli_print(sh, "camera: preview %s%s\r\n", on ? "on" : "off",
-	          (on && colorbar) ? " (colorbar)" : "");
-	return 0;
-}
-#endif /* BSP_ENABLE_LCD */
 
 CLI_SUBCMD_SET_CREATE(camera_subcmds,
 	CLI_CMD(probe, NULL, "power-cycle the module and read the sensor chip ID",
@@ -967,10 +911,6 @@ CLI_SUBCMD_SET_CREATE(camera_subcmds,
 	CLI_CMD_ARG_USAGE(stream, camera_stream_subcmds,
 	                  "continuous capture (start/stop/stats)",
 	                  "[start|stop|stats]", cmd_camera_stream, 1, 1),
-#if BSP_ENABLE_LCD
-	CLI_CMD_ARG_USAGE(preview, NULL, "live camera on the LCD <on|off> [test]",
-	                  "on|off [test]", cmd_camera_preview, 2, 1),
-#endif
 	CLI_CMD_ARG_USAGE(reg, NULL, "raw SCCB access <addr> <reg> [value] [-16]",
 	                  "<addr> <reg> [value] [-16]", cmd_camera_reg, 3, 2),
 	CLI_SUBCMD_SET_END);

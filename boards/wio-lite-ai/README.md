@@ -324,7 +324,7 @@ them:
 
 | `src/` header | Included by | Why |
 |---|---|---|
-| `psram.h` | `port/nn/nn_camera.c`, `port/nn/nn_svc_wio.c` | The OCTOSPI1 PSRAM shared guard (`psram_acquire_shared()` / `psram_release()`): the stream and `nn bench` read PSRAM, so a command that retunes the bus must be kept out. |
+| `psram.h` | `port/nn/nn_camera.c`, `port/nn/nn_svc_wio.c` | The OCTOSPI1 PSRAM shared guard (`psram_acquire_shared()` / `psram_release_shared()`): the stream and `nn bench` read PSRAM, so a command that retunes the bus must be kept out. |
 | `cam_preview.h` | `port/nn/nn_svc_wio.c` | `CAM_PREVIEW_STACK_BYTES`, the preview thread's stack: the ceiling the plugin draw allowance is asserted below. (The plugin-draw counters moved to `port/nn/nn_panel.h` in issue #140.) |
 | `blob.h` | `port/nn/nn_svc_wio.c` | The NOR asset store: `nn model load --name` reads a blob under the store's busy guard. |
 

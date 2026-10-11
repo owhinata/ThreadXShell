@@ -11,7 +11,7 @@
  * else includes it.  The glue is split by the thread a function runs on:
  *
  *   nn_camera.c    console (start / stop / stats / record reads, `nn norm` /
- *                  `nn overlay`); DEFINES every object declared below, and the
+ *                  the derived overlay); DEFINES every object declared below, and the
  *                  frame path's ops table
  *   nn_producer.c  the camera producer thread: the band callback, the prep
  *                  into the input tensor, the wake of the worker
@@ -99,8 +99,13 @@ extern const struct nn_core_frame_ops nncam_frame_ops;
  * the stop on the console, or the worker on its way off the run loop. */
 void nncam_guards_give(void);
 
-/* nn_producer.c: the band callback (claimed by the start), and the frame
- * path's prep / wake. */
+/* nn's place among the camera's holders (issue #142); defined in nn_camera.c,
+ * read by the band step for its lost mark. */
+struct cam_holder;
+extern const struct cam_holder nncam_holder;
+
+/* nn_producer.c: nn's step of the band sink (armed by the start), and the
+ * frame path's prep / wake. */
 void nncam_band(unsigned band, const uint16_t *px, unsigned rows);
 int  nncam_prep(void *ctx, unsigned band, unsigned nparts);
 void nncam_infer_start(void *ctx);

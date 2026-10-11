@@ -36,11 +36,6 @@
  *  a real choice here. */
 #define NN_SVC_HAS_NORM        1
 
-/** Boxes drawn on the LTDC preview.  This board is the only one where the
- *  overlay can be turned OFF independently -- the other panel board draws
- *  whenever its preview runs. */
-#define NN_SVC_HAS_OVERLAY     1
-
 /** Live inference, as `nn stream start/stop/stats`.  One shared implementation
  *  since issue #99; the worker below it is unchanged. */
 #define NN_SVC_HAS_STREAM      1

@@ -18,6 +18,7 @@
 #include "nn_camera_priv.h"
 
 #include "cam_band.h"
+#include "cam_holders.h"     /* struct cam_holder: nn's place on the camera (#142) */
 #include "camera.h"
 #include "nn.h"
 #if BSP_ENABLE_LCD
@@ -71,6 +72,10 @@
  * worker reports rather than hangs the console.
  */
 #define NNCAM_STOP_TICKS 1500
+/* How long the stop waits for the producer to leave nn's step, in ticks.  A
+ * step is one band's ingest, well under 1 ms; 200 ms is two orders of margin
+ * and still bounded (the same budget the band claim's drain used to have). */
+#define NNCAM_DRAIN_TICKS 200
 
 static TX_THREAD    nncam_thread;
 static UCHAR        nn_worker_stack[NNCAM_STACK] DTCM_BSS __attribute__((aligned(8)));
@@ -93,6 +98,12 @@ static int nncam_rearmable;
  * nn_camera_start() on the shell side, before nncam_run is raised, and kept by
  * a re-arm (which only a stream's session takes). */
 int nncam_oneshot;
+/* nn's place among the camera's holders (issue #142): `nn stream start` and `nn
+ * run` hold the band stream open -- starting it, and holding the operator's place
+ * too, when nothing streams -- and the stop lets go of nn's place only, so the
+ * camera keeps streaming for the operator.  Its LOST mark (a confirmed end of
+ * the stream) is what stops the ingest until nn itself re-arms. */
+const struct cam_holder nncam_holder = { "nn" };
 /* The worker is inside the run loop, i.e. it may touch the tensors at any moment. */
 volatile int nncam_worker_busy;
 /*
@@ -129,7 +140,6 @@ static uint32_t nncam_start_tick;
 static uint32_t nncam_depth_decode, nncam_depth_draw, nncam_depth_shell;
 
 int nncam_norm_signed;   /* 0 = [0,1] (default), 1 = [-1,1] */
-static int nncam_overlay;
 
 /*
  * The published decode: boxes AND the diagnostics that describe them, plus the
@@ -356,7 +366,8 @@ int nn_camera_start(int colorbar, int require_draw)
 		 * one-shot is never re-armed, svc/nn_stream_life.c); this is the same
 		 * rule stated where the worker is, so the two cannot drift apart.
 		 */
-		if (!cam_band_stream_lost() || !nncam_rearmable || !require_draw)
+		if (!camera_stream_lost(&nncam_holder) || !nncam_rearmable ||
+		    !require_draw)
 			return NNCAM_ERR_RUNNING;
 
 		/* Drop the fill before the stream comes back (JOIN, issue #130).  A
@@ -368,8 +379,9 @@ int nn_camera_start(int colorbar, int require_draw)
 		   first (the re-arm can easily arrive inside the worker's 100 ms window,
 		   or while it is mid-inference -- a frame handed over or running is not
 		   taken away, and its publish lands in the old generation).  Safe from
-		   here: cam_band_stream_lost() being true means there is no producer
-		   right now. */
+		   here: nn's lost mark means the producer skips this step (nncam_band()
+		   returns at its first line), whether or not the operator has
+		   restarted the camera since. */
 		(void)nn_core_frame_join(&nncam_frame, &nncam_frame_ops);
 
 		/*
@@ -382,18 +394,23 @@ int nn_camera_start(int colorbar, int require_draw)
 		 * generation does not claim it, because what it produced is counted
 		 * from a base its commit takes after this call.
 		 *
-		 * BEFORE the band is re-claimed, so the producer never resumes while the
-		 * old generation is still the current one.
+		 * BEFORE nn joins the camera again, so the producer never resumes while
+		 * the old generation is still the current one.
 		 */
 		nncam_record_boundary();
 
-		if (cam_band_claim(CAM_BAND_NN, colorbar, nncam_band) != CAM_BAND_OK) {
-			/* cam_band_claim() unwound our claim, but nncam_run and the guards
-			   are still ours -- and with no claim left the lost latch cannot
-			   re-arm itself, so a second `nn stream start` would just report
-			   "already running".  Say what actually clears it instead of leaving
-			   the user to discover a state with no obvious way out. */
-			return NNCAM_ERR_REARM;
+		/* The step stayed armed through the end; joining again is what clears
+		   nn's lost mark (issue #142) -- starting the camera, holding the
+		   operator's place too, if nobody restarted it. */
+		{
+			struct cam_holders_ticket tk;
+
+			if (camera_stream_join(&nncam_holder, colorbar, &tk) != CAM_OK) {
+				/* nncam_run and the guards are still ours, and the mark is
+				   still set -- say what clears it rather than leave a
+				   state with no obvious way out. */
+				return NNCAM_ERR_REARM;
+			}
 		}
 		return NNCAM_OK;
 	}
@@ -587,11 +604,31 @@ int nn_camera_start(int colorbar, int require_draw)
 	nncam_rearmable = require_draw ? 1 : 0;   /* see the re-arm above */
 	nncam_oneshot   = require_draw ? 0 : 1;   /* `nn run` is the one without */
 	nncam_run = 1;
-	rc = cam_band_claim(CAM_BAND_NN, colorbar, nncam_band);
-	if (rc != CAM_BAND_OK) {
-		nncam_run = 0;
-		nncam_guards_give();
-		return NNCAM_ERR_BAND;
+	/*
+	 * Hold the camera open (issue #142): join a running stream, or start it --
+	 * holding the operator's place too, so it keeps streaming after nn stops
+	 * (D6, `nn run` as well).  Then arm nn's step of the band sink.  A step
+	 * the producer is still inside from a stop whose drain timed out cannot be
+	 * re-armed (cam_band.h), which refuses the start instead of resuming a
+	 * callback that never returned.
+	 */
+	{
+		struct cam_holders_ticket tk;
+
+		rc = camera_stream_join(&nncam_holder, colorbar, &tk);
+		if (rc != CAM_OK) {
+			nncam_run = 0;
+			nncam_guards_give();
+			return (rc == CAM_ERR_TEST)  ? NNCAM_ERR_TEST :
+			       (rc == CAM_ERR_STILL) ? NNCAM_ERR_STILL : NNCAM_ERR_BAND;
+		}
+		if (cam_band_step_enable(CAM_BAND_NN, nncam_band) != CAM_BAND_OK) {
+			nncam_run = 0;
+			/* Undo exactly what the join registered (svc/cam_holders.h). */
+			(void)camera_stream_leave(&nncam_holder, &tk);
+			nncam_guards_give();
+			return NNCAM_ERR_BAND;
+		}
 	}
 	(void)tx_semaphore_put(&nncam_start_sem);
 	return NNCAM_OK;
@@ -620,20 +657,25 @@ int nn_camera_stop(void)
 	(void)tx_semaphore_put(&nncam_frame_sem);
 
 	/*
-	 * Producer side first.  cam_band_release() drops the claim and then drains any
-	 * callback already in flight -- and the claim test and the in-flight count are
-	 * updated together under one PRIMASK section, so a producer that passed the
-	 * test but had not yet entered cannot slip through behind us.  Until this
-	 * returns OK, something may still be writing the input tensor.
+	 * Producer side first.  Disarm nn's step of the band sink and drain it: the
+	 * armed test and the in-flight count are updated together under one PRIMASK
+	 * section (svc/cam_step.h), so a producer that passed the test but had not
+	 * yet entered cannot slip through behind us.  Until the drain returns OK,
+	 * something may still be writing the input tensor.
 	 *
-	 * [!] Called UNCONDITIONALLY, not just when the claim is still set.  A previous
-	 * stop that timed out already cleared the claim but left a callback in flight;
-	 * skipping the drain on the retry because "we are not claimed any more" would
-	 * release the arena to `nn bench` with that callback still able to write the
-	 * input tensor -- which is the precise thing the first stop refused to do.
-	 * cam_band_release() is idempotent, so calling it again is free.
+	 * [!] Called UNCONDITIONALLY, not just when the step is still armed.  A
+	 * previous stop that timed out already disarmed it but left a callback in
+	 * flight; skipping the drain on the retry would release the arena to `nn
+	 * bench` with that callback still able to write the input tensor -- which is
+	 * the precise thing the first stop refused to do.  Both are idempotent.
 	 */
-	rc_band = cam_band_release(CAM_BAND_NN);
+	cam_band_step_disable(CAM_BAND_NN);
+	rc_band = cam_band_step_drain(CAM_BAND_NN, NNCAM_DRAIN_TICKS);
+	/* nn lets go of the camera (issue #142).  The operator's place stays, so
+	   the camera keeps streaming: stopping it is `camera stream stop`'s.  Not
+	   held back by a drain that timed out -- the camera's own stop cannot
+	   outrun a producer stuck in this step anyway. */
+	(void)camera_stream_leave(&nncam_holder, NULL);
 	/* The producer is confirmed out once the drain succeeded: a frame it was
 	 * part way through filling will never be finished (JOIN, issue #130).  A
 	 * frame handed over or running is the worker's, and is left to it. */
@@ -670,9 +712,9 @@ void nn_camera_stats_get(struct nn_camera_stats *out)
 
 	out->running      = (uint8_t)(nncam_run != 0);
 	out->holds_guards = (uint8_t)(nncam_holds_guards != 0);
-	out->stream_lost  = (uint8_t)(cam_band_stream_lost() != 0);
+	out->stream_lost  = (uint8_t)(nncam_run != 0 &&
+	                              camera_stream_lost(&nncam_holder) != 0);
 	out->norm_signed  = (uint8_t)(nncam_norm_signed != 0);
-	out->overlay      = (uint8_t)(nncam_overlay != 0);
 	out->infers       = nncam_infers;
 	out->frames       = nncam_frames;
 	out->skipped      = nncam_skipped;
@@ -805,5 +847,11 @@ int nn_camera_decode_get(struct nn_camera_decode *out,
 
 void nn_camera_set_norm(int signed_range) { nncam_norm_signed = signed_range ? 1 : 0; }
 int  nn_camera_get_norm(void)             { return nncam_norm_signed; }
-void nn_camera_set_overlay(int on)        { nncam_overlay = on ? 1 : 0; }
-int  nn_camera_get_overlay(void)          { return nncam_overlay; }
+/* Boxes on the live picture while an `nn stream` runs -- not for a `nn run`
+ * (issue #142: `nn overlay on|off` is gone; the overlay is derived). */
+int  nn_camera_overlay(void)              { return nncam_run && !nncam_oneshot; }
+
+int  nn_camera_stream_lost(void)
+{
+	return nncam_run != 0 && camera_stream_lost(&nncam_holder) != 0;
+}

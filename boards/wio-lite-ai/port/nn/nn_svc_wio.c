@@ -504,14 +504,16 @@ static int nn_life_swap(struct nn_core_model_job *j, int *model_after)
 
 	(void)nn_model_open(&m);
 	rc = nn_model_reload(w->model_at, w->model_len, w->info.name, model_after);
-	if (rc == 0 && *model_after)
-		return NN_SVC_OK;
-	/* A "success" that left no model is this board's refusal too (status
-	 * ARG, as before the order was shared); the shared table calls it LOST
-	 * either way. */
-	nn_detail_set("%s", rc != 0 ? nn_model_strerror(rc)
-	                            : "the backend left no model open");
-	return NN_SVC_ERR_ARG;
+	if (rc != 0) {
+		nn_detail_set("%s", nn_model_strerror(rc));
+		return NN_SVC_ERR_ARG;
+	}
+	/* A "success" that left no model: the shared order answers it NN_SVC_ERR_HW
+	 * and LOST, as on every board (issue #138).  Only the wording is this
+	 * board's. */
+	if (!*model_after)
+		nn_detail_set("the backend left no model open");
+	return NN_SVC_OK;
 }
 
 /*

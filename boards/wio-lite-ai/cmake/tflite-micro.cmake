@@ -403,7 +403,7 @@ if(HOST_CXX)
 
     # --- Host-side model rewriter (scripts/tflite_int8_input.cc) --------------
     # owhinata/wio-lite-ai#51.  Strips a model's own leading QUANTIZE so the graph input becomes the
-    # quantized tensor -- which is the only way to exercise port/nn/nn_camera.c's int8
+    # quantized tensor -- which is the only way to exercise port/nn/nn_producer.c's int8
     # ingest path, because "an int8 model" from the model zoo means int8 WEIGHTS and
     # float I/O.  See the file header.
     #

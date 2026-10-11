@@ -55,12 +55,10 @@
 #include "cam_band.h"    /* issue #9 P3: the band stream is shared with the NN now */
 #include "camera.h"
 #include "ltdc_display.h"
-#include "nn_camera.h"
+#include "nn_panel.h"     /* issue #140: the nn half of this thread */
 #if defined(CONFIG_NN_BACKEND_TFLM)
-#include "nn_active.h"
-#include "plugin_lease.h"
-#include "plugin_paint.h"
-#endif   /* issue #9 P4: the face boxes this thread draws */
+#include "nn_active.h"   /* NN_ACTIVE_FRAME_W / _H, checked against the surface */
+#endif
 #include "stm32h7xx.h"   /* DWT->CYCCNT: time the rotating blit */
 #include "tx_api.h"
 
@@ -186,137 +184,17 @@ static void preview_check_plugin_frame(void)
 }
 
 /*
- * What one plugin draw() may spend.
- *
- * A quarter of the surface, which is where the other board started, taken here
- * as an INITIAL TEST CEILING rather than a shipping one: what the budget bounds
- * is time spent with the frame lock held, and on this board those pixels are
- * CPU stores into non-cacheable external PSRAM.  The board README carries the
- * measurement and the acceptance criteria; if they are not met this comes down.
+ * [!] THE NN HALF OF THIS THREAD IS port/nn/nn_panel.c (issue #140): whether to
+ * paint, the record, the plugin's draw() and its spent / refused figures.  What
+ * stays here is the display, handed over as the LTDC driver's own functions --
+ * port/nn may not include port/ltdc.  The back buffer and the surface size are
+ * read only once the frame lock is held (nn_panel.h).
  */
-#define PREVIEW_PLUGIN_DRAW_PIXELS  (NN_ACTIVE_FRAME_W * NN_ACTIVE_FRAME_H / 4u)
-#define PREVIEW_PLUGIN_DRAW_OPS     64u
-
-/*
- * [!] WRITER, READER AND ARM UNDER ONE RULE.  The writer below sets two words;
- * a reader that masked interrupts only on its own side could still see the
- * high-water from after one assignment beside the refusals from before the
- * other.  Masking cannot reach backwards, so all three sites mask.
- */
-static uint32_t preview_draw_spent;
-static uint32_t preview_draw_refused;
-
-void cam_preview_plugin_draw_stats(uint32_t *spent, uint32_t *refused)
-{
-	TX_INTERRUPT_SAVE_AREA
-
-	TX_DISABLE
-	if (spent != NULL)
-		*spent = preview_draw_spent;
-	if (refused != NULL)
-		*refused = preview_draw_refused;
-	TX_RESTORE
-}
-
-void cam_preview_plugin_draw_arm(void)
-{
-	TX_INTERRUPT_SAVE_AREA
-
-	TX_DISABLE
-	preview_draw_spent   = 0u;
-	preview_draw_refused = 0u;
-	TX_RESTORE
-	plugin_lease_misses_reset();
-}
-
-/*
- * The panel's half of the shared frame path (svc/nn_core_frame.h, issue #130).
- * nn_core_draw() tries the lease, then takes the frame lock below, then asks
- * the hooks below whether to paint, then paints, then gives the lease back --
- * the order and the questions this file used to spell out itself.
- *
- * [!] THE LEASE IS TAKEN BEFORE THE FRAME LOCK.  It used to be taken in here,
- * AFTER ltdc_lock_frame() -- the exact inversion of the order this port
- * documents, with the comment beside it asserting the opposite.  A no-wait
- * acquire meant no deadlock could follow, so the code worked and the rule it was
- * written to obey did not exist.  The frame path takes the frame lock through
- * preview_frame_lock() only once the lease is won, and LEAVES IT HELD for the
- * flip.
- *
- * [!] AND A HELD LEASE IS NOT A REASON TO DRAW.  The lease says the plugin's
- * result is not being rewritten; it says nothing about whether there IS one
- * that belongs to now.  Three reachable cases need the record as well:
- * `nn overlay off` (preview_may_draw()), a preview still running after
- * inference stopped, and a decode whose publication the generation check
- * REJECTED -- that one leaves fresh private state in the plugin that no
- * accepted record describes, and drawing it puts a retired session's
- * detections on a live picture.  The frame path checks the record it gets
- * from preview_record(): valid, of THIS session (issue #118), and the
- * plugin's.
- */
-static void preview_frame_lock(void *ctx)
-{
-	(void)ctx;
-	ltdc_lock_frame();
-}
-
-static int preview_may_draw(void *ctx)
-{
-	(void)ctx;
-	return nn_camera_get_overlay();
-}
-
-/* No capture: this is the panel asking "is there a current result, and is it
- * the plugin's".  A RAW_TENSORS record answers the first and not the second --
- * an inference ran that nothing decoded, and there is nothing to put on the
- * picture (issue #116). */
-static int preview_record(void *ctx, struct nn_det_snapshot *snap)
-{
-	struct nn_camera_decode dec;
-
-	(void)ctx;
-	memset(&dec, 0, sizeof dec);
-	if (!nn_camera_decode_get(&dec, NULL, NULL))
-		return 0;
-	snap->valid      = dec.valid;
-	snap->ndet       = dec.ndet;
-	snap->kind       = dec.kind;
-	snap->reportable = dec.reportable;
-	snap->current    = dec.current;
-	snap->accepted   = dec.accepted;
-	snap->epoch      = dec.epoch;
-	return 1;
-}
-
-static void preview_paint(void *ctx)
-{
-	struct plugin_painter paint;
-	struct plugin_paint_budget bud;
-	TX_INTERRUPT_SAVE_AREA
-
-	(void)ctx;
-	bud.pixels  = PREVIEW_PLUGIN_DRAW_PIXELS;
-	bud.ops     = PREVIEW_PLUGIN_DRAW_OPS;
-	bud.refused = 0u;
-	plugin_paint_bind(&paint, &bud, ltdc_back_buffer(),
-	                  ltdc_surface_w(), ltdc_surface_h());
-	/* The depth is sampled inside, at the indirect call (issue #126).
-	 * NN_ACTIVE_NOT_HELD paints nothing and is counted by the entry check
-	 * itself (issue #130); there is nothing more to do with it here. */
-	(void)nn_active_draw(&paint);
-
-	TX_DISABLE
-	if (PREVIEW_PLUGIN_DRAW_PIXELS - bud.pixels > preview_draw_spent)
-		preview_draw_spent = PREVIEW_PLUGIN_DRAW_PIXELS - bud.pixels;
-	preview_draw_refused += bud.refused;
-	TX_RESTORE
-}
-
-static const struct nn_core_panel preview_panel = {
-	.frame_lock = preview_frame_lock,
-	.may_draw   = preview_may_draw,
-	.record     = preview_record,
-	.paint      = preview_paint,
+static const struct nn_panel_display preview_display = {
+	.frame_lock  = ltdc_lock_frame,
+	.back_buffer = ltdc_back_buffer,
+	.surface_w   = ltdc_surface_w,
+	.surface_h   = ltdc_surface_h,
 };
 
 #endif /* CONFIG_NN_BACKEND_TFLM */
@@ -353,7 +231,7 @@ static void preview_entry(ULONG arg)
 			   path: holding it across the VBR wait would stop the worker
 			   decoding while this thread sleeps, for nothing -- the drawing is
 			   already done. */
-			int drew = nn_camera_draw(&preview_panel, NULL);
+			int drew = nn_panel_draw(&preview_display);
 
 			/* One outer lock around the boxes AND the flip.  ltdc_lock_frame()
 			   is recursive, and ltdc_flip() already holds it across its entire

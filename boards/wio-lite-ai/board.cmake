@@ -780,15 +780,19 @@ if(BSP_ENABLE_CAMERA)
         # inference with the preview off is the fastest configuration this board has.
         "${BOARD_DIR}/port/camera/cam_band.c"
         # The camera -> inference glue.  Camera-only for the same
-        # reason as the mux; the overlay it feeds is drawn by cam_preview.c, which
-        # is the file already gated on the pair.
-        "${BOARD_DIR}/port/nn/nn_camera.c"
+        # reason as the mux; the overlay it feeds is drawn from the preview
+        # thread (nn_panel.c below), which is gated on the pair.
+        "${BOARD_DIR}/port/nn/nn_camera.c"     # console side, owns the state
+        "${BOARD_DIR}/port/nn/nn_producer.c"   # ...its camera producer thread (#140)
+        "${BOARD_DIR}/port/nn/nn_worker.c"     # ...its inference worker thread (#140)
         "${BOARD_DIR}/cmds/cmd_camera.c")
     # The LCD preview needs BOTH drivers, so it is the one
     # source gated on the pair.  With either option off there is nothing to glue
     # and the file is simply not built.
     if(BSP_ENABLE_LCD)
-        list(APPEND SHELL_SOURCES "${BOARD_DIR}/src/cam_preview.c")
+        list(APPEND SHELL_SOURCES "${BOARD_DIR}/src/cam_preview.c"
+            # ...and the nn half of its thread (#140): built with the preview.
+            "${BOARD_DIR}/port/nn/nn_panel.c")
     endif()
 endif()
 
@@ -1156,7 +1160,7 @@ if(BSP_ENABLE_KV)
 endif()
 if(BSP_ENABLE_CAMERA)
     list(APPEND DTCM_REQUIRED --require-dtcm cam_producer_stack) # port/camera/camera.c
-    list(APPEND DTCM_REQUIRED --require-dtcm nn_worker_stack)    # port/nn/nn_camera.c
+    list(APPEND DTCM_REQUIRED --require-dtcm nn_worker_stack)    # port/nn/nn_camera.c (created there)
     list(APPEND DTCM_REQUIRED --require-axi  cam_band)           # DCMI via DMA2_Stream1
     if(BSP_ENABLE_LCD)
         list(APPEND DTCM_REQUIRED --require-dtcm preview_stack)  # src/cam_preview.c

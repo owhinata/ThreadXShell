@@ -40,6 +40,7 @@
 #include "plugin_info.h"
 #include "nn.h"
 #include "nn_camera.h"
+#include "nn_panel.h"       /* the panel's draw counters (#140) */
 #include "nn_desc.h"
 #include "nn_active.h"
 #include "nn_core_model.h" /* the shared load / unload order (#131) */
@@ -1581,7 +1582,8 @@ static const char *nn_nncam_strerror(int rc)
 
 /* ---- live inference (issue #99) ------------------------------------------
  *
- * The worker in port/nn/nn_camera.c is unchanged and still owns the real lifecycle,
+ * The worker (port/nn/nn_worker.c, with its state and start / stop in
+ * port/nn/nn_camera.c) is unchanged and still owns the real lifecycle,
  * the NN session and the OCTOSPI1 guard.  What this adds is an IDENTITY, so a
  * `--frames` waiter on one console cannot stop a stream that a second console
  * started after its own had gone.

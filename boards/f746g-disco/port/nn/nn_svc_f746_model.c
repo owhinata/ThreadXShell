@@ -151,14 +151,9 @@ static int nn_life_check_spec(struct nn_core_model_job *j)
 }
 
 /*
- * The preconditions, and then THE CLAIM ITSELF -- the NN session.
- *
- * [!] THE SESSION IS TAKEN HERE, AS ADMISSION'S LAST STEP, NOT IN claim_take.
- * The shared order's claim hook takes no result, so it cannot say WHY it was
- * refused, and this board words that ("a stream, run or bench is active").
- * Taken last, a refusal before it holds nothing; taken, the shared order's
- * claim_take is a formality that cannot fail, so nothing runs between this and
- * the claim the order reads had_open under.  claim_give gives it back.
+ * The preconditions.  The claim -- the NN session -- is nn_life_claim_take(),
+ * which the shared order calls next (issue #138: until then the hook took no
+ * job, so it could not word a refusal, and the session was taken here).
  *
  * [!] THE FIRST OPEN AFTER BOOT HAPPENS HERE, BEFORE THE SESSION (issue #131
  * P16).  That open adopts the built-in model and does not return until it is
@@ -189,23 +184,26 @@ static int nn_life_admit(struct nn_core_model_job *j)
 			return NN_SVC_ERR_STATE;
 		}
 	}
-	/*
-	 * [!] THE SESSION IS CLAIMED BEFORE THE SLOT IS CHOSEN, so slot selection,
-	 * the SD read and the swap are atomic against another console: otherwise
-	 * a second shell could flip the chosen (inactive) slot to active between
-	 * load_region() and the read, and the live flatbuffer would be corrupted.
-	 */
+	return NN_SVC_OK;
+}
+
+/*
+ * THE CLAIM, worded.  claim_give gives it back.
+ *
+ * [!] THE SESSION IS CLAIMED BEFORE THE SLOT IS CHOSEN, so slot selection,
+ * the SD read and the swap are atomic against another console: otherwise
+ * a second shell could flip the chosen (inactive) slot to active between
+ * load_region() and the read, and the live flatbuffer would be corrupted.
+ */
+static int nn_life_claim_take(struct nn_core_model_job *j)
+{
+	struct nn_op_result *res = j->res;
+
 	if (nn_session_try_acquire() != 0) {
 		nn_detail_set("NN busy (a stream, run or bench is active)");
 		return NN_SVC_ERR_BUSY;
 	}
 	return NN_SVC_OK;
-}
-
-/* Held since nn_life_admit(); see there. */
-static int nn_life_claim_take(void)
-{
-	return 1;
 }
 
 /* What the read needs, asked before the SD card is touched. */

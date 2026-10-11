@@ -805,10 +805,13 @@ static int nn_life_check_spec(struct nn_core_model_job *j)
 
 /* [!] AS A SWAP: a load or an unload can replace the plugin, so it is refused
  * while a threshold call is inside it (issue #122) -- not waited for.  The
- * count is judged in the claim's own critical section (nn_claim_as()). */
-static int nn_life_claim_take(void)
+ * count is judged in the claim's own critical section (nn_claim_as()).  The
+ * refusal keeps the shared command's own words for BUSY ("busy (another nn
+ * command is running)"): no detail is set. */
+static int nn_life_claim_take(struct nn_core_model_job *j)
 {
-	return nn_try_acquire_swap();
+	(void)j;
+	return nn_try_acquire_swap() ? NN_SVC_OK : NN_SVC_ERR_BUSY;
 }
 
 /* Up only if nothing is open; over an open model the NPU already is.  A

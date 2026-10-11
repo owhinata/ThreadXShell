@@ -14,9 +14,9 @@
  * from src/ in issue #139.  It is still board integration -- it claims a band
  * stream (port/camera/cam_band.h), publishes boxes for the display and is driven
  * by a shell command -- so it still includes two src/ headers, cam_preview.h and
- * psram.h: port -> src includes that remain on purpose.  nn.h is untouched by
- * that and stays what its own header claims to be: a model-agnostic,
- * hardware-free inference API.
+ * psram.h: port -> src includes that remain on purpose (the board README's
+ * "nn files" section lists them).  nn.h is untouched by that and stays what
+ * its own header claims to be: a model-agnostic, hardware-free inference API.
  *
  * NO STAGING BUFFER, AND THAT IS THE INTERESTING PART.  The donor stages frames
  * through two 192 KB buffers behind a four-state machine with epoch counters.  Here

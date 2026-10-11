@@ -168,6 +168,29 @@ configure after #130, and every `null` configure prints a status line. To move
 it: `cmake -B <dir> -DCONFIG_NN_BACKEND=tflm`, or use a fresh build directory.
 A fresh `-DCONFIG_NN_BACKEND=null` is not warned about.
 
+### The nn files
+
+The command, its contract and the shared core are `svc/`'s (see
+[svc/README.md](../../svc/README.md)).  What this board still owns, one line per
+file (each `.c` with its `.h` unless only a header is listed):
+
+| File | Thread or context | Hardware reason |
+|---|---|---|
+| `port/nn/nn_svc_f746.c` | console | The thin adapter over this board's `nn.h` API; it adds no state. |
+| `port/nn/nn_svc_f746_model.c` | console (`nn info`, `nn model load` / `unload`) | The steps of the shared load order on this board: the built-in model in Flash and the SD-card model slots in SDRAM. |
+| `port/nn/nn_camera.c` | camera producer (sink `consume()`), inference worker (priority 18), console (start / stop / stats), caller of attach / detach (sink `open()` / `close()`) | Binds the shared frame path to this board's camera frame pipeline as one of its three subscribers; inference runs on the CPU, so the worker sits below every other thread. |
+| `port/nn/nn_decoder.c` | inference worker | Resident BlazeFace decoder state, with its candidate scratch placed in `.sdram.ai`, and `nn_tensor` -> `tensor_desc`. |
+| `port/nn/nn_decode_count.c` | inference worker | No hardware reason: this board's table for counting the decoder's answer in `nn stream stats` (pure, host-tested). |
+| `port/nn/nn_sess_release.c` | console (stop), inference worker | No hardware reason: when the stream's hold on the nn session may be given back, as a pure function of the sink drain and the worker. |
+| `port/nn/nn.c`, `nn_backend.h` | worker (run), console (open / bench / info) | The backend-agnostic model API and session guard, with DWT cycle-counter timing around `nn_run()`. |
+| `port/nn/nn_null.c` | as `nn.c` | The `null` backend: a BlazeFace-shaped stub with no runtime. |
+| `port/nn/nn_stedgeai.c`, `nn_stedgeai_reloc.c` | as `nn.c` | The non-default ST Edge AI Core backends (a model baked into Flash, or a relocatable one); they need a local ST install. |
+| `port/nn/tflm/` | worker (invoke), console (load) | The default tflite-micro backend with CMSIS-NN kernels; arena and SD model slots in SDRAM. |
+
+There is no `nn_panel.c` here: this board has no panel thread.  The GUIX thread
+draws the boxes itself, reading the record through `nn_camera_dets_get()`
+(`ui/guix_camera_ui.c`).
+
 ### The model: built in, loaded from SD, or nothing (issue #131)
 
 The backend can hold no model at all, and `nn model unload` leaves it that way:

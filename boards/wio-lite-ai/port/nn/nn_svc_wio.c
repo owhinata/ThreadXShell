@@ -566,16 +566,25 @@ static int nn_life_check_spec(struct nn_core_model_job *j)
 }
 
 /*
- * The preconditions, and then THE CLAIM ITSELF.
- *
- * [!] THE CLAIM IS TAKEN HERE, AS ADMISSION'S LAST STEP, NOT IN claim_take.
- * The shared order's claim hook takes no result, so it cannot say WHY it was
- * refused, and this board's claim has more than one answer: the session is
- * busy, the PSRAM is not ready (STATE), the OCTOSPI1 guard is busy.  Taken
- * last, a refusal before it holds nothing (nn_guards_take() unwinds itself);
- * taken, the shared order's claim_take is a formality that cannot fail, so
- * nothing runs between this and the claim the order reads had_open under.
- * claim_give gives it back.
+ * The preconditions.  An UNLOAD refuses a running stream by name, before its
+ * claim; a LOAD has none here.
+ */
+static int nn_life_admit(struct nn_core_model_job *j)
+{
+	struct nn_op_result *res = j->res;
+
+	if (j->spec == NULL && nn_camera_running()) {
+		nn_detail_set("stop the inference stream first (`nn stream stop`)");
+		return NN_SVC_ERR_BUSY;
+	}
+	return NN_SVC_OK;
+}
+
+/*
+ * THE CLAIM, worded (issue #138: until then the hook took no job, and this was
+ * admit's last step).  It has more than one answer -- the session is busy, the
+ * PSRAM is not ready (STATE), the OCTOSPI1 guard is busy -- and a refusal holds
+ * nothing (nn_guards_take() unwinds itself).  claim_give gives it back.
  *
  * A LOAD takes the session only: which staging slot is "the inactive one" is
  * a function of backend state, so a slot number handed out before the claim
@@ -584,9 +593,9 @@ static int nn_life_check_spec(struct nn_core_model_job *j)
  * then writes its download straight over the flatbuffer the live interpreter
  * is reading.  Its PSRAM guard comes later (see nn_life_psram).
  *
- * An UNLOAD refuses a running stream by name first, then takes both guards.
+ * An UNLOAD takes both guards.
  */
-static int nn_life_admit(struct nn_core_model_job *j)
+static int nn_life_claim_take(struct nn_core_model_job *j)
 {
 	struct nn_op_result *res = j->res;
 	int rc;
@@ -598,20 +607,10 @@ static int nn_life_admit(struct nn_core_model_job *j)
 		}
 		return NN_SVC_OK;
 	}
-	if (nn_camera_running()) {
-		nn_detail_set("stop the inference stream first (`nn stream stop`)");
-		return NN_SVC_ERR_BUSY;
-	}
 	rc = nn_guards_take(res);
 	if (rc == NN_SVC_OK)
 		nn_life_psram = 1u;
 	return rc;
-}
-
-/* Held since nn_life_admit(); see there. */
-static int nn_life_claim_take(void)
-{
-	return 1;
 }
 
 /* Hardware claim first, software claim second -- the reverse of taking them

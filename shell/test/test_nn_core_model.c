@@ -107,11 +107,19 @@ static int  b_has(void)
 static void b_refused(struct nn_core_model_job *j) { (void)j; put("spec_refused"); }
 static int  b_check(struct nn_core_model_job *j)   { (void)j; put("check"); return r_check; }
 static int  b_admit(struct nn_core_model_job *j)   { (void)j; put("admit"); return r_admit; }
-static int  b_claim(void)
+/* The claim words its own refusal (issue #138): what it writes must be what
+ * the caller reads. */
+#define CLAIM_WORDS "the claim's own words"
+static char last_detail[NN_SVC_DETAIL_MAX + 1];
+
+static int  b_claim(struct nn_core_model_job *j)
 {
 	put("claim");
-	if (r_claim)
+	ok("the claim is handed the job", j != NULL && j->res != NULL);
+	if (r_claim == NN_SVC_OK)
 		claim_held = 1;
+	else if (r_claim < 0 && j != NULL && j->res != NULL)
+		snprintf(j->res->detail, sizeof j->res->detail, "%s", CLAIM_WORDS);
 	return r_claim;
 }
 static void b_unclaim(void)
@@ -207,7 +215,8 @@ static void reset(int open)
 	unclaimed_has = 0;
 	model_open = open;
 	r_check = r_admit = r_prepare = r_fetch = r_swap = r_plugin = NN_SVC_OK;
-	r_claim = r_lease = 1;
+	r_claim = NN_SVC_OK;
+	r_lease = 1;
 	r_after = 1;
 	bare = 0;
 }
@@ -270,6 +279,7 @@ static void load(const char *what, int tag, int want_status,
 	j.res = &res;
 	j.board = NULL;
 	nn_core_model_load(&life, cur, &j, &st);
+	memcpy(last_detail, res.detail, sizeof last_detail);
 
 	if (res.status != want_status || st != want_state ||
 	    strcmp(trace, want_trace) != 0 || res.claim != NN_CLAIM_NONE) {
@@ -310,6 +320,7 @@ static void unload(const char *what, int want_status, const char *want_trace)
 	j.res = &res;
 	j.board = NULL;
 	nn_core_model_unload(&life, cur, &j);
+	memcpy(last_detail, res.detail, sizeof last_detail);
 	if (res.status != want_status || strcmp(trace, want_trace) != 0) {
 		printf("  FAIL unload: %s\n       got  %d [%s]\n       want %d [%s]\n",
 		       what, res.status, trace, want_status, want_trace);
@@ -334,11 +345,26 @@ int main(void)
 	reset(1); r_admit = NN_SVC_ERR_STATE;
 	load("precondition refused", N, NN_SVC_ERR_STATE, NN_MODEL_PREVIOUS,
 	     "check admit");
-	reset(1); r_claim = 0;
+	reset(1); r_claim = NN_SVC_ERR_BUSY;
 	load("claim refused, open", N, NN_SVC_ERR_BUSY, UNTOUCHED,
 	     "check admit claim");
-	reset(0); r_claim = 0;
+	ok("claim refused: its words reach the caller",
+	   strcmp(last_detail, CLAIM_WORDS) == 0);
+	reset(0); r_claim = NN_SVC_ERR_BUSY;
 	load("claim refused, empty", N, NN_SVC_ERR_BUSY, UNTOUCHED,
+	     "check admit claim");
+	/* [!] issue #138: a claim refused for another reason keeps its status
+	 * (wio-lite-ai's PSRAM not ready) and, not being BUSY, reports what is
+	 * open as it stands -- like a precondition. */
+	reset(1); r_claim = NN_SVC_ERR_STATE;
+	load("claim refused, not busy", N, NN_SVC_ERR_STATE, NN_MODEL_PREVIOUS,
+	     "check admit claim");
+	ok("claim refused, not busy: its words reach the caller",
+	   strcmp(last_detail, CLAIM_WORDS) == 0);
+	/* [!] a positive answer is not a status (the hook's old "non-zero if
+	 * taken"): refused as BUSY, never admitted */
+	reset(1); r_claim = 1;
+	load("claim answers positive", N, NN_SVC_ERR_BUSY, UNTOUCHED,
 	     "check admit claim");
 	/* a board's precondition answering BUSY (wio-lite-ai's blob store) */
 	reset(1); r_admit = NN_SVC_ERR_BUSY;
@@ -432,8 +458,14 @@ int main(void)
 	/* ---- unload ------------------------------------------------------ */
 	reset(1); r_admit = NN_SVC_ERR_STATE;
 	unload("precondition refused", NN_SVC_ERR_STATE, "admit");
-	reset(1); r_claim = 0;
+	reset(1); r_claim = NN_SVC_ERR_BUSY;
 	unload("claim refused", NN_SVC_ERR_BUSY, "admit claim");
+	ok("unload claim refused: its words reach the caller",
+	   strcmp(last_detail, CLAIM_WORDS) == 0);
+	reset(1); r_claim = NN_SVC_ERR_STATE;
+	unload("claim refused, not busy", NN_SVC_ERR_STATE, "admit claim");
+	reset(1); r_claim = 1;
+	unload("claim answers positive", NN_SVC_ERR_BUSY, "admit claim");
 	reset(1); r_lease = 0;
 	unload("lease refused: nothing changes, the counter stays",
 	       NN_SVC_ERR_BUSY, "admit claim lease unclaim");

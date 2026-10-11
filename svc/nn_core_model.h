@@ -22,7 +22,7 @@
  *   1. the spec's tag is one this board takes          (else SPEC)
  *   2. the board's own check of the spec's arguments   (check_spec)
  *   3. the board's preconditions                       (admit)
- *   4. the claim                                       (else BUSY)
+ *   4. the claim                                       (claim_take; BUSY)
  *   5. had_open, read UNDER the claim
  *   6. the board's preparation                         (prepare; e.g. the NPU)
  *   7. the bytes, resolved and split                   (fetch)     -> REFUSED
@@ -48,8 +48,9 @@
  * [!] A BUSY REFUSAL NEVER REPLACES OR LOSES THE OPEN MODEL (it is answered
  * before the swap; staging into an inactive buffer or an empty-state cleanup
  * may already have run).  This file's
- * own BUSY refusals are the claim and the lease; a board's admit, prepare or
- * fetch hook may answer BUSY too (wio-lite-ai's blob store and OCTOSPI1 guard)
+ * own BUSY refusals are the claim (worded by the board's claim_take, which on
+ * wio-lite-ai holds the OCTOSPI1 guard too) and the lease; a board's admit,
+ * prepare or fetch hook may answer BUSY too (wio-lite-ai's blob store)
  * -- all of them before step 10 -- and a BUSY returned by the swap or the
  * plugin start is reported as NN_SVC_ERR_HW.  The
  * shared command relies on this (issue #131 stage 8): a load refused BUSY has
@@ -156,15 +157,14 @@ struct nn_core_model_board {
 	 *  guard).  NULL: none.  @return NN_SVC_OK or the status to report */
 	int  (*admit)(struct nn_core_model_job *j);
 	/** The claim.  A board that refuses a replacement for its own reasons
-	 *  decides them here, in the same critical section as the claim.
-	 *  @return non-zero if taken
-	 *
-	 *  It takes no job, so a refusal here has no words of its own.  A board
-	 *  whose claim has more than one answer to give (wio-lite-ai,
-	 *  f746g-disco) takes it as admit's LAST step instead -- admit holds
-	 *  nothing when it fails -- and answers this with a constant 1, so
-	 *  nothing runs between the two. */
-	int  (*claim_take)(void);
+	 *  decides them here, in the same critical section as the claim
+	 *  (grove-vision-ai-v2's threshold-call count).  It holds nothing when
+	 *  it refuses, and words the refusal in j->res itself.
+	 *  @return NN_SVC_OK if taken, else the status to report -- normally
+	 *          NN_SVC_ERR_BUSY (issue #138: until then it took no job, and
+	 *          the boards whose claim has words took it inside admit).  A
+	 *          positive value is not a status and is answered BUSY. */
+	int  (*claim_take)(struct nn_core_model_job *j);
 	void (*claim_give)(void);
 	/** Bring up what the load needs, knowing j->had_open.  On failure it gives
 	 *  back what it took itself; the table is not consulted.  NULL: none.

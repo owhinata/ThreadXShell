@@ -70,6 +70,22 @@ static void nn_core_model_answer(struct nn_core_model_job *j, int status,
 	nn_core_model_result(j, status);
 }
 
+/*
+ * The claim's answer as a status (issue #138).  NN_SVC_OK is taken; a refusal
+ * is the board's status, worded by the board -- a claim can be refused for more
+ * than "someone else holds it" (wio-lite-ai's PSRAM not ready is STATE).
+ * [!] A POSITIVE VALUE IS NOT A STATUS, SO IT IS BUSY.  The hook used to answer
+ * "non-zero if taken"; a board still speaking that way is refused, never
+ * admitted -- and its 0 for "refused" cannot compile against the job argument.
+ */
+static int nn_core_model_claim(const struct nn_core_model_board *b,
+                               struct nn_core_model_job *j)
+{
+	int status = b->claim_take(j);
+
+	return status > 0 ? NN_SVC_ERR_BUSY : status;
+}
+
 /* A refusal before the claim: nothing changed, and only a refusal that is not
  * BUSY reads what is open. */
 static void nn_core_model_refuse_unclaimed(const struct nn_core_model_board *b,
@@ -156,8 +172,8 @@ void nn_core_model_load(struct nn_core_model *m,
 		nn_core_model_refuse_unclaimed(b, j, status, state);
 		return;
 	}
-	if (!b->claim_take()) {
-		nn_core_model_refuse_unclaimed(b, j, NN_SVC_ERR_BUSY, state);
+	if ((status = nn_core_model_claim(b, j)) != NN_SVC_OK) {
+		nn_core_model_refuse_unclaimed(b, j, status, state);
 		return;
 	}
 
@@ -248,8 +264,8 @@ void nn_core_model_unload(struct nn_core_model *m,
 		nn_core_model_result(j, status);
 		return;
 	}
-	if (!b->claim_take()) {
-		nn_core_model_result(j, NN_SVC_ERR_BUSY);
+	if ((status = nn_core_model_claim(b, j)) != NN_SVC_OK) {
+		nn_core_model_result(j, status);
 		return;
 	}
 

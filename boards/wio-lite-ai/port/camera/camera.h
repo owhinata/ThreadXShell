@@ -216,12 +216,18 @@ struct camera_stream_stats {
 struct cam_holder;          /* svc/cam_holders.h */
 struct cam_holders_ticket;  /* svc/cam_holders.h */
 
+/** A join's @p colorbar meaning "whatever the running stream has": never
+ *  refused with CAM_ERR_TEST, and a start it makes is without the pattern.
+ *  For a caller that was not asked for `test` (issue #142 review). */
+#define CAM_COLORBAR_ANY (-1)
+
 /**
  * The operator takes hold (`camera stream start`): starts the band stream if
  * nobody held it, otherwise only registers.  @p colorbar (the sensor's COM7 test
  * pattern) takes effect only on a start; a running stream with a different
  * setting refuses (CAM_ERR_TEST).  *@p already (may be NULL) is set when it was
- * already running.  CAM_ERR_BUSY while a stop is still finishing (retry).
+ * already running.  A stop still finishing is waited for (bounded, once);
+ * CAM_ERR_BUSY only if it outlasts that (retry).
  */
 int camera_stream_start(int colorbar, int *already);
 
@@ -229,16 +235,20 @@ int camera_stream_start(int colorbar, int *already);
  * The operator lets go (`camera stream stop`).  [!] Refused with CAM_ERR_IN_USE
  * while another holder needs the stream -- nothing changes and the operator
  * stays (D8); their names go to @p users (up to @p max, *@p nusers; any may be
- * NULL).  Otherwise the stream stops; this waits for the producer (<= 1 s).
+ * NULL).  Otherwise the stream stops; this waits for the producer (<= 1 s)
+ * to end the stream that was running when the stop was asked -- not whatever
+ * runs by the time it looks.  Clears the operator's lost mark.
  */
 int camera_stream_stop(const char **users, int max, int *nusers);
 
 /**
  * Holder @p h joins the stream, taking the operator's place too when nothing
  * streams -- in which case it starts it with @p colorbar.  Joining a running
- * stream with a different @p colorbar is refused (CAM_ERR_TEST).  *@p tk says
- * what this call registered and under which generations, for
- * camera_stream_leave() to undo.  Clears @p h's lost mark.
+ * stream with a different explicit @p colorbar is refused (CAM_ERR_TEST);
+ * CAM_COLORBAR_ANY takes the running one.  A stop still finishing is waited for
+ * as in camera_stream_start().  *@p tk says what this call registered and under
+ * which generations, for camera_stream_leave() to undo.  Clears @p h's lost
+ * mark.
  */
 int camera_stream_join(const struct cam_holder *h, int colorbar,
                        struct cam_holders_ticket *tk);
@@ -247,7 +257,8 @@ int camera_stream_join(const struct cam_holder *h, int colorbar,
  * Holder @p h leaves.  @p undo is the join's ticket when this undoes a failed
  * start (exactly what that join registered goes, and only while it is still the
  * one it made); NULL for an ordinary leave (the operator stays, the stream runs
- * on).  Waits for the stream to stop when this was the last holder.
+ * on), which also clears @p h's lost mark.  Waits for the stream to stop when
+ * this was the last holder.
  */
 int camera_stream_leave(const struct cam_holder *h,
                         const struct cam_holders_ticket *undo);

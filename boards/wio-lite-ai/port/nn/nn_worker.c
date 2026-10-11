@@ -14,6 +14,7 @@
  * lock, as everywhere.
  */
 #include "nn_camera_priv.h"
+#include "nncam_teardown.h"  /* the worker's give (#142 review) */
 
 #include "camera.h"          /* camera_stream_lost(): nn's lost mark (#142) */
 #include "nn.h"
@@ -350,7 +351,16 @@ void nncam_entry(ULONG arg)
 		   the old session itself, and a NEW start take the guards -- and this
 		   give, arriving late, would hand back the new session's.  Given first,
 		   no start can see this worker idle while its give is still to come. */
-		nncam_guards_give();
+		/* [!] Not over a band step no stop has seen drained (issue #142
+		   review, nncam_teardown.h): the producer may still be writing the
+		   input tensor, so the session stays held and the stop whose drain
+		   succeeds gives it back. */
+		{
+			struct nncam_td td = { 0, 0, 0, nncam_drain_pending != 0 };
+
+			if (nncam_td_worker_gives(&td))
+				nncam_guards_give();
+		}
 		nncam_worker_busy = 0;
 	}
 }

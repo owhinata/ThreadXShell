@@ -68,6 +68,7 @@
 #include "camera.h"
 #include "cam_band.h"     /* cam_band_sink: the one band sink (issue #142) */
 #include "cam_holders.h"  /* who holds the stream open (issue #142)        */
+#include "cam_gen.h"      /* which stream a stop waits for (issue #142)    */
 
 #include "ov2640_regs.h"
 #include "stm32h7xx_hal.h"
@@ -210,6 +211,8 @@
 
 /* A frame is ~1/15 s; a second is "the sensor is not producing frames at all". */
 #define CAM_XFER_TIMEOUT_TICKS  1000u
+/* How long a stop waits for the producer's teardown, wall clock (1 kHz tick). */
+#define CAM_STOP_WAIT_TICKS     1000u
 
 /* Frames thrown away before the one we keep live in camera.h (the shell says how
    long a capture will take).  15 is not a guess -- see camera_capture_locked(). */
@@ -342,7 +345,13 @@ static const struct cam_holder *volatile cam_lost[CAM_HOLDERS_MAX];
 static int cam_band_colorbar;
 static void cam_holders_lose_locked(void);
 static volatile int      cam_stream_err;     /* terminal: TE / DCMI OVR          */
-static volatile int      cam_stop_req;
+static volatile int      cam_stop_req;       /* cam_lock: written only under it */
+/* The running (or last) band stream's generation, and the last one a teardown
+ * ended -- both written under cam_lock (cam_gen.h).  A stop names the
+ * generation it asked to end and waits for THAT, so it can never see, or post
+ * a stop onto, a stream started after its own (issue #142 review). */
+static uint32_t          cam_stream_gen;
+static volatile uint32_t cam_stream_done_gen;
 static volatile uint32_t cam_stream_fe;      /* tolerated FIFO/direct-mode errors */
 static volatile uint32_t cam_dcmi_ovr;
 static uint32_t cam_start_tick;
@@ -1419,6 +1428,8 @@ static void cam_stream_teardown(void)
 	cam_band_mode = 0;
 	cam_band_cb   = NULL;
 	cam_band_ctx  = NULL;
+	/* This generation is over: what a waiting stop asks (cam_gen.h). */
+	cam_stream_done_gen = cam_stream_gen;
 	cam_stream_active = 0;      /* last: releases the OCTOSPI1 gate */
 	(void)tx_mutex_put(&cam_lock);
 	LOG_INF("band stop: %lu frames, %lu ms, ovr %lu, fe %lu, late %lu, "
@@ -1591,6 +1602,7 @@ static int cam_band_start_locked(int colorbar, camera_band_fn fn, void *ctx)
 	cam_start_tick    = HAL_GetTick();
 	cam_band_mode     = 1;          /* before active: the ISR reads it */
 	cam_last_mode     = CAM_STREAM_BAND;
+	cam_stream_gen    = cam_gen_next(cam_stream_gen);   /* cam_lock held */
 	cam_stream_active = 1;
 
 	if (HAL_DMAEx_MultiBufferStart_IT(&hdma_dcmi,
@@ -1598,6 +1610,7 @@ static int cam_band_start_locked(int colorbar, camera_band_fn fn, void *ctx)
 	        (uint32_t)(uintptr_t)cam_band[0],
 	        (uint32_t)(uintptr_t)cam_band[1],
 	        CAMERA_BAND_BYTES / 4u) != HAL_OK) {
+		cam_stream_done_gen = cam_stream_gen;   /* it never ran: over */
 		cam_stream_active = 0;
 		cam_band_mode     = 0;
 		cam_band_cb       = NULL;
@@ -1766,30 +1779,32 @@ int camera_band_streaming(void)
 }
 
 /*
- * Ask the producer to stop and wait for it to finish the teardown.  The stop is
- * not done here: the producer owns the DCMI/DMA state machine, and having two
- * threads tear it down is how that state machine gets corrupted.  Waiting is
- * what makes `camera stream stop` mean "the bus is free now" to the caller --
- * which matters because psram_acquire() keys off camera_streaming().
+ * Wait for the band stream of generation @p gen to end.  The stop itself was
+ * requested under cam_lock by cam_holders_stop_locked(), which named @p gen;
+ * the producer does the teardown, because it owns the DCMI/DMA state machine
+ * and two threads tearing it down is how that machine gets corrupted.
+ * Waiting is what makes `camera stream stop` mean "the bus is free now" to
+ * the caller -- which matters because psram_acquire() keys off
+ * camera_streaming().
  *
  * Called WITHOUT cam_lock: the band teardown takes it to settle the holders.
- * Since issue #142 only the holder table's last leaver gets here.
+ *
+ * [!] IT WRITES NOTHING AND ASKS ONLY ABOUT @p gen (issue #142 review).  The
+ * caller can run below a console that starts the next stream as soon as this
+ * one is down; a wait that looked at "is a stream active" and posted a stop
+ * found that NEW stream and stopped it under its holders (cam_gen.h).
  */
-static int camera_stream_halt(void)
+static int camera_stream_wait_end(uint32_t gen)
 {
-	unsigned wait_ms = 0u;
+	ULONG start = tx_time_get();
 
-	if (!info.ready)
-		return CAM_ERR_STATE;
-	if (!cam_stream_active)
-		return CAM_OK;
-	cam_stop_req = 1;
-	(void)tx_semaphore_put(&cam_stream_sem);   /* poke it out of its bounded wait */
-	while (cam_stream_active && wait_ms < 1000u) {
-		tx_thread_sleep(5u);
-		wait_ms += 5u;
+	for (;;) {
+		if (cam_gen_ended(cam_stream_done_gen, gen))
+			return CAM_OK;
+		if ((tx_time_get() - start) >= (ULONG)CAM_STOP_WAIT_TICKS)
+			return CAM_ERR_TIMEOUT;
+		tx_thread_sleep(1u);
 	}
-	return cam_stream_active ? CAM_ERR_TIMEOUT : CAM_OK;
 }
 
 int camera_streaming(void)
@@ -1805,11 +1820,16 @@ int camera_streaming(void)
  * moved only under cam_lock in the same locked region as the start its answer
  * calls for.  A start's claim never outlives that region.
  *
- * THE STOP IS SYNCHRONOUS HERE (camera_stream_halt() waits for the producer),
- * and it waits WITHOUT cam_lock, because the band teardown takes cam_lock to
- * settle the holders.  So a join that arrives while the last leaver's stop is
- * still running finds the table empty and the stream still active, and is
- * refused with CAM_ERR_BUSY -- retryable, the stop is about to finish.
+ * THE STOP IS SYNCHRONOUS HERE (camera_stream_wait_end() waits for the
+ * producer), and it waits WITHOUT cam_lock, because the band teardown takes
+ * cam_lock to settle the holders.  The stop is requested under the lock, for
+ * the generation running then, and the wait asks only whether THAT generation
+ * is over (cam_gen.h) -- it never writes the stop request.  A start or a join
+ * that arrives while that stop is still running finds the table empty and the
+ * stream still active: it gives its claim back, waits (bounded) for the
+ * stopping generation to end and tries once more, rather than refusing a
+ * request that is about to become legal.  Only a stop that outlasts the wait
+ * answers CAM_ERR_BUSY (retryable).
  *
  * TWO WAYS TO END.  The last holder leaving is a stop.  An error (a DCMI
  * overrun, a DMA transfer error) ends the stream too -- this board does not
@@ -1877,47 +1897,85 @@ static int cam_holders_err(int rc)
 }
 
 /* The start a START answer calls for.  cam_lock held, the table claimed by the
- * caller's registration.  A stream still active here is one whose last holder
- * has just left and whose stop is still running: refused, retryable. */
+ * caller's registration.  @p colorbar may be CAM_COLORBAR_ANY ("whatever
+ * runs"), which starts without the test pattern.  A stream still active here is
+ * one whose last holder has just left and whose stop is still running: the
+ * callers wait for it before they get here (cam_stopping_gen_locked()), so this
+ * refusal is the backstop. */
 static int cam_holders_start_locked(int colorbar)
 {
+	int cb = (colorbar == CAM_COLORBAR_ANY) ? 0 : (colorbar ? 1 : 0);
 	int rc;
 
 	if (cam_stream_active)
 		return CAM_ERR_BUSY;
-	rc = cam_band_start_locked(colorbar, cam_band_sink, NULL);
+	rc = cam_band_start_locked(cb, cam_band_sink, NULL);
 	if (rc == CAM_OK)
-		cam_band_colorbar = colorbar ? 1 : 0;
+		cam_band_colorbar = cb;
 	return rc;
 }
 
-/* The last holder left (cam_lock held): ask the producer to stop.  The caller
- * waits for it with camera_stream_halt() after dropping the lock. */
-static int cam_holders_stop_locked(void)
+/* A START answer while the previous stream is still being stopped (cam_lock
+ * held): the generation to wait for, or CAM_GEN_NONE when the camera is down. */
+static uint32_t cam_stopping_gen_locked(void)
+{
+	return cam_stream_active ? cam_stream_gen : CAM_GEN_NONE;
+}
+
+/* Does a running stream's `test` setting refuse @p colorbar?  "Whatever runs"
+ * (CAM_COLORBAR_ANY) never does. */
+static int cam_colorbar_mismatch_locked(int colorbar)
+{
+	if (colorbar == CAM_COLORBAR_ANY)
+		return 0;
+	return (colorbar ? 1 : 0) != cam_band_colorbar;
+}
+
+/* The last holder left (cam_lock held): ask the producer to stop the stream
+ * running now, and say which one that is -- the caller waits for exactly that
+ * generation with camera_stream_wait_end() after dropping the lock.
+ * CAM_GEN_NONE: nothing streams, nothing to wait for. */
+static uint32_t cam_holders_stop_locked(void)
 {
 	if (!cam_stream_active)
-		return 0;
+		return CAM_GEN_NONE;
 	cam_stop_req = 1;
 	(void)tx_semaphore_put(&cam_stream_sem);
-	return 1;
+	return cam_stream_gen;
 }
 
 int camera_stream_start(int colorbar, int *already)
 {
-	int had, rc, hrc;
+	int had, rc, hrc, waited = 0;
 
 	if (already != NULL)
 		*already = 0;
-	rc = op_lock();
-	if (rc != CAM_OK)
-		return rc;
-	had = cam_holders_has(&cam_holds, &cam_manual);
-	hrc = cam_holders_add(&cam_holds, &cam_manual, CAM_HOLDER_KEEPS_STREAM);
-	if (hrc < 0) {
-		op_unlock();
-		return cam_holders_err(hrc);
-	}
-	if (hrc == CAM_HOLDERS_T_START) {
+	for (;;) {
+		rc = op_lock();
+		if (rc != CAM_OK)
+			return rc;
+		had = cam_holders_has(&cam_holds, &cam_manual);
+		hrc = cam_holders_add(&cam_holds, &cam_manual, CAM_HOLDER_KEEPS_STREAM);
+		if (hrc < 0) {
+			op_unlock();
+			return cam_holders_err(hrc);
+		}
+		if (hrc != CAM_HOLDERS_T_START)
+			break;          /* somebody holds it: it streams */
+		{
+			uint32_t stopping = cam_stopping_gen_locked();
+
+			if (stopping != CAM_GEN_NONE) {
+				/* The last stream's stop is still running: give the
+				   claim back, wait for that stream, and try once more. */
+				(void)cam_holders_abort(&cam_holds);
+				op_unlock();
+				if (waited || camera_stream_wait_end(stopping) != CAM_OK)
+					return CAM_ERR_BUSY;
+				waited = 1;
+				continue;
+			}
+		}
 		rc = cam_holders_start_locked(colorbar);
 		if (rc != CAM_OK) {
 			(void)cam_holders_abort(&cam_holds);
@@ -1932,7 +1990,7 @@ int camera_stream_start(int colorbar, int *already)
 	   on a start: the colour bar is the sensor's COM7, written when the stream
 	   is configured, and a restart would take the stream from under nn.  The
 	   same setting is accepted; a different one is refused, not ignored. */
-	if ((colorbar ? 1 : 0) != cam_band_colorbar) {
+	if (cam_colorbar_mismatch_locked(colorbar)) {
 		if (!had)
 			(void)cam_holders_remove(&cam_holds, &cam_manual);
 		op_unlock();
@@ -1947,7 +2005,8 @@ int camera_stream_start(int colorbar, int *already)
 
 int camera_stream_stop(const char **users, int max, int *nusers)
 {
-	int rc, hrc, stop = 0;
+	uint32_t gen;
+	int rc, hrc;
 
 	if (nusers != NULL)
 		*nusers = 0;
@@ -1970,32 +2029,52 @@ int camera_stream_stop(const char **users, int max, int *nusers)
 		op_unlock();
 		return cam_holders_err(hrc);
 	}
+	/* The operator has let go, so a lost mark from an earlier end is answered:
+	   `camera stream stats` stops reporting it (a stop never sets one). */
+	cam_lost_forget_locked(&cam_manual);
 	/* The last holder left -- or nobody held it; a stream nobody accounts for
 	   is still stopped by an explicit stop. */
-	stop = cam_holders_stop_locked();
+	gen = cam_holders_stop_locked();
 	op_unlock();
-	return stop ? camera_stream_halt() : CAM_OK;
+	return camera_stream_wait_end(gen);
 }
 
 int camera_stream_join(const struct cam_holder *h, int colorbar,
                        struct cam_holders_ticket *tk)
 {
-	int rc, hrc;
+	int rc, hrc, waited = 0;
 
 	if (tk != NULL)
 		memset(tk, 0, sizeof *tk);
 	if (h == NULL || tk == NULL || h == &cam_manual)
 		return CAM_ERR_PARAM;
-	rc = op_lock();
-	if (rc != CAM_OK)
-		return rc;
-	hrc = cam_holders_add_or_start(&cam_holds, h, 0u, &cam_manual,
-	                               CAM_HOLDER_KEEPS_STREAM, tk);
-	if (hrc < 0) {
-		op_unlock();
-		return cam_holders_err(hrc);
-	}
-	if (hrc == CAM_HOLDERS_T_START) {
+	for (;;) {
+		rc = op_lock();
+		if (rc != CAM_OK)
+			return rc;
+		hrc = cam_holders_add_or_start(&cam_holds, h, 0u, &cam_manual,
+		                               CAM_HOLDER_KEEPS_STREAM, tk);
+		if (hrc < 0) {
+			op_unlock();
+			return cam_holders_err(hrc);
+		}
+		if (hrc != CAM_HOLDERS_T_START)
+			break;
+		{
+			uint32_t stopping = cam_stopping_gen_locked();
+
+			if (stopping != CAM_GEN_NONE) {
+				/* As camera_stream_start(): wait for the stopping
+				   stream rather than refuse what is about to work. */
+				(void)cam_holders_abort(&cam_holds);
+				memset(tk, 0, sizeof *tk);
+				op_unlock();
+				if (waited || camera_stream_wait_end(stopping) != CAM_OK)
+					return CAM_ERR_BUSY;
+				waited = 1;
+				continue;
+			}
+		}
 		rc = cam_holders_start_locked(colorbar);
 		if (rc != CAM_OK) {
 			(void)cam_holders_abort(&cam_holds);   /* exactly what it added */
@@ -2005,9 +2084,14 @@ int camera_stream_join(const struct cam_holder *h, int colorbar,
 		}
 		(void)cam_holders_commit(&cam_holds);
 		cam_lost_forget_locked(&cam_manual);
-	} else if ((colorbar ? 1 : 0) != cam_band_colorbar) {
-		/* Joining a running stream with a different `test`: refused, and
-		   only what this call added goes back (still under the lock). */
+		cam_lost_forget_locked(h);
+		op_unlock();
+		return CAM_OK;
+	}
+	if (cam_colorbar_mismatch_locked(colorbar)) {
+		/* Joining a running stream with a different explicit `test`:
+		   refused, and only what this call added goes back (still under
+		   the lock). */
 		(void)cam_holders_undo(&cam_holds, h, &cam_manual, tk);
 		memset(tk, 0, sizeof *tk);
 		op_unlock();
@@ -2022,7 +2106,8 @@ int camera_stream_join(const struct cam_holder *h, int colorbar,
 int camera_stream_leave(const struct cam_holder *h,
                         const struct cam_holders_ticket *undo)
 {
-	int rc, hrc, stop = 0;
+	uint32_t gen = CAM_GEN_NONE;
+	int rc, hrc;
 
 	if (h == NULL || h == &cam_manual)
 		return CAM_ERR_PARAM;
@@ -2036,11 +2121,15 @@ int camera_stream_leave(const struct cam_holder *h,
 	else
 		hrc = cam_holders_remove(&cam_holds, h);
 	if (hrc == CAM_HOLDERS_T_STOP)
-		stop = cam_holders_stop_locked();
+		gen = cam_holders_stop_locked();
+	/* An ordinary leave is the holder letting go: its lost mark, if any, is
+	   answered (a rollback's join already cleared it). */
+	if (hrc >= 0 && undo == NULL)
+		cam_lost_forget_locked(h);
 	op_unlock();
 	if (hrc < 0)
 		return cam_holders_err(hrc);
-	return stop ? camera_stream_halt() : CAM_OK;
+	return camera_stream_wait_end(gen);
 }
 
 int camera_stream_holders(const char **names, int max, int *lost_out)

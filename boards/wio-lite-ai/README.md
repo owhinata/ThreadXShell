@@ -1015,8 +1015,9 @@ running, in slot 4, and two things came out of it:
   the bare model, and `nn info`'s plugin lines match what the host's
   `verify_container` printed for the same file, field for field.
 
-One operating note that is not a fault: `camera preview on` refuses with "the
-display is down or its scanout is off" until `lcd on` has run.
+One operating note that is not a fault: while `lcd anim` runs the camera
+preview shows little or nothing and its `dropped` count climbs -- the producer
+only tries the frame lock (issue #142) and the animation holds it.
 
 **Issue #110's runs** (plugin executing; the firmware still had its own decoder
 then, which is what several of these were read against):

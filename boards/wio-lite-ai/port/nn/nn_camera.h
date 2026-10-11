@@ -72,6 +72,8 @@
 #define NNCAM_ERR_DECBUSY (-14) /**< the decoder could not be held still to ask it */
 #define NNCAM_ERR_TEST   (-15)  /**< the camera streams with another `test` setting */
 #define NNCAM_ERR_STILL  (-16)  /**< an `lcd reset` holds the camera still          */
+#define NNCAM_ERR_CAMBUSY (-17) /**< the camera is still stopping, or a capture or
+                                 *   another start holds it -- retry          */
 
 /**
  * The worker thread's (`nn_work`) stack, in DTCM.  Published here since issue #108
@@ -180,6 +182,10 @@ struct nn_camera_stats {
  * while a stream runs for its own reason -- camera_still_claim().)
  */
 /**
+ * @param colorbar      the `test` setting asked for: 0 / 1, or CAM_COLORBAR_ANY
+ *                      (camera.h) to take the running stream as it is -- what a
+ *                      caller that was not asked for `test` passes, so a stream
+ *                      the operator started with the pattern is not refused.
  * @param require_draw  the caller is about to light a PANEL, so a decoder that
  *                      draws nothing is a preview that runs and never
  *                      annotates -- indistinguishable from a broken one.
@@ -203,6 +209,11 @@ int nn_camera_start(int colorbar, int require_draw);
  * and its arena to `nn bench` while something can still write the input tensor.
  * Holding a session nobody can use is recoverable; that is not.  Calling stop again
  * re-checks and completes the release, which is why it is idempotent.
+ *
+ * [!] A DRAIN THAT TIMED OUT IS REMEMBERED (issue #142 review, nncam_teardown.h):
+ * the worker does not give the guards back on its way out, a fresh start is
+ * refused with NNCAM_ERR_TEARING before it touches anything, and the next stop
+ * drains again -- until one sees the band step empty.
  */
 int nn_camera_stop(void);
 

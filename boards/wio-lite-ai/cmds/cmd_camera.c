@@ -251,7 +251,7 @@ static int cmd_camera_info(struct cli_instance *sh, int argc, char **argv)
 	          (unsigned long)(ci.i2c_ker_hz % 1000000u / 100000u));
 	cli_print(sh, "lines:   PWDN PE7 active high, RESETB PH12 active low\r\n");
 	cli_print(sh, "dcmi:    8-bit, PCK rising, VS/HS low, DMA2_Stream1 -> "
-	              "PSRAM ring (stream) / AXI-SRAM bands (preview)\r\n");
+	              "AXI-SRAM bands\r\n");
 #if BSP_ENABLE_LCD
 	{
 		uint32_t shown, dropped, blit_us;
@@ -760,6 +760,12 @@ static int cmd_stream_start(struct cli_instance *sh, int argc, char **argv)
 		report(sh, rc);
 		return 1;
 	}
+#if BSP_ENABLE_LCD
+	/* The preview's shown / dropped describe this stream, not every stream
+	   since boot (issue #142 review).  Only when this start lit the camera. */
+	if (!already)
+		cam_preview_stats_reset();
+#endif
 	cli_print(sh, "camera: streaming %s%s -- `camera stream stats` / `stop`\r\n",
 	          colorbar ? "colorbar" : "live", already ? " (already running)" : "");
 	return 0;

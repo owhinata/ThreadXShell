@@ -4,7 +4,7 @@
  */
 /**
  * @file    nn_stream_state.c
- * @brief   The live-inference teardown table (issues #99, #129).  See the
+ * @brief   The live-inference teardown table (issues #99, #129, #142).  See the
  *          header for why this is a pure function that nothing else lives
  *          beside.
  */
@@ -12,58 +12,55 @@
 
 #include "nn_stream_state.h"
 
-int nn_stream_may_detach(int cam_rc, int worker_join)
+int nn_stream_may_join_worker(int ov_rc)
 {
 	/*
-	 * [!] EXACTLY ONE VALUE, ENUMERATED RATHER THAN EXCLUDED.  "Anything that
-	 * is not an outright failure" would let CAM_ERR_LOCKED through -- which is
-	 * the answer that says the producer was never asked -- and unlinking a sink
-	 * a live producer may be inside is the failure the camera's lost-producer
-	 * state exists to prevent.  And the worker likewise: joined, not "not
-	 * tried" and not anything else (issue #129).
+	 * [!] EXACTLY ONE VALUE, ENUMERATED RATHER THAN EXCLUDED.  A timeout is
+	 * "the producer or the panel was still counted inside nn's step", and a
+	 * worker joined then could be handed a new job the moment this returns.
 	 */
-	return (cam_rc == NN_STREAM_CAM_OK && worker_join == NN_STREAM_WJOIN_OK);
+	return (ov_rc == NN_STREAM_CAM_OK);
 }
 
-int nn_stream_may_join_worker(int cam_rc)
+int nn_stream_may_release(int ov_rc, int worker_join)
 {
-	/* The same single value as the detach, for the same reason one step
-	 * earlier: a producer that may still be running may still hand over. */
-	return (cam_rc == NN_STREAM_CAM_OK);
+	/* The overlay AND the worker, each by its one success value (issues
+	 * #129, #142): not "not tried", not "anything but a failure". */
+	return (ov_rc == NN_STREAM_CAM_OK && worker_join == NN_STREAM_WJOIN_OK);
 }
 
-void nn_stream_stop_decide(int cam_rc, int worker_join, int detach_attempted,
-                           int detach_rc, struct nn_stream_verdict *out)
+void nn_stream_stop_decide(int ov_rc, int worker_join, int leave_attempted,
+                           int leave_rc, struct nn_stream_verdict *out)
 {
 	if (out == NULL)
 		return;
 
-	if (cam_rc != NN_STREAM_CAM_OK) {
-		switch (cam_rc) {
-		case NN_STREAM_CAM_LOCKED:
-			/* Nothing was touched, and there is now a command that can ask
-			   again on its own.  See the note in the header. */
-			out->act = (unsigned char)NN_STREAM_ACT_RETRY;
-			out->why = (unsigned char)NN_STREAM_WHY_CAM_LOCKED;
-			return;
+	if (ov_rc != NN_STREAM_CAM_OK) {
+		switch (ov_rc) {
 		case NN_STREAM_CAM_TIMEOUT:
-			out->act = (unsigned char)NN_STREAM_ACT_TERMINAL;
-			out->why = (unsigned char)NN_STREAM_WHY_CAM_LOST;
+			/* The overlay is off and stays off; what is left is a count
+			   that had not reached zero by the deadline -- the panel's
+			   blit is bounded by its own DMA timeout, so a second stop
+			   waits again (issue #142, the step rule: a drain that times
+			   out keeps the claim and is retried, never terminal). */
+			out->act = (unsigned char)NN_STREAM_ACT_RETRY;
+			out->why = (unsigned char)NN_STREAM_WHY_OV_BUSY;
 			return;
 		case NN_STREAM_CAM_STATE:
 		default:
-			/* Fail closed: an unrecognised code is not evidence of
-			   quiescence. */
+			/* Fail closed: the sink is lost or the camera ended
+			   unconfirmed, or a code nobody documented -- none of it is
+			   evidence that nothing is inside the overlay. */
 			out->act = (unsigned char)NN_STREAM_ACT_TERMINAL;
-			out->why = (unsigned char)NN_STREAM_WHY_CAM_STATE;
+			out->why = (unsigned char)NN_STREAM_WHY_SINK_LOST;
 			return;
 		}
 	}
 
 	/*
-	 * The worker, between the producer and the panel (issue #129).  Reached
-	 * only on a confirmed producer stop; above it the join is not attempted
-	 * and whatever was passed is ignored, like a leftover detach code.
+	 * The worker, between the overlay and the leave (issue #129).  Reached
+	 * only behind a proven overlay; above it the join is not attempted and
+	 * whatever was passed is ignored, like a leftover leave code.
 	 */
 	switch (worker_join) {
 	case NN_STREAM_WJOIN_OK:
@@ -71,7 +68,7 @@ void nn_stream_stop_decide(int cam_rc, int worker_join, int detach_attempted,
 	case NN_STREAM_WJOIN_NOT_TRIED:
 	case NN_STREAM_WJOIN_FAILED:
 	default:
-		/* [!] Fail closed, whatever the detach said: a worker that may
+		/* [!] Fail closed, whatever the leave said: a worker that may
 		 * still be inside the NPU or the plugin is not quiescent, a join
 		 * the caller skipped is not evidence that it is, and neither is an
 		 * unrecognised join result. */
@@ -80,33 +77,42 @@ void nn_stream_stop_decide(int cam_rc, int worker_join, int detach_attempted,
 		return;
 	}
 
-	if (!detach_attempted) {
-		/* The camera confirmed but the caller skipped the second half, so the
-		   sink is still linked and a panel thread may still be in it.  A caller
+	if (!leave_attempted) {
+		/* Both proven but the caller skipped the leave: nn still holds the
+		   camera, and the claim must not go back with it held.  A caller
 		   bug, and the safe reading of one. */
 		out->act = (unsigned char)NN_STREAM_ACT_TERMINAL;
-		out->why = (unsigned char)NN_STREAM_WHY_SINK_LOST;
+		out->why = (unsigned char)NN_STREAM_WHY_CAM_STATE;
 		return;
 	}
 
-	switch (detach_rc) {
+	switch (leave_rc) {
 	case NN_STREAM_CAM_OK:
 		out->act = (unsigned char)NN_STREAM_ACT_DONE;
 		out->why = (unsigned char)NN_STREAM_WHY_OK;
 		return;
 	case NN_STREAM_CAM_BUSY:
-		/* The core says a transition or a callback of ours is still in flight
-		   and to ask again; the sink is put back where it was.  Latching
-		   terminal here would strand the panel until reboot for something that
-		   clears by itself (issue #79). */
+		/* A camera start or stop held the holder lock past the wait, or the
+		   last place's unlink found a transition in flight and put the
+		   sink back (issue #79).  Latching terminal here would strand the
+		   panel until reboot for something that clears by itself. */
 		out->act = (unsigned char)NN_STREAM_ACT_RETRY;
 		out->why = (unsigned char)NN_STREAM_WHY_SINK_BUSY;
 		return;
+	case NN_STREAM_CAM_LOCKED:
+		/* The last place's camera stop never got the API: nothing was
+		   asked and nothing touched. */
+		out->act = (unsigned char)NN_STREAM_ACT_RETRY;
+		out->why = (unsigned char)NN_STREAM_WHY_CAM_LOCKED;
+		return;
 	case NN_STREAM_CAM_TIMEOUT:
+		out->act = (unsigned char)NN_STREAM_ACT_TERMINAL;
+		out->why = (unsigned char)NN_STREAM_WHY_CAM_LOST;
+		return;
 	case NN_STREAM_CAM_STATE:
 	default:
 		out->act = (unsigned char)NN_STREAM_ACT_TERMINAL;
-		out->why = (unsigned char)NN_STREAM_WHY_SINK_LOST;
+		out->why = (unsigned char)NN_STREAM_WHY_CAM_STATE;
 		return;
 	}
 }

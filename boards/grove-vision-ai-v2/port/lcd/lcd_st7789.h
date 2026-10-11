@@ -87,6 +87,15 @@ uint32_t lcd_sclk_hz(void);
 /** Backlight on/off (PA2).  Safe before init only after the pin is muxed. */
 void lcd_backlight(int on);
 
+/**
+ * Whether the panel is lit, as lcd_backlight() last set it (issue #142) --
+ * the logical "display on", the same role as the other two boards'
+ * ltdc_display_on().  The camera's panel thread asks it, without the panel
+ * guard, before each frame: a dark panel is not drawn on.  Commands set it only
+ * through lcd_backlight().
+ */
+int lcd_display_on(void);
+
 /* ---- orientation (issue #31) --------------------------------------------- */
 
 /*

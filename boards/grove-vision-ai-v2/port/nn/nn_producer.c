@@ -55,8 +55,9 @@ int nn_ov_prep(void *ctx, unsigned part, unsigned nparts)
 
 	/* The record generation this frame publishes under (issue #118).  No
 	 * boundary can move it while this producer is inside consume(): the
-	 * stream's start takes its boundary before the sink is attached, and its
-	 * stop only after the producer AND the worker are confirmed out. */
+	 * stream's start takes its boundary before its overlay is put on the
+	 * sink, and its stop only after the overlay's count is zero and the
+	 * worker is joined (issue #142). */
 	nn_ov_job.gen        = nn_rec_gen();
 	nn_ov_job.prep_ticks = e1 - e0;
 	nn_ov_job.t_hand     = e1;

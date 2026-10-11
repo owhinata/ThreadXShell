@@ -140,7 +140,7 @@ void tx_application_define(void *first_unused_memory)
 	 * posts a semaphore FROM AN INTERRUPT, so the semaphore has to exist
 	 * before anything can enable a datapath line.  The thread starts
 	 * immediately and parks on its start semaphore; no hardware is touched
-	 * until `camera probe` or `camera preview` asks for it. */
+	 * until `camera probe` or `camera stream start` asks for it. */
 	camera_create_objects();
 
 	/* The panel sink's own thread (issue #57).  The blit no longer runs on

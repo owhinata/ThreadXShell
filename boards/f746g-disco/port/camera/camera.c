@@ -407,23 +407,27 @@ static int          cam_start_colorbar;    /* colorbar of the running base (reco
    frame(s), and the 1-2 frames in flight are discarded.  Anything that is not a
    plain overrun (DMA TE, DCMI sync error / stop timeout, a failed step) stays
    terminal and takes the teardown + auto-recovery path above.
-   CAM_RESYNC_GIVEUP: consecutive resyncs with no frame published in between ->
-   terminal.  Every resync costs at least one frame (CAPTURE waits for the next
-   frame start), so 30 is about one second at the fastest streamed rate (30 fps)
-   and two at 15 fps -- a persistent overrun then falls back to the escalating
-   CAM_RECOVER_* path instead of resyncing forever.
+   CAM_RESYNC_GIVEUP: consecutive resyncs with no frame COMPLETED in between ->
+   terminal.  A completion is the DMA's buffer flip as cam_stream_service() sees
+   it, published or not: a frame dropped because every slot is pinned still
+   proves the capture runs, and counting it as a failure would let a slow
+   subscriber's overruns pile up to the limit (issue #138).  Every resync costs
+   at least one frame (CAPTURE waits for the next frame start), so 30 is about
+   one second at the fastest streamed rate (30 fps) and two at 15 fps -- a
+   persistent overrun then falls back to the escalating CAM_RECOVER_* path
+   instead of resyncing forever.
    CAM_RESYNC_CAPTURE_MS: bound for CAPTURE to read 0 after it is cleared (in
    continuous mode the clear takes effect at the frame end, RM0385 17.5.1) --
    a few frames even at night-mode frame rates.  CAM_RESYNC_DMA_MS: bound for the
    stream EN bit to read 0 (RM0385 8.3.18: it drops once the current beat ends).
    CAM_RESYNC_FIFO_READS: the DCMI FIFO is 8 words; reading DR more than that
    without FNE clearing means the FIFO is still being filled -> terminal. */
-#define CAM_RESYNC_GIVEUP      30u    /* consecutive resyncs without a publish     */
+#define CAM_RESYNC_GIVEUP      30u    /* consecutive resyncs without a completion  */
 #define CAM_RESYNC_CAPTURE_MS  500u   /* ms: CAPTURE clear wait bound              */
 #define CAM_RESYNC_DMA_MS      10u    /* ms: DMA stream EN == 0 wait bound         */
 #define CAM_RESYNC_FIFO_READS  64u    /* DR reads to empty the 8-word DCMI FIFO    */
 static volatile int cam_resync_req;        /* raster OVR seen: producer resyncs     */
-static uint32_t     cam_resync_run;        /* consecutive resyncs since a publish   */
+static uint32_t     cam_resync_run;        /* resyncs in a row since a completion  */
 
 /* ---- locking ------------------------------------------------------------ */
 /* Public API entries take the mutex here; all real work below lives in
@@ -2256,6 +2260,10 @@ static void cam_stream_service(int had_sem)
 	ct = (DMA2_Stream1->CR & DMA_SxCR_CT) ? 1u : 0u;
 	if (ct != cam_last_ct) {
 		cam_last_ct = ct;
+		/* A frame completed, so the resync run is over (issues #137, #138)
+		   -- whether or not a slot is free to publish it.  A resync restarts
+		   at M0 with cam_last_ct = 0, so only a real completion gets here. */
+		cam_resync_run = 0;
 		/* CT==1 -> M0 just completed; CT==0 -> M1 just completed (the HAL
 		   HAL_DMA_IRQHandler DBM dispatch mirrors this). */
 		done = ct ? cam_m0 : cam_m1;
@@ -2276,7 +2284,6 @@ static void cam_stream_service(int had_sem)
 			                       (uint16_t)(mode.width *
 			                                  mode.bytes_per_pixel));
 			published = 1;
-			cam_resync_run = 0;     /* issue #137: the resync run is over */
 		}
 		/* freed == NULL: no free slot, drop (do not publish); the M-reg keeps
 		   pointing at `done`, so the DMA simply refills it next cycle. */

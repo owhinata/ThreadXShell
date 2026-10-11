@@ -530,9 +530,12 @@ and the escalating auto-recovery of owhinata/stm32f746g-disco#100 takes over:
 - an error indication without an overrun in it;
 - CAPTURE not clearing within 500 ms, EN not clearing within 10 ms, the FIFO not
   draining, or a DMA re-init / restart failure;
-- the 30th resync in a row with no frame published between them (so at most 29
+- the 30th resync in a row with no frame completed between them (so at most 29
   in-place restarts, about one second at 30 fps) -- a persistent overrun falls
-  back to the escalating path rather than resyncing forever.
+  back to the escalating path rather than resyncing forever.  A completed frame
+  ends the run even when every slot is pinned and it is dropped rather than
+  published (issue #138): the capture is running, and a slow subscriber's
+  overruns must not add up to the limit.
 
 The terminals decided inside the resync (the last two items, and an error code
 or raw flag found there) log `DCMI overrun: in-place resync failed (<reason>);

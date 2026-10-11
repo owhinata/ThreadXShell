@@ -217,11 +217,11 @@ static uint32_t nn_core_ticks(void)
 static void nn_core_counts_of(struct nn_core_raw *raw, void *keep)
 {
 	struct camera_stats cs;
-	struct nn_overlay_stats os;
+	struct nn_camera_stats os;
 
 	(void)keep;
 	camera_stream_stats(&cs);
-	nn_overlay_stats(&os);
+	nn_camera_stats(&os);
 	raw->offered        = cs.frames;
 	raw->skipped        = os.skipped;
 	raw->infers         = os.inferences;
@@ -1208,7 +1208,7 @@ static void nn_teardown(int oneshot, struct nn_stream_verdict *v)
 
 	/* [!] BEFORE the camera stop, always: it is what keeps the frame in flight
 	 * from starting an inference the join would then have to wait out. */
-	nn_overlay_request_stop();
+	nn_camera_request_stop();
 	cam_rc = camera_stream_stop();
 
 	/*
@@ -1292,7 +1292,7 @@ static int nn_run_no_result(int shot, struct nn_op_result *res)
 		return NN_SVC_ERR_HW;
 	case NN_OV_SHOT_NO_OUTPUTS:
 		nn_detail_set("output %u of the model is unreadable",
-		              nn_overlay_shot_index());
+		              nn_camera_shot_index());
 		return NN_SVC_ERR_HW;
 	case NN_OV_SHOT_INVOKE_FAILED:
 		nn_detail_set("inference failed");
@@ -1419,7 +1419,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 * nothing is linked and nothing streams -- so the worker, armed and never
 	 * handed a frame, is parked again at once and the one-shot given back.
 	 */
-	rc = cam_capture_sink_attach_and_stream(nn_overlay_arm_oneshot());
+	rc = cam_capture_sink_attach_and_stream(nn_camera_arm_oneshot());
 	if (rc != CAM_OK) {
 		if (rc == CAM_ERR_BUSY)
 			nn_detail_set("the camera is already streaming, or another "
@@ -1444,7 +1444,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	t0 = tx_time_get();
 	for (;;) {
 		struct camera_stats cs;
-		int finished = (nn_overlay_shot() != (int)NN_OV_SHOT_NONE);
+		int finished = (nn_camera_shot() != (int)NN_OV_SHOT_NONE);
 		int published;
 
 		nn_rec_snapshot(&probe, NULL);
@@ -1520,7 +1520,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		status = NN_SVC_OK;
 		break;
 	case NN_RUN_NO_RESULT:
-		status = nn_run_no_result(nn_overlay_shot(), res);
+		status = nn_run_no_result(nn_camera_shot(), res);
 		break;
 	case NN_RUN_LOST:
 		nn_detail_set("the camera stream was lost before an inference "
@@ -1933,7 +1933,7 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		return;
 	}
 	acc0 = nn_rec_boundary_base();
-	rc = cam_lcd_sink_attach_and_stream(nn_overlay_arm());
+	rc = cam_lcd_sink_attach_and_stream(nn_camera_arm());
 	if (rc != CAM_OK) {
 		if (rc == CAM_ERR_BUSY)
 			nn_detail_set("the camera is already streaming, or another "
@@ -2186,7 +2186,7 @@ _Static_assert(sizeof(NN_LINE_WORKER) - 1u - 4u * 3u + 4u * 10u <
 int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
                         char *buf, size_t cap)
 {
-	struct nn_overlay_stats os;
+	struct nn_camera_stats os;
 
 	if (buf == NULL || cap == 0u)
 		return NN_SVC_ERR_ARG;
@@ -2216,7 +2216,7 @@ int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
 		return 1;
 	}
 
-	nn_overlay_stats(&os);
+	nn_camera_stats(&os);
 	switch (index) {
 	case 0u: {
 		/* [!] ITEMS, NOT FACES (issue #105).  This is the sum of what the

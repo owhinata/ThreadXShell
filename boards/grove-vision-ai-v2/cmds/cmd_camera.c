@@ -758,9 +758,9 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 	 * while the sink row above no longer contains them.
 	 */
 	{
-		struct nn_overlay_stats ns;
+		struct nn_camera_stats ns;
 
-		nn_overlay_stats(&ns);
+		nn_camera_stats(&ns);
 		if (ns.prof_frames != 0u && ns.prof_ok) {
 			cli_print(sh, "nn sink  : %lu frame(s), last nn stream "
 			              "[prep: producer; rest: worker]\r\n",

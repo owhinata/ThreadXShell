@@ -12,7 +12,7 @@
  * WHY IT IS IN THE PORT AND NOT IN cmds/.  None of it runs on the shell thread
  * that typed the command: process() runs on the CAMERA PRODUCER, draw() on the
  * panel thread, and since issue #129 the invoke, decode and publish on the
- * INFERENCE WORKER (nn_worker.h), through nn_overlay_work().  A file under
+ * INFERENCE WORKER (nn_worker.h), through nn_camera_work().  A file under
  * cmds/ that quietly executed there would be the kind of layering accident
  * that reads fine and is discovered during a debugging session.
  *
@@ -22,8 +22,8 @@
  * this, and it must still be there.  The `nn` gate, held for the whole life of
  * the stream, is what keeps a second caller out.
  */
-#ifndef NN_OVERLAY_H
-#define NN_OVERLAY_H
+#ifndef NN_CAMERA_H
+#define NN_CAMERA_H
 
 #include <stdint.h>
 
@@ -34,7 +34,7 @@ extern "C" {
 #endif
 
 /** What a stream has done, for `nn stream stats`. */
-struct nn_overlay_stats {
+struct nn_camera_stats {
 	uint32_t inferences;   /**< frames run through the NPU               */
 	uint32_t detections;   /**< faces drawn, summed over frames          */
 	uint32_t skipped;      /**< frames not inferred: a stop was pending, or
@@ -99,41 +99,41 @@ struct nn_overlay_stats {
  *
  * @return the vtable to pass to cam_lcd_sink_attach_and_stream(); never NULL.
  */
-const struct cam_lcd_overlay *nn_overlay_arm(void);
+const struct cam_lcd_overlay *nn_camera_arm(void);
 
 /**
  * @brief  The worker's half of one frame: invoke, plugin lease, then the shared
  *         frame path's geometry, decode, publish and account (issues #129,
  *         #130).
  *
- * Called by the inference worker only, after nn_overlay_take() -- so the job
+ * Called by the inference worker only, after nn_camera_take() -- so the job
  * the producer wrote is its alone, and the input and output tensors are not the
  * producer's until it returns.  It ends the job itself: a stream asks for the
  * next frame (DONE), a one-shot for nothing more (DONE_LAST).
  */
-void nn_overlay_work(void);
+void nn_camera_work(void);
 
 /*
  * The hand-over word (svc/nn_handoff.h), which lives with the overlay's
  * frame-path state since issue #130 (svc/nn_core_frame.h).  For nn_worker.c.
  */
 /** IDLE -> WANT.  @return non-zero if armed. */
-int nn_overlay_want(void);
+int nn_camera_want(void);
 /** HANDED -> RUNNING.  @return non-zero if a job was taken (else a stale
  *  wake-up). */
-int nn_overlay_take(void);
+int nn_camera_take(void);
 /** IDLE / WANT / FILLING -> IDLE, once the producer is confirmed out.
  *  @return non-zero if joined. */
-int nn_overlay_join(void);
+int nn_camera_join(void);
 
-/** How a one-shot's frame ended (nn_overlay_shot()).  NONE until it has. */
+/** How a one-shot's frame ended (nn_camera_shot()).  NONE until it has. */
 #define NN_OV_SHOT_NONE          0u
 #define NN_OV_SHOT_PUBLISHED     1u   /**< a result (or the raw outputs) went
                                            to the record                    */
 #define NN_OV_SHOT_PREP_FAILED   2u   /**< the producer could not prepare it */
 #define NN_OV_SHOT_STOPPED       3u   /**< a stop came first; no invoke      */
 #define NN_OV_SHOT_NO_OUTPUTS    4u   /**< an output tensor was unreadable
-                                           (nn_overlay_shot_index())      */
+                                           (nn_camera_shot_index())       */
 #define NN_OV_SHOT_INVOKE_FAILED 5u
 #define NN_OV_SHOT_LEASE_TIMEOUT 6u   /**< inferred, not decoded             */
 #define NN_OV_SHOT_NOT_HELD      7u   /**< the decode refused an unleased call */
@@ -148,16 +148,16 @@ int nn_overlay_join(void);
  *
  * @return the vtable to pass to cam_capture_sink_attach_and_stream()
  */
-const struct cam_lcd_overlay *nn_overlay_arm_oneshot(void);
+const struct cam_lcd_overlay *nn_camera_arm_oneshot(void);
 
 /** How the one-shot's frame ended, NN_OV_SHOT_*.  Read it BEFORE the record's
  *  count: the worker publishes and only then sets this. */
-int nn_overlay_shot(void);
+int nn_camera_shot(void);
 
 /** With NN_OV_SHOT_NO_OUTPUTS: the index of the output that could not be read
  *  (review of a438f76 -- `nn run` used to name it).  Read after
- *  nn_overlay_shot(). */
-unsigned nn_overlay_shot_index(void);
+ *  nn_camera_shot(). */
+unsigned nn_camera_shot_index(void);
 
 /**
  * @brief  Ask the overlay to stop doing work.
@@ -174,17 +174,17 @@ unsigned nn_overlay_shot_index(void);
  * join of the worker (terminal when it runs out, issue #129) are what make the
  * remainder safe.
  */
-void nn_overlay_request_stop(void);
+void nn_camera_request_stop(void);
 
 /**
  * Snapshot the counters.  Safe at any time: the word-sized counters need no
  * care, and the 64-bit stage accumulators behind prep/invoke/decode are copied
  * under a critical section (issue #60), same as the camera's own profile.
  */
-void nn_overlay_stats(struct nn_overlay_stats *out);
+void nn_camera_stats(struct nn_camera_stats *out);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* NN_OVERLAY_H */
+#endif /* NN_CAMERA_H */

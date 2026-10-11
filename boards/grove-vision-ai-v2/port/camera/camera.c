@@ -235,6 +235,10 @@ static volatile uint32_t cam_evt_benign;
 
 /* Counters (producer thread only, except cam_evt_benign above). */
 static uint32_t cam_frames;
+/* Frames the sensor delivered since the last successful bring-up (issue
+ * #115); see camera_frames_since_bringup().  Zeroed by cam_bringup() (no
+ * stream running), counted by the producer only, saturating. */
+static volatile uint32_t cam_frames_since_bringup;
 static uint32_t cam_timeouts;
 static uint32_t cam_retries;
 static uint32_t cam_csirx_errors;
@@ -1039,6 +1043,9 @@ static int cam_bringup(void)
 
 	cam_state = CAM_ST_READY;
 	cam_datapath_configured = 0u;
+	/* The mode table just went in, so the on-chip AEC/AGC starts over from
+	 * its defaults (issue #115). */
+	cam_frames_since_bringup = 0u;
 	LOG_INF("camera up (chip %08lx%s)",
 	        (unsigned long)info.chip_version, cam_rev_c ? ", rev C" : "");
 	return CAM_OK;
@@ -1327,6 +1334,12 @@ static void cam_publish(const uint8_t *raw)
 	 * pixels must be readable before anything else is allowed to matter,
 	 * and the arm must not wait for the packer. */
 	t1 = cam_now();
+
+	/* Before the acquire, so a frame the ring drops still counts: the sensor
+	 * exposed it, and this is what one-shot inference waits on (issue #115).
+	 * Before the publish, so the sinks consuming this frame see it counted. */
+	if (cam_frames_since_bringup != UINT32_MAX)
+		cam_frames_since_bringup++;
 
 	slot = frame_pipeline_acquire(&cam_pipe);
 	if (slot == NULL)
@@ -1878,6 +1891,11 @@ int camera_probe(struct camera_probe_info *out)
 const uint8_t *camera_raw_frame(void)
 {
 	return cam_dp_completed_buffer();
+}
+
+uint32_t camera_frames_since_bringup(void)
+{
+	return cam_frames_since_bringup;
 }
 
 /*

@@ -164,6 +164,27 @@ int camera_capture_raw(void);
 const uint8_t *camera_raw_frame(void);
 
 /**
+ * @return how many frames the sensor has delivered to the producer since the
+ *         last successful bring-up (issue #115), including the one being
+ *         published right now when called from inside a sink's consume().
+ *
+ * What it measures is the SENSOR, not a stream: zeroed when bring-up powers the
+ * sensor and loads its mode table (which restarts its on-chip AEC/AGC from the
+ * table's defaults), and counted on every frame-ready the producer takes --
+ * before the publish, so a frame the ring drops as an overrun counts too, since
+ * the sensor still exposed it.  A stream stop does not zero it (the sensor keeps
+ * its power and its converged exposure); only the next bring-up does.  The
+ * one-shot capture (camera_capture()) does not count: it does not run on the
+ * producer.
+ *
+ * Written by the producer (the count) and by bring-up (the zero, under the API
+ * mutex with no stream running); one aligned word, so a read from any thread is
+ * one load.  SATURATES at UINT32_MAX rather than wrapping: a wrap would make a
+ * long-settled sensor look freshly powered.
+ */
+uint32_t camera_frames_since_bringup(void);
+
+/**
  * @brief  Start / stop continuous capture on the producer thread.
  *
  * camera_stream_start() returns once the first frame is on its way; it does not

@@ -123,6 +123,12 @@ int nn_camera_process(void *ctx, const void *pixels,
 	 * takes no other: the frames after it go straight back. */
 	if (oneshot && nn_ov_shot != NN_OV_SHOT_NONE)
 		return -1;
+	/* A one-shot right after bring-up waits for the sensor's AEC/AGC to
+	 * settle: this frame is not taken, the next one is asked (issue #115).
+	 * The count includes this frame, so the first one taken is the one after
+	 * the NN_ONESHOT_WARM_FRAMES discarded.  A stream does not skip. */
+	if (oneshot && camera_frames_since_bringup() <= NN_ONESHOT_WARM_FRAMES)
+		return -1;
 
 	/*
 	 * [!] THE INPUT IS THE PRODUCER'S ONLY WHILE THE WORKER WANTS A FRAME

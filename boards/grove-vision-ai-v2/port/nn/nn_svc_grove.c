@@ -1289,6 +1289,10 @@ static const char *nn_stream_why_text(unsigned char why);
  * and the join's is "a result that started did not come back".  Derived from:
  *   - the first frame of a freshly started stream: the camera's own
  *     frame timeout                                       CAM_FRAME_TIMEOUT_TICKS
+ *   - the frames a one-shot right after bring-up skips while the sensor's
+ *     AEC/AGC settles (issue #115), each at the longest a
+ *     frame may take before the producer calls it lost    NN_ONESHOT_WARM_FRAMES
+ *                                                         x CAM_FRAME_TIMEOUT_TICKS
  *   - one inference at its worst: the ethos-u driver can take its semaphore
  *     twice (npu_hw.h)                                    2 x NPU_INFERENCE_TIMEOUT_TICKS
  *   - the plugin lease the worker waits for              PLUGIN_LEASE_WAIT_MS
@@ -1301,7 +1305,9 @@ static const char *nn_stream_why_text(unsigned char why);
 #define NN_RUN_MS_TO_TICKS(ms) \
 	(((ms) * (unsigned)TX_TIMER_TICKS_PER_SECOND + 999u) / 1000u)
 #define NN_RUN_WAIT_TICKS                                      \
-	(CAM_FRAME_TIMEOUT_TICKS + 2u * NPU_INFERENCE_TIMEOUT_TICKS + \
+	(CAM_FRAME_TIMEOUT_TICKS +                                \
+	 NN_ONESHOT_WARM_FRAMES * CAM_FRAME_TIMEOUT_TICKS +       \
+	 2u * NPU_INFERENCE_TIMEOUT_TICKS +                       \
 	 NN_RUN_MS_TO_TICKS(PLUGIN_LEASE_WAIT_MS) +               \
 	 NN_RUN_MS_TO_TICKS(NN_RUN_WAIT_SLACK_MS))
 

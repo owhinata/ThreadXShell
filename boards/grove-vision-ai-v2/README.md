@@ -4583,8 +4583,9 @@ plugin question, under the lease, each caller its own way
 (`port/nn/nn_outputs.c`): a bare model counts every output and describes the
 first eight it can read; `nn run` with a plugin decodes the first eight and
 names an output it cannot read; a stream refuses a model with more than eight.  The console waits on the record,
-on the wall clock, at most **4,300 ms**: the camera's first-frame timeout
-(`CAM_FRAME_TIMEOUT_TICKS`, 2 s) + one inference at its worst (2 x 1 s) + the
+on the wall clock, at most **34,300 ms**: the camera's first-frame timeout
+(`CAM_FRAME_TIMEOUT_TICKS`, 2 s) + the settling frames below at that same
+timeout each (15 x 2 s) + one inference at its worst (2 x 1 s) + the
 lease wait (50 ms) + 250 ms of slack.  That is deliberately not the join's
 number: this one is "no result came", the join's is "a result that started did
 not come back".  The wait ends one of five ways (`nn_run_wait.c`, host-tested
@@ -4599,6 +4600,21 @@ frame `nn run` sees is the first frame the worker wants after the overlay goes
 on -- of a running stream, or of one this run started -- where it used to be one
 stopped `camera_capture()` frame.  `camera capture` itself is
 unchanged.
+
+**[!] `nn run` skips the sensor's first 15 frames after a bring-up** (issue
+#115, `NN_ONESHOT_WARM_FRAMES` in `port/nn/nn_camera.h`).  The model's input is
+the raw planar B/G/R the datapath wrote, which the software white balance never
+touches, so the only thing that has to settle in it is the OV5647's on-chip
+AEC/AGC -- and that restarts from the mode table's defaults at every bring-up.
+Measured (2026-10-12, RST, `lcd off`, a face held still): `nn stream start
+--frames 300` ended at items 295 / infers 300, i.e. the first 5 frames found
+nothing, and `nn run` straight after a reset found nothing on its first call and
+the face on its second.  15 is three times that, as wio's `CAMERA_WARM_FRAMES`;
+at ~37 fps it is about 0.4 s.  The count is the sensor's frames since bring-up
+(`camera_frames_since_bringup()`), not the stream's: the sensor keeps its power
+and its exposure across a stream stop, so only the first `nn run` after a
+bring-up waits -- not one after `camera stream stop`, nor one after another
+`nn run`.  `nn stream` does not skip: its first frames are inferred and counted.
 
 **The decode's stack allowance is declared against the worker**
 (`GROVE_PLUGIN_STACK_WORKER`, `board.cmake`), because since #129 the worker is

@@ -220,10 +220,10 @@ static void nn_core_record_of(struct nn_det_snapshot *snap)
 }
 
 /* [!] NO COUNTER IS BASED AT THE COMMIT.  nn_camera_start() zeroes the per-
- * stream counters itself, before the record's base is read, and this worker
- * counts an inference BEFORE it publishes it -- so a base latched later could
- * take an inference whose result then counts as this stream's (see
- * nn_core_board::based).
+ * stream counters itself, before the record's base is read, so none needs one.
+ * (Until issue #138 this worker counted an inference BEFORE it published it,
+ * which no base could follow -- see nn_core_board::based; it counts in the
+ * publish now, but zeroing at the start stays the simpler answer.)
  *
  * This board has no re-arm and no transient claim decided with the lifecycle
  * (the worker's session is taken by nn_camera_start()); its stream clock runs

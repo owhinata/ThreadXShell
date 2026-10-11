@@ -459,18 +459,22 @@ static int nncam_publish(void *ctx, uint32_t gen)
 	 * this is where the decoder's answer is: the frame path hands this slot no
 	 * count to pass on.  BF_ERR_MODEL is the top-5 result above, not a
 	 * refusal (D6); any other negative is a wiring fault.  Counted like the
-	 * inference it belongs to -- whether or not the record took it. */
+	 * inference it belongs to -- whether or not the record took it.
+	 * [!] AN ERROR AND NOT AN INFERENCE (issue #138), as on every board:
+	 * `infers` counts the results a reader can use. */
 	if (nn_decode_count_of(nd, nncam_oneshot) == NN_DC_DECODER) {
 		nncam_error();
 		nncam_gen_decoder_errors++;
+	} else {
+		nnstat.infers++;
+		nncam_gen_infers++;
 	}
 	return took;
 }
 
-/* This board's counting is done where it always was: the inference when
- * nn_run() returned (before the publish -- see nn_core_board::based in
- * nn_svc_f746.c), the detections and a decoder refusal in the publish.
- * Nothing is left to count here. */
+/* This board's counting is done in the publish, where the decoder's answer is:
+ * the inference, the detections and a decoder refusal (issue #138 moved the
+ * inference there from nn_run()'s return).  Nothing is left to count here. */
 static void nncam_account(void *ctx, enum nn_core_done what, int n, int took)
 {
 	(void)ctx;
@@ -590,8 +594,7 @@ static void nncam_step(void)
 		nn_core_frame_done(&nncam_frame, &nncam_frame_ops, nncam_run ? 1 : 0);
 		return;
 	}
-	nnstat.infers++;
-	nncam_gen_infers++;
+	/* Counted in the publish, once the decoder has answered (issue #138). */
 	nnstat.last_us = nn_last_cycles(nncam_model) / mhz;
 
 	/*

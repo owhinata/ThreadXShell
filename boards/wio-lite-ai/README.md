@@ -392,8 +392,11 @@ nobody documented -- a wiring fault) in `decoder_errors`, and both in
 `errors`; the shared command then prints the `of those:` line. Before step 6c
 neither was counted, so a plugin that refused every frame read as a healthy
 stream. Only a decode the record took is counted -- the same rule as
-`infers`, which still counts it as an inference, because the inference ran --
-and a `nn run` counts nothing (it reports its own result).
+`infers` -- and a `nn run` counts nothing (it reports its own result). A
+refused decode is counted in `errors` and **not** in `infers` (issue #138, as
+on grove-vision-ai-v2 and f746g-disco): `infers` counts the results a reader
+can use, so it and `errors` never count the same frame. Until #138 this board
+counted it in both, because the inference ran.
 
 `nn model load --slot <n>` reads the blob into the PSRAM staging buffer and
 CRC-checks that copy exactly as before, then:

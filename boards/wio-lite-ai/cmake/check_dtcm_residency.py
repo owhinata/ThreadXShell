@@ -93,7 +93,7 @@ REQUIRED_DTCM = (
 #              would keep running and the panel would show whatever was in the
 #              buffer at boot.
 #
-# cam_frame / cam_ring / ltdc_fb are the other master-touched buffers.  They live in
+# cam_frame / ltdc_fb are the other master-touched buffers.  They live in
 # PSRAM and are checked by cmake/check_psram_ai_residency.py, which asserts they stay
 # OUT of the cacheable carve-out owhinata/wio-lite-ai#9 opened in the top 2 MB of that
 # window. (An earlier version of this comment said the linker script's .psram_noinit

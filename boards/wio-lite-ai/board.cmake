@@ -475,11 +475,8 @@ set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/svc/fmt.c"
     "${BOARD_DIR}/svc/timebase.c"
     "${CMAKE_SOURCE_DIR}/svc/ymodem.c"
-    # The camera frame ring + sink dispatch.  Nothing calls it
-    # yet (the DCMI producer is wired to it later); it is here so the engine and
-    # its host tests land before the hardware work that depends on them.
-    # --gc-sections drops it from the image until it has a caller.
-    "${CMAKE_SOURCE_DIR}/svc/frame_pipeline.c"
+    # (svc/frame_pipeline.c is not built here since issue #142: the frame
+    # stream into a PSRAM ring that used it is gone.  Grove and f746 use it.)
     "${CMAKE_SOURCE_DIR}/svc/gfx_rot.c"
     "${BOARD_DIR}/svc/log.c")
 
@@ -890,7 +887,6 @@ if(BSP_ENABLE_LCD)
     list(APPEND NN_PSRAM_AI_REQUIRED --noncacheable ltdc_fb)   # LTDC scan-out + DMA2D
 endif()
 if(BSP_ENABLE_CAMERA)
-    list(APPEND NN_PSRAM_AI_REQUIRED --noncacheable cam_ring)  # DCMI via DMA2_Stream1
     list(APPEND NN_PSRAM_AI_REQUIRED --noncacheable cam_frame) # DCMI single capture
 endif()
 list(APPEND SHELL_SOURCES ${NN_SOURCES}

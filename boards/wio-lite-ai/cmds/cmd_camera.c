@@ -45,14 +45,15 @@
  * between the rails every few rows, which is a horizontal stripe -- and since the
  * bit is only 8/31 of R and 2/63 of G, the picture still looked broadly right.
  *
- * NOTHING ELSE CAN SEE THIS.  `ovr dcmi`, `ovr ring`, `dma fe` and `repoint skip`
- * all stayed at zero throughout: neither the DCMI nor the DMA has any way to know
+ * NOTHING ELSE CAN SEE THIS.  `ovr dcmi`, `dma fe` and the then frame stream's
+ * ring counters all stayed at zero throughout: neither the DCMI nor the DMA has any way to know
  * that one data bit is lying.  Every counter reading healthy is not evidence that
  * the pixels arrived intact -- this line is.  Swapping the camera module took
  * `dR` from 8.00 to 0.05.
  *
- * The frames live in the PSRAM, so `capture`, `save`, `send` and `stream start`
- * all take the SHARED OCTOSPI1 guard -- which keeps out a command that is
+ * The snapshot lives in the PSRAM, and the preview of a stream writes the LTDC
+ * frame buffer there, so `capture`, `save`, `send` and `stream start` all take
+ * the SHARED OCTOSPI1 guard -- which keeps out a command that is
  * reconfiguring the bus, but not the LTDC scanning out of it.  That distinction
  * is what lets the preview put a live image on the display; see
  * cam_psram_take() and app/psram.h.
@@ -818,10 +819,6 @@ static int cmd_stream_stats(struct cli_instance *sh, int argc, char **argv)
 			cli_print(sh, "  (%d lost when the stream ended)", lost);
 		cli_print(sh, "\r\n");
 	}
-	cli_print(sh, "mode:      %s\r\n",
-	          st.mode == CAM_STREAM_BAND
-	                  ? "band (preview: 60-row slices in AXI-SRAM)"
-	                  : "frame (whole frames in the PSRAM ring)");
 	cli_print(sh, "frames:    %lu\r\n", (unsigned long)st.frames);
 	cli_print(sh, "elapsed:   %lu ms\r\n", (unsigned long)st.elapsed_ms);
 	if (st.elapsed_ms != 0u) {
@@ -834,8 +831,8 @@ static int cmd_stream_stats(struct cli_instance *sh, int argc, char **argv)
 	/* The figure of merit for the OCTOSPI1 contention work: DMA FIFO errors are
 	   tolerated (they do not stop the stream) but their RATE says how close the
 	   bus is to not keeping up -- which is what decides whether the LTDC can
-	   scan out at the same time (phase 3c).  owhinata/wio-lite-ai#35 expects zero in band
-	   mode:  the DCMI writes AXI-SRAM there and never touches OCTOSPI1 at all. */
+	   scan out at the same time (phase 3c).  owhinata/wio-lite-ai#35 expects zero:
+	   the DCMI writes AXI-SRAM and never touches OCTOSPI1 at all. */
 	cli_print(sh, "dma fe:    %lu\r\n", (unsigned long)st.dma_fe);
 	if (st.elapsed_ms != 0u) {
 		uint32_t e10 = (uint32_t)((uint64_t)st.dma_fe * 10000u / st.elapsed_ms);
@@ -843,33 +840,13 @@ static int cmd_stream_stats(struct cli_instance *sh, int argc, char **argv)
 		cli_print(sh, "dma fe/s:  %lu.%lu\r\n", (unsigned long)(e10 / 10u),
 		          (unsigned long)(e10 % 10u));
 	}
-	/* Board-global and cumulative, so it goes BEFORE the mode split below --
-	   which returns early for band mode and would otherwise hide it.  Printed
-	   only when non-zero (issue #72): zero is the only correct value and the
-	   only reason to look, so a standing "undrained: 0" would train the eye to
-	   skip past the one line worth noticing. */
-	if (st.sink_undrained != 0u)
-		cli_print(sh, "undrained: %lu detach(es) with a slot still held\r\n",
-		          (unsigned long)st.sink_undrained);
-	/* Only the counters this mode actually keeps.  The others are not zero, they
-	   are absent -- there is no ring in band mode and no band grid in frame mode --
-	   and printing an absent counter as 0 reads as "nothing went wrong". */
-	if (st.mode == CAM_STREAM_BAND) {
-		cli_print(sh, "band late: %lu\r\n", (unsigned long)st.band_late);
-		cli_print(sh, "band torn: %lu\r\n", (unsigned long)st.band_torn);
-		cli_print(sh, "band sync: %lu frame ends off a band boundary\r\n",
-		          (unsigned long)st.band_desync);
-		cli_print(sh, "bands:     2 x %lu B in AXI-SRAM (%lu rows each)\r\n",
-		          (unsigned long)CAMERA_BAND_BYTES,
-		          (unsigned long)CAMERA_BAND_ROWS);
-		return 0;
-	}
-	cli_print(sh, "ovr ring:  %lu\r\n", (unsigned long)st.ring_ovr);
-	cli_print(sh, "repoint skip: %lu\r\n", (unsigned long)st.repoint_skip);
-	cli_print(sh, "ring:      %lu slots x %lu B\r\n", (unsigned long)st.slots,
-	          (unsigned long)CAMERA_FRAME_BYTES);
-	cli_print(sh, "delivered: %lu  dropped: %lu\r\n",
-	          (unsigned long)st.delivered, (unsigned long)st.dropped);
+	cli_print(sh, "band late: %lu\r\n", (unsigned long)st.band_late);
+	cli_print(sh, "band torn: %lu\r\n", (unsigned long)st.band_torn);
+	cli_print(sh, "band sync: %lu frame ends off a band boundary\r\n",
+	          (unsigned long)st.band_desync);
+	cli_print(sh, "bands:     2 x %lu B in AXI-SRAM (%lu rows each)\r\n",
+	          (unsigned long)CAMERA_BAND_BYTES,
+	          (unsigned long)CAMERA_BAND_ROWS);
 	return 0;
 }
 

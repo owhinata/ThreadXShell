@@ -13,10 +13,12 @@
  * PWDN/RESETB lines and a chip-ID read (the part in hand is an OV2640, SCCB
  * 0x30, chip ID 0x2642).  Phase 2 adds the pixel path: the QVGA RGB565 register
  * sequence, and one frame captured over DCMI + DMA2_Stream1 into a PSRAM frame
- * buffer.  Phase 3b adds continuous capture: the DCMI runs free with the DMA in
- * double-buffer mode over a ring of PSRAM slots, and a producer thread publishes
- * each finished frame into svc/frame_pipeline.  Phase 3c puts those frames on the
- * LCD (app/cam_preview.c) and lets the DCMI and the LTDC share OCTOSPI1.
+ * buffer.  Continuous capture is the BAND stream (owhinata/wio-lite-ai#35): the
+ * DCMI runs free with the DMA in double-buffer mode over two 60-row bands in
+ * AXI-SRAM, and a producer thread hands each band to the band sink
+ * (port/camera/cam_band.c), which feeds the LCD preview and the NN.  (Phase 3b's
+ * frame stream into a ring of PSRAM slots through svc/frame_pipeline was removed
+ * by issue #142.)
  *
  * Two board facts drive the whole design and both differ from the STM32F746
  * Discovery firmware this project is otherwise ported from
@@ -50,8 +52,6 @@
 #define CAMERA_H
 
 #include <stdint.h>
-
-#include "frame.h"   /* struct frame_desc: what camera_stream_pin_latest() hands out */
 
 #ifdef __cplusplus
 extern "C" {
@@ -187,67 +187,23 @@ const char *camera_get_orient(void);
 
 /** Which shape of stream owns the DCMI (camera_stream_stats.mode). */
 enum camera_stream_mode {
-	CAM_STREAM_NONE = 0,   /**< nothing running                               */
-	CAM_STREAM_FRAME,      /**< whole frames into the PSRAM ring + pipeline   */
+	CAM_STREAM_NONE = 0,   /**< never started                                 */
 	CAM_STREAM_BAND,       /**< 60-row bands into AXI-SRAM, pushed to a sink  */
 };
 
-/** Streaming counters (camera_stream_stats).
- *
- *  @p mode says which of the fields below mean anything: the ring, the repoint
- *  and the sink counters exist only in CAM_STREAM_FRAME.  A band-mode reader must
- *  not print them as zero -- zero would read as "no overruns" when the truth is
- *  "there is no ring here at all". */
+/** Streaming counters (camera_stream_stats). */
 struct camera_stream_stats {
 	uint8_t  active;       /**< a stream is running right now                 */
-	uint8_t  mode;         /**< enum camera_stream_mode; the LAST run's, once
-	                        *   stopped, so a post-mortem `stats` still parses */
-	uint32_t frames;       /**< frames published (frame mode) / completed (band) */
+	uint8_t  mode;         /**< enum camera_stream_mode; NONE until the first
+	                        *   start, BAND after                             */
+	uint32_t frames;       /**< frames completed (all four bands delivered)   */
 	uint32_t elapsed_ms;   /**< run time (frozen at teardown for a post-stop read) */
 	uint32_t dcmi_ovr;     /**< DCMI overrun / sync errors (terminal)         */
-	uint32_t ring_ovr;     /**< frame mode: completions with no free slot     */
 	uint32_t dma_fe;       /**< DMA FIFO/direct-mode errors tolerated          */
-	uint32_t repoint_skip; /**< frame mode: DBM repoints skipped (see .c)     */
-	uint32_t delivered;    /**< frame mode, stat sink: frames consumed        */
-	uint32_t dropped;      /**< frame mode, stat sink: frames dropped         */
-	uint32_t slots;        /**< frame mode: ring depth                        */
-	uint32_t band_late;    /**< band mode: bands the consumer did not reach   */
-	uint32_t band_torn;    /**< band mode: bands the DMA caught up with       */
-	uint32_t band_desync;  /**< band mode: frame ends off a band boundary     */
-	/*
-	 * Detaches that found the stats sink still holding a pipeline slot
-	 * (issue #72).  Zero is the only correct value: this sink puts inside
-	 * consume(), and none of its three detach sites can have a publish in
-	 * flight -- the teardown is entered by the producer itself, and the two
-	 * start failures happen before capture is possible.  So a slot can never
-	 * legitimately be held there.
-	 *
-	 * Cumulative since boot and NOT mode-specific: it is filled in before the
-	 * band/frame split, because a counter hidden by whichever stream ran last
-	 * is a diagnostic that disappears exactly when it is wanted.
-	 */
-	uint32_t sink_undrained;
+	uint32_t band_late;    /**< bands the consumer did not reach              */
+	uint32_t band_torn;    /**< bands the DMA caught up with                  */
+	uint32_t band_desync;  /**< frame ends off a band boundary                */
 };
-
-/**
- * The FRAME-mode stream (PSRAM ring).  [!] No command starts it since issue
- * #142 -- `camera stream` is the band stream now, held by the holder table
- * below -- and the next commit removes it.  Kept, unused, until then.
- *
- * The DCMI runs in continuous mode with the DMA in double-buffer mode over a
- * ring of frame slots; a dedicated producer thread publishes each completed
- * frame into the pipeline.  @p frames / @p secs are optional self-stop limits.
- * @p colorbar selects the test pattern.
- *
- * Streaming and camera_capture() share the DCMI and are mutually exclusive.
- *
- * The frames land in the OCTOSPI1 PSRAM, so while a stream runs nothing else may
- * retune that bus -- psram_acquire() refuses on camera_streaming() for exactly
- * that reason.  The caller does NOT hold a guard for the stream's lifetime
- * (a stream is open-ended and can self-stop, so there would be no one left to
- * release it).
- */
-int camera_frame_stream_start(int colorbar, uint32_t frames, uint32_t secs);
 
 /*
  * ---- who holds the stream (issue #142) ----------------------------------------
@@ -331,7 +287,7 @@ typedef void (*camera_band_fn)(void *ctx, unsigned band, const uint16_t *px,
                                unsigned rows);
 
 /**
- * Start a BAND stream: the DCMI lands in AXI-SRAM, not in the PSRAM ring.
+ * The BAND stream: the DCMI lands in AXI-SRAM, not in the PSRAM.
  *
  * WHY THIS MODE EXISTS (owhinata/wio-lite-ai#35).  The panel is portrait and the
  * camera landscape, so every displayed frame is transposed, and a transpose reads one
@@ -341,29 +297,27 @@ typedef void (*camera_band_fn)(void *ctx, unsigned band, const uint16_t *px,
  * strided reads on internal RAM and takes the DCMI off OCTOSPI1 altogether.
  *
  * The DMA runs in double-buffer mode over two fixed band buffers and the memory
- * registers are never rewritten, so the whole on-the-fly repoint dance that frame
- * mode needs (RM0468 sec 15.3.11) does not exist here.
- *
- * Band mode publishes nothing into svc/frame_pipeline and fills no ring, so
- * camera_stream_pin_latest() finds nothing and `camera save` / `send` keep
- * showing the last camera_capture().  It is exclusive with the frame stream
- * and with camera_capture().
+ * registers are never rewritten (RM0468 sec 15.3.11's on-the-fly target change is
+ * not needed).  The stream fills no frame, so `camera save` / `send` keep showing the
+ * last camera_capture().  It is exclusive with camera_capture().
  */
 /* Started only by the holder table above (issue #142): camera.c passes the one
    band sink, port/camera/cam_band.c, so there is no public entry point. */
 
-/** Nonzero while a BAND stream specifically is running (camera_streaming() is
- *  true for either mode -- that one gates the OCTOSPI1 retune). */
+/** Nonzero while the band stream is running (the only stream since issue #142;
+ *  camera_streaming() is the same answer, kept for the OCTOSPI1 retune gate). */
 int camera_band_streaming(void);
 
-/** Nonzero while a stream owns the DCMI and is writing the PSRAM ring.
- *  Read by app/psram.c to refuse OCTOSPI1 retunes -- see psram_acquire(). */
+/** Nonzero while a stream owns the DCMI (its preview transposes into the LTDC
+ *  frame buffer in PSRAM).  Read by app/psram.c to refuse OCTOSPI1 retunes --
+ *  see psram_acquire(). */
 int camera_streaming(void);
 
 /**
  * Keep the camera still: refused with CAM_ERR_BUSY while a stream runs, and
  * with CAM_ERR_STILL while another claim is out; once granted, every stream
- * start (frame or band) refuses with CAM_ERR_STILL until camera_still_release() (issue #142 D9: `lcd reset` holds
+ * start refuses with CAM_ERR_STILL until camera_still_release() (issue #142 D9:
+ * `lcd reset` holds
  * it across the panel reset).  The look and the claim are one step under the
  * camera lock, so a start cannot slip in between them.  CAM_ERR_STATE when the
  * camera is not initialised -- nothing can start then, and nothing is owed.
@@ -372,31 +326,6 @@ int camera_still_claim(void);
 void camera_still_release(void);
 
 int camera_stream_stats(struct camera_stream_stats *out);
-
-/**
- * Pin the newest streamed frame for read-only access, or NULL if none.
- *
- * Frame mode only: a band stream fills no ring, so this returns NULL throughout
- * one rather than handing back whatever the previous frame-mode run left behind.
- *
- * For a consumer that wants to look at live frames without going through a
- * push sink -- the LCD preview in app/cam_preview.c.  The returned pointer stays
- * valid, and the producer will not recycle that slot, until the caller balances
- * it with exactly one camera_stream_put().  Holding it costs the ring one slot,
- * so hold it for the work and no longer.
- *
- * Pinning takes the driver lock briefly; releasing does not.  That asymmetry is
- * deliberate: a stream start has to wait for outstanding pins to drain before it
- * re-initialises the pipeline, and it does that waiting with the driver lock
- * held -- so a put() that needed the same lock would deadlock against it, while
- * a pin() that needs it is exactly what must be kept out.
- *
- * The descriptor carries the slot address, length and geometry, plus a
- * generation counter -- an unchanged gen means the same picture, which is how a
- * preview skips redundant work.
- */
-const struct frame_desc *camera_stream_pin_latest(void);
-void camera_stream_put(const struct frame_desc *f);
 
 /**
  * Configure the sensor if needed, then capture ONE frame into the driver's

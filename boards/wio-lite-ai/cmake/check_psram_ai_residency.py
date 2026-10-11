@@ -20,7 +20,7 @@ deterministic.  This one can pass every test on an idle board and corrupt a fram
 under load.
 
 So the checks below, on suffix-stripped base names (LTO renames these: the linked
-image really does contain `cam_ring.lto_priv.0`):
+image really does contain `cam_frame.lto_priv.0`):
 
   1. CACHE SAFETY -- every symbol given with --noncacheable lies OUTSIDE the MPU
      region, not merely outside the .psram_ai section.  The region is what makes
@@ -74,9 +74,9 @@ PSRAM_AI_LENGTH = 2 * 1024 * 1024
 #   ltdc_fb    LTDC read DMA + DMA2D writes (port/ltdc/ltdc_display.c).  The worst of
 #              them: the display controller reads it CONTINUOUSLY while scan-out is
 #              on, so there is no quiet moment in which a clean could catch up.
-#   cam_ring   DCMI via DMA2_Stream1, double-buffered while streaming (port/camera).
-#   cam_frame  DCMI target for a single capture, same file, same reasoning -- its own
-#              declaration spells the cache contract out.
+#   cam_frame  DCMI target for a single capture (port/camera) -- its own
+#              declaration spells the cache contract out.  (cam_ring, the frame
+#              stream's ring, was the other one until issue #142 removed it.)
 #
 # [!] THEY ARE PASSED IN WITH --noncacheable, NOT LISTED HERE, and for the same reason
 # --require is passed in: every one of them belongs to a BSP_ENABLE_* option, and a

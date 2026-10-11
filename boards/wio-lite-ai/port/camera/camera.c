@@ -48,16 +48,15 @@
  * unfalsifiable dead end; the split form worked on the first try and is now the
  * only one (CAM_SCCB_READ_SPLIT).
  *
- * Two shapes of continuous capture share all of that hardware and differ only in
- * where the DMA puts the pixels:
- *
- *   - FRAME mode (owhinata/wio-lite-ai#8 phase 3b, camera_stream_start): whole 150 KB
- * frames into a ring of PSRAM slots, published through svc/frame_pipeline.  The DMA's
- *     memory registers are repointed on the fly as slots recycle.
- *   - BAND mode (owhinata/wio-lite-ai#35, camera_band_start): 60-row slices into two
- * FIXED buffers in AXI-SRAM, pushed straight to one consumer.  Nothing is repointed
- *     and nothing lands in the PSRAM, which is what makes the display's rotating
- *     blit cheap and takes the DCMI off OCTOSPI1 entirely.
+ * Continuous capture is the BAND stream (owhinata/wio-lite-ai#35): 60-row slices
+ * into two FIXED buffers in AXI-SRAM, pushed straight to one consumer -- the band
+ * sink, port/camera/cam_band.c.  The DMA's targets never change and nothing lands in the
+ * PSRAM, which is what makes the display's rotating blit cheap and takes the DCMI
+ * off OCTOSPI1 entirely.  It runs while somebody holds it (issue #142, "who holds
+ * the stream" below).  The FRAME stream that used to fill a ring of PSRAM slots
+ * through svc/frame_pipeline is gone (issue #142): nothing used it once
+ * `camera stream` moved to bands, and `camera capture` keeps the single-frame
+ * snapshot into cam_frame.
  *
  * Concurrency: one TX_MUTEX serializes every public call for the whole
  * operation; the work lives in *_locked() helpers so a public entry never
@@ -70,7 +69,6 @@
 #include "cam_band.h"     /* cam_band_sink: the one band sink (issue #142) */
 #include "cam_holders.h"  /* who holds the stream open (issue #142)        */
 
-#include "frame_pipeline.h"
 #include "ov2640_regs.h"
 #include "stm32h7xx_hal.h"
 #include "timebase.h"   /* udelay: DWT-based, used by the bit-banged bus clear */
@@ -262,22 +260,6 @@ static int cam_colorbar = -1;          /* live/colorbar state, -1 = unknown   */
 /* ---- streaming state ----------------------------------------------------- */
 
 /*
- * The ring the DMA writes into while streaming.  Separate from cam_frame: the
- * snapshot buffer stays a stable thing the shell can save/send from, and the
- * teardown copies the last streamed frame into it so those commands keep working
- * after a stream.
- *
- * Four slots is the smallest comfortable ring: the DMA's double buffer always
- * owns two of them, one holds the latest published frame (frame_pipeline_acquire
- * refuses to recycle that one), and one is free to hand the producer.  Three
- * would technically run but would drop a frame every time a sink held a pin.
- */
-#define CAM_RING_SLOTS  4u
-
-static uint8_t cam_ring[CAM_RING_SLOTS][CAMERA_FRAME_BYTES]
-	__attribute__((aligned(32), section(".psram_noinit.camera")));
-
-/*
  * The two band buffers of the staged stream (owhinata/wio-lite-ai#35).
  *
  * [!] THIS IS THE SECOND BUFFER IN THIS FIRMWARE THAT A BUS MASTER WRITES AND THE
@@ -312,27 +294,16 @@ _Static_assert(CAMERA_BAND_BYTES % 32u == 0u,
 _Static_assert(CAMERA_BAND_BYTES / 4u <= 0xFFFFu,
                "a band must fit one DMA transfer (NDTR is 16-bit)");
 
-static TX_MUTEX     cam_pipe_lock;      /* the pipeline's injected mutex       */
 static TX_SEMAPHORE cam_stream_sem;     /* DMA TC ISR -> producer              */
 static TX_SEMAPHORE cam_start_sem;      /* start -> producer idle wakeup       */
 static TX_THREAD    cam_producer;
 static UCHAR        cam_producer_stack[CAM_PRODUCER_STACK] DTCM_BSS
                         __attribute__((aligned(8)));
 
-static struct frame_pipeline cam_pipe;
-static struct frame_sink     cam_stat_sink;
-/* Detaches that found the stats sink still pinned (issue #72).  Cumulative. */
-static uint32_t              cam_sink_undrained;
-
-/* The two slots the DMA's M0AR/M1AR currently point at. */
-static struct frame_desc *cam_m0;
-static struct frame_desc *cam_m1;
-static uint32_t cam_last_ct;
-
 /* ---- band-mode state (owhinata/wio-lite-ai#35) ------------------------------------ */
 
 /*
- * Band mode needs no ring, no pipeline and no repoint.  What it does need is a
+ * The band stream needs no ring and no pipeline.  What it does need is a
  * band INDEX, and the honest source for that is a counter kept by the DMA's own
  * completion ISR: cam_band_seq counts transfers since the stream armed, so the
  * band that finished with transfer number s is s-1, its index in the frame is
@@ -343,8 +314,7 @@ static uint32_t cam_last_ct;
  * updated by different agents (hardware / this ISR) and a thread that sampled them
  * separately could catch them disagreeing.  CT is read exactly once, right after
  * the stream arms, into cam_band_ct0 -- because HAL_DMAEx_MultiBufferStart_IT
- * leaves CT wherever the previous run put it, which is the same trap the frame
- * path documents at its own cam_last_ct seeding.
+ * leaves CT wherever the previous run put it.
  */
 static volatile uint32_t cam_band_seq;       /* DMA transfers completed          */
 static uint32_t cam_band_next;               /* sequence number expected next    */
@@ -375,18 +345,8 @@ static volatile int      cam_stream_err;     /* terminal: TE / DCMI OVR         
 static volatile int      cam_stop_req;
 static volatile uint32_t cam_stream_fe;      /* tolerated FIFO/direct-mode errors */
 static volatile uint32_t cam_dcmi_ovr;
-static uint32_t cam_ring_ovr;
-static uint32_t cam_repoint_skip;
 static uint32_t cam_start_tick;
 static uint32_t cam_elapsed_ms;              /* frozen at teardown for `stats`   */
-static uint32_t cam_target_frames;
-static uint32_t cam_target_secs;
-
-/* Slots pinned by camera_stream_pin_latest() outside this driver (the preview).
-   A stream start waits for this to reach zero before it re-initialises the
-   pipeline -- see cam_stream_start_locked(). */
-static volatile uint32_t cam_ext_pins;
-#define CAM_EXT_PIN_DRAIN_MS  200u
 
 static struct camera_info info;
 /*
@@ -1364,137 +1324,8 @@ static int camera_capture_locked(int colorbar)
 
 /* ---- streaming producer -------------------------------------------------- */
 
-/* The pipeline core's injected mutual exclusion -- a different mutex from
-   cam_lock, and only ever taken from thread context. */
-static void cam_pipe_os_lock(void *ctx)
-{
-	(void)ctx;
-	(void)tx_mutex_get(&cam_pipe_lock, TX_WAIT_FOREVER);
-}
-
-static void cam_pipe_os_unlock(void *ctx)
-{
-	(void)ctx;
-	(void)tx_mutex_put(&cam_pipe_lock);
-}
-
-static const struct frame_os cam_pipe_os = {
-	NULL, cam_pipe_os_lock, cam_pipe_os_unlock
-};
-
-/* Counting sink: the display-independent throughput consumer.  DROP policy and
-   it returns the pin immediately, so it can never stall the producer. */
-static int cam_stat_open(void *ctx, enum frame_format fmt, uint16_t w, uint16_t h)
-{
-	(void)ctx; (void)fmt; (void)w; (void)h;
-	return 0;
-}
-
-static int cam_stat_consume(void *ctx, const struct frame_desc *f)
-{
-	(void)ctx;
-	frame_pipeline_put(&cam_pipe, &cam_stat_sink, f);
-	return 0;
-}
-
-/*
- * [!] The pipeline is not safe to rebuild any more (issue #79).
- *
- * File-static, and deliberately NOT inside the pipeline: frame_pipeline_init()
- * memsets that, so a latch living there would be cleared by the very operation
- * it exists to prevent.  Never cleared before a reboot -- there is nothing to
- * wait for once the core has said it cannot account for a sink this port owns.
- * Logged once, so the reason reaches the console rather than living only inside
- * a refusal.
- */
-static int cam_pipe_unsafe;
-
-static void cam_pipe_fail_stop(const char *where, const char *why)
-{
-	if (!cam_pipe_unsafe) {
-		cam_pipe_unsafe = 1;
-		cam_sink_undrained++;
-		LOG_ERR("stats sink at %s: %s -- the camera pipeline cannot be "
-		        "rebuilt safely; streaming is disabled until reboot",
-		        where, why);
-	}
-}
-
-/*
- * Detach the stats sink and check the core's own in-flight count (issue #72).
- *
- * svc/frame_pipeline requires a sink's owner to drain until that count reaches
- * zero before anything the sink reads is freed or reused.  This port has nothing
- * to drain: cam_stat_consume() puts the slot back before it returns.
- *
- * And no publish can be in flight at any of the three callers -- but for two
- * DIFFERENT reasons, which is worth stating because the callers are not even on
- * the same thread:
- *   - the teardown is entered from cam_stream_service(), i.e. by the producer
- *     itself, which returns immediately afterwards.  Nothing else publishes.
- *   - the two start failures run on whatever thread called
- *     camera_stream_start() -- normally a console thread, not the producer --
- *     and get there BEFORE capture is possible: one after an acquire returned
- *     NULL, one after the DMA refused to start.  No frame has been taken.
- *
- * So the count here is ALWAYS zero, and anything else is a put that did not
- * happen.
- *
- * [!] IT USED TO HEAL AT THE NEXT START, AND NO LONGER DOES (issue #79).  A
- * stream start re-runs frame_pipeline_init(), which rebuilt every slot with
- * refcount zero, and the attach that followed cleared the sink's own
- * bookkeeping -- so a leaked pin here could not accumulate, and this was a bug
- * detector rather than protection.  #79 made that re-init a precondition
- * violation instead: a sink holding a pin is DRAINING with its owner still set,
- * and init() cannot reach state parked in a sink.  So a leak now latches the
- * fail-stop below and streaming is refused until reboot.
- */
-static void cam_stat_sink_detach(const char *where)
-{
-	int rc, pins;
-
-	/*
-	 * [!] THE CORE'S ANSWER IS TESTED FIRST, AND A NEGATIVE IS NOT A COUNT
-	 * (issue #79).  Both calls below can now answer "I cannot tell" -- a
-	 * transition, a callback that has not returned, bookkeeping that disagrees
-	 * with itself -- and this function used to discard the first and print the
-	 * second as a number of slots.
-	 *
-	 * Testing it is necessary but not sufficient, which is why the latch
-	 * exists: this returns void, and its callers go on to re-run
-	 * frame_pipeline_init() at this start or the next one.  init() memsets the
-	 * pipeline and cannot reach state parked in a sink, so running it then
-	 * would violate the precondition this change adds.  Unreachable in normal
-	 * operation -- cam_stat_consume() puts synchronously before returning, and
-	 * every caller is either the producer itself or a pre-publish failure --
-	 * and that is exactly why it is decided here rather than discovered later.
-	 */
-	rc = frame_pipeline_detach(&cam_pipe, &cam_stat_sink);
-	if (rc < 0) {
-		cam_pipe_fail_stop(where, frame_pipeline_strerror(rc));
-		return;
-	}
-	pins = frame_pipeline_sink_pins(&cam_pipe, &cam_stat_sink);
-	if (pins < 0) {
-		cam_pipe_fail_stop(where, frame_pipeline_strerror(pins));
-		return;
-	}
-	if (pins != 0) {
-		/* [!] AND A LEFTOVER PIN LATCHES TOO (issue #79).  Before #79 this was
-		   a diagnostic that healed at the next start; now a sink holding a pin
-		   is DRAINING with its owner still set, and the next start re-runs
-		   frame_pipeline_init() -- which memsets the pipeline and cannot reach
-		   that state.  Reporting it and carrying on would be this port
-		   violating the precondition the same change just added. */
-		LOG_ERR("stats sink still holds %d slot(s) at %s: a consume() "
-		        "returned without putting", pins, where);
-		cam_pipe_fail_stop(where, "a consume() returned without putting");
-	}
-}
-
-/* DMA transfer-complete, ISR context: one ring slot -- or, in band mode, one
-   band -- just filled.  Wakes the producer and nothing else: it touches no ring,
-   no pipeline and no CT.  The band counter is the single exception, and it is
+/* DMA transfer-complete, ISR context: one band just filled.  Wakes the producer
+   and nothing else: it touches no buffer and no CT.  The band counter is the single exception, and it is
    here rather than in the producer because only the ISR sees every completion;
    a producer that fell a band behind would otherwise lose count silently. */
 static void cam_stream_dma_cb(DMA_HandleTypeDef *h)
@@ -1547,10 +1378,9 @@ static void drain_stream_sem(void)
  *
  * app/psram.c refuses to retune OCTOSPI1 while camera_streaming() is true, so
  * cam_stream_active is what keeps another console off the bus.  It therefore has
- * to stay set until the DCMI is stopped, the DMA is aborted AND the final copy
- * out of the ring is done -- clearing it first (which is what f746 does, because
- * it has no such gate) would open a window where `psram clk` could retune the
- * bus mid-copy.  Interrupts go first so no late completion can disturb the
+ * to stay set until the DCMI is stopped and the DMA is aborted -- clearing it
+ * first (which is what f746 does, because it has no such gate) would open a
+ * window where `psram clk` could retune the bus under the stream.  Interrupts go first so no late completion can disturb the
  * teardown; HAL_DCMI_Stop() and HAL_DMA_Abort() are synchronous, so nothing is
  * lost by not servicing that last IRQ.
  */
@@ -1569,71 +1399,41 @@ static void cam_stream_teardown(void)
 	cam_elapsed_ms = HAL_GetTick() - cam_start_tick;
 	drain_stream_sem();
 
-	if (cam_band_mode) {
-		/* Nothing to hand over: a band stream never filled cam_ring, and copying
-		   a stale frame out of it into cam_frame would make `camera save` claim a
-		   picture the preview never showed.  The band buffers are the DMA's, and
-		   it has stopped. */
-		/*
-		 * [!] A CONFIRMED END (issue #142).  An error (DCMI overrun, DMA TE) is
-		 * not recovered on this board: the stream is over.  The DCMI and the DMA
-		 * are stopped above, and this runs on the producer thread itself, so no
-		 * band step is in flight -- the end is confirmed.  Every holder is
-		 * marked lost and the table emptied, and only each holder's own
-		 * re-registration clears its mark: an `nn stream` does not quietly
-		 * resume on a stream the operator restarts.  Under cam_lock, and
-		 * BEFORE cam_stream_active falls, so a join sees either the old
-		 * holders on a live stream or an empty table on a dead one.
-		 */
-		(void)tx_mutex_get(&cam_lock, TX_WAIT_FOREVER);
-		if (cam_stream_err && !cam_stop_req)
-			cam_holders_lose_locked();
-		cam_band_mode = 0;
-		cam_band_cb   = NULL;
-		cam_band_ctx  = NULL;
-		cam_stream_active = 0;      /* last: releases the OCTOSPI1 gate */
-		(void)tx_mutex_put(&cam_lock);
-		LOG_INF("band stop: %lu frames, %lu ms, ovr %lu, fe %lu, late %lu, "
-		        "torn %lu, desync %lu",
-		        (unsigned long)cam_band_frames, (unsigned long)cam_elapsed_ms,
-		        (unsigned long)cam_dcmi_ovr, (unsigned long)cam_stream_fe,
-		        (unsigned long)cam_band_late, (unsigned long)cam_band_torn,
-		        (unsigned long)cam_band_desync);
-		return;
-	}
-
-	/* Hand the last streamed frame to the snapshot buffer so `camera save` /
-	   `send` work on what was just captured.  Reading the ring is safe now (the
-	   DMA is stopped), but cam_frame and info are shell-visible state, so this
-	   takes cam_lock -- a `camera send` on the other console could be walking
-	   cam_frame right now.  Lock order is cam_lock -> cam_pipe_lock here, the
-	   same way round as cam_stream_start_locked(), so it cannot deadlock. */
-	if (tx_mutex_get(&cam_lock, TX_WAIT_FOREVER) == TX_SUCCESS) {
-		if (frame_pipeline_read_latest(&cam_pipe, 0u, cam_frame,
-		                               CAMERA_FRAME_BYTES, NULL) == 0) {
-			info.frame_bytes = CAMERA_FRAME_BYTES;
-			info.frame_valid = 1u;
-			cam_frame_gen++;
-		}
-		(void)tx_mutex_put(&cam_lock);
-	}
-
-	cam_stat_sink_detach("stream teardown");
-	cam_m0 = NULL;
-	cam_m1 = NULL;
-
-	cam_stream_active = 0;          /* last: releases the OCTOSPI1 gate */
-	LOG_INF("stream stop: %lu frames, %lu ms, ovr %lu/%lu, fe %lu",
-	        (unsigned long)cam_pipe.stats.published,
-	        (unsigned long)cam_elapsed_ms, (unsigned long)cam_dcmi_ovr,
-	        (unsigned long)cam_ring_ovr, (unsigned long)cam_stream_fe);
+	/* Nothing to hand over: a band stream fills no frame, and copying anything
+	   into cam_frame would make `camera save` claim a picture the preview never
+	   showed.  The band buffers are the DMA's, and it has stopped. */
+	/*
+	 * [!] A CONFIRMED END (issue #142).  An error (DCMI overrun, DMA TE) is
+	 * not recovered on this board: the stream is over.  The DCMI and the DMA
+	 * are stopped above, and this runs on the producer thread itself, so no
+	 * band step is in flight -- the end is confirmed.  Every holder is
+	 * marked lost and the table emptied, and only each holder's own
+	 * re-registration clears its mark: an `nn stream` does not quietly
+	 * resume on a stream the operator restarts.  Under cam_lock, and
+	 * BEFORE cam_stream_active falls, so a join sees either the old
+	 * holders on a live stream or an empty table on a dead one.
+	 */
+	(void)tx_mutex_get(&cam_lock, TX_WAIT_FOREVER);
+	if (cam_stream_err && !cam_stop_req)
+		cam_holders_lose_locked();
+	cam_band_mode = 0;
+	cam_band_cb   = NULL;
+	cam_band_ctx  = NULL;
+	cam_stream_active = 0;      /* last: releases the OCTOSPI1 gate */
+	(void)tx_mutex_put(&cam_lock);
+	LOG_INF("band stop: %lu frames, %lu ms, ovr %lu, fe %lu, late %lu, "
+	        "torn %lu, desync %lu",
+	        (unsigned long)cam_band_frames, (unsigned long)cam_elapsed_ms,
+	        (unsigned long)cam_dcmi_ovr, (unsigned long)cam_stream_fe,
+	        (unsigned long)cam_band_late, (unsigned long)cam_band_torn,
+	        (unsigned long)cam_band_desync);
 }
 
 /*
  * Service one completed BAND (owhinata/wio-lite-ai#35).
  *
- * Simpler than the frame path by construction: the memory registers are fixed for
- * the life of the stream, so there is no repoint, no CT race and no ring.  What is
+ * Simple by construction: the memory registers are fixed for the life of the
+ * stream, so the DMA's targets are never rewritten and there is no CT race.  What is
  * left is bookkeeping -- which band did we just get, is it still intact, and does
  * it continue the frame the consumer is already drawing?
  *
@@ -1698,84 +1498,17 @@ static void cam_band_service(void)
 	}
 }
 
-/*
- * Service one completed frame.
- *
- * The tear-free ordering: find the slot the DMA just finished with, take a free
- * one, point the DMA's now-idle memory register at the free slot, and only then
- * publish the finished one.  A published slot is therefore never a live DMA
- * target.  No free slot -> do not publish; the memory register keeps pointing at
- * the finished slot and the DMA simply refills it (a dropped frame, counted).
- *
- * The repoint is the delicate part.  RM0468 sec 15.3.11 allows M0AR/M1AR to be
- * written on the fly ONLY for the buffer that is not currently the target:
- * M1AR while CT=0, M0AR while CT=1.  Writing the active one raises TEIF and the
- * hardware disables the stream.  HAL_DMAEx_ChangeMemory() checks none of this --
- * it writes the register and returns HAL_OK regardless.  CT is flipped by the
- * DMA itself, so masking interrupts does not freeze it; the only defence is to
- * re-read CT immediately before the write and abandon the repoint if it moved.
- * That is nearly always a non-event (the producer runs microseconds after the
- * completion that woke it, with a whole frame period before the next flip) and
- * matters only if the producer was delayed by a full frame.  If one does slip
- * through, TE stops the stream and it shows up in `camera stream stats` rather
- * than silently corrupting a frame.
- */
+/* One producer pass: a stop or an error tears the stream down; otherwise the
+   band that completed is serviced.  (The frame stream's ring service is gone,
+   issue #142.) */
 static void cam_stream_service(int had_sem)
 {
-	uint32_t ct, ct2, seen, extra = 0;
-	struct frame_desc *done, *freed;
-	int published = 0;
-
-	if (cam_stop_req || cam_stream_err ||
-	    (cam_target_frames && cam_pipe.stats.published >= cam_target_frames) ||
-	    (cam_target_secs &&
-	     (HAL_GetTick() - cam_start_tick) >= cam_target_secs * 1000u)) {
+	(void)had_sem;   /* the band path counts completions in the ISR instead */
+	if (cam_stop_req || cam_stream_err) {
 		cam_stream_teardown();
 		return;
 	}
-	if (cam_band_mode) {
-		cam_band_service();
-		return;
-	}
-
-	/* Completions observed this pass.  Only the most recent buffer flip can be
-	   published; anything older was already overwritten -> ring overrun. */
-	while (tx_semaphore_get(&cam_stream_sem, TX_NO_WAIT) == TX_SUCCESS)
-		extra++;
-	seen = (had_sem ? 1u : 0u) + extra;
-
-	ct = (DMA2_Stream1->CR & DMA_SxCR_CT) ? 1u : 0u;
-	if (ct != cam_last_ct) {
-		cam_last_ct = ct;
-		/* CT==1 -> M0 just completed, CT==0 -> M1 just completed. */
-		done  = ct ? cam_m0 : cam_m1;
-		freed = frame_pipeline_acquire(&cam_pipe);
-		if (freed != NULL) {
-			ct2 = (DMA2_Stream1->CR & DMA_SxCR_CT) ? 1u : 0u;
-			if (ct2 != ct) {
-				/* CT moved while we were acquiring: the register we were about
-				   to write is now the live one.  Writing it would raise TEIF and
-				   kill the stream, so skip this frame entirely. */
-				cam_repoint_skip++;
-				cam_last_ct = ct2;
-			} else {
-				(void)HAL_DMAEx_ChangeMemory(&hdma_dcmi,
-				        (uint32_t)(uintptr_t)freed->data,
-				        ct ? MEMORY0 : MEMORY1);
-				if (ct)
-					cam_m0 = freed;
-				else
-					cam_m1 = freed;
-				frame_pipeline_publish(&cam_pipe, done, CAMERA_FRAME_BYTES,
-				                       FRAME_FMT_RGB565, CAMERA_FRAME_WIDTH,
-				                       CAMERA_FRAME_HEIGHT,
-				                       (uint16_t)(CAMERA_FRAME_WIDTH * 2u));
-				published = 1;
-			}
-		}
-	}
-	if (seen > (uint32_t)published)
-		cam_ring_ovr += seen - (uint32_t)published;
+	cam_band_service();
 }
 
 static void cam_producer_entry(ULONG arg)
@@ -1793,166 +1526,13 @@ static void cam_producer_entry(ULONG arg)
 	}
 }
 
-static int cam_stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
-{
-	int rc;
-
-	/* [!] Ahead of everything, including the probe and the sensor configure
-	   below (issue #79): a start that is going to be refused must not
-	   reconfigure the hardware on its way to failing, and the pipeline re-init
-	   further down is the operation this latch exists to stop. */
-	if (cam_pipe_unsafe)
-		return CAM_ERR_STATE;
-	if (cam_still_claimed)
-		return CAM_ERR_STILL;
-	if (cam_stream_active || cam_xfer_active)
-		return CAM_ERR_BUSY;
-	if (!info.powered || info.sensor != CAM_SENSOR_OV2640) {
-		rc = camera_probe_locked();
-		if (rc != CAM_OK)
-			return rc;
-	}
-	rc = camera_configure_locked(colorbar);
-	if (rc != CAM_OK)
-		return rc;
-
-	/*
-	 * Re-initialise the pipeline for every run.
-	 *
-	 * frame_pipeline_acquire() marks a slot FILLING and only publish() gives it
-	 * back, so the two slots the DMA was pointing at when the stream stopped stay
-	 * FILLING forever -- after one start/stop cycle the ring would be two slots
-	 * short and the second start would fail to get its DBM pair.  The counters
-	 * would carry over too, which would make `--frames N` stop instantly on the
-	 * second run.  init() memsets the whole struct and re-seeds the slots, so it
-	 * fixes both at once and needs no change to the (byte-identical) core.
-	 */
-	/*
-	 * Wait for external pins (the preview) to drain before re-initialising.
-	 *
-	 * init() memsets the pipeline, so a slot pinned by camera_stream_pin_latest()
-	 * would come back with its refcount zeroed and the holder's later put() would
-	 * corrupt a slot that now belongs to this new run.  Pinning takes cam_lock,
-	 * which this function already holds, so nothing new can be pinned from here
-	 * on -- waiting is enough to close the window, and it only has to outlast one
-	 * blit+flip.  put() deliberately does NOT take cam_lock, or this wait would
-	 * deadlock against the very pin it is waiting for.
-	 */
-	for (unsigned waited = 0u; cam_ext_pins != 0u; waited += 5u) {
-		if (waited >= CAM_EXT_PIN_DRAIN_MS) {
-			LOG_ERR("stream start: %lu external frame pin(s) never released",
-			        (unsigned long)cam_ext_pins);
-			return CAM_ERR_BUSY;
-		}
-		tx_thread_sleep(5u);
-	}
-
-	/* Under cam_pipe_lock, taken directly rather than through the pipeline's own
-	   os vtable: init() memsets the struct -- p->os included -- so a concurrent
-	   `camera stream stats` on the other console must not be inside the core
-	   while it happens.  Same lock order as everywhere else (cam_lock is already
-	   held here, then cam_pipe_lock). */
-	(void)tx_mutex_get(&cam_pipe_lock, TX_WAIT_FOREVER);
-	rc = frame_pipeline_init(&cam_pipe, &cam_pipe_os, cam_ring,
-	                         CAMERA_FRAME_BYTES, CAM_RING_SLOTS);
-	(void)tx_mutex_put(&cam_pipe_lock);
-	if (rc != 0)
-		return CAM_ERR_STATE;
-	frame_pipeline_set_format(&cam_pipe, FRAME_FMT_RGB565, CAMERA_FRAME_WIDTH,
-	                          CAMERA_FRAME_HEIGHT);
-	rc = frame_pipeline_attach(&cam_pipe, &cam_stat_sink);
-	if (rc != 0) {
-		/* Say WHICH (issue #72).  ERR_UNDRAINED here means cam_stat_consume()
-		   returned without putting its slot back on an earlier run -- the one
-		   thing this port's synchronous sink cannot do, and now the only report
-		   it would ever produce.  It no longer heals at the next start: the
-		   attach that used to zero the count is what refuses. */
-		LOG_ERR("stats sink attach refused: %s", frame_pipeline_strerror(rc));
-		return CAM_ERR_STATE;
-	}
-
-	cam_m0 = frame_pipeline_acquire(&cam_pipe);
-	cam_m1 = frame_pipeline_acquire(&cam_pipe);
-	if (cam_m0 == NULL || cam_m1 == NULL) {
-		cam_stat_sink_detach("ring slots unavailable");
-		return CAM_ERR_STATE;
-	}
-
-	cam_stream_err = 0;
-	cam_stop_req   = 0;
-	cam_stream_fe  = 0;
-	cam_dcmi_ovr   = 0;
-	cam_ring_ovr   = 0;
-	cam_repoint_skip = 0;
-	cam_elapsed_ms = 0;
-	cam_target_frames = frames;
-	cam_target_secs   = secs;
-	drain_stream_sem();
-
-	hdma_dcmi.XferCpltCallback   = cam_stream_dma_cb;
-	hdma_dcmi.XferM1CpltCallback = cam_stream_dma_cb;
-	hdma_dcmi.XferErrorCallback  = cam_stream_dma_err_cb;
-	hdcmi.ErrorCode              = HAL_DCMI_ERROR_NONE;
-	hdma_dcmi.ErrorCode          = HAL_DMA_ERROR_NONE;
-	__HAL_DCMI_CLEAR_FLAG(&hdcmi, DCMI_FLAG_ERRRI | DCMI_FLAG_OVRRI |
-	                              DCMI_FLAG_FRAMERI | DCMI_FLAG_LINERI |
-	                              DCMI_FLAG_VSYNCRI);
-
-	/* The interrupts are enabled here, not in camera_init(): the ThreadX objects
-	   the ISRs post to exist, and nothing can fire before CAPTURE is set below.
-	   The snapshot path does its own enable, so a stream started on a board that
-	   never ran `camera capture` would otherwise never see a completion. */
-	HAL_NVIC_EnableIRQ(DMA2_Stream1_IRQn);
-	HAL_NVIC_EnableIRQ(DCMI_IRQn);
-
-	cam_start_tick    = HAL_GetTick();
-	cam_last_mode     = CAM_STREAM_FRAME;   /* before active: another console's
-	                                           `stats` must not see the two disagree */
-	cam_stream_active = 1;
-
-	/* Manual double buffering: HAL's own >64 KB path bands a single frame
-	   INTO one buffer, which is not what we want -- we want consecutive frames
-	   landing in alternating slots. */
-	if (HAL_DMAEx_MultiBufferStart_IT(&hdma_dcmi,
-	        (uint32_t)(uintptr_t)&hdcmi.Instance->DR,
-	        (uint32_t)(uintptr_t)cam_m0->data,
-	        (uint32_t)(uintptr_t)cam_m1->data,
-	        CAM_FRAME_WORDS) != HAL_OK) {
-		cam_stream_active = 0;
-		HAL_NVIC_DisableIRQ(DMA2_Stream1_IRQn);
-		HAL_NVIC_DisableIRQ(DCMI_IRQn);
-		cam_stat_sink_detach("DMA start failed");
-		LOG_ERR("stream DMA start failed");
-		return CAM_ERR_HAL;
-	}
-	/* Seed the CT tracker from the hardware rather than assuming 0.  Only
-	   HAL_DMA_Init() clears CT; HAL_DMAEx_MultiBufferStart_IT() sets DBM, the
-	   memory registers and NDTR but leaves CT wherever the previous run left it,
-	   so a second stream could otherwise start with the tracker inverted and
-	   repoint the live buffer on its first frame. */
-	cam_last_ct = (DMA2_Stream1->CR & DMA_SxCR_CT) ? 1u : 0u;
-
-	hdcmi.Instance->CR &= ~DCMI_CR_CM;          /* continuous, not snapshot */
-	__HAL_DCMI_ENABLE(&hdcmi);
-	__HAL_DCMI_ENABLE_IT(&hdcmi, DCMI_IT_ERR | DCMI_IT_OVR);
-	hdcmi.Instance->CR |= DCMI_CR_CAPTURE;
-	hdcmi.State = HAL_DCMI_STATE_BUSY;
-
-	(void)tx_semaphore_put(&cam_start_sem);     /* wake the idle producer */
-	LOG_INF("stream start (frames=%lu secs=%lu)", (unsigned long)frames,
-	        (unsigned long)secs);
-	return CAM_OK;
-}
-
 /*
  * Arm the band stream (owhinata/wio-lite-ai#35).
  *
- * Deliberately parallel to cam_stream_start_locked() above, and deliberately
- * shorter: there is no pipeline to re-initialise, no ring slots to acquire and no
- * external pin to drain, because nothing outside the driver ever holds a band.
- * The pieces that DO carry over are the ones that were paid for in bugs -- the
- * error-code reset, the stale-flag clear, and enabling the interrupts here rather
- * than in camera_init() (owhinata/wio-lite-ai#12: an interrupt source is armed only once
+ * Short, because there is no pipeline to initialise, no ring slots to acquire
+ * and no external pin to drain: nothing outside the driver ever holds a band.
+ * What it does keep was paid for in bugs -- the error-code reset, the stale-flag
+ * clear, and enabling the interrupts here rather than in camera_init() (owhinata/wio-lite-ai#12: an interrupt source is armed only once
  * the ThreadX objects its ISR posts to exist).
  */
 static int cam_band_start_locked(int colorbar, camera_band_fn fn, void *ctx)
@@ -1980,13 +1560,7 @@ static int cam_band_start_locked(int colorbar, camera_band_fn fn, void *ctx)
 	cam_stop_req     = 0;
 	cam_stream_fe    = 0;
 	cam_dcmi_ovr     = 0;
-	cam_ring_ovr     = 0;
-	cam_repoint_skip = 0;
 	cam_elapsed_ms   = 0;
-	/* A band stream runs until it is told to stop: there is no --frames/--secs
-	   here, because the consumer is a display and it stops when the user says. */
-	cam_target_frames = 0u;
-	cam_target_secs   = 0u;
 	cam_band_seq     = 0u;
 	cam_band_next    = 0u;
 	cam_band_sync    = 0;
@@ -2066,25 +1640,15 @@ int camera_init(void)
 	if (tx_mutex_create(&cam_lock, "camera", TX_INHERIT) != TX_SUCCESS)
 		return CAM_ERR_STATE;
 	/* The DCMI/DMA ISRs post these, so they exist before any interrupt can be
-	   enabled -- which camera_capture() / camera_stream_start(), not this
+	   enabled -- which camera_capture() / the band stream's start, not this
 	   function, do (owhinata/wio-lite-ai#12). */
 	if (tx_semaphore_create(&cam_done, "cam_done", 0) != TX_SUCCESS) {
 		(void)tx_mutex_delete(&cam_lock);
 		return CAM_ERR_STATE;
 	}
-	if (tx_mutex_create(&cam_pipe_lock, "campipe", TX_INHERIT) != TX_SUCCESS ||
-	    tx_semaphore_create(&cam_stream_sem, "cam_strm", 0) != TX_SUCCESS ||
+	if (tx_semaphore_create(&cam_stream_sem, "cam_strm", 0) != TX_SUCCESS ||
 	    tx_semaphore_create(&cam_start_sem, "cam_strt", 0) != TX_SUCCESS)
 		return CAM_ERR_STATE;
-	if (frame_pipeline_init(&cam_pipe, &cam_pipe_os, cam_ring,
-	                        CAMERA_FRAME_BYTES, CAM_RING_SLOTS) != 0)
-		return CAM_ERR_STATE;
-	cam_stat_sink.name    = "stats";
-	cam_stat_sink.ctx     = NULL;
-	cam_stat_sink.policy  = FRAME_POLICY_DROP;
-	cam_stat_sink.open    = cam_stat_open;
-	cam_stat_sink.consume = cam_stat_consume;
-	cam_stat_sink.close   = NULL;
 
 	__HAL_RCC_GPIOA_CLK_ENABLE();
 	__HAL_RCC_GPIOE_CLK_ENABLE();
@@ -2192,22 +1756,6 @@ int camera_capture(int colorbar)
 	if (rc != CAM_OK)
 		return rc;
 	rc = camera_capture_locked(colorbar);
-	op_unlock();
-	return rc;
-}
-
-/*
- * The frame-mode stream (PSRAM ring).  Since issue #142 no command starts it --
- * `camera stream start` is the band stream, held by the holder table below --
- * and the next commit removes it; kept, unused, until then.
- */
-int camera_frame_stream_start(int colorbar, uint32_t frames, uint32_t secs)
-{
-	int rc = op_lock();
-
-	if (rc != CAM_OK)
-		return rc;
-	rc = cam_stream_start_locked(colorbar, frames, secs);
 	op_unlock();
 	return rc;
 }
@@ -2572,8 +2120,6 @@ void camera_still_release(void)
 
 int camera_stream_stats(struct camera_stream_stats *out)
 {
-	struct frame_stats fs;
-
 	if (out == NULL)
 		return CAM_ERR_PARAM;
 	if (!info.ready)
@@ -2585,77 +2131,11 @@ int camera_stream_stats(struct camera_stream_stats *out)
 	                                    : cam_elapsed_ms;
 	out->dcmi_ovr   = cam_dcmi_ovr;
 	out->dma_fe     = cam_stream_fe;
-	/* BEFORE the mode branch, which returns early: this one is board-global
-	   and cumulative since boot, so hiding it whenever the last stream happened
-	   to be a band run would lose the diagnostic exactly when someone came
-	   looking for it (issue #72). */
-	out->sink_undrained = cam_sink_undrained;
-	if (cam_last_mode == CAM_STREAM_BAND) {
-		/* Nothing from the pipeline here -- the ring is not merely empty, it is
-		   not part of this path, and reporting its zeroes beside real counters
-		   would read as "no overruns" rather than "no ring". */
-		out->frames     = cam_band_frames;
-		out->band_late  = cam_band_late;
-		out->band_torn  = cam_band_torn;
-		out->band_desync = cam_band_desync;
-		return CAM_OK;
-	}
-	frame_pipeline_stats(&cam_pipe, &fs);
-	out->frames     = fs.published;
-	out->ring_ovr   = cam_ring_ovr + fs.overruns;
-	out->repoint_skip = cam_repoint_skip;
-	out->delivered  = cam_stat_sink.delivered;
-	out->dropped    = cam_stat_sink.dropped;
-	out->slots      = CAM_RING_SLOTS;
+	out->frames     = cam_band_frames;
+	out->band_late  = cam_band_late;
+	out->band_torn  = cam_band_torn;
+	out->band_desync = cam_band_desync;
 	return CAM_OK;
-}
-
-/*
- * Pin the newest streamed frame for an outside reader (app/cam_preview.c).
- *
- * The count goes up BEFORE the pin and comes down AFTER the unpin, so a stream
- * start that samples it can only ever be too cautious, never too permissive.
- * Taking cam_lock here is what actually closes the window: a start holds that
- * lock across both its drain wait and the frame_pipeline_init() that follows, so
- * no pin can be created in between.
- */
-const struct frame_desc *camera_stream_pin_latest(void)
-{
-	const struct frame_desc *d;
-
-	if (!info.ready)
-		return NULL;
-	if (tx_mutex_get(&cam_lock, TX_WAIT_FOREVER) != TX_SUCCESS)
-		return NULL;
-	/* Band mode fills no ring: the pipeline still holds whatever the last frame
-	   stream published, and handing that out would show a consumer a stale
-	   picture it has no way to recognise as stale. */
-	if (!cam_stream_active || cam_band_mode) {
-		(void)tx_mutex_put(&cam_lock);
-		return NULL;
-	}
-	cam_ext_pins++;
-	d = frame_pipeline_pin_latest(&cam_pipe);
-	if (d == NULL) {
-		/* Nothing published yet -- a start has armed the DMA but no frame has
-		   completed.  Give the count back, or the next start spends its whole
-		   drain timeout waiting for a pin that was never taken. */
-		cam_ext_pins--;
-		(void)tx_mutex_put(&cam_lock);
-		return NULL;
-	}
-	(void)tx_mutex_put(&cam_lock);
-	return d;
-}
-
-/* Release a pin.  Deliberately does NOT take cam_lock: a stream start waits for
-   the pin count with that lock held, so needing it here would deadlock. */
-void camera_stream_put(const struct frame_desc *f)
-{
-	if (f == NULL)
-		return;
-	frame_pipeline_put(&cam_pipe, NULL, f);
-	cam_ext_pins--;
 }
 
 int camera_get_mode(struct camera_mode *out)

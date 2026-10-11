@@ -8,15 +8,16 @@
  * owhinata/wio-lite-ai#35).
  *
  * Shows the camera on the panel, rotated into the landscape drawing surface
- * (owhinata/wio-lite-ai#38).  Since owhinata/wio-lite-ai#35 the preview OWNS its
- * stream: it starts a band stream (camera_band_start) in which the DCMI lands
- * 60-row slices in AXI-SRAM, transposes each band into the LTDC back buffer as it
- * arrives, and presents once the fourth one is in.
+ * (owhinata/wio-lite-ai#38).  It is the first step of the camera's band sink
+ * (port/camera/cam_band.c, issue #142): the band stream lands 60-row slices in
+ * AXI-SRAM, the preview transposes each band into the LTDC back buffer as it
+ * arrives, and presents once the fourth one is in.  It owns no stream of its own
+ * -- whoever holds the camera (`camera stream start`, `nn stream start`) does.
  *
  * That replaced pinning whole frames out of the PSRAM ring, where the transpose's
  * strided side was the external OCTOSPI1 -- 25 ms of CPU per frame and enough
- * extra bus traffic to make the DCMI's FIFO complain.  `camera stream start` still
- * exists unchanged for whole frames into the ring; the two are exclusive.
+ * extra bus traffic to make the DCMI's FIFO complain.  (The whole-frame stream
+ * into that ring was removed by issue #142.)
  *
  * This lives in app/ rather than in either driver because it is the one thing
  * that needs BOTH -- port/camera for the pixels and port/ltdc for the display --

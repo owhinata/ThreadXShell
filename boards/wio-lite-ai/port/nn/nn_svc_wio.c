@@ -237,7 +237,11 @@ static void nn_claims_set(const struct nn_claims *c)
 	TX_RESTORE
 }
 
+#if defined(CONFIG_NN_BACKEND_TFLM)
 /*
+ * Only `nn info`'s plugin lines read the claims, and the null backend prints
+ * none (it cannot open a model) -- so the reader exists only beside its caller.
+ *
  * @param running  optional; whether a plugin is LOADED AND STARTED, taken in
  *                 the same masked section as the claims.
  *
@@ -267,6 +271,7 @@ static enum nn_claims_seen nn_claims_snapshot(struct nn_claims *out,
 	TX_RESTORE
 	return seen;
 }
+#endif /* CONFIG_NN_BACKEND_TFLM */
 
 /* [!] A legal asset name must survive `nn info`'s copy whole (issue #122 P10):
  * a truncated one can read as a different, equally legal, name. */

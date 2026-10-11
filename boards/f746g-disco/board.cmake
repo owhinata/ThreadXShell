@@ -391,7 +391,9 @@ set(NN_SOURCES
     "${BOARD_DIR}/port/nn/nn.c"
     "${BOARD_DIR}/port/nn/nn_svc_f746.c"   # the shared `nn` command's adapter
     "${BOARD_DIR}/port/nn/nn_svc_f746_model.c"  # ...its info / load / unload (#131)
-    "${BOARD_DIR}/port/nn/nn_camera.c"          # live camera -> inference glue
+    "${BOARD_DIR}/port/nn/nn_camera.c"          # live camera -> inference glue: console side
+    "${BOARD_DIR}/port/nn/nn_producer.c"        # ...its camera producer thread (#140)
+    "${BOARD_DIR}/port/nn/nn_worker.c"          # ...its inference worker thread (#140)
     "${BOARD_DIR}/port/nn/nn_sess_release.c"    # when the session may go back (#130)
     "${BOARD_DIR}/port/nn/nn_decode_count.c"    # how a decode is counted (#130 6c)
     # Model post-processing.  The decoder is SHARED with the other two boards

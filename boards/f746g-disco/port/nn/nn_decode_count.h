@@ -31,7 +31,7 @@
  * BF_ERR_ARG and a code nobody documented are wiring faults.
  *
  * Pure, no storage: test/test_nn_decode_count.c walks it.  The counters and
- * where they move are the worker's (port/nn/nn_camera.c, nncam_publish()).
+ * where they move are the worker's (port/nn/nn_worker.c, nncam_publish()).
  */
 #ifndef NN_DECODE_COUNT_H
 #define NN_DECODE_COUNT_H

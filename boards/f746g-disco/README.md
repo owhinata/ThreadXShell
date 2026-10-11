@@ -178,7 +178,9 @@ file (each `.c` with its `.h` unless only a header is listed):
 |---|---|---|
 | `port/nn/nn_svc_f746.c` | console | The thin adapter over this board's `nn.h` API; it adds no state. |
 | `port/nn/nn_svc_f746_model.c` | console (`nn info`, `nn model load` / `unload`) | The steps of the shared load order on this board: the built-in model in Flash and the SD-card model slots in SDRAM. |
-| `port/nn/nn_camera.c` | camera producer (sink `consume()`), inference worker (priority 18), console (start / stop / stats), caller of attach / detach (sink `open()` / `close()`) | Binds the shared frame path to this board's camera frame pipeline as one of its three subscribers; inference runs on the CPU, so the worker sits below every other thread. |
+| `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (start / stop / stats / record reads) and the caller of attach / detach (the sink's `open()` / `close()`) | Binds the shared frame path to this board's camera frame pipeline as one of its three subscribers; owns the glue's state (the private header lists each counter's writers and resets) and the frame path's ops table. |
+| `port/nn/nn_producer.c` | camera producer (sink `consume()`) | Prepares a frame straight into the model's input tensor (nearest-neighbour resize + RGB565 conversion on the CPU) and hands it over; `camera_frame_put()` stays the last statement of `consume()`. |
+| `port/nn/nn_worker.c` | inference worker (priority 18) | Inference runs on the CPU, so the worker sits below every other thread; it runs the model, the resident decoder's publish and the counting. |
 | `port/nn/nn_decoder.c` | inference worker | Resident BlazeFace decoder state, with its candidate scratch placed in `.sdram.ai`, and `nn_tensor` -> `tensor_desc`. |
 | `port/nn/nn_decode_count.c` | inference worker | No hardware reason: this board's table for counting the decoder's answer in `nn stream stats` (pure, host-tested). |
 | `port/nn/nn_sess_release.c` | console (stop), inference worker | No hardware reason: when the stream's hold on the nn session may be given back, as a pure function of the sink drain and the worker. |

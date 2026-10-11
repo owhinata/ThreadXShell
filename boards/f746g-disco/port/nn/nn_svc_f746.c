@@ -570,8 +570,9 @@ void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
 
 /* ---- live inference (issue #99) ------------------------------------------
  *
- * The subscriber worker in port/nn/nn_camera.c is unchanged and still owns the
- * lifecycle and the NN session.  What this adds is an IDENTITY, so a `--frames`
+ * The subscriber worker (port/nn/nn_worker.c, with its state and start / stop in
+ * port/nn/nn_camera.c) is unchanged and still owns the lifecycle and the NN
+ * session.  What this adds is an IDENTITY, so a `--frames`
  * waiter cannot stop a stream that another console started after its own had
  * gone.
  */
@@ -805,7 +806,7 @@ int nn_svc_box_to_frame(const struct bf_det *in, struct bf_det *out)
 	/*
 	 * [!] THE IDENTITY HERE, AND THAT IS A FACT ABOUT THIS BOARD RATHER THAN A
 	 * PLACEHOLDER.  The producer resizes the WHOLE frame into the model input
-	 * (nearest-neighbour, port/nn/nn_camera.c), so the input's normalised space
+	 * (nearest-neighbour, port/nn/nn_producer.c), so the input's normalised space
 	 * and the frame's are the same space.  Grove crops the centre square before
 	 * scaling, so there the two differ and its adapter maps between them -- the
 	 * reason this is a board operation at all.

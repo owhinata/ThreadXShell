@@ -226,7 +226,8 @@ int main(void)
 	/* Refusals before the claim keep their words. */
 	camera_running = 1;
 	load(NN_SPEC_PATH, "a.tflite");
-	assert(res.status == NN_SVC_ERR_BUSY && state == NN_MODEL_PREVIOUS);
+	/* BUSY reports no state and leaves the caller's untouched (#138). */
+	assert(res.status == NN_SVC_ERR_BUSY && state == (enum nn_model_state)99);
 	assert(strcmp(res.detail, "stop the inference stream first "
 	                          "(`nn stream stop`)") == 0);
 	unload();
@@ -239,7 +240,7 @@ int main(void)
 	assert(nn_session_try_acquire() == 0);      /* a stream holds it */
 	stream_holds = 1;
 	load(NN_SPEC_PATH, "a.tflite");
-	assert(res.status == NN_SVC_ERR_BUSY && state == NN_MODEL_PREVIOUS);
+	assert(res.status == NN_SVC_ERR_BUSY && state == (enum nn_model_state)99);
 	assert(strcmp(res.detail, "NN busy (a stream, run or bench is "
 	                          "active)") == 0);
 	/* ...and `nn info` during a stream still gets the copy: no load is in

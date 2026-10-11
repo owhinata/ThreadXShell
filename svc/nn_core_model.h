@@ -53,7 +53,10 @@
  * -- all of them before step 10 -- and a BUSY returned by the swap or the
  * plugin start is reported as NN_SVC_ERR_HW.  The
  * shared command relies on this (issue #131 stage 8): a load refused BUSY has
- * changed nothing, so it has no model state to report.
+ * changed nothing, so it has no model state to report -- and this does not
+ * make one up: a BUSY load leaves @p state unwritten (issue #138).  A refused
+ * claim could fill it only by asking has_model() without the claim, while
+ * another console's load may have the model down for a moment.
  *
  * [!] THE TRANSITION COUNTER is odd from the first change to what is open to
  * the last, and only then -- a load refused before the lease never moves it.
@@ -201,7 +204,9 @@ struct nn_core_model_board {
 
 /**
  * `nn model load`.  The board fills j->spec, j->res (its detail cleared) and
- * j->board; this fills j->res's status and disposition and @p state.
+ * j->board; this fills j->res's status and disposition and, unless the status
+ * is NN_SVC_ERR_BUSY, @p state.  [!] On BUSY @p state is left as the caller
+ * set it: there is no state to report (see the BUSY note above).
  */
 void nn_core_model_load(struct nn_core_model *m,
                         const struct nn_core_model_board *b,

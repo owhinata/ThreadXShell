@@ -18,6 +18,7 @@
 
 #include "tx_api.h"        /* tx_time_get(): ThreadX ticks, 1 ms here */
 
+#include "cam_holders.h"   /* struct cam_holder: nn's place on the camera (#142) */
 #include "nn_active.h"
 #include "plugin_lease.h"
 #include "nn_rec.h"
@@ -137,9 +138,18 @@ struct nn_core_frame nn_ov_core;
 volatile uint8_t nn_ov_result;   /* nn_ov_publish(), in the lease */
 
 /*
+ * nn's place among the camera's holders (issue #142).  `nn stream start` and
+ * `nn run` hold the camera's stream to the panel -- starting it, and holding the
+ * operator's place too, when nothing streams -- and nn's stop gives up this
+ * place only, so the camera keeps streaming for the operator.
+ */
+const struct cam_holder nn_cam_holder = { "nn" };
+
+/*
  * `nn run` (issue #129): the same producer and worker, for ONE frame.  Set by
  * nn_camera_arm_oneshot(), cleared by nn_camera_arm(); written only while the
- * worker is parked and nothing is attached.
+ * worker is parked and the overlay is off the sink with nothing counted in it
+ * (issue #142) -- the producer reads it only inside the overlay.
  *
  * [!] A ONE-SHOT COUNTS NOTHING HERE.  The stream statistics are what `nn stream
  * stats` reads after a stream has ended, and `nn run` never touched them; it
@@ -214,6 +224,18 @@ static const struct cam_lcd_overlay nn_ov_vtable = {
 	.draw    = nn_camera_draw,
 };
 
+/*
+ * `nn run`'s overlay: the same preparation and worker, and NO draw (issue
+ * #142).  On a stream the operator is watching, a one-shot must not paint --
+ * there is nothing of its own to paint until its worker has published, and
+ * what the plugin would paint before that is the LAST stream's result.
+ */
+static const struct cam_lcd_overlay nn_ov_oneshot_vtable = {
+	.ctx     = NULL,
+	.process = nn_camera_process,
+	.draw    = NULL,
+};
+
 const struct cam_lcd_overlay *nn_camera_arm(void)
 {
 	TX_INTERRUPT_SAVE_AREA
@@ -227,8 +249,10 @@ const struct cam_lcd_overlay *nn_camera_arm(void)
 	 *
 	 * Under the same critical section the writer and the reader use, so the
 	 * three agree on what one snapshot means.  There is no writer to race
-	 * here -- arm() runs after the old stream is quiescent and before the new
-	 * sink is attached -- and the reset is deliberately NOT done on stop, so
+	 * here -- arm() runs after the old stream is quiescent and before the
+	 * overlay is put on the sink (issue #142: the camera itself may already
+	 * be streaming for the operator, with nothing of nn's in it) -- and the
+	 * reset is deliberately NOT done on stop, so
 	 * `nn stream stats` after a stop still describes the run that just ended.
 	 */
 	TX_DISABLE
@@ -241,7 +265,8 @@ const struct cam_lcd_overlay *nn_camera_arm(void)
 
 	/*
 	 * The worker is parked -- the caller armed it IDLE -> WANT and nothing
-	 * hands it a frame until the attach -- so nothing below has a writer.
+	 * hands it a frame until the overlay is put on -- so nothing below has a
+	 * writer.
 	 */
 	TX_DISABLE
 	nn_ov_stats.inferences = 0u;
@@ -281,7 +306,7 @@ const struct cam_lcd_overlay *nn_camera_arm_oneshot(void)
 	 * Only what the producer and the worker read to decide; NOT the stream's
 	 * counters, which describe the last stream until the next one is armed.
 	 * Nothing writes these now: the worker is parked (the caller armed it
-	 * IDLE -> WANT and nothing has been attached to hand it a frame).
+	 * IDLE -> WANT and the overlay is not on yet to hand it a frame).
 	 */
 	TX_DISABLE
 	nn_ov_oneshot   = 1u;
@@ -291,7 +316,7 @@ const struct cam_lcd_overlay *nn_camera_arm_oneshot(void)
 	TX_RESTORE
 	/* The frame numbers, and not the stream's lag figures. */
 	nn_core_frame_reset(&nn_ov_core, &nn_ov_ops, 0);
-	return &nn_ov_vtable;
+	return &nn_ov_oneshot_vtable;
 }
 
 int nn_camera_shot(void)

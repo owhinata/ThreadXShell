@@ -33,6 +33,12 @@
  *
  * 3. Detach unlinks BEFORE it drains.  The other order leaves the sink reachable
  *    across a window in which a fresh stream can start.
+ *
+ * AND SINCE ISSUE #142, WHO HOLDS IT.  The holder table (svc/cam_holders.h)
+ * lives here, under this file's holder lock: the first holder starts the camera
+ * with this sink, the last one stops it, and only a confirmed stop unlinks.  nn's
+ * overlay is a pointer this sink counts the use of (svc/cam_step.h), so `nn
+ * stream stop` can take it off a stream that keeps running.
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -41,6 +47,9 @@
 
 #include "cam_lcd_sink.h"
 #include "camera.h"
+#include "cam_holders.h"    /* who holds the stream (issue #142)          */
+#include "cam_hold_rules.h" /* when the sink may be unlinked (issue #142) */
+#include "cam_step.h"       /* the overlay's use count (issue #142)       */
 #include "cam_dp.h"
 #include "cam_state.h"
 #include "cli_config.h"
@@ -51,6 +60,17 @@
 
 #define LOG_TAG "camlcd"
 #include "log.h"
+
+/* [!] cam_hold_rules.c decides about NUMBERS and is compiled on the host where
+ * camera.h cannot be included; these tie the two together. */
+_Static_assert(CAM_HOLD_CAM_OK      == CAM_OK,          "CAM_OK moved");
+_Static_assert(CAM_HOLD_CAM_TIMEOUT == CAM_ERR_TIMEOUT, "CAM_ERR_TIMEOUT moved");
+_Static_assert(CAM_HOLD_CAM_STATE   == CAM_ERR_STATE,   "CAM_ERR_STATE moved");
+_Static_assert(CAM_HOLD_CAM_BUSY    == CAM_ERR_BUSY,    "CAM_ERR_BUSY moved");
+_Static_assert(CAM_HOLD_CAM_LOCKED  == CAM_ERR_LOCKED,  "CAM_ERR_LOCKED moved");
+/* And this file's own refusal must not collide with the camera's codes. */
+_Static_assert(CAM_LCD_ERR_IN_USE < CAM_ERR_LOCKED,
+               "CAM_LCD_ERR_IN_USE collides with a camera.h code");
 
 /* ---- the panel thread ---------------------------------------------------- */
 
@@ -119,7 +139,7 @@ static TX_SEMAPHORE cam_panel_idle;
 static int cam_panel_ok;   /* the thread and its objects exist */
 
 /*
- * How long detach() waits for the panel thread.
+ * How long sink_detach() waits for the panel thread.
  *
  * A blit is bounded by the driver's own DMA timeout (one second) plus its
  * quiesce, and there can be at most one outstanding once the producer is idle.
@@ -128,6 +148,14 @@ static int cam_panel_ok;   /* the thread and its objects exist */
  * it poisons the sink rather than racing the thread.
  */
 #define CAM_PANEL_DRAIN_TICKS (3u * TX_TIMER_TICKS_PER_SECOND)
+
+/*
+ * How long a release waits for the holder lock (issue #142).  The longest a
+ * holder of it keeps it is a stop: the camera's own join (camera.c's
+ * CAM_STOP_JOIN_TICKS, 6 s) and then a panel drain (above, 3 s).  Missing it is
+ * a retryable refusal, never a decision: nothing was changed.
+ */
+#define CAM_HOLD_WAIT_TICKS (10u * TX_TIMER_TICKS_PER_SECOND)
 
 /* ---- lifecycle ----------------------------------------------------------- */
 
@@ -146,24 +174,56 @@ enum sink_state {
 	SINK_ATTACHING,   /**< claimed; the panel may be being brought up   */
 	SINK_ATTACHED,
 	SINK_DETACHING,   /**< unlinked; draining the panel thread          */
-	SINK_LOST,        /**< [!] UNRECOVERABLE -- see cam_lcd_sink_detach */
+	SINK_LOST,        /**< [!] UNRECOVERABLE -- see sink_detach() */
 };
 
 static enum sink_state sink_state;
 static const char     *sink_fault;
 
+/*
+ * ---- who holds the stream (issue #142) ------------------------------------
+ *
+ * Moved only under hold_mutex, in the same locked region as the camera start or
+ * stop its answer calls for -- and every attach and unlink of this sink happens
+ * in such a region, which is what lets the sink's state stand for "the stream
+ * is up" when the table is read.  The producer and the panel thread never take
+ * it.  Lock order: hold_mutex, then the camera API mutex (inside
+ * camera_stream_start() / _stop()), then the panel guard.
+ */
+static TX_MUTEX hold_mutex;
+static struct cam_holders hold_table;
+/* The operator's place.  Here rather than in cmds/: nn takes it too when it
+ * starts the camera (issue #142 D6), and port/nn may not reach into cmds/. */
+static const struct cam_holder hold_manual = { "manual" };
+/* Holders lost at the last confirmed end of a stream; each mark goes only when
+ * that holder takes hold again. */
+static const struct cam_holder *hold_lost[CAM_HOLDERS_MAX];
+/* A stop has CONFIRMED the camera stopped and still owes the unlink. */
+static uint8_t hold_stopping;
+/* ...and the end it is finishing was an error, so its holders are lost. */
+static uint8_t hold_stop_loses;
+/* [!] An unconfirmed loss: the table, the sink and every resource are kept, and
+ * nothing starts again until reboot.  Written under hold_mutex; read without it
+ * by cam_lcd_sink_overlay_remove(), which only ever refuses on it. */
+static volatile uint8_t hold_terminal;
+
 static struct cam_lcd_sink_stats sink_stats;
 
 /*
- * The optional overlay (issue #48).
+ * The optional overlay (issue #48), nn's step of this sink since issue #142.
  *
- * Written by attach() while no stream can be running (the state claim
- * guarantees it), read by process() on the producer and by draw() on the panel
- * thread.  Never cleared while the sink is linked or a frame is outstanding --
- * see the detach contract.
+ * A POINTER, and its use COUNTED: sink_ov_step says whether the producer may
+ * enter the step and how many times it is inside (svc/cam_step.h).  The pointer
+ * and the step move together, in one critical section -- put on by a hold,
+ * taken off by cam_lcd_sink_overlay_remove() or by the unlink -- and the producer
+ * reads the pointer only inside the critical section that counts it in.  It hands
+ * what it read to the panel thread with the frame, and the panel thread counts it
+ * out once it is finished with that frame; nothing on the panel side reads the
+ * pointer kept here.  So "the count is zero after the step was disarmed" is
+ * "neither thread is in either callback, and neither can enter again".
  */
-static struct cam_lcd_overlay sink_overlay;
-static int sink_has_overlay;
+static const struct cam_lcd_overlay *sink_ov;
+static struct cam_step_state sink_ov_step;
 
 /* Defined below; consume() has to name it when balancing its delivery. */
 static struct frame_sink cam_lcd_sink;
@@ -177,14 +237,18 @@ static struct frame_sink cam_lcd_sink;
  * descriptor slot sufficient.  Under FRAME_POLICY_LATEST the core would instead
  * keep a pending frame and re-enter consume() from INSIDE put(), on the panel
  * thread: the inference would leave the producer and #48's ordering would break.
- * So the policy is named here, and attach() refuses if it is ever anything else.
+ * So the policy is named here, and sink_attach_and_stream() refuses if it is
+ * ever anything else.
  */
 #define CAM_LCD_SINK_POLICY FRAME_POLICY_DROP
 
 /* The one outstanding delivery.  NULL when the panel thread has taken it. */
 static const struct frame_desc *sink_mbox;
-/* Travels with the frame: whether process() produced boxes for it. */
+/* Travels with the frame: whether process() produced a result to draw. */
 static int sink_mbox_overlay_ok;
+/* Travels with the frame: the overlay the producer counted itself into for it,
+ * or NULL.  The panel thread draws through THIS and counts it out (issue #142). */
+static const struct cam_lcd_overlay *sink_mbox_ov;
 
 /*
  * The drain handshake.
@@ -297,6 +361,9 @@ static enum sink_state sink_get_state(void)
  */
 struct sink_release {
 	const struct frame_desc *f;
+	/* The overlay counted in for this frame, or NULL (issue #142): drawn
+	 * through, and counted out with the frame's release. */
+	const struct cam_lcd_overlay *ov;
 	uint32_t t_release;   /* EPK ticks, stamped after the put returned */
 	int      released;
 	int      by_hook;     /* the driver told us, i.e. the fast path */
@@ -317,6 +384,22 @@ static void sink_release_frame(struct sink_release *r)
 	if (r->released)
 		return;
 
+	/*
+	 * [!] THE OVERLAY'S USE ENDS HERE, ON EVERY PATH (issue #142) -- drawn,
+	 * skipped because the panel was taken, skipped because it was dark, or
+	 * refused by the driver before staging.  After draw() (the staged hook
+	 * runs after the overlay hook) and before the put, so the producer cannot
+	 * be counted in again for the next frame until this one is counted out.
+	 */
+	if (r->ov != NULL) {
+		TX_INTERRUPT_SAVE_AREA
+
+		TX_DISABLE
+		(void)cam_step_leave(&sink_ov_step);
+		TX_RESTORE
+		r->ov = NULL;
+	}
+
 	camera_frame_put(&cam_lcd_sink, r->f);
 	/*
 	 * Both stamped AFTER the put has returned, not before it.  There is no
@@ -331,11 +414,14 @@ static void sink_release_frame(struct sink_release *r)
 }
 
 /* Trampoline: the LCD driver's callback signature is its own, and the sink's
- * overlay contract is the sink's.  Only reached with an overlay armed. */
+ * overlay contract is the sink's.  Only reached with an overlay counted in for
+ * this frame -- and it draws through the one the frame carried, never through
+ * the pointer the sink keeps (issue #142). */
 static void cam_lcd_draw(void *ctx, uint16_t *fb, uint16_t fb_w, uint16_t fb_h)
 {
-	(void)ctx;
-	sink_overlay.draw(sink_overlay.ctx, fb, fb_w, fb_h);
+	const struct sink_release *r = (const struct sink_release *)ctx;
+
+	r->ov->draw(r->ov->ctx, fb, fb_w, fb_h);
 }
 
 /*
@@ -384,7 +470,7 @@ static void cam_lcd_staged(void *ctx)
  * And `sink_done` stays where it is, in step 4's block. It answers "this blit is
  * finished"; the pin answers "the source is free". They were one statement and
  * are now two, and conflating them again would let cam_panel_drain() report idle
- * with a transfer still running -- which is the answer cam_lcd_sink_detach()
+ * with a transfer still running -- which is the answer sink_detach()
  * tears the overlay down on.
  *
  * Step 4 is deliberately after step 3 and deliberately not part of it.  What it
@@ -403,6 +489,7 @@ static void cam_panel_entry(ULONG arg)
 		struct sink_release rel;
 		struct lcd_blit_hooks hooks;
 		const struct frame_desc *f;
+		const struct cam_lcd_overlay *ov;
 		uint32_t t0;
 		int overlay_ok;
 		int blit;
@@ -413,7 +500,9 @@ static void cam_panel_entry(ULONG arg)
 		TX_DISABLE
 		f          = sink_mbox;
 		overlay_ok = sink_mbox_overlay_ok;
+		ov         = sink_mbox_ov;
 		sink_mbox  = NULL;
+		sink_mbox_ov = NULL;
 		TX_RESTORE
 
 		if (f == NULL)
@@ -424,6 +513,7 @@ static void cam_panel_entry(ULONG arg)
 		 * wake and the scheduling latency are inside the number. */
 		t0 = tx_glue_epk_timer_ticks();
 		rel.f         = f;
+		rel.ov        = ov;
 		rel.t_release = t0;
 		rel.released  = 0;
 		rel.by_hook   = 0;
@@ -434,7 +524,19 @@ static void cam_panel_entry(ULONG arg)
 		 * happened to type, and a live preview that drops a frame is
 		 * better than one that stalls the ring.  The count says it
 		 * happened. */
-		if (lcd_acquire() != 0) {
+		/*
+		 * [!] A DARK PANEL IS NOT DRAWN ON (issue #142).  `lcd off` is the
+		 * backlight only, so the frames would still be copied, drawn on and
+		 * clocked out to a panel nobody can see.  Asked BEFORE the guard,
+		 * so a dark frame never contends for it, and through the driver's
+		 * own record of what lcd_backlight() last set -- this thread does
+		 * not read the pin.  The frame and the overlay's count still go
+		 * back in step 3, and the inference is unaffected: its preparation
+		 * was the producer's, in consume().
+		 */
+		if (!lcd_display_on()) {
+			sink_stats.dark++;
+		} else if (lcd_acquire() != 0) {
 			sink_stats.busy++;
 		} else {
 			/* lcd_blit_le_overlay: the slot is little-endian RGB565
@@ -442,8 +544,8 @@ static void cam_panel_entry(ULONG arg)
 			 * swap, and calls the draw hook between the swap and the
 			 * DMA -- then the staged hook, which is where this sink
 			 * hands the slot back (issue #71). */
-			hooks.overlay = (overlay_ok && sink_overlay.draw != NULL)
-					? cam_lcd_draw : NULL;
+			hooks.overlay = (overlay_ok && ov != NULL &&
+			                 ov->draw != NULL) ? cam_lcd_draw : NULL;
 			hooks.staged  = cam_lcd_staged;
 			hooks.ctx     = &rel;
 
@@ -501,6 +603,12 @@ void cam_lcd_sink_create_objects(void)
 		LOG_ERR("panel sink semaphore create failed");
 		return;
 	}
+	/* The holder lock (issue #142).  Inheriting: a stop holds it across a
+	 * camera join and a panel drain, and a release waits for it. */
+	if (tx_mutex_create(&hold_mutex, "cam_hold", TX_INHERIT) != TX_SUCCESS) {
+		LOG_ERR("panel sink holder lock create failed");
+		return;
+	}
 
 	if (tx_thread_create(&cam_panel_thread, "camlcd", cam_panel_entry, 0,
 	                     cam_panel_stack, sizeof cam_panel_stack,
@@ -555,9 +663,29 @@ static int cam_lcd_open(void *ctx, enum frame_format fmt, uint16_t w,
 static int cam_lcd_consume(void *ctx, const struct frame_desc *f)
 {
 	TX_INTERRUPT_SAVE_AREA
+	const struct cam_lcd_overlay *ov = NULL;
 	int overlay_ok = 0;
 
 	(void)ctx;
+
+	/*
+	 * [!] ONE READ OF THE OVERLAY PER FRAME, IN THE CRITICAL SECTION THAT
+	 * COUNTS IT IN (issue #142).  Disarmed -- nn's stop has taken it off, or
+	 * none was ever put on -- the producer skips the step and reads nothing.
+	 * Counted in, it owes exactly one count out, and that is the panel
+	 * thread's, after it has finished with this frame: the pointer travels
+	 * with the frame below.  This and the hand-off further down are all the
+	 * producer pays for the count.
+	 */
+	TX_DISABLE
+	if (cam_step_enter(&sink_ov_step)) {
+		ov = sink_ov;
+		/* Armed without a pointer: not reachable (the two move together),
+		 * and counted straight back out rather than owed for ever. */
+		if (ov == NULL)
+			(void)cam_step_leave(&sink_ov_step);
+	}
+	TX_RESTORE
 
 	/*
 	 * [!] ON THE PRODUCER, and that ordering is the design (issue #48).
@@ -570,13 +698,14 @@ static int cam_lcd_consume(void *ctx, const struct frame_desc *f)
 	 * failure means no boxes on this frame, not a blank preview: the
 	 * picture is worth more than the annotation.
 	 */
-	if (sink_has_overlay && sink_overlay.process != NULL) {
-		if (sink_overlay.process(sink_overlay.ctx, f->data,
-		                         (uint16_t)CAM_FRAME_WIDTH,
-		                         (uint16_t)CAM_FRAME_HEIGHT) == 0)
+	if (ov != NULL && ov->process != NULL) {
+		if (ov->process(ov->ctx, f->data, (uint16_t)CAM_FRAME_WIDTH,
+		                (uint16_t)CAM_FRAME_HEIGHT) == 0)
 			overlay_ok = 1;
-		else
-			sink_stats.overlay_errors++;
+		else if (ov->draw != NULL)
+			sink_stats.overlay_errors++;   /* an overlay that draws
+			                                * nothing (`nn run`)
+			                                * leaves nothing bare */
 	}
 
 	/*
@@ -589,6 +718,7 @@ static int cam_lcd_consume(void *ctx, const struct frame_desc *f)
 	TX_DISABLE
 	sink_mbox            = f;
 	sink_mbox_overlay_ok = overlay_ok;
+	sink_mbox_ov         = ov;
 	sink_accepted++;
 	TX_RESTORE
 
@@ -603,7 +733,7 @@ static int cam_lcd_consume(void *ctx, const struct frame_desc *f)
  * this module's teardown and not the end of it: the panel thread may still be
  * inside a blit, reading the overlay and the detections.  Tearing anything down
  * here would mutate state a live thread is using -- so the state machine lives
- * in cam_lcd_sink_detach(), which knows whether the drain succeeded, and this
+ * in sink_detach(), which knows whether the drain succeeded, and this
  * hook stays as a marker that the omission is deliberate.
  */
 static void cam_lcd_close(void *ctx)
@@ -622,7 +752,12 @@ static struct frame_sink cam_lcd_sink = {
 
 /* ---- attach / detach ----------------------------------------------------- */
 
-int cam_lcd_sink_attach_and_stream(const struct cam_lcd_overlay *ov)
+/*
+ * Start the camera with this sink attached (issue #63's one step).  Since issue
+ * #142 called only by a hold that took the table from empty, under hold_mutex;
+ * the overlay is the hold's business, not this function's.
+ */
+static int sink_attach_and_stream(void)
 {
 	TX_INTERRUPT_SAVE_AREA
 	int rc;
@@ -647,12 +782,12 @@ int cam_lcd_sink_attach_and_stream(const struct cam_lcd_overlay *ov)
 	}
 
 	/*
-	 * [!] BUSY, not "already done".  The shell runs commands as background
-	 * jobs, so a second `camera preview` is a real second caller -- and if
-	 * it were told the attach succeeded, two commands would believe they own
-	 * one panel, and the second one's teardown would take the FIRST
-	 * preview's sink with it.  The first preview would keep capturing while
-	 * the panel silently stopped updating.
+	 * [!] BUSY, not "already done".  Since issue #142 only a hold that took
+	 * the table from empty gets here, under the holder lock, so a second
+	 * caller is not reachable through it -- the claim stays as the statement
+	 * that the attach is exclusive, rather than a property of who calls it.
+	 * Told the attach succeeded, two callers would believe they own one panel
+	 * and the second one's teardown would take the first one's sink with it.
 	 */
 	if (!sink_claim(SINK_DETACHED, SINK_ATTACHING)) {
 		enum sink_state s = sink_get_state();
@@ -717,6 +852,7 @@ int cam_lcd_sink_attach_and_stream(const struct cam_lcd_overlay *ov)
 	sink_stats.dropped        = 0u;
 	sink_stats.errors         = 0u;
 	sink_stats.busy           = 0u;
+	sink_stats.dark           = 0u;
 	sink_stats.overlay_errors = 0u;
 
 	/* The hand-off counters are normalised per attach, so a drain never
@@ -741,15 +877,6 @@ int cam_lcd_sink_attach_and_stream(const struct cam_lcd_overlay *ov)
 	while (tx_semaphore_get(&cam_panel_idle, TX_NO_WAIT) == TX_SUCCESS)
 		;
 
-	/* Published before the subscribe, so the producer can never see a sink
-	 * that is attached with a half-written overlay. */
-	if (ov != NULL) {
-		sink_overlay     = *ov;
-		sink_has_overlay = 1;
-	} else {
-		sink_has_overlay = 0;
-	}
-
 	/*
 	 * [!] THE SUBSCRIBE AND THE STREAM START ARE ONE CALL (issue #63).
 	 *
@@ -764,12 +891,11 @@ int cam_lcd_sink_attach_and_stream(const struct cam_lcd_overlay *ov)
 	 * The camera does both halves under its API mutex now, so there is no gap
 	 * to lose.  What that buys HERE is the unwind: on any failure nothing was
 	 * linked, so this module puts its own static state back and returns.  No
-	 * detach, and no failure code that has to be treated as "it might have
+	 * unlink, and no failure code that has to be treated as "it might have
 	 * half-worked".
 	 */
 	rc = camera_stream_start(&cam_lcd_sink);
 	if (rc != CAM_OK) {
-		sink_has_overlay = 0;
 		lcd_release();
 		sink_set_state(SINK_DETACHED);
 		return rc;
@@ -837,7 +963,12 @@ static int cam_panel_drain(void)
 	}
 }
 
-int cam_lcd_sink_detach(void)
+/*
+ * Unlink, then drain the panel thread.  Since issue #142 called only by a stop
+ * under hold_mutex, and only behind a confirmed camera stop
+ * (cam_hold_may_detach()).
+ */
+static int sink_detach(void)
 {
 	int rc;
 
@@ -1001,10 +1132,423 @@ int cam_lcd_sink_detach(void)
 		return CAM_ERR_STATE;
 	}
 
+	/*
+	 * [!] AND THE OVERLAY GOES WITH THE SINK (issue #142).  A stream that ends
+	 * with nn's overlay still on -- the producer gave up, and this is the
+	 * settling of it -- takes it off here: nothing is inside it (the drain
+	 * above saw every frame through the panel, and each frame counts its
+	 * overlay out before it is released), so its count must be zero.  A count
+	 * that is not is the same bookkeeping failure as a pin that is not, and
+	 * gets the same answer.  nn's own stop then finds nothing on and nothing
+	 * counted.
+	 */
+	{
+		TX_INTERRUPT_SAVE_AREA
+		uint16_t busy;
+
+		TX_DISABLE
+		cam_step_disarm(&sink_ov_step);
+		sink_ov = NULL;
+		busy = sink_ov_step.busy;
+		TX_RESTORE
+
+		if (busy != 0u) {
+			LOG_ERR("the overlay is still counted in use after the panel "
+			        "drained; the preview sink is unusable until reboot");
+			sink_fault_latch("the overlay was never counted out");
+			sink_set_state(SINK_LOST);
+			return CAM_ERR_STATE;
+		}
+	}
+
 	/* Provably idle: no delivery outstanding and none can start. */
-	sink_has_overlay = 0;
 	sink_set_state(SINK_DETACHED);
 	return CAM_OK;
+}
+
+/* ---- the overlay (issue #142) --------------------------------------------- */
+
+static int hold_settle_locked(void);   /* below, with the holders */
+
+/*
+ * Put @p ov on.  Under hold_mutex, from a hold.  Refused while the count is not
+ * zero -- whatever the caller initialised for its session just before (nn's
+ * counters, its frame path, its one-shot flags) must not be read half-way by a
+ * producer still inside from before -- and while one is already on (only nn
+ * puts one on, and its lifecycle admits one session at a time, so that is a
+ * stop that never ran).
+ */
+static int sink_ov_put_locked(const struct cam_lcd_overlay *ov)
+{
+	TX_INTERRUPT_SAVE_AREA
+	int rc = CAM_OK;
+
+	TX_DISABLE
+	if (sink_ov_step.armed)
+		rc = CAM_ERR_STATE;
+	else if (!cam_step_may_arm(&sink_ov_step))
+		rc = CAM_ERR_BUSY;
+	else {
+		sink_ov = ov;
+		(void)cam_step_arm(&sink_ov_step);
+	}
+	TX_RESTORE
+	return rc;
+}
+
+/* Take it off without waiting: the undo of a put this hold made. */
+static void sink_ov_off(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	cam_step_disarm(&sink_ov_step);
+	sink_ov = NULL;
+	TX_RESTORE
+}
+
+int cam_lcd_sink_overlay_remove(void)
+{
+	ULONG start;
+
+	/* Off first, whatever else: from here the producer does not enter the
+	 * step, so the count can only fall.  Not under hold_mutex -- only nn puts
+	 * an overlay on and only nn's stop takes it off, and its lifecycle keeps
+	 * the two apart; the unlink's own clearing is the same idempotent store. */
+	sink_ov_off();
+
+	/*
+	 * [!] NOTHING IS PROVEN ON A TERMINAL SINK.  A producer that never
+	 * acknowledged a stop, or a panel thread that never came back, may be
+	 * inside this very overlay, and the answer for those is to keep
+	 * everything (camera.h): no wait, no proof, CAM_ERR_STATE.
+	 */
+	if (hold_terminal || sink_get_state() == SINK_LOST)
+		return CAM_ERR_STATE;
+
+	/* Wall clock, never a count of wake-ups -- the same reasoning as
+	 * cam_panel_drain(): the panel posts cam_panel_idle once per frame, and
+	 * a waiter counting those would run its deadline out in microseconds. */
+	start = tx_time_get();
+	for (;;) {
+		TX_INTERRUPT_SAVE_AREA
+		uint16_t busy;
+
+		TX_DISABLE
+		busy = sink_ov_step.busy;
+		TX_RESTORE
+
+		if (busy == 0u)
+			return CAM_OK;
+		if ((ULONG)(tx_time_get() - start) >= CAM_PANEL_DRAIN_TICKS)
+			break;
+		(void)tx_semaphore_get(&cam_panel_idle, 1u);
+	}
+
+	/*
+	 * [!] A COUNT THAT DID NOT FALL MAY BE A STREAM THAT DID NOT END CLEANLY.
+	 * A producer that never acknowledged a stop (CAM_ST_LOST) may be stuck
+	 * inside process(), and only the settling of the stream finds that out --
+	 * which, unasked, would leave nn's stop retrying for ever.  So settle now
+	 * (without waiting for the lock: a stop in progress settles it itself),
+	 * and read the answer: terminal if the stream turned out lost, the count
+	 * again otherwise (a confirmed end unlinks, and the unlink proves it
+	 * zero), and a retryable timeout if the producer is merely slow.
+	 */
+	if (cam_panel_ok && tx_mutex_get(&hold_mutex, TX_NO_WAIT) == TX_SUCCESS) {
+		(void)hold_settle_locked();
+		(void)tx_mutex_put(&hold_mutex);
+	}
+	if (hold_terminal || sink_get_state() == SINK_LOST)
+		return CAM_ERR_STATE;
+	{
+		TX_INTERRUPT_SAVE_AREA
+		uint16_t busy;
+
+		TX_DISABLE
+		busy = sink_ov_step.busy;
+		TX_RESTORE
+		return (busy == 0u) ? CAM_OK : CAM_ERR_TIMEOUT;
+	}
+}
+
+/* ---- who holds the stream (issue #142) ------------------------------------ */
+
+static void hold_forget_lost_locked(const struct cam_holder *h)
+{
+	unsigned i;
+
+	for (i = 0u; i < CAM_HOLDERS_MAX; i++)
+		if (hold_lost[i] == h)
+			hold_lost[i] = NULL;
+}
+
+/* A confirmed end of a stream nobody stopped: every holder is marked lost and
+ * the table emptied.  Cleared, not initialised: the generations go on, so a
+ * ticket from before the end never matches a registration made after it. */
+static void hold_lose_all_locked(void)
+{
+	const struct cam_holder *who[CAM_HOLDERS_MAX];
+	unsigned n = cam_holders_list(&hold_table, who, NULL, CAM_HOLDERS_MAX);
+	unsigned i, k;
+
+	for (i = 0u; i < n; i++) {
+		for (k = 0u; k < CAM_HOLDERS_MAX && hold_lost[k] != who[i]; k++)
+			;
+		if (k < CAM_HOLDERS_MAX)
+			continue;               /* already marked */
+		for (k = 0u; k < CAM_HOLDERS_MAX; k++) {
+			if (hold_lost[k] == NULL) {
+				hold_lost[k] = who[i];
+				break;
+			}
+		}
+	}
+	cam_holders_clear(&hold_table);
+}
+
+static int hold_err(int hrc)
+{
+	switch (hrc) {
+	case CAM_HOLDERS_E_CLAIMED: return CAM_ERR_BUSY;    /* never across
+	                                                     * the lock      */
+	case CAM_HOLDERS_E_IN_USE:  return CAM_LCD_ERR_IN_USE;
+	case CAM_HOLDERS_E_FULL:    return CAM_ERR_STATE;
+	default:                    return CAM_ERR_PARAM;
+	}
+}
+
+/*
+ * Stop the camera and unlink this sink.  Under hold_mutex, for the last holder
+ * leaving (@p loses 0) or a stream that ended by itself (@p loses 1).
+ *
+ * [!] THE TABLE IS EMPTIED ONLY BEHIND BOTH: a confirmed camera stop
+ * (cam_hold_may_detach()) and a successful unlink.  Between the two -- an
+ * unlink that asked to be called again -- hold_stopping remembers that the
+ * camera is already stopped, and the next call of anything here finishes it.
+ */
+static int hold_stop_locked(int loses)
+{
+	int cam_rc, det_rc = CAM_OK, attempted = 0;
+
+	cam_rc = camera_stream_stop();
+	if (cam_hold_may_detach(cam_rc)) {
+		hold_stopping = 1u;
+		if (loses)
+			hold_stop_loses = 1u;
+		attempted = 1;
+		det_rc = sink_detach();
+	}
+
+	switch (cam_hold_end_of(cam_rc, attempted, det_rc)) {
+	case CAM_HOLD_END_DONE:
+		if (hold_stop_loses)
+			hold_lose_all_locked();
+		else
+			cam_holders_clear(&hold_table);
+		hold_stopping   = 0u;
+		hold_stop_loses = 0u;
+		return CAM_OK;
+	case CAM_HOLD_END_RETRY:
+		/* Nothing lost: the camera API was locked (nothing asked), or the
+		 * camera is stopped and the unlink is owed. */
+		return (cam_rc == CAM_ERR_LOCKED) ? CAM_ERR_LOCKED : CAM_ERR_BUSY;
+	case CAM_HOLD_END_TERMINAL:
+	default:
+		LOG_ERR("the camera stream could not be stopped and unlinked "
+		        "(camera %d, unlink %d); it is unusable until reboot",
+		        cam_rc, attempted ? det_rc : 0);
+		hold_terminal = 1u;
+		return (cam_rc != CAM_OK) ? cam_rc : CAM_ERR_STATE;
+	}
+}
+
+/*
+ * What every entry below owes first: finish a stop that is half done, or
+ * confirm a stream that ended by itself.  CAM_OK when nothing is owed (or it
+ * was just paid).
+ */
+static int hold_settle_locked(void)
+{
+	struct camera_stats cs;
+
+	if (hold_terminal)
+		return CAM_ERR_STATE;
+	camera_stream_stats(&cs);
+	switch (cam_hold_settle_of(sink_get_state() == SINK_ATTACHED,
+	                           cs.streaming, hold_stopping)) {
+	case CAM_HOLD_SETTLE_STOP:
+		return hold_stop_locked(0);
+	case CAM_HOLD_SETTLE_ERROR:
+		LOG_WRN("the camera stream ended by itself; its holders are "
+		        "marked lost");
+		return hold_stop_locked(1);
+	case CAM_HOLD_SETTLE_NONE:
+	default:
+		return CAM_OK;
+	}
+}
+
+int cam_lcd_sink_hold(const struct cam_holder *h,
+                      const struct cam_lcd_overlay *ov, int *started)
+{
+	struct cam_holders_ticket tk = { 0u, 0u, 0u };
+	const struct cam_holder *who = (h != NULL) ? h : &hold_manual;
+	int rc, hrc;
+
+	if (started != NULL)
+		*started = 0;
+	/* The operator brings no overlay; only a holder that is not the operator
+	 * can, and it names itself. */
+	if (h == &hold_manual || (h == NULL && ov != NULL))
+		return CAM_ERR_PARAM;
+	if (!cam_panel_ok) {
+		/* No panel thread (or no holder lock): a delivery would pin its
+		 * slot for ever.  Refusing is the only safe answer. */
+		LOG_ERR("the panel thread does not exist");
+		return CAM_ERR_STATE;
+	}
+	/* [!] NEVER WAITS: a start or a stop in progress is a retryable BUSY. */
+	if (tx_mutex_get(&hold_mutex, TX_NO_WAIT) != TX_SUCCESS)
+		return CAM_ERR_BUSY;
+
+	rc = hold_settle_locked();
+	if (rc != CAM_OK) {
+		(void)tx_mutex_put(&hold_mutex);
+		return (rc == CAM_ERR_LOCKED) ? CAM_ERR_BUSY : rc;
+	}
+
+	if (h == NULL) {
+		hrc = cam_holders_add(&hold_table, &hold_manual,
+		                      CAM_HOLDER_KEEPS_STREAM);
+	} else {
+		hrc = cam_holders_add_or_start(&hold_table, h, 0u, &hold_manual,
+		                               CAM_HOLDER_KEEPS_STREAM, &tk);
+	}
+	if (hrc < 0) {
+		(void)tx_mutex_put(&hold_mutex);
+		return hold_err(hrc);
+	}
+
+	/*
+	 * The overlay goes on BEFORE the camera starts, when this hold starts it:
+	 * a refusal then costs nothing to undo.  On a running stream it goes on a
+	 * frame boundary later -- the producer counts itself in per frame.
+	 */
+	if (ov != NULL) {
+		rc = sink_ov_put_locked(ov);
+		if (rc != CAM_OK) {
+			if (hrc == CAM_HOLDERS_T_START)
+				(void)cam_holders_abort(&hold_table);
+			else
+				(void)cam_holders_undo(&hold_table, h,
+				                       &hold_manual, &tk);
+			(void)tx_mutex_put(&hold_mutex);
+			return rc;
+		}
+	}
+
+	if (hrc == CAM_HOLDERS_T_START) {
+		rc = sink_attach_and_stream();
+		if (rc != CAM_OK) {
+			/* Exactly what this hold registered goes back, and the
+			 * overlay it put on: nothing was linked, nothing streams. */
+			(void)cam_holders_abort(&hold_table);
+			if (ov != NULL)
+				sink_ov_off();
+			(void)tx_mutex_put(&hold_mutex);
+			return rc;
+		}
+		(void)cam_holders_commit(&hold_table);
+		hold_forget_lost_locked(&hold_manual);
+		if (started != NULL)
+			*started = 1;
+	}
+	/* The holder's own hold: the only thing that clears its lost mark. */
+	hold_forget_lost_locked(who);
+	(void)tx_mutex_put(&hold_mutex);
+	return CAM_OK;
+}
+
+int cam_lcd_sink_release(const struct cam_holder *h, const char **users,
+                         int max, int *nusers)
+{
+	const struct cam_holder *who = (h != NULL) ? h : &hold_manual;
+	int rc, hrc;
+
+	if (nusers != NULL)
+		*nusers = 0;
+	if (h == &hold_manual)
+		return CAM_ERR_PARAM;
+	if (!cam_panel_ok)
+		return CAM_ERR_STATE;
+	/* The one entry that waits for the lock, bounded: it is how a stop
+	 * finishes, and a stop in progress holds the lock for its join. */
+	if (tx_mutex_get(&hold_mutex, CAM_HOLD_WAIT_TICKS) != TX_SUCCESS)
+		return CAM_ERR_BUSY;
+
+	rc = hold_settle_locked();
+	if (rc != CAM_OK) {
+		(void)tx_mutex_put(&hold_mutex);
+		return rc;
+	}
+	if (!cam_holders_has(&hold_table, who)) {
+		(void)tx_mutex_put(&hold_mutex);
+		return CAM_OK;              /* not holding: nothing to let go of */
+	}
+
+	if (cam_holders_count(&hold_table) > 1u) {
+		/* Others stay, so the camera keeps streaming.  [!] The operator
+		 * while nn holds it is REFUSED and stays (D8). */
+		hrc = cam_holders_remove(&hold_table, who);
+		if (hrc == CAM_HOLDERS_E_IN_USE) {
+			const struct cam_holder *list[CAM_HOLDERS_MAX];
+			unsigned char attr[CAM_HOLDERS_MAX];
+			unsigned n = cam_holders_list(&hold_table, list, attr,
+			                              CAM_HOLDERS_MAX);
+			int k = 0;
+
+			for (unsigned i = 0u; i < n; i++) {
+				if (attr[i] & CAM_HOLDER_KEEPS_STREAM)
+					continue;
+				if (users != NULL && k < max)
+					users[k++] = list[i]->name;
+			}
+			if (nusers != NULL)
+				*nusers = k;
+		}
+		(void)tx_mutex_put(&hold_mutex);
+		return (hrc < 0) ? hold_err(hrc) : CAM_OK;
+	}
+
+	/* The last holder: a confirmed stop, then the unlink, then the table. */
+	rc = hold_stop_locked(0);
+	(void)tx_mutex_put(&hold_mutex);
+	return rc;
+}
+
+int cam_lcd_sink_holders(const char **names, int max, int *lost)
+{
+	const struct cam_holder *who[CAM_HOLDERS_MAX];
+	unsigned n, i;
+	int k = 0, nlost = 0;
+
+	if (lost != NULL)
+		*lost = 0;
+	if (!cam_panel_ok)
+		return 0;
+	if (tx_mutex_get(&hold_mutex, TX_NO_WAIT) != TX_SUCCESS)
+		return -1;
+	n = cam_holders_list(&hold_table, who, NULL, CAM_HOLDERS_MAX);
+	for (i = 0u; i < n && names != NULL && k < max; i++)
+		names[k++] = who[i]->name;
+	for (i = 0u; i < CAM_HOLDERS_MAX; i++)
+		if (hold_lost[i] != NULL)
+			nlost++;
+	(void)tx_mutex_put(&hold_mutex);
+	if (lost != NULL)
+		*lost = nlost;
+	return k;
 }
 
 /* ---- statistics ---------------------------------------------------------- */

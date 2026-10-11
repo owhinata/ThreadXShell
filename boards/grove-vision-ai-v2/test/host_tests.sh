@@ -321,6 +321,18 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_cam_stop"
 "$out/test_cam_stop"
 
+# issue #142 -- the holder table's decisions (port/camera/cam_hold_rules.c): when
+# the panel sink may be unlinked, whether a stop that came back short is retried
+# or terminal, and whether a linked sink on a camera that stopped streaming is a
+# stop in progress or a stream that ended by itself.  None can be typed: they
+# need a stop to lose the API mutex, an unlink to find a callback in flight, or
+# a producer to give up between two commands.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/camera" \
+    "$here/test_cam_hold_rules.c" "$board/port/camera/cam_hold_rules.c" \
+    $LDFLAGS -o "$out/test_cam_hold_rules"
+"$out/test_cam_hold_rules"
+
 # issue #86 -- the NOR port's lifecycle decisions (port/nor/nor_state.c).  Two of
 # the cases cannot be produced from a console: two callers arriving in the
 # `OFF -> ENABLING` window (one shell, and background jobs run BELOW the
@@ -330,8 +342,9 @@ gcc $CFLAGS \
 # caller does NOT tear down on failure -- so the last section walks that
 # sequence, which an acquire/release table alone would pass while it leaked.
 # issue #99 -- the live-inference teardown table (port/nn/nn_stream_state.c),
-# and since #129 the worker join between its two halves.
-# Two halves that can each come back unconfirmed, and the two answers -- retry or
+# since #129 with the worker join, and since #142 with nn's overlay taken off the
+# panel sink and nn's place on the camera given up instead of a camera stop.
+# Steps that can each come back unconfirmed, and the two answers -- retry or
 # reboot -- are opposite mistakes.  None of the vectors can be typed on a board
 # with one console whose background jobs run below the foreground shell.
 gcc $CFLAGS \

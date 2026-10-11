@@ -687,8 +687,11 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/camera/cam_edm.c"
     "${BOARD_DIR}/port/camera/camera.c"
     "${BOARD_DIR}/port/camera/cam_lcd_sink.c"
-    # `nn run`'s sink: no panel, no thread, one put per frame (issue #129).
-    "${BOARD_DIR}/port/camera/cam_capture_sink.c"
+    # Who holds the camera's stream to the panel (issue #142): the board's
+    # decisions here, the table and the overlay's use count shared in svc/.
+    "${BOARD_DIR}/port/camera/cam_hold_rules.c"
+    "${CMAKE_SOURCE_DIR}/svc/cam_holders.c"
+    "${CMAKE_SOURCE_DIR}/svc/cam_step.c"
     # Ethos-U55 inference glue (issue #44).  The C++ interpreter is contained
     # behind port/nn/npu/npu.h; nothing above it sees a TFLite type.
     "${BOARD_DIR}/port/nn/npu/npu_tflm.cc"

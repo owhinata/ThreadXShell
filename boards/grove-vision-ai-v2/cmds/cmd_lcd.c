@@ -188,10 +188,10 @@ static int lcd_hold_ready(struct cli_instance *sh)
  * from bring-up until it is linked, so a caller that holds it here either got in
  * before the sink existed or can see it.
  *
- * Only rotation and MADCTL come through here.  A transfer-scoped command (fill,
- * bar, orient, the loop) does not need to: the worst it can do is lose a frame.
- * Neither does the backlight, which is a GPIO write with an obvious and
- * instantly reversible effect -- see lcd_set_backlight().
+ * Only rotation and MADCTL come through here.  The transfer-scoped commands go
+ * through lcd_hold_draw() below.  The backlight goes through neither: it is a
+ * GPIO write with an obvious and instantly reversible effect -- see
+ * lcd_set_backlight().
  */
 static int lcd_hold_exclusive(struct cli_instance *sh, const char *what)
 {
@@ -201,8 +201,34 @@ static int lcd_hold_exclusive(struct cli_instance *sh, const char *what)
 		lcd_release();
 		cli_error(sh, "lcd: a camera sink owns the panel -- %s would leave "
 		              "its frames refused or clamped.\r\n"
-		              "     Stop it first (`nn stream stop`, or `camera "
-		              "preview` with Ctrl+C)\r\n", what);
+		              "     Stop it first (`nn stream stop` if nn holds "
+		              "it, then `camera stream stop`)\r\n", what);
+		return -1;
+	}
+	return 0;
+}
+
+/*
+ * Hold the panel to DRAW on it -- fill, clear, bar, orient, the loop --
+ * refusing while a camera sink owns it (issue #142 D7).
+ *
+ * These used to be left to the guard: the panel thread holds it for most of
+ * every frame, so a draw during a stream was refused as "busy" nearly always
+ * and otherwise cost the stream one frame.  Since issue #142 a DARK panel's
+ * frames skip the guard altogether (`lcd off`), which would have turned that
+ * near-refusal into a draw that wins every time, onto a panel the stream then
+ * paints over the moment the backlight comes back.  So the refusal is said, not
+ * left to timing.  Checked under the guard, like lcd_hold_exclusive().
+ */
+static int lcd_hold_draw(struct cli_instance *sh)
+{
+	if (lcd_hold_ready(sh) != 0)
+		return -1;
+	if (cam_lcd_sink_linked()) {
+		lcd_release();
+		cli_error(sh, "lcd: the camera stream is drawing on the panel -- "
+		              "`camera stream stop` first (`nn stream stop` if nn "
+		              "holds it)\r\n");
 		return -1;
 	}
 	return 0;
@@ -214,7 +240,7 @@ static int lcd_flood(struct cli_instance *sh, uint16_t rgb565)
 {
 	int rc;
 
-	if (lcd_hold_ready(sh) != 0)
+	if (lcd_hold_draw(sh) != 0)
 		return 1;
 	rc = lcd_fill(rgb565, lcd_stop_cb, sh);
 	lcd_release();
@@ -240,11 +266,8 @@ static int lcd_run_loop(struct cli_instance *sh, uint32_t frames)
 	 * the shell will happily run one as a background job -- slipping a
 	 * frame in between would be visible on the glass and would make the fps
 	 * number a measurement of two commands. */
-	if (lcd_acquire() != 0) {
-		cli_error(sh, "lcd: busy (another lcd command holds the "
-		              "panel)\r\n");
+	if (lcd_hold_draw(sh) != 0)
 		return 1;
-	}
 
 	t0 = tx_time_get();
 	while (done < frames) {
@@ -344,7 +367,7 @@ static int cmd_lcd_bar(struct cli_instance *sh, int argc, char **argv)
 
 	(void)argc; (void)argv;
 
-	if (lcd_hold_ready(sh) != 0)
+	if (lcd_hold_draw(sh) != 0)
 		return 1;
 	rc = lcd_bars(lcd_stop_cb, sh);
 	lcd_release();
@@ -366,7 +389,7 @@ static int cmd_lcd_orient(struct cli_instance *sh, int argc, char **argv)
 
 	(void)argc; (void)argv;
 
-	if (lcd_hold_ready(sh) != 0)
+	if (lcd_hold_draw(sh) != 0)
 		return 1;
 	rc = lcd_orient(lcd_stop_cb, sh);
 	/* Snapshot while the panel is still HELD, so the line describes the
@@ -499,7 +522,7 @@ static int cmd_lcd_loop(struct cli_instance *sh, int argc, char **argv)
 	}
 	/* Bring-up (and its error message) before the timed run, so a panel
 	 * that never came up does not count as frame 0 of a measurement. */
-	if (lcd_hold_ready(sh) != 0)
+	if (lcd_hold_draw(sh) != 0)
 		return 1;
 	lcd_release();
 	return lcd_run_loop(sh, frames);

@@ -33,6 +33,12 @@
 extern "C" {
 #endif
 
+/** nn's place among the camera's holders (issue #142): what `nn stream start`
+ *  and `nn run` pass to cam_lcd_sink_hold() and nn's stop to
+ *  cam_lcd_sink_release().  Its name is what `camera stats` prints. */
+struct cam_holder;
+extern const struct cam_holder nn_cam_holder;
+
 /** What a stream has done, for `nn stream stats`. */
 struct nn_camera_stats {
 	uint32_t inferences;   /**< frames run through the NPU               */
@@ -91,13 +97,14 @@ struct nn_camera_stats {
 };
 
 /**
- * @brief  Arm the overlay for one stream, and hand back the vtable to attach.
+ * @brief  Arm the overlay for one stream, and hand back the vtable to put on.
  *
  * Resets the counters and clears the stop flag. The model must already be open
  * and BlazeFace-shaped -- the caller checks that, because it can refuse before
  * starting a stream and this cannot.
  *
- * @return the vtable to pass to cam_lcd_sink_attach_and_stream(); never NULL.
+ * @return the overlay to put on the panel sink with cam_lcd_sink_hold();
+ *         never NULL.
  */
 const struct cam_lcd_overlay *nn_camera_arm(void);
 
@@ -146,7 +153,10 @@ int nn_camera_join(void);
  * other; the worker parks for good after it (DONE_LAST).  Neither touches the
  * stream's statistics.  The caller arms the worker first.
  *
- * @return the vtable to pass to cam_capture_sink_attach_and_stream()
+ * Since issue #142 on the same panel sink as a stream -- the one the operator
+ * may already be watching -- and with NO draw: the one-shot paints nothing.
+ *
+ * @return the overlay to put on the panel sink with cam_lcd_sink_hold()
  */
 const struct cam_lcd_overlay *nn_camera_arm_oneshot(void);
 
@@ -162,7 +172,8 @@ unsigned nn_camera_shot_index(void);
 /**
  * @brief  Ask the overlay to stop doing work.
  *
- * [!] CALL THIS BEFORE camera_stream_stop(), always.
+ * [!] CALL THIS BEFORE TAKING THE OVERLAY OFF (cam_lcd_sink_overlay_remove()),
+ * always.
  *
  * It is checked at two points -- on the producer before preprocessing, and on
  * the worker immediately before the invoke -- so a frame that has not yet
@@ -170,9 +181,9 @@ unsigned nn_camera_shot_index(void);
  * from waiting on an inference.
  *
  * It CANNOT cancel an invoke already waiting on the NPU: nothing can. It
- * narrows the window; the camera's lost-producer state and the stop's bounded
- * join of the worker (terminal when it runs out, issue #129) are what make the
- * remainder safe.
+ * narrows the window; the overlay's use count (issue #142) and the stop's
+ * bounded join of the worker (terminal when it runs out, issue #129) are what
+ * make the remainder safe.
  */
 void nn_camera_request_stop(void);
 

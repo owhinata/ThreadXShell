@@ -245,10 +245,29 @@ static inline void lcd_dc(int level)
 	__DSB();
 }
 
+/*
+ * Whether the panel is lit, as lcd_backlight() last set it (issue #142).
+ *
+ * The camera's panel thread reads this BEFORE it takes the panel guard and, while
+ * it is clear, skips the staging copy, the overlay and the SPI transfer of each
+ * frame: nobody can see them.  It is the logical state, not the pin -- a GPIO
+ * read-back would answer the same question through a vendor call on every
+ * frame.  One byte, one writer at a time (the console), read by one thread that
+ * only needs the latest value: a frame drawn or skipped one late is the whole
+ * cost of a race, and the next frame sees the new value.
+ */
+static volatile uint8_t lcd_lit;
+
 void lcd_backlight(int on)
 {
 	(void)hx_drv_gpio_set_out_value(LCD_PIN_BL,
 	                                on ? GPIO_OUT_HIGH : GPIO_OUT_LOW);
+	lcd_lit = on ? 1u : 0u;
+}
+
+int lcd_display_on(void)
+{
+	return lcd_lit != 0u;
 }
 
 static int lcd_dma_burst(const uint8_t *bytes, uint32_t len,
@@ -568,6 +587,7 @@ static int lcd_pins_init(void)
 		LOG_ERR("gpio output setup failed");
 		return -1;
 	}
+	lcd_lit = 0u;   /* the backlight pin was just driven low */
 	return 0;
 }
 

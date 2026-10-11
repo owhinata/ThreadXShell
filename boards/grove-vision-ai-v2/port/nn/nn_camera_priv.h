@@ -129,8 +129,9 @@ extern struct nn_core_frame nn_ov_core;
  * arm; read by the producer as one byte. */
 extern volatile uint8_t nn_ov_result;
 
-/* Written by the arms only, while the worker is parked and nothing is
- * attached; read by the producer and the worker. */
+/* Written by the arms only, while the worker is parked and the overlay is off
+ * the sink with nothing counted in it (issue #142); read by the producer and
+ * the worker. */
 extern uint8_t nn_ov_oneshot;
 /* Written once per one-shot by the producer (before the hand-over) or the
  * worker (after its publish); reset by the arms; read by the console. */

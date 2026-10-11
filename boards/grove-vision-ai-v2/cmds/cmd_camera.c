@@ -27,9 +27,12 @@
  *                      the channel balance is what tells them apart.  The row
  *                      seam metric catches the other family -- a gain change
  *                      landing mid-readout, or a stride off by one.
- *   camera preview  -- the milestone: continuous capture onto the panel, Ctrl+C
- *                      to stop.
- *   camera stats    -- the counters, after the fact.
+ *   camera stream start / stop
+ *                   -- continuous capture onto the panel (issue #142: the
+ *                      operator taking and letting go of hold of the camera's
+ *                      stream; it runs until the last holder lets go, and
+ *                      `nn stream start` / `nn run` hold the same stream).
+ *   camera stats    -- the counters, and who holds the stream.
  *
  * WHY `capture` REPORTS THE PLANES AND NOT THE PACKED FRAME.  The planes are
  * what the camera produced; the packed RGB565 is what this firmware made of
@@ -52,7 +55,6 @@
 #include "lcd_st7789.h"
 #include "nn_camera.h"   /* the sink row's stage split under `nn stream` */
 
-#define CAM_PREVIEW_DEFAULT 0u   /* 0 = until Ctrl+C */
 #define CAM_BENCH_DEFAULT  60u   /* enough to average, ~4 s at 15 fps  */
 
 static void cam_report(struct cli_instance *sh, const char *what, int rc)
@@ -93,14 +95,22 @@ static void cam_print_unread(struct cli_instance *sh, const char *what)
  * The two failures need different sentences because they leave the board in
  * different places, and the old single message described the wrong one for the
  * commoner case: a lock collision was reported as a camera that had poisoned
- * itself.  What they share is the part that is not advice -- the sink is still
- * attached, and this command must not detach it.
+ * itself.  What they share is the part that is not advice -- nothing that was
+ * still in use was torn down.
+ *
+ * [!] @p retry SINCE ISSUE #142: a locked `camera stream stop` changed nothing
+ * and can simply be typed again -- the holder table still has the operator.
+ * `camera bench` has no such second chance: its stream has no holder and no
+ * sink, so the old advice stands for it.
  */
-static void cam_report_stop(struct cli_instance *sh, int rc)
+static void cam_report_stop(struct cli_instance *sh, int rc, int retry)
 {
 	cam_report(sh, "stream stop", rc);
 
-	if (rc == CAM_ERR_LOCKED)
+	if (rc == CAM_ERR_LOCKED && retry)
+		cli_error(sh, "        nothing was asked of the producer and "
+		              "nothing was torn down -- retry\r\n");
+	else if (rc == CAM_ERR_LOCKED)
 		cli_error(sh, "        nothing was asked of the producer and "
 		              "nothing was torn down;\r\n"
 		              "        the sink stays attached, and a reboot "
@@ -108,6 +118,9 @@ static void cam_report_stop(struct cli_instance *sh, int rc)
 	else if (rc == CAM_ERR_TIMEOUT)
 		cli_error(sh, "        the producer is still running; the "
 		              "camera is unusable until reboot\r\n");
+	else if (rc == CAM_ERR_STATE && retry)
+		cli_error(sh, "        the camera is unusable until "
+		              "reboot\r\n");
 }
 
 /* ---- probe --------------------------------------------------------------- */
@@ -334,129 +347,86 @@ static int cmd_camera_raw(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-/* ---- preview ------------------------------------------------------------- */
+/* ---- stream ------------------------------------------------------------- */
 
-static int cmd_camera_preview(struct cli_instance *sh, int argc, char **argv)
+/*
+ * `camera stream start` is the operator TAKING HOLD of the camera's stream to
+ * the panel (issue #142, port/camera/cam_lcd_sink.h): it starts the camera if
+ * nobody held it, and the stream runs until the last holder lets go -- no
+ * frame count, no Ctrl+C.  `nn stream start` and `nn run` hold the same stream,
+ * and start it holding the operator's place too, so it keeps streaming after
+ * nn stops.  It replaces the foreground `camera preview [frames]`.
+ */
+static int cmd_stream_start(struct cli_instance *sh, int argc, char **argv)
 {
-	uint32_t frames = CAM_PREVIEW_DEFAULT;
-	struct camera_stats st;
-	ULONG t0, t1, ticks;
-	uint32_t before;
-	int rc;
+	int started = 0, rc;
 
-	if (argc > 1 && cli_parse_u32(argv[1], &frames) != 0) {
-		cli_error(sh, "camera: bad frame count '%s'\r\n", argv[1]);
+	if (argc > 1) {
+		if (strcmp(argv[1], "test") == 0)
+			cli_error(sh, "camera: this board has no test pattern to "
+			              "stream\r\n");
+		else
+			cli_error(sh, "camera: usage: stream start\r\n");
 		return 1;
 	}
-
-	/*
-	 * No overlay: a plain preview stays a plain preview.  It is an argument
-	 * rather than a mode so that `nn stream`'s boxes can never be inherited
-	 * by this command (issue #48).
-	 *
-	 * ONE CALL, because attaching and starting are one operation since issue
-	 * #63 -- and therefore one failure to handle: nothing is attached and no
-	 * stream is running, whatever went wrong.  This used to be attach-then-
-	 * start with a guard here for the case where the start came back BUSY with
-	 * the sink already attached, which was a window rather than a case.
-	 */
-	rc = cam_lcd_sink_attach_and_stream(NULL);
+	rc = cam_lcd_sink_hold(NULL, NULL, &started);
 	if (rc == CAM_ERR_BUSY) {
-		cli_error(sh, "camera: a preview is already running, or another "
-		              "command owns the camera\r\n");
+		cli_error(sh, "camera: busy -- a stream start or stop, `camera "
+		              "bench`, or another command owns the camera; "
+		              "retry\r\n");
 		return 1;
 	}
 	if (rc != CAM_OK) {
-		cam_report(sh, "preview start", rc);
+		cam_report(sh, "stream start", rc);
 		return 1;
 	}
-
-	camera_stream_stats(&st);
-	before = st.frames;
-	t0 = tx_time_get();
-
-	/*
-	 * The shell thread only waits here -- capture, conversion and the blit
-	 * all run on the producer.  Polling once per tick is enough to notice
-	 * Ctrl+C and cheap enough not to matter next to a 26 ms frame.
-	 */
-	for (;;) {
-		if (cli_cancel_requested(sh))
-			break;
-		camera_stream_stats(&st);
-		if (!st.streaming)
-			break;                      /* the producer gave up */
-		if (frames != 0u && (st.frames - before) >= frames)
-			break;
-		if (cli_sleep(sh, 1u) != 0)
-			break;
-	}
-
-	t1 = tx_time_get();
-	ticks = t1 - t0;
-
-	/*
-	 * [!] DETACH ONLY ON A CONFIRMED STOP (issue #48).
-	 *
-	 * This used to detach unconditionally, under a comment asserting that
-	 * the stop was synchronous.  The stop's wait is BOUNDED, so a timeout
-	 * means the producer is still running -- and unlinking a sink it may be
-	 * inside is the one thing the pipeline cannot survive, because publish()
-	 * has already pre-pinned this sink and called consume() with the lock
-	 * released.  The camera poisons itself on that path and refuses
-	 * everything afterwards, so there is nothing to clean up here and
-	 * nothing that would be safe to do.
-	 *
-	 * [!] AND THE DETACH CAN FAIL TOO, since issue #57: it unlinks the sink
-	 * and then drains the panel thread, and a drain that does not finish
-	 * leaves a thread that may still be blitting.  A confirmed stop is now
-	 * only half the answer, so the result is reported rather than dropped.
-	 */
-	rc = camera_stream_stop();
-	if (rc == CAM_OK) {
-		int drain_rc = cam_lcd_sink_detach();
-
-		if (drain_rc != CAM_OK) {
-			cli_error(sh, "camera: the panel thread did not finish "
-			              "(%d); preview is unusable until reboot\r\n",
-			          drain_rc);
-			return 1;
-		}
-	}
-
-	if (cli_cancel_requested(sh)) {
-		/* Cancelled.  Silent on purpose, as in `lcd loop`: the shared
-		 * core discards output produced while cancel_req is still set,
-		 * so a summary here would never reach the terminal.  The
-		 * dispatcher's "^C" is the feedback. */
-		return 0;
-	}
-
-	if (rc != CAM_OK) {
-		cam_report_stop(sh, rc);
-		return 1;
-	}
-
-	camera_stream_stats(&st);
-	if (st.fault != NULL) {
-		cli_error(sh, "camera: stopped: %s\r\n", st.fault);
-		return 1;
-	}
-
-	{
-		uint32_t got = st.frames - before;
-		uint32_t ms = (uint32_t)((ticks * 1000u) /
-		                         TX_TIMER_TICKS_PER_SECOND);
-
-		cli_print(sh, "%lu frame(s) in %lu ms", (unsigned long)got,
-		          (unsigned long)ms);
-		if (ms != 0u)
-			cli_print(sh, " = %lu.%lu fps",
-			          (unsigned long)(got * 1000u / ms),
-			          (unsigned long)((got * 10000u / ms) % 10u));
-		cli_print(sh, "\r\n");
-	}
+	cli_print(sh, "camera: streaming to the panel%s -- `camera stats` / "
+	              "`camera stream stop`\r\n",
+	          started ? "" : " (already running)");
 	return 0;
+}
+
+/*
+ * The operator lets go.  [!] While nn holds the stream this is REFUSED and
+ * changes nothing (issue #142 D8): "still in use: nn", and the operator stays.
+ * The last holder's leave stops the camera and, only on a confirmed stop,
+ * unlinks the panel sink (issue #48).
+ */
+static int cmd_stream_stop(struct cli_instance *sh, int argc, char **argv)
+{
+	const char *users[4];
+	int rc, n = 0;
+
+	(void)argc;
+	(void)argv;
+	rc = cam_lcd_sink_release(NULL, users, 4, &n);
+	if (rc == CAM_LCD_ERR_IN_USE) {
+		cli_error(sh, "camera: still in use:");
+		for (int i = 0; i < n; i++)
+			cli_error(sh, "%s %s", i ? "," : "", users[i]);
+		cli_error(sh, "\r\n");
+		return 1;
+	}
+	if (rc == CAM_ERR_BUSY) {
+		cli_error(sh, "camera: a stream start or stop is in progress, or "
+		              "the panel has not let go yet -- retry\r\n");
+		return 1;
+	}
+	if (rc != CAM_OK) {
+		cam_report_stop(sh, rc, 1);
+		return 1;
+	}
+	cli_print(sh, "camera: stream stopped\r\n");
+	return 0;
+}
+
+static int cmd_camera_stream(struct cli_instance *sh, int argc, char **argv)
+{
+	if (argc > 1)
+		cli_error(sh, "camera: unknown stream subcommand '%s'\r\n",
+		          argv[1]);
+	cli_print(sh, "usage: camera stream <start | stop>\r\n");
+	return argc > 1 ? 1 : 0;
 }
 
 /*
@@ -615,8 +585,8 @@ static int cmd_camera_bench(struct cli_instance *sh, int argc, char **argv)
 			break;
 	}
 
-	/* Nothing was attached, so unlike `camera preview` there is nothing to
-	 * detach and no reason to condition on a confirmed stop.  A stop that
+	/* Nothing was attached, so unlike the panel's stream there is nothing
+	 * to detach and no reason to condition on a confirmed stop.  A stop that
 	 * does not confirm still leaves the camera poisoned, which the profile
 	 * below will refuse to describe. */
 	rc = camera_stream_stop();
@@ -625,7 +595,7 @@ static int cmd_camera_bench(struct cli_instance *sh, int argc, char **argv)
 		return 0;
 
 	if (rc != CAM_OK) {
-		cam_report_stop(sh, rc);
+		cam_report_stop(sh, rc, 0);
 		return 1;
 	}
 
@@ -653,6 +623,25 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 	cam_lcd_sink_stats(&sk);
 
 	cli_print(sh, "state    : %s\r\n", st.streaming ? "streaming" : "idle");
+	/* Who holds the stream to the panel (issue #142): a snapshot taken under
+	 * the holder lock, printed after it. */
+	{
+		const char *names[4];
+		int lost = 0;
+		int n = cam_lcd_sink_holders(names, 4, &lost);
+
+		cli_print(sh, "holders  :");
+		if (n < 0)
+			cli_print(sh, " -- (a stream start or stop is in "
+			              "progress)");
+		else if (n == 0)
+			cli_print(sh, " none");
+		for (int i = 0; i < n; i++)
+			cli_print(sh, "%s %s", i ? "," : "", names[i]);
+		if (lost)
+			cli_print(sh, "  (%d lost when the stream ended)", lost);
+		cli_print(sh, "\r\n");
+	}
 	cli_print(sh, "frames   : %lu\r\n", (unsigned long)st.frames);
 	cli_print(sh, "timeouts : %lu (restarts %lu)\r\n",
 	          (unsigned long)st.timeouts, (unsigned long)st.retries);
@@ -707,9 +696,11 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 		          (unsigned long)st.premature_disables);
 	cli_print(sh, "\r\n");
 	cam_print_profile(sh, &st);
-	cli_print(sh, "sink lcd : %lu shown, %lu dropped, %lu busy, %lu err\r\n",
+	cli_print(sh, "sink lcd : %lu shown, %lu dropped, %lu busy, %lu dark, "
+	              "%lu err\r\n",
 	          (unsigned long)sk.delivered, (unsigned long)sk.dropped,
-	          (unsigned long)sk.busy, (unsigned long)sk.errors);
+	          (unsigned long)sk.busy, (unsigned long)sk.dark,
+	          (unsigned long)sk.errors);
 	/*
 	 * [!] WHERE THE 26 ms WENT (issue #57).
 	 *
@@ -754,8 +745,8 @@ static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
 	 *
 	 * The scope is in the header because it is NOT the profile's: these
 	 * reset when an `nn stream` arms the overlay, not at stream start, so
-	 * after a later `camera preview` they still describe the LAST nn run
-	 * while the sink row above no longer contains them.
+	 * after nn stops on a stream that keeps running they still describe the
+	 * LAST nn run while the sink row above no longer contains them.
 	 */
 	{
 		struct nn_camera_stats ns;
@@ -1331,7 +1322,7 @@ static int cmd_camera_bayer(struct cli_instance *sh, int argc, char **argv)
 				              "The phase is read when the "
 				              "datapath is\r\n"
 				              "        configured, so stop the "
-				              "preview and set it before "
+				              "stream and set it before "
 				              "starting\r\n");
 			else
 				cam_report(sh, "bayer", rc);
@@ -1343,20 +1334,28 @@ static int cmd_camera_bayer(struct cli_instance *sh, int argc, char **argv)
 	          cam_dp_bayer_name(cam_dp_bayer()));
 	if (argc > 1)
 		cli_print(sh, "           (takes effect at the next `camera "
-		              "capture` or `camera preview`)\r\n");
+		              "capture` or `camera stream start`)\r\n");
 	return 0;
 }
 
 /* ---- registration -------------------------------------------------------- */
+
+CLI_SUBCMD_SET_CREATE(camera_stream_subcmds,
+	CLI_CMD_ARG_USAGE(start, NULL,
+	                  "hold the camera's stream to the panel open",
+	                  NULL, cmd_stream_start, 1, 1),
+	CLI_CMD(stop, NULL, "let go of the stream (stops it unless nn holds it)",
+	        cmd_stream_stop),
+	CLI_SUBCMD_SET_END);
 
 CLI_SUBCMD_SET_CREATE(camera_subcmds,
 	CLI_CMD(probe, NULL, "power the module and read its sensor ID",
 	        cmd_camera_probe),
 	CLI_CMD(capture, NULL, "one frame + per-channel statistics",
 	        cmd_camera_capture),
-	CLI_CMD_ARG_USAGE(preview, NULL,
-	                  "live preview on the panel, Ctrl+C to stop",
-	                  "[frames]", cmd_camera_preview, 1, 1),
+	CLI_CMD_ARG_USAGE(stream, camera_stream_subcmds,
+	                  "hold the camera's stream to the panel",
+	                  "[start|stop]", cmd_camera_stream, 1, 1),
 	CLI_CMD(raw, NULL, "capture the Bayer mosaic and name the phase",
 	        cmd_camera_raw),
 	CLI_CMD(stats, NULL, "producer and sink counters", cmd_camera_stats),
@@ -1394,5 +1393,5 @@ CLI_SUBCMD_SET_CREATE(camera_subcmds,
 	CLI_SUBCMD_SET_END);
 
 CLI_CMD_REGISTER(camera, camera_subcmds,
-                 "OV5647 camera: bring-up, capture, live preview",
+                 "OV5647 camera: bring-up, capture, stream to the panel",
                  NULL, 1, 0);

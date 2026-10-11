@@ -44,8 +44,7 @@
 #include "plugin_load.h"
 #include "plugin_run.h"
 #include "plugin_target.h"   /* the target word this build provides (#108) */
-#include "cam_lcd_sink.h"
-#include "cam_capture_sink.h"  /* `nn run`'s sink (#129) */
+#include "cam_lcd_sink.h"     /* nn holds the panel's stream (#142) */
 #include "camera.h"
 #include "npu_desc.h"
 #include "nn_active.h"
@@ -1190,62 +1189,85 @@ static void nn_oneshot_finish(uint32_t gen, struct nn_op_result *res)
 }
 
 /*
- * ---- the one teardown (issues #99, #129) ---------------------------------
+ * ---- the one teardown (issues #99, #129, #142) ---------------------------
  *
  * A stream's stop and `nn run`'s end run the same sequence, with the same table
- * deciding about it; only the sink differs (the panel's, or the capture sink's).
+ * deciding about it.  Since issue #142 it does NOT stop the camera: the operator
+ * holds the stream too, so nn takes its overlay off and gives up its own place.
  *
- *   stop request -> producer join (camera_stream_stop) -> worker join
- *   -> record boundary -> sink detach -> verdict
+ *   stop request -> overlay off, count to zero -> worker join
+ *   -> record boundary -> nn's leave -> verdict
+ *
+ * Two proofs, and they permit different things (nn_stream_state.h): the
+ * overlay's zero permits the join and -- with the worker joined -- the boundary
+ * and the leave; only a confirmed camera stop permits the panel sink's unlink,
+ * which happens inside the leave if nn's was the last place on the camera.
  *
  * The caller has claimed the stop; what it does with the verdict -- release,
  * leave retryable, poison -- is its own.
  */
-static void nn_teardown(int oneshot, struct nn_stream_verdict *v)
+static void nn_teardown(struct nn_stream_verdict *v)
 {
-	int cam_rc, detach_rc = 0, attempted = 0;
+	int ov_rc, leave_rc = 0, attempted = 0;
 	int wjoin = NN_STREAM_WJOIN_NOT_TRIED;
 
-	/* [!] BEFORE the camera stop, always: it is what keeps the frame in flight
-	 * from starting an inference the join would then have to wait out. */
+	/* [!] BEFORE the overlay comes off, always: it is what keeps the frame in
+	 * flight from starting an inference the join would then have to wait out. */
 	nn_camera_request_stop();
-	cam_rc = camera_stream_stop();
+	ov_rc = cam_lcd_sink_overlay_remove();
 
 	/*
-	 * [!] THEN THE WORKER, AND ONLY ONCE THE PRODUCER IS CONFIRMED OUT (issue
-	 * #129).  Before that the producer could still hand it a frame, so
-	 * "parked" would not stay true.  The stop flag above keeps it from
-	 * starting another invoke, so this waits out at most the one running --
-	 * bounded by the wall clock, and a worker that does not come back is the
-	 * terminal "worker did not return": no boundary, no unlink, no release.
+	 * [!] THEN THE WORKER, AND ONLY ONCE THE OVERLAY IS SHOWN UNUSED (issues
+	 * #129, #142).  Before that the producer could still be in nn's step and
+	 * hand it a frame, so "parked" would not stay true.  The stop flag above
+	 * keeps it from starting another invoke, so this waits out at most the
+	 * one running -- bounded by the wall clock, and a worker that does not
+	 * come back is the terminal "worker did not return": no boundary, no
+	 * leave, no release.
 	 */
-	if (nn_stream_may_join_worker(cam_rc))
+	if (nn_stream_may_join_worker(ov_rc))
 		wjoin = (nn_worker_join() == 0) ? NN_STREAM_WJOIN_OK
 		                                : NN_STREAM_WJOIN_FAILED;
 
 	/*
-	 * [!] THE RECORD BOUNDARY ONLY ONCE THE PRODUCER AND THE WORKER ARE
-	 * CONFIRMED OUT (issues #118, #129).  The worker publishes immediately
-	 * after each decode, so after both are confirmed every decode this session
-	 * ran has been published and none can follow -- the last result keeps an
-	 * account the plugin can still give.  A boundary taken earlier would drop
-	 * the frame in flight AFTER its decode had rewritten the plugin's result.
-	 * Unconfirmed, there is no boundary: the lifecycle goes DEAD and nothing
-	 * admits a new session.
+	 * [!] THE RECORD BOUNDARY ONLY ONCE THE OVERLAY AND THE WORKER ARE BOTH
+	 * PROVEN (issues #118, #129).  The worker publishes immediately after each
+	 * decode, so after both every decode this session ran has been published
+	 * and none can follow -- the last result keeps an account the plugin can
+	 * still give.  Unproven, there is no boundary: the lifecycle goes DEAD and
+	 * nothing admits a new session.
+	 *
+	 * [!] AND NN'S PLACE ON THE CAMERA IS GIVEN UP LAST (issue #142), so the
+	 * operator's `camera stream stop` -- refused while nn holds it -- can never
+	 * stop the camera under a producer or a panel still inside nn's overlay.  A
+	 * leave that comes back retryable is repeated by the next stop, which takes
+	 * the boundary again: harmless, the generation moves and the result stays.
 	 */
-	if (nn_stream_may_detach(cam_rc, wjoin))
+	if (nn_stream_may_release(ov_rc, wjoin)) {
 		nn_rec_boundary();
-
-	/* [!] AND THE DETACH IS THE LAST PART OF THE STOP (issue #57), reached
-	 * only on a confirmed stop of both -- the panel's blit runs on its own
-	 * thread, so a confirmed stop alone does not prove nothing is using the
-	 * frame.  The capture sink has no thread, and is asked the same way. */
-	if (nn_stream_may_detach(cam_rc, wjoin)) {
 		attempted = 1;
-		detach_rc = oneshot ? cam_capture_sink_detach()
-		                    : cam_lcd_sink_detach();
+		leave_rc = cam_lcd_sink_release(&nn_cam_holder, NULL, 0, NULL);
 	}
-	nn_stream_stop_decide(cam_rc, wjoin, attempted, detach_rc, v);
+	nn_stream_stop_decide(ov_rc, wjoin, attempted, leave_rc, v);
+}
+
+/* Why the panel's stream would not take nn on (issue #142): the detail for a
+ * refused cam_lcd_sink_hold().  In every case nothing of nn's was left on it. */
+static void nn_hold_refused(struct nn_op_result *res, int rc)
+{
+	switch (rc) {
+	case CAM_ERR_BUSY:
+		nn_detail_set("the camera is busy -- a stream start or stop, `camera "
+		              "bench`, or another command owns it; retry");
+		break;
+	case CAM_ERR_STATE:
+		nn_detail_set("the camera or its panel sink is unusable until "
+		              "reboot (`camera stats`)");
+		break;
+	default:
+		nn_detail_set("the camera would not start (%d)", rc);
+		break;
+	}
 }
 
 static enum nn_claim nn_claim_of_act(unsigned char act)
@@ -1257,7 +1279,7 @@ static enum nn_claim nn_claim_of_act(unsigned char act)
 	}
 }
 
-static const char *nn_stream_why_text(unsigned char why, int oneshot);
+static const char *nn_stream_why_text(unsigned char why);
 
 /*
  * How long `nn run` waits for its one result, in ticks of the wall clock.
@@ -1414,18 +1436,17 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		return;
 	}
 	/*
-	 * [!] A STREAM, NOT A CAPTURE (issue #129), through a sink with no panel.
-	 * Attaching and starting are one operation in the camera, and refused,
-	 * nothing is linked and nothing streams -- so the worker, armed and never
-	 * handed a frame, is parked again at once and the one-shot given back.
+	 * [!] A STREAM, NOT A CAPTURE (issue #129) -- and since issue #142 THE
+	 * PANEL'S STREAM, held like any other: joined if the operator is
+	 * watching it, started (holding the operator's place too, D6) if nothing
+	 * streams, so it keeps streaming after this run.  The one-shot's overlay
+	 * prepares a frame and draws nothing.  Refused, nothing this call added
+	 * is left -- so the worker, armed and never handed a frame, is parked
+	 * again at once and the one-shot given back.
 	 */
-	rc = cam_capture_sink_attach_and_stream(nn_camera_arm_oneshot());
+	rc = cam_lcd_sink_hold(&nn_cam_holder, nn_camera_arm_oneshot(), NULL);
 	if (rc != CAM_OK) {
-		if (rc == CAM_ERR_BUSY)
-			nn_detail_set("the camera is already streaming, or another "
-			              "command owns it");
-		else
-			nn_detail_set("capture failed (%d)", rc);
+		nn_hold_refused(res, rc);
 		/* Were the join ever refused, the word stays armed and the next
 		 * start refuses at its arm -- closed, not tidied. */
 		(void)nn_worker_join();
@@ -1505,7 +1526,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
 		return;
 	}
-	nn_teardown(1, &v);
+	nn_teardown(&v);
 	/* A one-shot's settle latches nothing: `nn run` never touched the
 	 * stream's numbers.  The gate goes back only on a finish that took. */
 	nn_core_settle(&nn_core, &nn_core_board, nn_claim_of_act(v.act), NULL,
@@ -1539,7 +1560,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		break;
 	}
 	if (v.act != (unsigned char)NN_STREAM_ACT_DONE)
-		nn_detail_set("%s", nn_stream_why_text(v.why, 1));
+		nn_detail_set("%s", nn_stream_why_text(v.why));
 	nn_result(res, status, nn_claim_of_act(v.act));
 }
 
@@ -1933,15 +1954,17 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		return;
 	}
 	acc0 = nn_rec_boundary_base();
-	rc = cam_lcd_sink_attach_and_stream(nn_camera_arm());
+	/*
+	 * [!] HOLD THE PANEL'S STREAM, AND PUT THE OVERLAY ON IN THE SAME STEP
+	 * (issue #142).  Joined if the operator is already streaming; started --
+	 * holding the operator's place too, so the camera keeps streaming after
+	 * nn stops -- if nothing is.
+	 */
+	rc = cam_lcd_sink_hold(&nn_cam_holder, nn_camera_arm(), NULL);
 	if (rc != CAM_OK) {
-		if (rc == CAM_ERR_BUSY)
-			nn_detail_set("the camera is already streaming, or another "
-			              "command owns it");
-		else
-			nn_detail_set("the camera would not start (%d)", rc);
-		/* Nothing was attached, so nothing can have handed the worker a
-		 * frame: it is parked wanting one, and the join returns at once.
+		nn_hold_refused(res, rc);
+		/* Nothing of nn's was put on, so nothing can have handed the worker
+		 * a frame: it is parked wanting one, and the join returns at once.
 		 * Were it ever to refuse, the word stays armed and the next start
 		 * refuses at the arm above -- closed, not tidied. */
 		(void)nn_worker_join();
@@ -1976,10 +1999,11 @@ int nn_svc_stream_poll(uint32_t gen, struct nn_stream_stats *out)
 	return nn_core_poll(&nn_core, &nn_core_board, gen, out);
 }
 
-/* The sentence an operator gets.  They are not interchangeable -- two of these
-   mean "nothing was touched" and "something is still running in there".
-   @p oneshot: the sink was `nn run`'s capture sink, not the panel's. */
-static const char *nn_stream_why_text(unsigned char why, int oneshot)
+/* The sentence an operator gets.  They are not interchangeable -- some mean
+   "nothing was touched, ask again" and others "something is still running in
+   there".  Since issue #142 the same for a stream and a `nn run`: both put an
+   overlay on the panel's stream and give up a place on it. */
+static const char *nn_stream_why_text(unsigned char why)
 {
 	/* Each sentence is checked against NN_SVC_DETAIL_MAX at build time -- it
 	 * is copied whole into a result's detail (issue #122 P15). */
@@ -1995,23 +2019,20 @@ static const char *nn_stream_why_text(unsigned char why, int oneshot)
 			"unusable until reboot");
 	case NN_STREAM_WHY_CAM_STATE:
 		return NN_SVC_DETAIL_LIT(
-			"the camera refused the stop; it is unusable until reboot");
+			"the camera or its panel sink could not be stopped; it is "
+			"unusable until reboot");
 	case NN_STREAM_WHY_SINK_BUSY:
-		if (oneshot)
-			return NN_SVC_DETAIL_LIT(
-				"the capture sink was not ready to unlink -- run "
-				"`nn stream stop` to finish this run's teardown");
 		return NN_SVC_DETAIL_LIT(
-			"the panel has not finished with this stream's frames -- "
-			"run `nn stream stop` again");
+			"a camera start or stop is in progress -- run `nn stream "
+			"stop` again");
 	case NN_STREAM_WHY_SINK_LOST:
-		if (oneshot)
-			return NN_SVC_DETAIL_LIT(
-				"the capture sink could not be unlinked; the camera is "
-				"unusable until reboot");
 		return NN_SVC_DETAIL_LIT(
-			"the panel thread did not finish; the preview is unusable "
-			"until reboot");
+			"the overlay cannot be shown unused: the camera or its "
+			"panel sink is lost until reboot");
+	case NN_STREAM_WHY_OV_BUSY:
+		return NN_SVC_DETAIL_LIT(
+			"the panel has not let go of the overlay yet -- run "
+			"`nn stream stop` again");
 	case NN_STREAM_WHY_WORKER_LOST:
 		return NN_SVC_DETAIL_LIT(
 			"the inference worker did not finish; inference is unusable "
@@ -2073,8 +2094,8 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 	/*
 	 * WHICH SESSION THIS IS -- read under the claim this call now holds, so it
 	 * cannot change.  A one-shot reaches here only once its own `nn run` left
-	 * its teardown retryable (svc/nn_stream_life.h); its sink is the capture
-	 * sink, and it latches no stream numbers.
+	 * its teardown retryable (svc/nn_stream_life.h); it runs the same teardown
+	 * (issue #142) and latches no stream numbers.
 	 */
 	{
 		TX_INTERRUPT_SAVE_AREA
@@ -2084,12 +2105,12 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 		TX_RESTORE
 	}
 	oneshot = (kind == (uint8_t)NN_STREAM_KIND_ONESHOT);
-	nn_teardown(oneshot, &v);
+	nn_teardown(&v);
 	if (oneshot) {
 		nn_core_settle(&nn_core, &nn_core_board, nn_claim_of_act(v.act),
 		               NULL, NULL);
 		if (v.act != (unsigned char)NN_STREAM_ACT_DONE)
-			nn_detail_set("%s", nn_stream_why_text(v.why, 1));
+			nn_detail_set("%s", nn_stream_why_text(v.why));
 		nn_result(res, (v.act == (unsigned char)NN_STREAM_ACT_DONE)
 		               ? NN_SVC_OK : NN_SVC_ERR_HW, nn_claim_of_act(v.act));
 		return;
@@ -2108,12 +2129,12 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 		nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 		return;
 	case NN_STREAM_ACT_RETRY:
-		nn_detail_set("%s", nn_stream_why_text(v.why, 0));
+		nn_detail_set("%s", nn_stream_why_text(v.why));
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_RETRYABLE);
 		return;
 	case NN_STREAM_ACT_TERMINAL:
 	default:
-		nn_detail_set("%s", nn_stream_why_text(v.why, 0));
+		nn_detail_set("%s", nn_stream_why_text(v.why));
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
 		return;
 	}

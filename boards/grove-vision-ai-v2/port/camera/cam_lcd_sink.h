@@ -20,7 +20,19 @@
  * unchanged.
  *
  * What it costs is that "the producer has stopped" no longer means "nothing is
- * using the frame", which is why detach() below is the interesting function.
+ * using the frame", which is why the unlink in cam_lcd_sink.c is the
+ * interesting function.
+ *
+ * [!] SINCE ISSUE #142 THIS SINK IS STARTED BY ITS HOLDERS, NOT BY A COMMAND.
+ * The camera streams to the panel while, and only while, somebody holds it:
+ * the operator (`camera stream start`) or nn (`nn stream start`, `nn run`), in
+ * the svc/cam_holders.h table kept here -- camera.c knows nothing of the panel
+ * and stays that way.  The first holder links this sink and starts the camera
+ * (one step, issue #63); the last one to leave stops it, and only a CONFIRMED
+ * stop unlinks it (port/camera/cam_hold_rules.h).  The operator may not leave
+ * while nn holds it ("still in use: nn", issue #142 D8).  nn's work rides on
+ * the stream as the overlay below, put on and taken off without touching the
+ * camera.
  */
 #ifndef CAM_LCD_SINK_H
 #define CAM_LCD_SINK_H
@@ -32,21 +44,22 @@ extern "C" {
 #endif
 
 /**
- * @brief  Optional per-frame overlay (issue #48).
+ * @brief  The optional per-frame overlay (issue #48): nn's step of this sink.
  *
  * Two callbacks because the work splits at the panel guard, and that split is
  * the point:
  *
- *   - process() runs FIRST, ON THE PRODUCER THREAD, with NO guard held, and may
- *     take as long as it needs -- `nn stream` runs a whole NPU inference here.
- *     It stays on the producer deliberately: the raw WDMA3 buffer it reads is
+ *   - process() runs FIRST, ON THE PRODUCER THREAD, with NO guard held.  It
+ *     stays on the producer deliberately: the raw WDMA3 buffer it reads is
  *     stable only until consume() returns (the datapath is re-armed after
  *     publish), so this is the one place the model sees the frame that is about
- *     to be shown.
+ *     to be shown.  Since issue #129 it only prepares the input; the inference
+ *     is the worker's.
  *   - draw() runs INSIDE the guard, on the staged frame, immediately before the
  *     DMA -- and therefore ON THE PANEL THREAD since issue #57.  It is bound by
  *     the contract in lcd_st7789.h: no blocking, no re-entry, only
- *     lcd_rect_wire().
+ *     lcd_rect_wire().  May be NULL: `nn run`'s overlay prepares a frame and
+ *     draws nothing (issue #142 -- a one-shot does not paint the last result).
  *
  * The two run on DIFFERENT THREADS but never overlap, and that is not a
  * coincidence to be preserved by luck: the pipeline pre-pins one delivery per
@@ -54,6 +67,15 @@ extern "C" {
  * so process() cannot run again until the panel thread has released the frame --
  * which it does only after draw() has returned.  Whatever process() leaves for
  * draw() is therefore published by that hand-off and needs no lock.
+ *
+ * [!] HELD BY POINTER AND COUNTED (issue #142).  The sink keeps a pointer, not a
+ * copy, and the producer reads it ONCE per frame -- in the same critical section
+ * as it counts itself in (svc/cam_step.h) -- and hands what it read to the panel
+ * thread with the frame.  The panel never reads the pointer the sink keeps.  The
+ * count stays up from that read until the panel thread has finished with the
+ * frame -- drawn, or skipped because the panel was taken or dark -- so it
+ * reaching zero after cam_lcd_sink_overlay_remove() says neither thread is in
+ * either callback and neither can enter again.  The vtable must outlive that.
  *
  * A non-zero return from process() means "no overlay for this frame": draw() is
  * skipped, the frame is still shown, and the preview keeps running.  A failed
@@ -92,96 +114,129 @@ struct cam_lcd_overlay {
  *
  * Call from tx_application_define(), next to lcd_create_objects() and
  * camera_create_objects().  Touches no hardware; the thread parks immediately
- * and does nothing until a frame is handed to it.  attach() refuses if this did
+ * and does nothing until a frame is handed to it.  A hold refuses if this did
  * not succeed -- a sink whose worker does not exist would accept a frame, pin
  * its slot for ever and stall the ring.
  */
 void cam_lcd_sink_create_objects(void);
 
-/**
- * @brief  Start the camera with this sink attached, and show its frames.
+/*
+ * ---- who holds the stream (issue #142) -------------------------------------
  *
- * Brings the panel up if needed, rotates it to landscape (the camera delivers
- * 320x240 and the panel is natively 240x320 -- MADCTL transposes for free on
- * this SPI panel, so no CPU-side rotation is involved), and then starts the
- * stream WITH this sink, in the camera's own one-step transaction.
+ * Every function below runs the holder table under this file's holder lock, in
+ * the same locked region as the camera start or stop its answer calls for.
+ * Before answering anything else each one SETTLES what is owed: a stop that
+ * confirmed the camera but still owes the unlink is finished, and a stream that
+ * ended by itself while held (the producer gave up) is confirmed with a stop,
+ * unlinked, and every holder marked lost -- a holder's mark goes only when that
+ * holder takes hold again.
  *
- * [!] IT STARTS THE STREAM (issue #63), which is why it is not just "attach"
- * any more.  Subscribing and starting used to be two calls the caller made in
- * order, and `camera bench` -- which starts a stream owning no sink -- could get
- * in between them, stranding this sink on a stream nobody here owns.  The two
- * are indivisible now, so the caller has one call and one answer.
- *
- * The panel work stays OUTSIDE that transaction: bring-up is a reset pulse, an
- * init table and a priming transfer, and none of it needs the camera held.  Only
- * the pipeline registration is inside.
- *
- * ON FAILURE NOTHING IS ATTACHED and no stream is running -- including for
- * CAM_ERR_BUSY, which now covers both "another preview owns this sink" and
- * "another command owns the camera".  There is nothing for the caller to
- * unwind but its own state.
- *
- * @p ov may be NULL for a plain preview.  It is an ARGUMENT rather than a
- * separate setter so that an overlay cannot outlive the command that wanted it:
- * there is no state a crashed or forgotten teardown could leave behind for the
- * next `camera preview` to inherit.  The pointer must stay valid until
- * detach() returns CAM_OK.
- *
- * @return CAM_OK, with the stream running; CAM_ERR_BUSY if a preview already
- *         owns the sink or another command owns the camera; CAM_ERR_STATE if a
- *         previous detach could not be completed (see below); CAM_ERR_HAL if the
- *         panel or the camera would not come up.
+ * [!] AN UNCONFIRMED LOSS IS TERMINAL.  A camera that never acknowledged a stop
+ * (CAM_ST_LOST) or a panel thread that did not come back leaves the table, the
+ * sink and every resource exactly where they are; every later call answers
+ * CAM_ERR_STATE and only a reboot clears it.
  */
-int cam_lcd_sink_attach_and_stream(const struct cam_lcd_overlay *ov);
+struct cam_holder;   /* svc/cam_holders.h */
+
+/** Refused: another holder still needs the stream (issue #142 D8).  The
+ *  operator stays and nothing changed.  This file's, not camera.h's: only the
+ *  holder table can say it. */
+#define CAM_LCD_ERR_IN_USE (-20)
+
+/**
+ * @brief  Take hold of the camera's stream to the panel.
+ *
+ * @param h        the holder; NULL for the operator (`camera stream start`)
+ * @param ov       nn's overlay to put on the sink with this hold, or NULL
+ * @param started  out (may be NULL): non-zero if this call started the camera
+ *
+ * A holder other than the operator joins a running stream, or -- when nothing
+ * streams -- takes the operator's place too and starts it (issue #142 D6: `nn
+ * run` as well), so the camera keeps streaming after nn lets go.  Starting brings
+ * the panel up, rotates it to landscape and starts the camera WITH this sink, in
+ * the camera's own one-step transaction (issue #63).  The overlay is put on in
+ * the same locked region; a refusal of it gives back exactly what this call
+ * registered (svc/cam_holders.h's ticket) and stops nothing it did not start.
+ *
+ * [!] NEVER WAITS FOR THE HOLDER LOCK: a camera start or stop in progress makes
+ * this CAM_ERR_BUSY, retryable (only a stop waits).
+ *
+ * @return CAM_OK; CAM_ERR_BUSY (retry: a start or stop in progress, the camera
+ *         owned by `camera bench` or another command, or the overlay still
+ *         counted in use); CAM_ERR_STATE (terminal, or the table full);
+ *         CAM_ERR_HAL / other CAM_ERR_* if the panel or the camera would not
+ *         come up -- in every failure nothing this call added is left behind.
+ */
+int cam_lcd_sink_hold(const struct cam_holder *h,
+                      const struct cam_lcd_overlay *ov, int *started);
+
+/**
+ * @brief  Let go of the camera's stream.
+ *
+ * @param h       the holder; NULL for the operator (`camera stream stop`)
+ * @param users   out (may be NULL): who refused the operator's leave
+ * @param max     room in @p users
+ * @param nusers  out (may be NULL): how many names went to @p users
+ *
+ * Not a holder: CAM_OK, nothing changes.  [!] The operator while nn holds it:
+ * CAM_LCD_ERR_IN_USE, and the operator STAYS (D8).  The last holder: the camera
+ * is stopped, and only on a CONFIRMED stop is the sink unlinked and the table
+ * emptied.  Waits for the holder lock, bounded (a stop in progress may hold it
+ * for a camera join and a panel drain).
+ *
+ * @return CAM_OK; CAM_LCD_ERR_IN_USE; CAM_ERR_BUSY (retry: the lock was not had
+ *         in time, or the unlink found a transition in flight -- the camera is
+ *         stopped and the next release finishes it); CAM_ERR_LOCKED (retry: the
+ *         camera API stayed locked, nothing was asked); CAM_ERR_TIMEOUT /
+ *         CAM_ERR_STATE (terminal: see above)
+ */
+int cam_lcd_sink_release(const struct cam_holder *h, const char **users,
+                         int max, int *nusers);
+
+/**
+ * @brief  Take the overlay off, and wait until nothing uses it (issue #142).
+ *
+ * The producer stops entering nn's step at once (the pointer goes and the step
+ * is disarmed in one critical section); then this waits, by the wall clock, for
+ * the count to reach zero -- the producer out of process() and the panel thread
+ * out of draw() and finished with the frame that carried it.  Zero is the proof
+ * nn's stop runs on (the worker JOIN, then the record boundary and nn's leave).
+ * The camera keeps streaming.
+ *
+ * Idempotent: nothing on (taken off by an earlier call, or by the unlink at the
+ * end of a stream) waits only for the count.
+ *
+ * @return CAM_OK once nothing is inside; CAM_ERR_TIMEOUT when the count had not
+ *         reached zero at the deadline (retryable: the overlay stays off, and a
+ *         later call waits again); CAM_ERR_STATE when the holder code is
+ *         terminal or the sink is lost (nothing is proven, everything is kept)
+ */
+int cam_lcd_sink_overlay_remove(void);
+
+/**
+ * The holders' names in registration order (static strings, up to @p max) and,
+ * in *@p lost (may be NULL), how many were marked lost at the last confirmed end
+ * of a stream.  Does not wait for the holder lock.
+ *
+ * @return the count; -1 when a start or stop held the lock (nothing copied)
+ */
+int cam_lcd_sink_holders(const char **names, int max, int *lost);
 
 /**
  * @brief  Is the panel spoken for by this sink? (issue #99)
  *
- * For the `lcd` commands that change PERSISTENT panel state -- rotation, MADCTL,
- * the backlight -- rather than one transfer.  Since live inference stopped
- * blocking its console those became typeable during a stream, and a rotation
- * mid-stream leaves the sink's fixed-size blits refused or clamped while every
- * layer still reports success.
+ * For the `lcd` commands that change PERSISTENT panel state -- rotation, MADCTL
+ * -- rather than one transfer.  A rotation mid-stream leaves the sink's
+ * fixed-size blits refused or clamped while every layer still reports success.
  *
  * [!] ASK IT WHILE HOLDING THE PANEL GUARD.  Answered and then acted on
- * afterwards it is a TOCTOU: the attach path takes the guard from bring-up until
+ * afterwards it is a TOCTOU: the start path takes the guard from bring-up until
  * the sink is linked precisely so that a caller holding it either finishes first
  * or sees the sink.
  *
- * @return non-zero if this sink is attached, coming up, or lost
+ * @return non-zero if this sink is attached, coming up, going down, or lost
  */
 int cam_lcd_sink_linked(void);
-
-/**
- * @brief  Stop showing frames: unlink the sink, then drain the panel thread.
- *
- * [!] THE CALLER MUST HAVE A CONFIRMED STOP FIRST -- camera_stream_stop() ==
- * CAM_OK, never a timeout (issue #48).  That proves the producer is idle, which
- * is what makes the count of outstanding deliveries here stop growing.
- *
- * THE ORDER IS THE DESIGN (issue #57), and it is svc/frame_pipeline's own:
- * unlink so that no further consume() can be issued, and only then wait for the
- * work already handed over.  Draining first would leave the sink linked across a
- * window in which another command can start a fresh stream -- camera_stream_stop()
- * releases the camera API mutex before it returns, and `camera bench` starts a
- * stream while owning no sink -- and the sink would then be delivered frames
- * belonging to a stream its owner had already finished with.
- *
- * A drain that does not finish inside its deadline is this module's CAM_ST_LOST:
- * nothing is torn down, the overlay is NOT cleared, the frame stays pinned, and
- * every later attach() is refused until reboot.  The caller must treat that
- * exactly as it treats a camera that never acknowledged a stop -- in particular
- * `nn stream` must keep its lease, because the panel thread may still be inside
- * a draw() that reads the detections.  All of this module's state is static, so
- * keeping it costs nothing; releasing it while a thread may still be in there
- * cannot be survived.
- *
- * @return CAM_OK once the panel thread is provably idle (and only then may the
- *         caller release anything the sink points at); CAM_ERR_TIMEOUT if the
- *         drain failed; CAM_ERR_STATE if the sink was already poisoned or the
- *         camera refused the unsubscribe.
- */
-int cam_lcd_sink_detach(void);
 
 /**
  * Delivery counters for `camera stats`, plus the blit timing (issue #57).
@@ -199,6 +254,8 @@ struct cam_lcd_sink_stats {
 	uint32_t dropped;        /**< pipeline dropped: sink still busy          */
 	uint32_t errors;         /**< blit failures                              */
 	uint32_t busy;           /**< frames skipped because the panel was taken */
+	uint32_t dark;           /**< frames skipped because the panel was dark
+	                          *   (`lcd off`, issue #142)                  */
 	uint32_t overlay_errors; /**< process() refused: frame shown, no boxes   */
 
 	/**

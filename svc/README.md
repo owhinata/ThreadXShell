@@ -28,8 +28,10 @@ svc/nn_svc.h                             the contract: the nn_svc_*() calls
 boards/<board>/port/nn/nn_svc_<board>*.c the adapter: translates the contract
         |                                to the board's model API (console side)
         v
-boards/<board>/port/nn/nn_camera.c ...   the board's glue and threads:
-   producer | worker | panel | console     each thread calls into the shared
+boards/<board>/port/nn/                  the board's glue, one file per thread:
+   nn_producer.c | nn_worker.c | nn_panel.c | nn_camera.c (console side, owns
+   producer      | worker      | panel      | the state; nn_camera_priv.h shares it)
+        |            |                     each thread calls into the shared
         |            |                     core and passes it hooks and state
         |            v
         |   svc/nn_core.c       lifecycle policy and the stream's numbers

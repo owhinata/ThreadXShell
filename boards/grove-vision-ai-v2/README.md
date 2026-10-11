@@ -2008,6 +2008,31 @@ already decides.  The decoder says which it is looking at, and only its
 refusals, because one of them means the model is wrong and the others mean this
 firmware is.
 
+### The nn files
+
+The command, its contract and the shared core are `svc/`'s (see
+[svc/README.md](../../svc/README.md)).  What this board still owns, one line per
+file (each `.c` with its `.h` unless only a header is listed):
+
+| File | Thread or context | Hardware reason |
+|---|---|---|
+| `port/nn/nn_svc_grove.c` | console | The adapter: an open brings the Ethos-U55 up and holds the NOR XIP lease, so it is the thick one of the three. |
+| `port/nn/nn_camera.c` | camera producer (`process()`), inference worker (`nn_camera_work()`), panel (`draw()`), console (arm / stop / stats) | Binds the shared frame path to this board's camera sink and the SPI LCD panel's overlay contract (`cam_lcd_sink.h`); its static state outlives a producer that never acknowledged a stop. |
+| `port/nn/nn_worker.c` | inference worker | The ThreadX thread and its join: the NPU driver blocks for the whole invoke, so the invoke needs a thread of its own. |
+| `port/nn/nn_active.c` | worker, panel, console, under the plugin lease | Turns `npu_tensor` into `svc/tensor.h` descriptors and states this board's frame geometry for `svc/nn_active_core.c`. |
+| `port/nn/nn_preproc.c` | camera producer (fill); wherever a box is mapped back | The camera's frame size and pixel format against the model input; pure and host-tested because a wrong box costs a NOR flash cycle to investigate. |
+| `port/nn/nn_rec.c` | worker (publish), panel and console (snapshot) | The record's storage and its lock, a short interrupt-disabled section rather than a mutex (`nn_rec.h` says why). |
+| `port/nn/nn_outputs.c` | inference worker | How many NPU outputs this board decodes (`NPU_DESC_MAX_OUTPUTS`); pure, the reads behind a callback. |
+| `port/nn/nn_run_wait.c` | console (`nn run`) | No hardware reason: the five ways `nn run`'s wait ends, a pure table over this board's worker and camera outcomes. |
+| `port/nn/nn_stream_state.c` | console (`nn stream stop`) | Classifies this board's camera stop and sink detach codes into retryable / terminal; pure, host-tested. |
+| `port/nn/nn_param_calls.c` | console (`nn thresh`, `nn dets`, load / unload) | No hardware reason: the count of console calls inside the plugin, run in the board's critical section. |
+| `port/nn/nn_plugin_stack.h` | build time | Per-slot plugin stack allowances asserted against this board's thread stacks. |
+| `port/nn/nn_probe.c`, `nn_probe_rtos.c` | every thread that enters a plugin slot | Stack depth at a plugin callback's entry; the rtos half asks ThreadX which thread is running. |
+| `port/nn/npu/` | worker (invoke), console (open / close / info) | The backend: Ethos-U55 bring-up, arena and cache maintenance, TFLM with the one op resolver, NOR model scan and payload checks. |
+| `port/plugin/plugin_run.c` | console (load / unload), worker, panel | The plugin reservation from this board's linker script, Cortex-M55 I/D-cache maintenance, the Armv8-M MPU read-back and the flash-lease precondition. |
+| `port/plugin/plugin_lease.c` | every path into the plugin | The lease as a ThreadX mutex with bounded waits (worker, console) and a try (panel). |
+| `port/plugin/plugin_paint.c` | panel | The pixel loops into the byte-swapped RGB565 staged frame the ST7789 takes over SPI. |
+
 ### The model is a blob, opened by name (#93, #49 Step 4a)
 
 `nn model load --name cls` asks the asset store for the blob called `cls` and parses what it

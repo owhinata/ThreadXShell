@@ -294,6 +294,37 @@ tflm -- is now part of the default build.  But no image from this configuration
 has been flashed, so the first `--target flash` after this change ships something
 new.
 
+## The nn files
+
+The command, its contract and the shared core are `svc/`'s (see
+[svc/README.md](../../svc/README.md)).  What this board still owns, one line per
+file (each `.c` with its `.h` unless only a header is listed):
+
+| File | Thread or context | Hardware reason |
+|---|---|---|
+| `port/nn/nn_svc_wio.c` | console | The adapter over this board's `nn.h` API; model bytes come out of the NOR asset store into the backend's PSRAM staging slot. |
+| `port/nn/nn_camera.c` | camera producer (band callback), inference worker (`nn_work`), panel (`nn_camera_draw()` from the preview thread), console (start / stop / stats) | Binds the shared frame path to the DCMI band stream (`port/camera/cam_band.h`) and the LTDC preview; the input frame lives in PSRAM behind its shared guard. |
+| `port/nn/nn_active.c` | worker, panel, console, under the plugin lease | Turns `nn_tensor` into `svc/tensor.h` descriptors and states this board's frame geometry for `svc/nn_active_core.c`. |
+| `port/nn/nn_desc.c` | wherever a tensor is described | `nn_tensor` -> `tensor_desc`, the only place this board's tensor type meets the neutral one. |
+| `port/nn/nn_decode_count.c` | inference worker | No hardware reason: this board's table for counting a decoder's answer in `nn stream stats` (pure, host-tested). |
+| `port/nn/nn.c`, `nn_backend.h` | worker (run), console (open / bench / info) | The backend-agnostic model API and session guard, with DWT cycle-counter timing around `nn_run()`. |
+| `port/nn/nn_null.c` | as `nn.c` | The `null` backend: a stub that builds without any runtime or model. |
+| `port/nn/crc32_fdb.c` | console (container validation) | Serves `svc/crc32.h` with the FlashDB CRC-32 this firmware already links. |
+| `port/nn/tflm/` | worker (invoke), console (load / reload) | The tflite-micro backend: arena and double-slotted model staging in the cacheable PSRAM carve-out (`.psram_ai`). |
+| `port/plugin/plugin_run.c` | console (load / unload), worker, panel | The reservation in the top 32 KB of AXI-SRAM (a Cortex-M7 cannot fetch from DTCM), M7 I/D-cache maintenance, the Armv7-M MPU read-back and the staging-region precondition. |
+| `port/plugin/plugin_lease.c` | every path into the plugin | The lease as a ThreadX mutex: the preview thread outranks the worker and would otherwise preempt a decode mid-way. |
+| `port/plugin/plugin_paint.c` | panel | CPU pixel loops into the rotated, native-order RGB565 LTDC frame (no DMA2D, which has no way to prove it stopped before the flip). |
+
+[!] **Three `port/` -> `src/` includes remain on purpose.**  They are not nn
+files, and moving them would touch the LTDC, Wi-Fi and MPU code that also uses
+them:
+
+| `src/` header | Included by | Why |
+|---|---|---|
+| `psram.h` | `port/nn/nn_camera.c`, `port/nn/nn_svc_wio.c` | The OCTOSPI1 PSRAM shared guard (`psram_acquire_shared()` / `psram_release()`): the stream and `nn bench` read PSRAM, so a command that retunes the bus must be kept out. |
+| `cam_preview.h` | `port/nn/nn_camera.c`, `port/nn/nn_svc_wio.c` | The preview's plugin-draw counters, re-armed at stream start and printed by `nn stream stats`. |
+| `blob.h` | `port/nn/nn_svc_wio.c` | The NOR asset store: `nn model load --name` reads a blob under the store's busy guard. |
+
 ## Plugin containers (issues #108, #110, #116 = #78 Steps 3a, 3b and 3c)
 
 A **container** carries a model together with the code that interprets its

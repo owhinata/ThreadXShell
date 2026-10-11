@@ -78,8 +78,7 @@
   保持者ではなく**呼び出し側の解放権限**である。
 - **モデル指定はタグ付きで裸の文字列は拒否**（同じ語がボードごとに別物を指す）。**`--addr` の長さは必須。**
 - **port のアダプタは `struct cli_instance` を取らない**（印字・待ち・キャンセルは `boards/*/cmds/` から関数ポインタで下へ渡す）。
-- **ライブ推論は 3 ボードとも `nn stream start/stop/stats`**（`preview` は復活させない）。`start` は
-  非ブロッキングで、待ちは共有コマンドの `--frames <n>` が 1 実装で持つ。
+- **ライブ推論は 3 ボードとも `nn stream start/stop/stats`**（`preview` は復活させない）。`start` は非ブロッキングで、待ちは共有コマンドの `--frames <n>` が 1 実装で持つ。
 - **[!] stream には世代がある。** 待ち手は `start` の generation を持ち、`stop` は**遷移を claim するのと
   同じクリティカルセクション内で**照合する（`NN_STREAM_GEN_ANY` は操作者専用で**待ち手は渡さない**）。
   機械は `svc/nn_stream_life.c` の 1 本。
@@ -113,6 +112,7 @@
   永久に retry する）。`detach()` の**非負の pin 数は単独では teardown 許可ではない**。
 - **caller に残る条件は 3 つ**（`set_format()` は attach と重ならない / sink は同時に 1 pipeline のみ /
   `init()` は quiescent なときだけ）。**「全 registry 操作を直列化する」とは書かない。**
+- **[!] カメラは持ち主（`svc/cam_holders`: manual / nn）が居る間だけ流れ、camera は持ち主の名前しか知らない**（`port/camera/` は nn を include しない。lcd は持ち主ではない）。**表が空でも teardown の許可ではなく**資源はボードの確認済み停止の後だけ、stop の待ちは自分の stream の世代で照合する（#142）。
 
 ### 9. plugin container と asset（3 ボード共有部）
 
@@ -183,11 +183,11 @@ plugin は board code と同格の**信頼された native code**。ゲートが
   `Default_Handler` で落ちてもリンクは通る）。ゲートは strong `T` / 非同値 / `.isr_vector` slot 一致の 3 条件。
 - **`CLI_INSTANCE_TIME_SLICE=0` を維持**（CPU-bound コマンドが多重実行に非再入。スライス有効化は再入ガードとセット）。
 - **raster の DCMI OVR を終端に戻さない**（#137）: 復帰は producer の `cam_stream_resync()` 1 本（`cam_lock` 下・
-  NVIC マスク下、subscriber の close/open 無し）。teardown は `--frames`/`--secs` 到達後に auto-recovery しない。
-- **カメラ subscriber の drain と owner lifecycle**: `camera_frame_put()` は**全 `consume()` の最後の
-  文**、`CAM_OWN_DRAINING` は `camera_unsubscribe()` の**前**、直列化（PRIMASK）は作業を跨がない。判定は
+  NVIC マスク下、subscriber の close/open 無し）。**teardown は stop とエラーだけ**（#142 で上限は無い）。
+- **購読者は camera sink（表示 + nn の step）と MJPEG の 2 つ、step の停止は印を落として使用中 0**（`svc/cam_step`）。`camera_frame_put()` は**全 `consume()` の最後の
+  文**、`CAM_OWN_DRAINING` は `camera_unsubscribe()` / step の disable の**前**、直列化（PRIMASK）は作業を跨がない。判定は
   `cam_drain.c` / `cam_own.c` の純関数が**唯一の判断点**で**両方 fail-closed**、**`default:` を足さない**。
-  **DONE は `pins == 0` ちょうどだけ。失敗は呼び出し元まで返す。**
+  **DONE は `pins == 0`（step は使用中 0）ちょうどだけ。失敗は呼び出し元まで返す。**
 
 ### 12. Grove Vision AI V2
 
@@ -258,7 +258,7 @@ board README が正。
 - **[!] `nn stream` の拒否の仕方はボードで違う。揃えない**（Grove は**デコーダが無い時点で**、wio は
   **shape は通し `can_draw` 1 本で**）。**[!] `nn_input_quant_ok()` は常駐デコーダの前提条件で plugin は
   縛られない。[!] ファームの印字は「種」を名乗らない** — ゲートは **`.rodata`** を negative scan する。**`nn dets` は
-  record の snapshot と report を lease の 1 回の保持で採る**（stream 中も全文。STALE は保持者が離さなかったときだけ）、**stop の record 境界は producer の停止確認と worker の join の後**（#118, #129。`nn run` も同じ teardown）。
+  record の snapshot と report を lease の 1 回の保持で採る**（stream 中も全文。STALE は保持者が離さなかったときだけ）、**stop の record 境界は overlay の使用中 0 と worker の join の後、sink の unlink はカメラ停止の確認だけが許す**（#118, #129, #142。`nn run` も同じ teardown）。
 - **[!] Grove と wio のファームは共有デコーダをリンクしない** — **デコーダは container でしか届かない**
   （f746 はまだ持つ）。**常駐デコーダを戻さない。別フラグで組み直した監査対象を作らない。** 素の
   `.tflite` は**テンソルをそのまま報告**し、`nn thresh` は **`none`**、set は **`NN_SVC_ERR_STATE`**。

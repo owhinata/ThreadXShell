@@ -46,6 +46,7 @@ src cmds svc cmake test README。wio のみ boot も）。
   サイズと優先度は `cli_config.h` の既定を踏襲し `_Static_assert` を通す。
 - upstream submodule（`lib/`）は read-only で、必要な調整は port 側で吸収する。**boot ツリー
   （`boards/wio-lite-ai/boot/`）は独立**で、app / shell とソースを共有しない。
+- **[!] カメラは持ち主（`svc/cam_holders`: manual / nn）が居る間だけ流れ、camera は持ち主の名前しか知らない**（nn を include しない。lcd は持ち主ではない）。**表が空でも teardown の許可ではなく**資源はボードの確認済み停止の後だけ、stop の待ちは自分の stream の世代で照合する（#142、`svc/README.md`）。
 
 ### [!] `nn` は 3 ボード共有の 1 コマンド
 
@@ -60,8 +61,7 @@ src cmds svc cmake test README。wio のみ boot も）。
   ボードは `terminal` に fail-closed**）。disposition は**呼び出し側の解放権限**である。
 - **モデル指定はタグ付きで裸の文字列は拒否する**（同じ語がボードごとに別物）。`--addr` の長さは必須。
 - **port のアダプタは `struct cli_instance` を取らない**（印字・待ち・キャンセルは `boards/*/cmds/`）。
-- **ライブ推論は 3 ボードとも `nn stream start/stop/stats`**（`preview` は復活させない）。`start` は非
-  ブロッキングで、待ちは `--frames <n>` が 1 実装で持つ。
+- **ライブ推論は 3 ボードとも `nn stream start/stop/stats`**（`preview` は復活させない）。`start` は非ブロッキングで、待ちは `--frames <n>` が 1 実装で持つ。
 - **[!] stream には世代があり、`stop` は遷移を claim するのと同じクリティカルセクション内で照合する**。
   `NN_STREAM_GEN_ANY` は操作者専用で**待ち手は渡さない**。機械は `svc/nn_stream_life.c` の 1 本。
 - **[!] start の admission も機械が持つ** — **worker を触る前に STARTING を claim し失敗なら abort**。
@@ -210,10 +210,10 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
 - **PendSV / SysTick / USART1 のハンドラは強シンボル**（stock CMSIS の weak `Default_Handler` で落ちてもリンクは通る）。
 - **`CLI_INSTANCE_TIME_SLICE=0` を維持**（CPU-bound コマンド中に他コンソールが応答しないのは**期待挙動**）。
 - **raster の DCMI OVR を終端に戻さない**（teardown → GUIX 再 open の全画面描画が最初のフレームで再発し復帰が
-  構造的に成立しない。復帰は producer の in-place resync 1 本、teardown は `--frames`/`--secs` 到達後に auto-recovery しない。#137）。
+  構造的に成立しない。#137）。**teardown は stop とエラーだけ、復帰は producer の in-place resync 1 本。**
 - **`.sdram.ai` のスクラッチはボードが注入する**（常駐の require は `check_f746_layout.py` が持つ）。
-- **カメラの 3 subscriber は各自 sink を drain する**（`camera_frame_put()` は全 `consume()` の最後の
-  文。所有権の終わりは quiescence = `_pins == 0 && _callbacks == 0`）。
+- **camera sink（表示 + nn の step）と MJPEG の 2 購読者は各自 drain する**（`camera_frame_put()` は全 `consume()` の
+  最後の文、購読者の終わりは `_pins == 0 && _callbacks == 0`）。**step の停止は印を落として使用中 0**（`svc/cam_step`）。
 - リファレンス: RM0385 / UM1907（`_ref/f746g-disco/`、read-only）。
 
 ### Wio Lite AI（[!] ブリック安全則あり）
@@ -305,7 +305,7 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
 - **アリーナの保守は範囲ごとでなく全体を 2 点で**（潰すのは `ethosu_invalidate_dcache()` だけ、成功条件は
   state と result の**両方**、異常時はリセット成功を確認してから）。**呼び出し側で保守しない。**
 - **prep は producer・`consume()` 内で worker が欲しいときだけ、invoke〜publish は worker**（callback 中の block / sleep /
-  推論 / 待つロック / LCD 再入は禁止。panel は lease の try だけ）。**stop は producer → worker の join の後に record 境界。タイムアウトは `npu_hw.h` に 1 つ。**
+  推論 / 待つロック / LCD 再入は禁止。panel は lease の try だけ）。**stop は overlay の使用中 0 → worker の join の後に record 境界、sink の unlink はカメラ停止の確認だけが許す。タイムアウトは `npu_hw.h` に 1 つ。**
 - **`nn stream` はデコーダが無い時点で拒否する**（shape や draw の前）。**wio と揃えようとしない。
   `nn_input_quant_ok()` は常駐デコーダの前提条件で plugin は縛られない。** `nn run` も同じ worker と同じ teardown（#129）。
 - **ファームの印字は「種」を名乗らない**（ゲートは **`.rodata`** を読む。**literal を regex で見ない**）。

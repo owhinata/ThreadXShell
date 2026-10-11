@@ -228,9 +228,21 @@ uint32_t ltdc_pixel_clock_hz(void)
 	return ltdc_up ? LTDC_PIXEL_CLOCK_HZ : 0u;
 }
 
+/* The display's on/off as the driver last set it (issue #142): what `lcd on|off`
+   means to a reader, which is not the scanout -- under GUIX `lcd off` drops
+   only DISP / backlight and the LTDC keeps scanning. */
+static volatile bool ltdc_shown;
+
+bool ltdc_display_on(void)
+{
+	return ltdc_shown;
+}
+
 void ltdc_backlight(bool on)
 {
 	GPIO_PinState s = on ? GPIO_PIN_SET : GPIO_PIN_RESET;
+
+	ltdc_shown = on;
 
 	HAL_GPIO_WritePin(LCD_DISP_PORT, LCD_DISP_PIN, s);
 	HAL_GPIO_WritePin(LCD_BL_CTRL_PORT, LCD_BL_CTRL_PIN, s);

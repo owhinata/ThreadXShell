@@ -80,6 +80,15 @@ gcc $CFLAGS -I "$board/port/camera" \
     $LDFLAGS -o "$out/test_cam_step"
 "$out/test_cam_step"
 
+# issue #142 -- this board's two decisions around the camera's holder table
+# (port/camera/cam_hold_rules.c): whether the producer's teardown still goes
+# ahead once a holder came back after the stop was asked for (an error teardown
+# always does), and whether nn may join the stream in the current mode (D3).
+gcc $CFLAGS -I "$board/port/camera" \
+    "$here/test_cam_hold_rules.c" "$board/port/camera/cam_hold_rules.c" \
+    $LDFLAGS -o "$out/test_cam_hold_rules"
+"$out/test_cam_hold_rules"
+
 # issue #130 -- when `nn stream` may give the nn session back
 # (port/nn/nn_sess_release.c).  The producer now writes the input tensor, inside
 # the arena the session guards, so the release waits for a sink drain that

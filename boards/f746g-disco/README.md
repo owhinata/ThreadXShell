@@ -417,18 +417,21 @@ console, and what the two columns mean, is in the root
 The GUI preview, `nn stream` and `net mjpeg` are all *subscribers* of one base
 capture.  When the LCD comes up at boot, the GUI preview subscribes and starts
 the base capture once (`ui/guix_camera_ui.c`, on the GUIX thread), so on a board
-with a working sensor the base is already running after boot: `camera stream
-start` then answers `busy (streaming or preview active)`, and `nn run` / `nn
-stream start` need no start of their own.
+with a working sensor the base is already running after boot, held in the
+operator's place: `camera stream start` then answers `camera: streaming live
+already running`.
 
-> **`nn stream` is a subscriber, and `--frames` waits on that** (issue #99).
-> `nn stream start` enables inference whether or not the base capture is running:
-> with it stopped the stream stays enabled and idle, and attaches at the next
-> `camera stream start`. So `nn stream start --frames <n>` waits indefinitely
-> until the base is started, which is not a hung command. The start says so when
-> the base is not running. (Issue #99 also removed the `[qqvga|qvga]` word this
-> command used to take -- the port discarded it and derived the geometry from
-> whatever the base publishes, so it had not selected anything for some time.)
+> **The camera streams while somebody holds it** (issue #142). The holders are
+> the operator (`camera stream start`, and the boot preview on its behalf) and
+> nn (`nn stream start`, `nn run`); `camera stream stats` lists them on its
+> `holders:` line. `nn stream start` and `nn run` join a running stream, or start
+> it -- in the current mode, which must stream RGB565, or they refuse -- holding
+> the operator's place too, so the camera keeps streaming after nn stops.
+> `camera stream stop` while nn holds it answers `camera: still in use: nn` and
+> changes nothing. A stream has no `--frames` / `--secs` of its own any more;
+> `nn stream start --frames <n>` is the bound. (Issue #99 removed the
+> `[qqvga|qvga]` word `nn stream start` used to take -- the geometry is whatever
+> the base publishes.)
 >
 > **The last result outlives the session** (issue #118). `nn dets` reads the
 > last published decode after a `nn run`, during a stream and after its stop;
@@ -569,9 +572,11 @@ The terminals decided inside the resync (the last two items, and an error code
 or raw flag found there) log `DCMI overrun: in-place resync failed (<reason>);
 stopping` first.  Those decided in the error callbacks -- a JPEG-stream overrun,
 a DMA transfer error, a DCMI sync error -- do not.
-A stop, `--frames` or `--secs` that is due by the time the teardown decides
-wins: the stream is not auto-recovered, even when a resync (or any other
-terminal error, JPEG included) failed after the target was reached.  A terminal
+A stop that is due by the time the teardown decides wins: the stream is not
+auto-recovered, even when a resync (or any other terminal error, JPEG included)
+failed after the stop was asked for.  The teardown looks at the holders again
+under the camera lock first (issue #142): a stop asked for by the last holder's
+leaving is withdrawn if a holder came back meanwhile; an error never is.  A terminal
 error that was latched still shows as `stopped (overrun)` in `stats`.
 
 ## Debugging

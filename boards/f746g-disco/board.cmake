@@ -505,6 +505,8 @@ add_executable(shell
     "${BOARD_DIR}/port/camera/cam_own.c"
     "${BOARD_DIR}/port/camera/cam_step.c"     # a step of the camera sink (#142)
     "${BOARD_DIR}/port/camera/cam_sink.c"     # ...and the sink that runs them
+    "${BOARD_DIR}/port/camera/cam_hold_rules.c"  # this board's holder rules (#142)
+    "${CMAKE_SOURCE_DIR}/svc/cam_holders.c"   # who holds the stream open (#142)
     "${BOARD_DIR}/port/ltdc/ltdc_display.c"
     "${BOARD_DIR}/port/touch/touch.c"
     "${BOARD_DIR}/port/sdram/sdram.c"

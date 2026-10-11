@@ -40,12 +40,58 @@ static int find(const struct cam_holders *t, const struct cam_holder *h)
 	return -1;
 }
 
-static void append(struct cam_holders *t, const struct cam_holder *h,
-                   unsigned attr)
+/* A fresh generation.  0 is never handed out, so a zeroed ticket matches
+ * nothing. */
+static uint32_t take_gen(struct cam_holders *t)
 {
+	t->next_gen++;
+	if (t->next_gen == 0u)
+		t->next_gen = 1u;
+	return t->next_gen;
+}
+
+static uint32_t append(struct cam_holders *t, const struct cam_holder *h,
+                       unsigned attr)
+{
+	uint32_t g = take_gen(t);
+
 	t->who[t->n] = h;
 	t->attr[t->n] = (unsigned char)attr;
+	t->gen[t->n] = g;
 	t->n++;
+	return g;
+}
+
+/* Would removing entry @p at be refused (D8)?  A keeps-stream holder does not
+ * leave while one without the attribute is present. */
+static int held_back(const struct cam_holders *t, unsigned at)
+{
+	unsigned i;
+
+	if (!(t->attr[at] & CAM_HOLDER_KEEPS_STREAM))
+		return 0;
+	for (i = 0; i < t->n; i++)
+		if (!(t->attr[i] & CAM_HOLDER_KEEPS_STREAM))
+			return 1;
+	return 0;
+}
+
+/* Remove entry @p at, closing the gap so the list stays in registration
+ * order.  The caller checked held_back(). */
+static int remove_at(struct cam_holders *t, unsigned at)
+{
+	unsigned i;
+
+	for (i = at; i + 1u < t->n; i++) {
+		t->who[i] = t->who[i + 1u];
+		t->attr[i] = t->attr[i + 1u];
+		t->gen[i] = t->gen[i + 1u];
+	}
+	t->n--;
+	t->who[t->n] = NULL;
+	t->attr[t->n] = 0u;
+	t->gen[t->n] = 0u;
+	return t->n == 0u ? CAM_HOLDERS_T_STOP : CAM_HOLDERS_T_NONE;
 }
 
 /* The first registration on an empty table starts the camera, and the table
@@ -57,17 +103,24 @@ static int start_claim(struct cam_holders *t, unsigned base)
 	return CAM_HOLDERS_T_START;
 }
 
-void cam_holders_init(struct cam_holders *t)
+void cam_holders_clear(struct cam_holders *t)
 {
 	unsigned i;
 
 	for (i = 0; i < CAM_HOLDERS_MAX; i++) {
 		t->who[i] = NULL;
 		t->attr[i] = 0u;
+		t->gen[i] = 0u;
 	}
 	t->n = 0u;
 	t->claimed = 0u;
 	t->claim_base = 0u;
+}
+
+void cam_holders_init(struct cam_holders *t)
+{
+	cam_holders_clear(t);
+	t->next_gen = 0u;
 }
 
 int cam_holders_add(struct cam_holders *t, const struct cam_holder *h,
@@ -80,28 +133,35 @@ int cam_holders_add(struct cam_holders *t, const struct cam_holder *h,
 	if (t->claimed)
 		return CAM_HOLDERS_E_CLAIMED;
 	at = find(t, h);
-	if (at >= 0)
-		return t->attr[at] == attr ? CAM_HOLDERS_T_NONE
-		                           : CAM_HOLDERS_E_INVAL;
+	if (at >= 0) {
+		if (t->attr[at] != attr)
+			return CAM_HOLDERS_E_INVAL;
+		/* This caller holds it too now: an older ticket no longer names it. */
+		t->gen[at] = take_gen(t);
+		return CAM_HOLDERS_T_NONE;
+	}
 	if (t->n >= CAM_HOLDERS_MAX)
 		return CAM_HOLDERS_E_FULL;
 	if (t->n == 0u) {
-		append(t, h, attr);
+		(void)append(t, h, attr);
 		return start_claim(t, 0u);
 	}
-	append(t, h, attr);
+	(void)append(t, h, attr);
 	return CAM_HOLDERS_T_NONE;
 }
 
 int cam_holders_add_or_start(struct cam_holders *t, const struct cam_holder *h,
                              unsigned attr, const struct cam_holder *starter,
-                             unsigned starter_attr, unsigned *added)
+                             unsigned starter_attr,
+                             struct cam_holders_ticket *tk)
 {
 	int at;
 
-	if (added == NULL)
+	if (tk == NULL)
 		return CAM_HOLDERS_E_INVAL;
-	*added = 0u;
+	tk->added = 0u;
+	tk->self_gen = 0u;
+	tk->starter_gen = 0u;
 	if (!well_formed(t) || !holder_ok(h, attr) ||
 	    !holder_ok(starter, starter_attr) || h == starter)
 		return CAM_HOLDERS_E_INVAL;
@@ -111,27 +171,29 @@ int cam_holders_add_or_start(struct cam_holders *t, const struct cam_holder *h,
 	if (t->n == 0u) {
 		/* Stopped: the starter first, as if started by hand.  Both slots
 		 * exist (static assert), so this cannot stop half-way. */
-		append(t, starter, starter_attr);
-		append(t, h, attr);
-		*added = CAM_HOLDERS_ADDED_STARTER | CAM_HOLDERS_ADDED_SELF;
+		tk->starter_gen = append(t, starter, starter_attr);
+		tk->self_gen = append(t, h, attr);
+		tk->added = CAM_HOLDERS_ADDED_STARTER | CAM_HOLDERS_ADDED_SELF;
 		return start_claim(t, 0u);
 	}
 
 	/* Streaming: join it.  The starter is whoever already holds it. */
 	at = find(t, h);
-	if (at >= 0)
-		return t->attr[at] == attr ? CAM_HOLDERS_T_NONE
-		                           : CAM_HOLDERS_E_INVAL;
+	if (at >= 0) {
+		if (t->attr[at] != attr)
+			return CAM_HOLDERS_E_INVAL;
+		t->gen[at] = take_gen(t);   /* as for cam_holders_add() */
+		return CAM_HOLDERS_T_NONE;
+	}
 	if (t->n >= CAM_HOLDERS_MAX)
 		return CAM_HOLDERS_E_FULL;
-	append(t, h, attr);
-	*added = CAM_HOLDERS_ADDED_SELF;
+	tk->self_gen = append(t, h, attr);
+	tk->added = CAM_HOLDERS_ADDED_SELF;
 	return CAM_HOLDERS_T_NONE;
 }
 
 int cam_holders_remove(struct cam_holders *t, const struct cam_holder *h)
 {
-	unsigned i;
 	int at;
 
 	if (!well_formed(t) || h == NULL)
@@ -144,20 +206,47 @@ int cam_holders_remove(struct cam_holders *t, const struct cam_holder *h)
 
 	/* [!] D8: a holder that keeps the stream does not leave while one that
 	 * needs it is still there -- and it is refused, not deferred. */
-	if (t->attr[at] & CAM_HOLDER_KEEPS_STREAM)
-		for (i = 0; i < t->n; i++)
-			if (!(t->attr[i] & CAM_HOLDER_KEEPS_STREAM))
-				return CAM_HOLDERS_E_IN_USE;
+	if (held_back(t, (unsigned)at))
+		return CAM_HOLDERS_E_IN_USE;
+	return remove_at(t, (unsigned)at);
+}
 
-	/* Close the gap so the list stays in registration order. */
-	for (i = (unsigned)at; i + 1u < t->n; i++) {
-		t->who[i] = t->who[i + 1u];
-		t->attr[i] = t->attr[i + 1u];
+/* Remove @p h only while its entry carries generation @p g; an entry a holder
+ * still needs (held_back) is left too -- an undo never stops a stream somebody
+ * else is using.  Returns the transition, or -1 for "nothing removed". */
+static int undo_one(struct cam_holders *t, const struct cam_holder *h,
+                    uint32_t g)
+{
+	int at = find(t, h);
+
+	if (at < 0 || g == 0u || t->gen[at] != g)
+		return -1;
+	if (held_back(t, (unsigned)at))
+		return -1;
+	return remove_at(t, (unsigned)at);
+}
+
+int cam_holders_undo(struct cam_holders *t, const struct cam_holder *h,
+                     const struct cam_holder *starter,
+                     const struct cam_holders_ticket *tk)
+{
+	int last = CAM_HOLDERS_T_NONE, rc;
+
+	if (!well_formed(t) || tk == NULL || h == NULL)
+		return CAM_HOLDERS_E_INVAL;
+	if (t->claimed)
+		return CAM_HOLDERS_E_CLAIMED;
+	if (tk->added & CAM_HOLDERS_ADDED_SELF) {
+		rc = undo_one(t, h, tk->self_gen);
+		if (rc >= 0)
+			last = rc;
 	}
-	t->n--;
-	t->who[t->n] = NULL;
-	t->attr[t->n] = 0u;
-	return t->n == 0u ? CAM_HOLDERS_T_STOP : CAM_HOLDERS_T_NONE;
+	if ((tk->added & CAM_HOLDERS_ADDED_STARTER) && starter != NULL) {
+		rc = undo_one(t, starter, tk->starter_gen);
+		if (rc >= 0)
+			last = rc;
+	}
+	return last;
 }
 
 int cam_holders_commit(struct cam_holders *t)
@@ -186,6 +275,7 @@ int cam_holders_abort(struct cam_holders *t)
 		t->n--;
 		t->who[t->n] = NULL;
 		t->attr[t->n] = 0u;
+		t->gen[t->n] = 0u;
 	}
 	t->claimed = 0u;
 	t->claim_base = 0u;

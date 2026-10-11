@@ -21,6 +21,9 @@
  *      in flight, commit / abort, and both refused with no claim.
  *   6. the list: order, the cap, attributes.
  *   7. dispositions: every code, and an unknown one fails closed.
+ *   8. the late undo (issue #142 review F1): an undo after the join committed
+ *      removes only the registrations its ticket names -- never one made
+ *      after a clear, nor one the operator renewed on top of the join.
  *
  * [!] WHAT IT DOES NOT COVER.  The lock, and that a board acts on START / STOP
  * in the same locked region, are the board's.  So is "an empty table is not a
@@ -223,13 +226,13 @@ static void test_in_use(void)
 static void test_add_or_start(void)
 {
 	struct cam_holders t;
-	unsigned added;
+	struct cam_holders_ticket tk;
 
 	/* Stopped: the operator is registered on its behalf, then nn. */
 	cam_holders_init(&t);
-	EQ(cam_holders_add_or_start(&t, &nn, 0, &manual, KEEP, &added),
+	EQ(cam_holders_add_or_start(&t, &nn, 0, &manual, KEEP, &tk),
 	   CAM_HOLDERS_T_START, "nn starts the camera");
-	EQ(added, CAM_HOLDERS_ADDED_SELF | CAM_HOLDERS_ADDED_STARTER,
+	EQ(tk.added, CAM_HOLDERS_ADDED_SELF | CAM_HOLDERS_ADDED_STARTER,
 	   "added both");
 	EQ(cam_holders_count(&t), 2, "two holders");
 	{
@@ -248,7 +251,7 @@ static void test_add_or_start(void)
 
 	/* The start succeeded: both stay, and nn stopping leaves the stream to
 	 * the operator. */
-	EQ(cam_holders_add_or_start(&t, &nn, 0, &manual, KEEP, &added),
+	EQ(cam_holders_add_or_start(&t, &nn, 0, &manual, KEEP, &tk),
 	   CAM_HOLDERS_T_START, "start again");
 	EQ(cam_holders_commit(&t), CAM_HOLDERS_T_NONE, "committed");
 	EQ(cam_holders_remove(&t, &nn), CAM_HOLDERS_T_NONE,
@@ -258,9 +261,9 @@ static void test_add_or_start(void)
 	/* Streaming by hand: only nn is added, so nn's own failure must undo
 	 * only nn -- the operator's holder survives. */
 	streaming_manual(&t);
-	EQ(cam_holders_add_or_start(&t, &nn, 0, &manual, KEEP, &added),
+	EQ(cam_holders_add_or_start(&t, &nn, 0, &manual, KEEP, &tk),
 	   CAM_HOLDERS_T_NONE, "nn joins a running stream");
-	EQ(added, CAM_HOLDERS_ADDED_SELF, "added only nn");
+	EQ(tk.added, CAM_HOLDERS_ADDED_SELF, "added only nn");
 	EQ(cam_holders_claimed(&t), 0, "a join does not claim");
 	EQ(cam_holders_remove(&t, &nn), CAM_HOLDERS_T_NONE, "nn rolls back");
 	CHECK(cam_holders_has(&t, &manual), "operator survives the rollback");
@@ -268,33 +271,35 @@ static void test_add_or_start(void)
 
 	/* nn already holding: nothing added, so nothing to undo. */
 	EQ(cam_holders_add(&t, &nn, 0), CAM_HOLDERS_T_NONE, "nn in");
-	EQ(cam_holders_add_or_start(&t, &nn, 0, &manual, KEEP, &added),
+	EQ(cam_holders_add_or_start(&t, &nn, 0, &manual, KEEP, &tk),
 	   CAM_HOLDERS_T_NONE, "nn again");
-	EQ(added, 0, "added nothing");
+	EQ(tk.added, 0, "added nothing");
 
 	/* A non-empty table never touches the starter, even if it is absent. */
 	cam_holders_init(&t);
 	EQ(cam_holders_add(&t, &other, KEEP), CAM_HOLDERS_T_START, "other");
 	EQ(cam_holders_commit(&t), CAM_HOLDERS_T_NONE, "commit");
-	EQ(cam_holders_add_or_start(&t, &nn, 0, &manual, KEEP, &added),
+	EQ(cam_holders_add_or_start(&t, &nn, 0, &manual, KEEP, &tk),
 	   CAM_HOLDERS_T_NONE, "join other's stream");
-	EQ(added, CAM_HOLDERS_ADDED_SELF, "starter not added");
+	EQ(tk.added, CAM_HOLDERS_ADDED_SELF, "starter not added");
 	CHECK(!cam_holders_has(&t, &manual), "manual absent");
 
 	/* Full: refused with nothing added. */
 	EQ(cam_holders_add(&t, &fourth, 0), CAM_HOLDERS_T_NONE, "fill 3");
 	EQ(cam_holders_add(&t, &fifth, 0), CAM_HOLDERS_T_NONE, "fill 4");
-	EQ(cam_holders_add_or_start(&t, &nn_twin, 0, &manual, KEEP, &added),
+	EQ(cam_holders_add_or_start(&t, &nn_twin, 0, &manual, KEEP, &tk),
 	   CAM_HOLDERS_E_FULL, "full");
-	EQ(added, 0, "nothing added when full");
+	EQ(tk.added, 0, "nothing added when full");
 
 	/* Arguments: refused before anything changes. */
 	cam_holders_init(&t);
-	added = 99u;
-	EQ(cam_holders_add_or_start(&t, &nn, 0, &nn, KEEP, &added),
+	tk.added = 99u;
+	tk.self_gen = 7u;
+	EQ(cam_holders_add_or_start(&t, &nn, 0, &nn, KEEP, &tk),
 	   CAM_HOLDERS_E_INVAL, "self as starter");
-	EQ(added, 0, "added cleared on refusal");
-	EQ(cam_holders_add_or_start(&t, &nn, 0, NULL, KEEP, &added),
+	EQ(tk.added, 0, "added cleared on refusal");
+	EQ(tk.self_gen, 0, "generation cleared on refusal");
+	EQ(cam_holders_add_or_start(&t, &nn, 0, NULL, KEEP, &tk),
 	   CAM_HOLDERS_E_INVAL, "no starter");
 	EQ(cam_holders_add_or_start(&t, &nn, 0, &manual, KEEP, NULL),
 	   CAM_HOLDERS_E_INVAL, "no out");
@@ -303,9 +308,9 @@ static void test_add_or_start(void)
 	/* Attribute mismatch on the join path. */
 	streaming_manual(&t);
 	EQ(cam_holders_add(&t, &nn, 0), CAM_HOLDERS_T_NONE, "nn in");
-	EQ(cam_holders_add_or_start(&t, &nn, KEEP, &manual, KEEP, &added),
+	EQ(cam_holders_add_or_start(&t, &nn, KEEP, &manual, KEEP, &tk),
 	   CAM_HOLDERS_E_INVAL, "nn re-registered with keeps");
-	EQ(added, 0, "nothing added");
+	EQ(tk.added, 0, "nothing added");
 }
 
 /* ---- 5. the claim ------------------------------------------------------- */
@@ -313,7 +318,7 @@ static void test_add_or_start(void)
 static void test_claim(void)
 {
 	struct cam_holders t;
-	unsigned added;
+	struct cam_holders_ticket tk;
 
 	cam_holders_init(&t);
 	EQ(cam_holders_commit(&t), CAM_HOLDERS_E_NOT_CLAIMED, "commit, no claim");
@@ -324,9 +329,9 @@ static void test_claim(void)
 	 * even with a no-op. */
 	EQ(cam_holders_add(&t, &nn, 0), CAM_HOLDERS_E_CLAIMED, "add");
 	EQ(cam_holders_add(&t, &manual, KEEP), CAM_HOLDERS_E_CLAIMED, "dup add");
-	EQ(cam_holders_add_or_start(&t, &nn, 0, &manual, KEEP, &added),
+	EQ(cam_holders_add_or_start(&t, &nn, 0, &manual, KEEP, &tk),
 	   CAM_HOLDERS_E_CLAIMED, "add_or_start");
-	EQ(added, 0, "nothing added");
+	EQ(tk.added, 0, "nothing added");
 	EQ(cam_holders_remove(&t, &manual), CAM_HOLDERS_E_CLAIMED, "remove");
 	EQ(cam_holders_remove(&t, &nn), CAM_HOLDERS_E_CLAIMED, "remove absent");
 	EQ(cam_holders_count(&t), 1, "unchanged");
@@ -416,6 +421,112 @@ static void test_disp(void)
 	      "distinct codes");
 }
 
+/* ---- 8. the late undo: generations (review F1) --------------------------- */
+
+static void test_late_undo(void)
+{
+	struct cam_holders t;
+	struct cam_holders_ticket tk, tk2;
+
+	/* The exact sequence the review found.  nn joins a stopped camera (it
+	 * takes the operator's place too) and the start commits; the stream then
+	 * ends for good (a confirmed end clears the table); the operator starts
+	 * it again by hand; only now does nn's start fail (its step refuses to
+	 * open) and undo its join.  The undo must not take the operator's NEW
+	 * registration -- that would stop the operator's stream. */
+	cam_holders_init(&t);
+	EQ(cam_holders_add_or_start(&t, &nn, 0, &manual, KEEP, &tk),
+	   CAM_HOLDERS_T_START, "nn starts the camera");
+	EQ(cam_holders_commit(&t), CAM_HOLDERS_T_NONE, "start committed");
+	cam_holders_clear(&t);                       /* confirmed end      */
+	EQ(cam_holders_count(&t), 0, "cleared");
+	EQ(cam_holders_add(&t, &manual, KEEP), CAM_HOLDERS_T_START,
+	   "operator starts it again");
+	EQ(cam_holders_commit(&t), CAM_HOLDERS_T_NONE, "committed");
+	EQ(cam_holders_undo(&t, &nn, &manual, &tk), CAM_HOLDERS_T_NONE,
+	   "late undo: no transition");
+	CHECK(cam_holders_has(&t, &manual), "the operator's stream survives");
+	EQ(cam_holders_count(&t), 1, "only the operator");
+
+	/* Same class: the operator starts by hand ON TOP of nn's join (manual
+	 * already present, so the add is a re-registration), then nn's start
+	 * fails and undoes.  nn goes, the operator's renewed hold stays. */
+	cam_holders_init(&t);
+	EQ(cam_holders_add_or_start(&t, &nn, 0, &manual, KEEP, &tk),
+	   CAM_HOLDERS_T_START, "nn starts the camera");
+	EQ(cam_holders_commit(&t), CAM_HOLDERS_T_NONE, "committed");
+	EQ(cam_holders_add(&t, &manual, KEEP), CAM_HOLDERS_T_NONE,
+	   "operator starts it by hand: already held");
+	EQ(cam_holders_undo(&t, &nn, &manual, &tk), CAM_HOLDERS_T_NONE,
+	   "nn undoes");
+	CHECK(!cam_holders_has(&t, &nn), "nn gone");
+	CHECK(cam_holders_has(&t, &manual), "the renewed operator stays");
+
+	/* Nobody intervened: the undo takes back exactly both, and says STOP. */
+	cam_holders_init(&t);
+	EQ(cam_holders_add_or_start(&t, &nn, 0, &manual, KEEP, &tk),
+	   CAM_HOLDERS_T_START, "start");
+	EQ(cam_holders_commit(&t), CAM_HOLDERS_T_NONE, "committed");
+	EQ(cam_holders_undo(&t, &nn, &manual, &tk), CAM_HOLDERS_T_STOP,
+	   "undo empties: stop");
+	EQ(cam_holders_count(&t), 0, "both gone");
+
+	/* A join onto a running stream added only nn: the undo never touches
+	 * the operator, whatever the starter argument says. */
+	cam_holders_init(&t);
+	EQ(cam_holders_add(&t, &manual, KEEP), CAM_HOLDERS_T_START, "operator");
+	EQ(cam_holders_commit(&t), CAM_HOLDERS_T_NONE, "committed");
+	EQ(cam_holders_add_or_start(&t, &nn, 0, &manual, KEEP, &tk),
+	   CAM_HOLDERS_T_NONE, "nn joins");
+	EQ(cam_holders_undo(&t, &nn, &manual, &tk), CAM_HOLDERS_T_NONE,
+	   "undo nn");
+	CHECK(cam_holders_has(&t, &manual), "operator untouched");
+
+	/* nn re-joined after a clear: an undo with the OLD ticket leaves the new
+	 * nn registration alone. */
+	cam_holders_init(&t);
+	EQ(cam_holders_add_or_start(&t, &nn, 0, &manual, KEEP, &tk),
+	   CAM_HOLDERS_T_START, "first join");
+	EQ(cam_holders_commit(&t), CAM_HOLDERS_T_NONE, "committed");
+	cam_holders_clear(&t);
+	EQ(cam_holders_add_or_start(&t, &nn, 0, &manual, KEEP, &tk2),
+	   CAM_HOLDERS_T_START, "second join");
+	EQ(cam_holders_commit(&t), CAM_HOLDERS_T_NONE, "committed");
+	EQ(cam_holders_undo(&t, &nn, &manual, &tk), CAM_HOLDERS_T_NONE,
+	   "stale undo");
+	EQ(cam_holders_count(&t), 2, "second join intact");
+	CHECK(tk2.self_gen != tk.self_gen && tk2.starter_gen != tk.starter_gen,
+	      "clear does not restart the generations");
+
+	/* An undo never stops a stream another holder needs: the starter it
+	 * added stays while somebody without KEEPS is there. */
+	cam_holders_init(&t);
+	EQ(cam_holders_add_or_start(&t, &nn, 0, &manual, KEEP, &tk),
+	   CAM_HOLDERS_T_START, "start");
+	EQ(cam_holders_commit(&t), CAM_HOLDERS_T_NONE, "committed");
+	EQ(cam_holders_add(&t, &other, 0), CAM_HOLDERS_T_NONE, "other joins");
+	EQ(cam_holders_undo(&t, &nn, &manual, &tk), CAM_HOLDERS_T_NONE,
+	   "undo with other present");
+	CHECK(cam_holders_has(&t, &manual), "operator kept for other");
+	CHECK(!cam_holders_has(&t, &nn), "nn gone");
+
+	/* Refusals. */
+	EQ(cam_holders_undo(&t, &nn, &manual, NULL), CAM_HOLDERS_E_INVAL,
+	   "no ticket");
+	cam_holders_init(&t);
+	EQ(cam_holders_add(&t, &manual, KEEP), CAM_HOLDERS_T_START, "claim");
+	EQ(cam_holders_undo(&t, &nn, &manual, &tk), CAM_HOLDERS_E_CLAIMED,
+	   "undo during a claim");
+	memset(&tk2, 0, sizeof tk2);
+	tk2.added = CAM_HOLDERS_ADDED_STARTER;
+	EQ(cam_holders_abort(&t), 1, "abort");
+	EQ(cam_holders_add(&t, &manual, KEEP), CAM_HOLDERS_T_START, "again");
+	EQ(cam_holders_commit(&t), CAM_HOLDERS_T_NONE, "committed");
+	EQ(cam_holders_undo(&t, &nn, &manual, &tk2), CAM_HOLDERS_T_NONE,
+	   "generation 0 matches nothing");
+	CHECK(cam_holders_has(&t, &manual), "still there");
+}
+
 int main(void)
 {
 	test_registration();
@@ -425,6 +536,7 @@ int main(void)
 	test_claim();
 	test_list();
 	test_disp();
+	test_late_undo();
 
 	if (fails) {
 		printf("test_cam_holders: %d FAILED\n", fails);

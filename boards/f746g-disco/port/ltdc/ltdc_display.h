@@ -194,6 +194,10 @@ uint32_t ltdc_pixel_clock_hz(void);
 /** Drive LCD_DISP (PI12) + LCD_BL_CTRL (PK3): true = display on + backlight. */
 void ltdc_backlight(bool on);
 
+/** Whether the display is on, as ltdc_backlight() last set it (issue #142).
+ *  Not the scanout: under GUIX `lcd off` leaves the LTDC scanning. */
+bool ltdc_display_on(void);
+
 /** Stop (false) / start (true) LTDC scanout at runtime
     (owhinata/stm32f746g-disco#66): clears/sets
  *  LTDC_GCR.LTDCEN so the controller stops/resumes fetching the framebuffer from

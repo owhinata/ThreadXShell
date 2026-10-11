@@ -55,6 +55,7 @@
 #include "camera.h"          /* enum camera_res / CAM_RES_*                         */
 #include "cam_own.h"         /* the owner lifecycle (issue #72)                        */
 #include "cam_sink.h"        /* the nn step of the camera sink (issue #142)            */
+#include "cam_holders.h"     /* struct cam_holder: nn's place on the camera (#142)     */
 #include "frame_pipeline.h"  /* struct frame_desc */
 
 #include "stm32f7xx_hal.h"   /* HAL_GetTick */
@@ -164,6 +165,13 @@ uint32_t     nncam_gen_decoder_errors;
  * its own result).  Written by nn_camera_start() before nncam_run is raised. */
 int          nncam_oneshot;
 
+/* nn's place among the camera's holders (issue #142): a `nn stream start` or
+ * `nn run` holds the camera open -- starting it, and holding the operator's
+ * place too, when nothing streams -- and the stop lets go of nn's place only,
+ * so the camera keeps streaming for the operator.  What the start's join added
+ * is kept for the one undo a failed start needs. */
+static const struct cam_holder nncam_holder = { "nn" };
+
 /* Session generation, bumped on every (re)attach + on a base detach.  An in-flight
  * prep that spans a session boundary is abandoned instead of handing over a stale frame. */
 volatile uint32_t nncam_epoch;
@@ -245,6 +253,13 @@ static int nncam_open(void *ctx, enum frame_format fmt, uint16_t w, uint16_t h)
 
 	if (fmt != FRAME_FMT_RGB565)
 		return -1;                          /* base raster is RGB565 only          */
+	/* [!] Not on a stream nn lost (issue #142).  A confirmed end (the overrun
+	   recovery gave up) emptied the camera's holders; if the operator restarts
+	   the camera, nn does not quietly resume -- it resumes when nn itself is
+	   restarted (camera_stream_join() clears the mark).  Called under the camera
+	   lock on an attach, which is what makes the unlocked read settled. */
+	if (camera_stream_lost(&nncam_holder))
+		return -1;
 
 	/* Record the actual base geometry for the stats display (the input adapts to
 	   whatever resolution the base publishes -- the model input is fixed 128x128). */
@@ -309,7 +324,8 @@ static void nncam_close(void *ctx)
 }
 
 /* The nn step of the one camera sink (issue #142); src/main.c registers it after
- * the display step.  nncam_consume() is in nn_producer.c. */
+ * the display step.  nncam_consume() is in nn_producer.c.  (nncam_holder, nn's
+ * place among the camera's holders, is defined further up.) */
 static const struct cam_step_ops nncam_step_ops = {
 	.open    = nncam_open,
 	.consume = nncam_consume,
@@ -417,6 +433,7 @@ static int nncam_create_objects(void)
 int nn_camera_start(enum camera_res res, int oneshot)
 {
 	enum cam_own_start act;
+	struct cam_holders_ticket tk;
 	int rc;
 
 	/* input adapts to the base geometry (owhinata/stm32f746g-disco#100) */
@@ -506,11 +523,29 @@ int nn_camera_start(enum camera_res res, int oneshot)
 	nncam_sink_drained = 0;
 	tx_mutex_put(&nncam_lock);
 
+	/* Hold the camera open (issue #142): join a running stream, or start it
+	 * -- in the current mode, which must stream RGB565 (D3) -- holding the
+	 * operator's place too.  Before the step is enabled, so a base this starts
+	 * attaches with the step still off and the enable below opens it. */
+	rc = camera_stream_join(&nncam_holder, &tk);
+	if (rc != 0) {
+		nncam_holds_session = 0;
+		nn_session_release();
+		cam_own_start_finish(&nncam_own, 0);
+		/* [!] TRANSLATED, NOT PASSED THROUGH (review F4): the camera's
+		 * CAM_ERR_* overlap this function's own codes (CAM_ERR_HAL is -2,
+		 * which the adapter reads as "already running"). */
+		return (rc == CAM_ERR_FORMAT) ? -9 : -10;
+	}
+
 	nncam_oneshot = oneshot ? 1 : 0;
 	nncam_run = 1;
 	rc = camera_sink_step_enable(&nncam_step);
 	if (rc != 0) {
 		nncam_run = 0;
+		/* Undo the join -- exactly what it added: the operator's place goes
+		 * only if this start took it. */
+		(void)camera_stream_leave(&nncam_holder, &tk);
 		nncam_holds_session = 0;
 		nn_session_release();
 		cam_own_start_finish(&nncam_own, 0);
@@ -570,6 +605,9 @@ int nn_camera_stop(void)
 	tx_mutex_put(&nncam_lock);
 	(void)tx_semaphore_put(&nncam_sem);     /* wake the worker if waiting           */
 	camera_sink_step_disable(&nncam_step);  /* disarm (close); base keeps running   */
+	/* nn lets go of the camera (issue #142).  The operator's place stays, so
+	 * the camera keeps streaming: stopping it is `camera stream stop`'s. */
+	(void)camera_stream_leave(&nncam_holder, NULL);
 
 	/* The step first.  The producer can have been inside it across the disarm,
 	 * and keeps preprocessing into the input tensor until it leaves -- the thing
@@ -616,6 +654,11 @@ int nn_camera_stop(void)
 bool nn_camera_running(void)
 {
 	return nncam_run != 0;
+}
+
+bool nn_camera_overlay(void)
+{
+	return nncam_run != 0 && !nncam_oneshot;
 }
 
 void nn_camera_stats_get(struct nn_camera_stats *out)

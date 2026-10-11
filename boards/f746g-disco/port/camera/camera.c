@@ -56,6 +56,8 @@
 
 #include "frame.h"
 #include "frame_pipeline.h"
+#include "cam_holders.h"     /* who holds the stream open (issue #142) */
+#include "cam_hold_rules.h"  /* this board's two decisions around it   */
 
 #define LOG_TAG "camera"
 #include "log.h"
@@ -297,7 +299,7 @@ static uint8_t cam_frame[CAM_FRAME_MAX_BYTES]
    owhinata/stm32f746g-disco#93); 1024
  * keeps ~2x margin for this well-exercised DCMI sem-wait producer.             */
 #define CAM_PRODUCER_STACK 1024u
-#define CAM_PRODUCER_TICK  10u     /* bounded sem wait so --secs/stop fire even
+#define CAM_PRODUCER_TICK  10u     /* bounded sem wait so a stop fires even
                                       when no frames arrive (sync lost), ms      */
 
 /* Camera DMA ring arena (owhinata/stm32f746g-disco#65): one fixed 2 MB buffer pinned by the
@@ -363,6 +365,16 @@ static struct cam_sub cam_subs[CAM_MAX_SUBS];
 static void cam_subs_release_oneshot(void);
 
 static volatile int      cam_stream_active;  /* streaming mode gate             */
+/* Who holds the stream open (issue #142); see "who holds the stream open"
+ * below for the rules.  All three move only under cam_lock. */
+static struct cam_holders cam_holds;
+/* The operator's place.  Here rather than in cmds/: GUIX's boot preview and nn
+ * take it too, and neither may reach up into cmds/. */
+static const struct cam_holder cam_manual = { "manual" };
+/* Holders lost at the last confirmed end. */
+static const struct cam_holder *volatile cam_lost[CAM_HOLDERS_MAX];
+static void cam_holders_lose_locked(void);
+static int cam_holders_users_locked(const char **users, int max);
 static volatile int      cam_stop_req;       /* stop requested (producer drains)*/
 static volatile int      cam_stream_err;     /* terminal error -> teardown      */
 static volatile uint32_t cam_stream_ovr;     /* DCMI overruns (resynced+terminal)*/
@@ -370,9 +382,7 @@ static volatile uint32_t cam_ring_ovr;       /* free-slot exhaustion / lost     
 static volatile uint32_t cam_stream_fe;      /* DMA FIFO/DME errors tolerated (owhinata/stm32f746g-disco#56) */
 static volatile uint32_t cam_ring_slots;     /* ring depth this stream (owhinata/stm32f746g-disco#65 arena) */
 static volatile uint32_t cam_ring_slot_bytes;/* ring slot stride this stream (owhinata/stm32f746g-disco#65) */
-static uint32_t cam_start_tick;              /* HAL tick at start (--secs)       */
-static uint32_t cam_target_frames;           /* 0 = unbounded                   */
-static uint32_t cam_target_secs;             /* 0 = unbounded                   */
+static uint32_t cam_start_tick;              /* HAL tick at start (elapsed)     */
 static uint32_t cam_last_ct;                 /* CT at last serviced completion  */
 static struct frame_desc *cam_m0, *cam_m1;   /* slots currently in M0AR/M1AR    */
 static struct frame_desc *cam_jpeg_slot;     /* JPEG stream: the single DMA target (owhinata/stm32f746g-disco#63) */
@@ -1072,8 +1082,12 @@ static int camera_set_format_locked(uint8_t res, uint8_t fmt)
 	int jpeg = (fmt == CAM_FMT_JPEG);
 	int rc;
 
-	if (cam_stream_active)
-		/* base capture owns the DCMI/DMA (owhinata/stm32f746g-disco#100) */
+	/* base capture owns the DCMI/DMA (owhinata/stm32f746g-disco#100) -- and
+	   so does a holder of a stream that is between an overrun and its
+	   auto-recovery (issue #142): the recovery re-arms in the mode the holders
+	   joined, so the mode does not change under them.  `camera fps` comes
+	   through here too. */
+	if (cam_stream_active || cam_holders_count(&cam_holds) != 0)
 		return CAM_ERR_BUSY;
 	if (!sdram_is_up())
 		return CAM_ERR_STATE;
@@ -1480,10 +1494,19 @@ int camera_power_off(void)
 		op_unlock();
 		return CAM_ERR_BUSY;
 	}
+	/* [!] D8 here too (issue #142): a holder that needs the stream (nn) keeps
+	   the camera powered even while the base is down between an overrun and
+	   its recovery -- the operator's power-off is refused, as its stop is. */
+	if (cam_holders_users_locked(NULL, 0) != 0) {
+		op_unlock();
+		return CAM_ERR_IN_USE;
+	}
 	/* do not auto-recover into a powered-off sensor */
 	cam_recover_pending = 0;
 	/* owhinata/stm32f746g-disco#101: power off cancels recovery -> release oneshot */
 	cam_subs_release_oneshot();
+	/* A recovery the power-off cancelled is a confirmed end (issue #142). */
+	cam_holders_lose_locked();
 	power_off_locked();
 	op_unlock();
 	return 0;
@@ -1988,8 +2011,8 @@ static void cam_subs_detach_all(void)
    subscribers -- clear
    the registration so a later base start's cam_subs_attach_all() cannot ghost
    re-attach a subscriber whose owning feature has no consumer anymore.  Called
-   under cam_lock on a NON-recover base stop (explicit stop / --frames|--secs
-   target done / overrun recover giveup): base off for good, so a oneshot sub must
+   under cam_lock on a NON-recover base stop (explicit stop / overrun recover
+   giveup): base off for good, so a oneshot sub must
    go idle in the registry too.  Persistent subs (gui/nncam, oneshot=0) are
    untouched -- they keep their enabled intent and re-attach at the next base start
    (contract owhinata/stm32f746g-disco#100.1).  The oneshot sub is already detached
@@ -2011,43 +2034,49 @@ static void cam_subs_release_oneshot(void)
 	}
 }
 
-/* --frames / --secs target reached.  The one place the target is judged: the
-   stop conditions below and the teardown's auto-recovery decision (a stream
-   whose target is due is never re-armed, even when an error landed first --
-   issue #137) both read it. */
-static int cam_stream_target_due(void)
-{
-	return (cam_target_frames && cam_pipe.stats.published >= cam_target_frames) ||
-	       (cam_target_secs &&
-	        (HAL_GetTick() - cam_start_tick) >= cam_target_secs * 1000u);
-}
-
-/* Stop conditions shared by both stream services and the overrun resync. */
+/* Stop conditions shared by both stream services and the overrun resync.
+   Since issue #142 a stream has no target of its own (`--frames` / `--secs` are
+   gone): it ends when the last holder leaves (cam_stop_req) or on an error. */
 static int cam_stream_should_stop(void)
 {
-	return cam_stop_req || cam_stream_err || cam_stream_target_due();
+	return cam_stop_req || cam_stream_err;
 }
 
 /* Stop the stream and restore a clean snapshot-ready DCMI/DMA.  Producer-thread
    only (single owner): start / stop / auto-stop / OVR all converge here, so the
    HW teardown never races the producer's repoint.  Short cam_lock for the state
    transition (serialises with start / stats). */
-static void cam_stream_teardown(void)
+static int cam_stream_teardown(void)
 {
 	(void)tx_mutex_get(&cam_lock, TX_WAIT_FOREVER);
+	/* [!] LOOK AT THE TABLE AGAIN, UNDER THE LOCK (issue #142).  The stop is
+	   asynchronous: the last holder's leaving only ASKED for it, and a holder
+	   may have come back since (a `nn stream start` right after `camera stream
+	   stop`).  Only that request is withdrawn; an error teardown always goes
+	   ahead, and so does everything that follows once it does. */
+	if (cam_stream_active &&
+	    !cam_teardown_proceeds(cam_stream_err, cam_stop_req,
+	                           cam_holders_count(&cam_holds))) {
+		cam_stop_req = 0;
+		/* The stop's wake-up is not a frame (review F5): drop it, or the
+		   raster pass counts it as a lost completion and the JPEG pass
+		   stops the DCMI mid-frame. */
+		drain_stream_sem();
+		(void)tx_mutex_put(&cam_lock);
+		return 0;                         /* withdrawn: keep streaming      */
+	}
 	if (cam_stream_active) {
 		/* Auto-recover only an overrun/DMA-error stop that was NOT an explicit
-		   stop or a --frames/--secs target completion (owhinata/stm32f746g-disco#100 contract
-		   6). */
-		cam_recover_pending = cam_stream_err && !cam_stop_req &&
-		                      !cam_stream_target_due();
+		   stop (owhinata/stm32f746g-disco#100 contract 6).  The holders stay
+		   registered across the recovery (issue #142): it is not an end. */
+		cam_recover_pending = cam_stream_err && !cam_stop_req;
 		cam_stream_active = 0;
 		cam_resync_req = 0;                   /* issue #137: nothing to resync */
 		cam_elapsed_ms = HAL_GetTick() - cam_start_tick;
 		(void)HAL_DCMI_Stop(&hdcmi);          /* aborts the DMA internally */
 		/* The JPEG snapshot-loop arms DCMI_IT_FRAME, but HAL_DCMI_Stop does NOT
 		   clear interrupt-enables (HAL only disables FRAME inside the FRAME IRQ).
-		   A timeout-driven stop (--secs / stop) tears down between FRAMEs with
+		   A stop tears down between FRAMEs with
 		   FRAME still armed, so a later raster stream -- which assumes FRAME is
 		   disabled -- would take a spurious cam_stream_sem.  Disable it here
 		   (owhinata/stm32f746g-disco#63;  a no-op for the raster path that never enabled it). */
@@ -2061,7 +2090,7 @@ static void cam_stream_teardown(void)
 		   safe here.  This is the master-switch teardown for both an explicit
 		   stop and an async OVR/auto-stop (contract owhinata/stm32f746g-disco#100.2). */
 		cam_subs_detach_all();
-		/* owhinata/stm32f746g-disco#101: a non-recover stop (explicit / target done) leaves the
+		/* owhinata/stm32f746g-disco#101: a non-recover stop (explicit) leaves the
      base off
 		   for good -> fully release oneshot (MJPEG) subscribers so a later start
 		   cannot ghost re-attach them.  An overrun (cam_recover_pending) keeps them
@@ -2081,6 +2110,7 @@ static void cam_stream_teardown(void)
 		        (unsigned long)cam_stream_fe);
 	}
 	(void)tx_mutex_put(&cam_lock);
+	return 1;
 }
 
 /* In-place restart of the raster capture after a DCMI overrun (issue #137).
@@ -2236,10 +2266,14 @@ static void cam_stream_service(int had_sem)
 	struct frame_desc *done, *freed;
 	int published = 0;
 
-	/* Stop conditions (also handles the bounded-timeout wake with no frame). */
+	/* Stop conditions (also handles the bounded-timeout wake with no frame).
+	   A stop the teardown withdrew (issue #142) carries on with this pass --
+	   without its wake-up, which was the stop's and not a frame's (the CT
+	   test below still finds a frame that did complete). */
 	if (cam_stream_should_stop()) {
-		cam_stream_teardown();
-		return;
+		if (cam_stream_teardown())
+			return;
+		had_sem = 0;
 	}
 
 	/* issue #137: an overrun (or a HAL DCMI state left in ERROR by an abort
@@ -2338,10 +2372,16 @@ static void cam_stream_service_jpeg(int had_sem)
 	uint32_t ndtr, eff, valid;
 	struct frame_desc *freed;
 
-	/* Stop conditions FIRST (stop/error/target share cam_stream_sem with FRAME). */
+	/* Stop conditions FIRST (stop/error share cam_stream_sem with FRAME).  A
+	   stop the teardown withdrew (issue #142) carries on with this pass: the
+	   FRAME it may carry must still be finalised and the capture re-armed. */
 	if (cam_stream_should_stop()) {
-		cam_stream_teardown();
-		return;
+		if (cam_stream_teardown())
+			return;
+		/* Withdrawn: the wake-up may have been the stop's.  In snapshot
+		   mode CAPTURE clears itself at the frame's end (RM0385 17.3.7), so
+		   that -- not the token -- says whether a FRAME is there to finish. */
+		had_sem = (hdcmi.Instance->CR & DCMI_CR_CAPTURE) == 0u;
 	}
 	if (!had_sem)
 		return;                          /* bounded-timeout wake, no frame yet */
@@ -2349,7 +2389,7 @@ static void cam_stream_service_jpeg(int had_sem)
 	/* FRAME arrived: the slot is no longer a live DMA target once stopped. */
 	if (HAL_DCMI_Stop(&hdcmi) != HAL_OK) {
 		cam_stream_err = 1;
-		cam_stream_teardown();
+		(void)cam_stream_teardown();
 		return;
 	}
 	ndtr = __HAL_DMA_GET_COUNTER(&hdma_dcmi);
@@ -2371,19 +2411,17 @@ static void cam_stream_service_jpeg(int had_sem)
 		cam_jpeg_trunc++;                /* no SOI/EOI: drop, reuse this slot */
 	}
 
-	/* Re-evaluate stop after publishing so a --frames/--secs target does not arm
-	   one extra capture. */
-	if (cam_stream_should_stop()) {
-		cam_stream_teardown();
+	/* Re-evaluate stop after publishing so a stop that landed meanwhile does
+	   not arm one extra capture. */
+	if (cam_stream_should_stop() && cam_stream_teardown())
 		return;
-	}
 	if (cam_jpeg_arm(cam_jpeg_slot) != HAL_OK) {
 		cam_stream_err = 1;
-		cam_stream_teardown();
+		(void)cam_stream_teardown();
 	}
 }
 
-static int stream_start_locked(int colorbar, uint32_t frames, uint32_t secs);
+static int stream_start_locked(int colorbar);
 
 /* Re-arm the base after an overrun teardown (producer thread; entered when
    cam_recover_pending is set and no stream is active).  Escalating backoff breaks
@@ -2421,6 +2459,8 @@ static void cam_stream_recover(void)
 		   subscribers must go idle too (a paused MJPEG thread sees this via
 		   camera_subscribed() and fully stops instead of waiting forever). */
 		cam_subs_release_oneshot();
+		/* A confirmed end (issue #142): nobody holds the stream any more. */
+		cam_holders_lose_locked();
 		(void)tx_mutex_put(&cam_lock);
 		LOG_WRN("base overruns persist; auto-recovery stopped -- use "
 		        "'camera stream start'");
@@ -2429,10 +2469,13 @@ static void cam_stream_recover(void)
 
 	/* Re-arm at the same mode; cam_subs_attach_all() re-attaches every enabled
 	   subscriber (each sees a close()/open() pair). */
-	rc = stream_start_locked(cam_start_colorbar, cam_target_frames, cam_target_secs);
-	if (rc != 0)
+	rc = stream_start_locked(cam_start_colorbar);
+	if (rc != 0) {
 		/* owhinata/stm32f746g-disco#101: re-arm failed, base off -> release */
 		cam_subs_release_oneshot();
+		/* ...and a confirmed end for the holders too (issue #142). */
+		cam_holders_lose_locked();
+	}
 	(void)tx_mutex_put(&cam_lock);
 	if (rc != 0)
 		LOG_WRN("base auto-recovery failed (%d) -- use 'camera stream start'", rc);
@@ -2442,7 +2485,7 @@ static void cam_stream_recover(void)
 
 /* Dedicated producer (priority 10).  When no stream is running it sleeps
    indefinitely (0 CPU) on the start semaphore; while active it bounded-waits on
-   the completion semaphore so --secs / stop / OVR fire even if frames stop
+   the completion semaphore so a stop / OVR fires even if frames stop
    arriving.  The two signals are SEPARATE semaphores on purpose: the start
    wakeup must never be consumed by the active bounded wait (it would be
    miscounted as a frame completion -> a spurious ring overrun). */
@@ -2473,7 +2516,7 @@ static void cam_producer_entry(ULONG arg)
    cam_lock MUST be held; returns 0 or CAM_ERR_* and NEVER unlocks (the public
    wrappers own the lock).  A subscriber enabled *after* the base is running
    attaches immediately in camera_subscribe(), not here. */
-static int stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
+static int stream_start_locked(int colorbar)
 {
 	int rc, nx;
 	uint32_t slot_size, nslots;
@@ -2566,8 +2609,6 @@ static int stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 	hdcmi.ErrorCode   = HAL_DCMI_ERROR_NONE;
 	cam_elapsed_ms    = 0;
 	cam_start_tick    = HAL_GetTick();
-	cam_target_frames = frames;
-	cam_target_secs   = secs;
 	cam_start_colorbar = colorbar;    /* remembered for an overrun auto-recover */
 	drain_stream_sem();
 
@@ -2601,8 +2642,7 @@ static int stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 			return CAM_ERR_HAL;
 		}
 		(void)tx_semaphore_put(&cam_start_sem);
-		LOG_INF("stream start jpeg (frames=%lu secs=%lu, subs=%d)",
-		        (unsigned long)frames, (unsigned long)secs, nx);
+		LOG_INF("stream start jpeg (subs=%d)", nx);
 		return 0;
 	}
 
@@ -2636,34 +2676,307 @@ static int stream_start_locked(int colorbar, uint32_t frames, uint32_t secs)
 	/* Wake the producer out of its idle FOREVER wait on the dedicated start
 	   semaphore -- never the completion semaphore, so it cannot be miscounted. */
 	(void)tx_semaphore_put(&cam_start_sem);
-	LOG_INF("stream start (frames=%lu secs=%lu, subs=%d)",
-	        (unsigned long)frames, (unsigned long)secs, nx);
+	LOG_INF("stream start (subs=%d)", nx);
 	return 0;
 }
 
-int camera_stream_start(int colorbar, uint32_t frames, uint32_t secs)
-{
-	int rc = op_lock();
+/* ---- who holds the stream open (issue #142) ---------------------------------
+ *
+ * The base streams while, and only while, somebody holds it: the operator
+ * (`camera stream start`, also the GUIX boot preview) or nn (`nn stream start`
+ * and `nn run`, which hold the operator's place too when nothing streams).  The
+ * table is svc/cam_holders.c, kept here next to the base and moved only under
+ * cam_lock, in the same locked region as the start or stop request its answer
+ * leads to.  Its claim never outlives that region: a start is decided, made and
+ * committed (or aborted) under one hold of cam_lock.
+ *
+ * [!] AN EMPTY TABLE IS NOT A TEARDOWN.  The last holder's leaving only asks
+ * the producer to stop (cam_stop_req); the producer tears down -- and only
+ * then gives anything back -- after looking at the table again under the lock
+ * (cam_stream_teardown()), so a holder that came back in between keeps it.
+ *
+ * TWO WAYS TO END.  A confirmed end (the auto-recovery gave up or could not
+ * re-arm, or a power-off cancelled it) empties the table and marks every
+ * holder that was in it as LOST; a holder's mark goes only when that holder
+ * registers again (camera_stream_join()), so nn's ingest does not resume on a
+ * stream the operator restarts until nn itself is restarted.  An overrun
+ * auto-recovery in progress is not an end: the holders stay.
+ */
 
-	if (rc != 0)
-		return rc;
-	/* Base capture start (owhinata/stm32f746g-disco#100): allowed unless already streaming.
-    Subscribers
-	   attach inside stream_start_locked(); there is no single owner to refuse.
-	   An explicit start resets the overrun-recovery backoff. */
+static void cam_lost_forget_locked(const struct cam_holder *h)
+{
+	for (unsigned i = 0; i < CAM_HOLDERS_MAX; i++)
+		if (cam_lost[i] == h)
+			cam_lost[i] = NULL;
+}
+
+static void cam_lost_mark_locked(const struct cam_holder *h)
+{
+	unsigned i;
+
+	for (i = 0; i < CAM_HOLDERS_MAX; i++)
+		if (cam_lost[i] == h)
+			return;
+	for (i = 0; i < CAM_HOLDERS_MAX; i++) {
+		if (cam_lost[i] == NULL) {
+			cam_lost[i] = h;
+			return;
+		}
+	}
+}
+
+/* A confirmed end: every holder is marked lost and the table is emptied. */
+static void cam_holders_lose_locked(void)
+{
+	const struct cam_holder *who[CAM_HOLDERS_MAX];
+	unsigned n = cam_holders_list(&cam_holds, who, NULL, CAM_HOLDERS_MAX);
+
+	for (unsigned i = 0; i < n; i++)
+		cam_lost_mark_locked(who[i]);
+	/* Clear, not init: the generations go on, so a ticket from before this
+	   end never matches a registration made after it (review F1). */
+	cam_holders_clear(&cam_holds);
+}
+
+/* Count the holders that keep the operator from leaving (those without
+ * KEEPS_STREAM), copying up to @p max of their names into @p users (may be
+ * NULL).  cam_lock held. */
+static int cam_holders_users_locked(const char **users, int max)
+{
+	const struct cam_holder *who[CAM_HOLDERS_MAX];
+	unsigned char attr[CAM_HOLDERS_MAX];
+	unsigned n = cam_holders_list(&cam_holds, who, attr, CAM_HOLDERS_MAX);
+	int k = 0;
+
+	for (unsigned i = 0; i < n; i++) {
+		if (attr[i] & CAM_HOLDER_KEEPS_STREAM)
+			continue;
+		if (users != NULL && k < max)
+			users[k] = who[i]->name;
+		k++;
+	}
+	return k;
+}
+
+/* The base start a START answer calls for.  cam_lock held; the table is
+ * claimed by the caller's registration.  A stream that is still active is one
+ * whose last holder left a moment ago and that the producer has not torn down
+ * yet: the stop request is withdrawn and the stream kept (its colorbar is
+ * whatever it was started with). */
+static int cam_holders_start_locked(int colorbar)
+{
+	if (cam_stream_active) {
+		cam_stop_req = 0;
+		return 0;
+	}
+	/* An explicit start resets the overrun-recovery backoff, and supersedes
+	   any aborted recovery window (owhinata/stm32f746g-disco#101): drop
+	   orphaned oneshot (MJPEG) subs left enabled+detached so they cannot ghost
+	   re-attach to this new base (possibly a different format). */
 	cam_recover_pending = 0;
 	cam_recover_rapid   = 0;
-	/* owhinata/stm32f746g-disco#101: a fresh explicit start supersedes any aborted
-    overrun-recovery window --
-	   drop orphaned oneshot (MJPEG) subs left enabled+detached so they cannot ghost
-	   re-attach to this new base (possibly a different format).  Only when the base
-	   is off: an active base keeps its attached oneshot and the start below
-	   BUSY-fails without touching state. */
-	if (!cam_stream_active)
+	cam_subs_release_oneshot();
+	return stream_start_locked(colorbar);
+}
+
+/* The last holder left: ask the producer to stop (it looks at the table again
+ * before it does), or cancel a pending recovery.  cam_lock held. */
+static void cam_holders_stop_locked(void)
+{
+	cam_recover_pending = 0;              /* a stop cancels any auto-recover */
+	if (cam_stream_active) {
+		cam_stop_req = 1;
+		(void)tx_semaphore_put(&cam_stream_sem);  /* producer tears down (releases oneshot) */
+	} else {
+		/* owhinata/stm32f746g-disco#101: base already inactive -- an overrun
+		   tore it down and this stop cancels the pending auto-recovery.  The
+		   producer teardown that would normally release oneshot (MJPEG) subs
+		   will not run again, so release them here (idempotent). */
 		cam_subs_release_oneshot();
-	rc = stream_start_locked(colorbar, frames, secs);
+	}
+}
+
+static int cam_holders_err(int rc)
+{
+	switch (rc) {
+	case CAM_HOLDERS_E_FULL:    return CAM_ERR_STATE;
+	case CAM_HOLDERS_E_CLAIMED: return CAM_ERR_BUSY;
+	case CAM_HOLDERS_E_IN_USE:  return CAM_ERR_IN_USE;
+	default:                    return CAM_ERR_PARAM;
+	}
+}
+
+int camera_stream_start(int colorbar, int *already)
+{
+	int had, rc, hrc;
+
+	if (already != NULL)
+		*already = 0;
+	rc = op_lock();
+	if (rc != 0)
+		return rc;
+	had = cam_holders_has(&cam_holds, &cam_manual);
+	hrc = cam_holders_add(&cam_holds, &cam_manual, CAM_HOLDER_KEEPS_STREAM);
+	if (hrc < 0) {
+		op_unlock();
+		return cam_holders_err(hrc);
+	}
+	if (hrc == CAM_HOLDERS_T_START) {
+		/* [!] `test` only takes effect on a stream this call starts.  A stream
+		   still winding down from a stop keeps its pattern, so a different one
+		   is refused rather than silently ignored. */
+		if (cam_stream_active && (colorbar != 0) != (cam_start_colorbar != 0)) {
+			(void)cam_holders_abort(&cam_holds);
+			op_unlock();
+			return CAM_ERR_TEST;
+		}
+		rc = cam_holders_start_locked(colorbar);
+		if (rc != 0)
+			(void)cam_holders_abort(&cam_holds);
+		else
+			(void)cam_holders_commit(&cam_holds);
+		if (rc == 0)
+			cam_lost_forget_locked(&cam_manual);
+		op_unlock();
+		return rc;
+	}
+	/* Somebody already holds it. */
+	if (cam_stream_active) {
+		if ((colorbar != 0) != (cam_start_colorbar != 0)) {
+			if (!had)
+				(void)cam_holders_remove(&cam_holds, &cam_manual);
+			op_unlock();
+			return CAM_ERR_TEST;
+		}
+		if (already != NULL)
+			*already = 1;
+		cam_lost_forget_locked(&cam_manual);
+		op_unlock();
+		return 0;
+	}
+	/* Held but not streaming: an overrun recovery is pending.  An explicit
+	   start does not wait for it (as before issue #142). */
+	rc = cam_holders_start_locked(colorbar);
+	if (rc != 0) {
+		/* [!] The start dropped the pending recovery and then failed: nothing
+		   will bring this stream back, so it is a confirmed end -- exactly as
+		   the recovery's own failed re-arm is (review F2).  Leaving the
+		   holders registered would wedge them: nn's join would see "held"
+		   and wait, and the operator's stop would be "in use". */
+		cam_holders_lose_locked();
+	} else {
+		cam_lost_forget_locked(&cam_manual);
+	}
 	op_unlock();
 	return rc;
+}
+
+int camera_stream_join(const struct cam_holder *h,
+                       struct cam_holders_ticket *tk)
+{
+	int rc, hrc;
+
+	if (tk != NULL)
+		memset(tk, 0, sizeof *tk);
+	if (h == NULL || tk == NULL || h == &cam_manual)
+		return CAM_ERR_PARAM;
+	rc = op_lock();
+	if (rc != 0)
+		return rc;
+	/* [!] nn reads RGB565 only (issue #142 D3): refused here rather than left
+	   enabled on a stream it can never see, where `nn run` would time out. */
+	if (!cam_join_format_ok(mode.format == CAM_FMT_RGB565, mode.streamable)) {
+		op_unlock();
+		return CAM_ERR_FORMAT;
+	}
+	hrc = cam_holders_add_or_start(&cam_holds, h, 0u, &cam_manual,
+	                               CAM_HOLDER_KEEPS_STREAM, tk);
+	if (hrc < 0) {
+		op_unlock();
+		return cam_holders_err(hrc);
+	}
+	if (hrc == CAM_HOLDERS_T_START) {
+		rc = cam_holders_start_locked(0);
+		if (rc != 0) {
+			(void)cam_holders_abort(&cam_holds);   /* exactly what it added */
+			memset(tk, 0, sizeof *tk);
+			op_unlock();
+			return rc;
+		}
+		(void)cam_holders_commit(&cam_holds);
+		cam_lost_forget_locked(&cam_manual);
+	}
+	/* The holder's own re-arm: the only thing that clears its lost mark. */
+	cam_lost_forget_locked(h);
+	op_unlock();
+	return 0;
+}
+
+int camera_stream_leave(const struct cam_holder *h,
+                        const struct cam_holders_ticket *undo)
+{
+	int rc, hrc;
+
+	if (h == NULL || h == &cam_manual)
+		return CAM_ERR_PARAM;
+	rc = op_lock();
+	if (rc != 0)
+		return rc;
+	/* An undo of a failed start gives back exactly the registrations its
+	   ticket names, and only while they are still the ones it made: by now a
+	   confirmed end may have emptied the table and the operator may have
+	   started the camera again -- or by hand on top of this join -- and an
+	   undo by pointer would stop the operator's stream (review F1; closing is
+	   not the inverse of opening). */
+	if (undo != NULL)
+		hrc = cam_holders_undo(&cam_holds, h, &cam_manual, undo);
+	else
+		hrc = cam_holders_remove(&cam_holds, h);
+	if (hrc == CAM_HOLDERS_T_STOP)
+		cam_holders_stop_locked();
+	op_unlock();
+	return hrc < 0 ? cam_holders_err(hrc) : 0;
+}
+
+int camera_stream_holders(const char **names, int max, int *lost_out)
+{
+	const struct cam_holder *who[CAM_HOLDERS_MAX];
+	unsigned n;
+	int k = 0, lost = 0;
+
+	if (op_lock() != 0)
+		return 0;
+	n = cam_holders_list(&cam_holds, who, NULL, CAM_HOLDERS_MAX);
+	for (unsigned i = 0; i < n && names != NULL && k < max; i++)
+		names[k++] = who[i]->name;
+	for (unsigned i = 0; i < CAM_HOLDERS_MAX; i++)
+		if (cam_lost[i] != NULL)
+			lost++;
+	op_unlock();
+	if (lost_out != NULL)
+		*lost_out = lost;
+	return k;
+}
+
+int camera_stream_users(const char **users, int max)
+{
+	int k;
+
+	if (op_lock() != 0)
+		return 0;
+	k = cam_holders_users_locked(users, max);
+	op_unlock();
+	return (k < max) ? k : max;
+}
+
+int camera_stream_lost(const struct cam_holder *h)
+{
+	/* No lock: the marks are written under cam_lock, and the one reader that
+	   matters (the nn step's open on an attach) runs under it. */
+	for (unsigned i = 0; i < CAM_HOLDERS_MAX; i++)
+		if (cam_lost[i] == h)
+			return 1;
+	return 0;
 }
 
 int camera_subscribe(struct frame_sink *s, enum camera_format fmt)
@@ -2880,29 +3193,37 @@ void camera_frame_put(struct frame_sink *s, const struct frame_desc *f)
 	frame_pipeline_put(&cam_pipe, s, f);
 }
 
-int camera_stream_stop(void)
+int camera_stream_stop(const char **users, int max, int *nusers)
 {
 	int rc = op_lock();
+	int hrc;
 
+	if (nusers != NULL)
+		*nusers = 0;
 	if (rc != 0)
 		return rc;
-	/* Master switch (owhinata/stm32f746g-disco#100): `camera stream stop` cascades -- the
-    producer teardown
-	   detaches every subscriber (each close()) and stops the DCMI.  Never refused
-	   for having subscribers; auto-stop is intentionally absent (an idle base with
-	   no subscribers stays ON until an explicit stop). */
-	cam_recover_pending = 0;              /* explicit stop cancels any auto-recover */
-	if (cam_stream_active) {
-		cam_stop_req = 1;
-		(void)tx_semaphore_put(&cam_stream_sem);  /* producer tears down (releases oneshot) */
-	} else {
-		/* owhinata/stm32f746g-disco#101: base already inactive -- an overrun tore it down and
-     this stop
-		   cancels the pending auto-recovery.  The producer teardown that would
-		   normally release oneshot (MJPEG) subs will not run again, so release them
-		   here (idempotent if none registered). */
-		cam_subs_release_oneshot();
+	/* The operator leaves (issue #142).  [!] While another holder needs the
+	   stream the operator is REFUSED and stays (D8): nothing changes, and the
+	   caller is told who. */
+	hrc = cam_holders_remove(&cam_holds, &cam_manual);
+	if (hrc == CAM_HOLDERS_E_IN_USE ||
+	    (hrc == CAM_HOLDERS_T_NONE && cam_holders_count(&cam_holds) != 0)) {
+		int k = cam_holders_users_locked(users, max);
+
+		if (nusers != NULL)
+			*nusers = (k < max) ? k : max;
+		op_unlock();
+		return CAM_ERR_IN_USE;
 	}
+	if (hrc < 0) {
+		op_unlock();
+		return cam_holders_err(hrc);
+	}
+	/* The last holder left -- or nobody held it (a base nobody accounts for
+	   is still stopped by an explicit stop, as before).  Master switch
+	   (owhinata/stm32f746g-disco#100): the producer teardown detaches every
+	   subscriber (each close()) and stops the DCMI. */
+	cam_holders_stop_locked();
 	op_unlock();
 	return 0;
 }

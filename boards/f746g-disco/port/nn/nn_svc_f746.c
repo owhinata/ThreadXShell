@@ -137,6 +137,14 @@ int nn_svc_input(struct tensor_desc *out)
 #define NN_CAMERA_START_FAILED \
 	"start failed (%d): NN busy (bench or another stream), SDRAM down, or " \
 	"no model loaded?"
+/* nn_camera_start()'s -9 (issue #142 D3): nn reads RGB565 only, and starts the
+ * camera in its current mode rather than choosing another. */
+#define NN_CAMERA_NOT_RGB565 \
+	"the camera is not streaming RGB565 (or its mode cannot): " \
+	"`camera format rgb565` and `camera res qvga` first"
+/* nn_camera_start()'s -10 (review F4): holding / starting the camera failed. */
+#define NN_CAMERA_NO_START \
+	"the camera could not be started -- `camera stream start` says why"
 
 /*
  * The worker's snapshot, as the shared command reads it.  [!] EVERY FIELD IS
@@ -253,14 +261,10 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 
 	nn_detail_clear();
 	/*
-	 * The inference path is a SUBSCRIBER here: it needs the base capture
-	 * running to get a frame, and a one-shot cannot pull one from an idle base.
+	 * [!] NO "BASE IS OFF" REFUSAL ANY MORE (issue #142 D6): nn_camera_start()
+	 * holds the camera open, starting it -- and holding the operator's place,
+	 * so it keeps streaming after the run -- when nothing streams.
 	 */
-	if (!camera_streaming()) {
-		nn_detail_set("base capture is off -- `camera stream start` first");
-		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
-		return;
-	}
 	/*
 	 * [!] THE LIFECYCLE IS CLAIMED BEFORE THE WORKER IS TOUCHED (issue #120).
 	 * `nn run` drives the same subscriber worker as `nn stream`, and it used to
@@ -299,8 +303,14 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		(void)nn_core_abort(&nn_core, &nn_core_board);
 		/* The same words and status as `nn stream start` -- one refusal from
 		 * one worker reads the same from either command. */
-		nn_detail_set(NN_CAMERA_START_FAILED, rc);
-		nn_result(res, (rc == -2) ? NN_SVC_ERR_STATE : NN_SVC_ERR_HW,
+		if (rc == -9)
+			nn_detail_set(NN_CAMERA_NOT_RGB565);
+		else if (rc == -10)
+			nn_detail_set(NN_CAMERA_NO_START);
+		else
+			nn_detail_set(NN_CAMERA_START_FAILED, rc);
+		nn_result(res, (rc == -2 || rc == -9) ? NN_SVC_ERR_STATE
+		                                      : NN_SVC_ERR_HW,
 		          NN_CLAIM_NONE);
 		return;
 	}
@@ -626,8 +636,14 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	rc = nn_camera_start(CAM_RES_QVGA, 0);
 	if (rc != 0) {
 		(void)nn_core_abort(&nn_core, &nn_core_board);
-		nn_detail_set(NN_CAMERA_START_FAILED, rc);
-		nn_result(res, (rc == -2) ? NN_SVC_ERR_STATE : NN_SVC_ERR_HW,
+		if (rc == -9)
+			nn_detail_set(NN_CAMERA_NOT_RGB565);
+		else if (rc == -10)
+			nn_detail_set(NN_CAMERA_NO_START);
+		else
+			nn_detail_set(NN_CAMERA_START_FAILED, rc);
+		nn_result(res, (rc == -2 || rc == -9) ? NN_SVC_ERR_STATE
+		                                      : NN_SVC_ERR_HW,
 		          NN_CLAIM_NONE);
 		return;
 	}
@@ -653,14 +669,14 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	}
 
 	/*
-	 * [!] THIS IS A SUBSCRIBER OF THE BASE CAPTURE, and saying so matters more
-	 * now than it did: a bounded `--frames` run waits for frames that will
-	 * never arrive until the base is started, and the wait itself cannot tell
-	 * that from a slow camera.
+	 * [!] THIS IS A SUBSCRIBER OF THE BASE CAPTURE.  Since issue #142 the start
+	 * holds the camera open (starting it when nothing streams), so the base is
+	 * off here only while an overrun auto-recovery is pending -- and a bounded
+	 * `--frames` run then waits for frames that come back with it.
 	 */
 	if (!camera_streaming())
-		nn_detail_set("inference enabled -- start the base "
-		              "(`camera stream start`) before frames arrive");
+		nn_detail_set("inference enabled -- the camera is re-arming after "
+		              "an overrun; frames resume when it does");
 	else
 		nn_detail_set("inference stream started");
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);

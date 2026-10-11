@@ -34,6 +34,7 @@
 #include "fs_devices.h"       /* fs_sd_device() / fs_qspi_device() (camera save) */
 #include "cmd_xfer.h"
 
+#include <stdio.h>
 #include <string.h>
 
 static const char *cam_strerror(int rc)
@@ -46,6 +47,9 @@ static const char *cam_strerror(int rc)
 	case CAM_ERR_NO_SENSOR: return "OV5640 not detected (module connected?)";
 	case CAM_ERR_NO_FRAME:  return "no captured frame";
 	case CAM_ERR_BUSY:      return "busy (streaming or preview active)";
+	case CAM_ERR_IN_USE:    return "still in use";
+	case CAM_ERR_FORMAT:    return "not an RGB565 stream";
+	case CAM_ERR_TEST:      return "the stream is running with a different test setting";
 	default:                return "unknown error";
 	}
 }
@@ -675,6 +679,25 @@ static int cmd_camera_on(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
+/* Print "still in use: nn[, ...]" for a refused stop (issue #142 D8): the
+   operator's stop changed nothing, and these are why. */
+static void stream_in_use(struct cli_instance *sh, const char **users, int n)
+{
+	char list[48];
+	size_t len = 0;
+
+	list[0] = '\0';
+	for (int i = 0; i < n; i++) {
+		int w = snprintf(list + len, sizeof list - len, "%s%s",
+		                 i ? ", " : "", users[i]);
+
+		if (w < 0 || (size_t)w >= sizeof list - len)
+			break;
+		len += (size_t)w;
+	}
+	cli_error(sh, "camera: still in use: %s\r\n", list);
+}
+
 static int cmd_camera_off(struct cli_instance *sh, int argc, char **argv)
 {
 	int rc, i;
@@ -687,8 +710,16 @@ static int cmd_camera_off(struct cli_instance *sh, int argc, char **argv)
 	   stop it and wait for the producer to tear it down (every subscriber gets a
 	   close()), then power off. */
 	if (camera_streaming()) {
+		const char *users[4];
+		int n = 0;
+
+		/* Refused first, announced after: a stop nn refuses changed
+		   nothing, so nothing is "stopping". */
+		if (camera_stream_stop(users, 4, &n) == CAM_ERR_IN_USE) {
+			stream_in_use(sh, users, n);
+			return 1;
+		}
 		cli_print(sh, "camera: stopping stream before power off\r\n");
-		(void)camera_stream_stop();
 		for (i = 0; i < 200 && camera_streaming(); i++)
 			cli_sleep(sh, 1);
 		if (camera_streaming()) {
@@ -698,6 +729,14 @@ static int cmd_camera_off(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	rc = camera_power_off();
+	if (rc == CAM_ERR_IN_USE) {
+		/* The base is down between an overrun and its recovery, and nn
+		   still holds it (issue #142 D8). */
+		const char *users[4];
+
+		stream_in_use(sh, users, camera_stream_users(users, 4));
+		return 1;
+	}
 	if (rc != 0) {
 		cli_error(sh, "camera: %s\r\n", cam_strerror(rc));
 		return 1;
@@ -933,28 +972,16 @@ static int cmd_camera_fps(struct cli_instance *sh, int argc, char **argv)
 
 static int cmd_stream_start(struct cli_instance *sh, int argc, char **argv)
 {
-	int colorbar = 0;
-	uint32_t frames = 0, secs = 0;
-	int i, rc, n;
+	int colorbar = 0, already = 0;
+	int i, rc;
 
+	/* No --frames / --secs any more (issue #142): a stream runs while somebody
+	   holds it, and only `nn stream start --frames` bounds anything. */
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "test") == 0) {
 			colorbar = 1;
-		} else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
-			if (cam_parse_int(argv[++i], &n) != 0 || n <= 0) {
-				cli_error(sh, "camera: bad --frames '%s'\r\n", argv[i]);
-				return 1;
-			}
-			frames = (uint32_t)n;
-		} else if (strcmp(argv[i], "--secs") == 0 && i + 1 < argc) {
-			if (cam_parse_int(argv[++i], &n) != 0 || n <= 0) {
-				cli_error(sh, "camera: bad --secs '%s'\r\n", argv[i]);
-				return 1;
-			}
-			secs = (uint32_t)n;
 		} else {
-			cli_error(sh, "camera: bad option '%s' "
-			          "(test | --frames N | --secs S)\r\n", argv[i]);
+			cli_error(sh, "camera: bad option '%s' (test)\r\n", argv[i]);
 			return 1;
 		}
 	}
@@ -982,17 +1009,18 @@ static int cmd_stream_start(struct cli_instance *sh, int argc, char **argv)
 		}
 	}
 
-	rc = camera_stream_start(colorbar, frames, secs);
+	rc = camera_stream_start(colorbar, &already);
 	if (rc != 0) {
 		cli_error(sh, "camera: %s\r\n", cam_strerror(rc));
 		return 1;
 	}
+	if (already) {
+		cli_print(sh, "camera: streaming %s already running\r\n",
+		          colorbar ? "colorbar" : "live");
+		return 0;
+	}
 	cli_print(sh, "camera: streaming %s started",
 	          colorbar ? "colorbar" : "live");
-	if (frames)
-		cli_print(sh, ", %lu frames", (unsigned long)frames);
-	if (secs)
-		cli_print(sh, ", %lu s", (unsigned long)secs);
 	cli_print(sh, " (`camera stream stats` / `stop`)\r\n");
 	return 0;
 }
@@ -1003,7 +1031,16 @@ static int cmd_stream_stop(struct cli_instance *sh, int argc, char **argv)
 	(void)argc;
 	(void)argv;
 
-	rc = camera_stream_stop();
+	{
+		const char *users[4];
+		int n = 0;
+
+		rc = camera_stream_stop(users, 4, &n);
+		if (rc == CAM_ERR_IN_USE) {
+			stream_in_use(sh, users, n);
+			return 1;
+		}
+	}
 	if (rc != 0) {
 		cli_error(sh, "camera: %s\r\n", cam_strerror(rc));
 		return 1;
@@ -1059,6 +1096,22 @@ static int cmd_stream_stats(struct cli_instance *sh, int argc, char **argv)
 	if (si.slots != 0)
 		cli_print(sh, "ring:      %lu slots x %lu B\r\n",
 		          (unsigned long)si.slots, (unsigned long)si.slot_bytes);
+	/* Who holds the stream open (issue #142): a snapshot taken under the
+	   camera lock, printed after it. */
+	{
+		const char *names[4];
+		int lost = 0;
+		int n = camera_stream_holders(names, 4, &lost);
+
+		cli_print(sh, "holders:  ");
+		if (n == 0)
+			cli_print(sh, " none");
+		for (int i = 0; i < n; i++)
+			cli_print(sh, "%s %s", i ? "," : "", names[i]);
+		if (lost)
+			cli_print(sh, "  (%d lost when the stream ended)", lost);
+		cli_print(sh, "\r\n");
+	}
 	cli_print(sh, "-- stat sink (shell) --\r\n");
 	cli_print(sh, "delivered: %lu\r\n", (unsigned long)si.delivered);
 	cli_print(sh, "dropped:   %lu\r\n", (unsigned long)si.dropped);
@@ -1070,16 +1123,15 @@ static int cmd_camera_stream(struct cli_instance *sh, int argc, char **argv)
 {
 	if (argc > 1)
 		cli_error(sh, "camera: unknown stream subcommand '%s'\r\n", argv[1]);
-	cli_print(sh, "usage: camera stream <start [test] [--frames N] [--secs S]"
-	          " | stop | stats>\r\n");
+	cli_print(sh, "usage: camera stream <start [test] | stop | stats>\r\n");
 	return argc > 1 ? 1 : 0;
 }
 
 CLI_SUBCMD_SET_CREATE(camera_stream_subcmds,
 	CLI_CMD_ARG_USAGE(start, NULL,
-	                  "begin continuous capture (test, --frames N, --secs S)",
-	                  "[test] [--frames <n>] [--secs <s>]",
-	                  cmd_stream_start, 1, 5),
+	                  "begin continuous capture (test = colorbar)",
+	                  "[test]",
+	                  cmd_stream_start, 1, 1),
 	CLI_CMD(stop,  NULL, "stop the running stream", cmd_stream_stop),
 	CLI_CMD(stats, NULL, "FPS / frame / overrun counters", cmd_stream_stats),
 	CLI_SUBCMD_SET_END);

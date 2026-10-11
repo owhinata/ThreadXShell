@@ -591,34 +591,39 @@ static int nncam_publish_hook(void *ctx, int n, uint32_t gen)
 #endif
 
 /*
- * This board's counting.  A publish the record took is an inference, whatever
- * the decoder said; one the generation rule dropped is not counted, and neither
- * is its decode.  A decode the plugin refused is counted apart by
+ * This board's counting.  A publish the record took is an inference -- unless
+ * the decoder refused it; one the generation rule dropped is not counted, and
+ * neither is its decode.  A decode the plugin refused is counted apart by
  * nn_decode_count_of() (issue #130 step 6c, P8: grove-vision-ai-v2's table) --
  * there is no console on this thread, so a refusal not counted apart cannot be
  * told apart afterwards (issue #97).
+ *
+ * [!] A REFUSED DECODE IS AN ERROR AND NOT AN INFERENCE (issue #138), as on
+ * every board: `infers` counts the results a reader can use, and a refusal
+ * counted in both would make `infers + errors` count it twice.
  */
 static void nncam_account(void *ctx, enum nn_core_done what, int n, int took)
 {
 	(void)ctx;
 	if (!took || (what != NN_CORE_DONE_RAW && what != NN_CORE_DONE_DECODED))
 		return;
-	nncam_infers++;
-	if (what != NN_CORE_DONE_DECODED)
-		return;   /* no plugin: nothing decoded, nothing refused */
-	switch (nn_decode_count_of(n, nncam_oneshot)) {
-	case NN_DC_MODEL:
-		nncam_model_errors++;
-		nncam_error();
-		break;
-	case NN_DC_DECODER:
-		nncam_decoder_errors++;
-		nncam_error();
-		break;
-	case NN_DC_NONE:
-	default:
-		break;
+	if (what == NN_CORE_DONE_DECODED) {
+		switch (nn_decode_count_of(n, nncam_oneshot)) {
+		case NN_DC_MODEL:
+			nncam_model_errors++;
+			nncam_error();
+			return;
+		case NN_DC_DECODER:
+			nncam_decoder_errors++;
+			nncam_error();
+			return;
+		case NN_DC_NONE:
+		default:
+			break;
+		}
 	}
+	/* RAW: no plugin, nothing decoded, nothing refused. */
+	nncam_infers++;
 }
 
 static const struct nn_core_frame_ops nncam_frame_ops = {

@@ -429,7 +429,8 @@ stream start` need no start of their own.
 > arrived while the worker was busy (or before it armed), and the rest were
 > handed over and inferred -- so `in - skipped` equals the inferences, give or
 > take the one in flight when the stream stopped, and less any inference whose
-> `nn_run()` failed (that one is counted in `errors`, not in `infers`). A frame
+> `nn_run()` failed or whose decode was refused (those are counted in
+> `errors`, not in `infers`). A frame
 > whose preparation was abandoned is in neither `in` nor `skipped`: that
 > happens when its session ended part way through (a base detach or a stop
 > moved the epoch) -- such a frame belongs to no session, which is how the
@@ -448,8 +449,10 @@ stream start` need no start of their own.
 > `model_errors` stays 0 on this board. Any other negative (`BF_ERR_UNINIT`,
 > `BF_ERR_ARG`, or an undocumented code) is a wiring fault: it counts in
 > `decoder_errors` and in `errors`, and the shared command prints the `of
-> those:` line. Such an inference still counts in `infers` (it ran), so with
-> decoder faults `in - skipped` still equals the inferences. Before step 6c
+> those:` line. Such an inference is **not** counted in `infers` (issue #138,
+> as on grove-vision-ai-v2 and wio-lite-ai): `infers` counts the results a
+> reader can use, so with decoder faults `in - skipped` equals `infers` plus
+> the faults. Until #138 it counted in both, because it ran; before step 6c
 > neither was counted. A `nn run` counts no decode (it reports its own
 > result).
 

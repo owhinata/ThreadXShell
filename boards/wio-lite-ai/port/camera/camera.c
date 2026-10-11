@@ -1300,7 +1300,7 @@ static int dcmi_snapshot_locked(void)
  * sampled off a floating pin.  The channel ratio was the tell and it was in the numbers
  * from the start -- R and G hit, B untouched, because D6 carries R bit 3 and G
  * bit 1 and never touches B.  See the DVP data-line table in
- * shell/cmds/cmd_camera.c.
+ * cmds/cmd_camera_board.c.
  *
  * The warm-up stays: it is justified by the exposure measurements above, which
  * are a separate and still-valid finding.  Do not re-derive one from the other.

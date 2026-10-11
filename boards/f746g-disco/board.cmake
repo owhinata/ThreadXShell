@@ -480,7 +480,7 @@ add_executable(shell
     "${BOARD_DIR}/cmds/cmd_qspi.c"
     "${BOARD_DIR}/cmds/cmd_fs.c"
     "${BOARD_DIR}/cmds/cmd_sd.c"
-    "${BOARD_DIR}/cmds/cmd_camera.c"
+    "${BOARD_DIR}/cmds/cmd_camera_board.c"
     "${BOARD_DIR}/cmds/cmd_lcd.c"
     "${BOARD_DIR}/cmds/cmd_touch.c"
     "${BOARD_DIR}/cmds/cmd_gui.c"
@@ -571,7 +571,7 @@ target_include_directories(shell PRIVATE
     # quoted includes.  Nothing else is in there, so no existing include can be
     # shadowed by adding it.
     "${CMAKE_SOURCE_DIR}/shell/cmds"
-    "${CMAKE_SOURCE_DIR}/svc"      # shared svc: ymodem.h (cmd_xfer.c, cmd_camera.c)
+    "${CMAKE_SOURCE_DIR}/svc"      # shared svc: ymodem.h (cmd_xfer.c, cmd_camera_board.c)
     "${BOARD_DIR}/svc")            # this board's svc: log.h / timebase.h
 target_compile_definitions(shell PRIVATE TX_INCLUDE_USER_DEFINE_FILE
     FX_INCLUDE_USER_DEFINE_FILE           # port/filex/fx_user.h

@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /**
- * @file    cmd_camera.c
+ * @file    cmd_camera_board.c
  * @brief   `camera` shell command: OV5647 bring-up, capture and live preview
  *          (Grove Vision AI V2, issue #35 / M-G3b).
  *

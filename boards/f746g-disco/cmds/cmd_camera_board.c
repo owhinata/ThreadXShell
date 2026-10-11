@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /**
- * @file    cmd_camera.c
+ * @file    cmd_camera_board.c
  * @brief   `camera` shell command: B-CAMS-OMV / OV5640 control
  * (owhinata/stm32f746g-disco#39/#41/#42).
  *

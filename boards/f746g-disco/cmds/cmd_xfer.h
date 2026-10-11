@@ -9,7 +9,7 @@
  *
  * cmd_xfer.c owns the console hand-over + YMODEM driving for an injected byte
  * source.  `xfer send <sd|fs> <path>` builds a FileX source; `camera send`
- * (cmd_camera.c) builds a RAM-frame source -- both call xfer_send_source() so
+ * (cmd_camera_board.c) builds a RAM-frame source -- both call xfer_send_source() so
  * the console claim / RX flush / progress messaging / result mapping live in one
  * place.
  */

@@ -764,7 +764,7 @@ endif()
 # camera pins untouched -- useful when bisecting a timer or D3-domain suspicion.
 option(BSP_ENABLE_CAMERA "Enable the FPC-24 DVP camera (DCMI) and the camera command" ON)
 
-# Driver and command move together -- cmd_camera.c is the only caller of
+# Driver and command move together -- cmd_camera_board.c is the only caller of
 # port/camera -- and, like the two blocks above, this append must stay BELOW the
 # option().
 if(BSP_ENABLE_CAMERA)
@@ -787,7 +787,7 @@ if(BSP_ENABLE_CAMERA)
         "${BOARD_DIR}/port/nn/nn_camera.c"     # console side, owns the state
         "${BOARD_DIR}/port/nn/nn_producer.c"   # ...its camera producer thread (#140)
         "${BOARD_DIR}/port/nn/nn_worker.c"     # ...its inference worker thread (#140)
-        "${BOARD_DIR}/cmds/cmd_camera.c")
+        "${BOARD_DIR}/cmds/cmd_camera_board.c")
     # The LCD preview needs BOTH drivers, so it is the one
     # source gated on the pair.  With either option off there is nothing to glue
     # and the file is simply not built.
@@ -1012,7 +1012,7 @@ target_include_directories(shell PRIVATE
     "${CMAKE_SOURCE_DIR}/shell/core"
     "${CMAKE_SOURCE_DIR}/shell/backend"
     # The shared commands' own headers: this board's cmds/ live in a different
-    # directory now, so cmd_sd.c / cmd_camera.c can no longer reach fs_cmd_core.h
+    # directory now, so cmd_sd.c / cmd_camera_board.c can no longer reach fs_cmd_core.h
     # through the "same directory first" rule for quoted includes.  Nothing else
     # is in there, so no existing include can be shadowed by adding it.
     "${CMAKE_SOURCE_DIR}/shell/cmds"

@@ -150,6 +150,15 @@ static uint32_t     nncam_gen_frames;
 static uint32_t     nncam_gen_infers;
 static uint32_t     nncam_gen_errors;
 static uint32_t     nncam_gen_drops;
+/*
+ * [!] nncam_gen_errors AND nnstat.errors HAVE TWO WRITERS -- the producer (no
+ * input tensor in the prep, a RACED hand-over) and the worker (nn_run(), a
+ * refused decode) -- so they move only through nncam_error(), one masked
+ * read-modify-write for both, as grove-vision-ai-v2's nn_ov_bump() (issue
+ * #138).  A plain `++` from both threads could lose a count.  Defined below
+ * nnstat.
+ */
+static void nncam_error(void);
 /* Of nncam_gen_errors: decodes the resident decoder refused as a wiring fault
  * (issue #130 step 6c, nn_decode_count.h -- BF_ERR_MODEL is a result here, not
  * one of these).  Written by the worker only. */
@@ -211,6 +220,16 @@ static struct {
 	uint32_t detections;
 	uint32_t start_tick;
 } nnstat;
+
+static void nncam_error(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	nnstat.errors++;
+	nncam_gen_errors++;
+	TX_RESTORE
+}
 
 /* ---- RGB565 -> model input: nearest-neighbour resize + convert ------------ */
 
@@ -347,8 +366,7 @@ static int nncam_prep(void *ctx, unsigned part, unsigned nparts)
 	 * anyway is an error, and nothing is written. */
 	in = nn_input(nncam_model, 0);
 	if (in == NULL || in->data == NULL || in->bytes < nncam_in_bytes) {
-		nnstat.errors++;
-		nncam_gen_errors++;
+		nncam_error();
 		return -1;
 	}
 	/* Resize + convert while the slot is still pinned by the caller (reads f->data). */
@@ -443,8 +461,7 @@ static int nncam_publish(void *ctx, uint32_t gen)
 	 * refusal (D6); any other negative is a wiring fault.  Counted like the
 	 * inference it belongs to -- whether or not the record took it. */
 	if (nn_decode_count_of(nd, nncam_oneshot) == NN_DC_DECODER) {
-		nnstat.errors++;
-		nncam_gen_errors++;
+		nncam_error();
 		nncam_gen_decoder_errors++;
 	}
 	return took;
@@ -495,8 +512,7 @@ static void nncam_ingest(const struct frame_desc *f)
 	case NN_CORE_FR_RACED:
 		/* The word left FILLING under a producer that was still writing:
 		 * an invariant broken, counted rather than assumed. */
-		nnstat.errors++;
-		nncam_gen_errors++;
+		nncam_error();
 		break;
 	case NN_CORE_FR_ABANDONED:   /* the session ended mid-prep, or no tensor (counted there) */
 	case NN_CORE_FR_WROTE:       /* not reachable with one part                             */
@@ -570,8 +586,7 @@ static void nncam_step(void)
 
 	/* RUNNING: while the word says so, NOTHING may write the input tensor. */
 	if (nn_run(nncam_model) != 0) {
-		nnstat.errors++;
-		nncam_gen_errors++;
+		nncam_error();
 		nn_core_frame_done(&nncam_frame, &nncam_frame_ops, nncam_run ? 1 : 0);
 		return;
 	}

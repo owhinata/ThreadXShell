@@ -117,6 +117,21 @@ static struct nn_core_frame nncam_frame;
 static volatile int nncam_holds_guards;
 
 static uint32_t nncam_infers, nncam_frames, nncam_skipped, nncam_errors;
+/*
+ * [!] nncam_errors HAS TWO WRITERS -- the producer (a band of the wrong height,
+ * an abandoned fill) and the worker (an inference, a lease, a refused decode)
+ * -- so it moves only through nncam_error(), one masked read-modify-write, as
+ * grove-vision-ai-v2's nn_ov_bump() (issue #138).  A plain `++` from both
+ * threads could lose a count.  Every other counter here has one writer.
+ */
+static void nncam_error(void)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	nncam_errors++;
+	TX_RESTORE
+}
 /* Of nncam_errors: decodes the plugin refused, apart (issue #97 / #130 step 6c,
  * nn_decode_count.h).  Written by the worker only. */
 static uint32_t nncam_model_errors, nncam_decoder_errors;
@@ -594,11 +609,11 @@ static void nncam_account(void *ctx, enum nn_core_done what, int n, int took)
 	switch (nn_decode_count_of(n, nncam_oneshot)) {
 	case NN_DC_MODEL:
 		nncam_model_errors++;
-		nncam_errors++;
+		nncam_error();
 		break;
 	case NN_DC_DECODER:
 		nncam_decoder_errors++;
-		nncam_errors++;
+		nncam_error();
 		break;
 	case NN_DC_NONE:
 	default:
@@ -646,7 +661,7 @@ static void nncam_band(unsigned band, const uint16_t *px, unsigned rows)
 	   drop the frame being filled (the producer's own ABANDON). */
 	if (rows != CAMERA_BAND_ROWS) {
 		(void)nn_core_frame_abandon(&nncam_frame, &nncam_frame_ops);
-		nncam_errors++;
+		nncam_error();
 		return;
 	}
 
@@ -658,7 +673,7 @@ static void nncam_band(unsigned band, const uint16_t *px, unsigned rows)
 		nncam_skipped++;   /* a whole frame went by while the worker ran */
 		break;
 	case NN_CORE_FR_ABANDONED:
-		nncam_errors++;
+		nncam_error();
 		break;
 	case NN_CORE_FR_RACED:
 		/* The invariant this stream depends on: the worker and the producer
@@ -745,7 +760,7 @@ static void nncam_step(int first)
 
 	/* RUNNING: while the word says so, NOTHING may write the input tensor. */
 	if (nn_run(nncam_model) != 0) {
-		nncam_errors++;
+		nncam_error();
 		nn_core_frame_done(&nncam_frame, &nncam_frame_ops, 0);
 		return;
 	}
@@ -768,7 +783,7 @@ static void nncam_step(int first)
 	 * plugin there is nothing to hold.
 	 */
 	if (nn_active_is_plugin() && !plugin_lease_take()) {
-		nncam_errors++;
+		nncam_error();
 		nn_core_frame_done(&nncam_frame, &nncam_frame_ops, 0);
 		return;
 	}

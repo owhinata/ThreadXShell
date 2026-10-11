@@ -699,7 +699,9 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/nn/npu/npu_model_scan.cc"
     "${BOARD_DIR}/port/nn/npu/npu_hw.c"
     "${BOARD_DIR}/port/nn/nn_preproc.c"
-    "${BOARD_DIR}/port/nn/nn_camera.c"
+    "${BOARD_DIR}/port/nn/nn_camera.c"     # console side, owns the state
+    "${BOARD_DIR}/port/nn/nn_producer.c"   # ...its camera producer half (#140)
+    "${BOARD_DIR}/port/nn/nn_panel.c"      # ...its panel thread half (#140)
     # The decode record `nn dets` reads (issue #118): the storage and its
     # interrupt-disabled lock here, the decisions in the shared svc/ file.
     "${BOARD_DIR}/port/nn/nn_rec.c"
@@ -715,9 +717,10 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/nn/nn_svc_grove.c"
     "${BOARD_DIR}/port/nn/nn_stream_state.c"
     # The inference worker and who may touch its input (issue #129): the
-    # thread and its join here; the hand-over table and the frame path that
-    # runs it are shared since issue #130 (svc/, walked by shell/test/
-    # test_nn_handoff.c and test_nn_core_frame.c).
+    # thread and its join here, and since issue #140 the worker's half of the
+    # camera glue (nn_camera_work() and its frame-path hooks); the hand-over
+    # table and the frame path that runs it are shared since issue #130 (svc/,
+    # walked by shell/test/test_nn_handoff.c and test_nn_core_frame.c).
     "${BOARD_DIR}/port/nn/nn_worker.c"
     "${CMAKE_SOURCE_DIR}/svc/nn_handoff.c"
     "${CMAKE_SOURCE_DIR}/svc/nn_core_frame.c"

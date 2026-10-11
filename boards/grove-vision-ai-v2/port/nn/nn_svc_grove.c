@@ -493,7 +493,7 @@ PLUGIN_POLICY_PROBE(nn_plugin_policy);
  *
  * [!] TWO ENTRIES, NOT SEVEN.  The reviewed plan listed preprocessing, invoke
  * and tensor fetching here as well.  Reading the code they would have wrapped
- * settles it: nn_camera.c drives the sequence -- it counts the outputs, fills
+ * settles it: the glue drives the sequence -- it counts the outputs, fills
  * the input, invokes the NPU and then CALLS the decoder.  A decoder is called;
  * it never calls up.  Exporting machinery no plugin can reach for would be
  * three more indirect call sites for the stack analysis to account for and
@@ -1130,7 +1130,7 @@ static int nn_run_input_ok(struct nn_op_result *res,
 /*
  * [!] `nn run` NO LONGER DECODES HERE (issue #129).  The decode -- or, with no
  * plugin, the raw outputs (issue #104) -- is published by the inference worker
- * (nn_camera.c), the one thread every decode on this board now runs on.
+ * (nn_worker.c), the one thread every decode on this board now runs on.
  */
 
 /*
@@ -1724,7 +1724,7 @@ int nn_svc_box_to_frame(const struct bf_det *in, struct bf_det *out)
  *
  * The work itself runs on the CAMERA PRODUCER (the frame's preparation, inside
  * the panel sink's consume()) and the INFERENCE WORKER (the invoke, decode and
- * publish) -- nn_camera.c, issue #129.  What is here only starts it, reports on it and
+ * publish) -- nn_producer.c / nn_worker.c.  What is here only starts it, reports on it and
  * stops it -- and, unlike the command file this replaces, it holds no shell
  * instance, because a port may not.  Everything that needs to print, wait or
  * notice Ctrl+C is the shared command's, above svc/nn_svc.h.

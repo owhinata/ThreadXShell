@@ -2017,8 +2017,10 @@ file (each `.c` with its `.h` unless only a header is listed):
 | File | Thread or context | Hardware reason |
 |---|---|---|
 | `port/nn/nn_svc_grove.c` | console | The adapter: an open brings the Ethos-U55 up and holds the NOR XIP lease, so it is the thick one of the three. |
-| `port/nn/nn_camera.c` | camera producer (`process()`), inference worker (`nn_camera_work()`), panel (`draw()`), console (arm / stop / stats) | Binds the shared frame path to this board's camera sink and the SPI LCD panel's overlay contract (`cam_lcd_sink.h`); its static state outlives a producer that never acknowledged a stop. |
-| `port/nn/nn_worker.c` | inference worker | The ThreadX thread and its join: the NPU driver blocks for the whole invoke, so the invoke needs a thread of its own. |
+| `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (arm / stop / join / stats, the one-shot's ending) | Binds the shared frame path to this board's camera sink and the SPI LCD panel's overlay contract (`cam_lcd_sink.h`); owns the glue's state (the private header lists each counter's writers and resets), which is static and outlives a producer that never acknowledged a stop, plus the frame path's ops table and the overlay vtable. |
+| `port/nn/nn_producer.c` | camera producer (`process()`, inside the panel sink's `consume()`) | Prepares the raw planar WDMA3 frame straight into the Ethos-U55 input tensor on the CPU, only while the worker wants a frame, and hands it over: the datapath rewrites that frame two frames later, so it is prepared here or copied. |
+| `port/nn/nn_worker.c` | inference worker | The ThreadX thread and its join, and `nn_camera_work()` with the frame path's outputs / decode / publish / account hooks: the NPU driver blocks for the whole invoke, so the invoke needs a thread of its own. |
+| `port/nn/nn_panel.c` | panel (`draw()`, inside the panel guard) | The nn half of the SPI LCD panel thread: the record snapshot and the plugin's paint into the staged RGB565 frame, with the plugin lease only tried (panel guard, then lease; no lease holder waits for the panel guard). |
 | `port/nn/nn_active.c` | worker, panel, console, under the plugin lease | Turns `npu_tensor` into `svc/tensor.h` descriptors and states this board's frame geometry for `svc/nn_active_core.c`. |
 | `port/nn/nn_preproc.c` | camera producer (fill); wherever a box is mapped back | The camera's frame size and pixel format against the model input; pure and host-tested because a wrong box costs a NOR flash cycle to investigate. |
 | `port/nn/nn_rec.c` | worker (publish), panel and console (snapshot) | The record's storage and its lock, a short interrupt-disabled section rather than a mutex (`nn_rec.h` says why). |
@@ -6226,7 +6228,7 @@ this: `to_frame(0,0,1,1)` is exactly the rectangle its output covers.
 **[!] Nothing stale reaches the panel.**  `decode()` drops its draw-valid flag on
 entry and raises it only on the fully successful path.  The firmware already
 declines to call `draw()` while the stream's latest decode is a failure --
-`nn_camera.c`'s `process()` returns non-zero and the sink never installs the
+`nn_producer.c`'s `process()` returns non-zero and the sink never installs the
 hook (issue #129: the latest decode, not this frame's) -- so this is the second
 line of defence, and it is the one that survives someone adding an early return
 to `decode()` later.  Without it the panel keeps showing the last good label over

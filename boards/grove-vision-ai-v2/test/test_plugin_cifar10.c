@@ -525,7 +525,7 @@ int main(void)
 
 	/*
 	 * [!] A FAILED DECODE LEAVES NOTHING ON THE PANEL.  The firmware already
-	 * declines to call draw() for such a frame -- nn_camera.c returns non-zero
+	 * declines to call draw() for such a frame -- nn_producer.c returns non-zero
 	 * and the sink never installs the hook -- so this is the second line of
 	 * defence, and it is the one that survives someone adding an early return
 	 * to decode() later.  Without it the panel would keep showing the last good

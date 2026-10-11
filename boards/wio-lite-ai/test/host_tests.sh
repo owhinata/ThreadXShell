@@ -330,3 +330,21 @@ gcc $CFLAGS -I "$board/src" \
     "$here/test_psram_guard.c" "$board/src/psram_guard.c" \
     $LDFLAGS -o "$out/test_psram_guard"
 "$out/test_psram_guard"
+
+# issue #142 review -- which band stream a stop waits for (port/camera/cam_gen.h).
+# A `camera stream stop &` below a console that starts the next stream can wake
+# to find another stream running; the wait must ask "is MY generation over",
+# never "is a stream active".  Two consoles at two priorities: not typeable.
+gcc $CFLAGS -I "$board/port/camera" \
+    "$here/test_cam_gen.c" \
+    $LDFLAGS -o "$out/test_cam_gen"
+"$out/test_cam_gen"
+
+# issue #142 review -- has the last nn teardown finished (port/nn/nncam_teardown.h):
+# a fresh start refused before it touches anything, a worker that keeps the
+# guards and a second stop that still drains, while a band drain that timed out
+# has not been seen to succeed.  A producer stuck in a callback is not typeable.
+gcc $CFLAGS -I "$board/port/nn" \
+    "$here/test_nncam_teardown.c" \
+    $LDFLAGS -o "$out/test_nncam_teardown"
+"$out/test_nncam_teardown"

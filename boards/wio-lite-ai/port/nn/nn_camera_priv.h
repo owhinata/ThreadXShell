@@ -58,6 +58,9 @@ extern volatile int nncam_run;
 extern int nncam_oneshot;
 /* Written by the worker only; read by the stop. */
 extern volatile int nncam_worker_busy;
+/* A stop has not yet seen nn's band step drained (nncam_teardown.h).  Written
+ * by nn_camera_stop() only; read by the worker and the start. */
+extern volatile int nncam_drain_pending;
 /* The hand-over word: stepped only through svc/nn_core_frame.c -- by the producer
  * (on_frame, abandon), the worker (discard / want / take / done / join /
  * on_infer_done), the panel (draw, present_done) and the start / stop (join,

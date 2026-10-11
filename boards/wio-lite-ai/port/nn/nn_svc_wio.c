@@ -1010,6 +1010,7 @@ int nn_svc_input(struct tensor_desc *out)
 #define NN_RUN_WAIT_S 3u
 
 static const char *nn_nncam_strerror(int rc);
+static int nn_status_of_start(int rc);
 
 /*
  * The worker's snapshot, as the shared command reads it.  [!] EVERY FIELD,
@@ -1187,7 +1188,9 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		return;
 	}
 
-	rc = nn_camera_start(0, 0);   /* no panel: a report-only decoder serves this */
+	/* No panel: a report-only decoder serves this.  No `test` either: the run
+	   takes the stream as it runs (issue #142 review). */
+	rc = nn_camera_start(CAM_COLORBAR_ANY, 0);
 	if (rc != NNCAM_OK) {
 		(void)nn_core_abort(&nn_core, &nn_core_board);
 		/* [!] The worker's own words and the stream start's status: one
@@ -1195,9 +1198,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		 * used to guess "NN busy, PSRAM down, or no model loaded?" for every
 		 * code, including a DCMI owned by a frame stream. */
 		nn_detail_set("%s", nn_nncam_strerror(rc));
-		nn_result(res, (rc == NNCAM_ERR_RUNNING) ? NN_SVC_ERR_STATE
-		                                         : NN_SVC_ERR_HW,
-		          NN_CLAIM_NONE);
+		nn_result(res, nn_status_of_start(rc), NN_CLAIM_NONE);
 		return;
 	}
 	gen = nn_core_oneshot_commit(&nn_core, &nn_core_board);
@@ -1518,8 +1519,11 @@ static const char *nn_nncam_strerror(int rc)
 			"psram/membench/devmem/wifi flash command");
 	case NNCAM_ERR_BAND:
 		return NN_SVC_DETAIL_LIT(
-			"the camera would not start: a stop is still finishing "
-			"(retry), or see `dmesg`");
+			"the camera would not start (see `dmesg`)");
+	case NNCAM_ERR_CAMBUSY:
+		return NN_SVC_DETAIL_LIT(
+			"the camera is busy: a stop, a capture or another start "
+			"is still finishing -- retry");
 	case NNCAM_ERR_STILL:
 		return NN_SVC_DETAIL_LIT(
 			"an `lcd reset` is holding the camera still -- retry");
@@ -1577,11 +1581,37 @@ static const char *nn_nncam_strerror(int rc)
 			"has not returned) -- run `nn stream stop` again");
 	case NNCAM_ERR_REARM:
 		return NN_SVC_DETAIL_LIT(
-			"the stream could not be re-armed (the DCMI may "
-			"be owned elsewhere) -- run `nn stream stop`, "
-			"then `nn stream start`");
+			"the re-arm could not start the camera (see `dmesg`) "
+			"-- run `nn stream stop`, then `nn stream start`");
 	default:
 		return NN_SVC_DETAIL_LIT("unknown error");
+	}
+}
+
+/*
+ * The status a refused nn_camera_start() reports (issue #142 review).  Apart
+ * from the claim, which is NN_CLAIM_NONE for every refusal (the start unwinds
+ * what it took): this says what the operator can do NOW.  A camera that is
+ * still stopping, an `lcd reset`, a teardown still running, a session or a
+ * decoder held for a moment are all a retry away, and calling them
+ * NN_SVC_ERR_HW said "the hardware refused".  A stream already running, or one
+ * running with another `test`, is the state's answer.  Everything else is
+ * still the hardware's.
+ */
+static int nn_status_of_start(int rc)
+{
+	switch (rc) {
+	case NNCAM_ERR_RUNNING:
+	case NNCAM_ERR_TEST:
+		return NN_SVC_ERR_STATE;
+	case NNCAM_ERR_CAMBUSY:
+	case NNCAM_ERR_STILL:
+	case NNCAM_ERR_TEARING:
+	case NNCAM_ERR_SESSION:
+	case NNCAM_ERR_DECBUSY:
+		return NN_SVC_ERR_BUSY;
+	default:
+		return NN_SVC_ERR_HW;
 	}
 }
 
@@ -1651,13 +1681,13 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		return;
 	}
 
-	rc = nn_camera_start(spec->test ? 1 : 0, 1);   /* a panel: DRAW is required */
+	/* A panel: DRAW is required.  Without `test` the stream is taken as it
+	   runs; with it, a stream running without the pattern refuses (#142). */
+	rc = nn_camera_start(spec->test ? 1 : CAM_COLORBAR_ANY, 1);
 	if (rc != NNCAM_OK) {
 		(void)nn_core_abort(&nn_core, &nn_core_board);  /* a re-arm: RUNNING */
 		nn_detail_set("%s", nn_nncam_strerror(rc));
-		nn_result(res, (rc == NNCAM_ERR_RUNNING) ? NN_SVC_ERR_STATE
-		                                         : NN_SVC_ERR_HW,
-		          NN_CLAIM_NONE);
+		nn_result(res, nn_status_of_start(rc), NN_CLAIM_NONE);
 		return;
 	}
 	/* Latched AFTER the start, so a re-arm's carried-over totals become this
@@ -1689,7 +1719,7 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		nn_detail_set("stream re-armed after a lost stream (counters continue)");
 	else
 		nn_detail_set("inference stream started (worker prio 18%s)",
-		              spec->test ? ", colorbar" : "");
+		              camera_stream_colorbar() ? ", colorbar" : "");
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
 

@@ -69,6 +69,11 @@ int cam_preview_init(void);
  * NULL. */
 void cam_preview_stats(uint32_t *shown, uint32_t *dropped, uint32_t *blit_us);
 
+/** Zero shown / dropped (`camera stream start` that lit the camera).  A count
+ *  the producer is incrementing at that moment may survive: the producer
+ *  outranks the console, so the two stores cannot interleave mid-update. */
+void cam_preview_stats_reset(void);
+
 /* The plugin-draw counters (cam_preview_plugin_draw_stats() / _arm()) moved
  * with the rest of this thread's nn half to port/nn/nn_panel.h (issue #140). */
 

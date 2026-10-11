@@ -91,4 +91,9 @@ int cam_band_step_drain(enum cam_band_client c, uint32_t ticks);
 /** Is step @p c armed? */
 int cam_band_step_armed(enum cam_band_client c);
 
+/** Is step @p c disarmed with nobody inside -- could it be armed now?  Read in
+ *  one PRIMASK section.  An owner that is the only one to arm its step can ask
+ *  this before it starts and rely on the answer until it arms. */
+int cam_band_step_idle(enum cam_band_client c);
+
 #endif /* CAM_BAND_H */

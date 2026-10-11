@@ -98,6 +98,20 @@ int cam_band_step_armed(enum cam_band_client c)
 	return (c < CAM_BAND_CLIENTS) ? band_step[c].armed != 0u : 0;
 }
 
+int cam_band_step_idle(enum cam_band_client c)
+{
+	uint32_t primask;
+	int idle;
+
+	if (c >= CAM_BAND_CLIENTS)
+		return 0;
+	primask = __get_PRIMASK();
+	__disable_irq();
+	idle = cam_step_may_arm(&band_step[c]);
+	__set_PRIMASK(primask);
+	return idle;
+}
+
 /*
  * Bounded drain, wall clock (issue #65): the producer runs at priority 10 and
  * every caller of this is below it, so a callback in flight preempts us and

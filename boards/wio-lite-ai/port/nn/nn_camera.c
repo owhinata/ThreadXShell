@@ -16,6 +16,7 @@
  */
 #include "nn_camera.h"
 #include "nn_camera_priv.h"
+#include "nncam_teardown.h"  /* has the last teardown finished (#142 review) */
 
 #include "cam_band.h"
 #include "cam_holders.h"     /* struct cam_holder: nn's place on the camera (#142) */
@@ -106,6 +107,8 @@ int nncam_oneshot;
 const struct cam_holder nncam_holder = { "nn" };
 /* The worker is inside the run loop, i.e. it may touch the tensors at any moment. */
 volatile int nncam_worker_busy;
+/* A stop has not yet seen nn's band step drained (nncam_teardown.h). */
+volatile int nncam_drain_pending;
 /*
  * WHO MAY TOUCH THE INPUT TENSOR (issue #130): the shared hand-over word,
  * svc/nn_handoff.h, stepped only by svc/nn_core_frame.c.  It replaced three
@@ -338,6 +341,32 @@ del_start:
 
 int nn_camera_running(void) { return nncam_run; }
 
+/* The teardown state the three questions in nncam_teardown.h read. */
+static struct nncam_td nncam_td_now(void)
+{
+	struct nncam_td s;
+
+	s.run           = nncam_run != 0;
+	s.holds_guards  = nncam_holds_guards != 0;
+	s.step_idle     = cam_band_step_idle(CAM_BAND_NN) != 0;
+	s.drain_pending = nncam_drain_pending != 0;
+	return s;
+}
+
+/* A join the camera refused, in this file's words (issue #142 review): kept
+ * apart, because each asks the operator for something different -- a retry,
+ * the other `test`, the end of an `lcd reset` -- and folding them into "the
+ * camera would not start" (and that into NN_SVC_ERR_HW) told them none of it. */
+static int nncam_err_of_join(int rc, int rearm)
+{
+	switch (rc) {
+	case CAM_ERR_TEST:  return NNCAM_ERR_TEST;
+	case CAM_ERR_STILL: return NNCAM_ERR_STILL;
+	case CAM_ERR_BUSY:  return NNCAM_ERR_CAMBUSY;
+	default:            return rearm ? NNCAM_ERR_REARM : NNCAM_ERR_BAND;
+	}
+}
+
 int nn_camera_start(int colorbar, int require_draw)
 {
 	struct nn_model *m = NULL;
@@ -405,14 +434,30 @@ int nn_camera_start(int colorbar, int require_draw)
 		{
 			struct cam_holders_ticket tk;
 
-			if (camera_stream_join(&nncam_holder, colorbar, &tk) != CAM_OK) {
+			rc = camera_stream_join(&nncam_holder, colorbar, &tk);
+			if (rc != CAM_OK) {
 				/* nncam_run and the guards are still ours, and the mark is
-				   still set -- say what clears it rather than leave a
-				   state with no obvious way out. */
-				return NNCAM_ERR_REARM;
+				   still set -- say why, and so what clears it, rather than
+				   leave a state with no obvious way out. */
+				return nncam_err_of_join(rc, 1);
 			}
 		}
 		return NNCAM_OK;
+	}
+	/*
+	 * [!] A FRESH START REFUSES BEFORE IT TOUCHES ANYTHING (issue #142 review).
+	 * A stop whose drain timed out left nn's band step with the producer
+	 * still inside it.  The step's arm refuses that -- but only at the end,
+	 * after this start had already joined and reset the frame word, crossed
+	 * a record boundary, taken the session and the guards and joined (or
+	 * started) the camera.  Asked here, first, nothing moves.  Only a start
+	 * arms the step, so the answer holds until this one does.
+	 */
+	{
+		struct nncam_td td = nncam_td_now();
+
+		if (!nncam_td_fresh_start_ok(&td))
+			return NNCAM_ERR_TEARING;
 	}
 	if (nn_model_open(&m) != 0)
 		return NNCAM_ERR_MODEL;
@@ -587,13 +632,11 @@ int nn_camera_start(int colorbar, int require_draw)
 	 * cleared want_frame and filling at this same point -- no more and no
 	 * less.  A frame it left HANDED is dropped by the worker's first step.
 	 *
-	 * [!] THIS DOES NOT PROVE THE PRODUCER IS GONE.  The session lock says
-	 * the last session's worker left its loop; it does not say its band was
-	 * drained.  A stop whose band release failed (TEARING) leaves the guards
-	 * to the worker, which gives them back on its way out whatever the band
-	 * did -- so a callback that never returned may still be in flight here.
-	 * That hazard is older than this word and is not closed by it (a
-	 * separate issue); the JOIN only keeps the behaviour HEAD had.
+	 * The producer is out of nn's step: the check at the top of this
+	 * function saw it disarmed and empty with no drain pending, and nothing
+	 * but a start arms it (issue #142 review -- the worker no longer gives
+	 * the guards back over an undrained step, so the session lock alone is
+	 * no longer the only evidence).
 	 */
 	(void)nn_core_frame_join(&nncam_frame, &nncam_frame_ops);
 	nn_core_frame_reset(&nncam_frame, &nncam_frame_ops, 1);
@@ -619,10 +662,11 @@ int nn_camera_start(int colorbar, int require_draw)
 		if (rc != CAM_OK) {
 			nncam_run = 0;
 			nncam_guards_give();
-			return (rc == CAM_ERR_TEST)  ? NNCAM_ERR_TEST :
-			       (rc == CAM_ERR_STILL) ? NNCAM_ERR_STILL : NNCAM_ERR_BAND;
+			return nncam_err_of_join(rc, 0);
 		}
 		if (cam_band_step_enable(CAM_BAND_NN, nncam_band) != CAM_BAND_OK) {
+			/* Not reachable past the check at the top (only a start arms
+			   the step); kept as the backstop it was. */
 			nncam_run = 0;
 			/* Undo exactly what the join registered (svc/cam_holders.h). */
 			(void)camera_stream_leave(&nncam_holder, &tk);
@@ -639,9 +683,19 @@ int nn_camera_stop(void)
 	int rc_band = CAM_BAND_OK;
 	int i;
 
-	if (!nncam_run && !nncam_holds_guards)
-		return NNCAM_ERR_NOTRUN;
+	{
+		/* [!] Not "not running and nothing held" alone (issue #142
+		 * review): a step the producer is still inside, or a drain no
+		 * stop has seen succeed, is still work for this stop. */
+		struct nncam_td td = nncam_td_now();
 
+		if (nncam_td_stop_notrun(&td))
+			return NNCAM_ERR_NOTRUN;
+	}
+
+	/* Before the run ends, so a worker that sees the end sees this too and
+	   leaves the guards to the stop whose drain succeeds (nncam_teardown.h). */
+	nncam_drain_pending = 1;
 	nncam_run = 0;
 	/*
 	 * [!] MOVE THE GENERATION BEFORE WAITING FOR THE WORKER.  The wait below is
@@ -679,8 +733,12 @@ int nn_camera_stop(void)
 	/* The producer is confirmed out once the drain succeeded: a frame it was
 	 * part way through filling will never be finished (JOIN, issue #130).  A
 	 * frame handed over or running is the worker's, and is left to it. */
-	if (rc_band == CAM_BAND_OK)
+	if (rc_band == CAM_BAND_OK) {
 		(void)nn_core_frame_join(&nncam_frame, &nncam_frame_ops);
+		/* Confirmed out: the guards may go back -- by this stop below, or
+		   by the worker on its way out, whichever is last. */
+		nncam_drain_pending = 0;
+	}
 
 	/* Consumer side second: the worker may be up to one inference (~373 ms) away
 	   from noticing.  It is below us in priority, so sleeping is what lets it run. */
@@ -691,8 +749,9 @@ int nn_camera_stop(void)
 		/* [!] Deliberately do NOT release the session or the OCTOSPI1 guard.  See
 		   nn_camera.h: handing the arena to `nn bench` while a dead-but-not-
 		   returned callback can still write the input tensor is unrecoverable,
-		   whereas holding a session nobody can use is not.  The worker releases
-		   on its way out, or a second `nn stream stop` completes it. */
+		   whereas holding a session nobody can use is not.  With the band
+		   drained the worker releases on its way out; with it not drained
+		   only a later `nn stream stop` whose drain succeeds does. */
 		LOG_WRN("stop: still tearing down (band %d, worker busy %d)",
 		        rc_band, nncam_worker_busy);
 		return NNCAM_ERR_TEARING;

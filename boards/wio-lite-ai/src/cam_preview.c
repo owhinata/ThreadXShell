@@ -306,6 +306,12 @@ int cam_preview_init(void)
 	return 0;
 }
 
+void cam_preview_stats_reset(void)
+{
+	preview_shown   = 0u;
+	preview_dropped = 0u;
+}
+
 void cam_preview_stats(uint32_t *shown, uint32_t *dropped, uint32_t *blit_us)
 {
 	if (shown != NULL)

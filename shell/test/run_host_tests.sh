@@ -714,6 +714,16 @@ gcc $CFLAGS -I "$svc" \
     $LDFLAGS -o "$out/test_plugin_lease_miss"
 "$out/test_plugin_lease_miss"
 
+# issue #142 -- who holds the camera stream open (svc/cam_holders.c).  The
+# table decides when three boards start and stop their cameras, and the cases
+# that matter most -- a start that fails while another holder is trying to
+# register, a rollback that must not take a holder that was already there, the
+# operator's stop while nn holds the stream -- are windows that cannot be typed.
+gcc $CFLAGS -I "$svc" \
+    "$here/test_cam_holders.c" "$svc/cam_holders.c" \
+    $LDFLAGS -o "$out/test_cam_holders"
+"$out/test_cam_holders"
+
 # ---- board-pinned tests --------------------------------------------------- *
 # Same toolchain flags and the same scratch dir, exported so a board test is built
 # exactly like a core one and cannot quietly diverge.  A board with no

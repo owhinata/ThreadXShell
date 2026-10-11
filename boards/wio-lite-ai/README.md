@@ -443,10 +443,14 @@ on every board.  What that changed here:
   It used to empty the backend first, which left a moment in which a plugin was
   published for a model that was already gone.
 - Every load that ends with no model also empties the backend explicitly.
-- Statuses and wording are unchanged.  The claim (the NN session, and for an
-  unload the OCTOSPI1/PSRAM guard) is still taken in this board's own order and
-  words, as the last step of the admission check, because the shared order's
-  claim hook cannot say why it refused.
+- Statuses and wording are unchanged, with one exception: since issue #138 a
+  load the backend reports as a success but that leaves no model open is
+  answered as a hardware failure, as on every board (the wording stays this
+  board's).  The claim (the NN session, and for an unload the OCTOSPI1/PSRAM
+  guard) is taken by this board's `claim_take`, in its own order, and that hook
+  words its own refusal (issue #138); before, it was the last step of the
+  admission check, because the shared order's claim hook could not say why it
+  refused.
 **"Nothing is open" means no MODEL, not a closed singleton** (issue #122 P2):
 the TFLM singleton opens empty and stays open, so `nn_model_reload()`
 reports whether a model is left (`nn_model_present()`: open and describing at

@@ -505,7 +505,9 @@ void nn_svc_info(struct nn_svc_info *out);
  * and a plugin refused THEN is a failed status with state NEW -- the model is
  * open without a decoder, since the previous plugin is already gone.
  *
- * @param state  where the lifecycle ended up, independent of the status
+ * @param state  where the lifecycle ended up, independent of the status --
+ *               except that it is not written when the status is
+ *               NN_SVC_ERR_BUSY (issue #138; svc/nn_core_model.h)
  */
 void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
                        void *ctx, struct nn_op_result *res,

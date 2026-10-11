@@ -76,7 +76,8 @@ static void nn_core_model_answer(struct nn_core_model_job *j, int status,
  * than "someone else holds it" (wio-lite-ai's PSRAM not ready is STATE).
  * [!] A POSITIVE VALUE IS NOT A STATUS, SO IT IS BUSY.  The hook used to answer
  * "non-zero if taken"; a board still speaking that way is refused, never
- * admitted -- and its 0 for "refused" cannot compile against the job argument.
+ * admitted (and would keep the claim it took: a permanent BUSY, which fails
+ * closed) -- and its 0 for "refused" cannot compile against the job argument.
  */
 static int nn_core_model_claim(const struct nn_core_model_board *b,
                                struct nn_core_model_job *j)

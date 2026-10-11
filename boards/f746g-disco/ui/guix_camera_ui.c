@@ -49,6 +49,7 @@
 
 #include "camera.h"              /* camera_subscribe / camera_set_x / ranges, enums */
 #include "cam_own.h"             /* the owner lifecycle (issue #72)               */
+#include "cam_sink.h"            /* the display step of the camera sink (#142)   */
 #include "frame_pipeline.h"      /* struct frame_sink / frame_desc, FRAME_*      */
 #include "nn_camera.h"           /* nn_camera_running / nn_camera_dets_get (bbox, #83) */
 
@@ -210,8 +211,8 @@ static volatile int cam_redraw_pending;
 /* ATTACHMENT state, not a gate (issue #72).  Since Epic
    owhinata/stm32f746g-disco#99 Phase 1 (owhinata/stm32f746g-disco#100)
    the GUI preview is a *subscriber* of the base capture, not its owner.
-   preview_running is set by cam_sink_open when the sink attaches and cleared by
-   cam_sink_close (a base stop / DCMI overrun / cascade); a base stop freezes the
+   preview_running is set by preview_step_open when the step is armed and cleared by
+   preview_step_close (a base stop / DCMI overrun / cascade); a base stop freezes the
    last frame (preview kept visible) and a base restart re-attaches so frames
    resume.  The base owns the DCMI overrun auto-recovery now (camera.c
    owhinata/stm32f746g-disco#100), so there is no GUI backoff.
@@ -242,7 +243,7 @@ static volatile enum cam_own_state preview_own;
 #define PREVIEW_CLAIM_TICKS  1000u
 
 /* Latest base geometry delivered to the sink (res_tbl index), latched by
-   cam_sink_open off the GUIX thread; the CAMERA_GEOM handler re-syncs the GUIX
+   preview_step_open off the GUIX thread; the CAMERA_GEOM handler re-syncs the GUIX
    pixmap/widget geometry to it on the GUIX thread when the base res differs. */
 static volatile int cam_delivered_idx = -1;
 
@@ -258,15 +259,16 @@ static int res_idx_from_w(uint16_t w)
 	return -1;
 }
 
-static struct frame_sink guix_cam_sink;
-
-/* Sink attach (any thread: base start on the producer/shell, or a live subscribe).
+/* The display step's open (issue #142: a step of the one camera sink, no longer a
+   subscriber of its own).  Runs when the base attaches the sink with this step
+   enabled, or when `gui start` enables the step while the base is attached --
+   any thread, under the sink's mutex.
    The GUI adapts to whatever streamable RGB565 geometry the base publishes (QQVGA
    / QVGA): arm the display blit geometry (thread-safe, ltdc-locked) and latch the
    delivered res index; if it differs from the current GUIX geometry, post
    CAMERA_GEOM so the GUIX thread re-syncs the pixmap/icon.  Rejects a non-RGB565 or
    unknown geometry (would not fit cam_view_buf). */
-static int cam_sink_open(void *ctx, enum frame_format fmt, uint16_t w, uint16_t h)
+static int preview_step_open(void *ctx, enum frame_format fmt, uint16_t w, uint16_t h)
 {
 	int idx;
 
@@ -302,19 +304,18 @@ static void overlay_draw_boxes(void)
 		                             OVERLAY_BOX_COLOR);
 }
 
-/* [!] PUT LAST.  camera_frame_put() must stay the LAST STATEMENT of this
-   function, and of every other consume() on this board (issue #72).  That rule
-   is the whole proof a teardown gets: once the pin reaches zero this callback
-   touches nothing the owner owns, so ONE count answers "may I release the
-   preview surface".  Move work back below the put and preview_teardown() starts
-   freeing the blit geometry underneath a live copy again -- silently, because
-   the count would still read zero.  See cam_drain.h.
+/* The display step (issue #142).  The camera sink calls it between entering and
+   leaving the step, and puts the pin itself after the last step -- so the proof
+   a teardown gets is the step's count reaching zero after `gui stop` disarmed it
+   (cam_step.h): from then on this function touches nothing the preview owns, and
+   preview_teardown() may release the blit geometry.  Everything this step does
+   happens inside the call; nothing is left running after it returns.
 
    Safe to leave the pin held across the post: the post is non-blocking
    (gx_system_event_send -> tx_queue_send TX_NO_WAIT), the GUIX thread runs at
    prio 14 below this producer at 10 so it cannot preempt us before the put, and
    what it wakes up to read is cam_view_buf -- a copy -- never the ring slot. */
-static int cam_sink_consume(void *ctx, const struct frame_desc *f)
+static int preview_step_consume(void *ctx, const struct frame_desc *f)
 {
 	int pending = cam_redraw_pending;
 	int rc = 0;
@@ -330,31 +331,34 @@ static int cam_sink_consume(void *ctx, const struct frame_desc *f)
 		if (guix_post_root_event(GX_EVENT_CAMERA_FRAME) == GUIX_OK)
 			cam_redraw_pending = 1;
 	}
-	camera_frame_put(&guix_cam_sink, f);        /* LAST -- see the rule above  */
 	return rc;
 }
 
-/* Base detached this subscriber: a normal `camera stream stop`, a DCMI overrun, or
-   a cascade.  A base *stop*, not a GUI stop (contract owhinata/stm32f746g-disco#100.2):
-   just clear preview_running so the last frame freezes on screen -- the preview stays
-   visible and resumes when the base re-attaches (cam_sink_open re-arms).  Non-blocking,
+/* The display step was disarmed: the base detached the sink (a normal `camera
+   stream stop`, a DCMI overrun, or a cascade), or `gui stop` disabled the step.  On
+   a base *stop*, not a GUI stop (contract owhinata/stm32f746g-disco#100.2), this
+   just clears preview_running so the last frame freezes on screen -- the preview
+   stays visible and resumes when the base re-attaches (preview_step_open re-arms).  Non-blocking,
    no camera API re-entry, so it is safe under the camera driver lock.  The base owns
    the overrun auto-recovery now (camera.c owhinata/stm32f746g-disco#100), so there is
    nothing to restart or tear down here (the AI subscriber's own close handles its
    bbox/session). */
-static void cam_sink_close(void *ctx)
+static void preview_step_close(void *ctx)
 {
 	(void)ctx;
 	preview_running = 0;
 }
 
-static struct frame_sink guix_cam_sink = {
-	.name    = "guix",
-	.ctx     = NULL,
-	.policy  = FRAME_POLICY_DROP,
-	.open    = cam_sink_open,
-	.consume = cam_sink_consume,
-	.close   = cam_sink_close,
+static const struct cam_step_ops preview_step_ops = {
+	.open    = preview_step_open,
+	.consume = preview_step_consume,
+	.close   = preview_step_close,
+};
+
+struct cam_sink_step camera_ui_step = {
+	.name = "guix",
+	.ops  = &preview_step_ops,
+	.ctx  = NULL,
 };
 
 static GX_PIXELMAP *camera_pixmap(void)
@@ -560,14 +564,14 @@ static void preview_await_claim(void)
 		tx_thread_sleep(1);
 }
 
-/* Unsubscribe the preview sink from the base (the base keeps running for other
-   subscribers), wait for the sink to hand its frame back, and only then blank
-   the preview.  Used by `gui stop`.
+/* Disable the display step (the base and the nn step keep running), wait for
+   the producer to leave the step, and only then blank the preview.  Used by
+   `gui stop`.
 
    [!] THE CALLER MUST ALREADY BE IN CAM_OWN_DRAINING.  The order is the point of
    issue #72: the state that refuses a concurrent `gui start` is entered BEFORE
-   the unsubscribe below, so nothing can re-attach this sink -- and re-attaching
-   it would reset the pin count this then watches, erasing the evidence.
+   the disable below, so nothing can re-enable this step while its count is being
+   watched -- and a re-enable would re-arm it, after which a zero proves nothing.
 
    Returns CAM_DRAIN_DONE once the preview surface is released, or
    CAM_DRAIN_PINNED with everything left armed and untouched.  Leaving it armed
@@ -578,11 +582,11 @@ static enum cam_drain_step preview_teardown(void)
 {
 	enum cam_drain_step step;
 
-	(void)camera_unsubscribe(&guix_cam_sink);
-	step = camera_sink_drain(&guix_cam_sink, PREVIEW_DRAIN_TICKS);
+	camera_sink_step_disable(&camera_ui_step);
+	step = camera_sink_step_drain(&camera_ui_step, PREVIEW_DRAIN_TICKS);
 	if (step != CAM_DRAIN_DONE) {
-		LOG_WRN("camera preview drain timeout (pins=%d); preview left armed",
-		        camera_sink_pins(&guix_cam_sink));
+		LOG_WRN("camera preview drain timeout (busy=%d); preview left armed",
+		        camera_sink_step_busy(&camera_ui_step));
 		return step;
 	}
 	preview_running = 0;
@@ -614,11 +618,11 @@ static void apply_view_geometry(int idx)
 	gx_widget_resize(&cam_icon, &rc);
 }
 
-/* Subscribe the preview sink to the base capture (GUIX thread).  The GUI is a
-   subscriber now (owhinata/stm32f746g-disco#100): this does NOT start the base -- it
-   attaches iff the base is already streaming RGB565 (cam_sink_open arms the blit
-   geometry), otherwise it stays enabled + idle and attaches at the next `camera stream
-   start`. @p visible controls whether the camera rect is shown (false while under the
+/* Enable the display step of the camera sink (GUIX thread).  The GUI is a
+   subscriber now (owhinata/stm32f746g-disco#100; a step of the one camera sink since
+   issue #142): this does NOT start the base -- the step is armed at once iff the base
+   is already streaming RGB565 (preview_step_open arms the blit geometry), otherwise it
+   stays enabled + idle and is armed at the next `camera stream start`. @p visible controls whether the camera rect is shown (false while under the
    settings screen).  Returns 0, or <0 on a hard subscribe failure. */
 static int preview_subscribe(bool visible)
 {
@@ -632,7 +636,7 @@ static int preview_subscribe(bool visible)
 		return -1;
 	guix_display_cam_set_visible(visible);
 	cam_redraw_pending = 0;
-	rc = camera_subscribe(&guix_cam_sink, CAM_FMT_RGB565);
+	rc = camera_sink_step_enable(&camera_ui_step);
 	if (rc != 0) {
 		guix_display_cam_set_visible(false);
 		LOG_ERR("camera preview subscribe failed (%d)", rc);
@@ -704,7 +708,7 @@ static void cycle_resolution(void)
 	bool was_streaming;
 	int i;
 
-	if (camera_other_subscribers_attached(&guix_cam_sink)) {
+	if (camera_sink_others_live(&camera_ui_step)) {
 		LOG_WRN("resolution change blocked: other subscribers attached "
 		        "(stop net mjpeg / nn stream first)");
 		return;

@@ -8,17 +8,19 @@
  * owhinata/stm32f746g-disco#80). See nn_camera.h.
  *
  * Design (codex-reviewed, owhinata/stm32f746g-disco#81):
- *   - A SYNCHRONOUS push sink (like nx_mjpeg.c eth_sink): consume() runs in the
- *     camera producer thread, resizes + converts the RGB565 frame STRAIGHT INTO
- *     the model's input tensor when the worker wants one, and
- *     camera_frame_put()s the pin as its LAST STATEMENT.
+ *   - A SYNCHRONOUS step of the camera sink (issue #142; its own push sink
+ *     before, like nx_mjpeg.c eth_sink): consume() runs in the camera producer
+ *     thread and resizes + converts the RGB565 frame STRAIGHT INTO the model's
+ *     input tensor when the worker wants one; the sink puts the pin after its
+ *     last step (port/camera/cam_sink.c).
  *     The nearest-neighbour resize reads only WxH sampled source pixels (cheaper
  *     than copying the whole frame), keeping producer-thread load low.
  *     [!] This file used to claim the in-flight count is "always 0".  That is
  *     true of the consume BODY and false at detach, which is the moment an owner
- *     asks: camera_unsubscribe() detaches while the base keeps running, so a
- *     publish can already be in flight across the unlink.  nn_camera_stop() now
- *     drains that pin instead of assuming it away (issue #72).
+ *     asks: the stop switches the ingest off while the base keeps running, so a
+ *     frame can already be in flight across it.  nn_camera_stop() now drains it
+ *     instead of assuming it away (issue #72; since issue #142 the ingest is the
+ *     nn step of the one camera sink, and what it drains is the step's count).
  *   - NN-input ownership (the BLOCKING codex fix): the sink NEVER writes the
  *     input while the worker is using it.  Since issue #130 that is the shared
  *     hand-over word (svc/nn_handoff.h, stepped only by svc/nn_core_frame.c),
@@ -50,9 +52,10 @@
 #include "nn_det_record.h"
 #include "nn_core_frame.h"   /* the shared frame path and its hand-over word (#130) */
 #include "nn_sess_release.h" /* when the session may go back (#130)               */
-#include "camera.h"          /* camera_subscribe / camera_unsubscribe / camera_frame_put */
+#include "camera.h"          /* enum camera_res / CAM_RES_*                         */
 #include "cam_own.h"         /* the owner lifecycle (issue #72)                        */
-#include "frame_pipeline.h"  /* struct frame_sink / frame_desc / FRAME_POLICY_* */
+#include "cam_sink.h"        /* the nn step of the camera sink (issue #142)            */
+#include "frame_pipeline.h"  /* struct frame_desc */
 
 #include "stm32f7xx_hal.h"   /* HAL_GetTick */
 
@@ -104,7 +107,6 @@ static UCHAR        nncam_stack[NNCAM_WORKER_STACK];
 TX_MUTEX     nncam_lock;           /* guards the record, the epoch, the session */
 TX_SEMAPHORE nncam_sem;            /* wakes the worker: a hand-over, or a stop   */
 
-struct frame_sink nncam_sink;
 struct nn_model  *nncam_model;
 
 /* enabled intent (nn stream start=1, stop=0) */
@@ -115,7 +117,8 @@ volatile int nncam_active;
 static volatile int nncam_producer_dead;
 /* the AI subscriber holds the nn session */
 static volatile int nncam_holds_session;
-/* A sink drain since this stream's start returned DONE: the producer is confirmed
+/* A step drain (issue #142; a sink drain before it) since this stream's start
+ * returned DONE: the producer is confirmed
  * out of the input tensor (issue #130).  Cleared by the start, set only by a stop
  * whose drain succeeded; read and the hold cleared together under nncam_lock. */
 static int          nncam_sink_drained;
@@ -123,8 +126,9 @@ static int          nncam_sink_drained;
 static int          nncam_created;
 
 /* The `nn stream` lifecycle (issue #72), serialised by cam_own.h.  It guards the
- * SINK: which entry points may subscribe it, and the interval in which a stop
- * has detached it and is watching its pins fall to zero.  The three volatile
+ * nn STEP of the camera sink (issue #142; its own sink before): which entry points
+ * may enable it, and the interval in which a stop has disabled it and is watching
+ * its count fall to zero.  The three volatile
  * flags above stay, and describe something else -- the worker and the nn session,
  * which deliberately OUTLIVE a stop that returned -2 (the worker releases the
  * session itself on its way out).  Both are consulted at a start; neither
@@ -209,8 +213,9 @@ struct nncam_stat nnstat;
 
 /* ---- frame-pipeline sink (synchronous copy) ------------------------------- */
 
-/* Reset per-session state on attach (nncam_open, the sole attach path in the
- * subscriber model).  Bumps the epoch so an in-flight ingest from a prior session
+/* Reset per-session state when the step is armed (nncam_open: the base attaching
+ * the camera sink with the step enabled, or the start enabling the step while the
+ * base is attached -- issue #142).  Bumps the epoch so an in-flight ingest from a prior session
  * is abandoned, and clears producer_dead so a stale base-detach flag does not instantly
  * re-pause the fresh session.  [!] The hand-over word is NOT touched: an overrun
  * auto-recovery re-attaches (this reset) while the AI stays enabled, so the
@@ -277,8 +282,10 @@ const struct nn_core_frame_ops nncam_frame_ops = {
 	.account     = nncam_account,
 };
 
-/* Base detached this subscriber (base capture stopped / DCMI overrun / cascade).
- * A PAUSE, not a stop (contract owhinata/stm32f746g-disco#100.2/.4): keep the AI enabled
+/* The nn step was disarmed: the base detached the camera sink (base capture
+ * stopped / DCMI overrun / cascade), or the stop disabled the step (issue #142;
+ * the stop's unsubscribe used to call this the same way).  On a base detach it is
+ * a PAUSE, not a stop (contract owhinata/stm32f746g-disco#100.2/.4): keep the AI enabled
  * (nncam_run) and the nn session held -- the session owner is the `nn stream` intent,
  * released only by nn_camera_stop().  Bump the epoch so an in-flight ingest is
  * abandoned, move the generation so a frame already handed over is not published
@@ -300,6 +307,20 @@ static void nncam_close(void *ctx)
 	tx_mutex_put(&nncam_lock);
 	(void)tx_semaphore_put(&nncam_sem);     /* wake worker (idles until re-attach)  */
 }
+
+/* The nn step of the one camera sink (issue #142); src/main.c registers it after
+ * the display step.  nncam_consume() is in nn_producer.c. */
+static const struct cam_step_ops nncam_step_ops = {
+	.open    = nncam_open,
+	.consume = nncam_consume,
+	.close   = nncam_close,
+};
+
+struct cam_sink_step nncam_step = {
+	.name = "nn",
+	.ops  = &nncam_step_ops,
+	.ctx  = NULL,
+};
 
 /* ---- the inference worker is in nn_worker.c -------------------------------- */
 
@@ -377,11 +398,6 @@ static int nncam_create_objects(void)
 		nncam_creating = 0;
 		return -5;
 	}
-	nncam_sink.name    = "nncam";
-	nncam_sink.policy  = FRAME_POLICY_DROP;
-	nncam_sink.open    = nncam_open;
-	nncam_sink.consume = nncam_consume;
-	nncam_sink.close   = nncam_close;
 	if (tx_thread_create(&nncam_thread, "nn-worker", nncam_entry, 0,
 	                     nncam_stack, sizeof nncam_stack,
 	                     NNCAM_WORKER_PRIORITY, NNCAM_WORKER_PRIORITY,
@@ -455,11 +471,12 @@ int nn_camera_start(enum camera_res res, int oneshot)
 	}
 	nncam_holds_session = 1;
 
-	/* Enable the subscriber BEFORE subscribing so a frame delivered the instant we
-	 * attach is ingested.  camera_subscribe() attaches now iff the base is running
-	 * and RGB565 (calls nncam_open -> session reset); otherwise the subscriber stays
-	 * enabled + idle and attaches at the next `camera stream start`.  A non-zero rc
-	 * is a hard failure (registry full / immediate attach rejected) -> unwind. */
+	/* Enable the AI BEFORE enabling the step so a frame delivered the instant it
+	 * is armed is ingested.  camera_sink_step_enable() arms the nn step now iff the
+	 * base is running RGB565 (calls nncam_open -> session reset); otherwise the
+	 * step stays enabled + idle and is armed at the next `camera stream start`.  A
+	 * non-zero rc is a hard failure (the sink could not be subscribed / the step is
+	 * still busy / its open refused) -> unwind. */
 	/*
 	 * [!] A BOUNDARY OF ITS OWN, BEFORE THE SUBSCRIBE (issue #118).  The
 	 * attach below is one only if the base is running; with it idle the
@@ -478,8 +495,8 @@ int nn_camera_start(enum camera_res res, int oneshot)
 	 * DONE_LAST, as wio-lite-ai's worker drops one at its first step), and a word
 	 * it left armed or filling is joined.  Both are safe only because nothing
 	 * else can touch the word now: the worker is parked (checked above), and the
-	 * lifecycle said IDLE, which it reaches only through a stop whose sink drain
-	 * succeeded -- so the sink is unsubscribed and no consume() is in flight.
+	 * lifecycle said IDLE, which it reaches only through a stop whose step drain
+	 * succeeded -- so the nn step is disarmed and the producer is not in it.
 	 */
 	(void)nn_core_frame_discard(&nncam_frame, &nncam_frame_ops);
 	(void)nn_core_frame_join(&nncam_frame, &nncam_frame_ops);
@@ -491,7 +508,7 @@ int nn_camera_start(enum camera_res res, int oneshot)
 
 	nncam_oneshot = oneshot ? 1 : 0;
 	nncam_run = 1;
-	rc = camera_subscribe(&nncam_sink, CAM_FMT_RGB565);
+	rc = camera_sink_step_enable(&nncam_step);
 	if (rc != 0) {
 		nncam_run = 0;
 		nncam_holds_session = 0;
@@ -540,9 +557,8 @@ int nn_camera_stop(void)
 	}
 
 	/* [!] The ORDER is the fix (issue #72): CAM_OWN_DRAINING was entered above,
-	 * BEFORE this unsubscribe, so no `nn stream start` can re-subscribe the sink
-	 * while its pins are being watched -- frame_pipeline_attach() resets exactly
-	 * the count the drain below reads.  Everything from here to the commit runs
+	 * BEFORE this disable, so no `nn stream start` can re-enable the step while
+	 * its count is being watched -- a re-armed step's zero would prove nothing.  Everything from here to the commit runs
 	 * with the lifecycle held but NO serialiser held: these waits sleep, and one
 	 * of the callbacks takes nncam_lock. */
 	nncam_run = 0;                          /* disable: worker exits its run loop   */
@@ -553,12 +569,13 @@ int nn_camera_stop(void)
 	nn_det_record_boundary(&nncam_rec);
 	tx_mutex_put(&nncam_lock);
 	(void)tx_semaphore_put(&nncam_sem);     /* wake the worker if waiting           */
-	(void)camera_unsubscribe(&nncam_sink);  /* detach (close); base keeps running   */
+	camera_sink_step_disable(&nncam_step);  /* disarm (close); base keeps running   */
 
-	/* The sink first.  A publish can have been in flight across the unlink, and
-	 * that consume() keeps preprocessing into the input tensor until it puts its
-	 * pin back -- the thing this file used to assume away. */
-	step = camera_sink_drain(&nncam_sink, NNCAM_DRAIN_TICKS);
+	/* The step first.  The producer can have been inside it across the disarm,
+	 * and keeps preprocessing into the input tensor until it leaves -- the thing
+	 * this file used to assume away.  Zero after the disarm is the proof that it
+	 * is out and cannot come back (port/camera/cam_step.h, issue #142). */
+	step = camera_sink_step_drain(&nncam_step, NNCAM_DRAIN_TICKS);
 	/* The producer is confirmed out once the drain succeeded: a frame it was
 	 * part way through preparing will never be finished (JOIN, issue #130).  A
 	 * frame handed over or running is the worker's, and is left to it -- the

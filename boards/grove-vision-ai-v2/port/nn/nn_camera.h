@@ -160,6 +160,33 @@ int nn_camera_join(void);
  */
 const struct cam_lcd_overlay *nn_camera_arm_oneshot(void);
 
+/*
+ * A one-shot does not take any of the first NN_ONESHOT_WARM_FRAMES frames the
+ * sensor delivers after a bring-up (issue #115); it waits for the next one.
+ *
+ * The OV5647 runs its own AEC/AGC and it starts from the mode table's defaults
+ * every bring-up, so the first frames after power-up are not exposed for the
+ * scene.  Measured on this board (2026-10-12, firmware d0f791fb, RST then
+ * `lcd off`, the same face held still): `nn stream start --frames 300` ended at
+ * items 295 / infers 300 -- the first 5 frames found nothing and every later
+ * one did -- and `nn run` straight after a reset found nothing on its first
+ * call and the face on its second.  15 is three times the measured 5, the same
+ * reasoning as wio's CAMERA_WARM_FRAMES; at the camera's ~37 fps it costs about
+ * 0.4 s, once.
+ *
+ * [!] COUNTED FROM BRING-UP, NOT FROM THE STREAM (camera_frames_since_bringup()):
+ * the sensor keeps its power and its converged exposure across a stream stop,
+ * so after the first 15 frames since power-up no later `nn run` waits -- not
+ * after `camera stream stop`, not after a previous `nn run`.
+ *
+ * NOT white balance.  The model reads the raw planar B/G/R the datapath wrote,
+ * which the port's software white balance never touches (that is applied while
+ * packing the panel's RGB565); only the sensor's own AEC/AGC settles in it.
+ *
+ * A stream does not skip: its first frames are inferred and counted as usual.
+ */
+#define NN_ONESHOT_WARM_FRAMES 15u
+
 /** How the one-shot's frame ended, NN_OV_SHOT_*.  Read it BEFORE the record's
  *  count: the worker publishes and only then sets this. */
 int nn_camera_shot(void);

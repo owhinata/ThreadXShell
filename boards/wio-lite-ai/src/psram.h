@@ -108,7 +108,7 @@ int psram_ready(void);
  * camera_streaming()) are what keep the reconfigurers away.
  *
  * [!] `nn stream` IS THE ONE EXCEPTION: it holds the shared guard for its whole
- * lifetime (owhinata/wio-lite-ai#9 phase 3, app/nn_camera.h).  Arm-and-release does
+ * lifetime (owhinata/wio-lite-ai#9 phase 3, port/nn/nn_camera.h).  Arm-and-release does
  * not work for it, because the two gates above answer for the CAMERA and the DISPLAY,
  * and the thing that must not be retuned underneath is neither -- it is the NN worker
  * reading its arena out of the cacheable PSRAM carve-out.  The moment a DCMI

@@ -650,7 +650,7 @@ static const struct nn_core_frame_ops nncam_frame_ops = {
 /* ----------------------------------------------------------- band ingest ------ */
 
 /*
- * One band, on the camera's producer thread, fanned out by app/cam_band.c after the
+ * One band, on the camera's producer thread, fanned out by port/camera/cam_band.c after the
  * preview has had it.  The fill itself is the shared frame path's (issue #130): it
  * begins only at band 0 while the worker wants a frame, writes each band through
  * nncam_prep() while FILLING, and at band 3 hands the frame over and posts.

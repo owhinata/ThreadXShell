@@ -109,7 +109,7 @@ static uint32_t     preview_blit_cyc;
  * so the only frame-level decision left here is whether to start one.
  *
  * Since owhinata/wio-lite-ai#9 phase 3 this is a cam_band client rather than the
- * camera's one registered callback -- app/cam_band.c fans out to it first and to the
+ * camera's one registered callback -- port/camera/cam_band.c fans out to it first and to the
  * NN ingest second.  The frame-level decision below stays entirely ours: a frame this
  * thread skips because a flip is still pending is NOT a frame the NN skips.
  */

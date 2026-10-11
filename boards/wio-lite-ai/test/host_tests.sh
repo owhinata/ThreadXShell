@@ -101,7 +101,6 @@ gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" \
 # the same one the packer reads), and the shared decoder it carries comes with
 # it -- the firmware image no longer links svc/blazeface.c at all.
 gcc $CFLAGS -I "$board/port/nn" -I "$board/port/plugin" -I "$board/svc" \
-    -I "$board/src" \
     -I "$asset/plugins/blazeface" -I "$asset/common" -I "$HOST_TEST_SVC" \
     "$here/test_nn_active.c" \
     "$board/port/nn/nn_active.c" "$board/port/nn/nn_desc.c" \
@@ -136,7 +135,7 @@ gcc $CFLAGS \
 # plugin_run.c, each compiled ON ITS OWN with the includes its test uses (never
 # read off a linked test binary, whose stubs would count), held against the two
 # tests' tables and the script's named exemptions in both directions.
-lease_inc_active="-I $board/port/nn -I $board/port/plugin -I $board/svc -I $board/src -I $HOST_TEST_SVC"
+lease_inc_active="-I $board/port/nn -I $board/port/plugin -I $board/svc -I $HOST_TEST_SVC"
 lease_inc_run="-I $here/plugin_run_shim -I $board/port/plugin -I $board/svc -I $svc"
 gcc $CFLAGS $lease_inc_active -c "$board/port/nn/nn_active.c" \
     -o "$out/lease_nn_active.o"

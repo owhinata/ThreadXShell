@@ -27,7 +27,7 @@
  * a different model for a firmware bug).  Neither is any of them "0 found".
  *
  * Pure, no storage: test/test_nn_decode_count.c walks it.  The counters and
- * where they move are the worker's (src/nn_camera.c, nncam_account()).
+ * where they move are the worker's (port/nn/nn_camera.c, nncam_account()).
  */
 #ifndef NN_DECODE_COUNT_H
 #define NN_DECODE_COUNT_H

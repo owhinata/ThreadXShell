@@ -10,14 +10,13 @@
  * downsamples it straight into the model's input tensor, runs inference and
  * publishes decoded face boxes.
  *
- * WHY THIS IS IN app/ AND NOT port/nn/.  The donor firmware keeps the equivalent
- * glue under port/nn/, and it can: it has a camera subscriber registry, so its glue
- * only ever calls DOWN.  Here the glue claims a band stream, publishes boxes for the
- * display and is driven by a shell command -- that is board integration, and this
- * repository already has the shape for it in app/cam_preview.c, which binds
- * port/camera to port/ltdc from app/.  Nothing under port/ includes an app/ header
- * (checked, not assumed), and keeping it that way is what leaves port/nn exactly
- * what its own header claims to be: a model-agnostic, hardware-free inference API.
+ * WHERE THIS LIVES.  port/nn/, beside the adapter that drives it; it moved here
+ * from src/ in issue #139.  It is still board integration -- it claims a band
+ * stream (port/camera/cam_band.h), publishes boxes for the display and is driven
+ * by a shell command -- so it still includes two src/ headers, cam_preview.h and
+ * psram.h: port -> src includes that remain on purpose.  nn.h is untouched by
+ * that and stays what its own header claims to be: a model-agnostic,
+ * hardware-free inference API.
  *
  * NO STAGING BUFFER, AND THAT IS THE INTERESTING PART.  The donor stages frames
  * through two 192 KB buffers behind a four-state machine with epoch counters.  Here
@@ -291,7 +290,7 @@ int  nn_camera_draw(const struct nn_core_panel *p, void *ctx);
 /** The painted frame is out (svc/nn_core_frame.h). */
 void nn_camera_present_done(void);
 
-/** Draw the boxes on the LCD preview (app/cam_preview.c does the drawing). */
+/** Draw the boxes on the LCD preview (src/cam_preview.c does the drawing). */
 void nn_camera_set_overlay(int on);
 int  nn_camera_get_overlay(void);
 

@@ -294,6 +294,17 @@ int camera_band_streaming(void);
  *  Read by app/psram.c to refuse OCTOSPI1 retunes -- see psram_acquire(). */
 int camera_streaming(void);
 
+/**
+ * Keep the camera still: refused (CAM_ERR_BUSY) while a stream runs or another
+ * claim is out; once granted, every stream start (frame or band) refuses with
+ * CAM_ERR_BUSY until camera_still_release() (issue #142 D9: `lcd reset` holds
+ * it across the panel reset).  The look and the claim are one step under the
+ * camera lock, so a start cannot slip in between them.  CAM_ERR_STATE when the
+ * camera is not initialised -- nothing can start then, and nothing is owed.
+ */
+int camera_still_claim(void);
+void camera_still_release(void);
+
 int camera_stream_stats(struct camera_stream_stats *out);
 
 /**

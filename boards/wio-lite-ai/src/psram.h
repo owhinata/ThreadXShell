@@ -82,8 +82,11 @@ int psram_ready(void);
 /*
  * Serialize access to the single OCTOSPI1 resource across concurrent shell
  * commands (`cmd &` background workers).  Both calls return 1 on success and 0
- * when refused (the caller rejects and returns); both are released with
- * psram_release().  Thread context only.
+ * when refused (the caller rejects and returns).  [!] EACH HAS ITS OWN RELEASE:
+ * psram_release() for psram_acquire(), psram_release_shared() for
+ * psram_acquire_shared() -- the guard is one word of users plus a reconfigurer
+ * mark (src/psram_guard.h, issue #142), and a release of the wrong kind is
+ * refused and leaves the other held.  Thread context only.
  *
  * The two differ in what they refuse, because the callers differ in what they
  * do to the bus:
@@ -99,9 +102,12 @@ int psram_ready(void);
  *                             `lcd on`, `camera stream start`, `camera capture`
  *                             / `save` / `send`, `nn bench`, `nn stream`.
  *                             Refused only while a reconfiguring command holds
- *                             the bus.  These do not exclude each other, which is
- *                             what lets the display scan out while the camera
- *                             streams (owhinata/wio-lite-ai#8 3c).
+ *                             the bus.  [!] These now really do not exclude each
+ *                             other (issue #142): any number hold the bus at
+ *                             once, counted.  Until then they shared one bit with
+ *                             the reconfigurers, so two users DID exclude each
+ *                             other -- which is why a running `nn stream` used
+ *                             to refuse a later `lcd on`.
  *
  * A continuous user takes the shared guard just long enough to arm itself, then
  * releases it: from that point the gates above (ltdc_scanout_active(),
@@ -113,14 +119,18 @@ int psram_ready(void);
  * and the thing that must not be retuned underneath is neither -- it is the NN worker
  * reading its arena out of the cacheable PSRAM carve-out.  The moment a DCMI
  * overrun tears the band stream down, camera_streaming() goes false while that
- * worker is still inside nn_run(), and a `psram clk` would become legal.  The
- * consequence is that a running `nn stream` refuses a NEW `lcd on` / `lcd reset` /
- * `camera capture` / `camera preview on`, so every site that reports this guard as
- * busy names `nn stream` as a possible holder.
+ * worker is still inside nn_run(), and a `psram clk` would become legal.  Since
+ * issue #142 holding it refuses only the RECONFIGURERS (`psram`, `membench`,
+ * `devmem`, `wifi flash`), which is what it is for; a later `lcd on`, capture or
+ * preview is another user and is admitted.
  */
 int psram_acquire(void);
-int psram_acquire_shared(void);
 void psram_release(void);
+int psram_acquire_shared(void);
+void psram_release_shared(void);
+
+/* Users holding the shared guard now (a stats / diagnostic number). */
+uint32_t psram_guard_holders(void);
 
 /* Which bring-up stage failed (PSRAM_STAGE_*); PSRAM_STAGE_OK when ready, for
  * the `psram info` "init: failed at ..." line. */

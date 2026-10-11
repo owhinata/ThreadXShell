@@ -118,8 +118,7 @@ static int cam_psram_take(struct cli_instance *sh)
 	   distinction is what lets the display show a live preview. */
 	if (!psram_acquire_shared()) {
 		cli_error(sh, "camera: OCTOSPI1 busy (wait for "
-		              "psram/membench/devmem/wifi flash, or run "
-		              "`nn stream stop`)\r\n");
+		              "psram/membench/devmem/wifi flash)\r\n");
 		return 0;
 	}
 	return 1;
@@ -132,7 +131,7 @@ static int cam_psram_take(struct cli_instance *sh)
 static void cam_psram_give(void)
 {
 #if BSP_ENABLE_PSRAM
-	psram_release();
+	psram_release_shared();
 #endif
 }
 

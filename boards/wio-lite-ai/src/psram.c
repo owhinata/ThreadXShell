@@ -35,6 +35,7 @@
  */
 #include "stm32h7xx_hal.h"
 #include "psram.h"
+#include "psram_guard.h"    /* the guard word's transitions (issue #142) */
 #if BSP_ENABLE_LCD
 #include "ltdc_display.h"   /* ltdc_scanout_active(): see psram_acquire() (issue #7) */
 #endif
@@ -637,10 +638,14 @@ int psram_ready(void) { return psram_up; }
  * DCR writes) or does CPU memory-mapped access at 0x90000000 must be serialized
  * against every other, or a mutator can fire mid-transaction and corrupt data
  * or -- with a DQS-gated mmap read on a half-configured controller -- stall the
- * AXI bus until the IWDG resets the board.  A non-blocking test-and-set (LDREXB/
- * STREXB, no IRQ disable, thread-context only) lets the shell reject the second
- * user instead.  Held at the shell-command boundary: cmd_psram.c hardware
- * subcommands, cmd_membench.c PSRAM rows, and cmd_devmem.c PSRAM accesses.
+ * AXI bus until the IWDG resets the board.  A non-blocking guard lets the shell
+ * reject the second caller instead.  Held at the shell-command boundary:
+ * cmd_psram.c hardware subcommands, cmd_membench.c PSRAM rows, and cmd_devmem.c
+ * PSRAM accesses.
+ *
+ * Since issue #142 the guard is one word of users + a reconfigurer mark
+ * (psram_guard.h): users -- who only move bytes through the window -- run
+ * together, and only a reconfigurer needs the bus to itself.
  *
  * owhinata/wio-lite-ai#7 added a second, non-shell contender that no test-and-set can
  * arbitrate after the fact: the LTDC. Its frame buffers live in this window, so while
@@ -655,20 +660,46 @@ int psram_ready(void) { return psram_up; }
  * port/ltdc never includes psram.h (its caller checks psram_ready() instead).
  * ltdc_scanout_active() is false whenever the LTDC never came up, so a build or a
  * boot without a display behaves exactly as before. */
-static volatile uint8_t psram_busy;
+static volatile uint32_t psram_guard_word;
 
-/* The try-lock both entry points share: refuses only if another command already
-   holds the bus.  This is all a reader/writer needs. */
+/*
+ * Apply one transition of the guard word (psram_guard.c) atomically.
+ *
+ * PRIMASK rather than LDREX/STREX: the step is a function call between the
+ * load and the store, and ARMv7-M leaves it IMPLEMENTATION DEFINED whether an
+ * ordinary store in between (a stack spill) clears the exclusive monitor -- a
+ * pair that always fails would spin forever.  The masked section is a load, a
+ * few compares and a store, thread context only, and never per frame.
+ */
+static int guard_apply(int (*step)(uint32_t w, uint32_t *next))
+{
+	uint32_t primask = __get_PRIMASK();
+	uint32_t next;
+	int ok;
+
+	__disable_irq();
+	ok = step(psram_guard_word, &next);
+	if (ok)
+		psram_guard_word = next;
+	__set_PRIMASK(primask);
+	__DMB();
+	return ok;
+}
+
+/* A USER of the memory: refused only while a reconfigurer holds the bus. */
 int psram_acquire_shared(void)
 {
-	do {
-		if (__LDREXB(&psram_busy) != 0u) {
-			__CLREX();
-			return 0;               /* already held by another command */
-		}
-	} while (__STREXB(1u, &psram_busy) != 0u);
-	__DMB();
-	return 1;
+	return guard_apply(psram_guard_user_take);
+}
+
+void psram_release_shared(void)
+{
+	(void)guard_apply(psram_guard_user_give);
+}
+
+uint32_t psram_guard_holders(void)
+{
+	return psram_guard_users(psram_guard_word);
 }
 
 /*
@@ -679,6 +710,10 @@ int psram_acquire_shared(void)
  * open-ended -- and a stream can even stop itself on --frames/--secs -- so there
  * would be nobody left to release a guard they had taken; instead they arm
  * themselves under psram_acquire_shared() and then answer for themselves.
+ *
+ * The reconfigurer's mark is set only on a word with no user and no other
+ * mark (psram_guard_reconf_take()), and every gate below that refuses gives
+ * the mark back before returning.
  */
 int psram_acquire(void)
 {
@@ -689,7 +724,7 @@ int psram_acquire(void)
 	   reconfiguration then proceeds underneath it.  Holding the lock while
 	   checking makes the two orders mutually exclusive: whoever gets the lock
 	   first wins, and the loser sees a state that cannot change under it. */
-	if (!psram_acquire_shared())
+	if (!guard_apply(psram_guard_reconf_take))
 		return 0;
 #if BSP_ENABLE_LCD
 	if (ltdc_scanout_active()) {    /* LTDC is reading this bus right now */
@@ -713,8 +748,7 @@ int psram_acquire(void)
 
 void psram_release(void)
 {
-	__DMB();
-	psram_busy = 0u;
+	(void)guard_apply(psram_guard_reconf_give);
 }
 
 uint32_t psram_clock_hz(void) { return PSRAM_KERNEL_HZ / (psram_presc + 1u); }

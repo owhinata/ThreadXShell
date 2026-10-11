@@ -167,10 +167,11 @@ struct nn_camera_stats {
  *    Per-inference holding would refuse the same commands AND leave a gap between
  *    inferences for exactly that.
  *
- * The documented consequence: START THE PREVIEW BEFORE `nn stream start`.  The guard
- * coexists with an already-armed LTDC scan-out and band DMA, but it refuses a NEW
- * `lcd on` / `lcd reset` / `camera capture` / `camera preview on` while held -- the
- * same behaviour `nn bench` has, for the same reason.
+ * Since issue #142 the guard is a count of users plus a reconfigurer mark
+ * (src/psram_guard.h), so holding it refuses only the commands that RECONFIGURE
+ * OCTOSPI1 (`psram`, `membench`, `devmem`, `wifi flash`); a later `lcd on`,
+ * capture or preview is another user and is admitted.  (`lcd reset` is refused
+ * while a stream runs for its own reason -- camera_still_claim().)
  */
 /**
  * @param require_draw  the caller is about to light a PANEL, so a decoder that

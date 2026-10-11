@@ -328,7 +328,7 @@ static int nn_guards_take(struct nn_op_result *res)
 	}
 	if (!psram_acquire_shared()) {
 		nn_detail_set("OCTOSPI1 busy (a psram/membench/wifi flash command holds "
-		              "it, or `nn stream` is running)");
+		              "it)");
 		nn_session_release();
 		return NN_SVC_ERR_BUSY;
 	}
@@ -337,7 +337,7 @@ static int nn_guards_take(struct nn_op_result *res)
 
 static void nn_guards_give(void)
 {
-	psram_release();
+	psram_release_shared();
 	nn_session_release();
 }
 
@@ -620,7 +620,7 @@ static void nn_life_claim_give(void)
 {
 	if (nn_life_psram) {
 		nn_life_psram = 0u;
-		psram_release();
+		psram_release_shared();
 	}
 	nn_session_release();
 }

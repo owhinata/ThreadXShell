@@ -162,7 +162,7 @@ void nncam_guards_give(void)
 	__set_PRIMASK(primask);
 
 	if (mine) {
-		psram_release();
+		psram_release_shared();
 		nn_session_release();
 	}
 }

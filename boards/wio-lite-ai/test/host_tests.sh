@@ -320,3 +320,13 @@ else
     echo "run_veneer_gate_build_tests: SKIPPED -- no arm-none-eabi toolchain" \
          "under $HOST_TEST_REPO/tools/ (configure a wio build once to fetch it)" >&2
 fi
+
+# issue #142 -- the OCTOSPI1 guard word (src/psram_guard.c): users of the memory
+# (scan-out, capture, nn stream, bench) run together, and only a command that
+# reconfigures the controller (psram, membench, devmem, wifi flash) needs it to
+# itself.  The pairings are windows between two consoles; the plan's contention
+# table is walked here.
+gcc $CFLAGS -I "$board/src" \
+    "$here/test_psram_guard.c" "$board/src/psram_guard.c" \
+    $LDFLAGS -o "$out/test_psram_guard"
+"$out/test_psram_guard"

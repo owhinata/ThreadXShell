@@ -732,9 +732,10 @@ registered**, never a third thing.
 ```
 camera probe             power the module and read its sensor ID
 camera capture           one frame + per-channel statistics
-camera preview [frames]  live preview on the panel, Ctrl+C to stop
+camera stream start      take hold of the stream to the panel (returns at once)
+camera stream stop       let go; refused while nn holds it
 camera raw               capture the Bayer mosaic and name the phase
-camera stats             producer and sink counters
+camera stats             producer and sink counters, and the holders
 camera exposure [lines]  read/set the sensor's exposure
 camera gain [a [d]]      read/set analogue / digital gain
 camera wb [r g b]        read/set the software white balance (256 = unity)
@@ -765,9 +766,92 @@ carried a software AE loop purely for it.  That loop, `camera depth`, the frame
 length argument to `camera exposure` and the IMX219 register tables all went
 with it.  The history is in git if a part without on-chip AE ever arrives.
 
-`camera preview` rotates the panel to landscape first.  320x240 then maps 1:1
-with no CPU-side transpose, because MADCTL really rotates this panel over 4-wire
-SPI (issue #31).
+Starting the stream (`camera stream start`, or `nn stream start` / `nn run`
+when nothing streams) rotates the panel to landscape first.  320x240 then maps
+1:1 with no CPU-side transpose, because MADCTL really rotates this panel over
+4-wire SPI (issue #31).
+
+### Who holds the stream (issue #142)
+
+**The camera streams to the panel while, and only while, somebody holds it**:
+the operator (`camera stream start`) or nn (`nn stream start`, `nn run`).  The
+table is `svc/cam_holders` (the shared rules are in
+[svc/README.md](../../svc/README.md#the-camera-streams-ownership-issue-142)),
+and the panel sink keeps it (`port/camera/cam_lcd_sink.c`): `camera.c` knows
+nothing of the panel and nothing of nn, and stays that way.  The first holder
+links the one panel sink and starts the camera in the camera's own one-step
+transaction (issue #63, below); the last one to leave stops the camera, and
+only a **confirmed** stop unlinks the sink.
+
+- `camera stream start` returns at once with `camera: streaming to the panel --
+  ...`, or `(already running)`.  It has no frame count and no Ctrl+C; it
+  replaces the foreground `camera preview [frames]`.  This board has no test
+  pattern, so `camera stream start test` is refused.  A start or stop already
+  in progress, `camera bench`, or another command owning the camera answers
+  `busy ... retry`.
+- `camera stream stop` while nn holds the stream answers `camera: still in use:
+  nn` and changes nothing -- the operator stays too.  Otherwise the camera is
+  stopped and, once the stop is confirmed, the sink unlinked: `camera: stream
+  stopped`.
+- `nn stream start` and `nn run` join a running stream, or start it holding the
+  operator's place too, so the camera keeps streaming after nn stops.  nn's stop
+  takes nn off the sink and never stops the camera.
+- `camera stats` prints `holders  : manual, nn` (or `none`, or `-- (a stream
+  start or stop is in progress)` while a start or stop holds the table), with
+  `(<n> lost when the stream ended)` after a stream ended by itself.  Its `sink
+  lcd` line counts `shown`, `dropped`, `busy`, `dark` and `err` frames.
+
+**nn is an overlay on the panel's stream, counted.**  nn's step of the sink is
+`struct cam_lcd_overlay`, which the sink holds by pointer.  The producer reads
+the pointer once per frame, in the same critical section in which it counts
+itself in (`svc/cam_step.h`), and hands what it read to the panel thread with
+the frame; the panel thread never reads the sink's pointer, and leaves the step
+after drawing and before `camera_frame_put()`.  Taking the overlay off
+(`cam_lcd_sink_overlay_remove()`) disarms the step and clears the pointer in one
+critical section, then waits on the wall clock for the count to reach zero --
+the proof that neither the producer nor the panel thread is in nn's callbacks or
+can enter them again.  A count still up at the deadline is retryable: the
+overlay stays off and the next stop waits again.  `nn run` puts on an overlay
+that prepares a frame and draws nothing, so a one-shot does not paint the last
+result; the separate capture sink it used to start the camera with is gone.
+
+**`lcd off` only darkens the panel.**  While the panel is dark the panel thread
+skips the staging copy, the overlay's draw and the SPI DMA, and still returns
+the frame and the overlay count; the producer still prepares nn's frames, so
+inference goes on.  Such frames are counted as `dark`.  `lcd on` lights the
+panel again, and the next frame is drawn.  Neither takes the panel guard.  The
+drawing commands (`lcd fill`, `clear`, `bar`, `orient`, `loop`) are refused
+while the sink is linked -- `lcd: the camera stream is drawing on the panel --
+`camera stream stop` first` -- because a dark panel's frames skip the guard,
+and a draw would otherwise win every time onto a panel the stream paints over
+when it lights again.
+
+**[!] `nn run` now brings the panel up, and leaves the camera and the panel
+running.**  Because `nn run` rides the panel's stream, a `nn run` typed while
+nothing streams starts that stream: it runs `lcd_init()` -- the pin mux, the SPI
+device, and PA2 driven high for the backlight -- and rotates the panel.  PA2 is
+also the Grove connector's I2C SCL through the level shifter (see the wiring
+notes above), so on a board with a Grove I2C device attached the connector's
+behaviour changes from that point on.  It also takes the operator's place
+(issue #142 D6), so when the run has finished the camera and the panel keep
+streaming; `camera stream stop` is what stops them.  Neither happened before
+issue #142: `nn run` started the camera through a capture sink with no panel
+and stopped it afterwards.  The bring-up has no way to tell that a panel is
+missing (nothing is read back from it), so on a board with no panel fitted
+`nn run` still drives those pins and streams to a panel that is not there until
+`camera stream stop`.
+
+**Two ways a stream ends without its holders leaving.**  A stream that ended by
+itself (the producer gave up) is settled at the next hold or release: it is
+confirmed with a stop, the sink unlinked, the table emptied, and every holder
+marked lost until it takes hold again.  A stop that cannot be confirmed -- the
+camera never acknowledged it (`CAM_ST_LOST`) or the panel thread did not come
+back -- is terminal: the table, the sink and every resource stay where they
+are, every later call answers `CAM_ERR_STATE`, and only a reboot clears it.
+
+The frame rates under the new ownership have not been measured on hardware
+yet.  Older sections below name `camera preview`, the command of their time;
+they are records of runs and designs and are left as written.
 
 ### What the hardware gives you, and what it does not
 
@@ -953,7 +1037,8 @@ removed with the IMX219 rather than being re-aimed at the OV5647's VTS pair at
 **[!] The auto mode is re-applied at every bring-up, not just when asked for.**
 A bring-up writes the mode table again, and on the OV5647 that table is what
 switches its AEC back ON -- so without this an earlier `camera auto off` is
-silently undone by the next `camera preview` and manual exposure stops holding.
+silently undone by the next stream start (`camera stream start`, or nn's) and
+manual exposure stops holding.
 The requested mode is also kept from before the first probe, when "the sensor"
 is still a default descriptor and not the fitted part.
 
@@ -1211,7 +1296,8 @@ grove> thread
 thread: cpu% unavailable (an accounted interrupt vector was replaced)
 ```
 
-That was observed on hardware, and it is the same lesson `lcd_teardown()`
+That was observed on hardware (with `camera preview`, the command before issue
+#142), and it is the same lesson `lcd_teardown()`
 already carried ("unwrap the accounted interrupts BEFORE closing the device").
 `cam_quiesce()` therefore masks the lines, hands the vectors back, and only then
 lets the vendor tear the datapath down.  The lines are left DOWN afterwards --
@@ -2017,8 +2103,8 @@ file (each `.c` with its `.h` unless only a header is listed):
 | File | Thread or context | Hardware reason |
 |---|---|---|
 | `port/nn/nn_svc_grove.c` | console | The adapter: an open brings the Ethos-U55 up and holds the NOR XIP lease, so it is the thick one of the three. |
-| `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (arm / stop / join / stats, the one-shot's ending) | Binds the shared frame path to this board's camera sink and the SPI LCD panel's overlay contract (`cam_lcd_sink.h`); owns the glue's state (the private header lists each counter's writers and resets), which is static and outlives a producer that never acknowledged a stop, plus the frame path's ops table and the overlay vtable. |
-| `port/nn/nn_producer.c` | camera producer (`process()`, inside the panel sink's `consume()`) | Prepares the raw planar WDMA3 frame straight into the Ethos-U55 input tensor on the CPU, only while the worker wants a frame, and hands it over: the datapath rewrites that frame two frames later, so it is prepared here or copied. |
+| `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (arm / stop / join / stats, the one-shot's ending) | Binds the shared frame path to this board's camera sink and the SPI LCD panel's overlay contract (`cam_lcd_sink.h`), and defines nn's place among the panel stream's holders (issue #142); owns the glue's state (the private header lists each counter's writers and resets), which is static and outlives a producer that never acknowledged a stop, plus the frame path's ops table and the overlay vtable. |
+| `port/nn/nn_producer.c` | camera producer (the overlay's `process()`, inside the panel sink's `consume()`, counted by `svc/cam_step.h`) | Prepares the raw planar WDMA3 frame straight into the Ethos-U55 input tensor on the CPU, only while the worker wants a frame, and hands it over: the datapath rewrites that frame two frames later, so it is prepared here or copied. |
 | `port/nn/nn_worker.c` | inference worker | The ThreadX thread and its join, and `nn_camera_work()` with the frame path's outputs / decode / publish / account hooks: the NPU driver blocks for the whole invoke, so the invoke needs a thread of its own. |
 | `port/nn/nn_panel.c` | panel (`draw()`, inside the panel guard) | The nn half of the SPI LCD panel thread: the record snapshot and the plugin's paint into the staged RGB565 frame, with the plugin lease only tried (panel guard, then lease; no lease holder waits for the panel guard). |
 | `port/nn/nn_active.c` | worker, panel, console, under the plugin lease | Turns `npu_tensor` into `svc/tensor.h` descriptors and states this board's frame geometry for `svc/nn_active_core.c`. |
@@ -2026,7 +2112,8 @@ file (each `.c` with its `.h` unless only a header is listed):
 | `port/nn/nn_rec.c` | worker (publish), panel and console (snapshot) | The record's storage and its lock, a short interrupt-disabled section rather than a mutex (`nn_rec.h` says why). |
 | `port/nn/nn_outputs.c` | inference worker | How many NPU outputs this board decodes (`NPU_DESC_MAX_OUTPUTS`); pure, the reads behind a callback. |
 | `port/nn/nn_run_wait.c` | console (`nn run`) | No hardware reason: the five ways `nn run`'s wait ends, a pure table over this board's worker and camera outcomes. |
-| `port/nn/nn_stream_state.c` | console (`nn stream stop`) | Classifies this board's camera stop and sink detach codes into retryable / terminal; pure, host-tested. |
+| `port/nn/nn_stream_state.c` | console (`nn stream stop`) | The stop's order as a table over two separate proofs -- the overlay's count at zero (permits the worker join, the record boundary and nn's leave) and a confirmed camera stop (the only thing that permits the sink's unlink) -- and the retryable / terminal classification of the codes; pure, host-tested. |
+| `port/camera/cam_lcd_sink.c` | camera producer (`consume()`), panel thread, console (hold / release / overlay) | Not an nn file, but nn runs on it: the one panel sink, the holder table (`svc/cam_holders`) and the overlay pointer with its count. |
 | `port/nn/nn_param_calls.c` | console (`nn thresh`, `nn dets`, load / unload) | No hardware reason: the count of console calls inside the plugin, run in the board's critical section. |
 | `port/nn/nn_plugin_stack.h` | build time | Per-slot plugin stack allowances asserted against this board's thread stacks. |
 | `port/nn/nn_probe.c`, `nn_probe_rtos.c` | every thread that enters a plugin slot | Stack depth at a plugin callback's entry; the rtos half asks ThreadX which thread is running. |
@@ -4256,7 +4343,11 @@ nn stream stop
 nn stream start --frames 30 # or a bounded run: stops itself, Ctrl+C also stops
 ```
 
-`camera preview` is unchanged and still shows a plain picture.
+Since issue #142 the stream draws on the camera's stream to the panel as an
+overlay (see "Who holds the stream"): `nn stream start` joins a running
+`camera stream start`, or starts the camera holding the operator's place too,
+and `nn stream stop` takes the boxes off while the picture keeps running.
+`camera stream stop` then stops the camera.
 
 **This used to be `nn preview`, which BLOCKED until Ctrl+C** (issue #99 replaced
 it with the same `nn stream start/stop/stats` the other two boards speak, and
@@ -4315,11 +4406,13 @@ whatever is open when they print.
   severity -- a rotation is silent and lasts; a dark panel announces itself and
   is one command from undone.
 
-  That same 96% explains the rest of the `lcd` set under a stream: `lcd fill`,
-  `lcd bar`, `lcd orient` and even the read-backs will usually report
-  `busy (another lcd command holds the panel)`, because they are transfer-scoped
-  and the transfer is nearly always in progress. That is the guard working, not
-  a fault.
+  That same 96% explains the read-backs under a stream: they will usually
+  report `busy (another lcd command holds the panel)`, because they are
+  transfer-scoped and the transfer is nearly always in progress. That is the
+  guard working, not a fault. The drawing commands (`lcd fill`, `lcd bar`,
+  `lcd orient`, ...) used to be left to the same guard; since issue #142 they
+  are refused outright while the sink is linked, because a dark panel's frames
+  no longer take the guard (see "Who holds the stream").
 
 **Measured on the board** (issue #60, rev D, default VTS 940): 200 frames at
 **33.3 fps**, with **200 inferences for 200 frames** -- every published frame is
@@ -4456,9 +4549,14 @@ while a stop is pending.  Those are the frames `camera stats` counts as *shown
 unannotated*.
 
 **The stop** (`nn_teardown()` in `nn_svc_grove.c`, shared with `nn run`):
-stop request -> `camera_stream_stop()` (the producer's join) -> the worker's join
--> record boundary -> sink detach -> the table in `nn_stream_state.c`.  The
-worker join waits, on the wall clock, until the hand-over word is parked with
+stop request -> overlay off and its count to zero -> the worker's join -> record
+boundary -> nn's leave -> the table in `nn_stream_state.c`.  Since issue #142
+the camera does not stop here.  The table takes two proofs separately: the
+overlay's zero permits the worker join and, with the worker joined, the record
+boundary and nn's leave; only a confirmed camera stop -- reached through the
+leave when nn's was the last place -- permits the sink's unlink.  (Until #142 it
+was stop request -> `camera_stream_stop()` -> worker join -> record boundary ->
+sink detach.)  The worker join waits, on the wall clock, until the hand-over word is parked with
 nothing handed over or running, at most **2,300 ms**: two NPU semaphore waits
 (`2 x NPU_INFERENCE_TIMEOUT_TICKS`, the ethos-u driver can take it twice) +
 `PLUGIN_LEASE_WAIT_MS` (50) + 250 ms of slack.  A pending stop keeps the worker
@@ -4472,10 +4570,11 @@ worker does not exist or is not parked.
 
 **`nn run` is a stream of one frame on the same threads.**  It claims the
 one-shot, checks the model's input (the reasons are given here, since the
-producer can only say that preparation failed), arms the worker and starts the
-camera through a **capture sink with no panel** (`port/camera/cam_capture_sink.c`:
-synchronous, one put per frame, attached only by `camera_stream_start()`,
-detached only after a confirmed stop and a zero pin count).  The producer
+producer can only say that preparation failed), arms the worker and puts a
+draw-less overlay on the panel's stream -- joining a running stream, or starting
+it holding the operator's place too, so the camera keeps streaming after the
+run (issue #142; until then it started the camera through a capture sink with no
+panel, `port/camera/cam_capture_sink.c`, now removed).  The producer
 prepares the first frame the worker wants and declines the rest; the worker
 decodes and publishes it -- or, with no plugin, publishes the raw output
 descriptors -- and parks for good (DONE_LAST).  The outputs are read after the
@@ -4495,8 +4594,9 @@ nothing -- the reason is theirs: invoke failed, lease not had in time, ...),
 **lost** (the camera stopped streaming), **cancelled** (Ctrl+C), **timed out**.
 Every ending then runs the same teardown as a stream, by the run's own
 generation; a retryable teardown leaves the one-shot to `nn stream stop`.  The
-frame `nn run` sees is the first frame of a freshly started stream, where it used
-to be one stopped `camera_capture()` frame.  `camera capture` itself is
+frame `nn run` sees is the first frame the worker wants after the overlay goes
+on -- of a running stream, or of one this run started -- where it used to be one
+stopped `camera_capture()` frame.  `camera capture` itself is
 unchanged.
 
 **The decode's stack allowance is declared against the worker**
@@ -4651,8 +4751,9 @@ the sink is already out of the registry. The one case that does refuse for good
 is the camera's own `CAM_ST_LOST`, which refuses everything anyway.
 
 What this buys the commands is one call with one answer: **every failure leaves
-nothing attached and no stream running**, so `camera preview` and `nn stream`
-unwind their own state and return. The "BUSY means it might have half-worked"
+nothing attached and no stream running**, so the holder that started it
+(`camera stream start`, `nn stream`, `nn run`; `camera preview` before issue
+#142) unwinds its own state and returns. The "BUSY means it might have half-worked"
 branches are gone along with the window that motivated them.
 
 **This is the START side only.** The stop side had its own way of orphaning a
@@ -5140,7 +5241,9 @@ Adding a recovery would mean claiming an ownerless sink can be safely unlinked,
 which is the claim #48 examined and rejected. Reaching any of these rows means
 something is already wedged, and a reboot is a second.
 
-**[!] Where the evidence lands after a Ctrl+C.** `camera preview` and `nn
+**[!] Where the evidence lands after a Ctrl+C.** (Written for the blocking
+`camera preview` and `nn preview`, both gone; `camera stream start` returns at
+once, and only `nn stream start --frames` and `nn run` still wait.) `camera preview` and `nn
 preview` both report a failed stop -- but not on the cancelled path, where they
 return silently. That is deliberate and not a gap that can be closed here: the
 shared core discards output produced while `cancel_req` is set (`cli_core.c`),
@@ -5163,12 +5266,13 @@ mark, and that is the number to check.
 
 Camera (up to 26 lines) + UART0 (1) + LCD SPI/DMA (2) + QSPI and U55 (2) = 31 of
 the 32 EPK wrap slots, reaching exactly 32 if the UART's DMA fallback is ever
-used.  `nn run` never brings the panel up, so nothing before `nn stream` had
-all five at once.
+used.  Until issue #142 `nn run` never brought the panel up, so nothing before
+`nn stream` had all five at once; since #142 a `nn run` that starts the stream
+brings the panel up too.
 
 There is no room for an unexpected vendor-enabled line.  The wrap is
 fail-closed, so the symptom would be the camera refusing to come up during
-`nn stream` rather than silent mis-accounting -- but it is worth running
+`nn stream` (or `nn run`) rather than silent mis-accounting -- but it is worth running
 `thread` once after the first `nn model load --name det`, when IRQ 133 is also present, to
 see the cpu% column still reported as trustworthy.
 

@@ -178,8 +178,9 @@ file (each `.c` with its `.h` unless only a header is listed):
 |---|---|---|
 | `port/nn/nn_svc_f746.c` | console | The thin adapter over this board's `nn.h` API; it adds no state. |
 | `port/nn/nn_svc_f746_model.c` | console (`nn info`, `nn model load` / `unload`) | The steps of the shared load order on this board: the built-in model in Flash and the SD-card model slots in SDRAM. |
-| `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (start / stop / stats / record reads) and the caller of attach / detach (the sink's `open()` / `close()`) | Binds the shared frame path to this board's camera frame pipeline as one of its three subscribers; owns the glue's state (the private header lists each counter's writers and resets) and the frame path's ops table. |
-| `port/nn/nn_producer.c` | camera producer (sink `consume()`) | Prepares a frame straight into the model's input tensor (nearest-neighbour resize + RGB565 conversion on the CPU) and hands it over; `camera_frame_put()` stays the last statement of `consume()`. |
+| `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (start / stop / stats / record reads) and the camera sink's open / close of the nn step | Binds the shared frame path to this board's camera as the nn step of the one camera sink, and holds nn's place among the camera's holders (issue #142); owns the glue's state (the private header lists each counter's writers and resets) and the frame path's ops table. |
+| `port/nn/nn_producer.c` | camera producer (the nn step of the camera sink's `consume()`) | Prepares a frame straight into the model's input tensor (nearest-neighbour resize + RGB565 conversion on the CPU) and hands it over; it does not put the frame -- the sink does, last. |
+| `port/camera/cam_sink.c` | camera producer (`consume()`), console (step enable / disable / drain) | Not an nn file, but nn runs inside it: the one RGB565 subscriber of the base capture, running the GUIX display step and then the nn step, with `camera_frame_put()` last. Each step's armed mark and busy count are `svc/cam_step.h`'s. |
 | `port/nn/nn_worker.c` | inference worker (priority 18) | Inference runs on the CPU, so the worker sits below every other thread; it runs the model, the resident decoder's publish and the counting. |
 | `port/nn/nn_decoder.c` | inference worker | Resident BlazeFace decoder state, with its candidate scratch placed in `.sdram.ai`, and `nn_tensor` -> `tensor_desc`. |
 | `port/nn/nn_decode_count.c` | inference worker | No hardware reason: this board's table for counting the decoder's answer in `nn stream stats` (pure, host-tested). |
@@ -324,6 +325,13 @@ overrun resync in place):
 | `cam_prod` peak | 508 / 1,024 B (49%) before and after the stream |
 | `camera stream stats` after 145 s | 12 DCMI overruns (3 of them at 15.9-16.4 s after boot), all resynced in place, `ovr ring` 0, base capture never stopped; `dma fe/s` about 2,350 (up from about 1,500: the producer now writes the input tensor in bank3 as well) |
 
+After issue #142 (the GUIX and nn subscribers folded into one camera sink with
+two steps, and the holder table; 2026-10-11, firmware `8baed71b`):
+`nn stream start --frames 300` gave 31 inferences, 1.48 inf/s, with `in -
+skipped` still equal to the inferences, and 1.47 inf/s across `lcd off` / `lcd
+on`.  The DCMI overrun count moved with the build's layout, not with the change
+(issue #144, below).
+
 ### [!] LTO is refused on this board
 
 `board.cmake` turns an attempt to enable it into a `FATAL_ERROR`, including the
@@ -412,26 +420,60 @@ deadline that drops output lives in the shared output path.  What counts as a
 console, and what the two columns mean, is in the root
 [README](../../README.md#a-board-can-run-more-than-one-console).
 
-### [!] Three subscribers share one capture, and each has to drain its sink
+### The camera streams while somebody holds it (issue #142)
 
-The GUI preview, `nn stream` and `net mjpeg` are all *subscribers* of one base
-capture.  When the LCD comes up at boot, the GUI preview subscribes and starts
-the base capture once (`ui/guix_camera_ui.c`, on the GUIX thread), so on a board
-with a working sensor the base is already running after boot, held in the
-operator's place: `camera stream start` then answers `camera: streaming live
+```
+camera stream start [test]   take hold of the base capture (test = colour bar)
+camera stream stop           let go; refused while nn holds it
+camera stream stats          counters, subscribers and the holders
+```
+
+The base capture runs while, and only while, somebody holds it: the operator
+(`camera stream start`) or nn (`nn stream start`, `nn run`).  The table is
+`svc/cam_holders` (the shared rules are in
+[svc/README.md](../../svc/README.md#the-camera-streams-ownership-issue-142)),
+kept next to the base in `port/camera/camera.c` under the camera lock.  When the
+LCD comes up at boot, GUIX takes hold in the operator's place
+(`ui/guix_camera_ui.c`), so on a board with a working sensor the base is already
+running after boot and `camera stream start` answers `camera: streaming live
 already running`.
 
-> **The camera streams while somebody holds it** (issue #142). The holders are
-> the operator (`camera stream start`, and the boot preview on its behalf) and
-> nn (`nn stream start`, `nn run`); `camera stream stats` lists them on its
-> `holders:` line. `nn stream start` and `nn run` join a running stream, or start
-> it -- in the current mode, which must stream RGB565, or they refuse -- holding
-> the operator's place too, so the camera keeps streaming after nn stops.
-> `camera stream stop` while nn holds it answers `camera: still in use: nn` and
-> changes nothing. A stream has no `--frames` / `--secs` of its own any more;
-> `nn stream start --frames <n>` is the bound. (Issue #99 removed the
-> `[qqvga|qvga]` word `nn stream start` used to take -- the geometry is whatever
-> the base publishes.)
+- **`camera stream start` has no `--frames` / `--secs` any more.**  The stream
+  runs until the last holder lets go or an error ends it; `nn stream start
+  --frames <n>` is the only bound.  `test` takes effect only when this call
+  starts the base; on a running stream the same setting is accepted and a
+  different one is refused (`the stream is running with a different test
+  setting`).
+- **`camera stream stop` while nn holds the stream** answers `camera: still in
+  use: nn` and changes nothing -- the operator stays too.  Otherwise it answers
+  `camera: stream stop requested`: the stop is asynchronous, and the producer's
+  teardown looks at the holders again under the camera lock and withdraws the
+  stop if a holder came back meanwhile.  `camera off` is refused the same way
+  while nn holds the stream.
+- **`camera stream stats` prints `holders:`**, e.g. `holders:   manual, nn`, or
+  `none`, followed by `(<n> lost when the stream ended)` after a confirmed end
+  (the auto-recovery gave up or could not re-arm, or a power-off cancelled it).
+- **`nn stream start` and `nn run` join a running stream, or start it** holding
+  the operator's place too, so the camera keeps streaming after nn stops.  They
+  start it in the current mode, which must be a streamable RGB565 mode (QQVGA
+  or QVGA); any other mode is refused, as is a running base of another format
+  (a JPEG stream for `net mjpeg`).  (Issue #99 removed the `[qqvga|qvga]` word
+  `nn stream start` used to take -- the geometry is whatever the base
+  publishes.)
+- **`camera res` / `camera format` / `camera fps` are refused while anyone holds
+  the stream** -- including between an overrun and its auto-recovery, which
+  re-arms in the mode the holders joined.  The GUI's resolution button stops and
+  restarts the base only while the operator is the sole holder.
+- **The preview follows the display, not a switch.**  The GUIX display step
+  copies a frame only while the display is on as `lcd on` / `lcd off` last set it
+  (`ltdc_display_on()`).  Under GUIX `lcd off` drives the backlight and DISP and
+  leaves the LTDC scanning, so the display step is skipped but the scanout is
+  not stopped.  The boxes are drawn only for `nn stream`; `nn run` draws none,
+  although its result is in the record (`nn dets`) either way.
+
+> **Before issue #142** the GUI preview, `nn stream` and `net mjpeg` were three
+> subscribers, the base kept no record of who wanted it, and `camera stream
+> start` took `--frames` / `--secs`.
 >
 > **The last result outlives the session** (issue #118). `nn dets` reads the
 > last published decode after a `nn run`, during a stream and after its stop;
@@ -484,11 +526,30 @@ already running`.
 > neither was counted. A `nn run` counts no decode (it reports its own
 > result).
 
-Stopping one of them detaches its sink while the base keeps running --
-that is the whole point of a subscriber -- so a delivery can already be in
-flight across the unlink: `frame_pipeline_publish()` copies the sinks it will
-deliver to into a local array, drops the pipeline lock, and only then calls
-`consume()` on each.
+### [!] Two subscribers share one capture, and each has to drain
+
+The base capture has two *subscribers* since issue #142:
+
+- **the camera sink** (`port/camera/cam_sink.c`): one RGB565 subscriber whose
+  `consume()` runs the GUIX display step, then the nn step, then
+  `camera_frame_put()`.  It is subscribed once and stays subscribed; the base
+  attaches it when it streams RGB565 and detaches it when it stops;
+- **`net mjpeg`**, a subscriber of its own, because it needs a JPEG base this
+  sink never sees.  It is not a holder either: it streams only while somebody
+  holds the base in JPEG mode.
+
+`gui stop` and `nn stream stop` do not unsubscribe anything.  Each switches its
+own step off and waits for the producer to leave it (`svc/cam_step.h`): the
+step's armed mark is dropped, and its busy count reaching 0 proves the producer
+is out of the step and cannot enter it again.  The other step and the base keep
+running.  The owner keeps its transition claimed (`port/camera/cam_own.h`)
+across disable, drain, its own clean-up and commit, exactly as it used to across
+unsubscribe and pin drain.
+
+Stopping a subscriber detaches it while the base keeps running, so a delivery
+can already be in flight across the unlink: `frame_pipeline_publish()` copies
+the sinks it will deliver to into a local array, drops the pipeline lock, and
+only then calls `consume()` on each.
 
 Two rules follow, and neither is optional (issue #72):
 
@@ -507,11 +568,12 @@ Two rules follow, and neither is optional (issue #72):
   because the branches that matter (a drain that spends its budget, two owner
   commands in flight at once) cannot be produced from the console.
 
-When a drain does spend its budget, the owner refuses to release and says so:
+When a drain -- of a step's busy count, or of a subscriber's pins -- does spend
+its budget, the owner refuses to release and says so:
 
 | command | what you see | what it means |
 |---|---|---|
-| `gui stop` | `preview did not release the camera frame; display kept` | GUIX keeps the LCD and the preview stays armed.  Run `gui stop` again. |
+| `gui stop` | `preview did not release the camera frame; display kept` | GUIX keeps the LCD and its display step stays claimed.  Run `gui stop` again. |
 | `nn stream stop` | `camera has not released the inference frame` | `nn stream start` is refused until a later `nn stream stop` finds it clear.  `nn run` reports the same condition rather than swallowing it (issue #50). |
 | `net mjpeg stop` | `camera has not released the mjpeg frame` | likewise for `net mjpeg start`. |
 
@@ -552,8 +614,14 @@ plus the overruns that ended the stream.  A DMA transfer error or a DCMI sync
 error that ends the stream is not an overrun and is not counted.  It restarts from 0 with every stream
 start, an auto-recovery included.
 
-These are still terminal -- the stream tears down (`state: stopped (overrun)`)
-and the escalating auto-recovery of owhinata/stm32f746g-disco#100 takes over:
+Since issue #142 a stream is torn down for two reasons only: a stop (the last
+holder let go) and an error.  There is no frame or time limit to reach any
+more, so the in-place resync above is the one way back from an overrun on the
+raster stream.
+
+These errors are still terminal -- the stream tears down (`state: stopped
+(overrun)`) and the escalating auto-recovery of owhinata/stm32f746g-disco#100
+takes over, holding the holders across it:
 
 - an overrun on the JPEG stream (snapshot-per-frame, not this path);
 - a DMA transfer error, or a DCMI synchronisation error or stop timeout, seen
@@ -578,6 +646,17 @@ failed after the stop was asked for.  The teardown looks at the holders again
 under the camera lock first (issue #142): a stop asked for by the last holder's
 leaving is withdrawn if a holder came back meanwhile; an error never is.  A terminal
 error that was latched still shows as `stopped (overrun)` in `stats`.
+
+**Known: how many overruns you get depends on code placement (issue #144).**
+With nothing else changed, moving unrelated code by a few dozen bytes takes the
+count from 0 to 16-18 in 3 minutes of GUIX preview, arriving in bursts of 3-4
+every 39.77 s at the same times after every boot.  The logic of the code that
+moved is not the cause: replacing an instruction with a NOP of the same length
+(same placement) keeps the overruns, and adding 32 B of padding in a function
+that runs once at boot removes them.  The root cause is suspected in the DMA2
+FIFO / SDRAM arbitration between the DCMI writes and the LTDC scan-out.  Every
+burst is resynced in place (`ovr ring` 0, nothing dropped by the ring), at a
+cost of 3-4 frames every 40 s on an unlucky layout.
 
 ## Debugging
 

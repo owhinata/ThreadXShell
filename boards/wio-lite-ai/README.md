@@ -294,6 +294,132 @@ tflm -- is now part of the default build.  But no image from this configuration
 has been flashed, so the first `--target flash` after this change ships something
 new.
 
+## Camera stream and preview (issue #142)
+
+```
+camera stream start [test]   take hold of the band stream (test = the sensor's colour bars)
+camera stream stop           let go; refused while nn holds it
+camera stream stats          band counters and the holders
+camera info                  ... and the derived preview line
+```
+
+**The band stream runs while somebody holds it.**  The holders are the operator
+(`camera stream start`) and nn (`nn stream start`, `nn run`), kept in
+`svc/cam_holders` next to the band start in `port/camera/camera.c` under the
+camera lock (the shared rules are in
+[svc/README.md](../../svc/README.md#the-camera-streams-ownership-issue-142)).
+`nn stream start` and `nn run` join a running stream, or start it holding the
+operator's place too, so the camera keeps streaming after nn stops.
+
+- `camera stream start` answers `camera: streaming live -- ...`, or `(already
+  running)`.  It has no `--frames` / `--secs`; `nn stream start --frames <n>` is
+  the only bound.  `test` takes effect only when this call starts the stream; on
+  a running stream the same setting is accepted and a different one refused.
+  `nn run` and a `nn stream start` without `test` take the running stream's
+  setting as it is, so a `nn run` over the colour bars is accepted.
+- `camera stream stop` while nn holds the stream answers `camera: still in use:
+  nn` and changes nothing -- the operator stays too.  Otherwise it stops the
+  stream and waits (at most 1 s) for the producer to end **the stream that was
+  running when the stop was asked**.  Every band start takes a new generation
+  and the teardown records the one it ended under the camera lock, so a stop
+  never ends a stream started after it.  A start or join that finds the previous
+  stream still stopping waits for it (bounded, once) instead of refusing.
+- `camera stream stats` prints `state`, `holders:` (e.g. `manual, nn`, or
+  `none`), the frame and fps counters, `ovr dcmi`, `dma fe` (and its rate), the
+  band counters (`band late`, `band torn`, `band sync`) and the two AXI-SRAM
+  bands.
+- **An error ends the stream for good on this board** -- there is no recovery.
+  It is a confirmed end: the teardown empties the table and marks every holder
+  lost, and `holders:` adds `(<n> lost when the stream ended)`.  A holder's mark
+  goes when that holder takes hold again or lets go.  nn's step skips every
+  band until nn itself starts again (`nn stream start` or `nn run`), even if the
+  operator restarts the camera in between.
+
+**One sink, two steps.**  `port/camera/cam_band.c` is the one band callback.  For
+every 60-row band it runs the preview step (`src/cam_preview.c`) and then the nn
+step (`port/nn/nn_producer.c`), each deciding at the frame's first band on its
+own, both inside the band period (~18.5 ms).  The steps use the shared
+`svc/cam_step.h` machine: the producer reads a step's armed mark and counts
+itself in in one PRIMASK section, and an owner that disarmed the step and saw
+the count reach 0 knows the producer is out of it for good -- what `nn stream
+stop` needs before it gives the input tensor back.
+
+- **The preview is derived, not switched.**  Its step is armed for the board's
+  whole life and draws while the stream runs and the display is on
+  (`ltdc_display_on()`).  `camera info` says which: `preview: on`, `off (display
+  off -- `lcd on`)` or `off (camera not streaming)`, with `shown` / `dropped`
+  counters that a `camera stream start` which lit the camera resets.
+- **The preview never waits on the producer.**  Each band tries the frame lock
+  (`ltdc_blit_try()`); a band that finds it held drops the rest of that frame
+  from the display, counts it in `dropped`, and still goes on to the nn step.
+  While `lcd anim` runs the animation holds the lock, so the preview shows little
+  or nothing and `dropped` climbs.
+- **The boxes are drawn for `nn stream` only**, not for `nn run`.  The order is
+  still the result lease, then the frame lock, and the panel does not wait.
+- A `nn stream stop` whose drain of the nn step runs out of time is remembered:
+  the worker keeps the NN session and the OCTOSPI1 place, a fresh `nn stream
+  start` is refused (retryable) before it touches anything, and the next stop
+  drains again.
+
+`camera preview on|off` and `nn overlay on|off` were removed in issue #142: the
+preview follows the stream and the display, and the boxes follow `nn stream`.
+
+**The frame-mode stream is gone** (issue #142).  The band stream used to have a
+sibling that captured whole frames into a 4-slot PSRAM ring, with `--frames` /
+`--secs` limits and a copy into the snapshot buffer at its stop.  Nothing
+started it once `camera stream` became the band stream, so it was removed with
+its ring: `.psram_noinit` is now **460,800 B** (the two LTDC frame buffers,
+307,200 B, and the snapshot `cam_frame`, 153,600 B), down by 614,400 B, and
+that is the `PSRAM` used figure `free` reports.  `camera capture`, `save` and
+`send` are unchanged.
+
+### The OCTOSPI1 guard: users and one reconfigurer (issue #142)
+
+`src/psram_guard.c` keeps one word: the number of **users** of the PSRAM window
+and a **reconfigurer** mark.  Users -- a scan-out start, `camera capture` /
+`save` / `send`, `nn bench`, `nn stream`, an mlperf run -- are counted and run
+together.  A reconfigurer -- the `psram` tuning subcommands, `membench`,
+`devmem`, `wifi flash` -- is admitted only on a zero word, sets its mark, and
+then asks the scan-out and camera gates, giving the mark back if they refuse.
+Each transition is one short PRIMASK section; nothing waits.
+
+This used to be one bit that users took too, so two users excluded each other:
+a running `nn stream` refused a later `lcd on`, although `lcd on` only sets
+LTDCEN and the backlight.  Now `lcd on` during `nn stream` goes through and the
+boxes are drawn.  `psram clk` and the other reconfigurers are still refused
+while anything uses the window.
+
+`lcd reset` holds the frame lock for about 0.25 s, so it is refused while any
+camera stream runs (`lcd: a camera stream is running -- stop it first`), and a
+stream start is refused while a reset is in progress.  The look and the claim
+are one step under the camera lock (`camera_still_claim()`).
+
+**Known gaps, older than #142 (issue #145).**  The drawing commands (`lcd anim`,
+`lcd fill`, ...) look at the scan-out outside the frame lock and hold no user
+place, so after another console's `lcd off` a reconfigurer can run while one of
+them writes PSRAM.  And an LTDC fault marks the display faulted without
+clearing LTDCEN, which hides a running LTDC from the reconfigurer's scan-out
+gate (not reproduced on hardware).  Both are manual-operation windows; neither
+is fixed here.
+
+### Measured after issue #142
+
+2026-10-11, a plugin container loaded.  The rates were taken on firmware
+`175d03e2` (the band holders, the one sink and the guard word), the PSRAM figure
+on `65c9363f` (with the frame-mode removal and the review fixes):
+
+| | before #142 | after |
+|---|---:|---:|
+| `nn stream`, `lcd off` | 2.10 inf/s | **2.26 inf/s** |
+| `nn stream`, `lcd on` | 1.90 inf/s | **1.91 inf/s** |
+| ingest, worst band | 1,021 us (#116) | 900-1,014 us, against the ~18,500 us band deadline |
+| `free` PSRAM used | 1,075,200 B | **460,800 B** |
+
+`lcd on` during `nn stream` drew the boxes (636 px charged); `lcd reset` and
+`psram clk 1` were refused while the stream ran; `camera stream stop` followed by
+`camera stream start` on one line, and `nn stream stop` followed by `nn stream
+start`, both went through.
+
 ## The nn files
 
 The command, its contract and the shared core are `svc/`'s (see
@@ -303,8 +429,8 @@ file (each `.c` with its `.h` unless only a header is listed):
 | File | Thread or context | Hardware reason |
 |---|---|---|
 | `port/nn/nn_svc_wio.c` | console | The adapter over this board's `nn.h` API; model bytes come out of the NOR asset store into the backend's PSRAM staging slot. |
-| `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (start / stop / stats / record reads) | Binds the shared frame path to the DCMI band stream (`port/camera/cam_band.h`) and holds the NN session plus the OCTOSPI1 PSRAM shared guard for the stream's lifetime; owns the glue's state (the private header lists each counter's writers and resets) and the frame path's ops table. |
-| `port/nn/nn_producer.c` | camera producer (band callback) | Downsamples each 60-row DCMI band straight into the model's input tensor on the CPU, inside one band period (~18.5 ms), and hands the frame over after the fourth band. |
+| `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (start / stop / stats / record reads) | Binds the shared frame path to the nn step of the band sink (`port/camera/cam_band.h`), holds nn's place among the camera's holders, and holds the NN session plus an OCTOSPI1 user place for the stream's lifetime; owns the glue's state (the private header lists each counter's writers and resets) and the frame path's ops table. |
+| `port/nn/nn_producer.c` | camera producer (the nn step of the band sink) | Downsamples each 60-row DCMI band straight into the model's input tensor on the CPU, inside one band period (~18.5 ms), and hands the frame over after the fourth band. |
 | `port/nn/nn_worker.c` | inference worker (`nn_work`, priority 18) | Inference runs on the CPU for ~373 ms with no yield, so the worker sits below the console, the preview and the producer; it holds the result lease across decode + publish because the preview thread outranks it. |
 | `port/nn/nn_panel.c` | panel (preview thread, priority 12) | The nn half of the LTDC preview: the may-draw question, the record snapshot and the plugin's `draw()`, with the lease only tried. The display half (frame lock, back buffer, flip) stays in `src/cam_preview.c` and is passed in as hooks (`nn_panel.h`), because `port/nn` may not include `port/ltdc`. Built only with the LCD. |
 | `port/nn/nn_active.c` | worker, panel, console, under the plugin lease | Turns `nn_tensor` into `svc/tensor.h` descriptors and states this board's frame geometry for `svc/nn_active_core.c`. |
@@ -317,6 +443,7 @@ file (each `.c` with its `.h` unless only a header is listed):
 | `port/plugin/plugin_run.c` | console (load / unload), worker, panel | The reservation in the top 32 KB of AXI-SRAM (a Cortex-M7 cannot fetch from DTCM), M7 I/D-cache maintenance, the Armv7-M MPU read-back and the staging-region precondition. |
 | `port/plugin/plugin_lease.c` | every path into the plugin | The lease as a ThreadX mutex: the preview thread outranks the worker and would otherwise preempt a decode mid-way. |
 | `port/plugin/plugin_paint.c` | panel | CPU pixel loops into the rotated, native-order RGB565 LTDC frame (no DMA2D, which has no way to prove it stopped before the flip). |
+| `port/camera/cam_band.c` | camera producer (band callback), console (step enable / disable / drain) | Not an nn file, but nn runs inside it: the one band sink, running the preview step and then the nn step; each step's armed mark and busy count are `svc/cam_step.h`'s. |
 
 [!] **Three `port/` -> `src/` includes remain on purpose.**  They are not nn
 files, and moving them would touch the LTDC, Wi-Fi and MPU code that also uses
@@ -324,7 +451,7 @@ them:
 
 | `src/` header | Included by | Why |
 |---|---|---|
-| `psram.h` | `port/nn/nn_camera.c`, `port/nn/nn_svc_wio.c` | The OCTOSPI1 PSRAM shared guard (`psram_acquire_shared()` / `psram_release_shared()`): the stream and `nn bench` read PSRAM, so a command that retunes the bus must be kept out. |
+| `psram.h` | `port/nn/nn_camera.c`, `port/nn/nn_svc_wio.c` | An OCTOSPI1 user place (`psram_acquire_shared()` / `psram_release_shared()`): the stream and `nn bench` read PSRAM, so a command that retunes the bus must be kept out (users do not exclude each other). |
 | `cam_preview.h` | `port/nn/nn_svc_wio.c` | `CAM_PREVIEW_STACK_BYTES`, the preview thread's stack: the ceiling the plugin draw allowance is asserted below. (The plugin-draw counters moved to `port/nn/nn_panel.h` in issue #140.) |
 | `blob.h` | `port/nn/nn_svc_wio.c` | The NOR asset store: `nn model load --name` reads a blob under the store's busy guard. |
 
@@ -604,14 +731,15 @@ inside the plugin, so there is nothing to copy.
   the base transform, called from inside the plugin; the fault reporter's
   `plugin_run_attribute()`; and constants).
 
-A held lease is not by itself a reason to draw -- the panel also requires
-`nn overlay` to be on and the record to hold a VALID decode of the plugin's
+A held lease is not by itself a reason to draw -- the panel also requires a
+`nn stream` (not a `nn run`) in force and the record to hold a VALID decode of the plugin's
 kind, published IN THE SESSION NOW IN FORCE (`current`, issue #118: the record
 keeps its last result across a stop, and a live preview must not keep wearing
 it).  That last condition does work since #116: a record can now say "an
 inference ran and nothing decoded it", which is valid and is not the plugin's,
-and the panel must leave such a frame alone.  Without the condition,
-`nn overlay off` was ignored on this path, a preview outliving its inference
+and the panel must leave such a frame alone.  Without the condition (when it
+was still switched by `nn overlay`, before issue #142), turning the overlay off
+was ignored on this path, a preview outliving its inference
 kept drawing retained detections, and a decode whose publication the generation
 check REJECTED -- which leaves fresh private state no accepted record describes
 -- reached the panel by a route the publication gate does not guard.
@@ -1064,7 +1192,8 @@ through the same commands in the same order):
 - **The container path is unmoved**: `nn run` finds the face
   (`faces 1 ... score 871`), `nn thresh 700` reads back through the plugin,
   the stream runs at 1.91 inf/s with 0 errors and 0 raced tensors, overlay
-  off/on mid-run does not disturb it, and `--frames 30` stops itself.
+  off/on mid-run does not disturb it (the `nn overlay` command of the time,
+  removed in issue #142), and `--frames 30` stops itself.
 - **`dmesg` carries no new warning or error.**
 
 ## Commands

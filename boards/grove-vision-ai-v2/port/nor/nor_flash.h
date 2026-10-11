@@ -6,7 +6,7 @@
  * @file    nor_flash.h
  * @brief   Board-owned lifecycle for the external QSPI NOR (issue #86).
  *
- * WHAT THIS OWNS, AND WHY IT IS NOT IN port/npu/ ANY MORE
+ * WHAT THIS OWNS, AND WHY IT IS NOT IN port/nn/npu/ ANY MORE
  *
  * The QSPI master, the memory-mapped read window, and the interrupt the vendor
  * library uses to move data with DMA.  Those used to be brought up inside

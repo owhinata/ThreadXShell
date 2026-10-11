@@ -9,7 +9,7 @@
  *
  * What a plugin may be lent on a thread is what that thread has left at the
  * instant the plugin is entered, less the exception reserve and a margin
- * (port/npu/nn_plugin_stack.h).  This records the first term, where it happens:
+ * (port/nn/nn_plugin_stack.h).  This records the first term, where it happens:
  *
  *   - the six callbacks svc/nn_active_core.c calls through are sampled in the function
  *     that makes the indirect call, immediately before it (NN_PROBE_SP() reads

@@ -441,12 +441,12 @@ set(SHELL_SOURCES
     # decision and the calls into the plugin shared with wio (issue #126), this
     # board's tensors, geometry and depth record beside it.
     "${CMAKE_SOURCE_DIR}/svc/nn_active_core.c"
-    "${BOARD_DIR}/port/npu/nn_active.c"
+    "${BOARD_DIR}/port/nn/nn_active.c"
     # The stack depth where each plugin callback is entered, per slot and per
     # thread (issue #119): the pure half has a host test, the other half is
     # what only the board can do -- ask ThreadX who is running.
-    "${BOARD_DIR}/port/npu/nn_probe.c"
-    "${BOARD_DIR}/port/npu/nn_probe_rtos.c"
+    "${BOARD_DIR}/port/nn/nn_probe.c"
+    "${BOARD_DIR}/port/nn/nn_probe_rtos.c"
     # Camera frame ring (issue #35).  Freestanding: it depends on <stdint.h>
     # and an injected lock vtable only, which is why the same file serves all
     # three boards and has a host unit test (shell/test/test_frame_pipeline.c).
@@ -566,11 +566,11 @@ add_library(tflm_obj OBJECT
 # is load-bearing for camera.c's stop join, which budgets two of these waits.
 # A configure-time FATAL_ERROR is the point -- silently falling back to a
 # default here would put the number back to being written twice.
-file(STRINGS "${BOARD_DIR}/port/npu/npu_hw.h" _npu_timeout_line
+file(STRINGS "${BOARD_DIR}/port/nn/npu/npu_hw.h" _npu_timeout_line
      REGEX "^#define[ \t]+NPU_INFERENCE_TIMEOUT_TICKS[ \t]+[0-9]+u?[ \t]*$")
 if(NOT _npu_timeout_line)
     message(FATAL_ERROR
-            "could not find NPU_INFERENCE_TIMEOUT_TICKS in port/npu/npu_hw.h; "
+            "could not find NPU_INFERENCE_TIMEOUT_TICKS in port/nn/npu/npu_hw.h; "
             "it is the single source of truth for the ethos-u inference wait")
 endif()
 string(REGEX REPLACE "^#define[ \t]+NPU_INFERENCE_TIMEOUT_TICKS[ \t]+([0-9]+u?)[ \t]*$"
@@ -593,7 +593,7 @@ target_compile_definitions(tflm_obj PUBLIC
     # would otherwise default this to "wait forever" and a lost NPU interrupt
     # would suspend the calling shell job with no way back.
     #
-    # [!] PARSED from port/npu/npu_hw.h, not written here (issue #48).  The
+    # [!] PARSED from port/nn/npu/npu_hw.h, not written here (issue #48).  The
     # value used to exist in both places with only this one live, so the
     # header's constant was dead and would have drifted the first time somebody
     # tuned it -- and since #48 the number is load-bearing for the camera's
@@ -690,19 +690,19 @@ add_library(shell_objs OBJECT
     # `nn run`'s sink: no panel, no thread, one put per frame (issue #129).
     "${BOARD_DIR}/port/camera/cam_capture_sink.c"
     # Ethos-U55 inference glue (issue #44).  The C++ interpreter is contained
-    # behind port/npu/npu.h; nothing above it sees a TFLite type.
-    "${BOARD_DIR}/port/npu/npu_tflm.cc"
-    "${BOARD_DIR}/port/npu/npu_arena.c"
-    "${BOARD_DIR}/port/npu/npu_rtos.c"
-    "${BOARD_DIR}/port/npu/npu_cache.c"
-    "${BOARD_DIR}/port/npu/npu_payload.c"
-    "${BOARD_DIR}/port/npu/npu_model_scan.cc"
-    "${BOARD_DIR}/port/npu/npu_hw.c"
-    "${BOARD_DIR}/port/npu/nn_preproc.c"
-    "${BOARD_DIR}/port/npu/nn_overlay.c"
+    # behind port/nn/npu/npu.h; nothing above it sees a TFLite type.
+    "${BOARD_DIR}/port/nn/npu/npu_tflm.cc"
+    "${BOARD_DIR}/port/nn/npu/npu_arena.c"
+    "${BOARD_DIR}/port/nn/npu/npu_rtos.c"
+    "${BOARD_DIR}/port/nn/npu/npu_cache.c"
+    "${BOARD_DIR}/port/nn/npu/npu_payload.c"
+    "${BOARD_DIR}/port/nn/npu/npu_model_scan.cc"
+    "${BOARD_DIR}/port/nn/npu/npu_hw.c"
+    "${BOARD_DIR}/port/nn/nn_preproc.c"
+    "${BOARD_DIR}/port/nn/nn_camera.c"
     # The decode record `nn dets` reads (issue #118): the storage and its
     # interrupt-disabled lock here, the decisions in the shared svc/ file.
-    "${BOARD_DIR}/port/npu/nn_rec.c"
+    "${BOARD_DIR}/port/nn/nn_rec.c"
     "${CMAKE_SOURCE_DIR}/svc/nn_det_record.c"
     # npu_tensor -> tensor_desc (issues #97, #104).  The only file here that
     # knows both types, and all that is left of what used to be nn_decoder.c:
@@ -711,23 +711,23 @@ add_library(shell_objs OBJECT
     # container's decoder is the only one on this board.  `nn out`, `nn info`
     # and the active-decoder shim need this translation whatever interprets the
     # tensors, or whether anything does.
-    "${BOARD_DIR}/port/npu/npu_desc.c"
-    "${BOARD_DIR}/port/npu/nn_svc_grove.c"
-    "${BOARD_DIR}/port/npu/nn_stream_state.c"
+    "${BOARD_DIR}/port/nn/npu/npu_desc.c"
+    "${BOARD_DIR}/port/nn/nn_svc_grove.c"
+    "${BOARD_DIR}/port/nn/nn_stream_state.c"
     # The inference worker and who may touch its input (issue #129): the
     # thread and its join here; the hand-over table and the frame path that
     # runs it are shared since issue #130 (svc/, walked by shell/test/
     # test_nn_handoff.c and test_nn_core_frame.c).
-    "${BOARD_DIR}/port/npu/nn_worker.c"
+    "${BOARD_DIR}/port/nn/nn_worker.c"
     "${CMAKE_SOURCE_DIR}/svc/nn_handoff.c"
     "${CMAKE_SOURCE_DIR}/svc/nn_core_frame.c"
     # How `nn run`'s wait for its one inference ends (issue #129): a pure
     # table, walked by test/test_nn_run_wait.c.
-    "${BOARD_DIR}/port/npu/nn_run_wait.c"
+    "${BOARD_DIR}/port/nn/nn_run_wait.c"
     # What the worker does with a model's outputs (issue #129): a stream, `nn
     # run` with a plugin and a bare `nn run` each read them their own way.
     # Pure, walked by test/test_nn_outputs.c.
-    "${BOARD_DIR}/port/npu/nn_outputs.c"
+    "${BOARD_DIR}/port/nn/nn_outputs.c"
     # Where a `nn model load` ends and what that obliges (issue #122): a pure
     # table shared by every board since issue #131, so shell/test/
     # test_nn_swap.c walks the endings a console cannot produce.
@@ -737,7 +737,7 @@ add_library(shell_objs OBJECT
     "${CMAKE_SOURCE_DIR}/svc/nn_core_model.c"
     # The gate's claim and the count of threshold calls inside the plugin
     # (issue #122): one transition each, walked by test/test_nn_param_calls.c.
-    "${BOARD_DIR}/port/npu/nn_param_calls.c"
+    "${BOARD_DIR}/port/nn/nn_param_calls.c"
     "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"
     # The policy around it, and the stream's numbers (issue #130).
     "${CMAKE_SOURCE_DIR}/svc/nn_core.c"
@@ -764,7 +764,8 @@ target_include_directories(shell_objs PRIVATE
     "${BOARD_DIR}/port/nor"
     "${BOARD_DIR}/port/lcd"
     "${BOARD_DIR}/port/camera"
-    "${BOARD_DIR}/port/npu"
+    "${BOARD_DIR}/port/nn"
+    "${BOARD_DIR}/port/nn/npu"
     "${BOARD_DIR}/port/plugin"
     # Header surface of the two camera archives (issue #35): the CIS (sensor
     # I2C) layer and the sensor datapath library.  Not in bsp_iface because
@@ -887,7 +888,7 @@ target_compile_options(shell_objs PRIVATE -Os)
 # carry the compile options with the code, every time it moves.
 set(GROVE_O3_SOURCES
     "${BOARD_DIR}/port/camera/cam_convert.c"
-    "${BOARD_DIR}/port/npu/nn_preproc.c"
+    "${BOARD_DIR}/port/nn/nn_preproc.c"
     "${BOARD_DIR}/port/lcd/lcd_st7789.c"
     "${BOARD_DIR}/port/lcd/lcd_rect.c"
     "${CMAKE_SOURCE_DIR}/svc/rect_geom.c")
@@ -1341,8 +1342,8 @@ endif()
 # one of them.  Neither is in ALL -- compiling schema_generated.h plus the
 # interpreter costs a few seconds and most builds never need it.
 #
-# [!] verify_vela_model links THE FIRMWARE'S OWN port/npu/npu_payload.c and
-# port/npu/npu_arena.c.  That is the whole design: a host checker that
+# [!] verify_vela_model links THE FIRMWARE'S OWN port/nn/npu/npu_payload.c and
+# port/nn/npu/npu_arena.c.  That is the whole design: a host checker that
 # reimplemented the payload walk could agree with itself and disagree with the
 # board, and one that hardcoded the arena size would drift from the reservation.
 # The two .c files need -x c EACH -- one -x c in front of a list applies only to
@@ -1418,28 +1419,28 @@ if(HOST_CXX)
                 -I "${TFLM}/third_party/gemmlowp"
                 -I "${TFLM}/third_party/ruy"
                 -I "${_ethosu_drv_inc}"
-                -I "${BOARD_DIR}/port/npu"
+                -I "${BOARD_DIR}/port/nn/npu"
                 -DTF_LITE_STATIC_MEMORY -DTF_LITE_MCU_DEBUG_LOG
                 -DETHOS_U -DETHOSU55 -DETHOSU_ARCH=u55
                 "${BOARD_DIR}/scripts/verify_vela_model.cc"
-                -x c "${BOARD_DIR}/port/npu/npu_payload.c"
-                -x c "${BOARD_DIR}/port/npu/npu_arena.c"
+                -x c "${BOARD_DIR}/port/nn/npu/npu_payload.c"
+                -x c "${BOARD_DIR}/port/nn/npu/npu_arena.c"
                 -x none
-                "${BOARD_DIR}/port/npu/npu_model_scan.cc"
+                "${BOARD_DIR}/port/nn/npu/npu_model_scan.cc"
                 ${_tflm_host_srcs}
                 -Wl,--gc-sections
                 -o "${CMAKE_BINARY_DIR}/verify_vela_model"
         DEPENDS "${BOARD_DIR}/scripts/verify_vela_model.cc"
-                "${BOARD_DIR}/port/npu/npu_model_scan.cc"
-                "${BOARD_DIR}/port/npu/npu_model_scan.h"
-                "${BOARD_DIR}/port/npu/npu_payload.c"
-                "${BOARD_DIR}/port/npu/npu_payload.h"
-                "${BOARD_DIR}/port/npu/npu_arena.c"
-                "${BOARD_DIR}/port/npu/npu.h"
+                "${BOARD_DIR}/port/nn/npu/npu_model_scan.cc"
+                "${BOARD_DIR}/port/nn/npu/npu_model_scan.h"
+                "${BOARD_DIR}/port/nn/npu/npu_payload.c"
+                "${BOARD_DIR}/port/nn/npu/npu_payload.h"
+                "${BOARD_DIR}/port/nn/npu/npu_arena.c"
+                "${BOARD_DIR}/port/nn/npu/npu.h"
                 # The bounded flatbuffer check the firmware runs (issue #93).
                 # Listed so that changing a limit rebuilds the host gate: the
                 # whole point of sharing it is that the two cannot disagree.
-                "${BOARD_DIR}/port/npu/npu_verify.h"
+                "${BOARD_DIR}/port/nn/npu/npu_verify.h"
         COMMENT "host c++ -> verify_vela_model (checks a model before it is flashed)"
         VERBATIM)
 
@@ -1693,7 +1694,7 @@ add_custom_target(flash
 #
 # The depth is taken at the plugin's entry and has two sources, which have to
 # agree: `nn stream stats` prints the high-water per slot and per thread from the
-# probe beside each indirect call (port/npu/nn_probe.h), and the same depth is
+# probe beside each indirect call (port/nn/nn_probe.h), and the same depth is
 # the sum of the frames on the deepest call path in the final ELF.  The board
 # README carries both (issue #119).  The reserve is 208 B, derived rather than
 # measured (at most one hardware exception frame lands on a thread's PSP --
@@ -1702,7 +1703,7 @@ add_custom_target(flash
 # ThreadX's own 100 B PendSV save, which can coexist with it while a callback is
 # suspended).
 #
-# Which thread each slot runs on is the table in port/npu/nn_plugin_stack.h,
+# Which thread each slot runs on is the table in port/nn/nn_plugin_stack.h,
 # where the firmware also asserts every allowance below each of those stacks:
 # the shell's (a console, or a background job) for every slot but draw and
 # decode, the panel's for draw, and the inference worker's -- alone -- for decode
@@ -1710,7 +1711,7 @@ add_custom_target(flash
 # from the console).
 #
 # [!] UNTIL ISSUE #119 THE DEPTH WAS TAKEN IN THE WRONG PLACE AND ON TWO THREADS.
-# The probe sat in nn_overlay.c, before the call into nn_active_*(), so the frame
+# The probe sat in nn_camera.c, before the call into nn_active_*(), so the frame
 # that function builds before it calls through -- the tensor descriptors -- was
 # not in the number, and nothing measured the shell thread, where decode also
 # runs and where the deepest path is.  The 553 / 217 B figures of issue #104
@@ -1749,7 +1750,7 @@ set(GROVE_PLUGIN_STACK_WORKER   1024)
 # GROVE_PLUGIN_STACK_* definitions are derived from it by the shared helpers,
 # and the build reads the seven numbers the shipped policy holds back out of
 # shell.elf and compares them with it (cmake/check_policy_probe.py).  The
-# firmware states its own mapping in port/npu/nn_plugin_stack.h -- with the
+# firmware states its own mapping in port/nn/nn_plugin_stack.h -- with the
 # asserts against each thread -- and that is what the read-back holds to this.
 include("${CMAKE_SOURCE_DIR}/cmake/plugin_stack_table.cmake")
 plugin_stack_table(

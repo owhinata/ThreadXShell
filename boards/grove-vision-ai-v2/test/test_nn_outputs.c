@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host test for what the inference worker does with a model's outputs (issue
- * #129, port/npu/nn_outputs.c).
+ * #129, port/nn/nn_outputs.c).
  *
  * WHY THIS EXISTS.  When `nn run` moved onto the worker, the outputs were read
  * once, before the plugin question, with the stream's rule -- so a bare model

@@ -9,7 +9,7 @@
  * C++ ONLY -- it speaks flatbuffer types, which is exactly why it is separate
  * from npu.h.  Two translation units include it:
  *
- *   port/npu/npu_tflm.cc          npu_open() refuses a model that fails this
+ *   port/nn/npu/npu_tflm.cc          npu_open() refuses a model that fails this
  *   scripts/verify_vela_model.cc  the host gate, before the model is flashed
  *
  * [!] THE SHARING IS THE POINT, AND IT IS NOT ONLY ABOUT THE WALK.

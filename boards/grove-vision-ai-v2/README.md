@@ -2024,7 +2024,7 @@ nn run
 **The order inside `nn model load --name <name>` is the design**, and every step of it is
 load-bearing.  Since issue #131 the order itself is `svc/nn_core_model.c`, shared by every
 board and walked step by step by `shell/test/test_nn_core_model.c`; what this board supplies
-are the steps' contents (`port/npu/nn_svc_grove.c`: the claim, the bring-up, the lookup, the
+are the steps' contents (`port/nn/nn_svc_grove.c`: the claim, the bring-up, the lookup, the
 backend's close-and-reopen and the identity):
 
 1. the `nn` ownership gate, as every subcommand has.
@@ -2082,7 +2082,7 @@ plugin over the code a threshold call was executing.  Now a threshold call is
 counted in around its call into the plugin's param function, refused (`busy`)
 only while a load or unload holds the gate, and a load or unload is refused
 (`busy`) while the count is not zero; nobody waits.  Each test is in the same
-critical section as the change it guards (`port/npu/nn_param_calls.c`,
+critical section as the change it guards (`port/nn/nn_param_calls.c`,
 `test/test_nn_param_calls.c`).  Since issue #127 the count covers `nn dets` as
 well, and both take the plugin lease after they are counted in, so the stream's
 decode (the inference worker's since issue #129) and a threshold call are no
@@ -3872,7 +3872,7 @@ answering and Ctrl+C would not land.  A static ThreadX pool replaces it, so the
 inference thread suspends instead.  `nn run &` returns the prompt immediately.
 
 `ETHOSU_SEMAPHORE_WAIT_INFERENCE` is set to a finite 1000 ticks
-(`NPU_INFERENCE_TIMEOUT_TICKS`, `port/npu/npu_hw.h`); the header
+(`NPU_INFERENCE_TIMEOUT_TICKS`, `port/nn/npu/npu_hw.h`); the header
 would otherwise default it to "wait forever", and a lost NPU interrupt would
 suspend the calling job with no way back.
 
@@ -4053,7 +4053,7 @@ including mutations compiled with this board's actual service flags. The
 plugin's actual-object audit remains independent. See the
 [shared storage gate contract](../../cmake/README.md).
 
-`port/npu/npu_desc.c` is what remains of this board's half: `npu_tensor` ->
+`port/nn/npu/npu_desc.c` is what remains of this board's half: `npu_tensor` ->
 `tensor_desc`, and nothing else.  `nn out`, `nn info` and the active-decoder shim
 all need that translation whatever interprets the tensors -- or whether anything
 does -- which is why it outlived the decoder that used to share its file.
@@ -4169,7 +4169,7 @@ and requires the decoded sizes to differ by the ratio of the scales.
 
 ### The resize, and why it is host-tested
 
-`port/npu/nn_preproc.c`: crop the largest centred rectangle with the INPUT's
+`port/nn/nn_preproc.c`: crop the largest centred rectangle with the INPUT's
 aspect ratio, then bilinear-scale it in, in fixed point, with no libm and no
 vectorisation.  It depends on nothing -- no hardware, no ThreadX, no camera or
 NPU singleton -- so `test/test_nn_preproc.c` compiles the real thing and drives
@@ -4258,7 +4258,7 @@ Three things behave differently now that the stream outlives the command:
   holder did not let go within the bound -- see "One lock into the plugin".
 
 **The record (issue #118).**  `nn dets` reads the last result `nn run` or a
-stream published (`port/npu/nn_rec.c`, the decisions in `svc/nn_det_record.c`);
+stream published (`port/nn/nn_rec.c`, the decisions in `svc/nn_det_record.c`);
 it no longer decodes.  A stop does not clear it; `nn model load` and `nn model
 unload` do.  **A stop takes its record boundary only after
 `camera_stream_stop()` has confirmed the producer is out of `consume()` AND the
@@ -4375,7 +4375,7 @@ on the producer:
 |---|---:|---:|---|---|
 | panel (`cam_lcd_sink.c`) | 9 | 2,048 B (DTCM) | stage, `draw()` the latest result under the panel guard + plugin lease **try**, blit | the producer's hand-off semaphore |
 | camera producer (`camera.c`) | 10 | 8,192 B (DTCM) | count the frame; if the worker wants one, prepare it **straight into the model's input tensor** and hand it over | the datapath's frame-ready |
-| inference worker (`port/npu/nn_worker.c`) | 12 | 8,192 B (DTCM) | invoke, plugin lease (bounded wait), geometry, decode, record publish | an event flag the hand-over sets |
+| inference worker (`port/nn/nn_worker.c`) | 12 | 8,192 B (DTCM) | invoke, plugin lease (bounded wait), geometry, decode, record publish | an event flag the hand-over sets |
 | mve worker | 15 | 1,024 B | (`mve` only) | -- |
 | console | 16 | 4,096 B | `nn stream start/stop/stats`, `nn run`'s wait | UART |
 | background job | 17 | 4,096 B | `cmd &` | -- |
@@ -4453,7 +4453,7 @@ prepares the first frame the worker wants and declines the rest; the worker
 decodes and publishes it -- or, with no plugin, publishes the raw output
 descriptors -- and parks for good (DONE_LAST).  The outputs are read after the
 plugin question, under the lease, each caller its own way
-(`port/npu/nn_outputs.c`): a bare model counts every output and describes the
+(`port/nn/nn_outputs.c`): a bare model counts every output and describes the
 first eight it can read; `nn run` with a plugin decodes the first eight and
 names an output it cannot read; a stream refuses a model with more than eight.  The console waits on the record,
 on the wall clock, at most **4,300 ms**: the camera's first-frame timeout
@@ -5059,7 +5059,7 @@ cancel an invoke already waiting; nothing can.  It narrows the window, and
 
 The inference timeout came down from 5,000 ticks to **1,000** as part of this,
 and now has ONE definition -- `NPU_INFERENCE_TIMEOUT_TICKS` in
-`port/npu/npu_hw.h`, which `board.cmake` parses.  It used to be written in both
+`port/nn/npu/npu_hw.h`, which `board.cmake` parses.  It used to be written in both
 places with only the CMake literal live, so the header's constant was dead and
 would have drifted the first time anyone tuned it.
 
@@ -5356,7 +5356,7 @@ the panel thread (2,048 B, whose measured peak at issue #64 is already 544 B),
 decode on the inference worker (8 KiB) for both `nn stream` and `nn run` since
 issue #129 (before it: the camera producer for the stream, the shell for `nn run`
 and, until issue #118, `nn dets`), and everything else on the shell -- a console
-or a background job.  `port/npu/nn_plugin_stack.h` is the table.  These stacks are
+or a background job.  `port/nn/nn_plugin_stack.h` is the table.  These stacks are
 statically allocated and do not grow.  An overflow is
 caught here -- the ThreadX M55 port sets PSPLIM per thread, so it raises a
 UsageFault with `CFSR.STKOF` and lands in `fault.c` -- but the M7 boards have no
@@ -5439,7 +5439,7 @@ of formatting.
 
 `svc/nn_active_core.c` is the only place that decides which decoder is in force
 -- shared with wio-lite-ai since issue #126 and reached through this board's
-`port/npu/nn_active.c`, which converts the tensors and states the board's facts
+`port/nn/nn_active.c`, which converts the tensors and states the board's facts
 -- and **everything** goes through it: the one-shot decode, the stream's
 admission, decode and draw, the threshold, and the report.  This board's fact
 that differs from wio's: with no plugin loaded, `shapes_ok` refuses.
@@ -5573,7 +5573,7 @@ allowance(slot) <= min over every path that reaches the slot of
 ```
 
 **A slot is declared against the shallowest thread that can call it.** Which
-thread each slot runs on is stated once, in `port/npu/nn_plugin_stack.h`, as data
+thread each slot runs on is stated once, in `port/nn/nn_plugin_stack.h`, as data
 (`GROVE_PLUGIN_RUNS_*`).  Both of its readers take it from there: the header's
 asserts -- one per slot and thread, every allowance strictly below every stack
 its slot runs on -- and the stack report's coverage marks.  Read the table there;
@@ -5626,13 +5626,13 @@ refusal stays either way.
 
 #### Where the depth is taken
 
-At the plugin's entry, one record per slot and per thread (`port/npu/nn_probe.h`):
+At the plugin's entry, one record per slot and per thread (`port/nn/nn_probe.h`):
 
 - **the six callbacks `svc/nn_active_core.c` calls through** are sampled in the
   function that makes the indirect call, immediately before it, and handed to
   this board's record through the `note` it is given (issue #126).  The stack
   pointer is read explicitly (`mov rX, sp`), after everything passed has been
-  built -- the tensor descriptor array, in `port/npu/nn_active.c`'s frame above
+  built -- the tensor descriptor array, in `port/nn/nn_active.c`'s frame above
   it, included.
 - **entry()** is called inside the shared loader, `svc/plugin_exec.c`, which may
   own no storage.  The loader calls this board's `exec_ok` hook (`pl_exec_ok()`
@@ -5654,7 +5654,7 @@ stack pointer outside the thread's own stack is not a depth: it is counted as
 entry() is measured before any stream exists.
 
 **[!] Until issue #119 the probe stood in the wrong place.**  It sat in
-`nn_overlay.c`, before the call into `nn_active_*()`, so the frame
+`nn_camera.c`, before the call into `nn_active_*()`, so the frame
 `nn_active_decode()` builds before it calls through -- 320 B, the descriptors --
 was not in the number, and nothing measured the shell thread, where the deepest
 path is.  The 553 / 217 B of issues #104 and #110 were that probe.  They are not
@@ -6044,7 +6044,7 @@ detector from a classifier, so it stops guessing rather than guessing quietly.
 to the resident decoder, whose arithmetic assumed `pixel - 128` was read as scale
 1/255 zero point -128.  A bare model whose input says otherwise is still fed, and
 the tensors above are then a faithful reading of a meaningless inference.  The
-fill convention is a property of this board (`port/npu/nn_preproc.h`) that a
+fill convention is a property of this board (`port/nn/nn_preproc.h`) that a
 container is written against -- the vendor's own CIFAR-10 model records scale
 0.0203 zero point -8 and is fed `pixel - 128` deliberately.
 
@@ -6201,7 +6201,7 @@ this: `to_frame(0,0,1,1)` is exactly the rectangle its output covers.
 **[!] Nothing stale reaches the panel.**  `decode()` drops its draw-valid flag on
 entry and raises it only on the fully successful path.  The firmware already
 declines to call `draw()` while the stream's latest decode is a failure --
-`nn_overlay.c`'s `process()` returns non-zero and the sink never installs the
+`nn_camera.c`'s `process()` returns non-zero and the sink never installs the
 hook (issue #129: the latest decode, not this frame's) -- so this is the second
 line of defence, and it is the one that survives someone adding an early return
 to `decode()` later.  Without it the panel keeps showing the last good label over

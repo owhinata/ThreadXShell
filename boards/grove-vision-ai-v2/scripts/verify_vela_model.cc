@@ -19,10 +19,10 @@
  *   - npu_open() refuses a payload whose driver actions continue past the
  *     command stream (issue #46), because the driver can abandon a launch with
  *     the arena still owned by the NPU.  So this tool runs THE FIRMWARE'S OWN
- *     walk -- port/npu/npu_payload.c is compiled in, not reimplemented -- over
+ *     walk -- port/nn/npu/npu_payload.c is compiled in, not reimplemented -- over
  *     the same bytes the driver will parse.
  *   - AllocateTensors() has to fit the model in the arena the board reserves.
- *     So this tool compiles THE BOARD'S OWN reservation -- port/npu/npu_arena.c
+ *     So this tool compiles THE BOARD'S OWN reservation -- port/nn/npu/npu_arena.c
  *     -- and plans into it.  "384.86 KiB" from Vela's summary is the NPU's SRAM
  *     figure, which is a different number from what TFLM's planner consumes.
  *   - The decoder locates outputs by shape, so the shapes and their
@@ -678,7 +678,7 @@ int main(int argc, char **argv)
 
 	/* --- does it fit the arena the board reserves? ------------------------ */
 	/*
-	 * The REAL reservation (port/npu/npu_arena.c) is compiled into this tool,
+	 * The REAL reservation (port/nn/npu/npu_arena.c) is compiled into this tool,
 	 * so the number planned against is the board's by construction rather than
 	 * by a constant repeated here and left to drift.
 	 */

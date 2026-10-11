@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host test for the gate's claim and the threshold-call count (issue #122,
- * port/npu/nn_param_calls.c).
+ * port/nn/nn_param_calls.c).
  *
  * WHY THIS EXISTS.  `nn thresh` takes no gate, and since a load can replace an
  * open model, a load on the other console could copy a new plugin over the code

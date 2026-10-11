@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host test for how `nn run`'s wait ends (issue #129, port/npu/nn_run_wait.c).
+ * Host test for how `nn run`'s wait ends (issue #129, port/nn/nn_run_wait.c).
  *
  * WHY THIS EXISTS.  Several of the endings can hold in the same poll -- a
  * publish and the deadline, a publish and a Ctrl+C, a lost stream and a

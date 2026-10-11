@@ -2,11 +2,11 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host unit test for port/npu/nn_probe.c -- the pure half of the plugin stack
+ * Host unit test for port/nn/nn_probe.c -- the pure half of the plugin stack
  * probe (issue #119).
  *
  * WHY THIS FILE.  What the probe reports becomes the input to a stack allowance
- * (port/npu/nn_plugin_stack.h), and every way it can be wrong is wrong in the
+ * (port/nn/nn_plugin_stack.h), and every way it can be wrong is wrong in the
  * UNSAFE direction or is invisible on the board:
  *
  *   - a sample taken on a stack it was not attributed to -- an exception

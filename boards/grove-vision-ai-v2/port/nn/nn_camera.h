@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  */
 /**
- * @file    nn_overlay.h
+ * @file    nn_camera.h
  * @brief   Face detection over the live preview (issue #48).
  *
  * The NN half of cam_lcd_sink.h's overlay contract: inference on each published
@@ -75,7 +75,7 @@ struct nn_overlay_stats {
 
 	/* The stack depth where a plugin is entered is not here any more: it is
 	 * per slot and per thread, and taken at the entry itself rather than in
-	 * this file's call sites (port/npu/nn_probe.h, issue #119). */
+	 * this file's call sites (port/nn/nn_probe.h, issue #119). */
 
 	/* What a plugin's draw() actually spends of its painter budget, and how
 	 * often it was refused (issue #103).  Reported so the cap is judged

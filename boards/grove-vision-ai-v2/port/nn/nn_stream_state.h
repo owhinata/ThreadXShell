@@ -24,7 +24,7 @@
  *
  * [!] THE CODES BELOW ARE MIRRORED, NOT INCLUDED, and that is deliberate: this
  * file is compiled on the host with no board on the include path (camera.h
- * pulls in the whole datapath).  port/npu/nn_svc_grove.c static-asserts each one
+ * pulls in the whole datapath).  port/nn/nn_svc_grove.c static-asserts each one
  * against the camera's own definition, so a drift is a build failure on the
  * board rather than a table that quietly decides about numbers nobody returns.
  */

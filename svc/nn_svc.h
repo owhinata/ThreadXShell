@@ -8,7 +8,7 @@
  *
  * Three boards run inference behind three different runtimes: f746g-disco and
  * wio-lite-ai share a model/tensor API in their own port/nn/, and
- * grove-vision-ai-v2 has port/npu/, whose open also brings up the NPU and takes a
+ * grove-vision-ai-v2 has port/nn/npu/, whose open also brings up the NPU and takes a
  * lease on the external NOR window.  Each grew its own command, and the three
  * drifted in name, grammar and output.  This is the seam that lets ONE command
  * in shell/cmds/ serve all three: the declarations here are implemented by a

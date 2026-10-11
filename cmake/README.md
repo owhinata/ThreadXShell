@@ -260,7 +260,7 @@ over the definition the table makes, with only a warning), lowering or raising
 it; and the firmware mapping a slot to a different allowance than the table --
 both boards' firmware still states its own slot -> allowance mapping, next to
 the asserts that hold each allowance under the threads its slot runs on
-(Grove `port/npu/nn_plugin_stack.h`, wio `port/nn/nn_svc_wio.c`).
+(Grove `port/nn/nn_plugin_stack.h`, wio `port/nn/nn_svc_wio.c`).
 
 What it does NOT catch: a mapping disagreement between two allowances of EQUAL
 value -- today every allowance on both boards is 1,024 B, so the device enforces

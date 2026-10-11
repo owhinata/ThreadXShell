@@ -29,7 +29,7 @@
 #  registered no table.
 #
 #  [!] THE FIRMWARE STILL STATES ITS OWN SLOT -> ALLOWANCE MAPPING, AND THAT IS
-#  WHAT THE READ-BACK COMPARES WITH.  Grove's port/npu/nn_plugin_stack.h and
+#  WHAT THE READ-BACK COMPARES WITH.  Grove's port/nn/nn_plugin_stack.h and
 #  wio's nn_svc_wio.c map each slot to one of the macros defined here, next to
 #  the asserts that hold every allowance under the threads its slot runs on.
 #  cmake/check_policy_probe.py reads the seven numbers the shipped policy

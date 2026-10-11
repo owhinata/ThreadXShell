@@ -47,11 +47,39 @@ int nn_core_model_copy_stands(uint32_t seq0, uint32_t seq1, int claim_free)
 	return (seq0 & 1u) == 0u && seq0 == seq1;
 }
 
-/* What is open when nothing has been changed: the refusals before the claim,
- * and a refused claim, report it as it stands. */
+/* What is open when nothing has been changed: the refusals before the claim
+ * report it as it stands.  Read without the claim, so another console's load
+ * may be half way through -- which is why a BUSY refusal never asks. */
 static enum nn_model_state nn_core_model_as_is(const struct nn_core_model_board *b)
 {
 	return b->backend->has_model() ? NN_MODEL_PREVIOUS : NN_MODEL_EMPTY;
+}
+
+/*
+ * A load's two answers.  [!] A BUSY REFUSAL LEAVES @p state UNWRITTEN (issue
+ * #138): it never replaces or loses the open model, the command does not read
+ * a state beside it (issue #131 stage 8), and a refused claim could only fill
+ * one by asking has_model() outside the claim -- a value nobody can trust.
+ */
+static void nn_core_model_answer(struct nn_core_model_job *j, int status,
+                                 enum nn_model_state *state,
+                                 enum nn_model_state value)
+{
+	if (status != NN_SVC_ERR_BUSY)
+		*state = value;
+	nn_core_model_result(j, status);
+}
+
+/* A refusal before the claim: nothing changed, and only a refusal that is not
+ * BUSY reads what is open. */
+static void nn_core_model_refuse_unclaimed(const struct nn_core_model_board *b,
+                                           struct nn_core_model_job *j,
+                                           int status,
+                                           enum nn_model_state *state)
+{
+	nn_core_model_answer(j, status, state,
+	                     status == NN_SVC_ERR_BUSY ? NN_MODEL_EMPTY
+	                                               : nn_core_model_as_is(b));
 }
 
 /* The backend's swap, then the plugin -- the steps under which the plugin's
@@ -106,7 +134,6 @@ void nn_core_model_load(struct nn_core_model *m,
 	enum nn_swap_end end;
 	int status = NN_SVC_OK, leased = 0;
 
-	*state      = NN_MODEL_EMPTY;
 	j->had_open = 0;
 	j->bare     = 0;
 
@@ -118,23 +145,19 @@ void nn_core_model_load(struct nn_core_model *m,
 	    (b->tags & NN_CORE_MODEL_TAG(j->spec->tag)) == 0u) {
 		if (b->spec_refused != NULL)
 			b->spec_refused(j);
-		*state = nn_core_model_as_is(b);
-		nn_core_model_result(j, NN_SVC_ERR_SPEC);
+		nn_core_model_refuse_unclaimed(b, j, NN_SVC_ERR_SPEC, state);
 		return;
 	}
 	if (b->check_spec != NULL && (status = b->check_spec(j)) != NN_SVC_OK) {
-		*state = nn_core_model_as_is(b);
-		nn_core_model_result(j, status);
+		nn_core_model_refuse_unclaimed(b, j, status, state);
 		return;
 	}
 	if (b->admit != NULL && (status = b->admit(j)) != NN_SVC_OK) {
-		*state = nn_core_model_as_is(b);
-		nn_core_model_result(j, status);
+		nn_core_model_refuse_unclaimed(b, j, status, state);
 		return;
 	}
 	if (!b->claim_take()) {
-		*state = nn_core_model_as_is(b);
-		nn_core_model_result(j, NN_SVC_ERR_BUSY);
+		nn_core_model_refuse_unclaimed(b, j, NN_SVC_ERR_BUSY, state);
 		return;
 	}
 
@@ -145,8 +168,8 @@ void nn_core_model_load(struct nn_core_model *m,
 
 	/* A preparation that fails gave back what it took; nothing else moved. */
 	if (b->prepare != NULL && (status = b->prepare(j)) != NN_SVC_OK) {
-		*state = j->had_open ? NN_MODEL_PREVIOUS : NN_MODEL_EMPTY;
-		nn_core_model_result(j, status);
+		nn_core_model_answer(j, status, state,
+		                     j->had_open ? NN_MODEL_PREVIOUS : NN_MODEL_EMPTY);
 		b->claim_give();
 		return;
 	}
@@ -207,8 +230,8 @@ settle:
 			b->lease_give();
 	}
 
-	*state = (enum nn_model_state)v.state;
-	nn_core_model_result(j, v.ok ? NN_SVC_OK : status);
+	nn_core_model_answer(j, v.ok ? NN_SVC_OK : status, state,
+	                     (enum nn_model_state)v.state);
 	b->claim_give();
 }
 

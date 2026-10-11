@@ -46,6 +46,7 @@ static int  misplaced;     /* a hook called inside the critical section      */
 static int  unleased;      /* a plugin touched without the lease              */
 static int  even_change;   /* a change while leased and the counter was even  */
 static int  claim_held, lease_held, swapped;
+static int  unclaimed_has;  /* has_model() asked without the claim          */
 static const struct nn_core_model_board board, board_nolease;
 static const struct nn_core_model_board *cur = &board;
 
@@ -97,7 +98,12 @@ static int  b_swap(struct nn_core_model_job *j, int *after)
 	return r_swap;
 }
 static void b_release(void)      { change("release"); }
-static int  b_has(void)          { return model_open; }
+static int  b_has(void)
+{
+	if (!claim_held)
+		unclaimed_has++;
+	return model_open;
+}
 static void b_refused(struct nn_core_model_job *j) { (void)j; put("spec_refused"); }
 static int  b_check(struct nn_core_model_job *j)   { (void)j; put("check"); return r_check; }
 static int  b_admit(struct nn_core_model_job *j)   { (void)j; put("admit"); return r_admit; }
@@ -198,6 +204,7 @@ static void reset(int open)
 	trace[0] = '\0';
 	misplaced = unleased = even_change = 0;
 	claim_held = lease_held = swapped = 0;
+	unclaimed_has = 0;
 	model_open = open;
 	r_check = r_admit = r_prepare = r_fetch = r_swap = r_plugin = NN_SVC_OK;
 	r_claim = r_lease = 1;
@@ -205,8 +212,14 @@ static void reset(int open)
 	bare = 0;
 }
 
+/* What the caller's state holds before the load: a BUSY load must leave it
+ * there (issue #138). */
+#define UNTOUCHED ((enum nn_model_state)0x5A)
+
 static const char *state_name(enum nn_model_state s)
 {
+	if (s == UNTOUCHED)
+		return "UNTOUCHED";
 	switch (s) {
 	case NN_MODEL_EMPTY:    return "EMPTY";
 	case NN_MODEL_NEW:      return "NEW";
@@ -246,7 +259,7 @@ static void load(const char *what, int tag, int want_status,
 	struct nn_spec spec;
 	struct nn_op_result res;
 	struct nn_core_model_job j;
-	enum nn_model_state st = NN_MODEL_NEW;
+	enum nn_model_state st = UNTOUCHED;
 	uint32_t seq0 = life.seq;
 
 	memset(&spec, 0, sizeof spec);
@@ -266,6 +279,19 @@ static void load(const char *what, int tag, int want_status,
 		fails++;
 	}
 	rules(what, res.status, seq0);
+	/* [!] BUSY has no state to report and makes none up (issue #138): the
+	 * state is not written, and what is open is not asked without the claim.
+	 * Every other answer writes it. */
+	{
+		char buf[160];
+
+		snprintf(buf, sizeof buf, "%s: BUSY leaves the state unwritten, any "
+		         "other answer writes it", what);
+		ok(buf, (res.status == NN_SVC_ERR_BUSY) == (st == UNTOUCHED));
+		snprintf(buf, sizeof buf, "%s: BUSY never asks what is open without "
+		         "the claim", what);
+		ok(buf, res.status != NN_SVC_ERR_BUSY || unclaimed_has == 0);
+	}
 	/* EMPTY after the claim was taken and the preparation stood: the
 	 * hardware comes down (the table's hw_down covers every EMPTY row). */
 	if (st == NN_MODEL_EMPTY && strstr(trace, "fetch") != NULL)
@@ -309,11 +335,14 @@ int main(void)
 	load("precondition refused", N, NN_SVC_ERR_STATE, NN_MODEL_PREVIOUS,
 	     "check admit");
 	reset(1); r_claim = 0;
-	load("claim refused, open", N, NN_SVC_ERR_BUSY, NN_MODEL_PREVIOUS,
+	load("claim refused, open", N, NN_SVC_ERR_BUSY, UNTOUCHED,
 	     "check admit claim");
 	reset(0); r_claim = 0;
-	load("claim refused, empty", N, NN_SVC_ERR_BUSY, NN_MODEL_EMPTY,
+	load("claim refused, empty", N, NN_SVC_ERR_BUSY, UNTOUCHED,
 	     "check admit claim");
+	/* a board's precondition answering BUSY (wio-lite-ai's blob store) */
+	reset(1); r_admit = NN_SVC_ERR_BUSY;
+	load("precondition busy", N, NN_SVC_ERR_BUSY, UNTOUCHED, "check admit");
 
 	/* ---- the preparation: it gives back what it took; no table ---------- */
 	reset(0); r_prepare = NN_SVC_ERR_HW;
@@ -330,10 +359,10 @@ int main(void)
 	     "unclaim");
 	reset(1); r_lease = 0;
 	load("lease refused over an open model", N, NN_SVC_ERR_BUSY,
-	     NN_MODEL_PREVIOUS,
+	     UNTOUCHED,
 	     "check admit claim prepare(open) fetch lease unclaim");
 	reset(0); r_lease = 0;
-	load("lease refused from empty", N, NN_SVC_ERR_BUSY, NN_MODEL_EMPTY,
+	load("lease refused from empty", N, NN_SVC_ERR_BUSY, UNTOUCHED,
 	     "check admit claim prepare fetch lease release hw_down inval forget "
 	     "geom unclaim");
 

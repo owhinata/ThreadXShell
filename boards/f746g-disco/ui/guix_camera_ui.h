@@ -51,6 +51,12 @@ extern "C" {
 #define CAMERA_UI_ERR_BUSY  -3   /* a start or a teardown owns the preview sink */
 #define CAMERA_UI_ERR_PINS  -4   /* the sink did not hand its frame back        */
 
+/** The display step of the camera sink (port/camera/cam_sink.h, issue #142).
+ *  Defined here; src/main.c registers it ahead of the nn step, so the sink
+ *  shows a frame before it hands one to inference. */
+struct cam_sink_step;
+extern struct cam_sink_step camera_ui_step;
+
 /** Register the GUIX widget-tree builder with guix_glue.  No GUIX/camera I/O, so
  *  it is safe to call from tx_application_define() before the scheduler.  Call
  *  once at boot, before any camera_ui_start(). */
@@ -63,8 +69,8 @@ void camera_ui_init(void);
  * teardown still owns the sink (issue #72). */
 int camera_ui_start(void);
 
-/** Stop the live preview (unsubscribe from the base -- the base keeps running for
- *  other subscribers), blank the screen and hand the display back to `lcd`
+/** Stop the live preview (disable the display step of the camera sink -- the base
+ *  and the nn step keep running), blank the screen and hand the display back to `lcd`
  *  (`gui stop`).  Thread context only.  Idempotent.  Since Epic
  * owhinata/stm32f746g-disco#99 Phase 1 (owhinata/stm32f746g-disco#100) this no
  * longer stops the base capture nor the AI subscriber.

@@ -51,8 +51,6 @@ extern TX_MUTEX     nncam_lock;
 /* Posted by the producer (a hand-over), close() and the stop; taken by the
  * worker; drained by the attach (nncam_session_reset()). */
 extern TX_SEMAPHORE nncam_sem;
-/* Filled in by nn_camera.c at create; the producer hands its pins back. */
-extern struct frame_sink nncam_sink;
 /* Written by the start (nncam_open_model()); read by the producer and worker. */
 extern struct nn_model  *nncam_model;
 /* Written by the start (1) and the stop (0) only; read by all three. */
@@ -119,7 +117,7 @@ extern const struct nn_core_frame_ops nncam_frame_ops;
 /* nn_camera.c: release the nn session (the worker on its way out, the stop). */
 void nncam_release_session(enum nn_sess_who who);
 
-/* nn_producer.c: the sink's consume(), and the frame path's prep / wake. */
+/* nn_producer.c: the nn step's consume(), and the frame path's prep / wake. */
 int  nncam_consume(void *ctx, const struct frame_desc *f);
 int  nncam_prep(void *ctx, unsigned part, unsigned nparts);
 void nncam_infer_start(void *ctx);

@@ -69,6 +69,17 @@ gcc $CFLAGS -I "$board/port/camera" \
     $LDFLAGS -o "$out/test_cam_own"
 "$out/test_cam_own"
 
+# issue #142 -- a step of the camera sink (port/camera/cam_step.c).  The GUIX
+# preview and the nn ingest are two steps of one sink now, and each is switched
+# off while the base keeps running: disarm, then wait for the producer's count
+# to reach zero, which is what proves it out of the step for good.  A disarm
+# while the producer is inside, a re-arm before it has left and a leave with no
+# enter cannot be typed; they are walked here.
+gcc $CFLAGS -I "$board/port/camera" \
+    "$here/test_cam_step.c" "$board/port/camera/cam_step.c" \
+    $LDFLAGS -o "$out/test_cam_step"
+"$out/test_cam_step"
+
 # issue #130 -- when `nn stream` may give the nn session back
 # (port/nn/nn_sess_release.c).  The producer now writes the input tensor, inside
 # the arena the session guards, so the release waits for a sink drain that

@@ -66,13 +66,18 @@ struct nn_camera_stats {
 	uint32_t gen_decoder_errors;
 };
 
+/** The nn step of the camera sink (port/camera/cam_sink.h, issue #142).
+ *  Defined in nn_camera.c; src/main.c registers it after the display step. */
+struct cam_sink_step;
+extern struct cam_sink_step nncam_step;
+
 /**
  * Enable live camera inference (`nn stream start`).  @p res is a display hint
  * only -- the input adapts to whatever geometry the base capture publishes
  * (owhinata/stm32f746g-disco#100).  Claims the single nn session (refused -6 if `ai
- * bench`/another stream holds it) and registers nncam as an RGB565 subscriber of the
- * base: it attaches immediately if the base is already running, otherwise it stays
- * enabled + idle and attaches at the next `camera stream start`.  Non-blocking.
+ * bench`/another stream holds it) and enables the nn step of the camera sink: it is
+ * armed immediately if the base is already running, otherwise it stays enabled +
+ * idle and is armed at the next `camera stream start`.  Non-blocking.
  * Returns 0 or <0 (-2 already running / still tearing down / a teardown owns the
  * sink, -3 model, -4 geometry, -5 objects, -6 nn session busy).
  * @p oneshot is non-zero for `nn run`'s session, whose decodes are not counted
@@ -80,9 +85,9 @@ struct nn_camera_stats {
  */
 int  nn_camera_start(enum camera_res res, int oneshot);
 
-/** Disable live inference (`nn stream stop`): unsubscribe from the base (which
- *  keeps running for other subscribers), wait for the producer to hand this
- *  sink's frame back, and release the nn session after the worker parks.
+/** Disable live inference (`nn stream stop`): disable the nn step of the camera
+ *  sink (the base keeps running), wait for the producer to leave the step, and
+ *  release the nn session after the worker parks.
  *  Bounded waits (wall clock).  Returns:
  *    0   stopped;
  *   -1   not running;

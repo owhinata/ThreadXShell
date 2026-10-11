@@ -503,6 +503,8 @@ add_executable(shell
     "${BOARD_DIR}/port/camera/camera.c"
     "${BOARD_DIR}/port/camera/cam_drain.c"
     "${BOARD_DIR}/port/camera/cam_own.c"
+    "${BOARD_DIR}/port/camera/cam_step.c"     # a step of the camera sink (#142)
+    "${BOARD_DIR}/port/camera/cam_sink.c"     # ...and the sink that runs them
     "${BOARD_DIR}/port/ltdc/ltdc_display.c"
     "${BOARD_DIR}/port/touch/touch.c"
     "${BOARD_DIR}/port/sdram/sdram.c"

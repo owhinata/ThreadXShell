@@ -20,8 +20,7 @@
 #include "nn_camera_priv.h"
 #include "nn_det_record.h"
 #include "nn_core_frame.h"   /* the shared frame path and its hand-over word (#130) */
-#include "camera.h"          /* camera_frame_put */
-#include "frame_pipeline.h"  /* struct frame_sink / frame_desc */
+#include "frame_pipeline.h"  /* struct frame_desc */
 
 /* ---- RGB565 -> model input: nearest-neighbour resize + convert ------------ */
 
@@ -150,17 +149,17 @@ static void nncam_ingest(const struct frame_desc *f)
 	}
 }
 
-/* [!] PUT LAST.  camera_frame_put() must stay the LAST STATEMENT here, as in
-   every consume() on this board (issue #72): once the pin reaches zero this
-   callback touches nothing the owner owns, which is what lets nn_camera_stop()
-   settle for ONE count.  Work moved back below the put would be invisible to
-   that count -- the failure this rule exists to prevent. */
+/* The nn step of the camera sink (issue #142).  The sink calls it between
+   entering and leaving the step and puts the pin itself, after the last step
+   (port/camera/cam_sink.c) -- so what lets nn_camera_stop() settle for ONE count
+   is the step's count reaching zero after the stop disarmed it.  Everything this
+   step does happens inside the call; nothing may be left running after it
+   returns, or that count would not see it. */
 int nncam_consume(void *ctx, const struct frame_desc *f)
 {
 	(void)ctx;
 
 	if (nncam_run)
 		nncam_ingest(f);                    /* into the input tensor (pin held)     */
-	camera_frame_put(&nncam_sink, f);       /* LAST -- see the rule above           */
 	return 0;
 }

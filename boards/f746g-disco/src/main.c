@@ -46,6 +46,8 @@
 #include "nx_glue.h"
 #include "nx_shell.h"
 #include "guix_camera_ui.h"
+#include "cam_sink.h"
+#include "nn_camera.h"
 #include "iwdg.h"
 
 #include <stddef.h>
@@ -229,6 +231,23 @@ void tx_application_define(void *first_unused_memory)
 	 * initialized"; nothing else stops. */
 	if (camera_init() != 0)
 		printf("camera: init failed (camera command disabled)\r\n");
+
+	/* The camera sink (issue #142): one RGB565 subscriber of the base capture
+	 * that runs the GUIX preview and then the nn ingest as two steps.  This is
+	 * the one place that knows both, so it is where their order is decided:
+	 * the display step first (a frame is shown before it is handed to
+	 * inference), then the nn step.  Only creates a mutex -- safe before the
+	 * scheduler, and before the first step is enabled (camera_ui_start below). */
+	{
+		static struct cam_sink_step *const cam_sink_steps[] = {
+			&camera_ui_step,
+			&nncam_step,
+		};
+
+		if (camera_sink_init(cam_sink_steps,
+		                     sizeof cam_sink_steps / sizeof cam_sink_steps[0]) != 0)
+			printf("camera: sink init failed (preview / nn stream disabled)\r\n");
+	}
 
 	/* FT5336 touch bring-up (owhinata/stm32f746g-disco#54): I2C3 (PH7/PH8) + the
     operation mutex

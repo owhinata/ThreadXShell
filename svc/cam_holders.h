@@ -31,6 +31,18 @@
  * a failure afterwards undoes only that (closing is not the inverse of
  * opening: a holder that was already there must survive nn's rollback).
  *
+ * [!] EVERY REGISTRATION HAS A GENERATION, AND AN UNDO NAMES IT.  The claim
+ * covers only the start; a caller that fails AFTER its join committed (nn's
+ * step refusing to open) undoes later, outside any claim -- and by then the
+ * table may have been emptied by a confirmed end and the operator may have
+ * registered again, or have started the stream by hand on top of nn's join.
+ * An undo that removed "the operator" by pointer would take that NEW
+ * registration with it and stop the operator's stream.  So each registration
+ * (and each re-registration of a holder already present) gets a fresh
+ * generation from a counter that only cam_holders_init() resets, the join
+ * hands its generations back in a ticket, and cam_holders_undo() removes an
+ * entry only while it still carries the generation the ticket names.
+ *
  * THE CLAIM.  A registration that takes the table from empty to non-empty
  * returns CAM_HOLDERS_T_START and leaves the table CLAIMED: the board is now
  * starting the camera, and until it calls cam_holders_commit() (it started) or
@@ -57,6 +69,8 @@
 #ifndef CAM_HOLDERS_H
 #define CAM_HOLDERS_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -79,10 +93,21 @@ struct cam_holder {
  *  places it and locks it. */
 struct cam_holders {
 	const struct cam_holder *who[CAM_HOLDERS_MAX];  /**< registration order */
+	uint32_t gen[CAM_HOLDERS_MAX];  /**< each entry's registration          */
 	unsigned char attr[CAM_HOLDERS_MAX];
 	unsigned char n;           /**< entries in use                          */
 	unsigned char claimed;     /**< a start is in flight                    */
 	unsigned char claim_base;  /**< n before the registration that claimed  */
+	uint32_t next_gen;         /**< last generation handed out; survives
+	                            *   cam_holders_clear()                     */
+};
+
+/** What cam_holders_add_or_start() registered, for cam_holders_undo().  A
+ *  generation of 0 is never handed out. */
+struct cam_holders_ticket {
+	unsigned added;            /**< CAM_HOLDERS_ADDED_*                     */
+	uint32_t self_gen;         /**< the holder's registration, if added     */
+	uint32_t starter_gen;      /**< the starter's registration, if added    */
 };
 
 /* ---- answers ------------------------------------------------------------
@@ -118,14 +143,21 @@ struct cam_holders {
 #define CAM_HOLDERS_ADDED_SELF     0x01u
 #define CAM_HOLDERS_ADDED_STARTER  0x02u
 
-/** Make @p t empty and unclaimed (a zero-initialised table already is). */
+/** Make @p t empty and unclaimed (a zero-initialised table already is).  Also
+ *  restarts the generations: for boot only -- an end uses cam_holders_clear(). */
 void cam_holders_init(struct cam_holders *t);
+
+/** Empty @p t and release any claim, KEEPING the generation counter, so a
+ *  ticket from before can never match a registration made after (a confirmed
+ *  end of the stream). */
+void cam_holders_clear(struct cam_holders *t);
 
 /**
  * Register @p h with @p attr.
  *
- * Already registered with the same attributes: CAM_HOLDERS_T_NONE, nothing
- * changes.  Already registered with DIFFERENT attributes: CAM_HOLDERS_E_INVAL
+ * Already registered with the same attributes: CAM_HOLDERS_T_NONE, and the
+ * entry takes a fresh generation -- this caller now holds it too, so an older
+ * ticket's undo no longer removes it.  Already registered with DIFFERENT attributes: CAM_HOLDERS_E_INVAL
  * (an operator holder that silently stopped keeping the stream would turn
  * `camera stream stop` into a teardown under nn).  First holder:
  * CAM_HOLDERS_T_START, and the table is claimed.
@@ -138,16 +170,33 @@ int cam_holders_add(struct cam_holders *t, const struct cam_holder *h,
  * @p starter_attr) so the stream has the holder it would have had if it had
  * been started by hand.  One call, so nothing can come between the two.
  *
- * @param added  out: CAM_HOLDERS_ADDED_* -- what THIS call registered, which
- *               is what the caller undoes if it fails afterwards (by
- *               cam_holders_abort() when the call returned T_START, by
- *               cam_holders_remove() of @p h otherwise).  0 on any refusal.
+ * @param tk  out: what THIS call registered and under which generations --
+ *            what the caller undoes if it fails afterwards (cam_holders_abort()
+ *            while the call's claim is still held, cam_holders_undo() after
+ *            it committed).  Zeroed on any refusal.
  *
  * On a non-empty table @p starter is not touched, whether or not it is there.
+ * @p h already registered: T_NONE, nothing added (its entry takes a fresh
+ * generation, as for cam_holders_add()).
  */
 int cam_holders_add_or_start(struct cam_holders *t, const struct cam_holder *h,
                              unsigned attr, const struct cam_holder *starter,
-                             unsigned starter_attr, unsigned *added);
+                             unsigned starter_attr,
+                             struct cam_holders_ticket *tk);
+
+/**
+ * Undo what @p tk registered: @p h if the ticket added it, then @p starter if
+ * it added that -- each only while its entry still carries the ticket's
+ * generation.  An entry that went away (a clear) or was registered again since
+ * (by anyone, including a re-registration of the same holder) is left alone.
+ * The keeps-stream refusal applies as for cam_holders_remove().
+ *
+ * @return the transition of the last removal made (T_STOP if the table became
+ *         empty), T_NONE if nothing matched, or CAM_HOLDERS_E_*
+ */
+int cam_holders_undo(struct cam_holders *t, const struct cam_holder *h,
+                     const struct cam_holder *starter,
+                     const struct cam_holders_ticket *tk);
 
 /**
  * Remove @p h.  Not registered: CAM_HOLDERS_T_NONE, nothing changes.  The last

@@ -79,7 +79,10 @@ extern struct cam_sink_step nncam_step;
  * armed immediately if the base is already running, otherwise it stays enabled +
  * idle and is armed at the next `camera stream start`.  Non-blocking.
  * Returns 0 or <0 (-2 already running / still tearing down / a teardown owns the
- * sink, -3 model, -4 geometry, -5 objects, -6 nn session busy).
+ * sink, -3 model, -4 geometry, -5 objects, -6 nn session busy, -9 the camera is
+ * not streaming RGB565 / its mode cannot stream RGB565 (issue #142 D3), -10 the
+ * camera could not be held or started).  Holds the camera open (issue #142): joins
+ * a running stream, or starts it holding the operator's place too.
  * @p oneshot is non-zero for `nn run`'s session, whose decodes are not counted
  * in the stream's errors (issue #130 step 6c).
  */
@@ -103,6 +106,10 @@ int  nn_camera_stop(void);
 
 /** True while inference is enabled. */
 bool nn_camera_running(void);
+
+/** True while an `nn stream` runs -- not a `nn run` (issue #142): what the
+ *  preview draws boxes for.  The record and the report do not depend on it. */
+bool nn_camera_overlay(void);
 
 /** Snapshot current stats (any time). */
 void nn_camera_stats_get(struct nn_camera_stats *out);

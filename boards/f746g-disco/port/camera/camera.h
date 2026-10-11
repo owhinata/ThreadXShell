@@ -52,6 +52,9 @@ extern "C" {
 #define CAM_ERR_NO_SENSOR -5   /* OV5640 not detected (no module / bad ID)      */
 #define CAM_ERR_NO_FRAME  -6   /* no captured frame available                   */
 #define CAM_ERR_BUSY      -7   /* streaming or preview already owns the DCMI    */
+#define CAM_ERR_IN_USE    -8   /* another holder needs the stream (issue #142)  */
+#define CAM_ERR_FORMAT    -9   /* the stream is not RGB565 / not streamable     */
+#define CAM_ERR_TEST     -10   /* running with a different `test` setting       */
 
 /* Default capture geometry (owhinata/stm32f746g-disco#41): QVGA RGB565,
    little-endian 16-bit
@@ -199,7 +202,7 @@ int camera_init(void);
 int camera_probe(uint32_t *chip_id);
 
 /** Cut module power (PH13 high) and clear the probed/configured state. */
-int camera_power_off(void);
+int camera_power_off(void);   /* CAM_ERR_IN_USE while nn holds the stream (#142) */
 
 /** Fill @p out with the current driver state.  Never touches the sensor. */
 int camera_get_info(struct camera_info *out);
@@ -306,18 +309,72 @@ struct camera_stream_info {
 	uint32_t elapsed_ms; /* run duration (live, or frozen at stop)           */
 };
 
-/**
- * Start continuous capture into the SDRAM frame ring (DCMI continuous + DMA
- * double-buffer).  **Non-blocking**: a dedicated producer thread runs the
- * capture and this returns at once.  @p colorbar selects the OV5640 test
- * pattern.  The stream auto-stops after @p frames frames or @p secs seconds
- * (0 = unbounded); camera_stream_stop() or a DCMI overrun also stop it.
- * Mutually exclusive with camera_capture() (both own the DCMI/DMA).
+/*
+ * ---- who holds the stream (issue #142) ----------------------------------------
+ *
+ * The base streams while, and only while, somebody holds it: the operator
+ * (`camera stream start` -- and GUIX's boot preview, which starts it on the
+ * operator's behalf) or nn (camera_stream_join()).  A stream has no length of
+ * its own any more: it ends when the last holder leaves, or on an error.
  */
-int camera_stream_start(int colorbar, uint32_t frames, uint32_t secs);
+struct cam_holder;          /* svc/cam_holders.h */
+struct cam_holders_ticket;  /* svc/cam_holders.h */
 
-/** Request the running stream to stop (non-blocking; the producer tears down). */
-int camera_stream_stop(void);
+/**
+ * The operator takes hold of the stream (`camera stream start`).  Starts the
+ * base (DCMI continuous + DMA double-buffer, non-blocking: the producer thread
+ * runs the capture) if nobody held it; otherwise only registers.  @p colorbar
+ * selects the OV5640 test pattern -- only on a start: a running stream with a
+ * different setting refuses (CAM_ERR_TEST) rather than ignore it.  *@p already
+ * (may be NULL) is set when the stream was already running.  Mutually exclusive
+ * with camera_capture() (both own the DCMI/DMA).
+ */
+int camera_stream_start(int colorbar, int *already);
+
+/**
+ * The operator lets go (`camera stream stop`).  [!] Refused with CAM_ERR_IN_USE
+ * while another holder needs the stream -- nothing changes and the operator
+ * stays (D8); the names of those holders are copied into @p users (up to
+ * @p max, *@p nusers set; any may be NULL).  Otherwise the producer is asked to
+ * stop (non-blocking; it tears down after looking at the holders again).
+ */
+int camera_stream_stop(const char **users, int max, int *nusers);
+
+/**
+ * Holder @p h (static, its address is its identity) joins the stream, taking
+ * the operator's place too when nothing streams -- in which case the base is
+ * started in the current mode, which must stream RGB565 (CAM_ERR_FORMAT
+ * otherwise; also for a running stream that is not RGB565).  *@p tk says what
+ * this call registered and under which generations, for camera_stream_leave()
+ * to undo.  Clears @p h's lost mark (camera_stream_lost()).
+ */
+int camera_stream_join(const struct cam_holder *h,
+                       struct cam_holders_ticket *tk);
+
+/**
+ * Holder @p h leaves.  @p undo is the join's ticket when this undoes a failed
+ * start: exactly what that join registered goes (the operator's place too, if
+ * it took it), and only while those registrations are still the ones it made
+ * -- one renewed or made since is left alone.  NULL for an ordinary leave (the
+ * operator stays, so the stream keeps running).
+ */
+int camera_stream_leave(const struct cam_holder *h,
+                        const struct cam_holders_ticket *undo);
+
+/** The names of the holders that keep the operator from stopping the stream
+ *  (those without KEEPS_STREAM), up to @p max; returns how many were copied. */
+int camera_stream_users(const char **users, int max);
+
+/** The holders' names, in registration order (static strings; up to @p max).
+ *  *@p lost (may be NULL): how many holders the last confirmed end lost. */
+int camera_stream_holders(const char **names, int max, int *lost);
+
+/**
+ * Was @p h lost at a confirmed end (the auto-recovery gave up or could not
+ * re-arm, or a power-off cancelled it), and has not joined since?  A lost
+ * holder's consumer must not resume on a stream somebody else restarts.
+ */
+int camera_stream_lost(const struct cam_holder *h);
 
 /** Fill @p out with the current or last stream statistics (any time). */
 int camera_stream_stats(struct camera_stream_info *out);
@@ -363,8 +420,8 @@ int camera_unsubscribe(struct frame_sink *s);
 /**
  * Register @p s as a *non-persistent* (oneshot) subscriber
  * (owhinata/stm32f746g-disco#101). Like camera_subscribe() but, on a non-recover
- * base stop (explicit `camera stream stop` / `camera off`, a --frames|--secs target
- * completion, or overrun-recovery giveup), the subscriber is fully released instead
+ * base stop (explicit `camera stream stop` / `camera off`, or overrun-recovery
+ * giveup), the subscriber is fully released instead
  * of staying enabled to re-attach at the next base start.  Used by the
  * MJPEG-over-HTTP server (owhinata/stm32f746g-disco#49 P5): a base stop means "stop
  * the stream", not "pause it". A transient overrun keeps the sink enabled so the

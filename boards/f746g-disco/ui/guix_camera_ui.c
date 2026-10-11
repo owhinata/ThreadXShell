@@ -51,7 +51,7 @@
 #include "cam_own.h"             /* the owner lifecycle (issue #72)               */
 #include "cam_sink.h"            /* the display step of the camera sink (#142)   */
 #include "frame_pipeline.h"      /* struct frame_sink / frame_desc, FRAME_*      */
-#include "nn_camera.h"           /* nn_camera_running / nn_camera_dets_get (bbox, #83) */
+#include "nn_camera.h"           /* nn_camera_overlay / nn_camera_dets_get (bbox, #83) */
 
 #include "gx_api.h"
 #include "tx_api.h"
@@ -321,6 +321,13 @@ static int preview_step_consume(void *ctx, const struct frame_desc *f)
 	int rc = 0;
 
 	(void)ctx;
+	/* [!] The display's on/off as the driver holds it, not the scanout (issue
+	   #142): under GUIX `lcd off` drops only DISP / backlight and the LTDC keeps
+	   scanning, so copying frames nobody can see would be all cost.  `lcd on`
+	   resumes with the next frame; the step itself stays armed throughout --
+	   `lcd on|off` neither subscribes nor unsubscribes anything. */
+	if (!ltdc_display_on())
+		return 0;
 	if (!pending)
 		rc = guix_display_cam_view_store((const uint16_t *)f->data);
 	if (rc == 0 && !pending) {
@@ -503,9 +510,10 @@ static UINT camera_ui_root_event(GX_WIDGET *widget, GX_EVENT *event_ptr)
 			   the producer just stored this frame into cam_view_buf, so stamping the
 			   boxes on top now -- before the icon redraw reads it -- keeps the boxes
 			   off the DCMI-servicing critical path (owhinata/stm32f746g-disco#83).  Drawn
-			   whenever inference is running; overlay_draw_boxes() is a no-op with no detections,
-			   so the box clears when `nn stream stop` runs or a face is lost. */
-			if (nn_camera_running())
+			   while an `nn stream` runs -- not for a `nn run` (issue #142: a one-shot's
+			   result is reported, not drawn); overlay_draw_boxes() is a no-op with no
+			   detections, so the box clears when `nn stream stop` runs or a face is lost. */
+			if (nn_camera_overlay())
 				overlay_draw_boxes();
 			gx_system_dirty_mark((GX_WIDGET *)&cam_icon);
 		}
@@ -678,7 +686,7 @@ static void camera_ui_autostart(void)
 		   leaves the preview subscribed + idle until `camera stream start`. */
 		if (!base_autostarted) {
 			base_autostarted = 1;
-			if (camera_stream_start(0, 0, 0) == 0)
+			if (camera_stream_start(0, NULL) == 0)
 				LOG_INF("base capture on (boot); camera preview on");
 			else
 				LOG_INF("camera preview subscribed; base off "
@@ -716,7 +724,14 @@ static void cycle_resolution(void)
 	was_streaming = camera_streaming() != 0;
 
 	if (was_streaming) {
-		camera_stream_stop();                 /* cascade */
+		/* [!] Only when the operator is the stream's sole holder (issue #142):
+		   a stop refused because nn holds it changed nothing, so nothing is
+		   changed here either. */
+		if (camera_stream_stop(NULL, 0, NULL) == CAM_ERR_IN_USE) {
+			LOG_WRN("resolution change blocked: the camera is in use "
+			        "(stop nn stream first)");
+			return;
+		}
 		for (i = 0; i < 100 && camera_streaming(); i++)
 			tx_thread_sleep(1);
 		if (camera_streaming()) {
@@ -727,13 +742,13 @@ static void cycle_resolution(void)
 	if (camera_set_format(res_tbl[next].res, CAM_FMT_RGB565) != 0) {
 		LOG_WRN("resolution change: set_format failed");
 		if (was_streaming)
-			(void)camera_stream_start(0, 0, 0);
+			(void)camera_stream_start(0, NULL);
 		return;
 	}
 	cur_res_idx = next;
 	apply_view_geometry(next);
 	gx_text_button_text_set(&btn_res, res_tbl[next].name);
-	if (was_streaming && camera_stream_start(0, 0, 0) != 0)
+	if (was_streaming && camera_stream_start(0, NULL) != 0)
 		LOG_WRN("resolution change: base restart failed");
 }
 

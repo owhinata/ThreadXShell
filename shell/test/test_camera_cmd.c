@@ -210,9 +210,8 @@ static void check_common(void)
 	reset();
 	camera_stub.head_len = 4;
 	run("camera capture\r");
-	expect("capture announces a live frame",
-	       has("camera: capturing live frame ...\r\n") &&
-	       camera_stub.last_test == 0);
+	expect("capture lets the board announce a live frame",
+	       has("stub: capturing live\r\n") && camera_stub.last_test == 0);
 	expect("then the board's lines, then the dump of the head",
 	       before("stub: frame stats", "bytes[0..3]:\r\n"));
 	reset();
@@ -251,6 +250,14 @@ static void check_common(void)
 	       has("state:     stopped (sample-1)\r\n") &&
 	       has("stub: board stats sample-1\r\n") &&
 	       before("holders:", "stub: board stats"));
+
+	/* stats before any stream: the one line, no holders, no board lines */
+	reset();
+	camera_stub.never_started = 1;
+	run("camera stream stats\r");
+	expect("stats with no stream since boot says only that",
+	       has("state:     never started\r\n") && !has("holders:") &&
+	       !has("stub: board stats"));
 
 	/* stats when the board cannot sample the stream: its error alone */
 	reset();
@@ -335,8 +342,7 @@ static void check_full(void)
 	reset();
 	run("camera capture test\r");
 	expect("capture test asks for the colorbar",
-	       has("camera: capturing colorbar test frame ...\r\n") &&
-	       camera_stub.last_test == 1);
+	       has("stub: capturing test\r\n") && camera_stub.last_test == 1);
 	reset();
 	run("camera stream start bogus\r");
 	expect("stream start: an unknown word",
@@ -344,14 +350,14 @@ static void check_full(void)
 	       camera_stub.calls_start == 0);
 	reset();
 	run("camera stream start test\r");
-	expect("stream start test",
-	       has("camera: streaming colorbar started (`camera stream stats` / "
-	           "`stop`)\r\n") && camera_stub.last_test == 1);
+	expect("stream start test: the board says the outcome, alone",
+	       has("stub: streaming\r\n") && camera_stub.last_test == 1 &&
+	       !has("camera: streaming"));
 	reset();
 	camera_stub.already = 1;
 	run("camera stream start\r");
-	expect("an already running stream says so",
-	       has("camera: streaming live already running\r\n"));
+	expect("an already running stream: the board's words",
+	       has("stub: already streaming\r\n"));
 
 	/* save */
 	reset();
@@ -388,6 +394,8 @@ static void check_full(void)
 	       has("camera: stub: frame changed (file left partial)\r\n") &&
 	       camera_stub.closed_file == 1 && camera_stub.opened == 0 &&
 	       camera_stub.calls_op_end == 1);
+	expect("and the partial file is closed and the medium flushed",
+	       camera_stub.closed_file == 1 && camera_stub.flushed == 1);
 	reset();
 	camera_stub.status = CAMERA_SVC_ERR_NO_FRAME;
 	strcpy(camera_stub.detail, "no captured frame");
@@ -419,6 +427,23 @@ static void check_full(void)
 	expect("off refused by another holder changes nothing and says who",
 	       has("camera: still in use: nn\r\n") && !has("stopping") &&
 	       camera_stub.calls_off == 0);
+}
+#endif
+
+#if defined(CAM_TEST_SHAPE_MIN)
+static void check_min(void)
+{
+	/* CAMERA_SVC_OFF_STOPS_STREAM 0: a running stream is the board's to
+	   refuse, so the shared command neither stops it nor announces a stop. */
+	reset();
+	camera_stub.streaming = 1;
+	camera_stub.status = CAMERA_SVC_ERR_BUSY;
+	strcpy(camera_stub.detail, "a capture or stream already owns the DCMI");
+	run("camera off\r");
+	expect("off while streaming goes straight to the board, which refuses",
+	       camera_stub.calls_stop == 0 && camera_stub.calls_off == 1 &&
+	       !has("stopping") &&
+	       has("camera: a capture or stream already owns the DCMI\r\n"));
 }
 #endif
 
@@ -464,6 +489,9 @@ int main(void)
 #endif
 #if defined(CAM_TEST_SHAPE_BARE)
 	check_bare();
+#endif
+#if defined(CAM_TEST_SHAPE_MIN)
+	check_min();
 #endif
 	if (failures != 0) {
 		printf("test_camera_cmd: %d failure(s)\n", failures);

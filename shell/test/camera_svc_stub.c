@@ -83,8 +83,11 @@ void camera_svc_info(struct camera_op_result *res,
 		stub_line(write, ctx, "stub: info\r\n");
 }
 
-void camera_svc_capture(int test, struct camera_op_result *res)
+void camera_svc_capture(int test, struct camera_op_result *res,
+                        camera_svc_write_fn write, void *ctx)
 {
+	stub_line(write, ctx, test ? "stub: capturing test\r\n"
+	                           : "stub: capturing live\r\n");
 	camera_stub.calls_capture++;
 	camera_stub.last_test = test;
 	stub_result(res);
@@ -155,12 +158,13 @@ void camera_svc_stream_start(int test, struct camera_op_result *res,
                              int *already,
                              camera_svc_write_fn write, void *ctx)
 {
-	(void)write;
-	(void)ctx;
 	camera_stub.calls_start++;
 	camera_stub.last_test = test;
 	*already = camera_stub.already;
 	stub_result(res);
+	if (res->status == CAMERA_SVC_OK)
+		stub_line(write, ctx, *already ? "stub: already streaming\r\n"
+		                               : "stub: streaming\r\n");
 }
 
 int camera_svc_stream_stop(struct camera_op_result *res, uint32_t *gen)
@@ -211,6 +215,13 @@ void camera_svc_stream_report(struct camera_op_result *res,
 
 	camera_stub.samples++;
 	t = tag[(camera_stub.samples - 1) % 3];
+	if (camera_stub.never_started) {
+		memset(res, 0, sizeof *res);
+		memset(&st, 0, sizeof st);
+		st.never_started = 1u;
+		head(ctx, &st);
+		return;                        /* and no board lines */
+	}
 	stub_result(res);
 	if (res->status == CAMERA_SVC_OK)
 		res->status = camera_stub.state_status;
@@ -286,5 +297,5 @@ UINT fx_file_write(FX_FILE *f, VOID *buf, ULONG size)
 	return FX_SUCCESS;
 }
 UINT fx_file_close(FX_FILE *f) { (void)f; camera_stub.closed_file++; return FX_SUCCESS; }
-UINT fx_media_flush(FX_MEDIA *m) { (void)m; return FX_SUCCESS; }
+UINT fx_media_flush(FX_MEDIA *m) { (void)m; camera_stub.flushed++; return FX_SUCCESS; }
 #endif

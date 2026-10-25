@@ -16,17 +16,16 @@
  *
  * The port must not reach up into cmds/, and cmds/ already depends on the port,
  * so this sits in the port.  It holds no shell instance: lines go through the
- * length-bearing writer of svc/camera_svc.h.
+ * length-bearing writer of svc/camera_svc.h (svc/camera_svc_adapter.h).
  */
 #ifndef CAMERA_NAMES_H
 #define CAMERA_NAMES_H
 
-#include <stdarg.h>
 #include <stddef.h>
 
 #include "camera.h"
 #include "camera_svc.h"
-#include "fmt.h"
+#include "camera_svc_adapter.h" /* struct camera_out, camera_out() */
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,41 +50,6 @@ const char *camera_named_name(const struct camera_named *t, int v);
 
 /** A CAM_ERR_* code in the words the console has always printed for it. */
 const char *camera_strerror(int rc);
-
-/**
- * A writer that stops at the first refusal: once @ref failed is set, every
- * later line is dropped rather than retried, so one refused line does not
- * turn into a run of them (svc/camera_svc.h, camera_svc_write_fn).
- */
-struct camera_out {
-	camera_svc_write_fn write;
-	void *ctx;
-	int failed;
-};
-
-/*
- * Format one piece of a line and hand it to the writer.  fmt_vsnformat() is the
- * formatter cli_print uses underneath, so what lands on the console is what the
- * old cli_print calls produced.  128 is the same bound as nn_info_line() and
- * for the same reason: a truncated line loses its CRLF first.  On the caller's
- * stack, never static (two consoles may write at once).
- */
-static inline void camera_out(struct camera_out *o, const char *f, ...)
-	__attribute__((format(printf, 2, 3)));
-static inline void camera_out(struct camera_out *o, const char *f, ...)
-{
-	char line[128];
-	va_list ap;
-	int n;
-
-	if (o->failed)
-		return;
-	va_start(ap, f);
-	n = fmt_vsnformat(line, sizeof line, f, ap);
-	va_end(ap);
-	if (n < 0 || o->write(o->ctx, line, (size_t)n) < 0)
-		o->failed = 1;
-}
 
 /** The nine `camera set` values, one line each -- `camera info` and a bare
  *  `camera set` print exactly these. */

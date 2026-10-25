@@ -59,6 +59,9 @@
     !defined(CAMERA_SVC_HELP)
 #error "camera_svc_config.h must define every CAMERA_SVC_HAS_*, CAMERA_SVC_HELP and CAMERA_SVC_BOARD_SUBCMDS"
 #endif
+#if CAMERA_SVC_HAS_POWER && !defined(CAMERA_SVC_OFF_STOPS_STREAM)
+#error "CAMERA_SVC_HAS_POWER needs CAMERA_SVC_OFF_STOPS_STREAM: say whether `camera off` stops a running stream first"
+#endif
 #if CAMERA_SVC_HAS_SAVE && !defined(CAMERA_SVC_SAVE_MEDIA)
 #error "CAMERA_SVC_HAS_SAVE needs CAMERA_SVC_SAVE_MEDIA: say which media `camera save` takes"
 #endif
@@ -200,16 +203,18 @@ static int cmd_camera_on(struct cli_instance *sh, int argc, char **argv)
 
 static int cmd_camera_off(struct cli_instance *sh, int argc, char **argv)
 {
-	struct camera_svc_state st;
 	struct camera_op_result res;
 
 	(void)argc;
 	(void)argv;
 
+#if CAMERA_SVC_OFF_STOPS_STREAM
 	/* Power cannot be cut mid-stream (it wrecks the interface), so the
 	   operator's own stream is stopped first and waited for: the producer
 	   tears it down (every subscriber gets a close()), then the power goes.
 	   The board re-checks under its own lock before it cuts anything. */
+	struct camera_svc_state st;
+
 	/* Only "is it streaming" is needed here; a state the board could not
 	   sample still answers that, and the power-off below reports. */
 	camera_svc_stream_state(&st, &res);
@@ -232,6 +237,8 @@ static int cmd_camera_off(struct cli_instance *sh, int argc, char **argv)
 			return 1;
 		}
 	}
+#endif /* CAMERA_SVC_OFF_STOPS_STREAM: otherwise the board refuses a
+          running stream itself (CAMERA_SVC_ERR_BUSY) */
 
 	camera_svc_off(&res, cam_write, sh);
 	if (res.status != CAMERA_SVC_OK) {
@@ -303,9 +310,7 @@ static int cmd_camera_capture(struct cli_instance *sh, int argc, char **argv)
 			return 1;
 	}
 
-	cli_print(sh, "camera: capturing %s frame ...\r\n",
-	          test ? "colorbar test" : "live");
-	camera_svc_capture(test, &res);
+	camera_svc_capture(test, &res, cam_write, sh);
 	if (res.status != CAMERA_SVC_OK) {
 		cam_print_fail(sh, &res, "");
 		return 1;
@@ -379,6 +384,14 @@ static void cam_convert_hint(struct cli_instance *sh,
  * the frame replaced fails the save rather than mixing two frames -- the
  * adapter checks and copies in one step -- and the file is left partial.
  */
+/* [!] ONCE THE FILE IS OPEN, EVERY WAY OUT CLOSES IT AND FLUSHES THE MEDIUM,
+   so a partial file is at least a consistent one on the card. */
+static void cam_save_close(FX_FILE *file, FX_MEDIA *media)
+{
+	(void)fx_file_close(file);
+	(void)fx_media_flush(media);
+}
+
 static int cam_save_body(const struct fs_device *dev, struct cli_instance *sh,
                          const struct camera_svc_frame *f, const char *path,
                          struct camera_op_result *res)
@@ -424,21 +437,24 @@ static int cam_save_body(const struct fs_device *dev, struct cli_instance *sh,
 
 		camera_svc_frame_read(f, off, buf, n, res);
 		if (res->status != CAMERA_SVC_OK) {
-			(void)fx_file_close(&file);
+			cam_save_close(&file, media);
 			cam_print_fail(sh, res, " (file left partial)");
 			return 1;
 		}
 		status = fx_file_write(&file, buf, n);
 		off += n;
 		if (cli_cancel_requested(sh)) {
-			(void)fx_file_close(&file);
+			cam_save_close(&file, media);
 			cli_error(sh, "camera: cancelled (file left partial)\r\n");
 			return 1;
 		}
 	}
 	(void)fx_file_close(&file);
-	if (status == FX_SUCCESS)
+	if (status == FX_SUCCESS) {
 		status = fx_media_flush(media);
+	} else {
+		(void)fx_media_flush(media);   /* what was written, a write failed */
+	}
 
 	if (status != FX_SUCCESS) {
 		cli_error(sh, "camera: write failed: %s (0x%02x)\r\n",
@@ -557,19 +573,12 @@ static int cmd_stream_start(struct cli_instance *sh, int argc, char **argv)
 		test = 1;
 	}
 
+	/* The board writes its outcome line (svc/camera_svc.h). */
 	camera_svc_stream_start(test, &res, &already, cam_write, sh);
 	if (res.status != CAMERA_SVC_OK) {
 		cam_print_fail(sh, &res, "");
 		return 1;
 	}
-	if (already) {
-		cli_print(sh, "camera: streaming %s already running\r\n",
-		          test ? "colorbar" : "live");
-		return 0;
-	}
-	cli_print(sh, "camera: streaming %s started",
-	          test ? "colorbar" : "live");
-	cli_print(sh, " (`camera stream stats` / `stop`)\r\n");
 	return 0;
 }
 
@@ -600,6 +609,10 @@ static void cam_stats_head(void *ctx, const struct camera_svc_state *st)
 	struct cli_instance *sh = (struct cli_instance *)ctx;
 	unsigned n;
 
+	if (st->never_started) {
+		cli_print(sh, "state:     never started\r\n");
+		return;
+	}
 	if (st->streaming)
 		cli_print(sh, "state:     streaming\r\n");
 	else if (st->stop_reason != NULL)
@@ -682,7 +695,8 @@ CLI_SUBCMD_SET_CREATE(camera_subcmds,
 #if CAMERA_SVC_HAS_POWER
 	CLI_CMD(on,    NULL, "power on the camera module (bring-up, no ID report)",
 	        cmd_camera_on),
-	CLI_CMD(off,   NULL, "cut camera module power", cmd_camera_off),
+	CLI_CMD(off,   NULL, "power down the camera module (this board's deepest state)",
+	        cmd_camera_off),
 #endif
 #if CAMERA_SVC_HAS_INFO
 	CLI_CMD(info,  NULL, "driver / sensor state", cmd_camera_info),

@@ -31,11 +31,13 @@ struct camera_stub {
 	int read_fail_at;                 /* the Nth read (1-based) and on  */
 	int state_status;                 /* camera_svc_stream_state()'s    */
 	int tag_samples;                  /* name each stats sample          */
+	int never_started;                /* stats: no stream since boot     */
 	/* what was called */
 	int calls_probe, calls_on, calls_off, calls_info, calls_capture;
 	int calls_open, calls_read, calls_start, calls_stop, calls_send;
 	int calls_op_begin, calls_op_end, closed_file, created_file;
 	int cancel_asked;
+	int flushed;                      /* fx_media_flush() calls         */
 	int calls_state;                  /* camera_svc_stream_state()      */
 	int samples;                      /* camera_svc_stream_report()     */
 	int opened;                       /* open minus close: 0 when balanced */

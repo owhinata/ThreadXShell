@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host test for the order of a model load and unload (issue #131,
- * svc/nn_core_model.c).
+ * svc/nn/nn_core_model.c).
  *
  * WHY THIS EXISTS.  test_nn_swap.c walks the table that says where a load
  * ended; it cannot say whether the code around the table acts in the right

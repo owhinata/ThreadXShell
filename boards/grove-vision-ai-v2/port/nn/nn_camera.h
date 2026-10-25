@@ -121,8 +121,8 @@ const struct cam_lcd_overlay *nn_camera_arm(void);
 void nn_camera_work(void);
 
 /*
- * The hand-over word (svc/nn_handoff.h), which lives with the overlay's
- * frame-path state since issue #130 (svc/nn_core_frame.h).  For nn_worker.c.
+ * The hand-over word (svc/nn/nn_handoff.h), which lives with the overlay's
+ * frame-path state since issue #130 (svc/nn/nn_core_frame.h).  For nn_worker.c.
  */
 /** IDLE -> WANT.  @return non-zero if armed. */
 int nn_camera_want(void);

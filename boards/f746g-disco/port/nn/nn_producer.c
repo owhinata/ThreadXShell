@@ -64,7 +64,7 @@ static void nncam_preprocess(const struct frame_desc *f, void *dst)
 	}
 }
 
-/* ---- the frame path's hooks (svc/nn_core_frame.h, issue #130) ------------- */
+/* ---- the frame path's hooks (svc/nn/nn_core_frame.h, issue #130) ------------- */
 
 /*
  * Preprocess the frame (@p ctx, the frame_desc consume() was handed, pin held)

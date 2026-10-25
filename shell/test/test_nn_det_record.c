@@ -4,7 +4,7 @@
  */
 /**
  * @file    test_nn_det_record.c
- * @brief   Host tests for svc/nn_det_record.c (issues #97, #110, #116, #118).
+ * @brief   Host tests for svc/nn/nn_det_record.c (issues #97, #110, #116, #118).
  *
  * THIS IS THE ONLY PLACE THE RULE CAN BE CHECKED.  What it guards is an ordering:
  *

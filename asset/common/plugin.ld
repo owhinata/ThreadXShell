@@ -12,7 +12,7 @@
  * address out of the firmware would agree with whatever it was handed, and
  * check_placement_budget.py exists precisely to catch the day they diverge.
  *
- * THE IMAGE IS FLAT, AND ITS SHAPE IS THE ABI'S.  svc/plugin_abi.h defines the
+ * THE IMAGE IS FLAT, AND ITS SHAPE IS THE ABI'S.  svc/plugin/plugin_abi.h defines the
  * file side as [code (text+rodata)][data initialiser] with [bss][scratch]
  * following in memory only, so the sections are laid out in exactly that order
  * and the boundary symbols below are what the packer turns into the manifest's
@@ -46,7 +46,7 @@ SECTIONS
          * reaches the entry points through the manifest's offsets, so
          * --gc-sections would drop the table and every function it names.  It is
          * also what the packer reads to fill those offsets in. */
-        /* One word per TU: the ABI it was compiled against (svc/plugin_abi.h,
+        /* One word per TU: the ABI it was compiled against (svc/plugin/plugin_abi.h,
          * PLUGIN_IMAGE_BUILD).  KEEP because nothing refers to them; the gate
          * reads them. */
         . = ALIGN(4);

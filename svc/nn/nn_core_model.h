@@ -7,7 +7,7 @@
  * @brief   The order of a `nn model load` and a `nn model unload`, written once
  *          for every board (issue #131).
  *
- * WHY THIS EXISTS.  svc/nn_swap.c decides where a load ended and what that
+ * WHY THIS EXISTS.  svc/nn/nn_swap.c decides where a load ended and what that
  * obliges, but each board still walked its own order around that table: when
  * the claim is taken, when the plugin lease is, when the backend is touched,
  * when the plugin is swapped, which obligations run and in what order, and
@@ -31,7 +31,7 @@
  *  10. the backend's swap, which says itself what it left
  *  11. only if the backend took the new model: the plugin -- started, or
  *      unloaded for a bare model
- *  12. svc/nn_swap.c's table, and its obligations, in unload's order:
+ *  12. svc/nn/nn_swap.c's table, and its obligations, in unload's order:
  *      plugin unload (only under the lease) -> backend release + hw_down ->
  *      the last result -> forget / commit -> the geometry
  *  13. the counter goes EVEN, the lease goes back, the claim goes back.

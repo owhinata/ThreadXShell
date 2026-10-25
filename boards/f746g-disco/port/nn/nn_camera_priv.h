@@ -39,7 +39,7 @@
 
 /* ---- objects (defined in nn_camera.c) ------------------------------------- */
 
-/* The hand-over word: stepped only through svc/nn_core_frame.c -- by the producer
+/* The hand-over word: stepped only through svc/nn/nn_core_frame.c -- by the producer
  * (on_frame), the worker (want / take / done / on_infer_done) and the start /
  * stop (discard / join). */
 extern struct nn_core_frame nncam_frame;

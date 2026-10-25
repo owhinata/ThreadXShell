@@ -7,7 +7,7 @@
  * @brief   npu_tensor -> tensor_desc, and nothing else (issues #97, #104).
  *
  * `struct npu_tensor` carries an opaque TfLiteType whose meaning is pinned by a
- * C++ static_assert in npu_tflm.cc; `struct tensor_desc` (svc/tensor.h) is the
+ * C++ static_assert in npu_tflm.cc; `struct tensor_desc` (svc/nn/tensor.h) is the
  * neutral descriptor everything above the port reads.  This file is the
  * translation, and it is the only place on this board that knows both types.
  *

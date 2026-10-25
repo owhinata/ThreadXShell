@@ -12,7 +12,7 @@
  * `struct npu_tensor` on grove-vision-ai-v2 (port/nn/npu).  Both live in board
  * headers, so neither can be included from svc/.  This is the neutral shape a
  * board's glue fills in so that ONE decoder can read tensors from any of them --
- * the same role svc/frame.h plays for the camera pipeline.
+ * the same role svc/camera/frame.h plays for the camera pipeline.
  *
  * WIDEST OF THE THREE, DELIBERATELY.  `size_t bytes` and signed `int32_t dims[]`
  * come from the Grove descriptor; the other two boards carry `uint32_t bytes`

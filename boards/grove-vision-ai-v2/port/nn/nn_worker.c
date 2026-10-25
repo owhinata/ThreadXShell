@@ -8,8 +8,8 @@
  *          issue #140 the worker's half of the camera -> inference glue:
  *          nn_camera_work() (invoke, plugin lease wait) and the frame path's
  *          outputs / decode / publish / account hooks.  See nn_worker.h; the
- *          hand-over decisions are svc/nn_handoff.c's, run by
- *          svc/nn_core_frame.c (issue #130).  The shared state is
+ *          hand-over decisions are svc/nn/nn_handoff.c's, run by
+ *          svc/nn/nn_core_frame.c (issue #130).  The shared state is
  *          nn_camera_priv.h's, defined in nn_camera.c.
  */
 #include "nn_worker.h"
@@ -84,8 +84,8 @@ static UCHAR                 nn_worker_stack[NN_WORKER_STACK_BYTES]
 static TX_EVENT_FLAGS_GROUP  nn_worker_flags;
 static volatile int          nn_worker_ok;
 
-/* The hand-over word (svc/nn_handoff.h) is the overlay's frame-path state
- * since issue #130 -- svc/nn_core_frame.c steps it, one critical section per
+/* The hand-over word (svc/nn/nn_handoff.h) is the overlay's frame-path state
+ * since issue #130 -- svc/nn/nn_core_frame.c steps it, one critical section per
  * transition -- and this file reaches it through nn_camera_take(),
  * nn_camera_want() and nn_camera_join(). */
 

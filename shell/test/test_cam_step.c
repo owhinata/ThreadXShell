@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host test for a camera sink's step machine (issue #142, svc/cam_step.c --
+ * Host test for a camera sink's step machine (issue #142, svc/camera/cam_step.c --
  * shared by f746g-disco's camera sink and wio-lite-ai's band sink).
  *
  * WHY THIS EXISTS.  Since issue #142 the preview and the nn ingest are two

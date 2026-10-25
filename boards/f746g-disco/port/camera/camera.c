@@ -284,7 +284,7 @@ static uint8_t cam_frame[CAM_FRAME_MAX_BYTES]
 
 /* ---- streaming (owhinata/stm32f746g-disco#46): DCMI continuous + DMA double-buffer --- */
 /*
- * The continuous producer feeds a frame pipeline (svc/frame_pipeline.c, the
+ * The continuous producer feeds a frame pipeline (svc/camera/frame_pipeline.c, the
  * owhinata/stm32f746g-disco#47 design).  The ring slots are carved at stream start from
  * cam_arena (below): at any instant the DMA double-buffer (DBM) targets two of them
  * (M0AR/M1AR), one holds the latest published frame, and one is free to be acquired (so >=
@@ -380,7 +380,7 @@ static int cam_holders_users_locked(const char **users, int max);
 static volatile int      cam_stop_req;       /* stop requested (producer drains)*/
 static volatile int      cam_stream_err;     /* terminal error -> teardown      */
 /* The running (or last) stream's generation, and the last one a teardown
- * ended -- both written under cam_lock (svc/cam_gen.h, issue #143).  A start
+ * ended -- both written under cam_lock (svc/camera/cam_gen.h, issue #143).  A start
  * takes a fresh one only once its arm has succeeded, in the same critical
  * section as its admission (stream_start_locked() runs under cam_lock); the
  * teardown records the end under cam_lock as it clears cam_stream_active.  A
@@ -2716,7 +2716,7 @@ static int stream_start_locked(int colorbar)
  * The base streams while, and only while, somebody holds it: the operator
  * (`camera stream start`, also the GUIX boot preview) or nn (`nn stream start`
  * and `nn run`, which hold the operator's place too when nothing streams).  The
- * table is svc/cam_holders.c, kept here next to the base and moved only under
+ * table is svc/camera/cam_holders.c, kept here next to the base and moved only under
  * cam_lock, in the same locked region as the start or stop request its answer
  * leads to.  Its claim never outlives that region: a start is decided, made and
  * committed (or aborted) under one hold of cam_lock.

@@ -10,7 +10,7 @@
  * Three boards each grew their own: `ai` on wio-lite-ai, a different `ai` on
  * f746g-disco, `nn` on grove-vision-ai-v2 -- about 3,100 lines of C printing the
  * same facts three ways, so that changing one meant reading three.  This is the
- * one command; each board supplies an adapter behind svc/nn_svc.h.
+ * one command; each board supplies an adapter behind svc/nn/nn_svc.h.
  *
  *   nn info                     backend / model / tensors / arena
  *   nn model load <source>      point the model lifecycle at something
@@ -466,7 +466,7 @@ static int cmd_nn_model_load(struct cli_instance *sh, int argc, char **argv)
 		nn_report(sh, "model load", &res);
 		/* [!] A BUSY REFUSAL NEVER REPLACES OR LOSES THE OPEN MODEL, SO IT
 		 * HAS NO STATE TO REPORT (issue #131 P19).  The shared order
-		 * (svc/nn_core_model.h) answers BUSY only before the swap -- claim,
+		 * (svc/nn/nn_core_model.h) answers BUSY only before the swap -- claim,
 		 * lease, the board's admit / prepare / fetch; staging into an
 		 * inactive buffer or an empty-state cleanup may have run, the model
 		 * that was open has not moved -- and maps a swap's or a plugin
@@ -619,7 +619,7 @@ static int cmd_nn_bench(struct cli_instance *sh, int argc, char **argv)
  *
  * [!] AND IT PRINTS WHAT THE RECORD CARRIES, NOT WHAT THE TENSOR HOLDS NOW
  * (issue #121).  The classes are computed by the thread that ran the inference,
- * before its next one, and published with the result (svc/nn_top.c).  Reading
+ * before its next one, and published with the result (svc/nn/nn_top.c).  Reading
  * the output tensor here, after the session was released, printed whatever the
  * next inference -- a dropped frame after a stop, another console's `nn bench`
  * -- had left in it.

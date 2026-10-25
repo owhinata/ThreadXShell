@@ -11,10 +11,10 @@
  * instant the plugin is entered, less the exception reserve and a margin
  * (port/nn/nn_plugin_stack.h).  This records the first term, where it happens:
  *
- *   - the six callbacks svc/nn_active_core.c calls through are sampled in the function
+ *   - the six callbacks svc/nn/nn_active_core.c calls through are sampled in the function
  *     that makes the indirect call, immediately before it (NN_PROBE_SP() reads
  *     the stack pointer there, explicitly -- not the address of a local);
- *   - entry() is called from inside the shared loader (svc/plugin_exec.c),
+ *   - entry() is called from inside the shared loader (svc/plugin/plugin_exec.c),
  *     which owns no storage and so cannot hold a probe.  The loader calls the
  *     board's exec_ok hook from the very frame it then calls entry() from,
  *     with the same stack pointer, and the hook samples there: the hook's own

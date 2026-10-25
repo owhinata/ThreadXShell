@@ -19,7 +19,7 @@ enum cam_drain_step cam_sink_drain_step(int pins, int deadline_passed)
 	 * timeout there would strand a teardown that was entitled to proceed.
 	 *
 	 * [!] EXACTLY ZERO, not "zero or less".  unpin_locked() saturates at zero
-	 * (svc/frame_pipeline.c), so the pipeline cannot produce a negative count
+	 * (svc/camera/frame_pipeline.c), so the pipeline cannot produce a negative count
 	 * at all -- a negative one means the sink's bookkeeping has been written by
 	 * something that had no business writing it.  Reading that as "released"
 	 * would let a teardown free what a callback is reading on the strength of a

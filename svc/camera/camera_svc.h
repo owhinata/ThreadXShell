@@ -12,7 +12,7 @@
  * means, what is left between them is mostly the same frame -- the argument
  * grammar, the holders line, the save / send read loop -- written three times.
  * This is the seam that lets ONE command in shell/cmds/ serve all three, in the
- * same shape as svc/nn_svc.h: the declarations here are implemented by a board
+ * same shape as svc/nn/nn_svc.h: the declarations here are implemented by a board
  * adapter (boards/<board>/port/camera/camera_svc_<board>.c), and the board's
  * own richer camera API stays below it, unreachable from shell/.
  *
@@ -114,7 +114,7 @@ extern "C" {
 
 /*
  * [!] A BOARD'S LITERAL WORDING IS CHECKED AGAINST THE BOUND AT BUILD TIME, the
- * same way as nn's (svc/nn_detail.h, issue #122 P15): the copy into
+ * same way as nn's (svc/nn/nn_detail.h, issue #122 P15): the copy into
  * camera_op_result::detail truncates, and a truncated sentence does not look
  * truncated.  CAMERA_SVC_DETAIL_CHECK(s) is a compile-time zero that fails the
  * build when the string LITERAL @p s is longer than CAMERA_SVC_DETAIL_MAX;
@@ -360,7 +360,7 @@ enum camera_svc_stop {
 	                             *   wait on camera_svc_stream_ended(*gen)      */
 };
 
-/** A stream generation meaning "no stream to wait for" (svc/cam_gen.h's
+/** A stream generation meaning "no stream to wait for" (svc/camera/cam_gen.h's
  *  CAM_GEN_NONE): camera_svc_stream_ended() answers it at once. */
 #define CAMERA_SVC_GEN_NONE 0u
 

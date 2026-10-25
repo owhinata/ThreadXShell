@@ -17,7 +17,7 @@
  * DCMI runs free with the DMA in double-buffer mode over two 60-row bands in
  * AXI-SRAM, and a producer thread hands each band to the band sink
  * (port/camera/cam_band.c), which feeds the LCD preview and the NN.  (Phase 3b's
- * frame stream into a ring of PSRAM slots through svc/frame_pipeline was removed
+ * frame stream into a ring of PSRAM slots through svc/camera/frame_pipeline was removed
  * by issue #142.)
  *
  * Two board facts drive the whole design and both differ from the STM32F746
@@ -213,8 +213,8 @@ struct camera_stream_stats {
  * own; it ends when the last holder leaves, or on an error -- which this board
  * does not recover from, so it is a confirmed end that marks every holder lost.
  */
-struct cam_holder;          /* svc/cam_holders.h */
-struct cam_holders_ticket;  /* svc/cam_holders.h */
+struct cam_holder;          /* svc/camera/cam_holders.h */
+struct cam_holders_ticket;  /* svc/camera/cam_holders.h */
 
 /** A join's @p colorbar meaning "whatever the running stream has": never
  *  refused with CAM_ERR_TEST, and a start it makes is without the pattern.
@@ -243,7 +243,7 @@ int camera_stream_stop(const char **users, int max, int *nusers);
 
 /**
  * camera_stream_stop(), also handing back in *@p gen (may be NULL) the
- * generation of the stream it asked to end (svc/cam_gen.h; CAM_GEN_NONE when
+ * generation of the stream it asked to end (svc/camera/cam_gen.h; CAM_GEN_NONE when
  * nothing was running).  The shared `camera off` (issue #143) waits on THAT
  * stream with camera_stream_ended(), never on "is a stream running".
  */

@@ -7,7 +7,7 @@
  *
  * A board copies plugin_result_name() and plugin_run_strerror() whole into
  * struct nn_op_result::detail.  A board's OWN tables are checked where they are
- * written, with NN_SVC_DETAIL_LIT -- but svc/plugin_load.c and plugin_exec.c
+ * written, with NN_SVC_DETAIL_LIT -- but svc/plugin/plugin_load.c and plugin_exec.c
  * sit below the `nn` contract and must not depend on it.  So their sentences are
  * checked here instead, by ENUMERATION rather than by a list: every integer
  * around the enumerations is asked for its name, so a sentence added to either

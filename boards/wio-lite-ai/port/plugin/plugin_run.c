@@ -111,7 +111,7 @@ static __attribute__((noinline)) int pl_exec_check(uint32_t lo, uint32_t hi,
  * The exec_ok hook, and where entry()'s stack depth is taken (issue #126).
  *
  * [!] THE LOADER CALLS THIS FROM THE FRAME IT CALLS entry() FROM.  entry() is
- * called inside svc/plugin_exec.c, which may own no storage, so no probe can go
+ * called inside svc/plugin/plugin_exec.c, which may own no storage, so no probe can go
  * beside that branch -- but this hook is called in the same function, after
  * the copy and the cache maintenance and before the branch, with the stack
  * pointer the branch will use.  Read here, the depth is the entry depth plus
@@ -280,7 +280,7 @@ enum plugin_run_result plugin_run_load(const struct plugin_view *v,
 		/* [!] %s, NOT %.*s (issue #112).  svc/fmt.c implements neither a
 		 * precision nor `*`, so the precision form printed the format string
 		 * itself instead of the name.  plugin_parse() terminates this field
-		 * (svc/plugin_load.h), which is what makes %s the right answer here
+		 * (svc/plugin/plugin_load.h), which is what makes %s the right answer here
 		 * rather than a copy. */
 		LOG_ERR("'%s' refused its own entry point or declares none", v->name);
 		break;

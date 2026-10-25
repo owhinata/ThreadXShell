@@ -14,7 +14,7 @@
  * producer thread that turns datapath interrupts into published frames, and the
  * error state machine.  The sensor and datapath registers belong to
  * cam_dp.h and cam_sensor.h; the pixel packing to cam_convert.h; the ring and
- * svc/frame_pipeline.h.
+ * svc/camera/frame_pipeline.h.
  *
  * THE FRAME PATH.  Datapath callback (interrupt) classifies the event and posts
  * a semaphore -> producer thread invalidates the WDMA3 buffer, packs planar
@@ -507,7 +507,7 @@ void camera_set_wb(const struct cam_wb *wb);
 void camera_get_wb(struct cam_wb *out);
 
 /**
- * @brief  Detach a frame sink (svc/frame_pipeline.h contract).
+ * @brief  Detach a frame sink (svc/camera/frame_pipeline.h contract).
  *
  * There is no matching subscribe: attaching happens inside
  * camera_stream_start(), because "the camera is stopped" and "subscribe" have to

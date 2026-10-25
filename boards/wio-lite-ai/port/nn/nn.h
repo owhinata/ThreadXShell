@@ -91,7 +91,7 @@ enum nn_dtype {
  * relative to the start of the FILE -- 16 bytes -- and the kernels read float32
  * weights with word loads that fault on this core if misaligned, so the file must
  * start on a boundary at least that strict for its internal alignments to survive.
- * The container's own rule (PLUGIN_MODEL_ALIGN, svc/plugin_abi.h) is 16, and
+ * The container's own rule (PLUGIN_MODEL_ALIGN, svc/plugin/plugin_abi.h) is 16, and
  * nn_svc_wio.c asserts that it meets this one; the backend checks it anyway.
  */
 #define NN_MODEL_ALIGN        16u
@@ -253,7 +253,7 @@ int nn_model_present(const struct nn_model *m);
 /**
  * nn_model_present() of the singleton, WITHOUT opening it: 0 before the first
  * nn_model_open().  Builds nothing (issue #131 step 7d) -- the shared order in
- * svc/nn_core_model.c asks it for a refusal before the claim and for had_open
+ * svc/nn/nn_core_model.c asks it for a refusal before the claim and for had_open
  * under the claim, and a question must not construct what it asks about.
  */
 int nn_model_loaded(void);

@@ -20,7 +20,7 @@
  * name; past that, the backend's swap says what it returned and whether a model
  * was left, and nn_swap_end_of() turns those into the ending.  Either way
  * nn_swap_decide() is the one list of obligations.  The order that drives both
- * is svc/nn_core_model.c (issue #131), one copy for every board.
+ * is svc/nn/nn_core_model.c (issue #131), one copy for every board.
  *
  * WHY IT IS A PURE FUNCTION IN ITS OWN FILE.  The interesting ends cannot be
  * produced from a console on demand: a backend that refuses the new model and
@@ -35,7 +35,7 @@
  *
  * [!] WHAT IT DOES NOT COVER.  This decides; it does not act.  That the plugin
  * is swapped only after the backend took the new model, and every flag is acted
- * on, is svc/nn_core_model.c's (walked by shell/test/test_nn_core_model.c) --
+ * on, is svc/nn/nn_core_model.c's (walked by shell/test/test_nn_core_model.c) --
  * not this file's.
  */
 #ifndef NN_SWAP_H

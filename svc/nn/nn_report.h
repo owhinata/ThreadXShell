@@ -7,7 +7,7 @@
  * @brief   Capturing an external decoder's account of its own result
  *          (issue #110 = #78 Step 3b).
  *
- * The buffer and the contract are in svc/nn_svc.h, where the shared command
+ * The buffer and the contract are in svc/nn/nn_svc.h, where the shared command
  * that owns the storage can see them.  This is the bounded sink a BOARD hands
  * to its decoder, and the mapping from what the decoder returned to what the
  * operator is told.

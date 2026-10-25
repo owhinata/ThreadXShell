@@ -7,7 +7,7 @@
  * @brief   How this board counts its resident decoder's answer in `nn stream
  *          stats` (issue #130 step 6c, #122 P8).
  *
- * The resident BlazeFace decoder (port/nn/nn_decoder.c over svc/blazeface.c)
+ * The resident BlazeFace decoder (port/nn/nn_decoder.c over svc/nn/blazeface.c)
  * returns a count or a negative BF_ERR_*.  Until step 6c this board counted no
  * negative at all -- `decoder_errors` was always 0, so a decoder that was never
  * initialised (a build fault, on every frame) read as a healthy stream.

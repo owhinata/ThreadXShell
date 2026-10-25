@@ -33,7 +33,7 @@
  * mutex.  Nothing takes it the other way round, and a shortcut that acquired it
  * from inside an overlay helper -- after the frame lock -- would invert that.
  *
- * [!] THE API IS svc/plugin_lease_api.h (issue #130, as grove-vision-ai-v2's
+ * [!] THE API IS svc/plugin/plugin_lease_api.h (issue #130, as grove-vision-ai-v2's
  * since #127).  This file adds what only this board knows -- the wait bound,
  * the lock order above, plugin_lease_init() -- and plugin_lease.c implements
  * the API with a ThreadX mutex.  With it came the two things this board's lease

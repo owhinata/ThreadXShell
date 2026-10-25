@@ -123,7 +123,7 @@ uint32_t nn_ov_draw_refused;   /* primitives refused for want */
 struct nn_ov_job nn_ov_job;
 
 /*
- * The frame path's state (svc/nn_core_frame.h): the hand-over word, and the
+ * The frame path's state (svc/nn/nn_core_frame.h): the hand-over word, and the
  * frame numbers draw() reads its lag from.  Static and never freed, like the
  * rest of this file.
  */
@@ -165,7 +165,7 @@ volatile uint8_t nn_ov_shot;
  * before nn_ov_shot, by the same thread. */
 volatile uint8_t nn_ov_shot_index;
 
-/* ---- the frame path's hooks (svc/nn_core_frame.h, issue #130) ------------- */
+/* ---- the frame path's hooks (svc/nn/nn_core_frame.h, issue #130) ------------- */
 
 static unsigned nn_ov_cs_enter(void)
 {
@@ -376,7 +376,7 @@ void nn_camera_stats(struct nn_camera_stats *out)
 	out->draw_spent   = nn_ov_draw_spent;
 	out->draw_refused = nn_ov_draw_refused;
 	/* The lag figures, which the frame path updates under this same kind of
-	 * critical section (svc/nn_core_frame.c, issue #130). */
+	 * critical section (svc/nn/nn_core_frame.c, issue #130). */
 	out->lag_sum      = nn_ov_core.lag_sum;
 	out->lag_n        = nn_ov_core.lag_n;
 	out->lag_max      = nn_ov_core.lag_max;

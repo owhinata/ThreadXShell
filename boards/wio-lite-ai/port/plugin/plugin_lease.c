@@ -5,7 +5,7 @@
 /**
  * @file    plugin_lease.c
  * @brief   The result lease.  See plugin_lease.h; the API is
- *          svc/plugin_lease_api.h (issue #130).
+ *          svc/plugin/plugin_lease_api.h (issue #130).
  */
 #define LOG_TAG "plugin"
 #include "log.h"
@@ -43,7 +43,7 @@ static int      pl_lease_ready;
  * own side could still see the run counter from after an increment beside the
  * total from before it.  Interrupt masking cannot reach backwards, so all three
  * sites mask -- the same discipline the draw budget's counters follow.  The
- * rules themselves are svc/plugin_lease_miss.c's (only the panel asks here).
+ * rules themselves are svc/plugin/plugin_lease_miss.c's (only the panel asks here).
  */
 static struct plugin_lease_miss pl_miss;
 

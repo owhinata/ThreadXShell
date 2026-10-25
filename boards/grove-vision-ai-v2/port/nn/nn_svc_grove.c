@@ -6,7 +6,7 @@
  * @file    nn_svc_grove.c
  * @brief   This board behind the shared `nn` command's contract (issue #50).
  *
- * svc/nn_svc.h is what shell/cmds/cmd_nn.c speaks; port/nn/npu is what this board
+ * svc/nn/nn_svc.h is what shell/cmds/cmd_nn.c speaks; port/nn/npu is what this board
  * has.  This is the translation, and it is the THICK one of the three adapters
  * because open here is not "parse a model": it brings the NPU up and takes a
  * lease on the external NOR window, and it must keep doing so in that order.
@@ -178,7 +178,7 @@ static void nn_release(void)
 
 /* ---- the stream lifecycle (issues #99, #130) -----------------------------
  *
- * The machine is svc/nn_stream_life.c's and the policy around it svc/nn_core.c's
+ * The machine is svc/nn/nn_stream_life.c's and the policy around it svc/nn/nn_core.c's
  * -- one copy for every board.  What is here is only what this board is: its
  * critical section, its clock, where its counters and its record are, and the
  * transient claim that is decided together with the lifecycle.
@@ -362,7 +362,7 @@ void nn_svc_info(struct nn_svc_info *out)
 	/*
 	 * The rest needs the gate the stream is holding -- and would be misleading
 	 * anyway: the arena is being rewritten every frame, so a tensor's CONTENTS
-	 * are not a thing to report while this runs.  That is the line svc/nn_svc.h
+	 * are not a thing to report while this runs.  That is the line svc/nn/nn_svc.h
 	 * already draws between a descriptor and its buffer.
 	 */
 	out->avail_runtime = (uint8_t)NN_AVAIL_WITHHELD;
@@ -414,7 +414,7 @@ static int nn_scan_slots(struct nn_op_result *res, uint32_t token,
 /* ---- containers (issue #101) ---------------------------------------------- */
 
 /*
- * This board's policy for a plugin image.  svc/plugin_load.c holds no board
+ * This board's policy for a plugin image.  svc/plugin/plugin_load.c holds no board
  * address, so the reservation, the target identity and what each thread can
  * spare arrive from here.
  *
@@ -455,7 +455,7 @@ static int nn_scan_slots(struct nn_op_result *res, uint32_t token,
  */
 _Static_assert(GROVE_PLUGIN_TARGET_ID == PLUGIN_TARGET_ID_HERE,
                "GROVE_PLUGIN_TARGET_ID does not describe this firmware's build "
-               "(svc/plugin_target.h)");
+               "(svc/plugin/plugin_target.h)");
 #ifndef GROVE_PLUGIN_BASE
 #error "board.cmake must define GROVE_PLUGIN_BASE"
 #endif
@@ -669,8 +669,8 @@ nn_resolve_blob(struct nn_op_result *res, uint32_t token, const char *name,
 
 /* ---- model lifecycle -----------------------------------------------------
  *
- * The ORDER is svc/nn_core_model.c's -- one copy for every board (issue #131)
- * -- and where a load ends is svc/nn_swap.c's table.  What is here is only what
+ * The ORDER is svc/nn/nn_core_model.c's -- one copy for every board (issue #131)
+ * -- and where a load ends is svc/nn/nn_swap.c's table.  What is here is only what
  * this board is: how it claims (the SWAP gate and the threshold-call count),
  * how it brings the NPU up and resolves a name under that lease, how its
  * backend replaces one interpreter with another, and what its identity is.
@@ -975,7 +975,7 @@ static const struct nn_core_model_board nn_life_board = {
 };
 
 /* Point the model lifecycle at @p spec -- over an open model too (issue #122).
- * The order and its endings: svc/nn_core_model.h. */
+ * The order and its endings: svc/nn/nn_core_model.h. */
 void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
                        void *ctx, struct nn_op_result *res,
                        enum nn_model_state *state)
@@ -1757,7 +1757,7 @@ int nn_svc_box_to_frame(const struct bf_det *in, struct bf_det *out)
  * publish) -- nn_producer.c / nn_worker.c.  What is here only starts it, reports on it and
  * stops it -- and, unlike the command file this replaces, it holds no shell
  * instance, because a port may not.  Everything that needs to print, wait or
- * notice Ctrl+C is the shared command's, above svc/nn_svc.h.
+ * notice Ctrl+C is the shared command's, above svc/nn/nn_svc.h.
  */
 
 /* [!] The table in nn_stream_state.c decides about NUMBERS, and it is compiled
@@ -2106,7 +2106,7 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 	/*
 	 * WHICH SESSION THIS IS -- read under the claim this call now holds, so it
 	 * cannot change.  A one-shot reaches here only once its own `nn run` left
-	 * its teardown retryable (svc/nn_stream_life.h); it runs the same teardown
+	 * its teardown retryable (svc/nn/nn_stream_life.h); it runs the same teardown
 	 * (issue #142) and latches no stream numbers.
 	 */
 	{
@@ -2484,7 +2484,7 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	                 (unsigned long)view.bss_len) < 0)
 		return;
 	/* What each slot needs at this firmware's c, and what the manifest
-	 * declared (issue #111).  See svc/plugin_info.h.  A container with no
+	 * declared (issue #111).  See svc/plugin/plugin_info.h.  A container with no
 	 * plugin section has no stack to describe. */
 	if (view.has_plugin)
 		(void)plugin_info_stack(write, ctx, &view,

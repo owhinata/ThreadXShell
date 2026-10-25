@@ -8,7 +8,7 @@
  *          line (issue #143).
  *
  * The same few helpers in each boards/<board>/port/camera/camera_svc_<b>.c,
- * kept here once as static inline -- the arrangement of svc/nn_svc_adapter.h
+ * kept here once as static inline -- the arrangement of svc/nn/nn_svc_adapter.h
  * for the `nn` adapters.  Each adapter TU gets its own private copy.
  *
  * [!] NO STORAGE.  Nothing here holds state; the line buffer is on the

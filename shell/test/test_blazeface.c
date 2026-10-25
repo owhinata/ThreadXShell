@@ -4,12 +4,12 @@
  */
 /**
  * @file    test_blazeface.c
- * @brief   Host tests for svc/blazeface.c (issue #97).
+ * @brief   Host tests for svc/nn/blazeface.c (issue #97).
  *
  * The REAL decoder is compiled here -- not a copy of its arithmetic -- which is
  * the only arrangement that keeps this honest: a transcription would drift from
  * the firmware's and nothing would notice.  It is testable at all because the
- * decoder takes tensor DESCRIPTORS (svc/tensor.h) rather than reaching into any
+ * decoder takes tensor DESCRIPTORS (svc/nn/tensor.h) rather than reaching into any
  * inference singleton, so the tensors below are plain arrays.
  *
  * THIS FILE ABSORBS THE THREE BOARD TESTS IT REPLACED.  Before issue #97 there

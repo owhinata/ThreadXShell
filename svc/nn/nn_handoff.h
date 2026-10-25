@@ -41,7 +41,7 @@
  * [!] EACH FUNCTION IS ONE WHOLE TRANSITION -- the test and the change -- and
  * the caller runs it inside ONE critical section.  Testing in one section and
  * changing in another would let the producer and the stop each see the other's
- * precondition and both proceed.  svc/nn_core_frame.c is the caller.
+ * precondition and both proceed.  svc/nn/nn_core_frame.c is the caller.
  *
  * WHY A PURE FUNCTION IN ITS OWN FILE.  None of the interesting sequences can be
  * typed: a stop that lands while a hand-over is in flight, a stale wake-up after

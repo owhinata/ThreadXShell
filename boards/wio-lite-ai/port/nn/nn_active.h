@@ -192,7 +192,7 @@ int nn_active_report(nn_svc_write_fn write, void *ctx);
 int nn_active_get_thresh_milli(unsigned *milli);
 
 /** Set it: NN_ACTIVE_THRESH_OK, _REFUSED (the decoder rejected the value) or
- *  _NO_DECODER (nothing holds a threshold) -- svc/nn_active_core.h -- or
+ *  _NO_DECODER (nothing holds a threshold) -- svc/nn/nn_active_core.h -- or
  *  NN_ACTIVE_NOT_HELD. */
 int nn_active_set_thresh_milli(unsigned milli);
 

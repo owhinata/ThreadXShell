@@ -46,7 +46,7 @@ struct nn_panel_display {
  * the frame lock is HELD for the caller to present under and release.
  */
 int  nn_camera_draw(const struct nn_core_panel *p, void *ctx);
-/** The painted frame is out (svc/nn_core_frame.h). */
+/** The painted frame is out (svc/nn/nn_core_frame.h). */
 void nn_camera_present_done(void);
 
 #if defined(CONFIG_NN_BACKEND_TFLM)

@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host test for the policy around the shared stream lifecycle (issue #130,
- * svc/nn_core.c): the baselines a commit latches, the two-phase poll, and the
+ * svc/nn/nn_core.c): the baselines a commit latches, the two-phase poll, and the
  * settle's disposition table.
  *
  * WHY THIS EXISTS.  Until issue #130 each board carried its own copy of this

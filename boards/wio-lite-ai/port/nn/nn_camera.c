@@ -111,7 +111,7 @@ volatile int nncam_worker_busy;
 volatile int nncam_drain_pending;
 /*
  * WHO MAY TOUCH THE INPUT TENSOR (issue #130): the shared hand-over word,
- * svc/nn_handoff.h, stepped only by svc/nn_core_frame.c.  It replaced three
+ * svc/nn/nn_handoff.h, stepped only by svc/nn/nn_core_frame.c.  It replaced three
  * flags that said the same thing in pieces -- `want_frame` (WANT), `filling`
  * (FILLING, latched at band 0 and never mid-frame) and `infer_active` (RUNNING:
  * the arena reuses the input's space for intermediates, so a producer write
@@ -147,7 +147,7 @@ int nncam_norm_signed;   /* 0 = [0,1] (default), 1 = [-1,1] */
 /*
  * The published decode: boxes AND the diagnostics that describe them, plus the
  * session generation that keeps a stopped session's in-flight decode from landing
- * in a live one.  The decisions live in svc/nn_det_record.c so they can be tested
+ * in a live one.  The decisions live in svc/nn/nn_det_record.c so they can be tested
  * -- the ordering they guard against cannot be produced deterministically on
  * hardware -- and the storage and the lock are ours.
  */
@@ -250,7 +250,7 @@ void nn_camera_note_depth_at(enum nn_camera_site site, uintptr_t sp)
 		*hw = used;
 }
 
-/* ---- the frame path's hooks (svc/nn_core_frame.h, issue #130) ------------- */
+/* ---- the frame path's hooks (svc/nn/nn_core_frame.h, issue #130) ------------- */
 
 static unsigned nncam_cs_enter(void)
 {
@@ -392,7 +392,7 @@ int nn_camera_start(int colorbar, int require_draw)
 		 * since it was asked.  A `nn run`'s session never asked it at all, so a
 		 * `nn stream start` that re-armed one would light a panel nothing had
 		 * agreed to draw on.  The lifecycle already refuses that start (a
-		 * one-shot is never re-armed, svc/nn_stream_life.c); this is the same
+		 * one-shot is never re-armed, svc/nn/nn_stream_life.c); this is the same
 		 * rule stated where the worker is, so the two cannot drift apart.
 		 */
 		if (!camera_stream_lost(&nncam_holder) || !nncam_rearmable ||
@@ -668,7 +668,7 @@ int nn_camera_start(int colorbar, int require_draw)
 			/* Not reachable past the check at the top (only a start arms
 			   the step); kept as the backstop it was. */
 			nncam_run = 0;
-			/* Undo exactly what the join registered (svc/cam_holders.h). */
+			/* Undo exactly what the join registered (svc/camera/cam_holders.h). */
 			(void)camera_stream_leave(&nncam_holder, &tk);
 			nncam_guards_give();
 			return NNCAM_ERR_BAND;
@@ -713,7 +713,7 @@ int nn_camera_stop(void)
 	/*
 	 * Producer side first.  Disarm nn's step of the band sink and drain it: the
 	 * armed test and the in-flight count are updated together under one PRIMASK
-	 * section (svc/cam_step.h), so a producer that passed the test but had not
+	 * section (svc/camera/cam_step.h), so a producer that passed the test but had not
 	 * yet entered cannot slip through behind us.  Until the drain returns OK,
 	 * something may still be writing the input tensor.
 	 *

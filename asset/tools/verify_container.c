@@ -7,7 +7,7 @@
  * @brief   Run the DEVICE's container validator over a packed container, on the
  *          host (issue #101).
  *
- * [!] IT LINKS svc/plugin_load.c ITSELF.  That is the whole design, and it is
+ * [!] IT LINKS svc/plugin/plugin_load.c ITSELF.  That is the whole design, and it is
  * the same one verify_vela_model uses when it links the firmware's own
  * npu_payload.c: a host checker that reimplemented the walk could agree with
  * itself and disagree with the board, and the disagreement would surface as a

@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host test for the load's ending table (issue #122; shared by every board
- * since issue #131, svc/nn_swap.c).
+ * since issue #131, svc/nn/nn_swap.c).
  *
  * WHY THIS EXISTS.  A load over an open model is a replacement with a rollback,
  * and every ending obliges something different: which model the operator is
@@ -29,7 +29,7 @@
  *      plugin, over an open model.  Until step 7d the status came from rc, and
  *      the one input where rc and the table disagree is unreachable, and says
  *      so; since 7d the shared order answers that input as a failure too
- *      (svc/nn_core_model.c, shell/test/test_nn_core_model.c).
+ *      (svc/nn/nn_core_model.c, shell/test/test_nn_core_model.c).
  *   4. The rules the table must obey whatever its entries say, over every input
  *      of both ways in, including endings it does not know.
  * A change that moves an obligation from one row to another passes the rules

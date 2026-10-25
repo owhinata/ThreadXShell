@@ -43,7 +43,7 @@
  * ---- The producer / worker split (issue #129, Epic #122 U1) ----------------
  *
  * The producer prepares a frame STRAIGHT INTO the model's input tensor, and
- * only while the worker wants one (svc/nn_handoff.h); the worker runs the
+ * only while the worker wants one (svc/nn/nn_handoff.h); the worker runs the
  * invoke, the decode and the publish.  There is no staging copy: the input the
  * model reads is the raw WDMA3 frame, which the pipeline's pin does not reach
  * and the datapath rewrites two frames later, so it is either copied or
@@ -51,7 +51,7 @@
  * frames (spike, 2026-10-03).
  *
  * SINCE ISSUE #130 the hand-over itself is the shared frame path's
- * (svc/nn_core_frame.c): process() calls nn_core_on_frame() with the whole
+ * (svc/nn/nn_core_frame.c): process() calls nn_core_on_frame() with the whole
  * frame as its one part, the worker ends a job through nn_core_on_infer_done(),
  * and draw() paints through nn_core_draw().  What stays here is this board's:
  * the prep, the invoke, the lease wait, the outputs and geometry, and every
@@ -120,7 +120,7 @@ extern uint32_t nn_ov_draw_refused;
  * worker after its TAKE. */
 extern struct nn_ov_job nn_ov_job;
 
-/* The frame path's state: stepped only through svc/nn_core_frame.c -- by the
+/* The frame path's state: stepped only through svc/nn/nn_core_frame.c -- by the
  * producer (on_frame), the worker (take / on_infer_done / done), the panel
  * (draw / present_done) and the console (want / join / reset). */
 extern struct nn_core_frame nn_ov_core;

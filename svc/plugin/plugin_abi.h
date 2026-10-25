@@ -664,7 +664,7 @@ struct plugin_base_api {
  * than test for non-zero (a board's own refusals are negative and must never
  * read as yes).  Return exactly 1 or 0.
  */
-struct tensor_desc;   /* svc/tensor.h; a plugin includes it, this header need not */
+struct tensor_desc;   /* svc/nn/tensor.h; a plugin includes it, this header need not */
 
 typedef int  (*plugin_entry_fn)(const struct plugin_base_api *base);
 typedef int  (*plugin_shapes_ok_fn)(const struct tensor_desc *outs, unsigned n);

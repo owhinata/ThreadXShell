@@ -7,7 +7,7 @@
  * @brief   This board's decode record (issue #118): the last result `nn run` or
  *          the stream's producer published, which `nn dets` reads.
  *
- * The decisions are svc/nn_det_record.c's, shared with the other two boards;
+ * The decisions are svc/nn/nn_det_record.c's, shared with the other two boards;
  * what is here is the storage and this board's lock around it.
  *
  * [!] THE LOCK IS A SHORT INTERRUPT-DISABLED SECTION, NOT A MUTEX.  The producer
@@ -45,7 +45,7 @@ void     nn_rec_invalidate(void);
 /** The generation a publisher arms with. */
 uint32_t nn_rec_gen(void);
 /** Would a publish at @p gen still be taken?  Asked by the worker under the
- *  plugin lease before the decode (svc/nn_core_frame.c, issue #130).  Always
+ *  plugin lease before the decode (svc/nn/nn_core_frame.c, issue #130).  Always
  *  yes during a session here -- no boundary falls inside one -- and asked all
  *  the same, because the frame path that asks it is shared. */
 int      nn_rec_admits(uint32_t gen);

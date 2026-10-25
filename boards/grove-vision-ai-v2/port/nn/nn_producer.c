@@ -132,7 +132,7 @@ int nn_camera_process(void *ctx, const void *pixels,
 
 	/*
 	 * [!] THE INPUT IS THE PRODUCER'S ONLY WHILE THE WORKER WANTS A FRAME
-	 * (svc/nn_core_frame.c).  The whole frame is this board's one part, so
+	 * (svc/nn/nn_core_frame.c).  The whole frame is this board's one part, so
 	 * the frame path BEGINs, preps and HANDs in this one call -- or reports
 	 * that the worker is still on an earlier frame: this one is not inferred
 	 * (skipped, and counted as busy apart).  WANT cannot be taken from under

@@ -129,7 +129,7 @@ int nn_model_present(const struct nn_model *m);
 /**
  * nn_model_present() of the singleton, WITHOUT opening it: 0 before the first
  * nn_model_open().  Builds nothing (issue #131 step 7d) -- the shared order in
- * svc/nn_core_model.c asks it for a refusal before the claim and for had_open
+ * svc/nn/nn_core_model.c asks it for a refusal before the claim and for had_open
  * under the claim, and a question must not construct what it asks about.
  */
 int nn_model_loaded(void);

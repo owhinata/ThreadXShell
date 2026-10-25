@@ -7,7 +7,7 @@
  * @brief   This board behind the shared `camera` command's contract
  *          (issue #143).
  *
- * svc/camera_svc.h is what shell/cmds/cmd_camera.c speaks; port/camera is what
+ * svc/camera/camera_svc.h is what shell/cmds/cmd_camera.c speaks; port/camera is what
  * this board has.  Only the operations this board's camera_svc_config.h says it
  * has are implemented -- probe, capture and its report, and the stream -- and
  * the shared command calls nothing else (an implementation it would call and

@@ -8,7 +8,7 @@
  *
  * What each primitive decides before its first store -- the clip, a blit's
  * source offset, the charge -- is shared with wio-lite-ai
- * (svc/plugin_paint_span.c).  What is here is what this panel makes different:
+ * (svc/plugin/plugin_paint_span.c).  What is here is what this panel makes different:
  * pixels in wire byte order, row-major into the staged frame, and outlines
  * through the driver's own lcd_rect_wire().
  */

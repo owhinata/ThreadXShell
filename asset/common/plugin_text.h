@@ -25,7 +25,7 @@
  * WHERE THE WORK GOES.  Rasterise in decode(), on the board's inference worker,
  * with no panel guard held.  draw() runs on the panel thread inside the guard
  * and should do nothing but hand over the finished spans.  The base's plugin
- * lease keeps the two from running at once (svc/plugin_abi.h), so the hand-off
+ * lease keeps the two from running at once (svc/plugin/plugin_abi.h), so the hand-off
  * needs no lock of the plugin's own.
  *
  * [!] NOTHING HERE OWNS STORAGE.  Every entry point writes only the buffer the

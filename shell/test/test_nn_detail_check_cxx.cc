@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host test: the C++ spelling of the build-time wording check (svc/nn_detail.h,
+ * Host test: the C++ spelling of the build-time wording check (svc/nn/nn_detail.h,
  * issue #122).  A board's C++ table -- grove-vision-ai-v2's npu_status_name() --
  * cannot use the C form (a struct cannot be defined inside sizeof in C++), so
  * nn_detail.h gives it a template.  Same shape as test_nn_detail_check.c:

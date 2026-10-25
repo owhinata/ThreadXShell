@@ -7,7 +7,7 @@
  * @brief   The frame path of the shared nn core: producer, worker and panel,
  *          written once (issue #130, Epic #122 Phase 3b).
  *
- * The other half of svc/nn_core.h.  That file holds the stream's lifecycle and
+ * The other half of svc/nn/nn_core.h.  That file holds the stream's lifecycle and
  * numbers, called from a console; this one holds what happens to each frame,
  * called from the three threads every board now has:
  *
@@ -21,7 +21,7 @@
  * block (a synchronous NPU driver, a CPU inference, a blanking wait), it does so
  * on a thread of its own, around these calls.
  *
- * THE HAND-OVER is svc/nn_handoff.h's word, kept in @ref nn_core_frame and only
+ * THE HAND-OVER is svc/nn/nn_handoff.h's word, kept in @ref nn_core_frame and only
  * ever stepped here, one critical section per transition.  The producer writes
  * the model's input in place while the word is FILLING and at no other time;
  * the worker owns it from TAKE until it says DONE.
@@ -32,7 +32,7 @@
  * sample it on the producer, wio-lite-ai on the worker when it arms -- issue
  * #118 has why each; f746g-disco's prep keeps it with its epoch test),
  * every counter and how it counts (the account hook), and the admission
- * questions.  svc/nn_active_core.c is unchanged and still knows nothing of a
+ * questions.  svc/nn/nn_active_core.c is unchanged and still knows nothing of a
  * result gate; the decoder is reached through a hook, so no shared decoder is
  * linked into a board that carries none.
  *

@@ -4,7 +4,7 @@
  */
 /**
  * @file    abi_layout.c
- * @brief   Emit svc/plugin_abi.h's wire layout as JSON, for the packer.
+ * @brief   Emit svc/plugin/plugin_abi.h's wire layout as JSON, for the packer.
  *
  * [!] THE PACKER DOES NOT MIRROR THE FORMAT, IT IS TOLD IT.  A Python struct
  * format string transcribed from the header is a second declaration of the ABI,

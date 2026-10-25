@@ -6,7 +6,7 @@
  * @file    nn_svc_wio.c
  * @brief   This board behind the shared `nn` command's contract (issue #50).
  *
- * svc/nn_svc.h is what shell/cmds/cmd_nn.c speaks; port/nn is what this board
+ * svc/nn/nn_svc.h is what shell/cmds/cmd_nn.c speaks; port/nn is what this board
  * has.  Like the f746 adapter and unlike the Grove one, this introduces no state
  * about the model: the singleton and the session gate live in port/nn/nn.c and
  * the worker's release authority lives in port/nn/nn_camera.c, so this queries them.
@@ -64,7 +64,7 @@
 #endif
 _Static_assert(WIO_PLUGIN_TARGET_ID == PLUGIN_TARGET_ID_HERE,
                "WIO_PLUGIN_TARGET_ID does not describe this firmware's build "
-               "(svc/plugin_target.h)");
+               "(svc/plugin/plugin_target.h)");
 
 /*
  * How long a console waits for the result lease before giving up (issue #110)
@@ -78,7 +78,7 @@ _Static_assert(WIO_PLUGIN_TARGET_ID == PLUGIN_TARGET_ID_HERE,
 /* ---- plugin containers (issue #108 = #78 Step 3a) ------------------------- */
 
 /*
- * This board's policy for a plugin image.  svc/plugin_load.c holds no board
+ * This board's policy for a plugin image.  svc/plugin/plugin_load.c holds no board
  * address, so the reservation, the target identity and what each thread can
  * spare arrive from here.
  *
@@ -123,7 +123,7 @@ _Static_assert(WIO_PLUGIN_STACK_SHELL < CLI_INSTANCE_STACK_SIZE &&
  * The container's model section starts on PLUGIN_MODEL_ALIGN; the backend adopts
  * it in place and needs NN_MODEL_ALIGN.  Stated as MET, not assumed -- the Grove
  * lesson is that an alignment an old placement over-satisfied is invisible until
- * something places differently (svc/plugin_abi.h, PLUGIN_MODEL_ALIGN).
+ * something places differently (svc/plugin/plugin_abi.h, PLUGIN_MODEL_ALIGN).
  */
 _Static_assert(PLUGIN_MODEL_ALIGN % NN_MODEL_ALIGN == 0u,
                "a container's model section must meet the backend's alignment");
@@ -208,7 +208,7 @@ static struct nn_claims nn_claims;
 static uint8_t          nn_claims_valid;
 
 /*
- * The shared order's state (svc/nn_core_model.c, issue #131 step 7d): its
+ * The shared order's state (svc/nn/nn_core_model.c, issue #131 step 7d): its
  * transition counter, ODD for exactly as long as a load or unload is changing
  * what is open.  `nn info` reads it on both sides of its copy (issue #122) --
  * odd alone cannot say that a whole load started AND finished between two
@@ -448,8 +448,8 @@ void nn_svc_info(struct nn_svc_info *out)
 
 /* ---- model lifecycle -----------------------------------------------------
  *
- * The ORDER is svc/nn_core_model.c's -- one copy for every board (issue #131
- * step 7d) -- and where a load ends is svc/nn_swap.c's table.  What is here is
+ * The ORDER is svc/nn/nn_core_model.c's -- one copy for every board (issue #131
+ * step 7d) -- and where a load ends is svc/nn/nn_swap.c's table.  What is here is
  * only what this board is: where its claim is (the NN session, and for an
  * unload the OCTOSPI1/PSRAM guard too), how it reads a model out of a NOR asset
  * slot into PSRAM and checks it, how a container is split, how its backend
@@ -904,7 +904,7 @@ static const struct nn_core_model_board nn_life_board = {
 };
 
 /* Point the model at @p spec -- over an open model too (issue #122).  The order
- * and its endings: svc/nn_core_model.h. */
+ * and its endings: svc/nn/nn_core_model.h. */
 void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
                        void *ctx, struct nn_op_result *res,
                        enum nn_model_state *state)
@@ -926,7 +926,7 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 }
 
 /*
- * Idempotent: unloading nothing succeeds.  Order (svc/nn_core_model.h): the
+ * Idempotent: unloading nothing succeeds.  Order (svc/nn/nn_core_model.h): the
  * plugin and the last result first, under the lease, and the lease back; then
  * the model -- the singleton stays open with NO model (issue #122 P11); then
  * the claims.  The plugin used to go after the model; no window exists now in
@@ -1032,7 +1032,7 @@ static void nn_snap_of(const struct nn_camera_decode *dec,
 
 /* ---- the stream lifecycle's binding (issues #99, #130) -------------------
  *
- * The machine is svc/nn_stream_life.c's and the policy around it svc/nn_core.c's
+ * The machine is svc/nn/nn_stream_life.c's and the policy around it svc/nn/nn_core.c's
  * -- one copy for every board.  What is here is only what this board is: its
  * critical section, its clock, where its counters and its record are, that it
  * can re-arm, and the board lines it latches beside the stats.
@@ -1693,7 +1693,7 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	/* Latched AFTER the start, so a re-arm's carried-over totals become this
 	 * generation's zero: the counters first, then the record's accepted count
 	 * (after the start's record boundary -- the two interleavings are in
-	 * svc/nn_det_record.h, issue #118), both outside the commit's critical
+	 * svc/nn/nn_det_record.h, issue #118), both outside the commit's critical
 	 * section, which may not take their locks.  The order is the commit's. */
 	*gen = nn_core_commit(&nn_core, &nn_core_board, NULL);
 	if (*gen == NN_STREAM_GEN_ANY) {
@@ -2213,7 +2213,7 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 		return;
 	/* What each slot needs at this firmware's c, and what the manifest
 	 * declared -- compared with the call-site depths `nn stream stats`
-	 * measures.  See svc/plugin_info.h. */
+	 * measures.  See svc/plugin/plugin_info.h. */
 	(void)plugin_info_stack(write, ctx, v, nn_plugin_policy.veneer_cost);
 #else
 	/* The null backend cannot load a model, so no container can be open. */

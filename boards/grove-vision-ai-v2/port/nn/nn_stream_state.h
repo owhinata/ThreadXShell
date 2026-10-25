@@ -8,7 +8,7 @@
  *          #99, #129, #142).
  *
  * Since issue #142 the camera does not stop when nn does: the operator holds
- * the stream too (svc/cam_holders.h), so `nn stream stop` -- and the end of
+ * the stream too (svc/camera/cam_holders.h), so `nn stream stop` -- and the end of
  * `nn run` -- takes nn's overlay OFF the panel sink, waits until nothing uses
  * it, joins the inference worker and lets go of nn's place among the camera's
  * holders.  Each step can come back unconfirmed for reasons that call for

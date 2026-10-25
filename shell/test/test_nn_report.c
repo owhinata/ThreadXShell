@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host tests for svc/nn_report.c (issue #110 = #78 Step 3b).
+ * Host tests for svc/nn/nn_report.c (issue #110 = #78 Step 3b).
  *
  * The thing under test is a contract about OUTCOMES, not about bytes: an
  * external decoder's report is captured while its result is still protected,
@@ -51,7 +51,7 @@ int main(void)
 	char buf[16];
 	struct nn_report_capture r = { buf, (uint32_t)sizeof buf, 0u, 0u };
 
-	printf("test_nn_report (svc/nn_report.c):\n");
+	printf("test_nn_report (svc/nn/nn_report.c):\n");
 
 	printf("the ordinary case:\n");
 	nn_report_begin(&r);

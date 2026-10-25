@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host test for the shared live-inference lifecycle (issue #99,
- * svc/nn_stream_life.c).
+ * svc/nn/nn_stream_life.c).
  *
  * WHY THIS EXISTS.  `nn stream start --frames n` waits on one console while
  * another console -- or, on the one-console board, a background job -- can stop
@@ -604,7 +604,7 @@ static void issue_120_interleaving(void)
 		ok("...and a poll sees no stream generation", sg == NN_STREAM_GEN_ANY);
 	}
 
-	/* nn_core_admit() on a re-arming board (svc/nn_core.c), verbatim in shape. */
+	/* nn_core_admit() on a re-arming board (svc/nn/nn_core.c), verbatim in shape. */
 	r = nn_stream_life_begin(&l, NN_STREAM_KIND_STREAM);
 	if (r == NN_STREAM_START_RUNNING && nn_stream_life_rearm(&l))
 		r = NN_STREAM_START_GO;

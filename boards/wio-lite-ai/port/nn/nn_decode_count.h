@@ -7,7 +7,7 @@
  * @brief   How this board counts a decoder's answer in `nn stream stats`
  *          (issue #130 step 6c, #122 P8).
  *
- * The plugin's decode() returns a count or a negative BF_ERR_* (svc/blazeface.h),
+ * The plugin's decode() returns a count or a negative BF_ERR_* (svc/nn/blazeface.h),
  * and the worker has no console of its own: a refusal that is not counted apart
  * cannot be told apart afterwards (issue #97).  Until step 6c this board counted
  * neither -- `model_errors` and `decoder_errors` were always 0 and a plugin that

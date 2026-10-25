@@ -102,7 +102,7 @@ def build(cc, nm, objdump, work, board, mutate=None, cflags=None, facts=None,
     src = os.path.join(work, "src")
     shutil.copytree(PLUGIN, src)
     shutil.copytree(COMMON, src, dirs_exist_ok=True)
-    shutil.copy(os.path.join(REPO, "svc", "blazeface.c"), src)
+    shutil.copy(os.path.join(REPO, "svc", "nn", "blazeface.c"), src)
     shutil.copy(b["memory_ld"], os.path.join(src, "plugin_memory.ld"))
     if mutate:
         mutate(src)
@@ -116,7 +116,9 @@ def build(cc, nm, objdump, work, board, mutate=None, cflags=None, facts=None,
 
     cflags = b["arch"] + (cflags if cflags is not None
                           else BASE_FLAGS + NO_UNWIND) + [
-        "-I", os.path.join(REPO, "svc"), "-I", src]
+        "-I", os.path.join(REPO, "svc"), "-I", os.path.join(REPO, "svc", "nn"),
+        "-I", os.path.join(REPO, "svc", "plugin"),
+        "-I", os.path.join(REPO, "svc", "camera"), "-I", src]
     objs, sus = [], []
     # [!] KEEP THIS IN STEP WITH add_plugin()'s source list.  plugin_text.c
     # arrived with #105 and was added there and NOT here, which nothing noticed
@@ -302,7 +304,7 @@ def m_sink_crosses(src):
 
 def m_stale_tu(src):
     """[!] ONE OBJECT COMPILED AGAINST THE OLD ABI (issue #111).  What the
-    hardware showed: plugin_main.o was a day older than svc/plugin_abi.h and
+    hardware showed: plugin_main.o was a day older than svc/plugin/plugin_abi.h and
     still compared the base against ABI 1.  Rebuilding against a stale header
     copy is awkward in a fixture, so the stale TU's record is written directly:
     a TU that says ABI 1 in an image whose other TUs say 2."""
@@ -531,7 +533,7 @@ EMIT_CASES = [
 ]
 
 
-# --- the firmware's half: svc/plugin_target.h (issue #108) --------------------
+# --- the firmware's half: svc/plugin/plugin_target.h (issue #108) --------------------
 #
 # The same word checked from the other end: a board adapter static-asserts its
 # declared word against PLUGIN_TARGET_ID_HERE, derived from the compiler's own
@@ -573,7 +575,7 @@ def fw_assert(cc, work, flags, word):
                  "_Static_assert(%s == PLUGIN_TARGET_ID_HERE, \"word\");\n"
                  % word)
     r = subprocess.run([cc] + flags + ["-std=c11", "-I",
-                                       os.path.join(REPO, "svc"),
+                                       os.path.join(REPO, "svc", "plugin"),
                                        "-c", src, "-o",
                                        os.path.join(work, "t.o")],
                        capture_output=True, text=True)
@@ -621,7 +623,7 @@ def fw_image(cc, work, flags, word):
 # The gate runs at plugin link time with no host C compiler guaranteed, so it
 # carries the enum values it needs as a table.  That is a transcription, and a
 # transcription nobody compares is the drift #106 found in this very file.  So
-# it is compared: a program built against the REAL svc/plugin_abi.h prints every
+# it is compared: a program built against the REAL svc/plugin/plugin_abi.h prints every
 # name the table uses, and one disagreement fails the run.
 def abi_table_mismatches(work):
     sys.path.insert(0, os.path.dirname(GATE))
@@ -635,7 +637,7 @@ def abi_table_mismatches(work):
             fh.write('  printf("%s %%lu\\n", (unsigned long)(%s));\n' % (n, n))
         fh.write("  return 0;\n}\n")
     exe = os.path.join(work, "abi")
-    r = subprocess.run(["gcc", "-std=c11", "-I", os.path.join(REPO, "svc"),
+    r = subprocess.run(["gcc", "-std=c11", "-I", os.path.join(REPO, "svc", "plugin"),
                         prog, "-o", exe], capture_output=True, text=True)
     if r.returncode != 0:
         return ["cannot build the ABI probe:\n" + r.stderr]
@@ -748,7 +750,7 @@ def main():
         bad += 1
     else:
         print(f"  ok   {'abi_table':24s} the gate's ABI values match "
-              "svc/plugin_abi.h")
+              "svc/plugin/plugin_abi.h")
 
     if bad:
         print("run_plugin_gate_tests: FAILED", file=sys.stderr)

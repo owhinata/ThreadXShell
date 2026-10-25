@@ -91,7 +91,7 @@ def configure(root, build, args, *extra, expected=True, contains=None):
 def replay_mutations(args):
     database = json.loads((Path(args.board_build) / "compile_commands.json").read_text())
     root = CMAKE.parent.resolve()
-    names = ("rect_geom.c", "plugin_exec.c", "plugin_paint_budget.c")
+    names = ("rect_geom.c", "plugin/plugin_exec.c", "plugin/plugin_paint_budget.c")
     guards = ("defined(__arm__)", "defined(__OPTIMIZE__)", "__INCLUDE_LEVEL__ == 0")
     for name, guard in zip(names, guards):
         source = root / "svc" / name
@@ -100,7 +100,7 @@ def replay_mutations(args):
         for entry in entries:
             with tempfile.TemporaryDirectory(prefix="storage-regression-") as tmp:
                 tmp = Path(tmp)
-                copy = tmp / name
+                copy = tmp / Path(name).name
                 copy.write_text(source.read_text() + f"\n#if {guard}\nstatic volatile int injected;\nint storage_regression_probe(void) {{ return ++injected; }}\n#endif\n")
                 argv = gate.entry_argv(entry)
                 # The copy remains a directly compiled TU. The extra quote path

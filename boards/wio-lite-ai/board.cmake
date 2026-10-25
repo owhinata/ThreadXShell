@@ -475,7 +475,7 @@ set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/svc/fmt.c"
     "${BOARD_DIR}/svc/timebase.c"
     "${CMAKE_SOURCE_DIR}/svc/ymodem.c"
-    # (svc/frame_pipeline.c is not built here since issue #142: the frame
+    # (svc/camera/frame_pipeline.c is not built here since issue #142: the frame
     # stream into a PSRAM ring that used it is gone.  Grove and f746 use it.)
     "${CMAKE_SOURCE_DIR}/svc/gfx_rot.c"
     "${BOARD_DIR}/svc/log.c")
@@ -787,8 +787,8 @@ list(APPEND SHELL_SOURCES
     "${BOARD_DIR}/port/camera/cam_band.c"
     # ...its steps, and who holds the stream open (issue #142): the
     # same two shared files f746g-disco runs its camera sink on.
-    "${CMAKE_SOURCE_DIR}/svc/cam_step.c"
-    "${CMAKE_SOURCE_DIR}/svc/cam_holders.c"
+    "${CMAKE_SOURCE_DIR}/svc/camera/cam_step.c"
+    "${CMAKE_SOURCE_DIR}/svc/camera/cam_holders.c"
     # The camera -> inference glue.  Independent of the LCD for the same
     # reason as the band sink; the overlay it feeds is drawn from the preview
     # thread (nn_panel.c below), which is built only with the LCD.
@@ -827,11 +827,11 @@ set(NN_SOURCES "${BOARD_DIR}/port/nn/nn.c"
                # where a `nn model load` ends (issue #122): a pure table
                # shared by every board since issue #131, walked by
                # shell/test/test_nn_swap.c
-               "${CMAKE_SOURCE_DIR}/svc/nn_swap.c"
+               "${CMAKE_SOURCE_DIR}/svc/nn/nn_swap.c"
                # ...and the order of a load / unload around it (issue #131),
                # one copy for every board, walked by
                # shell/test/test_nn_core_model.c
-               "${CMAKE_SOURCE_DIR}/svc/nn_core_model.c"
+               "${CMAKE_SOURCE_DIR}/svc/nn/nn_core_model.c"
                # how a decode's answer is counted (issue #130 step 6c): a pure
                # table, walked by test/test_nn_decode_count.c
                "${BOARD_DIR}/port/nn/nn_decode_count.c")
@@ -872,7 +872,7 @@ list(APPEND NN_PSRAM_AI_REQUIRED --require psram_ai_bench_buf)
 # BOTH backends, because neither changes what a descriptor is.
 #
 # [!] AND THERE IS NO DECODER HERE ANY MORE (issue #116 = #78 Step 3c).  This
-# board linked svc/blazeface.c and a port/nn/nn_decoder.c that owned its state
+# board linked svc/nn/blazeface.c and a port/nn/nn_decoder.c that owned its state
 # and its candidate scratch; both are gone, and with them the `.psram_ai`
 # requirement for `nn_dec_scratch` and the pair of --internal-ram lines that
 # kept the decoder's state OUT of that NOLOAD carve-out.  A DECODER REACHES THIS
@@ -883,7 +883,7 @@ list(APPEND NN_PSRAM_AI_REQUIRED --require psram_ai_bench_buf)
 # removed its resident decoder first (issue #104) and the reason is the same on
 # both: issue #78 exists so that the model-specific half ships with the model.
 list(APPEND NN_SOURCES "${BOARD_DIR}/port/nn/nn_desc.c"
-                       "${CMAKE_SOURCE_DIR}/svc/nn_det_record.c")
+                       "${CMAKE_SOURCE_DIR}/svc/nn/nn_det_record.c")
 # The other half of that gate: PSRAM buffers a bus master owns, which must stay OUT
 # of the cacheable carve-out.  Named here rather than in the script for the same
 # reason as the DTCM list above -- a name that belongs to a BSP_ENABLE_* option and
@@ -897,11 +897,11 @@ list(APPEND NN_PSRAM_AI_REQUIRED --noncacheable cam_frame)     # DCMI single cap
 list(APPEND SHELL_SOURCES ${NN_SOURCES}
      "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"      # the one shared command
      "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c" # its pure half
-     "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"      # the shared stream lifecycle
-     "${CMAKE_SOURCE_DIR}/svc/nn_core.c"             # ...and the policy around it
-     "${CMAKE_SOURCE_DIR}/svc/nn_core_frame.c"       # the frame path (#130)
-     "${CMAKE_SOURCE_DIR}/svc/nn_handoff.c"          # ...and its hand-over word
-     "${CMAKE_SOURCE_DIR}/svc/nn_report.c")          # the report capture sink
+     "${CMAKE_SOURCE_DIR}/svc/nn/nn_stream_life.c"      # the shared stream lifecycle
+     "${CMAKE_SOURCE_DIR}/svc/nn/nn_core.c"             # ...and the policy around it
+     "${CMAKE_SOURCE_DIR}/svc/nn/nn_core_frame.c"       # the frame path (#130)
+     "${CMAKE_SOURCE_DIR}/svc/nn/nn_handoff.c"          # ...and its hand-over word
+     "${CMAKE_SOURCE_DIR}/svc/nn/nn_report.c")          # the report capture sink
 
 # The plugin loader (issue #110 = #78 Step 3b): the machine in svc/, this
 # board's state, reservation, cache maintenance, Armv7-M MPU read-back and
@@ -910,17 +910,17 @@ list(APPEND SHELL_SOURCES ${NN_SOURCES}
 # follows CONFIG_NN_BACKEND, exactly as the container validation of #108 does.
 if(CONFIG_NN_BACKEND STREQUAL "tflm")
     list(APPEND SHELL_SOURCES
-         "${CMAKE_SOURCE_DIR}/svc/nn_active_core.c"
+         "${CMAKE_SOURCE_DIR}/svc/nn/nn_active_core.c"
          "${BOARD_DIR}/port/nn/nn_active.c"
-         "${CMAKE_SOURCE_DIR}/svc/plugin_exec.c"
-         "${CMAKE_SOURCE_DIR}/svc/plugin_paint_budget.c"
-         "${CMAKE_SOURCE_DIR}/svc/plugin_paint_span.c"
+         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_exec.c"
+         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_paint_budget.c"
+         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_paint_span.c"
          "${CMAKE_SOURCE_DIR}/svc/rect_geom.c"
          "${BOARD_DIR}/port/plugin/plugin_run.c"
-         "${CMAKE_SOURCE_DIR}/svc/plugin_mpu_v7m.c"
+         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_mpu_v7m.c"
          "${BOARD_DIR}/port/plugin/plugin_paint.c"
          "${BOARD_DIR}/port/plugin/plugin_lease.c"
-         "${CMAKE_SOURCE_DIR}/svc/plugin_lease_miss.c")  # its miss rules (#130)
+         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_lease_miss.c")  # its miss rules (#130)
 endif()
 
 # The MLPerf Tiny v1.4 benchmark harness.  Like CONFIG_NN_BACKEND above and
@@ -1023,6 +1023,9 @@ target_include_directories(shell PRIVATE
     "${CMAKE_SOURCE_DIR}/shell/cmds"
     "${BOARD_DIR}/backend"                       # cli_backend_usbcdc.h / _log.h
     "${CMAKE_SOURCE_DIR}/svc"
+    "${CMAKE_SOURCE_DIR}/svc/nn"
+    "${CMAKE_SOURCE_DIR}/svc/plugin"
+    "${CMAKE_SOURCE_DIR}/svc/camera"
     "${BOARD_DIR}/svc"                           # log.h / timebase.h: the board's
                                                  # services, which the shared
                                                  # cmd_dmesg.c / cmd_sleep.c consume
@@ -1240,9 +1243,9 @@ endif()
 # ---------------------------------------------------------------------------
 #
 # cortex-m7 / fpv5-d16 / hard float / little endian, no CMSE (this part has no
-# Security Extension), per plugin_target_id() in svc/plugin_abi.h.  One value,
+# Security Extension), per plugin_target_id() in svc/plugin/plugin_abi.h.  One value,
 # and it is checked rather than trusted: nn_svc_wio.c static-asserts it against
-# this firmware's own predefined macros (svc/plugin_target.h), which is also the
+# this firmware's own predefined macros (svc/plugin/plugin_target.h), which is also the
 # only check of the CMSE bit.  The plugin image gate checks the other bits
 # against each plugin ELF.
 #
@@ -1290,7 +1293,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # --- the policy: ONE declaration, two consumers ----------------------------
     #
     # The firmware's validator (port/nn/nn_svc_wio.c) and the host asset build
-    # (verify_container, which runs that same svc/plugin_load.c) take these from
+    # (verify_container, which runs that same svc/plugin/plugin_load.c) take these from
     # here, so a container cannot pass on the host and be refused on the board
     # (the shape issue #93 hit).  The reservation's ADDRESS is still stated
     # independently elsewhere -- see ldscript/plugin_memory.ld.
@@ -1373,9 +1376,9 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # -- and the CRC-32 it checks the plugin digest with, which on this board is
     # the one FlashDB already provides (port/nn/crc32_fdb.c says why).
     target_sources(shell PRIVATE
-        "${CMAKE_SOURCE_DIR}/svc/plugin_load.c"
+        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
         # `nn info`'s plugin stack lines, shared with Grove (issue #111).
-        "${CMAKE_SOURCE_DIR}/svc/plugin_info.c"
+        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_info.c"
         "${BOARD_DIR}/port/nn/crc32_fdb.c")
 
     target_compile_definitions(shell PRIVATE
@@ -1490,11 +1493,11 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables
         # The stack gate's input.
         -fstack-usage
-        -I "${CMAKE_SOURCE_DIR}/svc" -I "${WIO_PLUGIN_COMMON}")
+        -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${WIO_PLUGIN_COMMON}")
 
     include("${CMAKE_SOURCE_DIR}/cmake/add_plugin.cmake")
 
-    # [!] svc/blazeface.c IS NOW COMPILED ONLY HERE (issue #116).  The firmware
+    # [!] svc/nn/blazeface.c IS NOW COMPILED ONLY HERE (issue #116).  The firmware
     # used to link it too, as the resident decoder; this is the one compile of
     # it this board produces, and AUDIT_SHARED is what keeps the
     # no-mutable-storage rule on it -- on the object that actually ships inside
@@ -1510,7 +1513,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # block compiles it, and a `null` build that refused to configure over a
     # file it never reads would be a gate firing for a build it does not guard.
     get_filename_component(WIO_SHARED_DECODER
-                           "${CMAKE_SOURCE_DIR}/svc/blazeface.c" ABSOLUTE)
+                           "${CMAKE_SOURCE_DIR}/svc/nn/blazeface.c" ABSOLUTE)
     if(NOT EXISTS "${WIO_SHARED_DECODER}")
         message(FATAL_ERROR
             "shared BlazeFace decoder not found:\n  ${WIO_SHARED_DECODER}\n"
@@ -1557,9 +1560,9 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     #
     # The same three Grove builds, the same way (explicit host-compiler commands,
     # because every CMake target in this project cross-compiles):
-    #   abi_layout        svc/plugin_abi.h's layout as JSON, for the packer
+    #   abi_layout        svc/plugin/plugin_abi.h's layout as JSON, for the packer
     #   slot_table        THIS board's slot capacities, from src/blob.h
-    #   verify_container  svc/plugin_load.c -- the device's validator -- on the
+    #   verify_container  svc/plugin/plugin_load.c -- the device's validator -- on the
     #                     host, so a container cannot pass here and fail there
     set(WIO_ABI_LAYOUT_JSON "${CMAKE_BINARY_DIR}/plugin/abi_layout.json")
     set(WIO_SLOT_TABLE_JSON "${CMAKE_BINARY_DIR}/plugin/slot_table.json")
@@ -1571,13 +1574,13 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         add_custom_command(
             OUTPUT "${WIO_ABI_LAYOUT_JSON}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/plugin"
-            COMMAND "${WIO_HOST_CC}" -std=c11 -O1 -I "${CMAKE_SOURCE_DIR}/svc"
+            COMMAND "${WIO_HOST_CC}" -std=c11 -O1 -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera"
                     "${CMAKE_SOURCE_DIR}/asset/tools/abi_layout.c"
                     -o "${CMAKE_BINARY_DIR}/plugin/abi_layout"
             COMMAND "${CMAKE_BINARY_DIR}/plugin/abi_layout"
                     > "${WIO_ABI_LAYOUT_JSON}"
             DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/abi_layout.c"
-                    "${CMAKE_SOURCE_DIR}/svc/plugin_abi.h"
+                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_abi.h"
             COMMENT "host cc -> abi_layout.json (the packer's view of the ABI)"
             VERBATIM)
 
@@ -1593,7 +1596,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
                     -MD -MF "${CMAKE_BINARY_DIR}/plugin/slot_table.d"
                     -MT "${WIO_SLOT_TABLE_JSON}"
                     -I "${BOARD_DIR}/src" -I "${BOARD_DIR}/port/nor"
-                    -I "${CMAKE_SOURCE_DIR}/svc"
+                    -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera"
                     "${BOARD_DIR}/scripts/slot_table.c"
                     -o "${CMAKE_BINARY_DIR}/plugin/slot_table"
             COMMAND "${CMAKE_BINARY_DIR}/plugin/slot_table"
@@ -1606,15 +1609,15 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         add_custom_command(
             OUTPUT "${WIO_CONTAINER_VERIFIER}"
             COMMAND "${WIO_HOST_CC}" -std=c11 -O1 -Wall -Wextra
-                    -I "${CMAKE_SOURCE_DIR}/svc"
+                    -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera"
                     "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
-                    "${CMAKE_SOURCE_DIR}/svc/plugin_load.c"
+                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
                     "${CMAKE_SOURCE_DIR}/svc/crc32.c"
                     -o "${WIO_CONTAINER_VERIFIER}"
             DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
-                    "${CMAKE_SOURCE_DIR}/svc/plugin_load.c"
-                    "${CMAKE_SOURCE_DIR}/svc/plugin_load.h"
-                    "${CMAKE_SOURCE_DIR}/svc/plugin_abi.h"
+                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
+                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.h"
+                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_abi.h"
             COMMENT "host cc -> verify_container (the device's own validator)"
             VERBATIM)
 

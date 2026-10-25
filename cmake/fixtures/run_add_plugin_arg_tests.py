@@ -352,7 +352,7 @@ def header_rebuild(cmake_dir):
     """[!] A SHARED HEADER CHANGES, EVERY PLUGIN OBJECT THAT READ IT REBUILDS.
 
     Found on the hardware in issue #111: the compile rule depended on its .c
-    alone, so bumping PLUGIN_ABI_VERSION in svc/plugin_abi.h recompiled only the
+    alone, so bumping PLUGIN_ABI_VERSION in svc/plugin/plugin_abi.h recompiled only the
     plugin TUs whose .c had also changed.  plugin_main.o kept comparing the base
     against ABI 1, the packer (which reads the header) stamped ABI 2 into the
     manifest, the device's loader accepted it -- and the plugin refused its own
@@ -384,8 +384,11 @@ def header_rebuild(cmake_dir):
         args = dict(FULL)
         # -fstack-usage as the boards pass it: without it the .su byproducts
         # never appear and ninja reruns every edge, so every case would pass.
-        args["CFLAGS"] = '-O1 -ffreestanding -fstack-usage -I "%s" -I "%s"' % (
-            os.path.join(repo, "svc"), os.path.join(repo, "asset", "common"))
+        args["CFLAGS"] = ('-O1 -ffreestanding -fstack-usage -I "%s" -I "%s" -I "%s" '
+                          '-I "%s" -I "%s"') % (
+            os.path.join(repo, "svc"), os.path.join(repo, "svc", "nn"),
+            os.path.join(repo, "svc", "plugin"), os.path.join(repo, "svc", "camera"),
+            os.path.join(repo, "asset", "common"))
         call = "\n".join("    %s %s" % (k, v) for k, v in args.items())
         gcall = "\n".join("    %s %s" % (k, v) for k, v in GATE.items())
         with open(os.path.join(src, "CMakeLists.txt"), "w") as fh:
@@ -426,7 +429,7 @@ def header_rebuild(cmake_dir):
             return "a second build with nothing changed did work:\n" + log[-800:]
         before = {x: os.stat(os.path.join(out, x + ".o")).st_mtime_ns
                   for x in stems}
-        hdr = os.path.join(repo, "svc", "plugin_abi.h")
+        hdr = os.path.join(repo, "svc", "plugin", "plugin_abi.h")
         future = max(before.values()) + 10 ** 9
         os.utime(hdr, ns=(future, future))
         rc, log = build()
@@ -436,7 +439,7 @@ def header_rebuild(cmake_dir):
                  if os.stat(os.path.join(out, x + ".o")).st_mtime_ns
                  == before[x]]
         if stale:
-            return ("svc/plugin_abi.h is newer, but %s.o %s not recompiled "
+            return ("svc/plugin/plugin_abi.h is newer, but %s.o %s not recompiled "
                     "-- the compile rule does not know the headers it reads"
                     % (".o, ".join(stale), "was" if len(stale) == 1
                        else "were"))
@@ -612,7 +615,7 @@ def main():
         print("  FAIL %-22s %s" % ("header_rebuild", err))
         bad += 1
     else:
-        print("  ok   %-22s touching svc/plugin_abi.h recompiles plugin_main, "
+        print("  ok   %-22s touching svc/plugin/plugin_abi.h recompiles plugin_main, "
               "plugin_base, plugin_fmt and plugin_text" % "header_rebuild")
     if bad:
         print("run_add_plugin_arg_tests: FAILED", file=sys.stderr)

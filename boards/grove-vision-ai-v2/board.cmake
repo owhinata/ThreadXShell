@@ -417,31 +417,31 @@ set(SHELL_SOURCES
     # validates a container and never branches into one.  Board-independent
     # (the policy is passed in) and host-tested, and the SAME file the host-side
     # verify_container links, so the two cannot disagree.
-    "${CMAKE_SOURCE_DIR}/svc/plugin_load.c"
+    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
     # `nn info`'s plugin stack lines, shared with wio (issue #111).
-    "${CMAKE_SOURCE_DIR}/svc/plugin_info.c"
+    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_info.c"
     # The loader and its MPU verdict (issue #103).  plugin_mpu.c is a pure
     # function so that the refusals -- a reservation that is Device memory, or
     # covered by two regions, or execute-never -- are reachable from a host
     # test; no board can be arranged to produce them.
-    "${CMAKE_SOURCE_DIR}/svc/plugin_mpu.c"
+    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_mpu.c"
     # The loader: the machine in svc/, this board's state, reservation, cache
     # maintenance, MPU read-back and source precondition in port/ (issue #110).
-    "${CMAKE_SOURCE_DIR}/svc/plugin_exec.c"
-    "${CMAKE_SOURCE_DIR}/svc/plugin_paint_budget.c"
-    "${CMAKE_SOURCE_DIR}/svc/plugin_paint_span.c"
+    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_exec.c"
+    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_paint_budget.c"
+    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_paint_span.c"
     "${BOARD_DIR}/port/plugin/plugin_run.c"
     "${BOARD_DIR}/port/plugin/plugin_paint.c"
     # The one lock every path into the plugin takes (issue #127): the mutex
     # and its holder check in plugin_lease.c, the miss rules a pure function
-    # in svc/ since issue #130 (API in svc/plugin_lease_api.h), walked by
+    # in svc/ since issue #130 (API in svc/plugin/plugin_lease_api.h), walked by
     # shell/test/test_plugin_lease_miss.c.  Kept in this place in the list.
     "${BOARD_DIR}/port/plugin/plugin_lease.c"
-    "${CMAKE_SOURCE_DIR}/svc/plugin_lease_miss.c"
+    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_lease_miss.c"
     # The one place that decides which decoder is in force (issue #103): the
     # decision and the calls into the plugin shared with wio (issue #126), this
     # board's tensors, geometry and depth record beside it.
-    "${CMAKE_SOURCE_DIR}/svc/nn_active_core.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_active_core.c"
     "${BOARD_DIR}/port/nn/nn_active.c"
     # The stack depth where each plugin callback is entered, per slot and per
     # thread (issue #119): the pure half has a host test, the other half is
@@ -451,7 +451,7 @@ set(SHELL_SOURCES
     # Camera frame ring (issue #35).  Freestanding: it depends on <stdint.h>
     # and an injected lock vtable only, which is why the same file serves all
     # three boards and has a host unit test (shell/test/test_frame_pipeline.c).
-    "${CMAKE_SOURCE_DIR}/svc/frame_pipeline.c"
+    "${CMAKE_SOURCE_DIR}/svc/camera/frame_pipeline.c"
     # The outline geometry rule and its cost (issue #110).  Shared because
     # wio-lite-ai's painter charges by the same rule while drawing with its own
     # loop into a differently ordered surface; the loop itself stays in
@@ -622,7 +622,7 @@ target_compile_options(tflm_obj PRIVATE
 # board.  The path is still spelled once, because the plugin build and the
 # storage gate both name it and two spellings could drift.
 get_filename_component(GROVE_SHARED_DECODER
-                       "${CMAKE_SOURCE_DIR}/svc/blazeface.c" ABSOLUTE)
+                       "${CMAKE_SOURCE_DIR}/svc/nn/blazeface.c" ABSOLUTE)
 if(NOT EXISTS "${GROVE_SHARED_DECODER}")
     message(FATAL_ERROR
         "shared BlazeFace decoder not found:\n  ${GROVE_SHARED_DECODER}\n"
@@ -692,8 +692,8 @@ add_library(shell_objs OBJECT
     # Who holds the camera's stream to the panel (issue #142): the board's
     # decisions here, the table and the overlay's use count shared in svc/.
     "${BOARD_DIR}/port/camera/cam_hold_rules.c"
-    "${CMAKE_SOURCE_DIR}/svc/cam_holders.c"
-    "${CMAKE_SOURCE_DIR}/svc/cam_step.c"
+    "${CMAKE_SOURCE_DIR}/svc/camera/cam_holders.c"
+    "${CMAKE_SOURCE_DIR}/svc/camera/cam_step.c"
     # Ethos-U55 inference glue (issue #44).  The C++ interpreter is contained
     # behind port/nn/npu/npu.h; nothing above it sees a TFLite type.
     "${BOARD_DIR}/port/nn/npu/npu_tflm.cc"
@@ -710,10 +710,10 @@ add_library(shell_objs OBJECT
     # The decode record `nn dets` reads (issue #118): the storage and its
     # interrupt-disabled lock here, the decisions in the shared svc/ file.
     "${BOARD_DIR}/port/nn/nn_rec.c"
-    "${CMAKE_SOURCE_DIR}/svc/nn_det_record.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_det_record.c"
     # npu_tensor -> tensor_desc (issues #97, #104).  The only file here that
     # knows both types, and all that is left of what used to be nn_decoder.c:
-    # THE DECODER ITSELF IS NO LONGER IN THIS FIRMWARE.  svc/blazeface.c is
+    # THE DECODER ITSELF IS NO LONGER IN THIS FIRMWARE.  svc/nn/blazeface.c is
     # compiled by the plugin that carries it (add_plugin below), so a
     # container's decoder is the only one on this board.  `nn out`, `nn info`
     # and the active-decoder shim need this translation whatever interprets the
@@ -727,8 +727,8 @@ add_library(shell_objs OBJECT
     # table and the frame path that runs it are shared since issue #130 (svc/,
     # walked by shell/test/test_nn_handoff.c and test_nn_core_frame.c).
     "${BOARD_DIR}/port/nn/nn_worker.c"
-    "${CMAKE_SOURCE_DIR}/svc/nn_handoff.c"
-    "${CMAKE_SOURCE_DIR}/svc/nn_core_frame.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_handoff.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_core_frame.c"
     # How `nn run`'s wait for its one inference ends (issue #129): a pure
     # table, walked by test/test_nn_run_wait.c.
     "${BOARD_DIR}/port/nn/nn_run_wait.c"
@@ -739,19 +739,19 @@ add_library(shell_objs OBJECT
     # Where a `nn model load` ends and what that obliges (issue #122): a pure
     # table shared by every board since issue #131, so shell/test/
     # test_nn_swap.c walks the endings a console cannot produce.
-    "${CMAKE_SOURCE_DIR}/svc/nn_swap.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_swap.c"
     # The order of a load and an unload around that table (issue #131): one
     # copy for every board, walked by shell/test/test_nn_core_model.c.
-    "${CMAKE_SOURCE_DIR}/svc/nn_core_model.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_core_model.c"
     # The gate's claim and the count of threshold calls inside the plugin
     # (issue #122): one transition each, walked by test/test_nn_param_calls.c.
     "${BOARD_DIR}/port/nn/nn_param_calls.c"
-    "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_stream_life.c"
     # The policy around it, and the stream's numbers (issue #130).
-    "${CMAKE_SOURCE_DIR}/svc/nn_core.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_core.c"
     # The bounded sink a board captures an external decoder's report into
     # (issue #110); the buffer itself belongs to the shared command.
-    "${CMAKE_SOURCE_DIR}/svc/nn_report.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_report.c"
     ${SHELL_SOURCES}
     ${SDK_SOURCES}
     ${TX_CORE} ${TX_ASM} ${TX_EPK})
@@ -792,6 +792,9 @@ target_include_directories(shell_objs PRIVATE
     "${CMAKE_SOURCE_DIR}/shell/backend"
     "${CMAKE_SOURCE_DIR}/shell/cmds"
     "${CMAKE_SOURCE_DIR}/svc"
+    "${CMAKE_SOURCE_DIR}/svc/nn"
+    "${CMAKE_SOURCE_DIR}/svc/plugin"
+    "${CMAKE_SOURCE_DIR}/svc/camera"
     "${BOARD_DIR}/svc"          # log.h / timebase.h: the board's services,
                                 # which the shared cmd_dmesg.c / cmd_sleep.c
                                 # consume
@@ -1690,7 +1693,7 @@ add_custom_target(flash
 # 128 KiB reservation.  Since issue #104 these are also the only flags the
 # shared decoder is ever built with on this board.
 #
-# [!] AND svc/blazeface.c IS THE SAME FILE THE OTHER TWO BOARDS LINK.  Compiling
+# [!] AND svc/nn/blazeface.c IS THE SAME FILE THE OTHER TWO BOARDS LINK.  Compiling
 # a copy would fork the decoder issue #97 spent itself merging.  It is the
 # wrapper that is new, not the arithmetic.
 # What each thread may lend a plugin callback (issue #103), slot by slot since
@@ -1809,7 +1812,7 @@ set(GROVE_PLUGIN_CFLAGS
     # The stack gate's input.  Without it a bound cannot be derived at all, and
     # the gate says so rather than guessing.
     -fstack-usage
-    -I "${CMAKE_SOURCE_DIR}/svc" -I "${GROVE_PLUGIN_COMMON}")
+    -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${GROVE_PLUGIN_COMMON}")
 # The build rule itself is repository-wide (issue #106): the plugin sources are
 # not this board's, so neither is the rule that compiles them.  What IS this
 # board's -- the flags carrying -mcpu, the .plugin MEMORY fragment, the post-link
@@ -1901,7 +1904,7 @@ veneer_cost_gate(
     DELIVERY flash)
 
 # cortex-m55 / fp-armv8 / hard float / little endian / CMSE, per
-# plugin_target_id() in svc/plugin_abi.h.  ONE value, handed to the packer, the
+# plugin_target_id() in svc/plugin/plugin_abi.h.  ONE value, handed to the packer, the
 # container verifier and the firmware's policy.
 #
 # [!] AND UNTIL ISSUE #108 THIS COMMENT CLAIMED A CHECK THAT DID NOT EXIST.  It
@@ -1912,13 +1915,13 @@ veneer_cost_gate(
 # is checked now at the two ends that can each see part of it -- the image gate
 # derives CPU / FPU / float ABI / endianness from the plugin ELF (add_plugin()'s
 # TARGET_ID below), and nn_svc_grove.c static-asserts the whole word, CMSE bit
-# included, against this firmware's own predefined macros (svc/plugin_target.h).
+# included, against this firmware's own predefined macros (svc/plugin/plugin_target.h).
 # The CMSE bit says the BASE runs Secure; no image records it, so only the
 # firmware can check it.
 set(GROVE_PLUGIN_TARGET_ID "0x9302")
 
 
-# [!] svc/blazeface.c IS THE SAME FILE THE OTHER TWO BOARDS LINK.  Compiling a
+# [!] svc/nn/blazeface.c IS THE SAME FILE THE OTHER TWO BOARDS LINK.  Compiling a
 # copy would fork the decoder issue #97 spent itself merging.  It is the wrapper
 # that is new, not the arithmetic -- and since issue #104 this is the ONLY
 # compile of that decoder on this board, which is why the no-storage audit runs
@@ -1965,12 +1968,12 @@ add_custom_target(plugin ALL DEPENDS ${GROVE_PLUGIN_ELFS})
 # commands driving the host compiler, because every CMake target in this project
 # cross-compiles.
 #
-#   abi_layout        prints svc/plugin_abi.h's field offsets as JSON, so the
+#   abi_layout        prints svc/plugin/plugin_abi.h's field offsets as JSON, so the
 #                     packer is TOLD the format rather than transcribing it
 #   slot_table        prints the blob slot capacities through the firmware's own
 #                     accessors, so the sender can refuse an oversized container
 #                     BEFORE the device erases a slot to find out
-#   verify_container  runs svc/plugin_load.c -- the DEVICE's validator -- over a
+#   verify_container  runs svc/plugin/plugin_load.c -- the DEVICE's validator -- over a
 #                     packed container, so it cannot pass here and fail there
 set(GROVE_ABI_LAYOUT_JSON "${CMAKE_BINARY_DIR}/plugin/abi_layout.json")
 set(GROVE_SLOT_TABLE_JSON "${CMAKE_BINARY_DIR}/plugin/slot_table.json")
@@ -2016,12 +2019,12 @@ if(HOST_CC)
     add_custom_command(
         OUTPUT "${GROVE_ABI_LAYOUT_JSON}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/plugin"
-        COMMAND "${HOST_CC}" -std=c11 -O1 -I "${CMAKE_SOURCE_DIR}/svc"
+        COMMAND "${HOST_CC}" -std=c11 -O1 -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera"
                 "${CMAKE_SOURCE_DIR}/asset/tools/abi_layout.c"
                 -o "${CMAKE_BINARY_DIR}/plugin/abi_layout"
         COMMAND "${CMAKE_BINARY_DIR}/plugin/abi_layout"
                 > "${GROVE_ABI_LAYOUT_JSON}"
-        DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/abi_layout.c" "${CMAKE_SOURCE_DIR}/svc/plugin_abi.h"
+        DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/abi_layout.c" "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_abi.h"
         COMMENT "host cc -> abi_layout.json (the packer's view of the ABI)"
         VERBATIM)
 
@@ -2029,7 +2032,7 @@ if(HOST_CC)
         OUTPUT "${GROVE_SLOT_TABLE_JSON}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/plugin"
         COMMAND "${HOST_CC}" -std=c11 -O1 -w
-                -I "${BOARD_DIR}/src" -I "${CMAKE_SOURCE_DIR}/svc"
+                -I "${BOARD_DIR}/src" -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera"
                 "${BOARD_DIR}/scripts/slot_table.c" "${BOARD_DIR}/src/blob_map.c"
                 -o "${CMAKE_BINARY_DIR}/plugin/slot_table"
         COMMAND "${CMAKE_BINARY_DIR}/plugin/slot_table" "${GROVE_ERASE_GRAN}"
@@ -2041,15 +2044,15 @@ if(HOST_CC)
     add_custom_command(
         OUTPUT "${GROVE_CONTAINER_VERIFIER}"
         COMMAND "${HOST_CC}" -std=c11 -O1 -Wall -Wextra
-                -I "${CMAKE_SOURCE_DIR}/svc"
+                -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera"
                 "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
-                "${CMAKE_SOURCE_DIR}/svc/plugin_load.c"
+                "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
                 "${CMAKE_SOURCE_DIR}/svc/crc32.c"
                 -o "${GROVE_CONTAINER_VERIFIER}"
         DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
-                "${CMAKE_SOURCE_DIR}/svc/plugin_load.c"
-                "${CMAKE_SOURCE_DIR}/svc/plugin_load.h"
-                "${CMAKE_SOURCE_DIR}/svc/plugin_abi.h"
+                "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
+                "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.h"
+                "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_abi.h"
         COMMENT "host cc -> verify_container (the device's own validator)"
         VERBATIM)
 

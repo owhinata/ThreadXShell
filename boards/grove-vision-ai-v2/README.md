@@ -767,7 +767,7 @@ it is the donor's shipping OV5647 configuration rather than one invented here:
 OV5647 640x480 RAW10, 2 MIPI lanes (the sensor bins on chip)
   -> no INP crop -> 4:2 binning -> 320x240
   -> HW5x5 demosaic (BGGR) -> WDMA3
-  -> software pack to RGB565 -> svc/frame_pipeline -> ST7789
+  -> software pack to RGB565 -> svc/camera/frame_pipeline -> ST7789
 ```
 
 **[!] The IMX219 was supported and was removed (issue #54).**  Both modules fit
@@ -787,7 +787,7 @@ when nothing streams) rotates the panel to landscape first.  320x240 then maps
 
 The command is one file for all three boards, `shell/cmds/cmd_camera.c`, over
 this board's adapter `port/camera/camera_svc_grove.c`, which implements the
-contract in `svc/camera_svc.h` (the layers are in
+contract in `svc/camera/camera_svc.h` (the layers are in
 [svc/README.md](../../svc/README.md#the-camera-command-is-shared-issue-143)).
 The tuning and measurement subcommands stay in `cmds/cmd_camera_board.c` and are
 appended to the shared table.  Capabilities (`svc/camera_svc_config.h`): info,
@@ -856,7 +856,7 @@ image knobs.
 
 **The camera streams to the panel while, and only while, somebody holds it**:
 the operator (`camera stream start`) or nn (`nn stream start`, `nn run`).  The
-table is `svc/cam_holders` (the shared rules are in
+table is `svc/camera/cam_holders` (the shared rules are in
 [svc/README.md](../../svc/README.md#the-camera-streams-ownership-issue-142)),
 and the panel sink keeps it (`port/camera/cam_lcd_sink.c`): `camera.c` knows
 nothing of the panel and nothing of nn, and stays that way.  The first holder
@@ -885,7 +885,7 @@ only a **confirmed** stop unlinks the sink.
 **nn is an overlay on the panel's stream, counted.**  nn's step of the sink is
 `struct cam_lcd_overlay`, which the sink holds by pointer.  The producer reads
 the pointer once per frame, in the same critical section in which it counts
-itself in (`svc/cam_step.h`), and hands what it read to the panel thread with
+itself in (`svc/camera/cam_step.h`), and hands what it read to the panel thread with
 the frame; the panel thread never reads the sink's pointer, and leaves the step
 after drawing and before `camera_frame_put()`.  Taking the overlay off
 (`cam_lcd_sink_overlay_remove()`) disarms the step and clears the pointer in one
@@ -1668,7 +1668,7 @@ loop is refuted: whatever sets the pace, it is not integration time.
 **`sink` is the SPI DMA, and it is a hard floor.**  153,600 bytes at 48 MHz is
 25.60 ms of wire time; measured 26.45 ms, and across four runs it varied by
 7 us -- 0.03%.  So the byte-swap copy inside `lcd_blit_le()` costs about 0.85 ms,
-**1.3% of the frame**.  Removing it would mean teaching `svc/frame.h` a
+**1.3% of the frame**.  Removing it would mean teaching `svc/camera/frame.h` a
 big-endian RGB565 format, which reaches every board, for 1.3%.
 
 **`pack` is 44% arithmetic, not pixel traffic.**  Turning off gamma and
@@ -1755,7 +1755,7 @@ W, and W only matters once VTS is chosen to let it.
 `sink` remains 26.45 ms of SPI wire time (153,600 bytes at 48 MHz is 25.60 ms in
 theory, and it varied by 7 us across four runs), so taking the blit off this
 thread means overlapping it, not making it cheaper.  The byte swap inside it is
-~0.85 ms, 1.3% of a frame, and still not worth teaching `svc/frame.h` a
+~0.85 ms, 1.3% of a frame, and still not worth teaching `svc/camera/frame.h` a
 big-endian RGB565 format for.
 
 ### What happened when the blit did move (issue #57)
@@ -2186,16 +2186,16 @@ file (each `.c` with its `.h` unless only a header is listed):
 |---|---|---|
 | `port/nn/nn_svc_grove.c` | console | The adapter: an open brings the Ethos-U55 up and holds the NOR XIP lease, so it is the thick one of the three. |
 | `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (arm / stop / join / stats, the one-shot's ending) | Binds the shared frame path to this board's camera sink and the SPI LCD panel's overlay contract (`cam_lcd_sink.h`), and defines nn's place among the panel stream's holders (issue #142); owns the glue's state (the private header lists each counter's writers and resets), which is static and outlives a producer that never acknowledged a stop, plus the frame path's ops table and the overlay vtable. |
-| `port/nn/nn_producer.c` | camera producer (the overlay's `process()`, inside the panel sink's `consume()`, counted by `svc/cam_step.h`) | Prepares the raw planar WDMA3 frame straight into the Ethos-U55 input tensor on the CPU, only while the worker wants a frame, and hands it over: the datapath rewrites that frame two frames later, so it is prepared here or copied. |
+| `port/nn/nn_producer.c` | camera producer (the overlay's `process()`, inside the panel sink's `consume()`, counted by `svc/camera/cam_step.h`) | Prepares the raw planar WDMA3 frame straight into the Ethos-U55 input tensor on the CPU, only while the worker wants a frame, and hands it over: the datapath rewrites that frame two frames later, so it is prepared here or copied. |
 | `port/nn/nn_worker.c` | inference worker | The ThreadX thread and its join, and `nn_camera_work()` with the frame path's outputs / decode / publish / account hooks: the NPU driver blocks for the whole invoke, so the invoke needs a thread of its own. |
 | `port/nn/nn_panel.c` | panel (`draw()`, inside the panel guard) | The nn half of the SPI LCD panel thread: the record snapshot and the plugin's paint into the staged RGB565 frame, with the plugin lease only tried (panel guard, then lease; no lease holder waits for the panel guard). |
-| `port/nn/nn_active.c` | worker, panel, console, under the plugin lease | Turns `npu_tensor` into `svc/tensor.h` descriptors and states this board's frame geometry for `svc/nn_active_core.c`. |
+| `port/nn/nn_active.c` | worker, panel, console, under the plugin lease | Turns `npu_tensor` into `svc/nn/tensor.h` descriptors and states this board's frame geometry for `svc/nn/nn_active_core.c`. |
 | `port/nn/nn_preproc.c` | camera producer (fill); wherever a box is mapped back | The camera's frame size and pixel format against the model input; pure and host-tested because a wrong box costs a NOR flash cycle to investigate. |
 | `port/nn/nn_rec.c` | worker (publish), panel and console (snapshot) | The record's storage and its lock, a short interrupt-disabled section rather than a mutex (`nn_rec.h` says why). |
 | `port/nn/nn_outputs.c` | inference worker | How many NPU outputs this board decodes (`NPU_DESC_MAX_OUTPUTS`); pure, the reads behind a callback. |
 | `port/nn/nn_run_wait.c` | console (`nn run`) | No hardware reason: the five ways `nn run`'s wait ends, a pure table over this board's worker and camera outcomes. |
 | `port/nn/nn_stream_state.c` | console (`nn stream stop`) | The stop's order as a table over two separate proofs -- the overlay's count at zero (permits the worker join, the record boundary and nn's leave) and a confirmed camera stop (the only thing that permits the sink's unlink) -- and the retryable / terminal classification of the codes; pure, host-tested. |
-| `port/camera/cam_lcd_sink.c` | camera producer (`consume()`), panel thread, console (hold / release / overlay) | Not an nn file, but nn runs on it: the one panel sink, the holder table (`svc/cam_holders`) and the overlay pointer with its count. |
+| `port/camera/cam_lcd_sink.c` | camera producer (`consume()`), panel thread, console (hold / release / overlay) | Not an nn file, but nn runs on it: the one panel sink, the holder table (`svc/camera/cam_holders`) and the overlay pointer with its count. |
 | `port/nn/nn_param_calls.c` | console (`nn thresh`, `nn dets`, load / unload) | No hardware reason: the count of console calls inside the plugin, run in the board's critical section. |
 | `port/nn/nn_plugin_stack.h` | build time | Per-slot plugin stack allowances asserted against this board's thread stacks. |
 | `port/nn/nn_probe.c`, `nn_probe_rtos.c` | every thread that enters a plugin slot | Stack depth at a plugin callback's entry; the rtos half asks ThreadX which thread is running. |
@@ -2218,7 +2218,7 @@ nn run
 ```
 
 **The order inside `nn model load --name <name>` is the design**, and every step of it is
-load-bearing.  Since issue #131 the order itself is `svc/nn_core_model.c`, shared by every
+load-bearing.  Since issue #131 the order itself is `svc/nn/nn_core_model.c`, shared by every
 board and walked step by step by `shell/test/test_nn_core_model.c`; what this board supplies
 are the steps' contents (`port/nn/nn_svc_grove.c`: the claim, the bring-up, the lookup, the
 backend's close-and-reopen and the identity):
@@ -2251,7 +2251,7 @@ already up and holding the lease, so steps 3-5 run under that lease; the old
 interpreter is closed only once the new model has resolved and verified, and the
 plugin is swapped only once the backend has taken the new model -- the
 executable reservation is one region, and copying a new image into it destroys
-the one that is there.  Where it ends (`svc/nn_swap.c`, the table every board
+the one that is there.  Where it ends (`svc/nn/nn_swap.c`, the table every board
 shares since issue #131, walked by `shell/test/test_nn_swap.c`):
 
 | stopped at | status | state | plugin | NPU / lease | last result |
@@ -4224,11 +4224,11 @@ the first `nn run` on hardware is the proof.
 
 ### The decoder
 
-`svc/blazeface.c`, SHARED with the other two boards since issue #97: SSD anchor
+`svc/nn/blazeface.c`, SHARED with the other two boards since issue #97: SSD anchor
 decode over 896 anchors (16x16 grid with 2 per cell, 8x8 with 6), then hard NMS.
 No libm -- the threshold is compared as a pre-sigmoid logit and the reported
 confidence uses an algebraic sigmoid.  It takes tensor DESCRIPTORS
-(`svc/tensor.h`) rather than reaching into the NPU singleton, which is what lets
+(`svc/nn/tensor.h`) rather than reaching into the NPU singleton, which is what lets
 `shell/test/test_blazeface.c` compile the real decoder and drive it with
 synthetic tensors.
 
@@ -4460,7 +4460,7 @@ Three things behave differently now that the stream outlives the command:
   holder did not let go within the bound -- see "One lock into the plugin".
 
 **The record (issue #118).**  `nn dets` reads the last result `nn run` or a
-stream published (`port/nn/nn_rec.c`, the decisions in `svc/nn_det_record.c`);
+stream published (`port/nn/nn_rec.c`, the decisions in `svc/nn/nn_det_record.c`);
 it no longer decodes.  A stop does not clear it; `nn model load` and `nn model
 unload` do.  **A stop takes its record boundary only after
 `camera_stream_stop()` has confirmed the producer is out of `consume()` AND the
@@ -4615,8 +4615,8 @@ been let loose on, so the choice was a copy of the crop (172,800 B) or preparing
 on the producer; the spike behind #129 measured the copy costing a quarter of
 the detector's frames, and preparing in place costing nothing.
 
-**The hand-over is one word, not a flag pair** (`svc/nn_handoff.c` since #130,
-shared with wio-lite-ai and run by the shared frame path `svc/nn_core_frame.c`;
+**The hand-over is one word, not a flag pair** (`svc/nn/nn_handoff.c` since #130,
+shared with wio-lite-ai and run by the shared frame path `svc/nn/nn_core_frame.c`;
 a pure table with a host test over every state and operation): IDLE (parked,
 wants nothing) / WANT (the producer may begin a frame) / FILLING (the producer is
 writing the input; here the whole frame is one part, so it begins, writes and
@@ -4850,7 +4850,7 @@ the command releases the NPU while an inference is still in flight.
 
 So **a linked sink reserves the camera**: `CAM_ERR_BUSY` from a start also means
 "somebody else's sink is still attached". The question is put to
-`svc/frame_pipeline`'s own registry (`frame_pipeline_sink_count()`), not to a
+`svc/camera/frame_pipeline`'s own registry (`frame_pipeline_sink_count()`), not to a
 flag in the camera -- the registry is the thing that decides who gets frames.
 It cannot go stale in the dangerous direction, because every attach now runs
 under the API mutex the asking thread holds; a concurrent *detach* can only make
@@ -5219,14 +5219,14 @@ those down is the contract on `cam_bus_enter()` and its being the only entry.
 only BECAUSE consume ran on the producer, and issue #48 built detach, teardown
 and the `nn` gate release on that meaning.  With the blit on its own thread the
 stop proves only the first half, so the second moved to where
-`svc/frame_pipeline`'s own contract puts it:
+`svc/camera/frame_pipeline`'s own contract puts it:
 
 1. confirmed stop -- the producer is idle, so no new delivery can start;
 2. **unlink**, so no later stream can reach this sink;
 3. bounded drain of the panel thread's one possible in-flight blit;
 4. only on success: clear the overlay, allow re-attach, release the `nn` lease.
 
-**The order is not interchangeable.**  It is `svc/frame_pipeline`'s contract --
+**The order is not interchangeable.**  It is `svc/camera/frame_pipeline`'s contract --
 unlink so that no further `consume()` can be issued, then wait for the work
 already handed over -- and it is also what makes the reservation above end as
 early as it safely can: once the sink is out of the registry, nothing a new
@@ -5308,7 +5308,7 @@ would have drifted the first time anyone tuned it.
 Every teardown on this board is allowed to fail, and the correct answer to each
 failure is to **hold on to everything** -- do not detach, do not release. That is
 the rule above, and it is right: a sink unlinked while a producer or the panel
-thread may still be inside it is the one thing `svc/frame_pipeline` cannot
+thread may still be inside it is the one thing `svc/camera/frame_pipeline` cannot
 survive.
 
 The consequence is that nothing can pick it up afterwards. Issue #75 asked
@@ -5467,7 +5467,7 @@ wrote straight to the output, a verifier failing -- or the build being
 interrupted between them -- would leave a complete-looking `.nnc` at the path
 this README tells you to send.
 
-`verify_container` links `svc/plugin_load.c` -- the same validator the firmware
+`verify_container` links `svc/plugin/plugin_load.c` -- the same validator the firmware
 runs -- so a container cannot pass on the host and be refused on the board.
 Issue #93 is why that matters: its host gate used the flatbuffer verifier's
 default limits while the firmware used its own, and a model passed on the host
@@ -5517,7 +5517,7 @@ every container already in the store.
 two.**  `boards/grove-vision-ai-v2/ldscript/plugin_memory.ld` carries the
 `MEMORY` block and nothing else; `asset/common/plugin.ld` carries the `SECTIONS`
 layout, which is not this board's -- that order IS the file format
-`svc/plugin_abi.h` defines, and its boundary symbols become the manifest's
+`svc/plugin/plugin_abi.h` defines, and its boundary symbols become the manifest's
 offsets.  The build binds the two with a generated wrapper holding **absolute**
 `INCLUDE` paths, because ld resolves a bare `INCLUDE` against its search
 directories and the working directory, and the plugin link runs from the plugin
@@ -5558,7 +5558,7 @@ verifier "recomputes it from the same header", which nothing did.  It is now
 checked at the two ends that can each see part of it: the gate derives CPU, FPU,
 float ABI and endianness from the plugin ELF's `.ARM.attributes` and ELF header,
 and `nn_svc_grove.c` static-asserts the whole word against this firmware's own
-predefined macros (`svc/plugin_target.h`).  **The CMSE bit is only checked by the
+predefined macros (`svc/plugin/plugin_target.h`).  **The CMSE bit is only checked by the
 second.**  It says this BASE runs Secure -- `shell_objs` is built `-mcmse`, the
 plugins are not, and they run correctly, because `-mcmse` exists to build
 Non-secure entry points and a plugin defines none.  No image records it, so the
@@ -5628,7 +5628,7 @@ change**: the container carries the code that reads the model's output, and that
 code decodes, draws on the panel and writes to the console.
 
 Two plugins ship in the tree.  `asset/plugins/blazeface` is the face detector -- the
-same `svc/blazeface.c` the firmware links, wrapped -- and exists so the two
+same `svc/nn/blazeface.c` the firmware links, wrapped -- and exists so the two
 paths can be compared.  `asset/plugins/cifar10` is the point: it interprets the
 classification model's ten-element output and **prints class names**, which no
 amount of firmware generalisation could do, because the names come with the
@@ -5680,7 +5680,7 @@ of formatting.
 
 ### One branch point, not one per caller
 
-`svc/nn_active_core.c` is the only place that decides which decoder is in force
+`svc/nn/nn_active_core.c` is the only place that decides which decoder is in force
 -- shared with wio-lite-ai since issue #126 and reached through this board's
 `port/nn/nn_active.c`, which converts the tensors and states the board's facts
 -- and **everything** goes through it: the one-shot decode, the stream's
@@ -5706,7 +5706,7 @@ Two things follow from a plugin's result being private:
   which then calls `nn_svc_report()` instead of printing boxes it does not own.
 - **`report` needed a path to `nn run` at all.**  The shared command consumed a
   snapshot and detections and nothing else; the board's only channel was the
-  `nn info` extension Step 1a added.  `svc/nn_svc.h` now carries
+  `nn info` extension Step 1a added.  `svc/nn/nn_svc.h` now carries
   `nn_svc_report()`, on the same `nn_svc_write_fn` boundary, so there is one
   convention rather than two.
 
@@ -5751,7 +5751,7 @@ granted only when no reader lease is live, and `npu_hw_init()` holds
 while a model is open, so the window is already pinned; `plugin_run_load()`
 asserts that with `nor_lease_held()` rather than building a second lock.
 
-**One place turns an offset into an address.**  `svc/plugin_load.c` deliberately
+**One place turns an offset into an address.**  `svc/plugin/plugin_load.c` deliberately
 returns integers and no function pointers, so "the validation step executes
 nothing" is a property of its types.  `plugin_run_slot()` is where that stops
 being true, and the loader's own entry call goes through the same helper -- the
@@ -5871,13 +5871,13 @@ refusal stays either way.
 
 At the plugin's entry, one record per slot and per thread (`port/nn/nn_probe.h`):
 
-- **the six callbacks `svc/nn_active_core.c` calls through** are sampled in the
+- **the six callbacks `svc/nn/nn_active_core.c` calls through** are sampled in the
   function that makes the indirect call, immediately before it, and handed to
   this board's record through the `note` it is given (issue #126).  The stack
   pointer is read explicitly (`mov rX, sp`), after everything passed has been
   built -- the tensor descriptor array, in `port/nn/nn_active.c`'s frame above
   it, included.
-- **entry()** is called inside the shared loader, `svc/plugin_exec.c`, which may
+- **entry()** is called inside the shared loader, `svc/plugin/plugin_exec.c`, which may
   own no storage.  The loader calls this board's `exec_ok` hook (`pl_exec_ok()`
   in `port/plugin/plugin_run.c`) from the same frame, with the stack pointer it
   then branches to entry() with, and the hook samples there.  The sample is
@@ -5924,7 +5924,7 @@ param_get: con 744/4096 bg 656/4096; left 3352
 painter : at most 800 px in one frame, 0 refused
 ```
 
-Issue #126 moved the six samples into `svc/nn_active_core.c`, shared with
+Issue #126 moved the six samples into `svc/nn/nn_active_core.c`, shared with
 wio-lite-ai.  On build `ee045ff` the board printed: entry con 992, shapes_ok
 con 1552, decode producer 880 and con 2376, draw panel 224, report con 2088,
 param_set con 456, param_get con 784 (all `/4096`, producer `/8192`, panel `/2048`), and the
@@ -6039,7 +6039,7 @@ plugin load out of the name resolution and after `npu_open()`): ... >
 `plugin_exec_load` 56.  The resolution's slot table (`nn_resolve_blob` 200,
 `noinline`) has returned by then; before, the call sat inside it and the path
 was 1,096.  Issue #131 stage 7c put the shared load order
-(`svc/nn_core_model.c`) on that path: 8 + 16 + `cli_thread_entry` 40 >
+(`svc/nn/nn_core_model.c`) on that path: 8 + 16 + `cli_thread_entry` 40 >
 `cli_input_byte` 32 > `cli_dispatch_line` 24 > `cli_dispatch_segment` 280 >
 `cmd_nn_model_load` 376 > `nn_svc_model_load` 56 > `nn_core_model_load` 48 >
 `nn_life_plugin_start` 24 > `plugin_run_load` 56 > `plugin_exec_load` 56 =
@@ -6081,7 +6081,7 @@ and the painter's rect as the deepest thing under any veneer.
 
 (The chains are printed with the names the LINK produced, because the check
 reads the image, not the sources.  Since issue #126 the blit and fill chains go
-through the clip-and-charge shared with wio-lite-ai (`svc/plugin_paint_span.c`),
+through the clip-and-charge shared with wio-lite-ai (`svc/plugin/plugin_paint_span.c`),
 which this build -- no LTO -- keeps as real calls with the clipped span in the
 caller's frame: blit 48 -> 128 B and fill 32 -> 80 B, both still under the
 rect's 232 B, so the derived value did not move.)
@@ -6117,7 +6117,7 @@ there, so the bound decomposes exactly, and that is what a manifest now carries:
 per slot the plugin's own deepest frames **A0**, its own frames on a path that
 reaches a veneer **A1** plus a crossing bit, and for the whole plugin the bound
 **S** of its own printer sink (`pl_sbuf_write`, which sits on the far side of
-the printer veneer).  The loader (`svc/plugin_load.c`) requires
+the printer veneer).  The loader (`svc/plugin/plugin_load.c`) requires
 
     max(A0, A1 + max(c, S))    for a slot that crosses,   A0 otherwise
 
@@ -6187,7 +6187,7 @@ To check after a change, read `<nn_active_core_*>`, `<pl_exec_ok>` and
 `<plugin_exec_load>` in
 `arm-none-eabi-objdump -d --no-show-raw-insn build/grove-vision-ai-v2/shell.elf`.
 A second hook call in one load shows up as `inv`.  What does NOT show up is
-`svc/plugin_exec.c` putting a helper between the hook's frame and entry(), a
+`svc/plugin/plugin_exec.c` putting a helper between the hook's frame and entry(), a
 site that starts passing arguments on the stack, or anything else that moves
 `sp` between a sample and its call: the depth reads short, with no mark, and the
 tables above have to be derived again.
@@ -6579,7 +6579,7 @@ caller-boxes path prints a `struct bf_det`, so it is BlazeFace by type and a
 classifier cannot reach it -- and an entry that stops matching anything fails the
 gate as a stale exemption.
 
-`svc/nn_svc.h` now states what `last_ndet` means: **items the decoder produced**.
+`svc/nn/nn_svc.h` now states what `last_ndet` means: **items the decoder produced**.
 A face detector returns boxes; the classifier returns how many entries of its
 class vector it kept, and shows one of them.  How many it SHOWS is its own
 business, and a console that wants to know what they were asks the decoder with
@@ -6748,7 +6748,7 @@ parameters, its admission questions, its `entry()`, and its replacement or
 removal. It has the same name, API shape and miss semantics as wio-lite-ai's
 result lease (`boards/wio-lite-ai/port/plugin/plugin_lease.h`); the two are
 separate files until Epic #122 Phase 3b folds them into one type. What both
-boards now promise (`svc/plugin_abi.h`): **no two callbacks of one plugin run
+boards now promise (`svc/plugin/plugin_abi.h`): **no two callbacks of one plugin run
 at once.**
 
 Why this board needed one at all: the frame pipeline then kept the

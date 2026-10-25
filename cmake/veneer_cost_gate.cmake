@@ -52,7 +52,7 @@
 #  guarantee either -- a later -D or #define of the same name overrides it with
 #  a warning -- so the stamp also waits for cmake/check_policy_probe.py, which
 #  reads the veneer_cost the board's policy ACTUALLY HOLDS out of the shipped
-#  image (PLUGIN_POLICY_PROBE, svc/plugin_load.h) and refuses anything but the
+#  image (PLUGIN_POLICY_PROBE, svc/plugin/plugin_load.h) and refuses anything but the
 #  number that was checked.
 #
 #  [!] THE SAME READ-BACK HOLDS THE STACK ALLOWANCES TO THE BOARD'S TABLE

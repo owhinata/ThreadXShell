@@ -180,7 +180,7 @@ file (each `.c` with its `.h` unless only a header is listed):
 | `port/nn/nn_svc_f746_model.c` | console (`nn info`, `nn model load` / `unload`) | The steps of the shared load order on this board: the built-in model in Flash and the SD-card model slots in SDRAM. |
 | `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (start / stop / stats / record reads) and the camera sink's open / close of the nn step | Binds the shared frame path to this board's camera as the nn step of the one camera sink, and holds nn's place among the camera's holders (issue #142); owns the glue's state (the private header lists each counter's writers and resets) and the frame path's ops table. |
 | `port/nn/nn_producer.c` | camera producer (the nn step of the camera sink's `consume()`) | Prepares a frame straight into the model's input tensor (nearest-neighbour resize + RGB565 conversion on the CPU) and hands it over; it does not put the frame -- the sink does, last. |
-| `port/camera/cam_sink.c` | camera producer (`consume()`), console (step enable / disable / drain) | Not an nn file, but nn runs inside it: the one RGB565 subscriber of the base capture, running the GUIX display step and then the nn step, with `camera_frame_put()` last. Each step's armed mark and busy count are `svc/cam_step.h`'s. |
+| `port/camera/cam_sink.c` | camera producer (`consume()`), console (step enable / disable / drain) | Not an nn file, but nn runs inside it: the one RGB565 subscriber of the base capture, running the GUIX display step and then the nn step, with `camera_frame_put()` last. Each step's armed mark and busy count are `svc/camera/cam_step.h`'s. |
 | `port/nn/nn_worker.c` | inference worker (priority 18) | Inference runs on the CPU, so the worker sits below every other thread; it runs the model, the resident decoder's publish and the counting. |
 | `port/nn/nn_decoder.c` | inference worker | Resident BlazeFace decoder state, with its candidate scratch placed in `.sdram.ai`, and `nn_tensor` -> `tensor_desc`. |
 | `port/nn/nn_decode_count.c` | inference worker | No hardware reason: this board's table for counting the decoder's answer in `nn stream stats` (pure, host-tested). |
@@ -222,7 +222,7 @@ emptied.
   `nn model unload` answers as before without changing anything.
 
 Since #131 step 7d the order of a load and an unload is the one every board
-shares (`svc/nn_core_model.c`, walked by `shell/test/test_nn_core_model.c`);
+shares (`svc/nn/nn_core_model.c`, walked by `shell/test/test_nn_core_model.c`);
 this board's half is `port/nn/nn_svc_f746_model.c`, and
 `test/test_nn_model_life.c` builds it against the real `nn.c` over a stub
 backend. What that changed here:
@@ -368,7 +368,7 @@ compiled in every `CONFIG_NN_BACKEND` configuration.
 
 A third gate arrived with it, and it protects the arrangement that made the
 require possible.  The decoder itself is shared by all three boards
-(`svc/blazeface.c`) and owns NO storage: this board passes in its own scratch,
+(`svc/nn/blazeface.c`) and owns NO storage: this board passes in its own scratch,
 which is how that buffer keeps `.sdram.ai` and how the layout gate can name a
 symbol this board owns (`port/nn/nn_decoder.c`).
 `cmake/check_no_mutable_storage.py` refuses a static added to the shared file, by
@@ -430,7 +430,7 @@ camera stream stats          counters, subscribers and the holders
 
 The base capture runs while, and only while, somebody holds it: the operator
 (`camera stream start`) or nn (`nn stream start`, `nn run`).  The table is
-`svc/cam_holders` (the shared rules are in
+`svc/camera/cam_holders` (the shared rules are in
 [svc/README.md](../../svc/README.md#the-camera-streams-ownership-issue-142)),
 kept next to the base in `port/camera/camera.c` under the camera lock.  When the
 LCD comes up at boot, GUIX takes hold in the operator's place
@@ -487,13 +487,13 @@ already running`.
 > from a result of the session in force, so they still clear on `nn stream stop`.
 > For a model the decoder does not recognise, the worker takes the top 5 classes
 > of output 0 before its next inference and publishes them with the result
-> (issue #121, `svc/nn_top.c`); `nn run` and `nn dets` print those, never the
+> (issue #121, `svc/nn/nn_top.c`); `nn run` and `nn dets` print those, never the
 > output tensor as it is at print time.
 >
 > **A frame that arrives during an inference is skipped, not staged** (issue
 > #130 step 6b). The camera producer preprocesses a frame straight into the
 > model's input tensor, and only while the worker wants one; the shared
-> hand-over word (`svc/nn_handoff.h`, stepped by `svc/nn_core_frame.c`, the same
+> hand-over word (`svc/nn/nn_handoff.h`, stepped by `svc/nn/nn_core_frame.c`, the same
 > one grove-vision-ai-v2 and wio-lite-ai use) says who owns the input. In `nn
 > stream stats`, `frames in` counts every frame offered, `skipped` the ones that
 > arrived while the worker was busy (or before it armed), and the rest were
@@ -530,7 +530,7 @@ already running`.
 
 The command is one file for all three boards, `shell/cmds/cmd_camera.c`, over
 this board's adapter `port/camera/camera_svc_f746.c`, which implements the
-contract in `svc/camera_svc.h` (the layers are in
+contract in `svc/camera/camera_svc.h` (the layers are in
 [svc/README.md](../../svc/README.md#the-camera-command-is-shared-issue-143)).
 What only this board has stays in `cmds/cmd_camera_board.c` and is appended to
 the shared table.  This board's capabilities (`svc/camera_svc_config.h`): power,
@@ -603,7 +603,7 @@ The base capture has two *subscribers* since issue #142:
   holds the base in JPEG mode.
 
 `gui stop` and `nn stream stop` do not unsubscribe anything.  Each switches its
-own step off and waits for the producer to leave it (`svc/cam_step.h`): the
+own step off and waits for the producer to leave it (`svc/camera/cam_step.h`): the
 step's armed mark is dropped, and its busy count reaching 0 proves the producer
 is out of the step and cannot enter it again.  The other step and the base keep
 running.  The owner keeps its transition claimed (`port/camera/cam_own.h`)

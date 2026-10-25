@@ -11,7 +11,7 @@ warning, and the loader would then add a SMALLER c than the one checked -- every
 container it admitted would be under-charged.  So this reads what the policy
 actually HOLDS, from the linked image:
 
-    symbol plugin_policy_probe (svc/plugin_load.h, PLUGIN_POLICY_PROBE)
+    symbol plugin_policy_probe (svc/plugin/plugin_load.h, PLUGIN_POLICY_PROBE)
       -> magic, sizeof(struct plugin_policy), the field offsets, and a pointer
       -> the policy object the board passes to plugin_parse()
       -> veneer_cost == --declared, stack_accounting == the ABI's
@@ -48,7 +48,7 @@ SHT_NOBITS = 8
 SHF_WRITE = 0x1
 SHF_ALLOC = 0x2
 PROBE = "plugin_policy_probe"
-MAGIC = 0x4C4F5050          # svc/plugin_load.h PLUGIN_POLICY_PROBE_MAGIC
+MAGIC = 0x4C4F5050          # svc/plugin/plugin_load.h PLUGIN_POLICY_PROBE_MAGIC
 PROBE_WORDS = 6
 
 
@@ -79,7 +79,7 @@ def main():
         return 1
 
     # The table, by slot NAME.  The indices are the ABI's (check_plugin_image
-    # carries them, pinned to svc/plugin_abi.h by run_plugin_gate_tests.py), so
+    # carries them, pinned to svc/plugin/plugin_abi.h by run_plugin_gate_tests.py), so
     # neither the caller nor this file states an order.  Every slot is required:
     # a missing row would leave one number of the policy unchecked.
     abi = check_plugin_image.ABI
@@ -111,7 +111,7 @@ def main():
     if len(hits) != 1:
         return fail(f"{len(hits)} symbols named {PROBE} in {args.elf}; the "
                     "board must export its plugin policy exactly once "
-                    "(PLUGIN_POLICY_PROBE in svc/plugin_load.h)")
+                    "(PLUGIN_POLICY_PROBE in svc/plugin/plugin_load.h)")
     _, addr, size, _, _ = hits[0]
     if size != 4 * PROBE_WORDS:
         return fail(f"{PROBE} is {size} B, not {4 * PROBE_WORDS}")

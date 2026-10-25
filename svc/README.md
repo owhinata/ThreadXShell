@@ -7,12 +7,18 @@ and into the host tests under `shell/test/` and `boards/<board>/test/`. Anything
 that needs a peripheral, a memory map, a lock or a thread stays in the board and
 is reached from here through a hook or a declared API.
 
-Besides the `nn` and plugin files described below, it holds the formatter
-(`fmt`), CRC-32 (`crc32`), YMODEM (`ymodem`), the camera frame pipeline
-(`frame`, `frame_pipeline`), the camera stream's holder table, sink steps and
-stream generations (`cam_holders`, `cam_step`, `cam_gen`, below), the `camera`
-command's contract (`camera_svc`, below), small graphics helpers (`gfx_rot`, `rect_geom`), the
-neutral tensor descriptor (`tensor.h`) and the BlazeFace decoder (`blazeface`).
+The files are grouped by the feature they serve (issue #153):
+
+| Directory | What it holds |
+|---|---|
+| `svc/` | Generic services any layer uses: the formatter (`fmt`), CRC-32 (`crc32`), YMODEM (`ymodem`) and small graphics helpers (`gfx_rot`, `rect_geom`). |
+| `svc/nn/` | The `nn` command's contract and shared core (`nn_*`, described below), the neutral tensor descriptor (`tensor.h`) and the BlazeFace decoder (`blazeface`). |
+| `svc/plugin/` | The plugin container's ABI, loader, executor and the checks around them (`plugin_*`, below). |
+| `svc/camera/` | The camera frame pipeline (`frame`, `frame_pipeline`), the camera stream's holder table, sink steps and stream generations (`cam_holders`, `cam_step`, `cam_gen`, below) and the `camera` command's contract (`camera_svc`, below). |
+
+Every one of the four directories is on the include path wherever `svc/` is, so
+a source names a header by its file name alone (`#include "nn_core.h"`), and the
+storage audit covers the whole tree under `svc/`.
 
 ## The `nn` command's layering
 
@@ -24,7 +30,7 @@ shell/cmds/cmd_nn.c (+ nn_cmd_core.c)    one command; a subcommand whose
         |                                NN_SVC_HAS_* capability is 0 is not
         |                                registered (boards/<board>/svc/nn_svc_config.h)
         v
-svc/nn_svc.h                             the contract: the nn_svc_*() calls
+svc/nn/nn_svc.h                          the contract: the nn_svc_*() calls
         |
         v
 boards/<board>/port/nn/nn_svc_<board>*.c the adapter: translates the contract
@@ -36,11 +42,11 @@ boards/<board>/port/nn/                  the board's glue, one file per thread:
         |            |                     each thread calls into the shared
         |            |                     core and passes it hooks and state
         |            v
-        |   svc/nn_core.c       lifecycle policy and the stream's numbers
-        |   svc/nn_core_frame.c producer / worker / panel frame path
-        |   svc/nn_stream_life.c, nn_handoff.c, nn_det_record.c,
+        |   svc/nn/nn_core.c       lifecycle policy and the stream's numbers
+        |   svc/nn/nn_core_frame.c producer / worker / panel frame path
+        |   svc/nn/nn_stream_life.c, nn_handoff.c, nn_det_record.c,
         |   nn_core_model.c, nn_swap.c, nn_active_core.c,
-        |   plugin_lease_api.h (implemented by the board)
+        |   svc/plugin/plugin_lease_api.h (implemented by the board)
         v
 backend: boards/<board>/port/nn/tflm/ (wio-lite-ai, f746g-disco)
          boards/grove-vision-ai-v2/port/nn/npu/ (Ethos-U55 + TFLM)
@@ -63,7 +69,7 @@ grove-vision-ai-v2  port/camera/cam_lcd_sink.c  panel; nn is the overlay on it
 ```
 
 The command and the shared core never see a backend's tensor type: the board
-turns its own tensors into `svc/tensor.h` descriptors before anything shared
+turns its own tensors into `svc/nn/tensor.h` descriptors before anything shared
 reads them.
 
 ## The camera stream's ownership (issue #142)
@@ -168,8 +174,8 @@ shell/cmds/cmd_camera.c                  one command: grammar, usage, refusals,
         |   shell/cmds/camera_cmd_board.h  the two shell-layer services a board
         |                                gives it: YMODEM send, the save medium
         v
-svc/camera_svc.h                         the contract: the camera_svc_*() calls
-svc/camera_svc_adapter.h                 static-inline result / line helpers
+svc/camera/camera_svc.h                  the contract: the camera_svc_*() calls
+svc/camera/camera_svc_adapter.h          static-inline result / line helpers
         |
         v
 boards/<board>/port/camera/camera_svc_<board>.c   the adapter (no shell instance;
@@ -177,8 +183,9 @@ boards/<board>/port/camera/camera_svc_<board>.c   the adapter (no shell instance
         |                                answers a cancel callback)
         v
 the board's camera driver (port/camera/camera.c ...), which keeps the
-holder table (svc/cam_holders), the sink steps (svc/cam_step) and, on
-f746g-disco and wio-lite-ai, the stream generations (svc/cam_gen.h)
+holder table (svc/camera/cam_holders), the sink steps (svc/camera/cam_step)
+and, on f746g-disco and wio-lite-ai, the stream generations
+(svc/camera/cam_gen.h)
 ```
 
 | Capability (`boards/<board>/svc/camera_svc_config.h`) | f746g-disco | wio-lite-ai | grove-vision-ai-v2 |
@@ -216,46 +223,47 @@ What the contract fixes, on every board:
 
 ## One line per shared nn / plugin / camera file
 
-Each pair is a `.c` and its `.h` unless only a header is listed.
+Each pair is a `.c` and its `.h` unless only a header is listed; the path is
+relative to `svc/`.
 
 | File | Role |
 |---|---|
-| `nn_svc.h` | The contract the shared `nn` command speaks; implemented by each board's adapter. |
-| `nn_svc_adapter.h` | Static-inline helpers every adapter uses to build a result and an `nn info` line. |
-| `nn_detail.h` | The bound on a board's `nn` explanation text and its build-time check. |
-| `nn_stream_life` | The one live-inference state machine (start admission, generations, stop claims). |
-| `nn_core` | The policy around that machine and the stream's numbers, called from a console. |
-| `nn_core_frame` | The frame path: what the producer, worker and panel do with each frame. |
-| `nn_handoff` | The hand-over word that says who may touch the model's input and when. |
-| `nn_det_record` | The published decode record and the generation rule that keeps a stale decode out. |
-| `nn_core_model` | The order of `nn model load` and `nn model unload`. |
-| `nn_swap` | Where a model load ended up and what that obliges (the ending table). |
-| `nn_active_core` | Whether a plugin decodes, and every call into its decoder slots. |
-| `nn_report` | The bounded sink that captures a plugin's account of its own result. |
-| `nn_top` | The top classes of an output tensor, taken on the thread that ran the inference. |
-| `plugin_abi.h` | The wire ABI between the firmware and a plugin shipped with its model. |
-| `plugin_target.h` | The plugin target word this translation unit is compiled for. |
-| `plugin_load` | Container and manifest validation; returns offsets, never a callable pointer. |
-| `plugin_exec` | Copies a validated image into the board's reservation and calls its entry. |
-| `plugin_mpu` | Armv8-M MPU verdict: is the plugin reservation executable (pure function). |
-| `plugin_mpu_v7m` | The same question for an Armv7-M PMSA, answered by its own rules. |
-| `plugin_info` | The plugin stack lines of `nn info`. |
-| `plugin_lease_api.h` | The plugin lease's API (one lock into the plugin); the board implements it. |
-| `plugin_lease_miss` | What a refused no-wait lease acquire counts, over state the caller owns. |
-| `plugin_paint_budget` | What one plugin `draw()` may spend, and the one place it is charged. |
-| `plugin_paint_span` | What a painter primitive decides before its first store (clip, offset, charge). |
-| `cam_holders` | Who holds the camera stream open, and the start / stop / refusal each change implies (issue #142). |
-| `cam_step` | One step of the camera sink: may the producer enter it, and has it left (issue #142). |
-| `camera_svc.h` | The contract the shared `camera` command speaks; implemented by each board's adapter (issue #143). |
-| `camera_svc_adapter.h` | Static-inline helpers every camera adapter uses to fill a result and write a line. |
-| `cam_gen.h` | Stream generations: has THE stream a stop named ended (pure, shared by f746g-disco and wio-lite-ai). |
+| `nn/nn_svc.h` | The contract the shared `nn` command speaks; implemented by each board's adapter. |
+| `nn/nn_svc_adapter.h` | Static-inline helpers every adapter uses to build a result and an `nn info` line. |
+| `nn/nn_detail.h` | The bound on a board's `nn` explanation text and its build-time check. |
+| `nn/nn_stream_life` | The one live-inference state machine (start admission, generations, stop claims). |
+| `nn/nn_core` | The policy around that machine and the stream's numbers, called from a console. |
+| `nn/nn_core_frame` | The frame path: what the producer, worker and panel do with each frame. |
+| `nn/nn_handoff` | The hand-over word that says who may touch the model's input and when. |
+| `nn/nn_det_record` | The published decode record and the generation rule that keeps a stale decode out. |
+| `nn/nn_core_model` | The order of `nn model load` and `nn model unload`. |
+| `nn/nn_swap` | Where a model load ended up and what that obliges (the ending table). |
+| `nn/nn_active_core` | Whether a plugin decodes, and every call into its decoder slots. |
+| `nn/nn_report` | The bounded sink that captures a plugin's account of its own result. |
+| `nn/nn_top` | The top classes of an output tensor, taken on the thread that ran the inference. |
+| `plugin/plugin_abi.h` | The wire ABI between the firmware and a plugin shipped with its model. |
+| `plugin/plugin_target.h` | The plugin target word this translation unit is compiled for. |
+| `plugin/plugin_load` | Container and manifest validation; returns offsets, never a callable pointer. |
+| `plugin/plugin_exec` | Copies a validated image into the board's reservation and calls its entry. |
+| `plugin/plugin_mpu` | Armv8-M MPU verdict: is the plugin reservation executable (pure function). |
+| `plugin/plugin_mpu_v7m` | The same question for an Armv7-M PMSA, answered by its own rules. |
+| `plugin/plugin_info` | The plugin stack lines of `nn info`. |
+| `plugin/plugin_lease_api.h` | The plugin lease's API (one lock into the plugin); the board implements it. |
+| `plugin/plugin_lease_miss` | What a refused no-wait lease acquire counts, over state the caller owns. |
+| `plugin/plugin_paint_budget` | What one plugin `draw()` may spend, and the one place it is charged. |
+| `plugin/plugin_paint_span` | What a painter primitive decides before its first store (clip, offset, charge). |
+| `camera/cam_holders` | Who holds the camera stream open, and the start / stop / refusal each change implies (issue #142). |
+| `camera/cam_step` | One step of the camera sink: may the producer enter it, and has it left (issue #142). |
+| `camera/camera_svc.h` | The contract the shared `camera` command speaks; implemented by each board's adapter (issue #143). |
+| `camera/camera_svc_adapter.h` | Static-inline helpers every camera adapter uses to fill a result and write a line. |
+| `camera/cam_gen.h` | Stream generations: has THE stream a stop named ended (pure, shared by f746g-disco and wio-lite-ai). |
 
 ## Why the lock and the threads are the board's
 
 `svc/` cannot include `tx_api.h` or any board header: the same object has to
 build for three boards and for the host. So every mutex, every bounded wait and
 every thread is the board's. The board implements the APIs this layer declares
-(`plugin_lease_api.h`), and passes critical-section entry/exit, tick reads, the
+(`plugin/plugin_lease_api.h`), and passes critical-section entry/exit, tick reads, the
 lease and the decode as hooks in a const ops struct (`struct nn_core_frame_ops`,
 `struct nn_core_board`).
 

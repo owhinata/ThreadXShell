@@ -136,7 +136,7 @@ glue_inc="-I $here -I $backend"
 # the include path.  Output + tx_* glue route through the shared dummy backend.
 gcc $CFLAGS -DCLI_CMD_BUFFER_SIZE=16 -DCLI_MAX_ARGC=4 -DCLI_MAX_SUBCMD_DEPTH=2 \
     -DCLI_USE_COLOR=0 \
-    $glue_inc -I "$here/shim" -I "$inc" -I "$core" -I "$svc" \
+    $glue_inc -I "$here/shim" -I "$inc" -I "$core" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_core.c" "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
     "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_parse.c" "$core/cli_complete.c" \
     $glue \
@@ -148,7 +148,7 @@ gcc $CFLAGS -DCLI_CMD_BUFFER_SIZE=16 -DCLI_MAX_ARGC=4 -DCLI_MAX_SUBCMD_DEPTH=2 \
 # the real 32 B CLI_PRINTF_BUFFER_SIZE so the SGR escapes and autoflush are
 # exercised.  cli_session.c is linked for the cancel helpers.
 gcc $CFLAGS \
-    $glue_inc -I "$here/shim" -I "$inc" -I "$core" -I "$svc" \
+    $glue_inc -I "$here/shim" -I "$inc" -I "$core" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_output.c" "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_session.c" \
     $glue \
     $LDFLAGS -o "$out/test_output"
@@ -160,7 +160,7 @@ gcc $CFLAGS \
 # multi-instance isolation.  Small CLI_* limits + colour OFF as for the core test.
 gcc $CFLAGS -DCLI_CMD_BUFFER_SIZE=16 -DCLI_MAX_ARGC=4 -DCLI_MAX_SUBCMD_DEPTH=2 \
     -DCLI_USE_COLOR=0 \
-    $glue_inc -I "$here/shim" -I "$inc" -I "$core" -I "$svc" \
+    $glue_inc -I "$here/shim" -I "$inc" -I "$core" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_integration.c" "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
     "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_parse.c" "$core/cli_complete.c" \
     $glue \
@@ -173,7 +173,7 @@ gcc $CFLAGS -DCLI_CMD_BUFFER_SIZE=16 -DCLI_MAX_ARGC=4 -DCLI_MAX_SUBCMD_DEPTH=2 \
 # reply, and wrap redraw at a forced small term_width.  Drives cli_input_byte
 # directly (model assertions) so it needs no backend.  Colour OFF.
 gcc $CFLAGS -DCLI_USE_COLOR=0 \
-    $glue_inc -I "$here/shim" -I "$inc" -I "$core" -I "$svc" \
+    $glue_inc -I "$here/shim" -I "$inc" -I "$core" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_edit.c" "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
     "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_parse.c" "$core/cli_complete.c" \
     $glue \
@@ -186,7 +186,7 @@ gcc $CFLAGS -DCLI_USE_COLOR=0 \
 # re-submit, no-draft-restore, and per-instance isolation.  A small 32 B
 # CLI_HISTORY_BUFFER_SIZE forces eviction with a few short entries; colour OFF.
 gcc $CFLAGS -DCLI_USE_COLOR=0 -DCLI_HISTORY_BUFFER_SIZE=32 \
-    $glue_inc -I "$here/shim" -I "$inc" -I "$core" -I "$svc" \
+    $glue_inc -I "$here/shim" -I "$inc" -I "$core" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_history.c" "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
     "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_parse.c" "$core/cli_complete.c" \
     $glue \
@@ -230,7 +230,7 @@ gcc $CFLAGS \
 # territory, and the buffer-full guard.  Drives cli_input_byte (Tab=0x09) +
 # cli_tab_complete directly and asserts the model + captured output.  Colour OFF.
 gcc $CFLAGS -DCLI_USE_COLOR=0 \
-    $glue_inc -I "$here/shim" -I "$inc" -I "$core" -I "$svc" \
+    $glue_inc -I "$here/shim" -I "$inc" -I "$core" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_complete.c" "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
     "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_parse.c" "$core/cli_complete.c" \
     $glue \
@@ -241,7 +241,7 @@ gcc $CFLAGS -DCLI_USE_COLOR=0 \
 # completion that would overflow the line rings BEL and leaves the line unchanged,
 # and an LCP-extend that cannot fit still reaches the two-stage list on the next Tab.
 gcc $CFLAGS -DCLI_USE_COLOR=0 -DCLI_CMD_BUFFER_SIZE=8 -DTEST_COMPLETE_SMALL_BUF \
-    $glue_inc -I "$here/shim" -I "$inc" -I "$core" -I "$svc" \
+    $glue_inc -I "$here/shim" -I "$inc" -I "$core" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_complete.c" "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
     "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_parse.c" "$core/cli_complete.c" \
     $glue \
@@ -253,7 +253,7 @@ gcc $CFLAGS -DCLI_USE_COLOR=0 -DCLI_CMD_BUFFER_SIZE=8 -DTEST_COMPLETE_SMALL_BUF 
 # NAK resend, CAN abort + teardown, seq wrap mod 256, and a 1-byte-at-a-time
 # source filling full blocks.  Pure svc layer -- HAL/ThreadX/shell-free, so it
 # builds with the host gcc and needs only the svc include dir for the header.
-gcc $CFLAGS -I "$svc" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_ymodem.c" "$svc/ymodem.c" \
     $LDFLAGS -o "$out/test_ymodem"
 "$out/test_ymodem"
@@ -265,20 +265,20 @@ gcc $CFLAGS -I "$svc" \
 # handshake, since the sender only advances on the receiver's 'C'/ACKs -- and scripted
 # transcripts for the error paths (CRC damage, duplicate/out-of-order blocks, a sink
 # that refuses the file, a batch that never closes, short-block trimming).
-gcc $CFLAGS -I "$svc" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_ymodem_recv.c" "$svc/ymodem.c" \
     $LDFLAGS -pthread -o "$out/test_ymodem_recv"
 "$out/test_ymodem_recv"
 
-# owhinata/wio-lite-ai#8 phase 3a -- camera frame pipeline core (svc/frame_pipeline.c): ring
+# owhinata/wio-lite-ai#8 phase 3a -- camera frame pipeline core (svc/camera/frame_pipeline.c): ring
 # slot acquire/publish, refcount pin/put, DROP/LATEST policy + pending transfer, detach
 # in-flight count, read_latest generation, and an N=4 ring cycling under a counting
 # sink.  Pure svc layer -- HAL/ThreadX/shell-free, and the mutual exclusion it needs
 # is injected (struct frame_os), so the whole engine runs on the host with a no-op
 # lock.  This is the only part of the camera work that can be verified without the
 # board, which is exactly why it is ported byte-identical from the f746 firmware.
-gcc $CFLAGS -I "$svc" \
-    "$here/test_frame_pipeline.c" "$svc/frame_pipeline.c" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_frame_pipeline.c" "$svc/camera/frame_pipeline.c" \
     $LDFLAGS -o "$out/test_frame_pipeline"
 "$out/test_frame_pipeline"
 
@@ -292,12 +292,12 @@ gcc $CFLAGS -I "$svc" \
 # (Built as test_crc32_svc: boards/wio-lite-ai/test pins the same properties for
 # FlashDB's fdb_calc_crc32(), which is what the donor's blob uses, and that one
 # already owns the name test_crc32 in this scratch dir.)
-gcc $CFLAGS -I "$svc" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_crc32.c" "$svc/crc32.c" \
     $LDFLAGS -o "$out/test_crc32_svc"
 "$out/test_crc32_svc"
 
-# issue #101 (#78 Step 1a) -- container and manifest validation (svc/plugin_load.c):
+# issue #101 (#78 Step 1a) -- container and manifest validation (svc/plugin/plugin_load.c):
 # everything that must hold BEFORE a plugin's first instruction is fetched.
 #
 # [!] EVERY ONE OF THE THIRTY-TWO REFUSAL CODES IS PROVOKED HERE.  plugin_load.h names
@@ -311,8 +311,8 @@ gcc $CFLAGS -I "$svc" \
 # misaligned model that collided with the next section.
 #
 # Pure svc layer, so the svc include dir is all it needs.
-gcc $CFLAGS -I "$svc" \
-    "$here/test_plugin_load.c" "$svc/plugin_load.c" "$svc/crc32.c" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_plugin_load.c" "$svc/plugin/plugin_load.c" "$svc/crc32.c" \
     $LDFLAGS -o "$out/test_plugin_load"
 "$out/test_plugin_load"
 
@@ -322,20 +322,20 @@ gcc $CFLAGS -I "$svc" \
 # Board-independent -- every board's plugins link it -- so it runs here: a
 # version mismatch, a size one byte short of each member and a size ending
 # exactly at it, per member.
-gcc $CFLAGS -I "$svc" -I "$repo/asset/common" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$repo/asset/common" \
     "$here/test_plugin_veneer.c" "$repo/asset/common/plugin_base.c" \
     $LDFLAGS -o "$out/test_plugin_veneer"
 "$out/test_plugin_veneer"
 
-# issue #111 -- `nn info`'s plugin stack lines (svc/plugin_info.c), shared by
+# issue #111 -- `nn info`'s plugin stack lines (svc/plugin/plugin_info.c), shared by
 # grove-vision-ai-v2 and wio-lite-ai.  Pinned byte for byte: no gate compares
 # what a command prints, and the widest line must keep its CRLF.
-gcc $CFLAGS -I "$svc" \
-    "$here/test_plugin_info.c" "$svc/plugin_info.c" "$svc/fmt.c" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_plugin_info.c" "$svc/plugin/plugin_info.c" "$svc/fmt.c" \
     $LDFLAGS -o "$out/test_plugin_info"
 "$out/test_plugin_info"
 
-# issue #103 -- is the plugin reservation executable?  (svc/plugin_mpu.c, the
+# issue #103 -- is the plugin reservation executable?  (svc/plugin/plugin_mpu.c, the
 # Armv8-M verdict grove-vision-ai-v2 links)
 #
 # The loader reads the MPU back before it branches into a loaded image, because
@@ -354,13 +354,13 @@ gcc $CFLAGS -I "$svc" \
 # clamped MPU_TYPE.DREGION to the table it was handed, and this file expected
 # that to come out OK.  test_truncated() now holds the same snapshot read short
 # and read whole -- refused, and a fault.
-gcc $CFLAGS -I "$svc" \
-    "$here/test_plugin_mpu.c" "$svc/plugin_mpu.c" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_plugin_mpu.c" "$svc/plugin/plugin_mpu.c" \
     $LDFLAGS -o "$out/test_plugin_mpu"
 "$out/test_plugin_mpu"
 
 # issue #110 (#78 Step 3b) -- the Armv7-M MPU verdict wio-lite-ai links
-# (svc/plugin_mpu_v7m.c), read back immediately before the loader
+# (svc/plugin/plugin_mpu_v7m.c), read back immediately before the loader
 # branches into a plugin image.
 #
 # [!] EVERY FAILING CASE IS ONE THIS BOARD CANNOT BE MADE TO HAVE.  The four
@@ -376,52 +376,52 @@ gcc $CFLAGS -I "$svc" \
 # larger non-cacheable one -- so the other board's judgement would refuse the
 # configuration this one ships with.  Sub-regions and the background map have no
 # counterpart there either.
-gcc $CFLAGS -I "$svc" \
-    "$here/test_plugin_mpu_v7m.c" "$svc/plugin_mpu_v7m.c" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_plugin_mpu_v7m.c" "$svc/plugin/plugin_mpu_v7m.c" \
     $LDFLAGS -o "$out/test_plugin_mpu_v7m"
 "$out/test_plugin_mpu_v7m"
 
 # issue #126 -- what a painter primitive decides before its first store
-# (svc/plugin_paint_span.c): the clip, a blit's source offset, the charge, and
+# (svc/plugin/plugin_paint_span.c): the clip, a blit's source offset, the charge, and
 # how the painter is filled in.  Shared by grove-vision-ai-v2 and wio-lite-ai;
 # their loops stay theirs, and each board's test_plugin_paint.c counts the
 # stores its own loop makes against what this charged.  Every geometry case
 # runs on 320x240 and on 240x320 with the rectangle transposed, so a w/h mix-up
 # cannot pass on the one surface both boards happen to use.
-gcc $CFLAGS -I "$svc" \
-    "$here/test_plugin_paint_span.c" "$svc/plugin_paint_span.c" \
-    "$svc/plugin_paint_budget.c" "$svc/rect_geom.c" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_plugin_paint_span.c" "$svc/plugin/plugin_paint_span.c" \
+    "$svc/plugin/plugin_paint_budget.c" "$svc/rect_geom.c" \
     $LDFLAGS -o "$out/test_plugin_paint_span"
 "$out/test_plugin_paint_span"
 
 # issue #126 -- the one place that decides whether a plugin decodes
-# (svc/nn_active_core.c), shared by grove-vision-ai-v2 and wio-lite-ai: which
+# (svc/nn/nn_active_core.c), shared by grove-vision-ai-v2 and wio-lite-ai: which
 # slot is called, with what, how often, and what is answered when none is.
 # The no-plugin answer to shapes_ok is the BOARD's and is tried both ways --
 # grove refuses, wio accepts -- and with a plugin loaded neither may leak
 # through.  Every call into a slot is preceded by exactly one depth sample for
 # it, and a question that calls nothing samples nothing.  Each board's own
 # test drives its port nn_active.c through this file with the real plugin.
-gcc $CFLAGS -I "$svc" \
-    "$here/test_nn_active_core.c" "$svc/nn_active_core.c" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_nn_active_core.c" "$svc/nn/nn_active_core.c" \
     $LDFLAGS -o "$out/test_nn_active_core"
 "$out/test_nn_active_core"
 
 # issue #110 (#78 Step 3b) -- the capture of an external decoder's own account
-# of its result (svc/nn_report.c).  A contract about OUTCOMES: zero bytes is a
+# of its result (svc/nn/nn_report.c).  A contract about OUTCOMES: zero bytes is a
 # legal report, "no report to give" is a different answer, truncation is a
 # third and a decoder's own refusal a fourth, and a consumer that inferred any
 # of them from the length would tell an operator the wrong one.  The last case
 # demonstrates the ownership -- two callers, two frames -- because a
 # board-owned capture slot, which is the obvious first design and the wrong
 # one, passes every other case in the file.
-gcc $CFLAGS -I "$svc" -I "$inc" \
-    "$here/test_nn_report.c" "$svc/nn_report.c" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$inc" \
+    "$here/test_nn_report.c" "$svc/nn/nn_report.c" \
     $LDFLAGS -o "$out/test_nn_report"
 "$out/test_nn_report"
 
 # issue #110 (#78 Step 3b) -- the loader that runs AFTER that validation
-# (svc/plugin_exec.c), shared by grove-vision-ai-v2 and wio-lite-ai.
+# (svc/plugin/plugin_exec.c), shared by grove-vision-ai-v2 and wio-lite-ai.
 #
 # What it must get right is an ORDER, and every step of that order is invisible
 # from a console: a board can show that a plugin ran, not that the fault
@@ -436,14 +436,14 @@ gcc $CFLAGS -I "$svc" -I "$inc" \
 # twelve bytes of position-independent machine code that jumps back into the
 # test.  That part is host-specific and SKIPs elsewhere; the ordering cases run
 # everywhere.
-gcc $CFLAGS -I "$svc" \
-    "$here/test_plugin_exec.c" "$svc/plugin_exec.c" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_plugin_exec.c" "$svc/plugin/plugin_exec.c" \
     $LDFLAGS -o "$out/test_plugin_exec"
 "$out/test_plugin_exec"
 
-# issue #97 -- the shared BlazeFace decoder (svc/blazeface.c), folded from three
+# issue #97 -- the shared BlazeFace decoder (svc/nn/blazeface.c), folded from three
 # diverged board copies.  The REAL decoder is compiled here against synthetic
-# tensors, which it permits because it takes descriptors (svc/tensor.h) rather
+# tensors, which it permits because it takes descriptors (svc/nn/tensor.h) rather
 # than reaching into any inference singleton -- the arrangement that lets a
 # decode bug be found without spending a flash cycle on a board.  Absorbs the
 # assertions of all three tests it replaced, and runs the type-independent ones
@@ -451,13 +451,13 @@ gcc $CFLAGS -I "$svc" \
 # the anchor grid, lookup by shape, the candidate cap not truncating the scan
 # (issue #47), NMS, the distinct failure codes (issue #57), and init validation.
 # Pure svc layer -- HAL/ThreadX/shell-free, so it needs only the svc include dir.
-gcc $CFLAGS -I "$svc" \
-    "$here/test_blazeface.c" "$svc/blazeface.c" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_blazeface.c" "$svc/nn/blazeface.c" \
     $LDFLAGS -o "$out/test_blazeface_svc"
 "$out/test_blazeface_svc"
 
 # issue #97 -- negative tests for cmake/check_no_mutable_storage.py, the gate that
-# keeps svc/blazeface.c from growing state of its own (each board passes in its
+# keeps svc/nn/blazeface.c from growing state of its own (each board passes in its
 # own scratch so that it keeps its own placement and its own residency gate).
 # Four fixtures: clean, a plain static, thread-local storage and anonymous
 # writable bytes from inline asm -- the last two are why the gate measures
@@ -480,7 +480,7 @@ python3 "$repo/cmake/fixtures/run_storage_gate_tests.py" \
 # needs the host C compiler too -- still no cross toolchain.
 python3 "$repo/cmake/fixtures/run_add_plugin_arg_tests.py"
 
-# issue #97 -- the published decode record (svc/nn_det_record.c).  A camera stream
+# issue #97 -- the published decode record (svc/nn/nn_det_record.c).  A camera stream
 # decodes on a worker and a console prints on another thread, so what the two
 # exchange has a rule: the boxes and the diagnostics that describe them travel
 # together, and a decode that outlived its session lands nowhere.
@@ -492,16 +492,16 @@ python3 "$repo/cmake/fixtures/run_add_plugin_arg_tests.py"
 # INJECTED there, though, so the interleavings are written out by hand here; a
 # test that ran a stream and looked for stale boxes would pass almost always and
 # prove nothing.  Pure svc layer, so it needs only the svc include dir.
-gcc $CFLAGS -I "$svc" \
-    "$here/test_nn_det_record.c" "$svc/nn_det_record.c" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_nn_det_record.c" "$svc/nn/nn_det_record.c" \
     $LDFLAGS -o "$out/test_nn_det_record"
 "$out/test_nn_det_record"
 
 # issue #121 -- the top classes a worker publishes with a result it could not
-# decode (svc/nn_top.c).  The walk moved out of the shared command, which read
+# decode (svc/nn/nn_top.c).  The walk moved out of the shared command, which read
 # the output tensor at print time -- after a stream stop, the dropped frame's.
-gcc $CFLAGS -I "$svc" \
-    "$here/test_nn_top.c" "$svc/nn_top.c" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_nn_top.c" "$svc/nn/nn_top.c" \
     $LDFLAGS -o "$out/test_nn_top"
 "$out/test_nn_top"
 
@@ -521,7 +521,7 @@ gcc $CFLAGS -I "$svc" \
 #
 # Links cli_parse.c for cli_parse_u32(): the grammar uses this firmware's own
 # number parser rather than growing a second one.
-gcc $CFLAGS -I "$inc" -I "$here/../cmds" -I "$core" -I "$svc" \
+gcc $CFLAGS -I "$inc" -I "$here/../cmds" -I "$core" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_nn_cmd_core.c" "$here/../cmds/nn_cmd_core.c" "$core/cli_parse.c" \
     $LDFLAGS -o "$out/test_nn_cmd_core"
 "$out/test_nn_cmd_core"
@@ -535,7 +535,7 @@ gcc $CFLAGS -I "$inc" -I "$here/../cmds" -I "$core" -I "$svc" \
 # fails for some other reason proves nothing about the gate.
 #
 # [!] "ON THE GATE" IS CHECKED, not assumed.  Every error in the log must be in
-# svc/nn_detail.h -- the gate -- or on a test line marked "must not compile";
+# svc/nn/nn_detail.h -- the gate -- or on a test line marked "must not compile";
 # an unrelated error elsewhere fails this rather than passing for the gate.  And
 # each case names what it must show: the assertion's message for the over-long
 # ones, and for a pointer the syntax error that `"" s` produces INSIDE the
@@ -557,10 +557,10 @@ detail_gate_failed() {  # <log> <source> <want>
     done | grep -q . && return 1
     LC_ALL=C grep -q "$3" "$1"
 }
-gcc $CFLAGS -I "$svc" "$here/test_nn_detail_check.c" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" "$here/test_nn_detail_check.c" \
     $LDFLAGS -o "$out/test_nn_detail_check"
 "$out/test_nn_detail_check"
-g++ -std=c++17 -Wall -Wextra -I "$svc" "$here/test_nn_detail_check_cxx.cc" \
+g++ -std=c++17 -Wall -Wextra -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" "$here/test_nn_detail_check_cxx.cc" \
     -o "$out/test_nn_detail_check_cxx"
 "$out/test_nn_detail_check_cxx"
 for lang in c cxx; do
@@ -576,7 +576,7 @@ for lang in c cxx; do
             notlit="in definition of macro 'NN_SVC_DETAIL_LIT'"
         fi
         # shellcheck disable=SC2086  # $cc is deliberately word-split
-        if LC_ALL=C $cc -D"$neg" -I "$svc" "$src" -o "$out/detail_neg" \
+        if LC_ALL=C $cc -D"$neg" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" "$src" -o "$out/detail_neg" \
                > "$out/detail_neg.log" 2>&1; then
             echo "test_nn_detail_check ($lang): $neg COMPILED -- the length gate did not fire" >&2
             exit 1
@@ -597,8 +597,8 @@ done
 # issue #122 review -- the svc/ SHARED sentence tables a board copies whole into
 # its explanation (plugin_result_name, plugin_run_strerror).  They must not depend
 # on the `nn` contract, so they are enumerated here instead of wrapped.
-gcc $CFLAGS -I "$svc" \
-    "$here/test_nn_detail_tables.c" "$svc/plugin_load.c" "$svc/plugin_exec.c" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_nn_detail_tables.c" "$svc/plugin/plugin_load.c" "$svc/plugin/plugin_exec.c" \
     "$svc/crc32.c" $LDFLAGS -o "$out/test_nn_detail_tables"
 "$out/test_nn_detail_tables"
 
@@ -618,7 +618,7 @@ for shape in "-DNN_SVC_HAS_MODEL_SLOT=1" \
     # shellcheck disable=SC2086  # $shape is deliberately word-split
     gcc $CFLAGS -Wno-unused-function -DCLI_USE_COLOR=0 $shape \
         $glue_inc -I "$here/shim" -I "$here/nn_cfg" -I "$inc" -I "$core" \
-        -I "$here/../cmds" -I "$svc" \
+        -I "$here/../cmds" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
         "$here/test_nn_cmd_usage.c" "$here/../cmds/cmd_nn.c" \
         "$here/../cmds/nn_cmd_core.c" \
         "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
@@ -628,12 +628,12 @@ for shape in "-DNN_SVC_HAS_MODEL_SLOT=1" \
     "$out/test_nn_cmd_usage"
 done
 
-# issue #142 review / #143 -- which stream a stop waits for (svc/cam_gen.h).  A
+# issue #142 review / #143 -- which stream a stop waits for (svc/camera/cam_gen.h).  A
 # `camera stream stop &` (wio) or a `camera off` (f746, wio) below a console that
 # starts the next stream can wake to find another stream running; the wait must
 # ask "is MY generation over", never "is a stream active".  Two consoles at two
 # priorities: not typeable.  Moved here from wio-lite-ai when f746 took it up.
-gcc $CFLAGS -I "$svc" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_cam_gen.c" \
     $LDFLAGS -o "$out/test_cam_gen"
 "$out/test_cam_gen"
@@ -651,7 +651,7 @@ gcc $CFLAGS -I "$svc" \
 for shape in FULL BARE MIN DUP; do
     gcc $CFLAGS -DCLI_USE_COLOR=0 -DCAM_TEST_SHAPE_$shape \
         $glue_inc -I "$here/shim" -I "$here/fx_shim" -I "$here/camera_cfg" \
-        -I "$inc" -I "$core" -I "$here/../cmds" -I "$svc" \
+        -I "$inc" -I "$core" -I "$here/../cmds" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
         "$here/test_camera_cmd.c" "$here/camera_svc_stub.c" \
         "$here/../cmds/cmd_camera.c" \
         "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
@@ -661,7 +661,7 @@ for shape in FULL BARE MIN DUP; do
     "$out/test_camera_cmd"
 done
 
-# issue #99 -- the shared stream lifecycle (svc/nn_stream_life.c).
+# issue #99 -- the shared stream lifecycle (svc/nn/nn_stream_life.c).
 #
 # A `--frames` waiter and a second console racing over one stream: the waiter
 # must never tear down a stream it did not start.  The generation alone does not
@@ -671,100 +671,100 @@ done
 # between two statements of another thread, and the board where it matters most
 # has one console whose background jobs run below the foreground shell under
 # TX_NO_TIME_SLICE.  One machine, one test.
-gcc $CFLAGS -I "$inc" -I "$svc" \
-    "$here/test_nn_stream_life.c" "$svc/nn_stream_life.c" \
+gcc $CFLAGS -I "$inc" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_nn_stream_life.c" "$svc/nn/nn_stream_life.c" \
     $LDFLAGS -o "$out/test_nn_stream_life"
 "$out/test_nn_stream_life"
 
 # issue #130 -- the policy around that machine, written once for every board
-# (svc/nn_core.c): the baselines a commit latches, the two-phase poll and the
+# (svc/nn/nn_core.c): the baselines a commit latches, the two-phase poll and the
 # settle's disposition table, each walked under the three property sets the
 # boards differ by (plain / re-arming / gated).  The stand-in hooks also record
 # a counter or a record read INSIDE the critical section (a deadlock on hardware)
 # and a gate or a latch touched OUTSIDE it (a race) -- neither shows in a return.
-gcc $CFLAGS -I "$inc" -I "$svc" \
-    "$here/test_nn_core.c" "$svc/nn_core.c" "$svc/nn_stream_life.c" \
-    "$svc/nn_det_record.c" \
+gcc $CFLAGS -I "$inc" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_nn_core.c" "$svc/nn/nn_core.c" "$svc/nn/nn_stream_life.c" \
+    "$svc/nn/nn_det_record.c" \
     $LDFLAGS -o "$out/test_nn_core"
 "$out/test_nn_core"
 
 # issue #129 / #130 -- who may touch the inference worker's input
-# (svc/nn_handoff.c, moved out of grove-vision-ai-v2 and given FILLING by issue
+# (svc/nn/nn_handoff.c, moved out of grove-vision-ai-v2 and given FILLING by issue
 # #130).  The producer writes the input tensor in place, so this word is the only
 # thing keeping it and the worker apart, and the sequences that would break it --
 # a stop while a frame is handed over, a stale wake-up, a band after its frame was
 # abandoned -- are windows between three threads that cannot be typed.  Every
 # (state, operation) pair is spelled out.
-gcc $CFLAGS -I "$svc" \
-    "$here/test_nn_handoff.c" "$svc/nn_handoff.c" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_nn_handoff.c" "$svc/nn/nn_handoff.c" \
     $LDFLAGS -o "$out/test_nn_handoff"
 "$out/test_nn_handoff"
 
 # issue #122 / #131 -- where a `nn model load` ends and what that obliges
-# (svc/nn_swap.c, moved out of grove-vision-ai-v2 and given wio-lite-ai's and
+# (svc/nn/nn_swap.c, moved out of grove-vision-ai-v2 and given wio-lite-ai's and
 # f746g-disco's way in by issue #131).  A load over an open model is a
 # replacement with a rollback, and the endings that matter most -- the backend
 # refuses the new model AND the previous one, a plugin the device refuses after
 # the host packer validated it -- cannot be typed.  Every board's table is
 # spelled out against the one function, and the real contract header supplies
 # the operator's vocabulary (enum nn_model_state), so the two cannot drift.
-gcc $CFLAGS -I "$inc" -I "$svc" \
-    "$here/test_nn_swap.c" "$svc/nn_swap.c" \
+gcc $CFLAGS -I "$inc" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_nn_swap.c" "$svc/nn/nn_swap.c" \
     $LDFLAGS -o "$out/test_nn_swap"
 "$out/test_nn_swap"
 
-# issue #131 -- the ORDER around that table (svc/nn_core_model.c): claim ->
+# issue #131 -- the ORDER around that table (svc/nn/nn_core_model.c): claim ->
 # preparation -> lookup -> plugin lease -> backend -> plugin -> obligations, and
 # the unload's.  A stand-in board traces every hook, and the hooks check what no
 # return shows: a hook inside the critical section, a plugin touched without the
 # lease, a change while the transition counter is even, BUSY answered after the
 # backend was touched (issue #131 stage 8 relies on that never happening).
-gcc $CFLAGS -I "$inc" -I "$svc" \
-    "$here/test_nn_core_model.c" "$svc/nn_core_model.c" "$svc/nn_swap.c" \
+gcc $CFLAGS -I "$inc" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_nn_core_model.c" "$svc/nn/nn_core_model.c" "$svc/nn/nn_swap.c" \
     $LDFLAGS -o "$out/test_nn_core_model"
 "$out/test_nn_core_model"
 
-# issue #130 -- the shared frame path that runs that word (svc/nn_core_frame.c):
+# issue #130 -- the shared frame path that runs that word (svc/nn/nn_core_frame.c):
 # a frame in four parts (wio-lite-ai's bands) and in one (grove-vision-ai-v2's),
 # the two ways out of FILLING (the producer's ABANDON, the stop's JOIN), the
 # worker's end of a job under and without the lease, and the panel's try.  The
 # stand-in hooks watch the ORDER -- the input written outside FILLING, a hook
 # inside the critical section, the lease given back after the board counted, a
 # paint without the lease or before the frame lock -- which no return shows.
-gcc $CFLAGS -I "$svc" \
-    "$here/test_nn_core_frame.c" "$svc/nn_core_frame.c" "$svc/nn_handoff.c" \
-    "$svc/nn_det_record.c" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_nn_core_frame.c" "$svc/nn/nn_core_frame.c" "$svc/nn/nn_handoff.c" \
+    "$svc/nn/nn_det_record.c" \
     $LDFLAGS -o "$out/test_nn_core_frame"
 "$out/test_nn_core_frame"
 
 # issue #127 -- what a refused no-wait acquire of the plugin lease counts
-# (svc/plugin_lease_miss.c, moved out of grove-vision-ai-v2 by issue #130).  A
+# (svc/plugin/plugin_lease_miss.c, moved out of grove-vision-ai-v2 by issue #130).  A
 # frame can be lost at the producer's decode or at the panel's draw; a run reset
 # by the producer's success, or a frame counted at both, would each print a
 # plausible stats line.
-gcc $CFLAGS -I "$svc" \
-    "$here/test_plugin_lease_miss.c" "$svc/plugin_lease_miss.c" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_plugin_lease_miss.c" "$svc/plugin/plugin_lease_miss.c" \
     $LDFLAGS -o "$out/test_plugin_lease_miss"
 "$out/test_plugin_lease_miss"
 
-# issue #142 -- who holds the camera stream open (svc/cam_holders.c).  The
+# issue #142 -- who holds the camera stream open (svc/camera/cam_holders.c).  The
 # table decides when three boards start and stop their cameras, and the cases
 # that matter most -- a start that fails while another holder is trying to
 # register, a rollback that must not take a holder that was already there, the
 # operator's stop while nn holds the stream -- are windows that cannot be typed.
-gcc $CFLAGS -I "$svc" \
-    "$here/test_cam_holders.c" "$svc/cam_holders.c" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_cam_holders.c" "$svc/camera/cam_holders.c" \
     $LDFLAGS -o "$out/test_cam_holders"
 "$out/test_cam_holders"
 
-# issue #142 -- a step of a camera sink (svc/cam_step.c; f746g-disco's camera
+# issue #142 -- a step of a camera sink (svc/camera/cam_step.c; f746g-disco's camera
 # sink first, wio-lite-ai's band sink since).  The display and the nn ingest are
 # two steps of one sink, each switched off while the base keeps running: disarm,
 # then wait for the producer's count to reach zero, which is what proves it out
 # of the step for good.  A disarm while the producer is inside, a re-arm before
 # it has left and a leave with no enter cannot be typed; they are walked here.
-gcc $CFLAGS -I "$svc" \
-    "$here/test_cam_step.c" "$svc/cam_step.c" \
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_cam_step.c" "$svc/camera/cam_step.c" \
     $LDFLAGS -o "$out/test_cam_step"
 "$out/test_cam_step"
 

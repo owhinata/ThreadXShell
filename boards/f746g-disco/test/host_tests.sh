@@ -25,7 +25,7 @@ CFLAGS="$HOST_TEST_CFLAGS"
 LDFLAGS="$HOST_TEST_LDFLAGS"
 
 # issue #97 -- the adapter onto the SHARED BlazeFace decoder (port/nn/nn_decoder.c).
-# The decoder's arithmetic moved to svc/blazeface.c and is covered by
+# The decoder's arithmetic moved to svc/nn/blazeface.c and is covered by
 # shell/test/test_blazeface.c, which is board-independent; what stays here is the
 # half that cannot be -- nn_tensor -> tensor_desc, against this board's real nn.h.
 # struct nn_model is opaque (defined in nn.c), so the test supplies its own
@@ -36,9 +36,9 @@ LDFLAGS="$HOST_TEST_LDFLAGS"
 # publishes scale 0 for an unquantised tensor, and its graphs are float32), a rank
 # above four truncated into a match, and a hole in the output set reported as a
 # model-shape problem.
-gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" \
+gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_nn_decoder.c" "$board/port/nn/nn_decoder.c" \
-    "$HOST_TEST_SVC/blazeface.c" \
+    "$HOST_TEST_SVC/nn/blazeface.c" \
     $LDFLAGS -lm -o "$out/test_nn_decoder"
 "$out/test_nn_decoder"
 
@@ -92,7 +92,7 @@ gcc $CFLAGS -I "$board/port/nn" \
 # `nn stream stats` (port/nn/nn_decode_count.c).  BF_ERR_MODEL is the top-5
 # result of a classifier stream here and is NOT counted (D6); every other
 # negative is a decoder fault -- and none of those can be typed.
-gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" \
+gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_nn_decode_count.c" "$board/port/nn/nn_decode_count.c" \
     $LDFLAGS -o "$out/test_nn_decode_count"
 "$out/test_nn_decode_count"
@@ -118,30 +118,30 @@ python3 "$board/cmake/fixtures/run_gen_model_array_tests.py"
 # back), and a reload's answer is whether a MODEL is left -- a refused load from
 # empty is EMPTY through the shared table, not PREVIOUS.  The HAL and ThreadX are
 # test/nn_shim.
-gcc $CFLAGS -I "$here/nn_shim" -I "$board/port/nn" -I "$HOST_TEST_SVC" \
-    "$here/test_nn_model.c" "$board/port/nn/nn.c" "$HOST_TEST_SVC/nn_swap.c" \
+gcc $CFLAGS -I "$here/nn_shim" -I "$board/port/nn" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+    "$here/test_nn_model.c" "$board/port/nn/nn.c" "$HOST_TEST_SVC/nn/nn_swap.c" \
     $LDFLAGS -o "$out/test_nn_model"
 "$out/test_nn_model"
 # ...and again with the one adoption failing: the next open must reach the
 # backend through a latch that was given back, build nothing and open empty.
 gcc $CFLAGS -DTEST_FIRST_BUILD_FAILS -I "$here/nn_shim" -I "$board/port/nn" \
-    -I "$HOST_TEST_SVC" \
-    "$here/test_nn_model.c" "$board/port/nn/nn.c" "$HOST_TEST_SVC/nn_swap.c" \
+    -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+    "$here/test_nn_model.c" "$board/port/nn/nn.c" "$HOST_TEST_SVC/nn/nn_swap.c" \
     $LDFLAGS -o "$out/test_nn_model_fail"
 "$out/test_nn_model_fail"
 
 # issue #131 step 7d -- this board's `nn info` / `nn model load` / `nn model
 # unload` (port/nn/nn_svc_f746_model.c) behind the shared order
-# (svc/nn_core_model.c), against the real nn.c over a stub backend.  What a
+# (svc/nn/nn_core_model.c), against the real nn.c over a stub backend.  What a
 # console cannot produce on demand: a refusal from empty, a backend that
 # "restores" from nothing (EMPTY, released), a success that left no model (HW),
 # and `nn info` from another console in the middle of a swap (BUSY on all three
 # lines).  shell/test/test_nn_core_model.c walks the order itself.
 gcc $CFLAGS -I "$here/nn_shim" -I "$board/port/nn" -I "$board/port/camera" \
-    -I "$board/port/sdram" -I "$HOST_TEST_SVC" \
+    -I "$board/port/sdram" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_nn_model_life.c" "$board/port/nn/nn_svc_f746_model.c" \
-    "$board/port/nn/nn.c" "$HOST_TEST_SVC/nn_core_model.c" \
-    "$HOST_TEST_SVC/nn_swap.c" "$HOST_TEST_SVC/fmt.c" \
+    "$board/port/nn/nn.c" "$HOST_TEST_SVC/nn/nn_core_model.c" \
+    "$HOST_TEST_SVC/nn/nn_swap.c" "$HOST_TEST_SVC/fmt.c" \
     $LDFLAGS -o "$out/test_nn_model_life"
 "$out/test_nn_model_life"
 
@@ -156,7 +156,7 @@ st="$HOST_TEST_SHELL_TEST"
 gcc $CFLAGS -DCLI_USE_COLOR=0 \
     -I "$st" -I "$HOST_TEST_BACKEND" -I "$st/shim" -I "$st/fx_shim" \
     -I "$board/svc" -I "$HOST_TEST_INC" -I "$HOST_TEST_CORE" \
-    -I "$st/../cmds" -I "$HOST_TEST_SVC" \
+    -I "$st/../cmds" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_camera_table.c" "$st/camera_svc_stub.c" \
     "$st/../cmds/cmd_camera.c" \
     "$HOST_TEST_CORE/cli_session.c" "$HOST_TEST_CORE/cli_edit.c" \

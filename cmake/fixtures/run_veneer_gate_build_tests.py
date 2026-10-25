@@ -241,7 +241,7 @@ set(FIX_EXTRA "" CACHE STRING "")
 set(FIX_B 500 CACHE STRING "")
 
 add_library(fw_objs OBJECT objsrc.c policy.c)
-target_include_directories(fw_objs PRIVATE "@SVC@")
+target_include_directories(fw_objs PRIVATE "@SVC@" "@SVC@/nn" "@SVC@/plugin" "@SVC@/camera")
 add_library(fw_objlink OBJECT objlink.c)
 add_library(fw_lib STATIC lib.c)
 add_library(fw_iface INTERFACE)

@@ -79,7 +79,7 @@ that gets `-fstack-usage`), and to the asset rules through
 
 A `-D` is not a guarantee: a later `-D` (CMAKE_C_FLAGS, add_compile_definitions)
 or a `#define` overrides it with only a warning. So the board exports its policy
-with `PLUGIN_POLICY_PROBE()` (`svc/plugin_load.h`) -- a constant record holding a
+with `PLUGIN_POLICY_PROBE()` (`svc/plugin/plugin_load.h`) -- a constant record holding a
 pointer to the policy `plugin_parse()` gets and the offsets of its fields -- and
 `check_policy_probe.py` reads, from the shipped ELF, the `veneer_cost` and
 `stack_accounting` that policy actually holds. Anything but DECLARED and the
@@ -266,7 +266,7 @@ the plugin exports) and derives `--entry pl_<slot>=<limit>` from the table; it
 refuses `ENTRIES` by name. `add_asset()` (`add_asset.cmake`, shared by both
 boards' asset rules) derives `--policy-stack <slot>=<limit>`, which
 `build_asset.py` maps to the validator's slot indices through the
-`abi_layout.json` the host compiler prints from `svc/plugin_abi.h`. The slot
+`abi_layout.json` the host compiler prints from `svc/plugin/plugin_abi.h`. The slot
 indices the read-back uses are `check_plugin_image.ABI`'s, pinned to the same
 header by `run_plugin_gate_tests.py`.
 
@@ -311,7 +311,7 @@ refusals, that the table reaches all three command lines, and
 
 Two rules in `add_plugin.cmake` and `check_plugin_image.py` exist because of one
 defect found on hardware in #111: the plugin compile depended on its `.c` alone,
-so bumping `PLUGIN_ABI_VERSION` in `svc/plugin_abi.h` rebuilt only the TUs whose
+so bumping `PLUGIN_ABI_VERSION` in `svc/plugin/plugin_abi.h` rebuilt only the TUs whose
 source had also changed. The shipped images compared the base against ABI 1
 while the packer, which reads the header, stamped ABI 2 -- the loader accepted
 them and each plugin refused its own entry point. Every gate passed, because
@@ -320,7 +320,7 @@ every gate reads the linked image and it was self-consistent.
 - Each plugin compile writes a depfile (`-MMD -MF <stem>.d -MT <stamp>`, CMake
   `DEPFILE`), so a header change recompiles -- and re-audits -- every TU that
   read it. `run_add_plugin_arg_tests.py`'s `header_rebuild` builds one plugin's
-  objects on the host, touches `svc/plugin_abi.h`, and requires them rebuilt.
+  objects on the host, touches `svc/plugin/plugin_abi.h`, and requires them rebuilt.
 - `add_plugin()` compiles with `-DPLUGIN_IMAGE_BUILD`, under which every TU that
   includes `plugin_abi.h` leaves one word, `pl_abi_mark`, in `.plugin_abi_mark`
   (kept by `asset/common/plugin.ld`). The image gate refuses an image with no

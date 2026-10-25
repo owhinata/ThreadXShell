@@ -54,7 +54,7 @@ include_guard(GLOBAL)
 # reaches each consumer by NAME).  A transcription, but every consumer of the
 # table fails closed against it going stale: the probe check and the asset build
 # each require every slot of THEIR copy of the ABI -- check_plugin_image.ABI,
-# pinned to svc/plugin_abi.h by run_plugin_gate_tests.py, and the abi_layout.json
+# pinned to svc/plugin/plugin_abi.h by run_plugin_gate_tests.py, and the abi_layout.json
 # the host compiler prints from that header -- and refuse a name they do not
 # know.
 set(_PLUGIN_STACK_SLOTS entry shapes_ok decode draw report param_set param_get)

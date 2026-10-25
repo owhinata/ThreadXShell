@@ -136,7 +136,7 @@ def main():
     ap.add_argument("--capacity", required=True)
     # The board's plugin_stack_table(), as <slot>=<bytes> by slot NAME (issue
     # #126).  The index each name has is the header's, from the layout the host
-    # compiler printed from svc/plugin_abi.h -- so no order is transcribed here
+    # compiler printed from svc/plugin/plugin_abi.h -- so no order is transcribed here
     # or in cmake -- and every slot is required: a missing one would reach the
     # device's validator as a limit of 0, a refused slot, for a reason nobody
     # stated.

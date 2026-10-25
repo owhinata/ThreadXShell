@@ -3,7 +3,7 @@
 
 A board's word is checked at three places, each for what it can see:
 
-  - svc/plugin_target.h: the firmware's predefined macros, by static assert --
+  - svc/plugin/plugin_target.h: the firmware's predefined macros, by static assert --
     the only check of the CMSE bit (the base's security state, which no image
     records);
   - check_plugin_image.py: each PLUGIN image's .ARM.attributes;

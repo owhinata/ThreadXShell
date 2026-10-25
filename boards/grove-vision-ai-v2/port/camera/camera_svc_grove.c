@@ -43,6 +43,7 @@
 #include "cam_dp.h"
 #include "cam_lcd_sink.h"
 #include "cam_sensor.h"
+#include "cam_state.h"    /* CAM_ST_*: `camera info` names the state */
 #include "camera.h"
 #include "fmt.h"
 #include "nn_camera.h"    /* the sink row's stage split under `nn stream` */
@@ -121,7 +122,7 @@ void camera_svc_probe(struct camera_op_result *res,
 			cam_detail_add(res, "\r\n        a stream is running (the "
 			               "producer owns the sensor's I2C bus), or "
 			               "another\r\n        camera command holds the "
-			               "API; `camera stats` says which");
+			               "API; `camera stream stats` says which");
 		return;
 	}
 	camera_res_ok(res);
@@ -327,7 +328,7 @@ void camera_svc_stream_start(int test, struct camera_op_result *res,
 	}
 	camera_res_ok(res);
 	*already = !started;
-	camera_out(&o, "camera: streaming to the panel%s -- `camera stats` / "
+	camera_out(&o, "camera: streaming to the panel%s -- `camera stream stats` / "
 	           "`camera stream stop`\r\n",
 	           started ? "" : " (already running)");
 }
@@ -458,8 +459,8 @@ void camera_grove_profile_write(struct camera_out *o,
 }
 
 /*
- * `camera stream stats` (and the board's `camera stats`, which passes its own
- * head): ONE sample of the camera and of the panel sink, the head handed the
+ * `camera stream stats` (issue #143 decision 4: the board's `camera stats`
+ * moved here, its stage profile to `camera profile`): ONE sample of the camera and of the panel sink, the head handed the
  * state and holders from it, then every other line from the same sample.  The
  * holders and the nn stage split are separate looks, as they always were.
  */
@@ -530,7 +531,8 @@ void camera_svc_stream_report(struct camera_op_result *res,
 		camera_out(&o, "buffers  : %lu / %lu frames (b0/b1)\r\n",
 		           (unsigned long)st.buf_frames[0],
 		           (unsigned long)st.buf_frames[1]);
-	camera_grove_profile_write(&o, &st);
+	/* The stage profile is `camera profile` now (decision D3), and `camera
+	   bench` prints it too; this report is the counters. */
 	camera_out(&o, "sink lcd : %lu shown, %lu dropped, %lu busy, %lu dark, "
 	           "%lu err\r\n",
 	           (unsigned long)sk.delivered, (unsigned long)sk.dropped,
@@ -599,7 +601,138 @@ void camera_svc_stream_report(struct camera_op_result *res,
 		camera_out(&o, "fault    : %s\r\n", st.fault);
 }
 
-_Static_assert(!CAMERA_SVC_HAS_POWER && !CAMERA_SVC_HAS_INFO &&
+/* ---- info (issue #143 decision 5) --------------------------------------- */
+
+static const char *cam_state_word(uint8_t st)
+{
+	switch (st) {
+	case CAM_ST_DOWN:      return "down (nothing brought up)";
+	case CAM_ST_READY:     return "ready";
+	case CAM_ST_STREAMING: return "streaming";
+	case CAM_ST_FAULTED:   return "faulted (the next use rebuilds it)";
+	case CAM_ST_LOST:      return "lost (a stop was never acknowledged; reboot)";
+	default:               return "?";
+	}
+}
+
+/*
+ * What the port knows, from one sample, and the values the driver last WROTE
+ * -- the software side.  [!] NO I2C AND NO MUTEX: this is the command that
+ * still answers while a stream runs or a command holds the camera, so it reads
+ * nothing off the sensor (`camera probe` and `camera vts` are the ones that
+ * look).  The sensor line says which part this build drives, not that it
+ * answered.
+ */
+void camera_svc_info(struct camera_op_result *res,
+                     camera_svc_write_fn write, void *ctx)
+{
+	struct camera_out o = { write, ctx, 0 };
+	struct camera_info_sample is;
+	struct cam_wb wb;
+	uint16_t lines, dgain;
+	uint8_t again;
+	int sh_valid;
+
+	camera_info_sample(&is);
+	camera_get_wb(&wb);
+	cam_sensor_get_exposure_gains(&lines, &again, &dgain);
+	sh_valid = cam_sensor_exposure_gains_valid();
+	camera_res_ok(res);
+
+	camera_out(&o, "state    : %s\r\n", cam_state_word(is.state));
+	if (is.state == CAM_ST_DOWN)
+		camera_out(&o, "chip     : -- (no bring-up yet; `camera probe`)\r\n");
+	else
+		camera_out(&o, "chip     : %08lx%s\r\n",
+		           (unsigned long)cam_dp_chip_version(),
+		           is.rev_c ? " (rev C: per-frame MIPI bounce)" : "");
+	camera_out(&o, "sensor   : %s (id 0x%04X expected; `camera probe` reads it)\r\n",
+	           cam_sensor_name(), cam_sensor_id());
+	camera_out(&o, "frames   : %lu since the last bring-up\r\n",
+	           (unsigned long)is.frames_since_bringup);
+	if (is.capture_valid)
+		camera_out(&o, "capture  : %ux%u planar B/G/R, %lu bytes "
+		           "(capture %lu) -- `camera send`\r\n",
+		           (unsigned)CAM_FRAME_WIDTH, (unsigned)CAM_FRAME_HEIGHT,
+		           (unsigned long)CAM_RAW_BYTES,
+		           (unsigned long)is.capture_gen);
+	else
+		camera_out(&o, "capture  : none (or replaced by a stream or "
+		           "`camera raw`)\r\n");
+	if (sh_valid)
+		camera_out(&o, "exposure : %u lines   again %u   dgain %u\r\n",
+		           (unsigned)lines, (unsigned)again, (unsigned)dgain);
+	else
+		camera_out(&o, "exposure : -- (nothing has read the sensor back yet)\r\n");
+	camera_out(&o, "vts      : %u lines (programmed)\r\n",
+	           (unsigned)cam_sensor_frame_length());
+	camera_out(&o, "auto     : %s\r\n", camera_auto() ? "on" : "off");
+	camera_out(&o, "wb       : r %u  g %u  b %u   black %u   sat %u   gamma %s\r\n",
+	           (unsigned)wb.r, (unsigned)wb.g, (unsigned)wb.b,
+	           (unsigned)wb.black, (unsigned)wb.sat,
+	           wb.gamma ? "sRGB" : "off");
+	camera_out(&o, "bayer    : %s\r\n", cam_dp_bayer_name(cam_dp_bayer()));
+}
+
+/* ---- the last capture out (`camera send`, issue #143 decision 5 / D4) ---- */
+
+static void cam_res_frame(struct camera_op_result *res, int rc)
+{
+	if (rc == CAM_ERR_NO_FRAME)
+		camera_res_fail(res, CAMERA_SVC_ERR_NO_FRAME,
+		                "no frame captured yet (a stream or `camera raw` "
+		                "replaces it)");
+	else
+		camera_res_fail(res, cam_status(rc), "%s", camera_strerror(rc));
+}
+
+void camera_svc_frame_open(struct camera_svc_frame *f,
+                           struct camera_op_result *res)
+{
+	uint32_t gen = 0u;
+	int rc;
+
+	memset(f, 0, sizeof *f);
+	rc = camera_capture_last(&gen);
+	if (rc != CAM_OK) {
+		cam_res_frame(res, rc);
+		return;
+	}
+	f->gen = gen;
+	f->len = CAM_RAW_BYTES;
+	f->width = (uint16_t)CAM_FRAME_WIDTH;
+	f->height = (uint16_t)CAM_FRAME_HEIGHT;
+	f->format = "planar B/G/R";
+	f->convert = "boards/grove-vision-ai-v2/scripts/planar_bgr_to_png.py";
+	camera_res_ok(res);
+}
+
+/*
+ * One hold of the API mutex per read (TX_NO_WAIT, BUSY when another command
+ * has it), never across the transfer: the check that it is still capture
+ * @p f->gen and the copy happen in that one hold (camera_capture_read()).
+ */
+void camera_svc_frame_read(const struct camera_svc_frame *f, uint32_t off,
+                           void *dst, uint32_t n, struct camera_op_result *res)
+{
+	int rc = camera_capture_read(f->gen, off, dst, n);
+
+	if (rc == CAM_ERR_NO_FRAME)
+		camera_res_fail(res, CAMERA_SVC_ERR_NO_FRAME,
+		                "frame changed by a concurrent capture");
+	else if (rc != CAM_OK)
+		camera_res_fail(res, cam_status(rc), "%s", camera_strerror(rc));
+	else
+		camera_res_ok(res);
+}
+
+void camera_svc_frame_close(struct camera_svc_frame *f)
+{
+	(void)f;   /* nothing is held from open to close */
+}
+
+_Static_assert(!CAMERA_SVC_HAS_POWER && CAMERA_SVC_HAS_INFO &&
                !CAMERA_SVC_HAS_TEST && !CAMERA_SVC_HAS_SAVE &&
-               !CAMERA_SVC_HAS_SEND,
-               "camera_svc_grove.c implements only probe / capture / stream");
+               CAMERA_SVC_HAS_SEND,
+               "camera_svc_grove.c implements probe / info / capture / send / "
+               "stream");

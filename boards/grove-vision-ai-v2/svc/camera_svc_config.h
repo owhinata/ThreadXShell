@@ -24,9 +24,9 @@
  *  `off` there is no CAMERA_SVC_OFF_STOPS_STREAM to declare. */
 #define CAMERA_SVC_HAS_POWER  0
 
-/** No `camera info` yet: it is new on this board (identity, state and the last
- *  capture, reading no sensor register) and arrives in issue #143's B step. */
-#define CAMERA_SVC_HAS_INFO   0
+/** `camera info`: identity, state, the last capture and the values the driver
+ *  last wrote -- reading no sensor register (issue #143 decision 5). */
+#define CAMERA_SVC_HAS_INFO   1
 
 /** No test pattern on this data path: `test` is refused, in the words
  *  `camera stream start test` has always used here. */
@@ -35,20 +35,20 @@
 /** No `camera save`: this board has no filesystem. */
 #define CAMERA_SVC_HAS_SAVE   0
 
-/** No `camera send` yet: it arrives with the capture's validity and
- *  generation in issue #143's B step. */
-#define CAMERA_SVC_HAS_SEND   0
+/** `camera send`: the last `camera capture`'s planar B/G/R as it is (D4);
+ *  boards/grove-vision-ai-v2/scripts/planar_bgr_to_png.py makes a PNG. */
+#define CAMERA_SVC_HAS_SEND   1
 
 /*
  * The board's own subcommands, appended to the shared `camera` table (see the
- * f746 config for the rules), in the order and the words they have always had.
- * `stats` stays here until issue #143 moves it under `camera stream stats`
- * (which the shared table already has, printing the same lines).  Handlers in
- * cmds/cmd_camera_board.c.
+ * f746 config for the rules).  The counters are `camera stream stats` (issue
+ * #143 decision 4); the producer's stage profile that `camera stats` used to
+ * end with is `camera profile` (D3).  Handlers in cmds/cmd_camera_board.c.
  */
 #define CAMERA_SVC_BOARD_DECLS                                                 \
 	int camera_board_cmd_raw(struct cli_instance *sh, int argc, char **argv);   \
-	int camera_board_cmd_stats(struct cli_instance *sh, int argc, char **argv); \
+	int camera_board_cmd_profile(struct cli_instance *sh, int argc,           \
+	                             char **argv);                               \
 	int camera_board_cmd_vts(struct cli_instance *sh, int argc, char **argv);   \
 	int camera_board_cmd_bench(struct cli_instance *sh, int argc, char **argv); \
 	int camera_board_cmd_exposure(struct cli_instance *sh, int argc,          \
@@ -64,8 +64,9 @@
 #define CAMERA_SVC_BOARD_SUBCMDS                                               \
 	CLI_CMD(raw, NULL, "capture the Bayer mosaic and name the phase",      \
 	        camera_board_cmd_raw),                                         \
-	CLI_CMD(stats, NULL, "producer and sink counters",                     \
-	        camera_board_cmd_stats),                                       \
+	CLI_CMD(profile, NULL,                                                 \
+	        "the producer's time per stage since the last stream start",   \
+	        camera_board_cmd_profile),                                     \
 	CLI_CMD_ARG_USAGE(vts, NULL,                                           \
 	                  "sensor frame length: frame rate vs exposure ceiling", \
 	                  "[lines]", camera_board_cmd_vts, 1, 1),              \

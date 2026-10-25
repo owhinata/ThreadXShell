@@ -35,7 +35,7 @@ extern "C" {
 
 /** nn's place among the camera's holders (issue #142): what `nn stream start`
  *  and `nn run` pass to cam_lcd_sink_hold() and nn's stop to
- *  cam_lcd_sink_release().  Its name is what `camera stats` prints. */
+ *  cam_lcd_sink_release().  Its name is what `camera stream stats` prints. */
 struct cam_holder;
 extern const struct cam_holder nn_cam_holder;
 
@@ -66,7 +66,7 @@ struct nn_camera_stats {
 	/*
 	 * The stage split (issue #60), across two threads since issue #129:
 	 * `prep` is what the producer still spends inside consume() -- the part
-	 * of `camera stats`' `sink` number this overlay owns -- and invoke,
+	 * of `camera profile`'s `sink` number this overlay owns -- and invoke,
 	 * decode and the round trip are the worker's.  Totals since arm, over
 	 * prof_frames frames -- only frames that completed every stage are
 	 * counted, so the rows describe the same set.

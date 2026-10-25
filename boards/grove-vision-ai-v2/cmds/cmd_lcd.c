@@ -556,8 +556,8 @@ static int lcd_set_backlight(struct cli_instance *sh, int on)
 	 * The guard first: lcd_backlight() is ONE GPIO WRITE.  It touches no SPI
 	 * state, no framebuffer, no CS/DC and no DMA, so the panel guard protects
 	 * nothing it does -- while under a live stream the panel thread holds that
-	 * guard for about 96% of every frame (compare `blit` against `profile` in
-	 * `camera stats`).  Taking it made `lcd on` fail with "busy" almost every
+	 * guard for about 96% of every frame (compare `blit` in `camera stream
+	 * stats` against `camera profile`).  Taking it made `lcd on` fail with "busy" almost every
 	 * time, in exactly the case it exists for.
 	 *
 	 * Then the refusal, which this file briefly had on `off` alone.  That was

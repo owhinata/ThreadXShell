@@ -592,6 +592,7 @@ struct cam_send_cursor {
 	const struct camera_svc_frame *f;
 	struct camera_op_result *res;   /* the command's one result */
 	uint32_t off;
+	int read_failed;                /* res holds the failed read's words */
 };
 
 static int cam_send_read(void *ctx, uint8_t *dst, uint32_t want, uint32_t *got)
@@ -607,8 +608,10 @@ static int cam_send_read(void *ctx, uint8_t *dst, uint32_t want, uint32_t *got)
 	if (want < n)
 		n = want;
 	camera_svc_frame_read(c->f, c->off, dst, n, c->res);
-	if (c->res->status != CAMERA_SVC_OK)
+	if (c->res->status != CAMERA_SVC_OK) {
+		c->read_failed = 1;
 		return -1;                      /* frame changed mid-send, or gone */
+	}
 	c->off += n;
 	*got = n;
 	return 0;
@@ -627,11 +630,16 @@ static int cmd_camera_send(struct cli_instance *sh, int argc, char **argv)
 	c.f = &f;
 	c.res = &res;
 	c.off = 0u;
+	c.read_failed = 0;
 	src.ctx  = &c;
 	src.name = (argc >= 2) ? argv[1] : "frame.raw";
 	src.size = f.len;
 	src.read = cam_send_read;
 	rc = camera_board_send(sh, &src);
+	/* The transfer's own line said "source read error"; this says why, in
+	   the board's words (the frame was replaced, the camera was busy). */
+	if (c.read_failed)
+		cam_print_fail(sh, &res, "");
 	camera_svc_frame_close(&f);
 	return rc;
 }

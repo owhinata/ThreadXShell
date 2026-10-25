@@ -7,9 +7,9 @@
  * @brief   What this board's own `camera` subcommands (cmds/cmd_camera_board.c)
  *          share with its adapter (camera_svc_grove.c) (issue #143).
  *
- * The producer's stage profile is printed by `camera stream stats` (the
- * adapter's report), by the board's `camera stats` and by `camera bench`, so
- * its lines live once, in the adapter, behind the length-bearing writer.
+ * The producer's stage profile is printed by `camera profile` and by
+ * `camera bench`, so its lines live once, in the adapter, behind the
+ * length-bearing writer.
  */
 #ifndef CAMERA_SVC_GROVE_H
 #define CAMERA_SVC_GROVE_H

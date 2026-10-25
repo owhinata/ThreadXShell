@@ -17,7 +17,7 @@
  * "first, then every power of two" policy walks back through 1, 2, 4 ... and
  * starts logging again -- turning the bounded trail into a flood, in exactly
  * the situation where the log ring is the only channel left (no thread runs, so
- * `camera stats` cannot be asked) and where overwriting it destroys the boot
+ * `camera stream stats` cannot be asked) and where overwriting it destroys the boot
  * history that says what led up to the event.  Saturation is what stops that,
  * and this file is what holds saturation down.
  *

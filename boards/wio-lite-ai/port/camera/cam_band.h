@@ -31,8 +31,8 @@
  * before it gives the input tensor back.
  *
  * Callbacks are supplied when a step is enabled rather than looked up here, and
- * that is a layering requirement: this file is built whenever BSP_ENABLE_CAMERA
- * is on, while cam_preview.c needs BSP_ENABLE_CAMERA *and* BSP_ENABLE_LCD.
+ * that is a layering requirement: this file is always built (the camera is not
+ * optional on this board, #147), while cam_preview.c needs BSP_ENABLE_LCD too.
  *
  * Threading: enable / disable are a PRIMASK section each; drain sleeps (thread
  * context only).  The sink runs on the camera's producer thread, never an ISR.

@@ -38,9 +38,7 @@
 #include "cli.h"
 #include "ltdc_display.h"
 #include "psram.h"           /* psram_acquire(): OCTOSPI1 interlock (see lcd on) */
-#if BSP_ENABLE_CAMERA
 #include "camera.h"          /* camera_still_claim(): `lcd reset` vs a stream (#142) */
-#endif
 #include "stm32h7xx_hal.h"   /* __HAL_RCC_DMA2D_IS_CLK_ENABLED (AHB3ENR read-back) */
 
 #include <stdint.h>
@@ -368,9 +366,7 @@ static int cmd_lcd_off(struct cli_instance *sh, int argc, char **argv)
 static int cmd_lcd_reset(struct cli_instance *sh, int argc, char **argv)
 {
 	int rc;
-#if BSP_ENABLE_CAMERA
 	int held_still = 0;
-#endif
 
 	(void)argc;
 	(void)argv;
@@ -378,7 +374,6 @@ static int cmd_lcd_reset(struct cli_instance *sh, int argc, char **argv)
 		cli_error(sh, "lcd: display not initialized\r\n");
 		return 1;
 	}
-#if BSP_ENABLE_CAMERA
 	{
 		int still = camera_still_claim();
 
@@ -394,23 +389,18 @@ static int cmd_lcd_reset(struct cli_instance *sh, int argc, char **argv)
 		}
 		held_still = (still == CAM_OK);
 	}
-#endif
 	if (!psram_acquire_shared()) {
 		cli_error(sh, "lcd: OCTOSPI1 busy (a psram/membench/devmem/wifi flash "
 		              "command is reconfiguring it)\r\n");
-#if BSP_ENABLE_CAMERA
 		if (held_still)
 			camera_still_release();
-#endif
 		return 1;
 	}
 	cli_print(sh, "lcd: resetting the panel (~0.3 s)...\r\n");
 	rc = ltdc_panel_recover();
 	psram_release_shared();
-#if BSP_ENABLE_CAMERA
 	if (held_still)
 		camera_still_release();
-#endif
 	if (rc != LTDC_OK) {
 		cli_error(sh, "lcd: panel reset refused (display faulted)\r\n");
 		return 1;

@@ -42,9 +42,7 @@
 #if BSP_ENABLE_LCD
 #include "ltdc_display.h"   /* ltdc_scanout_active(): see psram_acquire() (issue #7) */
 #endif
-#if BSP_ENABLE_CAMERA
 #include "camera.h"         /* camera_streaming(): see psram_acquire() (issue #8) */
-#endif
 
 /* ------------------------------------------------------------------ *
  *  Tunable bring-up parameters (validate / adjust on board #2)
@@ -733,7 +731,6 @@ int psram_acquire(void)
 		return 0;
 	}
 #endif
-#if BSP_ENABLE_CAMERA
 	/* A frame stream has the DCMI's DMA writing the PSRAM ring; a band stream
 	   (owhinata/wio-lite-ai#35) does not touch this bus from the DMA at all, but its preview
 	   transposes into the LTDC frame buffer, which does.  Either way something is
@@ -743,7 +740,6 @@ int psram_acquire(void)
 		psram_release();
 		return 0;
 	}
-#endif
 	return 1;
 }
 

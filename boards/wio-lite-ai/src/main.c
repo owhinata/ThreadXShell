@@ -42,7 +42,6 @@
 #include "nor_flash.h"  /* external W25Q128 NOR on OCTOSPI2 (issue #37) */
 #include "kv.h"         /* configuration key-value store on that NOR (issue #37) */
 #endif
-#if BSP_ENABLE_CAMERA
 #include "camera.h"     /* FPC-24 DVP camera: XCLK + SCCB bring-up (issue #8) */
 #if BSP_ENABLE_LCD
 #include "cam_preview.h"
@@ -50,14 +49,13 @@
 #if defined(CONFIG_NN_BACKEND_TFLM)
 #include "plugin_lease.h" /* who may touch a plugin's result (issue #110)      */
 #endif
-#endif
 /* [!] UNCONDITIONAL, and it has to be (issue #50).  usb_stack and iwdg_stack
  * below are DTCM_BSS in every configuration, so this include cannot sit inside
- * the camera/LCD guards it used to -- BSP_ENABLE_CAMERA=OFF then left DTCM_BSS
- * undefined and the build failed on a stack that has nothing to do with either
- * option.  Which defeated the point of the switch: it exists to produce a
- * firmware that leaves a peripheral alone while bisecting a suspicion, and it
- * was unusable exactly when something was already wrong. */
+ * an option's guard (it once sat inside the LCD one): turning that option off
+ * left DTCM_BSS undefined and the build failed on a stack that has nothing to
+ * do with it.  Which defeats the point of a BSP_ENABLE_* switch: it exists to
+ * produce a firmware that leaves a peripheral alone while bisecting a
+ * suspicion, and it was unusable exactly when something was already wrong. */
 #include "mem_sections.h"  /* DTCM_BSS: CPU-only data out of AXI-SRAM (issue #46) */
 
 /* --- interactive shell over USB CDC ------------------------------------- */
@@ -201,7 +199,6 @@ void tx_application_define(void *first_unused_memory)
 #endif
 #endif
 
-#if BSP_ENABLE_CAMERA
   /* DVP camera bring-up (owhinata/wio-lite-ai#8 phase 1).  Creates its mutex, gates the clocks
    * and configures PA2 (XCLK, parked low), PE7/PH12 (PWDN/RESETB, both asserted)
    * and I2C4.  It runs NO sensor traffic, waits on nothing, spends no time in
@@ -216,7 +213,6 @@ void tx_application_define(void *first_unused_memory)
    * Creation and a PRIMASK store only -- the thread blocks on its first wait,
    * so it is safe here like every other service. */
   (void) cam_preview_init();
-#endif
 #endif
 
 #if defined(CONFIG_NN_BACKEND_TFLM)

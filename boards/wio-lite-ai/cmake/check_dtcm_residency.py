@@ -100,10 +100,11 @@ REQUIRED_DTCM = (
 # ASSERT covered them; it never did -- that ASSERT only bounds the total against the 8 MB
 # window and says nothing about which sub-range a buffer landed in.  Harmless while the
 # whole window was non-cacheable, wrong the moment part of it was not.)
-# Both of these belong to optional peripherals (BSP_ENABLE_SD / BSP_ENABLE_CAMERA), so
-# like the DTCM list above they arrive from CMakeLists.txt via --require-axi rather than
-# being named here.  The comment stays because the REASON is not conditional: whichever
-# of them is in a given image must be in AXI-SRAM.
+# Both of them arrive from CMakeLists.txt via --require-axi rather than being named
+# here, like the DTCM list above (sd_bounce belongs to BSP_ENABLE_SD; cam_band is
+# always built -- the camera is not optional on this board, #147 -- and is passed the
+# same way).  The comment stays because the REASON is not conditional: whichever of
+# them is in a given image must be in AXI-SRAM.
 #
 # [!] MAINTENANCE OBLIGATION, and it is the weak point of moving the lists out.  A NEW
 # bus-master buffer added to this firmware is not protected until someone adds it to
@@ -200,13 +201,13 @@ def main():
     required_axi = tuple(REQUIRED_AXI) + tuple(args.require_axi)
 
     # No --require-axi at all would mean a build with no bus-master buffers to check.
-    # That is legitimate (BSP_ENABLE_SD=OFF plus BSP_ENABLE_CAMERA=OFF) but rare enough
-    # to be worth saying out loud, so a missing argument is never mistaken for a
-    # thorough check that found nothing.
+    # No configuration of this board produces that any more (cam_band is always
+    # named, #147), so it means the caller lost its list; say so out loud, so a
+    # missing argument is never mistaken for a thorough check that found nothing.
     if not required_axi:
         print("check_dtcm_residency: note -- no bus-master buffers were named, so the "
-              "DMA-reachability half of this gate checked nothing (expected only with "
-              "BSP_ENABLE_SD=OFF and BSP_ENABLE_CAMERA=OFF)")
+              "DMA-reachability half of this gate checked nothing (not expected from "
+              "any wio-lite-ai configuration: board.cmake always passes cam_band)")
 
     syms = read_symbols(args.nm, args.elf)
     dtcm_start, dtcm_end = bounds(syms, "_sdtcm_bss", "_edtcm_bss")

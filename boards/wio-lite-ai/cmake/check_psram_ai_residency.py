@@ -79,12 +79,12 @@ PSRAM_AI_LENGTH = 2 * 1024 * 1024
 #              stream's ring, was the other one until issue #142 removed it.)
 #
 # [!] THEY ARE PASSED IN WITH --noncacheable, NOT LISTED HERE, and for the same reason
-# --require is passed in: every one of them belongs to a BSP_ENABLE_* option, and a
-# name this script demands from a build that never compiled it is reported as "no such
-# object in the image" -- which reads like a placement regression and is not one.
+# --require is passed in: a buffer that belongs to a BSP_ENABLE_* option and is demanded
+# by this script from a build that never compiled it is reported as "no such object in
+# the image" -- which reads like a placement regression and is not one.
 # check_dtcm_residency.py learned this in owhinata/wio-lite-ai#9 phase 2c, when a hardcoded
 # sd_bounce made BSP_ENABLE_SD=OFF unbuildable; this file kept its own hardcoded list
-# and made BSP_ENABLE_CAMERA=OFF unbuildable in exactly the same way
+# and broke an optional configuration in exactly the same way
 # (owhinata/wio-lite-ai#50).  The rule both scripts now follow: ONLY residents that exist
 # in EVERY configuration may be named in the source; anything a toggle can remove comes
 # from CMakeLists.txt, which is the only place that knows what was built.

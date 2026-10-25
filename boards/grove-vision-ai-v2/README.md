@@ -1929,8 +1929,10 @@ one flash.**  The worry on record was that the producer would be unable to run
 during the blit.  It is not: the panel thread sleeps on the DMA semaphore for the
 wire time and holds the CPU only for the staging copy, the command transfers,
 `draw()` and the FIFO tail.  `thread` on the OLD firmware put that at **1.5% of a
-62.6 ms frame -- 940 us**, against the producer's own 13.1%.  (`thread` needs a
-prior snapshot to divide by, so the first run of it prints `--`; run it twice.)
+62.6 ms frame -- 940 us**, against the producer's own 13.1%.  (`thread` divides
+by the window since its previous run; the first run after boot measures since
+profiling started and says so in a trailing note, so run it twice to get a
+window that covers only the load being measured.)
 
 After the change, with the producer's `sink` row now carrying the staging it is
 preempted by:

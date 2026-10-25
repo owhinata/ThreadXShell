@@ -160,15 +160,17 @@ __attribute__((weak)) int cli_thread_cpu_source_ok(const char **why)
  * never enters the arithmetic: cpu% = delta_thread / window, where window =
  * delta(all threads + isr + idle) over the window since the previous `thread`
  * run.  The previous snapshot lives here (threads are static and never deleted,
- * so a small pointer-keyed table suffices); the first run has no prior and
- * prints "--".
+ * so a small pointer-keyed table suffices).  Before the first committed run the
+ * table is empty and every baseline is 0; the kit's totals are monotonic and
+ * nothing resets them, so 0 means "since profiling started" and the first run
+ * prints real numbers over that window (plus a one-line note saying so).
  */
 #define THREAD_CPU_PREV_MAX 16
 struct cpu_snap { TX_THREAD *t; EXECUTION_TIME prev; };
 static struct cpu_snap cpu_prev[THREAD_CPU_PREV_MAX];
 static UINT           cpu_prev_count;
 static EXECUTION_TIME cpu_prev_thread, cpu_prev_isr, cpu_prev_idle;
-static int            cpu_have_prev;
+static int            cpu_baseline_committed;   /* 0 until the first commit below */
 
 static EXECUTION_TIME cpu_prev_lookup(const TX_THREAD *t)
 {
@@ -241,7 +243,7 @@ static int cmd_thread(struct cli_instance *sh, int argc, char **argv)
 	/* A board can declare its ISR accounting untrustworthy; keep the column
 	 * layout and blank the values rather than silently printing wrong ones. */
 	cpu_ok = cli_thread_cpu_source_ok(&cpu_why);
-	have   = cpu_have_prev && cpu_ok;
+	have   = cpu_ok;
 	if (!cpu_ok)
 		cli_warn(sh, "thread: cpu%% unavailable (%s)\r\n",
 		         (cpu_why != NULL) ? cpu_why : "board reported no source");
@@ -348,6 +350,9 @@ static int cmd_thread(struct cli_instance *sh, int argc, char **argv)
 	cpu_fmt(cpubuf, sizeof cpubuf, have, it - cpu_prev_isr, window);
 	cli_print(sh, "%-20s %-6s %3s %8s %6s %5s %5s %6s\r\n",
 	          "(isr)", "", "", "", "", "", "", cpubuf);
+	if (have && !cpu_baseline_committed)
+		cli_print(sh, "cpu%%: window is since profiling started"
+		              " (later runs: since the previous thread)\r\n");
 
 	/* Commit this snapshot as the baseline for the next `thread`. */
 	for (i = 0; i < next_count; i++)
@@ -356,7 +361,7 @@ static int cmd_thread(struct cli_instance *sh, int argc, char **argv)
 	cpu_prev_thread = tt;
 	cpu_prev_isr    = it;
 	cpu_prev_idle   = id;
-	cpu_have_prev   = 1;
+	cpu_baseline_committed = 1;
 #endif
 
 done:

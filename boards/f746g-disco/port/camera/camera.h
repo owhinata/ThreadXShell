@@ -256,27 +256,14 @@ int camera_capture(int colorbar);
  * mutex.  Fails with CAM_ERR_NO_FRAME until a capture succeeded.
  *
  * @p gen (optional, may be NULL) receives the frame's generation counter,
- * bumped whenever the stable buffer is refreshed -- a successful capture OR a
- * camera_snapshot_latest() (owhinata/stm32f746g-disco#102).  A multi-call reader
- * (stats, save) must compare generations across its reads: a concurrent
- * capture/snapshot between two reads re-validates the buffer with NEW pixels --
- * frame_valid alone cannot detect that, only the generation change does.
+ * bumped by every successful capture (owhinata/stm32f746g-disco#102; since
+ * issue #143 nothing else refreshes the buffer -- a stream never does).  A
+ * multi-call reader (stats, save) must compare generations across its reads: a
+ * concurrent capture between two reads re-validates the buffer with NEW pixels
+ * -- frame_valid alone cannot detect that, only the generation change does.
  */
 int camera_frame_read(uint32_t offset, void *dst, uint32_t len,
                       uint32_t *gen);
-
-/**
- * Refresh the stable snapshot buffer that camera_frame_read() serves, so `camera
- * save`/`send` capture the freshest frame, then return 0
- * (owhinata/stm32f746g-disco#102). While the base is streaming this copies the
- * latest published ring frame (any format, even with MJPEG/GUI subscribers
- * attached) via a pinned, lock-free copy that never stalls the producer.  While the
- * base is off it keeps the last `camera capture` frame (non-destructive).  Returns
- * CAM_ERR_NO_FRAME when no frame is available (base streaming but nothing published
- * yet, or base off with no prior capture). Call it once before a save/send, before
- * creating the file / starting the transfer.
- */
-int camera_snapshot_latest(void);
 
 /**
  * Drop the captured-frame flag (the buffer contents are about to be clobbered
@@ -339,6 +326,21 @@ int camera_stream_start(int colorbar, int *already);
  * stop (non-blocking; it tears down after looking at the holders again).
  */
 int camera_stream_stop(const char **users, int max, int *nusers);
+
+/**
+ * camera_stream_stop(), also handing back in *@p gen (may be NULL) the
+ * generation of the stream it asked to stop (svc/cam_gen.h; CAM_GEN_NONE when
+ * nothing was active), read under the camera lock with the request.  The stop
+ * is asynchronous: wait with camera_stream_ended(*gen), never with
+ * camera_streaming() -- a later start, or one that withdrew this stop and kept
+ * the stream, is not this stream's end (issue #143).
+ */
+int camera_stream_stop_gen(const char **users, int max, int *nusers,
+                           uint32_t *gen);
+
+/** Nonzero once the stream of generation @p gen has ended (CAM_GEN_NONE: at
+ *  once).  A lock-free read of the teardown's record. */
+int camera_stream_ended(uint32_t gen);
 
 /**
  * Holder @p h (static, its address is its identity) joins the stream, taking

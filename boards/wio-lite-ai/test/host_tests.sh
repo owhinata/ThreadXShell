@@ -331,14 +331,8 @@ gcc $CFLAGS -I "$board/src" \
     $LDFLAGS -o "$out/test_psram_guard"
 "$out/test_psram_guard"
 
-# issue #142 review -- which band stream a stop waits for (port/camera/cam_gen.h).
-# A `camera stream stop &` below a console that starts the next stream can wake
-# to find another stream running; the wait must ask "is MY generation over",
-# never "is a stream active".  Two consoles at two priorities: not typeable.
-gcc $CFLAGS -I "$board/port/camera" \
-    "$here/test_cam_gen.c" \
-    $LDFLAGS -o "$out/test_cam_gen"
-"$out/test_cam_gen"
+# issue #142 review -- which band stream a stop waits for: svc/cam_gen.h, shared
+# with f746g-disco since issue #143, so its test is shell/test/test_cam_gen.c.
 
 # issue #142 review -- has the last nn teardown finished (port/nn/nncam_teardown.h):
 # a fresh start refused before it touches anything, a worker that keeps the
@@ -354,8 +348,8 @@ gcc $CFLAGS -I "$board/port/nn" \
 # over the shared stub adapter, with and without the microSD (`camera save`
 # follows BSP_ENABLE_SD).  A board subcommand that reuses a shared name is
 # silently unreachable, and only the built table shows it; the run also pins
-# this board's `camera off` -- the board refuses a running stream, and the
-# shared command must not stop it first (CAMERA_SVC_OFF_STOPS_STREAM 0).
+# this board's `camera off` -- the shared command stops the operator's stream
+# first and then powers down (CAMERA_SVC_OFF_STOPS_STREAM 1).
 st="$HOST_TEST_SHELL_TEST"
 for sd in 0 1; do
     gcc $CFLAGS -DCLI_USE_COLOR=0 -DBSP_ENABLE_SD=$sd \

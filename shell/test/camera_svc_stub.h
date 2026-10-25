@@ -33,6 +33,9 @@ struct camera_stub {
 	int tag_samples;                  /* name each stats sample          */
 	int never_started;                /* stats: no stream since boot     */
 	int transition;                   /* stats: a start/stop in flight   */
+	int stop_never_ends;              /* the stopped stream never ends   */
+	int another_starts;               /* a stream runs on after the stop */
+	uint32_t done_gen;                /* the last stream generation over */
 	/* what was called */
 	int calls_probe, calls_on, calls_off, calls_info, calls_capture;
 	int calls_open, calls_read, calls_start, calls_stop, calls_send;
@@ -44,6 +47,7 @@ struct camera_stub {
 	int opened;                       /* open minus close: 0 when balanced */
 	int last_test;
 	uint32_t ended_gen;
+	int ended_calls;
 	const char *send_name;
 	uint32_t send_size;
 	uint32_t written;

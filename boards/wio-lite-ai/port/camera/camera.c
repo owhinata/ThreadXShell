@@ -344,6 +344,7 @@ static const struct cam_holder *volatile cam_lost[CAM_HOLDERS_MAX];
 /* The running band stream's `test` setting (the sensor's COM7 colour bar). */
 static int cam_band_colorbar;
 static void cam_holders_lose_locked(void);
+static int cam_holders_users_locked(const char **users, int max);
 static volatile int      cam_stream_err;     /* terminal: TE / DCMI OVR          */
 static volatile int      cam_stop_req;       /* cam_lock: written only under it */
 /* The running (or last) band stream's generation, and the last one a teardown
@@ -1742,6 +1743,18 @@ int camera_off(void)
 		op_unlock();
 		return CAM_ERR_BUSY;
 	}
+	/* [!] AND THE HOLDERS, UNDER THE SAME LOCK (issue #143): `camera off`
+	   stops the operator's stream first and only then powers down, so between
+	   the two a holder that needs the camera (nn) may have joined -- its start
+	   still in flight, nothing active yet.  It is refused, as its stop is. */
+	if (cam_holders_users_locked(NULL, 0) != 0) {
+		op_unlock();
+		return CAM_ERR_IN_USE;
+	}
+	if (cam_holders_count(&cam_holds) != 0 || cam_holders_claimed(&cam_holds)) {
+		op_unlock();
+		return CAM_ERR_BUSY;          /* the operator's own start in flight */
+	}
 	power_off_locked();
 	op_unlock();
 	return CAM_OK;
@@ -2005,8 +2018,22 @@ int camera_stream_start(int colorbar, int *already)
 
 int camera_stream_stop(const char **users, int max, int *nusers)
 {
+	return camera_stream_stop_gen(users, max, nusers, NULL);
+}
+
+int camera_stream_ended(uint32_t gen)
+{
+	return cam_gen_ended(cam_stream_done_gen, gen);
+}
+
+int camera_stream_stop_gen(const char **users, int max, int *nusers,
+                           uint32_t *gen_out)
+{
 	uint32_t gen;
 	int rc, hrc;
+
+	if (gen_out != NULL)
+		*gen_out = CAM_GEN_NONE;
 
 	if (nusers != NULL)
 		*nusers = 0;
@@ -2036,6 +2063,8 @@ int camera_stream_stop(const char **users, int max, int *nusers)
 	   is still stopped by an explicit stop. */
 	gen = cam_holders_stop_locked();
 	op_unlock();
+	if (gen_out != NULL)
+		*gen_out = gen;
 	return camera_stream_wait_end(gen);
 }
 

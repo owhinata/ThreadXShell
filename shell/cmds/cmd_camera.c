@@ -11,7 +11,7 @@
  *   camera on | off            module power                  (HAS_POWER)
  *   camera info                driver / sensor state         (HAS_INFO)
  *   camera capture [test]      snapshot one frame + its statistics
- *   camera save <medium> <p>   write the frame to a file     (HAS_SAVE)
+ *   camera save [<medium>] <p> write the last capture to a file (HAS_SAVE)
  *   camera send [name]         the frame to the PC over YMODEM (HAS_SEND)
  *   camera stream start [test] | stop | stats
  *   ...                        the board's own subcommands, appended
@@ -198,8 +198,21 @@ static int cmd_camera_on(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-/* How long `camera off` waits for the stream it stopped, in console ticks. */
+/* How long `camera off` waits for the stream it stopped, in console ticks.
+   A board whose stop already waits (wio, up to ~1 s) is not bounded by this:
+   `camera off` can take that long before the wait here even starts. */
 #define CAM_OFF_WAIT_TICKS 200u
+
+#if CAMERA_SVC_OFF_STOPS_STREAM
+/* The stop was asked for, the stream has not ended yet, and it may still: the
+   power is left on and the request stays. */
+static void cam_off_timed_out(struct cli_instance *sh)
+{
+	cli_error(sh, "camera: the stream has not stopped yet -- %s; power left "
+	          "on, retry 'camera off'\r\n",
+	          cam_status_name(CAMERA_SVC_ERR_TIMEOUT));
+}
+#endif
 
 static int cmd_camera_off(struct cli_instance *sh, int argc, char **argv)
 {
@@ -209,33 +222,60 @@ static int cmd_camera_off(struct cli_instance *sh, int argc, char **argv)
 	(void)argv;
 
 #if CAMERA_SVC_OFF_STOPS_STREAM
-	/* Power cannot be cut mid-stream (it wrecks the interface), so the
-	   operator's own stream is stopped first and waited for: the producer
-	   tears it down (every subscriber gets a close()), then the power goes.
-	   The board re-checks under its own lock before it cuts anything. */
+	/*
+	 * Power cannot be cut mid-stream (it wrecks the interface), so the
+	 * operator's own stream is stopped first and waited for: the producer
+	 * tears it down (every subscriber gets a close()), then the power goes.
+	 * The board re-checks the stream and its holders under its own lock
+	 * before it cuts anything (camera_svc_off()).
+	 *
+	 * [!] NOTHING IS POWERED DOWN UNLESS THE STOP WAS ACCEPTED AND ITS STREAM
+	 * IS CONFIRMED OVER.  A refusal (another holder: IN_USE), any other
+	 * failure of the stop, a wait that runs out (TIMEOUT -- the stream may
+	 * still stop later) and a Ctrl+C during the wait all leave the power on;
+	 * the stop request, once made, stays made.  The wait is on THE STREAM THE
+	 * STOP NAMED (its generation), never on "is anything streaming": a start
+	 * from another console after it is not its end, and neither is one that
+	 * withdrew the stop and kept the stream.
+	 */
 	struct camera_svc_state st;
 
 	/* Only "is it streaming" is needed here; a state the board could not
 	   sample still answers that, and the power-off below reports. */
 	camera_svc_stream_state(&st, &res);
 	if (st.streaming) {
-		uint32_t gen = 0u;
+		uint32_t gen = CAMERA_SVC_GEN_NONE;
 		unsigned i;
+		int what;
 
 		/* Refused first, announced after: a stop another holder refuses
 		   changed nothing, so nothing is "stopping". */
-		(void)camera_svc_stream_stop(&res, &gen);
-		if (res.status == CAMERA_SVC_ERR_IN_USE) {
+		what = camera_svc_stream_stop(&res, &gen);
+		if (res.status == CAMERA_SVC_ERR_TIMEOUT) {
+			cam_off_timed_out(sh);
+			return 1;
+		}
+		if (res.status != CAMERA_SVC_OK) {
 			cam_print_fail(sh, &res, "");
 			return 1;
 		}
 		cli_print(sh, "camera: stopping stream before power off\r\n");
-		for (i = 0; i < CAM_OFF_WAIT_TICKS && !camera_svc_stream_ended(gen); i++)
-			cli_sleep(sh, 1);
-		if (!camera_svc_stream_ended(gen)) {
-			cli_error(sh, "camera: stream did not stop; retry 'camera off'\r\n");
-			return 1;
+		if (what == CAMERA_SVC_STOP_REQUESTED) {
+			for (i = 0; i < CAM_OFF_WAIT_TICKS &&
+			            !camera_svc_stream_ended(gen); i++) {
+				if (cli_sleep(sh, 1) != 0)
+					return 1;     /* Ctrl+C: the core prints ^C */
+			}
+			if (!camera_svc_stream_ended(gen)) {
+				cam_off_timed_out(sh);
+				return 1;
+			}
 		}
+		/* A Ctrl+C typed while a board's stop waited inside the adapter
+		   (wio: up to ~1 s, which these 200 ticks do not bound) is still a
+		   cancel: the stop stands, the power stays on. */
+		if (cli_cancel_requested(sh))
+			return 1;
 	}
 #endif /* CAMERA_SVC_OFF_STOPS_STREAM: otherwise the board refuses a
           running stream itself (CAMERA_SVC_ERR_BUSY) */
@@ -365,6 +405,10 @@ static int cam_open_frame(struct cli_instance *sh, struct camera_svc_frame *f,
 #define CAM_MEDIUM_OR_(s)    " or " s
 #define CAM_SAVE_MEDIA_BAR   CAMERA_SVC_SAVE_MEDIA(CAM_MEDIUM_FIRST_, CAM_MEDIUM_BAR_)
 #define CAM_SAVE_MEDIA_OR    CAMERA_SVC_SAVE_MEDIA(CAM_MEDIUM_FIRST_, CAM_MEDIUM_OR_)
+#define CAM_MEDIUM_DROP_(s)
+/* The default medium: the first the board names (issue #143 decision 3). */
+#define CAM_SAVE_MEDIUM_DEFAULT CAMERA_SVC_SAVE_MEDIA(CAM_MEDIUM_FIRST_, CAM_MEDIUM_DROP_)
+#define CAM_SAVE_USAGE       "[" CAM_SAVE_MEDIA_BAR "] <path>"
 
 /* The PC-side conversion hint for the saved frame's format. */
 static void cam_convert_hint(struct cli_instance *sh,
@@ -471,17 +515,36 @@ static int cam_save_body(const struct fs_device *dev, struct cli_instance *sh,
 static int cmd_camera_save(struct cli_instance *sh, int argc, char **argv)
 {
 	const struct fs_device *dev;
+	const char *path;
 	struct camera_svc_frame f;
 	struct camera_op_result res;
 	UINT status;
 	int rc;
 
-	(void)argc;
-
-	dev = camera_board_medium(argv[1]);
-	if (dev == NULL) {
-		cli_error(sh, "camera: unknown medium '%s' (" CAM_SAVE_MEDIA_OR ")\r\n",
-		          argv[1]);
+	/* `save [<medium>] <path>`: the medium may be left out, and is then the
+	   board's first.  [!] A lone word that names a medium is refused rather
+	   than taken as a file name: `camera save sd` is a forgotten path far more
+	   often than a file called "sd". */
+	if (argc < 3) {
+		if (camera_board_medium(argv[1]) != NULL) {
+			cli_error(sh, "camera: '%s' names a medium -- give the path: "
+			          "camera save " CAM_SAVE_USAGE "\r\n", argv[1]);
+			return 1;
+		}
+		dev = camera_board_medium(CAM_SAVE_MEDIUM_DEFAULT);
+		path = argv[1];
+	} else {
+		dev = camera_board_medium(argv[1]);
+		path = argv[2];
+		if (dev == NULL) {
+			cli_error(sh, "camera: unknown medium '%s' (" CAM_SAVE_MEDIA_OR
+			          ")\r\n", argv[1]);
+			return 1;
+		}
+	}
+	if (dev == NULL) {   /* the board's own default it cannot resolve */
+		cli_error(sh, "camera: no medium '%s' on this board\r\n",
+		          CAM_SAVE_MEDIUM_DEFAULT);
 		return 1;
 	}
 	/* The frame first, the medium after: no file is created when there is
@@ -496,7 +559,7 @@ static int cmd_camera_save(struct cli_instance *sh, int argc, char **argv)
 		camera_svc_frame_close(&f);
 		return 1;
 	}
-	rc = cam_save_body(dev, sh, &f, argv[2], &res);
+	rc = cam_save_body(dev, sh, &f, path, &res);
 	dev->op_end();
 	camera_svc_frame_close(&f);
 	return rc;
@@ -730,11 +793,12 @@ CLI_SUBCMD_SET_CREATE(camera_subcmds,
 	                  cmd_camera_capture, 1, 1),
 #if CAMERA_SVC_HAS_SAVE
 	CLI_CMD_ARG_USAGE(save, NULL,
-	                  "write frame raw <" CAM_SAVE_MEDIA_BAR "> <path> (format per mode)",
-	                  CAM_SAVE_MEDIA_BAR " <path>", cmd_camera_save, 3, 0),
+	                  "write the last capture raw " CAM_SAVE_USAGE " (default "
+	                  CAM_SAVE_MEDIUM_DEFAULT ")",
+	                  CAM_SAVE_USAGE, cmd_camera_save, 2, 1),
 #endif
 #if CAMERA_SVC_HAS_SEND
-	CLI_CMD_ARG_USAGE(send, NULL, "stream the frame to the PC over YMODEM [name]",
+	CLI_CMD_ARG_USAGE(send, NULL, "send the last capture to the PC over YMODEM [name]",
 	                  "[name]", cmd_camera_send, 1, 1),
 #endif
 	CLI_CMD_ARG_USAGE(stream, camera_stream_subcmds,

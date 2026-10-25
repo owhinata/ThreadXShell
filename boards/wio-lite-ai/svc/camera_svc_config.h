@@ -22,11 +22,10 @@
 /** `camera on` / `camera off`: XCLK and PWDN / RESETB are the board's to drive
  *  (PWDN is the deepest state; the rail itself stays on). */
 #define CAMERA_SVC_HAS_POWER  1
-/** `camera off` does NOT stop a running stream: the driver refuses it
- *  ("a capture or stream already owns the DCMI") and the operator stops the
- *  stream first.  (Issue #143 keeps this through M1; making `off` stop the
- *  operator's own stream as f746 does is the later B step.) */
-#define CAMERA_SVC_OFF_STOPS_STREAM 0
+/** `camera off` with the operator's stream running stops that stream (wio's
+ *  stop waits for it, up to 1 s) and then powers down; a holder other than the
+ *  operator still refuses (issue #143 decision 2). */
+#define CAMERA_SVC_OFF_STOPS_STREAM 1
 
 /** `camera info`: driver, sensor, XCLK and SCCB state. */
 #define CAMERA_SVC_HAS_INFO   1

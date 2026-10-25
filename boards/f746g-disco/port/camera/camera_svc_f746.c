@@ -24,17 +24,14 @@
  * calls, from what the last call returned.  A slow console never stalls the
  * producer.
  *
- * What this board does NOT have yet (issue #143 commit 2, behaviour unchanged):
- *  - a stream GENERATION.  camera.c counts no streams, so camera_svc_stream_stop()
- *    hands back 0 and camera_svc_stream_ended() answers "is anything streaming",
- *    exactly what `camera off` always waited on.  A start that lands during the
- *    wait (it withdraws the stop and keeps the same stream) still reads as
- *    "did not stop", as before.
- *  - `save` / `send` of the LAST CAPTURE only: camera_svc_frame_open() still
- *    refreshes the stable buffer from the stream first
- *    (camera_snapshot_latest()), so a running stream's newest frame is what is
- *    read, as before.
- *  - a warm-up figure: the capture report says CAMERA_SVC_WARMUP_NONE.
+ * The stream stop is asynchronous here: camera_svc_stream_stop() hands back the
+ * generation of the stream it asked to end (camera.c counts them, svc/cam_gen.h)
+ * and camera_svc_stream_ended() answers for THAT stream, so `camera off` cannot
+ * mistake a later start -- or a start that withdrew the stop and kept the
+ * stream -- for its end.  `save` / `send` read the LAST CAPTURE, stream or no
+ * stream (issue #143).
+ *
+ * Not yet: a warm-up figure (the capture report says CAMERA_SVC_WARMUP_NONE).
  *
  * Clean-room design; no third-party code reused.
  */
@@ -446,17 +443,11 @@ void camera_svc_frame_open(struct camera_svc_frame *f,
 	struct camera_info ci;
 	uint8_t probe;
 	uint32_t gen;
-	int rc;
 
-	/* owhinata/stm32f746g-disco#102: refresh the stable buffer before sizing
-	   the file / transfer (base ON: the latest streamed frame of any format,
-	   even with MJPEG/GUI subscribers; base OFF: the last `camera capture`),
-	   and fail before anything is created when no frame is available. */
-	rc = camera_snapshot_latest();
-	if (rc != 0) {
-		cam_res_rc(res, rc);
-		return;
-	}
+	/* The LAST `camera capture`, whether or not a stream runs (issue #143):
+	   the stream never writes the capture buffer, so what is saved or sent is
+	   the frame the operator captured and saw the statistics of.  With none,
+	   the open fails before anything is created. */
 	/* The generation FIRST, the length after: a capture landing between the
 	   two gives a cursor whose generation is already stale, so the first read
 	   fails rather than reading the new frame against the old length. */
@@ -479,8 +470,8 @@ void camera_svc_frame_open(struct camera_svc_frame *f,
 /*
  * camera_frame_read() copies under the driver mutex and returns the generation
  * OF THE BYTES IT COPIED, so comparing that with the cursor's is the check and
- * the copy in one step: every path that refreshes the stable buffer (a capture,
- * camera_snapshot_latest()) bumps the generation under the same mutex.  A
+ * the copy in one step: the one path that refreshes the stable buffer (a
+ * capture) bumps the generation under the same mutex.  A
  * changed frame fails the read; the bytes already in @p dst are not to be
  * used.
  */
@@ -557,9 +548,8 @@ int camera_svc_stream_stop(struct camera_op_result *res, uint32_t *gen)
 {
 	const char *users[CAMERA_SVC_USERS_MAX];
 	int n = 0;
-	int rc = camera_stream_stop(users, (int)CAMERA_SVC_USERS_MAX, &n);
+	int rc = camera_stream_stop_gen(users, (int)CAMERA_SVC_USERS_MAX, &n, gen);
 
-	*gen = 0u;   /* no stream generation on this board -- see the file header */
 	if (rc == CAM_ERR_IN_USE) {
 		camera_res_in_use(res, users, n);
 		return CAMERA_SVC_STOP_NONE;
@@ -571,8 +561,7 @@ int camera_svc_stream_stop(struct camera_op_result *res, uint32_t *gen)
 
 int camera_svc_stream_ended(uint32_t gen)
 {
-	(void)gen;
-	return !camera_streaming();
+	return camera_stream_ended(gen);
 }
 
 /* The contract's state view of one camera_stream_stats() sample, plus the

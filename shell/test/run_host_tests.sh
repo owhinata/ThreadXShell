@@ -628,6 +628,16 @@ for shape in "-DNN_SVC_HAS_MODEL_SLOT=1" \
     "$out/test_nn_cmd_usage"
 done
 
+# issue #142 review / #143 -- which stream a stop waits for (svc/cam_gen.h).  A
+# `camera stream stop &` (wio) or a `camera off` (f746, wio) below a console that
+# starts the next stream can wake to find another stream running; the wait must
+# ask "is MY generation over", never "is a stream active".  Two consoles at two
+# priorities: not typeable.  Moved here from wio-lite-ai when f746 took it up.
+gcc $CFLAGS -I "$svc" \
+    "$here/test_cam_gen.c" \
+    $LDFLAGS -o "$out/test_cam_gen"
+"$out/test_cam_gen"
+
 # issue #143 -- the shared `camera` command (shell/cmds/cmd_camera.c) through the
 # REAL dispatcher over a stub adapter (camera_svc_stub.c), once per capability
 # shape a board may declare (camera_cfg/camera_svc_config.h): the table's order

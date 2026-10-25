@@ -20,8 +20,12 @@
  * every start answered "already running".  A generation cannot be mistaken
  * for the next one, and the waiter writes nothing.
  *
- * Pure, for test/test_cam_gen.c: the interleavings are two consoles at two
- * priorities and cannot be typed on purpose.
+ * Pure, for shell/test/test_cam_gen.c: the interleavings are two consoles at
+ * two priorities and cannot be typed on purpose.
+ *
+ * Shared since issue #143: f746g-disco's camera counts its streams the same
+ * way, so the shared `camera off` can wait for the stream it stopped and not
+ * mistake a later start for it.  No storage and no board header (svc/).
  */
 #ifndef CAM_GEN_H
 #define CAM_GEN_H

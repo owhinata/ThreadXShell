@@ -82,15 +82,15 @@ const char *camera_named_name(const struct camera_named *t, int v)
 
 void camera_settings_write(struct camera_out *o, const struct camera_settings *s)
 {
-	camera_out(o, "brightness: %d\r\n", s->brightness);
-	camera_out(o, "contrast:   %d\r\n", s->contrast);
-	camera_out(o, "saturation: %d\r\n", s->saturation);
-	camera_out(o, "hue:        %d deg\r\n", s->hue * 30);
-	camera_out(o, "awb:        %s\r\n", camera_named_name(camera_awb_names, s->awb));
-	camera_out(o, "effect:     %s\r\n",
+	camera_out(o, "brightness : %d\r\n", s->brightness);
+	camera_out(o, "contrast : %d\r\n", s->contrast);
+	camera_out(o, "saturation : %d\r\n", s->saturation);
+	camera_out(o, "hue      : %d deg\r\n", s->hue * 30);
+	camera_out(o, "awb      : %s\r\n", camera_named_name(camera_awb_names, s->awb));
+	camera_out(o, "effect   : %s\r\n",
 	           camera_named_name(camera_effect_names, s->effect));
-	camera_out(o, "flip:       %s\r\n",
+	camera_out(o, "flip     : %s\r\n",
 	           camera_named_name(camera_flip_names, s->flip));
-	camera_out(o, "zoom:       x%u\r\n", (unsigned)s->zoom);
-	camera_out(o, "night:      %s\r\n", s->night ? "on" : "off");
+	camera_out(o, "zoom     : x%u\r\n", (unsigned)s->zoom);
+	camera_out(o, "night    : %s\r\n", s->night ? "on" : "off");
 }

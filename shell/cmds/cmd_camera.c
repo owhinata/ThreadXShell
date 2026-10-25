@@ -377,10 +377,10 @@ static int cmd_camera_capture(struct cli_instance *sh, int argc, char **argv)
 	 * board that does not count.  A board that does not (NONE) prints none.
 	 */
 	if (rep.warmup_unit == (uint8_t)CAMERA_SVC_WARMUP_FRAMES)
-		cli_print(sh, "warm-up:   %lu frame%s dropped\r\n",
+		cli_print(sh, "warm-up  : %lu frame%s dropped\r\n",
 		          (unsigned long)rep.warmup, rep.warmup == 1u ? "" : "s");
 	else if (rep.warmup_unit == (uint8_t)CAMERA_SVC_WARMUP_MS)
-		cli_print(sh, "warm-up:   %lu ms\r\n", (unsigned long)rep.warmup);
+		cli_print(sh, "warm-up  : %lu ms\r\n", (unsigned long)rep.warmup);
 	/* The first bytes, from the same capture as the board's lines -- a quick
 	   eyeball check. */
 	if (rep.head_len != 0u) {
@@ -700,15 +700,15 @@ static void cam_stats_head(void *ctx, const struct camera_svc_state *st)
 	unsigned n;
 
 	if (st->never_started) {
-		cli_print(sh, "state:     never started\r\n");
+		cli_print(sh, "state    : never started\r\n");
 		return;
 	}
 	if (st->streaming)
-		cli_print(sh, "state:     streaming\r\n");
+		cli_print(sh, "state    : streaming\r\n");
 	else if (st->stop_reason != NULL)
-		cli_print(sh, "state:     stopped (%s)\r\n", st->stop_reason);
+		cli_print(sh, "state    : stopped (%s)\r\n", st->stop_reason);
 	else
-		cli_print(sh, "state:     stopped\r\n");
+		cli_print(sh, "state    : stopped\r\n");
 
 	/* One line, one print: a background job's output cannot land inside it. */
 	n = (st->nusers < CAMERA_SVC_USERS_MAX) ? st->nusers : CAMERA_SVC_USERS_MAX;
@@ -733,17 +733,17 @@ static void cam_stats_head(void *ctx, const struct camera_svc_state *st)
 		   stands (it is the last confirmed end's), as the boards' own
 		   heads have always printed it. */
 		if (st->transition && st->lost)
-			cli_print(sh, "holders:   -- (a stream start or stop is in "
+			cli_print(sh, "holders  : -- (a stream start or stop is in "
 			          "progress)  (%d lost when the stream ended)\r\n",
 			          (int)st->lost);
 		else if (st->transition)
-			cli_print(sh, "holders:   -- (a stream start or stop is in "
+			cli_print(sh, "holders  : -- (a stream start or stop is in "
 			          "progress)\r\n");
 		else if (st->lost)
-			cli_print(sh, "holders:  %s  (%d lost when the stream ended)\r\n",
+			cli_print(sh, "holders  :%s  (%d lost when the stream ended)\r\n",
 			          n ? list : " none", (int)st->lost);
 		else
-			cli_print(sh, "holders:  %s\r\n", n ? list : " none");
+			cli_print(sh, "holders  :%s\r\n", n ? list : " none");
 	}
 }
 

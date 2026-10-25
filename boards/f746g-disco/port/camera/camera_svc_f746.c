@@ -149,25 +149,25 @@ void camera_svc_info(struct camera_op_result *res,
 	if (rc != 0)
 		return;
 
-	camera_out(&o, "module:     B-CAMS-OMV (OV5640) on P1/DCMI, I2C1 @0x78\r\n");
-	camera_out(&o, "power:      %s\r\n", ci.powered ? "on" : "off");
-	camera_out(&o, "chip ID:    ");
+	camera_out(&o, "module   : B-CAMS-OMV (OV5640) on P1/DCMI, I2C1 @0x78\r\n");
+	camera_out(&o, "power    : %s\r\n", ci.powered ? "on" : "off");
+	camera_out(&o, "chip ID  : ");
 	if (ci.chip_id != 0)
 		camera_out(&o, "0x%04lx\r\n", (unsigned long)ci.chip_id);
 	else
 		camera_out(&o, "- (not probed)\r\n");
-	camera_out(&o, "configured: %s\r\n", ci.configured ? "yes" : "no");
-	camera_out(&o, "frame:      %s\r\n", ci.frame_valid ? "valid" : "none");
+	camera_out(&o, "configured : %s\r\n", ci.configured ? "yes" : "no");
+	camera_out(&o, "frame    : %s\r\n", ci.frame_valid ? "valid" : "none");
 
 	if (camera_get_mode(&cm) == 0) {
-		camera_out(&o, "mode:       %ux%u %s\r\n", (unsigned)cm.width,
+		camera_out(&o, "mode     : %ux%u %s\r\n", (unsigned)cm.width,
 		           (unsigned)cm.height,
 		           camera_named_name(camera_format_names, cm.format));
-		camera_out(&o, "fps target: %lu.%lu%s\r\n",
+		camera_out(&o, "fps target : %lu.%lu%s\r\n",
 		           (unsigned long)(cm.fps_target_x10 / 10u),
 		           (unsigned long)(cm.fps_target_x10 % 10u),
 		           cm.streamable ? "" : "  (capture only -- too large to stream)");
-		camera_out(&o, "fps select: %u", (unsigned)cm.fps_sel);
+		camera_out(&o, "fps select : %u", (unsigned)cm.fps_sel);
 		if (cm.fps_sel == 30u && cm.fps_eff == 15u) {
 			if (cm.fps_clamp == CAM_FPS_CLAMP_LTDC)
 				camera_out(&o, "  (clamped to 15: lcd scanout active "
@@ -187,7 +187,7 @@ void camera_svc_info(struct camera_op_result *res,
 		int nsub = camera_subscribers_snapshot(subs, CAMERA_MAX_SUB_STATS);
 
 		if (nsub == 0) {
-			camera_out(&o, "subscribers: none (base off)\r\n");
+			camera_out(&o, "subscribers : none (base off)\r\n");
 		} else {
 			camera_out(&o, "subscribers:\r\n");
 			for (int i = 0; i < nsub; i++) {
@@ -261,19 +261,19 @@ static void cam_report_jpeg(const struct camera_mode *m,
 		return;
 	}
 	camera_res_ok(res);
-	camera_out(o, "frame: %ux%u JPEG (%lu bytes)\r\n", (unsigned)m->width,
+	camera_out(o, "frame    : %ux%u JPEG (%lu bytes)\r\n", (unsigned)m->width,
 	           (unsigned)m->height, (unsigned long)ci.frame_bytes);
 	head = (ci.frame_bytes < CAMERA_SVC_HEAD_MAX) ? ci.frame_bytes
 	                                             : CAMERA_SVC_HEAD_MAX;
 	if (head >= 2u && camera_frame_read(0, rep->head, head, &gen) == 0) {
-		camera_out(o, "SOI: %s\r\n",
+		camera_out(o, "SOI      : %s\r\n",
 		           (rep->head[0] == 0xFFu && rep->head[1] == 0xD8u)
 		               ? "ok (FFD8)" : "MISSING");
 		rep->head_len = head;
 	}
 	if (ci.frame_bytes >= 2u &&
 	    camera_frame_read(ci.frame_bytes - 2u, tail, 2u, &gen) == 0)
-		camera_out(o, "EOI: %s\r\n",
+		camera_out(o, "EOI      : %s\r\n",
 		           (tail[0] == 0xFFu && tail[1] == 0xD9u) ? "ok (FFD9)"
 		                                                  : "MISSING");
 }
@@ -388,39 +388,39 @@ void camera_svc_capture_report(struct camera_svc_capture_report *rep,
 	}
 
 	camera_res_ok(res);
-	camera_out(&o, "frame: %ux%u %s (%lu bytes)\r\n", (unsigned)m.width,
+	camera_out(&o, "frame    : %ux%u %s (%lu bytes)\r\n", (unsigned)m.width,
 	           (unsigned)m.height, camera_named_name(camera_format_names, m.format),
 	           (unsigned long)m.frame_bytes);
 	if (m.format == CAM_FMT_RGB565) {
-		camera_out(&o, "R5: min %2lu  max %2lu  mean %lu.%lu\r\n",
+		camera_out(&o, "R5       : min %2lu  max %2lu  mean %lu.%lu\r\n",
 		           (unsigned long)rmin, (unsigned long)rmax,
 		           (unsigned long)(rsum / npx),
 		           (unsigned long)((rsum % npx) * 10u / npx));
-		camera_out(&o, "G6: min %2lu  max %2lu  mean %lu.%lu\r\n",
+		camera_out(&o, "G6       : min %2lu  max %2lu  mean %lu.%lu\r\n",
 		           (unsigned long)gmin, (unsigned long)gmax,
 		           (unsigned long)(gsum / npx),
 		           (unsigned long)((gsum % npx) * 10u / npx));
-		camera_out(&o, "B5: min %2lu  max %2lu  mean %lu.%lu\r\n",
+		camera_out(&o, "B5       : min %2lu  max %2lu  mean %lu.%lu\r\n",
 		           (unsigned long)bmin, (unsigned long)bmax,
 		           (unsigned long)(bsum / npx),
 		           (unsigned long)((bsum % npx) * 10u / npx));
 	} else if (m.format == CAM_FMT_YUV422) {
 		uint32_t nc = npx / 2u;   /* one U and one V per two luma samples */
 
-		camera_out(&o, "Y:  min %3lu  max %3lu  mean %lu.%lu\r\n",
+		camera_out(&o, "Y        : min %3lu  max %3lu  mean %lu.%lu\r\n",
 		           (unsigned long)ymin, (unsigned long)ymax,
 		           (unsigned long)(ysum / npx),
 		           (unsigned long)((ysum % npx) * 10u / npx));
-		camera_out(&o, "Cb: min %3lu  max %3lu  mean %lu.%lu  (U)\r\n",
+		camera_out(&o, "Cb       : min %3lu  max %3lu  mean %lu.%lu  (U)\r\n",
 		           (unsigned long)rmin, (unsigned long)rmax,
 		           (unsigned long)(rsum / nc),
 		           (unsigned long)((rsum % nc) * 10u / nc));
-		camera_out(&o, "Cr: min %3lu  max %3lu  mean %lu.%lu  (V)\r\n",
+		camera_out(&o, "Cr       : min %3lu  max %3lu  mean %lu.%lu  (V)\r\n",
 		           (unsigned long)gmin, (unsigned long)gmax,
 		           (unsigned long)(gsum / nc),
 		           (unsigned long)((gsum % nc) * 10u / nc));
 	} else {   /* Y8 */
-		camera_out(&o, "Y:  min %3lu  max %3lu  mean %lu.%lu\r\n",
+		camera_out(&o, "Y        : min %3lu  max %3lu  mean %lu.%lu\r\n",
 		           (unsigned long)ymin, (unsigned long)ymax,
 		           (unsigned long)(ysum / npx),
 		           (unsigned long)((ysum % npx) * 10u / npx));
@@ -623,24 +623,24 @@ void camera_svc_stream_report(struct camera_op_result *res,
 		return;
 	cam_state_of(&st, &si);
 	head(ctx, &st);
-	camera_out(&o, "elapsed:   %lu ms\r\n", (unsigned long)si.elapsed_ms);
+	camera_out(&o, "elapsed  : %lu ms\r\n", (unsigned long)si.elapsed_ms);
 	/* owhinata/stm32f746g-disco#102: split the producer counters (frames the
 	   DCMI/DMA acquired + published) from the internal stats sink's per-sink
 	   delivery counters. */
 	camera_out(&o, "-- producer --\r\n");
-	camera_out(&o, "captured:  %lu\r\n", (unsigned long)si.captured);
-	camera_out(&o, "published: %lu\r\n", (unsigned long)si.frames);
+	camera_out(&o, "captured : %lu\r\n", (unsigned long)si.captured);
+	camera_out(&o, "published : %lu\r\n", (unsigned long)si.frames);
 	if (si.elapsed_ms != 0) {
 		/* frames-per-second x10 (one decimal), no floating point */
 		uint32_t f10 = (uint32_t)((uint64_t)si.frames * 10000u /
 		                          si.elapsed_ms);
 
-		camera_out(&o, "fps:       %lu.%lu\r\n",
+		camera_out(&o, "fps      : %lu.%lu\r\n",
 		           (unsigned long)(f10 / 10u), (unsigned long)(f10 % 10u));
 	}
-	camera_out(&o, "ovr dcmi:  %lu\r\n", (unsigned long)si.dcmi_ovr);
-	camera_out(&o, "ovr ring:  %lu\r\n", (unsigned long)si.ring_ovr);
-	camera_out(&o, "dma fe:    %lu\r\n", (unsigned long)si.dma_fe);
+	camera_out(&o, "ovr dcmi : %lu\r\n", (unsigned long)si.dcmi_ovr);
+	camera_out(&o, "ovr ring : %lu\r\n", (unsigned long)si.ring_ovr);
+	camera_out(&o, "dma fe   : %lu\r\n", (unsigned long)si.dma_fe);
 	if (si.elapsed_ms != 0) {
 		/* DMA FIFO-error RATE (owhinata/stm32f746g-disco#59): the figure of
 		   merit for the SDRAM-contention work -- fe per second x10 (one
@@ -648,18 +648,18 @@ void camera_svc_stream_report(struct camera_op_result *res,
 		uint32_t fe10 = (uint32_t)((uint64_t)si.dma_fe * 10000u /
 		                           si.elapsed_ms);
 
-		camera_out(&o, "dma fe/s:  %lu.%lu\r\n",
+		camera_out(&o, "dma fe/s : %lu.%lu\r\n",
 		           (unsigned long)(fe10 / 10u), (unsigned long)(fe10 % 10u));
 	}
-	camera_out(&o, "jpeg trunc:%lu\r\n", (unsigned long)si.jpeg_trunc);
+	camera_out(&o, "jpeg trunc : %lu\r\n", (unsigned long)si.jpeg_trunc);
 	/* Ring arena: owhinata/stm32f746g-disco#65. */
 	if (si.slots != 0)
-		camera_out(&o, "ring:      %lu slots x %lu B\r\n",
+		camera_out(&o, "ring     : %lu slots x %lu B\r\n",
 		           (unsigned long)si.slots, (unsigned long)si.slot_bytes);
 	camera_out(&o, "-- stat sink (shell) --\r\n");
-	camera_out(&o, "delivered: %lu\r\n", (unsigned long)si.delivered);
-	camera_out(&o, "dropped:   %lu\r\n", (unsigned long)si.dropped);
-	camera_out(&o, "errors:    %lu\r\n", (unsigned long)si.stat_errors);
+	camera_out(&o, "delivered : %lu\r\n", (unsigned long)si.delivered);
+	camera_out(&o, "dropped  : %lu\r\n", (unsigned long)si.dropped);
+	camera_out(&o, "errors   : %lu\r\n", (unsigned long)si.stat_errors);
 }
 
 /* The shared command calls each of these only under its macro; a board that

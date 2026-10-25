@@ -98,6 +98,7 @@ Cases:
                     this: it is handed a policy, never the build's.
 """
 import argparse
+import importlib.util
 import os
 import re
 import shutil
@@ -342,6 +343,22 @@ elseif(FIX_EXTRA STREQUAL "brace")
                 "program {shell.elf} verify" flashed9
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" VERBATIM)
     add_dependencies(flash_brace shell)
+elseif(FIX_EXTRA STREQUAL "short_opt")
+    # (issue #149) the name glued to a short option, as `dfu-util -Dshell.bin`
+    # takes it: the only mention of the image is `-Dshell.elf`.
+    add_custom_target(flash_opt
+        COMMAND "${Python3_EXECUTABLE}" -c
+                "import sys,shutil;shutil.copy(sys.argv[1][2:],sys.argv[2])"
+                -Dshell.elf flashed11
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" VERBATIM)
+elseif(FIX_EXTRA STREQUAL "cluster")
+    # (issue #149 review) the name glued to the last option of a cluster, as
+    # getopt parses `dfu-util -vDshell.bin`: `-v -D shell.bin`.
+    add_custom_target(flash_cluster
+        COMMAND "${Python3_EXECUTABLE}" -c
+                "import sys,shutil;shutil.copy(sys.argv[1][3:],sys.argv[2])"
+                -vDshell.elf flashed12
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" VERBATIM)
 elseif(FIX_EXTRA MATCHES "^copy_alias")
     # (issue #126 review, Grove's image_gen shape) the firmware's own
     # POST_BUILD leaves a copy under another name, and a new target ships the
@@ -800,6 +817,10 @@ def delivery_tree(p, results):
              "names shell.elf in its command and does not wait for"),
             ("copy_alias", "flash_alias", "flashed10",
              "names output.img in its command and does not wait for"),
+            ("short_opt", "flash_opt", "flashed11",
+             "names shell.elf in its command and does not wait for"),
+            ("cluster", "flash_cluster", "flashed12",
+             "names shell.elf in its command and does not wait for"),
     ):
         p.configure(DECLARED="4096", FIX_EXTRA=extra, FIX_DELIVERY="flash")
         p.rm(made)
@@ -977,6 +998,99 @@ def cost_tree(p, results):
            "cost_override: removing the override should pass again", out)
 
 
+def delivery_glued_tree(p, results):
+    """issue #149: a path component that ENDS in the firmware's file name.
+
+    This tree is built under a directory called `xshell.elf`, so every command
+    of the graph mentions `.../xshell.elf/b/...`.  Before #149 the gate matched
+    the name with nothing required before it, saw `shell.elf` in all of them,
+    and refused the plain tree (in run_add_plugin_arg_tests.py this happened
+    whenever tempfile's random directory name ended in `fw`).  The name must
+    not be preceded by a name character: `-` is one, so `x-shell.elf` would
+    not reproduce it -- the letter is the point.
+    """
+    assert os.path.basename(os.path.dirname(p.src)) == "xshell.elf"
+    p.configure(DECLARED="4096", FIX_EXTRA="", FIX_DELIVERY="flash")
+    rc, out = p.ninja()
+    expect(rc == 0 and "check_delivery_gate: OK" in out,
+           "delivery_glued: a work path ending in `xshell.elf` must not count "
+           "as naming shell.elf", out)
+    # And the gate still sees a real use in the same tree.
+    p.configure(DECLARED="4096", FIX_EXTRA="by_command", FIX_DELIVERY="flash")
+    p.rm("flashed3")
+    rc, out = p.ninja("flash3")
+    flat = " ".join(out.split())
+    expect(rc != 0 and not os.path.exists(p.path("flashed3"))
+           and "names shell.elf in its command and does not wait for" in flat,
+           "delivery_glued: `ninja flash3` should still be refused under a "
+           "work path ending in `xshell.elf`", out)
+    results.append(("delivery_glued", "built under .../xshell.elf/: the plain "
+                    "tree passes, `ninja flash3` is still refused"))
+
+
+def name_re_case(cmake_dir, results):
+    """issue #149: the name matcher over the whole character class.
+
+    The build cases put only a space, `=` or `{` in front of the name, so a
+    matcher that lost `;` (or `(`, `&`, a backtick...) from its "not a name
+    character" class would pass all of them.  This imports the gate under test
+    -- the one in --cmake-dir, so a mutated copy is tested as the file it is --
+    and tries every printable ASCII character on both sides of the name.
+    """
+    path = os.path.join(cmake_dir, "check_delivery_gate.py")
+    spec = importlib.util.spec_from_file_location("delivery_gate_under_test",
+                                                  path)
+    gate = importlib.util.module_from_spec(spec)
+    sys.dont_write_bytecode = True
+    spec.loader.exec_module(gate)
+    if not hasattr(gate, "firmware_name_re"):
+        raise Fail("delivery_name_re: %s has no firmware_name_re()" % path)
+    rx = gate.firmware_name_re(["shell.elf", "shell.bin", "output.img"])
+    namech = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                 "0123456789_.+~-")
+    printable = [chr(i) for i in range(32, 127)]
+    other = [c for c in printable if c not in namech] + ["\t"]
+    bad = []
+
+    def want(text, hit):
+        m = rx.search(text)
+        if hit and (m is None or m.group(1) != "shell.bin"):
+            bad.append("%r should name shell.bin" % text)
+        elif not hit and m is not None:
+            bad.append("%r should not match (got %r)" % (text, m.group(1)))
+
+    # The #149 shapes, and the documented over-match (first, so a failure
+    # names them before the per-character list).
+    if gate.firmware_name_re(["fw"]).search("/tmp/tmpab12fw/b"):
+        bad.append("'/tmp/tmpab12fw/b' should not name fw")
+    if rx.search("/tmp/xshell.elf/b"):
+        bad.append("'/tmp/xshell.elf/b' should not name shell.elf")
+    if not rx.search("/tmp/-xshell.elf/b"):
+        bad.append("'/tmp/-xshell.elf/b' should name shell.elf "
+                   "(documented over-match)")
+    # Before the name: start of string, or any character that is not a name
+    # character, alone or followed by a short-option cluster.
+    for c in [""] + other:
+        want(c + "shell.bin", True)
+        want(c + "-vDshell.bin", True)
+    # A name character in front makes it another name -- except `-`, which is
+    # the cluster `-` with no letters: `-shell.bin` is not a real option
+    # syntax, but counting it refuses a delivery, which is the safe side.
+    for c in sorted(namech):
+        want(c + "shell.bin", c == "-")
+    # After the name: any name character continues it, anything else ends it.
+    for c in sorted(namech):
+        want("shell.bin" + c, False)
+    for c in other:
+        want("shell.bin" + c, True)
+    if bad:
+        raise Fail("delivery_name_re: %d case(s) wrong: %s"
+                   % (len(bad), "; ".join(bad[:12])))
+    results.append(("delivery_name_re", "%d characters before and after the "
+                    "name, the cluster, and the #149 paths"
+                    % (len(printable) + 1)))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--cc", required=True,
@@ -1004,11 +1118,20 @@ def main():
         ("cost_wiring", lambda p: cost_tree(p, results)),
         ("stack_wiring", lambda p: stack_tree(p, results)),
         ("delivery", lambda p: delivery_tree(p, results)),
+        ("delivery_glued", lambda p: delivery_glued_tree(p, results)),
     ]
+    # The directory each tree is built under, inside its temporary directory.
+    under = {"delivery_glued": "xshell.elf"}
+    try:
+        name_re_case(args.cmake_dir, results)
+    except Fail as e:
+        bad += 1
+        print("  FAIL %-15s %s" % ("delivery_name_re", e))
     for name, fn in runs:
         with tempfile.TemporaryDirectory() as work:
             try:
-                fn(Project(work, args.cmake_dir, args.cc))
+                fn(Project(os.path.join(work, under.get(name, "")),
+                           args.cmake_dir, args.cc))
             except Fail as e:
                 bad += 1
                 print("  FAIL %-15s %s" % (name, e))

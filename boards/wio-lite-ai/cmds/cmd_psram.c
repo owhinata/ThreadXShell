@@ -28,6 +28,7 @@
  */
 #include "cli.h"
 #include "psram.h"
+#include "camera.h"      /* camera_frame_invalidate(): the test clobbers cam_frame */
 
 #include <stdint.h>
 #include <string.h>
@@ -264,6 +265,11 @@ static int cmd_psram_test(struct cli_instance *sh, int argc, char **argv)
 
 	if (psram_guard(sh))               /* held across all three mmap passes */
 		return 1;
+	/* [!] The pool holds the camera's single-capture frame (issue #150).  The
+	   guard keeps capture, save and send away for the whole test, but a frame
+	   captured BEFORE it would stay valid over the test's patterns, so drop it
+	   here, under the guard and before the first write. */
+	camera_frame_invalidate();
 	if (test_pass(sh, PSRAM_BASE_ADDR, words, 0x00000000u, 1, "addr-in-addr") ||
 	    test_pass(sh, PSRAM_BASE_ADDR, words, 0x55555555u, 0, "0x55555555") ||
 	    test_pass(sh, PSRAM_BASE_ADDR, words, 0xAAAAAAAAu, 0, "0xAAAAAAAA")) {

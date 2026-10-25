@@ -1825,6 +1825,14 @@ int camera_streaming(void)
 	return cam_stream_active;
 }
 
+void camera_frame_invalidate(void)
+{
+	if (op_lock() != CAM_OK)
+		return;             /* not up: there is no frame to drop */
+	info.frame_valid = 0u;
+	op_unlock();
+}
+
 /* ---- who holds the stream (issue #142) -------------------------------------
  *
  * The band stream runs while, and only while, somebody holds it: the operator

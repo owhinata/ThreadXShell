@@ -421,6 +421,11 @@ static int          cam_recover_rapid;     /* consecutive rapid recoveries      
 static uint32_t     cam_recover_last;      /* HAL tick of the last recovery          */
 static int          cam_start_colorbar;    /* colorbar of the running base (recover) */
 
+/* `.sdram` lent out to a destructive memory test (issue #150): set and cleared
+   only under cam_lock by camera_scratch_claim()/_release().  While set, nothing
+   may write the frame or the ring -- capture and every stream start refuse. */
+static int          cam_scratch_claimed;
+
 /* ---- raster overrun: in-place resync (issue #137) --------------------------
    A raster DCMI overrun is NOT a teardown any more.  RM0385 17.3.10: on an
    overrun the DCMI resets its FIFO and waits for the next frame start, so the
@@ -1242,6 +1247,8 @@ static int camera_capture_locked(int colorbar, uint32_t *warm_ms)
 
 	if (cam_stream_active)
 		return CAM_ERR_BUSY;    /* streaming owns the DCMI/DMA (owhinata/stm32f746g-disco#46) */
+	if (cam_scratch_claimed)
+		return CAM_ERR_BUSY;    /* `sdram test` is writing the frame (issue #150) */
 
 	/* The warm-up (issue #143): what the bring-up, the configuration's settle
 	   sleeps and the PCLK programming cost before the snapshot starts -- the
@@ -1451,11 +1458,34 @@ int camera_frame_read(uint32_t offset, void *dst, uint32_t len,
 	return 0;
 }
 
-void camera_frame_invalidate(void)
+int camera_scratch_claim(void)
+{
+	/* Not initialised: there is no frame and nothing can capture or start
+	   (every entry point fails in op_lock(), and camera_init() runs only at
+	   boot), so the memory is already free -- the claim succeeds with no flag
+	   to drop, and a board whose camera never came up can still be tested. */
+	if (op_lock() != 0)
+		return 0;
+	/* [!] Refused not only while a stream runs but while anybody still holds
+	   it or an overrun re-arm is pending: the producer's recovery reaches
+	   stream_start_locked() on its own and would DMA into the ring under the
+	   test.  Holders without a stream are exactly that window. */
+	if (cam_scratch_claimed || cam_stream_active || cam_recover_pending ||
+	    cam_holders_count(&cam_holds) != 0) {
+		op_unlock();
+		return CAM_ERR_BUSY;
+	}
+	cam_scratch_claimed = 1;
+	info.frame_valid = 0;       /* the bytes under it are about to be destroyed */
+	op_unlock();
+	return 0;
+}
+
+void camera_scratch_release(void)
 {
 	if (op_lock() != 0)
 		return;
-	info.frame_valid = 0;
+	cam_scratch_claimed = 0;
 	op_unlock();
 }
 
@@ -2525,6 +2555,10 @@ static int stream_start_locked(int colorbar)
 		return CAM_ERR_STATE;
 	if (cam_stream_active)
 		return CAM_ERR_BUSY;           /* already streaming */
+	/* Backstop for the overrun re-arm, which comes here directly; a public
+	   start is refused earlier, in cam_holders_start_locked() (issue #150). */
+	if (cam_scratch_claimed)
+		return CAM_ERR_BUSY;
 	if (!sdram_is_up())
 		return CAM_ERR_STATE;
 	if (!info.powered) {
@@ -2766,6 +2800,11 @@ static int cam_holders_start_locked(int colorbar)
 		cam_stop_req = 0;
 		return 0;
 	}
+	/* [!] `sdram test` holds .sdram (issue #150): refused here, ahead of the
+	   recovery reset and the oneshot release below, so a refused start
+	   changes nothing -- the callers abort the registration they made. */
+	if (cam_scratch_claimed)
+		return CAM_ERR_BUSY;
 	/* An explicit start resets the overrun-recovery backoff, and supersedes
 	   any aborted recovery window (owhinata/stm32f746g-disco#101): drop
 	   orphaned oneshot (MJPEG) subs left enabled+detached so they cannot ghost

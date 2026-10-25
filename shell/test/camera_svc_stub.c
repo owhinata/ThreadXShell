@@ -83,14 +83,24 @@ void camera_svc_info(struct camera_op_result *res,
 		stub_line(write, ctx, "stub: info\r\n");
 }
 
-void camera_svc_capture(int test, struct camera_op_result *res,
-                        camera_svc_write_fn write, void *ctx)
+void camera_svc_capture(int test, struct camera_svc_capture_report *rep,
+                        struct camera_op_result *res,
+                        camera_svc_write_fn write,
+                        int (*cancelled)(void *ctx), void *ctx)
 {
 	stub_line(write, ctx, test ? "stub: capturing test\r\n"
 	                           : "stub: capturing live\r\n");
 	camera_stub.calls_capture++;
 	camera_stub.last_test = test;
 	stub_result(res);
+	if (res->status != CAMERA_SVC_OK)
+		return;
+	if (camera_stub.capture_cancels && cancelled(ctx)) {
+		res->status = CAMERA_SVC_ERR_CANCELLED;
+		return;
+	}
+	rep->warmup = camera_stub.warmup;
+	rep->warmup_unit = camera_stub.warmup_unit;
 }
 
 void camera_svc_capture_report(struct camera_svc_capture_report *rep,
@@ -98,7 +108,9 @@ void camera_svc_capture_report(struct camera_svc_capture_report *rep,
                                camera_svc_write_fn write,
                                int (*cancelled)(void *ctx), void *ctx)
 {
-	memset(rep, 0, sizeof *rep);
+	/* Never the warm-up: that is the capture's (svc/camera_svc.h). */
+	memset(rep->head, 0, sizeof rep->head);
+	rep->head_len = 0u;
 	stub_result(res);
 	if (res->status != CAMERA_SVC_OK)
 		return;

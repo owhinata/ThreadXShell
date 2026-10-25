@@ -52,6 +52,7 @@ extern "C" {
 #define CAM_ERR_NO_FRAME  -6  /**< nothing has been captured yet              */
 #define CAM_ERR_BUSY      -7  /**< a stream already owns the datapath         */
 #define CAM_ERR_LOCKED    -8  /**< the API stayed locked; nothing was asked   */
+#define CAM_ERR_CANCELLED -9  /**< the caller's cancel ended a settled capture */
 
 /** @return a short description of a CAM_* code (never NULL). */
 const char *camera_strerror(int rc);
@@ -130,6 +131,34 @@ int camera_probe(struct camera_probe_info *out);
  */
 int camera_capture(void);
 
+/** The frames a capture right after bring-up lets go by before it takes one --
+ *  the same count, counted the same way, as a one-shot `nn run`
+ *  (NN_ONESHOT_WARM_FRAMES, issue #115; the adapter asserts they agree). */
+#define CAMERA_ONESHOT_WARM_FRAMES 15u
+
+/**
+ * @brief  camera_capture(), letting the sensor's AEC/AGC settle first
+ *         (issue #143).
+ *
+ * Every frame this capture receives counts towards
+ * camera_frames_since_bringup(); while that count is still at or below
+ * @p warm the frame is let go and the next one is captured -- the same
+ * one-frame cycle as camera_capture(), once per frame, under one hold of the
+ * API.  So a capture right after bring-up takes the (@p warm + 1)th frame, and
+ * one after a settled sensor (a second capture, or after a stream) takes the
+ * first.  *@p dropped (may be NULL) says how many were let go.
+ *
+ * @p cancelled (may be NULL) is asked between frames, never during one; when
+ * it says yes the capture ends with CAM_ERR_CANCELLED, the datapath quiesced
+ * and the port READY, exactly as after a timeout.  A frame that does not
+ * arrive ends it as before (CAM_ERR_TIMEOUT), and so does the end of the ONE
+ * deadline all the frames share (CAM_FRAME_TIMEOUT_TICKS of wall clock after
+ * the bring-up, the bound a single capture always had) -- the frames let go
+ * by then stay counted, so the next capture carries on settling.
+ */
+int camera_capture_settled(uint32_t warm, uint32_t *dropped,
+                           int (*cancelled)(void *ctx), void *ctx);
+
 /**
  * @brief  Capture one frame with the demosaic OUT of the path.
  *
@@ -174,12 +203,13 @@ const uint8_t *camera_raw_frame(void);
  * before the publish, so a frame the ring drops as an overrun counts too, since
  * the sensor still exposed it.  A stream stop does not zero it (the sensor keeps
  * its power and its converged exposure); only the next bring-up does.  The
- * one-shot capture (camera_capture()) does not count: it does not run on the
- * producer.
+ * one-shot capture counts its frames too since issue #143 (it is the same
+ * sensor exposing them), from the shell thread under the API mutex with no
+ * producer running.
  *
- * Written by the producer (the count) and by bring-up (the zero, under the API
- * mutex with no stream running); one aligned word, so a read from any thread is
- * one load.  SATURATES at UINT32_MAX rather than wrapping: a wrap would make a
+ * Written by the producer or the one-shot capture (the count) and by bring-up
+ * (the zero, under the API mutex with no stream running) -- never two at once;
+ * one aligned word, so a read from any thread is one load.  SATURATES at UINT32_MAX rather than wrapping: a wrap would make a
  * long-settled sensor look freshly powered.
  */
 uint32_t camera_frames_since_bringup(void);

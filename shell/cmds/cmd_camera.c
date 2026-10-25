@@ -350,7 +350,13 @@ static int cmd_camera_capture(struct cli_instance *sh, int argc, char **argv)
 			return 1;
 	}
 
-	camera_svc_capture(test, &res, cam_write, sh);
+	/* The capture says what it paid to warm up; the report must not touch
+	   that (svc/camera_svc.h), so it starts out as "nothing". */
+	memset(&rep, 0, sizeof rep);
+	rep.warmup_unit = (uint8_t)CAMERA_SVC_WARMUP_NONE;
+	camera_svc_capture(test, &rep, &res, cam_write, cam_cancelled, sh);
+	if (res.status == CAMERA_SVC_ERR_CANCELLED)
+		return 1;                 /* Ctrl+C: the core prints ^C */
 	if (res.status != CAMERA_SVC_OK) {
 		cam_print_fail(sh, &res, "");
 		return 1;
@@ -362,6 +368,19 @@ static int cmd_camera_capture(struct cli_instance *sh, int argc, char **argv)
 		cam_print_fail(sh, &res, "");
 		return 1;
 	}
+	/*
+	 * [!] WHAT THE CAPTURE PAID TO WARM UP, IN ONE SHAPE ON EVERY BOARD
+	 * (issue #143 decision 6): the frames it let go, or the time it slept.
+	 * Printed when the board counts it at all, ZERO INCLUDED: a second
+	 * capture on a settled sensor paying nothing is the answer to "did it
+	 * wait this time", and a line that disappears cannot be told from a
+	 * board that does not count.  A board that does not (NONE) prints none.
+	 */
+	if (rep.warmup_unit == (uint8_t)CAMERA_SVC_WARMUP_FRAMES)
+		cli_print(sh, "warm-up:   %lu frame%s dropped\r\n",
+		          (unsigned long)rep.warmup, rep.warmup == 1u ? "" : "s");
+	else if (rep.warmup_unit == (uint8_t)CAMERA_SVC_WARMUP_MS)
+		cli_print(sh, "warm-up:   %lu ms\r\n", (unsigned long)rep.warmup);
 	/* The first bytes, from the same capture as the board's lines -- a quick
 	   eyeball check. */
 	if (rep.head_len != 0u) {

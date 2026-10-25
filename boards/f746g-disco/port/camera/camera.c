@@ -1230,15 +1230,23 @@ static int jpeg_trim(const uint8_t *buf, uint32_t eff_bytes, uint32_t *valid)
 	return CAM_ERR_HAL;                        /* no EOI: truncated */
 }
 
-static int camera_capture_locked(int colorbar)
+static int camera_capture_locked(int colorbar, uint32_t *warm_ms)
 {
+	uint32_t t0;
 	int rc;
 
+	if (warm_ms != NULL)
+		*warm_ms = 0u;
 	if (!sdram_is_up())
 		return CAM_ERR_STATE;
 
 	if (cam_stream_active)
 		return CAM_ERR_BUSY;    /* streaming owns the DCMI/DMA (owhinata/stm32f746g-disco#46) */
+
+	/* The warm-up (issue #143): what the bring-up, the configuration's settle
+	   sleeps and the PCLK programming cost before the snapshot starts -- the
+	   ~1 s a cold capture pays, close to nothing on a warm one. */
+	t0 = HAL_GetTick();
 
 	if (!info.powered) {
 		rc = camera_probe_locked(NULL);
@@ -1257,6 +1265,8 @@ static int camera_capture_locked(int colorbar)
 	rc = apply_effective_pclk_locked();
 	if (rc != 0)
 		return rc;
+	if (warm_ms != NULL)
+		*warm_ms = HAL_GetTick() - t0;
 
 	info.frame_valid = 0;
 	drain_done();
@@ -1357,10 +1367,19 @@ static int camera_capture_locked(int colorbar)
 
 int camera_capture(int colorbar)
 {
-	int rc = op_lock();
+	return camera_capture_warm(colorbar, NULL);
+}
+
+int camera_capture_warm(int colorbar, uint32_t *warm_ms)
+{
+	int rc;
+
+	if (warm_ms != NULL)
+		*warm_ms = 0u;
+	rc = op_lock();
 	if (rc != 0)
 		return rc;
-	rc = camera_capture_locked(colorbar != 0);
+	rc = camera_capture_locked(colorbar != 0, warm_ms);
 	op_unlock();
 	return rc;
 }

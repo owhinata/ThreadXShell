@@ -251,6 +251,14 @@ int camera_set_fps(unsigned fps);
 int camera_capture(int colorbar);
 
 /**
+ * camera_capture(), also handing back in *@p warm_ms (may be NULL) the time it
+ * spent before the snapshot started: bring-up, the configuration's settle
+ * sleeps and the PCLK programming (issue #143's warm-up report; ~1 s cold,
+ * close to 0 once the sensor is configured).  0 on a failure before that.
+ */
+int camera_capture_warm(int colorbar, uint32_t *warm_ms);
+
+/**
  * Copy @p len bytes at byte offset @p offset out of the captured frame into
  * @p dst (any alignment).  Serialized against capture/save by the driver
  * mutex.  Fails with CAM_ERR_NO_FRAME until a capture succeeded.

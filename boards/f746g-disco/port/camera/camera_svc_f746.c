@@ -31,8 +31,6 @@
  * stream -- for its end.  `save` / `send` read the LAST CAPTURE, stream or no
  * stream (issue #143).
  *
- * Not yet: a warm-up figure (the capture report says CAMERA_SVC_WARMUP_NONE).
- *
  * Clean-room design; no third-party code reused.
  */
 #include "camera_svc.h"
@@ -215,14 +213,29 @@ void camera_svc_info(struct camera_op_result *res,
 
 /* ---- one-shot capture ----------------------------------------------------- */
 
-void camera_svc_capture(int test, struct camera_op_result *res,
-                        camera_svc_write_fn write, void *ctx)
+/* The warm-up is TIME here (decision D1): what the capture slept and spent
+   before its snapshot -- a cold sensor's bring-up and settle (~1 s), next to
+   nothing once it is configured.  A running stream refuses the capture, so
+   it is only ever paid from cold or idle.  The sleeps are inside the port
+   and not cancellable, as before. */
+void camera_svc_capture(int test, struct camera_svc_capture_report *rep,
+                        struct camera_op_result *res,
+                        camera_svc_write_fn write,
+                        int (*cancelled)(void *ctx), void *ctx)
 {
 	struct camera_out o = { write, ctx, 0 };
+	uint32_t warm_ms = 0u;
+	int rc;
 
+	(void)cancelled;
 	camera_out(&o, "camera: capturing %s frame ...\r\n",
 	           test ? "colorbar test" : "live");
-	cam_res_rc(res, camera_capture(test ? 1 : 0));
+	rc = camera_capture_warm(test ? 1 : 0, &warm_ms);
+	cam_res_rc(res, rc);
+	if (rc == 0) {
+		rep->warmup = warm_ms;
+		rep->warmup_unit = (uint8_t)CAMERA_SVC_WARMUP_MS;
+	}
 }
 
 /*
@@ -285,9 +298,7 @@ void camera_svc_capture_report(struct camera_svc_capture_report *rep,
 	uint32_t gen0 = 0, gen, off, npx;
 	int rc;
 
-	rep->head_len = 0u;
-	rep->warmup = 0u;
-	rep->warmup_unit = (uint8_t)CAMERA_SVC_WARMUP_NONE;
+	rep->head_len = 0u;   /* the warm-up is the capture's (left alone) */
 
 	if (camera_get_mode(&m) != 0) {
 		cam_res_rc(res, CAM_ERR_STATE);

@@ -20,8 +20,9 @@
  * they travel together as one detail (CAMERA_SVC_DETAIL_MAX).
  *
  * [!] THE DATAPATH AND THE STOP ORDER ARE NOT THIS FILE'S.  Every call below is
- * one the old command made, in the order it made them: camera_capture() is the
- * one-shot through the producer's own teardown (#129), the stream is
+ * one the old command made, in the order it made them: camera_capture_settled()
+ * is the one-shot (camera_capture() letting the sensor settle first, #143)
+ * through the producer's own teardown (#129), the stream is
  * cam_lcd_sink_hold() / _release() (#142), and nothing here touches WDMA3,
  * the bus owner or the stop sequence.
  *
@@ -178,25 +179,42 @@ static void cam_plane_rec_of(struct cam_plane_rec *p, const uint8_t *plane)
 	                                       CAM_FRAME_HEIGHT);
 }
 
-void camera_svc_capture(int test, struct camera_op_result *res,
-                        camera_svc_write_fn write, void *ctx)
+/* A capture right after bring-up lets the sensor's AEC/AGC settle first, by
+   the same count as a one-shot `nn run` (issue #115) -- one constant, checked
+   here rather than trusted. */
+_Static_assert(CAMERA_ONESHOT_WARM_FRAMES == NN_ONESHOT_WARM_FRAMES,
+               "camera capture and nn run settle the sensor by the same count");
+
+void camera_svc_capture(int test, struct camera_svc_capture_report *rep,
+                        struct camera_op_result *res,
+                        camera_svc_write_fn write,
+                        int (*cancelled)(void *ctx), void *ctx)
 {
 	struct cam_capture_rec r;
 	const uint8_t *raw;
+	uint32_t dropped = 0u;
 	int rc;
 	TX_INTERRUPT_SAVE_AREA
 
 	(void)write;   /* no announcement on this board, as before */
-	(void)ctx;
 	if (test) {   /* CAMERA_SVC_HAS_TEST 0: the shared command refuses first */
 		camera_res_fail(res, CAMERA_SVC_ERR_NOSUP, "no test pattern");
 		return;
 	}
-	rc = camera_capture();
+	/* Frames since bring-up at or below the count are let go, the
+	   operator's Ctrl+C asked between them (issue #143). */
+	rc = camera_capture_settled(CAMERA_ONESHOT_WARM_FRAMES, &dropped,
+	                            cancelled, ctx);
+	if (rc == CAM_ERR_CANCELLED) {
+		camera_res_fail(res, CAMERA_SVC_ERR_CANCELLED, "cancelled");
+		return;
+	}
 	if (rc != CAM_OK) {
 		cam_res_report(res, cam_status(rc), "capture", rc);
 		return;
 	}
+	rep->warmup = dropped;
+	rep->warmup_unit = (uint8_t)CAMERA_SVC_WARMUP_FRAMES;
 
 	memset(&r, 0, sizeof r);
 	raw = camera_raw_frame();
@@ -246,7 +264,7 @@ void camera_svc_capture_report(struct camera_svc_capture_report *rep,
 	TX_INTERRUPT_SAVE_AREA
 
 	(void)cancelled;
-	memset(rep, 0, sizeof *rep);
+	rep->head_len = 0u;   /* the warm-up is the capture's (left alone) */
 	TX_DISABLE
 	r = cam_last_capture;
 	TX_RESTORE

@@ -231,6 +231,45 @@ static void check_common(void)
 	run("camera capture\r");
 	expect("no head, no dump", has("stub: frame stats") && !has("bytes["));
 
+	/* the warm-up the capture paid: none, frames, or time -- one shape */
+	reset();
+	run("camera capture\r");
+	expect("a board that counts no warm-up prints no warm-up line",
+	       !has("warm-up"));
+	reset();
+	camera_stub.warmup = 15;
+	camera_stub.warmup_unit = CAMERA_SVC_WARMUP_FRAMES;
+	camera_stub.head_len = 4;
+	run("camera capture\r");
+	expect("frames let go are printed after the board's lines, before the dump",
+	       has("warm-up:   15 frames dropped\r\n") &&
+	       before("stub: frame stats", "warm-up:") &&
+	       before("warm-up:", "bytes[0..3]:"));
+	reset();
+	camera_stub.warmup = 1;
+	camera_stub.warmup_unit = CAMERA_SVC_WARMUP_FRAMES;
+	run("camera capture\r");
+	expect("one frame is one frame", has("warm-up:   1 frame dropped\r\n"));
+	reset();
+	camera_stub.warmup = 0;
+	camera_stub.warmup_unit = CAMERA_SVC_WARMUP_FRAMES;
+	run("camera capture\r");
+	expect("zero is printed: the settled answer", has("warm-up:   0 frames dropped\r\n"));
+	reset();
+	camera_stub.warmup = 612;
+	camera_stub.warmup_unit = CAMERA_SVC_WARMUP_MS;
+	run("camera capture\r");
+	expect("a settle time is printed in ms", has("warm-up:   612 ms\r\n"));
+	reset();
+	camera_stub.warmup = 15;
+	camera_stub.warmup_unit = CAMERA_SVC_WARMUP_FRAMES;
+	camera_stub.capture_cancels = 1;
+	cli_dummy_inject(&tr0, "camera capture\r\x03", 16);
+	cli_test_pump(&sh0);
+	expect("a Ctrl+C between warm-up frames ends the capture silently",
+	       camera_stub.calls_capture == 1 && !has("stub: frame stats") &&
+	       !has("warm-up") && !has("camera: cancel"));
+
 	/* stats: state and holders first, the board's lines after */
 	reset();
 	camera_stub.streaming = 1;

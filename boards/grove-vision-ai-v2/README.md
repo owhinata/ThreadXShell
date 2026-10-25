@@ -754,7 +754,7 @@ camera wb [r g b]        read/set the software white balance (256 = unity)
 camera black [n]         black level subtracted before the gain (default 16)
 camera sat [n]           saturation, standing in for a colour matrix
 camera auto [on|off]     the sensor's own AEC + this port's white balance
-camera gamma [on|off]    sRGB encode (off by default)
+camera gamma [on|off]    sRGB encode (on by default)
 camera bayer [mode]      demosaic phase
 camera vts [lines]       sensor frame length: frame rate and exposure ceiling
 camera bench [frames]    the datapath's own period, with no sink attached
@@ -815,9 +815,21 @@ image knobs.
   `B(plane 0)` / `G(plane 1)` / `R(plane 2)`).  On the PC (`rz -y -b`), make a
   PNG with
   `python3 boards/grove-vision-ai-v2/scripts/planar_bgr_to_png.py frame.raw out.png`.
-  [!] The PNG looks darker and flatter than the panel: the planes are what the
-  datapath wrote, before the black level, white balance, saturation and gamma
-  the panel's packer applies (issue #151).
+  That PNG is the raw planes, and it looks darker and flatter than the panel:
+  they are what the datapath wrote, before the black level, white balance,
+  saturation and gamma the panel's packer (`port/camera/cam_convert.c`)
+  applies.  To see what the panel shows, copy the `wb` line of `camera info`
+  into `--wb R,G,B --black N --sat N --gamma {srgb,none}` (issue #151); with
+  the firmware's defaults, before `camera auto` moves r and b, that line reads
+  `wb       : r 256  g 256  b 256   black 16   sat 600   gamma sRGB`, so
+  `python3 boards/grove-vision-ai-v2/scripts/planar_bgr_to_png.py --wb 256,256,256 --black 16 --sat 600 --gamma srgb frame.raw panel.png`.
+  The script then runs the packer's integer arithmetic in the packer's order,
+  truncates to RGB565 and expands back to 8 bits by bit replication; an option
+  left out takes its neutral value (black 0, gains 256, sat 256, gamma none),
+  not the firmware default, and sat 0 leaves the colours alone as it does on
+  the board.  With no option the raw conversion stays the default, byte for
+  byte.  The host suite holds the script to the real `cam_convert.c`
+  (`test/test_planar_bgr_to_png.py`, frames and tables compared exactly).
 - **The capture's validity and generation.**  Every path that starts
   overwriting the landing buffer -- a capture, a `camera raw`, a stream start --
   invalidates it and takes a fresh generation under the API mutex before its

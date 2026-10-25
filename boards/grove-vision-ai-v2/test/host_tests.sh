@@ -240,6 +240,17 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_cam_convert"
 "$out/test_cam_convert"
 
+# issue #151 -- scripts/planar_bgr_to_png.py reproduces the packer above on the
+# PC so a `camera send` PNG can look like the panel.  A re-implementation drifts
+# without anything noticing, so the REAL cam_convert.c (included by the driver,
+# for its static tables) and the script are run over the same frames and
+# settings and compared word for word.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/camera" \
+    "$here/cam_convert_dump.c" \
+    $LDFLAGS -o "$out/cam_convert_dump"
+python3 -I "$here/test_planar_bgr_to_png.py" --driver "$out/cam_convert_dump"
+
 # issue #48 -- the camera frame -> input tensor resize, and the detection box ->
 # frame pixel map (port/nn/nn_preproc.c).  Two mappings that MUST be one
 # transform: sampling carries the half-pixel term and a box edge must not, and

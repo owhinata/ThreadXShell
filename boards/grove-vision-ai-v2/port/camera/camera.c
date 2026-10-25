@@ -289,7 +289,7 @@ static uint32_t cam_lock_wait_max;
  * touches every pixel twice.  Plausible is not measured, and the alternative --
  * that the SENSOR simply does not offer frames any faster, in which case
  * pipelining buys nothing at all -- is equally plausible from the armchair.
- * So the producer times its own stages and `camera stats` prints them.
+ * So the producer times its own stages and `camera profile` prints them.
  *
  * [!] TIMER2, NOT DWT CYCCNT.  The biggest single candidate is this thread
  * ASLEEP waiting for frame-ready, and CYCCNT stops in WFI (which BSP_ENABLE_WFI
@@ -692,7 +692,7 @@ static void cam_edm_isr(uint32_t status)
 	/*
 	 * [!] SELF-CONTAINED, because the counters do not survive what recovers
 	 * the board.  They are ordinary static storage and the reset wipes them;
-	 * only this ring is .noinit.  Reading `camera stats` afterwards would
+	 * only this ring is .noinit.  Reading `camera stream stats` afterwards would
 	 * show zeroes, so every number has to be in the record itself.
 	 *
 	 * And TERSE, because it has to fit LOG_MSG_MAX: an all-ones rendering of
@@ -1800,7 +1800,7 @@ static int cam_bus_enter(enum cam_bus_owner *owner)
 	 * Before the mutex because the lost producer may itself still hold
 	 * things; making a poisoned call queue behind anything would turn a clear
 	 * refusal into a hang.  camera_stream_stats() reads no hardware and takes
-	 * no mutex, so `camera stats` still answers and still says what happened
+	 * no mutex, so `camera stream stats` still answers and still says what happened
 	 * -- a refusal with no way to see why is not a diagnosis.
 	 *
 	 * [!] But it is NOT the last word, and treating it as one is what issue

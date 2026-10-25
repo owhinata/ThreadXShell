@@ -856,7 +856,7 @@ target_compile_options(shell_objs PRIVATE -Os)
 # [!] Measured at the time: with the pinned GCC 15.2 at -Os, removing the option
 # changes nothing these files emit -- no MVE appears.  It is permission, not a
 # speed-up, and any claim that it made something faster has to come from
-# `camera stats`, not from here.
+# `camera profile`, not from here.
 #
 # --- and then the level itself became a free choice (issue #76) --------------
 #

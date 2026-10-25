@@ -70,7 +70,8 @@ shell/                board-independent: core/ include/ backend/ cmds/ test/
 svc/                  board-independent services (fmt, crc32, ymodem, frame pipeline,
                       gfx, and the BlazeFace decoder the boards share -- linked by
                       f746g-disco's firmware, delivered inside a container on the
-                      other two); svc/README.md has the nn command's layering
+                      other two); svc/README.md has the nn and camera commands'
+                      layering (one shared command each, over a board adapter)
 asset/                board-independent plugin sources and the container toolchain --
                       common/ (veneers and the ABI's section layout), plugins/<name>/,
                       tools/ (packer, ABI layout, container verifier)

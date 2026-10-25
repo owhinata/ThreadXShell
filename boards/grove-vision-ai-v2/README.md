@@ -735,7 +735,10 @@ camera capture           one frame + per-channel statistics
 camera stream start      take hold of the stream to the panel (returns at once)
 camera stream stop       let go; refused while nn holds it
 camera raw               capture the Bayer mosaic and name the phase
-camera stats             producer and sink counters, and the holders
+camera stream stats      producer and sink counters, and the holders
+camera profile           the producer's time per stage since the stream start
+camera info              state, identity, the last capture, the values last written
+camera send [name]       the last capture (planar B/G/R) over YMODEM
 camera exposure [lines]  read/set the sensor's exposure
 camera gain [a [d]]      read/set analogue / digital gain
 camera wb [r g b]        read/set the software white balance (256 = unity)
@@ -771,6 +774,63 @@ when nothing streams) rotates the panel to landscape first.  320x240 then maps
 1:1 with no CPU-side transpose, because MADCTL really rotates this panel over
 4-wire SPI (issue #31).
 
+### The shared `camera` command, `info` and `send` (issue #143)
+
+The command is one file for all three boards, `shell/cmds/cmd_camera.c`, over
+this board's adapter `port/camera/camera_svc_grove.c`, which implements the
+contract in `svc/camera_svc.h` (the layers are in
+[svc/README.md](../../svc/README.md#the-camera-command-is-shared-issue-143)).
+The tuning and measurement subcommands stay in `cmds/cmd_camera_board.c` and are
+appended to the shared table.  Capabilities (`svc/camera_svc_config.h`): info,
+send; no power switch (`camera on` / `off` are not registered), no test pattern
+(`camera capture test` / `stream start test` say so), no save.  `help camera`
+lists probe, info, capture, send, stream, then raw, profile, vts, bench and the
+image knobs.
+
+- **The counters are `camera stream stats`** (the board's old `stats` is gone, no alias): the same counters
+  from one sample, without the stage profile -- `state    :` / `holders  :` from
+  the shared command, then `frames` ... `sink lcd`, `blit`, `held` and the
+  conditional rows.  About 12 lines idle, 13 while streaming.  The profile (the
+  `profile  :` line and its seven stage rows) is **`camera profile`**, and
+  `camera bench` prints it as before.
+- **`camera info`** (10 lines): the port state, the chip version, the sensor this
+  build drives (and that `camera probe` is what reads it), the frames since the
+  last bring-up, whether a capture is held (and its generation), and the values
+  the driver last wrote -- exposure / gains, vts, auto, white balance with black,
+  sat and gamma, and the Bayer phase.  It takes no mutex and reads no I2C (the
+  chip line reads the SCU version), so it answers while a stream runs; the
+  exposure / gain set and the white-balance set are each read whole, inside a
+  critical section, because the producer rewrites them on its own thread.
+- **`camera send [name]`** sends the last `camera capture` as it is: 230,400
+  bytes, the B plane, then G, then R (WDMA3's order; `camera capture`'s
+  `B(plane 0)` / `G(plane 1)` / `R(plane 2)`).  On the PC (`rz -y -b`), make a
+  PNG with
+  `python3 boards/grove-vision-ai-v2/scripts/planar_bgr_to_png.py frame.raw out.png`.
+  [!] The PNG looks darker and flatter than the panel: the planes are what the
+  datapath wrote, before the black level, white balance, saturation and gamma
+  the panel's packer applies (issue #151).
+- **The capture's validity and generation.**  Every path that starts
+  overwriting the landing buffer -- a capture, a `camera raw`, a stream start --
+  invalidates it and takes a fresh generation under the API mutex before its
+  datapath starts; a successful demosaiced capture marks it valid.  `send` reads
+  it block by block through `camera_capture_read()`, which takes the API mutex
+  with TX_NO_WAIT (BUSY when it is held) and checks the generation and copies in
+  ONE hold -- never across the transfer.  So `send` during a stream, or after a
+  `camera raw`, answers `camera: no frame captured yet (a stream or `camera raw`
+  replaces it)`, and a capture replaced mid-transfer ends it with `ymodem: source
+  read error` and `camera: frame changed by a concurrent capture`.
+- **The settled capture has ONE deadline**: all its passes share
+  `CAM_FRAME_TIMEOUT_TICKS` (2 s of wall clock after the bring-up), the bound a
+  single capture always had.  That keeps its hold of the API mutex and the bus
+  at bring-up + 2 s + a quiesce, under 3 s, which is what `CAM_STOP_LOCK_TICKS`
+  (8 s) is derived from.  Running out is an ordinary timeout; the frames let go
+  stay counted, so the next capture carries on settling.  A Ctrl+C between
+  frames ends the capture silently.
+- **Lines read `label    : value`**, which this board already used; the other
+  two boards adopted it.
+- Console stack high water after capture / stats (`thread`): 1,936 of 4,096 B at
+  the shared command's first version.
+
 ### Who holds the stream (issue #142)
 
 **The camera streams to the panel while, and only while, somebody holds it**:
@@ -796,7 +856,7 @@ only a **confirmed** stop unlinks the sink.
 - `nn stream start` and `nn run` join a running stream, or start it holding the
   operator's place too, so the camera keeps streaming after nn stops.  nn's stop
   takes nn off the sink and never stops the camera.
-- `camera stats` prints `holders  : manual, nn` (or `none`, or `-- (a stream
+- `camera stream stats` prints `holders  : manual, nn` (or `none`, or `-- (a stream
   start or stop is in progress)` while a start or stop holds the table), with
   `(<n> lost when the stream ended)` after a stream ended by itself.  Its `sink
   lcd` line counts `shown`, `dropped`, `busy`, `dark` and `err` frames.
@@ -1461,7 +1521,7 @@ Error Detection Module, a datapath monitor.  Its ISR is in the prebuilt
 | no watchdog bit | timing callback | **nobody** -- one line of vendor `xprintf`, then gone |
 
 Nothing in the SDK, prebuilt or source, registers the timing callback.  So a
-`camera`/`nn` datapath error you can see in `camera stats` is a watchdog; the
+`camera`/`nn` datapath error you can see in `camera stream stats` is a watchdog; the
 other branch was invisible.
 
 **And the other branch should be unreachable.**  The datapath configuration this
@@ -1509,7 +1569,7 @@ Logged on the **first event and then every power of two**.  A storm is exactly
 the case where no thread runs again to be asked, so the `.noinit` ring is the
 only channel left -- and a record per event would push the boot history that
 explains the event out of it.  The count saturates rather than wrapping, or the
-trail would restart.  `camera stats` grows an `edm :` line when the count is
+trail would restart.  `camera stream stats` grows an `edm :` line when the count is
 non-zero, but **after a hang that line is gone**: read `dmesg` first, before
 anything else.
 
@@ -1562,7 +1622,7 @@ are NULL.  No new wrap slot is consumed: irq 143 was already being wrapped.
 > as it was run, because they are a record rather than instructions.
 
 
-`camera stats` prints the producer's own per-stage timing, since the last
+`camera profile` prints the producer's own per-stage timing, since the last
 stream start.  It is measured on TIMER2 (the EPK's free-running source) and not
 on DWT CYCCNT, because the largest candidate stage is the producer ASLEEP
 waiting for a frame and CYCCNT stops in WFI -- a cycle counter would report that
@@ -1682,7 +1742,7 @@ big-endian RGB565 format for.
 The prediction above held almost exactly.  The blit now runs on a panel thread
 that the LCD sink owns, and the producer's `sink` stage fell from 26,420 us to
 **2 us** while a new `blit` row on the panel thread carries **26,445 us** -- the
-26 ms moved rather than vanished, which is what `camera stats` prints both
+26 ms moved rather than vanished, which is what `camera profile` (`sink`) and `camera stream stats` (`blit`) print between them
 numbers to prove.
 
 | | predicted | measured |
@@ -1755,7 +1815,7 @@ loads.  What does not fold is SATURATION, because it pulls a channel away from
 the pixel's own luma and so depends on the other two channels; its multiply and
 divide fold anyway, since those depend only on the difference from the luma.
 
-Measured on hardware, `camera stats`:
+Measured on hardware, `camera profile` / `camera stream stats`:
 
 | | pack | W | blit | period | shown | dropped |
 |---|---:|---:|---:|---:|---:|---:|
@@ -1830,7 +1890,7 @@ So the two previews wanted 1160 and 1968, and one global VTS could not serve
 both -- though the default of the day served the harder of the two exactly.
 (Issue #64 changed both the condition and the default; see below.)
 
-**[!] `camera stats`'s `sink` row is per ITERATION, not per delivery.**  With
+**[!] `camera profile`'s `sink` row is per ITERATION, not per delivery.**  With
 drops in play the two differ a lot: `nn preview` at VTS 1770 prints 11,594 us
 while the actual cost of one inference + preprocess + overlay is 22,958 us.  It
 is the right number for the period model, which is what it is there for, and the
@@ -1919,7 +1979,7 @@ zero drops  <=>  B <= period        and    period = T_s * ceil((W + T_active) / 
 ```
 
 Measured at #71: the hold is **775 us** against a 26.5 ms transfer, and
-`camera stats` reports it as its own `held` row, separate from `blit`.  `B` is
+`camera stream stats` reports it as its own `held` row, separate from `blit`.  `B` is
 still 26.4 ms and still the display's floor -- it is the SPI wire time and
 nothing in #71 touched it -- but at these periods it no longer binds.
 
@@ -2049,13 +2109,13 @@ these registers but describes nothing):
   **That proves "nothing moved the configuration", not "the hardware wrote
   here"** -- the getters echo programmed values.  What proves the alternation is
   real: the host test (`test/test_cam_wdma3.c`, the real module against mock
-  registers) and the `buffers` row of `camera stats`, whose two counts must
+  registers) and the `buffers` row of `camera stream stats`, whose two counts must
   advance together.  A flip that silently became a no-op is a working preview
   at the OLD frame rate, which nothing else can tell from a working one.
 - The status audit at the arm is fail-closed: only the premature-disable bit
   may be acknowledged (counted first, from the pre-acknowledge sample, and the
   readback after the acknowledge must come back clean), anything else refuses
-  the arm.  `camera stats` prints the count only when it is non-zero;
+  the arm.  `camera stream stats` prints the count only when it is non-zero;
   acceptance requires it absent.
 
 **Tearing is still impossible rather than unlikely, and issue #48's guarantee
@@ -4353,7 +4413,7 @@ and `nn stream stop` takes the boxes off while the picture keeps running.
 **This used to be `nn preview`, which BLOCKED until Ctrl+C** (issue #99 replaced
 it with the same `nn stream start/stop/stats` the other two boards speak, and
 removed it).  On a board with ONE console that is the bigger half of the change:
-`camera stats`, `nn info` and `nn thresh` during a run were simply unreachable
+the camera counters, `nn info` and `nn thresh` during a run were simply unreachable
 before, because the console was inside the command.  The measurement tables
 further down were recorded under the old name and are left as they were written
 -- they are a record of runs, not instructions.
@@ -4399,7 +4459,7 @@ whatever is open when they print.
   were learned at the bench.** `lcd_backlight()` is one GPIO write touching no
   SPI state, no framebuffer and no DMA, while under a live stream the panel
   thread holds the panel guard for about **96% of every frame** (compare `blit`
-  with `profile` in `camera stats`) -- so guarding it made `lcd on` fail with
+  with `camera profile`) -- so guarding it made `lcd on` fail with
   `busy` in exactly the case it exists for, a panel switched off before the
   stream started. And once `on` worked during a stream, refusing `off` had no
   hazard left under it: the reason for that refusal had been "no frame turns it
@@ -4437,7 +4497,7 @@ preprocessing.)
 #129 only `prep` does; invoke and decode are the inference worker's -- see the
 next section.)
 
-`camera stats` prints one `sink` row for everything a sink does on the producer,
+`camera profile` prints one `sink` row for everything a sink does on the producer,
 and under `nn stream` that number was 24.0 ms with no way to see inside it.  It
 now splits, from counters the overlay keeps on the same EPK clock:
 
@@ -4546,7 +4606,7 @@ so the producer's next write cannot land under it.
 **`process()` answers "draw this frame", not "was it inferred".**  It returns 0
 whenever the stream's latest publish was a successful decode, busy frames
 included; it declines only before the first result, after a failed decode, and
-while a stop is pending.  Those are the frames `camera stats` counts as *shown
+while a stop is pending.  Those are the frames `camera stream stats` counts as *shown
 unannotated*.
 
 **The stop** (`nn_teardown()` in `nn_svc_grove.c`, shared with `nn run`):
@@ -4598,8 +4658,8 @@ Every ending then runs the same teardown as a stream, by the run's own
 generation; a retryable teardown leaves the one-shot to `nn stream stop`.  The
 frame `nn run` sees is the first frame the worker wants after the overlay goes
 on -- of a running stream, or of one this run started -- where it used to be one
-stopped `camera_capture()` frame.  `camera capture` itself is
-unchanged.
+stopped `camera_capture()` frame.  (`camera capture` settles the sensor the
+same way since issue #143; see below.)
 
 **[!] `nn run` skips the sensor's first 15 frames after a bring-up** (issue
 #115, `NN_ONESHOT_WARM_FRAMES` in `port/nn/nn_camera.h`).  The model's input is
@@ -4615,6 +4675,18 @@ at ~37 fps it is about 0.4 s.  The count is the sensor's frames since bring-up
 and its exposure across a stream stop, so only the first `nn run` after a
 bring-up waits -- not one after `camera stream stop`, nor one after another
 `nn run`.  `nn stream` does not skip: its first frames are inferred and counted.
+
+**`camera capture` lets the same 15 frames go** (issue #143,
+`CAMERA_ONESHOT_WARM_FRAMES` in `port/camera/camera.h`, asserted equal to
+`NN_ONESHOT_WARM_FRAMES`).  The one-shot capture now counts every frame it
+receives into `camera_frames_since_bringup()` and, while the count is still at
+or below 15, lets the frame go and captures the next, so the first capture after
+a bring-up prints `warm-up  : 15 frames dropped` and the next one `warm-up  : 0
+frames dropped` (0 is printed).  `camera raw` takes the first frame as before,
+but its frame counts.  Since every pass is counted, the `frames` line of `camera
+stream stats` grows by 16 for that first capture (two captures after a reset:
+2 before, 17 now).  Measured: the first capture after a bring-up takes about
+450 ms, a settled one about 60 ms.
 
 **The decode's stack allowance is declared against the worker**
 (`GROVE_PLUGIN_STACK_WORKER`, `board.cmake`), because since #129 the worker is
@@ -4639,7 +4711,7 @@ picture the drawn result was, mean (two decimals) and worst.  The decodes are
 the shared `infers` line.  On the `worker` line `prep` is what the producer
 still spends inside `consume()` -- the hand-over's whole cost -- and `cycle` is
 the worker's round trip from hand-over to publish.  It is the last line and the
-only one left out when the EPK clock is not trusted.  `camera stats`' `nn sink`
+only one left out when the EPK clock is not trusted.  `camera stream stats`' `nn sink`
 block prints the same split, labelled `[prep: producer; rest: worker]`.
 
 **Measured on hardware, firmware `96235cf`** (2026-10-04; the containers already
@@ -4663,7 +4735,7 @@ entry con 1000; shapes_ok con 1552, bg 1464; **decode work 776/8192 (left
 (`nn dets`), con 1976 (`nn run`, CIFAR-10), bg 1888 (`nn run &`); param_set con
 448; param_get con 496.
 
-`camera stats` under the detector stream: 27,004 us/frame (37.0 fps), pack
+`camera profile` and `camera stream stats` under the detector stream: 27,004 us/frame (37.0 fps), pack
 6,743 us, `sink` 4,786 us (the nn prep, 4,395 us, plus the panel's staging),
 blit 25,879 us, held 217 us; the `nn sink` block, labelled `[prep: producer;
 rest: worker]`, read prep 4,395 / invoke 12,630 / decode 223 us; and
@@ -4729,7 +4801,7 @@ camera preview     -- the sink is DETACHED, so the attach SUCCEEDS and
                       leaks its NPU lease the same way, both until reboot
 ```
 
-Checking `camera stats` before attaching does not fix that; it is a TOCTOU read
+Checking the camera counters before attaching does not fix that; it is a TOCTOU read
 outside the camera's API mutex. The fix is to make the check, the subscribe and
 the start indivisible, which gives the camera one ownership rule:
 
@@ -4829,7 +4901,7 @@ mutex wait is not interruptible by Ctrl+C and this board has one shell, so there
 would be no message and no diagnosis. Bounded, then say what happened, is what
 `CAM_ST_LOST` already does.
 
-`camera stats` grew a `stop lock:` line -- how many stops found the mutex held,
+`camera stream stats` (then `stats`) grew a `stop lock:` line -- how many stops found the mutex held,
 and the longest they waited (timed-out attempts included). Zero is the normal
 answer; the line exists because a collision now leaves no other trace, and a
 collision used to be the thing that stranded a sink. The pair is updated and
@@ -5192,7 +5264,7 @@ time a vendor path is slower than assumed.  So:
   from it, which is exactly the catastrophic action here.
 - **Nothing is detached, torn down or released** on that path, and `nn` stays
   leased.  It is safe only because all overlay and sink state is static.
-- `camera stats` still answers (it reads no hardware and takes no mutex), so the
+- `camera stream stats` still answers (it reads no hardware and takes no mutex), so the
   refusal always comes with an explanation.
 
 The overlay also carries a stop-pending flag, set BEFORE the join is asked for
@@ -6453,7 +6525,7 @@ of guard time is 0.26% of a 112 ms frame.
 
 A classifier can hold the panel now, so every sentence the firmware printed about
 faces and boxes became a lie whenever the loaded container decodes something
-else.  `nn stream stats` said `last : 3 face(s)`; `camera stats` said
+else.  `nn stream stats` said `last : 3 face(s)`; the camera counters said
 `decode : ... anchors -> boxes` on an ORDINARY classifier stream.
 
 **[!] The lines were enumerated three times and the enumeration was wrong twice**
@@ -6912,7 +6984,7 @@ q-register instruction belongs to a vendor prebuilt function; the only ones from
 this project's own code are in `mve` itself.
 
 So this is permission, not a speed-up, and any future claim that it made
-something faster has to come from `camera stats`.
+something faster has to come from `camera profile`.
 
 **[!] Ask the compiler, not the disassembler.**  The way to check this is to
 recompile with the real flags and `-S` and read what GCC emitted, or to attribute

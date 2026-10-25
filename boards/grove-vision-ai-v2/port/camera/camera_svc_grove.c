@@ -69,7 +69,7 @@ static void cam_detail_add(struct camera_op_result *res, const char *f, ...)
  * "<what> failed: <reason>", and under it the reason the driver latched and
  * the last datapath status, when there are any -- the old cam_report().  The
  * driver latches a specific reason for every failure it can name, and making
- * the operator run `camera stats` to see it would hide the one useful
+ * the operator run `camera stream stats` to see it would hide the one useful
  * sentence behind a second command.
  */
 static void cam_res_report(struct camera_op_result *res, int status,
@@ -459,8 +459,8 @@ void camera_grove_profile_write(struct camera_out *o,
 }
 
 /*
- * `camera stream stats` (issue #143 decision 4: the board's `camera stats`
- * moved here, its stage profile to `camera profile`): ONE sample of the camera and of the panel sink, the head handed the
+ * `camera stream stats` (issue #143 decision 4: the board's old `stats`
+ * subcommand moved here, its stage profile to `camera profile`): ONE sample of the camera and of the panel sink, the head handed the
  * state and holders from it, then every other line from the same sample.  The
  * holders and the nn stage split are separate looks, as they always were.
  */

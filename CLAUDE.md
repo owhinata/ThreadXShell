@@ -48,11 +48,11 @@ src cmds svc cmake test README。wio のみ boot も）。
   （`boards/wio-lite-ai/boot/`）は独立**で、app / shell とソースを共有しない。
 - **[!] カメラは持ち主（`svc/cam_holders`: manual / nn）が居る間だけ流れ、camera は持ち主の名前しか知らない**（nn を include しない。lcd は持ち主ではない）。**表が空でも teardown の許可ではなく**資源はボードの確認済み停止の後だけ、stop の待ちは自分の stream の世代で照合する（#142、`svc/README.md`）。
 
-### [!] `nn` は 3 ボード共有の 1 コマンド
+### [!] `nn` と `camera` は 3 ボード共有の 1 コマンド（各 1 つ）
 
-`shell/cmds/cmd_nn.c` + 契約 `svc/nn_svc.h` + ボードごとの `nn_svc_*.c` アダプタ。
+`shell/cmds/cmd_nn.c` + 契約 `svc/nn_svc.h` + `nn_svc_*.c`、`cmd_camera.c` + `svc/camera_svc.h` + `camera_svc_*.c`（下は nn の規則）。
 
-- **共有 TU は可変記憶域を 1 バイトも持たない**（状態はアダプタ、バッファは持ち主が配置属性つきで注入）。
+- **共有 TU（nn・camera とも）は可変記憶域を 1 バイトも持たない**（状態はアダプタ、バッファは持ち主が配置属性つきで注入）。
   強制は `cmake/check_no_mutable_storage.py` の**ボードごとの監査コンパイル**（ホストの答えは別物）。
 - **ファーム監査は列挙せずビルドから導出する**（`cmake/shared_storage_gate.cmake`。例外は
   `svc/ymodem.c` のみ）。**導出・両方向照合・失敗伝播を弱めない。**

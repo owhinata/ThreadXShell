@@ -7,7 +7,7 @@ WHY.  Issue #105 let a classifier plugin hold the panel, which makes every
 sentence the firmware prints about "faces" and "boxes" wrong whenever the loaded
 container decodes something else.  The offending lines were enumerated three
 times and the enumeration was wrong twice -- one line, then three, then five, and
-the fifth (`camera stats`' `anchors -> boxes`) shows up on an ORDINARY classifier
+the fifth (the camera counters' `anchors -> boxes`) shows up on an ORDINARY classifier
 stream.  Nothing in this project gates what a command PRINTS, so a fourth careful
 reading would have the same shape of error and nothing would mark the sixth.
 

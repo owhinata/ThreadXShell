@@ -575,8 +575,8 @@ static void cam_panel_entry(ULONG arg)
 		 * It must name THIS sink: frame_pipeline_put() clears the sink's
 		 * busy flag only when it is given the owning sink, and a NULL
 		 * there would leave the sink busy for ever and its DROP policy
-		 * discarding every frame after the first.  (NULL is for releasing
-		 * a frame_pipeline_pin_latest() pin, which has no sink.) */
+		 * discarding every frame after the first.  (NULL is for a
+		 * reference that no sink holds.) */
 		sink_release_frame(&rel);
 
 		/* Timing is taken here rather than around the blit alone so it
@@ -1643,7 +1643,7 @@ void cam_lcd_sink_stats(struct cam_lcd_sink_stats *out)
 	 * The measurement is only as good as its clock, and this port has the
 	 * predicate for that: tx_glue_profile_ok() re-verifies TIMER2 every
 	 * time it is asked.  Saying "not trustworthy, and why" beats publishing
-	 * a number nobody can act on -- the rule `thread` and `camera stats`
+	 * a number nobody can act on -- the rule `thread` and `camera profile`
 	 * already follow.
 	 */
 	hz = tx_glue_epk_timer_hz();

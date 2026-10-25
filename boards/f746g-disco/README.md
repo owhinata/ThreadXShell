@@ -526,6 +526,63 @@ already running`.
 > neither was counted. A `nn run` counts no decode (it reports its own
 > result).
 
+### The `camera` command is shared with the other boards (issue #143)
+
+The command is one file for all three boards, `shell/cmds/cmd_camera.c`, over
+this board's adapter `port/camera/camera_svc_f746.c`, which implements the
+contract in `svc/camera_svc.h` (the layers are in
+[svc/README.md](../../svc/README.md#the-camera-command-is-shared-issue-143)).
+What only this board has stays in `cmds/cmd_camera_board.c` and is appended to
+the shared table.  This board's capabilities (`svc/camera_svc_config.h`): power,
+info, test pattern, save (`sd`, `fs`), send; `camera off` stops the operator's
+stream first.
+
+```
+camera probe                    power up + read the OV5640 chip ID
+camera on | off                 bring-up / cut the module's power
+camera info                     driver / sensor state and the ISP settings
+camera capture [test]           snapshot the current mode + statistics
+camera save [sd|fs] <path>      write the LAST capture raw (default sd)
+camera send [name]              send the LAST capture over YMODEM
+camera stream start [test] | stop | stats
+camera res | format | fps | set   (this board's own)
+```
+
+- **`save` and `send` read the last `camera capture`**, stream or no stream: the
+  stream never writes the capture buffer.  With nothing captured since boot (or
+  since `camera off`) they answer `camera: no captured frame`.  The medium may be
+  left out (`camera save x.raw` writes to `sd:x.raw`); a lone medium name
+  (`camera save sd`) is refused as a forgotten path.  A frame replaced while it
+  is being written fails the save (`camera: frame changed by a concurrent
+  capture (file left partial)`) or the send (`ymodem: source read error`, then
+  the same sentence).
+- **`camera off` with the operator's stream running** prints `camera: stopping
+  stream before power off`, waits for THAT stream to end and then cuts the rail
+  (`camera: power off`).  A holder other than the operator refuses it (`camera:
+  still in use: nn`).  If the stream has not ended within 200 ms the power is
+  left on (`camera: the stream has not stopped yet -- timed out (it may still
+  finish); power left on, retry 'camera off'`); a Ctrl+C during the wait also
+  leaves the power on.  The wait is on the stream's GENERATION: camera.c counts
+  streams (`cam_stream_gen`, advanced under the camera lock when a start's arm
+  has succeeded; `cam_stream_done_gen`, written by the teardown under the same
+  lock), and `camera_stream_stop_gen()` hands back the generation the stop asked
+  to end, so a later start, or a start that withdrew the stop and kept the
+  stream, is never taken for its end.
+- **`camera capture` prints `warm-up  : <n> ms`**, the time the capture spent
+  before its snapshot (bring-up, the configuration's settle sleeps, PCLK
+  programming).  Measured: 632 ms on a cold sensor, 0 ms on the next capture,
+  101 ms after a colour-bar switch.  0 is printed too.
+- **Lines read `label    : value`** (the label padded to 8 and ` : `; a longer
+  label keeps its length), the same form on all three boards.
+
+Measured / derived for this board:
+
+| Item | Value |
+|---|---|
+| Console stack high water after save / capture (`thread`) | 2,728 of 4,096 B (at the shared command's first version) |
+| `camera save` deepest path (from the disassembly, dispatch included) | about 3.18 KB to the microSD, about 3.43 KB on the QSPI write-error path |
+| `CAMERA_SVC_DETAIL_MAX` (the contract's failure text) | 319 B |
+
 ### [!] Two subscribers share one capture, and each has to drain
 
 The base capture has two *subscribers* since issue #142:

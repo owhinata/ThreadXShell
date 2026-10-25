@@ -9,8 +9,9 @@ is reached from here through a hook or a declared API.
 
 Besides the `nn` and plugin files described below, it holds the formatter
 (`fmt`), CRC-32 (`crc32`), YMODEM (`ymodem`), the camera frame pipeline
-(`frame`, `frame_pipeline`), the camera stream's holder table and sink steps
-(`cam_holders`, `cam_step`, below), small graphics helpers (`gfx_rot`, `rect_geom`), the
+(`frame`, `frame_pipeline`), the camera stream's holder table, sink steps and
+stream generations (`cam_holders`, `cam_step`, `cam_gen`, below), the `camera`
+command's contract (`camera_svc`, below), small graphics helpers (`gfx_rot`, `rect_geom`), the
 neutral tensor descriptor (`tensor.h`) and the BlazeFace decoder (`blazeface`).
 
 ## The `nn` command's layering
@@ -114,8 +115,8 @@ and keeps the generation counter.  Refusals are distinct codes;
 - `nn stream start` and `nn run` join a running stream, or start it holding the
   operator's place as well.  nn's stop removes only nn, so the camera keeps
   streaming after it; stopping the camera is always a later `camera stream stop`.
-- `camera stream stats` (`camera stats` on grove-vision-ai-v2) prints the
-  holders on a `holders:` line, and how many the last confirmed end lost.
+- `camera stream stats` prints the holders on a `holders  :` line, and how many
+  the last confirmed end lost.
 - The preview is derived, not switched: it is drawn while the camera streams and
   the display is on.  The nn boxes are drawn while it is drawn and a `nn stream`
   runs; a `nn run` draws none.  There is no `camera preview` or `nn overlay`
@@ -152,6 +153,67 @@ transition claimed across disarm -> drain -> clean-up -> commit.  A drain that
 runs out of time is retryable: the resources and the claim stay, and the next
 stop finishes it.
 
+## The `camera` command is shared (issue #143)
+
+There is one `camera` command for all three boards, in the same layering as
+`nn`: one way down, the command never reaching below the contract.
+
+```
+shell/cmds/cmd_camera.c                  one command: grammar, usage, refusals,
+        |                                the holders / warm-up lines, the save /
+        |                                send loops; a subcommand whose
+        |                                CAMERA_SVC_HAS_* is 0 is not registered;
+        |                                the board's own subcommands are
+        |                                appended (CAMERA_SVC_BOARD_SUBCMDS)
+        |   shell/cmds/camera_cmd_board.h  the two shell-layer services a board
+        |                                gives it: YMODEM send, the save medium
+        v
+svc/camera_svc.h                         the contract: the camera_svc_*() calls
+svc/camera_svc_adapter.h                 static-inline result / line helpers
+        |
+        v
+boards/<board>/port/camera/camera_svc_<board>.c   the adapter (no shell instance;
+        |                                writes through the caller's writer,
+        |                                answers a cancel callback)
+        v
+the board's camera driver (port/camera/camera.c ...), which keeps the
+holder table (svc/cam_holders), the sink steps (svc/cam_step) and, on
+f746g-disco and wio-lite-ai, the stream generations (svc/cam_gen.h)
+```
+
+| Capability (`boards/<board>/svc/camera_svc_config.h`) | f746g-disco | wio-lite-ai | grove-vision-ai-v2 |
+|---|---|---|---|
+| `CAMERA_SVC_HAS_POWER` (`on` / `off`) | 1 | 1 | 0 |
+| `CAMERA_SVC_OFF_STOPS_STREAM` (`off` stops the operator's stream first) | 1 | 1 | -- (no `off`) |
+| `CAMERA_SVC_HAS_INFO` | 1 | 1 | 1 |
+| `CAMERA_SVC_HAS_TEST` (colour bar) | 1 | 1 | 0 |
+| `CAMERA_SVC_HAS_SAVE` (`save [<medium>] <path>`) | 1 (sd, fs) | `BSP_ENABLE_SD` (sd) | 0 |
+| `CAMERA_SVC_HAS_SEND` | 1 | 1 | 1 |
+| `CAMERA_SVC_BOARD_SUBCMDS` | res format fps set | scan reg | raw profile vts bench exposure gain auto black sat gamma bayer wb |
+
+What the contract fixes, on every board:
+
+- **A result is `{status, detail, users}`**; the statuses (ARG / NOSUP / STATE /
+  BUSY / IN_USE / NO_FRAME / HW / TIMEOUT / LOST / CANCELLED) are not folded into
+  each other.  The detail is a copy of the board's words, up to
+  `CAMERA_SVC_DETAIL_MAX` (319) and possibly several lines.  Cleanup is the
+  adapter's; the command never releases anything on the strength of a result.
+- **A report is written from one sample**, one whole line per write, never with
+  a camera lock held; `camera stream stats` takes ONE sample for the state, the
+  holders head and the board's lines.
+- **A frame read checks and copies in one step** under the same exclusion as
+  every path that starts overwriting the buffer.  `save` / `send` read the last
+  `camera capture`.
+- **`camera off` waits for the stream it stopped by its generation**, and leaves
+  the power on after a TIMEOUT, any other failed stop, or a Ctrl+C.
+- **The capture reports its warm-up** (frames let go, or ms) on the caller's
+  stack; the command prints `warm-up  : ...`, 0 included.
+- **[!] The shared command owns no mutable storage**: line buffers, results and
+  frame cursors are on the caller's stack.  The storage audit's
+  `SHARED_COMMANDS` (`cmake/check_shared_storage_build.py`) lists
+  `shell/cmds/cmd_camera.c` next to `cmd_nn.c` and `nn_cmd_core.c`, so every
+  board's build audits it and fails without it.
+
 ## One line per shared nn / plugin / camera file
 
 Each pair is a `.c` and its `.h` unless only a header is listed.
@@ -184,6 +246,9 @@ Each pair is a `.c` and its `.h` unless only a header is listed.
 | `plugin_paint_span` | What a painter primitive decides before its first store (clip, offset, charge). |
 | `cam_holders` | Who holds the camera stream open, and the start / stop / refusal each change implies (issue #142). |
 | `cam_step` | One step of the camera sink: may the producer enter it, and has it left (issue #142). |
+| `camera_svc.h` | The contract the shared `camera` command speaks; implemented by each board's adapter (issue #143). |
+| `camera_svc_adapter.h` | Static-inline helpers every camera adapter uses to fill a result and write a line. |
+| `cam_gen.h` | Stream generations: has THE stream a stop named ended (pure, shared by f746g-disco and wio-lite-ai). |
 
 ## Why the lock and the threads are the board's
 

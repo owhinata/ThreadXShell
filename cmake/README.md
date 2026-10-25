@@ -2,7 +2,11 @@
 
 `shared_storage_check` runs on every shipping `shell` build (#117), including
 when the ELF is already current. It covers every compiled translation unit in
-the repository's `svc/` tree and `shell/cmds/{cmd_nn,nn_cmd_core}.c`. The exact
+the repository's `svc/` tree and the shared commands outside it,
+`SHARED_COMMANDS` in `check_shared_storage_build.py`:
+`shell/cmds/{cmd_nn,nn_cmd_core,cmd_camera}.c` (`cmd_camera.c` since #143).
+Each of those must also be compiled by the board -- a build that stops
+compiling one is refused ("mandatory command missing"), not audited less. The exact
 `svc/ymodem.c` path is the sole existing exception: it owns non-reentrant send
 and receive staging buffers and last-run diagnostics. This is not a stateless
 rule for the entire shell; instances and job pools intentionally own state.

@@ -242,24 +242,24 @@ static void check_common(void)
 	camera_stub.head_len = 4;
 	run("camera capture\r");
 	expect("frames let go are printed after the board's lines, before the dump",
-	       has("warm-up:   15 frames dropped\r\n") &&
-	       before("stub: frame stats", "warm-up:") &&
-	       before("warm-up:", "bytes[0..3]:"));
+	       has("warm-up  : 15 frames dropped\r\n") &&
+	       before("stub: frame stats", "warm-up  :") &&
+	       before("warm-up  :", "bytes[0..3]:"));
 	reset();
 	camera_stub.warmup = 1;
 	camera_stub.warmup_unit = CAMERA_SVC_WARMUP_FRAMES;
 	run("camera capture\r");
-	expect("one frame is one frame", has("warm-up:   1 frame dropped\r\n"));
+	expect("one frame is one frame", has("warm-up  : 1 frame dropped\r\n"));
 	reset();
 	camera_stub.warmup = 0;
 	camera_stub.warmup_unit = CAMERA_SVC_WARMUP_FRAMES;
 	run("camera capture\r");
-	expect("zero is printed: the settled answer", has("warm-up:   0 frames dropped\r\n"));
+	expect("zero is printed: the settled answer", has("warm-up  : 0 frames dropped\r\n"));
 	reset();
 	camera_stub.warmup = 612;
 	camera_stub.warmup_unit = CAMERA_SVC_WARMUP_MS;
 	run("camera capture\r");
-	expect("a settle time is printed in ms", has("warm-up:   612 ms\r\n"));
+	expect("a settle time is printed in ms", has("warm-up  : 612 ms\r\n"));
 	reset();
 	camera_stub.warmup = 15;
 	camera_stub.warmup_unit = CAMERA_SVC_WARMUP_FRAMES;
@@ -277,19 +277,19 @@ static void check_common(void)
 	camera_stub.holders[1] = "nn";
 	camera_stub.nholders = 2;
 	run("camera stream stats\r");
-	expect("stats: the state line", has("state:     streaming\r\n"));
+	expect("stats: the state line", has("state    : streaming\r\n"));
 	expect("then the holders line in the old spelling",
-	       has("holders:   manual, nn\r\n"));
+	       has("holders  : manual, nn\r\n"));
 	expect("then the board's lines",
-	       before("holders:", "stub: board stats"));
+	       before("holders  :", "stub: board stats"));
 	reset();
 	camera_stub.stop_reason = "overrun";
 	camera_stub.lost = 1;
 	run("camera stream stats\r");
 	expect("a stopped stream gives the board's reason",
-	       has("state:     stopped (overrun)\r\n"));
+	       has("state    : stopped (overrun)\r\n"));
 	expect("and nobody holding it, with the lost count",
-	       has("holders:   none  (1 lost when the stream ended)\r\n"));
+	       has("holders  : none  (1 lost when the stream ended)\r\n"));
 
 	/* [!] stats: the state and the numbers come from ONE sample */
 	reset();
@@ -298,23 +298,23 @@ static void check_common(void)
 	expect("stats takes one sample and no separate state",
 	       camera_stub.samples == 1 && camera_stub.calls_state == 0);
 	expect("and the state line and the board's line name the same sample",
-	       has("state:     stopped (sample-1)\r\n") &&
+	       has("state    : stopped (sample-1)\r\n") &&
 	       has("stub: board stats sample-1\r\n") &&
-	       before("holders:", "stub: board stats"));
+	       before("holders  :", "stub: board stats"));
 
 	/* stats while a start or stop is in flight: no holder list to give */
 	reset();
 	camera_stub.transition = 1;
 	run("camera stream stats\r");
 	expect("stats mid-transition says so instead of naming holders",
-	       has("holders:   -- (a stream start or stop is in progress)\r\n") &&
-	       !has("holders:   none"));
+	       has("holders  : -- (a stream start or stop is in progress)\r\n") &&
+	       !has("holders  : none"));
 	reset();
 	camera_stub.transition = 1;
 	camera_stub.lost = 2;
 	run("camera stream stats\r");
 	expect("and still gives the lost count, as the board heads do",
-	       has("holders:   -- (a stream start or stop is in progress)  "
+	       has("holders  : -- (a stream start or stop is in progress)  "
 	           "(2 lost when the stream ended)\r\n"));
 
 	/* stats before any stream: the one line, no holders, no board lines */
@@ -322,7 +322,7 @@ static void check_common(void)
 	camera_stub.never_started = 1;
 	run("camera stream stats\r");
 	expect("stats with no stream since boot says only that",
-	       has("state:     never started\r\n") && !has("holders:") &&
+	       has("state    : never started\r\n") && !has("holders  :") &&
 	       !has("stub: board stats"));
 
 	/* stats when the board cannot sample the stream: its error alone */
@@ -330,8 +330,8 @@ static void check_common(void)
 	camera_stub.state_status = CAMERA_SVC_ERR_STATE;
 	run("camera stream stats\r");
 	expect("stats the board cannot sample prints only the error",
-	       has("camera: stub: state unavailable\r\n") && !has("state:") &&
-	       !has("holders:") && !has("stub: board stats"));
+	       has("camera: stub: state unavailable\r\n") && !has("state    :") &&
+	       !has("holders  :") && !has("stub: board stats"));
 
 	/* capture cancelled during the board's walk: nothing after the banner */
 	reset();

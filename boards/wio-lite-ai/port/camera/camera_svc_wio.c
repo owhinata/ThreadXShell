@@ -208,35 +208,35 @@ void camera_svc_info(struct camera_op_result *res,
 	if (rc != CAM_OK)
 		return;
 
-	camera_out(&o, "state:   %s\r\n", ci.powered ? "powered" : "powered down");
+	camera_out(&o, "state    : %s\r\n", ci.powered ? "powered" : "powered down");
 	if (ci.sensor == CAM_SENSOR_OV2640 || ci.sensor == CAM_SENSOR_OV5640)
-		camera_out(&o, "sensor:  %s (chip ID 0x%04x, SCCB 0x%02x, %u-bit regs)\r\n",
+		camera_out(&o, "sensor   : %s (chip ID 0x%04x, SCCB 0x%02x, %u-bit regs)\r\n",
 		           camera_sensor_name(ci.sensor), (unsigned)ci.chip_id,
 		           (unsigned)ci.i2c_addr, (unsigned)ci.reg_width);
 	else if (ci.i2c_addr != 0u)
-		camera_out(&o, "sensor:  %s (unidentified device at SCCB 0x%02x)\r\n",
+		camera_out(&o, "sensor   : %s (unidentified device at SCCB 0x%02x)\r\n",
 		           camera_sensor_name(ci.sensor), (unsigned)ci.i2c_addr);
 	else
-		camera_out(&o, "sensor:  %s\r\n", camera_sensor_name(ci.sensor));
+		camera_out(&o, "sensor   : %s\r\n", camera_sensor_name(ci.sensor));
 	if (ci.xclk_hz != 0u)
-		camera_out(&o, "xclk:    %lu.%02lu MHz = %lu MHz / %lu (PA2, TIM5_CH3)\r\n",
+		camera_out(&o, "xclk     : %lu.%02lu MHz = %lu MHz / %lu (PA2, TIM5_CH3)\r\n",
 		           (unsigned long)(ci.xclk_hz / 1000000u),
 		           (unsigned long)(ci.xclk_hz % 1000000u / 10000u),
 		           (unsigned long)(ci.xclk_src_hz / 1000000u),
 		           (unsigned long)(ci.xclk_src_hz / ci.xclk_hz));
 	else
-		camera_out(&o, "xclk:    stopped (PA2 driven low)\r\n");
+		camera_out(&o, "xclk     : stopped (PA2 driven low)\r\n");
 	/* Everything below the kernel clock is a compile-time constant (phase
 	   3c-2 folded away the `tune` knobs), so it is spelled out rather than
 	   read back.  The kernel clock is not: it is what the SCCB TIMINGR
 	   constants were computed against, and 0.0 MHz here means the mux moved
 	   off rcc_pclk4. */
-	camera_out(&o, "sccb:    I2C4 PF14/PF15, 100 kHz nominal, kernel %lu.%lu MHz, "
+	camera_out(&o, "sccb     : I2C4 PF14/PF15, 100 kHz nominal, kernel %lu.%lu MHz, "
 	           "split reads, board pull-ups\r\n",
 	           (unsigned long)(ci.i2c_ker_hz / 1000000u),
 	           (unsigned long)(ci.i2c_ker_hz % 1000000u / 100000u));
-	camera_out(&o, "lines:   PWDN PE7 active high, RESETB PH12 active low\r\n");
-	camera_out(&o, "dcmi:    8-bit, PCK rising, VS/HS low, DMA2_Stream1 -> "
+	camera_out(&o, "lines    : PWDN PE7 active high, RESETB PH12 active low\r\n");
+	camera_out(&o, "dcmi     : 8-bit, PCK rising, VS/HS low, DMA2_Stream1 -> "
 	           "AXI-SRAM bands\r\n");
 #if BSP_ENABLE_LCD
 	{
@@ -249,7 +249,7 @@ void camera_svc_info(struct camera_op_result *res,
 		/* Derived, not switched (issue #142): the preview is what the panel
 		   shows while the camera streams AND the display is on. */
 		camera_out_n(&o, line, sizeof line,
-		             "preview: %s (%u AXI-SRAM bands of %u rows, rotated to "
+		             "preview  : %s (%u AXI-SRAM bands of %u rows, rotated to "
 		             "320x240 landscape), shown %lu dropped %lu, "
 		             "last blit %lu us\r\n",
 		             camera_band_streaming()
@@ -261,11 +261,11 @@ void camera_svc_info(struct camera_op_result *res,
 		             (unsigned long)blit_us);
 	}
 #endif
-	camera_out(&o, "sensor cfg: %s, DVP byte swap on, %s\r\n",
+	camera_out(&o, "sensor cfg : %s, DVP byte swap on, %s\r\n",
 	           ci.configured ? "QVGA RGB565 loaded" : "not loaded (lazy)",
 	           camera_get_orient());
 	if (camera_get_mode(&m) == CAM_OK)
-		camera_out(&o, "frame:   %ux%u %s (%lu bytes) -- %s\r\n",
+		camera_out(&o, "frame    : %ux%u %s (%lu bytes) -- %s\r\n",
 		           (unsigned)m.width, (unsigned)m.height, m.format,
 		           (unsigned long)m.frame_bytes,
 		           ci.frame_valid ? "captured" : "none yet");
@@ -529,17 +529,17 @@ void camera_svc_capture_report(struct camera_svc_capture_report *rep,
 	}
 	camera_res_ok(res);
 
-	camera_out(&o, "frame: %ux%u %s (%lu bytes)\r\n",
+	camera_out(&o, "frame    : %ux%u %s (%lu bytes)\r\n",
 	           (unsigned)r.m.width, (unsigned)r.m.height, r.m.format,
 	           (unsigned long)r.m.frame_bytes);
 	for (int k = 0; k < 3; k++)
-		camera_out(&o, "%s: min %3lu  max %3lu  mean %3lu\r\n", chan[k],
+		camera_out(&o, "%-8s : min %3lu  max %3lu  mean %3lu\r\n", chan[k],
 		           (unsigned long)r.st.min[k], (unsigned long)r.st.max[k],
 		           (unsigned long)(r.st.npx ? r.st.sum[k] / r.st.npx : 0u));
 	/* The banding metric: the largest jump between two adjacent rows' channel
 	   means (x100).  A settled frame is single digits; a gain change landing
 	   mid-readout shows up as hundreds, at the row where it landed. */
-	camera_out(&o, "seam: row %3lu  dR %lu.%02lu  dG %lu.%02lu  dB %lu.%02lu\r\n",
+	camera_out(&o, "seam     : row %3lu  dR %lu.%02lu  dG %lu.%02lu  dB %lu.%02lu\r\n",
 	           (unsigned long)r.seam.row,
 	           (unsigned long)(r.seam.d[0] / 100u), (unsigned long)(r.seam.d[0] % 100u),
 	           (unsigned long)(r.seam.d[1] / 100u), (unsigned long)(r.seam.d[1] % 100u),
@@ -734,31 +734,31 @@ void camera_svc_stream_report(struct camera_op_result *res,
 	if (st.never_started)
 		return;
 
-	camera_out(&o, "frames:    %lu\r\n", (unsigned long)s.frames);
-	camera_out(&o, "elapsed:   %lu ms\r\n", (unsigned long)s.elapsed_ms);
+	camera_out(&o, "frames   : %lu\r\n", (unsigned long)s.frames);
+	camera_out(&o, "elapsed  : %lu ms\r\n", (unsigned long)s.elapsed_ms);
 	if (s.elapsed_ms != 0u) {
 		uint32_t f10 = (uint32_t)((uint64_t)s.frames * 10000u / s.elapsed_ms);
 
-		camera_out(&o, "fps:       %lu.%lu\r\n", (unsigned long)(f10 / 10u),
+		camera_out(&o, "fps      : %lu.%lu\r\n", (unsigned long)(f10 / 10u),
 		           (unsigned long)(f10 % 10u));
 	}
-	camera_out(&o, "ovr dcmi:  %lu\r\n", (unsigned long)s.dcmi_ovr);
+	camera_out(&o, "ovr dcmi : %lu\r\n", (unsigned long)s.dcmi_ovr);
 	/* The figure of merit for the OCTOSPI1 contention work: DMA FIFO errors
 	   are tolerated (they do not stop the stream) but their RATE says how
 	   close the bus is to not keeping up.  owhinata/wio-lite-ai#35 expects
 	   zero: the DCMI writes AXI-SRAM and never touches OCTOSPI1 at all. */
-	camera_out(&o, "dma fe:    %lu\r\n", (unsigned long)s.dma_fe);
+	camera_out(&o, "dma fe   : %lu\r\n", (unsigned long)s.dma_fe);
 	if (s.elapsed_ms != 0u) {
 		uint32_t e10 = (uint32_t)((uint64_t)s.dma_fe * 10000u / s.elapsed_ms);
 
-		camera_out(&o, "dma fe/s:  %lu.%lu\r\n", (unsigned long)(e10 / 10u),
+		camera_out(&o, "dma fe/s : %lu.%lu\r\n", (unsigned long)(e10 / 10u),
 		           (unsigned long)(e10 % 10u));
 	}
-	camera_out(&o, "band late: %lu\r\n", (unsigned long)s.band_late);
-	camera_out(&o, "band torn: %lu\r\n", (unsigned long)s.band_torn);
-	camera_out(&o, "band sync: %lu frame ends off a band boundary\r\n",
+	camera_out(&o, "band late : %lu\r\n", (unsigned long)s.band_late);
+	camera_out(&o, "band torn : %lu\r\n", (unsigned long)s.band_torn);
+	camera_out(&o, "band sync : %lu frame ends off a band boundary\r\n",
 	           (unsigned long)s.band_desync);
-	camera_out(&o, "bands:     2 x %lu B in AXI-SRAM (%lu rows each)\r\n",
+	camera_out(&o, "bands    : 2 x %lu B in AXI-SRAM (%lu rows each)\r\n",
 	           (unsigned long)CAMERA_BAND_BYTES,
 	           (unsigned long)CAMERA_BAND_ROWS);
 }

@@ -99,11 +99,19 @@ static int parse_color(const char *s, uint16_t *out)
 	return -1;
 }
 
+/* The one sentence for every refusal while `sdram test` holds the display
+   (issue #152, ltdc_scanout_hold()). */
+#define LCD_HELD_MSG "lcd: display is held by `sdram test`\r\n"
+
 /* Shared guard for the drawing/backlight/info commands. */
 static int lcd_ready(struct cli_instance *sh)
 {
 	if (!ltdc_is_up()) {
 		cli_error(sh, "lcd: display not initialized\r\n");
+		return 0;
+	}
+	if (ltdc_scanout_held()) {
+		cli_error(sh, LCD_HELD_MSG);
 		return 0;
 	}
 	if (ltdc_scanout_off()) {
@@ -166,7 +174,11 @@ static int cmd_lcd_info(struct cli_instance *sh, int argc, char **argv)
    warn (but do not fail the command) if the tear-free swap did not land. */
 static void lcd_present(struct cli_instance *sh)
 {
-	if (ltdc_flip() != 0)
+	int rc = ltdc_flip();
+
+	if (rc == LTDC_ERR_HELD)
+		cli_warn(sh, LCD_HELD_MSG);
+	else if (rc != 0)
 		cli_warn(sh, "lcd: present failed\r\n");
 }
 
@@ -260,7 +272,8 @@ static int cmd_lcd_anim(struct cli_instance *sh, int argc, char **argv)
 		rc = ltdc_flip();
 		ltdc_unlock_frame();
 		if (rc != 0) {
-			cli_error(sh, "lcd: present failed\r\n");
+			cli_error(sh, rc == LTDC_ERR_HELD ? LCD_HELD_MSG
+			                                  : "lcd: present failed\r\n");
 			return 1;
 		}
 
@@ -294,7 +307,8 @@ static int cmd_lcd_blit(struct cli_instance *sh, int argc, char **argv)
 	rc = ltdc_flip();
 	ltdc_unlock_frame();
 	if (rc != 0) {
-		cli_error(sh, "lcd: present failed\r\n");
+		cli_error(sh, rc == LTDC_ERR_HELD ? LCD_HELD_MSG
+		                                  : "lcd: present failed\r\n");
 		return 1;
 	}
 	return 0;
@@ -316,7 +330,12 @@ static int cmd_lcd_on(struct cli_instance *sh, int argc, char **argv)
 		cli_error(sh, "lcd: display not initialized\r\n");
 		return 1;
 	}
-	ltdc_set_scanout(true);   /* LTDCEN + raise backlight; refused under GUIX */
+	/* Refused while `sdram test` holds the display (issue #152): the panel
+	   stays dark, backlight included, until the test restores it. */
+	if (ltdc_set_scanout(true) == LTDC_ERR_HELD) {  /* refused under GUIX too */
+		cli_error(sh, LCD_HELD_MSG);
+		return 1;
+	}
 	ltdc_backlight(true);     /* ensure DISP/BL asserted even if scanout owned */
 	return 0;
 }
@@ -330,7 +349,10 @@ static int cmd_lcd_off(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	}
 	ltdc_backlight(false);    /* DISP/BL off */
-	ltdc_set_scanout(false);  /* stop SDRAM reads; left running under GUIX */
+	/* stop SDRAM reads; left running under GUIX.  While `sdram test` holds the
+	   display (issue #152) scan-out is already off and this only keeps it off
+	   after the test. */
+	ltdc_set_scanout(false);
 	return 0;
 }
 

@@ -15,7 +15,11 @@
  *   - the reload's answer is whether a MODEL is left, not whether the handle is
  *     open: a refused load from empty must read EMPTY ("nothing is loaded"),
  *     not PREVIOUS, through the shared table the adapter uses;
- *   - `arena` is the backend's reservation and `used` goes to 0 with no model.
+ *   - `arena` is the backend's reservation and `used` goes to 0 with no model;
+ *   - the .sdram.ai claim `sdram test` takes (issue #152): refused while the
+ *     session is held, while the first open is building and while a model is
+ *     loaded; while it is held the session cannot be taken, the first open
+ *     builds nothing, and the load region and reload refuse.
  *
  * Built twice.  With TEST_FIRST_BUILD_FAILS the stub's one adoption of the
  * built-in model fails: the first open reports it, and the second -- nn.c's
@@ -52,6 +56,7 @@ static struct {
 	int has;            /* a model is there                             */
 	int open_calls;
 	int refuse_next;    /* the next reload of SD bytes is refused       */
+	int claim_in_open;  /* nn_scratch_claim() answer seen during a build */
 	int null_handle;    /* answer a reload with NULL (contract breach)  */
 	struct nn_tensor in;
 } stub;
@@ -65,6 +70,8 @@ static int st_open(void **impl)
 {
 	stub.open_calls++;
 	if (!stub.adopted) {
+		/* Mid-build the open latch is taken: a claim must be refused. */
+		stub.claim_in_open = nn_scratch_claim();
 		stub.adopted = 1;       /* the one adoption, whatever its outcome */
 		stub_builds++;
 #ifdef TEST_FIRST_BUILD_FAILS
@@ -169,8 +176,28 @@ int main(void)
 	assert(nn_model_reload(NULL, 0u, NULL, &after) == -1 && after == 0);
 	assert(stub.open_calls == 0);
 
-	/* The first open adopts the built-in model; the second reaches nothing. */
+	/* [!] The .sdram.ai claim on a fresh boot (issue #152): nothing loaded,
+	 * nothing using nn, so it is granted -- and while it is held the session
+	 * cannot be taken and the FIRST open builds nothing. */
+	assert(nn_scratch_claim() == 0);
+	assert(nn_scratch_claim() == -1);                 /* one holder      */
+	assert(nn_session_try_acquire() == NN_ERR_SCRATCH_HELD);
+	assert(nn_model_open(&m) == NN_ERR_SCRATCH_HELD);
+	assert(stub.open_calls == 0 && stub_builds == 0);  /* nothing built   */
+	assert(nn_model_load_region(&buf, &cap) == NN_ERR_SCRATCH_HELD);
+	assert(!nn_model_loaded());
+	nn_scratch_release();
+
+	/* Refused while the session is held, granted again once it is not. */
+	assert(nn_session_try_acquire() == 0);
+	assert(nn_scratch_claim() == -1);
+	nn_session_release();
+
+	/* The first open adopts the built-in model; the second reaches nothing.
+	 * The claim tried mid-build was refused (the open latch was taken). */
+	m = NULL;
 	assert(nn_model_open(&m) == 0 && m != NULL);
+	assert(stub.claim_in_open == -1);
 	assert(nn_model_open(&m2) == 0 && m2 == m);
 	assert(stub.open_calls == 1 && stub_builds == 1);
 	assert(nn_model_present(m));
@@ -188,6 +215,23 @@ int main(void)
 	assert(nn_input_count(m) == 0 && nn_activations_bytes(m) == 0u);
 	assert(nn_arena_reserved() == 524288u);       /* a fact of the build */
 	assert(nn_run(m) != 0);
+
+	/* The claim: refused over a model (above, it was loaded), granted on the
+	 * empty singleton.  An open now returns the singleton as it is and builds
+	 * nothing; a reload refuses and leaves it empty. */
+	assert(nn_model_reload(NULL, 0u, NULL, &after) == 0 && nn_model_present(m));
+	assert(nn_scratch_claim() == -2);
+	assert(nn_model_release() == 0 && !nn_model_present(m));
+	assert(nn_scratch_claim() == 0);
+	assert(nn_session_try_acquire() == NN_ERR_SCRATCH_HELD);
+	assert(nn_model_open(&m2) == 0 && m2 == m && stub.open_calls == 1);
+	after = -1;
+	assert(nn_model_reload(NULL, 0u, NULL, &after) == NN_ERR_SCRATCH_HELD);
+	assert(after == 0 && !nn_model_present(m));
+	assert(nn_model_load_region(&buf, &cap) == NN_ERR_SCRATCH_HELD);
+	nn_scratch_release();
+	assert(nn_session_try_acquire() == 0);
+	nn_session_release();
 
 	/* [!] A refused load FROM EMPTY: the handle is open, but no model is
 	 * left -- "nothing is loaded", not "the previous model is still active". */

@@ -195,6 +195,35 @@ int nn_model_release(void);
 int  nn_session_try_acquire(void);
 void nn_session_release(void);
 
+/**
+ * Returned by nn_session_try_acquire(), the first nn_model_open() after boot,
+ * nn_model_load_region() and nn_model_reload() while nn_scratch_claim() is held.
+ * Retryable: nothing was built or changed, and the same call succeeds once
+ * `sdram test` has finished.  Distinct from the backends' small negatives.
+ */
+#define NN_ERR_SCRATCH_HELD  (-50)
+
+/**
+ * The memory owner's side of `sdram test` (issue #152): .sdram.ai (the arena,
+ * the model slots, the decoder scratch) belongs to this layer, so the test asks
+ * HERE before it writes over it -- the same shape as camera_scratch_claim().
+ *
+ * nn_scratch_claim() succeeds (0) only when no model is loaded and nothing is
+ * using nn: it refuses with -1 while the session is held, the first open is in
+ * flight or another claim is held, and with -2 while a model is loaded.  It
+ * NEVER unloads -- the operator does that with `nn model unload`.  The check
+ * and the set are one PRIMASK critical section.
+ *
+ * While it is held nothing can put anything into .sdram.ai: the session cannot
+ * be taken (so `nn model load` / `unload`, `nn bench`, `nn run` and `nn stream`
+ * are all refused), the first open builds nothing, and the load region and
+ * reload refuse -- each with NN_ERR_SCRATCH_HELD.  An open that already
+ * happened returns the (empty) singleton as before; it builds nothing.
+ * nn_scratch_release() ends it.  Interrupt-guarded and thread-agnostic.
+ */
+int  nn_scratch_claim(void);
+void nn_scratch_release(void);
+
 #ifdef __cplusplus
 }
 #endif

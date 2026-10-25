@@ -560,9 +560,42 @@ camera res | format | fps | set   (this board's own)
   (issue #150, `camera_scratch_claim()` under the camera lock).  It is refused
   while a stream runs or is held; while it runs, `camera capture` and `camera
   stream start` from any console are refused as busy, `nn stream start` / `nn
-  run` fail with "the camera could not be started -- `camera stream start` says
-  why", and afterwards `save` / `send` answer `no captured frame` until the next
-  capture.
+  run` are refused, and afterwards `save` / `send` answer `no captured frame`
+  until the next capture.
+- **`sdram test` also claims `.sdram.ai` from nn and skips live Ethernet state**
+  (issue #152).  The NN arena, model slots and decoder scratch live in
+  `.sdram.ai` (bank 3), owned by `port/nn`, so the test takes
+  `nn_scratch_claim()` right after the camera claim and keeps it for its whole
+  run.  While it is held no nn session can be taken (`nn model load` /
+  `unload`, `nn bench`, `nn run` and `nn stream start` are refused as busy,
+  worded ``.sdram.ai is held by `sdram test`; try again when it finishes`` where
+  the command prints a reason), and the first model open after boot -- which is
+  where `tflm` adopts its built-in model into the arena -- builds nothing: a
+  fresh-boot `nn info` answers busy instead of adopting it, and adopts it
+  normally once the test is over.  The claim refuses while another nn command
+  or a stream is active, or while the first open is building (`sdram: nn is
+  busy; wait for the nn command / stream to finish`), and while a model is
+  loaded (``sdram: a model is loaded in .sdram.ai; run `nn model unload`
+  first``) -- a model left loaded over test patterns would run on garbage, and
+  the test never unloads it for you.  Bank 2 (`.sdram.eth`) holds the ETH DMA
+  descriptors and the NetX pool; the IP instance never goes down once boot
+  created it, so while the network is up the test skips the whole bank
+  (`sdram: bank2 (0xC0400000..0xC05FFFFF) skipped: the network is up (ETH DMA
+  descriptors live there)`) and the summary counts only what was tested (6144
+  KB for a full run).  The MJPEG server needs no guard of its own: it reads the
+  camera stream, which the camera claim already refuses.
+- **`sdram test` holds the display** (issue #152, `ltdc_scanout_hold()` under
+  the LTDC lock).  `ltdc_fb` sits in bank 0, so the test is refused while GUIX
+  owns the display (`run 'gui stop' first`); otherwise scan-out is stopped
+  before the first write.  Until the test ends, `lcd on`, `lcd fill` / `bar` /
+  `grad` / `clear` / `anim` / `blit` and `gui start` are refused with ``display
+  is held by `sdram test` ``, the driver's draw helpers draw nothing and flips are
+  refused, so nothing but the test writes the framebuffers.  `lcd off` is
+  accepted and only means the display stays off afterwards; `lcd info` only
+  reads.  At the end both buffers are repainted black, and scan-out and the
+  backlight each return to what they were (recorded apart: under GUIX `lcd off`
+  drops only the backlight).  `nn run` / `nn stream start` during the test answer busy with
+  ``.sdram.ai is held by `sdram test`; try again when it finishes``.
 - **`camera off` with the operator's stream running** prints `camera: stopping
   stream before power off`, waits for THAT stream to end and then cuts the rail
   (`camera: power off`).  A holder other than the operator refuses it (`camera:

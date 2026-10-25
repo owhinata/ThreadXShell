@@ -92,6 +92,10 @@ const struct nn_backend_info *nn_backend(void)
 }
 
 static volatile int g_opening;      /* one thread owns the singleton open/init */
+/* `sdram test` holds .sdram.ai (nn_scratch_claim(), issue #152).  Written only
+   under PRIMASK, beside the session flag and the open latch it is checked
+   against. */
+static volatile int nn_scratch_claimed;
 
 int nn_model_open(struct nn_model **out)
 {
@@ -113,6 +117,15 @@ int nn_model_open(struct nn_model **out)
 			__set_PRIMASK(primask);
 			*out = &g_model;
 			return 0;
+		}
+		/* [!] The first open builds into .sdram.ai (the tflm backend adopts
+		 * its built-in model there): refused, before anything is built,
+		 * while `sdram test` holds the memory (issue #152).  Decided in the
+		 * same critical section that takes the latch, so a claim and a build
+		 * can never both be in. */
+		if (nn_scratch_claimed) {
+			__set_PRIMASK(primask);
+			return NN_ERR_SCRATCH_HELD;
 		}
 		if (!g_opening) { g_opening = 1; owner = 1; }
 		__set_PRIMASK(primask);
@@ -240,6 +253,8 @@ int nn_model_load_region(void **buf, uint32_t *cap)
 {
 	if (!buf || !cap)
 		return -1;
+	if (nn_scratch_claimed)
+		return NN_ERR_SCRATCH_HELD;     /* the region is in .sdram.ai (#152) */
 	if (!nn_backend_vt_selected.load_region)
 		return -2;                  /* backend has no runtime model buffer */
 	return nn_backend_vt_selected.load_region(buf, cap);
@@ -256,6 +271,8 @@ int nn_model_reload(const void *data, uint32_t len, const char *name,
 		*model_after = nn_model_present(&g_model);
 	if (!g_model.open)                  /* caller must nn_model_open() first */
 		return -1;
+	if (nn_scratch_claimed)
+		return NN_ERR_SCRATCH_HELD;     /* `sdram test` holds .sdram.ai (#152) */
 	if (!nn_backend_vt_selected.reload)
 		return -2;                      /* backend cannot swap models        */
 
@@ -304,8 +321,12 @@ int nn_session_try_acquire(void)
 	int ok;
 
 	__disable_irq();
-	if (!nn_session_busy) { nn_session_busy = 1; ok = 1; } else { ok = 0; }
+	if (nn_scratch_claimed)
+		ok = -1;                    /* `sdram test` holds .sdram.ai (#152) */
+	else if (!nn_session_busy) { nn_session_busy = 1; ok = 1; } else { ok = 0; }
 	__set_PRIMASK(primask);
+	if (ok < 0)
+		return NN_ERR_SCRATCH_HELD;
 	return ok ? 0 : -1;
 }
 
@@ -315,5 +336,39 @@ void nn_session_release(void)
 
 	__disable_irq();
 	nn_session_busy = 0;
+	__set_PRIMASK(primask);
+}
+
+/* ---- .sdram.ai claim for `sdram test` (issue #152) --------------------------- */
+
+int nn_scratch_claim(void)
+{
+	uint32_t primask = __get_PRIMASK();
+	int rc;
+
+	/* [!] ONE CRITICAL SECTION for every question and the set.  The session
+	 * flag, the open latch and the claim are all written under PRIMASK, and a
+	 * model can appear only under the session (load) or under the latch (the
+	 * first open) -- so with both free here, nn_model_loaded() cannot change
+	 * before the claim is set, and once it is set neither can be taken. */
+	__disable_irq();
+	if (nn_scratch_claimed || nn_session_busy || g_opening)
+		rc = -1;                    /* an nn command, a stream or a test */
+	else if (nn_model_loaded())
+		rc = -2;                    /* a model lives in .sdram.ai         */
+	else {
+		nn_scratch_claimed = 1;
+		rc = 0;
+	}
+	__set_PRIMASK(primask);
+	return rc;
+}
+
+void nn_scratch_release(void)
+{
+	uint32_t primask = __get_PRIMASK();
+
+	__disable_irq();
+	nn_scratch_claimed = 0;
 	__set_PRIMASK(primask);
 }

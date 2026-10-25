@@ -93,6 +93,18 @@ static bool         ltdc_fault;
 static bool         ltdc_gui_owned;
 /* LTDC scanout stopped (lcd off, owhinata/stm32f746g-disco#66) */
 static bool         ltdc_disabled;
+/* `sdram test` holds the display (issue #152): ltdc_scanout_hold() */
+static bool         ltdc_held;
+/* scan-out to restore at ltdc_scanout_unhold(); an `lcd off` while held
+   clears it */
+static bool         ltdc_held_restore;
+/* DISP / backlight to restore at ltdc_scanout_unhold(), recorded apart from
+   scan-out (under GUIX `lcd off` drops only the backlight); `lcd off` while
+   held clears it */
+static bool         ltdc_held_bl;
+static void         ltdc_bl_pins(bool on);
+/* DISP / backlight as last driven (issue #142, ltdc_display_on()) */
+static volatile bool ltdc_shown;
 /* posted by the reload-ready IRQ */
 static TX_SEMAPHORE ltdc_reload_sem;
 /* serializes drawing + flip */
@@ -150,7 +162,7 @@ bool ltdc_gui_take(bool on)
     (owhinata/stm32f746g-disco#66) are
 	   both set under ltdc_lock, so the decision cannot race a concurrent flip
 	   or lcd off.  GUIX cannot run/flip with scanout off. */
-	if (ltdc_fault || (on && ltdc_disabled)) {
+	if (ltdc_fault || (on && (ltdc_disabled || ltdc_held))) {
 		ltdc_unlock_frame();
 		return false;
 	}
@@ -178,14 +190,28 @@ int ltdc_set_scanout(bool on)
 		ltdc_unlock_frame();
 		return LTDC_ERR_STATE;
 	}
+	/* [!] While `sdram test` holds the display (issue #152) scan-out stays off:
+	   `lcd on` is refused (retryable), and `lcd off` only changes what the
+	   unhold restores -- the controller is already stopped. */
+	if (ltdc_held) {
+		if (on) {
+			ltdc_unlock_frame();
+			return LTDC_ERR_HELD;
+		}
+		ltdc_held_restore = false;
+		ltdc_held_bl = false;
+		ltdc_bl_pins(false);
+		ltdc_unlock_frame();
+		return LTDC_OK;
+	}
 	if (on) {
 		__HAL_LTDC_ENABLE(&hltdc);
 		ltdc_disabled = false;
-		ltdc_backlight(true);
+		ltdc_bl_pins(true);
 	} else {
 		__HAL_LTDC_DISABLE(&hltdc);
 		ltdc_disabled = true;
-		ltdc_backlight(false);
+		ltdc_bl_pins(false);
 	}
 	ltdc_unlock_frame();
 	return LTDC_OK;
@@ -206,21 +232,71 @@ bool ltdc_gui_owns(void)
 	return ltdc_gui_owned;
 }
 
-/* Clear BOTH framebuffers to black (owhinata/stm32f746g-disco#65).  Low-level: it writes
-   ltdc_fb
-   directly under ltdc_lock and does NOT go through the scanout-disabled draw
-   refusal, so it works while scanout is OFF -- a destructive `sdram test`
-   repaints the clobbered .sdram buffers with this before re-enabling scanout.
-   No-op if the LTDC never came up or is faulted.  Thread-context only. */
-void ltdc_clear(void)
+int ltdc_scanout_hold(void)
 {
-	if (!ltdc_is_up())
-		return;
+	if (!ltdc_up)               /* nothing scans out or draws: nothing to hold */
+		return LTDC_OK;
 	ltdc_lock_frame();
-	for (uint32_t b = 0; b < 2u; b++)
-		for (uint32_t i = 0; i < LTDC_LCD_WIDTH * LTDC_LCD_HEIGHT; i++)
-			ltdc_fb[b][i] = LTDC_RGB565_BLACK;
+	/* Decided under ltdc_lock, which every draw helper, flip, gui take and
+	   scan-out change takes: none can be half-way through when this returns. */
+	if (ltdc_gui_owned) {
+		ltdc_unlock_frame();
+		return LTDC_ERR_STATE;
+	}
+	if (ltdc_held) {
+		ltdc_unlock_frame();
+		return LTDC_ERR_HELD;
+	}
+	ltdc_held_restore = !ltdc_fault && !ltdc_disabled;
+	ltdc_held_bl = ltdc_shown;
+	if (ltdc_held_restore) {
+		__HAL_LTDC_DISABLE(&hltdc);
+		ltdc_disabled = true;
+	}
+	ltdc_bl_pins(false);        /* dark for the whole hold */
+	ltdc_held = true;
 	ltdc_unlock_frame();
+	return LTDC_OK;
+}
+
+int ltdc_scanout_unhold(void)
+{
+	int rc = LTDC_OK;
+
+	if (!ltdc_up)
+		return LTDC_OK;
+	ltdc_lock_frame();
+	if (!ltdc_held) {
+		ltdc_unlock_frame();
+		return LTDC_OK;
+	}
+	/* Both buffers repainted black whatever is restored: the holder wrote
+	   over them, and a later `lcd on` must not show its patterns. */
+	if (!ltdc_fault)
+		for (uint32_t b = 0; b < 2u; b++)
+			for (uint32_t i = 0; i < LTDC_LCD_WIDTH * LTDC_LCD_HEIGHT; i++)
+				ltdc_fb[b][i] = LTDC_RGB565_BLACK;
+	if (ltdc_held_restore) {
+		if (ltdc_fault) {
+			rc = LTDC_ERR_STATE;
+		} else {
+			__HAL_LTDC_ENABLE(&hltdc);
+			ltdc_disabled = false;
+		}
+	}
+	/* Exactly what it was at the hold, unless `lcd off` ran meanwhile. */
+	if (ltdc_held_bl)
+		ltdc_bl_pins(true);
+	ltdc_held = false;
+	ltdc_held_restore = false;
+	ltdc_held_bl = false;
+	ltdc_unlock_frame();
+	return rc;
+}
+
+bool ltdc_scanout_held(void)
+{
+	return ltdc_held;
 }
 
 uint32_t ltdc_pixel_clock_hz(void)
@@ -230,15 +306,17 @@ uint32_t ltdc_pixel_clock_hz(void)
 
 /* The display's on/off as the driver last set it (issue #142): what `lcd on|off`
    means to a reader, which is not the scanout -- under GUIX `lcd off` drops
-   only DISP / backlight and the LTDC keeps scanning. */
-static volatile bool ltdc_shown;
+   only DISP / backlight and the LTDC keeps scanning.  (Declared with the
+   other flags above: the hold records it.) */
 
 bool ltdc_display_on(void)
 {
 	return ltdc_shown;
 }
 
-void ltdc_backlight(bool on)
+/* DISP + backlight pins, raw: the driver's own calls (init, scan-out changes,
+   hold / unhold), already under ltdc_lock or before it exists. */
+static void ltdc_bl_pins(bool on)
 {
 	GPIO_PinState s = on ? GPIO_PIN_SET : GPIO_PIN_RESET;
 
@@ -246,6 +324,29 @@ void ltdc_backlight(bool on)
 
 	HAL_GPIO_WritePin(LCD_DISP_PORT, LCD_DISP_PIN, s);
 	HAL_GPIO_WritePin(LCD_BL_CTRL_PORT, LCD_BL_CTRL_PIN, s);
+}
+
+void ltdc_backlight(bool on)
+{
+	if (!ltdc_up) {             /* lock/objects may not exist yet */
+		ltdc_bl_pins(on);
+		return;
+	}
+	ltdc_lock_frame();
+	/* [!] While `sdram test` holds the display (issue #152) the panel stays
+	   dark: "on" is refused here, under the lock, so no caller can relight it
+	   between a hold and its own scan-out step.  "Off" is applied and also
+	   wins over the restore. */
+	if (ltdc_held) {
+		if (!on) {
+			ltdc_held_bl = false;
+			ltdc_bl_pins(false);
+		}
+		ltdc_unlock_frame();
+		return;
+	}
+	ltdc_bl_pins(on);
+	ltdc_unlock_frame();
 }
 
 uint32_t ltdc_errors(bool clear)
@@ -494,7 +595,7 @@ static void ltdc_gpio_init(void)
 	HAL_GPIO_Init(LCD_DISP_PORT, &g);
 	g.Pin = LCD_BL_CTRL_PIN;
 	HAL_GPIO_Init(LCD_BL_CTRL_PORT, &g);
-	ltdc_backlight(false);
+	ltdc_bl_pins(false);
 }
 
 static int ltdc_controller_init(void)
@@ -606,7 +707,7 @@ int ltdc_init(void)
 
 	rc = ltdc_controller_init();
 	if (rc != LTDC_OK) {
-		ltdc_backlight(false);
+		ltdc_bl_pins(false);
 		(void)HAL_LTDC_DeInit(&hltdc);
 		__HAL_RCC_DMA2D_CLK_DISABLE();
 		__HAL_RCC_LTDC_CLK_DISABLE();
@@ -628,7 +729,7 @@ int ltdc_init(void)
 	HAL_NVIC_SetPriority(DMA2D_IRQn, 10, 0);
 	HAL_NVIC_EnableIRQ(DMA2D_IRQn);
 
-	ltdc_backlight(true);
+	ltdc_bl_pins(true);
 
 	ltdc_up = true;
 	LOG_INF("RK043FN48H up: 480x272 RGB565 double-buffered, LCD_CLK 4.8 MHz, "
@@ -651,7 +752,8 @@ void ltdc_fill(uint16_t rgb565)
 	if (!ltdc_is_up())
 		return;       /* no-op when down (lock/objects may not exist) */
 	ltdc_lock_frame();
-	if (ltdc_gui_owned) {        /* GUIX owns the display: shell draw is a no-op */
+	if (ltdc_gui_owned || ltdc_held) {  /* GUIX owns it / `sdram test` holds it:
+	                                       shell draw is a no-op (#55, #152) */
 		ltdc_unlock_frame();
 		return;
 	}
@@ -670,7 +772,8 @@ void ltdc_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 	if (!ltdc_is_up())
 		return;       /* no-op when down (lock/objects may not exist) */
 	ltdc_lock_frame();
-	if (ltdc_gui_owned) {        /* GUIX owns the display: shell draw is a no-op */
+	if (ltdc_gui_owned || ltdc_held) {  /* GUIX owns it / `sdram test` holds it:
+	                                       shell draw is a no-op (#55, #152) */
 		ltdc_unlock_frame();
 		return;
 	}
@@ -701,7 +804,8 @@ void ltdc_blit(const uint16_t *src, uint16_t x, uint16_t y,
 	if (!ltdc_is_up())
 		return;       /* no-op when down (lock/objects may not exist) */
 	ltdc_lock_frame();
-	if (ltdc_gui_owned) {        /* GUIX owns the display: shell draw is a no-op */
+	if (ltdc_gui_owned || ltdc_held) {  /* GUIX owns it / `sdram test` holds it:
+	                                       shell draw is a no-op (#55, #152) */
 		ltdc_unlock_frame();
 		return;
 	}
@@ -737,7 +841,8 @@ void ltdc_colorbar(void)
 	if (!ltdc_is_up())
 		return;       /* no-op when down (lock/objects may not exist) */
 	ltdc_lock_frame();
-	if (ltdc_gui_owned) {        /* GUIX owns the display: shell draw is a no-op */
+	if (ltdc_gui_owned || ltdc_held) {  /* GUIX owns it / `sdram test` holds it:
+	                                       shell draw is a no-op (#55, #152) */
 		ltdc_unlock_frame();
 		return;
 	}
@@ -766,7 +871,8 @@ void ltdc_blit_demo(void)
 	if (!ltdc_is_up())
 		return;       /* no-op when down (lock/objects may not exist) */
 	ltdc_lock_frame();
-	if (ltdc_gui_owned) {        /* GUIX owns the display: shell draw is a no-op */
+	if (ltdc_gui_owned || ltdc_held) {  /* GUIX owns it / `sdram test` holds it:
+	                                       shell draw is a no-op (#55, #152) */
 		ltdc_unlock_frame();
 		return;
 	}
@@ -791,7 +897,8 @@ void ltdc_gradient(void)
 	if (!ltdc_is_up())
 		return;       /* no-op when down (lock/objects may not exist) */
 	ltdc_lock_frame();
-	if (ltdc_gui_owned) {        /* GUIX owns the display: shell draw is a no-op */
+	if (ltdc_gui_owned || ltdc_held) {  /* GUIX owns it / `sdram test` holds it:
+	                                       shell draw is a no-op (#55, #152) */
 		ltdc_unlock_frame();
 		return;
 	}
@@ -829,6 +936,9 @@ static int ltdc_flip_locked(void)
 
 	if (!ltdc_up || ltdc_fault)
 		return LTDC_ERR_STATE;
+	if (ltdc_held)
+		/* `sdram test` holds the display (issue #152) */
+		return LTDC_ERR_HELD;
 	if (ltdc_disabled)
 		/* scanout off (owhinata/stm32f746g-disco#66): no VBR reload would come */
 		return LTDC_ERR_STATE;

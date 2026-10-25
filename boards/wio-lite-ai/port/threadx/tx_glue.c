@@ -134,7 +134,7 @@ void tx_glue_profile_enable(void)
  * bitten by exactly that shape of assumption before (src/system_stm32h7xx.c on
  * D1CorePrescTable).  port/camera/camera.c derives TIM5's the same way, for the same
  * reason; it is static there, so this is a second copy rather than a shared helper --
- * that file is behind BSP_ENABLE_CAMERA and this one must work without it.
+ * the timer base belongs to the kernel port, not to the camera driver.
  */
 static uint32_t tx_glue_tim_ker_hz(void)
 {

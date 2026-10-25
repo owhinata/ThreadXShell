@@ -251,8 +251,12 @@ Negative tests for the gate live in `cmake/fixtures/run_fixture_tests.py`.
 | `BSP_ENABLE_SD` | **OFF under tflm**, else ON | SDMMC1 + `sd` |
 | `BSP_ENABLE_LCD` | ON | FPC-40 RGB panel on the LTDC + `lcd` |
 | `BSP_ENABLE_KV` | ON | external NOR on OCTOSPI2 + the config KV store |
-| `BSP_ENABLE_CAMERA` | ON | FPC-24 DVP camera on the DCMI + `camera` |
 | `CONFIG_MLPERF_TINY` | OFF | MLPerf Tiny v1.4 harness + `mlperf` |
+
+The FPC-24 DVP camera (DCMI + `camera`) is not optional on this board: the `nn`
+adapter is built on it (the live `nn stream` path, the producer and worker threads,
+the band sink), so the former `BSP_ENABLE_CAMERA` option was removed (issue #147)
+and `-DBSP_ENABLE_CAMERA=OFF` now stops the configure.
 
 ### Why tflm is the default here and nowhere else (issue #98)
 

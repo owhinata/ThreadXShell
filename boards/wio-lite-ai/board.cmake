@@ -758,47 +758,52 @@ if(BSP_ENABLE_KV)
         "${FDB_DIR}/port/fal/src/fal_partition.c")
 endif()
 
-# The FPC-24 DVP camera.  Phase 1 builds only the sensor-side bring-up
-# (XCLK on TIM5_CH3, SCCB on I2C4, PWDN/RESETB) and the `camera` command; DCMI and
-# DMA arrive in phase 2.  Turn OFF for a firmware that leaves TIM5, I2C4 and the
-# camera pins untouched -- useful when bisecting a timer or D3-domain suspicion.
-option(BSP_ENABLE_CAMERA "Enable the FPC-24 DVP camera (DCMI) and the camera command" ON)
+# The FPC-24 DVP camera (XCLK on TIM5_CH3, SCCB on I2C4, PWDN/RESETB, DCMI +
+# DMA2_Stream1).  NOT optional on this board: the `nn` adapter is built on it (the
+# live `nn stream` path, the producer and worker threads, the band sink), so a
+# camera-less firmware does not link.  The BSP_ENABLE_CAMERA option that claimed
+# otherwise was removed (issue #147); an old command line that still turns it OFF
+# fails here instead of silently building the camera in, and a stale ON in an
+# existing cache is dropped.
+if(DEFINED BSP_ENABLE_CAMERA AND NOT BSP_ENABLE_CAMERA)
+    message(FATAL_ERROR "wio-lite-ai: the camera is not optional (issue #147); "
+                        "remove -DBSP_ENABLE_CAMERA=OFF (or re-run with -UBSP_ENABLE_CAMERA)")
+endif()
+unset(BSP_ENABLE_CAMERA CACHE)
 
 # Driver and command move together -- the `camera` command (shell/cmds/
 # cmd_camera.c over port/camera/camera_svc_wio.c, plus cmds/cmd_camera_board.c)
-# is the only shell caller of port/camera -- and, like the two blocks above, this append must stay BELOW the
-# option().
-if(BSP_ENABLE_CAMERA)
-    list(APPEND SHELL_SOURCES
-        "${BOARD_DIR}/port/camera/camera.c"
-        "${BOARD_DIR}/port/camera/camera_svc_wio.c"  # the shared `camera` command's adapter (#143)
-        "${BOARD_DIR}/port/camera/ov2640_regs.c"
-        # The band stream has two consumers (the preview and
-        # the NN ingest), and port/camera holds exactly one callback: the band
-        # sink, which runs them as two steps (issue #142).  It is
-        # gated on the camera ALONE -- the NN client needs no display, and running
-        # inference with the preview off is the fastest configuration this board has.
-        "${BOARD_DIR}/port/camera/cam_band.c"
-        # ...its steps, and who holds the stream open (issue #142): the
-        # same two shared files f746g-disco runs its camera sink on.
-        "${CMAKE_SOURCE_DIR}/svc/cam_step.c"
-        "${CMAKE_SOURCE_DIR}/svc/cam_holders.c"
-        # The camera -> inference glue.  Camera-only for the same
-        # reason as the mux; the overlay it feeds is drawn from the preview
-        # thread (nn_panel.c below), which is gated on the pair.
-        "${BOARD_DIR}/port/nn/nn_camera.c"     # console side, owns the state
-        "${BOARD_DIR}/port/nn/nn_producer.c"   # ...its camera producer thread (#140)
-        "${BOARD_DIR}/port/nn/nn_worker.c"     # ...its inference worker thread (#140)
-        "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_camera.c"  # the one shared command (#143)
-        "${BOARD_DIR}/cmds/cmd_camera_board.c")
-    # The LCD preview needs BOTH drivers, so it is the one
-    # source gated on the pair.  With either option off there is nothing to glue
-    # and the file is simply not built.
-    if(BSP_ENABLE_LCD)
-        list(APPEND SHELL_SOURCES "${BOARD_DIR}/src/cam_preview.c"
-            # ...and the nn half of its thread (#140): built with the preview.
-            "${BOARD_DIR}/port/nn/nn_panel.c")
-    endif()
+# is the only shell caller of port/camera.  The block stays BELOW the LCD
+# option() above because the preview half reads BSP_ENABLE_LCD.
+list(APPEND SHELL_SOURCES
+    "${BOARD_DIR}/port/camera/camera.c"
+    "${BOARD_DIR}/port/camera/camera_svc_wio.c"  # the shared `camera` command's adapter (#143)
+    "${BOARD_DIR}/port/camera/ov2640_regs.c"
+    # The band stream has two consumers (the preview and
+    # the NN ingest), and port/camera holds exactly one callback: the band
+    # sink, which runs them as two steps (issue #142).  It does NOT depend on
+    # the LCD -- the NN client needs no display, and running inference with
+    # the preview off is the fastest configuration this board has.
+    "${BOARD_DIR}/port/camera/cam_band.c"
+    # ...its steps, and who holds the stream open (issue #142): the
+    # same two shared files f746g-disco runs its camera sink on.
+    "${CMAKE_SOURCE_DIR}/svc/cam_step.c"
+    "${CMAKE_SOURCE_DIR}/svc/cam_holders.c"
+    # The camera -> inference glue.  Independent of the LCD for the same
+    # reason as the band sink; the overlay it feeds is drawn from the preview
+    # thread (nn_panel.c below), which is built only with the LCD.
+    "${BOARD_DIR}/port/nn/nn_camera.c"     # console side, owns the state
+    "${BOARD_DIR}/port/nn/nn_producer.c"   # ...its camera producer thread (#140)
+    "${BOARD_DIR}/port/nn/nn_worker.c"     # ...its inference worker thread (#140)
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_camera.c"  # the one shared command (#143)
+    "${BOARD_DIR}/cmds/cmd_camera_board.c")
+# The LCD preview needs the LCD as well as the camera, so it is the one
+# source gated on BSP_ENABLE_LCD here.  With the LCD off there is nothing to
+# glue and the file is simply not built.
+if(BSP_ENABLE_LCD)
+    list(APPEND SHELL_SOURCES "${BOARD_DIR}/src/cam_preview.c"
+        # ...and the nn half of its thread (#140): built with the preview.
+        "${BOARD_DIR}/port/nn/nn_panel.c")
 endif()
 
 # On-device NN inference.  Unlike the blocks above there is no
@@ -881,17 +886,14 @@ list(APPEND NN_SOURCES "${BOARD_DIR}/port/nn/nn_desc.c"
                        "${CMAKE_SOURCE_DIR}/svc/nn_det_record.c")
 # The other half of that gate: PSRAM buffers a bus master owns, which must stay OUT
 # of the cacheable carve-out.  Named here rather than in the script for the same
-# reason as the DTCM list above -- each belongs to a BSP_ENABLE_* option, and a name
-# demanded from a build that never compiled it is reported as "no such object in the
-# image", which reads like a placement regression and is not one.  That is why
-# check_dtcm_residency.py was fixed the same way: while this gate kept
-# its hard-coded list, BSP_ENABLE_CAMERA=OFF still could not be built.
+# reason as the DTCM list above -- a name that belongs to a BSP_ENABLE_* option and
+# is demanded from a build that never compiled it is reported as "no such object in
+# the image", which reads like a placement regression and is not one.  The camera
+# is not optional on this board (issue #147), so its buffer is always demanded.
 if(BSP_ENABLE_LCD)
     list(APPEND NN_PSRAM_AI_REQUIRED --noncacheable ltdc_fb)   # LTDC scan-out + DMA2D
 endif()
-if(BSP_ENABLE_CAMERA)
-    list(APPEND NN_PSRAM_AI_REQUIRED --noncacheable cam_frame) # DCMI single capture
-endif()
+list(APPEND NN_PSRAM_AI_REQUIRED --noncacheable cam_frame)     # DCMI single capture
 list(APPEND SHELL_SOURCES ${NN_SOURCES}
      "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"      # the one shared command
      "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c" # its pure half
@@ -1058,7 +1060,6 @@ target_compile_definitions(shell PRIVATE
     FX_INCLUDE_USER_DEFINE_FILE             # port/filex/fx_user.h
     BSP_ENABLE_SD=$<BOOL:${BSP_ENABLE_SD}>                  # SDMMC1 microSD + sd cmd
     BSP_ENABLE_LCD=$<BOOL:${BSP_ENABLE_LCD}>                # LTDC LCD + lcd cmd
-    BSP_ENABLE_CAMERA=$<BOOL:${BSP_ENABLE_CAMERA}>          # DVP camera + camera cmd
     BSP_ENABLE_KV=$<BOOL:${BSP_ENABLE_KV}>)                 # OCTOSPI2 NOR + KV store
 # -Os + LTO, plus two flags that disable optimisations which are legal C
 # but wrong for THIS firmware.  Both are cheap (measured: 1,008 B and 224 B) and both
@@ -1158,18 +1159,17 @@ add_custom_command(TARGET shell POST_BUILD
 # regression and is not one.  Before this, `BSP_ENABLE_SD=OFF` could not be built at
 # all -- the gate failed on sd_bounce -- which defeated the option's entire purpose,
 # since it exists to produce a firmware with no bus master while bisecting a D-cache
-# suspicion.  The condition on each line below is the same one that adds its source.
+# suspicion.  The condition on each line below is the same one that adds its source
+# (the camera lines have none: the camera is not optional on this board, #147).
 set(DTCM_REQUIRED "")
 if(BSP_ENABLE_KV)
     list(APPEND DTCM_REQUIRED --require-dtcm kv_boot_stack)      # src/kv_boot.c
 endif()
-if(BSP_ENABLE_CAMERA)
-    list(APPEND DTCM_REQUIRED --require-dtcm cam_producer_stack) # port/camera/camera.c
-    list(APPEND DTCM_REQUIRED --require-dtcm nn_worker_stack)    # port/nn/nn_camera.c (created there)
-    list(APPEND DTCM_REQUIRED --require-axi  cam_band)           # DCMI via DMA2_Stream1
-    if(BSP_ENABLE_LCD)
-        list(APPEND DTCM_REQUIRED --require-dtcm preview_stack)  # src/cam_preview.c
-    endif()
+list(APPEND DTCM_REQUIRED --require-dtcm cam_producer_stack)     # port/camera/camera.c
+list(APPEND DTCM_REQUIRED --require-dtcm nn_worker_stack)        # port/nn/nn_camera.c (created there)
+list(APPEND DTCM_REQUIRED --require-axi  cam_band)               # DCMI via DMA2_Stream1
+if(BSP_ENABLE_LCD)
+    list(APPEND DTCM_REQUIRED --require-dtcm preview_stack)      # src/cam_preview.c
 endif()
 if(BSP_ENABLE_SD)
     list(APPEND DTCM_REQUIRED --require-axi sd_bounce)           # SDMMC1 IDMA

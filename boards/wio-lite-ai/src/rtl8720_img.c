@@ -15,6 +15,7 @@
 #include "rtl8720_img.h"
 
 #include "psram.h"           /* PSRAM_BASE_ADDR / PSRAM_SIZE_BYTES / psram_ready() */
+#include "camera.h"          /* camera_frame_invalidate(): staging covers cam_frame */
 #include "rtl8720_flash.h"   /* rtl_dl_digest_* -- the module's 0x27 algorithm */
 
 #include <string.h>
@@ -81,6 +82,15 @@ static int img_begin(void *ctx, const char *name, uint32_t size)
 		return -1;                  /* cancels the batch before any data moves */
 	if (!psram_ready())
 		return -1;
+	/* [!] The staging window (up to RTL_IMG_MAX) covers the camera's capture
+	 * frame (issue #150).  The caller's OCTOSPI1 reconfigurer guard keeps
+	 * capture, save and send away for the transfer, but a frame captured before
+	 * it would stay valid over the image bytes, so drop it here, before the
+	 * first byte is staged.  Here rather than in the command because every
+	 * write into the window beyond the probe's 16-byte head/tail goes through
+	 * this begin() (the probe's words miss the frame: the head is in ltdc_fb,
+	 * the tail above the frame's end), so a later caller cannot miss it. */
+	camera_frame_invalidate();
 
 	for (i = 0u; i + 1u < sizeof(s_img.name) && name[i] != '\0'; i++)
 		s_img.name[i] = name[i];

@@ -556,6 +556,13 @@ camera res | format | fps | set   (this board's own)
   is being written fails the save (`camera: frame changed by a concurrent
   capture (file left partial)`) or the send (`ymodem: source read error`, then
   the same sentence).
+- **`sdram test` claims the frame buffer and the stream ring for its whole run**
+  (issue #150, `camera_scratch_claim()` under the camera lock).  It is refused
+  while a stream runs or is held; while it runs, `camera capture` and `camera
+  stream start` from any console are refused as busy, `nn stream start` / `nn
+  run` fail with "the camera could not be started -- `camera stream start` says
+  why", and afterwards `save` / `send` answer `no captured frame` until the next
+  capture.
 - **`camera off` with the operator's stream running** prints `camera: stopping
   stream before power off`, waits for THAT stream to end and then cuts the rail
   (`camera: power off`).  A holder other than the operator refuses it (`camera:

@@ -25,7 +25,7 @@ const char *camera_strerror(int rc)
 	case CAM_ERR_STATE:     return "driver not initialized / SDRAM down";
 	case CAM_ERR_NO_SENSOR: return "OV5640 not detected (module connected?)";
 	case CAM_ERR_NO_FRAME:  return "no captured frame";
-	case CAM_ERR_BUSY:      return "busy (streaming or preview active)";
+	case CAM_ERR_BUSY:      return "busy (stream, preview or sdram test active)";
 	case CAM_ERR_IN_USE:    return "still in use";
 	case CAM_ERR_FORMAT:    return "not an RGB565 stream";
 	case CAM_ERR_TEST:      return "the stream is running with a different test setting";

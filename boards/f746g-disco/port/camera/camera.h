@@ -51,7 +51,7 @@ extern "C" {
 #define CAM_ERR_STATE     -4   /* driver not initialized / SDRAM down           */
 #define CAM_ERR_NO_SENSOR -5   /* OV5640 not detected (no module / bad ID)      */
 #define CAM_ERR_NO_FRAME  -6   /* no captured frame available                   */
-#define CAM_ERR_BUSY      -7   /* streaming or preview already owns the DCMI    */
+#define CAM_ERR_BUSY      -7   /* stream/preview owns the DCMI, or sdram test   */
 #define CAM_ERR_IN_USE    -8   /* another holder needs the stream (issue #142)  */
 #define CAM_ERR_FORMAT    -9   /* the stream is not RGB565 / not streamable     */
 #define CAM_ERR_TEST     -10   /* running with a different `test` setting       */
@@ -274,14 +274,31 @@ int camera_frame_read(uint32_t offset, void *dst, uint32_t len,
                       uint32_t *gen);
 
 /**
- * Drop the captured-frame flag (the buffer contents are about to be clobbered
- * -- called by `sdram test` before it overwrites the .sdram region).  Safe to
- * call in any state; a no-op when the driver is not initialized.
+ * Lend `.sdram` (the frame buffer and the stream ring) to a destructive memory
+ * test for its whole run (issue #150; `sdram test`).  Under the driver mutex:
+ * refused with CAM_ERR_BUSY while a stream runs, while anybody still holds
+ * it or an overrun re-arm is pending (the ring is a live DMA target), or while
+ * another claim is held; otherwise drops the captured-frame flag and, until
+ * camera_scratch_release(), refuses every capture and every stream start
+ * (manual, GUIX preview, nn and the overrun re-arm) with CAM_ERR_BUSY.  So no
+ * capture can re-validate the frame under the test's patterns, and `camera
+ * save` / `send` answer "no frame" afterwards.  Commands that do not touch the
+ * frame bytes or the DMA (info, probe, power, settings) are not refused.
+ *
+ * Returns 0 when the driver is not initialised (no frame exists and nothing
+ * can capture or start, so a board whose camera init failed can still run the
+ * test); the matching release is then a no-op.  The caller must call
+ * camera_scratch_release() on every exit after a successful claim.
  */
-void camera_frame_invalidate(void);
+int camera_scratch_claim(void);
 
-/** Nonzero while a stream is running (a destructive `.sdram` op must refuse:
- *  the ring is a live DMA target).  See camera_stream_start()
+/** End the claim taken by camera_scratch_claim().  A no-op when the driver
+ *  is not initialised. */
+void camera_scratch_release(void);
+
+/** Nonzero while a stream is running (the ring is a live DMA target).  A
+ *  volatile read, not a lock: a destructive `.sdram` op takes
+ *  camera_scratch_claim() instead.  See camera_stream_start()
  * (owhinata/stm32f746g-disco#46). */
 int camera_streaming(void);
 

@@ -416,6 +416,12 @@ camera scan | reg <addr> <reg> [value] [-16]   (this board's own)
 - **`save` / `send` read the last capture** (the band stream fills no frame).  A
   read that finds the frame replaced fails the transfer with `ymodem: source
   read error` and then `camera: frame changed by a concurrent capture`.
+- **`psram test` and the `wifi flash` image staging drop the last capture**
+  (issue #150): the frame lives in the PSRAM they overwrite, so under their
+  OCTOSPI1 reconfigurer mark -- which already keeps capture, save and send out
+  for the whole run -- they call `camera_frame_invalidate()` before the first
+  write (the staging does it in `rtl8720_img.c`'s YMODEM begin), and `save` /
+  `send` then answer no frame until the next capture.
 - **Lines read `label    : value`** (the label padded to 8 and ` : `), the same
   form on all three boards.
 - Console stack high water after capture / send (`thread`): 2,260 of 4,096 B at

@@ -383,6 +383,20 @@ int camera_capture(int colorbar);
 int camera_frame_read(uint32_t offset, void *dst, uint32_t len, uint32_t *gen);
 
 /**
+ * Drop the captured-frame flag: the frame's bytes in the PSRAM are about to be
+ * destroyed (issue #150; `psram test`).  Afterwards `camera save` / `send`
+ * answer "no frame" until the next capture.  A no-op when the driver is not
+ * initialised.
+ *
+ * [!] A one-shot, not a claim.  The caller must hold the OCTOSPI1 reconfigurer
+ * guard (psram_acquire()) across the call AND the whole destructive write:
+ * that guard is what keeps a capture (which holds the shared guard across its
+ * DMA) and a save/send from running meanwhile, so no capture can re-validate
+ * the frame under the overwrite.
+ */
+void camera_frame_invalidate(void);
+
+/**
  * Scan 7-bit SCCB addresses 0x08..0x77 and store the ones that ACK.
  *
  * @param addrs  caller buffer receiving the ACKing addresses (may be NULL)

@@ -12,9 +12,10 @@
  *
  * The test overwrites the tested span -- everything placed in the `.sdram`
  * linker section (the camera frame buffer, owhinata/stm32f746g-disco#41) is
- * clobbered, so the test first drops the camera's captured-frame flag via
- * camera_frame_invalidate() (otherwise `camera save`/stats would read test
- * patterns believing them to be a frame).
+ * clobbered, so the test first claims it from the camera with
+ * camera_scratch_claim() (issue #150): the claim drops the captured-frame flag
+ * and refuses every capture and stream start until the test releases it, so
+ * `camera save`/`send` cannot ship test patterns believing them to be a frame.
  *
  * Three passes over the span, word-wise: (1) address pattern (each word holds
  * its own address -- catches stuck/shorted/aliased address lines, which a
@@ -31,7 +32,7 @@
  */
 #include "cli.h"
 #include "sdram.h"
-#include "camera.h"        /* camera_frame_invalidate / camera_streaming      */
+#include "camera.h"        /* camera_scratch_claim / camera_scratch_release   */
 #include "ltdc_display.h"  /* suspend LTDC scanout during the destructive test */
 
 #include <stdint.h>
@@ -155,9 +156,17 @@ static int cmd_sdram_test(struct cli_instance *sh, int argc, char **argv)
 	}
 	words = bytes / 4u;
 
-	if (camera_streaming()) {
-		cli_error(sh, "sdram: camera is streaming into .sdram; "
-		              "run 'camera stream stop' first\r\n");
+	/* [!] The camera's frame buffer and stream ring live in .sdram (issue
+	   #150).  Claim them first, for the whole run: the claim is taken under
+	   the camera's mutex, refuses while a stream runs or is held, drops the
+	   captured-frame flag, and until the release below every capture and
+	   stream start (from any console, and nn's) is refused with BUSY -- so
+	   nothing can DMA into the ring or re-validate the frame over the test's
+	   patterns.  Released on every exit from here on. */
+	if (camera_scratch_claim() != 0) {
+		cli_error(sh, "sdram: the camera is streaming into .sdram, or "
+		              "another sdram test holds it; run 'camera stream "
+		              "stop' / 'nn stream stop' first\r\n");
 		return 1;
 	}
 
@@ -166,25 +175,22 @@ static int cmd_sdram_test(struct cli_instance *sh, int argc, char **argv)
 	   the owhinata/stm32f746g-disco#47 suspend/ invalidate contract: refuse if GUIX
 	   owns the display (cannot safely suspend), otherwise stop LTDC scanout for the
 	   duration so the controller does not fetch the clobbered framebuffer (visual
-	   corruption + bus contention).  camera streaming is already refused above.
-	   Single postcondition (clear+restore) below.  TOCTOU note: camera_streaming()
-	   is a volatile read, not a lock -- safe under the single-shell assumption (a
-	   concurrent CLI could still race a stream start; full locking is a separate
-	   issue). */
+	   corruption + bus contention).  Single postcondition (clear+restore) below. */
 	if (ltdc_gui_owns()) {
 		cli_error(sh, "sdram: LTDC/GUIX owns the display; run 'gui stop' first\r\n");
-		return 1;
+		ret = 1;
+		goto release;
 	}
 	was_active = ltdc_scanout_active();
 	if (was_active && ltdc_set_scanout(false) != LTDC_OK) {
 		cli_error(sh, "sdram: could not suspend LTDC scanout\r\n");
-		return 1;
+		ret = 1;
+		goto release;
 	}
 
 	cli_warn(sh, "sdram: DESTRUCTIVE test over %lu KB "
 	             "(clobbers .sdram contents, e.g. a captured frame)\r\n",
 	         (unsigned long)(bytes / 1024u));
-	camera_frame_invalidate();
 
 	for (unsigned p = 0; p < sizeof patterns / sizeof patterns[0]; p++) {
 		const char *name = (p == 0) ? "address" :
@@ -228,6 +234,9 @@ restore:
 		if (ltdc_set_scanout(true) != LTDC_OK)
 			cli_warn(sh, "sdram: LTDC scanout restore failed; run 'lcd on'\r\n");
 	}
+release:
+	/* The frame stays invalid: only a new capture brings one back. */
+	camera_scratch_release();
 	return ret;
 }
 

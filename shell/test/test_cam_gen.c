@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host test for the band stream's generations (issue #142 review,
- * port/camera/cam_gen.h).
+ * svc/cam_gen.h; shared with f746g-disco since issue #143).
  *
  * WHY THIS EXISTS.  `camera stream stop &` runs below the console that types
  * the next `camera stream start`, so the stop's wait can wake up to find its

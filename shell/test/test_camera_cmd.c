@@ -97,6 +97,18 @@ static int before(const char *a, const char *b)
 	return pa != NULL && pb != NULL && pa < pb;
 }
 
+#if defined(CAM_TEST_SHAPE_FULL)
+/* A Ctrl+C arriving while a command sleeps. */
+static void inject_ctrl_c(struct cli_instance *sh, void *arg)
+{
+	static const char etx = 0x03;
+
+	(void)sh;
+	(void)arg;
+	cli_dummy_inject(&tr0, &etx, 1);
+}
+#endif
+
 static int failures;
 
 static void expect(const char *what, int ok)
@@ -377,8 +389,8 @@ static void check_full(void)
 	/* save */
 	reset();
 	run("camera save\r");
-	expect("save's usage spells the board's media",
-	       has("usage: camera save sd|fs <path>\r\n"));
+	expect("save's usage spells the board's media, the medium optional",
+	       has("usage: camera save [sd|fs] <path>\r\n"));
 	reset();
 	run("camera save usb /a.raw\r");
 	expect("an unknown medium lists the board's",
@@ -442,6 +454,82 @@ static void check_full(void)
 	expect("off refused by another holder changes nothing and says who",
 	       has("camera: still in use: nn\r\n") && !has("stopping") &&
 	       camera_stub.calls_off == 0);
+
+	/* [!] the wait is on THE STOPPED STREAM's generation: another console's
+	   stream running after it is not a reason to wait, and its end is */
+	reset();
+	camera_stub.streaming = 1;
+	camera_stub.another_starts = 1;
+	run("camera off\r");
+	expect("off waits for its own stream's end, not for nothing streaming",
+	       camera_stub.calls_off == 1 && !has("not stopped yet"));
+	reset();
+	camera_stub.streaming = 1;
+	camera_stub.stop_never_ends = 1;
+	camera_stub.another_starts = 1;
+	run("camera off\r");
+	expect("a stopped stream that never ends times out, power left on",
+	       has("camera: the stream has not stopped yet -- timed out (it may "
+	           "still finish); power left on, retry 'camera off'\r\n") &&
+	       camera_stub.calls_off == 0 && camera_stub.ended_calls > 1);
+
+	/* Ctrl+C during the wait: the wait ends, nothing more happens */
+	reset();
+	camera_stub.streaming = 1;
+	camera_stub.stop_never_ends = 1;
+	camera_stub.another_starts = 1;
+	cli_test_set_sleep_hook(inject_ctrl_c, NULL);
+	run("camera off\r");
+	expect("a cancelled wait leaves the power on and says nothing more",
+	       camera_stub.calls_off == 0 && has("stopping stream") &&
+	       !has("not stopped yet"));
+	cli_test_set_sleep_hook(NULL, NULL);
+
+	/* a stop that failed for any other reason: no power-off */
+	reset();
+	camera_stub.streaming = 1;
+	camera_stub.status = CAMERA_SVC_ERR_BUSY;
+	strcpy(camera_stub.detail, "stub: a stop is in flight");
+	run("camera off\r");
+	expect("a failed stop is printed and the power stays on",
+	       has("camera: stub: a stop is in flight\r\n") &&
+	       !has("stopping") && camera_stub.calls_off == 0);
+	reset();
+	camera_stub.streaming = 1;
+	camera_stub.status = CAMERA_SVC_ERR_TIMEOUT;
+	strcpy(camera_stub.detail, "timeout");
+	run("camera off\r");
+	expect("a stop that waited and ran out is the same timeout",
+	       has("the stream has not stopped yet -- timed out") &&
+	       camera_stub.calls_off == 0);
+
+	/* a stop that already waited (DONE): no wait of our own */
+	reset();
+	camera_stub.streaming = 1;
+	camera_stub.stop_what = CAMERA_SVC_STOP_DONE;
+	run("camera off\r");
+	expect("a confirmed stop goes straight on to the power-off",
+	       camera_stub.calls_off == 1 && camera_stub.ended_calls == 0 &&
+	       has("camera: stopping stream before power off\r\n"));
+	/* ...unless a Ctrl+C came while the board's stop waited (wio) */
+	reset();
+	camera_stub.streaming = 1;
+	camera_stub.stop_what = CAMERA_SVC_STOP_DONE;
+	cli_dummy_inject(&tr0, "camera off\r\x03", 12);
+	cli_test_pump(&sh0);
+	expect("a Ctrl+C during a confirmed stop leaves the power on",
+	       camera_stub.calls_stop == 1 && camera_stub.calls_off == 0);
+
+	/* save with the medium left out: the board's first */
+	reset();
+	run("camera save /b.raw\r");
+	expect("save with no medium writes to the first one",
+	       has("wrote 8 bytes (2x2 rgb565) to sd:/b.raw\r\n"));
+	reset();
+	run("camera save fs\r");
+	expect("a lone medium name is not taken for a path",
+	       has("camera: 'fs' names a medium -- give the path: camera save "
+	           "[sd|fs] <path>\r\n") && camera_stub.calls_open == 0);
 }
 #endif
 

@@ -57,6 +57,7 @@
 #include "frame.h"
 #include "frame_pipeline.h"
 #include "cam_holders.h"     /* who holds the stream open (issue #142) */
+#include "cam_gen.h"         /* which stream a stop waits for (issue #143) */
 #include "cam_hold_rules.h"  /* this board's two decisions around it   */
 
 #define LOG_TAG "camera"
@@ -153,7 +154,8 @@ static int cam_ready;                  /* camera_init() done           */
 static int cam_colorbar = -1;          /* last pattern mode; -1 unknown */
 static uint32_t cam_frame_gen;         /* owhinata/stm32f746g-disco#102: bumped whenever the stable cam_frame
                                           buffer is refreshed -- by `camera capture`
-                                          or by camera_snapshot_latest() (base ON).
+                                          only since issue #143 (save/send read the
+                                          last capture, never the stream).
                                           save/send compare it across chunks to detect
                                           a frame replaced mid-read. */
 static struct camera_info info;
@@ -377,6 +379,18 @@ static void cam_holders_lose_locked(void);
 static int cam_holders_users_locked(const char **users, int max);
 static volatile int      cam_stop_req;       /* stop requested (producer drains)*/
 static volatile int      cam_stream_err;     /* terminal error -> teardown      */
+/* The running (or last) stream's generation, and the last one a teardown
+ * ended -- both written under cam_lock (svc/cam_gen.h, issue #143).  A start
+ * takes a fresh one only once its arm has succeeded, in the same critical
+ * section as its admission (stream_start_locked() runs under cam_lock); the
+ * teardown records the end under cam_lock as it clears cam_stream_active.  A
+ * stop hands back the generation it asked to end, so `camera off` waits for
+ * THAT stream and never mistakes a later start -- or a start that withdrew
+ * the stop and kept the stream -- for its end.  0 (CAM_GEN_NONE) before the
+ * first stream, in .bss: zero-initialised at boot like the rest of the state
+ * here. */
+static uint32_t          cam_stream_gen;
+static volatile uint32_t cam_stream_done_gen;
 static volatile uint32_t cam_stream_ovr;     /* DCMI overruns (resynced+terminal)*/
 static volatile uint32_t cam_ring_ovr;       /* free-slot exhaustion / lost     */
 static volatile uint32_t cam_stream_fe;      /* DMA FIFO/DME errors tolerated (owhinata/stm32f746g-disco#56) */
@@ -1426,45 +1440,6 @@ void camera_frame_invalidate(void)
 	op_unlock();
 }
 
-int camera_snapshot_latest(void)
-{
-	int rc = op_lock();
-
-	if (rc != 0)
-		return rc;
-	/* owhinata/stm32f746g-disco#102: base ON -> refresh the stable cam_frame buffer from the
-    latest published
-	   ring frame so save/send always get the newest frame (any format, and even while
-	   MJPEG/GUI subscribers are attached).  The pin keeps the slot out of the
-	   producer's acquire() while we copy OUTSIDE the pipeline lock (pin held only across
-	   a brief refcount++/--), so the producer's publish/DMA-repoint is never stalled.
-	   base OFF -> keep the last `camera capture` frame (non-destructive,
-	   owhinata/stm32f746g-disco#102 decision);  no captured frame at all ->
-	   CAM_ERR_NO_FRAME. */
-	if (cam_stream_active) {
-		const struct frame_desc *f = frame_pipeline_pin_latest(&cam_pipe);
-
-		if (f == NULL) {
-			op_unlock();
-			return CAM_ERR_NO_FRAME;   /* stream up but no frame published yet */
-		}
-		if (f->bytes <= CAM_FRAME_MAX_BYTES) {
-			memcpy(cam_frame, f->data, f->bytes);   /* pin-protected, lock-free */
-			info.frame_bytes = f->bytes;
-			info.frame_valid = 1;
-			cam_frame_gen++;
-			rc = 0;
-		} else {
-			rc = CAM_ERR_PARAM;        /* cannot happen: budget < cam_frame */
-		}
-		frame_pipeline_put(&cam_pipe, NULL, f);     /* release the pin */
-	} else {
-		rc = info.frame_valid ? 0 : CAM_ERR_NO_FRAME;
-	}
-	op_unlock();
-	return rc;
-}
-
 int camera_streaming(void)
 {
 	return cam_stream_active;   /* volatile; a destructive .sdram op must refuse */
@@ -2071,6 +2046,7 @@ static int cam_stream_teardown(void)
 		   registered across the recovery (issue #142): it is not an end. */
 		cam_recover_pending = cam_stream_err && !cam_stop_req;
 		cam_stream_active = 0;
+		cam_stream_done_gen = cam_stream_gen;   /* this stream is over (#143) */
 		cam_resync_req = 0;                   /* issue #137: nothing to resync */
 		cam_elapsed_ms = HAL_GetTick() - cam_start_tick;
 		(void)HAL_DCMI_Stop(&hdcmi);          /* aborts the DMA internally */
@@ -2362,9 +2338,9 @@ static HAL_StatusTypeDef cam_jpeg_arm(struct frame_desc *slot)
 }
 
 /* Service one JPEG frame: finalise the current slot (Stop -> NDTR -> EOI trim),
-   publish it at its real length, then re-arm into a free slot.  save/send pull the
-   latest published frame on demand (camera_snapshot_latest, owhinata/stm32f746g-disco#102),
-   so this hot path does no cam_frame mirror.  Every HAL failure (Stop / re-arm) is terminal
+   publish it at its real length, then re-arm into a free slot.  save/send read
+   the last `camera capture` (issue #143), so this hot path does no cam_frame
+   mirror.  Every HAL failure (Stop / re-arm) is terminal
    -> teardown, so the stream never sticks "active" with no frame coming.
    Producer-thread only. */
 static void cam_stream_service_jpeg(int had_sem)
@@ -2399,10 +2375,10 @@ static void cam_stream_service_jpeg(int had_sem)
 		if (freed != NULL) {
 			frame_pipeline_publish(&cam_pipe, cam_jpeg_slot, valid,
 			                       FRAME_FMT_JPEG, mode.width, mode.height, 0u);
-			/* owhinata/stm32f746g-disco#102: the producer no longer mirrors into cam_frame.  camera
-			   save/send pull the latest published frame on demand via
-			   camera_snapshot_latest() (frame_pipeline_pin_latest), so this hot
-			   path stays copy-free for every format -- raster and JPEG alike. */
+			/* owhinata/stm32f746g-disco#102: the producer does not mirror into
+			   cam_frame -- `camera save` / `send` read the last capture
+			   (issue #143) -- so this hot path stays copy-free for every
+			   format, raster and JPEG alike. */
 			cam_jpeg_slot = freed;       /* fill a fresh slot next */
 		} else {
 			cam_ring_ovr++;              /* no free slot: drop, reuse this slot */
@@ -2641,6 +2617,7 @@ static int stream_start_locked(int colorbar)
 			LOG_ERR("JPEG stream arm failed");
 			return CAM_ERR_HAL;
 		}
+		cam_stream_gen = cam_gen_next(cam_stream_gen);   /* cam_lock held */
 		(void)tx_semaphore_put(&cam_start_sem);
 		LOG_INF("stream start jpeg (subs=%d)", nx);
 		return 0;
@@ -2675,6 +2652,7 @@ static int stream_start_locked(int colorbar)
 
 	/* Wake the producer out of its idle FOREVER wait on the dedicated start
 	   semaphore -- never the completion semaphore, so it cannot be miscounted. */
+	cam_stream_gen = cam_gen_next(cam_stream_gen);   /* cam_lock held */
 	(void)tx_semaphore_put(&cam_start_sem);
 	LOG_INF("stream start (subs=%d)", nx);
 	return 0;
@@ -3195,9 +3173,22 @@ void camera_frame_put(struct frame_sink *s, const struct frame_desc *f)
 
 int camera_stream_stop(const char **users, int max, int *nusers)
 {
+	return camera_stream_stop_gen(users, max, nusers, NULL);
+}
+
+int camera_stream_ended(uint32_t gen)
+{
+	return cam_gen_ended(cam_stream_done_gen, gen);
+}
+
+int camera_stream_stop_gen(const char **users, int max, int *nusers,
+                           uint32_t *gen)
+{
 	int rc = op_lock();
 	int hrc;
 
+	if (gen != NULL)
+		*gen = CAM_GEN_NONE;
 	if (nusers != NULL)
 		*nusers = 0;
 	if (rc != 0)
@@ -3224,6 +3215,10 @@ int camera_stream_stop(const char **users, int max, int *nusers)
 	   (owhinata/stm32f746g-disco#100): the producer teardown detaches every
 	   subscriber (each close()) and stops the DCMI. */
 	cam_holders_stop_locked();
+	/* The stream this stop asked to end, read in the same critical section
+	   (issue #143); nothing to wait for when nothing is active. */
+	if (gen != NULL)
+		*gen = cam_stream_active ? cam_stream_gen : CAM_GEN_NONE;
 	op_unlock();
 	return 0;
 }

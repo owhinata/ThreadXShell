@@ -13,9 +13,8 @@
  *    reuses a shared one would be silently unreachable.
  *  - each shared subcommand is there exactly when its capability is 1, and
  *    the board's scan / reg come after the shared ones.
- *  - [!] `camera off` with a stream running is the BOARD's to refuse
- *    (CAMERA_SVC_OFF_STOPS_STREAM 0): the shared command must not stop the
- *    stream first.
+ *  - `camera off` with the operator's stream running stops it first and then
+ *    powers down (CAMERA_SVC_OFF_STOPS_STREAM 1, issue #143).
  */
 #include <stdio.h>
 #include <string.h>
@@ -73,14 +72,14 @@ static void run(const char *line)
 	cli_test_pump(&sh0);
 }
 
-/* `camera off` with the stub saying a stream runs and the board refusing. */
+/* `camera off` with the stub saying a stream runs. */
 static void run_streaming_off(void)
 {
 	static const char line[] = "camera off\r";
 
 	run("");
 	camera_stub.streaming = 1;
-	camera_stub.status = CAMERA_SVC_ERR_BUSY;
+	camera_stub.stop_what = CAMERA_SVC_STOP_DONE;   /* wio's stop waits */
 	cli_dummy_inject(&tr0, line, strlen(line));
 	cli_test_pump(&sh0);
 }
@@ -138,11 +137,13 @@ int main(void)
 	       strstr(cli_dummy_output_str(&tr0),
 	              "usage: camera reg <addr> <reg> [value] [-16]\r\n") != NULL);
 
-	/* the old `off`: refused by the board while streaming, nothing stopped */
+	/* `camera off` stops the operator's stream first, then powers down
+	   (CAMERA_SVC_OFF_STOPS_STREAM 1, issue #143) */
 	run_streaming_off();
-	expect("`camera off` while streaming does not stop the stream",
-	       camera_stub.calls_stop == 0 && camera_stub.calls_off == 1 &&
-	       strstr(cli_dummy_output_str(&tr0), "stopping") == NULL);
+	expect("`camera off` while streaming stops the stream, then powers down",
+	       camera_stub.calls_stop == 1 && camera_stub.calls_off == 1 &&
+	       strstr(cli_dummy_output_str(&tr0),
+	              "camera: stopping stream before power off\r\n") != NULL);
 #if BSP_ENABLE_SD
 	run("camera save usb /a.raw\r");
 	expect("save refuses a medium this board does not have, in its words",

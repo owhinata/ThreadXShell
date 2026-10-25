@@ -242,6 +242,19 @@ int camera_stream_start(int colorbar, int *already);
 int camera_stream_stop(const char **users, int max, int *nusers);
 
 /**
+ * camera_stream_stop(), also handing back in *@p gen (may be NULL) the
+ * generation of the stream it asked to end (svc/cam_gen.h; CAM_GEN_NONE when
+ * nothing was running).  The shared `camera off` (issue #143) waits on THAT
+ * stream with camera_stream_ended(), never on "is a stream running".
+ */
+int camera_stream_stop_gen(const char **users, int max, int *nusers,
+                           uint32_t *gen);
+
+/** Nonzero once the stream of generation @p gen has ended (CAM_GEN_NONE: at
+ *  once).  A lock-free read of the teardown's record. */
+int camera_stream_ended(uint32_t gen);
+
+/**
  * Holder @p h joins the stream, taking the operator's place too when nothing
  * streams -- in which case it starts it with @p colorbar.  Joining a running
  * stream with a different explicit @p colorbar is refused (CAM_ERR_TEST);

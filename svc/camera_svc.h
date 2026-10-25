@@ -349,21 +349,32 @@ enum camera_svc_stop {
 	                             *   wait on camera_svc_stream_ended(*gen)      */
 };
 
+/** A stream generation meaning "no stream to wait for" (svc/cam_gen.h's
+ *  CAM_GEN_NONE): camera_svc_stream_ended() answers it at once. */
+#define CAMERA_SVC_GEN_NONE 0u
+
 /**
  * Remove the operator's hold.  With other holders still present the answer is
  * CAMERA_SVC_ERR_IN_USE with their names, and nothing changes.  Otherwise the
- * stream is stopped (CAMERA_SVC_STOP_DONE) or a stop is requested
- * (CAMERA_SVC_STOP_REQUESTED, f746 stops asynchronously) and @p gen is set to
- * THAT stream's generation, so the caller waits for that stream to end and
- * cannot mistake a later start for it.
+ * stream is stopped (CAMERA_SVC_STOP_DONE: wio, whose stop waits) or a stop is
+ * requested (CAMERA_SVC_STOP_REQUESTED: f746, whose producer tears down later),
+ * and in both cases @p gen is set to THAT stream's generation
+ * (CAMERA_SVC_GEN_NONE when nothing was running), so a caller that waits waits
+ * for that stream to end and cannot mistake a later start for it.
+ *
+ * A stop that waited and ran out answers CAMERA_SVC_ERR_TIMEOUT: the request
+ * stays and the stream may still end.  That is not "nothing changed", and the
+ * caller must not act as if the stream were over (`camera off` keeps the power
+ * on).
  *
  * @return enum camera_svc_stop
  */
 int camera_svc_stream_stop(struct camera_op_result *res, uint32_t *gen);
 
-/** Non-zero once the stream of generation @p gen has ended.  Waiting (and the
- *  operator cancelling the wait) belongs to the caller; a cancelled wait leaves
- *  the stop request in place. */
+/** Non-zero once the stream of generation @p gen has ended -- that stream, by
+ *  its generation, never "is anything streaming" (issue #143).  Waiting (and
+ *  the operator cancelling the wait) belongs to the caller; a cancelled wait
+ *  leaves the stop request in place. */
 int camera_svc_stream_ended(uint32_t gen);
 
 /** A one-sample view of the stream, for the shared command's own lines. */

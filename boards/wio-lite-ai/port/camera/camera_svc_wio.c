@@ -35,8 +35,8 @@
  * Lines written while the guard is held keep only a bus reconfigurer waiting,
  * never the producer -- as the old command did.
  *
- * Unchanged through issue #143 M1: `camera off` refuses a running stream
- * (CAMERA_SVC_OFF_STOPS_STREAM 0), and save / send read the LAST capture --
+ * `camera off` stops the operator's stream and then powers down (issue #143,
+ * CAMERA_SVC_OFF_STOPS_STREAM 1), and save / send read the LAST capture --
  * the band stream fills no frame.
  *
  * Clean-room design; no third-party code reused.
@@ -171,15 +171,25 @@ void camera_svc_on(struct camera_op_result *res,
 }
 
 /* The deepest state this board reaches: the 2V8 rail comes off a fixed LDO
-   with no enable pin (schematic U8).  camera_off() refuses a running stream
-   (CAM_ERR_BUSY) under the camera lock -- the shared command does not stop it
-   first on this board (CAMERA_SVC_OFF_STOPS_STREAM 0). */
+   with no enable pin (schematic U8).  The shared command has stopped the
+   operator's stream first (CAMERA_SVC_OFF_STOPS_STREAM 1); camera_off() looks
+   again under the camera lock and refuses a stream still running (BUSY) or a
+   holder that needs it (IN_USE). */
 void camera_svc_off(struct camera_op_result *res,
                     camera_svc_write_fn write, void *ctx)
 {
 	struct camera_out o = { write, ctx, 0 };
 	int rc = camera_off();
 
+	if (rc == CAM_ERR_IN_USE) {
+		/* camera_off() looked at the holders under the camera lock; the
+		   names are a second look, for the message. */
+		const char *users[CAMERA_SVC_USERS_MAX];
+
+		camera_res_in_use(res, users,
+		                  camera_stream_users(users, (int)CAMERA_SVC_USERS_MAX));
+		return;
+	}
 	cam_res_rc(res, rc);
 	if (rc == CAM_OK)
 		camera_out(&o, "camera: PWDN asserted, RESETB low, XCLK stopped "
@@ -645,9 +655,8 @@ int camera_svc_stream_stop(struct camera_op_result *res, uint32_t *gen)
 {
 	const char *users[CAMERA_SVC_USERS_MAX];
 	int n = 0;
-	int rc = camera_stream_stop(users, (int)CAMERA_SVC_USERS_MAX, &n);
+	int rc = camera_stream_stop_gen(users, (int)CAMERA_SVC_USERS_MAX, &n, gen);
 
-	*gen = 0u;
 	if (rc == CAM_ERR_IN_USE) {
 		camera_res_in_use(res, users, n);   /* D8: nothing changed */
 		return CAMERA_SVC_STOP_NONE;
@@ -661,11 +670,11 @@ int camera_svc_stream_stop(struct camera_op_result *res, uint32_t *gen)
 	return (rc == CAM_OK) ? CAMERA_SVC_STOP_DONE : CAMERA_SVC_STOP_NONE;
 }
 
-/* Only asked after a REQUESTED stop, which this board never answers. */
+/* The stop above already waited for its stream; answering by generation all
+   the same keeps the contract's one shape (svc/cam_gen.h). */
 int camera_svc_stream_ended(uint32_t gen)
 {
-	(void)gen;
-	return !camera_streaming();
+	return camera_stream_ended(gen);
 }
 
 /* The contract's view of one camera_stream_stats() sample, plus the holders --

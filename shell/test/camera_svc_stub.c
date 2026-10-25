@@ -171,17 +171,24 @@ int camera_svc_stream_stop(struct camera_op_result *res, uint32_t *gen)
 {
 	camera_stub.calls_stop++;
 	stub_result(res);
-	*gen = 42u;
+	*gen = 42u;                        /* the stream this stop names */
 	if (res->status != CAMERA_SVC_OK)
 		return CAMERA_SVC_STOP_NONE;
-	camera_stub.streaming = 0;
+	if (!camera_stub.stop_never_ends)
+		camera_stub.done_gen = 42u;    /* ...and it ends */
+	if (!camera_stub.another_starts)
+		camera_stub.streaming = 0;
 	return camera_stub.stop_what;
 }
 
+/* By generation, as the contract says -- never by "is anything streaming", so
+   a command that waited on the wrong thing would disagree with this stub. */
 int camera_svc_stream_ended(uint32_t gen)
 {
 	camera_stub.ended_gen = gen;
-	return !camera_stub.streaming;
+	camera_stub.ended_calls++;
+	return gen == CAMERA_SVC_GEN_NONE ||
+	       (int32_t)(camera_stub.done_gen - gen) >= 0;
 }
 
 void camera_svc_stream_state(struct camera_svc_state *st,

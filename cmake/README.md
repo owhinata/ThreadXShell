@@ -169,10 +169,21 @@ An edge USES the firmware when, other than the link edge, the gate's check and
 this check, an explicit or implicit input (resolved through phony nodes) is a
 firmware artifact, or any of its variables but the description names one by file
 name (`COMMAND`, and a link edge's `POST_BUILD` / `PRE_LINK`). The name is matched
-with nothing required before it and only a name character (`[A-Za-z0-9_.+~-]`)
-refusing it after, so `shell.bin&&true`, `{shell.elf}`, `<shell.elf`,
-`shell.elf:0x08000000` and `-Dshell.bin` all count, and `myshell.bin` is refused
-too (the safe side); `shell.elf.ltrans0.ltrans.su` is not the ELF. Order-only inputs
+as a run of name characters (`[A-Za-z0-9_.+~-]`) and no separator is listed on
+either side (a list always misses one): a name character after it makes it
+another name (`shell.elf.ltrans0.ltrans.su` is not the ELF), and the run of
+name characters right before it must be empty or one short-option cluster, `-`
+and letters/digits, because getopt takes a glued argument out of a cluster.
+So `shell.bin&&true`, `{shell.elf}`, `shell.elf:0x08000000`,
+`--file=shell.bin`, `/x/shell.elf`, `-Dshell.bin`, `-vDshell.bin`,
+`x;-Dshell.bin` and `FW=-Dshell.bin` all count, while `myshell.bin`,
+`x-Dshell.bin` and a work directory `.../tmpab12fw/` or `.../xshell.elf/` that
+every command of the tree mentions do not (issue #149: before, nothing was
+required in front of the name, and such a build was refused whole). The one
+over-match accepted is a path component that starts with `-` and ends in the
+name (`/-ab12fw/`; not `tmp-ab12fw`, where the cluster does not start the run),
+which is refused -- the safe side; tempfile's directory names are `[a-z0-9_]`
+only. Order-only inputs
 do not count: CMake writes every target a rule's target transitively waits for
 there. Then: every using edge must reach the gate's stamp; every target whose
 phony closure owns a using edge must be in `DELIVERY` (or be an `asset-*`);
@@ -212,7 +223,9 @@ passes; a new target that uses the image by file dependency
 from another executable's `POST_BUILD` (`delivery_post_build_other`), gated only
 through `flash` but not declared (`delivery_gated_undeclared`), with a shell
 separator or braces right after the name (`delivery_amp`, `delivery_brace`), or
-through a `POST_BUILD` copy declared as a BYPRODUCT (`delivery_copy_alias`) is
+through a `POST_BUILD` copy declared as a BYPRODUCT (`delivery_copy_alias`), or
+glued to a short option or to the end of a cluster (`-Dshell.elf`,
+`-vDshell.elf`: `delivery_short_opt`, `delivery_cluster`) is
 stopped BEFORE it runs; `DELIVERY` naming a target that uses nothing is refused
 (`delivery_declares_nothing`); a target deferred past the wiring refuses the
 configure and `ninja <it>` does not run (`delivery_late`); on an edited copy of
@@ -220,7 +233,11 @@ the graph, an unwired target is named (`delivery_rule4_graph`) and an edge no
 target owns fails the "waits for the gate" rule alone (`delivery_rule1_graph`);
 and a script that computes the path itself, or a copy nobody declared, gets
 through (`delivery_hidden_path`, `delivery_copy_undeclared`: the documented
-limits, as passing cases). `run_add_plugin_arg_tests.py`'s `not_ninja` covers
+limits, as passing cases). A tree built under a directory named `xshell.elf`
+passes, and `delivery_by_command` is still refused there (`delivery_glued`). The
+matcher itself (`firmware_name_re()`) is also tested over every printable ASCII
+character and tab on both sides of the name, alone and before a cluster, plus
+the #149 paths and the over-match (`delivery_name_re`). `run_add_plugin_arg_tests.py`'s `not_ninja` covers
 the generator refusal.
 
 # Plugin stack allowances: one table, read back from the image

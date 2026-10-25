@@ -153,6 +153,34 @@ def parse(path):
     return top, edges
 
 
+def firmware_name_re(names):
+    """The pattern that finds a firmware file name in a command (group 1)."""
+    # The file name wherever the command puts it, as a run of name characters
+    # (`[A-Za-z0-9_.+~-]`): not continued by one (shell.elf.ltrans0.ltrans.su
+    # is not it).  [!] NO SEPARATOR IS LISTED, ON EITHER SIDE (issue #126
+    # review, and #149's): listing what may follow -- space, quote, `;,)` --
+    # let `shell.bin&&true`, `{shell.elf}`, `shell.elf:0x08000000` through,
+    # and listing what may precede let `x;-Dshell.bin` and `FW=-Dshell.bin`
+    # through; a shell has more separators than any list.  So only name
+    # characters decide, and the run of them immediately BEFORE the name must
+    # be either empty or one short-option cluster, `-` and letters/digits
+    # (`-Dshell.bin`, `-vDshell.bin`, `-a0Dshell.bin`, `-xfshell.bin`): getopt
+    # parses a glued argument out of a cluster, so that delivers.  Anything
+    # else in front makes it another name: `myshell.bin`, `x-Dshell.bin`,
+    # `--Dshell.bin`, and a work directory `/tmp/tmpab12fw/...` or
+    # `.../xshell.elf/...` -- before #149 nothing was required in front and
+    # such a path made every command of the tree "name" the firmware.  The one
+    # over-match accepted: a path component that itself starts with `-` and
+    # ends in the name (`/-ab12fw/`) looks like a cluster and is refused, the
+    # side to err on (`tmp-ab12fw` is not: the cluster must start the run);
+    # tempfile's names are `[a-z0-9_]` only, so the #149 flake cannot come
+    # back.  The prefix is consumed rather than looked behind (it has variable
+    # width); group 1 is the name.
+    return re.compile(r"(?:^|[^A-Za-z0-9_.+~-])(?:-[A-Za-z0-9]*)?("
+                      + "|".join(map(re.escape, names))
+                      + r")(?![A-Za-z0-9_.+~-])")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--ninja", required=True, help="build.ninja")
@@ -223,16 +251,7 @@ def main():
     link, gate = links[0], producer[stamp]
     artifacts = set(link.outs)
     names = sorted({os.path.basename(a) for a in artifacts})
-    # The file name wherever the command puts it, and not continued by
-    # anything that would make it another name (shell.elf.ltrans0.ltrans.su is
-    # not it).  [!] NOTHING IS REQUIRED BEFORE IT, AND ONLY NAME CHARACTERS STOP
-    # IT AFTER (issue #126 review): listing the separators that may follow --
-    # space, quote, `;,)` -- let `shell.bin&&true`, `{shell.elf}`, `<shell.elf`,
-    # `shell.elf:0x08000000`, `-Dshell.bin`, `shell.bin>` through, and a shell
-    # has more separators than any list.  What this matches too much --
-    # `myshell.bin` -- is refused, which is the side to err on.
-    name_re = re.compile("(" + "|".join(map(re.escape, names))
-                         + r")(?![A-Za-z0-9_.+~-])")
+    name_re = firmware_name_re(names)
     with open(args.targets) as fh:
         listed = [t.strip() for t in fh if t.strip()]
     for t in [args.gate_target, args.self_target] + args.delivery:

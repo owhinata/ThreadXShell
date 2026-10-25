@@ -31,6 +31,7 @@
 #include "camera.h"          /* camera_streaming / camera_get_mode (#97 preview state) */
 #include "guix_glue.h"
 #include "guix_camera_ui.h"
+#include "ltdc_display.h"    /* ltdc_scanout_held: `sdram test` (#152) */
 
 #include <stdbool.h>
 #include <string.h>
@@ -42,6 +43,13 @@ static int cmd_gui_start(struct cli_instance *sh, int argc, char **argv)
 	(void)argc;
 	(void)argv;
 	rc = camera_ui_start();
+	/* First: the hold sets scan-out off, which guix_start() reports as
+	   GUIX_ERR_STATE -- that would read "display not initialized".
+	   ltdc_gui_take() refused because `sdram test` holds the display (#152). */
+	if (rc != GUIX_OK && ltdc_scanout_held()) {
+		cli_error(sh, "gui: display is held by `sdram test`\r\n");
+		return 1;
+	}
 	if (rc == CAMERA_UI_ERR_BUSY) {
 		/* issue #72: a `gui stop` is still draining the preview sink.  Refusing
 		   is the point -- starting here would re-attach the sink and reset the

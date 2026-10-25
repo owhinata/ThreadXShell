@@ -45,6 +45,15 @@ extern "C" {
 #define SDRAM_BASE_ADDR  0xC0000000u
 #define SDRAM_SIZE_BYTES (8u * 1024u * 1024u)   /* 16-bit bus: 8 MB usable */
 
+/* FMC internal banks: each 2 MB slice (offset bits [22:21]) keeps its own open
+ * row, and the linker script assigns each one to a single owner (see the bank
+ * table above `.sdram` in ldscript/STM32F746NGHx_FLASH.ld, mirrored by
+ * cmake/check_f746_layout.py).  Bank2 holds `.sdram.eth` -- the ETH DMA
+ * descriptors and the NetX packet pool -- which `sdram test` must not write
+ * while the network is up (issue #152). */
+#define SDRAM_BANK_BYTES     (2u * 1024u * 1024u)
+#define SDRAM_ETH_BANK_ADDR  (SDRAM_BASE_ADDR + 2u * SDRAM_BANK_BYTES)
+
 /**
  * One-time bring-up: FMC GPIO (AF12), FMC SDRAM controller (16-bit, CAS3,
  * SDCLK = HCLK/2 = 108 MHz; CL2 is only rated to 100 MHz on this part) and

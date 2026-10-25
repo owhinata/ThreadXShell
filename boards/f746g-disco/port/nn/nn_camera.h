@@ -81,7 +81,8 @@ extern struct cam_sink_step nncam_step;
  * Returns 0 or <0 (-2 already running / still tearing down / a teardown owns the
  * sink, -3 model, -4 geometry, -5 objects, -6 nn session busy, -9 the camera is
  * not streaming RGB565 / its mode cannot stream RGB565 (issue #142 D3), -10 the
- * camera could not be held or started).  Holds the camera open (issue #142): joins
+ * camera could not be held or started, NN_ERR_SCRATCH_HELD `sdram test` holds
+ * .sdram.ai -- retryable, issue #152).  Holds the camera open (issue #142): joins
  * a running stream, or starts it holding the operator's place too.
  * @p oneshot is non-zero for `nn run`'s session, whose decodes are not counted
  * in the stream's errors (issue #130 step 6c).

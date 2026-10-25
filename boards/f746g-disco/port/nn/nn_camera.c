@@ -470,9 +470,12 @@ int nn_camera_start(enum camera_res res, int oneshot)
 	 * built-in model -- under the session, and a load or unload racing it
 	 * waits on the open latch and then finds the session taken.  Otherwise the
 	 * open builds nothing. */
-	if (nn_session_try_acquire() != 0) {
+	rc = nn_session_try_acquire();
+	if (rc != 0) {
 		cam_own_start_finish(&nncam_own, 0);
-		return -6;
+		/* `sdram test` holding .sdram.ai is its own answer (issue #152):
+		 * passed through so the caller can say so as busy. */
+		return (rc == NN_ERR_SCRATCH_HELD) ? NN_ERR_SCRATCH_HELD : -6;
 	}
 
 	rc = nncam_open_model();                /* model + input geometry (bounds-checked) */

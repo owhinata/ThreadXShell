@@ -166,7 +166,10 @@ static int nn_life_admit(struct nn_core_model_job *j)
 {
 	struct nn_op_result *res = j->res;
 	struct nn_model *m = NULL;
+	int rc;
 
+	/* An unload's open may be refused while `sdram test` holds .sdram.ai
+	 * (issue #152); the claim below then refuses it as busy, worded there. */
 	if (j->spec == NULL)
 		(void)nn_model_open(&m);
 	if (nn_camera_running()) {
@@ -179,7 +182,14 @@ static int nn_life_admit(struct nn_core_model_job *j)
 			              "there");
 			return NN_SVC_ERR_STATE;
 		}
-		if (nn_model_open(&m) != 0 || m == NULL) {
+		rc = nn_model_open(&m);
+		if (rc == NN_ERR_SCRATCH_HELD) {
+			/* Transient, and nothing was built: BUSY, before the swap. */
+			nn_detail_set(".sdram.ai is held by `sdram test`; try "
+			              "again when it finishes");
+			return NN_SVC_ERR_BUSY;
+		}
+		if (rc != 0 || m == NULL) {
 			nn_detail_set("the model could not be opened");
 			return NN_SVC_ERR_STATE;
 		}
@@ -199,7 +209,14 @@ static int nn_life_claim_take(struct nn_core_model_job *j)
 {
 	struct nn_op_result *res = j->res;
 
-	if (nn_session_try_acquire() != 0) {
+	int rc = nn_session_try_acquire();
+
+	if (rc == NN_ERR_SCRATCH_HELD) {
+		nn_detail_set(".sdram.ai is held by `sdram test`; try again when "
+		              "it finishes");
+		return NN_SVC_ERR_BUSY;
+	}
+	if (rc != 0) {
 		nn_detail_set("NN busy (a stream, run or bench is active)");
 		return NN_SVC_ERR_BUSY;
 	}
@@ -317,7 +334,7 @@ void nn_svc_info(struct nn_svc_info *out)
 	const struct nn_backend_info *bi = nn_backend();
 	struct nn_model *m = NULL;
 	uint32_t seq0, seq1;
-	int held;
+	int held, rc;
 
 	memset(out, 0, sizeof *out);
 	nn_svc_str(out->backend, sizeof out->backend, bi ? bi->name : NULL);
@@ -329,7 +346,16 @@ void nn_svc_info(struct nn_svc_info *out)
 	 * needs no claim and stands even when the rest is busy. */
 	out->arena_bytes = nn_arena_reserved();
 
-	if (nn_model_open(&m) != 0 || m == NULL)
+	rc = nn_model_open(&m);
+	if (rc == NN_ERR_SCRATCH_HELD) {
+		/* `sdram test` holds .sdram.ai and nothing was opened (issue
+		 * #152): a transient answer, not "nothing is loaded". */
+		out->avail_identity = (uint8_t)NN_AVAIL_BUSY;
+		out->avail_runtime  = (uint8_t)NN_AVAIL_BUSY;
+		out->avail_tensors  = (uint8_t)NN_AVAIL_BUSY;
+		return;
+	}
+	if (rc != 0 || m == NULL)
 		return;
 
 	/* Copied, not borrowed: the backend owns this name and a reload replaces

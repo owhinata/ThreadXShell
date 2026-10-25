@@ -84,6 +84,8 @@ extern "C" {
 #define LTDC_OK          0
 #define LTDC_ERR_HAL    -1   /* a HAL init step (PLLSAI/LTDC/layer) failed   */
 #define LTDC_ERR_STATE  -2   /* SDRAM is down, or ltdc_init() did not succeed */
+#define LTDC_ERR_HELD   -3   /* `sdram test` holds the display (issue #152);
+                                retryable once it finishes                  */
 
 /* RK043FN48H panel geometry. */
 #define LTDC_LCD_WIDTH   480u
@@ -191,7 +193,9 @@ int ltdc_gui_flip(void);
 /** Pixel clock actually programmed (LTDC_PIXEL_CLOCK_HZ); 0 when down. */
 uint32_t ltdc_pixel_clock_hz(void);
 
-/** Drive LCD_DISP (PI12) + LCD_BL_CTRL (PK3): true = display on + backlight. */
+/** Drive LCD_DISP (PI12) + LCD_BL_CTRL (PK3): true = display on + backlight.
+ *  While ltdc_scanout_hold() is held, true is ignored (decided under the LTDC
+ *  lock) and false also cancels the backlight restore (issue #152). */
 void ltdc_backlight(bool on);
 
 /** Whether the display is on, as ltdc_backlight() last set it (issue #142).
@@ -208,8 +212,36 @@ bool ltdc_display_on(void);
  * GUIX owns it. While disabled, ltdc_flip()/ltdc_gui_flip() refuse (so no
  * VBR-timeout fault) and ltdc_gui_take(true) fails; the shell `lcd` draw commands
  * refuse via lcd_ready().  Direct ltdc_fill()/ltdc_blit() still write the back
- * buffer but nothing is presented until re-enabled. */
+ * buffer but nothing is presented until re-enabled.  While ltdc_scanout_hold()
+ * is held, on=true returns LTDC_ERR_HELD and on=false only cancels the restore
+ * (below). */
 int ltdc_set_scanout(bool on);
+
+/**
+ * The display owner's side of `sdram test` (issue #152): ltdc_fb lives in
+ * .sdram bank0, so the test asks HERE before writing over it -- the same shape
+ * as camera_scratch_claim() and nn_scratch_claim().
+ *
+ * ltdc_scanout_hold(), under the LTDC lock: refused with LTDC_ERR_STATE while
+ * GUIX owns the display, LTDC_ERR_HELD if already held; otherwise remembers
+ * whether scan-out was running and whether the backlight was on (two facts:
+ * under GUIX `lcd off` drops only the backlight), stops scan-out, turns the
+ * backlight off and holds.  While held:
+ * ltdc_set_scanout(true) (`lcd on`) returns LTDC_ERR_HELD, ltdc_set_scanout(false)
+ * (`lcd off`) only cancels the restore, ltdc_gui_take(true) (`gui start`) fails,
+ * the public draw helpers are no-ops and ltdc_flip() / ltdc_gui_flip() return
+ * LTDC_ERR_HELD -- nothing but the holder writes the framebuffers.
+ * ltdc_backlight(true) is ignored.  ltdc_scanout_unhold() repaints both buffers
+ * black and restores scan-out and the backlight each to what it was
+ * (LTDC_ERR_STATE if a fault prevents that).  Both return LTDC_OK when the
+ * LTDC never came up: nothing scans out or draws then.  Thread context only.
+ */
+int  ltdc_scanout_hold(void);
+int  ltdc_scanout_unhold(void);
+
+/** Whether ltdc_scanout_hold() is held -- for a command's wording only; the
+ *  refusals themselves are decided under the LTDC lock. */
+bool ltdc_scanout_held(void);
 
 /** True when the LTDC is up but scanout is currently disabled
     (owhinata/stm32f746g-disco#66). */
@@ -222,14 +254,6 @@ bool ltdc_scanout_off(void);
  * false when the LTDC never came up (no display = no contention), which is the
  * correct "scanout not active" case. */
 bool ltdc_scanout_active(void);
-
-/** Clear BOTH framebuffers to black (owhinata/stm32f746g-disco#65).  Low-level: it
-    writes the
- *  framebuffers directly under the LTDC lock and does NOT go through the
- *  scanout-disabled draw refusal, so it works even while scanout is OFF.  Used by
- *  `sdram test` to repaint the clobbered .sdram buffers before re-enabling
- *  scanout.  No-op when the LTDC is down/faulted.  Thread-context only. */
-void ltdc_clear(void);
 
 /** Read the LTDC FIFO-underrun / transfer-error status flags (sticky since the
  *  last clear).  These are set by hardware regardless of the interrupt enable

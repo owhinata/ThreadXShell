@@ -74,12 +74,31 @@ static enum nn_claim nn_claim_of_stop(int stop_rc)
 
 /* ---- tensors ------------------------------------------------------------- */
 
+/* What an nn_model_open() refusal means to the caller: `sdram test` holding
+ * .sdram.ai (issue #152) is a transient claim elsewhere -- BUSY, retry later --
+ * not a missing model.  Every other failure keeps its old answer. */
+static int nn_open_status(int rc)
+{
+	return (rc == NN_ERR_SCRATCH_HELD) ? NN_SVC_ERR_BUSY : NN_SVC_ERR_STATE;
+}
+
+/* The detail for a session or open refused for the same reason. */
+static void nn_busy_detail(struct nn_op_result *res, int rc)
+{
+	if (rc == NN_ERR_SCRATCH_HELD)
+		nn_detail_set(".sdram.ai is held by `sdram test`; try again "
+		              "when it finishes");
+	else
+		nn_detail_set("NN busy (a stream or run is active)");
+}
+
 int nn_svc_tensors_pin(void)
 {
 	struct nn_model *m = NULL;
+	int rc = nn_model_open(&m);
 
-	if (nn_model_open(&m) != 0 || m == NULL)
-		return NN_SVC_ERR_STATE;
+	if (rc != 0 || m == NULL)
+		return nn_open_status(rc);
 	if (nn_session_try_acquire() != 0)
 		return NN_SVC_ERR_BUSY;
 	return NN_SVC_OK;
@@ -93,9 +112,10 @@ void nn_svc_tensors_unpin(void)
 int nn_svc_output_count(void)
 {
 	struct nn_model *m = NULL;
+	int rc = nn_model_open(&m);
 
-	if (nn_model_open(&m) != 0 || m == NULL)
-		return NN_SVC_ERR_STATE;
+	if (rc != 0 || m == NULL)
+		return nn_open_status(rc);
 	return nn_output_count(m);
 }
 
@@ -103,9 +123,10 @@ int nn_svc_output(unsigned index, struct tensor_desc *out)
 {
 	struct nn_model *m = NULL;
 	struct nn_tensor *t;
+	int rc = nn_model_open(&m);
 
-	if (nn_model_open(&m) != 0 || m == NULL)
-		return NN_SVC_ERR_STATE;
+	if (rc != 0 || m == NULL)
+		return nn_open_status(rc);
 	t = nn_output(m, (int)index);
 	if (t == NULL)
 		return NN_SVC_ERR_ARG;
@@ -117,9 +138,10 @@ int nn_svc_input(struct tensor_desc *out)
 {
 	struct nn_model *m = NULL;
 	struct nn_tensor *t;
+	int rc = nn_model_open(&m);
 
-	if (nn_model_open(&m) != 0 || m == NULL)
-		return NN_SVC_ERR_STATE;
+	if (rc != 0 || m == NULL)
+		return nn_open_status(rc);
 	t = nn_input(m, 0);
 	if (t == NULL)
 		return NN_SVC_ERR_ARG;
@@ -303,6 +325,11 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		(void)nn_core_abort(&nn_core, &nn_core_board);
 		/* The same words and status as `nn stream start` -- one refusal from
 		 * one worker reads the same from either command. */
+		if (rc == NN_ERR_SCRATCH_HELD) {
+			nn_busy_detail(res, rc);        /* `sdram test` (#152) */
+			nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
+			return;
+		}
 		if (rc == -9)
 			nn_detail_set(NN_CAMERA_NOT_RGB565);
 		else if (rc == -10)
@@ -466,17 +493,22 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
 void nn_svc_bench_prepare(struct nn_op_result *res)
 {
 	struct nn_model *m = NULL;
-	int i;
+	int i, rc;
 
 	nn_detail_clear();
 
-	if (nn_model_open(&m) != 0 || m == NULL) {
-		nn_detail_set("no model is loaded");
-		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
+	rc = nn_model_open(&m);
+	if (rc != 0 || m == NULL) {
+		if (rc == NN_ERR_SCRATCH_HELD)
+			nn_busy_detail(res, rc);
+		else
+			nn_detail_set("no model is loaded");
+		nn_result(res, nn_open_status(rc), NN_CLAIM_NONE);
 		return;
 	}
-	if (nn_session_try_acquire() != 0) {
-		nn_detail_set("NN busy (a stream or run is active)");
+	rc = nn_session_try_acquire();
+	if (rc != 0) {
+		nn_busy_detail(res, rc);
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 		return;
 	}
@@ -508,18 +540,24 @@ void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
 	uint32_t hclk = HAL_RCC_GetHCLKFreq();
 	uint32_t mhz = (hclk / 1000000u) ? (hclk / 1000000u) : 1u;
 	uint32_t i;
+	int rc;
 
 	nn_detail_clear();
 	memset(out, 0, sizeof *out);
 	out->min_us = 0xFFFFFFFFu;
 
-	if (nn_model_open(&m) != 0 || m == NULL) {
-		nn_detail_set("no model is loaded");
-		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
+	rc = nn_model_open(&m);
+	if (rc != 0 || m == NULL) {
+		if (rc == NN_ERR_SCRATCH_HELD)
+			nn_busy_detail(res, rc);
+		else
+			nn_detail_set("no model is loaded");
+		nn_result(res, nn_open_status(rc), NN_CLAIM_NONE);
 		return;
 	}
-	if (nn_session_try_acquire() != 0) {
-		nn_detail_set("NN busy (a stream or run is active)");
+	rc = nn_session_try_acquire();
+	if (rc != 0) {
+		nn_busy_detail(res, rc);
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 		return;
 	}
@@ -636,6 +674,11 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	rc = nn_camera_start(CAM_RES_QVGA, 0);
 	if (rc != 0) {
 		(void)nn_core_abort(&nn_core, &nn_core_board);
+		if (rc == NN_ERR_SCRATCH_HELD) {
+			nn_busy_detail(res, rc);        /* `sdram test` (#152) */
+			nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
+			return;
+		}
 		if (rc == -9)
 			nn_detail_set(NN_CAMERA_NOT_RGB565);
 		else if (rc == -10)

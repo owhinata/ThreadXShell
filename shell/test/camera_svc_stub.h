@@ -32,6 +32,7 @@ struct camera_stub {
 	int state_status;                 /* camera_svc_stream_state()'s    */
 	int tag_samples;                  /* name each stats sample          */
 	int never_started;                /* stats: no stream since boot     */
+	int transition;                   /* stats: a start/stop in flight   */
 	/* what was called */
 	int calls_probe, calls_on, calls_off, calls_info, calls_capture;
 	int calls_open, calls_read, calls_start, calls_stop, calls_send;

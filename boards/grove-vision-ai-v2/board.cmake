@@ -391,6 +391,7 @@ set(SHELL_SOURCES
     "${BOARD_DIR}/cmds/cmd_epk.c"
     "${BOARD_DIR}/cmds/cmd_lcd.c"
     "${BOARD_DIR}/cmds/cmd_mve.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_camera.c"  # the one shared command (#143)
     "${BOARD_DIR}/cmds/cmd_camera_board.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
@@ -686,6 +687,7 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/camera/cam_state.c"
     "${BOARD_DIR}/port/camera/cam_edm.c"
     "${BOARD_DIR}/port/camera/camera.c"
+    "${BOARD_DIR}/port/camera/camera_svc_grove.c"  # the shared `camera` command's adapter (#143)
     "${BOARD_DIR}/port/camera/cam_lcd_sink.c"
     # Who holds the camera's stream to the panel (issue #142): the board's
     # decisions here, the table and the overlay's use count shared in svc/.

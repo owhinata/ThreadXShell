@@ -251,6 +251,21 @@ static void check_common(void)
 	       has("stub: board stats sample-1\r\n") &&
 	       before("holders:", "stub: board stats"));
 
+	/* stats while a start or stop is in flight: no holder list to give */
+	reset();
+	camera_stub.transition = 1;
+	run("camera stream stats\r");
+	expect("stats mid-transition says so instead of naming holders",
+	       has("holders:   -- (a stream start or stop is in progress)\r\n") &&
+	       !has("holders:   none"));
+	reset();
+	camera_stub.transition = 1;
+	camera_stub.lost = 2;
+	run("camera stream stats\r");
+	expect("and still gives the lost count, as the board heads do",
+	       has("holders:   -- (a stream start or stop is in progress)  "
+	           "(2 lost when the stream ended)\r\n"));
+
 	/* stats before any stream: the one line, no holders, no board lines */
 	reset();
 	camera_stub.never_started = 1;

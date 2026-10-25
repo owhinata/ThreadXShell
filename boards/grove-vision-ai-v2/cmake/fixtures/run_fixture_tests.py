@@ -342,8 +342,19 @@ def main():
     # port itself: cmd_nn.c captures a frame to feed the NPU (issue #44), so
     # leaving it in turns this fixture into an undefined-reference failure
     # instead of the vacuous link it is supposed to produce.
-    f2_objs = re.sub(r"\S*shell_objs\.dir/boards/\S*/(?:port/camera/\S+|"
-                     r"cmds/cmd_camera_board\.c|cmds/cmd_nn\.c)\.obj\s+", "", f2)
+    #
+    # [!] AND THE CONSUMERS MOVE.  Issue #142 gave cmd_lcd.c a look at the
+    # panel sink (cam_lcd_sink_linked()), and issue #143 put the `camera`
+    # command in shell/cmds/ -- outside the boards/ path this pattern used to
+    # stop at -- so F2 stopped linking twice, unnoticed, because nothing runs
+    # this suite automatically (it was broken on main before #143).  Those two
+    # go with the camera.  The nn port cannot: everything from the shared
+    # `nn` command to plugin_run.c and main.c leans on it, so the few camera
+    # entry points IT calls are aliased below instead, like the
+    # create_objects() pair.
+    f2_objs = re.sub(r"\S*shell_objs\.dir/(?:boards/\S*/(?:port/camera/\S+|"
+                     r"cmds/cmd_camera_board\.c|cmds/cmd_lcd\.c|cmds/cmd_nn\.c)|"
+                     r"shell/cmds/cmd_camera\.c)\.obj\s+", "", f2)
     if f2_objs == f2:
         raise SystemExit("run_fixture_tests: the probe link names no "
                          "port/camera objects; the fixture cannot remove them")
@@ -356,11 +367,19 @@ def main():
     # stopped LINKING at 3bb16e4 and stayed that way, unnoticed, because the
     # suite is run by hand.  A fixture that cannot link is a negative test that
     # is not running.
+    # The camera entry points the nn port calls (issue #142's panel-sink
+    # hold / release / overlay, the stats it reads, and issue #115's frame
+    # count and raw frame), aliased like the create_objects() pair -- nothing
+    # in a fixture ELF is executed.
+    f2_alias = ("camera_create_objects", "cam_lcd_sink_create_objects",
+                "cam_lcd_sink_hold", "cam_lcd_sink_release",
+                "cam_lcd_sink_overlay_remove", "camera_stream_stats",
+                "camera_frames_since_bringup", "camera_raw_frame")
     f2 = f2_objs.replace(
         "arm-none-eabi-g++ ",
-        "arm-none-eabi-g++ "
-        "-Wl,--defsym=camera_create_objects=lcd_create_objects "
-        "-Wl,--defsym=cam_lcd_sink_create_objects=lcd_create_objects ", 1)
+        "arm-none-eabi-g++ " +
+        "".join(f"-Wl,--defsym={sym}=lcd_create_objects " for sym in f2_alias),
+        1)
     if f2 == base:
         raise SystemExit("run_fixture_tests: the probe link names no camera "
                          "archives; the fixture cannot remove them")

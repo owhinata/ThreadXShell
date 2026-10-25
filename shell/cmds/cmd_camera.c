@@ -620,16 +620,41 @@ static void cam_stats_head(void *ctx, const struct camera_svc_state *st)
 	else
 		cli_print(sh, "state:     stopped\r\n");
 
+	/* One line, one print: a background job's output cannot land inside it. */
 	n = (st->nusers < CAMERA_SVC_USERS_MAX) ? st->nusers : CAMERA_SVC_USERS_MAX;
-	cli_print(sh, "holders:  ");
-	if (n == 0u)
-		cli_print(sh, " none");
-	for (unsigned i = 0; i < n; i++)
-		cli_print(sh, "%s %s", i ? "," : "",
-		          st->users[i] ? st->users[i] : "?");
-	if (st->lost)
-		cli_print(sh, "  (%d lost when the stream ended)", (int)st->lost);
-	cli_print(sh, "\r\n");
+	{
+		char list[64];
+		size_t len = 0;
+
+		list[0] = '\0';
+		for (unsigned i = 0; i < n; i++) {
+			const char *name = st->users[i] ? st->users[i] : "?";
+			size_t w = strlen(name);
+
+			if (len + 2u + w >= sizeof list)
+				break;
+			list[len++] = i ? ',' : ' ';
+			if (i)
+				list[len++] = ' ';
+			memcpy(list + len, name, w + 1u);
+			len += w;
+		}
+		/* Mid-transition there is no list, but the lost count still
+		   stands (it is the last confirmed end's), as the boards' own
+		   heads have always printed it. */
+		if (st->transition && st->lost)
+			cli_print(sh, "holders:   -- (a stream start or stop is in "
+			          "progress)  (%d lost when the stream ended)\r\n",
+			          (int)st->lost);
+		else if (st->transition)
+			cli_print(sh, "holders:   -- (a stream start or stop is in "
+			          "progress)\r\n");
+		else if (st->lost)
+			cli_print(sh, "holders:  %s  (%d lost when the stream ended)\r\n",
+			          n ? list : " none", (int)st->lost);
+		else
+			cli_print(sh, "holders:  %s\r\n", n ? list : " none");
+	}
 }
 
 static int cmd_stream_stats(struct cli_instance *sh, int argc, char **argv)

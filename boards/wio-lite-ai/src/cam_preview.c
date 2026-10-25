@@ -240,7 +240,7 @@ static void preview_entry(ULONG arg)
 
 			   Where a plugin's draw() stands (issue #108 placed the probe,
 			   #110 put the call beside it): inside the frame lock.  The depth
-			   is sampled at the indirect call itself (svc/nn_active_core.c,
+			   is sampled at the indirect call itself (svc/nn/nn_active_core.c,
 			   issue #126).
 			   [!] AND THIS IS THE ONLY WAY A FRAME GETS ANNOTATED (issue
 			   #116).  With no plugin -- or a container whose plugin was
@@ -270,7 +270,7 @@ static void preview_entry(ULONG arg)
 				preview_dropped++;
 			ltdc_unlock_frame();
 #if defined(CONFIG_NN_BACKEND_TFLM)
-			/* The painted frame is out (svc/nn_core_frame.h). */
+			/* The painted frame is out (svc/nn/nn_core_frame.h). */
 			nn_camera_present_done();
 #endif
 		}

@@ -10,7 +10,7 @@
  * the camera producer prepares a frame into the model's input and hands it
  * over, this thread runs the invoke, the decode and the publish, and the panel
  * draws whatever was published last.  The hand-over rules are
- * svc/nn_handoff.h's, run by the shared frame path (svc/nn_core_frame.h,
+ * svc/nn/nn_handoff.h's, run by the shared frame path (svc/nn/nn_core_frame.h,
  * issue #130) on the overlay's state.
  *
  * A stream arms it at start (IDLE -> WANT) and its stop joins it after the

@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host test for the shared plugin loader (svc/plugin_exec.c, issue #110).
+ * Host test for the shared plugin loader (svc/plugin/plugin_exec.c, issue #110).
  *
  * WHAT THIS CHECKS, AND WHY IT IS NOT A DEVICE TEST.  What the loader must get
  * right is an ORDER -- unload before deciding whether there is anything to
@@ -474,7 +474,7 @@ int main(void)
 	env.res_lo = res_lo;
 	env.res_hi = res_hi;
 
-	printf("test_plugin_exec (svc/plugin_exec.c):\n");
+	printf("test_plugin_exec (svc/plugin/plugin_exec.c):\n");
 	test_arguments();
 	test_refusals();
 	test_order();

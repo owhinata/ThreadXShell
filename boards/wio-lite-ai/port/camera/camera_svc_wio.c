@@ -7,7 +7,7 @@
  * @brief   This board behind the shared `camera` command's contract
  *          (issue #143).
  *
- * svc/camera_svc.h is what shell/cmds/cmd_camera.c speaks; port/camera is what
+ * svc/camera/camera_svc.h is what shell/cmds/cmd_camera.c speaks; port/camera is what
  * this board has.  A thin translation: the last capture, its generation, the
  * stream and its holders each already have one owner in camera.c.  It keeps
  * only two things of its own -- whether a frame cursor holds the OCTOSPI1
@@ -16,7 +16,7 @@
  *
  * [!] NO SHELL INSTANCE.  The sentences cmds/cmd_camera.c used to print are
  * written through the shared command's writer, one whole line per write
- * (svc/camera_svc_adapter.h), or formatted into the caller's result.
+ * (svc/camera/camera_svc_adapter.h), or formatted into the caller's result.
  *
  * [!] THE OCTOSPI1 SHARED GUARD, IN THREE PLACES, EACH INSIDE ONE CALL.  The
  * snapshot lives in the PSRAM, and `psram` / `membench` / `devmem` / `wifi
@@ -677,7 +677,7 @@ int camera_svc_stream_stop(struct camera_op_result *res, uint32_t *gen)
 }
 
 /* The stop above already waited for its stream; answering by generation all
-   the same keeps the contract's one shape (svc/cam_gen.h). */
+   the same keeps the contract's one shape (svc/camera/cam_gen.h). */
 int camera_svc_stream_ended(uint32_t gen)
 {
 	return camera_stream_ended(gen);

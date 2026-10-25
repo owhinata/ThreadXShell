@@ -12,7 +12,7 @@
  * lease on the external NOR window.  Each grew its own command, and the three
  * drifted in name, grammar and output.  This is the seam that lets ONE command
  * in shell/cmds/ serve all three: the declarations here are implemented by a
- * board adapter in that board's port, the same way svc/blazeface.h is one
+ * board adapter in that board's port, the same way svc/nn/blazeface.h is one
  * decoder above three tensor types.
  *
  * WHAT THIS FILE IS NOT.  It is not a model API -- the boards already have those
@@ -507,7 +507,7 @@ void nn_svc_info(struct nn_svc_info *out);
  *
  * @param state  where the lifecycle ended up, independent of the status --
  *               except that it is not written when the status is
- *               NN_SVC_ERR_BUSY (issue #138; svc/nn_core_model.h)
+ *               NN_SVC_ERR_BUSY (issue #138; svc/nn/nn_core_model.h)
  */
 void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
                        void *ctx, struct nn_op_result *res,

@@ -155,7 +155,7 @@ static int pl_draw_valid;
  * [!] NOT ONE CODE.  "Nothing has decoded yet" and "the open model is not a
  * classifier" call for opposite actions -- run something, or load something
  * else -- and folding either into "no classes" would report a measurement that
- * was never made.  The same rule svc/blazeface.h states for its own codes.
+ * was never made.  The same rule svc/nn/blazeface.h states for its own codes.
  */
 #define PL_ERR_MODEL   (-1)   /**< the outputs are not this model's shape     */
 #define PL_ERR_UNINIT  (-2)   /**< entry() has not run                        */
@@ -261,7 +261,7 @@ static int pl_shapes_ok(const struct tensor_desc *outs, unsigned n)
  * reason it is here rather than in draw().  draw() runs on the panel thread
  * inside the guard, where everything else that wants the panel is failing its
  * non-blocking acquire; the base's plugin lease keeps this and draw() from
- * running at once (svc/plugin_abi.h), so the hand-off needs no lock of the
+ * running at once (svc/plugin/plugin_abi.h), so the hand-off needs no lock of the
  * plugin's own.
  *
  * The number is formatted through the EXISTING pl_fmt_* helpers, pointed at a

@@ -6,7 +6,7 @@
  * @file    nn_svc_f746.c
  * @brief   This board behind the shared `nn` command's contract (issue #50).
  *
- * svc/nn_svc.h is what shell/cmds/cmd_nn.c speaks; port/nn is what this board
+ * svc/nn/nn_svc.h is what shell/cmds/cmd_nn.c speaks; port/nn is what this board
  * has.  This is the translation, and it is a THIN one: unlike the Grove adapter,
  * it introduces no state at all.
  *
@@ -169,7 +169,7 @@ static void nn_snap_of(const struct nn_camera_decode *dec,
 
 /* ---- the stream lifecycle's binding (issues #99, #130) -------------------
  *
- * The machine is svc/nn_stream_life.c's and the policy around it svc/nn_core.c's
+ * The machine is svc/nn/nn_stream_life.c's and the policy around it svc/nn/nn_core.c's
  * -- one copy for every board.  What is here is only what this board is: its
  * critical section, its clock, and where its counters and its record are.
  */
@@ -648,7 +648,7 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		return;
 	}
 	/* The record's accepted count is read by the commit, after the start's
-	 * record boundary: the two interleavings are in svc/nn_det_record.h
+	 * record boundary: the two interleavings are in svc/nn/nn_det_record.h
 	 * (issue #118).  It takes the record's lock outside the commit's critical
 	 * section, which may not take it. */
 	*gen = nn_core_commit(&nn_core, &nn_core_board, NULL);

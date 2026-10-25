@@ -62,7 +62,7 @@ void nn_top_of(const struct tensor_desc *t, struct nn_top5 *out)
 			raw = ((const uint8_t *)t->data)[i];
 			v = ((float)raw - (float)t->zero_point) * t->scale;
 			break;
-		default:              /* FLOAT32: no affine, see svc/tensor.h */
+		default:              /* FLOAT32: no affine, see svc/nn/tensor.h */
 			raw = 0;
 			v = ((const float *)t->data)[i];
 			break;

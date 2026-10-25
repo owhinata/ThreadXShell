@@ -14,7 +14,7 @@
  * never reaches either refusal -- so the only place they are ever seen to say no
  * is here.
  *
- * The REAL plugin_run.c and svc/plugin_exec.c are compiled; the device, ThreadX
+ * The REAL plugin_run.c and svc/plugin/plugin_exec.c are compiled; the device, ThreadX
  * and the NOR lease are stubs (test/plugin_run_shim).  The MPU is configured to
  * REFUSE in every case, so a load that passes both lease checks ends at
  * PLUGIN_RUN_MPU and never branches into the image -- which on a host would be

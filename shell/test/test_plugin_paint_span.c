@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host tests for svc/plugin_paint_span.c (issue #126): what a painter primitive
+ * Host tests for svc/plugin/plugin_paint_span.c (issue #126): what a painter primitive
  * decides before its first store, shared by grove-vision-ai-v2 and wio-lite-ai.
  *
  * What the LOOPS store is not tested here and cannot be: each board's
@@ -323,7 +323,7 @@ int main(void)
 {
 	size_t i;
 
-	printf("test_plugin_paint_span (svc/plugin_paint_span.c):\n");
+	printf("test_plugin_paint_span (svc/plugin/plugin_paint_span.c):\n");
 	for (i = 0; i < sizeof orients / sizeof orients[0]; i++) {
 		test_clip(&orients[i]);
 		test_fill(&orients[i]);

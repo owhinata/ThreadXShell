@@ -4,7 +4,7 @@
  */
 /**
  * @file    test_nn_top.c
- * @brief   Host tests for svc/nn_top.c (issue #121).
+ * @brief   Host tests for svc/nn/nn_top.c (issue #121).
  *
  * The walk moved out of the shared command into the worker; what is pinned here
  * is that it still reports what the command used to print -- the order, the raw

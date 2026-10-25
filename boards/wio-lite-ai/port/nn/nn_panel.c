@@ -10,7 +10,7 @@
  * Everything here runs on the preview thread (priority 12), which outranks the
  * worker: the may-draw question, the record snapshot (no capture, so it never
  * waits on the lease), the plugin's draw() and its spent / refused figures.
- * The lease is only ever TRIED (svc/nn_core_frame.c, nn_core_draw()).  Built
+ * The lease is only ever TRIED (svc/nn/nn_core_frame.c, nn_core_draw()).  Built
  * only with the LCD, like the preview itself.
  */
 #include "nn_panel.h"
@@ -72,7 +72,7 @@ void cam_preview_plugin_draw_arm(void)
 }
 
 /*
- * The panel's half of the shared frame path (svc/nn_core_frame.h, issue #130).
+ * The panel's half of the shared frame path (svc/nn/nn_core_frame.h, issue #130).
  * nn_core_draw() tries the lease, then takes the frame lock below, then asks
  * the hooks below whether to paint, then paints, then gives the lease back --
  * the order and the questions this file used to spell out itself.

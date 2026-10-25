@@ -8,7 +8,7 @@
  *          (issue #142): whether a teardown still goes ahead, and whether nn may
  *          join the stream.
  *
- * The table itself is svc/cam_holders.h.  What is here is this board's: its
+ * The table itself is svc/camera/cam_holders.h.  What is here is this board's: its
  * stop is ASYNCHRONOUS (camera_stream_stop() asks, the producer tears down
  * later), and its base can run formats the nn step cannot read.  Both are pure
  * so test/test_cam_hold_rules.c can walk them; camera.c calls them under

@@ -53,7 +53,7 @@
  * interpretation of them is missing.
  *
  * @return non-zero if it was taken.  A publish from a session that has since
- *         ended is DROPPED -- svc/nn_det_record.c has the rule and the reason --
+ *         ended is DROPPED -- svc/nn/nn_det_record.c has the rule and the reason --
  *         and the caller must not count it, because `nn run` waits on the
  *         inference counter and then reads the record.
  */
@@ -144,7 +144,7 @@ static uint32_t nncam_gen_now(void)
 	return g;
 }
 
-/* ---- the frame path's hooks (svc/nn_core_frame.h, issue #130) ------------- */
+/* ---- the frame path's hooks (svc/nn/nn_core_frame.h, issue #130) ------------- */
 
 int nncam_publish_raw_hook(void *ctx, uint32_t gen)
 {
@@ -160,7 +160,7 @@ int nncam_admits_hook(void *ctx, uint32_t gen)
 }
 
 /* Where a plugin's decode() is called (issue #110).  Its depth is sampled
- * inside, at the indirect call (svc/nn_active_core.c, issue #126). */
+ * inside, at the indirect call (svc/nn/nn_active_core.c, issue #126). */
 int nncam_decode(void *ctx, int *n)
 {
 	int nd = nn_active_decode(nncam_model);

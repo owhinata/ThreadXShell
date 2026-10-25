@@ -8,7 +8,7 @@
  *          grove-vision-ai-v2 and wio-lite-ai (issue #126).
  *
  * Each board's port nn_active.c keeps its public nn_active_*() API and turns
- * its own tensors into svc/tensor.h descriptors; the decision -- is there a
+ * its own tensors into svc/nn/tensor.h descriptors; the decision -- is there a
  * plugin, which slot, what the answer is when there is none -- and every
  * indirect call into a plugin's decoder slots is made here, once.
  *
@@ -35,7 +35,7 @@
  * frame, so it is inside the number -- and handed to the board's note().  The
  * note is a call of its own and its frame is gone before the plugin's begins.
  * Taken only on the branch that really calls: an answer that entered nothing
- * sampled nothing.  entry() is not called from here (svc/plugin_exec.c calls
+ * sampled nothing.  entry() is not called from here (svc/plugin/plugin_exec.c calls
  * it); each board samples it in its exec_ok hook.
  *
  * No mutable storage.

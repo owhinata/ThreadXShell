@@ -7,8 +7,8 @@
  * @brief   This board's `nn info`, `nn model load` and `nn model unload`
  *          behind the shared order (issue #131 step 7d).
  *
- * The ORDER of a load and an unload is svc/nn_core_model.c's -- one copy for
- * every board -- and where a load ends is svc/nn_swap.c's table.  What is here
+ * The ORDER of a load and an unload is svc/nn/nn_core_model.c's -- one copy for
+ * every board -- and where a load ends is svc/nn/nn_swap.c's table.  What is here
  * is only what this board is: where its claim is (the NN session), what it must
  * see before it (no stream, SDRAM up, the first open), how it reads a model off
  * the SD card, and how its backend replaces one model with another.
@@ -369,7 +369,7 @@ void nn_svc_info(struct nn_svc_info *out)
 	 * name one model beside another's size.  When the session was free no load
 	 * can have run; when it was not, the copy stands only if no load or unload
 	 * was between its two steps at either end of it, nor ran whole in between
-	 * (svc/nn_core_model.c).  A stream holds the session and never moves the
+	 * (svc/nn/nn_core_model.c).  A stream holds the session and never moves the
 	 * counter, so its report is what it was.
 	 */
 	if (!nn_core_model_copy_stands(seq0, seq1, held)) {
@@ -399,7 +399,7 @@ void nn_svc_info(struct nn_svc_info *out)
 /* ---- model lifecycle ----------------------------------------------------- */
 
 /* Point the model at @p spec -- over an open model too.  The order and its
- * endings: svc/nn_core_model.h. */
+ * endings: svc/nn/nn_core_model.h. */
 void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
                        void *ctx, struct nn_op_result *res,
                        enum nn_model_state *state)
@@ -417,7 +417,7 @@ void nn_svc_model_load(const struct nn_spec *spec, nn_svc_read_fn read,
 	nn_core_model_load(&nn_model_life, &nn_life_board, &j, state);
 }
 
-/* Idempotent: unloading nothing succeeds (svc/nn_core_model.h). */
+/* Idempotent: unloading nothing succeeds (svc/nn/nn_core_model.h). */
 void nn_svc_model_unload(struct nn_op_result *res)
 {
 	struct nn_core_model_job j;

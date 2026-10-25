@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host unit test for svc/plugin_info.c -- `nn info`'s plugin stack lines
+ * Host unit test for svc/plugin/plugin_info.c -- `nn info`'s plugin stack lines
  * (issue #111).  No gate compares what a command prints, so the two lines are
  * pinned here BYTE FOR BYTE, from the numbers Grove's blazeface container
  * carries (c 256) and a classifier with absent param slots, plus the widest
@@ -70,7 +70,7 @@ int main(void)
 	                                    1000 };
 	struct plugin_view v;
 
-	printf("test_plugin_info (svc/plugin_info.c):\n");
+	printf("test_plugin_info (svc/plugin/plugin_info.c):\n");
 
 	view(&v, bf_own, bf_cr, 0x7Fu, 256u, 16u);
 	out_len = 0u;

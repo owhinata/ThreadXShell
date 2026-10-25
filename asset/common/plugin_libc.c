@@ -7,7 +7,7 @@
  * @brief   The freestanding remnant of libc a plugin needs (issue #101).
  *
  * [!] MEASURED, NOT ASSUMED.  The reviewed plan said a plugin would need only
- * libgcc.  Running `nm -u` over the firmware's own object for svc/blazeface.c
+ * libgcc.  Running `nm -u` over the firmware's own object for svc/nn/blazeface.c
  * showed exactly one undefined symbol -- `memset` -- which GCC synthesises from
  * an initialisation loop and which libgcc does NOT provide: it is libc's.  A
  * `-nostdlib` link would therefore have failed to resolve it, and the host

@@ -14,7 +14,7 @@
  * Follows the nx_mjpeg.c eth_sink lifecycle (thread created once + parked) and
  * the codex-reviewed ownership rule -- the input the worker feeds to nn_run() is
  * never written by the sink -- which since issue #130 is the shared hand-over
- * word of svc/nn_core_frame.h (it was two staging buffers and a copy).  Since Epic owhinata/stm32f746g-disco#99 Phase 1
+ * word of svc/nn/nn_core_frame.h (it was two staging buffers and a copy).  Since Epic owhinata/stm32f746g-disco#99 Phase 1
  * (owhinata/stm32f746g-disco#100) nncam is a plain camera *subscriber*: `nn stream
  * start/stop` enable/disable it and it attaches to the base capture (`camera stream`)
  * only while the base runs. A base detach (stop / DCMI overrun / cascade) PAUSES it
@@ -134,7 +134,7 @@ struct nn_camera_decode {
 	int              ndet;   /**< faces, or a negative BF_ERR_* code          */
 	struct bf_result res;    /**< status, peak, pass/kept, threshold APPLIED  */
 	/* Carried from the record in the same snapshot (issue #118) -- see
-	 * svc/nn_det_record.h for each. */
+	 * svc/nn/nn_det_record.h for each. */
 	uint8_t          current;   /**< published in the session in force        */
 	uint32_t         accepted;  /**< publishes the record has ever taken      */
 	uint32_t         epoch;     /**< moves when a model change clears it      */

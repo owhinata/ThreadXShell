@@ -16,7 +16,7 @@
  *
  * The port must not reach up into cmds/, and cmds/ already depends on the port,
  * so this sits in the port.  It holds no shell instance: lines go through the
- * length-bearing writer of svc/camera_svc.h (svc/camera_svc_adapter.h).
+ * length-bearing writer of svc/camera/camera_svc.h (svc/camera/camera_svc_adapter.h).
  */
 #ifndef CAMERA_NAMES_H
 #define CAMERA_NAMES_H

@@ -24,7 +24,7 @@
  * the NN's while an `nn stream` / `nn run` is in progress.  This used to be a
  * refcount of PREVIEW and NN claims that started and stopped the stream itself.
  *
- * THE STEP MACHINE is svc/cam_step.h's, shared with f746g-disco's camera sink:
+ * THE STEP MACHINE is svc/camera/cam_step.h's, shared with f746g-disco's camera sink:
  * the producer reads a step's ARMED mark and counts itself in (BUSY) in one
  * PRIMASK section, so once an owner has disarmed a step and seen BUSY reach 0
  * the producer is out of it and cannot come back -- the proof the NN stop needs

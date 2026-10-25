@@ -8,7 +8,7 @@
  * shell/test/test_nn_core_model.c walks the shared order against a stand-in
  * board.  What it cannot say is whether THIS board's hooks feed it the right
  * facts.  So this builds the real adapter half, the real port/nn/nn.c, the
- * real svc/nn_core_model.c and svc/nn_swap.c, over a stub backend that keeps
+ * real svc/nn/nn_core_model.c and svc/nn/nn_swap.c, over a stub backend that keeps
  * nn_backend.h's contract (and can be told to break it), and walks:
  *
  *   - had_open is read under the claim: a refused load over a model is

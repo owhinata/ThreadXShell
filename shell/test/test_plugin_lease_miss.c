@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host test for the plugin lease's miss accounting (issue #127,
- * svc/plugin_lease_miss.c since issue #130).
+ * svc/plugin/plugin_lease_miss.c since issue #130).
  *
  * WHY THIS EXISTS.  A miss is a frame that reached the panel without an
  * overlay because the plugin was busy, and a frame can be lost at

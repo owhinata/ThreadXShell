@@ -34,10 +34,10 @@
  * 3. Detach unlinks BEFORE it drains.  The other order leaves the sink reachable
  *    across a window in which a fresh stream can start.
  *
- * AND SINCE ISSUE #142, WHO HOLDS IT.  The holder table (svc/cam_holders.h)
+ * AND SINCE ISSUE #142, WHO HOLDS IT.  The holder table (svc/camera/cam_holders.h)
  * lives here, under this file's holder lock: the first holder starts the camera
  * with this sink, the last one stops it, and only a confirmed stop unlinks.  nn's
- * overlay is a pointer this sink counts the use of (svc/cam_step.h), so `nn
+ * overlay is a pointer this sink counts the use of (svc/camera/cam_step.h), so `nn
  * stream stop` can take it off a stream that keeps running.
  */
 #include <stddef.h>
@@ -218,7 +218,7 @@ static struct cam_lcd_sink_stats sink_stats;
  * The optional overlay (issue #48), nn's step of this sink since issue #142.
  *
  * A POINTER, and its use COUNTED: sink_ov_step says whether the producer may
- * enter the step and how many times it is inside (svc/cam_step.h).  The pointer
+ * enter the step and how many times it is inside (svc/camera/cam_step.h).  The pointer
  * and the step move together, in one critical section -- put on by a hold,
  * taken off by cam_lcd_sink_overlay_remove() or by the unlink -- and the producer
  * reads the pointer only inside the critical section that counts it in.  It hands
@@ -993,7 +993,7 @@ static int sink_detach(void)
 	/*
 	 * [!] UNLINK FIRST (issue #57).
 	 *
-	 * This is svc/frame_pipeline's own contract -- detach stops any LATER
+	 * This is svc/camera/frame_pipeline's own contract -- detach stops any LATER
 	 * publish from selecting the sink and reports what is still in flight; the
 	 * owner of the sink's thread then drains it.  (Not "stops further
 	 * consume()": a call publish() or put() had already scheduled still runs

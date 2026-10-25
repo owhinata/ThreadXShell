@@ -7,7 +7,7 @@
  * @brief   svc/crc32.h's contract, served by the CRC-32 this firmware already
  *          links (issue #108).
  *
- * svc/plugin_load.c checks a container's plugin digest with crc32_update().  This
+ * svc/plugin/plugin_load.c checks a container's plugin digest with crc32_update().  This
  * board already carries a CRC-32/ISO-HDLC -- FlashDB's fdb_calc_crc32(), which
  * the blob store stamps every asset with -- and test/test_crc32.c pins the two
  * properties crc32_update() promises of it: that starting from 0 gives the

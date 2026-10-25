@@ -6,8 +6,8 @@
  * @file    nn_decoder.h
  * @brief   This board's adapter onto the shared BlazeFace decoder (issue #97).
  *
- * The decoder itself is svc/blazeface.c, shared with wio-lite-ai and
- * grove-vision-ai-v2.  It reads svc/tensor.h descriptors, so somebody has to turn
+ * The decoder itself is svc/nn/blazeface.c, shared with wio-lite-ai and
+ * grove-vision-ai-v2.  It reads svc/nn/tensor.h descriptors, so somebody has to turn
  * this board's `struct nn_tensor` into them, and somebody has to own the
  * decoder's state and its candidate scratch -- the shared translation unit owns
  * no storage at all, which is what lets the scratch stay in `.sdram.ai` here and

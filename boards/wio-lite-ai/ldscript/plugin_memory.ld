@@ -6,7 +6,7 @@
  *
  * [!] THIS IS THE BOARD'S HALF OF A LINKER SCRIPT SPLIT IN TWO.  The other half
  * -- asset/common/plugin.ld -- is the ABI's: its SECTIONS order IS the file
- * format svc/plugin_abi.h defines, so it belongs with the ABI and is shared by
+ * format svc/plugin/plugin_abi.h defines, so it belongs with the ABI and is shared by
  * every board.  What is genuinely this board's is the address, and it is the
  * only thing here.
  *

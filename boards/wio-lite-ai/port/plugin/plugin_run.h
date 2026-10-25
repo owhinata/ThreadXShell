@@ -7,7 +7,7 @@
  * @brief   This board's binding of the shared plugin loader (issue #110 =
  *          #78 Step 3b).
  *
- * The loader itself is svc/plugin_exec.c, shared with grove-vision-ai-v2.  What
+ * The loader itself is svc/plugin/plugin_exec.c, shared with grove-vision-ai-v2.  What
  * is genuinely this board's, and lives here, is:
  *
  *   - the state, in permanently allocated static memory;
@@ -16,7 +16,7 @@
  *     because a Cortex-M7 cannot fetch instructions from DTCM;
  *   - cache maintenance: the M7's I- and D-caches are separate and an
  *     instruction fetch does not snoop the D-cache;
- *   - the Armv7-M MPU read-back and its verdict (svc/plugin_mpu_v7m.c),
+ *   - the Armv7-M MPU read-back and its verdict (svc/plugin/plugin_mpu_v7m.c),
  *     which is NOT the other board's judgement -- see that file;
  *   - the precondition on the image's source.
  *
@@ -68,7 +68,7 @@ extern "C" {
  *         carries only a model -- a legal container, and the caller carries on.
  *         PLUGIN_RUN_NOT_HELD when the caller does not hold the plugin lease.
  *
- * Logs its own refusals: svc/plugin_exec.c returns diagnostics rather than
+ * Logs its own refusals: svc/plugin/plugin_exec.c returns diagnostics rather than
  * printing them, precisely so that the board decides where they go.
  */
 enum plugin_run_result plugin_run_load(const struct plugin_view *v,

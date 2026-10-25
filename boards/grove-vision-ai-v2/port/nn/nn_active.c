@@ -7,7 +7,7 @@
  * @brief   Which decoder is in force.  See nn_active.h.
  *
  * The decision and every call into the plugin's decoder slots are
- * svc/nn_active_core.c's, shared with wio-lite-ai (issue #126).  What is here
+ * svc/nn/nn_active_core.c's, shared with wio-lite-ai (issue #126).  What is here
  * is this board's: the geometry and the transform, the conversion from
  * npu_tensor, and the three facts the shared file is handed below.
  *
@@ -16,7 +16,7 @@
  * write the geometry a callback reads -- asks nn_active_held() first, and a
  * caller that does not hold the lease gets NN_ACTIVE_NOT_HELD: not "no
  * plugin", not a decoder's own error, an answer of its own.  The shared file
- * stays ignorant of the lease (svc/nn_active_core.h); the board enforces it at
+ * stays ignorant of the lease (svc/nn/nn_active_core.h); the board enforces it at
  * the board's branch point, which is the only way in.
  */
 #include "nn_active.h"
@@ -123,7 +123,7 @@ int nn_active_is_plugin(void)
 	return nn_active_core_is_plugin(&nn_active_board);
 }
 
-/* The tensors reach a plugin as svc/tensor.h descriptors, which is the contract
+/* The tensors reach a plugin as svc/nn/tensor.h descriptors, which is the contract
  * issue #97 established so that one decoder can read any board's tensors.  The
  * conversion is npu_desc_of(), reused rather than repeated: a second translation
  * could disagree with `nn out` and `nn info` about what a tensor is. */

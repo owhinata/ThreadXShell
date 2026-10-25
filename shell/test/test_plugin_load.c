@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host unit test for svc/plugin_load.c -- container and manifest validation
+ * Host unit test for svc/plugin/plugin_load.c -- container and manifest validation
  * (issue #101 = #78 Step 1a).
  *
  * WHY THIS FILE CARRIES SO MANY CASES.  plugin_load.h names thirty-two distinct
@@ -800,7 +800,7 @@ int main(void)
 {
 	unsigned i;
 
-	printf("test_plugin_load (svc/plugin_load.c):\n");
+	printf("test_plugin_load (svc/plugin/plugin_load.c):\n");
 
 	pol.target_id = plugin_target_id(PLUGIN_CPU_CORTEX_M55,
 	                                 PLUGIN_FPU_FP_ARMV8,

@@ -11,7 +11,7 @@
  * boards drive an LTDC-style scanout panel, whose completion and back-pressure
  * behaviour is nothing like a pushed SPI panel's; generalising across two
  * implementations, one of which does not exist yet, would fix the wrong shape.
- * When the camera arrives (M-G3b) the seam that matters is svc/frame_pipeline's
+ * When the camera arrives (M-G3b) the seam that matters is svc/camera/frame_pipeline's
  * frame_sink, which this driver will implement -- not a "display" API.
  *
  * WIRING (2x7 XIAO footprint on the board's underside; see the board README --

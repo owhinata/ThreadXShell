@@ -38,7 +38,7 @@
  *               band 3  -> HAND (-> HANDED); post(sem)
  *
  * The states are ONE word, shared with grove-vision-ai-v2 since issue #130
- * (svc/nn_handoff.h, stepped by svc/nn_core_frame.c); before that they were three
+ * (svc/nn/nn_handoff.h, stepped by svc/nn/nn_core_frame.c); before that they were three
  * flags.  Outside FILLING the producer does not touch the input tensor at all, and
  * the worker owns it exclusively from TAKE to the end of its job.  That removes the staging
  * buffers, the state machine, the epoch counters and a 196,608 B memcpy per
@@ -89,7 +89,7 @@
  * #110 added the third).
  *
  * DECODE is `nn_work`, the worker.  DRAW is the preview thread.  Since issue
- * #126 all of them are sampled in svc/nn_active_core.c, in the function that
+ * #126 all of them are sampled in svc/nn/nn_active_core.c, in the function that
  * makes the indirect call, immediately before it -- and entry() in the
  * loader's exec_ok hook -- so the number is the depth the callback is entered
  * at and does not depend on what the compiler inlined above it.
@@ -243,7 +243,7 @@ struct nn_camera_decode {
 	 */
 	uint8_t          kind;   /**< one of @ref nn_det_kind                     */
 	/* Carried from the record in the same snapshot (issue #118) -- see
-	 * svc/nn_det_record.h for each. */
+	 * svc/nn/nn_det_record.h for each. */
 	uint8_t          reportable;  /**< the plugin can still describe it      */
 	uint8_t          current;     /**< published in the session in force     */
 	uint32_t         accepted;    /**< publishes the record has ever taken   */

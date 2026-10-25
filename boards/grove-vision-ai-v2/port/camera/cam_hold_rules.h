@@ -8,7 +8,7 @@
  *          (issue #142): when the panel sink may be unlinked, how a stop came
  *          out, and whether the stream has ended under its holders.
  *
- * The table itself is svc/cam_holders.h; the locking and the acting are
+ * The table itself is svc/camera/cam_holders.h; the locking and the acting are
  * cam_lcd_sink.c's.  What is here is pure, so test/test_cam_hold_rules.c can
  * walk every input -- the interesting ones (a stop that loses the API mutex, an
  * unlink that finds a callback in flight, a producer that gave up by itself

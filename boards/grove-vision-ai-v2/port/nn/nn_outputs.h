@@ -16,7 +16,7 @@
  *   - `nn run` with NO plugin reports the outputs as tensors: every output the
  *     model has is COUNTED, the first NN_RAW_OUTPUTS_MAX that can be read are
  *     described, and a read that fails ends the list there rather than the
- *     report (svc/nn_det_record.h: `count` is the model's, `n` what was kept).
+ *     report (svc/nn/nn_det_record.h: `count` is the model's, `n` what was kept).
  *
  * The decision is taken under the plugin lease, after the plugin question, so
  * the bare model's count is never refused for a limit only a decoder has.

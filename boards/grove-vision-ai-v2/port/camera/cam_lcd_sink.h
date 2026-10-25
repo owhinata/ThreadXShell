@@ -15,7 +15,7 @@
  * the blit -- a 153,600-byte byte-swap copy plus a ~26 ms SPI DMA wait -- happens
  * there, while the producer is already capturing the next frame.  That is the
  * whole point: those 26 ms were the largest single term in the frame period
- * (epic #56).  svc/frame_pipeline specifies this exact shape -- publish pre-pins
+ * (epic #56).  svc/camera/frame_pipeline specifies this exact shape -- publish pre-pins
  * the slot, the sink may put from its own thread -- so the shared core is
  * unchanged.
  *
@@ -26,7 +26,7 @@
  * [!] SINCE ISSUE #142 THIS SINK IS STARTED BY ITS HOLDERS, NOT BY A COMMAND.
  * The camera streams to the panel while, and only while, somebody holds it:
  * the operator (`camera stream start`) or nn (`nn stream start`, `nn run`), in
- * the svc/cam_holders.h table kept here -- camera.c knows nothing of the panel
+ * the svc/camera/cam_holders.h table kept here -- camera.c knows nothing of the panel
  * and stays that way.  The first holder links this sink and starts the camera
  * (one step, issue #63); the last one to leave stops it, and only a CONFIRMED
  * stop unlinks it (port/camera/cam_hold_rules.h).  The operator may not leave
@@ -70,7 +70,7 @@ extern "C" {
  *
  * [!] HELD BY POINTER AND COUNTED (issue #142).  The sink keeps a pointer, not a
  * copy, and the producer reads it ONCE per frame -- in the same critical section
- * as it counts itself in (svc/cam_step.h) -- and hands what it read to the panel
+ * as it counts itself in (svc/camera/cam_step.h) -- and hands what it read to the panel
  * thread with the frame.  The panel never reads the pointer the sink keeps.  The
  * count stays up from that read until the panel thread has finished with the
  * frame -- drawn, or skipped because the panel was taken or dark -- so it
@@ -136,7 +136,7 @@ void cam_lcd_sink_create_objects(void);
  * sink and every resource exactly where they are; every later call answers
  * CAM_ERR_STATE and only a reboot clears it.
  */
-struct cam_holder;   /* svc/cam_holders.h */
+struct cam_holder;   /* svc/camera/cam_holders.h */
 
 /** Refused: another holder still needs the stream (issue #142 D8).  The
  *  operator stays and nothing changed.  This file's, not camera.h's: only the
@@ -158,7 +158,7 @@ struct cam_holder;   /* svc/cam_holders.h */
  * the panel up, rotates it to landscape and starts the camera WITH this sink, in
  * the camera's own one-step transaction (issue #63).  Whether the overlay can go
  * on is asked before the camera starts; a refusal gives back exactly what this
- * call registered (svc/cam_holders.h's ticket) and stops nothing it did not
+ * call registered (svc/camera/cam_holders.h's ticket) and stops nothing it did not
  * start.  [!] The arm runs LAST, so a refused hold has no side effect on the
  * holder (issue #142 review: a refused `nn stream start` keeps the last
  * stream's statistics).

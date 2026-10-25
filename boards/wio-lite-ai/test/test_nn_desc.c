@@ -11,7 +11,7 @@
  * translation never had a model in it: `nn out`, `nn info` and the
  * active-decoder shim all need it whatever interprets the tensors -- or whether
  * anything does -- so it is tested without one, and NOTHING HERE LINKS
- * svc/blazeface.c.  Linking a decoder would only prove it still compiles.
+ * svc/nn/blazeface.c.  Linking a decoder would only prove it still compiles.
  *
  * It stays a BOARD test rather than moving to the core suite because the point
  * is the REAL headers: `struct nn_tensor` and `enum nn_dtype` are this port's,

@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host test for the camera's holder table (issue #142, svc/cam_holders.c).
+ * Host test for the camera's holder table (issue #142, svc/camera/cam_holders.c).
  *
  * WHY THIS EXISTS.  The table decides when a camera starts and stops on three
  * boards, and the cases that matter most cannot be typed on purpose: a start

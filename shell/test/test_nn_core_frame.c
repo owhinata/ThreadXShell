@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host test for the shared frame path (issue #130, svc/nn_core_frame.c): the
+ * Host test for the shared frame path (issue #130, svc/nn/nn_core_frame.c): the
  * producer's parts, the worker's end of a job and the panel's draw, driven
  * through stand-in hooks.
  *

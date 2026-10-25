@@ -7,7 +7,7 @@
  * @brief   Copy a validated plugin image into a board's reservation and call
  *          its entry point (issues #103, #110).
  *
- * THREE LAYERS, AND THIS IS THE MIDDLE ONE.  svc/plugin_load.c validates a
+ * THREE LAYERS, AND THIS IS THE MIDDLE ONE.  svc/plugin/plugin_load.c validates a
  * container and hands back a POD snapshot of integer offsets -- it yields no
  * callable pointer, so "validation does not execute anything" is a property of
  * its types.  This file is where those offsets become an address and where the
@@ -202,7 +202,7 @@ int plugin_exec_active(const struct plugin_exec_env *env);
 /**
  * @brief  The address of one entry point of the active plugin, or NULL.
  *
- * [!] THE ONE PLACE AN OFFSET BECOMES SOMETHING CALLABLE.  svc/plugin_load.c
+ * [!] THE ONE PLACE AN OFFSET BECOMES SOMETHING CALLABLE.  svc/plugin/plugin_load.c
  * deliberately hands back integers and no function pointers, so that "the
  * validation step does not execute anything" is a property of its types rather
  * than a discipline someone keeps.  Here is where the arithmetic happens, and

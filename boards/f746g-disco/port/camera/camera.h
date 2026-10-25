@@ -329,8 +329,8 @@ struct camera_stream_info {
  * operator's behalf) or nn (camera_stream_join()).  A stream has no length of
  * its own any more: it ends when the last holder leaves, or on an error.
  */
-struct cam_holder;          /* svc/cam_holders.h */
-struct cam_holders_ticket;  /* svc/cam_holders.h */
+struct cam_holder;          /* svc/camera/cam_holders.h */
+struct cam_holders_ticket;  /* svc/camera/cam_holders.h */
 
 /**
  * The operator takes hold of the stream (`camera stream start`).  Starts the
@@ -354,7 +354,7 @@ int camera_stream_stop(const char **users, int max, int *nusers);
 
 /**
  * camera_stream_stop(), also handing back in *@p gen (may be NULL) the
- * generation of the stream it asked to stop (svc/cam_gen.h; CAM_GEN_NONE when
+ * generation of the stream it asked to stop (svc/camera/cam_gen.h; CAM_GEN_NONE when
  * nothing was active), read under the camera lock with the request.  The stop
  * is asynchronous: wait with camera_stream_ended(*gen), never with
  * camera_streaming() -- a later start, or one that withdrew this stop and kept
@@ -407,8 +407,8 @@ int camera_stream_lost(const struct cam_holder *h);
 int camera_stream_stats(struct camera_stream_info *out);
 
 /* ---- base capture + subscribers (Epic owhinata/stm32f746g-disco#99 Phase 1, owhinata/stm32f746g-disco#100) --- */
-struct frame_sink;       /* svc/frame_pipeline.h */
-struct frame_desc;       /* svc/frame.h          */
+struct frame_sink;       /* svc/camera/frame_pipeline.h */
+struct frame_desc;       /* svc/camera/frame.h          */
 
 /**
  * Register push sink @p s as a *subscriber* of the base capture (`camera

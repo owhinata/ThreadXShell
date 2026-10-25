@@ -6,13 +6,13 @@
  * @file    plugin_run.h
  * @brief   This board's binding of the shared plugin loader (issues #103, #110).
  *
- * The loader itself is svc/plugin_exec.c, shared with wio-lite-ai.  What is
+ * The loader itself is svc/plugin/plugin_exec.c, shared with wio-lite-ai.  What is
  * genuinely this board's, and lives here, is:
  *
  *   - the state, in permanently allocated static memory;
  *   - the reservation, from this board's linker script;
  *   - cache maintenance for a Cortex-M55 with split I- and D-caches;
- *   - the Armv8-M MPU read-back and its verdict (svc/plugin_mpu.c);
+ *   - the Armv8-M MPU read-back and its verdict (svc/plugin/plugin_mpu.c);
  *   - the precondition on the image's source -- here, the flash lease.
  *
  * [!] AND THE CALLER MUST ALREADY HOLD THE FLASH LEASE.  The container is read
@@ -52,7 +52,7 @@ extern "C" {
  *         carries only a model -- a legal container, and the caller carries on.
  *         PLUGIN_RUN_NOT_HELD when the caller does not hold the plugin lease.
  *
- * Logs its own refusals: svc/plugin_exec.c returns diagnostics rather than
+ * Logs its own refusals: svc/plugin/plugin_exec.c returns diagnostics rather than
  * printing them, precisely so that the board decides where they go.
  *
  * [!] AND IT RECORDS HOW DEEP THE STACK WAS WHERE entry() WAS CALLED (issue
@@ -87,7 +87,7 @@ const char *plugin_run_why(enum plugin_run_result r);
  *
  * [!] ENTRY IS IN, ON PURPOSE (issue #119).  A refused entry() still ran at the
  * depth sampled, and leaving it out let a shallower earlier success stand in
- * the stack report unmarked.  PLUGIN_RUN_ENTRY is also what svc/plugin_exec.c
+ * the stack report unmarked.  PLUGIN_RUN_ENTRY is also what svc/plugin/plugin_exec.c
  * returns for a null entry slot, which plugin_parse() refuses long before this;
  * were it ever reached, the sample would be counted once too often -- the safe
  * direction for a stack bound.

@@ -32,7 +32,7 @@
 
 #define NNCAM_POLL_TICKS      100u        /* sem wait -> stop latency               */
 
-/* ---- the frame path's publish / account (svc/nn_core_frame.h, issue #130) -- */
+/* ---- the frame path's publish / account (svc/nn/nn_core_frame.h, issue #130) -- */
 
 /*
  * The publish of one inference -- on this board, THE RESIDENT DECODER'S.  The

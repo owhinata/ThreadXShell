@@ -36,7 +36,7 @@
  * @section storage Where the state lives
  *
  * THIS TRANSLATION UNIT OWNS NO MUTABLE STORAGE, and a per-board build gate
- * enforces that.  The split follows svc/frame_pipeline, whose engine likewise
+ * enforces that.  The split follows svc/camera/frame_pipeline, whose engine likewise
  * owns nothing: on all three boards `struct frame_pipeline` is a plain board
  * static and only the ring's slot memory carries a section attribute.
  *

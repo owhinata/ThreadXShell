@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host unit test for the camera frame pipeline core (svc/frame_pipeline.c,
+ * Host unit test for the camera frame pipeline core (svc/camera/frame_pipeline.c,
  * owhinata/stm32f746g-disco#47 design / owhinata/stm32f746g-disco#46).  Pure: no
  * HAL/ThreadX/shell -- a no-op frame_os and mock sinks exercise the
  * ring/refcount/policy logic on the host. Asserts:  A. init + acquire returns

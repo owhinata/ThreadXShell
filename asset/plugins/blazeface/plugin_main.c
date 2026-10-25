@@ -6,7 +6,7 @@
  * @file    plugin_main.c
  * @brief   BlazeFace as a loadable plugin (issue #101 = #78 Step 1a).
  *
- * The ABI face of svc/blazeface.c.  The decoder itself is NOT copied here: the
+ * The ABI face of svc/nn/blazeface.c.  The decoder itself is NOT copied here: the
  * same source the firmware links is linked again into this image, which is what
  * keeps issue #97's "one decoder for three boards" true after a second way of
  * shipping it exists.  Everything in this file is the wrapper.
@@ -18,7 +18,7 @@
  * measurements of this artifact, not estimates.
  *
  * [!] AND IT OWNS ITS STORAGE, WHICH THE SHARED DECODER MAY NOT.  cmake/
- * check_no_mutable_storage.py forbids svc/blazeface.c from holding a single
+ * check_no_mutable_storage.py forbids svc/nn/blazeface.c from holding a single
  * mutable byte, because each board places the decoder's scratch itself -- wio in
  * .psram_ai, f746 in .sdram.ai, Grove in plain .bss -- and a static in the
  * shared file would land in memory no board's residency gate names.  A plugin is

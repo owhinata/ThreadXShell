@@ -7,7 +7,7 @@
  * @brief   Which decoder is in force.  See nn_active.h.
  *
  * The decision and every call into the plugin's decoder slots are
- * svc/nn_active_core.c's, shared with grove-vision-ai-v2 (issue #126).  What is
+ * svc/nn/nn_active_core.c's, shared with grove-vision-ai-v2 (issue #126).  What is
  * here is this board's: the conversion from nn_tensor, the transform and the
  * log sink of the base vtable, and the three facts the shared file is handed.
  *
@@ -16,7 +16,7 @@
  * callback -- or reads the slot table a holder is about to call through -- asks
  * nn_active_held() first, and a caller that does not hold the lease gets
  * NN_ACTIVE_NOT_HELD: not "no plugin", not a decoder's own error, an answer of
- * its own.  The shared file stays ignorant of the lease (svc/nn_active_core.h);
+ * its own.  The shared file stays ignorant of the lease (svc/nn/nn_active_core.h);
  * the board enforces it at the board's branch point, which is the only way in.
  * nn_active_is_plugin() is the one question left unchecked, as on Grove: the
  * worker and the panel ask it to decide whether to take the lease at all.
@@ -37,7 +37,7 @@
 /* ---- tensors ------------------------------------------------------------- */
 
 /*
- * The outputs reach a plugin as svc/tensor.h descriptors, which is the contract
+ * The outputs reach a plugin as svc/nn/tensor.h descriptors, which is the contract
  * issue #97 established so that one decoder can read any board's tensors.  The
  * conversion is nn_desc_of(), reused rather than repeated: a second translation
  * could disagree with `nn out` and `nn info` about what a tensor is.

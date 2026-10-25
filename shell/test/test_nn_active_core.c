@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host tests for svc/nn_active_core.c (issue #126): the one place that decides
+ * Host tests for svc/nn/nn_active_core.c (issue #126): the one place that decides
  * whether a plugin decodes, shared by grove-vision-ai-v2 and wio-lite-ai.
  *
  * The plugin here is a set of counting stubs, not a real decoder: what is
@@ -340,7 +340,7 @@ static void test_plugin(void)
 
 int main(void)
 {
-	printf("test_nn_active_core (svc/nn_active_core.c):\n");
+	printf("test_nn_active_core (svc/nn/nn_active_core.c):\n");
 	memset(d, 0, sizeof d);
 
 	printf("no plugin loaded:\n");

@@ -47,7 +47,7 @@ extern "C" {
 #endif
 
 /* The budget and the charge are shared with the other board that lets a plugin
- * paint (svc/plugin_paint_budget.h, issue #110): the loops have nothing in
+ * paint (svc/plugin/plugin_paint_budget.h, issue #110): the loops have nothing in
  * common, the accounting is the part issue #105 got wrong, and a rule that
  * subtle should have one implementation. */
 

@@ -19,7 +19,7 @@
  *
  * The same layering as `nn` (shell/cmds/cmd_nn.c): this file owns the frame --
  * the grammar, the usage, what a refusal looks like, the holders line, the
- * save / send loops -- and speaks only svc/camera_svc.h.  Each board puts its
+ * save / send loops -- and speaks only svc/camera/camera_svc.h.  Each board puts its
  * camera behind that contract in boards/<board>/port/camera/camera_svc_<b>.c,
  * and the two things only the shell layer can do (send over YMODEM, resolve a
  * FileX medium) come from the board's cmds/ through shell/cmds/
@@ -35,7 +35,7 @@
  * registered at all, so `help camera` describes this board and not the family.
  *
  * [!] NOTHING IS RELEASED HERE ON THE STRENGTH OF A RESULT.  Cleanup is the
- * adapter's (svc/camera_svc.h); this file prints what happened and returns.
+ * adapter's (svc/camera/camera_svc.h); this file prints what happened and returns.
  */
 #include "cli.h"
 
@@ -142,7 +142,7 @@ static void cam_print_fail(struct cli_instance *sh,
 }
 
 /*
- * The writer a board's report goes through (svc/camera_svc.h).  cli_write()
+ * The writer a board's report goes through (svc/camera/camera_svc.h).  cli_write()
  * takes the whole piece under ONE output bracket, as one cli_print() did when
  * the board printed for itself: a line split across two calls can have a
  * background job's output land in the middle of it.  No copy, so no chunk
@@ -159,7 +159,7 @@ static int cam_write(void *ctx, const char *s, size_t len)
 	return (cli_write(sh, s, len) < 0) ? -1 : (int)len;
 }
 
-/* The cancellation question a board's long walk asks (svc/camera_svc.h).  It
+/* The cancellation question a board's long walk asks (svc/camera/camera_svc.h).  It
    is also what lets the console read the Ctrl+C at all: input is polled only
    while somebody asks. */
 static int cam_cancelled(void *ctx)
@@ -351,7 +351,7 @@ static int cmd_camera_capture(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	/* The capture says what it paid to warm up; the report must not touch
-	   that (svc/camera_svc.h), so it starts out as "nothing". */
+	   that (svc/camera/camera_svc.h), so it starts out as "nothing". */
 	memset(&rep, 0, sizeof rep);
 	rep.warmup_unit = (uint8_t)CAMERA_SVC_WARMUP_NONE;
 	camera_svc_capture(test, &rep, &res, cam_write, cam_cancelled, sh);
@@ -663,7 +663,7 @@ static int cmd_stream_start(struct cli_instance *sh, int argc, char **argv)
 		test = 1;
 	}
 
-	/* The board writes its outcome line (svc/camera_svc.h). */
+	/* The board writes its outcome line (svc/camera/camera_svc.h). */
 	camera_svc_stream_start(test, &res, &already, cam_write, sh);
 	if (res.status != CAMERA_SVC_OK) {
 		cam_print_fail(sh, &res, "");
@@ -754,7 +754,7 @@ static int cmd_stream_stats(struct cli_instance *sh, int argc, char **argv)
 	(void)argc;
 	(void)argv;
 
-	/* One sample for the state and the numbers (svc/camera_svc.h). */
+	/* One sample for the state and the numbers (svc/camera/camera_svc.h). */
 	camera_svc_stream_report(&res, cam_write, cam_stats_head, sh);
 	if (res.status != CAMERA_SVC_OK) {
 		cam_print_fail(sh, &res, "");

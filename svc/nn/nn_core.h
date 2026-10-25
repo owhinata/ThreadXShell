@@ -7,7 +7,7 @@
  * @brief   The policy around the shared stream lifecycle, and the stream's
  *          numbers, written once for every board (issue #130).
  *
- * WHY THIS EXISTS.  svc/nn_stream_life.c is the one machine (issue #99), but
+ * WHY THIS EXISTS.  svc/nn/nn_stream_life.c is the one machine (issue #99), but
  * each board still wrapped it in its own copy of the same policy: admit under a
  * critical section, mint a generation and latch the stream's baselines with it,
  * claim a stop by generation, settle a teardown by its disposition and freeze

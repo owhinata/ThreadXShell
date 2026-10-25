@@ -90,7 +90,7 @@ static void test_timeout(void)
 
 /*
  * [!] A negative count must NOT be read as released.  The pipeline saturates its
- * decrement at zero (svc/frame_pipeline.c), so a negative one cannot come from
+ * decrement at zero (svc/camera/frame_pipeline.c), so a negative one cannot come from
  * the pipeline at all -- it means the sink's bookkeeping was written by
  * something that had no business writing it.  Letting the teardown proceed on
  * that value would free what a callback is reading, on the strength of a number

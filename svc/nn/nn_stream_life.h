@@ -296,7 +296,7 @@ void nn_stream_life_snapshot(const struct nn_stream_life *l, uint32_t *gen,
 
 /* ---- disposition ---------------------------------------------------------
  *
- * Mirrors of enum nn_claim (svc/nn_svc.h), which cannot be included here without
+ * Mirrors of enum nn_claim (svc/nn/nn_svc.h), which cannot be included here without
  * a cycle.  nn_svc.h static-asserts them equal, so a drift is a build failure
  * rather than a table deciding about values nobody means.
  */
@@ -318,7 +318,7 @@ struct nn_stream_disp {
  * boards previously ended their mapping with a catch-all "retryable", so any new
  * or corrupted return -- a value carrying no evidence at all about whether a
  * worker is quiescent -- told the operator to keep retrying while resources
- * might still be live.  svc/nn_svc.h states the rule this restores: a board that
+ * might still be live.  svc/nn/nn_svc.h states the rule this restores: a board that
  * CANNOT TELL must fail closed rather than guess.
  *
  * The table is the board's, because the codes are; the default is here, because

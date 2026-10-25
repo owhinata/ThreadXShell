@@ -54,7 +54,7 @@
  * PSRAM, which is what makes the display's rotating blit cheap and takes the DCMI
  * off OCTOSPI1 entirely.  It runs while somebody holds it (issue #142, "who holds
  * the stream" below).  The FRAME stream that used to fill a ring of PSRAM slots
- * through svc/frame_pipeline is gone (issue #142): nothing used it once
+ * through svc/camera/frame_pipeline is gone (issue #142): nothing used it once
  * `camera stream` moved to bands, and `camera capture` keeps the single-frame
  * snapshot into cam_frame.
  *
@@ -1837,7 +1837,7 @@ void camera_frame_invalidate(void)
  *
  * The band stream runs while, and only while, somebody holds it: the operator
  * (`camera stream start`) or nn (`nn stream start`, `nn run`, which hold the
- * operator's place too when nothing streams).  The table is svc/cam_holders.c,
+ * operator's place too when nothing streams).  The table is svc/camera/cam_holders.c,
  * moved only under cam_lock in the same locked region as the start its answer
  * calls for.  A start's claim never outlives that region.
  *
@@ -2152,7 +2152,7 @@ int camera_stream_leave(const struct cam_holder *h,
 	if (rc != CAM_OK)
 		return rc;
 	/* An undo gives back exactly what its join registered, and only while those
-	   registrations are still the ones it made (svc/cam_holders.h). */
+	   registrations are still the ones it made (svc/camera/cam_holders.h). */
 	if (undo != NULL)
 		hrc = cam_holders_undo(&cam_holds, h, &cam_manual, undo);
 	else

@@ -11,7 +11,7 @@
  * the plugin takes -- its decode, its draw, its report, its parameters, its
  * entry, and its replacement or removal.
  *
- * [!] THE API IS svc/plugin_lease_api.h (issue #130).  This file adds what only
+ * [!] THE API IS svc/plugin/plugin_lease_api.h (issue #130).  This file adds what only
  * this board knows -- the wait bound, the lock order, plugin_lease_init() -- and
  * plugin_lease.c implements the API with a ThreadX mutex.  wio-lite-ai
  * implements the same API since issue #130, with its own statement of the same

@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * A stub camera adapter (svc/camera_svc.h) and stub board services
+ * A stub camera adapter (svc/camera/camera_svc.h) and stub board services
  * (shell/cmds/camera_cmd_board.h, FileX) for the shared `camera` command's
  * host tests (issue #143).  The test sets what each call answers through
  * camera_stub (camera_svc_stub.h) and reads back what was called.
@@ -108,7 +108,7 @@ void camera_svc_capture_report(struct camera_svc_capture_report *rep,
                                camera_svc_write_fn write,
                                int (*cancelled)(void *ctx), void *ctx)
 {
-	/* Never the warm-up: that is the capture's (svc/camera_svc.h). */
+	/* Never the warm-up: that is the capture's (svc/camera/camera_svc.h). */
 	memset(rep->head, 0, sizeof rep->head);
 	rep->head_len = 0u;
 	stub_result(res);

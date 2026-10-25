@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host test for the build-time length check on a board's `nn` wording
- * (svc/nn_svc.h: NN_SVC_DETAIL_CHECK / _LIT / _CHECK_FMT, issue #122 P15).
+ * (svc/nn/nn_svc.h: NN_SVC_DETAIL_CHECK / _LIT / _CHECK_FMT, issue #122 P15).
  *
  * WHY A COMPILE TEST.  The check fires in the compiler, so the only way to see
  * it refuse is to compile something it must refuse.  run_host_tests.sh builds

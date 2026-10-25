@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host test for the inference worker's hand-over word (issue #129; shared and
- * given FILLING by issue #130, svc/nn_handoff.c).
+ * given FILLING by issue #130, svc/nn/nn_handoff.c).
  *
  * WHY THIS EXISTS.  The camera producer writes the model's input tensor in
  * place, with no staging copy, so whether it may do so at a given instant is
@@ -22,7 +22,7 @@
  * [!] AND WHAT IT DOES NOT COVER.  This compiles nn_handoff.c alone, so it says
  * nothing about whether its caller runs each step inside one critical section,
  * or whether the producer writes the input only while FILLING.  Those are
- * svc/nn_core_frame.c's, walked by test_nn_core_frame.c.
+ * svc/nn/nn_core_frame.c's, walked by test_nn_core_frame.c.
  */
 #include <stdio.h>
 

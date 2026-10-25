@@ -7,7 +7,7 @@
  * @brief   This board behind the shared `camera` command's contract
  *          (issue #143).
  *
- * svc/camera_svc.h is what shell/cmds/cmd_camera.c speaks; port/camera is what
+ * svc/camera/camera_svc.h is what shell/cmds/cmd_camera.c speaks; port/camera is what
  * this board has.  This is the translation, and like the `nn` adapter it is a
  * THIN one: it keeps no state.  The last capture, its generation, the stream
  * and its holders already have one owner each in camera.c, and everything here
@@ -25,7 +25,7 @@
  * producer.
  *
  * The stream stop is asynchronous here: camera_svc_stream_stop() hands back the
- * generation of the stream it asked to end (camera.c counts them, svc/cam_gen.h)
+ * generation of the stream it asked to end (camera.c counts them, svc/camera/cam_gen.h)
  * and camera_svc_stream_ended() answers for THAT stream, so `camera off` cannot
  * mistake a later start -- or a start that withdrew the stop and kept the
  * stream -- for its end.  `save` / `send` read the LAST CAPTURE, stream or no

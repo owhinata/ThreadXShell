@@ -7,7 +7,7 @@
  * @brief   nn_tensor -> tensor_desc, and nothing else (issues #97, #116).
  *
  * `struct nn_tensor` is this board's inference API (port/nn/nn.h); `struct
- * tensor_desc` (svc/tensor.h) is the neutral descriptor everything above the
+ * tensor_desc` (svc/nn/tensor.h) is the neutral descriptor everything above the
  * port reads.  This file is the translation, and it is the only place on this
  * board that knows both types.
  *

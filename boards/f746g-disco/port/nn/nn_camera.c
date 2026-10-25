@@ -23,7 +23,7 @@
  *     nn step of the one camera sink, and what it drains is the step's count).
  *   - NN-input ownership (the BLOCKING codex fix): the sink NEVER writes the
  *     input while the worker is using it.  Since issue #130 that is the shared
- *     hand-over word (svc/nn_handoff.h, stepped only by svc/nn_core_frame.c),
+ *     hand-over word (svc/nn/nn_handoff.h, stepped only by svc/nn/nn_core_frame.c),
  *     the one grove-vision-ai-v2 and wio-lite-ai use: the producer writes the
  *     input tensor only while the word is FILLING, hands it over, and the worker
  *     owns it from TAKE until the publish is done.  A frame that arrives while
@@ -85,7 +85,7 @@
 
 /*
  * WHO MAY TOUCH THE INPUT TENSOR (issue #130): the shared hand-over word, stepped
- * only by svc/nn_core_frame.c.  It replaced two staging buffers and their
+ * only by svc/nn/nn_core_frame.c.  It replaced two staging buffers and their
  * FREE/FILLING/READY/RUNNING states -- the worker used to copy a READY stage
  * into the input, so the producer never needed the input itself.  Now it writes
  * the input directly, while the word says FILLING and at no other time: the
@@ -206,7 +206,7 @@ uint8_t  nncam_in_dtype;   /* enum nn_dtype of the model input */
 /*
  * The published decode: boxes AND the diagnostics that describe them, plus the
  * session generation that keeps a decode from a session that has ended out of a
- * live one.  The rules live in svc/nn_det_record.c so they can be tested -- the
+ * live one.  The rules live in svc/nn/nn_det_record.c so they can be tested -- the
  * ordering they guard against cannot be produced deterministically on hardware --
  * and the storage and the lock (nncam_lock) are ours.
  */
@@ -270,7 +270,7 @@ static int nncam_open(void *ctx, enum frame_format fmt, uint16_t w, uint16_t h)
 	return 0;
 }
 
-/* ---- the frame path's hooks (svc/nn_core_frame.h, issue #130) ------------- */
+/* ---- the frame path's hooks (svc/nn/nn_core_frame.h, issue #130) ------------- */
 
 /* nncam_cs_enter / nncam_cs_exit are in nn_camera_priv.h (both threads take
  * them); nncam_prep / nncam_infer_start in nn_producer.c; nncam_publish /

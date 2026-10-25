@@ -11,7 +11,7 @@
  * to hold two decoders that both shipped -- the firmware's resident adapter and
  * the plugin -- and to check they agreed.  The firmware no longer HAS a decoder,
  * so the second half is now a reference this test builds for itself, directly on
- * svc/blazeface.c.  That is a weaker statement about the product (nothing is
+ * svc/nn/blazeface.c.  That is a weaker statement about the product (nothing is
  * being cross-checked against another shipped implementation) and it is still
  * worth making: the plugin's wrapper, not the arithmetic, is what this catches.
  *

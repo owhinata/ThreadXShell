@@ -192,7 +192,7 @@ int nn_active_get_thresh_milli(unsigned *milli);
 
 /**
  * @brief  Set it: NN_ACTIVE_THRESH_OK, _REFUSED or _NO_DECODER
- *         (svc/nn_active_core.h, which says why there are three), or
+ *         (svc/nn/nn_active_core.h, which says why there are three), or
  *         NN_ACTIVE_NOT_HELD.
  */
 int nn_active_set_thresh_milli(unsigned milli);

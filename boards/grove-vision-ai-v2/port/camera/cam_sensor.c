@@ -21,6 +21,8 @@
 #include "hx_drv_scu.h"
 #include "hx_drv_scu_export.h"
 
+#include "tx_api.h"     /* TX_DISABLE: the shadow is read and written as a set */
+
 #include "cam_dp.h"
 #include "cam_sensor.h"
 #include "timebase.h"
@@ -328,9 +330,17 @@ int cam_sensor_refresh_exposure_gains(void)
 		return 0;                    /* the shadow is already true */
 	if (sens->read_exposure_gain(&lines, &again) != 0)
 		return -1;
-	cam_exposure = lines;
-	cam_again = again;
-	cam_eg_valid = 1u;
+	{
+		/* [!] As one set (issue #143): `camera info` / `exposure` / `gain`
+		   read them together from another thread. */
+		TX_INTERRUPT_SAVE_AREA
+
+		TX_DISABLE
+		cam_exposure = lines;
+		cam_again = again;
+		cam_eg_valid = 1u;
+		TX_RESTORE
+	}
 	return 0;
 }
 
@@ -367,9 +377,15 @@ int cam_sensor_set_gains(uint8_t again, uint16_t dgain)
 		return -1;
 	if (sens->set_gains(again, dgain) != 0)
 		return -1;
-	cam_again = again;
-	cam_dgain = dgain;
-	cam_eg_valid = 1u;
+	{
+		TX_INTERRUPT_SAVE_AREA
+
+		TX_DISABLE                 /* one set, as in the refresh above */
+		cam_again = again;
+		cam_dgain = dgain;
+		cam_eg_valid = 1u;
+		TX_RESTORE
+	}
 	cam_auto_at_sensor = 0u;       /* same register, same reason */
 	return 0;
 }
@@ -397,15 +413,27 @@ int cam_sensor_exposure_gains_valid(void)
 	return cam_eg_valid;
 }
 
+/* [!] One sample of the set (issue #143): the producer refreshes exposure and
+   gain together on its own thread while a stream runs, so three separate
+   loads could pair one frame's exposure with the next frame's gain. */
 void cam_sensor_get_exposure_gains(uint16_t *lines, uint8_t *again,
                                    uint16_t *dgain)
 {
+	uint16_t l, d;
+	uint8_t a;
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	l = cam_exposure;
+	a = cam_again;
+	d = cam_dgain;
+	TX_RESTORE
 	if (lines != NULL)
-		*lines = cam_exposure;
+		*lines = l;
 	if (again != NULL)
-		*again = cam_again;
+		*again = a;
 	if (dgain != NULL)
-		*dgain = cam_dgain;
+		*dgain = d;
 }
 
 int cam_sensor_stream_on(void)

@@ -10,9 +10,9 @@
  * The command itself -- probe / capture / stream start|stop|stats -- is
  * shell/cmds/cmd_camera.c, shared with the other boards, over this board's
  * adapter port/camera/camera_svc_grove.c.  What stays here is appended to that
- * table by CAMERA_SVC_BOARD_SUBCMDS (svc/camera_svc_config.h): `raw`, `stats`
- * (until it moves under `camera stream stats`, which prints the same lines),
- * `vts`, `bench`, and the image knobs.
+ * table by CAMERA_SVC_BOARD_SUBCMDS (svc/camera_svc_config.h): `raw`,
+ * `profile`, `vts`, `bench`, and the image knobs -- plus camera_board_send(),
+ * the YMODEM half of `camera send`.
  *
  * The questions, in the order you would ask them when nothing works yet:
  *
@@ -24,9 +24,10 @@
  *                      at the right time with every layer reporting success;
  *                      the channel balance is what tells them apart.  (the
  *                      adapter)
- *   camera stream start / stop
- *                   -- continuous capture onto the panel (issue #142).
- *   camera stats    -- the counters, and who holds the stream.
+ *   camera stream start / stop / stats
+ *                   -- continuous capture onto the panel (issue #142), and the
+ *                      counters and who holds it.
+ *   camera profile  -- where the producer's time per frame goes.
  *
  * WHY `capture` REPORTS THE PLANES AND NOT THE PACKED FRAME.  The planes are
  * what the camera produced; the packed RGB565 is what this firmware made of
@@ -50,6 +51,8 @@
 #include "camera_svc.h"
 #include "camera_svc_config.h" /* CAMERA_SVC_BOARD_DECLS: the names declared */
 #include "camera_svc_grove.h"  /* the profile lines, shared with the adapter */
+#include "camera_cmd_board.h"  /* camera_board_send() */
+#include "cmd_xfer.h"          /* xfer_send_source(): YMODEM over the console */
 
 /* What the shared table expands; declared once, there and here. */
 CAMERA_SVC_BOARD_DECLS
@@ -72,7 +75,7 @@ static void cam_report(struct cli_instance *sh, const char *what, int rc)
 	cli_error(sh, "camera: %s failed: %s\r\n", what, camera_strerror(rc));
 
 	/* The driver latches a specific reason for every failure it can name.
-	 * Making the operator know to run `camera stats` to see it is a way of
+	 * Making the operator know to run `camera stream stats` to see it is a way of
 	 * hiding the one useful sentence behind a second command. */
 	camera_stream_stats(&st);
 	if (st.fault != NULL)
@@ -336,56 +339,33 @@ int camera_board_cmd_bench(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-/* ---- stats ------------------------------------------------------------- */
+/* ---- profile ----------------------------------------------------------- */
 
 /*
- * `camera stats` -- until issue #143 moves it under `camera stream stats`.
- * The lines are the adapter's (camera_svc_stream_report(), which `camera
- * stream stats` prints too), from one sample; this board's head says the
- * state and the holders in its own spelling.
+ * `camera profile` (issue #143 D3): the producer's per-stage breakdown since the
+ * last stream start -- the eight lines `camera stats` used to end with.  The
+ * counters themselves are `camera stream stats` now.  One stats sample; the
+ * lines are the adapter's, shared with `camera bench`.
  */
-static void cam_stats_head(void *ctx, const struct camera_svc_state *st)
+int camera_board_cmd_profile(struct cli_instance *sh, int argc, char **argv)
 {
-	struct camera_out o = { board_write, ctx, 0 };
-	char line[96];
-	size_t len;
-
-	camera_out(&o, "state    : %s\r\n", st->streaming ? "streaming" : "idle");
-	/* Who holds the stream to the panel (issue #142), one line. */
-	strcpy(line, "holders  :");
-	len = strlen(line);
-	if (st->transition) {
-		strcpy(line + len, " -- (a stream start or stop is in progress)");
-	} else if (st->nusers == 0u) {
-		strcpy(line + len, " none");
-	} else {
-		for (unsigned i = 0; i < st->nusers && i < CAMERA_SVC_USERS_MAX; i++) {
-			const char *name = st->users[i] ? st->users[i] : "?";
-			size_t w = strlen(name);
-
-			if (len + 2u + w >= sizeof line)
-				break;
-			line[len++] = i ? ',' : ' ';
-			if (i)
-				line[len++] = ' ';
-			memcpy(line + len, name, w + 1u);
-			len += w;
-		}
-	}
-	if (st->lost)
-		camera_out(&o, "%s  (%d lost when the stream ended)\r\n", line,
-		           (int)st->lost);
-	else
-		camera_out(&o, "%s\r\n", line);
-}
-
-int camera_board_cmd_stats(struct cli_instance *sh, int argc, char **argv)
-{
-	struct camera_op_result res;
+	struct camera_out o = { board_write, sh, 0 };
+	struct camera_stats st;
 
 	(void)argc; (void)argv;
-	camera_svc_stream_report(&res, board_write, cam_stats_head, sh);
-	return (res.status == CAMERA_SVC_OK) ? 0 : 1;
+	camera_stream_stats(&st);
+	camera_grove_profile_write(&o, &st);
+	return o.failed ? 1 : 0;
+}
+
+/* ---- send (shell/cmds/camera_cmd_board.h) ------------------------------- */
+
+/* The last capture to the PC over YMODEM: the console is claimed here, in the
+   shell layer, and the frame is read through the adapter (one hold of the
+   camera API per block, never across the transfer). */
+int camera_board_send(struct cli_instance *sh, const struct ym_source *src)
+{
+	return xfer_send_source(sh, src);
 }
 
 /* ---- exposure / gain / white balance ------------------------------------- */

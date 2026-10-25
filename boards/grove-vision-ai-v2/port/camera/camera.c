@@ -26,6 +26,7 @@
  */
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>    /* memcpy: camera_capture_read() */
 
 #include "tx_api.h"
 
@@ -244,6 +245,18 @@ static uint32_t cam_frames;
  * stream running), counted by the producer and, since issue #143, by the
  * one-shot capture (camera_capture_settled()), saturating. */
 static volatile uint32_t cam_frames_since_bringup;
+/*
+ * The last `camera capture` (issue #143): whether the landing buffer still holds
+ * it, and which capture it is.  Written ONLY under the API mutex, by the paths
+ * that start overwriting that buffer -- every one-shot (capture or raw) and every
+ * stream start invalidates and takes a fresh generation BEFORE its datapath
+ * starts; a successful settled capture marks it valid.  Read back under the same
+ * mutex by camera_capture_read(), whose check and copy are one hold, so a frame
+ * that is replaced between two reads fails the second instead of mixing.
+ */
+static uint32_t cam_capture_gen;
+static uint8_t  cam_capture_valid;
+static void cam_capture_invalidate_locked(void);
 static uint32_t cam_timeouts;
 static uint32_t cam_retries;
 static uint32_t cam_csirx_errors;
@@ -1328,7 +1341,20 @@ static void cam_auto_step(void)
 
 	/* White balance is software, so it takes effect on the NEXT frame this
 	 * thread packs -- no sensor round trip, no delay to design around. */
-	(void)cam_awb_step(means[0], means[1], means[2], &cam_wb);
+	{
+		/* Stepped on a copy and stored as a set, so a reader on another
+		   thread (camera_get_wb()) never sees half a step (issue #143). */
+		struct cam_wb w;
+		TX_INTERRUPT_SAVE_AREA
+
+		TX_DISABLE
+		w = cam_wb;
+		TX_RESTORE
+		(void)cam_awb_step(means[0], means[1], means[2], &w);
+		TX_DISABLE
+		cam_wb = w;
+		TX_RESTORE
+	}
 }
 
 static void cam_publish(const uint8_t *raw)
@@ -1899,6 +1925,65 @@ const uint8_t *camera_raw_frame(void)
 	return cam_dp_completed_buffer();
 }
 
+/* API mutex held: the landing buffer is about to be overwritten. */
+static void cam_capture_invalidate_locked(void)
+{
+	cam_capture_valid = 0u;
+	cam_capture_gen++;
+}
+
+int camera_capture_last(uint32_t *gen)
+{
+	enum cam_bus_owner owner;
+	int rc = cam_bus_enter(&owner);
+
+	(void)owner;   /* a read of memory, not of the bus: any route may ask */
+	if (rc != CAM_OK)
+		return rc;
+	rc = cam_capture_valid ? CAM_OK : CAM_ERR_NO_FRAME;
+	if (rc == CAM_OK && gen != NULL)
+		*gen = cam_capture_gen;
+	cam_api_exit();
+	return rc;
+}
+
+int camera_capture_read(uint32_t gen, uint32_t off, void *dst, uint32_t n)
+{
+	enum cam_bus_owner owner;
+	int rc;
+
+	if (dst == NULL || off > CAM_RAW_BYTES || n > CAM_RAW_BYTES - off)
+		return CAM_ERR_PARAM;
+	rc = cam_bus_enter(&owner);   /* TX_NO_WAIT: BUSY rather than wait */
+	(void)owner;
+	if (rc != CAM_OK)
+		return rc;
+	/* [!] The check and the copy in ONE hold: every path that starts
+	   overwriting the buffer invalidates it under this mutex first. */
+	if (!cam_capture_valid || gen != cam_capture_gen) {
+		cam_api_exit();
+		return CAM_ERR_NO_FRAME;
+	}
+	/* Invalidated when the frame landed (cam_capture_one()), as the
+	   statistics walk relies on; nothing has written it since. */
+	memcpy(dst, cam_dp_completed_buffer() + off, n);
+	cam_api_exit();
+	return CAM_OK;
+}
+
+void camera_info_sample(struct camera_info_sample *out)
+{
+	TX_INTERRUPT_SAVE_AREA
+
+	TX_DISABLE
+	out->state = (uint8_t)cam_state;
+	out->rev_c = cam_rev_c;
+	out->capture_valid = cam_capture_valid;
+	out->capture_gen = cam_capture_gen;
+	out->frames_since_bringup = cam_frames_since_bringup;
+	TX_RESTORE
+}
+
 uint32_t camera_frames_since_bringup(void)
 {
 	return cam_frames_since_bringup;
@@ -1945,6 +2030,9 @@ static int cam_capture_one(uint8_t raw, uint32_t warm, uint32_t *dropped,
 		cam_api_exit();
 		return rc;
 	}
+
+	/* From here the landing buffer is being overwritten (issue #143). */
+	cam_capture_invalidate_locked();
 
 	/*
 	 * One frame per pass, the same cycle a single capture always was: quiesce,
@@ -2038,6 +2126,10 @@ static int cam_capture_one(uint8_t raw, uint32_t warm, uint32_t *dropped,
 	 * the next capture simply tries again.
 	 */
 	cam_state = (rc == CAM_ERR_HAL) ? CAM_ST_FAULTED : CAM_ST_READY;
+	/* A demosaiced frame now holds the buffer: that is what `camera send`
+	   may read.  A raw Bayer frame is not the capture. */
+	if (rc == CAM_OK && !raw)
+		cam_capture_valid = 1u;
 	cam_api_exit();
 	return rc;
 }
@@ -2144,6 +2236,8 @@ int camera_stream_start(struct frame_sink *sink)
 		return rc;
 	}
 
+	/* The stream writes the same landing buffers (issue #143). */
+	cam_capture_invalidate_locked();
 	cam_quiesce();
 	rc = cam_start_datapath();
 	if (rc != CAM_OK) {
@@ -2487,8 +2581,13 @@ int camera_set_bayer(uint8_t pattern)
 
 void camera_set_wb(const struct cam_wb *wb)
 {
-	if (wb != NULL)
-		cam_wb = *wb;
+	TX_INTERRUPT_SAVE_AREA
+
+	if (wb == NULL)
+		return;
+	TX_DISABLE                     /* whole: see camera_get_wb() */
+	cam_wb = *wb;
+	TX_RESTORE
 }
 
 int camera_set_auto(int on)
@@ -2570,10 +2669,18 @@ int camera_auto(void)
 	return cam_auto_on;
 }
 
+/* [!] Whole, inside a critical section (issue #143): the producer's white
+   balance step rewrites the set on its own thread each frame, and a plain
+   struct copy could pair one frame's red with the next frame's blue. */
 void camera_get_wb(struct cam_wb *out)
 {
-	if (out != NULL)
-		*out = cam_wb;
+	TX_INTERRUPT_SAVE_AREA
+
+	if (out == NULL)
+		return;
+	TX_DISABLE
+	*out = cam_wb;
+	TX_RESTORE
 }
 
 /* Ticks -> microseconds at the rate TIMER2 was actually brought up at, which is

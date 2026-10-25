@@ -168,6 +168,40 @@ int camera_capture_settled(uint32_t warm, uint32_t *dropped,
  */
 int camera_capture_raw(void);
 
+/*
+ * The last `camera capture`, for `camera send` (issue #143).
+ *
+ * Every path that starts overwriting the landing buffer -- a capture, a
+ * `camera raw`, a stream start -- invalidates it and takes a fresh generation
+ * under the API mutex before its datapath starts; a successful (settled,
+ * demosaiced) capture marks it valid.  Both calls take the API mutex with
+ * TX_NO_WAIT, as every entry but the stop does, and answer CAM_ERR_BUSY when
+ * it is held -- a long YMODEM transfer takes it once per read, never across.
+ */
+
+/** CAM_OK and the capture's generation, or CAM_ERR_NO_FRAME. */
+int camera_capture_last(uint32_t *gen);
+
+/**
+ * Copy @p n bytes at @p off of the last capture (CAM_RAW_BYTES: the B, G and
+ * R planes in that order, as WDMA3 writes them) into @p dst -- only while it
+ * is still capture @p gen; the check and the copy are one hold of the mutex.
+ * CAM_ERR_NO_FRAME once it was replaced or invalidated, CAM_ERR_BUSY when the
+ * mutex is held, CAM_ERR_PARAM out of range.
+ */
+int camera_capture_read(uint32_t gen, uint32_t off, void *dst, uint32_t n);
+
+/** What `camera info` reports of the port, from one sample; no I2C and no
+ *  mutex (the chip line reads the SCU's version register). */
+struct camera_info_sample {
+	uint8_t  state;                /**< enum cam_state                  */
+	uint8_t  rev_c;                /**< the last bring-up found rev C    */
+	uint8_t  capture_valid;
+	uint32_t capture_gen;
+	uint32_t frames_since_bringup;
+};
+void camera_info_sample(struct camera_info_sample *out);
+
 /**
  * @return the completed raw frame (CAM_RAW_BYTES: B, G then R planes), never
  *         NULL.

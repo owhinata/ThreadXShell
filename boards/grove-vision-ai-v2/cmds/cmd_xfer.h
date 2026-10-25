@@ -4,11 +4,10 @@
  */
 /**
  * @file    cmd_xfer.h
- * @brief   YMODEM receive over the console, for this board (#92).
+ * @brief   YMODEM over the console, for this board (#92, #143).
  *
- * The receive direction only: this board has one thing that wants a file from
- * the PC, and that is `blob write`.  There is no `xfer` command here and no
- * send direction -- nothing on this board produces a file to send.
+ * Receive for `blob write`, and since issue #143 send for `camera send` (the
+ * last capture's planar B/G/R).  There is no `xfer` command here.
  *
  * [!] THE THIRD COPY OF THIS WIRING, and deliberately so.  f746g-disco and
  * wio-lite-ai each have a cmd_xfer.c and the three are nearly the same twenty
@@ -54,6 +53,18 @@ struct cli_instance;
  * the prompt.
  */
 int xfer_recv_sink_locked(struct cli_instance *sh, const struct ym_sink *sink);
+
+/**
+ * @brief  Send @p src to the PC over YMODEM: says what it sends, claims the
+ *         console, runs ymodem_send(), releases it and prints the one-line
+ *         result -- the same shape as the other boards' xfer_send_source().
+ *
+ * A local Ctrl+C aborts (while sending, every byte read back is protocol).  The
+ * source's read may refuse (the frame replaced, the camera busy), which ends
+ * the transfer as a source error.  A background job is refused: the transfer
+ * needs the foreground's RX.  Returns 0 on a completed transfer, 1 otherwise.
+ */
+int xfer_send_source(struct cli_instance *sh, const struct ym_source *src);
 
 #ifdef __cplusplus
 }

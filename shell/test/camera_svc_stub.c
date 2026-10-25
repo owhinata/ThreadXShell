@@ -268,7 +268,16 @@ int camera_board_send(struct cli_instance *sh, const struct ym_source *src)
 	camera_stub.calls_send++;
 	camera_stub.send_name = src->name;
 	camera_stub.send_size = src->size;
-	return 0;
+	/* Pull the whole source as ymodem would, block by block. */
+	for (;;) {
+		uint8_t blk[4];
+		uint32_t got = 0u;
+
+		if (src->read(src->ctx, blk, sizeof blk, &got) != 0)
+			return 1;                  /* "source read error" */
+		if (got == 0u)
+			return 0;
+	}
 }
 
 #if CAMERA_SVC_HAS_SAVE

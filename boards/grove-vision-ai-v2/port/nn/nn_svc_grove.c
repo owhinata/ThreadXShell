@@ -1262,7 +1262,7 @@ static void nn_hold_refused(struct nn_op_result *res, int rc)
 		break;
 	case CAM_ERR_STATE:
 		nn_detail_set("the camera or its panel sink is unusable until "
-		              "reboot (`camera stats`)");
+		              "reboot (`camera stream stats`)");
 		break;
 	default:
 		nn_detail_set("the camera would not start (%d)", rc);

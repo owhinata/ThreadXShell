@@ -383,7 +383,7 @@ void nn_camera_stats(struct nn_camera_stats *out)
 	TX_RESTORE
 
 	/* The stage rows are only as good as their clock, and this port has the
-	 * predicate for that -- the same one `thread` and `camera stats` use. */
+	 * predicate for that -- the same one `thread` and `camera profile` use. */
 	hz = tx_glue_epk_timer_hz();
 	out->prof_ok     = (tx_glue_profile_ok(&why) && hz != 0u);
 	out->prof_frames = frames;

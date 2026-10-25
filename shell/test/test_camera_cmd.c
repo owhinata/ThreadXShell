@@ -359,6 +359,15 @@ static void check_common(void)
 	       strcmp(camera_stub.send_name, "frame.raw") == 0);
 	expect("and closes what it opened", camera_stub.opened == 0);
 	reset();
+	camera_stub.read_fail_at = 2;
+	run("camera send\r");
+	expect("a read that fails mid-transfer says why, in the board's words",
+	       has("camera: stub: frame changed\r\n") && camera_stub.opened == 0);
+	reset();
+	run("camera send\r");
+	expect("and a transfer whose reads all succeed says nothing more",
+	       !has("camera: ") && camera_stub.calls_read == 2);
+	reset();
 	camera_stub.status = CAMERA_SVC_ERR_NO_FRAME;
 	strcpy(camera_stub.detail, "no captured frame");
 	run("camera send pic.raw\r");

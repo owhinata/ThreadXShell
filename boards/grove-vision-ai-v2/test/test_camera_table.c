@@ -10,10 +10,10 @@
  *  - [!] NO NAME TWICE: CAMERA_SVC_BOARD_SUBCMDS is appended to the shared
  *    entries and the parser takes the first match, so a board name that
  *    reuses a shared one would be silently unreachable.
- *  - each shared subcommand is there exactly when its capability is 1 (none
- *    of on / off / info / save / send here), and the board's twelve come
- *    after the shared ones IN THEIR OLD ORDER -- so `help camera` lists what
- *    it always did, in the order it always did.
+ *  - each shared subcommand is there exactly when its capability is 1 (info
+ *    and send since issue #143's B step; never on / off / save), and the
+ *    board's twelve come after the shared ones -- `stats` gone (it is
+ *    `camera stream stats`), `profile` in its place.
  *  - no test pattern: `test` is refused in this board's old words.
  */
 #include <stdio.h>
@@ -42,7 +42,7 @@ static int stub_board(struct cli_instance *sh, int argc, char **argv)
 
 int camera_board_cmd_raw(struct cli_instance *sh, int argc, char **argv)
 { return stub_board(sh, argc, argv); }
-int camera_board_cmd_stats(struct cli_instance *sh, int argc, char **argv)
+int camera_board_cmd_profile(struct cli_instance *sh, int argc, char **argv)
 { return stub_board(sh, argc, argv); }
 int camera_board_cmd_vts(struct cli_instance *sh, int argc, char **argv)
 { return stub_board(sh, argc, argv); }
@@ -103,7 +103,7 @@ int main(void)
 {
 	const struct cli_cmd *t = camera_table();
 	static const char *const board[] = {
-		"raw", "stats", "vts", "bench", "exposure", "gain", "auto", "black",
+		"raw", "profile", "vts", "bench", "exposure", "gain", "auto", "black",
 		"sat", "gamma", "bayer", "wb"
 	};
 	int last_shared;
@@ -130,11 +130,19 @@ int main(void)
 		last_shared = at;
 	}
 
-	expect("the shared order: probe, capture, stream, then the board's",
+	expect("the shared order: probe, info, capture, send, stream, then the "
+	       "board's",
 	       camera_table_index(t, "probe") == 0 &&
-	       camera_table_index(t, "capture") == 1 &&
-	       camera_table_index(t, "stream") == 2 &&
-	       camera_table_index(t, "raw") == 3);
+	       camera_table_index(t, "info") == 1 &&
+	       camera_table_index(t, "capture") == 2 &&
+	       camera_table_index(t, "send") == 3 &&
+	       camera_table_index(t, "stream") == 4 &&
+	       camera_table_index(t, "raw") == 5);
+	expect("`camera stats` is gone: the counters are `camera stream stats`",
+	       !camera_table_has(t, "stats"));
+	run("camera profile\r");
+	expect("`camera profile` reaches the board", board_calls == 1 &&
+	       strcmp(board_last, "profile") == 0);
 	run("camera bench 30\r");
 	expect("`camera bench` reaches the board", board_calls == 1 &&
 	       strcmp(board_last, "bench") == 0);

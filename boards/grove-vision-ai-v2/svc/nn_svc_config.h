@@ -44,7 +44,7 @@
  * all three onto one grammar over neutral start/poll/stop hooks and removed
  * `preview`; the panel drawing is unchanged, it simply outlives the command
  * now.  On a board with ONE console that is the bigger half of the change --
- * `camera stats` and `nn info` during a run were previously unreachable.
+ * `camera stream stats` and `nn info` during a run were previously unreachable.
  *
  * NOT NN_SVC_HAS_STREAM_TEST: there is no sensor test pattern here, and a
  * `--test` that always refused would be an option listed in `help` that cannot

@@ -764,12 +764,14 @@ endif()
 # camera pins untouched -- useful when bisecting a timer or D3-domain suspicion.
 option(BSP_ENABLE_CAMERA "Enable the FPC-24 DVP camera (DCMI) and the camera command" ON)
 
-# Driver and command move together -- cmd_camera_board.c is the only caller of
-# port/camera -- and, like the two blocks above, this append must stay BELOW the
+# Driver and command move together -- the `camera` command (shell/cmds/
+# cmd_camera.c over port/camera/camera_svc_wio.c, plus cmds/cmd_camera_board.c)
+# is the only shell caller of port/camera -- and, like the two blocks above, this append must stay BELOW the
 # option().
 if(BSP_ENABLE_CAMERA)
     list(APPEND SHELL_SOURCES
         "${BOARD_DIR}/port/camera/camera.c"
+        "${BOARD_DIR}/port/camera/camera_svc_wio.c"  # the shared `camera` command's adapter (#143)
         "${BOARD_DIR}/port/camera/ov2640_regs.c"
         # The band stream has two consumers (the preview and
         # the NN ingest), and port/camera holds exactly one callback: the band
@@ -787,6 +789,7 @@ if(BSP_ENABLE_CAMERA)
         "${BOARD_DIR}/port/nn/nn_camera.c"     # console side, owns the state
         "${BOARD_DIR}/port/nn/nn_producer.c"   # ...its camera producer thread (#140)
         "${BOARD_DIR}/port/nn/nn_worker.c"     # ...its inference worker thread (#140)
+        "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_camera.c"  # the one shared command (#143)
         "${BOARD_DIR}/cmds/cmd_camera_board.c")
     # The LCD preview needs BOTH drivers, so it is the one
     # source gated on the pair.  With either option off there is nothing to glue

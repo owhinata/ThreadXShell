@@ -219,8 +219,14 @@ void camera_svc_info(struct camera_op_result *res,
  *
  * Whatever warm-up the board pays (frames discarded, or a settle time) is
  * part of the capture and is reported by camera_svc_capture_report().
+ *
+ * The board writes its own "capturing ..." line through @p write before the
+ * capture starts -- after any refusal it can give at once (wio: the OCTOSPI1
+ * guard), so a refused capture is not announced -- because what a capture
+ * costs is the board's to say (wio: "~1 s of warm-up").
  */
-void camera_svc_capture(int test, struct camera_op_result *res);
+void camera_svc_capture(int test, struct camera_op_result *res,
+                        camera_svc_write_fn write, void *ctx);
 
 /** Most leading bytes of a frame a capture report hands back. */
 #define CAMERA_SVC_HEAD_MAX 32u
@@ -317,8 +323,10 @@ void camera_svc_frame_close(struct camera_svc_frame *f);
  * streaming.  @p test != 0 streams the test pattern (CAMERA_SVC_HAS_TEST).
  * @p already is set non-zero when the operator was already a holder and
  * nothing changed.  A board may write a note through @p write before it
- * starts (f746: 30 fps clamped while the LCD scans out); the outcome itself is
- * the shared command's to print.
+ * starts (f746: 30 fps clamped while the LCD scans out), and on success it
+ * writes the outcome line itself ("streaming live started" / "... already
+ * running"), whose wording each board's operators already read; the shared
+ * command prints only a failure.
  */
 void camera_svc_stream_start(int test, struct camera_op_result *res,
                              int *already,
@@ -357,6 +365,10 @@ struct camera_svc_state {
 	const char *users[CAMERA_SVC_USERS_MAX];  /**< current holders           */
 	unsigned nusers;
 	uint32_t lost;             /**< holders dropped when the stream ended     */
+	/** No stream has run since boot: there is nothing to say about one, and
+	 *  the shared command prints that alone ("state: never started") -- no
+	 *  holders line, and the board writes no lines of its own. */
+	uint8_t  never_started;
 };
 
 /** Fill @p st from one sample taken under the board's lock.  When the board

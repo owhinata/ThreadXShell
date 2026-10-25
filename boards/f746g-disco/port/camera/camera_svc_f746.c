@@ -46,34 +46,10 @@
 
 #include "camera.h"
 #include "camera_names.h"
+#include "camera_svc_adapter.h"
 #include "fmt.h"
 
 /* ---- results ------------------------------------------------------------- */
-
-static void cam_res_ok(struct camera_op_result *res)
-{
-	res->status = CAMERA_SVC_OK;
-	res->detail[0] = '\0';
-	res->nusers = 0u;
-}
-
-static void cam_detail_to(struct camera_op_result *res, const char *f, ...)
-	__attribute__((format(printf, 2, 3)));
-static void cam_detail_to(struct camera_op_result *res, const char *f, ...)
-{
-	va_list ap;
-
-	va_start(ap, f);
-	(void)fmt_vsnformat(res->detail, sizeof res->detail, f, ap);
-	va_end(ap);
-}
-
-/* Fill a failure in one place, its sentence checked against
-   CAMERA_SVC_DETAIL_MAX at build time (the copy truncates silently). */
-#define cam_res_fail(res, st, ...)                                          \
-	((void)CAMERA_SVC_DETAIL_CHECK_FMT(__VA_ARGS__),                    \
-	 (res)->status = (st), (res)->nusers = 0u,                          \
-	 cam_detail_to((res), __VA_ARGS__))
 
 /* A CAM_ERR_* code as a contract status.  Only IN_USE and BUSY change what the
    shared command does; every code keeps the board's own sentence. */
@@ -101,24 +77,9 @@ static int cam_status(int rc)
 static void cam_res_rc(struct camera_op_result *res, int rc)
 {
 	if (rc == 0)
-		cam_res_ok(res);
+		camera_res_ok(res);
 	else
-		cam_res_fail(res, cam_status(rc), "%s", camera_strerror(rc));
-}
-
-/* IN_USE with the names of the holders that keep the operator out (D8). */
-static void cam_res_in_use(struct camera_op_result *res, const char **users,
-                           int n)
-{
-	res->status = CAMERA_SVC_ERR_IN_USE;
-	res->detail[0] = '\0';
-	if (n < 0)
-		n = 0;
-	if (n > (int)CAMERA_SVC_USERS_MAX)
-		n = (int)CAMERA_SVC_USERS_MAX;
-	for (int i = 0; i < n; i++)
-		res->users[i] = users[i];
-	res->nusers = (unsigned)n;
+		camera_res_fail(res, cam_status(rc), "%s", camera_strerror(rc));
 }
 
 /* ---- power and identity --------------------------------------------------- */
@@ -170,7 +131,7 @@ void camera_svc_off(struct camera_op_result *res,
 		   the camera lock; the names are a second look, for the message. */
 		const char *users[CAMERA_SVC_USERS_MAX];
 
-		cam_res_in_use(res, users,
+		camera_res_in_use(res, users,
 		               camera_stream_users(users, (int)CAMERA_SVC_USERS_MAX));
 		return;
 	}
@@ -257,8 +218,13 @@ void camera_svc_info(struct camera_op_result *res,
 
 /* ---- one-shot capture ----------------------------------------------------- */
 
-void camera_svc_capture(int test, struct camera_op_result *res)
+void camera_svc_capture(int test, struct camera_op_result *res,
+                        camera_svc_write_fn write, void *ctx)
 {
+	struct camera_out o = { write, ctx, 0 };
+
+	camera_out(&o, "camera: capturing %s frame ...\r\n",
+	           test ? "colorbar test" : "live");
 	cam_res_rc(res, camera_capture(test ? 1 : 0));
 }
 
@@ -284,7 +250,7 @@ static void cam_report_jpeg(const struct camera_mode *m,
 		cam_res_rc(res, CAM_ERR_STATE);
 		return;
 	}
-	cam_res_ok(res);
+	camera_res_ok(res);
 	camera_out(o, "frame: %ux%u JPEG (%lu bytes)\r\n", (unsigned)m->width,
 	           (unsigned)m->height, (unsigned long)ci.frame_bytes);
 	head = (ci.frame_bytes < CAMERA_SVC_HEAD_MAX) ? ci.frame_bytes
@@ -352,7 +318,7 @@ void camera_svc_capture_report(struct camera_svc_capture_report *rep,
 		if (off == 0) {
 			gen0 = gen;
 		} else if (gen != gen0) {
-			cam_res_fail(res, CAMERA_SVC_ERR_NO_FRAME,
+			camera_res_fail(res, CAMERA_SVC_ERR_NO_FRAME,
 			             "frame changed mid-read (concurrent capture)");
 			return;
 		}
@@ -413,7 +379,7 @@ void camera_svc_capture_report(struct camera_svc_capture_report *rep,
 		}
 	}
 
-	cam_res_ok(res);
+	camera_res_ok(res);
 	camera_out(&o, "frame: %ux%u %s (%lu bytes)\r\n", (unsigned)m.width,
 	           (unsigned)m.height, camera_named_name(camera_format_names, m.format),
 	           (unsigned long)m.frame_bytes);
@@ -507,7 +473,7 @@ void camera_svc_frame_open(struct camera_svc_frame *f,
 	f->format = camera_named_name(camera_format_names, m.format);
 	f->convert = cam_convert_of(m.format);
 	f->adapter = 0u;
-	cam_res_ok(res);
+	camera_res_ok(res);
 }
 
 /*
@@ -534,11 +500,11 @@ void camera_svc_frame_read(const struct camera_svc_frame *f, uint32_t off,
 		return;
 	}
 	if (gen != f->gen) {
-		cam_res_fail(res, CAMERA_SVC_ERR_NO_FRAME,
+		camera_res_fail(res, CAMERA_SVC_ERR_NO_FRAME,
 		             "frame changed by a concurrent capture");
 		return;
 	}
-	cam_res_ok(res);
+	camera_res_ok(res);
 }
 
 void camera_svc_frame_close(struct camera_svc_frame *f)
@@ -565,7 +531,7 @@ void camera_svc_stream_start(int test, struct camera_op_result *res,
 	   owhinata/stm32f746g-disco#67). */
 	if (camera_get_mode(&m) == 0) {
 		if (!m.streamable && !m.is_jpeg) {
-			cam_res_fail(res, CAMERA_SVC_ERR_STATE,
+			camera_res_fail(res, CAMERA_SVC_ERR_STATE,
 			             "%ux%u %s is capture-only -- too large to "
 			             "stream; use a smaller resolution",
 			             (unsigned)m.width, (unsigned)m.height,
@@ -577,6 +543,14 @@ void camera_svc_stream_start(int test, struct camera_op_result *res,
 			           "active; `lcd off` for 30fps)\r\n");
 	}
 	cam_res_rc(res, camera_stream_start(test ? 1 : 0, already));
+	if (res->status != CAMERA_SVC_OK)
+		return;
+	if (*already)
+		camera_out(&o, "camera: streaming %s already running\r\n",
+		           test ? "colorbar" : "live");
+	else
+		camera_out(&o, "camera: streaming %s started (`camera stream stats` "
+		           "/ `stop`)\r\n", test ? "colorbar" : "live");
 }
 
 int camera_svc_stream_stop(struct camera_op_result *res, uint32_t *gen)
@@ -587,7 +561,7 @@ int camera_svc_stream_stop(struct camera_op_result *res, uint32_t *gen)
 
 	*gen = 0u;   /* no stream generation on this board -- see the file header */
 	if (rc == CAM_ERR_IN_USE) {
-		cam_res_in_use(res, users, n);
+		camera_res_in_use(res, users, n);
 		return CAMERA_SVC_STOP_NONE;
 	}
 	cam_res_rc(res, rc);

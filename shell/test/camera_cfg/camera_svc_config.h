@@ -11,7 +11,8 @@
  *   CAM_TEST_SHAPE_BARE  no power, no test pattern, no save (Grove-like),
  *                        two board subcommands
  *   CAM_TEST_SHAPE_MIN   power and a test pattern, but no info, save or
- *                        send; one board subcommand
+ *                        send, and `off` does not stop a stream (wio-like);
+ *                        one board subcommand
  *   CAM_TEST_SHAPE_DUP   FULL, but the board also registers `info` -- the
  *                        shadowing the table check must catch
  *
@@ -37,6 +38,7 @@
 	CLI_CMD(bench, NULL, "board: bench", test_board_cmd),
 #elif defined(CAM_TEST_SHAPE_MIN)
 #define CAMERA_SVC_HAS_POWER  1
+#define CAMERA_SVC_OFF_STOPS_STREAM 0   /* the board refuses a running stream */
 #define CAMERA_SVC_HAS_INFO   0
 #define CAMERA_SVC_HAS_TEST   1
 #define CAMERA_SVC_HAS_SAVE   0
@@ -45,6 +47,7 @@
 	CLI_CMD(scan, NULL, "board: scan", test_board_cmd),
 #elif defined(CAM_TEST_SHAPE_FULL) || defined(CAM_TEST_SHAPE_DUP)
 #define CAMERA_SVC_HAS_POWER  1
+#define CAMERA_SVC_OFF_STOPS_STREAM 1
 #define CAMERA_SVC_HAS_INFO   1
 #define CAMERA_SVC_HAS_TEST   1
 #define CAMERA_SVC_HAS_SAVE   1

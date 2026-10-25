@@ -21,6 +21,10 @@
 /** `camera on` / `camera off`: the module's power can be switched (the OV5640
  *  has no power-only state, so `on` is a bring-up; `off` cuts the rail). */
 #define CAMERA_SVC_HAS_POWER  1
+/** `camera off` with the operator's stream running stops that stream, waits
+ *  for it to end, then cuts the rail (a holder other than the operator still
+ *  refuses).  0 would refuse a running stream instead. */
+#define CAMERA_SVC_OFF_STOPS_STREAM 1
 
 /** `camera info`: driver and sensor state. */
 #define CAMERA_SVC_HAS_INFO   1

@@ -8,49 +8,94 @@
  *
  * The board says what it HAS; the shared command (shell/cmds/cmd_camera.c)
  * registers a subcommand only under its macro, and the board adapter
- * implements only what is 1 here.  These are properties, never a board
- * identity test.  Every macro is defined, to 0 or 1, so a reader of this file
- * sees the whole set and a missing one is not mistaken for a decision.
- *
- * Not yet read by anything: issue #143 commit 1 adds the table, and the
- * shared command that reads it arrives in the commits that follow.
+ * (port/camera/camera_svc_grove.c) implements only what is 1 here.  These are
+ * properties, never a board identity test.  Every macro is defined, to 0 or 1,
+ * so a reader of this file sees the whole set and a missing one is not
+ * mistaken for a decision.
  */
 #ifndef CAMERA_SVC_CONFIG_H
 #define CAMERA_SVC_CONFIG_H
 
+/** The `camera` line of the top-level `help`: what the module is. */
+#define CAMERA_SVC_HELP "OV5647 camera: bring-up, capture, stream to the panel"
+
 /** No `camera on` / `camera off`: this board has no sensor power state for
- *  them to set, so they are not registered (issue #143 decision 2). */
+ *  them to set, so they are not registered (issue #143 decision 2).  With no
+ *  `off` there is no CAMERA_SVC_OFF_STOPS_STREAM to declare. */
 #define CAMERA_SVC_HAS_POWER  0
 
-/** `camera info`: identity, state and the last capture (new in issue #143;
- *  it reads no sensor register). */
-#define CAMERA_SVC_HAS_INFO   1
+/** No `camera info` yet: it is new on this board (identity, state and the last
+ *  capture, reading no sensor register) and arrives in issue #143's B step. */
+#define CAMERA_SVC_HAS_INFO   0
 
-/** No test pattern on this data path: `--test` is refused, in the same words
- *  `nn stream start --test` uses. */
+/** No test pattern on this data path: `test` is refused, in the words
+ *  `camera stream start test` has always used here. */
 #define CAMERA_SVC_HAS_TEST   0
 
 /** No `camera save`: this board has no filesystem. */
 #define CAMERA_SVC_HAS_SAVE   0
 
-/** `camera send`: the last capture's planar B/G/R to the PC over YMODEM (new
- *  in issue #143). */
-#define CAMERA_SVC_HAS_SEND   1
+/** No `camera send` yet: it arrives with the capture's validity and
+ *  generation in issue #143's B step. */
+#define CAMERA_SVC_HAS_SEND   0
 
 /*
- * The board's own subcommands, appended to the shared `camera` table.
- *
- * A run of CLI_CMD / CLI_CMD_ARG / CLI_CMD_ARG_USAGE entries (shell/include/
- * cli.h), EACH FOLLOWED BY A COMMA, that the shared command expands as is just
- * before CLI_SUBCMD_SET_END.  Empty means the board adds none.  The handlers
- * are the board's (cmds/cmd_camera_board.c).
- *
- * [!] A NAME HERE THAT IS ALSO A SHARED SUBCOMMAND IS SILENTLY SHADOWED by
- * whichever entry the lookup meets first; the board's host test builds the
- * table and refuses a duplicate.
- *
- * Empty for now: raw, vts, bench, profile and the tuning subcommands move here in issue #143 commit 4.
+ * The board's own subcommands, appended to the shared `camera` table (see the
+ * f746 config for the rules), in the order and the words they have always had.
+ * `stats` stays here until issue #143 moves it under `camera stream stats`
+ * (which the shared table already has, printing the same lines).  Handlers in
+ * cmds/cmd_camera_board.c.
  */
-#define CAMERA_SVC_BOARD_SUBCMDS
+#define CAMERA_SVC_BOARD_DECLS                                                 \
+	int camera_board_cmd_raw(struct cli_instance *sh, int argc, char **argv);   \
+	int camera_board_cmd_stats(struct cli_instance *sh, int argc, char **argv); \
+	int camera_board_cmd_vts(struct cli_instance *sh, int argc, char **argv);   \
+	int camera_board_cmd_bench(struct cli_instance *sh, int argc, char **argv); \
+	int camera_board_cmd_exposure(struct cli_instance *sh, int argc,          \
+	                              char **argv);                              \
+	int camera_board_cmd_gain(struct cli_instance *sh, int argc, char **argv);  \
+	int camera_board_cmd_auto(struct cli_instance *sh, int argc, char **argv);  \
+	int camera_board_cmd_black(struct cli_instance *sh, int argc, char **argv); \
+	int camera_board_cmd_sat(struct cli_instance *sh, int argc, char **argv);   \
+	int camera_board_cmd_gamma(struct cli_instance *sh, int argc, char **argv); \
+	int camera_board_cmd_bayer(struct cli_instance *sh, int argc, char **argv); \
+	int camera_board_cmd_wb(struct cli_instance *sh, int argc, char **argv);
+
+#define CAMERA_SVC_BOARD_SUBCMDS                                               \
+	CLI_CMD(raw, NULL, "capture the Bayer mosaic and name the phase",      \
+	        camera_board_cmd_raw),                                         \
+	CLI_CMD(stats, NULL, "producer and sink counters",                     \
+	        camera_board_cmd_stats),                                       \
+	CLI_CMD_ARG_USAGE(vts, NULL,                                           \
+	                  "sensor frame length: frame rate vs exposure ceiling", \
+	                  "[lines]", camera_board_cmd_vts, 1, 1),              \
+	CLI_CMD_ARG_USAGE(bench, NULL,                                         \
+	                  "time the datapath with the panel out of the loop",  \
+	                  "[frames]", camera_board_cmd_bench, 1, 1),           \
+	CLI_CMD_ARG_USAGE(exposure, NULL,                                      \
+	                  "read or set the sensor's exposure",                 \
+	                  "[lines]", camera_board_cmd_exposure, 1, 1),         \
+	CLI_CMD_ARG_USAGE(gain, NULL,                                          \
+	                  "read or set analogue / digital gain",               \
+	                  "[again [dgain]]", camera_board_cmd_gain, 1, 2),     \
+	CLI_CMD_ARG_USAGE(auto, NULL,                                          \
+	                  "the sensor's own AEC + this port's white balance",  \
+	                  "[on|off]", camera_board_cmd_auto, 1, 1),            \
+	CLI_CMD_ARG_USAGE(black, NULL,                                         \
+	                  "black level subtracted before the gain (default 16)", \
+	                  "[n]", camera_board_cmd_black, 1, 1),                \
+	CLI_CMD_ARG_USAGE(sat, NULL,                                           \
+	                  "saturation, standing in for a colour matrix "       \
+	                  "(256 = unchanged)",                                 \
+	                  "[n]", camera_board_cmd_sat, 1, 1),                  \
+	CLI_CMD_ARG_USAGE(gamma, NULL,                                         \
+	                  "sRGB encode the preview (on by default)",           \
+	                  "[on|off]", camera_board_cmd_gamma, 1, 1),           \
+	CLI_CMD_ARG_USAGE(bayer, NULL,                                         \
+	                  "demosaic phase: bggr|gbrg|grbg|rggb (try all four)", \
+	                  "[mode]", camera_board_cmd_bayer, 1, 1),             \
+	CLI_CMD_ARG_USAGE(wb, NULL,                                            \
+	                  "software white balance (256 = unity)",              \
+	                  "[r g b]", camera_board_cmd_wb, 1, 3),
 
 #endif /* CAMERA_SVC_CONFIG_H */

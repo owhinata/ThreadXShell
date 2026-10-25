@@ -4,34 +4,28 @@
  */
 /**
  * @file    cmd_camera_board.c
- * @brief   `camera` shell command: OV5647 bring-up, capture and live preview
- *          (Grove Vision AI V2, issue #35 / M-G3b).
+ * @brief   This board's own `camera` subcommands (Grove Vision AI V2, issue
+ *          #35 / M-G3b, issue #143).
  *
- * Registered LOCALLY on this board, like `lcd`: the other two boards have their
- * own camera commands over entirely different hardware, and the only thing the
- * three share is the vocabulary.
+ * The command itself -- probe / capture / stream start|stop|stats -- is
+ * shell/cmds/cmd_camera.c, shared with the other boards, over this board's
+ * adapter port/camera/camera_svc_grove.c.  What stays here is appended to that
+ * table by CAMERA_SVC_BOARD_SUBCMDS (svc/camera_svc_config.h): `raw`, `stats`
+ * (until it moves under `camera stream stats`, which prints the same lines),
+ * `vts`, `bench`, and the image knobs.
  *
- * The subcommands answer questions, in the order you would ask them when
- * nothing works yet:
+ * The questions, in the order you would ask them when nothing works yet:
  *
- *   camera probe    -- is a module there at all?  Powers it, reads the sensor's
- *                      model ID over I2C, and prints the chip revision (which
- *                      decides whether the per-frame MIPI bounce is needed).
- *                      This is the one that separates "nothing is plugged in"
- *                      from every other failure.
+ *   camera probe    -- is a module there at all?  (the adapter)
  *   camera capture  -- take ONE frame and describe it, per channel, straight
  *                      off the hardware's own planar output.  A dead MIPI lane,
  *                      a sensor that never streamed and a demosaic given the
  *                      wrong Bayer phase all produce a frame of the right size
  *                      at the right time with every layer reporting success;
- *                      the channel balance is what tells them apart.  The row
- *                      seam metric catches the other family -- a gain change
- *                      landing mid-readout, or a stride off by one.
+ *                      the channel balance is what tells them apart.  (the
+ *                      adapter)
  *   camera stream start / stop
- *                   -- continuous capture onto the panel (issue #142: the
- *                      operator taking and letting go of hold of the camera's
- *                      stream; it runs until the last holder lets go, and
- *                      `nn stream start` / `nn run` hold the same stream).
+ *                   -- continuous capture onto the panel (issue #142).
  *   camera stats    -- the counters, and who holds the stream.
  *
  * WHY `capture` REPORTS THE PLANES AND NOT THE PACKED FRAME.  The planes are
@@ -53,7 +47,21 @@
 #include "cam_lcd_sink.h"
 #include "camera.h"
 #include "lcd_st7789.h"
-#include "nn_camera.h"   /* the sink row's stage split under `nn stream` */
+#include "camera_svc.h"
+#include "camera_svc_config.h" /* CAMERA_SVC_BOARD_DECLS: the names declared */
+#include "camera_svc_grove.h"  /* the profile lines, shared with the adapter */
+
+/* What the shared table expands; declared once, there and here. */
+CAMERA_SVC_BOARD_DECLS
+
+/* The writer the adapter's lines go through here: one cli_write() per line,
+   as the shared command's (shell/cmds/cmd_camera.c). */
+static int board_write(void *ctx, const char *s, size_t len)
+{
+	if (len == 0u)
+		return 0;
+	return (cli_write((struct cli_instance *)ctx, s, len) < 0) ? -1 : (int)len;
+}
 
 #define CAM_BENCH_DEFAULT  60u   /* enough to average, ~4 s at 15 fps  */
 
@@ -123,129 +131,6 @@ static void cam_report_stop(struct cli_instance *sh, int rc, int retry)
 		              "reboot\r\n");
 }
 
-/* ---- probe --------------------------------------------------------------- */
-
-static int cmd_camera_probe(struct cli_instance *sh, int argc, char **argv)
-{
-	struct camera_probe_info info;
-	int rc;
-
-	(void)argc; (void)argv;
-
-	rc = camera_probe(&info);
-	if (rc != CAM_OK) {
-		cam_report(sh, "probe", rc);
-		/*
-		 * "camera busy" on its own reads like something to retry, and
-		 * retrying is the one thing that will not help (issue #74).
-		 *
-		 * Deliberately naming BOTH causes: this code comes back either
-		 * from the streaming refusal or from cam_api_enter() failing to
-		 * take the API mutex, and the two are indistinguishable here.
-		 * A message that only mentioned the stream would tell someone
-		 * running `camera capture &` to stop a stream that is not there.
-		 */
-		if (rc == CAM_ERR_BUSY)
-			cli_error(sh, "        a stream is running (the producer "
-			              "owns the sensor's I2C bus), or another\r\n"
-			              "        camera command holds the API; "
-			              "`camera stats` says which\r\n");
-		return 1;
-	}
-
-	cli_print(sh, "chip     : %08lx%s\r\n",
-	          (unsigned long)info.chip_version,
-	          info.rev_c ? " (rev C: per-frame MIPI bounce)" : "");
-	cli_print(sh, "sensor   : %s (id 0x%04X, on-chip AEC)\r\n",
-	          cam_sensor_name(), info.sensor_id);
-	cli_print(sh, "frame    : %ux%u planar B/G/R, %lu bytes\r\n",
-	          (unsigned)CAM_FRAME_WIDTH, (unsigned)CAM_FRAME_HEIGHT,
-	          (unsigned long)CAM_RAW_BYTES);
-	return 0;
-}
-
-/* ---- capture ------------------------------------------------------------- */
-
-static void cam_print_plane(struct cli_instance *sh, const char *name,
-                            const uint8_t *plane)
-{
-	struct cam_plane_stats st;
-	uint32_t mosaic;
-
-	cam_plane_stats(plane, CAM_FRAME_PIXELS, &st);
-	mosaic = cam_plane_mosaic_x100(plane, CAM_FRAME_WIDTH, CAM_FRAME_HEIGHT);
-
-	cli_print(sh, "%s : min %3u  max %3u  mean %3lu.%02lu  "
-	              "mosaic %3lu.%02lu\r\n", name,
-	          st.min, st.max,
-	          (unsigned long)(st.mean_x100 / 100u),
-	          (unsigned long)(st.mean_x100 % 100u),
-	          (unsigned long)(mosaic / 100u),
-	          (unsigned long)(mosaic % 100u));
-}
-
-static int cmd_camera_capture(struct cli_instance *sh, int argc, char **argv)
-{
-	const uint8_t *raw;
-	uint32_t seam, row;
-	int rc;
-
-	(void)argc; (void)argv;
-
-	rc = camera_capture();
-	if (rc != CAM_OK) {
-		cam_report(sh, "capture", rc);
-		return 1;
-	}
-
-	raw = camera_raw_frame();
-	cli_print(sh, "frame    : %ux%u planar B/G/R\r\n",
-	          (unsigned)CAM_FRAME_WIDTH, (unsigned)CAM_FRAME_HEIGHT);
-
-	/* The plane ORDER is the hardware's, not a preference: WDMA3 writes B
-	 * first.  Printing them in that order is what makes a swapped pair
-	 * visible against a scene somebody can describe. */
-	cam_print_plane(sh, "B(plane 0)", raw);
-	cam_print_plane(sh, "G(plane 1)", raw + CAM_FRAME_PIXELS);
-	cam_print_plane(sh, "R(plane 2)", raw + 2u * CAM_FRAME_PIXELS);
-
-	seam = cam_plane_row_seam_x100(raw + CAM_FRAME_PIXELS,
-	                               CAM_FRAME_WIDTH, CAM_FRAME_HEIGHT, &row);
-	cli_print(sh, "seam     : row %3lu  dG %lu.%02lu  "
-	              "(single digits = settled)\r\n",
-	          (unsigned long)row, (unsigned long)(seam / 100u),
-	          (unsigned long)(seam % 100u));
-
-	{
-		uint32_t colour = cam_frame_colour_x100(raw, CAM_FRAME_PIXELS);
-
-		cli_print(sh, "bayer    : %s   colour separation %lu.%02lu\r\n",
-		          cam_dp_bayer_name(cam_dp_bayer()),
-		          (unsigned long)(colour / 100u),
-		          (unsigned long)(colour % 100u));
-	}
-
-	/*
-	 * The two figures answer DIFFERENT questions, and conflating them was a
-	 * mistake worth not repeating:
-	 *
-	 *   mosaic  -- did a demosaic run at all?  Single digits yes, tens no.
-	 *              It says NOTHING about whether the phase was right: a
-	 *              wrongly-phased demosaic is just as phase-flat.
-	 *   colour  -- was the phase right?  A wrong phase interpolates red and
-	 *              blue from where they are not, dragging both toward green,
-	 *              so the frame desaturates.  Point the camera at something
-	 *              strongly coloured and try all four `camera bayer` values:
-	 *              the right one is the one that maximises this.  On a grey
-	 *              scene they all score low and prove nothing.
-	 */
-	cli_print(sh, "           (mosaic: single digits = a demosaic ran. "
-	              "colour: bigger = the phase fits)\r\n");
-
-	cli_hexdump(sh, raw, 32u);
-	return 0;
-}
-
 /* ---- raw ----------------------------------------------------------------- */
 
 /*
@@ -259,7 +144,7 @@ static int cmd_camera_capture(struct cli_instance *sh, int argc, char **argv)
  * the remaining pair -- cannot be settled from an unknown scene by any amount
  * of arithmetic, so it is reported rather than guessed.
  */
-static int cmd_camera_raw(struct cli_instance *sh, int argc, char **argv)
+int camera_board_cmd_raw(struct cli_instance *sh, int argc, char **argv)
 {
 	static const char *const pos[4] = { "(0,0)", "(1,0)", "(0,1)", "(1,1)" };
 	const uint8_t *raw;
@@ -347,169 +232,6 @@ static int cmd_camera_raw(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-/* ---- stream ------------------------------------------------------------- */
-
-/*
- * `camera stream start` is the operator TAKING HOLD of the camera's stream to
- * the panel (issue #142, port/camera/cam_lcd_sink.h): it starts the camera if
- * nobody held it, and the stream runs until the last holder lets go -- no
- * frame count, no Ctrl+C.  `nn stream start` and `nn run` hold the same stream,
- * and start it holding the operator's place too, so it keeps streaming after
- * nn stops.  It replaces the foreground `camera preview [frames]`.
- */
-static int cmd_stream_start(struct cli_instance *sh, int argc, char **argv)
-{
-	int started = 0, rc;
-
-	if (argc > 1) {
-		if (strcmp(argv[1], "test") == 0)
-			cli_error(sh, "camera: this board has no test pattern to "
-			              "stream\r\n");
-		else
-			cli_error(sh, "camera: usage: stream start\r\n");
-		return 1;
-	}
-	rc = cam_lcd_sink_hold(NULL, NULL, &started);
-	if (rc == CAM_ERR_BUSY) {
-		cli_error(sh, "camera: busy -- a stream start or stop, `camera "
-		              "bench`, or another command owns the camera; "
-		              "retry\r\n");
-		return 1;
-	}
-	if (rc != CAM_OK) {
-		cam_report(sh, "stream start", rc);
-		return 1;
-	}
-	cli_print(sh, "camera: streaming to the panel%s -- `camera stats` / "
-	              "`camera stream stop`\r\n",
-	          started ? "" : " (already running)");
-	return 0;
-}
-
-/*
- * The operator lets go.  [!] While nn holds the stream this is REFUSED and
- * changes nothing (issue #142 D8): "still in use: nn", and the operator stays.
- * The last holder's leave stops the camera and, only on a confirmed stop,
- * unlinks the panel sink (issue #48).
- */
-static int cmd_stream_stop(struct cli_instance *sh, int argc, char **argv)
-{
-	const char *users[4];
-	int rc, n = 0;
-
-	(void)argc;
-	(void)argv;
-	rc = cam_lcd_sink_release(NULL, users, 4, &n);
-	if (rc == CAM_LCD_ERR_IN_USE) {
-		cli_error(sh, "camera: still in use:");
-		for (int i = 0; i < n; i++)
-			cli_error(sh, "%s %s", i ? "," : "", users[i]);
-		cli_error(sh, "\r\n");
-		return 1;
-	}
-	if (rc == CAM_ERR_BUSY) {
-		cli_error(sh, "camera: a stream start or stop is in progress, or "
-		              "the panel has not let go yet -- retry\r\n");
-		return 1;
-	}
-	if (rc != CAM_OK) {
-		cam_report_stop(sh, rc, 1);
-		return 1;
-	}
-	cli_print(sh, "camera: stream stopped\r\n");
-	return 0;
-}
-
-static int cmd_camera_stream(struct cli_instance *sh, int argc, char **argv)
-{
-	if (argc > 1)
-		cli_error(sh, "camera: unknown stream subcommand '%s'\r\n",
-		          argv[1]);
-	cli_print(sh, "usage: camera stream <start | stop>\r\n");
-	return argc > 1 ? 1 : 0;
-}
-
-/*
- * One line of the stage profile (issue #38).
- *
- * Microseconds and tenths of a percent, both assembled from integers because
- * svc/fmt.c has no %f -- and the percentages are of prof_total_us, which was
- * measured over the same window as the parts, so the column adds up.
- */
-static void cam_prof_line(struct cli_instance *sh, const char *name,
-                          uint32_t us, uint32_t total_us, uint32_t iters,
-                          const char *what)
-{
-	uint32_t pct10 = (total_us != 0u)
-	               ? (uint32_t)(((uint64_t)us * 1000u) / total_us) : 0u;
-	uint32_t per   = (iters != 0u) ? (us / iters) : 0u;
-
-	cli_print(sh, "  %-7s: %6lu us/frame  %2lu.%lu%%   %s\r\n",
-	          name, (unsigned long)per,
-	          (unsigned long)(pct10 / 10u), (unsigned long)(pct10 % 10u),
-	          what);
-}
-
-/*
- * The producer's per-stage breakdown, since the last stream start.
- *
- * [!] The point of this is the RATIO, not the fps.  If `wait` dominates, the
- * sensor is not offering frames any faster and pipelining the CPU work would
- * buy nothing; if `pack` and `sink` dominate, it would.  The two cases call for
- * opposite work, which is why the number came before the design (issue #38).
- */
-static void cam_print_profile(struct cli_instance *sh,
-                              const struct camera_stats *st)
-{
-	uint32_t fps10;
-
-	if (!st->prof_ok) {
-		cli_print(sh, "profile  : -- (%s)\r\n",
-		          st->prof_why != NULL ? st->prof_why : "no time source");
-		return;
-	}
-	if (st->prof_iters == 0u || st->prof_total_us == 0u) {
-		cli_print(sh, "profile  : -- (no frames since the last stream "
-		              "start)\r\n");
-		return;
-	}
-
-	fps10 = (uint32_t)(((uint64_t)st->prof_iters * 10000000u) /
-	                   st->prof_total_us);
-	cli_print(sh, "profile  : %lu iterations, %lu us/frame (%lu.%lu fps)"
-	              "  [since stream start]\r\n",
-	          (unsigned long)st->prof_iters,
-	          (unsigned long)(st->prof_total_us / st->prof_iters),
-	          (unsigned long)(fps10 / 10u), (unsigned long)(fps10 % 10u));
-
-	/* In LOOP order (issue #59 rearranged it): the arm goes ahead of the
-	 * work, and tune ahead of pack, so the rows read as the iteration
-	 * runs. */
-	cam_prof_line(sh, "wait", st->prof_wait_us, st->prof_total_us,
-	              st->prof_iters, "asleep: sensor exposure + readout");
-	cam_prof_line(sh, "invald", st->prof_inval_us, st->prof_total_us,
-	              st->prof_iters, "D-cache invalidate, one buffer, 225 KB");
-	/* The next capture is running from here down: this row is the price of
-	 * the overlap, and it is the one to watch if `wait` ever grows -- an
-	 * arm that slows down eats the blanking-interval deadline. */
-	cam_prof_line(sh, "arm", st->prof_arm_us, st->prof_total_us,
-	              st->prof_iters, "arm next capture + wrap reassert");
-	cam_prof_line(sh, "tune", st->prof_tune_us, st->prof_total_us,
-	              st->prof_iters, "means + sensor read-back + wb");
-	cam_prof_line(sh, "pack", st->prof_pack_us, st->prof_total_us,
-	              st->prof_iters, "planar B/G/R -> RGB565, 76800 px");
-	/* NOT the blit -- that left this thread in #57 and has its own row
-	 * below.  What is left is whatever the sinks do on the producer: the
-	 * frame's preparation for the inference worker under `nn stream` (the
-	 * inference itself left this thread in #129), and since #64 the panel
-	 * thread's staging copy, which now preempts this thread instead of
-	 * queueing behind it. */
-	cam_prof_line(sh, "sink", st->prof_sink_us, st->prof_total_us,
-	              st->prof_iters, "sinks consume: nn prep + panel staging");
-	cam_prof_line(sh, "other", st->prof_other_us, st->prof_total_us,
-	              st->prof_iters, "verify, error recheck, loop");
-}
-
 /*
  * The datapath's own frame period, with the display OUT of the path (#38).
  *
@@ -542,7 +264,7 @@ static void cam_print_profile(struct cli_instance *sh,
  * while ANY sink is attached, so a preview that is still tearing down keeps the
  * camera to itself and this command is told to wait.
  */
-static int cmd_camera_bench(struct cli_instance *sh, int argc, char **argv)
+int camera_board_cmd_bench(struct cli_instance *sh, int argc, char **argv)
 {
 	uint32_t frames = CAM_BENCH_DEFAULT;
 	struct camera_stats st;
@@ -606,191 +328,64 @@ static int cmd_camera_bench(struct cli_instance *sh, int argc, char **argv)
 	}
 
 	cli_print(sh, "no sink attached: the LCD blit is out of this loop\r\n");
-	cam_print_profile(sh, &st);
+	{
+		struct camera_out o = { board_write, sh, 0 };
+
+		camera_grove_profile_write(&o, &st);
+	}
 	return 0;
 }
 
-/* ---- stats --------------------------------------------------------------- */
+/* ---- stats ------------------------------------------------------------- */
 
-static int cmd_camera_stats(struct cli_instance *sh, int argc, char **argv)
+/*
+ * `camera stats` -- until issue #143 moves it under `camera stream stats`.
+ * The lines are the adapter's (camera_svc_stream_report(), which `camera
+ * stream stats` prints too), from one sample; this board's head says the
+ * state and the holders in its own spelling.
+ */
+static void cam_stats_head(void *ctx, const struct camera_svc_state *st)
 {
-	struct cam_lcd_sink_stats sk;
-	struct camera_stats st;
+	struct camera_out o = { board_write, ctx, 0 };
+	char line[96];
+	size_t len;
 
-	(void)argc; (void)argv;
+	camera_out(&o, "state    : %s\r\n", st->streaming ? "streaming" : "idle");
+	/* Who holds the stream to the panel (issue #142), one line. */
+	strcpy(line, "holders  :");
+	len = strlen(line);
+	if (st->transition) {
+		strcpy(line + len, " -- (a stream start or stop is in progress)");
+	} else if (st->nusers == 0u) {
+		strcpy(line + len, " none");
+	} else {
+		for (unsigned i = 0; i < st->nusers && i < CAMERA_SVC_USERS_MAX; i++) {
+			const char *name = st->users[i] ? st->users[i] : "?";
+			size_t w = strlen(name);
 
-	camera_stream_stats(&st);
-	cam_lcd_sink_stats(&sk);
-
-	cli_print(sh, "state    : %s\r\n", st.streaming ? "streaming" : "idle");
-	/* Who holds the stream to the panel (issue #142): a snapshot taken under
-	 * the holder lock, printed after it. */
-	{
-		const char *names[4];
-		int lost = 0;
-		int n = cam_lcd_sink_holders(names, 4, &lost);
-
-		cli_print(sh, "holders  :");
-		if (n < 0)
-			cli_print(sh, " -- (a stream start or stop is in "
-			              "progress)");
-		else if (n == 0)
-			cli_print(sh, " none");
-		for (int i = 0; i < n; i++)
-			cli_print(sh, "%s %s", i ? "," : "", names[i]);
-		if (lost)
-			cli_print(sh, "  (%d lost when the stream ended)", lost);
-		cli_print(sh, "\r\n");
-	}
-	cli_print(sh, "frames   : %lu\r\n", (unsigned long)st.frames);
-	cli_print(sh, "timeouts : %lu (restarts %lu)\r\n",
-	          (unsigned long)st.timeouts, (unsigned long)st.retries);
-	cli_print(sh, "overruns : %lu\r\n", (unsigned long)st.overruns);
-	cli_print(sh, "csirx err: %lu (relock fail %lu)\r\n",
-	          (unsigned long)st.csirx_errors,
-	          (unsigned long)st.relock_fails);
-	cli_print(sh, "dp errors: %lu", (unsigned long)st.dp_errors);
-	if (st.last_dp_status != 0)
-		cli_print(sh, " (last status %ld)", (long)st.last_dp_status);
-	cli_print(sh, "\r\n");
-	/*
-	 * Stops that found the API locked (issue #65).  Zero is the normal
-	 * answer and the line is still worth printing: since the stop WAITS now
-	 * instead of giving up, a collision leaves no other trace -- and a
-	 * collision used to be the thing that stranded a sink until reboot.
-	 * A non-zero count with the previews still working is the fix doing its
-	 * job; the longest wait says how close it came to the deadline.
-	 */
-	cli_print(sh, "stop lock: %lu contended (longest wait %lu ms)\r\n",
-	          (unsigned long)st.lock_contended,
-	          (unsigned long)st.lock_wait_max_ms);
-	/*
-	 * The EDM observer (issue #68).  Printed only when non-zero: the whole
-	 * point is that this has never been seen on a healthy run, so a standing
-	 * "edm: 0" line would train the eye to skip past the one thing worth
-	 * noticing.  Cumulative since boot, unlike the per-stream profile below.
-	 *
-	 * [!] After a hang this line is GONE -- the reset that recovers the board
-	 * wipes it.  `dmesg` is the readout that survives; see cam_edm.h.
-	 */
-	if (st.edm.events != 0u)
-		cli_print(sh, "edm      : %lu event(s), first %08lx last %08lx "
-		              "(see dmesg)\r\n",
-		          (unsigned long)st.edm.events,
-		          (unsigned long)st.edm.first_status,
-		          (unsigned long)st.edm.last_status);
-	/*
-	 * The double-buffer evidence (issue #59).  A flip that silently became
-	 * a no-op -- every arm landing on buffer 0 -- produces a working
-	 * picture at the OLD frame rate, which nothing else on this screen can
-	 * tell from a working one.  Equal-ish per-buffer counts is the
-	 * on-hardware proof the alternation is real; the premature-disable
-	 * count is the proof the mask around the arm's disable is doing its
-	 * job, and acceptance requires it zero.
-	 */
-	cli_print(sh, "buffers  : %lu / %lu frames (b0/b1)",
-	          (unsigned long)st.buf_frames[0],
-	          (unsigned long)st.buf_frames[1]);
-	if (st.premature_disables != 0u)
-		cli_print(sh, ", %lu premature-disable",
-		          (unsigned long)st.premature_disables);
-	cli_print(sh, "\r\n");
-	cam_print_profile(sh, &st);
-	cli_print(sh, "sink lcd : %lu shown, %lu dropped, %lu busy, %lu dark, "
-	              "%lu err\r\n",
-	          (unsigned long)sk.delivered, (unsigned long)sk.dropped,
-	          (unsigned long)sk.busy, (unsigned long)sk.dark,
-	          (unsigned long)sk.errors);
-	/*
-	 * [!] WHERE THE 26 ms WENT (issue #57).
-	 *
-	 * The producer's `sink` row above is now just the hand-off (plus the
-	 * nn prep under `nn stream`); the blit itself is timed on the panel
-	 * thread and reported here.  Both numbers are needed: "the producer's
-	 * went down" is also what a sink that silently stopped drawing looks
-	 * like, and only this row distinguishes moved from lost.
-	 */
-	if (!sk.prof_ok)
-		cli_print(sh, "  blit   : -- (%s)\r\n",
-		          sk.prof_why != NULL ? sk.prof_why : "no time source");
-	else if (sk.blit_frames == 0u)
-		cli_print(sh, "  blit   : -- (no frames since the last "
-		              "attach)\r\n");
-	else
-		cli_print(sh, "  blit   : %6lu us/frame over %lu frame(s) "
-		              "[panel thread]\r\n",
-		          (unsigned long)(sk.blit_us / sk.blit_frames),
-		          (unsigned long)sk.blit_frames);
-	/*
-	 * [!] AND HOW LONG THE SLOT IS HELD (issue #71), which is NOT the row
-	 * above.  `blit` is the panel thread's whole interval; this stops when
-	 * the pin goes back at the staging seam, before the transfer.  The gap
-	 * between the two is exactly what moving the release bought, and this is
-	 * the number the frame period is now bounded by -- so it is the one to
-	 * read before picking a frame length with `camera vts`.
-	 */
-	if (sk.prof_ok && sk.hold_frames != 0u)
-		cli_print(sh, "  held   : %6lu us/frame over %lu frame(s) "
-		              "[to pin returned]\r\n",
-		          (unsigned long)(sk.hold_us / sk.hold_frames),
-		          (unsigned long)sk.hold_frames);
-	/*
-	 * [!] WHAT IS INSIDE THE PRODUCER'S `sink` ROW under `nn stream`
-	 * (issue #60).  One number was carrying the whole of "preprocess +
-	 * inference + decode + hand-off", and which stage owns it decides what
-	 * is worth optimising -- so the overlay times its own stages and they
-	 * are printed HERE.  Since issue #129 only `prep` is inside the sink row
-	 * (the producer prepares and hands over); invoke and decode run on the
-	 * inference worker and are printed for the same frames, outside it.
-	 *
-	 * The scope is in the header because it is NOT the profile's: these
-	 * reset when an `nn stream` arms the overlay, not at stream start, so
-	 * after nn stops on a stream that keeps running they still describe the
-	 * LAST nn run while the sink row above no longer contains them.
-	 */
-	{
-		struct nn_camera_stats ns;
-
-		nn_camera_stats(&ns);
-		if (ns.prof_frames != 0u && ns.prof_ok) {
-			cli_print(sh, "nn sink  : %lu frame(s), last nn stream "
-			              "[prep: producer; rest: worker]\r\n",
-			          (unsigned long)ns.prof_frames);
-			cli_print(sh, "  prep   : %6lu us/frame   setup + "
-			              "crop/resize\r\n",
-			          (unsigned long)(ns.prep_us / ns.prof_frames));
-			cli_print(sh, "  invoke : %6lu us/frame   NPU inference\r\n",
-			          (unsigned long)(ns.invoke_us / ns.prof_frames));
-			cli_print(sh, "  decode : %6lu us/frame   outputs -> "
-			              "the decoder's result\r\n",
-			          (unsigned long)(ns.decode_us / ns.prof_frames));
-		} else if (ns.prof_frames != 0u) {
-			cli_print(sh, "nn sink  : -- (the EPK time source is not "
-			              "trusted)\r\n");
+			if (len + 2u + w >= sizeof line)
+				break;
+			line[len++] = i ? ',' : ' ';
+			if (i)
+				line[len++] = ' ';
+			memcpy(line + len, name, w + 1u);
+			len += w;
 		}
 	}
-	/*
-	 * A stream in flight has one frame out, so `accepted` leading `puts` by
-	 * one is normal and not worth printing.  Any other gap is worth seeing
-	 * at once -- detach turns it into a poisoned sink, and this is how to
-	 * catch it before then.
-	 */
-	if (sk.accepted != sk.puts)
-		cli_print(sh, "  handed : %lu accepted, %lu released%s\r\n",
-		          (unsigned long)sk.accepted, (unsigned long)sk.puts,
-		          (sk.accepted - sk.puts == 1u) ? " (one in flight)"
-		                                        : " [!]");
-	if (sk.fault != NULL)
-		cli_print(sh, "sink err : %s\r\n", sk.fault);
-	/* Only ever non-zero after an `nn stream`: a frame whose inference was
-	 * refused is still SHOWN, just with nothing drawn on it, so it counts here
-	 * and not as a sink error. */
-	if (sk.overlay_errors != 0u)
-		cli_print(sh, "overlay  : %lu frame(s) shown unannotated\r\n",
-		          (unsigned long)sk.overlay_errors);
-	if (st.fault != NULL)
-		cli_print(sh, "fault    : %s\r\n", st.fault);
-	return 0;
+	if (st->lost)
+		camera_out(&o, "%s  (%d lost when the stream ended)\r\n", line,
+		           (int)st->lost);
+	else
+		camera_out(&o, "%s\r\n", line);
+}
+
+int camera_board_cmd_stats(struct cli_instance *sh, int argc, char **argv)
+{
+	struct camera_op_result res;
+
+	(void)argc; (void)argv;
+	camera_svc_stream_report(&res, board_write, cam_stats_head, sh);
+	return (res.status == CAMERA_SVC_OK) ? 0 : 1;
 }
 
 /* ---- exposure / gain / white balance ------------------------------------- */
@@ -886,7 +481,7 @@ static void cam_note_manual(struct cli_instance *sh, int was_auto)
  * a write to an address that means something else, so "supported" and "lands
  * somewhere unintended" look identical from here.)
  */
-static int cmd_camera_exposure(struct cli_instance *sh, int argc, char **argv)
+int camera_board_cmd_exposure(struct cli_instance *sh, int argc, char **argv)
 {
 	uint16_t lines, dgain;
 	uint8_t again;
@@ -945,7 +540,7 @@ static int cmd_camera_exposure(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-static int cmd_camera_gain(struct cli_instance *sh, int argc, char **argv)
+int camera_board_cmd_gain(struct cli_instance *sh, int argc, char **argv)
 {
 	uint16_t lines, dgain;
 	uint8_t again;
@@ -1010,7 +605,7 @@ static int cmd_camera_gain(struct cli_instance *sh, int argc, char **argv)
  * The read-back is from the SENSOR, deliberately.  A getter that reported this
  * port's own last write could not have found the bug it exists to expose.
  */
-static int cmd_camera_vts(struct cli_instance *sh, int argc, char **argv)
+int camera_board_cmd_vts(struct cli_instance *sh, int argc, char **argv)
 {
 	uint16_t rb = 0u;
 	uint16_t lines, dgain, capped = 0u;
@@ -1099,7 +694,7 @@ static int cmd_camera_vts(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-static int cmd_camera_wb(struct cli_instance *sh, int argc, char **argv)
+int camera_board_cmd_wb(struct cli_instance *sh, int argc, char **argv)
 {
 	struct cam_wb wb;
 	uint32_t r, g, b;
@@ -1141,7 +736,7 @@ static int cmd_camera_wb(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-static int cmd_camera_auto(struct cli_instance *sh, int argc, char **argv)
+int camera_board_cmd_auto(struct cli_instance *sh, int argc, char **argv)
 {
 	uint16_t lines, dgain;
 	uint8_t again;
@@ -1204,7 +799,7 @@ static int cmd_camera_auto(struct cli_instance *sh, int argc, char **argv)
  * moves contrast directly -- and burying a control people reach for inside
  * another command's optional argument is how it becomes unfindable.
  */
-static int cmd_camera_black(struct cli_instance *sh, int argc, char **argv)
+int camera_board_cmd_black(struct cli_instance *sh, int argc, char **argv)
 {
 	struct cam_wb wb;
 	uint32_t v;
@@ -1234,7 +829,7 @@ static int cmd_camera_black(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-static int cmd_camera_sat(struct cli_instance *sh, int argc, char **argv)
+int camera_board_cmd_sat(struct cli_instance *sh, int argc, char **argv)
 {
 	struct cam_wb wb;
 	uint32_t v;
@@ -1260,7 +855,7 @@ static int cmd_camera_sat(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-static int cmd_camera_gamma(struct cli_instance *sh, int argc, char **argv)
+int camera_board_cmd_gamma(struct cli_instance *sh, int argc, char **argv)
 {
 	struct cam_wb wb;
 
@@ -1290,7 +885,7 @@ static int cmd_camera_gamma(struct cli_instance *sh, int argc, char **argv)
 	return 0;
 }
 
-static int cmd_camera_bayer(struct cli_instance *sh, int argc, char **argv)
+int camera_board_cmd_bayer(struct cli_instance *sh, int argc, char **argv)
 {
 	static const char *const names[4] = { "bggr", "gbrg", "grbg", "rggb" };
 	uint8_t i;
@@ -1337,61 +932,3 @@ static int cmd_camera_bayer(struct cli_instance *sh, int argc, char **argv)
 		              "capture` or `camera stream start`)\r\n");
 	return 0;
 }
-
-/* ---- registration -------------------------------------------------------- */
-
-CLI_SUBCMD_SET_CREATE(camera_stream_subcmds,
-	CLI_CMD_ARG_USAGE(start, NULL,
-	                  "hold the camera's stream to the panel open",
-	                  NULL, cmd_stream_start, 1, 1),
-	CLI_CMD(stop, NULL, "let go of the stream (stops it unless nn holds it)",
-	        cmd_stream_stop),
-	CLI_SUBCMD_SET_END);
-
-CLI_SUBCMD_SET_CREATE(camera_subcmds,
-	CLI_CMD(probe, NULL, "power the module and read its sensor ID",
-	        cmd_camera_probe),
-	CLI_CMD(capture, NULL, "one frame + per-channel statistics",
-	        cmd_camera_capture),
-	CLI_CMD_ARG_USAGE(stream, camera_stream_subcmds,
-	                  "hold the camera's stream to the panel",
-	                  "[start|stop]", cmd_camera_stream, 1, 1),
-	CLI_CMD(raw, NULL, "capture the Bayer mosaic and name the phase",
-	        cmd_camera_raw),
-	CLI_CMD(stats, NULL, "producer and sink counters", cmd_camera_stats),
-	CLI_CMD_ARG_USAGE(vts, NULL,
-	                  "sensor frame length: frame rate vs exposure ceiling",
-	                  "[lines]", cmd_camera_vts, 1, 1),
-	CLI_CMD_ARG_USAGE(bench, NULL,
-	                  "time the datapath with the panel out of the loop",
-	                  "[frames]", cmd_camera_bench, 1, 1),
-	CLI_CMD_ARG_USAGE(exposure, NULL,
-	                  "read or set the sensor's exposure",
-	                  "[lines]", cmd_camera_exposure, 1, 1),
-	CLI_CMD_ARG_USAGE(gain, NULL,
-	                  "read or set analogue / digital gain",
-	                  "[again [dgain]]", cmd_camera_gain, 1, 2),
-	CLI_CMD_ARG_USAGE(auto, NULL,
-	                  "the sensor's own AEC + this port's white balance",
-	                  "[on|off]", cmd_camera_auto, 1, 1),
-	CLI_CMD_ARG_USAGE(black, NULL,
-	                  "black level subtracted before the gain (default 16)",
-	                  "[n]", cmd_camera_black, 1, 1),
-	CLI_CMD_ARG_USAGE(sat, NULL,
-	                  "saturation, standing in for a colour matrix "
-	                  "(256 = unchanged)",
-	                  "[n]", cmd_camera_sat, 1, 1),
-	CLI_CMD_ARG_USAGE(gamma, NULL,
-	                  "sRGB encode the preview (on by default)",
-	                  "[on|off]", cmd_camera_gamma, 1, 1),
-	CLI_CMD_ARG_USAGE(bayer, NULL,
-	                  "demosaic phase: bggr|gbrg|grbg|rggb (try all four)",
-	                  "[mode]", cmd_camera_bayer, 1, 1),
-	CLI_CMD_ARG_USAGE(wb, NULL,
-	                  "software white balance (256 = unity)",
-	                  "[r g b]", cmd_camera_wb, 1, 3),
-	CLI_SUBCMD_SET_END);
-
-CLI_CMD_REGISTER(camera, camera_subcmds,
-                 "OV5647 camera: bring-up, capture, stream to the panel",
-                 NULL, 1, 0);

@@ -17,7 +17,11 @@ import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
-NN_COMMANDS = ("shell/cmds/cmd_nn.c", "shell/cmds/nn_cmd_core.c")
+# The shared commands outside svc/: in scope like svc/, and each must be compiled
+# by every board (a board that lost one would otherwise pass with less audited).
+# `camera` joined `nn` in issue #143.
+SHARED_COMMANDS = ("shell/cmds/cmd_nn.c", "shell/cmds/nn_cmd_core.c",
+                   "shell/cmds/cmd_camera.c")
 # Existing protocol staging buffers and last-run diagnostics; moving these out
 # would change ownership/reentrancy and is not part of the stateless nn contract.
 EXCEPTIONS = {"svc/ymodem.c": "existing s_block, s_rdata and s_diag (non-reentrant protocol)"}
@@ -53,7 +57,7 @@ def canonical(path, directory):
 def policy_source(path, root):
     """Return the in-scope canonical source, without applying exceptions."""
     path = Path(path).resolve()
-    if path in {root / n for n in NN_COMMANDS}:
+    if path in {root / n for n in SHARED_COMMANDS}:
         return True
     return path.is_relative_to(root / "svc")
 
@@ -152,7 +156,7 @@ def select(database, targets, wanted, root):
     need(not missing and not extra,
          "inventory/database coverage mismatch; missing=" + repr(sorted(map(str, missing)))
          + "; unexpected=" + repr(sorted(map(str, extra))))
-    for cmd in NN_COMMANDS:
+    for cmd in SHARED_COMMANDS:
         need(any(src == root / cmd for _, src in seen), f"mandatory command missing: {cmd}")
     return selected
 

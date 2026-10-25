@@ -662,3 +662,24 @@ else
     echo "run_veneer_gate_build_tests: SKIPPED -- no arm-none-eabi toolchain" \
          "under $repo/tools/ (configure a Grove build once to fetch it)" >&2
 fi
+
+# issue #143 -- the `camera` table this board builds: the shared command
+# (shell/cmds/cmd_camera.c) against this board's REAL svc/camera_svc_config.h,
+# over the shared stub adapter.  A board subcommand that reuses a shared name is
+# silently unreachable, and only the built table shows it; the run also pins
+# that the twelve board subcommands keep their old order behind probe /
+# capture / stream, and the no-test-pattern refusals.
+st="$HOST_TEST_SHELL_TEST"
+gcc $CFLAGS -DCLI_USE_COLOR=0 \
+    -I "$st" -I "$HOST_TEST_BACKEND" -I "$st/shim" -I "$st/fx_shim" \
+    -I "$board/svc" -I "$HOST_TEST_INC" -I "$HOST_TEST_CORE" \
+    -I "$st/../cmds" -I "$svc" \
+    "$here/test_camera_table.c" "$st/camera_svc_stub.c" \
+    "$st/../cmds/cmd_camera.c" \
+    "$HOST_TEST_CORE/cli_session.c" "$HOST_TEST_CORE/cli_edit.c" \
+    "$HOST_TEST_CORE/cli_history.c" "$HOST_TEST_CORE/cli_printf.c" \
+    "$svc/fmt.c" "$HOST_TEST_CORE/cli_parse.c" \
+    "$HOST_TEST_CORE/cli_complete.c" \
+    "$HOST_TEST_BACKEND/cli_backend_dummy.c" "$st/host_glue.c" \
+    $LDFLAGS -o "$out/test_camera_table_grove"
+"$out/test_camera_table_grove"

@@ -97,8 +97,17 @@ extern "C" {
                                         *   command's callback said so); the
                                         *   shared command prints nothing      */
 
-/** Longest board-written explanation carried back with a result. */
-#define CAMERA_SVC_DETAIL_MAX 159
+/**
+ * Longest board-written explanation carried back with a result.
+ *
+ * [!] AN EXPLANATION MAY BE SEVERAL LINES ("\r\n" + an indent between them),
+ * printed as one failure: Grove's failures name the reason the driver latched
+ * and what to do about it on the lines under the first ("camera: probe failed:
+ * camera busy" / "        a stream is running ..."), and those lines are what
+ * tells an operator to retry rather than reboot.  319 holds Grove's longest
+ * (about 290 with every optional line); 159 did not (issue #143 commit 4).
+ */
+#define CAMERA_SVC_DETAIL_MAX 319
 
 /** Most holder names one IN_USE result (or one state snapshot) carries. */
 #define CAMERA_SVC_USERS_MAX  CAM_HOLDERS_MAX

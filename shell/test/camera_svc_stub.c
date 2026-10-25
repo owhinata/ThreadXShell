@@ -199,6 +199,7 @@ void camera_svc_stream_state(struct camera_svc_state *st,
 		st->users[i] = camera_stub.holders[i];
 	st->nusers = camera_stub.nholders;
 	st->lost = camera_stub.lost;
+	st->transition = (uint8_t)camera_stub.transition;
 }
 
 void camera_svc_stream_report(struct camera_op_result *res,

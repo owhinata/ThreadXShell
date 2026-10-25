@@ -286,10 +286,19 @@ Three independent things hold this down:
 | the refusal path writes nothing | `test/test_timer_seam.c`, a host test that compiles the real `timer_seam.c` against the real SDK headers with the register block pointed at an array |
 
 ```sh
+sh shell/test/run_host_tests.sh grove-vision-ai-v2
+# or the fixtures alone, against an already-built tree:
 python3 boards/grove-vision-ai-v2/cmake/fixtures/run_fixture_tests.py \
     --build-dir build/grove-vision-ai-v2 --board-dir boards/grove-vision-ai-v2
-sh shell/test/run_host_tests.sh grove-vision-ai-v2
 ```
+
+Since issue #148 the host test suite runs `run_fixture_tests.py` itself
+(`test/host_tests.sh`) whenever a configured Grove build tree exists --
+`build/grove-vision-ai-v2`, or the directory named by `GROVE_BUILD_DIR`. It
+first runs `ninja seam_probe.elf shell.elf` in that tree so the fixtures relink
+current objects, and fails the suite if either step fails. Without a tree (or
+without the pinned toolchain) it prints a `run_fixture_tests: SKIPPED` line to
+stderr and the rest of the suite still runs.
 
 `seam_probe` is a build target, not an artifact -- nothing flashes it.  It
 exists because M-G3a does not link the camera archives, so every wrapper is
@@ -2977,7 +2986,9 @@ about them.  It is also the link the negative tests are built from.
 
 `cmake/fixtures/run_fixture_tests.py` carries a pristine control and ten
 negative tests for it, each a real link of the real objects with one thing
-broken, each asserting the **diagnostic** and not merely a non-zero exit. The one that says the most is
+broken, each asserting the **diagnostic** and not merely a non-zero exit (the
+host test suite runs them when a configured Grove tree exists; see the timer
+seam section above). The one that says the most is
 `Q3`: a translation unit that reaches the inner name by reviving the vendor's
 outer forwarder, which must trip all three of the caller-edge rule, the outer
 caller-edge rule and the outer-absence rule -- because reviving the forwarder

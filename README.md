@@ -212,7 +212,8 @@ sh shell/test/run_host_tests.sh wio-lite-ai  # core + one board
 `shell/test/` holds the board-independent tests and always runs them. A test that
 compiles board-owned code against the board's real headers belongs to that board
 and lives in `boards/<board>/test/host_tests.sh`, which the runner invokes with
-the same toolchain flags. Each board pins the adapter that turns its own tensor
+the same toolchain flags. Some board tests also need that board's configured
+build tree and skip loudly without it (see the board README). Each board pins the adapter that turns its own tensor
 type into the neutral one; the decoder they share is tested once, centrally.
 
 ## Status

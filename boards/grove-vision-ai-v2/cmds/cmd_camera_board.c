@@ -343,7 +343,7 @@ int camera_board_cmd_bench(struct cli_instance *sh, int argc, char **argv)
 
 /*
  * `camera profile` (issue #143 D3): the producer's per-stage breakdown since the
- * last stream start -- the eight lines `camera stats` used to end with.  The
+ * last stream start -- the eight lines the old `stats` subcommand ended with.  The
  * counters themselves are `camera stream stats` now.  One stats sample; the
  * lines are the adapter's, shared with `camera bench`.
  */

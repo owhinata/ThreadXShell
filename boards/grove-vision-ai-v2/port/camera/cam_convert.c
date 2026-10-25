@@ -107,7 +107,7 @@ static uint8_t cam_gain8(uint8_t v, uint16_t gain, uint8_t black)
  * comparison is ten bytes against a 76,800-pixel loop.
  *
  * Rebuilding costs 2,047 entries where the loop it serves costs 230,400, and it
- * happens INSIDE the interval `camera stats` reports as `pack`, so the number
+ * happens INSIDE the interval `camera profile` reports as `pack`, so the number
  * that reports the saving already carries the price of it.
  *
  * [!] NOT REENTRANT.  These tables are the camera producer thread's private

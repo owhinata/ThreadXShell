@@ -245,7 +245,7 @@ int cam_lcd_sink_holders(const char **names, int max, int *lost);
 int cam_lcd_sink_linked(void);
 
 /**
- * Delivery counters for `camera stats`, plus the blit timing (issue #57).
+ * Delivery counters for `camera stream stats`, plus the blit timing (issue #57).
  *
  * The timing is here rather than in the producer's profile because it is
  * measured on the panel thread, and it exists so that the acceptance test for

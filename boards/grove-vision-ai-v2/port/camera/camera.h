@@ -313,7 +313,7 @@ uint32_t camera_frames_since_bringup(void);
 int camera_stream_start(struct frame_sink *sink);
 int camera_stream_stop(void);
 
-/** Producer and pipeline counters, as `camera stats` prints them. */
+/** Producer and pipeline counters, as `camera stream stats` and `camera profile` print them. */
 struct camera_stats {
 	int      streaming;
 	uint32_t frames;        /**< frames published                         */

@@ -61,11 +61,11 @@
   開いているモデルに従い**、reload 後の状態は `nn_model_reload()` 自身の戻り値で決める。**監査は
   `AUDIT_SHARED` だけで、f746g-disco はまだ常駐デコーダを持つ（変えない）。**
 
-### 7. `nn` は 3 ボード共有の 1 コマンド
+### 7. `nn` と `camera` は 3 ボード共有の 1 コマンド（各 1 つ）
 
-`cmd_nn.c` が唯一の実装、契約は `svc/nn_svc.h`、ボード側は `nn_svc_*.c`。**緩めた時点で BLOCKING。**
+`cmd_nn.c` / `cmd_camera.c` が唯一の実装、契約は `svc/nn_svc.h` / `svc/camera_svc.h`、ボード側は `nn_svc_*.c` / `camera_svc_*.c`。**緩めた時点で BLOCKING。**
 
-- **共有 TU（`cmd_nn.c` / `nn_cmd_core.c`）は可変記憶域を持たない**（状態はアダプタだけ）。強制は
+- **共有 TU（`cmd_nn.c` / `nn_cmd_core.c` / `cmd_camera.c`）は可変記憶域を持たない**（状態はアダプタだけ）。強制は
   `cmake/check_no_mutable_storage.py` を**ボードごとの監査コンパイル**で当てること — **ホストの結果は
   当てにならない**（host ではコマンド表が `.data.rel.ro` に落ちて偽陽性になる）。
 - **ファーム監査は列挙せずビルドから導出する**（`cmake/shared_storage_gate.cmake`。対象は実際に

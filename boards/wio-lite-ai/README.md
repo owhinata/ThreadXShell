@@ -373,6 +373,50 @@ its ring: `.psram_noinit` is now **460,800 B** (the two LTDC frame buffers,
 that is the `PSRAM` used figure `free` reports.  `camera capture`, `save` and
 `send` are unchanged.
 
+### The `camera` command is shared with the other boards (issue #143)
+
+The command is one file for all three boards, `shell/cmds/cmd_camera.c`, over
+this board's adapter `port/camera/camera_svc_wio.c`, which implements the
+contract in `svc/camera_svc.h` (the layers are in
+[svc/README.md](../../svc/README.md#the-camera-command-is-shared-issue-143)).
+`camera scan` and `camera reg` stay in `cmds/cmd_camera_board.c`, appended to
+the shared table.  Capabilities (`svc/camera_svc_config.h`): power, info, test
+pattern, send; save only with `BSP_ENABLE_SD` (the default tflm build has no
+SD, so no `camera save`); `CAMERA_SVC_OFF_STOPS_STREAM 1`.
+
+```
+camera probe | on | off | info
+camera capture [test]           snapshot one frame + channel statistics
+camera save [sd] <path>         (BSP_ENABLE_SD builds) the LAST capture, raw
+camera send [name]              the LAST capture over YMODEM (`rz -y -b`)
+camera stream start [test] | stop | stats
+camera scan | reg <addr> <reg> [value] [-16]   (this board's own)
+```
+
+- **`camera off` with the operator's stream running** stops it (this board's stop
+  waits for the stream, up to 1 s), prints `camera: stopping stream before power
+  off` and then powers down (`camera: PWDN asserted, RESETB low, XCLK stopped
+  (the 2V8 rail stays on -- no enable pin)`).  While nn holds the stream it
+  answers `camera: still in use: nn` and the power stays on.  `camera_off()`
+  looks at the stream and the holders again under the camera lock before it
+  powers down.  A stop that runs out of time, and a Ctrl+C while the stop waits,
+  leave the power on.  (Before issue #143 `off` refused a running stream with
+  `a capture or stream already owns the DCMI`.)
+- **`camera capture` prints `warm-up  : 15 frames dropped`** on every capture --
+  the 15 frames the driver lets go before it keeps one; the frame line no longer
+  carries it.  The capture and the statistics walk over the PSRAM frame run
+  inside ONE hold of the OCTOSPI1 guard; the statistics are kept in a small
+  record (`cam_last_report`, in DTCM: CPU-only data) with the frame generation
+  and the thread that captured it, and the report prints them only for that
+  thread and that frame.
+- **`save` / `send` read the last capture** (the band stream fills no frame).  A
+  read that finds the frame replaced fails the transfer with `ymodem: source
+  read error` and then `camera: frame changed by a concurrent capture`.
+- **Lines read `label    : value`** (the label padded to 8 and ` : `), the same
+  form on all three boards.
+- Console stack high water after capture / send (`thread`): 2,260 of 4,096 B at
+  the shared command's first version.
+
 ### The OCTOSPI1 guard: users and one reconfigurer (issue #142)
 
 `src/psram_guard.c` keeps one word: the number of **users** of the PSRAM window

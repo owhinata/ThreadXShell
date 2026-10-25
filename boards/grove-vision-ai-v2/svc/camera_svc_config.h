@@ -42,8 +42,8 @@
 /*
  * The board's own subcommands, appended to the shared `camera` table (see the
  * f746 config for the rules).  The counters are `camera stream stats` (issue
- * #143 decision 4); the producer's stage profile that `camera stats` used to
- * end with is `camera profile` (D3).  Handlers in cmds/cmd_camera_board.c.
+ * #143 decision 4); the producer's stage profile that the old `stats` subcommand
+ * ended with is `camera profile` (D3).  Handlers in cmds/cmd_camera_board.c.
  */
 #define CAMERA_SVC_BOARD_DECLS                                                 \
 	int camera_board_cmd_raw(struct cli_instance *sh, int argc, char **argv);   \

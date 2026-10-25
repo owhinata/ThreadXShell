@@ -663,6 +663,50 @@ else
          "under $repo/tools/ (configure a Grove build once to fetch it)" >&2
 fi
 
+# --- the linker-property gates' negative tests (issue #148) -----------------
+#
+# cmake/fixtures/run_fixture_tests.py re-links the firmware's own objects and
+# archives with exactly one thing broken and asserts the DIAGNOSTIC of
+# check_timer_seam.py, check_placement_budget.py and check_nor_seam.py.  Until
+# #148 nothing ran it -- only a README command -- and F2 could not link for
+# weeks until #143 repaired it by accident: a fixture nobody runs is a gate
+# never seen to fail.
+#
+# [!] HERE, NOT IN shell/test/run_host_tests.sh, for the reason the plugin gate
+# above is here, and one more: the fixtures read their link and compile lines
+# out of a CONFIGURED Grove build tree (ninja -t commands) and re-link the
+# objects already in it, so they need the cross toolchain AND that tree.  The
+# shared runner must not require either.
+#
+# The tree is $repo/build/grove-vision-ai-v2, or GROVE_BUILD_DIR to use another
+# (a directory holding a build.ninja).  It is brought up to date first --
+# `ninja seam_probe.elf shell.elf` is a no-op on a built tree, and on a stale one
+# it is what keeps this from testing yesterday's objects against today's gates.
+# No tree, or no pinned toolchain: a loud SKIP, as above.
+grove_build="${GROVE_BUILD_DIR:-$repo/build/grove-vision-ai-v2}"
+if [ ! -f "$grove_build/build.ninja" ]; then
+    echo "run_fixture_tests: SKIPPED -- no configured grove-vision-ai-v2 build" \
+         "tree at $grove_build (cmake -B build/grove-vision-ai-v2" \
+         "-DBOARD=grove-vision-ai-v2 ...; set GROVE_BUILD_DIR to use" \
+         "another)" >&2
+elif [ -z "$gate_cc" ] || [ ! -x "$gate_cc" ]; then
+    echo "run_fixture_tests: SKIPPED -- no arm-none-eabi toolchain under" \
+         "$repo/tools/ (configure a Grove build once to fetch it)" >&2
+else
+    gate_bin=$(dirname "$gate_cc")
+    if ! ninja -C "$grove_build" seam_probe.elf shell.elf \
+            > "$out/grove_fixture_ninja.log" 2>&1; then
+        tail -n 40 "$out/grove_fixture_ninja.log" >&2
+        echo "run_fixture_tests: FAIL -- could not bring $grove_build up to" \
+             "date (ninja seam_probe.elf shell.elf)" >&2
+        exit 1
+    fi
+    python3 "$board/cmake/fixtures/run_fixture_tests.py" \
+        --build-dir "$grove_build" --board-dir "$board" \
+        --nm "$gate_bin/arm-none-eabi-nm" \
+        --objdump "$gate_bin/arm-none-eabi-objdump"
+fi
+
 # issue #143 -- the `camera` table this board builds: the shared command
 # (shell/cmds/cmd_camera.c) against this board's REAL svc/camera_svc_config.h,
 # over the shared stub adapter.  A board subcommand that reuses a shared name is

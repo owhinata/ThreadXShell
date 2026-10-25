@@ -329,7 +329,7 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
 ## ドキュメント
 
 - **`README.md` と各モジュールの README は英語で書く**。変更と同時に更新する。
-- リポジトリ内ファイルの記号は **基本 ASCII**。絵文字は使わない（強調マーカーは `[!]`）。
+- **ソースコード（C / H / CMake / スクリプト / ldscript とコメント）に絵文字を入れない**（ASCII、強調は `[!]`）。README・Issue は可。
 
 ### [!] ボード固有の説明は `boards/<board>/README.md` に書く
 

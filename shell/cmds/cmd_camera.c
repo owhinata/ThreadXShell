@@ -1,0 +1,707 @@
+/*
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 ThreadX Shell Project
+ */
+/**
+ * @file    cmd_camera.c
+ * @brief   The one `camera` command, shared by every board with a camera
+ *          (issue #143, epic #141).
+ *
+ *   camera probe               power up and read the sensor's identity
+ *   camera on | off            module power                  (HAS_POWER)
+ *   camera info                driver / sensor state         (HAS_INFO)
+ *   camera capture [test]      snapshot one frame + its statistics
+ *   camera save <medium> <p>   write the frame to a file     (HAS_SAVE)
+ *   camera send [name]         the frame to the PC over YMODEM (HAS_SEND)
+ *   camera stream start [test] | stop | stats
+ *   ...                        the board's own subcommands, appended
+ *                              (CAMERA_SVC_BOARD_SUBCMDS)
+ *
+ * The same layering as `nn` (shell/cmds/cmd_nn.c): this file owns the frame --
+ * the grammar, the usage, what a refusal looks like, the holders line, the
+ * save / send loops -- and speaks only svc/camera_svc.h.  Each board puts its
+ * camera behind that contract in boards/<board>/port/camera/camera_svc_<b>.c,
+ * and the two things only the shell layer can do (send over YMODEM, resolve a
+ * FileX medium) come from the board's cmds/ through shell/cmds/
+ * camera_cmd_board.h.
+ *
+ * [!] THIS FILE OWNS NO STORAGE.  Line buffers, results and frame cursors are
+ * on the caller's stack; whatever has to outlive a call is the adapter's.  A
+ * static here would be memory no board placed and that two consoles share.
+ *
+ * [!] NO BOARD IN HERE: no `#ifdef <BOARD>`, no board header, no peripheral.
+ * What a board HAS comes from its camera_svc_config.h as properties
+ * (CAMERA_SVC_HAS_*), and a subcommand a board does not have is not
+ * registered at all, so `help camera` describes this board and not the family.
+ *
+ * [!] NOTHING IS RELEASED HERE ON THE STRENGTH OF A RESULT.  Cleanup is the
+ * adapter's (svc/camera_svc.h); this file prints what happened and returns.
+ */
+#include "cli.h"
+
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+#include "camera_svc.h"
+#include "camera_svc_config.h"   /* the board says what it has */
+#include "camera_cmd_board.h"
+
+/*
+ * [!] EVERY CAPABILITY IS DECLARED BY THE BOARD, to 0 or 1.  Unlike nn_svc's
+ * "undefined means absent", a missing one here is a build error: the
+ * camera_svc_config.h files say so of themselves, and a macro that silently
+ * defaulted would let a board lose `camera save` by a typo.
+ */
+#if !defined(CAMERA_SVC_HAS_POWER) || !defined(CAMERA_SVC_HAS_INFO) ||     \
+    !defined(CAMERA_SVC_HAS_TEST) || !defined(CAMERA_SVC_HAS_SAVE) ||       \
+    !defined(CAMERA_SVC_HAS_SEND) || !defined(CAMERA_SVC_BOARD_SUBCMDS) || \
+    !defined(CAMERA_SVC_HELP)
+#error "camera_svc_config.h must define every CAMERA_SVC_HAS_*, CAMERA_SVC_HELP and CAMERA_SVC_BOARD_SUBCMDS"
+#endif
+#if CAMERA_SVC_HAS_SAVE && !defined(CAMERA_SVC_SAVE_MEDIA)
+#error "CAMERA_SVC_HAS_SAVE needs CAMERA_SVC_SAVE_MEDIA: say which media `camera save` takes"
+#endif
+#ifndef CAMERA_SVC_BOARD_DECLS
+#define CAMERA_SVC_BOARD_DECLS
+#endif
+
+#if CAMERA_SVC_HAS_SAVE
+#include "fs_cmd_core.h"         /* struct fs_device, fs_core_mount, FileX */
+#endif
+#if CAMERA_SVC_HAS_SEND
+#include "ymodem.h"              /* struct ym_source */
+#endif
+
+/* The board's own subcommand handlers (see CAMERA_SVC_BOARD_SUBCMDS). */
+CAMERA_SVC_BOARD_DECLS
+
+/* ---- saying what happened ------------------------------------------------ */
+
+/* The words for a status a board gave no sentence for. */
+static const char *cam_status_name(int status)
+{
+	switch (status) {
+	case CAMERA_SVC_ERR_ARG:      return "bad argument";
+	case CAMERA_SVC_ERR_NOSUP:    return "not supported on this board";
+	case CAMERA_SVC_ERR_STATE:    return "not in a state to do that";
+	case CAMERA_SVC_ERR_BUSY:     return "busy -- try again";
+	case CAMERA_SVC_ERR_IN_USE:   return "still in use";
+	case CAMERA_SVC_ERR_NO_FRAME: return "no captured frame";
+	case CAMERA_SVC_ERR_HW:       return "sensor or interface error";
+	case CAMERA_SVC_ERR_TIMEOUT:  return "timed out (it may still finish)";
+	case CAMERA_SVC_ERR_LOST:     return "lost -- only a reset clears it";
+	default:                      return "unknown error";
+	}
+}
+
+/* "still in use: nn[, ...]" for a refused stop or power-off (issue #142 D8):
+   the operator's request changed nothing, and these are why. */
+static void cam_print_in_use(struct cli_instance *sh,
+                             const struct camera_op_result *res)
+{
+	char list[64];
+	size_t len = 0;
+	unsigned n = res->nusers;
+
+	if (n > CAMERA_SVC_USERS_MAX)
+		n = CAMERA_SVC_USERS_MAX;
+	list[0] = '\0';
+	for (unsigned i = 0; i < n; i++) {
+		const char *name = res->users[i] ? res->users[i] : "?";
+		size_t sep = i ? 2u : 0u;
+		size_t w = strlen(name);
+
+		if (len + sep + w >= sizeof list)
+			break;
+		if (sep)
+			memcpy(list + len, ", ", sep);
+		memcpy(list + len + sep, name, w);
+		len += sep + w;
+		list[len] = '\0';
+	}
+	cli_error(sh, "camera: still in use: %s\r\n", list);
+}
+
+/* A failed result, in the board's words when it gave any.  @p suffix follows
+   the sentence ("" or " (file left partial)"). */
+static void cam_print_fail(struct cli_instance *sh,
+                           const struct camera_op_result *res,
+                           const char *suffix)
+{
+	if (res->status == CAMERA_SVC_ERR_IN_USE) {
+		cam_print_in_use(sh, res);
+		return;
+	}
+	cli_error(sh, "camera: %s%s\r\n",
+	          res->detail[0] ? res->detail : cam_status_name(res->status),
+	          suffix);
+}
+
+/*
+ * The writer a board's report goes through (svc/camera_svc.h).  cli_write()
+ * takes the whole piece under ONE output bracket, as one cli_print() did when
+ * the board printed for itself: a line split across two calls can have a
+ * background job's output land in the middle of it.  No copy, so no chunk
+ * buffer on the console's stack either.
+ */
+static int cam_write(void *ctx, const char *s, size_t len)
+{
+	struct cli_instance *sh = (struct cli_instance *)ctx;
+
+	if (sh == NULL || (s == NULL && len != 0u))
+		return -1;
+	if (len == 0u)
+		return 0;
+	return (cli_write(sh, s, len) < 0) ? -1 : (int)len;
+}
+
+/* The cancellation question a board's long walk asks (svc/camera_svc.h).  It
+   is also what lets the console read the Ctrl+C at all: input is polled only
+   while somebody asks. */
+static int cam_cancelled(void *ctx)
+{
+	return cli_cancel_requested((struct cli_instance *)ctx) ? 1 : 0;
+}
+
+/* ---- power and identity --------------------------------------------------- */
+
+static int cmd_camera_probe(struct cli_instance *sh, int argc, char **argv)
+{
+	struct camera_op_result res;
+
+	(void)argc;
+	(void)argv;
+	camera_svc_probe(&res, cam_write, sh);
+	if (res.status != CAMERA_SVC_OK) {
+		cam_print_fail(sh, &res, "");
+		return 1;
+	}
+	return 0;
+}
+
+#if CAMERA_SVC_HAS_POWER
+static int cmd_camera_on(struct cli_instance *sh, int argc, char **argv)
+{
+	struct camera_op_result res;
+
+	(void)argc;
+	(void)argv;
+	camera_svc_on(&res, cam_write, sh);
+	if (res.status != CAMERA_SVC_OK) {
+		cam_print_fail(sh, &res, "");
+		return 1;
+	}
+	return 0;
+}
+
+/* How long `camera off` waits for the stream it stopped, in console ticks. */
+#define CAM_OFF_WAIT_TICKS 200u
+
+static int cmd_camera_off(struct cli_instance *sh, int argc, char **argv)
+{
+	struct camera_svc_state st;
+	struct camera_op_result res;
+
+	(void)argc;
+	(void)argv;
+
+	/* Power cannot be cut mid-stream (it wrecks the interface), so the
+	   operator's own stream is stopped first and waited for: the producer
+	   tears it down (every subscriber gets a close()), then the power goes.
+	   The board re-checks under its own lock before it cuts anything. */
+	/* Only "is it streaming" is needed here; a state the board could not
+	   sample still answers that, and the power-off below reports. */
+	camera_svc_stream_state(&st, &res);
+	if (st.streaming) {
+		uint32_t gen = 0u;
+		unsigned i;
+
+		/* Refused first, announced after: a stop another holder refuses
+		   changed nothing, so nothing is "stopping". */
+		(void)camera_svc_stream_stop(&res, &gen);
+		if (res.status == CAMERA_SVC_ERR_IN_USE) {
+			cam_print_fail(sh, &res, "");
+			return 1;
+		}
+		cli_print(sh, "camera: stopping stream before power off\r\n");
+		for (i = 0; i < CAM_OFF_WAIT_TICKS && !camera_svc_stream_ended(gen); i++)
+			cli_sleep(sh, 1);
+		if (!camera_svc_stream_ended(gen)) {
+			cli_error(sh, "camera: stream did not stop; retry 'camera off'\r\n");
+			return 1;
+		}
+	}
+
+	camera_svc_off(&res, cam_write, sh);
+	if (res.status != CAMERA_SVC_OK) {
+		cam_print_fail(sh, &res, "");
+		return 1;
+	}
+	return 0;
+}
+#endif /* CAMERA_SVC_HAS_POWER */
+
+#if CAMERA_SVC_HAS_INFO
+static int cmd_camera_info(struct cli_instance *sh, int argc, char **argv)
+{
+	struct camera_op_result res;
+
+	(void)argc;
+	(void)argv;
+	camera_svc_info(&res, cam_write, sh);
+	if (res.status != CAMERA_SVC_OK) {
+		cam_print_fail(sh, &res, "");
+		return 1;
+	}
+	return 0;
+}
+#endif
+
+/* ---- the `test` word ----------------------------------------------------- */
+
+/*
+ * Parse an optional `test`.  0 = no test, 1 = test, -1 = refused (printed).
+ * A board without a test pattern still recognises the word, so the refusal says
+ * why instead of "unknown option" -- the same shape as `nn stream start`.
+ */
+static int cam_parse_test(struct cli_instance *sh, const char *arg,
+                          const char *unknown_fmt, const char *what)
+{
+	if (strcmp(arg, "test") != 0) {
+		cli_error(sh, unknown_fmt, arg);
+		return -1;
+	}
+#if CAMERA_SVC_HAS_TEST
+	(void)what;
+	return 1;
+#else
+	cli_error(sh, "camera: this board has no test pattern to %s\r\n", what);
+	return -1;
+#endif
+}
+
+#if CAMERA_SVC_HAS_TEST
+#define CAM_CAPTURE_UNKNOWN "camera: unknown option '%s' (try: test)\r\n"
+#define CAM_STREAM_UNKNOWN  "camera: bad option '%s' (test)\r\n"
+#else
+#define CAM_CAPTURE_UNKNOWN "camera: unknown option '%s'\r\n"
+#define CAM_STREAM_UNKNOWN  "camera: bad option '%s'\r\n"
+#endif
+
+/* ---- one-shot capture ----------------------------------------------------- */
+
+static int cmd_camera_capture(struct cli_instance *sh, int argc, char **argv)
+{
+	struct camera_svc_capture_report rep;
+	struct camera_op_result res;
+	int test = 0;
+
+	if (argc > 1) {
+		test = cam_parse_test(sh, argv[1], CAM_CAPTURE_UNKNOWN, "capture");
+		if (test < 0)
+			return 1;
+	}
+
+	cli_print(sh, "camera: capturing %s frame ...\r\n",
+	          test ? "colorbar test" : "live");
+	camera_svc_capture(test, &res);
+	if (res.status != CAMERA_SVC_OK) {
+		cam_print_fail(sh, &res, "");
+		return 1;
+	}
+	camera_svc_capture_report(&rep, &res, cam_write, cam_cancelled, sh);
+	if (res.status == CAMERA_SVC_ERR_CANCELLED)
+		return 1;                 /* Ctrl+C: the core prints ^C */
+	if (res.status != CAMERA_SVC_OK) {
+		cam_print_fail(sh, &res, "");
+		return 1;
+	}
+	/* The first bytes, from the same capture as the board's lines -- a quick
+	   eyeball check. */
+	if (rep.head_len != 0u) {
+		uint32_t n = rep.head_len;
+
+		if (n > CAMERA_SVC_HEAD_MAX)
+			n = CAMERA_SVC_HEAD_MAX;
+		cli_print(sh, "bytes[0..%lu]:\r\n", (unsigned long)(n - 1u));
+		cli_hexdump(sh, rep.head, n);
+	}
+	return 0;
+}
+
+/* ---- reading the last capture out (save / send) -------------------------- */
+
+#if CAMERA_SVC_HAS_SAVE || CAMERA_SVC_HAS_SEND
+/* An open frame's failure, in the board's words.  @p res is the caller's, so
+   one result serves the whole command (it is ~200 B of console stack). */
+static int cam_open_frame(struct cli_instance *sh, struct camera_svc_frame *f,
+                          struct camera_op_result *res)
+{
+	camera_svc_frame_open(f, res);
+	if (res->status != CAMERA_SVC_OK) {
+		cam_print_fail(sh, res, "");
+		return -1;
+	}
+	return 0;
+}
+#endif
+
+#if CAMERA_SVC_HAS_SAVE
+/*
+ * Bounded scratch for `save`: the frame is streamed in fixed chunks so no
+ * full-frame staging buffer is needed.  On the console's stack.
+ */
+#define CAM_SAVE_CHUNK 512u
+
+/* The media list, spelled three ways from the board's one X-macro. */
+#define CAM_MEDIUM_FIRST_(s) s
+#define CAM_MEDIUM_BAR_(s)   "|" s
+#define CAM_MEDIUM_OR_(s)    " or " s
+#define CAM_SAVE_MEDIA_BAR   CAMERA_SVC_SAVE_MEDIA(CAM_MEDIUM_FIRST_, CAM_MEDIUM_BAR_)
+#define CAM_SAVE_MEDIA_OR    CAMERA_SVC_SAVE_MEDIA(CAM_MEDIUM_FIRST_, CAM_MEDIUM_OR_)
+
+/* The PC-side conversion hint for the saved frame's format. */
+static void cam_convert_hint(struct cli_instance *sh,
+                             const struct camera_svc_frame *f, const char *path)
+{
+	if (f->convert == NULL)
+		cli_print(sh, "PC: %s is a JPEG stream -- open it directly\r\n", path);
+	else
+		cli_print(sh, "PC: python3 %s --width %u --height %u %s out.png\r\n",
+		          f->convert, (unsigned)f->width, (unsigned)f->height, path);
+}
+
+/*
+ * Write the open frame to <path> on @p dev, raw in its format, chunk by chunk.
+ * Runs under the medium's shared op slot (the same gate as the fs/sd command
+ * bodies), so format/umount cannot yank the media mid-save.  A read that finds
+ * the frame replaced fails the save rather than mixing two frames -- the
+ * adapter checks and copies in one step -- and the file is left partial.
+ */
+static int cam_save_body(const struct fs_device *dev, struct cli_instance *sh,
+                         const struct camera_svc_frame *f, const char *path,
+                         struct camera_op_result *res)
+{
+	uint8_t buf[CAM_SAVE_CHUNK];
+	FX_MEDIA *media = fs_core_mount(dev, sh);
+	FX_FILE file;
+	uint32_t off;
+	UINT status;
+
+	if (media == NULL)
+		return 1;
+
+	/* [!] THE FRAME IS ASKED AGAIN AFTER THE MOUNT AND BEFORE THE FILE IS
+	   TOUCHED.  The mount can take a while, and another console may replace
+	   or drop the frame meanwhile (`camera res`, a failed capture); finding
+	   that out on the first chunk would be after the create/truncate, with an
+	   existing file already emptied.  One byte through the same read, so the
+	   validity and the generation are the read's own. */
+	camera_svc_frame_read(f, 0u, buf, 1u, res);
+	if (res->status != CAMERA_SVC_OK) {
+		cam_print_fail(sh, res, "");
+		return 1;
+	}
+
+	status = fx_file_create(media, (CHAR *)path);
+	if (status != FX_SUCCESS && status != FX_ALREADY_CREATED) {
+		cli_error(sh, "camera: create %s: %s (0x%02x)\r\n",
+		          path, fs_strerror(status), status);
+		return 1;
+	}
+	status = fx_file_open(media, &file, (CHAR *)path, FX_OPEN_FOR_WRITE);
+	if (status != FX_SUCCESS) {
+		cli_error(sh, "camera: open %s: %s (0x%02x)\r\n",
+		          path, fs_strerror(status), status);
+		return 1;
+	}
+
+	status = fx_file_truncate(&file, 0);
+	for (off = 0; status == FX_SUCCESS && off < f->len; ) {
+		uint32_t n = (f->len - off < CAM_SAVE_CHUNK) ? f->len - off
+		                                            : CAM_SAVE_CHUNK;
+
+		camera_svc_frame_read(f, off, buf, n, res);
+		if (res->status != CAMERA_SVC_OK) {
+			(void)fx_file_close(&file);
+			cam_print_fail(sh, res, " (file left partial)");
+			return 1;
+		}
+		status = fx_file_write(&file, buf, n);
+		off += n;
+		if (cli_cancel_requested(sh)) {
+			(void)fx_file_close(&file);
+			cli_error(sh, "camera: cancelled (file left partial)\r\n");
+			return 1;
+		}
+	}
+	(void)fx_file_close(&file);
+	if (status == FX_SUCCESS)
+		status = fx_media_flush(media);
+
+	if (status != FX_SUCCESS) {
+		cli_error(sh, "camera: write failed: %s (0x%02x)\r\n",
+		          fs_strerror(status), status);
+		return 1;
+	}
+	cli_print(sh, "wrote %lu bytes (%ux%u %s) to %s:%s\r\n",
+	          (unsigned long)f->len, (unsigned)f->width, (unsigned)f->height,
+	          f->format, dev->name, path);
+	cam_convert_hint(sh, f, path);
+	return 0;
+}
+
+static int cmd_camera_save(struct cli_instance *sh, int argc, char **argv)
+{
+	const struct fs_device *dev;
+	struct camera_svc_frame f;
+	struct camera_op_result res;
+	UINT status;
+	int rc;
+
+	(void)argc;
+
+	dev = camera_board_medium(argv[1]);
+	if (dev == NULL) {
+		cli_error(sh, "camera: unknown medium '%s' (" CAM_SAVE_MEDIA_OR ")\r\n",
+		          argv[1]);
+		return 1;
+	}
+	/* The frame first, the medium after: no file is created when there is
+	   nothing to put in it, and "no captured frame" comes before any medium
+	   error, as it always has. */
+	if (cam_open_frame(sh, &f, &res) != 0)
+		return 1;
+
+	status = dev->op_begin();
+	if (status != FX_SUCCESS) {
+		cli_error(sh, "camera: %s: %s\r\n", dev->name, fs_strerror(status));
+		camera_svc_frame_close(&f);
+		return 1;
+	}
+	rc = cam_save_body(dev, sh, &f, argv[2], &res);
+	dev->op_end();
+	camera_svc_frame_close(&f);
+	return rc;
+}
+#endif /* CAMERA_SVC_HAS_SAVE */
+
+#if CAMERA_SVC_HAS_SEND
+/* The YMODEM source over the open frame: sequential, each chunk read (checked
+   and copied in one step by the adapter) straight into ymodem's block. */
+struct cam_send_cursor {
+	const struct camera_svc_frame *f;
+	struct camera_op_result *res;   /* the command's one result */
+	uint32_t off;
+};
+
+static int cam_send_read(void *ctx, uint8_t *dst, uint32_t want, uint32_t *got)
+{
+	struct cam_send_cursor *c = (struct cam_send_cursor *)ctx;
+	uint32_t n;
+
+	if (c->off >= c->f->len) {
+		*got = 0;
+		return 0;                       /* EOF */
+	}
+	n = c->f->len - c->off;
+	if (want < n)
+		n = want;
+	camera_svc_frame_read(c->f, c->off, dst, n, c->res);
+	if (c->res->status != CAMERA_SVC_OK)
+		return -1;                      /* frame changed mid-send, or gone */
+	c->off += n;
+	*got = n;
+	return 0;
+}
+
+static int cmd_camera_send(struct cli_instance *sh, int argc, char **argv)
+{
+	struct camera_svc_frame f;
+	struct camera_op_result res;
+	struct cam_send_cursor c;
+	struct ym_source src;
+	int rc;
+
+	if (cam_open_frame(sh, &f, &res) != 0)
+		return 1;
+	c.f = &f;
+	c.res = &res;
+	c.off = 0u;
+	src.ctx  = &c;
+	src.name = (argc >= 2) ? argv[1] : "frame.raw";
+	src.size = f.len;
+	src.read = cam_send_read;
+	rc = camera_board_send(sh, &src);
+	camera_svc_frame_close(&f);
+	return rc;
+}
+#endif /* CAMERA_SVC_HAS_SEND */
+
+/* ---- the stream ----------------------------------------------------------- */
+
+static int cmd_stream_start(struct cli_instance *sh, int argc, char **argv)
+{
+	struct camera_op_result res;
+	int test = 0, already = 0;
+	int i;
+
+	/* No --frames / --secs (issue #142): a stream runs while somebody holds
+	   it, and only `nn stream start --frames` bounds anything. */
+	for (i = 1; i < argc; i++) {
+		int t = cam_parse_test(sh, argv[i], CAM_STREAM_UNKNOWN, "stream");
+
+		if (t < 0)
+			return 1;
+		test = 1;
+	}
+
+	camera_svc_stream_start(test, &res, &already, cam_write, sh);
+	if (res.status != CAMERA_SVC_OK) {
+		cam_print_fail(sh, &res, "");
+		return 1;
+	}
+	if (already) {
+		cli_print(sh, "camera: streaming %s already running\r\n",
+		          test ? "colorbar" : "live");
+		return 0;
+	}
+	cli_print(sh, "camera: streaming %s started",
+	          test ? "colorbar" : "live");
+	cli_print(sh, " (`camera stream stats` / `stop`)\r\n");
+	return 0;
+}
+
+static int cmd_stream_stop(struct cli_instance *sh, int argc, char **argv)
+{
+	struct camera_op_result res;
+	uint32_t gen = 0u;
+	int what;
+
+	(void)argc;
+	(void)argv;
+	what = camera_svc_stream_stop(&res, &gen);
+	if (res.status != CAMERA_SVC_OK) {
+		cam_print_fail(sh, &res, "");
+		return 1;
+	}
+	if (what == CAMERA_SVC_STOP_DONE)
+		cli_print(sh, "camera: stream stopped\r\n");
+	else
+		cli_print(sh, "camera: stream stop requested\r\n");
+	return 0;
+}
+
+/* The shared head of `camera stream stats`: the state and who holds the
+   stream (issue #142), from the sample the board's lines are written from. */
+static void cam_stats_head(void *ctx, const struct camera_svc_state *st)
+{
+	struct cli_instance *sh = (struct cli_instance *)ctx;
+	unsigned n;
+
+	if (st->streaming)
+		cli_print(sh, "state:     streaming\r\n");
+	else if (st->stop_reason != NULL)
+		cli_print(sh, "state:     stopped (%s)\r\n", st->stop_reason);
+	else
+		cli_print(sh, "state:     stopped\r\n");
+
+	n = (st->nusers < CAMERA_SVC_USERS_MAX) ? st->nusers : CAMERA_SVC_USERS_MAX;
+	cli_print(sh, "holders:  ");
+	if (n == 0u)
+		cli_print(sh, " none");
+	for (unsigned i = 0; i < n; i++)
+		cli_print(sh, "%s %s", i ? "," : "",
+		          st->users[i] ? st->users[i] : "?");
+	if (st->lost)
+		cli_print(sh, "  (%d lost when the stream ended)", (int)st->lost);
+	cli_print(sh, "\r\n");
+}
+
+static int cmd_stream_stats(struct cli_instance *sh, int argc, char **argv)
+{
+	struct camera_op_result res;
+
+	(void)argc;
+	(void)argv;
+
+	/* One sample for the state and the numbers (svc/camera_svc.h). */
+	camera_svc_stream_report(&res, cam_write, cam_stats_head, sh);
+	if (res.status != CAMERA_SVC_OK) {
+		cam_print_fail(sh, &res, "");
+		return 1;
+	}
+	return 0;
+}
+
+static int cmd_camera_stream(struct cli_instance *sh, int argc, char **argv)
+{
+	if (argc > 1)
+		cli_error(sh, "camera: unknown stream subcommand '%s'\r\n", argv[1]);
+#if CAMERA_SVC_HAS_TEST
+	cli_print(sh, "usage: camera stream <start [test] | stop | stats>\r\n");
+#else
+	cli_print(sh, "usage: camera stream <start | stop | stats>\r\n");
+#endif
+	return argc > 1 ? 1 : 0;
+}
+
+/* ---- registration -------------------------------------------------------- */
+
+/*
+ * [!] `test` IS ACCEPTED BY THE GRAMMAR EVEN WITHOUT A TEST PATTERN (one
+ * optional word), so the refusal can say why; only the help and the usage
+ * spelling drop it.
+ */
+#if CAMERA_SVC_HAS_TEST
+#define CAM_CAPTURE_HELP  "snapshot the current mode + stats ('test' = colorbar)"
+#define CAM_TEST_USAGE    "[test]"
+#define CAM_START_HELP    "begin continuous capture (test = colorbar)"
+#else
+#define CAM_CAPTURE_HELP  "snapshot the current mode + stats"
+#define CAM_TEST_USAGE    NULL
+#define CAM_START_HELP    "begin continuous capture"
+#endif
+
+CLI_SUBCMD_SET_CREATE(camera_stream_subcmds,
+	CLI_CMD_ARG_USAGE(start, NULL, CAM_START_HELP, CAM_TEST_USAGE,
+	                  cmd_stream_start, 1, 1),
+	CLI_CMD(stop,  NULL, "stop the running stream", cmd_stream_stop),
+	CLI_CMD(stats, NULL, "FPS / frame / overrun counters", cmd_stream_stats),
+	CLI_SUBCMD_SET_END);
+
+/*
+ * [!] A SUBCOMMAND A BOARD DOES NOT HAVE IS NOT REGISTERED, rather than
+ * registered as a stub that answers "not supported" (the same rule as `nn`).
+ * The order is the shared one -- probe / on / off / info / capture / save /
+ * send / stream -- and the board's own subcommands come last.
+ */
+CLI_SUBCMD_SET_CREATE(camera_subcmds,
+	CLI_CMD(probe, NULL, "power up + read the sensor chip ID", cmd_camera_probe),
+#if CAMERA_SVC_HAS_POWER
+	CLI_CMD(on,    NULL, "power on the camera module (bring-up, no ID report)",
+	        cmd_camera_on),
+	CLI_CMD(off,   NULL, "cut camera module power", cmd_camera_off),
+#endif
+#if CAMERA_SVC_HAS_INFO
+	CLI_CMD(info,  NULL, "driver / sensor state", cmd_camera_info),
+#endif
+	CLI_CMD_ARG_USAGE(capture, NULL, CAM_CAPTURE_HELP, CAM_TEST_USAGE,
+	                  cmd_camera_capture, 1, 1),
+#if CAMERA_SVC_HAS_SAVE
+	CLI_CMD_ARG_USAGE(save, NULL,
+	                  "write frame raw <" CAM_SAVE_MEDIA_BAR "> <path> (format per mode)",
+	                  CAM_SAVE_MEDIA_BAR " <path>", cmd_camera_save, 3, 0),
+#endif
+#if CAMERA_SVC_HAS_SEND
+	CLI_CMD_ARG_USAGE(send, NULL, "stream the frame to the PC over YMODEM [name]",
+	                  "[name]", cmd_camera_send, 1, 1),
+#endif
+	CLI_CMD_ARG_USAGE(stream, camera_stream_subcmds,
+	                  "continuous capture (start/stop/stats)",
+	                  "[start|stop|stats]", cmd_camera_stream, 1, 1),
+	CAMERA_SVC_BOARD_SUBCMDS
+	CLI_SUBCMD_SET_END);
+
+CLI_CMD_REGISTER(camera, camera_subcmds, CAMERA_SVC_HELP, NULL, 1, 0);

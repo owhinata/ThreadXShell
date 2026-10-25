@@ -456,13 +456,16 @@ static void cam_capture_walk(struct camera_op_result *res,
 	camera_res_ok(res);
 }
 
-void camera_svc_capture(int test, struct camera_op_result *res,
-                        camera_svc_write_fn write, void *ctx)
+void camera_svc_capture(int test, struct camera_svc_capture_report *rep,
+                        struct camera_op_result *res,
+                        camera_svc_write_fn write,
+                        int (*cancelled)(void *ctx), void *ctx)
 {
 	struct camera_out o = { write, ctx, 0 };
 	struct cam_report_rec r;
 	int rc;
 
+	(void)cancelled;
 	if (!cam_psram_take(res))
 		return;   /* refused before it is announced, as before */
 	/* Every capture pays for the warm-up frames (~1 s at 15).  The FIRST one
@@ -480,8 +483,13 @@ void camera_svc_capture(int test, struct camera_op_result *res,
 	}
 	cam_capture_walk(res, &r);   /* still under the capture's guard */
 	cam_psram_give();
-	if (res->status == CAMERA_SVC_OK)
+	if (res->status == CAMERA_SVC_OK) {
 		cam_report_store(&r);
+		/* Every capture lets the first CAMERA_WARM_FRAMES go (decision D2),
+		   inside camera_capture() and -- as before -- not cancellable. */
+		rep->warmup = CAMERA_WARM_FRAMES;
+		rep->warmup_unit = (uint8_t)CAMERA_SVC_WARMUP_FRAMES;
+	}
 }
 
 /*
@@ -504,8 +512,6 @@ void camera_svc_capture_report(struct camera_svc_capture_report *rep,
 
 	(void)cancelled;
 	rep->head_len = 0u;               /* this board prints no head dump */
-	rep->warmup = CAMERA_WARM_FRAMES; /* every capture discards these   */
-	rep->warmup_unit = (uint8_t)CAMERA_SVC_WARMUP_FRAMES;
 
 	if (!cam_psram_take(res))
 		return;
@@ -523,9 +529,9 @@ void camera_svc_capture_report(struct camera_svc_capture_report *rep,
 	}
 	camera_res_ok(res);
 
-	camera_out(&o, "frame: %ux%u %s (%lu bytes, %u warm-up frames)\r\n",
+	camera_out(&o, "frame: %ux%u %s (%lu bytes)\r\n",
 	           (unsigned)r.m.width, (unsigned)r.m.height, r.m.format,
-	           (unsigned long)r.m.frame_bytes, (unsigned)CAMERA_WARM_FRAMES);
+	           (unsigned long)r.m.frame_bytes);
 	for (int k = 0; k < 3; k++)
 		camera_out(&o, "%s: min %3lu  max %3lu  mean %3lu\r\n", chan[k],
 		           (unsigned long)r.st.min[k], (unsigned long)r.st.max[k],

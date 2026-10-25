@@ -221,26 +221,10 @@ void camera_svc_info(struct camera_op_result *res,
 
 /* ---- one-shot capture ----------------------------------------------------- */
 
-/**
- * Capture one frame into the board's capture buffer, replacing the last one.
- * @p test != 0 asks for the sensor's test pattern (CAMERA_SVC_HAS_TEST; a
- * board without one answers CAMERA_SVC_ERR_NOSUP).
- *
- * Whatever warm-up the board pays (frames discarded, or a settle time) is
- * part of the capture and is reported by camera_svc_capture_report().
- *
- * The board writes its own "capturing ..." line through @p write before the
- * capture starts -- after any refusal it can give at once (wio: the OCTOSPI1
- * guard), so a refused capture is not announced -- because what a capture
- * costs is the board's to say (wio: "~1 s of warm-up").
- */
-void camera_svc_capture(int test, struct camera_op_result *res,
-                        camera_svc_write_fn write, void *ctx);
-
 /** Most leading bytes of a frame a capture report hands back. */
 #define CAMERA_SVC_HEAD_MAX 32u
 
-/** How a board's warm-up is counted. */
+/** How a board's warm-up is counted (camera_svc_capture() says). */
 enum camera_svc_warmup_unit {
 	CAMERA_SVC_WARMUP_NONE = 0,   /**< nothing was paid                   */
 	CAMERA_SVC_WARMUP_FRAMES,     /**< whole frames read and discarded    */
@@ -256,10 +240,37 @@ struct camera_svc_capture_report {
 };
 
 /**
+ * Capture one frame into the board's capture buffer, replacing the last one.
+ * @p test != 0 asks for the sensor's test pattern (CAMERA_SVC_HAS_TEST; a
+ * board without one answers CAMERA_SVC_ERR_NOSUP).
+ *
+ * [!] WHAT THE CAPTURE PAID TO WARM UP IS THE CAPTURE'S ANSWER (issue #143):
+ * it fills @p rep's warmup and warmup_unit -- frames let go (wio: every
+ * capture's 15; Grove: those still within its count of the bring-up), or the
+ * time slept before the snapshot (f746, ms), or CAMERA_SVC_WARMUP_NONE -- and
+ * camera_svc_capture_report() leaves them alone.  On the caller's stack, so
+ * the figure is this capture's and no other console's.  The shared command
+ * prints it after the board's lines.
+ *
+ * The board writes its own "capturing ..." line through @p write before the
+ * capture starts -- after any refusal it can give at once (wio: the OCTOSPI1
+ * guard), so a refused capture is not announced -- because what a capture
+ * costs is the board's to say (wio: "~1 s of warm-up").
+ *
+ * A board whose warm-up is a run of frames asks @p cancelled between them
+ * (Grove); when it says yes the capture ends CAMERA_SVC_ERR_CANCELLED and the
+ * shared command prints nothing more.  @p cancelled gets the same @p ctx.
+ */
+void camera_svc_capture(int test, struct camera_svc_capture_report *rep,
+                        struct camera_op_result *res,
+                        camera_svc_write_fn write,
+                        int (*cancelled)(void *ctx), void *ctx);
+
+/**
  * Report on the LAST capture: write the board's statistics lines and hand back
- * its leading bytes (the shared command hexdumps them, after the lines) and
- * the warm-up it paid.  Statistics, head and warm-up all come from the same
- * capture generation; if the frame is replaced part way the report fails
+ * its leading bytes (the shared command hexdumps them, after the lines).  It
+ * does NOT touch @p rep's warm-up, which camera_svc_capture() filled.
+ * Statistics and head come from the same capture generation; if the frame is replaced part way the report fails
  * rather than mixing two frames (a head that cannot be read from that
  * generation comes back with head_len 0).
  *

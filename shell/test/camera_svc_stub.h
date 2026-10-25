@@ -26,6 +26,9 @@ struct camera_stub {
 	unsigned nholders;
 	uint32_t lost;
 	uint32_t head_len;
+	uint32_t warmup;                  /* what the capture paid ...       */
+	uint8_t warmup_unit;              /* ... and in what                 */
+	int capture_cancels;              /* the capture asks for a cancel   */
 	uint32_t frame_len;
 	int read_fail;                    /* every read fails               */
 	int read_fail_at;                 /* the Nth read (1-based) and on  */

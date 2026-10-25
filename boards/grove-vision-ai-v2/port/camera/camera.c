@@ -153,7 +153,9 @@ _Static_assert(CAM_PRODUCER_STACK >= 1024u,
  *     (CAM_STOP_JOIN_TICKS, 6 s), and
  *   - a one-shot capture, which holds it for a bring-up (the 100 ms Timer0
  *     delivery probe dominates) plus CAM_FRAME_TIMEOUT_TICKS (2 s) plus the
- *     quiesce -- under 3 s.
+ *     quiesce -- under 3 s.  Since issue #143 a capture may take several
+ *     frames to let the sensor settle, but they share that ONE 2 s deadline
+ *     (cam_capture_one()), so the hold is still bring-up + 2 s + a quiesce.
  *
  * So the join dominates, and 8 s clears it with room for scheduling.  Like the
  * join deadline this is NOT a correctness parameter: reaching it means a holder
@@ -233,11 +235,14 @@ static volatile int32_t  cam_err;
 static volatile uint8_t  cam_frame_ready;
 static volatile uint32_t cam_evt_benign;
 
-/* Counters (producer thread only, except cam_evt_benign above). */
+/* Counters (the producer thread, or the one-shot capture on the shell thread
+ * under the API mutex while no producer runs -- never both; except
+ * cam_evt_benign above). */
 static uint32_t cam_frames;
 /* Frames the sensor delivered since the last successful bring-up (issue
  * #115); see camera_frames_since_bringup().  Zeroed by cam_bringup() (no
- * stream running), counted by the producer only, saturating. */
+ * stream running), counted by the producer and, since issue #143, by the
+ * one-shot capture (camera_capture_settled()), saturating. */
 static volatile uint32_t cam_frames_since_bringup;
 static uint32_t cam_timeouts;
 static uint32_t cam_retries;
@@ -571,6 +576,7 @@ const char *camera_strerror(int rc)
 	case CAM_ERR_NO_FRAME:   return "no frame captured yet";
 	case CAM_ERR_BUSY:       return "camera busy";
 	case CAM_ERR_LOCKED:     return "the camera API stayed locked";
+	case CAM_ERR_CANCELLED:  return "cancelled";
 	default:                 return "unknown error";
 	}
 }
@@ -1908,11 +1914,16 @@ uint32_t camera_frames_since_bringup(void)
  * what a producer restart does with it in that window.  Passing it in means it
  * cannot be set before the answer.
  */
-static int cam_capture_one(uint8_t raw)
+static int cam_capture_one(uint8_t raw, uint32_t warm, uint32_t *dropped,
+                           int (*cancelled)(void *ctx), void *ctx)
 {
 	enum cam_bus_owner owner;
-	uint32_t waited;
+	ULONG start;
+	uint32_t let_go = 0u;
 	int rc;
+
+	if (dropped != NULL)
+		*dropped = 0u;
 
 	rc = cam_bus_enter(&owner);
 	if (rc != CAM_OK)
@@ -1935,41 +1946,86 @@ static int cam_capture_one(uint8_t raw)
 		return rc;
 	}
 
-	/* Start from a known-quiet datapath: a previous capture that ended in a
-	 * fault, or a stream that stopped, may have left events latched. */
-	cam_quiesce();
-
-	rc = cam_start_datapath();
-	if (rc != CAM_OK) {
+	/*
+	 * One frame per pass, the same cycle a single capture always was: quiesce,
+	 * start, wait for the frame or a fault.  A settled capture (issue #143)
+	 * repeats it while the sensor is still within @p warm frames of its
+	 * bring-up -- the frames are COUNTED the way the producer counts them for
+	 * a one-shot `nn run` (#115), and let go here as it lets them go.  Each
+	 * pass starts from a quiesced datapath, as every capture already did; no
+	 * other stop or restart is introduced.
+	 *
+	 * [!] ONE DEADLINE FOR ALL THE PASSES, NOT ONE PER PASS: the whole of the
+	 * waiting -- every pass's start and poll, after the bring-up -- fits in
+	 * CAM_FRAME_TIMEOUT_TICKS (2 s) of wall clock, the same bound a single
+	 * capture always had.  That keeps this call's hold of the API mutex and
+	 * the bus at bring-up + 2 s + one quiesce, which is what
+	 * CAM_STOP_LOCK_TICKS is derived from; one deadline per pass would have
+	 * let 16 of them stack up to ~32 s.  Running out is an ordinary timeout
+	 * (READY, CAM_ERR_TIMEOUT): the frames already let go stay counted, so
+	 * the next capture carries on settling from there.
+	 *
+	 * What a healthy settle costs, estimated (not measured): the sensor runs
+	 * free at ~37 fps (27 ms a frame), and a pass armed mid-frame takes the
+	 * NEXT whole frame, so a pass is at most ~2 frames (~54 ms) plus its
+	 * quiesce / start (a few ms of register writes).  16 passes is then
+	 * ~0.9 s at the worst, ~0.6 s typically; the first frame after a
+	 * bring-up can take a few hundred ms more while the sensor starts
+	 * streaming.  About 1.2 s at the worst, inside the 2 s.
+	 */
+	start = tx_time_get();
+	for (;;) {
+		/* Start from a known-quiet datapath: a previous capture that ended
+		 * in a fault, or a stream that stopped, may have left events
+		 * latched -- or the previous pass's frame. */
 		cam_quiesce();
-		cam_state = CAM_ST_FAULTED;
-		cam_api_exit();
-		return rc;
-	}
 
-	/* Poll rather than block on the semaphore: this runs on the shell
-	 * thread and the producer owns the semaphore during a stream.  Bounded
-	 * either way. */
-	rc = CAM_ERR_TIMEOUT;
-	for (waited = 0u; waited < CAM_FRAME_TIMEOUT_TICKS; waited++) {
-		if (cam_err != 0) {
-			cam_last_dp_status = cam_err;
-			cam_dp_errors++;
-			rc = CAM_ERR_HAL;
+		rc = cam_start_datapath();
+		if (rc != CAM_OK) {
+			cam_quiesce();
+			cam_state = CAM_ST_FAULTED;
+			cam_api_exit();
+			return rc;
+		}
+
+		/* Poll rather than block on the semaphore: this runs on the shell
+		 * thread and the producer owns the semaphore during a stream.
+		 * Bounded either way. */
+		rc = CAM_ERR_TIMEOUT;
+		while ((ULONG)(tx_time_get() - start) <
+		       (ULONG)CAM_FRAME_TIMEOUT_TICKS) {
+			if (cam_err != 0) {
+				cam_last_dp_status = cam_err;
+				cam_dp_errors++;
+				rc = CAM_ERR_HAL;
+				break;
+			}
+			if (cam_frame_ready) {
+				cam_frame_ready = 0u;
+				hx_InvalidateDCache_by_Addr(
+					(volatile void *)(uintptr_t)
+						cam_dp_completed_buffer(),
+					(int32_t)CAM_RAW_BYTES);
+				cam_frames++;
+				/* The sensor exposed it, so it counts (camera.h). */
+				if (cam_frames_since_bringup != UINT32_MAX)
+					cam_frames_since_bringup++;
+				rc = CAM_OK;
+				break;
+			}
+			(void)tx_thread_sleep(1u);
+		}
+		if (rc != CAM_OK || cam_frames_since_bringup > warm)
+			break;
+		/* Still settling: let this one go, unless the caller gave up. */
+		let_go++;
+		if (cancelled != NULL && cancelled(ctx)) {
+			rc = CAM_ERR_CANCELLED;
 			break;
 		}
-		if (cam_frame_ready) {
-			cam_frame_ready = 0u;
-			hx_InvalidateDCache_by_Addr(
-				(volatile void *)(uintptr_t)
-					cam_dp_completed_buffer(),
-				(int32_t)CAM_RAW_BYTES);
-			cam_frames++;
-			rc = CAM_OK;
-			break;
-		}
-		(void)tx_thread_sleep(1u);
 	}
+	if (dropped != NULL)
+		*dropped = let_go;
 	if (rc == CAM_ERR_TIMEOUT)
 		cam_timeouts++;
 
@@ -1988,12 +2044,20 @@ static int cam_capture_one(uint8_t raw)
 
 int camera_capture(void)
 {
-	return cam_capture_one(0u);
+	return cam_capture_one(0u, 0u, NULL, NULL, NULL);
 }
 
+int camera_capture_settled(uint32_t warm, uint32_t *dropped,
+                           int (*cancelled)(void *ctx), void *ctx)
+{
+	return cam_capture_one(0u, warm, dropped, cancelled, ctx);
+}
+
+/* `camera raw` is a phase measurement, not a picture: it takes the first frame
+   as before, which still counts towards the settling. */
 int camera_capture_raw(void)
 {
-	return cam_capture_one(1u);
+	return cam_capture_one(1u, 0u, NULL, NULL, NULL);
 }
 
 int camera_stream_start(struct frame_sink *sink)

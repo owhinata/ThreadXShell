@@ -117,7 +117,10 @@ option(BSP_ENABLE_IWDG "Enable the IWDG watchdog and wdt shell command" ON)
 add_library(bsp_iface INTERFACE)
 target_include_directories(bsp_iface INTERFACE
     "${BOARD_DIR}/include"
-    "${CMAKE_SOURCE_DIR}/svc"   # shared freestanding services: fmt.h / ymodem.h / frame.h
+    "${CMAKE_SOURCE_DIR}/svc"   # shared freestanding services: fmt.h / ymodem.h
+    "${CMAKE_SOURCE_DIR}/svc/nn"
+    "${CMAKE_SOURCE_DIR}/svc/plugin"
+    "${CMAKE_SOURCE_DIR}/svc/camera"   # frame.h
     "${BOARD_DIR}/svc"          # this board's services: log.h / timebase.h
     "${GEN_DIR}"
     "${HAL_DIR}/Inc"
@@ -181,7 +184,7 @@ add_library(svc_obj OBJECT
     "${BOARD_DIR}/svc/log.c"
     "${BOARD_DIR}/svc/timebase.c"
     "${CMAKE_SOURCE_DIR}/svc/ymodem.c"
-    "${CMAKE_SOURCE_DIR}/svc/frame_pipeline.c")
+    "${CMAKE_SOURCE_DIR}/svc/camera/frame_pipeline.c")
 target_link_libraries(svc_obj PUBLIC bsp_iface)
 target_compile_options(svc_obj PRIVATE -O2)
 
@@ -380,7 +383,7 @@ set(F746_NN_DEFAULT_SEEN "tflm" CACHE INTERNAL
 # [!] ONE VARIABLE FOR THE SHARED DECODER'S PATH (issue #97): the source list and
 # the audit target below must name the same file.
 get_filename_component(F746_SHARED_DECODER
-                       "${CMAKE_SOURCE_DIR}/svc/blazeface.c" ABSOLUTE)
+                       "${CMAKE_SOURCE_DIR}/svc/nn/blazeface.c" ABSOLUTE)
 if(NOT EXISTS "${F746_SHARED_DECODER}")
     message(FATAL_ERROR
         "shared BlazeFace decoder not found:\n  ${F746_SHARED_DECODER}\n"
@@ -403,10 +406,10 @@ set(NN_SOURCES
     # Built in EVERY backend configuration, including `null`, which is what keeps
     # the unconditional --require-sdram-ai below honest.
     "${F746_SHARED_DECODER}"
-    "${CMAKE_SOURCE_DIR}/svc/nn_det_record.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_det_record.c"
     # The top classes of a model the decoder does not recognise, taken by the
     # worker before its next inference (issue #121, decision D3).
-    "${CMAKE_SOURCE_DIR}/svc/nn_top.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_top.c"
     "${BOARD_DIR}/port/nn/nn_decoder.c")
 if(CONFIG_NN_BACKEND STREQUAL "null")
     list(APPEND NN_SOURCES "${BOARD_DIR}/port/nn/nn_null.c")
@@ -491,13 +494,13 @@ add_executable(shell
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_nn.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/nn_cmd_core.c"
     "${BOARD_DIR}/cmds/cmd_nn_board.c"
-    "${CMAKE_SOURCE_DIR}/svc/nn_stream_life.c"
-    "${CMAKE_SOURCE_DIR}/svc/nn_core.c"
-    "${CMAKE_SOURCE_DIR}/svc/nn_core_frame.c"   # the frame path (#130)
-    "${CMAKE_SOURCE_DIR}/svc/nn_handoff.c"      # ...and its hand-over word
-    "${CMAKE_SOURCE_DIR}/svc/nn_swap.c"         # where a load ends (#131)
-    "${CMAKE_SOURCE_DIR}/svc/nn_core_model.c"   # ...and the order around it (#131)
-    "${CMAKE_SOURCE_DIR}/svc/nn_report.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_stream_life.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_core.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_core_frame.c"   # the frame path (#130)
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_handoff.c"      # ...and its hand-over word
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_swap.c"         # where a load ends (#131)
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_core_model.c"   # ...and the order around it (#131)
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_report.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/fs_cmd_core.c"
     "${BOARD_DIR}/port/qspi/qspi_flash.c"
     "${BOARD_DIR}/port/sd/sd_card.c"
@@ -506,10 +509,10 @@ add_executable(shell
     "${BOARD_DIR}/port/camera/camera_names.c"     # ...and the words it shares with cmds/
     "${BOARD_DIR}/port/camera/cam_drain.c"
     "${BOARD_DIR}/port/camera/cam_own.c"
-    "${CMAKE_SOURCE_DIR}/svc/cam_step.c"      # a step of the camera sink (#142)
+    "${CMAKE_SOURCE_DIR}/svc/camera/cam_step.c"      # a step of the camera sink (#142)
     "${BOARD_DIR}/port/camera/cam_sink.c"     # ...and the sink that runs them
     "${BOARD_DIR}/port/camera/cam_hold_rules.c"  # this board's holder rules (#142)
-    "${CMAKE_SOURCE_DIR}/svc/cam_holders.c"   # who holds the stream open (#142)
+    "${CMAKE_SOURCE_DIR}/svc/camera/cam_holders.c"   # who holds the stream open (#142)
     "${BOARD_DIR}/port/ltdc/ltdc_display.c"
     "${BOARD_DIR}/port/touch/touch.c"
     "${BOARD_DIR}/port/sdram/sdram.c"
@@ -575,6 +578,9 @@ target_include_directories(shell PRIVATE
     # shadowed by adding it.
     "${CMAKE_SOURCE_DIR}/shell/cmds"
     "${CMAKE_SOURCE_DIR}/svc"      # shared svc: ymodem.h (cmd_xfer.c, cmd_camera_board.c)
+    "${CMAKE_SOURCE_DIR}/svc/nn"
+    "${CMAKE_SOURCE_DIR}/svc/plugin"
+    "${CMAKE_SOURCE_DIR}/svc/camera"
     "${BOARD_DIR}/svc")            # this board's svc: log.h / timebase.h
 target_compile_definitions(shell PRIVATE TX_INCLUDE_USER_DEFINE_FILE
     FX_INCLUDE_USER_DEFINE_FILE           # port/filex/fx_user.h

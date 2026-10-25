@@ -150,10 +150,10 @@ gcc $CFLAGS \
 # rank-0 "not representable" marker treated as present, a field inherited from
 # the previous tensor -- none of which the core suite can see.
 #
-# NO svc/blazeface.c HERE ANY MORE.  There is no decoder in this half, so
+# NO svc/nn/blazeface.c HERE ANY MORE.  There is no decoder in this half, so
 # linking one would only prove it still compiles.
 gcc $CFLAGS \
-    -I "$here" -I "$board/port/nn" -I "$board/port/nn/npu" -I "$board/svc" -I "$HOST_TEST_SVC" \
+    -I "$here" -I "$board/port/nn" -I "$board/port/nn/npu" -I "$board/svc" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_npu_desc.c" "$board/port/nn/npu/npu_desc.c" \
     $LDFLAGS -o "$out/test_npu_desc"
 "$out/test_npu_desc"
@@ -164,7 +164,7 @@ gcc $CFLAGS \
 # [!] WHAT THIS COMPARES CHANGED WITH ISSUE #104.  It used to hold the two
 # decoders that both shipped -- the firmware's resident adapter and the plugin.
 # The firmware no longer has one, so the second half is a reference this test
-# builds directly on svc/blazeface.c.  That is a weaker statement about the
+# builds directly on svc/nn/blazeface.c.  That is a weaker statement about the
 # product and still worth making: the plugin's WRAPPER is what it catches.
 #
 # The shared arithmetic is NOT what is tested (shell/test/test_blazeface.c owns
@@ -177,15 +177,15 @@ gcc $CFLAGS \
 # of refusing, which nothing outside this file could see.
 gcc $CFLAGS \
     -I "$here" -I "$board/port/nn" -I "$board/port/nn/npu" -I "$board/port/plugin" -I "$board/svc" \
-    -I "$asset/plugins/blazeface" -I "$asset/common" -I "$HOST_TEST_SVC" \
+    -I "$asset/plugins/blazeface" -I "$asset/common" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_plugin_decode.c" \
     "$board/port/nn/nn_active.c" "$board/port/nn/npu/npu_desc.c" \
-    "$HOST_TEST_SVC/nn_active_core.c" \
+    "$HOST_TEST_SVC/nn/nn_active_core.c" \
     "$board/port/nn/nn_preproc.c" \
     "$asset/plugins/blazeface/plugin_main.c" \
     "$asset/common/plugin_base.c" "$asset/common/plugin_fmt.c" \
     "$asset/common/plugin_text.c" \
-    "$HOST_TEST_SVC/blazeface.c" \
+    "$HOST_TEST_SVC/nn/blazeface.c" \
     $LDFLAGS -o "$out/test_plugin_decode"
 "$out/test_plugin_decode"
 
@@ -204,7 +204,7 @@ gcc $CFLAGS \
 # against the vendor scenario app's, which is where the ten names come from.
 gcc $CFLAGS \
     -I "$here" -I "$asset/plugins/cifar10" -I "$asset/common" \
-    -I "$HOST_TEST_SVC" \
+    -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_plugin_cifar10.c" \
     "$asset/plugins/cifar10/plugin_main.c" \
     "$asset/common/plugin_base.c" "$asset/common/plugin_fmt.c" \
@@ -311,11 +311,11 @@ gcc $CFLAGS \
 # the loop under test is still the real one.  The test compares that count against the budget the painter deducted,
 # and pins golden numbers besides, so the two sides are not one side twice.
 gcc $CFLAGS -DLCD_RECT_COUNT_STORES \
-    -I "$here" -I "$board/port/plugin" -I "$board/port/lcd" -I "$board/../../svc" \
+    -I "$here" -I "$board/port/plugin" -I "$board/port/lcd" -I "$board/../../svc" -I "$board/../../svc/nn" -I "$board/../../svc/plugin" -I "$board/../../svc/camera" \
     "$here/test_plugin_paint.c" "$board/port/plugin/plugin_paint.c" \
     "$board/port/lcd/lcd_rect.c" "$board/../../svc/rect_geom.c" \
-    "$board/../../svc/plugin_paint_budget.c" \
-    "$board/../../svc/plugin_paint_span.c" \
+    "$board/../../svc/plugin/plugin_paint_budget.c" \
+    "$board/../../svc/plugin/plugin_paint_span.c" \
     $LDFLAGS -o "$out/test_plugin_paint"
 "$out/test_plugin_paint"
 
@@ -384,7 +384,7 @@ gcc $CFLAGS \
 # unreadable one; a stream refuses past eight.  No model this board ships has
 # nine outputs or an unreadable one, so the cases are made up here.
 gcc $CFLAGS \
-    -I "$here" -I "$board/port/nn" -I "$board/port/nn/npu" -I "$HOST_TEST_SVC" \
+    -I "$here" -I "$board/port/nn" -I "$board/port/nn/npu" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_nn_outputs.c" "$board/port/nn/nn_outputs.c" \
     $LDFLAGS -o "$out/test_nn_outputs"
 "$out/test_nn_outputs"
@@ -403,13 +403,13 @@ gcc $CFLAGS \
 # before the shared loader touches the reservation, and again in the exec_ok
 # hook at the branch.  A load is the one path that destroys the plugin it
 # replaces, and no console can aim one at a decode, so these refusals are
-# never seen on hardware.  The REAL plugin_run.c and svc/plugin_exec.c, with
+# never seen on hardware.  The REAL plugin_run.c and svc/plugin/plugin_exec.c, with
 # the device, ThreadX and the NOR lease stubbed (test/plugin_run_shim).
 gcc $CFLAGS \
     -I "$here/plugin_run_shim" -I "$board/port/plugin" -I "$board/port/nn" -I "$board/port/nn/npu" \
-    -I "$board/port/nor" -I "$board/svc" -I "$svc" \
+    -I "$board/port/nor" -I "$board/svc" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_plugin_run_lease.c" "$board/port/plugin/plugin_run.c" \
-    "$svc/plugin_exec.c" "$svc/plugin_mpu.c" "$svc/plugin_load.c" \
+    "$svc/plugin/plugin_exec.c" "$svc/plugin/plugin_mpu.c" "$svc/plugin/plugin_load.c" \
     "$svc/crc32.c" \
     $LDFLAGS -Wl,--wrap=plugin_exec_unload -o "$out/test_plugin_run_lease"
 "$out/test_plugin_run_lease"
@@ -525,7 +525,7 @@ gcc $CFLAGS \
 # nor_span.h (the header's page granularity is the vendor's program page) and
 # linked with svc/crc32.c, which is what the body checksum is.
 gcc $CFLAGS \
-    -I "$board/src" -I "$board/port/nor" -I "$svc" \
+    -I "$board/src" -I "$board/port/nor" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_blob_state.c" "$board/src/blob_state.c" "$svc/crc32.c" \
     $LDFLAGS -o "$out/test_blob_state"
 "$out/test_blob_state"
@@ -541,7 +541,7 @@ gcc $CFLAGS \
 # coordinator's own sink as well, which is how a rejected block 0, a short file
 # and an empty batch happen without a PC.
 gcc $CFLAGS \
-    -I "$board/src" -I "$board/port/nor" -I "$svc" \
+    -I "$board/src" -I "$board/port/nor" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_blob_write.c" "$board/src/blob_write.c" \
     "$board/src/blob_state.c" "$board/src/blob_stage.c" "$svc/crc32.c" \
     $LDFLAGS -o "$out/test_blob_write"
@@ -559,7 +559,7 @@ gcc $CFLAGS \
 # typeface and break on a glyph edit -- but the two ends of the table are, since
 # an index off by one shows up at exactly two characters.
 gcc $CFLAGS \
-    -I "$here" -I "$asset/common" -I "$HOST_TEST_SVC" \
+    -I "$here" -I "$asset/common" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_plugin_text.c" "$asset/common/plugin_text.c" \
     "$asset/common/plugin_fmt.c" "$asset/common/plugin_base.c" \
     $LDFLAGS -o "$out/test_plugin_text"
@@ -574,7 +574,7 @@ gcc $CFLAGS \
 # never failing.  So the driver compiles the REAL header once per ceiling at,
 # below and above it (the others out of the way), and builds the runtime half
 # (test_plugin_stack.c) with sentinel allowances to catch a slot wired to the
-# wrong one, and with the real ones against svc/plugin_load.c.  Host cc only:
+# wrong one, and with the real ones against svc/plugin/plugin_load.c.  Host cc only:
 # nothing here needs the cross toolchain, so nothing here skips.
 python3 "$here/test_plugin_stack.py"
 
@@ -590,7 +590,7 @@ python3 "$here/test_plugin_stack.py"
 # will not compile without its allowances and the four thread stacks; the -D
 # numbers below are placeholders the masks do not depend on.
 gcc $CFLAGS \
-    -I "$board/port/nn" -I "$board/port/nn/npu" -I "$board/port/plugin" -I "$HOST_TEST_SVC" \
+    -I "$board/port/nn" -I "$board/port/nn/npu" -I "$board/port/plugin" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     -I "$HOST_TEST_INC" \
     -DGROVE_PLUGIN_STACK_SHELL=1024u -DGROVE_PLUGIN_STACK_PANEL=1024u \
     -DGROVE_PLUGIN_STACK_WORKER=1024u -DNN_WORKER_STACK_BYTES=8192u -DCAM_PANEL_STACK_BYTES=2048u \
@@ -608,7 +608,7 @@ gcc $CFLAGS \
 # write byte-identical records for the same text.  The REAL log.c is compiled
 # (by #include, to read the ring back); log_shim/ supplies only the intrinsics
 # it uses, traced, and -DLOG_HOST_TEST switches on its read-back tap.
-gcc $CFLAGS -DLOG_HOST_TEST -I "$here/log_shim" -I "$board/svc" -I "$svc" \
+gcc $CFLAGS -DLOG_HOST_TEST -I "$here/log_shim" -I "$board/svc" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_log.c" "$svc/fmt.c" \
     $LDFLAGS -o "$out/test_log"
 "$out/test_log"
@@ -728,7 +728,7 @@ st="$HOST_TEST_SHELL_TEST"
 gcc $CFLAGS -DCLI_USE_COLOR=0 \
     -I "$st" -I "$HOST_TEST_BACKEND" -I "$st/shim" -I "$st/fx_shim" \
     -I "$board/svc" -I "$HOST_TEST_INC" -I "$HOST_TEST_CORE" \
-    -I "$st/../cmds" -I "$svc" \
+    -I "$st/../cmds" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_camera_table.c" "$st/camera_svc_stub.c" \
     "$st/../cmds/cmd_camera.c" \
     "$HOST_TEST_CORE/cli_session.c" "$HOST_TEST_CORE/cli_edit.c" \

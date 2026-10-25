@@ -26,7 +26,7 @@ separate reasons, and this file answers each:
      The runtime half (test_plugin_stack.c) prints the table the firmware builds
      its policy from, compiled with the allowances set to DIFFERENT sentinel
      values, and it is checked here against this file's own statement of which
-     slot runs where.  It also runs the device's validator (svc/plugin_load.c)
+     slot runs where.  It also runs the device's validator (svc/plugin/plugin_load.c)
      against the REAL allowances: one byte past each limit must be refused.
 
 The real values are read from where the firmware gets them -- board.cmake for
@@ -58,7 +58,10 @@ REPO = os.path.dirname(os.path.dirname(BOARD))
 INCLUDES = ["-I", os.path.join(BOARD, "port", "nn"),
             "-I", os.path.join(BOARD, "port", "nn", "npu"),
             "-I", os.path.join(REPO, "shell", "include"),
-            "-I", os.path.join(REPO, "svc")]
+            "-I", os.path.join(REPO, "svc"),
+            "-I", os.path.join(REPO, "svc", "nn"),
+            "-I", os.path.join(REPO, "svc", "plugin"),
+            "-I", os.path.join(REPO, "svc", "camera")]
 CFLAGS = shlex.split(os.environ.get("HOST_TEST_CFLAGS", "-std=c11 -Wall -Wextra"))
 # -Werror: an "ok" has to mean the header compiled clean, not that a warning
 # about one of its comparisons scrolled past.
@@ -249,7 +252,7 @@ def run_probe(work, values):
     exe = os.path.join(work, "probe")
     r = subprocess.run(["gcc"] + CFLAGS + INCLUDES + defines(values)
                        + [os.path.join(HERE, "test_plugin_stack.c"),
-                          os.path.join(REPO, "svc", "plugin_load.c"),
+                          os.path.join(REPO, "svc", "plugin", "plugin_load.c"),
                           os.path.join(REPO, "svc", "crc32.c"),
                           "-o", exe], capture_output=True, text=True)
     if r.returncode != 0:

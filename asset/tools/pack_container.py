@@ -19,7 +19,7 @@ artifact:
     manifest, offsets and digest -> hand that unmodified file to the sender.
 
 [!] AND THE LAYOUT IS NOT TRANSCRIBED HERE.  Field offsets come from
-abi_layout.c, compiled against the same svc/plugin_abi.h the firmware includes.
+abi_layout.c, compiled against the same svc/plugin/plugin_abi.h the firmware includes.
 A struct format string in this file would be a second declaration of the ABI,
 and the day a field moved the two would disagree while both still ran.
 """
@@ -263,7 +263,7 @@ def main():
     # safe, but found on the device after the erase.
     if args.accounting != L["stack_accounting"]:
         die(f"the gate's stack accounting is {args.accounting} but "
-            f"svc/plugin_abi.h says {L['stack_accounting']}; one of them was "
+            f"svc/plugin/plugin_abi.h says {L['stack_accounting']}; one of them was "
             "changed without the other")
     if args.sink < 0:
         die("--sink is a byte count")

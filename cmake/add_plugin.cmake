@@ -303,7 +303,7 @@ function(add_plugin _name)
     # verifier are host tools, not plugin storage.
     #
     # [!] AND THE COMPARISON IS PHYSICAL, NOT LEXICAL.  ABSOLUTE does not resolve
-    # symlinks, so a tracked asset/plugins/<name>/x.c -> ../../../svc/blazeface.c
+    # symlinks, so a tracked asset/plugins/<name>/x.c -> ../../../svc/nn/blazeface.c
     # used to start with the owned prefix, compile, and never be audited.
     # REALPATH canonicalises both sides, and the resolved paths are what gets
     # compiled below -- classifying one path and compiling another would put the
@@ -402,7 +402,7 @@ function(add_plugin _name)
         endif()
         # [!] THE HEADERS ARE DEPENDENCIES TOO (issue #111).  This rule used to
         # depend on its .c alone, so bumping PLUGIN_ABI_VERSION in
-        # svc/plugin_abi.h rebuilt only the TUs whose .c had also changed: the
+        # svc/plugin/plugin_abi.h rebuilt only the TUs whose .c had also changed: the
         # shipped blazeface and cifar10 images compared the base against ABI 1
         # while the packer, which reads the header, stamped ABI 2 -- the device
         # loaded them and each refused its own entry point.  Every gate passed,
@@ -419,7 +419,7 @@ function(add_plugin _name)
             COMMAND "${CMAKE_C_COMPILER}" ${P_CFLAGS}
                     -I "${_dir}"
                     -MMD -MF "${_dep}" -MT "${_stamp}"
-                    # Each TU leaves the ABI it saw (svc/plugin_abi.h); the
+                    # Each TU leaves the ABI it saw (svc/plugin/plugin_abi.h); the
                     # image gate compares them with the header's.
                     -DPLUGIN_IMAGE_BUILD
                     -c "${_src_abs}" -o "${_obj}"

@@ -67,11 +67,14 @@ and are described in that board's README.
 CMakeLists.txt        project, board selection, submodule bootstrap, cli_version.h
 cmake/                toolchain file (fetches ARM GNU on first configure), version template
 shell/                board-independent: core/ include/ backend/ cmds/ test/
-svc/                  board-independent services (fmt, crc32, ymodem, frame pipeline,
-                      gfx, and the BlazeFace decoder the boards share -- linked by
-                      f746g-disco's firmware, delivered inside a container on the
-                      other two); svc/README.md has the nn and camera commands'
-                      layering (one shared command each, over a board adapter)
+svc/                  board-independent services: generic ones (fmt, crc32, ymodem,
+                      gfx) at the top, nn/ (the nn core and the BlazeFace decoder
+                      the boards share -- linked by f746g-disco's firmware,
+                      delivered inside a container on the other two), plugin/
+                      (container ABI, loader, executor) and camera/ (frame
+                      pipeline, holders, the camera contract); svc/README.md has
+                      the nn and camera commands' layering (one shared command
+                      each, over a board adapter)
 asset/                board-independent plugin sources and the container toolchain --
                       common/ (veneers and the ABI's section layout), plugins/<name>/,
                       tools/ (packer, ABI layout, container verifier)

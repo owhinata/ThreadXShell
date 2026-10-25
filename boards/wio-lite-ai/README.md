@@ -189,7 +189,7 @@ demonstrates both, and demonstrates why the check runs against the cross
 compiler rather than on the host.
 
 **[!] Which compile it audits moved with issue #116.**  The rule's first
-subject was `svc/blazeface.c`, which this firmware used to link as its resident
+subject was `svc/nn/blazeface.c`, which this firmware used to link as its resident
 decoder, with the candidate scratch it passes in pinned in `.psram_ai` as
 `nn_dec_scratch`.  The firmware links neither now: the decoder arrives inside a
 container, and `add_plugin()`'s `AUDIT_SHARED` runs the same gate on the
@@ -309,7 +309,7 @@ camera info                  ... and the derived preview line
 
 **The band stream runs while somebody holds it.**  The holders are the operator
 (`camera stream start`) and nn (`nn stream start`, `nn run`), kept in
-`svc/cam_holders` next to the band start in `port/camera/camera.c` under the
+`svc/camera/cam_holders` next to the band start in `port/camera/camera.c` under the
 camera lock (the shared rules are in
 [svc/README.md](../../svc/README.md#the-camera-streams-ownership-issue-142)).
 `nn stream start` and `nn run` join a running stream, or start it holding the
@@ -343,7 +343,7 @@ operator's place too, so the camera keeps streaming after nn stops.
 every 60-row band it runs the preview step (`src/cam_preview.c`) and then the nn
 step (`port/nn/nn_producer.c`), each deciding at the frame's first band on its
 own, both inside the band period (~18.5 ms).  The steps use the shared
-`svc/cam_step.h` machine: the producer reads a step's armed mark and counts
+`svc/camera/cam_step.h` machine: the producer reads a step's armed mark and counts
 itself in in one PRIMASK section, and an owner that disarmed the step and saw
 the count reach 0 knows the producer is out of it for good -- what `nn stream
 stop` needs before it gives the input tensor back.
@@ -381,7 +381,7 @@ that is the `PSRAM` used figure `free` reports.  `camera capture`, `save` and
 
 The command is one file for all three boards, `shell/cmds/cmd_camera.c`, over
 this board's adapter `port/camera/camera_svc_wio.c`, which implements the
-contract in `svc/camera_svc.h` (the layers are in
+contract in `svc/camera/camera_svc.h` (the layers are in
 [svc/README.md](../../svc/README.md#the-camera-command-is-shared-issue-143)).
 `camera scan` and `camera reg` stay in `cmds/cmd_camera_board.c`, appended to
 the shared table.  Capabilities (`svc/camera_svc_config.h`): power, info, test
@@ -487,7 +487,7 @@ file (each `.c` with its `.h` unless only a header is listed):
 | `port/nn/nn_producer.c` | camera producer (the nn step of the band sink) | Downsamples each 60-row DCMI band straight into the model's input tensor on the CPU, inside one band period (~18.5 ms), and hands the frame over after the fourth band. |
 | `port/nn/nn_worker.c` | inference worker (`nn_work`, priority 18) | Inference runs on the CPU for ~373 ms with no yield, so the worker sits below the console, the preview and the producer; it holds the result lease across decode + publish because the preview thread outranks it. |
 | `port/nn/nn_panel.c` | panel (preview thread, priority 12) | The nn half of the LTDC preview: the may-draw question, the record snapshot and the plugin's `draw()`, with the lease only tried. The display half (frame lock, back buffer, flip) stays in `src/cam_preview.c` and is passed in as hooks (`nn_panel.h`), because `port/nn` may not include `port/ltdc`. Built only with the LCD. |
-| `port/nn/nn_active.c` | worker, panel, console, under the plugin lease | Turns `nn_tensor` into `svc/tensor.h` descriptors and states this board's frame geometry for `svc/nn_active_core.c`. |
+| `port/nn/nn_active.c` | worker, panel, console, under the plugin lease | Turns `nn_tensor` into `svc/nn/tensor.h` descriptors and states this board's frame geometry for `svc/nn/nn_active_core.c`. |
 | `port/nn/nn_desc.c` | wherever a tensor is described | `nn_tensor` -> `tensor_desc`, the only place this board's tensor type meets the neutral one. |
 | `port/nn/nn_decode_count.c` | inference worker | No hardware reason: this board's table for counting a decoder's answer in `nn stream stats` (pure, host-tested). |
 | `port/nn/nn.c`, `nn_backend.h` | worker (run), console (open / bench / info) | The backend-agnostic model API and session guard, with DWT cycle-counter timing around `nn_run()`. |
@@ -497,7 +497,7 @@ file (each `.c` with its `.h` unless only a header is listed):
 | `port/plugin/plugin_run.c` | console (load / unload), worker, panel | The reservation in the top 32 KB of AXI-SRAM (a Cortex-M7 cannot fetch from DTCM), M7 I/D-cache maintenance, the Armv7-M MPU read-back and the staging-region precondition. |
 | `port/plugin/plugin_lease.c` | every path into the plugin | The lease as a ThreadX mutex: the preview thread outranks the worker and would otherwise preempt a decode mid-way. |
 | `port/plugin/plugin_paint.c` | panel | CPU pixel loops into the rotated, native-order RGB565 LTDC frame (no DMA2D, which has no way to prove it stopped before the flip). |
-| `port/camera/cam_band.c` | camera producer (band callback), console (step enable / disable / drain) | Not an nn file, but nn runs inside it: the one band sink, running the preview step and then the nn step; each step's armed mark and busy count are `svc/cam_step.h`'s. |
+| `port/camera/cam_band.c` | camera producer (band callback), console (step enable / disable / drain) | Not an nn file, but nn runs inside it: the one band sink, running the preview step and then the nn step; each step's armed mark and busy count are `svc/camera/cam_step.h`'s. |
 
 [!] **Three `port/` -> `src/` includes remain on purpose.**  They are not nn
 files, and moving them would touch the LTDC, Wi-Fi and MPU code that also uses
@@ -618,7 +618,7 @@ CRC-checks that copy exactly as before, then:
 
 - a payload that is not a container is a bare model and takes the old path
   unchanged (models already in the store do not need re-sending);
-- a container goes through `svc/plugin_load.c` -- the same validator the host
+- a container goes through `svc/plugin/plugin_load.c` -- the same validator the host
   build runs -- with this board's policy, and its **model section is handed to
   the backend in place**, at its offset inside the staged container.  The TFLM
   backend accepts any range inside the staging slot it handed out that starts
@@ -642,9 +642,9 @@ that changed what is open change what decodes it:
 | the previous model was restored | nothing moved, so nothing moves here -- the previous plugin keeps reading the previous model |
 | nothing is open | the plugin is unloaded too |
 
-The table is the one every board shares (`svc/nn_swap.c`, issue #131), and
+The table is the one every board shares (`svc/nn/nn_swap.c`, issue #131), and
 `shell/test/test_nn_swap.c` walks every row with this board's inputs.  Since
-#131 step 7d the **order around it is shared too** (`svc/nn_core_model.c`,
+#131 step 7d the **order around it is shared too** (`svc/nn/nn_core_model.c`,
 walked hook by hook by `shell/test/test_nn_core_model.c`): the session, then
 whether a model is open (read under the session), the NOR read and CRC, the
 plugin lease, the reload, the plugin, the table and its duties, in that order
@@ -688,7 +688,7 @@ carried the used figure under the word "reserved".
 and its plugin refused" and "the reload failed and the previous model was
 restored" differ only in which one keeps its decoder, and telling them apart
 needs a container the DEVICE refuses -- which the build cannot produce, because
-the host packer runs the device's own validator (`svc/plugin_load.c`) over what
+the host packer runs the device's own validator (`svc/plugin/plugin_load.c`) over what
 it packs and publishes nothing that would be refused.  The host tests reach the
 no-decoder STATE (that is what `test_nn_active.c` pins) but not this branch
 that arrives at it; since #122 the ending table's host test reaches the
@@ -761,7 +761,7 @@ inside the plugin, so there is nothing to copy.
   stop's record boundary and the consoles each passed 50 ticks of their own;
 - **and every entry checks that its caller holds it** (issue #130, as on
   grove-vision-ai-v2 since #127).  The API is the shared
-  `svc/plugin_lease_api.h`; `plugin_lease_held()` asks whether the CALLING
+  `svc/plugin/plugin_lease_api.h`; `plugin_lease_held()` asks whether the CALLING
   thread owns the mutex.  Every wrapper in `port/nn/nn_active.c` that reaches a
   plugin callback or the slot table a holder is about to call through
   (`shapes_ok`, `decode`, `draw`, `can_draw`, `can_report`, `report`, both
@@ -775,7 +775,7 @@ inside the plugin, so there is nothing to copy.
   build never prints.  The callers check the answer as well (compare against 1:
   the refusal is negative), so a refusal is never read as "yes" -- and since
   #130 that includes the plugin's own `shapes_ok()`, whose contract
-  (`svc/plugin_abi.h`) is 1 = readable and anything else, 2 or a negative value
+  (`svc/plugin/plugin_abi.h`) is 1 = readable and anything else, 2 or a negative value
   included, = not.  `plugin_lease_held()` also answers no in any exception or
   before the scheduler runs, where `tx_thread_identify()` alone would name the
   interrupted thread.  Which entries
@@ -852,7 +852,7 @@ The plugin target word for this board is `0x1201` (Cortex-M7 / FPv5-D16 / hard
 float / little-endian, no CMSE).  Until #108 nothing checked such a word on any
 board -- the packer, the verifier and the firmware all read one CMake variable.
 It is now checked at both ends: `nn_svc_wio.c` static-asserts it against this
-firmware's own predefined macros (`svc/plugin_target.h`), and the shared image
+firmware's own predefined macros (`svc/plugin/plugin_target.h`), and the shared image
 gate derives the core, FPU, float ABI and endianness from each plugin ELF.
 [!] An M7 object does not record its core's name -- GCC's `.arch armv7e-m`
 overrides `.cpu cortex-m7`, leaving `Tag_CPU_name "7E-M"`, the same as a
@@ -984,7 +984,7 @@ cover it:
 | `pl_base_to_frame` | `nn_active_to_frame` | 0 B | leaf, no frame |
 
 (The chains carry the names the LINK produced -- LTO privatises the two log
-bodies, and inlines the shared clip-and-charge of svc/plugin_paint_span.c into
+bodies, and inlines the shared clip-and-charge of svc/plugin/plugin_paint_span.c into
 each primitive -- because the check reads the image, not the sources.)
 
 **640 >= 176, with 464 B of headroom.**  This used to be a hand sum, and it came
@@ -1064,14 +1064,14 @@ sits under its derived room, and the shipped plugin well under the allowance.
 **[!] Issue #126 moved every sample, which is why the column rose.**  The
 callers used to sample before calling into `port/nn/nn_active.c`, which left
 out everything below them -- the descriptor array above all, about 300 B at
-decode and shapes_ok.  The stack pointer is now read in `svc/nn_active_core.c`,
+decode and shapes_ok.  The stack pointer is now read in `svc/nn/nn_active_core.c`,
 at the indirect call itself, and entry()'s in the loader's `exec_ok` hook
 (`pl_exec_ok()`, 16 B above the branch).  Before that the column read 49 / 105
 (issue #116) and 1,977 for the shell (issue #121, build `5cb217f`); those were
 under-counts.  The bound each must stay under is `stack - 208 - 1,024`.
 
 **Re-measured after issue #131 step 7d** (the load and unload order moved into
-the shared `svc/nn_core_model.c`; 2026-10-10, firmware `01200f2-dirty`).
+the shared `svc/nn/nn_core_model.c`; 2026-10-10, firmware `01200f2-dirty`).
 Procedure: reset -> `nn model load --slot 5` -> `nn stream start --frames 300`
 -> `nn stream stats`, with no `nn run`:
 `at call : shell 1376/4096 (entry, shapes_ok, report, param)`.  The same
@@ -1114,7 +1114,7 @@ with c already inside it, and the loader could not know which c.  Now the
 manifest declares, per slot, the plugin's own deepest frames A0, its own frames
 at a crossing A1 and a crossing bit, plus the plugin's sink bound S, and the
 loader requires `max(A0, A1 + max(c, S))` with this firmware's c
-(`svc/plugin_load.c`).  A stack-accounting version in the manifest says which
+(`svc/plugin/plugin_load.c`).  A stack-accounting version in the manifest says which
 analysis produced the numbers; a mismatch is its own refusal.  The c is the one
 the build checked, read back out of `shell.elf` (`cmake/check_policy_probe.py`).
 

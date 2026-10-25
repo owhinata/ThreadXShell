@@ -49,6 +49,9 @@ target_include_directories(mlperf_obj PRIVATE
     "${BOARD_DIR}/port/threadx"   # tx_glue.h: the microsecond clock
     "${CMAKE_SOURCE_DIR}/shell/include"  # cli.h: where protocol bytes go
     "${CMAKE_SOURCE_DIR}/svc"            # fmt.h: the printf that has no %f
+    "${CMAKE_SOURCE_DIR}/svc/nn"
+    "${CMAKE_SOURCE_DIR}/svc/plugin"
+    "${CMAKE_SOURCE_DIR}/svc/camera"
     "${TX_DIR}/common/inc"               # cli.h -> cli_config.h -> ThreadX types
     "${TX_PORT}/inc")
 

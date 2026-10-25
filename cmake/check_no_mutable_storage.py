@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Refuse a translation unit that owns mutable storage (issue #97).
 
-WHAT THIS PROTECTS.  svc/blazeface.c is one decoder shared by three boards, and
+WHAT THIS PROTECTS.  svc/nn/blazeface.c is one decoder shared by three boards, and
 each board keeps its candidate scratch where its own memory map wants it (wio
 .psram_ai, f746 .sdram.ai, Grove plain .bss) by passing it in.  That only works
 while the shared translation unit owns nothing itself.  If someone adds a static

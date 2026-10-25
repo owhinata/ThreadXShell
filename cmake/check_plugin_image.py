@@ -53,11 +53,11 @@ import sys
 
 # ---- the target word (issue #108) ------------------------------------------
 #
-# The board declares one word (svc/plugin_abi.h, plugin_target_id()) and hands
+# The board declares one word (svc/plugin/plugin_abi.h, plugin_target_id()) and hands
 # it to the packer, the host container verifier and its firmware policy.  Until
 # #108 nothing checked the word itself: the three agreed because they read the
 # same CMake variable.  This half derives what the PLUGIN IMAGE says about
-# itself and compares; the firmware's half (svc/plugin_target.h) derives the
+# itself and compares; the firmware's half (svc/plugin/plugin_target.h) derives the
 # environment from its own predefined macros.
 #
 # [!] THESE VALUES ARE THE ABI'S, TRANSCRIBED -- and pinned.  The gate runs at
@@ -85,10 +85,10 @@ ABI = {
     "PLUGIN_TARGET_RESERVED_MASK": 0xFFFF0000,
     # What the walk below MEANS (issue #111): stamped into --emit-stacks and from
     # there into the manifest, and compared for equality by the loader.  Raise it
-    # in svc/plugin_abi.h -- and here, where the fixture will insist on it -- when
+    # in svc/plugin/plugin_abi.h -- and here, where the fixture will insist on it -- when
     # the walk changes what it charges or where it stops.
     "PLUGIN_STACK_ACCOUNTING": 1,
-    # The ABI each plugin TU records (svc/plugin_abi.h, pl_abi_mark): the
+    # The ABI each plugin TU records (svc/plugin/plugin_abi.h, pl_abi_mark): the
     # image is refused unless every record is this (issue #111).
     "PLUGIN_ABI_VERSION": 2,
     # The slot indices, for cmake/check_policy_probe.py to read a policy's
@@ -482,7 +482,7 @@ def bound_stack(entry, funcs, frames, errors):
       A1  the deepest its own frames go on a path that REACHES a crossing, or
           None when no path does.  A1 <= A0 by construction.
 
-    The firmware adds its own c at load time (svc/plugin_load.c), so neither
+    The firmware adds its own c at load time (svc/plugin/plugin_load.c), so neither
     number goes stale when c moves.  Proof that this is the old walk and not a
     new one: old(f) = frame + max(c, old(g)...) = max(frame + A0(g),
     frame + c, frame + A1(g) + c) = max(A0(f), A1(f) + c), with A0(f) =
@@ -554,7 +554,7 @@ def main():
     ap.add_argument("--veneer-base-cost", required=True, type=int,
                     help="stack the base may spend below one veneer, in bytes")
     ap.add_argument("--target-id", required=True, type=lambda v: int(v, 0),
-                    help="the board's plugin target word (svc/plugin_abi.h)")
+                    help="the board's plugin target word (svc/plugin/plugin_abi.h)")
     args = ap.parse_args()
     if args.end <= args.base:
         print("check_plugin_image: FAIL\n  - --end 0x%08x is not above --base "

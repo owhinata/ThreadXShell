@@ -63,7 +63,7 @@
 
 ### 7. `nn` と `camera` は 3 ボード共有の 1 コマンド（各 1 つ）
 
-`cmd_nn.c` / `cmd_camera.c` が唯一の実装、契約は `svc/nn_svc.h` / `svc/camera_svc.h`、ボード側は `nn_svc_*.c` / `camera_svc_*.c`。**緩めた時点で BLOCKING。**
+`cmd_nn.c` / `cmd_camera.c` が唯一の実装、契約は `svc/nn/nn_svc.h` / `svc/camera/camera_svc.h`、ボード側は `nn_svc_*.c` / `camera_svc_*.c`。**緩めた時点で BLOCKING。**
 
 - **共有 TU（`cmd_nn.c` / `nn_cmd_core.c` / `cmd_camera.c`）は可変記憶域を持たない**（状態はアダプタだけ）。強制は
   `cmake/check_no_mutable_storage.py` を**ボードごとの監査コンパイル**で当てること — **ホストの結果は
@@ -81,24 +81,24 @@
 - **ライブ推論は 3 ボードとも `nn stream start/stop/stats`**（`preview` は復活させない）。`start` は非ブロッキングで、待ちは共有コマンドの `--frames <n>` が 1 実装で持つ。
 - **[!] stream には世代がある。** 待ち手は `start` の generation を持ち、`stop` は**遷移を claim するのと
   同じクリティカルセクション内で**照合する（`NN_STREAM_GEN_ANY` は操作者専用で**待ち手は渡さない**）。
-  機械は `svc/nn_stream_life.c` の 1 本。
+  機械は `svc/nn/nn_stream_life.c` の 1 本。
 - **[!] start の admission も機械が持つ** — worker を触る**前に** STARTING を claim し失敗なら abort。
   `commit()` は STARTING 以外を、`finish/retry/poison` は STOPPING 以外を拒否する。**worker のカウンタも
   record の `valid` も世代と一致しない**（record は境界で消えずモデル変更で消える、#118）ので poll は
   commit 時に latch した基準（record の受理数を含む）を引く。**遷移拒否なら wrapper の副作用も走らせない。**
 - **[!] `nn run` も one-shot で同じ機械を claim**（re-arm/操作者 stop 不可。種類は claim 内で判定、#120）。
 - **[!] poll は 2 相 + 遷移カウンタ**（数値は他ロック配下で割込み禁止下では集められず、世代と状態だけでは stop 跨ぎを弾けない）。
-- **[!] 入力の受け渡し語 FILLING の出口は ABANDON（producer）と JOIN（worker の受理）だけ**（`svc/nn_handoff.h`、#130）。待ちが
+- **[!] 入力の受け渡し語 FILLING の出口は ABANDON（producer）と JOIN（worker の受理）だけ**（`svc/nn/nn_handoff.h`、#130）。待ちが
   切れた worker は FILLING を奪わず待ち直す。**負値の decode の数え方はボードの純関数の表**（P8、ホストテスト必須、Grove の規則）。
 - **[!] 分類表はボードが持ち既定は fail-closed**（Grove の `nn_stream_state.c` では `CAM_ERR_LOCKED` と
   `CAM_ERR_BUSY` が **retryable**）。**terminal に畳み直さない。**
 - **[!] デコーダの負値を 1 つに畳まない**（どれも「0 件」ではない）。**停止は推論を取り消せない**ので
-  worker は arm 時点の世代を控え publish のロック内で照合（`svc/nn_det_record.c`）。**RAW 記述子と top-5 は publish 時に record へ載せ、印字時にモデルを取り直さない**（#121）。
+  worker は arm 時点の世代を控え publish のロック内で照合（`svc/nn/nn_det_record.c`）。**RAW 記述子と top-5 は publish 時に record へ載せ、印字時にモデルを取り直さない**（#121）。
 - **[!] 推論を非同期の worker で回すボードは「誰も解釈していない」も世代規則の下で publish する**（しないと `nn run` が timeout する。wio・Grove）。
-- **[!] モデルの load / unload の順序は `svc/nn_core_model` の 1 実装**（表は `svc/nn_swap`、3 ボードがフック + const 表で採る）: 差し替えは
+- **[!] モデルの load / unload の順序は `svc/nn/nn_core_model` の 1 実装**（表は `svc/nn/nn_swap`、3 ボードがフック + const 表で採る）: 差し替えは
   backend 成功後、bare は plugin unload、モデルが残らない終わり方は全部下ろす、**BUSY は swap より前だけ**（BUSY 拒否は状態行を出さない、#131）。
 
-### 8. `svc/frame_pipeline` の sink registry: attach は拒否する、直列化は呼び出し元
+### 8. `svc/camera/frame_pipeline` の sink registry: attach は拒否する、直列化は呼び出し元
 
 - `frame_pipeline_attach()` は**未 drain の sink** と**既に link 済みの sink** を拒否する。**緩めない**
   — 前者を通すとリングが恒久的に 1 スロット短くなり、後者は `s->_next = s` を作り走査が終わらない。
@@ -112,18 +112,18 @@
   永久に retry する）。`detach()` の**非負の pin 数は単独では teardown 許可ではない**。
 - **caller に残る条件は 3 つ**（`set_format()` は attach と重ならない / sink は同時に 1 pipeline のみ /
   `init()` は quiescent なときだけ）。**「全 registry 操作を直列化する」とは書かない。**
-- **[!] カメラは持ち主（`svc/cam_holders`: manual / nn）が居る間だけ流れ、camera は持ち主の名前しか知らない**（`port/camera/` は nn を include しない。lcd は持ち主ではない）。**表が空でも teardown の許可ではなく**資源はボードの確認済み停止の後だけ、stop の待ちは自分の stream の世代で照合する（#142）。
+- **[!] カメラは持ち主（`svc/camera/cam_holders`: manual / nn）が居る間だけ流れ、camera は持ち主の名前しか知らない**（`port/camera/` は nn を include しない。lcd は持ち主ではない）。**表が空でも teardown の許可ではなく**資源はボードの確認済み停止の後だけ、stop の待ちは自分の stream の世代で照合する（#142）。
 
 ### 9. plugin container と asset（3 ボード共有部）
 
 plugin は board code と同格の**信頼された native code**。ゲートが証明するのは**スタック上限だけ**で、
 **メモリ安全性も、渡したポインタの使用範囲も、MMIO も証明しない**。
 
-- **`svc/plugin_load.c` は呼び出し可能なポインタを 1 つも返さない**（整数オフセットとコピー済みバイト
+- **`svc/plugin/plugin_load.c` は呼び出し可能なポインタを 1 つも返さない**（整数オフセットとコピー済みバイト
   のみ）。「実行しない」は規律ではなく**型の性質**。**ゲートは plugin ELF にも適用し対象外にしない。
   ダイジェストは署名ではない**（由来は packer のプロセス制約が担保する）。
 - **container は組んでから検査し、その同一ファイルを送る**。ホストは `verify_container` で**デバイスと
-  同じ `svc/plugin_load.c`** を走らせ、**全ゲート通過まで公開しない**。**`--profile` と `--slot` は必須**
+  同じ `svc/plugin/plugin_load.c`** を走らせ、**全ゲート通過まで公開しない**。**`--profile` と `--slot` は必須**
   で前者はファイル名から推測しない。**`--profile` はチェック集合の選択であって識別ではない**ので非対称
   — 対処は**拒否ではなく警告**で、**`cls` 側に出力 shape 固定を足さない**。
 - **[!] モデル区画は 16 バイト整列**（flatbuffer の 4 ではなく Ethos-U ドライバの要求）。
@@ -141,7 +141,7 @@ plugin は board code と同格の**信頼された native code**。ゲートが
   ない（課金は**フレームバッファを触る前**）。**輪郭は外接面積ではなく実際に書く store 数で課金する**
   （外接面積だと近距離の顔 1 つで箱が黙って消える）。共有してよいのは幾何規則（`svc/rect_geom.c`）
   だけで**期待値は共有せず実ループの store を数える**。
-- **[!] 分岐点は `svc/nn_active_core.c` の 1 つだけ**（一発デコード / stream の admission・decode・draw /
+- **[!] 分岐点は `svc/nn/nn_active_core.c` の 1 つだけ**（一発デコード / stream の admission・decode・draw /
   **閾値** / report が全部そこを通る）。**plugin は自分の閾値を持つ**ので片方だけ繋ぐと `nn thresh` が
   届かず、**両者に同じ閾値を与える differential test はこれを見逃す**。**幾何も 1 つで decode 結果は private**。
 - **[!] plugin のビルド規則は共有**（`cmake/add_plugin.cmake`）で**ボードは自分の事実だけを引数で渡す**。
@@ -184,7 +184,7 @@ plugin は board code と同格の**信頼された native code**。ゲートが
 - **`CLI_INSTANCE_TIME_SLICE=0` を維持**（CPU-bound コマンドが多重実行に非再入。スライス有効化は再入ガードとセット）。
 - **raster の DCMI OVR を終端に戻さない**（#137）: 復帰は producer の `cam_stream_resync()` 1 本（`cam_lock` 下・
   NVIC マスク下、subscriber の close/open 無し）。**teardown は stop とエラーだけ**（#142 で上限は無い）。
-- **購読者は camera sink（表示 + nn の step）と MJPEG の 2 つ、step の停止は印を落として使用中 0**（`svc/cam_step`）。`camera_frame_put()` は**全 `consume()` の最後の
+- **購読者は camera sink（表示 + nn の step）と MJPEG の 2 つ、step の停止は印を落として使用中 0**（`svc/camera/cam_step`）。`camera_frame_put()` は**全 `consume()` の最後の
   文**、`CAM_OWN_DRAINING` は `camera_unsubscribe()` / step の disable の**前**、直列化（PRIMASK）は作業を跨がない。判定は
   `cam_drain.c` / `cam_own.c` の純関数が**唯一の判断点**で**両方 fail-closed**、**`default:` を足さない**。
   **DONE は `pins == 0`（step は使用中 0）ちょうどだけ。失敗は呼び出し元まで返す。**

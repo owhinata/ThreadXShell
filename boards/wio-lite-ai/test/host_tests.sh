@@ -51,7 +51,7 @@ gcc $CFLAGS -Wno-unused-parameter \
 # This was half of test_nn_decoder.c below.  The translation never had a model in
 # it: `nn out`, `nn info` and the active-decoder shim all need it whatever
 # interprets the tensors -- or whether anything does -- so NOTHING IS LINKED WITH
-# IT HERE, svc/blazeface.c included.  Linking a decoder would only prove it still
+# IT HERE, svc/nn/blazeface.c included.  Linking a decoder would only prove it still
 # compiles.
 #
 # It is a board test because the point is the REAL nn.h: `struct nn_tensor` and
@@ -62,7 +62,7 @@ gcc $CFLAGS -Wno-unused-parameter \
 # described before, and a quantisation not passed through as it stands (this
 # board publishes scale 0 for an unquantised tensor and its graphs are float32,
 # so an invented scale would multiply every value by zero).
-gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" \
+gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_nn_desc.c" "$board/port/nn/nn_desc.c" \
     $LDFLAGS -o "$out/test_nn_desc"
 "$out/test_nn_desc"
@@ -71,7 +71,7 @@ gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" \
 # stats` (port/nn/nn_decode_count.c): grove-vision-ai-v2's table.  A plugin that
 # answers BF_ERR_UNINIT, BF_ERR_ARG or an undocumented code cannot be typed, and
 # each must be counted as a decoder fault, never as "the model" or as nothing.
-gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" \
+gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_nn_decode_count.c" "$board/port/nn/nn_decode_count.c" \
     $LDFLAGS -o "$out/test_nn_decode_count"
 "$out/test_nn_decode_count"
@@ -99,16 +99,16 @@ gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" \
 #
 # The plugin linked in is the real asset/plugins/blazeface (its own slot table,
 # the same one the packer reads), and the shared decoder it carries comes with
-# it -- the firmware image no longer links svc/blazeface.c at all.
+# it -- the firmware image no longer links svc/nn/blazeface.c at all.
 gcc $CFLAGS -I "$board/port/nn" -I "$board/port/plugin" -I "$board/svc" \
-    -I "$asset/plugins/blazeface" -I "$asset/common" -I "$HOST_TEST_SVC" \
+    -I "$asset/plugins/blazeface" -I "$asset/common" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_nn_active.c" \
     "$board/port/nn/nn_active.c" "$board/port/nn/nn_desc.c" \
-    "$HOST_TEST_SVC/nn_active_core.c" \
+    "$HOST_TEST_SVC/nn/nn_active_core.c" \
     "$asset/plugins/blazeface/plugin_main.c" \
     "$asset/common/plugin_base.c" "$asset/common/plugin_fmt.c" \
     "$asset/common/plugin_text.c" \
-    "$HOST_TEST_SVC/blazeface.c" \
+    "$HOST_TEST_SVC/nn/blazeface.c" \
     $LDFLAGS -lm -o "$out/test_nn_active"
 "$out/test_nn_active"
 
@@ -117,14 +117,14 @@ gcc $CFLAGS -I "$board/port/nn" -I "$board/port/plugin" -I "$board/svc" \
 # refusing again at the branch into entry(), and an unload that does not reach
 # the loader -- each without the lease, and each counted once.  The same test
 # grove-vision-ai-v2 has had since #127.  The REAL plugin_run.c and
-# svc/plugin_exec.c; the HAL is test/plugin_run_shim, and the shared loader's
+# svc/plugin/plugin_exec.c; the HAL is test/plugin_run_shim, and the shared loader's
 # unload is wrapped so "it did not unpublish" can be observed as "it did not
 # call".
 gcc $CFLAGS \
     -I "$here/plugin_run_shim" -I "$board/port/plugin" -I "$board/svc" \
-    -I "$svc" \
+    -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_plugin_run_lease.c" "$board/port/plugin/plugin_run.c" \
-    "$svc/plugin_exec.c" "$svc/plugin_mpu_v7m.c" "$svc/plugin_load.c" \
+    "$svc/plugin/plugin_exec.c" "$svc/plugin/plugin_mpu_v7m.c" "$svc/plugin/plugin_load.c" \
     "$svc/crc32.c" \
     $LDFLAGS -Wl,--wrap=plugin_exec_unload -o "$out/test_plugin_run_lease"
 "$out/test_plugin_run_lease"
@@ -135,8 +135,8 @@ gcc $CFLAGS \
 # plugin_run.c, each compiled ON ITS OWN with the includes its test uses (never
 # read off a linked test binary, whose stubs would count), held against the two
 # tests' tables and the script's named exemptions in both directions.
-lease_inc_active="-I $board/port/nn -I $board/port/plugin -I $board/svc -I $HOST_TEST_SVC"
-lease_inc_run="-I $here/plugin_run_shim -I $board/port/plugin -I $board/svc -I $svc"
+lease_inc_active="-I $board/port/nn -I $board/port/plugin -I $board/svc -I $HOST_TEST_SVC -I $HOST_TEST_SVC/nn -I $HOST_TEST_SVC/plugin -I $HOST_TEST_SVC/camera"
+lease_inc_run="-I $here/plugin_run_shim -I $board/port/plugin -I $board/svc -I $svc -I $svc/nn -I $svc/plugin -I $svc/camera"
 gcc $CFLAGS $lease_inc_active -c "$board/port/nn/nn_active.c" \
     -o "$out/lease_nn_active.o"
 gcc $CFLAGS $lease_inc_run -c "$board/port/plugin/plugin_run.c" \
@@ -194,7 +194,7 @@ done
 # reason mlperf_th is C++ too (see its header).
 mlperf="$HOST_TEST_REPO/lib/mlperf-tiny/benchmark"
 if [ -f "$mlperf/api/internally_implemented.cpp" ]; then
-    gcc $CFLAGS -c -I "$svc" "$svc/fmt.c" -o "$out/fmt.o"
+    gcc $CFLAGS -c -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" "$svc/fmt.c" -o "$out/fmt.o"
     gcc $CFLAGS -I "$board/port/nn" -I "$board/port/mlperf" \
         -c "$here/test_mlperf.c" -o "$out/test_mlperf.o"
     # -std=gnu++17 to match the firmware, which passes no -std and so gets the GNU
@@ -205,7 +205,7 @@ if [ -f "$mlperf/api/internally_implemented.cpp" ]; then
     # both, but the dialect match is what made the difference visible.)
     g++ -std=gnu++17 -Wall -Wextra -ffunction-sections -fdata-sections -no-pie \
         -I "$mlperf" -I "$board/port/mlperf" -I "$board/port/nn" \
-        -I "$inc" -I "$svc" -I "$board/port/threadx" \
+        -I "$inc" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" -I "$board/port/threadx" \
         -fno-exceptions -fno-rtti \
         -include "$board/port/mlperf/mlperf_th.h" \
         "$mlperf/api/internally_implemented.cpp" \
@@ -243,10 +243,10 @@ gcc $CFLAGS "$here/test_sbrk.c" "$out/retarget_host.o" \
 # it -- and those goldens are the OTHER board's, because rect_geom.c is shared
 # and an 8x8 outline of stroke 2 must cost 48 on both.
 gcc $CFLAGS -DPLUGIN_PAINT_COUNT_STORES \
-    -I "$board/port/plugin" -I "$board/../../svc" \
+    -I "$board/port/plugin" -I "$board/../../svc" -I "$board/../../svc/nn" -I "$board/../../svc/plugin" -I "$board/../../svc/camera" \
     "$here/test_plugin_paint.c" "$board/port/plugin/plugin_paint.c" \
-    "$board/../../svc/plugin_paint_budget.c" "$board/../../svc/rect_geom.c" \
-    "$board/../../svc/plugin_paint_span.c" \
+    "$board/../../svc/plugin/plugin_paint_budget.c" "$board/../../svc/rect_geom.c" \
+    "$board/../../svc/plugin/plugin_paint_span.c" \
     $LDFLAGS -o "$out/test_plugin_paint"
 "$out/test_plugin_paint"
 
@@ -259,7 +259,7 @@ gcc $CFLAGS -DPLUGIN_PAINT_COUNT_STORES \
 # write byte-identical records for the same text.  The REAL log.c is compiled
 # (by #include, to read the ring back); log_shim/ supplies only the intrinsics
 # it uses, traced, and -DLOG_HOST_TEST switches on its read-back tap.
-gcc $CFLAGS -DLOG_HOST_TEST -I "$here/log_shim" -I "$board/svc" -I "$svc" \
+gcc $CFLAGS -DLOG_HOST_TEST -I "$here/log_shim" -I "$board/svc" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_log.c" "$svc/fmt.c" \
     $LDFLAGS -o "$out/test_log"
 "$out/test_log"
@@ -331,7 +331,7 @@ gcc $CFLAGS -I "$board/src" \
     $LDFLAGS -o "$out/test_psram_guard"
 "$out/test_psram_guard"
 
-# issue #142 review -- which band stream a stop waits for: svc/cam_gen.h, shared
+# issue #142 review -- which band stream a stop waits for: svc/camera/cam_gen.h, shared
 # with f746g-disco since issue #143, so its test is shell/test/test_cam_gen.c.
 
 # issue #142 review -- has the last nn teardown finished (port/nn/nncam_teardown.h):
@@ -355,7 +355,7 @@ for sd in 0 1; do
     gcc $CFLAGS -DCLI_USE_COLOR=0 -DBSP_ENABLE_SD=$sd \
         -I "$st" -I "$HOST_TEST_BACKEND" -I "$st/shim" -I "$st/fx_shim" \
         -I "$board/svc" -I "$inc" -I "$HOST_TEST_CORE" \
-        -I "$st/../cmds" -I "$svc" \
+        -I "$st/../cmds" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
         "$here/test_camera_table.c" "$st/camera_svc_stub.c" \
         "$st/../cmds/cmd_camera.c" \
         "$HOST_TEST_CORE/cli_session.c" "$HOST_TEST_CORE/cli_edit.c" \

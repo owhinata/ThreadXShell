@@ -34,7 +34,7 @@ shell をボード非依存コアとして統合する当初の目標は達成�
 ## アーキテクチャ / レイヤリング
 
 一方向依存を守る: **HAL/CMSIS/ThreadX（`lib/`）← port（ボード別グルー）← shell ← app**。
-構成は `shell/` / `svc/`（freestanding サービス層）/ `asset/`（plugin ソースと container ツール）/
+構成は `shell/` / `svc/`（freestanding サービス層: 汎用 + `nn/` `plugin/` `camera/`）/ `asset/`（plugin ソースと container ツール）/
 `lib/`（upstream、read-only）/ `cmake/`（共有ビルド規則とゲート）/ `boards/<board>/`（port ldscript
 src cmds svc cmake test README。wio のみ boot も）。
 
@@ -46,11 +46,11 @@ src cmds svc cmake test README。wio のみ boot も）。
   サイズと優先度は `cli_config.h` の既定を踏襲し `_Static_assert` を通す。
 - upstream submodule（`lib/`）は read-only で、必要な調整は port 側で吸収する。**boot ツリー
   （`boards/wio-lite-ai/boot/`）は独立**で、app / shell とソースを共有しない。
-- **[!] カメラは持ち主（`svc/cam_holders`: manual / nn）が居る間だけ流れ、camera は持ち主の名前しか知らない**（nn を include しない。lcd は持ち主ではない）。**表が空でも teardown の許可ではなく**資源はボードの確認済み停止の後だけ、stop の待ちは自分の stream の世代で照合する（#142、`svc/README.md`）。
+- **[!] カメラは持ち主（`svc/camera/cam_holders`: manual / nn）が居る間だけ流れ、camera は持ち主の名前しか知らない**（nn を include しない。lcd は持ち主ではない）。**表が空でも teardown の許可ではなく**資源はボードの確認済み停止の後だけ、stop の待ちは自分の stream の世代で照合する（#142、`svc/README.md`）。
 
 ### [!] `nn` と `camera` は 3 ボード共有の 1 コマンド（各 1 つ）
 
-`shell/cmds/cmd_nn.c` + 契約 `svc/nn_svc.h` + `nn_svc_*.c`、`cmd_camera.c` + `svc/camera_svc.h` + `camera_svc_*.c`（下は nn の規則）。
+`shell/cmds/cmd_nn.c` + 契約 `svc/nn/nn_svc.h` + `nn_svc_*.c`、`cmd_camera.c` + `svc/camera/camera_svc.h` + `camera_svc_*.c`（下は nn の規則）。
 
 - **共有 TU（nn・camera とも）は可変記憶域を 1 バイトも持たない**（状態はアダプタ、バッファは持ち主が配置属性つきで注入）。
   強制は `cmake/check_no_mutable_storage.py` の**ボードごとの監査コンパイル**（ホストの答えは別物）。
@@ -63,7 +63,7 @@ src cmds svc cmake test README。wio のみ boot も）。
 - **port のアダプタは `struct cli_instance` を取らない**（印字・待ち・キャンセルは `boards/*/cmds/`）。
 - **ライブ推論は 3 ボードとも `nn stream start/stop/stats`**（`preview` は復活させない）。`start` は非ブロッキングで、待ちは `--frames <n>` が 1 実装で持つ。
 - **[!] stream には世代があり、`stop` は遷移を claim するのと同じクリティカルセクション内で照合する**。
-  `NN_STREAM_GEN_ANY` は操作者専用で**待ち手は渡さない**。機械は `svc/nn_stream_life.c` の 1 本。
+  `NN_STREAM_GEN_ANY` は操作者専用で**待ち手は渡さない**。機械は `svc/nn/nn_stream_life.c` の 1 本。
 - **[!] start の admission も機械が持つ** — **worker を触る前に STARTING を claim し失敗なら abort**。
   `commit()` は STARTING 以外、`finish/retry/poison` は STOPPING 以外を拒否する。
 - **[!] `nn run` も one-shot として同じ機械を claim する**（re-arm 不可・操作者の stop は拒否・自分の世代で
@@ -73,12 +73,12 @@ src cmds svc cmake test README。wio のみ boot も）。
 - **[!] poll は 2 相 + 遷移カウンタ**（数値は他ロック配下で割込み禁止下では集められず、世代と状態だけでは retryable な stop 跨ぎを弾けない）。
 - **[!] retryable / terminal の分類は「その時点で何ができるか」**。表はボードが出し（純関数・ホストテスト必須）、未文書コードは
   `nn_stream_disp_of()` が terminal に fail-closed。**負値を 1 つに畳まない**（モデル非認識 / 未初期化 / 引数不正は別コードで「0 件」ではない）。
-- **[!] 入力の受け渡し語 FILLING の出口は ABANDON（producer）と JOIN（worker の受理）だけ**（`svc/nn_handoff.h`。待ちが切れた
+- **[!] 入力の受け渡し語 FILLING の出口は ABANDON（producer）と JOIN（worker の受理）だけ**（`svc/nn/nn_handoff.h`。待ちが切れた
   worker は FILLING を奪わず待ち直す。#130）。負値の decode の数え方もボードの純関数の表（P8、ホストテスト必須）。
 - **[!] 停止は走行中の推論を取り消せない** — worker は arm 時点の世代を控え、publish のロック内で照合
-  する（`svc/nn_det_record.c`）。**RAW 記述子・top-5 は publish 時に record へ載せ、印字時にモデルを取り直さない**（#121）。
+  する（`svc/nn/nn_det_record.c`）。**RAW 記述子・top-5 は publish 時に record へ載せ、印字時にモデルを取り直さない**（#121）。
 - **[!] 推論を非同期の worker で回すボードは「誰も解釈していない」も世代規則の下で publish する**（しないと `nn run` が timeout する。wio・Grove）。
-- **[!] モデルの load / unload の順序は `svc/nn_core_model` の 1 実装**（表は `svc/nn_swap`）: plugin の差し替えは backend 成功後、bare は plugin
+- **[!] モデルの load / unload の順序は `svc/nn/nn_core_model` の 1 実装**（表は `svc/nn/nn_swap`）: plugin の差し替えは backend 成功後、bare は plugin
   unload、モデルが残らない終わり方は全部下ろす、**BUSY は swap より前だけ**（だから BUSY 拒否は状態行を出さない、#131）。
 
 ### [!] plugin container と asset（3 ボード共有部）
@@ -86,11 +86,11 @@ src cmds svc cmake test README。wio のみ boot も）。
 モデルとその出力を解釈するコードを 1 blob で運ぶ。plugin は board code と同格の**信頼された native
 code** で、ゲートが証明するのはスタック上限だけ（**メモリ安全性も MMIO も証明しない**）。
 
-- **`svc/plugin_load.c` は呼び出し可能なポインタを返さない**（整数オフセットとコピー済みバイトのみ）。
+- **`svc/plugin/plugin_load.c` は呼び出し可能なポインタを返さない**（整数オフセットとコピー済みバイトのみ）。
   「実行しない」は型の性質なので関数ポインタを足さない。
 - **ゲートは plugin ELF にも適用する**（対象外にしない）。**ダイジェストは署名ではない**。
 - **container は組んでから検査し、その同一ファイルを送る**（ホストは `verify_container` で**デバイスと
-  同じ `svc/plugin_load.c`** を走らせる）。**通るまで公開しない**（private path で組む）。
+  同じ `svc/plugin/plugin_load.c`** を走らせる）。**通るまで公開しない**（private path で組む）。
 - **モデル区画は 16 バイト整列**（flatbuffer の 4 ではなく Ethos-U ドライバの要求）。
 - **オフセット → アドレスの変換は `plugin_run_slot()` の 1 箇所**で、**実行前に MPU を読み戻して
   fail-closed**（純関数・ホストテスト必須）。**窓を守る新しい機構は作らない**。
@@ -213,7 +213,7 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
   構造的に成立しない。#137）。**teardown は stop とエラーだけ、復帰は producer の in-place resync 1 本。**
 - **`.sdram.ai` のスクラッチはボードが注入する**（常駐の require は `check_f746_layout.py` が持つ）。
 - **camera sink（表示 + nn の step）と MJPEG の 2 購読者は各自 drain する**（`camera_frame_put()` は全 `consume()` の
-  最後の文、購読者の終わりは `_pins == 0 && _callbacks == 0`）。**step の停止は印を落として使用中 0**（`svc/cam_step`）。
+  最後の文、購読者の終わりは `_pins == 0 && _callbacks == 0`）。**step の停止は印を落として使用中 0**（`svc/camera/cam_step`）。
 - リファレンス: RM0385 / UM1907（`_ref/f746g-disco/`、read-only）。
 
 ### Wio Lite AI（[!] ブリック安全則あり）

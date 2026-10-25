@@ -40,8 +40,8 @@
  * finish it keeps whatever is left and finishes it itself (or on the next
  * call), and says which of the statuses below describes the situation.
  *
- * Not yet used (issue #143 commit 1 only adds it); the shared command and the
- * first adapter arrive in the commits that follow.
+ * Used by shell/cmds/cmd_camera.c and, so far, the f746g-disco adapter
+ * (issue #143 commit 2); the wio-lite-ai and Grove adapters follow.
  */
 #ifndef CAMERA_SVC_H
 #define CAMERA_SVC_H
@@ -93,6 +93,9 @@ extern "C" {
 #define CAMERA_SVC_ERR_HW       (-96)  /**< the sensor or interface refused     */
 #define CAMERA_SVC_ERR_TIMEOUT  (-97)  /**< a wait expired; it may still finish */
 #define CAMERA_SVC_ERR_LOST     (-98)  /**< terminal; only a reset clears it    */
+#define CAMERA_SVC_ERR_CANCELLED (-99) /**< the operator cancelled (the shared
+                                        *   command's callback said so); the
+                                        *   shared command prints nothing      */
 
 /** Longest board-written explanation carried back with a result. */
 #define CAMERA_SVC_DETAIL_MAX 159
@@ -162,29 +165,50 @@ typedef int (*camera_svc_write_fn)(void *ctx, const char *s, size_t len);
 
 /* ---- power and identity --------------------------------------------------- */
 
+/*
+ * [!] WHERE AN OPERATION TAKES @p write, THE BOARD SAYS ITS OWN WORDS THROUGH
+ * IT -- a progress line before a slow bring-up ("takes ~1s"), and what it did
+ * on success -- and the shared command adds none of its own for that case.
+ * What went WRONG is never written: it comes back in @p res, because the shared
+ * command prints a failure differently (in red) from a report, and a board
+ * cannot tell the two apart through one writer.  (Issue #143 commit 2 gave the
+ * power, info, report and stream-start calls a writer; commit 1 had drafted
+ * them without one, which would have put every board's wording into the
+ * shared command.)
+ */
+
 /**
  * Power the sensor up (as deep a bring-up as `probe` needs), read its
- * identity, and write what was found.  Writes from one sample after the
- * bring-up; a failure is in @p res and nothing is written for it.
+ * identity, and write what was found.  A board whose bring-up is slow may write
+ * one progress line first, before it takes any lock; the identity is written
+ * after the bring-up from one sample.  A failure is in @p res and nothing is
+ * written for it.
  */
 void camera_svc_probe(struct camera_op_result *res,
                       camera_svc_write_fn write, void *ctx);
 
-/** CAMERA_SVC_HAS_POWER: bring the module to its powered, ready state. */
-void camera_svc_on(struct camera_op_result *res);
+/** CAMERA_SVC_HAS_POWER: bring the module to its powered, ready state, and
+ *  write what was done (as for probe, a progress line may come first). */
+void camera_svc_on(struct camera_op_result *res,
+                   camera_svc_write_fn write, void *ctx);
 
 /**
- * CAMERA_SVC_HAS_POWER: take the module to the board's DEEPEST power state.
+ * CAMERA_SVC_HAS_POWER: take the module to the board's DEEPEST power state,
+ * and write what was done.
  *
  * The board re-checks the stream and its holders under its own lock
  * immediately before cutting power; with anyone but the operator holding the
- * stream it answers CAMERA_SVC_ERR_IN_USE and changes nothing.
+ * stream it answers CAMERA_SVC_ERR_IN_USE and changes nothing.  Stopping the
+ * operator's own stream first is the shared command's (it prints and waits).
  */
-void camera_svc_off(struct camera_op_result *res);
+void camera_svc_off(struct camera_op_result *res,
+                    camera_svc_write_fn write, void *ctx);
 
-/** CAMERA_SVC_HAS_INFO: write the driver / sensor state from one sample.
- *  Touches no sensor bus that a running stream depends on. */
-int camera_svc_info(camera_svc_write_fn write, void *ctx);
+/** CAMERA_SVC_HAS_INFO: write the driver / sensor state.  Each line is written
+ *  with no camera lock held.  Touches no sensor bus that a running stream
+ *  depends on.  A failure is in @p res. */
+void camera_svc_info(struct camera_op_result *res,
+                     camera_svc_write_fn write, void *ctx);
 
 /* ---- one-shot capture ----------------------------------------------------- */
 
@@ -218,16 +242,26 @@ struct camera_svc_capture_report {
 
 /**
  * Report on the LAST capture: write the board's statistics lines and hand back
- * its leading bytes (the shared command hexdumps them) and the warm-up it
- * paid.  Statistics, head and warm-up all come from the same capture
- * generation; if the frame is replaced part way the report fails rather than
- * mixing two frames.
+ * its leading bytes (the shared command hexdumps them, after the lines) and
+ * the warm-up it paid.  Statistics, head and warm-up all come from the same
+ * capture generation; if the frame is replaced part way the report fails
+ * rather than mixing two frames (a head that cannot be read from that
+ * generation comes back with head_len 0).
  *
- * @return CAMERA_SVC_OK or a CAMERA_SVC_ERR_* status (NO_FRAME when nothing
- *         has been captured).
+ * The status is in @p res: CAMERA_SVC_OK or a CAMERA_SVC_ERR_* (NO_FRAME when
+ * nothing has been captured), with the board's words in its detail.
+ *
+ * [!] A LONG WALK ASKS @p cancelled BETWEEN CHUNKS, and when it says yes
+ * (non-zero) the board stops, writes NOTHING, and answers
+ * CAMERA_SVC_ERR_CANCELLED.  The board holds no shell instance, so it cannot
+ * see a Ctrl+C itself; and the console only reads its input while somebody
+ * asks, so a walk that never asks runs to the end and prints lines nobody
+ * wanted.  @p cancelled gets the same @p ctx as @p write.
  */
-int camera_svc_capture_report(struct camera_svc_capture_report *rep,
-                              camera_svc_write_fn write, void *ctx);
+void camera_svc_capture_report(struct camera_svc_capture_report *rep,
+                               struct camera_op_result *res,
+                               camera_svc_write_fn write,
+                               int (*cancelled)(void *ctx), void *ctx);
 
 /* ---- reading the last capture out (save / send) -------------------------- */
 
@@ -265,7 +299,9 @@ void camera_svc_frame_open(struct camera_svc_frame *f,
  * a stream start, Grove's `camera raw`).  A check followed by a copy under a
  * separate lock leaves a window in which a capture starts writing and the copy
  * reads half of each frame.  When the frame is no longer the one opened, the
- * read fails (save leaves a partial file, send aborts) and copies nothing.
+ * read fails (save leaves a partial file, send aborts).  The bytes may
+ * already be in @p dst by then (a board may copy first and compare the
+ * generation of what it copied); after a failed read they must not be used.
  */
 void camera_svc_frame_read(const struct camera_svc_frame *f, uint32_t off,
                            void *dst, uint32_t n, struct camera_op_result *res);
@@ -280,10 +316,13 @@ void camera_svc_frame_close(struct camera_svc_frame *f);
  * Register the operator as a holder of the stream, starting it if nobody was
  * streaming.  @p test != 0 streams the test pattern (CAMERA_SVC_HAS_TEST).
  * @p already is set non-zero when the operator was already a holder and
- * nothing changed.
+ * nothing changed.  A board may write a note through @p write before it
+ * starts (f746: 30 fps clamped while the LCD scans out); the outcome itself is
+ * the shared command's to print.
  */
 void camera_svc_stream_start(int test, struct camera_op_result *res,
-                             int *already);
+                             int *already,
+                             camera_svc_write_fn write, void *ctx);
 
 /** What a stop request did. */
 enum camera_svc_stop {
@@ -320,11 +359,34 @@ struct camera_svc_state {
 	uint32_t lost;             /**< holders dropped when the stream ended     */
 };
 
-/** Fill @p st from one sample taken under the board's lock. */
-void camera_svc_stream_state(struct camera_svc_state *st);
+/** Fill @p st from one sample taken under the board's lock.  When the board
+ *  cannot take that sample (driver not up), @p res says why and @p st still
+ *  holds the board's best answer to "is it streaming" (zero otherwise), so a
+ *  caller that only needs that -- `camera off` -- may go on. */
+void camera_svc_stream_state(struct camera_svc_state *st,
+                             struct camera_op_result *res);
 
-/** Write the board's own `camera stream stats` lines, from one sample. */
-int camera_svc_stream_report(camera_svc_write_fn write, void *ctx);
+/** The shared command's own `camera stream stats` lines (state, holders),
+ *  handed the board's sample.  Called with no camera lock held. */
+typedef void (*camera_svc_state_fn)(void *ctx, const struct camera_svc_state *st);
+
+/**
+ * `camera stream stats`: take ONE sample, hand its state to @p head (the
+ * shared command prints the state and holders lines from it), then write the
+ * board's own lines from THE SAME sample.
+ *
+ * [!] ONE SAMPLE FOR THE STATE AND THE NUMBERS.  Two samples -- the state from
+ * camera_svc_stream_state() and the numbers from a second one -- let another
+ * console's `camera stream start` land in between, and "state: stopped" would
+ * sit above the new stream's elapsed time and fps.  The holders may be a
+ * separate look (they always were).  camera_svc_stream_state() stays for a
+ * caller that needs the state alone (`camera off`).
+ *
+ * A failure is in @p res, and then neither @p head nor @p write is called.
+ */
+void camera_svc_stream_report(struct camera_op_result *res,
+                              camera_svc_write_fn write,
+                              camera_svc_state_fn head, void *ctx);
 
 #ifdef __cplusplus
 }

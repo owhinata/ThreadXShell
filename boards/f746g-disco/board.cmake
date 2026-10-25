@@ -480,6 +480,7 @@ add_executable(shell
     "${BOARD_DIR}/cmds/cmd_qspi.c"
     "${BOARD_DIR}/cmds/cmd_fs.c"
     "${BOARD_DIR}/cmds/cmd_sd.c"
+    "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_camera.c"  # the one shared command (#143)
     "${BOARD_DIR}/cmds/cmd_camera_board.c"
     "${BOARD_DIR}/cmds/cmd_lcd.c"
     "${BOARD_DIR}/cmds/cmd_touch.c"
@@ -501,6 +502,8 @@ add_executable(shell
     "${BOARD_DIR}/port/qspi/qspi_flash.c"
     "${BOARD_DIR}/port/sd/sd_card.c"
     "${BOARD_DIR}/port/camera/camera.c"
+    "${BOARD_DIR}/port/camera/camera_svc_f746.c"  # the shared `camera` command's adapter (#143)
+    "${BOARD_DIR}/port/camera/camera_names.c"     # ...and the words it shares with cmds/
     "${BOARD_DIR}/port/camera/cam_drain.c"
     "${BOARD_DIR}/port/camera/cam_own.c"
     "${CMAKE_SOURCE_DIR}/svc/cam_step.c"      # a step of the camera sink (#142)

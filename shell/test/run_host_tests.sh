@@ -628,6 +628,29 @@ for shape in "-DNN_SVC_HAS_MODEL_SLOT=1" \
     "$out/test_nn_cmd_usage"
 done
 
+# issue #143 -- the shared `camera` command (shell/cmds/cmd_camera.c) through the
+# REAL dispatcher over a stub adapter (camera_svc_stub.c), once per capability
+# shape a board may declare (camera_cfg/camera_svc_config.h): the table's order
+# and its capabilities, the refusal sentences (a board without a test pattern
+# still recognises `test` and says why), the lines the shared command prints
+# around a board's report, and that every frame it opens it closes (MIN: no
+# info, save or send).  The DUP
+# shape registers a board `info` on top of the shared one: the check that the
+# real boards' tables pass (boards/<board>/test/host_tests.sh) must see that.
+# fx_shim/ stands in for FileX, which `camera save` writes through.
+for shape in FULL BARE MIN DUP; do
+    gcc $CFLAGS -DCLI_USE_COLOR=0 -DCAM_TEST_SHAPE_$shape \
+        $glue_inc -I "$here/shim" -I "$here/fx_shim" -I "$here/camera_cfg" \
+        -I "$inc" -I "$core" -I "$here/../cmds" -I "$svc" \
+        "$here/test_camera_cmd.c" "$here/camera_svc_stub.c" \
+        "$here/../cmds/cmd_camera.c" \
+        "$core/cli_session.c" "$core/cli_edit.c" "$core/cli_history.c" \
+        "$core/cli_printf.c" "$svc/fmt.c" "$core/cli_parse.c" "$core/cli_complete.c" \
+        $glue \
+        $LDFLAGS -o "$out/test_camera_cmd"
+    "$out/test_camera_cmd"
+done
+
 # issue #99 -- the shared stream lifecycle (svc/nn_stream_life.c).
 #
 # A `--frames` waiter and a second console racing over one stream: the waiter

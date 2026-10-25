@@ -19,8 +19,7 @@
  *
  * Declared unconditionally; a board defines only what its camera_svc_config.h
  * says it has (CAMERA_SVC_HAS_SEND / CAMERA_SVC_HAS_SAVE), and the shared
- * command calls only under the same macros.  Not yet used: issue #143 commit 1
- * only adds the declarations.
+ * command calls only under the same macros.
  */
 #ifndef CAMERA_CMD_BOARD_H
 #define CAMERA_CMD_BOARD_H

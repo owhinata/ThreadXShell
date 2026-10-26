@@ -81,6 +81,7 @@ TABLE_ROWS = ("entry=100", "shapes_ok=100", "decode=100", "draw=200",
 # A complete shared asset rule (issue #126), over FULL's plugin.
 ASSET = {
     "MODEL": '"${CMAKE_BINARY_DIR}/m.tflite"',
+    "MODEL_SHA256": "%s" % ("ab" * 32),
     "PLUGIN": "cifar10",
     "SLOT": "5",
     "PACKER": '"${CMAKE_BINARY_DIR}/pack.py"',
@@ -194,6 +195,11 @@ ASSET_CASES = [
     # Absent is a board that forgot it, and must not look like the above.
     ("asset_no_verifier", "MODEL_VERIFIER", {}, "MODEL_VERIFIER is required"),
     ("asset_no_model", "MODEL", {}, "MODEL is required"),
+    # Issue #132: empty is "not the pin as fetched" and configures; absent is
+    # a board that forgot, and must not look like it.
+    ("asset_empty_model_sha256", None, {"MODEL_SHA256": '""'}, None),
+    ("asset_no_model_sha256", "MODEL_SHA256", {},
+     "MODEL_SHA256 is required"),
     ("asset_no_plugin", "PLUGIN", {}, "PLUGIN is required"),
     ("asset_no_slot", "SLOT", {}, "SLOT is required"),
     ("asset_no_packer", "PACKER", {}, "PACKER is required"),
@@ -224,6 +230,21 @@ SOURCE_CASES = [
     ("source_both", 'FILE "${CMAKE_BINARY_DIR}/m.tflite" URL u', "FILE and URL both given"),
     ("source_short_pin", "URL u COMMIT c PATH_IN p", "the pin has no SHA256"),
     ("source_none", "", "no FILE, and the pin has no URL"),
+]
+
+# -- issue #132: the pin's hash reaches add_asset() only as asset_model_source()'s
+# <var>_SHA256.  (name, the MODEL_SHA256 the board passes for the pinned file,
+# expected substring or None)
+PIN_HASH = "cd" * 32
+PIN_CASES = [
+    ("pin_hash_passed", "${_src_SHA256}", None),
+    # [!] The same file spelled differently is still the pinned file.
+    ("pin_hash_dropped_respelled", '""', "MODEL is the pinned fetch",
+     '"${CMAKE_BINARY_DIR}/./model/../model/fix/fetched.tflite"'),
+    # [!] The one way to drop the check by mistake: the pinned file, packed as
+    # fetched, with "" as if it were an override.
+    ("pin_hash_dropped", '""', "MODEL is the pinned fetch"),
+    ("pin_hash_other", "ab" * 32, "MODEL is the pinned fetch"),
 ]
 
 # -- the firmware-side registration (issue #112).
@@ -585,9 +606,11 @@ def main():
                                 tail=inc + "add_asset(fix\n%s)\n" % acall)
             text = build_text(work) if expect is None and rc == 0 else ""
         if expect is None and rc == 0:
+            sha = a["MODEL_SHA256"].strip('"')
             need = [w for w in (POLICY_LINE, r"--veneer-cost\s+256\b",
                                 r"plugin/cifar10/plugin\.elf",
-                                r"asset_receipt\.py")
+                                r"asset_receipt\.py",
+                                r"--model-sha256=%s(\s|$)" % sha)
                     if not re.search(w, text)]
             if need:
                 print("  FAIL %-22s configures, but the asset's command lacks "
@@ -604,6 +627,26 @@ def main():
                 tail=inc + "asset_model_source(fix OVERRIDE_VAR FIX_FILE "
                            "OUT_VAR _src %s)\n" % sargs)
         bad += judge(name, rc, out, expect, "configures")
+    for name, sha, expect, *model in PIN_CASES:
+        a = dict(ASSET)
+        a["MODEL"] = model[0] if model else "${_src}"
+        a["MODEL_SHA256"] = sha
+        acall = "\n".join("    %s %s" % (k, v) for k, v in a.items())
+        with tempfile.TemporaryDirectory() as work:
+            rc, out = configure(
+                work, dict(FULL),
+                tail=inc + "asset_model_source(fix OVERRIDE_VAR FIX_FILE "
+                           "OUT_VAR _src URL u COMMIT c PATH_IN p SHA256 %s)\n"
+                           "add_asset(fix\n%s)\n" % (PIN_HASH, acall))
+            text = build_text(work) if expect is None and rc == 0 else ""
+        if expect is None and rc == 0 and not re.search(
+                r"--model-sha256=%s(\s|$)" % PIN_HASH, text):
+            print("  FAIL %-22s configures, but the pack does not carry the "
+                  "pin's hash" % name)
+            bad += 1
+            continue
+        bad += judge(name, rc, out, expect,
+                     "configures; the pack carries the pin's own hash")
     bad += policy_args_cases()
     with tempfile.TemporaryDirectory() as work:
         rc, out = configure(work, dict(FULL), generator="Unix Makefiles")

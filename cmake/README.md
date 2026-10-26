@@ -240,6 +240,23 @@ character and tab on both sides of the name, alone and before a cluster, plus
 the #149 paths and the over-match (`delivery_name_re`). `run_add_plugin_arg_tests.py`'s `not_ninja` covers
 the generator refusal.
 
+# Asset models: the pin is checked again by its first consumer (#132)
+
+`asset_model_source()` takes a pinned model (`URL`/`COMMIT`/`PATH_IN`/`SHA256`)
+and `fetch_model.cmake` checks the hash when it publishes `fetched.tflite`. Once
+the file exists, ninja reruns only its consumer if it changes, so the FIRST
+CONSUMER checks the same `SHA256` again, inside its own command, on the bytes it
+reads: `pack_container.py --model-sha256` when the model is packed as fetched
+(wio), or `run_with_pinned_input.py` in front of the board's first ingest tool
+(Grove's `tflite_strip_boundary`). A mismatch fails the step and writes
+nothing. The value reaches the consumer only as `<OUT_VAR>_SHA256`, never as a
+second literal; `add_asset()` requires `MODEL_SHA256` (possibly empty), refuses
+`""` for the pinned file itself, and an empty hash given to either checker is a
+refusal, not "no check". An override (`OVERRIDE_VAR`) is not hash-checked and
+configure says so; `FILE` is a path, not a hash pin, and is guarded by whatever
+pins the tree it lives in (Grove's cifar10 is inside the pinned Himax SDK).
+`fixtures/run_pinned_input_tests.py` covers both checkers.
+
 # Plugin stack allowances: one table, read back from the image
 
 What each plugin slot may ask of the stack it runs on is one fact with four

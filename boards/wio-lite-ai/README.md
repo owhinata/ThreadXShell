@@ -867,10 +867,11 @@ cmake --build build/wio-lite-ai --target asset-blazeface
 picocom -b 115200 --send-cmd "sb -k" --receive-cmd "rb" /dev/ttyACM0
 ```
 
-The target fetches the pinned model (the same commit and SHA-256 Grove uses),
-checks it with this board's `verify_tflite` (the operators THIS firmware
-registers), packs it with the M7 blazeface plugin, runs the device's validator
-over the packed file, and publishes only then.  It prints a receipt:
+The target fetches the pinned model (the same commit and SHA-256 Grove uses;
+the packer checks that hash again on the bytes it packs, #132), checks it with
+this board's `verify_tflite` (the operators THIS firmware registers), packs it
+with the M7 blazeface plugin, runs the device's validator over the packed file,
+and publishes only then.  It prints a receipt:
 
 ```
   on the board:  blob write 5   (erases the slot, then waits for the file)

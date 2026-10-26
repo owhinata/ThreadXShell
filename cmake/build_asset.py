@@ -123,6 +123,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", required=True)
     ap.add_argument("--model", required=True)
+    # [!] REQUIRED, BUT MAY BE EMPTY (issue #132), like --model-verifier.
+    # Non-empty is the pin's SHA256 and reaches the packer, which hashes the
+    # bytes it packs; empty is add_asset()'s "this model is not the pin" (an
+    # override, a FILE, or a board ingest whose first step checked the pin),
+    # and the packer is then given no hash option at all -- never an empty one.
+    ap.add_argument("--model-sha256", required=True)
     ap.add_argument("--plugin-elf", required=True)
     ap.add_argument("--plugin-stacks", required=True)
     ap.add_argument("--packer", required=True)
@@ -191,7 +197,10 @@ def main():
              "--model", args.model, "--name", args.name,
              "--build-id", args.build_id, "--out", container,
              "--nm", os.environ["ASSET_NM"], "--objcopy", os.environ["ASSET_OBJCOPY"],
-             "--target-id", args.target_id] + stack_args(args.plugin_stacks),
+             "--target-id", args.target_id]
+            + (["--model-sha256", args.model_sha256] if args.model_sha256
+               else [])
+            + stack_args(args.plugin_stacks),
             "the packer")
 
         # From here on, only the ASSEMBLED file is read.

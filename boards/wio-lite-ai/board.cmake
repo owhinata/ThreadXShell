@@ -1692,7 +1692,10 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         # The receipt's commands are THIS board's: `blob write` takes a slot
         # and no name, and erases that slot itself before it receives.
         add_asset(${_name}
-            MODEL "${_src}"  PLUGIN ${A_PLUGIN}  SLOT ${A_SLOT}
+            # No ingest, so the packer is the pin's first consumer and
+            # re-checks it on the bytes it packs (issue #132).
+            MODEL "${_src}"  MODEL_SHA256 "${_src_SHA256}"
+            PLUGIN ${A_PLUGIN}  SLOT ${A_SLOT}
             PACKER "${WIO_PACKER}"  LAYOUT "${WIO_ABI_LAYOUT_JSON}"
             MODEL_VERIFIER "${WIO_MODEL_VERIFIER}"
             CONTAINER_VERIFIER "${WIO_CONTAINER_VERIFIER}"

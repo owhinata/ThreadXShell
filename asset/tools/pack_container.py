@@ -24,6 +24,7 @@ A struct format string in this file would be a second declaration of the ABI,
 and the day a field moved the two would disagree while both still ran.
 """
 import argparse
+import hashlib
 import json
 import os
 import struct
@@ -62,6 +63,26 @@ def elf_section_bytes(objcopy, elf, section, work):
         return b""
     with open(out, "rb") as fh:
         return fh.read()
+
+
+def model_sha256_error(model, want):
+    """None when `model` (the bytes about to be packed) hashes to `want`, else
+    the sentence to die with.  Pure, so the host tests reach it directly.
+
+    [!] AN EMPTY `want` IS A REFUSAL, NOT "NO CHECK" (issue #132).  A pin whose
+    hash went missing on the way here would otherwise pack unverified bytes and
+    look exactly like a checked build.  Only the override path omits the
+    option, and it omits it -- it never passes an empty one."""
+    if not want:
+        return ("--model-sha256 is empty: a pinned model without a hash; the "
+                "override path omits the option instead")
+    if len(want) != 64 or any(c not in "0123456789abcdef" for c in want):
+        return ("--model-sha256 must be 64 lowercase hex digits, got %r" % want)
+    got = hashlib.sha256(model).hexdigest()
+    if got != want:
+        return ("the model is not the pinned content: sha256 mismatch "
+                "(expected %s, got %s, %d B)" % (want, got, len(model)))
+    return None
 
 
 def put(buf, off, fmt, *vals):
@@ -200,6 +221,9 @@ def main():
     ap.add_argument("--elf", required=True)
     ap.add_argument("--model", required=True)
     ap.add_argument("--data")
+    # The pin's SHA256, re-checked on the bytes this packer reads and packs
+    # (issue #132).  Absent = an override, not hash-checked; empty = refused.
+    ap.add_argument("--model-sha256")
     ap.add_argument("--name", required=True)
     ap.add_argument("--build-id", required=True)
     ap.add_argument("--out", required=True)
@@ -214,6 +238,17 @@ def main():
     ap.add_argument("--accounting", required=True, type=int,
                     help="the analysis the gate says produced the numbers")
     args = ap.parse_args()
+
+    # [!] READ THE MODEL ONCE, AND CHECK THOSE BYTES BEFORE ANYTHING IS WRITTEN
+    # (issue #132).  The fetch verified the file when it published it; ninja
+    # reruns only this step if the file changes afterwards, so the pin is
+    # checked again here, on the very buffer that build_container() lays out.
+    with open(args.model, "rb") as fh:
+        model = fh.read()
+    if args.model_sha256 is not None:
+        err = model_sha256_error(model, args.model_sha256)
+        if err:
+            die(f"{args.model}: {err}; nothing was written")
 
     with open(args.layout) as fh:
         L = json.load(fh)
@@ -313,8 +348,6 @@ def main():
         "slots": slots,
     }
 
-    with open(args.model, "rb") as fh:
-        model = fh.read()
     extra = None
     if args.data:
         with open(args.data, "rb") as fh:

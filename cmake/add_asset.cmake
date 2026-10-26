@@ -12,11 +12,29 @@
 #
 #  asset_model_source(<name>
 #      OVERRIDE_VAR <cache var>  the operator's own copy instead of the pin
-#      OUT_VAR      <var>        receives the path of the model to ingest
+#      OUT_VAR      <var>        receives the path of the model to ingest,
+#                                and <var>_SHA256 the hash its first consumer
+#                                must check ("" = not a pin, nothing to check)
 #      FILE <path> | URL <git> COMMIT <sha> PATH_IN <p> SHA256 <hash>)
+#
+#  [!] THE PIN IS CHECKED TWICE, FROM ONE VALUE (issue #132).  The fetch checks
+#  the file it publishes; the FIRST CONSUMER of that file checks the bytes it
+#  reads, inside its own command -- because once the file exists, ninja reruns
+#  only the consumer if it changes, and an edit after the fetch would otherwise
+#  flow straight into a container.  The consumer is the packer when the model is
+#  packed as fetched (MODEL_SHA256 below), or a board ingest step behind
+#  cmake/run_with_pinned_input.py.  FILE is a path, not a hash pin (it is
+#  guarded by whatever pins the tree it lives in), and an override is not
+#  hash-checked: both give "".
 #
 #  add_asset(<name>
 #      MODEL   <path>            the model as packed, after the board's ingest
+#      MODEL_SHA256 <hash>       REQUIRED, but may be empty: the pin the packer
+#                                re-checks on the bytes it packs, i.e.
+#                                asset_model_source()'s <var>_SHA256 when MODEL
+#                                is that source unchanged; "" when MODEL is an
+#                                override, a FILE, or an ingest's output (the
+#                                ingest's first step checked the pin)
 #      PLUGIN  <name>            a plugin this board built with add_plugin()
 #      SLOT    <n>               checked for capacity, printed on the receipt
 #      PACKER LAYOUT CONTAINER_VERIFIER SLOT_TABLE <path>
@@ -49,6 +67,9 @@
 include_guard(GLOBAL)
 include("${CMAKE_CURRENT_LIST_DIR}/plugin_stack_table.cmake")
 set(_ADD_ASSET_DIR "${CMAKE_CURRENT_LIST_DIR}")
+# The wrapper a board puts in front of an ingest tool that is the pin's first
+# consumer (issue #132); see asset_model_source() above.
+set(ASSET_RUN_PINNED "${CMAKE_CURRENT_LIST_DIR}/run_with_pinned_input.py")
 
 function(asset_model_source _name)
     cmake_parse_arguments(A "" "OVERRIDE_VAR;OUT_VAR;FILE;URL;COMMIT;PATH_IN;SHA256"
@@ -90,9 +111,14 @@ function(asset_model_source _name)
         "Local model for asset '${_name}' instead of the pinned upstream one")
     if(${A_OVERRIDE_VAR})
         set(_src "${${A_OVERRIDE_VAR}}")
+        set(_sha "")
+        message(STATUS "asset ${_name}: model OVERRIDDEN by ${_src} "
+                       "(not the pin, not hash-checked)")
     elseif(A_FILE)
         set(_src "${A_FILE}")
+        set(_sha "")
     else()
+        set(_sha "${A_SHA256}")
         set(_src "${_model_dir}/fetched.tflite")
         add_custom_command(
             OUTPUT "${_src}"
@@ -106,12 +132,26 @@ function(asset_model_source _name)
             COMMENT "asset ${_name}: fetch the pinned model"
             VERBATIM)
     endif()
+    # [!] THE HASH TRAVELS AS A VARIABLE DERIVED FROM OUT_VAR, never as a second
+    # literal: the SHA256 argument above is the one source for both the fetch
+    # and the consumer's check, and a board passes ${<var>_SHA256} on.  The
+    # fetched path is also recorded, so add_asset() can refuse a board that
+    # packs the pinned file and passes MODEL_SHA256 "" -- the one way to drop
+    # the check by mistake.
     set(${A_OUT_VAR} "${_src}" PARENT_SCOPE)
+    set(${A_OUT_VAR}_SHA256 "${_sha}" PARENT_SCOPE)
+    if(_sha)
+        # Keyed by the REALPATH (relative = from where the pack command runs),
+        # so a spelling difference (./, .., relative) cannot drop this net.
+        get_filename_component(_key "${_src}" REALPATH
+                               BASE_DIR "${CMAKE_CURRENT_BINARY_DIR}")
+        set_property(GLOBAL PROPERTY "ASSET_MODEL_PIN:${_key}" "${_sha}")
+    endif()
 endfunction()
 
 function(add_asset _name)
     cmake_parse_arguments(A ""
-        "MODEL;PLUGIN;SLOT;PACKER;LAYOUT;CONTAINER_VERIFIER;SLOT_TABLE;MODEL_VERIFIER;BUILD_ID;TARGET_ID;LINK_ADDR;CAPACITY"
+        "MODEL;MODEL_SHA256;PLUGIN;SLOT;PACKER;LAYOUT;CONTAINER_VERIFIER;SLOT_TABLE;MODEL_VERIFIER;BUILD_ID;TARGET_ID;LINK_ADDR;CAPACITY"
         "VERIFY_ARGS;RECEIPT_STEPS;RECEIPT_THEN" ${ARGN})
     if(A_UNPARSED_ARGUMENTS)
         message(FATAL_ERROR
@@ -132,6 +172,25 @@ function(add_asset _name)
         message(FATAL_ERROR
             "add_asset(${_name}): MODEL_VERIFIER is required (pass \"\" when "
             "this build has no model gate; the asset then refuses to build)")
+    endif()
+    # [!] AND SO MUST MODEL_SHA256 (issue #132), for the same reason: empty is
+    # "this model is not the pin as fetched", absent is a board that forgot.
+    if(NOT DEFINED A_MODEL_SHA256
+       AND NOT "MODEL_SHA256" IN_LIST A_KEYWORDS_MISSING_VALUES)
+        message(FATAL_ERROR
+            "add_asset(${_name}): MODEL_SHA256 is required (pass "
+            "asset_model_source()'s <var>_SHA256, or \"\" when MODEL is not the "
+            "pinned file as fetched)")
+    endif()
+    # The same normalisation as the record in asset_model_source().
+    get_filename_component(_key "${A_MODEL}" REALPATH
+                           BASE_DIR "${CMAKE_CURRENT_BINARY_DIR}")
+    get_property(_pin GLOBAL PROPERTY "ASSET_MODEL_PIN:${_key}")
+    if(_pin AND NOT "${A_MODEL_SHA256}" STREQUAL "${_pin}")
+        message(FATAL_ERROR
+            "add_asset(${_name}): MODEL is the pinned fetch ${A_MODEL}, so "
+            "MODEL_SHA256 must be its pin (asset_model_source()'s "
+            "<var>_SHA256), got '${A_MODEL_SHA256}'")
     endif()
     if(NOT A_SLOT MATCHES "^[0-9]+$")
         message(FATAL_ERROR
@@ -170,6 +229,8 @@ function(add_asset _name)
                 "ASSET_NM=${CMAKE_NM}" "ASSET_OBJCOPY=${CMAKE_OBJCOPY}"
                 "${Python3_EXECUTABLE}" "${_ADD_ASSET_DIR}/build_asset.py"
                 --name "${_name}" --model "${A_MODEL}"
+                # One token with "=" so an empty value survives as "".
+                "--model-sha256=${A_MODEL_SHA256}"
                 --plugin-elf "${_plugin_dir}/plugin.elf"
                 --plugin-stacks "${_plugin_dir}/plugin.stacks.json"
                 --packer "${A_PACKER}" --layout "${A_LAYOUT}"

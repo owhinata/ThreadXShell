@@ -4200,7 +4200,9 @@ untracked, and **the upstream model-zoo licence is yours to comply with**.
 `-DGROVE_ASSET_blazeface_FILE=<path>` uses a local copy instead and skips the
 network; that path is deliberately not hash-checked, because an override exists
 to supply different content, and the strip/vela/pack/verify chain is what stands
-behind it either way.
+behind it either way.  On the pin path the hash is checked twice:
+by the fetch, and again by the strip step on the bytes it reads (#132), so a
+`fetched.tflite` edited after the fetch fails the build instead of being packed.
 
 [!] **The model is stored with Git LFS, and a missing git-lfs fails open.**  A
 checkout without it leaves a **131-byte pointer file, exit code 0, no

@@ -480,6 +480,14 @@ python3 "$repo/cmake/fixtures/run_storage_gate_tests.py" \
 # needs the host C compiler too -- still no cross toolchain.
 python3 "$repo/cmake/fixtures/run_add_plugin_arg_tests.py"
 
+# issue #132 -- the pin is checked again by the FIRST CONSUMER of the fetched
+# model, inside its own command (ninja reruns only the consumer when the file
+# changes after its fetch): the packer's --model-sha256 on the bytes it packs,
+# and cmake/run_with_pinned_input.py in front of an ingest tool.  A one-byte
+# flip must refuse and write nothing, an empty hash must refuse, and a match
+# must go through.  Python only.
+python3 "$repo/cmake/fixtures/run_pinned_input_tests.py"
+
 # issue #97 -- the published decode record (svc/nn/nn_det_record.c).  A camera stream
 # decodes on a worker and a console prints on another thread, so what the two
 # exchange has a rule: the boxes and the diagnostics that describe them travel

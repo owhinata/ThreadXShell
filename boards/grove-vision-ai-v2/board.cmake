@@ -1547,6 +1547,21 @@ endif()
 # commands.
 include("${CMAKE_SOURCE_DIR}/cmake/add_asset.cmake")
 
+# [!] THE PIN'S FIRST CONSUMER CHECKS IT (issue #132), inside its own
+# command.  _pinned is that consumer's prefix: the wrapper on the pin path,
+# nothing on an override or FILE.  Whichever step reads _src first takes
+# it and clears _src_SHA256, so the steps after it -- which read derived
+# bytes no pin describes -- check nothing, and the packer gets "" unless
+# it is itself the first consumer.
+macro(_grove_pinned_prefix)
+    set(_pinned "")
+    if(_src_SHA256)
+        set(_pinned "${Python3_EXECUTABLE}" "${ASSET_RUN_PINNED}"
+                    --sha256 "${_src_SHA256}" --file "${_src}" --)
+        set(_src_SHA256 "")
+    endif()
+endmacro()
+
 function(grove_add_asset _name)
     cmake_parse_arguments(A "STRIP;VELA"
         "PROFILE;PLUGIN;SLOT;FILE;URL;COMMIT;PATH_IN;SHA256" "" ${ARGN})
@@ -1578,12 +1593,14 @@ function(grove_add_asset _name)
     set(_model_dir "${CMAKE_BINARY_DIR}/model/${_name}")
     if(A_STRIP)
         set(_stripped "${_model_dir}/stripped.tflite")
+        _grove_pinned_prefix()
         add_custom_command(
             OUTPUT "${_stripped}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${_model_dir}"
-            COMMAND "${CMAKE_BINARY_DIR}/tflite_strip_boundary"
+            COMMAND ${_pinned} "${CMAKE_BINARY_DIR}/tflite_strip_boundary"
                     "${_src}" "${_stripped}"
             DEPENDS "${_src}" "${CMAKE_BINARY_DIR}/tflite_strip_boundary"
+                    "${ASSET_RUN_PINNED}"
             COMMENT "asset ${_name}: strip the boundary conversions"
             VERBATIM)
         set(_src "${_stripped}")
@@ -1595,14 +1612,16 @@ function(grove_add_asset _name)
         # guess the name vela chose.
         get_filename_component(_stem "${_src}" NAME_WE)
         set(_velaed "${_model_dir}/vela.tflite")
+        _grove_pinned_prefix()
         add_custom_command(
             OUTPUT "${_velaed}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${_model_dir}/vela"
-            COMMAND "${GROVE_VENV}/bin/vela" --accelerator-config ethos-u55-64
+            COMMAND ${_pinned} "${GROVE_VENV}/bin/vela"
+                    --accelerator-config ethos-u55-64
                     --output-dir "${_model_dir}/vela" "${_src}"
             COMMAND "${CMAKE_COMMAND}" -E rename
                     "${_model_dir}/vela/${_stem}_vela.tflite" "${_velaed}"
-            DEPENDS "${_src}"
+            DEPENDS "${_src}" "${ASSET_RUN_PINNED}"
             COMMENT "asset ${_name}: vela -> Ethos-U55 command stream"
             VERBATIM)
         set(_src "${_velaed}")
@@ -1612,7 +1631,8 @@ function(grove_add_asset _name)
     # NAME as well as a slot, and `blob write` will not overwrite a VALID blob
     # of another name.
     add_asset(${_name}
-        MODEL "${_src}"  PLUGIN ${A_PLUGIN}  SLOT ${A_SLOT}
+        MODEL "${_src}"  MODEL_SHA256 "${_src_SHA256}"
+        PLUGIN ${A_PLUGIN}  SLOT ${A_SLOT}
         PACKER "${GROVE_PACKER}"  LAYOUT "${GROVE_ABI_LAYOUT_JSON}"
         MODEL_VERIFIER "${GROVE_SEND_VERIFIER}"
         VERIFY_ARGS ${_verify_args}

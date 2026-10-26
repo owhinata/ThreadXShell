@@ -241,7 +241,9 @@ bool ltdc_is_up(void);
  *  reading the frame buffer out of OCTOSPI1 right now.  **This is the condition
  *  app/psram.c uses to refuse its OCTOSPI1 guard** -- retuning the octal bus
  *  under a live scanout starves the LTDC FIFO and can stall the AXI.  Both
- *  false when the LTDC never came up, which is the correct "not scanning" case. */
+ *  false when the LTDC never came up, which is the correct "not scanning" case.
+ *  [!] It reads the disabled flag, not the fault flag (issue #145): a faulted
+ *  display is "not scanning" only because ltdc_flip() cleared LTDCEN first. */
 bool ltdc_scanout_active(void);
 
 /** True when the LTDC is up but scanout is currently stopped (`lcd off`). */
@@ -326,7 +328,8 @@ void ltdc_unlock_frame(void);
  * reloaded (SRCR.VBR reads 0).  Returns LTDC_OK; LTDC_ERR_STATE if the display
  * is down or scanout is off; LTDC_ERR_HAL if the reload never landed within the
  * timeout -- in which case the display is latched faulted (front unchanged,
- * ltdc_is_up() false; recovery is a reset).  Thread-context only.
+ * ltdc_is_up() false; backlight and LTDCEN off, so ltdc_scanout_active() is
+ * false too -- issue #145; recovery is a reset).  Thread-context only.
  */
 int ltdc_flip(void);
 

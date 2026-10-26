@@ -448,13 +448,14 @@ camera stream runs (`lcd: a camera stream is running -- stop it first`), and a
 stream start is refused while a reset is in progress.  The look and the claim
 are one step under the camera lock (`camera_still_claim()`).
 
-**Known gaps, older than #142 (issue #145).**  The drawing commands (`lcd anim`,
-`lcd fill`, ...) look at the scan-out outside the frame lock and hold no user
-place, so after another console's `lcd off` a reconfigurer can run while one of
-them writes PSRAM.  And an LTDC fault marks the display faulted without
-clearing LTDCEN, which hides a running LTDC from the reconfigurer's scan-out
-gate (not reproduced on hardware).  Both are manual-operation windows; neither
-is fixed here.
+**Drawing commands and LTDC faults (issue #145).**  The drawing commands
+(`lcd fill`, `bar`, `grad`, `clear`, `anim`, `blit`) hold a PSRAM user place for
+the whole drawing and give it back on every exit, so a reconfigurer is refused
+by the guard word while one of them writes the frame buffer, even after another
+console's `lcd off`.  An LTDC fault in `ltdc_flip()` turns the backlight off,
+clears LTDCEN and marks the display disabled; the reconfigurer's scan-out gate
+reads that disabled flag (set only after LTDCEN is cleared), not the fault flag,
+so a fault never hides a running LTDC.  The fault path is review-only.
 
 ### Measured after issue #142
 

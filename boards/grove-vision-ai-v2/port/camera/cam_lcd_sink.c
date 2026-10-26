@@ -1381,8 +1381,8 @@ static int hold_stop_locked(int loses)
 		return (cam_rc == CAM_ERR_LOCKED) ? CAM_ERR_LOCKED : CAM_ERR_BUSY;
 	case CAM_HOLD_END_TERMINAL:
 	default:
-		LOG_ERR("the camera stream could not be stopped and unlinked "
-		        "(camera %d, unlink %d); it is unusable until reboot",
+		LOG_ERR("camera stream not stopped and unlinked (camera %d, "
+		        "unlink %d); RST if camera < 0, else reboot",
 		        cam_rc, attempted ? det_rc : 0);
 		hold_terminal = 1u;
 		return (cam_rc != CAM_OK) ? cam_rc : CAM_ERR_STATE;

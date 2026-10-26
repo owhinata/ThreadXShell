@@ -1262,7 +1262,8 @@ static void nn_hold_refused(struct nn_op_result *res, int rc)
 		break;
 	case CAM_ERR_STATE:
 		nn_detail_set("the camera or its panel sink is unusable until "
-		              "reboot (`camera stream stats`)");
+		              "reset: `reboot`, or RST if it refuses "
+		              "(`camera stream stats`)");
 		break;
 	default:
 		nn_detail_set("the camera would not start (%d)", rc);
@@ -1378,7 +1379,8 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		switch (why) {
 		case NN_STREAM_START_DEAD:
 			nn_detail_set("a previous teardown was never confirmed; only "
-			              "a reboot clears it");
+			              "a reset clears it (`reboot`, or RST if it "
+			              "refuses)");
 			nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
 			return;
 		case NN_STREAM_START_RUNNING:
@@ -1904,8 +1906,8 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 		return;
 	case NN_STREAM_START_DEAD:
-		nn_detail_set("a previous teardown was never confirmed; only a reboot "
-		              "clears it");
+		nn_detail_set("a previous teardown was never confirmed; only a reset "
+		              "clears it (`reboot`, or RST if it refuses)");
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
 		return;
 	case NN_STREAM_START_BUSY:
@@ -2028,11 +2030,11 @@ static const char *nn_stream_why_text(unsigned char why)
 	case NN_STREAM_WHY_CAM_LOST:
 		return NN_SVC_DETAIL_LIT(
 			"the producer never acknowledged the stop; the camera is "
-			"unusable until reboot");
+			"unusable until the board is reset (RST button)");
 	case NN_STREAM_WHY_CAM_STATE:
 		return NN_SVC_DETAIL_LIT(
 			"the camera or its panel sink could not be stopped; it is "
-			"unusable until reboot");
+			"unusable until reset (`reboot`, or RST if it refuses)");
 	case NN_STREAM_WHY_SINK_BUSY:
 		return NN_SVC_DETAIL_LIT(
 			"a camera start or stop is in progress -- run `nn stream "
@@ -2040,7 +2042,8 @@ static const char *nn_stream_why_text(unsigned char why)
 	case NN_STREAM_WHY_SINK_LOST:
 		return NN_SVC_DETAIL_LIT(
 			"the overlay cannot be shown unused: the camera or its "
-			"panel sink is lost until reboot");
+			"panel sink is lost until reset (`reboot`, or RST if it "
+			"refuses)");
 	case NN_STREAM_WHY_OV_BUSY:
 		return NN_SVC_DETAIL_LIT(
 			"the panel has not let go of the overlay yet -- run "
@@ -2078,8 +2081,8 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 		nn_result(res, NN_SVC_ERR_GEN, NN_CLAIM_NONE);
 		return;
 	case NN_STREAM_STOP_DEAD:
-		nn_detail_set("a previous teardown was never confirmed; only a reboot "
-		              "clears it");
+		nn_detail_set("a previous teardown was never confirmed; only a reset "
+		              "clears it (`reboot`, or RST if it refuses)");
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
 		return;
 	case NN_STREAM_STOP_ONESHOT:

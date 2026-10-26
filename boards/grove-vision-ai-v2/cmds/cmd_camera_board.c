@@ -124,14 +124,16 @@ static void cam_report_stop(struct cli_instance *sh, int rc, int retry)
 	else if (rc == CAM_ERR_LOCKED)
 		cli_error(sh, "        nothing was asked of the producer and "
 		              "nothing was torn down;\r\n"
-		              "        the sink stays attached, and a reboot "
-		              "is what clears it\r\n");
+		              "        the stream may still be running; `reboot` "
+		              "stops it first,\r\n"
+		              "        or press RST if that is refused\r\n");
 	else if (rc == CAM_ERR_TIMEOUT)
 		cli_error(sh, "        the producer is still running; the "
-		              "camera is unusable until reboot\r\n");
+		              "camera is unusable until the board\r\n"
+		              "        is reset (RST button)\r\n");
 	else if (rc == CAM_ERR_STATE && retry)
-		cli_error(sh, "        the camera is unusable until "
-		              "reboot\r\n");
+		cli_error(sh, "        the camera is unusable until the "
+		              "board is reset (RST button)\r\n");
 }
 
 /* ---- raw ----------------------------------------------------------------- */

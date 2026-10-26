@@ -929,7 +929,9 @@ confirmed with a stop, the sink unlinked, the table emptied, and every holder
 marked lost until it takes hold again.  A stop that cannot be confirmed -- the
 camera never acknowledged it (`CAM_ST_LOST`) or the panel thread did not come
 back -- is terminal: the table, the sink and every resource stay where they
-are, every later call answers `CAM_ERR_STATE`, and only a reboot clears it.
+are, every later call answers `CAM_ERR_STATE`, and only a reset clears it --
+the RST button when the camera is lost (`reboot` refuses then, #68), `reboot`
+when only the panel thread is.
 
 The frame rates under the new ownership have not been measured on hardware
 yet.  Older sections below name `camera preview`, the command of their time;
@@ -1612,6 +1614,48 @@ enables the line), and the round's wrap-then-reassert step adopts it.  Removing
 happens **inside the quiesce, before the vendor stop**, because that stop drops
 the vendor's watchdog callback and only disables irq 143 when *both* callbacks
 are NULL.  No new wrap slot is consumed: irq 143 was already being wrapped.
+
+### [!] `reboot` stops the camera first, and refuses if it cannot (issue #68)
+
+`reboot` is `NVIC_SystemReset()`, and that resets the **CPU only**.  A stream
+left running keeps the sensor sending and the datapath's EDM watchdog (5 s)
+armed across the reset.  That watchdog then expires **after** the new boot's
+IRQ sweep in `main.c` has already cleared pending interrupts, so the request is
+delivered on the first enable of irq 143 -- and the first `camera stream start`
+of the new boot shows the `edm #1 s 00000000 ...` record above, a garbled panel,
+and a hung console.  Reproduced every time as `camera stream start` -> `reboot`
+-> `camera stream start`; never after an RST boot, and never when
+`camera stream stop` came before the `reboot`.
+
+So `reboot` (`cmds/cmd_system.c`) now runs the board's one stop routine,
+`camera_stream_stop()`, and resets **only when it returns `CAM_OK`** -- a joined
+stream, or one that was not running.  The table is `cmds/reboot_gate.c`, pure,
+walked by `test/test_reboot_gate.c`:
+
+| `camera_stream_stop()` | `reboot` |
+|---|---|
+| `CAM_OK` | prints `rebooting (camera stopped)...` and resets |
+| `CAM_ERR_LOCKED` | refuses: the API stayed locked, the producer was never asked |
+| `CAM_ERR_TIMEOUT` | refuses: the producer never acknowledged (now `CAM_ST_LOST`) |
+| `CAM_ERR_STATE` | refuses: the camera is lost or was never created |
+| anything else | refuses: an undocumented result is no evidence of a stop |
+
+A refusal prints the reason, the stop's code and `press RST`.  The RST button
+resets the whole board, sensor included, which is the recovery the soft reset
+cannot be.
+
+The stop is called directly, not through the holder table or the `nn` stream
+state: both are soft state the reset wipes, and what has to be true before the
+reset is only that the producer has been through its quiesce.  It is asked
+twice -- before the goodbye line, and again after the ~50 ms the UART TX ring is
+given to drain, since that sleep lets a background job run.
+
+**[!] Known residual: a crash reset does not stop the camera.**  A fault taken
+while streaming resets through `src/fault.c`, which does not go through
+`reboot`, so the first `camera stream start` after such a crash can still hang
+the same way.  Press RST after a crash during streaming.  Scrubbing a datapath
+left running at bring-up would cover that path too; it is a separate follow-up
+(issue #155), not part of #68's fix.
 
 ### Not yet answered
 
@@ -4912,13 +4956,13 @@ its own ahead of that call; a copy would be the copy that drifts.
 
 | return | what it proves | what the operator is told |
 |---|---|---|
-| `CAM_ERR_TIMEOUT` | the producer was asked and never acknowledged | the camera poisons itself; unusable until reboot |
-| `CAM_ERR_LOCKED` (-8, Grove-only) | this call never acquired the API, so nothing was asked and nothing was touched | the sink stays attached, and a reboot is what clears the reservation |
+| `CAM_ERR_TIMEOUT` | the producer was asked and never acknowledged | the camera poisons itself; unusable until the board is reset with the RST button (`reboot` refuses, #68) |
+| `CAM_ERR_LOCKED` (-8, Grove-only) | this call never acquired the API, so nothing was asked and nothing was touched | the sink stays attached, and a reset is what clears the reservation: `reboot` asks the stop again first and refuses if the API is still locked, and then it is the RST button |
 
 `CAM_ERR_LOCKED` deliberately claims nothing about the stream: the holder may be
 a stop that has already joined and not yet let go. The camera is not poisoned --
 but with a linked sink reserving it and no command that can stop a stream on its
-own, the reboot part is still true, and saying only "nothing was torn down"
+own, the reset part is still true, and saying only "nothing was torn down"
 would read as recoverable.
 
 Waiting forever instead would trade a stranded sink for a **dead console**: the
@@ -5323,7 +5367,7 @@ What each failure actually leaves, re-derived after #72, #79 and #77 landed
 
 | the failure | camera | sink | camera reserved? | what is actually true |
 |---|---|---|---|---|
-| stop returns `CAM_ERR_TIMEOUT` | poisoned (`CAM_ST_LOST`) | attached | yes | reboot, **by design** -- the producer may still be running |
+| stop returns `CAM_ERR_TIMEOUT` | poisoned (`CAM_ST_LOST`) | attached | yes | the **RST button**, by design -- the producer may still be running; the soft `reboot` refuses here, because it resets only on a confirmed camera stop (#68) |
 | stop returns `CAM_ERR_LOCKED` | **healthy** | attached | yes | **the producer was never asked, so the stream and the panel are still live** |
 | `cam_lcd_sink_detach()` drain times out | **healthy** | **unlinked** | **no** | the camera still works; only the panel preview is lost |
 | `camera_unsubscribe()` refused terminally | poisoned | attached | yes | as the first row |
@@ -5353,7 +5397,8 @@ recoveries proposed in #75 do not reach it:
 
 Adding a recovery would mean claiming an ownerless sink can be safely unlinked,
 which is the claim #48 examined and rejected. Reaching any of these rows means
-something is already wedged, and a reboot is a second.
+something is already wedged, and a reset is a second (the RST button whenever
+the camera is lost, since `reboot` refuses then).
 
 **[!] Where the evidence lands after a Ctrl+C.** (Written for the blocking
 `camera preview` and `nn preview`, both gone; `camera stream start` returns at

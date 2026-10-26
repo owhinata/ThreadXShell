@@ -2386,7 +2386,7 @@ int camera_stream_stop(void)
 		 * the second.
 		 */
 		LOG_ERR("the producer did not acknowledge a stop; camera is "
-		        "unusable until reboot");
+		        "unusable until the board is reset (RST button)");
 		cam_fault_latch("the producer thread did not acknowledge a stop");
 		cam_state = CAM_ST_LOST;
 		cam_api_exit();

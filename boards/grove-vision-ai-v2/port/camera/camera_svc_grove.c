@@ -360,8 +360,10 @@ int camera_svc_stream_stop(struct camera_op_result *res, uint32_t *gen)
 		/* A stop that did not confirm, said accurately (issue #65): the
 		   failures leave the board in different places.  A locked stop
 		   changed nothing and can be typed again (the holder table still
-		   has the operator); the other two leave a camera only a reboot
-		   recovers. */
+		   has the operator); the other two need a reset.  A timeout is
+		   CAM_ST_LOST, where `reboot` refuses (issue #68) and only RST
+		   helps; CAM_ERR_STATE may also be a stopped camera whose sink
+		   could not be unlinked, where `reboot` does reset. */
 		int status = (rc == CAM_ERR_LOCKED) ? CAMERA_SVC_ERR_BUSY
 		           : (rc == CAM_ERR_TIMEOUT || rc == CAM_ERR_STATE)
 		                     ? CAMERA_SVC_ERR_LOST : CAMERA_SVC_ERR_HW;
@@ -372,10 +374,11 @@ int camera_svc_stream_stop(struct camera_op_result *res, uint32_t *gen)
 			               "producer and nothing was torn down -- retry");
 		else if (rc == CAM_ERR_TIMEOUT)
 			cam_detail_add(res, "\r\n        the producer is still "
-			               "running; the camera is unusable until reboot");
+			               "running; the camera is unusable until the "
+			               "board is reset (RST button)");
 		else if (rc == CAM_ERR_STATE)
 			cam_detail_add(res, "\r\n        the camera is unusable until "
-			               "reboot");
+			               "reset (`reboot`, or RST if it refuses)");
 		return CAMERA_SVC_STOP_NONE;
 	}
 	camera_res_ok(res);
@@ -610,7 +613,7 @@ static const char *cam_state_word(uint8_t st)
 	case CAM_ST_READY:     return "ready";
 	case CAM_ST_STREAMING: return "streaming";
 	case CAM_ST_FAULTED:   return "faulted (the next use rebuilds it)";
-	case CAM_ST_LOST:      return "lost (a stop was never acknowledged; reboot)";
+	case CAM_ST_LOST:      return "lost (a stop was never acknowledged; press RST)";
 	default:               return "?";
 	}
 }

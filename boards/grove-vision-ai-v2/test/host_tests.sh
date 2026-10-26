@@ -344,6 +344,16 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_cam_hold_rules"
 "$out/test_cam_hold_rules"
 
+# issue #68 -- which camera stop result lets `reboot` reset the board
+# (cmds/reboot_gate.c).  Only CAM_OK may; the refusals need a stop that loses
+# the API mutex, a producer that never acknowledges, or a code nobody has
+# documented yet, and none of those can be typed.
+gcc $CFLAGS \
+    -I "$here" -I "$board/cmds" \
+    "$here/test_reboot_gate.c" "$board/cmds/reboot_gate.c" \
+    $LDFLAGS -o "$out/test_reboot_gate"
+"$out/test_reboot_gate"
+
 # issue #86 -- the NOR port's lifecycle decisions (port/nor/nor_state.c).  Two of
 # the cases cannot be produced from a console: two callers arriving in the
 # `OFF -> ENABLING` window (one shell, and background jobs run BELOW the

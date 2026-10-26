@@ -11,6 +11,10 @@ came out of check_veneer_base_cost.py unchanged (issue #124, step 1); that
 script's docstring is still where the rules are stated -- how a frame, an edge
 and a bound are derived, what is refused and what is not proven.
 
+Since step 3 of #124 the analysis of one body also proves its returns: where
+lr was saved, where sp is, and that both are back when the body leaves
+(_ReturnAnalysis, with the one line it does not cross stated there).
+
 Since step 2 of #124 it has two callers, and they differ only in where the
 walk stops: check_veneer_base_cost.py walks everything below a firmware root
 (Walk.total), check_plugin_image.py stops at the register branch of a named
@@ -138,8 +142,11 @@ class Elf:
 #
 #  Not a disassembler: for each instruction it answers only what the walk
 #  needs -- its size, which core registers it writes, what it does to sp and
-#  to control flow.  It works on the instruction BYTES, not on a disassembler's
-#  text: a check that parses a tool's output depends on that tool's vocabulary
+#  to control flow, and (for the return analysis, issue #124) which stack
+#  bytes it may store to, which words it loads into core registers, and the
+#  register arithmetic of the form rd = rn + constant.  It works on the
+#  instruction BYTES, not on a disassembler's text: a check that parses a
+#  tool's output depends on that tool's vocabulary
 #  (the MVE predication scan of issues #42/#66 passed everything because
 #  objdump never decoded what it was grepping for).  Every encoding it does not
 #  positively know is "undecoded", and an undecoded instruction below a veneer
@@ -150,7 +157,8 @@ class Elf:
 # ============================================================================
 class Insn:
     __slots__ = ("addr", "size", "raw", "flow", "target", "wr", "sp",
-                 "sp_known", "lrk", "why", "itlen", "forever", "lit")
+                 "sp_known", "why", "itlen", "forever", "lit",
+                 "st", "ld", "wb", "arith")
 
     def __init__(self, addr, size, raw):
         self.addr, self.size, self.raw = addr, size, raw
@@ -159,11 +167,20 @@ class Insn:
         self.wr = set()         # core registers written
         self.sp = 0             # constant change to sp, when sp_known
         self.sp_known = False
-        self.lrk = None         # "call" | "save" | "restore" | "arb"
         self.why = None         # what the instruction is, for a diagnostic
         self.itlen = 0
         self.forever = False    # LE without a counter: never falls through
         self.lit = False
+        # What the return analysis needs (issue #124, D4), in the order the
+        # instruction does it.  Offsets are from the base register's value
+        # BEFORE the instruction; None is "not a known constant".
+        self.st = []            # stores: (base, offset, bytes, source reg)
+        self.ld = []            # core-register loads: (dest, base, offset,
+        #                         bytes)
+        self.wb = None          # base writeback: (base, delta)
+        # (rd, rn, imm): rd = rn + imm.  Any other register it writes is,
+        # to the analysis, "not sp plus a known constant".
+        self.arith = None
 
     def hexraw(self):
         return f"{self.raw:08x}" if self.size == 4 else f"{self.raw:04x}"
@@ -208,8 +225,6 @@ def _finish(i):
     if PC in i.wr and i.flow == "seq":
         i.flow = "ind_jump"
         i.why = i.why or "writes pc"
-    if LR in i.wr and i.lrk is None:
-        i.lrk = "arb"
     return i
 
 
@@ -225,12 +240,26 @@ def dec16(hw, addr):
     i = Insn(addr, 2, hw)
     lo3 = hw & 7
     if hw >> 14 == 0:                        # shift, add, sub, mov, compare
+        rm = (hw >> 3) & 7
         if hw >> 11 == 0b00101:
             pass                             # CMP imm8
         elif hw >> 13 == 0b001:
-            i.wr.add((hw >> 8) & 7)
+            rd = (hw >> 8) & 7
+            i.wr.add(rd)
+            op = (hw >> 11) & 3
+            if op != 0:                      # ADD / SUB imm8 (not MOV)
+                i.arith = (rd, rd, hw & 0xFF if op == 2 else -(hw & 0xFF))
         else:
             i.wr.add(lo3)
+            if hw >> 11 == 0b00011:          # ADD/SUB register / imm3
+                op = (hw >> 9) & 3
+                f3 = (hw >> 6) & 7
+                if op == 2:
+                    i.arith = (lo3, rm, f3)
+                elif op == 3:
+                    i.arith = (lo3, rm, -f3)
+            elif hw >> 6 == 0:               # MOVS rd, rm (LSL #0)
+                i.arith = (lo3, rm, 0)
     elif hw >> 10 == 0b010000:               # data processing
         if (hw >> 6) & 0xF not in (8, 10, 11):   # TST, CMP, CMN write nothing
             i.wr.add(lo3)
@@ -246,38 +275,62 @@ def dec16(hw, addr):
         elif op == 2:                        # MOV (register) T1
             i.wr.add(rdn)
             i.why = f"mov {REG[rdn]}, {REG[rm]}"
+            i.arith = (rdn, rm, 0)
             if rdn == PC:
                 i.flow = "ind_jump"
         elif op == 3:
             if hw & 0x80:                    # BLX / BLXNS
                 if lo3 not in (0, 4):
                     return _undef(i, "BLX with nonzero low bits")
-                i.flow = "ind_call"
+                i.flow = "secure" if lo3 else "ind_call"
                 i.why = f"blx{'ns' if lo3 else ''} {REG[rm]}"
                 i.wr.add(LR)
-                i.lrk = "call"
             else:                            # BX / BXNS
                 if lo3 == 0 and rm == LR:
                     i.flow = "ret_lr"
                     i.why = "bx lr"
                 elif lo3 in (0, 4):
-                    i.flow = "ind_jump"
+                    i.flow = "secure" if lo3 else "ind_jump"
                     i.why = f"bx{'ns' if lo3 else ''} {REG[rm]}"
                 else:
                     return _undef(i, "BX with nonzero low bits")
     elif hw >> 11 == 0b01001:                # LDR (literal)
         i.wr.add((hw >> 8) & 7)
+        i.ld.append(((hw >> 8) & 7, PC, None, 4))
     elif hw >> 12 == 0b0101:                 # load/store, register offset
-        if (hw >> 9) & 7 >= 3:
+        op = (hw >> 9) & 7
+        rn = (hw >> 3) & 7
+        if op >= 3:
             i.wr.add(lo3)
+            i.ld.append((lo3, rn, None, 4 if op == 4 else 0))
+        else:                                # STR / STRH / STRB
+            i.st.append((rn, None, (4, 2, 1)[op], lo3))
     elif hw >> 13 == 0b011 or hw >> 12 == 0b1000:   # imm5 word/byte/half
+        imm5 = (hw >> 6) & 0x1F
+        rn = (hw >> 3) & 7
+        if hw >> 12 == 0b1000:
+            off, n = imm5 << 1, 2
+        elif hw & 0x1000:
+            off, n = imm5, 1
+        else:
+            off, n = imm5 << 2, 4
         if hw & 0x800:
             i.wr.add(lo3)
+            i.ld.append((lo3, rn, off, n))
+        else:
+            i.st.append((rn, off, n, lo3))
     elif hw >> 12 == 0b1001:                 # load/store sp-relative (no wb)
+        rt = (hw >> 8) & 7
         if hw & 0x800:
-            i.wr.add((hw >> 8) & 7)
+            i.wr.add(rt)
+            i.ld.append((rt, SP, (hw & 0xFF) << 2, 4))
+        else:
+            i.st.append((SP, (hw & 0xFF) << 2, 4, rt))
     elif hw >> 12 == 0b1010:                 # ADR / ADD Rd, sp, #imm
-        i.wr.add((hw >> 8) & 7)
+        rd = (hw >> 8) & 7
+        i.wr.add(rd)
+        if hw & 0x800:
+            i.arith = (rd, SP, (hw & 0xFF) << 2)
     elif hw >> 12 == 0b1011:
         _misc16(i, hw)
     elif hw >> 12 == 0b1100:                 # STM / LDM T1 (low registers)
@@ -285,12 +338,17 @@ def dec16(hw, addr):
         lst = hw & 0xFF
         if not lst:
             return _undef(i, "LDM/STM with an empty list")
+        regs = sorted(_regs(lst))
         if hw & 0x800:
             i.wr |= _regs(lst)
+            i.ld = [(r, rn, 4 * k, 4) for k, r in enumerate(regs)]
             if not lst >> rn & 1:
                 i.wr.add(rn)
+                i.wb = (rn, 4 * len(regs))
         else:
             i.wr.add(rn)
+            i.st = [(rn, 4 * k, 4, r) for k, r in enumerate(regs)]
+            i.wb = (rn, 4 * len(regs))
     elif hw >> 12 == 0b1101:
         cond = (hw >> 8) & 0xF
         if cond == 0xE:
@@ -327,8 +385,8 @@ def _misc16(i, hw):
             _undef(i, "PUSH with an empty list")
             return
         _spdelta(i, -4 * n, f"push ({n} regs)")
-        if b & 1:
-            i.lrk = "save"
+        regs = sorted(_regs(lst)) + ([LR] if b & 1 else [])
+        i.st = [(SP, -4 * n + 4 * k, 4, r) for k, r in enumerate(regs)]
     elif b == 6:
         if hw & 0xFFEF != 0xB662:            # CPS; nothing else is allocated
             _undef(i, "unallocated 1011 0110")
@@ -345,6 +403,8 @@ def _misc16(i, hw):
             return
         i.wr |= _regs(lst)
         _spdelta(i, 4 * n, f"pop ({n} regs)")
+        regs = sorted(_regs(lst)) + ([PC] if b & 1 else [])
+        i.ld = [(r, SP, 4 * k, 4) for k, r in enumerate(regs)]
         if b & 1:
             i.wr.add(PC)
             i.flow = "ret_pop"
@@ -435,16 +495,18 @@ def _ldst_multiple(i, hw1, hw2):
         return
     n = len(lst)
     name = ("ldm" if load else "stm") + ("ia" if op == 1 else "db")
+    base = 0 if op == 1 else -4 * n          # words ascend from the lowest
+    regs = sorted(lst)
     if w:
         i.wr.add(rn)
+        i.wb = (rn, 4 * n if op == 1 else -4 * n)
         if rn == SP:                         # IA adds, DB subtracts
             _spdelta(i, 4 * n if op == 1 else -4 * n, f"{name} sp! ({n} regs)")
     if not load:
         if SP in lst or PC in lst:
             _undef(i, "STM storing sp or pc")
             return
-        if rn == SP and LR in lst:
-            i.lrk = "save"
+        i.st = [(rn, base + 4 * k, 4, r) for k, r in enumerate(regs)]
         return
     if SP in lst:
         i.wr.add(SP)
@@ -452,8 +514,7 @@ def _ldst_multiple(i, hw1, hw2):
         i.why = f"{name} loading sp"
         return
     i.wr |= lst
-    if LR in lst:
-        i.lrk = "restore" if rn == SP else "arb"
+    i.ld = [(r, rn, base + 4 * k, 4) for k, r in enumerate(regs)]
     if PC in lst:
         if rn == SP and w and op == 1:
             i.flow = "ret_pop"
@@ -476,13 +537,20 @@ def _ldst_dual(i, hw1, hw2):
         if u == 0:
             if load:                         # LDREX
                 i.wr.add(rt)
+                i.ld.append((rt, rn, (hw2 & 0xFF) << 2, 4))
             else:                            # STREX, or TT/TTT/TTA/TTAT
                 i.wr.add(rt2)
+                if rt != PC:                 # TT has 1111 where STREX has Rt
+                    i.st.append((rn, (hw2 & 0xFF) << 2, 4, rt))
             return
+        size = {4: 1, 5: 2, 8: 1, 9: 2, 10: 4, 12: 1, 13: 2, 14: 4}.get(op3)
         if not load:
             if op3 in (4, 5, 12, 13, 14):    # STREXB/H, STLEXB/H/STLEX
                 i.wr.add(hw2 & 0xF)
-            elif op3 not in (8, 9, 10):      # STLB/STLH/STL write nothing
+                i.st.append((rn, 0, size, rt))
+            elif op3 in (8, 9, 10):          # STLB/STLH/STL write nothing
+                i.st.append((rn, 0, size, rt))
+            else:
                 _undef(i, "unallocated store-exclusive form")
             return
         if op3 in (0, 1):
@@ -491,23 +559,28 @@ def _ldst_dual(i, hw1, hw2):
             return
         if op3 in (4, 5, 8, 9, 10, 12, 13, 14):  # LDREXB/H, LDA*, LDAEX*
             i.wr.add(rt)
+            i.ld.append((rt, rn, 0, size))
         else:
             _undef(i, "unallocated load-exclusive form")
         return
     if hw1 == 0xE97F and hw2 == 0xE97F:      # SG
+        i.flow = "secure"
         i.why = "sg"
         return
     off = (hw2 & 0xFF) << 2
     off = off if u else -off
+    at = off if p else 0
     if w and rn == PC:
         _undef(i, "LDRD/STRD writing back pc")
         return
     if w:
         i.wr.add(rn)
+        i.wb = (rn, off)
         if rn == SP:
             _spdelta(i, off, f"{'ldrd' if load else 'strd'} [sp] writeback "
                              f"{off:+d}")
     if load:
+        i.ld = [(rt, rn, at, 4), (rt2, rn, at + 4, 4)]
         if SP in (rt, rt2) or PC in (rt, rt2):
             i.wr |= {rt, rt2}
             i.why = "ldrd into sp or pc"
@@ -516,11 +589,8 @@ def _ldst_dual(i, hw1, hw2):
             i.sp_known = False if SP in (rt, rt2) else i.sp_known
             return
         i.wr |= {rt, rt2}
-        if LR in (rt, rt2):
-            i.lrk = "restore" if rn == SP else "arb"
     else:
-        if rn == SP and LR in (rt, rt2):
-            i.lrk = "save"
+        i.st = [(rn, at, 4, rt), (rn, at + 4, 4, rt2)]
 
 
 def _dp_shifted(i, hw1, hw2):
@@ -553,6 +623,10 @@ def _dp_shifted(i, hw1, hw2):
     if s and rd == PC and op in (0, 4, 8, 13):
         return                               # TST / TEQ / CMN / CMP
     i.wr.add(rd)
+    if op in (2, 3) and rn == PC:            # MOV / MVN (register)
+        shift = (hw2 >> 12) & 7, (hw2 >> 6) & 3, (hw2 >> 4) & 3
+        if op == 2 and shift == (0, 0, 0):
+            i.arith = (rd, rm, 0)
     if rd == SP:
         i.why = "register arithmetic into sp"
 
@@ -574,6 +648,8 @@ def _dp_modimm(i, hw1, hw2):
                  f"{'add' if op == 8 else 'sub'}.w sp, sp, #{imm}")
         return
     i.wr.add(rd)
+    if op in (8, 13):                        # ADD / SUB
+        i.arith = (rd, rn, imm if op == 8 else -imm)
     if rd == SP:
         i.why = "immediate arithmetic into sp not relative to sp"
 
@@ -588,6 +664,8 @@ def _dp_plainimm(i, hw1, hw2):
             _spdelta(i, imm12 if op == 0 else -imm12,
                      f"{'addw' if op == 0 else 'subw'} sp, sp, #{imm12}")
             return
+        if rn != PC:                         # not ADR
+            i.arith = (rd, rn, imm12 if op == 0 else -imm12)
     elif op not in (0b00100, 0b01100, 0b10000, 0b10010, 0b10100, 0b10110,
                     0b11000, 0b11010, 0b11100):
         _undef(i, "unallocated data-processing (plain binary immediate)")
@@ -646,7 +724,6 @@ def _branch_misc(i, hw1, hw2):
         if op1 & 0b100:
             i.flow = "bl"
             i.wr.add(LR)
-            i.lrk = "call"
         else:
             i.flow = "b"
         return
@@ -690,16 +767,18 @@ def _branch_misc(i, hw1, hw2):
 
 def _index_fields(hw1, hw2, i, what):
     """The imm8 addressing forms of the single loads/stores (T4): returns
-    (writeback, delta) or None for an unallocated combination."""
+    (writeback, delta, offset of the access from the base) or None for an
+    unallocated combination."""
     pw = (hw2 >> 8) & 0xF
     if pw == 0b1110:                         # LDRT/STRT: offset, no writeback
-        return False, 0
+        return False, 0, hw2 & 0xFF
     p, u, w = hw2 >> 10 & 1, hw2 >> 9 & 1, hw2 >> 8 & 1
     if not p and not w:
         _undef(i, f"unallocated {what} addressing mode")
         return None
     off = hw2 & 0xFF
-    return bool(w), off if u else -off
+    off = off if u else -off
+    return bool(w), off, off if p else 0
 
 
 def _store_single(i, hw1, hw2):
@@ -712,25 +791,27 @@ def _store_single(i, hw1, hw2):
     if rn == PC:
         _undef(i, "store based on pc")
         return
-    wb, delta = False, 0
+    wb, delta, at = False, 0, hw2 & 0xFFF    # the imm12 form
     if not hw1 & 0x80:                       # not the imm12 form
         if hw2 & 0x800:
             got = _index_fields(hw1, hw2, i, "store")
             if got is None:
                 return
-            wb, delta = got
+            wb, delta, at = got
         elif (hw2 >> 6) & 0x3F:
             _undef(i, "unallocated store (register) form")
             return
+        else:                                # register offset
+            at = None
     if rt == PC:
         _undef(i, "store of pc")
         return
+    i.st.append((rn, at, (1, 2, 4)[size], rt))
     if wb:
         i.wr.add(rn)
+        i.wb = (rn, delta)
         if rn == SP:
             _spdelta(i, delta, f"str [sp] writeback {delta:+d}")
-    if rn == SP and rt == LR and size == 2:
-        i.lrk = "save"
 
 
 def _load_single(i, hw1, hw2):
@@ -739,7 +820,9 @@ def _load_single(i, hw1, hw2):
     rt = hw2 >> 12
     wb, delta = False, 0
     post = False
+    at = hw2 & 0xFFF                         # the imm12 form
     if rn == PC:                             # literal
+        at = None
         if rt == PC and size == 2:
             imm = hw2 & 0xFFF
             base = (i.addr + 4) & ~3
@@ -754,18 +837,22 @@ def _load_single(i, hw1, hw2):
             got = _index_fields(hw1, hw2, i, "load")
             if got is None:
                 return
-            wb, delta = got
+            wb, delta, at = got
             post = not hw2 >> 10 & 1
         elif (hw2 >> 6) & 0x3F:
             _undef(i, "unallocated load (register) form")
             return
+        else:                                # register offset
+            at = None
     if rt == PC and size != 2:
         if wb:
             _undef(i, "preload with writeback")
             return
         return                               # PLD / PLI / hints
+    i.ld.append((rt, rn, at, 4 if size == 2 else 0))
     if wb:
         i.wr.add(rn)
+        i.wb = (rn, delta)
         if rn == SP:
             _spdelta(i, delta, f"ldr [sp] writeback {delta:+d}")
     if rt == SP:
@@ -782,8 +869,6 @@ def _load_single(i, hw1, hw2):
             i.flow = "ind_jump"
             i.why = "load into pc"
         return
-    if rt == LR:
-        i.lrk = "restore" if rn == SP and size == 2 else "arb"
 
 
 def _dp_register(i, hw1, hw2):
@@ -849,8 +934,21 @@ def _mve_contiguous(i, hw1, hw2):
         _undef(i, "MVE load/store writing back sp is UNPREDICTABLE")
         return True
     i.why = "MVE vector load/store"
+    # The bytes it touches: 16 for the contiguous forms, whose size field
+    # scales imm7; 8 at most for the widening/narrowing ones, whose scale is
+    # the element's memory size (1 or 2) -- both scales are charged there, so
+    # the region is never smaller than the real one.
+    imm7 = hw2 & 0x7F
+    sign = 1 if hw1 >> 7 & 1 else -1
+    if hw2 & 0x1E00 == 0x0E00:
+        cands = [(sign * imm7 * sc, 8) for sc in (1, 2)]
+    else:
+        cands = [(sign * imm7 << ((hw2 >> 7) & 3), 16)]
+    if not hw1 >> 4 & 1:                     # a store
+        i.st = [(rn, off if p else 0, n, None) for off, n in cands]
     if w:
         i.wr.add(rn)
+        i.wb = (rn, cands[0][0] if len(cands) == 1 else None)
     return True
 
 
@@ -887,10 +985,17 @@ def _coproc(i, hw1, hw2):
                     i.wr |= {hw2 >> 12, hw1 & 0xF}
                 return
             if not d and w and hw2 == 0x0A00:    # VLSTM / VLLDM
+                if not load:                 # VLSTM: a context of its own size
+                    i.st.append((rn, None, None, None))
                 return
             _undef(i, "unallocated FP load/store")
             return
         if p and not w:                      # VLDR / VSTR
+            if not load:
+                sh, n = (1, 2) if coproc == 9 else (2, 8 if coproc == 11
+                                                     else 4)
+                off = (hw2 & 0xFF) << sh
+                i.st.append((rn, off if u else -off, n, None))
             return
         if p and u and w:
             _undef(i, "unallocated FP load/store")
@@ -900,9 +1005,12 @@ def _coproc(i, hw1, hw2):
                 return                       # VSCCLRM
             _undef(i, "FP load/store multiple based on pc")
             return
-        if w:                                # VLDM/VSTM IA!, VLDMDB/VSTMDB!
-            imm = (hw2 & 0xFF) << 2
+        imm = (hw2 & 0xFF) << 2              # VLDM/VSTM IA(!), VLDMDB/VSTMDB!
+        if not load:
+            i.st.append((rn, -imm if p else 0, imm, None))
+        if w:
             i.wr.add(rn)
+            i.wb = (rn, imm if u else -imm)
             if rn == SP:
                 _spdelta(i, imm if u else -imm,
                          f"{'vldm' if load else 'vstm'} sp! "
@@ -1262,11 +1370,16 @@ class Image:
                 falls = cond
             elif f == "le":
                 falls = not ins.forever or cond
-            elif f in ("trap", "undef"):
+            elif f in ("trap", "undef", "secure"):
                 falls = False
             if f == "trap":
                 info.flow_errs.append(
                     (a, f"{ins.why} at 0x{a:08x} (an exception, not a call)"))
+            elif f == "secure":
+                info.flow_errs.append(
+                    (a, f"`{ins.why}` at 0x{a:08x} is a security state "
+                        "transition, which no stack bound here follows -- "
+                        "refused everywhere, inside a veneer too"))
             elif f == "ind_call":
                 err = (a, f"indirect call `{ins.why}` at 0x{a:08x} -- the "
                           "walk cannot know what it reaches")
@@ -1336,49 +1449,9 @@ class Image:
                             "change counted once would be made per "
                             "iteration"))
                     break
-        # returns: lr must hold the return address (bx lr), or have been
-        # saved while it did (pop into pc), on EVERY path to the return -- a
-        # must-analysis over (lr intact, lr saved), iterated to its greatest
-        # fixpoint.  A reload of lr from the stack is trusted to reload what was
-        # saved; slot identity is not tracked (see the module docstring).
-        preds = {}
-        for a, ns in succ.items():
-            for b in ns:
-                preds.setdefault(b, []).append(a)
-        top = (True, True)
-        OUT = {a: top for a in seen}
-        IN = {}
-        changed = True
-        while changed:
-            changed = False
-            for a in sorted(seen):
-                ps = [OUT[p] for p in preds.get(a, [])]
-                if a == node.addr:
-                    ps.append((True, False))
-                IN[a] = st = (all(p[0] for p in ps), all(p[1] for p in ps))
-                ins = insns[a]
-                ok, saved = st
-                cond = a in in_it
-                if ins.lrk == "save":
-                    saved = saved or (ok and not cond)
-                if ins.lrk in ("call", "arb"):
-                    ok = False
-                elif ins.lrk == "restore":
-                    ok = (ok and saved) if cond else saved
-                if OUT[a] != (ok, saved):
-                    OUT[a] = (ok, saved)
-                    changed = True
-        for a in sorted(seen):
-            ins = insns[a]
-            st = IN[a]
-            if ins.flow == "ret_lr" and not st[0]:
-                info.flow_errs.append(
-                    (a, f"`bx lr` at 0x{a:08x} is not proven to be a return: "
-                        "lr may have been overwritten on some path"))
-            elif ins.flow == "ret_pop" and not st[1]:
-                info.flow_errs.append(
-                    (a, f"`{ins.why}` at 0x{a:08x} is not proven to be a "
-                        "return: lr was not saved on every path"))
+        # returns, tail calls and the stack pointer's position (issue #124,
+        # D4): see _ReturnAnalysis.
+        _ReturnAnalysis(node, info, insns, in_it, seen, succ).run()
         return info
 
     def _bad_target(self, info, node, at, t, what):
@@ -1395,6 +1468,245 @@ class Image:
             info.flow_errs.append(
                 (at, f"{what} at 0x{at:08x} to 0x{t:08x}, which is no "
                      "function's entry"))
+
+
+# ============================================================================
+#  Returns, tail calls and the stack pointer (issue #124, D4)
+#
+#  A forward analysis over one body's control flow.  At every instruction it
+#  knows, on EVERY path that reaches it:
+#
+#    sp     where the stack pointer is, in bytes from where it was at the
+#           entry (0 there).  Paths that meet with two positions are refused.
+#    ra     whether lr still holds the return address -- untouched since the
+#           entry, or reloaded from a word that holds it.
+#    slots  the stack words (as positions from the entry sp) that hold the
+#           return address: lr was stored there while it held it, no store at
+#           a known position has overlapped the word since, and sp has not
+#           risen above it.  A word sp has risen above is free -- an
+#           exception's stacking or a callee may write it -- so it stays dead
+#           even if sp comes back down; and since a callee may write only
+#           below the sp it is called with, a call needs no rule of its own.
+#    regs   which core registers hold sp + a known constant, followed through
+#           register moves and add/sub of an immediate inside the body.  A
+#           store whose position is sp + a known constant -- `[sp, #k]`, or
+#           such a register plus a constant -- kills every slot it overlaps.
+#
+#  and it requires: `bx lr` with ra and sp at the entry; a pop into pc that
+#  loads a live slot and leaves sp at the entry; a tail call (a direct branch
+#  to another function) or a register branch (`bx rN`, a plugin veneer's way
+#  out) with sp at the entry and ra.
+#
+#  [!] THE ONE LINE IT DOES NOT CROSS, AND THE ONLY PLACE IT PASSES WHAT IT
+#  CANNOT FOLLOW: a store whose position is not sp + a known constant is not
+#  checked against the slots.  That is a pointer that does not come from sp in
+#  this body (an argument, a loaded pointer, a callee's result, an sp value
+#  that went through memory, a callee or FP/vector registers), and equally a
+#  pointer that does come from sp but at a position no constant gives -- a
+#  local array written at a variable index, a pointer stepped through a
+#  buffer in a loop, an offset held in a register.  Such a store reaches a
+#  saved lr only by writing outside the object it is meant for, which is
+#  memory safety, and the gates do not claim memory safety.  (Checking those
+#  stores too was tried: it refused a function of every plugin and the
+#  firmware's log_append below pl_base_log, all ordinary compiler output.)
+#  Everything else that cannot be followed is refused.
+# ============================================================================
+def _pos(o):
+    return f"entry sp{o:+d}"
+
+
+class _ReturnAnalysis:
+    def __init__(self, node, info, insns, in_it, seen, succ):
+        self.node, self.info, self.insns = node, info, insns
+        self.in_it, self.seen, self.succ = in_it, seen, succ
+        self.kills = set()       # (where, slot, how): for the diagnostics
+        self.joins = {}          # address -> the sp positions that met there
+
+    # --- the state: (sp, ra, slots, regs) -----------------------------------
+    @staticmethod
+    def _val(st, r):
+        """r as sp + an int, or None (not a known position on the stack)."""
+        if r == SP:
+            return st[0]
+        if r == PC:
+            return None
+        return st[3][r]
+
+    def _addr(self, st, base, off):
+        v = self._val(st, base)
+        if v is None or off is None:
+            return None
+        return v + off
+
+    def _meet(self, a, b, at):
+        if a[0] is None or b[0] is None:
+            sp = None
+        else:
+            sp = a[0]
+            if a[0] != b[0]:
+                # refused below; from here on sp is not a known position, so
+                # nothing after the meeting point repeats the refusal
+                self.joins.setdefault(at, set()).update((a[0], b[0]))
+                sp = None
+        regs = tuple(x if x == y else None for x, y in zip(a[3], b[3]))
+        return (sp, a[1] and b[1], a[2] & b[2], regs)
+
+    def _transfer(self, st, ins):
+        sp, ra, slots, regs = st
+        slots = set(slots)
+        regs = list(regs)
+        new = {}
+        lr_from = None
+        # loads, at the addresses before any writeback
+        for dest, base, off, n in ins.ld:
+            if dest == LR and n == 4:
+                lr_from = self._addr(st, base, off)
+            new[dest] = None
+        # stores
+        for base, off, n, src in ins.st:
+            a = self._addr(st, base, off)
+            if a is None or n is None:
+                continue                     # the line above
+            for x in [x for x in slots if x < a + n and a < x + 4]:
+                self.kills.add((ins.addr, x, "a store over it"))
+                slots.discard(x)
+            if src == LR and ra and n == 4:
+                slots.add(a)
+        # writeback, the arithmetic, then whatever else is written
+        if ins.wb is not None and ins.wb[0] != SP and ins.wb[0] not in new:
+            base, delta = ins.wb
+            v = self._val(st, base)
+            new[base] = v + delta if v is not None and delta is not None \
+                else None
+        if ins.arith is not None and ins.arith[0] not in new:
+            rd, rn, imm = ins.arith
+            v = self._val(st, rn)
+            new[rd] = None if v is None else v + imm
+        for r in ins.wr - {SP, PC} - set(new):
+            new[r] = None
+        call = ins.flow in ("bl", "ind_call")
+        if call:
+            for r in (0, 1, 2, 3, 12, LR):
+                new[r] = None
+        if LR in ins.wr or call:
+            ra = lr_from is not None and lr_from in slots
+        for r, v in new.items():
+            regs[r] = v
+        if SP in ins.wr:
+            sp = sp + ins.sp if sp is not None and ins.sp_known else None
+        if sp is not None:
+            for x in [x for x in slots if x < sp]:
+                if ins.flow != "ret_pop":
+                    self.kills.add((ins.addr, x, "sp rising above it"))
+                slots.discard(x)
+        return (sp, ra, frozenset(slots), tuple(regs))
+
+    # --- the fixpoint --------------------------------------------------------
+    def _edges(self, a, st):
+        """[(successor, state on that edge)]"""
+        ins = self.insns[a]
+        ex = self._transfer(st, ins)
+        cond = a in self.in_it
+        out = []
+        for b in self.succ.get(a, []):
+            if b == ins.target and ins.flow not in ("seq", "it"):
+                es = ex
+            elif cond:
+                # not executed: unchanged.  Executed: falls through too,
+                # unless it is a transfer that does not.
+                if ins.flow in ("b", "ret_lr", "ret_pop", "ind_jump",
+                                "lit_pc"):
+                    es = st
+                else:
+                    es = self._meet(ex, st, b)
+            else:
+                es = ex
+            out.append((b, es))
+        return out
+
+    def run(self):
+        entry = self.node.addr
+        IN = {entry: (0, True, frozenset(), (None,) * 16)}
+        work = [entry]
+        while work:
+            a = work.pop()
+            for b, es in self._edges(a, IN[a]):
+                if b not in IN:
+                    IN[b] = es
+                    work.append(b)
+                else:
+                    m = self._meet(IN[b], es, b)
+                    if m != IN[b]:
+                        IN[b] = m
+                        work.append(b)
+        errs = self.info.flow_errs
+        for at in sorted(self.joins):
+            ps = sorted(self.joins[at])
+            errs.append(
+                (at, f"paths meet at 0x{at:08x} with sp at different places "
+                     f"({', '.join(_pos(p) for p in ps)}) -- no one stack "
+                     "position holds there"))
+        tails = {}
+        for callee, kind, at in self.info.edges:
+            if kind == "tail":
+                tails.setdefault(at, callee)
+        for a in sorted(self.seen):
+            ins = self.insns[a]
+            st = IN.get(a)
+            if st is None:
+                continue
+            sp, ra, slots = st[0], st[1], st[2]
+            if sp is None:
+                # sp is not a known position here, which is already its own
+                # refusal (a frame error, or paths that met with two
+                # positions); what follows would only repeat it.
+                continue
+            f = ins.flow
+            if f == "ret_lr":
+                if not ra:
+                    errs.append(
+                        (a, f"`bx lr` at 0x{a:08x} is not proven to be a "
+                            "return: lr may have been overwritten on some "
+                            "path"))
+                self._sp_back(a, "`bx lr`", sp)
+            elif f == "ret_pop":
+                pcw = [x for x in ins.ld if x[0] == PC]
+                at = self._addr(st, pcw[0][1], pcw[0][2]) if pcw else None
+                if at is None or at not in slots:
+                    errs.append((a, self._pop_why(ins, a, at, slots)))
+                self._sp_back(a, f"`{ins.why}`",
+                              None if sp is None else sp + ins.sp)
+            elif a in tails or (f == "ind_jump"
+                                and CROSSING_WHY.match(ins.why or "")):
+                what = (f"tail call at 0x{a:08x}" if a in tails else
+                        f"register branch `{ins.why}` at 0x{a:08x}")
+                if sp is not None and sp != 0:
+                    errs.append(
+                        (a, f"{what} leaves with sp at {_pos(sp)}, not where "
+                            "the body found it"))
+                if not ra:
+                    errs.append(
+                        (a, f"{what} leaves with lr not holding the return "
+                            "address -- where it returns to is not proven"))
+
+    def _sp_back(self, a, what, sp):
+        if sp is not None and sp != 0:
+            self.info.flow_errs.append(
+                (a, f"{what} at 0x{a:08x} returns with sp at {_pos(sp)}, not "
+                    "where the body found it"))
+
+    def _pop_why(self, ins, a, at, slots):
+        head = f"`{ins.why}` at 0x{a:08x} is not proven to be a return: "
+        if slots:
+            where = ", ".join(_pos(x) for x in sorted(slots))
+            took = _pos(at) if at is not None else "an unknown position"
+            return head + (f"it loads pc from {took}, and the return address "
+                           f"is at {where}")
+        tail = "".join(
+            f" -- the saved lr at {_pos(x)} was lost to {how} at 0x{w:08x}"
+            for w, x, how in sorted(self.kills))
+        return head + ("lr was not saved on every path, or the word it was "
+                       "saved to did not survive" + tail)
 
 
 def _sccs(nodes, succ):

@@ -407,19 +407,21 @@ def sections(objdump, elf):
 #              record or the image is refused.
 #   refused    anywhere in the image, not only below an entry: an indirect
 #              transfer outside a veneer (a register branch, a load or move
-#              into pc, tbb/tbh), a return not proven to use the return
-#              address, a branch into the middle of another function, an SP
-#              change that is not a constant or sits on a loop, an encoding
-#              the decoder does not know.  Below an entry also recursion,
-#              found by address.  Inside a veneer exactly one thing is allowed
-#              that is refused elsewhere: `bx rN` / `blx rN` (r0-r12), the
-#              crossing into the base.
+#              into pc, tbb/tbh), a return or tail call not proven to go
+#              back to the caller with sp where it was (the saved lr's word,
+#              sp at the entry -- issue #124, D4), a branch into the middle of
+#              another function, an SP change that is not a constant or sits
+#              on a loop, a security state transition (sg / bxns / blxns,
+#              inside a veneer too), an encoding the decoder does not know.
+#              Below an entry also recursion, found by address.  Inside a
+#              veneer exactly one thing is allowed that is refused elsewhere:
+#              `bx rN` / `blx rN` (r0-r12), the crossing into the base -- and
+#              `bx rN` is a tail call, held to the same sp and lr rule.
 #
-# [!] WHAT IT DOES NOT YET PROVE is what the shared analysis does not prove for
-# the firmware either (check_veneer_base_cost.py, "NOR THAT A RETURN
-# RETURNS"): which stack word a `pop {..., pc}` takes once lr was saved, and
-# that a body returns with sp where it found it.  Both gates inherit the same
-# limit from the same code, and lose it together.
+# [!] WHAT IT DOES NOT PROVE is what the shared analysis does not prove for the
+# firmware either (check_veneer_base_cost.py, "AND WHAT IS NOT COMPARED WITH
+# THE SAVED LR"): that a store whose position is not sp plus a known constant
+# misses the saved lr.  That is memory safety, which the gate does not claim.
 #
 # [!] switch JUMP TABLES (tbb/tbh) ARE REFUSED BY THE DECODER, UNCONDITIONALLY.
 # add_plugin() compiles with -fno-jump-tables so that a plugin's switch does not

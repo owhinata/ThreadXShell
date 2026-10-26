@@ -42,8 +42,9 @@ Cases:
   flash_waits       then `ninja flash` runs the check before the flash command.
   noop              `ninja` again reruns nothing.
   witnesses         every TU of the image has its record; other.c has none.
-  script_change     editing either script (the veneer set lives in
-                    check_plugin_image.py) reruns the check without a relink.
+  script_change     editing any of its scripts (the veneer set lives in
+                    check_plugin_image.py, the decoder and the walk in
+                    thumb_stack_analysis.py) reruns the check without a relink.
   image_change      a source edit that relinks the image reruns the check.
   relink_retracts   building the IMAGE alone relinks without checking, and
                     that link removes the stamp: a pass cannot outlive the
@@ -57,6 +58,15 @@ Cases:
                     dependency of its own) runs the check first.
   asset_packed      the same for an asset whose pack rule names the gate, as
                     the boards' do.
+  shared_analysis   (issue #124) with a real add_plugin() in the tree:
+                    editing thumb_stack_analysis.py ALONE reruns both gates --
+                    the firmware's check and the plugin's link + gate -- and
+                    relinks no firmware; with no edit, nothing reruns; and a
+                    refusal added to that module alone fails the build, leaves
+                    no stamp, and stops flash, both assets and the plugin's
+                    asset.  (In step 1 of #124 only the firmware's check
+                    imports the module; the plugin gate reruns on it because
+                    it is listed as an input, and does not yet read it.)
   ltrans_drop       an LTO link that writes fewer partitions than the last
                     (max -> one) still passes: the old records are removed
                     before the link, not left for the check to refuse.
@@ -109,8 +119,13 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 COPIED = ("veneer_cost_gate.cmake", "check_veneer_base_cost.py",
-          "check_plugin_image.py", "check_policy_probe.py",
-          "plugin_stack_table.cmake", "check_delivery_gate.py")
+          "thumb_stack_analysis.py", "check_plugin_image.py",
+          "check_policy_probe.py", "plugin_stack_table.cmake",
+          "check_delivery_gate.py", "add_plugin.cmake",
+          "check_no_mutable_storage.py")
+# What add_plugin() compiles a plugin from (shared_analysis), copied so that
+# the helper's derived asset root (cmake/../asset) resolves inside the tree.
+ASSET_COPIED = ("common", os.path.join("plugins", "cifar10"))
 
 LINKER_SCRIPT = """
 MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 1M
@@ -239,6 +254,7 @@ set(FIX_A 300 CACHE STRING "")
 set(FIX_DELIVERY flash CACHE STRING "")
 set(FIX_EXTRA "" CACHE STRING "")
 set(FIX_B 500 CACHE STRING "")
+set(FIX_PLUGIN OFF CACHE BOOL "")
 
 add_library(fw_objs OBJECT objsrc.c policy.c)
 target_include_directories(fw_objs PRIVATE "@SVC@" "@SVC@/nn" "@SVC@/plugin" "@SVC@/camera")
@@ -406,6 +422,39 @@ add_custom_target(asset-cost
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/record.py"
             "${_cost}" "${CMAKE_BINARY_DIR}/asset_cost.txt"
     VERBATIM)
+
+# (issue #124) A real plugin, built by the real add_plugin(): its link + gate
+# is the second user of cmake/thumb_stack_analysis.py.  wio's facts, which this
+# fixture's Cortex-M7 toolchain matches; the allowances are FIX_A / FIX_B.
+if(FIX_PLUGIN)
+    include("${CMAKE_SOURCE_DIR}/cmake/add_plugin.cmake")
+    set(_parch -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard)
+    add_plugin(cifar10
+        CFLAGS ${_parch} -Os -std=c11 -ffreestanding -fno-builtin -fno-common
+               -ffunction-sections -fdata-sections -fno-stack-protector
+               -fno-unwind-tables -fno-asynchronous-unwind-tables
+               -fstack-usage
+               -I "@SVC@" -I "@SVC@/nn" -I "@SVC@/plugin" -I "@SVC@/camera"
+               -I "${CMAKE_SOURCE_DIR}/asset/common"
+        ARCH_FLAGS ${_parch}
+        MEMORY_LD "${CMAKE_SOURCE_DIR}/plugin_memory.ld"
+        IMAGE_BASE 0x24048000
+        IMAGE_END  0x24050000
+        FORBIDDEN  HAL_FLASH_Program
+        VENEER_BASE_COST ${DECLARED}
+        TARGET_ID  0x1201
+        OUT_DIR "${CMAKE_BINARY_DIR}/plugin"
+        OUT_VAR FIX_PLUGIN_ELFS
+        SLOTS   entry shapes_ok decode draw report
+        SBUF_WRITE_MAX 64)
+    add_custom_target(plugin ALL DEPENDS ${FIX_PLUGIN_ELFS})
+    # The plugin's container, as grove/wio_add_asset() wire one: it waits for
+    # the plugin's image AND the firmware's check.
+    add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/plugin.nnc"
+        COMMAND ${DELIVER} "${CMAKE_BINARY_DIR}/plugin.nnc"
+        DEPENDS ${FIX_PLUGIN_ELFS} ${_gate} VERBATIM)
+    add_custom_target(asset-plugin DEPENDS "${CMAKE_BINARY_DIR}/plugin.nnc")
+endif()
 """
 
 
@@ -424,6 +473,14 @@ class Project:
         for name, text in SOURCES.items():
             with open(os.path.join(self.src, name), "w") as fh:
                 fh.write(text)
+        for sub in ASSET_COPIED:
+            shutil.copytree(os.path.join(REPO, "asset", sub),
+                            os.path.join(self.src, "asset", sub),
+                            ignore=shutil.ignore_patterns("*.tflite",
+                                                          "__pycache__"))
+        with open(os.path.join(self.src, "plugin_memory.ld"), "w") as fh:
+            fh.write("MEMORY { PLUGIN (rwx) : ORIGIN = 0x24048000, "
+                     "LENGTH = 32K }\n")
         with open(os.path.join(self.src, "fix.ld"), "w") as fh:
             fh.write(LINKER_SCRIPT)
         prebuilt = os.path.dirname(os.path.dirname(cc))
@@ -533,7 +590,8 @@ def main_tree(p, results):
     results.append(("witnesses", "all four TUs of the image have a record, "
                                  "other.c none"))
 
-    for script in ("check_veneer_base_cost.py", "check_plugin_image.py"):
+    for script in ("check_veneer_base_cost.py", "thumb_stack_analysis.py",
+                   "check_plugin_image.py"):
         with open(os.path.join(p.src, "cmake", script), "a") as fh:
             fh.write("\n# touched by the build test\n")
         rc, out = p.ninja()
@@ -542,7 +600,7 @@ def main_tree(p, results):
                out)
         expect(os.path.getmtime(p.elf) == elf_mtime,
                "script_change: editing %s relinked the image" % script, out)
-    results.append(("script_change", "either script reruns the check, "
+    results.append(("script_change", "each of its scripts reruns the check, "
                                      "no relink"))
 
     with open(os.path.join(p.src, "root.c"), "a") as fh:
@@ -628,6 +686,97 @@ def asset_tree(p, target, made, results, name):
            % (name, target), out)
     results.append((name, "`ninja %s` from nothing ran the check first"
                           % target))
+
+
+PLUGIN_GATE = "plugin cifar10: ld + gate"
+# A refusal that only the shared module makes: the walk reports it once per
+# run, as any of its own refusals would be reported.
+REFUSAL = """
+
+# --- appended by run_veneer_gate_build_tests.py (shared_analysis) ---
+_fixture_total = Walk.total
+
+
+def _fixture_refusing_total(self, addr, path=()):
+    msg = ("walk", "refused by the build test's edit of the shared module")
+    if msg not in self.errors:
+        self.errors.append(msg)
+    return _fixture_total(self, addr, path)
+
+
+Walk.total = _fixture_refusing_total
+"""
+
+
+def shared_tree(p, results):
+    """(issue #124) thumb_stack_analysis.py is an input of BOTH gates."""
+    p.configure(DECLARED="1024", FIX_A="2048", FIX_B="2048", FIX_PLUGIN="ON")
+    rc, out = p.ninja()
+    expect(rc == 0 and ran_check(out) and PLUGIN_GATE in out
+           and os.path.exists(p.stamp),
+           "shared_analysis: the first build should run both gates", out)
+    rc, out = p.ninja()
+    expect(rc == 0 and "no work to do" in out and not ran_check(out)
+           and PLUGIN_GATE not in out,
+           "shared_analysis: with nothing edited, nothing should rerun", out)
+    elf_mtime = os.path.getmtime(p.elf)
+    mod = os.path.join(p.src, "cmake", "thumb_stack_analysis.py")
+    with open(mod) as fh:
+        pristine = fh.read()
+
+    with open(mod, "a") as fh:
+        fh.write("\n# touched by the build test\n")
+    rc, out = p.ninja()
+    expect(rc == 0 and ran_check(out) and PLUGIN_GATE in out
+           and os.path.exists(p.stamp),
+           "shared_analysis: editing the shared module alone should rerun "
+           "both gates", out)
+    expect(os.path.getmtime(p.elf) == elf_mtime,
+           "shared_analysis: editing the shared module relinked the "
+           "firmware", out)
+    rc, out = p.ninja()
+    expect(rc == 0 and "no work to do" in out,
+           "shared_analysis: a second build after the edit should do "
+           "nothing", out)
+    results.append(("shared_analysis", "an edit of thumb_stack_analysis.py "
+                                       "alone reruns both gates, no "
+                                       "firmware relink; no edit, no rerun"))
+
+    for f in ("flashed", "bare.nnc", "packed.nnc", "plugin.nnc"):
+        p.rm(f)
+    with open(mod, "w") as fh:
+        fh.write(pristine + REFUSAL)
+    rc, out = p.ninja()
+    flat = " ".join(out.split())
+    expect(rc != 0 and "check_veneer_base_cost: FAIL" in flat
+           and "[walk] refused by the build test's edit of the shared "
+               "module" in flat,
+           "shared_refusal: a refusal in the shared module should fail the "
+           "firmware's check, for that reason", out)
+    expect(not os.path.exists(p.stamp),
+           "shared_refusal: a stamp survived the refusal", out)
+    for target, made in (("flash", "flashed"), ("asset-bare", "bare.nnc"),
+                         ("asset-packed", "packed.nnc"),
+                         ("asset-plugin", "plugin.nnc")):
+        rc, out = p.ninja(target)
+        expect(rc != 0 and not os.path.exists(p.path(made)),
+               "shared_refusal: `ninja %s` proceeded past the refusal"
+               % target, out)
+    expect(not os.path.exists(p.stamp),
+           "shared_refusal: a stamp appeared after the refusal")
+
+    with open(mod, "w") as fh:
+        fh.write(pristine)
+    rc, out = p.ninja("asset-plugin", "flash")
+    expect(rc == 0 and os.path.exists(p.stamp)
+           and os.path.exists(p.path("plugin.nnc"))
+           and os.path.exists(p.path("flashed")),
+           "shared_refusal: the module restored, flash and the plugin's "
+           "asset should proceed", out)
+    results.append(("shared_refusal", "a refusal added to the shared module "
+                                      "alone: build fails in [walk], no "
+                                      "stamp, flash and all three assets "
+                                      "stopped; restored, they proceed"))
 
 
 def lto_tree(p, results):
@@ -1114,6 +1263,7 @@ def main():
         ("asset_packed", lambda p: asset_tree(p, "asset-packed",
                                               "packed.nnc", results,
                                               "asset_packed")),
+        ("shared_analysis", lambda p: shared_tree(p, results)),
         ("ltrans_drop", lambda p: lto_tree(p, results)),
         ("cost_wiring", lambda p: cost_tree(p, results)),
         ("stack_wiring", lambda p: stack_tree(p, results)),

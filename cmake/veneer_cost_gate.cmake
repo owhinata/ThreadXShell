@@ -341,9 +341,10 @@ function(_veneer_cost_gate_finish)
 
     # [!] THE STAMP IS DELETED BEFORE THE CHECK and written only after it
     # passes, so a failed check leaves no stamp for a later build to trust.
-    # The check re-runs whenever the image, either script (the veneer set lives
-    # in check_plugin_image.py) or its command line -- roots, declaration,
-    # printer limits -- changes.  The witness records are not listed: each is
+    # The check re-runs whenever the image, any of its scripts (the veneer set
+    # lives in check_plugin_image.py, the decoder and the walk in
+    # thumb_stack_analysis.py since issue #124) or its command line -- roots,
+    # declaration, printer limits -- changes.  The witness records are not listed: each is
     # written by the same compile or link that rewrites the image.
     get_filename_component(_stamp_dir "${stamp}" DIRECTORY)
     add_custom_command(
@@ -368,6 +369,7 @@ function(_veneer_cost_gate_finish)
         COMMAND "${CMAKE_COMMAND}" -E touch "${stamp}"
         DEPENDS "${fw}"
                 "${_VENEER_GATE_DIR}/check_veneer_base_cost.py"
+                "${_VENEER_GATE_DIR}/thumb_stack_analysis.py"
                 "${_VENEER_GATE_DIR}/check_plugin_image.py"
                 "${_VENEER_GATE_DIR}/check_policy_probe.py"
                 "${_VENEER_GATE_DIR}/plugin_stack_table.cmake"

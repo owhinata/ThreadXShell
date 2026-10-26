@@ -98,6 +98,12 @@ The set of veneers is imported from `check_plugin_image.py`, and the board's
 roots must cover it exactly, so adding a veneer there fails every board that has
 not bound a function to it.
 
+The decoder, the analysis of one body and the walk live in
+`thumb_stack_analysis.py` (#124), so that a second stack gate calls them rather
+than growing an analysis of its own; the roots, the records and the budget stay
+in `check_veneer_base_cost.py`. The module is an input of both gate commands --
+this check and `add_plugin()`'s link + gate -- so editing it alone re-runs both.
+
 The compiler's own `-fstack-usage` record is a WITNESS, not the answer: it
 under-reports variadic frames, so a bound built from it would err unsafely.
 Every body below a veneer is compared against the record of its own object file
@@ -135,7 +141,11 @@ and the stage, diagnostic and number of refusals for a refusal.
 building a real project whose fake flash and assets refuse unless a passed
 check's stamp is newer than the image: the stamp's lifetime, the dependencies,
 reruns on a script or image change, the witnesses of every compile, and an LTO
-link that writes fewer partitions than the last.
+link that writes fewer partitions than the last. `shared_analysis` /
+`shared_refusal` add a real `add_plugin()`: an edit of
+`thumb_stack_analysis.py` alone re-runs both gates and nothing re-runs without
+one, and a refusal added to that module alone leaves no stamp and stops flash
+and every asset.
 It also covers the c the firmware compiles in: `cost_wiring` changes DECLARED and
 reads the value back from a policy TU in a `$<TARGET_OBJECTS:>` library and from
 an asset's command line, and `cost_override` adds `-DPLUGIN_VENEER_BASE_COST=1u`

@@ -92,8 +92,10 @@ at the firmware function the board binds behind it, decodes Thumb-2 instructions
 to sum each body's stack decrements, follows direct calls and branches, and
 takes frame + max(callee). Every step fails closed -- an encoding it does not
 model, an SP change it cannot evaluate as a constant, an SP change on a cycle,
-an indirect transfer, a return not proven to use the return address, recursion,
-and a root that resolves to two bodies are each a refusal rather than a guess.
+an indirect transfer, a return not proven to use the return address, a body
+that leaves with sp somewhere other than where it found it (see **Returns and
+the stack pointer** below), recursion, and a root that resolves to two bodies
+are each a refusal rather than a guess.
 The set of veneers is imported from `check_plugin_image.py`, and the board's
 roots must cover it exactly, so adding a veneer there fails every board that has
 not bound a function to it.
@@ -291,21 +293,24 @@ everything below its roots.
   `add_plugin()`.
 - Refused anywhere in the image, not only below an entry: an indirect transfer
   outside a veneer (a register branch, a load or move into pc, `tbb`/`tbh`), a
-  return not proven to use the return address (`mov lr, rX; bx lr`, `pop {pc}`
-  with lr never saved), a branch into the middle of another function, a
-  non-constant or looped SP change, an encoding the decoder does not know; and
+  return or tail call that does not pass the checks of **Returns and the stack
+  pointer** below (`mov lr, rX; bx lr`, `pop {pc}` with lr never saved or its
+  word overwritten, sp not back at the entry), a branch into the middle of
+  another function, a non-constant or looped SP change, a security state
+  transition (`sg`, `bxns`, `blxns`), an encoding the decoder does not know; and
   below an entry, recursion by address. Inside a veneer exactly one more thing
-  is allowed: `bx rN` / `blx rN` with N in r0-r12, the crossing into the base.
-  A conditional branch to another function's entry is a tail call and is
-  walked.
+  is allowed: `bx rN` / `blx rN` with N in r0-r12, the crossing into the base
+  -- and a `bx rN` is a tail call, so it too must leave with sp at the entry
+  and lr holding the return address. `sg` / `bxns` / `blxns` are refused
+  inside a veneer as well. A conditional branch to another function's entry
+  is a tail call and is walked.
 - Switch jump tables are refused by the decoder unconditionally.
   `add_plugin()` compiles every plugin TU with `-fno-jump-tables`, after the
   board's `CFLAGS`, so that a dense `switch` compiles to a compare chain; the
   flag is what lets such a plugin pass, not a replacement for the refusal.
   Adding it changed no byte of the shipped plugins.
-- Not proven, on this side as on the firmware side (same code, same limit):
-  which stack word a `pop {..., pc}` takes once lr was saved, and that a body
-  returns with sp where it found it.
+- Returns and sp are checked as on the firmware side (same code): see
+  **Returns and the stack pointer** below.
 
 On the four shipped plugin images (Grove and wio, blazeface and cifar10) the
 shared analysis gives the same A0 / A1 / S as the analysis it replaced, so the
@@ -321,6 +326,58 @@ reason named in the case, and the ones about a bound also show that the older
 analysis would have passed the same image. The linker-stub refusal (a stub that
 is not a long-branch veneer) has no case: a plugin reservation is far smaller
 than a branch's range.
+
+# Returns and the stack pointer
+
+Both stack gates (#124, in `thumb_stack_analysis.py`) follow, through every
+body they analyse, where sp is relative to the body's entry, whether lr still
+holds the return address, and which stack words hold a saved copy of it. A
+bound that charges a body's own frame is only a bound if the body really
+returns to its caller with sp where it found it; until #124 that was assumed
+once lr had been saved anywhere (the four shapes `#112` pinned as a limit).
+
+- Paths that meet with sp at two different places are refused.
+- A saved copy is a word lr was stored to while it held the return address
+  (a conditional store, which may not run, is not a save). It stops counting
+  when a store at a known position overlaps it -- any width: byte, word,
+  doubleword, store multiple, FP, MVE -- or when sp rises above it: a freed
+  word may be written by an exception's stacking or by a callee, so it stays
+  dead even if sp comes back down. Since a callee may write only below the sp
+  it is called with, a word above the call's sp lives across the call.
+- `bx lr` needs lr to hold the return address and sp at the entry. A pop into
+  pc must load a live saved copy and leave sp at the entry. lr reloaded from
+  a live saved copy holds the return address again; from any other word it
+  does not.
+- A tail call (a direct branch to another function's entry) and a plugin
+  veneer's `bx rN` need sp at the entry and lr holding the return address.
+- A store's position is known when it is sp plus a constant: `[sp, #k]`, or a
+  register that holds sp plus a constant -- followed through register moves
+  and add/sub of an immediate inside the body, and through base writeback --
+  plus a constant offset.
+
+[!] The one line the check does not cross: a store whose position is not sp
+plus a known constant is not compared with the saved copies. That covers a
+pointer that does not come from sp in this body (an argument, a pointer loaded
+from memory, a callee's result, an sp value that went through memory, a callee
+or FP/vector registers), and equally a pointer that does come from sp at a
+position no constant gives: a local array written at a variable index, a
+pointer stepped through a local buffer in a loop, an offset held in a
+register. Such a store reaches a saved lr only by writing outside the object
+it is meant for -- memory safety, which these gates do not prove (plugins are
+trusted native code). Comparing those stores too was measured: it refused one
+function of each of the four shipped plugins and `log_append` below
+`pl_base_log` on both boards, all ordinary compiler output. Every other shape
+that cannot be followed is refused, not passed.
+
+`fixtures/run_veneer_cost_tests.py` fires each of these checks on both cores,
+each refusal next to a passing case that differs only in what the check
+looks at (`tail_sp`, `sp_unbalanced`, `sp_join`, `reg_kill`, `reg_copy_kill`
+/ `reg_nokill`, `reg_unknown_position` -- the line above, which passes on
+purpose -- `released_then_relowered` / `call_keeps_slot`,
+`tail_after_lr_change` / `tail_after_reload`, `lr_reload_other` /
+`lr_reload_slot`, the IT-block, width and indexing pairs, `sg`, `bxns`,
+`blxns`), and `run_plugin_gate_tests.py` the plugin side (`lr_slot` on both
+cores, `veneer_sp`, `veneer_sg`, `veneer_bxns`, `veneer_blxns`).
 
 # Plugin stack allowances: one table, read back from the image
 

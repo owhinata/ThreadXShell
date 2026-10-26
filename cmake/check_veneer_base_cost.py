@@ -58,9 +58,15 @@ record, and the budget here):
              long-branch veneer is an edge: its literal is read out of the ELF
              and must be a Thumb function entry.  Indirect transfers (blx/bx
              <reg>, tbb/tbh, a load or move into pc) are refused, and so is a
-             return that is not proven to use the return address: `bx lr` needs
-             lr to hold it on every path, a pop into pc needs lr to have been
-             saved on every path.  Recursion is refused.
+             return that is not proven to go back to the caller with sp where
+             it was: `bx lr` needs lr to hold the return address on every
+             path, a pop into pc must load the word lr was saved to (still
+             live: nothing stored over it at a known position, sp never risen
+             above it), and both, like a tail call, must leave sp at the
+             entry; paths that meet with sp at two places are refused
+             (thumb_stack_analysis.py, _ReturnAnalysis; issue #124).  So are
+             security state transitions (sg, bxns, blxns).  Recursion is
+             refused.
   bound      is frame(f) + max(bound(callee)) -- the caller's whole frame is
              charged even below a tail call, which can only overstate.
 
@@ -122,22 +128,19 @@ comparison reaches only bodies whose record can be named: a C++ record is
 spelled demangled, so C++ bodies are counted "without a record" -- which below
 a veneer is a refusal.
 
-[!] NOR THAT A RETURN RETURNS.  A `pop {..., pc}` is accepted as a return when
-lr was SAVED on every path; which word the pop then takes is not checked, and
-slot identity is not tracked at all.  So a body that saves lr and then leaves
-by some other word is still read as a return -- `push {lr}` then `str` over
-that slot, or `push {lr}` then `sub sp, #4` so the pop takes a different word
-with no store at all (both measured) -- and only that body's own frame is
-charged, with nothing charged for wherever it goes.  What IS held is the
-condition itself: with lr never saved, the same `pop {..., pc}` is refused
-(measured), so this is not a way past the walk for ordinary code.  No compiler
-emits any of it; the witness rule stops the hand-written spellings that could
-reach a veneer from this tree (no -fstack-usage record, so no walk), but C with
-__attribute__((naked)) and inline asm has a record and does reach it.
-cmake/fixtures/run_veneer_cost_tests.py pins all four shapes
-(`lr_slot_asm_in_tree`, `lr_slot_naked_c`, `lr_slot_moved_sp`,
-`lr_never_saved`) so the limit cannot move in silence; closing it needs slot
-identity, in the shared walk (issue #111).
+[!] AND WHAT IS NOT COMPARED WITH THE SAVED LR.  Since issue #124 a return is
+proven by WHERE lr was saved, not only by whether it was: the shapes #112 had
+to accept -- `push {lr}` then a store over that word, or `push {lr}` then
+`sub sp, #4` so the pop takes another word -- are refused, and so is a body
+that returns with sp elsewhere than where it found it
+(cmake/fixtures/run_veneer_cost_tests.py: `lr_slot_*`, `tail_sp`,
+`sp_unbalanced`, `sp_join`, ...).  A store kills a saved copy when its
+position is sp plus a known constant.  A store whose position is NOT -- a
+pointer from anywhere else, or one made from sp at a position no constant
+gives (a variable index into a local array, a pointer stepped through a
+buffer) -- is not compared: it reaches the saved lr only by writing outside
+its object, which is memory safety, and that is not what this proves
+(cmake/README.md, "Returns and the stack pointer").
 """
 import argparse
 import os

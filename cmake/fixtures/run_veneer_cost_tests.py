@@ -93,7 +93,10 @@ END leaf
 
 @ root_chain 8 > ch_a 24 > ch_b 16 > max(ch_c 8, ch_d 40) = 88.  ch_d is only
 @ reached through a CONDITIONAL tail call and ch_c through an unconditional
-@ one: a walk that drops either edge gets 56.
+@ one: a walk that drops either edge gets 56.  ch_b restores sp and lr BEFORE
+@ either tail call (issue #124: a tail call leaves with sp where the body found
+@ it); the shape that branched with its frame still allocated is
+@ tail_sp_fn, a refusal.
 FUNC root_chain
     push {r3, lr}
     bl ch_a
@@ -108,9 +111,9 @@ FUNC ch_a
 END ch_a
 FUNC ch_b
     push {r4, r5, r6, lr}
+    pop {r4, r5, r6, lr}
     cmp r0, #0
     beq.w ch_d
-    pop {r4, r5, r6, lr}
     b.w ch_c
 END ch_b
 FUNC ch_c
@@ -503,11 +506,16 @@ FUNC lr_join_fn
     mov lr, r3
 1:  bx lr
 END lr_join_fn
+@ (Since #124 the save on one path is a store, not a push: a push on one path
+@ would make the paths meet with sp at two places, a refusal of its own --
+@ sp_join -- and this case is about lr.)
 FUNC saved_join_fn
+    sub sp, #8
     cmp r0, #0
     beq 1f
-    push {r4, lr}
-1:  pop {r4, pc}
+    str lr, [sp, #4]
+1:  add sp, #4
+    pop {pc}
 END saved_join_fn
 
 @ The stack change is neither the head nor the tail of its loop.
@@ -519,6 +527,250 @@ FUNC loop_mid_fn
     bne 1b
     pop {r4, pc}
 END loop_mid_fn
+
+@ ---- issue #124 (D4): where lr was saved and where sp is ------------------
+@ Every refusal below has a passing twin that differs in the one thing the
+@ check looks at, so a check that refused everything would fail the twin.
+
+@ ch_b as it was before #124: the conditional tail call leaves with the
+@ 16-byte frame still allocated.
+FUNC tail_sp_fn
+    push {r4, r5, r6, lr}
+    cmp r0, #0
+    beq.w ch_d
+    pop {r4, r5, r6, lr}
+    b.w ch_c
+END tail_sp_fn
+
+@ Returns with sp 16 B below where it found it.
+FUNC sp_unbal_fn
+    sub sp, #16
+    bx lr
+END sp_unbal_fn
+
+@ Two paths meet with sp at two places (entry-8 and entry-16).
+FUNC sp_join_fn
+    push {r4, lr}
+    cmp r0, #0
+    beq 1f
+    sub sp, #8
+1:  nop
+    pop {r4, pc}
+END sp_join_fn
+
+@ A register made from sp at a KNOWN position, stored through: over the saved
+@ lr (sp+4) is a refusal, over r4's word (sp+0) is not.
+FUNC reg_kill_fn
+    push {r4, lr}
+    add r3, sp, #4
+    str r0, [r3]
+    pop {r4, pc}
+END reg_kill_fn
+FUNC reg_nokill_fn
+    push {r4, lr}
+    add r3, sp, #0
+    str r0, [r3]
+    pop {r4, pc}
+END reg_nokill_fn
+@ Copies and arithmetic are followed: mov, then add of an immediate.
+FUNC reg_copy_kill_fn
+    push {r4, lr}
+    mov r2, sp
+    adds r2, #2
+    mov r3, r2
+    str.w r0, [r3, #2]
+    pop {r4, pc}
+END reg_copy_kill_fn
+@ [!] THE LINE: a position no constant gives (sp + r1) is NOT checked -- an
+@ index running past a local array is memory safety.  It passes on purpose.
+FUNC reg_unknown_fn
+    push {r4, lr}
+    add r3, sp, r1
+    str r0, [r3]
+    pop {r4, pc}
+END reg_unknown_fn
+
+@ Saved, released (sp rises above the slot), a call, sp lowered again, and
+@ the dead slot popped into pc.
+FUNC released_fn
+    push {r4, lr}
+    add sp, #8
+    bl leaf
+    sub sp, #8
+    pop {r4, pc}
+END released_fn
+@ Its twin: the slot is ABOVE the call's sp, so the call leaves it alive.
+FUNC call_keeps_fn
+    push {r4, lr}
+    bl leaf
+    pop {r4, pc}
+END call_keeps_fn
+
+@ A call rewrites lr: `bx lr` after it, with lr never saved, is no return.
+FUNC call_clobbers_fn
+    push {r4, r5}
+    bl leaf
+    pop {r4, r5}
+    bx lr
+END call_clobbers_fn
+
+@ A tail call after lr was rewritten; and its twin, which reloads lr from the
+@ slot first.
+FUNC tail_lr_fn
+    mov lr, r3
+    b.w leaf
+END tail_lr_fn
+FUNC tail_reload_fn
+    push {r4, lr}
+    bl leaf
+    pop {r4, lr}
+    b.w leaf
+END tail_reload_fn
+
+@ lr reloaded with a load: from the slot (sp+4) it is the return address,
+@ from r4's word (sp+0) it is not.
+FUNC reload_ok_fn
+    push {r4, lr}
+    bl leaf
+    ldr.w lr, [sp, #4]
+    add sp, #8
+    bx lr
+END reload_ok_fn
+FUNC reload_bad_fn
+    push {r4, lr}
+    bl leaf
+    ldr.w lr, [sp, #0]
+    add sp, #8
+    bx lr
+END reload_bad_fn
+
+@ IT blocks.  A store that MAY run (executed or not) over the slot kills it;
+@ the same store over r4's word does not.
+FUNC it_st_kill_fn
+    push {r4, lr}
+    cmp r0, #0
+    it eq
+    streq r0, [sp, #4]
+    pop {r4, pc}
+END it_st_kill_fn
+FUNC it_st_ok_fn
+    push {r4, lr}
+    cmp r0, #0
+    it eq
+    streq r0, [sp, #0]
+    pop {r4, pc}
+END it_st_ok_fn
+@ A save that may NOT run is not a save; an unconditional one is.
+FUNC it_save_fn
+    sub sp, #8
+    cmp r0, #0
+    it eq
+    streq lr, [sp, #4]
+    add sp, #4
+    pop {pc}
+END it_save_fn
+@ lr stored after it was rewritten: the word holds no return address.
+FUNC save_stale_fn
+    mov lr, r3
+    push {r4, lr}
+    pop {r4, pc}
+END save_stale_fn
+FUNC save_str_fn
+    sub sp, #8
+    str lr, [sp, #4]
+    add sp, #4
+    pop {pc}
+END save_str_fn
+
+@ Store widths over a 4-byte slot at entry-4 (sp at entry-16 in the wide
+@ cases): a byte on its last byte / the byte just below it; a doubleword
+@ that covers it / the one below; an FP doubleword; a store multiple.
+FUNC byte_kill_fn
+    push {r4, lr}
+    strb r0, [sp, #7]
+    pop {r4, pc}
+END byte_kill_fn
+FUNC byte_ok_fn
+    push {r4, lr}
+    strb r0, [sp, #3]
+    pop {r4, pc}
+END byte_ok_fn
+FUNC strd_kill_fn
+    push {r4, r5, r6, lr}
+    strd r0, r1, [sp, #8]
+    pop {r4, r5, r6, pc}
+END strd_kill_fn
+FUNC strd_ok_fn
+    push {r4, r5, r6, lr}
+    strd r0, r1, [sp]
+    pop {r4, r5, r6, pc}
+END strd_ok_fn
+FUNC vstr_kill_fn
+    push {r4, r5, r6, lr}
+    vstr d0, [sp, #8]
+    pop {r4, r5, r6, pc}
+END vstr_kill_fn
+FUNC vstr_ok_fn
+    push {r4, r5, r6, lr}
+    vstr d0, [sp]
+    pop {r4, r5, r6, pc}
+END vstr_ok_fn
+FUNC stm_kill_fn
+    push {r4, lr}
+    mov r3, sp
+    stmia r3!, {r0, r1}
+    pop {r4, pc}
+END stm_kill_fn
+FUNC stm_ok_fn
+    push {r4, lr}
+    mov r3, sp
+    stmia r3!, {r0}
+    pop {r4, pc}
+END stm_ok_fn
+
+@ Indexing: pre-indexed with writeback lands on the slot; post-indexed writes
+@ at the old base and moves it, so a second store through it lands there.
+FUNC pre_kill_fn
+    push {r4, lr}
+    mov r3, sp
+    str r0, [r3, #4]!
+    pop {r4, pc}
+END pre_kill_fn
+FUNC pre_ok_fn
+    push {r4, lr}
+    mov r3, sp
+    str r0, [r3, #-4]!
+    pop {r4, pc}
+END pre_ok_fn
+FUNC post_kill_fn
+    push {r4, lr}
+    mov r3, sp
+    str r0, [r3], #4
+    str r0, [r3]
+    pop {r4, pc}
+END post_kill_fn
+FUNC post_ok_fn
+    push {r4, lr}
+    mov r3, sp
+    str r0, [r3], #4
+    pop {r4, pc}
+END post_ok_fn
+
+@ Security state transitions, refused wherever they are (a plugin veneer's
+@ exemption covers `bx rN` / `blx rN` only).  Assembled as bytes, so both
+@ cores carry them: SG, BXNS r3, BLXNS r3.
+FUNC sg_fn
+    .inst.w 0xe97fe97f
+    bx lr
+END sg_fn
+FUNC bxns_fn
+    .inst.n 0x471c
+END bxns_fn
+FUNC blxns_fn
+    push {r4, lr}
+    .inst.n 0x479c
+    pop {r4, pc}
+END blxns_fn
 
 @ The code after a CONDITIONAL return is reachable; a walk that took `popeq`
 @ for an unconditional return would never see the blx.
@@ -565,6 +817,23 @@ FUNC mve_sp_fn
     vstrw.32 q0, [sp, #-16]!
     bx lr
 END mve_sp_fn
+
+@ An MVE store is a store too (issue #124): 16 bytes at sp+8 cover the saved
+@ lr at entry-4; at sp+0 they end below it.
+FUNC mve_kill_fn
+    push {r4, lr}
+    sub sp, #16
+    vstrw.32 q0, [sp, #8]
+    add sp, #16
+    pop {r4, pc}
+END mve_kill_fn
+FUNC mve_ok_fn
+    push {r4, lr}
+    sub sp, #16
+    vstrw.32 q0, [sp]
+    add sp, #16
+    pop {r4, pc}
+END mve_ok_fn
 """
 
 # --- the C half: what the compiler's own records say ------------------------
@@ -629,16 +898,13 @@ static __attribute__((noinline)) int sr(const int *p, int unused)
 { volatile int v[5]; v[*p & 3] = *p; return v[1]; }
 int sr_root(int x) { return sr(&x, 0) + sr(&x, 0) + 1; }
 """,
-    # [!] A LIMIT, RECORDED -- NOT A SHAPE THAT OUGHT TO PASS.  A return is
-    # proven here by lr's STATE (was it saved?), never by the IDENTITY of the
-    # slot it comes back from, so a body that saves lr and then stores over
-    # that slot transfers to an arbitrary address and is still read as a
-    # return: only its own frame is charged, and whatever it reaches is
-    # charged nothing.  The cases below pin what happens today so that a
-    # change to it cannot be silent; slot identity belongs to the shared walk
-    # (issue #111).  In C, in the tree, so it has a -fstack-usage record and
-    # reaches the walk -- which is exactly why the witness rule is not a
-    # defence against this.
+    # [!] SHAPES #112 HAD TO ACCEPT AND #124 REFUSES.  A body that saves lr
+    # and then stores over that word, or moves sp so the pop takes another
+    # word, leaves for an address nobody charged.  Until #124 the return was
+    # proven by lr's state alone and these passed (pinned as a limit); the
+    # shared analysis now knows WHERE lr was saved.  In C, in the tree, so it
+    # has a -fstack-usage record -- the witness rule is no defence here, the
+    # analysis is.
     "lr_slot.c": r"""
 __attribute__((noinline, used)) int lr_slot_target(void)
 { volatile char b[64]; b[0] = 1; return b[0]; }
@@ -660,8 +926,8 @@ __attribute__((naked, used)) void lr_slot_moved(void)
 }
 __attribute__((naked, used)) void lr_never_saved(void)
 {
-    /* The other side of the line, and a real defence: lr is never saved, so
-     * the pop is not a return at all. */
+    /* lr is never saved, so the pop is not a return at all (refused before
+     * #124 too). */
     __asm__ volatile("sub  sp, #4\n\t"
                      "movw r0, #:lower16:lr_slot_target\n\t"
                      "movt r0, #:upper16:lr_slot_target\n\t"
@@ -675,9 +941,8 @@ C_ORDER = ["c_chain.c", "varargs.c", "indirect.c", "recur.c", "alloca.c",
            "tu_a1.c", "tu_b1.c", "tu_b2.c", "tu_a2.c", "clone.c", "lr_slot.c"]
 
 # The same shape in hand-written assembler, in an object of the tree's own --
-# NOT in the prebuilt archive.  It has no -fstack-usage record, which is what
-# stops it: the witness rule refuses a compiled body below a veneer whose
-# record cannot be named.  That is a real defence, and it is the one this pins.
+# NOT in the prebuilt archive.  It has no -fstack-usage record, so the witness
+# rule refuses it too; since #124 the analysis refuses the shape itself.
 INTREE_ASM = r"""
     .syntax unified
     .thumb
@@ -1141,10 +1406,12 @@ CASES = [
      ("reject", [("walk", "register arithmetic into sp at")]),
      "an sp write outside the vocabulary"),
     ("sp_in_loop", "main", BOTH, {"pl_base_log": "loop_fn"}, 1024, p_none,
-     ("reject", [("walk", "is inside a loop")]),
+     ("reject", [("walk", "is inside a loop"),
+                 ("walk", "with sp at different places")]),
      "a decrement on a backward branch's cycle"),
     ("sp_in_le_loop", "main", ("m55",), {"pl_base_log": "le_loop_fn"}, 1024,
-     p_none, ("reject", [("walk", "is inside a loop")]),
+     p_none, ("reject", [("walk", "is inside a loop"),
+                         ("walk", "with sp at different places")]),
      "a decrement inside a DLS/LE low-overhead loop"),
     ("branch_interior", "main", BOTH, {"pl_base_log": "interior_fn"}, 1024,
      p_none, ("reject", [("walk", "into the interior of other_fn")]),
@@ -1168,8 +1435,9 @@ CASES = [
      p_none, ("reject", [("walk", "`bx lr` at")]),
      "bx lr after lr was overwritten"),
     ("unproven_pop_pc", "main", BOTH, {"pl_base_log": "badpop_fn"}, 1024,
-     p_none, ("reject", [("walk", "lr was not saved on every path")]),
-     "pop into pc with nothing saved"),
+     p_none, ("reject", [("walk", "lr was not saved on every path"),
+                         ("walk", "returns with sp at entry sp+8")]),
+     "pop into pc with nothing saved (and sp above the entry after it)"),
     ("msr_stack_pointer", "main", BOTH, {"pl_base_log": "msr_sp_fn"}, 1024,
      p_none, ("reject", [("walk", "msr to a stack pointer")]),
      "an msr to a stack pointer"),
@@ -1190,7 +1458,8 @@ CASES = [
      ("reject", [("walk", "outside a linker long-branch veneer")]),
      "ldr pc, [pc, #imm] inside an ordinary body"),
     ("sp_in_loop_middle", "main", BOTH, {"pl_base_log": "loop_mid_fn"},
-     1024, p_none, ("reject", [("walk", "is inside a loop")]),
+     1024, p_none, ("reject", [("walk", "is inside a loop"),
+                               ("walk", "with sp at different places")]),
      "the stack change is in the middle of its loop"),
     ("lr_clobbered_on_one_path", "main", BOTH, {"pl_base_log": "lr_join_fn"},
      1024, p_none, ("reject", [("walk", "`bx lr` at")]),
@@ -1297,36 +1566,148 @@ CASES = [
     ("in_tree_archive", "main", BOTH, {"pl_base_log": "tree_fn"}, 1024,
      p_none, ("reject", [("witness", "is not under a --prebuilt-root")]),
      "an archive this build made is not a vendor's"),
-    # --- the lr slot: a limit, pinned so that changing it cannot be silent --
-    # [!] THE SECOND OF THESE RECORDS SOMETHING UNDESIRABLE.  A return is
-    # proven by lr's STATE, not by the IDENTITY of the slot it is reloaded
-    # from, so a body that saves lr and then stores over that slot is read as
-    # a return: the walk charges ITS frame (8 B) and charges NOTHING for the
-    # address it actually transfers to -- lr_slot_target, whose own frame is
-    # 64 B and never appears.  Closing that needs slot identity, which belongs
-    # to the shared walk (issue #111).  Until then: if somebody adds slot
-    # identity, this case turns into a refusal and MUST be rewritten as one --
-    # that is what it is here to force.  If instead somebody widens what
-    # counts as a return, the number moves and the case fails too.
+    # --- the lr slot: the four shapes #112 pinned as a limit, now checked ----
+    # Until #124 a return was proven by lr's STATE (was it saved?), never by
+    # WHERE it was saved, and the first three below were accepted, charging
+    # the body's own frame and nothing for wherever the pop went.  The shared
+    # analysis now records the word lr was saved to and accepts a pop into pc
+    # only from that word (issue #124, D4); each is refused for that reason.
     ("lr_slot_asm_in_tree", "main", BOTH, {"pl_base_log": "lr_slot_asm"},
-     1024, p_none, ("reject", [("witness", "no record file")]),
-     "the same shape in the tree's own assembler is stopped -- by the "
-     "WITNESS rule, not by the walk: it has no -fstack-usage record"),
+     1024, p_none,
+     ("reject", [("walk", "the saved lr at entry sp-4 was lost to a store "
+                          "over it"),
+                 ("witness", "no record file")]),
+     "the tree's own assembler: refused by the analysis (the store over the "
+     "saved lr), and still by the witness rule"),
     ("lr_slot_naked_c", "main", BOTH, {"pl_base_log": "lr_slot_naked"}, 1024,
-     p_none, ("accept", {"pl_base_log": 8}),
-     "[!] KNOWN LIMIT, NOT DESIRED BEHAVIOUR: storing over the saved lr slot "
-     "passes as a return, charging the frame alone and nothing for the "
-     "64 B body it reaches"),
+     p_none,
+     ("reject", [("walk", "the saved lr at entry sp-4 was lost to a store "
+                          "over it")]),
+     "storing over the saved lr slot: the pop is not a return"),
     ("lr_slot_moved_sp", "main", BOTH, {"pl_base_log": "lr_slot_moved"}, 1024,
-     p_none, ("accept", {"pl_base_log": 8}),
-     "[!] KNOWN LIMIT: and no store is needed -- moving sp after saving lr "
-     "pops a different word, which is the same missing slot identity"),
+     p_none,
+     ("reject", [("walk", "it loads pc from entry sp-8, and the return "
+                          "address is at entry sp-4"),
+                 ("walk", "returns with sp at entry sp-4")]),
+     "sp moved after saving lr: the pop takes another word, and leaves sp "
+     "below the entry"),
     ("lr_never_saved", "main", BOTH, {"pl_base_log": "lr_never_saved"}, 1024,
      p_none,
      ("reject", [("walk", "is not proven to be a return: lr was not saved "
                           "on every path")]),
-     "the line that IS held: with lr never saved, `pop {..., pc}` is refused "
-     "-- so the two accepts above turn on lr's state, not on the slot"),
+     "with lr never saved, `pop {..., pc}` is refused (as before #124)"),
+    # --- issue #124 (D4): sp's position and the saved lr ---------------------
+    ("tail_sp", "main", BOTH, {"pl_base_log": "tail_sp_fn"}, 1024, p_none,
+     ("reject", [("walk", "tail call at 0x")]),
+     "a conditional tail call with the frame still allocated (ch_b's shape "
+     "before #124)"),
+    ("sp_unbalanced", "main", BOTH, {"pl_base_log": "sp_unbal_fn"}, 1024,
+     p_none, ("reject", [("walk", "`bx lr` at")]),
+     "a body that returns with sp 16 B below where it found it"),
+    ("sp_join", "main", BOTH, {"pl_base_log": "sp_join_fn"}, 1024, p_none,
+     ("reject", [("walk", "with sp at different places (entry sp-16, "
+                          "entry sp-8)")]),
+     "two paths meet with sp at two places"),
+    ("reg_kill", "main", BOTH, {"pl_base_log": "reg_kill_fn"}, 1024, p_none,
+     ("reject", [("walk", "lost to a store over it")]),
+     "a store through a register made from sp at a known position, over "
+     "the saved lr"),
+    ("reg_copy_kill", "main", BOTH, {"pl_base_log": "reg_copy_kill_fn"}, 1024,
+     p_none, ("reject", [("walk", "lost to a store over it")]),
+     "the same through mov, add of an immediate and another mov"),
+    ("reg_nokill", "main", BOTH, {"pl_base_log": "reg_nokill_fn"}, 1024,
+     p_none, ("accept", {"pl_base_log": 8}),
+     "the same register store over r4's word, not lr's"),
+    ("reg_unknown_position", "main", BOTH, {"pl_base_log": "reg_unknown_fn"},
+     1024, p_none, ("accept", {"pl_base_log": 8}),
+     "[!] THE LINE: a store at sp + a register is not checked (memory "
+     "safety, which the gates do not claim) -- it passes on purpose"),
+    ("released_then_relowered", "main", BOTH, {"pl_base_log": "released_fn"},
+     1024, p_none,
+     ("reject", [("walk", "lost to sp rising above it")]),
+     "sp rose above the slot, a call, sp lowered again: the slot stays dead"),
+    ("call_keeps_slot", "main", BOTH, {"pl_base_log": "call_keeps_fn"}, 1024,
+     p_none, ("accept", {"pl_base_log": 8}),
+     "a slot above the call's sp lives across the call"),
+    ("call_clobbers_lr", "main", BOTH, {"pl_base_log": "call_clobbers_fn"},
+     1024, p_none, ("reject", [("walk", "`bx lr` at")]),
+     "a call rewrites lr; `bx lr` after it, lr never saved, is no return"),
+    ("tail_after_lr_change", "main", BOTH, {"pl_base_log": "tail_lr_fn"},
+     1024, p_none,
+     ("reject", [("walk", "leaves with lr not holding the return address")]),
+     "a tail call after lr was rewritten"),
+    ("tail_after_reload", "main", BOTH, {"pl_base_log": "tail_reload_fn"},
+     1024, p_none, ("accept", {"pl_base_log": 8}),
+     "a tail call after lr was reloaded from its slot"),
+    ("lr_reload_slot", "main", BOTH, {"pl_base_log": "reload_ok_fn"}, 1024,
+     p_none, ("accept", {"pl_base_log": 8}),
+     "`ldr lr, [sp, #4]` from the slot, then `bx lr`"),
+    ("lr_reload_other", "main", BOTH, {"pl_base_log": "reload_bad_fn"}, 1024,
+     p_none, ("reject", [("walk", "`bx lr` at")]),
+     "`ldr lr, [sp, #0]` from another word: lr is not the return address"),
+    ("it_store_kills", "main", BOTH, {"pl_base_log": "it_st_kill_fn"}, 1024,
+     p_none, ("reject", [("walk", "lost to a store over it")]),
+     "a conditional store over the slot (it may run)"),
+    ("it_store_elsewhere", "main", BOTH, {"pl_base_log": "it_st_ok_fn"}, 1024,
+     p_none, ("accept", {"pl_base_log": 8}),
+     "the same conditional store over r4's word"),
+    ("it_save", "main", BOTH, {"pl_base_log": "it_save_fn"}, 1024, p_none,
+     ("reject", [("walk", "lr was not saved on every path")]),
+     "a conditional save of lr (it may not run) is not a save"),
+    ("save_after_lr_change", "main", BOTH, {"pl_base_log": "save_stale_fn"},
+     1024, p_none, ("reject", [("walk", "lr was not saved on every path")]),
+     "a push of lr after lr was rewritten saves no return address"),
+    ("str_save", "main", BOTH, {"pl_base_log": "save_str_fn"}, 1024, p_none,
+     ("accept", {"pl_base_log": 8}),
+     "the same save, unconditional"),
+    ("byte_over_slot", "main", BOTH, {"pl_base_log": "byte_kill_fn"}, 1024,
+     p_none, ("reject", [("walk", "lost to a store over it")]),
+     "a byte store on the slot's last byte"),
+    ("byte_below_slot", "main", BOTH, {"pl_base_log": "byte_ok_fn"}, 1024,
+     p_none, ("accept", {"pl_base_log": 8}),
+     "a byte store just below the slot"),
+    ("strd_over_slot", "main", BOTH, {"pl_base_log": "strd_kill_fn"}, 1024,
+     p_none, ("reject", [("walk", "lost to a store over it")]),
+     "a doubleword store covering the slot"),
+    ("strd_below_slot", "main", BOTH, {"pl_base_log": "strd_ok_fn"}, 1024,
+     p_none, ("accept", {"pl_base_log": 16}),
+     "a doubleword store below it"),
+    ("vstr_over_slot", "main", BOTH, {"pl_base_log": "vstr_kill_fn"}, 1024,
+     p_none, ("reject", [("walk", "lost to a store over it")]),
+     "an FP doubleword store covering the slot"),
+    ("vstr_below_slot", "main", BOTH, {"pl_base_log": "vstr_ok_fn"}, 1024,
+     p_none, ("accept", {"pl_base_log": 16}),
+     "an FP doubleword store below it"),
+    ("stm_over_slot", "main", BOTH, {"pl_base_log": "stm_kill_fn"}, 1024,
+     p_none, ("reject", [("walk", "lost to a store over it")]),
+     "a store multiple whose second word is the slot"),
+    ("stm_below_slot", "main", BOTH, {"pl_base_log": "stm_ok_fn"}, 1024,
+     p_none, ("accept", {"pl_base_log": 8}),
+     "a store multiple of one word, below it"),
+    ("pre_index_over_slot", "main", BOTH, {"pl_base_log": "pre_kill_fn"},
+     1024, p_none, ("reject", [("walk", "lost to a store over it")]),
+     "a pre-indexed store landing on the slot"),
+    ("pre_index_elsewhere", "main", BOTH, {"pl_base_log": "pre_ok_fn"}, 1024,
+     p_none, ("accept", {"pl_base_log": 8}),
+     "a pre-indexed store landing below sp"),
+    ("post_index_over_slot", "main", BOTH, {"pl_base_log": "post_kill_fn"},
+     1024, p_none, ("reject", [("walk", "lost to a store over it")]),
+     "post-indexed: the base moves onto the slot and the next store hits it"),
+    ("post_index_elsewhere", "main", BOTH, {"pl_base_log": "post_ok_fn"},
+     1024, p_none, ("accept", {"pl_base_log": 8}),
+     "post-indexed: the store itself is at the old base"),
+    ("mve_store_over_slot", "main", ("m55",), {"pl_base_log": "mve_kill_fn"},
+     1024, p_none, ("reject", [("walk", "lost to a store over it")]),
+     "an MVE vector store covering the slot"),
+    ("mve_store_below_slot", "main", ("m55",), {"pl_base_log": "mve_ok_fn"},
+     1024, p_none, ("accept", {"pl_base_log": 24}),
+     "the same vector store ending below it"),
+    ("sg", "main", BOTH, {"pl_base_log": "sg_fn"}, 1024, p_none,
+     ("reject", [("walk", "`sg` at")]), "SG is refused"),
+    ("bxns", "main", BOTH, {"pl_base_log": "bxns_fn"}, 1024, p_none,
+     ("reject", [("walk", "`bxns r3` at")]), "BXNS is refused"),
+    ("blxns", "main", BOTH, {"pl_base_log": "blxns_fn"}, 1024, p_none,
+     ("reject", [("walk", "`blxns r3` at")]), "BLXNS is refused"),
     ("ltrans_partition_missing", "lto", BOTH,
      {"*": "lto_leaf", "pl_base_log": "lto_root"}, 1024,
      p_ltrans_delete("lto_mid"),

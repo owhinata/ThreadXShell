@@ -410,6 +410,27 @@ def m_pop_pc(src):
     inject(src, naked("fx_poppc", "pop {pc}"), "return fx_poppc(" + ARG + ");")
 
 
+def m_lr_slot(src):
+    """lr saved, then the saved word stored over (issue #124, D4): the pop
+    into pc is not a return.  The same shared analysis as the firmware's."""
+    inject(src, naked("fx_lrslot", "push {r4, lr}\\n\\t"
+                                   "str r0, [sp, #4]\\n\\tpop {r4, pc}"),
+           "return fx_lrslot(" + ARG + ");")
+
+
+def m_veneer_secure(word):
+    """An instruction put INSIDE a veneer (pl_print_write), before its
+    register branch: a security state transition, which the veneer's exemption
+    (`bx rN` / `blx rN` only) does not cover, or an sp change that the branch
+    -- a tail call into the base -- then leaves with (issue #124)."""
+    def f(src):
+        sub(os.path.join(src, "plugin_base.c"),
+            "\treturn o->write(o->ctx, s, len);",
+            "\t__asm__ volatile(\"%s\");\n\treturn o->write(o->ctx, s, len);"
+            % word)
+    return f
+
+
 def m_jump_table(src):
     """A dense switch.  Compiled without -fno-jump-tables it is a tbb on both
     cores (measured with the pinned GCC); with it, a compare chain."""
@@ -876,6 +897,23 @@ CASES += [
     ("pop_pc_unsaved", "grove", m_pop_pc, None, None, "gate",
      "lr was not saved on every path",
      "gate: `pop {pc}` with lr never saved is not a return"),
+    ("lr_slot", "grove", m_lr_slot, None, None, "gate",
+     "fx_lrslot: `pop {..., pc}` at",
+     "gate: the saved lr stored over -- the pop into pc is not a return"),
+    ("lr_slot", "wio", m_lr_slot, None, None, "gate",
+     "fx_lrslot: `pop {..., pc}` at", "gate: the same on the M7"),
+    ("veneer_sp", "grove", m_veneer_secure("sub sp, #8"), None, None,
+     "gate", "leaves with sp at entry sp-8",
+     "gate: a veneer's register branch is a tail call -- sp must be back"),
+    ("veneer_sg", "grove", m_veneer_secure(".inst.w 0xe97fe97f"), None, None,
+     "gate", "pl_print_write: `sg` at",
+     "gate: SG inside a veneer is refused, not exempted"),
+    ("veneer_bxns", "grove", m_veneer_secure(".inst.n 0x471c"), None, None,
+     "gate", "pl_print_write: `bxns r3` at",
+     "gate: BXNS inside a veneer is refused, not exempted"),
+    ("veneer_blxns", "grove", m_veneer_secure(".inst.n 0x479c"), None, None,
+     "gate", "pl_print_write: `blxns r3` at",
+     "gate: BLXNS inside a veneer is refused, not exempted"),
     ("interior", "grove", m_interior, None, None, "gate",
      "into the interior of fx_deep",
      "gate: a branch into the middle of another function"),

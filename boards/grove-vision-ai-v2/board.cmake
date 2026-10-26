@@ -376,6 +376,7 @@ set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/shell/backend/cli_backend_dummy.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_builtin.c"
     "${BOARD_DIR}/cmds/cmd_system.c"
+    "${BOARD_DIR}/cmds/reboot_gate.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_thread.c"
     "${CMAKE_SOURCE_DIR}/shell/cmds/cmd_console.c"
     "${BOARD_DIR}/cmds/cmd_free.c"

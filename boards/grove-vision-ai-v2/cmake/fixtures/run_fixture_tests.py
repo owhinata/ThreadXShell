@@ -370,11 +370,14 @@ def main():
     # The camera entry points the nn port calls (issue #142's panel-sink
     # hold / release / overlay, the stats it reads, and issue #115's frame
     # count and raw frame), aliased like the create_objects() pair -- nothing
-    # in a fixture ELF is executed.
+    # in a fixture ELF is executed.  And issue #68's `reboot` (cmd_system.c),
+    # which stops the camera before it resets: it is the system command, not
+    # a camera consumer, so its one entry point is aliased too.
     f2_alias = ("camera_create_objects", "cam_lcd_sink_create_objects",
                 "cam_lcd_sink_hold", "cam_lcd_sink_release",
                 "cam_lcd_sink_overlay_remove", "camera_stream_stats",
-                "camera_frames_since_bringup", "camera_raw_frame")
+                "camera_frames_since_bringup", "camera_raw_frame",
+                "camera_stream_stop")
     f2 = f2_objs.replace(
         "arm-none-eabi-g++ ",
         "arm-none-eabi-g++ " +

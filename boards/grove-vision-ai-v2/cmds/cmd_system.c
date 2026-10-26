@@ -14,7 +14,9 @@
  *    next to the tx_glue snapshot, which is the value SysTick runs from.
  *
  * reboot is a *dangerous* command, compiled in only when
- * CLI_ENABLE_DANGEROUS_CMDS is set.  Clean-room design; no code reused.
+ * CLI_ENABLE_DANGEROUS_CMDS is set.  It stops the camera first and refuses
+ * when the stop does not confirm (issue #68, cmds/reboot_gate.h).  Clean-room
+ * design; no code reused.
  */
 #include "cli.h"
 #include "cli_version.h"     /* CLI_FW_NAME / CLI_FW_VERSION / CLI_GIT_DESC */
@@ -24,6 +26,18 @@
 #include "tx_glue.h"
 
 #include <stdint.h>
+
+#if CLI_ENABLE_DANGEROUS_CMDS
+#include "camera.h"
+#include "reboot_gate.h"
+
+/* [!] reboot_gate.c decides about NUMBERS and is compiled on the host where
+ * camera.h cannot be included; these tie the two together. */
+_Static_assert(REBOOT_CAM_OK      == CAM_OK,          "CAM_OK moved");
+_Static_assert(REBOOT_CAM_TIMEOUT == CAM_ERR_TIMEOUT, "CAM_ERR_TIMEOUT moved");
+_Static_assert(REBOOT_CAM_STATE   == CAM_ERR_STATE,   "CAM_ERR_STATE moved");
+_Static_assert(REBOOT_CAM_LOCKED  == CAM_ERR_LOCKED,  "CAM_ERR_LOCKED moved");
+#endif
 
 static int cmd_version(struct cli_instance *sh, int argc, char **argv)
 {
@@ -71,17 +85,64 @@ static int cmd_uptime(struct cli_instance *sh, int argc, char **argv)
 
 #if CLI_ENABLE_DANGEROUS_CMDS
 /*
+ * Run the camera's one stop routine and say whether its answer permits a
+ * reset.  On a refusal the reason is printed here.  camera_stream_stop() is
+ * the only camera entry that waits for the API mutex (bounded), and the
+ * decision over the state is taken under that mutex inside it -- nothing
+ * here reads the camera state beforehand.
+ *
+ * It is called directly, not through the holder table (svc/camera/
+ * cam_holders) or the nn stream machine: those are soft state the reset
+ * wipes, and the panel sink's unlink and the holders' release touch no camera
+ * hardware.  What has to be true before the reset is only that the producer
+ * has been through its quiesce, and a CAM_OK from this call is that proof.
+ */
+static int reboot_camera_stopped(struct cli_instance *sh)
+{
+	int rc = camera_stream_stop();
+	enum reboot_verdict v = reboot_verdict_of(rc);
+
+	if (v == REBOOT_RESET)
+		return 1;
+	cli_error(sh, "reboot: refused: %s (camera stop %d)\r\n"
+	              "        a soft reset leaves the camera running and the "
+	              "next stream start\r\n"
+	              "        hangs (issue #68); press RST\r\n",
+	          reboot_refusal_text(v), rc);
+	return 0;
+}
+
+/*
  * reboot: software reset via SCB->AIRCR SYSRESETREQ.  The board re-enters the
- * Himax bootloader (its xmodem menu window included), then the app.  Sleep
- * briefly first so the UART TX ring drains the goodbye message.
+ * Himax bootloader (its xmodem menu window included), then the app.
+ *
+ * [!] THE CAMERA IS STOPPED FIRST, AND THE RESET HAPPENS ONLY ON A CONFIRMED
+ * STOP (issue #68).  The reset is the CPU's alone: a stream left running keeps
+ * the sensor and the datapath going, the previous boot's EDM watchdog expires
+ * after the new boot's NVIC sweep, and the first `camera stream start` that
+ * follows hangs the console.  Anything but a confirmed stop is refused, and
+ * the operator is sent to the RST button, which resets the whole board.
+ *
+ * The stop is asked TWICE: once before the goodbye message, so a refusal is
+ * printed instead of it, and once after the ~50 ms the UART TX ring needs to
+ * drain -- that sleep lets lower-priority threads run, and a background job
+ * could start a stream inside it.  The second stop answers CAM_OK at once when
+ * nothing did.
+ *
+ * NOT COVERED: a crash reset through fault.c does not come here, so it does
+ * not stop the camera (see the README's reboot note).
  */
 static int cmd_reboot(struct cli_instance *sh, int argc, char **argv)
 {
 	(void)argc;
 	(void)argv;
 
-	cli_print(sh, "rebooting...\r\n");
+	if (!reboot_camera_stopped(sh))
+		return 1;
+	cli_print(sh, "rebooting (camera stopped)...\r\n");
 	tx_thread_sleep(50);          /* ~50 ms: let the TX ring drain */
+	if (!reboot_camera_stopped(sh))
+		return 1;
 	NVIC_SystemReset();           /* does not return */
 	return 0;                     /* unreachable */
 }
@@ -90,5 +151,5 @@ static int cmd_reboot(struct cli_instance *sh, int argc, char **argv)
 CLI_CMD_REGISTER(version, NULL, "show firmware/MCU version", cmd_version, 1, 0);
 CLI_CMD_REGISTER(uptime,  NULL, "show uptime since boot (~49.7d wrap)", cmd_uptime, 1, 0);
 #if CLI_ENABLE_DANGEROUS_CMDS
-CLI_CMD_REGISTER(reboot,  NULL, "reboot the board (immediate)", cmd_reboot, 1, 0);
+CLI_CMD_REGISTER(reboot,  NULL, "stop the camera, then reboot the board", cmd_reboot, 1, 0);
 #endif

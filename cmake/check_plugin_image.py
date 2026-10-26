@@ -22,8 +22,9 @@ board's value:
                        plugin's, so one board's number silently becoming
                        another's would make every bound derived here a guess.
 
-Everything else -- the section whitelist, the veneer set, the disassembly and
-the call-graph walk -- is the ABI's and is the same for every board.
+Everything else -- the section whitelist, the veneer set and the stack
+analysis (thumb_stack_analysis.py since issue #124, shared with the
+firmware-side check) -- is the ABI's and is the same for every board.
 
 [!] AND THIS DOES NOT PROVE MEMORY SAFETY.  It cannot see an ordinary
 out-of-bounds write, a bad tensor pointer, scratch overrun, or wrong arithmetic
@@ -41,15 +42,23 @@ Checks:
   4. no forbidden symbols          -- the board's table, applied here
   5. (no MMIO check: not soundly possible -- see the note in main)
   6. storage lives inside the declared segments, and no COMMON
-  7. indirect branches only inside the named veneers
+  7. indirect branches only inside the named veneers -- decoded from the
+     instruction bytes, image-wide (issue #124)
   8. a transitive stack bound per entry point, fail-closed -- emitted in
-     parts that do not contain the board's veneer cost (issue #111)
+     parts that do not contain the board's veneer cost (issue #111), from
+     frames counted in the bytes with the compiler's record as a witness
+     (issue #124; see stack_analysis)
 """
 import argparse
+import os
 import re
 import struct
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# The decoder, the analysis of one body and the walk (issue #124).
+import thumb_stack_analysis as tsa  # noqa: E402
 
 # ---- the target word (issue #108) ------------------------------------------
 #
@@ -333,7 +342,8 @@ BANNED_SECTIONS = {
 # The ONLY functions allowed to contain an indirect branch.  Every base, painter
 # and printer call funnels through one of these so that the stack analyser sees
 # an ordinary direct edge and exactly one accounted indirect site.  See
-# plugin_base.c.
+# plugin_base.c.  [!] THIS IS THE SET'S ONLY DECLARATION: the firmware-side
+# check imports it, and the shared analysis takes it as an argument.
 VENEERS = {
     "pl_base_log",
     "pl_base_to_frame",
@@ -348,31 +358,6 @@ VENEERS = {
 # so the far side of the printer veneer is sometimes the plugin itself.  Its
 # bound is emitted as S, and the loader charges max(c, S) at a crossing.
 SINK = "pl_sbuf_write"
-
-# [!] REGISTER NAMES, NOT NUMBERS.  objdump spells r12 as `ip`, r13 `sp`, r14
-# `lr` and r15 `pc`, and it used exactly that spelling for the painter veneer's
-# tail call (`bx ip`).  A scan written as r[0-9]+ misses those and reports an
-# image with unaccounted indirect branches as clean -- which is what the first
-# draft of this file did, on this very plugin.
-REG = r"(?:r\d+|ip|sp|lr|pc|fp|sl)"
-# [!] `bx lr` IS A RETURN, NOT A CALL.  Flagging it made the first run report
-# every leaf function in the decoder as containing an indirect branch -- forty
-# findings, none of them real, from a check that was one register name away from
-# being useless noise.  An indirect CALL is `blx <reg>`, or `bx <reg>` to
-# anything but lr (a tail call).
-INDIRECT_RE = re.compile(r"\bblx\s+" + REG + r"\b|\bbx\s+(?!lr\b)" + REG + r"\b")
-# [!] THE OFFSET IS CAPTURED, BECAUSE `b <f+0x8>` AND `b <f>` ARE NOT THE SAME
-# THING.  objdump renders an ordinary loop inside f as a branch to `<f+0x8>` and
-# a self tail call as a branch to `<f>`, and the first draft of the walk below
-# told them apart by skipping EVERY call whose target was the current function.
-# That skipped genuine direct recursion too -- the one thing the walk exists to
-# refuse -- and the recursion fixture in cmake/fixtures went on passing because
-# the clone-naming bug above happened to refuse its image for an unrelated
-# reason.  Two mistakes cancelling is how a gate ends up never having been seen
-# to fail for its own reason.
-DIRECT_CALL_RE = re.compile(r"\bbl\s+[0-9a-f]+\s+<([^>+]+)(\+0x[0-9a-f]+)?>")
-TAIL_CALL_RE = re.compile(
-    r"\bb(?:\.[nw])?\s+[0-9a-f]+\s+<([^>+]+)(\+0x[0-9a-f]+)?>")
 
 
 def run(cmd):
@@ -394,139 +379,142 @@ def sections(objdump, elf):
     return secs
 
 
-def disassemble(objdump, elf):
-    """{function: [text lines]} plus the literal words objdump decoded."""
-    out = run([objdump, "-d", "-j", ".text", elf])
-    funcs, cur = {}, None
-    for line in out.splitlines():
-        m = re.match(r"^[0-9a-f]+ <([^>]+)>:", line)
-        if m:
-            cur = m.group(1)
-            funcs[cur] = []
-        elif cur and "\t" in line:
-            funcs[cur].append(line)
-    return funcs
+# ---- the stack bound (issue #124: the shared analysis) ----------------------
+#
+# [!] THE FIRMWARE-SIDE CHECK'S ANALYSIS, NOT A SECOND ONE.  Until #124 this
+# gate had its own: frames were the compiler's -fstack-usage numbers taken as
+# the answer, edges were regular expressions over objdump's text, and functions
+# were known by NAME.  Each of those was measured to miss something: two
+# `static` functions of one name in two files merged into one (a 920 B path
+# answered as 16 B), a conditional branch used as a tail call was not an edge,
+# `mov lr, rX; bx lr`, `ldr pc, [...]` and a `pop {pc}` with lr never saved
+# were not indirect transfers, and a record that under-reports (a variadic save
+# area, a naked function) was believed.  The decoder, the analysis of one body
+# and the walk are now thumb_stack_analysis.py's, the same code that bounds the
+# firmware below each veneer (check_veneer_base_cost.py), and the two differ in
+# one thing only: WHERE THE WALK STOPS.  Here it stops at the register branch of
+# a named veneer, and returns the two halves the manifest declares.
+#
+#   functions  ELF FUNC symbols, by ADDRESS.  A name is used only to find an
+#              --entry (exactly one body, or refused) and a veneer (at most
+#              one body per name, or refused).
+#   frame      the sum of every stack decrement in the body's BYTES.  The
+#              compiler's record is a WITNESS: a scan below the record of the
+#              body's own object file is refused (the decoder missed
+#              something), and so is a body with no record, an ambiguous one,
+#              or a dynamic one.  There is NO prebuilt exemption here: every
+#              body of a plugin is compiled by add_plugin(), so every one has a
+#              record or the image is refused.
+#   refused    anywhere in the image, not only below an entry: an indirect
+#              transfer outside a veneer (a register branch, a load or move
+#              into pc, tbb/tbh), a return not proven to use the return
+#              address, a branch into the middle of another function, an SP
+#              change that is not a constant or sits on a loop, an encoding
+#              the decoder does not know.  Below an entry also recursion,
+#              found by address.  Inside a veneer exactly one thing is allowed
+#              that is refused elsewhere: `bx rN` / `blx rN` (r0-r12), the
+#              crossing into the base.
+#
+# [!] WHAT IT DOES NOT YET PROVE is what the shared analysis does not prove for
+# the firmware either (check_veneer_base_cost.py, "NOR THAT A RETURN
+# RETURNS"): which stack word a `pop {..., pc}` takes once lr was saved, and
+# that a body returns with sp where it found it.  Both gates inherit the same
+# limit from the same code, and lose it together.
+#
+# [!] switch JUMP TABLES (tbb/tbh) ARE REFUSED BY THE DECODER, UNCONDITIONALLY.
+# add_plugin() compiles with -fno-jump-tables so that a plugin's switch does not
+# produce one; that flag is a way to pass, not a replacement for the refusal --
+# a plugin that forced a table back (a later flag, hand-written asm) is still
+# refused here.  Nothing follows a table's entries.
 
 
-# [!] GCC SPELLS AN INTERPROCEDURAL CLONE TWO WAYS, AND THIS IS NOT A GUESS.
-# ipa-cp, ipa-sra and partial inlining emit extra bodies for a function; the ELF
-# calls one `pl_utoa.constprop.0` and -fstack-usage calls the SAME body
-# `pl_utoa.constprop`, without the index.  The analyser looked the ELF name up
-# verbatim, found nothing and failed closed -- correct behaviour on a wrong
-# premise, and it went unseen until a second plugin gave a static helper three
-# call sites with a constant argument.  Matching a clone to its PARENT would be
-# a guess; matching the two spellings of one clone is not.  Where a name really
-# is ambiguous (two clones, one .su name) the larger frame is kept, which is the
-# direction a bound may err in.
-CLONE_SUFFIX_RE = re.compile(
-    r"^(.*\.(?:constprop|isra|part|cold|lto_priv|localalias))\.\d+$")
+def resolve(image, name):
+    """[addr] of every body that carries `name`."""
+    return sorted(a for a, n in image.nodes.items() if name in n.names)
 
 
-def stack_usage(su_files):
-    """{function: (frame, qualifier)} from -fstack-usage output."""
-    frames = {}
-    for path in su_files:
-        with open(path) as fh:
-            for line in fh:
-                parts = line.rstrip("\n").split("\t")
-                if len(parts) < 3:
-                    continue
-                name = parts[0].rsplit(":", 1)[-1]
-                entry = (int(parts[1]), parts[2])
-                prev = frames.get(name)
-                if prev is None or su_rank(entry) > su_rank(prev):
-                    frames[name] = entry
-    return frames
+def stack_analysis(elf_path, map_path, entries, errors):
+    """{entry: (A0, A1 or None)} for each name in `entries`, fail-closed.
 
+    [!] NO VENEER COST GOES IN HERE (issue #111).  The walk stops at a
+    crossing (only a veneer has one), so a path crosses into the base at most
+    once and what the firmware charges decomposes as max(A0, A1 + c) -- the
+    loader adds its own c (svc/plugin/plugin_load.c), so neither part goes
+    stale when c moves.  cmake/fixtures/run_plugin_gate_tests.py checks the
+    parts against a transcription of the pre-#124 walk at three values of c."""
+    try:
+        elf = tsa.Elf(elf_path)
+        image = tsa.Image(elf, *tsa.parse_map(
+            map_path, {s.name for s in elf.code}))
+    except tsa.InputError as exc:
+        errors.append(f"stack: [input] {exc}")
+        return {}
 
-def su_rank(entry):
-    """Order two .su records for the same name; the larger one is kept.
+    veneers = set()
+    for v in sorted(VENEERS):
+        at = resolve(image, v)
+        if len(at) > 1:
+            errors.append(f"stack: veneer {v} names {len(at)} bodies ("
+                          + ", ".join(f"0x{a:08x}" for a in at)
+                          + ") -- a veneer must be exactly one")
+        veneers.update(at)
+    walk = tsa.Walk(image, crossings=veneers)
 
-    [!] A NON-STATIC QUALIFIER OUTRANKS EVERY BYTE COUNT.  Two clones can share
-    one normalised name, and merging them by frame size alone throws away the
-    only thing that matters if one of them is `dynamic` or `bounded`: that it
-    has no static bound at all.  A small dynamic record losing to a large static
-    one would hand `frame_of()` a finite number for a body that has none, and
-    the gate would state a bound where there is not one -- which is the fail-open
-    direction, and the reason a merge exists here at all is a naming quirk, not
-    a licence to summarise evidence.
-    """
-    frame, qual = entry
-    return (0 if qual == "static" else 1, frame)
+    # Every body of the image, reachable or not: a plugin is one program, all
+    # of it compiled here, and what no entry reaches today a later edge does.
+    for a in sorted(image.nodes):
+        node = image.nodes[a]
+        info = image.analyse(node)
+        errs, _ = walk.body_errors(a)
+        indirect = {id(err) for _at, _why, err in info.indirect}
+        for err in errs:
+            hint = (" -- only the named veneers may, or the stack bound is "
+                    "not a bound") if id(err) in indirect else ""
+            errors.append(f"stack: {node.name}: {err[1]}{hint}")
 
+    # The witnesses.  [!] NO --prebuilt-root: nothing in a plugin is exempt.
+    wit = tsa.Witnesses(image, os.path.dirname(os.path.abspath(map_path)),
+                        [], [])
+    errors.extend(f"stack: [witness] {e}" for e in wit.errors)
+    for a in sorted(image.nodes):
+        node = image.nodes[a]
+        info = image.analyse(node)
+        state, detail = wit.records(node)
+        if state == "none":
+            # 'stub': the linker's own code, which has no record by nature.
+            if info.veneer is None:
+                errors.append(f"stack: {node.name}: linker-generated code that "
+                              "is not a long-branch veneer")
+            continue
+        if state == "missing":
+            errors.append(f"stack: [witness] {node.name}: {detail} -- every "
+                          "body of a plugin is compiled by add_plugin() and "
+                          "must have its own object's record")
+            continue
+        if state != "ok":
+            errors.append(f"stack: [witness] {node.name}: {detail}")
+            continue
+        frame, where = detail
+        if not info.frame_errs and info.frame < frame:
+            errors.append(f"stack: [witness] {node.name}: the scan found "
+                          f"{info.frame} B, the compiler's record ({where}) "
+                          f"says {frame} B -- the decoder missed a stack "
+                          "adjustment")
 
-def frame_of(fn, frames):
-    """The .su entry for an ELF symbol, or None.  See CLONE_SUFFIX_RE."""
-    if fn in frames:
-        return frames[fn]
-    m = CLONE_SUFFIX_RE.match(fn)
-    if m and m.group(1) in frames:
-        return frames[m.group(1)]
-    return None
-
-
-def bound_stack(entry, funcs, frames, errors):
-    """The plugin's own stack below `entry`, as (A0, A1), fail-closed.
-
-    [!] NO VENEER COST GOES IN HERE (issue #111).  Until then this took the
-    board's cost c and added it at every indirect call, returning one number --
-    and that number went into the manifest, where the firmware could not tell
-    which c it had been made with.  The walk stops at an indirect call (only a
-    veneer has one, which check 7 enforces), so a path crosses into the base at
-    most once and the old number decomposes exactly:
-
-        old(entry) = max(A0, A1 + c)            (the second term only if A1)
-
-      A0  the deepest the plugin's OWN frames go, over every path -- a path
-          that reaches a crossing counts up to and including the veneer's frame;
-      A1  the deepest its own frames go on a path that REACHES a crossing, or
-          None when no path does.  A1 <= A0 by construction.
-
-    The firmware adds its own c at load time (svc/plugin/plugin_load.c), so neither
-    number goes stale when c moves.  Proof that this is the old walk and not a
-    new one: old(f) = frame + max(c, old(g)...) = max(frame + A0(g),
-    frame + c, frame + A1(g) + c) = max(A0(f), A1(f) + c), with A0(f) =
-    frame + max(0, A0(g)...) and A1(f) = frame + max(0 if f crosses, A1(g)...).
-    cmake/fixtures/run_plugin_gate_tests.py checks it against a transcription of
-    the old walk at three values of c.
-    """
-    def walk(fn, path):
-        if fn in path:
-            errors.append(f"stack: recursion through {fn} ({' -> '.join(path)})")
-            return 0, None
-        su = frame_of(fn, frames)
-        if su is None:
-            errors.append(f"stack: no frame recorded for {fn} -- the .su input "
-                          "does not match the linked image")
-            return 0, None
-        frame, qual = su
-        if qual != "static":
-            errors.append(f"stack: {fn} has a {qual} frame (alloca/VLA); a "
-                          "bound cannot be stated")
-            return 0, None
-        own, cross = 0, None
-        for line in funcs.get(fn, []):
-            if INDIRECT_RE.search(line):
-                # Only ever legal inside a veneer, which check 7 enforces.  The
-                # far side is charged by whoever knows it: the firmware adds c.
-                cross = 0 if cross is None else max(cross, 0)
-                continue
-            m = DIRECT_CALL_RE.search(line) or TAIL_CALL_RE.search(line)
-            if m:
-                callee = m.group(1)
-                # A branch into the MIDDLE of this same function is a loop, not
-                # a call; a branch to its entry is recursion and is walked, so
-                # the `fn in path` test above refuses it.
-                if callee == fn and m.group(2):
-                    continue
-                if callee in funcs or frame_of(callee, frames) is not None:
-                    o, x = walk(callee, path + [fn])
-                    own = max(own, o)
-                    if x is not None:
-                        cross = x if cross is None else max(cross, x)
-        return frame + own, (None if cross is None else frame + cross)
-
-    return walk(entry, [])
+    out = {}
+    for name in entries:
+        at = resolve(image, name)
+        if not at:
+            errors.append(f"stack: no function {name} in the image")
+            continue
+        if len(at) > 1:
+            errors.append(f"stack: {name} names {len(at)} bodies -- an entry "
+                          "must be exactly one")
+            continue
+        own, cross, _complete = walk.parts(at[0])
+        out[name] = (own, cross)
+    errors.extend(f"stack: {msg}" for _stage, msg in walk.errors)
+    return out
 
 
 def bound_at(own, cross, cost):
@@ -539,7 +527,10 @@ def main():
     ap.add_argument("elf")
     ap.add_argument("--nm", required=True)
     ap.add_argument("--objdump", required=True)
-    ap.add_argument("--su", nargs="*", default=[])
+    ap.add_argument("--map", required=True,
+                    help="the GNU ld map of this link: which object each body "
+                         "came from, and so which -fstack-usage record "
+                         "witnesses it (<object>.su beside the object)")
     ap.add_argument("--entry", nargs="*", default=[],
                     help="functions to bound the stack below, name=limit")
     ap.add_argument("--emit-stacks",
@@ -564,7 +555,6 @@ def main():
 
     errors = []
     secs = sections(args.objdump, args.elf)
-    funcs = disassemble(args.objdump, args.elf)
 
     # 0. the target word
     target_note = check_target(args.elf, args.target_id, errors)
@@ -643,32 +633,29 @@ def main():
             errors.append(f"COMMON symbol {parts[-1]} -- it belongs to no "
                           "section and the manifest cannot describe it")
 
-    # 7. indirect branches only inside the veneers
-    for fn, lines in funcs.items():
-        for line in lines:
-            if INDIRECT_RE.search(line) and fn not in VENEERS:
-                errors.append(f"{fn} contains an indirect branch ({line.strip()})"
-                              " -- only the named veneers may, or the stack "
-                              "bound is not a bound")
-
-    # 8. stack bounds
-    frames = stack_usage(args.su) if args.su else {}
-    bounds = {}
+    # 7. indirect branches only inside the veneers, and
+    # 8. stack bounds -- one analysis since issue #124 (stack_analysis above):
+    # an indirect transfer anywhere but a veneer's crossing is one of its
+    # refusals, so the two checks cannot disagree about what a branch is.
     parts = {}
+    bounds = {}
+    specs = [spec.partition("=") for spec in args.entry]
     if args.entry:
-        if not frames:
-            errors.append("stack: --entry given without --su; a bound cannot be "
-                          "derived from the ELF alone")
-        for spec in args.entry:
-            name, _, limit = spec.partition("=")
-            own, cross = bound_stack(name, funcs, frames, errors)
-            parts[name] = (own, cross)
-            # The limit is still checked at THIS board's cost, as it always
-            # was: the build refuses what this firmware would refuse.
-            got = bound_at(own, cross, args.veneer_base_cost)
-            bounds[name] = got
-            if limit and got > int(limit):
-                errors.append(f"stack: {name} needs {got} B, limit {limit} B")
+        parts = stack_analysis(args.elf, args.map,
+                               [name for name, _, _ in specs], errors)
+    else:
+        # No entry still analyses the image: check 7 is not optional.
+        stack_analysis(args.elf, args.map, [], errors)
+    for name, _, limit in specs:
+        if name not in parts:
+            continue
+        own, cross = parts[name]
+        # The limit is still checked at THIS board's cost, as it always
+        # was: the build refuses what this firmware would refuse.
+        got = bound_at(own, cross, args.veneer_base_cost)
+        bounds[name] = got
+        if limit and got > int(limit):
+            errors.append(f"stack: {name} needs {got} B, limit {limit} B")
 
     # [!] S IS A NUMBER THE LOADER ADDS, SO IT MUST NOT DEPEND ON c.  The sink is
     # reached through the printer veneer; if it crossed a veneer itself, its

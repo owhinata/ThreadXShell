@@ -62,11 +62,10 @@ Cases:
                     editing thumb_stack_analysis.py ALONE reruns both gates --
                     the firmware's check and the plugin's link + gate -- and
                     relinks no firmware; with no edit, nothing reruns; and a
-                    refusal added to that module alone fails the build, leaves
-                    no stamp, and stops flash, both assets and the plugin's
-                    asset.  (In step 1 of #124 only the firmware's check
-                    imports the module; the plugin gate reruns on it because
-                    it is listed as an input, and does not yet read it.)
+                    refusal added to that module alone fails BOTH gates for
+                    that reason (the plugin gate's stack bound is the shared
+                    analysis since step 2 of #124), leaves no stamp, and stops
+                    flash, both assets and the plugin's asset.
   ltrans_drop       an LTO link that writes fewer partitions than the last
                     (max -> one) still passes: the old records are removed
                     before the link, not left for the check to refuse.
@@ -689,23 +688,28 @@ def asset_tree(p, target, made, results, name):
 
 
 PLUGIN_GATE = "plugin cifar10: ld + gate"
-# A refusal that only the shared module makes: the walk reports it once per
-# run, as any of its own refusals would be reported.
+PLUGIN_FAIL = "check_plugin_image: FAIL"
+REFUSAL_MSG = "refused by the build test's edit of the shared module"
+# A refusal that only the shared module makes, in the analysis of one body --
+# the part BOTH gates call (step 2 of #124), so each reports it as one of its
+# own refusals: the firmware's check below a veneer, the plugin gate for every
+# body of the plugin.
 REFUSAL = """
 
 # --- appended by run_veneer_gate_build_tests.py (shared_analysis) ---
-_fixture_total = Walk.total
+_fixture_analyse = Image.analyse
 
 
-def _fixture_refusing_total(self, addr, path=()):
-    msg = ("walk", "refused by the build test's edit of the shared module")
-    if msg not in self.errors:
-        self.errors.append(msg)
-    return _fixture_total(self, addr, path)
+def _fixture_refusing_analyse(self, node):
+    info = _fixture_analyse(self, node)
+    msg = (node.addr, "%s")
+    if msg not in info.flow_errs:
+        info.flow_errs.append(msg)
+    return info
 
 
-Walk.total = _fixture_refusing_total
-"""
+Image.analyse = _fixture_refusing_analyse
+""" % REFUSAL_MSG
 
 
 def shared_tree(p, results):
@@ -746,13 +750,19 @@ def shared_tree(p, results):
         p.rm(f)
     with open(mod, "w") as fh:
         fh.write(pristine + REFUSAL)
-    rc, out = p.ninja()
+    # -k 0: the two gates are independent edges, and ninja would otherwise
+    # stop at whichever failed first -- this case is about BOTH.
+    rc, out = p.ninja("-k", "0")
     flat = " ".join(out.split())
     expect(rc != 0 and "check_veneer_base_cost: FAIL" in flat
-           and "[walk] refused by the build test's edit of the shared "
-               "module" in flat,
+           and ("[walk] " in flat and REFUSAL_MSG in flat),
            "shared_refusal: a refusal in the shared module should fail the "
            "firmware's check, for that reason", out)
+    expect(PLUGIN_FAIL in flat
+           and re.search(r"check_plugin_image: FAIL\s+- stack: \S+: "
+                         + re.escape(REFUSAL_MSG), out),
+           "shared_refusal: a refusal in the shared module should fail the "
+           "plugin gate too, for that reason", out)
     expect(not os.path.exists(p.stamp),
            "shared_refusal: a stamp survived the refusal", out)
     for target, made in (("flash", "flashed"), ("asset-bare", "bare.nnc"),
@@ -774,7 +784,7 @@ def shared_tree(p, results):
            "shared_refusal: the module restored, flash and the plugin's "
            "asset should proceed", out)
     results.append(("shared_refusal", "a refusal added to the shared module "
-                                      "alone: build fails in [walk], no "
+                                      "alone: both gates fail for it, no "
                                       "stamp, flash and all three assets "
                                       "stopped; restored, they proceed"))
 

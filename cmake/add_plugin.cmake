@@ -421,7 +421,14 @@ function(add_plugin _name)
             BYPRODUCTS "${_obj}" "${_out}/${_stem}.su"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${_out}"
             COMMAND "${CMAKE_COMMAND}" -E rm -f "${_stamp}"
+            # [!] NO switch JUMP TABLES (issue #124).  A table is a tbb/tbh,
+            # an indirect branch the stack analysis refuses wherever it is --
+            # unconditionally, and that refusal stays.  This flag is what lets
+            # a plugin with a dense switch pass at all; it comes AFTER the
+            # board's CFLAGS so that a -fjump-tables there cannot undo it.
+            # Adding it changed no byte of the shipped plugins (measured).
             COMMAND "${CMAKE_C_COMPILER}" ${P_CFLAGS}
+                    -fno-jump-tables
                     -I "${_dir}"
                     -MMD -MF "${_dep}" -MT "${_stamp}"
                     # Each TU leaves the ABI it saw (svc/plugin/plugin_abi.h); the
@@ -476,7 +483,12 @@ function(add_plugin _name)
                 # packer, the verifier and the firmware all read this one value
                 # and nothing asked whether it was true.
                 --target-id "${P_TARGET_ID}"
-                --su ${_sus}
+                # [!] THE MAP, NOT A LIST OF RECORDS (issue #124).  The gate
+                # finds each body's -fstack-usage record by the object the map
+                # says it came from (<stem>.su beside <stem>.o), so a record is
+                # only ever compared with its own body.  The .su files stay in
+                # DEPENDS below: they are still what the witness reads.
+                --map "${_out}/plugin.map"
                 # [!] EVERY SLOT THE PLUGIN EXPORTS, not just the interesting
                 # ones.  The packer refuses to declare a stack for a slot nobody
                 # measured, so a short list here does not under-report -- it

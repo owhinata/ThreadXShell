@@ -6,10 +6,17 @@ What is here is the part of a stack bound that does not depend on WHERE the
 walk stops: a reader for just enough of a 32-bit ARM ELF, a Thumb-2 decoder
 that works on the instruction bytes, the analysis of one function body (its
 frame, its edges, whether its returns are proven) and the walk down the call
-tree.  It came out of check_veneer_base_cost.py unchanged (issue #124, step 1);
-that script's docstring is still where the rules are stated -- how a frame, an
-edge and a bound are derived, what is refused and what is not proven -- and it
-is still the only caller.
+tree, and the lookup of each body's -fstack-usage record (the witness).  It
+came out of check_veneer_base_cost.py unchanged (issue #124, step 1); that
+script's docstring is still where the rules are stated -- how a frame, an edge
+and a bound are derived, what is refused and what is not proven.
+
+Since step 2 of #124 it has two callers, and they differ only in where the
+walk stops: check_veneer_base_cost.py walks everything below a firmware root
+(Walk.total), check_plugin_image.py stops at the register branch of a named
+veneer and takes the two halves the plugin manifest declares (Walk.parts).
+Which bodies are veneers, which may have no record and what the budget is
+are the callers' facts.
 
 [!] ONE IMPLEMENTATION, NOT TWO.  The point of the move is that a second stack
 gate calls this rather than growing its own decoder: two analyses of the same
@@ -17,8 +24,9 @@ code would answer differently and nothing would say which one is right.
 
 [!] NO BOARD NAME AND NO -mcpu.  Like the script it came from, this names no
 core: an encoding the decoder does not know is a refusal, never a guess.  And
-it imports neither gate -- the veneer set, the records (-fstack-usage) and the
-budget are the callers' -- so it is a dependency of both and owns no policy.
+it imports neither gate -- the veneer set, which records may be absent
+(--prebuilt-root) and the budget are the callers' -- so it is a dependency of
+both and owns no policy.
 
 [!] IT IS A BUILD INPUT OF BOTH GATES.  veneer_cost_gate() and add_plugin()
 list this file in the DEPENDS of the commands that run them, so editing it
@@ -26,6 +34,7 @@ alone re-runs both checks; cmake/fixtures/run_veneer_gate_build_tests.py
 builds that both ways (re-runs after an edit, nothing re-runs without one).
 """
 import bisect
+import os
 import re
 import struct
 
@@ -1016,7 +1025,7 @@ class Node:
 class Info:
     """What one body's analysis found."""
     __slots__ = ("frame", "frame_errs", "flow_errs", "edges", "veneer",
-                 "sp_ops")
+                 "sp_ops", "indirect")
 
     def __init__(self):
         self.frame = 0
@@ -1025,6 +1034,11 @@ class Info:
         self.edges = []        # (callee addr, kind, at)
         self.veneer = None     # target addr, when the body is a linker veneer
         self.sp_ops = 0
+        # (at, why, the flow_errs entry) for every indirect transfer the body
+        # reaches.  Each is ALSO in flow_errs: this only names them, so that a
+        # caller that may exempt one (a plugin veneer, issue #124) removes that
+        # exact entry and nothing else.
+        self.indirect = []
 
 
 class Image:
@@ -1254,17 +1268,20 @@ class Image:
                 info.flow_errs.append(
                     (a, f"{ins.why} at 0x{a:08x} (an exception, not a call)"))
             elif f == "ind_call":
-                info.flow_errs.append(
-                    (a, f"indirect call `{ins.why}` at 0x{a:08x} -- the walk "
-                        "cannot know what it reaches"))
+                err = (a, f"indirect call `{ins.why}` at 0x{a:08x} -- the "
+                          "walk cannot know what it reaches")
+                info.flow_errs.append(err)
+                info.indirect.append((a, ins.why, err))
             elif f == "ind_jump":
-                info.flow_errs.append(
-                    (a, f"indirect branch `{ins.why}` at 0x{a:08x} -- the "
-                        "walk cannot know where it goes"))
+                err = (a, f"indirect branch `{ins.why}` at 0x{a:08x} -- the "
+                          "walk cannot know where it goes")
+                info.flow_errs.append(err)
+                info.indirect.append((a, ins.why, err))
             elif f == "lit_pc":
-                info.flow_errs.append(
-                    (a, f"`{ins.why}` at 0x{a:08x} outside a linker "
-                        "long-branch veneer"))
+                err = (a, f"`{ins.why}` at 0x{a:08x} outside a linker "
+                          "long-branch veneer")
+                info.flow_errs.append(err)
+                info.indirect.append((a, ins.why, err))
             if f in ("b", "bcc", "cbz", "le", "wls", "bl"):
                 t = ins.target
                 if f == "bl":
@@ -1424,25 +1441,270 @@ def _sccs(nodes, succ):
 
 
 # ============================================================================
+#  Provenance and witnesses (-fstack-usage records)
+#
+#  Moved here from check_veneer_base_cost.py in step 2 of issue #124, so that
+#  both gates find a body's record by one rule: by the map's input file of
+#  THAT body, never by a name looked up across the build.  Which bodies may
+#  have no record (--prebuilt-root) is the caller's policy, not this module's.
+# ============================================================================
+ARCHIVE_RE = re.compile(r"^(.*)\(([^()]+)\)$")
+LTRANS_O_RE = re.compile(r"\.ltrans(\d+)\.ltrans\.o$")
+LTRANS_SU_RE = re.compile(r"\.ltrans(\d+)\.ltrans\.su$")
+SU_LINE = re.compile(r"^(.*):(\d+):(\d+):(.+)\t(\d+)\t(\S+)$")
+
+
+def read_su(path):
+    """{name: [(frame, qualifier, location)]} from one -fstack-usage file."""
+    recs = {}
+    try:
+        text = open(path, errors="replace").read()
+    except OSError as exc:
+        raise InputError(f"cannot read {path}: {exc}")
+    for n, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        m = SU_LINE.match(line)
+        if not m:
+            raise InputError(f"{path}:{n}: not a -fstack-usage record: "
+                             f"{line[:80]!r}")
+        recs.setdefault(m.group(4), []).append(
+            (int(m.group(5)), m.group(6), f"{m.group(1)}:{m.group(2)}"))
+    return recs
+
+
+LTO_PRIV = re.compile(r"^(.*?)((?:\.lto_priv\.\d+)+)$")
+
+
+def record_names(name):
+    """The spellings -fstack-usage may use for one ELF symbol, most exact
+    first.  Measured with the pinned GCC: the record drops the NUMBER of an
+    IPA clone but not the clone's tag -- `f.constprop.0.isra.0` is recorded as
+    `f.constprop.isra` -- while a partial-inlining part keeps its own
+    (`f.part.0.constprop`); and LTO's `f.lto_priv.0` is a rename in the symbol
+    table only, recorded as `f`.  Every combination of dropped numbers is
+    tried, fewest first; a spelling can only ever match a record in the body's
+    OWN record file, and two records that disagree are refused as ambiguous."""
+    out = [name]
+    m = LTO_PRIV.match(name)
+    base = m.group(1) if m else name
+    parts = base.split(".")
+    nums = [k for k in range(1, len(parts)) if parts[k].isdigit()]
+    for drop in range(len(nums) + 1):
+        for combo in _combos(nums[::-1], drop):
+            cand = ".".join(p for k, p in enumerate(parts) if k not in combo)
+            if cand not in out:
+                out.append(cand)
+    return out
+
+
+def _combos(items, k):
+    if k == 0:
+        yield set()
+        return
+    for idx, it in enumerate(items):
+        for rest in _combos(items[idx + 1:], k - 1):
+            yield {it} | rest
+
+
+class Witnesses:
+    def __init__(self, image, link_dir, prebuilt_roots, ltrans_su):
+        self.image = image
+        self.link_dir = link_dir
+        self.roots = [os.path.realpath(r) for r in prebuilt_roots]
+        self.errors = []
+        self._su_cache = {}
+        self.ltrans = {}
+        for path in ltrans_su:
+            m = LTRANS_SU_RE.search(os.path.basename(path))
+            if not m:
+                raise InputError(f"--ltrans-su {path}: not named like an LTO "
+                                 "partition's record (*.ltransN.ltrans.su)")
+            n = int(m.group(1))
+            if n in self.ltrans:
+                raise InputError(f"two records for LTO partition {n}: "
+                                 f"{self.ltrans[n]} and {path}")
+            self.ltrans[n] = path
+        seen_parts = set()
+        for what in image.loads:
+            m = LTRANS_O_RE.search(what)
+            if m and not ARCHIVE_RE.match(what):
+                seen_parts.add(int(m.group(1)))
+        for n in sorted(set(self.ltrans) - seen_parts):
+            self.errors.append(
+                f"{self.ltrans[n]} is the record of LTO partition {n}, which "
+                "this image's map does not contain -- a record left by an "
+                "earlier link is not a witness of this one")
+
+    def origin(self, node):
+        """('prebuilt' | 'stub' | 'object' | 'ltrans' | 'unknown', detail)"""
+        if node.origin is not None:
+            return node.origin
+        inp = self.image.input_at(node.addr)
+        if inp is None:
+            o = ("unknown", "the map places no input section there")
+        else:
+            a, size, what = inp
+            if node.end > a + size:
+                o = ("unknown", f"its extent runs past its input section "
+                                f"({what})")
+            elif what == "linker stubs":
+                o = ("stub", what)
+            else:
+                m = ARCHIVE_RE.match(what)
+                if m:
+                    arc = os.path.realpath(os.path.join(self.link_dir,
+                                                        m.group(1)))
+                    if any(arc.startswith(r + os.sep) for r in self.roots):
+                        o = ("prebuilt", what)
+                    else:
+                        o = ("unknown", f"archive member {what} is not under "
+                                        "a --prebuilt-root, and nothing says "
+                                        "where its record is")
+                else:
+                    m = LTRANS_O_RE.search(what)
+                    if m:
+                        o = ("ltrans", int(m.group(1)))
+                    else:
+                        o = ("object", os.path.join(self.link_dir, what))
+        node.origin = o
+        return o
+
+    def records(self, node):
+        """(state, detail): state is 'none' (no witness is required), 'missing',
+        'ambiguous', 'dynamic' or 'ok' (detail = (frame, where))."""
+        kind, detail = self.origin(node)
+        if kind in ("prebuilt", "stub"):
+            return "none", kind
+        if kind == "unknown":
+            return "missing", detail
+        if kind == "ltrans":
+            path = self.ltrans.get(detail)
+            if path is None:
+                return "missing", (f"LTO partition {detail} has no record "
+                                   "file")
+        else:
+            path = os.path.splitext(detail)[0] + ".su"
+            if not os.path.exists(path):
+                return "missing", f"no record file {path}"
+        recs = self._su(path)
+        # [!] EVERY SPELLING OF EVERY NAME, NOT THE FIRST THAT HITS.  Picking
+        # one would make the answer depend on the order the spellings are
+        # tried in; taking them all makes two records that could belong to
+        # this body disagree out loud (ambiguous) instead.
+        cands = []
+        tried = set()
+        for name in node.names:
+            for spelling in record_names(name):
+                if spelling in recs and spelling not in tried:
+                    tried.add(spelling)
+                    cands.extend(recs[spelling])
+        if not cands:
+            return "missing", f"no record for {node.name} in {path}"
+        if any(q != "static" for _f, q, _w in cands):
+            q = [q for _f, q, _w in cands if q != "static"][0]
+            return "dynamic", f"{path} records {node.name} as '{q}'"
+        if len({f for f, _q, _w in cands}) > 1:
+            return "ambiguous", (f"{path} has {len(cands)} different records "
+                                 f"named like {node.name}")
+        return "ok", (cands[0][0], path)
+
+    def _su(self, path):
+        if path not in self._su_cache:
+            self._su_cache[path] = read_su(path)
+        return self._su_cache[path]
+
+
+# ============================================================================
 #  The walk
 # ============================================================================
+# [!] THE ONE INDIRECT TRANSFER A CROSSING MAY EXEMPT (issue #124): a branch
+# through a general-purpose register, `bx rN` / `blx rN` with N in r0-r12 --
+# what the plugin's veneers compile to (`bx r3`, `bx r12`, `blx r3`).  Not a
+# load or move into pc, not tbb/tbh, not `bx lr` that is not a proven return,
+# and not BXNS/BLXNS: each of those is still refused inside a veneer too.
+CROSSING_WHY = re.compile(r"^bl?x r(?:[0-9]|1[0-2])$")
+
+
+def crossing_sites(info):
+    """The entries of info.flow_errs that a crossing body may exempt."""
+    return [err for _at, why, err in info.indirect if CROSSING_WHY.match(why)]
+
+
 class Walk:
-    def __init__(self, image):
+    """The walk down the call tree, by ADDRESS.
+
+    total() walks everything below a root (the firmware's check).  parts()
+    is the same walk for a caller that names CROSSINGS -- bodies whose
+    register branches lead somewhere this image does not contain (the plugin
+    gate's veneers, issue #124): it stops there and returns the two halves
+    the plugin manifest declares.  Which body is a crossing is the caller's
+    fact; how frames, edges and recursion are found is this module's, for both.
+    """
+
+    def __init__(self, image, crossings=()):
         self.image = image
         self.memo = {}
+        self.pmemo = {}
+        self.crossings = frozenset(crossings)
         self.errors = []
         self.recursion = set()
         self.closure = set()
 
+    def _recursion(self, addr, path):
+        cyc = list(path[path.index(addr):]) + [addr]
+        key = frozenset(cyc)
+        if key not in self.recursion:
+            self.recursion.add(key)
+            names = " -> ".join(self.image.nodes[a].name for a in cyc)
+            self.errors.append(("walk", f"recursion: {names} -- no bound "
+                                        "exists"))
+
+    def body_errors(self, addr):
+        """Every refusal of one body, less the register branches of a crossing.
+        (errors, crosses)."""
+        info = self.image.analyse(self.image.nodes[addr])
+        exempt = crossing_sites(info) if addr in self.crossings else []
+        errs = [e for e in info.frame_errs + info.flow_errs
+                if not any(e is x for x in exempt)]
+        return errs, bool(exempt)
+
+    def parts(self, addr, path=()):
+        """(A0, A1, complete) below addr.
+
+          A0  the deepest the image's own frames go, over every path -- a path
+              that reaches a crossing counts up to and including the crossing
+              body's frame;
+          A1  the deepest they go on a path that REACHES a crossing, or None
+              when no path does.  A1 <= A0.
+
+        The crossing body's direct edges are walked like any other's; only its
+        register branches stop the walk.  `complete` is False when a body on
+        the way was refused (body_errors) or recursion was found."""
+        if addr in path:
+            self._recursion(addr, path)
+            return 0, None, False
+        if addr in self.pmemo:
+            return self.pmemo[addr]
+        info = self.image.analyse(self.image.nodes[addr])
+        self.closure.add(addr)
+        errs, crosses = self.body_errors(addr)
+        complete = not errs
+        own, cross = 0, (0 if crosses else None)
+        for callee, _kind, _at in info.edges:
+            o, x, ok = self.parts(callee, path + (addr,))
+            complete = complete and ok
+            own = max(own, o)
+            if x is not None:
+                cross = x if cross is None else max(cross, x)
+        res = (info.frame + own,
+               None if cross is None else info.frame + cross, complete)
+        self.pmemo[addr] = res
+        return res
+
     def total(self, addr, path=()):
         if addr in path:
-            cyc = list(path[path.index(addr):]) + [addr]
-            key = frozenset(cyc)
-            if key not in self.recursion:
-                self.recursion.add(key)
-                names = " -> ".join(self.image.nodes[a].name for a in cyc)
-                self.errors.append(("walk", f"recursion: {names} -- no bound "
-                                            "exists"))
+            self._recursion(addr, path)
             return 0, [], False
         if addr in self.memo:
             return self.memo[addr]

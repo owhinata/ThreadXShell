@@ -34,7 +34,9 @@ the same for every board; an encoding it does not know is a refusal, never a
 guess.
 
 How a bound is derived (every step fails closed; since issue #124 the code
-is in thumb_stack_analysis.py, and the roots, records and budget here):
+is in thumb_stack_analysis.py -- shared with the plugin image gate, which
+stops at its veneers instead -- and the roots, which bodies may have no
+record, and the budget here):
 
   functions  are ELF FUNC symbols, identified by ADDRESS.  A name is only ever
              used to resolve a root, and a root that names two bodies (two
@@ -150,181 +152,16 @@ import check_plugin_image  # noqa: E402
 # [!] THE DECODER, THE ANALYSIS OF ONE BODY AND THE WALK ARE SHARED (issue
 # #124): they live in thumb_stack_analysis.py, a build input of this check and
 # of the plugin gate both.  What stays here is what is THIS check's -- the
-# roots, the records and their provenance, the budget and the report.
+# roots, which bodies need no record (--prebuilt-root), the budget and the
+# report.
 # SP and decode are not used here: the fixtures reach them through this
 # module (run_veneer_cost_tests.py's decoder comparison).
+# The records' provenance and the witness lookup are shared too (step 2 of
+# #124): the plugin gate compares every body with its own object's record by
+# the same rule.
 from thumb_stack_analysis import (  # noqa: E402,F401
-    InputError, SP, Elf, Image, Walk, decode, parse_map)
-
-
-# ============================================================================
-#  Provenance and witnesses
-# ============================================================================
-ARCHIVE_RE = re.compile(r"^(.*)\(([^()]+)\)$")
-LTRANS_O_RE = re.compile(r"\.ltrans(\d+)\.ltrans\.o$")
-LTRANS_SU_RE = re.compile(r"\.ltrans(\d+)\.ltrans\.su$")
-SU_LINE = re.compile(r"^(.*):(\d+):(\d+):(.+)\t(\d+)\t(\S+)$")
-
-
-def read_su(path):
-    """{name: [(frame, qualifier, location)]} from one -fstack-usage file."""
-    recs = {}
-    try:
-        text = open(path, errors="replace").read()
-    except OSError as exc:
-        raise InputError(f"cannot read {path}: {exc}")
-    for n, line in enumerate(text.splitlines(), 1):
-        if not line.strip():
-            continue
-        m = SU_LINE.match(line)
-        if not m:
-            raise InputError(f"{path}:{n}: not a -fstack-usage record: "
-                             f"{line[:80]!r}")
-        recs.setdefault(m.group(4), []).append(
-            (int(m.group(5)), m.group(6), f"{m.group(1)}:{m.group(2)}"))
-    return recs
-
-
-LTO_PRIV = re.compile(r"^(.*?)((?:\.lto_priv\.\d+)+)$")
-
-
-def record_names(name):
-    """The spellings -fstack-usage may use for one ELF symbol, most exact
-    first.  Measured with the pinned GCC: the record drops the NUMBER of an
-    IPA clone but not the clone's tag -- `f.constprop.0.isra.0` is recorded as
-    `f.constprop.isra` -- while a partial-inlining part keeps its own
-    (`f.part.0.constprop`); and LTO's `f.lto_priv.0` is a rename in the symbol
-    table only, recorded as `f`.  Every combination of dropped numbers is
-    tried, fewest first; a spelling can only ever match a record in the body's
-    OWN record file, and two records that disagree are refused as ambiguous."""
-    out = [name]
-    m = LTO_PRIV.match(name)
-    base = m.group(1) if m else name
-    parts = base.split(".")
-    nums = [k for k in range(1, len(parts)) if parts[k].isdigit()]
-    for drop in range(len(nums) + 1):
-        for combo in _combos(nums[::-1], drop):
-            cand = ".".join(p for k, p in enumerate(parts) if k not in combo)
-            if cand not in out:
-                out.append(cand)
-    return out
-
-
-def _combos(items, k):
-    if k == 0:
-        yield set()
-        return
-    for idx, it in enumerate(items):
-        for rest in _combos(items[idx + 1:], k - 1):
-            yield {it} | rest
-
-
-class Witnesses:
-    def __init__(self, image, link_dir, prebuilt_roots, ltrans_su):
-        self.image = image
-        self.link_dir = link_dir
-        self.roots = [os.path.realpath(r) for r in prebuilt_roots]
-        self.errors = []
-        self._su_cache = {}
-        self.ltrans = {}
-        for path in ltrans_su:
-            m = LTRANS_SU_RE.search(os.path.basename(path))
-            if not m:
-                raise InputError(f"--ltrans-su {path}: not named like an LTO "
-                                 "partition's record (*.ltransN.ltrans.su)")
-            n = int(m.group(1))
-            if n in self.ltrans:
-                raise InputError(f"two records for LTO partition {n}: "
-                                 f"{self.ltrans[n]} and {path}")
-            self.ltrans[n] = path
-        seen_parts = set()
-        for what in image.loads:
-            m = LTRANS_O_RE.search(what)
-            if m and not ARCHIVE_RE.match(what):
-                seen_parts.add(int(m.group(1)))
-        for n in sorted(set(self.ltrans) - seen_parts):
-            self.errors.append(
-                f"{self.ltrans[n]} is the record of LTO partition {n}, which "
-                "this image's map does not contain -- a record left by an "
-                "earlier link is not a witness of this one")
-
-    def origin(self, node):
-        """('prebuilt' | 'stub' | 'object' | 'ltrans' | 'unknown', detail)"""
-        if node.origin is not None:
-            return node.origin
-        inp = self.image.input_at(node.addr)
-        if inp is None:
-            o = ("unknown", "the map places no input section there")
-        else:
-            a, size, what = inp
-            if node.end > a + size:
-                o = ("unknown", f"its extent runs past its input section "
-                                f"({what})")
-            elif what == "linker stubs":
-                o = ("stub", what)
-            else:
-                m = ARCHIVE_RE.match(what)
-                if m:
-                    arc = os.path.realpath(os.path.join(self.link_dir,
-                                                        m.group(1)))
-                    if any(arc.startswith(r + os.sep) for r in self.roots):
-                        o = ("prebuilt", what)
-                    else:
-                        o = ("unknown", f"archive member {what} is not under "
-                                        "a --prebuilt-root, and nothing says "
-                                        "where its record is")
-                else:
-                    m = LTRANS_O_RE.search(what)
-                    if m:
-                        o = ("ltrans", int(m.group(1)))
-                    else:
-                        o = ("object", os.path.join(self.link_dir, what))
-        node.origin = o
-        return o
-
-    def records(self, node):
-        """(state, detail): state is 'none' (no witness is required), 'missing',
-        'ambiguous', 'dynamic' or 'ok' (detail = (frame, where))."""
-        kind, detail = self.origin(node)
-        if kind in ("prebuilt", "stub"):
-            return "none", kind
-        if kind == "unknown":
-            return "missing", detail
-        if kind == "ltrans":
-            path = self.ltrans.get(detail)
-            if path is None:
-                return "missing", (f"LTO partition {detail} has no record "
-                                   "file")
-        else:
-            path = os.path.splitext(detail)[0] + ".su"
-            if not os.path.exists(path):
-                return "missing", f"no record file {path}"
-        recs = self._su(path)
-        # [!] EVERY SPELLING OF EVERY NAME, NOT THE FIRST THAT HITS.  Picking
-        # one would make the answer depend on the order the spellings are
-        # tried in; taking them all makes two records that could belong to
-        # this body disagree out loud (ambiguous) instead.
-        cands = []
-        tried = set()
-        for name in node.names:
-            for spelling in record_names(name):
-                if spelling in recs and spelling not in tried:
-                    tried.add(spelling)
-                    cands.extend(recs[spelling])
-        if not cands:
-            return "missing", f"no record for {node.name} in {path}"
-        if any(q != "static" for _f, q, _w in cands):
-            q = [q for _f, q, _w in cands if q != "static"][0]
-            return "dynamic", f"{path} records {node.name} as '{q}'"
-        if len({f for f, _q, _w in cands}) > 1:
-            return "ambiguous", (f"{path} has {len(cands)} different records "
-                                 f"named like {node.name}")
-        return "ok", (cands[0][0], path)
-
-    def _su(self, path):
-        if path not in self._su_cache:
-            self._su_cache[path] = read_su(path)
-        return self._su_cache[path]
+    InputError, SP, Elf, Image, Walk, decode, parse_map,
+    LTO_PRIV, LTRANS_SU_RE, Witnesses, read_su, record_names)
 
 
 def fmt_chain(image, chain):

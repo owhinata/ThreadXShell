@@ -86,18 +86,23 @@ BASE_FLAGS = [
     "-Os", "-std=c11", "-ffreestanding", "-fno-builtin", "-fno-common",
     "-ffunction-sections", "-fdata-sections", "-fno-stack-protector",
     "-fstack-usage", "-DPLUGIN_IMAGE_BUILD",
+    # add_plugin() adds this after the board's CFLAGS (issue #124); the
+    # fixtures build what it builds.  `jump_table_*` leave it out.
+    "-fno-jump-tables",
 ]
 NO_UNWIND = ["-fno-unwind-tables", "-fno-asynchronous-unwind-tables"]
 
 
 def build(cc, nm, objdump, work, board, mutate=None, cflags=None, facts=None,
-          entries=None, inspect=None):
+          entries=None, inspect=None, after=None):
     """Build a plugin image for `board`, optionally mutated.
 
     `cflags` replaces the non-architecture flags; `facts` overrides what the
     gate is told; `entries` replaces the --entry list, and with `inspect` the
     gate also writes --emit-stacks and `inspect(elf, sus, emitted)` runs while
-    the tree still exists.  Returns (rc, output)."""
+    the tree still exists.  `after(elf, sus)` runs once the gate has, whatever
+    it said -- for a refusal whose point is that the OLD walk would not have
+    made it.  Returns (rc, output)."""
     b = BOARDS[board]
     src = os.path.join(work, "src")
     shutil.copytree(PLUGIN, src)
@@ -154,11 +159,35 @@ def build(cc, nm, objdump, work, board, mutate=None, cflags=None, facts=None,
             extra = fh.read()
         with open(sus[0], "a") as fh:
             fh.write(extra)
+    # `.raise_su` lines are "name bytes": that record's frame is replaced.
+    bump = os.path.join(src, ".raise_su")
+    if os.path.exists(bump):
+        with open(bump) as fh:
+            want = dict(ln.split() for ln in fh if ln.strip())
+        for su in sus:
+            with open(su) as fh:
+                lines = fh.readlines()
+            for k, ln in enumerate(lines):
+                f = ln.rstrip("\n").split("\t")
+                if f[0].rsplit(":", 1)[-1] in want:
+                    f[1] = want[f[0].rsplit(":", 1)[-1]]
+                    lines[k] = "\t".join(f) + "\n"
+            with open(su, "w") as fh:
+                fh.writelines(lines)
+    # `.drop_su_file` names objects whose record FILE is deleted.
+    gone = os.path.join(src, ".drop_su_file")
+    if os.path.exists(gone):
+        with open(gone) as fh:
+            for ln in fh:
+                if ln.strip():
+                    os.remove(os.path.join(work, ln.strip() + ".su"))
 
     elf = os.path.join(work, "plugin.elf")
+    pmap = os.path.join(work, "plugin.map")
     r = subprocess.run([cc, "-nostdlib", "-nostartfiles",
                         "-T", os.path.join(src, "plugin_link.ld"),
-                        "-Wl,--gc-sections", "-Wl,--no-warn-rwx-segments"]
+                        "-Wl,--gc-sections", "-Wl,--no-warn-rwx-segments",
+                        "-Wl,-Map=" + pmap]
                        + b["arch"] + objs + ["-o", elf],
                        capture_output=True, text=True, cwd=work)
     if r.returncode != 0:
@@ -167,14 +196,20 @@ def build(cc, nm, objdump, work, board, mutate=None, cflags=None, facts=None,
     gate_facts = dict(b["facts"])
     gate_facts.update(facts or {})
     emitted = os.path.join(work, "stacks.json")
+    # [!] THE MAP, NOT THE RECORDS (issue #124): the gate finds each body's
+    # record through the object the map says it came from.
     r = subprocess.run([sys.executable, GATE, elf, "--nm", nm,
-                        "--objdump", objdump, "--su"] + sus
+                        "--objdump", objdump, "--map", pmap]
                        + ["--entry"] + (entries or ["pl_draw=1024",
                                                     "pl_decode=8192"])
                        + (["--emit-stacks", emitted] if inspect else [])
                        + [x for kv in gate_facts.items() for x in kv],
                        capture_output=True, text=True)
     out = r.stdout + r.stderr
+    if after:
+        msg = after(elf, [x for x in sus if os.path.exists(x)])
+        if msg:
+            return 96, msg + "\n" + out
     if r.returncode == 0 and inspect:
         msg = inspect(elf, sus, emitted)
         if msg:
@@ -314,19 +349,255 @@ def m_stale_tu(src):
         "static const uint32_t pl_abi_mark = 1u;")
 
 
+# ---- the shared analysis (issue #124) --------------------------------------
+#
+# Each of these is a shape the pre-#124 gate measured wrong or did not see, put
+# on a path the image keeps (behind `n == 0xDEADu` in pl_decode, which the slot
+# table keeps alive) so that it is linked and walked but never executed.  The
+# hand-written ones are naked C, not top-level asm: a naked function still has
+# a -fstack-usage record (0, static), so the image is refused for the shape
+# under test rather than for a missing record.
+#
+# [!] THE ARGUMENT IS A volatile READ, NOT `n`.  Behind `n == 0xDEADu` the
+# compiler knows n, and ipa-cp then clones the callee for that constant
+# (`f.constprop.0`) or folds it away: the first draft of `jump_table` compiled
+# to no switch at all and passed, and the same-name cases compared two bodies
+# that no longer shared a name.  ARG is opaque to every pass.
+ARG = "(int)fx_vin"
+ARG_DEF = "extern volatile unsigned fx_vin;\nvolatile unsigned fx_vin;\n"
+
+
+def inject(src, defs, call, where="plugin_main.c"):
+    sub(os.path.join(src, where), "/* ---- state ---",
+        ARG_DEF + defs + "/* ---- state ---")
+    if call:
+        sub(os.path.join(src, "plugin_main.c"), "\tpl_ndet = blazeface_decode(",
+            "\tif (n == 0xDEADu) " + call + "\n\tpl_ndet = blazeface_decode(")
+
+
+# A body with a large frame of its own, made reachable by whoever calls it.
+DEEP = ("__attribute__((noinline, used)) int fx_deep(int x)\n"
+        "{ volatile unsigned char b[1000]; b[0] = (unsigned char)x;\n"
+        "  b[999] = 1u; return b[x & 511] + b[999]; }\n")
+
+
+def naked(name, body):
+    return ("__attribute__((naked, noinline, used)) int %s(int x)\n"
+            "{ __asm__ volatile(\"%s\"); }\n" % (name, body))
+
+
+def m_cond_tail(src):
+    """A conditional branch to another function's entry is a tail call.  The
+    old walk's pattern took `b`, `b.n` and `b.w` and not `bne.w`."""
+    inject(src, DEEP + naked("fx_ctail", "cmp r0, #0\\n\\tbne.w fx_deep"
+                                          "\\n\\tbx lr"),
+           "return fx_ctail(" + ARG + ");")
+
+
+def m_mov_lr(src):
+    """`mov lr, rX; bx lr` reads as a return in objdump's text."""
+    inject(src, naked("fx_movlr", "mov lr, r0\\n\\tbx lr"),
+           "return fx_movlr(" + ARG + ");")
+
+
+def m_ldr_pc(src):
+    """A load into pc is an indirect branch the old pattern did not name."""
+    inject(src, naked("fx_ldrpc", "ldr pc, [r0]"), "return fx_ldrpc(" + ARG + ");")
+
+
+def m_pop_pc(src):
+    """`pop {pc}` with lr never saved: not a return."""
+    inject(src, naked("fx_poppc", "pop {pc}"), "return fx_poppc(" + ARG + ");")
+
+
+def m_jump_table(src):
+    """A dense switch.  Compiled without -fno-jump-tables it is a tbb on both
+    cores (measured with the pinned GCC); with it, a compare chain."""
+    inject(src,
+           "static volatile unsigned fx_v[10];\n"
+           "__attribute__((noinline)) static void fx_switch(unsigned k)\n"
+           "{ switch (k) {\n"
+           + "".join("  case %du: fx_v[%d] = %du; break;\n" % (i, i, i * 7 + 3)
+                     for i in range(10))
+           + "  default: break; } }\n",
+           "fx_switch(fx_vin);")
+
+
+def m_naked_frame(src):
+    """A naked function's record says 0 whatever its body does: the scan of
+    its bytes (1024 B) is what must be charged."""
+    inject(src, naked("fx_naked", "sub sp, sp, #1024\\n\\t"
+                                  "add sp, sp, #1024\\n\\tbx lr"),
+           "return fx_naked(" + ARG + ");")
+
+
+def m_interior(src):
+    """A branch into the middle of another function: neither a call nor a
+    loop, and nothing above it would charge the right frame."""
+    inject(src, DEEP + naked("fx_interior", "b.w fx_deep + 4"),
+           "return fx_interior(" + ARG + ");")
+
+
+def m_same_name_deep(src):
+    """[!] TWO static FUNCTIONS OF ONE NAME, IN TWO FILES.  The old walk knew a
+    function by its name in objdump's text, where the later body overwrote the
+    earlier: the path through plugin_main.c's fx_helper -- which reaches
+    fx_deep -- was charged as plugin_libc.c's leaf, and fx_deep vanished."""
+    inject(src, DEEP + "__attribute__((noinline)) static int fx_helper(int x)\n"
+                       "{ return fx_deep(x) + 1; }\n",
+           "return fx_helper(" + ARG + ");")
+    sub(os.path.join(src, "plugin_libc.c"), "void *memset(",
+        "__attribute__((noinline)) static int fx_helper(int x)\n"
+        "{ return x * 3; }\n"
+        "int fx_libc_user(int x) { return fx_helper(x) + 1; }\n"
+        "void *memset(")
+    sub(os.path.join(src, "plugin_main.c"), "/* ---- state ---",
+        "extern int fx_libc_user(int x);\n/* ---- state ---")
+    sub(os.path.join(src, "plugin_main.c"),
+        "static int pl_param_get(uint32_t id, uint32_t *value)\n{",
+        "static int pl_param_get(uint32_t id, uint32_t *value)\n{\n"
+        "\tif (id == 0xDEADu) return fx_libc_user((int)id);")
+
+
+def m_same_name_shallow(src):
+    """The mirror image, and a case where the right answer is SMALLER.  The
+    path from pl_decode reaches only plugin_libc.c's leaf fx_helper; the old
+    walk merged the two records by name and charged the other one's 600-byte
+    frame to it."""
+    sub(os.path.join(src, "plugin_main.c"), "/* ---- state ---",
+        "__attribute__((noinline)) static int fx_helper(int x)\n"
+        "{ volatile unsigned char b[600]; b[0] = (unsigned char)x;\n"
+        "  return b[x & 255] + 1; }\n"
+        "extern int fx_libc_user(int x);\n/* ---- state ---")
+    sub(os.path.join(src, "plugin_main.c"),
+        "static int pl_param_get(uint32_t id, uint32_t *value)\n{",
+        "static int pl_param_get(uint32_t id, uint32_t *value)\n{\n"
+        "\tif (id == 0xDEADu) return fx_helper(" + ARG + ");")
+    sub(os.path.join(src, "plugin_libc.c"), "void *memset(",
+        "__attribute__((noinline)) static int fx_helper(int x)\n"
+        "{ return x * 3; }\n"
+        "int fx_libc_user(int x) { return fx_helper(x) + 1; }\n"
+        "void *memset(")
+    inject(src, "", "return fx_libc_user(" + ARG + ");")
+
+
+def libc_helper_frame(frames, sus):
+    """The `smaller` edit for same_name_shallow: fx_helper's frame as
+    plugin_libc.su alone records it -- what the old walk should have used."""
+    for su in sus:
+        if os.path.basename(su) == "plugin_libc.su":
+            with open(su) as fh:
+                for ln in fh:
+                    f = ln.rstrip("\n").split("\t")
+                    if f[0].rsplit(":", 1)[-1] == "fx_helper":
+                        frames["fx_helper"] = (int(f[1]), f[2])
+
+
+def m_second_veneer(src):
+    """A veneer's name on a second body: which one is the crossing would be a
+    guess, so neither is."""
+    sub(os.path.join(src, "plugin_libc.c"), "void *memset(",
+        "__attribute__((noinline)) static int pl_print_write(int x)\n"
+        "{ return x * 3; }\n"
+        "int fx_libc_user(int x) { return pl_print_write(x) + 1; }\n"
+        "void *memset(")
+    inject(src, "extern int fx_libc_user(int x);\n",
+           "return fx_libc_user(" + ARG + ");")
+
+
+def m_su_dropped_file(src):
+    """A whole object's record file missing, not just one line."""
+    with open(os.path.join(src, ".drop_su_file"), "w") as fh:
+        fh.write("plugin_text\n")
+
+
+def m_su_above_scan(src):
+    """The record says more than the bytes: the decoder missed something,
+    and the scan is not believed."""
+    with open(os.path.join(src, ".raise_su"), "w") as fh:
+        fh.write("pl_decode 4000\n")
+
+
 # ---- the declaration the gate emits (issue #111) ---------------------------
 #
-# [!] AN ORACLE THAT IS NOT THE CODE UNDER TEST.  The gate now emits each slot's
-# bound in two parts, (A0, A1), and the loader adds the board's c.  The claim is
-# that this is the OLD walk decomposed, not a new one -- so the old walk is kept
-# here, transcribed from the gate as it stood before #111 (one number, c added
-# at every indirect call), and the emitted parts must reproduce it at three
-# values of c.  One value would not do: a swapped pair, or an A0 that was really
-# the old bound at the build's c, can agree with the oracle at the c it was
-# made with.  At c = 1, 256 and 2^20 every such mistake shows.
+# [!] AN ORACLE THAT IS NOT THE CODE UNDER TEST.  The gate emits each slot's
+# bound in two parts, (A0, A1), and the loader adds the board's c.  When #111
+# split the number, the claim was that this is the OLD walk decomposed -- so
+# the old walk is kept here, transcribed, and the emitted parts are compared
+# with it at three values of c.  One value would not do: a swapped pair, or an
+# A0 that was really the old bound at the build's c, can agree with the oracle
+# at the c it was made with.  At c = 1, 256 and 2^20 every such mistake shows.
+#
+# [!] AND SINCE ISSUE #124 THE RELATION IS >=, NOT ==.  The gate's own walk was
+# replaced by the shared analysis (thumb_stack_analysis.py): frames from the
+# instruction bytes, edges from the decoder, functions by address.  It sees
+# edges and frames the old walk missed, so on an image where they differ it
+# answers MORE, never less -- with one deliberate exception, `same_name_shallow`
+# below, where the old walk merged two static functions of one name and
+# charged the larger frame to the smaller one.  On the shipped plugins the two
+# still agree exactly (that is the byte-for-byte acceptance of #124 step 2).
+#
+# The old walk and everything it read are transcribed HERE, not imported from
+# the gate: the gate no longer has them, and an oracle that shared its code with
+# the thing under test would agree with it by construction.
 ORACLE_COSTS = (1, 256, 1 << 20)
 ALL_SLOTS = ["pl_entry", "pl_shapes_ok", "pl_decode", "pl_draw", "pl_report",
              "pl_param_set", "pl_param_get", "pl_sbuf_write"]
+
+# check_plugin_image.py before issue #124, transcribed.
+OLD_REG = r"(?:r\d+|ip|sp|lr|pc|fp|sl)"
+OLD_INDIRECT_RE = re.compile(r"\bblx\s+" + OLD_REG + r"\b|\bbx\s+(?!lr\b)"
+                             + OLD_REG + r"\b")
+OLD_DIRECT_CALL_RE = re.compile(
+    r"\bbl\s+[0-9a-f]+\s+<([^>+]+)(\+0x[0-9a-f]+)?>")
+OLD_TAIL_CALL_RE = re.compile(
+    r"\bb(?:\.[nw])?\s+[0-9a-f]+\s+<([^>+]+)(\+0x[0-9a-f]+)?>")
+OLD_CLONE_SUFFIX_RE = re.compile(
+    r"^(.*\.(?:constprop|isra|part|cold|lto_priv|localalias))\.\d+$")
+
+
+def old_disassemble(objdump, elf):
+    out = subprocess.run([objdump, "-d", "-j", ".text", elf], check=True,
+                         capture_output=True, text=True).stdout
+    funcs, cur = {}, None
+    for line in out.splitlines():
+        m = re.match(r"^[0-9a-f]+ <([^>]+)>:", line)
+        if m:
+            cur = m.group(1)
+            funcs[cur] = []
+        elif cur and "\t" in line:
+            funcs[cur].append(line)
+    return funcs
+
+
+def old_stack_usage(su_files):
+    frames = {}
+    for path in su_files:
+        with open(path) as fh:
+            for line in fh:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 3:
+                    continue
+                name = parts[0].rsplit(":", 1)[-1]
+                entry = (int(parts[1]), parts[2])
+                prev = frames.get(name)
+                if prev is None or old_su_rank(entry) > old_su_rank(prev):
+                    frames[name] = entry
+    return frames
+
+
+def old_su_rank(entry):
+    frame, qual = entry
+    return (0 if qual == "static" else 1, frame)
+
+
+def old_frame_of(fn, frames):
+    if fn in frames:
+        return frames[fn]
+    m = OLD_CLONE_SUFFIX_RE.match(fn)
+    if m and m.group(1) in frames:
+        return frames[m.group(1)]
+    return None
 
 
 def _gate():
@@ -337,37 +608,46 @@ def _gate():
 
 def old_walk(entry, funcs, frames, cost):
     """check_plugin_image.bound_stack() before issue #111, transcribed."""
-    g = _gate()
-
     def walk(fn, path):
         if fn in path:
             raise ValueError("recursion")
-        frame, qual = g.frame_of(fn, frames)
+        frame, qual = old_frame_of(fn, frames)
         assert qual == "static"
         worst = 0
         for line in funcs.get(fn, []):
-            if g.INDIRECT_RE.search(line):
+            if OLD_INDIRECT_RE.search(line):
                 worst = max(worst, cost)
                 continue
-            m = g.DIRECT_CALL_RE.search(line) or g.TAIL_CALL_RE.search(line)
+            m = OLD_DIRECT_CALL_RE.search(line) or \
+                OLD_TAIL_CALL_RE.search(line)
             if m:
                 callee = m.group(1)
                 if callee == fn and m.group(2):
                     continue
-                if callee in funcs or g.frame_of(callee, frames) is not None:
+                if callee in funcs or old_frame_of(callee, frames) is not None:
                     worst = max(worst, walk(callee, path + [fn]))
         return frame + worst
     return walk(entry, [])
 
 
-def inspect_emitted(objdump):
-    """An `inspect` for build(): the emitted parts against the oracle."""
+def emitted_at(d, c):
+    return max(d["own"], d["cross"] + c) if d["crossing"] else d["own"]
+
+
+def inspect_emitted(objdump, smaller=None):
+    """An `inspect` for build(): the emitted parts against the oracle.
+
+    Every slot must come out >= the old walk at every c.  `smaller` names the
+    one case that may come out below it: (slot, frames-edit), where the edit
+    corrects the old walk's merged frames, and the slot must then be strictly
+    below the uncorrected old walk at some c and EQUAL to the corrected one at
+    every c -- smaller, and right."""
     import json
 
     def check(elf, sus, emitted):
         g = _gate()
-        funcs = g.disassemble(objdump, elf)
-        frames = g.stack_usage(sus)
+        funcs = old_disassemble(objdump, elf)
+        frames = old_stack_usage(sus)
         with open(emitted) as fh:
             e = json.load(fh)
         if e.get("accounting") != g.ABI["PLUGIN_STACK_ACCOUNTING"]:
@@ -383,22 +663,54 @@ def inspect_emitted(objdump):
             if not d["crossing"] and d["cross"] != 0:
                 return "%s: A1 %d without a crossing" % (name, d["cross"])
             crossed += bool(d["crossing"])
+            if smaller and name == smaller[0]:
+                fixed = dict(frames)
+                smaller[1](fixed, sus)
+                below = False
+                for c in ORACLE_COSTS:
+                    got = emitted_at(d, c)
+                    want = old_walk(name, funcs, fixed, c)
+                    old = old_walk(name, funcs, frames, c)
+                    if got != want:
+                        return ("%s at c=%d: %d, the corrected old walk says "
+                                "%d" % (name, c, got, want))
+                    below = below or got < old
+                if not below:
+                    return ("%s: not below the old walk at any c -- the case "
+                            "no longer shows what it is for" % name)
+                continue
             for c in ORACLE_COSTS:
                 want = old_walk(name, funcs, frames, c)
-                got = max(d["own"], d["cross"] + c) if d["crossing"] \
-                    else d["own"]
-                if got != want:
-                    return ("%s at c=%d: max(A0 %d, A1 %d + c) = %d, the old "
-                            "walk says %d" % (name, c, d["own"], d["cross"],
-                                              got, want))
+                got = emitted_at(d, c)
+                if got < want:
+                    return ("%s at c=%d: max(A0 %d, A1 %d + c) = %d, below "
+                            "the old walk's %d" % (name, c, d["own"],
+                                                   d["cross"], got, want))
         # Something must cross, or the checks above never met a crossing.
         if not crossed:
             return "no entry crosses a veneer; the oracle tested nothing"
         # [!] S is the sink's bound, and it is the same at every c.
         s = [old_walk("pl_sbuf_write", funcs, frames, c) for c in ORACLE_COSTS]
-        if len(set(s)) != 1 or e.get("sink") != s[0]:
+        if len(set(s)) != 1 or e.get("sink") is None or e["sink"] < s[0]:
             return "emitted sink %r; the old walk bounds pl_sbuf_write at %r" % (
                 e.get("sink"), s)
+        return None
+    return check
+
+
+def old_would_pass(objdump, entry, limit, cost):
+    """An `after` for build(): the OLD walk keeps `entry` within `limit` at
+    `cost` -- so the refusal the case expects is the new analysis's, made on
+    an image the old gate passed."""
+    def check(elf, sus):
+        try:
+            old = old_walk(entry, old_disassemble(objdump, elf),
+                           old_stack_usage(sus), cost)
+        except (ValueError, TypeError, AssertionError) as exc:
+            return "the old walk cannot bound %s here (%r)" % (entry, exc)
+        if old > limit:
+            return ("the old walk already puts %s at %d B > %d B: the case "
+                    "does not show a gap" % (entry, old, limit))
         return None
     return check
 
@@ -408,28 +720,64 @@ def walk_units():
 
     Frames are chosen so that every wrong answer is a different number: a
     swapped (A0, A1) pair, a dropped crossing and an A1 that forgot the
-    veneer's own frame each come out distinct from the right one."""
-    g = _gate()
-    bl = "   0:\tf000 f800 \tbl\t100 <%s>"
-    frames = {k: (v, "static") for k, v in
-              {"e": 8, "a": 100, "v": 16, "b": 40, "leaf": 4}.items()}
-    funcs = {
-        "e": [bl % "a", bl % "v"],   # a deep sibling, and a veneer
-        "a": [],
-        "v": ["   4:\t4798      \tblx\tr3"],
-        "b": [bl % "v"],
-        "n": [bl % "b", bl % "a"],   # the crossing one level down
-        "leaf": [],
-    }
-    frames["n"] = (12, "static")
+    veneer's own frame each come out distinct from the right one.  Since issue
+    #124 the walk under test is the shared one (thumb_stack_analysis.Walk.
+    parts), run over a hand-made image: bodies by address, each with the
+    frame, edges and indirect transfers the shared analysis would report."""
+    sys.path.insert(0, os.path.dirname(GATE))
+    import thumb_stack_analysis as tsa        # noqa: E402 -- path set above
+
+    addr = {n: 0x100 * (k + 1) for k, n in
+            enumerate(["e", "a", "v", "b", "n", "leaf", "x"])}
+
+    class Body:
+        def __init__(self, name, frame, calls=(), branch=None):
+            self.names = [name]
+            self.name = name
+            self.info = tsa.Info()
+            self.info.frame = frame
+            self.info.edges = [(addr[c], "call", 0) for c in calls]
+            if branch:
+                err = (addr[name] + 4, f"indirect branch `{branch}` here")
+                self.info.flow_errs.append(err)
+                self.info.indirect.append((addr[name] + 4, branch, err))
+
+    class FakeImage:
+        def __init__(self):
+            self.nodes = {addr[b.name]: b for b in (
+                Body("e", 8, ["a", "v"]),      # a deep sibling, and a veneer
+                Body("a", 100),
+                Body("v", 16, branch="blx r3"),
+                Body("b", 40, ["v"]),
+                Body("n", 12, ["b", "a"]),     # the crossing one level down
+                Body("leaf", 4),
+                # a "veneer" whose only indirect transfer is not a register
+                # branch: it does not cross, and its refusal stays
+                Body("x", 16, branch="load into pc"))}
+
+        def analyse(self, node):
+            return node.info
+
+    image = FakeImage()
     cases = [("e", (108, 24)), ("n", (112, 68)), ("leaf", (4, None)),
-             ("a", (100, None)), ("v", (16, 16))]
+             ("a", (100, None)), ("v", (16, 16)), ("x", (16, None))]
     bad = []
     for entry, want in cases:
-        errors = []
-        got = g.bound_stack(entry, funcs, frames, errors)
-        if errors or tuple(got) != want:
-            bad.append("%s: got %r %s, want %r" % (entry, got, errors, want))
+        walk = tsa.Walk(image, crossings={addr["v"], addr["x"]})
+        own, cross, _ok = walk.parts(addr[entry])
+        if (own, cross) != want:
+            bad.append("%s: got %r, want %r" % (entry, (own, cross), want))
+    walk = tsa.Walk(image, crossings={addr["v"], addr["x"]})
+    if walk.body_errors(addr["v"]) != ([], True):
+        bad.append("v: its register branch should cross, not be refused")
+    errs, crosses = walk.body_errors(addr["x"])
+    if crosses or len(errs) != 1:
+        bad.append("x: a load into pc in a veneer must stay refused (%r)"
+                   % (errs,))
+    walk = tsa.Walk(image, crossings=set())
+    errs, crosses = walk.body_errors(addr["v"])
+    if crosses or len(errs) != 1:
+        bad.append("v: outside the crossing set its branch must be refused")
     return bad
 
 
@@ -448,7 +796,8 @@ def walk_units():
 CASES = [
     ("clean", "grove", None, None, None, "accept", None,
      "accepted (the plugin as built)"),
-    ("veneer_bypass", "grove", m_veneer_bypass, None, None, "gate", None,
+    ("veneer_bypass", "grove", m_veneer_bypass, None, None, "gate",
+     "only the named veneers may",
      "gate: an indirect call outside a veneer -- the stack bound would stop "
      "being a bound"),
     ("forbidden", "grove", m_forbidden, None, None, "link", None,
@@ -458,12 +807,13 @@ CASES = [
     ("unwind", "grove", None, BASE_FLAGS + ["-funwind-tables"], None, "link",
      None,
      "linker: unwind tables pull in a personality routine that does not exist"),
-    ("recursion", "grove", m_recursion, None, None, "gate", None,
+    ("recursion", "grove", m_recursion, None, None, "gate", "recursion:",
      "gate: a cycle the compiler could not flatten -- no bound exists"),
-    ("dup_su", "grove", m_dup_su, None, None, "gate", None,
+    ("dup_su", "grove", m_dup_su, None, None, "gate", "as 'dynamic'",
      "gate: a duplicate record with no static bound is not outvoted by a "
      "larger static one"),
-    ("no_frame", "grove", m_no_frame, None, None, "gate", None,
+    ("no_frame", "grove", m_no_frame, None, None, "gate",
+     "no record for pl_decode",
      "gate: a function in the image with no measurement -- still fail-closed "
      "after the clone-name fix"),
     # --- the target word (issue #108) -----------------------------------------
@@ -513,9 +863,53 @@ CASES = [
      "gate: an image compiled without PLUGIN_IMAGE_BUILD states no ABI"),
 ]
 
-# (name, board, mutate, entries, expected, must-say, why): the same build, but
-# the gate also EMITS the declaration, and for an accept it is checked against
-# the pre-#111 walk (inspect_emitted).
+# --- the shared analysis (issue #124) ----------------------------------------
+# Each is refused for the reason named in must-say, which is the shared
+# analysis's own message.  Before #124 every one of them was accepted.
+CASES += [
+    ("mov_lr_bx_lr", "grove", m_mov_lr, None, None, "gate",
+     "fx_movlr: `bx lr` at",
+     "gate: `mov lr, r0; bx lr` outside a veneer is not a proven return"),
+    ("ldr_pc", "grove", m_ldr_pc, None, None, "gate",
+     "fx_ldrpc: indirect branch `load into pc`",
+     "gate: a load into pc outside a veneer is an indirect branch"),
+    ("pop_pc_unsaved", "grove", m_pop_pc, None, None, "gate",
+     "lr was not saved on every path",
+     "gate: `pop {pc}` with lr never saved is not a return"),
+    ("interior", "grove", m_interior, None, None, "gate",
+     "into the interior of fx_deep",
+     "gate: a branch into the middle of another function"),
+    ("second_veneer", "grove", m_second_veneer, None, None, "gate",
+     "veneer pl_print_write names 2 bodies",
+     "gate: a veneer's name on two bodies -- neither is taken as the crossing"),
+    ("su_file_missing", "grove", m_su_dropped_file, None, None, "gate",
+     "no record file",
+     "gate: an object with no record file at all"),
+    ("su_above_scan", "grove", m_su_above_scan, None, None, "gate",
+     "says 4000 B -- the decoder missed",
+     "gate: a record above the scan -- the bytes are not believed"),
+    # [!] THE TABLE IS REFUSED, AND THE FLAG IS WHAT AVOIDS IT -- on both cores.
+    ("jump_table", "grove", m_jump_table,
+     [f for f in BASE_FLAGS if f != "-fno-jump-tables"] + NO_UNWIND, None,
+     "gate", "fx_switch: indirect branch `tbb`",
+     "gate: an M55 switch compiled to tbb without -fno-jump-tables"),
+    ("jump_table", "wio", m_jump_table,
+     [f for f in BASE_FLAGS if f != "-fno-jump-tables"] + NO_UNWIND, None,
+     "gate", "fx_switch: indirect branch `tbb`",
+     "gate: the same on the M7"),
+    ("jump_table_flag", "grove", m_jump_table, None, None, "accept", None,
+     "accepted: the same switch under add_plugin()'s -fno-jump-tables (M55)"),
+    ("jump_table_flag", "wio", m_jump_table, None, None, "accept", None,
+     "accepted: the same on the M7"),
+]
+
+# (name, board, mutate, entries, expected, must-say, why[, extra]): the same
+# build, but the gate also EMITS the declaration, and for an accept it is
+# checked against the pre-#124 walk (inspect_emitted: >= at every c).  `extra`
+# may carry `after` (run whatever the gate said) and `smaller` (see
+# inspect_emitted).
+LIMITED = [n + "=1048576" for n in ALL_SLOTS if n != "pl_decode"] + \
+    ["pl_decode=1024"]
 EMIT_CASES = [
     ("emit_grove", "grove", None, [n + "=1048576" for n in ALL_SLOTS],
      "accept", None,
@@ -530,6 +924,33 @@ EMIT_CASES = [
     ("sink_crosses", "grove", m_sink_crosses,
      [n + "=1048576" for n in ALL_SLOTS], "gate", "reaches a veneer itself",
      "gate: a sink that crosses a veneer would put c back into S"),
+    # --- issue #124: a bound the old walk understated ---------------------------
+    # pl_decode limited to 1024 B: the old walk stays under it (checked by
+    # `after`), the shared analysis does not, and says by how much.
+    ("cond_tail", "grove", m_cond_tail, LIMITED, "gate",
+     "stack: pl_decode needs",
+     "gate: a conditional tail call (`bne.w`) is an edge",
+     {"after": ("pl_decode", 1024)}),
+    ("naked_frame", "grove", m_naked_frame, LIMITED, "gate",
+     "stack: pl_decode needs",
+     "gate: a naked function's record says 0; its bytes say 1024",
+     {"after": ("pl_decode", 1024)}),
+    ("same_name_deep", "grove", m_same_name_deep, LIMITED, "gate",
+     "stack: pl_decode needs",
+     "gate: two statics of one name, the deep one on the path",
+     {"after": ("pl_decode", 1024)}),
+    ("same_name_deep", "wio", m_same_name_deep, LIMITED, "gate",
+     "stack: pl_decode needs", "gate: the same on the M7",
+     {"after": ("pl_decode", 1024)}),
+    ("no_entry", "grove", None, ["pl_nope=1024"] + LIMITED, "gate",
+     "no function pl_nope in the image",
+     "gate: an --entry that names no body"),
+    # [!] THE ONE CASE BELOW THE OLD WALK, and it must also be RIGHT: equal to
+    # the old walk once that walk is given the shallow body's own record.
+    ("same_name_shallow", "grove", m_same_name_shallow,
+     [n + "=1048576" for n in ALL_SLOTS], "accept", None,
+     "accepted, SMALLER than the old walk and equal to it with the frames "
+     "unmerged", {"smaller": ("pl_decode", libc_helper_frame)}),
 ]
 
 
@@ -661,7 +1082,7 @@ def main():
             rc, out = build(args.cc, args.nm, args.objdump, work, board,
                             mutate, cflags, facts)
         got = "link" if rc == 98 else ("build" if rc == 99 else
-                                       ("inspect" if rc == 97 else
+                                       ("inspect" if rc in (96, 97) else
                                         ("gate" if rc != 0 else "accept")))
         label = f"{board}:{name}"
         if got != expect_fail:
@@ -716,14 +1137,24 @@ def main():
         else:
             print(f"  ok   {'image:' + name:24s} {why}")
 
-    for name, board, mutate, entries, expect_fail, must_say, why in EMIT_CASES:
+    for case in EMIT_CASES:
+        name, board, mutate, entries, expect_fail, must_say, why = case[:7]
+        extra = case[7] if len(case) > 7 else {}
+        after = None
+        if "after" in extra:
+            entry, limit = extra["after"]
+            after = old_would_pass(args.objdump, entry, limit,
+                                   int(BOARDS[board]["facts"]
+                                       ["--veneer-base-cost"]))
         with tempfile.TemporaryDirectory() as work:
             rc, out = build(args.cc, args.nm, args.objdump, work, board,
                             mutate, None, None, entries,
-                            inspect_emitted(args.objdump))
-        got = "inspect" if rc == 97 else ("gate" if rc not in (0, 98, 99)
-                                          else ("accept" if rc == 0
-                                                else "build"))
+                            inspect_emitted(args.objdump,
+                                            extra.get("smaller")), after)
+        got = "inspect" if rc == 97 else (
+            "oracle" if rc == 96 else ("gate" if rc not in (0, 98, 99)
+                                       else ("accept" if rc == 0
+                                             else "build")))
         label = f"{board}:{name}"
         if got != expect_fail or (must_say and must_say not in out):
             print(f"  FAIL {label:24s} expected {expect_fail}, got {got}"

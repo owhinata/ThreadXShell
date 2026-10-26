@@ -98,10 +98,11 @@ The set of veneers is imported from `check_plugin_image.py`, and the board's
 roots must cover it exactly, so adding a veneer there fails every board that has
 not bound a function to it.
 
-The decoder, the analysis of one body and the walk live in
-`thumb_stack_analysis.py` (#124), so that a second stack gate calls them rather
-than growing an analysis of its own; the roots, the records and the budget stay
-in `check_veneer_base_cost.py`. The module is an input of both gate commands --
+The decoder, the analysis of one body, the walk and the lookup of each body's
+`-fstack-usage` record live in `thumb_stack_analysis.py` (#124), and the plugin
+image gate calls the same code (see **Plugin image gate: the stack bound**
+below); the roots, which bodies may have no record and the budget stay in
+`check_veneer_base_cost.py`. The module is an input of both gate commands --
 this check and `add_plugin()`'s link + gate -- so editing it alone re-runs both.
 
 The compiler's own `-fstack-usage` record is a WITNESS, not the answer: it
@@ -144,8 +145,8 @@ reruns on a script or image change, the witnesses of every compile, and an LTO
 link that writes fewer partitions than the last. `shared_analysis` /
 `shared_refusal` add a real `add_plugin()`: an edit of
 `thumb_stack_analysis.py` alone re-runs both gates and nothing re-runs without
-one, and a refusal added to that module alone leaves no stamp and stops flash
-and every asset.
+one, and a refusal added to that module alone fails both gates for that
+reason, leaves no stamp and stops flash and every asset.
 It also covers the c the firmware compiles in: `cost_wiring` changes DECLARED and
 reads the value back from a policy TU in a `$<TARGET_OBJECTS:>` library and from
 an asset's command line, and `cost_override` adds `-DPLUGIN_VENEER_BASE_COST=1u`
@@ -266,6 +267,60 @@ refusal, not "no check". An override (`OVERRIDE_VAR`) is not hash-checked and
 configure says so; `FILE` is a path, not a hash pin, and is guarded by whatever
 pins the tree it lives in (Grove's cifar10 is inside the pinned Himax SDK).
 `fixtures/run_pinned_input_tests.py` covers both checkers.
+
+# Plugin image gate: the stack bound
+
+`check_plugin_image.py` runs in `add_plugin()`'s link command and refuses the
+plugin before any container is packed. Since #124 its stack bound is not an
+analysis of its own: it calls `thumb_stack_analysis.py`, the code that bounds
+the firmware below each veneer, and the two gates differ only in where the walk
+stops. The plugin walk stops at the register branch of a named veneer
+(`VENEERS` in `check_plugin_image.py`, the set's only declaration) and returns
+the two halves the manifest declares, A0 and A1; the firmware-side check walks
+everything below its roots.
+
+- Functions are ELF symbols identified by address. A name is used only to find
+  an `--entry` (exactly one body) and a veneer (at most one body per name);
+  two `static` functions of one name in two files are two bodies.
+- A frame is the sum of the stack decrements in the body's instruction bytes.
+  The compiler's record is a witness, found through the map: each body is
+  compared with the `.su` beside the object the map says it came from
+  (`--map`, which replaced `--su`). A scan below the record, a body with no
+  record, an ambiguous record and a dynamic one are refused. There is no
+  prebuilt exemption on the plugin side: every body is compiled by
+  `add_plugin()`.
+- Refused anywhere in the image, not only below an entry: an indirect transfer
+  outside a veneer (a register branch, a load or move into pc, `tbb`/`tbh`), a
+  return not proven to use the return address (`mov lr, rX; bx lr`, `pop {pc}`
+  with lr never saved), a branch into the middle of another function, a
+  non-constant or looped SP change, an encoding the decoder does not know; and
+  below an entry, recursion by address. Inside a veneer exactly one more thing
+  is allowed: `bx rN` / `blx rN` with N in r0-r12, the crossing into the base.
+  A conditional branch to another function's entry is a tail call and is
+  walked.
+- Switch jump tables are refused by the decoder unconditionally.
+  `add_plugin()` compiles every plugin TU with `-fno-jump-tables`, after the
+  board's `CFLAGS`, so that a dense `switch` compiles to a compare chain; the
+  flag is what lets such a plugin pass, not a replacement for the refusal.
+  Adding it changed no byte of the shipped plugins.
+- Not proven, on this side as on the firmware side (same code, same limit):
+  which stack word a `pop {..., pc}` takes once lr was saved, and that a body
+  returns with sp where it found it.
+
+On the four shipped plugin images (Grove and wio, blazeface and cifar10) the
+shared analysis gives the same A0 / A1 / S as the analysis it replaced, so the
+change re-packed nothing: every `plugin.stacks.json` and container is byte for
+byte what it was. `fixtures/run_plugin_gate_tests.py` keeps that older
+analysis, transcribed, as an oracle: every slot must come out at or above it at
+c = 1, 256 and 2^20, with one case (`same_name_shallow`) that must come out
+below it and equal to it once its merged frames are separated. The negative
+cases (`cond_tail`, `naked_frame`, `same_name_deep`, `mov_lr_bx_lr`, `ldr_pc`,
+`pop_pc_unsaved`, `interior`, `jump_table` on both cores, `second_veneer`,
+`su_file_missing`, `su_above_scan`, `no_entry`) are each refused for the
+reason named in the case, and the ones about a bound also show that the older
+analysis would have passed the same image. The linker-stub refusal (a stub that
+is not a long-branch veneer) has no case: a plugin reservation is far smaller
+than a branch's range.
 
 # Plugin stack allowances: one table, read back from the image
 

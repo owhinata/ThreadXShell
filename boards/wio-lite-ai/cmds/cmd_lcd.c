@@ -75,7 +75,7 @@ static int parse_color(const char *s, uint16_t *out)
 	return -1;
 }
 
-/* Shared guard for the drawing commands. */
+/* Display-state check for the drawing commands (see lcd_begin()). */
 static int lcd_ready(struct cli_instance *sh)
 {
 	if (!ltdc_is_up()) {
@@ -87,6 +87,33 @@ static int lcd_ready(struct cli_instance *sh)
 		return 0;
 	}
 	return 1;
+}
+
+/*
+ * Bracket for the drawing commands: lcd_ready() plus a PSRAM USER place held
+ * for the whole drawing (issue #145).  The frame buffer is in PSRAM, so a fill,
+ * a blit or a CPU gradient is writing OCTOSPI1 for as long as it runs -- and
+ * the scan-out gate in psram_acquire() no longer covers it once another console
+ * has run `lcd off`.  The counted user is what makes the reconfigurer refuse.
+ * Same order as `lcd on`: the shared place first (a try, never a wait), then
+ * the frame lock inside.  Every exit after a successful lcd_begin() goes
+ * through lcd_end().
+ */
+static int lcd_begin(struct cli_instance *sh)
+{
+	if (!lcd_ready(sh))
+		return 0;
+	if (!psram_acquire_shared()) {
+		cli_error(sh, "lcd: OCTOSPI1 busy (a psram/membench/devmem/wifi flash "
+		              "command is reconfiguring it)\r\n");
+		return 0;
+	}
+	return 1;
+}
+
+static void lcd_end(void)
+{
+	psram_release_shared();
 }
 
 static int cmd_lcd_info(struct cli_instance *sh, int argc, char **argv)
@@ -157,16 +184,18 @@ static int cmd_lcd_fill(struct cli_instance *sh, int argc, char **argv)
 	uint16_t color;
 
 	(void)argc;
-	if (!lcd_ready(sh))
+	if (!lcd_begin(sh))
 		return 1;
 	if (parse_color(argv[1], &color) != 0) {
 		cli_error(sh, "lcd: bad colour '%s' (name or 0xRGB565)\r\n", argv[1]);
+		lcd_end();
 		return 1;
 	}
 	ltdc_lock_frame();
 	ltdc_fill(color);
 	lcd_present(sh);
 	ltdc_unlock_frame();
+	lcd_end();
 	return 0;
 }
 
@@ -174,12 +203,13 @@ static int cmd_lcd_bar(struct cli_instance *sh, int argc, char **argv)
 {
 	(void)argc;
 	(void)argv;
-	if (!lcd_ready(sh))
+	if (!lcd_begin(sh))
 		return 1;
 	ltdc_lock_frame();
 	ltdc_colorbar();
 	lcd_present(sh);
 	ltdc_unlock_frame();
+	lcd_end();
 	return 0;
 }
 
@@ -187,12 +217,13 @@ static int cmd_lcd_grad(struct cli_instance *sh, int argc, char **argv)
 {
 	(void)argc;
 	(void)argv;
-	if (!lcd_ready(sh))
+	if (!lcd_begin(sh))
 		return 1;
 	ltdc_lock_frame();
 	ltdc_gradient();
 	lcd_present(sh);
 	ltdc_unlock_frame();
+	lcd_end();
 	return 0;
 }
 
@@ -200,12 +231,13 @@ static int cmd_lcd_clear(struct cli_instance *sh, int argc, char **argv)
 {
 	(void)argc;
 	(void)argv;
-	if (!lcd_ready(sh))
+	if (!lcd_begin(sh))
 		return 1;
 	ltdc_lock_frame();
 	ltdc_fill(LTDC_RGB565_BLACK);
 	lcd_present(sh);
 	ltdc_unlock_frame();
+	lcd_end();
 	return 0;
 }
 
@@ -221,7 +253,7 @@ static int cmd_lcd_anim(struct cli_instance *sh, int argc, char **argv)
 
 	(void)argc;
 	(void)argv;
-	if (!lcd_ready(sh))
+	if (!lcd_begin(sh))
 		return 1;
 	/* The drawing surface, not ltdc_panel_get()'s panel geometry: the API is
 	   landscape 320x240 since owhinata/wio-lite-ai#38, so a rectangle bounced inside
@@ -240,6 +272,7 @@ static int cmd_lcd_anim(struct cli_instance *sh, int argc, char **argv)
 		ltdc_unlock_frame();
 		if (rc != LTDC_OK) {
 			cli_error(sh, "lcd: present failed\r\n");
+			lcd_end();
 			return 1;
 		}
 
@@ -251,6 +284,7 @@ static int cmd_lcd_anim(struct cli_instance *sh, int argc, char **argv)
 		if (cli_cancel_requested(sh))
 			break;
 	}
+	lcd_end();
 	return 0;
 }
 
@@ -264,7 +298,7 @@ static int cmd_lcd_blit(struct cli_instance *sh, int argc, char **argv)
 
 	(void)argc;
 	(void)argv;
-	if (!lcd_ready(sh))
+	if (!lcd_begin(sh))
 		return 1;
 
 	ltdc_lock_frame();
@@ -272,6 +306,7 @@ static int cmd_lcd_blit(struct cli_instance *sh, int argc, char **argv)
 	ltdc_blit_demo();     /* M2M copy left half -> right half (same buffer) */
 	rc = ltdc_flip();
 	ltdc_unlock_frame();
+	lcd_end();
 	if (rc != LTDC_OK) {
 		cli_error(sh, "lcd: present failed\r\n");
 		return 1;

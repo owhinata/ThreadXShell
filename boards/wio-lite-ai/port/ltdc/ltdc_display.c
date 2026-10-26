@@ -262,9 +262,14 @@ bool ltdc_is_up(void)
 	return ltdc_up && !ltdc_fault;
 }
 
+/* [!] Not via ltdc_is_up(): a fault must not make a live scan-out read as
+   stopped (issue #145).  ltdc_disabled is set only after LTDCEN was cleared
+   (ltdc_set_scanout(), ltdc_panel_recover(), ltdc_latch_down()), so it is the
+   one flag that says "the controller is not fetching OCTOSPI1"; the fault flag
+   says nothing about that.  psram_acquire() reads this. */
 bool ltdc_scanout_active(void)
 {
-	return ltdc_is_up() && !ltdc_disabled;
+	return ltdc_up && !ltdc_disabled;
 }
 
 bool ltdc_scanout_off(void)
@@ -363,6 +368,23 @@ int ltdc_set_scanout(bool on)
 	}
 	ltdc_unlock_frame();
 	return LTDC_OK;
+}
+
+/*
+ * Latch the display down on a flip fault (issue #145).  Caller holds the frame
+ * lock.  Stops the scan-out the same way `lcd off` does -- backlight, then
+ * LTDCEN, then the flag -- so that a faulted display is also a stopped one:
+ * the reconfiguration gate in psram_acquire() reads ltdc_disabled, not
+ * ltdc_fault, and a fault that left LTDCEN set would otherwise let OCTOSPI1 be
+ * retuned under a live scan-out.  There is no way back (set_scanout and
+ * panel_recover refuse on ltdc_fault); recovery is a reset.
+ */
+static void ltdc_latch_down(void)
+{
+	ltdc_fault = true;
+	ltdc_backlight(false);
+	__HAL_LTDC_DISABLE(&hltdc);
+	ltdc_disabled = true;
 }
 
 /* ==========================================================================
@@ -1236,7 +1258,7 @@ int ltdc_flip(void)
 	                                 (uint32_t)(uintptr_t)&ltdc_fb[back][0],
 	                                 0) != HAL_OK ||
 	    HAL_LTDC_Reload(&hltdc, LTDC_RELOAD_VERTICAL_BLANKING) != HAL_OK) {
-		ltdc_fault = true;
+		ltdc_latch_down();
 		LOG_ERR("LTDC reload could not be armed, display down");
 		ltdc_unlock_frame();
 		return LTDC_ERR_HAL;
@@ -1258,7 +1280,7 @@ int ltdc_flip(void)
 	} else {
 		/* fail-closed: the reload never landed -- leave the front buffer as-is
 		   and latch the display down (recovery is a system reset). */
-		ltdc_fault = true;
+		ltdc_latch_down();
 		LOG_ERR("LTDC reload stuck (VBR), display down");
 		rc = LTDC_ERR_HAL;
 	}

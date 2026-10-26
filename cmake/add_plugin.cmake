@@ -59,6 +59,11 @@ include("${CMAKE_CURRENT_LIST_DIR}/plugin_stack_table.cmake")
 # (issue #108 too), and all four are required below, so a second board cannot
 # inherit the first one's by omission.
 set(_ADD_PLUGIN_GATE "${_ADD_PLUGIN_DIR}/check_plugin_image.py")
+# [!] AND THE STACK ANALYSIS SHARED WITH THE FIRMWARE-SIDE CHECK (issue #124):
+# the decoder, the analysis of one body and the walk.  It is an input of the
+# gate's command below, so editing it alone re-runs every plugin's gate, the
+# same as editing the gate itself.
+set(_ADD_PLUGIN_STACK_ANALYSIS "${_ADD_PLUGIN_DIR}/thumb_stack_analysis.py")
 get_filename_component(_ADD_PLUGIN_ASSET_ROOT
                        "${CMAKE_CURRENT_LIST_DIR}/../asset" REALPATH)
 
@@ -503,7 +508,7 @@ function(add_plugin _name)
         DEPENDS ${_stamps} ${_objs} ${_sus}
                 "${_out}/plugin_link.ld"
                 "${_ADD_PLUGIN_ASSET_ROOT}/common/plugin.ld" "${P_MEMORY_LD}"
-                "${_ADD_PLUGIN_GATE}"
+                "${_ADD_PLUGIN_GATE}" "${_ADD_PLUGIN_STACK_ANALYSIS}"
         COMMENT "plugin ${_name}: ld + gate -> plugin.elf"
         VERBATIM)
 

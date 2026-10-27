@@ -98,7 +98,7 @@ ABI = {
     # there into the manifest, and compared for equality by the loader.  Raise it
     # in svc/plugin/plugin_abi.h -- and here, where the fixture will insist on it -- when
     # the walk changes what it charges or where it stops.
-    "PLUGIN_STACK_ACCOUNTING": 1,
+    "PLUGIN_STACK_ACCOUNTING": 2,
     # The ABI each plugin TU records (svc/plugin/plugin_abi.h, pl_abi_mark): the
     # image is refused unless every record is this (issue #111).
     "PLUGIN_ABI_VERSION": 2,

@@ -76,10 +76,15 @@ extern "C" {
  * equality and refuses a mismatch as its own reason, so an old declaration is
  * re-packed rather than silently reinterpreted.
  *
+ * Version 1 was the #111 analysis.  Version 2 is #124's: frames counted from
+ * the bytes, functions told apart by address, every return checked for where
+ * lr was saved and where sp is, and S taken over every plugin function the
+ * base may be handed.
+ *
  * cmake/check_plugin_image.py carries a copy (its ABI table) and stamps it into
  * what it emits; cmake/fixtures/run_plugin_gate_tests.py pins the copy to this.
  */
-#define PLUGIN_STACK_ACCOUNTING 1u
+#define PLUGIN_STACK_ACCOUNTING 2u
 
 /*
  * [!] EVERY PLUGIN TU SAYS WHICH ABI IT WAS COMPILED AGAINST (issue #111).  The

@@ -23,15 +23,25 @@ picocom -b 115200 /dev/ttyACM0                   # the ST-Link VCP
 
 The first configure downloads the pinned ARM GNU toolchain into `tools/` and
 the submodules this board needs (`boards/f746g-disco/submodules.cmake`), and
-fetches the ST Cube set this board pins in `board.cmake` -- the F7 HAL, CMSIS
-device F7 and CMSIS core -- into `upstream/<repo>-<commit>/` (issue #136; see the
-root README's Building section).  Those trees are shared with every other build
+fetches the ST Cube set this board pins in `board.cmake` -- the F7 HAL and CMSIS
+device F7 -- and its CMSIS core into `upstream/<repo>-<commit>/` (issue #136; see
+the root README's Building section).  Those trees are shared with every other build
 directory of the clone, so later configures are offline.  The
 default NN backend (`tflm`) also fetches the `lib/tflite-micro` submodule on
 first use, generates the tflite-micro tree from it at configure time (which
 downloads its third-party dependencies) and fetches the pinned model at build
 time; `-DCONFIG_NN_BACKEND=null` touches none of these and builds offline (see
 [Build options](#build-options)).
+
+CMSIS core stays at `v5.6.0_cm7`, newer than the 5.4.0 STM32CubeF7 pairs with its
+HAL. Going down to 5.4.0 would give up four properties for nothing but matching
+the Cube: `SCB_EnableICache()` / `SCB_EnableDCache()` doing nothing when the cache
+is already on (5.4.0 invalidates it again, dropping dirty D-cache lines if the
+start-up path is entered without a reset); the `*_by_Addr` cache maintenance
+handling a start address that is not 32-byte aligned (5.4.0 assumes it is); the
+compiler barriers around `NVIC_EnableIRQ()` (the write order of the #137 DCMI
+recovery would no longer be guaranteed by CMSIS); and a defined `__CLZ(0)` (5.4.0
+leaves it undefined). Revisit this when the HAL is moved to a newer Cube release.
 
 ## The board at a glance
 

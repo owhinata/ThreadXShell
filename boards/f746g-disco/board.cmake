@@ -96,10 +96,12 @@ endforeach()
 set(MCU_OPTS
     -mcpu=cortex-m7 -mthumb -mfpu=fpv5-sp-d16 -mfloat-abi=hard)
 
-# The ST Cube set -- HAL, CMSIS device, CMSIS core -- is pinned per board and
-# fetched by cmake/fetch_upstream.cmake into upstream/<repo>-<commit> (issue #136),
-# not taken from lib/: ST pairs these three per Cube package, so each board names
-# its own commits.  The SHA is the pin; the tag beside it is only a comment.
+# The ST Cube set -- HAL and CMSIS device -- is pinned per board and fetched by
+# cmake/fetch_upstream.cmake into upstream/<repo>-<commit> (issue #136), not taken
+# from lib/: ST pairs these two per Cube package, so each board names its own
+# commits.  CMSIS core is fetched the same way, at the Cube set's version or a
+# newer one (the board README says which and why).  The SHA is the pin; the tag
+# beside it is only a comment.
 # The trees are read-only, like lib/.
 include("${CMAKE_SOURCE_DIR}/cmake/fetch_upstream.cmake")
 fetch_upstream(HAL_DIR                          # v1.3.3-11-gdaf38ec (no tag)

@@ -488,6 +488,15 @@ python3 "$repo/cmake/fixtures/run_add_plugin_arg_tests.py"
 # must go through.  Python only.
 python3 "$repo/cmake/fixtures/run_pinned_input_tests.py"
 
+# issue #136 -- cmake/fetch_upstream.cmake, the per-board pinned fetch of the ST
+# Cube trees (HAL / CMSIS device / CMSIS core).  An existing checkout is only ever
+# checked, never repaired: moved to another commit, edited, a probe gone or an
+# empty directory in its place must each stop the configure, a deleted one must
+# be fetched again, the second configure must be offline, and a parallel
+# configure must wait for the lock.  Against a local file:// upstream, so no
+# network; needs git, cmake and ninja only.
+python3 "$repo/cmake/fixtures/run_fetch_upstream_tests.py"
+
 # issue #97 -- the published decode record (svc/nn/nn_det_record.c).  A camera stream
 # decodes on a worker and a console prints on another thread, so what the two
 # exchange has a rule: the boxes and the diagnostics that describe them travel

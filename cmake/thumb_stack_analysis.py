@@ -552,13 +552,16 @@ def _ldst_dual(i, hw1, hw2):
             else:                            # STREX, or TT/TTT/TTA/TTAT
                 i.wr.add(rt2)
                 if rt != PC:                 # TT has 1111 where STREX has Rt
-                    i.st.append((rn, (hw2 & 0xFF) << 2, 4, rt))
+                    # [!] no source: an exclusive store may not write (its
+                    # status register says), so it kills the words under it
+                    # and saves nothing -- lr stored by it is not a save.
+                    i.st.append((rn, (hw2 & 0xFF) << 2, 4, None))
             return
         size = {4: 1, 5: 2, 8: 1, 9: 2, 10: 4, 12: 1, 13: 2, 14: 4}.get(op3)
         if not load:
             if op3 in (4, 5, 12, 13, 14):    # STREXB/H, STLEXB/H/STLEX
                 i.wr.add(hw2 & 0xF)
-                i.st.append((rn, 0, size, rt))
+                i.st.append((rn, 0, size, None))    # as STREX: no source
             elif op3 in (8, 9, 10):          # STLB/STLH/STL write nothing
                 i.st.append((rn, 0, size, rt))
             else:

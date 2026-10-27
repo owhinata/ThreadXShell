@@ -350,9 +350,11 @@ once lr had been saved anywhere (the four shapes `#112` pinned as a limit).
 
 - Paths that meet with sp at two different places are refused.
 - A saved copy is a word lr was stored to while it held the return address
-  (a conditional store, which may not run, is not a save). It stops counting
-  when a store at a known position overlaps it -- any width: byte, word,
-  doubleword, store multiple, FP, MVE -- or when sp rises above it: a freed
+  (a conditional store, which may not run, is not a save; nor is an exclusive
+  store -- STREX, STLEX and their byte and halfword forms -- which may fail
+  to write, though it still counts as a store over what it covers). It stops
+  counting when a store at a known position overlaps it -- any width: byte,
+  word, doubleword, store multiple, FP, MVE -- or when sp rises above it: a freed
   word may be written by an exception's stacking or by a callee, so it stays
   dead even if sp comes back down. A word above the call's sp lives across
   the call, and that is checked, not assumed: every body -- the callee too --

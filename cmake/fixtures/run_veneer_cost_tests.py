@@ -730,6 +730,24 @@ FUNC save_str_fn
     add sp, #4
     pop {pc}
 END save_str_fn
+@ An exclusive store may fail (its status register says so), so lr stored by
+@ one is not a save; the same word saved by a plain str is.  Over a saved
+@ copy it is still a store: the copy is lost.
+FUNC strex_save_fn
+    sub sp, #4
+    strex r0, lr, [sp]
+    pop {pc}
+END strex_save_fn
+FUNC strex_twin_fn
+    sub sp, #4
+    str lr, [sp]
+    pop {pc}
+END strex_twin_fn
+FUNC strex_kill_fn
+    push {r4, lr}
+    strex r0, r1, [sp, #4]
+    pop {r4, pc}
+END strex_kill_fn
 
 @ Store widths over a 4-byte slot at entry-4 (sp at entry-16 in the wide
 @ cases): a byte on its last byte / the byte just below it; a doubleword
@@ -856,6 +874,19 @@ FUNC le_loop_fn
     le lr, 1b
     pop {r4, pc}
 END le_loop_fn
+
+@ STLEX (Armv8-M) is an exclusive store too: no save, but a store over one.
+FUNC stlex_save_fn
+    sub sp, #4
+    stlex r0, lr, [sp]
+    pop {pc}
+END stlex_save_fn
+FUNC stlex_kill_fn
+    push {r4, lr}
+    add r3, sp, #4
+    stlex r0, r1, [r3]
+    pop {r4, pc}
+END stlex_kill_fn
 
 FUNC mve_vec_fn
     vadd.i32 q0, q1, q2
@@ -1727,6 +1758,21 @@ CASES = [
     ("str_save", "main", BOTH, {"pl_base_log": "save_str_fn"}, 1024, p_none,
      ("accept", {"pl_base_log": 8}),
      "the same save, unconditional"),
+    ("strex_save", "main", BOTH, {"pl_base_log": "strex_save_fn"}, 1024,
+     p_none, ("reject", [("walk", "lr was not saved on every path")]),
+     "lr stored by an exclusive store (it may fail) is not a save"),
+    ("strex_twin", "main", BOTH, {"pl_base_log": "strex_twin_fn"}, 1024,
+     p_none, ("accept", {"pl_base_log": 4}),
+     "the same word saved by a plain str"),
+    ("strex_over_slot", "main", BOTH, {"pl_base_log": "strex_kill_fn"}, 1024,
+     p_none, ("reject", [("walk", "lost to a store over it")]),
+     "an exclusive store over the saved lr is still a store over it"),
+    ("stlex_save", "main", ("m55",), {"pl_base_log": "stlex_save_fn"}, 1024,
+     p_none, ("reject", [("walk", "lr was not saved on every path")]),
+     "the same with a store-release exclusive (Armv8-M)"),
+    ("stlex_over_slot", "main", ("m55",), {"pl_base_log": "stlex_kill_fn"},
+     1024, p_none, ("reject", [("walk", "lost to a store over it")]),
+     "...and over the saved lr"),
     ("byte_over_slot", "main", BOTH, {"pl_base_log": "byte_kill_fn"}, 1024,
      p_none, ("reject", [("walk", "lost to a store over it")]),
      "a byte store on the slot's last byte"),

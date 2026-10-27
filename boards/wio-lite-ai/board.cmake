@@ -1636,7 +1636,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         message(STATUS "wio: no host C compiler -- asset-* targets will refuse")
     endif()
 
-    execute_process(COMMAND git -C "${CMAKE_SOURCE_DIR}" rev-parse --short HEAD
+    execute_process(COMMAND ${FETCH_UPSTREAM_GIT} -C "${CMAKE_SOURCE_DIR}" rev-parse --short HEAD
                     OUTPUT_VARIABLE WIO_PLUGIN_BUILD_ID
                     OUTPUT_STRIP_TRAILING_WHITESPACE
                     ERROR_QUIET)

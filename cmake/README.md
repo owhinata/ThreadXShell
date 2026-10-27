@@ -642,9 +642,21 @@ several boards share at one version stay `lib/` submodules. Rules:
   for a fresh copy.
 - Every git call clears `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
   `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES` and `GIT_COMMON_DIR`
-  and sets `GIT_NO_REPLACE_OBJECTS=1` (the `FETCH_UPSTREAM_GIT` prefix, also used by
-  `tflm_submodule.cmake`), so a configure started from a git hook cannot check or
-  fetch into the superproject, and `git replace` cannot stand in for the pin.
+  and sets `GIT_NO_REPLACE_OBJECTS=1`, so a configure started from a git hook
+  cannot check or fetch into the superproject, and `git replace` cannot stand in
+  for the pin. It also clears `GIT_CONFIG_PARAMETERS` (what `git -c` hands to the
+  commands it starts) and `GIT_CONFIG_COUNT` (without it the numbered
+  `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` are not read; see git-config(1),
+  ENVIRONMENT), so an inherited `core.hooksPath` or `url.<x>.insteadOf` cannot run
+  hooks in a fetched tree or send a fetch to another remote (#158). Configuration
+  files are still read: git-lfs installs its filter in the system or global one.
+- That prefix, `FETCH_UPSTREAM_GIT`, is how the whole build starts git: the
+  pinned model fetch (`fetch_model.cmake`), the tflite-micro submodule
+  (`tflm_submodule.cmake`, `tflm_pin_check.cmake`), the Grove SDK fetch
+  (`boards/grove-vision-ai-v2/cmake/himax_sdk_fetch.cmake`), the submodule
+  bootstrap and `git describe` in `CMakeLists.txt`, the boards' plugin build ids
+  and the MLPerf Tiny submodule. A new git call uses it too, never a bare
+  `${GIT_EXECUTABLE}` or `git`.
 - The fetch runs in `<dest>.partial` and is renamed into place only after passing
   the same checks, so an interrupted fetch leaves no `<dest>` behind. A `<dest>.partial`
   that is a symlink is refused rather than removed.
@@ -658,3 +670,10 @@ several boards share at one version stay `lib/` submodules. Rules:
 `fixtures/run_fetch_upstream_tests.py` (run by `shell/test/run_host_tests.sh`)
 covers each refusal against a local `file://` upstream, paired with the same
 configure passing, plus the offline second configure and the lock.
+`fixtures/run_git_env_tests.py` (also run by `run_host_tests.sh`) runs the model
+fetch and the Grove SDK fetch (fresh, and the check of an existing tree) with
+each repository-redirecting variable pointed at a throwaway superproject, which
+must come out byte for byte unchanged, and with a hook path and an `insteadOf`
+injected through `GIT_CONFIG_PARAMETERS` and `GIT_CONFIG_COUNT`, which must
+neither run the hook nor reach the other remote (`GIT_TRACE` shows which
+upload-pack git started).

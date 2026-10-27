@@ -47,7 +47,23 @@
 #  turns replace refs off.  A configure run from a shell with GIT_DIR set (a git
 #  hook, `git rebase -x`) would otherwise check -- and fetch into -- the
 #  superproject, and `git replace` would let another commit answer for the pin.
-#  cmake/tflm_submodule.cmake uses the same prefix.
+#  It also clears the two variables that carry configuration in the environment
+#  (issue #158): GIT_CONFIG_PARAMETERS, which `git -c <name>=<value>` exports to
+#  every command it starts, and GIT_CONFIG_COUNT, which makes git read the
+#  numbered GIT_CONFIG_KEY_<n> / GIT_CONFIG_VALUE_<n> pairs.  Inherited from a
+#  parent `git -c url.<x>.insteadOf=... rebase -x`, they would retarget a fetch
+#  at another remote or run hooks from another core.hooksPath.  The line is:
+#  what git itself hands to its children is cleared; what a person sets on
+#  purpose (GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM, GIT_TEMPLATE_DIR) and the
+#  configuration FILES (system, global, the repository's own) are still read:
+#  git-lfs installs its smudge filter in the system or global file, and the
+#  model fetch depends on it.  Every git call in the build goes through this prefix:
+#  cmake/tflm_submodule.cmake, cmake/tflm_pin_check.cmake,
+#  cmake/fetch_model.cmake, the Grove SDK fetch (boards/grove-vision-ai-v2/
+#  cmake/himax_sdk_fetch.cmake), the submodule bootstrap and `git describe` in
+#  CMakeLists.txt, the boards' plugin build ids and the MLPerf Tiny submodule.
+#  cmake/fixtures/run_git_env_tests.py runs the model and SDK fetches with each
+#  of these variables set.
 #
 #  [!] A DIRECTORY THAT EXISTS WAS COMPLETE.  The fetch happens in a private
 #  staging directory (<dest>.partial) and is renamed into place only after it has
@@ -72,15 +88,24 @@ include_guard(GLOBAL)
 
 find_package(Git REQUIRED)
 
-# The one way this file (and cmake/tflm_submodule.cmake) starts git: a COMMAND
+# The one way the build starts git (see the header for who uses it): a COMMAND
 # prefix, so a pipeline can use it as well as a single call.  GIT_TERMINAL_PROMPT=0:
 # a mistyped GitHub URL asks for credentials instead of failing, which would hang
 # a configure with nobody at the terminal.
+#
+# GIT_CONFIG_PARAMETERS is git's internal channel for `git -c` (not listed in
+# git(1); it is how a git process hands -c to the commands it runs).  The
+# GIT_CONFIG_COUNT / GIT_CONFIG_KEY_<n> / GIT_CONFIG_VALUE_<n> set is documented
+# in git-config(1), ENVIRONMENT: "If GIT_CONFIG_COUNT is set to a positive number,
+# all environment pairs ... up to that number will be added", and an empty or
+# absent count processes no pairs -- so clearing the count is enough, and the
+# numbered keys, which cannot be listed in advance, are never read.
 set(FETCH_UPSTREAM_GIT
     "${CMAKE_COMMAND}" -E env
     --unset=GIT_DIR --unset=GIT_WORK_TREE --unset=GIT_INDEX_FILE
     --unset=GIT_OBJECT_DIRECTORY --unset=GIT_ALTERNATE_OBJECT_DIRECTORIES
     --unset=GIT_COMMON_DIR
+    --unset=GIT_CONFIG_PARAMETERS --unset=GIT_CONFIG_COUNT
     GIT_TERMINAL_PROMPT=0 GIT_NO_REPLACE_OBJECTS=1
     "${GIT_EXECUTABLE}")
 

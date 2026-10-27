@@ -34,6 +34,16 @@
 #  invocation and the verified file is renamed into place, so an interrupted
 #  fetch cannot leave something at OUT that looks finished.  The clone directory
 #  is never evidence of completion.
+#
+#  [!] GIT RUNS THROUGH FETCH_UPSTREAM_GIT (cmake/fetch_upstream.cmake; issue
+#  #158), never as a bare ${GIT_EXECUTABLE}.  This script runs from ninja, which
+#  passes on the environment of whoever started the build: with GIT_DIR and
+#  GIT_WORK_TREE inherited (a git hook, `git rebase -x`), `init` re-initialises
+#  the SUPERPROJECT, `remote add` / `fetch` / `checkout` act on it, and the
+#  checkout writes the model's tree over its working tree.  An inherited
+#  `git -c url.<x>.insteadOf=...` would fetch from another remote and an
+#  inherited core.hooksPath would run its hooks on the checkout: the hash still
+#  decides what is published, but only after both had already happened.
 # ============================================================================
 
 foreach(_v URL COMMIT PATH_IN SHA256 OUT WORK OVERRIDE)
@@ -42,7 +52,7 @@ foreach(_v URL COMMIT PATH_IN SHA256 OUT WORK OVERRIDE)
     endif()
 endforeach()
 
-find_package(Git REQUIRED)
+include("${CMAKE_CURRENT_LIST_DIR}/fetch_upstream.cmake")
 
 # Private, and replaced rather than resumed: a half-finished clone from an
 # interrupted run must not be mistaken for a usable one.
@@ -50,7 +60,7 @@ file(REMOVE_RECURSE "${WORK}")
 file(MAKE_DIRECTORY "${WORK}")
 
 function(_run_git)
-    execute_process(COMMAND "${GIT_EXECUTABLE}" ${ARGN}
+    execute_process(COMMAND ${FETCH_UPSTREAM_GIT} ${ARGN}
                     WORKING_DIRECTORY "${WORK}"
                     RESULT_VARIABLE _rc
                     OUTPUT_VARIABLE _out ERROR_VARIABLE _err)

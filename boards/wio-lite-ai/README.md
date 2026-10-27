@@ -26,9 +26,11 @@ cmake --build build/wio-lite-ai
 
 The default `tflm` backend generates its tflite-micro tree at configure time from
 the `lib/tflite-micro` submodule (issue #134; see the root README's Building
-section). The generation downloads tflite-micro's third-party dependencies
-(flatbuffers, gemmlowp, ruy, CMSIS-NN) and needs Python, so the first configure
-of a build directory needs the network even when every submodule is present.
+section), which that configure initialises on first use -- it is not in this
+board's `submodules.cmake`, so `-DCONFIG_NN_BACKEND=null` never fetches it. The
+generation downloads tflite-micro's third-party dependencies (flatbuffers,
+gemmlowp, ruy, CMSIS-NN) and needs Python, so the first tflm configure of a build
+directory needs the network even when every submodule is present.
 
 To flash the app: **hold PF1 (USER) while resetting** to enter the bootloader's
 DFU mode, check that `0483:df11` appears, then

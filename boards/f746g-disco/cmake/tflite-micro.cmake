@@ -7,7 +7,8 @@
 # final shell link keeps the C driver (gcc) and does not auto-pull full libstdc++.
 #
 # The tflite-micro sources come from the lib/tflite-micro submodule (#134), pinned by
-# its gitlink.  At CONFIGURE time the pinned commit is written out into the build dir
+# its gitlink, fetched here on first use (no board's sentinel list names it, so a
+# null configure stays offline) and re-checked against the gitlink on every build.  At CONFIGURE time the pinned commit is written out into the build dir
 # (cmake/tflm_submodule.cmake -- never generated inside lib/) and upstream's own
 # `create_tflm_tree.py` runs there (it drives the tflite-micro Makefile to list library
 # sources, download the header-only third-party deps flatbuffers/gemmlowp/ruy -- so
@@ -21,7 +22,7 @@ enable_language(CXX)
 
 # --- Pinned upstream: the lib/tflite-micro gitlink ---------------------------
 include("${CMAKE_SOURCE_DIR}/cmake/tflm_submodule.cmake")
-tflm_submodule_pin(TFLM_GIT_SHA)                  # fatal unless HEAD == gitlink
+tflm_submodule_pin(TFLM_GIT_SHA)                  # fetches if uninitialised; fatal unless HEAD == gitlink
 set(TFLM_SRC  "${CMAKE_BINARY_DIR}/tflm-src")     # git archive of the pinned commit
 set(TFLM_ROOT "${CMAKE_BINARY_DIR}/tflm-tree")    # generated self-contained source tree
 set(TFLM_GEN   "${TFLM_SRC}/tensorflow/lite/micro/tools/project_generation/create_tflm_tree.py")
@@ -262,6 +263,11 @@ if(TARGET tflm_override_id)
 endif()
 
 target_link_libraries(tflm PRIVATE bsp_iface)   # MCU_OPTS (fpv5-sp-d16) + CMSIS/HAL includes
+
+# The tree above was generated at configure time for TFLM_GIT_SHA; a superproject
+# checkout that moves only the gitlink does not re-configure, so every build first
+# re-checks gitlink == submodule HEAD == TFLM_GIT_SHA (cmake/tflm_submodule.cmake).
+tflm_submodule_build_check(tflm_pin_check tflm "${TFLM_GIT_SHA}")
 
 target_include_directories(tflm PRIVATE
     "${TFLM_ROOT}"                                   # "tensorflow/..." and "signal/..."

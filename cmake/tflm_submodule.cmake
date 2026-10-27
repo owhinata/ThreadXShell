@@ -23,18 +23,31 @@
 #  advancing the submodule and committing the gitlink; the submodule's HEAD
 #  file is a configure dependency, so the next build re-configures.
 #
+#  [!] FETCHED BY ITS USER, NOT BY THE BOARD'S SENTINEL LIST.  Only the tflm
+#  backend reads lib/tflite-micro, so it is in no boards/<board>/submodules.cmake:
+#  a CONFIG_NN_BACKEND=null configure must stay offline.  tflm_submodule_pin()
+#  initialises the submodule itself when it finds it uninitialised -- the same
+#  fetch-on-demand as lib/mlperf-tiny.
+#
+#  [!] THE GITLINK IS RE-CHECKED ON EVERY BUILD.  The HEAD file as a configure
+#  dependency catches a checkout INSIDE the submodule, but not a superproject
+#  checkout that moves only the gitlink (the submodule's HEAD file is untouched).
+#  The superproject's .git/index cannot be that dependency instead: `git status`
+#  rewrites it, so nearly every git command would re-configure.  So
+#  tflm_submodule_build_check() adds a target in ALL that compares the gitlink,
+#  the submodule HEAD and the pin this tree was configured with, and the tflm
+#  library waits for it.
+#
 #  Configure still needs the network and Python: the generator's dependency
 #  downloads happen whether or not tflite-micro itself was cloned.
 # ============================================================================
 
 set(TFLM_SUBMODULE_DIR "${CMAKE_SOURCE_DIR}/lib/tflite-micro")
 
-# Sets <out_var> to the pinned commit, after checking the submodule's HEAD
-# against the superproject's gitlink.  Fatal if they differ or either is unreadable.
-function(tflm_submodule_pin out_var)
-    # An uninitialised submodule is an empty directory INSIDE the superproject,
-    # where `git -C` silently answers for the superproject instead.  So first
-    # make sure the repository git finds there is the submodule itself.
+# Sets <out_var> to TRUE when git, asked inside lib/tflite-micro, answers for the
+# submodule itself.  An uninitialised submodule is an empty directory INSIDE the
+# superproject, where `git -C` silently answers for the superproject instead.
+function(_tflm_submodule_is_init out_var)
     execute_process(
         COMMAND git -C "${TFLM_SUBMODULE_DIR}" rev-parse --show-toplevel
         OUTPUT_VARIABLE _top OUTPUT_STRIP_TRAILING_WHITESPACE
@@ -43,10 +56,29 @@ function(tflm_submodule_pin out_var)
     if(_rc EQUAL 0)
         file(REAL_PATH "${_top}" _top)
     endif()
-    if(NOT _rc EQUAL 0 OR NOT _top STREQUAL _want)
-        message(FATAL_ERROR
-            "tflm: lib/tflite-micro is not an initialised submodule; run\n"
-            "    git submodule update --init -- lib/tflite-micro")
+    if(_rc EQUAL 0 AND _top STREQUAL _want)
+        set(${out_var} TRUE PARENT_SCOPE)
+    else()
+        set(${out_var} FALSE PARENT_SCOPE)
+    endif()
+endfunction()
+
+# Sets <out_var> to the pinned commit, after checking the submodule's HEAD
+# against the superproject's gitlink.  Fatal if they differ or either is unreadable.
+function(tflm_submodule_pin out_var)
+    _tflm_submodule_is_init(_init)
+    if(NOT _init)
+        message(STATUS "tflm: fetching the lib/tflite-micro submodule (~40 MB) ...")
+        execute_process(
+            COMMAND git submodule update --init -- lib/tflite-micro
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            RESULT_VARIABLE _rc)
+        _tflm_submodule_is_init(_init)
+        if(NOT _rc EQUAL 0 OR NOT _init)
+            message(FATAL_ERROR
+                "tflm: could not initialise the lib/tflite-micro submodule; run\n"
+                "    git submodule update --init -- lib/tflite-micro")
+        endif()
     endif()
     execute_process(
         COMMAND git -C "${TFLM_SUBMODULE_DIR}" rev-parse --verify -q HEAD
@@ -109,4 +141,19 @@ function(tflm_submodule_export sha dest)
     if(NOT _rc EQUAL 0)
         message(FATAL_ERROR "tflm: extracting lib/tflite-micro @ ${sha} failed")
     endif()
+endfunction()
+
+# Adds <check_target> to ALL: on every build it compares the superproject's gitlink,
+# the submodule's checked-out HEAD and <sha> (the pin this tree was configured
+# with), and fails the build unless all three agree.  <user_target> -- the
+# library compiled from the generated tree -- waits for it.
+function(tflm_submodule_build_check check_target user_target sha)
+    add_custom_target(${check_target} ALL
+        COMMAND "${CMAKE_COMMAND}"
+                "-DSRC_ROOT=${CMAKE_SOURCE_DIR}" "-DSUB_DIR=${TFLM_SUBMODULE_DIR}"
+                "-DPIN=${sha}"
+                -P "${CMAKE_SOURCE_DIR}/cmake/tflm_pin_check.cmake"
+        COMMENT "tflm: check lib/tflite-micro against the configured pin"
+        VERBATIM)
+    add_dependencies(${user_target} ${check_target})
 endfunction()

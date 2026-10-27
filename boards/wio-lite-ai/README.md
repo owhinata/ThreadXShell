@@ -1006,8 +1006,9 @@ measuring a callback's own frame is not measuring what is below the crossing.
 (`build/wio-lite-ai/veneer_cost/shell.checked`), deleted before the check runs
 and written only when it passes; `dfu-shell`, `flash` and every `asset-*` target
 depend on it, so a failure stops the DFU write AND the container pack.  Each
-plugin's own `pl_sbuf_write` bound (64 B) is checked against the declaration in
-the same run.  The mechanism is shared with Grove:
+plugin's printer limit (64 B, the bound on `pl_sbuf_write` and, since issue
+#124, on every plugin function the base may be handed) is checked against the
+declaration in the same run.  The mechanism is shared with Grove:
 `cmake/veneer_cost_gate.cmake`, `cmake/check_veneer_base_cost.py` and
 `cmake/README.md`.
 
@@ -1114,7 +1115,8 @@ What used to be owed here -- **the firmware could not tell a stale declaration
 from a current one** -- is closed.  Until ABI 2 each slot declared one number
 with c already inside it, and the loader could not know which c.  Now the
 manifest declares, per slot, the plugin's own deepest frames A0, its own frames
-at a crossing A1 and a crossing bit, plus the plugin's sink bound S, and the
+at a crossing A1 and a crossing bit, plus S, the bound of every plugin function the base may be handed (issue #124;
+`pl_sbuf_write` alone on the shipped plugins), and the
 loader requires `max(A0, A1 + max(c, S))` with this firmware's c
 (`svc/plugin/plugin_load.c`).  A stack-accounting version in the manifest says which
 analysis produced the numbers; a mismatch is its own refusal.  The c is the one
@@ -1132,6 +1134,31 @@ slot 5, 194,232 B, crc32 `E07F7D79`; `blob list` matched the receipt.  The ABI 1
 container that was in the slot is refused by the new firmware as `abi mismatch`,
 as it must be.  `nn model load --slot 5`, `nn run` (1 face) and `nn stream`
 behaved as before.
+
+#### Stack accounting 2 (issue #124)
+
+Since issue #124 the image gate's stack bound is computed by the same code that
+derives the veneer charge above (`cmake/thumb_stack_analysis.py`; see
+`cmake/README.md`, **Plugin image gate: the stack bound**): frames counted from
+the instruction bytes rather than taken from `-fstack-usage`, functions told
+apart by address rather than by name, every return checked for where lr was
+saved and where sp is, and S taken over every plugin function the base may be
+handed rather than over `pl_sbuf_write` by name.  On both plugins this board
+builds, A0, A1 and S came out the same to the byte, so the tables above stand
+(c = 640, S = 16 B).  What changed is what the numbers mean, and the manifest
+says so: its stack-accounting version is now **2**.
+
+The loader compares that version for equality, so a container packed before
+#124 is refused on load as `stack declared under another analysis` -- not as a
+stack that is too big.  Build the asset again and send it as in **Sending an
+asset** above (`asset-blazeface` to slot 5), then compare the receipt's crc32
+with `blob list`.  The new container differs from the old one in the version
+field and in the digest and CRC over it, so its crc32 is not `E07F7D79`.
+
+Re-sent on 2026-10-27, with the firmware at `bc92a6f-dirty` (the version-2
+build): the old container was refused on `nn model load --slot 5` with the
+line above, then `blob write 5` stored 194,232 B, crc32 `E8616C54` (equal to
+the receipt, verify PASS), and `nn run` and `nn stream start` / `stop` ran.
 
 ### What the panel costs, measured
 

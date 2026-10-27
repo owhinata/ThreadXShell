@@ -288,7 +288,7 @@ everything below its roots.
 - A frame is the sum of the stack decrements in the body's instruction bytes.
   The compiler's record is a witness, found through the map: each body is
   compared with the `.su` beside the object the map says it came from
-  (`--map`, which replaced `--su`). A scan below the record, a body with no
+  (`--map`). A scan below the record, a body with no
   record, an ambiguous record and a dynamic one are refused. There is no
   prebuilt exemption on the plugin side: every body is compiled by
   `add_plugin()`.
@@ -314,9 +314,20 @@ everything below its roots.
   **Returns and the stack pointer** below.
 
 On the four shipped plugin images (Grove and wio, blazeface and cifar10) the
-shared analysis gives the same A0 / A1 / S as the analysis it replaced, so the
-change re-packed nothing: every `plugin.stacks.json` and container is byte for
-byte what it was. `fixtures/run_plugin_gate_tests.py` keeps that older
+shared analysis gives the same A0 / A1 / S as the analysis it replaced, to the
+byte. The numbers did not move, but what they mean did, so the manifest's
+stack-accounting version (`PLUGIN_STACK_ACCOUNTING` in
+`svc/plugin/plugin_abi.h`, copied in `check_plugin_image.py`'s ABI table and
+pinned to the header by the fixtures) went from 1 to 2 once all of #124 was in.
+The device's loader compares it for equality, so a container packed before
+#124 is refused on load as "stack declared under another analysis" and has to
+be rebuilt and sent again (each board README says how); the new containers
+differ from the old in the version field and in what covers it (digest,
+CRC). Raise the version again whenever what the analysis charges, where it
+stops, what it accepts as a return, or which functions S covers changes --
+also when the change only makes the bound more precise, since an old
+declaration would otherwise be read under the new rules.
+`fixtures/run_plugin_gate_tests.py` keeps that older
 analysis, transcribed, as an oracle: every slot must come out at or above it at
 c = 1, 256 and 2^20, with one case (`same_name_shallow`) that must come out
 below it and equal to it once its merged frames are separated. The negative
@@ -387,7 +398,7 @@ is handed carries, so the far side of a crossing is sometimes the plugin
 itself: its own string sink `pl_sbuf_write`, put in a printer by
 `asset/common/plugin_text.c`. The manifest carries that bound as S, and the
 loader charges `max(c, S)` at a crossing. Until #124 S was the bound of that
-one function, named on the gate's `--entry`. Any other plugin function whose
+one function alone. Any other plugin function whose
 address the plugin takes could be put in a printer (or a painter) just the
 same, and nothing measured it.
 
@@ -416,8 +427,7 @@ limit. S is the deepest of them; an image that hands the base nothing declares
 S = 0, which is a measurement. The listed functions are also emitted in
 `plugin.stacks.json` beside the slots, by name (the packer reads only the
 slots), and the gate prints the list: on the four shipped plugin images it is
-`pl_sbuf_write` alone, so S and every container are byte for byte what they
-were.
+`pl_sbuf_write` alone, so S is what it was (16 B on both boards).
 
 Refused: a relocation type not listed above; a reference to code that is not
 a function's first instruction; any reference to the slot table from outside
@@ -432,8 +442,12 @@ section the map neither places nor discards.
 
 [!] The line the list does not cross: a function address made from a number.
 Code that writes a function's address as an integer constant, or computes it
-from one, carries no relocation, and nothing here can find it. That is on the
-same side as memory safety: a plugin is reviewed, trusted native code, and the
+from one, carries no relocation, and nothing here can find it. The same holds
+for a MOVW/MOVT pair whose halves name different symbols: each half is
+resolved to the whole address of its own symbol (and each of those is listed
+or refused as above), but the address the two instructions build together is
+a third one that no relocation names. Both are on the same side as memory
+safety: a plugin is reviewed, trusted native code, and the
 gate proves a stack bound for the code as the compiler and linker describe it,
 not against a plugin that hides a pointer from them.
 

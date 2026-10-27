@@ -16,12 +16,11 @@
 #  cmake/mlperf-tiny.cmake, so a default configure must neither be triggered by
 #  its absence nor drag it in.  lib/tflite-micro is absent for the same reason:
 #  only the tflm backend reads it, and cmake/tflm_submodule.cmake fetches it on
-#  first use, so a CONFIG_NN_BACKEND=null configure stays offline.
+#  first use, so a CONFIG_NN_BACKEND=null configure stays offline.  The ST Cube
+#  set (H7 HAL, CMSIS device, CMSIS core) is not a submodule at all: board.cmake
+#  pins it per board and fetches it with cmake/fetch_upstream.cmake (issue #136).
 # ============================================================================
 set(_submodule_sentinels
-    "lib/stm32h7xx_hal_driver/Src/stm32h7xx_hal.c"
-    "lib/cmsis_core/Include/core_cm7.h"
-    "lib/cmsis_device_h7/Include/stm32h725xx.h"
     "lib/tinyusb/src/tusb.h"
     "lib/threadx/common/src/tx_thread_create.c"
     "lib/coremark/core_main.c"

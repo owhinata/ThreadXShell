@@ -47,18 +47,19 @@ fetch_upstream(HAL_DIR                          # master, 2026-06-26 (no tag)
     URL    "https://github.com/STMicroelectronics/stm32h7xx_hal_driver"
     COMMIT "c5e70527126710a6415929ff10c1fd1f40394b1e"
     SPARSE "/Inc/" "/Src/" "/LICENSE.md"
-    PROBE  "Src/stm32h7xx_hal.c" "Inc/stm32h7xx_hal_conf_template.h")
+    PROBE  "Src/stm32h7xx_hal.c" "Inc/stm32h7xx_hal_conf_template.h"
+           "LICENSE.md")
 fetch_upstream(CMSIS_DEV                        # master, 2026-04-16 (no tag)
     URL    "https://github.com/STMicroelectronics/cmsis_device_h7"
     COMMIT "de8243d2c15f87936f28a49fcd9e6f5ba10fc233"
     SPARSE "/Include/" "/Source/Templates/" "/LICENSE.md"
     PROBE  "Include/stm32h725xx.h" "Source/Templates/system_stm32h7xx.c"
-           "Source/Templates/gcc/startup_stm32h725xx.s")
-fetch_upstream(CMSIS_CORE                       # v5.6.0_cm7
+           "Source/Templates/gcc/startup_stm32h725xx.s" "LICENSE.md")
+fetch_upstream(CMSIS_CORE                       # v5.9.0_20250520
     URL    "https://github.com/STMicroelectronics/cmsis-core"
-    COMMIT "04fe7bb2025811f10848ce14be810dde981934cf"
-    SPARSE "/Include/" "/LICENSE.txt"
-    PROBE  "Include/core_cm7.h")
+    COMMIT "b7487de1303e2eb77c402432e368691e9dcfb5f0"
+    SPARSE "/Include/" "/LICENSE.md"
+    PROBE  "Include/core_cm7.h" "LICENSE.md")
 set(LDSCRIPT_APP "${BOARD_DIR}/ldscript/STM32H725AEIx_IROM.ld") # app (internal 0x08020000)
 set(LDSCRIPT_ROM "${BOARD_DIR}/ldscript/STM32H725AEIx_ROM.ld")  # bootloader (0x08000000)
 

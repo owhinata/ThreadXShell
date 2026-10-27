@@ -46,8 +46,9 @@ the lists that board builds against.
     upstream/cmsis_device_h7-<commit>/LICENSE.md  (device headers; the wio-lite-ai
     port supplies its own SystemInit)
 - ARM CMSIS-Core                           -- Apache-2.0
-    upstream/cmsis-core-<commit>/LICENSE.txt  (both STM32 boards; the Grove board
-    uses the CMSIS bundled inside the Himax SDK instead)
+    upstream/cmsis-core-<commit>/LICENSE.txt  (f746g-disco, 5.6.0)
+    upstream/cmsis-core-<commit>/LICENSE.md   (wio-lite-ai, 5.9.0; the Grove
+    board uses the CMSIS bundled inside the Himax SDK instead)
 - Eclipse ThreadX                          -- MIT
     lib/threadx/LICENSE.txt
     A project of the Eclipse Foundation (donated by Microsoft from Azure RTOS);

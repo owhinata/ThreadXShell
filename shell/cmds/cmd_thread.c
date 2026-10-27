@@ -24,8 +24,12 @@
  * Stack peak (high-water) usage is computed by scanning the 0xEF fill ThreadX lays
  * down at create time (tx_thread_create.c, TX_STACK_FILL == 0xEFEFEFEF -- present by
  * default unless TX_DISABLE_STACK_FILLING is defined, which this target does not).
- * This is the same best-effort method as ThreadX's own tx_thread_stack_analyze():
- * a used word can legitimately equal 0xEF, so peak may read a few bytes low.
+ * Best effort: a used byte can legitimately equal 0xEF, so peak may read a few
+ * bytes low.  This is a plain linear scan up from stack_start and is NOT the same
+ * method as ThreadX's tx_thread_stack_analyze(): that is a binary search, and since
+ * ThreadX 6.5.2 each probe checks up to TX_THREAD_STACK_ANALYZE_FILL_WORDS (default
+ * 8) consecutive fill words toward lower addresses, stopping at the lowest address
+ * already known to hold the fill, so the two can report different peaks.
  *
  * Clean-room design; no third-party code reused.
  */
@@ -79,7 +83,8 @@ static const char *state_name(UINT s)
  * Peak (high-water) stack usage in bytes.  The stack grows down from
  * tx_thread_stack_end (high) toward tx_thread_stack_start (low), so the untouched
  * tail keeps its 0xEF fill at the low end.  The leading 0xEF run from stack_start
- * is the free headroom; peak = size - free.  (Same scan as _tx_thread_stack_analyze.)
+ * is the free headroom; peak = size - free.  (A byte-wise linear scan, not the
+ * binary search of _tx_thread_stack_analyze -- see the file header.)
  */
 static ULONG stack_peak_used(const TX_THREAD *t)
 {

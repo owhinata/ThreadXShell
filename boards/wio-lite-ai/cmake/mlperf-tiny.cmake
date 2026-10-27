@@ -17,7 +17,7 @@ set(MLPERF_API "${MLPERF_DIR}/benchmark/api")
 if(NOT EXISTS "${MLPERF_API}/internally_implemented.cpp")
     message(STATUS "Fetching the MLPerf Tiny submodule (~340 MB, shallow) ...")
     execute_process(
-        COMMAND git submodule update --init --depth 1 -- lib/mlperf-tiny
+        COMMAND ${FETCH_UPSTREAM_GIT} submodule update --init --depth 1 -- lib/mlperf-tiny
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
         RESULT_VARIABLE _mlperf_sm)
     if(NOT _mlperf_sm EQUAL 0 OR NOT EXISTS "${MLPERF_API}/internally_implemented.cpp")

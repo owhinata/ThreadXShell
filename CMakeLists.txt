@@ -111,10 +111,14 @@ foreach(_s IN LISTS _submodule_sentinels)
     list(APPEND _submodule_paths "${_p}")
 endforeach()
 list(REMOVE_DUPLICATES _submodule_paths)
+# Every git call in the build goes through FETCH_UPSTREAM_GIT, which clears the
+# environment that would point git at another repository or hand it another
+# configuration (issues #136 and #158; the list is in cmake/fetch_upstream.cmake).
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/fetch_upstream.cmake")
 if(_need_submodules)
     message(STATUS "Initializing git submodules ...")
     execute_process(
-        COMMAND git submodule update --init -- ${_submodule_paths}
+        COMMAND ${FETCH_UPSTREAM_GIT} submodule update --init -- ${_submodule_paths}
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         RESULT_VARIABLE _sm)
     if(NOT _sm EQUAL 0)
@@ -136,7 +140,7 @@ add_shared_storage_build_gate()
 # GEN_DIR is already on the board's include path, which is what lets
 # cmd_system.c say #include "cli_version.h".
 execute_process(
-    COMMAND git -C "${CMAKE_CURRENT_SOURCE_DIR}" describe --always --dirty --tags
+    COMMAND ${FETCH_UPSTREAM_GIT} -C "${CMAKE_CURRENT_SOURCE_DIR}" describe --always --dirty --tags
     OUTPUT_VARIABLE CLI_GIT_DESC OUTPUT_STRIP_TRAILING_WHITESPACE
     ERROR_QUIET RESULT_VARIABLE _gitrc)
 if(NOT _gitrc EQUAL 0)

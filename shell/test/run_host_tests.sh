@@ -497,6 +497,17 @@ python3 "$repo/cmake/fixtures/run_pinned_input_tests.py"
 # network; needs git, cmake and ninja only.
 python3 "$repo/cmake/fixtures/run_fetch_upstream_tests.py"
 
+# issue #158 -- the other two pinned fetches, cmake/fetch_model.cmake and the
+# Grove SDK fetch (boards/grove-vision-ai-v2/cmake/himax_sdk_fetch.cmake), start
+# git through the same FETCH_UPSTREAM_GIT.  With GIT_DIR / GIT_WORK_TREE /
+# GIT_INDEX_FILE / GIT_OBJECT_DIRECTORY / GIT_COMMON_DIR pointed at a throwaway
+# superproject, each fetch must succeed and leave the superproject byte for byte
+# as it was; an alternate object store must not end up owning the SDK tree's
+# objects; and a core.hooksPath or url.<x>.insteadOf carried in
+# GIT_CONFIG_PARAMETERS or GIT_CONFIG_COUNT must neither run a hook nor send the
+# fetch to another remote.  Local file:// upstreams; needs git and cmake only.
+python3 "$repo/cmake/fixtures/run_git_env_tests.py"
+
 # issue #97 -- the published decode record (svc/nn/nn_det_record.c).  A camera stream
 # decodes on a worker and a console prints on another thread, so what the two
 # exchange has a rule: the boxes and the diagnostics that describe them travel

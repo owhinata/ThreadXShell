@@ -2007,7 +2007,7 @@ set(GROVE_PLUGIN_MAX  "131072")
 # [!] NOT CMAKE_PROJECT_VERSION -- this project sets none, so the manifest
 # carried an empty build id and `nn info` printed "build )".  The build id is
 # what a fault report names, so it has to identify something.
-execute_process(COMMAND git -C "${CMAKE_SOURCE_DIR}" rev-parse --short HEAD
+execute_process(COMMAND ${FETCH_UPSTREAM_GIT} -C "${CMAKE_SOURCE_DIR}" rev-parse --short HEAD
                 OUTPUT_VARIABLE GROVE_PLUGIN_BUILD_ID
                 OUTPUT_STRIP_TRAILING_WHITESPACE
                 ERROR_QUIET)

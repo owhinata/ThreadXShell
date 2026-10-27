@@ -44,7 +44,8 @@
 #  Every git call here (and in cmake/tflm_pin_check.cmake) starts git through
 #  FETCH_UPSTREAM_GIT from cmake/fetch_upstream.cmake (issue #136), so a GIT_DIR or
 #  GIT_WORK_TREE inherited from the shell cannot make it answer for, or check
-#  out into, another repository.
+#  out into, another repository, and a `git -c` inherited from a parent git
+#  cannot change its configuration (issue #158).
 # ============================================================================
 include("${CMAKE_CURRENT_LIST_DIR}/fetch_upstream.cmake")
 

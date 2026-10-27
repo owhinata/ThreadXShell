@@ -190,7 +190,7 @@ int sd_card_read_blocks(uint32_t lba, void *buf, uint32_t count)
 
 		/* Discard any cached lines over the bounce before the DMA writes it:
 		   a dirty eviction mid-transfer would corrupt the DMA'd data. */
-		SCB_InvalidateDCache_by_Addr(sd_bounce, (int32_t)len);
+		SCB_InvalidateDCache_by_Addr((void *)sd_bounce, (int32_t)len);
 
 		drain_done();
 		sd_xfer_err    = 0;
@@ -208,7 +208,7 @@ int sd_card_read_blocks(uint32_t lba, void *buf, uint32_t count)
 			break;
 
 		/* Drop speculative prefetches made during the DMA, then copy out. */
-		SCB_InvalidateDCache_by_Addr(sd_bounce, (int32_t)len);
+		SCB_InvalidateDCache_by_Addr((void *)sd_bounce, (int32_t)len);
 		memcpy(dst, sd_bounce, len);
 
 		lba   += c;

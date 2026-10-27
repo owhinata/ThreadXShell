@@ -531,6 +531,35 @@ class Handed:
         self.addrs = {}
         self.errors = []
         link_dir = os.path.dirname(os.path.abspath(map_path))
+        elf = image.elf
+
+        # [!] CODE IS ONLY IN .text (issue #124).  The analysis reads only
+        # executable sections as instructions and finds functions only there,
+        # so a function placed anywhere else -- `.data`, which the wio MPU
+        # runs as freely as `.text` -- would be in the image, callable, and
+        # never bounded.  An executable output section other than .text, or
+        # a function symbol outside it, is refused here; a reference to such
+        # code with no function symbol is refused in _addr below.
+        text = [x.index for x in elf.sections if x.name == ".text"]
+        for x in elf.sections:
+            if x.flags & tsa.SHF_ALLOC and x.flags & tsa.SHF_EXECINSTR and \
+                    x.size and x.name != ".text":
+                self.errors.append(f"section {x.name} is executable -- code "
+                                   "outside .text is never analysed")
+        for (n, v, _sz, t, sh) in elf.symbols:
+            if t == tsa.STT_FUNC and sh != SHN_UNDEF and sh not in text:
+                where = (elf.sections[sh].name if sh < len(elf.sections)
+                         else f"section index {sh}")
+                self.errors.append(f"function {n} (0x{v:08x}) is in {where}, "
+                                   "not .text -- code outside .text is never "
+                                   "analysed")
+        # The link's own answer for every global name (issue #124, B).
+        self.linked = {}
+        for k, (n, v, _sz, t, sh) in enumerate(elf.symbols):
+            if n and sh != SHN_UNDEF and elf.binds[k] in (STB_GLOBAL,
+                                                          STB_WEAK):
+                self.linked.setdefault(n, set()).add(
+                    (v & ~1) if t == tsa.STT_FUNC else v)
 
         def norm(p):
             return os.path.realpath(os.path.join(link_dir, p))
@@ -706,26 +735,65 @@ class Handed:
             # Defined in another object, or by the link script: what the link
             # bound it to is the image's own global of that name.  An alias
             # is just another name for an address, and is classified by it.
-            elf = self.image.elf
-            vals = {(v & ~1) if t == tsa.STT_FUNC else v
-                    for k, (n, v, _s, t, sh) in enumerate(elf.symbols)
-                    if n == name and sh != SHN_UNDEF
-                    and elf.binds[k] in (STB_GLOBAL, STB_WEAK)}
+            vals = self.linked.get(name, set())
             if len(vals) != 1:
                 self.errors.append(f"{why}: {name} resolves to "
                                    f"{len(vals)} addresses in the image")
                 return
-            self._addr((vals.pop() + addend) & 0xFFFFFFFF, in_slots, why)
+            elf = self.image.elf
+            func = any(n == name and t == tsa.STT_FUNC and sh != SHN_UNDEF
+                       and elf.binds[k] in (STB_GLOBAL, STB_WEAK)
+                       for k, (n, _v, _s, t, sh) in enumerate(elf.symbols))
+            self._addr((next(iter(vals)) + addend) & 0xFFFFFFFF, in_slots,
+                       why, func)
             return
+        # [!] A DEFINED GLOBAL IS WHERE THE LINK BOUND IT, NOT WHERE THIS
+        # OBJECT DEFINES IT (issue #124).  The two differ when this object's
+        # definition is weak and another object's strong one wins: the word
+        # the link writes holds the winner's address, and reading the
+        # object's own definition would list the loser -- a body the base is
+        # never handed -- and miss the one it is.  So the object's position
+        # is resolved too, and the two must agree.
+        if o.binds[sym] in (STB_GLOBAL, STB_WEAK) and name and \
+                shndx not in (SHN_ABS, SHN_COMMON):
+            here = self._defined_at(f, o, value, shndx, styp)
+            vals = self.linked.get(name, set())
+            if here is not None and vals != {here}:
+                bind = "weak" if o.binds[sym] == STB_WEAK else "global"
+                self.errors.append(
+                    f"{why}: {name} is defined here ({bind}) at 0x{here:08x}"
+                    ", and the link bound it to "
+                    + (", ".join(f"0x{v:08x}" for v in sorted(vals))
+                       or "nothing")
+                    + " -- the address the base may be handed is not the "
+                      "body this object names")
+                return
         self._target(f, o, value, shndx, addend, in_slots, why, styp)
+
+    def _defined_at(self, f, o, value, shndx, styp):
+        """The linked address of a symbol this object defines, or None when
+        it has none to compare (a merged or empty data section, or a section
+        the link did not keep -- _target says what that is)."""
+        if shndx >= SHN_LORESERVE or shndx >= len(o.sections):
+            return None
+        s = o.sections[shndx]
+        if not s.flags & tsa.SHF_EXECINSTR and (s.flags & SHF_MERGE
+                                                or s.size == 0):
+            return None
+        at = self.place.get((f, s.name))
+        if at is None or len(at) != 1:
+            return None
+        return (at[0][0] + ((value & ~1) if styp == tsa.STT_FUNC
+                            else value)) & 0xFFFFFFFF
 
     def _target(self, f, o, value, shndx, addend, in_slots, why, styp=None):
         # S is the symbol's ADDRESS: a Thumb function's value carries the
         # Thumb bit, which the relocation ORs back in (AAELF32 (S + A) | T).
         if styp == tsa.STT_FUNC:
             value &= ~1
+        func = styp == tsa.STT_FUNC
         if shndx == SHN_ABS:
-            self._addr((value + addend) & 0xFFFFFFFF, in_slots, why)
+            self._addr((value + addend) & 0xFFFFFFFF, in_slots, why, func)
             return
         if shndx == SHN_COMMON:
             return                          # data (and refused as COMMON)
@@ -748,7 +816,7 @@ class Handed:
             return
         # The slot table is found by the address this makes (an alias, or a
         # section symbol of .plugin_slots, is an address in it).
-        self._addr((at + value + addend) & 0xFFFFFFFF, in_slots, why)
+        self._addr((at + value + addend) & 0xFFFFFFFF, in_slots, why, func)
 
     def _slot_ref(self, why):
         self.errors.append(f"{why}: refers to the slot table -- a slot read "
@@ -756,11 +824,24 @@ class Handed:
                            "relocation shows, so nothing outside the table "
                            "may refer to it")
 
-    def _addr(self, addr, in_slots, why):
-        """Classify one resolved, linked address."""
+    def _addr(self, addr, in_slots, why, func=False):
+        """Classify one resolved, linked address.  `func`: the symbol it
+        names is a function."""
         if any(lo <= addr < hi for lo, hi in self.slot_ranges):
             if not in_slots:
                 self._slot_ref(why)
+            return
+        # [!] A FUNCTION'S ADDRESS OUTSIDE THE CODE (issue #124).  A function
+        # symbol, or an address with the Thumb bit set, that is not in an
+        # executable section names code the analysis never reads as
+        # instructions -- refused, not passed as data.  (An odd data address,
+        # `&bytes[1]`, is refused by the same test; none of the shipped
+        # plugins takes one.)
+        if (func or addr & 1) and self.image.elf.code_section(addr & ~1) \
+                is None:
+            self.errors.append(f"{why}: a function's address (0x{addr:08x}) "
+                               "outside the image's code -- what runs there "
+                               "is never analysed")
             return
         if in_slots:
             return                  # what the loader reaches by the manifest

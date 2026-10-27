@@ -1531,8 +1531,10 @@ class Image:
 #           a known position has overlapped the word since, and sp has not
 #           risen above it.  A word sp has risen above is free -- an
 #           exception's stacking or a callee may write it -- so it stays dead
-#           even if sp comes back down; and since a callee may write only
-#           below the sp it is called with, a call needs no rule of its own.
+#           even if sp comes back down.  A call needs no rule of its own:
+#           a word above the call's sp lives across it, because every body --
+#           the callee too -- is refused if it stores at a known position at
+#           or above the sp it was called with (below).
 #    regs   which core registers hold sp + a known constant, followed through
 #           register moves and add/sub of an immediate inside the body.  A
 #           store whose position is sp + a known constant -- `[sp, #k]`, or
@@ -1541,7 +1543,14 @@ class Image:
 #  and it requires: `bx lr` with ra and sp at the entry; a pop into pc that
 #  loads a live slot and leaves sp at the entry; a tail call (a direct branch
 #  to another function) or a register branch (`bx rN`, a plugin veneer's way
-#  out) with sp at the entry and ra.
+#  out) with sp at the entry and ra; and no store at a known position at or
+#  above the entry sp -- that is the caller's frame, where the caller's own
+#  saved lr may be, and it is what lets a slot live across a call (issue
+#  #124: until then the callee's side was assumed, not checked).
+#
+#  Positions are taken modulo 2^32 as signed numbers: `add.w rX, sp,
+#  #0xffffffff` is sp - 1, not sp + 4294967295 (a store through such a
+#  register was compared with nothing until the position wrapped).
 #
 #  [!] THE ONE LINE IT DOES NOT CROSS, AND THE ONLY PLACE IT PASSES WHAT IT
 #  CANNOT FOLLOW: a store whose position is not sp + a known constant is not
@@ -1559,6 +1568,11 @@ class Image:
 # ============================================================================
 def _pos(o):
     return f"entry sp{o:+d}"
+
+
+def _wrap(v):
+    """An address offset as the 32-bit machine computes it, signed."""
+    return ((v + 0x80000000) & 0xFFFFFFFF) - 0x80000000
 
 
 class _ReturnAnalysis:
@@ -1582,7 +1596,7 @@ class _ReturnAnalysis:
         v = self._val(st, base)
         if v is None or off is None:
             return None
-        return v + off
+        return _wrap(v + off)
 
     def _meet(self, a, b, at):
         if a[0] is None or b[0] is None:
@@ -1622,12 +1636,12 @@ class _ReturnAnalysis:
         if ins.wb is not None and ins.wb[0] != SP and ins.wb[0] not in new:
             base, delta = ins.wb
             v = self._val(st, base)
-            new[base] = v + delta if v is not None and delta is not None \
-                else None
+            new[base] = _wrap(v + delta) if v is not None and \
+                delta is not None else None
         if ins.arith is not None and ins.arith[0] not in new:
             rd, rn, imm = ins.arith
             v = self._val(st, rn)
-            new[rd] = None if v is None else v + imm
+            new[rd] = None if v is None else _wrap(v + imm)
         for r in ins.wr - {SP, PC} - set(new):
             new[r] = None
         call = ins.flow in ("bl", "ind_call")
@@ -1701,6 +1715,23 @@ class _ReturnAnalysis:
             st = IN.get(a)
             if st is None:
                 continue
+            # [!] NOTHING AT OR ABOVE THE ENTRY SP.  That is the caller's
+            # frame (its saved lr among it), and the caller's rule "a word
+            # above the call's sp lives across the call" is this check, made
+            # here in the callee.  Measured before it was made: no body
+            # below a veneer and none of the four shipped plugins stores
+            # there; the firmware does in 9 (Grove) and 34 (wio) other bodies
+            # -- stack-passed arguments written back -- none of them below a
+            # veneer.
+            for base, off, n, _src in ins.st:
+                p = self._addr(st, base, off)
+                if p is not None and n is not None and p + n > 0:
+                    errs.append(
+                        (a, f"a store at 0x{a:08x} writes {n} B at {_pos(p)}"
+                            ", at or above the sp the body was called with "
+                            "-- its caller's frame, where the caller's saved "
+                            "lr may be"))
+                    break
             sp, ra, slots = st[0], st[1], st[2]
             if sp is None:
                 # sp is not a known position here, which is already its own

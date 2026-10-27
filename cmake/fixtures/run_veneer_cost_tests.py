@@ -606,6 +606,55 @@ FUNC call_keeps_fn
     pop {r4, pc}
 END call_keeps_fn
 
+@ [!] THE CALLEE'S SIDE OF "A SLOT ABOVE THE CALL'S SP LIVES ACROSS IT" (issue
+@ #124).  writes_up_fn stores at its entry sp+4, which is where call_up_fn
+@ saved lr; call_up_fn then pops that word into pc.  The callee is refused --
+@ nothing may be stored at or above the sp a body is called with -- and its
+@ twin, which stores only below its own entry sp, passes with its caller.
+FUNC writes_up_fn
+    str r0, [sp, #4]
+    bx lr
+END writes_up_fn
+FUNC call_up_fn
+    push {r4, lr}
+    bl writes_up_fn
+    pop {r4, pc}
+END call_up_fn
+FUNC writes_down_fn
+    sub sp, #8
+    str r0, [sp, #4]
+    add sp, #8
+    bx lr
+END writes_down_fn
+FUNC call_down_fn
+    push {r4, lr}
+    bl writes_down_fn
+    pop {r4, pc}
+END call_down_fn
+@ A word that starts below the entry sp and ends above it (entry-2 .. +2).
+FUNC straddle_fn
+    sub sp, #4
+    str r0, [sp, #2]
+    add sp, #4
+    bx lr
+END straddle_fn
+@ Positions wrap at 2^32: `add.w r3, sp, #0xffffffff` (written as its bytes,
+@ so that no assembler turns it into a sub) is sp - 1.  r3 + 5 is the saved
+@ lr; r3 + 1 is r4's word.  Taken as sp + 4294967295 the first store would
+@ kill nothing, and either one would read as a store far above the entry.
+FUNC wrap_kill_fn
+    push {r4, lr}
+    .inst.w 0xf10d33ff
+    str.w r0, [r3, #5]
+    pop {r4, pc}
+END wrap_kill_fn
+FUNC wrap_ok_fn
+    push {r4, lr}
+    .inst.w 0xf10d33ff
+    str.w r0, [r3, #1]
+    pop {r4, pc}
+END wrap_ok_fn
+
 @ A call rewrites lr: `bx lr` after it, with lr never saved, is no return.
 FUNC call_clobbers_fn
     push {r4, r5}
@@ -1629,6 +1678,24 @@ CASES = [
     ("call_keeps_slot", "main", BOTH, {"pl_base_log": "call_keeps_fn"}, 1024,
      p_none, ("accept", {"pl_base_log": 8}),
      "a slot above the call's sp lives across the call"),
+    ("callee_writes_caller", "main", BOTH, {"pl_base_log": "call_up_fn"},
+     1024, p_none,
+     ("reject", [("walk", "writes_up_fn: a store at 0x")]),
+     "a callee storing over the lr its caller saved (its entry sp+4): "
+     "refused in the callee, at or above the sp it was called with"),
+    ("callee_writes_own", "main", BOTH, {"pl_base_log": "call_down_fn"},
+     1024, p_none, ("accept", {"pl_base_log": 16}),
+     "its twin stores at its own sp+4, below the sp it was called with"),
+    ("store_straddles_entry", "main", BOTH, {"pl_base_log": "straddle_fn"},
+     1024, p_none,
+     ("reject", [("walk", "writes 4 B at entry sp-2, at or above")]),
+     "a word from entry-2 to entry+2: its upper half is the caller's"),
+    ("position_wraps_kill", "main", BOTH, {"pl_base_log": "wrap_kill_fn"},
+     1024, p_none, ("reject", [("walk", "lost to a store over it")]),
+     "sp + 0xffffffff is sp - 1: the store through it lands on the saved lr"),
+    ("position_wraps_ok", "main", BOTH, {"pl_base_log": "wrap_ok_fn"},
+     1024, p_none, ("accept", {"pl_base_log": 8}),
+     "the same register, a store on r4's word: below the entry, no slot"),
     ("call_clobbers_lr", "main", BOTH, {"pl_base_log": "call_clobbers_fn"},
      1024, p_none, ("reject", [("walk", "`bx lr` at")]),
      "a call rewrites lr; `bx lr` after it, lr never saved, is no return"),

@@ -354,8 +354,16 @@ once lr had been saved anywhere (the four shapes `#112` pinned as a limit).
   when a store at a known position overlaps it -- any width: byte, word,
   doubleword, store multiple, FP, MVE -- or when sp rises above it: a freed
   word may be written by an exception's stacking or by a callee, so it stays
-  dead even if sp comes back down. Since a callee may write only below the sp
-  it is called with, a word above the call's sp lives across the call.
+  dead even if sp comes back down. A word above the call's sp lives across
+  the call, and that is checked, not assumed: every body -- the callee too --
+  is refused if it stores at a known position at or above the sp it was
+  called with (any byte of the store), because that is its caller's frame.
+  Measured before the check was added: no body below a veneer and none of
+  the four shipped plugins does it; elsewhere in the firmware 9 bodies on
+  Grove and 34 on wio do (stack-passed arguments written back, ThreadX
+  service wrappers, CMSIS-NN kernels), and the firmware gate does not look
+  at them. A plugin function that writes back a stack-passed argument is
+  therefore refused today.
 - `bx lr` needs lr to hold the return address and sp at the entry. A pop into
   pc must load a live saved copy and leave sp at the entry. lr reloaded from
   a live saved copy holds the return address again; from any other word it
@@ -365,7 +373,10 @@ once lr had been saved anywhere (the four shapes `#112` pinned as a limit).
 - A store's position is known when it is sp plus a constant: `[sp, #k]`, or a
   register that holds sp plus a constant -- followed through register moves
   and add/sub of an immediate inside the body, and through base writeback --
-  plus a constant offset.
+  plus a constant offset. Positions are 32-bit and signed, as the machine
+  computes them: `add.w r3, sp, #0xffffffff` is sp - 1 (until #124 was
+  finished it read as sp + 4294967295, so a store through it was compared
+  with no saved copy).
 
 [!] The one line the check does not cross: a store whose position is not sp
 plus a known constant is not compared with the saved copies. That covers a
@@ -386,10 +397,13 @@ each refusal next to a passing case that differs only in what the check
 looks at (`tail_sp`, `sp_unbalanced`, `sp_join`, `reg_kill`, `reg_copy_kill`
 / `reg_nokill`, `reg_unknown_position` -- the line above, which passes on
 purpose -- `released_then_relowered` / `call_keeps_slot`,
+`callee_writes_caller` / `callee_writes_own`, `store_straddles_entry`,
+`position_wraps_kill` / `position_wraps_ok`,
 `tail_after_lr_change` / `tail_after_reload`, `lr_reload_other` /
 `lr_reload_slot`, the IT-block, width and indexing pairs, `sg`, `bxns`,
-`blxns`), and `run_plugin_gate_tests.py` the plugin side (`lr_slot` on both
-cores, `veneer_sp`, `veneer_sg`, `veneer_bxns`, `veneer_blxns`).
+`blxns`), and `run_plugin_gate_tests.py` the plugin side (`lr_slot` and
+`callee_writes_caller` / `callee_writes_own` on both cores, `veneer_sp`,
+`veneer_sg`, `veneer_bxns`, `veneer_blxns`).
 
 # S: every plugin function the base may be handed
 
@@ -415,6 +429,11 @@ plugin function whose address is taken for a reason other than a branch:
   another object or of the link script, an alias -- each resolves to the
   linked address of what it names, with the Thumb bit dropped. A function's
   first byte there puts that function on the list; data is not a function.
+- A global or weak symbol the object defines itself is resolved twice, at
+  the object's own definition and at the image's global of that name, and
+  the two must agree. They differ when the definition is weak and another
+  object's strong one wins the link: the word then holds the winner, and the
+  object's own position would list the loser.
 - Not read: branch relocations (`R_ARM_THM_CALL`, `JUMP24`, `JUMP19`,
   `JUMP11`, `JUMP8` -- a call is an edge, walked as one), the relocations
   inside the slot table (the loader reaches a slot through the manifest, not
@@ -430,7 +449,14 @@ slots), and the gate prints the list: on the four shipped plugin images it is
 `pl_sbuf_write` alone, so S is what it was (16 B on both boards).
 
 Refused: a relocation type not listed above; a reference to code that is not
-a function's first instruction; any reference to the slot table from outside
+a function's first instruction; a function symbol's address, or any address
+with the Thumb bit set, outside the image's executable sections (an odd data
+address such as `&bytes[1]` is refused by the same test -- none of the
+shipped plugins takes one); an executable output section other than `.text`,
+and a function symbol outside `.text` -- the analysis reads instructions only
+there, and the wio MPU runs the whole reservation, `.data` included, as code;
+a defined global whose position in its object is not where the link bound
+it; any reference to the slot table from outside
 it, by name, by alias or by address (`plugin_slot_table`, `__plugin_slots_start`
 and `__plugin_slots_end`, the last by name because it points one past the
 table) -- code that reads a slot out of the table gets a function pointer no
@@ -440,13 +466,16 @@ given, or one it was given that the link did not load; an input section the
 map places from any other file (an archive member, for instance); an allocated
 section the map neither places nor discards.
 
-[!] The line the list does not cross: a function address made from a number.
+[!] The line the list does not cross: a function address no relocation shows.
 Code that writes a function's address as an integer constant, or computes it
 from one, carries no relocation, and nothing here can find it. The same holds
 for a MOVW/MOVT pair whose halves name different symbols: each half is
 resolved to the whole address of its own symbol (and each of those is listed
 or refused as above), but the address the two instructions build together is
-a third one that no relocation names. Both are on the same side as memory
+a third one that no relocation names; and for an address computed pc-relative
+inside one section (`adr`, `add rX, pc`, a word holding `fn - .`
+resolved by the assembler), which the assembler fixes without leaving a
+relocation. Both are on the same side as memory
 safety: a plugin is reviewed, trusted native code, and the
 gate proves a stack bound for the code as the compiler and linker describe it,
 not against a plugin that hides a pointer from them.
@@ -456,8 +485,13 @@ refusal: the shipped plugin on both cores lists `pl_sbuf_write` only (and the
 same with `-g`, and with an address taken only in code the link removed); the
 plugin's own painter function, a slot function put in a printer, a section
 symbol plus an addend, MOVW/MOVT on both cores, a literal pool and an address
-taken in another object each raise S to that function; refused are one over
-the printer limit, one that reaches a veneer, `R_ARM_REL32`, the slot table
+taken in another object each raise S to that function, and so does a weak
+definition nobody overrides; refused are a weak definition another object's
+strong one wins over (on both cores), a C function in `.data` whose address
+is taken (on both cores), a Thumb address into a data section with no
+function symbol, an executable section other than `.text` and a function
+symbol outside it (`handed_weak_*`, `handed_data_*`, `exec_data_section`,
+`data_fn_symbol`), one over the printer limit, one that reaches a veneer, `R_ARM_REL32`, the slot table
 read by name, by alias in its own object and in another, by its end symbol,
 by a link-script symbol inside it and by a data symbol plus an addend, a code address inside a function and one no
 function covers, an unreadable object, an ELF that is not an object, an object

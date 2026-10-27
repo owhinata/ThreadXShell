@@ -79,7 +79,12 @@ extern "C" {
  * Version 1 was the #111 analysis.  Version 2 is #124's: frames counted from
  * the bytes, functions told apart by address, every return checked for where
  * lr was saved and where sp is, and S taken over every plugin function the
- * base may be handed.
+ * base may be handed.  A store whose position on the stack is not a known
+ * constant is not compared with where lr was saved.  A function address that
+ * no relocation shows -- a numeric constant, a MOVW/MOVT pair whose halves
+ * name different symbols, a pc-relative computation inside one section -- is
+ * not on S's list; both are left to the plugin being trusted code, as memory
+ * safety is (cmake/README.md, "Returns and the stack pointer" and "S").
  *
  * cmake/check_plugin_image.py carries a copy (its ABI table) and stamps it into
  * what it emits; cmake/fixtures/run_plugin_gate_tests.py pins the copy to this.

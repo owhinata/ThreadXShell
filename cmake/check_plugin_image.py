@@ -48,6 +48,8 @@ Checks:
      parts that do not contain the board's veneer cost (issue #111), from
      frames counted in the bytes with the compiler's record as a witness
      (issue #124; see stack_analysis)
+  9. S, the bound of every plugin function the base may be handed, found in
+     the relocations of the link's objects (issue #124; see Handed)
 """
 import argparse
 import os
@@ -353,11 +355,11 @@ VENEERS = {
     "pl_print_write",
 }
 
-# The plugin's own printer sink (asset/common/plugin_text.c).  A plugin that
-# formats into its own buffer hands pl_print_write a printer whose write is THIS,
-# so the far side of the printer veneer is sometimes the plugin itself.  Its
-# bound is emitted as S, and the loader charges max(c, S) at a crossing.
-SINK = "pl_sbuf_write"
+# [!] NO SINK IS NAMED HERE (issue #124).  The far side of the printer veneer
+# is sometimes the plugin itself -- its own string sink, pl_sbuf_write, put in a
+# printer by asset/common/plugin_text.c -- and until #124 S was that one
+# function's bound, found by this name.  S is now derived from the relocations
+# over every function the base may be handed (Handed, below).
 
 
 def run(cmd):
@@ -435,8 +437,351 @@ def resolve(image, name):
     return sorted(a for a, n in image.nodes.items() if name in n.names)
 
 
-def stack_analysis(elf_path, map_path, entries, errors):
-    """{entry: (A0, A1 or None)} for each name in `entries`, fail-closed.
+# ---- the functions the base may be handed (issue #124, D5) -----------------
+#
+# [!] S IS THE BOUND OF EVERY PLUGIN FUNCTION THE BASE CAN BE GIVEN, NOT OF ONE
+# FUNCTION NAMED HERE.  The printer veneer (pl_print_write) calls whatever
+# function pointer the printer it is handed carries; the plugin's own string
+# sink (pl_sbuf_write) is one such function, and until #124 S was its bound,
+# found by name.  Any other plugin function whose address the plugin takes
+# could be put in a printer just the same, and nothing measured it.  So the
+# list is derived: every plugin function whose address is taken for any reason
+# other than a branch, read out of the RELOCATIONS of the objects the link
+# consumed, and S is the deepest of them (a function that reaches a veneer
+# itself is refused -- its bound would contain the board's cost).
+#
+#   read      every relocation of every allocated input section the map
+#             places, in every object the link LOADed.  A data word or a
+#             literal-pool word (R_ARM_ABS32), either half of a MOVW/MOVT pair
+#             (each half names its own symbol + addend), a section symbol plus
+#             an addend, a symbol another object or the link script defines
+#             (through the image's own global of that name), an alias: each is
+#             resolved to the LINKED address of what it names, with the Thumb
+#             bit dropped, and a function start there puts that function on
+#             the list.
+#   skipped   branch relocations (a call or tail call is an edge, walked as
+#             such); the relocations INSIDE the slot table (the loader reaches
+#             a slot through the manifest, never through a pointer the base is
+#             handed); sections --gc-sections discarded (not in the image); and
+#             unallocated sections (debug information is not loaded).
+#   refused   a relocation type not listed below; a reference to code that is
+#             not a function's first byte; ANY reference to the slot table from
+#             outside it -- code that reads a slot out of the table gets a
+#             function pointer no relocation shows, so the table is not
+#             readable at all; an object that cannot be read as an ARM
+#             relocatable; an object the link loaded that the gate was not
+#             given, or one it was given that the link did not load; an input
+#             section the map places from a file that is not one of them; an
+#             allocated section the map neither places nor discards.
+#
+# [!] WHAT IT CANNOT SEE: A FUNCTION ADDRESS MADE FROM A NUMBER.  Code that
+# writes the address as an integer constant (or computes it from one) carries
+# no relocation, so nothing here can find it.  That is on the same side of the
+# line as memory safety: a plugin is reviewed, trusted native code, and this
+# gate proves a stack bound for the code as the compiler and linker describe
+# it, not against a plugin that hides a pointer from them.  cmake/README.md
+# states the same line.
+R_ARM_NONE = 0
+R_ARM_ABS32 = 2
+R_ARM_THM_CALL = 10
+R_ARM_THM_JUMP24 = 30
+R_ARM_THM_MOVW_ABS_NC = 47
+R_ARM_THM_MOVT_ABS = 48
+R_ARM_THM_JUMP19 = 51
+R_ARM_THM_JUMP11 = 102
+R_ARM_THM_JUMP8 = 103
+BRANCH_RELOCS = {R_ARM_THM_CALL: "R_ARM_THM_CALL",
+                 R_ARM_THM_JUMP24: "R_ARM_THM_JUMP24",
+                 R_ARM_THM_JUMP19: "R_ARM_THM_JUMP19",
+                 R_ARM_THM_JUMP11: "R_ARM_THM_JUMP11",
+                 R_ARM_THM_JUMP8: "R_ARM_THM_JUMP8"}
+ADDRESS_RELOCS = {R_ARM_ABS32: "R_ARM_ABS32",
+                  R_ARM_THM_MOVW_ABS_NC: "R_ARM_THM_MOVW_ABS_NC",
+                  R_ARM_THM_MOVT_ABS: "R_ARM_THM_MOVT_ABS"}
+SHT_RELA, SHT_REL, SHT_NOBITS = 4, 9, 8
+SHF_MERGE = 0x10
+ET_REL = 1
+SHN_UNDEF, SHN_LORESERVE, SHN_ABS, SHN_COMMON = 0, 0xFF00, 0xFFF1, 0xFFF2
+STB_GLOBAL, STB_WEAK = 1, 2
+# The slot table: the input section that holds it, and the names that point at
+# it.  [!] THE TABLE IS NOT READABLE: see "refused" above.
+SLOT_SECTION = ".plugin_slots"
+SLOT_SYMBOLS = {"plugin_slot_table", "__plugin_slots_start",
+                "__plugin_slots_end"}
+# The linker's own input, which has no object to read and no relocations.
+LINKER_STUBS = "linker stubs"
+
+
+def _thumb_imm16(hw1, hw2):
+    v = ((hw1 & 0xF) << 12) | (((hw1 >> 10) & 1) << 11) | \
+        (((hw2 >> 12) & 7) << 8) | (hw2 & 0xFF)
+    return v - 0x10000 if v & 0x8000 else v
+
+
+class Handed:
+    """The plugin functions whose address the plugin takes (issue #124 D5).
+
+    `addrs` is {function addr: [where each reference is]}; `errors` is every
+    refusal.  Built from the linked image (functions, by address), its map
+    (where each input section landed, what was discarded, what was loaded)
+    and the objects the link consumed (the relocations)."""
+
+    def __init__(self, image, map_path, objects, out_names):
+        self.image = image
+        self.addrs = {}
+        self.errors = []
+        link_dir = os.path.dirname(os.path.abspath(map_path))
+
+        def norm(p):
+            return os.path.realpath(os.path.join(link_dir, p))
+
+        try:
+            placed, discarded, loads = tsa.map_sections(map_path, out_names)
+        except tsa.InputError as exc:
+            self.errors.append(f"[input] {exc}")
+            return
+        loads = {norm(p) for p in loads if p != LINKER_STUBS}
+        given = {}
+        for p in objects:               # as the command line names them
+            given.setdefault(os.path.realpath(p), p)
+
+        # [!] BOTH DIRECTIONS.  What the link LOADed and what the gate was
+        # given must be the same set: an object linked and not read would
+        # contribute code whose relocations nobody looked at.
+        for p in sorted(loads - set(given)):
+            self.errors.append(f"{p}: the link loaded it and the gate was not "
+                               "given it -- its relocations were not read")
+        for p in sorted(set(given) - loads):
+            self.errors.append(f"{given[p]}: given to the gate, but the link "
+                               "did not load it")
+        self.place = {}             # (file, section name) -> [(addr, size)]
+        self.slot_ranges = []
+        self.code_inputs = []       # placed executable input ranges
+        for name, addr, size, what, _out in placed:
+            if what == LINKER_STUBS:
+                continue
+            f = norm(what)
+            if f not in loads:
+                self.errors.append(f"{what}: the map places {name} from it, "
+                                   "and it is not an object the link loaded "
+                                   "-- its relocations were not read")
+                continue
+            self.place.setdefault((f, name), []).append((addr, size))
+            if name == SLOT_SECTION:
+                self.slot_ranges.append((addr, addr + size))
+        self.discarded = {(norm(w), n) for n, w in discarded
+                          if w != LINKER_STUBS}
+
+        self.reported = set()
+        self.objs = {}
+        for f in sorted(loads & set(given)):
+            try:
+                o = tsa.Elf(f)
+            except tsa.InputError as exc:
+                self.errors.append(f"{given[f]}: cannot read its relocations "
+                                   f"({exc})")
+                continue
+            if o.etype != ET_REL:
+                self.errors.append(f"{given[f]}: not a relocatable object "
+                                   f"(e_type {o.etype}) -- its relocations "
+                                   "cannot be read")
+                continue
+            self.objs[f] = o
+        if len(self.objs) != len(loads & set(given)):
+            return
+        for f, o in sorted(self.objs.items()):
+            for s in o.sections:
+                if s.flags & tsa.SHF_ALLOC and s.size:
+                    a = self._placed(f, o, s)
+                    if a is not None and s.flags & tsa.SHF_EXECINSTR:
+                        self.code_inputs.append((a, a + s.size))
+        self.code_inputs.sort()
+        for f in sorted(self.objs):
+            self._object(f, self.objs[f])
+
+    # --- where an input section is ------------------------------------------
+    def _placed(self, f, o, s):
+        """The linked address of object section `s`, or None if it is not in
+        the image.  [!] AN ALLOCATED SECTION THE MAP NEITHER PLACES NOR
+        DISCARDS IS REFUSED: its relocations would otherwise be skipped as if
+        it had been garbage-collected."""
+        at = self.place.get((f, s.name))
+        if at is None:
+            if (f, s.name) not in self.discarded and (f, s.name) not in \
+                    self.reported:
+                self.reported.add((f, s.name))
+                self.errors.append(f"{os.path.basename(f)}: section {s.name} "
+                                   "is neither placed nor discarded by the "
+                                   "map")
+            return None
+        if len(at) != 1 or sum(1 for x in o.sections
+                               if x.name == s.name) != 1:
+            if (f, s.name) not in self.reported:
+                self.reported.add((f, s.name))
+                self.errors.append(f"{os.path.basename(f)}: section {s.name} "
+                                   "cannot be matched to one place in the map "
+                                   "by its name")
+            return None
+        addr, size = at[0]
+        if size != s.size and not s.flags & SHF_MERGE:
+            if (f, s.name) not in self.reported:
+                self.reported.add((f, s.name))
+                self.errors.append(f"{os.path.basename(f)}: section {s.name} "
+                                   f"is {s.size} B and the map places "
+                                   f"{size} B")
+            return None
+        return addr
+
+    # --- one object ---------------------------------------------------------
+    def _object(self, f, o):
+        base = os.path.basename(f)
+        for rs in o.sections:
+            if rs.type == SHT_RELA:
+                self.errors.append(f"{base}: {rs.name} is SHT_RELA -- an ARM "
+                                   "object's relocations are SHT_REL, and "
+                                   "these are not read")
+                continue
+            if rs.type != SHT_REL:
+                continue
+            if rs.info >= len(o.sections) or rs.link != o.symtab_index or \
+                    rs.entsize != 8 or rs.size % 8:
+                self.errors.append(f"{base}: {rs.name} cannot be read as "
+                                   "relocations of one section against the "
+                                   "symbol table")
+                continue
+            tgt = o.sections[rs.info]
+            if not tgt.flags & tsa.SHF_ALLOC:
+                continue                    # debug information: not loaded
+            if self._placed(f, o, tgt) is None:
+                continue                    # garbage-collected (or refused)
+            in_slots = tgt.name == SLOT_SECTION
+            code = bool(tgt.flags & tsa.SHF_EXECINSTR)
+            for off in range(rs.offset, rs.offset + rs.size, 8):
+                r_off, r_info = struct.unpack_from("<II", o.raw, off)
+                self._reloc(f, o, tgt, in_slots, code, r_off, r_info >> 8,
+                            r_info & 0xFF)
+
+    def _reloc(self, f, o, tgt, in_slots, code, r_off, sym, typ):
+        base = os.path.basename(f)
+        where = f"{base}: {tgt.name}+0x{r_off:x}"
+        if typ in BRANCH_RELOCS:
+            if not code:
+                self.errors.append(f"{where}: {BRANCH_RELOCS[typ]} outside "
+                                   "code")
+            return                          # an edge, walked as one
+        if typ not in ADDRESS_RELOCS:
+            self.errors.append(f"{where}: relocation type {typ} is not one "
+                               "this gate reads -- what it makes of a "
+                               "function's address is unknown")
+            return
+        if sym >= len(o.symbols):
+            self.errors.append(f"{where}: symbol index {sym} out of range")
+            return
+        if tgt.type == SHT_NOBITS or r_off + 4 > tgt.size:
+            self.errors.append(f"{where}: outside the bytes of its section")
+            return
+        raw_at = tgt.offset + r_off
+        if typ == R_ARM_ABS32:
+            addend, = struct.unpack_from("<I", o.raw, raw_at)
+        else:
+            hw1, hw2 = struct.unpack_from("<HH", o.raw, raw_at)
+            want = 0xF240 if typ == R_ARM_THM_MOVW_ABS_NC else 0xF2C0
+            if not code or (hw1 & 0xFBF0) != want or hw2 & 0x8000:
+                self.errors.append(f"{where}: {ADDRESS_RELOCS[typ]} on "
+                                   "something that is not that instruction")
+                return
+            addend = _thumb_imm16(hw1, hw2)
+        name, value, _sz, styp, shndx = o.symbols[sym]
+        label = name or (o.sections[shndx].name
+                         if 0 < shndx < len(o.sections) else "?")
+        why = f"{where} ({ADDRESS_RELOCS[typ]} {label}" + \
+            (f"{addend:+#x}" if addend else "") + ")"
+        # The table's own names.  [!] __plugin_slots_end IS ONE PAST THE
+        # TABLE, so where it points cannot say what it is: only its name can.
+        if name in SLOT_SYMBOLS:
+            if not in_slots:
+                self._slot_ref(why)
+            return
+        if shndx == SHN_UNDEF:
+            # Defined in another object, or by the link script: what the link
+            # bound it to is the image's own global of that name.  An alias
+            # is just another name for an address, and is classified by it.
+            elf = self.image.elf
+            vals = {(v & ~1) if t == tsa.STT_FUNC else v
+                    for k, (n, v, _s, t, sh) in enumerate(elf.symbols)
+                    if n == name and sh != SHN_UNDEF
+                    and elf.binds[k] in (STB_GLOBAL, STB_WEAK)}
+            if len(vals) != 1:
+                self.errors.append(f"{why}: {name} resolves to "
+                                   f"{len(vals)} addresses in the image")
+                return
+            self._addr((vals.pop() + addend) & 0xFFFFFFFF, in_slots, why)
+            return
+        self._target(f, o, value, shndx, addend, in_slots, why, styp)
+
+    def _target(self, f, o, value, shndx, addend, in_slots, why, styp=None):
+        # S is the symbol's ADDRESS: a Thumb function's value carries the
+        # Thumb bit, which the relocation ORs back in (AAELF32 (S + A) | T).
+        if styp == tsa.STT_FUNC:
+            value &= ~1
+        if shndx == SHN_ABS:
+            self._addr((value + addend) & 0xFFFFFFFF, in_slots, why)
+            return
+        if shndx == SHN_COMMON:
+            return                          # data (and refused as COMMON)
+        if shndx >= SHN_LORESERVE or shndx >= len(o.sections):
+            self.errors.append(f"{why}: symbol in section index {shndx}")
+            return
+        s = o.sections[shndx]
+        code = bool(s.flags & tsa.SHF_EXECINSTR)
+        # [!] DATA IS CLASSIFIED BY ADDRESS TOO, not dismissed by its section:
+        # a data symbol plus an addend that lands in code or in the slot table
+        # is the same reference as one that names it.  Only a merged string
+        # section has no byte-for-byte address to give (and holds no code).
+        if not code and (s.flags & SHF_MERGE or s.size == 0):
+            return
+        at = self._placed(f, o, s)
+        if at is None:
+            if code:
+                self.errors.append(f"{why}: names code that is not in the "
+                                   "image")
+            return
+        # The slot table is found by the address this makes (an alias, or a
+        # section symbol of .plugin_slots, is an address in it).
+        self._addr((at + value + addend) & 0xFFFFFFFF, in_slots, why)
+
+    def _slot_ref(self, why):
+        self.errors.append(f"{why}: refers to the slot table -- a slot read "
+                           "out of the table is a function pointer no "
+                           "relocation shows, so nothing outside the table "
+                           "may refer to it")
+
+    def _addr(self, addr, in_slots, why):
+        """Classify one resolved, linked address."""
+        if any(lo <= addr < hi for lo, hi in self.slot_ranges):
+            if not in_slots:
+                self._slot_ref(why)
+            return
+        if in_slots:
+            return                  # what the loader reaches by the manifest
+        a = addr & ~1
+        if a in self.image.nodes:
+            self.addrs.setdefault(a, []).append(why)
+            return
+        n = self.image.node_containing(a)
+        if n is not None:
+            self.errors.append(f"{why}: points into {n.name}+0x{a - n.addr:x}"
+                               ", not at a function's first instruction")
+            return
+        if any(lo <= a < hi for lo, hi in self.code_inputs):
+            self.errors.append(f"{why}: points at code 0x{a:08x} that is "
+                               "not a function's first instruction")
+
+
+def stack_analysis(elf_path, map_path, entries, objects, errors):
+    """({entry: (A0, A1 or None)} for each name in `entries`,
+    {addr: (name, A0, [where its address is taken])} for each function the
+    base may be handed (Handed, issue #124 D5), {entry: addr}), fail-closed.
 
     [!] NO VENEER COST GOES IN HERE (issue #111).  The walk stops at a
     crossing (only a veneer has one), so a path crosses into the base at most
@@ -450,7 +795,7 @@ def stack_analysis(elf_path, map_path, entries, errors):
             map_path, {s.name for s in elf.code}))
     except tsa.InputError as exc:
         errors.append(f"stack: [input] {exc}")
-        return {}
+        return {}, {}, {}
 
     veneers = set()
     for v in sorted(VENEERS):
@@ -504,6 +849,7 @@ def stack_analysis(elf_path, map_path, entries, errors):
                           "adjustment")
 
     out = {}
+    out_at = {}
     for name in entries:
         at = resolve(image, name)
         if not at:
@@ -515,8 +861,27 @@ def stack_analysis(elf_path, map_path, entries, errors):
             continue
         own, cross, _complete = walk.parts(at[0])
         out[name] = (own, cross)
+        out_at[name] = at[0]
+
+    # The functions the base may be handed, and each one's bound.  [!] A
+    # FUNCTION ON THIS LIST THAT REACHES A VENEER IS REFUSED: S is a number
+    # the loader adds at a crossing, so it must not contain c (issue #111).
+    handed = Handed(image, map_path, objects,
+                    {s.name for s in elf.sections if s.flags & tsa.SHF_ALLOC})
+    errors.extend(f"handed: {e}" for e in handed.errors)
+    listed = {}
+    for a in sorted(handed.addrs):
+        node = image.nodes[a]
+        own, cross, _complete = walk.parts(a)
+        if cross is not None:
+            errors.append(f"handed: {node.name} can be handed to the base "
+                          f"({handed.addrs[a][0]}) and reaches a veneer "
+                          "itself; its bound would contain the board's cost, "
+                          "which a manifest no longer carries")
+            continue
+        listed[a] = (node.name, own, handed.addrs[a])
     errors.extend(f"stack: {msg}" for _stage, msg in walk.errors)
-    return out
+    return out, listed, out_at
 
 
 def bound_at(own, cross, cost):
@@ -537,6 +902,13 @@ def main():
                     help="functions to bound the stack below, name=limit")
     ap.add_argument("--emit-stacks",
                     help="write the derived bounds here, for the packer")
+    ap.add_argument("--objects", nargs="+", required=True,
+                    help="the objects the link consumed: their relocations "
+                         "say which plugin functions have their address "
+                         "taken (checked against the map's LOADs, both ways)")
+    ap.add_argument("--printer-limit", required=True, type=int,
+                    help="the bound on every plugin function the base may be "
+                         "handed (the board's SBUF_WRITE_MAX), in bytes")
     # The board's facts.  Required, every one: see the module docstring.
     ap.add_argument("--base", required=True, type=lambda v: int(v, 0),
                     help="the reservation's first byte, as the board states it")
@@ -639,15 +1011,15 @@ def main():
     # 8. stack bounds -- one analysis since issue #124 (stack_analysis above):
     # an indirect transfer anywhere but a veneer's crossing is one of its
     # refusals, so the two checks cannot disagree about what a branch is.
-    parts = {}
+    if args.printer_limit <= 0:
+        errors.append(f"--printer-limit {args.printer_limit}: a bound must be "
+                      "a positive byte count")
     bounds = {}
     specs = [spec.partition("=") for spec in args.entry]
-    if args.entry:
-        parts = stack_analysis(args.elf, args.map,
-                               [name for name, _, _ in specs], errors)
-    else:
-        # No entry still analyses the image: check 7 is not optional.
-        stack_analysis(args.elf, args.map, [], errors)
+    # No entry still analyses the image: check 7 is not optional.
+    parts, listed, key_at = stack_analysis(args.elf, args.map,
+                                   [name for name, _, _ in specs],
+                                   args.objects, errors)
     for name, _, limit in specs:
         if name not in parts:
             continue
@@ -659,22 +1031,26 @@ def main():
         if limit and got > int(limit):
             errors.append(f"stack: {name} needs {got} B, limit {limit} B")
 
-    # [!] S IS A NUMBER THE LOADER ADDS, SO IT MUST NOT DEPEND ON c.  The sink is
-    # reached through the printer veneer; if it crossed a veneer itself, its
-    # bound would be one more c-dependent sum, and the manifest would be back to
-    # carrying the firmware's cost.  Refused rather than folded in.
-    sink = None
-    if args.emit_stacks:
-        if SINK not in parts:
-            errors.append(f"stack: --emit-stacks needs --entry {SINK}=<limit>: "
-                          "the sink bound S is part of the declaration, and an "
-                          "unmeasured one cannot be declared")
-        elif parts[SINK][1] is not None:
-            errors.append(f"stack: {SINK} reaches a veneer itself; its bound "
-                          "would contain the board's cost, which a manifest "
-                          "no longer carries")
-        else:
-            sink = parts[SINK][0]
+    # [!] S IS THE DEEPEST FUNCTION THE BASE MAY BE HANDED (issue #124 D5),
+    # and every one of them is held to the printer limit.  It does not depend
+    # on c: a listed function that crosses a veneer is refused above.  An
+    # image that hands the base nothing declares S = 0, a measurement.  Each
+    # listed function is also emitted beside the slots, by name, so the
+    # declaration shows what S was taken over (the packer reads the slots
+    # only).
+    sink = 0
+    for a, (name, own, why) in sorted(listed.items()):
+        if own > args.printer_limit:
+            errors.append(f"handed: {name} can be handed to the base "
+                          f"({why[0]}) and needs {own} B, printer limit "
+                          f"{args.printer_limit} B")
+        sink = max(sink, own)
+        key = name
+        if key in key_at and key_at[key] != a:
+            key = f"{name}@0x{a:08x}"
+        key_at[key] = a
+        parts[key] = (own, None)
+        bounds[key] = own
 
     if errors:
         print("check_plugin_image: FAIL", file=sys.stderr)
@@ -712,6 +1088,13 @@ def main():
     print(f"check_plugin_image: OK (text {t} B, data {d} B, bss {b} B"
           + (f"; stack {summary}" if summary else "") + ")")
     print(f"check_plugin_image: {target_note}")
+    # What S was taken over, so that a person (and the fixtures) can see the
+    # list and not only its maximum.
+    print(f"check_plugin_image: S = {sink} B over the functions the base may "
+          "be handed: ["
+          + ", ".join(f"{n} {o} B" for _a, (n, o, _w) in sorted(
+              listed.items(), key=lambda kv: (kv[1][0], kv[0])))
+          + "]")
     return 0
 
 

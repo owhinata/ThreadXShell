@@ -61,11 +61,16 @@ STT_FUNC = 2
 
 class Section:
     __slots__ = ("index", "name", "type", "flags", "addr", "offset", "size",
-                 "link")
+                 "link", "info", "entsize")
 
-    def __init__(self, index, name, typ, flags, addr, offset, size, link):
+    def __init__(self, index, name, typ, flags, addr, offset, size, link,
+                 info=0, entsize=0):
         self.index, self.name, self.type, self.flags = index, name, typ, flags
         self.addr, self.offset, self.size, self.link = addr, offset, size, link
+        # sh_info and sh_entsize: for a relocation section, the section it
+        # applies to and the size of one entry (the plugin gate reads the
+        # relocations of a plugin's objects, issue #124 D5).
+        self.info, self.entsize = info, entsize
 
     @property
     def end(self):
@@ -97,19 +102,24 @@ class Elf:
             name = raw[stro + h[0]:raw.index(b"\0", stro + h[0])].decode(
                 "ascii", "replace")
             self.sections.append(Section(i, name, h[1], h[2], h[3], h[4],
-                                         h[5], h[6]))
+                                         h[5], h[6], h[7], h[9]))
         self.code = sorted((s for s in self.sections
                             if s.type == SHT_PROGBITS and s.size
                             and s.flags & SHF_ALLOC
                             and s.flags & SHF_EXECINSTR),
                            key=lambda s: s.addr)
         self._code_starts = [s.addr for s in self.code]
+        self.etype, = struct.unpack_from("<H", raw, 0x10)
         self.symbols = []
+        # STB_* of each entry of self.symbols, in the same order (a separate
+        # list so that the tuples every caller unpacks keep their shape).
+        self.binds = []
         symtab = [s for s in self.sections if s.type == SHT_SYMTAB]
         if not symtab:
             raise InputError(f"{path} has no symbol table (stripped?) -- "
                              "functions cannot be found without one")
         st = symtab[0]
+        self.symtab_index = st.index
         strtab = self.sections[st.link]
         for off in range(st.offset, st.offset + st.size, 16):
             name_off, value, size, info, _other, shndx = struct.unpack_from(
@@ -117,6 +127,7 @@ class Elf:
             no = strtab.offset + name_off
             name = raw[no:raw.index(b"\0", no)].decode("ascii", "replace")
             self.symbols.append((name, value, size, info & 0xF, shndx))
+            self.binds.append(info >> 4)
 
     def code_section(self, addr):
         i = bisect.bisect_right(self._code_starts, addr) - 1
@@ -1058,18 +1069,56 @@ def parse_map(path, code_names):
     the map places in an executable output section, and every file the link
     LOADed.  Only executable sections: the debug sections list their inputs at
     offsets that overlap real code addresses."""
+    placed, _discarded, loads = map_sections(path, code_names)
+    return sorted((a, size, what) for _n, a, size, what, _o in placed
+                  if size), loads
+
+
+def map_sections(path, out_names):
+    """([(name, addr, size, input, output)], {(name, input)}, {loaded input}).
+
+    The first is every input section the map places in one of the
+    output sections `out_names`, by its own section name; the second every
+    input section the map lists as discarded (--gc-sections), whatever its
+    size; the third every file the link LOADed.  parse_map() is this with the
+    names dropped -- one reading of the map, not two."""
     try:
         lines = open(path, errors="replace").read().splitlines()
     except OSError as exc:
         raise InputError(f"cannot read map {path}: {exc}")
     out = []
+    discarded = set()
     loads = set()
     in_map = False
+    in_discard = False
     cur = None
     pending = None
     for line in lines:
         if not in_map:
-            in_map = line.startswith("Linker script and memory map")
+            if line.startswith("Discarded input sections"):
+                in_discard = True
+                pending = None
+                continue
+            if line.startswith("Linker script and memory map"):
+                in_map, in_discard, pending = True, False, None
+                continue
+            if in_discard and line and not line[0].isspace():
+                in_discard = False      # "Memory Configuration"
+            if not in_discard or not line.strip():
+                continue
+            m = MAP_SEC1.match(line)
+            if m:
+                discarded.add((m.group(1), m.group(4).strip()))
+                pending = None
+                continue
+            m = MAP_NAME.match(line)
+            if m:
+                pending = m.group(1)
+                continue
+            m = MAP_SEC2.match(line)
+            if m and pending is not None:
+                discarded.add((pending, m.group(3).strip()))
+            pending = None
             continue
         if line.startswith("Cross Reference Table"):
             break
@@ -1079,16 +1128,15 @@ def parse_map(path, code_names):
             loads.add(line[5:].strip())
         if not line[0].isspace():
             tok = line.split()
-            cur = tok[0] if tok[0] in code_names else None
+            cur = tok[0] if tok[0] in out_names else None
             pending = None
             continue
         if cur is None:
             continue
         m = MAP_SEC1.match(line)
         if m and not m.group(1).startswith("*"):
-            if int(m.group(3), 16):
-                out.append((int(m.group(2), 16), int(m.group(3), 16),
-                            m.group(4).strip()))
+            out.append((m.group(1), int(m.group(2), 16),
+                        int(m.group(3), 16), m.group(4).strip(), cur))
             pending = None
             continue
         m = MAP_NAME.match(line)
@@ -1097,15 +1145,13 @@ def parse_map(path, code_names):
             continue
         m = MAP_SEC2.match(line)
         if m and pending is not None:
-            if int(m.group(2), 16):
-                out.append((int(m.group(1), 16), int(m.group(2), 16),
-                            m.group(3).strip()))
+            out.append((pending, int(m.group(1), 16),
+                        int(m.group(2), 16), m.group(3).strip(), cur))
         pending = None
     if not in_map:
         raise InputError(f"{path} has no 'Linker script and memory map' "
                          "section -- not a GNU ld map")
-    out.sort()
-    return out, loads
+    return out, discarded, loads
 
 
 # ============================================================================

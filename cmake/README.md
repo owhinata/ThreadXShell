@@ -125,8 +125,9 @@ to configure on a board that has not registered the gate, and the registration
 is a target and a stamp rather than a flag; a plugin charged a cost that nothing
 checks is the state this exists to end. At the end of configure the value being
 checked is compared with the `VENEER_BASE_COST` every `add_plugin()` received,
-and each plugin's own `pl_sbuf_write` bound goes to the check as well, because
-the printer veneer lands in the plugin too.
+and each plugin's printer limit (`SBUF_WRITE_MAX`, the bound on every plugin
+function the base may be handed -- see **S** below) goes to the check as well,
+because the printer veneer lands in the plugin too.
 
 Success is a stamp, `build/<board>/veneer_cost/<firmware>.checked`. It is
 deleted before the check runs and written only when the check passes, it is
@@ -378,6 +379,77 @@ purpose -- `released_then_relowered` / `call_keeps_slot`,
 `lr_reload_slot`, the IT-block, width and indexing pairs, `sg`, `bxns`,
 `blxns`), and `run_plugin_gate_tests.py` the plugin side (`lr_slot` on both
 cores, `veneer_sp`, `veneer_sg`, `veneer_bxns`, `veneer_blxns`).
+
+# S: every plugin function the base may be handed
+
+The printer veneer (`pl_print_write`) calls whatever function the printer it
+is handed carries, so the far side of a crossing is sometimes the plugin
+itself: its own string sink `pl_sbuf_write`, put in a printer by
+`asset/common/plugin_text.c`. The manifest carries that bound as S, and the
+loader charges `max(c, S)` at a crossing. Until #124 S was the bound of that
+one function, named on the gate's `--entry`. Any other plugin function whose
+address the plugin takes could be put in a printer (or a painter) just the
+same, and nothing measured it.
+
+Since #124 S is derived. `add_plugin()` hands the gate the objects of the link
+(`--objects`, the same list the link command takes, so a file added to a
+plugin is read without anyone listing it) and the printer limit
+(`--printer-limit`, the board's `SBUF_WRITE_MAX`). The gate reads every
+relocation of every allocated input section the map places, and lists every
+plugin function whose address is taken for a reason other than a branch:
+
+- A data word or a literal-pool word (`R_ARM_ABS32`), either half of a
+  MOVW/MOVT pair (`R_ARM_THM_MOVW_ABS_NC` / `R_ARM_THM_MOVT_ABS`, each naming
+  its own symbol and addend), a section symbol plus an addend, a symbol of
+  another object or of the link script, an alias -- each resolves to the
+  linked address of what it names, with the Thumb bit dropped. A function's
+  first byte there puts that function on the list; data is not a function.
+- Not read: branch relocations (`R_ARM_THM_CALL`, `JUMP24`, `JUMP19`,
+  `JUMP11`, `JUMP8` -- a call is an edge, walked as one), the relocations
+  inside the slot table (the loader reaches a slot through the manifest, not
+  through a pointer the base is handed), sections `--gc-sections` removed, and
+  unallocated sections (debug information is not loaded).
+
+Each listed function is bounded by the same walk as a slot. One that reaches
+a veneer itself is refused (S would contain c), and each is held to the printer
+limit. S is the deepest of them; an image that hands the base nothing declares
+S = 0, which is a measurement. The listed functions are also emitted in
+`plugin.stacks.json` beside the slots, by name (the packer reads only the
+slots), and the gate prints the list: on the four shipped plugin images it is
+`pl_sbuf_write` alone, so S and every container are byte for byte what they
+were.
+
+Refused: a relocation type not listed above; a reference to code that is not
+a function's first instruction; any reference to the slot table from outside
+it, by name, by alias or by address (`plugin_slot_table`, `__plugin_slots_start`
+and `__plugin_slots_end`, the last by name because it points one past the
+table) -- code that reads a slot out of the table gets a function pointer no
+relocation shows, so the table is not readable at all; an object that cannot
+be read as an ARM relocatable; an object the link loaded that the gate was not
+given, or one it was given that the link did not load; an input section the
+map places from any other file (an archive member, for instance); an allocated
+section the map neither places nor discards.
+
+[!] The line the list does not cross: a function address made from a number.
+Code that writes a function's address as an integer constant, or computes it
+from one, carries no relocation, and nothing here can find it. That is on the
+same side as memory safety: a plugin is reviewed, trusted native code, and the
+gate proves a stack bound for the code as the compiler and linker describe it,
+not against a plugin that hides a pointer from them.
+
+`fixtures/run_plugin_gate_tests.py` (`handed_*`) builds each form and each
+refusal: the shipped plugin on both cores lists `pl_sbuf_write` only (and the
+same with `-g`, and with an address taken only in code the link removed); the
+plugin's own painter function, a slot function put in a printer, a section
+symbol plus an addend, MOVW/MOVT on both cores, a literal pool and an address
+taken in another object each raise S to that function; refused are one over
+the printer limit, one that reaches a veneer, `R_ARM_REL32`, the slot table
+read by name, by alias in its own object and in another, by its end symbol,
+by a link-script symbol inside it and by a data symbol plus an addend, a code address inside a function and one no
+function covers, an unreadable object, an ELF that is not an object, an object
+not given, one not linked, an archive member, and a section the map does not
+account for. The refusals on malformed relocation sections themselves (RELA,
+a bad header, an index out of range) have no case.
 
 # Plugin stack allowances: one table, read back from the image
 

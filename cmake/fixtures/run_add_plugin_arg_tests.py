@@ -347,7 +347,10 @@ def build_text(work):
 # table's order: the gate's --entry for FULL's three slots (draw is the one
 # that takes FIX_STACK_B), and every slot for the policy read-back.
 ENTRY_LINE = r"--entry\s+pl_entry=100\s+pl_decode=100\s+pl_draw=200\s+" \
-             r"pl_sbuf_write=64\b"
+             r"--objects\s"
+# [!] AND THE PRINTER LIMIT AS THE GATE'S OWN ARGUMENT (issue #124): it bounds
+# every plugin function the base may be handed, not one --entry.
+PRINTER_LINE = r"--printer-limit\s+64\b"
 PROBE_LINE = r"\s+".join(r"--stack-limit\s+" + re.escape(r)
                          for r in TABLE_ROWS) + r"\b"
 POLICY_LINE = r"\s+".join(r"--policy-stack\s+" + re.escape(r)
@@ -364,7 +367,7 @@ def wired(work):
     text = build_text(work)
     missing = [w for w in (r"--declared\s+256\b",
                            r"--printer-limit\s+cifar10=64\b",
-                           ENTRY_LINE, PROBE_LINE)
+                           ENTRY_LINE, PRINTER_LINE, PROBE_LINE)
                if not re.search(w, text)]
     return missing
 

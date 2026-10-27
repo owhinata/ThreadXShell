@@ -33,7 +33,8 @@
 #      OUT_VAR      <var>        list variable the plugin.elf path is appended to
 #      SLOTS        <slot ...>   every slot the plugin exports (entry, decode,
 #                                ...); the limit of each is the board's table
-#      SBUF_WRITE_MAX <bytes>    the bound on the plugin's own string sink
+#      SBUF_WRITE_MAX <bytes>    the bound on every plugin function the base
+#                                may be handed (its own string sink, today)
 #      [SOURCES     <.c ...>]    the plugin's own extra sources
 #      [AUDIT_SHARED <path ...>] sources from outside the owned roots
 #  )
@@ -148,10 +149,12 @@ function(add_plugin _name)
             "the firmware that ships.")
     endif()
     # What this plugin was given, for veneer_cost_gate() to compare with what
-    # it checks.  The printer bound is the plugin's OWN pl_sbuf_write limit: the
-    # printer veneer lands there as well as in the firmware, so the declared
-    # cost has to cover it too, and it has to be the limit this plugin actually
-    # got rather than a board variable that merely starts out equal.
+    # it checks.  The printer bound is the limit on the plugin's OWN functions
+    # the base may be handed (its string sink pl_sbuf_write today; since issue
+    # #124 every function whose address the plugin takes): the printer veneer
+    # lands there as well as in the firmware, so the declared cost has to cover
+    # it too, and it has to be the limit this plugin actually got rather than a
+    # board variable that merely starts out equal.
     if(NOT P_SBUF_WRITE_MAX MATCHES "^[1-9][0-9]*$")
         message(FATAL_ERROR
             "add_plugin(${_name}): SBUF_WRITE_MAX must be a positive byte "
@@ -191,7 +194,6 @@ function(add_plugin _name)
         list(APPEND _named "${_slot}")
         list(APPEND _entries "pl_${_slot}=${_lim}")
     endforeach()
-    list(APPEND _entries "pl_sbuf_write=${_printer}")
     set_property(GLOBAL APPEND PROPERTY VENEER_GATE_PLUGIN_COSTS
                  "${_name}=${P_VENEER_BASE_COST}")
     set_property(GLOBAL APPEND PROPERTY VENEER_GATE_PRINTER_LIMITS
@@ -495,16 +497,6 @@ function(add_plugin _name)
                 # stops the container being built at all, which is the right
                 # direction but a confusing place to discover it.
                 #
-                # [!] AND ONE NAME THAT IS NOT A SLOT.  pl_sbuf_write is reached
-                # through the pl_print_write veneer, and the gate cannot see
-                # across a veneer -- it charges a flat allowance there for
-                # whatever is on the other side, which is normally the BASE.
-                # A plugin-supplied printer puts its own code there instead, so
-                # that assumption is bounded here by name rather than trusted to
-                # a comment.  Since ABI 2 (issue #111) its bound also reaches
-                # the manifest, as S: the loader charges max(c, S) at a
-                # crossing, so a later, smaller c cannot under-charge a sink
-                # this plugin carries.
                 # [!] THE BOARD'S TABLE, NOT A COPY OF IT (issue #126).  Written
                 # out again here, the gate and the device would be two
                 # declarations of one rule, and a plugin could pass the build
@@ -512,6 +504,21 @@ function(add_plugin _name)
                 # firmware's own copy is read back out of shell.elf and
                 # compared with the same table (veneer_cost_gate()).
                 --entry ${_entries}
+                # [!] THE PLUGIN'S OWN CODE ON THE FAR SIDE OF A VENEER (issue
+                # #124).  The printer veneer calls whatever function the
+                # printer it is handed carries, and a plugin that formats into
+                # its own buffer puts its own sink there -- so S, which the
+                # loader charges as max(c, S) at a crossing (ABI 2, issue
+                # #111), is the bound of every plugin function the base may be
+                # handed.  The gate finds them in the relocations of the
+                # objects below and holds each to the printer limit; until
+                # #124 it was one function, pl_sbuf_write, named in --entry.
+                # [!] THE OBJECTS ARE THE LINK'S OWN LIST, the same variable
+                # the link command above takes -- not a second enumeration, so
+                # a file added to the plugin is read without anyone adding it
+                # here.  The gate compares it with the map's LOADs both ways.
+                --objects ${_objs}
+                --printer-limit "${_printer}"
                 --emit-stacks "${_out}/plugin.stacks.json"
         # [!] THE STAMPS, not just the objects: an object exists whether or not
         # its audit passed, so depending on it alone would let a rejected one

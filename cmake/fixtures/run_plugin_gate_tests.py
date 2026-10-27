@@ -476,6 +476,28 @@ def m_lr_slot(src):
            "return fx_lrslot(" + ARG + ");")
 
 
+def m_callee_up(src):
+    """[!] A CALLEE THAT STORES INTO ITS CALLER'S FRAME (issue #124): fx_up
+    writes its entry sp+4, which is where fx_upcaller saved lr, and
+    fx_upcaller then pops that word into pc.  The caller's pop was proven
+    because a word above the call's sp was assumed to live across the call;
+    now the callee is refused for storing at or above the sp it was called
+    with."""
+    inject(src, naked("fx_up", "str r0, [sp, #4]\\n\\tbx lr") +
+           naked("fx_upcaller", "push {r4, lr}\\n\\tbl fx_up\\n\\t"
+                                "pop {r4, pc}"),
+           "return fx_upcaller(" + ARG + ");")
+
+
+def m_callee_own(src):
+    """Its twin: the callee stores at its own sp+4, below its entry sp."""
+    inject(src, naked("fx_dn", "sub sp, #8\\n\\tstr r0, [sp, #4]\\n\\t"
+                               "add sp, #8\\n\\tbx lr") +
+           naked("fx_dncaller", "push {r4, lr}\\n\\tbl fx_dn\\n\\t"
+                                "pop {r4, pc}"),
+           "return fx_dncaller(" + ARG + ");")
+
+
 def m_veneer_secure(word):
     """An instruction put INSIDE a veneer (pl_print_write), before its
     register branch: a security state transition, which the veneer's exemption
@@ -797,6 +819,87 @@ def m_handed_code_not_fn(src):
            naked("fx_nofnref", "ldr r0, 1f\\n\\tbx lr\\n\\t.align 2\\n"
                                "1:\\t.word fx_nofn_at + 1"),
            "return fx_nofnref(" + ARG + ");")
+
+
+# A weak definition and the body the link picks over it (issue #124).  The
+# weak name is an alias of a static body so that the body stays in the image
+# (its own section is referenced) while the link binds the NAME elsewhere.
+FX_WEAK = (
+    "__attribute__((noinline, used)) static int fx_wk_impl(void *ctx, "
+    "const char *s, size_t len)\n"
+    "{ volatile unsigned char b[100]; (void)ctx; b[0] = (unsigned char)len;\n"
+    "  b[99] = (unsigned char)s[0]; return b[len & 63] + b[99]; }\n"
+    "int fx_wk(void *ctx, const char *s, size_t len)\n"
+    "    __attribute__((weak, alias(\"fx_wk_impl\")));\n"
+    "static struct plugin_printer fx_pr;\n")
+FX_WEAK_CALL = ("{ fx_pr.write = fx_wk; fx_vin = (unsigned)fx_wk_impl(0, "
+                "\"x\", 1);\n  return pl_print_write(&fx_pr, \"x\", 1); }")
+
+
+def m_handed_weak_kept(src):
+    """A weak definition nobody overrides: the link binds the name to it."""
+    inject(src, FX_WEAK, FX_WEAK_CALL)
+
+
+def m_handed_weak_lost(src):
+    """[!] The same, and a deeper strong definition in another object wins
+    the link: the printer carries the STRONG body.  Read from the object's
+    own definition the list held the weak one (100 B) and not this one."""
+    inject(src, FX_WEAK, FX_WEAK_CALL)
+    sub(os.path.join(src, "plugin_libc.c"), "void *memset(",
+        "int fx_wk(void *ctx, const char *s, size_t len)\n"
+        "{ volatile unsigned char b[300]; (void)ctx; b[0] = (unsigned "
+        "char)len;\n  b[299] = (unsigned char)s[0]; return b[len & 127] + "
+        "b[299]; }\n"
+        "void *memset(")
+
+
+def m_handed_data_fn(src):
+    """A C function placed in .data, its address put in a printer: the wio
+    MPU runs the reservation as code, and the analysis reads only
+    executable sections -- the function would never be bounded."""
+    inject(src,
+           "__attribute__((noinline, used, section(\".data\"))) static int "
+           "fx_in_data(void *ctx, const char *s, size_t len)\n"
+           "{ (void)ctx; (void)s; return (int)len; }\n"
+           "static struct plugin_printer fx_pr;\n",
+           "{ fx_pr.write = fx_in_data; return pl_print_write(&fx_pr, "
+           "\"x\", 1); }")
+
+
+def m_handed_data_label(src):
+    """Code in a data section with no function symbol, its address (Thumb
+    bit set) in a literal pool: only the address says what it is."""
+    inject(src,
+           "__asm__(\".section .data.fx_dl,\\\"aw\\\",%progbits\\n"
+           ".thumb\\nfx_dl_at: bx lr\\n.text\\n\");\n" +
+           naked("fx_dlref", "ldr r0, 1f\\n\\tbx lr\\n\\t.align 2\\n"
+                             "1:\\t.word fx_dl_at + 1"),
+           "return fx_dlref(" + ARG + ");")
+
+
+def m_exec_data_section(src):
+    """An executable section that is not .text, kept by the link script and
+    referenced by nothing -- so nothing but the section's flags says code may
+    be there."""
+    sub(os.path.join(src, "plugin.ld"), "        *(.data .data.*)",
+        "        KEEP(*(.fx_x))\n        *(.data .data.*)")
+    inject(src,
+           "__asm__(\".section .fx_x,\\\"awx\\\",%progbits\\n"
+           ".align 2\\n.word 0\\n.text\\n\");\n", None)
+
+
+def m_data_fn_symbol(src):
+    """A function symbol in a data section the image keeps for its data
+    word -- the function itself referenced by nothing."""
+    inject(src,
+           "__asm__(\".section .data.fx_fs,\\\"aw\\\",%progbits\\n"
+           ".align 2\\nfx_fs_var: .word 0\\n.thumb\\n"
+           ".type fx_fs_fn, %function\\n.thumb_func\\nfx_fs_fn: bx lr\\n"
+           ".size fx_fs_fn, . - fx_fs_fn\\n.text\\n\");\n" +
+           naked("fx_fsref", "ldr r0, 1f\\n\\tbx lr\\n\\t.align 2\\n"
+                             "1:\\t.word fx_fs_var"),
+           "return fx_fsref(" + ARG + ");")
 
 
 def marker_file(name, *lines):
@@ -1190,6 +1293,16 @@ CASES += [
      "gate: the saved lr stored over -- the pop into pc is not a return"),
     ("lr_slot", "wio", m_lr_slot, None, None, "gate",
      "fx_lrslot: `pop {..., pc}` at", "gate: the same on the M7"),
+    ("callee_writes_caller", "grove", m_callee_up, None, None, "gate",
+     "fx_up: a store at",
+     "gate: a callee storing over the lr its caller saved -- at or above "
+     "the sp it was called with"),
+    ("callee_writes_caller", "wio", m_callee_up, None, None, "gate",
+     "fx_up: a store at", "gate: the same on the M7"),
+    ("callee_writes_own", "grove", m_callee_own, None, None, "accept", None,
+     "accepted: the twin stores below its own entry sp"),
+    ("callee_writes_own", "wio", m_callee_own, None, None, "accept", None,
+     "accepted: the same on the M7"),
     ("veneer_sp", "grove", m_veneer_secure("sub sp, #8"), None, None,
      "gate", "leaves with sp at entry sp-8",
      "gate: a veneer's register branch is a tail call -- sp must be back"),
@@ -1372,6 +1485,33 @@ HANDED_CASES = [
     ("handed_code_not_fn", "grove", m_handed_code_not_fn, "gate",
      "that is not a function's first instruction",
      "gate: a code address no function covers", None, "1024"),
+    # --- issue #124: the name the link bound, and code outside .text --------
+    ("handed_weak_kept", "grove", m_handed_weak_kept, "accept", "fx_wk",
+     "accepted, and a weak definition nobody overrides is on the list",
+     check_sink("fx_wk", want_more_than=16), "1024"),
+    ("handed_weak_lost", "grove", m_handed_weak_lost, "gate",
+     "fx_wk is defined here (weak)",
+     "gate: a weak definition another object's strong one wins over -- the "
+     "list would hold the loser", None, "1024"),
+    ("handed_weak_lost", "wio", m_handed_weak_lost, "gate",
+     "fx_wk is defined here (weak)", "gate: the same on the M7", None,
+     "1024"),
+    ("handed_data_fn", "grove", m_handed_data_fn, "gate",
+     "outside the image's code",
+     "gate: a C function in .data whose address is taken", None, "1024"),
+    ("handed_data_fn", "wio", m_handed_data_fn, "gate",
+     "outside the image's code", "gate: the same on the M7", None, "1024"),
+    ("handed_data_label", "grove", m_handed_data_label, "gate",
+     "outside the image's code",
+     "gate: an odd (Thumb) address in a data section, no function symbol",
+     None, "1024"),
+    ("exec_data_section", "grove", m_exec_data_section, "gate",
+     "section .data is executable",
+     "gate: an executable output section other than .text", None, "1024"),
+    ("data_fn_symbol", "grove", m_data_fn_symbol, "gate",
+     "function fx_fs_fn (0x",
+     "gate: a function symbol outside .text, referenced by nothing", None,
+     "1024"),
     ("handed_not_relocatable", "grove", marker_file(".exec_obj", "plugin_fmt"),
      "gate", "plugin_fmt.o: not a relocatable object",
      "gate: an input that is an ELF but not an object", None, "1024"),

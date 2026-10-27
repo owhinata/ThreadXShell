@@ -9,7 +9,8 @@
 # nn_tflm_attach() at the bottom, where that is spelled out.
 #
 # The tflite-micro sources come from the lib/tflite-micro submodule (#134), pinned by
-# its gitlink.  At CONFIGURE time the pinned commit is written out into the build
+# its gitlink, fetched here on first use (no board's sentinel list names it, so a
+# null configure stays offline) and re-checked against the gitlink on every build.  At CONFIGURE time the pinned commit is written out into the build
 # directory (cmake/tflm_submodule.cmake -- the generator never runs inside lib/) and
 # upstream's own create_tflm_tree.py runs there.  It drives tflite-micro's Makefile to
 # list the library sources, download the header-only third-party dependencies
@@ -29,7 +30,7 @@ enable_language(CXX)
 
 # --- Pinned upstream: the lib/tflite-micro gitlink ---------------------------
 include("${CMAKE_SOURCE_DIR}/cmake/tflm_submodule.cmake")
-tflm_submodule_pin(TFLM_GIT_SHA)                  # fatal unless HEAD == gitlink
+tflm_submodule_pin(TFLM_GIT_SHA)                  # fetches if uninitialised; fatal unless HEAD == gitlink
 set(TFLM_SRC  "${CMAKE_BINARY_DIR}/tflm-src")     # git archive of the pinned commit
 set(TFLM_ROOT "${CMAKE_BINARY_DIR}/tflm-tree")    # generated self-contained tree
 set(TFLM_GEN  "${TFLM_SRC}/tensorflow/lite/micro/tools/project_generation/create_tflm_tree.py")
@@ -251,6 +252,11 @@ add_library(tflm STATIC
     "${BOARD_DIR}/port/nn/tflm/nn_tflm.cc")       # extern "C" nn_backend_vt_selected
 
 target_link_libraries(tflm PRIVATE bsp_iface)   # MCU_OPTS (fpv5-d16) + CMSIS/HAL includes
+
+# The tree above was generated at configure time for TFLM_GIT_SHA; a superproject
+# checkout that moves only the gitlink does not re-configure, so every build first
+# re-checks gitlink == submodule HEAD == TFLM_GIT_SHA (cmake/tflm_submodule.cmake).
+tflm_submodule_build_check(tflm_pin_check tflm "${TFLM_GIT_SHA}")
 
 target_include_directories(tflm PRIVATE
     "${TFLM_ROOT}"                                   # "tensorflow/..." and "signal/..."

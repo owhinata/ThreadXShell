@@ -593,10 +593,20 @@ every gate reads the linked image and it was self-consistent.
 
 `tflm_submodule.cmake` is shared by the boards whose `tflm` backend generates a
 tree with upstream's `create_tflm_tree.py` (f746g-disco, wio-lite-ai).
-`tflm_submodule_pin()` returns the commit the superproject's gitlink records for
-`lib/tflite-micro` (read from the index) and stops the configure if the
-submodule is uninitialised or checked out anywhere else; it also makes the
-submodule's HEAD file a configure dependency, so a checkout re-runs configure.
+`tflm_submodule_pin()` initialises `lib/tflite-micro` if it is not yet (the
+submodule is in no board's `submodules.cmake`, so only a tflm configure fetches
+it and a `null` one stays offline -- the same fetch-on-demand as
+`lib/mlperf-tiny`), returns the commit the superproject's gitlink records for it
+(read from the index), and stops the configure if the submodule is checked out
+anywhere else; it also makes the submodule's HEAD file a configure dependency, so
+a checkout inside the submodule re-runs configure.
+`tflm_submodule_build_check()` covers what that dependency cannot see, a
+superproject checkout that moves only the gitlink: a target in ALL runs
+`tflm_pin_check.cmake` on every build, compares the gitlink (`git ls-files -s`),
+the submodule's `rev-parse HEAD` and the configured `TFLM_GIT_SHA`, and fails the
+build with all three values unless they agree; the `tflm` library waits for it.
+The superproject's `.git/index` is deliberately not a configure dependency
+instead: `git status` rewrites it, so almost every git command would re-configure.
 `tflm_submodule_export()` writes that commit with `git archive` into
 `build/<board>/tflm-src`, where the board runs the generator. The generator is
 never run inside `lib/`: it downloads ~300 MB of third-party code into the

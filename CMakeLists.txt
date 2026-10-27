@@ -75,11 +75,14 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 # it compiles.  One shared list would make `-DBOARD=wio-lite-ai` clone the F7
 # side as well (lib/guix alone is ~1.5 GB) for sources it never opens.
 #
-# The update is given EXPLICIT paths for a second reason: lib/mlperf-tiny is a
-# ~340 MB shallow mirror behind CONFIG_MLPERF_TINY (OFF by default) with its own
-# fetch-on-demand in the board's mlperf-tiny.cmake, and a bare `git submodule
-# update --init` would drag it in -- git's default pathspec is every registered
-# submodule.  It appears in no board's sentinel list.
+# The update is given EXPLICIT paths for a second reason: two submodules are
+# fetched by their user instead, and a bare `git submodule update --init` would
+# drag them in -- git's default pathspec is every registered submodule.
+# lib/mlperf-tiny is a ~340 MB shallow mirror behind CONFIG_MLPERF_TINY (OFF by
+# default), fetched on demand by the board's mlperf-tiny.cmake; lib/tflite-micro
+# is read only by the tflm backend, fetched on demand by cmake/tflm_submodule.cmake,
+# so a CONFIG_NN_BACKEND=null configure stays offline.  Neither appears in any
+# board's sentinel list.
 #
 # Adding a board means writing its boards/<board>/submodules.cmake; there is no
 # central list to edit.

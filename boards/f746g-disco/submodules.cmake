@@ -5,18 +5,16 @@
 #  boards/wio-lite-ai/submodules.cmake for why the list is per board and why the
 #  entries are sentinel FILES rather than directories.
 #
-#  Ten mirrors: the F7 HAL + CMSIS device, the CMSIS core (shared with the H7
-#  board), CoreMark, and the Eclipse ThreadX family this firmware links --
+#  Seven mirrors: CoreMark, the Eclipse ThreadX family this firmware links --
 #  ThreadX, FileX + LevelX (the QSPI NOR filesystem), GUIX (the LCD GUI) and
-#  NetX Duo (the Ethernet stack) -- plus the ST OV5640 camera driver.
+#  NetX Duo (the Ethernet stack) -- and the ST OV5640 camera driver.  The ST
+#  Cube set (F7 HAL, CMSIS device, CMSIS core) is not here: board.cmake pins it
+#  per board and fetches it with cmake/fetch_upstream.cmake (issue #136).
 #
 #  [!] The first configure of this board is heavy: lib/guix is ~1.5 GB on its own.
 #  That cost is confined here, which is the point of the split.
 # ============================================================================
 set(_submodule_sentinels
-    "lib/stm32f7xx_hal_driver/Src/stm32f7xx_hal.c"
-    "lib/cmsis_core/Include/core_cm7.h"
-    "lib/cmsis_device_f7/Include/stm32f746xx.h"
     "lib/threadx/common/src/tx_thread_create.c"
     "lib/coremark/core_main.c"
     "lib/filex/common/src/fx_media_open.c"

@@ -36,9 +36,29 @@ set(BOARD_FW_NAME "Wio Lite AI ThreadX Shell")
 set(MCU_OPTS
     -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard)
 
-set(HAL_DIR    "${CMAKE_SOURCE_DIR}/lib/stm32h7xx_hal_driver")
-set(CMSIS_DEV  "${CMAKE_SOURCE_DIR}/lib/cmsis_device_h7")
-set(CMSIS_CORE "${CMAKE_SOURCE_DIR}/lib/cmsis_core")
+# The ST Cube set -- HAL, CMSIS device, CMSIS core -- is pinned per board and
+# fetched by cmake/fetch_upstream.cmake into upstream/<repo>-<commit> (issue #136),
+# not taken from lib/: ST pairs these three per Cube package, so each board names
+# its own commits.  The SHA is the pin; the tag beside it is only a comment.
+# The trees are read-only, like lib/.  The bootloader reference build below
+# compiles from the same three variables, so its golden hash covers this fetch.
+include("${CMAKE_SOURCE_DIR}/cmake/fetch_upstream.cmake")
+fetch_upstream(HAL_DIR                          # master, 2026-06-26 (no tag)
+    URL    "https://github.com/STMicroelectronics/stm32h7xx_hal_driver"
+    COMMIT "c5e70527126710a6415929ff10c1fd1f40394b1e"
+    SPARSE "/Inc/" "/Src/" "/LICENSE.md"
+    PROBE  "Src/stm32h7xx_hal.c" "Inc/stm32h7xx_hal_conf_template.h")
+fetch_upstream(CMSIS_DEV                        # master, 2026-04-16 (no tag)
+    URL    "https://github.com/STMicroelectronics/cmsis_device_h7"
+    COMMIT "de8243d2c15f87936f28a49fcd9e6f5ba10fc233"
+    SPARSE "/Include/" "/Source/Templates/" "/LICENSE.md"
+    PROBE  "Include/stm32h725xx.h" "Source/Templates/system_stm32h7xx.c"
+           "Source/Templates/gcc/startup_stm32h725xx.s")
+fetch_upstream(CMSIS_CORE                       # v5.6.0_cm7
+    URL    "https://github.com/STMicroelectronics/cmsis-core"
+    COMMIT "04fe7bb2025811f10848ce14be810dde981934cf"
+    SPARSE "/Include/" "/LICENSE.txt"
+    PROBE  "Include/core_cm7.h")
 set(LDSCRIPT_APP "${BOARD_DIR}/ldscript/STM32H725AEIx_IROM.ld") # app (internal 0x08020000)
 set(LDSCRIPT_ROM "${BOARD_DIR}/ldscript/STM32H725AEIx_ROM.ld")  # bootloader (0x08000000)
 

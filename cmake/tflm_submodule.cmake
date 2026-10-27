@@ -1,0 +1,112 @@
+# ============================================================================
+#  tflite-micro from the lib/tflite-micro submodule (issue #134).
+#
+#  Shared by every board whose tflm backend generates its source tree with
+#  upstream's create_tflm_tree.py (f746g-disco, wio-lite-ai).  Nothing below
+#  knows which board is asking: the board keeps its own stamp, venv and
+#  generation step, this file only answers "which commit" and "give me a
+#  private copy of it".
+#
+#  [!] THE GENERATOR NEVER RUNS INSIDE THE SUBMODULE.  create_tflm_tree.py
+#  downloads its third-party dependencies (~300 MB) into a fixed path INSIDE
+#  the tflite-micro tree it is run from, and lib/ is read-only.  So the pinned
+#  commit is written out with `git archive` into the build directory and the
+#  generator runs there -- a fresh copy on every attempt, which is also what
+#  lets an interrupted download heal on the next configure (upstream skips a
+#  download directory that merely exists).  `git archive` takes the COMMIT, so
+#  uncommitted edits in the submodule's work tree never reach the build.
+#
+#  [!] THE PIN IS THE SUPERPROJECT'S GITLINK.  tflm_submodule_pin() refuses a
+#  submodule whose checked-out HEAD is not the commit the superproject records
+#  for it (in the index, so a staged pin bump is what gets built), exactly as
+#  the SHA constant this replaced refused anything else.  Bumping the pin is
+#  advancing the submodule and committing the gitlink; the submodule's HEAD
+#  file is a configure dependency, so the next build re-configures.
+#
+#  Configure still needs the network and Python: the generator's dependency
+#  downloads happen whether or not tflite-micro itself was cloned.
+# ============================================================================
+
+set(TFLM_SUBMODULE_DIR "${CMAKE_SOURCE_DIR}/lib/tflite-micro")
+
+# Sets <out_var> to the pinned commit, after checking the submodule's HEAD
+# against the superproject's gitlink.  Fatal if they differ or either is unreadable.
+function(tflm_submodule_pin out_var)
+    # An uninitialised submodule is an empty directory INSIDE the superproject,
+    # where `git -C` silently answers for the superproject instead.  So first
+    # make sure the repository git finds there is the submodule itself.
+    execute_process(
+        COMMAND git -C "${TFLM_SUBMODULE_DIR}" rev-parse --show-toplevel
+        OUTPUT_VARIABLE _top OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _rc ERROR_QUIET)
+    file(REAL_PATH "${TFLM_SUBMODULE_DIR}" _want)
+    if(_rc EQUAL 0)
+        file(REAL_PATH "${_top}" _top)
+    endif()
+    if(NOT _rc EQUAL 0 OR NOT _top STREQUAL _want)
+        message(FATAL_ERROR
+            "tflm: lib/tflite-micro is not an initialised submodule; run\n"
+            "    git submodule update --init -- lib/tflite-micro")
+    endif()
+    execute_process(
+        COMMAND git -C "${TFLM_SUBMODULE_DIR}" rev-parse --verify -q HEAD
+        OUTPUT_VARIABLE _head OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _rc)
+    if(NOT _rc EQUAL 0 OR NOT _head MATCHES "^[0-9a-f]+$")
+        message(FATAL_ERROR
+            "tflm: cannot read the checked-out commit of lib/tflite-micro")
+    endif()
+    # Mode 160000 is a gitlink; anything else means lib/tflite-micro is not a
+    # submodule of this repository at all.
+    execute_process(
+        COMMAND git -C "${CMAKE_SOURCE_DIR}" ls-files -s -- lib/tflite-micro
+        OUTPUT_VARIABLE _ls OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _rc)
+    if(NOT _rc EQUAL 0 OR NOT _ls MATCHES "^160000 ([0-9a-f]+) 0\tlib/tflite-micro$")
+        message(FATAL_ERROR
+            "tflm: the superproject records no gitlink for lib/tflite-micro "
+            "(git ls-files -s said: '${_ls}')")
+    endif()
+    set(_pin "${CMAKE_MATCH_1}")
+    if(NOT _head STREQUAL _pin)
+        message(FATAL_ERROR
+            "tflm: lib/tflite-micro is checked out at ${_head},\n"
+            "  but this repository pins ${_pin}.\n"
+            "  Restore the pin with\n"
+            "    git submodule update -- lib/tflite-micro\n"
+            "  or, to move the pin, commit the new gitlink (git add lib/tflite-micro).")
+    endif()
+    # The HEAD file changes on every checkout of the submodule, so moving it
+    # re-runs configure (and with it the check above and the stamp lookup).
+    execute_process(
+        COMMAND git -C "${TFLM_SUBMODULE_DIR}" rev-parse --path-format=absolute --git-path HEAD
+        OUTPUT_VARIABLE _head_file OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _rc)
+    if(NOT _rc EQUAL 0 OR NOT EXISTS "${_head_file}")
+        message(FATAL_ERROR "tflm: cannot locate the HEAD file of lib/tflite-micro")
+    endif()
+    set_property(DIRECTORY "${CMAKE_SOURCE_DIR}" APPEND PROPERTY
+                 CMAKE_CONFIGURE_DEPENDS "${_head_file}")
+    set(${out_var} "${_pin}" PARENT_SCOPE)
+endfunction()
+
+# Replaces <dest> with the files of <sha> from the submodule (no .git).
+function(tflm_submodule_export sha dest)
+    set(_tar "${dest}.tar")
+    file(REMOVE_RECURSE "${dest}")
+    file(REMOVE "${_tar}")
+    file(MAKE_DIRECTORY "${dest}")
+    execute_process(
+        COMMAND git -C "${TFLM_SUBMODULE_DIR}" archive --format=tar -o "${_tar}" "${sha}"
+        RESULT_VARIABLE _rc)
+    if(NOT _rc EQUAL 0)
+        message(FATAL_ERROR "tflm: git archive ${sha} of lib/tflite-micro failed")
+    endif()
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E tar xf "${_tar}"
+        WORKING_DIRECTORY "${dest}" RESULT_VARIABLE _rc)
+    file(REMOVE "${_tar}")
+    if(NOT _rc EQUAL 0)
+        message(FATAL_ERROR "tflm: extracting lib/tflite-micro @ ${sha} failed")
+    endif()
+endfunction()

@@ -6,21 +6,23 @@
 # C-only.  All C++ is confined to this `tflm` STATIC lib so the
 # final shell link keeps the C driver (gcc) and does not auto-pull full libstdc++.
 #
-# The tflite-micro sources are NOT vendored.  At CONFIGURE time we fetch the pinned
-# upstream commit and run its own `create_tflm_tree.py` (which drives the tflite-micro
-# Makefile to list library sources, download the header-only third-party deps
-# flatbuffers/gemmlowp/ruy, and generate the model-data C array) into a self-contained,
-# glob-able tree under the build dir.  We then compile that tree with OUR exact flags
-# (so the ABI -- cortex-m7 / fpv5-sp-d16 / hard / -fno-exceptions -- is fully ours).
-# This mirrors the repo's "download the toolchain at configure" convention; only the
-# tflm build pays the fetch cost, and it is cached (SHA-keyed stamp) after the first run.
+# The tflite-micro sources come from the lib/tflite-micro submodule (#134), pinned by
+# its gitlink.  At CONFIGURE time the pinned commit is written out into the build dir
+# (cmake/tflm_submodule.cmake -- never generated inside lib/) and upstream's own
+# `create_tflm_tree.py` runs there (it drives the tflite-micro Makefile to list library
+# sources, download the header-only third-party deps flatbuffers/gemmlowp/ruy -- so
+# the network is still needed -- and generate the model-data C array) into a
+# self-contained, glob-able tree under the build dir.  We then compile that tree with
+# OUR exact flags (so the ABI -- cortex-m7 / fpv5-sp-d16 / hard / -fno-exceptions -- is
+# fully ours).  Only the tflm build pays the generation cost, and it is cached
+# (SHA-keyed stamp) after the first run.
 
 enable_language(CXX)
 
-# --- Pinned upstream ---------------------------------------------------------
-set(TFLM_GIT_URL "https://github.com/tensorflow/tflite-micro.git")
-set(TFLM_GIT_SHA "e142972d4f4382f77faa8212b7c70b37d28b9cb9")   # tflite-micro main, 2026-07
-set(TFLM_SRC  "${CMAKE_BINARY_DIR}/tflm-src")     # shallow clone at the pinned SHA
+# --- Pinned upstream: the lib/tflite-micro gitlink ---------------------------
+include("${CMAKE_SOURCE_DIR}/cmake/tflm_submodule.cmake")
+tflm_submodule_pin(TFLM_GIT_SHA)                  # fatal unless HEAD == gitlink
+set(TFLM_SRC  "${CMAKE_BINARY_DIR}/tflm-src")     # git archive of the pinned commit
 set(TFLM_ROOT "${CMAKE_BINARY_DIR}/tflm-tree")    # generated self-contained source tree
 set(TFLM_GEN   "${TFLM_SRC}/tensorflow/lite/micro/tools/project_generation/create_tflm_tree.py")
 
@@ -59,13 +61,13 @@ if(NOT EXISTS "${TFLM_PY}")
     endif()
 endif()
 
-# --- Fetch + generate the tree (SHA-keyed stamp: only runs once per pin) ------
+# --- Export + generate the tree (SHA-keyed stamp: only runs once per pin) -----
 # The stamp is written ONLY after a fully successful generation, and each attempt starts
-# from a clean clone + a fresh dependency install, so an interrupted run self-heals on
+# from a clean export + a fresh dependency install, so an interrupted run self-heals on
 # the next configure (no stale partial third-party downloads, no half-populated venv).
 if(NOT EXISTS "${TFLM_STAMP}")
-    message(STATUS "tflm: fetching tflite-micro @ ${TFLM_GIT_SHA} and generating the source tree "
-                   "(one-time, a few minutes -- clones + downloads flatbuffers/gemmlowp/ruy)")
+    message(STATUS "tflm: generating the source tree from lib/tflite-micro @ ${TFLM_GIT_SHA} "
+                   "(one-time, a few minutes -- downloads flatbuffers/gemmlowp/ruy)")
 
     # Ensure numpy/Pillow are present (idempotent when already satisfied); heals a venv
     # created before these were added to requirements.txt.
@@ -77,30 +79,10 @@ if(NOT EXISTS "${TFLM_STAMP}")
         message(FATAL_ERROR "tflm: pip install -r requirements.txt failed")
     endif()
 
-    # Fresh clone each attempt: upstream's third-party extractor skips a download dir
+    # Fresh export each attempt: upstream's third-party extractor skips a download dir
     # that merely exists, so a previously interrupted download would never self-repair
-    # in place.  Wiping the clone also avoids any stale remote/HEAD idempotency issues.
-    file(REMOVE_RECURSE "${TFLM_SRC}")
-    file(MAKE_DIRECTORY "${TFLM_SRC}")
-    execute_process(COMMAND git init -q WORKING_DIRECTORY "${TFLM_SRC}" RESULT_VARIABLE _rc)
-    if(NOT _rc EQUAL 0)
-        message(FATAL_ERROR "tflm: git init failed")
-    endif()
-    execute_process(COMMAND git remote add origin "${TFLM_GIT_URL}"
-                    WORKING_DIRECTORY "${TFLM_SRC}" RESULT_VARIABLE _rc)
-    if(NOT _rc EQUAL 0)
-        message(FATAL_ERROR "tflm: git remote add failed")
-    endif()
-    execute_process(COMMAND git fetch --depth 1 -q origin "${TFLM_GIT_SHA}"
-                    WORKING_DIRECTORY "${TFLM_SRC}" RESULT_VARIABLE _rc)
-    if(NOT _rc EQUAL 0)
-        message(FATAL_ERROR "tflm: git fetch ${TFLM_GIT_SHA} failed (network + reachable SHA needed)")
-    endif()
-    execute_process(COMMAND git checkout -q -f FETCH_HEAD
-                    WORKING_DIRECTORY "${TFLM_SRC}" RESULT_VARIABLE _rc)
-    if(NOT _rc EQUAL 0)
-        message(FATAL_ERROR "tflm: git checkout FETCH_HEAD failed")
-    endif()
+    # in place.
+    tflm_submodule_export("${TFLM_GIT_SHA}" "${TFLM_SRC}")
 
     file(REMOVE_RECURSE "${TFLM_ROOT}")
     execute_process(

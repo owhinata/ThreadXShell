@@ -5591,7 +5591,8 @@ shipped image and checked on every build since issue #112 (see **The veneer
 charge is derived from the image, and checked**).  The checks are
 forbidden symbols, an allocated-section whitelist, no relocations, storage in
 the declared segments, indirect branches only in the named veneers, a
-transitive stack bound per entry point (emitted c-free since issue #111), and
+transitive stack bound per entry point (emitted c-free since issue #111, and
+computed by the same code as the veneer charge since issue #124), and
 that every TU was compiled against the header's ABI.  The linker enforces some of the same
 things first: under `-nostdlib` an unresolved symbol, a forbidden vendor entry
 point that is nowhere in the image, and unwind tables that need a personality
@@ -6145,8 +6146,9 @@ chain, not by raising the number.  And since plugin ABI 2 (issue #111, below)
 a container no longer carries this number at all: the loader adds the
 firmware's own c at load time, so changing it re-packs nothing.
 
-Each plugin's own printer bound goes to the same check (`pl_sbuf_write` = 64
-here, from `add_plugin()`): the printer veneer lands in the plugin as well as in
+Each plugin's own printer limit goes to the same check (64 here, from
+`add_plugin()`'s `SBUF_WRITE_MAX`; it bounds `pl_sbuf_write` and, since issue
+#124, every other plugin function the base may be handed): the printer veneer lands in the plugin as well as in
 the base, so it has to fit under the declared charge too.
 
 **Nothing ships past a failed check.**  Its success is a stamp
@@ -6165,8 +6167,9 @@ number had been made with.  The gate's walk adds c at a crossing and stops
 there, so the bound decomposes exactly, and that is what a manifest now carries:
 per slot the plugin's own deepest frames **A0**, its own frames on a path that
 reaches a veneer **A1** plus a crossing bit, and for the whole plugin the bound
-**S** of its own printer sink (`pl_sbuf_write`, which sits on the far side of
-the printer veneer).  The loader (`svc/plugin/plugin_load.c`) requires
+**S** of every plugin function the base may be handed (since issue #124; on
+the shipped plugins that is the printer sink `pl_sbuf_write` alone, which sits
+on the far side of the printer veneer).  The loader (`svc/plugin/plugin_load.c`) requires
 
     max(A0, A1 + max(c, S))    for a slot that crosses,   A0 otherwise
 
@@ -6215,6 +6218,34 @@ painter refusals and `nn run` found 1 face; cifar10 streamed at 8.85 inf/s.
 1080/4096, shapes_ok 1528, decode producer 864/8192, draw panel 224/2048,
 param_get 744 (the console decode and report depths of that build are
 superseded by issue #121's, in the ELF table).
+
+#### Stack accounting 2 (issue #124)
+
+Since issue #124 the image gate's stack bound is computed by the same code that
+derives the veneer charge above (`cmake/thumb_stack_analysis.py`; see
+`cmake/README.md`, **Plugin image gate: the stack bound**): frames counted from
+the instruction bytes rather than taken from `-fstack-usage`, functions told
+apart by address rather than by name, every return checked for where lr was
+saved and where sp is, and S taken over every plugin function the base may be
+handed rather than over `pl_sbuf_write` by name.  On both plugins this board
+ships, A0, A1 and S came out the same to the byte, so the table above stands
+(c = 256, S = 16 B).  What changed is what the numbers mean, and the manifest
+says so: its stack-accounting version is now **2**.
+
+The loader compares that version for equality, so a container packed before
+#124 is refused on load as `stack declared under another analysis` -- not as a
+stack that is too big.  Build the asset again and send it as in **Sending a
+container** below (`asset-blazeface` to slot 9, `asset-cifar10` to slot 1),
+then compare the receipt's crc32 with `blob list`.  The new container differs
+from the old one in the version field and in the digest and CRC over it, so
+its crc32 is not the one recorded for the 2026-09-23 re-send above.
+
+Re-sent on 2026-10-27, with the firmware at `bc92a6f-dirty` (the version-2
+build): the old containers were refused on `nn model load --name` with the
+line above, then `blob write blazeface 9` stored 169,040 B, crc32 `8E678851`,
+and `blob write cifar10 1` stored 1,707,808 B, crc32 `27DAA874` (both equal to
+the receipts).  `nn run` and `nn stream start` / `stop` ran on blazeface,
+`nn run` on cifar10.
 
 #### What holds these numbers up, which no gate checks
 
@@ -6511,7 +6542,9 @@ a live picture, which reads as a working classifier.
 The bss is the strip and the atlas; the reservation is 128 KiB.  `draw` and
 `decode` both stay far under their 1,024 B allowances (issue #119 moved decode's
 off the producer's 4,096, which was the whole of the shell's stack).
-`pl_sbuf_write` measures 16 B and is bounded by name in `board.cmake` at 64 --
+`pl_sbuf_write` measures 16 B and is held to `board.cmake`'s 64
+(`GROVE_PLUGIN_SBUF_WRITE_MAX`, which since issue #124 bounds every plugin
+function the base may be handed, not this one by name) --
 it is reached through the `pl_print_write` veneer, and the stack gate cannot see
 across a veneer, so it charges a flat allowance there for what is normally the
 BASE.  A plugin-supplied printer puts its own code on the other side of that

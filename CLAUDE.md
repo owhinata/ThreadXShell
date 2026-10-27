@@ -97,12 +97,12 @@ code** で、ゲートが証明するのはスタック上限だけ（**メモ�
 - **上限は実測から導出する。超えられない上限は上限ではない。導出値 0 は「未測定」ではない**
   （absent の綴りは slot 側で、`stack_limit == 0` の拒否は明示的に書く）。**許容値は slot に到達しうる
   全スレッドの最も浅い天井に対して宣言し、深さは callback 入口で測る**（表はボード、深さの正は README）。
-- **[!] 宣言は c を含まずファームが足す**（walk を変えたら会計の版）。**c と slot 許容値は出荷 ELF から読み戻す**（許容値は `plugin_stack_table()` の 1 表から導出し写さない）。
+- **[!] 宣言は c を含まずファームが足す**（計算の対象・止まる場所・戻りの検査・S の範囲が変われば精度向上でも会計の版を上げる。#124）。**c と slot 許容値は出荷 ELF から読み戻す**（許容値は `plugin_stack_table()` の 1 表から導出し写さない）。
 - **plugin のビルド規則は共有**（`cmake/add_plugin.cmake`）で**ボードは自分の事実だけを引数で渡す**。
   **owned source root は helper が導出する**（受け取る形自体が fail-open）。**リンク入力も列挙する**
   （`ARCH_FLAGS` は `-m*` のみ）。**監査の success stamp は compile 前に消す**。**ヘッダも依存（depfile）**。
 - **image gate も共有**（`cmake/check_plugin_image.py`）。予約 / 禁止シンボル表 / veneer base cost は
-  `add_plugin()` の**必須引数**で、**ゲートに告げる予約は MEMORY fragment と別の宣言**。TU の ABI も照合。
+  `add_plugin()` の**必須引数**で、**ゲートに告げる予約は MEMORY fragment と別の宣言**。TU の ABI も照合。**スタック計算は veneer 検査と同じ `cmake/thumb_stack_analysis.py` の 1 実装で、違うのは止まる場所だけ**（別実装を戻さない）。
 - **target word は 2 端で検査する**（firmware の `_Static_assert` + gate の `.ARM.attributes`）。
 - **[!] ゲートは送信時ではなくビルド時にある**（`--target asset-<name>`）。送信は打ったパスをそのまま送る
   ので**閉じ手は CRC32 と `blob list` の照合**。「ビルド時に検査済み」を「何も起きない」と書き換えない。**配送 target（DELIVERY）は build.ninja から導出した使用者と両方向照合する**（`check_delivery_gate.py`、全 target が先に待つ）。

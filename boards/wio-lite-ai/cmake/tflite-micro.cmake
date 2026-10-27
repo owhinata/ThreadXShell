@@ -8,16 +8,17 @@
 # keeps the C driver (gcc) and does not auto-pull the full libstdc++ -- see
 # nn_tflm_attach() at the bottom, where that is spelled out.
 #
-# The tflite-micro sources are NOT vendored and NOT a submodule.  At CONFIGURE time we
-# fetch the pinned upstream commit and run its own create_tflm_tree.py, which drives
-# tflite-micro's Makefile to list the library sources, download the header-only
-# third-party dependencies (flatbuffers/gemmlowp/ruy) and -- with
-# OPTIMIZED_KERNEL_DIR=cmsis_nn -- CMSIS_6 + CMSIS-NN at ITS OWN pinned SHAs.  The
-# result is a self-contained, glob-able tree under the build directory, which we then
+# The tflite-micro sources come from the lib/tflite-micro submodule (#134), pinned by
+# its gitlink.  At CONFIGURE time the pinned commit is written out into the build
+# directory (cmake/tflm_submodule.cmake -- the generator never runs inside lib/) and
+# upstream's own create_tflm_tree.py runs there.  It drives tflite-micro's Makefile to
+# list the library sources, download the header-only third-party dependencies
+# (flatbuffers/gemmlowp/ruy) and -- with OPTIMIZED_KERNEL_DIR=cmsis_nn -- CMSIS_6 +
+# CMSIS-NN at ITS OWN pinned SHAs, so configure still needs the network.  The result
+# is a self-contained, glob-able tree under the build directory, which we then
 # compile with OUR flags, so the ABI (cortex-m7 / fpv5-d16 / hard-float /
-# -fno-exceptions) is entirely ours.  This mirrors how this repository already
-# downloads the ARM toolchain at configure time; only the tflm build pays the fetch
-# cost, and a SHA-keyed stamp makes it a one-time cost.
+# -fno-exceptions) is entirely ours.  Only the tflm build pays the generation cost,
+# and a SHA-keyed stamp makes it a one-time cost.
 #
 # [!] lib/cmsis_core is NOT reused for the CMSIS-NN build.  The donor firmware recorded
 # that a vendored CMSIS core/NN pair mismatched against the one tflite-micro expects
@@ -26,10 +27,10 @@
 
 enable_language(CXX)
 
-# --- Pinned upstream ---------------------------------------------------------
-set(TFLM_GIT_URL "https://github.com/tensorflow/tflite-micro.git")
-set(TFLM_GIT_SHA "e142972d4f4382f77faa8212b7c70b37d28b9cb9")   # same pin as the donor
-set(TFLM_SRC  "${CMAKE_BINARY_DIR}/tflm-src")     # shallow clone at the pinned SHA
+# --- Pinned upstream: the lib/tflite-micro gitlink ---------------------------
+include("${CMAKE_SOURCE_DIR}/cmake/tflm_submodule.cmake")
+tflm_submodule_pin(TFLM_GIT_SHA)                  # fatal unless HEAD == gitlink
+set(TFLM_SRC  "${CMAKE_BINARY_DIR}/tflm-src")     # git archive of the pinned commit
 set(TFLM_ROOT "${CMAKE_BINARY_DIR}/tflm-tree")    # generated self-contained tree
 set(TFLM_GEN  "${TFLM_SRC}/tensorflow/lite/micro/tools/project_generation/create_tflm_tree.py")
 
@@ -174,17 +175,17 @@ if(NOT EXISTS "${TFLM_PY}")
     endif()
 endif()
 
-# --- Fetch + generate the tree (SHA-keyed stamp: once per pin) ----------------
+# --- Export + generate the tree (SHA-keyed stamp: once per pin) ---------------
 # The stamp is written ONLY after a fully successful generation, and each attempt
-# starts from a clean clone plus a fresh dependency install, so an interrupted run
+# starts from a clean export plus a fresh dependency install, so an interrupted run
 # self-heals on the next configure.  That matters more than it sounds: upstream's
 # third-party extractor SKIPS a download directory that merely exists, so a download
 # interrupted half-way would never repair itself in place -- it would produce a tree
 # that configures and then fails to compile, pointing at nothing in particular.
 if(NOT EXISTS "${TFLM_STAMP}")
-    message(STATUS "tflm: fetching tflite-micro @ ${TFLM_GIT_SHA} and generating the "
-                   "source tree (one-time, a few minutes -- clones tflite-micro and "
-                   "downloads flatbuffers/gemmlowp/ruy/CMSIS-NN)")
+    message(STATUS "tflm: generating the source tree from lib/tflite-micro @ "
+                   "${TFLM_GIT_SHA} (one-time, a few minutes -- downloads "
+                   "flatbuffers/gemmlowp/ruy/CMSIS-NN)")
 
     execute_process(
         COMMAND "${TFLM_VENV}/bin/pip" install -q --disable-pip-version-check
@@ -194,28 +195,7 @@ if(NOT EXISTS "${TFLM_STAMP}")
         message(FATAL_ERROR "tflm: pip install -r requirements.txt failed")
     endif()
 
-    file(REMOVE_RECURSE "${TFLM_SRC}")
-    file(MAKE_DIRECTORY "${TFLM_SRC}")
-    execute_process(COMMAND git init -q WORKING_DIRECTORY "${TFLM_SRC}" RESULT_VARIABLE _rc)
-    if(NOT _rc EQUAL 0)
-        message(FATAL_ERROR "tflm: git init failed")
-    endif()
-    execute_process(COMMAND git remote add origin "${TFLM_GIT_URL}"
-                    WORKING_DIRECTORY "${TFLM_SRC}" RESULT_VARIABLE _rc)
-    if(NOT _rc EQUAL 0)
-        message(FATAL_ERROR "tflm: git remote add failed")
-    endif()
-    execute_process(COMMAND git fetch --depth 1 -q origin "${TFLM_GIT_SHA}"
-                    WORKING_DIRECTORY "${TFLM_SRC}" RESULT_VARIABLE _rc)
-    if(NOT _rc EQUAL 0)
-        message(FATAL_ERROR "tflm: git fetch ${TFLM_GIT_SHA} failed "
-                            "(needs network and a reachable SHA)")
-    endif()
-    execute_process(COMMAND git checkout -q -f FETCH_HEAD
-                    WORKING_DIRECTORY "${TFLM_SRC}" RESULT_VARIABLE _rc)
-    if(NOT _rc EQUAL 0)
-        message(FATAL_ERROR "tflm: git checkout FETCH_HEAD failed")
-    endif()
+    tflm_submodule_export("${TFLM_GIT_SHA}" "${TFLM_SRC}")
 
     file(REMOVE_RECURSE "${TFLM_ROOT}")
     execute_process(
@@ -358,7 +338,7 @@ target_compile_options(tflm PRIVATE
 target_link_libraries(tflm PUBLIC stdc++_nano supc++_nano m)
 
 # --- Host-side model checker (scripts/verify_tflite.cc) ----------------------
-# Built with the HOST compiler, against the same fetched tree, so it runs the identical
+# Built with the HOST compiler, against the same generated tree, so it runs the identical
 # tflite::VerifyModelBuffer() the firmware would -- see the file's own header for why
 # "identical" rather than "equivalent" is the whole point.
 #

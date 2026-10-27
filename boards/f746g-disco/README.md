@@ -23,8 +23,9 @@ picocom -b 115200 /dev/ttyACM0                   # the ST-Link VCP
 
 The first configure downloads the pinned ARM GNU toolchain into `tools/` and
 the submodules this board needs (`boards/f746g-disco/submodules.cmake`).  The
-default NN backend (`tflm`) also fetches tflite-micro at configure time and the
-pinned model at build time; `-DCONFIG_NN_BACKEND=null` builds offline (see
+default NN backend (`tflm`) also generates the tflite-micro tree from the
+`lib/tflite-micro` submodule at configure time (which downloads its third-party
+dependencies) and fetches the pinned model at build time; `-DCONFIG_NN_BACKEND=null` builds offline (see
 [Build options](#build-options)).
 
 ## The board at a glance
@@ -143,8 +144,10 @@ emits and refuses (leaving no array behind) if the file changed after the
 fetch verified it.
 
 [!] **The default build needs the network**, once per build directory: for the
-tflite-micro tree at configure time (this was already true of any tflm build)
-and for the model at build time. This is a deliberate difference from the
+tflite-micro tree at configure time (this was already true of any tflm build;
+since issue #134 tflite-micro itself is the `lib/tflite-micro` submodule, but
+generating the tree still downloads its third-party dependencies) and for the
+model at build time. This is a deliberate difference from the
 `asset-*` rule (issue #94), whose fetch stays outside ALL because a container
 is not part of the firmware; here the model is. A `null` build needs neither and
 configures and builds offline.

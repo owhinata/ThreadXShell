@@ -588,3 +588,18 @@ every gate reads the linked image and it was self-consistent.
   record, or with any record that is not the header's ABI (`stale_tu` and
   `no_marks` in `run_plugin_gate_tests.py`). This is the backstop, not the fix:
   a TU that does not include the header states no ABI.
+
+# tflite-micro from its submodule (#134)
+
+`tflm_submodule.cmake` is shared by the boards whose `tflm` backend generates a
+tree with upstream's `create_tflm_tree.py` (f746g-disco, wio-lite-ai).
+`tflm_submodule_pin()` returns the commit the superproject's gitlink records for
+`lib/tflite-micro` (read from the index) and stops the configure if the
+submodule is uninitialised or checked out anywhere else; it also makes the
+submodule's HEAD file a configure dependency, so a checkout re-runs configure.
+`tflm_submodule_export()` writes that commit with `git archive` into
+`build/<board>/tflm-src`, where the board runs the generator. The generator is
+never run inside `lib/`: it downloads ~300 MB of third-party code into the
+tflite-micro tree it runs from, and a fresh export per attempt is what lets an
+interrupted download heal on the next configure. Uncommitted edits in the
+submodule are not exported.

@@ -119,6 +119,18 @@ declares the upstream mirrors it needs in `boards/<board>/submodules.cmake`, and
 only those are fetched -- the first `f746g-disco` configure is heavy (GUIX alone
 is about 1.5 GB) and none of it is pulled in for a `wio-lite-ai` build.
 
+tflite-micro, which the `tflm` NN backend of `f746g-disco` and `wio-lite-ai`
+compiles, is the `lib/tflite-micro` submodule (issue #134) and is pinned by its
+gitlink like every other mirror. It is not compiled in place: at configure time
+the pinned commit is exported into `build/<board>/tflm-src` and upstream's
+`create_tflm_tree.py` generates `build/<board>/tflm-tree` from it
+(`cmake/tflm_submodule.cmake`). That generation still downloads tflite-micro's own
+third-party dependencies and runs Python, so a tflm configure needs the network
+even with the submodule present. To move the pin, check the submodule out at the
+new commit and commit the gitlink (`git add lib/tflite-micro`); configure refuses a
+submodule whose checkout differs from the gitlink, and a new pin regenerates the
+tree on the next build.
+
 The Grove Vision AI V2 additionally fetches the Himax WiseEye2 SDK (~480 MB, a
 pinned commit) into `boards/grove-vision-ai-v2/sdk/` on first configure -- not a
 submodule, git-ignored, treated read-only; `-DGROVE_SDK_DIR=<path>` points at an

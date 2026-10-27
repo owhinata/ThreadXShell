@@ -206,8 +206,9 @@ def main(argv=None):
                     help="the board's VENEER_BASE_COST, in bytes")
     ap.add_argument("--printer-limit", action="append", default=[],
                     metavar="WHO=BYTES",
-                    help="a plugin's own pl_sbuf_write bound, which runs below "
-                         "the printer veneer too")
+                    help="a plugin's printer limit -- the bound on every "
+                         "plugin function the base may be handed, which runs "
+                         "below the printer veneer too")
     ap.add_argument("--prebuilt-root", action="append", default=[],
                     metavar="DIR",
                     help="archives under DIR are the toolchain's or a "

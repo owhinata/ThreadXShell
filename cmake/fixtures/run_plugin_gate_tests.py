@@ -94,7 +94,7 @@ NO_UNWIND = ["-fno-unwind-tables", "-fno-asynchronous-unwind-tables"]
 
 
 def build(cc, nm, objdump, work, board, mutate=None, cflags=None, facts=None,
-          entries=None, inspect=None, after=None):
+          entries=None, inspect=None, after=None, printer="1024"):
     """Build a plugin image for `board`, optionally mutated.
 
     `cflags` replaces the non-architecture flags; `facts` overrides what the
@@ -102,7 +102,7 @@ def build(cc, nm, objdump, work, board, mutate=None, cflags=None, facts=None,
     gate also writes --emit-stacks and `inspect(elf, sus, emitted)` runs while
     the tree still exists.  `after(elf, sus)` runs once the gate has, whatever
     it said -- for a refusal whose point is that the OLD walk would not have
-    made it.  Returns (rc, output)."""
+    made it.  `printer` is --printer-limit.  Returns (rc, output)."""
     b = BOARDS[board]
     src = os.path.join(work, "src")
     shutil.copytree(PLUGIN, src)
@@ -182,16 +182,72 @@ def build(cc, nm, objdump, work, board, mutate=None, cflags=None, facts=None,
                 if ln.strip():
                     os.remove(os.path.join(work, ln.strip() + ".su"))
 
+    # The link inputs and what the gate is told about them (issue #124 D5).
+    # `.archive_obj` names an object linked from an archive instead of
+    # directly; `.omit_obj` one the gate is not given; `.extra_obj` adds an
+    # object the gate is given and the link never sees.
+    def marker(name):
+        path = os.path.join(src, name)
+        if not os.path.exists(path):
+            return []
+        with open(path) as fh:
+            return [ln.strip() for ln in fh if ln.strip()]
+    link_in = list(objs)
+    for stem in marker(".archive_obj"):
+        obj = os.path.join(work, stem + ".o")
+        lib = os.path.join(work, "lib" + stem + ".a")
+        ar = os.path.join(os.path.dirname(cc),
+                          os.path.basename(cc).replace("gcc", "ar"))
+        subprocess.run([ar, "rcs", lib, obj], check=True)
+        link_in[link_in.index(obj)] = lib
+    given = list(link_in)
+    for stem in marker(".omit_obj"):
+        given.remove(os.path.join(work, stem + ".o"))
+    for stem in marker(".extra_obj"):
+        extra = os.path.join(work, stem + ".o")
+        with open(os.path.join(work, stem + ".c"), "w") as fh:
+            fh.write("int %s(int x) { return x + 1; }\n" % stem)
+        subprocess.run([cc] + cflags + ["-c", os.path.join(work, stem + ".c"),
+                                        "-o", extra], check=True, cwd=work)
+        given.append(extra)
+
     elf = os.path.join(work, "plugin.elf")
     pmap = os.path.join(work, "plugin.map")
     r = subprocess.run([cc, "-nostdlib", "-nostartfiles",
                         "-T", os.path.join(src, "plugin_link.ld"),
                         "-Wl,--gc-sections", "-Wl,--no-warn-rwx-segments",
                         "-Wl,-Map=" + pmap]
-                       + b["arch"] + objs + ["-o", elf],
+                       + b["arch"] + link_in + ["-o", elf],
                        capture_output=True, text=True, cwd=work)
     if r.returncode != 0:
         return 98, "link failed:\n" + r.stderr
+    # After the link: `.corrupt_obj` overwrites an object the gate will read
+    # (`.exec_obj` with the linked image itself);
+    # `.drop_map_line` deletes the map's placement of an input section (its
+    # line, and the address line under it when the name stands alone).
+    for stem in marker(".corrupt_obj"):
+        with open(os.path.join(work, stem + ".o"), "wb") as fh:
+            fh.write(b"this is not an object file\n")
+    for stem in marker(".exec_obj"):            # an ELF, but not relocatable
+        shutil.copy(elf, os.path.join(work, stem + ".o"))
+    for sec in marker(".drop_map_line"):
+        with open(pmap) as fh:
+            lines = fh.read().split("\n")
+        out, skip, hit = [], False, False
+        for ln in lines:
+            if skip:
+                skip = False
+                continue
+            if hit is False and ln.startswith("Linker script and memory map"):
+                hit = None
+            if hit is None and ln.split()[:1] == [sec]:
+                hit = True
+                skip = ln.strip() == sec
+                continue
+            out.append(ln)
+        assert hit, "fixture: no placement of %s in the map" % sec
+        with open(pmap, "w") as fh:
+            fh.write("\n".join(out))
 
     gate_facts = dict(b["facts"])
     gate_facts.update(facts or {})
@@ -203,6 +259,8 @@ def build(cc, nm, objdump, work, board, mutate=None, cflags=None, facts=None,
                        + ["--entry"] + (entries or ["pl_draw=1024",
                                                     "pl_decode=8192"])
                        + (["--emit-stacks", emitted] if inspect else [])
+                       + ["--objects"] + given
+                       + ["--printer-limit", printer]
                        + [x for kv in gate_facts.items() for x in kv],
                        capture_output=True, text=True)
     out = r.stdout + r.stderr
@@ -537,6 +595,236 @@ def m_su_above_scan(src):
     and the scan is not believed."""
     with open(os.path.join(src, ".raise_su"), "w") as fh:
         fh.write("pl_decode 4000\n")
+
+
+# ---- the functions the base may be handed (issue #124, D5) -----------------
+#
+# S is the bound of every plugin function whose address the plugin takes for
+# a reason other than a branch, found in the relocations of the linked
+# objects.  Each case below takes an address one way (a data word, a literal
+# pool, MOVW/MOVT, a section symbol plus an addend, a slot function outside
+# the table) or breaks one of the rules the list depends on, behind the same
+# `n == 0xDEADu` guard as above so that it is linked and never executed.
+FX_DEEP_WRITE = (
+    "__attribute__((noinline, used)) static int fx_write_deep(void *ctx, "
+    "const char *s, size_t len)\n"
+    "{ volatile unsigned char b[200]; (void)ctx; b[0] = (unsigned char)len;\n"
+    "  b[199] = (unsigned char)s[0]; return b[len & 127] + b[199]; }\n")
+
+
+def m_handed_painter(src):
+    """The plugin's own painter: a struct of its own functions handed to the
+    painter veneer, whose rect is deeper than pl_sbuf_write."""
+    inject(src,
+           "__attribute__((noinline)) static void fx_rect_deep(void *ctx, "
+           "const struct plugin_rect *r, uint16_t c, uint16_t k)\n"
+           "{ volatile unsigned char b[200]; (void)ctx; (void)r;\n"
+           "  b[0] = (unsigned char)c; b[199] = (unsigned char)k;\n"
+           "  fx_vin = b[fx_vin & 127] + b[199]; }\n"
+           "static const struct plugin_painter fx_painter = {\n"
+           "  PLUGIN_ABI_VERSION, sizeof(struct plugin_painter), 0,\n"
+           "  fx_rect_deep, 0, 0 };\n",
+           "{ struct plugin_rect fr = {0, 0, 1, 1};\n"
+           "  pl_paint_rect(&fx_painter, &fr, 0, 1); return 0; }")
+
+
+def m_handed_crosses(src):
+    """A printer write of the plugin's own that calls a veneer itself."""
+    inject(src,
+           "__attribute__((noinline)) static int fx_write_log(void *ctx, "
+           "const char *s, size_t len)\n"
+           "{ return pl_print_write((const struct plugin_printer *)ctx, s, "
+           "len); }\n"
+           "static struct plugin_printer fx_pr;\n",
+           "{ fx_pr.write = fx_write_log; return pl_print_write(&fx_pr, "
+           "\"x\", 1); }")
+
+
+def m_handed_slot_fn(src):
+    """A slot function put in a printer: its reference from the slot table
+    does not list it, this one does."""
+    inject(src,
+           "static struct plugin_printer fx_pr;\n",
+           "{ fx_pr.write = (int (*)(void *, const char *, size_t))"
+           "(uintptr_t)pl_shapes_ok;\n"
+           "  return pl_print_write(&fx_pr, \"x\", 1); }")
+
+
+def m_handed_unknown(src):
+    """A pc-relative data word: R_ARM_REL32, a type the gate does not read."""
+    inject(src, DEEP +
+           "__asm__(\".section .rodata.fx_rel,\\\"a\\\"\\n.global fx_rel\\n"
+           "fx_rel: .word fx_deep - .\\n.text\\n\");\n"
+           "extern const int fx_rel;\n",
+           "return fx_rel;")
+
+
+def m_handed_slot_read(src):
+    """Code that reads a function pointer out of the slot table."""
+    inject(src, "extern const void *const plugin_slot_table[];\n",
+           "return (int)(uintptr_t)plugin_slot_table[" + ARG + " & 3];")
+
+
+def m_handed_section_sym(src):
+    """A static function's address as a section symbol plus an addend: the
+    word names .text.fx_sec, not fx_sec."""
+    inject(src,
+           naked("fx_sec", ".Lfx_sec_at:\\n\\tsub sp, sp, #256\\n\\t"
+                           "add sp, sp, #256\\n\\tbx lr").replace(
+                               "int fx_sec", "static int fx_sec") +
+           naked("fx_secref", "ldr r0, 1f\\n\\tbx lr\\n\\t.align 2\\n"
+                              "1:\\t.word .Lfx_sec_at + 1"),
+           "return fx_secref(" + ARG + ");")
+
+
+def m_handed_movw(src):
+    """MOVW/MOVT building a function's address in a register."""
+    inject(src, FX_DEEP_WRITE +
+           naked("fx_movw", "movw r0, #:lower16:fx_write_deep\\n\\t"
+                            "movt r0, #:upper16:fx_write_deep\\n\\tbx lr"),
+           "return fx_movw(" + ARG + ");")
+
+
+def m_handed_literal(src):
+    """A function's address in a literal pool, loaded pc-relative."""
+    inject(src, FX_DEEP_WRITE +
+           naked("fx_lit", "ldr r0, 1f\\n\\tbx lr\\n\\t.align 2\\n"
+                           "1:\\t.word fx_write_deep"),
+           "return fx_lit(" + ARG + ");")
+
+
+def m_handed_interior(src):
+    """A code address that is not a function's first instruction."""
+    inject(src, DEEP +
+           naked("fx_mid", "ldr r0, 1f\\n\\tbx lr\\n\\t.align 2\\n"
+                           "1:\\t.word fx_deep + 5"),
+           "return fx_mid(" + ARG + ");")
+
+
+def m_handed_other_tu(src):
+    """A function of one object whose address another object takes: the
+    reference is an undefined symbol, resolved through the defining object."""
+    inject(src,
+           "__attribute__((noinline)) int fx_far(void *ctx, const char *s, "
+           "size_t len)\n"
+           "{ volatile unsigned char b[300]; (void)ctx; b[0] = (unsigned "
+           "char)len;\n  b[299] = (unsigned char)s[0]; return b[len & 127] "
+           "+ b[299]; }\n"
+           "extern void fx_libc_take(void);\n",
+           "{ fx_libc_take(); return 0; }")
+    sub(os.path.join(src, "plugin_libc.c"), "void *memset(",
+        "extern int fx_far(void *ctx, const char *s, size_t len);\n"
+        "int (*volatile fx_far_ptr)(void *, const char *, size_t);\n"
+        "void fx_libc_take(void) { fx_far_ptr = fx_far; }\n"
+        "void *memset(")
+
+
+def m_handed_slot_alias(src):
+    """Another name for the slot table, read from another object."""
+    with open(os.path.join(src, "plugin_main.c"), "a") as fh:
+        fh.write("extern const void *const fx_slot_alias[PLUGIN_SLOT_COUNT]\n"
+                 "    __attribute__((alias(\"plugin_slot_table\")));\n")
+    inject(src, "extern const void *fx_libc_slot(void);\n",
+           "return (int)(uintptr_t)fx_libc_slot();")
+    sub(os.path.join(src, "plugin_libc.c"), "void *memset(",
+        "extern const void *const fx_slot_alias[];\n"
+        "extern volatile unsigned fx_vin;\n"
+        "const void *fx_libc_slot(void) "
+        "{ return fx_slot_alias[fx_vin & 3u]; }\n"
+        "void *memset(")
+
+
+def m_handed_slot_local_alias(src):
+    """Another name for the slot table, read in the table's own object: the
+    reference names a symbol defined in the table's section."""
+    with open(os.path.join(src, "plugin_main.c"), "a") as fh:
+        fh.write("extern const void *const fx_slot_alias[PLUGIN_SLOT_COUNT]\n"
+                 "    __attribute__((alias(\"plugin_slot_table\")));\n"
+                 "const void *fx_main_slot(void)\n"
+                 "{ return fx_slot_alias[fx_vin & 3u]; }\n")
+    inject(src, "extern const void *fx_main_slot(void);\n",
+           "return (int)(uintptr_t)fx_main_slot();")
+
+
+def m_handed_slot_data_addend(src):
+    """A data word placed just before the table, plus an addend that reaches
+    the table: it names data, and the address it makes is the table's."""
+    sub(os.path.join(src, "plugin.ld"), "        __plugin_slots_start = .;",
+        "        KEEP(*(.fx_before))\n"
+        "        __plugin_slots_start = .;")
+    inject(src,
+           "__asm__(\".section .fx_before,\\\"a\\\"\\n.align 2\\n"
+           "fx_before: .word 0\\n.text\\n\");\n" +
+           naked("fx_dataref", "ldr r0, 1f\\n\\tbx lr\\n\\t.align 2\\n"
+                               "1:\\t.word fx_before + 4"),
+           "return fx_dataref(" + ARG + ");")
+
+
+def m_handed_gc(src):
+    """A function --gc-sections removes, which took a kept function's
+    address: its relocations are not in the image and list nothing."""
+    inject(src,
+           "static int pl_shapes_ok(const struct tensor_desc *outs, "
+           "unsigned n);\n"
+           "struct plugin_printer fx_pr_unused;\n"
+           "__attribute__((noinline)) void fx_unused(void)\n"
+           "{ fx_pr_unused.write = (int (*)(void *, const char *, size_t))"
+           "(uintptr_t)pl_shapes_ok; }\n", None)
+
+
+def m_handed_slot_end(src):
+    """The link script's end-of-table symbol, as a loop over the table would
+    use it.  It is one past the table, so only its NAME says what it is."""
+    inject(src, "extern const void *const __plugin_slots_end[];\n",
+           "return (int)(uintptr_t)__plugin_slots_end[-1 - (int)(fx_vin & 3u)];")
+
+
+def m_handed_slot_ldsym(src):
+    """A symbol the link script defines inside the table, under a name the
+    gate does not know: refused by where it points."""
+    sub(os.path.join(src, "plugin.ld"), "        __plugin_slots_end = .;",
+        "        __plugin_slots_end = .;\n"
+        "        fx_slot_mid = __plugin_slots_start + 8;")
+    inject(src, "extern const void *const fx_slot_mid[];\n",
+           "return (int)(uintptr_t)fx_slot_mid[0];")
+
+
+def m_handed_code_not_fn(src):
+    """A code address that no function symbol covers at all."""
+    inject(src,
+           "__asm__(\".section .text.fx_nofn,\\\"ax\\\",%progbits\\n"
+           ".thumb\\nfx_nofn_at: bx lr\\n.text\\n\");\n" +
+           naked("fx_nofnref", "ldr r0, 1f\\n\\tbx lr\\n\\t.align 2\\n"
+                               "1:\\t.word fx_nofn_at + 1"),
+           "return fx_nofnref(" + ARG + ");")
+
+
+def marker_file(name, *lines):
+    def f(src):
+        with open(os.path.join(src, name), "w") as fh:
+            fh.write("".join(ln + "\n" for ln in lines))
+    return f
+
+
+def check_sink(want_name, want_more_than=None, want_equal=None):
+    """An `inspect`: S is `want_name`'s bound, and above / equal to a number."""
+    import json
+
+    def check(_elf, _sus, emitted):
+        with open(emitted) as fh:
+            e = json.load(fh)
+        d = e["entries"].get(want_name)
+        if d is None:
+            return "no emitted entry for %s" % want_name
+        if e["sink"] != d["own"]:
+            return "S is %d, %s's bound is %d" % (e["sink"], want_name,
+                                                   d["own"])
+        if want_more_than is not None and not e["sink"] > want_more_than:
+            return "S %d is not above %d" % (e["sink"], want_more_than)
+        if want_equal is not None and e["sink"] != want_equal:
+            return "S %d, expected %d" % (e["sink"], want_equal)
+        return None
+    return check
 
 
 # ---- the declaration the gate emits (issue #111) ---------------------------
@@ -956,9 +1244,6 @@ EMIT_CASES = [
     ("emit_wio", "wio", None, [n + "=1048576" for n in ALL_SLOTS],
      "accept", None,
      "wio: the same, on the M7 image"),
-    ("emit_no_sink", "grove", None, ["pl_draw=1048576", "pl_decode=1048576"],
-     "gate", "--emit-stacks needs --entry pl_sbuf_write",
-     "gate: a declaration cannot be emitted without S"),
     ("sink_crosses", "grove", m_sink_crosses,
      [n + "=1048576" for n in ALL_SLOTS], "gate", "reaches a veneer itself",
      "gate: a sink that crosses a veneer would put c back into S"),
@@ -989,6 +1274,127 @@ EMIT_CASES = [
      [n + "=1048576" for n in ALL_SLOTS], "accept", None,
      "accepted, SMALLER than the old walk and equal to it with the frames "
      "unmerged", {"smaller": ("pl_decode", libc_helper_frame)}),
+]
+
+
+# --- the functions the base may be handed (issue #124, D5) -------------------
+# (name, board, mutate, expected, must-say, why, inspect or None, printer
+#  [, cflags]).
+# Every case's --entry is the slots alone: S comes from the relocations, not
+# from a name on the command line.
+SLOTS_ONLY = [n + "=1048576" for n in ALL_SLOTS if n != "pl_sbuf_write"]
+HANDED_CASES = [
+    ("handed_clean", "grove", None, "accept",
+     "S = 16 B over the functions the base may be handed: "
+     "[pl_sbuf_write 16 B]",
+     "accepted: the shipped plugin hands the base pl_sbuf_write only -- the "
+     "slot table's references list nothing", check_sink("pl_sbuf_write",
+                                                       want_equal=16), "64"),
+    ("handed_clean", "wio", None, "accept",
+     "S = 16 B over the functions the base may be handed: "
+     "[pl_sbuf_write 16 B]",
+     "accepted: the same on the M7", check_sink("pl_sbuf_write",
+                                                want_equal=16), "64"),
+    ("handed_painter", "grove", m_handed_painter, "accept", "fx_rect_deep",
+     "accepted, and S rises to the plugin's own painter function",
+     check_sink("fx_rect_deep", want_more_than=16), "1024"),
+    ("handed_painter", "wio", m_handed_painter, "accept", "fx_rect_deep",
+     "accepted, the same on the M7",
+     check_sink("fx_rect_deep", want_more_than=16), "1024"),
+    ("handed_over_limit", "grove", m_handed_painter, "gate",
+     "fx_rect_deep can be handed to the base",
+     "gate: the printer limit holds for every function on the list", None,
+     "64"),
+    ("handed_crosses", "grove", m_handed_crosses, "gate",
+     "fx_write_log can be handed to the base",
+     "gate: a function on the list that reaches a veneer itself", None,
+     "1024"),
+    ("handed_slot_fn", "grove", m_handed_slot_fn, "accept", "pl_shapes_ok",
+     "accepted, and a slot function put in a printer is on the list",
+     check_sink("pl_shapes_ok", want_more_than=16), "1024"),
+    ("handed_unknown_type", "grove", m_handed_unknown, "gate",
+     "relocation type 3 is not one this gate reads",
+     "gate: an unknown relocation type (R_ARM_REL32)", None, "1024"),
+    ("handed_slot_read", "grove", m_handed_slot_read, "gate",
+     "refers to the slot table",
+     "gate: code that reads the slot table", None, "1024"),
+    ("handed_section_sym", "grove", m_handed_section_sym, "accept",
+     "fx_sec 256 B",
+     "accepted, and a static function named by section symbol + addend is "
+     "on the list", check_sink("fx_sec", want_equal=256), "1024"),
+    ("handed_movw_movt", "grove", m_handed_movw, "accept", "fx_write_deep",
+     "accepted, and a MOVW/MOVT-built address is on the list",
+     check_sink("fx_write_deep", want_more_than=16), "1024"),
+    ("handed_movw_movt", "wio", m_handed_movw, "accept", "fx_write_deep",
+     "accepted, the same on the M7",
+     check_sink("fx_write_deep", want_more_than=16), "1024"),
+    ("handed_literal", "grove", m_handed_literal, "accept", "fx_write_deep",
+     "accepted, and a literal-pool address is on the list",
+     check_sink("fx_write_deep", want_more_than=16), "1024"),
+    ("handed_interior", "grove", m_handed_interior, "gate",
+     "points into fx_deep+0x4, not at a function's first instruction",
+     "gate: a code address that is not a function start", None, "1024"),
+    ("handed_other_tu", "grove", m_handed_other_tu, "accept", "fx_far",
+     "accepted, and a function whose address another object takes is on the "
+     "list", check_sink("fx_far", want_more_than=16), "1024"),
+    ("handed_slot_alias", "grove", m_handed_slot_alias, "gate",
+     "fx_slot_alias): refers to the slot table",
+     "gate: another name for the slot table, from another object", None,
+     "1024"),
+    ("handed_slot_local_alias", "grove", m_handed_slot_local_alias, "gate",
+     "fx_slot_alias): refers to the slot table",
+     "gate: another name for the slot table, in the table's own object",
+     None, "1024"),
+    ("handed_slot_data_addend", "grove", m_handed_slot_data_addend, "gate",
+     "refers to the slot table",
+     "gate: a data symbol plus an addend that lands in the slot table", None,
+     "1024"),
+    ("handed_gc", "grove", m_handed_gc, "accept",
+     "S = 16 B over the functions the base may be handed: "
+     "[pl_sbuf_write 16 B]",
+     "accepted: an address taken only in code the link removed lists nothing",
+     check_sink("pl_sbuf_write", want_equal=16), "64"),
+    ("handed_slot_end", "grove", m_handed_slot_end, "gate",
+     "__plugin_slots_end): refers to the slot table",
+     "gate: the table's end symbol -- one past it, refused by name", None,
+     "1024"),
+    ("handed_slot_ldsym", "grove", m_handed_slot_ldsym, "gate",
+     "fx_slot_mid): refers to the slot table",
+     "gate: a link-script symbol inside the table -- refused by address",
+     None, "1024"),
+    ("handed_debug", "grove", None, "accept",
+     "S = 16 B over the functions the base may be handed: "
+     "[pl_sbuf_write 16 B]",
+     "accepted with -g: debug information names every function and is not "
+     "loaded, so it lists nothing", check_sink("pl_sbuf_write",
+                                               want_equal=16), "64",
+     BASE_FLAGS + NO_UNWIND + ["-g"]),
+    ("handed_code_not_fn", "grove", m_handed_code_not_fn, "gate",
+     "that is not a function's first instruction",
+     "gate: a code address no function covers", None, "1024"),
+    ("handed_not_relocatable", "grove", marker_file(".exec_obj", "plugin_fmt"),
+     "gate", "plugin_fmt.o: not a relocatable object",
+     "gate: an input that is an ELF but not an object", None, "1024"),
+    ("handed_unreadable", "grove", marker_file(".corrupt_obj", "plugin_fmt"),
+     "gate", "plugin_fmt.o: cannot read its relocations",
+     "gate: an object whose relocations cannot be read", None, "1024"),
+    ("handed_not_given", "grove", marker_file(".omit_obj", "plugin_fmt"),
+     "gate", "plugin_fmt.o: the link loaded it and the gate was not given it",
+     "gate: an object the link loaded and the gate did not read", None,
+     "1024"),
+    ("handed_not_linked", "grove", marker_file(".extra_obj", "fx_extra"),
+     "gate", "fx_extra.o: given to the gate, but the link did not load it",
+     "gate: an object the gate was given and the link never saw", None,
+     "1024"),
+    ("handed_archive", "grove", marker_file(".archive_obj", "plugin_text"),
+     "gate", "is not an object the link loaded",
+     "gate: code placed from an archive member, which is not an object the "
+     "gate read", None, "1024"),
+    ("handed_unplaced", "grove",
+     marker_file(".drop_map_line", ".text.pl_sbuf_printer"), "gate",
+     "section .text.pl_sbuf_printer is neither placed nor discarded",
+     "gate: an allocated section the map does not account for -- its "
+     "relocations are not skipped as if collected", None, "1024"),
 ]
 
 
@@ -1197,6 +1603,24 @@ def main():
         if got != expect_fail or (must_say and must_say not in out):
             print(f"  FAIL {label:24s} expected {expect_fail}, got {got}"
                   f"\n        {out.strip()[:400]}")
+            bad += 1
+        else:
+            print(f"  ok   {label:24s} {why}")
+
+    for case in HANDED_CASES:
+        name, board, mutate, expect, must_say, why, insp, printer = case[:8]
+        cflags = case[8] if len(case) > 8 else None
+        with tempfile.TemporaryDirectory() as work:
+            rc, out = build(args.cc, args.nm, args.objdump, work, board,
+                            mutate, cflags, None, SLOTS_ONLY,
+                            insp or (lambda *_a: None), None, printer)
+        got = "inspect" if rc == 97 else (
+            "gate" if rc not in (0, 98, 99) else ("accept" if rc == 0
+                                                  else "build"))
+        label = f"{board}:{name}"
+        if got != expect or (must_say and must_say not in out):
+            print(f"  FAIL {label:24s} expected {expect}, got {got}"
+                  f"\n        {out.strip()[:600]}")
             bad += 1
         else:
             print(f"  ok   {label:24s} {why}")

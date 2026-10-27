@@ -130,9 +130,10 @@ by `cmake/fetch_upstream.cmake` (shallow, at the exact commit, sparse) into
 `upstream/<repo>-<commit>/` in the source tree -- git-ignored, read-only like
 `lib/`, and shared by every build directory of the clone: only the first configure
 that needs a tree goes to the network, and every later one, for any board, is
-offline. An existing tree is only checked, never repaired: one at another commit,
-edited, or missing a file stops the configure; delete the directory to fetch it
-again. A clone made before #136 still has `lib/stm32f7xx_hal_driver`,
+offline. An existing tree is only checked, never repaired: one at another commit
+or on a branch, edited, or missing a file stops the configure; delete the
+directory to fetch it again. The checks ask `git sparse-checkout check-rules`, so
+git 2.42 or later is needed. A clone made before #136 still has `lib/stm32f7xx_hal_driver`,
 `lib/stm32h7xx_hal_driver`, `lib/cmsis_device_f7`, `lib/cmsis_device_h7` and
 `lib/cmsis_core` checked out; nothing reads them any more, and they can be deleted.
 

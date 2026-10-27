@@ -12,6 +12,12 @@
 #  moves only the gitlink -- without making .git/index a configure dependency.
 #  Reads only: neither command below writes the index.
 # ============================================================================
+# git runs through FETCH_UPSTREAM_GIT, as at configure (cmake/tflm_submodule.cmake).
+# The log level hides the "Found Git" line find_package would print on every build.
+set(CMAKE_MESSAGE_LOG_LEVEL NOTICE)
+include("${CMAKE_CURRENT_LIST_DIR}/fetch_upstream.cmake")
+unset(CMAKE_MESSAGE_LOG_LEVEL)
+
 foreach(_v SRC_ROOT SUB_DIR PIN)
     if(NOT DEFINED ${_v} OR "${${_v}}" STREQUAL "")
         message(FATAL_ERROR "tflm_pin_check: ${_v} is not set")
@@ -20,7 +26,7 @@ endforeach()
 
 set(_gitlink "<unreadable>")
 execute_process(
-    COMMAND git -C "${SRC_ROOT}" ls-files -s -- lib/tflite-micro
+    COMMAND ${FETCH_UPSTREAM_GIT} -C "${SRC_ROOT}" ls-files -s -- lib/tflite-micro
     OUTPUT_VARIABLE _ls OUTPUT_STRIP_TRAILING_WHITESPACE
     RESULT_VARIABLE _rc ERROR_QUIET)
 if(_rc EQUAL 0 AND _ls MATCHES "^160000 ([0-9a-f]+) 0\tlib/tflite-micro$")
@@ -30,7 +36,7 @@ endif()
 # Same test as configure: git must answer for the submodule, not the superproject.
 set(_head "<unreadable>")
 execute_process(
-    COMMAND git -C "${SUB_DIR}" rev-parse --show-toplevel
+    COMMAND ${FETCH_UPSTREAM_GIT} -C "${SUB_DIR}" rev-parse --show-toplevel
     OUTPUT_VARIABLE _top OUTPUT_STRIP_TRAILING_WHITESPACE
     RESULT_VARIABLE _rc ERROR_QUIET)
 if(_rc EQUAL 0)
@@ -38,7 +44,7 @@ if(_rc EQUAL 0)
     file(REAL_PATH "${SUB_DIR}" _want)
     if(_top STREQUAL _want)
         execute_process(
-            COMMAND git -C "${SUB_DIR}" rev-parse --verify -q HEAD
+            COMMAND ${FETCH_UPSTREAM_GIT} -C "${SUB_DIR}" rev-parse --verify -q HEAD
             OUTPUT_VARIABLE _h OUTPUT_STRIP_TRAILING_WHITESPACE
             RESULT_VARIABLE _rc ERROR_QUIET)
         if(_rc EQUAL 0 AND _h MATCHES "^[0-9a-f]+$")

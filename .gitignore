@@ -89,3 +89,9 @@ __pycache__/
 # generation, and the -mlperf variants for the host side of a benchmark run.  All
 # reproducible from a requirements.txt, so none of them belong in git.
 /.venv*/
+
+# Upstream source trees fetched at a pinned commit by cmake/fetch_upstream.cmake
+# (issue #136: the ST Cube set -- HAL, CMSIS device, CMSIS core -- per board), one
+# <repo>-<commit> directory each, shared by every build directory of this clone.
+# Read-only, like lib/; delete a directory to have the next configure fetch it again.
+/upstream/

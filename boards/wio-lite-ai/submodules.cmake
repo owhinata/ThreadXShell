@@ -15,6 +15,10 @@
 #  CONFIG_MLPERF_TINY (OFF by default) whose own fetch-on-demand lives in
 #  cmake/mlperf-tiny.cmake, so a default configure must neither be triggered by
 #  its absence nor drag it in.
+#
+#  lib/tflite-micro IS listed although only the tflm backend reads it: tflm is the
+#  default backend, and its tree is generated from this submodule at configure time
+#  (cmake/tflm_submodule.cmake), so the default configure needs it.
 # ============================================================================
 set(_submodule_sentinels
     "lib/stm32h7xx_hal_driver/Src/stm32h7xx_hal.c"
@@ -25,4 +29,5 @@ set(_submodule_sentinels
     "lib/coremark/core_main.c"
     "lib/netxduo/common/src/nx_ip_create.c"
     "lib/flashdb/src/fdb_kvdb.c"
-    "lib/filex/common/src/fx_media_open.c")
+    "lib/filex/common/src/fx_media_open.c"
+    "lib/tflite-micro/tensorflow/lite/micro/tools/project_generation/create_tflm_tree.py")

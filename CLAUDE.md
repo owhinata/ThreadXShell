@@ -184,8 +184,8 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
 - **PR は作らない**（`gh pr create` / `gh pr merge` 禁止）。直 push なので `--ff-only` 厳守、**force push 禁止**
 - Issue を立てずにコミットしない。Epic / 親 Issue はクローズキーワードを使わず `#<epic>` 参照のみ
 - 元リポジトリの Issue は `owhinata/wio-lite-ai#N` / `owhinata/stm32f746g-disco#N` の完全形で書く
-- **upstream submodule（`STMicroelectronics/`, `eclipse-threadx/`, `hathach/tinyusb`,
-  `eembc/coremark`, `armink/FlashDB`, `mlcommons/tiny`）へ `gh` で書き込まない**（PR/issue/comment とも
+- **upstream submodule（`STMicroelectronics/`, `eclipse-threadx/`, `hathach/tinyusb`, `eembc/coremark`,
+  `armink/FlashDB`, `mlcommons/tiny`, `tensorflow/tflite-micro`）へ `gh` で書き込まない**（PR/issue/comment とも
   PreToolUse hook がブロックする）。コードも編集せず、port 側のグルーで吸収する
 
 ## ThreadX 統合の共通教訓（全ボード共通）

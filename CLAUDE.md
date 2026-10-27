@@ -44,8 +44,8 @@ src cmds svc cmake test README。wio のみ boot も）。
 - **shell の常設状態は静的割当**で init / dispatch / 出力経路は heap を要求しない。board 固有コマンドの
   ペイロードは board が bounded heap・排他・失敗処理を明示的に提供する場合のみ heap 可。スタック
   サイズと優先度は `cli_config.h` の既定を踏襲し `_Static_assert` を通す。
-- upstream submodule（`lib/`）は read-only で、必要な調整は port 側で吸収する。**boot ツリー
-  （`boards/wio-lite-ai/boot/`）は独立**で、app / shell とソースを共有しない。
+- upstream は read-only で調整は port 側（ST の Cube の組 HAL / CMSIS device / core はボードが commit 固定で `upstream/` に
+  fetch、複数ボードが同じ版を使う物は `lib/` submodule）。**boot ツリー（`boards/wio-lite-ai/boot/`）は独立**で app / shell とソースを共有しない。
 - **[!] カメラは持ち主（`svc/camera/cam_holders`: manual / nn）が居る間だけ流れ、camera は持ち主の名前しか知らない**（nn を include しない。lcd は持ち主ではない）。**表が空でも teardown の許可ではなく**資源はボードの確認済み停止の後だけ、stop の待ちは自分の stream の世代で照合する（#142、`svc/README.md`）。
 
 ### [!] `nn` と `camera` は 3 ボード共有の 1 コマンド（各 1 つ）

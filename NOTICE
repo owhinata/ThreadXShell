@@ -27,24 +27,26 @@ Third-party components fetched as submodules
 --------------------------------------------------------------------------------
 
 The firmware is built from, and at runtime incorporates, the components below.
-They are git submodules under lib/ (fetched at configure time) and keep their own
-licenses -- that code is NOT redistributed in this repository, only referenced.
-See each submodule's own LICENSE for the authoritative terms.
+They are git submodules under lib/, or -- the ST Cube set, pinned per board --
+trees fetched into upstream/<repo>-<commit>/ (both at configure time), and keep
+their own licenses -- that code is NOT redistributed in this repository, only
+referenced.  See each one's own LICENSE for the authoritative terms.
 
 Which of them a given image contains depends on the board; boards/<board>/
-submodules.cmake is the list that board builds against.
+submodules.cmake and the fetch_upstream() calls in boards/<board>/board.cmake are
+the lists that board builds against.
 
 - STMicroelectronics STM32F7xx HAL driver  -- BSD-3-Clause
-    lib/stm32f7xx_hal_driver/LICENSE.md    (f746g-disco)
+    upstream/stm32f7xx_hal_driver-<commit>/LICENSE.md  (f746g-disco)
 - STMicroelectronics STM32H7xx HAL driver  -- BSD-3-Clause
-    lib/stm32h7xx_hal_driver/LICENSE.md    (wio-lite-ai)
+    upstream/stm32h7xx_hal_driver-<commit>/LICENSE.md  (wio-lite-ai)
 - STMicroelectronics CMSIS Device F7       -- Apache-2.0
-    lib/cmsis_device_f7/LICENSE.md         (startup, system_*, device headers)
+    upstream/cmsis_device_f7-<commit>/LICENSE.md  (startup, system_*, device headers)
 - STMicroelectronics CMSIS Device H7       -- Apache-2.0
-    lib/cmsis_device_h7/LICENSE.md         (device headers; the wio-lite-ai port
-    supplies its own SystemInit)
+    upstream/cmsis_device_h7-<commit>/LICENSE.md  (device headers; the wio-lite-ai
+    port supplies its own SystemInit)
 - ARM CMSIS-Core                           -- Apache-2.0
-    lib/cmsis_core/LICENSE.txt             (both STM32 boards; the Grove board
+    upstream/cmsis-core-<commit>/LICENSE.txt  (both STM32 boards; the Grove board
     uses the CMSIS bundled inside the Himax SDK instead)
 - Eclipse ThreadX                          -- MIT
     lib/threadx/LICENSE.txt

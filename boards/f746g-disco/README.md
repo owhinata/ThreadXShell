@@ -22,7 +22,11 @@ picocom -b 115200 /dev/ttyACM0                   # the ST-Link VCP
 ```
 
 The first configure downloads the pinned ARM GNU toolchain into `tools/` and
-the submodules this board needs (`boards/f746g-disco/submodules.cmake`).  The
+the submodules this board needs (`boards/f746g-disco/submodules.cmake`), and
+fetches the ST Cube set this board pins in `board.cmake` -- the F7 HAL, CMSIS
+device F7 and CMSIS core -- into `upstream/<repo>-<commit>/` (issue #136; see the
+root README's Building section).  Those trees are shared with every other build
+directory of the clone, so later configures are offline.  The
 default NN backend (`tflm`) also fetches the `lib/tflite-micro` submodule on
 first use, generates the tflite-micro tree from it at configure time (which
 downloads its third-party dependencies) and fetches the pinned model at build

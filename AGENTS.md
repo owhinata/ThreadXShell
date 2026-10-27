@@ -20,7 +20,7 @@
    で **Wio の boot ツリーは独立**。ボード所有コードのホストテストは `boards/<board>/test/host_tests.sh`
    に置き `shell/test/` にボード参照を持ち込まない。**ドキュメントも同じで board README が正。**
 2. **共有コアに触れる変更は全対応ボードで成立すること。** 片方のボードだけを見て LGTM しない。
-3. **upstream submodule（`lib/` 配下）と Grove の Himax SDK ツリーは read-only**（調整は port 側で）。
+3. **upstream（`lib/` の submodule と、ボードが commit 固定で取る ST Cube の組 `upstream/`）と Grove の Himax SDK ツリーは read-only**（調整は port 側で。取得済みツリーは検査だけで直さない）。
 4. **shell の常設状態は静的割当**で、init / dispatch / 出力経路は heap を要求しない。board 固有コマンドの
    ペイロードは board が bounded heap・排他・失敗処理を明示的に提供する場合のみ heap 可。スタック
    サイズ・優先度は `cli_config.h` で `_Static_assert` を通すこと。

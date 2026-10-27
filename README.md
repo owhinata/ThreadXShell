@@ -32,7 +32,7 @@ More boards are planned.
 One-way layering:
 
 ```
-HAL / CMSIS / ThreadX (lib/, upstream submodules, read-only)
+HAL / CMSIS / ThreadX (lib/ submodules + upstream/ pinned fetches, read-only)
   <- port (per-board glue)
   <- shell (board-independent core, commands, transport backends)
   <- app
@@ -79,6 +79,8 @@ asset/                board-independent plugin sources and the container toolcha
                       common/ (veneers and the ABI's section layout), plugins/<name>/,
                       tools/ (packer, ABI layout, container verifier)
 lib/                  upstream mirror submodules (read-only)
+upstream/             git-ignored; per-board pinned trees fetched at configure
+                      time (the ST Cube set), one <repo>-<commit> each (read-only)
 boards/<board>/       board.cmake, src/ port/ cmds/ backend/ svc/ include/ ldscript/ cmake/
 ```
 
@@ -118,6 +120,21 @@ Configuring without `-DBOARD` fails with the list of available boards. Each boar
 declares the upstream mirrors it needs in `boards/<board>/submodules.cmake`, and
 only those are fetched -- the first `f746g-disco` configure is heavy (GUIX alone
 is about 1.5 GB) and none of it is pulled in for a `wio-lite-ai` build.
+
+Where an upstream lives follows one rule (issue #136): **the ST Cube set -- HAL,
+CMSIS device and CMSIS core -- is pinned by the board that uses it and fetched by
+that board's `board.cmake`, while an upstream that several boards share at one
+version is a `lib/` submodule.** ST pairs those three per Cube package, so each
+board names its own commits instead of sharing one `lib/` copy. They are fetched
+by `cmake/fetch_upstream.cmake` (shallow, at the exact commit, sparse) into
+`upstream/<repo>-<commit>/` in the source tree -- git-ignored, read-only like
+`lib/`, and shared by every build directory of the clone: only the first configure
+that needs a tree goes to the network, and every later one, for any board, is
+offline. An existing tree is only checked, never repaired: one at another commit,
+edited, or missing a file stops the configure; delete the directory to fetch it
+again. A clone made before #136 still has `lib/stm32f7xx_hal_driver`,
+`lib/stm32h7xx_hal_driver`, `lib/cmsis_device_f7`, `lib/cmsis_device_h7` and
+`lib/cmsis_core` checked out; nothing reads them any more, and they can be deleted.
 
 tflite-micro, which the `tflm` NN backend of `f746g-disco` and `wio-lite-ai`
 compiles, is the `lib/tflite-micro` submodule (issue #134) and is pinned by its

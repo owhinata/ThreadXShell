@@ -121,11 +121,13 @@ declares the upstream mirrors it needs in `boards/<board>/submodules.cmake`, and
 only those are fetched -- the first `f746g-disco` configure is heavy (GUIX alone
 is about 1.5 GB) and none of it is pulled in for a `wio-lite-ai` build.
 
-Where an upstream lives follows one rule (issue #136): **the ST Cube set -- HAL,
-CMSIS device and CMSIS core -- is pinned by the board that uses it and fetched by
-that board's `board.cmake`, while an upstream that several boards share at one
-version is a `lib/` submodule.** ST pairs those three per Cube package, so each
-board names its own commits instead of sharing one `lib/` copy. They are fetched
+Where an upstream lives follows one rule (issue #136): **the ST Cube set -- HAL
+and CMSIS device -- is pinned by the board that uses it and fetched by that
+board's `board.cmake`, and so is CMSIS core, at the Cube set's version or a newer
+one; an upstream that several boards share at one version is a `lib/`
+submodule.** ST pairs HAL and CMSIS device per Cube package, so each board names
+its own commits instead of sharing one `lib/` copy; which CMSIS core a board pins,
+and why, is in its README. They are fetched
 by `cmake/fetch_upstream.cmake` (shallow, at the exact commit, sparse) into
 `upstream/<repo>-<commit>/` in the source tree -- git-ignored, read-only like
 `lib/`, and shared by every build directory of the clone: only the first configure

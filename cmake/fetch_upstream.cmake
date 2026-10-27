@@ -12,8 +12,9 @@
 #      ${CMAKE_SOURCE_DIR}/upstream/<repo>-<commit>
 #
 #  where <repo> is the last component of URL without ".git".  Used by the boards
-#  for the trees they pin per board (the ST Cube set: HAL, CMSIS device, CMSIS
-#  core); the upstreams every board shares at one version stay lib/ submodules.
+#  for the trees they pin per board (the ST Cube set -- HAL and CMSIS device --
+#  and a CMSIS core at the Cube set's version or a newer one); the upstreams every
+#  board shares at one version stay lib/ submodules.
 #  Nothing below knows which board is asking.
 #
 #  [!] ONE PLACE, IN THE SOURCE TREE, NAMED BY THE COMMIT.  Every build directory

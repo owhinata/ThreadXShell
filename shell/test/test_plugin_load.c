@@ -753,6 +753,11 @@ static void test_sink(void)
 	build();
 }
 
+/* The analysis version every container built before #124 carries. */
+#define STACK_ACCOUNTING_V1 1u
+_Static_assert(PLUGIN_STACK_ACCOUNTING != STACK_ACCOUNTING_V1,
+               "the version-1 case below refuses nothing if 1 is current");
+
 /* (f) Another analysis is its own refusal, not a stack that is too big. */
 static void test_accounting(void)
 {
@@ -762,6 +767,11 @@ static void test_accounting(void)
 	build();
 	one("manifest declared under another analysis", MF(stack_accounting),
 	    PLUGIN_STACK_ACCOUNTING + 1u, PLUGIN_ERR_STACK_ACCOUNTING, 1);
+	/* The version a real container still carries: the one before the
+	 * current, named as a value -- "+ 1" only ever tries a future one. */
+	one("manifest declared under the version-1 analysis (#111)",
+	    MF(stack_accounting), STACK_ACCOUNTING_V1, PLUGIN_ERR_STACK_ACCOUNTING,
+	    1);
 	one("manifest never set it", MF(stack_accounting), 0u,
 	    PLUGIN_ERR_STACK_ACCOUNTING, 1);
 	p.stack_accounting = PLUGIN_STACK_ACCOUNTING + 1u;

@@ -42,4 +42,14 @@
  * off) and never create a second visible canvas.
  */
 
+/*
+ * Compile out GUIX's deprecated binary-resource loaders.  This board never loads
+ * a binary resource (the gx_binres_* sources are excluded from the build), and
+ * since GUIX 6.5.2 gx_api.h emits a #pragma message in every TU while this API
+ * is enabled.  The deprecated string API stays enabled: the UI still calls the
+ * char* setters (gx_text_button_text_set / gx_prompt_text_set), and disabling it
+ * changes the widget structures; migrating to the _ext calls is separate work.
+ */
+#define GX_DISABLE_DEPRECATED_BINRES_API
+
 #endif /* GX_USER_H */

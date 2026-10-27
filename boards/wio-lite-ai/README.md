@@ -40,6 +40,13 @@ reuses it offline. The bootloader reference build compiles from the same three
 trees, so a change of any of those commits is also checked by the bootloader's
 golden hash.
 
+CMSIS core is pinned at `v5.9.0_20250520`, the version STM32CubeH7 ships with
+its HAL (the same tree). Against the 5.6.0 the board used before, the only change
+in the generated app code, alignment padding aside, is three barriers in the MPU
+setup: a DSB+ISB after `ARM_MPU_Disable()` and a DMB before `ARM_MPU_Enable()`;
+the cache functions moved to `cachel1_armv7.h` with the same bodies. The
+bootloader still builds to its golden hash with it.
+
 To flash the app: **hold PF1 (USER) while resetting** to enter the bootloader's
 DFU mode, check that `0483:df11` appears, then
 

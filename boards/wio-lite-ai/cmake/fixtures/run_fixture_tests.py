@@ -1189,7 +1189,7 @@ class Runner:
         return (True, name, "")
 
     def _baselines(self):
-        """The healthy image, the two app images, and malformed input."""
+        """The healthy image, the app image, and malformed input."""
         reference = os.path.join(self.build, "boot-reference")
         cases = [
             (
@@ -1202,13 +1202,6 @@ class Runner:
             (
                 "baseline_shell_elf",
                 [self.build + "/shell.elf", self.build + "/shell.bin"],
-                1,
-                "BOOT-C1-VECTOR-VMA",
-                False,
-            ),
-            (
-                "baseline_blink_elf",
-                [self.build + "/blink.elf", self.build + "/blink.bin"],
                 1,
                 "BOOT-C1-VECTOR-VMA",
                 False,

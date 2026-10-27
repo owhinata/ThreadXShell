@@ -185,8 +185,7 @@ SECTIONS
    *
    * NOT here, deliberately: the vector table itself (the bootloader reads MSP from
    * the partition base, so VTOR stays there) and the dwc2 USB ISR (~1.5 KB with a
-   * wide call closure -- separate increment).  Empty for firmwares with no ISRs of
-   * their own (blink). */
+   * wide call closure -- separate increment). */
   .itcm :
   {
     . = ALIGN(8);
@@ -292,8 +291,7 @@ SECTIONS
 
   /* Shell command registry (CLI_CMD_REGISTER): each root command lands in
      .shell_root_cmds.<name>; KEEP + SORT packs them in name order between the
-     boundary symbols so the core walks the section as a plain array.  Empty for
-     firmwares that register no commands (e.g. blink). */
+     boundary symbols so the core walks the section as a plain array. */
   .shell_root_cmds :
   {
     . = ALIGN(4);
@@ -691,20 +689,22 @@ SECTIONS
    * `_tx_event_flags_set` has become `_tx_event_flags_set.isra.0`, DEFINED() below
    * is false, the conditional collapses to `1`, and the ASSERT passes while the
    * function sits in the flash.  The guard fails in exactly the situation it exists
-   * for.  They are kept because they still fire early -- at link time, and for the
-   * non-LTO and blink builds.  What actually holds the line is the post-link check
+   * for.  They are kept because they still fire early -- at link time, and for
+   * non-LTO builds.  What actually holds the line is the post-link check
    * cmake/check_itcm_residency.py, which matches on suffix-stripped base names and
    * additionally proves that nothing inside .itcm branches out through a veneer.
    *
-   * DEFINED(...) guards each one because both app firmwares share this script and
-   * blink links neither ThreadX nor the UART/fault handlers; ORIGIN(ITCM) is 0, so
+   * DEFINED(...) guards each one so the script does not itself require ThreadX or
+   * the UART/fault handlers to be linked.  (They were written for a second,
+   * bare-metal app that shared this script and linked none of them; that app was
+   * removed in #157 and the guards were left as they were.)  ORIGIN(ITCM) is 0, so
    * a plain "> ORIGIN" test would also be vacuous -- compare against the top.
    *
    * The two vector-table entry points are gated on a STRONG companion symbol from
    * the same module, not on themselves: the CMSIS startup declares every vector
    * .weak and aliases it to Default_Handler, so DEFINED(SysTick_Handler) is true
-   * even in blink -- where it correctly lives in the flash -- and asserting on it
-   * directly breaks the blink link. */
+   * even in an image whose handler is the weak default and correctly lives in the
+   * flash -- asserting on it directly would fail such an image. */
   ASSERT(DEFINED(_tx_thread_schedule) ?
          (_tx_thread_schedule < ORIGIN(ITCM) + LENGTH(ITCM)) : 1,
          "_tx_thread_schedule (ThreadX PendSV) left ITCM: does tx_thread_schedule.S.obj still match .itcm?")

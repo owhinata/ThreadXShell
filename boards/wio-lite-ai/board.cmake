@@ -3,14 +3,13 @@
 #
 #  Included by the top-level CMakeLists.txt with BOARD=wio-lite-ai.  It owns
 #  everything board-specific: the MCU flags, the HAL/CMSIS pins, the linker
-#  script, the peripheral options, the two firmwares and the post-build gates.
+#  script, the peripheral options, the firmware and the post-build gates.
 #
-#  Firmwares (both run from the internal flash app partition 0x08020000 and are
+#  Firmware (runs from the internal flash app partition 0x08020000 and is
 #  loaded over DFU -- see the "DFU only" rule in the project CLAUDE.md):
 #    shell -- ThreadX + the interactive CLI console over USB CDC.
-#    blink -- LED blink reference app.
-#      `dfu-util -d 0483:df11 -a 0 -D <fw>.bin` while the bootloader is in DFU
-#      mode (hold USER/PF1 at reset); convenience targets `dfu-shell`/`dfu-blink`.
+#      `dfu-util -d 0483:df11 -a 0 -D shell.bin` while the bootloader is in DFU
+#      mode (hold USER/PF1 at reset); convenience target `dfu-shell`.
 #
 #  [!] The DFU bootloader at internal flash 0x08000000 IS built here (`boot`),
 #  but only as a REFERENCE BUILD -- into boot-reference/, and with no target that
@@ -219,7 +218,7 @@ set(BOOT_TINYUSB_SOURCES
     "${TUSB_DIR}/portable/synopsys/dwc2/dcd_dwc2.c"
     "${TUSB_DIR}/portable/synopsys/dwc2/dwc2_common.c")
 
-# HAL_SOURCES is shared with the app targets, and that is fine: it is a list of
+# HAL_SOURCES is shared with the shell app, and that is fine: it is a list of
 # upstream submodule files, and each target recompiles them into its own objects
 # with its own flags.  Do NOT "optimise" that into a shared OBJECT library -- it
 # is the one refactor that would put a single set of flags into both images and
@@ -372,12 +371,12 @@ add_custom_target(boot ALL
 add_dependencies(boot boot_image)
 
 # ============================================================================
-#  Apps: blink and the ThreadX shell
+#  App: the ThreadX shell
 #  Internal flash app partition 0x08020000 (sectors 1-3); flashed over DFU
 #  (dfu-util / dfu-<tgt>)
 # ============================================================================
 # --- Post-build artifacts + DFU flash target -------------------------------
-# App firmwares (blink, shell): linked at 0x08020000, emitted as raw .bin (what the
+# App firmware (shell): linked at 0x08020000, emitted as raw .bin (what the
 # DFU bootloader programs over dfu-util) + .hex.  Overflowing the 384 KB partition
 # is a link error -- it cannot silently grow into the bootloader's sector.
 function(firmware_finalize tgt)
@@ -401,16 +400,6 @@ function(firmware_finalize tgt)
         USES_TERMINAL
         COMMENT "dfu-util -> ${tgt}.bin to internal flash 0x08020000 (hold PF1 at reset for DFU mode)")
 endfunction()
-
-add_executable(blink
-    "${BOARD_DIR}/src/blink.c"
-    "${BOARD_DIR}/src/system_stm32h7xx.c"
-    "${CMSIS_DEV}/Source/Templates/gcc/startup_stm32h725xx.s"
-    ${HAL_SOURCES})
-target_link_libraries(blink PRIVATE bsp_iface)
-target_compile_options(blink PRIVATE -O2)
-
-firmware_finalize(blink)
 
 # --- shell: interactive Eclipse ThreadX CLI console -------------------------
 # App at 0x08020000 (firmware_finalize -> dfu-shell): ThreadX + an interactive
@@ -1149,7 +1138,7 @@ firmware_finalize(shell)
 # `flash`: the target name BOTH boards answer to, so the flash step in the docs and
 # in the development cycle is one command with the build directory swapped, not a
 # per-board incantation to remember.  Here it is an alias for `dfu-shell` -- the
-# shell app is what "flash this board" means; blink stays reachable as `dfu-blink`.
+# shell app is what "flash this board" means.
 #
 # It cannot reach sector 0.  It runs exactly the dfu-util command `dfu-shell` runs,
 # into the app partition at 0x08020000, over the bootloader that lives in sector 0
@@ -1163,9 +1152,7 @@ add_dependencies(flash dfu-shell)
 # The last line of defence for the ITCM residency of the interrupt paths.
 # The linker-script ASSERTs cannot do this job under LTO -- see the
 # comment on them in ldscript/STM32H725AEIx_IROM.ld -- because LTO renames the very
-# symbols they are written against.  This checks the linked image instead, and is
-# deliberately attached to `shell` only: blink shares the linker script but has no
-# ThreadX and no RTL8720 UART, so the required-symbol list does not apply to it.
+# symbols they are written against.  This checks the linked image instead.
 add_custom_command(TARGET shell POST_BUILD
     COMMAND "${Python3_EXECUTABLE}"
             "${BOARD_DIR}/cmake/check_itcm_residency.py"
@@ -1177,8 +1164,6 @@ add_custom_command(TARGET shell POST_BUILD
 # The same kind of gate for the AXI-SRAM / DTCM split, and it guards both
 # directions: a stack that quietly returned to AXI-SRAM (budget regression, no error)
 # and a DMA buffer that quietly moved to DTCM (the transfer moves nothing, no error).
-# `shell` only, like the check above: blink has none of these objects.
-#
 # The objects that only exist in SOME configurations are named here rather than in the
 # script, for the reason spelled out at the top of it: a required symbol the build never
 # compiled is reported as "no such object in the image", which reads like a placement

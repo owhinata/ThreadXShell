@@ -107,7 +107,7 @@ pinned ARM GNU toolchain (~155 MB) into `tools/`, so it needs network access.
 cmake -B build/wio-lite-ai -G Ninja \
       -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi-toolchain.cmake \
       -DBOARD=wio-lite-ai
-cmake --build build/wio-lite-ai        # -> shell.{elf,bin,hex}, blink.{elf,bin,hex}
+cmake --build build/wio-lite-ai        # -> shell.{elf,bin,hex}
                                        #    + boot-reference/boot.{elf,bin,hex}
 
 cmake -B build/f746g-disco -G Ninja \
@@ -186,7 +186,7 @@ Put the board in DFU mode by holding USER (PF1) during reset, then:
 
 ```bash
 cmake --build build/wio-lite-ai --target flash
-# `flash` is an alias for `dfu-shell`; `dfu-blink` programs the blink firmware
+# `flash` is an alias for `dfu-shell`
 # or: dfu-util -d 0483:df11 -a 0 -D build/wio-lite-ai/shell.bin
 ```
 

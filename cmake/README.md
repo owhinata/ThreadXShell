@@ -228,7 +228,7 @@ are not declared; anything run outside the build (a shell alias, picocom by
 hand); and a `POST_BUILD` / `PRE_LINK` step on the FIRMWARE target itself, which
 is part of its link edge and runs before any gate can. A target named `asset-*`
 is exempt from the naming rule (rule 2) -- it still waits for the gate. The
-match is by file name, so it errs towards flagging. Other firmware (wio's `blink` and `dfu-blink`, f746) is not this
+match is by file name, so it errs towards flagging. Other firmware (f746) is not this
 gate's: only the registered firmware's artifacts are looked for.
 
 `fixtures/run_veneer_gate_build_tests.py`'s `delivery_*` cases: the plain tree

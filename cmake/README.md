@@ -631,15 +631,29 @@ several boards share at one version stay `lib/` submodules. Rules:
   directory beside the old one, and every configure after the first is offline.
 - An existing directory is only checked, never repaired or re-fetched. It must be
   its own git checkout (an empty directory would otherwise let the superproject
-  answer), its HEAD must be the pin, `git status --porcelain --untracked-files=all
-  --ignored` must be empty and every `PROBE` must exist; anything else stops the
-  configure with the reason. Deleting the directory is how to ask for a fresh copy.
+  answer), its HEAD must be the pin and detached (not a branch), `git status
+  --porcelain --untracked-files=all --ignored` must be empty, and every `PROBE`
+  must exist. Because `git status` trusts the index marks, those are checked too:
+  no entry may be assume-unchanged, `git sparse-checkout list` must be exactly
+  `SPARSE` (and the tree must not be sparse when `SPARSE` is not given), and the
+  skip-worktree marks must be exactly the paths those patterns exclude (asked of
+  `git sparse-checkout check-rules`, so git 2.42 or later is needed). Anything
+  else stops the configure with the reason. Deleting the directory is how to ask
+  for a fresh copy.
+- Every git call clears `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
+  `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES` and `GIT_COMMON_DIR`
+  and sets `GIT_NO_REPLACE_OBJECTS=1` (the `FETCH_UPSTREAM_GIT` prefix, also used by
+  `tflm_submodule.cmake`), so a configure started from a git hook cannot check or
+  fetch into the superproject, and `git replace` cannot stand in for the pin.
 - The fetch runs in `<dest>.partial` and is renamed into place only after passing
-  the same checks, so an interrupted fetch leaves no `<dest>` behind.
+  the same checks, so an interrupted fetch leaves no `<dest>` behind. A `<dest>.partial`
+  that is a symlink is refused rather than removed.
 - Concurrent configures serialise on `<dest>.lock` (`file(LOCK)`; a configure that
   has to wait says so).
-- The checkout's HEAD file is a configure dependency, so a checkout inside the
-  tree re-runs configure and its checks.
+- The checkout's HEAD file is a configure dependency. HEAD is detached, so every
+  checkout or commit inside the tree rewrites that file and re-runs configure and
+  its checks; a file edited without git is caught by the next configure, not by a
+  build.
 
 `fixtures/run_fetch_upstream_tests.py` (run by `shell/test/run_host_tests.sh`)
 covers each refusal against a local `file://` upstream, paired with the same

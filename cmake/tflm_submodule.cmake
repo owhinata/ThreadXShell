@@ -40,7 +40,13 @@
 #
 #  Configure still needs the network and Python: the generator's dependency
 #  downloads happen whether or not tflite-micro itself was cloned.
+#
+#  Every git call here (and in cmake/tflm_pin_check.cmake) starts git through
+#  FETCH_UPSTREAM_GIT from cmake/fetch_upstream.cmake (issue #136), so a GIT_DIR or
+#  GIT_WORK_TREE inherited from the shell cannot make it answer for, or check
+#  out into, another repository.
 # ============================================================================
+include("${CMAKE_CURRENT_LIST_DIR}/fetch_upstream.cmake")
 
 set(TFLM_SUBMODULE_DIR "${CMAKE_SOURCE_DIR}/lib/tflite-micro")
 
@@ -49,7 +55,7 @@ set(TFLM_SUBMODULE_DIR "${CMAKE_SOURCE_DIR}/lib/tflite-micro")
 # superproject, where `git -C` silently answers for the superproject instead.
 function(_tflm_submodule_is_init out_var)
     execute_process(
-        COMMAND git -C "${TFLM_SUBMODULE_DIR}" rev-parse --show-toplevel
+        COMMAND ${FETCH_UPSTREAM_GIT} -C "${TFLM_SUBMODULE_DIR}" rev-parse --show-toplevel
         OUTPUT_VARIABLE _top OUTPUT_STRIP_TRAILING_WHITESPACE
         RESULT_VARIABLE _rc ERROR_QUIET)
     file(REAL_PATH "${TFLM_SUBMODULE_DIR}" _want)
@@ -70,7 +76,7 @@ function(tflm_submodule_pin out_var)
     if(NOT _init)
         message(STATUS "tflm: fetching the lib/tflite-micro submodule (~40 MB) ...")
         execute_process(
-            COMMAND git submodule update --init -- lib/tflite-micro
+            COMMAND ${FETCH_UPSTREAM_GIT} submodule update --init -- lib/tflite-micro
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
             RESULT_VARIABLE _rc)
         _tflm_submodule_is_init(_init)
@@ -81,7 +87,7 @@ function(tflm_submodule_pin out_var)
         endif()
     endif()
     execute_process(
-        COMMAND git -C "${TFLM_SUBMODULE_DIR}" rev-parse --verify -q HEAD
+        COMMAND ${FETCH_UPSTREAM_GIT} -C "${TFLM_SUBMODULE_DIR}" rev-parse --verify -q HEAD
         OUTPUT_VARIABLE _head OUTPUT_STRIP_TRAILING_WHITESPACE
         RESULT_VARIABLE _rc)
     if(NOT _rc EQUAL 0 OR NOT _head MATCHES "^[0-9a-f]+$")
@@ -91,7 +97,7 @@ function(tflm_submodule_pin out_var)
     # Mode 160000 is a gitlink; anything else means lib/tflite-micro is not a
     # submodule of this repository at all.
     execute_process(
-        COMMAND git -C "${CMAKE_SOURCE_DIR}" ls-files -s -- lib/tflite-micro
+        COMMAND ${FETCH_UPSTREAM_GIT} -C "${CMAKE_SOURCE_DIR}" ls-files -s -- lib/tflite-micro
         OUTPUT_VARIABLE _ls OUTPUT_STRIP_TRAILING_WHITESPACE
         RESULT_VARIABLE _rc)
     if(NOT _rc EQUAL 0 OR NOT _ls MATCHES "^160000 ([0-9a-f]+) 0\tlib/tflite-micro$")
@@ -111,7 +117,7 @@ function(tflm_submodule_pin out_var)
     # The HEAD file changes on every checkout of the submodule, so moving it
     # re-runs configure (and with it the check above and the stamp lookup).
     execute_process(
-        COMMAND git -C "${TFLM_SUBMODULE_DIR}" rev-parse --path-format=absolute --git-path HEAD
+        COMMAND ${FETCH_UPSTREAM_GIT} -C "${TFLM_SUBMODULE_DIR}" rev-parse --path-format=absolute --git-path HEAD
         OUTPUT_VARIABLE _head_file OUTPUT_STRIP_TRAILING_WHITESPACE
         RESULT_VARIABLE _rc)
     if(NOT _rc EQUAL 0 OR NOT EXISTS "${_head_file}")
@@ -129,7 +135,7 @@ function(tflm_submodule_export sha dest)
     file(REMOVE "${_tar}")
     file(MAKE_DIRECTORY "${dest}")
     execute_process(
-        COMMAND git -C "${TFLM_SUBMODULE_DIR}" archive --format=tar -o "${_tar}" "${sha}"
+        COMMAND ${FETCH_UPSTREAM_GIT} -C "${TFLM_SUBMODULE_DIR}" archive --format=tar -o "${_tar}" "${sha}"
         RESULT_VARIABLE _rc)
     if(NOT _rc EQUAL 0)
         message(FATAL_ERROR "tflm: git archive ${sha} of lib/tflite-micro failed")

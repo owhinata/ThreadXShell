@@ -27,12 +27,26 @@
 #  [!] FETCHED ONCE, THEN ONLY CHECKED -- NEVER REPAIRED.  A directory that exists
 #  is validated and nothing else: it must be its own git checkout (an empty
 #  directory inside this repository would otherwise let the SUPERPROJECT answer),
-#  its HEAD must be the pin, `git status` must be empty (tracked edits, untracked
-#  and ignored files all count -- the working tree is what gets compiled), and
+#  its HEAD must be the pin and DETACHED (on a branch, a commit moves the branch
+#  ref and leaves the HEAD file -- the configure dependency below -- untouched),
+#  `git status` must be empty (tracked edits, untracked and ignored files all
+#  count -- the working tree is what gets compiled), no index entry may be marked
+#  assume-unchanged (status trusts the mark and stops looking at the file), the
+#  sparse patterns must be exactly SPARSE (none when SPARSE is not given) and the
+#  skip-worktree marks exactly what those patterns exclude (a marked file is
+#  invisible to status, so a mark inside the patterns hides a deleted file), and
 #  every PROBE must exist.  Any deviation is FATAL with the remedy spelled out.
 #  It is deliberately not "fetch again": a tree someone checked out to another
 #  commit or edited by hand is a decision the build must not silently undo, and
 #  the trees are read-only by project rule exactly like lib/.
+#
+#  [!] EVERY GIT CALL GOES THROUGH FETCH_UPSTREAM_GIT, which clears the variables
+#  that point git at another repository (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE,
+#  GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_COMMON_DIR) and
+#  turns replace refs off.  A configure run from a shell with GIT_DIR set (a git
+#  hook, `git rebase -x`) would otherwise check -- and fetch into -- the
+#  superproject, and `git replace` would let another commit answer for the pin.
+#  cmake/tflm_submodule.cmake uses the same prefix.
 #
 #  [!] A DIRECTORY THAT EXISTS WAS COMPLETE.  The fetch happens in a private
 #  staging directory (<dest>.partial) and is renamed into place only after it has
@@ -48,20 +62,32 @@
 #  The commit is fetched DIRECTLY (`git fetch <url> <sha>`), shallow and with
 #  --filter=blob:none, so only the blobs of the checked-out (sparse) paths come
 #  over the network.  A tag is only ever a comment next to the SHA: tags move.
-#  The checkout's HEAD file is a configure dependency, so a checkout inside the
-#  tree re-runs configure and with it the checks above.
+#  The checkout's HEAD file is a configure dependency: since HEAD must be detached,
+#  every checkout or commit inside the tree rewrites that file and re-runs
+#  configure, and with it the checks above.  A file edited without git is caught
+#  by the next configure, not by a build.
 # ============================================================================
 include_guard(GLOBAL)
 
 find_package(Git REQUIRED)
 
+# The one way this file (and cmake/tflm_submodule.cmake) starts git: a COMMAND
+# prefix, so a pipeline can use it as well as a single call.  GIT_TERMINAL_PROMPT=0:
+# a mistyped GitHub URL asks for credentials instead of failing, which would hang
+# a configure with nobody at the terminal.
+set(FETCH_UPSTREAM_GIT
+    "${CMAKE_COMMAND}" -E env
+    --unset=GIT_DIR --unset=GIT_WORK_TREE --unset=GIT_INDEX_FILE
+    --unset=GIT_OBJECT_DIRECTORY --unset=GIT_ALTERNATE_OBJECT_DIRECTORIES
+    --unset=GIT_COMMON_DIR
+    GIT_TERMINAL_PROMPT=0 GIT_NO_REPLACE_OBJECTS=1
+    "${GIT_EXECUTABLE}")
+
 # Runs git in <dir> with the arguments after it; FATAL (naming the command) on
-# failure.  GIT_TERMINAL_PROMPT=0: a mistyped GitHub URL asks for credentials
-# instead of failing, which would hang a configure with nobody at the terminal.
+# failure.
 function(_fetch_upstream_git dir)
     execute_process(
-        COMMAND "${CMAKE_COMMAND}" -E env GIT_TERMINAL_PROMPT=0
-                "${GIT_EXECUTABLE}" -C "${dir}" ${ARGN}
+        COMMAND ${FETCH_UPSTREAM_GIT} -C "${dir}" ${ARGN}
         RESULT_VARIABLE _rc ERROR_VARIABLE _err OUTPUT_QUIET)
     if(NOT _rc EQUAL 0)
         string(REPLACE ";" " " _cmd "${ARGN}")
@@ -74,15 +100,24 @@ function(_fetch_upstream_git dir)
     endif()
 endfunction()
 
+# Runs git in <dir>; sets <rc_var> to its exit code and <out_var> to its stdout
+# (stderr dropped).  For the checks, which turn a failure into a reason.
+function(_fetch_upstream_ask dir rc_var out_var)
+    execute_process(
+        COMMAND ${FETCH_UPSTREAM_GIT} -C "${dir}" ${ARGN}
+        OUTPUT_VARIABLE _out RESULT_VARIABLE _rc ERROR_QUIET)
+    set(${rc_var} "${_rc}" PARENT_SCOPE)
+    set(${out_var} "${_out}" PARENT_SCOPE)
+endfunction()
+
 # Sets <out_var> to "" when <dir> is a usable checkout of <commit> with every
-# probe present, and otherwise to one sentence saying what is wrong with it.
-function(_fetch_upstream_check dir commit probes out_var)
+# probe present and exactly the sparse patterns <sparse> (a list; empty means not
+# sparse), and otherwise to one sentence saying what is wrong with it.
+function(_fetch_upstream_check dir commit probes sparse out_var)
     # Its OWN checkout: asked inside an empty directory (or a directory whose
     # .git was deleted), git walks up and answers for this repository instead.
-    execute_process(
-        COMMAND "${GIT_EXECUTABLE}" -C "${dir}" rev-parse --show-toplevel
-        OUTPUT_VARIABLE _top OUTPUT_STRIP_TRAILING_WHITESPACE
-        RESULT_VARIABLE _rc ERROR_QUIET)
+    _fetch_upstream_ask("${dir}" _rc _top rev-parse --show-toplevel)
+    string(STRIP "${_top}" _top)
     if(_rc EQUAL 0)
         file(REAL_PATH "${_top}" _top)
     endif()
@@ -91,10 +126,8 @@ function(_fetch_upstream_check dir commit probes out_var)
         set(${out_var} "it is not a git checkout of its own" PARENT_SCOPE)
         return()
     endif()
-    execute_process(
-        COMMAND "${GIT_EXECUTABLE}" -C "${dir}" rev-parse --verify -q HEAD
-        OUTPUT_VARIABLE _head OUTPUT_STRIP_TRAILING_WHITESPACE
-        RESULT_VARIABLE _rc ERROR_QUIET)
+    _fetch_upstream_ask("${dir}" _rc _head rev-parse --verify -q HEAD)
+    string(STRIP "${_head}" _head)
     if(NOT _rc EQUAL 0)
         set(${out_var} "its HEAD cannot be read" PARENT_SCOPE)
         return()
@@ -103,12 +136,20 @@ function(_fetch_upstream_check dir commit probes out_var)
         set(${out_var} "it is checked out at ${_head}, not at the pin" PARENT_SCOPE)
         return()
     endif()
+    # Detached: exit 1 is "HEAD is not a symbolic ref"; 0 is a branch.
+    _fetch_upstream_ask("${dir}" _rc _ref symbolic-ref -q HEAD)
+    string(STRIP "${_ref}" _ref)
+    if(_rc EQUAL 0)
+        set(${out_var} "its HEAD is the branch ${_ref}, not the detached pin" PARENT_SCOPE)
+        return()
+    elseif(NOT _rc EQUAL 1)
+        set(${out_var} "git symbolic-ref HEAD failed in it" PARENT_SCOPE)
+        return()
+    endif()
     # HEAD proves the parent commit only; the files compiled are the working tree.
     # --ignored: an ignored file is still a file a header search can find.
-    execute_process(
-        COMMAND "${GIT_EXECUTABLE}" -C "${dir}" status --porcelain
-                --untracked-files=all --ignored
-        OUTPUT_VARIABLE _dirty RESULT_VARIABLE _rc ERROR_QUIET)
+    _fetch_upstream_ask("${dir}" _rc _dirty
+        status --porcelain --untracked-files=all --ignored)
     if(NOT _rc EQUAL 0)
         set(${out_var} "git status failed in it" PARENT_SCOPE)
         return()
@@ -119,6 +160,69 @@ function(_fetch_upstream_check dir commit probes out_var)
             "its working tree differs from the pinned commit:\n      ${_dirty}"
             PARENT_SCOPE)
         return()
+    endif()
+    _fetch_upstream_ask("${dir}" _rc _on config --bool --get core.sparseCheckout)
+    string(STRIP "${_on}" _on)
+    if(sparse STREQUAL "" AND _on STREQUAL "true")
+        set(${out_var} "it is a sparse checkout, but no SPARSE patterns were asked for"
+            PARENT_SCOPE)
+        return()
+    endif()
+    # status above is only as good as the index marks it trusts.  Every entry must
+    # be "H " (checked out) or "S " (skip-worktree); a lower-case tag is
+    # assume-unchanged, anything else is an unmerged or otherwise odd entry.
+    _fetch_upstream_ask("${dir}" _rc _tags ls-files -v)
+    if(NOT _rc EQUAL 0)
+        set(${out_var} "git ls-files failed in it" PARENT_SCOPE)
+        return()
+    endif()
+    set(_tags "\n${_tags}")
+    if(sparse STREQUAL "")
+        set(_odd "\n([^H]|H[^ ])")
+    else()
+        set(_odd "\n([^HS]|[HS][^ ])")
+    endif()
+    if(_tags MATCHES "${_odd}([^\n]*)")
+        string(STRIP "${CMAKE_MATCH_0}" _line)
+        set(${out_var}
+            "its index marks '${_line}' (assume-unchanged or skip-worktree hides a file from git status)"
+            PARENT_SCOPE)
+        return()
+    endif()
+    if(NOT sparse STREQUAL "")
+        # The patterns, exactly and in order: a narrowed set would still pass
+        # status and could still hold every PROBE.
+        _fetch_upstream_ask("${dir}" _rc _have sparse-checkout list)
+        string(REPLACE ";" "\n" _asked "${sparse}")
+        if(NOT _on STREQUAL "true" OR NOT _rc EQUAL 0 OR NOT _have STREQUAL "${_asked}\n")
+            string(STRIP "${_have}" _have)
+            string(REPLACE "\n" " " _have "${_have}")
+            set(${out_var}
+                "its sparse patterns are '${_have}', not the SPARSE '${sparse}'"
+                PARENT_SCOPE)
+            return()
+        endif()
+        # And the marks match the patterns: the paths the patterns keep are
+        # exactly the "H " entries (so every "S " entry is one they exclude).
+        # git itself answers which paths the patterns keep.
+        execute_process(
+            COMMAND ${FETCH_UPSTREAM_GIT} -C "${dir}" ls-files
+            COMMAND ${FETCH_UPSTREAM_GIT} -C "${dir}" sparse-checkout check-rules
+            OUTPUT_VARIABLE _kept RESULTS_VARIABLE _rcs ERROR_QUIET)
+        string(REGEX REPLACE "\nS [^\n]*" "" _marked "${_tags}")
+        string(REPLACE "\nH " "\n" _marked "${_marked}")
+        if(NOT _rcs STREQUAL "0;0")
+            set(${out_var}
+                "git sparse-checkout check-rules failed in it (git 2.42 or later is needed)"
+                PARENT_SCOPE)
+            return()
+        endif()
+        if(NOT _marked STREQUAL "\n${_kept}")
+            set(${out_var}
+                "its skip-worktree marks do not match its sparse patterns"
+                PARENT_SCOPE)
+            return()
+        endif()
     endif()
     foreach(_p IN LISTS probes)
         if(NOT EXISTS "${dir}/${_p}")
@@ -179,6 +283,13 @@ function(fetch_upstream out_var)
 
     if(NOT EXISTS "${_dest}" AND NOT IS_SYMLINK "${_dest}")
         message(STATUS "fetch_upstream: fetching ${_repo} @ ${_fu_COMMIT} ...")
+        # The staging directory is ours to delete; a symlink there points at
+        # something that is not, and is left for a person to look at.
+        if(IS_SYMLINK "${_stage}")
+            message(FATAL_ERROR
+                "fetch_upstream: ${_stage} is a symlink; it is not removed (nor\n"
+                "  what it points at).  Delete it by hand to fetch ${_repo}.")
+        endif()
         file(REMOVE_RECURSE "${_stage}")
         file(MAKE_DIRECTORY "${_stage}")
         _fetch_upstream_git("${_stage}" init -q)
@@ -189,7 +300,7 @@ function(fetch_upstream out_var)
             _fetch_upstream_git("${_stage}" sparse-checkout set --no-cone ${_fu_SPARSE})
         endif()
         _fetch_upstream_git("${_stage}" checkout -q --detach "${_fu_COMMIT}")
-        _fetch_upstream_check("${_stage}" "${_fu_COMMIT}" "${_fu_PROBE}" _why)
+        _fetch_upstream_check("${_stage}" "${_fu_COMMIT}" "${_fu_PROBE}" "${_fu_SPARSE}" _why)
         if(NOT _why STREQUAL "")
             message(FATAL_ERROR
                 "fetch_upstream: the fresh checkout of ${_fu_URL} @ ${_fu_COMMIT}\n"
@@ -198,7 +309,7 @@ function(fetch_upstream out_var)
         file(RENAME "${_stage}" "${_dest}")
     endif()
 
-    _fetch_upstream_check("${_dest}" "${_fu_COMMIT}" "${_fu_PROBE}" _why)
+    _fetch_upstream_check("${_dest}" "${_fu_COMMIT}" "${_fu_PROBE}" "${_fu_SPARSE}" _why)
     if(NOT _why STREQUAL "")
         message(FATAL_ERROR
             "fetch_upstream: ${_dest}\n"
@@ -209,11 +320,9 @@ function(fetch_upstream out_var)
             "  build another version, change COMMIT in board.cmake instead.")
     endif()
 
-    execute_process(
-        COMMAND "${GIT_EXECUTABLE}" -C "${_dest}" rev-parse --path-format=absolute
-                --git-path HEAD
-        OUTPUT_VARIABLE _head_file OUTPUT_STRIP_TRAILING_WHITESPACE
-        RESULT_VARIABLE _rc ERROR_QUIET)
+    _fetch_upstream_ask("${_dest}" _rc _head_file
+        rev-parse --path-format=absolute --git-path HEAD)
+    string(STRIP "${_head_file}" _head_file)
     if(NOT _rc EQUAL 0 OR NOT EXISTS "${_head_file}")
         message(FATAL_ERROR "fetch_upstream: cannot locate the HEAD file of ${_dest}")
     endif()

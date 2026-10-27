@@ -12,9 +12,14 @@ ninja -- no toolchain, no board.
     second configure is OFFLINE (the upstream is moved away first);
   - the checkout's HEAD file is a configure dependency;
   - a checkout moved to another commit, a deleted probe, an edited file, an
-    untracked file, a file upstream's .gitignore hides and an empty directory
-    standing in for the checkout are each FATAL, and are not repaired or
-    re-fetched;
+    untracked file, a file upstream's .gitignore hides, an empty directory
+    standing in for the checkout, a branch checked out at the pin, an edit hidden
+    by assume-unchanged, a deletion hidden by skip-worktree, a narrowed sparse
+    set, a sparse tree asked for without SPARSE (and the reverse) and a `git
+    replace` of the pin are each FATAL, and are not repaired or re-fetched;
+  - GIT_DIR pointing at the superproject neither breaks the check of an existing
+    tree nor lets a fetch land in the superproject;
+  - a staging directory that is a symlink is refused and its target kept;
   - a deleted checkout is fetched again, even over a leftover staging directory;
   - a commit the upstream does not have, an abbreviated commit, a missing PROBE
     and a probe the sparse patterns exclude are refused, and the first publishes
@@ -101,14 +106,16 @@ try:
     dest = os.path.join(sup, "upstream", "demo-repo-" + sha_a)
     runs = [0]
 
-    def configure(commit=sha_a, probe="Inc/a.h", sparse="/Inc/;/Src/", u=None):
+    def configure(commit=sha_a, probe="Inc/a.h", sparse="/Inc/;/Src/", u=None,
+                  extra_env=None):
         runs[0] += 1
         b = os.path.join(tmp, "b%d" % runs[0])
         r = subprocess.run(
             ["cmake", "-S", sup, "-B", b, "-G", "Ninja",
              "-DFX_URL=" + (u or url), "-DFX_COMMIT=" + commit,
              "-DFX_PROBE=" + probe, "-DFX_SPARSE=" + sparse],
-            capture_output=True, text=True)
+            capture_output=True, text=True,
+            env=dict(os.environ, **(extra_env or {})))
         return r.returncode, r.stdout + r.stderr, b
 
     def passes(name, want_fetch, **kw):
@@ -172,6 +179,81 @@ try:
     os.remove(os.path.join(dest, "Inc", "shadow.gen.h"))
     passes("  ... cleaned", False)
 
+    # --- what git status cannot see ---------------------------------------------
+    git(dest, "checkout", "-q", "-b", "local")
+    refuses("branch checked out at the pin", "is the branch refs/heads/local")
+    git(dest, "checkout", "-q", "--detach", sha_a)
+    git(dest, "branch", "-q", "-D", "local")
+    passes("  ... detached again", False)
+
+    git(dest, "update-index", "--assume-unchanged", "Src/a.c")
+    write(os.path.join(dest, "Src", "a.c"), "int a = 1;\n")
+    check("  (status is blind to it)", git(dest, "status", "--porcelain") == "", "")
+    refuses("assume-unchanged edit", "assume-unchanged")
+    git(dest, "update-index", "--no-assume-unchanged", "Src/a.c")
+    git(dest, "checkout", "--", ".")
+    passes("  ... mark dropped", False)
+
+    git(dest, "update-index", "--skip-worktree", "Src/a.c")
+    os.remove(os.path.join(dest, "Src", "a.c"))
+    check("  (status is blind to it)", git(dest, "status", "--porcelain") == "", "")
+    refuses("skip-worktree inside the patterns", "do not match its sparse patterns")
+    git(dest, "update-index", "--no-skip-worktree", "Src/a.c")
+    git(dest, "checkout", "--", ".")
+    passes("  ... mark dropped", False)
+
+    git(dest, "sparse-checkout", "set", "--no-cone", "/Inc/")
+    refuses("narrowed sparse set", "not the SPARSE")
+    # The same narrowing with the old patterns written back: the list matches,
+    # the marks do not.
+    write(os.path.join(dest, ".git", "info", "sparse-checkout"), "/Inc/\n/Src/\n")
+    check("  (list restored, Src still gone)",
+          not os.path.exists(os.path.join(dest, "Src")), "")
+    refuses("marks narrower than the list", "do not match its sparse patterns")
+    git(dest, "sparse-checkout", "set", "--no-cone", "/Inc/", "/Src/")
+    passes("  ... patterns restored", False)
+    refuses("sparse tree, no SPARSE asked", "no SPARSE patterns were asked for",
+            sparse="")
+
+    # A replaced pin: rev-parse still says the pin, the files are the impostor's.
+    tree = git(dest, "write-tree")
+    blob = subprocess.run(["git", "-C", dest, "hash-object", "-w", "--stdin"],
+                          input="#define A 666\n", check=True, capture_output=True,
+                          text=True).stdout.strip()
+    git(dest, "update-index", "--cacheinfo", "100644,%s,Inc/a.h" % blob)
+    fake = git(dest, "commit-tree", git(dest, "write-tree"), "-m", "impostor")
+    git(dest, "read-tree", tree)
+    git(dest, "replace", sha_a, fake)
+    git(dest, "checkout", "-q", "-f", "--detach", sha_a)
+    check("  (impostor checked out)",
+          "666" in open(os.path.join(dest, "Inc", "a.h")).read()
+          and git(dest, "status", "--porcelain") == "", "")
+    refuses("git replace of the pin", "differs from the pinned commit")
+    git(dest, "replace", "-d", sha_a)
+    git(dest, "checkout", "-q", "-f", "--detach", sha_a)
+    passes("  ... replacement deleted", False)
+
+    # Not sparse, and asked for SPARSE: refused the other way round.
+    passes("unsparse fetch (no SPARSE)", True, commit=sha_b, sparse="")
+    refuses("unsparse tree, SPARSE asked", "not the SPARSE", commit=sha_b)
+
+    # --- GIT_DIR from the environment ------------------------------------------
+    def super_state():
+        g = os.path.join(sup, ".git")
+        return (open(os.path.join(g, "config")).read(),
+                open(os.path.join(g, "HEAD")).read(),
+                sorted(os.listdir(os.path.join(g, "refs", "heads"))),
+                os.path.exists(os.path.join(g, "shallow")))
+    before = super_state()
+    genv = {"GIT_DIR": os.path.join(sup, ".git"), "GIT_WORK_TREE": sup}
+    passes("GIT_DIR set, existing tree", False, extra_env=genv)
+    shutil.rmtree(dest)
+    passes("GIT_DIR set, fresh fetch", True, extra_env=genv)
+    check("  ... landed in its own checkout",
+          os.path.isfile(os.path.join(dest, ".git", "HEAD"))
+          and git(dest, "rev-parse", "HEAD") == sha_a, dest)
+    check("  ... superproject untouched", super_state() == before, "config/HEAD/refs")
+
     # --- a deleted tree is fetched again --------------------------------------
     shutil.rmtree(dest)
     os.makedirs(dest)
@@ -180,6 +262,17 @@ try:
     write(os.path.join(dest + ".partial", "junk"), "an interrupted fetch\n")
     passes("deleted tree, leftover staging", True)
     check("  ... staging gone", not os.path.exists(dest + ".partial"), dest + ".partial")
+
+    shutil.rmtree(dest)
+    keep = os.path.join(tmp, "keep")
+    write(os.path.join(keep, "precious"), "\n")
+    os.symlink(keep, dest + ".partial")
+    refuses("staging is a symlink", "is a symlink")
+    check("  ... link and target kept",
+          os.path.islink(dest + ".partial")
+          and os.path.isfile(os.path.join(keep, "precious")), keep)
+    os.remove(dest + ".partial")
+    passes("  ... link removed", True)
 
     # --- the lock ---------------------------------------------------------------
     hold = os.path.join(tmp, "hold.cmake")

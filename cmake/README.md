@@ -613,3 +613,34 @@ never run inside `lib/`: it downloads ~300 MB of third-party code into the
 tflite-micro tree it runs from, and a fresh export per attempt is what lets an
 interrupted download heal on the next configure. Uncommitted edits in the
 submodule are not exported.
+
+# Upstream trees pinned per board (#136)
+
+`fetch_upstream.cmake` gives a board an upstream source tree at an exact commit:
+`fetch_upstream(<out_var> URL <url> COMMIT <40-hex sha> PROBE <file>... [SPARSE
+<pattern>...])` sets `<out_var>` to `upstream/<repo>-<commit>` in the source tree
+(`<repo>` is the URL's last component). The boards use it for the ST Cube set
+(HAL, CMSIS device, CMSIS core), which ST pairs per Cube package; upstreams that
+several boards share at one version stay `lib/` submodules. Rules:
+
+- The commit is the pin and must be the full SHA (a tag is only a comment next to
+  it). It is fetched directly, `--depth 1 --filter=blob:none`, with a non-cone
+  sparse checkout when `SPARSE` is given, so only the needed blobs are downloaded.
+- One directory per repository and commit, shared by every build directory of the
+  clone: boards that pin the same commit share it, a pin bump fetches a new
+  directory beside the old one, and every configure after the first is offline.
+- An existing directory is only checked, never repaired or re-fetched. It must be
+  its own git checkout (an empty directory would otherwise let the superproject
+  answer), its HEAD must be the pin, `git status --porcelain --untracked-files=all
+  --ignored` must be empty and every `PROBE` must exist; anything else stops the
+  configure with the reason. Deleting the directory is how to ask for a fresh copy.
+- The fetch runs in `<dest>.partial` and is renamed into place only after passing
+  the same checks, so an interrupted fetch leaves no `<dest>` behind.
+- Concurrent configures serialise on `<dest>.lock` (`file(LOCK)`; a configure that
+  has to wait says so).
+- The checkout's HEAD file is a configure dependency, so a checkout inside the
+  tree re-runs configure and its checks.
+
+`fixtures/run_fetch_upstream_tests.py` (run by `shell/test/run_host_tests.sh`)
+covers each refusal against a local `file://` upstream, paired with the same
+configure passing, plus the offline second configure and the lock.

@@ -46,3 +46,6 @@
 [submodule "lib/guix"]
 	path = lib/guix
 	url = https://github.com/eclipse-threadx/guix
+[submodule "lib/tflite-micro"]
+	path = lib/tflite-micro
+	url = https://github.com/tensorflow/tflite-micro.git

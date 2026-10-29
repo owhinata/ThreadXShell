@@ -516,6 +516,24 @@ static int32_t cam_io_read(uint16_t addr, uint16_t reg, uint8_t *data,
 
 /* ---- mode timing / DCMI helpers (owhinata/stm32f746g-disco#45) ----------------------- */
 
+/* HAL_DCMI_Init plus the interrupt-enable fix-up every Init on this board needs.
+   HAL_DCMI_Init enables LINE | VSYNC | ERR | OVR unconditionally (upstream
+   stm32f7xx_hal_dcmi.c, HAL_DCMI_Init).  Nothing on this board consumes LINE or
+   VSYNC -- the HAL callbacks are the weak empty ones, so at QVGA 15 fps that is
+   ~3,600 interrupts/s doing nothing -- and in the configurations tested (QVGA,
+   GUIX preview, SDRAM frame ring) having LINE enabled was a necessary condition
+   for the boot-aligned 40 s overrun bursts of issue #144.  So both are masked
+   right after Init.  [!] Do not re-enable them.  ERR/OVR stay on; FRAME is
+   managed by the snapshot and JPEG paths. */
+static HAL_StatusTypeDef dcmi_hal_init(void)
+{
+	HAL_StatusTypeDef st = HAL_DCMI_Init(&hdcmi);
+
+	if (st == HAL_OK)
+		__HAL_DCMI_DISABLE_IT(&hdcmi, DCMI_IT_LINE | DCMI_IT_VSYNC);
+	return st;
+}
+
 /* Toggle the DCMI hardware JPEG mode.  JPEGMode latches at HAL_DCMI_Init, so a
    switch needs a DeInit/Init with the new value; the cached hdcmi.Init keeps the
    sync/polarity/EDM config, and the DMA link + NVIC are restored after.  Only
@@ -525,7 +543,7 @@ static int dcmi_set_jpeg(int on)
 	if (HAL_DCMI_DeInit(&hdcmi) != HAL_OK)
 		return -1;
 	hdcmi.Init.JPEGMode = on ? DCMI_JPEG_ENABLE : DCMI_JPEG_DISABLE;
-	if (HAL_DCMI_Init(&hdcmi) != HAL_OK)
+	if (dcmi_hal_init() != HAL_OK)
 		return -1;
 	__HAL_LINKDMA(&hdcmi, DMA_Handle, hdma_dcmi);
 	return 0;
@@ -1285,7 +1303,8 @@ static int camera_capture_locked(int colorbar, uint32_t *warm_ms)
 	   (stm32f7xx_hal_dcmi.c FRAME handling), and HAL_DCMI_Start_DMA does not
 	   re-enable them -- without this, an overrun/sync error on the second and
 	   later captures would surface as a timeout instead of CAM_ERR_HAL.
-	   LINE/VSYNC stay off (nothing consumes them; they fire per line/frame).
+	   LINE/VSYNC stay off (nothing consumes them; they fire per line/frame;
+	   dcmi_hal_init() is where they are masked after every Init, issue #144).
 	   Clear stale flags first so an old latched error cannot trip the ISR
 	   the moment the interrupt enables. */
 	__HAL_DCMI_CLEAR_FLAG(&hdcmi, DCMI_FLAG_ERRRI | DCMI_FLAG_OVRRI |
@@ -3496,7 +3515,7 @@ int camera_init(void)
 	hdcmi.Init.CaptureRate       = DCMI_CR_ALL_FRAME;
 	hdcmi.Init.ExtendedDataMode  = DCMI_EXTEND_DATA_8B;
 	hdcmi.Init.JPEGMode          = DCMI_JPEG_DISABLE;
-	if (HAL_DCMI_Init(&hdcmi) != HAL_OK) {
+	if (dcmi_hal_init() != HAL_OK) {
 		(void)HAL_DMA_DeInit(&hdma_dcmi);
 		LOG_ERR("DCMI init failed");
 		goto fail_i2c;

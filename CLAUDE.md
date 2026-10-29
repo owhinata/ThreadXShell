@@ -204,13 +204,13 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
 
 ### STM32F746G-DISCO
 
-- **LTO 禁止**（ldscript の ASSERT 群が配置 invariant の本体で、LTO はそれが依拠するシンボル名を改名
-  する）。`board.cmake` の FATAL_ERROR と `boards/f746g-disco/cmake/check_f746_layout.py` を外さない。
+- **LTO 禁止**（ldscript の ASSERT 群が配置 invariant の本体で、LTO はそれが依拠するシンボル名を改名する）。`board.cmake` の FATAL_ERROR と `boards/f746g-disco/cmake/check_f746_layout.py` を外さない。
 - **SDRAM は FMC 内部バンクで用途固定**（またぐ変更は FE とキャッシュ直結）。ASSERT の境界を緩めない。
 - **PendSV / SysTick / USART1 のハンドラは強シンボル**（stock CMSIS の weak `Default_Handler` で落ちてもリンクは通る）。
 - **`CLI_INSTANCE_TIME_SLICE=0` を維持**（CPU-bound コマンド中に他コンソールが応答しないのは**期待挙動**）。
 - **raster の DCMI OVR を終端に戻さない**（teardown → GUIX 再 open の全画面描画が最初のフレームで再発し復帰が
   構造的に成立しない。#137）。**teardown は stop とエラーだけ、復帰は producer の in-place resync 1 本。**
+- **DCMI の LINE / VSYNC 割込みを有効に戻さない**（消費者が無く、試した構成では有効だと 40 s 周期 overrun の必要条件だった。`HAL_DCMI_Init` が足すので Init 直後に切る。#144）
 - **`.sdram.ai` のスクラッチはボードが注入する**（常駐の require は `check_f746_layout.py` が持つ）。
 - **camera sink（表示 + nn の step）と MJPEG の 2 購読者は各自 drain する**（`camera_frame_put()` は全 `consume()` の
   最後の文、購読者の終わりは `_pins == 0 && _callbacks == 0`）。**step の停止は印を落として使用中 0**（`svc/camera/cam_step`）。

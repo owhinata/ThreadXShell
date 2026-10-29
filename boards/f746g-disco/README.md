@@ -762,16 +762,39 @@ under the camera lock first (issue #142): a stop asked for by the last holder's
 leaving is withdrawn if a holder came back meanwhile; an error never is.  A terminal
 error that was latched still shows as `stopped (overrun)` in `stats`.
 
-**Known: how many overruns you get depends on code placement (issue #144).**
-With nothing else changed, moving unrelated code by a few dozen bytes takes the
-count from 0 to 16-18 in 3 minutes of GUIX preview, arriving in bursts of 3-4
-every 39.77 s at the same times after every boot.  The logic of the code that
-moved is not the cause: replacing an instruction with a NOP of the same length
-(same placement) keeps the overruns, and adding 32 B of padding in a function
-that runs once at boot removes them.  The root cause is suspected in the DMA2
-FIFO / SDRAM arbitration between the DCMI writes and the LTDC scan-out.  Every
-burst is resynced in place (`ovr ring` 0, nothing dropped by the ring), at a
-cost of 3-4 frames every 40 s on an unlucky layout.
+### The unused DCMI LINE / VSYNC interrupts stay masked (issue #144)
+
+Symptom, on some builds: during a GUIX preview the raster stream gets DCMI
+overruns in bursts of 3-4 about every 40 s, at the same times after every boot
+(15.7 / 55.7 / 95.7 s ...), whatever the stream starts and stops in between.
+Only the first overrun of a burst is the real event; the others re-trigger
+right after each in-place resync above.  Whether a build shows it comes and goes
+with code placement: moving unrelated code by a few dozen bytes takes the count
+from 0 to 16-18 in 3 minutes.  Every burst is resynced in place (`ovr ring` 0).
+
+Same-boot A/B/A tests on a reproducing build established two necessary
+conditions, in the configurations tested (QVGA RGB565, GUIX preview, 8-slot
+SDRAM ring):
+
+- the DCMI LINE interrupt is enabled: with IER 0x06 (ERR | OVR) there were 0
+  overruns in 35 minutes; re-enabling LINE alone gave 6 in 71 s, VSYNC alone
+  gave 0 in 208 s;
+- the DMA destination is external SDRAM: two images differing only in the
+  buffer base gave 6 overruns (SDRAM) against 0 (SRAM) in about 200 s.  The
+  frame ring can only live in SDRAM, so this one stays.
+
+`HAL_DCMI_Init()` enables LINE | VSYNC | ERR | OVR unconditionally, and nothing
+on this board consumes LINE or VSYNC (the HAL callbacks are the weak empty ones,
+about 3,600 interrupts/s at QVGA 15 fps).  `dcmi_hal_init()` in
+`port/camera/camera.c` therefore masks both right after every Init (camera
+init and the JPEG-mode toggle); the snapshot path already re-armed only ERR |
+OVR.  IER (`devmem peek 0x5005000C`; bit0 FRAME, bit1 OVR, bit2 ERR, bit3 VSYNC,
+bit4 LINE, RM0385 17.5.4) should read 0x06 on the raster stream and 0x07 while a
+JPEG frame is armed.
+
+Not known, and not pursued further: where the 40 s period comes from and why
+code placement matters.  The reproducing binary and the raw investigation notes
+are in the git-ignored `build/f746-144-repro/`.
 
 ## Debugging
 

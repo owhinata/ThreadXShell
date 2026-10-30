@@ -123,8 +123,8 @@ plugin は board code と同格の**信頼された native code**。ゲートが
   のみ）。「実行しない」は規律ではなく**型の性質**。**ゲートは plugin ELF にも適用し対象外にしない。
   ダイジェストは署名ではない**（由来は packer のプロセス制約が担保する）。
 - **container は組んでから検査し、その同一ファイルを送る**。ホストは `verify_container` で**デバイスと
-  同じ `svc/plugin/plugin_load.c`** を走らせ、**全ゲート通過まで公開しない**。**`--profile` と `--slot` は必須**
-  で前者はファイル名から推測しない。**`--profile` はチェック集合の選択であって識別ではない**ので非対称
+  同じ `svc/plugin/plugin_load.c`** を走らせ、**全ゲート通過まで公開しない**。**`--profile` と行き先は必須**
+  で前者はファイル名から推測しない。**asset の行き先はちょうど 1 つ**（slot ボードは `--slot` と slot 表、file ボードは出荷 ELF から読み戻した staging 容量に公開前に照合し、無し・両方・半分は拒否。#159）。**`--profile` はチェック集合の選択であって識別ではない**ので非対称
   — 対処は**拒否ではなく警告**で、**`cls` 側に出力 shape 固定を足さない**。
 - **[!] モデル区画は 16 バイト整列**（flatbuffer の 4 ではなく Ethos-U ドライバの要求）。
   **[!] オフセット → アドレスの変換は `plugin_run_slot()` の 1 箇所**で、**実行前に MPU を読み戻して
@@ -178,7 +178,7 @@ plugin は board code と同格の**信頼された native code**。ゲートが
 
 - **メモリ配置**: DTCM = D-cache を経由しないもの / SRAM1 = SDMMC DMA バウンス / SDRAM は **FMC 内部
   バンクごとに用途固定**（**またぐ変更は FE とキャッシュコヒーレンシに直結**）。ASSERT では `.sdram` の
-  属性脱落を検出できないので `check_f746_layout.py` のシンボル常駐検査が見る。
+  属性脱落を検出できないので `check_f746_layout.py` のシンボル常駐検査が見る。**内蔵 SRAM 上端 32 KB（0x20048000）は prelink の `.plugin` 予約**で、ldscript / `plugin_memory.ld` / board.cmake のゲート引数 / `check_f746_layout.py` の **4 箇所で独立に宣言し 1 変数から生成しない**（`_estack` と heap 天井はその下、#159）。
 - **`PendSV_Handler` / `SysTick_Handler` / `USART1_IRQHandler` は強シンボル**（stock CMSIS の weak
   `Default_Handler` で落ちてもリンクは通る）。ゲートは strong `T` / 非同値 / `.isr_vector` slot 一致の 3 条件。
 - **`CLI_INSTANCE_TIME_SLICE=0` を維持**（CPU-bound コマンドが多重実行に非再入。スライス有効化は再入ガードとセット）。

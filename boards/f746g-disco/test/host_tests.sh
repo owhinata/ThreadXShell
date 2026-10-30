@@ -145,6 +145,65 @@ gcc $CFLAGS -I "$here/nn_shim" -I "$board/port/nn" -I "$board/port/camera" \
     $LDFLAGS -o "$out/test_nn_model_life"
 "$out/test_nn_model_life"
 
+# issue #159 (#78 Step 4a) -- `nn model load --path <container>` on the tflm
+# build: the same adapter compiled WITH CONFIG_NN_BACKEND_TFLM and this board's
+# policy macros (the values board.cmake gives a tflm build), over the real
+# plugin validator and CRC.  A container built byte by byte with this board's
+# facts is accepted and its MODEL SECTION handed over in place; wio's target
+# word, a truncated file and a damaged plugin byte are refused before the
+# backend is touched; the CRC the reader prints and the one `nn info` prints
+# beside the claims are one value, equal to an independent CRC of the file.
+gcc $CFLAGS -DCONFIG_NN_BACKEND_TFLM=1 -DF746_PLUGIN_TARGET_ID=0x1101 \
+    -DF746_PLUGIN_BASE=0x20048000u -DF746_PLUGIN_MAX=32768u \
+    -DF746_PLUGIN_VENEER_COST_4A=640u -DF746_PLUGIN_STACK_NN_WORK=1024u \
+    -DF746_PLUGIN_STACK_GUIX=1024u -DF746_PLUGIN_STACK_SHELL=1024u \
+    -I "$here/nn_shim" -I "$board/port/nn" -I "$board/port/camera" \
+    -I "$board/port/sdram" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+    "$here/test_nn_model_container.c" "$board/port/nn/nn_svc_f746_model.c" \
+    "$board/port/nn/nn_container.c" \
+    "$board/port/nn/nn.c" "$HOST_TEST_SVC/nn/nn_core_model.c" \
+    "$HOST_TEST_SVC/nn/nn_swap.c" "$HOST_TEST_SVC/fmt.c" \
+    "$HOST_TEST_SVC/plugin/plugin_load.c" "$HOST_TEST_SVC/plugin/plugin_info.c" \
+    "$HOST_TEST_SVC/crc32.c" \
+    $LDFLAGS -o "$out/test_nn_model_container"
+"$out/test_nn_model_container"
+
+# issue #159 -- which model range the tflm backend's staging slot may adopt
+# (port/nn/tflm/nn_tflm_fit.h, the header nn_tflm.cc calls): a range ending
+# exactly at the slot's end, one byte past it, misalignments 1..15, outside
+# the slot, empty, wrapping, and a slot at the top of the address space.
+gcc $CFLAGS -I "$board/port/nn/tflm" \
+    "$here/test_nn_tflm_fit.c" $LDFLAGS -o "$out/test_nn_tflm_fit"
+"$out/test_nn_tflm_fit"
+
+# issue #159 -- the heap's bound by BEHAVIOUR: the real src/retarget.c must
+# grow the break to exactly `_estack - _Min_Stack_Size` (below the .plugin
+# reservation) and no further.  cmake/check_f746_layout.py checks that the
+# linked _sbrk NAMES _estack; it cannot check that _estack GOVERNS the
+# comparison (`_estack + _Min_Stack_Size` names the same constants), and this
+# can.  The linker symbols are renamed for retarget.c only, to labels
+# test_sbrk.c lays out with memory above _estack, so a bound past it links and
+# fails rather than failing to link.
+gcc $CFLAGS -Dend=f746_test_heap_floor -D_estack=f746_test_estack \
+    -D_Min_Stack_Size=f746_test_min_stack \
+    -c "$board/src/retarget.c" -o "$out/retarget_host.o"
+gcc $CFLAGS "$here/test_sbrk.c" "$out/retarget_host.o" \
+    $LDFLAGS -o "$out/test_sbrk"
+"$out/test_sbrk"
+
+# issue #159 -- the file destination's fit check reads the staging capacity
+# back out of the shipped firmware (cmake/build_asset.py stage_capacity()); its
+# refusals need a real ARM ELF, so this runs with the repository-pinned cross
+# toolchain and SKIPS -- loudly -- without it.  (The toolchain-free cases of the
+# same script run from shell/test/run_host_tests.sh.)
+gate_cc=$(ls -d "$HOST_TEST_REPO"/tools/arm-gnu-toolchain-*/bin/arm-none-eabi-gcc 2>/dev/null | tail -1)
+if [ -n "$gate_cc" ] && [ -x "$gate_cc" ]; then
+    python3 "$HOST_TEST_REPO/cmake/fixtures/run_asset_dest_tests.py" --cc "$gate_cc"
+else
+    echo "run_asset_dest_tests --cc: SKIPPED -- no arm-none-eabi toolchain under" \
+         "$HOST_TEST_REPO/tools/ (configure an f746 build once to fetch it)" >&2
+fi
+
 # issue #143 -- the `camera` table this board builds: the shared command
 # (shell/cmds/cmd_camera.c) against this board's REAL svc/camera_svc_config.h,
 # over the shared stub adapter.  A board subcommand that reuses a shared name

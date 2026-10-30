@@ -39,6 +39,29 @@ It also guards two things the linker script never could:
     unresolved references" says nothing here -- that is just what a successful
     link means -- so this is a presence check.
 
+  * THE .plugin RESERVATION (issue #159).  The top 32 KB of internal SRAM is
+    prelinked plugin space: a container built for this board carries code
+    linked for exactly RESERVATION_BASE.  The linker script pins it and ASSERTs
+    on it, but those ASSERTs are the linker checking its own script, and the
+    heap ceiling is not a section at all.  So the linked image is checked
+    against literals stated HERE -- the section at exactly that address and
+    size, NOLOAD, ending at the top of SRAM2, no other allocated section and no
+    symbol but its own markers inside it, _estack (the MSP and the heap
+    ceiling's source) at or below its base, the heap's floor below that -- and
+    `_sbrk`, the code that enforces the ceiling, is read: its 32-bit constants
+    must name _estack's address and nothing inside the reservation.  Text over
+    objdump, so it fails CLOSED: constants it cannot read do not contain the
+    ceiling, and that is a refusal.  [!] WHAT THE CONSTANT CHECK DOES NOT
+    PROVE: that _estack GOVERNS the comparison.  `_estack + _Min_Stack_Size`
+    materialises exactly the same constants and lets the heap 1 KB into the
+    reservation -- the #159 adversarial review linked that image and this gate
+    passed it (wio's #108 review found the same hole in its gate).  A
+    disassembly is the wrong tool for data flow, so that half is checked by
+    behaviour: test/test_sbrk.c compiles the real src/retarget.c on the host
+    and requires the break to stop at `_estack - _Min_Stack_Size`.  [!] The literal is one of four independent
+    declarations (the linker script, ldscript/plugin_memory.ld, board.cmake's
+    F746_PLUGIN_GATE_BASE/END); never derive it from any of them.
+
 Exit status 0 = pass; 1 = a failure; 2 = the check could not be performed (which
 is also a failure: a gate that skips itself reports the same silence as a passing
 one).
@@ -62,7 +85,15 @@ SDRAM_BANK3 = (0xC0600000, 0xC0800000)   # bank3: NN arena
 MODEL_WINDOW = (0xC0700000, 0xC0800000)  # bank3 upper half: reloc exec window
 
 VECTOR_BASE = 0x08000000
-ESTACK = 0x20050000
+
+# The .plugin reservation (issue #159), stated here as its own literals -- see
+# the module docstring.  Anchored at the top of SRAM2.
+RESERVATION_BASE = 0x20048000
+RESERVATION_SIZE = 0x8000
+SRAM_TOP = 0x20050000
+# The only symbols allowed inside [base, base + size): the section's markers.
+RESERVATION_MARKERS = {"__plugin_start", "__plugin_end"}
+ESTACK = 0x20048000                      # below the .plugin reservation (#159)
 
 # Objects that exist in EVERY configuration of this firmware, and the region each
 # one must be in.  Configuration-dependent residents are NOT listed here -- they
@@ -211,8 +242,9 @@ def check_fixed(syms):
     if estack is None:
         failures.append("_estack: not defined -- the linker script did not run?")
     elif estack != ESTACK:
-        failures.append(f"_estack is 0x{estack:08x}, expected 0x{ESTACK:08x} (top of "
-                        f"SRAM1+SRAM2).  src/retarget.c bounds the heap against this.")
+        failures.append(f"_estack is 0x{estack:08x}, expected 0x{ESTACK:08x} (the "
+                        f"base of the .plugin reservation).  src/retarget.c bounds "
+                        f"the heap against this.")
     return failures
 
 
@@ -363,6 +395,120 @@ def check_not_in_sdram(syms, forbidden):
     return failures
 
 
+def read_sections(objdump, elf):
+    """[(name, vma, size, {flags})] from `objdump -h`."""
+    lines = run([objdump, "-h", elf]).splitlines()
+    out = []
+    for i, line in enumerate(lines):
+        m = re.match(r"^\s*\d+\s+(\S+)\s+([0-9a-fA-F]{8})\s+([0-9a-fA-F]{8})", line)
+        if not m or i + 1 >= len(lines):
+            continue
+        flags = {f.strip() for f in lines[i + 1].split(",")}
+        out.append((m.group(1), int(m.group(3), 16), int(m.group(2), 16), flags))
+    if not out:
+        die(f"{objdump} -h listed no sections for {elf}")
+    return out
+
+
+def function_constants(objdump, elf, name):
+    """The 32-bit constants @name materialises, or None if it is not there.
+
+    A literal-pool word (`.word 0x...` inside the function) or a movw/movt
+    pair on one register.  Anything else yields nothing -- which the caller
+    reads as the ceiling NOT being named, i.e. a refusal.
+    """
+    out = run([objdump, "-d", "-j", ".text", elf])
+    body, inside, found = [], False, False
+    for line in out.splitlines():
+        m = re.match(r"^[0-9a-fA-F]+ <([^>]+)>:", line)
+        if m:
+            if inside:
+                break
+            inside = strip_clone_suffixes(m.group(1)) == name
+            found = found or inside
+            continue
+        if inside:
+            body.append(line)
+    if not found:
+        return None
+    consts, low = set(), {}
+    for line in body:
+        m = re.search(r"\.word\s+0x([0-9a-fA-F]+)", line)
+        if m:
+            consts.add(int(m.group(1), 16))
+            continue
+        m = re.search(r"\bmovw\s+(\w+),\s*#(\d+)", line)
+        if m:
+            low[m.group(1)] = int(m.group(2))
+            continue
+        m = re.search(r"\bmovt\s+(\w+),\s*#(\d+)", line)
+        if m and m.group(1) in low:
+            consts.add((int(m.group(2)) << 16) | low[m.group(1)])
+    return consts
+
+
+def check_reservation(syms, sections, sbrk_consts):
+    """The .plugin reservation and the heap below it (issue #159)."""
+    failures = []
+    base, end = RESERVATION_BASE, RESERVATION_BASE + RESERVATION_SIZE
+    if end != SRAM_TOP:
+        failures.append(f"the reservation literal ends at 0x{end:08x}, not at "
+                        f"the top of SRAM2 (0x{SRAM_TOP:08x})")
+    plug = [sec for sec in sections if sec[0] == ".plugin"]
+    if len(plug) != 1:
+        failures.append(f".plugin: expected exactly one section, found {len(plug)} "
+                        f"-- the prelinked plugin reservation is not in the image")
+    else:
+        _, vma, size, flags = plug[0]
+        if vma != base or size != RESERVATION_SIZE:
+            failures.append(f".plugin is [0x{vma:08x}, 0x{vma + size:08x}); this "
+                            f"gate states [0x{base:08x}, 0x{end:08x}) -- a "
+                            f"prelinked address may not move")
+        if "CONTENTS" in flags or "LOAD" in flags:
+            failures.append(".plugin carries contents; it must be NOLOAD (the "
+                            "image arrives at run time)")
+    for name, vma, size, flags in sections:
+        if name == ".plugin" or "ALLOC" not in flags or size == 0:
+            continue
+        if vma < end and vma + size > base:
+            failures.append(f"section {name} [0x{vma:08x}, 0x{vma + size:08x}) "
+                            f"overlaps the .plugin reservation")
+    for addr, _typ, name in syms:
+        n = strip_clone_suffixes(name)
+        # _estack is DEFINED as the base (the MSP starts there and grows down);
+        # it is the reservation's lower edge, not something inside it.
+        if n == "_estack" and addr == base:
+            continue
+        if base <= addr < end and n not in RESERVATION_MARKERS:
+            failures.append(f"symbol {name} at 0x{addr:08x} lies inside the "
+                            f".plugin reservation")
+    estack = unique_address(syms, "_estack")
+    floor = unique_address(syms, "end")
+    if estack is not None and estack > base:
+        failures.append(f"_estack 0x{estack:08x} is above the reservation's base "
+                        f"0x{base:08x}: the main stack and the heap ceiling "
+                        f"src/retarget.c derives from it reach into plugin space")
+    if floor is None:
+        failures.append("end: not defined -- the heap's floor cannot be checked")
+    elif estack is not None and floor > estack:
+        failures.append(f"the heap starts at 0x{floor:08x}, above its own ceiling "
+                        f"source _estack 0x{estack:08x}")
+    if sbrk_consts is None:
+        failures.append("_sbrk: not in the image -- the heap's bound cannot be "
+                        "checked where it is enforced")
+    else:
+        if estack is not None and estack not in sbrk_consts:
+            failures.append(f"_sbrk does not name _estack (0x{estack:08x}) -- "
+                            f"whatever bounds the heap, it is not the ceiling "
+                            f"below the reservation")
+        above = sorted(c for c in sbrk_consts if base <= c <= end and c != estack)
+        if above:
+            failures.append("_sbrk names " + ", ".join(f"0x{c:08x}" for c in above)
+                            + " inside the .plugin reservation -- the heap could "
+                            "grow into a plugin")
+    return failures
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("elf")
@@ -396,6 +542,8 @@ def main():
     failures += cmd_failures
     failures += check_residency(syms, required)
     failures += check_not_in_sdram(syms, args.forbid_sdram)
+    failures += check_reservation(syms, read_sections(args.objdump, args.elf),
+                                  function_constants(args.objdump, args.elf, "_sbrk"))
 
     if failures:
         print(f"check_f746_layout: FAIL ({len(failures)} problem(s)) in {args.elf}",
@@ -405,7 +553,8 @@ def main():
         return 1
 
     print(f"check_f746_layout: OK -- {len(required)} placed objects in their regions, "
-          f"3 strong handlers installed in .isr_vector, "
+          f"3 strong handlers installed in .isr_vector, .plugin "
+          f"0x{RESERVATION_BASE:08x}+0x{RESERVATION_SIZE:x} with the heap below it, "
           f".shell_root_cmds {cmd_bytes} B / {cmd_count} registrations")
     return 0
 

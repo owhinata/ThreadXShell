@@ -17,7 +17,8 @@
  *   region   start        total      used      free  use%
  *   Flash    0x08000000  1048576    294752    753824   28%   .isr/.text/.rodata/.data(load)
  *   DTCM     0x20000000    65536     24608     40928   37%   .log_noinit + .dtcm_bench
- *   SRAM     0x20010000   262144     ......    ......  ..%   .data/.bss/.sram1_dma + heap
+ *   SRAM     0x20010000   229376     ......    ......  ..%   .data/.bss/.sram1_dma + heap
+ *   Plugin   0x20048000    32768         0     32768    0%   prelinked plugin image; not heap
  *   SDRAM    0xC0000000  8388608   ........  ........  ..%   .sdram banks0-3 (LTDC/cam/eth/NN NOLOAD)
  *
  * Per-region accounting (linker symbols in ldscript/STM32F746NGHx_FLASH.ld):
@@ -31,6 +32,13 @@
  *   SRAM   static = _end - ORIGIN(RAM) (.data + .bss + .sram1_dma); the heap then
  *          grows up from _end and the main/ISR stack grows down from _estack, so
  *          used = (heap break) - ORIGIN(RAM) and free = _estack - (heap break).
+ *          [!] Since issue #159 the row's TOTAL stops at the .plugin
+ *          reservation (__plugin_start == _estack): the top 32 KB is prelinked
+ *          plugin space the heap and the main stack can never have, and
+ *          counting it as free would report headroom that does not exist.
+ *   Plugin the .plugin reservation itself, on its own row, so the 256 KB of
+ *          SRAM1+SRAM2 is still all accounted for.  Nothing is loaded there in
+ *          Step 4a, so its used column is 0.
  *   SDRAM  used = sum of the bank-aligned NOLOAD sub-regions: .sdram.fixed (bank0
  *          LTDC/display) + .sdram.cam (bank1 camera arena) + .sdram.eth (bank2 ETH
  *          DMA + NetX pool, owhinata/stm32f746g-disco#49) + .sdram.ai (bank3 lower, NN arena,
@@ -70,7 +78,6 @@
 #define DTCM_ORIGIN   0x20000000u
 #define DTCM_LENGTH   (64u   * 1024u)
 #define SRAM_ORIGIN   0x20010000u
-#define SRAM_LENGTH   (256u  * 1024u)
 #define SDRAM_ORIGIN  0xC0000000u
 #define SDRAM_LENGTH  (8u * 1024u * 1024u)
 
@@ -101,6 +108,7 @@ extern uint8_t _ssdram_ai_model[], _esdram_ai_model[];
 extern uint8_t _end[];                       /* top of static SRAM = heap base */
 extern uint8_t _estack[];                    /* top of SRAM (initial MSP)      */
 extern uint8_t _Min_Stack_Size[];            /* reserved main-stack bytes      */
+extern uint8_t __plugin_start[], __plugin_end[]; /* the .plugin reservation (#159) */
 
 static uint32_t sym(const uint8_t s[])
 {
@@ -151,8 +159,12 @@ static int cmd_free(struct cli_instance *sh, int argc, char **argv)
 	             ".isr/.text/.rodata/.data");
 	print_region(sh, "DTCM",  DTCM_ORIGIN,  DTCM_LENGTH,  dtcm_used,
 	             ".log_noinit (persistent) + .dtcm_bench");
-	print_region(sh, "SRAM",  SRAM_ORIGIN,  SRAM_LENGTH,  sram_used,
-	             ".data/.bss/.sram1_dma + heap");
+	/* The SRAM row ends where the plugin reservation starts (issue #159). */
+	print_region(sh, "SRAM",  SRAM_ORIGIN,  sym(__plugin_start) - SRAM_ORIGIN,
+	             sram_used, ".data/.bss/.sram1_dma + heap");
+	print_region(sh, "Plugin", sym(__plugin_start),
+	             sym(__plugin_end) - sym(__plugin_start), 0u,
+	             "prelinked plugin image; not heap (none loaded: #159 4a)");
 	print_region(sh, "SDRAM", SDRAM_ORIGIN, SDRAM_LENGTH, sdram_used,
 	             ".sdram fixed/cam/eth/ai/model (banks0-3)");
 

@@ -664,6 +664,124 @@ endif()
 
 firmware_finalize(shell)
 
+# ---------------------------------------------------------------------------
+# The plugin target word (issue #159 = #78 Step 4a)
+# ---------------------------------------------------------------------------
+#
+# cortex-m7 / fpv5-sp-d16 / hard float / little endian, no CMSE (this part has
+# no Security Extension), per plugin_target_id() in svc/plugin/plugin_abi.h.
+# Checked at both ends rather than trusted: port/nn/nn_svc_f746.c static-asserts
+# it against this firmware's own predefined macros (svc/plugin/plugin_target.h,
+# also the only check of the CMSE bit) -- and since those macros are exactly a
+# Cortex-M4 with FPv4's too, cmake/check_target_word.py checks it against the
+# LINKED image's .ARM.attributes, whose Tag_FP_arch tells FPv5 from FPv4.
+#
+# Every backend: it describes the environment this firmware provides, whether
+# or not this build can load a model.
+set(F746_PLUGIN_TARGET_ID "0x1101")
+target_compile_definitions(shell PRIVATE
+    F746_PLUGIN_TARGET_ID=${F746_PLUGIN_TARGET_ID})
+add_custom_command(TARGET shell POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/cmake/check_target_word.py"
+            $<TARGET_FILE:shell> --target-id "${F746_PLUGIN_TARGET_ID}"
+    COMMENT "check the plugin target word against the firmware image"
+    VERBATIM)
+
+# ---------------------------------------------------------------------------
+# The .plugin reservation (issue #159 = #78 Step 4a)
+# ---------------------------------------------------------------------------
+#
+# The top 32 KB of internal SRAM, 0x20048000..0x20050000, in every backend (the
+# linker script has it whatever the backend, so its gate -- in
+# cmake/check_f746_layout.py, below -- runs whatever the backend).
+#
+# [!] WRITTEN OUT AGAIN HERE, ON PURPOSE.  This is what Step 4b's add_plugin()
+# tells the shared image gate.  The same reservation is stated in the linker
+# script, in ldscript/plugin_memory.ld (what a plugin links against) and in
+# cmake/check_f746_layout.py, each as its own literal: a gate that read its
+# expected value out of what it checks would pass anything.  Do not derive one
+# from another.
+set(F746_PLUGIN_GATE_BASE 0x20048000)
+set(F746_PLUGIN_GATE_END  0x20050000)
+set(F746_PLUGIN_MEMORY_LD "${BOARD_DIR}/ldscript/plugin_memory.ld")
+
+# ---------------------------------------------------------------------------
+# Plugin containers: recognise, validate, report (issue #159 Step 4a)
+# ---------------------------------------------------------------------------
+#
+# `nn model load --path <x.nnc>` recognises a container, validates it with
+# this board's policy (svc/plugin/plugin_load.c -- the validator the host asset
+# build runs too) and hands its model section to the backend in place.  Step 4a
+# NEVER EXECUTES A PLUGIN: the load order's plugin hooks are unset, so the
+# model runs under the resident decoder and `nn info` says the plugin is
+# validated, not loaded.  This board builds no plugin and no container yet --
+# add_plugin() needs veneer_cost_gate(), whose roots arrive with Step 4b.
+#
+# tflm only: the other backends cannot hand a model section to an interpreter
+# in place, so a container has nowhere to go there.
+if(CONFIG_NN_BACKEND STREQUAL "tflm")
+    # The policy's address and capacity, for the firmware's validator.  The
+    # reservation's address is still stated independently elsewhere (above).
+    set(F746_PLUGIN_BASE "0x20048000")
+    set(F746_PLUGIN_MAX  "32768")
+    # [!] PROVISIONAL c, STEP 4a ONLY.  plugin_parse() refuses a policy with no
+    # veneer cost, and the number every other board uses is
+    # PLUGIN_VENEER_BASE_COST, which veneer_cost_gate() derives-and-checks
+    # against the shipped image and compiles in.  That gate needs the firmware
+    # functions behind all six veneers, which arrive with Step 4b.  Until then
+    # nothing here executes a plugin, so this number only decides whether
+    # `nn info` calls a container's stack declaration admissible -- wio's
+    # checked value (640), named so that 4b's gate replaces it rather than
+    # coexisting with it.
+    set(F746_PLUGIN_VENEER_COST_4A 640)
+    # [!] AND IT MUST NOT OUTLIVE STEP 4a.  Once veneer_cost_gate() is
+    # registered for this firmware, the checked number exists and the
+    # provisional one would be a second c the loader could use instead.  Checked
+    # at the end of this directory, so the order of the two calls does not
+    # matter; the firmware refuses the pair too (nn_svc_f746_model.c).
+    function(_f746_provisional_c_check)
+        get_property(_gate GLOBAL PROPERTY VENEER_GATE_TARGET)
+        if(_gate AND DEFINED F746_PLUGIN_VENEER_COST_4A)
+            message(FATAL_ERROR
+                "f746g-disco: veneer_cost_gate() is registered, but "
+                "F746_PLUGIN_VENEER_COST_4A (the provisional c of issue #159 "
+                "Step 4a) is still defined.  Step 4b replaces it with the "
+                "gate's value, PLUGIN_VENEER_BASE_COST: delete the provisional "
+                "variable and its compile definition, and give the policy the "
+                "gate's number.")
+        endif()
+    endfunction()
+    cmake_language(DEFER CALL _f746_provisional_c_check)
+
+    # What each thread may lend a plugin callback (wio's policy to start, per
+    # the plan; the measured depths come with Step 4b).  The firmware's
+    # slot -> allowance mapping and the asserts against each thread's stack are
+    # in port/nn/nn_svc_f746_model.c / nn_svc_f746.c / nn_camera.c.
+    include("${CMAKE_SOURCE_DIR}/cmake/plugin_stack_table.cmake")
+    plugin_stack_table(
+        DEFINE_ON  shell
+        ALLOWANCES F746_PLUGIN_STACK_NN_WORK=1024
+                   F746_PLUGIN_STACK_GUIX=1024
+                   F746_PLUGIN_STACK_SHELL=1024
+        SLOTS      entry=F746_PLUGIN_STACK_SHELL
+                   shapes_ok=F746_PLUGIN_STACK_SHELL
+                   decode=F746_PLUGIN_STACK_NN_WORK
+                   draw=F746_PLUGIN_STACK_GUIX
+                   report=F746_PLUGIN_STACK_SHELL
+                   param_set=F746_PLUGIN_STACK_SHELL
+                   param_get=F746_PLUGIN_STACK_SHELL)
+
+    target_sources(shell PRIVATE
+        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"   # the device's validator
+        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_info.c"   # `nn info`'s stack lines
+        "${CMAKE_SOURCE_DIR}/svc/crc32.c"                # the digest and the load CRC
+        "${BOARD_DIR}/port/nn/nn_container.c")           # ...over the bytes read
+    target_compile_definitions(shell PRIVATE
+        F746_PLUGIN_BASE=${F746_PLUGIN_BASE}u
+        F746_PLUGIN_MAX=${F746_PLUGIN_MAX}u
+        F746_PLUGIN_VENEER_COST_4A=${F746_PLUGIN_VENEER_COST_4A}u)
+endif()
+
 # --- Post-link placement gate ------------------------------------------------
 # The linker script carries most of this board's placement invariant in ASSERTs,
 # but ASSERTs can only see the section BOUNDARIES, and this script defines those

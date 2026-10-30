@@ -20,8 +20,9 @@
  * restores nothing, an `nn info` from another console in the middle of a swap.
  *
  * Like the rest of the adapter it adds no second copy of the model: the
- * singleton and the session gate live in port/nn/nn.c.  The one piece of state
- * here is the shared order's transition counter, which nothing else had.
+ * singleton and the session gate live in port/nn/nn.c.  The state here is the
+ * shared order's transition counter, which nothing else had, and -- on tflm,
+ * since issue #159 -- what the open model's container CLAIMS (below).
  */
 #include "nn_svc.h"
 #include "nn_svc_adapter.h" /* nn_detail_set, nn_result (#130) */
@@ -33,6 +34,12 @@
 #include "nn_camera.h"
 #include "sdram.h"
 #include "tx_api.h"
+
+#if defined(CONFIG_NN_BACKEND_TFLM)
+#include "nn_container.h"
+#include "plugin_info.h"
+#include "plugin_load.h"
+#endif
 
 /* ---- the shared order's state -------------------------------------------- */
 
@@ -60,6 +67,109 @@ static void nn_life_cs_exit(unsigned posture)
 	TX_RESTORE
 }
 
+/* ---- plugin containers (issue #159 = #78 Step 4a) ------------------------- */
+
+#if defined(CONFIG_NN_BACKEND_TFLM)
+/*
+ * This board's policy for a plugin image.  svc/plugin/plugin_load.c holds no
+ * board fact; every one of them arrives here, from board.cmake.
+ *
+ * [!] STEP 4a NEVER CALLS THROUGH ANY OF THIS.  A container is validated, its
+ * model section handed to the backend in place and its claims recorded; the
+ * plugin section is never copied into .plugin and never branched into, and the
+ * resident decoder keeps reading the model.  The load order's plugin hooks are
+ * unset (nn_life_board below), so nothing here could.
+ *
+ * The reservation's address is stated independently in the linker script,
+ * ldscript/plugin_memory.ld and cmake/check_f746_layout.py, on purpose.
+ */
+#if !defined(F746_PLUGIN_BASE) || !defined(F746_PLUGIN_MAX) ||               \
+    !defined(F746_PLUGIN_TARGET_ID) || !defined(F746_PLUGIN_VENEER_COST_4A) || \
+    !defined(F746_PLUGIN_STACK_NN_WORK) || !defined(F746_PLUGIN_STACK_GUIX) ||  \
+    !defined(F746_PLUGIN_STACK_SHELL)
+#error "board.cmake must define the F746_PLUGIN_* policy for a tflm build"
+#endif
+/* The provisional c must go when the checked one arrives (Step 4b): two
+ * numbers for one fact is how the loader would charge the unchecked one. */
+#if defined(PLUGIN_VENEER_BASE_COST)
+#error "veneer_cost_gate() defines PLUGIN_VENEER_BASE_COST: replace F746_PLUGIN_VENEER_COST_4A with it (issue #159 Step 4b)"
+#endif
+
+/* A container's model section starts on PLUGIN_MODEL_ALIGN and the backend
+ * adopts it in place, so that must meet what the backend requires.  Stated as
+ * MET, not assumed. */
+_Static_assert(PLUGIN_MODEL_ALIGN % NN_MODEL_ALIGN == 0u,
+               "a container's model section must meet the backend's alignment");
+
+/*
+ * [!] c IS PROVISIONAL IN STEP 4a (board.cmake, F746_PLUGIN_VENEER_COST_4A):
+ * veneer_cost_gate(), which derives and checks PLUGIN_VENEER_BASE_COST against
+ * the shipped image, needs the firmware functions behind every veneer, and
+ * those arrive with Step 4b.  Nothing here executes a plugin, so the number
+ * only decides whether a container's stack declaration reads as admissible.
+ *
+ * The slot -> allowance mapping is this board's (decode on the nn worker, draw
+ * on the GUIX thread that draws the boxes, the rest on a console); the asserts
+ * against each thread's stack are in nn_svc_f746.c and nn_camera.c.
+ */
+static const struct plugin_policy nn_plugin_policy = {
+	.target_id      = F746_PLUGIN_TARGET_ID,
+	.link_addr      = F746_PLUGIN_BASE,
+	.capacity       = F746_PLUGIN_MAX,
+	.image_align    = PLUGIN_IMAGE_ALIGN,
+	.caps_supported = PLUGIN_CAP_KNOWN_MASK,
+	.stack_limit    = {
+		[PLUGIN_SLOT_ENTRY]     = F746_PLUGIN_STACK_SHELL,
+		[PLUGIN_SLOT_SHAPES_OK] = F746_PLUGIN_STACK_SHELL,
+		[PLUGIN_SLOT_DECODE]    = F746_PLUGIN_STACK_NN_WORK,
+		[PLUGIN_SLOT_DRAW]      = F746_PLUGIN_STACK_GUIX,
+		[PLUGIN_SLOT_REPORT]    = F746_PLUGIN_STACK_SHELL,
+		[PLUGIN_SLOT_PARAM_SET] = F746_PLUGIN_STACK_SHELL,
+		[PLUGIN_SLOT_PARAM_GET] = F746_PLUGIN_STACK_SHELL,
+	},
+	.veneer_cost    = F746_PLUGIN_VENEER_COST_4A,
+	.stack_accounting = PLUGIN_STACK_ACCOUNTING,
+};
+
+/*
+ * What the container of the OPEN model claimed, or nothing.
+ *
+ * Settled only by the shared order's commit / forget, i.e. only once the
+ * backend adopted (or refused) the model, and while the transition counter is
+ * odd -- so `nn info`, which takes no lock, reads the counter in the same
+ * masked section as these and says "a model load is in progress" rather than
+ * pairing one model with another's claims.  @ref path names the file the claims
+ * came with, so a load landing between `nn info`'s model line and its plugin
+ * line shows up as a mismatch.
+ *
+ * PLAIN DATA: struct plugin_view carries integer offsets and copied bytes, no
+ * callable pointer.
+ */
+#define NN_CLAIMS_PATH_MAX 48u
+struct nn_claims {
+	struct plugin_view view;
+	uint32_t crc32;   /**< nn_container_crc() over all @ref bytes read      */
+	uint32_t bytes;   /**< the whole container, as read off the card        */
+	char     path[NN_CLAIMS_PATH_MAX];
+};
+
+static struct nn_claims nn_claims;
+static uint8_t          nn_claims_valid;
+
+static void nn_claims_set(const struct nn_claims *c)
+{
+	unsigned posture = nn_life_cs_enter();
+
+	if (c != NULL) {
+		nn_claims       = *c;
+		nn_claims_valid = 1u;
+	} else {
+		nn_claims_valid = 0u;
+	}
+	nn_life_cs_exit(posture);
+}
+#endif /* CONFIG_NN_BACKEND_TFLM */
+
 /* ---- the backend ---------------------------------------------------------- */
 
 /** One load's resolution, on the console's stack. */
@@ -69,6 +179,14 @@ struct nn_f746_job {
 	void          *buf;
 	uint32_t       cap;
 	uint32_t       len;
+	/* What the backend is handed: the whole file, or -- for a container --
+	 * its model section, in place inside the staging slot (issue #159). */
+	const void    *model_at;
+	uint32_t       model_len;
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	int              is_container;
+	struct nn_claims claims;
+#endif
 };
 
 /*
@@ -89,7 +207,8 @@ static int nn_life_swap(struct nn_core_model_job *j, int *model_after)
 	if (j->spec->tag == NN_SPEC_BUILTIN)
 		rc = nn_model_reload(NULL, 0u, NULL, model_after);
 	else
-		rc = nn_model_reload(f->buf, f->len, j->spec->path, model_after);
+		rc = nn_model_reload(f->model_at, f->model_len, j->spec->path,
+		                     model_after);
 	if (rc == 0)
 		return NN_SVC_OK;
 	nn_detail_set("the model was refused (%d)", rc);
@@ -242,8 +361,22 @@ static int nn_life_prepare(struct nn_core_model_job *j)
 	return NN_SVC_OK;
 }
 
-/* The file, into the staging slot the backend handed out.  This board carries
- * no plugin, so every model is bare. */
+/*
+ * The file, into the staging slot the backend handed out -- and, on tflm, split
+ * if it is a plugin container (issue #159).
+ *
+ * A payload that is not a container is a bare model and takes the old path
+ * unchanged.  A container goes through svc/plugin/plugin_load.c -- the same
+ * validator the host asset build runs -- with this board's policy, and its
+ * MODEL SECTION is handed to the backend IN PLACE, at its offset inside the
+ * staged file (nn.h, NN_MODEL_ALIGN): copying it down to the slot's start would
+ * overwrite the validated container with bytes nobody validated.  A refused
+ * container is a refused load (REFUSED: nothing changed).
+ *
+ * j->bare = 0 for a container is the truth, and in Step 4a changes nothing:
+ * the plugin hooks are unset, so the shared order touches no plugin either way
+ * (nn_core_model.h).
+ */
 static int nn_life_fetch(struct nn_core_model_job *j)
 {
 	struct nn_op_result *res = j->res;
@@ -258,6 +391,39 @@ static int nn_life_fetch(struct nn_core_model_job *j)
 		nn_detail_clear();
 		return NN_SVC_ERR_ARG;
 	}
+	f->model_at  = f->buf;
+	f->model_len = f->len;
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/*
+	 * [!] THE CRC IS OVER THE SAME BYTES THE READER PRINTED ITS CRC OVER: the
+	 * reader (cmds/cmd_nn_board.c) calls nn_container_crc() on (f->buf, f->len)
+	 * as it returns them, and this calls it again on exactly that range, before
+	 * anything else writes the slot.  So the number `nn info` prints beside the
+	 * claims is the number the load printed, for the file the operator copied.
+	 */
+	if (nn_container_crc(f->buf, f->len, &f->claims.crc32)) {
+		enum plugin_result pr = plugin_parse(f->buf, f->len,
+		                                     &nn_plugin_policy,
+		                                     &f->claims.view);
+		size_t n;
+
+		if (pr != PLUGIN_OK) {
+			nn_detail_set("%s is a container this firmware refuses: %s",
+			              j->spec->path, plugin_result_name(pr));
+			return NN_SVC_ERR_ARG;
+		}
+		f->is_container  = 1;
+		j->bare          = 0;
+		f->claims.bytes  = f->len;
+		n = strlen(j->spec->path);
+		if (n >= sizeof f->claims.path)
+			n = sizeof f->claims.path - 1u;
+		memcpy(f->claims.path, j->spec->path, n);
+		f->claims.path[n] = '\0';
+		f->model_at  = (const uint8_t *)f->buf + f->claims.view.model_off;
+		f->model_len = f->claims.view.model_len;
+	}
+#endif
 	return NN_SVC_OK;
 }
 
@@ -271,20 +437,37 @@ static void nn_life_invalidate(void)
 	nn_camera_record_invalidate();
 }
 
-/* The backend owns the model's identity (its name); there is none here to
- * keep or clear. */
+/* The backend owns the model's identity (its name).  What is kept here is the
+ * container's claims (tflm, issue #159): no model is open, so none describe
+ * it. */
 static void nn_life_forget(void)
 {
-}
-
-static void nn_life_commit(struct nn_core_model_job *j)
-{
-	(void)j;
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	nn_claims_set(NULL);
+#endif
 }
 
 /*
- * [!] NO PLUGIN, SO NO LEASE: lease_take is NULL and the shared order then
- * calls no plugin hook at all (nn_core_model.h).  The counter still brackets
+ * The job's model is now the open one: its container's claims, or none for a
+ * bare model.  Called by the shared order only once the backend adopted it,
+ * while the transition counter is odd.  A refusal that restored the previous
+ * model does not commit, so the previous claims stay with the previous model.
+ */
+static void nn_life_commit(struct nn_core_model_job *j)
+{
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	const struct nn_f746_job *f = j->board;
+
+	nn_claims_set((f != NULL && f->is_container) ? &f->claims : NULL);
+#else
+	(void)j;
+#endif
+}
+
+/*
+ * [!] NO PLUGIN RUNS, SO NO LEASE: lease_take is NULL and the shared order then
+ * calls no plugin hook at all (nn_core_model.h) -- in Step 4a a container is
+ * validated and its model adopted, and its plugin is never started.  The counter still brackets
  * the swap.  hw_down is NULL: what an EMPTY ending must bring down is the
  * backend's model, and the order releases that itself.
  */
@@ -454,3 +637,93 @@ void nn_svc_model_unload(struct nn_op_result *res)
 	j.board = NULL;
 	nn_core_model_unload(&nn_model_life, &nn_life_board, &j);
 }
+
+/* ---- what `nn info` adds -------------------------------------------------- */
+
+/*
+ * What the open model's container CLAIMS about its plugin (issue #159 = #78
+ * Step 4a), and where a plugin would live.
+ *
+ * [!] CLAIMS, AND THE LINE SAYS SO.  Every field comes from a manifest
+ * plugin_parse() validated.  "validated, not loaded" is the only word that
+ * describes this firmware: in Step 4a the plugin section is never copied and
+ * never branched into, and the resident decoder keeps reading the model.
+ *
+ * Two CRCs, which are different things: `crc` on the plugin line is the
+ * plugin-section digest the container carries (it moves when the plugin's
+ * bytes do, not when the model does); `file crc32` on the from-line is the CRC
+ * of the WHOLE container as read off the card -- the number the load printed
+ * and the asset receipt names (nn_container.h).
+ *
+ * [!] NOTHING IS HELD WHILE THIS PRINTS.  The claims and the transition counter
+ * are copied out in one masked section and written afterwards.
+ */
+#if defined(CONFIG_NN_BACKEND_TFLM)
+extern uint8_t __plugin_start[], __plugin_end[];   /* the linker's reservation */
+
+void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
+{
+	struct nn_claims c;
+	const struct plugin_view *v = &c.view;
+	unsigned posture;
+	uint32_t seq;
+	int valid;
+	const uint32_t base = (uint32_t)(uintptr_t)__plugin_start;
+	const uint32_t size = (uint32_t)(__plugin_end - __plugin_start);
+
+	if (write == NULL)
+		return;
+
+	posture = nn_life_cs_enter();
+	seq   = nn_model_life.seq;
+	valid = nn_claims_valid;
+	if (valid)
+		c = nn_claims;
+	nn_life_cs_exit(posture);
+
+	if ((seq & 1u) != 0u) {
+		(void)nn_info_line(write, ctx,
+		                   "plugin  : (a model load is in progress -- ask "
+		                   "again)\r\n");
+		return;
+	}
+	if (!valid || !v->has_plugin) {
+		/* Says so rather than leaving the line out: a missing line would read
+		 * as a board with no plugin support at all. */
+		(void)nn_info_line(write, ctx,
+		                   "plugin  : (none%s) -- reservation %lu B at 0x%08lx"
+		                   "\r\n", valid ? " in this container" : "",
+		                   (unsigned long)size, (unsigned long)base);
+		if (!valid)
+			return;
+	} else if (nn_info_line(write, ctx,
+	                        "plugin  : %s (build %s, crc %08lx), validated, "
+	                        "not loaded\r\n", v->name, v->build_id,
+	                        (unsigned long)v->digest) < 0) {
+		return;
+	}
+	if (nn_info_line(write, ctx,
+	                 "  from  : %s, %lu B, file crc32 %08lX\r\n", c.path,
+	                 (unsigned long)c.bytes, (unsigned long)c.crc32) < 0)
+		return;
+	if (!v->has_plugin)
+		return;
+	if (nn_info_line(write, ctx,
+	                 "  image : %lu B file / %lu B mem (code %lu, data %lu, "
+	                 "bss %lu), link 0x%08lx\r\n",
+	                 (unsigned long)v->file_size, (unsigned long)v->mem_size,
+	                 (unsigned long)v->code_len, (unsigned long)v->data_seg_len,
+	                 (unsigned long)v->bss_len,
+	                 (unsigned long)v->link_addr) < 0)
+		return;
+	(void)plugin_info_stack(write, ctx, v, nn_plugin_policy.veneer_cost);
+}
+#else
+/* The other backends cannot take a container, so they have nothing to add.
+ * Silence is a legal answer: these lines are the board's own subject. */
+void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
+{
+	(void)write;
+	(void)ctx;
+}
+#endif

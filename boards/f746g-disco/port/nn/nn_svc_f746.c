@@ -34,8 +34,42 @@
 #include "nn.h"
 #include "nn_camera.h"
 #include "nn_decoder.h"
+#include "plugin_target.h"   /* the target word this build provides (#159) */
 #include "stm32f7xx_hal.h"   /* HAL_RCC_GetHCLKFreq: the DWT counter's clock */
 #include "tx_api.h"
+
+/*
+ * [!] THE PLUGIN TARGET WORD IS CHECKED HERE, against this firmware's own build
+ * (issue #159).  board.cmake hands one value to this firmware's policy (and,
+ * from Step 4b, to the packer and the host container verifier); this is the
+ * only check of its CMSE bit, which no image records.  The macros cannot tell
+ * this Cortex-M7 / FPv5-SP from a Cortex-M4 / FPv4, so board.cmake also checks
+ * the word against the linked image (cmake/check_target_word.py).  Every
+ * backend: the word describes the firmware, not the model it can load.
+ */
+#ifndef F746_PLUGIN_TARGET_ID
+#error "board.cmake must define F746_PLUGIN_TARGET_ID"
+#endif
+_Static_assert(F746_PLUGIN_TARGET_ID == PLUGIN_TARGET_ID_HERE,
+               "F746_PLUGIN_TARGET_ID does not describe this firmware's build "
+               "(svc/plugin/plugin_target.h)");
+
+#if defined(CONFIG_NN_BACKEND_TFLM)
+/*
+ * Each plugin stack allowance (board.cmake's plugin_stack_table()) strictly
+ * below the stack of every thread its slot runs on -- Grove's issue #103 found
+ * placeholders equal to a whole thread stack, which a plugin could have
+ * declared, been admitted with and overflowed.  The decode slot's thread (the
+ * nn worker) is asserted in nn_camera.c, where its stack is.  Draw runs on the
+ * GUIX thread from Step 4b.
+ */
+#include "gx_user.h"   /* GX_THREAD_STACK_SIZE: the GUIX system thread's stack */
+_Static_assert(F746_PLUGIN_STACK_GUIX < GX_THREAD_STACK_SIZE,
+               "the draw allowance must be below the GUIX thread's stack");
+_Static_assert(F746_PLUGIN_STACK_SHELL < CLI_INSTANCE_STACK_SIZE &&
+               F746_PLUGIN_STACK_SHELL < CLI_BG_JOB_STACK_SIZE,
+               "the console allowance must be below every console's stack");
+#endif
 
 /*
  * This board's stop codes, and nothing else (issue #99).
@@ -890,18 +924,5 @@ int nn_svc_thresh_set(unsigned milli)
 	                                                     : NN_SVC_ERR_ARG;
 }
 
-/*
- * Nothing to add (issue #101).
- *
- * The plugin container is a Grove path today; this board has no second source of
- * model-adjacent facts, so it says nothing.  Silence is a legal answer here --
- * unlike the shared fields, whose absence the command reports as withheld,
- * because these lines are the board's own subject and no reader can mistake
- * their absence for a fact about the model.
- */
-void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
-{
-	(void)write;
-	(void)ctx;
-}
-
+/* nn_svc_info_extra() -- the container's claims -- is in nn_svc_f746_model.c,
+ * beside the claims it reads (issue #159). */

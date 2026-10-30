@@ -37,13 +37,18 @@
  *     would set the bit on a build that is not Secure.
  *
  * [!] ONLY THE PAIRS A BOARD HERE BUILDS PLUGINS FOR ARE MAPPED, and anything
- * else is a compile error rather than a guess.  (7, 4) is deliberately absent:
- * it is what f746's fpv5-sp-d16 predefines, and ALSO exactly what a Cortex-M4
- * with fpv4-sp-d16 predefines -- the macros cannot tell the two apart, and f746
- * builds no plugins.  Mapping it would state a CPU this header cannot know.
- * (The gate CAN tell them apart on the plugin side, but not by the core's name:
- * an M7 object records Tag_CPU_name "7E-M", the same as an M4.  What differs is
- * Tag_FP_arch -- FPv4 against FPv5 -- which __ARM_FP does not carry.)
+ * else is a compile error rather than a guess.
+ *
+ * [!] (7, 4) IS MAPPED TO f746's CORTEX-M7 / FPv5-SP-D16, AND THIS HEADER CANNOT
+ * KNOW THAT IT IS RIGHT (issue #159).  -mcpu=cortex-m4 -mfpu=fpv4-sp-d16
+ * predefines exactly the same macros (measured with GCC 15.2: the two sets are
+ * identical), so an M4/FPv4 firmware passes the static assert here as an M7.
+ * The end that can tell them apart is the LINKED FIRMWARE: its .ARM.attributes
+ * record Tag_FP_arch, FPv4 against FPv5, and cmake/check_target_word.py checks
+ * the word against that after every link (f746's board.cmake, every backend)
+ * -- the same split as Cortex-M55 against M85+nopacbti below.  The plugin image
+ * gate tells them apart on the plugin side the same way, not by the core's
+ * name: an M7 object records Tag_CPU_name "7E-M", the same as an M4.
  */
 #ifndef PLUGIN_TARGET_H
 #define PLUGIN_TARGET_H
@@ -60,6 +65,15 @@
 /* -mcpu=cortex-m7 -mfpu=fpv5-d16 (wio-lite-ai) */
 #define PLUGIN_CPU_HERE  PLUGIN_CPU_CORTEX_M7
 #define PLUGIN_FPU_HERE  PLUGIN_FPU_FPV5_D16
+#elif __ARM_ARCH == 7 && defined(__ARM_ARCH_7EM__) && defined(__ARM_FP) && \
+    __ARM_FP == 4
+/*
+ * -mcpu=cortex-m7 -mfpu=fpv5-sp-d16 (f746g-disco).  [!] A Cortex-M4 with
+ * fpv4-sp-d16 lands here too -- see the note above; check_target_word.py on
+ * the linked image is what refuses it.
+ */
+#define PLUGIN_CPU_HERE  PLUGIN_CPU_CORTEX_M7
+#define PLUGIN_FPU_HERE  PLUGIN_FPU_FPV5_SP_D16
 #elif __ARM_ARCH == 8 && defined(__ARM_ARCH_8M_MAIN__) && defined(__ARM_FP) && \
     __ARM_FP == 14 && !defined(__ARM_FEATURE_PAUTH) && !defined(__ARM_FEATURE_BTI)
 /*

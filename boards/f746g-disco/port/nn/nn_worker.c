@@ -41,6 +41,30 @@
 
 /* ---- the frame path's publish / account (svc/nn/nn_core_frame.h, issue #130) -- */
 
+/* One publish's counts (nn_decode_tally_of()): the per-attach and the
+ * per-stream counters, and the detections it found.  The worker only. */
+static void nncam_tally(enum nn_decode_tally t, int nd)
+{
+	switch (t) {
+	case NN_TALLY_INFER:
+		nnstat.detections = (nd > 0) ? (uint32_t)nd : 0u;
+		nnstat.infers++;
+		nncam_gen_infers++;
+		return;
+	case NN_TALLY_DECODER:
+		nncam_error();
+		nncam_gen_decoder_errors++;
+		return;
+	case NN_TALLY_MODEL:
+		nncam_error();
+		nncam_gen_model_errors++;
+		return;
+	case NN_TALLY_NOTHING:
+	default:
+		return;
+	}
+}
+
 /*
  * The publish of one inference -- on this board, THE RESIDENT DECODER'S.  The
  * frame path hands a board with no plugin mechanism this slot (its decode slot is
@@ -102,21 +126,17 @@ int nncam_publish(void *ctx, uint32_t gen)
 	took = nn_det_record_publish(&nncam_rec, tmp, nd, &bfr, gen,
 	                             (nd == BF_ERR_MODEL) ? &top : NULL);
 	tx_mutex_put(&nncam_lock);
-	nnstat.detections = (nd > 0) ? (uint32_t)nd : 0u;
 	/* [!] A REFUSAL IS COUNTED APART (issue #130 step 6c, P8), HERE, because
 	 * this is where the decoder's answer is: the frame path hands this slot no
 	 * count to pass on.  BF_ERR_MODEL is the top-5 result above, not a
-	 * refusal (D6); any other negative is a wiring fault.  Counted like the
-	 * inference it belongs to -- whether or not the record took it.
+	 * refusal (D6); any other negative is a wiring fault.
 	 * [!] AN ERROR AND NOT AN INFERENCE (issue #138), as on every board:
-	 * `infers` counts the results a reader can use. */
-	if (nn_decode_count_of(nd, nncam_oneshot) == NN_DC_DECODER) {
-		nncam_error();
-		nncam_gen_decoder_errors++;
-	} else {
-		nnstat.infers++;
-		nncam_gen_infers++;
-	}
+	 * `infers` counts the results a reader can use.
+	 * [!] AND ONLY WHAT THE RECORD TOOK (issue #159 Step 4b-iii, #122 P18):
+	 * a publish the generation rule dropped is counted as nothing, as the
+	 * plugin path and wio-lite-ai count it. */
+	nncam_tally(nn_decode_tally_of(took, nn_decode_count_of(nd, nncam_oneshot)),
+	            nd);
 	return took;
 }
 
@@ -183,28 +203,14 @@ int nncam_publish_hook(void *ctx, int n, uint32_t gen)
 void nncam_account(void *ctx, enum nn_core_done what, int n, int took)
 {
 	(void)ctx;
-	if (what != NN_CORE_DONE_DECODED || !took)
+	if (what != NN_CORE_DONE_DECODED)
 		return;
 	/* [!] THE PLUGIN TABLE, NOT THE RESIDENT ONE (issue #159): a plugin's
 	 * BF_ERR_MODEL is a mismatch between the container's halves, counted in
 	 * model_errors -- the resident table would count it as an inference that
-	 * found nobody. */
-	switch (nn_decode_count_plugin_of(n, nncam_oneshot)) {
-	case NN_DC_MODEL:
-		nncam_error();
-		nncam_gen_model_errors++;
-		return;
-	case NN_DC_DECODER:
-		nncam_error();
-		nncam_gen_decoder_errors++;
-		return;
-	case NN_DC_NONE:
-	default:
-		break;
-	}
-	nnstat.detections = (n > 0) ? (uint32_t)n : 0u;
-	nnstat.infers++;
-	nncam_gen_infers++;
+	 * found nobody.  Only what the record took, as the resident path. */
+	nncam_tally(nn_decode_tally_of(took, nn_decode_count_plugin_of(n,
+	                                         nncam_oneshot)), n);
 }
 
 /* ---- inference worker ----------------------------------------------------- */

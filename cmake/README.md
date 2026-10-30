@@ -590,6 +590,32 @@ covers the table's, `add_plugin()`'s and `add_asset()`'s configure-time
 refusals, that the table reaches all three command lines, and
 `build_asset.py`'s name-to-index mapping against a layout numbered in reverse.
 
+What the read-back does NOT read either: the policy's `link_addr` and
+`capacity`.  The probe carries no offset for them, and adding one would change
+every board's image.  f746g-disco holds the link address to the linked
+`__plugin_start` in its layout gate (`check_f746_layout.py --policy-link-addr`,
+issue #159) -- but that compares board.cmake's VARIABLE, the one compiled in as
+`-DF746_PLUGIN_BASE`, not the policy object's bytes, so a `#define` or a later
+`-D` in the source is outside it; wio-lite-ai has neither check.  A wrong value
+fails closed (every container is refused as linked for another address), which
+is why it stays a limit rather than a gate.
+
+# Plugin lease entries: derived from the objects (`check_lease_entries.py`)
+
+Every way into a plugin is either walked without the lease by a host test or
+named in the script's `EXEMPT` table with the reason it needs no lease (issue
+#130; moved here from wio-lite-ai's `test/` by issue #159, so f746g-disco runs
+the same script).  The list of entries is every external text symbol of the
+objects a board passes -- its `port/nn/nn_active.c` and `port/plugin/plugin_run.c`
+and the shared `svc/nn/nn_active_lease.c` and `svc/plugin/plugin_run_core.c`,
+each compiled on its own, never read off a linked test binary -- held in both
+directions against the `LEASE ENTRIES` tables of the tests the board names
+(`shell/test/test_nn_active_lease.c`, `shell/test/test_plugin_run_lease.c`, and
+wio-lite-ai's `test/test_nn_active.c`).  A name defined but neither walked nor
+exempted fails, and so does a name walked or exempted that no object defines.
+Each board's `test/host_tests.sh` runs it; wio-lite-ai's also shows it refusing
+two spellings a source-text match would miss.
+
 # Plugin objects and the ABI they were compiled against
 
 Two rules in `add_plugin.cmake` and `check_plugin_image.py` exist because of one

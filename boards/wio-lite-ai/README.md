@@ -803,11 +803,16 @@ inside the plugin, so there is nothing to copy.
   included, = not.  `plugin_lease_held()` also answers no in any exception or
   before the scheduler runs, where `tx_thread_identify()` alone would name the
   interrupted thread.  Which entries
-  exist is derived, not listed: `test/check_lease_entries.py` holds every
-  function the two files define against the host tests' tables and its own
-  named exemptions (`nn_active_is_plugin()`, asked before the lease is taken;
-  the base transform, called from inside the plugin; the fault reporter's
-  `plugin_run_attribute()`; and constants).
+  exist is derived, not listed: `cmake/check_lease_entries.py` (this board's
+  `test/` until issue #159, shared with f746g-disco since) holds every function
+  that `port/nn/nn_active.c`, `port/plugin/plugin_run.c` and the shared
+  `svc/nn/nn_active_lease.c` / `svc/plugin/plugin_run_core.c` define against the
+  host tests' tables (`test/test_nn_active.c`,
+  `shell/test/test_plugin_run_lease.c`) and its own named exemptions
+  (`nn_active_is_plugin()`, asked before the lease is taken; the base transform,
+  called from inside the plugin; the fault reporter's `plugin_run_attribute()`;
+  the binding's MPU read-back and log line; and constants).  The binding's MPU
+  read-back loop itself is `test/test_plugin_run_mpu.c`'s.
 
 A held lease is not by itself a reason to draw -- the panel also requires a
 `nn stream` (not a `nn run`) in force and the record to hold a VALID decode of the plugin's

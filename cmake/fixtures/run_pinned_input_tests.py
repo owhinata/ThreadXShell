@@ -181,7 +181,11 @@ def build_asset_cases():
                  "--model-verifier", tool, "--container-verifier", tool,
                  "--build-id", "b", "--target-id", "1", "--link-addr", "0",
                  "--capacity", "1", "--policy-stack", "entry=8",
-                 "--veneer-cost", "0", "--out", os.path.join(d, "o", "a.nnc")]
+                 "--veneer-cost", "0", "--out", os.path.join(d, "o", "a.nnc"),
+                 # A destination is required since issue #159 (build_asset.py
+                 # refuses none before packing); never reached here, because
+                 # the packer refuses first.
+                 "--slot", "5", "--slot-table", tool]
                 + sha_args, capture_output=True, text=True, env=env)
             got = None
             if os.path.exists(argv_log):

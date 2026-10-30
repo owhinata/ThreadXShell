@@ -1713,7 +1713,13 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
             LINK_ADDR "${WIO_PLUGIN_BASE}"
             CAPACITY "${WIO_PLUGIN_MAX}"
             RECEIPT_STEPS "blob write {slot}   (erases the slot, then waits for the file)"
-            RECEIPT_THEN  "nn model load --slot {slot}")
+            RECEIPT_THEN  "nn model load --slot {slot}"
+            # How the file gets there and how the stored bytes are compared
+            # with the receipt's CRC -- this board's, since issue #159.
+            RECEIPT_TRANSFER "in picocom:" "C-a C-s, then the path above"
+            RECEIPT_VERIFY   "afterwards:"
+                "`blob list` must show crc32 {crc} -- that is how you know"
+                "the bytes that were built are the bytes that were stored.")
     endfunction()
 
     # The file #107 pins for Grove -- the same commit and the same SHA-256, from

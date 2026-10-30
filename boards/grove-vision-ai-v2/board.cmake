@@ -1643,7 +1643,13 @@ function(grove_add_asset _name)
         LINK_ADDR "${GROVE_PLUGIN_BASE}"
         CAPACITY "${GROVE_PLUGIN_MAX}"
         RECEIPT_STEPS "blob erase {slot}   (the slot must be empty first)"
-                      "blob write {name} {slot}")
+                      "blob write {name} {slot}"
+        # How the file gets there and how the stored bytes are compared
+        # with the receipt's CRC -- this board's, since issue #159.
+        RECEIPT_TRANSFER "in picocom:" "C-a C-s, then the path above"
+        RECEIPT_VERIFY   "afterwards:"
+            "`blob list` must show crc32 {crc} -- that is how you know"
+            "the bytes that were built are the bytes that were stored.")
 endfunction()
 
 # --- The layout check, and the one flashing target left (issues #44, #45, #94)-

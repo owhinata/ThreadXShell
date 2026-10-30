@@ -480,6 +480,13 @@ python3 "$repo/cmake/fixtures/run_storage_gate_tests.py" \
 # needs the host C compiler too -- still no cross toolchain.
 python3 "$repo/cmake/fixtures/run_add_plugin_arg_tests.py"
 
+# issue #159 -- an asset's destination is exactly one of a slot or a file, and
+# the receipt prints the board's own transfer / verify lines: build_asset.py
+# refuses none / both / half of either before packing, and asset_receipt.py
+# prints the slot boards' receipt byte for byte as before.  The staging-capacity
+# read-back needs the cross toolchain and runs from f746's host_tests.sh.
+python3 "$repo/cmake/fixtures/run_asset_dest_tests.py"
+
 # issue #132 -- the pin is checked again by the FIRST CONSUMER of the fetched
 # model, inside its own command (ninja reruns only the consumer when the file
 # changes after its fetch): the packer's --model-sha256 on the bytes it packs,

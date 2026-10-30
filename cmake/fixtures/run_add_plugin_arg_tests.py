@@ -94,6 +94,9 @@ ASSET = {
     "LINK_ADDR": "0x24048000",
     "CAPACITY": "32768",
     "RECEIPT_STEPS": '"blob write {slot}"',
+    # Issue #159: the board's transfer and verify lines, a label and a line.
+    "RECEIPT_TRANSFER": '"in picocom:" "C-a C-s, then the path above"',
+    "RECEIPT_VERIFY": '"afterwards:" "`blob list` must show crc32 {crc}"',
 }
 
 # A complete gate registration, as a board makes it.  Its DECLARED matches
@@ -201,12 +204,43 @@ ASSET_CASES = [
     ("asset_no_model_sha256", "MODEL_SHA256", {},
      "MODEL_SHA256 is required"),
     ("asset_no_plugin", "PLUGIN", {}, "PLUGIN is required"),
-    ("asset_no_slot", "SLOT", {}, "SLOT is required"),
+    # Issue #159: a destination is exactly one of a slot or a file, each
+    # whole.  Half a slot, no destination, both, and malformed ones refuse.
+    ("asset_no_slot", "SLOT", {},
+     "a slot destination needs SLOT (SLOT and SLOT_TABLE go together)"),
     ("asset_no_packer", "PACKER", {}, "PACKER is required"),
     ("asset_no_layout", "LAYOUT", {}, "LAYOUT is required"),
     ("asset_no_container_verifier", "CONTAINER_VERIFIER", {},
      "CONTAINER_VERIFIER is required"),
-    ("asset_no_slot_table", "SLOT_TABLE", {}, "SLOT_TABLE is required"),
+    ("asset_no_slot_table", "SLOT_TABLE", {},
+     "a slot destination needs SLOT_TABLE"),
+    ("asset_no_destination", None, {"SLOT": None, "SLOT_TABLE": None},
+     "no destination -- SLOT with SLOT_TABLE"),
+    ("asset_both_destinations", None,
+     {"FILE_NAME": "blazeface.nnc", "STAGE_SYMBOL": "nn_stage_capacity"},
+     "both a slot destination (SLOT/SLOT_TABLE) and a file destination"),
+    ("asset_file_control", None,
+     {"SLOT": None, "SLOT_TABLE": None, "FILE_NAME": "blazeface.nnc",
+      "STAGE_SYMBOL": "nn_stage_capacity"}, None),
+    ("asset_file_no_symbol", None,
+     {"SLOT": None, "SLOT_TABLE": None, "FILE_NAME": "blazeface.nnc"},
+     "a file destination needs STAGE_SYMBOL"),
+    ("asset_file_no_name", None,
+     {"SLOT": None, "SLOT_TABLE": None, "STAGE_SYMBOL": "nn_stage_capacity"},
+     "a file destination needs FILE_NAME"),
+    ("asset_file_bad_name", None,
+     {"SLOT": None, "SLOT_TABLE": None, "FILE_NAME": "dir/x.nnc",
+      "STAGE_SYMBOL": "nn_stage_capacity"},
+     "FILE_NAME must be a plain file name, got 'dir/x.nnc'"),
+    ("asset_file_bad_symbol", None,
+     {"SLOT": None, "SLOT_TABLE": None, "FILE_NAME": "x.nnc",
+      "STAGE_SYMBOL": "9cap"},
+     "STAGE_SYMBOL must be a C identifier, got '9cap'"),
+    ("asset_no_transfer", "RECEIPT_TRANSFER", {},
+     "RECEIPT_TRANSFER is required"),
+    ("asset_no_verify", "RECEIPT_VERIFY", {}, "RECEIPT_VERIFY is required"),
+    ("asset_transfer_label_only", None, {"RECEIPT_TRANSFER": '"in picocom:"'},
+     "RECEIPT_TRANSFER takes a label and at least one line"),
     ("asset_no_build_id", "BUILD_ID", {}, "BUILD_ID is required"),
     ("asset_no_target_id", "TARGET_ID", {}, "TARGET_ID is required"),
     ("asset_no_link_addr", "LINK_ADDR", {}, "LINK_ADDR is required"),
@@ -603,6 +637,7 @@ def main():
         if drop:
             del a[drop]
         a.update({k: v for k, v in override.items() if not k.startswith("^")})
+        a = {k: v for k, v in a.items() if v is not None}
         acall = "\n".join("    %s %s" % (k, v) for k, v in a.items())
         with tempfile.TemporaryDirectory() as work:
             rc, out = configure(work, dict(FULL),
@@ -610,10 +645,19 @@ def main():
             text = build_text(work) if expect is None and rc == 0 else ""
         if expect is None and rc == 0:
             sha = a["MODEL_SHA256"].strip('"')
+            # The destination reaches the pack (its fit check) and the
+            # receipt: a slot as --slot/--slot-table and the positional slot,
+            # a file as --stage-elf/--stage-symbol and --file (issue #159).
+            dest = ((r"--stage-elf\s+\S*fw", r"--stage-symbol\s+"
+                     r"nn_stage_capacity\b", r"--file\s+blazeface\.nnc\b")
+                    if "FILE_NAME" in a else
+                    (r"--slot\s+5\b", r"--slot-table\s+\S*slots\.json"))
             need = [w for w in (POLICY_LINE, r"--veneer-cost\s+256\b",
                                 r"plugin/cifar10/plugin\.elf",
                                 r"asset_receipt\.py",
-                                r"--model-sha256=%s(\s|$)" % sha)
+                                r"--transfer-label\s+\"?in picocom:",
+                                r"--verify-label\s+\"?afterwards:",
+                                r"--model-sha256=%s(\s|$)" % sha) + dest
                     if not re.search(w, text)]
             if need:
                 print("  FAIL %-22s configures, but the asset's command lacks "

@@ -52,6 +52,9 @@
 #include "cam_sink.h"            /* the display step of the camera sink (#142)   */
 #include "frame_pipeline.h"      /* struct frame_sink / frame_desc, FRAME_*      */
 #include "nn_camera.h"           /* nn_camera_overlay / nn_camera_dets_get (bbox, #83) */
+#if defined(CONFIG_NN_BACKEND_TFLM)
+#include "nn_panel.h"            /* a loaded plugin's draw (issue #159)                 */
+#endif
 
 #include "gx_api.h"
 #include "tx_api.h"
@@ -304,6 +307,17 @@ static void overlay_draw_boxes(void)
 		                             OVERLAY_BOX_COLOR);
 }
 
+#if defined(CONFIG_NN_BACKEND_TFLM)
+/* What a plugin's draw is handed: the display's own lock and view buffer
+ * (issue #159).  port/nn does not include the GUIX or LTDC ports. */
+static const struct nn_panel_display overlay_display = {
+	.frame_lock   = ltdc_lock_frame,
+	.frame_unlock = ltdc_unlock_frame,
+	.view         = guix_display_cam_view,
+	.touched      = guix_display_cam_view_touched,
+};
+#endif
+
 /* The display step (issue #142).  The camera sink calls it between entering and
    leaving the step, and puts the pin itself after the last step -- so the proof
    a teardown gets is the step's count reaching zero after `gui stop` disarmed it
@@ -513,8 +527,20 @@ static UINT camera_ui_root_event(GX_WIDGET *widget, GX_EVENT *event_ptr)
 			   while an `nn stream` runs -- not for a `nn run` (issue #142: a one-shot's
 			   result is reported, not drawn); overlay_draw_boxes() is a no-op with no
 			   detections, so the box clears when `nn stream stop` runs or a face is lost. */
+#if defined(CONFIG_NN_BACKEND_TFLM)
+			/* [!] A LOADED PLUGIN DRAWS ITS OWN RESULT (issue #159): the
+			   lease is tried, then the frame lock, then the shared questions
+			   (the overlay, the record, the session, the plugin's) -- all in
+			   nn_panel_draw(), which leaves nothing locked.  NONE means no
+			   plugin is in force, and the resident decoder's boxes are drawn
+			   as before (Step 4c removes that fallback). */
+			if (nn_panel_draw(&overlay_display) == NN_CORE_DRAW_NONE &&
+			    nn_camera_overlay())
+				overlay_draw_boxes();
+#else
 			if (nn_camera_overlay())
 				overlay_draw_boxes();
+#endif
 			gx_system_dirty_mark((GX_WIDGET *)&cam_icon);
 		}
 		return GX_SUCCESS;

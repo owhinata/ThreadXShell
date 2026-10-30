@@ -109,6 +109,17 @@ int guix_display_cam_view_store(const uint16_t *src);
 void guix_display_cam_overlay_box(float nx, float ny, float nw, float nh,
                                   uint16_t rgb565);
 
+/** The camera view buffer and its geometry, for a CPU painter -- a loaded
+ *  plugin's draw() (issue #159).  NULL (and 0 x 0) when no preview session is
+ *  armed.  [!] Valid only while the caller holds ltdc_lock_frame(): the session
+ *  is armed and torn down under it. */
+uint16_t *guix_display_cam_view(uint16_t *w, uint16_t *h);
+
+/** The CPU wrote the view buffer (issue #159): mark BOTH LTDC buffers stale, so
+ *  the strokes are composited like the frame (owhinata/stm32f746g-disco#59 B2).
+ *  Caller holds ltdc_lock_frame(). */
+void guix_display_cam_view_touched(void);
+
 #ifdef __cplusplus
 }
 #endif

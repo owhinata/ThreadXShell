@@ -105,7 +105,7 @@ code** で、ゲートが証明するのはスタック上限だけ（**メモ�
   `add_plugin()` の**必須引数**で、**ゲートに告げる予約は MEMORY fragment と別の宣言**。TU の ABI も照合。**スタック計算は veneer 検査と同じ `cmake/thumb_stack_analysis.py` の 1 実装で、違うのは止まる場所だけ**（別実装を戻さない）。
 - **target word は 2 端で検査する**（firmware の `_Static_assert` + gate の `.ARM.attributes`）。
 - **[!] ゲートは送信時ではなくビルド時にある**（`--target asset-<name>`）。送信は打ったパスをそのまま送る
-  ので**閉じ手は CRC32 と `blob list` の照合**。「ビルド時に検査済み」を「何も起きない」と書き換えない。**配送 target（DELIVERY）は build.ninja から導出した使用者と両方向照合する**（`check_delivery_gate.py`、全 target が先に待つ）。
+  ので**閉じ手は receipt の CRC32 とボードの保存バイトの CRC（slot ボードは `blob list`、f746 は load が印字する採用済み全バイトの CRC）の照合**。「ビルド時に検査済み」を「何も起きない」と書き換えない。**配送 target（DELIVERY）は build.ninja から導出した使用者と両方向照合する**（`check_delivery_gate.py`、全 target が先に待つ）。
 - **モデルは commit と SHA256 で pin**し、消えたら **fail closed**。fetch は build 時で `asset-*` は ALL 外。
 - **ファームと plugin は別成果物で間違いは両方向**（焼いても container は更新されず、逆も焼き直し不要）。
 - **[!] 同じ plugin の callback は 2 つ同時に走らない**: plugin に入る全経路（param・admission・report・load/unload も）がボードの lease を取り、worker とコンソールは有界に待ち、panel は try だけ。**入口は保持を検査し、無ければ「plugin 無し」と別の答え**（#127）。

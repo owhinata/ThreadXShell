@@ -194,11 +194,15 @@ enum entry_id {
 	E_THRESH_GET, E_THRESH_SET, E_COUNT
 };
 
+/* What this file walks without the lease; each board's
+ * cmake/check_lease_entries.py run holds it against the objects it builds. */
+/* LEASE ENTRIES BEGIN */
 static const char *const entry_name[E_COUNT] = {
 	"nn_active_shapes_ok", "nn_active_decode", "nn_active_draw",
 	"nn_active_can_draw", "nn_active_can_report", "nn_active_report",
 	"nn_active_get_thresh_milli", "nn_active_set_thresh_milli",
 };
+/* LEASE ENTRIES END */
 
 static int call_entry(enum entry_id e, unsigned *th)
 {

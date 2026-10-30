@@ -4,20 +4,25 @@
 # Copyright (c) 2026 ThreadX Shell Project
 #
 # Every way into the plugin is walked by a host test, or is named here with the
-# reason it needs no lease (issue #130).
+# reason it needs no lease (issue #130; shared by wio-lite-ai and f746g-disco
+# since issue #159, which moved it out of wio-lite-ai's test/).
 #
-# The entry checks in svc/nn/nn_active_lease.c (port/nn/nn_active.c's until
-# issue #159) and port/plugin/plugin_run.c are
-# proved by test_nn_active.c and test_plugin_run_lease.c, which call each entry
+# The entry checks in svc/nn/nn_active_lease.c and svc/plugin/plugin_run_core.c
+# (both wio-lite-ai's port/ files until issue #159) are proved by the board's
+# test_nn_active.c and shell/test/test_plugin_run_lease.c, which call each entry
 # without the lease and require NN_ACTIVE_NOT_HELD / PLUGIN_RUN_NOT_HELD.  What
 # those tests cannot see is an entry that is not in their table: a mutation that
-# deletes a check turns its row red, but a new entry that was never given a check
-# has no row to turn (grove-vision-ai-v2's #127 shipped its unload unchecked for
-# exactly that reason).  So the list is DERIVED and held against the tests'
-# tables in both directions:
+# deletes a check turns its row red, but a new entry that was never given a
+# check has no row to turn (grove-vision-ai-v2's #127 shipped its unload
+# unchecked for exactly that reason).  So the list is DERIVED and held against
+# the tests' tables in both directions:
 #
-#   - a function the TU defines must be walked, or named in EXEMPT with why;
+#   - a function the TUs define must be walked, or named in EXEMPT with why;
 #   - a name walked or exempted must still be defined (a stale row proves nothing).
+#
+# A board passes every TU of its own that a plugin is entered through or that
+# defines a name below: its port/nn/nn_active.c and port/plugin/plugin_run.c
+# (the binding) beside the two shared ones.
 #
 # [!] "DEFINES" IS READ FROM THE OBJECT, NOT FROM THE SOURCE.  The first version
 # matched definitions with a regular expression and missed a function whose
@@ -25,7 +30,7 @@
 # #130 step 4) -- both spellings this tree already uses.  host_tests.sh compiles
 # each TU ON ITS OWN with -c, and the list is every external TEXT symbol (`T`)
 # `nm --defined-only -g` reports for that object.  Never a linked test binary:
-# its stubs would be counted as the board's entries.  Neither TU has an #if
+# its stubs would be counted as the board's entries.  No TU has an #if
 # around a definition, so the host compile defines the same set the firmware's
 # does; if one ever gains one, compile it here under the firmware's condition.
 #
@@ -55,6 +60,13 @@ EXEMPT = {
     "plugin_run_why": "a string",
     "plugin_run_res_base": "a linker constant",
     "plugin_run_res_len": "a linker constant",
+    # the loader's source_ok hook: a range check over the region the caller
+    # named, called by plugin_exec.c inside a load that already passed its check
+    "plugin_run_source_ok": "a range check inside a checked load",
+    # the board's binding (issue #159): an MPU read-back and a log line, neither
+    # of which calls into a plugin
+    "plugin_run_mpu_ok": "reads the MPU; enters nothing",
+    "plugin_run_log": "a log line",
 }
 
 LIT = re.compile(r'"(\w+)"')

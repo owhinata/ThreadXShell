@@ -48,7 +48,7 @@
 #include "nn_camera.h"
 #include "nn_desc.h"
 #include "plugin_lease.h"
-#include "plugin_run.h"
+#include "plugin_run_core.h"
 
 #include <stdarg.h>
 #include <stdint.h>

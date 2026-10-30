@@ -35,6 +35,7 @@
 #include "camera.h"            /* enum camera_res */
 #include "blazeface.h"  /* struct bf_det */
 #include "nn_det_record.h" /* struct nn_result_extra (issue #121) */
+#include "nn_report.h"     /* struct nn_report_capture (issue #159) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -64,7 +65,61 @@ struct nn_camera_stats {
 	 *  fault (issue #130 step 6c).  BF_ERR_MODEL is not one -- see
 	 *  nn_decode_count.h. */
 	uint32_t gen_decoder_errors;
+	/** Of @ref gen_errors: a loaded plugin's BF_ERR_MODEL -- the container's
+	 *  model and decoder disagree (issue #159).  The resident decoder's is a
+	 *  result, never counted here. */
+	uint32_t gen_model_errors;
+	/**
+	 * How much of each thread's stack was already spent where a plugin is
+	 * CALLED (issue #159; wio-lite-ai's since #108): the deepest depth sampled
+	 * at the indirect call into the decode slot (the nn worker), the draw slot
+	 * (the GUIX thread) and every console slot (entry, shapes_ok, report,
+	 * params).  0 until a site has run.  decode / draw are reset per stream;
+	 * the shell's is kept from boot -- its deepest site is a model load.
+	 */
+	uint32_t depth_decode;
+	uint32_t depth_draw;
+	uint32_t depth_shell;
 };
+
+/* The nn worker's stack.  Sized from the measured high-water-mark: `thread`
+ * peak = 1808 B under the tflm backend (CMSIS-NN, BlazeFace pin) after `nn bench
+ * 10`, two `nn run` and a 300-frame `nn stream` (issue #130, 2026-10-04); 4096
+ * keeps ~2.3x margin.  (The earlier 1024 B was the stedgeai backend,
+ * owhinata/stm32f746g-disco#93.)  Here so `nn stream stats` can print each
+ * plugin call site's depth over the stack it is in (issue #159). */
+#define NNCAM_WORKER_STACK    4096u
+
+/** Which thread a plugin slot was entered on (issue #159). */
+enum nn_camera_site {
+	NNCAM_SITE_DECODE = 0,   /**< the nn worker   */
+	NNCAM_SITE_DRAW   = 1,   /**< the GUIX thread */
+	NNCAM_SITE_SHELL  = 2,   /**< a console       */
+};
+
+/**
+ * Record that a plugin slot is about to be entered at stack pointer @p sp on the
+ * calling thread (issue #159).  Keeps the high-water of (stack top - sp) per
+ * site; a sample that is not inside the calling thread's stack -- not on a
+ * thread, or a host build's 0 -- is dropped rather than recorded.
+ */
+void nn_camera_note_depth_at(enum nn_camera_site site, uintptr_t sp);
+
+/**
+ * The geometry of the frames the stream is attached to (issue #159): what a
+ * plugin's to_frame() maps the model's normalised space into -- the producer
+ * squashes the whole frame onto the input.  0 x 0 before the first attach.
+ */
+void nn_camera_frame_geom(uint16_t *w, uint16_t *h);
+
+/*
+ * nn_camera_start()'s refusals when a plugin is in force (issue #159; the same
+ * three questions, and the same values, as wio-lite-ai's).  Outside the -2..-10
+ * the start already returns, and apart from NN_ERR_SCRATCH_HELD (-50).
+ */
+#define NNCAM_ERR_SHAPES  (-12) /**< the loaded decoder cannot read these outputs  */
+#define NNCAM_ERR_NODRAW  (-13) /**< a stream was asked for; the plugin draws none */
+#define NNCAM_ERR_DECBUSY (-14) /**< the decoder could not be held still to ask it */
 
 /** The nn step of the camera sink (port/camera/cam_sink.h, issue #142).
  *  Defined in nn_camera.c; src/main.c registers it after the display step. */
@@ -82,7 +137,8 @@ extern struct cam_sink_step nncam_step;
  * sink, -3 model, -4 geometry, -5 objects, -6 nn session busy, -9 the camera is
  * not streaming RGB565 / its mode cannot stream RGB565 (issue #142 D3), -10 the
  * camera could not be held or started, NN_ERR_SCRATCH_HELD `sdram test` holds
- * .sdram.ai -- retryable, issue #152).  Holds the camera open (issue #142): joins
+ * .sdram.ai -- retryable, issue #152; with a plugin in force NNCAM_ERR_SHAPES /
+ * _NODRAW / _DECBUSY, issue #159).  Holds the camera open (issue #142): joins
  * a running stream, or starts it holding the operator's place too.
  * @p oneshot is non-zero for `nn run`'s session, whose decodes are not counted
  * in the stream's errors (issue #130 step 6c).
@@ -139,6 +195,10 @@ struct nn_camera_decode {
 	uint8_t          current;   /**< published in the session in force        */
 	uint32_t         accepted;  /**< publishes the record has ever taken      */
 	uint32_t         epoch;     /**< moves when a model change clears it      */
+	/** Whose result it is (issue #159): the resident decoder's boxes, or a
+	 *  plugin's -- which keeps its own result and is asked to report it. */
+	uint8_t          kind;
+	uint8_t          reportable;  /**< see nn_det_record.h                   */
 };
 
 /**
@@ -151,6 +211,10 @@ void nn_camera_record_invalidate(void);
  * Take a coherent snapshot of the last published decode.
  *
  * @param dets  optional; the boxes, up to @p max of them
+ * @param rep   optional; with a plugin in force, its account of THIS result,
+ *              taken under the plugin lease in the same hold as the snapshot
+ *              (issue #159; wio-lite-ai's since #110).  Left alone otherwise:
+ *              the caller states NN_REPORT_NONE for the resident decoder.
  * @param ext   optional; the classes the result was published with, for a
  *              model the decoder did not recognise (issue #121)
  * @return non-zero if a snapshot was taken (zero before the first attach, when
@@ -159,7 +223,8 @@ void nn_camera_record_invalidate(void);
  *         nothing, and must not be printed as one.
  */
 int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
-                         int max, struct nn_result_extra *ext);
+                         int max, struct nn_report_capture *rep,
+                         struct nn_result_extra *ext);
 
 /** Runtime float32 input normalization: 1 = [-1,1], 0 = [0,1] (tuning, no reflash). */
 void nn_camera_set_norm(int signed_range);

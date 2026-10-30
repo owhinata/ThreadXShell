@@ -2,13 +2,13 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host test for the loader's plugin-lease checks on this board (issue #130,
- * port/plugin/plugin_run.c): plugin_run_load() refuses a caller that does not
- * hold the lease before the shared loader touches anything, the exec_ok hook
- * asks again immediately before entry(), and plugin_run_unload() refuses too.
- * The same three checks, and the same shape of test, as grove-vision-ai-v2's
- * since issue #127 -- where the review found the unload was the one entry left
- * unchecked.
+ * Host test for the loader's plugin-lease checks (issue #130), shared since
+ * issue #159 (svc/plugin/plugin_run_core.c, used by wio-lite-ai and
+ * f746g-disco): plugin_run_load() refuses a caller that does not hold the lease
+ * before the shared loader touches anything, the exec_ok hook asks again
+ * immediately before entry(), and plugin_run_unload() refuses too.  The same
+ * three checks, and the same shape of test, as grove-vision-ai-v2's since issue
+ * #127 -- where the review found the unload was the one entry left unchecked.
  *
  * WHY THIS EXISTS.  A load is the one path into the plugin that destroys it:
  * the shared loader unpublishes the previous plugin and copies the new image
@@ -17,21 +17,23 @@
  * build never reaches either refusal -- so the only place they are ever seen to
  * say no is here.
  *
- * The REAL plugin_run.c and svc/plugin/plugin_exec.c are compiled; the HAL and the
- * lease are stubs (test/plugin_run_shim).  The MPU is configured to REFUSE in
- * every case, so a load that passes both lease checks ends at PLUGIN_RUN_MPU
- * and never branches into the image -- which on a host would be a jump into
- * data.  "It got as far as the MPU" is what proves the lease let it through;
- * "the reservation is untouched" is what proves a refusal came first.
+ * The REAL plugin_run_core.c and svc/plugin/plugin_exec.c are compiled; the
+ * board's binding -- its MPU verdict, its cache maintenance, its log, its depth
+ * record -- is stubbed here.  The MPU REFUSES in every case, so a load that
+ * passes both lease checks ends at PLUGIN_RUN_MPU and never branches into the
+ * image -- which on a host would be a jump into data.  "It got as far as the
+ * MPU" is what proves the lease let it through; "the reservation is untouched"
+ * is what proves a refusal came first.  (Until issue #159 this file was
+ * wio-lite-ai's and drove that board's binding through a HAL shim; the binding
+ * is now the hardware half only, and its verdict is plugin_mpu_v7m.c's, tested
+ * on its own and on each board's real region set.)
  *
  * plugin_run_unload() is checked through -Wl,--wrap on the shared loader's
  * unload: with no plugin publishable on a host, "it did not unpublish" can only
  * be observed as "it did not call".
  */
-#include "plugin_run.h"
-#include "plugin_lease.h"
-#include "plugin_mpu_v7m.h"
-#include "stm32h7xx_hal.h"
+#include "plugin_run_core.h"
+#include "plugin_lease_api.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -49,16 +51,46 @@ __asm__(".data\n"
         "__plugin_end:\n");
 extern uint8_t __plugin_start[], __plugin_end[];
 
-/* ---- stubs ------------------------------------------------------------------ */
+/* ---- the board's binding, stubbed ----------------------------------------- */
 
-MPU_Type test_mpu;
+static unsigned mpu_asks, syncs, log_errors;
 
-void log_write(unsigned level, const char *tag, const char *fmt, ...)
+/* An MPU that refuses. */
+int plugin_run_mpu_ok(uint32_t lo, uint32_t hi, const char **why)
 {
-	(void)level;
-	(void)tag;
-	(void)fmt;
+	(void)lo;
+	(void)hi;
+	mpu_asks++;
+	if (why != NULL)
+		*why = "the test's MPU refuses";
+	return -1;
 }
+
+static void sync_caches(uint32_t base, uint32_t len)
+{
+	(void)base;
+	(void)len;
+	syncs++;
+}
+
+void plugin_run_log(int error, const char *text)
+{
+	(void)text;
+	if (error)
+		log_errors++;
+}
+
+static struct plugin_exec_state state;
+static const struct plugin_exec_port port = PLUGIN_RUN_PORT(sync_caches);
+
+const struct plugin_exec_env plugin_run_env = {
+	.state  = &state,
+	.port   = &port,
+	.res_lo = __plugin_start,
+	.res_hi = __plugin_end,
+};
+
+/* ---- stubs ------------------------------------------------------------------ */
 
 static unsigned entry_notes;
 
@@ -68,7 +100,7 @@ void plugin_run_note_entry(uintptr_t sp)
 	entry_notes++;
 }
 
-/* The shared loader's unload, seen from plugin_run.c (-Wl,--wrap).  Calls made
+/* The shared loader's unload, seen from plugin_run_core.c (-Wl,--wrap).  Calls made
  * inside plugin_exec.c itself -- the unload at the start of every load -- do
  * not come through here. */
 static unsigned exec_unloads;
@@ -149,11 +181,8 @@ static void setup(void)
 	view.link_addr  = (uint32_t)(uintptr_t)__plugin_start;
 	memset(__plugin_start, RES_FILL, (size_t)(__plugin_end - __plugin_start));
 
-	/* An MPU that refuses: enabled, no default map, no regions. */
-	memset(&test_mpu, 0, sizeof test_mpu);
-	test_mpu.CTRL = PL_MPU7_CTRL_ENABLE;
-	test_mpu.TYPE = 0u;
-
+	mpu_asks = 0u;
+	syncs    = 0u;
 	base.version = PLUGIN_ABI_VERSION;
 	base.size    = (uint32_t)sizeof base;
 
@@ -192,10 +221,11 @@ static enum plugin_run_result load(void)
 	                       (uint32_t)sizeof container, &base);
 }
 
-/* What this file walks without the lease; test/check_lease_entries.py holds
- * it against the functions plugin_run.c defines. */
+/* What this file walks without the lease; cmake/check_lease_entries.py holds
+ * it against the functions plugin_run_core.c defines. */
 /* LEASE ENTRIES BEGIN */
-static const char *const walked[] = { "plugin_run_load", "plugin_run_unload" };
+static const char *const walked[] = { "plugin_run_load", "plugin_run_unload",
+                                      "plugin_run_exec_ok" };
 /* LEASE ENTRIES END */
 
 int main(void)
@@ -205,8 +235,8 @@ int main(void)
 	enum plugin_run_result r;
 	unsigned o, u0;
 
-	printf("test_plugin_run_lease (wio-lite-ai): %s, %s\n", walked[0],
-	       walked[1]);
+	printf("test_plugin_run_lease: %s, %s, %s\n", walked[0], walked[1],
+	       walked[2]);
 
 	/* Nobody holds it, or another thread does: refused before anything. */
 	for (o = 0u; o < 2u; o++) {
@@ -242,6 +272,8 @@ int main(void)
 	expect("  ...with nothing counted", unheld == u0, "%u", unheld - u0);
 	expect("  ...and the lease asked twice: before the loader, at the branch",
 	       held_asked == 2u, "%u", held_asked);
+	expect("  ...the caches synced once and the MPU asked once",
+	       syncs == 1u && mpu_asks == 1u, "%u / %u", syncs, mpu_asks);
 
 	/* [!] The hook asks again.  A caller that got past the first check but
 	 * does not hold the lease at the branch is refused there -- by name, not
@@ -256,6 +288,7 @@ int main(void)
 	       r == PLUGIN_RUN_NOT_HELD, "got %d", (int)r);
 	expect("  ...and counted once", unheld == u0 + 1u, "%u", unheld - u0);
 	expect("  ...and nothing is active", plugin_run_active() == 0, "active");
+	expect("  ...and the MPU was never asked", mpu_asks == 0u, "%u", mpu_asks);
 
 	/* And the hook's flag does not outlive its load: a held load after it is
 	 * the MPU's refusal again. */
@@ -288,6 +321,35 @@ int main(void)
 	expect("held, the unload reaches the loader once", exec_unloads == 1u,
 	       "%u call(s)", exec_unloads);
 	expect("  ...with nothing counted", unheld == u0, "%u", unheld - u0);
+
+	/* [!] The hook itself, called directly without the lease: refused with the
+	 * one reason plugin_run_load() recognises, counted once, the MPU never
+	 * asked -- and with it held, the MPU's verdict is the answer. */
+	for (o = 0u; o < 2u; o++) {
+		const char *why = NULL;
+		int rc;
+
+		setup();
+		lease_owner = not_held[o];
+		u0 = unheld;
+		rc = plugin_run_exec_ok(0u, 32u, &why);
+		expect("[!] the exec_ok hook without the lease refuses",
+		       rc != 0 && why != NULL && strstr(why, "lease") != NULL,
+		       "%s: rc %d", o ? "other" : "none", rc);
+		expect("  ...counted once, the MPU not asked, the depth noted",
+		       unheld == u0 + 1u && mpu_asks == 0u && entry_notes == 1u,
+		       "%u / %u / %u", unheld - u0, mpu_asks, entry_notes);
+	}
+	{
+		const char *why = NULL;
+
+		setup();
+		lease_owner = LEASE_SELF;
+		expect("held, the hook answers with the MPU's verdict",
+		       plugin_run_exec_ok(0u, 32u, &why) != 0 && mpu_asks == 1u &&
+		       why != NULL && strstr(why, "MPU") != NULL, "%s",
+		       why != NULL ? why : "(none)");
+	}
 
 	if (failures) {
 		printf("test_plugin_run_lease: %d failure(s)\n", failures);

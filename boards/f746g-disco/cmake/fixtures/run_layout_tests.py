@@ -303,6 +303,18 @@ def main():
                "ceiling source _estack 0x20048000",
                sbrk=SBRK_CONSTS)
 
+        # The policy's link address (issue #159 Step 4b): held to the linked
+        # __plugin_start.
+        expect("policy-link-addr-ok", img,
+               ok_args + ["--policy-link-addr", "0x20048000"], 0, "OK")
+        expect("policy-link-addr-elsewhere", img,
+               ok_args + ["--policy-link-addr", "0x20040000"], 1,
+               "the plugin policy links containers at 0x20040000, but the "
+               "image's .plugin starts at 0x20048000")
+        expect("policy-link-addr-garbage", img,
+               ok_args + ["--policy-link-addr", "plugin"], 1,
+               "is not a number")
+
     if failures:
         print(f"run_layout_tests: {len(failures)} case(s) FAILED: {', '.join(failures)}",
               file=sys.stderr)

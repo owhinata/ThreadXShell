@@ -482,6 +482,36 @@ void guix_display_cam_overlay_box(float nx, float ny, float nw, float nh,
 	ltdc_unlock_frame();
 }
 
+/* The view buffer for a CPU painter (issue #159).  The lock is recursive, so
+ * taking it here costs a caller that already holds it nothing, and a caller
+ * that does not gets an answer that is at least consistent at the moment. */
+uint16_t *guix_display_cam_view(uint16_t *w, uint16_t *h)
+{
+	uint16_t *v = NULL;
+	uint16_t vw = 0u, vh = 0u;
+
+	ltdc_lock_frame();
+	if (cam_view_data != NULL && cam_preview_active) {
+		v  = cam_view_data;
+		vw = cam_w;
+		vh = cam_h;
+	}
+	ltdc_unlock_frame();
+	if (w != NULL)
+		*w = vw;
+	if (h != NULL)
+		*h = vh;
+	return v;
+}
+
+void guix_display_cam_view_touched(void)
+{
+	ltdc_lock_frame();
+	cam_buf_stale[0] = true;
+	cam_buf_stale[1] = true;
+	ltdc_unlock_frame();
+}
+
 /*
  * Tear-free buffer toggle (GUIX calls this once per refreshed frame).  GUIX has
  * just composited the accumulated dirty region into the back buffer (= the

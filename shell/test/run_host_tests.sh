@@ -419,6 +419,22 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     $LDFLAGS -o "$out/test_nn_active_core"
 "$out/test_nn_active_core"
 
+# issue #130 -- the loader's plugin-lease checks (svc/plugin/plugin_run_core.c,
+# shared by wio-lite-ai and f746g-disco since issue #159): a load refused before
+# the shared loader touches anything, the exec_ok hook refusing again at the
+# branch into entry() -- by name, not as the MPU refusal the loader turns a
+# hook's "no" into -- and an unload that does not reach the loader, each
+# without the lease and each counted once.  The board's binding (MPU verdict,
+# caches, log, depth record) is stubbed; the shared loader's unload is wrapped so
+# "it did not unpublish" can be observed as "it did not call".  Each board's
+# check_lease_entries run holds this file's table against the objects.
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_plugin_run_lease.c" "$svc/plugin/plugin_run_core.c" \
+    "$svc/plugin/plugin_exec.c" "$svc/plugin/plugin_load.c" "$svc/crc32.c" \
+    "$svc/fmt.c" \
+    $LDFLAGS -Wl,--wrap=plugin_exec_unload -o "$out/test_plugin_run_lease"
+"$out/test_plugin_run_lease"
+
 # issue #159 -- the lease-checked entries above that branch
 # (svc/nn/nn_active_lease.c), moved out of wio-lite-ai so f746g-disco takes the
 # same ones: every entry refuses a caller without the plugin lease with

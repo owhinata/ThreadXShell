@@ -40,6 +40,42 @@ static void row(int nd, int oneshot, enum nn_decode_count want)
 	      (int)got, (int)want);
 }
 
+static void prow(int nd, int oneshot, enum nn_decode_count want)
+{
+	enum nn_decode_count got = nn_decode_count_plugin_of(nd, oneshot);
+
+	CHECK(got == want, "plugin nd %d oneshot %d: got %d want %d", nd,
+	      oneshot, (int)got, (int)want);
+}
+
+/*
+ * [!] A LOADED PLUGIN'S ANSWER (issue #159 Step 4b).  A plugin that passed the
+ * stream's admission (shapes_ok) and then answers BF_ERR_MODEL from decode()
+ * is a container whose two halves disagree: model_errors, never an inference
+ * with nobody found -- which is what the resident table above would make of
+ * it.  The other negatives are wiring faults, as everywhere.
+ */
+static void test_plugin_rows(void)
+{
+	int nd;
+
+	prow(0, 0, NN_DC_NONE);
+	prow(5, 0, NN_DC_NONE);
+	prow(BF_ERR_MODEL, 0, NN_DC_MODEL);
+	prow(BF_ERR_UNINIT, 0, NN_DC_DECODER);
+	prow(BF_ERR_ARG, 0, NN_DC_DECODER);
+	prow(-4, 0, NN_DC_DECODER);
+	prow(INT_MIN, 0, NN_DC_DECODER);
+	prow(BF_ERR_MODEL, 1, NN_DC_NONE);   /* `nn run` reports its own */
+	prow(BF_ERR_UNINIT, 1, NN_DC_NONE);
+	for (nd = -200; nd < 0; nd++)
+		CHECK(nn_decode_count_plugin_of(nd, 0) != NN_DC_NONE,
+		      "a plugin's negative %d counted as nothing", nd);
+	CHECK(nn_decode_count_of(BF_ERR_MODEL, 0) !=
+	      nn_decode_count_plugin_of(BF_ERR_MODEL, 0),
+	      "the resident and the plugin tables agree on BF_ERR_MODEL");
+}
+
 static void test_rows(void)
 {
 	/* A stream. */
@@ -87,6 +123,7 @@ static void test_rules(void)
 int main(void)
 {
 	test_rows();
+	test_plugin_rows();
 	test_rules();
 	if (fails) {
 		printf("test_nn_decode_count: %d failure(s)\n", fails);

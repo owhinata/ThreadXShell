@@ -30,8 +30,16 @@
  * [!] THE OTHER NEGATIVES ARE NOT FOLDED INTO IT, nor into "0 found": BF_ERR_UNINIT,
  * BF_ERR_ARG and a code nobody documented are wiring faults.
  *
- * Pure, no storage: test/test_nn_decode_count.c walks it.  The counters and
- * where they move are the worker's (port/nn/nn_worker.c, nncam_publish()).
+ * [!] A LOADED PLUGIN'S ANSWER IS COUNTED BY THE OTHER BOARDS' RULE (issue #159
+ * Step 4b): nn_decode_count_plugin_of() below.  A plugin was chosen for its
+ * model, so its BF_ERR_MODEL means the two do not match -- `model_errors`, as
+ * on wio-lite-ai and grove-vision-ai-v2 -- and must not read as an inference
+ * that found nobody.  The resident table above is unchanged until Step 4c
+ * removes the resident decoder.
+ *
+ * Pure, no storage: test/test_nn_decode_count.c walks both.  The counters and
+ * where they move are the worker's (port/nn/nn_worker.c: nncam_publish() for
+ * the resident decoder, nncam_account() for a plugin).
  */
 #ifndef NN_DECODE_COUNT_H
 #define NN_DECODE_COUNT_H
@@ -44,6 +52,7 @@ extern "C" {
 enum nn_decode_count {
 	NN_DC_NONE = 0,   /**< not an error: a result, or not counted at all */
 	NN_DC_DECODER,    /**< decoder_errors and errors                     */
+	NN_DC_MODEL,      /**< model_errors and errors -- a plugin's only    */
 };
 
 /**
@@ -52,6 +61,13 @@ enum nn_decode_count {
  * @return the counter it moves
  */
 enum nn_decode_count nn_decode_count_of(int nd, int oneshot);
+
+/**
+ * The same question for a loaded PLUGIN's decode (issue #159 Step 4b), with
+ * wio-lite-ai's and grove-vision-ai-v2's table: BF_ERR_MODEL is NN_DC_MODEL,
+ * every other negative NN_DC_DECODER, a count or a one-shot NN_DC_NONE.
+ */
+enum nn_decode_count nn_decode_count_plugin_of(int nd, int oneshot);
 
 #ifdef __cplusplus
 }

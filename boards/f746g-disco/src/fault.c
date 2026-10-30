@@ -18,6 +18,10 @@
  * a sleeping core, owhinata/stm32f746g-disco#20/#24/#26); SWD can still inspect the
  * halted state.
  *
+ * [!] EXCEPT A FAULT INSIDE A LOADED PLUGIN (issue #159, tflm): its pc is named
+ * as "plugin +offset" in the RAM log and the board resets at once -- the reset
+ * is the teardown (src/fault_plugin.h).
+ *
  * The exception entry is captured by a small naked stub shared by all four
  * vectors (the type is read back from SCB->ICSR), which hands the C handler the
  * stacked frame, EXC_RETURN and the callee-saved registers.  Clean-room: concept
@@ -33,6 +37,9 @@
 #include "stm32f7xx_hal.h"
 #include "tx_api.h"
 #include "iwdg.h"        /* BSP_ENABLE_IWDG: debugger-aware fault halt (issue #38) */
+#if defined(CONFIG_NN_BACKEND_TFLM)
+#include "fault_plugin.h" /* a plugin's fault: attributed, then reset (issue #159) */
+#endif
 
 /* ThreadX current-thread pointer (tx_thread.h is internal; declare it here). */
 extern TX_THREAD *_tx_thread_current_ptr;
@@ -228,6 +235,29 @@ void fault_handler_c(uint32_t *frame, uint32_t exc_return, uint32_t *cs_regs)
 	else
 		LOG_ERR("frame lost (stacking fault?) frame=%08lx exc=%08lx",
 		        (unsigned long)(uintptr_t)frame, (unsigned long)exc_return);
+
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/* Was it a loaded plugin (issue #159)?  Only the loader's published
+	 * metadata is read; nothing inside the plugin is followed. */
+	{
+		const char *who = NULL;
+		uint32_t off = 0u;
+		enum fault_end end = fault_plugin_end(
+			pc, frame_ok,
+			(CoreDebug->DHCSR & CoreDebug_DHCSR_C_DEBUGEN_Msk) != 0u,
+			&who, &off);
+
+		if (who != NULL)
+			LOG_ERR("pc is in plugin '%s' +0x%lx", who, (unsigned long)off);
+		if (end == FAULT_END_RESET) {
+			NVIC_SystemReset();     /* the reset is the teardown */
+			for (;;)
+				;
+		}
+		if (end == FAULT_END_DEBUG_HALT)
+			fault_halt();           /* SWD may look; the RAM log has it */
+	}
+#endif
 
 	/* (2) Full dump over USART1 by polling. */
 	fault_printf("\r\n*** FAULT: %s ***\r\n", name);

@@ -45,7 +45,7 @@
 #include "nn_core_model.h" /* the shared load / unload order (#131) */
 #include "plugin_load.h"
 #include "plugin_lease.h"
-#include "plugin_run.h"
+#include "plugin_run_core.h"
 #include "plugin_target.h"   /* the target word this build provides (#108) */
 #include "psram.h"
 #include "stm32h7xx_hal.h"   /* SystemCoreClock -- the DWT counter's clock */

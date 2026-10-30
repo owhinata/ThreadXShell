@@ -578,6 +578,7 @@ target_include_directories(shell PRIVATE
     "${BOARD_DIR}/port/sdram"
     "${BOARD_DIR}/port/eth"
     "${BOARD_DIR}/port/nn"
+    "${BOARD_DIR}/port/plugin"     # the plugin binding, lease and painter (#159)
     "${CMAKE_SOURCE_DIR}/lib/ov5640"
     "${FX_DIR}/common/inc" "${FX_DIR}/ports/cortex_m7/gnu/inc"
     "${LX_DIR}/common/inc"
@@ -706,57 +707,35 @@ set(F746_PLUGIN_GATE_END  0x20050000)
 set(F746_PLUGIN_MEMORY_LD "${BOARD_DIR}/ldscript/plugin_memory.ld")
 
 # ---------------------------------------------------------------------------
-# Plugin containers: recognise, validate, report (issue #159 Step 4a)
+# Plugin containers: deliver, validate, RUN (issue #159 Steps 4a and 4b)
 # ---------------------------------------------------------------------------
 #
-# `nn model load --path <x.nnc>` recognises a container, validates it with
-# this board's policy (svc/plugin/plugin_load.c -- the validator the host asset
-# build runs too) and hands its model section to the backend in place.  Step 4a
-# NEVER EXECUTES A PLUGIN: the load order's plugin hooks are unset, so the
-# model runs under the resident decoder and `nn info` says the plugin is
-# validated, not loaded.  This board builds no plugin and no container yet --
-# add_plugin() needs veneer_cost_gate(), whose roots arrive with Step 4b.
+# `nn model load --path <x.nnc>` recognises a container, validates it with this
+# board's policy (svc/plugin/plugin_load.c -- the validator the host asset build
+# runs too), hands its model section to the backend in place and, since Step
+# 4b, copies its plugin into .plugin and starts it: the plugin then decodes on
+# the nn worker, draws on the GUIX thread and reports to a console, every entry
+# under the plugin lease.  The resident decoder stays as the no-plugin fallback
+# until Step 4c.  See the board README.
 #
 # tflm only: the other backends cannot hand a model section to an interpreter
 # in place, so a container has nowhere to go there.
 if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # The policy's address and capacity, for the firmware's validator.  The
-    # reservation's address is still stated independently elsewhere (above).
+    # reservation's address is still stated independently elsewhere (above);
+    # check_f746_layout.py holds this F746_PLUGIN_BASE to the linked
+    # __plugin_start (--policy-link-addr, below).
     set(F746_PLUGIN_BASE "0x20048000")
     set(F746_PLUGIN_MAX  "32768")
-    # [!] PROVISIONAL c, STEP 4a ONLY.  plugin_parse() refuses a policy with no
-    # veneer cost, and the number every other board uses is
-    # PLUGIN_VENEER_BASE_COST, which veneer_cost_gate() derives-and-checks
-    # against the shipped image and compiles in.  That gate needs the firmware
-    # functions behind all six veneers, which arrive with Step 4b.  Until then
-    # nothing here executes a plugin, so this number only decides whether
-    # `nn info` calls a container's stack declaration admissible -- wio's
-    # checked value (640), named so that 4b's gate replaces it rather than
-    # coexisting with it.
-    set(F746_PLUGIN_VENEER_COST_4A 640)
-    # [!] AND IT MUST NOT OUTLIVE STEP 4a.  Once veneer_cost_gate() is
-    # registered for this firmware, the checked number exists and the
-    # provisional one would be a second c the loader could use instead.  Checked
-    # at the end of this directory, so the order of the two calls does not
-    # matter; the firmware refuses the pair too (nn_svc_f746_model.c).
-    function(_f746_provisional_c_check)
-        get_property(_gate GLOBAL PROPERTY VENEER_GATE_TARGET)
-        if(_gate AND DEFINED F746_PLUGIN_VENEER_COST_4A)
-            message(FATAL_ERROR
-                "f746g-disco: veneer_cost_gate() is registered, but "
-                "F746_PLUGIN_VENEER_COST_4A (the provisional c of issue #159 "
-                "Step 4a) is still defined.  Step 4b replaces it with the "
-                "gate's value, PLUGIN_VENEER_BASE_COST: delete the provisional "
-                "variable and its compile definition, and give the policy the "
-                "gate's number.")
-        endif()
-    endfunction()
-    cmake_language(DEFER CALL _f746_provisional_c_check)
 
-    # What each thread may lend a plugin callback (wio's policy to start, per
-    # the plan; the measured depths come with Step 4b).  The firmware's
-    # slot -> allowance mapping and the asserts against each thread's stack are
-    # in port/nn/nn_svc_f746_model.c / nn_svc_f746.c / nn_camera.c.
+    # What each thread may lend a plugin callback -- wio-lite-ai's policy to
+    # start (plan #159 D6).  The honest figure is "thread stack - depth at the
+    # call site - asynchronous reserve - margin", the call-site depth being what
+    # `nn stream stats` measures ("at call"); the asynchronous reserve is 208 B
+    # on this core and ThreadX port (PM0253 2.3.7: the 26-word extended frame
+    # plus its alignment pad, and ThreadX's r4-r11 / s16-s31 / LR save).  Each
+    # allowance is asserted below its thread's stack in the firmware, and the
+    # README's table records the measured depths it is checked against.
     include("${CMAKE_SOURCE_DIR}/cmake/plugin_stack_table.cmake")
     plugin_stack_table(
         DEFINE_ON  shell
@@ -770,17 +749,281 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
                    report=F746_PLUGIN_STACK_SHELL
                    param_set=F746_PLUGIN_STACK_SHELL
                    param_get=F746_PLUGIN_STACK_SHELL)
+    # The plugin's own string sink (asset/common), as wio-lite-ai's.
+    set(F746_PLUGIN_SBUF_WRITE_MAX 64)
 
     target_sources(shell PRIVATE
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"   # the device's validator
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_info.c"   # `nn info`'s stack lines
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_claims.c" # ...and the claims around them
         "${CMAKE_SOURCE_DIR}/svc/crc32.c"                # the digest and the load CRC
-        "${BOARD_DIR}/port/nn/nn_container.c")           # ...over the bytes read
+        "${BOARD_DIR}/port/nn/nn_container.c"            # ...over the bytes read
+        # Step 4b: the loader, the lease, the painter and the decoder branch.
+        # What is board-independent is svc/'s (shared with wio-lite-ai); what
+        # touches this board's hardware or RTOS is port/plugin/ and port/nn/.
+        "${CMAKE_SOURCE_DIR}/svc/nn/nn_active_core.c"    # the one branch point
+        "${CMAKE_SOURCE_DIR}/svc/nn/nn_active_lease.c"   # ...its lease-checked entries
+        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_exec.c"   # the loader
+        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_run_core.c" # ...its lease checks
+        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_mpu_v7m.c"  # the Armv7-M MPU verdict
+        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_paint_budget.c"
+        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_paint_span.c"
+        "${CMAKE_SOURCE_DIR}/svc/rect_geom.c"
+        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_lease_miss.c"
+        "${BOARD_DIR}/port/nn/nn_active.c"                # this board's facts
+        "${BOARD_DIR}/port/nn/nn_panel.c"                 # the GUIX draw
+        "${BOARD_DIR}/port/plugin/plugin_run.c"           # MPU read-back, caches
+        "${BOARD_DIR}/port/plugin/plugin_lease.c"         # the lease (ThreadX)
+        "${BOARD_DIR}/port/plugin/plugin_paint.c"         # CPU stores, view buffer
+        "${BOARD_DIR}/src/fault_plugin.c")                # a plugin's fault: reset
     target_compile_definitions(shell PRIVATE
         F746_PLUGIN_BASE=${F746_PLUGIN_BASE}u
-        F746_PLUGIN_MAX=${F746_PLUGIN_MAX}u
-        F746_PLUGIN_VENEER_COST_4A=${F746_PLUGIN_VENEER_COST_4A}u)
+        F746_PLUGIN_MAX=${F746_PLUGIN_MAX}u)
+    # (F746_PLUGIN_STACK_* are defined by plugin_stack_table(), and
+    # PLUGIN_VENEER_BASE_COST by veneer_cost_gate() below.)
+
+    # Entry points a plugin may never reach on this board.  A plugin links no
+    # firmware code at all (-nostdlib, and the gate refuses an undefined
+    # symbol), so this matters for what a plugin might DEFINE under one of these
+    # names: the internal-flash and option-byte writers, the QSPI NOR writers
+    # (the filesystem), the clock and supply configuration, and the MPU / cache
+    # / NVIC state the base owns.
+    set(F746_PLUGIN_FORBIDDEN
+        HAL_FLASH_Unlock
+        HAL_FLASH_Program
+        HAL_FLASHEx_Erase
+        HAL_FLASH_OB_Unlock
+        HAL_FLASH_OB_Launch
+        HAL_FLASHEx_OBProgram
+        qspi_flash_write
+        qspi_flash_erase_sector
+        qspi_flash_erase_subsector
+        qspi_flash_erase_chip
+        HAL_RCC_OscConfig
+        HAL_RCC_ClockConfig
+        HAL_RCCEx_PeriphCLKConfig
+        HAL_PWREx_EnableOverDrive
+        HAL_MPU_ConfigRegion
+        HAL_MPU_Enable
+        HAL_MPU_Disable
+        ARM_MPU_Enable
+        ARM_MPU_Disable
+        ARM_MPU_SetRegion
+        SCB_EnableDCache
+        SCB_DisableDCache
+        SCB_InvalidateICache
+        NVIC_EnableIRQ
+        NVIC_DisableIRQ)
+
+    # What the base itself may spend below one veneer, charged at each indirect
+    # call because the gate cannot see across it.  DERIVED FROM THE SHIPPED IMAGE
+    # AND CHECKED, EVERY BUILD (cmake/check_veneer_base_cost.py, issue #112):
+    # the build fails if the stack below any veneer exceeds this.  wio-lite-ai's
+    # declaration to start -- over-estimating is the safe direction, since a
+    # larger charge makes a plugin's requirement larger, not smaller.  It
+    # REPLACES Step 4a's provisional c (F746_PLUGIN_VENEER_COST_4A), which
+    # nothing checked.
+    set(F746_PLUGIN_VENEER_BASE_COST 640)
+
+    # The firmware side of that charge: the function this board binds behind
+    # each veneer (nn_plugin_base in port/nn/nn_active.c, the painter in
+    # port/plugin/plugin_paint.c, the report sink in svc/nn/nn_report.c), the
+    # charge -- the SAME variable every add_plugin() below is given -- and where
+    # the toolchain's archives live.  `flash` and every container's pack wait
+    # for the check, and for the policy read back out of shell.elf.
+    get_filename_component(_f746_gcc_bin "${CMAKE_C_COMPILER}" DIRECTORY)
+    get_filename_component(F746_TOOLCHAIN_ROOT "${_f746_gcc_bin}" DIRECTORY)
+    include("${CMAKE_SOURCE_DIR}/cmake/veneer_cost_gate.cmake")
+    veneer_cost_gate(
+        FIRMWARE shell
+        MAP      "${CMAKE_BINARY_DIR}/shell.map"
+        DECLARED ${F746_PLUGIN_VENEER_BASE_COST}
+        ROOTS    pl_base_log=nn_plugin_log
+                 pl_base_to_frame=nn_active_to_frame
+                 pl_paint_rect=paint_rect
+                 pl_paint_fill_rect=paint_fill_rect
+                 pl_paint_blit=paint_blit
+                 pl_print_write=nn_report_write
+        PREBUILT_ROOTS "${F746_TOOLCHAIN_ROOT}"
+        DELIVERY flash)
+
+    set(F746_PLUGIN_COMMON "${CMAKE_SOURCE_DIR}/asset/common")
+    # The firmware's own architecture, and only that.  The float ABI is the
+    # firmware's, because a plugin's callbacks are called with it.
+    set(F746_PLUGIN_ARCH_FLAGS
+        -mcpu=cortex-m7 -mthumb -mfpu=fpv5-sp-d16 -mfloat-abi=hard)
+    set(F746_PLUGIN_CFLAGS
+        ${F746_PLUGIN_ARCH_FLAGS}
+        -Os -std=c11 -Wall -Wextra -Werror
+        -ffreestanding -fno-builtin -fno-common
+        -ffunction-sections -fdata-sections
+        -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables
+        -fstack-usage
+        -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera" -I "${F746_PLUGIN_COMMON}")
+
+    include("${CMAKE_SOURCE_DIR}/cmake/add_plugin.cmake")
+
+    # The shared BlazeFace decoder, compiled into the blazeface plugin and audited
+    # there as AUDIT_SHARED (the firmware still links it too, as the resident
+    # decoder, until Step 4c -- F746_SHARED_DECODER above).
+    set(F746_PLUGIN_ELFS "")
+    add_plugin(blazeface
+        CFLAGS ${F746_PLUGIN_CFLAGS}
+        ARCH_FLAGS ${F746_PLUGIN_ARCH_FLAGS}
+        MEMORY_LD "${F746_PLUGIN_MEMORY_LD}"
+        IMAGE_BASE ${F746_PLUGIN_GATE_BASE}
+        IMAGE_END  ${F746_PLUGIN_GATE_END}
+        FORBIDDEN  ${F746_PLUGIN_FORBIDDEN}
+        VENEER_BASE_COST ${F746_PLUGIN_VENEER_BASE_COST}
+        TARGET_ID  ${F746_PLUGIN_TARGET_ID}
+        OUT_DIR "${CMAKE_BINARY_DIR}/plugin"
+        OUT_VAR F746_PLUGIN_ELFS
+        SOURCES "${F746_SHARED_DECODER}"
+        AUDIT_SHARED "${F746_SHARED_DECODER}"
+        SLOTS   entry shapes_ok decode draw report param_set param_get
+        SBUF_WRITE_MAX ${F746_PLUGIN_SBUF_WRITE_MAX})
+
+    # Built to prove the build and to measure it.  No asset carries it: no
+    # CIFAR-10 model this backend runs is pinned in the tree (Grove's is a
+    # Vela-compiled Ethos-U model), as on wio-lite-ai.
+    add_plugin(cifar10
+        CFLAGS ${F746_PLUGIN_CFLAGS}
+        ARCH_FLAGS ${F746_PLUGIN_ARCH_FLAGS}
+        MEMORY_LD "${F746_PLUGIN_MEMORY_LD}"
+        IMAGE_BASE ${F746_PLUGIN_GATE_BASE}
+        IMAGE_END  ${F746_PLUGIN_GATE_END}
+        FORBIDDEN  ${F746_PLUGIN_FORBIDDEN}
+        VENEER_BASE_COST ${F746_PLUGIN_VENEER_BASE_COST}
+        TARGET_ID  ${F746_PLUGIN_TARGET_ID}
+        OUT_DIR "${CMAKE_BINARY_DIR}/plugin"
+        OUT_VAR F746_PLUGIN_ELFS
+        SLOTS   entry shapes_ok decode draw report
+        SBUF_WRITE_MAX ${F746_PLUGIN_SBUF_WRITE_MAX})
+
+    add_custom_target(plugin ALL DEPENDS ${F746_PLUGIN_ELFS})
+
+    # --- the container chain's host tools --------------------------------------
+    #   abi_layout        svc/plugin/plugin_abi.h's layout as JSON, for the packer
+    #   verify_container  svc/plugin/plugin_load.c -- the device's validator -- on
+    #                     the host, so a container cannot pass here and fail there
+    # (No slot table: this board's destination is a file on the card, fit-checked
+    # against the staging capacity read back from shell.elf.)
+    set(F746_ABI_LAYOUT_JSON "${CMAKE_BINARY_DIR}/plugin/abi_layout.json")
+    set(F746_CONTAINER_VERIFIER "${CMAKE_BINARY_DIR}/verify_container")
+    set(F746_PACKER "${CMAKE_SOURCE_DIR}/asset/tools/pack_container.py")
+
+    find_program(F746_HOST_CC NAMES cc gcc clang)
+    if(F746_HOST_CC)
+        add_custom_command(
+            OUTPUT "${F746_ABI_LAYOUT_JSON}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/plugin"
+            COMMAND "${F746_HOST_CC}" -std=c11 -O1 -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera"
+                    "${CMAKE_SOURCE_DIR}/asset/tools/abi_layout.c"
+                    -o "${CMAKE_BINARY_DIR}/plugin/abi_layout"
+            COMMAND "${CMAKE_BINARY_DIR}/plugin/abi_layout"
+                    > "${F746_ABI_LAYOUT_JSON}"
+            DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/abi_layout.c"
+                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_abi.h"
+            COMMENT "host cc -> abi_layout.json (the packer's view of the ABI)"
+            VERBATIM)
+        add_custom_command(
+            OUTPUT "${F746_CONTAINER_VERIFIER}"
+            COMMAND "${F746_HOST_CC}" -std=c11 -O1 -Wall -Wextra
+                    -I "${CMAKE_SOURCE_DIR}/svc" -I "${CMAKE_SOURCE_DIR}/svc/nn" -I "${CMAKE_SOURCE_DIR}/svc/plugin" -I "${CMAKE_SOURCE_DIR}/svc/camera"
+                    "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
+                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
+                    "${CMAKE_SOURCE_DIR}/svc/crc32.c"
+                    -o "${F746_CONTAINER_VERIFIER}"
+            DEPENDS "${CMAKE_SOURCE_DIR}/asset/tools/verify_container.c"
+                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
+                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.h"
+                    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_abi.h"
+            COMMENT "host cc -> verify_container (the device's own validator)"
+            VERBATIM)
+        add_custom_target(container-tools ALL
+            DEPENDS "${F746_ABI_LAYOUT_JSON}" "${F746_CONTAINER_VERIFIER}")
+    else()
+        message(STATUS "f746g-disco: no host C compiler -- asset-* targets will refuse")
+    endif()
+
+    execute_process(COMMAND ${FETCH_UPSTREAM_GIT} -C "${CMAKE_SOURCE_DIR}" rev-parse --short HEAD
+                    OUTPUT_VARIABLE F746_PLUGIN_BUILD_ID
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET)
+    if(NOT F746_PLUGIN_BUILD_ID)
+        set(F746_PLUGIN_BUILD_ID "nogit")
+    endif()
+
+    # --- sendable assets ----------------------------------------------------------
+    #
+    # `--target asset-<name>` produces build/<board>/asset/<name>.nnc: a container
+    # that has already been through every gate, published only after passing
+    # (cmake/build_asset.py), and a receipt.  This board's destination is a FILE
+    # copied to the SD card (plan #159 D4/D5): its fit is checked against the
+    # staging capacity the shipped shell.elf holds in nn_tflm_stage_cap -- the
+    # object the backend's load_region() hands out as the read limit
+    # (port/nn/tflm/nn_tflm.cc) -- and the closing check is the CRC the load
+    # prints over the whole file it read, compared with the receipt's.
+    #
+    # [!] THE GATES RUN AT BUILD TIME, NOT AT COPY TIME: nothing checks that the
+    # file copied is the file built -- the CRC the load prints is the only
+    # "built bytes = stored bytes" check.  Neither the asset nor its fetch is in
+    # ALL (issue #94's lesson).
+    if(HOST_CXX)
+        set(F746_MODEL_VERIFIER "${CMAKE_BINARY_DIR}/verify_tflite")
+    else()
+        # Left EMPTY on purpose: build_asset.py refuses on an empty verifier
+        # rather than publishing an unchecked model.
+        set(F746_MODEL_VERIFIER "")
+    endif()
+    include("${CMAKE_SOURCE_DIR}/cmake/add_asset.cmake")
+
+    function(f746_add_asset _name)
+        cmake_parse_arguments(A ""
+            "PLUGIN;FILE_NAME;FILE;URL;COMMIT;PATH_IN;SHA256" "" ${ARGN})
+        if(A_UNPARSED_ARGUMENTS)
+            message(FATAL_ERROR
+                "f746_add_asset(${_name}): unrecognised: ${A_UNPARSED_ARGUMENTS}")
+        endif()
+        set(_pin "")
+        foreach(_k FILE URL COMMIT PATH_IN SHA256)
+            if(DEFINED A_${_k})
+                list(APPEND _pin ${_k} "${A_${_k}}")
+            endif()
+        endforeach()
+        # No ingest: the model as the zoo ships it (tflm with CMSIS-NN reads it).
+        asset_model_source(${_name}
+            OVERRIDE_VAR F746_ASSET_${_name}_FILE OUT_VAR _src ${_pin})
+        add_asset(${_name}
+            MODEL "${_src}"  MODEL_SHA256 "${_src_SHA256}"
+            PLUGIN ${A_PLUGIN}
+            FILE_NAME "${A_FILE_NAME}"  STAGE_SYMBOL nn_tflm_stage_cap
+            PACKER "${F746_PACKER}"  LAYOUT "${F746_ABI_LAYOUT_JSON}"
+            MODEL_VERIFIER "${F746_MODEL_VERIFIER}"
+            CONTAINER_VERIFIER "${F746_CONTAINER_VERIFIER}"
+            BUILD_ID "${F746_PLUGIN_BUILD_ID}"
+            TARGET_ID "${F746_PLUGIN_TARGET_ID}"
+            LINK_ADDR "${F746_PLUGIN_BASE}"
+            CAPACITY "${F746_PLUGIN_MAX}"
+            # The board has no receive path of its own: the file reaches the
+            # card through a PC card reader, and the load reads it whole.
+            RECEIPT_STEPS "nn model load --path /{file}   (once the file is on the card)"
+            RECEIPT_TRANSFER "on the PC:" "copy the path above to the card's root as {file}"
+            RECEIPT_VERIFY   "the load:"
+                "must print crc32 {crc} -- that is how you know the bytes"
+                "that were built are the bytes that were read.")
+    endfunction()
+
+    # The file wio-lite-ai and Grove pin -- the same commit and SHA-256, from the
+    # ST model zoo -- and the model this board's built-in array is generated
+    # from (cmake/tflite-micro.cmake).  Licence: model-zoo weights, fetched into
+    # the build tree only, never committed.
+    f746_add_asset(blazeface
+        PLUGIN  blazeface  FILE_NAME blazeface.nnc
+        URL     "https://github.com/STMicroelectronics/stm32ai-modelzoo.git"
+        COMMIT  "1423c78953a830903485135febe1dd98ff31aed8"
+        PATH_IN "face_detection/facedetect_front/Public_pretrainedmodel_public_dataset/widerface/blazeface_front_128/blazeface_front_128_int8.tflite"
+        SHA256  "e803bb4e93b10f7a19d4243bcc39698599a723f3128e19d3f90e0b1c0bc88dd8")
 endif()
 
 # --- Post-link placement gate ------------------------------------------------
@@ -842,6 +1085,11 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     list(APPEND F746_LAYOUT_REQUIRED
          --require-sdram-ai _ZN12_GLOBAL__N_1L7g_arenaE
          --require-sdram-ai _ZN12_GLOBAL__N_1L14g_sd_model_bufE)
+    # The plugin policy's link address -- F746_PLUGIN_BASE, the value compiled
+    # into the policy as -DF746_PLUGIN_BASE -- is the linked __plugin_start
+    # (issue #159 Step 4b): a fifth statement of the reservation's address, and
+    # the one the device refuses containers by.
+    list(APPEND F746_LAYOUT_REQUIRED --policy-link-addr ${F746_PLUGIN_BASE})
 endif()
 if(CONFIG_NN_BACKEND STREQUAL "stedgeai_reloc")
     # port/nn/nn_stedgeai_reloc.c -- the executable model slots, which MUST sit in

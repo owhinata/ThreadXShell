@@ -155,7 +155,7 @@ plugin は board code と同格の**信頼された native code**。ゲートが
   決めず、写像できない組は `#error`。
 - **[!] アセットは `--target asset-<name>` が作る。ゲートは送信時ではなくビルド時にある** — 送信は打った
   パスをそのまま送り**それがその成果物かは誰も検査しない**ので、閉じ手は receipt の **CRC32** を転送後に
-  `blob list` と突き合わせること。**モデルは commit + SHA256 で pin**（Git LFS 不在だとポインタが
+  ボードの保存バイトの CRC（slot ボードは `blob list`、f746 は load が印字する採用済み全バイトの CRC）と突き合わせること。**モデルは commit + SHA256 で pin**（Git LFS 不在だとポインタが
   exit 0 で置かれる）、**pin が消えたら fail closed**。**ファームと plugin は別成果物で間違いは両方向。** **[!] veneer ゲートの DELIVERY は build.ninja から導出したファーム成果物の使用者と両方向で照合し（`cmake/check_delivery_gate.py`）、全 target がその検査を先に待つ。外す・弱めない。**
 - **[!] 同じ plugin の callback は 2 つ同時に走らない**: plugin に入る全経路（param・admission・report・load/unload も）がボードの lease を取り、worker とコンソールは有界に待ち、panel は try だけ。**入口（ボードの分岐点と ENTRY の直前）は保持を検査し、無ければ「plugin 無し」とは別の答えを返す**（#127）。
 

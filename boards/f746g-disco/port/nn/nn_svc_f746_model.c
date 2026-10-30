@@ -36,9 +36,12 @@
 #include "tx_api.h"
 
 #if defined(CONFIG_NN_BACKEND_TFLM)
+#include "nn_active.h"       /* nn_active_base(): what a started plugin is handed */
 #include "nn_container.h"
 #include "plugin_claims.h"   /* the open model's claims and `nn info` lines */
+#include "plugin_lease.h"    /* the one lock into the plugin (#159 Step 4b) */
 #include "plugin_load.h"
+#include "plugin_run_core.h" /* the loader (#159 Step 4b)                   */
 #endif
 
 /* ---- the shared order's state -------------------------------------------- */
@@ -67,32 +70,33 @@ static void nn_life_cs_exit(unsigned posture)
 	TX_RESTORE
 }
 
-/* ---- plugin containers (issue #159 = #78 Step 4a) ------------------------- */
+/* ---- plugin containers (issue #159 = #78 Steps 4a and 4b) ---------------- */
 
 #if defined(CONFIG_NN_BACKEND_TFLM)
 /*
  * This board's policy for a plugin image.  svc/plugin/plugin_load.c holds no
  * board fact; every one of them arrives here, from board.cmake.
  *
- * [!] STEP 4a NEVER CALLS THROUGH ANY OF THIS.  A container is validated, its
- * model section handed to the backend in place and its claims recorded; the
- * plugin section is never copied into .plugin and never branched into, and the
- * resident decoder keeps reading the model.  The load order's plugin hooks are
- * unset (nn_life_board below), so nothing here could.
+ * Since Step 4b the plugin section is RUN: a load copies it into .plugin and
+ * calls its entry (the load order's plugin hooks below), and from then on the
+ * plugin decodes, draws and reports -- the resident decoder is the no-plugin
+ * fallback until Step 4c.
  *
  * The reservation's address is stated independently in the linker script,
- * ldscript/plugin_memory.ld and cmake/check_f746_layout.py, on purpose.
+ * ldscript/plugin_memory.ld and cmake/check_f746_layout.py, on purpose; the
+ * layout gate also holds this policy's link_addr (F746_PLUGIN_BASE) to the
+ * linked __plugin_start (cmake/check_f746_layout.py --policy-link-addr).
  */
 #if !defined(F746_PLUGIN_BASE) || !defined(F746_PLUGIN_MAX) ||               \
-    !defined(F746_PLUGIN_TARGET_ID) || !defined(F746_PLUGIN_VENEER_COST_4A) || \
+    !defined(F746_PLUGIN_TARGET_ID) || !defined(PLUGIN_VENEER_BASE_COST) ||    \
     !defined(F746_PLUGIN_STACK_NN_WORK) || !defined(F746_PLUGIN_STACK_GUIX) ||  \
     !defined(F746_PLUGIN_STACK_SHELL)
-#error "board.cmake must define the F746_PLUGIN_* policy for a tflm build"
+#error "board.cmake must define the F746_PLUGIN_* policy and veneer_cost_gate() PLUGIN_VENEER_BASE_COST for a tflm build"
 #endif
-/* The provisional c must go when the checked one arrives (Step 4b): two
+/* The provisional c of Step 4a is gone; the checked one replaced it.  Two
  * numbers for one fact is how the loader would charge the unchecked one. */
-#if defined(PLUGIN_VENEER_BASE_COST)
-#error "veneer_cost_gate() defines PLUGIN_VENEER_BASE_COST: replace F746_PLUGIN_VENEER_COST_4A with it (issue #159 Step 4b)"
+#if defined(F746_PLUGIN_VENEER_COST_4A)
+#error "F746_PLUGIN_VENEER_COST_4A is Step 4a's provisional c; the policy takes PLUGIN_VENEER_BASE_COST (issue #159 Step 4b)"
 #endif
 
 /* A container's model section starts on PLUGIN_MODEL_ALIGN and the backend
@@ -102,11 +106,10 @@ _Static_assert(PLUGIN_MODEL_ALIGN % NN_MODEL_ALIGN == 0u,
                "a container's model section must meet the backend's alignment");
 
 /*
- * [!] c IS PROVISIONAL IN STEP 4a (board.cmake, F746_PLUGIN_VENEER_COST_4A):
- * veneer_cost_gate(), which derives and checks PLUGIN_VENEER_BASE_COST against
- * the shipped image, needs the firmware functions behind every veneer, and
- * those arrive with Step 4b.  Nothing here executes a plugin, so the number
- * only decides whether a container's stack declaration reads as admissible.
+ * c is PLUGIN_VENEER_BASE_COST, which veneer_cost_gate() derives and checks
+ * against the shipped image and compiles in -- and the build reads the value
+ * this policy ACTUALLY holds back out of shell.elf (PLUGIN_POLICY_PROBE below,
+ * cmake/check_policy_probe.py), with the seven allowances.
  *
  * The slot -> allowance mapping is this board's (decode on the nn worker, draw
  * on the GUIX thread that draws the boxes, the rest on a console); the asserts
@@ -127,9 +130,12 @@ static const struct plugin_policy nn_plugin_policy = {
 		[PLUGIN_SLOT_PARAM_SET] = F746_PLUGIN_STACK_SHELL,
 		[PLUGIN_SLOT_PARAM_GET] = F746_PLUGIN_STACK_SHELL,
 	},
-	.veneer_cost    = F746_PLUGIN_VENEER_COST_4A,
+	.veneer_cost    = PLUGIN_VENEER_BASE_COST,
 	.stack_accounting = PLUGIN_STACK_ACCOUNTING,
 };
+/* Where the build finds the policy this firmware REALLY holds, whatever -D
+ * reached this compile (cmake/check_policy_probe.py, issue #111). */
+PLUGIN_POLICY_PROBE(nn_plugin_policy);
 
 /*
  * What the container of the OPEN model claimed, or nothing.
@@ -462,12 +468,68 @@ static void nn_life_commit(struct nn_core_model_job *j)
 #endif
 }
 
+#if defined(CONFIG_NN_BACKEND_TFLM)
 /*
- * [!] NO PLUGIN RUNS, SO NO LEASE: lease_take is NULL and the shared order then
- * calls no plugin hook at all (nn_core_model.h) -- in Step 4a a container is
- * validated and its model adopted, and its plugin is never started.  The counter still brackets
- * the swap.  hw_down is NULL: what an EMPTY ending must bring down is the
- * backend's model, and the order releases that itself.
+ * [!] THE LEASE IS TAKEN BEFORE ANYTHING CHANGES, AND ITS FAILURE IS AN ANSWER
+ * (issue #159, wio-lite-ai's #110).  The NN session keeps the WORKER out, but
+ * not another CONSOLE's plugin callback: `nn thresh` takes no session.  Without
+ * this, a background job could be inside a plugin's param_set while this
+ * overwrote the reservation under it.  Taken before the first change, a
+ * timeout costs nothing: the model and the plugin are both as they were.
+ */
+static int nn_life_lease_take(struct nn_core_model_job *j)
+{
+	struct nn_op_result *res = j->res;
+
+	if (plugin_lease_take())
+		return 1;
+	nn_detail_set("the decoder is busy -- try again");
+	return 0;
+}
+
+/*
+ * The plugin half of a load, run only once the backend has taken the new model
+ * and only for a container (a bare model unloads instead, in the shared order).
+ *
+ * [!] A REFUSED PLUGIN IS A FAILED LOAD OF A MODEL THAT IS NOW OPEN (issue #122
+ * D6).  The copy into the reservation has already destroyed the previous
+ * plugin, so there is no rollback: the model stays open with nothing but the
+ * resident decoder reading it (Step 4b), and the status says the load did not
+ * give what was asked for.  plugin_run_load() also logs its own reason.
+ *
+ * [!] THE STAGING REGION IS PASSED, NOT LOOKED UP: the slot the reader filled
+ * (f->buf, f->cap) is the region the container lies in, and the backend's
+ * load_region() would now answer with the other slot.
+ */
+static int nn_life_plugin_start(struct nn_core_model_job *j)
+{
+	struct nn_op_result *res = j->res;
+	struct nn_f746_job *f = j->board;
+	enum plugin_run_result pr;
+
+	/* entry()'s depth is sampled in the loader's exec_ok hook. */
+	pr = plugin_run_load(&f->claims.view, f->buf, f->buf, f->cap,
+	                     nn_active_base());
+	if (pr == PLUGIN_RUN_OK || pr == PLUGIN_RUN_NO_PLUGIN)
+		return NN_SVC_OK;
+	nn_detail_set("%s: %s", j->spec->path, plugin_run_why(pr));
+	return NN_SVC_ERR_ARG;
+}
+
+/* Unpublish: a plugin left loaded would be a decoder for a model that is gone,
+ * waiting to interpret the next one. */
+static void nn_life_plugin_unload(void)
+{
+	plugin_run_unload();
+}
+#endif /* CONFIG_NN_BACKEND_TFLM */
+
+/*
+ * The plugin hooks exist only in a tflm build (issue #159 Step 4b): the other
+ * backends cannot carry a container, so lease_take is NULL there and the
+ * shared order calls no plugin hook at all (nn_core_model.h).  The counter
+ * still brackets the swap.  hw_down is NULL: what an EMPTY ending must bring
+ * down is the backend's model, and the order releases that itself.
  */
 static const struct nn_core_model_board nn_life_board = {
 	.cs_enter      = nn_life_cs_enter,
@@ -482,10 +544,17 @@ static const struct nn_core_model_board nn_life_board = {
 	.claim_give    = nn_session_release,
 	.prepare       = nn_life_prepare,
 	.fetch         = nn_life_fetch,
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	.lease_take    = nn_life_lease_take,
+	.lease_give    = plugin_lease_give,
+	.plugin_start  = nn_life_plugin_start,
+	.plugin_unload = nn_life_plugin_unload,
+#else
 	.lease_take    = NULL,
 	.lease_give    = NULL,
 	.plugin_start  = NULL,
 	.plugin_unload = NULL,
+#endif
 	.hw_down       = NULL,
 	.invalidate    = nn_life_invalidate,
 	.forget        = nn_life_forget,
@@ -643,9 +712,9 @@ void nn_svc_model_unload(struct nn_op_result *res)
  * Step 4a), and where a plugin would live.
  *
  * [!] CLAIMS, AND THE LINE SAYS SO.  Every field comes from a manifest
- * plugin_parse() validated.  "validated, not loaded" is the only word that
- * describes this firmware: in Step 4a the plugin section is never copied and
- * never branched into, and the resident decoder keeps reading the model.
+ * plugin_parse() validated; "running" is the one word about what the loader
+ * actually branched into (since Step 4b), and "validated, not loaded" a
+ * container whose plugin was refused or never reached.
  *
  * Two CRCs, which are different things: `crc` on the plugin line is the
  * plugin-section digest the container carries (it moves when the plugin's
@@ -665,15 +734,19 @@ void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 	struct plugin_claims c;
 	enum plugin_claims_seen seen;
 	unsigned posture;
+	int running;
 
 	if (write == NULL)
 		return;
+	/* [!] ONE SECTION FOR THE CLAIMS AND THE LOADER'S STATE (issue #110's
+	 * rule): asked later, a load landing between would print one container's
+	 * manifest beside another's runtime state.  plugin_run_active() reads one
+	 * word. */
 	posture = nn_life_cs_enter();
 	seen = plugin_claims_get(&nn_claims, nn_model_life.seq, &c);
+	running = plugin_run_active();
 	nn_life_cs_exit(posture);
-	/* No loader yet (Step 4a): nothing is ever running, so a plugin reads
-	 * "validated, not loaded". */
-	plugin_claims_info(write, ctx, seen, &c, 0,
+	plugin_claims_info(write, ctx, seen, &c, running,
 	                   (uint32_t)(uintptr_t)__plugin_start,
 	                   (uint32_t)(__plugin_end - __plugin_start),
 	                   nn_plugin_policy.veneer_cost);

@@ -29,7 +29,7 @@
 #include "log.h"
 
 #if defined(CONFIG_NN_BACKEND_TFLM)
-#include "plugin_run.h"
+#include "plugin_run_core.h"
 #endif
 
 #include <stdint.h>

@@ -240,6 +240,12 @@ file (each `.c` with its `.h` unless only a header is listed):
 | `port/camera/cam_sink.c` | camera producer (`consume()`), console (step enable / disable / drain) | Not an nn file, but nn runs inside it: the one RGB565 subscriber of the base capture, running the GUIX display step and then the nn step, with `camera_frame_put()` last. Each step's armed mark and busy count are `svc/camera/cam_step.h`'s. |
 | `port/nn/nn_worker.c` | inference worker (priority 18) | Inference runs on the CPU, so the worker sits below every other thread; it runs the model, the resident decoder's publish and the counting. |
 | `port/nn/nn_decoder.c` | inference worker | Resident BlazeFace decoder state, with its candidate scratch placed in `.sdram.ai`, and `nn_tensor` -> `tensor_desc`. |
+| `port/nn/nn_active.c` | worker, GUIX, console, under the plugin lease (tflm) | This board's facts for the shared entries (`svc/nn/nn_active_lease.c` above `svc/nn/nn_active_core.c`): reading an `nn_tensor` as a descriptor, where a depth sample goes, the frame a box maps into, and the base vtable's transform and log sink. |
+| `port/nn/nn_panel.c` | GUIX (CAMERA_FRAME handler) (tflm) | The panel's half of the shared frame path: the lease tried, then the frame lock, then the plugin's draw into the view buffer, with its spent / refused / hold figures.  The display is handed in as hooks (`nn_panel.h`). |
+| `port/plugin/plugin_run.c` | console (load / unload), fault handler | The MPU read-back and the M7 cache maintenance around the shared loader, and its log; the reservation's address from the linker script. |
+| `port/plugin/plugin_lease.c` | every path into the plugin | The lease as a ThreadX mutex with inheritance: the GUIX thread outranks the worker and would otherwise preempt a decode. |
+| `port/plugin/plugin_paint.c` | GUIX | CPU pixel loops into the camera view buffer (row-major RGB565 in non-cacheable SDRAM; no DMA2D). |
+| `src/fault_plugin.c` | fault handler | Whether a fault's pc is in the loaded plugin, and that its end is a reset (pure, host-tested). |
 | `port/nn/nn_container.c` | console (`nn model load --path`) | No hardware reason: whether a file read for a load is a plugin container, and the CRC-32 of exactly the bytes read -- the one function both the SD reader (`cmds/cmd_nn_board.c`) and `nn info` print it with (tflm only, issue #159). |
 | `port/nn/nn_decode_count.c` | inference worker | No hardware reason: this board's table for counting the decoder's answer in `nn stream stats` (pure, host-tested). |
 | `port/nn/nn_sess_release.c` | console (stop), inference worker | No hardware reason: when the stream's hold on the nn session may be given back, as a pure function of the sink drain and the worker. |
@@ -248,9 +254,10 @@ file (each `.c` with its `.h` unless only a header is listed):
 | `port/nn/nn_stedgeai.c`, `nn_stedgeai_reloc.c` | as `nn.c` | The non-default ST Edge AI Core backends (a model baked into Flash, or a relocatable one); they need a local ST install. |
 | `port/nn/tflm/` | worker (invoke), console (load) | The default tflite-micro backend with CMSIS-NN kernels; arena and SD model slots in SDRAM. |
 
-There is no `nn_panel.c` here: this board has no panel thread.  The GUIX thread
-draws the boxes itself, reading the record through `nn_camera_dets_get()`
-(`ui/guix_camera_ui.c`).
+This board has no panel thread.  The GUIX thread draws the overlay itself, in
+its CAMERA_FRAME handler (`ui/guix_camera_ui.c`): a loaded plugin's draw
+through `nn_panel_draw()`, or with none the resident decoder's boxes read
+through `nn_camera_dets_get()`.
 
 ### The model: built in, loaded from SD, or nothing (issue #131)
 
@@ -440,12 +447,13 @@ operator copies to the microSD card with a PC card reader, and loads with
   so the validated container is never overwritten with unvalidated bytes.
   The rule is `port/nn/tflm/nn_tflm_fit.h`, a pure function the backend calls
   and `test/test_nn_tflm_fit.c` walks at its boundaries.
-- **The plugin is never started.**  The shared load order's plugin hooks are
-  unset, so the model is read by the resident decoder exactly like a bare one.
+- **Since Step 4b the plugin is started** (below): after the backend has
+  adopted the model section, the shared load order copies the plugin into
+  `.plugin` and calls its entry, under the plugin lease.
 - `nn info` then shows the container's claims:
 
   ```
-  plugin  : <name> (build <id>, crc <plugin digest>), validated, not loaded
+  plugin  : <name> (build <id>, crc <plugin digest>), running
     from  : <path>, <n> B, file crc32 <CRC>
     image : ...
     stack : ...
@@ -455,19 +463,132 @@ operator copies to the microSD card with a PC card reader, and loads with
   `file crc32` is the same value the read printed (one function over the same
   bytes; `test/test_nn_model_container.c` pins it against an independent CRC).
   The plugin line's `crc` is the plugin section's digest, a different number.
-  A bare load or `nn model unload` clears the claims (`plugin  : (none) --
+  `running` is the loader's own state, read in the same critical section as the
+  claims; `validated, not loaded` is a container whose plugin the loader
+  refused (the model stays open -- issue #122 D6).  A model-only container
+  shows `plugin  : (none in this container)` and still its `from` line.  A bare
+  load or `nn model unload` clears the claims (`plugin  : (none) --
   reservation 32768 B at 0x20048000`); a refused load leaves the previous ones.
+  The store, the snapshot rule and these lines are `svc/plugin/plugin_claims`,
+  shared with wio-lite-ai.
 
-**The policy's c is provisional in Step 4a** (640 B, wio's checked value,
-`F746_PLUGIN_VENEER_COST_4A`): `veneer_cost_gate()`, which derives and checks c
-against the shipped image, needs the firmware functions behind every plugin
-veneer, and those arrive with Step 4b.  Nothing executes a plugin before then,
-so the number only decides whether a container's stack declaration reads as
-admissible.  It cannot outlive Step 4a: once `veneer_cost_gate()` is
-registered, `board.cmake` refuses to configure while the provisional variable
-is still defined, and the adapter refuses to compile beside
-`PLUGIN_VENEER_BASE_COST`.  For the same reason this board builds no plugin and no container
-in Step 4a: `add_plugin()` refuses a board without that gate.
+**Step 4a's provisional c (640 B, `F746_PLUGIN_VENEER_COST_4A`) is gone.**  The
+policy's c is `PLUGIN_VENEER_BASE_COST`, which `veneer_cost_gate()` derives and
+checks against the shipped image and compiles in; the build reads the policy
+back out of `shell.elf` (`cmake/check_policy_probe.py`).  The adapter refuses
+to compile if the provisional macro reappears.
+
+### Running one (Step 4b, `tflm` only)
+
+What runs where, and why each piece is this board's or shared:
+
+| Slot | Thread | Allowance | Who calls it |
+|---|---|---|---|
+| entry | console (`nn model load`) | 1,024 B | the shared loader, `svc/plugin/plugin_run_core.c` |
+| shapes_ok | console (`nn run`, `nn stream start`) | 1,024 B | the start's admission, under the lease |
+| decode | nn worker (priority 18) | 1,024 B | `port/nn/nn_worker.c`, lease held across decode + publish |
+| draw | GUIX (priority 14) | 1,024 B | the CAMERA_FRAME handler (`ui/guix_camera_ui.c` -> `port/nn/nn_panel.c`) |
+| report | console (`nn run`, `nn dets`) | 1,024 B | `nn_camera_decode_get()`, snapshot and report in one hold |
+| param_set / param_get | console (`nn thresh`) | 1,024 B | `nn_svc_thresh_*()`, under the lease |
+
+- **The lease** is this board's ThreadX mutex with inheritance
+  (`port/plugin/plugin_lease.c`, the same implementation as the other boards').
+  Every entry into the plugin is checked by the shared entries
+  (`svc/nn/nn_active_lease.c`, `svc/plugin/plugin_run_core.c`); a caller that
+  does not hold it gets `NOT_HELD`, counted in `nn stream stats`
+  (`entry(s) refused unheld`).  Order: always the lease, then the frame lock
+  (`ltdc_lock_frame()`), then the record lock (`nncam_lock`).
+- **The draw** runs where the resident boxes always have: in the GUIX thread's
+  CAMERA_FRAME handler, between the producer's store into the view buffer and
+  the icon redraw.  `nn_panel_draw()` TRIES the lease (a busy lease is a frame
+  shown bare, counted as a miss), takes the frame lock, asks the shared
+  questions (the overlay is derived -- a stream, not a `nn run` -- and the
+  record is valid, of this session, and the plugin's), lets the plugin paint
+  into the view buffer with the CPU (`port/plugin/plugin_paint.c`, row-major
+  RGB565, no DMA2D), marks both LTDC buffers stale and releases the lock.  With
+  no plugin in force it answers NONE and the resident decoder's boxes are
+  drawn as before (Step 4c removes that fallback).
+- **The geometry**: the producer squashes the whole camera frame onto the model
+  input, so `to_frame()` multiplies by the frame size the stream attached with
+  (QVGA or QQVGA) -- the same frame the preview stores.
+- **The loader binding** (`port/plugin/plugin_run.c`) is the MPU read-back
+  under a critical section, judged by `svc/plugin/plugin_mpu_v7m.c`, and the
+  D-clean + I-invalidate of the reservation.  `test/test_plugin_mpu_f746.c`
+  holds the verdict on this board's real region set: SDRAM non-cacheable XN,
+  bank 3 WBWA XN, PRIVDEFENA -- the reservation is executable through the
+  default map -- and refuses the background map off and an XN / Device /
+  read-only region placed over it.
+- **A plugin's fault** is attributed (`pc is in plugin '<name>' +0x<off>` in the
+  RAM log) and **the board resets at once** (`src/fault_plugin.c`); under a
+  debugger it halts instead.  A fault anywhere else keeps the full UART dump
+  and the halt the IWDG resets.  `crash` is outside the reservation and behaves
+  as before.
+  [!] **The attribution is by the stacked PC, and only a PC inside the
+  reservation is the plugin's -- on purpose.**  A plugin that hands a firmware
+  function a bad argument (a rectangle to `paint_rect`, a length to
+  `nn_report_write` or `log_write_bytes`) faults with the PC in the firmware,
+  so that fault takes the ordinary path: the UART dump, then the IWDG reset.
+  The handler names where the PC is, not who caused it; the backtrace in the
+  dump (and the plugin being the one loaded) is what points back at it.
+- **The asynchronous reserve is 208 B** on this core and ThreadX port: the
+  extended exception frame (26 words + the alignment pad; PM0253 2.3.7,
+  STKALIGN reads 1) plus ThreadX's switch save (r4-r11, s16-s31, LR).  Nested
+  exceptions stack on the MSP, and FPCCR ASPEN / LSPEN (reset 1, written
+  nowhere on this board) can only shrink the frame.  Each allowance must fit
+  "thread stack - depth at call - 208 - margin" on the shallowest thread of its
+  slot; the depth is what `nn stream stats` prints (`at call`), sampled at the
+  indirect call and, for entry, in the loader's exec_ok hook.  **To be measured
+  on hardware at the Step 4b acceptance** (the values go here).
+
+#### The draw budget (provisional until measured)
+
+A plugin's draw is charged pixels and primitives (`svc/plugin/plugin_paint_budget.c`);
+the budget bounds how long the GUIX thread holds the frame lock, which the
+producer needs to store the next frame into the view buffer.  **Provisional:**
+an eighth of the frame (9,600 px at QVGA) and 64 primitives
+(`port/nn/nn_panel.c`) -- not wio-lite-ai's number.  The acceptance measures it:
+
+1. `camera stream stats` -> `slots` and the frame rate: the producer can wait
+   on the lock about `(slots - 2) x frame period` before the DCMI ring runs out
+   of free slots (the DMA owns one slot, the producer the one it is storing).
+2. Load the blazeface container, `nn stream start`, face the camera, and let it
+   run; `nn stream stats` prints `plugin  : frame lock held <n> us max by a
+   draw` -- the longest hold a plugin draw caused -- and `drew <px> max/frame
+   of <budget>`.
+3. The budget stands when the longest hold of a full-budget draw stays well
+   inside step 1's slack and the overrun rate over the 10-minute stream is not
+   above the baseline (19 overruns / 600 s, tflm, `/pinned.tflite`).  Record
+   both numbers here.
+
+#### Building this board's containers
+
+`cmake --build build/f746-tflm --target asset-blazeface` builds
+`build/f746-tflm/asset/blazeface.nnc` -- the pinned BlazeFace (the same commit
+and SHA-256 as the other boards' and this board's built-in model) with this
+board's blazeface plugin -- through every gate, and prints the receipt:
+
+```
+  asset blazeface    .../build/f746-tflm/asset/blazeface.nnc
+  file blazeface.nnc 194232 B   crc32 <CRC>
+
+  on the board:  nn model load --path /blazeface.nnc   (once the file is on the card)
+  on the PC:     copy the path above to the card's root as blazeface.nnc
+  the load:      must print crc32 <CRC> -- that is how you know the bytes
+                 that were built are the bytes that were read.
+```
+
+The destination is a FILE (`cmake/add_asset.cmake`): its fit is checked
+against `nn_tflm_stage_cap`, the object the backend's `load_region()` hands out
+as the read limit, read back out of the shipped `shell.elf`.  The CRC moves
+with the build id (the HEAD the tree was configured at), so compare with the
+receipt of the build that produced the file you copied.  The `cifar10` plugin
+is built and gated too, but no asset carries it: no CIFAR-10 model this
+backend runs is pinned in the tree (Grove's is a Vela model for the Ethos-U).
+
+Measured at Step 4b (`build/f746-tflm`): plugins blazeface text 4,092 B / bss
+4,816 B (decode 784 / draw 716 / report 728 B with c = 640), cifar10 text
+2,764 B / bss 8,852 B; the stack below a veneer derived from the image is 192 B
+(the log path) against the declared 640 B.
 
 `scripts/verify_tflite.cc` (`--target verify-model`) is this board's model gate
 for that asset build: the tree's own `VerifyModelBuffer()`, the staging

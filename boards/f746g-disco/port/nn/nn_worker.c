@@ -8,8 +8,10 @@
  * (issue #140; see nn_camera.c for the design and nn_camera_priv.h for the state).
  *
  * Everything here runs on the worker (priority 18): the thread itself, the
- * frame path's worker half (take -> nn_run() -> on_infer_done), and the
- * resident decoder's publish with the counting that goes with it.
+ * frame path's worker half (take -> nn_run() -> on_infer_done), the resident
+ * decoder's publish with the counting that goes with it, and -- with a plugin
+ * in force (issue #159) -- the plugin's decode and publish under the plugin
+ * lease.  Lease, then the record lock (nncam_lock), as everywhere.
  */
 #include <stdint.h>
 
@@ -26,6 +28,11 @@
 #include "cam_own.h"         /* the owner lifecycle (issue #72)                        */
 
 #include "stm32f7xx_hal.h"   /* HAL_RCC_GetHCLKFreq */
+
+#if defined(CONFIG_NN_BACKEND_TFLM)
+#include "nn_active.h"       /* the plugin entries (issue #159) */
+#include "plugin_lease.h"    /* the one lock into the plugin    */
+#endif
 
 #define LOG_TAG "nncam"
 #include "log.h"
@@ -113,15 +120,91 @@ int nncam_publish(void *ctx, uint32_t gen)
 	return took;
 }
 
-/* This board's counting is done in the publish, where the decoder's answer is:
- * the inference, the detections and a decoder refusal (issue #138 moved the
- * inference there from nn_run()'s return).  Nothing is left to count here. */
+#if defined(CONFIG_NN_BACKEND_TFLM)
+/*
+ * The plugin's half (issue #159; wio-lite-ai's since #110).  Called by the
+ * frame path with the plugin lease held -- nn_core_on_infer_done() checks it.
+ */
+
+/* Is a decode armed at @p gen still going to be published?  Asked UNDER THE
+ * LEASE, before the plugin rewrites its private result (issue #118). */
+int nncam_admits_hook(void *ctx, uint32_t gen)
+{
+	int ok;
+
+	(void)ctx;
+	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
+	ok = nn_det_record_admits(&nncam_rec, gen);
+	tx_mutex_put(&nncam_lock);
+	return ok;
+}
+
+/* Where a plugin's decode() is called.  Its depth is sampled inside, at the
+ * indirect call (svc/nn/nn_active_core.c). */
+int nncam_decode(void *ctx, int *n)
+{
+	int nd = nn_active_decode(nncam_model);
+
+	(void)ctx;
+	/* NN_ACTIVE_NOT_HELD: not reachable while the worker's take stands; if it
+	 * ever is, the decode did not run and nothing is published (counted by
+	 * the entry check, plugin_lease_unheld(), not as a worker error). */
+	if (nd == NN_ACTIVE_NOT_HELD)
+		return -1;
+	*n = nd;
+	return 0;
+}
+
+/*
+ * The count and the generation rule travel; the result stays with the plugin.
+ * [!] CALLED WITH THE LEASE STILL HELD: releasing it between the decode and
+ * this would let the GUIX draw pair the new private state with the old record.
+ */
+int nncam_publish_hook(void *ctx, int n, uint32_t gen)
+{
+	int took;
+
+	(void)ctx;
+	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
+	took = nn_det_record_publish_external(&nncam_rec, n, gen);
+	tx_mutex_put(&nncam_lock);
+	return took;
+}
+#endif
+
+/*
+ * This board's counting.  The RESIDENT decoder's is done in its publish, where
+ * its answer is (issue #138), so a RAW job counts nothing here.  A PLUGIN's
+ * decode is counted here, wio-lite-ai's way: a publish the record took is an
+ * inference -- unless the decoder refused it, which is an error counted apart
+ * by nn_decode_count_of() -- and one the generation rule dropped is not
+ * counted, and neither is its decode.
+ */
 void nncam_account(void *ctx, enum nn_core_done what, int n, int took)
 {
 	(void)ctx;
-	(void)what;
-	(void)n;
-	(void)took;
+	if (what != NN_CORE_DONE_DECODED || !took)
+		return;
+	/* [!] THE PLUGIN TABLE, NOT THE RESIDENT ONE (issue #159): a plugin's
+	 * BF_ERR_MODEL is a mismatch between the container's halves, counted in
+	 * model_errors -- the resident table would count it as an inference that
+	 * found nobody. */
+	switch (nn_decode_count_plugin_of(n, nncam_oneshot)) {
+	case NN_DC_MODEL:
+		nncam_error();
+		nncam_gen_model_errors++;
+		return;
+	case NN_DC_DECODER:
+		nncam_error();
+		nncam_gen_decoder_errors++;
+		return;
+	case NN_DC_NONE:
+	default:
+		break;
+	}
+	nnstat.detections = (n > 0) ? (uint32_t)n : 0u;
+	nnstat.infers++;
+	nncam_gen_infers++;
 }
 
 /* ---- inference worker ----------------------------------------------------- */
@@ -155,6 +238,23 @@ static void nncam_step(void)
 	}
 	/* Counted in the publish, once the decoder has answered (issue #138). */
 	nnstat.last_us = nn_last_cycles(nncam_model) / mhz;
+
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/*
+	 * [!] THE LEASE SPANS THE DECODE AND THE PUBLISH, taken BEFORE the slot is
+	 * looked up (issue #159, wio-lite-ai's #110).  The GUIX thread outranks
+	 * this one and nothing else separates them, so "ask the plugin, then say
+	 * what it answered" has to be one transaction.  A wait, bounded by the
+	 * lease's one bound: a wedged holder costs frames, not the worker.  The
+	 * frame path checks the hold and gives it back; with no plugin there is
+	 * nothing to hold.
+	 */
+	if (nn_active_is_plugin() && !plugin_lease_take()) {
+		nncam_error();
+		nn_core_frame_done(&nncam_frame, &nncam_frame_ops, nncam_run ? 1 : 0);
+		return;
+	}
+#endif
 
 	/*
 	 * The decode and the publish under the generation the frame was prepared

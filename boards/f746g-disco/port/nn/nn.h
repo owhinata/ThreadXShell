@@ -92,7 +92,8 @@ const struct nn_backend_info *nn_backend(void);
  * The handle is a singleton; a second open returns the same instance.
  *
  * [!] ONLY THE FIRST OPEN AFTER BOOT BUILDS ANYTHING (issue #131 P16).  That is
- * where the tflm backend adopts its built-in model; a later open -- from `nn
+ * where a backend with a model in the image (stedgeai, null) adopts it -- tflm
+ * has none since issue #159 Step 4c and opens empty; a later open -- from `nn
  * info`, `nn run` or a load -- returns the singleton as it is, empty after an
  * unload included.  The first one is serialised by a latch and does not return
  * until the build is done, so a release can never run under it.
@@ -134,8 +135,9 @@ int nn_model_present(const struct nn_model *m);
  */
 int nn_model_loaded(void);
 
-/** Whether `nn model load builtin` means anything to this backend: a model is
- *  built into the image (tflm, stedgeai, null).  0 for stedgeai_reloc. */
+/** Whether this backend has a model in the image that the first open adopts
+ *  without a load (stedgeai, null).  0 for tflm (since issue #159 Step 4c) and
+ *  stedgeai_reloc, which are empty until `nn model load --path`. */
 int nn_model_has_builtin(void);
 
 /**
@@ -155,7 +157,7 @@ uint32_t nn_last_cycles(const struct nn_model *m);
  * Usage:
  *   nn_model_load_region(&buf,&cap);   // backend's writable staging buffer
  *   ...fill buf with up to cap bytes of a .tflite read from SD...
- *   nn_model_reload(buf, len, "name"); // activate it (data==NULL => built-in)
+ *   nn_model_reload(buf, len, "name"); // activate it (data==NULL is refused)
  * The caller MUST serialize these against inference: stop any live stream and
  * hold nn_session_try_acquire(), since the interpreter/arena/model are singletons.
  * nn_model_reload is transactional -- on failure the previous model stays active,
@@ -191,8 +193,7 @@ int nn_model_reload(const void *data, uint32_t len, const char *name,
 /**
  * Unload: the backend keeps its singleton open with NO model in it (issue #131
  * P16).  Nothing comes back by itself afterwards -- not on the next open, not
- * from `nn info` or `nn run`; the built-in model returns only through an
- * explicit `nn model load builtin`.  Same serialization as nn_model_reload().
+ * from `nn info` or `nn run`; only a later `nn model load` brings a model.  Same serialization as nn_model_reload().
  * 0 on success, -2 when the backend cannot swap models (null, stedgeai).
  */
 int nn_model_release(void);

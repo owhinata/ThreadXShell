@@ -164,10 +164,7 @@ static struct {
 static int st_init(void) { return 0; }
 static int st_open(void **impl)
 {
-	if (!stub.adopted) {
-		stub.adopted = 1;
-		stub.has     = 1;
-	}
+	stub.adopted = 1;   /* nothing in the image (issue #159 Step 4c) */
 	*impl = &stub;
 	return 0;
 }
@@ -220,7 +217,7 @@ const struct nn_backend_vt nn_backend_vt_selected = {
 	.model_name = st_name, .in_count = st_in_count, .out_count = st_in_count,
 	.input = st_tensor, .output = st_tensor, .activations_bytes = st_acts,
 	.run = st_run, .load_region = st_region, .reload = st_reload,
-	.release = st_release, .arena_reserved = 524288u, .has_builtin = 1u,
+	.release = st_release, .arena_reserved = 524288u, .has_builtin = 0u,
 };
 
 /* ---- the file on the card ------------------------------------------------ */
@@ -403,7 +400,8 @@ int main(void)
 	uint32_t crc, rl;
 	struct nn_svc_info i;
 
-	nn_svc_info(&i);   /* boot: the built-in model */
+	nn_svc_info(&i);   /* boot: no model (issue #159 Step 4c) */
+	assert(i.model_active == 0u);
 	assert(strstr(info_extra(), "plugin  : (none) -- reservation") != NULL);
 
 	/* A bare model: the old path, slot base and the whole file. */

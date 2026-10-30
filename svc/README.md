@@ -12,7 +12,7 @@ The files are grouped by the feature they serve (issue #153):
 | Directory | What it holds |
 |---|---|
 | `svc/` | Generic services any layer uses: the formatter (`fmt`), CRC-32 (`crc32`), YMODEM (`ymodem`) and small graphics helpers (`gfx_rot`, `rect_geom`). |
-| `svc/nn/` | The `nn` command's contract and shared core (`nn_*`, described below), the neutral tensor descriptor (`tensor.h`) and the BlazeFace decoder (`blazeface`). |
+| `svc/nn/` | The `nn` command's contract and shared core (`nn_*`, described below), the neutral tensor descriptor (`tensor.h`) and the BlazeFace decoder (`blazeface`), which reaches every board only inside a plugin container (no board links it into its firmware since issue #159 Step 4c). |
 | `svc/plugin/` | The plugin container's ABI, loader, executor and the checks around them (`plugin_*`, below). |
 | `svc/camera/` | The camera frame pipeline (`frame`, `frame_pipeline`), the camera stream's holder table, sink steps and stream generations (`cam_holders`, `cam_step`, `cam_gen`, below) and the `camera` command's contract (`camera_svc`, below). |
 
@@ -241,7 +241,7 @@ relative to `svc/`.
 | `nn/nn_active_core` | Whether a plugin decodes, and every call into its decoder slots. |
 | `nn/nn_active_lease` | The lease-checked entries above that branch, for a board whose model is a `struct nn_model` (wio-lite-ai, f746g-disco); the board supplies its facts (`nn_active_facts`). |
 | `nn/nn_report` | The bounded sink that captures a plugin's account of its own result. |
-| `nn/nn_top` | The top classes of an output tensor, taken on the thread that ran the inference. |
+| `nn/nn_top` | The top classes of an output tensor, taken on the thread that ran the inference.  No board links it since f746g-disco's resident decoder went (issue #159 Step 4c); host-tested only.  The carriers are still there with no producer: `nn_det_record_publish()`'s top-5 (`NN_EXTRA_TOP`, issue #121) and the `nn run` / `nn dets` printing of it in `shell/cmds/cmd_nn.c`, and no firmware calls `nn_det_record_publish()` (the caller-boxes publish) either. |
 | `plugin/plugin_abi.h` | The wire ABI between the firmware and a plugin shipped with its model. |
 | `plugin/plugin_target.h` | The plugin target word this translation unit is compiled for. |
 | `plugin/plugin_load` | Container and manifest validation; returns offsets, never a callable pointer. |

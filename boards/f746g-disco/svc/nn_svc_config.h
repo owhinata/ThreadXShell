@@ -27,13 +27,11 @@
  *  whole-file read the shared command passes down (see nn_svc.h). */
 #define NN_SVC_HAS_MODEL_PATH  1
 #endif
-/** ...or the model built into the image -- which only `tflm` has among the two
- *  that can load.  `stedgeai_reloc` is SD-only and refuses `builtin` (issue
- *  #131 P16), so its usage does not list it.  These are the sources `nn model
- *  load` lists here, and the only ones the adapter accepts. */
-#if defined(CONFIG_NN_BACKEND_TFLM)
-#define NN_SVC_HAS_MODEL_BUILTIN 1
-#endif
+/* No NN_SVC_HAS_MODEL_BUILTIN: since issue #159 Step 4c no build of this board
+ * carries a model it could adopt by name -- tflm loads from the SD card only,
+ * like stedgeai_reloc -- so `nn model load builtin` is refused and the usage
+ * does not list it.  (null / stedgeai still open their own stub / generated
+ * model without a load; that is has_builtin in nn_backend.h, not a source.) */
 
 /** One-shot capture and infer.  The camera is on the DCMI header. */
 #define NN_SVC_HAS_CAMERA      1

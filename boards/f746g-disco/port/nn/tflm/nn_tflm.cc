@@ -10,10 +10,11 @@
  * Bridges a TFLM MicroInterpreter to the backend-agnostic nn vtable (nn_backend.h).
  * Compiled only when CONFIG_NN_BACKEND=tflm, into the `tflm` static lib alongside
  * the tflite-micro tree fetched + generated at CMake configure time
- * (cmake/tflite-micro.cmake).  Runs the built-in **BlazeFace-front 128 int8**
- * face-detection model (owhinata/stm32f746g-disco#88), and -- because TFLM interprets any
- * .tflite flatbuffer in RAM -- also a model loaded at runtime from the microSD card
- * (owhinata/stm32f746g-disco#89 P2).
+ * (cmake/tflite-micro.cmake).  Runs a model loaded at runtime from the microSD
+ * card (owhinata/stm32f746g-disco#89 P2) -- TFLM interprets any .tflite
+ * flatbuffer in RAM -- bare, or as the model section of a plugin container
+ * (issue #159).  There is no model in the image since issue #159 Step 4c (the
+ * BlazeFace that used to be built in is the `asset-blazeface` container now).
  *
  * Runtime model swap (owhinata/stm32f746g-disco#89): TFLM's op set is fixed at compile time
  * by the resolver, so this backend registers a broad common-vision op SUPERSET (23 ops)
@@ -23,14 +24,11 @@
  * referencing, and reload() is transactional -- on any failure it rebuilds the
  * previous (known-good) model and reports it.
  *
- * EMPTY, AND WHEN THE BUILT-IN COMES BACK (issue #131 P16).  The backend can hold
- * no model: zero tensors, the name "(none)" -- after `nn model unload`
- * (release()), or after a refused load that had nothing to restore.  The built-in
- * model is adopted implicitly exactly ONCE, by the first open() after boot
- * (g_adopted); after that only an explicit reload(NULL) -- `nn model load
- * builtin` -- brings it back.  An open, an `nn info` or an `nn run` on an empty
- * backend builds nothing.  This used to revert to the built-in model on unload
- * and on any reopen, so `nn model unload` could not empty the board.
+ * EMPTY (issue #131 P16).  The backend can hold no model: zero tensors, the name
+ * "(none)" -- from boot until the first `nn model load --path` (issue #159 Step
+ * 4c: there is no built-in model to adopt), after `nn model unload`
+ * (release()), or after a refused load that had nothing to restore.  An open,
+ * an `nn info` or an `nn run` on an empty backend builds nothing.
  *
  * The interpreter is constructed lazily in open() (placement-new into a static
  * buffer, so no global ctor runs before SDRAM/clock are up, and the heap is never
@@ -43,7 +41,6 @@
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/schema/schema_generated.h"
-#include "blazeface_model_data.h"        /* g_blazeface_model_data[/_size] (generated) */
 
 #include "nn.h"
 #include "nn_backend.h"
@@ -67,10 +64,10 @@ namespace {
 /* Activation arena in .sdram.ai (bank3).  BlazeFace's activations measured
  * ~470 KB; 512 KB is a documented reservation with headroom -- the true figure is
  * reported by arena_used_bytes() (see tflm_bk_acts_bytes).  bank3 is 2 MB and also
- * holds the 2x512 KB SD model slots below and the decoder's scratch; the camera
+ * holds the 2x512 KB SD model slots below; the camera
  * staging that used to sit here (2x192 KB) went with issue #130, when the camera
  * producer started writing the input tensor -- which is in THIS arena -- directly.
- * 512 + 1024 + ~2 = ~1538 KB < 2 MB.  The .sdram.ai.model exec split is reloc-only, so tflm gets the
+ * 512 + 1024 = 1536 KB < 2 MB.  The .sdram.ai.model exec split is reloc-only, so tflm gets the
  * FULL 2 MB of bank3 (owhinata/stm32f746g-disco#95); the linker ASSERT enforces the 2 MB
  * fit. */
 constexpr int kArenaSize = 512 * 1024;
@@ -80,7 +77,7 @@ alignas(32) uint8_t g_arena[kArenaSize] __attribute__((section(".sdram.ai")));
    .tflite never
  * overwrites the flatbuffer the live interpreter is still reading.  16-aligned for
  * tflite::GetModel().  g_sd_slot names the slot holding the ACTIVE model, or -1
- * when the built-in model is active. */
+ * when there is none. */
 #ifndef NN_TFLM_SD_MODEL_MAX
 #define NN_TFLM_SD_MODEL_MAX (512u * 1024u)
 #endif
@@ -108,18 +105,11 @@ tflm_model g_tm;
 char g_model_name[64];
 
 /* The active flatbuffer + its length, or nullptr / 0 when nothing is loaded.
- * The first open() points it at the built-in BlazeFace model; reload() redirects
- * it to an SD slot or back to the built-in one, release() clears it. */
+ * reload() points it into an SD slot, release() clears it. */
 const void *g_active_model = nullptr;
 uint32_t    g_active_len   = 0u;
 
-/* The first open() has run, and with it the one implicit adoption of the
- * built-in model (issue #131 P16).  Never cleared. */
-bool g_adopted = false;
-
 tflite::MicroInterpreter *g_interp = nullptr;
-
-const char *const kBuiltinName = "blazeface_front_128 (tflm)";
 
 uint8_t map_dtype(TfLiteType t)
 {
@@ -147,24 +137,17 @@ void fill_tensor(struct nn_tensor *nt, const TfLiteTensor *tt)
 }
 
 /* Copy a model display name into g_model_name (backend-owned, so `nn info` never
- * holds a dangling pointer into argv/path).  slot<0 => the built-in name; else
- * "sd:<name>". */
-void set_model_name(const char *name, int slot)
+ * holds a dangling pointer into argv/path): "sd:<name>". */
+void set_model_name(const char *name)
 {
 	const int cap = (int)sizeof(g_model_name) - 1;
 	int n = 0;
 
-	if (slot < 0) {
-		for (const char *s = kBuiltinName; *s && n < cap; s++)
+	for (const char *s = "sd:"; *s && n < cap; s++)
+		g_model_name[n++] = *s;
+	if (name)
+		for (const char *s = name; *s && n < cap; s++)
 			g_model_name[n++] = *s;
-	} else {
-		const char *pfx = "sd:";
-		for (const char *s = pfx; *s && n < cap; s++)
-			g_model_name[n++] = *s;
-		if (name)
-			for (const char *s = name; *s && n < cap; s++)
-				g_model_name[n++] = *s;
-	}
 	g_model_name[n] = '\0';
 	g_tm.name = g_model_name;
 }
@@ -297,32 +280,17 @@ static int tflm_bk_init(void)
 }
 
 /*
- * [!] THE BUILT-IN MODEL IS ADOPTED HERE ONCE, ON THE FIRST OPEN AFTER BOOT, and
- * never again (issue #131 P16).  g_adopted is set before the build, so a build
- * that fails is reported to that first caller and the next open finds the
- * backend EMPTY instead of trying again -- every later open, from `nn info`
- * on another console included, builds nothing.  nn.c's latch keeps a second
- * open out until this one has returned.
+ * [!] AN OPEN BUILDS NOTHING (issue #131 P16; since issue #159 Step 4c also the
+ * first one after boot, which used to adopt the built-in model).  The backend
+ * is empty until a reload() succeeds, so every open -- from `nn info` on
+ * another console included -- only publishes what is there.
  */
 static int tflm_bk_open(void **impl_out)
 {
 	if (g_tm.open) { *impl_out = &g_tm; return 0; }
 
-	if (!g_adopted) {
-		g_adopted = true;
-		int rc = build_interp(g_blazeface_model_data,
-		                      g_blazeface_model_data_size);
-		if (rc != 0) {
-			publish_empty();             /* the next open finds it empty */
-			return rc;
-		}
-		g_active_model = g_blazeface_model_data;
-		g_active_len   = g_blazeface_model_data_size;
-		g_sd_slot      = -1;
-		set_model_name(nullptr, -1);         /* the built-in name */
-	} else if (g_interp == nullptr) {
+	if (g_interp == nullptr)
 		publish_empty();
-	}
 	g_tm.open = true;
 	*impl_out = &g_tm;
 	return 0;
@@ -370,8 +338,9 @@ static int tflm_bk_load_region(void **buf, uint32_t *cap)
 	return 0;
 }
 
-/* Transactional model swap.  data==NULL adopts the built-in model; otherwise
- * data must lie wholly inside one of the two SD slots and start on
+/* Transactional model swap.  data==NULL is refused (there is no built-in model
+ * since issue #159 Step 4c; the shared order never asks for one here).  data
+ * must lie wholly inside one of the two SD slots and start on
  * NN_MODEL_ALIGN (nn.h) -- a bare .tflite at the slot base load_region() handed
  * out, or a container's model section in place (issue #159).
  * On failure the previous known-good model is rebuilt and reported -- or, when
@@ -388,9 +357,10 @@ static int tflm_bk_reload(const void *data, uint32_t len, const char *name,
 	int         new_slot;
 
 	if (data == NULL) {
-		new_model = g_blazeface_model_data;
-		new_slot  = -1;
-	} else {
+		*impl_out = &g_tm;
+		return -10;
+	}
+	{
 		/*
 		 * [!] A SLOT IS IDENTIFIED BY CONTAINMENT, NOT BY EQUALITY (issue #159,
 		 * wio-lite-ai's since its issue #108).  A container's model section is
@@ -422,14 +392,14 @@ static int tflm_bk_reload(const void *data, uint32_t len, const char *name,
 		new_model = data;
 	}
 
-	uint32_t new_len = (data == NULL) ? g_blazeface_model_data_size : len;
+	uint32_t new_len = len;
 	int rc = build_interp(new_model, new_len);
 	if (rc == 0) {
 		/* Atomic publish: only after build + I/O fill succeeded. */
 		g_active_model = new_model;
 		g_active_len   = new_len;
 		g_sd_slot      = new_slot;
-		set_model_name(name, new_slot);
+		set_model_name(name);
 		g_tm.open = true;
 		*impl_out = &g_tm;
 		return 0;
@@ -447,7 +417,7 @@ static int tflm_bk_reload(const void *data, uint32_t len, const char *name,
 	}
 
 	/* Restore the previous (known-good) model.  Its flatbuffer is intact
-	 * (double-buffered slots / Flash built-in), so this should succeed.
+	 * (double-buffered slots), so this should succeed.
 	 * g_model_name still holds the old name (only success paths overwrite it), so
 	 * no re-derive -- just re-point g_tm.name after build_interp refilled g_tm. */
 	if (build_interp(old_model, old_len) == 0) {
@@ -462,8 +432,8 @@ static int tflm_bk_reload(const void *data, uint32_t len, const char *name,
 
 	/* Catastrophic: even the previous model could not be rebuilt.  Empty, and
 	 * open (issue #131 P16): this used to close the handle, and the next open of
-	 * a closed backend adopted the built-in model on its own -- a model nobody
-	 * loaded, and one a racing `nn info` could install. */
+	 * a closed backend adopted the then built-in model on its own -- a model
+	 * nobody loaded, and one a racing `nn info` could install. */
 	g_active_model = nullptr;
 	g_active_len   = 0u;
 	g_sd_slot      = -1;
@@ -499,7 +469,7 @@ static int tflm_bk_run(void *impl)
 	return (g_interp && g_interp->Invoke() == kTfLiteOk) ? 0 : -1;
 }
 
-static const struct nn_backend_info g_info = { "tflm", "tflite-micro (BlazeFace)" };
+static const struct nn_backend_info g_info = { "tflm", "tflite-micro" };
 
 /* Positional init (C++17: no designated initializers).  Field order MUST match
  * struct nn_backend_vt in nn_backend.h:
@@ -522,7 +492,7 @@ const struct nn_backend_vt nn_backend_vt_selected = {
 	tflm_bk_reload,
 	tflm_bk_release,
 	(uint32_t)kArenaSize,
-	1u,                                  /* the built-in BlazeFace */
+	0u,                                  /* SD-only (issue #159 Step 4c) */
 };
 
 }  /* extern "C" */

@@ -65,9 +65,6 @@ def base_listing():
         (0x080BC854, "r", "__cli_root_cmds_start"),
         (0x080BC9D4, "r", "__cli_cmd_nn"),
         (0x080BCB24, "r", "__cli_root_cmds_end"),
-        (0x200260F0, "b", "nn_dec"),
-        (0x200260EC, "b", "nn_dec_ready"),
-        (0xC0660000, "b", "nn_dec_scratch"),
         (0x20048000, "B", "__plugin_start"),
         (0x20050000, "B", "__plugin_end"),
         (HEAP_FLOOR, "B", "end"),
@@ -174,8 +171,9 @@ def main():
     null = backend_requires("null")
     tflm_args = [a for n in tflm for a in ("--require-sdram-ai", n)]
     null_args = [a for n in null for a in ("--require-sdram-ai", n)]
-    common = ["--require-sdram-ai", "nn_dec_scratch",
-              "--forbid-sdram", "nn_dec", "--forbid-sdram", "nn_dec_ready"]
+    # The resident decoder's unconditional requires went with it (issue #159
+    # Step 4c); what is left is per backend.
+    common = []
 
     failures = []
 
@@ -242,6 +240,30 @@ def main():
         expect("null-control", null_syms, common + null_args, 0, "OK")
         expect("null-image-under-tflm-requires", null_syms, common + tflm_args, 1,
                "no such object in the image")
+
+        # [!] THE stedgeai BACKENDS NAME THEIR OWN RESIDENTS (issue #159 Step
+        # 4c).  Until then the resident decoder's unconditional require was the
+        # only bank3 check those builds had, and an empty .sdram.ai passes every
+        # linker ASSERT.  Read from board.cmake like the others, so a block that
+        # stops naming them fails here (backend_requires exits on none).
+        for backend in ("stedgeai", "stedgeai_reloc"):
+            names = backend_requires(backend)
+            args = [a for n in names for a in ("--require-sdram-ai", n)]
+            print(f"run_layout_tests: {backend} residents from board.cmake: "
+                  f"{', '.join(names)}")
+            img = base_listing() + [(BANK3 + 0x10000 * i, "b", n)
+                                    for i, n in enumerate(names)]
+            expect(f"{backend}-control", img, common + args, 0, "OK")
+            for name in names:
+                expect(f"{backend}-{name}-absent",
+                       [x for x in img if x[2] != name], common + args, 1,
+                       f"{name}: no such object in the image")
+                expect(f"{backend}-{name}-in-sram",
+                       [x for x in img if x[2] != name] +
+                       [(0x20030000, "b", name)], common + args, 1,
+                       f"{name}: {name} is at 0x20030000, outside")
+            expect(f"null-image-under-{backend}-requires", null_syms,
+                   common + args, 1, "no such object in the image")
 
         # --- the .plugin reservation (issue #159) ----------------------------
         # Every case below differs from tflm-control in ONE fact and is

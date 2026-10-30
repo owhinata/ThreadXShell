@@ -164,7 +164,7 @@ static int cmd_free(struct cli_instance *sh, int argc, char **argv)
 	             sram_used, ".data/.bss/.sram1_dma + heap");
 	print_region(sh, "Plugin", sym(__plugin_start),
 	             sym(__plugin_end) - sym(__plugin_start), 0u,
-	             "prelinked plugin image; not heap (none loaded: #159 4a)");
+	             "prelinked plugin image; not heap (`nn info` names the one loaded)");
 	print_region(sh, "SDRAM", SDRAM_ORIGIN, SDRAM_LENGTH, sdram_used,
 	             ".sdram fixed/cam/eth/ai/model (banks0-3)");
 

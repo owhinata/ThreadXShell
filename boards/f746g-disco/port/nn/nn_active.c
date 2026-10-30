@@ -27,7 +27,7 @@
 
 #include "nn_active_core.h"
 #include "nn_camera.h"       /* nn_camera_note_depth_at(), the frame geometry */
-#include "nn_decoder.h"      /* nn_decoder_desc(): nn_tensor -> tensor_desc   */
+#include "nn_desc.h"         /* nn_desc_of(): nn_tensor -> tensor_desc        */
 #include "plugin_run_core.h"
 
 /* ---- tensors ------------------------------------------------------------- */
@@ -36,7 +36,7 @@
  * The loop over the outputs -- the count, the cap, a hole read as a zeroed
  * descriptor -- is the shared entries' (svc/nn/nn_active_lease.c); what is this
  * board's is reading its own model handle and translating one tensor, which is
- * the translation `nn out` and `nn info` already use (nn_decoder_desc()): a
+ * the translation `nn out` and `nn info` already use (nn_desc_of()): a
  * second one could disagree with them about what a tensor is.
  */
 _Static_assert(NN_MAX_IO <= NN_ACTIVE_MAX_OUTPUTS,
@@ -56,7 +56,7 @@ static int nn_active_output_desc(struct nn_model *m, unsigned i,
 
 	if (t == NULL)
 		return -1;
-	nn_decoder_desc(d, t);
+	nn_desc_of(d, t);
 	return 0;
 }
 
@@ -91,11 +91,10 @@ static const struct nn_active_board nn_active_board = {
 	.note   = nn_active_note,
 	/*
 	 * [!] NOBODY IS GOING TO READ THEM, SO NOBODY OBJECTS -- wio-lite-ai's
-	 * answer (issue #116), and the one Step 4c needs here: this is the
-	 * admission `nn run` and `nn stream start` pass through, and a bare model
-	 * still runs and reports its tensors.  While Step 4b keeps the resident
-	 * decoder, the admission asks this only with a plugin in force, so the
-	 * answer is not reached yet.
+	 * answer (issue #116), and this board's since issue #159 Step 4c: this is
+	 * the admission `nn run` and `nn stream start` pass through, and a bare
+	 * model still runs and reports its tensors.  What stops a stream with
+	 * nothing to draw is nn_active_can_draw(), alone.
 	 */
 	.shapes_without_plugin = 1,
 };

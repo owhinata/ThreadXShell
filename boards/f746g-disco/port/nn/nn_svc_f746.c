@@ -35,7 +35,7 @@
 #include "fmt.h"
 #include "nn.h"
 #include "nn_camera.h"
-#include "nn_decoder.h"
+#include "nn_desc.h"
 #include "plugin_target.h"   /* the target word this build provides (#159) */
 #if defined(CONFIG_NN_BACKEND_TFLM)
 #include "nn_active.h"       /* the plugin entries (#159 Step 4b)          */
@@ -171,7 +171,7 @@ int nn_svc_output(unsigned index, struct tensor_desc *out)
 	t = nn_output(m, (int)index);
 	if (t == NULL)
 		return NN_SVC_ERR_ARG;
-	nn_decoder_desc(out, t);
+	nn_desc_of(out, t);
 	return NN_SVC_OK;
 }
 
@@ -186,7 +186,7 @@ int nn_svc_input(struct tensor_desc *out)
 	t = nn_input(m, 0);
 	if (t == NULL)
 		return NN_SVC_ERR_ARG;
-	nn_decoder_desc(out, t);
+	nn_desc_of(out, t);
 	return NN_SVC_OK;
 }
 
@@ -211,8 +211,8 @@ int nn_svc_input(struct tensor_desc *out)
 
 /*
  * nn_camera_start()'s refusal, in the words and the status both `nn run` and
- * `nn stream start` give.  The plugin's three (issue #159 Step 4b) are
- * wio-lite-ai's words and statuses.
+ * `nn stream start` give.  The decoder's three (issue #159) are wio-lite-ai's
+ * words; NODRAW stays STATE here, where wio-lite-ai says HW.
  */
 static void nn_start_refusal(struct nn_op_result *res, int rc)
 {
@@ -232,10 +232,16 @@ static void nn_start_refusal(struct nn_op_result *res, int rc)
 		              "(`nn info`)");
 		status = NN_SVC_ERR_STATE;
 		break;
+	/*
+	 * [!] IT ALSO COVERS "THERE IS NO DECODER AT ALL" (Step 4c, wio-lite-ai's
+	 * #116 words): a bare model reaches the same nn_active_can_draw() == 0
+	 * as a plugin with no draw() slot, so the sentence names both and points
+	 * at `nn info`, which knows which it is.
+	 */
 	case NNCAM_ERR_NODRAW:
-		nn_detail_set("nothing would annotate a live preview: the loaded "
-		              "plugin draws nothing (`nn info`); `nn run` still "
-		              "works");
+		nn_detail_set("nothing would annotate a live preview: no decoder "
+		              "is loaded, or the one that is draws nothing (`nn "
+		              "info`); `nn run` still works");
 		status = NN_SVC_ERR_STATE;
 		break;
 	case NNCAM_ERR_DECBUSY:
@@ -263,9 +269,9 @@ static void nn_snap_of(const struct nn_camera_decode *dec,
 	snap->valid      = dec->valid;
 	snap->ndet       = dec->ndet;
 	snap->res        = dec->res;
-	/* [!] CARRIED, NOT STATED, since issue #159 Step 4b: the resident decoder
-	 * publishes boxes into the caller's array, and a loaded plugin publishes a
-	 * count and keeps its result -- the record says which, in the same
+	/* [!] CARRIED, NOT STATED, since issue #159 Step 4b: a loaded plugin
+	 * publishes a count and keeps its result, and with none the worker
+	 * publishes the raw tensors -- the record says which, in the same
 	 * snapshot. */
 	snap->kind       = dec->kind;
 	snap->reportable = dec->reportable;
@@ -319,8 +325,7 @@ static void nn_core_counts_of(struct nn_core_raw *raw, void *keep)
 	raw->skipped   = st.gen_drops;
 	raw->infers    = st.gen_infers;
 	raw->errors    = st.gen_errors;
-	/* The resident decoder's BF_ERR_MODEL is a result (D6) and never counted;
-	 * a loaded plugin's is a mismatch and is (issue #159). */
+	/* A plugin's BF_ERR_MODEL is a mismatch (issue #159, nn_decode_count.h). */
 	raw->model_errors   = st.gen_model_errors;
 	raw->decoder_errors = st.gen_decoder_errors;
 	raw->last_us   = st.last_us;
@@ -1056,39 +1061,30 @@ int nn_svc_box_to_frame(const struct bf_det *in, struct bf_det *out)
 
 int nn_svc_thresh_get(unsigned *milli)
 {
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	int r;
+#endif
+
 	if (milli == NULL)
 		return NN_SVC_ERR_ARG;
+	*milli = NN_SVC_THRESH_NONE;
 #if defined(CONFIG_NN_BACKEND_TFLM)
-	{
-		int r;
-
-		/*
-		 * [!] THE LEASE FIRST, AND THE QUESTION "IS THERE A PLUGIN" UNDER IT
-		 * (issue #159 Step 4b review).  Asked before the lease, a `nn model
-		 * load` on the other console could start a plugin in between, and this
-		 * would read the resident decoder's threshold and say OK while the
-		 * plugin's is the one in force.  Under the lease no load or unload can
-		 * change which decoder that is.  A loaded plugin owns its own
-		 * threshold, read through the shared entry; with none the resident
-		 * decoder answers, as before (Step 4c removes it).  No lease is BUSY,
-		 * not "none" (issue #122 P6).
-		 */
-		*milli = NN_SVC_THRESH_NONE;
-		if (!plugin_lease_take())
-			return NN_SVC_ERR_BUSY;
-		if (nn_active_is_plugin()) {
-			r = nn_active_get_thresh_milli(milli);
-			plugin_lease_give();
-			return r == NN_ACTIVE_THRESH_OK ? NN_SVC_OK : NN_SVC_ERR_BUSY;
-		}
-		*milli = nn_decoder_get_thresh_milli();
-		plugin_lease_give();
-		return NN_SVC_OK;
-	}
+	/*
+	 * [!] UNDER THE LEASE (issue #159, wio-lite-ai's #110).  This reaches a
+	 * plugin's param_get, which reads plugin state that a decode may be
+	 * rewriting and that a concurrent `nn model load` may be REPLACING -- and
+	 * this command takes no NN session.  With no plugin the shared entry
+	 * answers NONE: there is no resident decoder to hold a threshold since
+	 * Step 4c.  No lease is BUSY, not "none" (issue #122 P6).
+	 */
+	if (!plugin_lease_take())
+		return NN_SVC_ERR_BUSY;
+	r = nn_active_get_thresh_milli(milli);
+	plugin_lease_give();
+	return r == NN_ACTIVE_THRESH_OK ? NN_SVC_OK : NN_SVC_ERR_BUSY;
 #else
-	/* The resident decoder's threshold is a plain value behind no lock, so
-	 * there is nothing to be busy on here. */
-	*milli = nn_decoder_get_thresh_milli();
+	/* [!] NO PLUGIN MECHANISM AND NO DECODER (wio-lite-ai's issue #116): the
+	 * same answer the tflm build gives with none loaded. */
 	return NN_SVC_OK;
 #endif
 }
@@ -1098,22 +1094,15 @@ int nn_svc_thresh_set(unsigned milli)
 #if defined(CONFIG_NN_BACKEND_TFLM)
 	int r;
 
-	/* [!] The lease first, and the plugin question under it -- see
-	 * nn_svc_thresh_get(). */
 	if (!plugin_lease_take())
 		return NN_SVC_ERR_BUSY;
-	if (!nn_active_is_plugin()) {
-		r = nn_decoder_set_thresh_milli(milli);
-		plugin_lease_give();
-		return (r == BF_OK) ? NN_SVC_OK : NN_SVC_ERR_ARG;
-	}
 	r = nn_active_set_thresh_milli(milli);
 	plugin_lease_give();
 	switch (r) {
 	case NN_ACTIVE_THRESH_OK:
 		return NN_SVC_OK;
 	case NN_ACTIVE_THRESH_NO_DECODER:
-		/* the plugin holds no threshold: a state, not a bad value */
+		/* nothing holds a threshold: a state, not a bad value */
 		return NN_SVC_ERR_STATE;
 	case NN_ACTIVE_NOT_HELD:
 		return NN_SVC_ERR_BUSY;
@@ -1121,8 +1110,10 @@ int nn_svc_thresh_set(unsigned milli)
 		return NN_SVC_ERR_ARG;
 	}
 #else
-	return (nn_decoder_set_thresh_milli(milli) == BF_OK) ? NN_SVC_OK
-	                                                     : NN_SVC_ERR_ARG;
+	/* Nothing holds one here either -- and "there is nothing to set" is not
+	 * "that value is out of range" (wio-lite-ai's issue #116). */
+	(void)milli;
+	return NN_SVC_ERR_STATE;
 #endif
 }
 

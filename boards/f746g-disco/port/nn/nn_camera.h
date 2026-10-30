@@ -33,7 +33,7 @@
 #include <stdint.h>
 
 #include "camera.h"            /* enum camera_res */
-#include "blazeface.h"  /* struct bf_det */
+#include "blazeface.h"  /* struct bf_det / bf_result -- the vocabulary, not the decoder */
 #include "nn_det_record.h" /* struct nn_result_extra (issue #121) */
 #include "nn_report.h"     /* struct nn_report_capture (issue #159) */
 
@@ -61,13 +61,11 @@ struct nn_camera_stats {
 	uint32_t gen_infers;   /**< ...and the same for these three, or the four   */
 	uint32_t gen_errors;   /**< numbers describe two different periods and do  */
 	uint32_t gen_drops;    /**< not add up (issue #99).                        */
-	/** Of @ref gen_errors: decodes the resident decoder refused as a wiring
-	 *  fault (issue #130 step 6c).  BF_ERR_MODEL is not one -- see
-	 *  nn_decode_count.h. */
+	/** Of @ref gen_errors: decodes a plugin refused as a wiring fault (issue
+	 *  #130 step 6c) -- see nn_decode_count.h. */
 	uint32_t gen_decoder_errors;
 	/** Of @ref gen_errors: a loaded plugin's BF_ERR_MODEL -- the container's
-	 *  model and decoder disagree (issue #159).  The resident decoder's is a
-	 *  result, never counted here. */
+	 *  model and decoder disagree (issue #159). */
 	uint32_t gen_model_errors;
 	/**
 	 * How much of each thread's stack was already spent where a plugin is
@@ -113,12 +111,13 @@ void nn_camera_note_depth_at(enum nn_camera_site site, uintptr_t sp);
 void nn_camera_frame_geom(uint16_t *w, uint16_t *h);
 
 /*
- * nn_camera_start()'s refusals when a plugin is in force (issue #159; the same
- * three questions, and the same values, as wio-lite-ai's).  Outside the -2..-10
- * the start already returns, and apart from NN_ERR_SCRATCH_HELD (-50).
+ * nn_camera_start()'s refusals about the decoder (issue #159; the same three
+ * questions, and the same values, as wio-lite-ai's).  Outside the -2..-10 the
+ * start already returns, and apart from NN_ERR_SCRATCH_HELD (-50).  NODRAW is
+ * also a stream with no plugin at all (Step 4c): nothing would draw.
  */
 #define NNCAM_ERR_SHAPES  (-12) /**< the loaded decoder cannot read these outputs  */
-#define NNCAM_ERR_NODRAW  (-13) /**< a stream was asked for; the plugin draws none */
+#define NNCAM_ERR_NODRAW  (-13) /**< a stream was asked for; nothing draws          */
 #define NNCAM_ERR_DECBUSY (-14) /**< the decoder could not be held still to ask it */
 
 /** The nn step of the camera sink (port/camera/cam_sink.h, issue #142).
@@ -137,8 +136,8 @@ extern struct cam_sink_step nncam_step;
  * sink, -3 model, -4 geometry, -5 objects, -6 nn session busy, -9 the camera is
  * not streaming RGB565 / its mode cannot stream RGB565 (issue #142 D3), -10 the
  * camera could not be held or started, NN_ERR_SCRATCH_HELD `sdram test` holds
- * .sdram.ai -- retryable, issue #152; with a plugin in force NNCAM_ERR_SHAPES /
- * _NODRAW / _DECBUSY, issue #159).  Holds the camera open (issue #142): joins
+ * .sdram.ai -- retryable, issue #152; NNCAM_ERR_SHAPES / _NODRAW / _DECBUSY,
+ * issue #159 -- _NODRAW for a stream with no plugin too).  Holds the camera open (issue #142): joins
  * a running stream, or starts it holding the operator's place too.
  * @p oneshot is non-zero for `nn run`'s session, whose decodes are not counted
  * in the stream's errors (issue #130 step 6c).
@@ -171,10 +170,6 @@ bool nn_camera_overlay(void);
 /** Snapshot current stats (any time). */
 void nn_camera_stats_get(struct nn_camera_stats *out);
 
-/** Copy the latest detections OF THE SESSION IN FORCE into @p out[0..max);
- *  returns the count copied (issue #118: a stopped session's are not). */
-int nn_camera_dets_get(struct bf_det *out, int max);
-
 /**
  * One decode's boxes and the diagnostics that belong to them.
  *
@@ -195,8 +190,8 @@ struct nn_camera_decode {
 	uint8_t          current;   /**< published in the session in force        */
 	uint32_t         accepted;  /**< publishes the record has ever taken      */
 	uint32_t         epoch;     /**< moves when a model change clears it      */
-	/** Whose result it is (issue #159): the resident decoder's boxes, or a
-	 *  plugin's -- which keeps its own result and is asked to report it. */
+	/** Whose result it is (issue #159): the raw tensors nobody interpreted,
+	 *  or a plugin's -- which keeps its own result and is asked to report it. */
 	uint8_t          kind;
 	uint8_t          reportable;  /**< see nn_det_record.h                   */
 };
@@ -214,7 +209,7 @@ void nn_camera_record_invalidate(void);
  * @param rep   optional; with a plugin in force, its account of THIS result,
  *              taken under the plugin lease in the same hold as the snapshot
  *              (issue #159; wio-lite-ai's since #110).  Left alone otherwise:
- *              the caller states NN_REPORT_NONE for the resident decoder.
+ *              the caller states NN_REPORT_NONE.
  * @param ext   optional; the classes the result was published with, for a
  *              model the decoder did not recognise (issue #121)
  * @return non-zero if a snapshot was taken (zero before the first attach, when

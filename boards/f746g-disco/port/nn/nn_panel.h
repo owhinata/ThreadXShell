@@ -50,8 +50,8 @@ struct nn_panel_display {
 /**
  * Let a loaded plugin paint this frame into the view buffer.
  *
- * @return NN_CORE_DRAW_NONE when no plugin is in force -- the caller draws the
- *         resident decoder's boxes instead (Step 4b keeps that fallback);
+ * @return NN_CORE_DRAW_NONE when no plugin is in force -- nothing is drawn
+ *         (there is no resident decoder since Step 4c);
  *         otherwise MISSED (the lease was busy: the frame goes out bare,
  *         counted), DECLINED (no stream to annotate -- asked before the lease
  *         is tried, so a preview with no stream counts no misses -- or the

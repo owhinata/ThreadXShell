@@ -59,16 +59,16 @@ struct nn_backend_vt {
 	 *  flatbuffer).  0 on success, <0 otherwise. */
 	int  (*load_region)(void **buf, uint32_t *cap);
 
-	/** Rebuild the model from @p data (@p len bytes); @p data==NULL adopts the
-	 *  built-in model, and only a backend with @ref has_builtin accepts it.
+	/** Rebuild the model from @p data (@p len bytes); @p data==NULL is refused
+	 *  (no backend adopts a model by name since issue #159 Step 4c).
 	 *  @p name is copied for display.  Transactional: on failure the previous
 	 *  model is restored -- or, when nothing was loaded before, the backend stays
 	 *  EMPTY.  *impl_out is ALWAYS set to the resulting handle: the new model
 	 *  (returns 0), the restored previous one (returns <0), or the empty handle
 	 *  (returns <0) when there was nothing to restore or even the restore failed
 	 *  (issue #131 P16 -- this used to be NULL, which closed the singleton, and
-	 *  the next open of a closed tflm singleton adopted the built-in model on
-	 *  its own).  "Empty" is a handle with no inputs; see nn_model_present(). */
+	 *  the next open of a closed tflm singleton adopted the then built-in
+	 *  model on its own).  "Empty" is a handle with no inputs; see nn_model_present(). */
 	int  (*reload)(const void *data, uint32_t len, const char *name, void **impl_out);
 
 	/* --- issue #131 (P16, P3) --------------------------------------------- */
@@ -84,9 +84,10 @@ struct nn_backend_vt {
 	 *  none (the `null` stub). */
 	uint32_t arena_reserved;
 
-	/** 1 when a model is built into the image and reload(NULL) adopts it; 0 for
-	 *  a backend that loads only from the SD card (stedgeai_reloc), which refuses
-	 *  `nn model load builtin` rather than treating it as an unload. */
+	/** 1 when a model is in the image and the first open adopts it without a
+	 *  load (null's stub, stedgeai's generated model); 0 for a backend that is
+	 *  empty until a load from the SD card (tflm since issue #159 Step 4c,
+	 *  stedgeai_reloc). */
 	uint8_t has_builtin;
 };
 

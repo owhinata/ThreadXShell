@@ -5,9 +5,11 @@
  * Host test for this board's model singleton (port/nn/nn.c), issue #131 P16.
  *
  * The real nn.c is compiled against nn_shim/ (HAL + ThreadX stand-ins) and a
- * stub backend that keeps the backend contract nn_backend.h now states: the
- * built-in model is adopted by the first open only, release() empties, and a
- * reload ALWAYS hands back the handle -- the empty one when no model is left.
+ * stub backend that keeps the backend contract nn_backend.h now states: a
+ * model in the image (has_builtin) is adopted by the first open only,
+ * release() empties, and a reload ALWAYS hands back the handle -- the empty one
+ * when no model is left.  No backend of this board adopts a model through
+ * reload(NULL) any more (issue #159 Step 4c), so the stub refuses it too.
  *
  * What is checked is nn.c's half, the half the adapter reads:
  *   - only the first open reaches the backend; nothing after it -- an open
@@ -21,9 +23,13 @@
  *     loaded; while it is held the session cannot be taken, the first open
  *     builds nothing, and the load region and reload refuse.
  *
- * Built twice.  With TEST_FIRST_BUILD_FAILS the stub's one adoption of the
- * built-in model fails: the first open reports it, and the second -- nn.c's
- * latch taken again -- reaches the backend, builds nothing and opens EMPTY.
+ * Built three times.  The default is a backend with a model in the image (the
+ * null stub, stedgeai's generated model).  With TEST_FIRST_BUILD_FAILS the
+ * stub's one adoption of that model fails: the first open reports it, and the
+ * second -- nn.c's latch taken again -- reaches the backend, builds nothing and
+ * opens EMPTY.  With TEST_EMPTY_FROM_BOOT the backend has nothing in the image
+ * (tflm since issue #159 Step 4c, stedgeai_reloc): the first open builds
+ * nothing, and only a load from the SD card brings a model.
  *
  * The tflm backend itself needs TFLM and is not built here; it is the stub's
  * contract that this pins, and nn_backend.h is where that contract is written.
@@ -73,8 +79,13 @@ static int st_open(void **impl)
 		/* Mid-build the open latch is taken: a claim must be refused. */
 		stub.claim_in_open = nn_scratch_claim();
 		stub.adopted = 1;       /* the one adoption, whatever its outcome */
+#ifdef TEST_EMPTY_FROM_BOOT
+		stub.has = 0;           /* nothing in the image: builds nothing */
+#else
 		stub_builds++;
-#ifdef TEST_FIRST_BUILD_FAILS
+#endif
+#if defined(TEST_EMPTY_FROM_BOOT)
+#elif defined(TEST_FIRST_BUILD_FAILS)
 		stub.has = 0;
 		return -3;              /* the build failed; stays empty */
 #else
@@ -106,7 +117,9 @@ static int st_reload(const void *data, uint32_t len, const char *name,
 {
 	(void)len; (void)name;
 	*impl = stub.null_handle ? NULL : (void *)&stub;
-	if (data != NULL && stub.refuse_next) {
+	if (data == NULL)
+		return -10;             /* no model is adopted by name any more */
+	if (stub.refuse_next) {
 		stub.refuse_next = 0;
 		return -7;              /* refused: whatever was there stays */
 	}
@@ -121,7 +134,12 @@ const struct nn_backend_vt nn_backend_vt_selected = {
 	.model_name = st_name, .in_count = st_in_count, .out_count = st_out_count,
 	.input = st_tensor, .output = st_tensor, .activations_bytes = st_acts,
 	.run = st_run, .load_region = st_region, .reload = st_reload,
-	.release = st_release, .arena_reserved = 524288u, .has_builtin = 1u,
+	.release = st_release, .arena_reserved = 524288u,
+#ifdef TEST_EMPTY_FROM_BOOT
+	.has_builtin = 0u,
+#else
+	.has_builtin = 1u,
+#endif
 };
 
 
@@ -148,11 +166,65 @@ int main(void)
 	assert(nn_model_open(&m) == 0);
 	assert(stub.open_calls == 2 && stub_builds == 1 && !nn_model_present(m));
 
-	/* Only an explicit `nn model load builtin` brings a model. */
-	assert(nn_model_reload(NULL, 0u, NULL, &after) == 0 && after == 1);
+	/* Only an explicit load brings a model; reload(NULL) is not one. */
+	assert(nn_model_reload(NULL, 0u, NULL, &after) == -10 && after == 0);
+	assert(nn_model_reload(stub_buf, 8u, "x", &after) == 0 && after == 1);
 	assert(nn_model_present(m));
 
 	printf("test_nn_model (first build fails): OK\n");
+	return 0;
+}
+#elif defined(TEST_EMPTY_FROM_BOOT)
+/*
+ * [!] EMPTY FROM BOOT (issue #159 Step 4c).  The tflm build has no model in the
+ * image: the first open -- the #131 latch is still there -- finds the backend
+ * empty and builds nothing, so `nn info` says (none) and `nn run` refuses until
+ * a load from the SD card.
+ */
+int main(void)
+{
+	struct nn_model *m = NULL, *m2 = NULL;
+	int after = -1;
+
+	assert(nn_model_has_builtin() == 0);
+
+	/* [!] `sdram test` HOLDING .sdram.ai DOES NOT REFUSE THIS FIRST OPEN
+	 * (issue #159 Step 4c): it builds nothing there, so a fresh-boot `nn
+	 * info` during the test answers (none), not busy.  The claim still keeps
+	 * the session out, and the load region and a reload still refuse. */
+	assert(nn_scratch_claim() == 0);
+	assert(nn_model_open(&m) == 0 && m != NULL);
+	assert(stub.open_calls == 1 && stub_builds == 0);
+	assert(stub.claim_in_open == -1);              /* the latch was taken */
+	assert(!nn_model_present(m));
+	assert(nn_session_try_acquire() == NN_ERR_SCRATCH_HELD);
+	after = -1;
+	assert(nn_model_reload(stub_buf, 8u, "x", &after) == NN_ERR_SCRATCH_HELD);
+	assert(after == 0);
+	nn_scratch_release();
+	assert(!nn_model_present(m) && !nn_model_loaded());
+	assert(strcmp(nn_model_name(m), "(none)") == 0);
+	assert(nn_input_count(m) == 0 && nn_activations_bytes(m) == 0u);
+	assert(nn_arena_reserved() == 524288u);
+	assert(nn_run(m) != 0);
+
+	/* Later opens reach nothing and build nothing. */
+	assert(nn_model_open(&m2) == 0 && m2 == m && stub.open_calls == 1);
+
+	/* `builtin` is not a source: reload(NULL) is refused and leaves it empty. */
+	after = -1;
+	assert(nn_model_reload(NULL, 0u, NULL, &after) == -10 && after == 0);
+	assert(!nn_model_present(m));
+
+	/* A load from the card brings one; an unload empties it again. */
+	after = -1;
+	assert(nn_model_reload(stub_buf, 8u, "x", &after) == 0 && after == 1);
+	assert(nn_model_present(m) && nn_run(m) == 0);
+	assert(nn_model_release() == 0 && !nn_model_present(m));
+	assert(nn_model_open(&m2) == 0 && stub.open_calls == 1);
+	assert(!nn_model_present(m));
+
+	printf("test_nn_model (empty from boot): OK\n");
 	return 0;
 }
 #else
@@ -219,14 +291,15 @@ int main(void)
 	/* The claim: refused over a model (above, it was loaded), granted on the
 	 * empty singleton.  An open now returns the singleton as it is and builds
 	 * nothing; a reload refuses and leaves it empty. */
-	assert(nn_model_reload(NULL, 0u, NULL, &after) == 0 && nn_model_present(m));
+	assert(nn_model_reload(stub_buf, 8u, "x", &after) == 0 &&
+	       nn_model_present(m));
 	assert(nn_scratch_claim() == -2);
 	assert(nn_model_release() == 0 && !nn_model_present(m));
 	assert(nn_scratch_claim() == 0);
 	assert(nn_session_try_acquire() == NN_ERR_SCRATCH_HELD);
 	assert(nn_model_open(&m2) == 0 && m2 == m && stub.open_calls == 1);
 	after = -1;
-	assert(nn_model_reload(NULL, 0u, NULL, &after) == NN_ERR_SCRATCH_HELD);
+	assert(nn_model_reload(stub_buf, 8u, "x", &after) == NN_ERR_SCRATCH_HELD);
 	assert(after == 0 && !nn_model_present(m));
 	assert(nn_model_load_region(&buf, &cap) == NN_ERR_SCRATCH_HELD);
 	nn_scratch_release();
@@ -243,9 +316,12 @@ int main(void)
 	assert(state_of(rc, after) == NN_MODEL_EMPTY);
 	assert(!nn_model_present(m));
 
-	/* The built-in model comes back only through an explicit load. */
+	/* The model in the image does not come back by name (issue #159 Step
+	 * 4c): reload(NULL) is refused, and a load from the card brings one. */
 	after = -1;
-	rc = nn_model_reload(NULL, 0u, NULL, &after);
+	assert(nn_model_reload(NULL, 0u, NULL, &after) == -10 && after == 0);
+	after = -1;
+	rc = nn_model_reload(buf, 8u, "x", &after);
 	assert(rc == 0 && after == 1 && nn_model_present(m));
 	assert(state_of(rc, after) == NN_MODEL_NEW);
 

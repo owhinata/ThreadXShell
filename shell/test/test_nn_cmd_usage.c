@@ -42,10 +42,18 @@
 #define SHAPE    "name + addr (grove-vision-ai-v2)"
 #define SOURCES  "<--name <name> | --addr <addr> <len>>"
 #define A_SOURCE "--name person"
-#elif defined(NN_SVC_HAS_MODEL_PATH) && NN_SVC_HAS_MODEL_PATH
-#define SHAPE    "path + builtin (f746g-disco)"
+#elif defined(NN_SVC_HAS_MODEL_PATH) && NN_SVC_HAS_MODEL_PATH && \
+      defined(NN_SVC_HAS_MODEL_BUILTIN) && NN_SVC_HAS_MODEL_BUILTIN
+/* No board declares this since issue #159 Step 4c (f746g-disco dropped its
+ * built-in model); the shared command still spells the word, so the shape is
+ * still walked. */
+#define SHAPE    "path + builtin (no board)"
 #define SOURCES  "<--path <p> | builtin>"
 #define A_SOURCE "builtin"
+#elif defined(NN_SVC_HAS_MODEL_PATH) && NN_SVC_HAS_MODEL_PATH
+#define SHAPE    "path (f746g-disco)"
+#define SOURCES  "<--path <p>>"
+#define A_SOURCE "--path /m.tflite"
 #else
 #error "build this test with a board's NN_SVC_HAS_MODEL_* set"
 #endif

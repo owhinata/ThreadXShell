@@ -79,8 +79,8 @@ static void nn_life_cs_exit(unsigned posture)
  *
  * Since Step 4b the plugin section is RUN: a load copies it into .plugin and
  * calls its entry (the load order's plugin hooks below), and from then on the
- * plugin decodes, draws and reports -- the resident decoder is the no-plugin
- * fallback until Step 4c.
+ * plugin decodes, draws and reports.  Since Step 4c it is the only decoder:
+ * with no plugin the outputs are reported as tensors.
  *
  * The reservation's address is stated independently in the linker script,
  * ldscript/plugin_memory.ld and cmake/check_f746_layout.py, on purpose; the
@@ -201,11 +201,8 @@ static int nn_life_swap(struct nn_core_model_job *j, int *model_after)
 	const struct nn_f746_job *f = j->board;
 	int rc;
 
-	if (j->spec->tag == NN_SPEC_BUILTIN)
-		rc = nn_model_reload(NULL, 0u, NULL, model_after);
-	else
-		rc = nn_model_reload(f->model_at, f->model_len, j->spec->path,
-		                     model_after);
+	rc = nn_model_reload(f->model_at, f->model_len, j->spec->path,
+	                     model_after);
 	if (rc == 0)
 		return NN_SVC_OK;
 	nn_detail_set("the model was refused (%d)", rc);
@@ -234,8 +231,9 @@ static const struct nn_core_model_backend nn_life_backend = {
 
 /* ---- the board ------------------------------------------------------------ */
 
-/* Every tag but the two this board loads from, refused before anything is
- * acquired. */
+/* Every tag but a path, refused before anything is acquired.  `builtin` is
+ * one of them since issue #159 Step 4c: no build of this board that can load
+ * a model carries one in the image any more. */
 static void nn_life_spec_refused(struct nn_core_model_job *j)
 {
 	struct nn_op_result *res = j->res;
@@ -243,27 +241,13 @@ static void nn_life_spec_refused(struct nn_core_model_job *j)
 
 	if (spec == NULL)
 		return;
-	nn_detail_set("this board loads a model from the SD card (--path) or "
-	              "uses the one built into the image (builtin); it has no "
-	              "%s",
+	nn_detail_set("this board loads a model from the SD card (--path); it "
+	              "has no %s",
 	              spec->tag == NN_SPEC_NAME ? "asset store"
 	              : spec->tag == NN_SPEC_SLOT ? "slot index"
 	              : spec->tag == NN_SPEC_ADDR ? "raw model window"
-	                                          : "such source");
-}
-
-static int nn_life_check_spec(struct nn_core_model_job *j)
-{
-	struct nn_op_result *res = j->res;
-
-	if (j->spec->tag == NN_SPEC_BUILTIN && !nn_model_has_builtin()) {
-		/* [!] NOT AN UNLOAD (issue #131 P16).  On the SD-only backend this
-		 * word used to empty the model; `nn model unload` does that. */
-		nn_detail_set("this backend loads a model from the SD card (--path); "
-		              "it has no built-in model");
-		return NN_SVC_ERR_SPEC;
-	}
-	return NN_SVC_OK;
+	              : spec->tag == NN_SPEC_BUILTIN ? "built-in model"
+	                                             : "such source");
 }
 
 /*
@@ -272,10 +256,11 @@ static int nn_life_check_spec(struct nn_core_model_job *j)
  * job, so it could not word a refusal, and the session was taken here).
  *
  * [!] THE FIRST OPEN AFTER BOOT HAPPENS HERE, BEFORE THE SESSION (issue #131
- * P16).  That open adopts the built-in model and does not return until it is
- * built -- if another console's `nn info` got there first, this waits for that
- * build -- so nothing under the session runs beside it, and every later open
- * builds nothing.  An unload opens first and asks about the stream after, as
+ * P16).  On a backend with a model in the image (null, stedgeai) that open
+ * adopts it and does not return until it is built -- if another console's
+ * `nn info` got there first, this waits for that build -- so nothing under the
+ * session runs beside it, and every later open builds nothing.  tflm has had
+ * nothing to adopt since issue #159 Step 4c: its first open finds it empty.  An unload opens first and asks about the stream after, as
  * before the order was shared.
  */
 static int nn_life_admit(struct nn_core_model_job *j)
@@ -345,8 +330,6 @@ static int nn_life_prepare(struct nn_core_model_job *j)
 	struct nn_op_result *res = j->res;
 	struct nn_f746_job *f = j->board;
 
-	if (j->spec->tag == NN_SPEC_BUILTIN)
-		return NN_SVC_OK;
 	if (nn_model_load_region(&f->buf, &f->cap) != 0) {
 		nn_detail_set("this backend has no runtime model loader");
 		return NN_SVC_ERR_NOSUP;
@@ -380,8 +363,6 @@ static int nn_life_fetch(struct nn_core_model_job *j)
 	struct nn_f746_job *f = j->board;
 
 	j->bare = 1;
-	if (j->spec->tag == NN_SPEC_BUILTIN)
-		return NN_SVC_OK;
 	/* The reader prints its own failure: it is the board's shell-layer file
 	   and it has the console this command came in on. */
 	if (f->read(f->ctx, j->spec->path, f->buf, f->cap, &f->len) != 0) {
@@ -493,8 +474,8 @@ static int nn_life_lease_take(struct nn_core_model_job *j)
  *
  * [!] A REFUSED PLUGIN IS A FAILED LOAD OF A MODEL THAT IS NOW OPEN (issue #122
  * D6).  The copy into the reservation has already destroyed the previous
- * plugin, so there is no rollback: the model stays open with nothing but the
- * resident decoder reading it (Step 4b), and the status says the load did not
+ * plugin, so there is no rollback: the model stays open with nothing reading
+ * it (Step 4c: no resident decoder), and the status says the load did not
  * give what was asked for.  plugin_run_load() also logs its own reason.
  *
  * [!] THE STAGING REGION IS PASSED, NOT LOOKED UP: the slot the reader filled
@@ -535,10 +516,9 @@ static const struct nn_core_model_board nn_life_board = {
 	.cs_enter      = nn_life_cs_enter,
 	.cs_exit       = nn_life_cs_exit,
 	.backend       = &nn_life_backend,
-	.tags          = NN_CORE_MODEL_TAG(NN_SPEC_PATH) |
-	                 NN_CORE_MODEL_TAG(NN_SPEC_BUILTIN),
+	.tags          = NN_CORE_MODEL_TAG(NN_SPEC_PATH),
 	.spec_refused  = nn_life_spec_refused,
-	.check_spec    = nn_life_check_spec,
+	.check_spec    = NULL,     /* a path has no argument to range-check */
 	.admit         = nn_life_admit,
 	.claim_take    = nn_life_claim_take,
 	.claim_give    = nn_session_release,

@@ -51,7 +51,6 @@
 #include "cam_own.h"             /* the owner lifecycle (issue #72)               */
 #include "cam_sink.h"            /* the display step of the camera sink (#142)   */
 #include "frame_pipeline.h"      /* struct frame_sink / frame_desc, FRAME_*      */
-#include "nn_camera.h"           /* nn_camera_overlay / nn_camera_dets_get (bbox, #83) */
 #if defined(CONFIG_NN_BACKEND_TFLM)
 #include "nn_panel.h"            /* a loaded plugin's draw (issue #159)                 */
 #endif
@@ -250,9 +249,6 @@ static volatile enum cam_own_state preview_own;
    pixmap/widget geometry to it on the GUIX thread when the base res differs. */
 static volatile int cam_delivered_idx = -1;
 
-/* Box outline colour: bright green (RGB565), high contrast on a camera image. */
-#define OVERLAY_BOX_COLOR  0x07E0u
-
 /* Map a delivered frame geometry to a res_tbl index, or -1 if unknown. */
 static int res_idx_from_w(uint16_t w)
 {
@@ -290,21 +286,6 @@ static int preview_step_open(void *ctx, enum frame_format fmt, uint16_t w, uint1
 	if (idx != cur_res_idx)
 		(void)guix_post_root_event(GX_EVENT_CAMERA_GEOM);
 	return 0;
-}
-
-/* Draw the latest face detections as bounding boxes into the view buffer (GUIX
-   thread, right after the frame store).  The dets are normalized [0,1] to the
-   full preview frame, which maps 1:1 onto the view buffer, so they scale directly.
-   nn_camera_dets_get() returns 0 when inference is not running or has no detection,
-   so the boxes clear when `nn stream stop` runs or a face is lost. */
-static void overlay_draw_boxes(void)
-{
-	struct bf_det d[BF_MAX_DET];
-	int n = nn_camera_dets_get(d, BF_MAX_DET);
-
-	for (int i = 0; i < n; i++)
-		guix_display_cam_overlay_box(d[i].x, d[i].y, d[i].w, d[i].h,
-		                             OVERLAY_BOX_COLOR);
 }
 
 #if defined(CONFIG_NN_BACKEND_TFLM)
@@ -520,26 +501,18 @@ static UINT camera_ui_root_event(GX_WIDGET *widget, GX_EVENT *event_ptr)
 		   posting; only skip the icon redraw while the settings screen covers it. */
 		cam_redraw_pending = 0;
 		if (!settings_active) {
-			/* Draw the face boxes here (GUIX thread) rather than on the producer:
-			   the producer just stored this frame into cam_view_buf, so stamping the
-			   boxes on top now -- before the icon redraw reads it -- keeps the boxes
-			   off the DCMI-servicing critical path (owhinata/stm32f746g-disco#83).  Drawn
-			   while an `nn stream` runs -- not for a `nn run` (issue #142: a one-shot's
-			   result is reported, not drawn); overlay_draw_boxes() is a no-op with no
-			   detections, so the box clears when `nn stream stop` runs or a face is lost. */
+			/* Draw the overlay here (GUIX thread) rather than on the producer:
+			   the producer just stored this frame into cam_view_buf, so stamping
+			   on top now -- before the icon redraw reads it -- keeps it off the
+			   DCMI-servicing critical path (owhinata/stm32f746g-disco#83).
+			   [!] ONLY A LOADED PLUGIN DRAWS (issue #159): the lease is tried,
+			   then the frame lock, then the shared questions (the overlay, the
+			   record, the session, the plugin's) -- all in nn_panel_draw(),
+			   which leaves nothing locked.  NONE means no plugin is in force,
+			   and nothing is drawn: there is no resident decoder since Step 4c
+			   (and a stream with nothing to draw is refused at its start). */
 #if defined(CONFIG_NN_BACKEND_TFLM)
-			/* [!] A LOADED PLUGIN DRAWS ITS OWN RESULT (issue #159): the
-			   lease is tried, then the frame lock, then the shared questions
-			   (the overlay, the record, the session, the plugin's) -- all in
-			   nn_panel_draw(), which leaves nothing locked.  NONE means no
-			   plugin is in force, and the resident decoder's boxes are drawn
-			   as before (Step 4c removes that fallback). */
-			if (nn_panel_draw(&overlay_display) == NN_CORE_DRAW_NONE &&
-			    nn_camera_overlay())
-				overlay_draw_boxes();
-#else
-			if (nn_camera_overlay())
-				overlay_draw_boxes();
+			(void)nn_panel_draw(&overlay_display);
 #endif
 			gx_system_dirty_mark((GX_WIDGET *)&cam_icon);
 		}

@@ -12,15 +12,6 @@
 
 enum nn_decode_count nn_decode_count_of(int nd, int oneshot)
 {
-	/* BF_ERR_MODEL is the top-5 result of a model that is not BlazeFace-
-	 * shaped (D6), not a refusal. */
-	if (oneshot || nd >= 0 || nd == BF_ERR_MODEL)
-		return NN_DC_NONE;
-	return NN_DC_DECODER;   /* BF_ERR_UNINIT, BF_ERR_ARG, and any other */
-}
-
-enum nn_decode_count nn_decode_count_plugin_of(int nd, int oneshot)
-{
 	/* [!] A plugin was shipped with its model: BF_ERR_MODEL is a mismatch,
 	 * not a result (issue #159, the other boards' rule). */
 	if (oneshot || nd >= 0)

@@ -182,8 +182,8 @@ enum nn_core_draw nn_panel_draw(const struct nn_panel_display *d)
 	 * to zero at the next start.  Asked here first, without a lock (the
 	 * overlay is two words the start and the stop write); the same question
 	 * under the frame lock (panel_may_draw) stays, for a stop landing in
-	 * between.  DECLINED, not NONE: NONE tells the caller to draw the resident
-	 * decoder's boxes, and with no stream there are none to draw either.
+	 * between.  DECLINED, not NONE: NONE says no plugin is in force, which is
+	 * not the answer here -- there is no stream to annotate.
 	 */
 	if (!nn_camera_overlay())
 		return NN_CORE_DRAW_DECLINED;

@@ -24,23 +24,18 @@ out="$HOST_TEST_OUT"
 CFLAGS="$HOST_TEST_CFLAGS"
 LDFLAGS="$HOST_TEST_LDFLAGS"
 
-# issue #97 -- the adapter onto the SHARED BlazeFace decoder (port/nn/nn_decoder.c).
-# The decoder's arithmetic moved to svc/nn/blazeface.c and is covered by
-# shell/test/test_blazeface.c, which is board-independent; what stays here is the
-# half that cannot be -- nn_tensor -> tensor_desc, against this board's real nn.h.
-# struct nn_model is opaque (defined in nn.c), so the test supplies its own
-# nn_output_count() / nn_output(), which is also what makes the adapter testable.
-#
-# The cases are the translation's own failure modes: an unsupported dtype mapped
-# onto one the decoder reads, float32 put through the affine form (this board
-# publishes scale 0 for an unquantised tensor, and its graphs are float32), a rank
-# above four truncated into a match, and a hole in the output set reported as a
-# model-shape problem.
+# issues #97, #159 Step 4c -- nn_tensor -> tensor_desc (port/nn/nn_desc.c), the
+# half of the old nn_decoder.c that outlived the resident decoder.  Nothing here
+# links svc/nn/blazeface.c: the translation has no model in it.  A board test
+# because the point is the REAL nn.h.  The cases are the translation's own
+# failure modes -- an unsupported dtype mapped onto one a reader does read, a
+# rank above four truncated into a match, a field inherited from the tensor
+# described before, and a quantisation not passed through as it stands (scale 0
+# for an unquantised tensor, and float32 graphs).  wio-lite-ai's test, copied.
 gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
-    "$here/test_nn_decoder.c" "$board/port/nn/nn_decoder.c" \
-    "$HOST_TEST_SVC/nn/blazeface.c" \
-    $LDFLAGS -lm -o "$out/test_nn_decoder"
-"$out/test_nn_decoder"
+    "$here/test_nn_desc.c" "$board/port/nn/nn_desc.c" \
+    $LDFLAGS -o "$out/test_nn_desc"
+"$out/test_nn_desc"
 
 # issue #72 -- the sink-drain decision (port/camera/cam_drain.c).  Three
 # subscribers here detach while the base capture keeps running, so each has to
@@ -88,10 +83,11 @@ gcc $CFLAGS -I "$board/port/nn" \
     $LDFLAGS -o "$out/test_nn_sess_release"
 "$out/test_nn_sess_release"
 
-# issue #130 step 6c (#122 P8) -- how the resident decoder's answer is counted in
-# `nn stream stats` (port/nn/nn_decode_count.c).  BF_ERR_MODEL is the top-5
-# result of a classifier stream here and is NOT counted (D6); every other
-# negative is a decoder fault -- and none of those can be typed.
+# issue #130 step 6c (#122 P8) -- how a plugin's decode is counted in `nn stream
+# stats` (port/nn/nn_decode_count.c; one table since issue #159 Step 4c, when the
+# resident decoder went).  BF_ERR_MODEL is model_errors, every other negative a
+# decoder fault -- and none of those can be typed -- and only what the record
+# took is counted (P18).
 gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_nn_decode_count.c" "$board/port/nn/nn_decode_count.c" \
     $LDFLAGS -o "$out/test_nn_decode_count"
@@ -106,16 +102,11 @@ gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$
 # on a name that matches nothing.
 python3 "$board/cmake/fixtures/run_layout_tests.py"
 
-# issue #130 -- cmake/gen_model_array.py re-verifies the pinned model's SHA256
-# on the bytes it emits (the fetch verified it once, earlier), refuses an empty
-# or malformed expected hash, and leaves no output behind on a refusal.
-python3 "$board/cmake/fixtures/run_gen_model_array_tests.py"
-
 # issue #131 P16 -- this board's model singleton (port/nn/nn.c) over a stub
 # backend that keeps the contract nn_backend.h states.  The two properties a
 # console cannot pin down on its own: only the first open after boot reaches the
-# backend (an `nn info` after `nn model unload` must not put the built-in model
-# back), and a reload's answer is whether a MODEL is left -- a refused load from
+# backend (an `nn info` after `nn model unload` must not put the model in the
+# image back), and a reload's answer is whether a MODEL is left -- a refused load from
 # empty is EMPTY through the shared table, not PREVIOUS.  The HAL and ThreadX are
 # test/nn_shim.
 gcc $CFLAGS -I "$here/nn_shim" -I "$board/port/nn" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
@@ -129,6 +120,13 @@ gcc $CFLAGS -DTEST_FIRST_BUILD_FAILS -I "$here/nn_shim" -I "$board/port/nn" \
     "$here/test_nn_model.c" "$board/port/nn/nn.c" "$HOST_TEST_SVC/nn/nn_swap.c" \
     $LDFLAGS -o "$out/test_nn_model_fail"
 "$out/test_nn_model_fail"
+# ...and with nothing in the image (tflm since issue #159 Step 4c): the first
+# open builds nothing, `builtin` is refused, only a load brings a model.
+gcc $CFLAGS -DTEST_EMPTY_FROM_BOOT -I "$here/nn_shim" -I "$board/port/nn" \
+    -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+    "$here/test_nn_model.c" "$board/port/nn/nn.c" "$HOST_TEST_SVC/nn/nn_swap.c" \
+    $LDFLAGS -o "$out/test_nn_model_empty"
+"$out/test_nn_model_empty"
 
 # issue #131 step 7d -- this board's `nn info` / `nn model load` / `nn model
 # unload` (port/nn/nn_svc_f746_model.c) behind the shared order

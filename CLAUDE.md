@@ -90,7 +90,7 @@ code** で、ゲートが証明するのはスタック上限だけ（**メモ�
   「実行しない」は型の性質なので関数ポインタを足さない。
 - **ゲートは plugin ELF にも適用する**（対象外にしない）。**ダイジェストは署名ではない**。
 - **container は組んでから検査し、その同一ファイルを送る**（ホストは `verify_container` で**デバイスと
-  同じ `svc/plugin/plugin_load.c`** を走らせる）。**通るまで公開しない**（private path で組む）。
+  同じ `svc/plugin/plugin_load.c`** を走らせる）。**通るまで公開しない**（private path で組む）。**asset の行き先はちょうど 1 つ**（slot ボードは `--slot` と slot 表、file ボードは出荷 ELF から読み戻した staging 容量に公開前に照合し、無し・両方・半分は拒否。#159）。
 - **モデル区画は 16 バイト整列**（flatbuffer の 4 ではなく Ethos-U ドライバの要求）。
 - **オフセット → アドレスの変換は `plugin_run_slot()` の 1 箇所**で、**実行前に MPU を読み戻して
   fail-closed**（純関数・ホストテスト必須）。**窓を守る新しい機構は作らない**。
@@ -205,7 +205,7 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
 ### STM32F746G-DISCO
 
 - **LTO 禁止**（ldscript の ASSERT 群が配置 invariant の本体で、LTO はそれが依拠するシンボル名を改名する）。`board.cmake` の FATAL_ERROR と `boards/f746g-disco/cmake/check_f746_layout.py` を外さない。
-- **SDRAM は FMC 内部バンクで用途固定**（またぐ変更は FE とキャッシュ直結）。ASSERT の境界を緩めない。
+- **SDRAM は FMC 内部バンクで用途固定**（またぐ変更は FE とキャッシュ直結）。ASSERT の境界を緩めない。**内蔵 SRAM 上端 32 KB（0x20048000）は prelink の `.plugin` 予約**で、ldscript / `plugin_memory.ld` / board.cmake のゲート引数 / `check_f746_layout.py` の **4 箇所で独立に宣言し 1 変数から生成しない**（`_estack` と heap 天井はその下、#159）。
 - **PendSV / SysTick / USART1 のハンドラは強シンボル**（stock CMSIS の weak `Default_Handler` で落ちてもリンクは通る）。
 - **`CLI_INSTANCE_TIME_SLICE=0` を維持**（CPU-bound コマンド中に他コンソールが応答しないのは**期待挙動**）。
 - **raster の DCMI OVR を終端に戻さない**（teardown → GUIX 再 open の全画面描画が最初のフレームで再発し復帰が

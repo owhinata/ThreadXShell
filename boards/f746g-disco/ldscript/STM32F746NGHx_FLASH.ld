@@ -2,13 +2,17 @@
  * Linker script for STM32F746NGH6 (STM32F746G-DISCO).
  *   FLASH : 1024 KB @ 0x08000000
  *   DTCM  :   64 KB @ 0x20000000 (tightly coupled, not D-cached)
- *   RAM   :  256 KB @ 0x20010000 (SRAM1 240K + SRAM2 16K, contiguous, D-cached)
+ *   RAM   :  224 KB @ 0x20010000 (SRAM1, D-cached)
+ *   PLUGIN:   32 KB @ 0x20048000 (top 16 KB of SRAM1 + SRAM2; issue #159)
  *
  * The physical RAM is one contiguous 320 KB block from 0x20000000, but it is
- * split here into two regions (owhinata/stm32f746g-disco#33): the reset-persistent log lives in
+ * split here into regions (owhinata/stm32f746g-disco#33): the reset-persistent log lives in
  * DTCM, while .data/.bss/heap/stack and the SDMMC DMA bounce buffer live in
- * SRAM1+SRAM2 (RAM).  _estack = ORIGIN(RAM)+LENGTH(RAM) = 0x20050000, the same
- * top-of-RAM value as the previous single-region layout, so the MSP is unmoved.
+ * SRAM1 (RAM).  Since issue #159 the top 32 KB of internal SRAM is the
+ * .plugin reservation (below), so RAM is 224 KB and _estack =
+ * ORIGIN(RAM)+LENGTH(RAM) = 0x20048000: the MSP starts below the reservation,
+ * its reserve (_Min_Stack_Size) unchanged in size, and the heap ceiling
+ * src/retarget.c derives from _estack moved down with it.
  *
  * Symbols (_estack, _sdata, _edata, _sidata, _sbss, _ebss) match the CMSIS
  * gcc startup file startup_stm32f746xx.s.
@@ -25,7 +29,13 @@ _Min_Stack_Size = 0x400;   /* required stack */
 MEMORY
 {
   DTCM  (xrw) : ORIGIN = 0x20000000, LENGTH = 64K
-  RAM   (xrw) : ORIGIN = 0x20010000, LENGTH = 256K   /* SRAM1 240K + SRAM2 16K */
+  RAM   (xrw) : ORIGIN = 0x20010000, LENGTH = 224K   /* SRAM1 below the plugin reservation */
+  /* The plugin load image's reservation (issue #159 = #78 Step 4).  [!] STATED
+   * HERE AS ITS OWN LITERAL, and again -- independently, on purpose -- in
+   * ldscript/plugin_memory.ld (what a plugin links against), in board.cmake's
+   * statement to the shared image gate (F746_PLUGIN_GATE_BASE/END) and in
+   * cmake/check_f746_layout.py.  Do not derive any of them from another. */
+  PLUGIN (xrw) : ORIGIN = 0x20048000, LENGTH = 32K
   SDRAM (xrw) : ORIGIN = 0xC0000000, LENGTH = 8M     /* FMC bank1, 16-bit bus (owhinata/stm32f746g-disco#40) */
   FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = 1024K
 }
@@ -313,6 +323,35 @@ SECTIONS
          ".sdram.ai (+ .sdram.ai.model) must fit in FMC internal bank3 (2 MB)")
   /* Overall guard: still inside the 8 MB SDRAM bank (owhinata/stm32f746g-disco#45/#65). */
   ASSERT(_esdram - _ssdram <= 0x800000, ".sdram exceeds the 8 MB SDRAM bank")
+
+  /*
+   * The plugin load image's reservation (issue #159 = #78 Step 4).
+   *
+   * [!] A FIXED ABSOLUTE ADDRESS, AND THAT IS THE POINT.  A plugin is PRELINKED
+   * for it -- the loader services no relocations -- so it cannot drift the way
+   * a sequential section would the day .bss grew, and moving it invalidates
+   * every container built for this board.  The top 32 KB of internal SRAM
+   * (16 KB of SRAM1 + all of SRAM2), executable through the default memory map
+   * (PRIVDEFENA; no MPU region covers internal SRAM, src/bsp.c), so no MPU
+   * change is needed.  NOLOAD: the image arrives at run time.
+   *
+   * Nothing is loaded or executed here in Step 4a; the region and its gate
+   * exist in every backend because the reservation is a fact of the layout.
+   * cmake/check_f746_layout.py checks the linked image against its own
+   * literal: the section at exactly this address and size, NOLOAD, nothing
+   * else inside, and _estack (the heap ceiling's source) at or below its base.
+   */
+  .plugin 0x20048000 (NOLOAD) :
+  {
+    __plugin_start = .;
+    . = . + 0x8000;
+    __plugin_end = .;
+  } >PLUGIN
+
+  ASSERT(__plugin_end == 0x20050000,
+         ".plugin must be anchored at the top of internal SRAM (0x20050000)")
+  ASSERT(_estack <= __plugin_start,
+         "_estack (the MSP and the heap ceiling) is above the .plugin reservation")
 
   /* Make sure there is room left for the heap and stack */
   ._user_heap_stack :

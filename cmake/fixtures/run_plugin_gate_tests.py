@@ -1548,6 +1548,9 @@ HANDED_CASES = [
 # (name, flags, word, expect "ok" | "refuse", why)
 FW_M55 = ["-mcpu=cortex-m55", "-mthumb", "-mfloat-abi=hard"]
 FW_M7 = ["-mcpu=cortex-m7", "-mthumb", "-mfpu=fpv5-d16", "-mfloat-abi=hard"]
+FW_F746 = ["-mcpu=cortex-m7", "-mthumb", "-mfpu=fpv5-sp-d16",
+           "-mfloat-abi=hard"]
+FW_M4 = ["-mcpu=cortex-m4", "-mthumb", "-mfpu=fpv4-sp-d16", "-mfloat-abi=hard"]
 ASSERT_CASES = [
     ("grove_word", FW_M55 + ["-mcmse"], "0x9302", "ok",
      "Grove's firmware flags describe 0x9302"),
@@ -1567,9 +1570,17 @@ ASSERT_CASES = [
      "a wio word with the CMSE bit set -- the part has no Security Extension"),
     ("wio_fpu", FW_M7, "0x1301", "refuse",
      "a wio word naming Grove's FPU: __ARM_FP is 14 on both, __ARM_ARCH is not"),
-    ("f746_unmapped", ["-mcpu=cortex-m7", "-mthumb", "-mfpu=fpv5-sp-d16",
-                       "-mfloat-abi=hard"], "0x1101", "refuse",
-     "f746's (7, 4) is also a Cortex-M4's, so it is refused rather than mapped"),
+    # Issue #159: f746's (7, 4) is mapped.  The macros cannot tell it from a
+    # Cortex-M4 with FPv4, so the M4 case is ACCEPTED here on purpose -- the
+    # image check below (m4_image) is the end that refuses it.
+    ("f746_word", FW_F746, "0x1101", "ok",
+     "f746's firmware flags describe 0x1101"),
+    ("f746_cmse", FW_F746, "0x9101", "refuse",
+     "an f746 word with the CMSE bit set -- the part has no Security Extension"),
+    ("f746_dp_word", FW_F746, "0x1201", "refuse",
+     "wio's double-precision word against f746's single-precision flags"),
+    ("m4_macros_pass", FW_M4, "0x1101", "ok",
+     "an M4/FPv4 predefines exactly what f746 does; only the image can tell"),
 ]
 
 
@@ -1604,6 +1615,13 @@ FW_ELF_CASES = [
      "wio's firmware image describes 0x1201"),
     ("wio_image_sp", FW_M7, "0x1101", "refuse",
      "a single-precision claim against wio's double-precision image"),
+    ("f746_image", FW_F746, "0x1101", "ok",
+     "f746's firmware image describes 0x1101"),
+    # [!] Issue #159: the case the macros pass (m4_macros_pass above).  The
+    # image records Tag_FP_arch FPv4, which is no FPU any board here builds
+    # plugins for, so the word cannot be derived and is refused.
+    ("m4_image", FW_M4, "0x1101", "refuse",
+     "an M4/FPv4 firmware image claimed as f746's 0x1101"),
 ]
 
 

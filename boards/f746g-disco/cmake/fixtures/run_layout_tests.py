@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Negative tests for cmake/check_f746_layout.py's backend residents (issue #130).
+"""Negative tests for cmake/check_f746_layout.py's backend residents (issue #130)
+and its .plugin reservation checks (issue #159).
 
 [!] WHAT THIS PROVES AND WHAT IT DOES NOT.  The gate reads two tool outputs (nm
 and `objdump -s -j .isr_vector`) and nothing else, so it is driven here by fake
@@ -67,6 +68,9 @@ def base_listing():
         (0x200260F0, "b", "nn_dec"),
         (0x200260EC, "b", "nn_dec_ready"),
         (0xC0660000, "b", "nn_dec_scratch"),
+        (0x20048000, "B", "__plugin_start"),
+        (0x20050000, "B", "__plugin_end"),
+        (HEAP_FLOOR, "B", "end"),
     ]
     for i, (name, slot, _why) in enumerate(gate.HANDLERS):
         syms.append((0x08001000 + 0x100 * i, "T", name))
@@ -89,16 +93,69 @@ def vectors(syms):
 
 
 FAKE_NM = '#!/bin/sh\ncat "$1.nm"\n'
-FAKE_OBJDUMP = '#!/bin/sh\nfor a; do last=$a; done\ncat "$last.vec"\n'
+# `objdump -h` (sections), `objdump -d -j .text` (the _sbrk disassembly) and
+# `objdump -s -j .isr_vector` (the vector table): one canned listing each.
+FAKE_OBJDUMP = ('#!/bin/sh\nfor a; do last=$a; done\n'
+                'case "$1" in\n'
+                '  -h) cat "$last.h" ;;\n'
+                '  -d) cat "$last.d" ;;\n'
+                '  *)  cat "$last.vec" ;;\n'
+                'esac\n')
+
+# --- the .plugin reservation (issue #159) ------------------------------------
+# What the pinned objdump prints for the real tflm image, trimmed to the
+# sections that matter.  (name, vma, size, flags)
+PLUGIN = (".plugin", 0x20048000, 0x8000, "ALLOC")
+SECTIONS = [
+    (".isr_vector", 0x08000000, 0x1f8, "CONTENTS, ALLOC, LOAD, READONLY, DATA"),
+    (".text", 0x08000200, 0xb0000, "CONTENTS, ALLOC, LOAD, READONLY, CODE"),
+    (".data", 0x20010000, 0x1130, "CONTENTS, ALLOC, LOAD, DATA"),
+    (".bss", 0x20011130, 0x19b24, "ALLOC"),
+    (".sram1_dma", 0x2002ac60, 0x1000, "ALLOC"),
+    PLUGIN,
+    ("._user_heap_stack", 0x2002bc60, 0x600, "ALLOC"),
+]
+HEAP_FLOOR = 0x2002bc60
+# _sbrk's literal pool as the real image has it: its static, _estack, `end`
+# and _Min_Stack_Size.
+SBRK_CONSTS = (0x20015d40, 0x20048000, HEAP_FLOOR, 0x400)
 
 
-def run(tmp, case, syms, args):
+def objdump_h(sections):
+    lines = ["", "shell.elf:     file format elf32-littlearm", "", "Sections:",
+             "Idx Name          Size      VMA       LMA       File off  Algn"]
+    for i, (name, vma, size, flags) in enumerate(sections):
+        lines.append(f" {i:2d} {name:13s} {size:08x}  {vma:08x}  {vma:08x}  "
+                     f"00001000  2**2")
+        lines.append(f"                  {flags}")
+    return "\n".join(lines) + "\n"
+
+
+def objdump_d(consts, name="_sbrk"):
+    lines = ["", "Disassembly of section .text:", "",
+             "08010680 <Reset_Handler>:",
+             " 8010670:\t4911      \tldr\tr1, [pc, #68]",
+             " 8010674:\t20050000 \t.word\t0x20050000", "",
+             f"08010680 <{name}>:",
+             " 8010680:\t4911      \tldr\tr1, [pc, #68]\t@ (80106c8 <_sbrk+0x48>)",
+             " 80106aa:\tbd08      \tpop\t{r3, pc}"]
+    for i, c in enumerate(consts):
+        lines.append(f" {0x80106c8 + 4 * i:x}:\t{c:08x} \t.word\t0x{c:08x}")
+    lines += ["", "080106d8 <_close>:", " 80106d8:\tbd08      \tpop\t{r3, pc}"]
+    return "\n".join(lines) + "\n"
+
+
+def run(tmp, case, syms, args, sections=None, sbrk=SBRK_CONSTS, sbrk_name="_sbrk"):
     stem = os.path.join(tmp, case)
     with open(stem + ".nm", "w") as f:
         for addr, typ, name in syms:
             f.write(f"{addr:08x} {typ} {name}\n")
     with open(stem + ".vec", "w") as f:
         f.write(vectors(syms))
+    with open(stem + ".h", "w") as f:
+        f.write(objdump_h(SECTIONS if sections is None else sections))
+    with open(stem + ".d", "w") as f:
+        f.write(objdump_d(sbrk, sbrk_name))
     p = subprocess.run(
         [sys.executable, GATE, "--nm", os.path.join(tmp, "nm"),
          "--objdump", os.path.join(tmp, "objdump"), *args, stem],
@@ -122,8 +179,8 @@ def main():
 
     failures = []
 
-    def expect(case, syms, args, rc, *needles):
-        got_rc, out = run(tmp, case, syms, args)
+    def expect(case, syms, args, rc, *needles, **kw):
+        got_rc, out = run(tmp, case, syms, args, **kw)
         ok = got_rc == rc and all(n in out for n in needles)
         print(f"  {'ok  ' if ok else 'FAIL'} {case}: rc {got_rc}"
               + ("" if ok else f" (want {rc}, needles {needles})\n{out}"))
@@ -185,6 +242,66 @@ def main():
         expect("null-control", null_syms, common + null_args, 0, "OK")
         expect("null-image-under-tflm-requires", null_syms, common + tflm_args, 1,
                "no such object in the image")
+
+        # --- the .plugin reservation (issue #159) ----------------------------
+        # Every case below differs from tflm-control in ONE fact and is
+        # asserted on its own sentence.  The linker ASSERTs refuse most of
+        # these shapes before the gate gets a say; the gate is what still
+        # holds the day an ASSERT is edited, and the heap ceiling is not a
+        # section at all.
+        ok_args = common + tflm_args
+        img = tflm_image()
+
+        def sections_with(**change):
+            out = []
+            for sec in SECTIONS:
+                if sec[0] in change:
+                    if change[sec[0]] is not None:
+                        out.append(change[sec[0]])
+                else:
+                    out.append(sec)
+            return out
+
+        expect("res-moved", img, ok_args, 1,
+               ".plugin is [0x20040000, 0x20048000); this gate states "
+               "[0x20048000, 0x20050000)",
+               sections=sections_with(**{".plugin": (".plugin", 0x20040000,
+                                                     0x8000, "ALLOC")}))
+        expect("res-shrunk", img, ok_args, 1,
+               ".plugin is [0x20048000, 0x2004c000)",
+               sections=sections_with(**{".plugin": (".plugin", 0x20048000,
+                                                     0x4000, "ALLOC")}))
+        expect("res-loaded", img, ok_args, 1, ".plugin carries contents",
+               sections=sections_with(**{".plugin": (
+                   ".plugin", 0x20048000, 0x8000, "CONTENTS, ALLOC, LOAD, DATA")}))
+        expect("res-missing", img, ok_args, 1,
+               ".plugin: expected exactly one section, found 0",
+               sections=sections_with(**{".plugin": None}))
+        expect("res-overlap", img, ok_args, 1,
+               "section .bss [0x20011130, 0x20048100) overlaps the .plugin "
+               "reservation",
+               sections=sections_with(**{".bss": (".bss", 0x20011130,
+                                                  0x20048100 - 0x20011130,
+                                                  "ALLOC")}))
+        expect("res-symbol-inside", img + [(0x20049000, "b", "stray_buf")],
+               ok_args, 1, "symbol stray_buf at 0x20049000 lies inside")
+        expect("res-estack-above",
+               [x for x in img if x[2] != "_estack"] +
+               [(0x20050000, "R", "_estack")], ok_args, 1,
+               "_estack 0x20050000 is above the reservation's base")
+        expect("res-sbrk-names-top", img, ok_args, 1,
+               "_sbrk names 0x20050000 inside the .plugin reservation",
+               sbrk=SBRK_CONSTS + (0x20050000,))
+        expect("res-sbrk-no-ceiling", img, ok_args, 1,
+               "_sbrk does not name _estack (0x20048000)",
+               sbrk=(0x20015d40, HEAP_FLOOR, 0x400))
+        expect("res-sbrk-absent", img, ok_args, 1,
+               "_sbrk: not in the image", sbrk_name="_sbrk_old")
+        expect("res-heap-floor-above",
+               [x for x in img if x[2] != "end"] + [(0x20048010, "B", "end")],
+               ok_args, 1, "the heap starts at 0x20048010, above its own "
+               "ceiling source _estack 0x20048000",
+               sbrk=SBRK_CONSTS)
 
     if failures:
         print(f"run_layout_tests: {len(failures)} case(s) FAILED: {', '.join(failures)}",

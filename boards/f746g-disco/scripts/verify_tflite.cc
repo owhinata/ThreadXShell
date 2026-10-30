@@ -1,0 +1,222 @@
+/*
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 ThreadX Shell Project
+ */
+/**
+ * @file    verify_tflite.cc
+ * @brief   Check a .tflite on the PC before copying it to this board's card
+ *          (issue #159; wio-lite-ai's checker of the same name, with this
+ *          board's operator list and staging capacity).
+ *
+ * A HOST tool, never compiled into a firmware: built with the host compiler
+ * against the SAME tflite-micro tree the `tflm` build generated, so it runs
+ * tflite::VerifyModelBuffer() itself, not an approximation of it.  The asset
+ * build (cmake/add_asset.cmake, from Step 4b) runs it as this board's model
+ * gate on the model section of every container it packs.
+ *
+ * WHAT IT CHECKS, in the order the board would:
+ *   1. length, and that it fits the backend's staging slot
+ *   2. the "TFL3" file identifier at offset 4
+ *   3. tflite::VerifyModelBuffer() -- the full structural walk
+ *   4. the schema version the runtime understands
+ *   5. [!] that every operator the model uses is one this FIRMWARE registers
+ *
+ * Step 5 is the one the board cannot do well: AllocateTensors() returns one
+ * kTfLiteError for "an operator is missing" and "the activations do not fit".
+ * The list is port/nn/tflm/nn_tflm_ops.h, the header the firmware registers
+ * from, so the two cannot drift apart.
+ *
+ * It prints the CRC-32/ISO-HDLC of the file -- for a bare .tflite, the number
+ * to compare with what the card holds.
+ *
+ * Build + run:  cmake --build build/f746-tflm --target verify-model
+ *               ./build/f746-tflm/verify_tflite <model.tflite>
+ */
+#include "tensorflow/lite/schema/schema_generated.h"
+#include "tensorflow/lite/schema/schema_utils.h"   /* GetBuiltinCode()          */
+/* For TFLITE_SCHEMA_VERSION, taken from the runtime's own header rather than restated
+ * here.  A restated constant is a constant that can fall out of step with the pinned
+ * tree, and this tool's only reason to exist is that it cannot. */
+#include "tensorflow/lite/micro/micro_interpreter.h"
+
+#include "nn_tflm_ops.h"
+
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
+
+/* Mirrors port/nn/tflm/nn_tflm.cc's NN_TFLM_SD_MODEL_MAX (one staging slot).
+ * Restated rather than included because that file is C++ inside the firmware's
+ * world; the message below names its source. */
+static const uint32_t kStagingMax = 512u * 1024u;
+
+/* CRC-32/ISO-HDLC, bit by bit -- the same value svc/crc32.c produces on the board
+ * and Python's zlib.crc32() produces on this machine.  Written out rather
+ * than linked from zlib so this tool builds with nothing but a C++ compiler. */
+static uint32_t crc32_iso_hdlc(const uint8_t *p, size_t n)
+{
+	uint32_t crc = 0xFFFFFFFFu;
+
+	for (size_t i = 0; i < n; i++) {
+		crc ^= p[i];
+		for (int b = 0; b < 8; b++)
+			crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1u)));
+	}
+	return ~crc;
+}
+
+static bool read_file(const char *path, std::vector<uint8_t> &out)
+{
+	FILE *f = fopen(path, "rb");
+	if (!f) {
+		fprintf(stderr, "verify_tflite: cannot open %s\n", path);
+		return false;
+	}
+	uint8_t buf[65536];
+	size_t n;
+	while ((n = fread(buf, 1, sizeof buf, f)) > 0)
+		out.insert(out.end(), buf, buf + n);
+	bool ok = (ferror(f) == 0);
+	fclose(f);
+	if (!ok)
+		fprintf(stderr, "verify_tflite: read error on %s\n", path);
+	return ok;
+}
+
+/* The operators this firmware registers, from the shared X-macro list. */
+static const tflite::BuiltinOperator kRegistered[] = {
+#define NN_TFLM_OP_ENUM(enum_suffix, method) tflite::BuiltinOperator_##enum_suffix,
+	NN_TFLM_OPS_ALL(NN_TFLM_OP_ENUM)
+#undef NN_TFLM_OP_ENUM
+};
+
+static bool is_registered(tflite::BuiltinOperator op)
+{
+	for (size_t i = 0; i < sizeof kRegistered / sizeof kRegistered[0]; i++)
+		if (kRegistered[i] == op)
+			return true;
+	return false;
+}
+
+int main(int argc, char **argv)
+{
+	if (argc != 2) {
+		fprintf(stderr,
+		        "usage: verify_tflite <model.tflite>\n"
+		        "  Checks a model against THIS firmware configuration before you copy\n"
+		        "  it to the card for `nn model load --path`.\n");
+		return 2;
+	}
+
+	std::vector<uint8_t> buf;
+	if (!read_file(argv[1], buf))
+		return 2;
+
+	const uint32_t len = (uint32_t)buf.size();
+	printf("file    : %s\n", argv[1]);
+	printf("size    : %u B\n", len);
+	printf("crc32   : %08X\n",
+	       crc32_iso_hdlc(buf.data(), buf.size()));
+
+	/* 1. length ---------------------------------------------------------- */
+	if (len < 8u) {
+		printf("RESULT  : REJECT -- too short to be a flatbuffer (%u B)\n", len);
+		return 1;
+	}
+	if (len > kStagingMax) {
+		printf("RESULT  : REJECT -- %u B exceeds the backend staging slot (%u B).\n"
+		       "          Widen NN_TFLM_SD_MODEL_MAX in port/nn/tflm/nn_tflm.cc.\n",
+		       len, kStagingMax);
+		return 1;
+	}
+
+	/* 2. file identifier -------------------------------------------------- */
+	if (!tflite::ModelBufferHasIdentifier(buf.data())) {
+		printf("RESULT  : REJECT -- no \"TFL3\" identifier at offset 4; this is not a\n"
+		       "          .tflite flatbuffer.\n");
+		return 1;
+	}
+
+	/* 3. the structural walk ---------------------------------------------- */
+	flatbuffers::Verifier verifier(buf.data(), (size_t)len);
+	if (!tflite::VerifyModelBuffer(verifier)) {
+		printf("RESULT  : REJECT -- the flatbuffer is malformed.\n"
+		       "          This is what a file truncated on THIS machine looks like: the\n"
+		       "          CRC32 above would still have matched on the board, because the\n"
+		       "          transfer would have carried the damage faithfully.\n"
+		       "          Check the source of the file (interrupted download, a\n"
+		       "          converter still writing, a git-lfs pointer).\n");
+		return 1;
+	}
+
+	const tflite::Model *model = tflite::GetModel(buf.data());
+
+	/* 4. schema version --------------------------------------------------- */
+	if (model->version() != TFLITE_SCHEMA_VERSION) {
+		printf("RESULT  : REJECT -- schema version %u, this runtime reads %d.\n",
+		       (unsigned)model->version(), TFLITE_SCHEMA_VERSION);
+		return 1;
+	}
+
+	/* 5. operator coverage ------------------------------------------------ */
+	std::vector<std::string> missing;
+	const auto *codes = model->operator_codes();
+	if (codes) {
+		for (uint32_t i = 0; i < codes->size(); i++) {
+			const tflite::OperatorCode *c = codes->Get(i);
+			if (!c)
+				continue;
+			tflite::BuiltinOperator op = tflite::GetBuiltinCode(c);
+			if (op == tflite::BuiltinOperator_CUSTOM) {
+				missing.push_back(std::string("CUSTOM:") +
+				                  (c->custom_code() ? c->custom_code()->str() : "?"));
+			} else if (!is_registered(op)) {
+				missing.push_back(tflite::EnumNameBuiltinOperator(op));
+			}
+		}
+	}
+
+	const auto *subgraphs = model->subgraphs();
+	printf("schema  : version %u, %u subgraph(s), %u distinct operator(s)\n",
+	       (unsigned)model->version(),
+	       subgraphs ? (unsigned)subgraphs->size() : 0u,
+	       codes ? (unsigned)codes->size() : 0u);
+	printf("ops set : %d registered by this build (port/nn/tflm/nn_tflm_ops.h)\n",
+	       (int)(sizeof kRegistered / sizeof kRegistered[0]));
+
+	if (!missing.empty()) {
+		printf("RESULT  : REJECT -- the model uses %zu operator(s) this build did not\n"
+		       "          register:\n", missing.size());
+		for (const std::string &m : missing)
+			printf("            %s\n", m.c_str());
+		printf("          On the board this would fail as NN_MODEL_ERR_ARENA, whose\n"
+		       "          message cannot tell a missing operator from an arena that is\n"
+		       "          too small -- which is exactly why this check is here.\n");
+		printf("          Add the operator to port/nn/tflm/nn_tflm_ops.h (it is\n"
+		       "          kernel code in Flash), or re-export the model without it.\n");
+		return 1;
+	}
+
+	/*
+	 * Deliberately narrow wording.  What was established is: the flatbuffer is
+	 * structurally sound, the schema version is one this runtime reads, and every
+	 * BUILTIN OPERATOR CODE it references is in the registered set.  What was NOT
+	 * established, and cannot be from here, is that each kernel's Prepare() accepts
+	 * this model's particular tensor shapes and types, that the operator VERSIONS are
+	 * ones these kernels implement, or that the activations fit the arena -- all three
+	 * are settled by AllocateTensors() on the board, against the real arena size.
+	 *
+	 * Saying "safe to send" would overstate that, and an overstated pass is the same
+	 * failure this whole tool exists to avoid: a check that reports more confidence
+	 * than it earned.
+	 */
+	printf("RESULT  : PASS -- structurally valid, schema version %d, and no unregistered\n"
+	       "          builtin operators.  Remaining checks happen on the board when\n"
+	       "          `nn model load` calls AllocateTensors(): operator versions, each\n"
+	       "          kernel's shape/type constraints, and whether the activations fit\n"
+	       "          the arena.\n", TFLITE_SCHEMA_VERSION);
+	return 0;
+}

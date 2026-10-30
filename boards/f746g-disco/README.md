@@ -69,12 +69,51 @@ option does not fail the link, it fails at runtime with an empty field.
 | Flash | `0x08000000` | 1 MB | whole device, no bootloader |
 | ITCM | `0x00000000` | 16 KB | present, **not used by the linker script** |
 | DTCM | `0x20000000` | 64 KB | |
-| SRAM | `0x20010000` | 256 KB | SRAM1 240 KB + SRAM2 16 KB, contiguous |
+| SRAM | `0x20010000` | 224 KB | SRAM1: data, bss, heap, main stack |
+| Plugin | `0x20048000` | 32 KB | top 16 KB of SRAM1 + SRAM2: the `.plugin` reservation (issue #159) |
 | SDRAM | `0xC0000000` | 8 MB | FMC bank1, 16-bit bus |
 
 ITCM placement was tried and dropped: with I-cache and D-cache enabled it was
 worth about 0.6%, because the cache already hides the flash wait states.  The
 region is left in the map as a fact about the part, not as a placement target.
+
+### [!] The top 32 KB of internal SRAM is the plugin reservation (issue #159)
+
+`.plugin` is a fixed NOLOAD reservation at `0x20048000..0x20050000` for the
+load image of a model post-processing plugin (#78 Step 4; see [Plugin
+containers](#plugin-containers-issue-159--78-step-4)).  A plugin is
+**prelinked** for that address -- the loader services no relocations -- so it
+cannot drift the way a sequential section would the day `.bss` grew, and moving
+it later invalidates every container built for this board.  Internal SRAM is
+executable through the default memory map (`PRIVDEFENA`; no MPU region covers
+it, `src/bsp.c`), so the reservation needs no MPU change.
+
+**The main stack and the heap moved below it.**  `RAM` shrank from 256 KB to
+224 KB, so `_estack` is `0x20048000` (was `0x20050000`), the main-stack
+reserve (`_Min_Stack_Size`, 1 KB) is unchanged in size, and the heap ceiling
+`src/retarget.c` derives from `_estack` moved down with it: the heap runs from
+`end` to `0x20047C00` (114,304 B on `tflm` at #159 Step 4a, was 147,072 B).
+`free` reports SRAM as two rows, `SRAM` (up to the reservation) and `Plugin`
+(the reservation, never counted as spendable).  `membench` still takes its
+32 KB buffer from the heap.
+
+The address is declared four times, independently, on purpose: the linker
+script, the plugin `MEMORY` fragment (`ldscript/plugin_memory.ld`, which a
+plugin links against from Step 4b), `board.cmake`'s statement to the shared
+image gate (`F746_PLUGIN_GATE_BASE/END`), and `cmake/check_f746_layout.py`,
+which checks the linked image in every backend: the section at exactly that
+address and size, NOLOAD, nothing else allocated or named inside it, `_estack`
+at or below its base, the heap floor below that -- and that the linked `_sbrk`
+names `_estack` and no address inside the reservation, read from its own
+constants.  Naming `_estack` is not using it as the bound (`_estack +
+_Min_Stack_Size` names the same constants and passes that check -- the #159
+review linked such an image), so the behaviour is checked separately:
+`test/test_sbrk.c` compiles the real `src/retarget.c` on the host and requires
+the break to stop at `_estack - _Min_Stack_Size`.  **Do not generate any of
+them from another.**
+`cmake/fixtures/run_layout_tests.py` watches each refusal (moved, shrunk,
+loaded, missing, overlapped, a symbol inside, `_estack` above, `_sbrk` naming
+the top or not naming the ceiling, `_sbrk` absent, the heap floor above).
 
 ### [!] The SDRAM's internal banks are assigned by use, and the linker enforces it
 
@@ -195,12 +234,13 @@ file (each `.c` with its `.h` unless only a header is listed):
 | File | Thread or context | Hardware reason |
 |---|---|---|
 | `port/nn/nn_svc_f746.c` | console | The thin adapter over this board's `nn.h` API; it adds no state. |
-| `port/nn/nn_svc_f746_model.c` | console (`nn info`, `nn model load` / `unload`) | The steps of the shared load order on this board: the built-in model in Flash and the SD-card model slots in SDRAM. |
+| `port/nn/nn_svc_f746_model.c` | console (`nn info`, `nn model load` / `unload`) | The steps of the shared load order on this board: the built-in model in Flash and the SD-card model slots in SDRAM; on `tflm`, the plugin policy, the container split and the open container's claims (issue #159). |
 | `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (start / stop / stats / record reads) and the camera sink's open / close of the nn step | Binds the shared frame path to this board's camera as the nn step of the one camera sink, and holds nn's place among the camera's holders (issue #142); owns the glue's state (the private header lists each counter's writers and resets) and the frame path's ops table. |
 | `port/nn/nn_producer.c` | camera producer (the nn step of the camera sink's `consume()`) | Prepares a frame straight into the model's input tensor (nearest-neighbour resize + RGB565 conversion on the CPU) and hands it over; it does not put the frame -- the sink does, last. |
 | `port/camera/cam_sink.c` | camera producer (`consume()`), console (step enable / disable / drain) | Not an nn file, but nn runs inside it: the one RGB565 subscriber of the base capture, running the GUIX display step and then the nn step, with `camera_frame_put()` last. Each step's armed mark and busy count are `svc/camera/cam_step.h`'s. |
 | `port/nn/nn_worker.c` | inference worker (priority 18) | Inference runs on the CPU, so the worker sits below every other thread; it runs the model, the resident decoder's publish and the counting. |
 | `port/nn/nn_decoder.c` | inference worker | Resident BlazeFace decoder state, with its candidate scratch placed in `.sdram.ai`, and `nn_tensor` -> `tensor_desc`. |
+| `port/nn/nn_container.c` | console (`nn model load --path`) | No hardware reason: whether a file read for a load is a plugin container, and the CRC-32 of exactly the bytes read -- the one function both the SD reader (`cmds/cmd_nn_board.c`) and `nn info` print it with (tflm only, issue #159). |
 | `port/nn/nn_decode_count.c` | inference worker | No hardware reason: this board's table for counting the decoder's answer in `nn stream stats` (pure, host-tested). |
 | `port/nn/nn_sess_release.c` | console (stop), inference worker | No hardware reason: when the stream's hold on the nn session may be given back, as a pure function of the sink drain and the worker. |
 | `port/nn/nn.c`, `nn_backend.h` | worker (run), console (open / bench / info) | The backend-agnostic model API and session guard, with DWT cycle-counter timing around `nn_run()`. |
@@ -349,6 +389,93 @@ two steps, and the holder table; 2026-10-11, firmware `8baed71b`):
 skipped` still equal to the inferences, and 1.47 inf/s across `lcd off` / `lcd
 on`.  The DCMI overrun count moved with the build's layout, not with the change
 (issue #144, below).
+
+## Plugin containers (issue #159 = #78 Step 4)
+
+A **container** carries a model together with the code that interprets its
+output (a *plugin*).  The format, the validator and the build rules are shared
+with grove-vision-ai-v2 and wio-lite-ai (their READMEs have the design); this
+section is what is different here.  Step 4a recognises, validates and reports a
+container **without ever executing one**; Step 4b runs the plugin and builds
+this board's own containers; Step 4c removes the resident decoder.
+
+### The target word
+
+This board's plugin target word is `0x1101` (Cortex-M7 / FPv5-SP-D16 / hard
+float / little-endian, no CMSE), in every backend.  It is checked at both ends:
+`port/nn/nn_svc_f746.c` static-asserts it against this firmware's predefined
+macros (`svc/plugin/plugin_target.h`; also the only check of the CMSE bit), and
+**because those macros are exactly a Cortex-M4 with FPv4's too** (GCC 15.2:
+the two predefine the same set), `cmake/check_target_word.py` checks it against
+the linked image after every build: its `Tag_FP_arch` says FPv5, which an
+M4/FPv4 image's does not.  `cmake/fixtures/run_plugin_gate_tests.py` builds an
+M4/FPv4 firmware image and watches it refused under `0x1101`.
+
+### Loading one (Step 4a, `tflm` only)
+
+There is no blob store here: a container reaches the board as a file the
+operator copies to the microSD card with a PC card reader, and loads with
+`nn model load --path /<name>.nnc`.
+
+- The reader (`cmds/cmd_nn_board.c`) reads the whole file into the backend's
+  staging slot as before.  If the bytes probe as a container it prints
+  `nn: read <path>: plugin container, <n> B, crc32 <CRC>` -- the CRC-32 of
+  every byte read, **the closing check**: it must equal the asset receipt's
+  CRC, because nothing on the PC checks that the file copied is the file the
+  build published.  A bare `.tflite` prints nothing new.
+  Measured at Step 4a on hardware: reading and validating a container on the
+  console thread raised the `cli` stack peak from 2,096 B to 2,652 B of 4,096
+  (`thread`, the wio container refused by target word); the inference worker's
+  peak (1,516 B) did not move.
+- The container goes through `svc/plugin/plugin_load.c` -- the validator the
+  host asset build runs -- with this board's policy (target word `0x1101`, link
+  address `0x20048000`, capacity 32 KB, the stack table in `board.cmake`).  A
+  refusal names its reason (`<path> is a container this firmware refuses:
+  built for another target`, `... size disagrees with payload`, `... digest
+  mismatch`, ...) and changes nothing: the previous model and its claims stay.
+- Its **model section is handed to the backend in place**, at its offset
+  inside the staged file.  The tflm backend now accepts any range wholly inside
+  one of its two staging slots that starts on `NN_MODEL_ALIGN` (16 B) -- a slot
+  is identified by containment, not equality, as on wio-lite-ai since #108 --
+  so the validated container is never overwritten with unvalidated bytes.
+  The rule is `port/nn/tflm/nn_tflm_fit.h`, a pure function the backend calls
+  and `test/test_nn_tflm_fit.c` walks at its boundaries.
+- **The plugin is never started.**  The shared load order's plugin hooks are
+  unset, so the model is read by the resident decoder exactly like a bare one.
+- `nn info` then shows the container's claims:
+
+  ```
+  plugin  : <name> (build <id>, crc <plugin digest>), validated, not loaded
+    from  : <path>, <n> B, file crc32 <CRC>
+    image : ...
+    stack : ...
+    decl  : ...
+  ```
+
+  `file crc32` is the same value the read printed (one function over the same
+  bytes; `test/test_nn_model_container.c` pins it against an independent CRC).
+  The plugin line's `crc` is the plugin section's digest, a different number.
+  A bare load or `nn model unload` clears the claims (`plugin  : (none) --
+  reservation 32768 B at 0x20048000`); a refused load leaves the previous ones.
+
+**The policy's c is provisional in Step 4a** (640 B, wio's checked value,
+`F746_PLUGIN_VENEER_COST_4A`): `veneer_cost_gate()`, which derives and checks c
+against the shipped image, needs the firmware functions behind every plugin
+veneer, and those arrive with Step 4b.  Nothing executes a plugin before then,
+so the number only decides whether a container's stack declaration reads as
+admissible.  It cannot outlive Step 4a: once `veneer_cost_gate()` is
+registered, `board.cmake` refuses to configure while the provisional variable
+is still defined, and the adapter refuses to compile beside
+`PLUGIN_VENEER_BASE_COST`.  For the same reason this board builds no plugin and no container
+in Step 4a: `add_plugin()` refuses a board without that gate.
+
+`scripts/verify_tflite.cc` (`--target verify-model`) is this board's model gate
+for that asset build: the tree's own `VerifyModelBuffer()`, the staging
+capacity (512 KB), and the operators the firmware registers -- read from
+`port/nn/tflm/nn_tflm_ops.h`, the same list `nn_tflm.cc` registers from.
+
+Measured at Step 4a (`build/f746-tflm`): Flash 796,868 B (was 792,100; the
+validator, the CRC and the claims), `RAM` 115,584 B of 224 KB.
 
 ### [!] LTO is refused on this board
 

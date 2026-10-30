@@ -15,7 +15,10 @@ static assert would pass a Grove word of "M55" on an M85 firmware -- and the
 plugin gate would not notice either, because the plugins are built with their
 own -mcpu and would still be M55 (the #108 adversarial review).  The linked
 firmware's attributes DO record the core on v8.1-M ("cortex-m55" /
-"cortex-m85"), so the firmware's own image answers what its macros cannot.
+"cortex-m85"), so the firmware's own image answers what its macros cannot.  The same holds for
+f746g-disco (issue #159): -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 predefines exactly
+what its Cortex-M7 / FPv5-SP does, and the image's Tag_FP_arch (FPv4 against
+FPv5) is what tells them apart.
 
 The CMSE bit is masked here as in the plugin gate; the static assert owns it.
 """

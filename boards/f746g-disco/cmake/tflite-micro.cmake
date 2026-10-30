@@ -323,3 +323,34 @@ target_compile_options(tflm PRIVATE
 # the C driver (gcc), which -- unlike g++ -- does not auto-link it, and TFLM's
 # QuantizeMultiplier uses `round` (double, soft-float on this fpv5-sp-d16 core).
 target_link_libraries(tflm PUBLIC stdc++_nano supc++_nano m)
+
+# --- Host-side model checker (scripts/verify_tflite.cc, issue #159) -----------
+# Built with the HOST compiler against the same generated tree, so it runs the
+# identical tflite::VerifyModelBuffer() the firmware does, and checks a model's
+# operators against port/nn/tflm/nn_tflm_ops.h -- the list the firmware
+# registers from.  The asset build uses it as this board's model gate from Step
+# 4b (cmake/add_asset.cmake's MODEL_VERIFIER); until then it is the
+# `verify-model` target, NOT in ALL (compiling schema_generated.h takes a few
+# seconds and most builds never need it).  A custom command because every CMake
+# target in this project cross-compiles.
+find_program(HOST_CXX NAMES c++ g++ clang++)
+if(HOST_CXX)
+    add_custom_command(
+        OUTPUT "${CMAKE_BINARY_DIR}/verify_tflite"
+        COMMAND "${HOST_CXX}" -std=c++17 -O1 -w
+                -I "${TFLM_ROOT}"
+                -I "${TFLM_ROOT}/third_party/flatbuffers/include"
+                -I "${TFLM_ROOT}/third_party/gemmlowp"
+                -I "${TFLM_ROOT}/third_party/ruy"
+                -I "${BOARD_DIR}/port/nn/tflm"
+                "${BOARD_DIR}/scripts/verify_tflite.cc"
+                # GetBuiltinCode(): reads an operator code correctly across the
+                # schema's deprecated/current field pair.
+                "${TFLM_ROOT}/tensorflow/compiler/mlir/lite/schema/schema_utils.cc"
+                -o "${CMAKE_BINARY_DIR}/verify_tflite"
+        DEPENDS "${BOARD_DIR}/scripts/verify_tflite.cc"
+                "${BOARD_DIR}/port/nn/tflm/nn_tflm_ops.h"
+        COMMENT "host c++ -> verify_tflite (checks a .tflite before you copy it)"
+        VERBATIM)
+    add_custom_target(verify-model DEPENDS "${CMAKE_BINARY_DIR}/verify_tflite")
+endif()

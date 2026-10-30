@@ -47,6 +47,8 @@
 
 #include "nn.h"
 #include "nn_backend.h"
+#include "nn_tflm_ops.h"                 /* the op list, shared with verify_tflite */
+#include "nn_tflm_fit.h"                 /* which model range a slot may adopt */
 
 #include <new>
 #include <cstddef>
@@ -89,8 +91,9 @@ int g_sd_slot = -1;
 /* Broad common-vision op superset (23), registered once.  BlazeFace uses only 8
  * of these; the rest let an SD-loaded int8 classifier/detector run without a
  * rebuild.  Unregistered kernels are compiled but dropped by --gc-sections, so the
- * Flash cost is only the kept kernels. */
-using OpResolver = tflite::MicroMutableOpResolver<24>;
+ * Flash cost is only the kept kernels.  The list is nn_tflm_ops.h's, which the
+ * host model gate (scripts/verify_tflite.cc) reads too (issue #159). */
+using OpResolver = tflite::MicroMutableOpResolver<NN_TFLM_OPS_TOTAL>;
 
 struct tflm_model {
 	struct nn_tensor in[1];             /* one input assumed (BlazeFace / classifiers) */
@@ -193,29 +196,13 @@ OpResolver *get_resolver()
 	static bool ready = false;
 	if (ready)
 		return &resolver;
-	if (resolver.AddConv2D()               == kTfLiteOk &&
-	    resolver.AddDepthwiseConv2D()       == kTfLiteOk &&
-	    resolver.AddFullyConnected()        == kTfLiteOk &&
-	    resolver.AddAveragePool2D()         == kTfLiteOk &&
-	    resolver.AddMaxPool2D()             == kTfLiteOk &&
-	    resolver.AddSoftmax()               == kTfLiteOk &&
-	    resolver.AddLogistic()              == kTfLiteOk &&
-	    resolver.AddRelu()                  == kTfLiteOk &&
-	    resolver.AddRelu6()                 == kTfLiteOk &&
-	    resolver.AddReshape()               == kTfLiteOk &&
-	    resolver.AddQuantize()              == kTfLiteOk &&
-	    resolver.AddDequantize()            == kTfLiteOk &&
-	    resolver.AddPad()                   == kTfLiteOk &&
-	    resolver.AddAdd()                   == kTfLiteOk &&
-	    resolver.AddMul()                   == kTfLiteOk &&
-	    resolver.AddSub()                   == kTfLiteOk &&
-	    resolver.AddMean()                  == kTfLiteOk &&
-	    resolver.AddConcatenation()         == kTfLiteOk &&
-	    resolver.AddResizeBilinear()        == kTfLiteOk &&
-	    resolver.AddResizeNearestNeighbor() == kTfLiteOk &&
-	    resolver.AddStridedSlice()          == kTfLiteOk &&
-	    resolver.AddLeakyRelu()             == kTfLiteOk &&
-	    resolver.AddTranspose()             == kTfLiteOk) {
+	/* Every operator of nn_tflm_ops.h, in its order; the first refusal
+	 * stops the rest (the chain the hand-written form had). */
+	bool ok = true;
+#define NN_TFLM_OP_ADD(e, method) ok = ok && resolver.method() == kTfLiteOk;
+	NN_TFLM_OPS_ALL(NN_TFLM_OP_ADD)
+#undef NN_TFLM_OP_ADD
+	if (ok) {
 		ready = true;
 		return &resolver;
 	}
@@ -370,7 +357,9 @@ static int tflm_bk_load_region(void **buf, uint32_t *cap)
 }
 
 /* Transactional model swap.  data==NULL adopts the built-in model; otherwise
- * data must point at one of the two SD slots (the one load_region() handed out).
+ * data must lie wholly inside one of the two SD slots and start on
+ * NN_MODEL_ALIGN (nn.h) -- a bare .tflite at the slot base load_region() handed
+ * out, or a container's model section in place (issue #159).
  * On failure the previous known-good model is rebuilt and reported -- or, when
  * nothing was loaded, the backend stays empty.  *impl_out is ALWAYS &g_tm: the
  * empty handle when no model is left (issue #131 P16). */
@@ -387,13 +376,36 @@ static int tflm_bk_reload(const void *data, uint32_t len, const char *name,
 	if (data == NULL) {
 		new_model = g_blazeface_model_data;
 		new_slot  = -1;
-	} else if (data == g_sd_model_buf[0]) {
-		new_model = data; new_slot = 0;
-	} else if (data == g_sd_model_buf[1]) {
-		new_model = data; new_slot = 1;
 	} else {
-		*impl_out = &g_tm;               /* not a known slot; nothing changed */
-		return -10;
+		/*
+		 * [!] A SLOT IS IDENTIFIED BY CONTAINMENT, NOT BY EQUALITY (issue #159,
+		 * wio-lite-ai's since its issue #108).  A container's model section is
+		 * handed over in place, at an offset inside the staged container.  What
+		 * equality used to guarantee is still required, stated as what it
+		 * meant: the whole model lies inside one slot this backend owns -- TFLM
+		 * keeps pointers INTO the model for as long as the interpreter lives --
+		 * and it starts on the alignment the flatbuffer was laid out against.
+		 * A slot base met both by construction; an offset has to be checked.
+		 */
+		const uintptr_t p = (uintptr_t)data;
+
+		/* The rule itself is nn_tflm_fit.h's, which the host test runs. */
+		new_slot = -1;
+		for (int i = 0; i < 2; i++) {
+			const uintptr_t base = (uintptr_t)g_sd_model_buf[i];
+
+			if (nn_tflm_in_slot(base, NN_TFLM_SD_MODEL_MAX, p)) {
+				new_slot = i;
+				break;
+			}
+		}
+		if (new_slot < 0 ||
+		    !nn_tflm_fit((uintptr_t)g_sd_model_buf[new_slot],
+		                 NN_TFLM_SD_MODEL_MAX, p, len, NN_MODEL_ALIGN)) {
+			*impl_out = &g_tm;  /* not in a slot, off its end, or misaligned */
+			return -10;
+		}
+		new_model = data;
 	}
 
 	uint32_t new_len = (data == NULL) ? g_blazeface_model_data_size : len;

@@ -74,6 +74,12 @@
  * `nn stream` (issue #130, 2026-10-04); 4096 keeps ~2.3x margin.  (The earlier
  * 1024 B was the stedgeai backend, owhinata/stm32f746g-disco#93.) */
 #define NNCAM_WORKER_STACK    4096u
+#if defined(CONFIG_NN_BACKEND_TFLM)
+/* The decode slot's plugin allowance (board.cmake, issue #159) strictly below
+ * the thread it runs on. */
+_Static_assert(F746_PLUGIN_STACK_NN_WORK < NNCAM_WORKER_STACK,
+               "the decode allowance must be below the nn worker's stack");
+#endif
 /* Teardown budgets (ticks, WALL CLOCK; 1 tick = 1 ms).  The sink drain is short
  * because a healthy consume() is one resize away from its put; the worker settle
  * keeps the 3 s this always allowed, since it may have to outlast a whole

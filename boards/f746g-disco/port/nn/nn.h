@@ -171,6 +171,20 @@ uint32_t nn_last_cycles(const struct nn_model *m);
  * session is released may see a state this call did not leave (issue #122 P1).
  */
 int nn_model_load_region(void **buf, uint32_t *cap);
+
+/*
+ * [!] WHERE @p data MAY POINT (issue #159).  The tflm backend accepts any range
+ * that lies wholly inside the staging slot load_region() handed out and starts
+ * on NN_MODEL_ALIGN -- not only the slot's base.  A plugin container is staged
+ * whole and its MODEL SECTION is handed over in place, at its offset inside the
+ * slot; copying it down to the slot's start would overwrite the container whose
+ * bytes were validated with bytes nobody validated.  16, because tflite's
+ * flatbuffer lays its buffers out against that; svc/plugin/plugin_abi.h's
+ * PLUGIN_MODEL_ALIGN is a multiple of it (asserted where containers are
+ * split).  Anything else is refused and changes nothing.
+ */
+#define NN_MODEL_ALIGN 16u
+
 int nn_model_reload(const void *data, uint32_t len, const char *name,
                     int *model_after);
 

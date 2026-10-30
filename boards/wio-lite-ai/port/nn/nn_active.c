@@ -7,19 +7,19 @@
  * @brief   Which decoder is in force.  See nn_active.h.
  *
  * The decision and every call into the plugin's decoder slots are
- * svc/nn/nn_active_core.c's, shared with grove-vision-ai-v2 (issue #126).  What is
- * here is this board's: the conversion from nn_tensor, the transform and the
- * log sink of the base vtable, and the three facts the shared file is handed.
+ * svc/nn/nn_active_core.c's, shared with grove-vision-ai-v2 (issue #126), and
+ * the lease-checked entries above it are svc/nn/nn_active_lease.c's, shared
+ * with f746g-disco (issue #159).  What is here is this board's: the conversion
+ * from nn_tensor, the transform and the log sink of the base vtable, and the
+ * facts the shared files are handed.
  *
- * [!] AND EVERY ENTRY INTO THE PLUGIN REQUIRES THE PLUGIN LEASE (issue #130, as
- * grove-vision-ai-v2's since #127).  Each wrapper below that can reach a plugin
- * callback -- or reads the slot table a holder is about to call through -- asks
- * nn_active_held() first, and a caller that does not hold the lease gets
- * NN_ACTIVE_NOT_HELD: not "no plugin", not a decoder's own error, an answer of
- * its own.  The shared file stays ignorant of the lease (svc/nn/nn_active_core.h);
- * the board enforces it at the board's branch point, which is the only way in.
- * nn_active_is_plugin() is the one question left unchecked, as on Grove: the
- * worker and the panel ask it to decide whether to take the lease at all.
+ * [!] EVERY ENTRY INTO THE PLUGIN STILL REQUIRES THE PLUGIN LEASE (issue #130,
+ * as grove-vision-ai-v2's since #127) -- the check moved with the entries, it
+ * did not go.  nn_active_lease.c asks plugin_lease_held() (this board's
+ * port/plugin/plugin_lease.c) before each of them, and a caller that does not
+ * hold the lease gets NN_ACTIVE_NOT_HELD.  nn_active_is_plugin() is the one
+ * question left unchecked, as on Grove: the worker and the panel ask it to
+ * decide whether to take the lease at all.
  */
 #define LOG_TAG "nn"
 #include "log.h"
@@ -30,45 +30,39 @@
 #include "nn_camera.h"       /* nn_camera_note_depth_at() */
 #include "nn_desc.h"         /* nn_tensor -> tensor_desc */
 #include "plugin_run.h"
-#include "plugin_lease.h"    /* plugin_lease_held() -- the entry check (#130) */
-
-#include <string.h>
 
 /* ---- tensors ------------------------------------------------------------- */
 
 /*
- * The outputs reach a plugin as svc/nn/tensor.h descriptors, which is the contract
- * issue #97 established so that one decoder can read any board's tensors.  The
- * conversion is nn_desc_of(), reused rather than repeated: a second translation
- * could disagree with `nn out` and `nn info` about what a tensor is.
- *
- * A hole in the output set becomes a zeroed descriptor -- UNSUPPORTED -- rather
- * than a refusal here: it is not a model-shape problem, and letting the decoder
- * decide whether the tensors it wants are still there reaches the same answer by
- * a defensible route.
+ * The outputs reach a plugin as svc/nn/tensor.h descriptors.  The loop over
+ * them -- the count, the cap, a hole read as a zeroed descriptor -- is the
+ * shared entries' (svc/nn/nn_active_lease.c); what is this board's is reading
+ * its own model handle and translating one tensor, which is nn_desc_of(),
+ * reused rather than repeated: a second translation could disagree with
+ * `nn out` and `nn info` about what a tensor is.
  */
-static unsigned to_desc(struct nn_model *m, struct tensor_desc *d, unsigned cap)
+_Static_assert(NN_MAX_IO <= NN_ACTIVE_MAX_OUTPUTS,
+               "the shared entries would not read every output of a model");
+
+static int nn_active_output_count(struct nn_model *m)
 {
-	int n = nn_output_count(m);
-	unsigned i, out;
-
-	if (n < 0)
-		n = 0;
-	out = (unsigned)n;
-	if (out > cap)
-		out = cap;
-	for (i = 0u; i < out; i++) {
-		struct nn_tensor *t = nn_output(m, (int)i);
-
-		if (t == NULL)
-			memset(&d[i], 0, sizeof d[i]);
-		else
-			nn_desc_of(&d[i], t);
-	}
-	return out;
+	return nn_output_count(m);
 }
 
-/* ---- the three facts the shared branch is handed ------------------------ */
+/* 0 with @p d filled; non-zero for an output the backend counts but cannot
+ * hand over, which the shared entries turn into a zeroed descriptor. */
+static int nn_active_output_desc(struct nn_model *m, unsigned i,
+                                 struct tensor_desc *d)
+{
+	struct nn_tensor *t = nn_output(m, (int)i);
+
+	if (t == NULL)
+		return -1;
+	nn_desc_of(d, t);
+	return 0;
+}
+
+/* ---- the facts the shared files are handed ------------------------------ */
 
 /*
  * Where a sample goes (issue #126).  This board keeps one high-water per
@@ -113,103 +107,13 @@ static const struct nn_active_board nn_active_board = {
 	.shapes_without_plugin = 1,
 };
 
-/* ---- the branch ---------------------------------------------------------- */
-
-/*
- * Does the calling thread hold the plugin lease?  Counted when it does not, here
- * and only here, so every refusal is counted exactly once whoever forgot.
- */
-static int nn_active_held(void)
-{
-	if (plugin_lease_held())
-		return 1;
-	plugin_lease_note_unheld();
-	return 0;
-}
-
-int nn_active_is_plugin(void)
-{
-	return nn_active_core_is_plugin(&nn_active_board);
-}
-
-int nn_active_shapes_ok(struct nn_model *m)
-{
-	struct tensor_desc d[NN_MAX_IO];
-	unsigned n;
-
-	if (m == NULL)
-		return 0;
-	if (!nn_active_held())
-		return NN_ACTIVE_NOT_HELD;
-	n = to_desc(m, d, NN_MAX_IO);
-	return nn_active_core_shapes_ok(&nn_active_board, d, n);
-}
-
-int nn_active_decode(struct nn_model *m)
-{
-	struct tensor_desc d[NN_MAX_IO];
-	unsigned n;
-
-	if (m == NULL)
-		return BF_ERR_ARG;
-	if (!nn_active_held())
-		return NN_ACTIVE_NOT_HELD;
-	n = to_desc(m, d, NN_MAX_IO);
-	return nn_active_core_decode(&nn_active_board, d, n);
-}
-
-int nn_active_draw(const struct plugin_painter *paint)
-{
-	if (!nn_active_held())
-		return NN_ACTIVE_NOT_HELD;
-	nn_active_core_draw(&nn_active_board, paint);
-	return 0;
-}
-
-/* can_draw and can_report read the plugin's slot table rather than call into
- * it, and are checked anyway: what they answer is about the plugin a holder is
- * about to call, and a load replacing it between the question and the call is
- * exactly what the lease excludes. */
-int nn_active_can_draw(void)
-{
-	if (!nn_active_held())
-		return NN_ACTIVE_NOT_HELD;
-	return nn_active_core_can_draw(&nn_active_board);
-}
-
-int nn_active_can_report(void)
-{
-	if (!nn_active_held())
-		return NN_ACTIVE_NOT_HELD;
-	return nn_active_core_can_report(&nn_active_board);
-}
-
-int nn_active_report(nn_svc_write_fn write, void *ctx)
-{
-	if (!nn_active_held())
-		return NN_ACTIVE_NOT_HELD;
-	return nn_active_core_report(&nn_active_board, write, ctx);
-}
-
-/* ---- the threshold ------------------------------------------------------- */
-
-int nn_active_get_thresh_milli(unsigned *milli)
-{
-	if (milli == NULL)
-		return NN_ACTIVE_THRESH_REFUSED;
-	*milli = NN_SVC_THRESH_NONE;
-	if (!nn_active_held())
-		return NN_ACTIVE_NOT_HELD;
-	*milli = nn_active_core_get_thresh_milli(&nn_active_board);
-	return NN_ACTIVE_THRESH_OK;
-}
-
-int nn_active_set_thresh_milli(unsigned milli)
-{
-	if (!nn_active_held())
-		return NN_ACTIVE_NOT_HELD;
-	return nn_active_core_set_thresh_milli(&nn_active_board, milli);
-}
+/* The shared entries' facts (svc/nn/nn_active_lease.h): the branch above, and
+ * how to read this board's model. */
+const struct nn_active_lease_board nn_active_facts = {
+	.core         = &nn_active_board,
+	.output_count = nn_active_output_count,
+	.output_desc  = nn_active_output_desc,
+};
 
 /* ---- the base vtable ----------------------------------------------------- */
 

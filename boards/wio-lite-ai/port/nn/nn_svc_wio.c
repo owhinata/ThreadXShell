@@ -36,7 +36,7 @@
 #include "cam_preview.h"     /* CAM_PREVIEW_STACK_BYTES -- the draw allowance's ceiling */
 #include "cli_config.h"      /* CLI_INSTANCE/BG_JOB_STACK_SIZE -- report's ceiling */
 #include "fmt.h"
-#include "plugin_info.h"
+#include "plugin_claims.h"   /* the open model's claims and `nn info` lines (#159) */
 #include "nn.h"
 #include "nn_camera.h"
 #include "nn_panel.h"       /* the panel's draw counters (#140) */
@@ -163,49 +163,21 @@ PLUGIN_POLICY_PROBE(nn_plugin_policy);
 #endif /* CONFIG_NN_BACKEND_TFLM */
 
 /*
- * What the container of the OPEN model claimed, or nothing.
- *
- * [!] THE CLAIMS FOLLOW THE MODEL THAT IS ACTUALLY OPEN.  They are settled only
- * after nn_model_reload() has adopted (or refused) that model -- never before,
- * because a reload can refuse and leave the PREVIOUS model active, and then these
- * must still be the previous model's.  A successful bare-model load clears them,
- * as do an unload and a reload that left nothing open.
- *
- * [!] AND THERE IS A WINDOW, SO IT IS NAMED RATHER THAN HIDDEN (the #108
- * adversarial review).  The backend makes the new model visible inside
- * nn_model_reload(); the claims are settled after it returns.  `nn info` does not
- * take the NN session -- it has to answer while a stream holds it -- so a console
- * that preempts a background `nn model load` between those two points would read
- * the new model beside the old claims.  The shared order's transition counter
- * (nn_model_life) is odd from before the reload to after the claims are
- * settled, and a reader that sees it odd -- in the same critical section as
- * its copy -- says "a load is in progress" instead of reporting either set.
- * The claims also carry the slot and blob name they were read from: `nn info`
- * prints the model and the plugin lines from two separate calls, and naming the
- * model on the plugin line is what makes a load landing BETWEEN those calls
- * visible to whoever reads them, rather than a silent mismatch.
- *
- * PLAIN DATA: struct plugin_view carries integer offsets and copied bytes, no
- * callable pointer -- "3a does not execute a plugin" is a property of the type.
+ * What the container of the OPEN model claimed, or nothing -- the store, its
+ * snapshot rule and the `nn info` lines are svc/plugin/plugin_claims.h's since
+ * issue #159 (f746g-disco needed the same three); the object and the
+ * interrupt-masked section around every read and write stay here.  "from" is
+ * this board's: the slot and blob name the claims were read from.
  *
  * Written by `nn model load` / `nn model unload` (which hold the NN session);
  * every read and write copies inside one interrupt-masked section, a couple of
  * hundred bytes, so a reader never sees half of one container's claims.
  */
-struct nn_claims {
-	struct plugin_view view;
-	uint32_t           slot;                     /* the blob it came from */
-	char               model[BLOB_NAME_MAX + 1u];
-};
+/* "slot 4294967295, blob '" + the longest name + "'" must survive whole. */
+_Static_assert(23u + BLOB_NAME_MAX + 1u < PLUGIN_CLAIMS_FROM_MAX,
+               "a container's slot and blob name would be cut on `nn info`");
 
-enum nn_claims_seen {
-	NN_CLAIMS_NONE    = 0,   /* the open model is not a container's    */
-	NN_CLAIMS_VALID   = 1,   /* *out describes the open model           */
-	NN_CLAIMS_LOADING = 2,   /* a load/unload is between its two steps  */
-};
-
-static struct nn_claims nn_claims;
-static uint8_t          nn_claims_valid;
+static struct plugin_claims_store nn_claims;
 
 /*
  * The shared order's state (svc/nn/nn_core_model.c, issue #131 step 7d): its
@@ -223,17 +195,12 @@ static void     nn_core_cs_exit(unsigned posture);
 
 /* The claims of the model the load committed (@p c), or none (NULL).  Only the
  * shared order calls this, under the NN session and inside its counter. */
-static void nn_claims_set(const struct nn_claims *c)
+static void nn_claims_set(const struct plugin_claims *c)
 {
 	TX_INTERRUPT_SAVE_AREA
 
 	TX_DISABLE
-	if (c != NULL) {
-		nn_claims       = *c;
-		nn_claims_valid = 1u;
-	} else {
-		nn_claims_valid = 0u;
-	}
+	plugin_claims_set(&nn_claims, c);
 	TX_RESTORE
 }
 
@@ -251,21 +218,14 @@ static void nn_claims_set(const struct nn_claims *c)
  * beside no plugin at all.  plugin_run_active() reads one word, so taking it
  * here costs nothing.
  */
-static enum nn_claims_seen nn_claims_snapshot(struct nn_claims *out,
-                                              int *running)
+static enum plugin_claims_seen nn_claims_snapshot(struct plugin_claims *out,
+                                                  int *running)
 {
-	enum nn_claims_seen seen;
+	enum plugin_claims_seen seen;
 	TX_INTERRUPT_SAVE_AREA
 
 	TX_DISABLE
-	if ((nn_model_life.seq & 1u) != 0u) {
-		seen = NN_CLAIMS_LOADING;
-	} else if (nn_claims_valid) {
-		*out = nn_claims;
-		seen = NN_CLAIMS_VALID;
-	} else {
-		seen = NN_CLAIMS_NONE;
-	}
+	seen = plugin_claims_get(&nn_claims, nn_model_life.seq, out);
 	if (running != NULL)
 		*running = plugin_run_active();
 	TX_RESTORE
@@ -468,7 +428,7 @@ static uint8_t nn_life_psram;
  *  adapter's until commit(). */
 struct nn_wio_job {
 	struct blob_info info;
-	struct nn_claims claims;
+	struct plugin_claims claims;
 	void            *stage;
 	uint32_t         cap;
 	const void      *model_at;
@@ -752,9 +712,15 @@ static int nn_life_fetch(struct nn_core_model_job *j)
 		}
 		w->is_container = 1;
 		j->bare         = 0;
-		w->claims.slot  = spec->slot;
-		(void)memcpy(w->claims.model, w->info.name, sizeof w->claims.model);
-		w->claims.model[sizeof w->claims.model - 1u] = '\0';
+		{
+			char name[BLOB_NAME_MAX + 1u];
+
+			(void)memcpy(name, w->info.name, sizeof name);
+			name[sizeof name - 1u] = '\0';
+			nn_detail_to(w->claims.from, sizeof w->claims.from,
+			             "slot %lu, blob '%s'", (unsigned long)spec->slot,
+			             name);
+		}
 		w->model_at  = (const uint8_t *)w->stage + w->claims.view.model_off;
 		w->model_len = w->claims.view.model_len;
 	}
@@ -2155,66 +2121,20 @@ extern uint8_t __plugin_start[], __plugin_end[];   /* the linker's reservation *
 void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 {
 #if defined(CONFIG_NN_BACKEND_TFLM)
-	struct nn_claims c;
-	const struct plugin_view *v = &c.view;
-	enum nn_claims_seen seen;
+	struct plugin_claims c;
+	enum plugin_claims_seen seen;
 	int running = 0;
-	const uint32_t base = (uint32_t)(uintptr_t)__plugin_start;
-	const uint32_t size = (uint32_t)(__plugin_end - __plugin_start);
 
 	if (write == NULL)
 		return;
-
-	/* One snapshot, and every word below is read from it: re-reading the flag
-	 * afterwards could describe a load another console finished in between. */
+	/* One snapshot, and every word printed is read from it: re-reading the
+	 * flag afterwards could describe a load another console finished in
+	 * between.  The lines are svc/plugin/plugin_claims.c's. */
 	seen = nn_claims_snapshot(&c, &running);
-	if (seen == NN_CLAIMS_LOADING) {
-		(void)nn_info_line(write, ctx,
-		                   "plugin  : (a model load is in progress -- ask "
-		                   "again)\r\n");
-		return;
-	}
-	if (seen == NN_CLAIMS_NONE || !v->has_plugin) {
-		/* Says so rather than leaving the line out: a missing line reads as a
-		 * board with no plugin support at all, which is a different and wrong
-		 * fact. */
-		(void)nn_info_line(write, ctx,
-		                   "plugin  : (none%s) -- reservation %lu B at 0x%08lx"
-		                   "\r\n",
-		                   seen == NN_CLAIMS_VALID ? " in this container" : "",
-		                   (unsigned long)size, (unsigned long)base);
-		return;
-	}
-	/*
-	 * [!] THE RUNTIME STATUS COMES FROM THE SAME SNAPSHOT AS THE CLAIMS
-	 * (issue #110).  Reading it here would be a second question asked later,
-	 * and a load landing between the two would print one container's manifest
-	 * beside another's -- or beside no plugin at all.  `running` is what this
-	 * board's loader actually has branched into; `validated` is a container
-	 * whose plugin was refused or never reached -- since issue #116 that means
-	 * nothing is reading its model.
-	 */
-	if (nn_info_line(write, ctx,
-	                 "plugin  : %s (build %s, crc %08lx), %s\r\n",
-	                 v->name, v->build_id, (unsigned long)v->digest,
-	                 running ? "running" : "validated, not loaded") < 0)
-		return;
-	/* Which model these claims came with -- see struct nn_claims. */
-	if (nn_info_line(write, ctx, "  from  : slot %lu, blob '%s'\r\n",
-	                 (unsigned long)c.slot, c.model) < 0)
-		return;
-	if (nn_info_line(write, ctx,
-	                 "  image : %lu B file / %lu B mem (code %lu, data %lu, "
-	                 "bss %lu), link 0x%08lx\r\n",
-	                 (unsigned long)v->file_size, (unsigned long)v->mem_size,
-	                 (unsigned long)v->code_len, (unsigned long)v->data_seg_len,
-	                 (unsigned long)v->bss_len,
-	                 (unsigned long)v->link_addr) < 0)
-		return;
-	/* What each slot needs at this firmware's c, and what the manifest
-	 * declared -- compared with the call-site depths `nn stream stats`
-	 * measures.  See svc/plugin/plugin_info.h. */
-	(void)plugin_info_stack(write, ctx, v, nn_plugin_policy.veneer_cost);
+	plugin_claims_info(write, ctx, seen, &c, running,
+	                   (uint32_t)(uintptr_t)__plugin_start,
+	                   (uint32_t)(__plugin_end - __plugin_start),
+	                   nn_plugin_policy.veneer_cost);
 #else
 	/* The null backend cannot load a model, so no container can be open. */
 	(void)write;

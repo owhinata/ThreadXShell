@@ -37,7 +37,7 @@
 
 #if defined(CONFIG_NN_BACKEND_TFLM)
 #include "nn_container.h"
-#include "plugin_info.h"
+#include "plugin_claims.h"   /* the open model's claims and `nn info` lines */
 #include "plugin_load.h"
 #endif
 
@@ -134,38 +134,29 @@ static const struct plugin_policy nn_plugin_policy = {
 /*
  * What the container of the OPEN model claimed, or nothing.
  *
- * Settled only by the shared order's commit / forget, i.e. only once the
- * backend adopted (or refused) the model, and while the transition counter is
- * odd -- so `nn info`, which takes no lock, reads the counter in the same
- * masked section as these and says "a model load is in progress" rather than
- * pairing one model with another's claims.  @ref path names the file the claims
- * came with, so a load landing between `nn info`'s model line and its plugin
+ * The store, its snapshot rule and the `nn info` lines are
+ * svc/plugin/plugin_claims.h's (issue #159 Step 4b: wio-lite-ai's, moved so
+ * this board does not keep a second copy).  Settled only by the shared order's
+ * commit / forget, i.e. only once the backend adopted (or refused) the model,
+ * and while the transition counter is odd -- so `nn info`, which takes no lock,
+ * reads the counter in the same masked section as these and says "a model load
+ * is in progress" rather than pairing one model with another's claims.  "from"
+ * is this board's: the file the claims came with, its length and the CRC the
+ * load printed, so a load landing between `nn info`'s model line and its plugin
  * line shows up as a mismatch.
- *
- * PLAIN DATA: struct plugin_view carries integer offsets and copied bytes, no
- * callable pointer.
  */
 #define NN_CLAIMS_PATH_MAX 48u
-struct nn_claims {
-	struct plugin_view view;
-	uint32_t crc32;   /**< nn_container_crc() over all @ref bytes read      */
-	uint32_t bytes;   /**< the whole container, as read off the card        */
-	char     path[NN_CLAIMS_PATH_MAX];
-};
+/* "<path>, 4294967295 B, file crc32 XXXXXXXX" must survive whole. */
+_Static_assert((NN_CLAIMS_PATH_MAX - 1u) + 35u < PLUGIN_CLAIMS_FROM_MAX,
+               "a container's path, length and CRC would be cut on `nn info`");
 
-static struct nn_claims nn_claims;
-static uint8_t          nn_claims_valid;
+static struct plugin_claims_store nn_claims;
 
-static void nn_claims_set(const struct nn_claims *c)
+static void nn_claims_set(const struct plugin_claims *c)
 {
 	unsigned posture = nn_life_cs_enter();
 
-	if (c != NULL) {
-		nn_claims       = *c;
-		nn_claims_valid = 1u;
-	} else {
-		nn_claims_valid = 0u;
-	}
+	plugin_claims_set(&nn_claims, c);
 	nn_life_cs_exit(posture);
 }
 #endif /* CONFIG_NN_BACKEND_TFLM */
@@ -184,8 +175,8 @@ struct nn_f746_job {
 	const void    *model_at;
 	uint32_t       model_len;
 #if defined(CONFIG_NN_BACKEND_TFLM)
-	int              is_container;
-	struct nn_claims claims;
+	int                  is_container;
+	struct plugin_claims claims;
 #endif
 };
 
@@ -401,10 +392,13 @@ static int nn_life_fetch(struct nn_core_model_job *j)
 	 * anything else writes the slot.  So the number `nn info` prints beside the
 	 * claims is the number the load printed, for the file the operator copied.
 	 */
-	if (nn_container_crc(f->buf, f->len, &f->claims.crc32)) {
+	uint32_t crc;
+
+	if (nn_container_crc(f->buf, f->len, &crc)) {
 		enum plugin_result pr = plugin_parse(f->buf, f->len,
 		                                     &nn_plugin_policy,
 		                                     &f->claims.view);
+		char path[NN_CLAIMS_PATH_MAX];
 		size_t n;
 
 		if (pr != PLUGIN_OK) {
@@ -414,12 +408,16 @@ static int nn_life_fetch(struct nn_core_model_job *j)
 		}
 		f->is_container  = 1;
 		j->bare          = 0;
-		f->claims.bytes  = f->len;
 		n = strlen(j->spec->path);
-		if (n >= sizeof f->claims.path)
-			n = sizeof f->claims.path - 1u;
-		memcpy(f->claims.path, j->spec->path, n);
-		f->claims.path[n] = '\0';
+		if (n >= sizeof path)
+			n = sizeof path - 1u;
+		memcpy(path, j->spec->path, n);
+		path[n] = '\0';
+		/* The whole container, as read off the card, and the CRC of exactly
+		 * those bytes (nn_container.h). */
+		nn_detail_to(f->claims.from, sizeof f->claims.from,
+		             "%s, %lu B, file crc32 %08lX", path,
+		             (unsigned long)f->len, (unsigned long)crc);
 		f->model_at  = (const uint8_t *)f->buf + f->claims.view.model_off;
 		f->model_len = f->claims.view.model_len;
 	}
@@ -656,67 +654,29 @@ void nn_svc_model_unload(struct nn_op_result *res)
  * and the asset receipt names (nn_container.h).
  *
  * [!] NOTHING IS HELD WHILE THIS PRINTS.  The claims and the transition counter
- * are copied out in one masked section and written afterwards.
+ * are copied out in one masked section and written afterwards, by
+ * svc/plugin/plugin_claims.c (issue #159 Step 4b).
  */
 #if defined(CONFIG_NN_BACKEND_TFLM)
 extern uint8_t __plugin_start[], __plugin_end[];   /* the linker's reservation */
 
 void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 {
-	struct nn_claims c;
-	const struct plugin_view *v = &c.view;
+	struct plugin_claims c;
+	enum plugin_claims_seen seen;
 	unsigned posture;
-	uint32_t seq;
-	int valid;
-	const uint32_t base = (uint32_t)(uintptr_t)__plugin_start;
-	const uint32_t size = (uint32_t)(__plugin_end - __plugin_start);
 
 	if (write == NULL)
 		return;
-
 	posture = nn_life_cs_enter();
-	seq   = nn_model_life.seq;
-	valid = nn_claims_valid;
-	if (valid)
-		c = nn_claims;
+	seen = plugin_claims_get(&nn_claims, nn_model_life.seq, &c);
 	nn_life_cs_exit(posture);
-
-	if ((seq & 1u) != 0u) {
-		(void)nn_info_line(write, ctx,
-		                   "plugin  : (a model load is in progress -- ask "
-		                   "again)\r\n");
-		return;
-	}
-	if (!valid || !v->has_plugin) {
-		/* Says so rather than leaving the line out: a missing line would read
-		 * as a board with no plugin support at all. */
-		(void)nn_info_line(write, ctx,
-		                   "plugin  : (none%s) -- reservation %lu B at 0x%08lx"
-		                   "\r\n", valid ? " in this container" : "",
-		                   (unsigned long)size, (unsigned long)base);
-		if (!valid)
-			return;
-	} else if (nn_info_line(write, ctx,
-	                        "plugin  : %s (build %s, crc %08lx), validated, "
-	                        "not loaded\r\n", v->name, v->build_id,
-	                        (unsigned long)v->digest) < 0) {
-		return;
-	}
-	if (nn_info_line(write, ctx,
-	                 "  from  : %s, %lu B, file crc32 %08lX\r\n", c.path,
-	                 (unsigned long)c.bytes, (unsigned long)c.crc32) < 0)
-		return;
-	if (!v->has_plugin)
-		return;
-	if (nn_info_line(write, ctx,
-	                 "  image : %lu B file / %lu B mem (code %lu, data %lu, "
-	                 "bss %lu), link 0x%08lx\r\n",
-	                 (unsigned long)v->file_size, (unsigned long)v->mem_size,
-	                 (unsigned long)v->code_len, (unsigned long)v->data_seg_len,
-	                 (unsigned long)v->bss_len,
-	                 (unsigned long)v->link_addr) < 0)
-		return;
-	(void)plugin_info_stack(write, ctx, v, nn_plugin_policy.veneer_cost);
+	/* No loader yet (Step 4a): nothing is ever running, so a plugin reads
+	 * "validated, not loaded". */
+	plugin_claims_info(write, ctx, seen, &c, 0,
+	                   (uint32_t)(uintptr_t)__plugin_start,
+	                   (uint32_t)(__plugin_end - __plugin_start),
+	                   nn_plugin_policy.veneer_cost);
 }
 #else
 /* The other backends cannot take a container, so they have nothing to add.

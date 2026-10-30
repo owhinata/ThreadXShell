@@ -335,6 +335,18 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     $LDFLAGS -o "$out/test_plugin_info"
 "$out/test_plugin_info"
 
+# issue #159 -- the open model's container claims and the `nn info` lines around
+# those stack lines (svc/plugin/plugin_claims), shared by wio-lite-ai and
+# f746g-disco: an odd transition counter is "a load is in progress" whatever is
+# stored, and each state's lines, with the board's own "from" words passed
+# through -- including for a model-only container, whose from-line is where
+# f746g-disco repeats the CRC its load printed.
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_plugin_claims.c" "$svc/plugin/plugin_claims.c" \
+    "$svc/plugin/plugin_info.c" "$svc/fmt.c" \
+    $LDFLAGS -o "$out/test_plugin_claims"
+"$out/test_plugin_claims"
+
 # issue #103 -- is the plugin reservation executable?  (svc/plugin/plugin_mpu.c, the
 # Armv8-M verdict grove-vision-ai-v2 links)
 #
@@ -406,6 +418,18 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_nn_active_core.c" "$svc/nn/nn_active_core.c" \
     $LDFLAGS -o "$out/test_nn_active_core"
 "$out/test_nn_active_core"
+
+# issue #159 -- the lease-checked entries above that branch
+# (svc/nn/nn_active_lease.c), moved out of wio-lite-ai so f746g-disco takes the
+# same ones: every entry refuses a caller without the plugin lease with
+# NN_ACTIVE_NOT_HELD, enters and reads nothing, counts the refusal once, and
+# goes in with it held; the descriptors it builds keep the count, the cap, and a
+# hole read as zeroed rather than as the board's residue.
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_nn_active_lease.c" "$svc/nn/nn_active_lease.c" \
+    "$svc/nn/nn_active_core.c" \
+    $LDFLAGS -o "$out/test_nn_active_lease"
+"$out/test_nn_active_lease"
 
 # issue #110 (#78 Step 3b) -- the capture of an external decoder's own account
 # of its result (svc/nn/nn_report.c).  A contract about OUTCOMES: zero bytes is a

@@ -45,7 +45,7 @@ boards/<board>/port/nn/                  the board's glue, one file per thread:
         |   svc/nn/nn_core.c       lifecycle policy and the stream's numbers
         |   svc/nn/nn_core_frame.c producer / worker / panel frame path
         |   svc/nn/nn_stream_life.c, nn_handoff.c, nn_det_record.c,
-        |   nn_core_model.c, nn_swap.c, nn_active_core.c,
+        |   nn_core_model.c, nn_swap.c, nn_active_core.c, nn_active_lease.c,
         |   svc/plugin/plugin_lease_api.h (implemented by the board)
         v
 backend: boards/<board>/port/nn/tflm/ (wio-lite-ai, f746g-disco)
@@ -239,6 +239,7 @@ relative to `svc/`.
 | `nn/nn_core_model` | The order of `nn model load` and `nn model unload`. |
 | `nn/nn_swap` | Where a model load ended up and what that obliges (the ending table). |
 | `nn/nn_active_core` | Whether a plugin decodes, and every call into its decoder slots. |
+| `nn/nn_active_lease` | The lease-checked entries above that branch, for a board whose model is a `struct nn_model` (wio-lite-ai, f746g-disco); the board supplies its facts (`nn_active_facts`). |
 | `nn/nn_report` | The bounded sink that captures a plugin's account of its own result. |
 | `nn/nn_top` | The top classes of an output tensor, taken on the thread that ran the inference. |
 | `plugin/plugin_abi.h` | The wire ABI between the firmware and a plugin shipped with its model. |
@@ -248,6 +249,7 @@ relative to `svc/`.
 | `plugin/plugin_mpu` | Armv8-M MPU verdict: is the plugin reservation executable (pure function). |
 | `plugin/plugin_mpu_v7m` | The same question for an Armv7-M PMSA, answered by its own rules. |
 | `plugin/plugin_info` | The plugin stack lines of `nn info`. |
+| `plugin/plugin_claims` | The open model's container claims (a board-owned store, read in the board's critical section) and the `nn info` plugin lines around the stack lines (wio-lite-ai, f746g-disco). |
 | `plugin/plugin_lease_api.h` | The plugin lease's API (one lock into the plugin); the board implements it. |
 | `plugin/plugin_lease_miss` | What a refused no-wait lease acquire counts, over state the caller owns. |
 | `plugin/plugin_paint_budget` | What one plugin `draw()` may spend, and the one place it is charged. |

@@ -104,7 +104,7 @@ gcc $CFLAGS -I "$board/port/nn" -I "$board/port/plugin" -I "$board/svc" \
     -I "$asset/plugins/blazeface" -I "$asset/common" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_nn_active.c" \
     "$board/port/nn/nn_active.c" "$board/port/nn/nn_desc.c" \
-    "$HOST_TEST_SVC/nn/nn_active_core.c" \
+    "$HOST_TEST_SVC/nn/nn_active_lease.c" "$HOST_TEST_SVC/nn/nn_active_core.c" \
     "$asset/plugins/blazeface/plugin_main.c" \
     "$asset/common/plugin_base.c" "$asset/common/plugin_fmt.c" \
     "$asset/common/plugin_text.c" \
@@ -131,19 +131,23 @@ gcc $CFLAGS \
 
 # issue #130 -- and the two tables above are the WHOLE list.  A mutation that
 # deletes one entry's check turns its row red; an entry that never had a row
-# cannot.  The list of entries is every external text symbol of nn_active.c and
-# plugin_run.c, each compiled ON ITS OWN with the includes its test uses (never
-# read off a linked test binary, whose stubs would count), held against the two
-# tests' tables and the script's named exemptions in both directions.
+# cannot.  The list of entries is every external text symbol of nn_active.c,
+# svc/nn/nn_active_lease.c (where the entries themselves live since issue #159)
+# and plugin_run.c, each compiled ON ITS OWN with the includes its test uses
+# (never read off a linked test binary, whose stubs would count), held against
+# the two tests' tables and the script's named exemptions in both directions.
 lease_inc_active="-I $board/port/nn -I $board/port/plugin -I $board/svc -I $HOST_TEST_SVC -I $HOST_TEST_SVC/nn -I $HOST_TEST_SVC/plugin -I $HOST_TEST_SVC/camera"
 lease_inc_run="-I $here/plugin_run_shim -I $board/port/plugin -I $board/svc -I $svc -I $svc/nn -I $svc/plugin -I $svc/camera"
 gcc $CFLAGS $lease_inc_active -c "$board/port/nn/nn_active.c" \
     -o "$out/lease_nn_active.o"
+gcc $CFLAGS $lease_inc_active -c "$HOST_TEST_SVC/nn/nn_active_lease.c" \
+    -o "$out/lease_nn_active_lease.o"
 gcc $CFLAGS $lease_inc_run -c "$board/port/plugin/plugin_run.c" \
     -o "$out/lease_plugin_run.o"
 lease_tests="--test $here/test_nn_active.c $here/test_plugin_run_lease.c"
 python3 "$here/check_lease_entries.py" \
-    --obj "$out/lease_nn_active.o" "$out/lease_plugin_run.o" $lease_tests
+    --obj "$out/lease_nn_active.o" "$out/lease_nn_active_lease.o" \
+          "$out/lease_plugin_run.o" $lease_tests
 
 # [!] And it is seen to fail, for the two spellings a source-text match missed
 # (the review of #130 step 4): a definition whose return type is on the line
@@ -160,7 +164,8 @@ for lease_neg in two_line attribute; do
     gcc $CFLAGS -Wno-missing-prototypes $lease_inc_active -c "$lease_src" \
         -o "$out/lease_neg_$lease_neg.o"
     if python3 "$here/check_lease_entries.py" \
-            --obj "$out/lease_neg_$lease_neg.o" "$out/lease_plugin_run.o" \
+            --obj "$out/lease_neg_$lease_neg.o" "$out/lease_nn_active_lease.o" \
+                  "$out/lease_plugin_run.o" \
             $lease_tests > "$out/lease_neg_$lease_neg.txt" 2>&1; then
         echo "check_lease_entries: FAIL -- the $lease_neg entry was not refused" >&2
         exit 1

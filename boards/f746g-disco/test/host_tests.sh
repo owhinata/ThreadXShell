@@ -155,10 +155,10 @@ gcc $CFLAGS -I "$here/nn_shim" -I "$board/port/nn" -I "$board/port/camera" \
 # beside the claims are one value, equal to an independent CRC of the file.
 gcc $CFLAGS -DCONFIG_NN_BACKEND_TFLM=1 -DF746_PLUGIN_TARGET_ID=0x1101 \
     -DF746_PLUGIN_BASE=0x20048000u -DF746_PLUGIN_MAX=32768u \
-    -DF746_PLUGIN_VENEER_COST_4A=640u -DF746_PLUGIN_STACK_NN_WORK=1024u \
+    -DPLUGIN_VENEER_BASE_COST=640u -DF746_PLUGIN_STACK_NN_WORK=1024u \
     -DF746_PLUGIN_STACK_GUIX=1024u -DF746_PLUGIN_STACK_SHELL=1024u \
     -I "$here/nn_shim" -I "$board/port/nn" -I "$board/port/camera" \
-    -I "$board/port/sdram" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+    -I "$board/port/sdram" -I "$board/port/plugin" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_nn_model_container.c" "$board/port/nn/nn_svc_f746_model.c" \
     "$board/port/nn/nn_container.c" \
     "$board/port/nn/nn.c" "$HOST_TEST_SVC/nn/nn_core_model.c" \
@@ -226,3 +226,72 @@ gcc $CFLAGS -DCLI_USE_COLOR=0 \
     "$HOST_TEST_BACKEND/cli_backend_dummy.c" "$st/host_glue.c" \
     $LDFLAGS -o "$out/test_camera_table"
 "$out/test_camera_table"
+
+# issue #159 (#78 Step 4b) -- the painter's loops (port/plugin/plugin_paint.c):
+# row-major CPU stores into the camera view buffer.  Built with
+# PLUGIN_PAINT_COUNT_STORES so every store is counted where it happens; the
+# outline goldens are wio-lite-ai's (rect_geom.c is shared), so the two boards'
+# loops are held to the same rule from opposite layouts.
+gcc $CFLAGS -DPLUGIN_PAINT_COUNT_STORES -I "$board/port/plugin" \
+    -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+    "$here/test_plugin_paint.c" "$board/port/plugin/plugin_paint.c" \
+    "$HOST_TEST_SVC/plugin/plugin_paint_budget.c" \
+    "$HOST_TEST_SVC/plugin/plugin_paint_span.c" "$HOST_TEST_SVC/rect_geom.c" \
+    $LDFLAGS -o "$out/test_plugin_paint_f746"
+"$out/test_plugin_paint_f746"
+
+# issue #159 -- the shared Armv7-M MPU verdict on THIS board's region set (the
+# ones src/bsp.c programs), and the configurations that must be refused: the
+# background map off, an XN / Device / read-only region over the reservation,
+# a DREGION the snapshot cannot hold.
+gcc $CFLAGS -I "$HOST_TEST_SVC/plugin" \
+    "$here/test_plugin_mpu_f746.c" "$HOST_TEST_SVC/plugin/plugin_mpu_v7m.c" \
+    $LDFLAGS -o "$out/test_plugin_mpu_f746"
+"$out/test_plugin_mpu_f746"
+
+# issue #159 -- a fault inside the loaded plugin is attributed and resets at
+# once; anywhere else keeps the dump-and-halt (src/fault_plugin.c over the real
+# shared loader).  A plugin cannot be made to fault on demand on the board.
+gcc $CFLAGS -I "$board/src" \
+    -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+    "$here/test_fault_plugin.c" "$board/src/fault_plugin.c" \
+    "$HOST_TEST_SVC/plugin/plugin_run_core.c" "$HOST_TEST_SVC/plugin/plugin_exec.c" \
+    "$HOST_TEST_SVC/plugin/plugin_load.c" "$HOST_TEST_SVC/crc32.c" "$HOST_TEST_SVC/fmt.c" \
+    $LDFLAGS -o "$out/test_fault_plugin"
+"$out/test_fault_plugin"
+
+# issue #159 -- every way into the plugin on this board is walked without the
+# lease by a host test, or named in cmake/check_lease_entries.py with why (the
+# script wio-lite-ai has used since #130, shared now).  The entries are the
+# external text symbols of this board's nn_active.c and plugin_run.c and of the
+# two shared TUs, each compiled ON ITS OWN; the walks are the shared tests'
+# (shell/test/test_nn_active_lease.c, test_plugin_run_lease.c).  The HAL for
+# the binding is test/plugin_run_shim (compile only).
+lease_check="$HOST_TEST_REPO/cmake/check_lease_entries.py"
+lease_inc="-I $board/port/nn -I $board/port/plugin -I $board/port/camera -I $board/svc -I $here/plugin_run_shim -I $here/nn_shim -I $HOST_TEST_SVC -I $HOST_TEST_SVC/nn -I $HOST_TEST_SVC/plugin -I $HOST_TEST_SVC/camera"
+gcc $CFLAGS -DCONFIG_NN_BACKEND_TFLM=1 $lease_inc -c "$board/port/nn/nn_active.c" \
+    -o "$out/f746_lease_nn_active.o"
+gcc $CFLAGS $lease_inc -c "$HOST_TEST_SVC/nn/nn_active_lease.c" \
+    -o "$out/f746_lease_nn_active_lease.o"
+gcc $CFLAGS $lease_inc -c "$HOST_TEST_SVC/plugin/plugin_run_core.c" \
+    -o "$out/f746_lease_plugin_run_core.o"
+gcc $CFLAGS $lease_inc -c "$board/port/plugin/plugin_run.c" \
+    -o "$out/f746_lease_plugin_run.o"
+python3 "$lease_check" \
+    --obj "$out/f746_lease_nn_active.o" "$out/f746_lease_nn_active_lease.o" \
+          "$out/f746_lease_plugin_run_core.o" "$out/f746_lease_plugin_run.o" \
+    --test "$HOST_TEST_REPO/shell/test/test_nn_active_lease.c" \
+           "$HOST_TEST_REPO/shell/test/test_plugin_run_lease.c"
+
+# issue #159 (Step 4b review) -- this board's MPU read-back
+# (port/plugin/plugin_run.c, plugin_run_mpu_ok()): the REAL binding over
+# test/plugin_run_shim, whose MPU answers RBAR / RASR for the region RNR
+# selects.  Every region up to DREGION is read, RNR and PRIMASK are put back,
+# DREGION above the snapshot refuses rather than clamps.  The shared lease test
+# stubs this binding, so this is where the loop itself is seen.
+gcc $CFLAGS -I "$here/plugin_run_shim" -I "$board/svc" \
+    -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+    "$here/test_plugin_run_mpu.c" "$board/port/plugin/plugin_run.c" \
+    "$HOST_TEST_SVC/plugin/plugin_mpu_v7m.c" \
+    $LDFLAGS -o "$out/test_plugin_run_mpu"
+"$out/test_plugin_run_mpu"

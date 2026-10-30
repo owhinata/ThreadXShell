@@ -29,7 +29,7 @@
 #include "nn_active_core.h"
 #include "nn_camera.h"       /* nn_camera_note_depth_at() */
 #include "nn_desc.h"         /* nn_tensor -> tensor_desc */
-#include "plugin_run.h"
+#include "plugin_run_core.h"
 
 /* ---- tensors ------------------------------------------------------------- */
 
@@ -85,7 +85,7 @@ static void nn_active_note(unsigned slot, uintptr_t sp)
 	                        sp);
 }
 
-/* entry(), from the loader's exec_ok hook: a console slot (plugin_run.h). */
+/* entry(), from the loader's exec_ok hook: a console slot (plugin_run_core.h). */
 void plugin_run_note_entry(uintptr_t sp)
 {
 	nn_camera_note_depth_at(NNCAM_SITE_SHELL, sp);

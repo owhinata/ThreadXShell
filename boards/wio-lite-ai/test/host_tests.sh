@@ -112,42 +112,50 @@ gcc $CFLAGS -I "$board/port/nn" -I "$board/port/plugin" -I "$board/svc" \
     $LDFLAGS -lm -o "$out/test_nn_active"
 "$out/test_nn_active"
 
-# issue #130 -- the loader's plugin-lease checks (port/plugin/plugin_run.c):
-# a load refused before the shared loader touches anything, the exec_ok hook
-# refusing again at the branch into entry(), and an unload that does not reach
-# the loader -- each without the lease, and each counted once.  The same test
-# grove-vision-ai-v2 has had since #127.  The REAL plugin_run.c and
-# svc/plugin/plugin_exec.c; the HAL is test/plugin_run_shim, and the shared loader's
-# unload is wrapped so "it did not unpublish" can be observed as "it did not
-# call".
-gcc $CFLAGS \
-    -I "$here/plugin_run_shim" -I "$board/port/plugin" -I "$board/svc" \
-    -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
-    "$here/test_plugin_run_lease.c" "$board/port/plugin/plugin_run.c" \
-    "$svc/plugin/plugin_exec.c" "$svc/plugin/plugin_mpu_v7m.c" "$svc/plugin/plugin_load.c" \
-    "$svc/crc32.c" \
-    $LDFLAGS -Wl,--wrap=plugin_exec_unload -o "$out/test_plugin_run_lease"
-"$out/test_plugin_run_lease"
-
-# issue #130 -- and the two tables above are the WHOLE list.  A mutation that
+# issue #130 -- the loader's plugin-lease checks are svc/plugin/plugin_run_core.c
+# since issue #159, shared with f746g-disco, and so is their test
+# (shell/test/test_plugin_run_lease.c, run by run_host_tests.sh).  What is this
+# board's -- port/plugin/plugin_run.c, the MPU read-back and the cache
+# maintenance -- enters no plugin; it is compiled below so the entry list
+# derives from it too (the HAL is test/plugin_run_shim).
+#
+# issue #130 -- and the two tables are the WHOLE list.  A mutation that
 # deletes one entry's check turns its row red; an entry that never had a row
 # cannot.  The list of entries is every external text symbol of nn_active.c,
-# svc/nn/nn_active_lease.c (where the entries themselves live since issue #159)
-# and plugin_run.c, each compiled ON ITS OWN with the includes its test uses
-# (never read off a linked test binary, whose stubs would count), held against
-# the two tests' tables and the script's named exemptions in both directions.
+# svc/nn/nn_active_lease.c, svc/plugin/plugin_run_core.c (where the entries
+# themselves live since issue #159) and this board's plugin_run.c, each compiled
+# ON ITS OWN with the includes its test uses (never read off a linked test
+# binary, whose stubs would count), held against the two tests' tables and the
+# script's named exemptions in both directions (cmake/check_lease_entries.py,
+# shared with f746g-disco).
+lease_check="$HOST_TEST_REPO/cmake/check_lease_entries.py"
 lease_inc_active="-I $board/port/nn -I $board/port/plugin -I $board/svc -I $HOST_TEST_SVC -I $HOST_TEST_SVC/nn -I $HOST_TEST_SVC/plugin -I $HOST_TEST_SVC/camera"
 lease_inc_run="-I $here/plugin_run_shim -I $board/port/plugin -I $board/svc -I $svc -I $svc/nn -I $svc/plugin -I $svc/camera"
 gcc $CFLAGS $lease_inc_active -c "$board/port/nn/nn_active.c" \
     -o "$out/lease_nn_active.o"
 gcc $CFLAGS $lease_inc_active -c "$HOST_TEST_SVC/nn/nn_active_lease.c" \
     -o "$out/lease_nn_active_lease.o"
+gcc $CFLAGS $lease_inc_run -c "$svc/plugin/plugin_run_core.c" \
+    -o "$out/lease_plugin_run_core.o"
 gcc $CFLAGS $lease_inc_run -c "$board/port/plugin/plugin_run.c" \
     -o "$out/lease_plugin_run.o"
-lease_tests="--test $here/test_nn_active.c $here/test_plugin_run_lease.c"
-python3 "$here/check_lease_entries.py" \
-    --obj "$out/lease_nn_active.o" "$out/lease_nn_active_lease.o" \
-          "$out/lease_plugin_run.o" $lease_tests
+lease_tests="--test $here/test_nn_active.c $HOST_TEST_REPO/shell/test/test_plugin_run_lease.c"
+lease_objs_rest="$out/lease_nn_active_lease.o $out/lease_plugin_run_core.o $out/lease_plugin_run.o"
+python3 "$lease_check" \
+    --obj "$out/lease_nn_active.o" $lease_objs_rest $lease_tests
+
+# issue #159 (Step 4b review) -- this board's MPU read-back
+# (port/plugin/plugin_run.c, plugin_run_mpu_ok()): the REAL binding over
+# test/plugin_run_shim, whose MPU answers RBAR / RASR for the region RNR
+# selects.  Every region up to DREGION is read, RNR and PRIMASK are put back,
+# DREGION above the snapshot refuses rather than clamps.  The shared lease test
+# stubs this binding, so this is where the loop itself is seen.
+gcc $CFLAGS -I "$here/plugin_run_shim" -I "$board/svc" \
+    -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+    "$here/test_plugin_run_mpu.c" "$board/port/plugin/plugin_run.c" \
+    "$HOST_TEST_SVC/plugin/plugin_mpu_v7m.c" \
+    $LDFLAGS -o "$out/test_plugin_run_mpu"
+"$out/test_plugin_run_mpu"
 
 # [!] And it is seen to fail, for the two spellings a source-text match missed
 # (the review of #130 step 4): a definition whose return type is on the line
@@ -163,9 +171,8 @@ for lease_neg in two_line attribute; do
     fi
     gcc $CFLAGS -Wno-missing-prototypes $lease_inc_active -c "$lease_src" \
         -o "$out/lease_neg_$lease_neg.o"
-    if python3 "$here/check_lease_entries.py" \
-            --obj "$out/lease_neg_$lease_neg.o" "$out/lease_nn_active_lease.o" \
-                  "$out/lease_plugin_run.o" \
+    if python3 "$lease_check" \
+            --obj "$out/lease_neg_$lease_neg.o" $lease_objs_rest \
             $lease_tests > "$out/lease_neg_$lease_neg.txt" 2>&1; then
         echo "check_lease_entries: FAIL -- the $lease_neg entry was not refused" >&2
         exit 1

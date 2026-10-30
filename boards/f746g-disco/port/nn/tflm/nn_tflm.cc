@@ -347,12 +347,26 @@ static void tflm_bk_close(void *impl)
 	(void)impl;   /* singleton; keep the interpreter alive */
 }
 
+/*
+ * [!] THE STAGING CAPACITY, AS ONE OBJECT THE DEVICE READS AND THE HOST READS
+ * BACK (issue #159 Step 4b).  load_region() hands it out as the read limit --
+ * the reader refuses a file larger than this -- and the asset build reads the
+ * same object's bytes out of the shipped shell.elf (cmake/build_asset.py
+ * --stage-symbol) to refuse a container that would not fit, before it is
+ * published.  Read through a volatile below so the read limit is THIS object,
+ * not a constant the compiler folded beside it.
+ */
+extern "C" {
+extern const uint32_t nn_tflm_stage_cap;
+const uint32_t nn_tflm_stage_cap = NN_TFLM_SD_MODEL_MAX;
+}
+
 /* Return the INACTIVE slot so filling it cannot corrupt the live flatbuffer. */
 static int tflm_bk_load_region(void **buf, uint32_t *cap)
 {
 	int inactive = (g_sd_slot == 0) ? 1 : 0;
 	*buf = g_sd_model_buf[inactive];
-	*cap = NN_TFLM_SD_MODEL_MAX;
+	*cap = *(const volatile uint32_t *)&nn_tflm_stage_cap;
 	return 0;
 }
 

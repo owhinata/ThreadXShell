@@ -509,6 +509,34 @@ def check_reservation(syms, sections, sbrk_consts):
     return failures
 
 
+def check_policy_link_addr(syms, text):
+    """The plugin policy's link address is where the linker put .plugin.
+
+    [!] A FIFTH STATEMENT OF THE SAME ADDRESS, AND THE ONE THE DEVICE ACTS ON
+    (issue #159).  The four reservation declarations are checked against each
+    other above; the policy's link_addr is what plugin_parse() refuses a
+    container by, and it came from a CMake variable of its own.  If it named
+    anything but __plugin_start, every container linked for the reservation
+    would be refused -- or, worse, one linked for that other address admitted.
+    This holds board.cmake's value (the one compiled into the policy) to the
+    linked symbol; an override inside the C source is outside its sight (the
+    policy object's bytes are read only for c and the allowances,
+    cmake/check_policy_probe.py)."""
+    try:
+        want = int(text, 0)
+    except ValueError:
+        return [f"--policy-link-addr {text!r} is not a number"]
+    starts = [a for a, _t, n in syms if n == "__plugin_start"]
+    if len(starts) != 1:
+        return [f"__plugin_start: {len(starts)} definitions in the image, so the "
+                "policy's link address cannot be held to it"]
+    if starts[0] != want:
+        return [f"the plugin policy links containers at 0x{want:08x}, but the "
+                f"image's .plugin starts at 0x{starts[0]:08x} (__plugin_start) "
+                "-- the policy and the reservation name different places"]
+    return []
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("elf")
@@ -520,6 +548,11 @@ def main():
     ap.add_argument("--require-model-window", action="append", metavar="SYMBOL", default=[],
                     help="object that must sit in the 0xC0700000 executable model "
                          "window (stedgeai_reloc only)")
+    ap.add_argument("--policy-link-addr", metavar="HEX",
+                    help="the link address the firmware's plugin policy holds "
+                         "(board.cmake's F746_PLUGIN_BASE, the value it compiles "
+                         "in as -DF746_PLUGIN_BASE): must equal the linked "
+                         "__plugin_start (issue #159).  tflm only")
     ap.add_argument("--forbid-sdram", action="append", metavar="SYMBOL", default=[],
                     help="object that must NOT be in external SDRAM at all -- for "
                          "state that has to be INITIALISED, since the whole .sdram "
@@ -544,6 +577,8 @@ def main():
     failures += check_not_in_sdram(syms, args.forbid_sdram)
     failures += check_reservation(syms, read_sections(args.objdump, args.elf),
                                   function_constants(args.objdump, args.elf, "_sbrk"))
+    if args.policy_link_addr is not None:
+        failures += check_policy_link_addr(syms, args.policy_link_addr)
 
     if failures:
         print(f"check_f746_layout: FAIL ({len(failures)} problem(s)) in {args.elf}",

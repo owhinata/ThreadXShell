@@ -246,6 +246,7 @@ relative to `svc/`.
 | `plugin/plugin_target.h` | The plugin target word this translation unit is compiled for. |
 | `plugin/plugin_load` | Container and manifest validation; returns offsets, never a callable pointer. |
 | `plugin/plugin_exec` | Copies a validated image into the board's reservation and calls its entry. |
+| `plugin/plugin_run_core` | Above that loader, for an Armv7-M board staging in RAM (wio-lite-ai, f746g-disco): the lease checked before a load or unload and again at the branch into entry, the load's log lines and the staging-region check; the board keeps its MPU read-back and cache maintenance. |
 | `plugin/plugin_mpu` | Armv8-M MPU verdict: is the plugin reservation executable (pure function). |
 | `plugin/plugin_mpu_v7m` | The same question for an Armv7-M PMSA, answered by its own rules. |
 | `plugin/plugin_info` | The plugin stack lines of `nn info`. |

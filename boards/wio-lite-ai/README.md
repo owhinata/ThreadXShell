@@ -518,7 +518,7 @@ file (each `.c` with its `.h` unless only a header is listed):
 | `port/nn/nn_null.c` | as `nn.c` | The `null` backend: a stub that builds without any runtime or model. |
 | `port/nn/crc32_fdb.c` | console (container validation) | Serves `svc/crc32.h` with the FlashDB CRC-32 this firmware already links. |
 | `port/nn/tflm/` | worker (invoke), console (load / reload) | The tflite-micro backend: arena and double-slotted model staging in the cacheable PSRAM carve-out (`.psram_ai`). |
-| `port/plugin/plugin_run.c` | console (load / unload), worker, panel | The reservation in the top 32 KB of AXI-SRAM (a Cortex-M7 cannot fetch from DTCM), M7 I/D-cache maintenance, the Armv7-M MPU read-back and the staging-region precondition. |
+| `port/plugin/plugin_run.c` | console (load / unload), fault handler | The reservation in the top 32 KB of AXI-SRAM (a Cortex-M7 cannot fetch from DTCM), M7 I/D-cache maintenance and the Armv7-M MPU read-back.  The lease checks, the log lines and the staging-region precondition around them are `svc/plugin/plugin_run_core.c`, shared with f746g-disco (issue #159). |
 | `port/plugin/plugin_lease.c` | every path into the plugin | The lease as a ThreadX mutex: the preview thread outranks the worker and would otherwise preempt a decode mid-way. |
 | `port/plugin/plugin_paint.c` | panel | CPU pixel loops into the rotated, native-order RGB565 LTDC frame (no DMA2D, which has no way to prove it stopped before the flip). |
 | `port/camera/cam_band.c` | camera producer (band callback), console (step enable / disable / drain) | Not an nn file, but nn runs inside it: the one band sink, running the preview step and then the nn step; each step's armed mark and busy count are `svc/camera/cam_step.h`'s. |

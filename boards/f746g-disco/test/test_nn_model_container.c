@@ -19,8 +19,13 @@
  *   - a bare model takes the old path: the backend gets the slot base and the
  *     whole file, and `nn info` says no container is open;
  *   - a container this policy accepts hands the backend its MODEL SECTION in
- *     place (slot base + model_off, model_len), commits its claims, and `nn
- *     info` prints them as "validated, not loaded" -- Step 4a starts no plugin;
+ *     place (slot base + model_off, model_len), commits its claims, and -- since
+ *     Step 4b -- starts its plugin through the loader, under the plugin lease,
+ *     with the staging slot the reader filled as the source region; `nn info`
+ *     says "running" while the loader has it, and "validated, not loaded" when
+ *     the loader refused it (the model stays open: issue #122 D6);
+ *   - a lease that cannot be had refuses the load before anything changes,
+ *     and a bare load unloads the plugin (the shared order);
  *   - [!] THE TWO CRCs ARE ONE VALUE: what the reader prints
  *     (nn_container_crc() over the bytes it returned, as cmds/cmd_nn_board.c
  *     does) is what `nn info` prints beside the claims, and both equal an
@@ -45,6 +50,8 @@
 #include "nn_container.h"
 #include "nn_svc.h"
 #include "plugin_abi.h"
+#include "plugin_lease_api.h"
+#include "plugin_run_core.h"
 #include "sdram.h"
 #include "tx_api.h"
 #include "stm32f7xx_hal.h"
@@ -68,6 +75,79 @@ static int invalidations;
 bool nn_camera_running(void) { return false; }
 void nn_camera_record_invalidate(void) { invalidations++; }
 int sdram_is_up(void) { return 1; }
+
+/* ---- the loader and the lease (issue #159 Step 4b), stubbed ---------------
+ * This test is about the container split and the claims; what the loader does
+ * with the image is shell/test/test_plugin_run_lease.c's.  Here it records
+ * what it was handed, and answers as told. */
+static int      lease_free = 1, lease_held_now;
+static unsigned lease_takes, lease_gives;
+static unsigned pl_loads, pl_unloads;
+static int      pl_active, pl_refuse_next;
+static const void *pl_container, *pl_stage;
+static uint32_t pl_cap;
+
+int plugin_lease_take(void)
+{
+	if (!lease_free)
+		return 0;
+	lease_takes++;
+	lease_held_now = 1;
+	return 1;
+}
+
+void plugin_lease_give(void)
+{
+	assert(lease_held_now);
+	lease_gives++;
+	lease_held_now = 0;
+}
+
+enum plugin_run_result plugin_run_load(const struct plugin_view *v,
+                                       const void *container,
+                                       const void *stage, uint32_t cap,
+                                       const struct plugin_base_api *base)
+{
+	(void)v;
+	assert(lease_held_now && base != NULL);
+	pl_loads++;
+	pl_container = container;
+	pl_stage     = stage;
+	pl_cap       = cap;
+	if (pl_refuse_next) {
+		pl_refuse_next = 0;
+		pl_active = 0;
+		return PLUGIN_RUN_MPU;
+	}
+	pl_active = 1;
+	return PLUGIN_RUN_OK;
+}
+
+const char *plugin_run_why(enum plugin_run_result r)
+{
+	(void)r;
+	return "refused by the test";
+}
+
+void plugin_run_unload(void)
+{
+	assert(lease_held_now);
+	pl_unloads++;
+	pl_active = 0;
+}
+
+int plugin_run_active(void)
+{
+	return pl_active;
+}
+
+static const struct plugin_base_api test_base = { PLUGIN_ABI_VERSION,
+	sizeof(struct plugin_base_api), NULL, NULL, NULL };
+
+const struct plugin_base_api *nn_active_base(void)
+{
+	return &test_base;
+}
 
 /* ---- the staging slot and the stub backend ------------------------------- */
 
@@ -349,9 +429,13 @@ int main(void)
 	printf("%s", out);
 	assert(strstr(out, want) != NULL);
 	snprintf(want, sizeof want, "plugin  : fixture (build abc1234, crc %08x), "
-	         "validated, not loaded\r\n",
+	         "running\r\n",
 	         (unsigned)crc32_update(0u, file + PL_OFF, PL_LEN));
 	assert(strstr(out, want) != NULL);
+	/* [!] Started once, under the lease, from the slot the reader filled. */
+	assert(pl_loads == 1u && pl_container == slot && pl_stage == slot &&
+	       pl_cap == SLOT_CAP);
+	assert(lease_takes == lease_gives && !lease_held_now);
 	assert(strstr(out, "  image : 256 B file / 320 B mem") != NULL);
 	assert(strstr(out, "link 0x20048000") != NULL);
 
@@ -401,20 +485,51 @@ int main(void)
 	info_extra();
 	assert(strstr(out, "  from  : /fixture.nnc,") != NULL);
 
-	/* A bare load clears the claims; so does an unload. */
+	/* [!] The loader refuses the plugin: the model IS open (no rollback), the
+	 * load says it did not give what was asked, and `nn info` says the plugin
+	 * was validated and is not running. */
+	build_container(F746_PLUGIN_TARGET_ID);
+	pl_refuse_next = 1;
+	load("/refused.nnc");
+	assert(res.status == NN_SVC_ERR_ARG && state == NN_MODEL_NEW);
+	assert(strstr(res.detail, "/refused.nnc: refused by the test") != NULL);
+	info_extra();
+	assert(strstr(out, "validated, not loaded\r\n") != NULL);
+	assert(strstr(out, "  from  : /refused.nnc,") != NULL);
+
+	/* A lease that cannot be had: BUSY before anything changes. */
+	build_container(F746_PLUGIN_TARGET_ID);
+	load("/fixture.nnc");
+	assert(res.status == NN_SVC_OK && pl_active);
+	rl = (uint32_t)stub.reloads;
+	lease_free = 0;
+	build_container(F746_PLUGIN_TARGET_ID);
+	load("/busy.nnc");
+	lease_free = 1;
+	assert(res.status == NN_SVC_ERR_BUSY);
+	assert(strstr(res.detail, "busy") != NULL);
+	assert((uint32_t)stub.reloads == rl && pl_active);
+	info_extra();
+	assert(strstr(out, "  from  : /fixture.nnc,") != NULL);
+
+	/* A bare load clears the claims and unloads the plugin; so does an
+	 * unload. */
 	build_container(F746_PLUGIN_TARGET_ID);
 	load("/fixture.nnc");
 	assert(res.status == NN_SVC_OK);
 	build_bare();
 	load("/m.tflite");
 	assert(res.status == NN_SVC_OK);
+	assert(!pl_active);
 	assert(strstr(info_extra(), "plugin  : (none) -- reservation") != NULL);
 	build_container(F746_PLUGIN_TARGET_ID);
 	load("/fixture.nnc");
 	memset(&res, 0, sizeof res);
 	nn_svc_model_unload(&res);
 	assert(res.status == NN_SVC_OK);
+	assert(!pl_active);
 	assert(strstr(info_extra(), "plugin  : (none) -- reservation") != NULL);
+	assert(lease_takes == lease_gives && !lease_held_now);
 
 	printf("test_nn_model_container: OK\n");
 	return 0;

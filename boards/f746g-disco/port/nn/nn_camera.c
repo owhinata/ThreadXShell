@@ -60,6 +60,12 @@
 
 #include "stm32f7xx_hal.h"   /* HAL_GetTick */
 
+#if defined(CONFIG_NN_BACKEND_TFLM)
+#include "nn_active.h"       /* the plugin entries (issue #159)                    */
+#include "nn_panel.h"        /* the GUIX draw's figures, armed with the stream     */
+#include "plugin_lease.h"    /* the one lock into the plugin                       */
+#endif
+
 /* Float32 input normalization.  BlazeFace's model card says [-1,1], but its ST
  * config says rescale 1/255 -> [0,1] -- and [0,1] is what actually detects faces
  * on hardware (maxscore 288 vs 11), so ST retrained with [0,1].  Default [0,1];
@@ -68,12 +74,8 @@
 #define NNCAM_NORM_SIGNED 0
 #endif
 
-/* NNCAM_WORKER_PRIORITY is in nn_camera_priv.h (the worker logs it). */
-/* Sized from the measured high-water-mark: `thread` peak = 1808 B under the tflm
- * backend (CMSIS-NN, BlazeFace pin) after `nn bench 10`, two `nn run` and a 300-frame
- * `nn stream` (issue #130, 2026-10-04); 4096 keeps ~2.3x margin.  (The earlier
- * 1024 B was the stedgeai backend, owhinata/stm32f746g-disco#93.) */
-#define NNCAM_WORKER_STACK    4096u
+/* NNCAM_WORKER_PRIORITY is in nn_camera_priv.h (the worker logs it), and
+ * NNCAM_WORKER_STACK in nn_camera.h (`nn stream stats` prints it). */
 #if defined(CONFIG_NN_BACKEND_TFLM)
 /* The decode slot's plugin allowance (board.cmake, issue #159) strictly below
  * the thread it runs on. */
@@ -167,6 +169,10 @@ uint32_t     nncam_gen_drops;
  * (issue #130 step 6c, nn_decode_count.h -- BF_ERR_MODEL is a result here, not
  * one of these).  Written by the worker only. */
 uint32_t     nncam_gen_decoder_errors;
+/* Of nncam_gen_errors: a LOADED PLUGIN's BF_ERR_MODEL -- its model and its
+ * decoder do not match (issue #159; nn_decode_count_plugin_of()).  The worker
+ * only. */
+uint32_t     nncam_gen_model_errors;
 /* The running stream is a `nn run`'s: its decodes are not counted (it reports
  * its own result).  Written by nn_camera_start() before nncam_run is raised. */
 int          nncam_oneshot;
@@ -203,10 +209,92 @@ void nncam_release_session(enum nn_sess_who who)
 		nn_session_release();
 }
 
+/*
+ * How deep each thread's stack already was where a plugin was CALLED (issue
+ * #159; wio-lite-ai's form since #108 / #126).  High-waters, written by
+ * nn_camera_note_depth_at() on the thread that calls -- each site has one
+ * writer thread -- and read by `nn stream stats`.  decode / draw are reset when
+ * a stream starts; shell is not (its deepest site is `nn model load`).  Only
+ * ever written with a real measurement, so 0 means "not reached yet".
+ */
+static uint32_t nncam_depth_decode, nncam_depth_draw, nncam_depth_shell;
+
+/*
+ * The geometry of the frames the nn step is attached to, (w << 16) | h, one
+ * word so a reader on another thread never pairs one attach's width with
+ * another's height.  Written by nncam_open() (under the camera lock); read by
+ * a plugin's to_frame() on the worker.  0 before the first attach.
+ */
+static volatile uint32_t nncam_geom;
+
+/*
+ * A stream starts or stops: move the generation under the lock, so an in-flight
+ * decode from the previous session lands nowhere.  [!] THE RESULT STAYS (issue
+ * #118).
+ *
+ * [!] UNDER THE PLUGIN LEASE WHEN ONE CAN BE HAD (issue #159, wio-lite-ai's
+ * #118).  The worker asks "is my generation still current?", decodes and
+ * publishes, all under the lease -- so a boundary taken under it too lands
+ * either before the question (no decode runs, and the plugin's private result
+ * still describes the record) or after the publish.  Never in between, where a
+ * decode would rewrite the plugin's result for a publish then dropped.  The
+ * wait is the lease's one bound; if it expires the boundary is taken anyway --
+ * a stop does not wait on a plugin -- and the record's reportable rule covers
+ * the decode that may then run.  Lease before the record lock, as everywhere.
+ * (The attach and the detach move the generation under the camera lock, where
+ * no wait is allowed; they keep the plain boundary.)
+ */
+static void nncam_record_boundary(void)
+{
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	int leased = plugin_lease_take();
+#endif
+
+	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
+	nn_det_record_boundary(&nncam_rec);
+	tx_mutex_put(&nncam_lock);
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	if (leased)
+		plugin_lease_give();
+#endif
+}
+
+/* See nn_camera.h. */
+void nn_camera_note_depth_at(enum nn_camera_site site, uintptr_t sp)
+{
+	TX_THREAD *t = tx_thread_identify();
+	uintptr_t  lo, hi;
+	uint32_t   used;
+	uint32_t  *hw = (site == NNCAM_SITE_DRAW)  ? &nncam_depth_draw :
+	                (site == NNCAM_SITE_SHELL) ? &nncam_depth_shell :
+	                                             &nncam_depth_decode;
+
+	if (t == NULL)
+		return;                     /* not on a thread; nothing to say */
+	lo = (uintptr_t)t->tx_thread_stack_start;
+	hi = lo + (uintptr_t)t->tx_thread_stack_size;
+	if (sp < lo || sp > hi)
+		return;                     /* not this thread's stack after all */
+	used = (uint32_t)(hi - sp);
+	if (used > *hw)
+		*hw = used;
+}
+
+void nn_camera_frame_geom(uint16_t *w, uint16_t *h)
+{
+	uint32_t g = nncam_geom;
+
+	if (w != NULL)
+		*w = (uint16_t)(g >> 16);
+	if (h != NULL)
+		*h = (uint16_t)(g & 0xFFFFu);
+}
+
 /* Model input geometry, latched at start from the input tensor. */
 uint16_t nncam_in_w, nncam_in_h, nncam_in_c;
 uint32_t nncam_in_bytes;   /* what the preprocess writes (<= the tensor's) */
 uint8_t  nncam_in_dtype;   /* enum nn_dtype of the model input */
+
 
 /* Latest detections (BlazeFace), guarded by nncam_lock; read via nn_camera_dets_get(). */
 /*
@@ -272,6 +360,7 @@ static int nncam_open(void *ctx, enum frame_format fmt, uint16_t w, uint16_t h)
 	nncam_res = (w <= 160u) ? (uint8_t)CAM_RES_QQVGA
 	          : (w <= 320u) ? (uint8_t)CAM_RES_QVGA
 	                        : (uint8_t)CAM_RES_VGA;
+	nncam_geom = ((uint32_t)w << 16) | (uint32_t)h;
 	nncam_session_reset();                  /* fresh session on (re)attach          */
 	return 0;
 }
@@ -282,16 +371,22 @@ static int nncam_open(void *ctx, enum frame_format fmt, uint16_t w, uint16_t h)
  * them); nncam_prep / nncam_infer_start in nn_producer.c; nncam_publish /
  * nncam_account in nn_worker.c. */
 
-/* This board has no plugin mechanism: no lease, no external decoder. */
+/* Is a plugin in force?  The question the frame path asks before the lease
+ * (issue #159); with none, the resident decoder publishes (nncam_publish). */
 static int nncam_is_plugin(void *ctx)
 {
 	(void)ctx;
-	return 0;
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	return nn_active_is_plugin();
+#else
+	return 0;                           /* no plugin mechanism in this backend */
+#endif
 }
 
-/* No plugin mechanism: the admission / decode / lease slots stay NULL, as in
- * wio-lite-ai's null build; the frame path never reaches them while
- * is_plugin() says no. */
+/* The plugin's admission / decode / publish and the lease are tflm's only (the
+ * other backends cannot load a container), and stay NULL elsewhere, as in
+ * wio-lite-ai's null build: the frame path never reaches them while is_plugin()
+ * says no. */
 const struct nn_core_frame_ops nncam_frame_ops = {
 	.cs_enter    = nncam_cs_enter,
 	.cs_exit     = nncam_cs_exit,
@@ -300,7 +395,17 @@ const struct nn_core_frame_ops nncam_frame_ops = {
 	.infer_start = nncam_infer_start,
 	.is_plugin   = nncam_is_plugin,
 	.publish_raw = nncam_publish,
+	.outputs     = NULL,   /* nn_active_decode() reads them itself */
 	.account     = nncam_account,
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	.admits            = nncam_admits_hook,
+	.decode            = nncam_decode,
+	.publish           = nncam_publish_hook,
+	.lease_try         = plugin_lease_try,
+	.lease_held        = plugin_lease_held,
+	.lease_give        = plugin_lease_give,
+	.lease_note_unheld = plugin_lease_note_unheld,
+#endif
 };
 
 /* The nn step was disarmed: the base detached the camera sink (base capture
@@ -490,6 +595,41 @@ int nn_camera_start(enum camera_res res, int oneshot)
 		cam_own_start_finish(&nncam_own, 0);
 		return rc;
 	}
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/*
+	 * [!] CAN THE PLUGIN READ THIS MODEL, AND WILL IT DRAW (issue #159,
+	 * wio-lite-ai's #110 / #116)?  A plugin was shipped WITH the model it reads;
+	 * finding out per frame that it cannot is a stream that runs and silently
+	 * never annotates.  Asked only with a plugin in force: in Step 4b the
+	 * resident decoder is still the no-plugin fallback, and it answers for
+	 * itself as it always has (BF_ERR_MODEL is its "not a detector").  The draw
+	 * question is a STREAM's -- a `nn run` reports, it does not draw.  Under the
+	 * lease like every entry into a plugin, and a timeout is not a yes.
+	 */
+	if (nn_active_is_plugin()) {
+		int shapes, draws;
+
+		if (!plugin_lease_take()) {
+			nn_session_release();
+			cam_own_start_finish(&nncam_own, 0);
+			return NNCAM_ERR_DECBUSY;
+		}
+		shapes = nn_active_shapes_ok(nncam_model);
+		draws  = oneshot ? 1 : nn_active_can_draw();
+		plugin_lease_give();
+		/* Compared against 1: NN_ACTIVE_NOT_HELD is negative. */
+		if (shapes == NN_ACTIVE_NOT_HELD || draws == NN_ACTIVE_NOT_HELD) {
+			nn_session_release();
+			cam_own_start_finish(&nncam_own, 0);
+			return NNCAM_ERR_DECBUSY;
+		}
+		if (shapes != 1 || draws != 1) {
+			nn_session_release();
+			cam_own_start_finish(&nncam_own, 0);
+			return (shapes != 1) ? NNCAM_ERR_SHAPES : NNCAM_ERR_NODRAW;
+		}
+	}
+#endif
 	if (nncam_create_objects() != 0) {
 		nn_session_release();
 		cam_own_start_finish(&nncam_own, 0);
@@ -511,9 +651,7 @@ int nn_camera_start(enum camera_res res, int oneshot)
 	 * accepted after the base is this session's" true on both paths.  The
 	 * worker is parked (checked above), so nothing is in flight to drop.
 	 */
-	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
-	nn_det_record_boundary(&nncam_rec);
-	tx_mutex_put(&nncam_lock);
+	nncam_record_boundary();
 
 	/*
 	 * [!] THE WORD IS PARKED HERE, BEFORE nncam_run IS RAISED (issue #130).  A
@@ -567,6 +705,17 @@ int nn_camera_start(enum camera_res res, int oneshot)
 	nncam_gen_errors = 0u;
 	nncam_gen_drops  = 0u;
 	nncam_gen_decoder_errors = 0u;
+	nncam_gen_model_errors   = 0u;
+	/* The call-site depths a stream measures (issue #159): the decode and
+	 * draw sites are this stream's; the shell's is kept from boot. */
+	nncam_depth_decode = 0u;
+	nncam_depth_draw   = 0u;
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/* The GUIX draw's figures and the lease misses are this stream's too --
+	 * armed here, not at a stop, so the stats right after a stop still
+	 * describe the stream that ended. */
+	nn_panel_arm();
+#endif
 	cam_own_start_finish(&nncam_own, 1);    /* STARTING -> RUNNING                  */
 	return 0;
 }
@@ -609,9 +758,7 @@ int nn_camera_stop(void)
 	/* [!] The stop is a boundary whether or not the sink is attached (issue
 	 * #118): the close below moves the generation only if there is a base to
 	 * detach from, and an inference in flight must land nowhere either way. */
-	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
-	nn_det_record_boundary(&nncam_rec);
-	tx_mutex_put(&nncam_lock);
+	nncam_record_boundary();
 	(void)tx_semaphore_put(&nncam_sem);     /* wake the worker if waiting           */
 	camera_sink_step_disable(&nncam_step);  /* disarm (close); base keeps running   */
 	/* nn lets go of the camera (issue #142).  The operator's place stays, so
@@ -683,12 +830,16 @@ void nn_camera_stats_get(struct nn_camera_stats *out)
 	out->gen_errors = nncam_gen_errors;
 	out->gen_drops  = nncam_gen_drops;
 	out->gen_decoder_errors = nncam_gen_decoder_errors;
+	out->gen_model_errors   = nncam_gen_model_errors;
 	out->frames     = nnstat.frames;
 	out->drops      = nnstat.drops;
 	out->infers     = nnstat.infers;
 	out->errors     = nnstat.errors;
 	out->last_us    = nnstat.last_us;
 	out->detections = nnstat.detections;
+	out->depth_decode = nncam_depth_decode;
+	out->depth_draw   = nncam_depth_draw;
+	out->depth_shell  = nncam_depth_shell;
 
 	now = HAL_GetTick();
 	elapsed = now - nnstat.start_tick;
@@ -701,12 +852,16 @@ int nn_camera_dets_get(struct bf_det *out, int max)
 
 	if (!out || max <= 0)
 		return 0;
-	if (!nn_camera_decode_get(&snap, out, max, NULL))
+	if (!nn_camera_decode_get(&snap, out, max, NULL, NULL))
 		return 0;
 	/* [!] ONLY THE SESSION IN FORCE (issue #118).  The record keeps its last
 	 * boxes across a stop now, and this is what the GUI stamps on a LIVE
 	 * picture: a new stream would open wearing the previous one's faces. */
 	if (!snap.current)
+		return 0;
+	/* [!] AND ONLY THE RESIDENT DECODER'S (issue #159): a plugin's count has no
+	 * boxes in this record -- its result is private, and it draws it itself. */
+	if (snap.kind != (uint8_t)NN_DET_CALLER_BOXES)
 		return 0;
 	/* A count of boxes actually copied.  A negative ndet means "not a BlazeFace
 	 * model" and there are no boxes to hand back; callers that need to tell that
@@ -717,12 +872,31 @@ int nn_camera_dets_get(struct bf_det *out, int max)
 }
 
 int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
-                         int max, struct nn_result_extra *ext)
+                         int max, struct nn_report_capture *rep,
+                         struct nn_result_extra *ext)
 {
 	struct nn_det_snapshot snap;
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	int leased = 0;
+#endif
 
 	if (!nncam_created || !out)
 		return 0;                           /* nncam_lock not created before 1st start */
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/*
+	 * [!] THE LEASE FIRST, AND ONLY FOR A CAPTURE (issue #159, wio-lite-ai's
+	 * #110).  A plugin's account of its result has to be taken in the same
+	 * breath as the snapshot that describes it -- the next decode overwrites
+	 * the private state -- so both happen inside one hold.  The order is lease
+	 * then record lock, the same way the worker takes them; the GUIX draw asks
+	 * for no capture, so it never waits here.
+	 */
+	if (rep != NULL && nn_active_is_plugin()) {
+		leased = plugin_lease_take();
+		if (!leased)
+			nn_report_set(rep, NN_REPORT_STALE);
+	}
+#endif
 	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
 	/*
 	 * [!] ONE LOCK FOR BOTH.  The boxes and the diagnostics that describe them
@@ -735,12 +909,44 @@ int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
 	if (ext != NULL)
 		nn_det_record_extra(&nncam_rec, ext);   /* same hold (issue #121) */
 	tx_mutex_put(&nncam_lock);
-	out->valid    = snap.valid;
-	out->ndet     = snap.ndet;
-	out->res      = snap.res;
-	out->current  = snap.current;
-	out->accepted = snap.accepted;
-	out->epoch    = snap.epoch;
+	out->valid      = snap.valid;
+	out->ndet       = snap.ndet;
+	out->res        = snap.res;
+	out->current    = snap.current;
+	out->accepted   = snap.accepted;
+	out->epoch      = snap.epoch;
+	out->kind       = snap.kind;
+	out->reportable = snap.reportable;
+
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	if (leased) {
+		/* Still under the lease: the snapshot above and this account of it
+		 * describe the same decode because nothing has run in between. */
+		if (snap.valid && snap.kind == (uint8_t)NN_DET_PLUGIN_REPORT &&
+		    !snap.reportable) {
+			/* A later decode ran and its publish was dropped (issue #118):
+			 * the plugin's result is that frame's now. */
+			nn_report_set(rep, NN_REPORT_SUPERSEDED);
+		} else if (snap.valid && snap.kind == (uint8_t)NN_DET_PLUGIN_REPORT) {
+			int rc;
+
+			nn_report_begin(rep);
+			/* Compared against 1: NN_ACTIVE_NOT_HELD is negative, and a
+			 * refusal for want of the lease is REFUSED, never UNSUPPORTED. */
+			rc = nn_active_can_report();
+			if (rc == NN_ACTIVE_NOT_HELD)
+				nn_report_set(rep, NN_REPORT_REFUSED);
+			else if (rc != 1)
+				nn_report_set(rep, NN_REPORT_UNSUPPORTED);
+			else
+				nn_report_end(rep, nn_active_report(nn_report_write, rep));
+		} else {
+			/* A plugin is loaded but this record is not its work. */
+			nn_report_set(rep, NN_REPORT_NONE);
+		}
+		plugin_lease_give();
+	}
+#endif
 	return 1;
 }
 

@@ -30,11 +30,18 @@
 #include <string.h>
 
 #include "camera.h"
+#include "gx_user.h"         /* GX_THREAD_STACK_SIZE: the GUIX thread draw() runs on */
+#include "cli_config.h"      /* CLI_INSTANCE/BG_JOB_STACK_SIZE: the `at call` lines */
 #include "fmt.h"
 #include "nn.h"
 #include "nn_camera.h"
 #include "nn_decoder.h"
 #include "plugin_target.h"   /* the target word this build provides (#159) */
+#if defined(CONFIG_NN_BACKEND_TFLM)
+#include "nn_active.h"       /* the plugin entries (#159 Step 4b)          */
+#include "nn_panel.h"        /* the GUIX draw's figures (#159 Step 4b)     */
+#include "plugin_lease.h"    /* the one lock into the plugin               */
+#endif
 #include "stm32f7xx_hal.h"   /* HAL_RCC_GetHCLKFreq: the DWT counter's clock */
 #include "tx_api.h"
 
@@ -203,6 +210,49 @@ int nn_svc_input(struct tensor_desc *out)
 	"the camera could not be started -- `camera stream start` says why"
 
 /*
+ * nn_camera_start()'s refusal, in the words and the status both `nn run` and
+ * `nn stream start` give.  The plugin's three (issue #159 Step 4b) are
+ * wio-lite-ai's words and statuses.
+ */
+static void nn_start_refusal(struct nn_op_result *res, int rc)
+{
+	int status = NN_SVC_ERR_HW;
+
+	switch (rc) {
+	case -9:
+		nn_detail_set(NN_CAMERA_NOT_RGB565);
+		status = NN_SVC_ERR_STATE;
+		break;
+	case -10:
+		nn_detail_set(NN_CAMERA_NO_START);
+		break;
+	case NNCAM_ERR_SHAPES:
+		nn_detail_set("the container's decoder cannot read this model's "
+		              "outputs -- its two halves do not belong together "
+		              "(`nn info`)");
+		status = NN_SVC_ERR_STATE;
+		break;
+	case NNCAM_ERR_NODRAW:
+		nn_detail_set("nothing would annotate a live preview: the loaded "
+		              "plugin draws nothing (`nn info`); `nn run` still "
+		              "works");
+		status = NN_SVC_ERR_STATE;
+		break;
+	case NNCAM_ERR_DECBUSY:
+		nn_detail_set("the decoder could not be held still long enough to "
+		              "ask it -- try again");
+		status = NN_SVC_ERR_BUSY;
+		break;
+	default:
+		nn_detail_set(NN_CAMERA_START_FAILED, rc);
+		if (rc == -2)
+			status = NN_SVC_ERR_STATE;
+		break;
+	}
+	nn_result(res, status, NN_CLAIM_NONE);
+}
+
+/*
  * The worker's snapshot, as the shared command reads it.  [!] EVERY FIELD IS
  * WRITTEN (issues #104, #110, #118): a projection that drops one hands the
  * caller whatever its initialiser left there.
@@ -213,11 +263,12 @@ static void nn_snap_of(const struct nn_camera_decode *dec,
 	snap->valid      = dec->valid;
 	snap->ndet       = dec->ndet;
 	snap->res        = dec->res;
-	/* [!] STATED, NOT CARRIED: this board has one decoder and it fills the
-	 * caller's array, so the kind is never in doubt -- and the resident
-	 * decoder keeps no account of its own, so there is none to withhold. */
-	snap->kind       = (uint8_t)NN_DET_CALLER_BOXES;
-	snap->reportable = 0u;
+	/* [!] CARRIED, NOT STATED, since issue #159 Step 4b: the resident decoder
+	 * publishes boxes into the caller's array, and a loaded plugin publishes a
+	 * count and keeps its result -- the record says which, in the same
+	 * snapshot. */
+	snap->kind       = dec->kind;
+	snap->reportable = dec->reportable;
 	snap->current    = dec->current;
 	snap->accepted   = dec->accepted;
 	snap->epoch      = dec->epoch;
@@ -268,7 +319,9 @@ static void nn_core_counts_of(struct nn_core_raw *raw, void *keep)
 	raw->skipped   = st.gen_drops;
 	raw->infers    = st.gen_infers;
 	raw->errors    = st.gen_errors;
-	/* model_errors stays 0: BF_ERR_MODEL is a result on this board (D6). */
+	/* The resident decoder's BF_ERR_MODEL is a result (D6) and never counted;
+	 * a loaded plugin's is a mismatch and is (issue #159). */
+	raw->model_errors   = st.gen_model_errors;
 	raw->decoder_errors = st.gen_decoder_errors;
 	raw->last_us   = st.last_us;
 	raw->producing = st.running ? 1u : 0u;
@@ -279,7 +332,7 @@ static void nn_core_record_of(struct nn_det_snapshot *snap)
 	struct nn_camera_decode dec;
 
 	memset(&dec, 0, sizeof dec);
-	(void)nn_camera_decode_get(&dec, NULL, 0, NULL);
+	(void)nn_camera_decode_get(&dec, NULL, 0, NULL, NULL);
 	nn_snap_of(&dec, snap);
 }
 
@@ -364,15 +417,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 			nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 			return;
 		}
-		if (rc == -9)
-			nn_detail_set(NN_CAMERA_NOT_RGB565);
-		else if (rc == -10)
-			nn_detail_set(NN_CAMERA_NO_START);
-		else
-			nn_detail_set(NN_CAMERA_START_FAILED, rc);
-		nn_result(res, (rc == -2 || rc == -9) ? NN_SVC_ERR_STATE
-		                                      : NN_SVC_ERR_HW,
-		          NN_CLAIM_NONE);
+		nn_start_refusal(res, rc);
 		return;
 	}
 	gen = nn_core_oneshot_commit(&nn_core, &nn_core_board);
@@ -395,7 +440,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 * sampled after nn_camera_start()'s boundary.
 	 */
 	memset(&dec, 0, sizeof dec);
-	(void)nn_camera_decode_get(&dec, NULL, 0, NULL);
+	(void)nn_camera_decode_get(&dec, NULL, 0, NULL, NULL);
 	base = dec.accepted;
 
 	/*
@@ -412,7 +457,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		                 (NN_RUN_WAIT_S * TX_TIMER_TICKS_PER_SECOND);
 
 		for (;;) {
-			(void)nn_camera_decode_get(&dec, NULL, 0, NULL);
+			(void)nn_camera_decode_get(&dec, NULL, 0, NULL, NULL);
 			if (dec.accepted != base) {
 				why = RUN_INFERRED;
 				break;
@@ -433,7 +478,12 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 * now (issue #118), but reading first keeps this in the order the other
 	 * boards use. */
 	memset(&dec, 0, sizeof dec);
-	(void)nn_camera_decode_get(&dec, dets, max, ext);
+	/* NONE unless a loaded plugin's account is captured below -- stated
+	 * rather than left to the caller's initialiser (issue #110).  With a
+	 * plugin in force the account is taken under the lease, in the same hold
+	 * as the snapshot (issue #159). */
+	nn_report_set(rep, NN_REPORT_NONE);
+	(void)nn_camera_decode_get(&dec, dets, max, rep, ext);
 	nn_snap_of(&dec, snap);
 	/* [!] THIS RUN'S, OR NOT VALID (issue #118): the record's own `valid` is
 	 * true of whatever ran last, and a valid snapshot is printed as this run's
@@ -441,10 +491,6 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	snap->valid = nn_det_last_valid(snap, base);
 	if (!snap->valid && ext != NULL)
 		ext->what = (uint8_t)NN_EXTRA_NONE;     /* not this run's either */
-	/* No external decoder on this board, so nothing was captured -- stated
-	 * rather than left to the caller's initialiser, for the same reason the
-	 * kind is (issue #110). */
-	nn_report_set(rep, NN_REPORT_NONE);
 
 	/* [!] A RESULT THAT MADE IT IS NOT A TIMEOUT (issue #122, review).  The
 	 * deadline can pass in the same moment the inference publishes; the record
@@ -516,9 +562,9 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
 	memset(&dec, 0, sizeof dec);
 	/* [!] THE LAST RESULT, WHOEVER PRODUCED IT (issue #118) -- a `nn run`, a
 	 * running stream or a stopped one.  Only a model change clears it. */
-	(void)nn_camera_decode_get(&dec, dets, max, ext);
-	nn_snap_of(&dec, snap);
 	nn_report_set(rep, NN_REPORT_NONE);
+	(void)nn_camera_decode_get(&dec, dets, max, rep, ext);
+	nn_snap_of(&dec, snap);
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
 
@@ -713,15 +759,7 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 			nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 			return;
 		}
-		if (rc == -9)
-			nn_detail_set(NN_CAMERA_NOT_RGB565);
-		else if (rc == -10)
-			nn_detail_set(NN_CAMERA_NO_START);
-		else
-			nn_detail_set(NN_CAMERA_START_FAILED, rc);
-		nn_result(res, (rc == -2 || rc == -9) ? NN_SVC_ERR_STATE
-		                                      : NN_SVC_ERR_HW,
-		          NN_CLAIM_NONE);
+		nn_start_refusal(res, rc);
 		return;
 	}
 	/* The record's accepted count is read by the commit, after the start's
@@ -864,24 +902,132 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 }
 
+/*
+ * [!] EVERY LINE BELOW FITS NN_STREAM_LINE_MAX AT ITS WORST, AND THE BUILD SAYS
+ * SO (wio-lite-ai's rule since issue #126: the shared command hands each line
+ * 96 B and the copy truncates without a mark).  A format's worst case is its
+ * literal less each conversion, plus the most that conversion can print: 10
+ * digits for any uint32_t, 4 for a depth or a stack size.
+ */
+#define NN_LINE_WORST(fmt, nconv, digits) \
+	(sizeof(fmt) - 1u - 2u * (nconv) - (nconv) + (digits))
+#define NN_LINE_AT_WORK "at call : nn-worker %lu/%lu (decode), guix %lu/%lu (draw); high-water"
+#define NN_LINE_AT_SH   "at call : shell %lu/%lu (entry, shapes_ok, report, param); high-water"
+#define NN_LINE_PL_DREW "plugin  : drew %lu px max/frame of %lu, %lu refused"
+#define NN_LINE_PL_HOLD "plugin  : frame lock held %lu us max by a draw"
+#define NN_LINE_PL_MISS "plugin  : %lu frame(s) missed (run of %lu)"
+/* The same line when an entry into the plugin has ever been refused because its
+ * caller did not hold the lease (wio-lite-ai's form).  Counted from boot. */
+#define NN_LINE_PL_UNHELD NN_LINE_PL_MISS "; %lu entry(s) refused unheld"
+_Static_assert(NN_LINE_WORST(NN_LINE_PL_DREW, 3u, 3u * 10u) < NN_STREAM_LINE_MAX &&
+               NN_LINE_WORST(NN_LINE_PL_HOLD, 1u, 10u) < NN_STREAM_LINE_MAX &&
+               NN_LINE_WORST(NN_LINE_PL_MISS, 2u, 2u * 10u) < NN_STREAM_LINE_MAX &&
+               NN_LINE_WORST(NN_LINE_PL_UNHELD, 3u, 3u * 10u) < NN_STREAM_LINE_MAX,
+               "a stream line's worst case is longer than the caller's buffer");
+_Static_assert(NNCAM_WORKER_STACK < 10000u && GX_THREAD_STACK_SIZE < 10000u &&
+               CLI_INSTANCE_STACK_SIZE < 10000u && CLI_BG_JOB_STACK_SIZE < 10000u,
+               "`at call` budgets four digits for a depth and its stack");
+_Static_assert(NN_LINE_WORST(NN_LINE_AT_WORK, 4u, 4u * 4u) < NN_STREAM_LINE_MAX &&
+               NN_LINE_WORST(NN_LINE_AT_SH, 2u, 2u * 4u) < NN_STREAM_LINE_MAX,
+               "an `at call` line's worst case is longer than the caller's buffer");
+
+/*
+ * This board's extra lines: the base geometry, and -- since issue #159 Step 4b
+ * -- where a plugin is called and what it cost the GUIX preview.
+ *
+ * Optional lines are SKIPPED rather than left as holes, because the caller
+ * stops at the first index that reports nothing.  The `at call` lines appear
+ * once a plugin call site has run; the plugin lines while a plugin is in force.
+ * The figures are this stream's (armed by the start, not cleared by the stop),
+ * so after a stop they still describe the stream that ended.
+ */
 int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
                         char *buf, size_t cap)
 {
 	struct nn_camera_stats st;
+	unsigned i, n;
+	int plugin = 0;
 
 	if (buf == NULL || cap == 0u)
 		return NN_SVC_ERR_ARG;
 	buf[0] = '\0';
-	if (ctx != NN_STREAM_LINES_STATS || index != 0u)
+	if (ctx != NN_STREAM_LINES_STATS)
 		return 0;
 
 	nn_camera_stats_get(&st);
-	/* The base geometry the input adapted to.  It is a report, never a setting
-	   -- see the note in nn_svc_stream_start(). */
-	nn_detail_to(buf, cap, "base    : %s",
-	             (st.res == (uint8_t)CAM_RES_QQVGA) ? "qqvga" :
-	             (st.res == (uint8_t)CAM_RES_QVGA)  ? "qvga" : "vga");
-	return 1;
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	plugin = nn_active_is_plugin();
+#endif
+	for (i = 0u, n = 0u; i < 6u; i++) {
+		if ((i == 1u || i == 2u) && st.depth_decode == 0u &&
+		    st.depth_draw == 0u && st.depth_shell == 0u)
+			continue;               /* no site has run: no numbers */
+		if (i >= 3u && !plugin)
+			continue;               /* the panel's plugin numbers */
+		if (n++ != index)
+			continue;
+		switch (i) {
+		case 0u:
+			/* The base geometry the input adapted to.  It is a report,
+			   never a setting -- see nn_svc_stream_start(). */
+			nn_detail_to(buf, cap, "base    : %s",
+			             (st.res == (uint8_t)CAM_RES_QQVGA) ? "qqvga" :
+			             (st.res == (uint8_t)CAM_RES_QVGA)  ? "qvga" : "vga");
+			return 1;
+		case 1u:
+			/* How much stack is already spent where a plugin is CALLED --
+			 * the term the plugin allowances are checked against, which
+			 * `thread`'s peak does not answer.  Over each thread's stack. */
+			nn_detail_to(buf, cap, NN_LINE_AT_WORK,
+			             (unsigned long)st.depth_decode,
+			             (unsigned long)NNCAM_WORKER_STACK,
+			             (unsigned long)st.depth_draw,
+			             (unsigned long)GX_THREAD_STACK_SIZE);
+			return 1;
+		case 2u:
+			nn_detail_to(buf, cap, NN_LINE_AT_SH,
+			             (unsigned long)st.depth_shell,
+			             (unsigned long)CLI_INSTANCE_STACK_SIZE);
+			return 1;
+#if defined(CONFIG_NN_BACKEND_TFLM)
+		case 3u:
+		case 4u:
+		case 5u: {
+			uint32_t spent = 0u, refused = 0u, hold = 0u;
+			uint32_t miss = 0u, run = 0u, unheld;
+			uint16_t w = 0u, h = 0u;
+
+			nn_panel_stats(&spent, &refused, &hold);
+			if (i == 3u) {
+				nn_camera_frame_geom(&w, &h);
+				nn_detail_to(buf, cap, NN_LINE_PL_DREW,
+				             (unsigned long)spent,
+				             (unsigned long)nn_panel_budget(w, h),
+				             (unsigned long)refused);
+			} else if (i == 4u) {
+				/* What the draw budget bounds: how long the GUIX thread held
+				 * the lock the producer stores the next frame under (the
+				 * README's draw-budget section). */
+				nn_detail_to(buf, cap, NN_LINE_PL_HOLD,
+				             (unsigned long)hold);
+			} else {
+				plugin_lease_misses(&miss, &run);
+				if ((unheld = plugin_lease_unheld()) != 0u)
+					nn_detail_to(buf, cap, NN_LINE_PL_UNHELD,
+					             (unsigned long)miss, (unsigned long)run,
+					             (unsigned long)unheld);
+				else
+					nn_detail_to(buf, cap, NN_LINE_PL_MISS,
+					             (unsigned long)miss, (unsigned long)run);
+			}
+			return 1;
+		}
+#endif
+		default:
+			break;
+		}
+	}
+	return 0;
 }
 
 void nn_svc_norm_set(int signed_range)
@@ -910,18 +1056,74 @@ int nn_svc_box_to_frame(const struct bf_det *in, struct bf_det *out)
 
 int nn_svc_thresh_get(unsigned *milli)
 {
-	/* Always answers: the resident decoder's threshold is a plain value
-	 * behind no lock, so there is nothing to be busy on here. */
 	if (milli == NULL)
 		return NN_SVC_ERR_ARG;
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	{
+		int r;
+
+		/*
+		 * [!] THE LEASE FIRST, AND THE QUESTION "IS THERE A PLUGIN" UNDER IT
+		 * (issue #159 Step 4b review).  Asked before the lease, a `nn model
+		 * load` on the other console could start a plugin in between, and this
+		 * would read the resident decoder's threshold and say OK while the
+		 * plugin's is the one in force.  Under the lease no load or unload can
+		 * change which decoder that is.  A loaded plugin owns its own
+		 * threshold, read through the shared entry; with none the resident
+		 * decoder answers, as before (Step 4c removes it).  No lease is BUSY,
+		 * not "none" (issue #122 P6).
+		 */
+		*milli = NN_SVC_THRESH_NONE;
+		if (!plugin_lease_take())
+			return NN_SVC_ERR_BUSY;
+		if (nn_active_is_plugin()) {
+			r = nn_active_get_thresh_milli(milli);
+			plugin_lease_give();
+			return r == NN_ACTIVE_THRESH_OK ? NN_SVC_OK : NN_SVC_ERR_BUSY;
+		}
+		*milli = nn_decoder_get_thresh_milli();
+		plugin_lease_give();
+		return NN_SVC_OK;
+	}
+#else
+	/* The resident decoder's threshold is a plain value behind no lock, so
+	 * there is nothing to be busy on here. */
 	*milli = nn_decoder_get_thresh_milli();
 	return NN_SVC_OK;
+#endif
 }
 
 int nn_svc_thresh_set(unsigned milli)
 {
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	int r;
+
+	/* [!] The lease first, and the plugin question under it -- see
+	 * nn_svc_thresh_get(). */
+	if (!plugin_lease_take())
+		return NN_SVC_ERR_BUSY;
+	if (!nn_active_is_plugin()) {
+		r = nn_decoder_set_thresh_milli(milli);
+		plugin_lease_give();
+		return (r == BF_OK) ? NN_SVC_OK : NN_SVC_ERR_ARG;
+	}
+	r = nn_active_set_thresh_milli(milli);
+	plugin_lease_give();
+	switch (r) {
+	case NN_ACTIVE_THRESH_OK:
+		return NN_SVC_OK;
+	case NN_ACTIVE_THRESH_NO_DECODER:
+		/* the plugin holds no threshold: a state, not a bad value */
+		return NN_SVC_ERR_STATE;
+	case NN_ACTIVE_NOT_HELD:
+		return NN_SVC_ERR_BUSY;
+	default:
+		return NN_SVC_ERR_ARG;
+	}
+#else
 	return (nn_decoder_set_thresh_milli(milli) == BF_OK) ? NN_SVC_OK
 	                                                     : NN_SVC_ERR_ARG;
+#endif
 }
 
 /* nn_svc_info_extra() -- the container's claims -- is in nn_svc_f746_model.c,

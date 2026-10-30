@@ -71,6 +71,7 @@ extern uint32_t     nncam_gen_infers;
 extern uint32_t     nncam_gen_errors;
 extern uint32_t     nncam_gen_drops;
 extern uint32_t     nncam_gen_decoder_errors;
+extern uint32_t     nncam_gen_model_errors;    /* the worker only (#159) */
 /* Written by nn_camera_start() before nncam_run is raised; read by the worker. */
 extern int          nncam_oneshot;
 /* Moved by the attach (open), the detach (close) under nncam_lock; read by the
@@ -126,6 +127,13 @@ void nncam_infer_start(void *ctx);
 void nncam_entry(ULONG arg);
 int  nncam_publish(void *ctx, uint32_t gen);
 void nncam_account(void *ctx, enum nn_core_done what, int n, int took);
+#if defined(CONFIG_NN_BACKEND_TFLM)
+/* nn_worker.c: the plugin's half of the frame path (issue #159) -- the
+ * generation question, the decode and its publish, all under the plugin lease. */
+int  nncam_admits_hook(void *ctx, uint32_t gen);
+int  nncam_decode(void *ctx, int *n);
+int  nncam_publish_hook(void *ctx, int n, uint32_t gen);
+#endif
 
 /* ---- helpers used by both threads ----------------------------------------- */
 

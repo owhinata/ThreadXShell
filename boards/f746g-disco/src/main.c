@@ -28,6 +28,9 @@
  *
  * Clean-room design; no third-party code reused.
  */
+#if defined(CONFIG_NN_BACKEND_TFLM)
+#include "plugin_lease.h"   /* plugin_lease_init() (issue #159) */
+#endif
 #include "tx_api.h"
 #include "main.h"
 #include "bsp.h"
@@ -154,6 +157,14 @@ void tx_application_define(void *first_unused_memory)
 	 * single-threaded moment: everything below either creates a thread or can be
 	 * preempted once tx_kernel_enter() returns to the scheduler. */
 	malloc_lock_init();
+
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	/* The plugin lease (issue #159): created before any thread that can enter
+	 * a plugin -- a console's load, the worker, the GUIX draw -- exists.  A
+	 * failure leaves every acquire failing: consoles answer BUSY and frames go
+	 * out bare, rather than unguarded. */
+	(void)plugin_lease_init();
+#endif
 
 	/* Bring up every shell instance.  cli_init (backend / ThreadX object create)
 	 * and cli_start (tx_thread_create) can each fail; on either, disable just

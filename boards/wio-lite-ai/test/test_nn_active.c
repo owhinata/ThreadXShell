@@ -7,7 +7,8 @@
  * @brief   The active-decoder shim, with a plugin and without one
  *          (issues #110, #116).
  *
- * port/nn/nn_active.c is the ONE place this board decides what reads a model's
+ * port/nn/nn_active.c (with the entries svc/nn/nn_active_lease.c has held for it
+ * since issue #159) is the ONE place this board decides what reads a model's
  * outputs.  Since issue #116 the firmware carries no decoder of its own, so
  * every one of its answers has two forms -- with a plugin loaded, and with none
  * -- and the second form is new: it used to fall back on a resident BlazeFace
@@ -40,8 +41,8 @@
  * variable here; sections 1-5 run with the caller holding it, and section 6
  * walks every entry with it NOT held.  The entries walked are the table below
  * section 6, and test/check_lease_entries.py holds that table against the
- * functions nn_active.c actually defines -- so an entry added without a row is
- * a failure, not a gap.
+ * functions nn_active.c and nn_active_lease.c actually define -- so an entry
+ * added without a row is a failure, not a gap.
  */
 #include "nn_active.h"
 #include "nn_camera.h"
@@ -313,8 +314,8 @@ static unsigned get_thresh(void)
  *
  * [!] THE NAMES ARE THE FUNCTIONS' OWN, and test/check_lease_entries.py reads
  * them from between the two markers below and compares them with every
- * function port/nn/nn_active.c defines: one that is neither walked here nor
- * named there with a reason fails the suite.
+ * function port/nn/nn_active.c or svc/nn/nn_active_lease.c defines: one that
+ * is neither walked here nor named there with a reason fails the suite.
  */
 enum entry_id {
 	E_SHAPES_OK, E_DECODE, E_DRAW, E_CAN_DRAW, E_CAN_REPORT, E_REPORT,

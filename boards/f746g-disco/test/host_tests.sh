@@ -164,6 +164,7 @@ gcc $CFLAGS -DCONFIG_NN_BACKEND_TFLM=1 -DF746_PLUGIN_TARGET_ID=0x1101 \
     "$board/port/nn/nn.c" "$HOST_TEST_SVC/nn/nn_core_model.c" \
     "$HOST_TEST_SVC/nn/nn_swap.c" "$HOST_TEST_SVC/fmt.c" \
     "$HOST_TEST_SVC/plugin/plugin_load.c" "$HOST_TEST_SVC/plugin/plugin_info.c" \
+    "$HOST_TEST_SVC/plugin/plugin_claims.c" \
     "$HOST_TEST_SVC/crc32.c" \
     $LDFLAGS -o "$out/test_nn_model_container"
 "$out/test_nn_model_container"

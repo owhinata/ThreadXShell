@@ -774,6 +774,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     target_sources(shell PRIVATE
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"   # the device's validator
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_info.c"   # `nn info`'s stack lines
+        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_claims.c" # ...and the claims around them
         "${CMAKE_SOURCE_DIR}/svc/crc32.c"                # the digest and the load CRC
         "${BOARD_DIR}/port/nn/nn_container.c")           # ...over the bytes read
     target_compile_definitions(shell PRIVATE

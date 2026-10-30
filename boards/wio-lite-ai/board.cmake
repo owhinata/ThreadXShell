@@ -923,6 +923,7 @@ list(APPEND SHELL_SOURCES ${NN_SOURCES}
 if(CONFIG_NN_BACKEND STREQUAL "tflm")
     list(APPEND SHELL_SOURCES
          "${CMAKE_SOURCE_DIR}/svc/nn/nn_active_core.c"
+         "${CMAKE_SOURCE_DIR}/svc/nn/nn_active_lease.c"  # its lease-checked entries (#159)
          "${BOARD_DIR}/port/nn/nn_active.c"
          "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_exec.c"
          "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_paint_budget.c"
@@ -1387,6 +1388,8 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
         # `nn info`'s plugin stack lines, shared with Grove (issue #111).
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_info.c"
+        # ...and the open model's claims around them, shared with f746 (#159).
+        "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_claims.c"
         "${BOARD_DIR}/port/nn/crc32_fdb.c")
 
     target_compile_definitions(shell PRIVATE

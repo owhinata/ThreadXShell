@@ -6,7 +6,8 @@
 # Every way into the plugin is walked by a host test, or is named here with the
 # reason it needs no lease (issue #130).
 #
-# The entry checks in port/nn/nn_active.c and port/plugin/plugin_run.c are
+# The entry checks in svc/nn/nn_active_lease.c (port/nn/nn_active.c's until
+# issue #159) and port/plugin/plugin_run.c are
 # proved by test_nn_active.c and test_plugin_run_lease.c, which call each entry
 # without the lease and require NN_ACTIVE_NOT_HELD / PLUGIN_RUN_NOT_HELD.  What
 # those tests cannot see is an entry that is not in their table: a mutation that

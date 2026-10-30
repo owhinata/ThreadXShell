@@ -271,6 +271,28 @@ configure says so; `FILE` is a path, not a hash pin, and is guarded by whatever
 pins the tree it lives in (Grove's cifar10 is inside the pinned Himax SDK).
 `fixtures/run_pinned_input_tests.py` covers both checkers.
 
+# Asset destinations: a slot or a file, exactly one (#159)
+
+`add_asset()` takes exactly one destination. A store slot -- `SLOT` with
+`SLOT_TABLE` -- is what Grove and wio use, and its fit check against the slot
+table before publication is unchanged. A file the operator copies to the
+board's card -- `FILE_NAME` with `STAGE_SYMBOL` -- is f746's (from #159 Step
+4b): `build_asset.py` reads the staging capacity the shipped firmware holds in
+that `const uint32_t`, out of the ELF `veneer_cost_gate()` registered, and
+refuses a container larger than it before publishing. None, both, or half of
+either is refused at configure (`add_asset()`) and again in `build_asset.py`,
+which used to skip the fit check on a call that named no slot.
+
+The receipt's transfer and verify lines are the board's too
+(`RECEIPT_TRANSFER` / `RECEIPT_VERIFY`: a label and its lines, templates over
+`{name}`, `{slot}`, `{file}` and `{crc}`). Grove and wio pass the picocom and
+`blob list` text the receipt always printed, so their receipts are
+byte-identical. `fixtures/run_add_plugin_arg_tests.py` covers the configure
+refusals; `fixtures/run_asset_dest_tests.py` covers `build_asset.py`'s, the
+receipt (including the slot boards' text byte for byte) and, with the cross
+toolchain, the capacity read-back's refusals (missing, writable, zero, not a
+`uint32_t`).
+
 # Plugin image gate: the stack bound
 
 `check_plugin_image.py` runs in `add_plugin()`'s link command and refuses the

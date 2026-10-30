@@ -119,6 +119,71 @@ def policy_args(layout_path, entries):
     return out
 
 
+def destination(args):
+    """'slot' or 'file' -- exactly one, each whole (issue #159).
+
+    [!] THIS USED TO BE OPTIONAL, AND THAT WAS A FAIL-OPEN.  The fit check ran
+    "if args.slot and args.slot_table", so a call with neither -- or with half
+    of one -- published with no fit check at all.  Now none, both or half of
+    either is a refusal before anything is packed."""
+    slot = (args.slot is not None, args.slot_table is not None)
+    stage = (args.stage_elf is not None, args.stage_symbol is not None)
+    if any(slot) and any(stage):
+        die("both a slot destination (--slot/--slot-table) and a file "
+            "destination (--stage-elf/--stage-symbol) -- exactly one")
+    if any(slot):
+        if not all(slot):
+            die("--slot and --slot-table go together")
+        return "slot"
+    if any(stage):
+        if not all(stage):
+            die("--stage-elf and --stage-symbol go together")
+        return "file"
+    die("no destination: --slot with --slot-table, or --stage-elf with "
+        "--stage-symbol, is required -- an asset whose fit nothing checks is "
+        "not published")
+
+
+def stage_capacity(elf_path, symbol):
+    """The staging capacity the SHIPPED firmware holds in @symbol (issue #159).
+
+    [!] READ BACK, NOT RESTATED.  A file-destination board copies the container
+    to a card and the firmware reads it whole into a staging slot; a container
+    larger than that slot is refused on the device.  The number is the one the
+    image holds -- a const uint32_t, read from its loaded bytes like the plugin
+    policy probe (check_policy_probe.py) -- so a firmware whose slot shrank
+    refuses the asset here.  Fail closed: no symbol, two, a size that is not
+    four bytes, a writable home (its loaded bytes are only an initial value) or
+    zero is a refusal."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from check_veneer_base_cost import Elf, InputError    # noqa: E402
+    from check_policy_probe import loaded_u32, SHF_ALLOC, SHF_WRITE, \
+        SHT_NOBITS                                        # noqa: E402
+    try:
+        elf = Elf(elf_path)
+    except InputError as exc:
+        die("cannot read the firmware %s: %s" % (elf_path, exc))
+    hits = [h for h in elf.symbols if h[0] == symbol]
+    if len(hits) != 1:
+        die("%d symbols named %s in %s; the firmware must hold its staging "
+            "capacity exactly once" % (len(hits), symbol, elf_path))
+    _, addr, size, _, _ = hits[0]
+    if size != 4:
+        die("%s is %d B, not a uint32_t" % (symbol, size))
+    home = [sec for sec in elf.sections
+            if sec.flags & SHF_ALLOC and sec.type != SHT_NOBITS and sec.size
+            and sec.addr <= addr and addr + 4 <= sec.addr + sec.size]
+    if len(home) != 1:
+        die("%s at 0x%08x is not in loadable bytes" % (symbol, addr))
+    if home[0].flags & SHF_WRITE:
+        die("%s is in %s, a writable section: what the image holds there is "
+            "only its initial value.  Declare it const." % (symbol, home[0].name))
+    cap = loaded_u32(elf, addr)
+    if not cap:
+        die("%s holds %r, not a capacity" % (symbol, cap))
+    return cap
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", required=True)
@@ -151,10 +216,15 @@ def main():
     # declares (issue #111).  The board passes cmake/veneer_cost_gate.cmake's
     # value, the one the firmware is compiled with -- never its own variable.
     ap.add_argument("--veneer-cost", required=True)
+    # The destination: exactly one of a slot (with the board's slot table) or
+    # a file on the board's card (with the firmware that stages it).
     ap.add_argument("--slot")
     ap.add_argument("--slot-table")
+    ap.add_argument("--stage-elf")
+    ap.add_argument("--stage-symbol")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
+    dest = destination(args)
 
     # [!] FAIL CLOSED ON EVERY LINK.  A missing tool means nothing is produced.
     # Skipping a check and publishing anyway would make the gate advisory, and an
@@ -228,7 +298,16 @@ def main():
         # the YMODEM size header arrives, so a container that cannot fit costs
         # the previous blob and an endurance event to discover on the device.
         # Refusing here is free and happens before any of that.
-        if args.slot and args.slot_table:
+        if dest == "file":
+            # [!] THE SAME "REFUSE HERE, NOT ON THE DEVICE" FOR A FILE (issue
+            # #159): the shipped firmware's staging slot is what reads it.
+            cap = stage_capacity(args.stage_elf, args.stage_symbol)
+            if len(blob) > cap:
+                die("%s is %d B and the firmware stages at most %d B (%s in "
+                    "%s).  The device would refuse it after the copy."
+                    % (args.name, len(blob), cap, args.stage_symbol,
+                       args.stage_elf))
+        else:
             table = json.load(open(args.slot_table))
             for sl in table["slots"]:
                 if sl["index"] == int(args.slot):

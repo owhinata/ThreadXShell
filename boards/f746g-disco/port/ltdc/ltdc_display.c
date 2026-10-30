@@ -39,7 +39,7 @@
  * MPU non-cacheable `.sdram` region, so they are coherent with no cache work.
  *
  * Double buffer + tear-free flip (owhinata/stm32f746g-disco#53): drawing targets the back
- * buffer;  ltdc_flip() stages it via HAL_LTDC_SetAddress_NoReload() then HAL_LTDC_Reload
+ * buffer;  ltdc_flip() stages it by writing LxCFBAR alone (#160) then HAL_LTDC_Reload
  * (VERTICAL_BLANKING) and waits for the hardware reload.  SRCR.VBR is the
  * authoritative signal -- it self-clears only after the HW commits the reload at
  * the next vertical blanking (RM0385 §18.7.6) -- and the reload-ready IRQ
@@ -950,9 +950,25 @@ static int ltdc_flip_locked(void)
 	while (tx_semaphore_get(&ltdc_reload_sem, TX_NO_WAIT) == TX_SUCCESS)
 		;
 
-	(void)HAL_LTDC_SetAddress_NoReload(&hltdc,
-	                                   (uint32_t)(uintptr_t)&ltdc_fb[back][0],
-	                                   0);
+	/* [!] Stage ONLY the layer-0 frame-buffer address (LxCFBAR, HCLK domain,
+	   one access).  Do not go through HAL_LTDC_SetAddress_NoReload(): its
+	   LTDC_SetConfig() rewrites the whole layer: 11 write / read-modify-write
+	   statements on pixel-clock-domain registers (LxWHPCR/WVPCR/PFCR/DCCR/
+	   CACR/BFCR), 16 bus accesses, plus 4 BPCR reads.  RM0385 §18.3.3 Table
+	   117: each such access stalls APB2 for 6 (write) / 7 (read) PCLK2 + 5
+	   LCD_CLK periods (~1.1 us at 4.8 MHz), i.e. ~12 us at the very least (~22 us counting
+	   every access) of APB2 stall per flip -- longer than the SDMMC1 RX FIFO
+	   lasts at 24 MHz 4-bit, so an SD read during the GUIX flip overran
+	   (#160), and the DMA2 peripheral port it shares with the DCMI stream
+	   stalled with it.  Rule: no pixel-clock-domain LTDC register on the flip
+	   or any per-frame path.  The HAL lock / State the HAL toggled around the
+	   write carry nothing here (ltdc_lock serializes every layer / flip
+	   access; ltdc_errors() and the IRQ touch only ISR / IER / ICR); the
+	   stored layer config is kept coherent so a later HAL_LTDC_Set*() that
+	   rebuilds the layer from hltdc.LayerCfg would not revert the address. */
+	hltdc.LayerCfg[0].FBStartAdress = (uint32_t)(uintptr_t)&ltdc_fb[back][0];
+	LTDC_LAYER(&hltdc, 0)->CFBAR = (uint32_t)(uintptr_t)&ltdc_fb[back][0];
+	/* IER (RRIE) + SRCR: PCLK2 domain, no LCD_CLK stall. */
 	(void)HAL_LTDC_Reload(&hltdc, LTDC_RELOAD_VERTICAL_BLANKING);
 
 	/* Wake-up hint (the IRQ posts on reload-ready); the truth is VBR below.

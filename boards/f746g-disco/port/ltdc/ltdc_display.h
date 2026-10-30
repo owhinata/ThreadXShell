@@ -19,7 +19,7 @@
  * Double buffer (owhinata/stm32f746g-disco#53): two RGB565 frame buffers live in
  * SDRAM. Drawing always targets the *back* buffer (ltdc_back_buffer()); ltdc_flip()
  * then makes it the front (displayed) one with a tear-free swap --
- * HAL_LTDC_SetAddress_NoReload() stages the new CFBAR,
+ * a direct write of LxCFBAR alone stages the new address (#160),
  * HAL_LTDC_Reload(VERTICAL_BLANKING) requests the register reload at the next
  * VSYNC, and the swap is committed only after the hardware has actually reloaded
  * (SRCR.VBR reads back 0, RM0385 §18.7.6 -- VBR self-clears after the HW reload).

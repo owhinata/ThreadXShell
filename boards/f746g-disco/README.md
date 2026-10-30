@@ -651,9 +651,11 @@ faces 1 thresh 600/1000
 face 0 x 230 y 78 w 63 h 47 px score 859
 ```
 
-The first SD read of a large file can fail while the camera streams
-(`sd: read failed: I/O error`, an SDMMC RX overrun); issuing the load again
-reads it.  That is #160, not the container path.
+Before #160 the first SD read of a large file could fail while the GUIX
+camera preview ran (`sd: read failed: I/O error`, an SDMMC RX overrun, about 1
+load in 3).  The cause was the display flip, not the SD driver or the container
+path: see "The flip writes only the layer address" below.  SD hardware flow
+control stays off.
 
 `scripts/verify_tflite.cc` (`--target verify-model`) is this board's model gate
 for that asset build: the tree's own `VerifyModelBuffer()`, the staging
@@ -1119,6 +1121,51 @@ JPEG frame is armed.
 Not known, and not pursued further: where the 40 s period comes from and why
 code placement matters.  The reproducing binary and the raw investigation notes
 are in the git-ignored `build/f746-144-repro/`.
+
+### [!] The flip writes only the layer address (issue #160)
+
+RM0385 18.3.3 (Table 117): every access to an LTDC register in the pixel-clock
+domain -- the layer registers LxWHPCR, LxWVPCR, LxCKCR, LxPFCR, LxCACR, LxDCCR,
+LxBFCR, LxCLUTWR and the global SSCR, BPCR, AWCR, TWCR, GCR, BCCR, LIPCR, CPSR,
+CDSR -- stalls APB2 for 6 (write) / 7 (read) PCLK2 + 5 LCD_CLK periods, about 1.1 us at this
+board's 4.8 MHz pixel clock.  LxCR, LxCFBAR, LxCFBLR and LxCFBLNR are in the
+HCLK domain; SRCR, IER, ISR and ICR cost 6-7 PCLK2 only.
+
+`HAL_LTDC_SetAddress_NoReload()` goes through `LTDC_SetConfig()`, which
+rewrites the whole layer: 11 write / read-modify-write statements on
+pixel-clock-domain layer registers (16 bus accesses) plus 4 BPCR reads, so
+at least about 12 us and up to about 22 us of APB2 stall on every flip,
+back to back.  SDMMC1 sits on
+APB2 and its 32-word RX FIFO, drained by the DMA2 peripheral port, overflows
+after about 8 us without service at 24 MHz 4-bit, so an SD read that overlapped
+a GUIX buffer toggle failed with `HAL err 0x20` (RX overrun) -- about 1
+`nn model load --path` in 3 while the camera preview ran.  The DMA2 peripheral
+port is shared with the DCMI stream, so the same stall, landing on active
+pixels, also starves the DCMI (one captured SD failure coincided with a DCMI
+overrun).  It is the likely source of the rare DCMI overruns under GUIX (2 per
+624 s under the `nn stream` load before the fix); that run has not been
+repeated after the fix.
+
+Verified after the fix (2026-10-30): 30 consecutive `nn model load --path`
+with the camera preview running, 0 failures, no `HAL err 0x20` in `dmesg`;
+811 s of preview with `ovr dcmi` 0; `gui stop` / `gui start` and `lcd off` /
+`lcd on` round trips intact.
+
+`ltdc_flip_locked()` (`port/ltdc/ltdc_display.c`) therefore writes LxCFBAR
+alone (and keeps `hltdc.LayerCfg[0].FBStartAdress` in step) before
+`HAL_LTDC_Reload(VERTICAL_BLANKING)`.  LTDC accesses that remain:
+
+| Path | Registers | Domain |
+|---|---|---|
+| every flip (GUIX canvas toggle, `lcd` draw commands) | LxCFBAR write; IER read-modify-write and SRCR write (`HAL_LTDC_Reload`); SRCR read, polled at 1 ms until VBR clears | HCLK / PCLK2 |
+| reload-ready IRQ, once per flip | ISR, IER reads; IER read-modify-write; ICR write | PCLK2 |
+| `lcd on` / `lcd off`, `sdram test` hold / unhold | GCR read-modify-write | pixel |
+| `lcd info` | ISR read | PCLK2 |
+| bring-up / failed bring-up | `HAL_LTDC_Init`, `HAL_LTDC_ConfigLayer`, `HAL_LTDC_DeInit` | all |
+
+Nothing on a per-frame or per-flip path touches a pixel-clock-domain register;
+keep it that way (no `HAL_LTDC_SetAddress*`, `HAL_LTDC_SetPitch*`,
+`HAL_LTDC_SetWindow*`, `HAL_LTDC_ConfigLayer*` or CPSR / CDSR reads there).
 
 ## Debugging
 

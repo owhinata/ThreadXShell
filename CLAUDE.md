@@ -213,6 +213,7 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
 - **raster の DCMI OVR を終端に戻さない**（teardown → GUIX 再 open の全画面描画が最初のフレームで再発し復帰が
   構造的に成立しない。#137）。**teardown は stop とエラーだけ、復帰は producer の in-place resync 1 本。**
 - **DCMI の LINE / VSYNC 割込みを有効に戻さない**（消費者が無く、試した構成では有効だと 40 s 周期 overrun の必要条件だった。`HAL_DCMI_Init` が足すので Init 直後に切る。#144）
+- **LTDC の pixel-clock 域レジスタ（RM0385 Table 117）を flip / 毎フレーム経路で触らない**（1 アクセスで APB2 が約 1.1 us 止まり SDMMC / DCMI が溢れる。flip は LxCFBAR だけ書く、#160）
 - **camera sink（表示 + nn の step）と MJPEG の 2 購読者は各自 drain する**（`camera_frame_put()` は全 `consume()` の
   最後の文、購読者の終わりは `_pins == 0 && _callbacks == 0`）。**step の停止は印を落として使用中 0**（`svc/camera/cam_step`）。
 - リファレンス: RM0385 / UM1907（`_ref/f746g-disco/`、read-only）。

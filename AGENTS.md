@@ -181,6 +181,7 @@ plugin は board code と同格の**信頼された native code**。ゲートが
 - **`CLI_INSTANCE_TIME_SLICE=0` を維持**（CPU-bound コマンドが多重実行に非再入。スライス有効化は再入ガードとセット）。
 - **raster の DCMI OVR を終端に戻さない**（#137）: 復帰は producer の `cam_stream_resync()` 1 本（`cam_lock` 下・NVIC マスク下、subscriber の close/open 無し）。**teardown は stop とエラーだけ**（#142 で上限は無い）。
 - **DCMI の LINE / VSYNC 割込みを有効に戻さない**（消費者が無く、試した構成では有効だと 40 s 周期 overrun の必要条件だった。`HAL_DCMI_Init` が足すので Init 直後に `dcmi_hal_init()` で切る。#144）
+- **LTDC の pixel-clock 域レジスタ（RM0385 Table 117）を flip / 毎フレーム経路で触らない**（1 アクセスで APB2 が約 1.1 us 止まり SDMMC / DCMI が溢れる。flip は LxCFBAR だけ書く、`HAL_LTDC_SetAddress*` を戻さない、#160）
 - **購読者は camera sink（表示 + nn の step）と MJPEG の 2 つ、step の停止は印を落として使用中 0**（`svc/camera/cam_step`）。`camera_frame_put()` は**全 `consume()` の最後の
   文**、`CAM_OWN_DRAINING` は `camera_unsubscribe()` / step の disable の**前**、直列化（PRIMASK）は作業を跨がない。判定は
   `cam_drain.c` / `cam_own.c` の純関数が**唯一の判断点**で**両方 fail-closed**、**`default:` を足さない**。

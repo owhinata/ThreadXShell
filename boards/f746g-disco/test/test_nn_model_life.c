@@ -21,7 +21,9 @@
  *   - `nn info` from another console while a swap is in flight answers BUSY on
  *     all three lines (the stub's reload asks it), and a held session with no
  *     load in flight -- a stream -- still gets the copy;
- *   - nothing is called inside the board's critical section.
+ *   - nothing is called inside the board's critical section;
+ *   - the board is empty from boot and `builtin` is not a source it takes
+ *     (issue #159 Step 4c): SPEC, worded, nothing touched.
  */
 #include <assert.h>
 #include <stdio.h>
@@ -86,10 +88,9 @@ static char stub_buf[64];
 static int st_init(void) { return 0; }
 static int st_open(void **impl)
 {
-	if (!stub.adopted) {
-		stub.adopted = 1;
-		stub.has     = 1;   /* the built-in model, once */
-	}
+	/* Nothing in the image (issue #159 Step 4c): the first open builds
+	 * nothing, as the tflm backend's does. */
+	stub.adopted = 1;
 	*impl = &stub;
 	return 0;
 }
@@ -152,7 +153,7 @@ const struct nn_backend_vt nn_backend_vt_selected = {
 	.model_name = st_name, .in_count = st_in_count, .out_count = st_in_count,
 	.input = st_tensor, .output = st_tensor, .activations_bytes = st_acts,
 	.run = st_run, .load_region = st_region, .reload = st_reload,
-	.release = st_release, .arena_reserved = 524288u, .has_builtin = 1u,
+	.release = st_release, .arena_reserved = 524288u, .has_builtin = 0u,
 };
 
 /* ---- the console's side ------------------------------------------------- */
@@ -214,8 +215,22 @@ int main(void)
 {
 	int rel, inv, rl;
 
-	/* Boot: the first `nn info` adopts the built-in model. */
+	/* Boot: nothing in the image, so the first `nn info` finds no model. */
+	info_is(0, "(none)", NN_AVAIL_OK);
+
+	/* [!] `builtin` IS NOT A SOURCE HERE ANY MORE (issue #159 Step 4c): the
+	 * shared SPEC refusal, worded, refused before anything is acquired. */
+	load(NN_SPEC_BUILTIN, NULL);
+	assert(res.status == NN_SVC_ERR_SPEC && state == NN_MODEL_EMPTY);
+	assert(strstr(res.detail, "built-in model") != NULL);
+	assert(stub.reloads == 0 && invalidations == 0 && !stub.has);
+
+	/* The first model comes from the card. */
+	load(NN_SPEC_PATH, "a.tflite");
+	assert(res.status == NN_SVC_OK && state == NN_MODEL_NEW && stub.has);
 	info_is(1, "m", NN_AVAIL_OK);
+	stub.reloads  = 0;
+	invalidations = 0;
 
 	/* A spec this board does not take: SPEC, worded, nothing touched. */
 	load(NN_SPEC_NAME, NULL);
@@ -314,8 +329,8 @@ int main(void)
 	assert(stub.reloads == rl);
 	read_rc = 0;
 
-	/* `builtin` brings the built-in model back. */
-	load(NN_SPEC_BUILTIN, NULL);
+	/* A load from the card brings a model back. */
+	load(NN_SPEC_PATH, "a.tflite");
 	assert(res.status == NN_SVC_OK && state == NN_MODEL_NEW && stub.has);
 
 	/* A "success" that left no model: a failure (HW), EMPTY, released. */

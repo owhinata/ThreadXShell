@@ -118,12 +118,16 @@ int nn_model_open(struct nn_model **out)
 			*out = &g_model;
 			return 0;
 		}
-		/* [!] The first open builds into .sdram.ai (the tflm backend adopts
-		 * its built-in model there): refused, before anything is built,
-		 * while `sdram test` holds the memory (issue #152).  Decided in the
-		 * same critical section that takes the latch, so a claim and a build
-		 * can never both be in. */
-		if (nn_scratch_claimed) {
+		/* [!] The first open of a backend with a model in the image
+		 * (has_builtin: null, stedgeai) builds it into .sdram.ai: refused,
+		 * before anything is built, while `sdram test` holds the memory
+		 * (issue #152).  Decided in the same critical section that takes the
+		 * latch, so a claim and a build can never both be in.
+		 * [!] ONLY THAT BACKEND (issue #159 Step 4c).  tflm's and
+		 * stedgeai_reloc's first open builds nothing -- it only publishes the
+		 * empty handle -- so refusing it would turn a fresh-boot `nn info`
+		 * during `sdram test` into "busy" for a memory nothing touches. */
+		if (nn_scratch_claimed && nn_backend_vt_selected.has_builtin) {
 			__set_PRIMASK(primask);
 			return NN_ERR_SCRATCH_HELD;
 		}
@@ -281,7 +285,7 @@ int nn_model_reload(const void *data, uint32_t len, const char *name,
 	 * empty handle (rc<0) when there was nothing to restore or even the restore
 	 * failed (issue #131 P16).  NULL is no longer a backend's answer; it is still
 	 * mirrored -- the singleton closes, and the backend's next open builds
-	 * nothing, because it has adopted its built-in model once already -- rather
+	 * nothing (a swapping backend has nothing in the image to adopt) -- rather
 	 * than left as a dangling impl. */
 	rc = nn_backend_vt_selected.reload(data, len, name, &impl);
 	if (impl) {

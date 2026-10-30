@@ -3,14 +3,13 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host test for this board's decode counting table (issue #130 step 6c, #122
- * P8, port/nn/nn_decode_count.c).
+ * P8, port/nn/nn_decode_count.c; one table since issue #159 Step 4c).
  *
- * WHY THIS EXISTS.  The rows that matter cannot be typed: the resident decoder
- * answers BF_ERR_UNINIT only if its init failed at boot, and BF_ERR_ARG only for
- * a wiring fault in this file's caller.  Each must be counted as a decoder
- * fault -- folded into nothing it reads as a healthy stream.  And BF_ERR_MODEL
- * must NOT be counted (D6): on this board it is the top-5 result of every
- * classifier stream, so counting it would make every such stream all errors.
+ * WHY THIS EXISTS.  The rows that matter cannot be typed: a plugin answers
+ * BF_ERR_UNINIT or BF_ERR_ARG only for a wiring fault, and each must be counted
+ * as a decoder fault -- folded into nothing it reads as a healthy stream.  And
+ * BF_ERR_MODEL from a plugin that passed the admission is a container whose
+ * two halves disagree: model_errors, never an inference with nobody found.
  * Every row is spelled out against the real BF_ERR_* values, then the rules are
  * checked over a sweep of answers.
  */
@@ -40,84 +39,13 @@ static void row(int nd, int oneshot, enum nn_decode_count want)
 	      (int)got, (int)want);
 }
 
-static void prow(int nd, int oneshot, enum nn_decode_count want)
-{
-	enum nn_decode_count got = nn_decode_count_plugin_of(nd, oneshot);
-
-	CHECK(got == want, "plugin nd %d oneshot %d: got %d want %d", nd,
-	      oneshot, (int)got, (int)want);
-}
-
-/*
- * [!] A LOADED PLUGIN'S ANSWER (issue #159 Step 4b).  A plugin that passed the
- * stream's admission (shapes_ok) and then answers BF_ERR_MODEL from decode()
- * is a container whose two halves disagree: model_errors, never an inference
- * with nobody found -- which is what the resident table above would make of
- * it.  The other negatives are wiring faults, as everywhere.
- */
-static void test_plugin_rows(void)
-{
-	int nd;
-
-	prow(0, 0, NN_DC_NONE);
-	prow(5, 0, NN_DC_NONE);
-	prow(BF_ERR_MODEL, 0, NN_DC_MODEL);
-	prow(BF_ERR_UNINIT, 0, NN_DC_DECODER);
-	prow(BF_ERR_ARG, 0, NN_DC_DECODER);
-	prow(-4, 0, NN_DC_DECODER);
-	prow(INT_MIN, 0, NN_DC_DECODER);
-	prow(BF_ERR_MODEL, 1, NN_DC_NONE);   /* `nn run` reports its own */
-	prow(BF_ERR_UNINIT, 1, NN_DC_NONE);
-	for (nd = -200; nd < 0; nd++)
-		CHECK(nn_decode_count_plugin_of(nd, 0) != NN_DC_NONE,
-		      "a plugin's negative %d counted as nothing", nd);
-	CHECK(nn_decode_count_of(BF_ERR_MODEL, 0) !=
-	      nn_decode_count_plugin_of(BF_ERR_MODEL, 0),
-	      "the resident and the plugin tables agree on BF_ERR_MODEL");
-}
-
-/*
- * [!] ONLY WHAT THE RECORD TOOK IS COUNTED (issue #159 Step 4b-iii, #122 P18).
- * The case that cannot be typed on purpose: a stop that lands during the one
- * inference of a short stream drops its publish, and the stats must then say no
- * inference -- not "1 infer" beside `last : nothing decoded yet`.  Until this
- * step the resident path counted the inference whether or not the record took
- * it; the plugin path (Step 4b-ii) and wio-lite-ai did not.
- */
-static void test_tally(void)
-{
-	static const enum nn_decode_count all[3] = { NN_DC_NONE, NN_DC_DECODER,
-	                                             NN_DC_MODEL };
-	unsigned i, infers = 0u;
-
-	for (i = 0u; i < 3u; i++)
-		CHECK(nn_decode_tally_of(0, all[i]) == NN_TALLY_NOTHING,
-		      "a dropped publish (dc %d) was counted", (int)all[i]);
-	CHECK(nn_decode_tally_of(1, NN_DC_NONE) == NN_TALLY_INFER,
-	      "a taken result is not an infer");
-	CHECK(nn_decode_tally_of(1, NN_DC_DECODER) == NN_TALLY_DECODER,
-	      "a taken decoder refusal is not a decoder error");
-	CHECK(nn_decode_tally_of(1, NN_DC_MODEL) == NN_TALLY_MODEL,
-	      "a taken model mismatch is not a model error");
-
-	/* The resident path's one publish of a stream, dropped by the stop's
-	 * boundary: a face found, and nothing counted. */
-	if (nn_decode_tally_of(0, nn_decode_count_of(1, 0)) == NN_TALLY_INFER)
-		infers++;
-	CHECK(infers == 0u, "[!] the stop-refused publish counted %u infer(s)",
-	      infers);
-	/* ...and the plugin path's the same. */
-	CHECK(nn_decode_tally_of(0, nn_decode_count_plugin_of(BF_ERR_MODEL, 0)) ==
-	      NN_TALLY_NOTHING, "a dropped plugin mismatch was counted");
-}
-
 static void test_rows(void)
 {
 	/* A stream. */
 	row(0, 0, NN_DC_NONE);               /* decoded nobody: a measurement  */
-	row(1, 0, NN_DC_NONE);
+	row(5, 0, NN_DC_NONE);
 	row(INT_MAX, 0, NN_DC_NONE);
-	row(BF_ERR_MODEL, 0, NN_DC_NONE);    /* the top-5 result (D6)          */
+	row(BF_ERR_MODEL, 0, NN_DC_MODEL);   /* the container's halves disagree */
 	row(BF_ERR_UNINIT, 0, NN_DC_DECODER);
 	row(BF_ERR_ARG, 0, NN_DC_DECODER);
 	row(-4, 0, NN_DC_DECODER);           /* undocumented: a fault          */
@@ -135,15 +63,53 @@ static void test_rows(void)
 	row(BF_ERR_ARG, 2, NN_DC_NONE);
 }
 
-/* The rules, over a sweep: no negative of a stream but BF_ERR_MODEL is
- * dropped, and no count is an error. */
+/*
+ * [!] ONLY WHAT THE RECORD TOOK IS COUNTED (issue #159 Step 4b-iii, #122 P18).
+ * The case that cannot be typed on purpose: a stop that lands during the one
+ * inference of a short stream drops its publish, and the stats must then say no
+ * inference -- not "1 infer" beside `last : nothing decoded yet`.  Kept through
+ * Step 4c: the plugin's decode and the raw publish both go through it.
+ */
+static void test_tally(void)
+{
+	static const enum nn_decode_count all[3] = { NN_DC_NONE, NN_DC_DECODER,
+	                                             NN_DC_MODEL };
+	unsigned i, infers = 0u;
+
+	for (i = 0u; i < 3u; i++)
+		CHECK(nn_decode_tally_of(0, all[i]) == NN_TALLY_NOTHING,
+		      "a dropped publish (dc %d) was counted", (int)all[i]);
+	CHECK(nn_decode_tally_of(1, NN_DC_NONE) == NN_TALLY_INFER,
+	      "a taken result is not an infer");
+	CHECK(nn_decode_tally_of(1, NN_DC_DECODER) == NN_TALLY_DECODER,
+	      "a taken decoder refusal is not a decoder error");
+	CHECK(nn_decode_tally_of(1, NN_DC_MODEL) == NN_TALLY_MODEL,
+	      "a taken model mismatch is not a model error");
+
+	/* A plugin's one publish of a stream, dropped by the stop's boundary: a
+	 * face found, and nothing counted. */
+	if (nn_decode_tally_of(0, nn_decode_count_of(1, 0)) == NN_TALLY_INFER)
+		infers++;
+	CHECK(infers == 0u, "[!] the stop-refused publish counted %u infer(s)",
+	      infers);
+	CHECK(nn_decode_tally_of(0, nn_decode_count_of(BF_ERR_MODEL, 0)) ==
+	      NN_TALLY_NOTHING, "a dropped plugin mismatch was counted");
+	/* ...and a raw publish (no plugin) the same. */
+	CHECK(nn_decode_tally_of(0, NN_DC_NONE) == NN_TALLY_NOTHING,
+	      "a dropped raw publish was counted");
+}
+
+/* The rules, over a sweep: no negative of a stream is dropped, BF_ERR_MODEL
+ * alone is a model error, and no count is an error. */
 static void test_rules(void)
 {
 	for (int nd = -200; nd <= 200; nd++) {
 		enum nn_decode_count got = nn_decode_count_of(nd, 0);
 
-		if (nd >= 0 || nd == BF_ERR_MODEL)
+		if (nd >= 0)
 			CHECK(got == NN_DC_NONE, "%d counted as %d", nd, (int)got);
+		else if (nd == BF_ERR_MODEL)
+			CHECK(got == NN_DC_MODEL, "BF_ERR_MODEL got %d", (int)got);
 		else
 			CHECK(got == NN_DC_DECODER, "negative %d got %d", nd,
 			      (int)got);
@@ -158,7 +124,6 @@ static void test_rules(void)
 int main(void)
 {
 	test_rows();
-	test_plugin_rows();
 	test_tally();
 	test_rules();
 	if (fails) {

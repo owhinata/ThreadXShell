@@ -165,13 +165,11 @@ uint32_t     nncam_gen_errors;
 uint32_t     nncam_gen_drops;
 /* Two of these (nncam_gen_errors, and nnstat.errors) have two writers: see
  * nncam_error() in nn_camera_priv.h (issue #138). */
-/* Of nncam_gen_errors: decodes the resident decoder refused as a wiring fault
- * (issue #130 step 6c, nn_decode_count.h -- BF_ERR_MODEL is a result here, not
- * one of these).  Written by the worker only. */
+/* Of nncam_gen_errors: decodes a plugin refused as a wiring fault (issue #130
+ * step 6c, nn_decode_count.h).  Written by the worker only. */
 uint32_t     nncam_gen_decoder_errors;
 /* Of nncam_gen_errors: a LOADED PLUGIN's BF_ERR_MODEL -- its model and its
- * decoder do not match (issue #159; nn_decode_count_plugin_of()).  The worker
- * only. */
+ * decoder do not match (issue #159; nn_decode_count_of()).  The worker only. */
 uint32_t     nncam_gen_model_errors;
 /* The running stream is a `nn run`'s: its decodes are not counted (it reports
  * its own result).  Written by nn_camera_start() before nncam_run is raised. */
@@ -372,7 +370,8 @@ static int nncam_open(void *ctx, enum frame_format fmt, uint16_t w, uint16_t h)
  * nncam_account in nn_worker.c. */
 
 /* Is a plugin in force?  The question the frame path asks before the lease
- * (issue #159); with none, the resident decoder publishes (nncam_publish). */
+ * (issue #159); with none, the worker publishes the raw tensors
+ * (nncam_publish, Step 4c). */
 static int nncam_is_plugin(void *ctx)
 {
 	(void)ctx;
@@ -577,10 +576,10 @@ int nn_camera_start(enum camera_res res, int oneshot)
 	 * the two and this start would succeed on nothing -- every frame an error,
 	 * `nn run` a timeout.  Under the session no load or unload can run, so what
 	 * nncam_open_model() reads stays true for the stream.  If this is the
-	 * first nn command after boot, its open is the one that adopts the
-	 * built-in model -- under the session, and a load or unload racing it
-	 * waits on the open latch and then finds the session taken.  Otherwise the
-	 * open builds nothing. */
+	 * first nn command after boot on a backend with a model in the image, its
+	 * open is the one that adopts it -- under the session, and a load or
+	 * unload racing it waits on the open latch and then finds the session
+	 * taken.  Otherwise the open builds nothing. */
 	rc = nn_session_try_acquire();
 	if (rc != 0) {
 		cam_own_start_finish(&nncam_own, 0);
@@ -598,15 +597,19 @@ int nn_camera_start(enum camera_res res, int oneshot)
 #if defined(CONFIG_NN_BACKEND_TFLM)
 	/*
 	 * [!] CAN THE PLUGIN READ THIS MODEL, AND WILL IT DRAW (issue #159,
-	 * wio-lite-ai's #110 / #116)?  A plugin was shipped WITH the model it reads;
-	 * finding out per frame that it cannot is a stream that runs and silently
-	 * never annotates.  Asked only with a plugin in force: in Step 4b the
-	 * resident decoder is still the no-plugin fallback, and it answers for
-	 * itself as it always has (BF_ERR_MODEL is its "not a detector").  The draw
-	 * question is a STREAM's -- a `nn run` reports, it does not draw.  Under the
+	 * wio-lite-ai's #110 / #116)?  This is the one admission point both `nn
+	 * run` and `nn stream start` pass through.  A plugin was shipped WITH the
+	 * model it reads; finding out per frame that it cannot is a stream that
+	 * runs and silently never annotates.
+	 *
+	 * [!] WITH NO PLUGIN THE SHAPE QUESTION PASSES AND THE DRAW QUESTION DOES
+	 * NOT (Step 4c, wio-lite-ai's answer).  There is no resident decoder, so
+	 * no shape can be wrong -- and `nn run` on a bare model runs and reports
+	 * the tensors themselves.  What is refused is a STREAM with nothing to
+	 * draw, and nn_active_can_draw() is the one thing that says so.  Under the
 	 * lease like every entry into a plugin, and a timeout is not a yes.
 	 */
-	if (nn_active_is_plugin()) {
+	{
 		int shapes, draws;
 
 		if (!plugin_lease_take()) {
@@ -628,6 +631,19 @@ int nn_camera_start(enum camera_res res, int oneshot)
 			cam_own_start_finish(&nncam_own, 0);
 			return (shapes != 1) ? NNCAM_ERR_SHAPES : NNCAM_ERR_NODRAW;
 		}
+	}
+#else
+	/*
+	 * [!] THE SAME ANSWER WITHOUT THE MACHINERY (wio-lite-ai's issue #116).  A
+	 * non-tflm backend has no plugin mechanism compiled in, so nothing could
+	 * ever draw here: a stream is refused, a one-shot `nn run` reports the
+	 * tensors.  Said here rather than left out, or this build would light a
+	 * camera for a stream that can never draw.
+	 */
+	if (!oneshot) {
+		nn_session_release();
+		cam_own_start_finish(&nncam_own, 0);
+		return NNCAM_ERR_NODRAW;
 	}
 #endif
 	if (nncam_create_objects() != 0) {
@@ -844,31 +860,6 @@ void nn_camera_stats_get(struct nn_camera_stats *out)
 	now = HAL_GetTick();
 	elapsed = now - nnstat.start_tick;
 	out->fps_x100 = elapsed ? (uint32_t)((uint64_t)nnstat.infers * 100000u / elapsed) : 0u;
-}
-
-int nn_camera_dets_get(struct bf_det *out, int max)
-{
-	struct nn_camera_decode snap;
-
-	if (!out || max <= 0)
-		return 0;
-	if (!nn_camera_decode_get(&snap, out, max, NULL, NULL))
-		return 0;
-	/* [!] ONLY THE SESSION IN FORCE (issue #118).  The record keeps its last
-	 * boxes across a stop now, and this is what the GUI stamps on a LIVE
-	 * picture: a new stream would open wearing the previous one's faces. */
-	if (!snap.current)
-		return 0;
-	/* [!] AND ONLY THE RESIDENT DECODER'S (issue #159): a plugin's count has no
-	 * boxes in this record -- its result is private, and it draws it itself. */
-	if (snap.kind != (uint8_t)NN_DET_CALLER_BOXES)
-		return 0;
-	/* A count of boxes actually copied.  A negative ndet means "not a BlazeFace
-	 * model" and there are no boxes to hand back; callers that need to tell that
-	 * apart from an honest zero use nn_camera_decode_get(). */
-	if (snap.ndet <= 0)
-		return 0;
-	return snap.ndet < max ? snap.ndet : max;
 }
 
 int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,

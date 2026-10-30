@@ -270,7 +270,7 @@ int main(void)
 	wio_row("model_after = 2 is a model",            0, 2, 0, 1, NN_MODEL_NEW,      1, 0, 1, CLAIMS_NEW);
 
 	/* 3. f746g-disco                                rc  open reach state            iv */
-	f746_row("--path or builtin taken",              0, 1, 1, NN_MODEL_NEW,      1);
+	f746_row("--path taken",                         0, 1, 1, NN_MODEL_NEW,      1);
 	f746_row("refused, previous rebuilt (tflm)",   -10, 1, 1, NN_MODEL_PREVIOUS, 0);
 	f746_row("backend cannot swap (-2)",            -2, 1, 1, NN_MODEL_PREVIOUS, 0);
 	f746_row("refused, previous lost",              -7, 0, 1, NN_MODEL_EMPTY,    1);

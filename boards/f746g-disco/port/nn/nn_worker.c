@@ -8,10 +8,10 @@
  * (issue #140; see nn_camera.c for the design and nn_camera_priv.h for the state).
  *
  * Everything here runs on the worker (priority 18): the thread itself, the
- * frame path's worker half (take -> nn_run() -> on_infer_done), the resident
- * decoder's publish with the counting that goes with it, and -- with a plugin
- * in force (issue #159) -- the plugin's decode and publish under the plugin
- * lease.  Lease, then the record lock (nncam_lock), as everywhere.
+ * frame path's worker half (take -> nn_run() -> on_infer_done), the raw publish
+ * ("nobody interprets these") when no plugin is in force, and -- with one (issue
+ * #159) -- the plugin's decode and publish under the plugin lease, and this
+ * board's counting.  Lease, then the record lock (nncam_lock), as everywhere.
  */
 #include <stdint.h>
 
@@ -19,12 +19,11 @@
 
 #include "nn.h"
 #include "nn_camera_priv.h"
-#include "nn_decoder.h"   /* the shared BlazeFace decoder, via this board's adapter */
+#include "nn_desc.h"      /* nn_tensor -> tensor_desc (the raw publish)      */
 #include "nn_det_record.h"
 #include "nn_core_frame.h"   /* the shared frame path and its hand-over word (#130) */
 #include "nn_sess_release.h" /* when the session may go back (#130)               */
 #include "nn_decode_count.h" /* how a decode's answer is counted (#130 6c)         */
-#include "nn_top.h"          /* the classes, taken before the next inference (#121) */
 #include "cam_own.h"         /* the owner lifecycle (issue #72)                        */
 
 #include "stm32f7xx_hal.h"   /* HAL_RCC_GetHCLKFreq */
@@ -66,77 +65,43 @@ static void nncam_tally(enum nn_decode_tally t, int nd)
 }
 
 /*
- * The publish of one inference -- on this board, THE RESIDENT DECODER'S.  The
- * frame path hands a board with no plugin mechanism this slot (its decode slot is
- * the plugin's, reached only under the plugin lease, which this board does not
- * have), so the BlazeFace decode that has always run here runs here: on the
- * worker, while the word still says RUNNING -- the output tensors are read for
- * the last time inside this call -- and published under @p gen, the generation
- * the frame was prepared under.  Non-zero if the record took it.
+ * Publish "an inference ran and nothing decoded it" (issue #159 Step 4c;
+ * wio-lite-ai's since its issue #116).  The frame path calls this with no
+ * plugin in force: this firmware carries no decoder, the outputs are there, and
+ * only an interpretation of them is missing.  Under @p gen, the generation the
+ * frame was prepared under -- [!] A RAW PUBLISH IS UNDER THE GENERATION RULE
+ * TOO, or `nn run` on a bare model would wait for a result that never comes.
+ * Non-zero if the record took it; the counting is nncam_account()'s.
  */
 int nncam_publish(void *ctx, uint32_t gen)
 {
-	struct bf_det tmp[BF_MAX_DET];
-	struct bf_result bfr;
-	struct nn_top5 top;
-	int nd, took;
+	/*
+	 * [!] THE OUTPUT SHAPES OF THE MODEL THAT RAN, TAKEN HERE (issue #121).
+	 * This thread holds the session, so the model cannot change under it; the
+	 * console that prints the report later holds nothing of the kind.  Built
+	 * outside the lock; only the copy into the record is under it.  Static,
+	 * not a local: only this thread builds it, and ~300 B is not something the
+	 * worker's stack should carry for it.
+	 */
+	static struct nn_raw_outputs raw;
+	int took, i, n;
 
 	(void)ctx;
-	/* Model-specific decode (BlazeFace).  A safe no-op (returns BF_ERR_MODEL) for
-	 * other models, so this stays model-agnostic at the sink level.  Publish the
-	 * boxes and the diagnostics that go with them under the lock. */
-	nd = nn_decoder_run(nncam_model, tmp, BF_MAX_DET, &bfr);
+	n = nn_output_count(nncam_model);
+	raw.count = n;
+	raw.n = 0u;
+	for (i = 0; i < n && i < NN_RAW_OUTPUTS_MAX; i++) {
+		struct nn_tensor *t = nn_output(nncam_model, i);
 
-	/*
-	 * [!] NOT A DETECTOR: THE CLASSES ARE TAKEN NOW (issue #121, D3).
-	 * This thread is the only reader of the output tensor while the word says
-	 * RUNNING, and the producer may write the input again -- which can share
-	 * the arena with the outputs -- the moment it does not, so this is the one
-	 * moment its classes are still this result's.  The shared command used to
-	 * read them at print time -- after a stream stop, from the frame whose
-	 * publish had been dropped.  The walk is outside nncam_lock; only the copy
-	 * is under it.
-	 */
-	if (nd == BF_ERR_MODEL) {
-		struct tensor_desc d;
-		struct nn_tensor *o = nn_output(nncam_model, 0);
-
-		if (o != NULL) {
-			nn_decoder_desc(&d, o);
-			nn_top_of(&d, &top);
-		} else {
-			nn_top_of(NULL, &top);
-		}
+		if (t == NULL)
+			break;
+		nn_desc_of(&raw.out[i], t);
+		raw.n = (uint8_t)(i + 1);
 	}
 
 	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
-	/*
-	 * [!] A NEGATIVE RETURN IS NO LONGER FOLDED INTO ZERO (issue #57/#97).
-	 * It used to be, and that was the worst place for it: "0 faces" reads
-	 * as a measurement, so a decoder that had never been initialised --
-	 * a build fault, permanent, on every frame -- would have shown up as a
-	 * perfectly healthy stream finding nobody.  The record keeps -1, and
-	 * the status with it -- and since issue #118 it keeps its own code:
-	 * BF_ERR_UNINIT is not BF_ERR_MODEL.
-	 */
-	/* [!] WHETHER IT WAS TAKEN IS THE RECORD'S TO COUNT (issue #118).
-	 * `infers` counts inferences and keeps that meaning; `nn run` waits on
-	 * the record's accepted count, which moves here, under this lock, only
-	 * for a publish the generation rule took. */
-	took = nn_det_record_publish(&nncam_rec, tmp, nd, &bfr, gen,
-	                             (nd == BF_ERR_MODEL) ? &top : NULL);
+	took = nn_det_record_publish_raw(&nncam_rec, gen, &raw);
 	tx_mutex_put(&nncam_lock);
-	/* [!] A REFUSAL IS COUNTED APART (issue #130 step 6c, P8), HERE, because
-	 * this is where the decoder's answer is: the frame path hands this slot no
-	 * count to pass on.  BF_ERR_MODEL is the top-5 result above, not a
-	 * refusal (D6); any other negative is a wiring fault.
-	 * [!] AN ERROR AND NOT AN INFERENCE (issue #138), as on every board:
-	 * `infers` counts the results a reader can use.
-	 * [!] AND ONLY WHAT THE RECORD TOOK (issue #159 Step 4b-iii, #122 P18):
-	 * a publish the generation rule dropped is counted as nothing, as the
-	 * plugin path and wio-lite-ai count it. */
-	nncam_tally(nn_decode_tally_of(took, nn_decode_count_of(nd, nncam_oneshot)),
-	            nd);
 	return took;
 }
 
@@ -193,23 +158,22 @@ int nncam_publish_hook(void *ctx, int n, uint32_t gen)
 #endif
 
 /*
- * This board's counting.  The RESIDENT decoder's is done in its publish, where
- * its answer is (issue #138), so a RAW job counts nothing here.  A PLUGIN's
- * decode is counted here, wio-lite-ai's way: a publish the record took is an
- * inference -- unless the decoder refused it, which is an error counted apart
- * by nn_decode_count_of() -- and one the generation rule dropped is not
- * counted, and neither is its decode.
+ * This board's counting, wio-lite-ai's way: a publish the record took is an
+ * inference -- unless a plugin's decoder refused it, which is an error counted
+ * apart by nn_decode_count_of() -- and one the generation rule dropped is not
+ * counted, and neither is its decode (#122 P18).  A RAW publish found nothing
+ * and refused nothing: an inference with no detections.
  */
 void nncam_account(void *ctx, enum nn_core_done what, int n, int took)
 {
 	(void)ctx;
+	if (what == NN_CORE_DONE_RAW) {
+		nncam_tally(nn_decode_tally_of(took, NN_DC_NONE), 0);
+		return;
+	}
 	if (what != NN_CORE_DONE_DECODED)
 		return;
-	/* [!] THE PLUGIN TABLE, NOT THE RESIDENT ONE (issue #159): a plugin's
-	 * BF_ERR_MODEL is a mismatch between the container's halves, counted in
-	 * model_errors -- the resident table would count it as an inference that
-	 * found nobody.  Only what the record took, as the resident path. */
-	nncam_tally(nn_decode_tally_of(took, nn_decode_count_plugin_of(n,
+	nncam_tally(nn_decode_tally_of(took, nn_decode_count_of(n,
 	                                         nncam_oneshot)), n);
 }
 
@@ -242,7 +206,7 @@ static void nncam_step(void)
 		nn_core_frame_done(&nncam_frame, &nncam_frame_ops, nncam_run ? 1 : 0);
 		return;
 	}
-	/* Counted in the publish, once the decoder has answered (issue #138). */
+	/* Counted in nncam_account(), once the publish has answered (#138). */
 	nnstat.last_us = nn_last_cycles(nncam_model) / mhz;
 
 #if defined(CONFIG_NN_BACKEND_TFLM)
@@ -264,7 +228,7 @@ static void nncam_step(void)
 
 	/*
 	 * The decode and the publish under the generation the frame was prepared
-	 * under (nncam_publish(), this board's resident decoder), then the word back
+	 * under (a plugin's, or nncam_publish()'s raw one), then the word back
 	 * to WANT -- or to IDLE when a stop has come in, so a stop that finds the
 	 * worker parked finds nothing armed.  [!] After the outputs are read for the
 	 * last time, never before: from WANT the producer may write the input again.

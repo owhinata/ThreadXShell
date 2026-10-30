@@ -15,8 +15,9 @@
  * [!] THE SURFACE IS THE CAMERA VIEW BUFFER (cam_view_buf), NOT THE PANEL.  The
  * GUIX preview stores each frame into that buffer (DMA2D, under the frame
  * lock) and redraws the camera icon from it; the plugin's draw() runs in the
- * GUIX thread's CAMERA_FRAME handler between the store and the redraw, as the
- * resident decoder's boxes always have (owhinata/stm32f746g-disco#83), and its
+ * GUIX thread's CAMERA_FRAME handler between the store and the redraw, where
+ * the resident decoder's boxes were drawn until issue #159 Step 4c
+ * (owhinata/stm32f746g-disco#83), and its
  * strokes ride the buffer into both LTDC framebuffers through the same
  * freshness flags as the frame.  So the coordinates are the camera frame's --
  * w x h, QVGA or QQVGA, row-major with stride w, not rotated -- and the byte
@@ -24,8 +25,8 @@
  *
  * [!] IT DRAWS WITH THE CPU, INCLUDING THE FILLS, AND THAT IS THE DESIGN.  The
  * view buffer is non-cacheable SDRAM (bank 1), so CPU stores are coherent with
- * the DMA2D reads that later blit it -- the access the resident overlay already
- * performs (guix_display_cam_overlay_box()).  A DMA2D fill would need a way to
+ * the DMA2D reads that later blit it -- the access the resident overlay used to
+ * make before issue #159 Step 4c removed it.  A DMA2D fill would need a way to
  * know it had stopped writing before the frame lock is let go, which this port
  * does not have.
  */

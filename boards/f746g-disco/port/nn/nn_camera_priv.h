@@ -15,8 +15,8 @@
  *                  object declared below, and the frame path's ops table
  *   nn_producer.c  the camera producer thread: the sink's consume(), the prep
  *                  into the input tensor, the hand-over
- *   nn_worker.c    the inference worker (priority 18): nn_run(), the resident
- *                  decoder's publish, the counting
+ *   nn_worker.c    the inference worker (priority 18): nn_run(), the raw
+ *                  publish or the plugin's decode and publish, the counting
  *
  * Every object here has ONE definition, in nn_camera.c.  Next to each one: who
  * writes it, and who resets it.

@@ -15,10 +15,10 @@
  * port/nn/nn_active.c: reading an nn_tensor as a descriptor, where a depth
  * sample goes, the frame a box is mapped into, and the base vtable.
  *
- * [!] IN STEP 4b THE RESIDENT DECODER IS STILL HERE, AS THE NO-PLUGIN FALLBACK.
- * With a plugin in force everything goes through these entries; with none the
- * worker publishes through port/nn/nn_decoder.c as before.  Step 4c removes the
- * fallback (plan D7).
+ * [!] THERE IS NO RESIDENT DECODER BEHIND THESE (issue #159 Step 4c).  A
+ * decoder reaches this board only in a plugin container; with none in force
+ * the worker publishes the raw tensors ("nobody interprets them") under the
+ * same generation rule, as wio-lite-ai does since its issue #116.
  *
  * [!] THE FRAME IS THE PREVIEW'S, AND IT IS NOT A CONSTANT HERE.  The producer
  * squashes the whole camera frame onto the model's input (nearest neighbour,

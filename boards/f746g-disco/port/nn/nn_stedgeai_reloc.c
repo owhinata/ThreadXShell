@@ -18,8 +18,9 @@
  *
  * SD-only: there is NO built-in model.  open() returns an empty handle (0 in/out);
  * `nn model load --path <bin>` installs a model; `nn model unload` (release())
- * empties it again.  `nn model load builtin` is refused (has_builtin is 0) -- it
- * used to unload, which is not what the word says (issue #131 P16).
+ * empties it again.  `nn model load builtin` is refused (not a source this
+ * board takes) -- it used to unload, which is not what the word says (issue
+ * #131 P16).
  *
  * Memory (all in .sdram.ai / .sdram.ai.model, FMC bank3):
  *   - g_model_slot[2]  (.sdram.ai.model, bank3 UPPER half -> bsp.c MPU region2 makes

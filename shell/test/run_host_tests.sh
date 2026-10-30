@@ -687,6 +687,7 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
 # nn_svc_config.h with the loader on, and -D picks the sources.
 for shape in "-DNN_SVC_HAS_MODEL_SLOT=1" \
              "-DNN_SVC_HAS_MODEL_NAME=1 -DNN_SVC_HAS_MODEL_ADDR=1" \
+             "-DNN_SVC_HAS_MODEL_PATH=1" \
              "-DNN_SVC_HAS_MODEL_PATH=1 -DNN_SVC_HAS_MODEL_BUILTIN=1"; do
     # -Wno-unused-function: the stub config has no camera or bench, so the
     # cancel shim they share is unused here and nowhere on a real board.

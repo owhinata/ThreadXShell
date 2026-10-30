@@ -355,10 +355,11 @@ set(CLI_DEVMEM_DUMP_MAX_LEN "256" CACHE STRING "Max bytes per devmem dump")
 # Backend-agnostic nn layer (port/nn) over one selectable runtime.
 # `tflm` (tflite-micro, the DEFAULT since issue #130) is a C++ runtime whose
 # interpreter + backend live in a separate `tflm` static lib
-# (cmake/tflite-micro.cmake); it enables C++ only for that build.  Its built-in
-# model is the pinned upstream BlazeFace the other two boards ship, fetched and
-# sha256-verified at BUILD time -- so the default build needs the network (it
-# already did for tflite-micro itself).
+# (cmake/tflite-micro.cmake); it enables C++ only for that build.  It carries
+# no model since issue #159 Step 4c: one is loaded from the SD card (`nn model
+# load --path`), bare or as a container -- the pinned BlazeFace is the
+# `asset-blazeface` container below.  Its configure needs the network, for
+# tflite-micro itself; its build does not.
 # `null` (no runtime -> builds offline, with no toolchain or model beyond the
 # cross compiler; the `nn` command reports a BlazeFace-shaped stub whose
 # inference does nothing).  It was the default until #130.
@@ -402,14 +403,16 @@ endif()
 set(F746_NN_DEFAULT_SEEN "tflm" CACHE INTERNAL
     "This tree has been configured since the NN backend default became tflm (#130)")
 
-# [!] ONE VARIABLE FOR THE SHARED DECODER'S PATH (issue #97): the source list and
-# the audit target below must name the same file.
+# [!] ONE VARIABLE FOR THE SHARED DECODER'S PATH (issue #97): the blazeface
+# plugin's SOURCES and its AUDIT_SHARED below must name the same file.  Since
+# issue #159 Step 4c the firmware does not link it -- a decoder reaches this
+# board only in a container.
 get_filename_component(F746_SHARED_DECODER
                        "${CMAKE_SOURCE_DIR}/svc/nn/blazeface.c" ABSOLUTE)
 if(NOT EXISTS "${F746_SHARED_DECODER}")
     message(FATAL_ERROR
         "shared BlazeFace decoder not found:\n  ${F746_SHARED_DECODER}\n"
-        "This board builds it (issue #97); it is not optional.")
+        "The blazeface plugin builds it (issue #159); it is not optional.")
 endif()
 
 set(NN_SOURCES
@@ -421,18 +424,11 @@ set(NN_SOURCES
     "${BOARD_DIR}/port/nn/nn_worker.c"          # ...its inference worker thread (#140)
     "${BOARD_DIR}/port/nn/nn_sess_release.c"    # when the session may go back (#130)
     "${BOARD_DIR}/port/nn/nn_decode_count.c"    # how a decode is counted (#130 6c)
-    # Model post-processing.  The decoder is SHARED with the other two boards
-    # (issue #97); port/nn/nn_decoder.c is this board's half -- nn_tensor ->
-    # tensor_desc, and the ownership of the decoder's state and its candidate
-    # scratch, because the shared translation unit owns no storage at all.
-    # Built in EVERY backend configuration, including `null`, which is what keeps
-    # the unconditional --require-sdram-ai below honest.
-    "${F746_SHARED_DECODER}"
-    "${CMAKE_SOURCE_DIR}/svc/nn/nn_det_record.c"
-    # The top classes of a model the decoder does not recognise, taken by the
-    # worker before its next inference (issue #121, decision D3).
-    "${CMAKE_SOURCE_DIR}/svc/nn/nn_top.c"
-    "${BOARD_DIR}/port/nn/nn_decoder.c")
+    # nn_tensor -> tensor_desc (issue #159 Step 4c: the half of the old
+    # nn_decoder.c that outlived the resident decoder).  No decoder is linked in
+    # any backend: one reaches this board only in a plugin container.
+    "${BOARD_DIR}/port/nn/nn_desc.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_det_record.c")
 if(CONFIG_NN_BACKEND STREQUAL "null")
     list(APPEND NN_SOURCES "${BOARD_DIR}/port/nn/nn_null.c")
 elseif(CONFIG_NN_BACKEND STREQUAL "stedgeai")
@@ -715,8 +711,8 @@ set(F746_PLUGIN_MEMORY_LD "${BOARD_DIR}/ldscript/plugin_memory.ld")
 # runs too), hands its model section to the backend in place and, since Step
 # 4b, copies its plugin into .plugin and starts it: the plugin then decodes on
 # the nn worker, draws on the GUIX thread and reports to a console, every entry
-# under the plugin lease.  The resident decoder stays as the no-plugin fallback
-# until Step 4c.  See the board README.
+# under the plugin lease.  Since Step 4c it is the only decoder this board has:
+# with none in force the outputs are reported as tensors.  See the board README.
 #
 # tflm only: the other backends cannot hand a model section to an interpreter
 # in place, so a container has nowhere to go there.
@@ -864,8 +860,8 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     include("${CMAKE_SOURCE_DIR}/cmake/add_plugin.cmake")
 
     # The shared BlazeFace decoder, compiled into the blazeface plugin and audited
-    # there as AUDIT_SHARED (the firmware still links it too, as the resident
-    # decoder, until Step 4c -- F746_SHARED_DECODER above).
+    # there as AUDIT_SHARED -- the only place it is built for this board since
+    # issue #159 Step 4c (F746_SHARED_DECODER above).
     set(F746_PLUGIN_ELFS "")
     add_plugin(blazeface
         CFLAGS ${F746_PLUGIN_CFLAGS}
@@ -1015,9 +1011,9 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     endfunction()
 
     # The file wio-lite-ai and Grove pin -- the same commit and SHA-256, from the
-    # ST model zoo -- and the model this board's built-in array is generated
-    # from (cmake/tflite-micro.cmake).  Licence: model-zoo weights, fetched into
-    # the build tree only, never committed.
+    # ST model zoo (until issue #159 Step 4c this board also compiled it into
+    # Flash).  Licence: model-zoo weights, fetched into the build tree only,
+    # never committed.
     f746_add_asset(blazeface
         PLUGIN  blazeface  FILE_NAME blazeface.nnc
         URL     "https://github.com/STMicroelectronics/stm32ai-modelzoo.git"
@@ -1049,24 +1045,13 @@ endif()
 # regression and is not one.  The condition on each line is the one that adds its
 # source above.
 set(F746_LAYOUT_REQUIRED "")
-# [!] A GATE THIS BOARD DID NOT HAVE (issue #97).  The decoder's candidate scratch
-# has always lived in .sdram.ai, and nothing checked it: the built-in required list
-# in check_f746_layout.py never named it, `.sdram.ai` uses KEEP so --gc-sections
-# cannot even produce the "no such object" hint, and the linker ASSERTs bound only
-# where the section STARTS -- an empty .sdram.ai satisfies every one of them.
-# Losing the attribute would have moved the buffer into internal SRAM with the
-# build still green.  Wio's equivalent gate catches exactly that class; this board
-# was the one where it would have been silent.  Unconditional, because the decoder
-# is compiled in every backend configuration.
-list(APPEND F746_LAYOUT_REQUIRED --require-sdram-ai nn_dec_scratch)
-# [!] AND THE STATE MUST STAY OUT.  The requirement above says nothing about the
-# decoder's state, and moving `nn_dec` / `nn_dec_ready` into the arena would leave
-# every gate green -- while the whole .sdram output section is NOLOAD, so the
-# threshold would come up holding the previous run's bytes and a `ready` flag that
-# followed it would survive a warm reset still saying ready, skipping
-# initialisation over stale state.
-list(APPEND F746_LAYOUT_REQUIRED
-     --forbid-sdram nn_dec --forbid-sdram nn_dec_ready)
+# [!] EVERY BACKEND NAMES WHAT IT PUTS IN .sdram.ai (issue #97's class, #159
+# Step 4c).  The linker ASSERTs bound only where the section starts, so an EMPTY
+# .sdram.ai passes all of them: a backend whose objects lost their section
+# attribute would land in internal SRAM with the build green.  Until Step 4c the
+# resident decoder's unconditional `nn_dec_scratch` require was the only one the
+# stedgeai backends had; it went with the decoder, so each block below names its
+# own residents.
 if(CONFIG_NN_BACKEND STREQUAL "null")
     # port/nn/nn_null.c -- the stub backend's input buffer in the NN arena.
     list(APPEND F746_LAYOUT_REQUIRED --require-sdram-ai null_in_buf)
@@ -1091,10 +1076,19 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # the one the device refuses containers by.
     list(APPEND F746_LAYOUT_REQUIRED --policy-link-addr ${F746_PLUGIN_BASE})
 endif()
+if(CONFIG_NN_BACKEND STREQUAL "stedgeai")
+    # port/nn/nn_stedgeai.c -- the activation arena (a C static: nm spells it
+    # plainly).
+    list(APPEND F746_LAYOUT_REQUIRED --require-sdram-ai stai_acts)
+endif()
 if(CONFIG_NN_BACKEND STREQUAL "stedgeai_reloc")
-    # port/nn/nn_stedgeai_reloc.c -- the executable model slots, which MUST sit in
-    # the 0xC0700000 window bsp.c region2 makes instruction-fetchable.
-    list(APPEND F746_LAYOUT_REQUIRED --require-model-window g_model_slot)
+    # port/nn/nn_stedgeai_reloc.c -- the activation arena and the per-slot XIP RW
+    # images in bank3, and the executable model slots, which MUST sit in the
+    # 0xC0700000 window bsp.c region2 makes instruction-fetchable.
+    list(APPEND F746_LAYOUT_REQUIRED
+         --require-sdram-ai g_acts
+         --require-sdram-ai g_rt_ram
+         --require-model-window g_model_slot)
 endif()
 
 # Shared service storage checks are derived after this file by the root CMake.

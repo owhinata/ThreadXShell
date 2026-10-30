@@ -52,14 +52,9 @@
 - **report は snapshot と同じ保護区間で採取しバッファは呼び出し側のフレーム。長さは状態ではない。**
   **[!] painter は全部 CPU。** **[!] スタックは 2 つの量**で、veneer の下のファーム側コストは**過大が
   安全側**（**コールバック自身のフレームだけでは「crossing の下」にならない**）。
-- **[!] デコーダは container でしか届かない**（**常駐デコーダを戻さない**）。素の `.tflite` は
-  **`nn run` でテンソルをそのまま報告**、**`nn stream start` は拒否**、**`nn thresh` は none**（set は
-  **state** で拒否）。**`null` backend も同じ答え。**
-- **admission は `nn run` と共有**なので**shape の問いは no-plugin で通す**（refuse すると素のモデルの
-  `nn run` が消える）。**stream を止めるのは `nn_active_can_draw()` 1 本。**
 - **`nn dets` は record を読むだけ、panel は kind も見る（無解釈の publish は 7 節）。`nn info` の claim は
   開いているモデルに従い**、reload 後の状態は `nn_model_reload()` 自身の戻り値で決める。**監査は
-  `AUDIT_SHARED` だけで、f746g-disco はまだ常駐デコーダを持つ（変えない）。**
+  `AUDIT_SHARED` だけ。**
 
 ### 7. `nn` と `camera` は 3 ボード共有の 1 コマンド（各 1 つ）
 
@@ -94,7 +89,7 @@
   `CAM_ERR_BUSY` が **retryable**）。**terminal に畳み直さない。**
 - **[!] デコーダの負値を 1 つに畳まない**（どれも「0 件」ではない）。**停止は推論を取り消せない**ので
   worker は arm 時点の世代を控え publish のロック内で照合（`svc/nn/nn_det_record.c`）。**RAW 記述子と top-5 は publish 時に record へ載せ、印字時にモデルを取り直さない**（#121）。
-- **[!] 推論を非同期の worker で回すボードは「誰も解釈していない」も世代規則の下で publish する**（しないと `nn run` が timeout する。wio・Grove）。
+- **[!] 推論を非同期の worker で回すボードは「誰も解釈していない」も世代規則の下で publish する**（しないと `nn run` が timeout する。3 ボードとも）。
 - **[!] モデルの load / unload の順序は `svc/nn/nn_core_model` の 1 実装**（表は `svc/nn/nn_swap`、3 ボードがフック + const 表で採る）: 差し替えは
   backend 成功後、bare は plugin unload、モデルが残らない終わり方は全部下ろす、**BUSY は swap より前だけ**（BUSY 拒否は状態行を出さない、#131）。
 
@@ -158,6 +153,8 @@ plugin は board code と同格の**信頼された native code**。ゲートが
   ボードの保存バイトの CRC（slot ボードは `blob list`、f746 は load が印字する採用済み全バイトの CRC）と突き合わせること。**モデルは commit + SHA256 で pin**（Git LFS 不在だとポインタが
   exit 0 で置かれる）、**pin が消えたら fail closed**。**ファームと plugin は別成果物で間違いは両方向。** **[!] veneer ゲートの DELIVERY は build.ninja から導出したファーム成果物の使用者と両方向で照合し（`cmake/check_delivery_gate.py`）、全 target がその検査を先に待つ。外す・弱めない。**
 - **[!] 同じ plugin の callback は 2 つ同時に走らない**: plugin に入る全経路（param・admission・report・load/unload も）がボードの lease を取り、worker とコンソールは有界に待ち、panel は try だけ。**入口（ボードの分岐点と ENTRY の直前）は保持を検査し、無ければ「plugin 無し」とは別の答えを返す**（#127）。
+- **[!] 3 ボードのファームとも共有デコーダをリンクしない — デコーダは container でしか届かない**（**常駐デコーダを戻さない。別フラグで組み直した監査対象を作らない**。f746 も #159 で外した）。素の `.tflite` は **`nn run` でテンソルをそのまま報告**、**`nn stream start` は拒否**、**`nn thresh` は none**（set は **state**）。**非 tflm backend も同じ答え。**
+  **wio・f746 は admission を `nn run` と共有するので shape の問いは no-plugin で通し**（refuse すると素のモデルの `nn run` が消える）、**stream を止めるのは `nn_active_can_draw()` 1 本**（Grove は 12 節）。
 
 ### 10. 配置ゲート: リンカスクリプトの `ASSERT` は LTO 下で空振りする
 
@@ -255,12 +252,11 @@ board README が正。
   `job.result` の両方**、異常時はリセットの**成功を確認してから**。**呼び出し側で保守しない。prep は
   camera producer・`consume()` 内で worker が欲しいときだけ、invoke〜publish は推論 worker**（#129。
   callback 中の block / sleep / 推論 / 待つロック / LCD 再入は禁止。panel は lease の try だけ）。**タイムアウトは `npu_hw.h` の 1 箇所。**
-- **[!] `nn stream` の拒否の仕方はボードで違う。揃えない**（Grove は**デコーダが無い時点で**、wio は
+- **[!] `nn stream` の拒否の仕方はボードで違う。揃えない**（Grove は**デコーダが無い時点で**、wio・f746 は
   **shape は通し `can_draw` 1 本で**）。**[!] `nn_input_quant_ok()` は常駐デコーダの前提条件で plugin は
   縛られない。[!] ファームの印字は「種」を名乗らない** — ゲートは **`.rodata`** を negative scan する。**`nn dets` は
   record の snapshot と report を lease の 1 回の保持で採る**（stream 中も全文。STALE は保持者が離さなかったときだけ）、**stop の record 境界は overlay の使用中 0 と worker の join の後、sink の unlink はカメラ停止の確認だけが許す**（#118, #129, #142。`nn run` も同じ teardown）。
-- **[!] Grove と wio のファームは共有デコーダをリンクしない** — **デコーダは container でしか届かない**
-  （f746 はまだ持つ）。**常駐デコーダを戻さない。別フラグで組み直した監査対象を作らない。** 素の
+- **[!] Grove のファームも共有デコーダをリンクしない**（9 節）。**別フラグで組み直した監査対象を作らない。** 素の
   `.tflite` は**テンソルをそのまま報告**し、`nn thresh` は **`none`**、set は **`NN_SVC_ERR_STATE`**。
   デコーダは**全アンカーを走査**し出力は **shape で探す**。**[!] フォントは plugin 側で painter に
   `text()` を足さない**（ラスタライズは `decode()`、`draw()` は blit だけで**原点アンカー**。

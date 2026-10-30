@@ -28,10 +28,27 @@ device F7 -- and its CMSIS core into `upstream/<repo>-<commit>/` (issue #136; se
 the root README's Building section).  Those trees are shared with every other build
 directory of the clone, so later configures are offline.  The
 default NN backend (`tflm`) also fetches the `lib/tflite-micro` submodule on
-first use, generates the tflite-micro tree from it at configure time (which
-downloads its third-party dependencies) and fetches the pinned model at build
-time; `-DCONFIG_NN_BACKEND=null` touches none of these and builds offline (see
+first use and generates the tflite-micro tree from it at configure time (which
+downloads its third-party dependencies); its build needs no network.
+`-DCONFIG_NN_BACKEND=null` touches none of these and builds offline (see
 [Build options](#build-options)).
+
+The firmware carries no model (issue #159 Step 4c): after boot `nn info` says
+`model : (none)`. To run the face detector, build its container, copy it to
+the root of the microSD card and load it:
+
+```bash
+cmake --build build/f746g-disco --target asset-blazeface   # fetches the pinned model
+# copy build/f746g-disco/asset/blazeface.nnc to the card as /blazeface.nnc
+```
+
+```
+nn model load --path /blazeface.nnc
+```
+
+The load prints the CRC32 of the bytes it read; compare it with the one in the
+receipt the asset build printed (see [Building this board's
+containers](#building-this-boards-containers)).
 
 CMSIS core stays at `v5.6.0_cm7`, newer than the 5.4.0 STM32CubeF7 pairs with its
 HAL. Going down to 5.4.0 would give up four properties for nothing but matching
@@ -178,39 +195,30 @@ knowing:
 | `CLI_ENABLE_DANGEROUS_CMDS` | ON | builds `reboot` and `devmem` |
 | `CLI_DEVMEM_DUMP_MAX_LEN` | 256 | bytes per `devmem` dump |
 | `CONFIG_NN_BACKEND` | `tflm` | `tflm` / `null` / `stedgeai` / `stedgeai_reloc` |
-| `NN_TFLM_MODEL_OVERRIDE` | empty | a local `.tflite` baked in instead of the pinned model (tflm only) |
 
 ### The NN backend: `tflm` by default (issue #130)
 
-`tflm` runs tflite-micro with CMSIS-NN kernels and bakes one model into Flash
-as the built-in. That model is the same pinned file wio-lite-ai and
-grove-vision-ai-v2 ship as their `blazeface` asset: BlazeFace front 128 int8
-from the ST model zoo (`STMicroelectronics/stm32ai-modelzoo`, commit
-`1423c78953a830903485135febe1dd98ff31aed8`,
+`tflm` runs tflite-micro with CMSIS-NN kernels.  [!] **It carries no model**
+(issue #159 Step 4c): a model -- a bare `.tflite`, or a plugin container that
+brings the decoder for it -- is copied to the microSD card and loaded with `nn
+model load --path`.  The pinned BlazeFace front 128 int8 that wio-lite-ai and
+grove-vision-ai-v2 ship (ST model zoo, `STMicroelectronics/stm32ai-modelzoo`,
+commit `1423c78953a830903485135febe1dd98ff31aed8`,
 `face_detection/facedetect_front/.../blazeface_front_128_int8.tflite`, SHA256
-`e803bb4e93b10f7a19d4243bcc39698599a723f3128e19d3f90e0b1c0bc88dd8`, 189,816 B). It is fetched at BUILD time by the shared
-`cmake/fetch_model.cmake` into `build/<dir>/tflm-model/pinned.tflite`, and the
-C array is generated from that fetched file, so a pin that can no longer be
-fetched -- a vanished commit, a Git LFS pointer instead of the file, different
-bytes -- fails the build rather than shipping an older array.  The hash is
-checked again at use: `cmake/gen_model_array.py` hashes the exact bytes it
-emits and refuses (leaving no array behind) if the file changed after the
-fetch verified it.
+`e803bb4e93b10f7a19d4243bcc39698599a723f3128e19d3f90e0b1c0bc88dd8`, 189,816 B)
+reaches this board as the `asset-blazeface` container
+([Building this board's containers](#building-this-boards-containers)).  From
+#130 to Step 4c it was compiled into Flash as the built-in model; that array,
+its build-time fetch, its generator and `NN_TFLM_MODEL_OVERRIDE` are gone, and
+a tree that still holds `NN_TFLM_MODEL_OVERRIDE` or the older `NN_TFLM_MODEL`
+gets a configure warning saying so (`-U<name>` silences it).
 
-[!] **The default build needs the network**, once per build directory: for the
-tflite-micro tree at configure time (this was already true of any tflm build;
-since issue #134 tflite-micro itself is the `lib/tflite-micro` submodule, which
-the tflm configure initialises on first use, and generating the tree still
-downloads its third-party dependencies) and for the model at build time. This is a deliberate difference from the
-`asset-*` rule (issue #94), whose fetch stays outside ALL because a container
-is not part of the firmware; here the model is. A `null` build needs neither and
-configures and builds offline.
-
-To try another model, pass `-DNN_TFLM_MODEL_OVERRIDE=<path to .tflite>` (int8
-weights, float32 I/O). An override is not hash-checked. The old variable,
-`NN_TFLM_MODEL`, is IGNORED with a configure warning: build trees from before
-#130 hold it pointing into the git-ignored `_ref/` tree, and reading it would
-keep building from a file no clone has. `-UNN_TFLM_MODEL` silences the warning.
+[!] **A `tflm` configure needs the network, its build does not**: the
+tflite-micro tree is generated at configure time (since issue #134 tflite-micro
+itself is the `lib/tflite-micro` submodule, which the tflm configure initialises
+on first use, and generating the tree downloads its third-party dependencies).
+Only `asset-*` targets fetch a model, at build time and outside ALL (issue
+#94). A `null` build needs neither and configures and builds offline.
 
 `null` stays available: no runtime, a BlazeFace-shaped stub whose inference
 does nothing, and no network or C++ needed. It was the default until #130
@@ -234,12 +242,12 @@ file (each `.c` with its `.h` unless only a header is listed):
 | File | Thread or context | Hardware reason |
 |---|---|---|
 | `port/nn/nn_svc_f746.c` | console | The thin adapter over this board's `nn.h` API; it adds no state. |
-| `port/nn/nn_svc_f746_model.c` | console (`nn info`, `nn model load` / `unload`) | The steps of the shared load order on this board: the built-in model in Flash and the SD-card model slots in SDRAM; on `tflm`, the plugin policy, the container split and the open container's claims (issue #159; the claims' store and their `nn info` lines are `svc/plugin/plugin_claims`, read under this file's critical section). |
+| `port/nn/nn_svc_f746_model.c` | console (`nn info`, `nn model load` / `unload`) | The steps of the shared load order on this board: the SD-card model slots in SDRAM; on `tflm`, the plugin policy, the container split and the open container's claims (issue #159; the claims' store and their `nn info` lines are `svc/plugin/plugin_claims`, read under this file's critical section). |
 | `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (start / stop / stats / record reads) and the camera sink's open / close of the nn step | Binds the shared frame path to this board's camera as the nn step of the one camera sink, and holds nn's place among the camera's holders (issue #142); owns the glue's state (the private header lists each counter's writers and resets) and the frame path's ops table. |
 | `port/nn/nn_producer.c` | camera producer (the nn step of the camera sink's `consume()`) | Prepares a frame straight into the model's input tensor (nearest-neighbour resize + RGB565 conversion on the CPU) and hands it over; it does not put the frame -- the sink does, last. |
 | `port/camera/cam_sink.c` | camera producer (`consume()`), console (step enable / disable / drain) | Not an nn file, but nn runs inside it: the one RGB565 subscriber of the base capture, running the GUIX display step and then the nn step, with `camera_frame_put()` last. Each step's armed mark and busy count are `svc/camera/cam_step.h`'s. |
-| `port/nn/nn_worker.c` | inference worker (priority 18) | Inference runs on the CPU, so the worker sits below every other thread; it runs the model, the resident decoder's publish and the counting. |
-| `port/nn/nn_decoder.c` | inference worker | Resident BlazeFace decoder state, with its candidate scratch placed in `.sdram.ai`, and `nn_tensor` -> `tensor_desc`. |
+| `port/nn/nn_worker.c` | inference worker (priority 18) | Inference runs on the CPU, so the worker sits below every other thread; it runs the model, publishes the raw tensors ("nothing decoded them") or, under the plugin lease, the plugin's decode, and does the counting. |
+| `port/nn/nn_desc.c` | worker, console | `nn_tensor` -> `tensor_desc`, the half of the old `nn_decoder.c` that outlived the resident decoder (Step 4c). Board-owned like wio-lite-ai's copy, because its input is this board's `nn.h` types. |
 | `port/nn/nn_active.c` | worker, GUIX, console, under the plugin lease (tflm) | This board's facts for the shared entries (`svc/nn/nn_active_lease.c` above `svc/nn/nn_active_core.c`): reading an `nn_tensor` as a descriptor, where a depth sample goes, the frame a box maps into, and the base vtable's transform and log sink. |
 | `port/nn/nn_panel.c` | GUIX (CAMERA_FRAME handler) (tflm) | The panel's half of the shared frame path: the lease tried, then the frame lock, then the plugin's draw into the view buffer, with its spent / refused / hold figures.  The display is handed in as hooks (`nn_panel.h`). |
 | `port/plugin/plugin_run.c` | console (load / unload), fault handler | The MPU read-back and the M7 cache maintenance around the shared loader, and its log; the reservation's address from the linker script. |
@@ -247,42 +255,61 @@ file (each `.c` with its `.h` unless only a header is listed):
 | `port/plugin/plugin_paint.c` | GUIX | CPU pixel loops into the camera view buffer (row-major RGB565 in non-cacheable SDRAM; no DMA2D). |
 | `src/fault_plugin.c` | fault handler | Whether a fault's pc is in the loaded plugin, and that its end is a reset (pure, host-tested). |
 | `port/nn/nn_container.c` | console (`nn model load --path`) | No hardware reason: whether a file read for a load is a plugin container, and the CRC-32 of exactly the bytes read -- the one function both the SD reader (`cmds/cmd_nn_board.c`) and `nn info` print it with (tflm only, issue #159). |
-| `port/nn/nn_decode_count.c` | inference worker | No hardware reason: this board's tables for counting a decoder's answer in `nn stream stats` -- the resident decoder's and a plugin's -- and the tally that counts only what the record took (pure, host-tested). |
+| `port/nn/nn_decode_count.c` | inference worker | No hardware reason: this board's table for counting a plugin's answer in `nn stream stats` (wio-lite-ai's and Grove's) and the tally that counts only what the record took (pure, host-tested). |
 | `port/nn/nn_sess_release.c` | console (stop), inference worker | No hardware reason: when the stream's hold on the nn session may be given back, as a pure function of the sink drain and the worker. |
 | `port/nn/nn.c`, `nn_backend.h` | worker (run), console (open / bench / info) | The backend-agnostic model API and session guard, with DWT cycle-counter timing around `nn_run()`. |
-| `port/nn/nn_null.c` | as `nn.c` | The `null` backend: a BlazeFace-shaped stub with no runtime. |
+| `port/nn/nn_null.c` | as `nn.c` | The `null` backend: a BlazeFace-shaped stub with no runtime, present without a load. |
 | `port/nn/nn_stedgeai.c`, `nn_stedgeai_reloc.c` | as `nn.c` | The non-default ST Edge AI Core backends (a model baked into Flash, or a relocatable one); they need a local ST install. |
 | `port/nn/tflm/` | worker (invoke), console (load) | The default tflite-micro backend with CMSIS-NN kernels; arena and SD model slots in SDRAM. |
 
 This board has no panel thread.  The GUIX thread draws the overlay itself, in
 its CAMERA_FRAME handler (`ui/guix_camera_ui.c`): a loaded plugin's draw
-through `nn_panel_draw()`, or with none the resident decoder's boxes read
-through `nn_camera_dets_get()`.
+through `nn_panel_draw()`, and with none nothing (a stream with nothing to draw
+is refused at its start, below).
 
-### The model: built in, loaded from SD, or nothing (issue #131)
+### No resident decoder (issue #159 Step 4c)
 
-The backend can hold no model at all, and `nn model unload` leaves it that way:
-`nn info` then prints `model : (none)` and, in place of the tensor lines,
-`note : nothing loaded -- `nn model load ...``; `nn run`, `nn stream start` and
-`nn bench` are refused (`nn bench` with `no model is loaded`). Until #131 the
-`tflm` unload went back to the built-in model, so the board could never be
-emptied.
+A decoder reaches this board only in a plugin container, as on wio-lite-ai
+since its #116; nothing in the firmware links `svc/nn/blazeface.c` (the
+blazeface plugin compiles and audits it). The answers are wio-lite-ai's, line
+for line:
 
-- [!] **The built-in model is adopted implicitly once, by the first open after
-  boot** -- whichever of `nn info`, `nn run`, `nn bench`, `nn model load` or
-  `nn model unload` comes first. After that, nothing puts it back except an
-  explicit `nn model load builtin`: an open, an `nn info` from the other
-  console or an `nn run` on an empty backend builds nothing. The first open is
-  serialised by a latch and does not return until the build is done, so an
-  unload typed right after boot -- even while the other console's `nn info` is
-  doing that first open -- empties a finished model.
+- The shape question of the admission `nn run` and `nn stream start` share
+  passes with no plugin; a bare model's `nn run` runs and reports its tensors.
+- `nn stream start` with nothing to draw -- no plugin, or one with no `draw()`
+  -- is refused, and `nn_active_can_draw()` is the one thing that says so:
+  `nothing would annotate a live preview: no decoder is loaded, or the one that
+  is draws nothing (`nn info`); `nn run` still works`.  (Status `wrong state`;
+  wio-lite-ai reports the same words as a hardware refusal.)
+- `nn thresh` reads `none -- the active decoder has no threshold`, and setting
+  one is a state refusal, not a bad value.
+- With no plugin the worker still publishes "nobody interpreted this" under the
+  generation rule, so `nn run` does not time out; it counts as an inference.
+- A non-`tflm` build (`null`, `stedgeai`, `stedgeai_reloc`) gives the same
+  answers without the plugin machinery: `nn stream start` refused, `nn run`
+  reports tensors, `nn thresh` none.
+
+### The model: loaded from SD, or nothing (issue #131, #159 Step 4c)
+
+The backend can hold no model at all: `nn info` then prints `model : (none)`
+and, in place of the tensor lines, `note : nothing loaded -- `nn model load
+...``; `nn run`, `nn stream start` and `nn bench` are refused (`nn bench` with
+`no model is loaded`). On `tflm` that is the state after boot (Step 4c: there
+is no built-in model) and after `nn model unload`.
+
+- `nn model load builtin` is refused before anything is acquired: `not a model
+  source this board takes` (this board loads a model from the SD card
+  (--path); it has no built-in model). The usage lists `--path` only.
+- [!] **Only the first open after boot can build anything**, and on `tflm` it
+  builds nothing: the #131 latch is kept for the backends with a model in the
+  image (`null`'s stub, `stedgeai`'s generated model), which adopt it there.
+  The first open is serialised by the latch and does not return until it is
+  done, so an unload typed right after boot finds a finished state.
 - A refused `nn model load --path` restores the previous model; from empty it
   stays empty and says `nothing is loaded`. The answer comes from the reload
   itself (whether a model is left), not from whether the handle is open.
-- `stedgeai_reloc` has no built-in model: it starts empty, and `nn model load
-  builtin` is refused as a source this backend does not have (it used to mean
-  "unload"; use `nn model unload`). Its `nn info` shows `(none)` and the note
-  after boot and after an unload.
+- `stedgeai_reloc` is the same: it starts empty, and `builtin` used to mean
+  "unload" there before #131 (use `nn model unload`).
 - `null` and `stedgeai` cannot swap models: `nn model load` is unsupported and
   `nn model unload` answers as before without changing anything.
 
@@ -326,18 +353,23 @@ Measured on the default (`tflm`, CMSIS-NN) build at #130, fresh configure:
 | `shell.bin` | 402,932 B | 777,280 B (74.1% of 1 MB) |
 | `size` text / data | 398,560 / 4,360 | 772,900 / 4,372 |
 
-Of the 374 KB difference, 189,816 B is the model array (`.rodata`); the rest
+Of the 374 KB difference, 189,816 B was the model array (`.rodata`); the rest
 is the interpreter, the kernels and the C++ runtime.
 
+At issue #159 Step 4c (the model array and the resident decoder removed; the
+plugin machinery of Steps 4a-4b in place), `shell.bin` is 613,388 B on `tflm`
+(807,188 B before the step: 193,800 B less, of which 189,816 B is the model)
+and 413,764 B on `null` (417,116 B before: 3,352 B less, the decoder).
+
 SDRAM bank3 (`.sdram.ai`, `0xC0600000`, 2 MB) under `tflm`, after #130 step 6b
-removed the camera staging buffers (`nncam_stage`, 393,216 B):
+removed the camera staging buffers (`nncam_stage`, 393,216 B) and #159 Step 4c
+the resident decoder's candidate scratch (`nn_dec_scratch`, 1,536 B):
 
 | Object | Address | Size | Owner |
 |---|---|---|---|
-| `nn_dec_scratch` | `0xC0600000` | 1,536 B | `port/nn/nn_decoder.c` |
-| `g_sd_model_buf` | `0xC0600600` | 1,048,576 B (2 x 512 KB) | `port/nn/tflm/nn_tflm.cc`, SD model slots |
-| `g_arena` | `0xC0700600` | 524,288 B | `port/nn/tflm/nn_tflm.cc`, activation arena (holds the input tensor) |
-| free | `0xC0780600` | 522,752 B | |
+| `g_sd_model_buf` | `0xC0600000` | 1,048,576 B (2 x 512 KB) | `port/nn/tflm/nn_tflm.cc`, SD model slots |
+| `g_arena` | `0xC0700000` | 524,288 B | `port/nn/tflm/nn_tflm.cc`, activation arena (holds the input tensor) |
+| free | `0xC0780000` | 524,288 B | |
 
 `check_f746_layout.py` requires `g_arena` and `g_sd_model_buf` in bank3 in a
 `tflm` build only (they are in an anonymous namespace, so board.cmake names them
@@ -404,7 +436,8 @@ output (a *plugin*).  The format, the validator and the build rules are shared
 with grove-vision-ai-v2 and wio-lite-ai (their READMEs have the design); this
 section is what is different here.  Step 4a recognises, validates and reports a
 container **without ever executing one**; Step 4b runs the plugin and builds
-this board's own containers; Step 4c removes the resident decoder.
+this board's own containers; Step 4c removed the resident decoder and the
+built-in model, so a container is the only way a decoder reaches this board.
 
 ### The target word
 
@@ -498,7 +531,7 @@ What runs where, and why each piece is this board's or shared:
   does not hold it gets `NOT_HELD`, counted in `nn stream stats`
   (`entry(s) refused unheld`).  Order: always the lease, then the frame lock
   (`ltdc_lock_frame()`), then the record lock (`nncam_lock`).
-- **The draw** runs where the resident boxes always have: in the GUIX thread's
+- **The draw** runs where the resident boxes used to: in the GUIX thread's
   CAMERA_FRAME handler, between the producer's store into the view buffer and
   the icon redraw.  `nn_panel_draw()` TRIES the lease (a busy lease is a frame
   shown bare, counted as a miss), takes the frame lock, asks the shared
@@ -506,8 +539,8 @@ What runs where, and why each piece is this board's or shared:
   record is valid, of this session, and the plugin's), lets the plugin paint
   into the view buffer with the CPU (`port/plugin/plugin_paint.c`, row-major
   RGB565, no DMA2D), marks both LTDC buffers stale and releases the lock.  With
-  no plugin in force it answers NONE and the resident decoder's boxes are
-  drawn as before (Step 4c removes that fallback).
+  no plugin in force it answers NONE and nothing is drawn (Step 4c removed the
+  resident decoder's boxes).
 - **The geometry**: the producer squashes the whole camera frame onto the model
   input, so `to_frame()` multiplies by the frame size the stream attached with
   (QVGA or QQVGA) -- the same frame the preview stores.
@@ -583,8 +616,8 @@ was fine.
 
 `cmake --build build/f746-tflm --target asset-blazeface` builds
 `build/f746-tflm/asset/blazeface.nnc` -- the pinned BlazeFace (the same commit
-and SHA-256 as the other boards' and this board's built-in model) with this
-board's blazeface plugin -- through every gate, and prints the receipt:
+and SHA-256 as the other boards'; until Step 4c it was also this board's
+built-in model) with this board's blazeface plugin -- through every gate, and prints the receipt:
 
 ```
   asset blazeface    .../build/f746-tflm/asset/blazeface.nnc
@@ -658,28 +691,23 @@ strong `T`, its address is NOT `Default_Handler`'s, and the matching
 [!] The ASSERTs are weaker than they look for `.sdram.ai` in particular: they
 bound where the section STARTS, so an EMPTY one satisfies all of them, and the
 section uses `KEEP` so `--gc-sections` cannot even produce the "no such object"
-hint the other boards get.  Until issue #97 nothing named the BlazeFace decoder's
-candidate scratch, and dropping its section attribute would have moved it into
-internal SRAM with every check still green.  `check_f746_layout.py` now requires
-`nn_dec_scratch` unconditionally -- unconditionally because the decoder is
-compiled in every `CONFIG_NN_BACKEND` configuration.
+hint the other boards get.  So `check_f746_layout.py` names what has to be
+there, per backend: `g_arena` and `g_sd_model_buf` on `tflm`, `null_in_buf` on
+`null`, `stai_acts` on `stedgeai`, and `g_acts` and `g_rt_ram` on
+`stedgeai_reloc` (whose executable model slots, `g_model_slot`, are required in
+the `0xC0700000` window).  From issue #97 to #159 Step 4c it also required the
+resident BlazeFace decoder's candidate scratch, `nn_dec_scratch`,
+unconditionally -- the only bank3 check the two `stedgeai` backends had until
+Step 4c named theirs -- and forbade the decoder's state in SDRAM
+(`--forbid-sdram`, removed with it: nothing else used it).  The blazeface
+plugin's scratch is in its own `.plugin` reservation.
 
-A third gate arrived with it, and it protects the arrangement that made the
-require possible.  The decoder itself is shared by all three boards
-(`svc/nn/blazeface.c`) and owns NO storage: this board passes in its own scratch,
-which is how that buffer keeps `.sdram.ai` and how the layout gate can name a
-symbol this board owns (`port/nn/nn_decoder.c`).
-`cmake/check_no_mutable_storage.py` refuses a static added to the shared file, by
-compiling it with this board's real definitions and requiring the object to have
-no allocated, writable section.  Only the SCRATCH is placed -- the decoder's
-threshold stays in ordinary internal RAM, because `.sdram` is NOLOAD and an
-initialised field there would never be loaded (and NOLOAD keeps the previous
-run's bytes, so it would fail by appearing to work).
-
-Since issue #117, coverage is derived across the actual `svc_obj` and `shell`
-producers. `cmd_nn.c`, `nn_cmd_core.c` and the resident decoder compile in
-`shell`. Each audit replays its producer's compile command. The resident
-decoder remains covered in every backend configuration. See the
+The shared decoder (`svc/nn/blazeface.c`) still owns NO storage, and
+`cmake/check_no_mutable_storage.py` still refuses a static added to it: it is
+audited as the blazeface plugin's `AUDIT_SHARED` source with the plugin's
+compile command.  Since issue #117, firmware coverage is derived across the
+actual `svc_obj` and `shell` producers (`cmd_nn.c`, `nn_cmd_core.c`); each
+audit replays its producer's compile command. See the
 [shared storage gate contract](../../cmake/README.md).
 
 ## Commands
@@ -783,10 +811,11 @@ already running`.
 > `infers` and `last` in separate critical sections, so on a running stream the
 > two can be one frame apart. The GUI boxes are drawn only
 > from a result of the session in force, so they still clear on `nn stream stop`.
-> For a model the decoder does not recognise, the worker takes the top 5 classes
-> of output 0 before its next inference and publishes them with the result
-> (issue #121, `svc/nn/nn_top.c`); `nn run` and `nn dets` print those, never the
-> output tensor as it is at print time.
+> With no plugin the worker publishes the output descriptors of the model that
+> ran, taken before its next inference (issue #121); `nn run` and `nn dets`
+> print those, never the output tensor as it is at print time.  (Until #159
+> Step 4c the resident decoder's "not BlazeFace" published the top 5 classes
+> of output 0 here, through `svc/nn/nn_top.c`; this board no longer links it.)
 >
 > **A frame that arrives during an inference is skipped, not staged** (issue
 > #130 step 6b). The camera producer preprocesses a frame straight into the
@@ -809,14 +838,13 @@ already running`.
 > skipped` ran ahead of the inferences (34 vs 30 in the baseline below) and
 > the frame inferred had usually sat in its buffer for most of an inference.
 >
-> **A decoder fault is counted apart; "not BlazeFace" is not a fault** (issue
-> #130 step 6c, #122 P8, decision D6; `port/nn/nn_decode_count.c`). The
-> resident decoder runs on every model, and for one that is not
-> BlazeFace-shaped it answers `BF_ERR_MODEL` and the worker publishes the top
-> 5 classes with it -- that is a classifier stream's normal result, so the
-> resident decoder never counts in `model_errors`.  A loaded PLUGIN's
-> `BF_ERR_MODEL` is a mismatch between the container's halves and does count
-> there (issue #159, `nn_decode_count_plugin_of()`, the other boards' table). Any other negative (`BF_ERR_UNINIT`,
+> **A decoder fault is counted apart** (issue #130 step 6c, #122 P8;
+> `port/nn/nn_decode_count.c`, one table since #159 Step 4c -- the other
+> boards'). A plugin's `BF_ERR_MODEL` is a mismatch between the container's
+> halves and counts in `model_errors`.  (Until Step 4c the resident decoder
+> ran on every model and its `BF_ERR_MODEL` was a classifier stream's top-5
+> result, never counted; with no plugin the worker now publishes the raw
+> tensors, an inference with nothing decoded.) Any other negative (`BF_ERR_UNINIT`,
 > `BF_ERR_ARG`, or an undocumented code) is a wiring fault: it counts in
 > `decoder_errors` and in `errors`, and the shared command prints the `of
 > those:` line. Such an inference is **not** counted in `infers` (issue #138,
@@ -831,8 +859,8 @@ already running`.
 > dropped -- a stop or a re-attach landing during the inference -- counts in
 > nothing.  Until then the resident path counted the inference whether or not
 > the record took it, so a stream whose one publish a stop refused said `infers
-> 1` beside `last : nothing decoded yet`.  To see it: on a fresh boot with
-> the built-in model, type `nn stream start` and then `nn stream stop` within
+> 1` beside `last : nothing decoded yet`.  To see it: with
+> `/blazeface.nnc` loaded, type `nn stream start` and then `nn stream stop` within
 > about a second, then `nn stream stats`.  When a frame was handed over (`in`
 > minus `skipped` is 1) and its inference was still running at the stop, the
 > stats say `infers` 0 and `last : nothing decoded yet`; if `in` is 0 the stop
@@ -875,16 +903,18 @@ camera res | format | fps | set   (this board's own)
   run` are refused, and afterwards `save` / `send` answer `no captured frame`
   until the next capture.
 - **`sdram test` also claims `.sdram.ai` from nn and skips live Ethernet state**
-  (issue #152).  The NN arena, model slots and decoder scratch live in
+  (issue #152).  The NN arena and model slots live in
   `.sdram.ai` (bank 3), owned by `port/nn`, so the test takes
   `nn_scratch_claim()` right after the camera claim and keeps it for its whole
   run.  While it is held no nn session can be taken (`nn model load` /
   `unload`, `nn bench`, `nn run` and `nn stream start` are refused as busy,
   worded ``.sdram.ai is held by `sdram test`; try again when it finishes`` where
   the command prints a reason), and the first model open after boot -- which is
-  where `tflm` adopts its built-in model into the arena -- builds nothing: a
-  fresh-boot `nn info` answers busy instead of adopting it, and adopts it
-  normally once the test is over.  The claim refuses while another nn command
+  where a backend with a model in the image (`null`, `stedgeai`) adopts it into
+  the arena -- builds nothing: there a fresh-boot `nn info` answers busy
+  instead, and opens normally once the test is over.  On `tflm` and
+  `stedgeai_reloc` the first open builds nothing in `.sdram.ai`, so it is not
+  refused: `nn info` during the test says `model : (none)` (issue #159 Step 4c).  The claim refuses while another nn command
   or a stream is active, or while the first open is building (`sdram: nn is
   busy; wait for the nn command / stream to finish`), and while a model is
   loaded (``sdram: a model is loaded in .sdram.ai; run `nn model unload`

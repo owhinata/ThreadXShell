@@ -247,7 +247,7 @@ file (each `.c` with its `.h` unless only a header is listed):
 | `port/plugin/plugin_paint.c` | GUIX | CPU pixel loops into the camera view buffer (row-major RGB565 in non-cacheable SDRAM; no DMA2D). |
 | `src/fault_plugin.c` | fault handler | Whether a fault's pc is in the loaded plugin, and that its end is a reset (pure, host-tested). |
 | `port/nn/nn_container.c` | console (`nn model load --path`) | No hardware reason: whether a file read for a load is a plugin container, and the CRC-32 of exactly the bytes read -- the one function both the SD reader (`cmds/cmd_nn_board.c`) and `nn info` print it with (tflm only, issue #159). |
-| `port/nn/nn_decode_count.c` | inference worker | No hardware reason: this board's table for counting the decoder's answer in `nn stream stats` (pure, host-tested). |
+| `port/nn/nn_decode_count.c` | inference worker | No hardware reason: this board's tables for counting a decoder's answer in `nn stream stats` -- the resident decoder's and a plugin's -- and the tally that counts only what the record took (pure, host-tested). |
 | `port/nn/nn_sess_release.c` | console (stop), inference worker | No hardware reason: when the stream's hold on the nn session may be given back, as a pure function of the sink drain and the worker. |
 | `port/nn/nn.c`, `nn_backend.h` | worker (run), console (open / bench / info) | The backend-agnostic model API and session guard, with DWT cycle-counter timing around `nn_run()`. |
 | `port/nn/nn_null.c` | as `nn.c` | The `null` backend: a BlazeFace-shaped stub with no runtime. |
@@ -522,7 +522,7 @@ What runs where, and why each piece is this board's or shared:
   RAM log) and **the board resets at once** (`src/fault_plugin.c`); under a
   debugger it halts instead.  A fault anywhere else keeps the full UART dump
   and the halt the IWDG resets.  `crash` is outside the reservation and behaves
-  as before.
+  as before (seen at the Step 4b acceptance with `crash bus`).
   [!] **The attribution is by the stacked PC, and only a PC inside the
   reservation is the plugin's -- on purpose.**  A plugin that hands a firmware
   function a bad argument (a rectangle to `paint_rect`, a length to
@@ -537,10 +537,20 @@ What runs where, and why each piece is this board's or shared:
   nowhere on this board) can only shrink the frame.  Each allowance must fit
   "thread stack - depth at call - 208 - margin" on the shallowest thread of its
   slot; the depth is what `nn stream stats` prints (`at call`), sampled at the
-  indirect call and, for entry, in the loader's exec_ok hook.  **To be measured
-  on hardware at the Step 4b acceptance** (the values go here).
+  indirect call and, for entry, in the loader's exec_ok hook.  Measured at the
+  Step 4b acceptance (blazeface container, a stream, `nn run`, `nn thresh`,
+  `nn dets` from both consoles):
 
-#### The draw budget (provisional until measured)
+  | Thread (stack) | Slots | `at call` high-water | Allowance | Left after 208 B reserve |
+  |---|---|---|---|---|
+  | nn-worker (4,096 B) | decode | 428 B | 1,024 B | 2,436 B |
+  | GUIX (4,096 B) | draw | 412 B | 1,024 B | 2,452 B |
+  | console (4,096 B) | entry, shapes_ok, report, params | 2,240 B | 1,024 B | **624 B** (the shallowest) |
+
+  `thread` peaks over the same run: `cli` 2,748 B, `nn-worker` 1,504 B, GUIX
+  776 B.
+
+#### The draw budget
 
 A plugin's draw is charged pixels and primitives (`svc/plugin/plugin_paint_budget.c`);
 the budget bounds how long the GUIX thread holds the frame lock, which the
@@ -557,8 +567,17 @@ an eighth of the frame (9,600 px at QVGA) and 64 primitives
    of <budget>`.
 3. The budget stands when the longest hold of a full-budget draw stays well
    inside step 1's slack and the overrun rate over the 10-minute stream is not
-   above the baseline (19 overruns / 600 s, tflm, `/pinned.tflite`).  Record
-   both numbers here.
+   above the baseline (19 overruns / 600 s, tflm, `/pinned.tflite`).
+
+**Measured at the Step 4b acceptance, and the budget stays at an eighth of the
+frame.**  The blazeface plugin drew at most 884 px of the 9,600 px budget per
+frame, refused 0 primitives, and held the frame lock at most 64 us; the
+producer's slack is 6 slots x 67 ms.  Over a 624 s stream with the preview
+visible and both consoles issuing `nn` commands, `camera stream stats` counted
+2 DCMI overruns (the baseline: 19 / 600 s).  After `nn stream stop`, with the
+preview still running, `missed` stayed 0 (the panel asks for the overlay
+before it tries the lease).  A pass through the GUIX settings screen and back
+was fine.
 
 #### Building this board's containers
 
@@ -585,10 +604,23 @@ receipt of the build that produced the file you copied.  The `cifar10` plugin
 is built and gated too, but no asset carries it: no CIFAR-10 model this
 backend runs is pinned in the tree (Grove's is a Vela model for the Ethos-U).
 
-Measured at Step 4b (`build/f746-tflm`): plugins blazeface text 4,092 B / bss
-4,816 B (decode 784 / draw 716 / report 728 B with c = 640), cifar10 text
-2,764 B / bss 8,852 B; the stack below a veneer derived from the image is 192 B
-(the log path) against the declared 640 B.
+Measured at Step 4b (`build/f746-tflm`): Flash 807,220 B; plugins blazeface
+text 4,092 B / bss 4,816 B (decode 784 / draw 716 / report 728 B with c = 640),
+cifar10 text 2,764 B / bss 8,852 B; the stack below a veneer derived from the
+image is 192 B (the log path) against the declared 640 B; `blazeface.nnc` is
+194,232 B (its CRC is the receipt's: it moves with the build id).
+
+With the container loaded, `nn run` prints the plugin's own words, in frame
+pixels (the base's `to_frame()`), e.g.:
+
+```
+faces 1 thresh 600/1000
+face 0 x 230 y 78 w 63 h 47 px score 859
+```
+
+The first SD read of a large file can fail while the camera streams
+(`sd: read failed: I/O error`, an SDMMC RX overrun); issuing the load again
+reads it.  That is #160, not the container path.
 
 `scripts/verify_tflite.cc` (`--target verify-model`) is this board's model gate
 for that asset build: the tree's own `VerifyModelBuffer()`, the staging
@@ -781,8 +813,10 @@ already running`.
 > #130 step 6c, #122 P8, decision D6; `port/nn/nn_decode_count.c`). The
 > resident decoder runs on every model, and for one that is not
 > BlazeFace-shaped it answers `BF_ERR_MODEL` and the worker publishes the top
-> 5 classes with it -- that is a classifier stream's normal result, so
-> `model_errors` stays 0 on this board. Any other negative (`BF_ERR_UNINIT`,
+> 5 classes with it -- that is a classifier stream's normal result, so the
+> resident decoder never counts in `model_errors`.  A loaded PLUGIN's
+> `BF_ERR_MODEL` is a mismatch between the container's halves and does count
+> there (issue #159, `nn_decode_count_plugin_of()`, the other boards' table). Any other negative (`BF_ERR_UNINIT`,
 > `BF_ERR_ARG`, or an undocumented code) is a wiring fault: it counts in
 > `decoder_errors` and in `errors`, and the shared command prints the `of
 > those:` line. Such an inference is **not** counted in `infers` (issue #138,
@@ -791,6 +825,18 @@ already running`.
 > the faults. Until #138 it counted in both, because it ran; before step 6c
 > neither was counted. A `nn run` counts no decode (it reports its own
 > result).
+>
+> **Only what the record took is counted** (issue #159 Step 4b-iii, #122 P18,
+> `nn_decode_tally_of()`), as on wio-lite-ai: a publish the generation rule
+> dropped -- a stop or a re-attach landing during the inference -- counts in
+> nothing.  Until then the resident path counted the inference whether or not
+> the record took it, so a stream whose one publish a stop refused said `infers
+> 1` beside `last : nothing decoded yet`.  To see it: on a fresh boot with
+> the built-in model, type `nn stream start` and then `nn stream stop` within
+> about a second, then `nn stream stats`.  When a frame was handed over (`in`
+> minus `skipped` is 1) and its inference was still running at the stop, the
+> stats say `infers` 0 and `last : nothing decoded yet`; if `in` is 0 the stop
+> came before any frame -- repeat.
 
 ### The `camera` command is shared with the other boards (issue #143)
 

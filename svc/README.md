@@ -270,6 +270,10 @@ every thread is the board's. The board implements the APIs this layer declares
 lease and the decode as hooks in a const ops struct (`struct nn_core_frame_ops`,
 `struct nn_core_board`).
 
+Every entry into a plugin checks the lease; which entries exist is derived
+from the objects, not listed (`cmake/check_lease_entries.py`, see
+`cmake/README.md`).
+
 The shared translation units also hold no mutable storage of their own: state
 lives in a board-owned struct that the board passes in. This is enforced per
 board by `cmake/check_no_mutable_storage.py` through the build-derived audit in

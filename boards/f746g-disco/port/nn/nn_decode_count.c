@@ -29,3 +29,15 @@ enum nn_decode_count nn_decode_count_plugin_of(int nd, int oneshot)
 		return NN_DC_MODEL;
 	return NN_DC_DECODER;   /* BF_ERR_UNINIT, BF_ERR_ARG, and any other */
 }
+
+enum nn_decode_tally nn_decode_tally_of(int took, enum nn_decode_count dc)
+{
+	if (!took)
+		return NN_TALLY_NOTHING;     /* dropped by the generation rule */
+	switch (dc) {
+	case NN_DC_DECODER: return NN_TALLY_DECODER;
+	case NN_DC_MODEL:   return NN_TALLY_MODEL;
+	case NN_DC_NONE:
+	default:            return NN_TALLY_INFER;
+	}
+}

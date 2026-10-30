@@ -37,7 +37,7 @@
  * that found nobody.  The resident table above is unchanged until Step 4c
  * removes the resident decoder.
  *
- * Pure, no storage: test/test_nn_decode_count.c walks both.  The counters and
+ * Pure, no storage: test/test_nn_decode_count.c walks both, and the tally.  The counters and
  * where they move are the worker's (port/nn/nn_worker.c: nncam_publish() for
  * the resident decoder, nncam_account() for a plugin).
  */
@@ -68,6 +68,26 @@ enum nn_decode_count nn_decode_count_of(int nd, int oneshot);
  * every other negative NN_DC_DECODER, a count or a one-shot NN_DC_NONE.
  */
 enum nn_decode_count nn_decode_count_plugin_of(int nd, int oneshot);
+
+/** What the worker adds to `nn stream stats` for one publish. */
+enum nn_decode_tally {
+	NN_TALLY_NOTHING = 0,  /**< the record did not take it: nothing counts */
+	NN_TALLY_INFER,        /**< infers (and the detections it found)       */
+	NN_TALLY_DECODER,      /**< decoder_errors and errors                  */
+	NN_TALLY_MODEL,        /**< model_errors and errors                    */
+};
+
+/**
+ * @brief  One publish's tally (issue #159 Step 4b-iii, #122 P18).
+ *
+ * [!] ONLY A PUBLISH THE RECORD TOOK IS COUNTED -- for the resident decoder as
+ * for a plugin, and as on wio-lite-ai.  A publish the generation rule dropped
+ * (a stop or a re-attach landed during the inference) produced nothing a reader
+ * can see, so counting it would leave `nn stream stats` saying "1 infer" beside
+ * `last : nothing decoded yet`.  @p dc is the table's answer for the decode
+ * (nn_decode_count_of() or nn_decode_count_plugin_of()).
+ */
+enum nn_decode_tally nn_decode_tally_of(int took, enum nn_decode_count dc);
 
 #ifdef __cplusplus
 }

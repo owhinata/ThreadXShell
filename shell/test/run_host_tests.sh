@@ -455,6 +455,20 @@ gcc $CFLAGS -I "$svc/nn" -I "$svc/nn/tflm" \
     "$here/test_nn_tflm_fit.c" $LDFLAGS -o "$out/test_nn_tflm_fit"
 "$out/test_nn_tflm_fit"
 
+# issue #162 -- the camera input tensor's admission test and the per-element
+# conversion wio-lite-ai and f746g-disco share (svc/nn/nn_input_contract.{h,c}):
+# every refusal by its own code and in its order (dtype, rank, batch, empty,
+# channels, int8 scale incl. 0 / NaN / infinities / subnormals, int8 zero point,
+# a byte count a 32-bit product would wrap past), and the conversion against a
+# reference that spells out the target's instruction sequence (fmaf for VFMA)
+# for every 8-bit value, both normalisations and a set of scales / zero points,
+# plus the int8 limit on both sides and the +-0.5 boundaries.  -lm: the host's
+# fmaf is the C library's (no FMA instruction is assumed on the build host).
+gcc $CFLAGS -I "$svc/nn" \
+    "$here/test_nn_input_contract.c" "$svc/nn/nn_input_contract.c" \
+    $LDFLAGS -lm -o "$out/test_nn_input_contract"
+"$out/test_nn_input_contract"
+
 # issue #130 -- the loader's plugin-lease checks (svc/plugin/plugin_run_core.c,
 # shared by wio-lite-ai and f746g-disco since issue #159): a load refused before
 # the shared loader touches anything, the exec_ok hook refusing again at the

@@ -16,6 +16,16 @@
      _sbrk stops at __HeapLimit and MSPLIM is __StackLimit, so neither side
      can run into the other whatever the gap is.
   2. Vector table residency: .table at the very start of ITCM, 496 * 4 bytes.
+     And (issue #170) every HANDLER slot of the LINKED table -- every word
+     after the first, which is the initial SP, and not 0 -- points into ITCM.
+     Each such word must also carry the Thumb bit.  Read from the table's
+     bytes, so no handler is listed by name.  [!] This
+     is the placement of the LINK-TIME vector table, NOT of every ISR: the
+     prebuilt drivers, the NPU and the timer seam install theirs at run time
+     through EPII_NVIC_SetVector, and those never appear in this table.  That
+     they stay in ITCM rests on .text_cold naming load-path functions only and
+     on the prebuilt archives never being moved (board README, "Cold code in
+     SRAM").
   3. Static stacks: every *_stack-named data/bss symbol lives in DTCM.
   4. Forbidden survivors: with -ffunction-sections + --gc-sections, an
      uncalled function is dropped -- so if any FORBIDDEN name is PRESENT in
@@ -329,6 +339,23 @@ def nm_sizes(nm, elf):
     return sized
 
 
+def section_bytes(objdump, elf, name):
+    """The file bytes of section `name`, located through `objdump -h`."""
+    out = run([objdump, "-h", elf])
+    for line in out.splitlines():
+        m = re.match(r"^\s*\d+\s+(\S+)\s+([0-9a-f]{8})\s+[0-9a-f]{8}\s+"
+                     r"[0-9a-f]{8}\s+([0-9a-f]{8})", line)
+        if m and m.group(1) == name:
+            size, off = int(m.group(2), 16), int(m.group(3), 16)
+            with open(elf, "rb") as fh:
+                fh.seek(off)
+                data = fh.read(size)
+            if len(data) != size:
+                return None
+            return data
+    return None
+
+
 def inside(region, lo, hi):
     return region[0] <= lo and hi <= region[0] + region[1]
 
@@ -377,6 +404,7 @@ def main():
             errors.append(f"__StackTop 0x{stack_top:08x} is not the DTCM top")
 
     # 2. vector table
+    vec_handlers = 0
     table = secs.get(".table")
     if table is None:
         errors.append(".table section missing")
@@ -385,6 +413,37 @@ def main():
             errors.append(f".table at 0x{table[0]:08x}, not ITCM base")
         if table[1] < VECTORS:
             errors.append(f".table {table[1]} B < vector table {VECTORS} B")
+        # 2b. the linked table's handler slots point into ITCM (issue #170).
+        # Slot 0 is the initial SP (DTCM top), not a handler; 0 is an empty
+        # slot.  The Thumb bit is cleared before the range test.
+        raw = section_bytes(args.objdump, args.elf, ".table")
+        if raw is None or len(raw) < VECTORS:
+            errors.append(".table bytes could not be read for the handler "
+                          "check")
+        else:
+            by_addr = {}
+            for a, _t, n in syms:
+                by_addr.setdefault(a & ~1, n)
+            for slot in range(1, VECTORS // 4):
+                w = int.from_bytes(raw[slot * 4:slot * 4 + 4], "little")
+                if w == 0:
+                    continue
+                vec_handlers += 1
+                target = w & ~1
+                if (w & 1) == 0:
+                    # An even entry is not a Thumb address: taking it faults
+                    # (INVSTATE) whatever memory it points at.
+                    errors.append(
+                        f"linked vector slot {slot} -> 0x{w:08x} "
+                        f"({by_addr.get(target, '?')}) has no Thumb bit")
+                if not (ITCM[0] <= target < ITCM[0] + ITCM[1]):
+                    errors.append(
+                        f"linked vector slot {slot} -> 0x{w:08x} "
+                        f"({by_addr.get(target, '?')}) is outside ITCM: a "
+                        "handler in the link-time vector table must run "
+                        "from ITCM")
+            if vec_handlers == 0:
+                errors.append("linked vector table has no handler at all")
 
     # 3. static stacks in DTCM (thread stacks are *_stack arrays in .bss/.data)
     for addr, typ, name in syms:
@@ -591,7 +650,8 @@ def main():
         return 1
 
     print(f"check_placement_budget: OK (ITCM used {itcm_end - ITCM[0]} B, "
-          f"free {itcm_free} B; DTCM heap..stack gap {dtcm_gap} B)")
+          f"free {itcm_free} B; {vec_handlers} linked vector handler slot(s) "
+          f"in ITCM, all Thumb; DTCM heap..stack gap {dtcm_gap} B)")
     return 0
 
 

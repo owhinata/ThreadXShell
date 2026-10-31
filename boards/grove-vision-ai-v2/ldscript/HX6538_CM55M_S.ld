@@ -15,10 +15,10 @@
  *   CM55M_S_APP_DATA  DTCM  256 KB @ 0x30000000                -- data+stack
  *   CM55M_S_SRAM_LDR  SRAM  188 KB @ 0x3401F000 -- the window the 2nd-stage
  *                     bootloader itself executes from.  NOLOAD ONLY.
- *   CM55M_S_SRAM      SRAM  1.7 MB @ 0x3404D000 -- .rodata plus the NOLOAD
- *                     buffers.  The only region here that may hold LOADABLE
- *                     content; see the MEMORY block for why the floor is
- *                     where it is.
+ *   CM55M_S_SRAM      SRAM  1.7 MB @ 0x3404D000 -- .text_cold (issue #170),
+ *                     .rodata and the NOLOAD buffers.  The only region here
+ *                     that may hold LOADABLE content; see the MEMORY block
+ *                     for why the floor is where it is.
  * Placement in both SRAM regions is EXPLICIT ONLY -- an ITCM overflow is a
  * link error, never a silent spill.
  *
@@ -90,6 +90,80 @@ SECTIONS
         __unprivileged_flash_start__ = .;
     } > CM55M_S_APP_ROM
 
+    /* Code that runs only when a model is loaded, unloaded or named (issue
+     * #170), moved out of ITCM into the loadable SRAM region.  ITCM was full:
+     * this is about 14 KB the per-frame path never touches.
+     *
+     * [!] IT IS WRITTEN BEFORE .text ON PURPOSE.  ld gives an input section to
+     * the FIRST statement whose pattern matches it, and .text below takes
+     * *(.text*); after it, these patterns would match nothing.  Being first in
+     * the script also puts it first in CM55M_S_SRAM, so .rodata now starts
+     * right after it rather than at the region base (nothing depends on
+     * .rodata's address).
+     *
+     * [!] FUNCTIONS ARE NAMED ONE PATTERN AT A TIME, NEVER A WHOLE OBJECT.
+     * -ffunction-sections gives every function its own .text.<mangled name>;
+     * a small inline (a flatbuffers accessor, say) is emitted as a COMDAT copy
+     * in whichever object the linker kept it from and may be shared with a
+     * per-frame caller in another object, so "everything from nn_ethosu.cc"
+     * would sweep those along.  The patterns also name the object, so a
+     * COMDAT copy kept from some other object stays in ITCM.  The reverse
+     * also holds: when the copy kept IS nn_ethosu.cc.obj's, callers in other
+     * objects land on that SRAM copy too (none today; nothing detects it).
+     * A name that
+     * stops matching (a rename, a different inlining decision) leaves the
+     * function in ITCM: the safe direction, costing only space.
+     *
+     * What is here, and the check that every caller is a load / unload /
+     * console path (never an ISR, the worker, the producer or the panel), is
+     * in the board README ("Cold code in SRAM").  [!] nn_model_open() runs on
+     * the first use of `nn`, and from `nn info` that is BEFORE the NPU and its
+     * XIP window are brought up -- so this region must be executable from
+     * boot, not only once the NPU is up.
+     *
+     * Not here, by decision: anything on the per-frame path (nn_run,
+     * ethosu_bk_run, the interpreter's Invoke, the Ethos-U kernel and driver,
+     * npu_cache_*, the worker / producer / panel, camera, LCD), every ISR,
+     * CoreMark and membench (where their code runs is part of what they
+     * measure), and the prebuilt vendor archives.  The vector table's
+     * handlers must stay in ITCM; check_placement_budget.py checks that for
+     * the linked table.
+     *
+     * No AT>: LMA == VMA, the loader writes it in place like .rodata. */
+    .text_cold : ALIGN(4)
+    {
+        __text_cold_start = .;
+        /* The bounded flatbuffer verifier the model is checked with before
+         * anything reads it (svc/nn/ethosu/npu_verify.h): tflite::*::Verify,
+         * tflite::Verify*, flatbuffers::Verifier::*, Table::Verify*. */
+        *nn_ethosu.cc.obj(.text._ZNK6tflite*6VerifyERN11flatbuffers8VerifierE*
+                          .text._ZN6tflite*Verify*ERN11flatbuffers8VerifierE*
+                          .text._ZN11flatbuffers8Verifier*
+                          .text._ZNK11flatbuffers8Verifier*
+                          .text._ZNK11flatbuffers5Table11VerifyField*
+                          .text._ZNK11flatbuffers5Table12VerifyOffset*)
+        /* The Ethos-U backend's build / reload / open / go-empty / name /
+         * descriptor fill / strerror (svc/nn/ethosu/nn_ethosu.cc). */
+        *nn_ethosu.cc.obj(.text._ZN12_GLOBAL__N_1L12build_interpEPKvm
+                          .text._ZN12_GLOBAL__N_1L22nn_tflm_destroy_interpEv
+                          .text._ZN12_GLOBAL__N_1L8go_emptyEv
+                          .text._ZN12_GLOBAL__N_1L22nn_tflm_set_model_nameEPKc
+                          .text._ZN12_GLOBAL__N_1L19nn_tflm_fill_tensorEP9nn_tensorPK12TfLiteTensor
+                          .text.ethosu_bk_open
+                          .text.ethosu_bk_reload
+                          .text.nn_ethosu_strerror)
+        /* The payload scan run before a model is adopted. */
+        *npu_model_scan.cc.obj(.text._Z24npu_model_command_stream*
+                               .text._Z25npu_model_payload_refusal*)
+        *npu_payload.c.obj(.text.npu_payload_is_single_final_command_stream)
+        /* The shared dispatcher's open / reload / strerror (svc/nn/nn.c). */
+        */svc/nn/nn.c.obj(.text.nn_model_open
+                          .text.nn_model_reload
+                          .text.nn_model_strerror)
+        . = ALIGN(4);
+        __text_cold_end = .;
+    } > CM55M_S_SRAM
+
     .text : ALIGN(4)
     {
        *(.text*)
@@ -120,20 +194,26 @@ SECTIONS
      * what M-G3c's TFLM needs, and it is the answer the SDK's own NN linker
      * script arrived at (Algo_NoTrustZone.ld puts .rodata in SRAM0).
      *
-     * It is placed FIRST in the region so its address is the region base and
-     * does not drift every time one of the NOLOAD buffers below changes size.
+     * It sits right after .text_cold (issue #170), ahead of every NOLOAD
+     * buffer, so its address moves only when .text_cold changes size -- never
+     * when a buffer below does.  Nothing depends on the address itself.
      *
-     * [!] This is the only LOADABLE section in the SRAM window, which is why
-     * #43 had to prove on hardware that the 2nd-stage bootloader actually
-     * writes one: every other section here is NOLOAD, so nothing had ever
-     * exercised that path.  It does (16 KB probes at 0x340d7c20 and in DTCM
-     * both matched the host-computed CRC32 of their ELF bytes).
+     * [!] Until issue #170 this was the only LOADABLE section in the SRAM
+     * window, which is why #43 had to prove on hardware that the 2nd-stage
+     * bootloader actually writes one: every other section here is NOLOAD, so
+     * nothing had ever exercised that path.  It does (16 KB probes at
+     * 0x340d7c20 and in DTCM both matched the host-computed CRC32 of their ELF
+     * bytes).
      *
-     * The stake is the command registry embedded below: it rides along inside
-     * .rodata precisely because the image generator drops output section names
-     * it does not recognise, and an empty registry would take away the console
-     * that would report it.  check_image_coherence.py byte-verifies the section
-     * reached the .img and that the registry span lies inside it. */
+     * The stake is the command registry embedded below, since an empty
+     * registry would take away the console that would report it.  It rides
+     * inside .rodata.  That was first done in case the image generator drops
+     * output section names it does not know -- and #43 (44f6031) measured that
+     * it does NOT: two sections with names it had never seen took it from 7 to
+     * 9 sections byte-verified.  The registry stays in .rodata because there
+     * is no reason to move it, not because a separate section would be lost.
+     * check_image_coherence.py byte-verifies every loaded section reached the
+     * .img and that the registry span lies inside .rodata. */
     .rodata : ALIGN(4)
     {
         __rodata_start = .;
@@ -149,12 +229,12 @@ SECTIONS
          * carry aligned(__alignof__) so the array is gap-free and walkable by
          * pointer arithmetic between the two boundary symbols.
          *
-         * [!] Embedded INSIDE .rodata, not emitted as its own output section:
-         * the Himax image generator extracts allocatable sections by name and
-         * silently drops names it does not know -- a standalone
-         * .shell_root_cmds would produce an app that boots with an EMPTY
-         * command registry.  check_image_coherence.py verifies the span lands
-         * inside the image's .rodata coverage. */
+         * Embedded INSIDE .rodata, not emitted as its own output section.
+         * This was chosen on the belief that the Himax image generator drops
+         * section names it does not know, which #43 (44f6031) disproved: it
+         * carries unknown names (7 -> 9 sections byte-verified).  The
+         * placement stays; check_image_coherence.py verifies every loaded
+         * section reached the image and that this span lies inside .rodata. */
         . = ALIGN(4);
         PROVIDE_HIDDEN (__cli_root_cmds_start = .);
         KEEP (*(SORT_BY_NAME(.shell_root_cmds.*)))

@@ -24,8 +24,8 @@
  * and the caller runs it inside ONE critical section.  Testing in one section
  * and changing in another would let a threshold call and a swap each see the
  * other absent and both proceed, which is the race this exists to close.  That
- * the caller does so is held by its short wrappers in nn_svc_grove.c, not by
- * this file.
+ * the caller does so is held by its short wrappers in grove-vision-ai-v2's
+ * port/nn/nn_svc_grove.c, not by this file.
  *
  * [!] SINCE ISSUE #127 THE COUNT IS EVERY CONSOLE CALL THAT ENTERS THE PLUGIN
  * FROM OUTSIDE THE GATE -- `nn thresh` and `nn dets` -- not threshold calls
@@ -33,11 +33,15 @@
  *
  * WHAT IT DOES NOT CLOSE, AND WHAT DOES: two callbacks of the same plugin
  * running at once -- the inference worker's decode and a threshold call, say
- * (issue #122 P5).  That is the plugin lease's (port/plugin/plugin_lease.h),
- * which such a call takes AFTER it is counted in.  The two are not folded into
- * one (issue #127 decision 3): the count is never waited for and refuses only
- * a replacement; the lease is waited for, bounded, and excludes every other
- * caller.
+ * (issue #122 P5).  That is the plugin lease's (grove-vision-ai-v2's
+ * port/plugin/plugin_lease.h), which such a call takes AFTER it is counted in.
+ * The two are not folded into one (issue #127 decision 3): the count is never
+ * waited for and refuses only a replacement; the lease is waited for, bounded,
+ * and excludes every other caller.
+ *
+ * Pure, walked by shell/test/test_nn_param_calls.c.  Moved here from
+ * grove-vision-ai-v2's port/nn/ by issue #163; grove-vision-ai-v2 is still its
+ * only user.
  */
 #ifndef NN_PARAM_CALLS_H
 #define NN_PARAM_CALLS_H

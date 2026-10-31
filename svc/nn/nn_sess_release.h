@@ -7,8 +7,8 @@
  * @brief   When `nn stream`'s hold on the nn session may be given back
  *          (issue #130, step 6b).
  *
- * WHY THE DRAIN IS NOW PART OF THE QUESTION.  Since issue #130 the camera
- * producer preprocesses a frame STRAIGHT INTO the model's input tensor, which is
+ * WHY THE DRAIN IS NOW PART OF THE QUESTION.  Since issue #130 f746g-disco's
+ * camera producer preprocesses a frame STRAIGHT INTO the model's input tensor, which is
  * in the arena the session guards.  Before, it wrote a private staging buffer, so
  * releasing the session while a consume() might still be running was harmless.
  * Now `nn bench` (which writes the input and runs the model) and `nn model load`
@@ -32,7 +32,9 @@
  *     poll and its commit                    -> the worker (drain already set)
  *
  * Pure, no storage: the caller reads its flags and clears the hold under its
- * own lock, so exactly one caller gives the session back.
+ * own lock, so exactly one caller gives the session back.  Walked by
+ * shell/test/test_nn_sess_release.c.  Moved here from f746g-disco's port/nn/ by
+ * issue #163; f746g-disco is still its only user.
  */
 #ifndef NN_SESS_RELEASE_H
 #define NN_SESS_RELEASE_H

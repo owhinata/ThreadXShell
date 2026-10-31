@@ -8,16 +8,19 @@
  *          what is the CRC-32 of the bytes that were read (issue #159).
  *
  * [!] ONE FUNCTION, TWO PRINTERS, ONE BYTE STRING.  The closing check of an
- * asset on this board is "the CRC the board prints = the receipt's CRC" (there
- * is no `blob list` here).  Two places print it: the SD reader in
- * cmds/cmd_nn_board.c, right after a whole-file read (it has the console), and
- * `nn info`'s plugin lines once the backend adopted the container
- * (port/nn/nn_svc_f746_model.c).  Both call THIS over the same (buf, len) --
+ * asset on f746g-disco is "the CRC the board prints = the receipt's CRC" (there
+ * is no `blob list` there).  Two places print it: the SD reader in
+ * boards/f746g-disco/cmds/cmd_nn_board.c, right after a whole-file read (it has
+ * the console), and `nn info`'s plugin lines once the backend adopted the
+ * container (boards/f746g-disco/port/nn/nn_svc_f746_model.c).  Both call THIS over the same (buf, len) --
  * the staging slot the reader filled and the length it returned -- so the two
  * numbers are the CRC of the same bytes, by construction rather than by two
- * computations kept alike.  test/test_nn_model_container.c pins it.
+ * computations kept alike.  boards/f746g-disco/test/test_nn_model_container.c
+ * pins it.
  *
  * tflm only (the backends that can take a container in place).  Owns nothing.
+ * Moved here from f746g-disco's port/nn/ by issue #163; f746g-disco is still
+ * its only user.
  */
 #ifndef NN_CONTAINER_H
 #define NN_CONTAINER_H

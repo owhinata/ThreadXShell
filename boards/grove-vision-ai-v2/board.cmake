@@ -745,8 +745,8 @@ add_library(shell_objs OBJECT
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_handoff.c"
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_core_frame.c"
     # How `nn run`'s wait for its one inference ends (issue #129): a pure
-    # table, walked by test/test_nn_run_wait.c.
-    "${BOARD_DIR}/port/nn/nn_run_wait.c"
+    # table in svc/ since issue #163, walked by shell/test/test_nn_run_wait.c.
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_run_wait.c"
     # What the worker does with a model's outputs (issue #129): a stream, `nn
     # run` with a plugin and a bare `nn run` each read them their own way.
     # Pure, walked by test/test_nn_outputs.c.
@@ -759,8 +759,9 @@ add_library(shell_objs OBJECT
     # copy for every board, walked by shell/test/test_nn_core_model.c.
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_core_model.c"
     # The gate's claim and the count of threshold calls inside the plugin
-    # (issue #122): one transition each, walked by test/test_nn_param_calls.c.
-    "${BOARD_DIR}/port/nn/nn_param_calls.c"
+    # (issue #122): one transition each, in svc/ since issue #163, walked by
+    # shell/test/test_nn_param_calls.c.
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_param_calls.c"
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_stream_life.c"
     # The policy around it, and the stream's numbers (issue #130).
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_core.c"

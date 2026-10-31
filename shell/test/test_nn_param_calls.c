@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host test for the gate's claim and the threshold-call count (issue #122,
- * port/nn/nn_param_calls.c).
+ * svc/nn/nn_param_calls.c).
  *
  * WHY THIS EXISTS.  `nn thresh` takes no gate, and since a load can replace an
  * open model, a load on the other console could copy a new plugin over the code
@@ -15,8 +15,8 @@
  * The sequences below are the interleavings, each step one critical section as
  * the adapter runs it.  [!] WHAT IT DOES NOT COVER: that the adapter runs each
  * of these inside ONE critical section and calls the plugin only between a
- * successful enter and its leave -- three short wrappers in nn_svc_grove.c hold
- * that.
+ * successful enter and its leave -- three short wrappers in grove-vision-ai-v2's
+ * nn_svc_grove.c hold that.
  */
 #include <stdio.h>
 

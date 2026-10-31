@@ -60,15 +60,9 @@ gcc $CFLAGS -I "$board/port/camera" \
     $LDFLAGS -o "$out/test_cam_hold_rules"
 "$out/test_cam_hold_rules"
 
-# issue #130 -- when `nn stream` may give the nn session back
-# (port/nn/nn_sess_release.c).  The producer now writes the input tensor, inside
-# the arena the session guards, so the release waits for a sink drain that
-# confirmed the producer out.  A drain that runs out cannot be typed; the table
-# and the four stop / worker interleavings are walked here instead.
-gcc $CFLAGS -I "$board/port/nn" \
-    "$here/test_nn_sess_release.c" "$board/port/nn/nn_sess_release.c" \
-    $LDFLAGS -o "$out/test_nn_sess_release"
-"$out/test_nn_sess_release"
+# issue #130 -- when `nn stream` may give the nn session back: in svc/ since
+# issue #163 (svc/nn/nn_sess_release.c) and walked by
+# shell/test/test_nn_sess_release.c.
 
 # issue #130 step 6c (#122 P8) -- how a plugin's decode is counted in `nn stream
 # stats` (port/nn/nn_decode_count.c; one table since issue #159 Step 4c, when the
@@ -132,7 +126,7 @@ gcc $CFLAGS -DCONFIG_NN_BACKEND_TFLM=1 -DF746_PLUGIN_TARGET_ID=0x1101 \
     -I "$here/nn_shim" -I "$board/port/nn" -I "$board/port/camera" \
     -I "$board/port/sdram" -I "$board/port/plugin" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_nn_model_container.c" "$board/port/nn/nn_svc_f746_model.c" \
-    "$board/port/nn/nn_container.c" \
+    "$HOST_TEST_SVC/nn/nn_container.c" \
     "$HOST_TEST_SVC/nn/nn.c" "$HOST_TEST_REPO/shell/test/nn_model_host.c" \
     "$HOST_TEST_SVC/nn/nn_core_model.c" \
     "$HOST_TEST_SVC/nn/nn_swap.c" "$HOST_TEST_SVC/fmt.c" \

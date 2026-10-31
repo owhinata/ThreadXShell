@@ -861,6 +861,36 @@ gcc $CFLAGS -I "$inc" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     $LDFLAGS -o "$out/test_nn_core_model"
 "$out/test_nn_core_model"
 
+# issue #129 -- how `nn run`'s wait for its one inference ends
+# (svc/nn/nn_run_wait.c, moved out of grove-vision-ai-v2 by issue #163).  A
+# publish and the deadline, a publish and a Ctrl+C, a finished worker and a lost
+# stream can all hold in one poll, and only the order decides the status; none
+# of those coincidences can be typed.
+gcc $CFLAGS -I "$svc" -I "$svc/nn" \
+    "$here/test_nn_run_wait.c" "$svc/nn/nn_run_wait.c" \
+    $LDFLAGS -o "$out/test_nn_run_wait"
+"$out/test_nn_run_wait"
+
+# issue #122 -- the gate's claim and the count of console calls inside the
+# plugin (svc/nn/nn_param_calls.c, moved out of grove-vision-ai-v2 by issue
+# #163).  A threshold call in a background job preempted by a load on the other
+# console is a window of microseconds; it cannot be typed.
+gcc $CFLAGS -I "$svc" -I "$svc/nn" \
+    "$here/test_nn_param_calls.c" "$svc/nn/nn_param_calls.c" \
+    $LDFLAGS -o "$out/test_nn_param_calls"
+"$out/test_nn_param_calls"
+
+# issue #130 -- when `nn stream` may give the nn session back
+# (svc/nn/nn_sess_release.c, moved out of f746g-disco by issue #163).  The
+# producer writes the input tensor, inside the arena the session guards, so the
+# release waits for a sink drain that confirmed the producer out.  A drain that
+# runs out cannot be typed; the table and the four stop / worker interleavings
+# are walked here instead.
+gcc $CFLAGS -I "$svc" -I "$svc/nn" \
+    "$here/test_nn_sess_release.c" "$svc/nn/nn_sess_release.c" \
+    $LDFLAGS -o "$out/test_nn_sess_release"
+"$out/test_nn_sess_release"
+
 # issue #130 -- the shared frame path that runs that word (svc/nn/nn_core_frame.c):
 # a frame in four parts (wio-lite-ai's bands) and in one (grove-vision-ai-v2's),
 # the two ways out of FILLING (the producer's ABANDON, the stop's JOIN), the

@@ -9,8 +9,8 @@
  * `nn run` hands one frame to the inference worker and waits on the console for
  * the result to be published.  The wait can end five ways and each is its own
  * status, because each sends the operator somewhere else -- the same four
- * wio-lite-ai's `nn run` reports (issue #122 P7), plus the one this board can
- * tell apart because its worker says when it is done with a one-shot:
+ * wio-lite-ai's `nn run` reports (issue #122 P7), plus the one grove-vision-ai-v2
+ * can tell apart because its worker says when it is done with a one-shot:
  *
  *   INFERRED   the record accepted a publish since this run's base
  *   NO_RESULT  the worker (or the producer, preparing the frame) finished with
@@ -30,7 +30,8 @@
  * says it is finished, so a caller that samples in that order cannot see
  * finished-without-published for a run that did publish.
  *
- * Pure, and walked over every combination by test/test_nn_run_wait.c.
+ * Pure, and walked over every combination by shell/test/test_nn_run_wait.c.
+ * Moved here from grove-vision-ai-v2's port/nn/ by issue #163.
  */
 #ifndef NN_RUN_WAIT_H
 #define NN_RUN_WAIT_H

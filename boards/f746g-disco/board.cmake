@@ -423,7 +423,7 @@ set(NN_SOURCES
     "${BOARD_DIR}/port/nn/nn_camera.c"          # live camera -> inference glue: console side
     "${BOARD_DIR}/port/nn/nn_producer.c"        # ...its camera producer thread (#140)
     "${BOARD_DIR}/port/nn/nn_worker.c"          # ...its inference worker thread (#140)
-    "${BOARD_DIR}/port/nn/nn_sess_release.c"    # when the session may go back (#130)
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_sess_release.c" # when the session may go back (#130, svc/ #163)
     "${BOARD_DIR}/port/nn/nn_decode_count.c"    # how a decode is counted (#130 6c)
     # nn_tensor -> tensor_desc (issue #159 Step 4c: the half of the old
     # nn_decoder.c that outlived the resident decoder).  No decoder is linked in
@@ -759,7 +759,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_info.c"   # `nn info`'s stack lines
         "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_claims.c" # ...and the claims around them
         "${CMAKE_SOURCE_DIR}/svc/crc32.c"                # the digest and the load CRC
-        "${BOARD_DIR}/port/nn/nn_container.c"            # ...over the bytes read
+        "${CMAKE_SOURCE_DIR}/svc/nn/nn_container.c"      # ...over the bytes read
         # Step 4b: the loader, the lease, the painter and the decoder branch.
         # What is board-independent is svc/'s (shared with wio-lite-ai); what
         # touches this board's hardware or RTOS is port/plugin/ and port/nn/.

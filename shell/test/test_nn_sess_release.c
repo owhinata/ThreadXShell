@@ -3,11 +3,11 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host test for when `nn stream` may give the nn session back (issue #130,
- * port/nn/nn_sess_release.c).
+ * svc/nn/nn_sess_release.c).
  *
- * WHY THIS EXISTS.  Since #130 the camera producer writes the model's input
- * tensor, inside the arena the session guards, so the session may go back only
- * once a sink drain has confirmed the producer out.  The drain that does not
+ * WHY THIS EXISTS.  Since #130 f746g-disco's camera producer writes the model's
+ * input tensor, inside the arena the session guards, so the session may go back
+ * only once a sink drain has confirmed the producer out.  The drain that does not
  * confirm needs a consume() that outlives a 100 ms budget at priority 10, and no
  * console can produce that.  So the decision is walked in full, and then the four
  * interleavings of the stop and the worker are played through the same

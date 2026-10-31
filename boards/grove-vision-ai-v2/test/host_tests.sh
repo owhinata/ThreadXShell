@@ -363,15 +363,8 @@ gcc $CFLAGS \
 # and the frame path that runs it are shared since issue #130 and walked by
 # shell/test/test_nn_handoff.c and test_nn_core_frame.c.
 
-# issue #129 -- how `nn run`'s wait for its one inference ends
-# (port/nn/nn_run_wait.c).  A publish and the deadline, a publish and a
-# Ctrl+C, a finished worker and a lost stream can all hold in one poll, and
-# only the order decides the status; none of those coincidences can be typed.
-gcc $CFLAGS \
-    -I "$here" -I "$board/port/nn" -I "$board/port/nn/npu" \
-    "$here/test_nn_run_wait.c" "$board/port/nn/nn_run_wait.c" \
-    $LDFLAGS -o "$out/test_nn_run_wait"
-"$out/test_nn_run_wait"
+# issue #129 -- how `nn run`'s wait for its one inference ends: in svc/ since
+# issue #163 (svc/nn/nn_run_wait.c) and walked by shell/test/test_nn_run_wait.c.
 
 # issue #129 -- what the inference worker does with a model's outputs
 # (port/nn/nn_outputs.c).  A bare `nn run` counts every output and describes
@@ -385,14 +378,8 @@ gcc $CFLAGS \
 "$out/test_nn_outputs"
 
 # issue #122 -- the gate's claim and the count of threshold calls inside the
-# plugin (port/nn/nn_param_calls.c).  A threshold call in a background job
-# preempted by a load on the other console is a window of microseconds; it
-# cannot be typed.
-gcc $CFLAGS \
-    -I "$here" -I "$board/port/nn" -I "$board/port/nn/npu" \
-    "$here/test_nn_param_calls.c" "$board/port/nn/nn_param_calls.c" \
-    $LDFLAGS -o "$out/test_nn_param_calls"
-"$out/test_nn_param_calls"
+# plugin: in svc/ since issue #163 (svc/nn/nn_param_calls.c) and walked by
+# shell/test/test_nn_param_calls.c.
 
 # issue #127 -- the loader's two plugin-lease checks (port/plugin/plugin_run.c):
 # before the shared loader touches the reservation, and again in the exec_ok

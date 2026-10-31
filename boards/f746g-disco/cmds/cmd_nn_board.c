@@ -40,7 +40,7 @@
  * purpose: a refused container's CRC is still the number that says whether
  * the right file reached the card.  The port computes the CRC `nn info` shows
  * beside the claims with the same function over the same (buf, len)
- * (port/nn/nn_container.h), so the two are one value.
+ * (svc/nn/nn_container.h), so the two are one value.
  */
 int nn_board_read_file(void *ctx, const char *path, void *buf, uint32_t cap,
                        uint32_t *len)

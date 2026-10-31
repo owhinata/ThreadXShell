@@ -429,7 +429,9 @@ set(NN_SOURCES
     # nn_decoder.c that outlived the resident decoder).  No decoder is linked in
     # any backend: one reaches this board only in a plugin container.
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_desc.c"   # shared with wio-lite-ai (#161)
-    "${CMAKE_SOURCE_DIR}/svc/nn/nn_det_record.c")
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_det_record.c"
+    # the camera input tensor's admission test, shared with wio-lite-ai (#162)
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_input_contract.c")
 if(CONFIG_NN_BACKEND STREQUAL "null")
     list(APPEND NN_SOURCES "${BOARD_DIR}/port/nn/nn_null.c")
 elseif(CONFIG_NN_BACKEND STREQUAL "stedgeai")

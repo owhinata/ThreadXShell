@@ -5,7 +5,10 @@ Uses a small real CMake/Ninja project and the supplied ARM C and C++ compilers
 (C++ services since #161). Optional
 --board-build replays copies of the three shared regression TUs using the
 selected consumer's actual compile context (Grove or Wio), without editing or
-building any firmware tree.
+building any firmware tree.  When that build compiles the shared TFLM backend
+(svc/nn/tflm/nn_tflm.cc: wio-lite-ai and f746g-disco with CONFIG_NN_BACKEND=tflm,
+issue #161) a copy of it is replayed the same way through the C++ driver;
+--require-tflm makes its absence a failure instead of a skip.
 """
 import argparse
 import importlib.util
@@ -128,6 +131,45 @@ def replay_mutations(args):
                     "owns mutable storage")
             print("ok board source mutation:", name, guard)
 
+    # [!] The C++ path of the audit in a REAL board context (#161): a copy of the
+    # shared TFLM backend with one `static` injected, compiled with the tflm
+    # target's own argv by its C++ driver, must be refused like the C TUs above.
+    # This is what shows the backend is audited where it ships, not only that a
+    # toy .cc is.
+    source = root / "svc" / "nn" / "tflm" / "nn_tflm.cc"
+    entries = [e for e in database if Path(e["file"]).resolve() == source]
+    if not entries:
+        assert not args.require_tflm, "board does not compile svc/nn/tflm/nn_tflm.cc"
+        print("skip board source mutation: nn/tflm/nn_tflm.cc (not compiled by this board)")
+        return
+    for entry in entries:
+        with tempfile.TemporaryDirectory(prefix="storage-regression-") as tmp:
+            tmp = Path(tmp)
+            copy = tmp / source.name
+            copy.write_text(source.read_text() + "\n#if defined(__arm__)\nstatic volatile int injected;\n"
+                            "extern \"C\" int storage_regression_probe(void) { return ++injected; }\n#endif\n")
+            argv = gate.entry_argv(entry)
+            assert gate.driver_language(argv[0], source, entry["directory"], Path(args.cc).resolve(),
+                                        Path(args.cxx).resolve()) == "C++"
+            argv = [str(copy) if a == str(source) else a for a in argv]
+            argv += ["-iquote", str(source.parent)]
+            command = gate.replay_argv(argv, copy, entry["directory"], Path(args.cc).resolve(),
+                                       tmp / "bad.o", Path(args.cxx).resolve())
+            run(command, cwd=entry["directory"])
+            run([sys.executable, str(CMAKE / "check_no_mutable_storage.py"),
+                 "--objdump", args.objdump, "--nm", args.nm, str(tmp / "bad.o")], False,
+                "owns mutable storage")
+            # The unmodified source in the same context passes: the refusal is the
+            # injection, not something else about the C++ context.
+            clean = gate.replay_argv(gate.entry_argv(entry), source, entry["directory"],
+                                     Path(args.cc).resolve(), tmp / "good.o",
+                                     Path(args.cxx).resolve())
+            run(clean, cwd=entry["directory"])
+            run([sys.executable, str(CMAKE / "check_no_mutable_storage.py"),
+                 "--objdump", args.objdump, "--nm", args.nm, str(tmp / "good.o")], True,
+                "owns no mutable storage")
+        print("ok board source mutation: nn/tflm/nn_tflm.cc defined(__arm__) (C++ driver)")
+
 
 CLEAN_CC = """\
 // A C++ service with no mutable storage: constant-initialised objects only.
@@ -218,6 +260,9 @@ def main():
     for name in ("cc", "cxx", "objdump", "nm"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--board-build")
+    parser.add_argument("--require-tflm", action="store_true",
+                        help="with --board-build: fail unless that build compiles "
+                             "svc/nn/tflm/nn_tflm.cc (the C++ replay case)")
     args = parser.parse_args()
     args.cc, args.cxx, args.objdump, args.nm = map(lambda p: str(Path(p).resolve()),
                                                    (args.cc, args.cxx, args.objdump, args.nm))

@@ -89,8 +89,9 @@ enum nn_dtype {
  * backend-agnostic: the reasons an interpreting runtime can reject a flatbuffer
  * are generic, and a command that had to know TFLM's private numbering would
  * have to be rewritten for the next backend.  nn_model_strerror() turns one
- * into a sentence.  (wio-lite-ai's backend returns these; f746g-disco's still
- * returns its own unnamed small negatives, which do not all mean the same.)
+ * into a sentence.  (The tflm backend returns these on both boards since issue
+ * #161; f746g-disco's stedgeai backends still return their own unnamed small
+ * negatives, which do not all mean the same.)
  */
 #define NN_MODEL_ERR_VERSION  (-1)  /**< schema version the runtime cannot read      */
 #define NN_MODEL_ERR_OPS      (-2)  /**< the operator resolver could not be built    */

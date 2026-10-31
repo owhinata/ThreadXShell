@@ -445,6 +445,16 @@ for nn_model_variant in "" -DTEST_FIRST_BUILD_FAILS -DTEST_EMPTY_FROM_BOOT -DTES
     "$out/test_nn_model"
 done
 
+# issues #159, #161 -- which staging slot the tflm backend (svc/nn/tflm/nn_tflm.cc,
+# wio-lite-ai and f746g-disco) may adopt a model range from
+# (svc/nn/tflm/nn_tflm_fit.h, the header the backend calls): a range ending
+# exactly at the slot's end, one byte past it, misalignments 1..15, outside the
+# slot, empty, wrapping, a slot at the top of the address space; then which of
+# two slots, each refusal's code in its order, and never the live slot.
+gcc $CFLAGS -I "$svc/nn" -I "$svc/nn/tflm" \
+    "$here/test_nn_tflm_fit.c" $LDFLAGS -o "$out/test_nn_tflm_fit"
+"$out/test_nn_tflm_fit"
+
 # issue #130 -- the loader's plugin-lease checks (svc/plugin/plugin_run_core.c,
 # shared by wio-lite-ai and f746g-disco since issue #159): a load refused before
 # the shared loader touches anything, the exec_ok hook refusing again at the

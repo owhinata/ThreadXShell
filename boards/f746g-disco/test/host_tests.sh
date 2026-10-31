@@ -135,14 +135,6 @@ gcc $CFLAGS -DCONFIG_NN_BACKEND_TFLM=1 -DF746_PLUGIN_TARGET_ID=0x1101 \
     $LDFLAGS -o "$out/test_nn_model_container"
 "$out/test_nn_model_container"
 
-# issue #159 -- which model range the tflm backend's staging slot may adopt
-# (port/nn/tflm/nn_tflm_fit.h, the header nn_tflm.cc calls): a range ending
-# exactly at the slot's end, one byte past it, misalignments 1..15, outside
-# the slot, empty, wrapping, and a slot at the top of the address space.
-gcc $CFLAGS -I "$board/port/nn/tflm" \
-    "$here/test_nn_tflm_fit.c" $LDFLAGS -o "$out/test_nn_tflm_fit"
-"$out/test_nn_tflm_fit"
-
 # issue #159 -- the heap's bound by BEHAVIOUR: the real src/retarget.c must
 # grow the break to exactly `_estack - _Min_Stack_Size` (below the .plugin
 # reservation) and no further.  cmake/check_f746_layout.py checks that the

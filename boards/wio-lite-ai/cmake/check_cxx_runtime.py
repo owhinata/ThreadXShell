@@ -22,9 +22,10 @@ them announces itself at link time.
    failure mode available on this part.
 
    The design answer is that the backend has no non-trivial globals -- the arena and
-   the model slots are plain C arrays, the interpreter is placement-new'd inside
-   open(), and the op resolver is a function-local static under
-   -fno-threadsafe-statics.  This check is what keeps that true, because nothing else
+   the model slots are plain C arrays, and the interpreter and the op resolver are
+   placement-new'd into the raw storage of a trivially constructible state object
+   (svc/nn/tflm/nn_tflm_state.h, since issue #161).  This check is what keeps that
+   true in the image, because nothing else
    would notice a `static SomeClass g_thing;` appearing in a future edit.
 
 2. THE EXCEPTION MACHINERY COMES BACK IN THROUGH THE SIDE DOOR.  Everything is
@@ -32,7 +33,7 @@ them announces itself at link time.
    linker extracts.  One unresolved reference to the standard throwing `operator new`
    is enough to pull libstdc++_nano's version, and with it __cxa_throw, the
    _Unwind_* personality machinery and std::bad_alloc's type-info -- tens of KB of
-   code that -fno-exceptions guarantees can never execute.  port/nn/tflm/cxx_runtime.cc
+   code that -fno-exceptions guarantees can never execute.  svc/nn/tflm/cxx_runtime.cc
    defines our own operator new precisely so that never happens; this verifies it did
    not happen rather than trusting that it did not.
 
@@ -91,7 +92,7 @@ FORBIDDEN = (
     (r"^__cxa_(throw|rethrow|begin_catch|end_catch|allocate_exception|"
      r"free_exception|call_unexpected|bad_cast|bad_typeid)$",
      "the exception runtime was linked in.  Something references the THROWING "
-     "operator new (or a real `throw`): check that port/nn/tflm/cxx_runtime.cc still "
+     "operator new (or a real `throw`): check that svc/nn/tflm/cxx_runtime.cc still "
      "defines all six operator new/delete forms and that it is still compiled into "
      "the tflm library."),
     (r"^_Unwind_",
@@ -109,7 +110,7 @@ FORBIDDEN = (
      "destructor at namespace or function-local static scope: nothing in this "
      "firmware ever returns from main, so this costs flash and a struct _atexit in "
      "AXI-SRAM to run destructors that cannot run.  Fix it by placement-new'ing the "
-     "object into a plain array (port/nn/tflm/nn_tflm.cc does this for both the "
+     "object into a plain array (svc/nn/tflm/nn_tflm.cc does this for both the "
      "interpreter and the op resolver), NOT by removing -fno-use-cxa-atexit.\n"
      "      Note both spellings are listed on purpose: -fno-use-cxa-atexit makes GCC "
      "register with newlib's plain atexit() instead of __cxa_atexit(), so a check "

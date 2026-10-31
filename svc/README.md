@@ -48,7 +48,8 @@ boards/<board>/port/nn/                  the board's glue, one file per thread:
         |   nn_core_model.c, nn_swap.c, nn_active_core.c, nn_active_lease.c,
         |   svc/plugin/plugin_lease_api.h (implemented by the board)
         v
-backend: boards/<board>/port/nn/tflm/ (wio-lite-ai, f746g-disco)
+backend: svc/nn/tflm/ (wio-lite-ai, f746g-disco; the board places its buffers
+         and defines its state in boards/<board>/port/nn/tflm/)
          boards/grove-vision-ai-v2/port/nn/npu/ (Ethos-U55 + TFLM)
 ```
 
@@ -233,6 +234,7 @@ relative to `svc/`.
 | `nn/nn_backend.h` | The vtable the one compiled-in backend (`null`, `tflm`, f746g-disco's `stedgeai*`) exports as `nn_backend_vt_selected`. |
 | `nn/nn_dispatch_state.h` | What a board gives `nn.c`: its state as one object the board defines (`nn_model_board_state`, bound at link time) and the hooks -- a critical section that restores the mask it found, a one-tick wait, and the cycle counter's start and fenced read (`boards/<board>/port/nn/nn_model_board.c`). |
 | `nn/nn_desc` | `nn_tensor` -> `svc/nn/tensor.h` descriptor, for the boards that use `nn.h`. |
+| `nn/tflm/` | The one tflite-micro backend of wio-lite-ai and f746g-disco (issue #161; built only with `CONFIG_NN_BACKEND=tflm`, into the board's `tflm` library): `nn_tflm.cc` (the vtable), `nn_tflm_state.h` (its state type, defined by the board in `port/nn/tflm/nn_tflm_board.cc` with the board's facts), `nn_tflm_mem.h` (the arena, staging slots and capacity object the board places in `port/nn/tflm/nn_tflm_bufs.c`; sizes are compile definitions), `nn_tflm_ops.h` (the op profiles, shared with each board's host `verify_tflite`), `nn_tflm_fit.h` (which slot a model range may be adopted from, never the live one; host-tested) and `cxx_runtime.cc` (the C++ runtime shim). The only directory under `svc/` that includes TFLM headers. |
 | `nn/nn_svc_adapter.h` | Static-inline helpers every adapter uses to build a result and an `nn info` line. |
 | `nn/nn_detail.h` | The bound on a board's `nn` explanation text and its build-time check. |
 | `nn/nn_stream_life` | The one live-inference state machine (start admission, generations, stop claims). |
@@ -281,7 +283,8 @@ from the objects, not listed (`cmake/check_lease_entries.py`, see
 The shared translation units also hold no mutable storage of their own: state
 lives in a board-owned struct that the board passes in, or -- for `nn/nn.c`,
 whose callers pass no context -- one the board defines under a name the shared
-file declares `extern` (`nn_model_board_state`). This is enforced per
+file declares `extern` (`nn_model_board_state`; the tflm backend's
+`nn_tflm_board_state`). This is enforced per
 board by `cmake/check_no_mutable_storage.py` through the build-derived audit in
 `cmake/shared_storage_gate.cmake` (see `cmake/README.md`; `svc/ymodem.c` is the
 one exception).

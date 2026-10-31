@@ -959,7 +959,7 @@ if(CONFIG_NN_BACKEND STREQUAL "tflm")
     # copied to the SD card (plan #159 D4/D5): its fit is checked against the
     # staging capacity the shipped shell.elf holds in nn_tflm_stage_cap -- the
     # object the backend's load_region() hands out as the read limit
-    # (port/nn/tflm/nn_tflm.cc) -- and the closing check is the CRC the load
+    # (port/nn/tflm/nn_tflm_bufs.c) -- and the closing check is the CRC the load
     # prints over the whole file it read, compared with the receipt's.
     #
     # [!] THE GATES RUN AT BUILD TIME, NOT AT COPY TIME: nothing checks that the
@@ -1058,19 +1058,15 @@ if(CONFIG_NN_BACKEND STREQUAL "null")
     list(APPEND F746_LAYOUT_REQUIRED --require-sdram-ai null_in_buf)
 endif()
 if(CONFIG_NN_BACKEND STREQUAL "tflm")
-    # port/nn/tflm/nn_tflm.cc -- the activation arena (g_arena) and the two SD
-    # model slots (g_sd_model_buf), the tflm backend's whole bank3 footprint
-    # (issue #130).  Both are in an ANONYMOUS namespace, so nm (demangling is not
-    # requested) reports them as the local symbols spelled below, as GCC mangles
-    # them: `12_GLOBAL__N_1` is the anonymous namespace, `L` marks internal
-    # linkage, and the length prefix is part of the name.  Spelling them mangled
-    # is deliberate -- renaming either object, or moving it out of the namespace,
-    # makes the name match NOTHING, which the gate reports as "no such object" (a
-    # failure), never as a pass.  (The first build of this rule, written without
-    # the `L`, failed exactly that way.)
+    # port/nn/tflm/nn_tflm_bufs.c -- the activation arena and the two SD model
+    # slots, the tflm backend's whole bank3 footprint (issue #130).  Defined in
+    # C since issue #161 (the backend is svc/nn/tflm/), so nm spells them
+    # plainly; until then they were anonymous-namespace objects required here by
+    # their mangled local names.  Renaming either makes the name match NOTHING,
+    # which the gate reports as "no such object" (a failure), never as a pass.
     list(APPEND F746_LAYOUT_REQUIRED
-         --require-sdram-ai _ZN12_GLOBAL__N_1L7g_arenaE
-         --require-sdram-ai _ZN12_GLOBAL__N_1L14g_sd_model_bufE)
+         --require-sdram-ai nn_tflm_arena
+         --require-sdram-ai nn_tflm_model_buf)
     # The plugin policy's link address -- F746_PLUGIN_BASE, the value compiled
     # into the policy as -DF746_PLUGIN_BASE -- is the linked __plugin_start
     # (issue #159 Step 4b): a fifth statement of the reservation's address, and

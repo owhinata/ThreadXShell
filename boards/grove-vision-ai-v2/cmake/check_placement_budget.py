@@ -4,10 +4,17 @@
 """Gate 2: placement + budget checks on the linked shell ELF.
 
   1. Region budget: every ALLOC section must lie inside a known region
-     (ITCM / DTCM / SRAM window), and each region must keep a minimum
-     headroom.  For DTCM the meaningful slack is the gap between the heap's
-     ceiling (__HeapLimit) and the MSP stack's floor (__StackLimit) -- the
-     statics, heap and stack are all placed from the two ends.
+     (ITCM / DTCM / SRAM window).  ITCM is checked for fitting only and has
+     NO headroom floor (issue #170): nothing consumes free ITCM at run time
+     (the vector table is .table, part of the linked contents; .itcm_bench is
+     NOLOAD but ALLOC, so it is already counted as used; plugins run from
+     SRAM; stacks and heap are in DTCM), and an overflow is a link error.  The
+     used/free figure is still printed.  DTCM keeps an 8 KB floor on the gap
+     between the heap's ceiling (__HeapLimit) and the MSP stack's floor
+     (__StackLimit) -- the statics, heap and stack are all placed from the two
+     ends.  That floor is an EARLY WARNING on the budget, not run-time safety:
+     _sbrk stops at __HeapLimit and MSPLIM is __StackLimit, so neither side
+     can run into the other whatever the gap is.
   2. Vector table residency: .table at the very start of ITCM, 496 * 4 bytes.
   3. Static stacks: every *_stack-named data/bss symbol lives in DTCM.
   4. Forbidden survivors: with -ffunction-sections + --gc-sections, an
@@ -56,7 +63,6 @@ PLUGIN_END     = 0x34200000
 # Whole window, for the checks that do not care which half a section is in.
 SRAM_ALL = (SRAM_LDR[0], SRAM_LDR[1] + SRAM[1])
 
-ITCM_MIN_HEADROOM = 8 * 1024
 DTCM_MIN_HEADROOM = 8 * 1024      # gap between __HeapLimit and __StackLimit
 
 VECTORS = 496 * 4
@@ -353,9 +359,8 @@ def main():
             errors.append(f"section {name} [0x{vma:08x},0x{end:08x}) outside "
                           "every known region")
 
+    # No ITCM floor (issue #170, see the docstring); reported only.
     itcm_free = ITCM[0] + ITCM[1] - itcm_end
-    if itcm_free < ITCM_MIN_HEADROOM:
-        errors.append(f"ITCM headroom {itcm_free} B < {ITCM_MIN_HEADROOM} B")
 
     heap_limit = by_name.get("__HeapLimit")
     stack_limit = by_name.get("__StackLimit")

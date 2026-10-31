@@ -169,7 +169,7 @@ plugin は board code と同格の**信頼された native code**。ゲートが
 - **wio-lite-ai の boot ツリー**: `check_boot_safety.py`（precheck + POST_BUILD）。`boot_image` の
   always-relink を外す変更はゲートの無効化と同じ。negative test は `cmake/fixtures/`。
 - **grove-vision-ai-v2**: ポストビルド 5 本（`check_image_coherence.py` / `check_placement_budget.py` /
-  `check_timer_seam.py` / `check_nor_seam.py` / `check_output_vocabulary.py`）。LTO は使わない。
+  `check_timer_seam.py` / `check_nor_seam.py` / `check_output_vocabulary.py`）。placement の ITCM 空き下限は持たない（実行時の消費者が無く溢れはリンクエラー、#170）。LTO は使わない。
   `check_mve_predication.py` は削除済み（1 命令も検出できなかった）。**戻さない。**
 
 ### 11. STM32F746G-DISCO

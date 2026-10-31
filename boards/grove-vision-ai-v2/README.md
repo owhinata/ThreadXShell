@@ -131,13 +131,29 @@ the settings are also lost when the USB device re-enumerates.
   into the `dmesg` RAM log; the SDK clib/console is not linked at all.
 - **Post-build gates** (`cmake/check_*.py`): image coherence (every linker
   section present in the generated `.img`, command registry inside `.rodata`),
-  placement/budget (ITCM/DTCM headroom, vector table, static stacks,
+  placement/budget (every section inside a known region, the DTCM
+  heap-to-stack gap, no ITCM headroom floor since issue #170, vector table,
+  static stacks,
   benchmark-buffer residency, no forbidden SDK symbols surviving, and -- since
   issue #42 -- one REQUIRED symbol), the timer seam, and -- since issue #88 --
   the NOR write seam (only `port/sdk_seam/nor_seam.c` may reach the vendor's
   erase and program entry points; it reads the linker's map, not the finished
   ELF).  The MVE-predication scan is gone, because its premise was wrong and it
   could not detect a single instruction it named (issues #42 and #66).
+
+**Why ITCM has no headroom floor and DTCM keeps one (issue #170, 2026-10-31).**
+`check_placement_budget.py` used to require 8,192 B of free ITCM.  Before
+removing it we checked who uses free ITCM at run time and found no one: the
+vector table is `.table`, part of the linked contents (the SDK's
+`EPII_NVIC_SetVector` writes into its existing slots, it does not grow it);
+`.itcm_bench` is NOLOAD but ALLOC, so it is already counted as used; plugins run
+from SRAM; stacks and heap are in DTCM.  An ITCM overflow is a link error, not a
+silent spill.  So the floor protected nothing while keeping the last 8 KB of
+ITCM unusable.  The gate still prints `ITCM used ... free ...`.  The
+8,192 B floor on the DTCM heap-to-stack gap stays, as an **early warning on the
+budget**, not as run-time safety: `_sbrk` stops at `__HeapLimit` and startup
+sets MSPLIM to `__StackLimit`, so neither side can reach the other whatever the
+gap is.
 
 ## Time sources
 
@@ -2299,7 +2315,7 @@ is printed only -- a load's refusal leaves no claim to recover either way.
 
 | what | value |
 |---|---|
-| ITCM | 253,952 B used, **8,192 B free -- exactly the placement gate's floor**; the next ITCM growth needs #170 first |
+| ITCM | 253,952 B used, **8,192 B free -- exactly the placement gate's floor at the time**; issue #170 removed that floor (see "Post-build gates") |
 | ITCM `.text` growth, step 2 to step 5 | about 1,088 B, of which `svc/nn/nn.c` as linked is about 750 B |
 | `.bss` | +512 B (the backend's state and descriptors, the dispatcher's state) |
 | `npu_cache_board_state` | 12 B in DTCM (step 2) |
@@ -2440,8 +2456,8 @@ into one custom operator), and the shipped limits are 16 and 4096: room enough
 that a legitimate model Vela did not fully offload reaches the op resolver and
 is refused THERE, rather than being reported here as malformed.
 
-Cost of the verifier in the image: **ITCM 214,368 -> 226,368 B**, against a gate
-that requires 8,192 B of headroom out of 262,144.
+Cost of the verifier in the image: **ITCM 214,368 -> 226,368 B** out of 262,144,
+against a gate that then required 8,192 B of headroom (removed in issue #170).
 
 `NPU_ERR_MODEL_FORMAT` was its own status, separate from `_MAGIC` ("this is not a
 model") and `_SCHEMA` ("a model this build cannot read").  Since issue #169 the

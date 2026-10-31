@@ -33,7 +33,6 @@
  * those are PRIMASK-based -- an ISR cannot preempt the critical section it
  * needs.  take() is only ever called from a thread.
  */
-#include "npu.h"
 #include "npu_hw.h"
 
 #include "ethosu_driver.h"   /* ETHOSU_SEMAPHORE_WAIT_FOREVER */

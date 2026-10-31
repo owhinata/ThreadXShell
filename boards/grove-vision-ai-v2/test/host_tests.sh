@@ -138,26 +138,10 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_npu_payload"
 "$out/test_npu_payload"
 
-# issues #97, #104 -- npu_tensor -> tensor_desc (port/nn/npu/npu_desc.c).
-#
-# This was test_nn_decoder.c and drove a decoder the firmware linked.  Issue #104
-# removed that decoder; the TRANSLATION stayed, because `nn out`, `nn info` and
-# the active-decoder shim all need it whatever interprets the tensors -- or
-# whether anything does.
-#
-# It is still a board test because the point is the REAL npu.h: a shimmed copy
-# could drift from the firmware's without anything noticing.  The cases are the
-# translation's own failure modes -- an unknown TfLiteType read as int8, the
-# rank-0 "not representable" marker treated as present, a field inherited from
-# the previous tensor -- none of which the core suite can see.
-#
-# NO svc/nn/blazeface.c HERE ANY MORE.  There is no decoder in this half, so
-# linking one would only prove it still compiles.
-gcc $CFLAGS \
-    -I "$here" -I "$board/port/nn" -I "$board/port/nn/npu" -I "$board/svc" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
-    "$here/test_npu_desc.c" "$board/port/nn/npu/npu_desc.c" \
-    $LDFLAGS -o "$out/test_npu_desc"
-"$out/test_npu_desc"
+# issues #97, #104 -- the tensor -> tensor_desc translation.  Since issue #169
+# this board uses the shared one (svc/nn/nn_desc.c, walked by
+# shell/test/test_nn_desc.c) over svc/nn/nn.h's tensors, so its own test and
+# its own npu_tensor are gone with port/nn/npu/npu_desc.c.
 
 # issues #103, #104 -- the active-decoder shim, and the plugin decoder against a
 # reference the test builds (port/nn/nn_active.c).
@@ -180,7 +164,7 @@ gcc $CFLAGS \
     -I "$here" -I "$board/port/nn" -I "$board/port/nn/npu" -I "$board/port/plugin" -I "$board/svc" \
     -I "$asset/plugins/blazeface" -I "$asset/common" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_plugin_decode.c" \
-    "$board/port/nn/nn_active.c" "$board/port/nn/npu/npu_desc.c" \
+    "$board/port/nn/nn_active.c" "$HOST_TEST_SVC/nn/nn_desc.c" \
     "$HOST_TEST_SVC/nn/nn_active_core.c" \
     "$board/port/nn/nn_preproc.c" \
     "$asset/plugins/blazeface/plugin_main.c" \

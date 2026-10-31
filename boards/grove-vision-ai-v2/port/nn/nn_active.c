@@ -9,7 +9,7 @@
  * The decision and every call into the plugin's decoder slots are
  * svc/nn/nn_active_core.c's, shared with wio-lite-ai (issue #126).  What is here
  * is this board's: the geometry and the transform, the conversion from
- * npu_tensor, and the three facts the shared file is handed below.
+ * nn_tensor, and the three facts the shared file is handed below.
  *
  * [!] AND EVERY ENTRY INTO THE PLUGIN REQUIRES THE PLUGIN LEASE (issue #127).
  * Each wrapper below that can reach a plugin callback -- and the two that
@@ -21,7 +21,7 @@
  */
 #include "nn_active.h"
 
-#include "npu_desc.h"
+#include "nn_desc.h"
 #include "nn_preproc.h"
 #include "nn_probe.h"
 #include "nn_active_core.h"
@@ -125,9 +125,9 @@ int nn_active_is_plugin(void)
 
 /* The tensors reach a plugin as svc/nn/tensor.h descriptors, which is the contract
  * issue #97 established so that one decoder can read any board's tensors.  The
- * conversion is npu_desc_of(), reused rather than repeated: a second translation
+ * conversion is nn_desc_of(), reused rather than repeated: a second translation
  * could disagree with `nn out` and `nn info` about what a tensor is. */
-static unsigned to_desc(const struct npu_tensor *outs, unsigned n,
+static unsigned to_desc(const struct nn_tensor *outs, unsigned n,
                         struct tensor_desc *d, unsigned cap)
 {
 	unsigned i;
@@ -135,7 +135,7 @@ static unsigned to_desc(const struct npu_tensor *outs, unsigned n,
 	if (n > cap)
 		n = cap;
 	for (i = 0u; i < n; i++)
-		npu_desc_of(&d[i], &outs[i]);
+		nn_desc_of(&d[i], &outs[i]);
 	return n;
 }
 
@@ -145,27 +145,27 @@ static unsigned to_desc(const struct npu_tensor *outs, unsigned n,
  * this firmware can pass null, which is exactly why an omission here would
  * have sat unnoticed.
  */
-int nn_active_shapes_ok(const struct npu_tensor *outs, unsigned n)
+int nn_active_shapes_ok(const struct nn_tensor *outs, unsigned n)
 {
-	struct tensor_desc d[NPU_DESC_MAX_OUTPUTS];
+	struct tensor_desc d[NN_MAX_IO];
 
 	if (outs == NULL)
 		return 0;
 	if (!nn_active_held())
 		return NN_ACTIVE_NOT_HELD;
-	n = to_desc(outs, n, d, NPU_DESC_MAX_OUTPUTS);
+	n = to_desc(outs, n, d, NN_MAX_IO);
 	return nn_active_core_shapes_ok(&nn_active_board, d, n);
 }
 
-int nn_active_decode(const struct npu_tensor *outs, unsigned n)
+int nn_active_decode(const struct nn_tensor *outs, unsigned n)
 {
-	struct tensor_desc d[NPU_DESC_MAX_OUTPUTS];
+	struct tensor_desc d[NN_MAX_IO];
 
 	if (outs == NULL)
 		return BF_ERR_ARG;   /* see nn_active_shapes_ok */
 	if (!nn_active_held())
 		return NN_ACTIVE_NOT_HELD;
-	n = to_desc(outs, n, d, NPU_DESC_MAX_OUTPUTS);
+	n = to_desc(outs, n, d, NN_MAX_IO);
 	return nn_active_core_decode(&nn_active_board, d, n);
 }
 

@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 /**
- * The protocol's state: the arena npu_open() handed over, and where the
+ * The protocol's state: the arena the backend's build handed over, and where the
  * handover stands.  `arena_cleaned` says the pre-launch clean ran;
  * `inference_armed` says the command stream was launched and the handover back
  * is still owed.  Zero is the boot state of every field (no arena, nothing
@@ -74,7 +74,7 @@ void npu_cache_fail_stop(const char *why) __attribute__((noreturn));
  *
  * The protocol maintains the WHOLE arena at two points and never a sub-range --
  * see npu_cache.c for why -- so it has to know where the arena is.  This is the
- * arena npu_open() was actually given, not the static reservation, and it is
+ * arena the interpreter was actually given, not the static reservation, and it is
  * cleared on close and on every failure unwind.
  */
 void npu_cache_set_arena(void *base, size_t bytes);

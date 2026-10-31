@@ -9,8 +9,8 @@
  * C++ ONLY -- it speaks flatbuffer types, which is exactly why it is separate
  * from npu.h.  Two translation units include it:
  *
- *   boards/grove-vision-ai-v2/port/nn/npu/npu_tflm.cc
- *       npu_open() refuses a model that fails this
+ *   svc/nn/ethosu/nn_ethosu.cc
+ *       the backend's reload() refuses a model that fails this
  *   boards/grove-vision-ai-v2/scripts/verify_vela_model.cc
  *       the host gate, before the model is flashed
  *

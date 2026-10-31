@@ -257,7 +257,9 @@ RESIDENCY = [
     # this many bytes from this symbol around every inference, so an arena
     # shorter than the gate believes would have the maintenance running off the
     # end of it.
-    ("nn_arena", 450 * 1024, ".nn_arena", "SRAM", SRAM),
+    # Named nn_ethosu_arena since issue #169: the shared Ethos-U backend declares
+    # it (svc/nn/ethosu/nn_ethosu_mem.h); the size here is stated independently.
+    ("nn_ethosu_arena", 450 * 1024, ".nn_arena", "SRAM", SRAM),
     # CoreMark MEM_STATIC working set: a plain .bss array, so there is no
     # dedicated section to pin it to -- only the region matters.
     ("static_memblk",   2 * 1000, None,          "DTCM", DTCM),

@@ -50,12 +50,12 @@
  * reason this seam exists -- the arithmetic it replaces has its own coverage in
  * the container tests.
  *
- * npu_tensor_is_int8() and log_write() are defined here for the same reason
- * test_npu_desc.c defines the first: on the board it lives in npu_tflm.cc, the
- * one translation unit that can see TfLiteType.
+ * log_write() is defined here, as the board's log is not linked.  The tensors
+ * are svc/nn/nn.h's, translated by the REAL svc/nn/nn_desc.c, as on the board
+ * since issue #169.
  */
 #include "nn_active.h"
-#include "npu_desc.h"
+#include "nn_desc.h"
 #include "nn_preproc.h"
 #include "nn_probe.h"
 #include "plugin_run.h"
@@ -67,13 +67,6 @@
 #include <string.h>
 
 /* ---- what the board supplies on hardware --------------------------------- */
-
-#define T_INT8   9
-
-bool npu_tensor_is_int8(int8_t type)
-{
-	return type == (int8_t)T_INT8;
-}
 
 void log_write(unsigned level, const char *tag, const char *fmt, ...)
 {
@@ -191,7 +184,7 @@ static void expect(const char *what, int cond, const char *fmt, ...)
 /* ---- the synthetic model -------------------------------------------------- */
 
 /*
- * The real model's quantisation, as in test_npu_desc.c and the core decoder
+ * The real model's quantisation, as in the core decoder
  * test.  The four tensors carry four DIFFERENT scales and zero points, which is
  * the property a shared dequantisation constant would break.
  */
@@ -213,19 +206,20 @@ static int8_t scr512[A512];
 static int8_t box384[A384 * STRIDE];
 static int8_t scr384[A384];
 
-static struct npu_tensor tens[NPU_DESC_MAX_OUTPUTS];
+static struct nn_tensor tens[NN_MAX_IO];
 
-static void set_tensor(struct npu_tensor *t, void *data, size_t bytes,
+static void set_tensor(struct nn_tensor *t, void *data, size_t bytes,
                        int32_t anchors, int32_t chan, float scale, int32_t zp)
 {
 	memset(t, 0, sizeof(*t));
 	t->data       = data;
-	t->bytes      = bytes;
-	t->rank       = 3;
+	t->bytes      = (uint32_t)bytes;
+	t->ndim       = 3;
 	t->dims[0]    = 1;
-	t->dims[1]    = anchors;
-	t->dims[2]    = chan;
-	t->type       = (int8_t)T_INT8;
+	t->dims[1]    = (uint16_t)anchors;
+	t->dims[2]    = (uint16_t)chan;
+	t->dims[3]    = 1;              /* nn.h: unused dims are 1 */
+	t->dtype      = (uint8_t)NN_DTYPE_INT8;
 	t->scale      = scale;
 	t->zero_point = zp;
 }
@@ -460,7 +454,7 @@ static int out_still_poisoned(void)
 static struct bf_cand   ref_scratch[BF_MAX_CAND];
 static struct blazeface ref_bf;
 
-static unsigned ref_to_desc(const struct npu_tensor *outs, unsigned n,
+static unsigned ref_to_desc(const struct nn_tensor *outs, unsigned n,
                             struct tensor_desc *d, unsigned cap)
 {
 	unsigned i;
@@ -468,25 +462,25 @@ static unsigned ref_to_desc(const struct npu_tensor *outs, unsigned n,
 	if (n > cap)
 		n = cap;
 	for (i = 0u; i < n; i++)
-		npu_desc_of(&d[i], &outs[i]);
+		nn_desc_of(&d[i], &outs[i]);
 	return n;
 }
 
-static int ref_shapes_ok(const struct npu_tensor *outs, unsigned n)
+static int ref_shapes_ok(const struct nn_tensor *outs, unsigned n)
 {
-	struct tensor_desc d[NPU_DESC_MAX_OUTPUTS];
+	struct tensor_desc d[NN_MAX_IO];
 	unsigned m;
 
 	if (outs == NULL)
 		return 0;
-	m = ref_to_desc(outs, n, d, NPU_DESC_MAX_OUTPUTS);
+	m = ref_to_desc(outs, n, d, NN_MAX_IO);
 	return blazeface_shapes_ok(d, m);
 }
 
-static int ref_run(const struct npu_tensor *outs, unsigned n,
+static int ref_run(const struct nn_tensor *outs, unsigned n,
                    struct bf_det *out, int max, struct bf_result *r)
 {
-	struct tensor_desc d[NPU_DESC_MAX_OUTPUTS];
+	struct tensor_desc d[NN_MAX_IO];
 	unsigned m;
 
 	if (outs == NULL) {
@@ -494,7 +488,7 @@ static int ref_run(const struct npu_tensor *outs, unsigned n,
 		r->status = BF_ERR_ARG;
 		return BF_ERR_ARG;
 	}
-	m = ref_to_desc(outs, n, d, NPU_DESC_MAX_OUTPUTS);
+	m = ref_to_desc(outs, n, d, NN_MAX_IO);
 	return blazeface_decode(&ref_bf, d, m, out, max, r);
 }
 
@@ -972,7 +966,7 @@ int main(void)
 		/* (a) an element type the board cannot vouch for */
 		reset_tensors();
 		put_the_scene();
-		tens[1].type = (int8_t)(T_INT8 + 1);
+		tens[1].dtype = (uint8_t)NN_DTYPE_UINT8;
 		pl_loaded = 0;
 		ref_n = ref_run(tens, 4, ref_det, BF_MAX_DET, &ref_res);
 		pl_loaded = 1;
@@ -989,7 +983,7 @@ int main(void)
 		/* (b) the rank-0 "not representable" marker */
 		reset_tensors();
 		put_the_scene();
-		tens[3].rank = 0;
+		tens[3].ndim = 0;
 		pl_loaded = 0;
 		ref_n = ref_run(tens, 4, ref_det, BF_MAX_DET, &ref_res);
 		pl_loaded = 1;
@@ -1038,10 +1032,10 @@ int main(void)
 	reset_tensors();
 	put_the_scene();
 	pl_loaded = 0;
-	ref_n = ref_run(tens, NPU_DESC_MAX_OUTPUTS + 4u, ref_det, BF_MAX_DET,
+	ref_n = ref_run(tens, NN_MAX_IO + 4u, ref_det, BF_MAX_DET,
 	                &ref_res);
 	pl_loaded = 1;
-	n = nn_active_decode(tens, NPU_DESC_MAX_OUTPUTS + 4u);
+	n = nn_active_decode(tens, NN_MAX_IO + 4u);
 	expect("an output count past the descriptor array is clamped, not walked",
 	       n == ref_n && n > 0, "plugin %d, reference %d", n, ref_n);
 

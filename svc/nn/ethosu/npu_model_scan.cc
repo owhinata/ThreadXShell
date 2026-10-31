@@ -6,7 +6,7 @@
  * @file    npu_model_scan.cc
  * @brief   Locate and vet an Ethos-U model's driver payload.  See the header.
  *
- * Split out of npu_tflm.cc in issue #45 so that the host gate and the firmware
+ * Split out of the board's interpreter glue in issue #45 so that the host gate and the firmware
  * share one answer to "which bytes does the driver parse" -- not just to "is
  * this byte sequence safe", which npu_payload.c already shared.
  *

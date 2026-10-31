@@ -17,6 +17,7 @@
 #include "camera.h"          /* CAMERA_BAND_ROWS, CAMERA_FRAME_WIDTH / _HEIGHT */
 #include "nn.h"
 #include "nn_core_frame.h"   /* the shared frame path (issue #130) */
+#include "nn_input_contract.h" /* the per-element conversion (issue #162) */
 
 #include "stm32h7xx_hal.h"   /* DWT */
 #include "tx_api.h"
@@ -36,6 +37,11 @@
  *
  * Layout is HWC (o = (oy*ow + ox) * oc), channel order RGB, matching a 1xHxWxC input.
  *
+ * [!] WHAT ONE 8-BIT CHANNEL BECOMES IS THE SHARED CONVERSION (issue #162,
+ * svc/nn/nn_input_contract.h), the same functions f746g-disco calls:
+ * nn_input_f32() for a float32 input, nn_input_i8() for an int8 one.  This file
+ * only samples the pixel and expands RGB565.
+ *
  * [!] For a quantized input the value is the NORMALIZED float put through the
  * tensor's OWN scale/zero_point, not the donor's hardcoded (rgb - 128).  This
  * board's struct nn_tensor carries the quantization params and the donor's did not,
@@ -44,9 +50,12 @@
  * on a quantized input.  The 1/scale reciprocal is computed once per band rather
  * than per channel: a vdiv.f32 is ~14 cycles and there are 3 per pixel.
  *
- * [!] scale > 0 IS GUARANTEED BY nn_camera_start(), which is why there is no fallback
- * here (owhinata/wio-lite-ai#51).  There used to be one -- the donor's (rgb - 128) when
- * the scale read back as zero -- and it was not dead code: a PER-AXIS quantized tensor
+ * [!] A USABLE SCALE IS GUARANTEED BY nn_camera_start(), which is why there is no
+ * fallback here (owhinata/wio-lite-ai#51): its admission test, nn_input_admit(),
+ * accepts an int8 input only with a positive NORMAL scale (so 1/scale is finite)
+ * and a zero point inside int8, and a float32 input only 4-byte aligned.  There
+ * used to be one -- the donor's (rgb - 128) when the scale read back as zero --
+ * and it was not dead code: a PER-AXIS quantized tensor
  * arrives with TfLiteTensor::params.scale == 0, because its real parameters live in the
  * affine-quantization struct that svc/nn/nn.h does not expose.  So the fallback's
  * only reachable case was the one where it silently fed the model wrong pixels, with
@@ -58,8 +67,7 @@ static void nncam_rows(const uint16_t *src, unsigned src_y0,
 {
 	const unsigned ow = nncam_ow, oh = nncam_oh, oc = nncam_oc;
 	const int is_f32 = (in->dtype == NN_DTYPE_FLOAT32);
-	const float bias = nncam_norm_signed ? -1.0f : 0.0f;
-	const float gain = nncam_norm_signed ? (1.0f / 127.5f) : (1.0f / 255.0f);
+	const int norm_signed = nncam_norm_signed;   /* read once per band */
 	const float inv_scale = is_f32 ? 0.0f : (1.0f / in->scale);
 	const int32_t zp = in->zero_point;
 	unsigned oy, ox, c;
@@ -84,27 +92,16 @@ static void nncam_rows(const uint16_t *src, unsigned src_y0,
 				float *o32 = (float *)in->data + o;
 
 				for (c = 0; c < oc && c < 3u; c++)
-					o32[c] = (float)rgb[c] * gain + bias;
+					o32[c] = nn_input_f32(rgb[c], norm_signed);
 			} else {
 				int8_t *o8 = (int8_t *)in->data + o;
 
-				for (c = 0; c < oc && c < 3u; c++) {
-					float f = ((float)rgb[c] * gain + bias) * inv_scale;
-					/* Round half away from zero without libm: this
-					   firmware links none, and lrintf() would pull it in
-					   for three multiply-adds per pixel.  This is the
-					   rounding TFLM's own QUANTIZE kernel does --
-					   reference_ops::AffineQuantize() -> TfLiteRound()
-					   -> std::round() -- so a model whose leading
-					   QUANTIZE was stripped gets the identical tensor. */
-					int q = (int)(f + (f >= 0.0f ? 0.5f : -0.5f)) + (int)zp;
-
-					if (q < -128)
-						q = -128;
-					else if (q > 127)
-						q = 127;
-					o8[c] = (int8_t)q;
-				}
+				/* Rounding: +-0.5 then toward zero, as this board always
+				   did.  Close to, not exactly, TFLM's QUANTIZE (std::round):
+				   see nn_input_q8() for the two places they differ. */
+				for (c = 0; c < oc && c < 3u; c++)
+					o8[c] = nn_input_i8(rgb[c], norm_signed,
+					                    inv_scale, zp);
 			}
 		}
 	}

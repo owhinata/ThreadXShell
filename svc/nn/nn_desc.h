@@ -9,9 +9,9 @@
  *
  * `struct nn_tensor` is the nn inference API's tensor (svc/nn/nn.h); `struct
  * tensor_desc` (svc/nn/tensor.h) is the neutral descriptor everything above the
- * port reads.  This file is the translation, and it is the only place on
- * wio-lite-ai and f746g-disco that knows both types.  grove-vision-ai-v2 has
- * its own (port/nn/npu/npu_desc.c), from its own tensor type.
+ * port reads.  This file is the translation, and it is the only place that
+ * knows both types -- on grove-vision-ai-v2 too since issue #169, when its
+ * own tensor type and translation (port/nn/npu/npu_desc.c) went.
  *
  * [!] IT IS THE HALF OF nn_decoder.c THAT OUTLIVED THE RESIDENT DECODER.  `nn
  * out`, `nn info`, the active-decoder shim and the raw publish all need this

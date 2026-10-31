@@ -76,7 +76,7 @@
  * The one path this protocol cannot cover from here is a payload whose driver
  * actions continue AFTER the command stream is launched: ethosu_invoke_async()
  * would then be able to fail and return without ever reaching
- * ethosu_inference_end().  That is closed at the other end, in npu_tflm.cc,
+ * ethosu_inference_end().  That is closed at the other end, in nn_ethosu.cc,
  * which refuses to open a model whose payload is not exactly one final
  * COMMAND_STREAM (npu_payload.c, next to this file).  npu_cache_after_invoke()
  * is the backstop if it ever is.
@@ -111,7 +111,7 @@ void npu_cache_after_invoke(void)
 	/* Armed here means the command stream was launched and
 	 * ethosu_inference_end() never ran, so nothing has established that the
 	 * NPU stopped writing -- and TFLM has ALREADY written the arena on its way
-	 * out of Invoke().  npu_tflm.cc's payload check exists to make this
+	 * out of Invoke().  nn_ethosu.cc's payload check exists to make this
 	 * unreachable; if it is reached, the check is wrong. */
 	if (npu_cache_board_state.inference_armed)
 		npu_cache_fail_stop("inference launched but never handed the arena back");
@@ -168,7 +168,7 @@ void ethosu_inference_begin(struct ethosu_driver *drv, void *user_arg)
 	 * -- cleaning, arming and launching each time -- but calls ethosu_wait()
 	 * only once, after the whole walk.  So two streams in one payload would
 	 * arm twice and disarm once, and the boolean backstop in
-	 * npu_cache_after_invoke() would see 0 and pass.  npu_tflm.cc refuses such
+	 * npu_cache_after_invoke() would see 0 and pass.  nn_ethosu.cc refuses such
 	 * a payload at open, and this is the second lock on the same door: a
 	 * counter would silently tolerate the case, so it is fatal instead. */
 	if (npu_cache_board_state.inference_armed)

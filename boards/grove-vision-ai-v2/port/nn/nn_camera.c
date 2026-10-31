@@ -156,6 +156,18 @@ const struct cam_holder nn_cam_holder = { "nn" };
  * still does not.  What it reports is its own ending, below.
  */
 uint8_t nn_ov_oneshot;
+
+/* The model handle (nn_camera_priv.h).  Set by the arms. */
+struct nn_model *nn_ov_model;
+
+/* The singleton is the same object for the life of the firmware once it is open,
+ * and a load opened it before any stream or `nn run` can be admitted; asked again
+ * at each arm rather than remembered from somewhere else. */
+static void nn_ov_model_take(void)
+{
+	if (nn_model_open(&nn_ov_model) != 0)
+		nn_ov_model = NULL;
+}
 /* How the one-shot's frame ended, NN_OV_SHOT_* (nn_camera.h); NONE while it
  * has not.  Written once, by the producer (a frame it could not prepare) or by
  * the worker (after its publish, before it parks) -- never both, since the
@@ -255,6 +267,7 @@ const struct cam_lcd_overlay *nn_camera_arm(void)
 	 * reset is deliberately NOT done on stop, so
 	 * `nn stream stats` after a stop still describes the run that just ended.
 	 */
+	nn_ov_model_take();
 	TX_DISABLE
 	nn_ov_draw_spent   = 0u;
 	nn_ov_draw_refused = 0u;
@@ -308,6 +321,7 @@ const struct cam_lcd_overlay *nn_camera_arm_oneshot(void)
 	 * Nothing writes these now: the worker is parked (the caller armed it
 	 * IDLE -> WANT and the overlay is not on yet to hand it a frame).
 	 */
+	nn_ov_model_take();
 	TX_DISABLE
 	nn_ov_oneshot   = 1u;
 	nn_ov_shot      = NN_OV_SHOT_NONE;

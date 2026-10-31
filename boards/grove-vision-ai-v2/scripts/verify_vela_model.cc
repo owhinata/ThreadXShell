@@ -16,7 +16,7 @@
  * THIS firmware can run the result, and the gap is where every interesting
  * failure lives:
  *
- *   - npu_open() refuses a payload whose driver actions continue past the
+ *   - the firmware refuses a payload whose driver actions continue past the
  *     command stream (issue #46), because the driver can abandon a launch with
  *     the arena still owned by the NPU.  So this tool runs THE FIRMWARE'S OWN
  *     walk -- svc/nn/ethosu/npu_payload.c is compiled in, not reimplemented -- over
@@ -51,14 +51,23 @@
 /* And the firmware's own bounded flatbuffer check (issue #93).  This tool used
  * to construct a flatbuffers::Verifier with the DEFAULT limits, which are the
  * ones the board cannot afford -- so a model could pass here and be refused by
- * npu_open() with NPU_ERR_MODEL_FORMAT, on the serial line, after the erase.
+ * the firmware's backend with NN_MODEL_ERR_FORMAT, on the serial line, after
+ * the erase.
  * A host gate that accepts what the device rejects has moved the failure rather
  * than caught it. */
 #include "npu_verify.h"
 
-extern "C" {
-#include "npu.h"           /* npu_arena_base() / npu_arena_bytes() */
-}
+#include "npu_arena.h"     /* npu_arena_base() / npu_arena_bytes() */
+
+/* The op list the firmware's backend registers (svc/nn/tflm/nn_tflm_ops.h, its
+ * ethosu profile -- issue #169).  The resolver below is built from it, so the two
+ * cannot register different operators. */
+#include "nn_tflm_ops.h"
+
+/* And the I/O rule the backend applies once the tensors are planned
+ * (svc/nn/ethosu/nn_ethosu_io.h, issue #169): the counts and the tensors the
+ * firmware refuses with NN_MODEL_ERR_SHAPE / NN_MODEL_ERR_TENSOR. */
+#include "nn_ethosu_io.h"
 
 #include <cstdarg>
 #include <cstdint>
@@ -278,6 +287,54 @@ int ethosu_invoke_v3(struct ethosu_driver *drv, const void *cms, size_t cms_byte
 
 }  /* extern "C" */
 
+/*
+ * The backend's I/O rule, on the interpreter planned against the board's arena:
+ * the same functions the firmware calls after AllocateTensors() (nn_ethosu_io.h),
+ * so a model this passes is not refused on the board as NN_MODEL_ERR_SHAPE or
+ * NN_MODEL_ERR_TENSOR after the erase and the transfer.
+ *
+ * [!] PLUS ONE CHECK THE FIRMWARE DOES NOT MAKE YET: a dimension above 65535.
+ * nn_tensor's dims are 16-bit (svc/nn/nn.h) and the descriptor copy truncates a
+ * larger one silently on every board.  Refusing it on the board as well is a
+ * known follow-up (it needs ITCM room on grove-vision-ai-v2); here it costs
+ * nothing, so the host refuses it now.
+ */
+static void check_planned_io(tflite::MicroInterpreter &interp)
+{
+	const size_t n_in  = interp.inputs_size();
+	const size_t n_out = interp.outputs_size();
+	const int before   = g_fail;
+
+	if (!nn_ethosu_io_count_ok(n_in) || !nn_ethosu_io_count_ok(n_out)) {
+		fail("%zu inputs and %zu outputs; the firmware takes 1..%d of each "
+		     "(NN_MODEL_ERR_SHAPE on the board)\n", n_in, n_out, NN_MAX_IO);
+		return;
+	}
+	for (size_t i = 0; i < n_in + n_out; i++) {
+		const bool is_in = i < n_in;
+		const size_t k   = is_in ? i : i - n_in;
+		const TfLiteTensor *t = is_in ? interp.input(k) : interp.output(k);
+
+		if (!nn_ethosu_tensor_ok(t)) {
+			fail("%s %zu has no buffer or a rank above %d "
+			     "(NN_MODEL_ERR_TENSOR on the board)\n",
+			     is_in ? "input" : "output", k, NN_MAX_DIMS);
+			continue;
+		}
+		for (int d = 0; d < t->dims->size; d++) {
+			if (t->dims->data[d] < 0 || t->dims->data[d] > 65535) {
+				fail("%s %zu dimension %d is %d; a tensor descriptor holds "
+				     "16 bits, so the board would report it truncated\n",
+				     is_in ? "input" : "output", k, d, t->dims->data[d]);
+				break;
+			}
+		}
+	}
+	if (g_fail == before)
+		printf("  ok     %zu input(s), %zu output(s), every one describable "
+		       "(the firmware's I/O rule)\n", n_in, n_out);
+}
+
 int main(int argc, char **argv)
 {
 	const char *path = nullptr;
@@ -295,7 +352,7 @@ int main(int argc, char **argv)
 		fprintf(stderr,
 		        "usage: verify_vela_model <model_vela.tflite> [--blazeface]\n"
 		        "  Checks that this firmware can run the model: one subgraph,\n"
-		        "  ethos-u operators only, a payload npu_open() will accept, int8\n"
+		        "  ethos-u operators only, a payload the firmware will accept, int8\n"
 		        "  I/O, an offline memory plan, and a layout that fits the arena\n"
 		        "  the board reserves.  --blazeface also pins the four output\n"
 		        "  shapes the decoder looks for -- it ADDS checks rather than\n"
@@ -345,7 +402,7 @@ int main(int argc, char **argv)
 	const auto *subgraphs = model->subgraphs();
 
 	if (subgraphs == nullptr || subgraphs->size() != 1u) {
-		printf("  FAIL   %u subgraphs; npu_open() accepts exactly one\n",
+		printf("  FAIL   %u subgraphs; the firmware accepts exactly one\n",
 		       subgraphs != nullptr ? subgraphs->size() : 0u);
 		printf("RESULT   : REJECT\n");
 		return 1;
@@ -405,11 +462,11 @@ int main(int argc, char **argv)
 		printf("  ok     every operator is the ethos-u custom operator (%u)\n",
 		       ethosu_ops);
 
-	/* --- the payload npu_open() will walk -------------------------------- */
+	/* --- the payload the firmware will walk ------------------------------ */
 
 	/*
 	 * [!] THE VERDICT IS THE FIRMWARE'S, NOT A COPY OF IT.
-	 * npu_model_payload_refusal() is the function npu_open() calls, compiled
+	 * npu_model_payload_refusal() is the function the firmware's backend calls, compiled
 	 * into this tool.  It reaches the same answer on the same bytes by
 	 * construction, which a reimplementation here could not promise -- and the
 	 * half that is easy to get wrong is not the walk but WHICH BYTES, since
@@ -419,10 +476,10 @@ int main(int argc, char **argv)
 		const char *refusal = npu_model_payload_refusal(model);
 
 		if (refusal != nullptr)
-			fail("npu_open() would refuse this model (NPU_ERR_PAYLOAD): %s\n",
+			fail("the firmware would refuse this model (NN_MODEL_ERR_PAYLOAD): %s\n",
 			     refusal);
 		else
-			printf("  ok     npu_open()'s payload scan accepts every operator\n");
+			printf("  ok     the firmware's payload scan accepts every operator\n");
 	}
 
 	/* Reporting only, and it uses the same locator, so what is printed is what
@@ -683,10 +740,16 @@ int main(int argc, char **argv)
 	 * by a constant repeated here and left to drift.
 	 */
 	{
-		tflite::MicroMutableOpResolver<1> resolver;
+		tflite::MicroMutableOpResolver<NN_TFLM_OPS_TOTAL> resolver;
+		bool ok = true;
 
-		if (resolver.AddEthosU() != kTfLiteOk) {
-			fail("AddEthosU() failed on the host\n");
+#define NN_TFLM_REGISTER(enum_suffix, method) \
+		ok = ok && (resolver.method() == kTfLiteOk);
+		NN_TFLM_OPS_ALL(NN_TFLM_REGISTER)
+#undef NN_TFLM_REGISTER
+
+		if (!ok) {
+			fail("the op resolver could not be built on the host\n");
 		} else {
 			tflite::MicroInterpreter interp(
 				model, resolver,
@@ -695,12 +758,13 @@ int main(int argc, char **argv)
 			if (interp.AllocateTensors() != kTfLiteOk) {
 				fail("AllocateTensors() failed against the board's %zu B "
 				     "arena.  This is the failure that would otherwise show "
-				     "up on hardware as NPU_ERR_ARENA.\n", npu_arena_bytes());
+				     "up on hardware as NN_MODEL_ERR_ARENA.\n", npu_arena_bytes());
 			} else {
 				printf("  ok     AllocateTensors: %zu of %zu B arena used "
 				       "(%zu B spare)\n",
 				       interp.arena_used_bytes(), npu_arena_bytes(),
 				       npu_arena_bytes() - interp.arena_used_bytes());
+				check_planned_io(interp);
 			}
 		}
 	}

@@ -8,7 +8,7 @@
  *
  * Plain C over plain bytes: no TFLite type reaches this, which is what lets the
  * host test compile the real implementation rather than a copy of it.  Finding
- * the payload inside the model is npu_tflm.cc's job; deciding whether it is
+ * the payload inside the model is npu_model_scan.cc's job; deciding whether it is
  * safe to launch is this one's.
  */
 #ifndef NPU_PAYLOAD_H

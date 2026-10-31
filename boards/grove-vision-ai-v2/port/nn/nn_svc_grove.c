@@ -46,7 +46,9 @@
 #include "plugin_target.h"   /* the target word this build provides (#108) */
 #include "cam_lcd_sink.h"     /* nn holds the panel's stream (#142) */
 #include "camera.h"
-#include "npu_desc.h"
+#include "nn.h"           /* the model API, svc/nn/nn.c (#169) */
+#include "nn_desc.h"
+#include "nn_ethosu.h"    /* the backend's words and length bounds */
 #include "nn_active.h"
 #include "nn_camera.h"
 #include "nn_param_calls.h"
@@ -60,7 +62,6 @@
 #include "nn_stream_state.h"
 #include "nn_core_model.h"
 #include "nor_flash.h"    /* NOR_XIP_BASE */
-#include "npu.h"
 #include "npu_hw.h"
 #include "tx_api.h"       /* tx_time_get() -- ThreadX ticks, 1 ms here */
 
@@ -74,9 +75,6 @@
 static uint8_t  nn_busy;            /**< the transient claim                  */
 static uint8_t  nn_owner;           /**< enum nn_owner -- WHO holds it        */
 static uint8_t  nn_open_done;       /**< a model is active                    */
-static uint32_t nn_model_addr;
-static uint32_t nn_model_len;
-static char     nn_model_from[BLOB_NAME_MAX + 1];  /**< label, never a key    */
 
 /* [!] A legal name must survive both copies it takes through the shared
  * command: the parser's (`--name`) and `nn info`'s (issue #122 P10). */
@@ -123,6 +121,18 @@ static int nn_claim_as(uint8_t who)
 	 * under it. */
 	TX_DISABLE
 	got = nn_gate_claim(&nn_busy, &nn_owner, nn_param_calls, who);
+	/* [!] AND svc/nn/nn.c'S SESSION WITH IT, IN THE SAME CRITICAL SECTION (issue
+	 * #169).  nn.h asks a caller to hold the session across a model swap; on
+	 * this board the gate is what every path holds, so the two are taken and
+	 * given together and the session can never be held without the gate.  Only
+	 * these gate sites touch it, so it is free whenever the gate was; a refusal
+	 * anyway is an invariant failure and is answered as busy, with the gate
+	 * given back. */
+	if (got && nn_session_try_acquire() != 0) {
+		nn_owner = (uint8_t)NN_OWNER_NONE;
+		nn_busy  = 0u;
+		got = 0;
+	}
 	TX_RESTORE
 	return got;
 }
@@ -171,9 +181,24 @@ static void nn_release(void)
 	TX_INTERRUPT_SAVE_AREA
 
 	TX_DISABLE
+	nn_session_release();    /* taken with the gate: nn_claim_as() */
 	nn_owner = (uint8_t)NN_OWNER_NONE;
 	nn_busy  = 0u;
 	TX_RESTORE
+}
+
+/*
+ * svc/nn/nn.c's model singleton (issue #169).  The first call opens it with no
+ * model in it; every later one is the same object.  Console paths ask for it
+ * where they need it; the producer and the worker take it at arm
+ * (nn_ov_model, nn_camera_priv.h).  NULL only if the backend could not open,
+ * and every nn.h accessor answers a NULL handle as "no model".
+ */
+static struct nn_model *nn_mh(void)
+{
+	struct nn_model *m;
+
+	return (nn_model_open(&m) == 0) ? m : NULL;
 }
 
 /* ---- the stream lifecycle (issues #99, #130) -----------------------------
@@ -254,6 +279,13 @@ static void nn_core_gate_take(int oneshot)
 {
 	nn_busy  = 1u;
 	nn_owner = (uint8_t)(oneshot ? NN_OWNER_OP : NN_OWNER_STREAM);
+	/* The session with the gate, as in nn_claim_as().  The core calls this only
+	 * after nn_core_gate_held() said free, in this same critical section, and
+	 * only the gate sites touch the session, so it cannot be held here.  Its
+	 * one other refusal, NN_ERR_SCRATCH_HELD, needs nn_scratch_claim(), which
+	 * nothing on this board calls (f746g-disco's `sdram test` is its only
+	 * user).  Both are why the result is not consulted. */
+	(void)nn_session_try_acquire();
 }
 
 /* [!] Called only when the transition happened: clearing the claim regardless
@@ -261,6 +293,7 @@ static void nn_core_gate_take(int oneshot)
  * catch -- and something may still be inside it. */
 static void nn_core_gate_give(void)
 {
+	nn_session_release();
 	nn_owner = (uint8_t)NN_OWNER_NONE;
 	nn_busy  = 0u;
 }
@@ -288,11 +321,17 @@ void nn_svc_info(struct nn_svc_info *out)
 {
 	uint8_t owner_snap, open_snap;
 	char    from_snap[BLOB_NAME_MAX + 1];
+	/* The model's display name is the backend's one copy (svc/nn/nn.h's
+	 * nn_model_name(): the blob name, or "(raw)" for --addr; issue #169).
+	 * Taken before any critical section: the first call may open the
+	 * singleton. */
+	struct nn_model *m = nn_mh();
+	const char *name = nn_model_name(m);
 	TX_INTERRUPT_SAVE_AREA
 
 	memset(out, 0, sizeof *out);
 	nn_svc_str(out->backend, sizeof out->backend, "ethos-u55 (tflm, secure)");
-	out->arena_bytes = (uint32_t)npu_arena_bytes();
+	out->arena_bytes = nn_arena_reserved();
 
 	/*
 	 * THE COMMON CASE IS UNCHANGED: when nothing holds the gate, take it and
@@ -301,10 +340,9 @@ void nn_svc_info(struct nn_svc_info *out)
 	 */
 	if (nn_try_acquire()) {
 		out->model_active = nn_open_done;
-		out->arena_used   = nn_open_done ? (uint32_t)npu_arena_used() : 0u;
+		out->arena_used   = nn_open_done ? nn_activations_bytes(m) : 0u;
 		if (nn_open_done) {
-			nn_svc_str(out->model, sizeof out->model,
-			           (nn_model_from[0] != '\0') ? nn_model_from : "(raw)");
+			nn_svc_str(out->model, sizeof out->model, name);
 			nn_svc_str(out->source, sizeof out->source,
 			           npu_hw_ready() ? "npu up (secure, privileged)"
 			                          : "npu down");
@@ -338,7 +376,7 @@ void nn_svc_info(struct nn_svc_info *out)
 	TX_DISABLE
 	owner_snap = nn_owner;
 	open_snap  = nn_open_done;
-	memcpy(from_snap, nn_model_from, sizeof from_snap);
+	nn_svc_str(from_snap, sizeof from_snap, name);
 	TX_RESTORE
 
 	if (owner_snap != (uint8_t)NN_OWNER_STREAM) {
@@ -356,8 +394,7 @@ void nn_svc_info(struct nn_svc_info *out)
 	out->model_active   = open_snap;
 	out->avail_identity = (uint8_t)NN_AVAIL_OK;
 	if (open_snap)
-		nn_svc_str(out->model, sizeof out->model,
-		           (from_snap[0] != '\0') ? from_snap : "(raw)");
+		nn_svc_str(out->model, sizeof out->model, from_snap);
 	nn_svc_str(out->source, sizeof out->source, "streaming (`nn stream stats`)");
 	/*
 	 * The rest needs the gate the stream is holding -- and would be misleading
@@ -556,18 +593,18 @@ static struct plugin_view nn_container_next;
 
 /** What a resolution found.  Nothing in here is the adapter's until committed. */
 struct nn_resolved {
-	uint32_t addr, len;   /**< the MODEL: what npu_open() is given           */
+	uint32_t addr, len;   /**< the MODEL: what nn_model_reload() is given    */
 	uint32_t src;         /**< the container's first byte, or 0 for a bare
 	                       *   model -- where the plugin image is read from  */
 	int      slot;        /**< -1 for the raw form                           */
 };
 
 /*
- * A blob name -> the address and length npu_open() will be given.
+ * A blob name -> the address and length nn_model_reload() will be given.
  *
  * [!] THE ORDER IS THE POINT (issue #93): the caller already holds the NPU lease
  * -> scan every slot -> resolve the name -> CHECK THE PAYLOAD'S CRC -> take the
- * length from the header that check ran against -> hand it to npu_open(), with
+ * length from the header that check ran against -> hand it to the backend, with
  * the lease never dropped in between.  BLOB_VALID is a statement about the
  * HEADER only; and blob_stat()'s lease is taken and returned per slot, so
  * resolving through it would leave a gap in which a background `blob write`
@@ -653,7 +690,7 @@ nn_resolve_blob(struct nn_op_result *res, uint32_t token, const char *name,
 			              plugin_result_name(pr));
 			return -1;
 		}
-		/* The MODEL section, not the container: npu_open() parses a
+		/* The MODEL section, not the container: the backend parses a
 		 * flatbuffer and the rest of the payload is not one. */
 		out->src  = NOR_XIP_BASE + payload;
 		out->addr = out->src + nn_container_next.model_off;
@@ -699,56 +736,67 @@ static int nn_life_has_model(void)
 
 static uint32_t nn_life_reserved(void)
 {
-	return (uint32_t)npu_arena_bytes();
+	return nn_arena_reserved();
 }
 
 static uint32_t nn_life_used(void)
 {
-	return nn_open_done ? (uint32_t)npu_arena_used() : 0u;
-}
-
-static const char *nn_life_strerror(int rc)
-{
-	return npu_status_name(rc);
+	return nn_open_done ? nn_activations_bytes(nn_mh()) : 0u;
 }
 
 /*
- * One interpreter: the old one goes before the new one can be built.  Nothing
- * can reach it meanwhile -- every path in holds the gate.
+ * The backend's own transaction (svc/nn/ethosu/nn_ethosu.cc, issue #169):
+ * nn_model_reload() validates the new model in place, replaces the interpreter
+ * only once the bytes have passed every check that needs no interpreter, and on
+ * a refusal rebuilds the previous model or leaves the backend empty.  Nothing can
+ * reach the model meanwhile -- every path in holds the gate, and with it the
+ * session nn.h asks for.
  *
- * [!] THE PREVIOUS MODEL IS REOPENED FROM THE SAME BYTES, UNDER THE SAME LEASE.
- * The NPU and its flash lease stay up across the whole replacement, so no
- * `blob write` can have moved the slot it was opened from.  If even that
- * reopen fails, nothing is open, and the table takes everything down: an NPU
- * that is up with no model is a state nothing uses, and it would hold the
- * lease against `blob write`.
+ * [!] THE PREVIOUS MODEL IS REBUILT FROM THE SAME BYTES, UNDER THE SAME LEASE.
+ * The NPU and its flash lease stay up across the whole replacement (prepare()
+ * took the lease, and only hw_down() returns it), so no `blob write` can have
+ * moved the slot it was opened from, and the bytes TFLM keeps pointers into stay
+ * where they are for as long as any model is loaded.  If even the rebuild fails,
+ * nothing is loaded, and the table takes everything down: an NPU that is up with
+ * no model is a state nothing uses, and it would hold the lease against `blob
+ * write`.
+ *
+ * *model_after is the reload's own outcome, never a readback.
  */
 static int nn_life_swap(struct nn_core_model_job *j, int *model_after)
 {
 	struct nn_op_result *res = j->res;
-	const struct nn_resolved *r = &((struct nn_grove_job *)j->board)->r;
+	const struct nn_grove_job *g = j->board;
+	const struct nn_resolved *r = &g->r;
+	int after = 0;
 	int rc;
 
-	if (j->had_open)
-		npu_close();
-	rc = npu_open(r->addr, r->len, npu_arena_base(), npu_arena_bytes());
-	if (rc == NPU_OK) {
+	/* Open the singleton first (the first load does); if it could not be,
+	 * nn_model_reload() refuses with NN_ERR_STATE itself and changes nothing. */
+	(void)nn_mh();
+	rc = nn_model_reload((const void *)(uintptr_t)r->addr, r->len,
+	                     (g->name != NULL) ? g->name : "(raw)", &after);
+	if (rc == 0) {
 		*model_after = 1;
 		return NN_SVC_OK;
 	}
-	nn_detail_set("%s (0x%08lx, %lu B)", npu_status_name(rc),
+	nn_detail_set("%s (0x%08lx, %lu B)", nn_ethosu_strerror(rc),
 	              (unsigned long)r->addr, (unsigned long)r->len);
-	*model_after = j->had_open &&
-	               npu_open(nn_model_addr, nn_model_len, npu_arena_base(),
-	                        npu_arena_bytes()) == NPU_OK;
+	*model_after = after;
 	return NN_SVC_ERR_HW;
+}
+
+/* Unload the model; the backend stays open with none (svc/nn/nn.h). */
+static void nn_life_release(void)
+{
+	(void)nn_model_release();
 }
 
 static const struct nn_core_model_backend nn_life_backend = {
 	.swap      = nn_life_swap,
-	.release   = npu_close,
+	.release   = nn_life_release,
 	.has_model = nn_life_has_model,
-	.strerror  = nn_life_strerror,
+	.strerror  = nn_ethosu_strerror,
 	.reserved  = nn_life_reserved,
 	.used      = nn_life_used,
 };
@@ -785,20 +833,12 @@ static int nn_life_check_spec(struct nn_core_model_job *j)
 		g->name = spec->name;
 		return NN_SVC_OK;
 	}
+	/* [!] THE RANGE AND THE LENGTH ARE THE BACKEND'S TO REFUSE (issue #169): its
+	 * window -> length checks are the one statement of them, and a second copy
+	 * here could only disagree.  The refusal reaches the operator as the
+	 * backend's code with the address and length beside it (nn_life_swap()). */
 	g->r.addr = spec->addr;
 	g->r.len  = spec->len;
-	/* Refused in this board's own words rather than as a bare error from three
-	 * layers down, because here the operator can see WHICH of the two numbers
-	 * is wrong. */
-	if (g->r.len < npu_model_len_min() ||
-	    g->r.len > npu_model_len_max(g->r.addr)) {
-		nn_detail_set("length %lu is not between %lu and %lu for 0x%08lx",
-		              (unsigned long)g->r.len,
-		              (unsigned long)npu_model_len_min(),
-		              (unsigned long)npu_model_len_max(g->r.addr),
-		              (unsigned long)g->r.addr);
-		return NN_SVC_ERR_ARG;
-	}
 	return NN_SVC_OK;
 }
 
@@ -911,10 +951,7 @@ static void nn_life_forget(void)
 {
 	nn_open_done     = 0u;
 	nn_has_container = 0;
-	nn_model_addr    = 0u;
-	nn_model_len     = 0u;
 	nn_model_slot    = -1;
-	nn_model_from[0] = '\0';
 }
 
 /* [!] COMMITTED EVEN WHEN THE PLUGIN WAS REFUSED (issue #122 D6): the new model
@@ -926,18 +963,12 @@ static void nn_life_commit(struct nn_core_model_job *j)
 	const struct nn_grove_job *g = j->board;
 
 	nn_open_done     = 1u;
-	nn_model_addr    = g->r.addr;
-	nn_model_len     = g->r.len;
 	nn_model_slot    = g->r.slot;
 	nn_has_container = (g->r.src != 0u);
 	if (nn_has_container)
 		nn_container = nn_container_next;
-	if (g->name != NULL) {
-		(void)strncpy(nn_model_from, g->name, sizeof nn_model_from - 1u);
-		nn_model_from[sizeof nn_model_from - 1u] = '\0';
-	} else {
-		nn_model_from[0] = '\0';
-	}
+	/* The name is not copied here: the backend took it with the model
+	 * (nn_life_swap()), and nn_model_name() is its one copy. */
 }
 
 /* A capture's geometry belongs to the model it was taken for.  The plugin's
@@ -1033,31 +1064,29 @@ int nn_svc_output_count(void)
 {
 	if (!nn_open_done)
 		return NN_SVC_ERR_STATE;
-	return (int)npu_output_count();
+	return nn_output_count(nn_mh());
+}
+
+/* One descriptor for `nn out` / `nn info`: the backend's tensor, translated.
+ * With no model nn.h's accessors answer NULL, but the state is said first. */
+static int nn_svc_desc(const struct nn_tensor *t, struct tensor_desc *out)
+{
+	if (!nn_open_done)
+		return NN_SVC_ERR_STATE;
+	if (t == NULL)
+		return NN_SVC_ERR_ARG;
+	nn_desc_of(out, t);
+	return NN_SVC_OK;
 }
 
 int nn_svc_output(unsigned index, struct tensor_desc *out)
 {
-	struct npu_tensor t;
-
-	if (!nn_open_done)
-		return NN_SVC_ERR_STATE;
-	if (npu_output(index, &t) != NPU_OK)
-		return NN_SVC_ERR_ARG;
-	npu_desc_of(out, &t);
-	return NN_SVC_OK;
+	return nn_svc_desc(nn_output(nn_mh(), (int)index), out);
 }
 
 int nn_svc_input(struct tensor_desc *out)
 {
-	struct npu_tensor t;
-
-	if (!nn_open_done)
-		return NN_SVC_ERR_STATE;
-	if (npu_input(&t) != NPU_OK)
-		return NN_SVC_ERR_ARG;
-	npu_desc_of(out, &t);
-	return NN_SVC_OK;
+	return nn_svc_desc(nn_input(nn_mh(), 0), out);
 }
 
 /* ---- one shot ------------------------------------------------------------ */
@@ -1079,13 +1108,15 @@ int nn_svc_input(struct tensor_desc *out)
  * all and is true whoever reads the result -- or whether anyone does.
  */
 static int nn_input_fillable(struct nn_op_result *res,
-                             const struct npu_tensor *in)
+                             const struct nn_tensor *in)
 {
 	(void)res;
-	if (!npu_tensor_is_int8(in->type)) {
+	if (in->dtype != (uint8_t)NN_DTYPE_INT8) {
+		/* The type itself is in `nn info`'s input line (the shared command's
+		 * names); this file keeps no second table of them (issue #169). */
 		nn_detail_set("this board fills the input a byte at a time, so it "
-		              "needs an int8 input; this model has %s",
-		              npu_type_name(in->type));
+		              "needs an int8 input; this model's is another type "
+		              "(`nn info` shows it)");
 		return -1;
 	}
 	return 0;
@@ -1100,14 +1131,14 @@ static int nn_input_fillable(struct nn_op_result *res,
  * nn_svc_box_to_frame().
  */
 static int nn_run_input_ok(struct nn_op_result *res,
-                           const struct npu_tensor *in)
+                           const struct nn_tensor *in)
 {
 	uint32_t w, h;
 
 	if (nn_input_fillable(res, in) != 0)
 		return -1;
-	if (in->rank != 4 || in->dims[3] != 3) {
-		nn_detail_set("model input is not HxWx3 (rank %u)", in->rank);
+	if (in->ndim != 4 || in->dims[3] != 3) {
+		nn_detail_set("model input is not HxWx3 (rank %u)", in->ndim);
 		return -1;
 	}
 	h = (uint32_t)in->dims[1];
@@ -1351,7 +1382,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
                      nn_svc_cancel_fn cancel, void *ctx,
                      struct nn_op_result *res)
 {
-	struct npu_tensor in;
+	const struct nn_tensor *in;
 	struct nn_stream_verdict v;
 	struct nn_det_snapshot probe;
 	enum nn_stream_start_claim why = NN_STREAM_START_BUSY;
@@ -1414,13 +1445,14 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		nn_oneshot_finish(gen, res);
 		return;
 	}
-	if (npu_input(&in) != NPU_OK) {
+	in = nn_input(nn_mh(), 0);
+	if (in == NULL) {
 		nn_detail_set("the model has no input tensor");
 		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
 		nn_oneshot_finish(gen, res);
 		return;
 	}
-	if (nn_run_input_ok(res, &in) != 0) {
+	if (nn_run_input_ok(res, in) != 0) {
 		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
 		nn_oneshot_finish(gen, res);
 		return;
@@ -1641,7 +1673,7 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
 
 void nn_svc_bench_prepare(struct nn_op_result *res)
 {
-	struct npu_tensor in;
+	const struct nn_tensor *in = NULL;
 
 	nn_detail_clear();
 
@@ -1649,7 +1681,9 @@ void nn_svc_bench_prepare(struct nn_op_result *res)
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
 		return;
 	}
-	if (!nn_open_done || npu_input(&in) != NPU_OK) {
+	if (nn_open_done)
+		in = nn_input(nn_mh(), 0);
+	if (in == NULL) {
 		nn_detail_set("no model is loaded");
 		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
 		nn_release();
@@ -1657,8 +1691,8 @@ void nn_svc_bench_prepare(struct nn_op_result *res)
 	}
 	/* A fixed pattern so every run measures the same work.  The value does not
 	   matter; that there IS one does. */
-	if (in.data != NULL)
-		memset(in.data, 0x5A, in.bytes);
+	if (in->data != NULL)
+		memset(in->data, 0x5A, in->bytes);
 	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
 	nn_release();
 }
@@ -1667,6 +1701,7 @@ void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
                       nn_svc_cancel_fn cancel, void *ctx,
                       struct nn_op_result *res)
 {
+	struct nn_model *m;
 	uint32_t i;
 
 	nn_detail_clear();
@@ -1683,6 +1718,7 @@ void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
 		nn_release();
 		return;
 	}
+	m = nn_mh();
 
 	for (i = 0u; i < iters; i++) {
 		uint32_t t0, t1, us;
@@ -1695,7 +1731,7 @@ void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
 			return;
 		}
 		t0 = (uint32_t)tx_time_get();
-		if (npu_invoke() != NPU_OK) {
+		if (nn_run(m) != 0) {
 			nn_detail_set("inference failed on run %lu of %lu",
 			              (unsigned long)i + 1u, (unsigned long)iters);
 			nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
@@ -1786,12 +1822,13 @@ _Static_assert(NN_STREAM_CAM_LOCKED  == CAM_ERR_LOCKED,  "CAM_ERR_LOCKED moved")
  */
 static int nn_detector_ready(struct nn_op_result *res)
 {
-	struct npu_tensor in;
-	struct npu_tensor outs[NPU_DESC_MAX_OUTPUTS];
+	struct nn_model *m = nn_mh();
+	const struct nn_tensor *in = nn_input(m, 0);
+	struct nn_tensor outs[NN_MAX_IO];
 	unsigned n_out, i;
 	int shapes, draws;
 
-	if (npu_input(&in) != NPU_OK) {
+	if (in == NULL) {
 		nn_detail_set("the model has no input tensor");
 		return NN_SVC_ERR_STATE;
 	}
@@ -1799,7 +1836,7 @@ static int nn_detector_ready(struct nn_op_result *res)
 	 * fills this tensor a byte at a time on every frame; a plugin cannot see
 	 * the input tensor and so cannot check it, which makes this the last place
 	 * anything can. */
-	if (nn_input_fillable(res, &in) != 0)
+	if (nn_input_fillable(res, in) != 0)
 		return NN_SVC_ERR_STATE;
 	/*
 	 * [!] IS THERE A DECODER AT ALL, ASKED FIRST (issue #104).  Ahead of the
@@ -1816,17 +1853,20 @@ static int nn_detector_ready(struct nn_op_result *res)
 		              "`nn run` reports the raw outputs");
 		return NN_SVC_ERR_STATE;
 	}
-	n_out = npu_output_count();
-	if (n_out > NPU_DESC_MAX_OUTPUTS) {
+	n_out = (unsigned)nn_output_count(m);
+	if (n_out > NN_MAX_IO) {
 		nn_detail_set("the model has %u outputs and this path reads %u",
-		              n_out, (unsigned)NPU_DESC_MAX_OUTPUTS);
+		              n_out, (unsigned)NN_MAX_IO);
 		return NN_SVC_ERR_STATE;
 	}
 	for (i = 0u; i < n_out; i++) {
-		if (npu_output(i, &outs[i]) != NPU_OK) {
+		const struct nn_tensor *t = nn_output(m, (int)i);
+
+		if (t == NULL) {
 			nn_detail_set("output %u is unreadable", i);
 			return NN_SVC_ERR_STATE;
 		}
+		outs[i] = *t;
 	}
 	/*
 	 * [!] BOTH QUESTIONS GO TO THE PLUGIN, SO BOTH ARE ASKED UNDER ITS LEASE

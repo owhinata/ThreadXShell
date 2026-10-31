@@ -29,8 +29,8 @@
 #include "nn_core_frame.h"  /* the shared frame path (issue #130)   */
 #include "nn_outputs.h"     /* what the worker does with the outputs (#129) */
 #include "nn_rec.h"
-#include "npu.h"
-#include "npu_desc.h"
+#include "nn.h"
+#include "nn_desc.h"
 #include "tx_glue.h"        /* the EPK's TIMER2: the stage clock (issue #60) */
 
 #define LOG_TAG "nn_worker"
@@ -196,7 +196,7 @@ static void nn_ov_end(int oneshot, uint32_t *counter, uint8_t shot)
 /* What the worker carries from its invoke into the frame path's hooks. */
 struct nn_ov_work {
 	struct nn_ov_job  job;
-	struct npu_tensor outs[NPU_DESC_MAX_OUTPUTS];
+	struct nn_tensor  outs[NN_MAX_IO];
 	unsigned          n_out;
 	int               oneshot;
 	uint32_t          t0, t1;   /* the invoke, in ticks   */
@@ -222,12 +222,12 @@ int nn_ov_admits(void *ctx, uint32_t gen)
 /* One output, described for the record (nn_out_raw_fill()'s reader). */
 static int nn_ov_desc(void *ctx, unsigned i, struct tensor_desc *out)
 {
-	struct npu_tensor t;
+	const struct nn_tensor *t = nn_output(nn_ov_model, (int)i);
 
 	(void)ctx;
-	if (npu_output(i, &t) != NPU_OK)
+	if (t == NULL)
 		return -1;
-	npu_desc_of(out, &t);
+	nn_desc_of(out, t);
 	return 0;
 }
 
@@ -238,7 +238,8 @@ static __attribute__((noinline)) int nn_ov_publish_raw_desc(uint32_t gen)
 	/* Every output counted, the first NN_RAW_OUTPUTS_MAX described until one
 	 * cannot be -- the report says how many there were and shows what it
 	 * could (nn_outputs.h). */
-	nn_out_raw_fill(&raw, npu_output_count(), nn_ov_desc, NULL);
+	nn_out_raw_fill(&raw, (unsigned)nn_output_count(nn_ov_model), nn_ov_desc,
+	                NULL);
 	return nn_rec_publish_raw(gen, &raw);
 }
 
@@ -256,9 +257,13 @@ int nn_ov_publish_raw(void *ctx, uint32_t gen)
 /* One output, into the array the decode is handed (nn_out_collect()'s reader). */
 static int nn_ov_read(void *ctx, unsigned i)
 {
-	struct npu_tensor *outs = ctx;
+	struct nn_tensor *outs = ctx;
+	const struct nn_tensor *t = nn_output(nn_ov_model, (int)i);
 
-	return (npu_output(i, &outs[i]) == NPU_OK) ? 0 : -1;
+	if (t == NULL)
+		return -1;
+	outs[i] = *t;
+	return 0;
 }
 
 int nn_ov_outputs(void *ctx)
@@ -270,14 +275,14 @@ int nn_ov_outputs(void *ctx)
 	 * [!] THE PLUGIN QUESTION BEFORE THE OUTPUTS ARE READ (review of a438f76).
 	 * What may be done with the outputs depends on it: a bare model is
 	 * reported whatever its output count (the frame path's raw branch), and
-	 * a decode is limited to NPU_DESC_MAX_OUTPUTS, which a stream refuses
+	 * a decode is limited to NN_MAX_IO, which a stream refuses
 	 * past and `nn run` truncates to, as each always did (nn_outputs.h).  The
 	 * frame path asked it under the lease just before this; the outputs are
 	 * read here, after the invoke, and the DONE that lets the producer write
 	 * again comes only after the job.
 	 */
-	if (nn_out_plan(w->oneshot, 1, npu_output_count(), NPU_DESC_MAX_OUTPUTS,
-	                &w->n_out) != NN_OUT_DECODE)
+	if (nn_out_plan(w->oneshot, 1, (unsigned)nn_output_count(nn_ov_model),
+	                NN_MAX_IO, &w->n_out) != NN_OUT_DECODE)
 		return -1;
 	i = nn_out_collect(w->n_out, nn_ov_read, w->outs);
 	if (i != w->n_out) {
@@ -424,7 +429,7 @@ void nn_camera_work(void)
 	 * the same two points; anything from out here is too early or too late. */
 	w.e1 = tx_glue_epk_timer_ticks();
 	w.t0 = (uint32_t)tx_time_get();
-	if (npu_invoke() != NPU_OK) {
+	if (nn_run(nn_ov_model) != 0) {
 		nn_ov_end(oneshot, &nn_ov_stats.errors, NN_OV_SHOT_INVOKE_FAILED);
 		goto done;
 	}

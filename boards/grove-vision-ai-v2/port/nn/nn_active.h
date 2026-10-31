@@ -35,7 +35,7 @@
 
 #include "blazeface.h"  /* BF_ERR_* -- the shared decode vocabulary */
 #include "nn_active_core.h" /* NN_ACTIVE_THRESH_* -- the shared branch */
-#include "npu.h"          /* struct npu_tensor */
+#include "nn.h"           /* struct nn_tensor */
 #include "nn_svc.h"       /* nn_svc_write_fn, NN_SVC_THRESH_NONE */
 #include "plugin_abi.h"
 
@@ -113,7 +113,7 @@ int nn_active_is_plugin(void);
  *
  * @return 1, 0, or NN_ACTIVE_NOT_HELD
  */
-int nn_active_shapes_ok(const struct npu_tensor *outs, unsigned n);
+int nn_active_shapes_ok(const struct nn_tensor *outs, unsigned n);
 
 /**
  * @brief  Decode one set of outputs.
@@ -128,7 +128,7 @@ int nn_active_shapes_ok(const struct npu_tensor *outs, unsigned n);
  * a camera.  Deliberately not BF_ERR_MODEL -- that means "not a detector" and
  * routes to the shared class report.
  */
-int nn_active_decode(const struct npu_tensor *outs, unsigned n);
+int nn_active_decode(const struct nn_tensor *outs, unsigned n);
 
 /**
  * @brief  Let the active decoder paint its own result.

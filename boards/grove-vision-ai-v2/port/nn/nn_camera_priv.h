@@ -38,6 +38,7 @@
 #include "nn_camera.h"     /* struct nn_camera_stats, NN_OV_SHOT_*            */
 #include "nn_core_frame.h" /* the shared frame path (issue #130)              */
 #include "nn_preproc.h"    /* struct nn_preproc_geom, carried in the job      */
+#include "nn.h"            /* struct nn_model: the handle the halves run      */
 
 /*
  * ---- The producer / worker split (issue #129, Epic #122 U1) ----------------
@@ -82,6 +83,15 @@ struct nn_ov_job {
 /* Written by nn_camera_request_stop() (1) and the arms (0), on the console;
  * read by the producer and the worker.  See nn_camera.c. */
 extern volatile uint8_t nn_ov_stop;
+
+/*
+ * The model the producer prepares into and the worker runs (svc/nn/nn.h's
+ * singleton, issue #169).  Written by the arms, on the console, while the worker
+ * is parked and the overlay is off the sink; read by the producer and the worker
+ * only inside a stream or a one-shot.  NULL when the singleton could not be
+ * opened -- nn_input() and nn_run() then refuse, and the frame is an error.
+ */
+extern struct nn_model *nn_ov_model;
 
 /*
  * The stream counters.  Reset (all of them) by nn_camera_arm() only; read by

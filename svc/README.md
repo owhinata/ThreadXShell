@@ -50,7 +50,8 @@ boards/<board>/port/nn/                  the board's glue, one file per thread:
         v
 backend: svc/nn/tflm/ (wio-lite-ai, f746g-disco; the board places its buffers
          and defines its state in boards/<board>/port/nn/tflm/)
-         boards/grove-vision-ai-v2/port/nn/npu/ (Ethos-U55 + TFLM)
+         svc/nn/ethosu/ (grove-vision-ai-v2, Ethos-U55; the board defines its
+         state and places its arena in boards/grove-vision-ai-v2/port/nn/npu/)
 ```
 
 The producer above is not a subscriber of its own.  Since issue #142 each board
@@ -75,7 +76,8 @@ reads them.
 
 ### The inference layer is one implementation (issue #161)
 
-On wio-lite-ai and f746g-disco the model API below the adapter is shared too:
+On every board the model API below the adapter is shared too (grove-vision-ai-v2
+since issue #169, over its own backend -- see [The Ethos-U backend](#the-ethos-u-backend-issue-169)):
 `svc/nn/nn.c` is the one dispatcher (the model singleton, the session, cycle
 timing, the model swap) over the one compiled-in backend (`nn_backend.h`), and
 `svc/nn/tflm/` is the one tflite-micro backend.  `svc/nn/tflm/` is compiled only
@@ -83,8 +85,8 @@ when `CONFIG_NN_BACKEND=tflm`, and the TFLM headers are the only include it adds
 to `svc/`'s (`svc/nn/ethosu/` below is the other directory that includes them).
 The parts of the backend that do not depend on where a model is staged -- tensor
 descriptors, the display name, the empty state, the op resolver, the interpreter's
-destruction -- are in `nn_tflm_glue.h`, which the Ethos-U backend is to include
-into its own translation unit (issue #169).  Neither keeps storage of its own; the board supplies everything
+destruction -- are in `nn_tflm_glue.h`, which the Ethos-U backend includes into
+its own translation unit (issue #169).  Neither keeps storage of its own; the board supplies everything
 that is a fact about its memory or its core, bound at link time (the callers of
 `nn.h` pass no context to carry it):
 
@@ -98,8 +100,8 @@ that is a fact about its memory or its core, bound at link time (the callers of
 The op profile is one definition selecting a complete list in
 `nn_tflm_ops.h`; the resolver's size is counted from it.  Since issue #169 it
 also holds the Ethos-U profile, `NN_TFLM_OPS_ETHOSU_PROFILE=1`: the one
-`ethos-u` custom operator and no CPU kernel, for an Ethos-U backend (which
-grove-vision-ai-v2 does not select yet; its backend is still its own).
+`ethos-u` custom operator and no CPU kernel, which grove-vision-ai-v2's board.cmake
+selects for the Ethos-U backend and for its host gate alike.
 
 Where `nn_model_reload()` may adopt a model from is the backend's to declare
 (`nn.h`, issue #169).  A staging backend (tflm) adopts only from a slot
@@ -112,30 +114,36 @@ counterpart have their own codes -- `NN_MODEL_ERR_WINDOW`, `NN_MODEL_ERR_IDENT`
 (kept apart from `NN_MODEL_ERR_FORMAT`) and `NN_MODEL_ERR_PAYLOAD` -- worded by
 that backend rather than by `nn_model_strerror()`.
 
-### The Ethos-U checks are shared (issue #169)
+### The Ethos-U backend (issue #169)
 
-`svc/nn/ethosu/` holds the parts of an Ethos-U backend that hold no state and
-know no board.  Three are the checks a model passes before
-grove-vision-ai-v2's `npu_open()` hands it to the interpreter, and that the
-board's host gate `verify_vela_model` runs on the developer's machine by
-compiling these same files (no copy).  The fourth is the protocol that hands
-the arena between the CPU and the NPU:
+`svc/nn/ethosu/` is grove-vision-ai-v2's backend behind the same `svc/nn/nn.c`
+dispatcher the other two boards use, and the checks and the cache protocol that
+come with it.  None of it keeps storage of its own: the stateless-service audit
+compiles every TU here in Grove's firmware context, like every other TU under
+`svc/`, and the C++ ones against the Himax SDK's TFLM snapshot, the only TFLM tree
+that board builds.
 
-| File | What it decides |
+| File | What it is |
 |---|---|
-| `npu_verify.h` | The bounded FlatBuffer verifier and its limits (length floor, depth, table count) -- the one place they are declared. |
-| `npu_model_scan` (`.cc` / `.h`) | Which bytes the driver will parse (the `ethos-u` operator's input tensor 0) and whether the model may be opened at all: one subgraph, every operator `ethos-u`, no variable payload tensor. |
+| `nn_ethosu.cc` | The backend (`nn_backend_vt_selected`). A model is interpreted IN PLACE, inside the read window the board declares: no `load_region()`, no staging slot, no second buffer; the caller's lease keeps the bytes in place (`nn.h`). The checks run in one order -- window, length, alignment, identifier, bounded verifier, schema version, payload walk, resolver, AllocateTensors, the I/O rule -- each refusal its own code (`NN_MODEL_ERR_WINDOW` / `_IDENT` / `_PAYLOAD` for the ones only an in-place backend gives). It tells the cache protocol which arena is live and closes out each `Invoke()` with its backstop. Transactional like tflm: a refused model leaves the previous one (rebuilt from the same bytes) or the empty state. Uses `svc/nn/tflm/nn_tflm_glue.h` with its state named. |
+| `nn_ethosu.h` | C, for the adapter: `nn_ethosu_strerror()`, the sentences for the in-place refusals (every other code goes to `nn_model_strerror()`). |
+| `nn_ethosu_state.h` | The state type and the board facts (name prefix, the read window). Needs `NN_TFLM_OPS_ETHOSU_PROFILE`: the resolver's size is part of the type. |
+| `nn_ethosu_mem.h` | The arena declaration, sized by the board's `NN_ETHOSU_ARENA_KB`. |
+| `npu_verify.h` | The bounded FlatBuffer verifier and its limits (length floor, depth, table count) -- the one place they are declared; the host gate `verify_vela_model` compiles the same header. |
+| `npu_model_scan` (`.cc` / `.h`) | Which bytes the driver will parse (the `ethos-u` operator's input tensor 0) and whether the model may be opened at all: one subgraph, every operator `ethos-u`, no variable payload tensor. Shared with the host gate. |
 | `npu_payload` (`.c` / `.h`) | Whether that payload is exactly one COMMAND_STREAM action, as the last action. Plain C over bytes, so the host test compiles it directly. |
 | `npu_cache` (`.c` / `.h`) | The arena ownership protocol and the driver's four cache hooks (`ethosu_flush_dcache`, `ethosu_invalidate_dcache`, `ethosu_inference_begin`, `ethosu_inference_end`), strong definitions that override the driver's weak ones at link time: the whole arena cleaned before launch and invalidated once DONE and OK are both seen, a checked reset first on any other ending, fail-stop otherwise. Its state (`npu_cache_board_state`), the cache-line primitive (`npu_cache_clean()` / `npu_cache_invalidate()`) and the fail-stop are the board's (`port/nn/npu/npu_cache_board.c`). |
 
-Everything else stays in `boards/grove-vision-ai-v2/port/nn/npu/`: the
-interpreter glue (`npu_tflm.cc`), the arena and its placement, the cache-line
-primitive and the fail-stop under the protocol, the ThreadX mutex and semaphore
-hooks the driver binds by name (`npu_rtos.c`), the NPU bring-up and its
-interrupt, and the tensor descriptors.  The shared files are compiled in
-Grove's firmware context, so the stateless-service audit covers them like every
-other TU under `svc/`; `npu_model_scan.cc` is C++ against the Himax SDK's TFLM
-snapshot, which is the only TFLM tree that board builds.
+What the board gives, in `boards/grove-vision-ai-v2/`:
+
+| What | Where | Why it is the board's |
+|---|---|---|
+| `nn_model_board_state` and the four hooks; the cycle counter reported unavailable, so `nn_last_cycles()` is 0 | `port/nn/nn_model_board.c` | the DWT stops in WFI while the inference thread sleeps on the driver's semaphore; `nn bench` and the stream keep their own clocks |
+| `nn_ethosu_board_state` and the facts (`""`, `NOR_XIP_BASE`, `NOR_SIZE`) | `port/nn/npu/nn_ethosu_board.cc` | which RAM the state lives in, and the one statement of the read window |
+| `nn_ethosu_arena` | `port/nn/npu/npu_arena.c` | placement: `.nn_arena` in SRAM, NOLOAD, 32-byte aligned, pinned by the placement gate |
+| `NN_ETHOSU_ARENA_KB`, `NN_TFLM_OPS_ETHOSU_PROFILE` | `board.cmake` (compile definitions, to the firmware and the host gate) | the size the board reserves, and the one-operator list |
+| the ThreadX mutex / semaphore hooks the driver binds by name | `port/nn/npu/npu_rtos.c` | they are ThreadX, which `svc/` does not include |
+| the NPU bring-up, its interrupt, the NOR window's lease and its lifetime | `port/nn/npu/npu_hw.c`, `port/nn/nn_svc_grove.c` | the adapter takes the lease before a load and returns it only when no model is left; `nn.c`'s session is taken and given with the adapter's own gate |
 
 ## The camera stream's ownership (issue #142)
 
@@ -299,7 +307,7 @@ relative to `svc/`.
 | `nn/nn_dispatch_state.h` | What a board gives `nn.c`: its state object and the hooks (see [The inference layer](#the-inference-layer-is-one-implementation-issue-161)). |
 | `nn/nn_desc` | `nn_tensor` -> `svc/nn/tensor.h` descriptor, for the boards that use `nn.h`. |
 | `nn/tflm/` | The one tflite-micro backend of wio-lite-ai and f746g-disco (issue #161; built only with `CONFIG_NN_BACKEND=tflm`, into the board's `tflm` library): `nn_tflm.cc` (the vtable), `nn_tflm_state.h` (its state type and facts, defined by the board), `nn_tflm_mem.h` (the buffers the board places; see [The inference layer](#the-inference-layer-is-one-implementation-issue-161)), `nn_tflm_ops.h` (the op profiles, shared with each board's host `verify_tflite`; includes the one-operator `ethosu` profile), `nn_tflm_fit.h` (which slot a model range may be adopted from, never the live one; host-tested), `nn_tflm_glue.h` (the glue that does not depend on staging -- descriptors, name, empty state, op resolver, interpreter destruction -- included into each TFLM-based backend's own translation unit with its state object named by `NN_TFLM_GLUE_STATE` / `NN_TFLM_GLUE_FACTS`; issue #169) and `cxx_runtime.cc` (the C++ runtime shim). One of the two directories under `svc/` that include TFLM headers (the other is `nn/ethosu/`). |
-| `nn/ethosu/` | The stateless Ethos-U parts (issue #169): the bounded verifier and its limits (`npu_verify.h`), the payload locator and model refusal (`npu_model_scan`) and the command-stream walk (`npu_payload`), which grove-vision-ai-v2's firmware and its host `verify_vela_model` compile from the same files, and the arena ownership protocol with the driver's cache hooks (`npu_cache`; state and cache-line primitive are the board's) (see [The Ethos-U checks](#the-ethos-u-checks-are-shared-issue-169)). |
+| `nn/ethosu/` | grove-vision-ai-v2's backend behind `nn/nn.c` (issue #169): `nn_ethosu.cc` (the vtable; models interpreted in place inside the board's read window), its state, facts and arena headers, the bounded verifier and its limits (`npu_verify.h`), the payload locator and model refusal (`npu_model_scan`) and the command-stream walk (`npu_payload`), which the host `verify_vela_model` compiles from the same files, and the arena ownership protocol with the driver's cache hooks (`npu_cache`) (see [The Ethos-U backend](#the-ethos-u-backend-issue-169)). |
 | `nn/nn_svc_adapter.h` | Static-inline helpers every adapter uses to build a result and an `nn info` line. |
 | `nn/nn_detail.h` | The bound on a board's `nn` explanation text and its build-time check. |
 | `nn/nn_stream_life` | The one live-inference state machine (start admission, generations, stop claims). |

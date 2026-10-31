@@ -10,8 +10,8 @@
  * onto the worker they had to stay three ways (review of a438f76):
  *
  *   - a STREAM refuses a model with more outputs than this board decodes
- *     (NPU_DESC_MAX_OUTPUTS), and refuses the frame if any is unreadable;
- *   - `nn run` with a PLUGIN decodes the first NPU_DESC_MAX_OUTPUTS and names
+ *     (NN_MAX_IO), and refuses the frame if any is unreadable;
+ *   - `nn run` with a PLUGIN decodes the first NN_MAX_IO and names
  *     the output it could not read;
  *   - `nn run` with NO plugin reports the outputs as tensors: every output the
  *     model has is COUNTED, the first NN_RAW_OUTPUTS_MAX that can be read are
@@ -46,7 +46,7 @@ enum nn_out_plan {
  * @param oneshot     `nn run` (non-zero) or a stream
  * @param has_plugin  whether a plugin is loaded, asked under the lease
  * @param n_out       the model's output count
- * @param max         how many this board decodes (NPU_DESC_MAX_OUTPUTS)
+ * @param max         how many this board decodes (NN_MAX_IO)
  * @param n_use       out, for NN_OUT_DECODE: how many to collect
  */
 enum nn_out_plan nn_out_plan(int oneshot, int has_plugin, unsigned n_out,

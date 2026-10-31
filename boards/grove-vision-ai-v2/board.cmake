@@ -695,9 +695,16 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/camera/cam_hold_rules.c"
     "${CMAKE_SOURCE_DIR}/svc/camera/cam_holders.c"
     "${CMAKE_SOURCE_DIR}/svc/camera/cam_step.c"
-    # Ethos-U55 inference glue (issue #44).  The C++ interpreter is contained
-    # behind port/nn/npu/npu.h; nothing above it sees a TFLite type.
-    "${BOARD_DIR}/port/nn/npu/npu_tflm.cc"
+    # The model API (issue #169): svc/nn/nn.c, the dispatcher wio-lite-ai and
+    # f746g-disco share, over the shared Ethos-U backend in svc/nn/ethosu/.
+    # The C++ interpreter is contained behind svc/nn/nn.h; nothing above it
+    # sees a TFLite type.  What the board gives them: the dispatcher's state
+    # and hooks (nn_model_board.c), the backend's state and facts
+    # (nn_ethosu_board.cc) and the arena (npu_arena.c).
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/nn_ethosu.cc"
+    "${BOARD_DIR}/port/nn/nn_model_board.c"
+    "${BOARD_DIR}/port/nn/npu/nn_ethosu_board.cc"
     "${BOARD_DIR}/port/nn/npu/npu_arena.c"
     "${BOARD_DIR}/port/nn/npu/npu_rtos.c"
     # The arena ownership protocol and the driver's cache hooks are shared
@@ -720,14 +727,13 @@ add_library(shell_objs OBJECT
     # interrupt-disabled lock here, the decisions in the shared svc/ file.
     "${BOARD_DIR}/port/nn/nn_rec.c"
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_det_record.c"
-    # npu_tensor -> tensor_desc (issues #97, #104).  The only file here that
-    # knows both types, and all that is left of what used to be nn_decoder.c:
-    # THE DECODER ITSELF IS NO LONGER IN THIS FIRMWARE.  svc/nn/blazeface.c is
-    # compiled by the plugin that carries it (add_plugin below), so a
-    # container's decoder is the only one on this board.  `nn out`, `nn info`
-    # and the active-decoder shim need this translation whatever interprets the
-    # tensors, or whether anything does.
-    "${BOARD_DIR}/port/nn/npu/npu_desc.c"
+    # nn_tensor -> tensor_desc (issues #97, #104; the shared translation since
+    # issue #169).  THE DECODER ITSELF IS NOT IN THIS FIRMWARE: svc/nn/
+    # blazeface.c is compiled by the plugin that carries it (add_plugin below),
+    # so a container's decoder is the only one on this board.  `nn out`, `nn
+    # info` and the active-decoder shim need this translation whatever
+    # interprets the tensors, or whether anything does.
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_desc.c"
     "${BOARD_DIR}/port/nn/nn_svc_grove.c"
     "${BOARD_DIR}/port/nn/nn_stream_state.c"
     # The inference worker and who may touch its input (issue #129): the
@@ -765,6 +771,12 @@ add_library(shell_objs OBJECT
     ${SDK_SOURCES}
     ${TX_CORE} ${TX_ASM} ${TX_EPK})
 
+# The NPU's activation arena, in KB (issue #169): the board's one statement of
+# its size, passed to the firmware (svc/nn/ethosu/nn_ethosu_mem.h, the array in
+# port/nn/npu/npu_arena.c) and to the host gate.  450 KB is what the SDK's own
+# classification app uses for this model class; cmake/check_placement_budget.py
+# states it again, independently, as the reservation it pins.
+set(GROVE_NN_ARENA_KB 450)
 add_executable(shell $<TARGET_OBJECTS:shell_objs>)
 target_link_libraries(shell PRIVATE bsp_iface coremark_obj tflm_obj
     -Wl,--start-group "${LIBDRIVER}" "${LIBPWRMGMT}"
@@ -802,7 +814,8 @@ target_include_directories(shell_objs PRIVATE
     "${CMAKE_SOURCE_DIR}/shell/cmds"
     "${CMAKE_SOURCE_DIR}/svc"
     "${CMAKE_SOURCE_DIR}/svc/nn"
-    "${CMAKE_SOURCE_DIR}/svc/nn/ethosu"   # npu_payload.h / npu_model_scan.h / npu_verify.h
+    "${CMAKE_SOURCE_DIR}/svc/nn/ethosu"   # the Ethos-U backend and its checks
+    "${CMAKE_SOURCE_DIR}/svc/nn/tflm"     # nn_tflm_ops.h / nn_tflm_glue.h (#169)
     "${CMAKE_SOURCE_DIR}/svc/plugin"
     "${CMAKE_SOURCE_DIR}/svc/camera"
     "${BOARD_DIR}/svc"          # log.h / timebase.h: the board's services,
@@ -814,6 +827,13 @@ target_include_directories(shell_objs PRIVATE
 target_link_libraries(shell_objs PRIVATE bsp_iface tflm_obj)
 target_compile_definitions(shell_objs PRIVATE
     TX_INCLUDE_USER_DEFINE_FILE        # -> port/threadx/tx_user.h
+    # The Ethos-U backend (issue #169).  Both reach the host gate too
+    # (verify_vela_model below), which plans a model into the same arena with
+    # a resolver built from the same op list.  The profile is part of the
+    # backend state's type (svc/nn/ethosu/nn_ethosu_state.h), so it is on every
+    # translation unit, not only the ones that include it today.
+    NN_TFLM_OPS_ETHOSU_PROFILE=1
+    NN_ETHOSU_ARENA_KB=${GROVE_NN_ARENA_KB}
     BSP_ENABLE_WFI=$<BOOL:${BSP_ENABLE_WFI}>   # gates TX_ENABLE_WFI (tx_user.h)
     CLI_ENABLE_DANGEROUS_CMDS=1        # reboot / devmem / crash
     CLI_INSTANCE_STACK_SIZE=4096       # headroom for cli_print (wio parity)
@@ -1443,6 +1463,10 @@ if(HOST_CXX)
                 -I "${_ethosu_drv_inc}"
                 -I "${BOARD_DIR}/port/nn/npu"
                 -I "${CMAKE_SOURCE_DIR}/svc/nn/ethosu"
+                -I "${CMAKE_SOURCE_DIR}/svc/nn/tflm"
+                -I "${CMAKE_SOURCE_DIR}/svc/nn"
+                -DNN_TFLM_OPS_ETHOSU_PROFILE=1
+                -DNN_ETHOSU_ARENA_KB=${GROVE_NN_ARENA_KB}
                 -DTF_LITE_STATIC_MEMORY -DTF_LITE_MCU_DEBUG_LOG
                 -DETHOS_U -DETHOSU55 -DETHOSU_ARCH=u55
                 "${BOARD_DIR}/scripts/verify_vela_model.cc"
@@ -1459,7 +1483,13 @@ if(HOST_CXX)
                 "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_payload.c"
                 "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_payload.h"
                 "${BOARD_DIR}/port/nn/npu/npu_arena.c"
-                "${BOARD_DIR}/port/nn/npu/npu.h"
+                "${BOARD_DIR}/port/nn/npu/npu_arena.h"
+                "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/nn_ethosu_mem.h"
+                # The op list the resolver is built from (issue #169): the
+                # firmware's backend builds its resolver from the same one.
+                "${CMAKE_SOURCE_DIR}/svc/nn/tflm/nn_tflm_ops.h"
+                # The I/O rule the backend applies after AllocateTensors.
+                "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/nn_ethosu_io.h"
                 # The bounded flatbuffer check the firmware runs (issue #93).
                 # Listed so that changing a limit rebuilds the host gate: the
                 # whole point of sharing it is that the two cannot disagree.

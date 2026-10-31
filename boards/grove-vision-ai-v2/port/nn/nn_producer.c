@@ -21,7 +21,7 @@
 #include "cam_dp.h"
 #include "nn_preproc.h"
 #include "nn_rec.h"
-#include "npu.h"
+#include "nn.h"
 #include "nn_worker.h"     /* the inference worker (issue #129) */
 #include "nn_core_frame.h" /* the shared frame path (issue #130) */
 #include "tx_glue.h"       /* the EPK's TIMER2: the stage clock (issue #60) */
@@ -32,7 +32,7 @@
  */
 int nn_ov_prep(void *ctx, unsigned part, unsigned nparts)
 {
-	struct npu_tensor in;
+	const struct nn_tensor *in;
 	struct nn_preproc_geom geom;
 	uint32_t e0, e1;
 
@@ -42,14 +42,17 @@ int nn_ov_prep(void *ctx, unsigned part, unsigned nparts)
 	/* Stage clock (issue #60): `prep` is the producer's whole share now. */
 	e0 = tx_glue_epk_timer_ticks();
 
-	if (npu_input(&in) != NPU_OK ||
-	    in.rank != 4 || in.dims[3] != 3 ||
+	/* The descriptor the backend published when the model was loaded: a
+	 * pointer, not a copy, and nothing is asked of the interpreter here. */
+	in = nn_input(nn_ov_model, 0);
+	if (in == NULL ||
+	    in->ndim != 4 || in->dims[3] != 3 ||
 	    nn_preproc_geom(CAM_FRAME_WIDTH, CAM_FRAME_HEIGHT,
-	                    (uint32_t)in.dims[2], (uint32_t)in.dims[1],
+	                    (uint32_t)in->dims[2], (uint32_t)in->dims[1],
 	                    &geom) != 0 ||
-	    in.bytes < (size_t)in.dims[2] * (size_t)in.dims[1] * 3u ||
+	    in->bytes < (size_t)in->dims[2] * (size_t)in->dims[1] * 3u ||
 	    nn_preproc_fill(camera_raw_frame(), CAM_FRAME_WIDTH,
-	                    CAM_FRAME_HEIGHT, &geom, (uint8_t *)in.data) != 0)
+	                    CAM_FRAME_HEIGHT, &geom, (uint8_t *)in->data) != 0)
 		return -1;
 	e1 = tx_glue_epk_timer_ticks();
 

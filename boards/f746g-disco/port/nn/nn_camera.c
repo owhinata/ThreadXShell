@@ -840,6 +840,14 @@ bool nn_camera_overlay(void)
 	return nncam_run != 0 && !nncam_oneshot;
 }
 
+/* Polled by `nn run`'s wait (issue #163).  camera_stream_lost() takes no lock:
+ * the marks are written under the camera's lock and a word read that comes a
+ * poll late costs that poll one tick, nothing more. */
+int nn_camera_stream_lost(void)
+{
+	return nncam_run != 0 && camera_stream_lost(&nncam_holder) != 0;
+}
+
 void nn_camera_stats_get(struct nn_camera_stats *out)
 {
 	uint32_t now, elapsed;

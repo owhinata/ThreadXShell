@@ -36,6 +36,7 @@
 #include "nn.h"
 #include "nn_camera.h"
 #include "nn_input_contract.h" /* nn_input_refusal_name() (#162) */
+#include "nn_run_wait.h"   /* how `nn run`'s wait ends (shared, #163) */
 #include "nn_desc.h"
 #include "plugin_target.h"   /* the target word this build provides (#159) */
 #if defined(CONFIG_NN_BACKEND_TFLM)
@@ -386,8 +387,9 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	struct nn_camera_decode dec;
 	uint32_t gen, base;
 	int rc, stop_rc;
-	/* Why the wait ended -- the run's status, decided below (issue #122 P7). */
-	enum { RUN_INFERRED, RUN_CANCELLED, RUN_TIMEOUT } why = RUN_TIMEOUT;
+	/* Why the wait ended -- the run's status, decided below (issue #122 P7)
+	 * by the shared table (svc/nn/nn_run_wait.h, issue #163). */
+	enum nn_run_end why = NN_RUN_WAITING;
 
 	nn_detail_clear();
 	/*
@@ -472,25 +474,38 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 * tx_thread_sleep() that returns early because a tick was already pending
 	 * would otherwise burn the budget in an instant and report a timeout that
 	 * never happened.
+	 *
+	 * [!] AND A STREAM THE CAMERA ENDED IS LOST, NOT A TIMEOUT (issue #163).
+	 * When the camera's overrun recovery gives up (or cannot re-arm) it drops
+	 * every holder and marks nn's as lost; nothing will publish after that, and
+	 * this wait used to sit out its deadline and call it a timeout.
+	 *
+	 * [!] Each poll reads the record, then the lost mark, then the operator,
+	 * then the clock, and stops reading at the first that holds: the table
+	 * ranks them in that same order, and the cancel query reads the console's
+	 * input, so it is asked only on a poll nothing earlier decided.
 	 */
 	{
 		ULONG deadline = tx_time_get() +
 		                 (NN_RUN_WAIT_S * TX_TIMER_TICKS_PER_SECOND);
 
 		for (;;) {
+			int published, lost = 0, cancelled = 0, expired = 0;
+
 			(void)nn_camera_decode_get(&dec, NULL, 0, NULL, NULL);
-			if (dec.accepted != base) {
-				why = RUN_INFERRED;
+			published = (dec.accepted != base);
+			if (!published)
+				lost = nn_camera_stream_lost();
+			if (!published && !lost)
+				cancelled = nn_svc_cancelled(cancel, ctx);
+			if (!published && !lost && !cancelled)
+				expired = ((LONG)(tx_time_get() - deadline) >= 0);
+			/* "finished" is 0: this worker does not say when it is
+			 * done with a one-shot yet.  Issue #171 passes it here. */
+			why = nn_run_wait_step(published, 0, lost, cancelled,
+			                       expired);
+			if (why != NN_RUN_WAITING)
 				break;
-			}
-			if (nn_svc_cancelled(cancel, ctx)) {
-				why = RUN_CANCELLED;
-				break;
-			}
-			if ((LONG)(tx_time_get() - deadline) >= 0) {
-				why = RUN_TIMEOUT;
-				break;
-			}
 			tx_thread_sleep(1u);
 		}
 	}
@@ -517,10 +532,10 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 * deadline can pass in the same moment the inference publishes; the record
 	 * was read after that, so reporting a timeout would throw away an answer
 	 * that is sitting right here.  ONLY a timeout is promoted: a cancel is the
-	 * operator's decision, and a valid record does not overrule it.  "Made
-	 * it" is the accepted count against this run's base (issue #118). */
-	if (why == RUN_TIMEOUT && snap->valid)
-		why = RUN_INFERRED;
+	 * operator's decision and a lost stream is a hardware fact, and a valid
+	 * record does not overrule either.  "Made it" is the accepted count
+	 * against this run's base (issue #118). */
+	why = nn_run_wait_final(why, snap->valid);
 
 	/* [!] STOPPED BY ITS OWN GENERATION, claimed like any stop (issue #120).
 	 * Nothing else can have claimed it -- an operator's stop is refused while
@@ -545,13 +560,22 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 * frame".  The disposition stays its own field beside either answer.
 	 */
 	switch (why) {
-	case RUN_INFERRED:
+	case NN_RUN_INFERRED:
 		nn_result(res, NN_SVC_OK, nn_claim_of_stop(stop_rc));
 		if (res->claim != NN_CLAIM_NONE)
 			nn_detail_set("the camera has not released the inference "
 			              "frame (%d)", stop_rc);
 		return;
-	case RUN_CANCELLED:
+	case NN_RUN_LOST:
+		nn_result(res, NN_SVC_ERR_HW, nn_claim_of_stop(stop_rc));
+		nn_detail_set("the camera stream was lost before an inference "
+		              "completed%s",
+		              (res->claim != NN_CLAIM_NONE)
+		              ? "; the camera has not released the frame either "
+		                "(`nn stream stop` finishes it)"
+		              : "");
+		return;
+	case NN_RUN_CANCELLED:
 		nn_result(res, NN_SVC_ERR_CANCEL, nn_claim_of_stop(stop_rc));
 		nn_detail_set("cancelled before an inference completed%s",
 		              (res->claim != NN_CLAIM_NONE)
@@ -559,8 +583,8 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		                "(`nn stream stop` finishes it)"
 		              : "");
 		return;
-	case RUN_TIMEOUT:
-	default:
+	case NN_RUN_TIMEOUT:
+	default:        /* NN_RUN_NO_RESULT is not passed here until #171 */
 		nn_result(res, NN_SVC_ERR_TIMEOUT, nn_claim_of_stop(stop_rc));
 		nn_detail_set("no inference completed within %u s%s",
 		              (unsigned)NN_RUN_WAIT_S,

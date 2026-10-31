@@ -190,6 +190,10 @@ bool nn_camera_overlay(void);
 /** Snapshot current stats (any time). */
 void nn_camera_stats_get(struct nn_camera_stats *out);
 
+/** The stream ended under a running nn (nn's holder lost at a confirmed end,
+ *  issue #142): `nn run`'s wait reports it as LOST (issue #163). */
+int  nn_camera_stream_lost(void);
+
 /**
  * One decode's boxes and the diagnostics that belong to them.
  *

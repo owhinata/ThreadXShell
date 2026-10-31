@@ -837,6 +837,10 @@ endif()
 set(NN_SOURCES "${CMAKE_SOURCE_DIR}/svc/nn/nn.c"   # the dispatcher (shared, #161)
                "${BOARD_DIR}/port/nn/nn_model_board.c"  # ...its state + hooks
                "${BOARD_DIR}/port/nn/nn_svc_wio.c"   # the shared `nn` command's adapter
+               # how `nn run`'s wait ends (issue #129): a pure table shared
+               # by every board since issue #163, walked by
+               # shell/test/test_nn_run_wait.c
+               "${CMAKE_SOURCE_DIR}/svc/nn/nn_run_wait.c"
                # where a `nn model load` ends (issue #122): a pure table
                # shared by every board since issue #131, walked by
                # shell/test/test_nn_swap.c

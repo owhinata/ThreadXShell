@@ -656,6 +656,14 @@ CRC-checks that copy exactly as before, then:
   about it, the reservation is read back and its entry point is called** --
   but only after the backend has accepted the model.
 
+[!] **Every build of an interpreter zeroes the whole arena first** (issue #167,
+`nn_tflm_construct_interp()` in `svc/nn/tflm/nn_tflm_glue.h`): a model refused
+at an unregistered op used to leave the rest of TFLM's per-op table holding the
+previous model's bytes, which the interpreter's destructor then called as a
+function pointer (`--slot 0`'s 16-op ResNet after BlazeFace froze the console).
+The cost is one memset of `nn_tflm_arena` (524,288 B, PSRAM) per load, the
+restore of a previous model included.
+
 **[!] The order matters and is not an implementation detail.**  Loading the
 plugin first would destroy the previous one's state at the fixed reservation
 before knowing whether the model that needs it can be built, and a backend that

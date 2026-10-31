@@ -6,7 +6,8 @@
  * @file    nn_tflm_glue.h
  * @brief   The TFLM glue every backend built on a MicroInterpreter needs in the same
  *          shape (issue #169): tensor descriptors, the display name, the empty
- *          state, the op resolver and the interpreter's destruction.
+ *          state, the op resolver and the interpreter's construction (which zeroes
+ *          the arena, issue #167) and destruction.
  *
  * Two backends include it: svc/nn/tflm/nn_tflm.cc (the CPU-kernel backend of
  * wio-lite-ai and f746g-disco, which adopts models from staging slots) and the
@@ -33,9 +34,11 @@
  * verifiers grew by 64 B) and the images stopped being byte-identical.  Naming the
  * object keeps every function textually what it was in nn_tflm.cc, in the same place
  * in the TU, which is the property the move had to prove.  For the same reason the
- * interpreter's construction and the counts-last publication of its I/O stay inside
- * nn_tflm.cc's build_interp(): split into two functions here they changed that
- * object's code (the inliner again), so they are not shared yet.
+ * counts-last publication of the interpreter's I/O stays inside each backend's
+ * build_interp(): split into a function here it changed that object's code (the
+ * inliner again), so it is not shared yet.  The interpreter's construction IS shared
+ * since issue #167 (nn_tflm_construct_interp(), below), because that issue changed
+ * what construction must do and the change had to be the same in both backends.
  *
  * The state needs these members, by name:
  *
@@ -59,6 +62,7 @@
 #include <new>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <type_traits>
 
 #ifndef NN_TFLM_OPS_ALL
@@ -197,6 +201,43 @@ void nn_tflm_destroy_interp()
 		s.interp->~MicroInterpreter();
 		s.interp = nullptr;
 	}
+}
+
+/*
+ * Used by: tflm, ethosu.  Construct the interpreter for @p model over the WHOLE arena
+ * [@p arena, @p arena + @p bytes), destroying any previous one first, and ZERO THE
+ * ARENA BETWEEN THE TWO (issue #167).
+ *
+ * [!] WHY THE ZEROING.  TFLM takes the per-operator NodeAndRegistration array from the
+ * arena without clearing it (MicroAllocator::StartModelAllocation), and
+ * MicroInterpreter fills it front to back, returning at the first operator the
+ * resolver does not have (PrepareNodeAndRegistrationDataFromFlatbuffer).  The
+ * elements after that one keep whatever the arena held before -- the previous model's
+ * data.  Destroying that half-built interpreter then runs FreeSubgraphs(), which walks
+ * EVERY operator and calls registration->free() whenever registration is non-null:
+ * it calls the stale bytes as a function pointer.  On wio-lite-ai a 16-op model
+ * refused at op 12, loaded after an 8-op one, jumped to garbage and froze the console.
+ * With the arena zeroed every element not yet filled has registration == nullptr and
+ * the destructor calls nothing.  TFLM is read-only (lib/, the SDK's tree), so the
+ * backend does it.
+ *
+ * The zeroing comes AFTER the destruction, never before: the old interpreter's
+ * destructor reads its own registrations out of this same arena.  That is why the
+ * destruction is in here too (it is a no-op when the caller has already done it).
+ *
+ * The cost is one memset of the whole arena per load, restores included.  The caller
+ * holds the NN session (svc/nn/nn.h) and has brought up the memory the arena lives in.
+ */
+tflite::MicroInterpreter *nn_tflm_construct_interp(const tflite::Model *model,
+                                                   nn_tflm_glue_resolver &resolver,
+                                                   uint8_t *arena, size_t bytes)
+{
+	auto &s = NN_TFLM_GLUE_STATE;
+
+	nn_tflm_destroy_interp();
+	memset(arena, 0, bytes);
+	s.interp = new (s.interp_buf) tflite::MicroInterpreter(model, resolver, arena, bytes);
+	return s.interp;
 }
 
 }  /* namespace */

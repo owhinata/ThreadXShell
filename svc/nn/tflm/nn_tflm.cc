@@ -131,9 +131,8 @@ int build_interp(const void *data, uint32_t len)
 	if (!resolver)
 		return NN_MODEL_ERR_OPS;
 
-	nn_tflm_destroy_interp();
-	s.interp = new (s.interp_buf) tflite::MicroInterpreter(
-		model, *resolver, nn_tflm_arena, (size_t)NN_TFLM_ARENA_BYTES);
+	/* Destroys the previous interpreter, zeroes the arena (issue #167), constructs. */
+	nn_tflm_construct_interp(model, *resolver, nn_tflm_arena, (size_t)NN_TFLM_ARENA_BYTES);
 
 	/* Where a model that needs an unregistered op fails, and where one whose
 	 * activations do not fit the arena fails.  TFLM does not distinguish the two in

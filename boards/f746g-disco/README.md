@@ -310,6 +310,12 @@ is no built-in model) and after `nn model unload`.
   image (`null`'s stub, `stedgeai`'s generated model), which adopt it there.
   The first open is serialised by the latch and does not return until it is
   done, so an unload typed right after boot finds a finished state.
+- [!] **Every build of an interpreter zeroes the whole arena first** (issue
+  #167, `nn_tflm_construct_interp()` in `svc/nn/tflm/nn_tflm_glue.h`): a model
+  refused at an unregistered op otherwise leaves the rest of TFLM's per-op table
+  holding the previous model's bytes, which the destructor calls as a function
+  pointer. The cost is one memset of `nn_tflm_arena` (524,288 B, SDRAM) per
+  load, the restore of a previous model included.
 - A refused `nn model load --path` restores the previous model; from empty it
   stays empty and says `nothing is loaded`. The answer comes from the reload
   itself (whether a model is left), not from whether the handle is open.

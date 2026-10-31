@@ -85,8 +85,11 @@ when `CONFIG_NN_BACKEND=tflm`, and the TFLM headers are the only include it adds
 to `svc/`'s (`svc/nn/ethosu/` below is the other directory that includes them).
 The parts of the backend that do not depend on where a model is staged -- tensor
 descriptors, the display name, the empty state, the op resolver, the interpreter's
-destruction -- are in `nn_tflm_glue.h`, which the Ethos-U backend includes into
-its own translation unit (issue #169).  Neither keeps storage of its own; the board supplies everything
+construction and destruction -- are in `nn_tflm_glue.h`, which the Ethos-U backend includes into
+its own translation unit (issue #169).  The construction zeroes the whole arena
+first (issue #167): TFLM does not clear its per-op table, and a model refused
+part-way through it would otherwise leave entries the destructor calls as function
+pointers.  Neither keeps storage of its own; the board supplies everything
 that is a fact about its memory or its core, bound at link time (the callers of
 `nn.h` pass no context to carry it):
 

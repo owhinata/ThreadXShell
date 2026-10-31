@@ -127,8 +127,8 @@ gcc $CFLAGS -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast \
 # issue #46 -- the Ethos-U command-stream payload check (svc/nn/ethosu/npu_payload.c,
 # shared since issue #169 and compiled from there -- no copy here).
 # No shim and no SDK header: the walk is deliberately plain C over plain bytes,
-# which is why it was split out of npu_tflm.cc.  It is a SAFETY check -- it is
-# what stops npu_open() accepting a model whose driver actions continue past the
+# which is why it was split out of the interpreter glue.  It is a SAFETY check --
+# it stops the backend accepting a model whose driver actions continue past the
 # launch, where the driver can return without ever handing the arena back -- so
 # the reject cases matter as much as the accept ones, and neither can be
 # exercised on the board without deliberately building a broken model.

@@ -92,7 +92,7 @@
 - **[!] 推論を非同期の worker で回すボードは「誰も解釈していない」も世代規則の下で publish する**（しないと `nn run` が timeout する。3 ボードとも）。
 - **[!] モデルの load / unload の順序は `svc/nn/nn_core_model` の 1 実装**（表は `svc/nn/nn_swap`、3 ボードがフック + const 表で採る）: 差し替えは
   backend 成功後、bare は plugin unload、モデルが残らない終わり方は全部下ろす、**BUSY は swap より前だけ**（BUSY 拒否は状態行を出さない、#131）。
-- **[!] nn ディスパッチャ（`svc/nn/nn.c`）と TFLM backend（`svc/nn/tflm/`）は wio・f746 の 1 実装**（Grove の Ethos-U backend は後の Issue）: ボードが出すのは配置・状態の実体・HW フックだけでリンク時に結合し、**ボード側の写しを戻さない**（#161、`svc/README.md`）。
+- **[!] nn ディスパッチャ（`svc/nn/nn.c`）は 3 ボードの 1 実装、backend は TFLM（`svc/nn/tflm/`、wio・f746）と Ethos-U（`svc/nn/ethosu/`、Grove）の各 1 実装**: ボードが出すのは配置・状態の実体・HW フックだけでリンク時に結合し、**ボード側の写しを戻さない**（#161・#169、`svc/README.md`）。
 
 ### 8. `svc/camera/frame_pipeline` の sink registry: attach は拒否する、直列化は呼び出し元
 
@@ -242,11 +242,11 @@ board README が正。
   **bring-up はヘルパに入れない。判定は状態を列挙し `default:` を足さない。cmds/ は producer が消費する
   データパス設定を書かない**（境界は**消費のされ方**）。
 - **op resolver は 1 個のまま**（**CMSIS-NN を持ち込まない**）。**境界の型変換はファイル側で剥がす。
-  [!] `npu_open()` は長さを取り `GetModel()` の前に境界付き verifier を通す**（**範囲 → 長さ →
-  identifier → verifier → 走査**。**長さには下限も要り生アドレス形にも必須**、**limits は呼び出しと
-  ともに `npu_verify.h` の 1 箇所**）。**ペイロード検査も緩めない**（`COMMAND_STREAM` が 1 個かつ
+  [!] Ethos-U backend の reload（`svc/nn/ethosu/nn_ethosu.cc`）は長さを取り `GetModel()` の前に境界付き verifier を通す**（**窓 → 長さ →
+  整列 → identifier → verifier → 走査**。**長さには下限も要り生アドレス形にも必須**、**limits は `npu_verify.h`、
+  I/O 規則は `nn_ethosu_io.h` の 1 箇所でホストゲートと共有**）。**ペイロード検査も緩めない**（`COMMAND_STREAM` が 1 個かつ
   最後 / 対象は**入力テンソル 0** / `is_variable()` は拒否）。
-- **[!] `nn model load --name` はリースを切らさない**（`npu_hw_init()` 先 → 走査 → CRC → `npu_open()` → plugin、**残らない失敗は必ず `npu_hw_deinit()`**）。
+- **[!] `nn model load --name` はリースを切らさない**（`npu_hw_init()` 先 → 走査 → CRC → `nn_model_reload()` → plugin、**残らない失敗は必ず backend の release の後に `npu_hw_deinit()`**）。
   候補は **VALID のみ・重複拒否・失敗理由は別々・読めなければ拒否。ホスト側の `verify_vela_model` を外さない**（**書込みの後**に走る。**C++ 不在は fail-closed**）。
 - **[!] gate の外から plugin に入るコンソール呼び出し（`nn thresh` / `nn dets`）は数に入ってから lease を取り、load/unload はその数が 0 でなければ BUSY**（数の判定は claim と同じクリティカルセクション、`nn_param_calls.c`。数は待たず、lease は有界に待つ）。
 - **[!] アリーナのキャッシュ保守は「範囲ごと」にしない。** 潰すのは **`ethosu_invalidate_dcache()`

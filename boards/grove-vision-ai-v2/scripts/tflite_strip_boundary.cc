@@ -228,8 +228,8 @@ int64_t producer_of(const tflite::SubGraphT *sg, int32_t idx, bool *ambiguous)
  * 8-bit code alongside the current one and the right answer is the maximum of
  * the pair, so reading either alone misidentifies operators.  The overload for
  * the unpacked object is linked from the tree (schema_utils.cc), not
- * reimplemented -- the firmware's npu_tflm.cc identifies operators with the
- * same function.
+ * reimplemented -- the firmware's model scan (svc/nn/ethosu/npu_model_scan.cc)
+ * identifies operators with the same function.
  */
 tflite::BuiltinOperator builtin_of(const tflite::ModelT &m,
                                    const tflite::OperatorT *op)

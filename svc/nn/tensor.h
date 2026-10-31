@@ -7,10 +7,10 @@
  * @brief   Board-independent tensor descriptor: the data contract a shared model
  *          post-processor sees (issue #97).
  *
- * Three boards run inference behind three different backends, and each has its
- * own tensor type: `struct nn_tensor` on f746g-disco and wio-lite-ai (port/nn),
- * `struct npu_tensor` on grove-vision-ai-v2 (port/nn/npu).  Both live in board
- * headers, so neither can be included from svc/.  This is the neutral shape a
+ * Three boards run inference behind different backends.  The backends' tensor
+ * type is svc/nn/nn.h's `struct nn_tensor` on all three since issue #169
+ * (grove-vision-ai-v2 had its own `struct npu_tensor` until then), and it is the
+ * INFERENCE API's type, not the decoder's.  This is the neutral shape a
  * board's glue fills in so that ONE decoder can read tensors from any of them --
  * the same role svc/camera/frame.h plays for the camera pipeline.
  *

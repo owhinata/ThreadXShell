@@ -21,8 +21,9 @@
  * about them is hardware.  So they live here once, and a board supplies only
  * its facts (struct nn_active_lease_board): the shared branch's board struct,
  * and how to read its model's outputs.  grove-vision-ai-v2 keeps its own
- * wrappers: its tensors are `struct npu_tensor` arrays, and its entries take a
- * geometry this shape has no place for.
+ * wrappers: its entries take caller-collected `struct nn_tensor` arrays (the
+ * worker reads them once per frame) and a geometry this shape has no place
+ * for.
  *
  * [!] ONE BRANCH POINT, NOT ONE PER CALLER (issues #103, #110).  Every way a
  * board's code reaches a plugin's decoder slots is a function below -- the

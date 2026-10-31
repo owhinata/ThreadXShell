@@ -6,8 +6,9 @@
  * @file    npu_hw.h
  * @brief   Ethos-U55 bring-up and cache maintenance, port-internal (issue #44).
  *
- * Not part of npu.h: the shell command only ever calls npu_open/invoke/close,
- * while these are the pieces those depend on and that only port/nn/npu/ arranges.
+ * Not part of the model API: the adapter loads, runs and unloads a model through
+ * svc/nn/nn.h (the Ethos-U backend in svc/nn/ethosu/), while these are the pieces
+ * that depend on this board and that only port/nn/npu/ arranges.
  */
 #ifndef NPU_HW_H
 #define NPU_HW_H

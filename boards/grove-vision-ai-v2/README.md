@@ -6891,11 +6891,15 @@ for this issue said otherwise three times before the code was read.
 
 ### The classifier, and the check that would have refused it
 
-`nn_input_quant_ok()` refuses a model whose input quantisation is not scale
+At the time, a check refused a model whose input quantisation is not scale
 1/255 zero point -128, because `nn_preproc_fill()` writes `pixel - 128` and
 BlazeFace's arithmetic assumes the model reads that back as those parameters.
-On `nn run` a refusal routes to the built-in class report; on `nn stream` it
-refuses to start.
+On `nn run` a refusal routed to the built-in class report; on `nn stream` it
+refused to start.  (That check is gone: issue #103 split it from the dtype
+question and issue #104 removed its quantisation half with the resident
+decoder.  What is left is `nn_input_fillable()` in `port/nn/nn_svc_grove.c`,
+which requires an int8 input, and `pixel - 128` is a board convention a
+container is written against -- `port/nn/nn_preproc.h`.)
 
 The classification model's input says scale 0.0203246, zero point -8 -- and **the
 vendor's own scenario app writes `pixel - 128` into it and is right to**

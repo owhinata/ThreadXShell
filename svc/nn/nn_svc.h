@@ -801,8 +801,11 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res);
 int nn_svc_stream_lines(enum nn_stream_lines_ctx ctx, unsigned index,
                         char *buf, size_t cap);
 
-/** Float input normalisation: 0 = [0,1], 1 = [-1,1].  Meaningless where the
- *  input is integer, which is why it is a capability and not a stub. */
+/** Input normalisation range: 0 = [0,1], 1 = [-1,1].  It applies to a float32
+ *  input and to an int8 one alike -- an int8 value is the normalised value put
+ *  through the tensor's scale and zero point (svc/nn/nn_input_contract.h, issue
+ *  #162).  A capability, not a stub: a board whose input is a fixed transform
+ *  (grove-vision-ai-v2's pixel - 128) has no range to choose. */
 void nn_svc_norm_set(int signed_range);
 int  nn_svc_norm_get(void);
 

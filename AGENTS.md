@@ -93,6 +93,7 @@
 - **[!] モデルの load / unload の順序は `svc/nn/nn_core_model` の 1 実装**（表は `svc/nn/nn_swap`、3 ボードがフック + const 表で採る）: 差し替えは
   backend 成功後、bare は plugin unload、モデルが残らない終わり方は全部下ろす、**BUSY は swap より前だけ**（BUSY 拒否は状態行を出さない、#131）。
 - **[!] nn ディスパッチャ（`svc/nn/nn.c`）は 3 ボードの 1 実装、backend は TFLM（`svc/nn/tflm/`、wio・f746）と Ethos-U（`svc/nn/ethosu/`、Grove）の各 1 実装**: ボードが出すのは配置・状態の実体・HW フックだけでリンク時に結合し、**ボード側の写しを戻さない**（#161・#169、`svc/README.md`）。 **interpreter は組む前に arena 全体をゼロ埋めする**（TFLM は途中失敗した演算表を初期化せず破棄で `free` を呼ぶ、#167、`nn_tflm_glue.h`）。
+- **[!] wio・f746 の入力の値と受入は `svc/nn/nn_input_contract` の 1 実装**（述語・1 要素の変換・開始コードの表 `nn_input_codes`。ボードは画素の取り方だけ、**Grove は自分の約束を持ち揃えない**。#162、`svc/README.md`）。
 
 ### 8. `svc/camera/frame_pipeline` の sink registry: attach は拒否する、直列化は呼び出し元
 
@@ -256,8 +257,8 @@ board README が正。
   camera producer・`consume()` 内で worker が欲しいときだけ、invoke〜publish は推論 worker**（#129。
   callback 中の block / sleep / 推論 / 待つロック / LCD 再入は禁止。panel は lease の try だけ）。**タイムアウトは `npu_hw.h` の 1 箇所。**
 - **[!] `nn stream` の拒否の仕方はボードで違う。揃えない**（Grove は**デコーダが無い時点で**、wio・f746 は
-  **shape は通し `can_draw` 1 本で**）。**[!] `nn_input_quant_ok()` は常駐デコーダの前提条件で plugin は
-  縛られない。[!] ファームの印字は「種」を名乗らない** — ゲートは **ロードされる全セクション**を negative scan する。**`nn dets` は
+  **shape は通し `can_draw` 1 本で**）。**[!] Grove の入力は固定の `pixel - 128` が container の前提で受入は
+  int8 だけ（`nn_input_fillable()`）。[!] ファームの印字は「種」を名乗らない** — ゲートは **ロードされる全セクション**を negative scan する。**`nn dets` は
   record の snapshot と report を lease の 1 回の保持で採る**（stream 中も全文。STALE は保持者が離さなかったときだけ）、**stop の record 境界は overlay の使用中 0 と worker の join の後、sink の unlink はカメラ停止の確認だけが許す**（#118, #129, #142。`nn run` も同じ teardown）。
 - **[!] Grove のファームも共有デコーダをリンクしない**（9 節）。**別フラグで組み直した監査対象を作らない。** 素の
   `.tflite` は**テンソルをそのまま報告**し、`nn thresh` は **`none`**、set は **`NN_SVC_ERR_STATE`**。

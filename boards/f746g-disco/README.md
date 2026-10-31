@@ -244,7 +244,7 @@ file (each `.c` with its `.h` unless only a header is listed):
 | `port/nn/nn_svc_f746.c` | console | The thin adapter over the `nn.h` API (`svc/nn/nn.h`, implemented by `svc/nn/nn.c`, shared with wio-lite-ai); it adds no state. |
 | `port/nn/nn_svc_f746_model.c` | console (`nn info`, `nn model load` / `unload`) | The steps of the shared load order on this board: the SD-card model slots in SDRAM; on `tflm`, the plugin policy, the container split and the open container's claims (issue #159; the claims' store and their `nn info` lines are `svc/plugin/plugin_claims`, read under this file's critical section). |
 | `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (start / stop / stats / record reads) and the camera sink's open / close of the nn step | Binds the shared frame path to this board's camera as the nn step of the one camera sink, and holds nn's place among the camera's holders (issue #142); owns the glue's state (the private header lists each counter's writers and resets) and the frame path's ops table. |
-| `port/nn/nn_producer.c` | camera producer (the nn step of the camera sink's `consume()`) | Prepares a frame straight into the model's input tensor (nearest-neighbour resize + RGB565 conversion on the CPU) and hands it over; it does not put the frame -- the sink does, last. |
+| `port/nn/nn_producer.c` | camera producer (the nn step of the camera sink's `consume()`) | Prepares a frame straight into the model's input tensor (nearest-neighbour resize + RGB565 expansion on the CPU, each value through the shared conversion `svc/nn/nn_input_contract.h`) and hands it over; it does not put the frame -- the sink does, last. |
 | `port/camera/cam_sink.c` | camera producer (`consume()`), console (step enable / disable / drain) | Not an nn file, but nn runs inside it: the one RGB565 subscriber of the base capture, running the GUIX display step and then the nn step, with `camera_frame_put()` last. Each step's armed mark and busy count are `svc/camera/cam_step.h`'s. |
 | `port/nn/nn_worker.c` | inference worker (priority 18) | Inference runs on the CPU, so the worker sits below every other thread; it runs the model, publishes the raw tensors ("nothing decoded them") or, under the plugin lease, the plugin's decode, and does the counting. |
 | `port/nn/nn_active.c` | worker, GUIX, console, under the plugin lease (tflm) | This board's facts for the shared entries (`svc/nn/nn_active_lease.c` above `svc/nn/nn_active_core.c`): reading an `nn_tensor` as a descriptor, where a depth sample goes, the frame a box maps into, and the base vtable's transform and log sink. |
@@ -257,20 +257,95 @@ file (each `.c` with its `.h` unless only a header is listed):
 | `port/nn/nn_decode_count.c` | inference worker | No hardware reason: this board's table for counting a plugin's answer in `nn stream stats` (wio-lite-ai's and Grove's) and the tally that counts only what the record took (pure, host-tested). |
 | `port/nn/nn_sess_release.c` | console (stop), inference worker | No hardware reason: when the stream's hold on the nn session may be given back, as a pure function of the sink drain and the worker. |
 | `port/nn/nn_model_board.c` | worker (run), console (open / bench / info) | The state and hooks of the shared model API (`svc/nn/nn.c`): its state as plain CPU-only `.bss`, the PRIMASK critical section, the one-tick ThreadX wait, and the DWT cycle counter, enabled here with the CoreSight lock key (TRCENA, LAR unlock, CYCCNTENA). |
-| `port/nn/nn_null.c` | as `svc/nn/nn.c` | The `null` backend: a BlazeFace-shaped stub with no runtime, present without a load. |
+| `port/nn/nn_null.c` | as `svc/nn/nn.c` | The `null` backend: a BlazeFace-shaped stub with no runtime, present without a load. Its input is int8, scale 1/128, zero point 0, so under the default `nn norm 0` the camera writes 0..127 into it (issue #162; the old `v - 128`, -128..127, comes back with `nn norm 1`); its run does nothing, so the tensor's contents are the only visible effect. |
 | `port/nn/nn_stedgeai.c`, `nn_stedgeai_reloc.c` | as `svc/nn/nn.c` | The non-default ST Edge AI Core backends (a model baked into Flash, or a relocatable one); they need a local ST install. |
 | `port/nn/tflm/nn_tflm_board.cc` | as `svc/nn/tflm/nn_tflm.cc` (worker: invoke; console: load / info) | The state object of the default backend, the shared tflite-micro one (`svc/nn/tflm/`, CMSIS-NN kernels; one implementation with wio-lite-ai since issue #161), as plain `.bss` in internal SRAM, and this board's fact that a model is named `sd:<path>` (it comes off the SD card). C++ only because the state holds TFLM objects' storage. |
 | `port/nn/tflm/nn_tflm_bufs.c` | as above | The arena and the two SD model slots in SDRAM bank3 (`.sdram.ai`, CPU-only), defined in C so `check_f746_layout.py` requires them by their plain names, and `nn_tflm_stage_cap`, the read limit the asset build reads back. |
 
-[!] **Until issue #162, only input 0 is filled.**  Since #161 the backend
-accepts a model with 1..8 input tensors (it refused more than one before), but
-the camera producer writes input 0 only: a model with more inputs runs with the
-others undefined (whatever the arena held).
+[!] **Only input 0 is filled** (issue #162 did not change this).  Since #161
+the backend accepts a model with 1..8 input tensors (it refused more than one
+before), but the camera producer writes input 0 only: a model with more inputs
+runs with the others undefined (whatever the arena held).
 
 This board has no panel thread.  The GUIX thread draws the overlay itself, in
 its CAMERA_FRAME handler (`ui/guix_camera_ui.c`): a loaded plugin's draw
 through `nn_panel_draw()`, and with none nothing (a stream with nothing to draw
 is refused at its start, below).
+
+### The camera input: one contract with wio-lite-ai (issue #162)
+
+What the camera can fill and what each pixel becomes are
+`svc/nn/nn_input_contract`, shared with wio-lite-ai.  This board keeps how a
+pixel is sampled (nearest-neighbour over the whole frame, the RGB565 expansion).
+
+**Admission.**  `nncam_open_model()` (under the NN session, which
+`nn_camera_start()` takes before it looks at the model) asks
+`nn_input_admit()`; each reason has its own code and sentence, the same as
+wio-lite-ai's:
+
+| Code | Reason | Sentence (`<name>`) |
+|---|---|---|
+| -3 | no input tensor, or it has no buffer | this board's "no model" sentence |
+| -18 | dtype neither float32 nor int8 | `input type is not float32 or int8` |
+| -19 | not 4-dimensional | `input is not 4-dimensional` |
+| -20 | batch not 1 | `input batch is not 1` |
+| -21 | height or width 0 | `input height or width is 0` |
+| -22 | channels neither 1 nor 3 | `input channels are not 1 or 3` |
+| -11 | int8 scale not a positive normal float | `int8 input scale is not a positive normal number -- a per-axis quantized input reads as scale 0` |
+| -23 | int8 zero point outside -128..127 | `int8 input zero point is outside -128..127` |
+| -24 | float32 buffer not 4-byte aligned | `float32 input buffer is not 4-byte aligned` |
+| -25 | buffer shorter than H x W x C elements (64-bit product) | `input buffer is shorter than its shape` |
+
+Every worded refusal reads `the model input cannot take camera pixels: <name>
+(`nn info`)`, with status `hardware` and nothing held, from `nn run` and `nn
+stream start` alike.  The numbers and the table are `svc/nn/nn_input_codes`;
+this board's `port/nn/nn_camera.h` takes its `NNCAM_ERR_*` from those names.
+
+-4 is no longer returned.  **This board admits less than it did**: a
+3-dimensional input (it used to be read as one channel), a batch other than 1,
+2 or 4+ channels, uint8 / int16 / int32 inputs (written a byte at a time
+before), an int8 scale of 0 or otherwise not a positive normal float -- so the
+`stedgeai_reloc` backend's int8 input, which always reads as scale 0, is
+refused -- a zero point outside int8, and an unaligned float32 buffer.
+
+**The value.**  Each sampled 8-bit channel goes through `nn_input_f32()` or
+`nn_input_i8()`: one explicit fused multiply-add (`VFMA.F32`, bias as the
+accumulator) for the `nn norm` range, then for int8 a multiply by 1/scale
+(computed once per frame, int8 only), a limit to +-255, +-0.5 and a conversion toward zero,
+the zero point, and saturation to int8.  The rounding is close to, but not
+exactly, TFLM's QUANTIZE (`std::round`): just below +-0.5 the float addition
+rounds to 1.0, and TFLM divides by the scale where this multiplies by 1/scale.
+The host test `shell/test/test_nn_input_contract.c` compares every 8-bit value,
+both ranges and a set of scales / zero points against a reference that spells
+out the target's instruction sequence.
+
+**What changed in the values** (issue #162 step 5):
+
+- int8 follows the tensor's scale, zero point and `nn norm` instead of a fixed
+  `v - 128`.  With the `null` backend (scale 1/128, zero point 0) and this
+  board's default `nn norm 0` the input is now `round(v / 255 * 128)`, 0..127
+  (saturating at 127), where it was -128..127; `nn norm 1` gives the old range
+  back to within the gain's rounding.
+- float32 is a fused multiply-add instead of a divide, so a value can differ
+  from before in the last bit; detections are expected to match and scores to
+  move by at most the last printed digit.
+
+**Cost -- estimates, not measured.**  From the instruction count of the final
+image, 49,152 elements (128 x 128 x 3) at 216 MHz, 1 to 1.5 cycles per added
+instruction:
+
+- int8: about 26 more instructions per element (fma, multiply, three compares,
+  add, convert, saturate in place of one subtract), roughly +5.9 to +9.1 ms per
+  frame.  There is no int8-input model for this board to measure it with.
+- float32: the per-element `VDIV.F32` (14-cycle latency) is gone, roughly 2.5
+  to 3.2 ms per frame faster.
+
+**Producer stack.**  The camera producer thread (`cam_prod`, 1024 B): deepest
+reachable path 600 B (its stream-start logging path; the nn path through
+`nncam_prep`, 96 B of it, is 400 B), plus 104 B for an exception frame with FP
+state and 100 B for the ThreadX context save -- 804 B of 1024.  From the
+`f746-tflm` `.su` files, with the calls through the pipeline's and the sink's
+function pointers added by hand.
 
 ### No resident decoder (issue #159 Step 4c)
 

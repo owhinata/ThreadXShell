@@ -39,8 +39,9 @@
 /** Repeat-invoke timing.  This board already had it as `ai bench`. */
 #define NN_SVC_HAS_BENCH       1
 
-/** Float input normalisation: this board's backends take float inputs, so the
- *  choice of range is real here in a way it is not on an int8-only board. */
+/** Input normalisation range: this board writes the camera input through the
+ *  shared conversion (svc/nn/nn_input_contract.h), float32 or int8, so the range
+ *  is a real choice here in a way it is not on a fixed-transform board. */
 #define NN_SVC_HAS_NORM        1
 
 /** Live inference, as `nn stream start/stop/stats`.  One shared implementation

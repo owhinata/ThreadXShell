@@ -7,8 +7,9 @@
  * @brief   Null nn backend: BlazeFace-shaped stub, no real runtime
  * (owhinata/stm32f746g-disco#81).
  *
- * The default backend (CONFIG_NN_BACKEND=null) so the firmware always builds
- * without the ST Edge AI Core (`stedgeai`) toolchain or any model.  It exposes a
+ * The always-buildable backend (CONFIG_NN_BACKEND=null; the default is `tflm`
+ * since issue #130): it needs neither the ST Edge AI Core (`stedgeai`)
+ * toolchain nor any model.  It exposes a
  * synthetic model whose tensor shapes match BlazeFace Front 128x128 int8 (input
  * 1x128x128x3; outputs 1x896x16 box regressors + 1x896x1 scores), with a REAL,
  * writable input buffer placed in the .sdram.ai arena (FMC bank3).  This lets the

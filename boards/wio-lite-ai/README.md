@@ -508,7 +508,7 @@ file (each `.c` with its `.h` unless only a header is listed):
 |---|---|---|
 | `port/nn/nn_svc_wio.c` | console | The adapter over the `nn.h` API (`svc/nn/nn.h`, implemented by `svc/nn/nn.c`, shared with f746g-disco); model bytes come out of the NOR asset store into the backend's PSRAM staging slot. The open model's claims are a `svc/plugin/plugin_claims.h` store read under this file's interrupt mask. |
 | `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (start / stop / stats / record reads) | Binds the shared frame path to the nn step of the band sink (`port/camera/cam_band.h`), holds nn's place among the camera's holders, and holds the NN session plus an OCTOSPI1 user place for the stream's lifetime; owns the glue's state (the private header lists each counter's writers and resets) and the frame path's ops table. |
-| `port/nn/nn_producer.c` | camera producer (the nn step of the band sink) | Downsamples each 60-row DCMI band straight into the model's input tensor on the CPU, inside one band period (~18.5 ms), and hands the frame over after the fourth band. |
+| `port/nn/nn_producer.c` | camera producer (the nn step of the band sink) | Downsamples each 60-row DCMI band straight into the model's input tensor on the CPU through the shared conversion (`svc/nn/nn_input_contract.h`), inside one band period (~18.5 ms), and hands the frame over after the fourth band. |
 | `port/nn/nn_worker.c` | inference worker (`nn_work`, priority 18) | Inference runs on the CPU for ~373 ms with no yield, so the worker sits below the console, the preview and the producer; it holds the result lease across decode + publish because the preview thread outranks it. |
 | `port/nn/nn_panel.c` | panel (preview thread, priority 12) | The nn half of the LTDC preview: the may-draw question, the record snapshot and the plugin's `draw()`, with the lease only tried. The display half (frame lock, back buffer, flip) stays in `src/cam_preview.c` and is passed in as hooks (`nn_panel.h`), because `port/nn` may not include `port/ltdc`. Built only with the LCD. |
 | `port/nn/nn_active.c` | worker, panel, console, under the plugin lease | This board's facts for the shared entries (`svc/nn/nn_active_lease.c`, which checks the lease, and `svc/nn/nn_active_core.c` below it): reading an `nn_tensor` as a `svc/nn/tensor.h` descriptor, where a depth sample goes, the frame geometry, and the base vtable's transform and log sink. |
@@ -523,9 +523,10 @@ file (each `.c` with its `.h` unless only a header is listed):
 | `port/plugin/plugin_paint.c` | panel | CPU pixel loops into the rotated, native-order RGB565 LTDC frame (no DMA2D, which has no way to prove it stopped before the flip). |
 | `port/camera/cam_band.c` | camera producer (band callback), console (step enable / disable / drain) | Not an nn file, but nn runs inside it: the one band sink, running the preview step and then the nn step; each step's armed mark and busy count are `svc/camera/cam_step.h`'s. |
 
-[!] **Until issue #162, only input 0 is filled.**  The backend accepts a model
-with 1..8 input tensors, but the camera producer writes input 0 only: a model
-with more inputs runs with the others undefined (whatever the arena held).
+[!] **Only input 0 is filled** (issue #162 did not change this).  The backend
+accepts a model with 1..8 input tensors, but the camera producer writes input 0
+only: a model with more inputs runs with the others undefined (whatever the
+arena held).
 
 [!] **Three `port/` -> `src/` includes remain on purpose.**  They are not nn
 files, and moving them would touch the LTDC, Wi-Fi and MPU code that also uses
@@ -536,6 +537,64 @@ them:
 | `psram.h` | `port/nn/nn_camera.c`, `port/nn/nn_svc_wio.c` | An OCTOSPI1 user place (`psram_acquire_shared()` / `psram_release_shared()`): the stream and `nn bench` read PSRAM, so a command that retunes the bus must be kept out (users do not exclude each other). |
 | `cam_preview.h` | `port/nn/nn_svc_wio.c` | `CAM_PREVIEW_STACK_BYTES`, the preview thread's stack: the ceiling the plugin draw allowance is asserted below. (The plugin-draw counters moved to `port/nn/nn_panel.h` in issue #140.) |
 | `blob.h` | `port/nn/nn_svc_wio.c` | The NOR asset store: `nn model load --name` reads a blob under the store's busy guard. |
+
+### The camera input: one contract with f746g-disco (issue #162)
+
+What the camera can fill and what each pixel becomes are no longer this
+board's: they are `svc/nn/nn_input_contract`, shared with f746g-disco.  This
+board keeps how a pixel is sampled (the band split, the downsample, the RGB565
+expansion) and its own band-tiling check (`NNCAM_ERR_GEOM`, -7), which runs
+after the shared one.
+
+**Admission.**  `nn_camera_start()` takes the NN session, then asks
+`nn_input_admit()` once, before it touches the camera or a plugin; a refusal
+gives the session back.  Each reason has its own code and sentence:
+
+| Code | Reason | Sentence (`<name>`) |
+|---|---|---|
+| -3 | no input tensor, or it has no buffer | this board's "no model" sentence |
+| -18 | dtype neither float32 nor int8 | `input type is not float32 or int8` |
+| -19 | not 4-dimensional | `input is not 4-dimensional` |
+| -20 | batch not 1 | `input batch is not 1` |
+| -21 | height or width 0 | `input height or width is 0` |
+| -22 | channels neither 1 nor 3 | `input channels are not 1 or 3` |
+| -11 | int8 scale not a positive normal float | `int8 input scale is not a positive normal number -- a per-axis quantized input reads as scale 0` |
+| -23 | int8 zero point outside -128..127 | `int8 input zero point is outside -128..127` |
+| -24 | float32 buffer not 4-byte aligned | `float32 input buffer is not 4-byte aligned` |
+| -25 | buffer shorter than H x W x C elements (64-bit product) | `input buffer is shorter than its shape` |
+
+Every worded refusal reads `the model input cannot take camera pixels: <name>
+(`nn info`)`, with status `hardware` and nothing held, from `nn run` and `nn
+stream start` alike.  The numbers and the table are `svc/nn/nn_input_codes`;
+this board's `port/nn/nn_camera.h` takes its `NNCAM_ERR_*` from those names.
+
+Against what this board admitted before: the same dtypes, rank, batch,
+channels, non-zero height / width, `scale > 0` and byte count, plus four new
+refusals -- an int8 scale that is infinite or subnormal, an int8 zero point
+outside int8, a shape whose 32-bit byte product wraps, and an unaligned float32
+buffer.  The dtype refusal used to share the band-tiling code; the rank and
+batch ones used to share -3.
+
+**The value.**  Each sampled 8-bit channel goes through `nn_input_f32()` or
+`nn_input_i8()`: one explicit fused multiply-add (`VFMA.F32`, bias as the
+accumulator) for the `nn norm` range, then for int8 a multiply by 1/scale
+(computed once per band), a limit to +-255, +-0.5 and a conversion toward zero,
+the zero point, and saturation to int8.  The rounding is close to, but not
+exactly, TFLM's QUANTIZE (`std::round`): just below +-0.5 the float addition
+rounds to 1.0, and TFLM divides by the scale where this multiplies by 1/scale.
+The host test `shell/test/test_nn_input_contract.c` compares every 8-bit value,
+both ranges and a set of scales / zero points against a reference that spells
+out the target's instruction sequence.  The values the producer writes are the ones it
+wrote before: the final image's `nncam_prep` has the same arithmetic in the same
+order, with only the limit's two compares added, and no `VFMA` with 0.5 as an
+operand.
+
+**Producer stack.**  The camera producer thread (`cam_prod`, 1024 B): deepest
+reachable path 368 B (its own logging path; the nn path through `nncam_prep`
+is 192 B), plus 104 B for an exception frame with FP state and 100 B for the
+ThreadX context save -- 572 B of 1024.  From the `.su` files of the final
+image (LTO partitions), with the calls through the band sink's function
+pointers added by hand.
 
 ## Plugin containers (issues #108, #110, #116 = #78 Steps 3a, 3b and 3c)
 

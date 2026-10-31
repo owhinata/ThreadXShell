@@ -21,6 +21,10 @@
  * order, the error codes, the double buffering, the transactional reload, the
  * descriptor publication order -- is one policy here.  This file owns no storage.
  *
+ * The pieces the Ethos-U backend needs in the same shape (descriptors, the display
+ * name, the empty state, the op resolver, the interpreter's destruction) are in
+ * nn_tflm_glue.h, included below with this file's state named (issue #169).
+ *
  * [!] THERE IS NO BUILT-IN MODEL.  open() succeeds with NO MODEL: zero inputs, zero
  * outputs, the name "(none)".  A model arrives by load_region() + reload() -- out of
  * wio-lite-ai's NOR blob store, off f746g-disco's SD card (since its issue #159 Step
@@ -55,6 +59,11 @@
 #include "nn_tflm_ops.h"     /* the op list, shared with verify_tflite */
 #include "nn_tflm_state.h"   /* the board-defined state and facts */
 
+/* The glue shared with the Ethos-U backend works on the object named here. */
+#define NN_TFLM_GLUE_STATE  nn_tflm_board_state
+#define NN_TFLM_GLUE_FACTS  nn_tflm_board_facts
+#include "nn_tflm_glue.h"    /* descriptors, name, resolver, interpreter (shared) */
+
 #include <new>
 #include <cstddef>
 #include <cstdint>
@@ -76,126 +85,6 @@
 #endif
 
 namespace {
-
-uint8_t map_dtype(TfLiteType t)
-{
-	switch (t) {
-	case kTfLiteInt8:    return NN_DTYPE_INT8;
-	case kTfLiteUInt8:   return NN_DTYPE_UINT8;
-	case kTfLiteInt16:   return NN_DTYPE_INT16;
-	case kTfLiteInt32:   return NN_DTYPE_INT32;
-	case kTfLiteFloat32: return NN_DTYPE_FLOAT32;
-	default:             return NN_DTYPE_NONE;
-	}
-}
-
-void fill_tensor(struct nn_tensor *nt, const TfLiteTensor *tt)
-{
-	int nd = tt->dims ? tt->dims->size : 0;
-
-	nt->data  = tt->data.data;
-	nt->bytes = (uint32_t)tt->bytes;
-	nt->ndim  = (uint8_t)(nd <= NN_MAX_DIMS ? nd : NN_MAX_DIMS);
-	for (int i = 0; i < NN_MAX_DIMS; i++)
-		nt->dims[i] = (i < nd) ? (uint16_t)tt->dims->data[i] : 1;
-	nt->dtype      = map_dtype(tt->type);
-	nt->scale      = tt->params.scale;
-	nt->zero_point = tt->params.zero_point;
-}
-
-/* Copy a display name into the backend-owned buffer: the board's prefix, then @p name.
- * nullptr / "" means no model and reads "(none)", never prefixed. */
-void set_model_name(const char *name)
-{
-	nn_tflm_state &s = nn_tflm_board_state;
-	const int cap = (int)sizeof(s.model_name) - 1;
-	int n = 0;
-
-	if (name && name[0]) {
-		const char *pre = nn_tflm_board_facts.name_prefix;
-
-		for (; pre && *pre && n < cap; pre++)
-			s.model_name[n++] = *pre;
-		for (; *name && n < cap; name++)
-			s.model_name[n++] = *name;
-	} else {
-		for (const char *src = "(none)"; *src && n < cap; src++)
-			s.model_name[n++] = *src;
-	}
-	s.model_name[n] = '\0';
-	s.tm.name = s.model_name;
-}
-
-/* No model: zero tensors, no activations, the name "(none)".  A legitimate steady
- * state, not an error -- see the file header.  Only the descriptors change; the
- * caller has destroyed the interpreter. */
-void publish_empty()
-{
-	nn_tflm_state &s = nn_tflm_board_state;
-
-	s.tm.n_in  = 0;
-	s.tm.n_out = 0;
-	s.tm.used  = 0u;
-	set_model_name(nullptr);
-}
-
-/*
- * The op resolver, constructed on first use into storage that is never destroyed.
- *
- * [!] NOT a function-local `static nn_tflm_op_resolver resolver;`, which is the
- * obvious way to write this.  MicroMutableOpResolver<N> has a non-trivial destructor,
- * so GCC emits a registration for it -- and because this build uses
- * -fno-use-cxa-atexit, that registration goes to plain atexit(), pulling newlib's
- * atexit, __register_exitproc and __call_exitprocs into the image (measured on
- * wio-lite-ai's first link) to run a destructor at a program exit that cannot happen.
- * And a function-local static would be storage in this shared file.
- *
- * Placement-new into the board's raw storage removes the destructor from the program
- * entirely, which is also the truthful description of this object's lifetime.  No
- * __cxa_guard_* is needed (-fno-threadsafe-statics) because every path that reaches
- * here holds the single NN session: svc/nn/nn.h requires the caller to hold it across
- * a model swap, and a model swap is the only thing that calls this.
- */
-nn_tflm_op_resolver *get_resolver()
-{
-	nn_tflm_state &s = nn_tflm_board_state;
-
-	if (s.resolver)
-		return s.resolver;
-
-	nn_tflm_op_resolver &resolver = *new (s.resolver_buf) nn_tflm_op_resolver();
-	bool ok = true;
-
-	/* AddXxx() returns kTfLiteError only when the resolver's slots are exhausted, which
-	 * cannot happen here -- NN_TFLM_OPS_TOTAL counts the very list being expanded -- so
-	 * any failure is a build-time mistake and fatal for the whole backend rather than
-	 * for one model.  The first refusal stops the rest. */
-#define NN_TFLM_REGISTER(enum_suffix, method) \
-	ok = ok && (resolver.method() == kTfLiteOk);
-	NN_TFLM_OPS_ALL(NN_TFLM_REGISTER)
-#undef NN_TFLM_REGISTER
-
-	if (ok) {
-		s.resolver = &resolver;
-		return s.resolver;
-	}
-	/* Leave the pointer null so this is retried rather than a half-filled resolver
-	 * being handed out.  Nothing to destroy: the object has no destructor in this
-	 * program, by construction (see above). */
-	return nullptr;
-}
-
-/* ~MicroInterpreter() is NOT trivial -- it calls graph_.FreeSubgraphs() -- so a
- * rebuild must destroy the previous one before placement-new reuses the storage. */
-void destroy_interp()
-{
-	nn_tflm_state &s = nn_tflm_board_state;
-
-	if (s.interp) {
-		s.interp->~MicroInterpreter();
-		s.interp = nullptr;
-	}
-}
 
 /*
  * Build an interpreter for @p data (@p len bytes) and publish its I/O into the handle.
@@ -238,11 +127,11 @@ int build_interp(const void *data, uint32_t len)
 	if (model->version() != TFLITE_SCHEMA_VERSION)
 		return NN_MODEL_ERR_VERSION;
 
-	nn_tflm_op_resolver *resolver = get_resolver();
+	nn_tflm_op_resolver *resolver = nn_tflm_get_resolver();
 	if (!resolver)
 		return NN_MODEL_ERR_OPS;
 
-	destroy_interp();
+	nn_tflm_destroy_interp();
 	s.interp = new (s.interp_buf) tflite::MicroInterpreter(
 		model, *resolver, nn_tflm_arena, (size_t)NN_TFLM_ARENA_BYTES);
 
@@ -251,7 +140,7 @@ int build_interp(const void *data, uint32_t len)
 	 * its return value; with TF_LITE_STRIP_ERROR_STRINGS there is no message either,
 	 * which is the price paid for not linking MicroPrintf and stdio. */
 	if (s.interp->AllocateTensors() != kTfLiteOk) {
-		destroy_interp();
+		nn_tflm_destroy_interp();
 		return NN_MODEL_ERR_ARENA;
 	}
 
@@ -262,7 +151,7 @@ int build_interp(const void *data, uint32_t len)
 	size_t n_out = s.interp->outputs_size();
 	if (n_in < 1u || n_in > (size_t)NN_MAX_IO ||
 	    n_out < 1u || n_out > (size_t)NN_MAX_IO) {
-		destroy_interp();
+		nn_tflm_destroy_interp();
 		return NN_MODEL_ERR_SHAPE;
 	}
 	/* Every tensor present, with a real buffer and a rank this API can describe.  Fail
@@ -270,14 +159,14 @@ int build_interp(const void *data, uint32_t len)
 	for (size_t i = 0; i < n_in; i++) {
 		TfLiteTensor *t = s.interp->input(i);
 		if (!t || !t->data.data || !t->dims || t->dims->size > NN_MAX_DIMS) {
-			destroy_interp();
+			nn_tflm_destroy_interp();
 			return NN_MODEL_ERR_TENSOR;
 		}
 	}
 	for (size_t i = 0; i < n_out; i++) {
 		TfLiteTensor *t = s.interp->output(i);
 		if (!t || !t->data.data || !t->dims || t->dims->size > NN_MAX_DIMS) {
-			destroy_interp();
+			nn_tflm_destroy_interp();
 			return NN_MODEL_ERR_TENSOR;
 		}
 	}
@@ -301,9 +190,9 @@ int build_interp(const void *data, uint32_t len)
 	s.tm.n_in  = 0;
 	s.tm.n_out = 0;
 	for (size_t i = 0; i < n_in; i++)
-		fill_tensor(&s.tm.in[i], s.interp->input(i));
+		nn_tflm_fill_tensor(&s.tm.in[i], s.interp->input(i));
 	for (size_t i = 0; i < n_out; i++)
-		fill_tensor(&s.tm.out[i], s.interp->output(i));
+		nn_tflm_fill_tensor(&s.tm.out[i], s.interp->output(i));
 	s.tm.used  = (uint32_t)s.interp->arena_used_bytes();
 	s.tm.n_in  = (int)n_in;
 	s.tm.n_out = (int)n_out;
@@ -331,7 +220,7 @@ static int tflm_bk_open(void **impl_out)
 	nn_tflm_state &s = nn_tflm_board_state;
 
 	if (!s.tm.open) {
-		publish_empty();
+		nn_tflm_publish_empty();
 		s.tm.open = true;
 	}
 	*impl_out = &s.tm;
@@ -367,11 +256,11 @@ static int tflm_bk_release(void)
 {
 	nn_tflm_state &s = nn_tflm_board_state;
 
-	destroy_interp();
+	nn_tflm_destroy_interp();
 	s.active_model = nullptr;
 	s.active_len   = 0u;
 	s.active_slot  = 0u;
-	publish_empty();
+	nn_tflm_publish_empty();
 	s.tm.open = true;
 	return 0;
 }
@@ -419,7 +308,7 @@ static int tflm_bk_reload(const void *data, uint32_t len, const char *name,
 		s.active_model = data;
 		s.active_len   = len;
 		s.active_slot  = (uint32_t)slot;
-		set_model_name(name);
+		nn_tflm_set_model_name(name);
 		s.tm.open = true;
 		return 0;
 	}
@@ -451,11 +340,11 @@ static int tflm_bk_reload(const void *data, uint32_t len, const char *name,
 	 * build_interp() destroys anything, so when both the new model and the restore
 	 * are refused there, the previous interpreter is still alive: left alone, run()
 	 * would Invoke() it on a slot load_region() is now free to hand out. */
-	destroy_interp();
+	nn_tflm_destroy_interp();
 	s.active_model = nullptr;
 	s.active_len   = 0u;
 	s.active_slot  = 0u;
-	publish_empty();
+	nn_tflm_publish_empty();
 	s.tm.open = true;
 	return rc;
 }

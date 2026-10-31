@@ -307,7 +307,7 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
   推論 / 待つロック / LCD 再入は禁止。panel は lease の try だけ）。**stop は overlay の使用中 0 → worker の join の後に record 境界、sink の unlink はカメラ停止の確認だけが許す。タイムアウトは `npu_hw.h` に 1 つ。**
 - **`nn stream` はデコーダが無い時点で拒否する**（shape や draw の前）。**wio・f746 と揃えようとしない。
   `nn_input_quant_ok()` は常駐デコーダの前提条件で plugin は縛られない。** `nn run` も同じ worker と同じ teardown（#129）。
-- **ファームの印字は「種」を名乗らない**（ゲートは **`.rodata`** を読む。**literal を regex で見ない**）。
+- **ファームの印字は「種」を名乗らない**（ゲートは **ロードされる全セクション**を読む。**literal を regex で見ない**）。
   **フォントは plugin 側**で `text()` を足さない。**`nn dets` は record の snapshot と report を lease の 1 回の保持で採る**（stream 中も全文）。
 
 ## SWD デバッグ（共通）

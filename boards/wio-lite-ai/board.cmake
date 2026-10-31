@@ -841,6 +841,9 @@ set(NN_SOURCES "${CMAKE_SOURCE_DIR}/svc/nn/nn.c"   # the dispatcher (shared, #16
                # by every board since issue #163, walked by
                # shell/test/test_nn_run_wait.c
                "${CMAKE_SOURCE_DIR}/svc/nn/nn_run_wait.c"
+               # the one `nn bench` procedure (issue #163): hold, fill,
+               # time N runs, let go -- walked by shell/test/test_nn_bench.c
+               "${CMAKE_SOURCE_DIR}/svc/nn/nn_bench.c"
                # where a `nn model load` ends (issue #122): a pure table
                # shared by every board since issue #131, walked by
                # shell/test/test_nn_swap.c

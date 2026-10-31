@@ -534,19 +534,14 @@ static int cmd_nn_bench(struct cli_instance *sh, int argc, char **argv)
 		return 1;
 	}
 
-	/* [!] The deterministic fill is not a tidy-up: on one board the arena is
-	 * NOLOAD, so an unfilled input holds whatever survived the last reset and
-	 * two runs are not measuring the same work. */
-	memset(&res, 0, sizeof res);
-	nn_svc_bench_prepare(&res);
-	if (res.status != NN_SVC_OK) {
-		nn_report(sh, "bench", &res);
-		return 1;
-	}
-
+	/* [!] ONE CALL, ONE HOLD (issue #163): the fill and the runs are the same
+	 * hold, so the model filled is the model measured.  The deterministic fill
+	 * is not a tidy-up: on one board the arena is NOLOAD, so an unfilled input
+	 * holds whatever survived the last reset and two runs are not measuring
+	 * the same work. */
 	memset(&res, 0, sizeof res);
 	memset(&st, 0, sizeof st);
-	nn_svc_bench_run(iters, &st, nn_cancel_shim, sh, &res);
+	nn_svc_bench(iters, &st, nn_cancel_shim, sh, &res);
 	if (res.status != NN_SVC_OK) {
 		nn_report(sh, "bench", &res);
 		return 1;

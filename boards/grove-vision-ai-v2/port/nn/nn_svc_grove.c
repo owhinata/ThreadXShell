@@ -30,6 +30,7 @@
 #include "nn_core.h"
 #include "nn_report.h"
 #include "nn_svc_adapter.h" /* nn_detail_set, nn_result, nn_info_line (#130) */
+#include "nn_bench.h"       /* the one bench procedure (#163) */
 
 #include <string.h>
 
@@ -1671,97 +1672,65 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
 
 /* ---- bench --------------------------------------------------------------- */
 
-void nn_svc_bench_prepare(struct nn_op_result *res)
+/* The procedure is svc/nn/nn_bench.c's (issue #163); this board's facts are its
+ * hold -- the gate as an OP, so `nn thresh` / `nn dets` still count in -- the
+ * model asked under it, and its clock. */
+static struct nn_model *nn_bench_acquire(struct nn_op_result *res)
 {
-	const struct nn_tensor *in = NULL;
-
-	nn_detail_clear();
+	struct nn_model *m = NULL;
 
 	if (!nn_try_acquire()) {
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
-		return;
+		return NULL;
 	}
+	/* [!] AN INPUT 0 TENSOR, NOT ONLY AN OPEN: a model without one is "no
+	 * model" here, as it was to the prepare this replaced.  A tensor whose data
+	 * is NULL is not a refusal -- the fill skips it. */
 	if (nn_open_done)
-		in = nn_input(nn_mh(), 0);
-	if (in == NULL) {
+		m = nn_mh();
+	if (m == NULL || nn_input(m, 0) == NULL) {
 		nn_detail_set("no model is loaded");
 		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
 		nn_release();
-		return;
+		return NULL;
 	}
-	/* A fixed pattern so every run measures the same work.  The value does not
-	   matter; that there IS one does. */
-	if (in->data != NULL)
-		memset(in->data, 0x5A, in->bytes);
-	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
-	nn_release();
+	return m;
 }
 
-void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
-                      nn_svc_cancel_fn cancel, void *ctx,
-                      struct nn_op_result *res)
+static void nn_bench_run_begin(struct nn_bench_clock *c)
 {
-	struct nn_model *m;
-	uint32_t i;
+	c->t0 = (uint32_t)tx_time_get();
+}
 
-	nn_detail_clear();
-	memset(out, 0, sizeof *out);
-	out->min_us = 0xFFFFFFFFu;
+static uint32_t nn_bench_run_end_us(struct nn_bench_clock *c,
+                                    const struct nn_model *m)
+{
+	uint32_t t1 = (uint32_t)tx_time_get();
 
-	if (!nn_try_acquire()) {
-		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
-		return;
-	}
-	if (!nn_open_done) {
-		nn_detail_set("no model is loaded");
-		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
-		nn_release();
-		return;
-	}
-	m = nn_mh();
+	(void)m;
+	/*
+	 * [!] TICKS ARE 1 ms HERE, so a single inference resolves to whole
+	 * milliseconds and the spread is coarse.  That is a property of this
+	 * board's time source rather than of the measurement, and it is why the
+	 * unit crossing the contract is microseconds: converting up is lossless,
+	 * and only this file knows what a tick is worth.
+	 */
+	return (t1 - c->t0) * 1000u;
+}
 
-	for (i = 0u; i < iters; i++) {
-		uint32_t t0, t1, us;
+static const struct nn_bench_ops nn_bench_ops_grove = {
+	.acquire     = nn_bench_acquire,
+	.release     = nn_release,
+	.clock_start = NULL,
+	.run_begin   = nn_bench_run_begin,
+	.run_end_us  = nn_bench_run_end_us,
+	.clock_mhz   = NULL,   /* ticks are real time: no clock to report */
+};
 
-		if (nn_svc_cancelled(cancel, ctx)) {
-			nn_detail_set("cancelled after %lu of %lu run(s)",
-			              (unsigned long)i, (unsigned long)iters);
-			nn_result(res, NN_SVC_ERR_CANCEL, NN_CLAIM_NONE);
-			nn_release();
-			return;
-		}
-		t0 = (uint32_t)tx_time_get();
-		if (nn_run(m) != 0) {
-			nn_detail_set("inference failed on run %lu of %lu",
-			              (unsigned long)i + 1u, (unsigned long)iters);
-			nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
-			nn_release();
-			return;
-		}
-		t1 = (uint32_t)tx_time_get();
-
-		/*
-		 * [!] TICKS ARE 1 ms HERE, so a single inference resolves to whole
-		 * milliseconds and the spread is coarse.  That is a property of this
-		 * board's time source rather than of the measurement, and it is why
-		 * the unit crossing the contract is microseconds: converting up is
-		 * lossless, and only this file knows what a tick is worth.
-		 */
-		us = (t1 - t0) * 1000u;
-		out->total_us += us;
-		if (us < out->min_us)
-			out->min_us = us;
-		if (us > out->max_us)
-			out->max_us = us;
-		out->runs++;
-	}
-
-	if (out->runs == 0u)
-		out->min_us = 0u;
-	else
-		out->avg_us = (uint32_t)(out->total_us / out->runs);
-	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
-	nn_release();
+void nn_svc_bench(uint32_t iters, struct nn_bench_stats *out,
+                  nn_svc_cancel_fn cancel, void *ctx, struct nn_op_result *res)
+{
+	nn_bench(&nn_bench_ops_grove, iters, out, cancel, ctx, res);
 }
 
 /* ---- boxes and threshold ------------------------------------------------- */

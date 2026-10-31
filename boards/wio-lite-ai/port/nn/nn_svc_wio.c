@@ -26,6 +26,7 @@
 #include "nn_core.h"
 #include "nn_report.h"
 #include "nn_svc_adapter.h" /* nn_detail_set, nn_result, nn_info_line (#130) */
+#include "nn_bench.h"       /* the one bench procedure (#163) */
 
 #include <string.h>
 
@@ -1345,22 +1346,23 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
 
 /* ---- bench --------------------------------------------------------------- */
 
-void nn_svc_bench_prepare(struct nn_op_result *res)
+/* The procedure is svc/nn/nn_bench.c's (issue #163); this board's facts are its
+ * hold -- the open, then the guards, then the model asked under them -- and its
+ * clock. */
+static struct nn_model *nn_bench_acquire(struct nn_op_result *res)
 {
 	struct nn_model *m = NULL;
-	int rc, i;
-
-	nn_detail_clear();
+	int rc;
 
 	if (nn_model_open(&m) != 0 || m == NULL) {
 		nn_detail_set("no model is loaded");
 		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
-		return;
+		return NULL;
 	}
 	rc = nn_guards_take(res);
 	if (rc != NN_SVC_OK) {
 		nn_result(res, rc, NN_CLAIM_NONE);
-		return;
+		return NULL;
 	}
 	/* [!] A MODEL, ASKED UNDER THE GUARDS (issue #131).  The singleton opens
 	 * empty -- after boot and after `nn model unload` -- and this used to
@@ -1370,92 +1372,42 @@ void nn_svc_bench_prepare(struct nn_op_result *res)
 		nn_guards_give();
 		nn_detail_set("no model is loaded");
 		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
-		return;
+		return NULL;
 	}
-	/* [!] The carve-out is NOLOAD, so an input holds whatever survived the last
-	 * reset until something fills it.  A fixed pattern makes every run
-	 * comparable; which pattern does not matter, that there is one does. */
-	for (i = 0; i < nn_input_count(m); i++) {
-		struct nn_tensor *t = nn_input(m, i);
-
-		if (t && t->data)
-			memset(t->data, 0x5A, t->bytes);
-	}
-	nn_guards_give();
-	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
+	return m;
 }
 
-void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
-                      nn_svc_cancel_fn cancel, void *ctx,
-                      struct nn_op_result *res)
+/* The DWT counter runs at the core clock on this board, and the core clock is
+ * INHERITED from the bootloader -- so it is read at run time, each run, rather
+ * than assumed. */
+static uint32_t nn_bench_run_end_us(struct nn_bench_clock *c,
+                                    const struct nn_model *m)
 {
-	struct nn_model *m = NULL;
-	uint32_t i;
-	int rc;
+	uint32_t mhz = SystemCoreClock / 1000000u;
 
-	nn_detail_clear();
-	memset(out, 0, sizeof *out);
-	out->min_us = 0xFFFFFFFFu;
+	(void)c;
+	return mhz ? (nn_last_cycles(m) / mhz) : 0u;
+}
 
-	if (nn_model_open(&m) != 0 || m == NULL) {
-		nn_detail_set("no model is loaded");
-		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
-		return;
-	}
-	rc = nn_guards_take(res);
-	if (rc != NN_SVC_OK) {
-		nn_result(res, rc, NN_CLAIM_NONE);
-		return;
-	}
-	/* Asked again under THIS hold: an unload may have run since prepare. */
-	if (!nn_model_present(m)) {
-		nn_guards_give();
-		nn_detail_set("no model is loaded");
-		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
-		return;
-	}
+static uint32_t nn_bench_clock_mhz(const struct nn_bench_clock *c)
+{
+	(void)c;
+	return SystemCoreClock / 1000000u;
+}
 
-	for (i = 0u; i < iters; i++) {
-		uint32_t us;
+static const struct nn_bench_ops nn_bench_ops_wio = {
+	.acquire     = nn_bench_acquire,
+	.release     = nn_guards_give,
+	.clock_start = NULL,
+	.run_begin   = NULL,
+	.run_end_us  = nn_bench_run_end_us,
+	.clock_mhz   = nn_bench_clock_mhz,
+};
 
-		if (nn_svc_cancelled(cancel, ctx)) {
-			nn_detail_set("cancelled after %lu of %lu run(s)",
-			              (unsigned long)i, (unsigned long)iters);
-			nn_guards_give();
-			nn_result(res, NN_SVC_ERR_CANCEL, NN_CLAIM_NONE);
-			return;
-		}
-		if (nn_run(m) != 0) {
-			nn_detail_set("inference failed on run %lu of %lu",
-			              (unsigned long)i + 1u, (unsigned long)iters);
-			nn_guards_give();
-			nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
-			return;
-		}
-		{
-			/* The DWT counter runs at the core clock on this board, and
-			   the core clock is INHERITED from the bootloader -- so it is
-			   read at run time rather than assumed. */
-			uint32_t mhz = SystemCoreClock / 1000000u;
-
-			us = mhz ? (nn_last_cycles(m) / mhz) : 0u;
-		}
-		out->total_us += us;
-		if (us < out->min_us)
-			out->min_us = us;
-		if (us > out->max_us)
-			out->max_us = us;
-		out->runs++;
-	}
-	nn_guards_give();
-
-	if (out->runs == 0u)
-		out->min_us = 0u;
-	else
-		out->avg_us = (uint32_t)(out->total_us / out->runs);
-	/* Say what the cycle -> microsecond conversion assumed. */
-	out->clock_mhz = SystemCoreClock / 1000000u;
-	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
+void nn_svc_bench(uint32_t iters, struct nn_bench_stats *out,
+                  nn_svc_cancel_fn cancel, void *ctx, struct nn_op_result *res)
+{
+	nn_bench(&nn_bench_ops_wio, iters, out, cancel, ctx, res);
 }
 
 /* ---- norm, boxes and threshold ---------------------------------- */

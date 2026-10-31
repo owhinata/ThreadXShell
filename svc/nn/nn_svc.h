@@ -588,16 +588,6 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
                            struct nn_result_extra *ext, struct nn_op_result *res);
 
 /**
- * Fill every input with a deterministic pattern, so runs are comparable.
- *
- * [!] NOT AN OPTIONAL TIDY-UP.  wio's arena is NOLOAD, so an input holds
- * whatever survived the last reset until something fills it, and two runs would
- * not be measuring the same work.  Which pattern is the board's business; that
- * there IS one is not.
- */
-void nn_svc_bench_prepare(struct nn_op_result *res);
-
-/**
  * What a benchmark measured.
  *
  * [!] MIN, AVERAGE AND MAX, NOT A TOTAL.  An average alone hides the thing a
@@ -627,10 +617,21 @@ struct nn_bench_stats {
 	uint32_t clock_mhz;
 };
 
-/** Invoke @p iters times and report the spread. */
-void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
-                      nn_svc_cancel_fn cancel, void *ctx,
-                      struct nn_op_result *res);
+/**
+ * Fill every input with a fixed pattern, invoke @p iters times and report the
+ * spread -- in ONE hold (issue #163).
+ *
+ * [!] ONE CALL, NOT A PREPARE AND A RUN.  Until issue #163 the fill and the runs
+ * were two calls with nothing held between them, so a load on another console
+ * could replace the model just filled.  Every board implements this through the
+ * one procedure in svc/nn/nn_bench.c and passes only its hold and its clock.
+ *
+ * [!] THE FILL IS NOT AN OPTIONAL TIDY-UP.  wio's arena is NOLOAD, so an input
+ * holds whatever survived the last reset until something fills it, and two runs
+ * would not be measuring the same work.
+ */
+void nn_svc_bench(uint32_t iters, struct nn_bench_stats *out,
+                  nn_svc_cancel_fn cancel, void *ctx, struct nn_op_result *res);
 
 /* ---- live inference (issue #99) ------------------------------------------
  *

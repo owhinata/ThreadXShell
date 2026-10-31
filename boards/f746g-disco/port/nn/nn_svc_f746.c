@@ -26,6 +26,7 @@
 #include "nn_core.h"
 #include "nn_report.h"
 #include "nn_svc_adapter.h" /* nn_detail_set, nn_result, nn_info_line (#130) */
+#include "nn_bench.h"       /* the one bench procedure (#163) */
 
 #include <string.h>
 
@@ -615,12 +616,13 @@ void nn_svc_decode_current(struct nn_det_snapshot *snap, struct bf_det *dets,
 
 /* ---- bench --------------------------------------------------------------- */
 
-void nn_svc_bench_prepare(struct nn_op_result *res)
+/* The procedure is svc/nn/nn_bench.c's (issue #163); this board's facts are its
+ * hold -- the open, then the session, then the model asked under it -- and its
+ * clock. */
+static struct nn_model *nn_bench_acquire(struct nn_op_result *res)
 {
 	struct nn_model *m = NULL;
-	int i, rc;
-
-	nn_detail_clear();
+	int rc;
 
 	rc = nn_model_open(&m);
 	if (rc != 0 || m == NULL) {
@@ -629,114 +631,71 @@ void nn_svc_bench_prepare(struct nn_op_result *res)
 		else
 			nn_detail_set("no model is loaded");
 		nn_result(res, nn_open_status(rc), NN_CLAIM_NONE);
-		return;
+		return NULL;
 	}
 	rc = nn_session_try_acquire();
 	if (rc != 0) {
 		nn_busy_detail(res, rc);
 		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
-		return;
+		return NULL;
 	}
 	/* [!] A MODEL, ASKED UNDER THE SESSION (issue #131): the singleton is open
 	 * with nothing in it after `nn model unload`, and a load cannot change the
-	 * answer while this holds the session. */
+	 * answer while this holds the session.  Without it an empty model failed
+	 * as "inference failed" -- a hardware answer for a state one. */
 	if (!nn_model_present(m)) {
 		nn_session_release();
 		nn_detail_set("no model is loaded");
 		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
-		return;
+		return NULL;
 	}
-	/* A fixed pattern so every run measures the same work. */
-	for (i = 0; i < nn_input_count(m); i++) {
-		struct nn_tensor *t = nn_input(m, i);
-
-		if (t && t->data)
-			memset(t->data, 0, t->bytes);
-	}
-	nn_session_release();
-	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
+	return m;
 }
 
-void nn_svc_bench_run(uint32_t iters, struct nn_bench_stats *out,
-                      nn_svc_cancel_fn cancel, void *ctx,
-                      struct nn_op_result *res)
+static void nn_bench_release(void)
 {
-	struct nn_model *m = NULL;
-	uint32_t hclk = HAL_RCC_GetHCLKFreq();
-	uint32_t mhz = (hclk / 1000000u) ? (hclk / 1000000u) : 1u;
-	uint32_t i;
-	int rc;
-
-	nn_detail_clear();
-	memset(out, 0, sizeof *out);
-	out->min_us = 0xFFFFFFFFu;
-
-	rc = nn_model_open(&m);
-	if (rc != 0 || m == NULL) {
-		if (rc == NN_ERR_SCRATCH_HELD)
-			nn_busy_detail(res, rc);
-		else
-			nn_detail_set("no model is loaded");
-		nn_result(res, nn_open_status(rc), NN_CLAIM_NONE);
-		return;
-	}
-	rc = nn_session_try_acquire();
-	if (rc != 0) {
-		nn_busy_detail(res, rc);
-		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
-		return;
-	}
-	/* Asked again under THIS hold: an unload may have run between prepare and
-	 * here (issue #131).  Without it an empty model failed as "inference
-	 * failed" -- a hardware answer for a state one. */
-	if (!nn_model_present(m)) {
-		nn_session_release();
-		nn_detail_set("no model is loaded");
-		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
-		return;
-	}
-
-	for (i = 0u; i < iters; i++) {
-		uint32_t us;
-
-		if (nn_svc_cancelled(cancel, ctx)) {
-			nn_detail_set("cancelled after %lu of %lu run(s)",
-			              (unsigned long)i, (unsigned long)iters);
-			nn_session_release();
-			nn_result(res, NN_SVC_ERR_CANCEL, NN_CLAIM_NONE);
-			return;
-		}
-		if (nn_run(m) != 0) {
-			nn_detail_set("inference failed on run %lu of %lu",
-			              (unsigned long)i + 1u, (unsigned long)iters);
-			nn_session_release();
-			nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_NONE);
-			return;
-		}
-		/*
-		 * [!] DWT CYCCNT COUNTS THE CORE CLOCK, so the divisor is HCLK --
-		 * NOT CLI_CPU_CYCLES_PER_US, which is this board's TIM2 timebase
-		 * rate (108) and half the core clock (216).  Using it made every
-		 * latency twice what it should be, silently, on a board where
-		 * nothing else would have contradicted the number.
-		 */
-		us = mhz ? (nn_last_cycles(m) / mhz) : 0u;
-		out->total_us += us;
-		if (us < out->min_us)
-			out->min_us = us;
-		if (us > out->max_us)
-			out->max_us = us;
-		out->runs++;
-	}
 	nn_session_release();
+}
 
-	if (out->runs == 0u)
-		out->min_us = 0u;
-	else
-		out->avg_us = (uint32_t)(out->total_us / out->runs);
-	/* Say what the cycle -> microsecond conversion assumed. */
-	out->clock_mhz = mhz;
-	nn_result(res, NN_SVC_OK, NN_CLAIM_NONE);
+/* HCLK once for the whole bench; 0 would divide by zero, so 1 MHz. */
+static void nn_bench_clock_start(struct nn_bench_clock *c)
+{
+	uint32_t hclk = HAL_RCC_GetHCLKFreq();
+
+	c->mhz = (hclk / 1000000u) ? (hclk / 1000000u) : 1u;
+}
+
+static uint32_t nn_bench_run_end_us(struct nn_bench_clock *c,
+                                    const struct nn_model *m)
+{
+	/*
+	 * [!] DWT CYCCNT COUNTS THE CORE CLOCK, so the divisor is HCLK -- NOT
+	 * CLI_CPU_CYCLES_PER_US, which is this board's TIM2 timebase rate (108) and
+	 * half the core clock (216).  Using it made every latency twice what it
+	 * should be, silently, on a board where nothing else would have
+	 * contradicted the number.
+	 */
+	return c->mhz ? (nn_last_cycles(m) / c->mhz) : 0u;
+}
+
+static uint32_t nn_bench_clock_mhz(const struct nn_bench_clock *c)
+{
+	return c->mhz;
+}
+
+static const struct nn_bench_ops nn_bench_ops_f746 = {
+	.acquire     = nn_bench_acquire,
+	.release     = nn_bench_release,
+	.clock_start = nn_bench_clock_start,
+	.run_begin   = NULL,
+	.run_end_us  = nn_bench_run_end_us,
+	.clock_mhz   = nn_bench_clock_mhz,
+};
+
+void nn_svc_bench(uint32_t iters, struct nn_bench_stats *out,
+                  nn_svc_cancel_fn cancel, void *ctx, struct nn_op_result *res)
+{
+	nn_bench(&nn_bench_ops_f746, iters, out, cancel, ctx, res);
 }
 
 /* ---- norm, boxes and threshold ------------------------------------------- */

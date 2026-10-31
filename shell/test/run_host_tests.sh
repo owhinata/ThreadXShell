@@ -871,6 +871,15 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" \
     $LDFLAGS -o "$out/test_nn_run_wait"
 "$out/test_nn_run_wait"
 
+# issue #163 -- the one `nn bench` procedure (svc/nn/nn_bench.c): the board's
+# hold taken once, every input filled and every run timed under it, given back
+# exactly once on every exit and never after a failed acquire.  A console
+# reaches only the common exits; a fake board records the order of all of them.
+gcc $CFLAGS -I "$svc" -I "$svc/nn" \
+    "$here/test_nn_bench.c" "$svc/nn/nn_bench.c" "$svc/fmt.c" \
+    $LDFLAGS -o "$out/test_nn_bench"
+"$out/test_nn_bench"
+
 # issue #122 -- the gate's claim and the count of console calls inside the
 # plugin (svc/nn/nn_param_calls.c, moved out of grove-vision-ai-v2 by issue
 # #163).  A threshold call in a background job preempted by a load on the other

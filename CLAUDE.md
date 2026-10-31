@@ -274,7 +274,7 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
   ファイル要求はファーム焼きを止める）。削除済みのモデル予約・ターゲットは復活させない。
 - **Himax SDK は pin fetch で `lib/` と同じ read-only**。**公開 TRM が無い**ので主張は SVD と SDK 実装で。
 - **ポストビルドゲート 5 本**（image coherence / placement / timer seam / `check_nor_seam.py` /
-  `check_output_vocabulary.py`）**を外す・弱めない**（負のテストは `cmake/fixtures/`）。**LTO 不使用。**
+  `check_output_vocabulary.py`）**を外す・弱めない**（負のテストは `cmake/fixtures/`）。placement の ITCM 空き下限は持たない（実行時の消費者が無く溢れはリンクエラー、#170）。**LTO 不使用。**
 - **低位 SRAM 窓は NOLOAD 専用**（配置ゲートが ELF のフラグで検査）。**DMA が触るバッファは TCM 不可。
   app はクロックを設定しない**（SCU 読み戻しが唯一の真実。SysTick reload は実行時値から）。
 - **SEC_ONLY なので `TX_SINGLE_MODE_SECURE` 必須**。優先度は 3-bit で**M7 の値を流用しない**。

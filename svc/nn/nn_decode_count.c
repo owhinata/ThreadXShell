@@ -4,7 +4,7 @@
  */
 /**
  * @file    nn_decode_count.c
- * @brief   This board's decode counting table.  See nn_decode_count.h.
+ * @brief   The decode counting table and tally.  See nn_decode_count.h.
  */
 #include "nn_decode_count.h"
 
@@ -13,7 +13,7 @@
 enum nn_decode_count nn_decode_count_of(int nd, int oneshot)
 {
 	/* [!] A plugin was shipped with its model: BF_ERR_MODEL is a mismatch,
-	 * not a result (issue #159, the other boards' rule). */
+	 * not a result (issue #159, grove-vision-ai-v2's rule). */
 	if (oneshot || nd >= 0)
 		return NN_DC_NONE;
 	if (nd == BF_ERR_MODEL)

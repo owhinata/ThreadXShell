@@ -2,16 +2,20 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host test for this board's decode counting table (issue #130 step 6c, #122
- * P8, port/nn/nn_decode_count.c; one table since issue #159 Step 4c).
+ * Host test for the decode counting table and tally (issue #130 step 6c, #122
+ * P8, svc/nn/nn_decode_count.c; one table since issue #159 Step 4c).  Since
+ * issue #163 the one copy wio-lite-ai and f746g-disco both link; this file
+ * merges the two boards' tests, every case of both kept.
  *
  * WHY THIS EXISTS.  The rows that matter cannot be typed: a plugin answers
- * BF_ERR_UNINIT or BF_ERR_ARG only for a wiring fault, and each must be counted
- * as a decoder fault -- folded into nothing it reads as a healthy stream.  And
- * BF_ERR_MODEL from a plugin that passed the admission is a container whose
- * two halves disagree: model_errors, never an inference with nobody found.
- * Every row is spelled out against the real BF_ERR_* values, then the rules are
- * checked over a sweep of answers.
+ * BF_ERR_UNINIT or BF_ERR_ARG only for a wiring fault no shipped container
+ * produces, and a code nobody documented has no container at all.  Each must be
+ * counted as a decoder fault -- folding a wiring fault into "the model" sends the
+ * operator to a different model, and folding any negative into nothing reads as
+ * a healthy stream.  And BF_ERR_MODEL from a plugin that passed the admission is
+ * a container whose two halves disagree: model_errors, never an inference with
+ * nobody found.  Every row is spelled out against the real BF_ERR_* values, then
+ * the rules are checked over a sweep of answers.
  */
 #include <limits.h>
 #include <stdio.h>
@@ -41,14 +45,17 @@ static void row(int nd, int oneshot, enum nn_decode_count want)
 
 static void test_rows(void)
 {
-	/* A stream. */
+	/* A stream: grove-vision-ai-v2's table. */
 	row(0, 0, NN_DC_NONE);               /* decoded nobody: a measurement  */
+	row(1, 0, NN_DC_NONE);
 	row(5, 0, NN_DC_NONE);
 	row(INT_MAX, 0, NN_DC_NONE);
-	row(BF_ERR_MODEL, 0, NN_DC_MODEL);   /* the container's halves disagree */
+	row(BF_ERR_MODEL, 0, NN_DC_MODEL);   /* the container's halves disagree:
+	                                      * load a different model          */
 	row(BF_ERR_UNINIT, 0, NN_DC_DECODER);
 	row(BF_ERR_ARG, 0, NN_DC_DECODER);
-	row(-4, 0, NN_DC_DECODER);           /* undocumented: a fault          */
+	row(-4, 0, NN_DC_DECODER);           /* undocumented: a fault, never
+	                                      * "the model"                     */
 	row(-64, 0, NN_DC_DECODER);
 	row(INT_MIN, 0, NN_DC_DECODER);
 
@@ -59,7 +66,9 @@ static void test_rows(void)
 	row(BF_ERR_UNINIT, 1, NN_DC_NONE);
 	row(BF_ERR_ARG, 1, NN_DC_NONE);
 	row(INT_MIN, 1, NN_DC_NONE);
-	row(BF_ERR_UNINIT, -1, NN_DC_NONE);  /* any non-zero is a one-shot     */
+	row(BF_ERR_MODEL, -1, NN_DC_NONE);   /* any non-zero is a one-shot     */
+	row(BF_ERR_UNINIT, -1, NN_DC_NONE);
+	row(BF_ERR_UNINIT, 2, NN_DC_NONE);
 	row(BF_ERR_ARG, 2, NN_DC_NONE);
 }
 

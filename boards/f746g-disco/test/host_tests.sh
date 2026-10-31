@@ -65,14 +65,8 @@ gcc $CFLAGS -I "$board/port/camera" \
 # shell/test/test_nn_sess_release.c.
 
 # issue #130 step 6c (#122 P8) -- how a plugin's decode is counted in `nn stream
-# stats` (port/nn/nn_decode_count.c; one table since issue #159 Step 4c, when the
-# resident decoder went).  BF_ERR_MODEL is model_errors, every other negative a
-# decoder fault -- and none of those can be typed -- and only what the record
-# took is counted (P18).
-gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
-    "$here/test_nn_decode_count.c" "$board/port/nn/nn_decode_count.c" \
-    $LDFLAGS -o "$out/test_nn_decode_count"
-"$out/test_nn_decode_count"
+# stats`: in svc/ since issue #163 (svc/nn/nn_decode_count.c, one copy with
+# wio-lite-ai) and walked by shell/test/test_nn_decode_count.c.
 
 # issue #162 -- the camera input refusals (svc/nn/nn_input_codes.h, tested in
 # shell/test/test_nn_input_codes.c) against this board's other nn_camera_start()

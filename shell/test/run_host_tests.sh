@@ -891,6 +891,17 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" \
     $LDFLAGS -o "$out/test_nn_sess_release"
 "$out/test_nn_sess_release"
 
+# issue #130 step 6c (#122 P8) -- how a decode's answer is counted in `nn stream
+# stats` (svc/nn/nn_decode_count.c; one copy for wio-lite-ai and f746g-disco
+# since issue #163, which merged the two boards' tests).  A plugin that answers
+# BF_ERR_UNINIT, BF_ERR_ARG or an undocumented code cannot be typed, and each
+# must be counted as a decoder fault, never as "the model" or as nothing; and
+# only what the record took is counted (P18).
+gcc $CFLAGS -I "$svc" -I "$svc/nn" \
+    "$here/test_nn_decode_count.c" "$svc/nn/nn_decode_count.c" \
+    $LDFLAGS -o "$out/test_nn_decode_count"
+"$out/test_nn_decode_count"
+
 # issue #130 -- the shared frame path that runs that word (svc/nn/nn_core_frame.c):
 # a frame in four parts (wio-lite-ai's bands) and in one (grove-vision-ai-v2's),
 # the two ways out of FILLING (the producer's ABANDON, the stop's JOIN), the

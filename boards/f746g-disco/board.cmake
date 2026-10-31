@@ -424,7 +424,7 @@ set(NN_SOURCES
     "${BOARD_DIR}/port/nn/nn_producer.c"        # ...its camera producer thread (#140)
     "${BOARD_DIR}/port/nn/nn_worker.c"          # ...its inference worker thread (#140)
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_sess_release.c" # when the session may go back (#130, svc/ #163)
-    "${BOARD_DIR}/port/nn/nn_decode_count.c"    # how a decode is counted (#130 6c)
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_decode_count.c" # how a decode is counted (#130 6c, svc/ #163)
     # nn_tensor -> tensor_desc (issue #159 Step 4c: the half of the old
     # nn_decoder.c that outlived the resident decoder).  No decoder is linked in
     # any backend: one reaches this board only in a plugin container.

@@ -4,33 +4,40 @@
  */
 /**
  * @file    nn_decode_count.h
- * @brief   How this board counts a decoder's answer in `nn stream stats`
+ * @brief   How a decoder's answer is counted in `nn stream stats`
  *          (issue #130 step 6c, #122 P8; one table since issue #159 Step 4c).
  *
- * A decoder reaches this board only in a plugin container (issue #159 Step
- * 4c removed the resident one).  Its decode() returns a count or a negative
- * BF_ERR_* (svc/nn/blazeface.h -- the vocabulary, not the decoder):
+ * A decoder reaches wio-lite-ai and f746g-disco only in a plugin container
+ * (issue #159 Step 4c removed f746g-disco's resident one).  Its decode()
+ * returns a count or a negative BF_ERR_* (svc/nn/blazeface.h -- the
+ * vocabulary, not the decoder), and the worker has no console of its own: a
+ * refusal that is not counted apart cannot be told apart afterwards (issue
+ * #97).  The table is grove-vision-ai-v2's rule:
  *
  *   count (>= 0)             not an error
  *   BF_ERR_MODEL             model_errors   -- load a different model
  *   any other negative       decoder_errors -- the firmware is wired wrong
  *   a one-shot (`nn run`)    nothing        -- it reports its own result
  *
- * and either error counts in `errors` too.  wio-lite-ai's and
- * grove-vision-ai-v2's table.
+ * and either error counts in `errors` too.
  *
  * [!] BF_ERR_MODEL IS A MISMATCH, NOT A RESULT.  A plugin was shipped with the
  * model it reads, so its "not my model" means the container's two halves do not
  * belong together -- it must not read as an inference that found nobody.  (Until
- * Step 4c the resident decoder ran on every model and its BF_ERR_MODEL was the
- * top-5 result of a classifier stream; that table went with it.)
+ * Step 4c f746g-disco's resident decoder ran on every model and its BF_ERR_MODEL
+ * was the top-5 result of a classifier stream; that table went with it.)
  *
  * [!] THE OTHER NEGATIVES ARE NOT FOLDED INTO IT, nor into "0 found": BF_ERR_UNINIT,
- * BF_ERR_ARG and a code nobody documented are wiring faults.
+ * BF_ERR_ARG and a code nobody documented are wiring faults, and an unknown one
+ * is never read as "the model" (that would send the operator to a different
+ * model for a firmware bug).
  *
- * Pure, no storage: test/test_nn_decode_count.c walks the table and the tally.
- * The counters and where they move are the worker's (port/nn/nn_worker.c,
- * nncam_account()).
+ * Pure, no storage: shell/test/test_nn_decode_count.c walks the table and the
+ * tally.  The counters and where they move are each board's worker
+ * (boards/<board>/port/nn/nn_worker.c, nncam_account(); only f746g-disco uses
+ * the tally).  Moved here from wio-lite-ai's and f746g-disco's port/nn/ (two
+ * copies of one table) by issue #163; the values of enum nn_decode_count are
+ * wio-lite-ai's.
  */
 #ifndef NN_DECODE_COUNT_H
 #define NN_DECODE_COUNT_H
@@ -42,8 +49,8 @@ extern "C" {
 /** Which `nn stream stats` counter one decode's answer moves. */
 enum nn_decode_count {
 	NN_DC_NONE = 0,   /**< not an error: a result, or not counted at all */
-	NN_DC_DECODER,    /**< decoder_errors and errors                     */
 	NN_DC_MODEL,      /**< model_errors and errors                       */
+	NN_DC_DECODER,    /**< decoder_errors and errors                     */
 };
 
 /**

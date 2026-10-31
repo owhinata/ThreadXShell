@@ -47,13 +47,8 @@ gcc $CFLAGS -Wno-unused-parameter \
 "$out/test_crc32"
 
 # issue #130 step 6c (#122 P8) -- how a decode's answer is counted in `nn stream
-# stats` (port/nn/nn_decode_count.c): grove-vision-ai-v2's table.  A plugin that
-# answers BF_ERR_UNINIT, BF_ERR_ARG or an undocumented code cannot be typed, and
-# each must be counted as a decoder fault, never as "the model" or as nothing.
-gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
-    "$here/test_nn_decode_count.c" "$board/port/nn/nn_decode_count.c" \
-    $LDFLAGS -o "$out/test_nn_decode_count"
-"$out/test_nn_decode_count"
+# stats`: in svc/ since issue #163 (svc/nn/nn_decode_count.c, one copy with
+# f746g-disco) and walked by shell/test/test_nn_decode_count.c.
 
 # issue #162 -- the camera input refusals (svc/nn/nn_input_codes.h, tested in
 # shell/test/test_nn_input_codes.c) against this board's other nn_camera_start()

@@ -366,6 +366,14 @@ plugin machinery of Steps 4a-4b in place), `shell.bin` is 613,388 B on `tflm`
 (807,188 B before the step: 193,800 B less, of which 189,816 B is the model)
 and 413,764 B on `null` (417,116 B before: 3,352 B less, the decoder).
 
+At issue #161 (the dispatcher and the tflm backend shared with wio-lite-ai),
+`shell.bin` is 612,980 B on `tflm`, 368 B less than at 3ead964 (613,348 B):
+the op resolver is constructed in the backend's state instead of as a
+function-local static, so its atexit registration is gone.  Internal SRAM grew
+by 32 B; the backend's state, `nn_tflm_board_state`, is 1,600 B of `.bss`
+there.  `nn info`'s backend line now reads `tflm (tflite-micro + CMSIS-NN)`,
+taken from the build configuration (kernel set) as on wio-lite-ai.
+
 SDRAM bank3 (`.sdram.ai`, `0xC0600000`, 2 MB) under `tflm`, after #130 step 6b
 removed the camera staging buffers (`nncam_stage`, 393,216 B) and #159 Step 4c
 the resident decoder's candidate scratch (`nn_dec_scratch`, 1,536 B):
@@ -379,7 +387,11 @@ the resident decoder's candidate scratch (`nn_dec_scratch`, 1,536 B):
 `check_f746_layout.py` requires `nn_tflm_arena` and `nn_tflm_model_buf` in bank3
 in a `tflm` build only (C globals since #161; until then they were
 anonymous-namespace objects `g_arena` / `g_sd_model_buf`, named by their mangled
-local symbols, at the same addresses). A `null` build is not asked for them. The
+local symbols, at the same addresses). A `null` build is not asked for them.
+[!] The gate checks the bank, not the address: the order in the table above
+(`nn_tflm_model_buf` first) comes from the compiler emitting the two
+definitions of `port/nn/tflm/nn_tflm_bufs.c` in reverse order, so the addresses
+are what the #161 map says (`_esdram_ai` still `0xC0780000`), not a promise. The
 negative tests are `cmake/fixtures/run_layout_tests.py`, run by the host test
 suite.
 
@@ -434,6 +446,11 @@ two steps, and the holder table; 2026-10-11, firmware `8baed71b`):
 skipped` still equal to the inferences, and 1.47 inf/s across `lcd off` / `lcd
 on`.  The DCMI overrun count moved with the build's layout, not with the change
 (issue #144, below).
+
+At issue #161 (2026-10-31, against the 3ead964 baseline log): `nn stream start
+--frames 100` gave 9 inferences in about 6.7-7.1 s, and `nn bench` averaged
+633.3 ms at 216 MHz; apart from the backend line the console output matched
+the baseline.
 
 ## Plugin containers (issue #159 = #78 Step 4)
 
@@ -588,7 +605,8 @@ What runs where, and why each piece is this board's or shared:
   | console (4,096 B) | entry, shapes_ok, report, params | 2,240 B | 1,024 B | **624 B** (the shallowest) |
 
   `thread` peaks over the same run: `cli` 2,748 B, `nn-worker` 1,504 B, GUIX
-  776 B.
+  776 B.  At issue #161 the nn-worker's `at call` high-water is 432 B (2,432 B
+  left); the console stays the shallowest.
 
 #### The draw budget
 

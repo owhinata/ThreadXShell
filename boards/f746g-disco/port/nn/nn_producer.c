@@ -18,23 +18,39 @@
 
 #include "nn.h"
 #include "nn_camera_priv.h"
+#include "nn_input_contract.h" /* the per-element conversion (issue #162) */
 #include "nn_det_record.h"
 #include "nn_core_frame.h"   /* the shared frame path and its hand-over word (#130) */
 #include "frame_pipeline.h"  /* struct frame_desc */
 
 /* ---- RGB565 -> model input: nearest-neighbour resize + convert ------------ */
 
-/* Convert one camera frame @p f (RGB565) into @p dst (HxWxC), formatted for the
- * model input dtype.  Reads only the sampled source pixels.
- *   - FLOAT32: RGB in [-1,1] (NNCAM_NORM_SIGNED) or [0,1] -- BlazeFace.
- *   - INT8   : uint8 - 128 (symmetric ~[-1,1], scale 1/128) -- MNIST/null stub. */
-static void nncam_preprocess(const struct frame_desc *f, void *dst)
+/* Convert one camera frame @p f (RGB565) into the input tensor @p in (HxWxC),
+ * formatted for the model input dtype.  Reads only the sampled source pixels.
+ *
+ * [!] WHAT ONE 8-BIT CHANNEL BECOMES IS THE SHARED CONVERSION (issue #162,
+ * svc/nn/nn_input_contract.h), the same functions wio-lite-ai calls; this file
+ * only samples the pixel and expands RGB565.  `nn norm` picks the range:
+ *   - FLOAT32: the normalised value, [0,1] or [-1,1] (nn_input_f32()).
+ *   - INT8   : the normalised value through the tensor's OWN scale and zero
+ *              point (nn_input_i8()), rounded +-0.5 toward zero and saturated.
+ *              It used to be a fixed (v - 128), right only for scale 1/128,
+ *              zero point 0 and [-1,1]; nncam_open_model()'s admission test
+ *              now guarantees a positive normal scale and a zero point inside
+ *              int8, so 1/scale is finite.
+ * 1/scale is computed once per frame (a divide per channel would cost more than
+ * the rest), and only for an int8 input; `nn norm` is read once per frame. */
+static void nncam_preprocess(const struct frame_desc *f, const struct nn_tensor *in)
 {
 	const uint8_t *base = (const uint8_t *)f->data;
+	void *dst = in->data;
 	uint32_t stride = f->stride ? f->stride : (uint32_t)f->width * 2u;
 	uint16_t ow = nncam_in_w, oh = nncam_in_h, oc = nncam_in_c;
 	uint16_t sw = f->width, sh = f->height;
 	int is_f32 = (nncam_in_dtype == NN_DTYPE_FLOAT32);
+	const int norm_signed = nncam_norm_signed;
+	const float inv_scale = is_f32 ? 0.0f : (1.0f / in->scale);
+	const int32_t zp = in->zero_point;
 
 	for (uint16_t oy = 0; oy < oh; oy++) {
 		uint16_t sy = (uint16_t)((uint32_t)oy * sh / oh);
@@ -52,13 +68,12 @@ static void nncam_preprocess(const struct frame_desc *f, void *dst)
 			if (is_f32) {
 				float *o32 = (float *)dst + o;
 				for (uint16_t c = 0; c < oc && c < 3; c++)
-					o32[c] = nncam_norm_signed
-					       ? (float)rgb[c] / 127.5f - 1.0f   /* [-1,1] */
-					       : (float)rgb[c] / 255.0f;         /* [0,1]  */
+					o32[c] = nn_input_f32(rgb[c], norm_signed);
 			} else {
 				int8_t *o8 = (int8_t *)dst + o;
 				for (uint16_t c = 0; c < oc && c < 3; c++)
-					o8[c] = (int8_t)((int)rgb[c] - 128);
+					o8[c] = nn_input_i8(rgb[c], norm_signed,
+					                    inv_scale, zp);
 			}
 		}
 	}
@@ -102,7 +117,7 @@ int nncam_prep(void *ctx, unsigned part, unsigned nparts)
 		return -1;
 	}
 	/* Resize + convert while the slot is still pinned by the caller (reads f->data). */
-	nncam_preprocess(f, in->data);
+	nncam_preprocess(f, in);
 
 	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
 	stale = (nncam_epoch != epoch0 || !nncam_run);

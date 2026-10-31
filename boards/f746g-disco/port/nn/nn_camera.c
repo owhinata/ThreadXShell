@@ -67,7 +67,8 @@
 #include "plugin_lease.h"    /* the one lock into the plugin                       */
 #endif
 
-/* Float32 input normalization.  BlazeFace's model card says [-1,1], but its ST
+/* Input normalization (float32, and int8 before its scale since issue #162).
+ * BlazeFace's model card says [-1,1], but its ST
  * config says rescale 1/255 -> [0,1] -- and [0,1] is what actually detects faces
  * on hardware (maxscore 288 vs 11), so ST retrained with [0,1].  Default [0,1];
  * `nn norm 1` flips to [-1,1] at runtime for other models. */
@@ -305,8 +306,9 @@ uint8_t  nncam_in_dtype;   /* enum nn_dtype of the model input */
  */
 struct nn_det_record nncam_rec;
 
-/* Float32 input normalization, runtime-tunable (`nn norm`) to settle the [-1,1] vs
- * [0,1] ambiguity on hardware without reflashing. */
+/* Input normalization, runtime-tunable (`nn norm`) to settle the [-1,1] vs
+ * [0,1] ambiguity on hardware without reflashing.  Applies to an int8 input too
+ * (before its scale and zero point, issue #162). */
 int nncam_norm_signed = NNCAM_NORM_SIGNED;
 
 /* The per-attach counters; the type and who writes each are in nn_camera_priv.h. */

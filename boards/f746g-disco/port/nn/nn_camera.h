@@ -241,7 +241,8 @@ int nn_camera_decode_get(struct nn_camera_decode *out, struct bf_det *dets,
                          int max, struct nn_report_capture *rep,
                          struct nn_result_extra *ext);
 
-/** Runtime float32 input normalization: 1 = [-1,1], 0 = [0,1] (tuning, no reflash). */
+/** Runtime input normalization: 1 = [-1,1], 0 = [0,1] (tuning, no reflash); float32
+ *  and, before its scale and zero point, int8 (issue #162). */
 void nn_camera_set_norm(int signed_range);
 int  nn_camera_get_norm(void);
 

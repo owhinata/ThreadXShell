@@ -207,7 +207,7 @@ holds one of its function addresses):
 
 | entry | called from | when |
 |---|---|---|
-| `nn_model_open` | `nn_mh()` in `nn_svc_info` / `_input` / `_output` / `_output_count` / `_run_once` / `_bench_prepare` / `_bench_run` / `_stream_start`, and the load / unload hooks | console commands |
+| `nn_model_open` | `nn_mh()` in `nn_svc_info` / `_input` / `_output` / `_output_count` / `_run_once` / `_stream_start` and in `nn_bench_acquire()` (the bench's hold since issue #163), and the load / unload hooks | console commands |
 | `nn_model_open` | `nn_ov_model_take()` in the two overlay arms | `cam_lcd_sink_hold()` on the console thread, under a ThreadX mutex (not PRIMASK), when `nn stream start` / `nn run` begin |
 | `nn_model_open` | `nn_mh()` in `nn_life_used()` (the lifecycle table's `.used` hook) | console only |
 | `nn_model_reload`, `nn_ethosu_strerror` | `nn_life_swap()` | the load transaction (`nn model load`) |
@@ -2340,7 +2340,8 @@ below the adapter: `svc/nn/nn.c`, the dispatcher wio-lite-ai and f746g-disco use
 over the Ethos-U backend in `svc/nn/ethosu/` (see
 [the shared dispatcher and backend](#the-shared-dispatcher-and-the-ethos-u-backend-issue-169)).
 What this board still owns, one line per file (each `.c` with its `.h` unless only
-a header is listed):
+a header is listed; `nn run`'s wait table and the console-call count moved to
+`svc/nn/` in issue #163, see [svc/README.md](../../svc/README.md)):
 
 | File | Thread or context | Hardware reason |
 |---|---|---|
@@ -2353,10 +2354,8 @@ a header is listed):
 | `port/nn/nn_preproc.c` | camera producer (fill); wherever a box is mapped back | The camera's frame size and pixel format against the model input; pure and host-tested because a wrong box costs a NOR flash cycle to investigate. |
 | `port/nn/nn_rec.c` | worker (publish), panel and console (snapshot) | The record's storage and its lock, a short interrupt-disabled section rather than a mutex (`nn_rec.h` says why). |
 | `port/nn/nn_outputs.c` | inference worker | How many NPU outputs this board decodes (`NN_MAX_IO`); pure, the reads behind a callback. |
-| `port/nn/nn_run_wait.c` | console (`nn run`) | No hardware reason: the five ways `nn run`'s wait ends, a pure table over this board's worker and camera outcomes. |
 | `port/nn/nn_stream_state.c` | console (`nn stream stop`) | The stop's order as a table over two separate proofs -- the overlay's count at zero (permits the worker join, the record boundary and nn's leave) and a confirmed camera stop (the only thing that permits the sink's unlink) -- and the retryable / terminal classification of the codes; pure, host-tested. |
 | `port/camera/cam_lcd_sink.c` | camera producer (`consume()`), panel thread, console (hold / release / overlay) | Not an nn file, but nn runs on it: the one panel sink, the holder table (`svc/camera/cam_holders`) and the overlay pointer with its count. |
-| `port/nn/nn_param_calls.c` | console (`nn thresh`, `nn dets`, load / unload) | No hardware reason: the count of console calls inside the plugin, run in the board's critical section. |
 | `port/nn/nn_plugin_stack.h` | build time | Per-slot plugin stack allowances asserted against this board's thread stacks. |
 | `port/nn/nn_probe.c`, `nn_probe_rtos.c` | every thread that enters a plugin slot | Stack depth at a plugin callback's entry; the rtos half asks ThreadX which thread is running. |
 | `port/nn/nn_model_board.c` | any thread calling `svc/nn/nn.h` | The dispatcher's state and its four hooks: PRIMASK, the ThreadX tick, and a cycle counter reported UNAVAILABLE (the DWT stops in WFI while the inference thread sleeps on the driver's semaphore), so `nn_last_cycles()` is 0. |
@@ -2415,6 +2414,13 @@ is printed only -- a load's refusal leaves no claim to recover either way.
 | `npu_cache_board_state` | 12 B in DTCM (step 2) |
 | detector stream / classifier stream | 36.9 - 37.0 inf/s / 7.3 - 7.4 inf/s (unchanged) |
 | `nn bench`, detector / classifier | 13.5 ms / 94.4 ms average (unchanged) |
+
+**`nn bench` after issue #163 (2026-11-01).**  The fill and the runs are now one
+hold (`svc/nn/nn_bench.c`), and every input is filled with `0x5A`, not only input
+0 (no shipped model has more than one, so the figures stay comparable).
+`nn bench 10`: detector (blazeface) min 12,000 / avg 12,600 / max 13,000 us,
+classifier (cifar10) min 91,000 / avg 91,200 / max 92,000 us, at the 1 ms
+resolution of the tick the bench counts in.
 
 **Known hole.**  `svc/nn/nn.h`'s tensor dimensions are 16-bit, and the descriptor
 copy truncates a larger one silently -- on all three boards; new here with this
@@ -2506,8 +2512,8 @@ plugin over the code a threshold call was executing.  Now a threshold call is
 counted in around its call into the plugin's param function, refused (`busy`)
 only while a load or unload holds the gate, and a load or unload is refused
 (`busy`) while the count is not zero; nobody waits.  Each test is in the same
-critical section as the change it guards (`port/nn/nn_param_calls.c`,
-`test/test_nn_param_calls.c`).  Since issue #127 the count covers `nn dets` as
+critical section as the change it guards (`svc/nn/nn_param_calls.c` since issue
+#163, `shell/test/test_nn_param_calls.c`).  Since issue #127 the count covers `nn dets` as
 well, and both take the plugin lease after they are counted in, so the stream's
 decode (the inference worker's since issue #129) and a threshold call are no
 longer inside the same plugin at once (#122 P5) -- see "One lock into the plugin".

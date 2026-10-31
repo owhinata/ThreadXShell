@@ -455,7 +455,8 @@ camera scan | reg <addr> <reg> [value] [-16]   (this board's own)
 `src/psram_guard.c` keeps one word: the number of **users** of the PSRAM window
 and a **reconfigurer** mark.  Users -- a scan-out start, `camera capture` /
 `save` / `send`, `nn bench`, `nn stream`, an mlperf run -- are counted and run
-together.  A reconfigurer -- the `psram` tuning subcommands, `membench`,
+together.  (`nn bench` holds its place from the fill through the last run, issue
+#163, so `membench psram` during a background `nn bench` is refused.)  A reconfigurer -- the `psram` tuning subcommands, `membench`,
 `devmem`, `wifi flash` -- is admitted only on a zero word, sets its mark, and
 then asks the scan-out and camera gates, giving the mark back if they refuse.
 Each transition is one short PRIMASK section; nothing waits.
@@ -498,11 +499,17 @@ on `65c9363f` (with the frame-mode removal and the review fixes):
 `camera stream start` on one line, and `nn stream stop` followed by `nn stream
 start`, both went through.
 
+After issue #163 (2026-11-01, `blazeface.nnc` in slot 5): `nn bench 10` gave
+min 372,779 / avg 373,294 / max 373,916 us at 550 MHz, consistent with the
+375,073 us `nn stream stats` latency the same day.  The 411 ms per inference
+in the #110 / #116 runs below is what that firmware measured, kept as recorded.
+
 ## The nn files
 
 The command, its contract and the shared core are `svc/`'s (see
 [svc/README.md](../../svc/README.md)).  What this board still owns, one line per
-file (each `.c` with its `.h` unless only a header is listed):
+file (each `.c` with its `.h` unless only a header is listed; the decode-count
+table moved to `svc/nn/` in issue #163, see svc/README.md):
 
 | File | Thread or context | Hardware reason |
 |---|---|---|
@@ -512,7 +519,6 @@ file (each `.c` with its `.h` unless only a header is listed):
 | `port/nn/nn_worker.c` | inference worker (`nn_work`, priority 18) | Inference runs on the CPU for ~373 ms with no yield, so the worker sits below the console, the preview and the producer; it holds the result lease across decode + publish because the preview thread outranks it. |
 | `port/nn/nn_panel.c` | panel (preview thread, priority 12) | The nn half of the LTDC preview: the may-draw question, the record snapshot and the plugin's `draw()`, with the lease only tried. The display half (frame lock, back buffer, flip) stays in `src/cam_preview.c` and is passed in as hooks (`nn_panel.h`), because `port/nn` may not include `port/ltdc`. Built only with the LCD. |
 | `port/nn/nn_active.c` | worker, panel, console, under the plugin lease | This board's facts for the shared entries (`svc/nn/nn_active_lease.c`, which checks the lease, and `svc/nn/nn_active_core.c` below it): reading an `nn_tensor` as a `svc/nn/tensor.h` descriptor, where a depth sample goes, the frame geometry, and the base vtable's transform and log sink. |
-| `port/nn/nn_decode_count.c` | inference worker | No hardware reason: this board's table for counting a decoder's answer in `nn stream stats` (pure, host-tested). |
 | `port/nn/nn_model_board.c` | worker (run), console (open / bench / info) | The state and hooks of the shared model API (`svc/nn/nn.c`): its state as plain CPU-only `.bss`, the PRIMASK critical section, the one-tick ThreadX wait, and a DWT cycle counter it only verifies and reads (`svc/timebase.c` owns it). |
 | `port/nn/nn_null.c` | as `svc/nn/nn.c` | The `null` backend: a stub that builds without any runtime or model. |
 | `port/nn/crc32_fdb.c` | console (container validation) | Serves `svc/crc32.h` with the FlashDB CRC-32 this firmware already links. |
@@ -687,7 +693,7 @@ re-arm in `nn_camera_start()` also takes back up only a session that
 
 **A decode the plugin refuses is counted apart in `nn stream stats`** (issue
 #130 step 6c, #122 P8 -- grove-vision-ai-v2's table, in
-`port/nn/nn_decode_count.c`). `BF_ERR_MODEL` ("these outputs are not my
+`svc/nn/nn_decode_count.c` since issue #163, shared with f746g-disco). `BF_ERR_MODEL` ("these outputs are not my
 model's shape": load a different model or container) counts in
 `model_errors`, any other negative (`BF_ERR_UNINIT`, `BF_ERR_ARG`, or a code
 nobody documented -- a wiring fault) in `decoder_errors`, and both in

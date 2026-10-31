@@ -237,7 +237,9 @@ A fresh `-DCONFIG_NN_BACKEND=null` is not warned about.
 
 The command, its contract and the shared core are `svc/`'s (see
 [svc/README.md](../../svc/README.md)).  What this board still owns, one line per
-file (each `.c` with its `.h` unless only a header is listed):
+file (each `.c` with its `.h` unless only a header is listed; the container
+check, the decode count and the session-release rule moved to `svc/nn/` in
+issue #163, see svc/README.md):
 
 | File | Thread or context | Hardware reason |
 |---|---|---|
@@ -253,9 +255,6 @@ file (each `.c` with its `.h` unless only a header is listed):
 | `port/plugin/plugin_lease.c` | every path into the plugin | The lease as a ThreadX mutex with inheritance: the GUIX thread outranks the worker and would otherwise preempt a decode. |
 | `port/plugin/plugin_paint.c` | GUIX | CPU pixel loops into the camera view buffer (row-major RGB565 in non-cacheable SDRAM; no DMA2D). |
 | `src/fault_plugin.c` | fault handler | Whether a fault's pc is in the loaded plugin, and that its end is a reset (pure, host-tested). |
-| `port/nn/nn_container.c` | console (`nn model load --path`) | No hardware reason: whether a file read for a load is a plugin container, and the CRC-32 of exactly the bytes read -- the one function both the SD reader (`cmds/cmd_nn_board.c`) and `nn info` print it with (tflm only, issue #159). |
-| `port/nn/nn_decode_count.c` | inference worker | No hardware reason: this board's table for counting a plugin's answer in `nn stream stats` (wio-lite-ai's and Grove's) and the tally that counts only what the record took (pure, host-tested). |
-| `port/nn/nn_sess_release.c` | console (stop), inference worker | No hardware reason: when the stream's hold on the nn session may be given back, as a pure function of the sink drain and the worker. |
 | `port/nn/nn_model_board.c` | worker (run), console (open / bench / info) | The state and hooks of the shared model API (`svc/nn/nn.c`): its state as plain CPU-only `.bss`, the PRIMASK critical section, the one-tick ThreadX wait, and the DWT cycle counter, enabled here with the CoreSight lock key (TRCENA, LAR unlock, CYCCNTENA). |
 | `port/nn/nn_null.c` | as `svc/nn/nn.c` | The `null` backend: a BlazeFace-shaped stub with no runtime, present without a load. Its input is int8, scale 1/128, zero point 0, so under the default `nn norm 0` the camera writes 0..127 into it (issue #162; the old `v - 128`, -128..127, comes back with `nn norm 1`); its run does nothing, so the tensor's contents are the only visible effect. |
 | `port/nn/nn_stedgeai.c`, `nn_stedgeai_reloc.c` | as `svc/nn/nn.c` | The non-default ST Edge AI Core backends (a model baked into Flash, or a relocatable one); they need a local ST install. |
@@ -532,6 +531,16 @@ At issue #161 (2026-10-31, against the 3ead964 baseline log): `nn stream start
 --frames 100` gave 9 inferences in about 6.7-7.1 s, and `nn bench` averaged
 633.3 ms at 216 MHz; apart from the backend line the console output matched
 the baseline.
+
+At issue #163 (2026-11-01, `/blazeface.nnc`): `nn bench 10` gave min 630,885 /
+avg 635,996 / max 638,293 us at 216 MHz.  [!] Since #163 the bench fills its
+input with `0x5A` (`svc/nn/nn_bench.c`, the byte every board uses) where this
+board filled `0x00`, so bench figures from before and after #163 are not
+strictly comparable.  The `cli` stack high-water was 1,216 / 4,096 B at boot
+and 2,748 / 4,096 B after `nn model load --path /blazeface.nnc`, unchanged by
+`nn bench 10` and by a stream start / stop: the container load is the deepest
+console path, not the bench (the 2,156 B in the table above was taken after
+`nn bench 10` with the built-in model, before containers).
 
 ## Plugin containers (issue #159 = #78 Step 4)
 
@@ -895,6 +904,15 @@ already running`.
   (a JPEG stream for `net mjpeg`).  (Issue #99 removed the `[qqvga|qvga]` word
   `nn stream start` used to take -- the geometry is whatever the base
   publishes.)
+- **`nn run` reports a lost stream** (issue #163, wio-lite-ai's words): when
+  the camera stream ends by itself before the inference completes -- the
+  auto-recovery gave up -- the run stops waiting and prints
+  `nn: run: the camera stream was lost before an inference completed (-76)`,
+  with ``; the camera has not released the frame either (`nn stream stop`
+  finishes it)`` before the code when its teardown did not finish, instead of
+  timing out after 2 s.  There is no bench procedure that makes the
+  auto-recovery give up, so this outcome is covered by
+  `shell/test/test_nn_run_wait.c` (the shared wait table) only.
 - **`camera res` / `camera format` / `camera fps` are refused while anyone holds
   the stream** -- including between an overrun and its auto-recovery, which
   re-arms in the mode the holders joined.  The GUI's resolution button stops and
@@ -948,8 +966,8 @@ already running`.
 > the frame inferred had usually sat in its buffer for most of an inference.
 >
 > **A decoder fault is counted apart** (issue #130 step 6c, #122 P8;
-> `port/nn/nn_decode_count.c`, one table since #159 Step 4c -- the other
-> boards'). A plugin's `BF_ERR_MODEL` is a mismatch between the container's
+> `svc/nn/nn_decode_count.c` since issue #163, one table since #159 Step 4c --
+> the other boards'). A plugin's `BF_ERR_MODEL` is a mismatch between the container's
 > halves and counts in `model_errors`.  (Until Step 4c the resident decoder
 > ran on every model and its `BF_ERR_MODEL` was a classifier stream's top-5
 > result, never counted; with no plugin the worker now publishes the raw

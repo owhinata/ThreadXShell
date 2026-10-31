@@ -19,7 +19,7 @@
  *   - npu_open() refuses a payload whose driver actions continue past the
  *     command stream (issue #46), because the driver can abandon a launch with
  *     the arena still owned by the NPU.  So this tool runs THE FIRMWARE'S OWN
- *     walk -- port/nn/npu/npu_payload.c is compiled in, not reimplemented -- over
+ *     walk -- svc/nn/ethosu/npu_payload.c is compiled in, not reimplemented -- over
  *     the same bytes the driver will parse.
  *   - AllocateTensors() has to fit the model in the arena the board reserves.
  *     So this tool compiles THE BOARD'S OWN reservation -- port/nn/npu/npu_arena.c

@@ -9,8 +9,10 @@
  * C++ ONLY -- it speaks flatbuffer types, which is exactly why it is separate
  * from npu.h.  Two translation units include it:
  *
- *   port/nn/npu/npu_tflm.cc          npu_open() refuses a model that fails this
- *   scripts/verify_vela_model.cc  the host gate, before the model is flashed
+ *   boards/grove-vision-ai-v2/port/nn/npu/npu_tflm.cc
+ *       npu_open() refuses a model that fails this
+ *   boards/grove-vision-ai-v2/scripts/verify_vela_model.cc
+ *       the host gate, before the model is flashed
  *
  * [!] THE SHARING IS THE POINT, AND IT IS NOT ONLY ABOUT THE WALK.
  * npu_payload.c already gave both sides one implementation of "is this byte

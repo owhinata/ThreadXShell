@@ -5,7 +5,7 @@
 /*
  * Host test for the Ethos-U command-stream payload check (issue #46).
  *
- * Compiles the REAL port/nn/npu/npu_payload.c -- the walk has no TFLite and no
+ * Compiles the REAL svc/nn/ethosu/npu_payload.c -- the walk has no TFLite and no
  * hardware dependency, which is why it was split out of npu_tflm.cc in the
  * first place.
  *

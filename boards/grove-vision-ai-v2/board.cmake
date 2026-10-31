@@ -701,8 +701,12 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/nn/npu/npu_arena.c"
     "${BOARD_DIR}/port/nn/npu/npu_rtos.c"
     "${BOARD_DIR}/port/nn/npu/npu_cache.c"
-    "${BOARD_DIR}/port/nn/npu/npu_payload.c"
-    "${BOARD_DIR}/port/nn/npu/npu_model_scan.cc"
+    # The Ethos-U checks that hold no state and know no board (issue #169): the
+    # payload walk, its locator and the bounded verifier.  Shared under svc/, so
+    # the stateless-service audit covers them; kept at this point in the list so
+    # the link order does not move.
+    "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_payload.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_model_scan.cc"
     "${BOARD_DIR}/port/nn/npu/npu_hw.c"
     "${BOARD_DIR}/port/nn/nn_preproc.c"
     "${BOARD_DIR}/port/nn/nn_camera.c"     # console side, owns the state
@@ -794,6 +798,7 @@ target_include_directories(shell_objs PRIVATE
     "${CMAKE_SOURCE_DIR}/shell/cmds"
     "${CMAKE_SOURCE_DIR}/svc"
     "${CMAKE_SOURCE_DIR}/svc/nn"
+    "${CMAKE_SOURCE_DIR}/svc/nn/ethosu"   # npu_payload.h / npu_model_scan.h / npu_verify.h
     "${CMAKE_SOURCE_DIR}/svc/plugin"
     "${CMAKE_SOURCE_DIR}/svc/camera"
     "${BOARD_DIR}/svc"          # log.h / timebase.h: the board's services,
@@ -1355,7 +1360,7 @@ endif()
 # one of them.  Neither is in ALL -- compiling schema_generated.h plus the
 # interpreter costs a few seconds and most builds never need it.
 #
-# [!] verify_vela_model links THE FIRMWARE'S OWN port/nn/npu/npu_payload.c and
+# [!] verify_vela_model links THE FIRMWARE'S OWN svc/nn/ethosu/npu_payload.c and
 # port/nn/npu/npu_arena.c.  That is the whole design: a host checker that
 # reimplemented the payload walk could agree with itself and disagree with the
 # board, and one that hardcoded the arena size would drift from the reservation.
@@ -1433,27 +1438,28 @@ if(HOST_CXX)
                 -I "${TFLM}/third_party/ruy"
                 -I "${_ethosu_drv_inc}"
                 -I "${BOARD_DIR}/port/nn/npu"
+                -I "${CMAKE_SOURCE_DIR}/svc/nn/ethosu"
                 -DTF_LITE_STATIC_MEMORY -DTF_LITE_MCU_DEBUG_LOG
                 -DETHOS_U -DETHOSU55 -DETHOSU_ARCH=u55
                 "${BOARD_DIR}/scripts/verify_vela_model.cc"
-                -x c "${BOARD_DIR}/port/nn/npu/npu_payload.c"
+                -x c "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_payload.c"
                 -x c "${BOARD_DIR}/port/nn/npu/npu_arena.c"
                 -x none
-                "${BOARD_DIR}/port/nn/npu/npu_model_scan.cc"
+                "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_model_scan.cc"
                 ${_tflm_host_srcs}
                 -Wl,--gc-sections
                 -o "${CMAKE_BINARY_DIR}/verify_vela_model"
         DEPENDS "${BOARD_DIR}/scripts/verify_vela_model.cc"
-                "${BOARD_DIR}/port/nn/npu/npu_model_scan.cc"
-                "${BOARD_DIR}/port/nn/npu/npu_model_scan.h"
-                "${BOARD_DIR}/port/nn/npu/npu_payload.c"
-                "${BOARD_DIR}/port/nn/npu/npu_payload.h"
+                "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_model_scan.cc"
+                "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_model_scan.h"
+                "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_payload.c"
+                "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_payload.h"
                 "${BOARD_DIR}/port/nn/npu/npu_arena.c"
                 "${BOARD_DIR}/port/nn/npu/npu.h"
                 # The bounded flatbuffer check the firmware runs (issue #93).
                 # Listed so that changing a limit rebuilds the host gate: the
                 # whole point of sharing it is that the two cannot disagree.
-                "${BOARD_DIR}/port/nn/npu/npu_verify.h"
+                "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_verify.h"
         COMMENT "host c++ -> verify_vela_model (checks a model before it is flashed)"
         VERBATIM)
 
@@ -1511,13 +1517,13 @@ endif()
 # load-bearing part and why nothing is published before it has passed.
 #
 # [!] THE INGEST HALF IS GROVE'S; THE REST IS SHARED (issue #108).  Ethos-U owns
-# the ingest: verify_vela_model links THIS port's npu_payload.c and npu_arena.c,
-# and tflite_strip_boundary exists because this port registers one operator and
-# offloads everything else.  Wio has no NPU, so its ingest is a different
-# pipeline.  What both boards run is the fetch (cmake/fetch_model.cmake), the
-# pack-verify-publish chain (cmake/build_asset.py) and the receipt
-# (cmake/asset_receipt.py) -- each of which takes this board's facts as
-# arguments below and holds none of its own.
+# the ingest: verify_vela_model links the shared svc/nn/ethosu/npu_payload.c
+# and THIS port's npu_arena.c, and tflite_strip_boundary exists because this
+# port registers one operator and offloads everything else.  Wio has no NPU, so
+# its ingest is a different pipeline.  What both boards run is the fetch
+# (cmake/fetch_model.cmake), the pack-verify-publish chain (cmake/build_asset.py)
+# and the receipt (cmake/asset_receipt.py) -- each of which takes this board's
+# facts as arguments below and holds none of its own.
 #
 # [!] AND NEITHER TARGET IS IN ALL.  The detection model cannot be committed
 # (model-zoo licensed) and is fetched on demand, so a tree with no access to the

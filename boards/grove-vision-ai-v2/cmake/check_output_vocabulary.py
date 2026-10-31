@@ -96,7 +96,7 @@ SHT_NOBITS = 8
 
 
 def loaded_sections(elf):
-    """Names of the sections with bytes in the loaded image, in header order.
+    """(name, size) of the sections with bytes in the loaded image, in order.
 
     Read straight from the ELF32 section header table (stdlib only, so the gate
     needs no second tool argument).  Anything that is not a little-endian ELF32
@@ -125,12 +125,17 @@ def loaded_sections(elf):
     for i in range(1, shnum):
         name, typ, flags, _addr, _off, size = header(i)
         if flags & SHF_ALLOC and typ != SHT_NOBITS and size > 0:
-            out.append(name_of(name))
+            out.append((name_of(name), size))
     return out
 
 
-def section_strings(objcopy, elf, section):
-    """Every printable run of MIN_RUN bytes or more in one section."""
+def section_strings(objcopy, elf, section, size):
+    """Every printable run of MIN_RUN bytes or more in one section.
+
+    [!] The bytes objcopy hands back must be exactly the section header's
+    size.  A name objcopy does not find yields an empty (or no) file, and
+    reading that as "no strings" would pass the section unread.
+    """
     with tempfile.TemporaryDirectory() as work:
         raw = os.path.join(work, "section.bin")
         rc = subprocess.run(
@@ -140,10 +145,13 @@ def section_strings(objcopy, elf, section):
         if rc.returncode != 0:
             sys.exit(f"check_output_vocabulary: objcopy failed: "
                      f"{rc.stderr.decode(errors='replace').strip()}")
-        if not os.path.exists(raw):
-            return []
-        with open(raw, "rb") as fh:
-            blob = fh.read()
+        blob = b""
+        if os.path.exists(raw):
+            with open(raw, "rb") as fh:
+                blob = fh.read()
+    if len(blob) != size:
+        sys.exit(f"check_output_vocabulary: {section}: objcopy returned "
+                 f"{len(blob)} B, the section header says {size} B")
 
     # [!] Runs are split on NUL only, so escapes a C string carries -- \r, \n,
     # \t -- stay INSIDE the run.  Splitting on them as well would cut
@@ -180,8 +188,8 @@ def main():
         sys.exit("check_output_vocabulary: no loaded section in "
                  f"{args.elf}; nothing to scan")
     found = []
-    for section in sections:
-        found.extend(section_strings(args.objcopy, args.elf, section))
+    for section, size in sections:
+        found.extend(section_strings(args.objcopy, args.elf, section, size))
     allowed = {text for text, _why in ALLOW}
 
     bad = [s for s in found if FORBIDDEN.search(s) and s not in allowed]
@@ -212,7 +220,7 @@ def main():
         return 1
 
     print(f"check_output_vocabulary: OK ({len(found)} string(s) in "
-          f"{', '.join(sections)}; {len(ALLOW)} allowed)")
+          f"{', '.join(n for n, _s in sections)}; {len(ALLOW)} allowed)")
     return 0
 
 

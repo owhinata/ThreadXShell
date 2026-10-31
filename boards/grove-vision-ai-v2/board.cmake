@@ -1248,9 +1248,10 @@ add_custom_command(TARGET shell POST_BUILD
 
 # --- Post-build gates --------------------------------------------------------
 # 1. Image coherence: everything the linker placed must actually be inside the
-#    generated image (the tool processes sections individually and silently
-#    drops names it does not know), and the shell command registry must sit
-#    inside the .rodata coverage.  Runs AFTER the image generation above --
+#    generated image (the tool processes sections individually; #43 measured
+#    that it does carry names it has never seen, and this gate is what keeps
+#    that true), and the shell command registry must sit inside the .rodata
+#    coverage.  Runs AFTER the image generation above --
 #    POST_BUILD commands execute in declaration order.
 add_custom_command(TARGET shell POST_BUILD
     COMMAND "${Python3_EXECUTABLE}" "${BOARD_DIR}/cmake/check_image_coherence.py"
@@ -1261,7 +1262,8 @@ add_custom_command(TARGET shell POST_BUILD
             --img "${CMAKE_BINARY_DIR}/shell.img"
             "$<TARGET_FILE:shell>"
     COMMENT "check_image_coherence.py (ELF sections vs generated .img)")
-# 2. Placement / budget: ITCM/DTCM usage + headroom, vector table residency,
+# 2. Placement / budget: ITCM usage (no floor, #170), DTCM headroom, vector
+#    table residency and its linked handler slots in ITCM (#170),
 #    static stacks in DTCM, and no references to the SDK's SysTick-touching or
 #    console APIs (they must have been dead-stripped / never called).
 add_custom_command(TARGET shell POST_BUILD

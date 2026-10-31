@@ -31,6 +31,9 @@ exactly one thing broken:
       section attribute                 -> RESIDENCY (it lands in DTCM)
   P4  the staging buffer in a section
       with no flags at all              -> ALLOC (it claims no memory)
+  P5  SysTick_Handler moved into
+      .text_cold (SRAM)                 -> VECTOR (a linked vector slot
+                                           points outside ITCM)
   P0  the unmodified firmware           -> PASS
 
   V0  the unmodified firmware           -> PASS
@@ -238,6 +241,8 @@ def run_placement_gate(board_dir, build_dir, elf, nm, objdump):
         ids.add("RESIDENCY")
     if "claims no memory" in text:
         ids.add("ALLOC")
+    if "linked vector slot" in text:
+        ids.add("VECTOR")
     return r.returncode, ids, text
 
 
@@ -609,6 +614,33 @@ def main():
     # Everything the gate checked before 1c3730d is satisfied.
     ok &= expect("P4 a reservation that claims no memory is caught",
                  rc, ids, 1, {"ALLOC"}, text)
+
+    # --- check_placement_budget.py: linked vector handlers (issue #170) -------
+    #
+    # P5: SysTick_Handler -- a handler the LINK-TIME vector table names -- is
+    # pulled into .text_cold, the SRAM code section issue #170 added, by one
+    # more pattern in a copy of the linker script.  It links, every region
+    # check holds (.text_cold is a legitimate loadable SRAM section), and only
+    # the handler-slot check can say the table now points out of ITCM.
+    print("run_fixture_tests (check_placement_budget.py, vector handlers):")
+    cold_open = "        __text_cold_start = .;\n"
+    ld_p5 = ld.replace(cold_open, cold_open +
+                       "        *tx_glue.c.obj(.text.SysTick_Handler)\n", 1)
+    if ld_p5 == ld:
+        raise SystemExit("run_fixture_tests: the linker script has no "
+                         ".text_cold; the fixture cannot move a handler "
+                         "into it")
+    ld_p5_dst = os.path.join(outdir, "p5_handler_in_sram.ld")
+    with open(ld_p5_dst, "w") as f:
+        f.write(ld_p5)
+    p5 = re.sub(r"-T\S*HX6538_CM55M_S\.ld", f"-T{ld_p5_dst}", shell_link)
+    p5 = retarget(p5, "shell.elf", "seam-fixtures/p5_handler_in_sram.elf")
+    link(build, p5, "P5")
+    rc, ids, text = run_placement_gate(board, build,
+                                       "seam-fixtures/p5_handler_in_sram.elf",
+                                       nm, objdump)
+    ok &= expect("P5 a linked vector handler outside ITCM is caught",
+                 rc, ids, 1, {"VECTOR"}, text)
 
     # --- check_output_vocabulary.py (issues #105, #170) ---------------------
     #

@@ -70,9 +70,10 @@ the settings are also lost when the USB device re-enumerates.
 
 - **Not XIP.**  The flashed `.img` is a full flash image (bootloader + 2nd
   bootloader + memory descriptors + signed app).  At boot the 2nd bootloader
-  loads the ELF into ITCM 256 KB @`0x10000000` (vectors+code+rodata) and DTCM
-  256 KB @`0x30000000` (data+stacks).  ITCM overflow is a link error -- nothing
-  spills into SRAM by itself.
+  loads each ELF section at its address: ITCM 256 KB @`0x10000000` (vectors +
+  code), DTCM 256 KB @`0x30000000` (data + stacks) and the loadable SRAM
+  window (`.text_cold` and `.rodata`, below).  ITCM overflow is a link error --
+  nothing spills into SRAM by itself; what is in SRAM is named there.
 - **[!] There are TWO SRAM windows, and only one of them may be loaded**
   (issue #29).  `CM55M_S_SRAM_LDR`, 188 KB @`0x3401F000`, is the window the
   2nd-stage bootloader executes from while it is loading us, so it is
@@ -132,8 +133,8 @@ the settings are also lost when the USB device re-enumerates.
 - **Post-build gates** (`cmake/check_*.py`): image coherence (every linker
   section present in the generated `.img`, command registry inside `.rodata`),
   placement/budget (every section inside a known region, the DTCM
-  heap-to-stack gap, no ITCM headroom floor since issue #170, vector table,
-  static stacks,
+  heap-to-stack gap, no ITCM headroom floor since issue #170, vector table
+  and -- since issue #170 -- its linked handler slots in ITCM, static stacks,
   benchmark-buffer residency, no forbidden SDK symbols surviving, and -- since
   issue #42 -- one REQUIRED symbol), the output vocabulary (every loaded
   section of the ELF, chosen by its flags since issue #170), the timer seam,
@@ -156,6 +157,95 @@ ITCM unusable.  The gate still prints `ITCM used ... free ...`.  The
 budget**, not as run-time safety: `_sbrk` stops at `__HeapLimit` and startup
 sets MSPLIM to `__StackLimit`, so neither side can reach the other whatever the
 gap is.
+
+## Cold code in SRAM (issue #170)
+
+Code that runs only when a model is loaded, unloaded or opened lives in its own
+output section, `.text_cold`, in the loadable SRAM window -- not in ITCM.  ITCM
+had 8,192 B free after issue #169; the next board change would not have fitted.
+
+**Layout (measured 2026-10-31).**  `CM55M_S_SRAM` now begins with `.text_cold`,
+then `.rodata`, then the NOLOAD buffers, with `.plugin` still pinned at the top.
+
+| what | before | after |
+|---|---|---|
+| ITCM used / free | 253,952 / 8,192 B | 239,968 / 22,176 B |
+| `.text` (ITCM) | 247,844 B | 233,852 B |
+| `.text_cold` | -- | 14,272 B @`0x3404D000..0x340507C0` |
+| `.rodata` start | `0x3404D000` | `0x340507C0` (same 78,864 B) |
+| `__sram_seq_end` (gap to `.plugin`) | `0x341AC420` | `0x341AFBE0` (197,664 B left) |
+| `arm-none-eabi-size` text | 328,700 | 328,980 (+280: branch veneers, alignment) |
+| `shell.img` | 507,904 B | 507,904 B (`check_flash_partitions` OK) |
+
+**What is in it: 88 functions, 14,020 B** (the rest of the 14,272 B is
+alignment and 31 linker branch veneers back into ITCM; 4 veneers in ITCM lead
+into it -- a Thumb `BL` reaches only 16 MB, and SRAM is 0x2404D000 away):
+
+- the bounded flatbuffer verifier the model is checked with: 74 functions,
+  11,856 B (`tflite::*::Verify`, `tflite::Verify*`, `flatbuffers::Verifier::*`,
+  `Table::VerifyField` / `VerifyOffset`);
+- the Ethos-U backend's build / reload / open / go-empty / interpreter teardown
+  / model name / descriptor fill / strerror, 8 functions, 1,180 B;
+- the payload scan, `npu_model_command_stream` / `npu_model_payload_refusal` /
+  `npu_payload_is_single_final_command_stream`, 712 B;
+- the shared dispatcher's `nn_model_open` / `nn_model_reload` /
+  `nn_model_strerror`, 272 B.
+
+They are picked in the linker script one `.text.<mangled name>` pattern at a
+time, each restricted to its object -- never a whole object, because a small
+inline (a flatbuffers accessor) is a COMDAT copy that may serve a per-frame
+caller elsewhere.  A pattern that stops matching leaves its function in ITCM:
+safe, and costs only space.  **Kept in ITCM by decision:** the per-frame path
+(`nn_run`, `ethosu_bk_run`, the interpreter's `Invoke`, the Ethos-U kernel and
+driver, `npu_cache_*`, the worker / producer / panel, camera, LCD), every ISR,
+CoreMark and membench (where their code runs is part of what they measure),
+and the prebuilt vendor archives.
+
+**Who calls into it, read off the linked ELF** (every branch from outside
+`.text_cold`, through the veneers, and every word in a loaded section that
+holds one of its function addresses):
+
+| entry | called from | when |
+|---|---|---|
+| `nn_model_open` | `nn_mh()` in `nn_svc_info` / `_input` / `_output` / `_output_count` / `_run_once` / `_bench_prepare` / `_bench_run` / `_stream_start`, and the load / unload hooks | console commands |
+| `nn_model_open` | `nn_ov_model_take()` in the two overlay arms | `cam_lcd_sink_hold()` on the console thread, under a ThreadX mutex (not PRIMASK), when `nn stream start` / `nn run` begin |
+| `nn_model_open` | `nn_mh()` in `nn_life_used()` (the lifecycle table's `.used` hook) | console only |
+| `nn_model_reload`, `nn_ethosu_strerror` | `nn_life_swap()` | the load transaction (`nn model load`) |
+| `go_empty` | `ethosu_bk_release()` <- `nn_model_release()` <- the unload hook | `nn model unload` and load failures |
+| `ethosu_bk_open` / `_reload` (addresses) | the backend's table, called through only by `nn_model_open` / `nn_model_reload` | as above |
+| `nn_ethosu_strerror` (address) | the lifecycle table's `strerror` field | nothing reads it today |
+
+No ISR, no worker / producer / panel entry and nothing on the NOR write path
+reaches it.  It is not free of PRIMASK, though: `nn_model_open()` itself enters
+`nn_model_board_enter()` (`__disable_irq`) and runs a few instructions from SRAM
+with interrupts masked; `board_enter` / `board_exit` / `wait_tick` are reached
+through veneers and stay in ITCM.  Harmless -- SRAM is not XIP and nothing
+there waits on an interrupt -- but it is the one masked stretch in it.  [!] **`nn_model_open()` runs on the first use of
+`nn`, and from `nn info` that is BEFORE the NPU and its XIP window are up** --
+so the region has to be executable from boot.  The check on hardware therefore
+starts with `nn info` on a fresh boot, and reads the MPU (`membench`) both
+before the first load and with a model loaded; each snapshot is judged with the
+firmware's own `plugin_mpu_judge()` rule.
+
+**The instruction cache is on, and this app's startup is what turns it on.**
+The SDK's `Reset_Handler`, linked into this image, disables both caches and
+enables them again (`SCB_EnableICache()` invalidates first) before
+`__PROGRAM_START()` -- after the loader has written `.text_cold` -- so no stale
+line can shadow it.  `membench` prints `IC=`.  (The older wording "this app
+never programs the caches" was wrong about the caches; it does not program the
+MPU.)
+
+**What checks it.**  `check_image_coherence.py` byte-verifies `.text_cold` in
+the image (7 -> 8 sections); `check_placement_budget.py` holds it above the
+loader floor and below `.plugin`, and -- new in issue #170 -- refuses a **linked**
+vector table whose handler slots (every word after the initial SP, skipping 0)
+do not all point into ITCM (fixture P5 moves `SysTick_Handler` into
+`.text_cold`).  [!] That is the placement of the LINK-TIME table, not of every
+ISR: `npu_irq_handler`, the EPK trampolines, the timer seam and the vendor
+ISRs are installed at run time through `EPII_NVIC_SetVector` and never appear
+in it.  They stay in ITCM because `.text_cold` names load-path functions only
+and the prebuilt archives are never moved -- the table above, not a gate.
+`check_output_vocabulary.py` reads `.text_cold` like every loaded section.
 
 ## Time sources
 
@@ -437,9 +527,11 @@ one of them can see a cache miss:
   is not 8-way unrolled.)
 
 **Read the register dump `membench` prints above its numbers.**  This app never
-programs the MPU or the caches -- both are inherited from the bootloader -- and
-with no TRM the firmware cannot honestly claim what the SRAM rows' memory
-attributes are.  So it dumps `SCB->CCR`, `MEMSYSCTL` (`MSCR` including FORCEWT
+programs the MPU -- it is inherited from the bootloader -- and with no TRM the
+firmware cannot honestly claim what the SRAM rows' memory attributes are.  (The
+caches are a different story: the SDK `Reset_Handler` linked into this image
+disables and re-enables both; see "Cold code in SRAM".  `membench`'s own
+heading still says "never programs the MPU or the caches".)  So it dumps `SCB->CCR`, `MEMSYSCTL` (`MSCR` including FORCEWT
 / DCACTIVE / ICACTIVE / ECCEN, `PFCR`, `ITCMCR`, `DTCMCR`), the MPU type,
 control, MAIR pair and every enabled region, and lets you decide.  The SRAM
 rows are labelled "as the CPU sees it", never "cached".
@@ -2317,7 +2409,7 @@ is printed only -- a load's refusal leaves no claim to recover either way.
 
 | what | value |
 |---|---|
-| ITCM | 253,952 B used, **8,192 B free -- exactly the placement gate's floor at the time**; issue #170 removed that floor (see "Post-build gates") |
+| ITCM | 253,952 B used, **8,192 B free -- exactly the placement gate's floor at the time**; issue #170 removed that floor and moved the cold load path to SRAM (239,968 B used; see "Cold code in SRAM") |
 | ITCM `.text` growth, step 2 to step 5 | about 1,088 B, of which `svc/nn/nn.c` as linked is about 750 B |
 | `.bss` | +512 B (the backend's state and descriptors, the dispatcher's state) |
 | `npu_cache_board_state` | 12 B in DTCM (step 2) |

@@ -17,6 +17,8 @@
 #include "nn_camera.h"
 #include "nn_camera_priv.h"
 #include "nncam_teardown.h"  /* has the last teardown finished (#142 review) */
+#include "nncam_input.h"     /* admission reasons -> NNCAM_* (#162) */
+#include "nn_input_contract.h" /* nn_input_admit() (#162) */
 
 #include "cam_band.h"
 #include "cam_holders.h"     /* struct cam_holder: nn's place on the camera (#142) */
@@ -469,50 +471,41 @@ int nn_camera_start(int colorbar, int require_draw)
 		return NNCAM_ERR_SESSION;
 
 	in = nn_input(m, 0);
-	if (nn_input_count(m) < 1 || in == NULL || in->data == NULL ||
-	    in->ndim != 4 || in->dims[0] != 1) {
+	if (nn_input_count(m) < 1) {
 		nn_session_release();
 		return NNCAM_ERR_MODEL;
 	}
-	if (in->dtype != NN_DTYPE_FLOAT32 && in->dtype != NN_DTYPE_INT8) {
-		nn_session_release();
-		return NNCAM_ERR_GEOM;
-	}
 	/*
-	 * [!] The quantization parameters have to be USABLE, not merely present (#51).
-	 * nn_tensor carries ONE scale, and the backend fills it from
-	 * TfLiteTensor::params.scale -- which a PER-AXIS quantized tensor leaves at zero,
-	 * keeping its real parameters in the affine-quantization struct this API does not
-	 * expose.  So a zero here does not mean "unit scale", it means "the number you
-	 * need is somewhere you cannot see", and quantizing with any assumed constant
-	 * would feed the model wrong pixels with nothing to show for it.  Refuse instead;
-	 * nncam_rows() then needs no per-pixel fallback (see its comment).
+	 * [!] WHAT THE CAMERA CAN FILL IS THE SHARED ADMISSION TEST'S ANSWER (issue
+	 * #162), not this file's: dtype float32 or int8, 1 x H x W x C with H, W > 0
+	 * and C 1 or 3, an int8 scale that is a positive normal float and a zero
+	 * point inside int8, a float32 buffer 4-byte aligned, and the bytes for the
+	 * shape (svc/nn/nn_input_contract.h).  Each refusal keeps its own code
+	 * (port/nn/nncam_input.c).  The reasons it carries forward from here:
+	 *
+	 *   - C is checked because nncam_rows() stops at three channels (issue #57):
+	 *     a fourth would be left holding the arena's stale activations.
+	 *   - The int8 scale has to be USABLE, not merely present (#51): a PER-AXIS
+	 *     quantized tensor arrives with scale 0, its real parameters in a struct
+	 *     nn_tensor does not carry, and quantizing with an assumed constant would
+	 *     feed the model wrong pixels with nothing to show for it.  nncam_rows()
+	 *     therefore needs no per-pixel fallback.
 	 */
-	if (in->dtype == NN_DTYPE_INT8 && !(in->scale > 0.0f)) {
+	rc = nncam_input_err_of(nn_input_admit(in));
+	if (rc != NNCAM_OK) {
 		nn_session_release();
-		return NNCAM_ERR_QUANT;
+		return rc;
 	}
 	nncam_oh = in->dims[1];
 	nncam_ow = in->dims[2];
 	nncam_oc = in->dims[3];
 	/*
-	 * [!] THE CHANNEL COUNT IS CHECKED BECAUSE nncam_rows() STOPS AT THREE (issue #57).
-	 * It writes `c < oc && c < 3` channels from an RGB565 pixel, so a four-channel
-	 * input would leave channel 3 of every pixel holding whatever the arena last had --
-	 * no fault, no overrun, just one plane of stale activations fed to the model as if
-	 * it were image data.  That is the failure mode this file already refuses a
-	 * per-axis scale over: silently wrong pixels with nothing to show for it.  1 (the
-	 * red channel alone) and 3 (RGB) are what the sampler can actually produce.
-	 *
-	 * The tiling then has to cover the input exactly, or some output rows would never
-	 * be written (and would then be inferred from whatever the arena last held).
+	 * This board's own condition, after the shared one: the band tiling has to
+	 * cover the input exactly, or some output rows would never be written (and
+	 * would then be inferred from whatever the arena last held).
 	 */
-	if ((nncam_oc != 1u && nncam_oc != 3u) ||
-	    nncam_oh == 0u || nncam_ow == 0u ||
-	    nncam_oy_bound(0u, nncam_oh) != 0u ||
-	    nncam_oy_bound(CAMERA_BANDS_PER_FRAME, nncam_oh) != nncam_oh ||
-	    (uint32_t)nncam_ow * nncam_oh * nncam_oc *
-	            (in->dtype == NN_DTYPE_FLOAT32 ? 4u : 1u) > in->bytes) {
+	if (nncam_oy_bound(0u, nncam_oh) != 0u ||
+	    nncam_oy_bound(CAMERA_BANDS_PER_FRAME, nncam_oh) != nncam_oh) {
 		nn_session_release();
 		return NNCAM_ERR_GEOM;
 	}

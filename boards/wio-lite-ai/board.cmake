@@ -897,6 +897,12 @@ list(APPEND NN_PSRAM_AI_REQUIRED --require psram_ai_bench_buf)
 # both: issue #78 exists so that the model-specific half ships with the model.
 list(APPEND NN_SOURCES "${CMAKE_SOURCE_DIR}/svc/nn/nn_desc.c"
                        "${CMAKE_SOURCE_DIR}/svc/nn/nn_det_record.c")
+# The camera input tensor's admission test, shared with f746g-disco (issue
+# #162; its per-element conversion is inline in nn_input_contract.h), and this
+# board's table from its reasons to nn_camera_start()'s codes, walked by
+# test/test_nncam_input.c.
+list(APPEND NN_SOURCES "${CMAKE_SOURCE_DIR}/svc/nn/nn_input_contract.c"
+                       "${BOARD_DIR}/port/nn/nncam_input.c")
 # The other half of that gate: PSRAM buffers a bus master owns, which must stay OUT
 # of the cacheable carve-out.  Named here rather than in the script for the same
 # reason as the DTCM list above -- a name that belongs to a BSP_ENABLE_* option and

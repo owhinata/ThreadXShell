@@ -55,6 +55,17 @@ gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$
     $LDFLAGS -o "$out/test_nn_decode_count"
 "$out/test_nn_decode_count"
 
+# issue #162 -- the shared input admission test's reasons (svc/nn/nn_input_contract.h)
+# as nn_camera_start()'s codes and words (port/nn/nncam_input.c): every reason
+# against a table written out in the test, none folded into another or into the
+# band-tiling refusal, an undocumented reason still a refusal, the reverse lookup
+# exactly the worded codes, every sentence distinct and within NN_SVC_DETAIL_MAX.
+gcc $CFLAGS -I "$board/port/nn" -I "$board/svc" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+    "$here/test_nncam_input.c" "$board/port/nn/nncam_input.c" \
+    "$HOST_TEST_SVC/nn/nn_input_contract.c" \
+    $LDFLAGS -o "$out/test_nncam_input"
+"$out/test_nncam_input"
+
 # issues #110, #116 -- the active-decoder shim (port/nn/nn_active.c), with a
 # plugin loaded and with none.
 #

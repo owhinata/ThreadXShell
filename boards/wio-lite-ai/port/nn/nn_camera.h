@@ -66,7 +66,7 @@
 #define NNCAM_ERR_INIT    (-8)  /**< thread / semaphore / mutex creation failed   */
 #define NNCAM_ERR_TEARING (-9)  /**< stop: still tearing down -- see below        */
 #define NNCAM_ERR_REARM  (-10)  /**< re-arm after a lost stream failed; stop first */
-#define NNCAM_ERR_QUANT  (-11)  /**< int8 input without a per-tensor quant scale   */
+#define NNCAM_ERR_QUANT  (-11)  /**< int8 input scale not a positive normal float */
 #define NNCAM_ERR_SHAPES (-12)  /**< the loaded decoder cannot read these outputs  */
 #define NNCAM_ERR_NODRAW (-13)  /**< a preview was asked for; the decoder draws none */
 #define NNCAM_ERR_DECBUSY (-14) /**< the decoder could not be held still to ask it */
@@ -74,6 +74,20 @@
 #define NNCAM_ERR_STILL  (-16)  /**< an `lcd reset` holds the camera still          */
 #define NNCAM_ERR_CAMBUSY (-17) /**< the camera is still stopping, or a capture or
                                  *   another start holds it -- retry          */
+/*
+ * The model input a camera cannot fill, one code per reason of the shared
+ * admission test (svc/nn/nn_input_contract.h, issue #162).  Its "no input"
+ * reason stays NNCAM_ERR_MODEL and an unusable int8 scale stays NNCAM_ERR_QUANT;
+ * the mapping is the pure table in port/nn/nncam_input.c.
+ */
+#define NNCAM_ERR_IN_DTYPE    (-18) /**< input neither float32 nor int8           */
+#define NNCAM_ERR_IN_RANK     (-19) /**< input not 4-dimensional                  */
+#define NNCAM_ERR_IN_BATCH    (-20) /**< input batch not 1                        */
+#define NNCAM_ERR_IN_EMPTY    (-21) /**< input height or width 0                  */
+#define NNCAM_ERR_IN_CHANNELS (-22) /**< input channels neither 1 nor 3           */
+#define NNCAM_ERR_IN_ZP       (-23) /**< int8 zero point outside -128..127        */
+#define NNCAM_ERR_IN_ALIGN    (-24) /**< float32 input buffer not 4-byte aligned  */
+#define NNCAM_ERR_IN_BYTES    (-25) /**< input buffer shorter than its shape      */
 
 /**
  * The worker thread's (`nn_work`) stack, in DTCM.  Published here since issue #108

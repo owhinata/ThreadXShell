@@ -39,6 +39,8 @@
 #include "plugin_claims.h"   /* the open model's claims and `nn info` lines (#159) */
 #include "nn.h"
 #include "nn_camera.h"
+#include "nncam_input.h"       /* input admission reasons in words (#162) */
+#include "nn_input_contract.h" /* nn_input_refusal_name() (#162) */
 #include "nn_panel.h"       /* the panel's draw counters (#140) */
 #include "nn_desc.h"
 #include "nn_active.h"
@@ -975,6 +977,7 @@ int nn_svc_input(struct tensor_desc *out)
 #define NN_RUN_WAIT_S 3u
 
 static const char *nn_nncam_strerror(int rc);
+static void nn_nncam_detail(struct nn_op_result *res, int rc);
 static int nn_status_of_start(int rc);
 
 /*
@@ -1162,7 +1165,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		 * refusal from one worker reads the same from either command.  This
 		 * used to guess "NN busy, PSRAM down, or no model loaded?" for every
 		 * code, including a DCMI owned by a frame stream. */
-		nn_detail_set("%s", nn_nncam_strerror(rc));
+		nn_nncam_detail(res, rc);
 		nn_result(res, nn_status_of_start(rc), NN_CLAIM_NONE);
 		return;
 	}
@@ -1496,16 +1499,13 @@ static const char *nn_nncam_strerror(int rc)
 		return NN_SVC_DETAIL_LIT(
 			"the camera is streaming with another `test` setting -- "
 			"match it, or `camera stream stop` first");
+	/* The input admission test's own reasons (NNCAM_ERR_QUANT and
+	   NNCAM_ERR_IN_*) are worded by nn_nncam_detail() from the shared reason
+	   names (issue #162); they never reach this switch. */
 	case NNCAM_ERR_GEOM:
 		return NN_SVC_DETAIL_LIT(
-			"the model input does not tile onto the camera's "
-			"4 bands, or its dtype is neither int8 nor "
-			"float32 (`nn info`)");
-	case NNCAM_ERR_QUANT:
-		return NN_SVC_DETAIL_LIT(
-			"the int8 input carries no per-tensor quantization "
-			"scale (`nn info` shows q(s=0.000000)) -- a "
-			"per-axis quantized input is not supported");
+			"the model input's height does not tile onto the "
+			"camera's 4 bands (`nn info`)");
 	case NNCAM_ERR_SHAPES:
 		return NN_SVC_DETAIL_LIT(
 			"the container's decoder cannot read this "
@@ -1551,6 +1551,24 @@ static const char *nn_nncam_strerror(int rc)
 	default:
 		return NN_SVC_DETAIL_LIT("unknown error");
 	}
+}
+
+/*
+ * One refusal in words.  A refusal of the shared input admission test (issue
+ * #162) is worded from its reason's name, so each reason reads differently and
+ * the words are the ones f746g-disco's are built from; every other code keeps
+ * this board's sentence.  The format and the longest name are held under
+ * NN_SVC_DETAIL_MAX by test/test_nncam_input.c.
+ */
+static void nn_nncam_detail(struct nn_op_result *res, int rc)
+{
+	int reason = nncam_input_reason_of(rc);
+
+	if (reason != 0)
+		nn_detail_set(NNCAM_INPUT_DETAIL_FMT, nn_input_refusal_name(reason),
+		              nncam_input_hint(reason));
+	else
+		nn_detail_set("%s", nn_nncam_strerror(rc));
 }
 
 /*
@@ -1651,7 +1669,7 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	rc = nn_camera_start(spec->test ? 1 : CAM_COLORBAR_ANY, 1);
 	if (rc != NNCAM_OK) {
 		(void)nn_core_abort(&nn_core, &nn_core_board);  /* a re-arm: RUNNING */
-		nn_detail_set("%s", nn_nncam_strerror(rc));
+		nn_nncam_detail(res, rc);
 		nn_result(res, nn_status_of_start(rc), NN_CLAIM_NONE);
 		return;
 	}
@@ -1770,7 +1788,7 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 		/* [!] The incomplete teardowns are RETRYABLE, not failures: the release
 		 * is idempotent and repeating the stop is what settles it.  Anything
 		 * this board does not document is TERMINAL -- see nn_stop_disp[]. */
-		nn_detail_set("%s", nn_nncam_strerror(rc));
+		nn_nncam_detail(res, rc);
 		nn_result(res, NN_SVC_ERR_HW, claim);
 		return;
 	}

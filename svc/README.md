@@ -96,10 +96,21 @@ that is a fact about its memory or its core, bound at link time (the callers of
 | `NN_TFLM_ARENA_KB`, `NN_TFLM_MODEL_KB`, `NN_TFLM_VERIFY`, the op profile | `cmake/tflite-micro.cmake` (compile definitions) | sizes the board's memory can hold, whether the board can afford the on-board flatbuffer verifier, and which kernels fit its flash |
 
 The op profile is one definition selecting a complete list in
-`nn_tflm_ops.h`; the resolver's size is counted from it.  That mechanism is
-where an Ethos-U profile (one custom op) would go when grove-vision-ai-v2's
-backend joins (a follow-up issue, not yet filed); Grove's backend is still its
-own today.
+`nn_tflm_ops.h`; the resolver's size is counted from it.  Since issue #169 it
+also holds the Ethos-U profile, `NN_TFLM_OPS_ETHOSU_PROFILE=1`: the one
+`ethos-u` custom operator and no CPU kernel, for an Ethos-U backend (which
+grove-vision-ai-v2 does not select yet; its backend is still its own).
+
+Where `nn_model_reload()` may adopt a model from is the backend's to declare
+(`nn.h`, issue #169).  A staging backend (tflm) adopts only from a slot
+`load_region()` handed out, aligned and not the live one.  An in-place backend
+(Ethos-U) adopts from inside the read window the board declares, aligned; it
+has no `load_region()` (so `nn_model_load_region()` is `NN_ERR_NOSUP`), and the
+model bytes stay valid only because the caller holds its lease on the window
+for as long as the model is loaded.  Its refusals that have no staging
+counterpart have their own codes -- `NN_MODEL_ERR_WINDOW`, `NN_MODEL_ERR_IDENT`
+(kept apart from `NN_MODEL_ERR_FORMAT`) and `NN_MODEL_ERR_PAYLOAD` -- worded by
+that backend rather than by `nn_model_strerror()`.
 
 ### The Ethos-U checks are shared (issue #169)
 
@@ -287,7 +298,7 @@ relative to `svc/`.
 | `nn/nn_backend.h` | The vtable the one compiled-in backend (`null`, `tflm`, f746g-disco's `stedgeai*`) exports as `nn_backend_vt_selected`. |
 | `nn/nn_dispatch_state.h` | What a board gives `nn.c`: its state object and the hooks (see [The inference layer](#the-inference-layer-is-one-implementation-issue-161)). |
 | `nn/nn_desc` | `nn_tensor` -> `svc/nn/tensor.h` descriptor, for the boards that use `nn.h`. |
-| `nn/tflm/` | The one tflite-micro backend of wio-lite-ai and f746g-disco (issue #161; built only with `CONFIG_NN_BACKEND=tflm`, into the board's `tflm` library): `nn_tflm.cc` (the vtable), `nn_tflm_state.h` (its state type and facts, defined by the board), `nn_tflm_mem.h` (the buffers the board places; see [The inference layer](#the-inference-layer-is-one-implementation-issue-161)), `nn_tflm_ops.h` (the op profiles, shared with each board's host `verify_tflite`), `nn_tflm_fit.h` (which slot a model range may be adopted from, never the live one; host-tested), `nn_tflm_glue.h` (the glue that does not depend on staging -- descriptors, name, empty state, op resolver, interpreter destruction -- included into each TFLM-based backend's own translation unit with its state object named by `NN_TFLM_GLUE_STATE` / `NN_TFLM_GLUE_FACTS`; issue #169) and `cxx_runtime.cc` (the C++ runtime shim). One of the two directories under `svc/` that include TFLM headers (the other is `nn/ethosu/`). |
+| `nn/tflm/` | The one tflite-micro backend of wio-lite-ai and f746g-disco (issue #161; built only with `CONFIG_NN_BACKEND=tflm`, into the board's `tflm` library): `nn_tflm.cc` (the vtable), `nn_tflm_state.h` (its state type and facts, defined by the board), `nn_tflm_mem.h` (the buffers the board places; see [The inference layer](#the-inference-layer-is-one-implementation-issue-161)), `nn_tflm_ops.h` (the op profiles, shared with each board's host `verify_tflite`; includes the one-operator `ethosu` profile), `nn_tflm_fit.h` (which slot a model range may be adopted from, never the live one; host-tested), `nn_tflm_glue.h` (the glue that does not depend on staging -- descriptors, name, empty state, op resolver, interpreter destruction -- included into each TFLM-based backend's own translation unit with its state object named by `NN_TFLM_GLUE_STATE` / `NN_TFLM_GLUE_FACTS`; issue #169) and `cxx_runtime.cc` (the C++ runtime shim). One of the two directories under `svc/` that include TFLM headers (the other is `nn/ethosu/`). |
 | `nn/ethosu/` | The stateless Ethos-U parts (issue #169): the bounded verifier and its limits (`npu_verify.h`), the payload locator and model refusal (`npu_model_scan`) and the command-stream walk (`npu_payload`), which grove-vision-ai-v2's firmware and its host `verify_vela_model` compile from the same files, and the arena ownership protocol with the driver's cache hooks (`npu_cache`; state and cache-line primitive are the board's) (see [The Ethos-U checks](#the-ethos-u-checks-are-shared-issue-169)). |
 | `nn/nn_svc_adapter.h` | Static-inline helpers every adapter uses to build a result and an `nn info` line. |
 | `nn/nn_detail.h` | The bound on a board's `nn` explanation text and its build-time check. |

@@ -3,7 +3,7 @@
  * Copyright (c) 2026 ThreadX Shell Project
  *
  * Host test: the C++ spelling of the build-time wording check (svc/nn/nn_detail.h,
- * issue #122).  A board's C++ table -- grove-vision-ai-v2's npu_status_name() --
+ * issue #122).  A C++ table -- svc/nn/ethosu/nn_ethosu.cc's nn_ethosu_strerror() --
  * cannot use the C form (a struct cannot be defined inside sizeof in C++), so
  * nn_detail.h gives it a template.  Same shape as test_nn_detail_check.c:
  * run_host_tests.sh builds this plainly, where the boundary must pass, and once

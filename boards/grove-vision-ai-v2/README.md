@@ -2225,8 +2225,12 @@ firmware is.
 ### The nn files
 
 The command, its contract and the shared core are `svc/`'s (see
-[svc/README.md](../../svc/README.md)).  What this board still owns, one line per
-file (each `.c` with its `.h` unless only a header is listed):
+[svc/README.md](../../svc/README.md)) -- and since issue #169 so is the model API
+below the adapter: `svc/nn/nn.c`, the dispatcher wio-lite-ai and f746g-disco use,
+over the Ethos-U backend in `svc/nn/ethosu/` (see
+[the shared dispatcher and backend](#the-shared-dispatcher-and-the-ethos-u-backend-issue-169)).
+What this board still owns, one line per file (each `.c` with its `.h` unless only
+a header is listed):
 
 | File | Thread or context | Hardware reason |
 |---|---|---|
@@ -2235,20 +2239,77 @@ file (each `.c` with its `.h` unless only a header is listed):
 | `port/nn/nn_producer.c` | camera producer (the overlay's `process()`, inside the panel sink's `consume()`, counted by `svc/camera/cam_step.h`) | Prepares the raw planar WDMA3 frame straight into the Ethos-U55 input tensor on the CPU, only while the worker wants a frame, and hands it over: the datapath rewrites that frame two frames later, so it is prepared here or copied. |
 | `port/nn/nn_worker.c` | inference worker | The ThreadX thread and its join, and `nn_camera_work()` with the frame path's outputs / decode / publish / account hooks: the NPU driver blocks for the whole invoke, so the invoke needs a thread of its own. |
 | `port/nn/nn_panel.c` | panel (`draw()`, inside the panel guard) | The nn half of the SPI LCD panel thread: the record snapshot and the plugin's paint into the staged RGB565 frame, with the plugin lease only tried (panel guard, then lease; no lease holder waits for the panel guard). |
-| `port/nn/nn_active.c` | worker, panel, console, under the plugin lease | Turns `npu_tensor` into `svc/nn/tensor.h` descriptors and states this board's frame geometry for `svc/nn/nn_active_core.c`. |
+| `port/nn/nn_active.c` | worker, panel, console, under the plugin lease | Turns `nn_tensor` arrays into `svc/nn/tensor.h` descriptors (the shared `svc/nn/nn_desc.c`) and states this board's frame geometry for `svc/nn/nn_active_core.c`. |
 | `port/nn/nn_preproc.c` | camera producer (fill); wherever a box is mapped back | The camera's frame size and pixel format against the model input; pure and host-tested because a wrong box costs a NOR flash cycle to investigate. |
 | `port/nn/nn_rec.c` | worker (publish), panel and console (snapshot) | The record's storage and its lock, a short interrupt-disabled section rather than a mutex (`nn_rec.h` says why). |
-| `port/nn/nn_outputs.c` | inference worker | How many NPU outputs this board decodes (`NPU_DESC_MAX_OUTPUTS`); pure, the reads behind a callback. |
+| `port/nn/nn_outputs.c` | inference worker | How many NPU outputs this board decodes (`NN_MAX_IO`); pure, the reads behind a callback. |
 | `port/nn/nn_run_wait.c` | console (`nn run`) | No hardware reason: the five ways `nn run`'s wait ends, a pure table over this board's worker and camera outcomes. |
 | `port/nn/nn_stream_state.c` | console (`nn stream stop`) | The stop's order as a table over two separate proofs -- the overlay's count at zero (permits the worker join, the record boundary and nn's leave) and a confirmed camera stop (the only thing that permits the sink's unlink) -- and the retryable / terminal classification of the codes; pure, host-tested. |
 | `port/camera/cam_lcd_sink.c` | camera producer (`consume()`), panel thread, console (hold / release / overlay) | Not an nn file, but nn runs on it: the one panel sink, the holder table (`svc/camera/cam_holders`) and the overlay pointer with its count. |
 | `port/nn/nn_param_calls.c` | console (`nn thresh`, `nn dets`, load / unload) | No hardware reason: the count of console calls inside the plugin, run in the board's critical section. |
 | `port/nn/nn_plugin_stack.h` | build time | Per-slot plugin stack allowances asserted against this board's thread stacks. |
 | `port/nn/nn_probe.c`, `nn_probe_rtos.c` | every thread that enters a plugin slot | Stack depth at a plugin callback's entry; the rtos half asks ThreadX which thread is running. |
-| `port/nn/npu/` | worker (invoke), console (open / close / info) | The backend: Ethos-U55 bring-up, arena and cache maintenance, TFLM with the one op resolver, NOR model scan and payload checks. |
+| `port/nn/nn_model_board.c` | any thread calling `svc/nn/nn.h` | The dispatcher's state and its four hooks: PRIMASK, the ThreadX tick, and a cycle counter reported UNAVAILABLE (the DWT stops in WFI while the inference thread sleeps on the driver's semaphore), so `nn_last_cycles()` is 0. |
+| `port/nn/npu/nn_ethosu_board.cc` | (state) | The Ethos-U backend's state object and this board's facts: no name prefix, and the read window a model must lie inside (`NOR_XIP_BASE`, `NOR_SIZE`). |
+| `port/nn/npu/npu_arena.c` | NPU (bus master), worker | `nn_ethosu_arena`, 450 KB in `.nn_arena` (SRAM, NOLOAD, 32-byte aligned), sized by `board.cmake`'s `NN_ETHOSU_ARENA_KB` and pinned by the placement gate. |
+| `port/nn/npu/npu_hw.c` | console (load / unload / info) | Ethos-U55 bring-up: SCU, the NPU interrupt and its EPK wrap, the NOR reader lease the loaded model reads through. |
+| `port/nn/npu/npu_rtos.c` | worker (invoke), NPU ISR (semaphore give) | The driver's mutex and semaphore hooks as ThreadX objects (a static pool); ThreadX, which `svc/` does not include. |
+| `port/nn/npu/npu_cache_board.c` | worker (inside `Invoke()`), console (plugin load) | The cache-line primitive and the fail-stop under the shared arena protocol (`svc/nn/ethosu/npu_cache.c`), and that protocol's state, `npu_cache_board_state` (12 B in DTCM). |
 | `port/plugin/plugin_run.c` | console (load / unload), worker, panel | The plugin reservation from this board's linker script, Cortex-M55 I/D-cache maintenance, the Armv8-M MPU read-back and the flash-lease precondition. |
 | `port/plugin/plugin_lease.c` | every path into the plugin | The lease as a ThreadX mutex with bounded waits (worker, console) and a try (panel). |
 | `port/plugin/plugin_paint.c` | panel | The pixel loops into the byte-swapped RGB565 staged frame the ST7789 takes over SPI. |
+
+### The shared dispatcher and the Ethos-U backend (issue #169)
+
+The model API under `port/nn/nn_svc_grove.c` is the one the other two boards use:
+`svc/nn/nn.c` (the singleton, the session, the swap) over one compiled-in backend,
+here `svc/nn/ethosu/nn_ethosu.cc`.  The backend interprets a model IN PLACE in the
+XIP window -- no staging buffer, no `load_region()` -- and the adapter's NOR lease is
+what keeps those bytes there, from `npu_hw_init()` before the lookup until the
+backend has released the last model.  What did not change, deliberately: the
+adapter's gate and its owners, the worker, the producer's prep, `nn stream` refusing
+a model with no decoder before shape or draw, `nn run` on the same worker, the
+teardown order and the NOR lease's lifetime.  The adapter takes `nn.c`'s session in
+the same critical section as its own gate and gives it back with it.
+
+**Refusals.**  A load is checked in one order by the backend: window, length (16 B
+floor), 16-byte alignment, the `TFL3` identifier, the bounded verifier
+(`svc/nn/ethosu/npu_verify.h`), the schema version, the payload walk, the resolver,
+`AllocateTensors()`, then the I/O rule (1..8 inputs and outputs, every tensor with a
+buffer and rank <= 4; `svc/nn/ethosu/nn_ethosu_io.h`, which `verify_vela_model`
+calls too).  The reasons are `svc/nn/nn.h`'s codes and the shared command's words:
+the three only an in-place backend gives are new -- `NN_MODEL_ERR_WINDOW` (-10,
+"model address outside the flash window"), `NN_MODEL_ERR_IDENT` (-11, "no TFL3
+model at that address", still separate from `_FORMAT`) and `NN_MODEL_ERR_PAYLOAD`
+(-12, "model payload has actions after the command stream") -- and the rest read as
+on wio-lite-ai and f746g-disco (e.g. "not a valid model for this runtime" for a
+malformed flatbuffer, where this board used to say "model flatbuffer is malformed").
+A model with more than 8 outputs or a tensor of rank > 4 is now refused at load
+instead of loading and being refused by `nn stream`.
+
+**`--addr` is refused by the backend, after the bring-up.**  The adapter no longer
+checks a raw address and length itself (that copy of the window check went to make
+room in ITCM).  `nn model load --addr 0x10 16` therefore brings the NPU up and takes
+the NOR lease, is refused by the backend (`model address outside the flash window
+(0x00000010, 16 B)`, status -76 where the adapter's own check answered -70), and
+gives both back; address 0 is a NULL pointer and reads `bad argument`.  The status
+is printed only -- a load's refusal leaves no claim to recover either way.
+
+**Measured (2026-10-31, after the change).**
+
+| what | value |
+|---|---|
+| ITCM | 253,952 B used, **8,192 B free -- exactly the placement gate's floor**; the next ITCM growth needs #170 first |
+| ITCM `.text` growth, step 2 to step 5 | about 1,088 B, of which `svc/nn/nn.c` as linked is about 750 B |
+| `.bss` | +512 B (the backend's state and descriptors, the dispatcher's state) |
+| `npu_cache_board_state` | 12 B in DTCM (step 2) |
+| detector stream / classifier stream | 36.9 - 37.0 inf/s / 7.3 - 7.4 inf/s (unchanged) |
+| `nn bench`, detector / classifier | 13.5 ms / 94.4 ms average (unchanged) |
+
+**Known hole.**  `svc/nn/nn.h`'s tensor dimensions are 16-bit, and the descriptor
+copy truncates a larger one silently -- on all three boards; new here with this
+change.  The firmware does not refuse it yet (the check would cost ITCM this board
+does not have until #170); `verify_vela_model` refuses it on the host.
 
 ### The model is a blob, opened by name (#93, #49 Step 4a)
 
@@ -2284,11 +2345,13 @@ backend's close-and-reopen and the identity):
    the step the first draft of the plan left out and the review caught:
    **`BLOB_VALID` is a statement about the HEADER**, and a consumer that PARSES
    a payload in place has to check the payload.
-5. `npu_open()`, with the length from the header the CRC ran against.
+5. `nn_model_reload()` (the Ethos-U backend; `npu_open()` until issue #169), with
+   the length from the header the CRC ran against.
 6. the plugin, if the payload is a container that carries one -- **only after
-   `npu_open()` took the model** (issue #122).
-7. any failure that leaves no model open: `npu_hw_deinit()`, so the flash lease
-   is never held by a half-open NPU.
+   the backend took the model** (issue #122).
+7. any failure that leaves no model open: the backend's release, then
+   `npu_hw_deinit()`, so the flash lease is never held by a half-open NPU and no
+   interpreter reads the window after it is returned.
 
 #### Loading over an open model replaces it (issue #122)
 
@@ -2303,8 +2366,9 @@ shares since issue #131, walked by `shell/test/test_nn_swap.c`):
 | stopped at | status | state | plugin | NPU / lease | last result |
 |---|---|---|---|---|---|
 | name, CRC, container (nothing touched) | failed | `previous` | kept | kept | kept |
-| `npu_open()` refused the new model, the previous one reopened | failed | `previous` | kept (never touched) | kept | kept |
-| `npu_open()` refused it and the previous one too | failed | `empty` | unloaded | down | gone |
+| the backend refused the new model, the previous one rebuilt from the same bytes | failed | `previous` | kept (never touched) | kept | kept |
+| the backend refused it and the previous one too | failed | `empty` | unloaded | down | gone |
+| `--addr` outside the window or under the length floor (issue #169: refused by the backend, after the bring-up) | failed | `previous`, or `empty` with nothing loaded | kept / none | kept; or brought up and taken down again | kept / gone |
 | the new model's plugin refused (`entry()` or earlier) | **failed** | **`new`** | unloaded | kept, for the new model | gone |
 | opened, plugin started or none carried | ok | `new` | the new one, or none | kept | gone |
 
@@ -2339,7 +2403,10 @@ The raw form is `nn model load --addr <addr> <len>` -- a flag, so that a name ca
 never be read as a hex number or the other way round.  It is how you look at a
 model somebody put somewhere the store does not carve.
 
-### [!] `npu_open()` takes a length, and verifies the flatbuffer (#93)
+### [!] The backend takes a length, and verifies the flatbuffer (#93)
+
+(This was `npu_open()`'s until issue #169; the checks and their order moved with
+it into `svc/nn/ethosu/nn_ethosu.cc`, the limits stayed in `npu_verify.h`.)
 
 `tflite::GetModel()` is a cast.  Every accessor after it follows an offset out
 of the buffer, and until #93 there was no buffer -- only an address with "enough
@@ -2376,8 +2443,10 @@ is refused THERE, rather than being reported here as malformed.
 Cost of the verifier in the image: **ITCM 214,368 -> 226,368 B**, against a gate
 that requires 8,192 B of headroom out of 262,144.
 
-`NPU_ERR_MODEL_FORMAT` is its own status, separate from `_MAGIC` ("this is not a
-model") and `_SCHEMA` ("a model this build cannot read").
+`NPU_ERR_MODEL_FORMAT` was its own status, separate from `_MAGIC` ("this is not a
+model") and `_SCHEMA` ("a model this build cannot read").  Since issue #169 the
+three are `NN_MODEL_ERR_FORMAT`, `NN_MODEL_ERR_IDENT` and `NN_MODEL_ERR_VERSION`,
+still three.
 
 #### [!] What the verifier does NOT say
 
@@ -2442,10 +2511,10 @@ what, rather than "the gates ran at build time":
 
 | what you could send by mistake | what catches it | when |
 |---|---|---|
-| malformed `.tflite` | `npu_open()`'s bounded verifier | `nn model load`, after erase + transfer |
+| malformed `.tflite` | the backend's bounded verifier | `nn model load`, after erase + transfer |
 | a **recognised** container with malformed internals, incompatible plugin target, or a damaged **plugin** section | `plugin_load.c` | `nn model load` |
-| a container whose **magic** is damaged | probes as `UNKNOWN` and falls through as a bare model, so `npu_open()` -- **not** `plugin_load.c` | `nn model load` |
-| **model-section** damage that still satisfies `npu_open()` | **nothing** -- only the plugin section has a digest | -- |
+| a container whose **magic** is damaged | probes as `UNKNOWN` and falls through as a bare model, so the backend -- **not** `plugin_load.c` | `nn model load` |
+| **model-section** damage that still satisfies the backend | **nothing** -- only the plugin section has a digest | -- |
 | a **stale** artifact from another build | **nothing refuses it** | -- |
 | content that was never gated: a model that never passed `verify_vela_model`, or a container pairing the wrong model with the wrong plugin | **nothing** | -- |
 | stored under the wrong **name** | not enforced, but observable -- `nn model load --name` refuses a key that is not there, and `blob list` shows slot and key | at load |
@@ -3725,7 +3794,7 @@ entry that moves fails there first.
 [!] **The 4 MB class is sized by what the hardware can run, not by anything
 stored here** -- the largest asset today is a 1,704,672 B model.  Nothing but
 the slot bounds model size: the flatbuffer is read in place out of the XIP
-window and never copied, `npu_open()`'s length limit is whatever is left of the
+window and never copied, the backend's length limit is whatever is left of the
 window, and the arena is a function of feature-map sizes rather than of weights.
 The two models prove that last part -- the **164,512 B detector uses a bigger
 arena (394,800 B) than the 1,704,672 B classifier (385,748 B)**.  So a model
@@ -3784,7 +3853,7 @@ arrived.  Whether the payload still matches them is what `blob verify` will
 answer, and a consumer that parses a payload in place -- `nn model load` reads a
 model straight out of the window -- has to check it first.  Since #93 it does,
 under the lease it goes on reading with: `blob_verify_leased()` between the name
-lookup and `npu_open()`.
+lookup and the backend's reload.
 
 #### What a write costs, and where the chunk size comes from
 
@@ -4082,7 +4151,7 @@ malformed the parser takes `goto err` and returns without ever calling
 `ethosu_wait()` -- so `ethosu_inference_end()` never runs, the arena is never
 handed back, and TFLM writes it while the NPU may still be running.
 
-The SDK is read-only, so this is closed at the other end: `npu_open()` refuses a
+The SDK is read-only, so this is closed at the other end: the backend refuses a
 model whose payload is not **exactly one `COMMAND_STREAM`, as the last action**.
 With nothing left to parse after the launch there is nothing left to fail on.
 Vela emits exactly this shape, but `nn model load` takes whatever an operator put in a
@@ -4238,7 +4307,7 @@ host instead of on a board at the far end of a flash cycle:
 
 - the payload passes **the firmware's own** `npu_payload.c` walk -- the file is
   compiled into the tool, not reimplemented, so it cannot agree with itself and
-  disagree with `npu_open()`
+  disagree with the backend
 - `AllocateTensors()` fits **the board's own** `npu_arena.c` -- likewise compiled
   in, so the size cannot drift from the reservation
 - one subgraph, every operator `ethos-u`, int8 in and out, no unreachable
@@ -4299,16 +4368,13 @@ including mutations compiled with this board's actual service flags. The
 plugin's actual-object audit remains independent. See the
 [shared storage gate contract](../../cmake/README.md).
 
-`port/nn/npu/npu_desc.c` is what remains of this board's half: `npu_tensor` ->
-`tensor_desc`, and nothing else.  `nn out`, `nn info` and the active-decoder shim
-all need that translation whatever interprets the tensors -- or whether anything
-does -- which is why it outlived the decoder that used to share its file.
-
-The board-independent arithmetic is tested in `shell/test/test_blazeface.c`; what
-stays in `test/test_npu_desc.c` is the translation, compiled against the real
-`npu.h` -- an unknown TfLiteType must not be read as int8, the rank-0 marker
-`npu_tflm.cc` leaves for a tensor it cannot represent must not look present, and
-a reused descriptor must keep nothing of the previous tensor.
+What remained of this board's half was the `npu_tensor` -> `tensor_desc`
+translation (`port/nn/npu/npu_desc.c`): `nn out`, `nn info` and the active-decoder
+shim all need it whatever interprets the tensors -- or whether anything does.
+Since issue #169 that is the shared `svc/nn/nn_desc.c` over `svc/nn/nn.h`'s tensors,
+tested by `shell/test/test_nn_desc.c`, and this board's own type, translation and
+test (`test/test_npu_desc.c`) are gone.  The board-independent arithmetic is tested
+in `shell/test/test_blazeface.c`.
 
 [!] **Two of the decoder's failure paths cannot be reached from the console, and
 no hardware procedure should pretend otherwise.**  `BF_ERR_MODEL` -- "the open
@@ -5447,7 +5513,8 @@ reads it in one blob.
 
 **Step 1a, which is what this section describes, never executes the plugin.**
 The device parses a container, validates its manifest in full, hands the MODEL
-section to the existing `npu_open()`, and reports what the plugin claims.
+section to the existing `npu_open()` (the backend's reload since issue #169), and
+reports what the plugin claims.
 Loading and calling it is Step 1b -- issue #103, the next section.
 
 ### Sending one
@@ -6084,7 +6151,8 @@ Report takes the same path to `nn_svc_run_once` and then `nn_capture_report` 8
 300 B at #121 -- the result's output shapes or classes travel in its frame --
 and `nn dets` reaches report only, through `cmd_nn_dets` 1,232 >
 `nn_svc_decode_current` 24.  To entry (issue #122 stage 4, which moved the
-plugin load out of the name resolution and after `npu_open()`): ... >
+plugin load out of the name resolution and after `npu_open()`, today the backend's
+reload): ... >
 `cmd_nn_model_load` 376 > `nn_svc_model_load` 96 > `plugin_run_load` 48 >
 `plugin_exec_load` 56.  The resolution's slot table (`nn_resolve_blob` 200,
 `noinline`) has returned by then; before, the call sat inside it and the path

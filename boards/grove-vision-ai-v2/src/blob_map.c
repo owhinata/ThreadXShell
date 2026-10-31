@@ -42,7 +42,7 @@
  * [!] THE 4 MB CLASS IS SIZED BY WHAT THE HARDWARE CAN RUN, not by anything
  * stored here (the largest asset is a 1,704,672 B model).  Nothing but the SLOT
  * bounds how big a model this board can run: the flatbuffer is read in place
- * out of the XIP window and never copied, npu_open()'s length limit is whatever
+ * out of the XIP window and never copied, the backend's length limit is whatever
  * is left of the window, and the arena is a function of feature-map sizes
  * rather than of weights.  The two models prove that last part -- the
  * 164,512 B detector uses a BIGGER arena (394,800 B) than the 1,704,672 B

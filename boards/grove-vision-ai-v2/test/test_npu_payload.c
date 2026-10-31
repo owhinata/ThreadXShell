@@ -6,13 +6,13 @@
  * Host test for the Ethos-U command-stream payload check (issue #46).
  *
  * Compiles the REAL svc/nn/ethosu/npu_payload.c -- the walk has no TFLite and no
- * hardware dependency, which is why it was split out of npu_tflm.cc in the
- * first place.
+ * hardware dependency, which is why it was split out of the interpreter glue in
+ * the first place.
  *
  * WHAT THIS IS PROTECTING.  The driver launches the NPU from inside its action
  * walk and keeps walking.  A malformed later action makes it return without
  * waiting, so the arena is never handed back and TFLM writes it while the NPU
- * may still be running.  npu_open() refuses such a model.  The interesting
+ * may still be running.  The backend's reload() refuses such a model.  The interesting
  * cases below are therefore the ACCEPTS that must stay accepted (a real Vela
  * payload) and the REJECTS that must stay rejected (anything after the stream).
  *

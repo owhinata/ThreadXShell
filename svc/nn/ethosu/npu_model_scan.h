@@ -7,7 +7,7 @@
  * @brief   Locate and vet an Ethos-U model's driver payload (issues #46, #45).
  *
  * C++ ONLY -- it speaks flatbuffer types, which is exactly why it is separate
- * from npu.h.  Two translation units include it:
+ * from the C headers an adapter includes.  Two translation units include it:
  *
  *   svc/nn/ethosu/nn_ethosu.cc
  *       the backend's reload() refuses a model that fails this

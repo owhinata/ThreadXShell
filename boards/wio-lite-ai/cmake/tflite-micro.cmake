@@ -44,14 +44,14 @@ set(TFLM_GEN  "${TFLM_SRC}/tensorflow/lite/micro/tools/project_generation/create
 set(NN_TFLM_CMSIS_NN ON CACHE BOOL "Use CMSIS-NN optimised kernels in the tflm backend")
 
 # Which ops the resolver registers.  Three NESTED profiles, listed in the order they
-# grow (see port/nn/tflm/nn_tflm_ops.h, which is the single definition of each set):
+# grow (see svc/nn/tflm/nn_tflm_ops.h, which is the single definition of each set):
 #
 #   blazeface   the 8 ops BlazeFace-front 128 int8 actually uses
 #   mlperf      + FULLY_CONNECTED / AVERAGE_POOL_2D / SOFTMAX = 11.  Exactly what the
 #               five MLPerf Tiny v1.4 models need (owhinata/wio-lite-ai#55), measured with
 #               scripts/verify_tflite.cc rather than guessed.  +23,624 B of text --
 #               and +6,072 B more with CONFIG_MLPERF_TINY=ON, which leaves 15,240 B.
-#   extended    + the common-vision superset = 26.  [!] DOES NOT LINK on this firmware
+#   extended    + the common-vision superset = 23.  [!] DOES NOT LINK on this firmware
 #               today: FLASH overflows by 29,200 B (measured, owhinata/wio-lite-ai#55).
 #
 # This is a knob rather than a constant because on a 384 KB partition the width of the
@@ -245,11 +245,14 @@ endif()
 # KEEP(*(.init_array*)) would ANCHOR every kernel translation unit that has a static
 # constructor, holding it against --gc-sections.  The donor firmware's +97,056 B for
 # widening the op set is the scale of what that would cost.
+# The backend itself is svc/nn/tflm/ (one implementation with f746g-disco since issue
+# #161); this board adds only where its buffers live and its state object.
 add_library(tflm STATIC
     ${TFLM_LIB_SOURCES}
-    "${BOARD_DIR}/port/nn/tflm/cxx_runtime.cc"    # noexcept operator new/delete
-    "${BOARD_DIR}/port/nn/tflm/nn_tflm_bufs.c"    # arena + model slots (C, on purpose)
-    "${BOARD_DIR}/port/nn/tflm/nn_tflm.cc")       # extern "C" nn_backend_vt_selected
+    "${CMAKE_SOURCE_DIR}/svc/nn/tflm/cxx_runtime.cc"  # noexcept operator new/delete
+    "${CMAKE_SOURCE_DIR}/svc/nn/tflm/nn_tflm.cc"      # extern "C" nn_backend_vt_selected
+    "${BOARD_DIR}/port/nn/tflm/nn_tflm_bufs.c"        # arena + model slots in .psram_ai (C, on purpose)
+    "${BOARD_DIR}/port/nn/tflm/nn_tflm_board.cc")     # the backend's state object + facts
 
 target_link_libraries(tflm PRIVATE bsp_iface)   # MCU_OPTS (fpv5-d16) + CMSIS/HAL includes
 
@@ -263,8 +266,8 @@ target_include_directories(tflm PRIVATE
     "${TFLM_ROOT}/third_party/flatbuffers/include"   # "flatbuffers/..."
     "${TFLM_ROOT}/third_party/gemmlowp"              # "fixedpoint/..."
     "${TFLM_ROOT}/third_party/ruy"                   # "ruy/..."
-    "${BOARD_DIR}/port/nn"                    # the board nn glue (nn_backend.h: svc/nn since #161)
-    "${CMAKE_SOURCE_DIR}/svc/nn")             # nn.h (shared since #161)
+    "${CMAKE_SOURCE_DIR}/svc/nn/tflm"         # the backend's own headers (#161)
+    "${CMAKE_SOURCE_DIR}/svc/nn")             # nn.h, nn_backend.h (shared since #161)
 
 # TF_LITE_STATIC_MEMORY changes TFLM's context/tensor struct layouts across the API
 # boundary, so every translation unit that includes a TFLM header must agree -> PUBLIC.
@@ -274,9 +277,13 @@ target_compile_definitions(tflm
     PUBLIC  TF_LITE_STATIC_MEMORY
     PRIVATE TF_LITE_STRIP_ERROR_STRINGS NDEBUG)
 
-# Our own knobs, consumed by nn_tflm.cc / nn_tflm_bufs.c.
+# Our own knobs, consumed by svc/nn/tflm/ and port/nn/tflm/nn_tflm_bufs.c.  Each size
+# is ONE definition that svc/nn/tflm/nn_tflm_mem.h requires (no fallback there).
+# NN_TFLM_MODEL_KB is one staging slot: 512 KB swallows a whole blob payload
+# (BLOB_PAYLOAD_MAX, src/blob.h), so no blob is ever refused for its size.
 target_compile_definitions(tflm PRIVATE
     NN_TFLM_ARENA_KB=${NN_TFLM_ARENA_KB}
+    NN_TFLM_MODEL_KB=512
     NN_TFLM_VERIFY=$<BOOL:${NN_TFLM_VERIFY}>
     ${NN_TFLM_OPS_DEFINE})
 
@@ -373,7 +380,7 @@ if(HOST_CXX)
                 -I "${TFLM_ROOT}/third_party/flatbuffers/include"
                 -I "${TFLM_ROOT}/third_party/gemmlowp"
                 -I "${TFLM_ROOT}/third_party/ruy"
-                -I "${BOARD_DIR}/port/nn/tflm"
+                -I "${CMAKE_SOURCE_DIR}/svc/nn/tflm"
                 ${_vt_ops_def}
                 "${BOARD_DIR}/scripts/verify_tflite.cc"
                 # GetBuiltinCode() is declared in a header and defined here; it is the
@@ -383,7 +390,7 @@ if(HOST_CXX)
                 "${TFLM_ROOT}/tensorflow/compiler/mlir/lite/schema/schema_utils.cc"
                 -o "${CMAKE_BINARY_DIR}/verify_tflite"
         DEPENDS "${BOARD_DIR}/scripts/verify_tflite.cc"
-                "${BOARD_DIR}/port/nn/tflm/nn_tflm_ops.h"
+                "${CMAKE_SOURCE_DIR}/svc/nn/tflm/nn_tflm_ops.h"
         COMMENT "host c++ -> verify_tflite (checks a .tflite before you send it)"
         VERBATIM)
     add_custom_target(verify-model DEPENDS "${CMAKE_BINARY_DIR}/verify_tflite")

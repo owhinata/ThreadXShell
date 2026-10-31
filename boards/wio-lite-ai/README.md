@@ -516,11 +516,16 @@ file (each `.c` with its `.h` unless only a header is listed):
 | `port/nn/nn_model_board.c` | worker (run), console (open / bench / info) | The state and hooks of the shared model API (`svc/nn/nn.c`): its state as plain CPU-only `.bss`, the PRIMASK critical section, the one-tick ThreadX wait, and a DWT cycle counter it only verifies and reads (`svc/timebase.c` owns it). |
 | `port/nn/nn_null.c` | as `svc/nn/nn.c` | The `null` backend: a stub that builds without any runtime or model. |
 | `port/nn/crc32_fdb.c` | console (container validation) | Serves `svc/crc32.h` with the FlashDB CRC-32 this firmware already links. |
-| `port/nn/tflm/` | worker (invoke), console (load / reload) | The tflite-micro backend: arena and double-slotted model staging in the cacheable PSRAM carve-out (`.psram_ai`). |
+| `port/nn/tflm/nn_tflm_board.cc` | as `svc/nn/tflm/nn_tflm.cc` (worker: invoke; console: load / reload / info) | The state object of the shared tflite-micro backend (`svc/nn/tflm/`, one implementation with f746g-disco since issue #161) as plain CPU-only `.bss`, and this board's facts (model names printed as given). C++ only because the state holds TFLM objects' storage. |
+| `port/nn/tflm/nn_tflm_bufs.c` | as above | The arena and the two model staging slots in the cacheable, CPU-only PSRAM carve-out (`.psram_ai`), defined in C so `check_psram_ai_residency.py` sees their plain names, and the staging capacity object `load_region()` hands out. |
 | `port/plugin/plugin_run.c` | console (load / unload), fault handler | The reservation in the top 32 KB of AXI-SRAM (a Cortex-M7 cannot fetch from DTCM), M7 I/D-cache maintenance and the Armv7-M MPU read-back.  The lease checks, the log lines and the staging-region precondition around them are `svc/plugin/plugin_run_core.c`, shared with f746g-disco (issue #159). |
 | `port/plugin/plugin_lease.c` | every path into the plugin | The lease as a ThreadX mutex: the preview thread outranks the worker and would otherwise preempt a decode mid-way. |
 | `port/plugin/plugin_paint.c` | panel | CPU pixel loops into the rotated, native-order RGB565 LTDC frame (no DMA2D, which has no way to prove it stopped before the flip). |
 | `port/camera/cam_band.c` | camera producer (band callback), console (step enable / disable / drain) | Not an nn file, but nn runs inside it: the one band sink, running the preview step and then the nn step; each step's armed mark and busy count are `svc/camera/cam_step.h`'s. |
+
+[!] **Until issue #162, only input 0 is filled.**  The backend accepts a model
+with 1..8 input tensors, but the camera producer writes input 0 only: a model
+with more inputs runs with the others undefined (whatever the arena held).
 
 [!] **Three `port/` -> `src/` includes remain on purpose.**  They are not nn
 files, and moving them would touch the LTDC, Wi-Fi and MPU code that also uses

@@ -259,7 +259,13 @@ file (each `.c` with its `.h` unless only a header is listed):
 | `port/nn/nn_model_board.c` | worker (run), console (open / bench / info) | The state and hooks of the shared model API (`svc/nn/nn.c`): its state as plain CPU-only `.bss`, the PRIMASK critical section, the one-tick ThreadX wait, and the DWT cycle counter, enabled here with the CoreSight lock key (TRCENA, LAR unlock, CYCCNTENA). |
 | `port/nn/nn_null.c` | as `svc/nn/nn.c` | The `null` backend: a BlazeFace-shaped stub with no runtime, present without a load. |
 | `port/nn/nn_stedgeai.c`, `nn_stedgeai_reloc.c` | as `svc/nn/nn.c` | The non-default ST Edge AI Core backends (a model baked into Flash, or a relocatable one); they need a local ST install. |
-| `port/nn/tflm/` | worker (invoke), console (load) | The default tflite-micro backend with CMSIS-NN kernels; arena and SD model slots in SDRAM. |
+| `port/nn/tflm/nn_tflm_board.cc` | as `svc/nn/tflm/nn_tflm.cc` (worker: invoke; console: load / info) | The state object of the default backend, the shared tflite-micro one (`svc/nn/tflm/`, CMSIS-NN kernels; one implementation with wio-lite-ai since issue #161), as plain `.bss` in internal SRAM, and this board's fact that a model is named `sd:<path>` (it comes off the SD card). C++ only because the state holds TFLM objects' storage. |
+| `port/nn/tflm/nn_tflm_bufs.c` | as above | The arena and the two SD model slots in SDRAM bank3 (`.sdram.ai`, CPU-only), defined in C so `check_f746_layout.py` requires them by their plain names, and `nn_tflm_stage_cap`, the read limit the asset build reads back. |
+
+[!] **Until issue #162, only input 0 is filled.**  Since #161 the backend
+accepts a model with 1..8 input tensors (it refused more than one before), but
+the camera producer writes input 0 only: a model with more inputs runs with the
+others undefined (whatever the arena held).
 
 This board has no panel thread.  The GUIX thread draws the overlay itself, in
 its CAMERA_FRAME handler (`ui/guix_camera_ui.c`): a loaded plugin's draw
@@ -339,7 +345,7 @@ backend. What that changed here:
   session (stream running, SDRAM down, the first open) come in the same order.
 
 `nn info` prints two arena figures: `arena : N B reserved` is the activation
-arena the backend reserves (`tflm`: `g_arena`, 524,288 B; `stedgeai_reloc`:
+arena the backend reserves (`tflm`: `nn_tflm_arena`, 524,288 B; `stedgeai_reloc`:
 `g_acts`, 393,216 B; `stedgeai`: the generated activations size; `null`: 0),
 and `used : N B (activations)` is what the open model's activations actually
 take of it (absent with no model, and on `null`). The same two lines as
@@ -366,21 +372,22 @@ the resident decoder's candidate scratch (`nn_dec_scratch`, 1,536 B):
 
 | Object | Address | Size | Owner |
 |---|---|---|---|
-| `g_sd_model_buf` | `0xC0600000` | 1,048,576 B (2 x 512 KB) | `port/nn/tflm/nn_tflm.cc`, SD model slots |
-| `g_arena` | `0xC0700000` | 524,288 B | `port/nn/tflm/nn_tflm.cc`, activation arena (holds the input tensor) |
+| `nn_tflm_model_buf` | `0xC0600000` | 1,048,576 B (2 x 512 KB) | `port/nn/tflm/nn_tflm_bufs.c`, SD model slots |
+| `nn_tflm_arena` | `0xC0700000` | 524,288 B | `port/nn/tflm/nn_tflm_bufs.c`, activation arena (holds the input tensor) |
 | free | `0xC0780000` | 524,288 B | |
 
-`check_f746_layout.py` requires `g_arena` and `g_sd_model_buf` in bank3 in a
-`tflm` build only (they are in an anonymous namespace, so board.cmake names them
-by their mangled local symbols). A `null` build is not asked for them. The
+`check_f746_layout.py` requires `nn_tflm_arena` and `nn_tflm_model_buf` in bank3
+in a `tflm` build only (C globals since #161; until then they were
+anonymous-namespace objects `g_arena` / `g_sd_model_buf`, named by their mangled
+local symbols, at the same addresses). A `null` build is not asked for them. The
 negative tests are `cmake/fixtures/run_layout_tests.py`, run by the host test
 suite.
 
 **What the camera producer writes is covered by the same requires.** Since #130
 the producer preprocesses each frame straight into the model's input tensor,
-and that tensor is not an object of its own: TFLM allocates it inside `g_arena`
+and that tensor is not an object of its own: TFLM allocates it inside `nn_tflm_arena`
 (and the `null` backend's is `null_in_buf`, required in a `null` build). So the
-`g_arena` require is also the placement guarantee for the producer's writes --
+`nn_tflm_arena` require is also the placement guarantee for the producer's writes --
 bank3, CPU-only, never a DMA target. There was no require for the removed
 `nncam_stage`, so no gate changed.
 
@@ -397,7 +404,7 @@ figures are the tables above.
 |---|---|
 | `nn bench 10` | min 628,234 / avg 631,212 / max 633,281 us |
 | `nn stream start --frames 300` | 300 frames in, 266 skipped, 0 errors; 30 inferences in 21,036 ms = 1.42 inf/s; latency 659,658 us (last) |
-| `nn info` arena line | `470352 B reserved` -- [!] labelled "reserved" but it was the arena TFLM actually USES; since #131 that figure is the `used` line and `arena` is the reservation, `g_arena`, 524,288 B |
+| `nn info` arena line | `470352 B reserved` -- [!] labelled "reserved" but it was the arena TFLM actually USES; since #131 that figure is the `used` line and `arena` is the reservation, `nn_tflm_arena`, 524,288 B |
 
 Stack high-water marks from `thread` after `nn bench 10`, two `nn run` and the
 300-frame stream (`peak` / size):
@@ -477,8 +484,9 @@ operator copies to the microSD card with a PC card reader, and loads with
   one of its two staging slots that starts on `NN_MODEL_ALIGN` (16 B) -- a slot
   is identified by containment, not equality, as on wio-lite-ai since #108 --
   so the validated container is never overwritten with unvalidated bytes.
-  The rule is `port/nn/tflm/nn_tflm_fit.h`, a pure function the backend calls
-  and `test/test_nn_tflm_fit.c` walks at its boundaries.
+  The rule is `svc/nn/tflm/nn_tflm_fit.h`, a pure function the backend calls
+  and `shell/test/test_nn_tflm_fit.c` walks at its boundaries (since #161 it
+  also refuses the live slot, as wio-lite-ai's always did).
 - **Since Step 4b the plugin is started** (below): after the backend has
   adopted the model section, the shared load order copies the plugin into
   `.plugin` and calls its entry, under the plugin lease.
@@ -659,7 +667,8 @@ control stays off.
 `scripts/verify_tflite.cc` (`--target verify-model`) is this board's model gate
 for that asset build: the tree's own `VerifyModelBuffer()`, the staging
 capacity (512 KB), and the operators the firmware registers -- read from
-`port/nn/tflm/nn_tflm_ops.h`, the same list `nn_tflm.cc` registers from.
+`svc/nn/tflm/nn_tflm_ops.h` under the `extended` profile, the same list
+`svc/nn/tflm/nn_tflm.cc` registers from.
 
 Measured at Step 4a (`build/f746-tflm`): Flash 796,868 B (was 792,100; the
 validator, the CRC and the claims), `RAM` 115,584 B of 224 KB.
@@ -693,7 +702,7 @@ strong `T`, its address is NOT `Default_Handler`'s, and the matching
 bound where the section STARTS, so an EMPTY one satisfies all of them, and the
 section uses `KEEP` so `--gc-sections` cannot even produce the "no such object"
 hint the other boards get.  So `check_f746_layout.py` names what has to be
-there, per backend: `g_arena` and `g_sd_model_buf` on `tflm`, `null_in_buf` on
+there, per backend: `nn_tflm_arena` and `nn_tflm_model_buf` on `tflm`, `null_in_buf` on
 `null`, `stai_acts` on `stedgeai`, and `g_acts` and `g_rt_ram` on
 `stedgeai_reloc` (whose executable model slots, `g_model_slot`, are required in
 the `0xC0700000` window).  From issue #97 to #159 Step 4c it also required the

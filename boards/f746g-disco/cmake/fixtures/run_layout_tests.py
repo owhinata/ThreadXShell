@@ -164,8 +164,8 @@ def main():
     tflm = backend_requires("tflm")
     # The tflm backend's whole bank3 footprint is these two objects; a block
     # that quietly lost one would still pass every case below for the other.
-    for want in ("g_arena", "g_sd_model_buf"):
-        if not any(re.search(r"\d%sE$" % want, n) for n in tflm):
+    for want in ("nn_tflm_arena", "nn_tflm_model_buf"):
+        if want not in tflm:
             sys.exit(f"run_layout_tests: board.cmake's tflm block no longer "
                      f"requires {want} in bank3 ({tflm})")
     null = backend_requires("null")
@@ -192,7 +192,8 @@ def main():
                 continue
             addr = where.get(name, BANK3 + 0x60600 + 0x100000 * i) if where else \
                 BANK3 + 0x60600 + 0x100000 * i
-            syms.append((addr, "b", rename.get(name, name) if rename else name))
+            # "B": plain C globals since issue #161 (nn_tflm_bufs.c).
+            syms.append((addr, "B", rename.get(name, name) if rename else name))
         return syms
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -211,16 +212,16 @@ def main():
                    common + tflm_args, 1, f"{name}: {name} is at 0xc0170800, outside")
             expect(f"tflm-{name}-in-bank2", tflm_image(where={name: 0xC0450780}),
                    common + tflm_args, 1, f"{name}: {name} is at 0xc0450780, outside")
-            # Gone from the image, or spelled differently (renamed / moved out of
-            # the anonymous namespace): a failure, never a vacuous pass.
+            # Gone from the image, or spelled differently (renamed, or moved
+            # back into C++ under a mangled name): a failure, never a vacuous pass.
             expect(f"tflm-{name}-absent", tflm_image(drop=name),
                    common + tflm_args, 1, f"{name}: no such object in the image")
             expect(f"tflm-{name}-renamed", tflm_image(rename={name: name + "_old"}),
                    common + tflm_args, 1, f"{name}: no such object in the image")
             # [!] Two objects with the same name, one in bank3 and one not.
-            # Anonymous-namespace names are not unique across files: another .cc
-            # defining the same object gets the same mangled name.  Every match
-            # must be in the region; one in place must not excuse the other.
+            # Local names are not unique across files: another file's `static`
+            # of the same name is a second `b` symbol.  Every match must be in
+            # the region; one in place must not excuse the other.
             for other, addr in (("bank0", 0xC0170800), ("bank2", 0xC0450780)):
                 syms = tflm_image() + [(addr, "b", name)]
                 expect(f"tflm-{name}-twice-one-in-{other}", syms,

@@ -151,10 +151,14 @@ if(NN_TFLM_CMSIS_NN)
     list(APPEND TFLM_LIB_SOURCES ${TFLM_CMSIS_NN_SOURCES})
 endif()
 
+# The backend itself is svc/nn/tflm/ (one implementation with wio-lite-ai since issue
+# #161); this board adds only where its buffers live and its state object.
 add_library(tflm STATIC
     ${TFLM_LIB_SOURCES}
-    "${BOARD_DIR}/port/nn/tflm/cxx_runtime.cc"   # noexcept operator new/delete + traps
-    "${BOARD_DIR}/port/nn/tflm/nn_tflm.cc")      # extern "C" nn_backend_vt_selected
+    "${CMAKE_SOURCE_DIR}/svc/nn/tflm/cxx_runtime.cc"  # noexcept operator new/delete + traps
+    "${CMAKE_SOURCE_DIR}/svc/nn/tflm/nn_tflm.cc"      # extern "C" nn_backend_vt_selected
+    "${BOARD_DIR}/port/nn/tflm/nn_tflm_bufs.c"        # arena + model slots in .sdram.ai (C, on purpose)
+    "${BOARD_DIR}/port/nn/tflm/nn_tflm_board.cc")     # the backend's state object + facts
 
 target_link_libraries(tflm PRIVATE bsp_iface)   # MCU_OPTS (fpv5-sp-d16) + CMSIS/HAL includes
 
@@ -168,8 +172,8 @@ target_include_directories(tflm PRIVATE
     "${TFLM_ROOT}/third_party/flatbuffers/include"   # "flatbuffers/..."
     "${TFLM_ROOT}/third_party/gemmlowp"              # "fixedpoint/..."
     "${TFLM_ROOT}/third_party/ruy"                   # "ruy/..."
-    "${BOARD_DIR}/port/nn"                    # the board nn glue (nn_backend.h: svc/nn since #161)
-    "${CMAKE_SOURCE_DIR}/svc/nn")             # nn.h (shared since #161)
+    "${CMAKE_SOURCE_DIR}/svc/nn/tflm"         # the backend's own headers (#161)
+    "${CMAKE_SOURCE_DIR}/svc/nn")             # nn.h, nn_backend.h (shared since #161)
 
 # TF_LITE_STATIC_MEMORY changes TFLM's context/tensor structs across the API boundary,
 # so it must be visible to every TU that includes TFLM headers -> PUBLIC.  Stripping
@@ -177,6 +181,25 @@ target_include_directories(tflm PRIVATE
 target_compile_definitions(tflm
     PUBLIC  TF_LITE_STATIC_MEMORY
     PRIVATE TF_LITE_STRIP_ERROR_STRINGS NDEBUG)
+
+# This board's facts for the shared backend (svc/nn/tflm/, issue #161), each ONE
+# definition there is no fallback for:
+#   NN_TFLM_ARENA_KB / NN_TFLM_MODEL_KB   the arena (512 KB; BlazeFace plans ~470 KB)
+#       and one SD staging slot (512 KB) -- svc/nn/tflm/nn_tflm_mem.h.  1.5 MB of the
+#       2 MB bank3; the linker ASSERT enforces the fit.
+#   NN_TFLM_VERIFY=1   the flatbuffer verifier runs on the board before a model is
+#       built, as it always has here: a file copied to the card by hand has not
+#       necessarily been through verify_tflite, and this 1 MB flash can afford it.
+#   NN_TFLM_OPS_EXTENDED=1   the 23-operator common-vision profile
+#       (svc/nn/tflm/nn_tflm_ops.h) this board has always registered, so an SD-loaded
+#       int8 classifier or detector runs without a rebuild.  The host verify_tflite
+#       below gets the same define (F746_TFLM_OPS_DEFINE), so the two cannot disagree.
+set(F746_TFLM_OPS_DEFINE "NN_TFLM_OPS_EXTENDED=1")
+target_compile_definitions(tflm PRIVATE
+    NN_TFLM_ARENA_KB=512
+    NN_TFLM_MODEL_KB=512
+    NN_TFLM_VERIFY=1
+    ${F746_TFLM_OPS_DEFINE})
 
 # CMSIS-NN: add the downloaded CMSIS_6 core + CMSIS-NN include roots (mirrors the
 # tflm Makefile's INCLUDES for cmsis_nn.inc) and the F16/F32 gates.  NN_TFLM_CMSIS_NN
@@ -221,8 +244,8 @@ target_link_libraries(tflm PUBLIC stdc++_nano supc++_nano m)
 # --- Host-side model checker (scripts/verify_tflite.cc, issue #159) -----------
 # Built with the HOST compiler against the same generated tree, so it runs the
 # identical tflite::VerifyModelBuffer() the firmware does, and checks a model's
-# operators against port/nn/tflm/nn_tflm_ops.h -- the list the firmware
-# registers from.  The asset build uses it as this board's model gate from Step
+# operators against svc/nn/tflm/nn_tflm_ops.h under this board's profile -- the
+# list the firmware registers from.  The asset build uses it as this board's model gate from Step
 # 4b (cmake/add_asset.cmake's MODEL_VERIFIER); until then it is the
 # `verify-model` target, NOT in ALL (compiling schema_generated.h takes a few
 # seconds and most builds never need it).  A custom command because every CMake
@@ -236,14 +259,15 @@ if(HOST_CXX)
                 -I "${TFLM_ROOT}/third_party/flatbuffers/include"
                 -I "${TFLM_ROOT}/third_party/gemmlowp"
                 -I "${TFLM_ROOT}/third_party/ruy"
-                -I "${BOARD_DIR}/port/nn/tflm"
+                -I "${CMAKE_SOURCE_DIR}/svc/nn/tflm"
+                "-D${F746_TFLM_OPS_DEFINE}"
                 "${BOARD_DIR}/scripts/verify_tflite.cc"
                 # GetBuiltinCode(): reads an operator code correctly across the
                 # schema's deprecated/current field pair.
                 "${TFLM_ROOT}/tensorflow/compiler/mlir/lite/schema/schema_utils.cc"
                 -o "${CMAKE_BINARY_DIR}/verify_tflite"
         DEPENDS "${BOARD_DIR}/scripts/verify_tflite.cc"
-                "${BOARD_DIR}/port/nn/tflm/nn_tflm_ops.h"
+                "${CMAKE_SOURCE_DIR}/svc/nn/tflm/nn_tflm_ops.h"
         COMMENT "host c++ -> verify_tflite (checks a .tflite before you copy it)"
         VERBATIM)
     add_custom_target(verify-model DEPENDS "${CMAKE_BINARY_DIR}/verify_tflite")

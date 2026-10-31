@@ -23,8 +23,9 @@
  *
  * Step 5 is the one the board cannot do well: AllocateTensors() returns one
  * kTfLiteError for "an operator is missing" and "the activations do not fit".
- * The list is port/nn/tflm/nn_tflm_ops.h, the header the firmware registers
- * from, so the two cannot drift apart.
+ * The list is svc/nn/tflm/nn_tflm_ops.h under this board's profile (`extended`,
+ * the define cmake/tflite-micro.cmake passes to both), the header the firmware
+ * registers from, so the two cannot drift apart.
  *
  * It prints the CRC-32/ISO-HDLC of the file -- for a bare .tflite, the number
  * to compare with what the card holds.
@@ -48,9 +49,9 @@
 #include <string>
 #include <vector>
 
-/* Mirrors port/nn/tflm/nn_tflm.cc's NN_TFLM_SD_MODEL_MAX (one staging slot).
- * Restated rather than included because that file is C++ inside the firmware's
- * world; the message below names its source. */
+/* Mirrors NN_TFLM_MODEL_KB, one staging slot (cmake/tflite-micro.cmake ->
+ * svc/nn/tflm/nn_tflm_mem.h).  Restated rather than included because that header
+ * needs the firmware's compile definitions; the message below names its source. */
 static const uint32_t kStagingMax = 512u * 1024u;
 
 /* CRC-32/ISO-HDLC, bit by bit -- the same value svc/crc32.c produces on the board
@@ -128,7 +129,7 @@ int main(int argc, char **argv)
 	}
 	if (len > kStagingMax) {
 		printf("RESULT  : REJECT -- %u B exceeds the backend staging slot (%u B).\n"
-		       "          Widen NN_TFLM_SD_MODEL_MAX in port/nn/tflm/nn_tflm.cc.\n",
+		       "          Widen NN_TFLM_MODEL_KB in cmake/tflite-micro.cmake.\n",
 		       len, kStagingMax);
 		return 1;
 	}
@@ -184,7 +185,7 @@ int main(int argc, char **argv)
 	       (unsigned)model->version(),
 	       subgraphs ? (unsigned)subgraphs->size() : 0u,
 	       codes ? (unsigned)codes->size() : 0u);
-	printf("ops set : %d registered by this build (port/nn/tflm/nn_tflm_ops.h)\n",
+	printf("ops set : %d registered by this build (svc/nn/tflm/nn_tflm_ops.h)\n",
 	       (int)(sizeof kRegistered / sizeof kRegistered[0]));
 
 	if (!missing.empty()) {
@@ -195,7 +196,7 @@ int main(int argc, char **argv)
 		printf("          On the board this would fail as NN_MODEL_ERR_ARENA, whose\n"
 		       "          message cannot tell a missing operator from an arena that is\n"
 		       "          too small -- which is exactly why this check is here.\n");
-		printf("          Add the operator to port/nn/tflm/nn_tflm_ops.h (it is\n"
+		printf("          Add the operator to svc/nn/tflm/nn_tflm_ops.h (it is\n"
 		       "          kernel code in Flash), or re-export the model without it.\n");
 		return 1;
 	}

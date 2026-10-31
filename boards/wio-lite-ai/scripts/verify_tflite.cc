@@ -37,7 +37,7 @@
  * single kTfLiteError for "an operator is missing" and "the activations do not fit",
  * and with TF_LITE_STRIP_ERROR_STRINGS there is no message to tell them apart -- so
  * `nn model load` has to report both possibilities and let you guess.  Here the
- * missing operator is named.  The list comes from port/nn/tflm/nn_tflm_ops.h, the same
+ * missing operator is named.  The list comes from svc/nn/tflm/nn_tflm_ops.h, the same
  * header the firmware registers from, so the two cannot drift apart.
  *
  * It also prints the CRC-32/ISO-HDLC of the file, which is what `blob list` and
@@ -64,8 +64,8 @@
 #include <vector>
 
 /* Mirrors app/blob.h (BLOB_SLOT_SIZE - BLOB_HDR_SIZE) and
- * port/nn/tflm/nn_tflm_priv.h (NN_TFLM_MODEL_MAX).  Restated rather than included
- * because those headers pull in the firmware's world; the numbers are checked against
+ * cmake/tflite-micro.cmake (NN_TFLM_MODEL_KB).  Restated rather than included
+ * because those sources belong to the firmware's world; the numbers are checked against
  * their sources by the message this prints when a model is too big. */
 static const uint32_t kBlobPayloadMax = 520192u;
 static const uint32_t kStagingMax     = 512u * 1024u;
@@ -183,7 +183,7 @@ int main(int argc, char **argv)
 	}
 	if (len > kStagingMax) {
 		printf("RESULT  : REJECT -- %u B exceeds the backend staging slot (%u B).\n"
-		       "          Widen NN_TFLM_MODEL_MAX in port/nn/tflm/nn_tflm_priv.h.\n",
+		       "          Widen NN_TFLM_MODEL_KB in cmake/tflite-micro.cmake.\n",
 		       len, kStagingMax);
 		return 1;
 	}

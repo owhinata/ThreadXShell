@@ -218,7 +218,7 @@ static int cmd_sdram_test(struct cli_instance *sh, int argc, char **argv)
 	/* [!] The NN arena, model slots and decoder scratch live in .sdram.ai
 	   (issue #152).  Claim it from its owner for the whole run, as the camera
 	   claim above does for its buffers.  nn_scratch_claim() asks and sets in
-	   one critical section (port/nn/nn.h): refused while any nn command or
+	   one critical section (svc/nn/nn.h): refused while any nn command or
 	   stream holds the session or the first open is building (-1), or while a
 	   model is loaded (-2).  Once held, no session can be taken and no open,
 	   load region or reload puts anything into .sdram.ai until the release

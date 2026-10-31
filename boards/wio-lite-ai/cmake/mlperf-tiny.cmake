@@ -45,7 +45,7 @@ target_link_libraries(mlperf_obj PUBLIC bsp_iface)
 target_include_directories(mlperf_obj PRIVATE
     "${MLPERF_DIR}/benchmark"            # upstream includes itself as "api/..."
     "${BOARD_DIR}/port/mlperf"
-    "${BOARD_DIR}/port/nn"        # nn.h: the model this harness runs
+    "${BOARD_DIR}/port/nn"        # the board nn glue (nn.h itself is in svc/nn)
     "${BOARD_DIR}/port/threadx"   # tx_glue.h: the microsecond clock
     "${CMAKE_SOURCE_DIR}/shell/include"  # cli.h: where protocol bytes go
     "${CMAKE_SOURCE_DIR}/svc"            # fmt.h: the printf that has no %f

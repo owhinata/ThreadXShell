@@ -28,7 +28,7 @@
  * the device through indirect transactions only), and the container is a copy
  * in the backend's staging buffer -- which the shared source check bounds.
  *
- * [!] port/nn/nn.h IS DELIBERATELY NOT INCLUDED.  It was, for
+ * [!] svc/nn/nn.h IS DELIBERATELY NOT INCLUDED.  It was, for
  * nn_model_load_region(), and asking that question inside the loader is the bug
  * svc/plugin/plugin_run_core.h describes: the backend is double-slotted and the
  * answer changes under the very operation this runs after.

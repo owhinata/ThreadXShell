@@ -24,19 +24,6 @@ out="$HOST_TEST_OUT"
 CFLAGS="$HOST_TEST_CFLAGS"
 LDFLAGS="$HOST_TEST_LDFLAGS"
 
-# issues #97, #159 Step 4c -- nn_tensor -> tensor_desc (port/nn/nn_desc.c), the
-# half of the old nn_decoder.c that outlived the resident decoder.  Nothing here
-# links svc/nn/blazeface.c: the translation has no model in it.  A board test
-# because the point is the REAL nn.h.  The cases are the translation's own
-# failure modes -- an unsupported dtype mapped onto one a reader does read, a
-# rank above four truncated into a match, a field inherited from the tensor
-# described before, and a quantisation not passed through as it stands (scale 0
-# for an unquantised tensor, and float32 graphs).  wio-lite-ai's test, copied.
-gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
-    "$here/test_nn_desc.c" "$board/port/nn/nn_desc.c" \
-    $LDFLAGS -o "$out/test_nn_desc"
-"$out/test_nn_desc"
-
 # issue #72 -- the sink-drain decision (port/camera/cam_drain.c).  Three
 # subscribers here detach while the base capture keeps running, so each has to
 # wait for its sink to go idle before releasing what that sink reads.  The

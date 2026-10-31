@@ -31,7 +31,7 @@
  * maintenance as board-owned, and the Armv7-M shared place for them is the one
  * issue #130 D3 declined.
  *
- * [!] port/nn/nn.h IS DELIBERATELY NOT INCLUDED.  The staging region travels
+ * [!] svc/nn/nn.h IS DELIBERATELY NOT INCLUDED.  The staging region travels
  * from the caller (svc/plugin/plugin_run_core.h says why).
  */
 #define LOG_TAG "plugin"

@@ -48,7 +48,7 @@
  * here (owhinata/wio-lite-ai#51).  There used to be one -- the donor's (rgb - 128) when
  * the scale read back as zero -- and it was not dead code: a PER-AXIS quantized tensor
  * arrives with TfLiteTensor::params.scale == 0, because its real parameters live in the
- * affine-quantization struct that port/nn/nn.h does not expose.  So the fallback's
+ * affine-quantization struct that svc/nn/nn.h does not expose.  So the fallback's
  * only reachable case was the one where it silently fed the model wrong pixels, with
  * the same hardcoded assumption the paragraph above rejects.  Refusing the model at
  * start() says so once, out loud, instead of per pixel, never.

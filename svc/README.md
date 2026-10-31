@@ -12,7 +12,7 @@ The files are grouped by the feature they serve (issue #153):
 | Directory | What it holds |
 |---|---|
 | `svc/` | Generic services any layer uses: the formatter (`fmt`), CRC-32 (`crc32`), YMODEM (`ymodem`) and small graphics helpers (`gfx_rot`, `rect_geom`). |
-| `svc/nn/` | The `nn` command's contract and shared core (`nn_*`, described below), the neutral tensor descriptor (`tensor.h`) and the BlazeFace decoder (`blazeface`), which reaches every board only inside a plugin container (no board links it into its firmware since issue #159 Step 4c). |
+| `svc/nn/` | The `nn` command's contract and shared core (`nn_*`, described below), the neutral tensor descriptor (`tensor.h`), the inference API `nn.h` and its translation into that descriptor `nn_desc` (wio-lite-ai and f746g-disco; each still implements `nn.h` in its own `port/nn/nn.c`, issue #161), and the BlazeFace decoder (`blazeface`), which reaches every board only inside a plugin container (no board links it into its firmware since issue #159 Step 4c). |
 | `svc/plugin/` | The plugin container's ABI, loader, executor and the checks around them (`plugin_*`, below). |
 | `svc/camera/` | The camera frame pipeline (`frame`, `frame_pipeline`), the camera stream's holder table, sink steps and stream generations (`cam_holders`, `cam_step`, `cam_gen`, below) and the `camera` command's contract (`camera_svc`, below). |
 

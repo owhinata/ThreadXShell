@@ -4,24 +4,18 @@
  */
 /**
  * @file    nn_desc.h
- * @brief   nn_tensor -> tensor_desc, and nothing else (issue #159 Step 4c).
+ * @brief   nn_tensor -> tensor_desc, and nothing else (issues #97, #116, #159;
+ * one file since issue #161).
  *
- * `struct nn_tensor` is this board's inference API (port/nn/nn.h); `struct
+ * `struct nn_tensor` is the nn inference API's tensor (svc/nn/nn.h); `struct
  * tensor_desc` (svc/nn/tensor.h) is the neutral descriptor everything above the
- * port reads.  This file is the translation, and it is the only place on this
- * board that knows both types.
+ * port reads.  This file is the translation, and it is the only place on
+ * wio-lite-ai and f746g-disco that knows both types.  grove-vision-ai-v2 has
+ * its own (port/nn/npu/npu_desc.c), from its own tensor type.
  *
  * [!] IT IS THE HALF OF nn_decoder.c THAT OUTLIVED THE RESIDENT DECODER.  `nn
  * out`, `nn info`, the active-decoder shim and the raw publish all need this
  * translation whatever interprets the tensors -- or whether anything does.
- * wio-lite-ai split its nn_decoder.c the same way for its issue #116
- * (port/nn/nn_desc.c) and grove-vision-ai-v2 for #104 (port/nn/npu/npu_desc.c).
- *
- * [!] BOARD-OWNED, NOT svc/, ALTHOUGH THE BODY MATCHES wio's.  Its input is
- * this board's `struct nn_tensor` and `enum nn_dtype` (port/nn/nn.h), and a
- * shared TU under svc/ would have to include a port header to name them --
- * the layering runs the other way.  Two boards spelling their own type the
- * same way is not one type.
  *
  * IT IS BUILT IN EVERY BACKEND: none of them changes what a descriptor is, and
  * `nn out` / `nn info` exist in all of them.
@@ -44,7 +38,7 @@ extern "C" {
  * every check it makes passes.  Rank 0 is left in place to say "not
  * representable", and every shape test downstream fails on it.
  *
- * [!] AND A dtype THIS BOARD CANNOT NAME BECOMES UNSUPPORTED rather than the
+ * [!] AND A dtype THE API CANNOT NAME BECOMES UNSUPPORTED rather than the
  * nearest one that is readable: a reader then refuses the tensor instead of
  * reading its bytes as a type they are not.
  */

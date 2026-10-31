@@ -46,27 +46,6 @@ gcc $CFLAGS -Wno-unused-parameter \
     $LDFLAGS -o "$out/test_crc32"
 "$out/test_crc32"
 
-# issues #97, #116 -- nn_tensor -> tensor_desc (port/nn/nn_desc.c), on its own.
-#
-# This was half of test_nn_decoder.c below.  The translation never had a model in
-# it: `nn out`, `nn info` and the active-decoder shim all need it whatever
-# interprets the tensors -- or whether anything does -- so NOTHING IS LINKED WITH
-# IT HERE, svc/nn/blazeface.c included.  Linking a decoder would only prove it still
-# compiles.
-#
-# It is a board test because the point is the REAL nn.h: `struct nn_tensor` and
-# `enum nn_dtype` are this port's, and a shimmed copy could drift from the
-# firmware's without anything noticing.  The cases are the translation's own
-# failure modes -- an unsupported dtype mapped onto one a reader does read, a
-# rank above four truncated into a match, a field inherited from the tensor
-# described before, and a quantisation not passed through as it stands (this
-# board publishes scale 0 for an unquantised tensor and its graphs are float32,
-# so an invented scale would multiply every value by zero).
-gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
-    "$here/test_nn_desc.c" "$board/port/nn/nn_desc.c" \
-    $LDFLAGS -o "$out/test_nn_desc"
-"$out/test_nn_desc"
-
 # issue #130 step 6c (#122 P8) -- how a decode's answer is counted in `nn stream
 # stats` (port/nn/nn_decode_count.c): grove-vision-ai-v2's table.  A plugin that
 # answers BF_ERR_UNINIT, BF_ERR_ARG or an undocumented code cannot be typed, and
@@ -103,7 +82,7 @@ gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$
 gcc $CFLAGS -I "$board/port/nn" -I "$board/port/plugin" -I "$board/svc" \
     -I "$asset/plugins/blazeface" -I "$asset/common" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_nn_active.c" \
-    "$board/port/nn/nn_active.c" "$board/port/nn/nn_desc.c" \
+    "$board/port/nn/nn_active.c" "$HOST_TEST_SVC/nn/nn_desc.c" \
     "$HOST_TEST_SVC/nn/nn_active_lease.c" "$HOST_TEST_SVC/nn/nn_active_core.c" \
     "$asset/plugins/blazeface/plugin_main.c" \
     "$asset/common/plugin_base.c" "$asset/common/plugin_fmt.c" \
@@ -207,7 +186,7 @@ done
 mlperf="$HOST_TEST_REPO/lib/mlperf-tiny/benchmark"
 if [ -f "$mlperf/api/internally_implemented.cpp" ]; then
     gcc $CFLAGS -c -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" "$svc/fmt.c" -o "$out/fmt.o"
-    gcc $CFLAGS -I "$board/port/nn" -I "$board/port/mlperf" \
+    gcc $CFLAGS -I "$board/port/nn" -I "$board/port/mlperf" -I "$svc/nn" \
         -c "$here/test_mlperf.c" -o "$out/test_mlperf.o"
     # -std=gnu++17 to match the firmware, which passes no -std and so gets the GNU
     # dialect by default: the test should compile the shared headers the same way the

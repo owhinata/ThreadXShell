@@ -419,6 +419,15 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     $LDFLAGS -o "$out/test_nn_active_core"
 "$out/test_nn_active_core"
 
+# issues #97, #116, #159, #161 -- nn_tensor -> tensor_desc (svc/nn/nn_desc.c),
+# on its own, against the real svc/nn/nn.h.  wio-lite-ai and f746g-disco both
+# link this file; until #161 each board ran an identical copy of this test.
+# Nothing here links svc/nn/blazeface.c: the translation has no model in it.
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_nn_desc.c" "$svc/nn/nn_desc.c" \
+    $LDFLAGS -o "$out/test_nn_desc"
+"$out/test_nn_desc"
+
 # issue #130 -- the loader's plugin-lease checks (svc/plugin/plugin_run_core.c,
 # shared by wio-lite-ai and f746g-disco since issue #159): a load refused before
 # the shared loader touches anything, the exec_ok hook refusing again at the

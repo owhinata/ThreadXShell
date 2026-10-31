@@ -8,7 +8,7 @@
  * owhinata/stm32f746g-disco#80).
  *
  * Bridges the camera frame pipeline (port/camera) to the nn inference API
- * (port/nn/nn.h): a synchronous push sink resizes + converts an RGB565 camera
+ * (svc/nn/nn.h): a synchronous push sink resizes + converts an RGB565 camera
  * frame straight into the model's input tensor whenever the worker wants one,
  * and a low-priority (prio 18) best-effort worker thread runs inference on it.
  * Follows the nx_mjpeg.c eth_sink lifecycle (thread created once + parked) and

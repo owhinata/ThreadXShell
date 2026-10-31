@@ -878,7 +878,7 @@ list(APPEND NN_PSRAM_AI_REQUIRED --require psram_ai_bench_buf)
 # The descriptor translation, and the published decode record, above the
 # model-agnostic nn API.
 #
-# port/nn/nn_desc.c is `nn_tensor` -> `tensor_desc` and nothing else (issue
+# svc/nn/nn_desc.c is `nn_tensor` -> `tensor_desc` and nothing else (issue
 # #116).  It is not a decoder's: `nn out`, `nn info` and the active-decoder shim
 # need it whatever interprets the tensors, or whether anything does.  Built in
 # BOTH backends, because neither changes what a descriptor is.
@@ -894,7 +894,7 @@ list(APPEND NN_PSRAM_AI_REQUIRED --require psram_ai_bench_buf)
 # [!] DO NOT PUT ONE BACK to make a gate or a test easier.  grove-vision-ai-v2
 # removed its resident decoder first (issue #104) and the reason is the same on
 # both: issue #78 exists so that the model-specific half ships with the model.
-list(APPEND NN_SOURCES "${BOARD_DIR}/port/nn/nn_desc.c"
+list(APPEND NN_SOURCES "${CMAKE_SOURCE_DIR}/svc/nn/nn_desc.c"
                        "${CMAKE_SOURCE_DIR}/svc/nn/nn_det_record.c")
 # The other half of that gate: PSRAM buffers a bus master owns, which must stay OUT
 # of the cacheable carve-out.  Named here rather than in the script for the same
@@ -1017,7 +1017,7 @@ target_include_directories(shell PRIVATE
     "${BOARD_DIR}/port/ltdc"                     # ltdc_display.h
     "${BOARD_DIR}/port/camera"                   # camera.h
     "${BOARD_DIR}/port/nor"                      # nor_flash.h
-    "${BOARD_DIR}/port/nn"                       # nn.h / nn_backend.h
+    "${BOARD_DIR}/port/nn"                       # nn_backend.h (nn.h: svc/nn)
     "${BOARD_DIR}/port/nn/models"                # blazeface.h
     "${BOARD_DIR}/port/plugin"                   # plugin_lease.h, plugin_paint.h
     # Our fdb_cfg.h / fal_cfg.h must be found BEFORE FlashDB's own inc/,

@@ -427,7 +427,7 @@ set(NN_SOURCES
     # nn_tensor -> tensor_desc (issue #159 Step 4c: the half of the old
     # nn_decoder.c that outlived the resident decoder).  No decoder is linked in
     # any backend: one reaches this board only in a plugin container.
-    "${BOARD_DIR}/port/nn/nn_desc.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_desc.c"   # shared with wio-lite-ai (#161)
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_det_record.c")
 if(CONFIG_NN_BACKEND STREQUAL "null")
     list(APPEND NN_SOURCES "${BOARD_DIR}/port/nn/nn_null.c")

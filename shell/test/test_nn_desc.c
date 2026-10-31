@@ -4,8 +4,8 @@
  */
 /**
  * @file    test_nn_desc.c
- * @brief   Host tests for port/nn/nn_desc.c -- nn_tensor -> tensor_desc
- *          (issues #97, #116).
+ * @brief   Host tests for svc/nn/nn_desc.c -- nn_tensor -> tensor_desc
+ *          (issues #97, #116, #159 Step 4c; one test since issue #161).
  *
  * This was half of test_nn_decoder.c and drove a BlazeFace decoder with it.  The
  * translation never had a model in it: `nn out`, `nn info` and the
@@ -13,10 +13,10 @@
  * anything does -- so it is tested without one, and NOTHING HERE LINKS
  * svc/nn/blazeface.c.  Linking a decoder would only prove it still compiles.
  *
- * It stays a BOARD test rather than moving to the core suite because the point
- * is the REAL headers: `struct nn_tensor` and `enum nn_dtype` are this port's,
- * and a shimmed copy of nn.h could drift from the firmware's without anything
- * noticing.
+ * Until issue #161 wio-lite-ai and f746g-disco each carried a copy of this test
+ * against their own nn.h; the assertions were identical.  It is a core test now
+ * because the REAL header is shared: `struct nn_tensor` and `enum nn_dtype` come
+ * from svc/nn/nn.h, the same file both firmwares compile, not from a shim.
  *
  * WHAT THE TRANSLATION CAN GET WRONG, and therefore what is pinned:
  *
@@ -29,8 +29,8 @@
  *     into a caller's array, often the same one twice; anything not written here
  *     would be inherited, and a stale scale is not an obvious failure -- it is a
  *     plausible number.
- *   - THE QUANTISATION NOT PASSED THROUGH AS IT IS.  This board publishes scale
- *     0 for an unquantised tensor and its graphs are float32, so a translation
+ *   - THE QUANTISATION NOT PASSED THROUGH AS IT IS.  Both boards publish scale
+ *     0 for an unquantised tensor and their graphs are float32, so a translation
  *     that invented a scale would put every value through an affine form that
  *     multiplies it by zero.
  */
@@ -105,7 +105,7 @@ int main(void)
 	expect("the shape passes through, every dimension", dims_ok != 0,
 	       "rank %u", (unsigned)d.rank);
 
-	/* --- the element types this board can name ------------------------ */
+	/* --- the element types the nn API can name ------------------------ */
 	t = mk_tensor();
 	t.dtype = NN_DTYPE_INT8;
 	nn_desc_of(&d, &t);
@@ -114,7 +114,7 @@ int main(void)
 
 	/* --- and the ones it cannot --------------------------------------- */
 	/*
-	 * [!] IT MUST NOT GUESS.  Mapping a type this board cannot name onto one a
+	 * [!] IT MUST NOT GUESS.  Mapping a type the nn API cannot name onto one a
 	 * reader does read would have it take the buffer for bytes it is not, and
 	 * produce numbers computed from nothing.
 	 */

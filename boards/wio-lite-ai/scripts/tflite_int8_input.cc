@@ -418,7 +418,7 @@ int main(int argc, char **argv)
 	}
 	/* [!] Per-tensor quantization specifically.  A per-axis input would arrive on the
 	 * board with TfLiteTensor::params.scale == 0 (the real parameters live in the
-	 * affine quantization struct, which port/nn/nn.h does not expose), and
+	 * affine quantization struct, which svc/nn/nn.h does not expose), and
 	 * nn_camera_start() rejects exactly that.  Producing such a model here would be
 	 * producing one the firmware is designed to refuse. */
 	if (!q_t->quantization || q_t->quantization->scale.size() != 1u ||

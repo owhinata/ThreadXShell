@@ -997,7 +997,8 @@ add_dependencies(shell grove_decoder_storage_fixtures)
 add_custom_target(grove_shared_storage_build_fixtures
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_SOURCE_DIR}/cmake/fixtures/run_shared_storage_build_tests.py"
-            --cc "${CMAKE_C_COMPILER}" --objdump "${CMAKE_OBJDUMP}"
+            --cc "${CMAKE_C_COMPILER}" --cxx "${CMAKE_CXX_COMPILER}"
+            --objdump "${CMAKE_OBJDUMP}"
             --nm "${CMAKE_NM}" --board-build "${CMAKE_BINARY_DIR}"
     COMMENT "derived storage gate integration tests (cross compiler)"
     VERBATIM)

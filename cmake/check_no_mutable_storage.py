@@ -23,6 +23,12 @@ which has NO allocated section at all, so the section rule sees nothing.
 (verified against the real cross compiler: it still emits `.comm`).  Both are
 storage in the linked image, so both are refused.
 
+[!] A GLOBAL CONSTRUCTOR IS REFUSED BY THE SAME SECTION RULE (#161).  A C++ object
+with dynamic initialisation (or __attribute__((constructor))) puts a pointer in
+.init_array, which is allocated and writable, so it is measured like .data --
+with no symbol of its own, which is the anonymous case above.  A shared TU must
+not run code before main any more than it may own the bytes that code fills.
+
 [!] WHY THIS RUNS PER BOARD AND NOT ONCE ON THE HOST.  The property is about the
 object each TARGET build produces.  The host and the boards differ in predefined
 macros, ABI and compile options, so code that generates storage only under
@@ -111,6 +117,10 @@ def offenders(objdump, obj):
     return bad
 
 
+# Sections that hold constructor/destructor pointers rather than variables.
+_INIT_SECTIONS = (".init_array", ".fini_array", ".preinit_array", ".ctors", ".dtors")
+
+
 def symbols(nm, obj):
     """Defined data-ish symbols, for a message that names the culprit."""
     try:
@@ -125,7 +135,11 @@ def symbols(nm, obj):
             continue
         cls = parts[-2] if len(parts) >= 3 else parts[0]
         name = parts[-1]
-        if cls in "BbCcDdGgSs":
+        # V/v (weak object) and u (unique global) are the COMDAT / inline /
+        # template-static shapes C++ emits.  W/w is left out: nm uses it for
+        # weak symbols NOT tagged as objects, i.e. inline functions, which
+        # would be named as culprits wrongly.  Naming only; never decides.
+        if cls in "BbCcDdGgSsVvu":
             found.append((cls, name))
     return found
 
@@ -173,6 +187,9 @@ def main():
               "cannot see them):", file=sys.stderr)
         for name in commons:
             print("    %s" % name, file=sys.stderr)
+    if any(name.startswith(_INIT_SECTIONS) for name, _, _ in bad):
+        print("  global constructor/destructor (dynamic initialisation or",
+              "teardown): the TU runs code before or after main", file=sys.stderr)
     if args.nm and bad:
         syms = symbols(args.nm, args.object)
         if syms:

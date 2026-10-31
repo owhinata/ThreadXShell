@@ -64,6 +64,16 @@ function(add_shared_storage_build_gate)
         message(FATAL_ERROR "shared storage audit: no compiled targets")
     endif()
     file(GENERATE OUTPUT "${_inventory}/index.txt" CONTENT "$<JOIN:${_index},\n>\n")
+    # A board that enabled C++ (#161) hands its C++ driver over so C++ services are
+    # replayed with it. Without one, any C++ compile command is refused.
+    set(_cxx_args "")
+    get_property(_languages GLOBAL PROPERTY ENABLED_LANGUAGES)
+    if("CXX" IN_LIST _languages)
+        if(NOT CMAKE_CXX_COMPILER)
+            message(FATAL_ERROR "shared storage audit: C++ is enabled but CMAKE_CXX_COMPILER is empty")
+        endif()
+        set(_cxx_args --cxx "${CMAKE_CXX_COMPILER}")
+    endif()
     # Deliberately always run, even when the shipping ELF is up to date. There
     # are no success stamps to outlive a rejected compile. Audits are never
     # linked, and cannot overwrite ordinary object files or dependency files.
@@ -74,6 +84,7 @@ function(add_shared_storage_build_gate)
             --database "${CMAKE_BINARY_DIR}/compile_commands.json"
             --inventory "${_inventory}"
             --cc "${CMAKE_C_COMPILER}"
+            ${_cxx_args}
             --objdump "${CMAKE_OBJDUMP}" --nm "${CMAKE_NM}"
             --report "${CMAKE_BINARY_DIR}/shared-storage/last-audit.json"
         COMMENT "audit every compiled stateless service in its board context"

@@ -30,7 +30,18 @@ options are preserved. Only output/depfile side effects are redirected or remove
 and a final `-fno-lto` makes native sections inspectable. Audits live in private
 temporary directories and are never linked. `check_no_mutable_storage.py` rejects
 allocated writable sections and COMMON symbols. Missing tools and failed commands
-fail the build. This checks ordinary storage additions, not deliberately evasive
+fail the build.
+
+C++ services (#161) are replayed with the board's C++ driver, which the gate
+passes as `--cxx` only when the build enabled C++. A compile command must name
+exactly the configured C or C++ compiler, and the source suffix must match that
+driver (`.c`/`.s`/`.S` for C, `.cc`/`.cpp`/`.cxx` for C++); an unknown driver or
+a mismatch fails the audit. An explicit `-x` must name the same language (`c`,
+or `assembler`/`assembler-with-cpp` for `.s`/`.S`, under the C driver; `c++`
+under the C++ driver); any other value, and the joined `-x<lang>` form, is
+refused. `-fno-use-cxa-atexit` is the one C++ flag added to
+the accepted set. A global constructor emits `.init_array`, a writable section,
+so the unchanged section rule refuses dynamic initialisation as well. This checks ordinary storage additions, not deliberately evasive
 source code or memory safety.
 
 `build/<board>/shared-storage/last-audit.json` is a diagnostic record of original
@@ -39,10 +50,13 @@ there is no cached success. Direct object/probe targets are outside the shipping
 invocation guarantee. Plugin custom commands remain a separate artifact graph,
 with actual-object storage checks and ownership validation in `add_plugin.cmake`.
 
-`fixtures/run_shared_storage_build_tests.py --cc <arm-gcc> --objdump <arm-objdump>
---nm <arm-nm>` builds a temporary real CMake project and tests coverage omissions,
-target export/unity, source additions/removal, differing target contexts, direct
-ARM-only/optimized storage, and failure persistence. Optional `--board-build
+`fixtures/run_shared_storage_build_tests.py --cc <arm-gcc> --cxx <arm-g++>
+--objdump <arm-objdump> --nm <arm-nm>` builds a temporary real CMake project and
+tests coverage omissions, target export/unity, source additions/removal,
+differing target contexts, direct ARM-only/optimized storage, failure
+persistence, and C++ services (a clean `.cc` passes; a static object, a global
+constructor, an unknown or unconfigured driver, a suffix/driver mismatch and a
+contradicting `-x` fail). Optional `--board-build
 <configured-consumer-build>` mutates temporary copies of the three shared
 regression sources using the selected Grove or Wio consumer's actual compile
 context. It never edits firmware sources or

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Integration/negative tests of derived board-context storage auditing (#117).
 
-Uses a small real CMake/Ninja project and the supplied ARM compiler. Optional
+Uses a small real CMake/Ninja project and the supplied ARM C and C++ compilers
+(C++ services since #161). Optional
 --board-build replays copies of the three shared regression TUs using the
 selected consumer's actual compile context (Grove or Wio), without editing or
 building any firmware tree.
@@ -10,6 +11,7 @@ import argparse
 import importlib.util
 import json
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -49,7 +51,7 @@ def project(root, args):
     write(root, "include dir/context.h", "#define CONTEXT 1\n")
     write(root, "svc/conditional.c", "#if !defined(CONTEXT) || !defined(__OPTIMIZE__)\n#error lost context\n#endif\nint conditional(void) { return 0; }\n")
     write(root, "CMakeLists.txt", '''cmake_minimum_required(VERSION 3.20)
-project(storage_fixture C)
+project(storage_fixture C CXX)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_library(services OBJECT svc/pure.c svc/ymodem.c svc/header_only.c
@@ -71,6 +73,14 @@ endif()
 if(EXTRA_SOURCE)
     target_sources(services PRIVATE "${EXTRA_SOURCE}")
 endif()
+# issue #161: compile a source with the other language's driver. CMake adds the
+# matching -x, which the audit accepts; the suffix/driver pairing is refused.
+if(C_AS_CXX)
+    set_source_files_properties(svc/pure.c PROPERTIES LANGUAGE CXX)
+endif()
+if(CXX_AS_C)
+    set_source_files_properties(svc/clean.cc PROPERTIES LANGUAGE C)
+endif()
 if(SECOND_CONTEXT)
     add_library(second OBJECT svc/pure.c)
     target_compile_definitions(second PRIVATE SECOND_CONTEXT=1)
@@ -83,8 +93,11 @@ add_shared_storage_build_gate()
 def configure(root, build, args, *extra, expected=True, contains=None):
     return run(["cmake", "-S", str(root), "-B", str(build), "-G", "Ninja",
                 "-DCMAKE_SYSTEM_NAME=Generic", "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY",
-                "-DCMAKE_C_COMPILER=" + args.cc, "-DCMAKE_OBJDUMP=" + args.objdump,
+                "-DCMAKE_C_COMPILER=" + args.cc, "-DCMAKE_CXX_COMPILER=" + args.cxx,
+                "-DCMAKE_OBJDUMP=" + args.objdump,
                 "-DCMAKE_NM=" + args.nm, "-DCMAKE_C_FLAGS=-mcpu=cortex-m7 -mthumb -O2",
+                "-DCMAKE_CXX_FLAGS=-mcpu=cortex-m7 -mthumb -O2 -std=c++17 -fno-exceptions"
+                " -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit",
                 *extra], expected, contains)
 
 
@@ -107,7 +120,8 @@ def replay_mutations(args):
                 # reproduces original source-relative headers after copying.
                 argv = [str(copy) if a == str(source) else a for a in argv]
                 argv += ["-iquote", str(source.parent)]
-                command = gate.replay_argv(argv, copy, entry["directory"], Path(args.cc).resolve(), tmp / "bad.o")
+                command = gate.replay_argv(argv, copy, entry["directory"], Path(args.cc).resolve(),
+                                           tmp / "bad.o", Path(args.cxx).resolve())
                 run(command, cwd=entry["directory"])
                 run([sys.executable, str(CMAKE / "check_no_mutable_storage.py"),
                      "--objdump", args.objdump, "--nm", args.nm, str(tmp / "bad.o")], False,
@@ -115,13 +129,98 @@ def replay_mutations(args):
             print("ok board source mutation:", name, guard)
 
 
+CLEAN_CC = """\
+// A C++ service with no mutable storage: constant-initialised objects only.
+#ifdef __cplusplus
+namespace {
+struct Pair { int a, b; constexpr Pair(int x, int y) : a(x), b(y) {} };
+constexpr Pair table[2] = {{1, 2}, {3, 4}};
+}
+extern "C" int clean_cc(int i) { return table[i & 1].a + table[i & 1].b; }
+#else
+int clean_cc(int i) { return i; }
+#endif
+"""
+STATIC_CC = """
+#ifdef __cplusplus
+namespace { volatile int counter; }
+extern "C" int bump_cc(void) { return ++counter; }
+#endif
+"""
+# An empty class whose constructor has a side effect: the object needs no bytes,
+# so the only writable section is the .init_array entry that runs it.
+CTOR_CC = """
+#ifdef __cplusplus
+namespace { struct Registrar { Registrar() { __asm__ volatile("" ::: "memory"); } }; const Registrar registrar; }
+#endif
+"""
+
+
+def failure_sections(text):
+    """The writable sections a FAIL listed, as names."""
+    return [line.split()[0] for line in text.splitlines()
+            if re.match(r"^  \.\S+\s+\d+ B\s+\[", line)]
+
+
+def cxx_services(root, build, args, shell):
+    """issue #161: C++ services are audited with the C++ driver, never skipped."""
+    write(root, "svc/clean.cc", CLEAN_CC)
+    configure(root, build, args, "-DEXTRA_SOURCE=svc/clean.cc")
+    run(shell, contains="coverage verified")
+    report = json.loads((build / "shared-storage/last-audit.json").read_text())
+    entries = [e for e in report["entries"] if e["source"].endswith("/svc/clean.cc")]
+    assert len(entries) == 1, entries
+    assert Path(entries[0]["audit"][0]).resolve() == Path(args.cxx)
+    assert "-fno-use-cxa-atexit" in entries[0]["audit"]
+    print("ok (a) C++ service without storage audited by the C++ driver and passed")
+    write(root, "svc/clean.cc", CLEAN_CC + STATIC_CC)
+    text = run(shell, False, "svc/clean.cc owns mutable storage")
+    assert failure_sections(text) == [".bss"], failure_sections(text)
+    print("ok (b) C++ service with a static object refused (.bss)")
+    write(root, "svc/clean.cc", CLEAN_CC + CTOR_CC)
+    text = run(shell, False, "svc/clean.cc owns mutable storage")
+    assert failure_sections(text) == [".init_array"], failure_sections(text)
+    assert "global constructor" in text
+    print("ok (c) C++ service with a global constructor refused (.init_array only)")
+    write(root, "svc/clean.cc", CLEAN_CC)
+    run(shell, contains="coverage verified")
+    base = (build / "compile_commands.json").read_text()
+    audit = [sys.executable, str(CMAKE / "check_shared_storage_build.py"), "--root", str(root),
+             "--database", str(build / "compile_commands.json"),
+             "--inventory", str(build / "shared-storage/inventory"),
+             "--cc", args.cc, "--objdump", args.objdump, "--nm", args.nm]
+    # Without a configured C++ driver, a C++ compile command is an unknown driver.
+    run(audit, False, "unsupported compiler/launcher (neither the configured C nor C++ compiler): " + args.cxx)
+    entries = json.loads(base)
+    for entry in entries:
+        if entry["file"].endswith("/svc/clean.cc"):
+            argv = gate.entry_argv(entry)
+            entry["command"] = shlex.join(["/opt/other/bin/arm-none-eabi-g++"] + argv[1:])
+    (build / "compile_commands.json").write_text(json.dumps(entries))
+    run(audit + ["--cxx", args.cxx], False,
+        "unsupported compiler/launcher (neither the configured C nor C++ compiler): /opt/other/bin/arm-none-eabi-g++")
+    (build / "compile_commands.json").write_text(base)
+    run(audit + ["--cxx", args.cc], False, "the C and C++ compilers must be distinct drivers")
+    run(audit + ["--cxx", "/no/such/g++"], False, "missing C++ compiler")
+    run(audit + ["--cxx", args.cxx], contains="coverage verified")
+    print("ok (d) unknown, unconfigured, missing and aliased C++ drivers refused")
+    configure(root, build, args, "-DC_AS_CXX=ON")
+    run(shell, False, "source/driver mismatch: pure.c compiled by the C++ driver")
+    configure(root, build, args, "-DC_AS_CXX=OFF", "-DCXX_AS_C=ON")
+    run(shell, False, "source/driver mismatch: clean.cc compiled by the C driver")
+    configure(root, build, args, "-DCXX_AS_C=OFF", "-DEXTRA_SOURCE=")
+    run(shell, contains="coverage verified")
+    print("ok (e) source suffix and driver language must agree")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("cc", "objdump", "nm"):
+    for name in ("cc", "cxx", "objdump", "nm"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--board-build")
     args = parser.parse_args()
-    args.cc, args.objdump, args.nm = map(lambda p: str(Path(p).resolve()), (args.cc, args.objdump, args.nm))
+    args.cc, args.cxx, args.objdump, args.nm = map(lambda p: str(Path(p).resolve()),
+                                                   (args.cc, args.cxx, args.objdump, args.nm))
     with tempfile.TemporaryDirectory(prefix="derived-storage-fixture-") as tmp:
         root, build = Path(tmp) / "source", Path(tmp) / "build"
         root.mkdir()
@@ -167,7 +266,7 @@ def main():
         base = (build / "compile_commands.json").read_text()
         audit = [sys.executable, str(CMAKE / "check_shared_storage_build.py"), "--root", str(root),
                  "--database", str(build / "compile_commands.json"), "--inventory", str(build / "shared-storage/inventory"),
-                 "--cc", args.cc, "--objdump", args.objdump, "--nm", args.nm]
+                 "--cc", args.cc, "--cxx", args.cxx, "--objdump", args.objdump, "--nm", args.nm]
         entries = json.loads(base)
         mutations = [
             ("omitted service", [e for e in entries if not e["file"].endswith("/svc/pure.c")], "coverage mismatch"),
@@ -200,7 +299,7 @@ def main():
         run(audit, False)
         (build / "compile_commands.json").write_text(base)
         print("ok malformed and missing DB")
-        for tool in ("--objdump", "--nm", "--cc"):
+        for tool in ("--objdump", "--nm", "--cc", "--cxx"):
             command = list(audit)
             command[command.index(tool) + 1] = "/no/such/tool"
             run(command, False)
@@ -225,6 +324,7 @@ def main():
         configure(root, build, args, "-DEXTRA_SOURCE=")
         run(shell, contains="coverage verified")
         print("ok added nested source audited, removed source not audited")
+        cxx_services(root, build, args, shell)
         write(root, "svc/pure.c", "#ifdef SECOND_CONTEXT\n" + bad + "\n#endif\nint pure(void) { return 1; }\n")
         configure(root, build, args, "-DSECOND_CONTEXT=ON")
         run(shell, False, "owns mutable storage")
@@ -243,12 +343,43 @@ def main():
                 raise AssertionError("accepted unsupported flag " + flag)
             except gate.AuditError:
                 pass
-        for compiler in ("ccache", "/no/such/compiler"):
+        for compiler in ("ccache", "/no/such/compiler", args.cxx):
             try:
                 gate.replay_argv([compiler] + base_argv[1:], source, root, Path(args.cc), out)
                 raise AssertionError("accepted unsupported compiler")
             except gate.AuditError:
                 pass
+        # issue #161: each driver only with its own suffixes, also at parse level.
+        cc_source = root / "svc/clean.cc"
+        for driver, src, word in ((args.cxx, source, "C++"), (args.cc, cc_source, "C")):
+            argv = [driver] + [str(src) if a == str(source) else a for a in base_argv[1:]]
+            try:
+                gate.replay_argv(argv, src, root, Path(args.cc), out, Path(args.cxx))
+                raise AssertionError("accepted source/driver mismatch " + src.name)
+            except gate.AuditError as exc:
+                assert f"compiled by the {word} driver" in str(exc), exc
+        argv = [args.cxx] + [str(cc_source) if a == str(source) else a for a in base_argv[1:]]
+        assert gate.replay_argv(argv, cc_source, root, Path(args.cc), out, Path(args.cxx))[0] == args.cxx
+        # An explicit -x must name the driver's own language (#161 review): the
+        # pairing above is not allowed to be overridden from inside the argv.
+        def x_case(driver, src, extra):
+            argv = [driver] + extra + [str(src) if a == str(source) else a for a in base_argv[1:]]
+            return gate.replay_argv(argv, src, root, Path(args.cc), out, Path(args.cxx))
+        for driver, src, extra, message in (
+                (args.cc, source, ["-x", "c++"], "-x c++ does not match the C driver for pure.c"),
+                (args.cxx, cc_source, ["-x", "c"], "-x c does not match the C++ driver for clean.cc"),
+                (args.cc, source, ["-x", "c-header"], "-x c-header does not match the C driver"),
+                (args.cc, source, ["-x", "assembler"], "-x assembler does not match the C driver"),
+                (args.cc, source, ["-xc++"], "unsupported compile option: -xc++"),
+                (args.cxx, cc_source, ["-xc"], "unsupported compile option: -xc")):
+            try:
+                x_case(driver, src, extra)
+                raise AssertionError("accepted " + " ".join(extra) + " for " + src.name)
+            except gate.AuditError as exc:
+                assert message in str(exc), exc
+        assert x_case(args.cc, source, ["-x", "c"])[1:3] == ["-x", "c"]
+        assert x_case(args.cxx, cc_source, ["-x", "c++"])[1:3] == ["-x", "c++"]
+        print("ok -x must name the driver's language; joined -x<lang> is unsupported")
         print("ok quoted/paired/joined options and forbidden side effects/launchers")
     if args.board_build:
         replay_mutations(args)

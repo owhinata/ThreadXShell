@@ -2,12 +2,12 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 ThreadX Shell Project
  *
- * Host stand-in for tx_api.h, for test_nn_model.c and test_nn_model_life.c
- * only (issue #131): the sleep of a thread that lost port/nn/nn.c's open latch,
- * and the interrupt-masking macros nn_svc_f746_model.c brackets its transition
- * counter with.  The tests are single-threaded, so the latch is never contended
- * (the sleep fails the test if it is ever reached), and the "mask" counts its
- * own depth so a test can tell that nothing is called inside it.
+ * Host stand-in for tx_api.h, for test_nn_model_life.c and
+ * test_nn_model_container.c (issue #131): the interrupt-masking macros
+ * nn_svc_f746_model.c brackets its transition counter with.  The "mask" counts
+ * its own depth so a test can tell that nothing is called inside it.  (The
+ * open latch's one-tick wait is no longer reached through here: svc/nn/nn.c
+ * calls the board hook, modelled by shell/test/nn_model_host.c, issue #161.)
  */
 #ifndef NN_SHIM_TX_API_H
 #define NN_SHIM_TX_API_H

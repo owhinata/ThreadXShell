@@ -263,7 +263,7 @@ target_include_directories(tflm PRIVATE
     "${TFLM_ROOT}/third_party/flatbuffers/include"   # "flatbuffers/..."
     "${TFLM_ROOT}/third_party/gemmlowp"              # "fixedpoint/..."
     "${TFLM_ROOT}/third_party/ruy"                   # "ruy/..."
-    "${BOARD_DIR}/port/nn"                    # nn_backend.h for the bridge
+    "${BOARD_DIR}/port/nn"                    # the board nn glue (nn_backend.h: svc/nn since #161)
     "${CMAKE_SOURCE_DIR}/svc/nn")             # nn.h (shared since #161)
 
 # TF_LITE_STATIC_MEMORY changes TFLM's context/tensor struct layouts across the API

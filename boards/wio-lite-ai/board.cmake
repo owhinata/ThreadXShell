@@ -834,7 +834,8 @@ endif()
 #
 # CONFIG_NN_BACKEND itself is declared much earlier in this file, above the BSP_ENABLE_*
 # block, because BSP_ENABLE_SD's default depends on which backend was selected.
-set(NN_SOURCES "${BOARD_DIR}/port/nn/nn.c"
+set(NN_SOURCES "${CMAKE_SOURCE_DIR}/svc/nn/nn.c"   # the dispatcher (shared, #161)
+               "${BOARD_DIR}/port/nn/nn_model_board.c"  # ...its state + hooks
                "${BOARD_DIR}/port/nn/nn_svc_wio.c"   # the shared `nn` command's adapter
                # where a `nn model load` ends (issue #122): a pure table
                # shared by every board since issue #131, walked by
@@ -1017,7 +1018,7 @@ target_include_directories(shell PRIVATE
     "${BOARD_DIR}/port/ltdc"                     # ltdc_display.h
     "${BOARD_DIR}/port/camera"                   # camera.h
     "${BOARD_DIR}/port/nor"                      # nor_flash.h
-    "${BOARD_DIR}/port/nn"                       # nn_backend.h (nn.h: svc/nn)
+    "${BOARD_DIR}/port/nn"                       # the board nn glue (nn.h, nn_backend.h: svc/nn)
     "${BOARD_DIR}/port/nn/models"                # blazeface.h
     "${BOARD_DIR}/port/plugin"                   # plugin_lease.h, plugin_paint.h
     # Our fdb_cfg.h / fal_cfg.h must be found BEFORE FlashDB's own inc/,

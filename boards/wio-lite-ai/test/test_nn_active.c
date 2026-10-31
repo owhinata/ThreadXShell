@@ -34,7 +34,7 @@
  * plugin_run_active() and plugin_run_slot() over the plugin's OWN
  * `plugin_slot_table`, which is the same table the packer reads.  The plugin
  * linked in is the real asset/plugins/blazeface, and `struct nn_model` is
- * opaque in nn.h (it is defined in nn.c), so the two accessors the shim uses
+ * opaque in nn.h (svc/nn/nn.c defines it), so the two accessors the shim uses
  * are supplied here -- which is also what makes the shim testable at all.
  *
  * [!] AND EVERY ENTRY REQUIRES THE PLUGIN LEASE (issue #130).  Who holds it is a

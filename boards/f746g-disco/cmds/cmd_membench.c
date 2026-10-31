@@ -17,7 +17,7 @@
  *
  * Timing: DWT CYCCNT (enabled locally; the ThreadX exec-profile and udelay use
  * TIM2 because DWT freezes in WFI, but the bench never sleeps).  The counter is
- * SHARED with port/nn/nn.c, which times nn_run() with it, so this file only ever
+ * SHARED with svc/nn/nn.c, which times nn_run() with it, so this file only ever
  * enables and READS it -- see dwt_enable() for why it must never be reset (#4).
  * Clock is read from HAL_RCC_GetHCLKFreq() (not a hardcoded 216 MHz).
  *
@@ -118,7 +118,7 @@ static int dwt_enable(void)
 	 * delta -> reps clamped to the max -> a multi-minute hang with all-zero results.
 	 *
 	 * NEVER write DWT->CYCCNT (issue #4).  It is a free-running counter SHARED
-	 * with port/nn/nn.c, which samples it either side of nn_run() for
+	 * with svc/nn/nn.c, which samples it either side of nn_run() for
 	 * nn_last_cycles(); a reset from here lands inside that window and reports a
 	 * garbage inference time (a huge value, since c1 - c0 wraps).  Nothing needs
 	 * the counter to start at zero: every reader here takes a difference, which
@@ -148,7 +148,7 @@ static int dwt_enable(void)
  * (VCP + telnet, or `membench &` twice).  A plain flag test-set under a brief
  * PRIMASK critical section: interrupt-safe, needs no one-time init, and acquire /
  * release may run on different threads.  Same shape as the CoreMark guard and as
- * nn_session_try_acquire() in port/nn/nn.c.
+ * nn_session_try_acquire() in svc/nn/nn.c.
  */
 static volatile uint8_t membench_busy;
 

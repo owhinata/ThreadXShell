@@ -89,35 +89,14 @@ gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$
 # on a name that matches nothing.
 python3 "$board/cmake/fixtures/run_layout_tests.py"
 
-# issue #131 P16 -- this board's model singleton (port/nn/nn.c) over a stub
-# backend that keeps the contract nn_backend.h states.  The two properties a
-# console cannot pin down on its own: only the first open after boot reaches the
-# backend (an `nn info` after `nn model unload` must not put the model in the
-# image back), and a reload's answer is whether a MODEL is left -- a refused load from
-# empty is EMPTY through the shared table, not PREVIOUS.  The HAL and ThreadX are
-# test/nn_shim.
-gcc $CFLAGS -I "$here/nn_shim" -I "$board/port/nn" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
-    "$here/test_nn_model.c" "$board/port/nn/nn.c" "$HOST_TEST_SVC/nn/nn_swap.c" \
-    $LDFLAGS -o "$out/test_nn_model"
-"$out/test_nn_model"
-# ...and again with the one adoption failing: the next open must reach the
-# backend through a latch that was given back, build nothing and open empty.
-gcc $CFLAGS -DTEST_FIRST_BUILD_FAILS -I "$here/nn_shim" -I "$board/port/nn" \
-    -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
-    "$here/test_nn_model.c" "$board/port/nn/nn.c" "$HOST_TEST_SVC/nn/nn_swap.c" \
-    $LDFLAGS -o "$out/test_nn_model_fail"
-"$out/test_nn_model_fail"
-# ...and with nothing in the image (tflm since issue #159 Step 4c): the first
-# open builds nothing, `builtin` is refused, only a load brings a model.
-gcc $CFLAGS -DTEST_EMPTY_FROM_BOOT -I "$here/nn_shim" -I "$board/port/nn" \
-    -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
-    "$here/test_nn_model.c" "$board/port/nn/nn.c" "$HOST_TEST_SVC/nn/nn_swap.c" \
-    $LDFLAGS -o "$out/test_nn_model_empty"
-"$out/test_nn_model_empty"
-
+# The model singleton itself (svc/nn/nn.c, shared with wio-lite-ai since issue
+# #161) is walked by shell/test/test_nn_model.c; the two tests below link the
+# same file over shell/test/nn_model_host.c, the board's state and hooks
+# modelled.
+#
 # issue #131 step 7d -- this board's `nn info` / `nn model load` / `nn model
 # unload` (port/nn/nn_svc_f746_model.c) behind the shared order
-# (svc/nn/nn_core_model.c), against the real nn.c over a stub backend.  What a
+# (svc/nn/nn_core_model.c), against the real svc/nn/nn.c over a stub backend.  What a
 # console cannot produce on demand: a refusal from empty, a backend that
 # "restores" from nothing (EMPTY, released), a success that left no model (HW),
 # and `nn info` from another console in the middle of a swap (BUSY on all three
@@ -125,7 +104,8 @@ gcc $CFLAGS -DTEST_EMPTY_FROM_BOOT -I "$here/nn_shim" -I "$board/port/nn" \
 gcc $CFLAGS -I "$here/nn_shim" -I "$board/port/nn" -I "$board/port/camera" \
     -I "$board/port/sdram" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_nn_model_life.c" "$board/port/nn/nn_svc_f746_model.c" \
-    "$board/port/nn/nn.c" "$HOST_TEST_SVC/nn/nn_core_model.c" \
+    "$HOST_TEST_SVC/nn/nn.c" "$HOST_TEST_REPO/shell/test/nn_model_host.c" \
+    "$HOST_TEST_SVC/nn/nn_core_model.c" \
     "$HOST_TEST_SVC/nn/nn_swap.c" "$HOST_TEST_SVC/fmt.c" \
     $LDFLAGS -o "$out/test_nn_model_life"
 "$out/test_nn_model_life"
@@ -146,7 +126,8 @@ gcc $CFLAGS -DCONFIG_NN_BACKEND_TFLM=1 -DF746_PLUGIN_TARGET_ID=0x1101 \
     -I "$board/port/sdram" -I "$board/port/plugin" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_nn_model_container.c" "$board/port/nn/nn_svc_f746_model.c" \
     "$board/port/nn/nn_container.c" \
-    "$board/port/nn/nn.c" "$HOST_TEST_SVC/nn/nn_core_model.c" \
+    "$HOST_TEST_SVC/nn/nn.c" "$HOST_TEST_REPO/shell/test/nn_model_host.c" \
+    "$HOST_TEST_SVC/nn/nn_core_model.c" \
     "$HOST_TEST_SVC/nn/nn_swap.c" "$HOST_TEST_SVC/fmt.c" \
     "$HOST_TEST_SVC/plugin/plugin_load.c" "$HOST_TEST_SVC/plugin/plugin_info.c" \
     "$HOST_TEST_SVC/plugin/plugin_claims.c" \

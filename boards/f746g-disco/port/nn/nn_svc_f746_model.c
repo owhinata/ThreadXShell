@@ -14,13 +14,13 @@
  * the SD card, and how its backend replaces one model with another.
  *
  * WHY IT IS ITS OWN FILE.  The rest of the adapter (nn_svc_f746.c) needs the
- * camera, the stream machine and the decoder; this half needs only port/nn/nn.c,
+ * camera, the stream machine and the decoder; this half needs only svc/nn/nn.c,
  * so test/test_nn_model_life.c builds it against the real nn.c over a stub
  * backend and walks what a console cannot produce on demand -- a refusal that
  * restores nothing, an `nn info` from another console in the middle of a swap.
  *
  * Like the rest of the adapter it adds no second copy of the model: the
- * singleton and the session gate live in port/nn/nn.c.  The state here is the
+ * singleton and the session gate live in svc/nn/nn.c.  The state here is the
  * shared order's transition counter, which nothing else had, and -- on tflm,
  * since issue #159 -- what the open model's container CLAIMS (below).
  */

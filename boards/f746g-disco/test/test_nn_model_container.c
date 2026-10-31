@@ -5,7 +5,7 @@
  * Host test for `nn model load --path <container>` on this board's tflm build
  * (issue #159 = #78 Step 4a): port/nn/nn_svc_f746_model.c compiled WITH
  * CONFIG_NN_BACKEND_TFLM and this board's policy macros, over the real
- * svc/plugin/plugin_load.c, svc/crc32.c, port/nn/nn_container.c, port/nn/nn.c
+ * svc/plugin/plugin_load.c, svc/crc32.c, port/nn/nn_container.c, svc/nn/nn.c
  * and the shared load order, against a stub backend that refuses any model
  * pointer outside its staging slot or off NN_MODEL_ALIGN -- the contract the
  * tflm backend keeps.
@@ -54,21 +54,11 @@
 #include "plugin_run_core.h"
 #include "sdram.h"
 #include "tx_api.h"
-#include "stm32f7xx_hal.h"
 
-DWT_Type       test_dwt = { .CTRL = DWT_CTRL_NOCYCCNT_Msk };
-CoreDebug_Type test_coredebug;
 int            test_tx_masked;
 
 /* The linker's reservation markers, as nn_svc_info_extra() names them. */
 uint8_t __plugin_start[16], __plugin_end[16];
-
-UINT tx_thread_sleep(ULONG ticks)
-{
-	(void)ticks;
-	assert(!"the open latch was contended in a single-threaded test");
-	return 0;
-}
 
 static int invalidations;
 

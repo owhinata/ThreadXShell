@@ -47,15 +47,12 @@
 #include <cstdlib>
 #include <new>
 
-/* See nn_tflm_priv.h: this is evidence for `nn info`, not a statistic. */
-extern "C" volatile uint32_t nn_tflm_cxx_new_calls;
-volatile uint32_t nn_tflm_cxx_new_calls = 0u;
-
 /*
  * Routed to malloc rather than returning nullptr: with TF_LITE_STATIC_MEMORY nothing
- * should reach these at all, and if something does, the useful outcome is that it
- * works while `nn info` reports a non-zero counter.  The counter is the claim; the
- * allocator behind it is a fallback.
+ * should reach these at all -- check_cxx_runtime.py reports after every link whether
+ * they are in the image -- and if something does, the useful outcome is that it
+ * works.  (A call counter used to sit here for `nn info`; nothing ever printed it,
+ * so it went with issue #161.)
  *
  * These deliberately do NOT run the new_handler loop the standard describes.  There is
  * no handler to install here, and the loop would only turn an out-of-memory into a
@@ -87,25 +84,21 @@ static void *nn_tflm_alloc_or_spin(std::size_t n)
 
 void *operator new(std::size_t n)
 {
-	nn_tflm_cxx_new_calls++;
 	return nn_tflm_alloc_or_spin(n);
 }
 
 void *operator new[](std::size_t n)
 {
-	nn_tflm_cxx_new_calls++;
 	return nn_tflm_alloc_or_spin(n);
 }
 
 void *operator new(std::size_t n, const std::nothrow_t &) noexcept
 {
-	nn_tflm_cxx_new_calls++;
 	return malloc(n);
 }
 
 void *operator new[](std::size_t n, const std::nothrow_t &) noexcept
 {
-	nn_tflm_cxx_new_calls++;
 	return malloc(n);
 }
 

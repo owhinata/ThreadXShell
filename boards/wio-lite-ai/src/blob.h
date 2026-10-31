@@ -194,7 +194,7 @@ int blob_verify(unsigned slot, uint32_t *crc_out);
 /**
  * Serialise blob-mutating operations against each other.  A plain test-and-set under
  * a brief PRIMASK critical section -- interrupt-safe, thread-agnostic and needing no
- * initialisation, the same idiom as the NN session guard (port/nn/nn.c).  Returns
+ * initialisation, the same idiom as the NN session guard (svc/nn/nn.c).  Returns
  * BLOB_OK when acquired, BLOB_ERR_BUSY otherwise.
  */
 int  blob_busy_acquire(void);

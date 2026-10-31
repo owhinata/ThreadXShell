@@ -18,7 +18,8 @@ links many more; `"fa" "ce"` and a line continuation and a stringifying macro al
 walked past it; and a literal on a line that happened to begin with `/*` was
 skipped outright.  Reading the section the compiler and linker actually produced
 answers all of those at once, because by then the string IS one string and every
-translation unit that reached the image has contributed.
+translation unit that reached the image has contributed.  Which sections is
+derived from the ELF's flags, not listed (issue #170; see loaded_sections()).
 
 [!] AND IT STILL DOES NOT PROVE THE FIRMWARE CANNOT SAY "face".  A string
 assembled at run time out of char literals is in no section and nothing here
@@ -35,6 +36,7 @@ ELF, so no exclusion rule is needed and none can be got wrong.
 import argparse
 import os
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -76,12 +78,55 @@ ALLOW = [
 
 MIN_RUN = min(len(w) for w in FORBIDDEN_WORDS)
 
-# Every loadable section that can hold a string constant.  .rodata is where they
-# normally land; .data catches a non-const `static char s[] = "faces"`, and .text
-# catches a constant the compiler chose to inline.  Both of the latter are empty
-# of these words today and cost nothing to scan, which is the right trade for a
-# check whose failure mode is silence.
-SECTIONS = (".rodata", ".data", ".text")
+# [!] WHICH SECTIONS ARE READ IS DERIVED FROM THE ELF, NOT LISTED (issue #170).
+# Until then this was a fixed (".rodata", ".data", ".text"): .rodata is where
+# string constants normally land, .data catches a non-const
+# `static char s[] = "faces"`, .text a constant inlined into a literal pool.  But
+# a fixed list is blind to the next section someone adds -- issue #170 moves cold
+# code into a new SRAM section, and its literal pools would have walked past.
+# The rule is now every section with SHF_ALLOC whose type is not SHT_NOBITS and
+# whose size is non-zero: everything that has bytes in the loaded image, chosen
+# by FLAGS, never by name.  Debug sections, .comment, .ARM.attributes (no
+# SHF_ALLOC), .bss and the NOLOAD buffers (SHT_NOBITS) and the non-ALLOC
+# .heap/.stack placeholders drop out by the same rule.  On the firmware as of
+# issue #170 that adds .table, .ARM.exidx, .copy.table and .zero.table to the
+# three, none of which holds a forbidden string.
+SHF_ALLOC = 0x2
+SHT_NOBITS = 8
+
+
+def loaded_sections(elf):
+    """Names of the sections with bytes in the loaded image, in header order.
+
+    Read straight from the ELF32 section header table (stdlib only, so the gate
+    needs no second tool argument).  Anything that is not a little-endian ELF32
+    is refused rather than guessed at.
+    """
+    with open(elf, "rb") as fh:
+        data = fh.read()
+    if data[:4] != b"\x7fELF" or data[4] != 1 or data[5] != 1:
+        sys.exit(f"check_output_vocabulary: {elf} is not a little-endian ELF32")
+    shoff, = struct.unpack_from("<I", data, 0x20)
+    shentsize, shnum, shstrndx = struct.unpack_from("<HHH", data, 0x2E)
+    if shoff == 0 or shnum == 0 or shentsize < 40 or shstrndx >= shnum:
+        sys.exit(f"check_output_vocabulary: {elf} has no usable section table")
+
+    def header(i):
+        # name, type, flags, addr, offset, size
+        return struct.unpack_from("<IIIIII", data, shoff + i * shentsize)
+
+    strtab_off = header(shstrndx)[4]
+
+    def name_of(off):
+        start = strtab_off + off
+        return data[start:data.index(b"\x00", start)].decode("ascii")
+
+    out = []
+    for i in range(1, shnum):
+        name, typ, flags, _addr, _off, size = header(i)
+        if flags & SHF_ALLOC and typ != SHT_NOBITS and size > 0:
+            out.append(name_of(name))
+    return out
 
 
 def section_strings(objcopy, elf, section):
@@ -129,8 +174,13 @@ def main():
     ap.add_argument("--objcopy", required=True)
     args = ap.parse_args()
 
+    sections = loaded_sections(args.elf)
+    if not sections:
+        # Fail closed: an empty scan set would pass any firmware.
+        sys.exit("check_output_vocabulary: no loaded section in "
+                 f"{args.elf}; nothing to scan")
     found = []
-    for section in SECTIONS:
+    for section in sections:
         found.extend(section_strings(args.objcopy, args.elf, section))
     allowed = {text for text, _why in ALLOW}
 
@@ -162,7 +212,7 @@ def main():
         return 1
 
     print(f"check_output_vocabulary: OK ({len(found)} string(s) in "
-          f"{', '.join(SECTIONS)}; {len(ALLOW)} allowed)")
+          f"{', '.join(sections)}; {len(ALLOW)} allowed)")
     return 0
 
 

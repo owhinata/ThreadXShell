@@ -135,7 +135,9 @@ the settings are also lost when the USB device re-enumerates.
   heap-to-stack gap, no ITCM headroom floor since issue #170, vector table,
   static stacks,
   benchmark-buffer residency, no forbidden SDK symbols surviving, and -- since
-  issue #42 -- one REQUIRED symbol), the timer seam, and -- since issue #88 --
+  issue #42 -- one REQUIRED symbol), the output vocabulary (every loaded
+  section of the ELF, chosen by its flags since issue #170), the timer seam,
+  and -- since issue #88 --
   the NOR write seam (only `port/sdk_seam/nor_seam.c` may reach the vendor's
   erase and program entry points; it reads the linker's map, not the finished
   ELF).  The MVE-predication scan is gone, because its premise was wrong and it
@@ -6722,7 +6724,7 @@ else.  `nn stream stats` said `last : 3 face(s)`; the camera counters said
 `cmake/check_output_vocabulary.py` runs POST_BUILD and fails when a word it
 cannot justify appears.
 
-**[!] It reads `.rodata`, not the sources, and the first version did the
+**[!] It reads the linked image, not the sources, and the first version did the
 opposite.**  That one was a regex over C string literals in a hand-picked set of
 directories, and the adversarial review of this issue took it apart: the image
 links many more directories than it scanned, and `"fa" "ce"`, a line
@@ -6732,8 +6734,20 @@ them at once -- by then the string is one string, and every translation unit tha
 reached the image is in scope.  It was checked by putting `"fa" "ce"` into
 `cmd_nn.c`: the source scanner passed it, the section scanner did not.
 
+**Which sections: every loaded one, derived from the ELF (issue #170).**  The
+gate used to read a fixed `.rodata`, `.data` and `.text`.  It now reads every
+section with `SHF_ALLOC` whose type is not `SHT_NOBITS` and whose size is not
+zero -- chosen by flags, never by name -- because a fixed list is blind to the
+next section someone adds, and issue #170 adds an SRAM code section whose
+literal pools hold strings.  On the firmware at that point the rule adds
+`.table`, `.ARM.exidx`, `.copy.table` and `.zero.table`; the string count stayed
+at 10,089, so the verdict did not move.  Fixtures V0-V2 in
+`cmake/fixtures/run_fixture_tests.py` are the gate's first negative tests: V1
+links a forbidden word into a new loaded section and is passed by the old fixed
+list, V2 puts one in `.rodata`.
+
 **[!] It still does not prove the firmware cannot say "face".**  A string
-assembled at run time out of char literals is not in `.rodata`.  That is a
+assembled at run time out of char literals is in no section.  That is a
 deliberate act, and this gate is aimed at the slip -- the ordinary edit made by
 someone thinking about a detector.
 

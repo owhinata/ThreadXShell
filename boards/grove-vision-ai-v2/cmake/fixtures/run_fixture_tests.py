@@ -4,8 +4,9 @@
 """Negative tests for the post-build gates that assert a LINKER property.
 
 Covers cmake/check_timer_seam.py (issue #30), the loadable-SRAM floor and the
-required-symbol rule in cmake/check_placement_budget.py (issues #29, #42), and
-cmake/check_nor_seam.py (issue #88).
+required-symbol rule in cmake/check_placement_budget.py (issues #29, #42),
+cmake/check_output_vocabulary.py (issues #105, #170) and cmake/check_nor_seam.py
+(issue #88).
 
 WHY REAL LINKS AND NOT UNIT TESTS
 ---------------------------------
@@ -31,6 +32,12 @@ exactly one thing broken:
   P4  the staging buffer in a section
       with no flags at all              -> ALLOC (it claims no memory)
   P0  the unmodified firmware           -> PASS
+
+  V0  the unmodified firmware           -> PASS
+  V1  a forbidden word in a NEW loaded
+      section the old fixed list
+      (.rodata/.data/.text) never read  -> VOCAB
+  V2  a forbidden word in .rodata       -> VOCAB
 
   Q0  the unmodified probe              -> PASS
   Q1  another TU calls the inner name   -> N5
@@ -231,6 +238,22 @@ def run_placement_gate(board_dir, build_dir, elf, nm, objdump):
         ids.add("RESIDENCY")
     if "claims no memory" in text:
         ids.add("ALLOC")
+    return r.returncode, ids, text
+
+
+def run_vocab_gate(board_dir, build_dir, elf, objcopy):
+    """check_output_vocabulary.py on one ELF; same matching rule as above."""
+    r = subprocess.run(
+        [sys.executable,
+         os.path.join(board_dir, "cmake", "check_output_vocabulary.py"),
+         "--objcopy", objcopy, os.path.join(build_dir, elf)],
+        capture_output=True, text=True)
+    text = r.stdout + r.stderr
+    ids = set()
+    if "detector vocabulary in firmware output" in text:
+        ids.add("VOCAB")
+    if "stale allowlist entry" in text:
+        ids.add("STALE")
     return r.returncode, ids, text
 
 
@@ -586,6 +609,78 @@ def main():
     # Everything the gate checked before 1c3730d is satisfied.
     ok &= expect("P4 a reservation that claims no memory is caught",
                  rc, ids, 1, {"ALLOC"}, text)
+
+    # --- check_output_vocabulary.py (issues #105, #170) ---------------------
+    #
+    # [!] THE FIRST NEGATIVE TESTS THIS GATE HAS HAD.  Until issue #170 it read a
+    # fixed (".rodata", ".data", ".text"); it now reads every section with bytes
+    # in the loaded image, chosen by its flags.  V1 is the case the fixed list
+    # could not see: a loaded section with any other name -- the shape of the
+    # SRAM code section issue #170 adds, whose literal pools hold strings.  V2
+    # pins the ordinary case so a regression in the extraction itself (the run
+    # splitter, the word list) cannot hide behind V1's section rule.
+    #
+    # Both are REAL links of the real objects plus one fixture TU, the way P2
+    # and P3 are, so the section the gate meets is one ld produced.
+    print("run_fixture_tests (check_output_vocabulary.py):")
+
+    objcopy = os.path.join(tc, "arm-none-eabi-objcopy")
+    rc, ids, text = run_vocab_gate(board, build, "shell.elf", objcopy)
+    ok &= expect("V0 pristine firmware passes", rc, ids, 0, set(), text)
+
+    vocab_src = os.path.join(outdir, "v_vocab_probe.c")
+    with open(vocab_src, "w") as f:
+        # Two strings, two symbols; each link keeps exactly one of them alive
+        # with -u, and --gc-sections drops the other.  -fdata-sections puts the
+        # .rodata one in .rodata.vocab_probe_rodata, which the real script
+        # gathers into .rodata.
+        f.write('__attribute__((section(".vocab_probe")))\n'
+                'const char vocab_probe_new[] = "faces in a new section";\n'
+                'const char vocab_probe_rodata[] = "faces in rodata";\n')
+    cc = ninja_compile_command(build, "src/blob_stage.c.obj")
+    v_obj = "seam-fixtures/v_vocab_probe.obj"
+    v_cc = re.sub(r"-o \S*blob_stage\.c\.obj", f"-o {v_obj}", cc)
+    v_cc = re.sub(r"-c \S*blob_stage\.c", f"-c {vocab_src}", v_cc)
+    v_cc = re.sub(r"-MD -MT \S+ -MF \S+", "", v_cc)
+    if v_cc == cc:
+        raise SystemExit("run_fixture_tests: cannot retarget the blob_stage.c "
+                         "compile line for the vocabulary probe")
+    compile_one(build, v_cc, "V")
+
+    # V1: an explicit output section in the SRAM region, right after .rodata.
+    # Explicit rather than orphan so the fixture does not depend on where ld's
+    # orphan heuristics would put it.
+    rodata_close = "        __rodata_end = .;\n    } > CM55M_S_SRAM\n"
+    ld_v1 = ld.replace(rodata_close, rodata_close +
+                       "\n    .vocab_probe : ALIGN(4)\n"
+                       "    {\n        KEEP(*(.vocab_probe))\n"
+                       "    } > CM55M_S_SRAM\n", 1)
+    if ld_v1 == ld:
+        raise SystemExit("run_fixture_tests: cannot find the end of .rodata in "
+                         "the linker script; the fixture cannot add a section")
+    ld_v1_dst = os.path.join(outdir, "v1_new_section.ld")
+    with open(ld_v1_dst, "w") as f:
+        f.write(ld_v1)
+    v1 = re.sub(r"-T\S*HX6538_CM55M_S\.ld", f"-T{ld_v1_dst}", shell_link)
+    v1 = v1.replace("arm-none-eabi-g++ ",
+                    f"arm-none-eabi-g++ {v_obj} -Wl,-u,vocab_probe_new ", 1)
+    v1 = retarget(v1, "shell.elf", "seam-fixtures/v1_new_section.elf")
+    link(build, v1, "V1")
+    rc, ids, text = run_vocab_gate(board, build,
+                                   "seam-fixtures/v1_new_section.elf", objcopy)
+    ok &= expect("V1 a forbidden word in a new loaded section is caught",
+                 rc, ids, 1, {"VOCAB"}, text)
+
+    # V2: the same word in .rodata, with the real linker script.
+    v2 = shell_link.replace("arm-none-eabi-g++ ",
+                            f"arm-none-eabi-g++ {v_obj} "
+                            "-Wl,-u,vocab_probe_rodata ", 1)
+    v2 = retarget(v2, "shell.elf", "seam-fixtures/v2_rodata.elf")
+    link(build, v2, "V2")
+    rc, ids, text = run_vocab_gate(board, build,
+                                   "seam-fixtures/v2_rodata.elf", objcopy)
+    ok &= expect("V2 a forbidden word in .rodata is caught",
+                 rc, ids, 1, {"VOCAB"}, text)
 
     # --- check_nor_seam.py: who may reach the NOR write path (issue #88) -----
     #

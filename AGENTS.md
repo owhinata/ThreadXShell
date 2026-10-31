@@ -256,7 +256,7 @@ board README が正。
   callback 中の block / sleep / 推論 / 待つロック / LCD 再入は禁止。panel は lease の try だけ）。**タイムアウトは `npu_hw.h` の 1 箇所。**
 - **[!] `nn stream` の拒否の仕方はボードで違う。揃えない**（Grove は**デコーダが無い時点で**、wio・f746 は
   **shape は通し `can_draw` 1 本で**）。**[!] `nn_input_quant_ok()` は常駐デコーダの前提条件で plugin は
-  縛られない。[!] ファームの印字は「種」を名乗らない** — ゲートは **`.rodata`** を negative scan する。**`nn dets` は
+  縛られない。[!] ファームの印字は「種」を名乗らない** — ゲートは **ロードされる全セクション**を negative scan する。**`nn dets` は
   record の snapshot と report を lease の 1 回の保持で採る**（stream 中も全文。STALE は保持者が離さなかったときだけ）、**stop の record 境界は overlay の使用中 0 と worker の join の後、sink の unlink はカメラ停止の確認だけが許す**（#118, #129, #142。`nn run` も同じ teardown）。
 - **[!] Grove のファームも共有デコーダをリンクしない**（9 節）。**別フラグで組み直した監査対象を作らない。** 素の
   `.tflite` は**テンソルをそのまま報告**し、`nn thresh` は **`none`**、set は **`NN_SVC_ERR_STATE`**。

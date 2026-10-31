@@ -86,26 +86,45 @@
 	X(TRANSPOSE,              AddTranspose)
 
 /*
+ * The Ethos-U profile (issue #169): ONE custom operator and no CPU kernel at all.
+ *
+ * Vela folds the whole graph into the `ethos-u` custom operator, which hands the
+ * command stream to the NPU; a model that still needs a CPU kernel is refused
+ * before it runs (svc/nn/ethosu/npu_model_scan refuses any other operator, and
+ * AllocateTensors() would too) rather than run half on the CPU -- the op resolver
+ * stays one operator by design (grove-vision-ai-v2's README).  Not nested in any of the
+ * lists above, and not a board name: it is what a backend driving an Ethos-U NPU
+ * registers.  The resolver method exists only in a TFLM tree built with the Ethos-U
+ * kernel, which is the only kind of tree that selects this profile.
+ */
+#define NN_TFLM_OPS_ETHOSU(X)           \
+	X(CUSTOM,             AddEthosU)
+
+/*
  * THE PROFILE: exactly one complete list, NN_TFLM_OPS_ALL(X), chosen by one define.
  *
  *   (none)                         blazeface   base                      =  8
  *   NN_TFLM_OPS_MLPERF_PROFILE=1   mlperf      base + mlperf             = 11
  *   NN_TFLM_OPS_EXTENDED=1         extended    base + mlperf + extra     = 23
+ *   NN_TFLM_OPS_ETHOSU_PROFILE=1   ethosu      the ethos-u custom op     =  1
  *
  * The three existing profiles happen to nest, which is why NN_TFLM_OPS_EXTRA does NOT
  * repeat the MLPerf operators (registering one twice is a resolver error, and this is
  * the only place that could introduce one).  Nesting is not a property of the
  * mechanism, though: each branch below states its WHOLE list.  A profile that shares
- * nothing with the CPU kernels -- an Ethos-U one, whose model is a single custom
- * operator the NPU runs (X(CUSTOM, AddEthosU)) with no CPU kernel registered at all --
- * is one more branch with its own list and its own define; the resolver's size below
- * follows from whatever the branch lists.
+ * nothing with the CPU kernels -- the Ethos-U one, whose model is a single custom
+ * operator the NPU runs with no CPU kernel registered at all -- is one more branch
+ * with its own list and its own define; the resolver's size below follows from
+ * whatever the branch lists.
  */
-#if defined(NN_TFLM_OPS_EXTENDED) && defined(NN_TFLM_OPS_MLPERF_PROFILE)
+#if (defined(NN_TFLM_OPS_EXTENDED) + defined(NN_TFLM_OPS_MLPERF_PROFILE) + \
+     defined(NN_TFLM_OPS_ETHOSU_PROFILE)) > 1
 #error "more than one NN_TFLM_OPS profile is defined"
 #endif
 
-#if defined(NN_TFLM_OPS_EXTENDED)
+#if defined(NN_TFLM_OPS_ETHOSU_PROFILE)
+#define NN_TFLM_OPS_ALL(X)  NN_TFLM_OPS_ETHOSU(X)
+#elif defined(NN_TFLM_OPS_EXTENDED)
 #define NN_TFLM_OPS_ALL(X)  NN_TFLM_OPS_BASE(X) NN_TFLM_OPS_MLPERF(X) NN_TFLM_OPS_EXTRA(X)
 #elif defined(NN_TFLM_OPS_MLPERF_PROFILE)
 #define NN_TFLM_OPS_ALL(X)  NN_TFLM_OPS_BASE(X) NN_TFLM_OPS_MLPERF(X)

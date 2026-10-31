@@ -103,6 +103,31 @@ enum nn_dtype {
 #define NN_MODEL_ERR_SLOT     (-8)  /**< not inside the region load_region() gave    */
 #define NN_MODEL_ERR_ALIGN    (-9)  /**< model does not start on NN_MODEL_ALIGN       */
 
+/*
+ * Refusals only a backend that interprets a model IN PLACE gives (issue #169, the
+ * Ethos-U backend of grove-vision-ai-v2).  Each is its own code because each sends
+ * the operator somewhere different, and a folded one would hide which:
+ *
+ *   _WINDOW   the counterpart of _SLOT: the range is not inside the read window the
+ *             board declares (the address, or the address plus the length).
+ *   _IDENT    no "TFL3" file identifier at offset 4.  Kept apart from _FORMAT on
+ *             purpose: "this is not a model" (erased flash, the wrong address) is a
+ *             different answer from "these bytes claim to be a model and do not hold
+ *             together", which is what an intact transfer of a file that was already
+ *             corrupt on the PC gets.  (The tflm backend folds the identifier into
+ *             _FORMAT and is not changed by this.)
+ *   _PAYLOAD  the Ethos-U operator's driver payload is not exactly one
+ *             COMMAND_STREAM action, as the last action -- the shape the driver can
+ *             launch without being able to abandon the launch with the arena still
+ *             owned by the NPU (svc/nn/ethosu/npu_payload.h).
+ *
+ * nn_model_strerror() does not word these: the backend that returns them supplies
+ * the sentence (svc/nn/ethosu/) and hands every other code to nn_model_strerror().
+ */
+#define NN_MODEL_ERR_WINDOW   (-10) /**< not inside the board's model read window    */
+#define NN_MODEL_ERR_IDENT    (-11) /**< no TFL3 file identifier at offset 4         */
+#define NN_MODEL_ERR_PAYLOAD  (-12) /**< Ethos-U payload is not one final command stream */
+
 /**
  * The alignment a model handed to nn_model_reload() must start on (issue #108,
  * f746g-disco since issue #159).
@@ -274,13 +299,27 @@ int nn_model_load_region(void **buf, uint32_t *cap);
  * while nn_scratch_claim() is held, NN_ERR_SCRATCH_HELD; on a backend that
  * cannot swap, NN_ERR_NOSUP.
  *
- * [!] WHERE @p data MAY POINT (issue #108, f746g-disco since issue #159).  Any
- * range that lies wholly inside the buffer load_region() handed out and starts
- * on NN_MODEL_ALIGN -- not only its base.  A container's model section is
- * adopted in place, at its offset inside the staged container; copying it down
- * would overwrite the container whose bytes were validated with bytes nobody
- * validated.  Anything else is refused (NN_MODEL_ERR_SLOT / NN_MODEL_ERR_ALIGN)
- * and changes nothing.
+ * [!] WHERE @p data MAY POINT (issue #108, f746g-disco since issue #159; per
+ * backend since issue #169).  Wherever the compiled-in backend declares it can
+ * adopt a model from, and nowhere else.  There are two kinds:
+ *
+ *   - A STAGING backend (tflm): any range that lies wholly inside a buffer
+ *     load_region() handed out, starts on NN_MODEL_ALIGN -- not only its base --
+ *     and is not the slot the live model is in.  A container's model section is
+ *     adopted in place, at its offset inside the staged container; copying it
+ *     down would overwrite the container whose bytes were validated with bytes
+ *     nobody validated.  Anything else is NN_MODEL_ERR_SLOT / NN_MODEL_ERR_ALIGN.
+ *   - An IN-PLACE backend (ethosu): any range that lies wholly inside the read
+ *     window the board declares and starts on NN_MODEL_ALIGN.  The interpreter
+ *     keeps pointers INTO those bytes for as long as the model is loaded, and the
+ *     backend cannot make them stay put: THE CALLER'S LEASE on the window (and on
+ *     the bytes in it) is what guarantees their lifetime, so the caller holds it
+ *     from before this call until the model is gone -- including a restore of the
+ *     previous model.  Anything else is NN_MODEL_ERR_WINDOW / NN_MODEL_ERR_ALIGN.
+ *     Such a backend has no load_region(), so nn_model_load_region() answers
+ *     NN_ERR_NOSUP there.
+ *
+ * Either way a refusal of the range changes nothing.
  *
  * @p model_after, when not NULL, receives whether a MODEL is active once THIS
  * call has finished (nn_model_present()), not whether the singleton is open,

@@ -343,6 +343,12 @@ int main(void)
 	assert(strcmp(nn_model_strerror(NN_ERR_STATE), nn_model_strerror(NN_ERR_NOSUP)) != 0);
 	assert(strcmp(nn_model_strerror(NN_ERR_SCRATCH_HELD), "unknown error") != 0);
 	assert(strcmp(nn_model_strerror(-12345), "unknown error") == 0);
+	/* The in-place backend's refusals (issue #169) are worded by that backend,
+	 * which hands every other code here: this layer has no sentence of its own for
+	 * them, and answers as for any code it does not know. */
+	assert(strcmp(nn_model_strerror(NN_MODEL_ERR_WINDOW), "unknown error") == 0);
+	assert(strcmp(nn_model_strerror(NN_MODEL_ERR_IDENT), "unknown error") == 0);
+	assert(strcmp(nn_model_strerror(NN_MODEL_ERR_PAYLOAD), "unknown error") == 0);
 
 	printf("test_nn_model (no swap): OK\n");
 	return 0;
@@ -366,7 +372,8 @@ static void check_codes_pass_through(struct nn_model *m)
 		NN_MODEL_ERR_VERSION, NN_MODEL_ERR_OPS, NN_MODEL_ERR_ARENA,
 		NN_MODEL_ERR_TENSOR, NN_MODEL_ERR_SHAPE, NN_MODEL_ERR_EMPTY,
 		NN_MODEL_ERR_FORMAT, NN_MODEL_ERR_SLOT, NN_MODEL_ERR_ALIGN,
-		-10, -11, -49, -51, -89, -93, -128, INT_MIN,
+		NN_MODEL_ERR_WINDOW, NN_MODEL_ERR_IDENT, NN_MODEL_ERR_PAYLOAD,
+		-13, -14, -49, -51, -89, -93, -128, INT_MIN,
 	};
 	void *buf;
 	uint32_t cap;

@@ -5,6 +5,15 @@ Coverage is derived twice: CMake's evaluated target sources, and its compile DB.
 Their (producer, source) sets must agree before any exception is applied. We only
 support ordinary single-config Ninja/GCC compiles; unknown command forms fail
 closed. This is a build-integrity check, not a defense against malicious CMake.
+
+C++ (#161): a TU compiled by the build's C++ driver is replayed with that driver.
+The driver must be exactly the C or the C++ compiler CMake was configured with,
+and the source suffix must belong to that driver's language (a .c by the C++
+driver, or a .cc by the C driver, is refused rather than guessed at). An explicit
+`-x <lang>` must name that same language too, so `gcc -x c++ x.c` cannot compile
+C++ under the C pairing; any other -x value is refused. A C++
+global constructor lands in .init_array, a writable section, so the unchanged
+section rule in check_no_mutable_storage.py refuses it like any other storage.
 """
 import argparse
 import json
@@ -26,6 +35,27 @@ SHARED_COMMANDS = ("shell/cmds/cmd_nn.c", "shell/cmds/nn_cmd_core.c",
 # would change ownership/reentrancy and is not part of the stateless nn contract.
 EXCEPTIONS = {"svc/ymodem.c": "existing s_block, s_rdata and s_diag (non-reentrant protocol)"}
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".s", ".S"}
+# Which suffixes each driver may compile. Together these are SOURCE_SUFFIXES.
+# The C driver keeps the assembly suffixes it always accepted (CMake's ASM
+# compiler is the same gcc); C++ sources are accepted only from the C++ driver.
+DRIVER_SUFFIXES = {"C": {".c", ".s", ".S"}, "C++": {".cc", ".cpp", ".cxx"}}
+ASM_SUFFIXES = {".s", ".S"}
+
+
+def x_language_ok(language, suffix, value):
+    """Whether `-x value` keeps the driver/suffix pairing true (#161 review).
+
+    The C driver may say `c`, and `assembler`/`assembler-with-cpp` only for an
+    assembly suffix; the C++ driver may say `c++`. Nothing else (c-header,
+    none, objective-c, a C++ value under the C driver, ...) is accepted.
+    """
+    if language == "C++":
+        return value == "c++"
+    if value == "c":
+        return suffix == ".c"
+    if value in ("assembler", "assembler-with-cpp"):
+        return suffix in ASM_SUFFIXES
+    return False
 HEADER_SUFFIXES = {".h", ".hh", ".hpp", ".hxx", ".inc"}
 SAFE_F = {
     "-fdata-sections", "-ffunction-sections", "-fno-common", "-fcommon",
@@ -37,6 +67,9 @@ SAFE_F = {
     "-fno-unwind-tables", "-fno-asynchronous-unwind-tables",
     "-fsigned-char", "-funsigned-char", "-fwrapv", "-fno-wrapv",
     "-fno-inline", "-fstack-usage", "-fno-delete-null-pointer-checks",
+    # C++ only (#161): static destructors are not registered through
+    # __cxa_atexit. Storage that would need one is still refused by section.
+    "-fno-use-cxa-atexit",
 }
 
 
@@ -161,8 +194,28 @@ def select(database, targets, wanted, root):
     return selected
 
 
-def replay_argv(argv, source, cwd, cc, destination):
-    need(canonical(argv[0], cwd) == cc, "unsupported compiler/launcher: " + argv[0])
+def driver_language(argv0, source, cwd, cc, cxx=None):
+    """Name the driver's language, refusing unknown drivers and mismatches.
+
+    [!] Only the two configured compilers are drivers. Anything else (a
+    launcher, another compiler, the C++ driver when none was configured) is
+    refused, and so is a source whose suffix belongs to the other language.
+    """
+    driver = canonical(argv0, cwd)
+    if driver == cc:
+        language = "C"
+    elif cxx is not None and driver == cxx:
+        language = "C++"
+    else:
+        raise AuditError("unsupported compiler/launcher (neither the configured C "
+                         "nor C++ compiler): " + argv0)
+    need(Path(source).suffix in DRIVER_SUFFIXES[language],
+         f"source/driver mismatch: {Path(source).name} compiled by the {language} driver")
+    return language
+
+
+def replay_argv(argv, source, cwd, cc, destination, cxx=None):
+    language = driver_language(argv[0], source, cwd, cc, cxx)
     result, inputs, compile_count = [argv[0]], [], 0
     i = 1
     while i < len(argv):
@@ -184,6 +237,9 @@ def replay_argv(argv, source, cwd, cc, destination):
         elif a in ("-D", "-U", "-I", "-isystem", "-iquote", "-include", "-imacros", "-x", "-isysroot"):
             need(i + 1 < len(argv) and argv[i + 1] and not argv[i + 1].startswith("@"),
                  f"missing/unsupported argument for {a}")
+            # Joined `-xc++` never reaches here: it is an unsupported option.
+            need(a != "-x" or x_language_ok(language, Path(source).suffix, argv[i + 1]),
+                 f"-x {argv[i + 1]} does not match the {language} driver for {Path(source).name}")
             result.extend(argv[i:i + 2])
             i += 2
             continue
@@ -218,6 +274,7 @@ def run(cmd, cwd, input_text=None):
 
 def audit(args):
     root, cc = Path(args.root).resolve(), Path(args.cc).resolve()
+    cxx = Path(args.cxx).resolve() if args.cxx else None
     report = {"status": "running", "entries": []}
     report_path = Path(args.report) if args.report else None
     if report_path:
@@ -226,6 +283,9 @@ def audit(args):
         # result before compilation so even consumers of the report see failure.
         report_path.write_text(json.dumps(report, indent=2) + "\n")
     need(cc.is_file(), f"missing compiler: {cc}")
+    if cxx is not None:
+        need(cxx.is_file(), f"missing C++ compiler: {cxx}")
+        need(cxx != cc, "the C and C++ compilers must be distinct drivers")
     targets, wanted = inventory(args.inventory, root)
     selected = select(args.database, targets, wanted, root)
     with tempfile.TemporaryDirectory(prefix="shared-storage-") as scratch:
@@ -238,7 +298,7 @@ def audit(args):
                 continue
             obj = Path(scratch) / f"{index}.o"
             cwd = entry["directory"]
-            command = replay_argv(argv, source, cwd, cc, obj)
+            command = replay_argv(argv, source, cwd, cc, obj, cxx)
             # Check the same architecture/definition context, including forced
             # includes. -dM/-E suppress assembly/output; the original TU stays direct.
             macros = run(command[:-2] + ["-dM", "-E", "-o", "-"], cwd)
@@ -264,6 +324,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("root", "database", "inventory", "cc", "objdump", "nm"):
         parser.add_argument("--" + name, required=True)
+    # Optional: a build that never enabled C++ has no C++ driver, and then every
+    # C++ compile command is refused as an unknown compiler.
+    parser.add_argument("--cxx")
     parser.add_argument("--report")
     args = parser.parse_args()
     try:

@@ -73,6 +73,30 @@ The command and the shared core never see a backend's tensor type: the board
 turns its own tensors into `svc/nn/tensor.h` descriptors before anything shared
 reads them.
 
+### The inference layer is one implementation (issue #161)
+
+On wio-lite-ai and f746g-disco the model API below the adapter is shared too:
+`svc/nn/nn.c` is the one dispatcher (the model singleton, the session, cycle
+timing, the model swap) over the one compiled-in backend (`nn_backend.h`), and
+`svc/nn/tflm/` is the one tflite-micro backend.  `svc/nn/tflm/` is compiled only
+when `CONFIG_NN_BACKEND=tflm`, and the TFLM headers are the only include it adds
+to `svc/`'s.  Neither keeps storage of its own; the board supplies everything
+that is a fact about its memory or its core, bound at link time (the callers of
+`nn.h` pass no context to carry it):
+
+| What the board gives | Where | Why it is the board's |
+|---|---|---|
+| `nn_model_board_state` and four hooks: critical section (restores the mask it found), one-tick wait, cycle-counter start and read (`nn_dispatch_state.h`) | `port/nn/nn_model_board.c` | PRIMASK, the ThreadX tick and the DWT are the core's and the RTOS's; f746g-disco unlocks the DWT, wio-lite-ai's timebase already owns it |
+| `nn_tflm_board_state` and the facts (the model-name prefix) (`nn_tflm_state.h`) | `port/nn/tflm/nn_tflm_board.cc` | which RAM the interpreter's state lives in, and how this board names a model (`sd:<path>` or a blob name) |
+| `nn_tflm_arena`, `nn_tflm_model_buf`, `nn_tflm_stage_cap` (`nn_tflm_mem.h`) | `port/nn/tflm/nn_tflm_bufs.c` | placement: SDRAM bank3 on f746g-disco, the PSRAM carve-out on wio-lite-ai, each under that board's residency gate |
+| `NN_TFLM_ARENA_KB`, `NN_TFLM_MODEL_KB`, `NN_TFLM_VERIFY`, the op profile | `cmake/tflite-micro.cmake` (compile definitions) | sizes the board's memory can hold, whether the board can afford the on-board flatbuffer verifier, and which kernels fit its flash |
+
+The op profile is one definition selecting a complete list in
+`nn_tflm_ops.h`; the resolver's size is counted from it.  That mechanism is
+where an Ethos-U profile (one custom op) would go when grove-vision-ai-v2's
+backend joins (a follow-up issue, not yet filed); Grove's backend is still its
+own today.
+
 ## The camera stream's ownership (issue #142)
 
 The camera streams while, and only while, somebody holds it.  Who that is lives
@@ -232,9 +256,9 @@ relative to `svc/`.
 | `nn/nn_svc.h` | The contract the shared `nn` command speaks; implemented by each board's adapter. |
 | `nn/nn` | The inference API (`nn.h`) and its one dispatcher for wio-lite-ai and f746g-disco (issue #161): the model singleton and its first-open latch, the session guard, the external claim on the backend's memory (f746g-disco's `sdram test`), cycle timing around `nn_run()`, and named refusal codes passed through unfolded. |
 | `nn/nn_backend.h` | The vtable the one compiled-in backend (`null`, `tflm`, f746g-disco's `stedgeai*`) exports as `nn_backend_vt_selected`. |
-| `nn/nn_dispatch_state.h` | What a board gives `nn.c`: its state as one object the board defines (`nn_model_board_state`, bound at link time) and the hooks -- a critical section that restores the mask it found, a one-tick wait, and the cycle counter's start and fenced read (`boards/<board>/port/nn/nn_model_board.c`). |
+| `nn/nn_dispatch_state.h` | What a board gives `nn.c`: its state object and the hooks (see [The inference layer](#the-inference-layer-is-one-implementation-issue-161)). |
 | `nn/nn_desc` | `nn_tensor` -> `svc/nn/tensor.h` descriptor, for the boards that use `nn.h`. |
-| `nn/tflm/` | The one tflite-micro backend of wio-lite-ai and f746g-disco (issue #161; built only with `CONFIG_NN_BACKEND=tflm`, into the board's `tflm` library): `nn_tflm.cc` (the vtable), `nn_tflm_state.h` (its state type, defined by the board in `port/nn/tflm/nn_tflm_board.cc` with the board's facts), `nn_tflm_mem.h` (the arena, staging slots and capacity object the board places in `port/nn/tflm/nn_tflm_bufs.c`; sizes are compile definitions), `nn_tflm_ops.h` (the op profiles, shared with each board's host `verify_tflite`), `nn_tflm_fit.h` (which slot a model range may be adopted from, never the live one; host-tested) and `cxx_runtime.cc` (the C++ runtime shim). The only directory under `svc/` that includes TFLM headers. |
+| `nn/tflm/` | The one tflite-micro backend of wio-lite-ai and f746g-disco (issue #161; built only with `CONFIG_NN_BACKEND=tflm`, into the board's `tflm` library): `nn_tflm.cc` (the vtable), `nn_tflm_state.h` (its state type and facts, defined by the board), `nn_tflm_mem.h` (the buffers the board places; see [The inference layer](#the-inference-layer-is-one-implementation-issue-161)), `nn_tflm_ops.h` (the op profiles, shared with each board's host `verify_tflite`), `nn_tflm_fit.h` (which slot a model range may be adopted from, never the live one; host-tested) and `cxx_runtime.cc` (the C++ runtime shim). The only directory under `svc/` that includes TFLM headers. |
 | `nn/nn_svc_adapter.h` | Static-inline helpers every adapter uses to build a result and an `nn info` line. |
 | `nn/nn_detail.h` | The bound on a board's `nn` explanation text and its build-time check. |
 | `nn/nn_stream_life` | The one live-inference state machine (start admission, generations, stop claims). |

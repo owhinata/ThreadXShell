@@ -59,7 +59,13 @@ constructor, an unknown or unconfigured driver, a suffix/driver mismatch and a
 contradicting `-x` fail). Optional `--board-build
 <configured-consumer-build>` mutates temporary copies of the three shared
 regression sources using the selected Grove or Wio consumer's actual compile
-context. It never edits firmware sources or
+context. When that consumer compiles the shared TFLM backend
+(`svc/nn/tflm/nn_tflm.cc`, Wio Lite AI or STM32F746G-DISCO with the `tflm`
+backend), a copy of it with one injected `static` is replayed through the C++
+driver in that real context and must be refused, and the unmodified file must
+pass; `--require-tflm` turns "this build does not compile it" from a skip into
+a failure (run by hand against a Wio or F746 build; Grove's automatic run skips
+it). It never edits firmware sources or
 writes firmware. The existing `run_storage_gate_tests.py` independently tests
 section/COMMON detection, including TLS, anonymous assembly and broken tools.
 Grove runs both fixture suites on every `shell` build, including the integration

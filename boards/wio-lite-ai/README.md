@@ -954,6 +954,7 @@ when a model changes.
 | blazeface container | 194,120 B (model 189,816 B at +4,304) |
 | `.plugin` reservation | 32 KB -- 2.8x the larger load image (cifar10's 11,584 B) |
 | app flash, default build (SD off) | **362,372 B of 384 KB (92%), 30,844 B free** -- what `free` reports on hardware at e09ce56.  #116 gave back **1,840 B** of the 4,628 B #110's wiring cost over #108 (below) |
+| app flash at #161 (default build, from the image; `free` on hardware follows the DFU) | **368,976 B of 384 KB, 24,240 B free**; DTCM 118,936 B (unchanged), `.bss` 111,152 B.  The shared dispatcher's and backend's state are board-defined `.bss` in AXI-SRAM: `nn_model_board_state` 32 B, `nn_tflm_board_state` 1,060 B |
 | AXI-SRAM heap room | **102,944 B** (`end` to `__heap_end`, SD off) -- #116 added 192 B.  `free` says 102,912 for that region, which is the same number less the 32 B already handed out |
 | `.psram_ai` carve-out in use | **1,638,400 B**, and `free` agrees -- #116 gave back the 1,536 B candidate scratch (`BF_MAX_CAND` x `sizeof(struct bf_cand)`), which the resident decoder owned |
 | DTCM ceiling for growing `nn_work` | **4,544 B** (`_smsp_stack - _dtcm_used_end`; the 8 KB main-stack reservation is not free) |

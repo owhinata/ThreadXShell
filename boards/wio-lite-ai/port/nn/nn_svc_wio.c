@@ -39,7 +39,6 @@
 #include "plugin_claims.h"   /* the open model's claims and `nn info` lines (#159) */
 #include "nn.h"
 #include "nn_camera.h"
-#include "nncam_input.h"       /* input admission reasons in words (#162) */
 #include "nn_input_contract.h" /* nn_input_refusal_name() (#162) */
 #include "nn_panel.h"       /* the panel's draw counters (#140) */
 #include "nn_desc.h"
@@ -1562,11 +1561,11 @@ static const char *nn_nncam_strerror(int rc)
  */
 static void nn_nncam_detail(struct nn_op_result *res, int rc)
 {
-	int reason = nncam_input_reason_of(rc);
+	int reason = nn_input_start_reason_of(rc);
 
 	if (reason != 0)
-		nn_detail_set(NNCAM_INPUT_DETAIL_FMT, nn_input_refusal_name(reason),
-		              nncam_input_hint(reason));
+		nn_detail_set(NN_INPUT_START_DETAIL_FMT, nn_input_refusal_name(reason),
+		              nn_input_start_hint(reason));
 	else
 		nn_detail_set("%s", nn_nncam_strerror(rc));
 }

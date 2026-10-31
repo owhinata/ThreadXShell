@@ -469,6 +469,17 @@ gcc $CFLAGS -I "$svc/nn" \
     $LDFLAGS -lm -o "$out/test_nn_input_contract"
 "$out/test_nn_input_contract"
 
+# issue #162 -- the input admission test's reasons as the start codes and
+# sentences wio-lite-ai and f746g-disco both report (svc/nn/nn_input_codes.c):
+# every reason against a table with the numbers written out, no two reasons on
+# one code, an undocumented reason still a refusal, the reverse lookup exactly
+# the worded codes, every sentence distinct and within NN_SVC_DETAIL_MAX.  Each
+# board checks its own codes do not collide (boards/<board>/test/).
+gcc $CFLAGS -I "$svc/nn" \
+    "$here/test_nn_input_codes.c" "$svc/nn/nn_input_codes.c" \
+    "$svc/nn/nn_input_contract.c" $LDFLAGS -o "$out/test_nn_input_codes"
+"$out/test_nn_input_codes"
+
 # issue #130 -- the loader's plugin-lease checks (svc/plugin/plugin_run_core.c,
 # shared by wio-lite-ai and f746g-disco since issue #159): a load refused before
 # the shared loader touches anything, the exec_ok hook refusing again at the

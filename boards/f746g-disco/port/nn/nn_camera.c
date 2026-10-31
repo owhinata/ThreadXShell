@@ -48,6 +48,7 @@
 
 #include "nn.h"
 #include "nn_camera.h"
+#include "nn_input_contract.h" /* nn_input_admit() (#162) */
 #include "nn_camera_priv.h"
 #include "nn_det_record.h"
 #include "nn_core_frame.h"   /* the shared frame path and its hand-over word (#130) */
@@ -450,41 +451,45 @@ struct cam_sink_step nncam_step = {
 
 /* ---- the inference worker is in nn_worker.c -------------------------------- */
 
-/* Open the model + latch its input geometry, bounds-checked against the input
- * tensor the producer writes into.  Returns 0, -3 (model open) or -4 (geometry).
+/* Open the model + latch its input geometry, checked by the shared admission
+ * test (issue #162).  Returns 0, NNCAM_ERR_MODEL (model open / no input), or one
+ * NNCAM_ERR_QUANT / NNCAM_ERR_IN_* code per reason (svc/nn/nn_input_codes.h).
  * Shared by both start paths. */
 static int nncam_open_model(void)
 {
 	struct nn_tensor *in;
+	int rc;
 
 	if (nn_model_open(&nncam_model) != 0)
-		return -3;
+		return NNCAM_ERR_MODEL;
 	/* No model loaded (e.g. the stedgeai_reloc backend before `nn model load`): the
 	 * single choke point that rejects `nn run`/`nn stream` cleanly. */
 	if (nn_input_count(nncam_model) == 0)
-		return -3;
+		return NNCAM_ERR_MODEL;
 	in = nn_input(nncam_model, 0);
-	if (!in || in->ndim < 3)
-		return -4;
+	/*
+	 * [!] WHAT THE CAMERA CAN FILL IS THE SHARED ADMISSION TEST'S ANSWER (issue
+	 * #162), the same one wio-lite-ai asks: dtype float32 or int8, 1 x H x W x C
+	 * with H, W > 0 and C 1 or 3 (the preprocess writes at most three
+	 * channels, so a fourth would hold stale arena bytes), an int8 scale that is
+	 * a positive normal float (a per-axis or unquantised int8 input reads as
+	 * scale 0) and a zero point inside int8, a float32 buffer 4-byte aligned,
+	 * and the bytes for the shape (svc/nn/nn_input_contract.h).
+	 *
+	 * [!] THE BOUND IS THE TENSOR ITSELF (issue #130).  The preprocess writes
+	 * H x W x C elements straight into the input, so that is what the tensor
+	 * must hold -- the admission test checks it in 64 bits, and what it admits
+	 * fits the tensor's 32-bit byte count.
+	 */
+	rc = nn_input_start_err_of(nn_input_admit(in));
+	if (rc != 0)
+		return rc;
 	nncam_in_h = in->dims[1];
 	nncam_in_w = in->dims[2];
-	nncam_in_c = (in->ndim >= 4) ? in->dims[3] : 1;
+	nncam_in_c = in->dims[3];
 	nncam_in_dtype = in->dtype;
-	/*
-	 * [!] THE BOUND IS THE TENSOR ITSELF (issue #130).  The preprocess writes
-	 * H x W x C elements of 4 bytes (FLOAT32) or 1 (anything else) straight into
-	 * the input, so that is what the tensor must hold.  It used to be bounded by
-	 * the staging buffers (128 x 128 x 3 x 4), which are gone; what is left to
-	 * protect is the arena around the input.
-	 */
-	{
-		uint64_t need = (uint64_t)nncam_in_w * nncam_in_h * nncam_in_c *
-		                ((nncam_in_dtype == NN_DTYPE_FLOAT32) ? 4u : 1u);
-
-		if (in->data == NULL || need == 0u || need > (uint64_t)in->bytes)
-			return -4;                      /* the input cannot hold the frame      */
-		nncam_in_bytes = (uint32_t)need;
-	}
+	nncam_in_bytes = (uint32_t)nncam_in_w * nncam_in_h * nncam_in_c *
+	                 ((nncam_in_dtype == NN_DTYPE_FLOAT32) ? 4u : 1u);
 	return 0;
 }
 

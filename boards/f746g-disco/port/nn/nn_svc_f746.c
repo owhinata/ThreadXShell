@@ -35,6 +35,7 @@
 #include "fmt.h"
 #include "nn.h"
 #include "nn_camera.h"
+#include "nn_input_contract.h" /* nn_input_refusal_name() (#162) */
 #include "nn_desc.h"
 #include "plugin_target.h"   /* the target word this build provides (#159) */
 #if defined(CONFIG_NN_BACKEND_TFLM)
@@ -213,12 +214,27 @@ int nn_svc_input(struct tensor_desc *out)
  * nn_camera_start()'s refusal, in the words and the status both `nn run` and
  * `nn stream start` give.  The decoder's three (issue #159) are wio-lite-ai's
  * words; NODRAW stays STATE here, where wio-lite-ai says HW.
+ *
+ * The model input's refusals (issue #162) are wio-lite-ai's codes and words too:
+ * one sentence per reason of the shared admission test, built from its reason
+ * name, with status HW and nothing held, as wio-lite-ai reports them.
  */
 static void nn_start_refusal(struct nn_op_result *res, int rc)
 {
 	int status = NN_SVC_ERR_HW;
+	int reason = nn_input_start_reason_of(rc);
 
+	if (reason != 0) {
+		nn_detail_set(NN_INPUT_START_DETAIL_FMT, nn_input_refusal_name(reason),
+		              nn_input_start_hint(reason));
+		nn_result(res, status, NN_CLAIM_NONE);
+		return;
+	}
 	switch (rc) {
+	case NNCAM_ERR_MODEL:
+		nn_detail_set("no model loaded, or it has no usable input tensor "
+		              "(`nn info`)");
+		break;
 	case -9:
 		nn_detail_set(NN_CAMERA_NOT_RGB565);
 		status = NN_SVC_ERR_STATE;

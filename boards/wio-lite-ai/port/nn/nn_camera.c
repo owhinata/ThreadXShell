@@ -17,7 +17,6 @@
 #include "nn_camera.h"
 #include "nn_camera_priv.h"
 #include "nncam_teardown.h"  /* has the last teardown finished (#142 review) */
-#include "nncam_input.h"     /* admission reasons -> NNCAM_* (#162) */
 #include "nn_input_contract.h" /* nn_input_admit() (#162) */
 
 #include "cam_band.h"
@@ -481,7 +480,7 @@ int nn_camera_start(int colorbar, int require_draw)
 	 * and C 1 or 3, an int8 scale that is a positive normal float and a zero
 	 * point inside int8, a float32 buffer 4-byte aligned, and the bytes for the
 	 * shape (svc/nn/nn_input_contract.h).  Each refusal keeps its own code
-	 * (port/nn/nncam_input.c).  The reasons it carries forward from here:
+	 * (svc/nn/nn_input_codes.h).  The reasons it carries forward from here:
 	 *
 	 *   - C is checked because nncam_rows() stops at three channels (issue #57):
 	 *     a fourth would be left holding the arena's stale activations.
@@ -491,7 +490,7 @@ int nn_camera_start(int colorbar, int require_draw)
 	 *     feed the model wrong pixels with nothing to show for it.  nncam_rows()
 	 *     therefore needs no per-pixel fallback.
 	 */
-	rc = nncam_input_err_of(nn_input_admit(in));
+	rc = nn_input_start_err_of(nn_input_admit(in));
 	if (rc != NNCAM_OK) {
 		nn_session_release();
 		return rc;

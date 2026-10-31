@@ -431,7 +431,10 @@ set(NN_SOURCES
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_desc.c"   # shared with wio-lite-ai (#161)
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_det_record.c"
     # the camera input tensor's admission test, shared with wio-lite-ai (#162)
-    "${CMAKE_SOURCE_DIR}/svc/nn/nn_input_contract.c")
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_input_contract.c"
+    # ...its reasons as nn_camera_start()'s codes and words, also shared with
+    # wio-lite-ai (walked by shell/test/test_nn_input_codes.c)
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_input_codes.c")
 if(CONFIG_NN_BACKEND STREQUAL "null")
     list(APPEND NN_SOURCES "${BOARD_DIR}/port/nn/nn_null.c")
 elseif(CONFIG_NN_BACKEND STREQUAL "stedgeai")

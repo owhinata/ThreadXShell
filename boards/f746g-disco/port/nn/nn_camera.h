@@ -36,6 +36,7 @@
 #include "blazeface.h"  /* struct bf_det / bf_result -- the vocabulary, not the decoder */
 #include "nn_det_record.h" /* struct nn_result_extra (issue #121) */
 #include "nn_report.h"     /* struct nn_report_capture (issue #159) */
+#include "nn_input_codes.h" /* the input refusals' values (issue #162) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -120,6 +121,24 @@ void nn_camera_frame_geom(uint16_t *w, uint16_t *h);
 #define NNCAM_ERR_NODRAW  (-13) /**< a stream was asked for; nothing draws          */
 #define NNCAM_ERR_DECBUSY (-14) /**< the decoder could not be held still to ask it */
 
+/*
+ * nn_camera_start()'s refusals about the model input, one per reason of the
+ * shared admission test (svc/nn/nn_input_contract.h, issue #162).  The values
+ * and the table from reason to code are svc/nn/nn_input_codes.h's, shared with
+ * wio-lite-ai (-11 and -18..-25 are free on this board too); the "no input"
+ * reason is -3, as "no model" already is.
+ */
+#define NNCAM_ERR_MODEL       NN_INPUT_START_ERR_MODEL     /* -3  */
+#define NNCAM_ERR_QUANT       NN_INPUT_START_ERR_QUANT     /* -11 */
+#define NNCAM_ERR_IN_DTYPE    NN_INPUT_START_ERR_DTYPE     /* -18 */
+#define NNCAM_ERR_IN_RANK     NN_INPUT_START_ERR_RANK      /* -19 */
+#define NNCAM_ERR_IN_BATCH    NN_INPUT_START_ERR_BATCH     /* -20 */
+#define NNCAM_ERR_IN_EMPTY    NN_INPUT_START_ERR_EMPTY     /* -21 */
+#define NNCAM_ERR_IN_CHANNELS NN_INPUT_START_ERR_CHANNELS  /* -22 */
+#define NNCAM_ERR_IN_ZP       NN_INPUT_START_ERR_ZP        /* -23 */
+#define NNCAM_ERR_IN_ALIGN    NN_INPUT_START_ERR_ALIGN     /* -24 */
+#define NNCAM_ERR_IN_BYTES    NN_INPUT_START_ERR_BYTES     /* -25 */
+
 /** The nn step of the camera sink (port/camera/cam_sink.h, issue #142).
  *  Defined in nn_camera.c; src/main.c registers it after the display step. */
 struct cam_sink_step;
@@ -133,7 +152,8 @@ extern struct cam_sink_step nncam_step;
  * armed immediately if the base is already running, otherwise it stays enabled +
  * idle and is armed at the next `camera stream start`.  Non-blocking.
  * Returns 0 or <0 (-2 already running / still tearing down / a teardown owns the
- * sink, -3 model, -4 geometry, -5 objects, -6 nn session busy, -9 the camera is
+ * sink, -3 model, NNCAM_ERR_QUANT / NNCAM_ERR_IN_* the model input (issue #162),
+ * -5 objects, -6 nn session busy, -9 the camera is
  * not streaming RGB565 / its mode cannot stream RGB565 (issue #142 D3), -10 the
  * camera could not be held or started, NN_ERR_SCRATCH_HELD `sdram test` holds
  * .sdram.ai -- retryable, issue #152; NNCAM_ERR_SHAPES / _NODRAW / _DECBUSY,

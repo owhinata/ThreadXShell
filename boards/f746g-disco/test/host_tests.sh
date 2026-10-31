@@ -80,6 +80,13 @@ gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$
     $LDFLAGS -o "$out/test_nn_decode_count"
 "$out/test_nn_decode_count"
 
+# issue #162 -- the camera input refusals (svc/nn/nn_input_codes.h, tested in
+# shell/test/test_nn_input_codes.c) against this board's other nn_camera_start()
+# codes: none may land on a value that already means something else here.
+gcc $CFLAGS -I "$board/port/nn" -I "$board/port/camera" -I "$board/svc" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+    "$here/test_nncam_input.c" $LDFLAGS -o "$out/test_nncam_input"
+"$out/test_nncam_input"
+
 # issue #130 -- negative tests for the tflm residents of cmake/check_f746_layout.py
 # (the activation arena and the SD model slots must sit in SDRAM bank3).  Driven
 # by fake nm/objdump, so no toolchain is needed: what is checked is the gate's

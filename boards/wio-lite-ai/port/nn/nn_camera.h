@@ -54,11 +54,12 @@
 #include "nn_det_record.h"  /* enum nn_det_kind                              */
 #include "nn_core_frame.h"  /* struct nn_core_panel (issue #130)             */
 #include "nn_svc.h"         /* struct nn_report_capture                      */
+#include "nn_input_codes.h"  /* the input refusals' values (issue #162)        */
 
 #define NNCAM_OK           0
 #define NNCAM_ERR_RUNNING (-1)  /**< a stream is already running                 */
 #define NNCAM_ERR_NOTRUN  (-2)  /**< nothing to stop                             */
-#define NNCAM_ERR_MODEL   (-3)  /**< no model loaded, or it has no input tensor   */
+#define NNCAM_ERR_MODEL   NN_INPUT_START_ERR_MODEL /**< (-3) no model loaded, or it has no input tensor */
 #define NNCAM_ERR_SESSION (-4)  /**< the NN session is held (bench / model load)  */
 #define NNCAM_ERR_PSRAM   (-5)  /**< PSRAM down, or OCTOSPI1 held by a retuner    */
 #define NNCAM_ERR_BAND    (-6)  /**< the camera would not start a band stream     */
@@ -66,7 +67,7 @@
 #define NNCAM_ERR_INIT    (-8)  /**< thread / semaphore / mutex creation failed   */
 #define NNCAM_ERR_TEARING (-9)  /**< stop: still tearing down -- see below        */
 #define NNCAM_ERR_REARM  (-10)  /**< re-arm after a lost stream failed; stop first */
-#define NNCAM_ERR_QUANT  (-11)  /**< int8 input scale not a positive normal float */
+#define NNCAM_ERR_QUANT   NN_INPUT_START_ERR_QUANT /**< (-11) int8 input scale not a positive normal float */
 #define NNCAM_ERR_SHAPES (-12)  /**< the loaded decoder cannot read these outputs  */
 #define NNCAM_ERR_NODRAW (-13)  /**< a preview was asked for; the decoder draws none */
 #define NNCAM_ERR_DECBUSY (-14) /**< the decoder could not be held still to ask it */
@@ -76,18 +77,19 @@
                                  *   another start holds it -- retry          */
 /*
  * The model input a camera cannot fill, one code per reason of the shared
- * admission test (svc/nn/nn_input_contract.h, issue #162).  Its "no input"
- * reason stays NNCAM_ERR_MODEL and an unusable int8 scale stays NNCAM_ERR_QUANT;
- * the mapping is the pure table in port/nn/nncam_input.c.
+ * admission test (svc/nn/nn_input_contract.h, issue #162).  The values and the
+ * table from reason to code are svc/nn/nn_input_codes.h's, shared with
+ * f746g-disco; its "no input" reason is NNCAM_ERR_MODEL and an unusable int8
+ * scale NNCAM_ERR_QUANT, above.
  */
-#define NNCAM_ERR_IN_DTYPE    (-18) /**< input neither float32 nor int8           */
-#define NNCAM_ERR_IN_RANK     (-19) /**< input not 4-dimensional                  */
-#define NNCAM_ERR_IN_BATCH    (-20) /**< input batch not 1                        */
-#define NNCAM_ERR_IN_EMPTY    (-21) /**< input height or width 0                  */
-#define NNCAM_ERR_IN_CHANNELS (-22) /**< input channels neither 1 nor 3           */
-#define NNCAM_ERR_IN_ZP       (-23) /**< int8 zero point outside -128..127        */
-#define NNCAM_ERR_IN_ALIGN    (-24) /**< float32 input buffer not 4-byte aligned  */
-#define NNCAM_ERR_IN_BYTES    (-25) /**< input buffer shorter than its shape      */
+#define NNCAM_ERR_IN_DTYPE    NN_INPUT_START_ERR_DTYPE     /* -18 */
+#define NNCAM_ERR_IN_RANK     NN_INPUT_START_ERR_RANK      /* -19 */
+#define NNCAM_ERR_IN_BATCH    NN_INPUT_START_ERR_BATCH     /* -20 */
+#define NNCAM_ERR_IN_EMPTY    NN_INPUT_START_ERR_EMPTY     /* -21 */
+#define NNCAM_ERR_IN_CHANNELS NN_INPUT_START_ERR_CHANNELS  /* -22 */
+#define NNCAM_ERR_IN_ZP       NN_INPUT_START_ERR_ZP        /* -23 */
+#define NNCAM_ERR_IN_ALIGN    NN_INPUT_START_ERR_ALIGN     /* -24 */
+#define NNCAM_ERR_IN_BYTES    NN_INPUT_START_ERR_BYTES     /* -25 */
 
 /**
  * The worker thread's (`nn_work`) stack, in DTCM.  Published here since issue #108

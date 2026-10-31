@@ -424,6 +424,7 @@ set(NN_SOURCES
     "${BOARD_DIR}/port/nn/nn_producer.c"        # ...its camera producer thread (#140)
     "${BOARD_DIR}/port/nn/nn_worker.c"          # ...its inference worker thread (#140)
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_run_wait.c"  # how `nn run`'s wait ends (#129, shared #163)
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_shot.c"      # ...and how one `nn run` ended (#171)
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_bench.c"     # the one `nn bench` procedure (#163)
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_sess_release.c" # when the session may go back (#130, svc/ #163)
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_decode_count.c" # how a decode is counted (#130 6c, svc/ #163)

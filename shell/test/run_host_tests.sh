@@ -871,6 +871,22 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" \
     $LDFLAGS -o "$out/test_nn_run_wait"
 "$out/test_nn_run_wait"
 
+# issue #171 -- how one `nn run` ended, and whether it is still open
+# (svc/nn/nn_shot.c, wio-lite-ai and f746g-disco).  An invoke that failed, a lease
+# not had in time, a prep refused and a boundary that moved the generation in
+# between cannot be made on hardware; the first walks the table and every
+# transition, the second the boards' call orders through the real frame path,
+# hand-over word and wait table.
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_nn_shot.c" "$svc/nn/nn_shot.c" \
+    $LDFLAGS -o "$out/test_nn_shot"
+"$out/test_nn_shot"
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_nn_shot_seq.c" "$svc/nn/nn_shot.c" "$svc/nn/nn_core_frame.c" \
+    "$svc/nn/nn_handoff.c" "$svc/nn/nn_det_record.c" "$svc/nn/nn_run_wait.c" \
+    $LDFLAGS -o "$out/test_nn_shot_seq"
+"$out/test_nn_shot_seq"
+
 # issue #163 -- the one `nn bench` procedure (svc/nn/nn_bench.c): the board's
 # hold taken once, every input filled and every run timed under it, given back
 # exactly once on every exit and never after a failed acquire.  A console

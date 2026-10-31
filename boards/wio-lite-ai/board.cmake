@@ -841,6 +841,10 @@ set(NN_SOURCES "${CMAKE_SOURCE_DIR}/svc/nn/nn.c"   # the dispatcher (shared, #16
                # by every board since issue #163, walked by
                # shell/test/test_nn_run_wait.c
                "${CMAKE_SOURCE_DIR}/svc/nn/nn_run_wait.c"
+               # ...and how one `nn run` ended (issue #171): wio-lite-ai
+               # and f746g-disco, walked by shell/test/test_nn_shot.c and
+               # test_nn_shot_seq.c
+               "${CMAKE_SOURCE_DIR}/svc/nn/nn_shot.c"
                # the one `nn bench` procedure (issue #163): hold, fill,
                # time N runs, let go -- walked by shell/test/test_nn_bench.c
                "${CMAKE_SOURCE_DIR}/svc/nn/nn_bench.c"

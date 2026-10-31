@@ -20,7 +20,7 @@
  *   nn out [tensor] [n]         dequantised values of an output tensor
  *   nn dets                     decode the current outputs
  *   nn thresh [1..999]          detection score threshold
- *   nn norm <0|1>               float input normalisation, where it means anything
+ *   nn norm <0|1>               input normalisation range, [0,1] or [-1,1]
  *   nn stream start [--test] [--frames <n>]   begin live inference
  *   nn stream stop | stats                    end it, or see how it is going
  *
@@ -1468,7 +1468,7 @@ CLI_SUBCMD_SET_CREATE(nn_subcmds,
 	CLI_CMD_ARG_USAGE(thresh, NULL, "the decoder's score threshold",
 	                  "[1..999]", cmd_nn_thresh, 1, 1),
 #if NN_SVC_HAS_NORM
-	CLI_CMD_ARG_USAGE(norm, NULL, "float input normalisation",
+	CLI_CMD_ARG_USAGE(norm, NULL, "input normalisation range",
 	                  "<0|1>", cmd_nn_norm, 1, 1),
 #endif
 #if NN_SVC_HAS_STREAM

@@ -81,6 +81,7 @@ src cmds svc cmake test README。wio のみ boot も）。
 - **[!] モデルの load / unload の順序は `svc/nn/nn_core_model` の 1 実装**（表は `svc/nn/nn_swap`）: plugin の差し替えは backend 成功後、bare は plugin
   unload、モデルが残らない終わり方は全部下ろす、**BUSY は swap より前だけ**（だから BUSY 拒否は状態行を出さない、#131）。
 - **[!] nn ディスパッチャ（`svc/nn/nn.c`）は 3 ボードの 1 実装、backend は TFLM（`svc/nn/tflm/`、wio・f746）と Ethos-U（`svc/nn/ethosu/`、Grove）の各 1 実装**: ボードが出すのは配置・状態の実体・HW フックだけでリンク時に結合し、**ボード側の写しを戻さない**（#161・#169、`svc/README.md`）。 **interpreter は組む前に arena 全体をゼロ埋めする**（TFLM は途中失敗した演算表を初期化せず破棄で `free` を呼ぶ、#167、`nn_tflm_glue.h`）。
+- **[!] wio・f746 の入力の値と受入は `svc/nn/nn_input_contract` の 1 実装**（述語・1 要素の変換・開始コードの表 `nn_input_codes`。ボードは画素の取り方だけ、**Grove は自分の約束を持ち揃えない**。#162、`svc/README.md`）。
 
 ### [!] plugin container と asset（3 ボード共有部）
 
@@ -306,8 +307,7 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
   state と result の**両方**、異常時はリセット成功を確認してから）。**呼び出し側で保守しない。**
 - **prep は producer・`consume()` 内で worker が欲しいときだけ、invoke〜publish は worker**（callback 中の block / sleep /
   推論 / 待つロック / LCD 再入は禁止。panel は lease の try だけ）。**stop は overlay の使用中 0 → worker の join の後に record 境界、sink の unlink はカメラ停止の確認だけが許す。タイムアウトは `npu_hw.h` に 1 つ。**
-- **`nn stream` はデコーダが無い時点で拒否する**（shape や draw の前）。**wio・f746 と揃えようとしない。
-  `nn_input_quant_ok()` は常駐デコーダの前提条件で plugin は縛られない。** `nn run` も同じ worker と同じ teardown（#129）。
+- **`nn stream` はデコーダが無い時点で拒否する**（shape や draw の前、**wio・f746 と揃えない**）。**入力は固定の `pixel - 128` が container の前提で受入は int8 だけ**（`nn_input_fillable()`）。`nn run` も同じ worker と同じ teardown（#129）。
 - **ファームの印字は「種」を名乗らない**（ゲートは **ロードされる全セクション**を読む。**literal を regex で見ない**）。
   **フォントは plugin 側**で `text()` を足さない。**`nn dets` は record の snapshot と report を lease の 1 回の保持で採る**（stream 中も全文）。
 

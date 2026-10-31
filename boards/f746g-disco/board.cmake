@@ -416,7 +416,8 @@ if(NOT EXISTS "${F746_SHARED_DECODER}")
 endif()
 
 set(NN_SOURCES
-    "${BOARD_DIR}/port/nn/nn.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn.c"          # the dispatcher (shared, #161)
+    "${BOARD_DIR}/port/nn/nn_model_board.c"    # ...its state + hooks
     "${BOARD_DIR}/port/nn/nn_svc_f746.c"   # the shared `nn` command's adapter
     "${BOARD_DIR}/port/nn/nn_svc_f746_model.c"  # ...its info / load / unload (#131)
     "${BOARD_DIR}/port/nn/nn_camera.c"          # live camera -> inference glue: console side

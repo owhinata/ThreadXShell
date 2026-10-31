@@ -20,16 +20,14 @@
  * WHO USES IT: wio-lite-ai and f746g-disco.  grove-vision-ai-v2 has its own
  * Ethos-U path (port/nn/npu/) and does not include this header.
  *
- * [!] THE HEADER IS SHARED, THE DISPATCHER IS NOT YET (issue #161).  Each of the
- * two boards still implements this API in its own port/nn/nn.c, and this file
- * is the UNION of what the two declared: a declaration only one board defines
- * is marked with that board's name, and nothing on the other board calls it.
- * A function declared here and not defined on a board is a link error the
- * moment anyone calls it there, never a silent fallback.
+ * ONE IMPLEMENTATION (issue #161): svc/nn/nn.c, for both boards.  It owns no
+ * storage: its state is the board's object and its critical section, tick wait
+ * and cycle counter are the board's hooks (svc/nn/nn_dispatch_state.h, defined in
+ * boards/<board>/port/nn/nn_model_board.c).  A declaration marked with one
+ * board's name is one only that board calls.
  *
- * Layering: no HAL, CMSIS or ThreadX here.  The implementation sits in port/
- * and depends on the compiled-in backend, the cycle counter and the RTOS; it
- * never reaches up into shell/.
+ * Layering: no HAL, CMSIS or ThreadX here or in nn.c; the board's hooks carry
+ * those.  Nothing here reaches up into shell/.
  *
  * Threading: a single model instance is NOT reentrant, and both boards have
  * more than one console that can issue `nn` commands.  Callers serialize with
@@ -69,8 +67,8 @@ enum nn_dtype {
  * they cannot be confused with a backend's.  A backend reports why a particular
  * model was rejected with its own small negative numbers (the TFLM backend uses
  * NN_MODEL_ERR_*); those pass through unchanged, because only the backend knows
- * what went wrong inside it.  (wio-lite-ai returns these; f746g-disco's
- * dispatcher still returns raw small negatives.)
+ * what went wrong inside it.  [!] No code is folded into another on the way
+ * out: each refusal reaches the caller as the value that was returned.
  */
 #define NN_ERR_ARG    (-90)   /**< a required argument was NULL or out of range     */
 #define NN_ERR_NOSUP  (-91)   /**< the compiled-in backend does not implement this  */
@@ -138,7 +136,7 @@ struct nn_tensor {
 	int32_t  zero_point;           /**< quant zero point                      */
 };
 
-/** Opaque model handle (defined in the board's nn.c). */
+/** Opaque model handle (defined in svc/nn/nn_dispatch_state.h, for nn.c only). */
 struct nn_model;
 
 /** Identity of the compiled-in backend, for `nn info`. */
@@ -163,8 +161,8 @@ const struct nn_backend_info *nn_backend(void);
  * instance.  Safe to call concurrently from several consoles -- the one-time
  * init is serialized internally.
  *
- * f746g-disco: ONLY THE FIRST OPEN AFTER BOOT BUILDS ANYTHING (issue #131 P16).
- * That is where a backend with a model in the image (stedgeai, null) adopts it
+ * ONLY THE FIRST OPEN AFTER BOOT BUILDS ANYTHING (issue #131 P16).  That is
+ * where a backend with a model in the image (null; stedgeai on f746g-disco) adopts it
  * -- tflm has none since issue #159 Step 4c and opens empty; a later open --
  * from `nn info`, `nn run` or a load -- returns the singleton as it is, empty
  * after an unload included.  The first one is serialised by a latch and does
@@ -213,9 +211,9 @@ int nn_model_present(const struct nn_model *m);
  */
 int nn_model_loaded(void);
 
-/** f746g-disco: whether this backend has a model in the image that the first
- *  open adopts without a load (stedgeai, null).  0 for tflm (since issue #159
- *  Step 4c) and stedgeai_reloc, which are empty until `nn model load --path`. */
+/** Whether this backend has a model in the image that the first open adopts
+ *  without a load (null; stedgeai on f746g-disco).  0 for tflm (since issue
+ *  #159 Step 4c) and stedgeai_reloc, which are empty until `nn model load`. */
 int nn_model_has_builtin(void);
 
 /**
@@ -234,7 +232,7 @@ int nn_run(struct nn_model *m);
 
 /**
  * DWT core cycles spent inside the most recent successful nn_run(); 0 if none,
- * or (wio-lite-ai) if the cycle counter was found not to be running.
+ * or if the cycle counter was found not to be running at init.
  */
 uint32_t nn_last_cycles(const struct nn_model *m);
 
@@ -270,8 +268,10 @@ int nn_model_load_region(void **buf, uint32_t *cap);
  * Adopt the model now sitting in the staging buffer: @p len bytes at @p data,
  * called @p name for display.
  *
- * @p data == NULL: wio-lite-ai unloads (the backend stays open with no model);
- * f746g-disco refuses it and unloads through nn_model_release().
+ * @p data == NULL is refused (NN_ERR_ARG) and changes nothing; an unload is
+ * nn_model_release().  Before the singleton exists the answer is NN_ERR_STATE;
+ * while nn_scratch_claim() is held, NN_ERR_SCRATCH_HELD; on a backend that
+ * cannot swap, NN_ERR_NOSUP.
  *
  * [!] WHERE @p data MAY POINT (issue #108, f746g-disco since issue #159).  Any
  * range that lies wholly inside the buffer load_region() handed out and starts
@@ -296,28 +296,22 @@ int nn_model_reload(const void *data, uint32_t len, const char *name,
                     int *model_after);
 
 /**
- * f746g-disco: unload.  The backend keeps its singleton open with NO model in
- * it (issue #131 P16).  Nothing comes back by itself afterwards -- not on the
- * next open, not from `nn info` or `nn run`; only a later `nn model load`
- * brings a model.  Same serialization as nn_model_reload().  0 on success, -2
- * when the backend cannot swap models (null, stedgeai).
+ * Unload.  The backend keeps its singleton open with NO model in it (issue
+ * #131 P16).  Nothing comes back by itself afterwards -- not on the next open,
+ * not from `nn info` or `nn run`; only a later `nn model load` brings a model.
+ * Same serialization as nn_model_reload().  0 on success, NN_ERR_NOSUP when the
+ * backend cannot swap models (null, stedgeai), or the backend's own <0 code.
  */
 int nn_model_release(void);
 
 /**
- * wio-lite-ai: one short sentence for a code returned by nn_model_reload(),
- * never NULL.  Handles both the NN_MODEL_ERR_* family and this layer's own
- * NN_ERR_* codes.
+ * One short sentence for a code returned by nn_model_load_region() or
+ * nn_model_reload(), never NULL.  Handles the NN_MODEL_ERR_* family and this
+ * layer's own NN_ERR_* codes (NN_ERR_SCRATCH_HELD included); anything else is
+ * "unknown error".  wio-lite-ai's adapter prints it; f746g-disco's words its
+ * refusals itself.
  */
 const char *nn_model_strerror(int rc);
-
-/**
- * wio-lite-ai: heap allocations made by the backend's language runtime, for
- * `nn info`.  Returns 0 and sets @p *out, or NN_ERR_NOSUP when the backend has
- * no such runtime to count.  The TFLM backend is built so this stays at 0 --
- * its interpreter allocates only from the arena.
- */
-int nn_heap_allocs(uint32_t *out);
 
 /*
  * Coarse single-session guard.  The singleton model and the backends are NOT
@@ -326,7 +320,8 @@ int nn_heap_allocs(uint32_t *out);
  * `nn run`, or a live `nn stream`.  try_acquire() claims the session (returns
  * 0) or reports it busy (<0); release() frees it.  Interrupt-guarded and
  * thread-agnostic -- the acquiring and releasing threads may differ (stream
- * start in one console, stop in another).  No init required.
+ * start in one console, stop in another).  No init required.  Busy is -1;
+ * NN_ERR_SCRATCH_HELD while nn_scratch_claim() is held.
  */
 int  nn_session_try_acquire(void);
 void nn_session_release(void);

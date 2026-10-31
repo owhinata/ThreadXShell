@@ -8,7 +8,7 @@
  *
  * svc/nn/nn_svc.h is what shell/cmds/cmd_nn.c speaks; port/nn is what this board
  * has.  Like the f746 adapter and unlike the Grove one, this introduces no state
- * about the model: the singleton and the session gate live in port/nn/nn.c and
+ * about the model: the singleton and the session gate live in svc/nn/nn.c and
  * the worker's release authority lives in port/nn/nn_camera.c, so this queries them.
  *
  * [!] THE CLAIM IS A PAIR HERE, AND THE ORDER IS NOT ARBITRARY.  Anything that
@@ -478,13 +478,12 @@ static int nn_life_swap(struct nn_core_model_job *j, int *model_after)
 
 /*
  * An unload, and every load that ends EMPTY: the singleton stays open with NO
- * model -- not a built-in one; this board has none (issue #122 P11).  A closed
- * singleton (a reload that could not even restore) has nothing to release and
- * is left closed; the next open rebuilds it empty.
+ * model -- not a built-in one; this board has none (issue #122 P11).  The
+ * `null` backend has no release and answers NN_ERR_NOSUP, as its reload did.
  */
 static void nn_life_release(void)
 {
-	(void)nn_model_reload(NULL, 0u, NULL, NULL);
+	(void)nn_model_release();
 }
 
 static const struct nn_core_model_backend nn_life_backend = {

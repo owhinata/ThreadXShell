@@ -11,7 +11,7 @@
  * it introduces no state at all.
  *
  * [!] IT WRAPS THE EXISTING OWNERS AND ADDS NO SECOND COPY.  The model
- * singleton and the session gate already live in port/nn/nn.c, and the stream
+ * singleton and the session gate already live in svc/nn/nn.c, and the stream
  * worker already records its own release authority in port/nn/nn_camera.c.  A
  * model handle or a session flag kept here as well would be a second answer to a
  * question that already has one, and the two would drift the first time either

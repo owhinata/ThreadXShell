@@ -7,7 +7,8 @@
  *
  * shell/test/test_nn_core_model.c walks the shared order against a stand-in
  * board.  What it cannot say is whether THIS board's hooks feed it the right
- * facts.  So this builds the real adapter half, the real port/nn/nn.c, the
+ * facts.  So this builds the real adapter half, the real svc/nn/nn.c (over
+ * shell/test/nn_model_host.c, the board hooks modelled), the
  * real svc/nn/nn_core_model.c and svc/nn/nn_swap.c, over a stub backend that keeps
  * nn_backend.h's contract (and can be told to break it), and walks:
  *
@@ -35,18 +36,8 @@
 #include "nn_svc.h"
 #include "sdram.h"
 #include "tx_api.h"
-#include "stm32f7xx_hal.h"
 
-DWT_Type       test_dwt = { .CTRL = DWT_CTRL_NOCYCCNT_Msk };
-CoreDebug_Type test_coredebug;
 int            test_tx_masked;
-
-UINT tx_thread_sleep(ULONG ticks)
-{
-	(void)ticks;
-	assert(!"the open latch was contended in a single-threaded test");
-	return 0;
-}
 
 /* ---- the rest of the board ---------------------------------------------- */
 

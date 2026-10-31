@@ -30,8 +30,8 @@
  *     by being careful: with no model there are no tensors to touch, and the arena is
  *     first written by AllocateTensors() inside `nn model load`, which does take the
  *     PSRAM guard.
- *   - reload(NULL, ...) is an UNLOAD rather than a revert, which is the only meaning
- *     it can have with nothing built in.
+ *   - unloading (release()) leaves the backend open and empty rather than reverting,
+ *     which is the only meaning it can have with nothing built in.
  *
  * WHAT RUNS WHEN.  Nothing in this file has a global constructor: the arena and the
  * model slots are plain C arrays (nn_tflm_bufs.c), the interpreter is placement-new'd
@@ -380,9 +380,24 @@ static int tflm_bk_load_region(void **buf, uint32_t *cap)
 }
 
 /*
- * Adopt a model, or unload.  Transactional in both directions: on any rejection the
- * previously active model is rebuilt and reported, so a bad file costs a message and
- * nothing else.
+ * Unload (issue #161: the vtable's release(), which svc/nn/nn.c calls for `nn model
+ * unload`): destroy the interpreter and stay open with no model.  The slots keep their
+ * bytes, but none of them is ACTIVE any more.
+ */
+static int tflm_bk_release(void)
+{
+	destroy_interp();
+	g_active_model = nullptr;
+	g_active_len   = 0u;
+	g_active_slot  = -1;
+	publish_empty();
+	g_tm.open = true;
+	return 0;
+}
+
+/*
+ * Adopt a model.  Transactional: on any rejection the previously active model is
+ * rebuilt and reported, so a bad file costs a message and nothing else.
  *
  * *impl_out is ALWAYS the resulting active handle -- the new model, or the restored
  * previous one -- and NULL only if even the restore failed.
@@ -396,15 +411,9 @@ static int tflm_bk_reload(const void *data, uint32_t len, const char *name,
 	int         new_slot;
 	int         rc;
 
-	if (data == nullptr) {                    /* unload */
-		destroy_interp();
-		g_active_model = nullptr;
-		g_active_len   = 0u;
-		g_active_slot  = -1;
-		publish_empty();
-		g_tm.open = true;
+	if (data == nullptr) {                    /* nn.c never asks; release() unloads */
 		*impl_out = &g_tm;
-		return 0;
+		return NN_ERR_ARG;
 	}
 
 	/* Only our own staging slots are accepted.  The alternative -- interpreting from
@@ -549,11 +558,6 @@ static int tflm_bk_run(void *impl)
 	return (g_interp->Invoke() == kTfLiteOk) ? 0 : -1;
 }
 
-static uint32_t tflm_bk_heap_allocs(void)
-{
-	return nn_tflm_cxx_new_calls;
-}
-
 /* The version string carries the build's POSTURE, not just its identity.  Whether the
  * flatbuffer verifier is compiled in changes what a failed `nn model load` can mean, so
  * `nn info` should not require reading CMakeCache.txt to find out.  With it off, the
@@ -606,8 +610,9 @@ const struct nn_backend_vt nn_backend_vt_selected = {
 	.run               = tflm_bk_run,
 	.load_region       = tflm_bk_load_region,
 	.reload            = tflm_bk_reload,
-	.heap_allocs       = tflm_bk_heap_allocs,
+	.release           = tflm_bk_release,
 	.arena_reserved    = NN_TFLM_ARENA_BYTES,     /* nn_tflm_arena */
+	.has_builtin       = 0u,                      /* empty until a load */
 };
 
 }  /* extern "C" */

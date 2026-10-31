@@ -197,7 +197,7 @@ static int null_run(void *impl)
 }
 
 /*
- * load_region / reload / heap_allocs are left out on purpose, so they are NULL and
+ * load_region / reload / release are left out on purpose, so they are NULL and
  * nn.c answers NN_ERR_NOSUP for them.  A stub could fake a model swap -- accept the
  * bytes, ignore them and report success -- and that would be the worst possible
  * behaviour: `nn model load` would appear to work, and the first wrong inference would
@@ -217,4 +217,5 @@ const struct nn_backend_vt nn_backend_vt_selected = {
 	.activations_bytes = null_activations_bytes,
 	.run               = null_run,
 	.arena_reserved    = 0u,      /* no arena -- see null_activations_bytes() */
+	.has_builtin       = 1u,      /* the synthetic stub, there without a load */
 };

@@ -18,12 +18,10 @@
  *    strong (non-throwing) definitions resolve those symbols first, so the throwing
  *    versions are never extracted.
  *
- *  - operator new records every call (g_tflm_cxx_new_calls, exported) and routes to
- *    newlib malloc/free.  With TF_LITE_STATIC_MEMORY the bump allocator means new is
- *    never hit at runtime; the counter is kept as a diagnostic (it should stay 0 --
- *    a non-zero value flags an unexpected heap allocation).  Routing to malloc
- *    (rather than returning nullptr) keeps the shell graceful if new is ever reached
- *    and avoids -Wnew-returns-null; it is NOT a link-level "no heap" guarantee.
+ *  - operator new routes to newlib malloc/free.  With TF_LITE_STATIC_MEMORY the bump
+ *    allocator means new is never hit at runtime.  Routing to malloc (rather than
+ *    returning nullptr) keeps the shell graceful if new is ever reached and avoids
+ *    -Wnew-returns-null; it is NOT a link-level "no heap" guarantee.
  *
  *  - __cxa_pure_virtual traps (should never run).  __cxa_guard_* are avoided by
  *    -fno-threadsafe-statics; __cxa_atexit/__dso_handle by -fno-use-cxa-atexit.
@@ -32,29 +30,18 @@
 #include <cstdint>
 #include <cstdlib>
 
-/* Diagnostic counter: stays 0 while TF_LITE_STATIC_MEMORY's bump allocator is in
- * effect (no heap).  A non-zero value flags an unexpected runtime allocation. */
-extern "C" volatile uint32_t g_tflm_cxx_new_calls;
-volatile uint32_t g_tflm_cxx_new_calls = 0;
-
 /* Our own global operator new/delete.  Defining them here means the linker resolves
  * operator new from THIS object and never extracts libstdc++_nano's THROWING version
  * (which would drag in __cxa_throw / _Unwind_* / std::bad_alloc type-info even under
  * -fno-exceptions).  We keep the standard (throwing) operator new signature and route
  * to newlib's malloc/free: with TF_LITE_STATIC_MEMORY the bump allocator means these
- * are never hit at runtime, and g_tflm_cxx_new_calls counts any that were.
- *
- * [!] NOTHING IN THE FIRMWARE READS THAT COUNTER.  This used to say an
- * `ai selftest` asserted it to zero; no such command exists, under that name or
- * the `nn` one that replaced it, and none ever did here.  It is `volatile` and
- * exported so a debugger or `devmem` can read it, which is the whole of its use
- * -- said plainly rather than left as a promise of a check that never runs
- * (issue #100).
+ * are never hit at runtime.  (A call counter used to sit here for a debugger to
+ * read; nothing in the firmware ever read it, so it went with issue #161.)
  *
  * If new IS ever reached the shell degrades gracefully instead of
  * hanging.  (Routing to malloc, not returning null, also avoids -Wnew-returns-null.) */
-void *operator new(std::size_t n)   { g_tflm_cxx_new_calls++; return malloc(n); }
-void *operator new[](std::size_t n) { g_tflm_cxx_new_calls++; return malloc(n); }
+void *operator new(std::size_t n)   { return malloc(n); }
+void *operator new[](std::size_t n) { return malloc(n); }
 void  operator delete(void *p) noexcept   { free(p); }
 void  operator delete[](void *p) noexcept { free(p); }
 void  operator delete(void *p, std::size_t) noexcept   { free(p); }   /* C++14 sized */

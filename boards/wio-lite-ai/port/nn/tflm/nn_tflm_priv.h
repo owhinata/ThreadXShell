@@ -95,25 +95,6 @@ extern uint8_t nn_tflm_arena[NN_TFLM_ARENA_BYTES];
 /** The two .tflite staging slots.  Defined in nn_tflm_bufs.c. */
 extern uint8_t nn_tflm_model_buf[NN_TFLM_MODEL_SLOTS][NN_TFLM_MODEL_MAX];
 
-/**
- * Every call our global `operator new` has served (port/nn/tflm/cxx_runtime.cc).
- *
- * [!] BE PRECISE ABOUT WHAT THIS PROVES, because it is easy to overstate.  In the
- * current build `operator new` is not in the linked image at all: with
- * TF_LITE_STATIC_MEMORY nothing references it, so --gc-sections drops it, and
- * cmake/check_cxx_runtime.py reports that after every link.  The link-time absence is
- * the real evidence -- far stronger than any run could give -- and it means this
- * counter is 0 by construction rather than by observation.  `nn info` printing 0 is
- * therefore NOT a measurement of this build's behaviour.
- *
- * It is still worth having, as a tripwire that is currently inert.  The moment some
- * future path does allocate, `operator new` becomes reachable, gets linked, and the
- * counter starts meaning something -- and `nn info` shows it without anyone having to
- * remember to look.  On this firmware such an allocation would come out of the newlib
- * heap in AXI-SRAM, which is shared with everything else and was never sized for it.
- */
-extern volatile uint32_t nn_tflm_cxx_new_calls;
-
 #ifdef __cplusplus
 }
 #endif

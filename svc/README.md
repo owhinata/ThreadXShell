@@ -12,7 +12,7 @@ The files are grouped by the feature they serve (issue #153):
 | Directory | What it holds |
 |---|---|
 | `svc/` | Generic services any layer uses: the formatter (`fmt`), CRC-32 (`crc32`), YMODEM (`ymodem`) and small graphics helpers (`gfx_rot`, `rect_geom`). |
-| `svc/nn/` | The `nn` command's contract and shared core (`nn_*`, described below), the neutral tensor descriptor (`tensor.h`), the inference API `nn.h` and its translation into that descriptor `nn_desc` (wio-lite-ai and f746g-disco; each still implements `nn.h` in its own `port/nn/nn.c`, issue #161), and the BlazeFace decoder (`blazeface`), which reaches every board only inside a plugin container (no board links it into its firmware since issue #159 Step 4c). |
+| `svc/nn/` | The `nn` command's contract and shared core (`nn_*`, described below), the neutral tensor descriptor (`tensor.h`), the inference API `nn.h`, its one implementation `nn.c` (the dispatcher over the compiled-in backend, `nn_backend.h`) and its translation into that descriptor `nn_desc` (wio-lite-ai and f746g-disco, issue #161), and the BlazeFace decoder (`blazeface`), which reaches every board only inside a plugin container (no board links it into its firmware since issue #159 Step 4c). |
 | `svc/plugin/` | The plugin container's ABI, loader, executor and the checks around them (`plugin_*`, below). |
 | `svc/camera/` | The camera frame pipeline (`frame`, `frame_pipeline`), the camera stream's holder table, sink steps and stream generations (`cam_holders`, `cam_step`, `cam_gen`, below) and the `camera` command's contract (`camera_svc`, below). |
 
@@ -229,6 +229,10 @@ relative to `svc/`.
 | File | Role |
 |---|---|
 | `nn/nn_svc.h` | The contract the shared `nn` command speaks; implemented by each board's adapter. |
+| `nn/nn` | The inference API (`nn.h`) and its one dispatcher for wio-lite-ai and f746g-disco (issue #161): the model singleton and its first-open latch, the session guard, the external claim on the backend's memory (f746g-disco's `sdram test`), cycle timing around `nn_run()`, and named refusal codes passed through unfolded. |
+| `nn/nn_backend.h` | The vtable the one compiled-in backend (`null`, `tflm`, f746g-disco's `stedgeai*`) exports as `nn_backend_vt_selected`. |
+| `nn/nn_dispatch_state.h` | What a board gives `nn.c`: its state as one object the board defines (`nn_model_board_state`, bound at link time) and the hooks -- a critical section that restores the mask it found, a one-tick wait, and the cycle counter's start and fenced read (`boards/<board>/port/nn/nn_model_board.c`). |
+| `nn/nn_desc` | `nn_tensor` -> `svc/nn/tensor.h` descriptor, for the boards that use `nn.h`. |
 | `nn/nn_svc_adapter.h` | Static-inline helpers every adapter uses to build a result and an `nn info` line. |
 | `nn/nn_detail.h` | The bound on a board's `nn` explanation text and its build-time check. |
 | `nn/nn_stream_life` | The one live-inference state machine (start admission, generations, stop claims). |
@@ -275,7 +279,9 @@ from the objects, not listed (`cmake/check_lease_entries.py`, see
 `cmake/README.md`).
 
 The shared translation units also hold no mutable storage of their own: state
-lives in a board-owned struct that the board passes in. This is enforced per
+lives in a board-owned struct that the board passes in, or -- for `nn/nn.c`,
+whose callers pass no context -- one the board defines under a name the shared
+file declares `extern` (`nn_model_board_state`). This is enforced per
 board by `cmake/check_no_mutable_storage.py` through the build-derived audit in
 `cmake/shared_storage_gate.cmake` (see `cmake/README.md`; `svc/ymodem.c` is the
 one exception).

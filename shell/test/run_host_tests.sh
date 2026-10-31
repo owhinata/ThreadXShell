@@ -428,6 +428,23 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     $LDFLAGS -o "$out/test_nn_desc"
 "$out/test_nn_desc"
 
+# issues #131 P16, #152, #161 -- the model singleton of wio-lite-ai and
+# f746g-disco (svc/nn/nn.c, one implementation since #161) over a stub backend
+# and shell/test/nn_model_host.c (the board's state object and hooks,
+# modelled).  Only the first open reaches the backend; a reload's answer is
+# whether a MODEL is left; a refused load whose restore also failed stays open
+# and empty and the next load goes through; every refusal code comes back
+# unchanged; each critical section hands back the mask it found; the external
+# memory claim (`sdram test`) refuses and is refused as nn.h says.  Built four
+# times: a model in the image, its adoption failing, empty from boot, and a
+# backend that cannot swap (NN_ERR_NOSUP for all three optional entries).
+for nn_model_variant in "" -DTEST_FIRST_BUILD_FAILS -DTEST_EMPTY_FROM_BOOT -DTEST_NO_SWAP; do
+    gcc $CFLAGS $nn_model_variant -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+        "$here/test_nn_model.c" "$here/nn_model_host.c" "$svc/nn/nn.c" "$svc/nn/nn_swap.c" \
+        $LDFLAGS -o "$out/test_nn_model"
+    "$out/test_nn_model"
+done
+
 # issue #130 -- the loader's plugin-lease checks (svc/plugin/plugin_run_core.c,
 # shared by wio-lite-ai and f746g-disco since issue #159): a load refused before
 # the shared loader touches anything, the exec_ok hook refusing again at the

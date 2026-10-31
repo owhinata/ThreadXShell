@@ -272,7 +272,7 @@ int blob_verify(unsigned slot, uint32_t *crc_out)
  * under a brief PRIMASK critical section: interrupt-safe, thread-agnostic (acquire
  * and release may run on different threads) and needing no one-time init, which
  * would itself race between the two consoles.  Same idiom as the NN session guard
- * in port/nn/nn.c, and PRIMASK is what this firmware's ThreadX port uses for its own
+ * in svc/nn/nn.c, and PRIMASK is what this firmware's ThreadX port uses for its own
  * critical sections (TX_PORT_USE_BASEPRI is not defined), so it nests consistently.
  *
  * It guards the CALLERS, not the functions below: `blob write` has to hold it from

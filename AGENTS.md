@@ -171,6 +171,7 @@ plugin は board code と同格の**信頼された native code**。ゲートが
 - **grove-vision-ai-v2**: ポストビルド 5 本（`check_image_coherence.py` / `check_placement_budget.py` /
   `check_timer_seam.py` / `check_nor_seam.py` / `check_output_vocabulary.py`）。placement の ITCM 空き下限は持たない（実行時の消費者が無く溢れはリンクエラー、#170）。LTO は使わない。
   `check_mve_predication.py` は削除済み（1 命令も検出できなかった）。**戻さない。**
+- **`.text_cold`（SRAM）に入れてよいのは load / unload 経路の関数名だけ**（per-frame・ISR・CoreMark・membench・プリビルトは ITCM。ゲートが見るのはリンク時ベクタのハンドラだけで、実行時に入る ISR は見ない。#170）
 
 ### 11. STM32F746G-DISCO
 

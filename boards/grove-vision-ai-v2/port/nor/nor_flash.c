@@ -158,7 +158,7 @@ static int fail(const char *why)
 	return -1;
 }
 
-/* This part's D-cache line, as npu_cache.c already assumes. */
+/* This part's D-cache line, as npu_cache_board.c already assumes. */
 #define NOR_CACHE_LINE          32u
 
 /*

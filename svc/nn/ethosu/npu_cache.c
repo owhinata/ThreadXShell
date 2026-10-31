@@ -4,7 +4,9 @@
  */
 /**
  * @file    npu_cache.c
- * @brief   The CPU/NPU arena ownership protocol, owned by this port (issue #46).
+ * @brief   The CPU/NPU arena ownership protocol (issue #46).  Shared since
+ *          issue #169; the state, the cache-line primitive and the fail-stop
+ *          are the board's (npu_cache.h).
  *
  * The Ethos-U55 is an AXI bus master and is NOT coherent with the CM55's
  * D-cache, so every handover of the arena needs explicit maintenance.  Issue
@@ -31,8 +33,9 @@
  *
  * So this file stops maintaining ranges and maintains the WHOLE ARENA at two
  * points, which makes alignment structurally irrelevant: the arena is 32-byte
- * aligned and a whole number of lines by _Static_assert (npu_arena.c), so no
- * partial line can ever be involved.
+ * aligned and a whole number of lines by _Static_assert (the board's arena,
+ * boards/grove-vision-ai-v2/port/nn/npu/npu_arena.c), so no partial line can
+ * ever be involved.
  *
  *   flush hook (pre-launch)     CPU -> NPU   clean the whole arena
  *   inference_begin             .            arm
@@ -49,7 +52,7 @@
  * wrong: ethosu_wait() runs it BEFORE taking the completion semaphore, i.e.
  * while the NPU may still be writing.  The asymmetry is the point.
  *
- * WHY inference_begin/end AND NOT THE SEMAPHORE HOOK.  npu_rtos.c owns
+ * WHY inference_begin/end AND NOT THE SEMAPHORE HOOK.  The board's npu_rtos.c owns
  * ethosu_semaphore_take() and a successful take does mean completion, but that
  * hook is not inference-specific (driver reservation takes the same path) and
  * it is never reached when power acquisition fails or the inference times out,
@@ -75,60 +78,32 @@
  * would then be able to fail and return without ever reaching
  * ethosu_inference_end().  That is closed at the other end, in npu_tflm.cc,
  * which refuses to open a model whose payload is not exactly one final
- * COMMAND_STREAM.  npu_cache_after_invoke() is the backstop if it ever is.
+ * COMMAND_STREAM (npu_payload.c, next to this file).  npu_cache_after_invoke()
+ * is the backstop if it ever is.
  */
-#include "npu.h"
-#include "npu_hw.h"
+#include "npu_cache.h"
 
 #include "ethosu_driver.h"   /* struct ethosu_driver, ethosu_soft_reset() */
-#include "WE2_device.h"      /* __disable_irq                             */
-#include "WE2_core.h"        /* hx_{Clean,Invalidate}DCache_by_Addr        */
-#define LOG_TAG "npucache"
-#include "log.h"             /* LOG_ERR                                   */
 
-#define CACHE_LINE 32u
-
-/* The arena the protocol maintains, handed over by npu_open(). */
-static void  *arena_base;
-static size_t arena_size;
-
-/* Protocol state.  `cleaned` says the pre-launch clean ran; `armed` says the
- * command stream was launched and the handover back is still owed. */
-static volatile uint8_t arena_cleaned;
-static volatile uint8_t inference_armed;
-
-/*
- * Stop, loudly and permanently.
- *
- * Reached only when the CPU is about to touch an arena the NPU may still own
- * and there is no way left to establish otherwise.  Returning would corrupt
- * silently and intermittently, which is strictly worse than halting: the same
- * judgement tx_glue.c makes when the WFI preconditions do not hold.
- */
-static void npu_cache_fail_stop(const char *why)
-{
-	LOG_ERR("%s -- halting", why);
-	__disable_irq();
-	for (;;)
-		;
-}
+/* All of the protocol's state is the board's object, npu_cache_board_state
+ * (npu_cache.h); this file keeps none of its own. */
 
 static void arena_clean_all(void)
 {
-	npu_cache_clean(arena_base, arena_size);
+	npu_cache_clean(npu_cache_board_state.arena_base, npu_cache_board_state.arena_size);
 }
 
 static void arena_invalidate_all(void)
 {
-	npu_cache_invalidate(arena_base, arena_size);
+	npu_cache_invalidate(npu_cache_board_state.arena_base, npu_cache_board_state.arena_size);
 }
 
 void npu_cache_set_arena(void *base, size_t bytes)
 {
-	arena_base      = base;
-	arena_size      = bytes;
-	arena_cleaned   = 0u;
-	inference_armed = 0u;
+	npu_cache_board_state.arena_base      = base;
+	npu_cache_board_state.arena_size      = bytes;
+	npu_cache_board_state.arena_cleaned   = 0u;
+	npu_cache_board_state.inference_armed = 0u;
 }
 
 void npu_cache_after_invoke(void)
@@ -138,13 +113,13 @@ void npu_cache_after_invoke(void)
 	 * NPU stopped writing -- and TFLM has ALREADY written the arena on its way
 	 * out of Invoke().  npu_tflm.cc's payload check exists to make this
 	 * unreachable; if it is reached, the check is wrong. */
-	if (inference_armed)
+	if (npu_cache_board_state.inference_armed)
 		npu_cache_fail_stop("inference launched but never handed the arena back");
 
 	/* Not armed: either no launch happened (the driver rejected the payload
 	 * before ethosu_inference_begin()) or the handover completed.  Either way
 	 * the next inference must do its own clean. */
-	arena_cleaned = 0u;
+	npu_cache_board_state.arena_cleaned = 0u;
 }
 
 /* --- the vendor hooks ---------------------------------------------------- */
@@ -165,11 +140,11 @@ void ethosu_flush_dcache(uint32_t *p, size_t bytes)
 	(void)p;
 	(void)bytes;
 
-	if (arena_base == NULL)
+	if (npu_cache_board_state.arena_base == NULL)
 		npu_cache_fail_stop("flush with no arena");
 
 	arena_clean_all();
-	arena_cleaned = 1u;
+	npu_cache_board_state.arena_cleaned = 1u;
 }
 
 void ethosu_invalidate_dcache(uint32_t *p, size_t bytes)
@@ -196,15 +171,15 @@ void ethosu_inference_begin(struct ethosu_driver *drv, void *user_arg)
 	 * npu_cache_after_invoke() would see 0 and pass.  npu_tflm.cc refuses such
 	 * a payload at open, and this is the second lock on the same door: a
 	 * counter would silently tolerate the case, so it is fatal instead. */
-	if (inference_armed)
+	if (npu_cache_board_state.inference_armed)
 		npu_cache_fail_stop("second launch while an inference is still owed");
 
 	/* Unreachable unless the flush hook was bypassed, which would mean the
 	 * NPU is about to read an arena the CPU still holds dirty. */
-	if (!arena_cleaned)
+	if (!npu_cache_board_state.arena_cleaned)
 		npu_cache_fail_stop("launch without the pre-launch clean");
 
-	inference_armed = 1u;
+	npu_cache_board_state.inference_armed = 1u;
 }
 
 void ethosu_inference_end(struct ethosu_driver *drv, void *user_arg)
@@ -213,7 +188,7 @@ void ethosu_inference_end(struct ethosu_driver *drv, void *user_arg)
 
 	if (drv == NULL)
 		npu_cache_fail_stop("inference_end without a driver");
-	if (!inference_armed)
+	if (!npu_cache_board_state.inference_armed)
 		npu_cache_fail_stop("inference_end without a launch");
 
 	if (drv->job.state == ETHOSU_JOB_DONE &&
@@ -231,40 +206,6 @@ void ethosu_inference_end(struct ethosu_driver *drv, void *user_arg)
 		arena_invalidate_all();
 	}
 
-	inference_armed = 0u;
-	arena_cleaned   = 0u;
-}
-
-/* Round a range outward to whole cache lines. */
-static void line_span(const void *p, size_t bytes, uint32_t *start,
-                      int32_t *len)
-{
-	uint32_t lo = (uint32_t)(uintptr_t)p & ~(CACHE_LINE - 1u);
-	uint32_t hi = ((uint32_t)(uintptr_t)p + (uint32_t)bytes + CACHE_LINE - 1u)
-	              & ~(CACHE_LINE - 1u);
-
-	*start = lo;
-	*len   = (int32_t)(hi - lo);
-}
-
-void npu_cache_clean(const void *p, size_t bytes)
-{
-	uint32_t start;
-	int32_t  len;
-
-	if (p == NULL || bytes == 0u)
-		return;
-	line_span(p, bytes, &start, &len);
-	hx_CleanDCache_by_Addr((volatile void *)start, len);
-}
-
-void npu_cache_invalidate(void *p, size_t bytes)
-{
-	uint32_t start;
-	int32_t  len;
-
-	if (p == NULL || bytes == 0u)
-		return;
-	line_span(p, bytes, &start, &len);
-	hx_InvalidateDCache_by_Addr((volatile void *)start, len);
+	npu_cache_board_state.inference_armed = 0u;
+	npu_cache_board_state.arena_cleaned   = 0u;
 }

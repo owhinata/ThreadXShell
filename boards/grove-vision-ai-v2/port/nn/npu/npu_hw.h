@@ -15,6 +15,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "npu_cache.h"
+
 /*
  * Finite inference timeout, in ThreadX ticks (1 ms).  The driver header would
  * otherwise define ETHOSU_SEMAPHORE_WAIT_INFERENCE as "wait forever", and a
@@ -103,32 +105,10 @@ unsigned npu_hw_wrapped_irqs(int *out, unsigned max);
  * this port already records to dmesg.  Loud beats silent -- zeros would reach
  * TFLM as a model or an arena full of nothing and be interpreted as data. */
 
-/* Cache maintenance (npu_cache.c).  Ranges are rounded outward to whole cache
- * lines, so the caller may pass a sub-range of the arena. */
-void npu_cache_clean(const void *p, size_t bytes);
-void npu_cache_invalidate(void *p, size_t bytes);
-
-/**
- * Hand the arena to the cache protocol, or take it back (NULL, 0).
- *
- * The protocol maintains the WHOLE arena at two points and never a sub-range --
- * see npu_cache.c for why -- so it has to know where the arena is.  This is the
- * arena npu_open() was actually given, not the static reservation, and it is
- * cleared on close and on every failure unwind.
- */
-void npu_cache_set_arena(void *base, size_t bytes);
-
-/**
- * Close out one Invoke().  Called after MicroInterpreter::Invoke() returns,
- * whatever it returned.
- *
- * Two jobs.  It clears the "arena was cleaned" state left by a launch that
- * never happened -- a payload the driver rejected before it reached
- * ethosu_inference_begin().  And it is where an inference that launched but
- * never completed the handover is caught: that would mean the CPU is about to
- * touch an arena the NPU may still own, so it fail-stops rather than return.
- */
-void npu_cache_after_invoke(void);
+/* Cache maintenance: the arena ownership protocol (svc/nn/ethosu/npu_cache.c)
+ * and this board's primitives under it (npu_cache_board.c) -- npu_cache_clean(),
+ * npu_cache_invalidate(), npu_cache_set_arena(), npu_cache_after_invoke() and
+ * the state object.  Declared once, in the shared header. */
 
 #ifdef __cplusplus
 }

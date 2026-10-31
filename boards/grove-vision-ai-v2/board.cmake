@@ -700,7 +700,11 @@ add_library(shell_objs OBJECT
     "${BOARD_DIR}/port/nn/npu/npu_tflm.cc"
     "${BOARD_DIR}/port/nn/npu/npu_arena.c"
     "${BOARD_DIR}/port/nn/npu/npu_rtos.c"
-    "${BOARD_DIR}/port/nn/npu/npu_cache.c"
+    # The arena ownership protocol and the driver's cache hooks are shared
+    # (issue #169); its state, the cache-line primitive and the fail-stop are
+    # this board's.
+    "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_cache.c"
+    "${BOARD_DIR}/port/nn/npu/npu_cache_board.c"
     # The Ethos-U checks that hold no state and know no board (issue #169): the
     # payload walk, its locator and the bounded verifier.  Shared under svc/, so
     # the stateless-service audit covers them; kept at this point in the list so

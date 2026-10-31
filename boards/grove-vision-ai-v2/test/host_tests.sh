@@ -417,7 +417,7 @@ gcc $CFLAGS \
 # never seen on hardware.  The REAL plugin_run.c and svc/plugin/plugin_exec.c, with
 # the device, ThreadX and the NOR lease stubbed (test/plugin_run_shim).
 gcc $CFLAGS \
-    -I "$here/plugin_run_shim" -I "$board/port/plugin" -I "$board/port/nn" -I "$board/port/nn/npu" \
+    -I "$here/plugin_run_shim" -I "$board/port/plugin" -I "$board/port/nn" -I "$board/port/nn/npu" -I "$svc/nn/ethosu" \
     -I "$board/port/nor" -I "$board/svc" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$here/test_plugin_run_lease.c" "$board/port/plugin/plugin_run.c" \
     "$svc/plugin/plugin_exec.c" "$svc/plugin/plugin_mpu.c" "$svc/plugin/plugin_load.c" \

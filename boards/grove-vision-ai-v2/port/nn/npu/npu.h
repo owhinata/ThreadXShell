@@ -121,7 +121,7 @@ unsigned npu_output_count(void);
  * CACHE MAINTENANCE IS NOT THE CALLER'S (issue #46).  The whole arena changes
  * hands at two instants inside Invoke() -- immediately before the command
  * stream is launched and once completion is confirmed -- and the port hangs the
- * clean and the invalidate off the driver's callbacks there (npu_cache.c).
+ * clean and the invalidate off the driver's callbacks there (svc/nn/ethosu/npu_cache.c).
  * Doing anything from outside is either too early (the ethos-u kernel writes
  * arena scratch afterwards) or too late (TFLM writes the arena before Invoke()
  * returns).  By the time this returns, the outputs are visible.

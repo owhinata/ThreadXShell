@@ -100,21 +100,24 @@ own today.
 ### The Ethos-U checks are shared (issue #169)
 
 `svc/nn/ethosu/` holds the parts of an Ethos-U backend that hold no state and
-know no board.  Today that is the three checks a model passes before
+know no board.  Three are the checks a model passes before
 grove-vision-ai-v2's `npu_open()` hands it to the interpreter, and that the
 board's host gate `verify_vela_model` runs on the developer's machine by
-compiling these same files (no copy):
+compiling these same files (no copy).  The fourth is the protocol that hands
+the arena between the CPU and the NPU:
 
 | File | What it decides |
 |---|---|
 | `npu_verify.h` | The bounded FlatBuffer verifier and its limits (length floor, depth, table count) -- the one place they are declared. |
 | `npu_model_scan` (`.cc` / `.h`) | Which bytes the driver will parse (the `ethos-u` operator's input tensor 0) and whether the model may be opened at all: one subgraph, every operator `ethos-u`, no variable payload tensor. |
 | `npu_payload` (`.c` / `.h`) | Whether that payload is exactly one COMMAND_STREAM action, as the last action. Plain C over bytes, so the host test compiles it directly. |
+| `npu_cache` (`.c` / `.h`) | The arena ownership protocol and the driver's four cache hooks (`ethosu_flush_dcache`, `ethosu_invalidate_dcache`, `ethosu_inference_begin`, `ethosu_inference_end`), strong definitions that override the driver's weak ones at link time: the whole arena cleaned before launch and invalidated once DONE and OK are both seen, a checked reset first on any other ending, fail-stop otherwise. Its state (`npu_cache_board_state`), the cache-line primitive (`npu_cache_clean()` / `npu_cache_invalidate()`) and the fail-stop are the board's (`port/nn/npu/npu_cache_board.c`). |
 
 Everything else stays in `boards/grove-vision-ai-v2/port/nn/npu/`: the
-interpreter glue (`npu_tflm.cc`), the arena and its placement, the cache
-maintenance and RTOS hooks the driver binds by name, the NPU bring-up and its
-interrupt, and the tensor descriptors.  The three shared files are compiled in
+interpreter glue (`npu_tflm.cc`), the arena and its placement, the cache-line
+primitive and the fail-stop under the protocol, the ThreadX mutex and semaphore
+hooks the driver binds by name (`npu_rtos.c`), the NPU bring-up and its
+interrupt, and the tensor descriptors.  The shared files are compiled in
 Grove's firmware context, so the stateless-service audit covers them like every
 other TU under `svc/`; `npu_model_scan.cc` is C++ against the Himax SDK's TFLM
 snapshot, which is the only TFLM tree that board builds.
@@ -281,7 +284,7 @@ relative to `svc/`.
 | `nn/nn_dispatch_state.h` | What a board gives `nn.c`: its state object and the hooks (see [The inference layer](#the-inference-layer-is-one-implementation-issue-161)). |
 | `nn/nn_desc` | `nn_tensor` -> `svc/nn/tensor.h` descriptor, for the boards that use `nn.h`. |
 | `nn/tflm/` | The one tflite-micro backend of wio-lite-ai and f746g-disco (issue #161; built only with `CONFIG_NN_BACKEND=tflm`, into the board's `tflm` library): `nn_tflm.cc` (the vtable), `nn_tflm_state.h` (its state type and facts, defined by the board), `nn_tflm_mem.h` (the buffers the board places; see [The inference layer](#the-inference-layer-is-one-implementation-issue-161)), `nn_tflm_ops.h` (the op profiles, shared with each board's host `verify_tflite`), `nn_tflm_fit.h` (which slot a model range may be adopted from, never the live one; host-tested) and `cxx_runtime.cc` (the C++ runtime shim). One of the two directories under `svc/` that include TFLM headers (the other is `nn/ethosu/`). |
-| `nn/ethosu/` | The stateless Ethos-U model checks (issue #169): the bounded verifier and its limits (`npu_verify.h`), the payload locator and model refusal (`npu_model_scan`) and the command-stream walk (`npu_payload`); grove-vision-ai-v2's firmware and its host `verify_vela_model` compile the same files (see [The Ethos-U checks](#the-ethos-u-checks-are-shared-issue-169)). |
+| `nn/ethosu/` | The stateless Ethos-U parts (issue #169): the bounded verifier and its limits (`npu_verify.h`), the payload locator and model refusal (`npu_model_scan`) and the command-stream walk (`npu_payload`), which grove-vision-ai-v2's firmware and its host `verify_vela_model` compile from the same files, and the arena ownership protocol with the driver's cache hooks (`npu_cache`; state and cache-line primitive are the board's) (see [The Ethos-U checks](#the-ethos-u-checks-are-shared-issue-169)). |
 | `nn/nn_svc_adapter.h` | Static-inline helpers every adapter uses to build a result and an `nn info` line. |
 | `nn/nn_detail.h` | The bound on a board's `nn` explanation text and its build-time check. |
 | `nn/nn_stream_life` | The one live-inference state machine (start admission, generations, stop claims). |
@@ -331,7 +334,7 @@ The shared translation units also hold no mutable storage of their own: state
 lives in a board-owned struct that the board passes in, or -- for `nn/nn.c`,
 whose callers pass no context -- one the board defines under a name the shared
 file declares `extern` (`nn_model_board_state`; the tflm backend's
-`nn_tflm_board_state`). This is enforced per
+`nn_tflm_board_state`; the Ethos-U cache protocol's `npu_cache_board_state`). This is enforced per
 board by `cmake/check_no_mutable_storage.py` through the build-derived audit in
 `cmake/shared_storage_gate.cmake` (see `cmake/README.md`; `svc/ymodem.c` is the
 one exception).

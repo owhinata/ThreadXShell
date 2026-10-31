@@ -2463,6 +2463,14 @@ backend's close-and-reopen and the identity):
    `npu_hw_deinit()`, so the flash lease is never held by a half-open NPU and no
    interpreter reads the window after it is returned.
 
+Inside step 5 the backend zeroes the whole arena before it constructs the
+interpreter (issue #167, shared with the tflm backend in `svc/nn/tflm/nn_tflm_glue.h`:
+a model refused part-way through TFLM's per-op table otherwise leaves stale entries
+the destructor calls as function pointers).  The cost is one memset of `nn_ethosu_arena`
+(460,800 B) per load, a restore included; the zeros are ordinary CPU writes, which the
+pre-launch clean of the whole arena hands to the NPU like every other CPU write
+([The arena changes hands twice](#-the-arena-changes-hands-twice-and-both-points-are-inside-invoke)).
+
 #### Loading over an open model replaces it (issue #122)
 
 `nn model load` no longer answers "unload first".  With a model open the NPU is

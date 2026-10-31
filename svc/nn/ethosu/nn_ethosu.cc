@@ -159,11 +159,18 @@ int build_interp(const void *data, uint32_t len)
 	/* From here the previous interpreter is gone.  The cache protocol is told
 	 * which arena before AllocateTensors (setting it also clears the protocol's
 	 * state, so the previous registration needs no separate unwind), and every
-	 * refusal below goes through drop_interp() and takes it back again. */
+	 * refusal below goes through drop_interp() and takes it back again.
+	 *
+	 * The construction zeroes the whole arena first (issue #167, nn_tflm_glue.h).
+	 * Those are CPU writes and land dirty in the D-cache, exactly like
+	 * AllocateTensors' own writes that follow; the protocol needs nothing more
+	 * for them, because no launch is possible before the pre-launch hook cleans
+	 * the whole arena (npu_cache.c), and nothing is launched while a load runs
+	 * (the caller holds the NN session). */
 	nn_tflm_destroy_interp();
 	npu_cache_set_arena(nn_ethosu_arena, (size_t)NN_ETHOSU_ARENA_BYTES);
-	s.interp = new (s.interp_buf) tflite::MicroInterpreter(
-		model, *resolver, nn_ethosu_arena, (size_t)NN_ETHOSU_ARENA_BYTES);
+	nn_tflm_construct_interp(model, *resolver, nn_ethosu_arena,
+	                         (size_t)NN_ETHOSU_ARENA_BYTES);
 
 	if (s.interp->AllocateTensors() != kTfLiteOk) {
 		rc = NN_MODEL_ERR_ARENA;

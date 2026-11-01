@@ -7,12 +7,21 @@
  * a stand-in board that makes the calls f746g-disco and wio-lite-ai make, in
  * their order:
  *
- *   producer  is the run open (and, wio, sample the generation for the frame)
- *             -> nn_core_on_frame() -> a refused prep -> record PREP
+ *   producer  is the run open -> nn_core_on_frame() -> a refused prep ->
+ *             record PREP
  *   worker    take -> invoke failed / lease not had -> record -> DONE_LAST ->
  *             re-arm only if the run is still open and the board still runs;
  *             or nn_core_on_infer_done() (DONE_LAST) -> nn_shot_after_job() ->
  *             the same re-arm question
+ *
+ * WHERE EACH BOARD SAMPLES THE GENERATION, and so where this stand-in does:
+ *   f746g-disco  in the prep's first hold of nncam_lock (prep() below); the
+ *                worker checks that frame's value (nncam_job_gen, b.job_gen)
+ *   wio-lite-ai  the producer at band 0, in the hold that asks "open?"
+ *                (b.p_gen); the worker at its arm, in the hold that asks
+ *                "open?" (b.w_gen), and it re-arms at its NEXT step's arm
+ *   f746g-disco re-arms right after the record (the run still open and
+ *   nncam_run still up); wio-lite-ai's record does not decide the re-arm.
  *   console   failed, then published, every poll; lost and the cancel only
  *             when neither is true
  *
@@ -53,11 +62,16 @@ static struct {
 	uint32_t accepted;   /* the record's accepted count (never goes back)   */
 	int      running;    /* the board's run flag (f746 nncam_run)           */
 	/* producer */
-	uint32_t p_run, p_gen;   /* sampled at the first part, under the lock  */
+	uint32_t p_run;          /* sampled at the first part, under the lock  */
+	uint32_t p_gen;          /* the frame's generation: wio at the first
+	                          * part, f746 in the prep's first hold         */
+	uint32_t job_gen;        /* f746: the frame's, read by the worker (the
+	                          * board's nncam_job_gen)                      */
 	int      prep_fail, prep_calls, prep_records;
 	int      f746_shape;     /* the prep records PREP inside itself (f746)  */
 	/* worker */
-	uint32_t w_run, w_gen;   /* sampled when it arms (wio) / for the job    */
+	uint32_t w_run;          /* the run the worker serves                   */
+	uint32_t w_gen;          /* wio: sampled at the arm, with "open?"       */
 	int      acc_what, acc_took, acc_calls;
 	int      infer_starts;
 	/* console */
@@ -73,6 +87,12 @@ static int prep(void *ctx, unsigned part, unsigned nparts)
 	(void)part;
 	(void)nparts;
 	b.prep_calls++;
+	if (b.f746_shape) {
+		/* f746g-disco: the prep's FIRST hold samples the frame's
+		 * generation (and the board's nncam_job_gen). */
+		b.p_gen = b.gen;
+		b.job_gen = b.gen;
+	}
 	if (!b.prep_fail)
 		return 0;
 	if (b.f746_shape) {
@@ -132,16 +152,46 @@ static void reset(int f746_shape)
 	b.f746_shape = f746_shape;
 }
 
-/* The start: begin the run (record lock), then let the worker want. */
+/*
+ * wio-lite-ai's arm, at the top of every worker step (nncam_oneshot_arm()):
+ * "is the run open?" and the generation in ONE hold, and a want only on an
+ * open run.  The step runs only while the board runs.
+ */
+static int worker_arm_wio(void)
+{
+	uint32_t run;
+
+	if (!b.running)
+		return 0;
+	run = nn_shot_open(&shot);
+	if (run == 0u)
+		return 0;
+	b.w_run = run;
+	b.w_gen = b.gen;
+	return nn_core_frame_want(&fr, &ops);
+}
+
+/* The start: begin the run (record lock), then the worker's first arm --
+ * f746g-disco's at its run-loop entry, wio-lite-ai's at its first step. */
 static uint32_t start_run(void)
 {
 	uint32_t run = nn_shot_begin(&shot);
 
 	b.running = 1;
-	b.w_run = run;
-	b.w_gen = b.gen;
-	(void)nn_core_frame_want(&fr, &ops);
+	if (b.f746_shape) {
+		b.w_run = nn_shot_open(&shot);
+		if (b.w_run != 0u)
+			(void)nn_core_frame_want(&fr, &ops);
+	} else {
+		(void)worker_arm_wio();
+	}
 	return run;
+}
+
+/* The generation the worker checks its job against. */
+static uint32_t worker_gen(void)
+{
+	return b.f746_shape ? b.job_gen : b.w_gen;
 }
 
 /* A boundary in the record: a detach / attach / stop moved the generation. */
@@ -164,7 +214,8 @@ static int producer_part(unsigned part, unsigned nparts)
 		if (run == 0u)
 			return -1;
 		b.p_run = run;
-		b.p_gen = b.gen;
+		if (!b.f746_shape)
+			b.p_gen = b.gen;   /* wio: same hold; f746: in the prep */
 	}
 	r = nn_core_on_frame(&fr, &ops, NULL, part, nparts);
 	if (r == NN_CORE_FR_ABANDONED && !b.f746_shape) {
@@ -183,14 +234,18 @@ static void producer_frame(unsigned nparts)
 		(void)producer_part(p, nparts);
 }
 
-/* The worker's re-arm, after the record: the run still open AND the board
- * still running, the run flag read after the record. */
+/*
+ * The worker's re-arm after a job.  f746g-disco: right after the record, on
+ * the record's answer AND the run flag read after it.  wio-lite-ai: the
+ * record's answer is not used; the NEXT step's arm asks "open?" itself and
+ * samples its generation in the same hold (worker_arm_wio()).
+ */
 static int worker_rearm(int open)
 {
-	if (open && b.running) {
-		b.w_gen = b.gen;
+	if (!b.f746_shape)
+		return worker_arm_wio();
+	if (open && b.running)
 		return nn_core_frame_want(&fr, &ops);
-	}
 	return 0;
 }
 
@@ -203,7 +258,7 @@ enum job { JOB_OK, JOB_INVOKE_FAIL, JOB_LEASE_TIMEOUT };
  */
 static int worker_job(enum job j, int boundary_at)
 {
-	uint32_t gen = b.w_gen;
+	uint32_t gen = worker_gen();
 	int open;
 
 	if (!nn_core_frame_take(&fr, &ops))
@@ -379,7 +434,7 @@ static void test_stop_between_record_and_rearm(void)
 	producer_frame(1u);
 	CHECK(nn_core_frame_take(&fr, &ops), "the worker took the job");
 	{
-		uint32_t gen = b.w_gen;
+		uint32_t gen = worker_gen();
 		int open;
 
 		boundary();   /* the generation moved during the inference */
@@ -451,14 +506,9 @@ static void test_wio_wait_ran_out_filling(void)
 	pgen = b.p_gen;
 	/* The next step of the worker: samples its own generation and tries to
 	 * arm -- refused, the producer is filling. */
-	{
-		uint32_t run = nn_shot_open(&shot);
-
-		b.w_gen = b.gen;
-		CHECK(run != 0u && !nn_core_frame_want(&fr, &ops) &&
-		      fr.word == (uint8_t)NN_HO_FILLING,
-		      "[!] the arm is refused and FILLING is not taken away");
-	}
+	CHECK(!worker_arm_wio() && nn_shot_open(&shot) != 0u &&
+	      fr.word == (uint8_t)NN_HO_FILLING,
+	      "[!] the arm is refused and FILLING is not taken away");
 	CHECK(b.p_run == prun && b.p_gen == pgen,
 	      "the frame's sampled run and generation are unchanged");
 	(void)producer_part(2u, 4u);

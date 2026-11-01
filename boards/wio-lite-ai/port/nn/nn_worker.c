@@ -188,6 +188,12 @@ static int nncam_oneshot_arm(uint32_t *gen)
  * job the boundary's, not the run's end.  The caller then parks the word
  * (DONE_LAST, as every job on this board ends) and the next step's arm asks
  * whether the run is still open.
+ *
+ * [!] The arm's sample, not the frame's, is good enough ONLY because nothing
+ * moves the generation while a one-shot runs: the stream re-arm refuses a
+ * one-shot, a load / unload is BUSY on the session the run holds, and a stop
+ * drops nncam_run before its boundary (so a worker that sampled after it
+ * returns before it TAKEs).
  */
 static void nncam_oneshot_job_failed(enum nn_shot_reason why, uint32_t gen)
 {

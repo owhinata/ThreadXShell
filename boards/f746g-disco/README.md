@@ -368,6 +368,44 @@ for line:
   answers without the plugin machinery: `nn stream start` refused, `nn run`
   reports tensors, `nn thresh` none.
 
+### `nn run` is one frame and ends one of five ways (issue #171)
+
+`nn run` drives the stream's producer and worker for exactly one frame.  The
+start gives the run a new number (`svc/nn/nn_shot`, shared with wio-lite-ai);
+the producer asks whether the run is still open before it begins filling the
+input tensor, and the worker parks after every job and arms again only while
+the run is open -- that is, while nothing has ended it yet.  Every ending (the
+producer's preparation refused, the inference failed, the plugin lease not had
+in time, the publish) is recorded under `nncam_lock`, the lock the attach, the
+detach and the stop move the record's generation under, and the first one wins.
+
+The console's wait ends one of five ways, in this order of precedence
+(`svc/nn/nn_run_wait.c`, the same table on all three boards): **inferred** (the
+record accepted a publish), **no result**, **lost** (the camera stream ended,
+issue #163), **cancelled** (Ctrl+C), **timed out** (2 s).  No result means the
+run ended without a publish; the status and the sentence come from the shared
+table in `svc/nn/nn_shot.c`, e.g. `inference failed` (status `hardware`) or
+`the plugin lease was not released in time; nothing was decoded` (status
+`busy`), and an ending the table does not know reads `the inference worker
+ended the run without a result` rather than waiting on.  Before #171 those runs
+sat out the 2 s and said timed out, and the worker armed again after every job
+while the run lasted.  There is no bench procedure that makes an inference or
+a preparation fail, so the no-result paths are covered by
+`shell/test/test_nn_shot.c` and `shell/test/test_nn_shot_seq.c` only.
+`camera stream stop` during a `nn run` is still refused (`camera: still in use:
+nn`), so it does not make the run lost.
+
+Measured 2026-11-01 (container and bare `.tflite` `nn run`, Ctrl+C, a stream,
+ten `nn run` in a row):
+
+| | before | after |
+|---|---:|---:|
+| Flash, `tflm` | 614,404 B | 615,684 B |
+| Flash, `null` | 415,172 B | 416,388 B |
+| `.bss` | | +32 B |
+| `nn run` | | 0.66-0.71 s, one inference each |
+| stack peaks | | `cam_prod` 548 / 1,024 B, `nn-worker` 1,512 / 4,096 B, `cli` 2,524 / 4,096 B (unchanged) |
+
 ### The model: loaded from SD, or nothing (issue #131, #159 Step 4c)
 
 The backend can hold no model at all: `nn info` then prints `model : (none)`
@@ -1158,7 +1196,10 @@ settings screen's **Back** button to return to the preview.
 
 The DCMI FIFO overruns when a frame start arrives while the DMA cannot reach
 SDRAM in time -- a GUIX full-screen DMA2D repaint lined up with the frame start
-is enough, and moving code around shifts that alignment.  RM0385 17.3.10: the
+is enough, and moving code around shifts that alignment.  That is not the only
+shape: the overruns measured for issue #172 almost never coincided with a
+DMA2D repaint and fell while `nn-worker` was in the CMSIS-NN kernels, with a
+rate that moves between builds; that investigation is #172's.  RM0385 17.3.10: the
 DCMI resets its FIFO and waits for the next frame start, so the capture
 survives; only the DMA's position inside the frame is lost.
 

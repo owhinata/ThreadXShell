@@ -657,7 +657,7 @@ accepts under its own lock, `nn run` waits on that count, and `nn stream
 stats`' `last` line is the stream's only when the record has accepted one since
 the stream's commit.  `infers` and `last` are read in separate critical
 sections, so on a running stream they can be one frame apart -- `last` from a
-frame `infers` has not counted yet, or the reverse.  A stop almost always lands inside an inference (~410 ms),
+frame `infers` has not counted yet, or the reverse.  A stop almost always lands inside an inference (~373 ms),
 so the worker asks, under the result lease, whether its generation is still
 current before it lets the plugin decode, and the stop takes its boundary under
 the same lease: the frame in flight is then either published or never decoded,
@@ -690,6 +690,34 @@ and is stopped by its own generation; while it runs, `nn stream start` and
 teardown comes back retryable, `nn stream stop` is what finishes it.  The
 re-arm in `nn_camera_start()` also takes back up only a session that
 `nn stream start` created.
+
+**`nn run` is one frame and ends one of five ways (issue #171).**  The start
+gives the run a new number (`svc/nn/nn_shot`, shared with f746g-disco).  At
+band 0 of each frame the producer takes `nncam_det_lock` once and, in that one
+hold, asks whether the run is still open and notes the record's generation for
+the frame; a closed run's frame is never begun.  The worker arms only on an open
+run, and the producer (its preparation refused) and the worker (the inference
+failed, the plugin lease not had in time, the publish) record every ending
+under the same lock,
+the one the start and the stop move the record's generation under; the first
+ending wins.  Every other holder of `nncam_det_lock` only copies under it, so
+the producer's wait for it is short (below).  The console's wait ends, in this
+order of precedence (`svc/nn/nn_run_wait.c`, all three boards): **inferred**,
+**no result**, **lost** (the camera stream ended), **cancelled** (Ctrl+C),
+**timed out** (3 s).  No result prints the status and sentence of the shared
+table in `svc/nn/nn_shot.c`, e.g. `inference failed`; before #171 such a run
+sat out its deadline and said timed out.  No bench procedure makes an
+inference or a preparation fail, so those paths are covered by
+`shell/test/test_nn_shot.c` and `shell/test/test_nn_shot_seq.c` only.
+
+Measured 2026-11-01 (DFU, `blazeface.nnc`): the whole band callback, the wait
+for the lock at band 0 included, 1,010 us at its worst while the other console
+typed `nn dets` repeatedly (a temporary DWT probe, not committed; the bar set
+beforehand was 2,000 us of the ~18,500 us band period; the preparation alone
+has measured 900-1,021 us in this README's runs), `ingest max` 1,038 us, a stream 2.22-2.25 inf/s, `nn run` latency
+374,713 us.  Stack peaks `cam_prod` 428 / 1,024 B, `nn_work` 1,444 / 3,072 B,
+the shell 2,728 / 4,096 B.  App flash 369,752 -> 370,872 B, DTCM 118,936 ->
+118,976 B.
 
 **A decode the plugin refuses is counted apart in `nn stream stats`** (issue
 #130 step 6c, #122 P8 -- grove-vision-ai-v2's table, in

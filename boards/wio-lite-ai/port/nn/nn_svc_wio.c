@@ -46,6 +46,7 @@
 #include "nn_active.h"
 #include "nn_core_model.h" /* the shared load / unload order (#131) */
 #include "nn_run_wait.h"   /* how `nn run`'s wait ends (shared, #163) */
+#include "nn_shot.h"       /* how one `nn run` ended (shared, #171)    */
 #include "plugin_load.h"
 #include "plugin_lease.h"
 #include "plugin_run_core.h"
@@ -1121,6 +1122,9 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	/* Why the wait ended -- the run's status, decided below (issue #122 P7)
 	 * by the shared table (svc/nn/nn_run_wait.h, issue #163). */
 	enum nn_run_end why = NN_RUN_WAITING;
+	/* What ended a NO_RESULT run (enum nn_shot_reason, issue #171): kept from
+	 * the poll that decided, never read again after the teardown. */
+	int shot_why = (int)NN_SHOT_NONE;
 
 	nn_detail_clear();
 
@@ -1197,29 +1201,42 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	/* [!] Wall-clock deadline, not a count of completed sleeps: a sleep that
 	 * returns early on an already-pending tick would burn the budget instantly
 	 * and report a timeout that never happened. */
-	/* [!] Each poll reads the record, then the lost mark, then the operator,
-	 * then the clock, and stops reading at the first that holds: the table
-	 * ranks them in that same order, and the cancel query reads the console's
-	 * input, so it is asked only on a poll nothing earlier decided. */
+	/*
+	 * [!] A RUN THAT ENDED WITHOUT A RESULT IS NO_RESULT (issue #171): the
+	 * producer could not prepare its frame, or the worker's inference or lease
+	 * failed, and the run takes no further frame -- waiting on would only end
+	 * in a timeout that hides why.
+	 *
+	 * [!] Each poll reads "ended without a result" and then the record -- in
+	 * THAT order and BOTH every time (svc/nn/nn_run_wait.h: the worker
+	 * publishes before it records, so this order cannot see a failure for a
+	 * run that published, and the table lets a publish win) -- then, only if
+	 * neither holds, the lost mark, the operator and the clock, stopping at the
+	 * first that holds: the cancel query reads the console's input, so it is
+	 * asked only on a poll nothing earlier decided.
+	 */
 	deadline = tx_time_get() + (NN_RUN_WAIT_S * TX_TIMER_TICKS_PER_SECOND);
 	for (;;) {
-		int published, lost = 0, cancelled = 0, expired = 0;
+		int finished, published, lost = 0, cancelled = 0, expired = 0,
+		    reason = (int)NN_SHOT_NONE;
 
+		finished = nn_camera_oneshot_failed(&reason);
 		(void)nn_camera_decode_get(&dec, NULL, NULL);
 		published = (dec.accepted != base);
-		if (!published) {
+		if (!published && !finished) {
 			nn_camera_stats_get(&st);
 			lost = (st.stream_lost != 0);
 		}
-		if (!published && !lost)
+		if (!published && !finished && !lost)
 			cancelled = nn_svc_cancelled(cancel, ctx);
-		if (!published && !lost && !cancelled)
+		if (!published && !finished && !lost && !cancelled)
 			expired = ((LONG)(tx_time_get() - deadline) >= 0);
-		/* "finished" is 0: this worker does not say when it is done with a
-		 * one-shot yet.  Issue #171 passes it here. */
-		why = nn_run_wait_step(published, 0, lost, cancelled, expired);
-		if (why != NN_RUN_WAITING)
+		why = nn_run_wait_step(published, finished, lost, cancelled,
+		                       expired);
+		if (why != NN_RUN_WAITING) {
+			shot_why = reason;
 			break;
+		}
 		tx_thread_sleep(1u);
 	}
 
@@ -1298,6 +1315,20 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		else if (st.stream_lost)
 			nn_detail_set("the band stream was lost during the run");
 		return;
+	case NN_RUN_NO_RESULT: {
+		/* The status and the sentence are the shared table's, the same
+		 * as f746g-disco's (svc/nn/nn_shot.c); the disposition is the
+		 * stop's, as for every other ending. */
+		const struct nn_shot_says *say =
+			nn_shot_says((enum nn_shot_reason)shot_why);
+
+		nn_result(res, say->status, nn_claim_of_stop(stop_rc));
+		nn_detail_set("%s%s", say->text,
+		              (res->claim != NN_CLAIM_NONE)
+		              ? "; the teardown did not finish either (`nn stream "
+		                "stop` finishes it)" : "");
+		return;
+	}
 	case NN_RUN_LOST:
 		nn_result(res, NN_SVC_ERR_HW, nn_claim_of_stop(stop_rc));
 		nn_detail_set("the band stream was lost before an inference "
@@ -1313,7 +1344,7 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		                "stop` finishes it)" : "");
 		return;
 	case NN_RUN_TIMEOUT:
-	default:        /* NN_RUN_NO_RESULT is not passed here until #171 */
+	default:
 		nn_result(res, NN_SVC_ERR_TIMEOUT, nn_claim_of_stop(stop_rc));
 		nn_detail_set("no inference completed within %u s%s",
 		              (unsigned)NN_RUN_WAIT_S,

@@ -36,6 +36,7 @@
 #include "nn.h"
 #include "nn_det_record.h"
 #include "nn_core_frame.h"   /* the shared frame path and its hand-over word (#130) */
+#include "nn_shot.h"         /* how one `nn run` ended, and whether it is open (#171) */
 
 /* ---- objects (defined in nn_camera.c) ------------------------------------- */
 
@@ -88,6 +89,22 @@ extern int nncam_norm_signed;
  * boundaries by the start / stop, invalidated by a load / unload, read by the
  * console and the panel (nn_camera_decode_get()). */
 extern struct nn_det_record nncam_rec;
+/*
+ * The one-shot's run number and its first ending (issue #171, svc/nn/nn_shot.h).
+ * [!] Every call on it is one hold of nncam_det_lock -- the lock that moves the
+ * record's generation -- never the PRIMASK the hand-over word steps under:
+ *   nn_shot_begin()      nn_camera_start(), before nncam_run is raised
+ *   nn_shot_open()       the producer at band 0 of a one-shot frame, BEFORE it
+ *                        can BEGIN a fill, sampling the generation for that
+ *                        frame in the same hold; the worker at its arm, sampling
+ *                        the generation it publishes under in the same hold
+ *   nn_shot_record()     the producer (a band it could not use, after its
+ *                        ABANDON), the worker (nn_run() failed, the lease not
+ *                        had, before nn_core_frame_done())
+ *   nn_shot_after_job()  the worker, after nn_core_on_infer_done() returned
+ *   nn_shot_failed()     `nn run`'s wait (nn_camera_oneshot_failed())
+ */
+extern struct nn_shot nncam_shot;
 
 /* Input geometry: written by the start, read by the producer while a stream
  * runs. */

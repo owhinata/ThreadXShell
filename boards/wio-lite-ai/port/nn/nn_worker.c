@@ -26,6 +26,7 @@
 #include "nn_decode_count.h" /* how a decode's answer is counted (#130 6c) */
 
 #include "tx_api.h"
+#include "mem_sections.h"    /* DTCM_BSS: CPU-only data out of AXI-SRAM (issue #46) */
 
 /*
  * How long this thread waits for the result lease before giving up on a frame
@@ -41,6 +42,18 @@
  * that stops underneath ends the band flow with the worker still wanting a frame.
  */
 #define NNCAM_FRAME_WAIT_TICKS 100u
+
+/*
+ * The one-shot's side of a job (issue #171), the worker's only:
+ *   nncam_w_run      the run this worker armed for, sampled under nncam_det_lock
+ *                    in the same hold as the generation it publishes under
+ *   nncam_acc_what   what nn_core_on_infer_done() made of the last job, and
+ *   nncam_acc_took   whether the record took it -- left by nncam_account() for
+ *                    the record after the call returns, never recorded there
+ */
+static uint32_t          nncam_w_run DTCM_BSS;
+static enum nn_core_done nncam_acc_what DTCM_BSS;
+static int               nncam_acc_took DTCM_BSS;
 
 /* ---------------------------------------------------------------- worker ------ */
 
@@ -144,6 +157,65 @@ static uint32_t nncam_gen_now(void)
 	return g;
 }
 
+/*
+ * The one-shot's arm (issue #171): is the run still open, and the generation
+ * this arm publishes under, in ONE hold of nncam_det_lock.  @return non-zero if
+ * the run is open (*@p gen and nncam_w_run then set): only then does the worker
+ * want a frame.  A run that has ended is not armed for, and the worker waits
+ * out its bounded frame wait until the stop's poke ends the loop.
+ */
+static int nncam_oneshot_arm(uint32_t *gen)
+{
+	uint32_t run, g;
+
+	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) != TX_SUCCESS)
+		return 0;
+	run = nn_shot_open(&nncam_shot);
+	g = nn_det_record_gen(&nncam_rec);
+	(void)tx_mutex_put(&nncam_det_lock);
+	if (run == 0u)
+		return 0;
+	nncam_w_run = run;
+	*gen = g;
+	return 1;
+}
+
+/*
+ * A one-shot job taken and ended before nn_core_on_infer_done(): nn_run()
+ * failed (@p why INVOKE) or the lease was not had (LEASE_TIMEOUT).  Recorded in
+ * ONE hold of nncam_det_lock with the question "is the generation sampled at
+ * the arm (@p gen) still the record's" -- a stop that moved it first makes this
+ * job the boundary's, not the run's end.  The caller then parks the word
+ * (DONE_LAST, as every job on this board ends) and the next step's arm asks
+ * whether the run is still open.
+ */
+static void nncam_oneshot_job_failed(enum nn_shot_reason why, uint32_t gen)
+{
+	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) != TX_SUCCESS)
+		return;
+	(void)nn_shot_record(&nncam_shot, nncam_w_run, why,
+	                     nn_det_record_admits(&nncam_rec, gen));
+	(void)tx_mutex_put(&nncam_det_lock);
+}
+
+/*
+ * A one-shot job after nn_core_on_infer_done() returned: what the account left
+ * (nncam_acc_what / _took), recorded in ONE hold of nncam_det_lock with the
+ * generation question -- a publish the record took ends the run whatever the
+ * generation, a job a boundary retired does not end it.  Whether to arm again
+ * is not decided here: the next step's arm asks nn_shot_open() itself, from the
+ * same state this writes.
+ */
+static void nncam_oneshot_after_job(uint32_t gen)
+{
+	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) != TX_SUCCESS)
+		return;
+	(void)nn_shot_after_job(&nncam_shot, nncam_w_run, nncam_acc_what,
+	                        nncam_acc_took,
+	                        nn_det_record_admits(&nncam_rec, gen));
+	(void)tx_mutex_put(&nncam_det_lock);
+}
+
 /* ---- the frame path's hooks (svc/nn/nn_core_frame.h, issue #130) ------------- */
 
 int nncam_publish_raw_hook(void *ctx, uint32_t gen)
@@ -199,6 +271,9 @@ int nncam_publish_hook(void *ctx, int n, uint32_t gen)
 void nncam_account(void *ctx, enum nn_core_done what, int n, int took)
 {
 	(void)ctx;
+	/* For the one-shot's record after nn_core_on_infer_done() (issue #171). */
+	nncam_acc_what = what;
+	nncam_acc_took = took;
 	if (!took || (what != NN_CORE_DONE_RAW && what != NN_CORE_DONE_DECODED))
 		return;
 	if (what == NN_CORE_DONE_DECODED) {
@@ -224,7 +299,9 @@ void nncam_account(void *ctx, enum nn_core_done what, int n, int took)
 
 static void nncam_step(int first)
 {
-	uint32_t gen;
+	/* Set by the start before nncam_run was raised; fixed while it is up. */
+	const int oneshot = nncam_oneshot;
+	uint32_t gen = 0u;
 	unsigned drained = 0u;
 
 	/*
@@ -261,9 +338,19 @@ static void nncam_step(int first)
 	 * wait, and the value read afterwards would be the NEW session's -- so the
 	 * old frame would publish into it looking current.  Hence this worker ends
 	 * every job parked (DONE_LAST) and arms itself here, after the sample.
+	 *
+	 * [!] A ONE-SHOT ARMS ONLY WHILE ITS RUN IS OPEN (issue #171): one frame
+	 * per job, and whether there is to be another is the run's answer.  The
+	 * question and the sample are one hold of nncam_det_lock.  A run that has
+	 * ended -- published, or failed -- is not armed for: the wait below runs
+	 * out, or the stop's poke ends it.  A stream arms on every step.
 	 */
-	gen = nncam_gen_now();
-	(void)nn_core_frame_want(&nncam_frame, &nncam_frame_ops);
+	if (!oneshot) {
+		gen = nncam_gen_now();
+		(void)nn_core_frame_want(&nncam_frame, &nncam_frame_ops);
+	} else if (nncam_oneshot_arm(&gen)) {
+		(void)nn_core_frame_want(&nncam_frame, &nncam_frame_ops);
+	}
 	if (tx_semaphore_get(&nncam_frame_sem, NNCAM_FRAME_WAIT_TICKS) != TX_SUCCESS) {
 		/* No frame within the bound.  The band flow may have ended without ever
 		   posting -- a DCMI overrun ended the stream, and nn's holder was
@@ -291,6 +378,8 @@ static void nncam_step(int first)
 	/* RUNNING: while the word says so, NOTHING may write the input tensor. */
 	if (nn_run(nncam_model) != 0) {
 		nncam_error();
+		if (oneshot)
+			nncam_oneshot_job_failed(NN_SHOT_INVOKE, gen);   /* #171 */
 		nn_core_frame_done(&nncam_frame, &nncam_frame_ops, 0);
 		return;
 	}
@@ -314,6 +403,8 @@ static void nncam_step(int first)
 	 */
 	if (nn_active_is_plugin() && !plugin_lease_take()) {
 		nncam_error();
+		if (oneshot)
+			nncam_oneshot_job_failed(NN_SHOT_LEASE_TIMEOUT, gen);   /* #171 */
 		nn_core_frame_done(&nncam_frame, &nncam_frame_ops, 0);
 		return;
 	}
@@ -323,8 +414,14 @@ static void nncam_step(int first)
 	 * or, with no plugin, the publish of an inference nothing decoded (issue
 	 * #116), which `nn run` waits on as much as on a decode.  Then this
 	 * board's count and the word back to IDLE: the next step arms again.
+	 *
+	 * [!] A ONE-SHOT THEN RECORDS WHAT BECAME OF THE JOB (issue #171), after
+	 * the call has returned -- the lease given back, the word parked -- so
+	 * the record lock is taken with nothing else held.
 	 */
 	nn_core_on_infer_done(&nncam_frame, &nncam_frame_ops, NULL, gen, 0);
+	if (oneshot)
+		nncam_oneshot_after_job(gen);
 }
 
 void nncam_entry(ULONG arg)

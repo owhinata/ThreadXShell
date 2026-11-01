@@ -154,6 +154,10 @@ int nncam_norm_signed;   /* 0 = [0,1] (default), 1 = [-1,1] */
  */
 struct nn_det_record nncam_rec;
 
+/* The one-shot's run number and first ending (issue #171); who calls what, and
+ * under which lock, is in nn_camera_priv.h.  CPU-only, so in DTCM. */
+struct nn_shot nncam_shot DTCM_BSS;
+
 /* Input geometry, latched at start so the band callback does no shape work. */
 unsigned nncam_ow, nncam_oh, nncam_oc;
 
@@ -636,6 +640,19 @@ int nn_camera_start(int colorbar, int require_draw)
 	while (tx_semaphore_get(&nncam_frame_sem, TX_NO_WAIT) == TX_SUCCESS)
 		;
 
+	/*
+	 * A new run number, nothing ended (issue #171): under nncam_det_lock like
+	 * every call on it, and now, while the worker is parked (the session this
+	 * start took is given back only once the worker is off its run loop) and
+	 * the producer is out of nn's step (the check at the top) -- so nobody
+	 * still holds the last run's number to write with.  For a stream too: it
+	 * never asks, and any writer of the last one-shot is refused from here.
+	 */
+	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) == TX_SUCCESS) {
+		(void)nn_shot_begin(&nncam_shot);
+		(void)tx_mutex_put(&nncam_det_lock);
+	}
+
 	nncam_rearmable = require_draw ? 1 : 0;   /* see the re-arm above */
 	nncam_oneshot   = require_draw ? 0 : 1;   /* `nn run` is the one without */
 	nncam_run = 1;
@@ -905,4 +922,24 @@ int  nn_camera_overlay(void)              { return nncam_run && !nncam_oneshot; 
 int  nn_camera_stream_lost(void)
 {
 	return nncam_run != 0 && camera_stream_lost(&nncam_holder) != 0;
+}
+
+/* Polled by `nn run`'s wait (issue #171), BEFORE it reads the record's accepted
+ * count (svc/nn/nn_run_wait.h).  Under nncam_det_lock, the lock every writer of
+ * the one-shot's ending holds.  The ending is the CURRENT run's: the start began
+ * it, and only the next start replaces it. */
+int nn_camera_oneshot_failed(int *reason)
+{
+	enum nn_shot_reason why = NN_SHOT_NONE;
+	int failed;
+
+	if (!nncam_created)
+		return 0;                       /* the lock is created by the 1st start */
+	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) != TX_SUCCESS)
+		return 0;
+	failed = nn_shot_failed(&nncam_shot, &why);
+	(void)tx_mutex_put(&nncam_det_lock);
+	if (failed && reason != NULL)
+		*reason = (int)why;
+	return failed;
 }

@@ -21,6 +21,7 @@
 
 #include "stm32h7xx_hal.h"   /* DWT */
 #include "tx_api.h"
+#include "mem_sections.h"    /* DTCM_BSS: CPU-only data out of AXI-SRAM (issue #46) */
 
 #include <stddef.h>
 
@@ -162,6 +163,65 @@ void nncam_infer_start(void *ctx)
 	(void)tx_semaphore_put(&nncam_frame_sem);
 }
 
+/* ------------------------------------------------- the one-shot's frame ------ */
+
+/*
+ * The one-shot frame the producer is on (issue #171), the producer's only:
+ *   nncam_p_open   band 0 of this frame found the run open; bands 1..3 of a
+ *                  frame whose band 0 was kept out do not reach the frame path
+ *   nncam_p_run    the run that band 0 found open, and
+ *   nncam_p_gen    the record's generation, sampled in the SAME hold -- what a
+ *                  band this frame could not use is recorded against
+ * Tied to the band 0 the producer is about to write, not to the worker's arm:
+ * the worker re-samples its own on every arm, even one refused while a fill is
+ * in flight, and handing that over would rewrite a frame's sample under it.  A
+ * band 0 that writes over a fill cut part way samples again, which is right:
+ * the bands after it belong to this band 0's frame.
+ */
+static uint32_t nncam_p_run DTCM_BSS;
+static uint32_t nncam_p_gen DTCM_BSS;
+static int      nncam_p_open DTCM_BSS;
+
+/*
+ * Band 0 of a one-shot frame: is the run still open?  Asked BEFORE the frame
+ * path can BEGIN a fill, so a run that has ended -- its frame refused, its
+ * inference failed -- never has another frame filled for it (FILLING keeps its
+ * two ways out, svc/nn/nn_handoff.h).  One hold of nncam_det_lock: every holder
+ * of it only copies, and none waits or sleeps inside it (the lease is always
+ * taken outside), so the band waits at most one such copy.
+ */
+static int nncam_frame_open(void)
+{
+	uint32_t run, gen;
+
+	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) != TX_SUCCESS)
+		return 0;
+	run = nn_shot_open(&nncam_shot);
+	gen = nn_det_record_gen(&nncam_rec);
+	(void)tx_mutex_put(&nncam_det_lock);
+	if (run == 0u)
+		return 0;
+	nncam_p_run = run;
+	nncam_p_gen = gen;
+	return 1;
+}
+
+/*
+ * The producer abandoned a one-shot frame it could not use -- a band of the
+ * wrong height, or no input tensor to write -- AFTER the ABANDON: the run ends
+ * as PREP, if the generation sampled at this frame's band 0 is still the
+ * record's (the test and the write in one hold of nncam_det_lock).  One a stop
+ * got to first is the boundary's, not the run's end.
+ */
+static void nncam_frame_refused(void)
+{
+	if (tx_mutex_get(&nncam_det_lock, TX_WAIT_FOREVER) != TX_SUCCESS)
+		return;
+	(void)nn_shot_record(&nncam_shot, nncam_p_run, NN_SHOT_PREP,
+	                     nn_det_record_admits(&nncam_rec, nncam_p_gen));
+	(void)tx_mutex_put(&nncam_det_lock);
+}
+
 /* ----------------------------------------------------------- band ingest ------ */
 
 /*
@@ -183,13 +243,32 @@ void nncam_band(unsigned band, const uint16_t *px, unsigned rows)
 	if (camera_stream_lost(&nncam_holder))
 		return;
 
+	/*
+	 * [!] A ONE-SHOT TAKES FRAMES ONLY WHILE ITS RUN IS OPEN (issue #171).
+	 * Asked at band 0, BEFORE the frame path can BEGIN a fill: a run that has
+	 * ended leaves the word WANT behind the producer's ABANDON, and without
+	 * this the next frame would be filled and handed for a run that is over.
+	 * The answer holds for the frame: bands 1..3 of a frame kept out at band 0
+	 * do not reach the frame path either.  nncam_oneshot is set by the start
+	 * before the step is armed.  A stream does not ask (it is not a run) and
+	 * takes no lock here.
+	 */
+	if (nncam_oneshot) {
+		if (band == 0u)
+			nncam_p_open = nncam_frame_open();
+		if (!nncam_p_open)
+			return;
+	}
+
 	/* The band tiling is derived from CAMERA_BAND_ROWS, and the driver's
 	   contract is that every band is exactly that tall (port/camera/camera.h).  If
 	   that ever stops being true the rows would be sampled from the wrong source
 	   offsets and the image would simply be wrong -- so count it instead, and
 	   drop the frame being filled (the producer's own ABANDON). */
 	if (rows != CAMERA_BAND_ROWS) {
-		(void)nn_core_frame_abandon(&nncam_frame, &nncam_frame_ops);
+		if (nn_core_frame_abandon(&nncam_frame, &nncam_frame_ops) &&
+		    nncam_oneshot)
+			nncam_frame_refused();     /* after the ABANDON (#171) */
 		nncam_error();
 		return;
 	}
@@ -202,6 +281,10 @@ void nncam_band(unsigned band, const uint16_t *px, unsigned rows)
 		nncam_skipped++;   /* a whole frame went by while the worker ran */
 		break;
 	case NN_CORE_FR_ABANDONED:
+		/* nncam_prep() refused the band (no input tensor) and the frame
+		 * path has ABANDONed the frame: a one-shot's run ends (#171). */
+		if (nncam_oneshot)
+			nncam_frame_refused();
 		nncam_error();
 		break;
 	case NN_CORE_FR_RACED:

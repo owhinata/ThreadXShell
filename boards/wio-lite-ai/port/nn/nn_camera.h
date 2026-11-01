@@ -332,4 +332,10 @@ int  nn_camera_overlay(void);
  *  `nn stream start` to re-arm. */
 int  nn_camera_stream_lost(void);
 
+/** The current `nn run` ended without a result (issue #171): the producer could
+ *  not prepare its frame, or the worker's inference or lease failed.  Non-zero
+ *  with @p *reason set to the enum nn_shot_reason (svc/nn/nn_shot.h); a run
+ *  that published, or has not ended, answers zero. */
+int  nn_camera_oneshot_failed(int *reason);
+
 #endif /* NN_CAMERA_H */

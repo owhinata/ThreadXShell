@@ -79,6 +79,11 @@ static void nncam_preprocess(const struct frame_desc *f, const struct nn_tensor 
 	}
 }
 
+/* The one-shot run this frame was offered for (issue #171): sampled by
+ * nncam_consume() under nncam_lock, in the hold that found the run open, and
+ * read by the prep of the same frame.  The producer only. */
+static uint32_t nncam_p_run;
+
 /* ---- the frame path's hooks (svc/nn/nn_core_frame.h, issue #130) ------------- */
 
 /*
@@ -99,7 +104,7 @@ int nncam_prep(void *ctx, unsigned part, unsigned nparts)
 	const struct frame_desc *f = (const struct frame_desc *)ctx;
 	struct nn_tensor *in;
 	uint32_t epoch0;
-	int stale;
+	int stale, refused;
 
 	(void)part;
 	(void)nparts;
@@ -112,17 +117,32 @@ int nncam_prep(void *ctx, unsigned part, unsigned nparts)
 	 * cannot be loaded or unloaded while a stream runs; a tensor that has gone
 	 * anyway is an error, and nothing is written. */
 	in = nn_input(nncam_model, 0);
-	if (in == NULL || in->data == NULL || in->bytes < nncam_in_bytes) {
+	refused = (in == NULL || in->data == NULL || in->bytes < nncam_in_bytes);
+	if (refused) {
 		nncam_error();
-		return -1;
+	} else {
+		/* Resize + convert while the slot is still pinned by the caller
+		 * (reads f->data). */
+		nncam_preprocess(f, in);
 	}
-	/* Resize + convert while the slot is still pinned by the caller (reads f->data). */
-	nncam_preprocess(f, in);
 
+	/*
+	 * [!] A REFUSED FRAME COMES THROUGH THIS HOLD TOO (issue #171), so that a
+	 * one-shot's "preprocessing refused the frame" is decided where the epoch
+	 * and the generation are asked: recorded only for a frame no boundary
+	 * overtook -- the epoch unmoved, the run still up, and the generation
+	 * sampled above still the record's.  A refusal a detach or a stop got to
+	 * first is the boundary's, as it always was: the frame is abandoned, the
+	 * run stays open, and the next frame is this run's.
+	 */
 	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
 	stale = (nncam_epoch != epoch0 || !nncam_run);
+	if (refused && !stale && nncam_oneshot)
+		(void)nn_shot_record(&nncam_shot, nncam_p_run, NN_SHOT_PREP,
+		                     nn_det_record_admits(&nncam_rec,
+		                                          nncam_job_gen));
 	tx_mutex_put(&nncam_lock);
-	return stale ? -1 : 0;
+	return (refused || stale) ? -1 : 0;
 }
 
 /* The producer has handed the frame over: wake the worker.  [!] After the
@@ -174,7 +194,28 @@ int nncam_consume(void *ctx, const struct frame_desc *f)
 {
 	(void)ctx;
 
-	if (nncam_run)
-		nncam_ingest(f);                    /* into the input tensor (pin held)     */
+	if (!nncam_run)
+		return 0;
+	/*
+	 * [!] A ONE-SHOT TAKES FRAMES ONLY WHILE ITS RUN IS OPEN (issue #171).
+	 * Asked here, BEFORE the frame path can BEGIN a fill: a run that has ended
+	 * -- its frame refused, its inference failed -- leaves the word WANT
+	 * behind the ABANDON or the worker, and without this the next frame would
+	 * be filled and handed for a run that is over.  FILLING is never entered
+	 * for a closed run, so it keeps its two ways out (svc/nn/nn_handoff.h).
+	 * The run is sampled in the same hold, for the prep to record against.
+	 * A stream does not ask: it is not a run.
+	 */
+	if (nncam_oneshot) {
+		uint32_t run;
+
+		tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
+		run = nn_shot_open(&nncam_shot);
+		tx_mutex_put(&nncam_lock);
+		if (run == 0u)
+			return 0;
+		nncam_p_run = run;
+	}
+	nncam_ingest(f);                            /* into the input tensor (pin held)     */
 	return 0;
 }

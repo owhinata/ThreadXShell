@@ -188,6 +188,10 @@ static const struct cam_holder nncam_holder = { "nn" };
  * prep that spans a session boundary is abandoned instead of handing over a stale frame. */
 volatile uint32_t nncam_epoch;
 
+/* The one-shot's run number and first ending (issue #171); who calls what, and
+ * under which lock, is in nn_camera_priv.h. */
+struct nn_shot nncam_shot;
+
 /* Release the nn session iff the AI subscriber still holds it AND the sink drain
  * has confirmed the producer out of the input tensor (issue #130 -- the producer
  * writes the arena the session guards, see nn_sess_release.h).  Exactly once per
@@ -688,9 +692,15 @@ int nn_camera_start(enum camera_res res, int oneshot)
 	(void)nn_core_frame_discard(&nncam_frame, &nncam_frame_ops);
 	(void)nn_core_frame_join(&nncam_frame, &nncam_frame_ops);
 
-	/* Nothing of this stream has been drained yet (issue #130). */
+	/* Nothing of this stream has been drained yet (issue #130).  And a new
+	 * run number, nothing ended (issue #171): under nncam_lock like every call
+	 * on it, and now, while the worker is parked and the producer is not in
+	 * the step (the same facts the word's park above rests on) -- so nobody
+	 * still holds the last run's number to write with.  For a stream too: it
+	 * never asks, and any writer of the last one-shot is refused from here. */
 	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
 	nncam_sink_drained = 0;
+	(void)nn_shot_begin(&nncam_shot);
 	tx_mutex_put(&nncam_lock);
 
 	/* Hold the camera open (issue #142): join a running stream, or start it
@@ -846,6 +856,25 @@ bool nn_camera_overlay(void)
 int nn_camera_stream_lost(void)
 {
 	return nncam_run != 0 && camera_stream_lost(&nncam_holder) != 0;
+}
+
+/* Polled by `nn run`'s wait (issue #171), BEFORE it reads the record's accepted
+ * count (svc/nn/nn_run_wait.h).  Under nncam_lock, the lock every writer of the
+ * one-shot's ending holds.  The ending is the CURRENT run's: the start began it,
+ * and only the next start replaces it. */
+int nn_camera_oneshot_failed(int *reason)
+{
+	enum nn_shot_reason why = NN_SHOT_NONE;
+	int failed;
+
+	if (!nncam_created)
+		return 0;                           /* nncam_lock not created before 1st start */
+	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
+	failed = nn_shot_failed(&nncam_shot, &why);
+	tx_mutex_put(&nncam_lock);
+	if (failed && reason != NULL)
+		*reason = (int)why;
+	return failed;
 }
 
 void nn_camera_stats_get(struct nn_camera_stats *out)

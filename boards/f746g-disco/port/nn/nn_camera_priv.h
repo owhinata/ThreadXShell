@@ -32,6 +32,7 @@
 #include "nn_det_record.h"
 #include "nn_core_frame.h"   /* the shared frame path and its hand-over word (#130) */
 #include "nn_sess_release.h" /* enum nn_sess_who                                    */
+#include "nn_shot.h"         /* how one `nn run` ended, and whether it is open (#171) */
 #include "cam_own.h"         /* the owner lifecycle (issue #72)                        */
 #include "frame_pipeline.h"  /* struct frame_sink / frame_desc */
 
@@ -77,6 +78,19 @@ extern int          nncam_oneshot;
 /* Moved by the attach (open), the detach (close) under nncam_lock; read by the
  * producer's prep under the same lock. */
 extern volatile uint32_t nncam_epoch;
+/*
+ * The one-shot's run number and its first ending (issue #171, svc/nn/nn_shot.h).
+ * [!] Every call on it is one hold of nncam_lock -- the lock that moves the
+ * record's generation -- never the PRIMASK the hand-over word steps under:
+ *   nn_shot_begin()      nn_camera_start(), in the hold that clears the drain
+ *   nn_shot_open()       the producer at consume() (one-shot only), BEFORE it
+ *                        offers the frame; the worker as it enters its run loop
+ *   nn_shot_record()     the producer's prep (no tensor), the worker (nn_run()
+ *                        failed, the lease not had)
+ *   nn_shot_after_job()  the worker, after nn_core_on_infer_done() returned
+ *   nn_shot_failed()     `nn run`'s wait (nn_camera_oneshot_failed())
+ */
+extern struct nn_shot nncam_shot;
 
 /* Model input geometry: written by the start (nncam_open_model()), read by the
  * producer while a stream runs. */

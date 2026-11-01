@@ -38,6 +38,19 @@
 
 #define NNCAM_POLL_TICKS      100u        /* sem wait -> stop latency               */
 
+/*
+ * The one-shot's side of a job (issue #171), the worker's only:
+ *   nncam_w_run      the run this worker serves, sampled under nncam_lock as it
+ *                    enters its run loop (the start began it before raising
+ *                    nncam_run, and begins the next only once this has parked)
+ *   nncam_acc_what   what nn_core_on_infer_done() made of the last job, and
+ *   nncam_acc_took   whether the record took it -- left by nncam_account() for
+ *                    the record after the call returns, never recorded there
+ */
+static uint32_t          nncam_w_run;
+static enum nn_core_done nncam_acc_what;
+static int               nncam_acc_took;
+
 /* ---- the frame path's publish / account (svc/nn/nn_core_frame.h, issue #130) -- */
 
 /* One publish's counts (nn_decode_tally_of()): the per-attach and the
@@ -167,6 +180,9 @@ int nncam_publish_hook(void *ctx, int n, uint32_t gen)
 void nncam_account(void *ctx, enum nn_core_done what, int n, int took)
 {
 	(void)ctx;
+	/* For the one-shot's record after nn_core_on_infer_done() (issue #171). */
+	nncam_acc_what = what;
+	nncam_acc_took = took;
 	if (what == NN_CORE_DONE_RAW) {
 		nncam_tally(nn_decode_tally_of(took, NN_DC_NONE), 0);
 		return;
@@ -175,6 +191,45 @@ void nncam_account(void *ctx, enum nn_core_done what, int n, int took)
 		return;
 	nncam_tally(nn_decode_tally_of(took, nn_decode_count_of(n,
 	                                         nncam_oneshot)), n);
+}
+
+/* ---- the one-shot's end of a job (issue #171, svc/nn/nn_shot.h) ------------- */
+
+/* Arm for another frame of the one-shot: only while its run is still open (the
+ * record's answer, @p open) AND nncam_run is still up -- read HERE, after the
+ * record, so a stop that came in before it is seen.  A stop that lands after
+ * this read finds WANT, and its JOIN (or the next start's) parks it, as for a
+ * stream. */
+static void nncam_shot_rearm(int open)
+{
+	if (open && nncam_run)
+		(void)nn_core_frame_want(&nncam_frame, &nncam_frame_ops);
+}
+
+/*
+ * A job taken and ended before nn_core_on_infer_done(): nn_run() failed
+ * (@p why INVOKE) or the lease was not had (LEASE_TIMEOUT).  A stream goes back
+ * to WANT while it runs, as it always did.  A one-shot records why, in ONE
+ * hold of nncam_lock with the question "is the generation the frame was
+ * prepared under (@p gen) still the record's" -- a detach or a stop that moved
+ * it first makes this frame the boundary's, not the run's end, and the worker
+ * arms for the next one -- then parks the word (one frame per job: DONE_LAST)
+ * and re-arms only if the run is still open.
+ */
+static void nncam_job_failed(int oneshot, enum nn_shot_reason why, uint32_t gen)
+{
+	int open;
+
+	if (!oneshot) {
+		nn_core_frame_done(&nncam_frame, &nncam_frame_ops, nncam_run ? 1 : 0);
+		return;
+	}
+	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
+	open = nn_shot_record(&nncam_shot, nncam_w_run, why,
+	                      nn_det_record_admits(&nncam_rec, gen));
+	tx_mutex_put(&nncam_lock);
+	nn_core_frame_done(&nncam_frame, &nncam_frame_ops, 0);
+	nncam_shot_rearm(open);
 }
 
 /* ---- inference worker ----------------------------------------------------- */
@@ -190,7 +245,10 @@ static void nncam_step(void)
 {
 	uint32_t hclk = HAL_RCC_GetHCLKFreq();
 	uint32_t mhz = hclk / 1000000u ? hclk / 1000000u : 1u;
+	/* Set by the start before nncam_run was raised; fixed while it is up. */
+	const int oneshot = nncam_oneshot;
 	uint32_t gen;
+	int open;
 
 	(void)tx_semaphore_get(&nncam_sem, NNCAM_POLL_TICKS);
 	if (!nncam_run)
@@ -203,7 +261,7 @@ static void nncam_step(void)
 	/* RUNNING: while the word says so, NOTHING may write the input tensor. */
 	if (nn_run(nncam_model) != 0) {
 		nncam_error();
-		nn_core_frame_done(&nncam_frame, &nncam_frame_ops, nncam_run ? 1 : 0);
+		nncam_job_failed(oneshot, NN_SHOT_INVOKE, gen);
 		return;
 	}
 	/* Counted in nncam_account(), once the publish has answered (#138). */
@@ -221,7 +279,7 @@ static void nncam_step(void)
 	 */
 	if (nn_active_is_plugin() && !plugin_lease_take()) {
 		nncam_error();
-		nn_core_frame_done(&nncam_frame, &nncam_frame_ops, nncam_run ? 1 : 0);
+		nncam_job_failed(oneshot, NN_SHOT_LEASE_TIMEOUT, gen);
 		return;
 	}
 #endif
@@ -232,9 +290,25 @@ static void nncam_step(void)
 	 * to WANT -- or to IDLE when a stop has come in, so a stop that finds the
 	 * worker parked finds nothing armed.  [!] After the outputs are read for the
 	 * last time, never before: from WANT the producer may write the input again.
+	 *
+	 * [!] A ONE-SHOT PARKS THE WORD AFTER EVERY JOB (issue #171): one frame
+	 * per job, and whether there is to be another is the run's answer, not
+	 * nncam_run's.  The account left what became of the job; the record
+	 * takes it in ONE hold of nncam_lock with the generation question -- a
+	 * publish the record took ends the run whatever the generation, a job a
+	 * boundary retired does not end it -- and the worker re-arms only on a
+	 * run still open.  A stream keeps going back to WANT while it runs.
 	 */
 	nn_core_on_infer_done(&nncam_frame, &nncam_frame_ops, NULL, gen,
-	                      nncam_run ? 1 : 0);
+	                      oneshot ? 0 : (nncam_run ? 1 : 0));
+	if (!oneshot)
+		return;
+	tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
+	open = nn_shot_after_job(&nncam_shot, nncam_w_run, nncam_acc_what,
+	                         nncam_acc_took,
+	                         nn_det_record_admits(&nncam_rec, gen));
+	tx_mutex_put(&nncam_lock);
+	nncam_shot_rearm(open);
 }
 
 void nncam_entry(ULONG arg)
@@ -249,11 +323,20 @@ void nncam_entry(ULONG arg)
 		 * without ever setting nncam_active -- so nn_camera_stop() never waits on
 		 * an active flag the worker will not clear (the BLOCKING stuck race). */
 		nncam_active = 1;
+		/* The one-shot's run, begun by the start before nncam_run was raised
+		 * (issue #171): the one this worker records against until it parks. */
+		if (nncam_oneshot) {
+			tx_mutex_get(&nncam_lock, TX_WAIT_FOREVER);
+			nncam_w_run = nn_shot_open(&nncam_shot);
+			tx_mutex_put(&nncam_lock);
+		}
 		/* Ask for a frame (IDLE -> WANT).  nn_camera_start() parked the word
 		 * before raising nncam_run, so this is the arm a stream begins with;
 		 * refused only if a word left armed by the last session is still
-		 * armed, which asks for the same thing. */
-		(void)nn_core_frame_want(&nncam_frame, &nncam_frame_ops);
+		 * armed, which asks for the same thing.  A one-shot arms only on an
+		 * open run -- always so here, nothing can end it before this arm. */
+		if (!nncam_oneshot || nncam_w_run != 0u)
+			(void)nn_core_frame_want(&nncam_frame, &nncam_frame_ops);
 		LOG_INF("inference running (prio %u)", (unsigned)NNCAM_WORKER_PRIORITY);
 		/* Run while enabled.  A base detach (producer_dead) is a PAUSE, not a stop
 		 * (owhinata/stm32f746g-disco#100): no frames flow so the worker just idles on the poll

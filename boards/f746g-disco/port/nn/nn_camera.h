@@ -194,6 +194,12 @@ void nn_camera_stats_get(struct nn_camera_stats *out);
  *  issue #142): `nn run`'s wait reports it as LOST (issue #163). */
 int  nn_camera_stream_lost(void);
 
+/** The current `nn run` ended without a result (issue #171): the producer could
+ *  not prepare its frame, or the worker's inference or lease failed.  Non-zero
+ *  with @p *reason set to the enum nn_shot_reason (svc/nn/nn_shot.h); a run
+ *  that published, or has not ended, answers zero. */
+int  nn_camera_oneshot_failed(int *reason);
+
 /**
  * One decode's boxes and the diagnostics that belong to them.
  *

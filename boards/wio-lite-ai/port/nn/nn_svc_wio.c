@@ -48,6 +48,7 @@
 #include "nn_run_wait.h"   /* how `nn run`'s wait ends (shared, #163) */
 #include "nn_shot.h"       /* how one `nn run` ended (shared, #171)    */
 #include "nn_refusal.h"    /* the refusals and run endings (shared, #174) */
+#include "nn_svc_common.h" /* nn info's model section, nn thresh (#174)   */
 #include "plugin_load.h"
 #include "plugin_lease.h"
 #include "plugin_run_core.h"
@@ -322,93 +323,11 @@ static uint32_t nn_life_seq(void)
 	return v;
 }
 
+/* The body is svc/nn/nn_svc_common.c's, shared with f746g-disco (issue #174);
+ * what is this board's is how it reads the order's counter. */
 void nn_svc_info(struct nn_svc_info *out)
 {
-	const struct nn_backend_info *bi = nn_backend();
-	struct nn_model *m = NULL;
-	uint32_t seq0, seq1;
-	int held;
-
-	memset(out, 0, sizeof *out);
-	nn_svc_str(out->backend, sizeof out->backend, bi ? bi->name : NULL);
-	nn_svc_str(out->version, sizeof out->version, bi ? bi->version : NULL);
-
-	/* [!] THE RESERVATION, NOT THE USE (issue #131 P3).  This line used to
-	 * carry what the model's activations take, under the word "reserved"; that
-	 * is `used` now, as on grove-vision-ai-v2.  A fixed fact of the build, so it
-	 * needs no claim and stands even when the rest is busy. */
-	out->arena_bytes = nn_arena_reserved();
-
-	if (nn_model_open(&m) != 0 || m == NULL)
-		return;
-
-	/* Copied, not borrowed: the backend owns this name and a reload replaces
-	   it, so the caller must not hold a pointer into it while printing. */
-	/*
-	 * [!] THE NAME IS COPIED UNDER THE SESSION WHEN THE SESSION IS FREE, and
-	 * copied anyway when it is not.  That is a deliberate middle, not an
-	 * oversight:
-	 *
-	 *   Taking the session unconditionally would make `nn info` REFUSE while a
-	 *   stream runs -- the worker holds it for the whole stream -- and that is
-	 *   exactly when the report is worth asking for.  Both boards' previous
-	 *   `nn info` read this name with no claim at all for that reason.
-	 *
-	 *   Not taking it at all leaves the copy able to race a reload, which
-	 *   rewrites the backend's name buffer byte by byte, and produce a torn
-	 *   name.  Cosmetic and self-correcting, but avoidable.
-	 *
-	 * So: try.  A reload cannot be in flight while the session is free, so the
-	 * common case is now provably clean; when it is held the behaviour is what
-	 * it always was, and no diagnostic is lost.
-	 */
-	seq0 = nn_life_seq();
-	held = (nn_session_try_acquire() == 0);
-	/* [!] "A MODEL IS ACTIVE", NOT "THE SINGLETON OPENED" (issue #122 P2).
-	 * nn_model_open() succeeds on an empty TFLM singleton -- its state after
-	 * boot and after an unload -- so this said 1 with nothing loaded, and the
-	 * load command took that to mean a previous model existed. */
-	out->model_active = nn_model_present(m) ? 1u : 0u;
-	nn_svc_str(out->model, sizeof out->model, nn_model_name(m));
-	out->arena_used  = out->model_active ? nn_activations_bytes(m) : 0u;
-	if (held)
-		nn_session_release();
-	seq1 = nn_life_seq();
-
-	/*
-	 * [!] A LOAD IN FLIGHT IS BUSY, NOT "NO MODEL" (issue #122).  The backend
-	 * publishes zero tensors while it rebuilds -- the new model, or the previous
-	 * one on a rollback -- so a copy taken then says nothing is loaded, and the
-	 * load goes on to report NEW or PREVIOUS.  When the session was free no load
-	 * can have run; when it was not, the copy stands only if no load or unload
-	 * was between its two steps at either end of it, nor ran whole in between
-	 * (nn_core_model_copy_stands(), the rule as the shared order states it).
-	 * A stream holds the session and never moves the counter, so its report is
-	 * what it was.
-	 */
-	if (!nn_core_model_copy_stands(seq0, seq1, held)) {
-		out->model_active   = 0u;
-		out->model[0]       = '\0';
-		out->arena_used     = 0u;
-		out->avail_identity = (uint8_t)NN_AVAIL_BUSY;
-		out->avail_runtime  = (uint8_t)NN_AVAIL_BUSY;
-		out->avail_tensors  = (uint8_t)NN_AVAIL_BUSY;
-		return;
-	}
-
-	/* Every section is answered here, streaming or not -- which is the point of
-	   the copy above (issue #99 made this explicit rather than implied). */
-	out->avail_identity = (uint8_t)NN_AVAIL_OK;
-	out->avail_runtime  = (uint8_t)NN_AVAIL_OK;
-	out->avail_tensors  = out->model_active ? (uint8_t)NN_AVAIL_OK
-	                                        : (uint8_t)NN_AVAIL_NA;
-
-
-	/* [!] Say plainly when nothing is being inferred, so a latency from
-	 * `nn bench` is never mistaken for a model's. */
-	if (bi && strcmp(bi->name, "null") == 0)
-		nn_svc_str(out->source, sizeof out->source,
-		           "synthetic workload, not inference");
+	nn_svc_common_info(out, nn_life_seq);
 }
 
 /* ---- model lifecycle -----------------------------------------------------
@@ -1964,77 +1883,33 @@ int nn_svc_box_to_frame(const struct bf_det *in, struct bf_det *out)
 }
 
 /*
- * [!] THROUGH THE SHIM, NOT STRAIGHT TO THE RESIDENT DECODER (issue #110).  A
- * loaded plugin carries its OWN threshold; reaching past nn_active would change
- * a firmware number the decoder in force never reads, and `nn thresh 700` would
- * report success while deciding nothing.  This is the divergence an operator
- * meets in the first minute, and the one a differential test that gives both
- * decoders the same threshold cannot see.
+ * [!] THROUGH THE SHIM, NOT STRAIGHT TO A RESIDENT DECODER (issue #110): a
+ * loaded plugin carries its OWN threshold.  The order -- lease, entry, lease
+ * back -- and the answers are svc/nn/nn_svc_common.c's, the same on every
+ * board (issue #174); this board protects the plugin with the lease alone, so
+ * it counts nothing in.  A build with no decoder passes no entries and gets the
+ * answers a decoder with none loaded gives (issue #116).
  */
+static const struct nn_svc_thresh_ops nn_thresh_ops = {
+#if defined(CONFIG_NN_BACKEND_TFLM)
+	.lease_take = plugin_lease_take,
+	.lease_give = plugin_lease_give,
+	.get        = nn_active_get_thresh_milli,
+	.set        = nn_active_set_thresh_milli,
+	.not_held   = NN_ACTIVE_NOT_HELD,
+#else
+	.not_held   = 0,
+#endif
+};
+
 int nn_svc_thresh_get(unsigned *milli)
 {
-#if defined(CONFIG_NN_BACKEND_TFLM)
-	int r;
-#endif
-
-	if (milli == NULL)
-		return NN_SVC_ERR_ARG;
-	*milli = NN_SVC_THRESH_NONE;
-#if defined(CONFIG_NN_BACKEND_TFLM)
-	/* [!] UNDER THE LEASE (issue #110).  This reaches a plugin's param_get,
-	 * which reads plugin state that a decode may be rewriting and that a
-	 * concurrent `nn model load` may be REPLACING -- and this command takes no
-	 * NN session, so nothing else keeps either out.  If the lease cannot be
-	 * had, say there is no answer rather than reading one from a plugin
-	 * somebody else is in the middle of.
-	 *
-	 * [!] AND "NO ANSWER" IS BUSY, NOT "NONE" (issue #122 P6).  Returning
-	 * NN_SVC_THRESH_NONE here told the operator the decoder held no threshold
-	 * when it merely could not be asked. */
-	if (!plugin_lease_take())
-		return NN_SVC_ERR_BUSY;
-	r = nn_active_get_thresh_milli(milli);
-	plugin_lease_give();
-	/* NN_ACTIVE_NOT_HELD cannot come back from under the lease; if it ever
-	 * does, it is BUSY like any other call that did not get in (issue #130). */
-	return r == NN_ACTIVE_THRESH_OK ? NN_SVC_OK : NN_SVC_ERR_BUSY;
-#else
-	/* [!] NO PLUGIN MECHANISM AND NO DECODER (issue #116).  The `null` backend
-	 * cannot load a container at all, so nothing in this build holds a
-	 * threshold -- the same answer the TFLM build gives with none loaded. */
-	return NN_SVC_OK;
-#endif
+	return nn_svc_common_thresh_get(&nn_thresh_ops, milli);
 }
 
 int nn_svc_thresh_set(unsigned milli)
 {
-#if defined(CONFIG_NN_BACKEND_TFLM)
-	int r;
-
-	/* No detail to set: this entry point returns a status only, and the
-	 * shared command has a line for BUSY (issue #122 P6 gave it one). */
-	if (!plugin_lease_take())
-		return NN_SVC_ERR_BUSY;
-	r = nn_active_set_thresh_milli(milli);
-	plugin_lease_give();
-	switch (r) {
-	case NN_ACTIVE_THRESH_OK:
-		return NN_SVC_OK;
-	case NN_ACTIVE_THRESH_NO_DECODER:
-		/* The slot the shared command already has for it: the loaded decoder
-		 * holds no threshold, which is not the same as refusing the value. */
-		return NN_SVC_ERR_STATE;
-	case NN_ACTIVE_NOT_HELD:
-		return NN_SVC_ERR_BUSY;     /* nothing was entered; see _get */
-	default:
-		return NN_SVC_ERR_ARG;
-	}
-#else
-	/* Nothing holds one here either -- and "there is nothing to set" is not
-	 * "that value is out of range" (issue #116). */
-	(void)milli;
-	return NN_SVC_ERR_STATE;
-#endif
+	return nn_svc_common_thresh_set(&nn_thresh_ops, milli);
 }
 
 /*

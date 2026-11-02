@@ -849,6 +849,10 @@ set(NN_SOURCES "${CMAKE_SOURCE_DIR}/svc/nn/nn.c"   # the dispatcher (shared, #16
                # one table for every board, walked by
                # shell/test/test_nn_refusal.c
                "${CMAKE_SOURCE_DIR}/svc/nn/nn_refusal.c"
+               # `nn info`'s model section and `nn thresh` (issue #174):
+               # shared with f746g-disco (both) and grove-vision-ai-v2
+               # (thresh), walked by shell/test/test_nn_svc_common.c
+               "${CMAKE_SOURCE_DIR}/svc/nn/nn_svc_common.c"
                # the one `nn bench` procedure (issue #163): hold, fill,
                # time N runs, let go -- walked by shell/test/test_nn_bench.c
                "${CMAKE_SOURCE_DIR}/svc/nn/nn_bench.c"

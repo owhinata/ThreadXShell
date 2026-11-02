@@ -426,6 +426,7 @@ set(NN_SOURCES
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_run_wait.c"  # how `nn run`'s wait ends (#129, shared #163)
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_shot.c"      # ...and how one `nn run` ended (#171)
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_refusal.c"   # the refusals' words + run endings (#174)
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_svc_common.c" # nn info's model section + nn thresh (#174)
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_bench.c"     # the one `nn bench` procedure (#163)
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_sess_release.c" # when the session may go back (#130, svc/ #163)
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_decode_count.c" # how a decode is counted (#130 6c, svc/ #163)

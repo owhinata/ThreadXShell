@@ -62,6 +62,7 @@
 #include "nn_rec.h"
 #include "nn_run_wait.h"
 #include "nn_refusal.h"   /* the refusals and run endings (shared, #174) */
+#include "nn_svc_common.h" /* nn thresh (shared, #174) */
 #include "nn_stream_state.h"
 #include "nn_core_model.h"
 #include "nor_flash.h"    /* NOR_XIP_BASE */
@@ -2336,52 +2337,26 @@ _Static_assert(4u + (unsigned)PLUGIN_SLOT_COUNT < (unsigned)NN_STREAM_LINES_MAX,
  * decoded).  Not taken, the call is BUSY -- the same answer as a refused count,
  * and nothing was entered.
  */
+/* The order above and the answers are svc/nn/nn_svc_common.c's, the same on
+ * every board (issue #174); this board passes the count's way in and out. */
+static const struct nn_svc_thresh_ops nn_thresh_ops = {
+	.enter      = nn_param_enter,
+	.leave      = nn_param_leave,
+	.lease_take = plugin_lease_take,
+	.lease_give = plugin_lease_give,
+	.get        = nn_active_get_thresh_milli,
+	.set        = nn_active_set_thresh_milli,
+	.not_held   = NN_ACTIVE_NOT_HELD,
+};
+
 int nn_svc_thresh_get(unsigned *milli)
 {
-	int r;
-
-	if (milli == NULL)
-		return NN_SVC_ERR_ARG;
-	*milli = NN_SVC_THRESH_NONE;
-	if (!nn_param_enter())
-		return NN_SVC_ERR_BUSY;
-	if (!plugin_lease_take()) {
-		nn_param_leave();
-		return NN_SVC_ERR_BUSY;
-	}
-	r = nn_active_get_thresh_milli(milli);
-	plugin_lease_give();
-	nn_param_leave();
-	/* NN_ACTIVE_NOT_HELD cannot come back from under the lease; if it ever
-	 * does, it is BUSY like any other call that did not get in. */
-	return r == NN_ACTIVE_THRESH_OK ? NN_SVC_OK : NN_SVC_ERR_BUSY;
+	return nn_svc_common_thresh_get(&nn_thresh_ops, milli);
 }
 
 int nn_svc_thresh_set(unsigned milli)
 {
-	int r;
-
-	if (!nn_param_enter())
-		return NN_SVC_ERR_BUSY;
-	if (!plugin_lease_take()) {
-		nn_param_leave();
-		return NN_SVC_ERR_BUSY;
-	}
-	r = nn_active_set_thresh_milli(milli);
-	plugin_lease_give();
-	nn_param_leave();
-	switch (r) {
-	case NN_ACTIVE_THRESH_OK:
-		return NN_SVC_OK;
-	case NN_ACTIVE_THRESH_NO_DECODER:
-		/* Not an argument error: the value was fine and there is nothing here
-		 * to hold it (issue #104). */
-		return NN_SVC_ERR_STATE;
-	case NN_ACTIVE_NOT_HELD:
-		return NN_SVC_ERR_BUSY;     /* nothing was entered; see _get */
-	default:
-		return NN_SVC_ERR_ARG;
-	}
+	return nn_svc_common_thresh_set(&nn_thresh_ops, milli);
 }
 
 /* ---- `nn info` extras (issue #101) --------------------------------------- */

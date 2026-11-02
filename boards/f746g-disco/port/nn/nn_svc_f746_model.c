@@ -27,6 +27,7 @@
 #include "nn_svc.h"
 #include "nn_svc_adapter.h" /* nn_detail_set, nn_result (#130) */
 #include "nn_core_model.h"  /* the shared load / unload order (#131) */
+#include "nn_svc_common.h"  /* nn info's model section (shared, #174) */
 
 #include <string.h>
 
@@ -559,97 +560,11 @@ static uint32_t nn_life_seq(void)
 	return v;
 }
 
+/* The body is svc/nn/nn_svc_common.c's, shared with wio-lite-ai (issue #174);
+ * what is this board's is how it reads the order's counter. */
 void nn_svc_info(struct nn_svc_info *out)
 {
-	const struct nn_backend_info *bi = nn_backend();
-	struct nn_model *m = NULL;
-	uint32_t seq0, seq1;
-	int held, rc;
-
-	memset(out, 0, sizeof *out);
-	nn_svc_str(out->backend, sizeof out->backend, bi ? bi->name : NULL);
-	nn_svc_str(out->version, sizeof out->version, bi ? bi->version : NULL);
-
-	/* [!] THE RESERVATION, NOT THE USE (issue #131 P3).  This line used to
-	 * carry what the model's activations take, under the word "reserved"; that
-	 * is `used` now, as on grove-vision-ai-v2.  A fixed fact of the build, so it
-	 * needs no claim and stands even when the rest is busy. */
-	out->arena_bytes = nn_arena_reserved();
-
-	rc = nn_model_open(&m);
-	if (rc == NN_ERR_SCRATCH_HELD) {
-		/* `sdram test` holds .sdram.ai and nothing was opened (issue
-		 * #152): a transient answer, not "nothing is loaded". */
-		out->avail_identity = (uint8_t)NN_AVAIL_BUSY;
-		out->avail_runtime  = (uint8_t)NN_AVAIL_BUSY;
-		out->avail_tensors  = (uint8_t)NN_AVAIL_BUSY;
-		return;
-	}
-	if (rc != 0 || m == NULL)
-		return;
-
-	/* Copied, not borrowed: the backend owns this name and a reload replaces
-	   it, so the caller must not hold a pointer into it while printing. */
-	/*
-	 * [!] THE NAME IS COPIED UNDER THE SESSION WHEN THE SESSION IS FREE, and
-	 * copied anyway when it is not.  That is a deliberate middle, not an
-	 * oversight:
-	 *
-	 *   Taking the session unconditionally would make `nn info` REFUSE while a
-	 *   stream runs -- the worker holds it for the whole stream -- and that is
-	 *   exactly when the report is worth asking for.
-	 *
-	 *   Not taking it at all leaves the copy able to race a reload, which
-	 *   rewrites the backend's name buffer byte by byte.
-	 *
-	 * So: try, and when the session is held, ask the transition counter
-	 * whether the copy describes one model (below).
-	 */
-	seq0 = nn_life_seq();
-	held = (nn_session_try_acquire() == 0);
-	/* [!] "A MODEL IS THERE", NOT "THE SINGLETON OPENED" (issue #131 P16, as
-	 * wio-lite-ai since its issue #122 P2).  The singleton stays open after
-	 * `nn model unload` with nothing in it. */
-	out->model_active = nn_model_present(m) ? 1u : 0u;
-	nn_svc_str(out->model, sizeof out->model, nn_model_name(m));
-	out->arena_used  = out->model_active ? nn_activations_bytes(m) : 0u;
-	if (held)
-		nn_session_release();
-	seq1 = nn_life_seq();
-
-	/*
-	 * [!] A LOAD IN FLIGHT IS BUSY, NOT A NAME AND A SIZE FROM TWO MODELS
-	 * (issue #131 step 7d; wio-lite-ai's rule since its issue #122).  The
-	 * backend rewrites the name and the tensors while it swaps -- the new
-	 * model, or the previous one on a rollback -- so a copy taken then can
-	 * name one model beside another's size.  When the session was free no load
-	 * can have run; when it was not, the copy stands only if no load or unload
-	 * was between its two steps at either end of it, nor ran whole in between
-	 * (svc/nn/nn_core_model.c).  A stream holds the session and never moves the
-	 * counter, so its report is what it was.
-	 */
-	if (!nn_core_model_copy_stands(seq0, seq1, held)) {
-		out->model_active   = 0u;
-		out->model[0]       = '\0';
-		out->arena_used     = 0u;
-		out->avail_identity = (uint8_t)NN_AVAIL_BUSY;
-		out->avail_runtime  = (uint8_t)NN_AVAIL_BUSY;
-		out->avail_tensors  = (uint8_t)NN_AVAIL_BUSY;
-		return;
-	}
-
-	/* [!] Say plainly when nothing is being inferred, so a latency from
-	 * `nn bench` is never mistaken for a model's. */
-	if (bi && strcmp(bi->name, "null") == 0)
-		nn_svc_str(out->source, sizeof out->source,
-		           "synthetic workload, not inference");
-
-	/* Every section is answered here, streaming or not -- which is the point of
-	   the copy above (issue #99 made this explicit rather than implied). */
-	out->avail_identity = (uint8_t)NN_AVAIL_OK;
-	out->avail_runtime  = (uint8_t)NN_AVAIL_OK;
-	out->avail_tensors  = out->model_active ? (uint8_t)NN_AVAIL_OK
-	                                        : (uint8_t)NN_AVAIL_NA;
+	nn_svc_common_info(out, nn_life_seq);
 }
 
 /* ---- model lifecycle ----------------------------------------------------- */

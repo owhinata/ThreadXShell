@@ -758,6 +758,11 @@ add_library(shell_objs OBJECT
     # every board, walked by shell/test/test_nn_refusal.c.  ITCM like the
     # wait above (not .text_cold: that is for the load / unload path only).
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_refusal.c"
+    # `nn thresh`'s order and answers (issue #174), shared with the other two
+    # boards; walked by shell/test/test_nn_svc_common.c.  Its `nn info` half is
+    # not called here (this board's model section reads under its gate) and is
+    # dropped by --gc-sections.
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_svc_common.c"
     # The one `nn bench` procedure (issue #163): hold, fill, time N runs, let
     # go, walked by shell/test/test_nn_bench.c.  ITCM (not .text_cold): it is
     # the timed path.

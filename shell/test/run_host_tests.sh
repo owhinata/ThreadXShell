@@ -359,6 +359,18 @@ gcc $CFLAGS -I "$inc" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     $LDFLAGS -o "$out/test_plugin_claims_order"
 "$out/test_plugin_claims_order"
 
+# issue #174 -- `nn thresh` on all three boards and `nn info`'s model section on
+# wio-lite-ai and f746g-disco (svc/nn/nn_svc_common.c).  The order on every exit
+# (count in -> lease -> entry -> lease back -> count out on grove-vision-ai-v2,
+# lease -> entry -> lease back on the other two), every answer of the decoder's
+# entries, and when an `nn info` copy stands: a timed-out lease, a count refused
+# by another console's load and a load between the two counter reads cannot be
+# typed.  The inference API is stubbed.
+gcc $CFLAGS -I "$inc" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_nn_svc_common.c" "$svc/nn/nn_svc_common.c" "$svc/nn/nn_core_model.c" \
+    "$svc/nn/nn_swap.c" $LDFLAGS -o "$out/test_nn_svc_common"
+"$out/test_nn_svc_common"
+
 # issue #103 -- is the plugin reservation executable?  (svc/plugin/plugin_mpu.c, the
 # Armv8-M verdict grove-vision-ai-v2 links)
 #

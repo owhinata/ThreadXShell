@@ -90,7 +90,8 @@ python3 "$board/cmake/fixtures/run_layout_tests.py"
 # modelled.
 #
 # issue #131 step 7d -- this board's `nn info` / `nn model load` / `nn model
-# unload` (port/nn/nn_svc_f746_model.c) behind the shared order
+# unload` (port/nn/nn_svc_f746_model.c; `nn info`'s body is
+# svc/nn/nn_svc_common.c's since issue #174) behind the shared order
 # (svc/nn/nn_core_model.c), against the real svc/nn/nn.c over a stub backend.  What a
 # console cannot produce on demand: a refusal from empty, a backend that
 # "restores" from nothing (EMPTY, released), a success that left no model (HW),
@@ -100,7 +101,7 @@ gcc $CFLAGS -I "$here/nn_shim" -I "$board/port/nn" -I "$board/port/camera" \
     -I "$board/port/sdram" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
     "$here/test_nn_model_life.c" "$board/port/nn/nn_svc_f746_model.c" \
     "$HOST_TEST_SVC/nn/nn.c" "$HOST_TEST_REPO/shell/test/nn_model_host.c" \
-    "$HOST_TEST_SVC/nn/nn_core_model.c" \
+    "$HOST_TEST_SVC/nn/nn_core_model.c" "$HOST_TEST_SVC/nn/nn_svc_common.c" \
     "$HOST_TEST_SVC/nn/nn_swap.c" "$HOST_TEST_SVC/fmt.c" \
     $LDFLAGS -o "$out/test_nn_model_life"
 "$out/test_nn_model_life"
@@ -122,7 +123,7 @@ gcc $CFLAGS -DCONFIG_NN_BACKEND_TFLM=1 -DF746_PLUGIN_TARGET_ID=0x1101 \
     "$here/test_nn_model_container.c" "$board/port/nn/nn_svc_f746_model.c" \
     "$HOST_TEST_SVC/nn/nn_container.c" \
     "$HOST_TEST_SVC/nn/nn.c" "$HOST_TEST_REPO/shell/test/nn_model_host.c" \
-    "$HOST_TEST_SVC/nn/nn_core_model.c" \
+    "$HOST_TEST_SVC/nn/nn_core_model.c" "$HOST_TEST_SVC/nn/nn_svc_common.c" \
     "$HOST_TEST_SVC/nn/nn_swap.c" "$HOST_TEST_SVC/fmt.c" \
     "$HOST_TEST_SVC/plugin/plugin_load.c" "$HOST_TEST_SVC/plugin/plugin_info.c" \
     "$HOST_TEST_SVC/plugin/plugin_claims.c" \

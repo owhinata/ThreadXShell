@@ -1,0 +1,8 @@
+# The ST Cube set this board pins -- HAL, CMSIS device, CMSIS core -- fetched at
+# configure time by cmake/fetch_upstream.cmake (pinned commits in board.cmake,
+# issues #136 / #177), one <repo>-<commit> directory each, shared by every build
+# directory of this clone.  Deliberately NOT git submodules: ST pairs these per
+# Cube package, so each board names its own commits.  The trees are treated
+# read-only, like the root lib/ mirrors: adjustments live in the port, never in
+# lib/.  Delete a directory to have the next configure fetch it again.
+/lib/

@@ -97,26 +97,30 @@ set(MCU_OPTS
     -mcpu=cortex-m7 -mthumb -mfpu=fpv5-sp-d16 -mfloat-abi=hard)
 
 # The ST Cube set -- HAL and CMSIS device -- is pinned per board and fetched by
-# cmake/fetch_upstream.cmake into upstream/<repo>-<commit> (issue #136), not taken
-# from lib/: ST pairs these two per Cube package, so each board names its own
-# commits.  CMSIS core is fetched the same way, at the Cube set's version or a
-# newer one (the board README says which and why).  The SHA is the pin; the tag
-# beside it is only a comment.
+# cmake/fetch_upstream.cmake into boards/<board>/lib/<repo>-<commit> (issues #136,
+# #177; git-ignored by this board's .gitignore), not taken from the root lib/: ST
+# pairs these two per Cube package, so each board names its own commits.  CMSIS
+# core is fetched the same way, at the Cube set's version or a newer one (the
+# board README says which and why).  The SHA is the pin; the tag beside it is
+# only a comment.
 # The trees are read-only, like lib/.
 include("${CMAKE_SOURCE_DIR}/cmake/fetch_upstream.cmake")
 fetch_upstream(HAL_DIR                          # v1.3.3-11-gdaf38ec (no tag)
+    ROOT   "${BOARD_DIR}/lib"
     URL    "https://github.com/STMicroelectronics/stm32f7xx_hal_driver"
     COMMIT "daf38ecc98298d8434a5fab8f5da35e34e4c1695"
     SPARSE "/Inc/" "/Src/" "/LICENSE.md"
     PROBE  "Src/stm32f7xx_hal.c" "Inc/stm32f7xx_hal_conf_template.h"
            "LICENSE.md")
 fetch_upstream(CMSIS_DEV                        # v1.2.10
+    ROOT   "${BOARD_DIR}/lib"
     URL    "https://github.com/STMicroelectronics/cmsis_device_f7"
     COMMIT "2352e888e821aa0f4fe549bd5ea81d29c67a3222"
     SPARSE "/Include/" "/Source/Templates/" "/LICENSE.md"
     PROBE  "Include/stm32f746xx.h" "Source/Templates/system_stm32f7xx.c"
            "Source/Templates/gcc/startup_stm32f746xx.s" "LICENSE.md")
 fetch_upstream(CMSIS_CORE                       # v5.6.0_cm7
+    ROOT   "${BOARD_DIR}/lib"
     URL    "https://github.com/STMicroelectronics/cmsis-core"
     COMMIT "04fe7bb2025811f10848ce14be810dde981934cf"
     SPARSE "/Include/" "/LICENSE.txt"

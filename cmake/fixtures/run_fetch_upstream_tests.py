@@ -8,7 +8,8 @@ a throwaway superproject (itself a git repository, as this one is) configures a
 tiny CMake project that calls fetch_upstream() on it.  Needs git, cmake and
 ninja -- no toolchain, no board.
 
-  - a fresh fetch publishes <repo>-<sha> with only the sparse paths, and a
+  - a fresh fetch publishes <ROOT>/<repo>-<sha> (ROOT a board's lib/, issue
+    #177) with only the sparse paths, and a
     second configure is OFFLINE (the upstream is moved away first);
   - the checkout's HEAD file is a configure dependency;
   - a checkout moved to another commit, a deleted probe, an edited file, an
@@ -23,7 +24,7 @@ ninja -- no toolchain, no board.
   - a deleted checkout is fetched again, even over a leftover staging directory;
   - a commit the upstream does not have, an abbreviated commit, a missing PROBE
     and a probe the sparse patterns exclude are refused, and the first publishes
-    nothing;
+    nothing; so are a missing ROOT and a relative one;
   - a second configure waits for the lock a first one holds.
 
 [!] EVERY REFUSAL IS PAIRED WITH THE SAME CONFIGURE PASSING BY ONE CHANGE, so a
@@ -97,23 +98,29 @@ try:
           "if(FX_SPARSE)\n"
           "    set(_sparse SPARSE ${FX_SPARSE})\n"
           "endif()\n"
+          "set(_root)\n"
+          "if(FX_ROOT)\n"
+          "    set(_root ROOT ${FX_ROOT})\n"
+          "endif()\n"
           "set(_probe)\n"
           "if(FX_PROBE)\n"
           "    set(_probe PROBE ${FX_PROBE})\n"
           "endif()\n"
-          "fetch_upstream(FX_DIR URL ${FX_URL} COMMIT ${FX_COMMIT} ${_probe} ${_sparse})\n"
+          "fetch_upstream(FX_DIR ${_root} URL ${FX_URL} COMMIT ${FX_COMMIT} ${_probe} ${_sparse})\n"
           'message(STATUS "FX_DIR=${FX_DIR}")\n' % HELPER)
-    dest = os.path.join(sup, "upstream", "demo-repo-" + sha_a)
+    root = os.path.join(sup, "boards", "demo", "lib")
+    dest = os.path.join(root, "demo-repo-" + sha_a)
     runs = [0]
 
     def configure(commit=sha_a, probe="Inc/a.h", sparse="/Inc/;/Src/", u=None,
-                  extra_env=None):
+                  extra_env=None, fx_root=root):
         runs[0] += 1
         b = os.path.join(tmp, "b%d" % runs[0])
         r = subprocess.run(
             ["cmake", "-S", sup, "-B", b, "-G", "Ninja",
              "-DFX_URL=" + (u or url), "-DFX_COMMIT=" + commit,
-             "-DFX_PROBE=" + probe, "-DFX_SPARSE=" + sparse],
+             "-DFX_PROBE=" + probe, "-DFX_SPARSE=" + sparse,
+             "-DFX_ROOT=" + fx_root],
             capture_output=True, text=True,
             env=dict(os.environ, **(extra_env or {})))
         return r.returncode, r.stdout + r.stderr, b
@@ -136,9 +143,11 @@ try:
     refuses("abbreviated commit", "full 40-digit SHA", commit=sha_a[:12])
     refuses("tag name as commit", "is not a commit SHA", commit="v1.0")
     refuses("no PROBE", "at least one PROBE", probe="")
+    refuses("no ROOT", "ROOT is required", fx_root="")
+    refuses("relative ROOT", "must be an absolute path", fx_root="boards/demo/lib")
     refuses("commit upstream lacks", "failed", commit="0" * 40)
     check("  ... publishes nothing", not os.path.exists(
-        os.path.join(sup, "upstream", "demo-repo-" + "0" * 40)), "no checkout left")
+        os.path.join(root, "demo-repo-" + "0" * 40)), "no checkout left")
 
     # --- fresh fetch, then offline ----------------------------------------------
     b = passes("fresh fetch", True)

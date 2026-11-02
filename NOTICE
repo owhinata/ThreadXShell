@@ -28,26 +28,26 @@ Third-party components fetched as submodules
 
 The firmware is built from, and at runtime incorporates, the components below.
 They are git submodules under lib/, or -- the ST Cube set, pinned per board --
-trees fetched into upstream/<repo>-<commit>/ (both at configure time), and keep
-their own licenses -- that code is NOT redistributed in this repository, only
-referenced.  See each one's own LICENSE for the authoritative terms.
+trees fetched into boards/<board>/lib/<repo>-<commit>/ (both at configure time),
+and keep their own licenses -- that code is NOT redistributed in this
+repository, only referenced.  See each one's own LICENSE for the authoritative terms.
 
 Which of them a given image contains depends on the board; boards/<board>/
 submodules.cmake and the fetch_upstream() calls in boards/<board>/board.cmake are
 the lists that board builds against.
 
 - STMicroelectronics STM32F7xx HAL driver  -- BSD-3-Clause
-    upstream/stm32f7xx_hal_driver-<commit>/LICENSE.md  (f746g-disco)
+    boards/f746g-disco/lib/stm32f7xx_hal_driver-<commit>/LICENSE.md  (f746g-disco)
 - STMicroelectronics STM32H7xx HAL driver  -- BSD-3-Clause
-    upstream/stm32h7xx_hal_driver-<commit>/LICENSE.md  (wio-lite-ai)
+    boards/wio-lite-ai/lib/stm32h7xx_hal_driver-<commit>/LICENSE.md  (wio-lite-ai)
 - STMicroelectronics CMSIS Device F7       -- Apache-2.0
-    upstream/cmsis_device_f7-<commit>/LICENSE.md  (startup, system_*, device headers)
+    boards/f746g-disco/lib/cmsis_device_f7-<commit>/LICENSE.md  (startup, system_*, device headers)
 - STMicroelectronics CMSIS Device H7       -- Apache-2.0
-    upstream/cmsis_device_h7-<commit>/LICENSE.md  (device headers; the wio-lite-ai
+    boards/wio-lite-ai/lib/cmsis_device_h7-<commit>/LICENSE.md  (device headers; the wio-lite-ai
     port supplies its own SystemInit)
 - ARM CMSIS-Core                           -- Apache-2.0
-    upstream/cmsis-core-<commit>/LICENSE.txt  (f746g-disco, 5.6.0)
-    upstream/cmsis-core-<commit>/LICENSE.md   (wio-lite-ai, 5.9.0; the Grove
+    boards/f746g-disco/lib/cmsis-core-<commit>/LICENSE.txt  (f746g-disco, 5.6.0)
+    boards/wio-lite-ai/lib/cmsis-core-<commit>/LICENSE.md   (wio-lite-ai, 5.9.0; the Grove
     board uses the CMSIS bundled inside the Himax SDK instead)
 - Eclipse ThreadX                          -- MIT
     lib/threadx/LICENSE.txt

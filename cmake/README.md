@@ -685,18 +685,20 @@ submodule are not exported.
 # Upstream trees pinned per board (#136)
 
 `fetch_upstream.cmake` gives a board an upstream source tree at an exact commit:
-`fetch_upstream(<out_var> URL <url> COMMIT <40-hex sha> PROBE <file>... [SPARSE
-<pattern>...])` sets `<out_var>` to `upstream/<repo>-<commit>` in the source tree
-(`<repo>` is the URL's last component). The boards use it for the ST Cube set
+`fetch_upstream(<out_var> ROOT <dir> URL <url> COMMIT <40-hex sha> PROBE <file>...
+[SPARSE <pattern>...])` sets `<out_var>` to `<dir>/<repo>-<commit>` (`<repo>` is
+the URL's last component). `ROOT` is required and absolute; the boards pass
+`boards/<board>/lib`, which each board's own `.gitignore` ignores (#177). The boards use it for the ST Cube set
 (HAL, CMSIS device, CMSIS core), which ST pairs per Cube package; upstreams that
 several boards share at one version stay `lib/` submodules. Rules:
 
 - The commit is the pin and must be the full SHA (a tag is only a comment next to
   it). It is fetched directly, `--depth 1 --filter=blob:none`, with a non-cone
   sparse checkout when `SPARSE` is given, so only the needed blobs are downloaded.
-- One directory per repository and commit, shared by every build directory of the
-  clone: boards that pin the same commit share it, a pin bump fetches a new
-  directory beside the old one, and every configure after the first is offline.
+- One directory per repository and commit under the board that pins it, shared
+  by every build directory of the clone: a pin bump fetches a new directory beside
+  the old one, and every configure after the first is offline. Two boards that pin
+  the same commit each fetch their own copy (none do today).
 - An existing directory is only checked, never repaired or re-fetched. It must be
   its own git checkout (an empty directory would otherwise let the superproject
   answer), its HEAD must be the pin and detached (not a branch), `git status

@@ -36,27 +36,31 @@ set(MCU_OPTS
     -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard)
 
 # The ST Cube set -- HAL and CMSIS device -- is pinned per board and fetched by
-# cmake/fetch_upstream.cmake into upstream/<repo>-<commit> (issue #136), not taken
-# from lib/: ST pairs these two per Cube package, so each board names its own
-# commits.  CMSIS core is fetched the same way, at the Cube set's version or a
-# newer one (the board README says which and why).  The SHA is the pin; the tag
-# beside it is only a comment.
+# cmake/fetch_upstream.cmake into boards/<board>/lib/<repo>-<commit> (issues #136,
+# #177; git-ignored by this board's .gitignore), not taken from the root lib/: ST
+# pairs these two per Cube package, so each board names its own commits.  CMSIS
+# core is fetched the same way, at the Cube set's version or a newer one (the
+# board README says which and why).  The SHA is the pin; the tag beside it is
+# only a comment.
 # The trees are read-only, like lib/.  The bootloader reference build below
 # compiles from the same three variables, so its golden hash covers this fetch.
 include("${CMAKE_SOURCE_DIR}/cmake/fetch_upstream.cmake")
 fetch_upstream(HAL_DIR                          # master, 2026-06-26 (no tag)
+    ROOT   "${BOARD_DIR}/lib"
     URL    "https://github.com/STMicroelectronics/stm32h7xx_hal_driver"
     COMMIT "c5e70527126710a6415929ff10c1fd1f40394b1e"
     SPARSE "/Inc/" "/Src/" "/LICENSE.md"
     PROBE  "Src/stm32h7xx_hal.c" "Inc/stm32h7xx_hal_conf_template.h"
            "LICENSE.md")
 fetch_upstream(CMSIS_DEV                        # master, 2026-04-16 (no tag)
+    ROOT   "${BOARD_DIR}/lib"
     URL    "https://github.com/STMicroelectronics/cmsis_device_h7"
     COMMIT "de8243d2c15f87936f28a49fcd9e6f5ba10fc233"
     SPARSE "/Include/" "/Source/Templates/" "/LICENSE.md"
     PROBE  "Include/stm32h725xx.h" "Source/Templates/system_stm32h7xx.c"
            "Source/Templates/gcc/startup_stm32h725xx.s" "LICENSE.md")
 fetch_upstream(CMSIS_CORE                       # v5.9.0_20250520
+    ROOT   "${BOARD_DIR}/lib"
     URL    "https://github.com/STMicroelectronics/cmsis-core"
     COMMIT "b7487de1303e2eb77c402432e368691e9dcfb5f0"
     SPARSE "/Include/" "/LICENSE.md"

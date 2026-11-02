@@ -2,6 +2,7 @@
 #  Fetch one upstream source tree at a pinned commit (issue #136).
 #
 #      fetch_upstream(<out_var>
+#          ROOT   <absolute directory>
 #          URL    <git remote>
 #          COMMIT <40-hex commit>
 #          PROBE  <file relative to the tree> ...
@@ -9,21 +10,26 @@
 #
 #  Sets <out_var> to the checkout, which is
 #
-#      ${CMAKE_SOURCE_DIR}/upstream/<repo>-<commit>
+#      <ROOT>/<repo>-<commit>
 #
-#  where <repo> is the last component of URL without ".git".  Used by the boards
+#  where <repo> is the last component of URL without ".git".  The boards pass
+#  ROOT = boards/<board>/lib (issue #177); there is no default, so a caller
+#  cannot fall back to a shared location without saying so.  Used by the boards
 #  for the trees they pin per board (the ST Cube set -- HAL and CMSIS device --
 #  and a CMSIS core at the Cube set's version or a newer one); the upstreams every
 #  board shares at one version stay lib/ submodules.
 #  Nothing below knows which board is asking.
 #
-#  [!] ONE PLACE, IN THE SOURCE TREE, NAMED BY THE COMMIT.  Every build directory
-#  of this clone reads the same checkout, so a tree is fetched once and every
-#  later configure -- any board, any build directory -- is offline.  The commit is
-#  in the name, so two boards pinning the same commit share one directory, and a
-#  pin bump fetches a NEW directory beside the old one instead of moving a
-#  checkout under a build that still points at it.  upstream/ is git-ignored, like
-#  tools/ and the Grove SDK checkout.
+#  [!] UNDER THE BOARD THAT PINS IT, IN THE SOURCE TREE, NAMED BY THE COMMIT.
+#  The tree lives in boards/<board>/lib/, beside the board.cmake that names the
+#  commit, and is git-ignored by that board's own .gitignore (/lib/), like the
+#  Grove SDK checkout in boards/grove-vision-ai-v2/sdk/.  Every build directory
+#  of this clone still reads the same checkout, so a tree is fetched once and
+#  every later configure of that board -- any build directory -- is offline.  The
+#  commit is in the name, so a pin bump fetches a NEW directory beside the old
+#  one instead of moving a checkout under a build that still points at it.  Two
+#  boards pinning the same commit no longer share a directory (each fetches its
+#  own copy); today no two boards pin the same commit.
 #
 #  [!] FETCHED ONCE, THEN ONLY CHECKED -- NEVER REPAIRED.  A directory that exists
 #  is validated and nothing else: it must be its own git checkout (an empty
@@ -261,12 +267,20 @@ function(_fetch_upstream_check dir commit probes sparse out_var)
 endfunction()
 
 function(fetch_upstream out_var)
-    cmake_parse_arguments(PARSE_ARGV 1 _fu "" "URL;COMMIT" "PROBE;SPARSE")
+    cmake_parse_arguments(PARSE_ARGV 1 _fu "" "ROOT;URL;COMMIT" "PROBE;SPARSE")
     if(_fu_UNPARSED_ARGUMENTS)
         message(FATAL_ERROR "fetch_upstream: unexpected arguments: ${_fu_UNPARSED_ARGUMENTS}")
     endif()
     if(NOT _fu_URL)
         message(FATAL_ERROR "fetch_upstream: URL is required")
+    endif()
+    # Required and absolute: the board names where its tree goes (issue #177).
+    if(NOT _fu_ROOT)
+        message(FATAL_ERROR "fetch_upstream: ROOT is required (${_fu_URL})")
+    endif()
+    if(NOT IS_ABSOLUTE "${_fu_ROOT}")
+        message(FATAL_ERROR
+            "fetch_upstream: ROOT '${_fu_ROOT}' for ${_fu_URL} must be an absolute path")
     endif()
     # A full SHA, never a tag or an abbreviation: both can come to mean another commit.
     if(NOT _fu_COMMIT MATCHES "^[0-9a-f]+$")
@@ -290,7 +304,7 @@ function(fetch_upstream out_var)
         message(FATAL_ERROR "fetch_upstream: cannot derive a directory name from ${_fu_URL}")
     endif()
 
-    set(_root "${CMAKE_SOURCE_DIR}/upstream")
+    set(_root "${_fu_ROOT}")
     set(_dest "${_root}/${_repo}-${_fu_COMMIT}")
     set(_stage "${_dest}.partial")
     file(MAKE_DIRECTORY "${_root}")

@@ -34,8 +34,9 @@ directory needs the network even when every submodule is present.
 
 The ST Cube set this board pins -- the H7 HAL and CMSIS device H7 -- and its
 CMSIS core are not submodules: `board.cmake` fetches them at the commits it names
-into `upstream/<repo>-<commit>/` on the first configure (issue #136; see the root
-README's Building section), and every later configure of any build directory
+into `boards/wio-lite-ai/lib/<repo>-<commit>/` (git-ignored by this board's
+`.gitignore`) on the first configure (issues #136 / #177; see the root README's
+Building section), and every later configure of any build directory
 reuses them offline. The bootloader reference build compiles from the same three
 trees, so a change of any of those commits is also checked by the bootloader's
 golden hash.

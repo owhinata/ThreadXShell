@@ -32,7 +32,7 @@ More boards are planned.
 One-way layering:
 
 ```
-HAL / CMSIS / ThreadX (lib/ submodules + upstream/ pinned fetches, read-only)
+HAL / CMSIS / ThreadX (lib/ submodules + boards/<board>/lib/ pinned fetches, read-only)
   <- port (per-board glue)
   <- shell (board-independent core, commands, transport backends)
   <- app
@@ -79,9 +79,10 @@ asset/                board-independent plugin sources and the container toolcha
                       common/ (veneers and the ABI's section layout), plugins/<name>/,
                       tools/ (packer, ABI layout, container verifier)
 lib/                  upstream mirror submodules (read-only)
-upstream/             git-ignored; per-board pinned trees fetched at configure
-                      time (the ST Cube set), one <repo>-<commit> each (read-only)
-boards/<board>/       board.cmake, src/ port/ cmds/ backend/ svc/ include/ ldscript/ cmake/
+boards/<board>/       board.cmake, src/ port/ cmds/ backend/ svc/ include/ ldscript/ cmake/,
+                      lib/ (f746g-disco, wio-lite-ai: the ST Cube set fetched at configure
+                      time, one <repo>-<commit> each, read-only, git-ignored by the
+                      board's .gitignore)
 ```
 
 Anything that reaches for the HAL, a peripheral or a specific memory map lives
@@ -129,15 +130,18 @@ submodule.** ST pairs HAL and CMSIS device per Cube package, so each board names
 its own commits instead of sharing one `lib/` copy; which CMSIS core a board pins,
 and why, is in its README. They are fetched
 by `cmake/fetch_upstream.cmake` (shallow, at the exact commit, sparse) into
-`upstream/<repo>-<commit>/` in the source tree -- git-ignored, read-only like
-`lib/`, and shared by every build directory of the clone: only the first configure
-that needs a tree goes to the network, and every later one, for any board, is
-offline. An existing tree is only checked, never repaired: one at another commit
-or on a branch, edited, or missing a file stops the configure; delete the
-directory to fetch it again. The checks ask `git sparse-checkout check-rules`, so
+`boards/<board>/lib/<repo>-<commit>/` in the source tree (issue #177) --
+git-ignored by the board's own `.gitignore`, read-only like `lib/`, and shared by
+every build directory of the clone: only the first configure that needs a tree
+goes to the network, and every later one of that board is offline. An existing
+tree is only checked, never repaired: one at another commit or on a branch,
+edited, or missing a file stops the configure; delete the directory to fetch it
+again. The checks ask `git sparse-checkout check-rules`, so
 git 2.42 or later is needed. A clone made before #136 still has `lib/stm32f7xx_hal_driver`,
 `lib/stm32h7xx_hal_driver`, `lib/cmsis_device_f7`, `lib/cmsis_device_h7` and
 `lib/cmsis_core` checked out; nothing reads them any more, and they can be deleted.
+Likewise a clone made before #177 still has the fetched trees in a top-level
+`upstream/` directory; nothing reads it any more, and it can be deleted.
 
 tflite-micro, which the `tflm` NN backend of `f746g-disco` and `wio-lite-ai`
 compiles, is the `lib/tflite-micro` submodule (issue #134) and is pinned by its

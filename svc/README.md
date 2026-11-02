@@ -120,12 +120,25 @@ The declarations are `boards/<board>/svc/nn_svc_config.h`; a capability that is
 0 leaves its subcommand or tag unregistered.  `NN_SVC_HAS_MODEL_BUILTIN` (`nn
 model load builtin`) is declared by no board.
 
-The wording of a refusal is each board's, and so are the board lines of `nn
-stream stats` and grove-vision-ai-v2's plugin lines in `nn info`; making them
-one is issue #174.  The status a refusal reports (`NN_SVC_ERR_*`) is the same on
-the three boards (issue #164): no model, a decoder that cannot read the
-model's outputs and one that draws nothing are STATE; an input the board
-cannot fill is HW, from `nn run` and `nn stream start` alike.
+The lifecycle's refusals of `nn run`, `nn stream start` and `nn stream stop`
+(a stream already running, a `nn run` holding the camera, a start or stop in
+flight, a dead lifecycle, a replaced generation, not running) are one table on
+every board since issue #174, `nn/nn_refusal`: the status, the claim
+disposition and the sentence, with the BUSY sentence chosen by a property of
+`struct nn_core_board` (whether the board has a gate), never its name.  So are
+the base sentences of a `nn run` that ended LOST, CANCELLED or TIMEOUT; what a
+board adds is only the clause on what its teardown did not release (wio-lite-ai
+the band stream and the PSRAM guard, f746g-disco the DCMI frame), checked at
+build time against the longest sentence it follows -- grove-vision-ai-v2 replaces
+the sentence with its stop's verdict instead.  The plugin lines of `nn info` are
+`plugin/plugin_claims`'s on all three boards since the same issue.  The board
+lines of `nn stream stats` stay each board's (grove-vision-ai-v2's `painter :`
+and the other two's `plugin  : drew ...` are not aligned, by decision): they are
+the board's own subject in the contract.  The status a refusal reports
+(`NN_SVC_ERR_*`) is the same on the three boards (issue #164): no model, a
+decoder that cannot read the model's outputs and one that draws nothing are
+STATE; an input the board cannot fill is HW, from `nn run` and `nn stream start`
+alike.
 
 ### The inference layer is one implementation (issue #161)
 
@@ -220,7 +233,9 @@ storage of their own.
 | `nn/nn_active_core.h` | a `struct nn_active_board`: is a plugin live, a slot's address, where a depth sample goes, the no-plugin shape answer | how the plugin's decoder slots are reached on this board |
 | `nn/nn_active_lease.h` | `nn_active_facts` (`struct nn_active_lease_board`): output count and descriptors -- wio-lite-ai and f746g-disco, whose model is a `struct nn_model` | the lease-checked entries' view of the model |
 | `nn/nn_det_record.h` | the `struct nn_det_record` and the lock it is read and published under | which lock orders the record against the board's other locks |
-| `nn/nn_shot.h` | a `struct nn_shot`, moved only under the lock that moves the record's generation -- wio-lite-ai and f746g-disco (grove-vision-ai-v2 keeps its own `nn_ov_shot`) | how one `nn run` ended |
+| `nn/nn_shot.h` | a `struct nn_shot`, moved only under the lock that moves the record's generation -- wio-lite-ai and f746g-disco (grove-vision-ai-v2 keeps its own `nn_ov_shot` state and links `nn_shot.c` for its words only: `nn_shot_says()` from its `port/nn/nn_run_says.c`, which keeps its own sentences for the endings only it has) | how one `nn run` ended |
+| `nn/nn_refusal.h` | nothing new: the board's existing `struct nn_core_board` (its `gate_held` picks the BUSY sentence), and for a `nn run` that ended without a result its teardown clause as a `NN_REFUSAL_RUN_UNFINISHED()` literal | what its teardown did not release; the words and status of every refusal are the table's |
+| `nn/nn_svc_common.h` | a const `struct nn_svc_thresh_ops` (the plugin lease, the decoder's threshold entries and its `NN_ACTIVE_NOT_HELD`, and on grove-vision-ai-v2 the count's way in and out), and for `nn info` on wio-lite-ai and f746g-disco its read of the load order's transition counter | which protections a threshold call takes on this board; the order and the answers are the shared file's |
 | `plugin/plugin_lease_api.h` | the plugin lease itself (`plugin_lease_try` / `_take` / `_give` / `_held` and the miss counters), in the board's `port/plugin/plugin_lease.c` -- all three boards | who may be inside the loaded plugin; the wait and the lock order are the board's `plugin_lease.h` |
 
 Why the locks and the threads behind these hooks are the board's is

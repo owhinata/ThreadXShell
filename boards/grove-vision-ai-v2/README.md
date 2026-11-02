@@ -2345,7 +2345,7 @@ a header is listed; `nn run`'s wait table and the console-call count moved to
 
 | File | Thread or context | Hardware reason |
 |---|---|---|
-| `port/nn/nn_svc_grove.c` | console | The adapter: an open brings the Ethos-U55 up and holds the NOR XIP lease, so it is the thick one of the three. |
+| `port/nn/nn_svc_grove.c` | console | The adapter: an open brings the Ethos-U55 up and holds the NOR XIP lease, so it is the thick one of the three. The refusals' words (`svc/nn/nn_refusal`), `nn thresh` (`svc/nn/nn_svc_common`, with this board's count hooks) and the plugin lines of `nn info` (`svc/plugin/plugin_claims`) are shared since issue #174. |
 | `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (arm / stop / join / stats, the one-shot's ending) | Binds the shared frame path to this board's camera sink and the SPI LCD panel's overlay contract (`cam_lcd_sink.h`), and defines nn's place among the panel stream's holders (issue #142); owns the glue's state (the private header lists each counter's writers and resets), which is static and outlives a producer that never acknowledged a stop, plus the frame path's ops table and the overlay vtable. |
 | `port/nn/nn_producer.c` | camera producer (the overlay's `process()`, inside the panel sink's `consume()`, counted by `svc/camera/cam_step.h`) | Prepares the raw planar WDMA3 frame straight into the Ethos-U55 input tensor on the CPU, only while the worker wants a frame, and hands it over: the datapath rewrites that frame two frames later, so it is prepared here or copied. |
 | `port/nn/nn_worker.c` | inference worker | The ThreadX thread and its join, and `nn_camera_work()` with the frame path's outputs / decode / publish / account hooks: the NPU driver blocks for the whole invoke, so the invoke needs a thread of its own. |
@@ -2354,6 +2354,7 @@ a header is listed; `nn run`'s wait table and the console-call count moved to
 | `port/nn/nn_preproc.c` | camera producer (fill); wherever a box is mapped back | The camera's frame size and pixel format against the model input; pure and host-tested because a wrong box costs a NOR flash cycle to investigate. |
 | `port/nn/nn_rec.c` | worker (publish), panel and console (snapshot) | The record's storage and its lock, a short interrupt-disabled section rather than a mutex (`nn_rec.h` says why). |
 | `port/nn/nn_outputs.c` | inference worker | How many NPU outputs this board decodes (`NN_MAX_IO`); pure, the reads behind a callback. |
+| `port/nn/nn_run_says.c` | console (`nn run`'s ending) | None: this board's one-shot endings in words -- the shared `nn_shot_says()` sentence where `svc/nn/nn_shot` names the ending, its own for an unreadable output, a publish the record did not take and a stop first; pure, host-tested by `test/test_nn_run_says.c` (issue #174). |
 | `port/nn/nn_stream_state.c` | console (`nn stream stop`) | The stop's order as a table over two separate proofs -- the overlay's count at zero (permits the worker join, the record boundary and nn's leave) and a confirmed camera stop (the only thing that permits the sink's unlink) -- and the retryable / terminal classification of the codes; pure, host-tested. |
 | `port/camera/cam_lcd_sink.c` | camera producer (`consume()`), panel thread, console (hold / release / overlay) | Not an nn file, but nn runs on it: the one panel sink, the holder table (`svc/camera/cam_holders`) and the overlay pointer with its count. |
 | `port/nn/nn_plugin_stack.h` | build time | Per-slot plugin stack allowances asserted against this board's thread stacks. |
@@ -2367,6 +2368,22 @@ a header is listed; `nn run`'s wait table and the console-call count moved to
 | `port/plugin/plugin_run.c` | console (load / unload), worker, panel | The plugin reservation from this board's linker script, Cortex-M55 I/D-cache maintenance, the Armv8-M MPU read-back and the flash-lease precondition. |
 | `port/plugin/plugin_lease.c` | every path into the plugin | The lease as a ThreadX mutex with bounded waits (worker, console) and a try (panel). |
 | `port/plugin/plugin_paint.c` | panel | The pixel loops into the byte-swapped RGB565 staged frame the ST7789 takes over SPI. |
+
+[!] **`nn run`'s driver (`nn_svc_run_once()`) stays in this board's adapter**
+(issue #174 D7).  Its policy is shared already: the refusals and the base words
+of how a run ends (`svc/nn/nn_refusal`), when the wait ends
+(`svc/nn/nn_run_wait`) and the words of a run that ended without a result
+(`nn_shot_says()` through `port/nn/nn_run_says.c`).  What is left is the camera
+and NPU API (the gate's one-shot claim, the stop's verdict that replaces the
+sentence when the teardown did not finish), and ThreadX's sleep and clock --
+`svc/` cannot include `tx_api.h`, so a shared driver would need a hook table as
+large as the loop itself.
+
+[!] **The one-shot keeps its own state, `nn_ov_shot`** (issue #174 D8), not
+`svc/nn/nn_shot`'s machine: this board's `nn run` is one frame by construction
+(the producer prepares one only while the worker wants it, the worker does not
+re-arm, and the arm happens while the worker is parked), so the shared run
+number and re-arm answer would protect nothing.  Only the words are shared.
 
 ### The shared dispatcher and the Ethos-U backend (issue #169)
 
@@ -2528,9 +2545,16 @@ plugin  : <name> (build <id>, crc <digest>), running
 
 `running` is the loader's own state; `validated, not loaded` is a container whose
 plugin was refused.  A raw `--addr` window is always a bare model on this board,
-so it never has claims (`(none)`).  The `where` and `code ... data ... bss` lines
-this board printed until #174 are folded into the `image` line and the `(none)`
-line's reservation.
+so it never has claims (`(none)`).  The reservation (its size and address) is
+printed only on the two `(none ...)` lines: while a plugin is there its `image`
+line names its link address instead.  The `where` and `code ... data ... bss`
+lines this board printed until #174 are folded into the `image` line and the
+`(none)` lines' reservation.
+
+The read and the commit are each one 356 B copy (`plugin_view` 260 B + `from`
+96 B, newlib's byte-wise `memcpy`) with interrupts masked: about 1,450-1,800
+cycles, 3.7-4.8 us at 400 MHz -- an estimate from the disassembly, not measured
+on the board (decided 2026-11-02).
 
 **A load or unload is refused while `nn thresh` is inside the plugin** (issue
 #122).  `nn thresh` takes no gate -- a stream holds that, and a threshold is what

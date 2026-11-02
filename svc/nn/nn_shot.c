@@ -16,9 +16,9 @@
 #include "nn_svc.h"     /* NN_SVC_ERR_* */
 
 /*
- * The status each failure reports.  The same assignment as
- * grove-vision-ai-v2's own one-shot endings: a lease not had in time is BUSY
- * (the same request may pass in a moment), everything else is HW.
+ * The status each failure reports, on all three boards (grove-vision-ai-v2 reads
+ * these words too, issue #174): a lease not had in time is BUSY (the same
+ * request may pass in a moment), everything else is HW.
  */
 static const struct nn_shot_says nn_shot_table[] = {
 	[NN_SHOT_PREP] = { NN_SVC_ERR_HW,

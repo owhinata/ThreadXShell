@@ -248,8 +248,8 @@ issue #163, see svc/README.md):
 
 | File | Thread or context | Hardware reason |
 |---|---|---|
-| `port/nn/nn_svc_f746.c` | console | The thin adapter over the `nn.h` API (`svc/nn/nn.h`, implemented by `svc/nn/nn.c`, shared with wio-lite-ai); it adds no state. |
-| `port/nn/nn_svc_f746_model.c` | console (`nn info`, `nn model load` / `unload`) | The steps of the shared load order on this board: the SD-card model slots in SDRAM; on `tflm`, the plugin policy, the container split and the open container's claims (issue #159; the claims' store and their `nn info` lines are `svc/plugin/plugin_claims`, read under this file's critical section). |
+| `port/nn/nn_svc_f746.c` | console | The thin adapter over the `nn.h` API (`svc/nn/nn.h`, implemented by `svc/nn/nn.c`, shared with wio-lite-ai); it adds no state. `nn thresh` is `svc/nn/nn_svc_common`'s and the refusals' words are `svc/nn/nn_refusal`'s (issue #174); this file passes its lease and its teardown clause. |
+| `port/nn/nn_svc_f746_model.c` | console (`nn info`, `nn model load` / `unload`) | `nn info`'s model section is `svc/nn/nn_svc_common`'s (issue #174), given this file's counter read. The steps of the shared load order on this board: the SD-card model slots in SDRAM; on `tflm`, the plugin policy, the container split and the open container's claims (issue #159; the claims' store and their `nn info` lines are `svc/plugin/plugin_claims`, read under this file's critical section). |
 | `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (start / stop / stats / record reads) and the camera sink's open / close of the nn step | Binds the shared frame path to this board's camera as the nn step of the one camera sink, and holds nn's place among the camera's holders (issue #142); owns the glue's state (the private header lists each counter's writers and resets) and the frame path's ops table. |
 | `port/nn/nn_producer.c` | camera producer (the nn step of the camera sink's `consume()`) | Prepares a frame straight into the model's input tensor (nearest-neighbour resize + RGB565 expansion on the CPU, each value through the shared conversion `svc/nn/nn_input_contract.h`) and hands it over; it does not put the frame -- the sink does, last. |
 | `port/camera/cam_sink.c` | camera producer (`consume()`), console (step enable / disable / drain) | Not an nn file, but nn runs inside it: the one RGB565 subscriber of the base capture, running the GUIX display step and then the nn step, with `camera_frame_put()` last. Each step's armed mark and busy count are `svc/camera/cam_step.h`'s. |
@@ -265,6 +265,8 @@ issue #163, see svc/README.md):
 | `port/nn/nn_stedgeai.c`, `nn_stedgeai_reloc.c` | as `svc/nn/nn.c` | The non-default ST Edge AI Core backends (a model baked into Flash, or a relocatable one); they need a local ST install. |
 | `port/nn/tflm/nn_tflm_board.cc` | as `svc/nn/tflm/nn_tflm.cc` (worker: invoke; console: load / info) | The state object of the default backend, the shared tflite-micro one (`svc/nn/tflm/`, CMSIS-NN kernels; one implementation with wio-lite-ai since issue #161), as plain `.bss` in internal SRAM, and this board's fact that a model is named `sd:<path>` (it comes off the SD card). C++ only because the state holds TFLM objects' storage. |
 | `port/nn/tflm/nn_tflm_bufs.c` | as above | The arena and the two SD model slots in SDRAM bank3 (`.sdram.ai`, CPU-only), defined in C so `check_f746_layout.py` requires them by their plain names, and `nn_tflm_stage_cap`, the read limit the asset build reads back. |
+
+[!] **`nn run`'s driver (`nn_svc_run_once()`) stays in this board's adapter** (issue #174 D7).  Its policy is shared already: the refusals and the base words of how a run ends (`svc/nn/nn_refusal`), when the wait ends (`svc/nn/nn_run_wait`) and how one run ended (`svc/nn/nn_shot`).  What is left is the camera API (the start's arguments and refusals, how a lost stream is read, the decode read-out), the teardown's clause, and ThreadX's sleep and clock -- `svc/` cannot include `tx_api.h`, so a shared driver would need a hook table as large as the loop itself.
 
 [!] **Only input 0 is filled** (issue #162 did not change this).  Since #161
 the backend accepts a model with 1..8 input tensors (it refused more than one
@@ -983,7 +985,8 @@ already running`.
   (a JPEG stream for `net mjpeg`).  (Issue #99 removed the `[qqvga|qvga]` word
   `nn stream start` used to take -- the geometry is whatever the base
   publishes.)
-- **`nn run` reports a lost stream** (issue #163, wio-lite-ai's words): when
+- **`nn run` reports a lost stream** (issue #163; the words are
+  `svc/nn/nn_refusal`'s on every board since issue #174): when
   the camera stream ends by itself before the inference completes -- the
   auto-recovery gave up -- the run stops waiting and prints
   `nn: run: the camera stream was lost before an inference completed (-76)`,

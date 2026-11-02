@@ -513,7 +513,7 @@ table moved to `svc/nn/` in issue #163, see svc/README.md):
 
 | File | Thread or context | Hardware reason |
 |---|---|---|
-| `port/nn/nn_svc_wio.c` | console | The adapter over the `nn.h` API (`svc/nn/nn.h`, implemented by `svc/nn/nn.c`, shared with f746g-disco); model bytes come out of the NOR asset store into the backend's PSRAM staging slot. The open model's claims are a `svc/plugin/plugin_claims.h` store read under this file's interrupt mask. |
+| `port/nn/nn_svc_wio.c` | console | The adapter over the `nn.h` API (`svc/nn/nn.h`, implemented by `svc/nn/nn.c`, shared with f746g-disco); model bytes come out of the NOR asset store into the backend's PSRAM staging slot. `nn info`'s model section and `nn thresh` are `svc/nn/nn_svc_common`'s, the refusals' words `svc/nn/nn_refusal`'s (issue #174); this file passes its counter read, its lease and its teardown clause. The open model's claims are a `svc/plugin/plugin_claims.h` store read under this file's interrupt mask. |
 | `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (start / stop / stats / record reads) | Binds the shared frame path to the nn step of the band sink (`port/camera/cam_band.h`), holds nn's place among the camera's holders, and holds the NN session plus an OCTOSPI1 user place for the stream's lifetime; owns the glue's state (the private header lists each counter's writers and resets) and the frame path's ops table. |
 | `port/nn/nn_producer.c` | camera producer (the nn step of the band sink) | Downsamples each 60-row DCMI band straight into the model's input tensor on the CPU through the shared conversion (`svc/nn/nn_input_contract.h`), inside one band period (~18.5 ms), and hands the frame over after the fourth band. |
 | `port/nn/nn_worker.c` | inference worker (`nn_work`, priority 18) | Inference runs on the CPU for ~373 ms with no yield, so the worker sits below the console, the preview and the producer; it holds the result lease across decode + publish because the preview thread outranks it. |
@@ -529,6 +529,8 @@ table moved to `svc/nn/` in issue #163, see svc/README.md):
 | `port/plugin/plugin_lease.c` | every path into the plugin | The lease as a ThreadX mutex: the preview thread outranks the worker and would otherwise preempt a decode mid-way. |
 | `port/plugin/plugin_paint.c` | panel | CPU pixel loops into the rotated, native-order RGB565 LTDC frame (no DMA2D, which has no way to prove it stopped before the flip). |
 | `port/camera/cam_band.c` | camera producer (band callback), console (step enable / disable / drain) | Not an nn file, but nn runs inside it: the one band sink, running the preview step and then the nn step; each step's armed mark and busy count are `svc/camera/cam_step.h`'s. |
+
+[!] **`nn run`'s driver (`nn_svc_run_once()`) stays in this board's adapter** (issue #174 D7).  Its policy is shared already: the refusals and the base words of how a run ends (`svc/nn/nn_refusal`), when the wait ends (`svc/nn/nn_run_wait`) and how one run ended (`svc/nn/nn_shot`).  What is left is the camera API (the start's arguments and refusals, how a lost stream is read, the decode read-out), the teardown's clause, and ThreadX's sleep and clock -- `svc/` cannot include `tx_api.h`, so a shared driver would need a hook table as large as the loop itself.
 
 [!] **Only input 0 is filled** (issue #162 did not change this).  The backend
 accepts a model with 1..8 input tensors, but the camera producer writes input 0

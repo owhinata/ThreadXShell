@@ -173,7 +173,7 @@ push → Issue へ対応コメント → Issue クローズ。リポジトリは
 - **ブランチ**: `feat/`, `fix/`, `docs/`, `build/`, `refactor/`, `chore/`, `style/` prefix で
   `<prefix>/<N>-short-description`（`<N>` は Issue 番号）。ベースは常に `main`
 - **コミット**: conventional commits `type: #N short description` で **subject に Issue 番号**を含める
-  （リンク生成＋オートクローズ判定のため）。末尾に `Co-Authored-By: Claude ...` を付与
+  （リンク生成＋オートクローズ判定のため）。**subject は 72 桁以内、本文は空行の後に 72 桁で折り返す**（受入の数字・理由は本文か Issue コメントへ、subject に詰めない）。末尾に `Co-Authored-By: Claude ...` を付与
 - [!] **コミットメッセージと README は英語で書く**（会話・Issue・コード内コメントは日本語でよい）
 - 動作確認していない変更を commit / push しない
 

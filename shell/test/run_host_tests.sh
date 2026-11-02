@@ -887,6 +887,32 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     $LDFLAGS -o "$out/test_nn_shot_seq"
 "$out/test_nn_shot_seq"
 
+# issue #174 -- the one table of `nn` admission refusals and `nn run` endings
+# (svc/nn/nn_refusal.c).  A dead lifecycle, a start and a stop in flight and a
+# value outside the enum cannot be typed, and every sentence is picked from a
+# table or composed with a number, which the build-time check cannot see: each
+# input is run and its whole sentence compared with the expected text and the
+# bound.  A board's clause after a run's base sentence is checked at build time
+# against NN_REFUSAL_RUN_END_MAX, so one character too many must fail to compile,
+# on that assertion.
+gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_nn_refusal.c" "$svc/nn/nn_refusal.c" "$svc/fmt.c" \
+    $LDFLAGS -o "$out/test_nn_refusal"
+"$out/test_nn_refusal"
+if LC_ALL=C gcc $CFLAGS -DNN_REFUSAL_NEG_CLAUSE -I "$svc" -I "$svc/nn" -I "$svc/plugin" \
+       -I "$svc/camera" -c "$here/test_nn_refusal.c" -o "$out/refusal_neg.o" \
+       > "$out/refusal_neg.log" 2>&1; then
+    echo "test_nn_refusal: NN_REFUSAL_NEG_CLAUSE COMPILED -- the clause check did not fire" >&2
+    exit 1
+fi
+if ! LC_ALL=C grep -q "nn run clause does not fit after the longest base sentence" \
+       "$out/refusal_neg.log"; then
+    echo "test_nn_refusal: NN_REFUSAL_NEG_CLAUSE failed to compile, but not on the check:" >&2
+    cat "$out/refusal_neg.log" >&2
+    exit 1
+fi
+echo "  ok   NN_REFUSAL_NEG_CLAUSE refused at compile time, by the clause check"
+
 # issue #163 -- the one `nn bench` procedure (svc/nn/nn_bench.c): the board's
 # hold taken once, every input filled and every run timed under it, given back
 # exactly once on every exit and never after a failed acquire.  A console

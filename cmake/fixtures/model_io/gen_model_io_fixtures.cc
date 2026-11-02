@@ -164,6 +164,46 @@
  *   codes_null.tflite            no operator-code vector (and no operator, so
  *                                nothing else is wrong)              -> FORMAT
  *
+ * And the constant buffers (issue #183): the control model with one tensor
+ * added (or t0 / t1 changed), each added tensor on a Buffer of its own whose data
+ * is 16-byte aligned and N bytes long ("int8 [2, 3] 6 B"), and, where it says
+ * so, named by an ADD operator; all refusals FORMAT:
+ *
+ *   c_int8_eq.tflite             control: int8 [2, 3] 6 B
+ *   c_types_eq.tflite            control: one [3] constant of every type with a
+ *                                size (FLOAT16 .. COMPLEX128, BOOL, RESOURCE)
+ *   c_int8_short / _long         int8 [2, 3] 5 B / 7 B (the equality is a policy)
+ *   c_int32_short.tflite         int32 [2] 2 B: the element size is multiplied
+ *                                (2 B is the element COUNT, so a rule that
+ *                                forgot the size would pass it)
+ *   c_scalar_null / _empty       controls: int32 with no shape / shape [], 4 B
+ *   c_zero.tflite                int8 [0, 3] 1 B (refused by the equality)
+ *   c_neg.tflite                 int8 [-1, 3] 3 B (the walk's negative guard is
+ *                                redundant below 4 GB of data: as unsigned, -1 is
+ *                                past every cap; the guard is kept for clarity)
+ *   c_int4_packed / _even        controls: int4 [3] 2 B / [4] 2 B
+ *   c_int4_unpacked / _short     int4 [3] 3 B / [5] 2 B
+ *   c_string.tflite              a STRING [1] constant, 1 B (no size)
+ *   c_string_nonconst.tflite     a STRING [1] tensor without data: every
+ *                                tensor's type is judged
+ *   c_resource_nonconst.tflite   control: RESOURCE [1] without data
+ *   c_wrap32.tflite              int8 [65537, 65537] 131,073 B: the product
+ *                                wraps to exactly that in 32 bits
+ *   c_rank7_eq / _short          int8 of rank 7, 2 B / 1 B: a constant's rank is
+ *                                judged before its values (FORMAT, not TENSOR)
+ *   c_sparse.tflite              int8 [4, 4] with a CSR sparsity table, 6 B
+ *                                compressed: TFLM micro reads it dense
+ *   c_graph_in / _graph_out      t0 / t1 with 4 B of data (equal)
+ *   c_op_out.tflite              an ADD whose output has 4 B of data (equal)
+ *   c_alias_in_out.tflite        that tensor is also the graph's input
+ *   c_io_oob_and_data.tflite     outputs = [99] and a constant 1 B short: two
+ *                                faults, both FORMAT, whatever the order
+ *   c_var_eq.tflite              control: an is_variable constant (equal) an
+ *                                ADD reads
+ *   c_sg1_short.tflite           sg1_ok's second-subgraph tensor 1 B short
+ *   c_empty_data.tflite          control: int8 [2, 3] on a Buffer whose data
+ *                                vector is 0 long (TFLM: not a constant)
+ *
  * And Grove's payload scan (issue #179, svc/nn/ethosu/npu_model_scan.cc), which
  * only verify_vela_model runs: one tensor [1, 4] as graph I/O, the CUSTOM
  * "ethos-u" operator code, and UINT8 1-D payload tensors over a 16-byte aligned
@@ -188,6 +228,17 @@
  *   pl_in_65.tflite             inputs {payload, t0 x 64}, 65 in all: the scan
  *                               judges the length before the -1 check, because
  *                               the board runs it before the walk -> PAYLOAD
+ *   pl_const_short.tflite       pl_in1_ok plus an int8 [8] constant of 4 B: the
+ *                               scan passes it, the walk refuses -> FORMAT
+ *                               (issue #183, in either order)
+ *   pl_in2_nodata.tflite        control: inputs {payload, t0, t0} -- input 2
+ *                               (the NPU's arena base pointer) has no data
+ *   pl_in2_data.tflite          input 2 an int8 [4] tensor with 4 B of data
+ *                               (exact, so the walk passes it) -> PAYLOAD
+ *                               (issue #183, in either order: the NPU writes
+ *                               through it, into the model)
+ *   pl_in2_oob.tflite           input 2 names tensor 999      -> PAYLOAD
+ *                               (the scan runs before the walk on the board)
  *
  * The two "pl_share_4000" / "pl_index_1300" are the witnesses: walked once per
  * entry they cost 4e8 / 1.2e8 payload words; charged before the walk the second
@@ -255,6 +306,23 @@ std::vector<uint8_t> plan(int32_t n, uint32_t k, std::vector<int32_t> first = {}
 	                            reinterpret_cast<const uint8_t *>(w.data() + w.size()));
 }
 
+/* issue #183: one tensor added after the others.  data_len > 0 gives it a
+ * Buffer of its own with that many bytes; empty_data a Buffer whose data vector
+ * is 0 long; neither, buffer 0 (no data).  op_in / op_out add an ADD reading /
+ * writing it, graph_in makes it subgraph 0's only input. */
+struct ctensor {
+	tflite::TensorType   type;
+	std::vector<int32_t> shape;
+	bool                 no_shape;
+	uint32_t             data_len;
+	bool                 empty_data;
+	bool                 op_in;
+	bool                 op_out;
+	bool                 graph_in;
+	bool                 is_variable;
+	bool                 sparse;
+};
+
 /* issue #180: one more ADD operator table, named by `entries` operator entries. */
 struct opdef {
 	std::vector<int32_t> in;
@@ -291,7 +359,43 @@ struct spec {
 	bool                 no_buffers;    /* no buffer vector at all */
 	bool                 no_codes;      /* no operator-code vector at all */
 	std::vector<mddef>   md;
+	/* issue #183 -- all zero / empty: no data anywhere. */
+	std::vector<ctensor> ct;            /* after the quantized tensors */
+	uint32_t             t0_data;       /* t0 / t1 / the sg1_ok tensor on a */
+	uint32_t             t1_data;       /* Buffer of their own with this */
+	uint32_t             sg1_data;      /* many bytes (0: buffer 0) */
 };
+
+/* issue #183: the index of the first added constant. */
+uint32_t ct_base(const spec &sp)
+{
+	uint32_t n = (sp.out_shape.empty() ? 1u : 2u) + sp.extra_entries;
+
+	for (const qtensor &t : sp.qt)
+		n += t.entries;
+	return n;
+}
+
+/* issue #183: Buffers of their own (a data vector, maybe 0 long). */
+uint32_t ct_buffers_of(const spec &sp)
+{
+	uint32_t n = (sp.t0_data ? 1u : 0u) + (sp.t1_data ? 1u : 0u) + (sp.sg1_data ? 1u : 0u);
+
+	for (const ctensor &c : sp.ct)
+		n += (c.data_len || c.empty_data) ? 1u : 0u;
+	return n;
+}
+
+/* issue #183: the sparsity tables (SparsityParameters, 2 DimensionMetadata, 2
+ * Int32Vector). */
+uint32_t ct_sparse_tables_of(const spec &sp)
+{
+	uint32_t n = 0;
+
+	for (const ctensor &c : sp.ct)
+		n += c.sparse ? 5u : 0u;
+	return n;
+}
 
 /* issue #181: the metadata entries that bring a Buffer of their own. */
 uint32_t md_buffers_of(const spec &sp)
@@ -328,7 +432,16 @@ uint32_t tables_of(const spec &sp)
 	       (op_entries_of(sp) ? 1u : 0u) /* the ADD OperatorCode */ +
 	       (sp.sg1_no_tensors ? 1u : 0u) /* the second SubGraph */ +
 	       (sp.sg1_ok ? 2u : 0u) /* the second SubGraph and its Tensor */ +
-	       (uint32_t)sp.md.size() + md_buffers_of(sp) /* Metadata, own Buffer */;
+	       (uint32_t)sp.md.size() + md_buffers_of(sp) /* Metadata, own Buffer */ +
+	       (uint32_t)sp.ct.size() + ct_buffers_of(sp) + ct_sparse_tables_of(sp);
+}
+
+/* issue #183: a data vector of @p n bytes, 16-byte aligned like a converter's. */
+flatbuffers::Offset<flatbuffers::Vector<uint8_t>> const_data(flatbuffers::FlatBufferBuilder &fbb,
+                                                             uint32_t n)
+{
+	fbb.ForceVectorAlignment(n, 1, 16);
+	return fbb.CreateVector(std::vector<uint8_t>(n, 0x11u));
 }
 
 bool write_model(const std::string &dir, const spec &sp)
@@ -341,13 +454,30 @@ bool write_model(const std::string &dir, const spec &sp)
 	flatbuffers::FlatBufferBuilder fbb(1024, &alloc);
 	std::vector<flatbuffers::Offset<tflite::Tensor>> tensors;
 
+	/* issue #183: the Buffers of their own come after the model's base buffers
+	 * and before the metadata's, in this order: t0, t1, sg1, then each added
+	 * tensor with data. */
+	const uint32_t nb_base = sp.no_buffers ? 0u : (sp.buffers ? sp.buffers : 1u);
+	std::vector<flatbuffers::Offset<tflite::Buffer>> own;
+	auto own_buffer = [&](uint32_t n, bool empty) {
+		const auto d = empty ? fbb.CreateVector(std::vector<uint8_t>{}) : const_data(fbb, n);
+
+		own.push_back(tflite::CreateBuffer(fbb, d));
+		return nb_base + (uint32_t)own.size() - 1u;
+	};
+	const uint32_t t0_buf = sp.t0_data ? own_buffer(sp.t0_data, false) : sp.t0_buffer;
+
 	tensors.push_back(tflite::CreateTensor(
-		fbb, fbb.CreateVector(sp.in_shape), tflite::TensorType_INT8, sp.t0_buffer,
+		fbb, fbb.CreateVector(sp.in_shape), tflite::TensorType_INT8, t0_buf,
 		fbb.CreateString("in")));
-	if (!sp.out_shape.empty())
+	if (!sp.out_shape.empty()) {
+		const uint32_t t1_buf = sp.t1_data ? own_buffer(sp.t1_data, false) : 0u;
+
 		tensors.push_back(tflite::CreateTensor(
-			fbb, fbb.CreateVector(sp.out_shape), tflite::TensorType_INT8, 0,
+			fbb, fbb.CreateVector(sp.out_shape), tflite::TensorType_INT8, t1_buf,
 			fbb.CreateString("out")));
+	}
+	const uint32_t sg1_buf = sp.sg1_data ? own_buffer(sp.sg1_data, false) : UINT32_MAX - 1u;
 
 	if (sp.extra_entries) {
 		/* ONE table, named by every entry: the verifier visits it each time. */
@@ -371,6 +501,34 @@ bool write_model(const std::string &dir, const spec &sp)
 
 		for (uint32_t i = 0; i < qt.entries; i++)
 			tensors.push_back(t);
+	}
+
+	for (const ctensor &c : sp.ct) {
+		typedef flatbuffers::Offset<flatbuffers::Vector<int32_t>> svec;
+		const uint32_t bi = (c.data_len || c.empty_data) ? own_buffer(c.data_len, c.empty_data)
+		                                                 : 0u;
+		flatbuffers::Offset<tflite::SparsityParameters> sparsity;
+
+		if (c.sparse) {
+			/* [4, 4] as CSR: row 0 dense, column indices of 6 non-zeros. */
+			const auto seg = tflite::CreateInt32Vector(
+				fbb, fbb.CreateVector(std::vector<int32_t>{ 0, 2, 3, 5, 6 }));
+			const auto idx = tflite::CreateInt32Vector(
+				fbb, fbb.CreateVector(std::vector<int32_t>{ 0, 1, 2, 0, 3, 1 }));
+			const std::vector<flatbuffers::Offset<tflite::DimensionMetadata>> dm{
+				tflite::CreateDimensionMetadata(fbb, tflite::DimensionType_DENSE, 4),
+				tflite::CreateDimensionMetadata(
+					fbb, tflite::DimensionType_SPARSE_CSR, 0,
+					tflite::SparseIndexVector_Int32Vector, seg.Union(),
+					tflite::SparseIndexVector_Int32Vector, idx.Union()) };
+
+			sparsity = tflite::CreateSparsityParameters(
+				fbb, fbb.CreateVector(std::vector<int32_t>{ 0, 1 }), 0,
+				fbb.CreateVector(dm));
+		}
+		tensors.push_back(tflite::CreateTensor(
+			fbb, c.no_shape ? svec() : fbb.CreateVector(c.shape), c.type, bi,
+			fbb.CreateString("const"), 0, c.is_variable, sparsity));
 	}
 
 	typedef flatbuffers::Offset<flatbuffers::Vector<int32_t>> ivec;
@@ -407,13 +565,14 @@ bool write_model(const std::string &dir, const spec &sp)
 	const auto sg   = tflite::CreateSubGraph(fbb, tv, inv, outv, ops, fbb.CreateString("main"));
 	std::vector<flatbuffers::Offset<tflite::SubGraph>> sgv{ sg };
 
-	/* The model's buffer count: the base buffers, then one per metadata entry
-	 * that brings its own (issue #181). */
-	const uint32_t nb = sp.no_buffers ? 0u : (sp.buffers ? sp.buffers : 1u);
-	const uint32_t nb_all = nb + md_buffers_of(sp);
+	/* The model's buffer count: the base buffers, the tensors' own (issue #183),
+	 * then one per metadata entry that brings its own (issue #181). */
+	const uint32_t nb = nb_base;
+	const uint32_t nb_all = nb + (uint32_t)own.size() + md_buffers_of(sp);
 
 	if (sp.sg1_ok) {
-		const uint32_t b1 = sp.sg1_buffer == UINT32_MAX ? nb_all : sp.sg1_buffer;
+		const uint32_t b1 = sp.sg1_buffer == UINT32_MAX ? nb_all
+		                    : sp.sg1_data ? sg1_buf : sp.sg1_buffer;
 		const auto t = tflite::CreateTensor(fbb, fbb.CreateVector(std::vector<int32_t>{ 1, 4 }),
 		                                    tflite::TensorType_INT8, b1,
 		                                    fbb.CreateString("sg1"));
@@ -435,6 +594,7 @@ bool write_model(const std::string &dir, const spec &sp)
 
 	for (uint32_t i = 0; i < nb; i++)
 		bv.push_back((sp.shared || i == 0) ? one : tflite::CreateBuffer(fbb));
+	bv.insert(bv.end(), own.begin(), own.end());
 
 	std::vector<flatbuffers::Offset<tflite::Metadata>> mdv;
 
@@ -494,6 +654,11 @@ struct pl_spec {
 	int32_t     in1;        /* the operator's input 1 */
 	uint32_t    length;     /* the file's exact length (0: as built) */
 	uint32_t    n_inputs;   /* inputs in all, the rest t0 (0: just the two) */
+	uint32_t    const_len;  /* issue #183: an int8 [8] constant of this many
+	                         * bytes, named by no operator (0: none) */
+	int         in2;        /* issue #183: input 2 -- 0 none, 1 t0 (no data),
+	                         * 2 an int8 [4] tensor with 4 B of data, 3 a
+	                         * tensor index past the vector */
 };
 
 /* The verifier's table visits: Model, SubGraph, the I/O tensor, the payload
@@ -503,7 +668,8 @@ uint32_t tables_of(const pl_spec &sp)
 {
 	const uint32_t k = sp.distinct ? sp.entries : 1u;
 
-	return 2u + 1u + k + sp.entries + 1u + 1u + k;
+	return 2u + 1u + k + sp.entries + 1u + 1u + k + (sp.const_len ? 2u : 0u) +
+	       (sp.in2 == 2 ? 2u : 0u);
 }
 
 bool write_payload_model(const std::string &dir, const pl_spec &sp)
@@ -531,11 +697,35 @@ bool write_payload_model(const std::string &dir, const pl_spec &sp)
 	for (uint32_t i = 0; i < k; i++)
 		tv.push_back(tflite::CreateTensor(fbb, pshape, tflite::TensorType_UINT8,
 		                                  1u + i /* buffer index */));
+	flatbuffers::Offset<tflite::Buffer> const_buf;
+
+	if (sp.const_len) {
+		const_buf = tflite::CreateBuffer(fbb, const_data(fbb, sp.const_len));
+		tv.push_back(tflite::CreateTensor(fbb, fbb.CreateVector(std::vector<int32_t>{ 8 }),
+		                                  tflite::TensorType_INT8, 1u + k,
+		                                  fbb.CreateString("const")));
+	}
+	flatbuffers::Offset<tflite::Buffer> in2_buf;
+	int32_t in2_index = 0;
+
+	if (sp.in2 == 2) {
+		in2_buf = tflite::CreateBuffer(fbb, const_data(fbb, 4u));
+		in2_index = (int32_t)tv.size();
+		tv.push_back(tflite::CreateTensor(fbb, fbb.CreateVector(std::vector<int32_t>{ 4 }),
+		                                  tflite::TensorType_INT8,
+		                                  1u + k + (sp.const_len ? 1u : 0u),
+		                                  fbb.CreateString("scratch")));
+	} else if (sp.in2 == 3) {
+		in2_index = 999;
+	}
 
 	const auto outs = fbb.CreateVector(std::vector<int32_t>{ 0 });
 	const auto marker = fbb.CreateVector(std::vector<uint8_t>{ 0 });
 	auto op_for = [&](int32_t payload_tensor) {
 		std::vector<int32_t> in{ payload_tensor, sp.in1 };
+
+		if (sp.in2)
+			in.push_back(in2_index);   /* 1: t0 */
 
 		while (in.size() < sp.n_inputs)
 			in.push_back(0);
@@ -566,6 +756,10 @@ bool write_payload_model(const std::string &dir, const pl_spec &sp)
 
 	for (uint32_t i = 0; i < k; i++)
 		bv.push_back(payload_buf);   /* distinct: k indices, ONE Buffer table */
+	if (sp.const_len)
+		bv.push_back(const_buf);
+	if (sp.in2 == 2)
+		bv.push_back(in2_buf);
 	const auto model = tflite::CreateModel(fbb, TFLITE_SCHEMA_VERSION, fbb.CreateVector(cv),
 	                                       fbb.CreateVector(sgv),
 	                                       fbb.CreateString("issue #179 fixture"),
@@ -788,6 +982,141 @@ int main(int argc, char **argv)
 		graph_specs.push_back(sp);
 	}
 
+	/* issue #183: constant buffers.  c(type, shape, bytes) is one added tensor
+	 * (on a Buffer of its own when bytes > 0), read by an ADD into t1. */
+	{
+		auto c = [](tflite::TensorType type, std::vector<int32_t> shape, uint32_t bytes) {
+			ctensor t = { type, shape, false, bytes, false, true, false, false, false,
+			              false };
+			return t;
+		};
+		auto one = [&](const char *file, ctensor t) {
+			spec sp = graph(file);
+			sp.ct = { t };
+			return sp;
+		};
+		const tflite::TensorType I8 = tflite::TensorType_INT8;
+		const tflite::TensorType I4 = tflite::TensorType_INT4;
+		const std::vector<int32_t> r7 = { 1, 1, 1, 1, 1, 1, 2 };
+		static_assert(NN_TFLM_MAX_TENSOR_RANK + 1u == 7u, "c_rank7_* are rank 7");
+
+		graph_specs.push_back(one("c_int8_eq.tflite", c(I8, { 2, 3 }, 6u)));
+		{
+			/* Every type with a size, [3] each: bytes = 3 x its size. */
+			const struct { tflite::TensorType t; uint32_t sz; } ty[] = {
+				{ tflite::TensorType_FLOAT16, 2 },  { tflite::TensorType_BFLOAT16, 2 },
+				{ tflite::TensorType_INT16, 2 },    { tflite::TensorType_UINT16, 2 },
+				{ tflite::TensorType_FLOAT32, 4 },  { tflite::TensorType_INT32, 4 },
+				{ tflite::TensorType_UINT32, 4 },   { tflite::TensorType_RESOURCE, 4 },
+				{ tflite::TensorType_FLOAT64, 8 },  { tflite::TensorType_INT64, 8 },
+				{ tflite::TensorType_UINT64, 8 },   { tflite::TensorType_COMPLEX64, 8 },
+				{ tflite::TensorType_COMPLEX128, 16 }, { tflite::TensorType_UINT8, 1 },
+				{ tflite::TensorType_INT8, 1 },     { tflite::TensorType_BOOL, 1 },
+			};
+			spec sp = graph("c_types_eq.tflite");
+
+			for (const auto &e : ty) {
+				ctensor t = c(e.t, { 3 }, 3u * e.sz);
+
+				t.op_in = false;   /* no ADD takes a COMPLEX128 */
+				sp.ct.push_back(t);
+			}
+			graph_specs.push_back(sp);
+		}
+		graph_specs.push_back(one("c_int8_short.tflite", c(I8, { 2, 3 }, 5u)));
+		graph_specs.push_back(one("c_int8_long.tflite", c(I8, { 2, 3 }, 7u)));
+		graph_specs.push_back(one("c_int32_short.tflite",
+		                          c(tflite::TensorType_INT32, { 2 }, 2u)));
+		{
+			ctensor t = c(tflite::TensorType_INT32, {}, 4u);
+
+			t.no_shape = true;
+			graph_specs.push_back(one("c_scalar_null.tflite", t));
+		}
+		graph_specs.push_back(one("c_scalar_empty.tflite",
+		                          c(tflite::TensorType_INT32, {}, 4u)));
+		graph_specs.push_back(one("c_zero.tflite", c(I8, { 0, 3 }, 1u)));
+		graph_specs.push_back(one("c_neg.tflite", c(I8, { -1, 3 }, 3u)));
+		graph_specs.push_back(one("c_int4_packed.tflite", c(I4, { 3 }, 2u)));
+		graph_specs.push_back(one("c_int4_even.tflite", c(I4, { 4 }, 2u)));
+		graph_specs.push_back(one("c_int4_unpacked.tflite", c(I4, { 3 }, 3u)));
+		graph_specs.push_back(one("c_int4_short.tflite", c(I4, { 5 }, 2u)));
+		graph_specs.push_back(one("c_string.tflite", c(tflite::TensorType_STRING, { 1 }, 1u)));
+		{
+			ctensor t = c(tflite::TensorType_STRING, { 1 }, 0u);
+
+			t.op_in = false;
+			graph_specs.push_back(one("c_string_nonconst.tflite", t));
+			t.type = tflite::TensorType_RESOURCE;
+			graph_specs.push_back(one("c_resource_nonconst.tflite", t));
+		}
+		graph_specs.push_back(one("c_wrap32.tflite", c(I8, { 65537, 65537 }, 131073u)));
+		static_assert((uint32_t)(65537u * 65537u) == 131073u,
+		              "c_wrap32: the 32-bit product is the data length");
+		graph_specs.push_back(one("c_rank7_eq.tflite", c(I8, r7, 2u)));
+		graph_specs.push_back(one("c_rank7_short.tflite", c(I8, r7, 1u)));
+		{
+			ctensor t = c(I8, { 4, 4 }, 6u);
+
+			t.sparse = true;
+			graph_specs.push_back(one("c_sparse.tflite", t));
+		}
+		{
+			spec sp = graph("c_graph_in.tflite");
+			sp.t0_data = 4u;
+			graph_specs.push_back(sp);
+			sp = graph("c_graph_out.tflite");
+			sp.t1_data = 4u;
+			graph_specs.push_back(sp);
+		}
+		{
+			ctensor t = c(I8, { 1, 4 }, 4u);
+
+			t.op_in = false;
+			t.op_out = true;
+			graph_specs.push_back(one("c_op_out.tflite", t));
+			t.graph_in = true;
+			graph_specs.push_back(one("c_alias_in_out.tflite", t));
+		}
+		{
+			spec sp = one("c_io_oob_and_data.tflite", c(I8, { 2, 3 }, 5u));
+			sp.outputs = { 99 };
+			graph_specs.push_back(sp);
+		}
+		{
+			ctensor t = c(I8, { 1, 4 }, 4u);
+
+			t.is_variable = true;
+			graph_specs.push_back(one("c_var_eq.tflite", t));
+		}
+		{
+			spec sp = graph("c_sg1_short.tflite");
+			sp.sg1_data = 3u;   /* the tensor is int8 [1, 4] */
+			graph_specs.push_back(sp);
+		}
+		{
+			ctensor t = c(I8, { 2, 3 }, 0u);
+
+			t.empty_data = true;
+			graph_specs.push_back(one("c_empty_data.tflite", t));
+		}
+		/* The ADDs and the graph input the added tensors ask for. */
+		for (spec &sp : graph_specs) {
+			const uint32_t base = ct_base(sp);
+
+			for (uint32_t k = 0; k < sp.ct.size(); k++) {
+				const int32_t idx = (int32_t)(base + k);
+
+				if (sp.ct[k].op_in)
+					sp.more_ops.push_back({ { idx }, { 1 }, 1u });
+				if (sp.ct[k].op_out)
+					sp.more_ops.push_back({ { 0 }, { idx }, 1u });
+				if (sp.ct[k].graph_in)
+					sp.inputs = { idx };
+			}
+		}
+	}
+
 	/* The flags the constructors above do not take, set by name. */
 	for (spec &sp : graph_specs) {
 		const std::string f = sp.file;
@@ -796,7 +1125,8 @@ int main(int argc, char **argv)
 		sp.op_no_outputs  = f == "op_no_outputs.tflite";
 		sp.sg1_ok         = f == "sg1_ok.tflite" || f == "t_buffer_oob_sg1.tflite" ||
 		                    f == "md_offline_total_3.tflite" ||
-		                    f == "md_offline_sg0_only.tflite";
+		                    f == "md_offline_sg0_only.tflite" ||
+		                    f == "c_sg1_short.tflite";
 		sp.sg1_no_tensors = f == "sg1_no_tensors.tflite";
 		if (f == "op_in_65000_shared.tflite")
 			sp.op_entries = witness_entries;
@@ -830,6 +1160,10 @@ int main(int argc, char **argv)
 		{ "pl_in1_neg1.tflite",          1u,    false, p2,       -1, 0u },
 		{ "pl_in1_ok.tflite",            1u,    false, p2,       0, 0u },
 		{ "pl_in_65.tflite",             1u,    false, p2,       0, 0u, opl + 1u },
+		{ "pl_const_short.tflite",       1u,    false, p2,       0, 0u, 0u, 4u },
+		{ "pl_in2_nodata.tflite",        1u,    false, p2,       0, 0u, 0u, 0u, 1 },
+		{ "pl_in2_data.tflite",          1u,    false, p2,       0, 0u, 0u, 0u, 2 },
+		{ "pl_in2_oob.tflite",           1u,    false, p2,       0, 0u, 0u, 0u, 3 },
 	};
 
 	for (const pl_spec &sp : pl_specs) {

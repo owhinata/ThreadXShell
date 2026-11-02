@@ -140,6 +140,8 @@ int build_interp(const void *data, uint32_t len)
 	 * long or indexes past the tensors, or quantization vectors too long or
 	 * inconsistent (issue #180), or a buffer index past the buffers, an offline
 	 * plan that does not match the graph or no operator-code vector (issue #181),
+	 * or a tensor type with no size, a constant whose data is not its shape's
+	 * bytes or data on a tensor the graph writes (issue #183),
 	 * SHAPE for an I/O count outside
 	 * 1..NN_MAX_IO, TENSOR for a rank above NN_TFLM_MAX_TENSOR_RANK (an I/O tensor's
 	 * above NN_MAX_DIMS), DIMS for an I/O dimension outside 0..65535 -- lengths

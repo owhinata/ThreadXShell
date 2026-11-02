@@ -19,7 +19,7 @@
 #include <string.h>
 
 #include "tensorflow/lite/schema/schema_utils.h"   /* GetBuiltinCode() */
-#include "nn_tflm_model_check.h"   /* NN_TFLM_MAX_OP_TENSORS */
+#include "nn_tflm_model_check.h"   /* NN_TFLM_MAX_OP_TENSORS, the walk's readers */
 
 const uint8_t *npu_model_command_stream(const tflite::Model *model,
                                         const tflite::SubGraph *sub,
@@ -171,6 +171,51 @@ const char *npu_model_payload_refusal(const tflite::Model *model,
 				return "an ethos-u operator names no tensor (-1) for an input "
 				       "after the command stream, which its Eval() reads "
 				       "unchecked";
+		}
+
+		/* [!] NO DATA FROM INPUT 2 ON (issue #183).  The kernel hands inputs
+		 * 1..n to the driver as base pointers 0..n-1, and Vela's command stream
+		 * WRITES through base pointers 1 and 2 -- input 2 is the TFLM arena
+		 * region, input 3 the fast scratch.  A tensor with data (the shared
+		 * walk's test: a Buffer with a data vector of size > 0) is not planned
+		 * into the arena (micro_allocation_info.cc), so its pointer is the
+		 * model -- the XIP window -- and the NPU would write there; the walk's
+		 * written-tensor rule covers operator outputs and graph I/O only.
+		 * Input 1 is the weights, constant by design.  Every Vela model
+		 * measured carries data on inputs 0 and 1 only.  The walk has not yet
+		 * proven the indices here (the board runs this scan first), so the
+		 * tensor index and the buffer index are compared before either is
+		 * read.  [!] Read through the walk's forced-inline helpers (the buffer
+		 * vector, a Tensor's buffer field, a vector-of-tables entry) and
+		 * Buffer::data() spelled as Table::GetPointer<const void *>, the same
+		 * test as the walk's nn_tflm_buffer_data(): the generated accessors
+		 * called from here were outlined into .text, ITCM on this board (+104 B
+		 * with four veneers; Buffer::data() alone +16 B). */
+		const auto *tensors = sub->tensors();   /* present: located above */
+		const nn_tflm_buffer_vec *buffers = static_cast<const nn_tflm_buffer_vec *>(
+			nn_tflm_model_field(model, tflite::Model::VT_BUFFERS));   /* present: likewise */
+
+		for (uint32_t i = 2u; i < inputs->size(); i++) {
+			const uint32_t ti = static_cast<uint32_t>(inputs->Get(i));   /* >= 0 above */
+
+			if (ti >= tensors->size())
+				return "an ethos-u operator names an input tensor that does "
+				       "not exist";
+
+			const auto *t = tensors->Get(ti);
+
+			if (t == nullptr || nn_tflm_tensor_buffer(t) >= buffers->size())
+				return "an ethos-u operator's input names no buffer";
+			const auto *b = nn_tflm_vec_table(buffers, nn_tflm_tensor_buffer(t));
+			const auto *d = b == nullptr ? nullptr
+			                : static_cast<const flatbuffers::Vector<uint8_t> *>(
+			                          reinterpret_cast<const flatbuffers::Table *>(b)
+			                                  ->GetPointer<const void *>(
+			                                          tflite::Buffer::VT_DATA));
+
+			if (d != nullptr && d->size() != 0u)
+				return "an ethos-u operator's input after the weights carries "
+				       "data, so the NPU would write into the model";
 		}
 
 		/* [!] CHARGED BEFORE IT IS WALKED (issue #179).  Operator entries may

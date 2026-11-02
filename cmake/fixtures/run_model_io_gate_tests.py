@@ -100,6 +100,33 @@ tensor count n and k offsets (12 + 4k bytes), the graph has 2 tensors:
 On the vela style the controls with a plan are judged by the walk's ok line like
 the rest; the gate's own offline-plan report and its later steps run after it.
 
+And the constant buffers (issue #183), all refusals NN_MODEL_ERR_FORMAT: every
+tensor's type one TFLM gives a size, every tensor with data exactly element
+count x element size long (INT4 packed two to a byte, 1 element for no shape),
+its rank judged before its values, and no data on an operator output or on
+subgraph 0's inputs / outputs:
+
+  c_int8_eq / c_types_eq             controls: int8 [2, 3] 6 B; one [3] constant of
+                                     every sized type
+  c_int8_short / _long / c_int32_short  5 B / 7 B / int32 [2] 2 B (its count)
+  c_scalar_null / c_scalar_empty     controls: int32, no shape / shape [], 4 B
+  c_zero / c_neg                     [0, 3] 1 B / [-1, 3] 3 B
+  c_int4_packed / _even              controls: int4 [3] 2 B / [4] 2 B
+  c_int4_unpacked / _short           int4 [3] 3 B / [5] 2 B
+  c_string / c_string_nonconst       a STRING constant / a STRING tensor without
+                                     data (every tensor's type is judged)
+  c_resource_nonconst                control: RESOURCE without data
+  c_wrap32                           [65537, 65537] 131,073 B (the 32-bit product)
+  c_rank7_eq / c_rank7_short         rank-7 constants: FORMAT, not TENSOR
+  c_sparse                           a CSR-sparse [4, 4] constant, 6 B
+  c_graph_in / c_graph_out / c_op_out / c_alias_in_out
+                                     data on a tensor the graph writes
+  c_io_oob_and_data                  an output index past the tensors and a short
+                                     constant: FORMAT either way
+  c_var_eq / c_empty_data            controls: a variable constant an ADD reads; a
+                                     data vector 0 long
+  c_sg1_short                        a short constant in a second subgraph
+
 And, on verify_vela_model only (--style vela), Grove's payload scan (issue #179,
 svc/nn/ethosu/npu_model_scan.cc), which charges each operator's payload bytes
 against the file's length before walking it and refuses -1 as an ethos-u
@@ -122,6 +149,13 @@ ok line.
   pl_in_65              65 inputs                              -> the length sentence
                         (judged by the scan before its -1 check; the walk would
                         say FORMAT, so the order below matters)
+  pl_in2_nodata         control: input 2 (the NPU's arena base pointer) without data
+  pl_in2_data           input 2 with data (exact, so the walk passes it)
+                        -> the data sentence, in BOTH orders (issue #183)
+  pl_in2_oob            input 2 past the tensor vector     -> the range sentence
+  pl_const_short        pl_in1_ok plus a constant 4 B short of its shape: the
+                        walk's FORMAT (issue #183), run in BOTH orders -- with
+                        --board-order after the scan's ok line
 
 Every pl_ case runs with --board-order (the scan before the walk, the board's
 order), and a refusal is matched as the gate's whole FAIL line.
@@ -255,6 +289,36 @@ CASES = [
     ("md_offline_off_min.tflite", FORMAT),
     ("md_offline_off_pos.tflite", None),
     ("codes_null.tflite", FORMAT),
+    # The constant buffers (issue #183): every tensor's type with a size, every
+    # constant exactly its shape's bytes, no data on a tensor the graph writes.
+    ("c_int8_eq.tflite", None),
+    ("c_types_eq.tflite", None),
+    ("c_int8_short.tflite", FORMAT),
+    ("c_int8_long.tflite", FORMAT),
+    ("c_int32_short.tflite", FORMAT),
+    ("c_scalar_null.tflite", None),
+    ("c_scalar_empty.tflite", None),
+    ("c_zero.tflite", FORMAT),
+    ("c_neg.tflite", FORMAT),
+    ("c_int4_packed.tflite", None),
+    ("c_int4_even.tflite", None),
+    ("c_int4_unpacked.tflite", FORMAT),
+    ("c_int4_short.tflite", FORMAT),
+    ("c_string.tflite", FORMAT),
+    ("c_string_nonconst.tflite", FORMAT),
+    ("c_resource_nonconst.tflite", None),
+    ("c_wrap32.tflite", FORMAT),
+    ("c_rank7_eq.tflite", FORMAT),
+    ("c_rank7_short.tflite", FORMAT),
+    ("c_sparse.tflite", FORMAT),
+    ("c_graph_in.tflite", FORMAT),
+    ("c_graph_out.tflite", FORMAT),
+    ("c_op_out.tflite", FORMAT),
+    ("c_alias_in_out.tflite", FORMAT),
+    ("c_io_oob_and_data.tflite", FORMAT),
+    ("c_var_eq.tflite", None),
+    ("c_sg1_short.tflite", FORMAT),
+    ("c_empty_data.tflite", None),
 ]
 
 # Grove's payload scan (issue #179): vela style only, judged by the scan's sentence.
@@ -268,7 +332,10 @@ PL_NEG = ("an ethos-u operator names no tensor (-1) for an input after the comma
           "stream, which its Eval() reads unchecked")
 PL_LEN = ("an ethos-u operator lists more inputs than the firmware's operator walk "
           "allows")
-PL_REASONS = (PL_SUM, PL_NEG, PL_LEN)
+PL_DATA = ("an ethos-u operator's input after the weights carries data, so the "
+           "NPU would write into the model")
+PL_OOB = "an ethos-u operator names an input tensor that does not exist"
+PL_REASONS = (PL_SUM, PL_NEG, PL_LEN, PL_DATA, PL_OOB)
 PL_FAIL = "  FAIL   the firmware would refuse this model (NN_MODEL_ERR_PAYLOAD): "
 # Run with the board's order: the scan before the graph walk (nn_ethosu.cc), so the
 # first refusal is the one the board gives -- pl_in_65 would otherwise be the walk's.
@@ -283,6 +350,19 @@ PL_CASES = [
     ("pl_in1_neg1.tflite", PL_NEG),
     ("pl_in1_ok.tflite", None),
     ("pl_in_65.tflite", PL_LEN),
+    ("pl_in2_nodata.tflite", None),
+    ("pl_in2_oob.tflite", PL_OOB),
+]
+# Payload models the SCAN refuses after the walk passes them (issue #183): run in
+# the default order too (the walk's ok line first, then the scan's sentence).
+PL_SCAN_BOTH = [
+    ("pl_in2_data.tflite", PL_DATA),
+]
+# Payload models the WALK refuses (issue #183): (file, code), each run in the
+# default order (the walk first) and with --board-order (the scan first, which
+# must pass it and print its ok line before the walk's refusal).
+PL_WALK_CASES = [
+    ("pl_const_short.tflite", FORMAT),
 ]
 
 # The wall-time ceiling on the two "_shared" witnesses: the fastest of
@@ -391,18 +471,48 @@ def main():
                         "-o", gen], check=True)
         subprocess.run([gen, tmp], check=True)
 
-        cases = CASES + (PL_CASES if args.style == "vela" else [])
-        for name, want in cases:
+        cases = [(n, w, None) for n, w in CASES]
+        if args.style == "vela":
+            cases += [(n, w, None) for n, w in PL_CASES]
+            for n, w in PL_WALK_CASES:
+                cases += [(n, w, []), (n, w, PL_ARGS)]
+            for n, w in PL_SCAN_BOTH:
+                cases += [(n, ("scan", w), []), (n, ("scan", w), PL_ARGS)]
+        for name, want, args_override in cases:
             took = None
             for _ in range(WITNESS_RUNS if name in WITNESSES else 1):
                 t0 = time.monotonic()
-                extra = PL_ARGS if name.startswith("pl_") else []
+                extra = args_override if args_override is not None else \
+                    (PL_ARGS if name.startswith("pl_") else [])
                 p = subprocess.run([gate_path, os.path.join(tmp, name), *extra],
                                    capture_output=True, text=True)
                 dt = time.monotonic() - t0
                 took = dt if took is None else min(took, dt)
             text = p.stdout + p.stderr
-            if name.startswith("pl_"):
+            if args_override is not None and isinstance(want, tuple):
+                want = want[1]
+                lines = p.stdout.splitlines()
+                ok = p.returncode == 1 and (PL_FAIL + want) in lines \
+                    and not any(x in text for x in PL_REASONS if x != want) \
+                    and PL_OK not in text \
+                    and not any(c in text for c in CODES)
+                if not args_override:
+                    ok = ok and OK_LINE[args.style] in text
+                name = f"{name} ({' '.join(args_override) or 'default order'})"
+                why = f"rc 1 with the whole line {PAYLOAD}: \"{want}\"" + \
+                    ("" if args_override else ", after the walk's ok line")
+            elif args_override is not None:
+                others = [c for c in CODES if c != want]
+                ok = p.returncode == 1 and want in text \
+                    and not any(c in text for c in others) \
+                    and PAYLOAD not in text \
+                    and OK_LINE[args.style] not in text
+                if args_override:
+                    ok = ok and PL_OK in text
+                name = f"{name} ({' '.join(args_override) or 'default order'})"
+                why = f"rc 1 with {want} (and no other code, no {PAYLOAD})" + \
+                    (", after the payload scan's ok line" if args_override else "")
+            elif name.startswith("pl_"):
                 if want is None:
                     ok = PL_OK in text and PAYLOAD not in text \
                         and not any(c in text for c in CODES)
@@ -446,7 +556,8 @@ def main():
 
     if failures:
         sys.exit(f"run_model_io_gate_tests: {failures} case(s) failed for {gate_path}")
-    n = len(CASES) + (len(PL_CASES) if args.style == "vela" else 0)
+    n = len(CASES) + (len(PL_CASES) + 2 * len(PL_WALK_CASES) + 2 * len(PL_SCAN_BOTH)
+                      if args.style == "vela" else 0)
     print(f"run_model_io_gate_tests: OK ({n} cases + schema depth, {gate_path})")
 
 

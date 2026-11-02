@@ -7,8 +7,9 @@
  * @brief   What a TFLM model must satisfy before it is planned -- the bounded
  *          flatbuffer verifier and the graph walk (structure, lengths, ranks,
  *          quantization lengths, buffer indices and the offline plan's
- *          header, I/O dims) -- shared by both interpreting backends and by the
- *          three host gates (issues #175, #178, #180, #181).
+ *          header, constant buffers, I/O dims) -- shared by both interpreting
+ *          backends and by the three host gates (issues #175, #178, #180, #181,
+ *          #183).
  *
  * TWO CHECKS, in the order a loader runs them:
  *
@@ -22,8 +23,11 @@
  *                                  the operators' per-channel sum within its
  *                                  own, every buffer index naming a buffer that
  *                                  exists, an offline plan that matches the
- *                                  graph, an operator-code vector), subgraph
- *                                  0's I/O is
+ *                                  graph, an operator-code vector, every
+ *                                  tensor's type one with a size, every
+ *                                  constant's data exactly its shape's bytes,
+ *                                  no data on a tensor the graph writes),
+ *                                  subgraph 0's I/O is
  *                                  1..NN_MAX_IO per list, every tensor's rank is
  *                                  at most NN_TFLM_MAX_TENSOR_RANK (subgraph 0's
  *                                  I/O at most NN_MAX_DIMS), and the I/O
@@ -124,6 +128,45 @@
  * one on grove-vision-ai-v2; a model without operators has no use for it
  * either way, and no converter omits it).
  *
+ * [!] CONSTANT BUFFERS (issue #183).  TFLM points a tensor whose buffer has data
+ * (GetFlatbufferTensorBuffer(): a data vector of size > 0) at those bytes, in
+ * the model, and compares their length with nothing: BytesRequiredForTensor()
+ * and TfLiteEvalTensorByteLength() (memory_helpers.cc) multiply the shape in int
+ * and the element size, and no caller looks at data()->size() (a verifier proves
+ * only that the vector lies in the file).  A kernel that reads a constant (a
+ * filter, RESHAPE's shape) by ITS OWN eval tensor's dims, which are the
+ * serialized shape, reads a short buffer under a large shape past the end of
+ * the model; the walk closes that.  [!] NOT covered: a bias that FULLY_CONNECTED
+ * / CONV_2D read by ANOTHER tensor's output depth (the weights' / filter's; the
+ * kernels compare the two with a DCHECK only, compiled out by NDEBUG) -- a rule
+ * that needs the operator's semantics, issue #185.  And the planner does not place a tensor with data
+ * (micro_allocation_info.cc, needs_allocating), so one that the graph WRITES --
+ * a graph input the board fills, an operator output a kernel produces -- is
+ * written in place, into the model (PSRAM staging on wio-lite-ai, SDRAM on
+ * f746g-disco, the XIP window on grove-vision-ai-v2).  So, all FORMAT:
+ *
+ *   every tensor of every subgraph, data or not, has a type TFLM gives a size
+ *   (nn_tflm_elem_bytes2(); TFLM's planner fails AllocateTensors() on any other
+ *   -- ARENA on the board, a PASS on the gates that never plan);
+ *   every tensor with data declares at most NN_TFLM_MAX_TENSOR_RANK dimensions
+ *   (judged on the length, before any value), none negative, and its data is
+ *   EXACTLY element count x element size long (1 element for no shape, INT4
+ *   packed two to a byte; longer is refused as a policy -- every constant of the
+ *   44 models measured is exact -- and so is a 0-element constant with data);
+ *   no tensor an operator of any subgraph outputs, and no tensor of subgraph
+ *   0's inputs / outputs, has data (a variable neither).
+ *
+ * The sparsity table is not read: TFLM micro reads a constant dense (no kernel
+ * registered here densifies), so a sparse constant's compressed buffer is short
+ * of its dense shape and refused.  NOT closed here: how far the NPU reads from
+ * an ethos-u operator's weights (input 1) is decided by its command stream, not
+ * by that tensor's length (grove-vision-ai-v2's README).  Work: per tensor entry
+ * one type, one buffer table, one data length and at most
+ * NN_TFLM_MAX_TENSOR_RANK dimension values; per operator entry at most
+ * NN_TFLM_MAX_OP_TENSORS output tensors' buffers -- a constant per visit, so the
+ * bound below holds.  The dimension VALUES of a tensor without data stay unread
+ * (Vela's internal tensors reach 2.2 M elements).
+ *
  * Structure is checked BEFORE anything else, so a model
  * broken in two ways is FORMAT; then the count (SHAPE), the rank (TENSOR) and the
  * values (DIMS).  On a board without a verifier this is the trust GetModel() and
@@ -140,9 +183,10 @@
  * verifier's table count bounded none of it.  So this walk reads each scalar
  * vector's LENGTH before any element and refuses one that is too long:
  *
- *   per tensor entry    one rank compare (shape()->size(); the internal tensors'
- *                       dimension VALUES are never read -- Vela's internal
- *                       tensors reach 2.2 M, a value rule would refuse them)
+ *   per tensor entry    one rank compare (shape()->size(); the dimension VALUES
+ *                       of a tensor without data are never read -- Vela's
+ *                       internal tensors reach 2.2 M, a value rule would refuse
+ *                       them)
  *   per operator entry  three length compares, then at most
  *                       3 x NN_TFLM_MAX_OP_TENSORS index reads, and as many
  *                       scale-vector length reads (issue #180)
@@ -158,6 +202,11 @@
  *   per tensor, once    for each plan entry, one offset-value compare: the plan
  *   per plan            holds exactly one offset per tensor of the model
  *                       (issue #181)
+ *   per tensor entry    one type, one buffer and its data length; with data,
+ *                       the rank compared, then at most NN_TFLM_MAX_TENSOR_RANK
+ *                       dimension values (issue #183)
+ *   per operator entry  for each output index, one tensor, one buffer and its
+ *                       data length (issue #183)
  *
  * Every tensor and operator entry is one table visit of the verifier (a shared
  * subgraph's are visited once per entry naming it), so behind the 16 / 4096
@@ -188,10 +237,12 @@
  * load is bounded by visits squared x small constants, not visits x a constant.
  *
  * [!] THE ONE EXCEPTION TO "LENGTHS FIRST": subgraph 0's two I/O lists are
- * walked once by nn_tflm_io_list_ok() BEFORE their count is judged (one compare
- * per entry, O(the list's length): at most ~128K entries in a 512 KB file, read
- * once, never multiplied by sharing).  The order is kept so that a model broken
- * in two ways stays FORMAT rather than SHAPE.
+ * walked once by nn_tflm_io_list_ok() BEFORE their count is judged (per entry
+ * one index compare, then its tensor's buffer and data length, issue #183;
+ * O(the list's length): at most ~128K entries in a 512 KB file, read once, never
+ * multiplied by sharing).  It runs after every subgraph's tensors (which prove
+ * the buffer indices it follows) and before the count, so a model broken in two
+ * ways stays FORMAT rather than SHAPE.
  *
  * wio-lite-ai runs no verifier: there nothing bounds the number
  * of entries but the file, the trust described above.  (grove-vision-ai-v2's payload
@@ -300,9 +351,10 @@
  * RuntimeShape::kMaxSmallSize (tensorflow/lite/kernels/internal/runtime_shape.h),
  * the size of the fixed dims_[] array kernels copy a shape into.  TFLM checks it
  * with TFLITE_DCHECK only, which a release build compiles out, so a rank-7 tensor
- * would overrun that array.  Only the rank is read: an internal tensor's
- * dimension values are never judged here.  Subgraph 0's I/O keeps the tighter
- * NN_MAX_DIMS, the descriptor's.
+ * would overrun that array.  Only the rank is read: the dimension values of a
+ * tensor without data are never judged here (a constant's are multiplied out
+ * against its buffer, issue #183, and a constant of a higher rank is FORMAT).
+ * Subgraph 0's I/O keeps the tighter NN_MAX_DIMS, the descriptor's.
  */
 #define NN_TFLM_MAX_TENSOR_RANK    6u
 
@@ -371,21 +423,6 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_verify_model_buffer(const uint8_t *buf, size_t
 
 /* A subgraph's tensor vector, as the schema types it. */
 typedef flatbuffers::Vector<flatbuffers::Offset<tflite::Tensor>> nn_tflm_tensor_vec;
-
-/* One of subgraph 0's index lists names only tensors that exist. */
-NN_TFLM_CHECK_INLINE bool nn_tflm_io_list_ok(const flatbuffers::Vector<int32_t> *list,
-                                      const nn_tflm_tensor_vec *tensors)
-{
-	if (!list)
-		return false;
-	for (uint32_t j = 0; j < list->size(); j++) {
-		const int32_t ti = list->Get(j);
-
-		if (ti < 0 || (uint32_t)ti >= tensors->size())
-			return false;
-	}
-	return true;
-}
 
 /* An operator's tensor list (its length already within NN_TFLM_MAX_OP_TENSORS)
  * names only tensors of its subgraph -- or -1, TFLM's optional tensor, where
@@ -535,59 +572,6 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_op_list_quant_add(const flatbuffers::Vector<in
 	return true;
 }
 
-/*
- * One subgraph holds together: a tensor vector, every tensor naming a buffer
- * below @p nb (the model's buffer count, issue #181), and every operator present with
- * an inputs and an outputs list, each of its three lists at most
- * NN_TFLM_MAX_OP_TENSORS long -- all three LENGTHS judged before any element is
- * read -- and then every index in range; every tensor's quantization holding
- * together (nn_tflm_tensor_quant_ok(), before the operators), and the scale
- * lengths the operators name adding up, with every earlier subgraph's, to at most
- * NN_TFLM_MAX_QUANT_REFS in @p *qrefs (issue #180).  Per tensor entry: a few
- * length reads; per operator entry: three compares and at most
- * 2 x 3 x NN_TFLM_MAX_OP_TENSORS reads.
- */
-NN_TFLM_CHECK_INLINE bool nn_tflm_subgraph_ok(const tflite::SubGraph *sg, uint32_t nb,
-                                         uint32_t *qrefs)
-{
-	const nn_tflm_tensor_vec *tensors = sg ? sg->tensors() : nullptr;
-
-	if (!tensors)
-		return false;
-
-	const nn_tflm_op_vec *ops = nn_tflm_sg_operators(sg);
-	const uint32_t nt = tensors->size();
-
-	for (uint32_t i = 0; i < nt; i++) {
-		const tflite::Tensor *t = tensors->Get(i);
-
-		if (t && t->buffer() >= nb)
-			return false;
-		if (!nn_tflm_tensor_quant_ok(t))
-			return false;
-	}
-
-	for (uint32_t i = 0; ops && i < ops->size(); i++) {
-		const tflite::Operator *op = ops->Get(i);
-
-		if (!op || !op->inputs() || !op->outputs())
-			return false;
-		if (op->inputs()->size() > NN_TFLM_MAX_OP_TENSORS ||
-		    op->outputs()->size() > NN_TFLM_MAX_OP_TENSORS ||
-		    nn_tflm_list_len(op->intermediates()) > NN_TFLM_MAX_OP_TENSORS)
-			return false;
-		if (!nn_tflm_op_list_indices_ok(op->inputs(), nt, true) ||
-		    !nn_tflm_op_list_indices_ok(op->outputs(), nt, false) ||
-		    !nn_tflm_op_list_indices_ok(op->intermediates(), nt, false))
-			return false;
-		if (!nn_tflm_op_list_quant_add(op->inputs(), tensors, qrefs) ||
-		    !nn_tflm_op_list_quant_add(op->outputs(), tensors, qrefs) ||
-		    !nn_tflm_op_list_quant_add(op->intermediates(), tensors, qrefs))
-			return false;
-	}
-	return true;
-}
-
 /* The model's buffer and metadata vectors, as the schema types them. */
 typedef flatbuffers::Vector<flatbuffers::Offset<tflite::Buffer>> nn_tflm_buffer_vec;
 typedef flatbuffers::Vector<flatbuffers::Offset<tflite::Metadata>> nn_tflm_metadata_vec;
@@ -617,6 +601,262 @@ NN_TFLM_CHECK_INLINE const T *nn_tflm_vec_table(
 	const uint8_t *p = v->Data() + (size_t)i * sizeof(flatbuffers::uoffset_t);
 
 	return reinterpret_cast<const T *>(p + flatbuffers::ReadScalar<flatbuffers::uoffset_t>(p));
+}
+
+/* Tensor::type(), spelled through Table::GetField<int8_t> -- the same read
+ * of the same field with the schema's default (FLOAT32, 0) -- for the reason
+ * nn_tflm_sg_operators() gives: [!] grove-vision-ai-v2 keeps no generated
+ * accessor the walk calls out of line in .text (ITCM) (issue #183). */
+NN_TFLM_CHECK_INLINE int nn_tflm_tensor_type(const tflite::Tensor *t)
+{
+	const flatbuffers::Table *tb = reinterpret_cast<const flatbuffers::Table *>(t);
+
+	return tb->GetField<int8_t>(tflite::Tensor::VT_TYPE, 0);
+}
+
+/* Tensor::buffer(), spelled through Table::GetField<int32_t> (default 0) and
+ * cast back: the same four bytes of the same field.  [!] grove-vision-ai-v2:
+ * once the walk called it from three places, the generated accessor was
+ * outlined into .text (ITCM, +16 B and a veneer), and so was GetField<uint32_t>
+ * when spelled with the field's own type; the int32_t instance is one that
+ * build already outlines for other callers, so this adds no ITCM byte
+ * (issue #183). */
+NN_TFLM_CHECK_INLINE uint32_t nn_tflm_tensor_buffer(const tflite::Tensor *t)
+{
+	const flatbuffers::Table *tb = reinterpret_cast<const flatbuffers::Table *>(t);
+
+	return (uint32_t)tb->GetField<int32_t>(tflite::Tensor::VT_BUFFER, 0);
+}
+
+/*
+ * A tensor type's element size in HALF bytes (issue #183): TFLM's
+ * TfLiteTypeSizeOf() (memory_helpers.cc, the same in both pinned trees) doubled,
+ * so that INT4 -- 1 byte per element to that function, but stored as a constant
+ * two elements per byte and read so by the kernels (UnpackDenseInt4IntoInt8(),
+ * ceil(n / 2) bytes) -- has a size too.  0 for a type TFLM gives no size
+ * (STRING, VARIANT, a value neither pinned schema names): TFLM's planner calls
+ * TfLiteEvalTensorByteLength() on every tensor and fails AllocateTensors() on
+ * one, which the board reports as NN_MODEL_ERR_ARENA and the wio-lite-ai /
+ * f746g-disco gates, which never plan, would have passed.  Only the enum values
+ * both pinned schemas share are named.
+ */
+NN_TFLM_CHECK_INLINE uint32_t nn_tflm_elem_bytes2(int type)
+{
+	switch (type) {
+	case tflite::TensorType_INT4:
+		return 1u;
+	case tflite::TensorType_UINT8:
+	case tflite::TensorType_INT8:
+	case tflite::TensorType_BOOL:
+		return 2u;
+	case tflite::TensorType_FLOAT16:
+	case tflite::TensorType_BFLOAT16:
+	case tflite::TensorType_INT16:
+	case tflite::TensorType_UINT16:
+		return 4u;
+	case tflite::TensorType_FLOAT32:
+	case tflite::TensorType_INT32:
+	case tflite::TensorType_UINT32:
+	case tflite::TensorType_RESOURCE:
+		return 8u;
+	case tflite::TensorType_FLOAT64:
+	case tflite::TensorType_INT64:
+	case tflite::TensorType_UINT64:
+	case tflite::TensorType_COMPLEX64:
+		return 16u;
+	case tflite::TensorType_COMPLEX128:
+		return 32u;
+	default:
+		return 0u;
+	}
+}
+
+/* The data vector TFLM points tensor @p t at, or null when it has none: the
+ * test of GetFlatbufferTensorBuffer() (micro_allocator.cc) -- a Buffer table,
+ * a data vector, and a size other than 0 -- on buffer @p bi, which the caller
+ * has checked is below @p buffers' size (so @p buffers is present). */
+NN_TFLM_CHECK_INLINE const flatbuffers::Vector<uint8_t> *
+nn_tflm_buffer_data(const nn_tflm_buffer_vec *buffers, uint32_t bi)
+{
+	const tflite::Buffer *b = nn_tflm_vec_table(buffers, bi);
+	const flatbuffers::Vector<uint8_t> *d = b ? b->data() : nullptr;
+
+	return (d && d->size() != 0u) ? d : nullptr;
+}
+
+/*
+ * A constant's data is exactly as long as its declared shape says (issue #183):
+ * the element count -- 1 for a missing or empty shape, as TFLM reads a scalar,
+ * else the product of the dimensions -- times the element size, ceil(n / 2) for
+ * INT4, equal to @p size, the data vector's length.  TFLM points the tensor at
+ * the data without comparing the two (micro_allocator.cc; memory_helpers.cc's
+ * byte counts multiply the shape in int and never look at the buffer), and a
+ * kernel that reads a constant by its own dims, which are the serialized shape,
+ * reads a short buffer under a large shape past its end (a bias read by another
+ * tensor's output depth is not covered, issue #185).  A longer buffer is refused too
+ * (a policy: every constant measured is exact, and Grove's payload scan holds
+ * its command stream to the same equality).  Lengths before elements: a rank
+ * above NN_TFLM_MAX_TENSOR_RANK is refused before any dimension is read (TENSOR
+ * judges ranks later, but a constant's dimensions are read here, so it is FORMAT
+ * here); a negative dimension is refused; the product is bounded BEFORE each
+ * multiplication by the elements @p size can hold (cap, clamped to 32 bits,
+ * which refuses only more), so it never wraps -- in int, as TFLM computes it, a
+ * [65537, 65537] int8 constant is 131,073 bytes.  At most
+ * NN_TFLM_MAX_TENSOR_RANK values read.  @p eb2 is nn_tflm_elem_bytes2() of the
+ * tensor's type, not 0.
+ */
+NN_TFLM_CHECK_INLINE bool nn_tflm_const_len_ok(const tflite::Tensor *t, uint32_t eb2,
+                                          uint32_t size)
+{
+	const flatbuffers::Vector<int32_t> *shape = nn_tflm_tensor_shape(t);
+	const uint32_t rank = shape ? shape->size() : 0u;
+
+	if (rank > NN_TFLM_MAX_TENSOR_RANK)
+		return false;
+
+	/* eb2 is 1 (INT4) or an even size: 32-bit divisions only (a 64-bit one is
+	 * a library call on the boards). */
+	const uint32_t cap = eb2 == 1u ? (size > UINT32_MAX / 2u ? (uint32_t)UINT32_MAX : 2u * size)
+	                               : size / (eb2 / 2u);
+	uint32_t n = 1u;
+
+	for (uint32_t d = 0; d < rank; d++) {
+		const int32_t v = shape->Get(d);
+
+		if (v < 0)
+			return false;
+		if (v != 0 && n > cap / (uint32_t)v)
+			return false;
+		n *= (uint32_t)v;
+	}
+	return ((uint64_t)n * eb2 + 1u) / 2u == size;
+}
+
+/* Does tensor @p ti of @p tensors (both checked) have data -- a tensor TFLM
+ * would not plan into the arena but write in place, in the model (issue #183)? */
+NN_TFLM_CHECK_INLINE bool nn_tflm_tensor_has_data(const nn_tflm_tensor_vec *tensors,
+                                             uint32_t ti,
+                                             const nn_tflm_buffer_vec *buffers)
+{
+	const tflite::Tensor *t = tensors->Get(ti);
+
+	return t && nn_tflm_buffer_data(buffers, nn_tflm_tensor_buffer(t)) != nullptr;
+}
+
+/* No tensor an operator's outputs list names (its indices already checked) has
+ * data: TFLM's planner does not place a tensor with data (micro_allocation_info.cc,
+ * needs_allocating), so the kernel would write its output into the model --
+ * PSRAM staging on wio-lite-ai, SDRAM on f746g-disco, the XIP window on
+ * grove-vision-ai-v2 (issue #183).  A variable too: the walk does not lean on
+ * AllocateVariables() moving it. */
+NN_TFLM_CHECK_INLINE bool nn_tflm_op_outputs_no_data(const flatbuffers::Vector<int32_t> *list,
+                                                const nn_tflm_tensor_vec *tensors,
+                                                const nn_tflm_buffer_vec *buffers)
+{
+	for (uint32_t j = 0; list && j < list->size(); j++)
+		if (nn_tflm_tensor_has_data(tensors, (uint32_t)list->Get(j), buffers))
+			return false;
+	return true;
+}
+
+/*
+ * One subgraph holds together: a tensor vector, every tensor naming a buffer
+ * below the model's buffer count (issue #181), of a type with a size and, when
+ * its buffer has data, exactly as long as its shape says (issue #183), and every operator present with
+ * an inputs and an outputs list, each of its three lists at most
+ * NN_TFLM_MAX_OP_TENSORS long -- all three LENGTHS judged before any element is
+ * read -- and then every index in range; every tensor's quantization holding
+ * together (nn_tflm_tensor_quant_ok(), before the operators), and the scale
+ * lengths the operators name adding up, with every earlier subgraph's, to at most
+ * NN_TFLM_MAX_QUANT_REFS in @p *qrefs (issue #180), and no operator output with
+ * data (issue #183).  Per tensor entry: a few length reads, one type and, for a
+ * constant, at most NN_TFLM_MAX_TENSOR_RANK dimension values; per operator
+ * entry: three compares and at most 3 x 3 x NN_TFLM_MAX_OP_TENSORS reads.
+ */
+NN_TFLM_CHECK_INLINE bool nn_tflm_subgraph_ok(const tflite::SubGraph *sg,
+                                         const nn_tflm_buffer_vec *buffers,
+                                         uint32_t *qrefs)
+{
+	const nn_tflm_tensor_vec *tensors = sg ? sg->tensors() : nullptr;
+
+	if (!tensors)
+		return false;
+
+	const nn_tflm_op_vec *ops = nn_tflm_sg_operators(sg);
+	const uint32_t nt = tensors->size();
+	const uint32_t nb = buffers ? buffers->size() : 0u;
+
+	for (uint32_t i = 0; i < nt; i++) {
+		const tflite::Tensor *t = tensors->Get(i);
+
+		if (t) {
+			const uint32_t bi = nn_tflm_tensor_buffer(t);
+
+			if (bi >= nb)
+				return false;
+
+			/* Every tensor's type has a size, data or not; then a
+			 * constant's length (the buffer index is proven above). */
+			const uint32_t eb2 = nn_tflm_elem_bytes2(nn_tflm_tensor_type(t));
+			const flatbuffers::Vector<uint8_t> *d;
+
+			if (eb2 == 0u)
+				return false;
+			d = nn_tflm_buffer_data(buffers, bi);
+			if (d && !nn_tflm_const_len_ok(t, eb2, d->size()))
+				return false;
+		}
+		if (!nn_tflm_tensor_quant_ok(t))
+			return false;
+	}
+
+	for (uint32_t i = 0; ops && i < ops->size(); i++) {
+		const tflite::Operator *op = ops->Get(i);
+
+		if (!op || !op->inputs() || !op->outputs())
+			return false;
+		if (op->inputs()->size() > NN_TFLM_MAX_OP_TENSORS ||
+		    op->outputs()->size() > NN_TFLM_MAX_OP_TENSORS ||
+		    nn_tflm_list_len(op->intermediates()) > NN_TFLM_MAX_OP_TENSORS)
+			return false;
+		if (!nn_tflm_op_list_indices_ok(op->inputs(), nt, true) ||
+		    !nn_tflm_op_list_indices_ok(op->outputs(), nt, false) ||
+		    !nn_tflm_op_list_indices_ok(op->intermediates(), nt, false))
+			return false;
+		if (!nn_tflm_op_list_quant_add(op->inputs(), tensors, qrefs) ||
+		    !nn_tflm_op_list_quant_add(op->outputs(), tensors, qrefs) ||
+		    !nn_tflm_op_list_quant_add(op->intermediates(), tensors, qrefs))
+			return false;
+		if (!nn_tflm_op_outputs_no_data(op->outputs(), tensors, buffers))
+			return false;
+	}
+	return true;
+}
+
+/*
+ * One of subgraph 0's I/O lists names only tensors that exist, none of them with
+ * data (issue #183): TFLM does not plan a tensor with data into the arena, so the
+ * board would write a graph input, and the kernel a graph output, in place, into
+ * the model.  Each entry: its index compared, then its tensor, its buffer (the
+ * buffer index already proven by nn_tflm_subgraph_ok()) and the data length --
+ * one pass, the list's only one before its count is judged (the file header,
+ * "THE ONE EXCEPTION").
+ */
+NN_TFLM_CHECK_INLINE bool nn_tflm_io_list_ok(const flatbuffers::Vector<int32_t> *list,
+                                      const nn_tflm_tensor_vec *tensors,
+                                      const nn_tflm_buffer_vec *buffers)
+{
+	if (!list)
+		return false;
+	for (uint32_t j = 0; j < list->size(); j++) {
+		const int32_t ti = list->Get(j);
+
+		if (ti < 0 || (uint32_t)ti >= tensors->size())
+			return false;
+		if (nn_tflm_tensor_has_data(tensors, (uint32_t)ti, buffers))
+			return false;
+	}
+	return true;
 }
 
 /* The metadata name of TFLM's offline memory plan (kOfflineMemAllocMetadata,
@@ -761,8 +1001,12 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_io_list_dims_fit(const flatbuffers::Vector<int
  *                        "OfflineMemoryAllocation" entry whose buffer has no
  *                        data, no 12-byte header, a tensor count other than
  *                        every subgraph's tensors together, fewer offsets
- *                        than that count, or an offset below -1 (issue #181)
- *                        (structure)
+ *                        than that count, or an offset below -1 (issue #181);
+ *                        a tensor of a type TFLM gives no size; a tensor with
+ *                        data whose length is not its shape's bytes, with a
+ *                        negative dimension or of a rank above
+ *                        NN_TFLM_MAX_TENSOR_RANK; data on an operator output or
+ *                        on subgraph 0's I/O (issue #183) (structure)
  *   NN_MODEL_ERR_SHAPE   an I/O list naming outside 1..NN_MAX_IO tensors (count)
  *   NN_MODEL_ERR_TENSOR  any tensor declaring more than NN_TFLM_MAX_TENSOR_RANK
  *                        dimensions, or an I/O tensor more than NN_MAX_DIMS (rank)
@@ -770,7 +1014,8 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_io_list_dims_fit(const flatbuffers::Vector<int
  * SHAPE and TENSOR are the codes the backends give the same failures after
  * planning (they keep those checks as the backstop); judged here they only come
  * sooner.  The order is also what bounds the work (the file header, "LENGTHS
- * BEFORE ELEMENTS"): the I/O index check is one comparison per list entry, every
+ * BEFORE ELEMENTS"): the I/O index check is one comparison per list entry (and
+ * one tensor's buffer, issue #183), every
  * other vector's length is judged before its elements are read, and everything
  * after the structure reads at most NN_MAX_IO x NN_MAX_DIMS values per I/O list.
  * Without the count and rank checks first, one tensor named ~65,000 times with a
@@ -788,8 +1033,7 @@ NN_TFLM_CHECK_INLINE int nn_tflm_model_io_check(const tflite::Model *model)
 	const tflite::SubGraph *sg = subgraphs->Get(0);
 	const nn_tflm_tensor_vec *tensors = sg ? sg->tensors() : nullptr;
 
-	if (!tensors || !nn_tflm_io_list_ok(sg->inputs(), tensors) ||
-	    !nn_tflm_io_list_ok(sg->outputs(), tensors))
+	if (!tensors)
 		return NN_MODEL_ERR_FORMAT;
 	if (!nn_tflm_model_field(model, tflite::Model::VT_OPERATOR_CODES))
 		return NN_MODEL_ERR_FORMAT;
@@ -807,10 +1051,15 @@ NN_TFLM_CHECK_INLINE int nn_tflm_model_io_check(const tflite::Model *model)
 	for (uint32_t i = 0; i < subgraphs->size(); i++) {
 		const tflite::SubGraph *s = subgraphs->Get(i);
 
-		if (!nn_tflm_subgraph_ok(s, nb, &qrefs))
+		if (!nn_tflm_subgraph_ok(s, buffers, &qrefs))
 			return NN_MODEL_ERR_FORMAT;
 		total_tensors += s->tensors()->size();
 	}
+	/* Subgraph 0's I/O after every tensor's buffer index is proven (issue #183):
+	 * all FORMAT, so moving it here changes no answer. */
+	if (!nn_tflm_io_list_ok(sg->inputs(), tensors, buffers) ||
+	    !nn_tflm_io_list_ok(sg->outputs(), tensors, buffers))
+		return NN_MODEL_ERR_FORMAT;
 	if (!nn_tflm_metadata_ok(model, nb, total_tensors))
 		return NN_MODEL_ERR_FORMAT;
 	if (!nn_tflm_io_list_count_ok(sg->inputs()) ||

@@ -851,6 +851,29 @@ every index in range) passes unchanged.  Cost: +496 B of Flash (`shell.elf`
 `.text` 284,056 -> 284,528 B, `.rodata` +24 B, `shell.bin` 373,136 -> 373,632
 B); the `null` tree is byte-identical.
 
+[!] **The walk checks the constant buffers too** (issue #183): a tensor of any
+subgraph whose type TFLM gives no size (STRING, VARIANT, an unknown value), a
+tensor with data whose data is not EXACTLY element count x element size long
+(1 element for no shape, INT4 packed two to a byte; longer is refused too, and
+so is a 0-element constant with data), with a negative dimension or of a rank
+above 6 (judged before any value is read, so FORMAT rather than TENSOR), and
+data on any operator's output or on subgraph 0's inputs / outputs -- each is
+`NN_MODEL_ERR_FORMAT` (-7).  TFLM points a constant at its bytes in the model
+and never compares their length with the shape, so a kernel that reads it by
+its own shape read a short buffer past the end of the PSRAM staging copy (a
+bias that FULLY_CONNECTED / CONV_2D read by another tensor's output depth is
+not covered -- issue #185); and it does not plan a tensor with data, so a graph input this board
+fills, or an operator output, would have been written INTO the staging copy.
+A type without a size used to fail only inside `AllocateTensors()`
+(`NN_MODEL_ERR_ARENA`) and pass `verify_tflite`, which does not plan.  The
+product of a constant's dimensions is bounded before each multiplication by
+what its data can hold, so it cannot wrap (TFLM's own byte count is an `int`
+product: a [65537, 65537] int8 constant is 131,073 bytes there).  All 1,320
+constants of the 44 models found that pass the verifier are exact and none of
+them is written, so every model keeps its verdict; the pinned blazeface int8
+passes unchanged.  Cost: +760 B of Flash (`shell.elf` `.text`
+284,528 -> 285,216 B, `.rodata` +72 B, `shell.bin` 373,632 -> 374,392 B); the `null` tree is byte-identical.
+
 **[!] The order matters and is not an implementation detail.**  Loading the
 plugin first would destroy the previous one's state at the fixed reservation
 before knowing whether the model that needs it can be built, and a backend that

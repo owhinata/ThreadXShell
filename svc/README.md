@@ -158,7 +158,7 @@ part-way through it would otherwise leave entries the destructor calls as functi
 pointers.  What a model's I/O must satisfy before it is planned is in
 `nn_tflm_model_check.h`, which both backends and the three host gates
 (`verify_tflite` on wio-lite-ai and f746g-disco, `verify_vela_model` on
-grove-vision-ai-v2) call (issues #175, #178, #180, #181).  The walk runs in a fixed order:
+grove-vision-ai-v2) call (issues #175, #178, #180, #181, #183).  The walk runs in a fixed order:
 
 1. Structure (`NN_MODEL_ERR_FORMAT`): subgraph 0's input / output lists present
    and naming tensors that exist; every subgraph has a tensor vector; every
@@ -202,12 +202,36 @@ grove-vision-ai-v2) call (issues #175, #178, #180, #181).  The walk runs in a fi
    operator-code vector (TFLM reads its size without a null check).  One compare
    per tensor entry, a constant per metadata entry (a table, so one verifier
    visit each).
+   And the constant buffers (issue #183): TFLM points a tensor whose buffer has
+   data at those bytes, in the model, and never compares their length with the
+   shape (its byte counts multiply the shape in `int`; the verifier proves only
+   that the vector lies in the file), while a kernel that reads a constant by its
+   own dims, which are the serialized shape, reads a short buffer under a large
+   shape past the model (a bias that FULLY_CONNECTED / CONV_2D read by another
+   tensor's output depth is NOT covered: that needs the operator's semantics,
+   issue #185).  And the planner does not place a tensor with data,
+   so a graph input the board fills or an operator output a kernel writes would
+   be written into the model (PSRAM staging, SDRAM, the XIP window).  So every
+   tensor of every subgraph, data or not, has a type TFLM gives a size (its
+   planner fails `AllocateTensors()` on STRING / VARIANT / an unknown value --
+   `NN_MODEL_ERR_ARENA` on a board, a pass on the gates that do not plan); every
+   tensor with data has at most `NN_TFLM_MAX_TENSOR_RANK` dimensions (judged on
+   the length first, so a rank-7 constant is FORMAT, not TENSOR), none negative,
+   and data EXACTLY element count x element size long (1 element for no shape,
+   INT4 two to a byte; the product bounded by what the data can hold before each
+   multiplication, so it cannot wrap; a longer buffer and a 0-element constant
+   with data are refused as well -- a policy, every constant of the 44 models
+   measured, 1,320 of them, is exact); and no operator output of any subgraph and
+   no input / output of subgraph 0 has data (a variable neither).  The sparsity
+   table is not read: TFLM micro reads a constant dense, so a sparse one is short
+   and refused.  Per tensor entry one type, one buffer and at most 6 dimension
+   values; per operator entry one buffer per output.
 2. The count of each I/O list (1..`NN_MAX_IO`, `NN_MODEL_ERR_SHAPE`).
 3. Rank (`NN_MODEL_ERR_TENSOR`): every tensor of every subgraph at most
    `NN_TFLM_MAX_TENSOR_RANK` (6, TFLM's `RuntimeShape::kMaxSmallSize`, which
    TFLM only DCHECKs), each I/O tensor at most `NN_MAX_DIMS`.  Only the length of
-   an internal tensor's shape is read, never its values (Vela's internal tensors
-   reach 2.2 M).
+   a shape is read here; the values of a tensor without data are never read
+   (Vela's internal tensors reach 2.2 M), a constant's are read in step 1.
 4. The I/O values: every dimension inside 0..65535, the range of `struct
    nn_tensor`'s 16-bit dims (`NN_MODEL_ERR_DIMS`, the predicate
    `nn_tensor_dim_fits()` in `nn.h`, tied to the field's width at compile time).

@@ -182,7 +182,7 @@ then `.rodata`, then the NOLOAD buffers, with `.plugin` still pinned at the top.
 @`0x3404D000..0x34050CC0` and `.rodata` 79,784 B from `0x34050CC0`; ITCM used
 240,640 / free 21,504 B (`check_placement_budget`).  Of the +1,280 B over the
 14,272 above, issue #175 added 112, #178 360, #179 96 and #180 336 (each its
-commit's measurement; #181 then added 240, to 15,792 B); the remaining 376 B came with the load-path changes between
+commit's measurement; #181 then added 240, to 15,792 B, and #183 560, to 16,352 B); the remaining 376 B came with the load-path changes between
 2026-10-31 and #175 and are not itemised here.  The list below is the
 2026-10-31 inventory.
 
@@ -2542,6 +2542,37 @@ outlined into `.text`, so the walk reads the fields through
 `Table::GetPointer<const void *>` (`nn_tflm_model_field()`) and the two
 vectors' entries by hand (`nn_tflm_vec_table()`, the read `Get()` makes).
 
+**And the constant buffers (issue #183).**  The same walk refuses
+(`NN_MODEL_ERR_FORMAT`) a tensor of any subgraph whose type TFLM gives no size,
+a tensor with data whose data is not exactly element count x element size long
+(1 element for no shape, INT4 two to a byte; a longer one, a 0-element one, a
+negative dimension and a rank above 6 are refused too, the rank before any value
+is read), and data on any operator's output or on subgraph 0's inputs /
+outputs.  TFLM points a constant at its bytes in the XIP window and never
+compares their length with the shape the CPU kernels read it by; and it does
+not plan a tensor with data, so a graph input or an operator output with data
+would have been written into the window.  For an ethos-u operator's input 0 (the
+command stream) this is the payload scan's own rule (1-byte type, rank 1,
+length == extent), which the board runs first, so such a model is still
+`NN_MODEL_ERR_PAYLOAD` here and FORMAT only on the host gate's default order.
+Every Vela model's two constants (the command stream and the weights) are
+exact, so the 12 pinned and SDK Vela models keep their verdict.  [!] **What
+this does NOT bound: how far the NPU reads from the weights** (input 1 and on,
+base pointers handed to the driver): the command stream decides that, and
+neither the tensor's length nor `npu_payload.c` is compared with it -- the walk
+only makes the CPU side's declaration of the weights' size true.  The payload
+scan adds its own rule for the inputs the NPU writes through (below, under the
+payload).  Cost of both: ITCM 0 B (`.text` 234,524 B as before;
+`check_placement_budget` used 240,640 B, free 21,504 B), `.text_cold` +560 B
+(15,792 -> 16,352 B; the walk 408, the scan 152), `.rodata` +224 B (the
+element-size table and the scan's two sentences).  [!] Keeping ITCM at 0 needed the
+same spelling again: the generated `Tensor::buffer()`, called from three places,
+was outlined into `.text` (+20 B and a veneer), and so was
+`Table::GetField<uint32_t>`; the walk reads the field as `GetField<int32_t>`
+(`nn_tflm_tensor_buffer()`), an instance this build already outlines for other
+callers (a veneer to it from `.text_cold` is the only new symbol), and the type
+as `GetField<int8_t>` (`nn_tflm_tensor_type()`), which stays inline.
+
 ### The model is a blob, opened by name (#93, #49 Step 4a)
 
 `nn model load --name cls` asks the asset store for the blob called `cls` and parses what it
@@ -2735,7 +2766,9 @@ on-board verifier and the wio-lite-ai and f746g-disco host gates use too
   and what it passes bounds `AllocateTensors()`'s passes over the same vectors
   the same way; TFLM's zero-point copies total at most 65,536 per load (issue
   #180); the buffer indices and the offline plan's header add one compare per
-  tensor entry and a constant per metadata entry (issue #181).  Not the whole of `AllocateTensors()`: the per-operator
+  tensor entry and a constant per metadata entry (issue #181); the constant
+  buffers one type, one buffer and at most 6 dimension values per tensor entry
+  and one buffer per output per operator entry (issue #183).  Not the whole of `AllocateTensors()`: the per-operator
   scratch-request walk and the greedy memory planner are quadratic in tensors
   and operators, so the load is bounded by visits squared x small constants.
 - **Measured** on the host: the classification model needs **depth 4 and 19
@@ -4520,6 +4553,19 @@ for this operator; the scan refuses it.  Because the board runs the scan before
 that walk, the inputs list's length is judged first against the walk's own limit
 (64), so the `-1` check is never a long read either.
 
+**Nor does an input from 2 on carry data (issue #183).**  Those inputs are the
+NPU's base pointers 1..n-1, and Vela's command stream writes through 1 and 2 (the
+TFLM arena region and the fast scratch).  A tensor with data is not planned into
+the arena, so its pointer is the model in the XIP window and the NPU would write
+there; the shared walk's written-tensor rule covers operator outputs and graph
+I/O only, so the scan refuses data on input 2..n itself (comparing the tensor
+and buffer indices first, since it runs before the walk; [!] it reads them
+through the walk's inline helpers and `Buffer::data()` as
+`Table::GetPointer<const void *>`, since the generated accessors were outlined
+into ITCM, +104 B).  Input 1, the
+weights, is constant by design; every Vela model measured carries data on
+inputs 0 and 1 only.
+
 The arm is one-shot and a second one is fatal rather than counted: the driver
 runs `handle_command_stream()` once per command-stream action but waits once for
 the whole walk, so two launches would arm twice and disarm once, and a counter
@@ -4662,7 +4708,14 @@ host instead of on a board at the far end of a flash cycle:
   tensors, an `OfflineMemoryAllocation` whose tensor count matches the subgraph
   (the shared walk refuses a plan TFLM would misread first, issue #181; the
   gate's own report of the plan stays as the diagnostic)
+- every constant's data is exactly its shape's bytes and no tensor the graph
+  writes has data (the shared walk, issue #183)
 - `--blazeface` additionally pins the four output shapes the decoder looks for
+
+What it does NOT prove: how far the NPU reads from an ethos-u operator's
+weights (input 1 and on).  The command stream decides that, and neither the
+weights tensor's length (which the walk now holds to its shape) nor the
+firmware's payload walk compares the stream's DMA ranges with it.
 
 Measured on the model built by the commands above:
 

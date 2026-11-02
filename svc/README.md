@@ -158,7 +158,7 @@ part-way through it would otherwise leave entries the destructor calls as functi
 pointers.  What a model's I/O must satisfy before it is planned is in
 `nn_tflm_model_check.h`, which both backends and the three host gates
 (`verify_tflite` on wio-lite-ai and f746g-disco, `verify_vela_model` on
-grove-vision-ai-v2) call (issues #175, #178).  The walk runs in a fixed order:
+grove-vision-ai-v2) call (issues #175, #178, #180).  The walk runs in a fixed order:
 
 1. Structure (`NN_MODEL_ERR_FORMAT`): subgraph 0's input / output lists present
    and naming tensors that exist; every subgraph has a tensor vector; every
@@ -167,6 +167,20 @@ grove-vision-ai-v2) call (issues #175, #178).  The walk runs in a fixed order:
    lengths judged before any element is read -- and every index names a tensor
    of its subgraph (or -1, the optional tensor, in inputs).  TFLM itself range-checks
    none of these indices: its planner writes per-tensor records through them.
+   And the quantization, by lengths only (issue #180): every tensor's scale vector
+   at most `NN_TFLM_MAX_QUANT_CHANNELS` (4096; max 1,280 over the 43 models
+   found that parse) long, its
+   zero-point vector absent, 1 long or the scale's length (TFLM otherwise reads
+   `zero_point[0]` for every channel, silently), a per-channel tensor's
+   `quantized_dimension` inside its declared rank when the rank is 2 or more
+   (TFLM aliases dims to the serialized shape and the filter's kernels read
+   `dims[qd]` without checking the rank), or in 0..`NN_TFLM_MAX_TENSOR_RANK` - 1
+   when the rank is 0 or 1 (the converter's rank-1 per-channel biases carry the
+   filter's qd -- TFLM's person_detect, qd 3 -- and no kernel indexes them by
+   it), and the scale lengths named by every
+   operator entry of every subgraph adding up to at most `NN_TFLM_MAX_QUANT_REFS`
+   (65,536; max 34,292 over the same 43 models).  Whether a scale's length matches `dims[qd]`
+   is left to the kernels, which check it.
 2. The count of each I/O list (1..`NN_MAX_IO`, `NN_MODEL_ERR_SHAPE`).
 3. Rank (`NN_MODEL_ERR_TENSOR`): every tensor of every subgraph at most
    `NN_TFLM_MAX_TENSOR_RANK` (6, TFLM's `RuntimeShape::kMaxSmallSize`, which
@@ -186,7 +200,15 @@ accepts many entries naming one table, so a 512 KB file could hand
 first, the walk does one compare per tensor entry and at most 3 + 3 x 64 reads
 per operator entry, each entry a verifier visit -- at most 4,096 x 192 list
 reads -- and what it passes bounds TFLM's own passes over the same vectors the
-same way.  It does not bound all of `AllocateTensors()`: the per-operator
+same way.  The same holds for TFLM's zero-point copies (issue #180): it copies a
+tensor's zero points (one int per scale entry) each time a kernel's `Prepare()`
+takes the tensor, freed per node, so with the cap and the sum they total at
+most 65,536 per load (plus subgraph 0's I/O, at most 2 x 8 x 4,096); without
+them one 65,000-entry scale vector named by 2,000 tensor entries, or one tensor
+named by 4,000 operator entries, passed the verifier.  The kernels' own
+per-channel work is NOT bounded by this: conv / depthwise `Prepare()` size
+their multiplier loops by the filter's dimension value, and `Invoke()` loops
+over planned tensors -- both bounded by the arena, not by the file.  It does not bound all of `AllocateTensors()`: the per-operator
 scratch-request walk and the greedy memory planner are quadratic in tensors and
 operators, so the whole load is bounded by visits squared x small constants.
 The one exception to lengths-first: subgraph 0's two I/O lists are walked once,
@@ -201,9 +223,10 @@ bounds: depth is bounded by the schema (acyclic, longest table chain 6 in both
 pinned schemas; `cmake/fixtures/model_io/schema_table_depth.py` reruns it), so
 16 is the guard for a future cycle; the table count bounds the verifier's own
 work (visits, which shared sub-tables multiply) and, through the walk above, the
-load's shape and list reads.  wio-lite-ai runs no verifier, so there only the file's length bounds the
+load's shape and list reads and its per-channel quantization copies (#180).
+wio-lite-ai runs no verifier, so there only the file's length bounds the
 entries.  grove-vision-ai-v2's payload walk per operator entry is bounded by its own
-scan (`ethosu/npu_model_scan`, #179); out of scope by decision: the per-channel quantization copy (#180).  Neither keeps storage of its own; the board supplies everything
+scan (`ethosu/npu_model_scan`, #179).  Neither keeps storage of its own; the board supplies everything
 that is a fact about its memory or its core, bound at link time (the callers of
 `nn.h` pass no context to carry it):
 

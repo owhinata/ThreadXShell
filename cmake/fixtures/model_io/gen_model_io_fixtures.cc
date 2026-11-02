@@ -82,6 +82,46 @@
  *
  * Read element-first, each costs 2.6e8 reads; read length-first, one compare.
  *
+ * And the quantization lengths (issue #180), at NN_TFLM_MAX_QUANT_CHANNELS (4096)
+ * and NN_TFLM_MAX_QUANT_REFS (65536): the control model plus quantized tensors
+ * (t2, t3, ... after the I/O; a QuantizationParameters table is one more visit, so
+ * a quantized tensor entry costs two) and ADD operators naming them.  Unless the
+ * line says otherwise one tensor t2 of shape [4096] (or [4] for the short ones),
+ * qd 0, named by one ADD {t2} -> {t1}:
+ *
+ *   q_scale_4096.tflite     control: scale 4096 long, zero point 1 -- the cap
+ *   q_scale_4097.tflite     scale 4097 long                         -> FORMAT
+ *   q_zp_4097.tflite        scale 4096, zero point 4097 long        -> FORMAT
+ *   q_zp_1_of_4.tflite      control: scale 4, zero point 1 (the weights' form)
+ *   q_zp_2_of_4.tflite      scale 4, zero point 2                   -> FORMAT
+ *   q_scale_gt_dim.tflite   control: shape [4], scale and zero point 8 long --
+ *                           the walk does NOT compare the length with dims[qd]
+ *                           (the kernels do; a decision, pinned here)
+ *   q_qd_5.tflite           control: shape [4] (rank 1), scale 4, qd 5 -- on a
+ *                           rank 0 / 1 tensor qd is bounded by
+ *                           NN_TFLM_MAX_TENSOR_RANK, not by the rank (TFLM's
+ *                           person_detect has rank-1 per-channel biases with qd
+ *                           3; a decision, pinned)
+ *   q_qd_6.tflite           the same with qd 6                      -> FORMAT
+ *   q_qd_neg.tflite         the same with qd -1                     -> FORMAT
+ *   q_qd_rank2_1.tflite     control: shape [1, 4] (rank 2), scale 4, qd 1
+ *   q_qd_rank2_2.tflite     the same with qd 2 == the rank          -> FORMAT
+ *   q_scale1_qd_100.tflite  control: shape [4], scale 1 long, qd 100 -- the qd
+ *                           rule applies to per-channel tensors only
+ *   q_refs_65536.tflite     control: t2 (scale 4096) named twice by each of 8
+ *                           ADD entries -- the sum exactly 65536 -- and one ADD
+ *                           {t0} -> {t1} (t0 unquantized); t3 has scale 1
+ *   q_refs_65537.tflite     the last ADD is {t3} -> {t1}: one more  -> FORMAT
+ *
+ * And two witnesses of the per-channel work bound, built the way that defeated the
+ * verifier and the #178 walk (scalar vectors, and entries sharing one table):
+ *
+ *   q_scale_65000_shared.tflite  2000 tensor entries naming ONE tensor whose
+ *                                scale vector is 65,000 long        -> FORMAT
+ *   q_refs_4000_shared.tflite    4000 ADD entries naming one tensor of scale 32
+ *                                (each passes the cap, the sum 128,000 does not)
+ *                                                                   -> FORMAT
+ *
  * And Grove's payload scan (issue #179, svc/nn/ethosu/npu_model_scan.cc), which
  * only verify_vela_model runs: one tensor [1, 4] as graph I/O, the CUSTOM
  * "ethos-u" operator code, and UINT8 1-D payload tensors over a 16-byte aligned
@@ -129,7 +169,11 @@ static_assert(NN_TFLM_VERIFY_MAX_TABLES == 4096u,
 static_assert(NN_TFLM_MAX_OP_TENSORS == 64u,
               "op_in_64 / op_*_65 are named for a 64-entry operator list limit");
 static_assert(NN_TFLM_MAX_TENSOR_RANK == 6u,
-              "t_rank_6 / t_rank_7 are named for a rank-6 limit");
+              "t_rank_6 / t_rank_7 and q_qd_5 / q_qd_6 are named for a rank-6 limit");
+static_assert(NN_TFLM_MAX_QUANT_CHANNELS == 4096u,
+              "q_scale_4096 / q_scale_4097 / q_zp_4097 are named for a 4096 cap");
+static_assert(NN_TFLM_MAX_QUANT_REFS == 65536u,
+              "q_refs_65536 / q_refs_65537 are named for a 65536 sum");
 
 #include <cstdint>
 #include <cstdio>
@@ -137,6 +181,22 @@ static_assert(NN_TFLM_MAX_TENSOR_RANK == 6u,
 #include <vector>
 
 namespace {
+
+/* issue #180: a quantized tensor, named by `entries` tensor entries (one table). */
+struct qtensor {
+	std::vector<int32_t> shape;
+	uint32_t             scale_len;
+	uint32_t             zp_len;
+	int32_t              qd;
+	uint32_t             entries;
+};
+
+/* issue #180: one more ADD operator table, named by `entries` operator entries. */
+struct opdef {
+	std::vector<int32_t> in;
+	std::vector<int32_t> out;
+	uint32_t             entries;
+};
 
 struct spec {
 	const char          *file;
@@ -158,7 +218,20 @@ struct spec {
 	std::vector<int32_t> extra_shape;
 	bool                 sg1_no_tensors; /* a second subgraph, no tensor vector */
 	bool                 sg1_ok;         /* a second subgraph, one tensor, no ops */
+	/* issue #180 -- after the extra tensor entries, and after the ADD above. */
+	std::vector<qtensor> qt;
+	std::vector<opdef>   more_ops;
 };
+
+/* Operator entries in all, of any operator table. */
+uint32_t op_entries_of(const spec &sp)
+{
+	uint32_t n = sp.op_entries;
+
+	for (const opdef &o : sp.more_ops)
+		n += o.entries;
+	return n;
+}
 
 /* The verifier's table visits for a model built by write_model(): every table
  * start, once per entry naming it. */
@@ -166,9 +239,13 @@ uint32_t tables_of(const spec &sp)
 {
 	const uint32_t nb = sp.buffers ? sp.buffers : 1u;
 
+	uint32_t q = 0;
+
+	for (const qtensor &t : sp.qt)
+		q += 2u * t.entries;   /* the Tensor and its QuantizationParameters */
 	return 2u /* Model, SubGraph */ + (sp.out_shape.empty() ? 1u : 2u) + nb +
-	       sp.extra_entries + sp.op_entries +
-	       (sp.op_entries ? 1u : 0u) /* the ADD OperatorCode */ +
+	       sp.extra_entries + op_entries_of(sp) + q +
+	       (op_entries_of(sp) ? 1u : 0u) /* the ADD OperatorCode */ +
 	       (sp.sg1_no_tensors ? 1u : 0u) /* the second SubGraph */ +
 	       (sp.sg1_ok ? 2u : 0u) /* the second SubGraph and its Tensor */;
 }
@@ -201,6 +278,20 @@ bool write_model(const std::string &dir, const spec &sp)
 			tensors.push_back(extra);
 	}
 
+	for (const qtensor &qt : sp.qt) {
+		/* ONE Tensor table (and so one scale vector) for all its entries. */
+		const auto q = tflite::CreateQuantizationParameters(
+			fbb, 0, 0, fbb.CreateVector(std::vector<float>(qt.scale_len, 1.0f)),
+			fbb.CreateVector(std::vector<int64_t>(qt.zp_len, 0)),
+			tflite::QuantizationDetails_NONE, 0, qt.qd);
+		const auto t = tflite::CreateTensor(
+			fbb, fbb.CreateVector(qt.shape), tflite::TensorType_INT8, 0,
+			fbb.CreateString("quantized"), q);
+
+		for (uint32_t i = 0; i < qt.entries; i++)
+			tensors.push_back(t);
+	}
+
 	typedef flatbuffers::Offset<flatbuffers::Vector<int32_t>> ivec;
 	const auto tv   = fbb.CreateVector(tensors);
 	const auto inv  = sp.no_inputs ? ivec() : fbb.CreateVector(sp.inputs);
@@ -219,9 +310,17 @@ bool write_model(const std::string &dir, const spec &sp)
 
 		for (uint32_t i = 0; i < sp.op_entries; i++)
 			opv.push_back(op);
+	}
+	for (const opdef &o : sp.more_ops) {
+		const auto op = tflite::CreateOperator(fbb, 0 /* ADD */, fbb.CreateVector(o.in),
+		                                       fbb.CreateVector(o.out));
+
+		for (uint32_t i = 0; i < o.entries; i++)
+			opv.push_back(op);
+	}
+	if (op_entries_of(sp))
 		codev.push_back(tflite::CreateOperatorCode(
 			fbb, (int8_t)tflite::BuiltinOperator_ADD, 0, 1, tflite::BuiltinOperator_ADD));
-	}
 
 	const auto ops  = fbb.CreateVector(opv);
 	const auto sg   = tflite::CreateSubGraph(fbb, tv, inv, outv, ops, fbb.CreateString("main"));
@@ -466,6 +565,59 @@ int main(int argc, char **argv)
 		graph("sg1_ok.tflite"),
 		graph("sg1_no_tensors.tflite"),
 	};
+	/* issue #180: quantized tensors t2 (and t3) named by ADD operators. */
+	const uint32_t qcap = NN_TFLM_MAX_QUANT_CHANNELS;
+	const uint32_t qrefs = NN_TFLM_MAX_QUANT_REFS;
+	auto quant = [&](const char *file, std::vector<int32_t> shape, uint32_t sl,
+	                 uint32_t zl, int32_t qd) {
+		spec sp = graph(file);
+		sp.qt = { { shape, sl, zl, qd, 1u } };
+		sp.more_ops = { { { 2 }, { 1 }, 1u } };
+		return sp;
+	};
+	/* 8 entries x {t2, t2} x 4096 == the sum's limit; the last ADD adds t3's 1 or
+	 * t0's nothing. */
+	auto refs = [&](const char *file, int32_t last_in) {
+		spec sp = graph(file);
+		sp.qt = { { { (int32_t)qcap }, qcap, 1u, 0, 1u },
+		          { { 1 }, 1u, 1u, 0, 1u } };
+		sp.more_ops = { { { 2, 2 }, { 1 }, qrefs / (2u * qcap) },
+		                { { last_in }, { 1 }, 1u } };
+		return sp;
+	};
+	const std::vector<int32_t> q4096 = { (int32_t)qcap };
+	const std::vector<spec> quant_specs = {
+		quant("q_scale_4096.tflite",   q4096, qcap,      1u,        0),
+		quant("q_scale_4097.tflite",   q4096, qcap + 1u, 1u,        0),
+		quant("q_zp_4097.tflite",      q4096, qcap,      qcap + 1u, 0),
+		quant("q_zp_1_of_4.tflite",    { 4 }, 4u,        1u,        0),
+		quant("q_zp_2_of_4.tflite",    { 4 }, 4u,        2u,        0),
+		quant("q_scale_gt_dim.tflite", { 4 }, 8u,        8u,        0),
+		quant("q_qd_5.tflite",         { 4 }, 4u,        4u,        (int32_t)rank - 1),
+		quant("q_qd_6.tflite",         { 4 }, 4u,        4u,        (int32_t)rank),
+		quant("q_qd_neg.tflite",       { 4 }, 4u,        4u,        -1),
+		quant("q_qd_rank2_1.tflite",   { 1, 4 }, 4u,     4u,        1),
+		quant("q_qd_rank2_2.tflite",   { 1, 4 }, 4u,     4u,        2),
+		quant("q_scale1_qd_100.tflite", { 4 }, 1u,       1u,        100),
+		refs("q_refs_65536.tflite", 0),
+		refs("q_refs_65537.tflite", 3),
+	};
+	graph_specs.insert(graph_specs.end(), quant_specs.begin(), quant_specs.end());
+	{
+		spec sp = graph("q_scale_65000_shared.tflite");
+		sp.qt = { { { 4 }, 65000u, 1u, 0, 2000u } };
+		graph_specs.push_back(sp);
+	}
+	{
+		spec sp = graph("q_refs_4000_shared.tflite");
+		sp.qt = { { { 32 }, 32u, 1u, 0, 1u } };
+		sp.more_ops = { { { 2 }, { 1 }, witness_entries } };
+		static_assert(4000u * 32u > NN_TFLM_MAX_QUANT_REFS &&
+		              32u <= NN_TFLM_MAX_QUANT_CHANNELS,
+		              "q_refs_4000_shared: each tensor passes the cap, the sum does not");
+		graph_specs.push_back(sp);
+	}
+
 	/* The flags the constructors above do not take, set by name. */
 	for (spec &sp : graph_specs) {
 		const std::string f = sp.file;

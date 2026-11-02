@@ -467,6 +467,22 @@ is no built-in model) and after `nn model unload`.
   The pinned model (blazeface, rank 4, operator lists <= 3) passes unchanged.
   Cost: +352 B of Flash on `build/f746-tflm` (text 612,044 -> 612,396 B); the
   `null` tree is byte-identical.
+- [!] **The walk bounds the per-channel quantization too** (issue #180): a
+  tensor's scale vector longer than 4,096 (`NN_TFLM_MAX_QUANT_CHANNELS`), a
+  zero-point vector neither absent, 1 long nor the scale's length, a
+  per-channel tensor whose `quantized_dimension` is outside its declared rank
+  (rank >= 2) or outside 0..5 (rank 0 / 1: the converter's rank-1 biases carry
+  the filter's qd, TFLM's person_detect qd 3),
+  or scale lengths named by all operator entries adding up past 65,536
+  (`NN_TFLM_MAX_QUANT_REFS`) is `NN_MODEL_ERR_FORMAT` (-7), judged by lengths
+  only.  TFLM copies a tensor's zero points each time a kernel's `Prepare()`
+  takes it (freed per node, so the arena never stops it); now those copies
+  total at most 65,536 per load (the kernels' own per-channel loops are sized by
+  dimension values and bounded by the arena).  Measured maxima over the 43
+  models found that parse: 1,280 per tensor, 34,292 summed (TFLM's
+  mobilenet_v2); the pinned blazeface int8 (96 / 4,539) passes unchanged.
+  Cost: +592 B of Flash on `build/f746-tflm` (`.text` 541,456 -> 542,048 B;
+  `shell.bin` 616,836 -> 617,412 B); the `null` tree is byte-identical.
 - `stedgeai_reloc` is the same: it starts empty, and `builtin` used to mean
   "unload" there before #131 (use `nn model unload`).
 - `stedgeai_reloc` refuses the same dimension with the same `-13` (issue
@@ -902,9 +918,9 @@ firmware's on-board verifier (`NN_TFLM_VERIFY=1`) and grove-vision-ai-v2 use --
 depth 16, 4,096 table visits, `nn_tflm_verify_model_buffer()` in
 `svc/nn/tflm/nn_tflm_model_check.h` (issue #175; a model the board would refuse
 as malformed is refused here first) -- the staging capacity (512 KB), the I/O check the backend runs before planning (issue
-#175, #178: `svc/nn/tflm/nn_tflm_model_check.h` compiled in -- a missing,
-too long (> 64) or out-of-range I/O or operator list, or a subgraph without
-tensors, is `NN_MODEL_ERR_FORMAT`, a tensor above rank 6 (an I/O tensor above
+#175, #178, #180: `svc/nn/tflm/nn_tflm_model_check.h` compiled in -- a missing,
+too long (> 64) or out-of-range I/O or operator list, a subgraph without
+tensors, or quantization vectors too long or inconsistent, is `NN_MODEL_ERR_FORMAT`, a tensor above rank 6 (an I/O tensor above
 4) `NN_MODEL_ERR_TENSOR`, an I/O dimension outside 0..65535 `NN_MODEL_ERR_DIMS`), and the operators the firmware registers -- read from
 `svc/nn/tflm/nn_tflm_ops.h` under the `extended` profile, the same list
 `svc/nn/tflm/nn_tflm.cc` registers from.  `test/host_tests.sh` runs it on

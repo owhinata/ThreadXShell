@@ -808,6 +808,25 @@ entries there are is bounded only by the file (512 KB).  The pinned model
 (blazeface, rank 4, operator lists <= 3) passes unchanged.  Cost: +592 B of
 Flash (`shell.elf` text 371,380 -> 371,972 B).
 
+[!] **The walk bounds the per-channel quantization too** (issue #180): a
+tensor's scale vector longer than 4,096 (`NN_TFLM_MAX_QUANT_CHANNELS`), a
+zero-point vector neither absent, 1 long nor the scale's length, a per-channel
+tensor (scale longer than 1) whose `quantized_dimension` is outside its
+declared rank (rank >= 2; the filter kernels read `dims[qd]` without checking
+the rank) or outside 0..5 (rank 0 / 1: the converter's rank-1 per-channel
+biases carry the filter's qd, TFLM's person_detect qd 3), or scale lengths named by all operator entries adding up past
+65,536 (`NN_TFLM_MAX_QUANT_REFS`) is `NN_MODEL_ERR_FORMAT` (-7) -- lengths
+only, no scale or zero-point value is read.  TFLM copies a tensor's zero points
+(one int per scale entry) each time a kernel's `Prepare()` takes it and frees
+the copy per node, so neither the arena nor the verifier stopped one long
+scale vector named from thousands of entries; now those copies total at most
+65,536 per load (the kernels' own per-channel loops are sized by dimension
+values and bounded by the arena, not by this).  Measured maxima over the 43
+models found that parse: 1,280 per tensor and 34,292 summed (TFLM's mobilenet_v2,
+3.98 MB); the pinned blazeface int8 has 96 and 4,539 and passes unchanged.
+Cost: +672 B of Flash (`shell.elf` `.text` 283,384 -> 284,056 B, `shell.bin`
+372,464 -> 373,136 B); the `null` tree is byte-identical.
+
 **[!] The order matters and is not an implementation detail.**  Loading the
 plugin first would destroy the previous one's state at the fixed reservation
 before knowing whether the model that needs it can be built, and a backend that

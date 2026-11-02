@@ -35,10 +35,11 @@
  *      (depth 16, 4096 table visits; issue #175)
  *   4. the schema version the runtime understands
  *   5. that the graph holds together (every subgraph's tensors, every operator's
- *      tensor lists, at most 64 long and naming tensors that exist), every tensor's
- *      rank, and that every DECLARED dimension of subgraph 0's I/O tensors fits a
- *      descriptor (0..65535) -- the FIRMWARE'S OWN check,
- *      svc/nn/tflm/nn_tflm_model_check.h, compiled in (issues #175, #178)
+ *      tensor lists, at most 64 long and naming tensors that exist, every
+ *      tensor's quantization lengths and the operators' per-channel sum), every
+ *      tensor's rank, and that every DECLARED dimension of subgraph 0's I/O
+ *      tensors fits a descriptor (0..65535) -- the FIRMWARE'S OWN check,
+ *      svc/nn/tflm/nn_tflm_model_check.h, compiled in (issues #175, #178, #180)
  *   6. [!] that every operator the model uses is one this FIRMWARE registered
  *
  * Step 6 is the one the board cannot do well.  TFLM's AllocateTensors() returns a
@@ -233,7 +234,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	/* 5. the graph's structure and ranks, the I/O dims (issues #175, #178) - */
+	/* 5. the graph's structure and ranks, the I/O dims (#175, #178, #180) */
 	switch (nn_tflm_model_io_check(model)) {
 	case 0:
 		break;
@@ -256,11 +257,18 @@ int main(int argc, char **argv)
 		return 1;
 	default:
 		printf("RESULT  : REJECT -- the graph does not hold together: subgraph 0 has\n"
-		       "          no input/output list, a subgraph has no tensors, or an\n"
+		       "          no input/output list, a subgraph has no tensors, an\n"
 		       "          operator's tensor list is missing, longer than %u, or names\n"
-		       "          a tensor that does not exist.  The board refuses it as\n"
-		       "          NN_MODEL_ERR_FORMAT (%d).\n",
-		       NN_TFLM_MAX_OP_TENSORS, NN_MODEL_ERR_FORMAT);
+		       "          a tensor that does not exist, or a tensor's quantization\n"
+		       "          lengths do not (a scale vector longer than %u, a zero-point\n"
+		       "          vector neither absent, 1 long nor the scale's length, a\n"
+		       "          per-channel quantized dimension outside the tensor's rank\n"
+		       "          (rank >= 2) or 0..%u (rank 0 / 1), or the\n"
+		       "          operators' scale lengths adding up past %u).  The board\n"
+		       "          refuses it as NN_MODEL_ERR_FORMAT (%d).\n",
+		       NN_TFLM_MAX_OP_TENSORS, NN_TFLM_MAX_QUANT_CHANNELS,
+		       NN_TFLM_MAX_TENSOR_RANK - 1u, NN_TFLM_MAX_QUANT_REFS,
+		       NN_MODEL_ERR_FORMAT);
 		return 1;
 	}
 	printf("io dims : ok -- every declared input/output dimension fits 0..65535\n");

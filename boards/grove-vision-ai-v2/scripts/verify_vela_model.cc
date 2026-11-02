@@ -70,10 +70,12 @@
 #include "nn_ethosu_io.h"
 
 /* And the graph walk both backends apply to the model before planning it
- * (svc/nn/tflm/nn_tflm_model_check.h, issues #175, #178): a graph that does not
- * hold together -- an I/O list, a subgraph's tensors or an operator's tensor list
- * missing, an operator list longer than NN_TFLM_MAX_OP_TENSORS, an index naming a
- * tensor that does not exist (NN_MODEL_ERR_FORMAT on the board) -- a tensor of
+ * (svc/nn/tflm/nn_tflm_model_check.h, issues #175, #178, #180): a graph that does
+ * not hold together -- an I/O list, a subgraph's tensors or an operator's tensor
+ * list missing, an operator list longer than NN_TFLM_MAX_OP_TENSORS, an index
+ * naming a tensor that does not exist, a quantization vector too long or
+ * inconsistent (NN_MODEL_ERR_FORMAT on the board; Vela output carries no
+ * per-channel quantization, so that part never bites a Vela model) -- a tensor of
  * too high a rank (NN_MODEL_ERR_TENSOR), or an I/O dimension outside 0..65535
  * (NN_MODEL_ERR_DIMS). */
 #include "nn_tflm_model_check.h"
@@ -470,10 +472,16 @@ int main(int argc, char **argv)
 		return 1;
 	default:
 		printf("  FAIL   the graph does not hold together: subgraph 0 has no "
-		       "input/output list, a subgraph has no tensors, or an operator's "
+		       "input/output list, a subgraph has no tensors, an operator's "
 		       "tensor list is missing, longer than %u, or names a tensor that "
-		       "does not exist (NN_MODEL_ERR_FORMAT on the board)\n",
-		       NN_TFLM_MAX_OP_TENSORS);
+		       "does not exist, or a tensor's quantization lengths do not (a "
+		       "scale vector longer than %u, a zero-point vector neither absent, "
+		       "1 long nor the scale's length, a per-channel quantized dimension "
+		       "outside the tensor's rank (rank >= 2) or 0..%u (rank 0 / 1), or "
+		       "the operators' scale lengths "
+		       "adding up past %u) (NN_MODEL_ERR_FORMAT on the board)\n",
+		       NN_TFLM_MAX_OP_TENSORS, NN_TFLM_MAX_QUANT_CHANNELS,
+		       NN_TFLM_MAX_TENSOR_RANK - 1u, NN_TFLM_MAX_QUANT_REFS);
 		printf("RESULT   : REJECT\n");
 		return 1;
 	}

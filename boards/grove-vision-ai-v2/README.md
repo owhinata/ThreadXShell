@@ -177,12 +177,12 @@ then `.rodata`, then the NOLOAD buffers, with `.plugin` still pinned at the top.
 | `arm-none-eabi-size` text | 328,700 | 328,980 (+280: branch veneers, alignment) |
 | `shell.img` | 507,904 B | 507,904 B (`check_flash_partitions` OK) |
 
-**Since then (measured 2026-11-02, the issue #179 build of
-`build/grove-vision-ai-v2`):** `.text_cold` is **15,216 B**
-@`0x3404D000..0x34050B70` and `.rodata` 79,784 B from `0x34050B70`; ITCM used
-240,640 / free 21,504 B (`check_placement_budget`).  Of the +944 B over the
-14,272 above, issue #175 added 112, #178 360 and #179 96 (each its commit's
-measurement); the remaining 376 B came with the load-path changes between
+**Since then (measured 2026-11-02, the issue #180 build of
+`build/grove-vision-ai-v2`):** `.text_cold` is **15,552 B**
+@`0x3404D000..0x34050CC0` and `.rodata` 79,784 B from `0x34050CC0`; ITCM used
+240,640 / free 21,504 B (`check_placement_budget`).  Of the +1,280 B over the
+14,272 above, issue #175 added 112, #178 360, #179 96 and #180 336 (each its
+commit's measurement); the remaining 376 B came with the load-path changes between
 2026-10-31 and #175 and are not itemised here.  The list below is the
 2026-10-31 inventory.
 
@@ -2491,8 +2491,27 @@ spelling: the generated `SubGraph::operators()`, called from the walk as well as
 from `SubGraph::Verify()`, was outlined into `.text` (+16 B ITCM), so the walk
 reads the field through the `Table::GetPointer<const void *>` instance this build
 already outlines (`nn_tflm_sg_operators()`).  The payload walk's work per
-operator entry is bounded since issue #179 (below, under the payload); out of
-scope by decision: the per-channel quantization copy (#180).
+operator entry is bounded since issue #179 (below, under the payload).
+
+**And the per-channel quantization, by lengths (issue #180).**  The same walk
+refuses (`NN_MODEL_ERR_FORMAT`) a tensor's scale vector longer than 4,096, a
+zero-point vector neither absent, 1 long nor the scale's length, a per-channel
+tensor whose `quantized_dimension` is outside its declared rank (rank >= 2) or
+outside 0..5 (rank 0 / 1), and scale
+lengths named by all operator entries adding up past 65,536 -- TFLM's
+`AllocateTensors()` copies a tensor's zero points each time a kernel's
+`Prepare()` takes it, which neither the arena nor the verifier bounded.  Vela
+output carries no per-channel quantization (every scale vector in the pinned
+and SDK Vela models is 1 long), so this never bites a Vela model; it bounds
+what a crafted file could make this board's load do.  Cost: ITCM 0 B
+(`check_placement_budget`: used 240,640 B, free 21,504 B, as before),
+`.text_cold` +336 B, `.rodata` 0 B.  [!] Keeping ITCM at 0 needed the same
+spelling as #178: the generated `Tensor::quantization()` and `Tensor::shape()`
+were outlined into `.text` (+16 B / +8 B ITCM, each with a veneer), so the walk
+reads them through `Table::GetPointer<const void *>` (`nn_tflm_tensor_quant()`,
+`nn_tflm_tensor_shape()`).  The
+`QuantizationParameters::scale()` / `zero_point()` accessors it also calls were
+already outlined into ITCM by this build before the change and add nothing.
 
 ### The model is a blob, opened by name (#93, #49 Step 4a)
 
@@ -2685,7 +2704,8 @@ on-board verifier and the wio-lite-ai and f746g-disco host gates use too
   vector's length before its elements -- one rank compare per tensor entry, at
   most 3 x 64 list reads per operator entry, so at most 4,096 x 192 reads --
   and what it passes bounds `AllocateTensors()`'s passes over the same vectors
-  the same way.  Not the whole of `AllocateTensors()`: the per-operator
+  the same way; TFLM's zero-point copies total at most 65,536 per load (issue
+  #180).  Not the whole of `AllocateTensors()`: the per-operator
   scratch-request walk and the greedy memory planner are quadratic in tensors
   and operators, so the load is bounded by visits squared x small constants.
 - **Measured** on the host: the classification model needs **depth 4 and 19

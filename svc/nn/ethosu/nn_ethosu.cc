@@ -160,12 +160,14 @@ int build_interp(const void *data, uint32_t len)
 	 * anything is planned or destroyed (issues #175, #178, nn_tflm_model_check.h --
 	 * the tflm backend and the host gate run the same function), in its fixed
 	 * order: FORMAT for an I/O list, a subgraph's tensors or an operator's tensor
-	 * list that is missing, too long or indexes past the tensors, SHAPE for an I/O
+	 * list that is missing, too long or indexes past the tensors, or quantization
+	 * vectors too long or inconsistent (issue #180), SHAPE for an I/O
 	 * count outside 1..NN_MAX_IO, TENSOR for a rank above NN_TFLM_MAX_TENSOR_RANK
 	 * (an I/O tensor's above NN_MAX_DIMS), DIMS for an I/O dimension outside
 	 * 0..65535 -- lengths before elements, which bounds the shape, operator-list
 	 * and index reads here and AllocateTensors()'s passes over the same vectors
-	 * to visits x a small constant (the planner's own quadratic passes are
+	 * to visits x a small constant, and its zero-point copies to
+	 * NN_TFLM_MAX_QUANT_REFS (the planner's own quadratic passes are
 	 * bounded by visits squared); the SHAPE / TENSOR checks after planning stay
 	 * as the backstop. */
 	rc = nn_tflm_model_io_check(model);

@@ -6,8 +6,8 @@
  * @file    nn_tflm_model_check.h
  * @brief   What a TFLM model must satisfy before it is planned -- the bounded
  *          flatbuffer verifier and the graph walk (structure, lengths, ranks,
- *          I/O dims) -- shared by both interpreting backends and by the three
- *          host gates (issues #175, #178).
+ *          quantization lengths, I/O dims) -- shared by both interpreting
+ *          backends and by the three host gates (issues #175, #178, #180).
  *
  * TWO CHECKS, in the order a loader runs them:
  *
@@ -16,7 +16,10 @@
  *   nn_tflm_model_io_check()       the graph holds together (every subgraph's
  *                                  tensors, every operator's tensor lists, each
  *                                  at most NN_TFLM_MAX_OP_TENSORS long and naming
- *                                  only tensors that exist), subgraph 0's I/O is
+ *                                  only tensors that exist, every tensor's
+ *                                  quantization vectors within their limits and
+ *                                  the operators' per-channel sum within its
+ *                                  own), subgraph 0's I/O is
  *                                  1..NN_MAX_IO per list, every tensor's rank is
  *                                  at most NN_TFLM_MAX_TENSOR_RANK (subgraph 0's
  *                                  I/O at most NN_MAX_DIMS), and the I/O
@@ -88,7 +91,12 @@
  *                       dimension VALUES are never read -- Vela's internal
  *                       tensors reach 2.2 M, a value rule would refuse them)
  *   per operator entry  three length compares, then at most
- *                       3 x NN_TFLM_MAX_OP_TENSORS index reads
+ *                       3 x NN_TFLM_MAX_OP_TENSORS index reads, and as many
+ *                       scale-vector length reads (issue #180)
+ *   per tensor entry    the scale and zero-point vectors' lengths and, when
+ *   with quantization   per-channel, the quantized dimension against the rank
+ *                       (rank >= 2) or NN_TFLM_MAX_TENSOR_RANK (rank 0 / 1)
+ *                       (issue #180; no scale or zero-point VALUE is read)
  *
  * Every tensor and operator entry is one table visit of the verifier (a shared
  * subgraph's are visited once per entry naming it), so behind the 16 / 4096
@@ -96,7 +104,23 @@
  * list elements, and what it passes bounds TFLM's own passes over the SAME
  * vectors -- shapes at most NN_TFLM_MAX_TENSOR_RANK per tensor entry, operator
  * lists the same 3 x 64 per operator entry, so the shape, operator-list and
- * index reads of a load are visits x a small constant.  That is not all of
+ * index reads of a load are visits x a small constant.  The same holds for the
+ * zero-point copies (issue #180): TFLM copies a tensor's zero points (one int
+ * per scale entry) each time a kernel's Prepare() takes the tensor, frees the
+ * copy per node, and so is stopped by neither the arena nor the verifier (a
+ * quantization table is one more visit): one 65,000-entry scale vector named by
+ * 2,000 tensor entries, or one 4,096-entry tensor named by 4,000 operator
+ * entries, passed the verifier and the #178 walk.  After this walk the scale
+ * vector of any tensor is at most NN_TFLM_MAX_QUANT_CHANNELS long and the
+ * lengths named by all operator entries add up to at most
+ * NN_TFLM_MAX_QUANT_REFS, so TFLM's zero-point copies total at most
+ * NN_TFLM_MAX_QUANT_REFS per load (times the small number of times a kernel
+ * takes one input again), plus 2 x NN_MAX_IO x NN_TFLM_MAX_QUANT_CHANNELS for
+ * subgraph 0's I/O.  [!] NOT the kernels' own per-channel work: conv /
+ * depthwise Prepare() size their multiplier arrays and loops by the filter's
+ * dimension VALUE (a per-tensor scale is broadcast), and Invoke() loops over
+ * planned tensors -- both bounded by the arena they allocate from, not by the
+ * file and not by this walk.  That is not all of
  * AllocateTensors(): MarkAllocationLifetimes() walks every scratch request for
  * each operator (O(N x M), TFLM's own comment) and the greedy memory planner is
  * quadratic in its buffers, both counted in tensors and operators, so the whole
@@ -110,8 +134,7 @@
  *
  * wio-lite-ai runs no verifier: there nothing bounds the number
  * of entries but the file, the trust described above.  (grove-vision-ai-v2's payload
- * walk per operator entry is bounded by its own scan, issue #179; what this does not
- * bound is outside it by decision: the per-channel quantization copy, issue #180.)
+ * walk per operator entry is bounded by its own scan, issue #179.)
  *
  * THE VERIFIER (moved here from svc/nn/ethosu/npu_verify.h, which delegates to
  * it).  flatbuffers' defaults are depth 64 and a million tables; the limits here
@@ -221,6 +244,44 @@
  */
 #define NN_TFLM_MAX_TENSOR_RANK    6u
 
+/*
+ * The longest per-channel quantization one tensor may carry (issue #180): its
+ * scale vector's length, the `channels` TFLM's allocator copies a zero point for
+ * (micro_allocator.cc, InitializeTfLiteTensorFromFlatbuffer(): an int array of
+ * that length in the arena, filled element by element).  TFLM has no such
+ * constant and the verifier checks a scalar vector in O(1), so it is derived:
+ * measured over the 43 models found on the host that parse (the pinned assets,
+ * the Grove SDK's model zoo, TFLM's bundled models, MLPerf Tiny and a few ST
+ * model zoo files), the longest scale vector is 1,280 (TFLM's mobilenet_v2 224
+ * and ST's mobilenetv2_a035_128, a final FULLY_CONNECTED's weights), the pinned blazeface
+ * int8 96, and Vela output carries none at all (every Vela model's scale vectors
+ * are 1 long).  4096 passes all of them with 3.2x; a longer one is refused as
+ * NN_MODEL_ERR_FORMAT.  The zero-point vector is 0, 1 or the scale's length (TFLM
+ * reads zero_point[0] for every channel when the two differ, silently), so the
+ * same cap bounds it.
+ */
+#define NN_TFLM_MAX_QUANT_CHANNELS 4096u
+
+/*
+ * The sum, over every subgraph and every operator entry, of the scale-vector
+ * lengths of the tensors the operator's inputs / outputs / intermediates name
+ * (issue #180): a bound on TFLM's zero-point COPIES (not on the kernels' own
+ * per-channel work, which the arena bounds -- see the file header).  The cap above bounds one
+ * tensor; TFLM copies a tensor's zero points again each time a kernel's Prepare()
+ * asks for it (AllocateTempInputTensor() and friends, micro_context.cc; the temp
+ * copy is freed per node, so the arena never runs out and nothing else stops
+ * it), and many operator entries may name one tensor, so per-tensor alone left
+ * operators x NN_TFLM_MAX_QUANT_CHANNELS.  Measured over the same 43 models: the largest sum
+ * is 34,292 (TFLM's 3.98 MB mobilenet_v2, which fits no slot), 14,233 for a model
+ * that fits one, 4,539 for the pinned blazeface int8.  65536 passes all of them
+ * with 1.9x over the largest; a model above it is refused as
+ * NN_MODEL_ERR_FORMAT.  Subgraph 0's I/O tensors, which TFLM copies once into the
+ * persistent arena, are at most 2 x NN_MAX_IO x NN_TFLM_MAX_QUANT_CHANNELS more.
+ */
+#define NN_TFLM_MAX_QUANT_REFS     65536u
+
+static_assert(NN_TFLM_MAX_QUANT_CHANNELS <= NN_TFLM_MAX_QUANT_REFS,
+              "one tensor's channels must fit the per-load sum");
 static_assert(NN_TFLM_MAX_TENSOR_RANK == (unsigned)tflite::RuntimeShape::kMaxSmallSize,
               "the rank bound is TFLM's RuntimeShape capacity in the tree built against");
 static_assert((unsigned)NN_MAX_DIMS <= NN_TFLM_MAX_TENSOR_RANK,
@@ -306,14 +367,124 @@ NN_TFLM_CHECK_INLINE uint32_t nn_tflm_list_len(const flatbuffers::Vector<int32_t
 	return list ? list->size() : 0u;
 }
 
+/* Tensor::quantization(), spelled through Table::GetPointer<const void *> for the
+ * same reason as nn_tflm_sg_operators() above: [!] grove-vision-ai-v2's build
+ * outlined the generated accessor into .text (ITCM, +16 B and a veneer) once the
+ * walk called it (issue #180); the void instance adds no ITCM byte. */
+NN_TFLM_CHECK_INLINE const tflite::QuantizationParameters *
+nn_tflm_tensor_quant(const tflite::Tensor *t)
+{
+	const flatbuffers::Table *tb = reinterpret_cast<const flatbuffers::Table *>(t);
+
+	return static_cast<const tflite::QuantizationParameters *>(
+		tb->GetPointer<const void *>(tflite::Tensor::VT_QUANTIZATION));
+}
+
+/* Tensor::shape(), spelled the same way and for the same reason: called from the
+ * quantization check as well, the generated accessor was outlined into .text
+ * (ITCM, +8 B and a veneer) on grove-vision-ai-v2 (issue #180). */
+NN_TFLM_CHECK_INLINE const flatbuffers::Vector<int32_t> *
+nn_tflm_tensor_shape(const tflite::Tensor *t)
+{
+	const flatbuffers::Table *tb = reinterpret_cast<const flatbuffers::Table *>(t);
+
+	return static_cast<const flatbuffers::Vector<int32_t> *>(
+		tb->GetPointer<const void *>(tflite::Tensor::VT_SHAPE));
+}
+
+/* A tensor's scale-vector LENGTH, 0 when it carries no quantization or no scale
+ * -- the channels TFLM would copy for it (it copies only when the zero-point
+ * vector is non-empty too; counting every scale vector is the larger, safe
+ * side).  No element is read. */
+NN_TFLM_CHECK_INLINE uint32_t nn_tflm_quant_len(const tflite::Tensor *t)
+{
+	const tflite::QuantizationParameters *q = t ? nn_tflm_tensor_quant(t) : nullptr;
+
+	return (q && q->scale()) ? q->scale()->size() : 0u;
+}
+
+/*
+ * One tensor's quantization holds together (issue #180), by LENGTHS only: the
+ * scale vector is at most NN_TFLM_MAX_QUANT_CHANNELS long; the zero-point vector
+ * is absent, 1 long or exactly the scale's length (TFLM otherwise reads
+ * zero_point[0] for every channel, silently, and the kernels' equal-length check
+ * runs on the copy TFLM resized); and a per-channel tensor (scale longer than 1)
+ * names a quantized dimension inside its declared rank when that rank is 2 or
+ * more (0 <= qd < shape()->size()), or 0 <= qd < NN_TFLM_MAX_TENSOR_RANK when the
+ * rank is 0 or 1.  TFLM copies qd unchecked, aliases a tensor's dims to the
+ * serialized shape vector (no padding, micro_allocator.cc), and the filter's
+ * kernels (kernel_util.cc PopulateConvolutionQuantizationParams(),
+ * fully_connected_common.cc) read dims->data[qd] without checking the rank, so
+ * qd past the rank reads past the shape.  Rank 0 / 1 is excepted because the
+ * converter emits rank-1 per-channel BIAS tensors with the filter's qd (TFLM's
+ * person_detect: 14 of them, scale 8..256 long, qd 3), which no kernel indexes
+ * by qd -- a filter is never rank 1, but the walk cannot tell the roles without
+ * the operators' semantics; for those, qd stays a small constant.  A per-tensor
+ * quantization (scale 0 or 1 long) may name any qd: nothing reads it.  Neither the scale values nor the
+ * dimension values are read: whether the scale's length matches dims[qd] is the
+ * kernels' check (they make it), and a rank above NN_TFLM_MAX_TENSOR_RANK is
+ * TENSOR, judged later.
+ */
+NN_TFLM_CHECK_INLINE bool nn_tflm_tensor_quant_ok(const tflite::Tensor *t)
+{
+	const tflite::QuantizationParameters *q = t ? nn_tflm_tensor_quant(t) : nullptr;
+
+	if (!q)
+		return true;
+
+	const uint32_t sl = q->scale() ? q->scale()->size() : 0u;
+	const uint32_t zl = q->zero_point() ? q->zero_point()->size() : 0u;
+
+	if (sl > NN_TFLM_MAX_QUANT_CHANNELS)
+		return false;
+	if (zl > 1u && zl != sl)
+		return false;
+	if (sl > 1u) {
+		const int32_t qd = q->quantized_dimension();
+		const flatbuffers::Vector<int32_t> *shape = nn_tflm_tensor_shape(t);
+		const uint32_t rank = shape ? shape->size() : 0u;
+		const uint32_t qd_end = rank >= 2u ? rank : NN_TFLM_MAX_TENSOR_RANK;
+
+		if (qd < 0 || (uint32_t)qd >= qd_end)
+			return false;
+	}
+	return true;
+}
+
+/* Add the scale-vector lengths of the tensors @p list names (its indices already
+ * checked; -1 names none) to @p *qrefs, false once the sum passes
+ * NN_TFLM_MAX_QUANT_REFS.  One length read per index.  Each addend is at most
+ * NN_TFLM_MAX_QUANT_CHANNELS (the operator's subgraph's tensors passed
+ * nn_tflm_tensor_quant_ok() first) and the sum stops just past the limit, so it
+ * cannot wrap. */
+NN_TFLM_CHECK_INLINE bool nn_tflm_op_list_quant_add(const flatbuffers::Vector<int32_t> *list,
+                                             const nn_tflm_tensor_vec *tensors,
+                                             uint32_t *qrefs)
+{
+	for (uint32_t j = 0; list && j < list->size(); j++) {
+		const int32_t ti = list->Get(j);
+
+		if (ti < 0)
+			continue;
+		*qrefs += nn_tflm_quant_len(tensors->Get((uint32_t)ti));
+		if (*qrefs > NN_TFLM_MAX_QUANT_REFS)
+			return false;
+	}
+	return true;
+}
+
 /*
  * One subgraph holds together: a tensor vector, and every operator present with
  * an inputs and an outputs list, each of its three lists at most
  * NN_TFLM_MAX_OP_TENSORS long -- all three LENGTHS judged before any element is
- * read -- and then every index in range.  Per operator entry: three compares and
- * at most 3 x NN_TFLM_MAX_OP_TENSORS reads.
+ * read -- and then every index in range; every tensor's quantization holding
+ * together (nn_tflm_tensor_quant_ok(), before the operators), and the scale
+ * lengths the operators name adding up, with every earlier subgraph's, to at most
+ * NN_TFLM_MAX_QUANT_REFS in @p *qrefs (issue #180).  Per tensor entry: a few
+ * length reads; per operator entry: three compares and at most
+ * 2 x 3 x NN_TFLM_MAX_OP_TENSORS reads.
  */
-NN_TFLM_CHECK_INLINE bool nn_tflm_subgraph_ok(const tflite::SubGraph *sg)
+NN_TFLM_CHECK_INLINE bool nn_tflm_subgraph_ok(const tflite::SubGraph *sg, uint32_t *qrefs)
 {
 	const nn_tflm_tensor_vec *tensors = sg ? sg->tensors() : nullptr;
 
@@ -322,6 +493,10 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_subgraph_ok(const tflite::SubGraph *sg)
 
 	const nn_tflm_op_vec *ops = nn_tflm_sg_operators(sg);
 	const uint32_t nt = tensors->size();
+
+	for (uint32_t i = 0; i < nt; i++)
+		if (!nn_tflm_tensor_quant_ok(tensors->Get(i)))
+			return false;
 
 	for (uint32_t i = 0; ops && i < ops->size(); i++) {
 		const tflite::Operator *op = ops->Get(i);
@@ -335,6 +510,10 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_subgraph_ok(const tflite::SubGraph *sg)
 		if (!nn_tflm_op_list_indices_ok(op->inputs(), nt, true) ||
 		    !nn_tflm_op_list_indices_ok(op->outputs(), nt, false) ||
 		    !nn_tflm_op_list_indices_ok(op->intermediates(), nt, false))
+			return false;
+		if (!nn_tflm_op_list_quant_add(op->inputs(), tensors, qrefs) ||
+		    !nn_tflm_op_list_quant_add(op->outputs(), tensors, qrefs) ||
+		    !nn_tflm_op_list_quant_add(op->intermediates(), tensors, qrefs))
 			return false;
 	}
 	return true;
@@ -404,7 +583,14 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_io_list_dims_fit(const flatbuffers::Vector<int
  *                        without tensors; an operator without an inputs or
  *                        outputs list, with a list longer than
  *                        NN_TFLM_MAX_OP_TENSORS, or naming a tensor that does not
- *                        exist (structure)
+ *                        exist; a tensor's scale vector longer than
+ *                        NN_TFLM_MAX_QUANT_CHANNELS, its zero-point vector
+ *                        neither 0, 1 nor the scale's length, or a per-channel
+ *                        quantized dimension outside its rank (rank >= 2) or
+ *                        outside 0..NN_TFLM_MAX_TENSOR_RANK-1 (rank 0 / 1);
+ *                        the operators'
+ *                        scale lengths adding up past NN_TFLM_MAX_QUANT_REFS
+ *                        (structure)
  *   NN_MODEL_ERR_SHAPE   an I/O list naming outside 1..NN_MAX_IO tensors (count)
  *   NN_MODEL_ERR_TENSOR  any tensor declaring more than NN_TFLM_MAX_TENSOR_RANK
  *                        dimensions, or an I/O tensor more than NN_MAX_DIMS (rank)
@@ -433,8 +619,11 @@ NN_TFLM_CHECK_INLINE int nn_tflm_model_io_check(const tflite::Model *model)
 	if (!tensors || !nn_tflm_io_list_ok(sg->inputs(), tensors) ||
 	    !nn_tflm_io_list_ok(sg->outputs(), tensors))
 		return NN_MODEL_ERR_FORMAT;
+	/* The per-channel sum runs across every subgraph: TFLM prepares them all. */
+	uint32_t qrefs = 0;
+
 	for (uint32_t i = 0; i < subgraphs->size(); i++)
-		if (!nn_tflm_subgraph_ok(subgraphs->Get(i)))
+		if (!nn_tflm_subgraph_ok(subgraphs->Get(i), &qrefs))
 			return NN_MODEL_ERR_FORMAT;
 	if (!nn_tflm_io_list_count_ok(sg->inputs()) ||
 	    !nn_tflm_io_list_count_ok(sg->outputs()))

@@ -49,6 +49,29 @@ NN_TFLM_MAX_TENSOR_RANK (6):
                                      the walk reads lengths before elements, so a
                                      regression to element-first fails on time
 
+And the quantization lengths (issue #180), at NN_TFLM_MAX_QUANT_CHANNELS (4096)
+and NN_TFLM_MAX_QUANT_REFS (65536), all refusals NN_MODEL_ERR_FORMAT:
+
+  q_scale_4096 / q_zp_1_of_4         controls: a scale at the cap; zero point 1 of 4
+  q_scale_gt_dim / q_qd_5            controls: scale 8 on dims[qd] 4 (not compared,
+                                     by decision); qd 5 on a rank-1 tensor (qd is
+                                     bounded by NN_TFLM_MAX_TENSOR_RANK on rank
+                                     0 / 1, not by the rank, by decision)
+  q_refs_65536                       control: the operators' sum at the limit
+  q_scale_4097 / q_zp_4097           a scale one over the cap; a zero point neither
+                                     1 nor the scale's length
+  q_zp_2_of_4                        zero point 2 of 4
+  q_qd_6 / q_qd_neg                  per-channel qd 6 on rank 1; qd -1
+  q_qd_rank2_1 / q_scale1_qd_100     controls: qd 1 on rank 2; qd 100 with scale 1
+                                     (the qd rule is for per-channel tensors only)
+  q_qd_rank2_2                       per-channel qd 2 == rank 2 (rank >= 2: qd < rank)
+  q_refs_65537                       the sum one over
+  q_scale_65000_shared               within WITNESS_SECONDS: 2000 tensor entries
+                                     naming one 65,000-entry scale vector
+  q_refs_4000_shared                 within WITNESS_SECONDS: 4000 operator entries
+                                     naming one tensor of scale 32 (each under the
+                                     cap, the sum 128,000 over it)
+
 And, on verify_vela_model only (--style vela), Grove's payload scan (issue #179,
 svc/nn/ethosu/npu_model_scan.cc), which charges each operator's payload bytes
 against the file's length before walking it and refuses -1 as an ethos-u
@@ -157,6 +180,27 @@ CASES = [
     # costs 2.6e8 reads, which WITNESS_SECONDS turns into a failure.
     ("op_in_65000_shared.tflite", FORMAT),
     ("t_shape_65000_shared.tflite", TENSOR),
+    # The quantization lengths (issue #180): a tensor's scale vector at most
+    # NN_TFLM_MAX_QUANT_CHANNELS (4096), its zero point 0 / 1 / the scale's length,
+    # a per-channel qd inside the rank (rank >= 2) or 0..NN_TFLM_MAX_TENSOR_RANK - 1
+    # (rank 0 / 1), and the scale lengths the operators name
+    # adding up to at most NN_TFLM_MAX_QUANT_REFS (65536).
+    ("q_scale_4096.tflite", None),
+    ("q_scale_4097.tflite", FORMAT),
+    ("q_zp_4097.tflite", FORMAT),
+    ("q_zp_1_of_4.tflite", None),
+    ("q_zp_2_of_4.tflite", FORMAT),
+    ("q_scale_gt_dim.tflite", None),
+    ("q_qd_5.tflite", None),
+    ("q_qd_6.tflite", FORMAT),
+    ("q_qd_neg.tflite", FORMAT),
+    ("q_qd_rank2_1.tflite", None),
+    ("q_qd_rank2_2.tflite", FORMAT),
+    ("q_scale1_qd_100.tflite", None),
+    ("q_refs_65536.tflite", None),
+    ("q_refs_65537.tflite", FORMAT),
+    ("q_scale_65000_shared.tflite", FORMAT),
+    ("q_refs_4000_shared.tflite", FORMAT),
 ]
 
 # Grove's payload scan (issue #179): vela style only, judged by the scan's sentence.
@@ -195,6 +239,7 @@ PL_CASES = [
 # shape witness read element-first stayed ~5 ms), so the time is a backstop for
 # the order; the verdicts above are the rule.
 WITNESSES = ("op_in_65000_shared.tflite", "t_shape_65000_shared.tflite",
+             "q_scale_65000_shared.tflite", "q_refs_4000_shared.tflite",
              "pl_share_4000.tflite", "pl_index_1300.tflite")
 WITNESS_SECONDS = 0.1
 WITNESS_RUNS = 3

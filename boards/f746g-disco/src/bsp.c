@@ -103,19 +103,32 @@ static void mpu_config_sdram(void)
     HAL_MPU_ConfigRegion(&r);
 
     /* Region 1: FMC internal bank3 (.sdram.ai, 0xC0600000, 2 MB) as Normal
-     * cacheable Write-Back/Write-Allocate (TEX=1,C=1,B=1).  A higher region
+     * cacheable Write-Back, no Write-Allocate (TEX=0,C=1,B=1; PM0253 Table 91,
+     * S=0 non-shareable).  A higher region
      * number wins on overlap (ARMv7-M PMSAv7), so this overrides region0's
      * non-cacheable attribute for bank3 only.  The NN inference arena (activations
      * + camera->model staging) lives here and is CPU-only -- NO DMA writes into
      * bank3 (camera DMA targets bank1, ETH bank2, LTDC bank0) -- so D-cache is
      * coherent without any maintenance.  Non-cacheable SDRAM activations were
      * ~20x slower for NN inference (owhinata/stm32f746g-disco#81
-     * owhinata/stm32f746g-disco#6, measured on MNIST). */
+     * owhinata/stm32f746g-disco#6, measured on MNIST).
+     *
+     * Why no write-allocate (#173): a store that misses the D-cache does not
+     * allocate a line in this region; loads still read-allocate.  Measured on
+     * blazeface with TFLM, `nn bench 3` went from ~637 ms to ~565 ms (-11%) and
+     * `nn stream` from 1.49 to 1.65 inf/s with the results unchanged.  Write-
+     * through measured about the same but is not used: a write-through region
+     * is the condition of the Cortex-M7 data corruption erratum (ES0290 2.1.1,
+     * Arm ID 1259864); this attribute is write-back and non-shareable and CACR
+     * is never written, so it is outside that erratum.  The region is still
+     * write-back, so dirty lines can stay in the cache exactly as before: the
+     * coherence rule is unchanged (CPU-only today; any DMA into bank3 would need
+     * clean / invalidate, with or without write-allocate). */
     r.Number           = MPU_REGION_NUMBER1;
     r.BaseAddress      = 0xC0600000u;
     r.Size             = MPU_REGION_SIZE_2MB;
     r.SubRegionDisable = 0x00;
-    r.TypeExtField     = MPU_TEX_LEVEL1;           /* TEX=1, C=1, B=1: Normal WBWA */
+    r.TypeExtField     = MPU_TEX_LEVEL0;  /* TEX=0, C=1, B=1: Normal WB, no WA */
     r.IsCacheable      = MPU_ACCESS_CACHEABLE;
     r.IsBufferable     = MPU_ACCESS_BUFFERABLE;
     r.IsShareable      = MPU_ACCESS_NOT_SHAREABLE;
@@ -123,10 +136,12 @@ static void mpu_config_sdram(void)
     r.DisableExec      = MPU_INSTRUCTION_ACCESS_DISABLE;
     HAL_MPU_ConfigRegion(&r);
 
-    /* Region 2: bank3 UPPER half (0xC0700000, 1 MB) -- same Normal WBWA cacheable as
-     * region1 but INSTRUCTION-FETCH ENABLED (higher region number wins on PMSAv7
-     * overlap, so this un-XNs just the upper 1 MB; the lower 1 MB stays XN under
-     * region1).  This is the .sdram.ai.model window (ldscript), where the X-CUBE-AI
+    /* Region 2: bank3 UPPER half (0xC0700000, 1 MB) -- Normal WBWA cacheable
+     * (this region stays write-allocate, unlike region1's no-write-allocate,
+     * #173: the reloc backend was not measured) and INSTRUCTION-FETCH ENABLED
+     * (higher region number wins on PMSAv7 overlap, so this un-XNs just the
+     * upper 1 MB; the lower 1 MB stays XN under region1).  This is the
+     * .sdram.ai.model window (ldscript), where the X-CUBE-AI
      * relocatable backend loads a position-independent network_rel.bin from SD and
      * runs it XIP -- instruction fetch out of external FMC SDRAM (RM0385 s2.1.3 AXIM).
      * Executing code from cacheable SDRAM needs a D-cache clean + I-cache invalidate

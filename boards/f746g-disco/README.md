@@ -148,7 +148,12 @@ written continuously by the DCMI, and an FMC bank change costs a row activation
 -- putting two continuous masters in one bank shows up as display tearing and
 DMA FIFO errors.  Banks 0..2 are non-cacheable (bus masters write them); bank 3
 is CPU-only and therefore cacheable, and its upper half is the only window
-`bsp.c` makes instruction-fetchable.
+`bsp.c` makes instruction-fetchable.  Since #173 bank 3 (MPU region 1) is Normal
+write-back with no write-allocate (TEX=0 C=1 B=1, non-shareable): a store that
+misses the D-cache does not allocate a line there, which made TFLM inference
+about 11% faster; write-through, which measured about the same, is not used
+because a write-through region is the condition of erratum ES0290 2.1.1.  The
+reloc backend's execution window (region 2) stays write-back write-allocate.
 
 The linker script asserts each boundary (`.sdram.cam` must start exactly at
 bank1 and be exactly 2 MB, `.sdram.eth` must fit inside bank2, and so on), so a
@@ -580,6 +585,40 @@ and 2,748 / 4,096 B after `nn model load --path /blazeface.nnc`, unchanged by
 console path, not the bench (the 2,156 B in the table above was taken after
 `nn bench 10` with the built-in model, before containers).
 
+At issue #173 (2026-11-02, `/blazeface.nnc`): bank 3 (MPU region 1) changed
+from write-back write-allocate (TEX=1 C=1 B=1, `RASR` `0x130B0029`) to
+write-back no write-allocate (TEX=0 C=1 B=1, `RASR` `0x13030029`).  The
+reproduction the issue asked for (three or more runs before the code changed)
+was taken by rewriting region 1's `RASR` with `devmem` within one boot, A
+(write-allocate) / B (no write-allocate) / A again, on an image whose layout
+gave no DCMI overruns (`ovr dcmi` 0 throughout; the stream latency row is that
+run's last reported latency):
+
+| Measurement | A (write-allocate) | B (no write-allocate) |
+|---|---|---|
+| `nn bench 3` | 636.4-637.6 ms (9 samples) | 563.5-565.4 ms (6 samples) |
+| `nn stream`, 60 s | 1.49 inf/s (both A phases) | 1.65 inf/s |
+| stream latency | 637 ms | 566 ms |
+
+Acceptance was then taken on two images that differ in exactly one byte (the
+`RASR` value in `bsp_init`'s literal pool, checked with `cmp -l`): A = main
+before the change, B = after, A again, each flashed and booted fresh.  Both
+images have the overrun-prone layout of main at c74991f, so the DCMI overruns
+(#172) are the same on both and are counted per operation:
+
+| Measurement | A | B | A again |
+|---|---|---|---|
+| `nn bench 3` x3 (avg) | 633.6 / 635.5 / 637.3 ms | 565.6 / 564.3 / 565.1 ms | 631.5 / 635.1 / 632.7 ms |
+| `nn stream start --frames 300` | 1.22 inf/s, latency 646 ms | 1.42 inf/s, latency 577 ms | 1.27 inf/s, latency 643 ms |
+| `ovr dcmi` during bench x3 / during the 300-frame stream | (not split) | 4 / 12 | 4 / 12 |
+| `/pinned.tflite` `nn bench 3` x3 (avg) | 634.3 / 631.1 / 634.4 ms | 564.1 / 565.6 / 564.2 ms | (not taken) |
+| `nn run` x5, `lcd info`, `sdram test` | faces 0 x5, underrun=no, 6144 KB OK | same | (not taken) |
+
+[!] Known limit: only `tflm` was measured, and only for `tflm` (and `null`) is
+bank 3 known to be CPU-only.  The two `stedgeai` backends get the same
+region 1 attribute, but that their generated code and the X-CUBE-AI runtime
+never hand bank 3 to a DMA has not been checked.
+
 ## Plugin containers (issue #159 = #78 Step 4)
 
 A **container** carries a model together with the code that interprets its
@@ -700,9 +739,9 @@ What runs where, and why each piece is this board's or shared:
   under a critical section, judged by `svc/plugin/plugin_mpu_v7m.c`, and the
   D-clean + I-invalidate of the reservation.  `test/test_plugin_mpu_f746.c`
   holds the verdict on this board's real region set: SDRAM non-cacheable XN,
-  bank 3 WBWA XN, PRIVDEFENA -- the reservation is executable through the
-  default map -- and refuses the background map off and an XN / Device /
-  read-only region placed over it.
+  bank 3 write-back no-write-allocate XN (#173), PRIVDEFENA -- the reservation
+  is executable through the default map -- and refuses the background map off
+  and an XN / Device / read-only region placed over it.
 - **A plugin's fault** is attributed (`pc is in plugin '<name>' +0x<off>` in the
   RAM log) and **the board resets at once** (`src/fault_plugin.c`); under a
   debugger it halts instead.  A fault anywhere else keeps the full UART dump

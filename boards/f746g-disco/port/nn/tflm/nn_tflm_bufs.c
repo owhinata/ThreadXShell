@@ -12,8 +12,9 @@
  * argument is in svc/nn/tflm/nn_tflm_mem.h, which declares what is defined here and so
  * type-checks each definition against it.
  *
- * Both live in .sdram.ai: SDRAM bank3 (0xC0600000, 2 MB), FMC, MPU cacheable WBWA and
- * CPU-ONLY (owhinata/stm32f746g-disco#6) -- no DMA writes either, so no cache
+ * Both live in .sdram.ai: SDRAM bank3 (0xC0600000, 2 MB), FMC, MPU cacheable
+ * write-back with no write-allocate (src/bsp.c region 1, #173) and CPU-ONLY
+ * (owhinata/stm32f746g-disco#6) -- no DMA writes either, so no cache
  * maintenance is ever owed.  The section is NOLOAD (the FMC is not up at reset), so
  * neither buffer may assume it starts as zeros, and neither does: TFLM's allocator
  * writes the arena before any kernel reads it, and a slot is only read over the range

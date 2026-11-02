@@ -20,7 +20,7 @@
  * The regions are written out as src/bsp.c's mpu_config_sdram() programs them
  * through HAL_MPU_ConfigRegion() (RM0385 / PM0253 4.6.9 RASR layout):
  *   0: 0xC0000000, 8 MB, TEX=1 C=0 B=0 (Normal non-cacheable), AP full, XN
- *   1: 0xC0600000, 2 MB, TEX=1 C=1 B=1 (Normal WBWA),          AP full, XN
+ *   1: 0xC0600000, 2 MB, TEX=0 C=1 B=1 (Normal WB, no WA, #173), AP full, XN
  *   2: disabled (tflm / null / stedgeai), or on stedgeai_reloc
  *      0xC0700000, 1 MB, Normal WBWA, AP full, executable
  * and HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT) = ENABLE | PRIVDEFENA.  The
@@ -53,6 +53,7 @@ static int fails;
 #define ATTR_NORMAL_NC   (1u << PL_MPU7_RASR_TEX_SHIFT)
 #define ATTR_NORMAL_WBWA ((1u << PL_MPU7_RASR_TEX_SHIFT) | PL_MPU7_RASR_C | \
                           PL_MPU7_RASR_B)
+#define ATTR_NORMAL_WB_NOWA (PL_MPU7_RASR_C | PL_MPU7_RASR_B)
 #define ATTR_DEVICE      (PL_MPU7_RASR_B)
 
 #define TYPE_8_REGIONS   (8u << PL_MPU7_TYPE_DREGION_SHIFT)
@@ -77,7 +78,7 @@ static void bsp_regions(struct pl_mpu7_region *r, int reloc)
 {
 	memset(r, 0, sizeof(*r) * PL_MPU7_REGION_MAX);
 	r[0] = mk(0xC0000000u, 23u, AP_FULL, ATTR_NORMAL_NC, 1);
-	r[1] = mk(0xC0600000u, 21u, AP_FULL, ATTR_NORMAL_WBWA, 1);
+	r[1] = mk(0xC0600000u, 21u, AP_FULL, ATTR_NORMAL_WB_NOWA, 1);
 	if (reloc)
 		r[2] = mk(0xC0700000u, 20u, AP_FULL, ATTR_NORMAL_WBWA, 0);
 }

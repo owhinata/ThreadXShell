@@ -10,8 +10,9 @@
 #             is a CH343P USB-UART bridge into PB0/PB1; 921600 8N1).
 #
 #  The chip has NO USB device controller: flashing goes over the same UART --
-#  reset the board, the flash-resident Himax bootloader offers an xmodem menu,
-#  and `--target flash` drives it (a manual step: press reset when prompted).
+#  opening the port resets the board (the CH343P's RTS edge, see the README),
+#  the flash-resident Himax bootloader offers an xmodem menu, `--target flash`
+#  drives it and the board reboots by itself when the transfer is done.
 #  The flashed .img is a FULL image (bootloader + 2nd bootloader + memory
 #  descriptors + signed app); rewriting the bootloader region every flash is
 #  the vendor-standard flow.  Recovery from a corrupted flash: the in-chip
@@ -1775,7 +1776,7 @@ add_custom_target(flash
             --file=${CMAKE_BINARY_DIR}/shell.img
     DEPENDS shell
     USES_TERMINAL
-    COMMENT "xmodem -> shell.img over ${GROVE_SERIAL_PORT} (press reset when asked)")
+    COMMENT "xmodem -> shell.img over ${GROVE_SERIAL_PORT} (resets by itself; close any terminal first)")
 
 # ---------------------------------------------------------------------------
 # The plugin image (issue #101 = #78 Step 1a)

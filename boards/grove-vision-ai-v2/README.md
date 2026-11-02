@@ -16,9 +16,9 @@ cmake -B build/grove-vision-ai-v2 -G Ninja \
 cmake --build build/grove-vision-ai-v2
 # close any terminal on the serial port first, then:
 cmake --build build/grove-vision-ai-v2 --target flash
-# the script prints "Please press reset button!!" -- press the board's RESET
-# button if the transfer does not start on its own (opening the port already
-# resets the board, see below, so it often does)
+# the script prints "Please press reset button!!" but no button press is
+# needed: opening the port resets the board (see below), the bootloader takes
+# the transfer, and the board reboots by itself when it is done
 picocom -b 921600 /dev/ttyACM0
 ```
 

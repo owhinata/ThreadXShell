@@ -13,7 +13,7 @@ HAL/CMSIS/ThreadX は upstream ミラー submodule、ツールチェーンは初
 |---|---|---|---|---|
 | STM32F746G-DISCO | STM32F746NGH6 / Cortex-M7 | 自前設定 | VCP: USART1 | ST-Link（`--target flash`） |
 | Wio Lite AI | STM32H725AEI6 / Cortex-M7 | **DFU boot から継承** | USB CDC（TinyUSB） | **DFU のみ**（`--target flash` = `dfu-shell`） |
-| Grove Vision AI V2 | Himax HX6538 / dual Cortex-M55 + Ethos-U55（app は CM55M / Secure） | **bootloader から継承** | UART0（CH343P ブリッジ） | **UART xmodem のみ**（手動フロー） |
+| Grove Vision AI V2 | Himax HX6538 / dual Cortex-M55 + Ethos-U55（app は CM55M / Secure） | **bootloader から継承** | UART0（CH343P ブリッジ） | **UART xmodem のみ**（`--target flash`、リセットは自動。ターミナルを閉じてから） |
 
 ピン・ボーレート・実測クロックは各 board README。**ボード追加時に必ず更新するもの**: この表 /
 「ボード固有ルール」節 / `AGENTS.md` / `.claude/settings.json` の upstream ブロックリスト /

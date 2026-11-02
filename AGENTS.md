@@ -296,5 +296,5 @@ cmake -B build/<board> -G Ninja \
       -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi-toolchain.cmake -DBOARD=<board>
 cmake --build build/<board>
 # 書込は --target flash: f746 = ST-Link / wio = DFU のみ（PF1 保持リセットで DFU へ）/
-#                        grove = UART xmodem のみ（ターミナルを閉じ、プロンプトでリセット押下）
+#                        grove = UART xmodem のみ（ターミナルを閉じてから。リセットは自動で、書込後も自動で再起動）
 ```

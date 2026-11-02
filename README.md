@@ -196,8 +196,9 @@ cmake --build build/wio-lite-ai --target flash
 
 ### Grove Vision AI V2 (UART xmodem)
 
-Close any terminal on the serial port, run the target, and press the board's
-RESET button when the script asks:
+Close any terminal on the serial port and run the target. No button press is
+needed: opening the port resets the board into the bootloader's xmodem wait,
+and the board reboots by itself when the transfer is done:
 
 ```bash
 cmake --build build/grove-vision-ai-v2 --target flash

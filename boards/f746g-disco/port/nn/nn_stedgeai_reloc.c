@@ -43,6 +43,7 @@
  */
 #include "nn.h"
 #include "nn_backend.h"
+#include "nn_reloc_shape.h"   /* the shape half of reloc_map() (issue #176) */
 
 #include "stm32f7xx_hal.h"   /* SCB_CleanDCache_by_Addr / SCB_InvalidateICache / __DSB / __ISB */
 
@@ -71,6 +72,23 @@ static uint8_t g_rt_ram[2][RELOC_RT_RAM_CAP]
 	__attribute__((section(".sdram.ai"), aligned(32)));
 static uint8_t g_acts[RELOC_ACTS_CAP]
 	__attribute__((section(".sdram.ai"), aligned(32)));
+
+/* ---- this backend's own refusals (issue #176) -----------------------------
+ * The reasons only this backend has -- its slot / .bin checks and the ST loader's
+ * steps -- numbered below every NN_MODEL_ERR_* (svc/nn/nn.h, which ends at -13), so
+ * no value means two things: reloc_map()'s NN_MODEL_ERR_TENSOR / _DIMS / _ARENA
+ * reach the caller beside these, and nn_svc_f746_model.c prints the number
+ * verbatim ("the model was refused (%d)").  Old value -N is now -(20 + N).
+ * RELOC_ERR_BIN is still one code for the whole reload() precondition group (data
+ * NULL, not the inactive slot, the live slot, a bad length, reloc_bin_verify()
+ * refused): it was one value (-1) before, so this is not a new fold. */
+#define RELOC_ERR_BIN        (-21)  /* reload(): not a usable .bin in the inactive slot */
+#define RELOC_ERR_ACTS_CAP   (-22)  /* the model's act_size > RELOC_ACTS_CAP            */
+#define RELOC_ERR_RTRAM_CAP  (-23)  /* the XIP RW image > RELOC_RT_RAM_CAP              */
+#define RELOC_ERR_CREATE     (-24)  /* ai_rel_network_load_and_create() failed          */
+#define RELOC_ERR_INIT       (-25)  /* ai_rel_network_init() failed                     */
+#define RELOC_ERR_REPORT     (-26)  /* ai_rel_network_get_report() failed               */
+#define RELOC_ERR_IO_COUNT   (-27)  /* inputs != 1, outputs outside 1..NN_MAX_IO, or no list */
 
 /* ---- backend singleton state ---------------------------------------------- */
 struct reloc_model {
@@ -262,38 +280,52 @@ static uint8_t reloc_dtype(ai_buffer_format fmt)
  * shape the same way nn_stedgeai.c (STAI) exposes it, so blazeface.c / nn_camera see an
  * identical tensor: input keeps NHWC 4-D [1,H,W,C]; the 3-D outputs (width==1) collapse
  * to [1,H,C].  Quantization is left at 0 (BlazeFace I/O is float32; an int8-I/O model
- * would additionally read ai_buffer.meta_info -- out of P5 scope). */
+ * would additionally read ai_buffer.meta_info -- out of P5 scope).
+ *
+ * The shape half is nn_reloc_shape_map() (nn_reloc_shape.h, host-tested); this keeps
+ * what needs the ai_buffer.  Returns 0 or an NN_MODEL_ERR_* the caller passes through
+ * unchanged (issue #176; it used to fold every refusal into -8 and truncate a
+ * dimension above 65535 into the 16-bit descriptor):
+ *   - NN_MODEL_ERR_TENSOR  no data pointer, or no element size (bits == 0);
+ *   - NN_MODEL_ERR_DIMS    a dimension above NN_TENSOR_DIM_MAX;
+ *   - NN_MODEL_ERR_ARENA   more bytes than RELOC_ACTS_CAP.
+ *
+ * Why the activation arena bounds an I/O tensor: the loader does not decide where
+ * the report's buffers point -- ai_rel_network_get_report() (ST Reloc/Src/
+ * ai_reloc_network.c) only dispatches to the model's own report entry inside the
+ * .bin.  That code is generated (ST Utilities/linux/deploy/templates/
+ * legacy_network.j2.c get_report -> stai_network.j2.c get_inputs / get_outputs;
+ * network.j2.c, the template with config['reloc'], gives the same answer through
+ * network_layers.j2.c activations_init_offsets): an I/O buffer is either
+ * `activations[pool_id] + offset`, set when
+ * ai_rel_network_init() hands the pools over (this backend hands exactly one,
+ * g_acts, whose model-declared size acts_sz reloc_build() already holds to
+ * RELOC_ACTS_CAP), or NULL when the model was generated without
+ * --allocate-inputs/outputs (refused above as TENSOR).  So no tensor a generated
+ * model can report is larger than RELOC_ACTS_CAP, and one that claims to be names a
+ * size no buffer here has. */
 static int reloc_map(struct nn_tensor *t, const ai_buffer *b)
 {
-	uint32_t B = AI_BUFFER_SHAPE_ELEM(b, AI_SHAPE_BATCH);
-	uint32_t C = AI_BUFFER_SHAPE_ELEM(b, AI_SHAPE_CHANNEL);
-	uint32_t W = AI_BUFFER_SHAPE_ELEM(b, AI_SHAPE_WIDTH);
-	uint32_t H = AI_BUFFER_SHAPE_ELEM(b, AI_SHAPE_HEIGHT);
-	uint32_t bits = AI_BUFFER_FMT_GET_BITS(b->format);
+	struct nn_reloc_shape sh;
+	int                   rc;
 
-	if (!b->data || bits == 0)
-		return -1;
+	if (!b->data)
+		return NN_MODEL_ERR_TENSOR;
+	rc = nn_reloc_shape_map(AI_BUFFER_SHAPE_ELEM(b, AI_SHAPE_BATCH),
+	                        AI_BUFFER_SHAPE_ELEM(b, AI_SHAPE_HEIGHT),
+	                        AI_BUFFER_SHAPE_ELEM(b, AI_SHAPE_WIDTH),
+	                        AI_BUFFER_SHAPE_ELEM(b, AI_SHAPE_CHANNEL),
+	                        AI_BUFFER_FMT_GET_BITS(b->format), RELOC_ACTS_CAP, &sh);
+	if (rc != 0)
+		return rc;
 
 	t->data  = b->data;
 	t->dtype = reloc_dtype(b->format);
 	t->scale = 0.0f;
 	t->zero_point = 0;
-
-	if (W <= 1u) {                       /* 3-D logical tensor [1,H,C] */
-		t->ndim = 3;
-		t->dims[0] = (uint16_t)(B ? B : 1);
-		t->dims[1] = (uint16_t)(H ? H : 1);
-		t->dims[2] = (uint16_t)(C ? C : 1);
-		t->dims[3] = 1;
-	} else {                              /* 4-D NHWC [1,H,W,C] */
-		t->ndim = 4;
-		t->dims[0] = (uint16_t)(B ? B : 1);
-		t->dims[1] = (uint16_t)(H ? H : 1);
-		t->dims[2] = (uint16_t)W;
-		t->dims[3] = (uint16_t)(C ? C : 1);
-	}
-
-	t->bytes = (B ? B : 1u) * (C ? C : 1u) * (W ? W : 1u) * (H ? H : 1u) * (bits / 8u);
+	memcpy(t->dims, sh.dims, sizeof(t->dims));
+	t->ndim  = sh.ndim;
+	t->bytes = sh.bytes;
 	return 0;
 }
 
@@ -310,7 +342,8 @@ static void reloc_set_name(const char *name)
 /* =====================================================================
  * Build a model instance from slot @p slot's already-verified .bin.
  * On success sets *hdl_out + fills the report/tensor out-params; on failure returns
- * <0 with *hdl_out set to any partially-created handle (caller destroys it).
+ * a RELOC_ERR_* or reloc_map()'s NN_MODEL_ERR_* with *hdl_out set to any
+ * partially-created handle (caller destroys it).
  * ===================================================================== */
 static int reloc_build(int slot, uint32_t len, ai_handle *hdl_out,
                        ai_network_report *rep, struct nn_tensor *in, struct nn_tensor *out,
@@ -340,8 +373,8 @@ static int reloc_build(int slot, uint32_t len, ai_handle *hdl_out,
 	ctxf       = (const struct ai_reloc_rt_ctx *)(obj + data_d + (ctx_off - data_s));
 	acts_sz    = ctxf->act_size;                                /* const in the .data image */
 
-	if (acts_sz > RELOC_ACTS_CAP)      return -2;
-	if (rt_ram_xip > RELOC_RT_RAM_CAP) return -3;
+	if (acts_sz > RELOC_ACTS_CAP)      return RELOC_ERR_ACTS_CAP;
+	if (rt_ram_xip > RELOC_RT_RAM_CAP) return RELOC_ERR_RTRAM_CAP;
 
 	/* XIP runs code out of cacheable SDRAM: flush the CPU-written .bin to SDRAM and
 	 * drop stale I-cache lines before the first fetch (the loader does neither). */
@@ -354,23 +387,28 @@ static int reloc_build(int slot, uint32_t len, ai_handle *hdl_out,
 	                                     AI_RELOC_RT_LOAD_MODE_XIP, &hdl);
 	*hdl_out = hdl;                          /* publish so the caller destroys any handle */
 	if (err.type != AI_ERROR_NONE || hdl == AI_HANDLE_NULL)
-		return -4;
+		return RELOC_ERR_CREATE;
 
 	weights[0] = (ai_handle)(obj + RELOC_OFF(h->sect.weights_start)); /* embedded weights */
 	acts[0]    = (ai_handle)g_acts;
 	if (!ai_rel_network_init(hdl, weights, acts))
-		return -5;
+		return RELOC_ERR_INIT;
 
 	if (!ai_rel_network_get_report(hdl, rep))
-		return -6;
+		return RELOC_ERR_REPORT;
 	if (rep->n_inputs != 1 || rep->n_outputs < 1 || rep->n_outputs > NN_MAX_IO ||
 	    !rep->inputs || !rep->outputs)
-		return -7;
+		return RELOC_ERR_IO_COUNT;
 
-	for (int i = 0; i < rep->n_inputs; i++)
-		if (reloc_map(&in[i], &rep->inputs[i]) != 0) return -8;
-	for (int i = 0; i < rep->n_outputs; i++)
-		if (reloc_map(&out[i], &rep->outputs[i]) != 0) return -8;
+	/* reloc_map()'s NN_MODEL_ERR_* passes through as it was returned (issue #176). */
+	for (int i = 0; i < rep->n_inputs; i++) {
+		int rc = reloc_map(&in[i], &rep->inputs[i]);
+		if (rc != 0) return rc;
+	}
+	for (int i = 0; i < rep->n_outputs; i++) {
+		int rc = reloc_map(&out[i], &rep->outputs[i]);
+		if (rc != 0) return rc;
+	}
 
 	*n_in    = rep->n_inputs;
 	*n_out   = rep->n_outputs;
@@ -478,22 +516,22 @@ static int reloc_bk_reload(const void *data, uint32_t len, const char *name, voi
 	*impl_out = &g_reloc;
 
 	if (data == NULL)                        /* no built-in model here */
-		return -1;
+		return RELOC_ERR_BIN;
 
 	/* data must be the inactive slot returned by load_region(). */
 	if (data == g_model_slot[0])      new_slot = 0;
 	else if (data == g_model_slot[1]) new_slot = 1;
-	else                              return -1;
-	if (new_slot == g_reloc.slot)     return -1;   /* would clobber the live model */
+	else                              return RELOC_ERR_BIN;
+	if (new_slot == g_reloc.slot)     return RELOC_ERR_BIN;   /* would clobber the live model */
 
 	if (len == 0 || len > RELOC_MODEL_SLOT_CAP)
-		return -1;
+		return RELOC_ERR_BIN;
 
 	/* Zero the slot tail so the loader can never follow an offset into stale bytes,
 	 * then validate every offset it will dereference before touching the ST API. */
 	memset(g_model_slot[new_slot] + len, 0, RELOC_MODEL_SLOT_CAP - len);
 	if (reloc_bin_verify(g_model_slot[new_slot], len, RELOC_RT_RAM_CAP) != 0)
-		return -1;                       /* keep the old model (unchanged) */
+		return RELOC_ERR_BIN;            /* keep the old model (unchanged) */
 
 	rc = reloc_build(new_slot, len, &new_hdl, &new_rep, new_in, new_out, &nin, &nout, &acts);
 	if (rc != 0) {

@@ -450,12 +450,22 @@ is no built-in model) and after `nn model unload`.
   previous model like any other; `verify_tflite` runs the same function.
 - `stedgeai_reloc` is the same: it starts empty, and `builtin` used to mean
   "unload" there before #131 (use `nn model unload`).
-- Parity gap: `stedgeai_reloc` does NOT refuse a dimension above 65535 yet.
-  Its own `reloc_map()` (`port/nn/nn_stedgeai_reloc.c`) narrows the runtime's
-  `uint32_t` B/H/W/C to the 16-bit descriptor unchecked, and that backend folds
-  every mapping failure into its own unnamed `-8`, so a distinct answer means
-  reworking its error numbering: issue #176.  (`stedgeai`'s shapes are fixed at
-  build time and `null`'s are constants, so neither can meet one.)
+- `stedgeai_reloc` refuses the same dimension with the same `-13` (issue
+  #176). Its `reloc_map()` (`port/nn/nn_stedgeai_reloc.c`) maps each I/O
+  `ai_buffer` through `nn_reloc_shape_map()` (`port/nn/nn_reloc_shape.h`,
+  walked by `test/test_reloc_shape.c`) and returns its own refusal unchanged:
+  a B/H/W/C above 65535 (after 0 becomes 1) is `NN_MODEL_ERR_DIMS` (-13), no
+  data pointer or no element size is `NN_MODEL_ERR_TENSOR` (-4), and a tensor
+  larger than the activation arena (`RELOC_ACTS_CAP`, 384 KB -- where the
+  generated model's I/O buffers live) is `NN_MODEL_ERR_ARENA` (-3), the product
+  taken in 64 bits so it cannot wrap. Its own refusals are numbered below
+  every `NN_MODEL_ERR_*` so no value means two things (`RELOC_ERR_*` in that
+  file): -21 not a usable `.bin` in the inactive slot (slot, length or the
+  `.bin` verifier), -22 activations above `RELOC_ACTS_CAP`, -23 RW image above
+  `RELOC_RT_RAM_CAP`, -24 / -25 / -26 the ST loader's create / init / report
+  failed, -27 I/O count outside 1 input and 1..8 outputs, or no list.
+  (`stedgeai`'s shapes are fixed at build time and `null`'s are constants, so
+  neither can meet one.)
 - `null` and `stedgeai` cannot swap models: `nn model load` is unsupported and
   `nn model unload` answers as before without changing anything.
 

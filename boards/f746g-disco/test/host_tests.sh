@@ -75,6 +75,16 @@ gcc $CFLAGS -I "$board/port/nn" -I "$board/port/camera" -I "$board/svc" -I "$HOS
     "$here/test_nncam_input.c" $LDFLAGS -o "$out/test_nncam_input"
 "$out/test_nncam_input"
 
+# issue #176 -- the stedgeai_reloc backend's shape mapping (port/nn/nn_reloc_shape.h,
+# the ST-header-free half of reloc_map()): 65535 passes and 65536 / > INT32_MAX is
+# NN_MODEL_ERR_DIMS on each of B / H / W / C, 0 becomes 1, W <= 1 collapses to 3-D,
+# no element size is NN_MODEL_ERR_TENSOR, and bytes above the arena -- including a
+# product that would wrap 32 bits -- is NN_MODEL_ERR_ARENA.  No model on hand reaches
+# any of these, and the reloc tree needs the ST SDK, so this is where they are seen.
+gcc $CFLAGS -I "$board/port/nn" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" \
+    "$here/test_reloc_shape.c" $LDFLAGS -o "$out/test_reloc_shape"
+"$out/test_reloc_shape"
+
 # issue #130 -- negative tests for the tflm residents of cmake/check_f746_layout.py
 # (the activation arena and the SD model slots must sit in SDRAM bank3).  Driven
 # by fake nm/objdump, so no toolchain is needed: what is checked is the gate's

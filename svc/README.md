@@ -99,7 +99,7 @@ counts and stack depths, is the board README's:
 | `nn stream start [--frames <n>]` | Claim the stream, start the camera if it is not running, start live inference; returns at once, or waits n frames and stops its own generation. | `STREAM` | As `nn run`, and: grove-vision-ai-v2 refuses a model with no decoder before any shape or draw question (CLAUDE.md: not aligned); wio-lite-ai re-arms a band stream it lost (a new generation, the counters continue). |
 | `nn stream start --test` | Stream the sensor's colour bar instead of the scene. | `STREAM_TEST` | -- |
 | `nn stream stop` | Stop the current stream; `not running` is not a failure; a retryable or terminal ending is reported. | `STREAM` | -- |
-| `nn stream stats` | Frames in, skipped, errors, infers and rate, decoder refusals, the last latency and result, then the board's own lines. | `STREAM` | grove-vision-ai-v2: the latency in 1 ms steps (the same clock as `nn bench`). The board lines are each board's. |
+| `nn stream stats` | Frames in, skipped, errors, infers and rate, decoder refusals, the last latency and result, then the board's own lines; STATE until a stream has run once (`nn_core_poll()`), and a `nn run` is not one. | `STREAM` | grove-vision-ai-v2: the latency in 1 ms steps (the same clock as `nn bench`). The board lines are each board's. |
 
 `infers` counts only a stream's publish the record took -- a raw one (no
 decoder) as an inference, a refused decode as an error and never an inference;

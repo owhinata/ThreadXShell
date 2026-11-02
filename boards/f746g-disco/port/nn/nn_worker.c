@@ -171,11 +171,13 @@ int nncam_publish_hook(void *ctx, int n, uint32_t gen)
 #endif
 
 /*
- * This board's counting, wio-lite-ai's way: a publish the record took is an
+ * This board's counting: the one tally of all three boards
+ * (nn_decode_tally_of(), issue #164).  A stream's publish the record took is an
  * inference -- unless a plugin's decoder refused it, which is an error counted
  * apart by nn_decode_count_of() -- and one the generation rule dropped is not
  * counted, and neither is its decode (#122 P18).  A RAW publish found nothing
- * and refused nothing: an inference with no detections.
+ * and refused nothing: an inference with no detections.  A one-shot's publish
+ * counts nothing: `nn run` prints its own result.
  */
 void nncam_account(void *ctx, enum nn_core_done what, int n, int took)
 {
@@ -184,13 +186,13 @@ void nncam_account(void *ctx, enum nn_core_done what, int n, int took)
 	nncam_acc_what = what;
 	nncam_acc_took = took;
 	if (what == NN_CORE_DONE_RAW) {
-		nncam_tally(nn_decode_tally_of(took, NN_DC_NONE), 0);
+		nncam_tally(nn_decode_tally_of(took, nncam_oneshot, NN_DC_NONE), 0);
 		return;
 	}
 	if (what != NN_CORE_DONE_DECODED)
 		return;
-	nncam_tally(nn_decode_tally_of(took, nn_decode_count_of(n,
-	                                         nncam_oneshot)), n);
+	nncam_tally(nn_decode_tally_of(took, nncam_oneshot,
+	                               nn_decode_count_of(n)), n);
 }
 
 /* ---- the one-shot's end of a job (issue #171, svc/nn/nn_shot.h) ------------- */
@@ -260,7 +262,10 @@ static void nncam_step(void)
 
 	/* RUNNING: while the word says so, NOTHING may write the input tensor. */
 	if (nn_run(nncam_model) != 0) {
-		nncam_error();
+		/* A one-shot reports it as its own ending and counts nothing
+		 * (issue #164, as on grove-vision-ai-v2). */
+		if (!oneshot)
+			nncam_error();
 		nncam_job_failed(oneshot, NN_SHOT_INVOKE, gen);
 		return;
 	}
@@ -278,7 +283,8 @@ static void nncam_step(void)
 	 * nothing to hold.
 	 */
 	if (nn_active_is_plugin() && !plugin_lease_take()) {
-		nncam_error();
+		if (!oneshot)
+			nncam_error();   /* a one-shot's ending, not counted (#164) */
 		nncam_job_failed(oneshot, NN_SHOT_LEASE_TIMEOUT, gen);
 		return;
 	}

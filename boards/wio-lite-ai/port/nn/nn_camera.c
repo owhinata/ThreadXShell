@@ -94,9 +94,11 @@ volatile int nncam_run;
  * so it is the one kind a re-arm may take back up (issue #120).  Written only
  * by nn_camera_start() on the shell side, before nncam_run is raised. */
 static int nncam_rearmable;
-/* The running session is a `nn run`'s (no panel was required), whose decodes
- * are not counted in the stream's errors (issue #130 step 6c, as on
- * grove-vision-ai-v2): it reports its own result.  Written only by
+/* The running session is a `nn run`'s (no panel was required): the worker
+ * counts nothing for it -- not its publish (nn_decode_tally_of(), the tally of
+ * all three boards), not an invoke failure, not a lease timeout (issue #130
+ * step 6c, #164); it reports its own ending.  The producer's invariant errors
+ * still count.  Written only by
  * nn_camera_start() on the shell side, before nncam_run is raised, and kept by
  * a re-arm (which only a stream's session takes). */
 int nncam_oneshot;

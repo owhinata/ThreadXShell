@@ -10,21 +10,24 @@
 
 #include "blazeface.h"   /* BF_ERR_* -- the decoder's vocabulary */
 
-enum nn_decode_count nn_decode_count_of(int nd, int oneshot)
+enum nn_decode_count nn_decode_count_of(int nd)
 {
 	/* [!] A plugin was shipped with its model: BF_ERR_MODEL is a mismatch,
 	 * not a result (issue #159, grove-vision-ai-v2's rule). */
-	if (oneshot || nd >= 0)
+	if (nd >= 0)
 		return NN_DC_NONE;
 	if (nd == BF_ERR_MODEL)
 		return NN_DC_MODEL;
 	return NN_DC_DECODER;   /* BF_ERR_UNINIT, BF_ERR_ARG, and any other */
 }
 
-enum nn_decode_tally nn_decode_tally_of(int took, enum nn_decode_count dc)
+enum nn_decode_tally nn_decode_tally_of(int took, int oneshot,
+                                        enum nn_decode_count dc)
 {
 	if (!took)
 		return NN_TALLY_NOTHING;     /* dropped by the generation rule */
+	if (oneshot)
+		return NN_TALLY_NOTHING;     /* `nn run` reports its own result */
 	switch (dc) {
 	case NN_DC_DECODER: return NN_TALLY_DECODER;
 	case NN_DC_MODEL:   return NN_TALLY_MODEL;

@@ -742,6 +742,10 @@ add_library(shell_objs OBJECT
     # table and the frame path that runs it are shared since issue #130 (svc/,
     # walked by shell/test/test_nn_handoff.c and test_nn_core_frame.c).
     "${BOARD_DIR}/port/nn/nn_worker.c"
+    # How one publish is counted in `nn stream stats`: the one tally of all
+    # three boards since issue #164 (svc/, walked by
+    # shell/test/test_nn_decode_count.c).
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_decode_count.c"
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_handoff.c"
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_core_frame.c"
     # How `nn run`'s wait for its one inference ends (issue #129): a pure

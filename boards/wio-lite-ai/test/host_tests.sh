@@ -48,7 +48,7 @@ gcc $CFLAGS -Wno-unused-parameter \
 
 # issue #130 step 6c (#122 P8) -- how a decode's answer is counted in `nn stream
 # stats`: in svc/ since issue #163 (svc/nn/nn_decode_count.c, one copy with
-# f746g-disco) and walked by shell/test/test_nn_decode_count.c.
+# f746g-disco, and grove-vision-ai-v2 since issue #164) and walked by shell/test/test_nn_decode_count.c.
 
 # issue #162 -- the camera input refusals (svc/nn/nn_input_codes.h, tested in
 # shell/test/test_nn_input_codes.c) against this board's other nn_camera_start()

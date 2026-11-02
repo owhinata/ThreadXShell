@@ -263,9 +263,11 @@ int nncam_publish_hook(void *ctx, int n, uint32_t gen)
 #endif
 
 /*
- * This board's counting.  A publish the record took is an inference -- unless
- * the decoder refused it; one the generation rule dropped is not counted, and
- * neither is its decode.  A decode the plugin refused is counted apart by
+ * This board's counting: the one tally of all three boards
+ * (nn_decode_tally_of(), issue #164).  A stream's publish the record took is an
+ * inference -- unless the decoder refused it; one the generation rule dropped
+ * is not counted, and neither is its decode; a one-shot's counts nothing (`nn
+ * run` prints its own result).  A decode the plugin refused is counted apart by
  * nn_decode_count_of() (issue #130 step 6c, P8: grove-vision-ai-v2's table) --
  * there is no console on this thread, so a refusal not counted apart cannot be
  * told apart afterwards (issue #97).
@@ -276,29 +278,32 @@ int nncam_publish_hook(void *ctx, int n, uint32_t gen)
  */
 void nncam_account(void *ctx, enum nn_core_done what, int n, int took)
 {
+	enum nn_decode_count dc = NN_DC_NONE;   /* RAW: nothing decoded or refused */
+
 	(void)ctx;
 	/* For the one-shot's record after nn_core_on_infer_done() (issue #171). */
 	nncam_acc_what = what;
 	nncam_acc_took = took;
-	if (!took || (what != NN_CORE_DONE_RAW && what != NN_CORE_DONE_DECODED))
+	if (what != NN_CORE_DONE_RAW && what != NN_CORE_DONE_DECODED)
 		return;
-	if (what == NN_CORE_DONE_DECODED) {
-		switch (nn_decode_count_of(n, nncam_oneshot)) {
-		case NN_DC_MODEL:
-			nncam_model_errors++;
-			nncam_error();
-			return;
-		case NN_DC_DECODER:
-			nncam_decoder_errors++;
-			nncam_error();
-			return;
-		case NN_DC_NONE:
-		default:
-			break;
-		}
+	if (what == NN_CORE_DONE_DECODED)
+		dc = nn_decode_count_of(n);
+	switch (nn_decode_tally_of(took, nncam_oneshot, dc)) {
+	case NN_TALLY_INFER:
+		nncam_infers++;
+		return;
+	case NN_TALLY_MODEL:
+		nncam_model_errors++;
+		nncam_error();
+		return;
+	case NN_TALLY_DECODER:
+		nncam_decoder_errors++;
+		nncam_error();
+		return;
+	case NN_TALLY_NOTHING:
+	default:
+		return;
 	}
-	/* RAW: no plugin, nothing decoded, nothing refused. */
-	nncam_infers++;
 }
 
 /* ----------------------------------------------------------- worker loop ------ */
@@ -383,9 +388,12 @@ static void nncam_step(int first)
 
 	/* RUNNING: while the word says so, NOTHING may write the input tensor. */
 	if (nn_run(nncam_model) != 0) {
-		nncam_error();
+		/* A one-shot reports it as its own ending and counts nothing
+		 * (issue #164, as on grove-vision-ai-v2). */
 		if (oneshot)
 			nncam_oneshot_job_failed(NN_SHOT_INVOKE, gen);   /* #171 */
+		else
+			nncam_error();
 		nn_core_frame_done(&nncam_frame, &nncam_frame_ops, 0);
 		return;
 	}
@@ -408,9 +416,11 @@ static void nncam_step(int first)
 	 * plugin there is nothing to hold.
 	 */
 	if (nn_active_is_plugin() && !plugin_lease_take()) {
-		nncam_error();
+		/* A one-shot's ending, not counted (issue #164). */
 		if (oneshot)
 			nncam_oneshot_job_failed(NN_SHOT_LEASE_TIMEOUT, gen);   /* #171 */
+		else
+			nncam_error();
 		nn_core_frame_done(&nncam_frame, &nncam_frame_ops, 0);
 		return;
 	}

@@ -31,6 +31,7 @@
 #include "nn_rec.h"
 #include "nn.h"
 #include "nn_desc.h"
+#include "nn_decode_count.h" /* the one tally of all three boards (#164) */
 #include "tx_glue.h"        /* the EPK's TIMER2: the stage clock (issue #60) */
 
 #define LOG_TAG "nn_worker"
@@ -334,8 +335,15 @@ int nn_ov_publish(void *ctx, int n, uint32_t gen)
 }
 
 /*
- * This board's counting, after the lease is given back -- the table it always
- * had (issue #97: model and decoder failures apart; a one-shot counts nothing).
+ * This board's counting, after the lease is given back: the one tally of all
+ * three boards (nn_decode_tally_of(), issue #164), over grove-vision-ai-v2's
+ * table (issue #97: model and decoder failures apart).  Only a stream's
+ * publish the record took is counted; one the generation rule dropped is not
+ * (a stop or a re-attach landed during the inference: a reader saw nothing,
+ * and `infers 1` beside `last : nothing decoded yet` would describe nothing --
+ * f746g-disco's #122 P18), and a one-shot counts nothing (`nn run` reports its
+ * own ending through nn_ov_end()).  A dropped publish leaves the latency, the
+ * stage totals and nn_ov_last_status as the last counted one left them.
  */
 void nn_ov_account(void *ctx, enum nn_core_done what, int nd, int took)
 {
@@ -343,10 +351,21 @@ void nn_ov_account(void *ctx, enum nn_core_done what, int nd, int took)
 	struct nn_ov_work *w = ctx;
 	uint32_t e3;
 
-	(void)took;   /* every decode is counted, as it always was */
 	switch (what) {
 	case NN_CORE_DONE_RAW:
+		/* Not reachable on a stream: `nn stream start` refuses a model
+		 * with no decoder on this board.  Were it ever, an inference that
+		 * found nothing and refused nothing -- no decode stage, so no
+		 * stage totals. */
 		nn_ov_end(w->oneshot, NULL, NN_OV_SHOT_PUBLISHED);
+		if (nn_decode_tally_of(took, w->oneshot, NN_DC_NONE) ==
+		    NN_TALLY_INFER) {
+			TX_DISABLE
+			nn_ov_stats.inferences++;
+			nn_ov_stats.last_ms   = w->t1 - w->t0;
+			nn_ov_stats.last_ndet = 0;
+			TX_RESTORE
+		}
 		return;
 	case NN_CORE_DONE_NO_OUTPUTS:
 		nn_ov_end(w->oneshot, &nn_ov_stats.errors, NN_OV_SHOT_NO_OUTPUTS);
@@ -368,21 +387,24 @@ void nn_ov_account(void *ctx, enum nn_core_done what, int nd, int took)
 
 	if (w->oneshot) {
 		nn_ov_end(w->oneshot, NULL, NN_OV_SHOT_PUBLISHED);
-		return;
+		return;   /* nn_decode_tally_of(): a one-shot counts nothing */
 	}
 
 	TX_DISABLE
-	if (nd < 0) {
-		/* [!] There is no console on this path, so the only way a decode
-		 * failure can be told apart afterwards is if it is counted apart
-		 * (issue #97). */
-		if (nd == BF_ERR_MODEL)
-			nn_ov_stats.model_errors++;
-		else
-			nn_ov_stats.decoder_errors++;
+	/* [!] There is no console on this path, so the only way a decode failure
+	 * can be told apart afterwards is if it is counted apart (issue #97). */
+	switch (nn_decode_tally_of(took, 0, nn_decode_count_of(nd))) {
+	case NN_TALLY_MODEL:
+		nn_ov_stats.model_errors++;
 		nn_ov_stats.errors++;
 		nn_ov_last_status = nd;
-	} else {
+		break;
+	case NN_TALLY_DECODER:
+		nn_ov_stats.decoder_errors++;
+		nn_ov_stats.errors++;
+		nn_ov_last_status = nd;
+		break;
+	case NN_TALLY_INFER:
 		nn_ov_last_status = BF_OK;
 		nn_ov_stats.inferences++;
 		nn_ov_stats.detections += (uint32_t)nd;
@@ -396,6 +418,10 @@ void nn_ov_account(void *ctx, enum nn_core_done what, int nd, int took)
 		nn_ov_cycle_ticks  += (uint32_t)(e3 - w->job.t_hand);
 		nn_ov_prof_frames++;
 		nn_ov_ndet = nd;
+		break;
+	case NN_TALLY_NOTHING:
+	default:
+		break;   /* dropped by the generation rule: nothing counts */
 	}
 	TX_RESTORE
 }

@@ -159,8 +159,10 @@ extern struct cam_sink_step nncam_step;
  * .sdram.ai -- retryable, issue #152; NNCAM_ERR_SHAPES / _NODRAW / _DECBUSY,
  * issue #159 -- _NODRAW for a stream with no plugin too).  Holds the camera open (issue #142): joins
  * a running stream, or starts it holding the operator's place too.
- * @p oneshot is non-zero for `nn run`'s session, whose decodes are not counted
- * in the stream's errors (issue #130 step 6c).
+ * @p oneshot is non-zero for `nn run`'s session, which counts nothing in the
+ * worker's counters -- not its publish (nn_decode_tally_of()), not an invoke
+ * failure, not a lease timeout (issue #130 step 6c, #164); the producer's
+ * invariant errors count whatever the run kind.
  */
 int  nn_camera_start(enum camera_res res, int oneshot);
 

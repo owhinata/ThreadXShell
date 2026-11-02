@@ -728,7 +728,14 @@ nobody documented -- a wiring fault) in `decoder_errors`, and both in
 `errors`; the shared command then prints the `of those:` line. Before step 6c
 neither was counted, so a plugin that refused every frame read as a healthy
 stream. Only a decode the record took is counted -- the same rule as
-`infers` -- and a `nn run` counts nothing (it reports its own result). A
+`infers` -- and a `nn run` counts nothing in the worker's counters: not its
+publish, not an invoke failure, not a lease timeout (it reports each as its own
+ending). The producer's invariant errors (a band of the wrong height, no input
+tensor, a raced hand-over) are counted in `errors` whatever the run kind. Until
+issue #164 this board counted a `nn run`'s publish -- even a refused decode --
+in `infers` and its invoke failure or lease timeout in `errors`, so the `nn
+stream stats` after a `nn run` said `infers 1`; since #164 the tally
+(`nn_decode_tally_of()`) is one rule for all three boards. A
 refused decode is counted in `errors` and **not** in `infers` (issue #138, as
 on grove-vision-ai-v2 and f746g-disco): `infers` counts the results a reader
 can use, so it and `errors` never count the same frame. Until #138 this board

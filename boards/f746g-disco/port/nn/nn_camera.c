@@ -173,8 +173,9 @@ uint32_t     nncam_gen_decoder_errors;
 /* Of nncam_gen_errors: a LOADED PLUGIN's BF_ERR_MODEL -- its model and its
  * decoder do not match (issue #159; nn_decode_count_of()).  The worker only. */
 uint32_t     nncam_gen_model_errors;
-/* The running stream is a `nn run`'s: its decodes are not counted (it reports
- * its own result).  Written by nn_camera_start() before nncam_run is raised. */
+/* The running stream is a `nn run`'s: the worker counts nothing for it -- not
+ * its publish, not an invoke failure, not a lease timeout (it reports its own
+ * ending; issue #164).  The producer's invariant errors still count.  Written by nn_camera_start() before nncam_run is raised. */
 int          nncam_oneshot;
 
 /* nn's place among the camera's holders (issue #142): a `nn stream start` or

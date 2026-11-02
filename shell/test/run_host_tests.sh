@@ -918,10 +918,11 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" \
 
 # issue #130 step 6c (#122 P8) -- how a decode's answer is counted in `nn stream
 # stats` (svc/nn/nn_decode_count.c; one copy for wio-lite-ai and f746g-disco
-# since issue #163, which merged the two boards' tests).  A plugin that answers
-# BF_ERR_UNINIT, BF_ERR_ARG or an undocumented code cannot be typed, and each
-# must be counted as a decoder fault, never as "the model" or as nothing; and
-# only what the record took is counted (P18).
+# since issue #163, which merged the two boards' tests, and grove-vision-ai-v2's
+# too since issue #164).  A plugin that answers BF_ERR_UNINIT, BF_ERR_ARG or an
+# undocumented code cannot be typed, and each must be counted as a decoder
+# fault, never as "the model" or as nothing; only what the record took is
+# counted (P18); and a one-shot counts nothing (#164).
 gcc $CFLAGS -I "$svc" -I "$svc/nn" \
     "$here/test_nn_decode_count.c" "$svc/nn/nn_decode_count.c" \
     $LDFLAGS -o "$out/test_nn_decode_count"

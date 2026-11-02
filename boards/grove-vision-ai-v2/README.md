@@ -6175,6 +6175,22 @@ calls there, so those two read 24 B over the entry depth.
 `infers` and `last` are read in separate critical sections, so on a running
 stream the two can be one frame apart (issue #118).
 
+**Only a stream's publish the record took is counted** (issue #164, the one
+tally of all three boards: `nn_decode_tally_of()` in `svc/nn/nn_decode_count.c`,
+walked by `shell/test/test_nn_decode_count.c`).  A decode that answered a count
+(0 included) is an inference; a refused one counts in `model_errors`
+(`BF_ERR_MODEL`) or `decoder_errors` (any other negative) and in `errors`,
+never in `infers` (issue #138); a publish the generation rule dropped -- a stop or a re-attach
+landing during the inference -- counts in nothing, and leaves `last`, the
+latency and the worker profile as the last counted frame left them; and a
+`nn run` counts nothing in the worker's counters -- not its publish, not an
+invoke failure, not a lease timeout (it reports each as its own ending; this
+board always did).  The producer's invariant errors are counted in `errors`
+whatever the run kind.  Until #164 this board
+counted every decode whether or not the record took it, so a stream whose one
+publish a stop refused could say `infers 1` beside `last : nothing decoded yet`
+-- the case f746g-disco fixed in #159 Step 4b-iii (#122 P18).
+
 Each thread shows `depth/stack`, a high-water since boot.  `--` is a thread the
 slot runs on that nothing has observed yet; `!` in front of a thread means the
 slot was seen on a thread `nn_plugin_stack.h` does not list, i.e. the table is

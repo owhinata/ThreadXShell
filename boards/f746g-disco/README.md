@@ -1055,11 +1055,18 @@ already running`.
 > as on grove-vision-ai-v2 and wio-lite-ai): `infers` counts the results a
 > reader can use, so with decoder faults `in - skipped` equals `infers` plus
 > the faults. Until #138 it counted in both, because it ran; before step 6c
-> neither was counted. A `nn run` counts no decode (it reports its own
-> result).
+> neither was counted. A `nn run` counts nothing in the worker's counters:
+> not its publish, not an invoke failure, not a lease timeout (it reports each
+> as its own ending). The producer's invariant errors (a band of the wrong
+> height, no input tensor, a raced hand-over) are counted in `errors` whatever
+> the run kind. Until issue #164 a `nn run`'s publish counted in `infers` --
+> even a refused decode -- and its invoke failure or lease timeout in `errors`,
+> so the `nn stream stats` after a `nn run` said `infers 1`; since #164 the
+> tally (`nn_decode_tally_of()`) is one rule for all three boards.
 >
 > **Only what the record took is counted** (issue #159 Step 4b-iii, #122 P18,
-> `nn_decode_tally_of()`), as on wio-lite-ai: a publish the generation rule
+> `nn_decode_tally_of()`), as on wio-lite-ai and (since issue #164)
+> grove-vision-ai-v2: a publish the generation rule
 > dropped -- a stop or a re-attach landing during the inference -- counts in
 > nothing.  Until then the resident path counted the inference whether or not
 > the record took it, so a stream whose one publish a stop refused said `infers

@@ -857,7 +857,8 @@ set(NN_SOURCES "${CMAKE_SOURCE_DIR}/svc/nn/nn.c"   # the dispatcher (shared, #16
                # shell/test/test_nn_core_model.c
                "${CMAKE_SOURCE_DIR}/svc/nn/nn_core_model.c"
                # how a decode's answer is counted (issue #130 step 6c): a pure
-               # table shared with f746g-disco since issue #163, walked by
+               # table shared with f746g-disco since issue #163 (and with
+               # grove-vision-ai-v2 since issue #164), walked by
                # shell/test/test_nn_decode_count.c
                "${CMAKE_SOURCE_DIR}/svc/nn/nn_decode_count.c")
 # Which buffers the cacheable-carve-out gate must find in the image depends on which

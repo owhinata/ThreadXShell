@@ -1153,7 +1153,11 @@ camera res | format | fps | set   (this board's own)
   while a stream runs or is held; while it runs, `camera capture` and `camera
   stream start` from any console are refused as busy, `nn stream start` / `nn
   run` are refused, and afterwards `save` / `send` answer `no captured frame`
-  until the next capture.
+  until the next capture.  The refusal names what clears it: `nn stream stop`
+  if nn holds the camera, then `camera stream stop` -- nn's stop leaves the
+  camera running for the operator (issue #142's `manual` holder, which the
+  GUIX camera screen also opens at boot), so `nn stream stop` alone never
+  clears it (issue #175).
 - **`sdram test` also claims `.sdram.ai` from nn and skips live Ethernet state**
   (issue #152).  The NN arena and model slots live in
   `.sdram.ai` (bank 3), owned by `port/nn`, so the test takes

@@ -210,8 +210,9 @@ static int cmd_sdram_test(struct cli_instance *sh, int argc, char **argv)
 	   patterns.  Released on every exit from here on. */
 	if (camera_scratch_claim() != 0) {
 		cli_error(sh, "sdram: the camera is streaming into .sdram, or "
-		              "another sdram test holds it; run 'camera stream "
-		              "stop' / 'nn stream stop' first\r\n");
+		              "another sdram test holds it; 'nn stream stop' if nn "
+		              "holds it, then 'camera stream stop' (nn's stop leaves "
+		              "the camera running for the operator)\r\n");
 		return 1;
 	}
 

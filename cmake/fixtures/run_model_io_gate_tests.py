@@ -49,6 +49,32 @@ NN_TFLM_MAX_TENSOR_RANK (6):
                                      the walk reads lengths before elements, so a
                                      regression to element-first fails on time
 
+And, on verify_vela_model only (--style vela), Grove's payload scan (issue #179,
+svc/nn/ethosu/npu_model_scan.cc), which charges each operator's payload bytes
+against the file's length before walking it and refuses -1 as an ethos-u
+operator's input after 0.  Its refusal is NN_MODEL_ERR_PAYLOAD with the scan's own
+sentence, checked here by sentence: the vela gate already prints
+NN_MODEL_ERR_PAYLOAD for the ADD fixtures above (a builtin operator), so the code
+is not in CODES.  The controls pass the scan and are refused later, for having no
+OfflineMemoryAllocation (they are not Vela output); what is asserted is the scan's
+ok line.
+
+  pl_share2_eq_len      control: two entries sharing a payload, sum == length
+  pl_share2_len_minus1  the same one byte shorter              -> the sum sentence
+  pl_share_4000         4000 entries sharing a 400 KB stream   -> the sum sentence
+  pl_index_1300         1300 buffer indices naming one Buffer  -> the sum sentence
+                        (both within WITNESS_SECONDS: walked per entry they took
+                        0.42 s / 0.14 s)
+  pl_single_whole       control: one payload, 99.9 % of the file
+  pl_in1_neg1           input 1 == -1                          -> the -1 sentence
+  pl_in1_ok             control: input 1 a real tensor
+  pl_in_65              65 inputs                              -> the length sentence
+                        (judged by the scan before its -1 check; the walk would
+                        say FORMAT, so the order below matters)
+
+Every pl_ case runs with --board-order (the scan before the walk, the board's
+order), and a refusal is matched as the gate's whole FAIL line.
+
 And the depth half of the header's claim: schema_table_depth.py runs on the
 schema.fbs the gate was built from (the first -I directory holding one, else the
 repo's lib/tflite-micro, the tree a tflm build generates from) and fails on a
@@ -133,6 +159,34 @@ CASES = [
     ("t_shape_65000_shared.tflite", TENSOR),
 ]
 
+# Grove's payload scan (issue #179): vela style only, judged by the scan's sentence.
+PAYLOAD = "NN_MODEL_ERR_PAYLOAD"
+PL_OK = "the firmware's payload scan accepts every operator"
+# The scan's whole sentences (svc/nn/ethosu/npu_model_scan.cc), matched as the
+# gate's whole FAIL line, so a reworded tail is a failure here too.
+PL_SUM = ("the operators' payloads add up to more bytes than the model, so a "
+          "command stream is shared or overlaps")
+PL_NEG = ("an ethos-u operator names no tensor (-1) for an input after the command "
+          "stream, which its Eval() reads unchecked")
+PL_LEN = ("an ethos-u operator lists more inputs than the firmware's operator walk "
+          "allows")
+PL_REASONS = (PL_SUM, PL_NEG, PL_LEN)
+PL_FAIL = "  FAIL   the firmware would refuse this model (NN_MODEL_ERR_PAYLOAD): "
+# Run with the board's order: the scan before the graph walk (nn_ethosu.cc), so the
+# first refusal is the one the board gives -- pl_in_65 would otherwise be the walk's.
+PL_ARGS = ["--board-order"]
+PL_CASES = [
+    # (file, expected sentence or None for a control that passes the scan)
+    ("pl_share2_eq_len.tflite", None),
+    ("pl_share2_len_minus1.tflite", PL_SUM),
+    ("pl_share_4000.tflite", PL_SUM),
+    ("pl_index_1300.tflite", PL_SUM),
+    ("pl_single_whole.tflite", None),
+    ("pl_in1_neg1.tflite", PL_NEG),
+    ("pl_in1_ok.tflite", None),
+    ("pl_in_65.tflite", PL_LEN),
+]
+
 # The wall-time ceiling on the two "_shared" witnesses: the fastest of
 # WITNESS_RUNS gate runs (the file read and the verifier included), so one run
 # slowed by a loaded host does not fail it.  Length-first they take 1..5 ms on the
@@ -140,7 +194,8 @@ CASES = [
 # loop the host compiler vectorizes can stay under any ceiling (measured: the
 # shape witness read element-first stayed ~5 ms), so the time is a backstop for
 # the order; the verdicts above are the rule.
-WITNESSES = ("op_in_65000_shared.tflite", "t_shape_65000_shared.tflite")
+WITNESSES = ("op_in_65000_shared.tflite", "t_shape_65000_shared.tflite",
+             "pl_share_4000.tflite", "pl_index_1300.tflite")
 WITNESS_SECONDS = 0.1
 WITNESS_RUNS = 3
 
@@ -237,16 +292,30 @@ def main():
                         "-o", gen], check=True)
         subprocess.run([gen, tmp], check=True)
 
-        for name, want in CASES:
+        cases = CASES + (PL_CASES if args.style == "vela" else [])
+        for name, want in cases:
             took = None
             for _ in range(WITNESS_RUNS if name in WITNESSES else 1):
                 t0 = time.monotonic()
-                p = subprocess.run([gate_path, os.path.join(tmp, name)],
+                extra = PL_ARGS if name.startswith("pl_") else []
+                p = subprocess.run([gate_path, os.path.join(tmp, name), *extra],
                                    capture_output=True, text=True)
                 dt = time.monotonic() - t0
                 took = dt if took is None else min(took, dt)
             text = p.stdout + p.stderr
-            if want is None:
+            if name.startswith("pl_"):
+                if want is None:
+                    ok = PL_OK in text and PAYLOAD not in text \
+                        and not any(c in text for c in CODES)
+                    why = "the payload scan's ok line, no NN_MODEL_ERR_PAYLOAD"
+                else:
+                    lines = p.stdout.splitlines()
+                    ok = p.returncode == 1 and (PL_FAIL + want) in lines \
+                        and not any(x in text for x in PL_REASONS if x != want) \
+                        and PL_OK not in text \
+                        and not any(c in text for c in CODES)
+                    why = f"rc 1 with the whole line {PAYLOAD}: \"{want}\""
+            elif want is None:
                 ok = OK_LINE[args.style] in text \
                     and not any(c in text for c in CODES)
                 if args.style == "tflite":
@@ -278,7 +347,8 @@ def main():
 
     if failures:
         sys.exit(f"run_model_io_gate_tests: {failures} case(s) failed for {gate_path}")
-    print(f"run_model_io_gate_tests: OK ({len(CASES)} cases + schema depth, {gate_path})")
+    n = len(CASES) + (len(PL_CASES) if args.style == "vela" else 0)
+    print(f"run_model_io_gate_tests: OK ({n} cases + schema depth, {gate_path})")
 
 
 if __name__ == "__main__":

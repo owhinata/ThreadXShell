@@ -121,7 +121,9 @@ enum nn_dtype {
  *   _PAYLOAD  the Ethos-U operator's driver payload is not exactly one
  *             COMMAND_STREAM action, as the last action -- the shape the driver can
  *             launch without being able to abandon the launch with the arena still
- *             owned by the NPU (svc/nn/ethosu/npu_payload.h).
+ *             owned by the NPU (svc/nn/ethosu/npu_payload.h) -- or the payloads add
+ *             up to more than the model's length, or an input after 0 is -1
+ *             (svc/nn/ethosu/npu_model_scan.h, issue #179).
  *
  * nn_model_strerror() does not word these: the backend that returns them supplies
  * the sentence (svc/nn/ethosu/) and hands every other code to nn_model_strerror().

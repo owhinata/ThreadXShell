@@ -202,8 +202,8 @@ pinned schemas; `cmake/fixtures/model_io/schema_table_depth.py` reruns it), so
 16 is the guard for a future cycle; the table count bounds the verifier's own
 work (visits, which shared sub-tables multiply) and, through the walk above, the
 load's shape and list reads.  wio-lite-ai runs no verifier, so there only the file's length bounds the
-entries.  Out of scope by decision: grove-vision-ai-v2's payload walk per operator
-entry (#179) and the per-channel quantization copy (#180).  Neither keeps storage of its own; the board supplies everything
+entries.  grove-vision-ai-v2's payload walk per operator entry is bounded by its own
+scan (`ethosu/npu_model_scan`, #179); out of scope by decision: the per-channel quantization copy (#180).  Neither keeps storage of its own; the board supplies everything
 that is a fact about its memory or its core, bound at link time (the callers of
 `nn.h` pass no context to carry it):
 
@@ -252,7 +252,7 @@ that board builds.
 | `nn_ethosu_state.h` | The state type and the board facts (name prefix, the read window). Needs `NN_TFLM_OPS_ETHOSU_PROFILE`: the resolver's size is part of the type. |
 | `nn_ethosu_mem.h` | The arena declaration, sized by the board's `NN_ETHOSU_ARENA_KB`. |
 | `npu_verify.h` | Grove's entry to the bounded FlatBuffer verifier: its length floor, then `nn_tflm_verify_model_buffer()` from `nn/tflm/nn_tflm_model_check.h`, where the limits (depth, table count) are declared for every board (issue #175); the host gate `verify_vela_model` compiles the same header. |
-| `npu_model_scan` (`.cc` / `.h`) | Which bytes the driver will parse (the `ethos-u` operator's input tensor 0) and whether the model may be opened at all: one subgraph, every operator `ethos-u`, no variable payload tensor. Shared with the host gate. |
+| `npu_model_scan` (`.cc` / `.h`) | Which bytes the driver will parse (the `ethos-u` operator's input tensor 0) and whether the model may be opened at all: one subgraph, every operator `ethos-u`, no variable payload tensor, no `-1` among an `ethos-u` operator's inputs after 0 (its `Eval()` reads them unchecked), and the payloads adding up to at most the model's declared length -- each charged before it is walked, so the scan reads at most length / 4 words however many operator entries share one stream (#179). Shared with the host gate. |
 | `npu_payload` (`.c` / `.h`) | Whether that payload is exactly one COMMAND_STREAM action, as the last action. Plain C over bytes, so the host test compiles it directly. |
 | `npu_cache` (`.c` / `.h`) | The arena ownership protocol and the driver's four cache hooks (`ethosu_flush_dcache`, `ethosu_invalidate_dcache`, `ethosu_inference_begin`, `ethosu_inference_end`), strong definitions that override the driver's weak ones at link time: the whole arena cleaned before launch and invalidated once DONE and OK are both seen, a checked reset first on any other ending, fail-stop otherwise. Its state (`npu_cache_board_state`), the cache-line primitive (`npu_cache_clean()` / `npu_cache_invalidate()`) and the fail-stop are the board's (`port/nn/npu/npu_cache_board.c`). |
 

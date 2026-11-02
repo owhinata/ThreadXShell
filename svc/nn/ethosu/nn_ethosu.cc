@@ -151,8 +151,9 @@ int build_interp(const void *data, uint32_t len)
 
 	/* Before anything can be launched: prove no driver action follows the command
 	 * stream (the walk is shared with the host gate, scripts/verify_vela_model.cc,
-	 * which reaches this same verdict on the same bytes). */
-	if (npu_model_payload_refusal(model) != nullptr)
+	 * which reaches this same verdict on the same bytes).  The payloads are
+	 * charged against the declared length, so the walk is O(len) (issue #179). */
+	if (npu_model_payload_refusal(model, (size_t)len) != nullptr)
 		return NN_MODEL_ERR_PAYLOAD;
 
 	/* The graph and the I/O a descriptor can describe, on the model and before

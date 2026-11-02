@@ -67,7 +67,28 @@ const uint8_t *npu_model_command_stream(const tflite::Model *model,
  * Rejecting a non-ethos-u operator is not redundant with the one-operator
  * resolver: AllocateTensors would refuse it too, but this runs first and says
  * which model is wrong rather than which operator is missing.
+ *
+ * [!] THE PAYLOADS ADD UP TO AT MOST @p model_bytes (issue #179).  Each
+ * operator entry's payload is charged against the model's declared length
+ * BEFORE it is walked, and the first one that would take the sum past it is
+ * refused.  Operator entries may name one Operator table and tensors may name
+ * one Buffer table -- the verifier accepts both -- so without the charge a
+ * file within its 4,096 visits could have the walk read one large stream
+ * thousands of times.  The bound is structural, not measured: an honest
+ * model's payloads are disjoint runs of its own bytes.  So the whole scan reads
+ * at most model_bytes / 4 payload words, and the driver's parse of every
+ * payload at each Invoke() is bounded the same way.
+ *
+ * [!] AND NO INPUT AFTER 0 IS -1.  The ethos-u kernel's Eval() passes inputs
+ * 1..n to GetEvalTensor() unchecked; the shared graph walk lets -1 through
+ * (TFLM's optional tensor), so it is refused here.  The list's length is judged
+ * first (NN_TFLM_MAX_OP_TENSORS, the walk's limit), because the firmware runs
+ * this before that walk.
+ *
+ * @param model_bytes  the length the model was verified with (the declared
+ *                     length, never "the rest of the window")
  */
-const char *npu_model_payload_refusal(const tflite::Model *model);
+const char *npu_model_payload_refusal(const tflite::Model *model,
+                                      size_t model_bytes);
 
 #endif /* NPU_MODEL_SCAN_H */

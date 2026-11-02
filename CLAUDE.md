@@ -297,7 +297,7 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
   join は `CAM_ST_LOST`（`FAULTED` で代用しない）で、detach も teardown も回収路も無い。**`cmds/` は
   producer が消費するデータパス設定を書かない**（境界は**消費のされ方**。毎フレーム読む物は可）。
 - **op resolver は 1 個のまま**（CMSIS-NN 排除 / 全面 offload でないモデルを落とす）。**境界の型変換は
-  ファイル側で剥がす。ペイロード検査も緩めない**（`COMMAND_STREAM` が 1 個かつ最後 / 入力テンソル 0 / `is_variable()` 拒否）。
+  ファイル側で剥がす。ペイロード検査も緩めない**（`COMMAND_STREAM` が 1 個かつ最後 / 入力テンソル 0 / `is_variable()` 拒否 / payload の総和 <= モデル長を歩く前に課金・入力 1..n の -1 拒否、#179）。
 - **Ethos-U backend の reload（`svc/nn/ethosu/nn_ethosu.cc`）は長さを取り `GetModel()` の前に境界付き verifier を通す**（窓 → 長さ → 整列 →
   identifier → verifier → 走査。**長さには下限も要る**）。**limits と load の walk は `nn_tflm_model_check.h`（全ボード共通。walk は長さを要素より先に見て内部テンソルの値は読まない、#178）、I/O 規則は `nn_ethosu_io.h` の 1 箇所でホストと共有。**
 - **`nn model load --name` はリースを切らさない**（`npu_hw_init()` 先 → 走査 → CRC → `nn_model_reload()` → plugin、残らない失敗は backend の release の後に `npu_hw_deinit()`）。

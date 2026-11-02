@@ -247,7 +247,7 @@ board README が正。
   [!] Ethos-U backend の reload（`svc/nn/ethosu/nn_ethosu.cc`）は長さを取り `GetModel()` の前に境界付き verifier を通す**（**窓 → 長さ →
   整列 → identifier → verifier → 走査**。**長さには下限も要り生アドレス形にも必須**、**limits と load の walk は全ボード共通の `nn_tflm_model_check.h`（walk は長さを要素より先に見て内部テンソルの値は読まない、#178）、
   I/O 規則は `nn_ethosu_io.h` の 1 箇所でホストゲートと共有**）。**ペイロード検査も緩めない**（`COMMAND_STREAM` が 1 個かつ
-  最後 / 対象は**入力テンソル 0** / `is_variable()` は拒否）。
+  最後 / 対象は**入力テンソル 0** / `is_variable()` は拒否 / payload の総和 <= モデル長を歩く前に課金・入力 1..n の -1 拒否、#179）。
 - **[!] `nn model load --name` はリースを切らさない**（`npu_hw_init()` 先 → 走査 → CRC → `nn_model_reload()` → plugin、**残らない失敗は必ず backend の release の後に `npu_hw_deinit()`**）。
   候補は **VALID のみ・重複拒否・失敗理由は別々・読めなければ拒否。ホスト側の `verify_vela_model` を外さない**（**書込みの後**に走る。**C++ 不在は fail-closed**）。
 - **[!] gate の外から plugin に入るコンソール呼び出し（`nn thresh` / `nn dets`）は数に入ってから lease を取り、load/unload はその数が 0 でなければ BUSY**（数の判定は claim と同じクリティカルセクション、`nn_param_calls.c`。数は待たず、lease は有界に待つ）。

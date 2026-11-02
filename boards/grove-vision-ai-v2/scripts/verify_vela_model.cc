@@ -340,10 +340,13 @@ int main(int argc, char **argv)
 {
 	const char *path = nullptr;
 	bool blazeface = false;
+	bool board_order = false;
 
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--blazeface") == 0)
 			blazeface = true;
+		else if (strcmp(argv[i], "--board-order") == 0)
+			board_order = true;
 		else if (path == nullptr)
 			path = argv[i];
 		else
@@ -351,14 +354,19 @@ int main(int argc, char **argv)
 	}
 	if (path == nullptr) {
 		fprintf(stderr,
-		        "usage: verify_vela_model <model_vela.tflite> [--blazeface]\n"
+		        "usage: verify_vela_model <model_vela.tflite> [--blazeface] "
+		        "[--board-order]\n"
 		        "  Checks that this firmware can run the model: one subgraph,\n"
 		        "  ethos-u operators only, a payload the firmware will accept, int8\n"
 		        "  I/O, an offline memory plan, and a layout that fits the arena\n"
 		        "  the board reserves.  --blazeface also pins the four output\n"
 		        "  shapes the decoder looks for -- it ADDS checks rather than\n"
 		        "  naming a model, so without it a detector still passes, and\n"
-		        "  says so.\n");
+		        "  says so.\n"
+		        "  --board-order runs the firmware's payload scan before the graph\n"
+		        "  walk, the board's order, so the first refusal printed is the\n"
+		        "  one the board gives.  By default the walk is reported first,\n"
+		        "  because this tool exists to diagnose.\n");
 		return 2;
 	}
 
@@ -397,6 +405,41 @@ int main(int argc, char **argv)
 	printf("  ok     flatbuffer verifies within the firmware's limits "
 	       "(depth %u, %u tables), schema version %d\n",
 	       NN_TFLM_VERIFY_MAX_DEPTH, NN_TFLM_VERIFY_MAX_TABLES, TFLITE_SCHEMA_VERSION);
+
+	/*
+	 * [!] THE VERDICT IS THE FIRMWARE'S, NOT A COPY OF IT.
+	 * npu_model_payload_refusal() is the function the firmware's backend calls, compiled
+	 * into this tool.  It reaches the same answer on the same bytes by
+	 * construction, which a reimplementation here could not promise -- and the
+	 * half that is easy to get wrong is not the walk but WHICH BYTES, since
+	 * the payload is input tensor 0 and not the operator's custom_options.
+	 *
+	 * [!] A REFUSAL STOPS THE RUN, as it stops the firmware's load (issue #179).
+	 * The report after it walks every operator's payload again, so going on past
+	 * a refusal would hand it the very shared-stream model the scan's length
+	 * charge refuses, and the gate would take as long as the board used to.  It
+	 * is passed the file's length, the length the board is given.
+	 *
+	 * Where it runs: by default after the graph walk and the operator-code
+	 * report (this tool diagnoses, and the walk proves the lists it reads index
+	 * real tensors); with --board-order right here, after the schema version and
+	 * before the walk -- nn_ethosu.cc's order, so the first refusal is the board's.
+	 */
+	auto payload_scan = [&]() -> bool {
+		const char *refusal = npu_model_payload_refusal(model, buf.size());
+
+		if (refusal != nullptr) {
+			fail("the firmware would refuse this model (NN_MODEL_ERR_PAYLOAD): %s\n",
+			     refusal);
+			printf("RESULT   : REJECT\n");
+			return false;
+		}
+		printf("  ok     the firmware's payload scan accepts every operator\n");
+		return true;
+	};
+
+	if (board_order && !payload_scan())
+		return 1;
 
 	/* The firmware runs this after its payload walk and before its resolver; it
 	 * runs here first because everything below follows subgraph 0's I/O lists,
@@ -490,8 +533,14 @@ int main(int argc, char **argv)
 		const auto *custom = code->custom_code();
 
 		if (custom == nullptr || strcmp(custom->c_str(), "ethos-u") != 0) {
-			fail("operator %u is custom \"%s\", not \"ethos-u\"\n", n,
-			     custom != nullptr ? custom->c_str() : "<unnamed>");
+			/* The name is printed to at most 64 bytes: thousands of entries
+			 * may name one operator code whose name is most of the file
+			 * (issue #179), and this line is printed per entry. */
+			const bool cut = custom != nullptr && custom->size() > 64u;
+
+			fail("operator %u is custom \"%.64s%s\", not \"ethos-u\"\n", n,
+			     custom != nullptr ? custom->c_str() : "<unnamed>",
+			     cut ? "..." : "");
 			continue;
 		}
 		ethosu_ops++;
@@ -502,26 +551,13 @@ int main(int argc, char **argv)
 
 	/* --- the payload the firmware will walk ------------------------------ */
 
-	/*
-	 * [!] THE VERDICT IS THE FIRMWARE'S, NOT A COPY OF IT.
-	 * npu_model_payload_refusal() is the function the firmware's backend calls, compiled
-	 * into this tool.  It reaches the same answer on the same bytes by
-	 * construction, which a reimplementation here could not promise -- and the
-	 * half that is easy to get wrong is not the walk but WHICH BYTES, since
-	 * the payload is input tensor 0 and not the operator's custom_options.
-	 */
-	{
-		const char *refusal = npu_model_payload_refusal(model);
-
-		if (refusal != nullptr)
-			fail("the firmware would refuse this model (NN_MODEL_ERR_PAYLOAD): %s\n",
-			     refusal);
-		else
-			printf("  ok     the firmware's payload scan accepts every operator\n");
-	}
+	/* Already run under --board-order (and a refusal returned there). */
+	if (!board_order && !payload_scan())
+		return 1;
 
 	/* Reporting only, and it uses the same locator, so what is printed is what
-	 * the driver will be handed. */
+	 * the driver will be handed.  Reached only when the scan accepted, so the
+	 * payloads add up to at most the file's length and so does this walk. */
 	for (uint32_t n = 0; n < ops->size(); n++) {
 		const auto *op = ops->Get(n);
 		size_t bytes = 0;

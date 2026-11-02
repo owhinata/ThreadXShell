@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "tensorflow/lite/schema/schema_utils.h"   /* GetBuiltinCode() */
+#include "nn_tflm_model_check.h"   /* NN_TFLM_MAX_OP_TENSORS */
 
 const uint8_t *npu_model_command_stream(const tflite::Model *model,
                                         const tflite::SubGraph *sub,
@@ -98,8 +99,12 @@ const uint8_t *npu_model_command_stream(const tflite::Model *model,
 	return data->data();
 }
 
-const char *npu_model_payload_refusal(const tflite::Model *model)
+const char *npu_model_payload_refusal(const tflite::Model *model,
+                                      size_t model_bytes)
 {
+	/* Payload bytes charged so far, against model_bytes (issue #179, the header). */
+	size_t charged = 0;
+
 	const auto *subgraphs = model->subgraphs();
 
 	if (subgraphs == nullptr || subgraphs->size() != 1u)
@@ -147,6 +152,41 @@ const char *npu_model_payload_refusal(const tflite::Model *model)
 
 		if (data == nullptr)
 			return why;
+
+		/* [!] LENGTH BEFORE ELEMENTS, then no -1 after input 0.  The kernel's
+		 * Eval() hands every input after 0 to GetEvalTensor() unchecked (an
+		 * address for the driver's base pointers), so -1 -- TFLM's optional
+		 * tensor, which the shared walk lets through because other kernels take
+		 * it -- reads eval_tensors[-1].  Vela never emits it here.  This runs
+		 * before the walk that bounds the list (nn_tflm_model_io_check()), so
+		 * the list's length is judged here first: otherwise one shared operator
+		 * with 65,000 inputs named by 4,000 entries is 2.6e8 reads. */
+		const auto *inputs = op->inputs();   /* non-empty: located above */
+
+		if (inputs->size() > NN_TFLM_MAX_OP_TENSORS)
+			return "an ethos-u operator lists more inputs than the firmware's "
+			       "operator walk allows";
+		for (uint32_t i = 1u; i < inputs->size(); i++) {
+			if (inputs->Get(i) < 0)
+				return "an ethos-u operator names no tensor (-1) for an input "
+				       "after the command stream, which its Eval() reads "
+				       "unchecked";
+		}
+
+		/* [!] CHARGED BEFORE IT IS WALKED (issue #179).  Operator entries may
+		 * name one Operator table, and distinct tensors may name one Buffer
+		 * table; the verifier accepts both, so without this 4,000 entries
+		 * naming one 400 KB stream are 4,000 walks of it.  An honest model's
+		 * payloads are disjoint byte runs inside the file, so their sum is at
+		 * most the file's length: a STRUCTURAL bound, not a measured knob.
+		 * Refusing the payload that would take the sum past model_bytes, before
+		 * walking it, keeps the whole scan at <= model_bytes / 4 words -- and
+		 * the driver's own parse at every Invoke() to the same. */
+		if (bytes > model_bytes - charged)
+			return "the operators' payloads add up to more bytes than the "
+			       "model, so a command stream is shared or overlaps";
+		charged += bytes;
+
 		if (!npu_payload_is_single_final_command_stream(data, bytes))
 			return "the payload is not exactly one COMMAND_STREAM as its last "
 			       "action, so a launch could be abandoned with the arena "

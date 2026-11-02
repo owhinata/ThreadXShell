@@ -81,6 +81,36 @@
  *                              shape has 65,000 dimensions (all 1)  -> TENSOR
  *
  * Read element-first, each costs 2.6e8 reads; read length-first, one compare.
+ *
+ * And Grove's payload scan (issue #179, svc/nn/ethosu/npu_model_scan.cc), which
+ * only verify_vela_model runs: one tensor [1, 4] as graph I/O, the CUSTOM
+ * "ethos-u" operator code, and UINT8 1-D payload tensors over a 16-byte aligned
+ * constant buffer that npu_payload.c accepts (COP1, NOP actions, one final
+ * COMMAND_STREAM of length 0).  The operator's inputs are {payload, t0} and its
+ * outputs {t0}.  The file is padded at its tail to an exact length where the
+ * name says so (the verifier accepts trailing bytes):
+ *
+ *   pl_share2_eq_len.tflite     control: two operator entries naming ONE
+ *                               operator over one 4,096 B payload, file length
+ *                               exactly 2 x 4,096 -- the sum may equal it
+ *   pl_share2_len_minus1.tflite the same, file length 2 x 4,096 - 1 -> PAYLOAD
+ *   pl_share_4000.tflite        4,000 entries naming one operator over one
+ *                               400,000 B payload of NOPs        -> PAYLOAD
+ *   pl_index_1300.tflite        1,300 operators, each with its own tensor and
+ *                               buffer INDEX, every buffers[] entry naming ONE
+ *                               Buffer table of 380,000 B         -> PAYLOAD
+ *   pl_single_whole.tflite      control: one operator, a payload 99.9 % of the
+ *                               file
+ *   pl_in1_neg1.tflite          inputs {payload, -1}             -> PAYLOAD
+ *   pl_in1_ok.tflite            control: inputs {payload, t0}
+ *   pl_in_65.tflite             inputs {payload, t0 x 64}, 65 in all: the scan
+ *                               judges the length before the -1 check, because
+ *                               the board runs it before the walk -> PAYLOAD
+ *
+ * The two "pl_share_4000" / "pl_index_1300" are the witnesses: walked once per
+ * entry they cost 4e8 / 1.2e8 payload words; charged before the walk the second
+ * entry is refused.
+ *
  * Every file stays under 512 KB (checked here) and within the 4096 visits.
  *
  * Usage: gen_model_io_fixtures <out-dir>
@@ -243,6 +273,122 @@ bool write_model(const std::string &dir, const spec &sp)
 	return (fclose(f) == 0) && ok;
 }
 
+/* issue #179: an ethos-u model for Grove's payload scan (the list at the top). */
+struct pl_spec {
+	const char *file;
+	uint32_t    entries;    /* operator entries */
+	bool        distinct;   /* each entry its own operator, tensor and buffer
+	                         * index; every buffers[] entry names ONE table */
+	uint32_t    payload;    /* payload bytes, a multiple of 4, >= 8 */
+	int32_t     in1;        /* the operator's input 1 */
+	uint32_t    length;     /* the file's exact length (0: as built) */
+	uint32_t    n_inputs;   /* inputs in all, the rest t0 (0: just the two) */
+};
+
+/* The verifier's table visits: Model, SubGraph, the I/O tensor, the payload
+ * tensors, every operator entry, the OperatorCode, the empty Buffer 0 and every
+ * payload buffers[] entry. */
+uint32_t tables_of(const pl_spec &sp)
+{
+	const uint32_t k = sp.distinct ? sp.entries : 1u;
+
+	return 2u + 1u + k + sp.entries + 1u + 1u + k;
+}
+
+bool write_payload_model(const std::string &dir, const pl_spec &sp)
+{
+	flatbuffers::DefaultAllocator alloc;   /* see write_model() */
+	flatbuffers::FlatBufferBuilder fbb(1024, &alloc);
+
+	/* COP1, NOPs, then one COMMAND_STREAM of length 0 as the last word. */
+	std::vector<uint32_t> w(sp.payload / 4u, 5u /* NOP */);
+
+	w.front() = 0x31504F43u;   /* "COP1" */
+	w.back()  = 2u;            /* COMMAND_STREAM, length 0 */
+	fbb.ForceVectorAlignment(sp.payload, 1, 16);
+	const auto data = fbb.CreateVector(reinterpret_cast<const uint8_t *>(w.data()),
+	                                   sp.payload);
+	const auto payload_buf = tflite::CreateBuffer(fbb, data);
+	const auto empty = tflite::CreateBuffer(fbb);
+	const uint32_t k = sp.distinct ? sp.entries : 1u;
+	std::vector<flatbuffers::Offset<tflite::Tensor>> tv;
+
+	tv.push_back(tflite::CreateTensor(fbb, fbb.CreateVector(std::vector<int32_t>{ 1, 4 }),
+	                                  tflite::TensorType_INT8, 0, fbb.CreateString("io")));
+	const auto pshape = fbb.CreateVector(std::vector<int32_t>{ (int32_t)sp.payload });
+
+	for (uint32_t i = 0; i < k; i++)
+		tv.push_back(tflite::CreateTensor(fbb, pshape, tflite::TensorType_UINT8,
+		                                  1u + i /* buffer index */));
+
+	const auto outs = fbb.CreateVector(std::vector<int32_t>{ 0 });
+	const auto marker = fbb.CreateVector(std::vector<uint8_t>{ 0 });
+	auto op_for = [&](int32_t payload_tensor) {
+		std::vector<int32_t> in{ payload_tensor, sp.in1 };
+
+		while (in.size() < sp.n_inputs)
+			in.push_back(0);
+		return tflite::CreateOperator(fbb, 0, fbb.CreateVector(in), outs,
+		                              tflite::BuiltinOptions_NONE, 0, marker);
+	};
+	std::vector<flatbuffers::Offset<tflite::Operator>> ov;
+
+	if (sp.distinct) {
+		for (uint32_t i = 0; i < sp.entries; i++)
+			ov.push_back(op_for((int32_t)(1u + i)));
+	} else {
+		const auto op = op_for(1);
+
+		for (uint32_t i = 0; i < sp.entries; i++)
+			ov.push_back(op);
+	}
+
+	const auto sg = tflite::CreateSubGraph(
+		fbb, fbb.CreateVector(tv), fbb.CreateVector(std::vector<int32_t>{ 0 }),
+		fbb.CreateVector(std::vector<int32_t>{ 0 }), fbb.CreateVector(ov),
+		fbb.CreateString("main"));
+	std::vector<flatbuffers::Offset<tflite::SubGraph>> sgv{ sg };
+	std::vector<flatbuffers::Offset<tflite::OperatorCode>> cv{ tflite::CreateOperatorCode(
+		fbb, (int8_t)tflite::BuiltinOperator_CUSTOM, fbb.CreateString("ethos-u"), 1,
+		tflite::BuiltinOperator_CUSTOM) };
+	std::vector<flatbuffers::Offset<tflite::Buffer>> bv{ empty };
+
+	for (uint32_t i = 0; i < k; i++)
+		bv.push_back(payload_buf);   /* distinct: k indices, ONE Buffer table */
+	const auto model = tflite::CreateModel(fbb, TFLITE_SCHEMA_VERSION, fbb.CreateVector(cv),
+	                                       fbb.CreateVector(sgv),
+	                                       fbb.CreateString("issue #179 fixture"),
+	                                       fbb.CreateVector(bv));
+
+	tflite::FinishModelBuffer(fbb, model);
+
+	std::vector<uint8_t> file(fbb.GetBufferPointer(), fbb.GetBufferPointer() + fbb.GetSize());
+
+	if (sp.length != 0u) {
+		if (file.size() > sp.length) {
+			fprintf(stderr, "gen_model_io_fixtures: %s is %zu bytes, over the %u "
+			        "it is named for\n", sp.file, file.size(), (unsigned)sp.length);
+			return false;
+		}
+		file.resize(sp.length, 0u);
+	}
+	if (file.size() > 512u * 1024u) {
+		fprintf(stderr, "gen_model_io_fixtures: %s is %zu bytes, over 512 KB\n",
+		        sp.file, file.size());
+		return false;
+	}
+
+	const std::string path = dir + "/" + sp.file;
+	FILE *f = fopen(path.c_str(), "wb");
+
+	if (!f) {
+		fprintf(stderr, "gen_model_io_fixtures: cannot write %s\n", path.c_str());
+		return false;
+	}
+	const bool ok = fwrite(file.data(), 1, file.size(), f) == file.size();
+	return (fclose(f) == 0) && ok;
+}
+
 }  /* namespace */
 
 int main(int argc, char **argv)
@@ -344,6 +490,31 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		if (!write_model(argv[1], sp))
+			return 1;
+		printf("%s: %u table visits\n", sp.file, (unsigned)tables_of(sp));
+	}
+
+	/* issue #179: Grove's payload scan.  2 x 4,096 B leaves room for the rest of
+	 * the file inside one payload's length, so the exact lengths are reachable. */
+	const uint32_t p2 = 4096u;
+	const pl_spec pl_specs[] = {
+		{ "pl_share2_eq_len.tflite",     2u,    false, p2,       0, 2u * p2 },
+		{ "pl_share2_len_minus1.tflite", 2u,    false, p2,       0, 2u * p2 - 1u },
+		{ "pl_share_4000.tflite",        witness_entries, false, 400000u, 0, 0u },
+		{ "pl_index_1300.tflite",        1300u, true,  380000u,  0, 0u },
+		{ "pl_single_whole.tflite",      1u,    false, 399600u,  0, 400000u },
+		{ "pl_in1_neg1.tflite",          1u,    false, p2,       -1, 0u },
+		{ "pl_in1_ok.tflite",            1u,    false, p2,       0, 0u },
+		{ "pl_in_65.tflite",             1u,    false, p2,       0, 0u, opl + 1u },
+	};
+
+	for (const pl_spec &sp : pl_specs) {
+		if (tables_of(sp) > lim) {
+			fprintf(stderr, "gen_model_io_fixtures: %s needs %u table visits, over %u\n",
+			        sp.file, (unsigned)tables_of(sp), (unsigned)lim);
+			return 1;
+		}
+		if (!write_payload_model(argv[1], sp))
 			return 1;
 		printf("%s: %u table visits\n", sp.file, (unsigned)tables_of(sp));
 	}

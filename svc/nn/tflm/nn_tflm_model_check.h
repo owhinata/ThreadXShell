@@ -109,9 +109,9 @@
  * in two ways stays FORMAT rather than SHAPE.
  *
  * wio-lite-ai runs no verifier: there nothing bounds the number
- * of entries but the file, the trust described above.  (What this does not bound
- * is outside it by decision: grove-vision-ai-v2's payload walk per operator entry,
- * issue #179, and the per-channel quantization copy, issue #180.)
+ * of entries but the file, the trust described above.  (grove-vision-ai-v2's payload
+ * walk per operator entry is bounded by its own scan, issue #179; what this does not
+ * bound is outside it by decision: the per-channel quantization copy, issue #180.)
  *
  * THE VERIFIER (moved here from svc/nn/ethosu/npu_verify.h, which delegates to
  * it).  flatbuffers' defaults are depth 64 and a million tables; the limits here

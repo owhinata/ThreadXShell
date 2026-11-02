@@ -177,6 +177,15 @@ then `.rodata`, then the NOLOAD buffers, with `.plugin` still pinned at the top.
 | `arm-none-eabi-size` text | 328,700 | 328,980 (+280: branch veneers, alignment) |
 | `shell.img` | 507,904 B | 507,904 B (`check_flash_partitions` OK) |
 
+**Since then (measured 2026-11-02, the issue #179 build of
+`build/grove-vision-ai-v2`):** `.text_cold` is **15,216 B**
+@`0x3404D000..0x34050B70` and `.rodata` 79,784 B from `0x34050B70`; ITCM used
+240,640 / free 21,504 B (`check_placement_budget`).  Of the +944 B over the
+14,272 above, issue #175 added 112, #178 360 and #179 96 (each its commit's
+measurement); the remaining 376 B came with the load-path changes between
+2026-10-31 and #175 and are not itemised here.  The list below is the
+2026-10-31 inventory.
+
 **What is in it: 88 functions, 14,020 B** (the rest of the 14,272 B is
 alignment and 31 linker branch veneers back into ITCM; 4 veneers in ITCM lead
 into it -- a Thumb `BL` reaches only 16 MB, and SRAM is 0x2404D000 away):
@@ -187,7 +196,8 @@ into it -- a Thumb `BL` reaches only 16 MB, and SRAM is 0x2404D000 away):
 - the Ethos-U backend's build / reload / open / go-empty / interpreter teardown
   / model name / descriptor fill / strerror, 8 functions, 1,180 B;
 - the payload scan, `npu_model_command_stream` / `npu_model_payload_refusal` /
-  `npu_payload_is_single_final_command_stream`, 712 B;
+  `npu_payload_is_single_final_command_stream`, 712 B (808 B since issue #179's
+  length charge and `-1` refusal: `.text_cold` +96 B, `.rodata` +296 B, ITCM 0 B);
 - the shared dispatcher's `nn_model_open` / `nn_model_reload` /
   `nn_model_strerror`, 272 B.
 
@@ -2465,7 +2475,10 @@ without an inputs or outputs list, any operator list (inputs / outputs /
 intermediates) longer than 64 -- its length judged before any element is read --
 or naming a tensor that does not exist (`NN_MODEL_ERR_FORMAT`, -7; TFLM's
 planner indexes its records with these unchecked, and this board's ethos-u
-`Prepare()` looks at no more than `inputs->size() > 0`), and any tensor of rank
+`Prepare()` looks at no more than `inputs->size() > 0`, while its `Eval()` hands
+every input after 0 to `GetEvalTensor()` unchecked -- so the `-1` this walk
+allows, TFLM's optional tensor, would read `eval_tensors[-1]` there; the payload
+scan refuses it for an `ethos-u` operator, issue #179), and any tensor of rank
 above 6, TFLM's `RuntimeShape::kMaxSmallSize` (`NN_MODEL_ERR_TENSOR`, -4).  An
 internal tensor's dimension VALUES are still not read (Vela's reach 2.2 M).  The
 one exception to lengths-first: subgraph 0's two I/O lists are walked once, one
@@ -2477,9 +2490,9 @@ free 21,504 B, as before), `.text_cold` +360 B.  [!] Keeping ITCM at 0 needed on
 spelling: the generated `SubGraph::operators()`, called from the walk as well as
 from `SubGraph::Verify()`, was outlined into `.text` (+16 B ITCM), so the walk
 reads the field through the `Table::GetPointer<const void *>` instance this build
-already outlines (`nn_tflm_sg_operators()`).  Out of scope by decision: the
-payload walk's work per operator entry (#179) and the per-channel quantization
-copy (#180).
+already outlines (`nn_tflm_sg_operators()`).  The payload walk's work per
+operator entry is bounded since issue #179 (below, under the payload); out of
+scope by decision: the per-channel quantization copy (#180).
 
 ### The model is a blob, opened by name (#93, #49 Step 4a)
 
@@ -2636,9 +2649,11 @@ lands intact.  So the order is
 
 ```
 range -> length -> "TFL3" identifier -> flatbuffer verifier -> payload scan
+                                                    (each payload charged against the length)
 ```
 
-and the length is what makes the verifier a bounds check at all.  The raw form
+and the length is what makes the verifier a bounds check at all -- and, since
+issue #179, what bounds the payload scan's work.  The raw form
 takes one for the same reason: "the rest of the window" would satisfy the
 arithmetic and check nothing.  The length also has a FLOOR -- the identifier is
 read at offset 4, so a shorter declared length would have the identifier check
@@ -2720,7 +2735,10 @@ things it is not:
 
 `scripts/verify_vela_model.cc` checks what the board cannot: one subgraph, every
 operator on Ethos-U, int8 I/O, an offline plan, no unreachable tensors, an arena
-that fits, and for the detector the shapes the decoder looks for.  The device's
+that fits, and for the detector the shapes the decoder looks for.  By default it
+reports the graph walk before the payload scan, because the gate exists to
+diagnose; `--board-order` runs the scan first, as `nn_ethosu.cc` does, so the
+first refusal it prints is the one the board gives (issue #179).  The device's
 bounds check does not replace any of that -- and it runs AFTER the write, by
 which point a bad model has cost ~40 s of erase and transfer and a flash cycle
 of a part whose endurance is not documented (#89).
@@ -4420,6 +4438,37 @@ Two things about that check are easy to get wrong, and both were:
   has a serialized buffer*.  The driver would then parse arena bytes -- which
   another operator can write at run time -- while the check inspected the
   constant in flash.  Variable tensors are refused.
+
+**The payloads add up to at most the model (issue #179).**  The scan walks
+each operator entry's payload, and the verifier accepts many operator entries
+naming one Operator table, and many tensors naming one Buffer table through
+distinct buffer indices -- so a 416 KB file of 4,000 entries sharing one 400 KB
+stream of NOP actions was 4e8 action reads, all accepted (0.43 s on the host,
+seconds on the board by estimate, the console blocked; a 1,300-operator file
+with distinct buffer indices onto one Buffer, 1.1e8).  Deduplicating by buffer
+index loses to the second shape, by data pointer to overlapping vectors, and a
+cap on the operator count bounds the work only to a multiple of the length.
+What is done instead: each operator's payload bytes are charged against the
+declared length **before** that payload is walked, and the one that would take
+the sum past it is refused (`NN_MODEL_ERR_PAYLOAD`).  The bound is structural,
+not a measured margin -- an honest model's payloads are disjoint runs of its own
+bytes, so their sum cannot exceed the file -- and it makes the whole scan at most
+length / 4 words, and the driver's parse of every payload at each `Invoke()` the
+same.  Every SDK and pinned Vela model keeps its verdict and its refusal (none
+shares a payload; the largest sum is 0.13 x the file).  Sharing a payload
+between operators is not itself refused -- only a sum above the model's length
+is -- so a future Vela that shares a buffer still loads while that ratio stays
+below 1 (measured maximum 0.132).  `verify_vela_model` stops
+at this refusal like the board does, rather than going on into its per-operator
+report, which walks every payload again.
+
+**Nor is an input after the command stream `-1` (issue #179).**  The kernel's
+`Eval()` passes inputs 1..n to `GetEvalTensor()` unchecked, to fill the driver's
+base pointers, so TFLM's optional `-1` -- which the shared graph walk lets through
+for the kernels that take it -- would read `eval_tensors[-1]`.  Vela never emits it
+for this operator; the scan refuses it.  Because the board runs the scan before
+that walk, the inputs list's length is judged first against the walk's own limit
+(64), so the `-1` check is never a long read either.
 
 The arm is one-shot and a second one is fatal rather than counted: the driver
 runs `handle_command_stream()` once per command-stream action but waits once for

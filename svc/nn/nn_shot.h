@@ -154,6 +154,16 @@ int nn_shot_after_job(struct nn_shot *s, uint32_t run, enum nn_core_done what,
  */
 int nn_shot_failed(const struct nn_shot *s, enum nn_shot_reason *reason);
 
+/**
+ * The longest @ref nn_shot_says::text, in characters without the terminator.
+ * A board that follows a sentence with its own clause checks that clause at
+ * build time against it (nn_refusal.h, NN_REFUSAL_RUN_UNFINISHED()).
+ *
+ * [!] HELD TO THE TABLE BY shell/test/test_nn_shot.c: no sentence is longer,
+ * and the longest is EXACTLY this (issue #174).
+ */
+#define NN_SHOT_SAYS_MAX 62u
+
 /** The status and sentence for a failure.  Any reason that is not one --
  *  NONE, PUBLISHED, out of range -- answers as UNKNOWN.  Never NULL. */
 const struct nn_shot_says *nn_shot_says(enum nn_shot_reason reason);

@@ -47,6 +47,7 @@
 #include "nn_core_model.h" /* the shared load / unload order (#131) */
 #include "nn_run_wait.h"   /* how `nn run`'s wait ends (shared, #163) */
 #include "nn_shot.h"       /* how one `nn run` ended (shared, #171)    */
+#include "nn_refusal.h"    /* the refusals and run endings (shared, #174) */
 #include "plugin_load.h"
 #include "plugin_lease.h"
 #include "plugin_run_core.h"
@@ -978,6 +979,13 @@ int nn_svc_input(struct tensor_desc *out)
 /** How long `nn run` waits for its one inference, in seconds. */
 #define NN_RUN_WAIT_S 3u
 
+/* What a `nn run` whose teardown did not finish adds to its sentence: the band
+ * stream and the PSRAM guard are still held.  Checked at build time against
+ * the longest sentence it follows (svc/nn/nn_refusal.h). */
+#define NN_RUN_UNFINISHED                                                     \
+	NN_REFUSAL_RUN_UNFINISHED("; the teardown did not finish either "      \
+	                          "(`nn stream stop` finishes it)")
+
 static const char *nn_nncam_strerror(int rc);
 static void nn_nncam_detail(struct nn_op_result *res, int rc);
 static int nn_status_of_start(int rc);
@@ -1137,30 +1145,11 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 * stream it never started.  As a one-shot it can be neither re-armed nor
 	 * stopped by anyone else, and it stops itself by its own generation.
 	 */
-	switch (nn_core_oneshot_admit(&nn_core, &nn_core_board)) {
-	case NN_STREAM_START_GO:
-		break;
-	case NN_STREAM_START_RUNNING:
-		nn_detail_set("a stream is already running -- `nn stream stats`");
-		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
+	/* The refusal's status, disposition and words are the shared table's
+	 * (svc/nn/nn_refusal.c, issue #174). */
+	if (nn_refusal_run(nn_core_oneshot_admit(&nn_core, &nn_core_board),
+	                   &nn_core_board, res))
 		return;
-	case NN_STREAM_START_ONESHOT:
-		nn_detail_set("another `nn run` holds the camera, or one returned "
-		              "with its teardown unfinished (`nn stream stop` "
-		              "finishes it)");
-		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
-		return;
-	case NN_STREAM_START_DEAD:
-		nn_detail_set("a previous teardown was never confirmed; only a "
-		              "reboot clears it");
-		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
-		return;
-	case NN_STREAM_START_BUSY:
-	default:
-		nn_detail_set("a start or a stop is already in progress -- retry");
-		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
-		return;
-	}
 
 	/* No panel: a report-only decoder serves this.  No `test` either: the run
 	   takes the stream as it runs (issue #142 review). */
@@ -1324,33 +1313,20 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 
 		nn_result(res, say->status, nn_claim_of_stop(stop_rc));
 		nn_detail_set("%s%s", say->text,
-		              (res->claim != NN_CLAIM_NONE)
-		              ? "; the teardown did not finish either (`nn stream "
-		                "stop` finishes it)" : "");
+		              (res->claim != NN_CLAIM_NONE) ? NN_RUN_UNFINISHED
+		                                            : "");
 		return;
 	}
 	case NN_RUN_LOST:
-		nn_result(res, NN_SVC_ERR_HW, nn_claim_of_stop(stop_rc));
-		nn_detail_set("the band stream was lost before an inference "
-		              "completed%s", (res->claim != NN_CLAIM_NONE)
-		              ? "; the teardown did not finish either (`nn stream "
-		                "stop` finishes it)" : "");
-		return;
 	case NN_RUN_CANCELLED:
-		nn_result(res, NN_SVC_ERR_CANCEL, nn_claim_of_stop(stop_rc));
-		nn_detail_set("cancelled before an inference completed%s",
-		              (res->claim != NN_CLAIM_NONE)
-		              ? "; the teardown did not finish either (`nn stream "
-		                "stop` finishes it)" : "");
-		return;
 	case NN_RUN_TIMEOUT:
 	default:
-		nn_result(res, NN_SVC_ERR_TIMEOUT, nn_claim_of_stop(stop_rc));
-		nn_detail_set("no inference completed within %u s%s",
-		              (unsigned)NN_RUN_WAIT_S,
-		              (res->claim != NN_CLAIM_NONE)
-		              ? "; the teardown did not finish either (`nn stream "
-		                "stop` finishes it)" : "");
+		/* The status and the base sentence are the shared table's
+		 * (svc/nn/nn_refusal.c, issue #174); what the teardown left held
+		 * is this board's clause. */
+		(void)nn_refusal_run_end(why, NN_RUN_WAIT_S * 1000u,
+		                         nn_claim_of_stop(stop_rc),
+		                         NN_RUN_UNFINISHED, res);
 		return;
 	}
 }
@@ -1633,30 +1609,11 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 	 * left a window in which this said IDLE while the board was already
 	 * streaming -- and on a re-arm it overwrote a stop that had already claimed
 	 * the teardown. */
-	switch (nn_core_admit(&nn_core, &nn_core_board)) {
-	case NN_STREAM_START_GO:
-		break;
-	case NN_STREAM_START_RUNNING:
-		nn_detail_set("a stream is already running (`nn stream stats`)");
-		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
+	/* A `nn run`'s session is refused, never re-armed (issue #120); the
+	 * words are the shared table's (svc/nn/nn_refusal.c, issue #174). */
+	if (nn_refusal_start(nn_core_admit(&nn_core, &nn_core_board),
+	                     &nn_core_board, res))
 		return;
-	case NN_STREAM_START_ONESHOT:
-		/* [!] NOT A RE-ARM (issue #120): the session is a `nn run`'s. */
-		nn_detail_set("a `nn run` holds the camera, or one returned with its "
-		              "teardown unfinished (`nn stream stop` finishes it)");
-		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
-		return;
-	case NN_STREAM_START_DEAD:
-		nn_detail_set("a previous teardown was never confirmed; only a "
-		              "reboot clears it");
-		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
-		return;
-	case NN_STREAM_START_BUSY:
-	default:
-		nn_detail_set("a start or a stop is already in progress -- retry");
-		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
-		return;
-	}
 
 	/* A panel: DRAW is required.  Without `test` the stream is taken as it
 	   runs; with it, a stream running without the pattern refuses (#142). */
@@ -1716,43 +1673,13 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 		return;
 	res->detail[0] = '\0';
 
-	switch (nn_core_claim_stop(&nn_core, &nn_core_board, gen)) {
-	case NN_STREAM_STOP_GO:
-		break;
-	case NN_STREAM_STOP_WRONG_GEN:
-		nn_detail_set("that stream has already been replaced by another");
-		nn_result(res, NN_SVC_ERR_GEN, NN_CLAIM_NONE);
+	/* [!] A refused stop attempted nothing, so nothing is the caller's to
+	 * release (issue #99, bench), and a `nn run`'s one-shot is refused, not
+	 * "not running" (issue #120): the shared table (svc/nn/nn_refusal.c,
+	 * issue #174). */
+	if (nn_refusal_stop(nn_core_claim_stop(&nn_core, &nn_core_board, gen),
+	                    &nn_core_board, res))
 		return;
-	case NN_STREAM_STOP_BUSY:
-		/* [!] NOTHING WAS ATTEMPTED, SO NOTHING IS THE CALLER'S TO RELEASE
-		 * (issue #99, bench).  This used to report RETRYABLE, which made the
-		 * shared reporter add "teardown did not finish; nn is still held" --
-		 * said to a background waiter whose stream another console was at that
-		 * moment tearing down perfectly well.  The claim is somebody else's and
-		 * they are settling it; the retry advice belongs in the detail, not in
-		 * a warning about a teardown this caller never began. */
-		nn_detail_set("a start or another stop owns the stream -- retry");
-		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
-		return;
-	case NN_STREAM_STOP_DEAD:
-		nn_detail_set("a previous teardown was never confirmed; only a reboot "
-		              "clears it");
-		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
-		return;
-	case NN_STREAM_STOP_ONESHOT:
-		/* [!] Refused, not "not running" (issue #120): a `nn run` owns the
-		 * worker and stops it itself.  Nothing was attempted, so nothing is
-		 * the caller's to release. */
-		nn_detail_set("a `nn run` owns the camera and stops it itself -- "
-		              "retry when it returns");
-		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
-		return;
-	case NN_STREAM_STOP_IDLE:
-	default:
-		nn_detail_set("not running");
-		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
-		return;
-	}
 
 	/*
 	 * [!] THE LIFECYCLE IS SETTLED ON EVERY EXIT FROM HERE, because the claim

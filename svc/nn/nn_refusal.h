@@ -69,6 +69,7 @@
 #include "nn_core.h"         /* struct nn_core_board                     */
 #include "nn_detail.h"       /* NN_SVC_DETAIL_MAX                        */
 #include "nn_run_wait.h"     /* enum nn_run_end                          */
+#include "nn_shot.h"         /* NN_SHOT_SAYS_MAX                         */
 #include "nn_stream_life.h"  /* enum nn_stream_start_claim / _stop_claim */
 #include "nn_svc.h"          /* struct nn_op_result, enum nn_claim       */
 
@@ -118,7 +119,8 @@ int nn_refusal_stop(enum nn_stream_stop_claim why,
 /**
  * The longest base sentence above, in characters without the terminator, with
  * the number at its widest (a uint32_t's ten digits).  A board's @p unfinished
- * is checked against it at build time by NN_REFUSAL_RUN_UNFINISHED().
+ * is checked at build time against it and NN_SHOT_SAYS_MAX, whichever is
+ * longer (NN_REFUSAL_RUN_BASE_MAX, NN_REFUSAL_RUN_UNFINISHED()).
  *
  * [!] HELD TO THE SENTENCES BY THE HOST TEST: every composed base sentence must
  * be no longer than this, and the longest must be EXACTLY this.  A constant
@@ -128,19 +130,29 @@ int nn_refusal_stop(enum nn_stream_stop_claim why,
 #define NN_REFUSAL_RUN_END_MAX 56u
 
 /**
- * A board's clause after a run's base sentence, as a checked literal: the
- * build fails if the longest base sentence plus @p s (its own separator
- * included, e.g. "; the teardown did not finish either") would not fit in
- * NN_SVC_DETAIL_MAX characters -- the field's terminator is the + 1u.  `"" s`
- * refuses anything that is not a literal.
+ * The longest sentence a board's clause can follow: the base sentences above,
+ * or a NO_RESULT run's sentence from nn_shot_says() (nn_shot.h), which the
+ * board follows with the same clause.  Both constants are held to their
+ * sentences by host tests (test_nn_refusal.c, test_nn_shot.c).
+ */
+#define NN_REFUSAL_RUN_BASE_MAX                                                \
+	((NN_REFUSAL_RUN_END_MAX > NN_SHOT_SAYS_MAX) ? NN_REFUSAL_RUN_END_MAX \
+	                                             : NN_SHOT_SAYS_MAX)
+
+/**
+ * A board's clause after a run's sentence, as a checked literal: the build
+ * fails if the longest sentence it can follow (NN_REFUSAL_RUN_BASE_MAX) plus
+ * @p s (its own separator included, e.g. "; the teardown did not finish
+ * either") would not fit in NN_SVC_DETAIL_MAX characters -- the field's
+ * terminator is the + 1u.  `"" s` refuses anything that is not a literal.
  */
 #ifndef __cplusplus
 #define NN_REFUSAL_RUN_UNFINISHED(s)                                           \
 	(0u * sizeof(struct {                                                  \
-		_Static_assert((size_t)NN_REFUSAL_RUN_END_MAX + sizeof("" s) <= \
+		_Static_assert((size_t)NN_REFUSAL_RUN_BASE_MAX + sizeof("" s) <= \
 		               (size_t)NN_SVC_DETAIL_MAX + 1u,                 \
 		               "nn run clause does not fit after the longest " \
-		               "base sentence");                               \
+		               "sentence");                                    \
 		char nn_refusal_check_;                                        \
 	}) + ("" s))
 #endif

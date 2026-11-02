@@ -60,6 +60,7 @@
 #include "nn_preproc.h"
 #include "nn_rec.h"
 #include "nn_run_wait.h"
+#include "nn_refusal.h"   /* the refusals and run endings (shared, #174) */
 #include "nn_stream_state.h"
 #include "nn_core_model.h"
 #include "nor_flash.h"    /* NOR_XIP_BASE */
@@ -1365,6 +1366,9 @@ static const char *nn_stream_why_text(unsigned char why);
 	 2u * NPU_INFERENCE_TIMEOUT_TICKS +                       \
 	 NN_RUN_MS_TO_TICKS(PLUGIN_LEASE_WAIT_MS) +               \
 	 NN_RUN_MS_TO_TICKS(NN_RUN_WAIT_SLACK_MS))
+/* ...and in milliseconds, as a timed-out run reports it. */
+#define NN_RUN_WAIT_MS \
+	((uint32_t)(NN_RUN_WAIT_TICKS * 1000u / TX_TIMER_TICKS_PER_SECOND))
 
 /* Why a one-shot's worker published nothing -- the detail and the status. */
 static int nn_run_no_result(int shot, struct nn_op_result *res)
@@ -1418,7 +1422,9 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	(void)max;
 	nn_detail_clear();
 	if (nn_svc_cancelled(cancel, ctx)) {
-		nn_result(res, NN_SVC_ERR_CANCEL, NN_CLAIM_NONE);
+		/* Nothing was claimed: the shared CANCELLED words, nothing held. */
+		(void)nn_refusal_run_end(NN_RUN_CANCELLED, 0u, NN_CLAIM_NONE,
+		                         NULL, res);
 		return;
 	}
 
@@ -1430,27 +1436,13 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 	 */
 	gen = nn_core_oneshot_claim(&nn_core, &nn_core_board, &why);
 	if (gen == NN_STREAM_GEN_ANY) {
-		switch (why) {
-		case NN_STREAM_START_DEAD:
-			nn_detail_set("a previous teardown was never confirmed; only "
-			              "a reset clears it (`reboot`, or RST if it "
-			              "refuses)");
-			nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
-			return;
-		case NN_STREAM_START_RUNNING:
-			/* The same words as the other two boards (issue #122). */
-			nn_detail_set("a stream is already running -- `nn stream "
-			              "stats`");
-			break;
-		case NN_STREAM_START_ONESHOT:
-			nn_detail_set("another `nn run` holds the NPU, or one returned "
-			              "with its teardown unfinished (`nn stream stop` "
-			              "finishes it)");
-			break;
-		default:
-			break;
-		}
-		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
+		/* Nothing is held.  The status, disposition and words are the
+		 * shared table's (svc/nn/nn_refusal.c, issue #174).  A refused
+		 * commit is reported BUSY by the claim itself, so GO never comes
+		 * without a generation; were it to, it is answered as BUSY. */
+		(void)nn_refusal_run((why == NN_STREAM_START_GO)
+		                     ? NN_STREAM_START_BUSY : why,
+		                     &nn_core_board, res);
 		return;
 	}
 	/* The run's record boundary and the base it counts from, under the gate
@@ -1610,19 +1602,13 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		status = nn_run_no_result(nn_camera_shot(), res);
 		break;
 	case NN_RUN_LOST:
-		nn_detail_set("the camera stream was lost before an inference "
-		              "completed");
-		status = NN_SVC_ERR_HW;
-		break;
 	case NN_RUN_CANCELLED:
-		status = NN_SVC_ERR_CANCEL;
-		break;
 	case NN_RUN_TIMEOUT:
 	default:
-		nn_detail_set("no inference completed within %lu ms",
-		              (unsigned long)(NN_RUN_WAIT_TICKS * 1000u /
-		                              TX_TIMER_TICKS_PER_SECOND));
-		status = NN_SVC_ERR_TIMEOUT;
+		/* The shared status and base sentence (svc/nn/nn_refusal.c,
+		 * issue #174); an unfinished stop's own words replace it below. */
+		status = nn_refusal_run_end(end, NN_RUN_WAIT_MS,
+		                            nn_claim_of_act(v.act), NULL, res);
 		break;
 	}
 	if (v.act != (unsigned char)NN_STREAM_ACT_DONE)
@@ -1926,30 +1912,12 @@ void nn_svc_stream_start(const struct nn_stream_spec *spec,
 		return;
 	}
 
-	switch (nn_core_admit(&nn_core, &nn_core_board)) {
-	case NN_STREAM_START_GO:
-		break;
-	case NN_STREAM_START_RUNNING:
-		nn_detail_set("a stream is already running (`nn stream stats`)");
-		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
+	/* The gate is tested first, so a live `nn run` reads as ONESHOT or
+	 * BUSY; the words are the shared table's (svc/nn/nn_refusal.c, issue
+	 * #174). */
+	if (nn_refusal_start(nn_core_admit(&nn_core, &nn_core_board),
+	                     &nn_core_board, res))
 		return;
-	case NN_STREAM_START_ONESHOT:
-		/* The gate is tested first above, so a live `nn run` reads as BUSY;
-		 * this is the lifecycle saying the same thing (issue #120). */
-		nn_detail_set("a `nn run` holds the NPU -- retry when it returns");
-		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
-		return;
-	case NN_STREAM_START_DEAD:
-		nn_detail_set("a previous teardown was never confirmed; only a reset "
-		              "clears it (`reboot`, or RST if it refuses)");
-		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
-		return;
-	case NN_STREAM_START_BUSY:
-	default:
-		nn_detail_set("busy -- another nn job, or a start or stop, holds it");
-		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
-		return;
-	}
 	/* From here every failure gives BOTH the lifecycle and the claim back. */
 	if (!nn_open_done) {
 		nn_detail_set("no model is loaded -- `nn model load --name <name>`");
@@ -2103,42 +2071,13 @@ void nn_svc_stream_stop(uint32_t gen, struct nn_op_result *res)
 		return;
 	nn_detail_clear();
 
-	switch (nn_core_claim_stop(&nn_core, &nn_core_board, gen)) {
-	case NN_STREAM_STOP_GO:
-		break;
-	case NN_STREAM_STOP_IDLE:
-		nn_detail_set("no stream is running");
-		nn_result(res, NN_SVC_ERR_STATE, NN_CLAIM_NONE);
+	/* [!] A refused stop attempted nothing, so nothing is the caller's to
+	 * release (issue #99, bench), and a `nn run`'s one-shot is refused, not
+	 * "not running" (issue #120): the shared table (svc/nn/nn_refusal.c,
+	 * issue #174). */
+	if (nn_refusal_stop(nn_core_claim_stop(&nn_core, &nn_core_board, gen),
+	                    &nn_core_board, res))
 		return;
-	case NN_STREAM_STOP_WRONG_GEN:
-		nn_detail_set("that stream has already been replaced by another");
-		nn_result(res, NN_SVC_ERR_GEN, NN_CLAIM_NONE);
-		return;
-	case NN_STREAM_STOP_DEAD:
-		nn_detail_set("a previous teardown was never confirmed; only a reset "
-		              "clears it (`reboot`, or RST if it refuses)");
-		nn_result(res, NN_SVC_ERR_HW, NN_CLAIM_TERMINAL);
-		return;
-	case NN_STREAM_STOP_ONESHOT:
-		/* [!] Refused, not "no stream is running" (issue #120): a `nn run`
-		 * holds the camera and the NPU and ends by itself. */
-		nn_detail_set("a `nn run` holds the camera and stops it itself -- "
-		              "retry when it returns");
-		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
-		return;
-	case NN_STREAM_STOP_BUSY:
-	default:
-		/* [!] NOTHING WAS ATTEMPTED, SO NOTHING IS THE CALLER'S TO RELEASE
-		 * (issue #99, bench).  This used to report RETRYABLE, which made the
-		 * shared reporter add "teardown did not finish; nn is still held" --
-		 * said to a background waiter whose stream another console was at that
-		 * moment tearing down perfectly well.  The claim is somebody else's and
-		 * they are settling it; the retry advice belongs in the detail, not in
-		 * a warning about a teardown this caller never began. */
-		nn_detail_set("a start or another stop owns the stream -- retry");
-		nn_result(res, NN_SVC_ERR_BUSY, NN_CLAIM_NONE);
-		return;
-	}
 
 	/*
 	 * WHICH SESSION THIS IS -- read under the claim this call now holds, so it

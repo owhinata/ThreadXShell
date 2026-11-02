@@ -845,6 +845,10 @@ set(NN_SOURCES "${CMAKE_SOURCE_DIR}/svc/nn/nn.c"   # the dispatcher (shared, #16
                # and f746g-disco, walked by shell/test/test_nn_shot.c and
                # test_nn_shot_seq.c
                "${CMAKE_SOURCE_DIR}/svc/nn/nn_shot.c"
+               # the admission refusals and `nn run`'s endings (issue #174):
+               # one table for every board, walked by
+               # shell/test/test_nn_refusal.c
+               "${CMAKE_SOURCE_DIR}/svc/nn/nn_refusal.c"
                # the one `nn bench` procedure (issue #163): hold, fill,
                # time N runs, let go -- walked by shell/test/test_nn_bench.c
                "${CMAKE_SOURCE_DIR}/svc/nn/nn_bench.c"

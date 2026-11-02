@@ -33,6 +33,7 @@
 #include "nn_detail.h"
 #include "nn_refusal.h"
 #include "nn_run_wait.h"
+#include "nn_shot.h"
 #include "nn_stream_life.h"
 #include "nn_svc.h"
 
@@ -301,10 +302,11 @@ static void test_status_table(void)
 
 /* ---- (a) + (c): `nn run`'s endings -------------------------------------- */
 
-/* Exactly the room left after the longest base sentence (159 - 56 = 103). */
+/* Exactly the room left after the longest sentence a clause can follow
+ * (NN_REFUSAL_RUN_BASE_MAX: 159 - 62 = 97). */
 #define CLAUSE_MAX_LIT \
 	"; 0123456789012345678901234567890123456789012345678901234567890123456789" \
-	"012345678901234567890123456789a"
+	"01234567890123456789abcde"
 #ifdef NN_REFUSAL_NEG_CLAUSE
 static const char *const clause_over =
 	NN_REFUSAL_RUN_UNFINISHED(CLAUSE_MAX_LIT "b");   /* must not compile */
@@ -353,8 +355,13 @@ static void test_run_end(void)
 
 	printf("nn_refusal_run_end: every end x wait x claim x clause\n");
 	CHECK(strlen(CLAUSE_MAX_LIT) ==
-	      (size_t)NN_SVC_DETAIL_MAX - NN_REFUSAL_RUN_END_MAX,
+	      (size_t)NN_SVC_DETAIL_MAX - NN_REFUSAL_RUN_BASE_MAX,
 	      "the widest clause the check admits is exactly the room left");
+	CHECK(NN_REFUSAL_RUN_BASE_MAX >= NN_REFUSAL_RUN_END_MAX &&
+	      NN_REFUSAL_RUN_BASE_MAX >= NN_SHOT_SAYS_MAX &&
+	      (NN_REFUSAL_RUN_BASE_MAX == NN_REFUSAL_RUN_END_MAX ||
+	       NN_REFUSAL_RUN_BASE_MAX == NN_SHOT_SAYS_MAX),
+	      "NN_REFUSAL_RUN_BASE_MAX is the larger of the two constants");
 	for (e = 0; e < sizeof ends / sizeof ends[0]; e++)
 	for (w = 0; w < sizeof waits / sizeof waits[0]; w++)
 	for (c = 0; c < sizeof claims / sizeof claims[0]; c++)
@@ -385,9 +392,34 @@ static void test_run_end(void)
 		if (strlen(res.detail) > longest)
 			longest = strlen(res.detail);
 	}
-	/* The longest sentence there is fills the field to the last character. */
-	CHECK(longest == NN_SVC_DETAIL_MAX,
-	      "the longest base + the widest clause is exactly the bound");
+	CHECK(longest == NN_REFUSAL_RUN_END_MAX + strlen(CLAUSE_MAX_LIT),
+	      "the longest base + the widest clause, untruncated");
+	/*
+	 * A NO_RESULT run is the nn_shot_says() sentence followed by the same
+	 * clause (the board composes it): every sentence of that table with the
+	 * widest clause fits, and the longest fills the field to the last
+	 * character.
+	 */
+	{
+		size_t r, most = 0;
+
+		for (r = 0; r <= (size_t)NN_SHOT_UNKNOWN; r++) {
+			char buf[2 * NN_SVC_DETAIL_MAX];
+			size_t n;
+
+			snprintf(buf, sizeof buf, "%s%s",
+			         nn_shot_says((enum nn_shot_reason)r)->text,
+			         clauses[3]);
+			n = strlen(buf);
+			CHECK(n <= NN_SVC_DETAIL_MAX,
+			      "a NO_RESULT sentence + the widest clause fits");
+			if (n > most)
+				most = n;
+		}
+		CHECK(most == NN_SVC_DETAIL_MAX,
+		      "the longest NO_RESULT sentence + the widest clause is "
+		      "exactly the bound");
+	}
 	CHECK(nn_refusal_run_end(NN_RUN_LOST, 0u, NN_CLAIM_NONE, NULL, NULL) ==
 	      NN_SVC_ERR_HW, "NULL result: the status, nothing written");
 	printf("  %d ending cases, longest sentence %zu of %d\n", n_cases,

@@ -294,6 +294,28 @@ static void test_says(void)
 					distinct = 0;
 		CHECK(distinct, "every failure reason has its own sentence");
 	}
+	/*
+	 * [!] NN_SHOT_SAYS_MAX IS THE LONGEST SENTENCE, EXACTLY (issue #174).  A
+	 * board appends its own clause to these and checks that clause at build
+	 * time against this constant (NN_REFUSAL_RUN_UNFINISHED()); a constant
+	 * left behind when a sentence grew would pass a clause that truncates.
+	 */
+	{
+		size_t longest = 0;
+
+		for (r = -2; r <= NN_SHOT_UNKNOWN + 2; r++) {
+			size_t n = strlen(nn_shot_says((enum nn_shot_reason)r)->text);
+			char line[96];
+
+			snprintf(line, sizeof line, "reason %d: %zu <= NN_SHOT_SAYS_MAX %u",
+			         r, n, (unsigned)NN_SHOT_SAYS_MAX);
+			CHECK(n <= NN_SHOT_SAYS_MAX, line);
+			if (n > longest)
+				longest = n;
+		}
+		CHECK(longest == NN_SHOT_SAYS_MAX,
+		      "the longest sentence is exactly NN_SHOT_SAYS_MAX");
+	}
 }
 
 int main(void)

@@ -751,6 +751,10 @@ add_library(shell_objs OBJECT
     # How `nn run`'s wait for its one inference ends (issue #129): a pure
     # table in svc/ since issue #163, walked by shell/test/test_nn_run_wait.c.
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_run_wait.c"
+    # The admission refusals and `nn run`'s endings (issue #174): one table for
+    # every board, walked by shell/test/test_nn_refusal.c.  ITCM like the
+    # wait above (not .text_cold: that is for the load / unload path only).
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_refusal.c"
     # The one `nn bench` procedure (issue #163): hold, fill, time N runs, let
     # go, walked by shell/test/test_nn_bench.c.  ITCM (not .text_cold): it is
     # the timed path.

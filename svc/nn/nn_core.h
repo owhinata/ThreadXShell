@@ -19,8 +19,9 @@
  *
  * WHAT STAYS WITH THE BOARD.  How a start comes up and what it asks before it
  * does (the admission questions are deliberately different), how and in what
- * order a stop tears down and where its record boundary falls, the words every
- * refusal is printed with, and the board's own lines.  This file sees none of
+ * order a stop tears down and where its record boundary falls, and the board's
+ * own lines.  (The words of the lifecycle's refusals are one table since issue
+ * #174: nn_refusal.h.)  This file sees none of
  * that: it is called before and after.
  *
  * [!] IT OWNS NO STORAGE.  The state is the board's @ref nn_core, declared in

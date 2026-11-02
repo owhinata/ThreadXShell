@@ -177,9 +177,10 @@ struct nn_core_frame_ops {
 	int  (*decode)(void *ctx, int *n);
 	/** Publish the plugin's count under @p gen; non-zero taken. */
 	int  (*publish)(void *ctx, int n, uint32_t gen);
-	/** The board's counting, after the lease is given back.  Its table, its
-	 *  counters: @p n is the decoder's count for DECODED, @p took whether the
-	 *  record accepted the publish. */
+	/** The board's counting, after the lease is given back.  Its counters,
+	 *  the shared tally (svc/nn/nn_decode_count.h, issue #164): @p n is the
+	 *  decoder's count for DECODED, @p took whether the record accepted the
+	 *  publish. */
 	void (*account)(void *ctx, enum nn_core_done what, int n, int took);
 
 	/* ---- the plugin lease: all NULL with no plugin mechanism ------------ */

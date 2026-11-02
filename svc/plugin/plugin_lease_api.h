@@ -16,9 +16,10 @@
  * miss counters, run through plugin_lease_miss.h) are the board's plugin_lease.c.
  * The board's own plugin_lease.h includes this and adds what only it knows: how
  * long plugin_lease_take() waits, the order against its other locks, and
- * plugin_lease_init().  Both boards with a plugin lease implement this API --
- * grove-vision-ai-v2 since issue #127, wio-lite-ai since #130 -- and the two
- * lock orders differ on purpose (each board's plugin_lease.h says why).  This
+ * plugin_lease_init().  All three boards implement this API --
+ * grove-vision-ai-v2 since issue #127, wio-lite-ai since #130, f746g-disco since
+ * #159 -- and the lock orders differ on purpose (each board's plugin_lease.h
+ * says why).  This
  * file is named apart from the boards' own plugin_lease.h so that which one a
  * TU means is said by the name, never by the include order.
  *

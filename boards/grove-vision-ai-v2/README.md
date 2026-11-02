@@ -4689,8 +4689,11 @@ Three things behave differently now that the stream outlives the command:
   activations figure and the tensors -- since issue #164 in full, as on the other
   two boards.  Both are what the last load left (the backend's activations field
   and the descriptors, never a tensor's contents, which the arena rewrites every
-  frame), and no load or unload can run while the stream holds the claim.  Until
-  #164 this board withheld those two sections during a stream.
+  frame).  `used` is read in the same critical section that sees the stream
+  holding the claim; the descriptors are read afterwards, outside any claim, as
+  they always are (with no stream too, and by `nn out`) -- the backend's
+  accessors bound the index and a reload zeroes the counts before it rebuilds.
+  Until #164 this board withheld those two sections during a stream.
 - **`nn model unload`, `nn run`, `nn bench` and `nn out` are refused** while a
   stream runs, by the same claim. `nn thresh` still works: it takes the plugin
   lease, not the claim, and the inference worker waits it out (bounded) before

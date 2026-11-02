@@ -413,10 +413,16 @@ void nn_svc_info(struct nn_svc_info *out)
 	 * as on the other two boards.  Both are what the reload left -- the
 	 * activations figure and the descriptors (shape, type, quantisation), never
 	 * a tensor's CONTENTS, which the arena rewrites every frame (the line
-	 * svc/nn/nn_svc.h draws between a descriptor and its buffer) -- and while a
-	 * stream holds the gate no load or unload can run to replace them.
-	 * nn_svc_input() / nn_svc_output() take no gate.  Until #164 both were
-	 * WITHHELD here (#99's first answer).
+	 * svc/nn/nn_svc.h draws between a descriptor and its buffer).  The stream's
+	 * hold is what makes `used_snap` above this stream's: it was read in the
+	 * same section as the owner test.  It does NOT cover the tensors: the
+	 * shared command reads them after this returns, through nn_svc_input() /
+	 * nn_svc_output(), which take no gate -- on every path, the ordinary one
+	 * after nn_release() above and `nn out` too, as before #164.  What keeps
+	 * that read in bounds is the backend's accessors (an index past the count
+	 * is NULL) and the reload's order (the counts are zeroed first and set
+	 * last), not this snapshot.  Until #164 both were WITHHELD here (#99's
+	 * first answer).
 	 */
 	out->arena_used    = used_snap;
 	out->avail_runtime = (uint8_t)NN_AVAIL_OK;
@@ -1801,9 +1807,12 @@ _Static_assert(NN_STREAM_CAM_LOCKED  == CAM_ERR_LOCKED,  "CAM_ERR_LOCKED moved")
  * showing a live picture with no boxes and no explanation -- the exact failure
  * live inference exists to make visible.
  *
- * @return NN_SVC_OK, NN_SVC_ERR_STATE with the detail set (this model or plugin
- *         would not annotate), or NN_SVC_ERR_BUSY (the plugin lease was not
- *         released in time, so neither question was asked -- issue #127)
+ * @return NN_SVC_OK, NN_SVC_ERR_HW with the detail set (an input this board
+ *         cannot fill -- HW from `nn run` too, and on the other two boards;
+ *         issue #164, until then STATE here), NN_SVC_ERR_STATE with the detail
+ *         set (this model or plugin would not annotate), or NN_SVC_ERR_BUSY
+ *         (the plugin lease was not released in time, so neither question was
+ *         asked -- issue #127)
  */
 static int nn_detector_ready(struct nn_op_result *res)
 {
@@ -1820,9 +1829,9 @@ static int nn_detector_ready(struct nn_op_result *res)
 	/* [!] THE BOARD'S PRECONDITION FIRST, AND FOR EVERY DECODER.  The producer
 	 * fills this tensor a byte at a time on every frame; a plugin cannot see
 	 * the input tensor and so cannot check it, which makes this the last place
-	 * anything can. */
+	 * anything can.  HW, as `nn run` answers it (issue #164). */
 	if (nn_input_fillable(res, in) != 0)
-		return NN_SVC_ERR_STATE;
+		return NN_SVC_ERR_HW;
 	/*
 	 * [!] IS THERE A DECODER AT ALL, ASKED FIRST (issue #104).  Ahead of the
 	 * shape question and ahead of the draw question, because with no plugin

@@ -216,7 +216,8 @@ int nn_svc_input(struct tensor_desc *out)
 /*
  * nn_camera_start()'s refusal, in the words and the status both `nn run` and
  * `nn stream start` give.  The decoder's three (issue #159) are wio-lite-ai's
- * words; NODRAW stays STATE here, where wio-lite-ai says HW.
+ * words; SHAPES and NODRAW are STATE, as on the other two boards (wio-lite-ai
+ * said HW until issue #164).
  *
  * The model input's refusals (issue #162) are wio-lite-ai's codes and words too:
  * one sentence per reason of the shared admission test, built from its reason

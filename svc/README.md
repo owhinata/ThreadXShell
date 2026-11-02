@@ -74,6 +74,59 @@ The command and the shared core never see a backend's tensor type: the board
 turns its own tensors into `svc/nn/tensor.h` descriptors before anything shared
 reads them.
 
+### The `nn` command's meaning on the three boards (issue #164)
+
+One row per subcommand.  The meaning is the shared command's and the shared
+core's, the same on every board; the last column names what differs by board,
+nearly all of it the hardware's (a capability is in the table below, and the
+statuses that differ are listed after it).  How each board does it, with its waits, frame
+counts and stack depths, is the board README's:
+[Grove Vision AI V2](../boards/grove-vision-ai-v2/README.md#the-nn-files),
+[Wio Lite AI](../boards/wio-lite-ai/README.md#the-nn-files),
+[STM32F746G-DISCO](../boards/f746g-disco/README.md#the-nn-files).
+
+| Subcommand | Meaning | Capability | What differs by board |
+|---|---|---|---|
+| `nn info` | The backend (`nn_backend()`'s name and version), the model and where it came from, the arena reserved and used, the input and output tensors, then the board's plugin lines; answered in full while a stream runs, busy while a load is in flight. | always | f746g-disco: `sdram test` holding `.sdram.ai` answers busy.  grove-vision-ai-v2: also busy while a `nn run` or `nn bench` holds its gate; the `source` line says the NPU runs secure and privileged. |
+| `nn model load --name / --slot / --path / --addr` | Point the model at bytes from the board's one store and swap it in as one transaction (the plugin after the backend succeeds; the order is `nn/nn_core_model`). | `MODEL_LOAD` and the tag's | grove-vision-ai-v2: a NOR blob by name, or a raw window with its length, read in place through the XIP window.  wio-lite-ai: a NOR slot copied to PSRAM, the CRC checked on the copy.  f746g-disco: a microSD file into SDRAM; prints the CRC32 of every byte it adopted. |
+| `nn model unload` | Unload the plugin and the model; nothing is loaded afterwards. | `MODEL_LOAD` | grove-vision-ai-v2: also powers the NPU down and gives back the NOR lease. |
+| `nn bench [n]` | One hold: fill every input with `0x5A`, n timed runs, min / avg / max (`nn/nn_bench`). | `BENCH` | grove-vision-ai-v2: the 1 ms ThreadX tick and no `@MHz` (the DWT stops in WFI); the other two count DWT cycles. |
+| `nn run` | One frame through the same producer and worker as a stream; ends one of five ways (`nn/nn_run_wait`) and prints its own result. | `CAMERA` | grove-vision-ai-v2: int8 input only (the Ethos-U55 fills a byte per element), and the first frames after a camera bring-up are skipped.  wio-lite-ai: the input must tile onto the 60-row DCMI bands; PSRAM must be up and OCTOSPI1 not held by a retuner.  f746g-disco: the camera must stream RGB565; `sdram test` holding `.sdram.ai` answers busy. |
+| `nn dets` | The last published record: the plugin's report captured with it, or the raw output shapes. | always | -- |
+| `nn out [tensor] [count]` | Dequantised values of one output tensor, the model held; busy while a stream runs. | always | wio-lite-ai: also takes the PSRAM guard (the arena is behind OCTOSPI1). |
+| `nn thresh [1..999]` | Get or set the loaded decoder's threshold under the plugin lease; `none` with no decoder. | always | -- |
+| `nn norm <0\|1>` | The float range the camera input is converted into. | `NORM` | grove-vision-ai-v2 has no float input to set (int8 only, fixed `pixel - 128`). |
+| `nn stream start [--frames <n>]` | Claim the stream, start the camera if it is not running, start live inference; returns at once, or waits n frames and stops its own generation. | `STREAM` | As `nn run`, and: grove-vision-ai-v2 refuses a model with no decoder before any shape or draw question (CLAUDE.md: not aligned); wio-lite-ai re-arms a band stream it lost (a new generation, the counters continue). |
+| `nn stream start --test` | Stream the sensor's colour bar instead of the scene. | `STREAM_TEST` | -- |
+| `nn stream stop` | Stop the current stream; `not running` is not a failure; a retryable or terminal ending is reported. | `STREAM` | -- |
+| `nn stream stats` | Frames in, skipped, errors, infers and rate, decoder refusals, the last latency and result, then the board's own lines. | `STREAM` | grove-vision-ai-v2: the latency in 1 ms steps (the same clock as `nn bench`). The board lines are each board's. |
+
+`infers` counts only a stream's publish the record took -- a raw one (no
+decoder) as an inference, a refused decode as an error and never an inference;
+a publish the record dropped and a `nn run` count nothing in the worker's
+counters (`nn/nn_decode_count`, the same rule on every board since issue #164).
+
+| Capability | grove-vision-ai-v2 | wio-lite-ai | f746g-disco |
+|---|---|---|---|
+| `NN_SVC_HAS_MODEL_LOAD` | yes | `tflm` with the KV store | `tflm` or `stedgeai_reloc` |
+| `NN_SVC_HAS_MODEL_NAME` / `_ADDR` | yes | -- | -- |
+| `NN_SVC_HAS_MODEL_SLOT` | -- | as `MODEL_LOAD` | -- |
+| `NN_SVC_HAS_MODEL_PATH` | -- | -- | as `MODEL_LOAD` |
+| `NN_SVC_HAS_CAMERA`, `_BENCH`, `_STREAM` | yes | yes | yes |
+| `NN_SVC_HAS_NORM` | -- | yes | yes |
+| `NN_SVC_HAS_STREAM_TEST` | -- | yes | -- |
+
+The declarations are `boards/<board>/svc/nn_svc_config.h`; a capability that is
+0 leaves its subcommand or tag unregistered.  `NN_SVC_HAS_MODEL_BUILTIN` (`nn
+model load builtin`) is declared by no board.
+
+The wording of a refusal is each board's, and so are the board lines of `nn
+stream stats` and grove-vision-ai-v2's plugin lines in `nn info`; making them
+one is issue #174.  The status a refusal reports (`NN_SVC_ERR_*`) is the same on
+the three boards (issue #164): no model, a decoder that cannot read the
+model's outputs and one that draws nothing are STATE; an input the board
+cannot fill is HW, from `nn run` and `nn stream start` alike.
+
 ### The inference layer is one implementation (issue #161)
 
 On every board the model API below the adapter is shared too (grove-vision-ai-v2
@@ -147,6 +200,31 @@ What the board gives, in `boards/grove-vision-ai-v2/`:
 | `NN_ETHOSU_ARENA_KB`, `NN_TFLM_OPS_ETHOSU_PROFILE` | `board.cmake` (compile definitions, to the firmware and the host gate) | the size the board reserves, and the one-operator list |
 | the ThreadX mutex / semaphore hooks the driver binds by name | `port/nn/npu/npu_rtos.c` | they are ThreadX, which `svc/` does not include |
 | the NPU bring-up, its interrupt, the NOR window's lease and its lifetime | `port/nn/npu/npu_hw.c`, `port/nn/nn_svc_grove.c` | the adapter takes the lease before a load and returns it only when no model is left; `nn.c`'s session is taken and given with the adapter's own gate |
+
+### The board's side of the contract (issue #164)
+
+`svc/nn/nn_svc.h` is the contract between the command and the board's
+adapter -- what `nn_svc_*()` answers -- not the board's hardware layer.  Below
+the adapter, what a board hands the shared code is declared in these headers;
+every object is the board's (state as zero-initialised static storage, hooks
+and facts as `const` objects in its `.rodata`), and the shared files keep no
+storage of their own.
+
+| Header | What the board gives | What it decides |
+|---|---|---|
+| `nn/nn_dispatch_state.h`, `nn/tflm/nn_tflm_state.h`, `nn/tflm/nn_tflm_mem.h`, `nn/ethosu/nn_ethosu_state.h`, `nn/ethosu/nn_ethosu_mem.h` | the model API's and the backend's state, its hooks and its buffers | see [The inference layer is one implementation](#the-inference-layer-is-one-implementation-issue-161) and [The Ethos-U backend](#the-ethos-u-backend-issue-169) |
+| `nn/nn_core.h` | `struct nn_core` (the live-inference state) and a `struct nn_core_board`: the critical section, the clock and its rate, the counter and record samplers, the optional transient-claim hooks decided with the lifecycle, `latch_extra`, and the properties `based`, `rearm`, `clock_needs_producer` | the stream's lifecycle and numbers, from this board's counters and clock |
+| `nn/nn_core_frame.h` | `struct nn_core_frame` (the frame word's state), a `struct nn_core_frame_ops` (prep, wake the worker, the generation question, the raw and decoded publish, outputs, decode, the board's counting, the plugin lease's hooks) and a `struct nn_core_panel` | how a frame is filled, decoded, published and counted on this board's producer, worker and panel threads |
+| `nn/nn_core_model.h` | a `struct nn_core_model_board` (which spec tags it loads from, its preconditions and claim, bring-up, fetch) and its `struct nn_core_model_backend` | where the model's bytes come from and what a load needs first; the order around the swap is the shared file's |
+| `nn/nn_bench.h` | a `struct nn_bench_ops`: the hold and the clock | how a bench holds the model and times a run |
+| `nn/nn_active_core.h` | a `struct nn_active_board`: is a plugin live, a slot's address, where a depth sample goes, the no-plugin shape answer | how the plugin's decoder slots are reached on this board |
+| `nn/nn_active_lease.h` | `nn_active_facts` (`struct nn_active_lease_board`): output count and descriptors -- wio-lite-ai and f746g-disco, whose model is a `struct nn_model` | the lease-checked entries' view of the model |
+| `nn/nn_det_record.h` | the `struct nn_det_record` and the lock it is read and published under | which lock orders the record against the board's other locks |
+| `nn/nn_shot.h` | a `struct nn_shot`, moved only under the lock that moves the record's generation -- wio-lite-ai and f746g-disco (grove-vision-ai-v2 keeps its own `nn_ov_shot`) | how one `nn run` ended |
+| `plugin/plugin_lease_api.h` | the plugin lease itself (`plugin_lease_try` / `_take` / `_give` / `_held` and the miss counters), in the board's `port/plugin/plugin_lease.c` -- all three boards | who may be inside the loaded plugin; the wait and the lock order are the board's `plugin_lease.h` |
+
+Why the locks and the threads behind these hooks are the board's is
+[below](#why-the-lock-and-the-threads-are-the-boards).
 
 ## The camera stream's ownership (issue #142)
 

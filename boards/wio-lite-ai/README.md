@@ -1410,7 +1410,8 @@ through the same commands in the same order):
   `dets : 1 ... score 871` through the resident decoder.
 - **`nn stream start` on that model is refused before anything is lit**:
   *nothing would annotate a live preview: no decoder is loaded, or the one
-  that is draws nothing* (-76), and the `nn stream stop` after it says
+  that is draws nothing* (-76 then; -73, state, since issue #164), and the
+  `nn stream stop` after it says
   *not running* -- so the refusal left no session behind.
 - **`nn thresh` and `nn info` both say `none -- the active decoder has no
   threshold`** where the baseline said `644/1000`.

@@ -448,6 +448,25 @@ is no built-in model) and after `nn model unload`.
   (`svc/nn/tflm/nn_tflm_model_check.h`) after the on-board verifier and the
   schema version, before anything is planned, so the refusal restores the
   previous model like any other; `verify_tflite` runs the same function.
+- [!] **The same walk covers the whole graph, lengths before elements** (issue
+  #178): a subgraph without tensors, an operator without an inputs or outputs
+  list, an operator list (inputs / outputs / intermediates) longer than 64 --
+  judged before any element is read -- or naming a tensor that does not exist
+  is `NN_MODEL_ERR_FORMAT` (-7); any tensor of rank above 6 (TFLM's
+  `RuntimeShape::kMaxSmallSize`) is `NN_MODEL_ERR_TENSOR` (-4).  The on-board
+  verifier counts tables, not the scalar vectors inside them, so before this a
+  file within its 4,096 visits could hand `AllocateTensors()` ~1e8 reads on the
+  console thread (one shared 65,000-entry shape or operator list named from
+  thousands of entries); now every entry is one visit and the walk reads at
+  most 192 list elements per operator entry, which bounds those reads in
+  `AllocateTensors()` too (its planner's own passes stay quadratic in tensors
+  and operators, so the whole load is bounded by visits squared).  The one
+  exception to lengths-first: subgraph 0's two I/O lists are walked once, one
+  compare per entry, before their count is judged (at most ~128K entries in a
+  512 KB file), so that a model broken in two ways stays `NN_MODEL_ERR_FORMAT`.
+  The pinned model (blazeface, rank 4, operator lists <= 3) passes unchanged.
+  Cost: +352 B of Flash on `build/f746-tflm` (text 612,044 -> 612,396 B); the
+  `null` tree is byte-identical.
 - `stedgeai_reloc` is the same: it starts empty, and `builtin` used to mean
   "unload" there before #131 (use `nn model unload`).
 - `stedgeai_reloc` refuses the same dimension with the same `-13` (issue
@@ -883,9 +902,10 @@ firmware's on-board verifier (`NN_TFLM_VERIFY=1`) and grove-vision-ai-v2 use --
 depth 16, 4,096 table visits, `nn_tflm_verify_model_buffer()` in
 `svc/nn/tflm/nn_tflm_model_check.h` (issue #175; a model the board would refuse
 as malformed is refused here first) -- the staging capacity (512 KB), the I/O check the backend runs before planning (issue
-#175: `svc/nn/tflm/nn_tflm_model_check.h` compiled in -- a missing or
-out-of-range I/O list is `NN_MODEL_ERR_FORMAT`, a dimension outside 0..65535
-`NN_MODEL_ERR_DIMS`), and the operators the firmware registers -- read from
+#175, #178: `svc/nn/tflm/nn_tflm_model_check.h` compiled in -- a missing,
+too long (> 64) or out-of-range I/O or operator list, or a subgraph without
+tensors, is `NN_MODEL_ERR_FORMAT`, a tensor above rank 6 (an I/O tensor above
+4) `NN_MODEL_ERR_TENSOR`, an I/O dimension outside 0..65535 `NN_MODEL_ERR_DIMS`), and the operators the firmware registers -- read from
 `svc/nn/tflm/nn_tflm_ops.h` under the `extended` profile, the same list
 `svc/nn/tflm/nn_tflm.cc` registers from.  `test/host_tests.sh` runs it on
 generated files wrong in exactly one way (`cmake/fixtures/run_model_io_gate_tests.py`,

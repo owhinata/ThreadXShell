@@ -789,6 +789,25 @@ board's default firmware, which runs no verifier, on purpose: here the host
 gate is the only verifier there is; the fixtures include 4,096
 visits (passes) and 4,097 (refused at the verifier).
 
+[!] **The walk covers the whole graph, lengths before elements** (issue #178):
+every subgraph needs a tensor vector, every operator an inputs and an outputs
+list, each operator list (inputs / outputs / intermediates) at most 64 long --
+judged before any element is read -- and naming tensors that exist (-1 allowed
+in inputs), or the model is `NN_MODEL_ERR_FORMAT` (-7); any tensor of rank
+above 6 (TFLM's `RuntimeShape::kMaxSmallSize`, a DCHECK only in TFLM) is
+`NN_MODEL_ERR_TENSOR` (-4).  TFLM's planner indexes its per-tensor records with
+these indices unchecked, and the lengths are what bound `AllocateTensors()`'s
+passes over the same vectors (shapes, operator lists, indices; its planner's
+own passes stay quadratic in tensors and operators): a verifier counts tables,
+not the scalar vectors inside them.  The one exception to lengths-first:
+subgraph 0's two I/O lists are walked once, one compare per entry, before their
+count is judged (at most ~128K entries in a 512 KB file), so that a model
+broken in two ways stays `NN_MODEL_ERR_FORMAT`.  On this board, with no
+verifier, the walk is again the only thing in front of those reads; how many
+entries there are is bounded only by the file (512 KB).  The pinned model
+(blazeface, rank 4, operator lists <= 3) passes unchanged.  Cost: +592 B of
+Flash (`shell.elf` text 371,380 -> 371,972 B).
+
 **[!] The order matters and is not an implementation detail.**  Loading the
 plugin first would destroy the previous one's state at the fixed reservation
 before knowing whether the model that needs it can be built, and a backend that

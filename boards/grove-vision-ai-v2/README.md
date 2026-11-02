@@ -2454,6 +2454,33 @@ right after the schema version.  Cost: ITCM 0 B (the check is forced inline into
 `test/host_tests.sh` runs the gate on generated files wrong in exactly one way
 (`cmake/fixtures/run_model_io_gate_tests.py`).
 
+**The same walk covers the whole graph, lengths before elements (issue #178).**
+The verifier checks a scalar vector (a shape, an operator's tensor list) in O(1),
+does not count it as a table, and accepts many vector entries naming one table,
+so a model within its 4,096 visits could still hand `AllocateTensors()` ~1e8
+reads (one 65,000-entry shape named by 1,900 tensor entries, one 65,000-input
+operator named by 2,000 operator entries, 535 KB).  `nn_tflm_model_io_check()`
+now also refuses, before the resolver: a subgraph without tensors, an operator
+without an inputs or outputs list, any operator list (inputs / outputs /
+intermediates) longer than 64 -- its length judged before any element is read --
+or naming a tensor that does not exist (`NN_MODEL_ERR_FORMAT`, -7; TFLM's
+planner indexes its records with these unchecked, and this board's ethos-u
+`Prepare()` looks at no more than `inputs->size() > 0`), and any tensor of rank
+above 6, TFLM's `RuntimeShape::kMaxSmallSize` (`NN_MODEL_ERR_TENSOR`, -4).  An
+internal tensor's dimension VALUES are still not read (Vela's reach 2.2 M).  The
+one exception to lengths-first: subgraph 0's two I/O lists are walked once, one
+compare per entry, before their count is judged (at most ~128K entries in a 512
+KB file), so that a model broken in two ways stays `NN_MODEL_ERR_FORMAT`.
+Every pinned and SDK Vela model passes unchanged (subgraph 1, rank <= 4,
+operator lists <= 9).  Cost: ITCM 0 B (`check_placement_budget`: used 240,640 B,
+free 21,504 B, as before), `.text_cold` +360 B.  [!] Keeping ITCM at 0 needed one
+spelling: the generated `SubGraph::operators()`, called from the walk as well as
+from `SubGraph::Verify()`, was outlined into `.text` (+16 B ITCM), so the walk
+reads the field through the `Table::GetPointer<const void *>` instance this build
+already outlines (`nn_tflm_sg_operators()`).  Out of scope by decision: the
+payload walk's work per operator entry (#179) and the per-channel quantization
+copy (#180).
+
 ### The model is a blob, opened by name (#93, #49 Step 4a)
 
 `nn model load --name cls` asks the asset store for the blob called `cls` and parses what it
@@ -2637,10 +2664,15 @@ on-board verifier and the wio-lite-ai and f746g-disco host gates use too
   the whole stack" -- true only if depth followed the data, which it does not.)
 - **The table count bounds the verifier's own work**: verification VISITS, which
   flatbuffers does not deduplicate, so a small file can name one sub-table from
-  many vector entries and multiply them.  It is not a bound on the whole load:
-  the I/O walk after it is bounded by its own order (structure, count, rank,
-  values -- at most `NN_MAX_IO` x `NN_MAX_DIMS` reads per list), and
-  `AllocateTensors()` is another matter.
+  many vector entries and multiply them.  Through the walk after it, it also
+  bounds the load's shape, operator-list and index reads (issue #178): every
+  tensor and operator entry is one visit, and the walk reads each scalar
+  vector's length before its elements -- one rank compare per tensor entry, at
+  most 3 x 64 list reads per operator entry, so at most 4,096 x 192 reads --
+  and what it passes bounds `AllocateTensors()`'s passes over the same vectors
+  the same way.  Not the whole of `AllocateTensors()`: the per-operator
+  scratch-request walk and the greedy memory planner are quadratic in tensors
+  and operators, so the load is bounded by visits squared x small constants.
 - **Measured** on the host: the classification model needs **depth 4 and 19
   tables** (Vela folds the graph into one custom operator); every pinned and
   SDK model found needs depth 4 and at most 785 (TFLM mobilenet_v2 224; the SDK

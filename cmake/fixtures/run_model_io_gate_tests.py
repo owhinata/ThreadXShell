@@ -30,6 +30,25 @@ exactly one way, and asserts the verdict AND which check gave it:
   vt_shared_4097    4097 visits of 5 distinct tables (one Buffer named 4093
                     times): the bound is on visits, as the header says
 
+And the rest of the graph (issue #178): one ADD operator and/or tensors that are
+not graph I/O, at the limits NN_TFLM_MAX_OP_TENSORS (64) and
+NN_TFLM_MAX_TENSOR_RANK (6):
+
+  op_in_64 / op_out_64 / op_int_64   controls: the walk passes (each list at 64)
+  op_in_neg1 / t_rank_6 / sg1_ok     controls: -1 in inputs, an internal rank 6, a
+                                     second subgraph with a tensor and no operator
+  op_in_65 / op_out_65 / op_int_65   NN_MODEL_ERR_FORMAT: a list one over 64
+  op_in_oob / op_int_oob             NN_MODEL_ERR_FORMAT: an index == the tensor count
+  op_out_neg1 / op_int_neg1          NN_MODEL_ERR_FORMAT: -1 outside inputs
+  op_no_inputs / op_no_outputs /     NN_MODEL_ERR_FORMAT: a missing list / vector
+  sg1_no_tensors
+  t_rank_7                           NN_MODEL_ERR_TENSOR: an internal tensor's rank
+  op_in_65000_shared                 NN_MODEL_ERR_FORMAT within WITNESS_SECONDS:
+  t_shape_65000_shared               NN_MODEL_ERR_TENSOR within WITNESS_SECONDS:
+                                     4000 entries naming one 65,000-entry vector --
+                                     the walk reads lengths before elements, so a
+                                     regression to element-first fails on time
+
 And the depth half of the header's claim: schema_table_depth.py runs on the
 schema.fbs the gate was built from (the first -I directory holding one, else the
 repo's lib/tflite-micro, the tree a tflm build generates from) and fails on a
@@ -52,6 +71,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GEN_SRC = os.path.join(HERE, "model_io", "gen_model_io_fixtures.cc")
@@ -86,7 +106,43 @@ CASES = [
     ("vt_tables_4096.tflite", None),
     ("vt_tables_4097.tflite", VERIFY),
     ("vt_shared_4097.tflite", VERIFY),
+    # The rest of the graph (issue #178): every operator's tensor lists, at most
+    # NN_TFLM_MAX_OP_TENSORS (64) long and naming tensors that exist, and every
+    # tensor's rank, at most NN_TFLM_MAX_TENSOR_RANK (6).
+    ("op_in_64.tflite", None),
+    ("op_out_64.tflite", None),
+    ("op_int_64.tflite", None),
+    ("op_in_65.tflite", FORMAT),
+    ("op_out_65.tflite", FORMAT),
+    ("op_int_65.tflite", FORMAT),
+    ("op_in_neg1.tflite", None),
+    ("op_in_oob.tflite", FORMAT),
+    ("op_out_neg1.tflite", FORMAT),
+    ("op_int_neg1.tflite", FORMAT),
+    ("op_int_oob.tflite", FORMAT),
+    ("op_no_inputs.tflite", FORMAT),
+    ("op_no_outputs.tflite", FORMAT),
+    ("t_rank_6.tflite", None),
+    ("t_rank_7.tflite", TENSOR),
+    ("sg1_ok.tflite", None),
+    ("sg1_no_tensors.tflite", FORMAT),
+    # The walk's work bound: 4000 entries naming one 65,000-entry vector.  Read
+    # length-first each is refused at its first entry; read element-first each
+    # costs 2.6e8 reads, which WITNESS_SECONDS turns into a failure.
+    ("op_in_65000_shared.tflite", FORMAT),
+    ("t_shape_65000_shared.tflite", TENSOR),
 ]
+
+# The wall-time ceiling on the two "_shared" witnesses: the fastest of
+# WITNESS_RUNS gate runs (the file read and the verifier included), so one run
+# slowed by a loaded host does not fail it.  Length-first they take 1..5 ms on the
+# host; the operator witness read element-first took ~0.27 s (2.6e8 reads).  A
+# loop the host compiler vectorizes can stay under any ceiling (measured: the
+# shape witness read element-first stayed ~5 ms), so the time is a backstop for
+# the order; the verdicts above are the rule.
+WITNESSES = ("op_in_65000_shared.tflite", "t_shape_65000_shared.tflite")
+WITNESS_SECONDS = 0.1
+WITNESS_RUNS = 3
 
 REPO = os.path.dirname(os.path.dirname(HERE))
 DEPTH_TOOL = os.path.join(HERE, "model_io", "schema_table_depth.py")
@@ -182,8 +238,13 @@ def main():
         subprocess.run([gen, tmp], check=True)
 
         for name, want in CASES:
-            p = subprocess.run([gate_path, os.path.join(tmp, name)],
-                               capture_output=True, text=True)
+            took = None
+            for _ in range(WITNESS_RUNS if name in WITNESSES else 1):
+                t0 = time.monotonic()
+                p = subprocess.run([gate_path, os.path.join(tmp, name)],
+                                   capture_output=True, text=True)
+                dt = time.monotonic() - t0
+                took = dt if took is None else min(took, dt)
             text = p.stdout + p.stderr
             if want is None:
                 ok = OK_LINE[args.style] in text \
@@ -202,6 +263,10 @@ def main():
                     and not any(c in text for c in others) \
                     and OK_LINE[args.style] not in text
                 why = f"rc 1 with {want} (and no other code)"
+            if name in WITNESSES:
+                ok = ok and took < WITNESS_SECONDS
+                why += (f" within {WITNESS_SECONDS} s (fastest of {WITNESS_RUNS}: "
+                        f"{took:.3f} s)")
             if ok:
                 print(f"  ok   {args.gate} {name}: {why}")
             else:

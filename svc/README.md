@@ -158,18 +158,40 @@ part-way through it would otherwise leave entries the destructor calls as functi
 pointers.  What a model's I/O must satisfy before it is planned is in
 `nn_tflm_model_check.h`, which both backends and the three host gates
 (`verify_tflite` on wio-lite-ai and f746g-disco, `verify_vela_model` on
-grove-vision-ai-v2) call (issue #175): subgraph 0's input / output lists present
-and naming tensors that exist (`NN_MODEL_ERR_FORMAT`), and every dimension inside
-0..65535, the range of `struct nn_tensor`'s 16-bit dims (`NN_MODEL_ERR_DIMS`, the
-predicate `nn_tensor_dim_fits()` in `nn.h`, tied to the field's width at compile
-time) -- checked on the model, before `AllocateTensors()`, and again on the
-planned tensors before they are published.  The walk runs in a fixed order:
-structure (`NN_MODEL_ERR_FORMAT`), then the count of each I/O list (1..`NN_MAX_IO`,
-`NN_MODEL_ERR_SHAPE`), then each I/O tensor's rank (<= `NN_MAX_DIMS`,
-`NN_MODEL_ERR_TENSOR`), then the values (`NN_MODEL_ERR_DIMS`) -- so its work is
-one comparison per list entry plus at most `NN_MAX_IO` x `NN_MAX_DIMS` reads,
-whatever the model declares; the SHAPE and TENSOR checks after planning stay as
-the backstop and give the same codes.  The same header holds the bounded
+grove-vision-ai-v2) call (issues #175, #178).  The walk runs in a fixed order:
+
+1. Structure (`NN_MODEL_ERR_FORMAT`): subgraph 0's input / output lists present
+   and naming tensors that exist; every subgraph has a tensor vector; every
+   operator present has an inputs and an outputs list, each of its inputs /
+   outputs / intermediates is at most `NN_TFLM_MAX_OP_TENSORS` (64) long --
+   lengths judged before any element is read -- and every index names a tensor
+   of its subgraph (or -1, the optional tensor, in inputs).  TFLM itself range-checks
+   none of these indices: its planner writes per-tensor records through them.
+2. The count of each I/O list (1..`NN_MAX_IO`, `NN_MODEL_ERR_SHAPE`).
+3. Rank (`NN_MODEL_ERR_TENSOR`): every tensor of every subgraph at most
+   `NN_TFLM_MAX_TENSOR_RANK` (6, TFLM's `RuntimeShape::kMaxSmallSize`, which
+   TFLM only DCHECKs), each I/O tensor at most `NN_MAX_DIMS`.  Only the length of
+   an internal tensor's shape is read, never its values (Vela's internal tensors
+   reach 2.2 M).
+4. The I/O values: every dimension inside 0..65535, the range of `struct
+   nn_tensor`'s 16-bit dims (`NN_MODEL_ERR_DIMS`, the predicate
+   `nn_tensor_dim_fits()` in `nn.h`, tied to the field's width at compile time).
+
+All of it runs on the model, before `AllocateTensors()`; the SHAPE / TENSOR /
+DIMS checks on the planned tensors stay as the backstop and give the same codes.
+The order is what bounds the shape, operator-list and index reads of a load:
+the verifier checks a scalar vector in O(1), does not count it as a table and
+accepts many entries naming one table, so a 512 KB file could hand
+`AllocateTensors()` ~1e8 shape and list reads behind the 4,096 visits.  Lengths
+first, the walk does one compare per tensor entry and at most 3 + 3 x 64 reads
+per operator entry, each entry a verifier visit -- at most 4,096 x 192 list
+reads -- and what it passes bounds TFLM's own passes over the same vectors the
+same way.  It does not bound all of `AllocateTensors()`: the per-operator
+scratch-request walk and the greedy memory planner are quadratic in tensors and
+operators, so the whole load is bounded by visits squared x small constants.
+The one exception to lengths-first: subgraph 0's two I/O lists are walked once,
+one compare per entry, before their count is judged (at most ~128K entries in a
+512 KB file), so that a model broken in two ways stays `NN_MODEL_ERR_FORMAT`.  The same header holds the bounded
 flatbuffer verifier, `nn_tflm_verify_model_buffer()` (depth 16, 4,096 table
 visits, nested-flatbuffer check off): the tflm backend runs it under
 `NN_TFLM_VERIFY` (f746g-disco), `nn/ethosu/npu_verify.h` delegates to it behind
@@ -178,8 +200,10 @@ passes what a board's verifier refuses.  Its header states what each limit
 bounds: depth is bounded by the schema (acyclic, longest table chain 6 in both
 pinned schemas; `cmake/fixtures/model_io/schema_table_depth.py` reruns it), so
 16 is the guard for a future cycle; the table count bounds the verifier's own
-work (visits, which shared sub-tables multiply) -- not the whole load's: the I/O
-walk is bounded by its order, `AllocateTensors()` separately.  Neither keeps storage of its own; the board supplies everything
+work (visits, which shared sub-tables multiply) and, through the walk above, the
+load's shape and list reads.  wio-lite-ai runs no verifier, so there only the file's length bounds the
+entries.  Out of scope by decision: grove-vision-ai-v2's payload walk per operator
+entry (#179) and the per-channel quantization copy (#180).  Neither keeps storage of its own; the board supplies everything
 that is a fact about its memory or its core, bound at link time (the callers of
 `nn.h` pass no context to carry it):
 
@@ -223,7 +247,7 @@ that board builds.
 
 | File | What it is |
 |---|---|
-| `nn_ethosu.cc` | The backend (`nn_backend_vt_selected`). A model is interpreted IN PLACE, inside the read window the board declares: no `load_region()`, no staging slot, no second buffer; the caller's lease keeps the bytes in place (`nn.h`). The checks run in one order -- window, length, alignment, identifier, bounded verifier, schema version, payload walk, the model's I/O (`nn_tflm_model_check.h`), resolver, AllocateTensors, the I/O rule -- each refusal its own code (`NN_MODEL_ERR_WINDOW` / `_IDENT` / `_PAYLOAD` for the ones only an in-place backend gives; `_DIMS` as tflm). It tells the cache protocol which arena is live and closes out each `Invoke()` with its backstop. Transactional like tflm: a refused model leaves the previous one (rebuilt from the same bytes) or the empty state. Uses `svc/nn/tflm/nn_tflm_glue.h` with its state named. |
+| `nn_ethosu.cc` | The backend (`nn_backend_vt_selected`). A model is interpreted IN PLACE, inside the read window the board declares: no `load_region()`, no staging slot, no second buffer; the caller's lease keeps the bytes in place (`nn.h`). The checks run in one order -- window, length, alignment, identifier, bounded verifier, schema version, payload walk, the model's graph and I/O (`nn_tflm_model_check.h`), resolver, AllocateTensors, the I/O rule -- each refusal its own code (`NN_MODEL_ERR_WINDOW` / `_IDENT` / `_PAYLOAD` for the ones only an in-place backend gives; `_DIMS` as tflm). It tells the cache protocol which arena is live and closes out each `Invoke()` with its backstop. Transactional like tflm: a refused model leaves the previous one (rebuilt from the same bytes) or the empty state. Uses `svc/nn/tflm/nn_tflm_glue.h` with its state named. |
 | `nn_ethosu.h` | C, for the adapter: `nn_ethosu_strerror()`, the sentences for the in-place refusals (every other code goes to `nn_model_strerror()`). |
 | `nn_ethosu_state.h` | The state type and the board facts (name prefix, the read window). Needs `NN_TFLM_OPS_ETHOSU_PROFILE`: the resolver's size is part of the type. |
 | `nn_ethosu_mem.h` | The arena declaration, sized by the board's `NN_ETHOSU_ARENA_KB`. |
@@ -433,7 +457,7 @@ relative to `svc/`.
 | `nn/nn_desc` | `nn_tensor` -> `svc/nn/tensor.h` descriptor, for the boards that use `nn.h`. |
 | `nn/nn_input_contract` | wio-lite-ai's and f746g-disco's camera input (issue #162): `nn_input_admit()`, whether a camera can fill the input tensor (float32 or int8, 1xHxWx1/3, a positive normal int8 scale and an int8 zero point, a 4-byte aligned float32 buffer, the bytes for the shape in 64 bits; each refusal its own reason), and the inline per-element conversion (`nn_input_f32()`, `nn_input_i8()`: one explicit fused multiply-add for the `nn norm` range, then 1/scale, a +-255 limit, +-0.5 toward zero, zero point, saturation). The boards keep only how a pixel is sampled; grove-vision-ai-v2 does not use it. Host-tested against the target's instruction sequence. |
 | `nn/nn_input_codes` | Those reasons as the start codes and sentences both boards report (`NN_INPUT_START_ERR_*`: -3, -11, -18..-25), which each board's `nn_camera.h` takes by name. |
-| `nn/tflm/` | The one tflite-micro backend of wio-lite-ai and f746g-disco (issue #161; built only with `CONFIG_NN_BACKEND=tflm`, into the board's `tflm` library): `nn_tflm.cc` (the vtable), `nn_tflm_state.h` (its state type and facts, defined by the board), `nn_tflm_mem.h` (the buffers the board places; see [The inference layer](#the-inference-layer-is-one-implementation-issue-161)), `nn_tflm_ops.h` (the op profiles, shared with each board's host `verify_tflite`; includes the one-operator `ethosu` profile), `nn_tflm_fit.h` (which slot a model range may be adopted from, never the live one; host-tested), `nn_tflm_model_check.h` (the bounded flatbuffer verifier and its limits, and the model's I/O before planning -- lists present, indices in range, every dimension within 0..65535 -- shared with the Ethos-U backend and the three host gates; issue #175), `nn_tflm_glue.h` (the glue that does not depend on staging -- descriptors, name, empty state, op resolver, interpreter destruction -- included into each TFLM-based backend's own translation unit with its state object named by `NN_TFLM_GLUE_STATE` / `NN_TFLM_GLUE_FACTS`; issue #169) and `cxx_runtime.cc` (the C++ runtime shim). One of the two directories under `svc/` that include TFLM headers (the other is `nn/ethosu/`). |
+| `nn/tflm/` | The one tflite-micro backend of wio-lite-ai and f746g-disco (issue #161; built only with `CONFIG_NN_BACKEND=tflm`, into the board's `tflm` library): `nn_tflm.cc` (the vtable), `nn_tflm_state.h` (its state type and facts, defined by the board), `nn_tflm_mem.h` (the buffers the board places; see [The inference layer](#the-inference-layer-is-one-implementation-issue-161)), `nn_tflm_ops.h` (the op profiles, shared with each board's host `verify_tflite`; includes the one-operator `ethosu` profile), `nn_tflm_fit.h` (which slot a model range may be adopted from, never the live one; host-tested), `nn_tflm_model_check.h` (the bounded flatbuffer verifier and its limits, and the model's graph before planning -- every list present, at most 64 long and in range, every tensor's rank, every I/O dimension within 0..65535 -- shared with the Ethos-U backend and the three host gates; issues #175, #178), `nn_tflm_glue.h` (the glue that does not depend on staging -- descriptors, name, empty state, op resolver, interpreter destruction -- included into each TFLM-based backend's own translation unit with its state object named by `NN_TFLM_GLUE_STATE` / `NN_TFLM_GLUE_FACTS`; issue #169) and `cxx_runtime.cc` (the C++ runtime shim). One of the two directories under `svc/` that include TFLM headers (the other is `nn/ethosu/`). |
 | `nn/ethosu/` | grove-vision-ai-v2's backend behind `nn/nn.c` (issue #169): `nn_ethosu.cc` (the vtable; models interpreted in place inside the board's read window), its state, facts and arena headers, the bounded verifier's entry and length floor (`npu_verify.h`; the limits are `nn/tflm/nn_tflm_model_check.h`'s), the payload locator and model refusal (`npu_model_scan`) and the command-stream walk (`npu_payload`), which the host `verify_vela_model` compiles from the same files, and the arena ownership protocol with the driver's cache hooks (`npu_cache`) (see [The Ethos-U backend](#the-ethos-u-backend-issue-169)). |
 | `nn/nn_svc_adapter.h` | Static-inline helpers every adapter uses to build a result and an `nn info` line. |
 | `nn/nn_detail.h` | The bound on a board's `nn` explanation text and its build-time check. |

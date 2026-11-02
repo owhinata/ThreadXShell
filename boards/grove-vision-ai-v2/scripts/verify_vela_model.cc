@@ -69,10 +69,13 @@
  * firmware refuses with NN_MODEL_ERR_SHAPE / NN_MODEL_ERR_TENSOR. */
 #include "nn_ethosu_io.h"
 
-/* And the I/O dims rule both backends apply to the model before planning it
- * (svc/nn/tflm/nn_tflm_model_check.h, issue #175): an I/O list that is missing or
- * names a tensor that does not exist (NN_MODEL_ERR_FORMAT on the board), or a
- * dimension outside 0..65535 (NN_MODEL_ERR_DIMS). */
+/* And the graph walk both backends apply to the model before planning it
+ * (svc/nn/tflm/nn_tflm_model_check.h, issues #175, #178): a graph that does not
+ * hold together -- an I/O list, a subgraph's tensors or an operator's tensor list
+ * missing, an operator list longer than NN_TFLM_MAX_OP_TENSORS, an index naming a
+ * tensor that does not exist (NN_MODEL_ERR_FORMAT on the board) -- a tensor of
+ * too high a rank (NN_MODEL_ERR_TENSOR), or an I/O dimension outside 0..65535
+ * (NN_MODEL_ERR_DIMS). */
 #include "nn_tflm_model_check.h"
 
 #include <cstdarg>
@@ -411,8 +414,9 @@ int main(int argc, char **argv)
 		printf("RESULT   : REJECT\n");
 		return 1;
 	case NN_MODEL_ERR_TENSOR:
-		printf("  FAIL   an input/output tensor declares more than %d dimensions "
-		       "(NN_MODEL_ERR_TENSOR on the board)\n", NN_MAX_DIMS);
+		printf("  FAIL   a tensor declares more than %u dimensions, or an "
+		       "input/output tensor more than %d (NN_MODEL_ERR_TENSOR on the "
+		       "board)\n", NN_TFLM_MAX_TENSOR_RANK, NN_MAX_DIMS);
 		printf("RESULT   : REJECT\n");
 		return 1;
 	case NN_MODEL_ERR_DIMS:
@@ -422,9 +426,11 @@ int main(int argc, char **argv)
 		printf("RESULT   : REJECT\n");
 		return 1;
 	default:
-		printf("  FAIL   subgraph 0 has no tensors or no input/output list, or one "
-		       "names a tensor that does not exist (NN_MODEL_ERR_FORMAT on the "
-		       "board)\n");
+		printf("  FAIL   the graph does not hold together: subgraph 0 has no "
+		       "input/output list, a subgraph has no tensors, or an operator's "
+		       "tensor list is missing, longer than %u, or names a tensor that "
+		       "does not exist (NN_MODEL_ERR_FORMAT on the board)\n",
+		       NN_TFLM_MAX_OP_TENSORS);
 		printf("RESULT   : REJECT\n");
 		return 1;
 	}

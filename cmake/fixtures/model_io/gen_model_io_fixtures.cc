@@ -13,7 +13,7 @@
  * flatbuffers and schema.  Nothing is checked in as a binary: every run writes
  * the files again from this source.
  *
- * Each model has zero operators and two int8 tensors (input t0, output t1) over an
+ * Each model below has zero operators and two int8 tensors (input t0, output t1) over an
  * empty buffer 0 -- the smallest graph that is a well-formed flatbuffer, passes
  * the verifier and the schema version, and has graph I/O.  Exactly one thing is
  * wrong in each negative file:
@@ -46,6 +46,43 @@
  *                           of 5 distinct tables                    -> verifier
  *                           (the bound is on visits, which sharing multiplies)
  *
+ * And the rest of the graph (issue #178): the same two I/O tensors, plus one ADD
+ * operator (in every tflm profile; the Ethos-U gate judges the walk before the
+ * operator) and/or more tensors that are not graph I/O.  The limits are in the
+ * names, NN_TFLM_MAX_OP_TENSORS (64) and NN_TFLM_MAX_TENSOR_RANK (6):
+ *
+ *   op_in_64.tflite         control: ADD with 64 inputs (all t0)  -- the limit
+ *   op_out_64.tflite        control: 64 outputs (all t1)
+ *   op_int_64.tflite        control: 64 intermediates (all t1)
+ *   op_in_65.tflite         65 inputs                               -> FORMAT
+ *   op_out_65.tflite        65 outputs                              -> FORMAT
+ *   op_int_65.tflite        65 intermediates                        -> FORMAT
+ *   op_in_neg1.tflite       control: inputs [0, -1], TFLM's optional tensor
+ *   op_in_oob.tflite        inputs [0, 2], 2 == the tensor count    -> FORMAT
+ *   op_out_neg1.tflite      outputs [-1] (optional is inputs only)  -> FORMAT
+ *   op_int_neg1.tflite      intermediates [-1] (likewise)           -> FORMAT
+ *   op_int_oob.tflite       intermediates [2], 2 == the tensor count -> FORMAT
+ *   op_no_inputs.tflite     ADD with no inputs vector               -> FORMAT
+ *   op_no_outputs.tflite    ADD with no outputs vector              -> FORMAT
+ *   t_rank_6.tflite         control: a third tensor, not I/O, of rank 6
+ *   t_rank_7.tflite         that tensor of rank 7                   -> TENSOR
+ *   sg1_ok.tflite           control: a second subgraph with a tensor and no
+ *                           operators (its I/O lists are not walked, see the
+ *                           header)
+ *   sg1_no_tensors.tflite   a second subgraph with no tensor vector -> FORMAT
+ *
+ * And two witnesses of the walk's WORK bound, built the way that defeated the
+ * verifier's (a scalar vector is checked in O(1) and not counted, and many
+ * entries may name one table):
+ *
+ *   op_in_65000_shared.tflite  4000 operator entries naming ONE ADD with 65,000
+ *                              inputs (all valid)                   -> FORMAT
+ *   t_shape_65000_shared.tflite 4000 tensor entries naming ONE tensor whose
+ *                              shape has 65,000 dimensions (all 1)  -> TENSOR
+ *
+ * Read element-first, each costs 2.6e8 reads; read length-first, one compare.
+ * Every file stays under 512 KB (checked here) and within the 4096 visits.
+ *
  * Usage: gen_model_io_fixtures <out-dir>
  */
 #include "tensorflow/lite/schema/schema_generated.h"
@@ -59,6 +96,10 @@
  * follow silently. */
 static_assert(NN_TFLM_VERIFY_MAX_TABLES == 4096u,
               "vt_tables_4096 / _4097 are named for a 4096-table limit");
+static_assert(NN_TFLM_MAX_OP_TENSORS == 64u,
+              "op_in_64 / op_*_65 are named for a 64-entry operator list limit");
+static_assert(NN_TFLM_MAX_TENSOR_RANK == 6u,
+              "t_rank_6 / t_rank_7 are named for a rank-6 limit");
 
 #include <cstdint>
 #include <cstdio>
@@ -76,14 +117,30 @@ struct spec {
 	bool                 no_inputs;
 	uint32_t             buffers;      /* Buffer tables (0 means 1, as before) */
 	bool                 shared;       /* every buffers[] entry names ONE table */
+	/* issue #178 -- all zero / empty: the zero-operator model above. */
+	uint32_t             op_entries;   /* operator entries, all naming ONE ADD */
+	std::vector<int32_t> op_in;
+	std::vector<int32_t> op_out;
+	std::vector<int32_t> op_int;       /* empty: no intermediates vector */
+	bool                 op_no_inputs;
+	bool                 op_no_outputs;
+	uint32_t             extra_entries; /* tensor entries naming ONE extra tensor */
+	std::vector<int32_t> extra_shape;
+	bool                 sg1_no_tensors; /* a second subgraph, no tensor vector */
+	bool                 sg1_ok;         /* a second subgraph, one tensor, no ops */
 };
 
-/* The verifier's table visits for a model built by write_model(). */
+/* The verifier's table visits for a model built by write_model(): every table
+ * start, once per entry naming it. */
 uint32_t tables_of(const spec &sp)
 {
 	const uint32_t nb = sp.buffers ? sp.buffers : 1u;
 
-	return 2u /* Model, SubGraph */ + (sp.out_shape.empty() ? 1u : 2u) + nb;
+	return 2u /* Model, SubGraph */ + (sp.out_shape.empty() ? 1u : 2u) + nb +
+	       sp.extra_entries + sp.op_entries +
+	       (sp.op_entries ? 1u : 0u) /* the ADD OperatorCode */ +
+	       (sp.sg1_no_tensors ? 1u : 0u) /* the second SubGraph */ +
+	       (sp.sg1_ok ? 2u : 0u) /* the second SubGraph and its Tensor */;
 }
 
 bool write_model(const std::string &dir, const spec &sp)
@@ -104,15 +161,57 @@ bool write_model(const std::string &dir, const spec &sp)
 			fbb, fbb.CreateVector(sp.out_shape), tflite::TensorType_INT8, 0,
 			fbb.CreateString("out")));
 
+	if (sp.extra_entries) {
+		/* ONE table, named by every entry: the verifier visits it each time. */
+		const auto extra = tflite::CreateTensor(
+			fbb, fbb.CreateVector(sp.extra_shape), tflite::TensorType_INT8, 0,
+			fbb.CreateString("internal"));
+
+		for (uint32_t i = 0; i < sp.extra_entries; i++)
+			tensors.push_back(extra);
+	}
+
+	typedef flatbuffers::Offset<flatbuffers::Vector<int32_t>> ivec;
 	const auto tv   = fbb.CreateVector(tensors);
-	const auto inv  = sp.no_inputs ? flatbuffers::Offset<flatbuffers::Vector<int32_t>>()
-	                               : fbb.CreateVector(sp.inputs);
+	const auto inv  = sp.no_inputs ? ivec() : fbb.CreateVector(sp.inputs);
 	const auto outv = fbb.CreateVector(sp.outputs);
-	const auto ops  = fbb.CreateVector(std::vector<flatbuffers::Offset<tflite::Operator>>());
+	std::vector<flatbuffers::Offset<tflite::Operator>> opv;
+	std::vector<flatbuffers::Offset<tflite::OperatorCode>> codev;
+
+	if (sp.op_entries) {
+		const auto op = tflite::CreateOperator(
+			fbb, 0 /* the ADD code below */,
+			sp.op_no_inputs ? ivec() : fbb.CreateVector(sp.op_in),
+			sp.op_no_outputs ? ivec() : fbb.CreateVector(sp.op_out),
+			tflite::BuiltinOptions_NONE, 0, 0,
+			tflite::CustomOptionsFormat_FLEXBUFFERS, 0,
+			sp.op_int.empty() ? ivec() : fbb.CreateVector(sp.op_int));
+
+		for (uint32_t i = 0; i < sp.op_entries; i++)
+			opv.push_back(op);
+		codev.push_back(tflite::CreateOperatorCode(
+			fbb, (int8_t)tflite::BuiltinOperator_ADD, 0, 1, tflite::BuiltinOperator_ADD));
+	}
+
+	const auto ops  = fbb.CreateVector(opv);
 	const auto sg   = tflite::CreateSubGraph(fbb, tv, inv, outv, ops, fbb.CreateString("main"));
-	const auto sgs  = fbb.CreateVector(std::vector<flatbuffers::Offset<tflite::SubGraph>>{ sg });
-	const auto codes =
-		fbb.CreateVector(std::vector<flatbuffers::Offset<tflite::OperatorCode>>());
+	std::vector<flatbuffers::Offset<tflite::SubGraph>> sgv{ sg };
+
+	if (sp.sg1_ok) {
+		const auto t = tflite::CreateTensor(fbb, fbb.CreateVector(std::vector<int32_t>{ 1, 4 }),
+		                                    tflite::TensorType_INT8, 0,
+		                                    fbb.CreateString("sg1"));
+
+		sgv.push_back(tflite::CreateSubGraph(
+			fbb, fbb.CreateVector(std::vector<flatbuffers::Offset<tflite::Tensor>>{ t }),
+			fbb.CreateVector(std::vector<int32_t>{ 0 }),
+			fbb.CreateVector(std::vector<int32_t>{ 0 })));
+	}
+	if (sp.sg1_no_tensors)
+		sgv.push_back(tflite::CreateSubGraph(fbb, 0, fbb.CreateVector(std::vector<int32_t>{}),
+		                                     fbb.CreateVector(std::vector<int32_t>{})));
+	const auto sgs  = fbb.CreateVector(sgv);
+	const auto codes = fbb.CreateVector(codev);
 	std::vector<flatbuffers::Offset<tflite::Buffer>> bv;
 	const uint32_t nb = sp.buffers ? sp.buffers : 1u;
 	const auto one = tflite::CreateBuffer(fbb);
@@ -126,6 +225,14 @@ bool write_model(const std::string &dir, const spec &sp)
 	tflite::FinishModelBuffer(fbb, model);
 
 	const std::string path = dir + "/" + sp.file;
+
+	/* The largest file a gate takes is 512 KB: a witness above it would be
+	 * refused for its length and prove nothing about the walk. */
+	if (fbb.GetSize() > 512u * 1024u) {
+		fprintf(stderr, "gen_model_io_fixtures: %s is %u bytes, over 512 KB\n",
+		        sp.file, (unsigned)fbb.GetSize());
+		return false;
+	}
 	FILE *f = fopen(path.c_str(), "wb");
 
 	if (!f) {
@@ -168,7 +275,74 @@ int main(int argc, char **argv)
 		  lim - 3u, true },
 	};
 
+	/* issue #178: the I/O of the control model, plus an operator and/or tensors. */
+	const uint32_t opl = NN_TFLM_MAX_OP_TENSORS;
+	const uint32_t rank = NN_TFLM_MAX_TENSOR_RANK;
+	const uint32_t witness_entries = 4000u;   /* within the 4096 visits, see tables_of */
+	auto graph = [](const char *file) {
+		spec sp = { file, { 1, 4 }, { 1, 4 }, { 0 }, { 1 }, false };
+		return sp;
+	};
+	auto with_op = [&](const char *file, std::vector<int32_t> in,
+	                   std::vector<int32_t> out, std::vector<int32_t> inter) {
+		spec sp = graph(file);
+		sp.op_entries = 1u;
+		sp.op_in = in;
+		sp.op_out = out;
+		sp.op_int = inter;
+		return sp;
+	};
+	auto with_tensor = [&](const char *file, std::vector<int32_t> shape, uint32_t entries) {
+		spec sp = graph(file);
+		sp.extra_shape = shape;
+		sp.extra_entries = entries;
+		return sp;
+	};
+	std::vector<spec> graph_specs = {
+		with_op("op_in_64.tflite",   std::vector<int32_t>(opl, 0), { 1 }, {}),
+		with_op("op_out_64.tflite",  { 0 }, std::vector<int32_t>(opl, 1), {}),
+		with_op("op_int_64.tflite",  { 0 }, { 1 }, std::vector<int32_t>(opl, 1)),
+		with_op("op_in_65.tflite",   std::vector<int32_t>(opl + 1u, 0), { 1 }, {}),
+		with_op("op_out_65.tflite",  { 0 }, std::vector<int32_t>(opl + 1u, 1), {}),
+		with_op("op_int_65.tflite",  { 0 }, { 1 }, std::vector<int32_t>(opl + 1u, 1)),
+		with_op("op_in_neg1.tflite", { 0, -1 }, { 1 }, {}),
+		with_op("op_in_oob.tflite",  { 0, 2 }, { 1 }, {}),
+		with_op("op_out_neg1.tflite", { 0 }, { -1 }, {}),
+		with_op("op_int_neg1.tflite", { 0 }, { 1 }, { -1 }),
+		with_op("op_int_oob.tflite", { 0 }, { 1 }, { 2 }),
+		with_op("op_no_inputs.tflite", {}, { 1 }, {}),
+		with_op("op_no_outputs.tflite", { 0 }, {}, {}),
+		with_op("op_in_65000_shared.tflite", std::vector<int32_t>(65000, 0), { 1 }, {}),
+		with_tensor("t_rank_6.tflite", std::vector<int32_t>(rank, 1), 1u),
+		with_tensor("t_rank_7.tflite", std::vector<int32_t>(rank + 1u, 1), 1u),
+		with_tensor("t_shape_65000_shared.tflite", std::vector<int32_t>(65000, 1),
+		            witness_entries),
+		graph("sg1_ok.tflite"),
+		graph("sg1_no_tensors.tflite"),
+	};
+	/* The flags the constructors above do not take, set by name. */
+	for (spec &sp : graph_specs) {
+		const std::string f = sp.file;
+
+		sp.op_no_inputs   = f == "op_no_inputs.tflite";
+		sp.op_no_outputs  = f == "op_no_outputs.tflite";
+		sp.sg1_ok         = f == "sg1_ok.tflite";
+		sp.sg1_no_tensors = f == "sg1_no_tensors.tflite";
+		if (f == "op_in_65000_shared.tflite")
+			sp.op_entries = witness_entries;
+	}
+
 	for (const spec &sp : specs) {
+		if (!write_model(argv[1], sp))
+			return 1;
+		printf("%s: %u table visits\n", sp.file, (unsigned)tables_of(sp));
+	}
+	for (const spec &sp : graph_specs) {
+		if (tables_of(sp) > lim) {
+			fprintf(stderr, "gen_model_io_fixtures: %s needs %u table visits, over %u\n",
+			        sp.file, (unsigned)tables_of(sp), (unsigned)lim);
+			return 1;
+		}
 		if (!write_model(argv[1], sp))
 			return 1;
 		printf("%s: %u table visits\n", sp.file, (unsigned)tables_of(sp));

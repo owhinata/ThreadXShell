@@ -245,7 +245,7 @@ board README が正。
   データパス設定を書かない**（境界は**消費のされ方**）。
 - **op resolver は 1 個のまま**（**CMSIS-NN を持ち込まない**）。**境界の型変換はファイル側で剥がす。
   [!] Ethos-U backend の reload（`svc/nn/ethosu/nn_ethosu.cc`）は長さを取り `GetModel()` の前に境界付き verifier を通す**（**窓 → 長さ →
-  整列 → identifier → verifier → 走査**。**長さには下限も要り生アドレス形にも必須**、**limits は全ボード共通の `nn_tflm_model_check.h`、
+  整列 → identifier → verifier → 走査**。**長さには下限も要り生アドレス形にも必須**、**limits と load の walk は全ボード共通の `nn_tflm_model_check.h`（walk は長さを要素より先に見て内部テンソルの値は読まない、#178）、
   I/O 規則は `nn_ethosu_io.h` の 1 箇所でホストゲートと共有**）。**ペイロード検査も緩めない**（`COMMAND_STREAM` が 1 個かつ
   最後 / 対象は**入力テンソル 0** / `is_variable()` は拒否）。
 - **[!] `nn model load --name` はリースを切らさない**（`npu_hw_init()` 先 → 走査 → CRC → `nn_model_reload()` → plugin、**残らない失敗は必ず backend の release の後に `npu_hw_deinit()`**）。

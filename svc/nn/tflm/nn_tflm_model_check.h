@@ -5,17 +5,24 @@
 /**
  * @file    nn_tflm_model_check.h
  * @brief   What a TFLM model must satisfy before it is planned -- the bounded
- *          flatbuffer verifier and the I/O dims walk -- shared by both
- *          interpreting backends and by the three host gates (issue #175).
+ *          flatbuffer verifier and the graph walk (structure, lengths, ranks,
+ *          I/O dims) -- shared by both interpreting backends and by the three
+ *          host gates (issues #175, #178).
  *
  * TWO CHECKS, in the order a loader runs them:
  *
  *   nn_tflm_verify_model_buffer()  every offset in the buffer lands inside it,
  *                                  within the limits below (see "THE VERIFIER")
- *   nn_tflm_model_io_check()       subgraph 0's I/O is indexable, 1..NN_MAX_IO
- *                                  per list, rank <= NN_MAX_DIMS, and its
+ *   nn_tflm_model_io_check()       the graph holds together (every subgraph's
+ *                                  tensors, every operator's tensor lists, each
+ *                                  at most NN_TFLM_MAX_OP_TENSORS long and naming
+ *                                  only tensors that exist), subgraph 0's I/O is
+ *                                  1..NN_MAX_IO per list, every tensor's rank is
+ *                                  at most NN_TFLM_MAX_TENSOR_RANK (subgraph 0's
+ *                                  I/O at most NN_MAX_DIMS), and the I/O
  *                                  dimensions fit a descriptor -- in that order,
- *                                  so its work is constant per list entry
+ *                                  lengths before elements, so its work is a
+ *                                  small constant per table the verifier visited
  *
  * THE I/O CHECK: every input and output tensor of subgraph 0 has dimensions a
  * descriptor can hold (nn.h, nn_tensor_dim_fits(): 0..NN_TENSOR_DIM_MAX, the range
@@ -47,11 +54,64 @@
  * tensor vector and its input / output lists must be present, and every index
  * must lie inside the tensor vector, or the answer is NN_MODEL_ERR_FORMAT (a
  * model whose structure does not hold together -- TFLM would index out of range).
- * Structure is checked over both lists BEFORE anything else, so a model broken in
- * two ways is FORMAT; then the count (SHAPE), the rank (TENSOR) and the values
- * (DIMS), an order that keeps the walk's work constant (see the function).  On a board without a verifier this is the
- * trust GetModel() and AllocateTensors() already extend to the bytes, with the
- * index bounds now in front of them.
+ * The same holds for EVERY subgraph and EVERY operator (issue #178): TFLM's
+ * planner writes subgraph_allocation_info[index] for each operator input and
+ * output without a range check (micro_allocation_info.cc, MarkAllocationLifetimes)
+ * and reads eval_tensors[index] for each intermediate (ValidateSubgraph), and it
+ * hands a kernel a null inputs / outputs list as it found it.  So every subgraph
+ * must have a tensor vector; an operator vector may be absent or empty (TFLM's
+ * NumSubgraphOperators() reads that as no operators), but every operator present
+ * has an inputs and an outputs list; inputs name -1 (TFLM's optional tensor) or a
+ * tensor of the operator's subgraph, outputs and intermediates (which may be
+ * absent) a tensor only.  NOT checked: the inputs / outputs lists of a subgraph
+ * other than 0, neither their length nor their indices -- TFLM reads them only
+ * through a control-flow operator (IF / WHILE / CALL_ONCE, in
+ * MarkAllocationLifetimes), and no profile registers one (nn_tflm_ops.h), so a
+ * model that would use them is refused by the resolver; a profile that adds one
+ * has to extend this walk first.  Structure is checked BEFORE anything else, so a model
+ * broken in two ways is FORMAT; then the count (SHAPE), the rank (TENSOR) and the
+ * values (DIMS).  On a board without a verifier this is the trust GetModel() and
+ * AllocateTensors() already extend to the bytes, with the index bounds now in
+ * front of them.
+ *
+ * [!] LENGTHS BEFORE ELEMENTS: WHAT IT BOUNDS OF THE LOAD'S WORK (issue #178).  The
+ * verifier checks a scalar vector (a shape, an operator's tensor list) in O(1)
+ * and does not count it as a table, and it accepts many vector entries naming
+ * one table: a 535 KB file with one tensor (a 65,000-entry shape) named by 1,900
+ * tensor entries and one operator (65,000 inputs) named by 2,000 operator entries
+ * passed the 16 / 4096 verifier and the #175 walk, and then cost TFLM ~1.2e8
+ * shape reads and ~1.3e8 list reads per pass in AllocateTensors() -- the
+ * verifier's table count bounded none of it.  So this walk reads each scalar
+ * vector's LENGTH before any element and refuses one that is too long:
+ *
+ *   per tensor entry    one rank compare (shape()->size(); the internal tensors'
+ *                       dimension VALUES are never read -- Vela's internal
+ *                       tensors reach 2.2 M, a value rule would refuse them)
+ *   per operator entry  three length compares, then at most
+ *                       3 x NN_TFLM_MAX_OP_TENSORS index reads
+ *
+ * Every tensor and operator entry is one table visit of the verifier (a shared
+ * subgraph's are visited once per entry naming it), so behind the 16 / 4096
+ * verifier the walk reads at most 4096 x 3 x NN_TFLM_MAX_OP_TENSORS = 786,432
+ * list elements, and what it passes bounds TFLM's own passes over the SAME
+ * vectors -- shapes at most NN_TFLM_MAX_TENSOR_RANK per tensor entry, operator
+ * lists the same 3 x 64 per operator entry, so the shape, operator-list and
+ * index reads of a load are visits x a small constant.  That is not all of
+ * AllocateTensors(): MarkAllocationLifetimes() walks every scratch request for
+ * each operator (O(N x M), TFLM's own comment) and the greedy memory planner is
+ * quadratic in its buffers, both counted in tensors and operators, so the whole
+ * load is bounded by visits squared x small constants, not visits x a constant.
+ *
+ * [!] THE ONE EXCEPTION TO "LENGTHS FIRST": subgraph 0's two I/O lists are
+ * walked once by nn_tflm_io_list_ok() BEFORE their count is judged (one compare
+ * per entry, O(the list's length): at most ~128K entries in a 512 KB file, read
+ * once, never multiplied by sharing).  The order is kept so that a model broken
+ * in two ways stays FORMAT rather than SHAPE.
+ *
+ * wio-lite-ai runs no verifier: there nothing bounds the number
+ * of entries but the file, the trust described above.  (What this does not bound
+ * is outside it by decision: grove-vision-ai-v2's payload walk per operator entry,
+ * issue #179, and the per-channel quantization copy, issue #180.)
  *
  * THE VERIFIER (moved here from svc/nn/ethosu/npu_verify.h, which delegates to
  * it).  flatbuffers' defaults are depth 64 and a million tables; the limits here
@@ -73,10 +133,10 @@
  *   boards' host tests run it on the schema each gate was built from and fail
  *   if a cycle appears or the chain exceeds NN_TFLM_VERIFY_MAX_DEPTH).
  *
- *   max_tables IS THE VERIFIER'S OWN WORK BOUND, not the whole load's (the I/O
- *   walk below is bounded by its order; AllocateTensors() is another matter): the
- *   number of table VERIFICATION VISITS (each
- *   table start counts once per visit, not every byte the verifier reads).
+ *   max_tables IS THE VERIFIER'S OWN WORK BOUND, and through the walk the load's
+ *   (see "LENGTHS BEFORE ELEMENTS" above): the number of table VERIFICATION
+ *   VISITS (each table start counts once per visit, not every byte the verifier
+ *   reads).
  *   flatbuffers does not detect shared sub-tables, so a small crafted buffer can
  *   point many vector entries at one table at several levels and multiply the
  *   visits; a million would let a <= 512 KB file keep a console verifying for a
@@ -117,6 +177,8 @@
 #include "flatbuffers/verifier.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "tensorflow/lite/c/common.h"
+/* RuntimeShape::kMaxSmallSize, the rank NN_TFLM_MAX_TENSOR_RANK is tied to. */
+#include "tensorflow/lite/kernels/internal/runtime_shape.h"
 
 #include "nn.h"   /* NN_MODEL_ERR_*, NN_MAX_IO / NN_MAX_DIMS, nn_tensor_dim_fits() */
 
@@ -134,6 +196,35 @@
  *  table verification visits (the work bound; measured <= 785). */
 #define NN_TFLM_VERIFY_MAX_DEPTH   16u
 #define NN_TFLM_VERIFY_MAX_TABLES  4096u
+
+/*
+ * The longest tensor list (inputs, outputs or intermediates) one operator may
+ * carry (issue #178).  TFLM has no such constant (no kMaxTensorsPerOp in either
+ * pinned tree), so it is derived: measured over every pinned, SDK, TFLM-bundled
+ * and MLPerf model on the host, the longest list is 24 (inputs of
+ * UNIDIRECTIONAL_SEQUENCE_LSTM, which no profile registers) and 9 among
+ * operators a profile registers (an ethos-u operator of the SDK's yolo11); the
+ * schema's largest fixed arity, BIDIRECTIONAL_SEQUENCE_LSTM, is 48 inputs.  64
+ * passes all of them; a list past it is no model this runtime runs and is
+ * refused as NN_MODEL_ERR_FORMAT, as the verifier's own limit is.
+ */
+#define NN_TFLM_MAX_OP_TENSORS     64u
+
+/*
+ * The highest rank any tensor may declare (issue #178): TFLM's
+ * RuntimeShape::kMaxSmallSize (tensorflow/lite/kernels/internal/runtime_shape.h),
+ * the size of the fixed dims_[] array kernels copy a shape into.  TFLM checks it
+ * with TFLITE_DCHECK only, which a release build compiles out, so a rank-7 tensor
+ * would overrun that array.  Only the rank is read: an internal tensor's
+ * dimension values are never judged here.  Subgraph 0's I/O keeps the tighter
+ * NN_MAX_DIMS, the descriptor's.
+ */
+#define NN_TFLM_MAX_TENSOR_RANK    6u
+
+static_assert(NN_TFLM_MAX_TENSOR_RANK == (unsigned)tflite::RuntimeShape::kMaxSmallSize,
+              "the rank bound is TFLM's RuntimeShape capacity in the tree built against");
+static_assert((unsigned)NN_MAX_DIMS <= NN_TFLM_MAX_TENSOR_RANK,
+              "an I/O tensor's rank bound cannot exceed every tensor's");
 
 /*
  * Does @p len bytes at @p buf hold a .tflite flatbuffer that is safe to follow,
@@ -155,7 +246,7 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_verify_model_buffer(const uint8_t *buf, size_t
 	return tflite::VerifyModelBuffer(v);
 }
 
-/* Subgraph 0's tensor vector, as the schema types it. */
+/* A subgraph's tensor vector, as the schema types it. */
 typedef flatbuffers::Vector<flatbuffers::Offset<tflite::Tensor>> nn_tflm_tensor_vec;
 
 /* One of subgraph 0's index lists names only tensors that exist. */
@@ -173,6 +264,99 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_io_list_ok(const flatbuffers::Vector<int32_t> 
 	return true;
 }
 
+/* An operator's tensor list (its length already within NN_TFLM_MAX_OP_TENSORS)
+ * names only tensors of its subgraph -- or -1, TFLM's optional tensor, where
+ * @p optional_ok (inputs). */
+NN_TFLM_CHECK_INLINE bool nn_tflm_op_list_indices_ok(const flatbuffers::Vector<int32_t> *list,
+                                              uint32_t ntensors, bool optional_ok)
+{
+	for (uint32_t j = 0; list && j < list->size(); j++) {
+		const int32_t ti = list->Get(j);
+
+		if (ti == -1 && optional_ok)
+			continue;
+		if (ti < 0 || (uint32_t)ti >= ntensors)
+			return false;
+	}
+	return true;
+}
+
+/* A subgraph's operator vector, as the schema types it. */
+typedef flatbuffers::Vector<flatbuffers::Offset<tflite::Operator>> nn_tflm_op_vec;
+
+/* SubGraph::operators(), spelled through Table::GetPointer<const void *>: the
+ * same read of the same field (the offset field's target, or null when absent);
+ * a generated table IS a flatbuffers::Table at the same address (a private base,
+ * which is how GetRoot<> reaches it too).  [!] grove-vision-ai-v2: the generated
+ * accessor, called from here as well as from SubGraph::Verify(), was outlined
+ * into .text (ITCM, +16 B); the void instance is one that build already outlines
+ * for other callers, so the walk adds no ITCM byte (issue #178; the board's
+ * README, "Cold code in SRAM"). */
+NN_TFLM_CHECK_INLINE const nn_tflm_op_vec *nn_tflm_sg_operators(const tflite::SubGraph *sg)
+{
+	const flatbuffers::Table *t = reinterpret_cast<const flatbuffers::Table *>(sg);
+
+	return static_cast<const nn_tflm_op_vec *>(
+		t->GetPointer<const void *>(tflite::SubGraph::VT_OPERATORS));
+}
+
+/* An optional tensor list's length, 0 when it is absent. */
+NN_TFLM_CHECK_INLINE uint32_t nn_tflm_list_len(const flatbuffers::Vector<int32_t> *list)
+{
+	return list ? list->size() : 0u;
+}
+
+/*
+ * One subgraph holds together: a tensor vector, and every operator present with
+ * an inputs and an outputs list, each of its three lists at most
+ * NN_TFLM_MAX_OP_TENSORS long -- all three LENGTHS judged before any element is
+ * read -- and then every index in range.  Per operator entry: three compares and
+ * at most 3 x NN_TFLM_MAX_OP_TENSORS reads.
+ */
+NN_TFLM_CHECK_INLINE bool nn_tflm_subgraph_ok(const tflite::SubGraph *sg)
+{
+	const nn_tflm_tensor_vec *tensors = sg ? sg->tensors() : nullptr;
+
+	if (!tensors)
+		return false;
+
+	const nn_tflm_op_vec *ops = nn_tflm_sg_operators(sg);
+	const uint32_t nt = tensors->size();
+
+	for (uint32_t i = 0; ops && i < ops->size(); i++) {
+		const tflite::Operator *op = ops->Get(i);
+
+		if (!op || !op->inputs() || !op->outputs())
+			return false;
+		if (op->inputs()->size() > NN_TFLM_MAX_OP_TENSORS ||
+		    op->outputs()->size() > NN_TFLM_MAX_OP_TENSORS ||
+		    nn_tflm_list_len(op->intermediates()) > NN_TFLM_MAX_OP_TENSORS)
+			return false;
+		if (!nn_tflm_op_list_indices_ok(op->inputs(), nt, true) ||
+		    !nn_tflm_op_list_indices_ok(op->outputs(), nt, false) ||
+		    !nn_tflm_op_list_indices_ok(op->intermediates(), nt, false))
+			return false;
+	}
+	return true;
+}
+
+/* Every tensor of @p sg (it has passed nn_tflm_subgraph_ok()) declares at most
+ * NN_TFLM_MAX_TENSOR_RANK dimensions: one length compare per tensor entry, no
+ * dimension read. */
+NN_TFLM_CHECK_INLINE bool nn_tflm_subgraph_rank_ok(const tflite::SubGraph *sg)
+{
+	const nn_tflm_tensor_vec *tensors = sg->tensors();
+
+	for (uint32_t i = 0; i < tensors->size(); i++) {
+		const tflite::Tensor *t = tensors->Get(i);
+		const flatbuffers::Vector<int32_t> *shape = t ? t->shape() : nullptr;
+
+		if (shape && shape->size() > NN_TFLM_MAX_TENSOR_RANK)
+			return false;
+	}
+	return true;
+}
+
 /* @p list (it has passed nn_tflm_io_list_ok()) names 1..NN_MAX_IO tensors --
  * NN_MODEL_ERR_SHAPE's rule, the count the backends check again after planning. */
 NN_TFLM_CHECK_INLINE bool nn_tflm_io_list_count_ok(const flatbuffers::Vector<int32_t> *list)
@@ -181,7 +365,7 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_io_list_count_ok(const flatbuffers::Vector<int
 }
 
 /* Every tensor in @p list (count already within NN_MAX_IO) declares at most
- * NN_MAX_DIMS dimensions -- the rank half of NN_MODEL_ERR_TENSOR's rule.  A
+ * NN_MAX_DIMS dimensions -- the I/O half of NN_MODEL_ERR_TENSOR's rank rule.  A
  * missing shape is a scalar (rank 0), as TFLM reads it. */
 NN_TFLM_CHECK_INLINE bool nn_tflm_io_list_rank_ok(const flatbuffers::Vector<int32_t> *list,
                                            const nn_tflm_tensor_vec *tensors)
@@ -214,21 +398,27 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_io_list_dims_fit(const flatbuffers::Vector<int
 }
 
 /*
- * The model's I/O, before it is planned, in this order: 0, or
+ * The model, before it is planned, in this order: 0, or
  *   NN_MODEL_ERR_FORMAT  subgraph 0, its tensors or an I/O list missing, or an
- *                        index outside the tensor vector (structure)
+ *                        I/O index outside the tensor vector; any subgraph
+ *                        without tensors; an operator without an inputs or
+ *                        outputs list, with a list longer than
+ *                        NN_TFLM_MAX_OP_TENSORS, or naming a tensor that does not
+ *                        exist (structure)
  *   NN_MODEL_ERR_SHAPE   an I/O list naming outside 1..NN_MAX_IO tensors (count)
- *   NN_MODEL_ERR_TENSOR  an I/O tensor declaring more than NN_MAX_DIMS
- *                        dimensions (rank)
- *   NN_MODEL_ERR_DIMS    a dimension outside 0..NN_TENSOR_DIM_MAX (value)
+ *   NN_MODEL_ERR_TENSOR  any tensor declaring more than NN_TFLM_MAX_TENSOR_RANK
+ *                        dimensions, or an I/O tensor more than NN_MAX_DIMS (rank)
+ *   NN_MODEL_ERR_DIMS    an I/O dimension outside 0..NN_TENSOR_DIM_MAX (value)
  * SHAPE and TENSOR are the codes the backends give the same failures after
  * planning (they keep those checks as the backstop); judged here they only come
- * sooner.  The order is also what bounds the work: the index check is one
- * comparison per list entry, and everything after it reads at most NN_MAX_IO x
- * NN_MAX_DIMS values per list.  Without the count and rank checks first, one
- * tensor named ~65,000 times with a ~65,000-entry shape -- scalar vectors, which
- * the verifier checks in O(1) and does not count as tables -- passed the
- * verifier and cost ~4e9 iterations here (issue #175 review).
+ * sooner.  The order is also what bounds the work (the file header, "LENGTHS
+ * BEFORE ELEMENTS"): the I/O index check is one comparison per list entry, every
+ * other vector's length is judged before its elements are read, and everything
+ * after the structure reads at most NN_MAX_IO x NN_MAX_DIMS values per I/O list.
+ * Without the count and rank checks first, one tensor named ~65,000 times with a
+ * ~65,000-entry shape -- scalar vectors, which the verifier checks in O(1) and
+ * does not count as tables -- passed the verifier and cost ~4e9 iterations here
+ * (issue #175 review).
  */
 NN_TFLM_CHECK_INLINE int nn_tflm_model_io_check(const tflite::Model *model)
 {
@@ -243,12 +433,18 @@ NN_TFLM_CHECK_INLINE int nn_tflm_model_io_check(const tflite::Model *model)
 	if (!tensors || !nn_tflm_io_list_ok(sg->inputs(), tensors) ||
 	    !nn_tflm_io_list_ok(sg->outputs(), tensors))
 		return NN_MODEL_ERR_FORMAT;
+	for (uint32_t i = 0; i < subgraphs->size(); i++)
+		if (!nn_tflm_subgraph_ok(subgraphs->Get(i)))
+			return NN_MODEL_ERR_FORMAT;
 	if (!nn_tflm_io_list_count_ok(sg->inputs()) ||
 	    !nn_tflm_io_list_count_ok(sg->outputs()))
 		return NN_MODEL_ERR_SHAPE;
 	if (!nn_tflm_io_list_rank_ok(sg->inputs(), tensors) ||
 	    !nn_tflm_io_list_rank_ok(sg->outputs(), tensors))
 		return NN_MODEL_ERR_TENSOR;
+	for (uint32_t i = 0; i < subgraphs->size(); i++)
+		if (!nn_tflm_subgraph_rank_ok(subgraphs->Get(i)))
+			return NN_MODEL_ERR_TENSOR;
 	if (!nn_tflm_io_list_dims_fit(sg->inputs(), tensors) ||
 	    !nn_tflm_io_list_dims_fit(sg->outputs(), tensors))
 		return NN_MODEL_ERR_DIMS;

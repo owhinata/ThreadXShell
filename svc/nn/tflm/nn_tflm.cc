@@ -120,8 +120,11 @@ int build_interp(const void *data, uint32_t len)
 	 * nn_tflm_model_check.h): depth 16 and 4096 table visits, the limits
 	 * grove-vision-ai-v2's firmware and every host gate use.  That bounds the
 	 * verifier's own work (a million visits would let a crafted file hold the
-	 * console), not the whole load's: the I/O walk below is bounded by its order,
-	 * and AllocateTensors() is another matter. */
+	 * console).  The walk below reads every shape and operator list's length
+	 * before its elements (issue #178), so its reads, and TFLM's passes over the
+	 * same vectors, are bounded by visits x a small constant; the planner's own
+	 * quadratic passes (scratch requests per op, the greedy planner) are bounded
+	 * by visits squared. */
 	if (!nn_tflm_verify_model_buffer(bytes, (size_t)len))
 		return NN_MODEL_ERR_FORMAT;
 #endif
@@ -130,13 +133,17 @@ int build_interp(const void *data, uint32_t len)
 	if (model->version() != TFLITE_SCHEMA_VERSION)
 		return NN_MODEL_ERR_VERSION;
 
-	/* The I/O a descriptor can describe, on the model and before anything is planned
-	 * or destroyed (issue #175, nn_tflm_model_check.h -- the host gate runs the same
-	 * function), in a fixed order -- FORMAT for an I/O list that is missing or
-	 * indexes past the tensors, SHAPE for a count outside 1..NN_MAX_IO, TENSOR for
-	 * a rank above NN_MAX_DIMS, DIMS for a dimension outside 0..65535 -- that keeps
-	 * its work constant.  The SHAPE / TENSOR checks after planning stay as the
-	 * backstop. */
+	/* The graph and the I/O a descriptor can describe, on the model and before
+	 * anything is planned or destroyed (issues #175, #178, nn_tflm_model_check.h --
+	 * the host gate runs the same function), in a fixed order -- FORMAT for an I/O
+	 * list, a subgraph's tensors or an operator's tensor list that is missing, too
+	 * long or indexes past the tensors, SHAPE for an I/O count outside
+	 * 1..NN_MAX_IO, TENSOR for a rank above NN_TFLM_MAX_TENSOR_RANK (an I/O tensor's
+	 * above NN_MAX_DIMS), DIMS for an I/O dimension outside 0..65535 -- lengths
+	 * before elements, which bounds the shape, operator-list and index reads here
+	 * and in AllocateTensors() below to visits x a small constant (the planner's
+	 * own quadratic passes are bounded by visits squared, nn_tflm_model_check.h).
+	 * The SHAPE / TENSOR checks after planning stay as the backstop. */
 	{
 		int io = nn_tflm_model_io_check(model);
 		if (io != 0)

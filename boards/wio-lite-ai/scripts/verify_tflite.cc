@@ -34,9 +34,11 @@
  *      verify with: nn_tflm_verify_model_buffer(), svc/nn/tflm/nn_tflm_model_check.h
  *      (depth 16, 4096 table visits; issue #175)
  *   4. the schema version the runtime understands
- *   5. that subgraph 0's input / output lists name tensors that exist and every
- *      DECLARED dimension of those tensors fits a descriptor (0..65535) -- the FIRMWARE'S
- *      OWN check, svc/nn/tflm/nn_tflm_model_check.h, compiled in (issue #175)
+ *   5. that the graph holds together (every subgraph's tensors, every operator's
+ *      tensor lists, at most 64 long and naming tensors that exist), every tensor's
+ *      rank, and that every DECLARED dimension of subgraph 0's I/O tensors fits a
+ *      descriptor (0..65535) -- the FIRMWARE'S OWN check,
+ *      svc/nn/tflm/nn_tflm_model_check.h, compiled in (issues #175, #178)
  *   6. [!] that every operator the model uses is one this FIRMWARE registered
  *
  * Step 6 is the one the board cannot do well.  TFLM's AllocateTensors() returns a
@@ -61,9 +63,9 @@
 #include "tensorflow/lite/micro/micro_interpreter.h"
 
 #include "nn_tflm_ops.h"
-/* The board's own check of the model's I/O (issue #175): the function the tflm
- * backend calls before it plans a model, so this gate and the board reach the same
- * verdict on the same bytes. */
+/* The board's own check of the model's graph and I/O (issues #175, #178): the
+ * function the tflm backend calls before it plans a model, so this gate and the
+ * board reach the same verdict on the same bytes. */
 #include "nn_tflm_model_check.h"
 
 #include <cstdint>
@@ -231,7 +233,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	/* 5. the I/O a descriptor can describe (issue #175) ------------------- */
+	/* 5. the graph's structure and ranks, the I/O dims (issues #175, #178) - */
 	switch (nn_tflm_model_io_check(model)) {
 	case 0:
 		break;
@@ -241,9 +243,10 @@ int main(int argc, char **argv)
 		       NN_MAX_IO, NN_MODEL_ERR_SHAPE);
 		return 1;
 	case NN_MODEL_ERR_TENSOR:
-		printf("RESULT  : REJECT -- an input/output tensor declares more than %d\n"
-		       "          dimensions.  The board refuses it as NN_MODEL_ERR_TENSOR (%d).\n",
-		       NN_MAX_DIMS, NN_MODEL_ERR_TENSOR);
+		printf("RESULT  : REJECT -- a tensor declares more than %u dimensions, or an\n"
+		       "          input/output tensor more than %d.  The board refuses it as\n"
+		       "          NN_MODEL_ERR_TENSOR (%d).\n",
+		       NN_TFLM_MAX_TENSOR_RANK, NN_MAX_DIMS, NN_MODEL_ERR_TENSOR);
 		return 1;
 	case NN_MODEL_ERR_DIMS:
 		printf("RESULT  : REJECT -- an input/output tensor has a dimension outside\n"
@@ -252,9 +255,12 @@ int main(int argc, char **argv)
 		       NN_MODEL_ERR_DIMS);
 		return 1;
 	default:
-		printf("RESULT  : REJECT -- subgraph 0 has no tensors or no input/output list,\n"
-		       "          or one names a tensor that does not exist.  The board refuses\n"
-		       "          it as NN_MODEL_ERR_FORMAT (%d).\n", NN_MODEL_ERR_FORMAT);
+		printf("RESULT  : REJECT -- the graph does not hold together: subgraph 0 has\n"
+		       "          no input/output list, a subgraph has no tensors, or an\n"
+		       "          operator's tensor list is missing, longer than %u, or names\n"
+		       "          a tensor that does not exist.  The board refuses it as\n"
+		       "          NN_MODEL_ERR_FORMAT (%d).\n",
+		       NN_TFLM_MAX_OP_TENSORS, NN_MODEL_ERR_FORMAT);
 		return 1;
 	}
 	printf("io dims : ok -- every declared input/output dimension fits 0..65535\n");

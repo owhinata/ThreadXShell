@@ -155,13 +155,18 @@ int build_interp(const void *data, uint32_t len)
 	if (npu_model_payload_refusal(model) != nullptr)
 		return NN_MODEL_ERR_PAYLOAD;
 
-	/* The I/O a descriptor can describe, on the model and before anything is
-	 * planned or destroyed (issue #175, nn_tflm_model_check.h -- the tflm backend
-	 * and the host gate run the same function), in its fixed order: FORMAT for an
-	 * I/O list that is missing or indexes past the tensors, SHAPE for a count
-	 * outside 1..NN_MAX_IO, TENSOR for a rank above NN_MAX_DIMS, DIMS for a
-	 * dimension outside 0..65535 -- constant work; the SHAPE / TENSOR checks
-	 * after planning stay as the backstop. */
+	/* The graph and the I/O a descriptor can describe, on the model and before
+	 * anything is planned or destroyed (issues #175, #178, nn_tflm_model_check.h --
+	 * the tflm backend and the host gate run the same function), in its fixed
+	 * order: FORMAT for an I/O list, a subgraph's tensors or an operator's tensor
+	 * list that is missing, too long or indexes past the tensors, SHAPE for an I/O
+	 * count outside 1..NN_MAX_IO, TENSOR for a rank above NN_TFLM_MAX_TENSOR_RANK
+	 * (an I/O tensor's above NN_MAX_DIMS), DIMS for an I/O dimension outside
+	 * 0..65535 -- lengths before elements, which bounds the shape, operator-list
+	 * and index reads here and AllocateTensors()'s passes over the same vectors
+	 * to visits x a small constant (the planner's own quadratic passes are
+	 * bounded by visits squared); the SHAPE / TENSOR checks after planning stay
+	 * as the backstop. */
 	rc = nn_tflm_model_io_check(model);
 	if (rc != 0)
 		return rc;

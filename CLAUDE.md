@@ -299,7 +299,7 @@ gh issue close <N> --repo owhinata/ThreadXShell && git branch -d feat/<N>-short-
 - **op resolver は 1 個のまま**（CMSIS-NN 排除 / 全面 offload でないモデルを落とす）。**境界の型変換は
   ファイル側で剥がす。ペイロード検査も緩めない**（`COMMAND_STREAM` が 1 個かつ最後 / 入力テンソル 0 / `is_variable()` 拒否）。
 - **Ethos-U backend の reload（`svc/nn/ethosu/nn_ethosu.cc`）は長さを取り `GetModel()` の前に境界付き verifier を通す**（窓 → 長さ → 整列 →
-  identifier → verifier → 走査。**長さには下限も要る**）。**limits は `npu_verify.h`、I/O 規則は `nn_ethosu_io.h` の 1 箇所でホストと共有。**
+  identifier → verifier → 走査。**長さには下限も要る**）。**limits は `nn_tflm_model_check.h`（全ボード共通）、I/O 規則は `nn_ethosu_io.h` の 1 箇所でホストと共有。**
 - **`nn model load --name` はリースを切らさない**（`npu_hw_init()` 先 → 走査 → CRC → `nn_model_reload()` → plugin、残らない失敗は backend の release の後に `npu_hw_deinit()`）。
 - **gate の外から plugin に入るコンソール呼び出し（thresh / dets）は数に入ってから lease を取る**。load/unload は数が 0 でなければ BUSY（判定は claim と同じ CS、`nn_param_calls.c`）。
 - **候補は VALID のみ・重複拒否・失敗理由は別々・読めなければ拒否。ホストの `verify_vela_model` を外さない**（代替にならない。C++ 不在は fail-closed）。

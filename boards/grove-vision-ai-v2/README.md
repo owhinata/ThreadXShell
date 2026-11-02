@@ -2591,7 +2591,9 @@ model somebody put somewhere the store does not carve.
 ### [!] The backend takes a length, and verifies the flatbuffer (#93)
 
 (This was `npu_open()`'s until issue #169; the checks and their order moved with
-it into `svc/nn/ethosu/nn_ethosu.cc`, the limits stayed in `npu_verify.h`.)
+it into `svc/nn/ethosu/nn_ethosu.cc`, the limits stayed in `npu_verify.h` until
+issue #175 moved them to `svc/nn/tflm/nn_tflm_model_check.h`, shared with the
+other boards.)
 
 `tflite::GetModel()` is a cast.  Every accessor after it follows an offset out
 of the buffer, and until #93 there was no buffer -- only an address with "enough
@@ -2616,14 +2618,41 @@ read at offset 4, so a shorter declared length would have the identifier check
 reading outside the bounds it declared.
 
 **The verifier's limits are stated, not defaulted.**  flatbuffers defaults to
-depth 64 and a million tables; the generated table verifiers RECURSE, and this
-runs on a 4,096 B shell stack.  Measured with `-fstack-usage`: every frame in
-the recursive cycle is 24 B or less, so a level of nesting costs about 64 B --
-16 levels is ~1.0 KB and the default 64 would be ~4.1 KB, the whole stack.  The
-real classification model needs **depth 4 and 19 tables** (Vela folds the graph
-into one custom operator), and the shipped limits are 16 and 4096: room enough
-that a legitimate model Vela did not fully offload reaches the op resolver and
-is refused THERE, rather than being reported here as malformed.
+depth 64 and a million tables; the limits are 16 and 4,096, declared since
+issue #175 in `svc/nn/tflm/nn_tflm_model_check.h` (`nn_tflm_verify_model_buffer()`),
+which `npu_verify.h` calls behind its length floor and which f746g-disco's
+on-board verifier and the wio-lite-ai and f746g-disco host gates use too
+(wio-lite-ai's default firmware runs no verifier).  What each one bounds:
+
+- **Depth is bounded by the schema, not by the limit.**  The generated table
+  verifiers are type-directed (a table's verifier calls its fields' verifiers
+  because the schema says so, whatever the bytes are), and this SDK's
+  `schema.fbs` (tflmtag2412, as lib/tflite-micro's) has no cycle among tables:
+  the longest chain is 6 (Model > SubGraph > Tensor > SparsityParameters >
+  DimensionMetadata > Int32Vector).  No buffer drives the recursion past 6, so
+  16 is a guard for a future schema with a cycle.  Rerun with
+  `python3 cmake/fixtures/model_io/schema_table_depth.py <schema.fbs>`; the host
+  tests run it on the schema `verify_vela_model` is built from.  (This README
+  used to say depth 16 was a stack bound and "the default 64 would be ~4.1 KB,
+  the whole stack" -- true only if depth followed the data, which it does not.)
+- **The table count bounds the verifier's own work**: verification VISITS, which
+  flatbuffers does not deduplicate, so a small file can name one sub-table from
+  many vector entries and multiply them.  It is not a bound on the whole load:
+  the I/O walk after it is bounded by its own order (structure, count, rank,
+  values -- at most `NN_MAX_IO` x `NN_MAX_DIMS` reads per list), and
+  `AllocateTensors()` is another matter.
+- **Measured** on the host: the classification model needs **depth 4 and 19
+  tables** (Vela folds the graph into one custom operator); every pinned and
+  SDK model found needs depth 4 and at most 785 (TFLM mobilenet_v2 224; the SDK
+  zoo's 11 Vela models 19..697), so 4,096 leaves >= 5x -- room enough that a
+  legitimate model Vela did not fully offload reaches the op resolver and is
+  refused THERE, rather than being reported here as malformed.  The host tests
+  pin the bound with generated models of exactly 4,096 visits (passes, reaches
+  the I/O walk) and 4,097 (refused at the verifier).
+- **Stack**: the deepest verifier chain is the schema's and the same under any
+  limit -- `Model::Verify` down to `Int32Vector::Verify`, 24 B frames or less;
+  its deepest recorded path, through a `FLATBUFFERS_ASSERT` to `fprintf`, is
+  740 B below `build_interp` (136 B).
 
 Cost of the verifier in the image: **ITCM 214,368 -> 226,368 B** out of 262,144,
 against a gate that then required 8,192 B of headroom (removed in issue #170).

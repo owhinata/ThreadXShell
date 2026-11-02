@@ -19,6 +19,21 @@ exactly one way, and asserts the verdict AND which check gave it:
   io_out_index_oob  NN_MODEL_ERR_FORMAT, never DIMS
   io_no_inputs      NN_MODEL_ERR_FORMAT, never DIMS
   io_same_70000     NN_MODEL_ERR_DIMS (the device fixture: input == output)
+  io_many_inputs    NN_MODEL_ERR_SHAPE: NN_MAX_IO + 1 inputs, all one tensor with
+                    a 1,000-entry shape -- the count is judged first, so the
+                    walk's work stays constant
+  io_rank5          NN_MODEL_ERR_TENSOR: an input of rank NN_MAX_DIMS + 1
+  vt_tables_4096    control: exactly NN_TFLM_VERIFY_MAX_TABLES table visits, so
+                    the bounded verifier passes it and the gate reaches the walk
+  vt_tables_4097    one visit over: refused AT THE VERIFIER (its sentence, with
+                    the limit), never reaching the walk
+  vt_shared_4097    4097 visits of 5 distinct tables (one Buffer named 4093
+                    times): the bound is on visits, as the header says
+
+And the depth half of the header's claim: schema_table_depth.py runs on the
+schema.fbs the gate was built from (the first -I directory holding one, else the
+repo's lib/tflite-micro, the tree a tflm build generates from) and fails on a
+cycle or a chain deeper than NN_TFLM_VERIFY_MAX_DEPTH; its self-test runs first.
 
 The files are written fresh each run by cmake/fixtures/model_io/
 gen_model_io_fixtures.cc, compiled with the include paths read off the gate's
@@ -44,6 +59,11 @@ GEN_SRC = os.path.join(HERE, "model_io", "gen_model_io_fixtures.cc")
 # What each gate prints: the code names are the board's, so both styles share them.
 DIMS = "NN_MODEL_ERR_DIMS"
 FORMAT = "NN_MODEL_ERR_FORMAT"
+SHAPE = "NN_MODEL_ERR_SHAPE"
+TENSOR = "NN_MODEL_ERR_TENSOR"
+CODES = (DIMS, FORMAT, SHAPE, TENSOR)
+# The verifier's refusal: the same opening, and the depth limit, in both styles.
+VERIFY = "the flatbuffer is malformed, or nests deeper than 16"
 OK_LINE = {
     "tflite": "io dims : ok",
     "vela": "the firmware's I/O dims rule",
@@ -60,7 +80,18 @@ CASES = [
     # The device fixture: the very file f746g-disco loads from its card to see the
     # refusal on the board (one tensor, input == output) -- checked here too.
     ("io_same_70000.tflite", DIMS),
+    ("io_many_inputs.tflite", SHAPE),
+    ("io_rank5.tflite", TENSOR),
+    # The verifier's work bound (NN_TFLM_VERIFY_MAX_TABLES = 4096).
+    ("vt_tables_4096.tflite", None),
+    ("vt_tables_4097.tflite", VERIFY),
+    ("vt_shared_4097.tflite", VERIFY),
 ]
+
+REPO = os.path.dirname(os.path.dirname(HERE))
+DEPTH_TOOL = os.path.join(HERE, "model_io", "schema_table_depth.py")
+CHECK_HDR = os.path.join(REPO, "svc", "nn", "tflm", "nn_tflm_model_check.h")
+SCHEMA_REL = os.path.join("tensorflow", "compiler", "mlir", "lite", "schema", "schema.fbs")
 
 
 def gate_compile_flags(build_dir, gate):
@@ -85,6 +116,45 @@ def gate_compile_flags(build_dir, gate):
     if not any(f == "-I" or f.startswith("-I") for f in flags):
         sys.exit(f"run_model_io_gate_tests: no include path on {gate}'s compile line")
     return flags
+
+
+def schema_depth_check(flags):
+    """0 on success: the gate's schema is acyclic and within the depth limit."""
+    import re
+    m = re.search(r"#define\s+NN_TFLM_VERIFY_MAX_DEPTH\s+(\d+)u", open(CHECK_HDR).read())
+    if not m:
+        print(f"  FAIL no NN_TFLM_VERIFY_MAX_DEPTH in {CHECK_HDR}")
+        return 1
+    limit = int(m.group(1))
+    st = subprocess.run([sys.executable, DEPTH_TOOL, "--self-test"],
+                        capture_output=True, text=True)
+    if st.returncode != 0:
+        print(f"  FAIL schema_table_depth self-test:\n{st.stdout}{st.stderr}")
+        return 1
+    dirs = []
+    i = 0
+    while i < len(flags):
+        if flags[i] == "-I":
+            dirs.append(flags[i + 1])
+            i += 2
+            continue
+        if flags[i].startswith("-I"):
+            dirs.append(flags[i][2:])
+        i += 1
+    cands = [os.path.join(d, SCHEMA_REL) for d in dirs]
+    cands.append(os.path.join(REPO, "lib", "tflite-micro", SCHEMA_REL))
+    schema = next((c for c in cands if os.path.isfile(c)), None)
+    if schema is None:
+        print("  FAIL no schema.fbs found for the gate")
+        return 1
+    p = subprocess.run([sys.executable, DEPTH_TOOL, schema], capture_output=True, text=True)
+    m = re.search(r"max table nesting from Model: (\d+)", p.stdout)
+    if p.returncode != 0 or not m or int(m.group(1)) > limit:
+        print(f"  FAIL schema depth of {schema} (limit {limit}):\n{p.stdout}{p.stderr}")
+        return 1
+    print(f"  ok   schema {os.path.relpath(schema, REPO)}: acyclic, table depth "
+          f"{m.group(1)} <= {limit}")
+    return 0
 
 
 def main():
@@ -116,16 +186,22 @@ def main():
                                capture_output=True, text=True)
             text = p.stdout + p.stderr
             if want is None:
-                ok = OK_LINE[args.style] in text and DIMS not in text \
-                    and FORMAT not in text
+                ok = OK_LINE[args.style] in text \
+                    and not any(c in text for c in CODES)
                 if args.style == "tflite":
                     ok = ok and p.returncode == 0
                 why = "the walk's ok line" + (" and rc 0" if args.style == "tflite" else "")
-            else:
-                other = FORMAT if want == DIMS else DIMS
-                ok = p.returncode == 1 and want in text and other not in text \
+            elif want == VERIFY:
+                ok = p.returncode == 1 and VERIFY in text \
+                    and not any(c in text for c in CODES) \
                     and OK_LINE[args.style] not in text
-                why = f"rc 1 with {want} (and not {other})"
+                why = "rc 1 at the verifier (its sentence, not the walk's)"
+            else:
+                others = [c for c in CODES if c != want]
+                ok = p.returncode == 1 and want in text \
+                    and not any(c in text for c in others) \
+                    and OK_LINE[args.style] not in text
+                why = f"rc 1 with {want} (and no other code)"
             if ok:
                 print(f"  ok   {args.gate} {name}: {why}")
             else:
@@ -133,9 +209,11 @@ def main():
                 print(f"  FAIL {args.gate} {name}: wanted {why}, got rc "
                       f"{p.returncode}:\n{text}")
 
+    failures += schema_depth_check(flags)
+
     if failures:
         sys.exit(f"run_model_io_gate_tests: {failures} case(s) failed for {gate_path}")
-    print(f"run_model_io_gate_tests: OK ({len(CASES)} cases, {gate_path})")
+    print(f"run_model_io_gate_tests: OK ({len(CASES)} cases + schema depth, {gate_path})")
 
 
 if __name__ == "__main__":

@@ -780,6 +780,13 @@ runs no on-board verifier, so that is the only thing between such an index and
 TFLM's own reads.  `verify_tflite` runs the same function, and
 `test/host_tests.sh` runs it on generated files wrong in exactly one way
 (against `build/wio-lite-ai` or `WIO_BUILD_DIR`; a loud SKIP without one).
+`verify_tflite`'s flatbuffer verifier uses the limits f746g-disco's and
+grove-vision-ai-v2's firmware verify with -- depth 16, 4,096 table visits,
+`nn_tflm_verify_model_buffer()` in the same header (issue #175) -- so a model
+it passes is one those boards' verifiers pass too.  It is stricter than this
+board's default firmware, which runs no verifier, on purpose: here the host
+gate is the only verifier there is; the fixtures include 4,096
+visits (passes) and 4,097 (refused at the verifier).
 
 **[!] The order matters and is not an implementation detail.**  Loading the
 plugin first would destroy the previous one's state at the fixed reservation
@@ -1062,7 +1069,7 @@ nothing checks that the file sent is the file built:
 | a container built for another board | `plugin_load.c` (target word) | `nn model load` |
 | a recognised container with malformed internals or a damaged plugin section | `plugin_load.c` | `nn model load` |
 | a container whose magic is damaged | probes as unknown and falls through as a bare model, so the TFLM backend -- **not** `plugin_load.c` | `nn model load` |
-| a malformed `.tflite` (bare, or as a container's model section) | the backend's parse only; `VerifyModelBuffer()` runs on the board only with `NN_TFLM_VERIFY=ON` (off by default) | `nn model load` |
+| a malformed `.tflite` (bare, or as a container's model section) | the backend's parse only; the bounded verifier (`nn_tflm_verify_model_buffer()`, the host gate's) runs on the board only with `NN_TFLM_VERIFY=ON` (off by default) | `nn model load` |
 | a stale artifact, or a model that never passed `verify_tflite` | **nothing** | -- |
 | the wrong slot | **nothing** -- and the slot's previous contents are gone | `blob write` |
 

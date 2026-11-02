@@ -157,8 +157,11 @@ int build_interp(const void *data, uint32_t len)
 
 	/* The I/O a descriptor can describe, on the model and before anything is
 	 * planned or destroyed (issue #175, nn_tflm_model_check.h -- the tflm backend
-	 * and the host gate run the same function): FORMAT for an I/O list that is
-	 * missing or indexes past the tensors, DIMS for a dimension outside 0..65535. */
+	 * and the host gate run the same function), in its fixed order: FORMAT for an
+	 * I/O list that is missing or indexes past the tensors, SHAPE for a count
+	 * outside 1..NN_MAX_IO, TENSOR for a rank above NN_MAX_DIMS, DIMS for a
+	 * dimension outside 0..65535 -- constant work; the SHAPE / TENSOR checks
+	 * after planning stay as the backstop. */
 	rc = nn_tflm_model_io_check(model);
 	if (rc != 0)
 		return rc;

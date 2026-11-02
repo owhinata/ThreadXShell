@@ -48,11 +48,11 @@
  * says why the LOCATOR matters as much as the walk. */
 #include "npu_model_scan.h"
 
-/* And the firmware's own bounded flatbuffer check (issue #93).  This tool used
- * to construct a flatbuffers::Verifier with the DEFAULT limits, which are the
- * ones the board cannot afford -- so a model could pass here and be refused by
- * the firmware's backend with NN_MODEL_ERR_FORMAT, on the serial line, after
- * the erase.
+/* And the firmware's own bounded flatbuffer check (issue #93; its limits are
+ * svc/nn/tflm/nn_tflm_model_check.h's since issue #175).  This tool used to
+ * construct a flatbuffers::Verifier with the DEFAULT limits, looser than the
+ * board's -- so a model could pass here and be refused by the firmware's
+ * backend with NN_MODEL_ERR_FORMAT, on the serial line, after the erase.
  * A host gate that accepts what the device rejects has moved the failure rather
  * than caught it. */
 #include "npu_verify.h"
@@ -377,8 +377,8 @@ int main(int argc, char **argv)
 	}
 	if (!npu_verify_model_buffer(buf.data(), buf.size())) {
 		printf("  FAIL   the flatbuffer is malformed, or nests deeper than %u "
-		       "or wider than %u tables (the firmware's limits)\n",
-		       NPU_VERIFY_MAX_DEPTH, NPU_VERIFY_MAX_TABLES);
+		       "or needs more than %u table visits (the firmware's limits)\n",
+		       NN_TFLM_VERIFY_MAX_DEPTH, NN_TFLM_VERIFY_MAX_TABLES);
 		printf("RESULT   : REJECT\n");
 		return 1;
 	}
@@ -393,7 +393,7 @@ int main(int argc, char **argv)
 	}
 	printf("  ok     flatbuffer verifies within the firmware's limits "
 	       "(depth %u, %u tables), schema version %d\n",
-	       NPU_VERIFY_MAX_DEPTH, NPU_VERIFY_MAX_TABLES, TFLITE_SCHEMA_VERSION);
+	       NN_TFLM_VERIFY_MAX_DEPTH, NN_TFLM_VERIFY_MAX_TABLES, TFLITE_SCHEMA_VERSION);
 
 	/* The firmware runs this after its payload walk and before its resolver; it
 	 * runs here first because everything below follows subgraph 0's I/O lists,
@@ -405,6 +405,16 @@ int main(int argc, char **argv)
 		printf("  ok     every input/output dimension fits 0..65535 "
 		       "(the firmware's I/O dims rule)\n");
 		break;
+	case NN_MODEL_ERR_SHAPE:
+		printf("  FAIL   an input or output list names outside 1..%d tensors "
+		       "(NN_MODEL_ERR_SHAPE on the board)\n", NN_MAX_IO);
+		printf("RESULT   : REJECT\n");
+		return 1;
+	case NN_MODEL_ERR_TENSOR:
+		printf("  FAIL   an input/output tensor declares more than %d dimensions "
+		       "(NN_MODEL_ERR_TENSOR on the board)\n", NN_MAX_DIMS);
+		printf("RESULT   : REJECT\n");
+		return 1;
 	case NN_MODEL_ERR_DIMS:
 		printf("  FAIL   an input/output tensor has a dimension outside 0..65535, "
 		       "which a tensor descriptor cannot hold (NN_MODEL_ERR_DIMS on the "

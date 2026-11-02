@@ -867,15 +867,33 @@ path: see "The flip writes only the layer address" below.  SD hardware flow
 control stays off.
 
 `scripts/verify_tflite.cc` (`--target verify-model`) is this board's model gate
-for that asset build: the tree's own `VerifyModelBuffer()`, the staging
-capacity (512 KB), the I/O check the backend runs before planning (issue
+for that asset build: the tree's own `VerifyModelBuffer()` with the limits the
+firmware's on-board verifier (`NN_TFLM_VERIFY=1`) and grove-vision-ai-v2 use --
+depth 16, 4,096 table visits, `nn_tflm_verify_model_buffer()` in
+`svc/nn/tflm/nn_tflm_model_check.h` (issue #175; a model the board would refuse
+as malformed is refused here first) -- the staging capacity (512 KB), the I/O check the backend runs before planning (issue
 #175: `svc/nn/tflm/nn_tflm_model_check.h` compiled in -- a missing or
 out-of-range I/O list is `NN_MODEL_ERR_FORMAT`, a dimension outside 0..65535
 `NN_MODEL_ERR_DIMS`), and the operators the firmware registers -- read from
 `svc/nn/tflm/nn_tflm_ops.h` under the `extended` profile, the same list
 `svc/nn/tflm/nn_tflm.cc` registers from.  `test/host_tests.sh` runs it on
 generated files wrong in exactly one way (`cmake/fixtures/run_model_io_gate_tests.py`,
-against `build/f746-tflm` or `F746_TFLM_BUILD_DIR`; a loud SKIP without one).
+against `build/f746-tflm` or `F746_TFLM_BUILD_DIR`; a loud SKIP without one),
+including 4,096 table visits (passes) and 4,097 (refused at the verifier).
+
+The on-board verifier runs on `nn model load` on the console thread.  Its stack
+(issue #175 step 2, `cmake/thumb_stack_analysis.py` over `build/f746-tflm/shell.elf`,
+frames in bytes): `cmd_nn_model_load` 376 + `nn_svc_model_load` 432 +
+`nn_core_model_load` 48 + `nn_life_swap` 8 + `nn_model_reload` 48 +
+`tflm_bk_reload` 48 + `build_interp` 120 + the verifier chain 300 (`Model` 72,
+`SubGraph` 48, `Tensor` 40, `SparsityParameters` 48, `DimensionMetadata` 40,
+`VerifySparseIndexVector` 28, `Int32Vector` 24) = **1,380 B, 1,588 B with the
+208 B exception reserve, of 4,096 B**.  Two of the links are indirect calls
+(the board's `swap` and the backend's `reload`) and are added by hand.  The
+limits do not change this: the chain is the schema's (depth 6 at most), the
+same under any `max_depth`.  Flash at step 2: 616,452 -> 616,388 B, 64 B
+smaller -- the bounded verifier 128 B smaller (the inliner folded the op
+resolver into `build_interp`), the I/O walk's count and rank checks 64 B larger.
 
 Measured at Step 4a (`build/f746-tflm`): Flash 796,868 B (was 792,100; the
 validator, the CRC and the claims), `RAM` 115,584 B of 224 KB.

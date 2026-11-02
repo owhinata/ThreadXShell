@@ -163,7 +163,23 @@ and naming tensors that exist (`NN_MODEL_ERR_FORMAT`), and every dimension insid
 0..65535, the range of `struct nn_tensor`'s 16-bit dims (`NN_MODEL_ERR_DIMS`, the
 predicate `nn_tensor_dim_fits()` in `nn.h`, tied to the field's width at compile
 time) -- checked on the model, before `AllocateTensors()`, and again on the
-planned tensors before they are published.  Neither keeps storage of its own; the board supplies everything
+planned tensors before they are published.  The walk runs in a fixed order:
+structure (`NN_MODEL_ERR_FORMAT`), then the count of each I/O list (1..`NN_MAX_IO`,
+`NN_MODEL_ERR_SHAPE`), then each I/O tensor's rank (<= `NN_MAX_DIMS`,
+`NN_MODEL_ERR_TENSOR`), then the values (`NN_MODEL_ERR_DIMS`) -- so its work is
+one comparison per list entry plus at most `NN_MAX_IO` x `NN_MAX_DIMS` reads,
+whatever the model declares; the SHAPE and TENSOR checks after planning stay as
+the backstop and give the same codes.  The same header holds the bounded
+flatbuffer verifier, `nn_tflm_verify_model_buffer()` (depth 16, 4,096 table
+visits, nested-flatbuffer check off): the tflm backend runs it under
+`NN_TFLM_VERIFY` (f746g-disco), `nn/ethosu/npu_verify.h` delegates to it behind
+grove-vision-ai-v2's length floor, and all three host gates call it, so no gate
+passes what a board's verifier refuses.  Its header states what each limit
+bounds: depth is bounded by the schema (acyclic, longest table chain 6 in both
+pinned schemas; `cmake/fixtures/model_io/schema_table_depth.py` reruns it), so
+16 is the guard for a future cycle; the table count bounds the verifier's own
+work (visits, which shared sub-tables multiply) -- not the whole load's: the I/O
+walk is bounded by its order, `AllocateTensors()` separately.  Neither keeps storage of its own; the board supplies everything
 that is a fact about its memory or its core, bound at link time (the callers of
 `nn.h` pass no context to carry it):
 
@@ -211,7 +227,7 @@ that board builds.
 | `nn_ethosu.h` | C, for the adapter: `nn_ethosu_strerror()`, the sentences for the in-place refusals (every other code goes to `nn_model_strerror()`). |
 | `nn_ethosu_state.h` | The state type and the board facts (name prefix, the read window). Needs `NN_TFLM_OPS_ETHOSU_PROFILE`: the resolver's size is part of the type. |
 | `nn_ethosu_mem.h` | The arena declaration, sized by the board's `NN_ETHOSU_ARENA_KB`. |
-| `npu_verify.h` | The bounded FlatBuffer verifier and its limits (length floor, depth, table count) -- the one place they are declared; the host gate `verify_vela_model` compiles the same header. |
+| `npu_verify.h` | Grove's entry to the bounded FlatBuffer verifier: its length floor, then `nn_tflm_verify_model_buffer()` from `nn/tflm/nn_tflm_model_check.h`, where the limits (depth, table count) are declared for every board (issue #175); the host gate `verify_vela_model` compiles the same header. |
 | `npu_model_scan` (`.cc` / `.h`) | Which bytes the driver will parse (the `ethos-u` operator's input tensor 0) and whether the model may be opened at all: one subgraph, every operator `ethos-u`, no variable payload tensor. Shared with the host gate. |
 | `npu_payload` (`.c` / `.h`) | Whether that payload is exactly one COMMAND_STREAM action, as the last action. Plain C over bytes, so the host test compiles it directly. |
 | `npu_cache` (`.c` / `.h`) | The arena ownership protocol and the driver's four cache hooks (`ethosu_flush_dcache`, `ethosu_invalidate_dcache`, `ethosu_inference_begin`, `ethosu_inference_end`), strong definitions that override the driver's weak ones at link time: the whole arena cleaned before launch and invalidated once DONE and OK are both seen, a checked reset first on any other ending, fail-stop otherwise. Its state (`npu_cache_board_state`), the cache-line primitive (`npu_cache_clean()` / `npu_cache_invalidate()`) and the fail-stop are the board's (`port/nn/npu/npu_cache_board.c`). |
@@ -417,8 +433,8 @@ relative to `svc/`.
 | `nn/nn_desc` | `nn_tensor` -> `svc/nn/tensor.h` descriptor, for the boards that use `nn.h`. |
 | `nn/nn_input_contract` | wio-lite-ai's and f746g-disco's camera input (issue #162): `nn_input_admit()`, whether a camera can fill the input tensor (float32 or int8, 1xHxWx1/3, a positive normal int8 scale and an int8 zero point, a 4-byte aligned float32 buffer, the bytes for the shape in 64 bits; each refusal its own reason), and the inline per-element conversion (`nn_input_f32()`, `nn_input_i8()`: one explicit fused multiply-add for the `nn norm` range, then 1/scale, a +-255 limit, +-0.5 toward zero, zero point, saturation). The boards keep only how a pixel is sampled; grove-vision-ai-v2 does not use it. Host-tested against the target's instruction sequence. |
 | `nn/nn_input_codes` | Those reasons as the start codes and sentences both boards report (`NN_INPUT_START_ERR_*`: -3, -11, -18..-25), which each board's `nn_camera.h` takes by name. |
-| `nn/tflm/` | The one tflite-micro backend of wio-lite-ai and f746g-disco (issue #161; built only with `CONFIG_NN_BACKEND=tflm`, into the board's `tflm` library): `nn_tflm.cc` (the vtable), `nn_tflm_state.h` (its state type and facts, defined by the board), `nn_tflm_mem.h` (the buffers the board places; see [The inference layer](#the-inference-layer-is-one-implementation-issue-161)), `nn_tflm_ops.h` (the op profiles, shared with each board's host `verify_tflite`; includes the one-operator `ethosu` profile), `nn_tflm_fit.h` (which slot a model range may be adopted from, never the live one; host-tested), `nn_tflm_model_check.h` (the model's I/O before planning -- lists present, indices in range, every dimension within 0..65535 -- shared with the Ethos-U backend and the three host gates; issue #175), `nn_tflm_glue.h` (the glue that does not depend on staging -- descriptors, name, empty state, op resolver, interpreter destruction -- included into each TFLM-based backend's own translation unit with its state object named by `NN_TFLM_GLUE_STATE` / `NN_TFLM_GLUE_FACTS`; issue #169) and `cxx_runtime.cc` (the C++ runtime shim). One of the two directories under `svc/` that include TFLM headers (the other is `nn/ethosu/`). |
-| `nn/ethosu/` | grove-vision-ai-v2's backend behind `nn/nn.c` (issue #169): `nn_ethosu.cc` (the vtable; models interpreted in place inside the board's read window), its state, facts and arena headers, the bounded verifier and its limits (`npu_verify.h`), the payload locator and model refusal (`npu_model_scan`) and the command-stream walk (`npu_payload`), which the host `verify_vela_model` compiles from the same files, and the arena ownership protocol with the driver's cache hooks (`npu_cache`) (see [The Ethos-U backend](#the-ethos-u-backend-issue-169)). |
+| `nn/tflm/` | The one tflite-micro backend of wio-lite-ai and f746g-disco (issue #161; built only with `CONFIG_NN_BACKEND=tflm`, into the board's `tflm` library): `nn_tflm.cc` (the vtable), `nn_tflm_state.h` (its state type and facts, defined by the board), `nn_tflm_mem.h` (the buffers the board places; see [The inference layer](#the-inference-layer-is-one-implementation-issue-161)), `nn_tflm_ops.h` (the op profiles, shared with each board's host `verify_tflite`; includes the one-operator `ethosu` profile), `nn_tflm_fit.h` (which slot a model range may be adopted from, never the live one; host-tested), `nn_tflm_model_check.h` (the bounded flatbuffer verifier and its limits, and the model's I/O before planning -- lists present, indices in range, every dimension within 0..65535 -- shared with the Ethos-U backend and the three host gates; issue #175), `nn_tflm_glue.h` (the glue that does not depend on staging -- descriptors, name, empty state, op resolver, interpreter destruction -- included into each TFLM-based backend's own translation unit with its state object named by `NN_TFLM_GLUE_STATE` / `NN_TFLM_GLUE_FACTS`; issue #169) and `cxx_runtime.cc` (the C++ runtime shim). One of the two directories under `svc/` that include TFLM headers (the other is `nn/ethosu/`). |
+| `nn/ethosu/` | grove-vision-ai-v2's backend behind `nn/nn.c` (issue #169): `nn_ethosu.cc` (the vtable; models interpreted in place inside the board's read window), its state, facts and arena headers, the bounded verifier's entry and length floor (`npu_verify.h`; the limits are `nn/tflm/nn_tflm_model_check.h`'s), the payload locator and model refusal (`npu_model_scan`) and the command-stream walk (`npu_payload`), which the host `verify_vela_model` compiles from the same files, and the arena ownership protocol with the driver's cache hooks (`npu_cache`) (see [The Ethos-U backend](#the-ethos-u-backend-issue-169)). |
 | `nn/nn_svc_adapter.h` | Static-inline helpers every adapter uses to build a result and an `nn info` line. |
 | `nn/nn_detail.h` | The bound on a board's `nn` explanation text and its build-time check. |
 | `nn/nn_stream_life` | The one live-inference state machine (start admission, generations, stop claims). |

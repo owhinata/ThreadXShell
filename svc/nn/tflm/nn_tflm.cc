@@ -55,7 +55,7 @@
 #include "nn.h"
 #include "nn_backend.h"
 #include "nn_tflm_fit.h"     /* which slot a model range may be adopted from */
-#include "nn_tflm_model_check.h" /* the I/O dims rule, shared with the host gates */
+#include "nn_tflm_model_check.h" /* the bounded verifier and the I/O dims rule, shared with the host gates */
 #include "nn_tflm_mem.h"     /* the board-placed arena, slots and capacity */
 #include "nn_tflm_ops.h"     /* the op list, shared with verify_tflite */
 #include "nn_tflm_state.h"   /* the board-defined state and facts */
@@ -116,12 +116,14 @@ int build_interp(const void *data, uint32_t len)
 #if NN_TFLM_VERIFY
 	/* The full structural walk: every offset, vector length and table in the buffer
 	 * checked against `len` before anything dereferences them.  This is what catches
-	 * the truncated-on-the-PC case above. */
-	{
-		flatbuffers::Verifier verifier(bytes, (size_t)len);
-		if (!tflite::VerifyModelBuffer(verifier))
-			return NN_MODEL_ERR_FORMAT;
-	}
+	 * the truncated-on-the-PC case above.  Bounded (issue #175,
+	 * nn_tflm_model_check.h): depth 16 and 4096 table visits, the limits
+	 * grove-vision-ai-v2's firmware and every host gate use.  That bounds the
+	 * verifier's own work (a million visits would let a crafted file hold the
+	 * console), not the whole load's: the I/O walk below is bounded by its order,
+	 * and AllocateTensors() is another matter. */
+	if (!nn_tflm_verify_model_buffer(bytes, (size_t)len))
+		return NN_MODEL_ERR_FORMAT;
 #endif
 
 	const tflite::Model *model = tflite::GetModel(data);
@@ -130,8 +132,11 @@ int build_interp(const void *data, uint32_t len)
 
 	/* The I/O a descriptor can describe, on the model and before anything is planned
 	 * or destroyed (issue #175, nn_tflm_model_check.h -- the host gate runs the same
-	 * function): FORMAT for an I/O list that is missing or indexes past the tensors,
-	 * DIMS for a dimension outside 0..65535. */
+	 * function), in a fixed order -- FORMAT for an I/O list that is missing or
+	 * indexes past the tensors, SHAPE for a count outside 1..NN_MAX_IO, TENSOR for
+	 * a rank above NN_MAX_DIMS, DIMS for a dimension outside 0..65535 -- that keeps
+	 * its work constant.  The SHAPE / TENSOR checks after planning stay as the
+	 * backstop. */
 	{
 		int io = nn_tflm_model_io_check(model);
 		if (io != 0)

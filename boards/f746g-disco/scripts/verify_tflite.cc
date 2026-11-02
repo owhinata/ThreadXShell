@@ -17,7 +17,10 @@
  * WHAT IT CHECKS, in the order the board would:
  *   1. length, and that it fits the backend's staging slot
  *   2. the "TFL3" file identifier at offset 4
- *   3. tflite::VerifyModelBuffer() -- the full structural walk
+ *   3. tflite::VerifyModelBuffer() -- the full structural walk, BOUNDED by the
+ *      limits this board's firmware (NN_TFLM_VERIFY) and grove-vision-ai-v2's
+ *      verify with: nn_tflm_verify_model_buffer(), svc/nn/tflm/nn_tflm_model_check.h
+ *      (depth 16, 4096 table visits; issue #175)
  *   4. the schema version the runtime understands
  *   5. that subgraph 0's input / output lists name tensors that exist and every
  *      DECLARED dimension of those tensors fits a descriptor (0..65535) -- the FIRMWARE'S
@@ -148,17 +151,22 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	/* 3. the structural walk ---------------------------------------------- */
-	flatbuffers::Verifier verifier(buf.data(), (size_t)len);
-	if (!tflite::VerifyModelBuffer(verifier)) {
-		printf("RESULT  : REJECT -- the flatbuffer is malformed.\n"
-		       "          This is what a file truncated on THIS machine looks like: the\n"
-		       "          CRC32 above would still have matched on the board, because the\n"
-		       "          transfer would have carried the damage faithfully.\n"
+	/* 3. the structural walk, with the boards' limits (issue #175) --------- */
+	if (!nn_tflm_verify_model_buffer(buf.data(), (size_t)len)) {
+		printf("RESULT  : REJECT -- the flatbuffer is malformed, or nests deeper than %u\n"
+		       "          or needs more than %u table visits (the boards' verifier\n"
+		       "          limits, svc/nn/tflm/nn_tflm_model_check.h).\n",
+		       NN_TFLM_VERIFY_MAX_DEPTH, NN_TFLM_VERIFY_MAX_TABLES);
+		printf("          Malformed is what a file truncated on THIS machine looks like:\n"
+		       "          the CRC32 above would still have matched on the board, because\n"
+		       "          the transfer would have carried the damage faithfully.\n"
 		       "          Check the source of the file (interrupted download, a\n"
 		       "          converter still writing, a git-lfs pointer).\n");
 		return 1;
 	}
+
+	printf("verify  : ok -- within depth %u / %u table visits (the boards' limits)\n",
+	       NN_TFLM_VERIFY_MAX_DEPTH, NN_TFLM_VERIFY_MAX_TABLES);
 
 	const tflite::Model *model = tflite::GetModel(buf.data());
 
@@ -173,6 +181,16 @@ int main(int argc, char **argv)
 	switch (nn_tflm_model_io_check(model)) {
 	case 0:
 		break;
+	case NN_MODEL_ERR_SHAPE:
+		printf("RESULT  : REJECT -- an input or output list names outside 1..%d\n"
+		       "          tensors.  The board refuses it as NN_MODEL_ERR_SHAPE (%d).\n",
+		       NN_MAX_IO, NN_MODEL_ERR_SHAPE);
+		return 1;
+	case NN_MODEL_ERR_TENSOR:
+		printf("RESULT  : REJECT -- an input/output tensor declares more than %d\n"
+		       "          dimensions.  The board refuses it as NN_MODEL_ERR_TENSOR (%d).\n",
+		       NN_MAX_DIMS, NN_MODEL_ERR_TENSOR);
+		return 1;
 	case NN_MODEL_ERR_DIMS:
 		printf("RESULT  : REJECT -- an input/output tensor has a dimension outside\n"
 		       "          0..65535, which a tensor descriptor (16 bits) cannot hold.\n"

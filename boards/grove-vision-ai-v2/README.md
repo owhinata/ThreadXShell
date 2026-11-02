@@ -2314,7 +2314,7 @@ usable while any of them runs.
 nn model load --name <n>  # QSPI XIP on, NPU out of reset, the blob of that name
                           #   parsed in place
 nn model load --addr <a> <len>   # ... or a raw address and a length
-nn info                   # tensors, arena use, which interrupts got wrapped
+nn info                   # backend, model, arena use, tensors, plugin
 nn run                    # one frame -> whatever the LOADED MODEL produces:
                           #   top-5 classes, or face boxes.  See below.
 nn out [t] [n]            # dequantised values of an output tensor
@@ -4170,21 +4170,23 @@ XIP under a backgrounded dump, but before any bring-up the dump was silently
 lying.  A degenerate window is now caught where it should be, by bring-up's own
 probe, and `nor info` reports the port as `faulted` with the reason.
 
-### `nn info`'s interrupt list shrinks after the first open, and that is correct
+### Where the wrapped interrupts are seen (history: `nn info`'s `irq` line)
 
-The first `nn model load` after a reset reports `irq 133, 192`; every later one
-reports `irq 192`.  Nothing is being lost:
+`nn info` no longer prints an interrupt list.  Until issue #50 moved this board
+onto the shared `nn` command it had an `irq` line -- the NPU bring-up's wrapped
+set, `irq 133, 192` on the first `nn model load` after a reset and `irq 192` on
+every later one, because the NPU's wrapset then also held the QSPI line (133)
+and `nn model unload` unwrapped it, and unwrapping DISABLES (the EPK rule: a
+line is either disabled or wrapped-and-registered, never a third thing).  The
+line went with #50; `npu_hw_wrapped_irqs()` is still defined but nothing calls
+it.  Since issue #86 the flash's line belongs to the `nor` port, not to the NPU
+bring-up.  Where each set is seen now:
 
-- `npu_flash_xip_init()` is one-shot (`xip_ready`).  The first open calls into
-  the QSPI library, which enables IRQ 133 as a side effect (below); later opens
-  skip it because the read window is already up.
-- `nn model unload` unwraps, and unwrapping DISABLES -- the EPK rule is that a line is
-  either disabled or wrapped-and-registered, never a third thing.
-
-So on the second open 133 is disabled and stays disabled, which is why the
-snapshot does not see it become enabled and why nothing is "enabled but
-unaccounted".  Reads keep working because the model is fetched through the
-memory-mapped alias, not through the library's DMA path.
+- **the flash's line (133):** `nor info`'s `irq :` line -- `wrapped, enabled`,
+  `WRAPPED BUT OFF`, or `(none wrapped)`.
+- **the NPU's set** (the U55 line and anything `ethosu_init()` enabled): the
+  `irq <n> wrapped (vendor ...)` line in `dmesg` at each bring-up; `epk` says
+  whether the cpu% accounting holds and names a displaced vector.
 
 ### [!] Bringing up the flash enables an interrupt nobody named
 
@@ -4192,7 +4194,8 @@ memory-mapped alias, not through the library's DMA path.
 library moves flash data with DMA.  Nothing predicted that line.  The EPK
 snapshot wrap caught it because it measures what got enabled rather than listing
 what we expect, which is the whole argument for doing accounting that way.
-`nn info` prints the wrapped set and it reads `irq 133, 192`.
+`nor info` reports the line on its `irq` row (until issue #50 `nn info` printed
+it, as `irq 133, 192` -- see above).
 
 ### The NPU was never brought up before this
 
@@ -4682,9 +4685,12 @@ further down were recorded under the old name and are left as they were written
 Three things behave differently now that the stream outlives the command:
 
 - **`nn info` answers while it runs**, as it always did on the other two boards.
-  It reports the model and where it came from, and says plainly which sections it
-  is withholding -- the arena figure and the tensors need the claim the stream is
-  holding, and the arena is being rewritten every frame anyway.
+  It reports the model, `source : streaming (`nn stream stats`)`, the `used`
+  activations figure and the tensors -- since issue #164 in full, as on the other
+  two boards.  Both are what the last load left (the backend's activations field
+  and the descriptors, never a tensor's contents, which the arena rewrites every
+  frame), and no load or unload can run while the stream holds the claim.  Until
+  #164 this board withheld those two sections during a stream.
 - **`nn model unload`, `nn run`, `nn bench` and `nn out` are refused** while a
   stream runs, by the same claim. `nn thresh` still works: it takes the plugin
   lease, not the claim, and the inference worker waits it out (bounded) before

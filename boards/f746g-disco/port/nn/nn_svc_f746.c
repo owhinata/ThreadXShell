@@ -220,7 +220,11 @@ int nn_svc_input(struct tensor_desc *out)
  *
  * The model input's refusals (issue #162) are wio-lite-ai's codes and words too:
  * one sentence per reason of the shared admission test, built from its reason
- * name, with status HW and nothing held, as wio-lite-ai reports them.
+ * name, with status HW and nothing held, as wio-lite-ai reports them.  No model
+ * (no usable input tensor, NNCAM_ERR_MODEL) is STATE, as on the other two
+ * boards and this board's own `nn bench` (issue #164; it said HW until then).
+ * `sdram test` holding .sdram.ai never reaches here: nn_camera_start() returns
+ * the session's NN_ERR_SCRATCH_HELD and its callers answer it as BUSY.
  */
 static void nn_start_refusal(struct nn_op_result *res, int rc)
 {
@@ -237,6 +241,7 @@ static void nn_start_refusal(struct nn_op_result *res, int rc)
 	case NNCAM_ERR_MODEL:
 		nn_detail_set("no model loaded, or it has no usable input tensor "
 		              "(`nn info`)");
+		status = NN_SVC_ERR_STATE;
 		break;
 	case -9:
 		nn_detail_set(NN_CAMERA_NOT_RGB565);

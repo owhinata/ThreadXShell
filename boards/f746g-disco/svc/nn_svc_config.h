@@ -15,9 +15,9 @@
 /*
  * [!] THIS ONE FOLLOWS THE BACKEND, NOT THE BOARD, and that is the case the
  * capability rule exists for.  Only a backend that interprets a .tflite in RAM
- * can be pointed at a new model at run time; with the `null` backend -- which is
- * this board's DEFAULT, because it is the only one whose inputs a clean tree
- * has (issue #98) -- there is nothing to load and `nn model load` would be a
+ * can be pointed at a new model at run time; with the `null` backend -- this
+ * board's default until issue #130 made it `tflm` (board.cmake), and still a
+ * selectable build -- there is nothing to load and `nn model load` would be a
  * subcommand that always refuses.  So the same board answers differently in two
  * builds, and `help` is right in both.
  */

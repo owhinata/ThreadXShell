@@ -320,18 +320,24 @@ static const struct nn_core_board nn_core_board = {
 
 void nn_svc_info(struct nn_svc_info *out)
 {
-	uint8_t owner_snap, open_snap;
-	char    from_snap[BLOB_NAME_MAX + 1];
+	uint8_t  owner_snap, open_snap;
+	uint32_t used_snap;
+	char     from_snap[BLOB_NAME_MAX + 1];
 	/* The model's display name is the backend's one copy (svc/nn/nn.h's
 	 * nn_model_name(): the blob name, or "(raw)" for --addr; issue #169).
 	 * Taken before any critical section: the first call may open the
 	 * singleton. */
 	struct nn_model *m = nn_mh();
 	const char *name = nn_model_name(m);
+	/* The backend's own name and version (svc/nn/ethosu/), as on the other two
+	 * boards (issue #164); until then a fixed string of this board's.  That the
+	 * NPU runs secure and privileged is the `source` line's. */
+	const struct nn_backend_info *bi = nn_backend();
 	TX_INTERRUPT_SAVE_AREA
 
 	memset(out, 0, sizeof *out);
-	nn_svc_str(out->backend, sizeof out->backend, "ethos-u55 (tflm, secure)");
+	nn_svc_str(out->backend, sizeof out->backend, bi ? bi->name : NULL);
+	nn_svc_str(out->version, sizeof out->version, bi ? bi->version : NULL);
 	out->arena_bytes = nn_arena_reserved();
 
 	/*
@@ -378,6 +384,11 @@ void nn_svc_info(struct nn_svc_info *out)
 	owner_snap = nn_owner;
 	open_snap  = nn_open_done;
 	nn_svc_str(from_snap, sizeof from_snap, name);
+	/* A field the backend wrote at the reload (svc/nn/ethosu/nn_ethosu.cc's
+	 * activations_bytes), not a walk of the arena: under a stream's hold no
+	 * reload can rewrite it, and it is read in the same section as the owner
+	 * test for the reason above.  Only used when a stream holds the gate. */
+	used_snap  = open_snap ? nn_activations_bytes(m) : 0u;
 	TX_RESTORE
 
 	if (owner_snap != (uint8_t)NN_OWNER_STREAM) {
@@ -398,13 +409,18 @@ void nn_svc_info(struct nn_svc_info *out)
 		nn_svc_str(out->model, sizeof out->model, from_snap);
 	nn_svc_str(out->source, sizeof out->source, "streaming (`nn stream stats`)");
 	/*
-	 * The rest needs the gate the stream is holding -- and would be misleading
-	 * anyway: the arena is being rewritten every frame, so a tensor's CONTENTS
-	 * are not a thing to report while this runs.  That is the line svc/nn/nn_svc.h
-	 * already draws between a descriptor and its buffer.
+	 * [!] `used` AND THE TENSORS ARE ANSWERED WHILE A STREAM RUNS (issue #164),
+	 * as on the other two boards.  Both are what the reload left -- the
+	 * activations figure and the descriptors (shape, type, quantisation), never
+	 * a tensor's CONTENTS, which the arena rewrites every frame (the line
+	 * svc/nn/nn_svc.h draws between a descriptor and its buffer) -- and while a
+	 * stream holds the gate no load or unload can run to replace them.
+	 * nn_svc_input() / nn_svc_output() take no gate.  Until #164 both were
+	 * WITHHELD here (#99's first answer).
 	 */
-	out->avail_runtime = (uint8_t)NN_AVAIL_WITHHELD;
-	out->avail_tensors = (uint8_t)NN_AVAIL_WITHHELD;
+	out->arena_used    = used_snap;
+	out->avail_runtime = (uint8_t)NN_AVAIL_OK;
+	out->avail_tensors = open_snap ? (uint8_t)NN_AVAIL_OK : (uint8_t)NN_AVAIL_NA;
 }
 
 /* ---- resolving a model in the asset store -------------------------------- */

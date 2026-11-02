@@ -302,7 +302,9 @@ wio-lite-ai's:
 
 Every worded refusal reads `the model input cannot take camera pixels: <name>
 (`nn info`)`, with status `hardware` and nothing held, from `nn run` and `nn
-stream start` alike.  The numbers and the table are `svc/nn/nn_input_codes`;
+stream start` alike.  The -3 row (no model, or no usable input tensor) is
+answered with status `state` instead, as on every board and as this board's
+`nn bench` (issue #164; it said `hardware` until then).  The numbers and the table are `svc/nn/nn_input_codes`;
 this board's `port/nn/nn_camera.h` takes its `NNCAM_ERR_*` from those names.
 
 -4 is no longer returned.  **This board admits less than it did**: a

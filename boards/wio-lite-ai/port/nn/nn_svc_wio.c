@@ -1563,8 +1563,11 @@ static void nn_nncam_detail(struct nn_op_result *res, int rc)
  * what it took): this says what the operator can do NOW.  A camera that is
  * still stopping, an `lcd reset`, a teardown still running, a session or a
  * decoder held for a moment are all a retry away, and calling them
- * NN_SVC_ERR_HW said "the hardware refused".  A stream already running, or one
- * running with another `test`, is the state's answer.  Everything else is
+ * NN_SVC_ERR_HW said "the hardware refused".  A stream already running, one
+ * running with another `test`, or no model (no usable input tensor) is the
+ * state's answer -- the last as on grove-vision-ai-v2 and this board's own `nn
+ * bench` (issue #164: until then it said HW, though nothing about the hardware
+ * refused; loading a model is what the operator does next).  Everything else is
  * still the hardware's.
  */
 static int nn_status_of_start(int rc)
@@ -1572,6 +1575,7 @@ static int nn_status_of_start(int rc)
 	switch (rc) {
 	case NNCAM_ERR_RUNNING:
 	case NNCAM_ERR_TEST:
+	case NNCAM_ERR_MODEL:
 		return NN_SVC_ERR_STATE;
 	case NNCAM_ERR_CAMBUSY:
 	case NNCAM_ERR_STILL:

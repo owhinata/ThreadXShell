@@ -517,6 +517,7 @@ table moved to `svc/nn/` in issue #163, see svc/README.md):
 | `port/nn/nn_camera.c`, `nn_camera_priv.h` | console (start / stop / stats / record reads) | Binds the shared frame path to the nn step of the band sink (`port/camera/cam_band.h`), holds nn's place among the camera's holders, and holds the NN session plus an OCTOSPI1 user place for the stream's lifetime; owns the glue's state (the private header lists each counter's writers and resets) and the frame path's ops table. |
 | `port/nn/nn_producer.c` | camera producer (the nn step of the band sink) | Downsamples each 60-row DCMI band straight into the model's input tensor on the CPU through the shared conversion (`svc/nn/nn_input_contract.h`), inside one band period (~18.5 ms), and hands the frame over after the fourth band. |
 | `port/nn/nn_worker.c` | inference worker (`nn_work`, priority 18) | Inference runs on the CPU for ~373 ms with no yield, so the worker sits below the console, the preview and the producer; it holds the result lease across decode + publish because the preview thread outranks it. |
+| `port/nn/nncam_teardown.h` | console (start / stop) and worker (leaving its loop), as inline predicates over one snapshot | None: pure -- whether the drain of this board's band stream has finished, asked the same way by a fresh start, a second stop and the worker; host-tested by `test/test_nncam_teardown.c`. |
 | `port/nn/nn_panel.c` | panel (preview thread, priority 12) | The nn half of the LTDC preview: the may-draw question, the record snapshot and the plugin's `draw()`, with the lease only tried. The display half (frame lock, back buffer, flip) stays in `src/cam_preview.c` and is passed in as hooks (`nn_panel.h`), because `port/nn` may not include `port/ltdc`. Built only with the LCD. |
 | `port/nn/nn_active.c` | worker, panel, console, under the plugin lease | This board's facts for the shared entries (`svc/nn/nn_active_lease.c`, which checks the lease, and `svc/nn/nn_active_core.c` below it): reading an `nn_tensor` as a `svc/nn/tensor.h` descriptor, where a depth sample goes, the frame geometry, and the base vtable's transform and log sink. |
 | `port/nn/nn_model_board.c` | worker (run), console (open / bench / info) | The state and hooks of the shared model API (`svc/nn/nn.c`): its state as plain CPU-only `.bss`, the PRIMASK critical section, the one-tick ThreadX wait, and a DWT cycle counter it only verifies and reads (`svc/timebase.c` owns it). |
@@ -542,7 +543,7 @@ them:
 |---|---|---|
 | `psram.h` | `port/nn/nn_camera.c`, `port/nn/nn_svc_wio.c` | An OCTOSPI1 user place (`psram_acquire_shared()` / `psram_release_shared()`): the stream and `nn bench` read PSRAM, so a command that retunes the bus must be kept out (users do not exclude each other). |
 | `cam_preview.h` | `port/nn/nn_svc_wio.c` | `CAM_PREVIEW_STACK_BYTES`, the preview thread's stack: the ceiling the plugin draw allowance is asserted below. (The plugin-draw counters moved to `port/nn/nn_panel.h` in issue #140.) |
-| `blob.h` | `port/nn/nn_svc_wio.c` | The NOR asset store: `nn model load --name` reads a blob under the store's busy guard. |
+| `blob.h` | `port/nn/nn_svc_wio.c` | The NOR asset store: `nn model load --slot` reads a blob under the store's busy guard. |
 
 ### The camera input: one contract with f746g-disco (issue #162)
 
@@ -571,7 +572,9 @@ gives the session back.  Each reason has its own code and sentence:
 
 Every worded refusal reads `the model input cannot take camera pixels: <name>
 (`nn info`)`, with status `hardware` and nothing held, from `nn run` and `nn
-stream start` alike.  The numbers and the table are `svc/nn/nn_input_codes`;
+stream start` alike.  The -3 row (no model, or no usable input tensor) is
+answered with status `state` instead, as on every board and as this board's
+`nn bench` (issue #164; it said `hardware` until then).  The numbers and the table are `svc/nn/nn_input_codes`;
 this board's `port/nn/nn_camera.h` takes its `NNCAM_ERR_*` from those names.
 
 Against what this board admitted before: the same dtypes, rank, batch,

@@ -182,7 +182,7 @@ then `.rodata`, then the NOLOAD buffers, with `.plugin` still pinned at the top.
 @`0x3404D000..0x34050CC0` and `.rodata` 79,784 B from `0x34050CC0`; ITCM used
 240,640 / free 21,504 B (`check_placement_budget`).  Of the +1,280 B over the
 14,272 above, issue #175 added 112, #178 360, #179 96 and #180 336 (each its
-commit's measurement); the remaining 376 B came with the load-path changes between
+commit's measurement; #181 then added 240, to 15,792 B); the remaining 376 B came with the load-path changes between
 2026-10-31 and #175 and are not itemised here.  The list below is the
 2026-10-31 inventory.
 
@@ -2513,6 +2513,35 @@ reads them through `Table::GetPointer<const void *>` (`nn_tflm_tensor_quant()`,
 `QuantizationParameters::scale()` / `zero_point()` accessors it also calls were
 already outlined into ITCM by this build before the change and add nothing.
 
+**And the buffer indices and the offline plan (issue #181).**  The same walk
+refuses (`NN_MODEL_ERR_FORMAT`) a tensor of any subgraph or any metadata entry
+naming a buffer past the model's buffer vector (or no buffer vector), an
+`OfflineMemoryAllocation` entry -- the name compared exactly as TFLM compares
+it, 23 bytes -- whose buffer has no data, less than the 12-byte header, a
+tensor count (word [2]) other than all subgraphs' tensors together, or fewer
+offsets than that count, and a model without an operator-code vector (the
+payload scan already refused that one here).  TFLM reads `(*buffers)[index]`
+for both without a range check and the plan's data without a null or length
+check; this board's TFLM keeps flatbuffers' assert (no `NDEBUG`), so an index
+past the vector aborts rather than reads, the console gone either way.  [!]
+**Every Vela model carries an `OfflineMemoryAllocation`**, so this part runs on
+each one this board loads: the pinned and SDK Vela models all hold exactly 12 +
+4 x n bytes with n equal to the subgraph's tensors, and pass unchanged.  A
+mismatched count used to surface as `NN_MODEL_ERR_ARENA` from inside
+`AllocateTensors()`.  Every offset must be -1 (plan online) or >= 0: TFLM's
+greedy planner keeps any other negative value as a fixed offset and its arena
+check adds offset + size, so -size < offset < -1 placed a tensor before the
+arena (every pinned and SDK Vela plan's smallest offset is -1).  Of the header
+only word [2] is read (Vela points its non-constant tensors at buffer 0, which
+need not be empty).  Cost: ITCM 0 B (`check_placement_budget`: used 240,640 B, free 21,504
+B, as before), `.text_cold` +240 B, `.rodata` +24 B (the name).  [!] Keeping
+ITCM at 0 needed the same spelling again: the generated `Model::buffers()`,
+`metadata()` and `operator_codes()` (+20 B each) and `Vector<Offset<Buffer>>`
+/ `Vector<Offset<Metadata>>::Get()` (+48 B each), each with a veneer, were
+outlined into `.text`, so the walk reads the fields through
+`Table::GetPointer<const void *>` (`nn_tflm_model_field()`) and the two
+vectors' entries by hand (`nn_tflm_vec_table()`, the read `Get()` makes).
+
 ### The model is a blob, opened by name (#93, #49 Step 4a)
 
 `nn model load --name cls` asks the asset store for the blob called `cls` and parses what it
@@ -2705,7 +2734,8 @@ on-board verifier and the wio-lite-ai and f746g-disco host gates use too
   most 3 x 64 list reads per operator entry, so at most 4,096 x 192 reads --
   and what it passes bounds `AllocateTensors()`'s passes over the same vectors
   the same way; TFLM's zero-point copies total at most 65,536 per load (issue
-  #180).  Not the whole of `AllocateTensors()`: the per-operator
+  #180); the buffer indices and the offline plan's header add one compare per
+  tensor entry and a constant per metadata entry (issue #181).  Not the whole of `AllocateTensors()`: the per-operator
   scratch-request walk and the greedy memory planner are quadratic in tensors
   and operators, so the load is bounded by visits squared x small constants.
 - **Measured** on the host: the classification model needs **depth 4 and 19
@@ -4630,6 +4660,8 @@ host instead of on a board at the far end of a flash cycle:
   in, so the size cannot drift from the reservation
 - one subgraph, every operator `ethos-u`, int8 in and out, no unreachable
   tensors, an `OfflineMemoryAllocation` whose tensor count matches the subgraph
+  (the shared walk refuses a plan TFLM would misread first, issue #181; the
+  gate's own report of the plan stays as the diagnostic)
 - `--blazeface` additionally pins the four output shapes the decoder looks for
 
 Measured on the model built by the commands above:

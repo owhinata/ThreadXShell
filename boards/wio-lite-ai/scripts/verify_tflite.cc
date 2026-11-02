@@ -36,10 +36,12 @@
  *   4. the schema version the runtime understands
  *   5. that the graph holds together (every subgraph's tensors, every operator's
  *      tensor lists, at most 64 long and naming tensors that exist, every
- *      tensor's quantization lengths and the operators' per-channel sum), every
+ *      tensor's quantization lengths and the operators' per-channel sum, every
+ *      buffer index, the offline plan's header, the operator-code vector), every
  *      tensor's rank, and that every DECLARED dimension of subgraph 0's I/O
  *      tensors fits a descriptor (0..65535) -- the FIRMWARE'S OWN check,
- *      svc/nn/tflm/nn_tflm_model_check.h, compiled in (issues #175, #178, #180)
+ *      svc/nn/tflm/nn_tflm_model_check.h, compiled in (issues #175, #178, #180,
+ *      #181)
  *   6. [!] that every operator the model uses is one this FIRMWARE registered
  *
  * Step 6 is the one the board cannot do well.  TFLM's AllocateTensors() returns a
@@ -234,7 +236,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	/* 5. the graph's structure and ranks, the I/O dims (#175, #178, #180) */
+	/* 5. the graph's structure and ranks, the I/O dims (#175, #178, #180, #181) */
 	switch (nn_tflm_model_io_check(model)) {
 	case 0:
 		break;
@@ -264,8 +266,13 @@ int main(int argc, char **argv)
 		       "          vector neither absent, 1 long nor the scale's length, a\n"
 		       "          per-channel quantized dimension outside the tensor's rank\n"
 		       "          (rank >= 2) or 0..%u (rank 0 / 1), or the\n"
-		       "          operators' scale lengths adding up past %u).  The board\n"
-		       "          refuses it as NN_MODEL_ERR_FORMAT (%d).\n",
+		       "          operators' scale lengths adding up past %u), a tensor or\n"
+		       "          metadata entry names a buffer that does not exist, an\n"
+		       "          OfflineMemoryAllocation plan has no data, no 12-byte\n"
+		       "          header, a tensor count other than the graph's, fewer\n"
+		       "          offsets than it claims or an offset below -1, or there\n"
+		       "          is no operator-code vector.  The board refuses it as\n"
+		       "          NN_MODEL_ERR_FORMAT (%d).\n",
 		       NN_TFLM_MAX_OP_TENSORS, NN_TFLM_MAX_QUANT_CHANNELS,
 		       NN_TFLM_MAX_TENSOR_RANK - 1u, NN_TFLM_MAX_QUANT_REFS,
 		       NN_MODEL_ERR_FORMAT);

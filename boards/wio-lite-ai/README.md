@@ -827,6 +827,30 @@ models found that parse: 1,280 per tensor and 34,292 summed (TFLM's mobilenet_v2
 Cost: +672 B of Flash (`shell.elf` `.text` 283,384 -> 284,056 B, `shell.bin`
 372,464 -> 373,136 B); the `null` tree is byte-identical.
 
+[!] **The walk checks the buffer indices and the offline plan too** (issue
+#181): a tensor of any subgraph, or any metadata entry, naming a buffer past
+the model's buffer vector (or a model with no buffer vector at all); an
+`OfflineMemoryAllocation` metadata entry (the name compared exactly as TFLM
+compares it, 23 bytes) whose buffer has no data, less than the 12-byte header,
+a tensor count other than all subgraphs' tensors together, or fewer offsets
+than that count; or a model without an operator-code vector -- each is
+`NN_MODEL_ERR_FORMAT` (-7).  TFLM reads `(*buffers)[buffer()]` for every tensor
+and for the plan's entry without a range check, then the plan's data without a
+null or length check, and this board builds TFLM with `NDEBUG`, so
+flatbuffers' index assert is compiled out and the read really leaves the
+vector; with no verifier on this board the walk is the only thing in front of
+it.  A plan count that disagrees with the graph used to fail only inside
+`AllocateTensors()` (`NN_MODEL_ERR_ARENA` on the board) and pass
+`verify_tflite`, which does not plan.  Every plan offset must be -1 (plan
+online) or >= 0: TFLM's planner keeps any other negative value as a fixed
+offset, and its arena check (offset + size) let -size < offset < -1 place a
+tensor before the arena.  Of the header only word [2] is read; buffer 0 need
+not be empty.  One compare per tensor
+entry, a constant per metadata entry.  The pinned blazeface int8 (no plan,
+every index in range) passes unchanged.  Cost: +496 B of Flash (`shell.elf`
+`.text` 284,056 -> 284,528 B, `.rodata` +24 B, `shell.bin` 373,136 -> 373,632
+B); the `null` tree is byte-identical.
+
 **[!] The order matters and is not an implementation detail.**  Loading the
 plugin first would destroy the previous one's state at the fixed reservation
 before knowing whether the model that needs it can be built, and a backend that

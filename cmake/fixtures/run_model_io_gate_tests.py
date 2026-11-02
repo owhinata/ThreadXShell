@@ -72,6 +72,34 @@ and NN_TFLM_MAX_QUANT_REFS (65536), all refusals NN_MODEL_ERR_FORMAT:
                                      naming one tensor of scale 32 (each under the
                                      cap, the sum 128,000 over it)
 
+And the buffer indices and the offline plan (issue #181), all refusals
+NN_MODEL_ERR_FORMAT; plan(n, k) is an OfflineMemoryAllocation buffer with
+tensor count n and k offsets (12 + 4k bytes), the graph has 2 tensors:
+
+  t_buffer_last                      control: a tensor on the last buffer (nb - 1)
+  t_buffer_oob / t_buffer_oob_sg1    a tensor on buffer nb (subgraph 0 / 1)
+  t_no_buffers                       no buffer vector, a tensor on buffer 0
+  md_buffer_oob                      a metadata entry (not the plan) on buffer nb
+  md_other_name / md_offline_name_24 controls: another name with 1 byte of data;
+                                     a 24-byte name starting with the plan's 23
+                                     (TFLM's compare includes the length)
+  md_offline_ok / md_offline_total_3 controls: plan(2, 2); plan(3, 3) with a
+                                     second subgraph -- the count is every
+                                     subgraph's tensors, as TFLM compares it
+  md_offline_short / _hdr_short /    plan(2, 1); 8 bytes; no data; the plan on
+  _null / _buffer_oob                buffer nb
+  md_offline_nbr_lt / _gt / _neg     plan(1, 1) / plan(3, 3) / plan(-1, 2)
+  md_offline_off_neg2 / _off_min     plan(2, 2) with an offset of -2 / INT32_MIN
+                                     (only -1 means "plan online" to TFLM)
+  md_offline_off_pos                 control: plan(2, 2) with offsets 0 and 16
+  md_offline_sg0_only                plan(2, 2) with a second subgraph (3 tensors)
+  md_offline_second_bad              plan(2, 2), then a second plan(2, 1): TFLM
+                                     reads every matching entry
+  codes_null                         no operator-code vector (and no operator)
+
+On the vela style the controls with a plan are judged by the walk's ok line like
+the rest; the gate's own offline-plan report and its later steps run after it.
+
 And, on verify_vela_model only (--style vela), Grove's payload scan (issue #179,
 svc/nn/ethosu/npu_model_scan.cc), which charges each operator's payload bytes
 against the file's length before walking it and refuses -1 as an ethos-u
@@ -201,6 +229,32 @@ CASES = [
     ("q_refs_65537.tflite", FORMAT),
     ("q_scale_65000_shared.tflite", FORMAT),
     ("q_refs_4000_shared.tflite", FORMAT),
+    # The buffer indices and the offline plan (issue #181): every tensor's and
+    # metadata entry's buffer below the buffer count, every OfflineMemoryAllocation
+    # entry with data, a 12-byte header, a count equal to every subgraph's tensors
+    # together and that many offsets, each -1 or >= 0, and an operator-code vector.
+    ("t_buffer_last.tflite", None),
+    ("t_buffer_oob.tflite", FORMAT),
+    ("t_buffer_oob_sg1.tflite", FORMAT),
+    ("t_no_buffers.tflite", FORMAT),
+    ("md_buffer_oob.tflite", FORMAT),
+    ("md_other_name.tflite", None),
+    ("md_offline_ok.tflite", None),
+    ("md_offline_name_24.tflite", None),
+    ("md_offline_short.tflite", FORMAT),
+    ("md_offline_hdr_short.tflite", FORMAT),
+    ("md_offline_null.tflite", FORMAT),
+    ("md_offline_buffer_oob.tflite", FORMAT),
+    ("md_offline_nbr_lt.tflite", FORMAT),
+    ("md_offline_nbr_gt.tflite", FORMAT),
+    ("md_offline_nbr_neg.tflite", FORMAT),
+    ("md_offline_total_3.tflite", None),
+    ("md_offline_sg0_only.tflite", FORMAT),
+    ("md_offline_second_bad.tflite", FORMAT),
+    ("md_offline_off_neg2.tflite", FORMAT),
+    ("md_offline_off_min.tflite", FORMAT),
+    ("md_offline_off_pos.tflite", None),
+    ("codes_null.tflite", FORMAT),
 ]
 
 # Grove's payload scan (issue #179): vela style only, judged by the scan's sentence.

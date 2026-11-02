@@ -483,6 +483,25 @@ is no built-in model) and after `nn model unload`.
   mobilenet_v2); the pinned blazeface int8 (96 / 4,539) passes unchanged.
   Cost: +592 B of Flash on `build/f746-tflm` (`.text` 541,456 -> 542,048 B;
   `shell.bin` 616,836 -> 617,412 B); the `null` tree is byte-identical.
+- [!] **The walk checks the buffer indices and the offline plan too** (issue
+  #181): a tensor of any subgraph or any metadata entry naming a buffer past
+  the buffer vector (or no buffer vector at all), an `OfflineMemoryAllocation`
+  entry (the name compared exactly as TFLM does) whose buffer has no data, less
+  than the 12-byte header, a tensor count other than all subgraphs' tensors
+  together, or fewer offsets than that count, or a model without an
+  operator-code vector is `NN_MODEL_ERR_FORMAT` (-7).  TFLM indexes the buffer
+  vector with both unchecked (this board builds TFLM with `NDEBUG`, so
+  flatbuffers' index assert is gone) and reads the plan's data without a null
+  or length check -- the on-board verifier proves offsets, not index values.
+  A plan count that disagreed with the graph used to fail inside
+  `AllocateTensors()` (`NN_MODEL_ERR_ARENA`) and pass `verify_tflite`, which
+  does not plan.  Every plan offset must be -1 (plan online) or >= 0: TFLM's
+  planner keeps any other negative value, and its arena check (offset + size)
+  let -size < offset < -1 place a tensor before the arena.  Of the header only
+  word [2] is read; buffer 0 need not be empty.  TFLM's person_detect and the 43 models found that parse keep their
+  verdict.  Cost: +256 B of Flash on `build/f746-tflm` (`.text` 542,048 ->
+  542,240 B, `.rodata` +64 B; `shell.bin` 617,412 -> 617,668 B); the `null`
+  tree is byte-identical.
 - `stedgeai_reloc` is the same: it starts empty, and `builtin` used to mean
   "unload" there before #131 (use `nn model unload`).
 - `stedgeai_reloc` refuses the same dimension with the same `-13` (issue
@@ -918,9 +937,11 @@ firmware's on-board verifier (`NN_TFLM_VERIFY=1`) and grove-vision-ai-v2 use --
 depth 16, 4,096 table visits, `nn_tflm_verify_model_buffer()` in
 `svc/nn/tflm/nn_tflm_model_check.h` (issue #175; a model the board would refuse
 as malformed is refused here first) -- the staging capacity (512 KB), the I/O check the backend runs before planning (issue
-#175, #178, #180: `svc/nn/tflm/nn_tflm_model_check.h` compiled in -- a missing,
+#175, #178, #180, #181: `svc/nn/tflm/nn_tflm_model_check.h` compiled in -- a missing,
 too long (> 64) or out-of-range I/O or operator list, a subgraph without
-tensors, or quantization vectors too long or inconsistent, is `NN_MODEL_ERR_FORMAT`, a tensor above rank 6 (an I/O tensor above
+tensors, quantization vectors too long or inconsistent, a buffer index past the
+buffer vector, an offline plan that does not match the graph, or no
+operator-code vector, is `NN_MODEL_ERR_FORMAT`, a tensor above rank 6 (an I/O tensor above
 4) `NN_MODEL_ERR_TENSOR`, an I/O dimension outside 0..65535 `NN_MODEL_ERR_DIMS`), and the operators the firmware registers -- read from
 `svc/nn/tflm/nn_tflm_ops.h` under the `extended` profile, the same list
 `svc/nn/tflm/nn_tflm.cc` registers from.  `test/host_tests.sh` runs it on

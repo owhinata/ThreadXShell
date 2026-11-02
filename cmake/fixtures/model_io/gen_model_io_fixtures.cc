@@ -122,6 +122,48 @@
  *                                (each passes the cap, the sum 128,000 does not)
  *                                                                   -> FORMAT
  *
+ * And the buffer indices and the offline plan (issue #181): the control model
+ * (buffer 0 empty, both tensors on it) with one thing changed.  A metadata entry
+ * gets a Buffer of its own appended after the model's (a Metadata table and its
+ * Buffer are two more visits); "plan(n, k)" is an OfflineMemoryAllocation
+ * buffer of words {0, 1, n, k offsets of -1}, 12 + 4k bytes, and the graph has 2
+ * tensors (3 where a second subgraph is added):
+ *
+ *   t_buffer_last.tflite         control: 2 buffers, t0 on buffer 1 (nb - 1)
+ *   t_buffer_oob.tflite          t0 on buffer 2 == nb                -> FORMAT
+ *   t_buffer_oob_sg1.tflite      a second subgraph's tensor on buffer nb
+ *                                                                    -> FORMAT
+ *   t_no_buffers.tflite          no buffer vector, t0 on buffer 0    -> FORMAT
+ *   md_buffer_oob.tflite         "min_runtime_version" on buffer nb  -> FORMAT
+ *   md_other_name.tflite         control: "min_runtime_version", 1 byte of data
+ *                                (only the plan's name is parsed)
+ *   md_offline_ok.tflite         control: plan(2, 2), 20 bytes
+ *   md_offline_name_24.tflite    control: "OfflineMemoryAllocationX", 1 byte
+ *                                (TFLM compares the length too; so does the walk)
+ *   md_offline_short.tflite      plan(2, 1), 16 bytes                -> FORMAT
+ *   md_offline_hdr_short.tflite  8 bytes, no word [2]                -> FORMAT
+ *   md_offline_null.tflite       the plan's buffer has no data       -> FORMAT
+ *   md_offline_buffer_oob.tflite the plan on buffer nb               -> FORMAT
+ *   md_offline_nbr_lt.tflite     plan(1, 1)                          -> FORMAT
+ *   md_offline_nbr_gt.tflite     plan(3, 3)                          -> FORMAT
+ *   md_offline_nbr_neg.tflite    plan(-1, 2)                         -> FORMAT
+ *                                (the walk's negative guard is redundant here:
+ *                                the 64-bit compare with the tensor count
+ *                                refuses -1 too; the guard is kept for clarity)
+ *   md_offline_off_neg2.tflite   plan(2, 2) with offset 0 = -2: TFLM's planner
+ *                                takes only -1 as "online"         -> FORMAT
+ *   md_offline_off_min.tflite    plan(2, 2) with offset 1 = INT32_MIN -> FORMAT
+ *   md_offline_off_pos.tflite    control: plan(2, 2) with offsets 0, 16
+ *                                (md_offline_ok's are both -1)
+ *   md_offline_total_3.tflite    control: a second subgraph (1 tensor), plan(3, 3)
+ *                                -- TFLM compares with every subgraph's tensors
+ *   md_offline_sg0_only.tflite   the same with plan(2, 2), subgraph 0's count
+ *                                                                    -> FORMAT
+ *   md_offline_second_bad.tflite plan(2, 2), then a second plan(2, 1): TFLM reads
+ *                                every matching entry                -> FORMAT
+ *   codes_null.tflite            no operator-code vector (and no operator, so
+ *                                nothing else is wrong)              -> FORMAT
+ *
  * And Grove's payload scan (issue #179, svc/nn/ethosu/npu_model_scan.cc), which
  * only verify_vela_model runs: one tensor [1, 4] as graph I/O, the CUSTOM
  * "ethos-u" operator code, and UINT8 1-D payload tensors over a 16-byte aligned
@@ -191,6 +233,28 @@ struct qtensor {
 	uint32_t             entries;
 };
 
+/* issue #181: one metadata entry.  Unless `oob`, it names a Buffer of its own
+ * (with `data`, or with no data vector when `no_data`); `oob` names buffer nb. */
+struct mddef {
+	std::string          name;
+	std::vector<uint8_t> data;
+	bool                 no_data;
+	bool                 oob;
+};
+
+/* issue #181: an OfflineMemoryAllocation buffer, words {0, 1, n, k x -1}, the
+ * first offsets replaced by @p first. */
+std::vector<uint8_t> plan(int32_t n, uint32_t k, std::vector<int32_t> first = {})
+{
+	std::vector<int32_t> w{ 0, 1, n };
+
+	w.resize(3u + k, -1);
+	for (size_t i = 0; i < first.size() && 3u + i < w.size(); i++)
+		w[3u + i] = first[i];
+	return std::vector<uint8_t>(reinterpret_cast<const uint8_t *>(w.data()),
+	                            reinterpret_cast<const uint8_t *>(w.data() + w.size()));
+}
+
 /* issue #180: one more ADD operator table, named by `entries` operator entries. */
 struct opdef {
 	std::vector<int32_t> in;
@@ -221,7 +285,23 @@ struct spec {
 	/* issue #180 -- after the extra tensor entries, and after the ADD above. */
 	std::vector<qtensor> qt;
 	std::vector<opdef>   more_ops;
+	/* issue #181 -- all zero / empty: buffer 0 everywhere, no metadata. */
+	uint32_t             t0_buffer;     /* the input tensor's buffer index */
+	uint32_t             sg1_buffer;    /* the sg1_ok tensor's (UINT32_MAX: nb) */
+	bool                 no_buffers;    /* no buffer vector at all */
+	bool                 no_codes;      /* no operator-code vector at all */
+	std::vector<mddef>   md;
 };
+
+/* issue #181: the metadata entries that bring a Buffer of their own. */
+uint32_t md_buffers_of(const spec &sp)
+{
+	uint32_t n = 0;
+
+	for (const mddef &m : sp.md)
+		n += m.oob ? 0u : 1u;
+	return n;
+}
 
 /* Operator entries in all, of any operator table. */
 uint32_t op_entries_of(const spec &sp)
@@ -237,7 +317,7 @@ uint32_t op_entries_of(const spec &sp)
  * start, once per entry naming it. */
 uint32_t tables_of(const spec &sp)
 {
-	const uint32_t nb = sp.buffers ? sp.buffers : 1u;
+	const uint32_t nb = sp.no_buffers ? 0u : (sp.buffers ? sp.buffers : 1u);
 
 	uint32_t q = 0;
 
@@ -247,7 +327,8 @@ uint32_t tables_of(const spec &sp)
 	       sp.extra_entries + op_entries_of(sp) + q +
 	       (op_entries_of(sp) ? 1u : 0u) /* the ADD OperatorCode */ +
 	       (sp.sg1_no_tensors ? 1u : 0u) /* the second SubGraph */ +
-	       (sp.sg1_ok ? 2u : 0u) /* the second SubGraph and its Tensor */;
+	       (sp.sg1_ok ? 2u : 0u) /* the second SubGraph and its Tensor */ +
+	       (uint32_t)sp.md.size() + md_buffers_of(sp) /* Metadata, own Buffer */;
 }
 
 bool write_model(const std::string &dir, const spec &sp)
@@ -261,7 +342,7 @@ bool write_model(const std::string &dir, const spec &sp)
 	std::vector<flatbuffers::Offset<tflite::Tensor>> tensors;
 
 	tensors.push_back(tflite::CreateTensor(
-		fbb, fbb.CreateVector(sp.in_shape), tflite::TensorType_INT8, 0,
+		fbb, fbb.CreateVector(sp.in_shape), tflite::TensorType_INT8, sp.t0_buffer,
 		fbb.CreateString("in")));
 	if (!sp.out_shape.empty())
 		tensors.push_back(tflite::CreateTensor(
@@ -326,9 +407,15 @@ bool write_model(const std::string &dir, const spec &sp)
 	const auto sg   = tflite::CreateSubGraph(fbb, tv, inv, outv, ops, fbb.CreateString("main"));
 	std::vector<flatbuffers::Offset<tflite::SubGraph>> sgv{ sg };
 
+	/* The model's buffer count: the base buffers, then one per metadata entry
+	 * that brings its own (issue #181). */
+	const uint32_t nb = sp.no_buffers ? 0u : (sp.buffers ? sp.buffers : 1u);
+	const uint32_t nb_all = nb + md_buffers_of(sp);
+
 	if (sp.sg1_ok) {
+		const uint32_t b1 = sp.sg1_buffer == UINT32_MAX ? nb_all : sp.sg1_buffer;
 		const auto t = tflite::CreateTensor(fbb, fbb.CreateVector(std::vector<int32_t>{ 1, 4 }),
-		                                    tflite::TensorType_INT8, 0,
+		                                    tflite::TensorType_INT8, b1,
 		                                    fbb.CreateString("sg1"));
 
 		sgv.push_back(tflite::CreateSubGraph(
@@ -340,16 +427,41 @@ bool write_model(const std::string &dir, const spec &sp)
 		sgv.push_back(tflite::CreateSubGraph(fbb, 0, fbb.CreateVector(std::vector<int32_t>{}),
 		                                     fbb.CreateVector(std::vector<int32_t>{})));
 	const auto sgs  = fbb.CreateVector(sgv);
-	const auto codes = fbb.CreateVector(codev);
+	typedef flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<tflite::OperatorCode>>>
+		cvec;
+	const auto codes = sp.no_codes ? cvec() : fbb.CreateVector(codev);
 	std::vector<flatbuffers::Offset<tflite::Buffer>> bv;
-	const uint32_t nb = sp.buffers ? sp.buffers : 1u;
 	const auto one = tflite::CreateBuffer(fbb);
 
 	for (uint32_t i = 0; i < nb; i++)
 		bv.push_back((sp.shared || i == 0) ? one : tflite::CreateBuffer(fbb));
-	const auto bufs = fbb.CreateVector(bv);
+
+	std::vector<flatbuffers::Offset<tflite::Metadata>> mdv;
+
+	for (const mddef &m : sp.md) {
+		uint32_t idx = nb_all;   /* oob: one past the last buffer */
+
+		if (!m.oob) {
+			flatbuffers::Offset<flatbuffers::Vector<uint8_t>> d;
+
+			if (!m.no_data) {
+				fbb.ForceVectorAlignment(m.data.size(), 1, 16);
+				d = fbb.CreateVector(m.data);
+			}
+			idx = (uint32_t)bv.size();
+			bv.push_back(tflite::CreateBuffer(fbb, d));
+		}
+		mdv.push_back(tflite::CreateMetadata(fbb, fbb.CreateString(m.name), idx));
+	}
+
+	typedef flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<tflite::Buffer>>> bvec;
+	typedef flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<tflite::Metadata>>>
+		mvec;
+	const auto bufs = sp.no_buffers ? bvec() : fbb.CreateVector(bv);
+	const auto mds  = sp.md.empty() ? mvec() : fbb.CreateVector(mdv);
 	const auto model = tflite::CreateModel(fbb, TFLITE_SCHEMA_VERSION, codes, sgs,
-	                                       fbb.CreateString("issue #175 fixture"), bufs);
+	                                       fbb.CreateString("issue #175 fixture"), bufs,
+	                                       0, mds);
 
 	tflite::FinishModelBuffer(fbb, model);
 
@@ -618,13 +730,73 @@ int main(int argc, char **argv)
 		graph_specs.push_back(sp);
 	}
 
+	/* issue #181: buffer indices and the offline plan. */
+	{
+		const std::string off = "OfflineMemoryAllocation";
+		const std::string mrv = "min_runtime_version";
+		auto md = [&](const char *file, std::vector<mddef> entries) {
+			spec sp = graph(file);
+			sp.md = entries;
+			return sp;
+		};
+		spec sp = graph("t_buffer_last.tflite");
+		sp.buffers = 2u;
+		sp.t0_buffer = 1u;
+		graph_specs.push_back(sp);
+		sp = graph("t_buffer_oob.tflite");
+		sp.buffers = 2u;
+		sp.t0_buffer = 2u;
+		graph_specs.push_back(sp);
+		sp = graph("t_buffer_oob_sg1.tflite");
+		sp.sg1_buffer = UINT32_MAX;
+		graph_specs.push_back(sp);
+		sp = graph("t_no_buffers.tflite");
+		sp.no_buffers = true;
+		graph_specs.push_back(sp);
+		graph_specs.push_back(md("md_buffer_oob.tflite", { { mrv, {}, false, true } }));
+		graph_specs.push_back(md("md_other_name.tflite", { { mrv, { 1 }, false, false } }));
+		graph_specs.push_back(md("md_offline_ok.tflite", { { off, plan(2, 2u), false, false } }));
+		graph_specs.push_back(md("md_offline_name_24.tflite",
+		                         { { off + "X", { 1 }, false, false } }));
+		graph_specs.push_back(md("md_offline_short.tflite",
+		                         { { off, plan(2, 1u), false, false } }));
+		graph_specs.push_back(md("md_offline_hdr_short.tflite",
+		                         { { off, { 0, 0, 0, 0, 1, 0, 0, 0 }, false, false } }));
+		graph_specs.push_back(md("md_offline_null.tflite", { { off, {}, true, false } }));
+		graph_specs.push_back(md("md_offline_buffer_oob.tflite", { { off, {}, false, true } }));
+		graph_specs.push_back(md("md_offline_nbr_lt.tflite",
+		                         { { off, plan(1, 1u), false, false } }));
+		graph_specs.push_back(md("md_offline_nbr_gt.tflite",
+		                         { { off, plan(3, 3u), false, false } }));
+		graph_specs.push_back(md("md_offline_nbr_neg.tflite",
+		                         { { off, plan(-1, 2u), false, false } }));
+		graph_specs.push_back(md("md_offline_total_3.tflite",
+		                         { { off, plan(3, 3u), false, false } }));
+		graph_specs.push_back(md("md_offline_sg0_only.tflite",
+		                         { { off, plan(2, 2u), false, false } }));
+		graph_specs.push_back(md("md_offline_second_bad.tflite",
+		                         { { off, plan(2, 2u), false, false },
+		                           { off, plan(2, 1u), false, false } }));
+		graph_specs.push_back(md("md_offline_off_neg2.tflite",
+		                         { { off, plan(2, 2u, { -2 }), false, false } }));
+		graph_specs.push_back(md("md_offline_off_min.tflite",
+		                         { { off, plan(2, 2u, { -1, INT32_MIN }), false, false } }));
+		graph_specs.push_back(md("md_offline_off_pos.tflite",
+		                         { { off, plan(2, 2u, { 0, 16 }), false, false } }));
+		sp = graph("codes_null.tflite");
+		sp.no_codes = true;
+		graph_specs.push_back(sp);
+	}
+
 	/* The flags the constructors above do not take, set by name. */
 	for (spec &sp : graph_specs) {
 		const std::string f = sp.file;
 
 		sp.op_no_inputs   = f == "op_no_inputs.tflite";
 		sp.op_no_outputs  = f == "op_no_outputs.tflite";
-		sp.sg1_ok         = f == "sg1_ok.tflite";
+		sp.sg1_ok         = f == "sg1_ok.tflite" || f == "t_buffer_oob_sg1.tflite" ||
+		                    f == "md_offline_total_3.tflite" ||
+		                    f == "md_offline_sg0_only.tflite";
 		sp.sg1_no_tensors = f == "sg1_no_tensors.tflite";
 		if (f == "op_in_65000_shared.tflite")
 			sp.op_entries = witness_entries;

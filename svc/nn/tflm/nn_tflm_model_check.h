@@ -6,8 +6,9 @@
  * @file    nn_tflm_model_check.h
  * @brief   What a TFLM model must satisfy before it is planned -- the bounded
  *          flatbuffer verifier and the graph walk (structure, lengths, ranks,
- *          quantization lengths, I/O dims) -- shared by both interpreting
- *          backends and by the three host gates (issues #175, #178, #180).
+ *          quantization lengths, buffer indices and the offline plan's
+ *          header, I/O dims) -- shared by both interpreting backends and by the
+ *          three host gates (issues #175, #178, #180, #181).
  *
  * TWO CHECKS, in the order a loader runs them:
  *
@@ -19,7 +20,10 @@
  *                                  only tensors that exist, every tensor's
  *                                  quantization vectors within their limits and
  *                                  the operators' per-channel sum within its
- *                                  own), subgraph 0's I/O is
+ *                                  own, every buffer index naming a buffer that
+ *                                  exists, an offline plan that matches the
+ *                                  graph, an operator-code vector), subgraph
+ *                                  0's I/O is
  *                                  1..NN_MAX_IO per list, every tensor's rank is
  *                                  at most NN_TFLM_MAX_TENSOR_RANK (subgraph 0's
  *                                  I/O at most NN_MAX_DIMS), and the I/O
@@ -71,7 +75,56 @@
  * through a control-flow operator (IF / WHILE / CALL_ONCE, in
  * MarkAllocationLifetimes), and no profile registers one (nn_tflm_ops.h), so a
  * model that would use them is refused by the resolver; a profile that adds one
- * has to extend this walk first.  Structure is checked BEFORE anything else, so a model
+ * has to extend this walk first.
+ *
+ * [!] BUFFER INDICES AND THE OFFLINE PLAN (issue #181).  TFLM indexes the model's
+ * buffer vector without a range check twice, and a verifier proves neither:
+ *
+ *   Tensor.buffer    micro_allocator.cc GetFlatbufferTensorBuffer()
+ *                    `(*buffers)[flatbuffer_tensor.buffer()]`, for every tensor
+ *                    of every subgraph (AllocateTfLiteEvalTensors(), at the start
+ *                    of AllocateTensors(); a model without a buffer vector is
+ *                    read through null)
+ *   Metadata.buffer  micro_allocation_info.cc GetOfflinePlannedOffsets()
+ *                    `(*buffers)[metadata->buffer()]` for an entry named
+ *                    "OfflineMemoryAllocation", then that buffer's data() with no
+ *                    null check, word [2] as the tensor count and words [3..] as
+ *                    one offset per tensor with no length check
+ *
+ * (FLATBUFFERS_ASSERT is an assert: wio-lite-ai and f746g-disco build TFLM with
+ * NDEBUG, so the index reads past the vector; grove-vision-ai-v2's TFLM keeps it
+ * and aborts, the console gone either way.)  So: every tensor of every subgraph
+ * and every metadata entry, whatever its name, names a buffer below the buffer
+ * vector's size (0 when it is absent).  Every entry whose name TFLM takes for the
+ * plan -- the same test as TFLM's, exactly 23 bytes equal to
+ * "OfflineMemoryAllocation", the length read first and the bytes compared with a
+ * bounded memcmp -- must have data(), at least the 12-byte header, word [2] (a
+ * signed int32, so a negative count is refused before any arithmetic) equal to
+ * the TOTAL tensor count over all subgraphs (what TFLM compares it with,
+ * info_.tensor_count; TFLM refuses a mismatch only inside AllocateTensors(),
+ * which the board reports as NN_MODEL_ERR_ARENA and the wio-lite-ai /
+ * f746g-disco gates, which never plan, would have passed), and room for that many
+ * offsets after the header, each of them -1 or >= 0.  Every matching entry is
+ * checked: TFLM reads each and keeps the last.  Of the header only word [2] is
+ * read (words [0] / [1], the version and the subgraph count, are read by no
+ * one, TFLM included).  [!] THE OFFSET VALUES: TFLM's greedy planner takes only
+ * -1 (kOnlinePlannedBuffer) for "plan online" and keeps any other value as a
+ * fixed offset (greedy_memory_planner.cc), and GetMaximumMemorySize() adds
+ * offset + size in int (micro_allocator.cc), so an offset between -size and -1
+ * passes the arena check and CommitPlan() places the tensor BEFORE the arena;
+ * the walk refuses any offset below -1 (one compare per offset, nbr of them,
+ * and nbr is the tensor count, so the work stays visits x a constant).  An
+ * offset's alignment and whether the tensor fits the arena stay the planner's
+ * (it checks the fit).  Buffer 0 is NOT required to be empty:
+ * TFLM does not rely on it (a tensor whose buffer has no data is simply not
+ * constant), Vela points its non-constant tensors at buffer 0, newer converters
+ * give each its own empty buffer.  And the model must have an operator-code
+ * vector: micro_interpreter.cc PrepareNodeAndRegistrationDataFromFlatbuffer()
+ * reads opcodes->size() without a null check (the payload scan already refused
+ * one on grove-vision-ai-v2; a model without operators has no use for it
+ * either way, and no converter omits it).
+ *
+ * Structure is checked BEFORE anything else, so a model
  * broken in two ways is FORMAT; then the count (SHAPE), the rank (TENSOR) and the
  * values (DIMS).  On a board without a verifier this is the trust GetModel() and
  * AllocateTensors() already extend to the bytes, with the index bounds now in
@@ -97,6 +150,14 @@
  *   with quantization   per-channel, the quantized dimension against the rank
  *                       (rank >= 2) or NN_TFLM_MAX_TENSOR_RANK (rank 0 / 1)
  *                       (issue #180; no scale or zero-point VALUE is read)
+ *   per tensor entry    one buffer-index compare (issue #181)
+ *   per metadata entry  one buffer-index compare, a name-length compare and, for
+ *                       the plan, a 23-byte compare, one buffer, one data length
+ *                       and one header word (issue #181) -- a metadata entry is a
+ *                       table, so one verifier visit each
+ *   per tensor, once    for each plan entry, one offset-value compare: the plan
+ *   per plan            holds exactly one offset per tensor of the model
+ *                       (issue #181)
  *
  * Every tensor and operator entry is one table visit of the verifier (a shared
  * subgraph's are visited once per entry naming it), so behind the 16 / 4096
@@ -207,6 +268,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>   /* memcmp */
 
 /* [!] FORCED INLINE.  Left to the inliner, grove-vision-ai-v2's build outlined the
  * two list helpers into .text, which is ITCM there, and reached them through
@@ -474,7 +536,8 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_op_list_quant_add(const flatbuffers::Vector<in
 }
 
 /*
- * One subgraph holds together: a tensor vector, and every operator present with
+ * One subgraph holds together: a tensor vector, every tensor naming a buffer
+ * below @p nb (the model's buffer count, issue #181), and every operator present with
  * an inputs and an outputs list, each of its three lists at most
  * NN_TFLM_MAX_OP_TENSORS long -- all three LENGTHS judged before any element is
  * read -- and then every index in range; every tensor's quantization holding
@@ -484,7 +547,8 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_op_list_quant_add(const flatbuffers::Vector<in
  * length reads; per operator entry: three compares and at most
  * 2 x 3 x NN_TFLM_MAX_OP_TENSORS reads.
  */
-NN_TFLM_CHECK_INLINE bool nn_tflm_subgraph_ok(const tflite::SubGraph *sg, uint32_t *qrefs)
+NN_TFLM_CHECK_INLINE bool nn_tflm_subgraph_ok(const tflite::SubGraph *sg, uint32_t nb,
+                                         uint32_t *qrefs)
 {
 	const nn_tflm_tensor_vec *tensors = sg ? sg->tensors() : nullptr;
 
@@ -494,9 +558,14 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_subgraph_ok(const tflite::SubGraph *sg, uint32
 	const nn_tflm_op_vec *ops = nn_tflm_sg_operators(sg);
 	const uint32_t nt = tensors->size();
 
-	for (uint32_t i = 0; i < nt; i++)
-		if (!nn_tflm_tensor_quant_ok(tensors->Get(i)))
+	for (uint32_t i = 0; i < nt; i++) {
+		const tflite::Tensor *t = tensors->Get(i);
+
+		if (t && t->buffer() >= nb)
 			return false;
+		if (!nn_tflm_tensor_quant_ok(t))
+			return false;
+	}
 
 	for (uint32_t i = 0; ops && i < ops->size(); i++) {
 		const tflite::Operator *op = ops->Get(i);
@@ -515,6 +584,103 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_subgraph_ok(const tflite::SubGraph *sg, uint32
 		    !nn_tflm_op_list_quant_add(op->outputs(), tensors, qrefs) ||
 		    !nn_tflm_op_list_quant_add(op->intermediates(), tensors, qrefs))
 			return false;
+	}
+	return true;
+}
+
+/* The model's buffer and metadata vectors, as the schema types them. */
+typedef flatbuffers::Vector<flatbuffers::Offset<tflite::Buffer>> nn_tflm_buffer_vec;
+typedef flatbuffers::Vector<flatbuffers::Offset<tflite::Metadata>> nn_tflm_metadata_vec;
+
+/* Model::buffers() / metadata() / operator_codes(), spelled through
+ * Table::GetPointer<const void *> for the reason nn_tflm_sg_operators() gives:
+ * [!] grove-vision-ai-v2's build outlined each generated accessor into .text
+ * (ITCM, +20 B and a veneer each) once the walk called it (issue #181). */
+NN_TFLM_CHECK_INLINE const void *nn_tflm_model_field(const tflite::Model *model,
+                                                    flatbuffers::voffset_t field)
+{
+	const flatbuffers::Table *t = reinterpret_cast<const flatbuffers::Table *>(model);
+
+	return t->GetPointer<const void *>(field);
+}
+
+/* Entry @p i (below the vector's size, which the caller has checked) of a
+ * vector of tables: the read Vector<Offset<T>>::Get() makes -- the element is an
+ * offset relative to its own slot -- spelled out because [!] grove-vision-ai-v2
+ * outlined Get() into .text (ITCM, +48 B and a veneer) for each new table type
+ * the walk indexed, Buffer and Metadata (issue #181).  Get()'s
+ * FLATBUFFERS_ASSERT on the index is the caller's range check here. */
+template <typename T>
+NN_TFLM_CHECK_INLINE const T *nn_tflm_vec_table(
+	const flatbuffers::Vector<flatbuffers::Offset<T>> *v, uint32_t i)
+{
+	const uint8_t *p = v->Data() + (size_t)i * sizeof(flatbuffers::uoffset_t);
+
+	return reinterpret_cast<const T *>(p + flatbuffers::ReadScalar<flatbuffers::uoffset_t>(p));
+}
+
+/* The metadata name of TFLM's offline memory plan (kOfflineMemAllocMetadata,
+ * micro_allocation_info.cc). */
+#define NN_TFLM_OFFLINE_PLAN_NAME "OfflineMemoryAllocation"
+
+/* Is @p md the entry TFLM's GetOfflinePlannedOffsets() takes for the offline
+ * plan?  The same test (a strncmp bounded by the shorter length, then the
+ * lengths equal): the name's length is read first, and only an exactly 23-byte
+ * name is compared, 23 bytes -- never a search for a terminator. */
+
+NN_TFLM_CHECK_INLINE bool nn_tflm_md_is_offline_plan(const tflite::Metadata *md)
+{
+	const size_t len = sizeof NN_TFLM_OFFLINE_PLAN_NAME - 1u;   /* 23 */
+	const flatbuffers::String *name = md->name();
+
+	return name && name->size() == len &&
+	       memcmp(name->data(), NN_TFLM_OFFLINE_PLAN_NAME, len) == 0;
+}
+
+/*
+ * The model's metadata holds together (issue #181): every entry names a buffer
+ * below @p nb, and every entry TFLM takes for the offline plan names one whose
+ * data has the 12-byte header, a tensor count (word [2], a signed int32) equal
+ * to @p total_tensors -- every subgraph's, as TFLM counts -- and room for that
+ * many int32 offsets after the header, each -1 (plan online) or >= 0.  Per
+ * entry: two compares and, for the plan, a 23-byte compare, one length, one
+ * header word and then one compare per offset (the count already equals the
+ * model's tensors, so a plan costs a constant per tensor entry).
+ */
+NN_TFLM_CHECK_INLINE bool nn_tflm_metadata_ok(const tflite::Model *model, uint32_t nb,
+                                         uint64_t total_tensors)
+{
+	const nn_tflm_metadata_vec *metadata = static_cast<const nn_tflm_metadata_vec *>(
+		nn_tflm_model_field(model, tflite::Model::VT_METADATA));
+	const nn_tflm_buffer_vec *buffers = static_cast<const nn_tflm_buffer_vec *>(
+		nn_tflm_model_field(model, tflite::Model::VT_BUFFERS));
+
+	for (uint32_t i = 0; metadata && i < metadata->size(); i++) {
+		const tflite::Metadata *md = nn_tflm_vec_table(metadata, i);
+
+		if (!md || md->buffer() >= nb)
+			return false;
+		if (!nn_tflm_md_is_offline_plan(md))
+			continue;
+
+		/* nb > 0 here, so buffers is present. */
+		const tflite::Buffer *b = nn_tflm_vec_table(buffers, md->buffer());
+		const flatbuffers::Vector<uint8_t> *d = b ? b->data() : nullptr;
+
+		if (!d || d->size() < 12u)
+			return false;
+
+		const int32_t nbr = flatbuffers::ReadScalar<int32_t>(d->data() + 8);
+
+		if (nbr < 0 || (uint64_t)nbr != total_tensors)
+			return false;
+		if ((d->size() - 12u) / 4u < (uint32_t)nbr)
+			return false;
+		/* Only -1 is "plan online"; any other negative offset would be
+		 * placed before the arena (the file header). */
+		for (uint32_t j = 0; j < (uint32_t)nbr; j++)
+			if (flatbuffers::ReadScalar<int32_t>(d->data() + 12u + 4u * j) < -1)
+				return false;
 	}
 	return true;
 }
@@ -589,7 +755,13 @@ NN_TFLM_CHECK_INLINE bool nn_tflm_io_list_dims_fit(const flatbuffers::Vector<int
  *                        quantized dimension outside its rank (rank >= 2) or
  *                        outside 0..NN_TFLM_MAX_TENSOR_RANK-1 (rank 0 / 1);
  *                        the operators'
- *                        scale lengths adding up past NN_TFLM_MAX_QUANT_REFS
+ *                        scale lengths adding up past NN_TFLM_MAX_QUANT_REFS;
+ *                        no operator-code vector; a tensor or metadata entry
+ *                        naming a buffer past the buffer vector; an
+ *                        "OfflineMemoryAllocation" entry whose buffer has no
+ *                        data, no 12-byte header, a tensor count other than
+ *                        every subgraph's tensors together, fewer offsets
+ *                        than that count, or an offset below -1 (issue #181)
  *                        (structure)
  *   NN_MODEL_ERR_SHAPE   an I/O list naming outside 1..NN_MAX_IO tensors (count)
  *   NN_MODEL_ERR_TENSOR  any tensor declaring more than NN_TFLM_MAX_TENSOR_RANK
@@ -619,12 +791,28 @@ NN_TFLM_CHECK_INLINE int nn_tflm_model_io_check(const tflite::Model *model)
 	if (!tensors || !nn_tflm_io_list_ok(sg->inputs(), tensors) ||
 	    !nn_tflm_io_list_ok(sg->outputs(), tensors))
 		return NN_MODEL_ERR_FORMAT;
-	/* The per-channel sum runs across every subgraph: TFLM prepares them all. */
-	uint32_t qrefs = 0;
+	if (!nn_tflm_model_field(model, tflite::Model::VT_OPERATOR_CODES))
+		return NN_MODEL_ERR_FORMAT;
 
-	for (uint32_t i = 0; i < subgraphs->size(); i++)
-		if (!nn_tflm_subgraph_ok(subgraphs->Get(i), &qrefs))
+	/* The per-channel sum runs across every subgraph: TFLM prepares them all.
+	 * So does its tensor count, which an offline plan must match (64 bits: each
+	 * addend is a vector's length, and wio-lite-ai has no verifier to bound how
+	 * many subgraphs there are). */
+	const nn_tflm_buffer_vec *buffers = static_cast<const nn_tflm_buffer_vec *>(
+		nn_tflm_model_field(model, tflite::Model::VT_BUFFERS));
+	const uint32_t nb = buffers ? buffers->size() : 0u;
+	uint32_t qrefs = 0;
+	uint64_t total_tensors = 0;
+
+	for (uint32_t i = 0; i < subgraphs->size(); i++) {
+		const tflite::SubGraph *s = subgraphs->Get(i);
+
+		if (!nn_tflm_subgraph_ok(s, nb, &qrefs))
 			return NN_MODEL_ERR_FORMAT;
+		total_tensors += s->tensors()->size();
+	}
+	if (!nn_tflm_metadata_ok(model, nb, total_tensors))
+		return NN_MODEL_ERR_FORMAT;
 	if (!nn_tflm_io_list_count_ok(sg->inputs()) ||
 	    !nn_tflm_io_list_count_ok(sg->outputs()))
 		return NN_MODEL_ERR_SHAPE;

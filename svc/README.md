@@ -158,7 +158,7 @@ part-way through it would otherwise leave entries the destructor calls as functi
 pointers.  What a model's I/O must satisfy before it is planned is in
 `nn_tflm_model_check.h`, which both backends and the three host gates
 (`verify_tflite` on wio-lite-ai and f746g-disco, `verify_vela_model` on
-grove-vision-ai-v2) call (issues #175, #178, #180).  The walk runs in a fixed order:
+grove-vision-ai-v2) call (issues #175, #178, #180, #181).  The walk runs in a fixed order:
 
 1. Structure (`NN_MODEL_ERR_FORMAT`): subgraph 0's input / output lists present
    and naming tensors that exist; every subgraph has a tensor vector; every
@@ -181,6 +181,27 @@ grove-vision-ai-v2) call (issues #175, #178, #180).  The walk runs in a fixed or
    operator entry of every subgraph adding up to at most `NN_TFLM_MAX_QUANT_REFS`
    (65,536; max 34,292 over the same 43 models).  Whether a scale's length matches `dims[qd]`
    is left to the kernels, which check it.
+   And the buffer indices and the offline plan (issue #181): every tensor of every
+   subgraph and every metadata entry names a buffer below the buffer vector's
+   size (0 when the model has none) -- TFLM reads `(*buffers)[buffer()]` for
+   both unchecked, and a release build compiles out flatbuffers' assert; every
+   metadata entry TFLM takes for the offline plan (the name exactly
+   `OfflineMemoryAllocation`, 23 bytes, compared as TFLM compares it) names a
+   buffer with data, at least the 12-byte header, a tensor count (word [2], a
+   signed int32) equal to every subgraph's tensors together -- what TFLM
+   compares it with, refusing a mismatch only inside `AllocateTensors()`, where
+   a board says `NN_MODEL_ERR_ARENA` and the gates that do not plan would have
+   passed it -- and room for that many offsets, each -1 (plan online) or >= 0
+   (TFLM's greedy planner keeps any other negative value as a fixed offset and
+   its arena check adds offset + size, so -size < offset < -1 placed a tensor
+   before the arena); every such entry is checked (TFLM reads each and keeps the
+   last).  Of the 12-byte header only word [2] is read (words [0] / [1] are read
+   by no one); an offset's alignment and the arena fit stay the planner's.
+   Buffer 0 need not be empty (TFLM does not rely on it;
+   Vela points its non-constant tensors there).  And the model has an
+   operator-code vector (TFLM reads its size without a null check).  One compare
+   per tensor entry, a constant per metadata entry (a table, so one verifier
+   visit each).
 2. The count of each I/O list (1..`NN_MAX_IO`, `NN_MODEL_ERR_SHAPE`).
 3. Rank (`NN_MODEL_ERR_TENSOR`): every tensor of every subgraph at most
    `NN_TFLM_MAX_TENSOR_RANK` (6, TFLM's `RuntimeShape::kMaxSmallSize`, which

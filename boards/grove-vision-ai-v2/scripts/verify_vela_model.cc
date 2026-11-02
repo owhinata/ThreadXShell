@@ -70,12 +70,15 @@
 #include "nn_ethosu_io.h"
 
 /* And the graph walk both backends apply to the model before planning it
- * (svc/nn/tflm/nn_tflm_model_check.h, issues #175, #178, #180): a graph that does
- * not hold together -- an I/O list, a subgraph's tensors or an operator's tensor
- * list missing, an operator list longer than NN_TFLM_MAX_OP_TENSORS, an index
- * naming a tensor that does not exist, a quantization vector too long or
- * inconsistent (NN_MODEL_ERR_FORMAT on the board; Vela output carries no
- * per-channel quantization, so that part never bites a Vela model) -- a tensor of
+ * (svc/nn/tflm/nn_tflm_model_check.h, issues #175, #178, #180, #181): a graph
+ * that does not hold together -- an I/O list, a subgraph's tensors or an
+ * operator's tensor list missing, an operator list longer than
+ * NN_TFLM_MAX_OP_TENSORS, an index naming a tensor that does not exist, a
+ * quantization vector too long or inconsistent (Vela output carries no
+ * per-channel quantization, so that part never bites a Vela model), a buffer
+ * index past the buffer vector, an OfflineMemoryAllocation plan that does not
+ * match the graph (every Vela model carries one, so that part runs on each), no
+ * operator-code vector (NN_MODEL_ERR_FORMAT on the board) -- a tensor of
  * too high a rank (NN_MODEL_ERR_TENSOR), or an I/O dimension outside 0..65535
  * (NN_MODEL_ERR_DIMS). */
 #include "nn_tflm_model_check.h"
@@ -479,7 +482,11 @@ int main(int argc, char **argv)
 		       "1 long nor the scale's length, a per-channel quantized dimension "
 		       "outside the tensor's rank (rank >= 2) or 0..%u (rank 0 / 1), or "
 		       "the operators' scale lengths "
-		       "adding up past %u) (NN_MODEL_ERR_FORMAT on the board)\n",
+		       "adding up past %u), a tensor or metadata entry names a buffer "
+		       "that does not exist, an OfflineMemoryAllocation plan has no "
+		       "data, no 12-byte header, a tensor count other than the graph's, "
+		       "fewer offsets than it claims or an offset below -1, or there is "
+		       "no operator-code vector (NN_MODEL_ERR_FORMAT on the board)\n",
 		       NN_TFLM_MAX_OP_TENSORS, NN_TFLM_MAX_QUANT_CHANNELS,
 		       NN_TFLM_MAX_TENSOR_RANK - 1u, NN_TFLM_MAX_QUANT_REFS);
 		printf("RESULT   : REJECT\n");
@@ -755,7 +762,16 @@ int main(int argc, char **argv)
 		/* TFLM reads word [2] as the tensor count and words [3..] as one
 		 * offset per tensor, and fails AllocateTensors when the count
 		 * disagrees with the subgraph (micro_allocation_info.cc,
-		 * GetOfflinePlannedOffsets).  Checking it here names the mismatch. */
+		 * GetOfflinePlannedOffsets).  Checking it here names the mismatch.
+		 * [!] The shared walk above (nn_tflm_model_io_check(), issue #181)
+		 * already refused, before this runs, every plan TFLM reads that this
+		 * would fail -- a buffer index out of range, no data, a short header,
+		 * a count other than every subgraph's tensors together, too few
+		 * offsets, an offset below -1 -- so on a model that reaches here these lines mostly print
+		 * what the plan holds (strcmp also matches a name with a NUL after
+		 * the 23 bytes, which TFLM and the walk do not take for the plan).
+		 * They stay as the diagnostic (and still demand at least one offset
+		 * and a whole number of words, which the walk does not). */
 		if (d == nullptr || d->size() < 16u || (d->size() % 4u) != 0u) {
 			fail("the OfflineMemoryAllocation buffer is too short to hold a "
 			     "header\n");

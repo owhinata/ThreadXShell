@@ -69,7 +69,8 @@ struct nn_svc_thresh_ops {
 	 *  enter.  NULL on a board that protects the plugin with the lease
 	 *  alone. */
 	int  (*enter)(void);
-	/** Count it out, after the lease is given back.  NULL with @ref enter. */
+	/** Count it out, after the lease is given back.  NULL with @ref enter;
+	 *  a table with only one of the two is refused (BUSY, nothing entered). */
 	void (*leave)(void);
 	/** The plugin lease, bounded; non-zero if held.  Required with get / set:
 	 *  missing, the call is BUSY and nothing is entered (fail-closed). */

@@ -63,6 +63,7 @@
 #include "nn_run_wait.h"
 #include "nn_refusal.h"   /* the refusals and run endings (shared, #174) */
 #include "nn_svc_common.h" /* nn thresh (shared, #174) */
+#include "nn_run_says.h"   /* a NO_RESULT run's words (#174) */
 #include "nn_stream_state.h"
 #include "nn_core_model.h"
 #include "nor_flash.h"    /* NOR_XIP_BASE */
@@ -1399,40 +1400,6 @@ static const char *nn_stream_why_text(unsigned char why);
 #define NN_RUN_WAIT_MS \
 	((uint32_t)(NN_RUN_WAIT_TICKS * 1000u / TX_TIMER_TICKS_PER_SECOND))
 
-/* Why a one-shot's worker published nothing -- the detail and the status. */
-static int nn_run_no_result(int shot, struct nn_op_result *res)
-{
-	switch (shot) {
-	case NN_OV_SHOT_PREP_FAILED:
-		nn_detail_set("preprocessing refused the frame");
-		return NN_SVC_ERR_HW;
-	case NN_OV_SHOT_NO_OUTPUTS:
-		nn_detail_set("output %u of the model is unreadable",
-		              nn_camera_shot_index());
-		return NN_SVC_ERR_HW;
-	case NN_OV_SHOT_INVOKE_FAILED:
-		nn_detail_set("inference failed");
-		return NN_SVC_ERR_HW;
-	case NN_OV_SHOT_LEASE_TIMEOUT:
-		nn_detail_set("the plugin lease was not released within %u ms; "
-		              "nothing was decoded", (unsigned)PLUGIN_LEASE_WAIT_MS);
-		return NN_SVC_ERR_BUSY;
-	case NN_OV_SHOT_NOT_HELD:
-		nn_detail_set("the decode was refused: the plugin lease is not held");
-		return NN_SVC_ERR_HW;
-	case NN_OV_SHOT_PUBLISHED:
-		/* Finished and published, but the record did not take it (a
-		 * generation that moved): nothing of this run to report. */
-		nn_detail_set("the result was not accepted by the record");
-		return NN_SVC_ERR_HW;
-	case NN_OV_SHOT_STOPPED:
-	default:
-		nn_detail_set("the inference worker ended the run without a "
-		              "result (%d)", shot);
-		return NN_SVC_ERR_HW;
-	}
-}
-
 void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
                      struct nn_report_capture *rep, struct nn_result_extra *ext,
                      nn_svc_cancel_fn cancel, void *ctx,
@@ -1628,7 +1595,10 @@ void nn_svc_run_once(struct nn_det_snapshot *snap, struct bf_det *dets, int max,
 		status = NN_SVC_OK;
 		break;
 	case NN_RUN_NO_RESULT:
-		status = nn_run_no_result(nn_camera_shot(), res);
+		/* The words are shared where the ending is (svc/nn/nn_shot.c,
+		 * issue #174); the status is this board's, unchanged. */
+		status = nn_run_no_result_says(nn_camera_shot(),
+		                               nn_camera_shot_index(), res);
 		break;
 	case NN_RUN_LOST:
 	case NN_RUN_CANCELLED:

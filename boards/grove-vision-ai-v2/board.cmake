@@ -763,6 +763,12 @@ add_library(shell_objs OBJECT
     # not called here (this board's model section reads under its gate) and is
     # dropped by --gc-sections.
     "${CMAKE_SOURCE_DIR}/svc/nn/nn_svc_common.c"
+    # A NO_RESULT `nn run`'s status and words (issue #174): the sentences
+    # svc/nn/nn_shot.c's table has (this board links it for nn_shot_says()
+    # only -- its one-shot keeps nn_ov_shot), its own for the endings only it
+    # has.  Walked by test/test_nn_run_says.c.
+    "${BOARD_DIR}/port/nn/nn_run_says.c"
+    "${CMAKE_SOURCE_DIR}/svc/nn/nn_shot.c"
     # The one `nn bench` procedure (issue #163): hold, fill, time N runs, let
     # go, walked by shell/test/test_nn_bench.c.  ITCM (not .text_cold): it is
     # the timed path.

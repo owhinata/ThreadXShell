@@ -377,6 +377,19 @@ gcc $CFLAGS \
     $LDFLAGS -o "$out/test_nn_outputs"
 "$out/test_nn_outputs"
 
+# issue #174 -- what a `nn run` whose one frame ended without a result says
+# (port/nn/nn_run_says.c): every NN_OV_SHOT_* value's status as before the words
+# moved (LEASE_TIMEOUT BUSY, the rest HW), the shared nn_shot_says() sentence
+# where svc/nn/nn_shot.c names the ending, this board's own where it does not.
+# No shipped model has an unreadable output, and a timed-out lease or a refused
+# prep cannot be typed.
+gcc $CFLAGS \
+    -I "$here" -I "$board/port/nn" -I "$board/port/camera" -I "$HOST_TEST_SVC" -I "$HOST_TEST_SVC/nn" -I "$HOST_TEST_SVC/plugin" -I "$HOST_TEST_SVC/camera" \
+    "$here/test_nn_run_says.c" "$board/port/nn/nn_run_says.c" \
+    "$HOST_TEST_SVC/nn/nn_shot.c" "$HOST_TEST_SVC/fmt.c" \
+    $LDFLAGS -o "$out/test_nn_run_says"
+"$out/test_nn_run_says"
+
 # issue #122 -- the gate's claim and the count of threshold calls inside the
 # plugin: in svc/ since issue #163 (svc/nn/nn_param_calls.c) and walked by
 # shell/test/test_nn_param_calls.c.

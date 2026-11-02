@@ -84,6 +84,14 @@ static const struct nn_svc_thresh_ops no_decoder_ops = { .not_held = 0 };
 static const struct nn_svc_thresh_ops no_lease_ops = {
 	.get = h_get, .set = h_set, .not_held = NOT_HELD,
 };
+static const struct nn_svc_thresh_ops enter_only_ops = {
+	.enter = h_enter, .lease_take = h_lease, .lease_give = h_give,
+	.get = h_get, .set = h_set, .not_held = NOT_HELD,
+};
+static const struct nn_svc_thresh_ops leave_only_ops = {
+	.leave = h_leave, .lease_take = h_lease, .lease_give = h_give,
+	.get = h_get, .set = h_set, .not_held = NOT_HELD,
+};
 
 static void arm(int enter, int lease, int get, int set)
 {
@@ -192,6 +200,15 @@ static void test_thresh(void)
 	get_case("entries but no lease hook", &no_lease_ops, 1, 1,
 	         NN_ACTIVE_THRESH_OK, NN_SVC_ERR_BUSY, NN_SVC_THRESH_NONE, "");
 	set_case("entries but no lease hook", &no_lease_ops, 1, 1,
+	         NN_ACTIVE_THRESH_OK, NN_SVC_ERR_BUSY, "");
+	/* [!] a count with only one end is refused before anything is called */
+	get_case("enter without leave", &enter_only_ops, 1, 1,
+	         NN_ACTIVE_THRESH_OK, NN_SVC_ERR_BUSY, NN_SVC_THRESH_NONE, "");
+	set_case("enter without leave", &enter_only_ops, 1, 1,
+	         NN_ACTIVE_THRESH_OK, NN_SVC_ERR_BUSY, "");
+	get_case("leave without enter", &leave_only_ops, 1, 1,
+	         NN_ACTIVE_THRESH_OK, NN_SVC_ERR_BUSY, NN_SVC_THRESH_NONE, "");
+	set_case("leave without enter", &leave_only_ops, 1, 1,
 	         NN_ACTIVE_THRESH_OK, NN_SVC_ERR_BUSY, "");
 	/* a NULL out-parameter is an argument error, before anything */
 	arm(1, 1, NN_ACTIVE_THRESH_OK, 0);

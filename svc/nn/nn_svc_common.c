@@ -127,6 +127,10 @@ void nn_svc_common_info(struct nn_svc_info *out, uint32_t (*life_seq)(void))
  */
 static int nn_svc_common_in(const struct nn_svc_thresh_ops *o)
 {
+	/* fail-closed: a count with only one end would leave a call counted in
+	 * for good (or count out one that never came in) */
+	if ((o->enter == NULL) != (o->leave == NULL))
+		return 0;
 	if (o->lease_take == NULL || o->lease_give == NULL)
 		return 0;   /* fail-closed: never enter a plugin unleased */
 	if (o->enter != NULL && !o->enter())

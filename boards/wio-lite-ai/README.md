@@ -861,8 +861,8 @@ data on any operator's output or on subgraph 0's inputs / outputs -- each is
 `NN_MODEL_ERR_FORMAT` (-7).  TFLM points a constant at its bytes in the model
 and never compares their length with the shape, so a kernel that reads it by
 its own shape read a short buffer past the end of the PSRAM staging copy (a
-bias that FULLY_CONNECTED / CONV_2D read by another tensor's output depth is
-not covered -- issue #185); and it does not plan a tensor with data, so a graph input this board
+constant read by another tensor's dims is the operator rules', issue #185,
+below); and it does not plan a tensor with data, so a graph input this board
 fills, or an operator output, would have been written INTO the staging copy.
 A type without a size used to fail only inside `AllocateTensors()`
 (`NN_MODEL_ERR_ARENA`) and pass `verify_tflite`, which does not plan.  The
@@ -873,6 +873,37 @@ constants of the 44 models found that pass the verifier are exact and none of
 them is written, so every model keeps its verdict; the pinned blazeface int8
 passes unchanged.  Cost: +760 B of Flash (`shell.elf` `.text`
 284,528 -> 285,216 B, `.rodata` +72 B, `shell.bin` 373,632 -> 374,392 B); the `null` tree is byte-identical.
+
+[!] **The walk checks the operators that read a constant by another tensor's
+dims** (issue #185): every operator's `opcode_index` must name an entry of the
+operator-code vector (TFLM compares that only inside `AllocateTensors()`, so it
+was `NN_MODEL_ERR_ARENA` here and a PASS in `verify_tflite`, which reads only the
+code vector), and a CONV_2D / DEPTHWISE_CONV_2D (and, on `mlperf`, a
+FULLY_CONNECTED) must have tensors that fit together -- ranks, the filter's or
+weights' channels against the output's, the depth multiplier (at least 1, and
+input channels x multiplier == filter channels), the input's element count
+(FULLY_CONNECTED), and a bias of exactly the channel count and of the type the
+kernel reads (INT32 under int8, FLOAT32 under float32, INT64, or INT32 for
+CONV_2D, under int16) -- each `NN_MODEL_ERR_FORMAT` (-7).  The CMSIS-NN int8
+kernels read the filter / weights and the bias by the OUTPUT's channel count
+and their `Prepare()` compares nothing of it (the reference kernels'
+`TFLITE_DCHECK`s are compiled out by `NDEBUG`), so a constant exactly its own
+shape's bytes was still read past the staging copy.  The rules are compiled
+from `nn_tflm_ops.h`'s selected list, so `blazeface` has CONV_2D's and
+DEPTHWISE_CONV_2D's only: a FULLY_CONNECTED is the gate's "did not register"
+REJECT there and FORMAT only on `mlperf` (the board and its gate always agree,
+being built with the same define).  [!] **`blazeface` is a define too now**
+(`NN_TFLM_OPS_BLAZEFACE_PROFILE=1`): `nn_tflm_ops.h` has no default and does
+not build without exactly one profile, so a translation unit that misses the
+board's define fails instead of compiling another profile's list.  All 44
+models found that pass the verifier pass the rules (the pinned blazeface int8
+included).  Cost: +1,072 B of Flash on `blazeface` (`shell.elf` `.text` 285,216
+-> 286,288 B, `.rodata` unchanged, `shell.bin` 374,392 -> 375,464 B), +1,296 B on
+`mlperf` (`CONFIG_MLPERF_TINY=OFF`; that tree already overflows FLASH by 4,736 B
+before the change, so it was measured linked with `--noinhibit-exec`: FLASH
+397,952 -> 399,248 B); the `null` tree is byte-identical.  The rules' helpers
+are out of line (`NN_TFLM_RULE_HELPER`, the one exception to the header's forced
+inline): forced inline, each rule copied them and `blazeface` cost +2,248 B.
 
 **[!] The order matters and is not an implementation detail.**  Loading the
 plugin first would destroy the previous one's state at the fixed reservation

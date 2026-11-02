@@ -160,6 +160,25 @@ ok line.
 Every pl_ case runs with --board-order (the scan before the walk, the board's
 order), and a refusal is matched as the gate's whole FAIL line.
 
+And the operator rules (issue #185): one operator over its own tensors, each
+constant exactly its shape's bytes, so only the rule can refuse it.  The answer
+depends on the gate's PROFILE (the op-list define on its compile line), because
+the walk compiles only the rules of the operators the profile registers:
+
+  r0_index_last          control: opcode_index == the code vector's length - 1
+  r0_index_oob           opcode_index == its length: FORMAT on every profile (on
+                         the vela gate with --board-order the payload scan's own
+                         sentence, which runs first there)
+  r1_* / r2_* / r3_*     CONV_2D / DEPTHWISE_CONV_2D / FULLY_CONNECTED: the
+                         case's own answer (None or FORMAT) where the profile
+                         registers the operator; the gate's "did not register"
+                         REJECT (rc 1, the walk's ok line, no code) where it
+                         does not (FULLY_CONNECTED on blazeface); on the ethos-u
+                         profile, which has no CPU rule, the walk's answer
+                         without the rule (its ok line, or TENSOR for
+                         r1_in_rank7) and then the payload scan's "builtin"
+                         sentence, and with --board-order that sentence alone
+
 And the depth half of the header's claim: schema_table_depth.py runs on the
 schema.fbs the gate was built from (the first -I directory holding one, else the
 repo's lib/tflite-micro, the tree a tflm build generates from) and fails on a
@@ -365,6 +384,113 @@ PL_WALK_CASES = [
     ("pl_const_short.tflite", FORMAT),
 ]
 
+# The operator rules (issue #185): (file, answer where the profile registers the
+# operator, the operator, the walk's answer without the rule).  None is a control.
+OP_CASES = [
+    ("r0_index_last.tflite", None, "ADD", None),
+    ("r0_index_oob.tflite", FORMAT, "ADD", FORMAT),
+    ("r1_ok.tflite", None, "CONV_2D", None),
+    ("r1_float.tflite", None, "CONV_2D", None),
+    ("r1_no_bias.tflite", None, "CONV_2D", None),
+    ("r1_two_inputs.tflite", None, "CONV_2D", None),
+    ("r1_i16_i64.tflite", None, "CONV_2D", None),
+    ("r1_one_input.tflite", None, "CONV_2D", None),
+    ("r1_filter_ne.tflite", FORMAT, "CONV_2D", None),
+    ("r1_deprecated_ne.tflite", FORMAT, "CONV_2D", None),
+    ("r1_bias_2.tflite", FORMAT, "CONV_2D", None),
+    ("r1_bias_nodata_2.tflite", FORMAT, "CONV_2D", None),
+    ("r1_bias_int8.tflite", FORMAT, "CONV_2D", None),
+    ("r1_bias_f32_i8.tflite", FORMAT, "CONV_2D", None),
+    ("r1_in_rank3.tflite", FORMAT, "CONV_2D", None),
+    ("r1_in_rank7.tflite", FORMAT, "CONV_2D", TENSOR),
+    ("r2_dm1.tflite", None, "DEPTHWISE_CONV_2D", None),
+    ("r2_dm4.tflite", None, "DEPTHWISE_CONV_2D", None),
+    ("r2_dm2.tflite", None, "DEPTHWISE_CONV_2D", None),
+    ("r2_i16_i64.tflite", None, "DEPTHWISE_CONV_2D", None),
+    ("r2_filter_ne.tflite", FORMAT, "DEPTHWISE_CONV_2D", None),
+    ("r2_dm_ne.tflite", FORMAT, "DEPTHWISE_CONV_2D", None),
+    ("r2_dm0.tflite", FORMAT, "DEPTHWISE_CONV_2D", None),
+    ("r2_opts_other.tflite", FORMAT, "DEPTHWISE_CONV_2D", None),
+    ("r2_bias_2.tflite", FORMAT, "DEPTHWISE_CONV_2D", None),
+    ("r2_i16_i32.tflite", FORMAT, "DEPTHWISE_CONV_2D", None),
+    ("r3_ok.tflite", None, "FULLY_CONNECTED", None),
+    ("r3_out_rank4.tflite", None, "FULLY_CONNECTED", None),
+    ("r3_no_bias.tflite", None, "FULLY_CONNECTED", None),
+    ("r3_w_nonconst.tflite", None, "FULLY_CONNECTED", None),
+    ("r3_issue.tflite", FORMAT, "FULLY_CONNECTED", None),
+    ("r3_w0_ne.tflite", FORMAT, "FULLY_CONNECTED", None),
+    ("r3_w_rank3.tflite", FORMAT, "FULLY_CONNECTED", None),
+    ("r3_out_rank1.tflite", FORMAT, "FULLY_CONNECTED", None),
+    ("r3_out_rank5.tflite", FORMAT, "FULLY_CONNECTED", None),
+    ("r3_in_count_ne.tflite", FORMAT, "FULLY_CONNECTED", None),
+    ("r3_saturate.tflite", FORMAT, "FULLY_CONNECTED", None),
+    ("r3_out_last0.tflite", FORMAT, "FULLY_CONNECTED", None),
+    ("r3_i16_i32.tflite", FORMAT, "FULLY_CONNECTED", None),
+]
+# What each profile registers of the operators above (svc/nn/tflm/nn_tflm_ops.h;
+# a profile changing there must change here, or these cases fail).
+PROFILE_DEFINES = {
+    "NN_TFLM_OPS_BLAZEFACE_PROFILE": "blazeface",
+    "NN_TFLM_OPS_MLPERF_PROFILE": "mlperf",
+    "NN_TFLM_OPS_EXTENDED": "extended",
+    "NN_TFLM_OPS_ETHOSU_PROFILE": "ethosu",
+}
+PROFILE_OPS = {
+    "blazeface": {"ADD", "CONV_2D", "DEPTHWISE_CONV_2D"},
+    "mlperf": {"ADD", "CONV_2D", "DEPTHWISE_CONV_2D", "FULLY_CONNECTED"},
+    "extended": {"ADD", "CONV_2D", "DEPTHWISE_CONV_2D", "FULLY_CONNECTED"},
+    "ethosu": set(),
+}
+# The tflite gates' refusal of an operator the profile does not register.
+UNREG = "operator(s) this build did not"
+# The payload scan's sentences for a builtin operator and a code index past the
+# vector (vela gate only).
+PL_BUILTIN = "an operator is a builtin; this port registers only ethos-u"
+PL_CODE_OOB = "an operator names an operator code that does not exist"
+
+
+def gate_profile(flags):
+    """The NN_TFLM_OPS profile the gate was compiled for, from its -D flags."""
+    found = []
+    i = 0
+    while i < len(flags):
+        f = flags[i]
+        if f == "-D":
+            f = "-D" + flags[i + 1]
+            i += 1
+        name = f[2:].split("=")[0] if f.startswith("-D") else None
+        if name in PROFILE_DEFINES:
+            found.append(PROFILE_DEFINES[name])
+        i += 1
+    if len(found) != 1:
+        sys.exit(f"run_model_io_gate_tests: the gate's compile line names {found} "
+                 "as its NN_TFLM_OPS profile, not exactly one")
+    return found[0]
+
+
+def op_case_runs(style, profile):
+    """(file, kind, want, extra args) for each OP_CASES run on this gate.
+    kind: "code" -- want is a code or None, judged like CASES;
+          "unreg" -- the tflite gate's unregistered-operator REJECT;
+          "scan" -- the vela gate: the walk's answer (want[0], a code or None)
+                    and then the scan's sentence want[1], or with --board-order
+                    the sentence alone (want[0] is then not judged)."""
+    runs = []
+    for name, want, op, bare in OP_CASES:
+        if style == "vela":
+            sentence = PL_CODE_OOB if name == "r0_index_oob.tflite" else PL_BUILTIN
+            if bare is not None:
+                runs.append((name, "code", bare, []))
+            else:
+                runs.append((name, "scan", (None, sentence), []))
+            runs.append((name, "scan", (None, sentence), PL_ARGS))
+        elif op in PROFILE_OPS[profile]:
+            runs.append((name, "code", want, []))
+        else:
+            runs.append((name, "unreg", None, []))
+    return runs
+
+
 # The wall-time ceiling on the two "_shared" witnesses: the fastest of
 # WITNESS_RUNS gate runs (the file read and the verifier included), so one run
 # slowed by a loaded host does not fail it.  Length-first they take 1..5 ms on the
@@ -552,12 +678,55 @@ def main():
                 print(f"  FAIL {args.gate} {name}: wanted {why}, got rc "
                       f"{p.returncode}:\n{text}")
 
+        # The operator rules (issue #185), by the gate's profile.
+        profile = gate_profile(flags)
+        op_runs = op_case_runs(args.style, profile)
+        for name, kind, want, extra in op_runs:
+            p = subprocess.run([gate_path, os.path.join(tmp, name), *extra],
+                               capture_output=True, text=True)
+            text = p.stdout + p.stderr
+            label = f"{name} ({profile}{', ' + ' '.join(extra) if extra else ''})"
+            if kind == "unreg":
+                ok = p.returncode == 1 and UNREG in text \
+                    and OK_LINE[args.style] in text \
+                    and not any(c in text for c in CODES)
+                why = "rc 1 with the unregistered-operator REJECT after the walk's ok line"
+            elif kind == "scan":
+                sentence = want[1]
+                ok = p.returncode == 1 and (PL_FAIL + sentence) in p.stdout.splitlines() \
+                    and not any(c in text for c in CODES)
+                if extra:
+                    ok = ok and OK_LINE[args.style] not in text
+                    why = f"rc 1 with the payload scan's line \"{sentence}\" first"
+                else:
+                    ok = ok and OK_LINE[args.style] in text
+                    why = (f"the walk's ok line (no rule on this profile), then the "
+                           f"payload scan's line \"{sentence}\"")
+            elif want is None:
+                ok = OK_LINE[args.style] in text \
+                    and not any(c in text for c in CODES) and UNREG not in text
+                if args.style == "tflite":
+                    ok = ok and p.returncode == 0
+                why = "the walk's ok line" + (" and rc 0" if args.style == "tflite" else "")
+            else:
+                others = [c for c in CODES if c != want]
+                ok = p.returncode == 1 and want in text \
+                    and not any(c in text for c in others) \
+                    and OK_LINE[args.style] not in text
+                why = f"rc 1 with {want} (and no other code)"
+            if ok:
+                print(f"  ok   {args.gate} {label}: {why}")
+            else:
+                failures += 1
+                print(f"  FAIL {args.gate} {label}: wanted {why}, got rc "
+                      f"{p.returncode}:\n{text}")
+
     failures += schema_depth_check(flags)
 
     if failures:
         sys.exit(f"run_model_io_gate_tests: {failures} case(s) failed for {gate_path}")
     n = len(CASES) + (len(PL_CASES) + 2 * len(PL_WALK_CASES) + 2 * len(PL_SCAN_BOTH)
-                      if args.style == "vela" else 0)
+                      if args.style == "vela" else 0) + len(op_runs)
     print(f"run_model_io_gate_tests: OK ({n} cases + schema depth, {gate_path})")
 
 

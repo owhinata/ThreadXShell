@@ -70,7 +70,7 @@
 #include "nn_ethosu_io.h"
 
 /* And the graph walk both backends apply to the model before planning it
- * (svc/nn/tflm/nn_tflm_model_check.h, issues #175 .. #181, #183): a graph
+ * (svc/nn/tflm/nn_tflm_model_check.h, issues #175 .. #181, #183, #185): a graph
  * that does not hold together -- an I/O list, a subgraph's tensors or an
  * operator's tensor list missing, an operator list longer than
  * NN_TFLM_MAX_OP_TENSORS, an index naming a tensor that does not exist, a
@@ -80,7 +80,9 @@
  * match the graph (every Vela model carries one, so that part runs on each), no
  * operator-code vector, a tensor type with no size, a constant whose data is
  * not exactly its shape's bytes (the command stream and the weights of every
- * Vela model are exact), data on a graph input / output or an operator output
+ * Vela model are exact), data on a graph input / output or an operator output,
+ * an operator naming an operator code that does not exist (the operator rules
+ * of issue #185 are empty under this profile: it registers no CPU kernel)
  * (NN_MODEL_ERR_FORMAT on the board) -- a tensor of
  * too high a rank (NN_MODEL_ERR_TENSOR), or an I/O dimension outside 0..65535
  * (NN_MODEL_ERR_DIMS). */
@@ -491,9 +493,9 @@ int main(int argc, char **argv)
 		       "fewer offsets than it claims or an offset below -1, there is "
 		       "no operator-code vector, a tensor has a type with no size, a "
 		       "constant's data is not exactly its shape's bytes (or it has a "
-		       "negative dimension or more than %u), or a graph input / output "
-		       "or an operator output has data (NN_MODEL_ERR_FORMAT on the "
-		       "board)\n",
+		       "negative dimension or more than %u), a graph input / output "
+		       "or an operator output has data, or an operator names an operator "
+		       "code that does not exist (NN_MODEL_ERR_FORMAT on the board)\n",
 		       NN_TFLM_MAX_OP_TENSORS, NN_TFLM_MAX_QUANT_CHANNELS,
 		       NN_TFLM_MAX_TENSOR_RANK - 1u, NN_TFLM_MAX_QUANT_REFS,
 		       NN_TFLM_MAX_TENSOR_RANK);

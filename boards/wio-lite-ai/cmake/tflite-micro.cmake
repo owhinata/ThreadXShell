@@ -68,10 +68,10 @@ endif()
 # The define each profile turns on, in ONE place: the firmware library and the
 # host-side verify_tflite build below both read this variable, and a checker built
 # against a different op set than the firmware is worse than no checker (the whole
-# argument is in nn_tflm_ops.h).  `blazeface` adds nothing, which is why this can be
-# empty -- and why it is a plain variable, not a generator expression: an unset genex
-# expands to an empty ARGUMENT rather than to nothing, and the compiler then sees "".
-set(NN_TFLM_OPS_DEFINE "")
+# argument is in nn_tflm_ops.h).  Every profile has one, `blazeface` included: the
+# header has no default and refuses to build without exactly one (issue #185), so a
+# translation unit that misses it fails instead of compiling another profile.
+set(NN_TFLM_OPS_DEFINE "NN_TFLM_OPS_BLAZEFACE_PROFILE=1")
 if(NN_TFLM_OPS STREQUAL "mlperf")
     set(NN_TFLM_OPS_DEFINE "NN_TFLM_OPS_MLPERF_PROFILE=1")
 elseif(NN_TFLM_OPS STREQUAL "extended")
@@ -366,13 +366,8 @@ target_link_libraries(tflm PUBLIC stdc++_nano supc++_nano m)
 find_program(HOST_CXX NAMES c++ g++ clang++)
 if(HOST_CXX)
     # The same profile define the firmware library got, so the checker and the board
-    # agree on the op set by construction.  Empty for `blazeface`, and an empty CMake
-    # variable expands to no argument at all here (unlike a genex, which would leave a
-    # literal "" on the command line).
-    set(_vt_ops_def "")
-    if(NN_TFLM_OPS_DEFINE)
-        set(_vt_ops_def "-D${NN_TFLM_OPS_DEFINE}")
-    endif()
+    # agree on the op set by construction (never empty, see NN_TFLM_OPS_DEFINE).
+    set(_vt_ops_def "-D${NN_TFLM_OPS_DEFINE}")
     add_custom_command(
         OUTPUT "${CMAKE_BINARY_DIR}/verify_tflite"
         COMMAND "${HOST_CXX}" -std=c++17 -O1 -w

@@ -244,6 +244,51 @@
  * entry they cost 4e8 / 1.2e8 payload words; charged before the walk the second
  * entry is refused.
  *
+ * And the operator rules (issue #185): one operator over tensors of its own (a
+ * constant on a Buffer of its own, 16-byte aligned, exactly its shape's bytes,
+ * so only the rule can refuse it), its kind, its options and its operator codes
+ * in the spec.  Unless the line says otherwise the operator is the graph: its
+ * input 0 is subgraph 0's input and its output 0 the graph's output.  What a
+ * profile that does not register the kind answers is the runner's
+ * (run_model_io_gate_tests.py); all refusals FORMAT:
+ *
+ *   r0_index_last / _oob    ADD [1, 4] -> [1, 4] with 2 ADD codes, opcode_index 1
+ *                           (control) / 2 == the vector's length
+ *   r1_*                    CONV_2D, int8 input [1, 4, 4, 2], filter [3, 1, 1, 2],
+ *                           bias INT32 [3], output [1, 4, 4, 3]: _ok, _float (all
+ *                           FLOAT32), _no_bias (input 2 == -1), _two_inputs,
+ *                           _i16_i64 and _one_input (the rule does not apply) are
+ *                           controls; _filter_ne (filter [2, 1, 1, 2]), _bias_2
+ *                           (bias [2]), _bias_nodata_2 (the same without data),
+ *                           _bias_int8 (INT8 [3]), _bias_f32_i8 (FLOAT32 [3]
+ *                           under the int8 input: the size the kernel reads, the
+ *                           type it does not), _in_rank3, _in_rank7 (not
+ *                           graph I/O: FORMAT, not TENSOR) and _deprecated_ne
+ *                           (_filter_ne with the kind only in
+ *                           deprecated_builtin_code, builtin_code ADD == 0: the
+ *                           kind is the larger of the two) are refused
+ *   r2_*                    DEPTHWISE_CONV_2D, int8 input [1, 4, 4, c], filter
+ *                           [1, 1, 1, c x dm], bias INT32 [c x dm], output
+ *                           [1, 4, 4, c x dm], options depth_multiplier dm:
+ *                           _dm1 / _dm4 / _dm2 (c 2, the three CMSIS-NN paths)
+ *                           and _i16_i64 are controls; _filter_ne (c 4, dm 1,
+ *                           output channels 2), _dm_ne (c 2, dm 2, filter 2),
+ *                           _dm0 (dm 0, filter and output channels 0, no bias:
+ *                           only the dm >= 1 check refuses it), _opts_other (a
+ *                           Conv2DOptions table, so dm reads as 0), _bias_2
+ *                           (dm 2, bias [2]) and _i16_i32 are refused
+ *   r3_*                    FULLY_CONNECTED, int8 input [1, 4], weights [3, 4],
+ *                           bias INT32 [3], output [1, 3]: _ok, _out_rank4
+ *                           (input [4, 4], output [1, 2, 2, 3]), _no_bias and
+ *                           _w_nonconst (weights without data) are controls;
+ *                           _issue (input [1, 1], weights [2, 1], bias [1],
+ *                           output [1, 2]), _w0_ne, _w_rank3, _out_rank1,
+ *                           _out_rank5 (not graph I/O), _in_count_ne (input
+ *                           [1, 5]), _saturate (output [65536, 65536, 1], not
+ *                           graph I/O, weights [1, 1], input [0, 1]: the product
+ *                           wraps to 0 in 32 bits), _out_last0 (output [1, 0],
+ *                           weights [1, 4]) and _i16_i32 are refused
+ *
  * Every file stays under 512 KB (checked here) and within the 4096 visits.
  *
  * Usage: gen_model_io_fixtures <out-dir>
@@ -794,6 +839,107 @@ bool write_payload_model(const std::string &dir, const pl_spec &sp)
 	return (fclose(f) == 0) && ok;
 }
 
+/* issue #185: one tensor of an operator-rule model: data_len > 0 puts it on a
+ * Buffer of its own with that many bytes, else on buffer 0 (no data). */
+struct rtensor {
+	tflite::TensorType   type;
+	std::vector<int32_t> shape;
+	uint32_t             data_len;
+};
+
+/* issue #185: one operator (named by one entry) over its own tensors. */
+struct opr_spec {
+	const char             *file;
+	tflite::BuiltinOperator kind;
+	std::vector<rtensor>    t;
+	std::vector<int32_t>    in;
+	std::vector<int32_t>    out;
+	std::vector<int32_t>    g_in;          /* subgraph 0's inputs / outputs */
+	std::vector<int32_t>    g_out;
+	int                     opts;          /* 0 none, 1 DepthwiseConv2DOptions
+	                                        * {dm}, 2 Conv2DOptions */
+	int32_t                 dm;
+	uint32_t                codes;         /* operator codes, all `kind` (0: 1) */
+	uint32_t                opcode_index;
+	bool                    deprecated_only; /* the kind in deprecated_builtin_code
+	                                          * only, builtin_code ADD (0) */
+};
+
+/* Model, SubGraph, the tensors, the operator and its options, the codes, buffer
+ * 0 and one Buffer per constant. */
+uint32_t tables_of(const opr_spec &sp)
+{
+	uint32_t n = 2u + (uint32_t)sp.t.size() + 1u + (sp.opts ? 1u : 0u) +
+	             (sp.codes ? sp.codes : 1u) + 1u;
+
+	for (const rtensor &t : sp.t)
+		n += t.data_len ? 1u : 0u;
+	return n;
+}
+
+bool write_op_model(const std::string &dir, const opr_spec &sp)
+{
+	flatbuffers::DefaultAllocator alloc;   /* see write_model() */
+	flatbuffers::FlatBufferBuilder fbb(1024, &alloc);
+	std::vector<flatbuffers::Offset<tflite::Buffer>> bv{ tflite::CreateBuffer(fbb) };
+	std::vector<flatbuffers::Offset<tflite::Tensor>> tv;
+
+	for (const rtensor &t : sp.t) {
+		uint32_t bi = 0;
+
+		if (t.data_len) {
+			bi = (uint32_t)bv.size();
+			bv.push_back(tflite::CreateBuffer(fbb, const_data(fbb, t.data_len)));
+		}
+		tv.push_back(tflite::CreateTensor(fbb, fbb.CreateVector(t.shape), t.type, bi,
+		                                  fbb.CreateString("t")));
+	}
+
+	tflite::BuiltinOptions ot = tflite::BuiltinOptions_NONE;
+	flatbuffers::Offset<void> ov;
+
+	if (sp.opts == 1) {
+		ot = tflite::BuiltinOptions_DepthwiseConv2DOptions;
+		ov = tflite::CreateDepthwiseConv2DOptions(fbb, tflite::Padding_VALID, 1, 1, sp.dm)
+		         .Union();
+	} else if (sp.opts == 2) {
+		ot = tflite::BuiltinOptions_Conv2DOptions;
+		ov = tflite::CreateConv2DOptions(fbb, tflite::Padding_VALID, 1, 1).Union();
+	}
+	const auto op = tflite::CreateOperator(fbb, sp.opcode_index, fbb.CreateVector(sp.in),
+	                                       fbb.CreateVector(sp.out), ot, ov);
+	const std::vector<flatbuffers::Offset<tflite::Operator>> opv{ op };
+	std::vector<flatbuffers::Offset<tflite::OperatorCode>> codev;
+
+	for (uint32_t i = 0; i < (sp.codes ? sp.codes : 1u); i++)
+		codev.push_back(sp.deprecated_only
+			? tflite::CreateOperatorCode(fbb, (int8_t)sp.kind, 0, 1,
+			                             tflite::BuiltinOperator_ADD)
+			: tflite::CreateOperatorCode(fbb, (int8_t)sp.kind, 0, 1, sp.kind));
+
+	const auto sg = tflite::CreateSubGraph(fbb, fbb.CreateVector(tv),
+	                                       fbb.CreateVector(sp.g_in),
+	                                       fbb.CreateVector(sp.g_out),
+	                                       fbb.CreateVector(opv), fbb.CreateString("main"));
+	const std::vector<flatbuffers::Offset<tflite::SubGraph>> sgv{ sg };
+	const auto model = tflite::CreateModel(fbb, TFLITE_SCHEMA_VERSION, fbb.CreateVector(codev),
+	                                       fbb.CreateVector(sgv),
+	                                       fbb.CreateString("issue #185 fixture"),
+	                                       fbb.CreateVector(bv));
+
+	tflite::FinishModelBuffer(fbb, model);
+
+	const std::string path = dir + "/" + sp.file;
+	FILE *f = fopen(path.c_str(), "wb");
+
+	if (!f) {
+		fprintf(stderr, "gen_model_io_fixtures: cannot write %s\n", path.c_str());
+		return false;
+	}
+	const bool ok = fwrite(fbb.GetBufferPointer(), 1, fbb.GetSize(), f) == fbb.GetSize();
+	return (fclose(f) == 0) && ok;
+}
+
 }  /* namespace */
 
 int main(int argc, char **argv)
@@ -1175,6 +1321,178 @@ int main(int argc, char **argv)
 		if (!write_payload_model(argv[1], sp))
 			return 1;
 		printf("%s: %u table visits\n", sp.file, (unsigned)tables_of(sp));
+	}
+
+	/* issue #185: the operator rules (the list at the top).  T(type, shape,
+	 * bytes); op() makes tensor 0 the graph's input and the last one its output
+	 * and the operator's output. */
+	{
+		const tflite::TensorType I8 = tflite::TensorType_INT8;
+		const tflite::TensorType I16 = tflite::TensorType_INT16;
+		const tflite::TensorType I32 = tflite::TensorType_INT32;
+		const tflite::TensorType I64 = tflite::TensorType_INT64;
+		const tflite::TensorType F32 = tflite::TensorType_FLOAT32;
+		const tflite::BuiltinOperator CONV = tflite::BuiltinOperator_CONV_2D;
+		const tflite::BuiltinOperator DW = tflite::BuiltinOperator_DEPTHWISE_CONV_2D;
+		const tflite::BuiltinOperator FC = tflite::BuiltinOperator_FULLY_CONNECTED;
+		auto T = [](tflite::TensorType type, std::vector<int32_t> shape, uint32_t bytes) {
+			rtensor t = { type, shape, bytes };
+			return t;
+		};
+		auto op = [](const char *file, tflite::BuiltinOperator kind, std::vector<rtensor> t,
+		             std::vector<int32_t> in) {
+			const int32_t last = (int32_t)t.size() - 1;
+			opr_spec sp = { file, kind, t, in, { last }, { 0 }, { last } };
+			return sp;
+		};
+		/* Tensor 0 (@p outputs false) or the operator's output, tensor 3, is
+		 * not graph I/O: an extra [1, 4] tensor 4 takes its place there. */
+		auto off_io = [&](opr_spec sp, bool outputs) {
+			sp.t.push_back(T(I8, { 1, 4 }, 0u));
+			(outputs ? sp.g_out : sp.g_in) = { 4 };
+			return sp;
+		};
+		auto dw = [&](const char *file, std::vector<rtensor> t, int32_t dm) {
+			opr_spec sp = op(file, DW, t, { 0, 1, 2 });
+			sp.opts = 1;
+			sp.dm = dm;
+			return sp;
+		};
+		const std::vector<int32_t> xb = { 1, 4, 4, 2 };
+		const std::vector<int32_t> y3 = { 1, 4, 4, 3 };
+		std::vector<opr_spec> os;
+
+		{
+			opr_spec sp = op("r0_index_last.tflite", tflite::BuiltinOperator_ADD,
+			                 { T(I8, { 1, 4 }, 0u), T(I8, { 1, 4 }, 0u) }, { 0 });
+			sp.codes = 2u;
+			sp.opcode_index = 1u;
+			os.push_back(sp);
+			sp.file = "r0_index_oob.tflite";
+			sp.opcode_index = 2u;
+			os.push_back(sp);
+		}
+
+		/* R1 CONV_2D */
+		const std::vector<rtensor> c_ok = { T(I8, xb, 0u), T(I8, { 3, 1, 1, 2 }, 6u),
+		                                    T(I32, { 3 }, 12u), T(I8, y3, 0u) };
+		os.push_back(op("r1_ok.tflite", CONV, c_ok, { 0, 1, 2 }));
+		os.push_back(op("r1_float.tflite", CONV,
+		                { T(F32, xb, 0u), T(F32, { 3, 1, 1, 2 }, 24u), T(F32, { 3 }, 12u),
+		                  T(F32, y3, 0u) }, { 0, 1, 2 }));
+		os.push_back(op("r1_no_bias.tflite", CONV, c_ok, { 0, 1, -1 }));
+		os.push_back(op("r1_two_inputs.tflite", CONV, c_ok, { 0, 1 }));
+		os.push_back(op("r1_i16_i64.tflite", CONV,
+		                { T(I16, xb, 0u), T(I8, { 3, 1, 1, 2 }, 6u), T(I64, { 3 }, 24u),
+		                  T(I16, y3, 0u) }, { 0, 1, 2 }));
+		os.push_back(op("r1_one_input.tflite", CONV, c_ok, { 0 }));
+		{
+			std::vector<rtensor> t = c_ok;
+
+			t[1] = T(I8, { 2, 1, 1, 2 }, 4u);
+			os.push_back(op("r1_filter_ne.tflite", CONV, t, { 0, 1, 2 }));
+			opr_spec sp = op("r1_deprecated_ne.tflite", CONV, t, { 0, 1, 2 });
+			sp.deprecated_only = true;
+			os.push_back(sp);
+			t = c_ok;
+			t[2] = T(I32, { 2 }, 8u);
+			os.push_back(op("r1_bias_2.tflite", CONV, t, { 0, 1, 2 }));
+			t[2] = T(I32, { 2 }, 0u);
+			os.push_back(op("r1_bias_nodata_2.tflite", CONV, t, { 0, 1, 2 }));
+			t[2] = T(I8, { 3 }, 3u);
+			os.push_back(op("r1_bias_int8.tflite", CONV, t, { 0, 1, 2 }));
+			t[2] = T(F32, { 3 }, 12u);
+			os.push_back(op("r1_bias_f32_i8.tflite", CONV, t, { 0, 1, 2 }));
+			t = c_ok;
+			t[0] = T(I8, { 4, 4, 2 }, 0u);
+			os.push_back(op("r1_in_rank3.tflite", CONV, t, { 0, 1, 2 }));
+			t[0] = T(I8, { 1, 1, 1, 1, 4, 4, 2 }, 0u);
+			os.push_back(off_io(op("r1_in_rank7.tflite", CONV, t, { 0, 1, 2 }), false));
+		}
+
+		/* R2 DEPTHWISE_CONV_2D: c x dm filter / bias / output channels. */
+		auto dwt = [&](tflite::TensorType xt, int32_t c, int32_t fc, int32_t oc,
+		               tflite::TensorType bt, int32_t bn) {
+			const uint32_t bsz = bt == I64 ? 8u : bt == I32 ? 4u : 1u;
+
+			return std::vector<rtensor>{ T(xt, { 1, 4, 4, c }, 0u),
+			                             T(I8, { 1, 1, 1, fc }, (uint32_t)fc),
+			                             T(bt, { bn }, bsz * (uint32_t)bn),
+			                             T(xt, { 1, 4, 4, oc }, 0u) };
+		};
+		os.push_back(dw("r2_dm1.tflite", dwt(I8, 2, 2, 2, I32, 2), 1));
+		os.push_back(dw("r2_dm4.tflite", dwt(I8, 2, 8, 8, I32, 8), 4));
+		os.push_back(dw("r2_dm2.tflite", dwt(I8, 2, 4, 4, I32, 4), 2));
+		os.push_back(dw("r2_i16_i64.tflite", dwt(I16, 2, 2, 2, I64, 2), 1));
+		os.push_back(dw("r2_filter_ne.tflite", dwt(I8, 4, 4, 2, I32, 4), 1));
+		os.push_back(dw("r2_dm_ne.tflite", dwt(I8, 2, 2, 2, I32, 2), 2));
+		{
+			std::vector<rtensor> t = dwt(I8, 2, 0, 0, I32, 2);
+
+			t[1].data_len = 0u;   /* filter [1, 1, 1, 0], no data */
+			opr_spec sp = dw("r2_dm0.tflite", t, 0);
+			sp.in = { 0, 1, -1 };
+			os.push_back(sp);
+		}
+		{
+			opr_spec sp = dw("r2_opts_other.tflite", dwt(I8, 2, 2, 2, I32, 2), 1);
+			sp.opts = 2;
+			os.push_back(sp);
+		}
+		os.push_back(dw("r2_bias_2.tflite", dwt(I8, 2, 4, 4, I32, 2), 2));
+		os.push_back(dw("r2_i16_i32.tflite", dwt(I16, 2, 2, 2, I32, 2), 1));
+
+		/* R3 FULLY_CONNECTED */
+		auto fct = [&](tflite::TensorType xt, std::vector<int32_t> x, std::vector<int32_t> w,
+		               uint32_t wbytes, int32_t bn, std::vector<int32_t> y) {
+			return std::vector<rtensor>{ T(xt, x, 0u), T(I8, w, wbytes),
+			                             T(I32, { bn }, 4u * (uint32_t)bn),
+			                             T(xt, y, 0u) };
+		};
+		os.push_back(op("r3_ok.tflite", FC, fct(I8, { 1, 4 }, { 3, 4 }, 12u, 3, { 1, 3 }),
+		                { 0, 1, 2 }));
+		os.push_back(op("r3_out_rank4.tflite", FC,
+		                fct(I8, { 4, 4 }, { 3, 4 }, 12u, 3, { 1, 2, 2, 3 }), { 0, 1, 2 }));
+		os.push_back(op("r3_no_bias.tflite", FC, fct(I8, { 1, 4 }, { 3, 4 }, 12u, 3, { 1, 3 }),
+		                { 0, 1, -1 }));
+		os.push_back(op("r3_w_nonconst.tflite", FC,
+		                fct(I8, { 1, 4 }, { 3, 4 }, 0u, 3, { 1, 3 }), { 0, 1, 2 }));
+		os.push_back(op("r3_issue.tflite", FC, fct(I8, { 1, 1 }, { 2, 1 }, 2u, 1, { 1, 2 }),
+		                { 0, 1, 2 }));
+		os.push_back(op("r3_w0_ne.tflite", FC, fct(I8, { 1, 4 }, { 2, 4 }, 8u, 2, { 1, 3 }),
+		                { 0, 1, 2 }));
+		os.push_back(op("r3_w_rank3.tflite", FC,
+		                fct(I8, { 1, 4 }, { 3, 1, 4 }, 12u, 3, { 1, 3 }), { 0, 1, 2 }));
+		os.push_back(op("r3_out_rank1.tflite", FC, fct(I8, { 4 }, { 3, 4 }, 12u, 3, { 3 }),
+		                { 0, 1, 2 }));
+		os.push_back(off_io(op("r3_out_rank5.tflite", FC,
+		                       fct(I8, { 1, 4 }, { 3, 4 }, 12u, 3, { 1, 1, 1, 1, 3 }),
+		                       { 0, 1, 2 }), true));
+		os.push_back(op("r3_in_count_ne.tflite", FC,
+		                fct(I8, { 1, 5 }, { 3, 4 }, 12u, 3, { 1, 3 }), { 0, 1, 2 }));
+		os.push_back(off_io(op("r3_saturate.tflite", FC,
+		                       fct(I8, { 0, 1 }, { 1, 1 }, 1u, 1, { 65536, 65536, 1 }),
+		                       { 0, 1, -1 }), true));
+		static_assert((uint32_t)(65536ull * 65536ull) == 0u,
+		              "r3_saturate: the 32-bit product of the output's outer dims is 0");
+		os.push_back(op("r3_out_last0.tflite", FC, fct(I8, { 1, 4 }, { 1, 4 }, 4u, 1, { 1, 0 }),
+		                { 0, 1, 2 }));
+		{
+			std::vector<rtensor> t = fct(I16, { 1, 4 }, { 3, 4 }, 12u, 3, { 1, 3 });
+
+			os.push_back(op("r3_i16_i32.tflite", FC, t, { 0, 1, 2 }));
+		}
+
+		for (const opr_spec &sp : os) {
+			if (tables_of(sp) > lim) {
+				fprintf(stderr, "gen_model_io_fixtures: %s needs %u table visits, "
+				        "over %u\n", sp.file, (unsigned)tables_of(sp), (unsigned)lim);
+				return 1;
+			}
+			if (!write_op_model(argv[1], sp))
+				return 1;
+			printf("%s: %u table visits\n", sp.file, (unsigned)tables_of(sp));
+		}
 	}
 	return 0;
 }

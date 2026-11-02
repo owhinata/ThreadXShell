@@ -158,7 +158,7 @@ part-way through it would otherwise leave entries the destructor calls as functi
 pointers.  What a model's I/O must satisfy before it is planned is in
 `nn_tflm_model_check.h`, which both backends and the three host gates
 (`verify_tflite` on wio-lite-ai and f746g-disco, `verify_vela_model` on
-grove-vision-ai-v2) call (issues #175, #178, #180, #181, #183).  The walk runs in a fixed order:
+grove-vision-ai-v2) call (issues #175, #178, #180, #181, #183, #185).  The walk runs in a fixed order:
 
 1. Structure (`NN_MODEL_ERR_FORMAT`): subgraph 0's input / output lists present
    and naming tensors that exist; every subgraph has a tensor vector; every
@@ -207,9 +207,8 @@ grove-vision-ai-v2) call (issues #175, #178, #180, #181, #183).  The walk runs i
    shape (its byte counts multiply the shape in `int`; the verifier proves only
    that the vector lies in the file), while a kernel that reads a constant by its
    own dims, which are the serialized shape, reads a short buffer under a large
-   shape past the model (a bias that FULLY_CONNECTED / CONV_2D read by another
-   tensor's output depth is NOT covered: that needs the operator's semantics,
-   issue #185).  And the planner does not place a tensor with data,
+   shape past the model (a constant a kernel reads by ANOTHER tensor's dims is
+   the operator rules', below).  And the planner does not place a tensor with data,
    so a graph input the board fills or an operator output a kernel writes would
    be written into the model (PSRAM staging, SDRAM, the XIP window).  So every
    tensor of every subgraph, data or not, has a type TFLM gives a size (its
@@ -226,12 +225,56 @@ grove-vision-ai-v2) call (issues #175, #178, #180, #181, #183).  The walk runs i
    table is not read: TFLM micro reads a constant dense, so a sparse one is short
    and refused.  Per tensor entry one type, one buffer and at most 6 dimension
    values; per operator entry one buffer per output.
+   And the operator rules (issue #185): some registered kernels read a constant
+   by ANOTHER tensor's dims or as a type of their own -- the int8 CONV_2D reads
+   the filter for, and the bias as, the output's channel count; DEPTHWISE_CONV_2D
+   reads them by input depth x depth multiplier (and a multiplier of 0 never ends
+   one CMSIS-NN loop); the int8 FULLY_CONNECTED reads the weights and the bias
+   by the output's last dimension; the bias is read as int32 under an int8 input
+   whatever its declared type -- and their `Prepare()` compares the two with a
+   `TFLITE_DCHECK` (compiled out by `NDEBUG`) or not at all.  (CMSIS-NN's
+   CONV_2D `Prepare()` does have a bias check, but it fetches the bias as output
+   2, which is always null, so the check never runs.)  So, per operator entry,
+   after its lists: R0, for every profile, its `opcode_index` is below the
+   operator-code vector's length (TFLM compares that only inside
+   `AllocateTensors()`, `NN_MODEL_ERR_ARENA` on a board, and the wio-lite-ai /
+   f746g-disco gates, which read only the code vector, passed it); then its kind
+   (the larger of `builtin_code` and `deprecated_builtin_code`, as
+   `GetBuiltinCode()` reads it) picks one rule, through a switch built from
+   `nn_tflm_ops.h`'s selected list, so a profile compiles only its own
+   operators' rules and an operator added to the list without one does not
+   build:
+   - R1 CONV_2D: input, filter, output rank 4; `filter[0] == output[3]`; a bias
+     (input 2, not -1, data or not) of `output[3]` elements, its type the one the
+     kernel reads (FLOAT32 / FLOAT32, INT8 / INT32, INT16 / INT32 or INT64).
+   - R2 DEPTHWISE_CONV_2D: the three rank 4; `filter[3] == output[3]`;
+     `depth_multiplier >= 1` (an absent or other options table reads as 0) and
+     `input[3] x depth_multiplier == filter[3]`; a bias of `filter[3]` elements
+     (FLOAT32 / FLOAT32, INT8 / INT32, INT16 / INT64).
+   - R3 FULLY_CONNECTED: weights rank 2, output rank 2..4; `weights[0]` equal to
+     the output's last dimension; the input's elements equal to the output's
+     other dimensions multiplied, times `weights[1]` (no division; a product
+     past 32 bits is refused before it wraps); a bias of `weights[0]` elements
+     (FLOAT32 / FLOAT32, INT8 / INT32, INT16 / INT64).
+   - Every other registered operator's rule is empty, its reason beside it
+     (ADD / SUB / MUL, PAD, STRIDED_SLICE, TRANSPOSE, RESIZE_* and CONCATENATION
+     get theirs in the second step of issue #185); the ethos-u profile has only
+     CUSTOM's, which is empty, so on grove-vision-ai-v2 R0 is all that runs.
+   A list shorter than the kernel needs, or a required tensor that is -1, is
+   left to `Prepare()`'s live check; every rule judges its tensors' ranks before
+   any dimension (so a rank-7 convolution input is FORMAT, not TENSOR) and
+   compares dimension values without sizing any work by them.  A board and its
+   gate, built with the same profile define, agree; two profiles may not (a
+   FULLY_CONNECTED that breaks R3 is FORMAT on f746g-disco and an unregistered
+   operator on wio-lite-ai's `blazeface` gate).  Every rule passes all 44 models
+   found that pass the verifier.
 2. The count of each I/O list (1..`NN_MAX_IO`, `NN_MODEL_ERR_SHAPE`).
 3. Rank (`NN_MODEL_ERR_TENSOR`): every tensor of every subgraph at most
    `NN_TFLM_MAX_TENSOR_RANK` (6, TFLM's `RuntimeShape::kMaxSmallSize`, which
    TFLM only DCHECKs), each I/O tensor at most `NN_MAX_DIMS`.  Only the length of
-   a shape is read here; the values of a tensor without data are never read
-   (Vela's internal tensors reach 2.2 M), a constant's are read in step 1.
+   a shape is read here; the values of a tensor without data are read only by
+   the operator rules, which compare them (Vela's internal tensors reach 2.2 M,
+   and the ethos-u profile has no rule), a constant's are read in step 1.
 4. The I/O values: every dimension inside 0..65535, the range of `struct
    nn_tensor`'s 16-bit dims (`NN_MODEL_ERR_DIMS`, the predicate
    `nn_tensor_dim_fits()` in `nn.h`, tied to the field's width at compile time).

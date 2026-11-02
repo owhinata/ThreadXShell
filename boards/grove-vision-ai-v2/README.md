@@ -2573,6 +2573,24 @@ was outlined into `.text` (+20 B and a veneer), and so was
 callers (a veneer to it from `.text_cold` is the only new symbol), and the type
 as `GetField<int8_t>` (`nn_tflm_tensor_type()`), which stays inline.
 
+**And the operator rules (issue #185): only R0 runs here.**  The shared walk
+now also holds each registered CPU kernel's constants to the other tensors'
+dims it reads them by (CONV_2D / DEPTHWISE_CONV_2D / FULLY_CONNECTED on the
+tflm boards), but its per-operator switch is built from `nn_tflm_ops.h`'s
+selected list, and the ethos-u profile registers one operator, CUSTOM, whose
+rule is empty (how far the NPU reads is the command stream's, issue #184).  What
+runs on this board is R0: every operator's `opcode_index` is below the
+operator-code vector's length (`NN_MODEL_ERR_FORMAT`).  The payload scan, which
+the board runs first, already refuses that (its "names an operator code that
+does not exist"), so on the board such a model stays `NN_MODEL_ERR_PAYLOAD`; it
+is FORMAT only on `verify_vela_model`'s default order.  A model with a builtin
+operator that breaks a tflm board's rule passes this walk (no such rule is
+compiled here) and is refused by the scan as a builtin.  The 12 pinned and SDK
+Vela models keep their verdict.  Cost: ITCM 0 B (`.text` 234,524 B as before,
+`check_placement_budget` used 240,640 B, the same 41 veneers and no new symbol),
+`.text_cold` +24 B (16,352 -> 16,376 B), `.rodata` unchanged; `opcode_index` is
+read through `Table::GetField<int32_t>` (`nn_tflm_op_opcode_index()`), as above.
+
 ### The model is a blob, opened by name (#93, #49 Step 4a)
 
 `nn model load --name cls` asks the asset store for the blob called `cls` and parses what it

@@ -30,6 +30,14 @@
  * flash.  Which profile a board builds, and what each one measured there, is the
  * board's (its cmake/tflite-micro.cmake and README): wio-lite-ai defaults to
  * `blazeface` and cannot link `extended`; f746g-disco builds `extended`.
+ *
+ * [!] AN OPERATOR ADDED HERE NEEDS ITS RULE TOO (issue #185).  The model walk
+ * (svc/nn/tflm/nn_tflm_model_check.h, "OPERATOR RULES") builds its per-operator
+ * switch from the selected list, calling nn_tflm_op_rule_<SUFFIX>() for each
+ * entry, so the build fails until that function exists.  Write the rule the
+ * kernel needs -- how it reads its constants against the other tensors' dims and
+ * types, checked or not by its Prepare() -- or a function that returns true with
+ * one line saying why the kernel needs none.
  */
 #ifndef NN_TFLM_OPS_H
 #define NN_TFLM_OPS_H
@@ -103,10 +111,10 @@
 /*
  * THE PROFILE: exactly one complete list, NN_TFLM_OPS_ALL(X), chosen by one define.
  *
- *   (none)                         blazeface   base                      =  8
- *   NN_TFLM_OPS_MLPERF_PROFILE=1   mlperf      base + mlperf             = 11
- *   NN_TFLM_OPS_EXTENDED=1         extended    base + mlperf + extra     = 23
- *   NN_TFLM_OPS_ETHOSU_PROFILE=1   ethosu      the ethos-u custom op     =  1
+ *   NN_TFLM_OPS_BLAZEFACE_PROFILE=1  blazeface   base                   =  8
+ *   NN_TFLM_OPS_MLPERF_PROFILE=1     mlperf      base + mlperf          = 11
+ *   NN_TFLM_OPS_EXTENDED=1           extended    base + mlperf + extra  = 23
+ *   NN_TFLM_OPS_ETHOSU_PROFILE=1     ethosu      the ethos-u custom op  =  1
  *
  * The three existing profiles happen to nest, which is why NN_TFLM_OPS_EXTRA does NOT
  * repeat the MLPerf operators (registering one twice is a resolver error, and this is
@@ -116,10 +124,20 @@
  * operator the NPU runs with no CPU kernel registered at all -- is one more branch
  * with its own list and its own define; the resolver's size below follows from
  * whatever the branch lists.
+ *
+ * [!] EXACTLY ONE DEFINE, NO DEFAULT (issue #185).  blazeface used to be what a
+ * translation unit got with no define at all, so one that missed the board's
+ * define compiled quietly against a different list -- a resolver, a gate or a
+ * walk of another profile.  Every profile is now named, and a unit that includes
+ * this header without one does not build.
  */
-#if (defined(NN_TFLM_OPS_EXTENDED) + defined(NN_TFLM_OPS_MLPERF_PROFILE) + \
-     defined(NN_TFLM_OPS_ETHOSU_PROFILE)) > 1
+#if (defined(NN_TFLM_OPS_BLAZEFACE_PROFILE) + defined(NN_TFLM_OPS_EXTENDED) + \
+     defined(NN_TFLM_OPS_MLPERF_PROFILE) + defined(NN_TFLM_OPS_ETHOSU_PROFILE)) > 1
 #error "more than one NN_TFLM_OPS profile is defined"
+#endif
+#if (defined(NN_TFLM_OPS_BLAZEFACE_PROFILE) + defined(NN_TFLM_OPS_EXTENDED) + \
+     defined(NN_TFLM_OPS_MLPERF_PROFILE) + defined(NN_TFLM_OPS_ETHOSU_PROFILE)) == 0
+#error "no NN_TFLM_OPS profile is defined: the board's cmake passes one to every unit that includes this header"
 #endif
 
 #if defined(NN_TFLM_OPS_ETHOSU_PROFILE)
@@ -128,7 +146,7 @@
 #define NN_TFLM_OPS_ALL(X)  NN_TFLM_OPS_BASE(X) NN_TFLM_OPS_MLPERF(X) NN_TFLM_OPS_EXTRA(X)
 #elif defined(NN_TFLM_OPS_MLPERF_PROFILE)
 #define NN_TFLM_OPS_ALL(X)  NN_TFLM_OPS_BASE(X) NN_TFLM_OPS_MLPERF(X)
-#else
+#elif defined(NN_TFLM_OPS_BLAZEFACE_PROFILE)
 #define NN_TFLM_OPS_ALL(X)  NN_TFLM_OPS_BASE(X)
 #endif
 

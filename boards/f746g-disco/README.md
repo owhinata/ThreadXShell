@@ -511,8 +511,8 @@ is no built-in model) and after `nn model unload`.
   operator output and no input / output of subgraph 0 may have data -- all
   `NN_MODEL_ERR_FORMAT` (-7).  TFLM compares a constant's data length with
   nothing and a kernel that reads it by its own shape read a short buffer past
-  the model in `.sdram.ai` (a bias read by another tensor's output depth, as
-  FULLY_CONNECTED / CONV_2D do, is not covered -- issue #185); and a tensor with data is not planned into the
+  the model in `.sdram.ai` (a constant read by another tensor's dims is the
+  operator rules', issue #185, next item); and a tensor with data is not planned into the
   arena, so a graph input or an operator output with data would have been
   written into the model there.  The sparsity table is not read (TFLM micro
   reads a constant dense, so a sparse one is short and refused).  TFLM's
@@ -520,6 +520,30 @@ is no built-in model) and after `nn model unload`.
   verdict (all 1,320 of their constants are exact).  Cost: +400 B of Flash on `build/f746-tflm` (`.text`
   542,240 -> 542,544 B, `.rodata` +80 B; `shell.bin` 617,668 -> 618,068 B); the
   `null` tree is byte-identical.
+- [!] **The walk checks the operators that read a constant by another tensor's
+  dims** (issue #185): every operator's `opcode_index` must name an entry of the
+  operator-code vector (TFLM compares it only inside `AllocateTensors()`, so it
+  was `NN_MODEL_ERR_ARENA` on the board and a PASS in `verify_tflite`), and a
+  CONV_2D / DEPTHWISE_CONV_2D / FULLY_CONNECTED must have tensors that fit
+  together -- ranks, `filter[0]` (CONV_2D) / `filter[3]` (DEPTHWISE_CONV_2D) /
+  `weights[0]` (FULLY_CONNECTED) equal to the output's channels, a depth
+  multiplier of at least 1 with input channels x multiplier == filter channels,
+  FULLY_CONNECTED's output rank 2..4 and input element count, and a bias of
+  exactly the channel count and of the type the kernel reads (INT32 under int8,
+  FLOAT32 under float32, INT64, or INT32 for CONV_2D, under int16) -- all
+  `NN_MODEL_ERR_FORMAT` (-7).  The CMSIS-NN int8 kernels read the filter /
+  weights and the bias by the OUTPUT's channels and their `Prepare()` compares
+  none of it (CMSIS-NN CONV_2D's bias check is dead code: it fetches the bias
+  as output 2, always null; the reference kernels' `TFLITE_DCHECK`s are
+  compiled out by `NDEBUG`), so a constant exactly its own shape's bytes was
+  still read past the model in `.sdram.ai`.  The other operators of `extended`
+  have empty rules in this step (ADD / SUB / MUL, PAD, STRIDED_SLICE,
+  TRANSPOSE, RESIZE_* and CONCATENATION follow in the second step of the
+  issue).  TFLM's person_detect and the 44 models found that pass the verifier
+  keep their verdict.  Cost: +576 B of Flash on `build/f746-tflm` (`.text`
+  542,544 -> 543,112 B, `.rodata` unchanged; `shell.bin` 618,004 -> 618,580 B; the
+  rules' helpers are out of line, the header's one exception to forced inline);
+  the `null` tree is byte-identical.
 - `stedgeai_reloc` is the same: it starts empty, and `builtin` used to mean
   "unload" there before #131 (use `nn model unload`).
 - `stedgeai_reloc` refuses the same dimension with the same `-13` (issue
@@ -955,12 +979,14 @@ firmware's on-board verifier (`NN_TFLM_VERIFY=1`) and grove-vision-ai-v2 use --
 depth 16, 4,096 table visits, `nn_tflm_verify_model_buffer()` in
 `svc/nn/tflm/nn_tflm_model_check.h` (issue #175; a model the board would refuse
 as malformed is refused here first) -- the staging capacity (512 KB), the I/O check the backend runs before planning (issue
-#175, #178, #180, #181, #183: `svc/nn/tflm/nn_tflm_model_check.h` compiled in -- a missing,
+#175, #178, #180, #181, #183, #185: `svc/nn/tflm/nn_tflm_model_check.h` compiled in -- a missing,
 too long (> 64) or out-of-range I/O or operator list, a subgraph without
 tensors, quantization vectors too long or inconsistent, a buffer index past the
 buffer vector, an offline plan that does not match the graph, no
 operator-code vector, a tensor type without a size, a constant whose data is not
-exactly its shape's bytes, or data on a tensor the graph writes, is
+exactly its shape's bytes, data on a tensor the graph writes, an operator code
+index past the code vector, or a CONV_2D / DEPTHWISE_CONV_2D / FULLY_CONNECTED
+whose tensors do not fit together (#185), is
 `NN_MODEL_ERR_FORMAT`, a tensor above rank 6 (an I/O tensor above
 4) `NN_MODEL_ERR_TENSOR`, an I/O dimension outside 0..65535 `NN_MODEL_ERR_DIMS`), and the operators the firmware registers -- read from
 `svc/nn/tflm/nn_tflm_ops.h` under the `extended` profile, the same list

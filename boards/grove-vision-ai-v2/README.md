@@ -2500,10 +2500,37 @@ The fourth row is not a rollback because there is nothing to roll back to: the
 copy has already destroyed the previous plugin.  The new model stays open with no
 decoder -- `nn run` reports its raw tensors and `nn stream start` refuses -- the
 shared command says `the new model is open, but it has no decoder`, and `nn info`
-shows the container with `not loaded`.  The previous model is reopened from the
+shows the container with `validated, not loaded`.  The previous model is reopened from the
 same bytes it was opened from; no `blob write` can have moved them, because the
 lease never dropped.  Nothing the resolution parses is the adapter's until the
 load commits, so a refusal leaves `nn info` describing exactly what it did before.
+
+**`nn info`'s plugin lines are the shared ones** (`svc/plugin/plugin_claims.c`,
+issue #174, as on wio-lite-ai and f746g-disco).  The load resolves a container's
+claims -- its manifest and where it came from -- into a copy of its own; the
+shared order's commit makes them the open model's, and its forget clears them,
+each in one short interrupt-masked copy.  `nn info` copies the claims, the
+order's transition counter and the loader's state in one masked section and
+prints afterwards, so it asks no gate: a bench or a `nn run` holding the gate no
+longer hides the lines (until #174 they read `busy (another nn command)`), and
+only a load or an unload between its steps answers
+`plugin  : (a model load is in progress -- ask again)`.  The other answers:
+
+```
+plugin  : (none) -- reservation 131072 B at 0x341e0000
+plugin  : (none in this container) -- reservation 131072 B at 0x341e0000
+  from  : slot <n>, blob '<name>'
+plugin  : <name> (build <id>, crc <digest>), running
+  from  : slot <n>, blob '<name>'
+  image : <file> B file / <mem> B mem (code <c>, data <d>, bss <b>), link 0x<addr>
+  stack : ...
+```
+
+`running` is the loader's own state; `validated, not loaded` is a container whose
+plugin was refused.  A raw `--addr` window is always a bare model on this board,
+so it never has claims (`(none)`).  The `where` and `code ... data ... bss` lines
+this board printed until #174 are folded into the `image` line and the `(none)`
+line's reservation.
 
 **A load or unload is refused while `nn thresh` is inside the plugin** (issue
 #122).  `nn thresh` takes no gate -- a stream holds that, and a threshold is what

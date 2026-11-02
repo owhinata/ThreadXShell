@@ -421,6 +421,9 @@ set(SHELL_SOURCES
     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_load.c"
     # `nn info`'s plugin stack lines, shared with wio (issue #111).
     "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_info.c"
+    # ...and the open model's container claims around them, shared with wio
+    # and f746 (issue #174).  ITCM: `nn info` is not the load / unload path.
+    "${CMAKE_SOURCE_DIR}/svc/plugin/plugin_claims.c"
     # The loader and its MPU verdict (issue #103).  plugin_mpu.c is a pure
     # function so that the refusals -- a reservation that is Device memory, or
     # covered by two regions, or execute-never -- are reachable from a host

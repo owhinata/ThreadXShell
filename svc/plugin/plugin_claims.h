@@ -7,15 +7,16 @@
  * @brief   What the OPEN model's container claimed, and the `nn info` lines
  *          that say so, for a board whose load goes through the shared order
  *          (svc/nn/nn_core_model.c) -- wio-lite-ai since issue #108,
- *          f746g-disco since #159.
+ *          f746g-disco since #159, grove-vision-ai-v2 since #174.
  *
  * [!] ONE COPY.  wio-lite-ai wrote the store, the snapshot and the lines in its
  * adapter (issues #108, #110); f746g-disco's Step 4a wrote the same three
  * again.  None of it is hardware: the store is a board-owned object passed in,
  * the critical section around every read and write is the board's, and what a
  * board adds is its own words for where the container came from (a blob slot,
- * a file on the card).  grove-vision-ai-v2 keeps its own lines: it reads its
- * claims under its NN gate, not through the shared order's counter.
+ * a file on the card).  grove-vision-ai-v2 kept its own lines, read under its NN
+ * gate, until issue #174; it now settles this store from the same commit /
+ * forget hooks and reads it through the same counter.
  *
  * [!] THE CLAIMS FOLLOW THE MODEL THAT IS ACTUALLY OPEN.  They are settled only
  * after the backend has adopted (or refused) the model -- the shared order's
@@ -60,8 +61,8 @@ extern "C" {
 struct plugin_claims {
 	struct plugin_view view;
 	/** The board's own words for where these bytes came from, formatted when
-	 *  the load read them: wio-lite-ai "slot N, blob 'name'", f746g-disco
-	 *  "<path>, N B, file crc32 X".  NUL-terminated. */
+	 *  the load read them: wio-lite-ai and grove-vision-ai-v2 "slot N, blob
+	 *  'name'", f746g-disco "<path>, N B, file crc32 X".  NUL-terminated. */
 	char from[PLUGIN_CLAIMS_FROM_MAX];
 };
 

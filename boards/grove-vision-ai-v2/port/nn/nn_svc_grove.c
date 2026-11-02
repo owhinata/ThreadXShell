@@ -38,6 +38,7 @@
 #include "log.h"
 
 #include "blob.h"
+#include "plugin_claims.h"   /* the open model's claims and `nn info` lines (#174) */
 #include "camera.h"
 #include "cam_dp.h"
 #include "fmt.h"
@@ -595,25 +596,48 @@ static const struct plugin_base_api nn_plugin_base = {
 };
 
 /*
- * The manifest of the container the open model came from, or zeroed.
+ * What the container of the OPEN model claimed, or nothing.
+ *
+ * The store, its snapshot rule and the `nn info` lines are
+ * svc/plugin/plugin_claims.h's, as on wio-lite-ai and f746g-disco (issue #174:
+ * this board used to keep its own copy and read it under the NN gate, which
+ * answered "busy" whenever a bench or a `nn run` held the gate).  Settled only by
+ * the shared order's commit / forget -- once the backend adopted (or refused)
+ * the model, while the transition counter is odd -- so `nn info`, which reads
+ * the counter in the same masked section as these, says "a model load is in
+ * progress" rather than pairing one model with another's claims.
  *
  * [!] PLAIN DATA, AND NOTHING HERE IS EVER CALLED.  struct plugin_view carries
- * integer offsets, not function pointers -- that is what makes "Step 1a does not
- * execute a plugin" a property of the types rather than a rule someone keeps.
+ * integer offsets, not function pointers.
  */
-static struct plugin_view nn_container;
-static int                nn_has_container;
+/* "slot 4294967295, blob '" + the longest name + "'" must survive whole.  Only
+ * a blob can be a container here: a raw `--addr` window is always a bare model
+ * (nn_life_fetch()), so it never has claims and no "from" is written for it. */
+_Static_assert(23u + BLOB_NAME_MAX + 1u < PLUGIN_CLAIMS_FROM_MAX,
+               "a container's slot and blob name would be cut on `nn info`");
+
+static struct plugin_claims_store nn_claims;
 
 /*
- * [!] WHERE A LOAD PARSES INTO, AND NOT THE ADAPTER'S OWN STATE (issue #122).
- * A load over an open model may end with the previous model reopened, and then
- * nothing about it -- its manifest included, which `nn info` prints -- may have
- * moved.  So a resolution writes here and the adapter copies it across only
- * when the load commits the new model.  Static rather than a local: the load
- * calls a plugin's entry() on this same stack, and a view is a few hundred
- * bytes that entry() would otherwise be charged for.
+ * [!] WHERE A LOAD PARSES INTO, AND NOT THE STORE (issue #122).  A load over an
+ * open model may end with the previous model reopened, and then nothing about
+ * it -- its claims included, which `nn info` prints -- may have moved.  So a
+ * resolution writes here and the commit copies it across only when the load
+ * commits the new model.  Static rather than a local: the load calls a
+ * plugin's entry() on this same stack, and the claims are a few hundred bytes
+ * that entry() would otherwise be charged for.
  */
-static struct plugin_view nn_container_next;
+static struct plugin_claims nn_claims_next;
+
+/* Settle the store in this board's own short masked section: the shared order
+ * calls commit / forget outside one, and nothing but the copy happens inside. */
+static void nn_claims_set(const struct plugin_claims *c)
+{
+	unsigned posture = nn_core_cs_enter();
+
+	plugin_claims_set(&nn_claims, c);
+	nn_core_cs_exit(posture);
+}
 
 /** What a resolution found.  Nothing in here is the adapter's until committed. */
 struct nn_resolved {
@@ -707,7 +731,8 @@ nn_resolve_blob(struct nn_op_result *res, uint32_t token, const char *name,
 		enum plugin_result pr;
 
 		pr = plugin_parse((const void *)(uintptr_t)(NOR_XIP_BASE + payload),
-		                  info.length, &nn_plugin_policy, &nn_container_next);
+		                  info.length, &nn_plugin_policy,
+		                  &nn_claims_next.view);
 		if (pr != PLUGIN_OK) {
 			nn_detail_set("slot %u ('%s') is a container this firmware "
 			              "refuses: %s", slot, name,
@@ -717,8 +742,13 @@ nn_resolve_blob(struct nn_op_result *res, uint32_t token, const char *name,
 		/* The MODEL section, not the container: the backend parses a
 		 * flatbuffer and the rest of the payload is not one. */
 		out->src  = NOR_XIP_BASE + payload;
-		out->addr = out->src + nn_container_next.model_off;
-		out->len  = nn_container_next.model_len;
+		out->addr = out->src + nn_claims_next.view.model_off;
+		out->len  = nn_claims_next.view.model_len;
+		/* This board's words for where the claims came from, written with
+		 * them: a load landing between `nn info`'s model line and its
+		 * plugin line then shows up as a mismatch. */
+		nn_detail_to(nn_claims_next.from, sizeof nn_claims_next.from,
+		             "slot %u, blob '%s'", slot, name);
 		return 0;
 	}
 
@@ -942,7 +972,7 @@ static int nn_life_plugin_start(struct nn_core_model_job *j)
 	const struct nn_grove_job *g = j->board;
 	enum plugin_run_result pr;
 
-	pr = plugin_run_load(&nn_container_next,
+	pr = plugin_run_load(&nn_claims_next.view,
 	                     (const void *)(uintptr_t)g->r.src,
 	                     npu_hw_flash_lease(), &nn_plugin_base);
 	if (pr == PLUGIN_RUN_OK || pr == PLUGIN_RUN_NO_PLUGIN)
@@ -952,8 +982,8 @@ static int nn_life_plugin_start(struct nn_core_model_job *j)
 	return NN_SVC_ERR_ARG;
 }
 
-/* Unpublish only.  The manifest (nn_has_container) is identity: forget() and
- * commit() own it, as before the order was shared (issue #131). */
+/* Unpublish only.  The claims are identity: forget() and commit() own them, as
+ * before the order was shared (issue #131). */
 static void nn_life_plugin_unload(void)
 {
 	plugin_run_unload();
@@ -973,24 +1003,22 @@ static void nn_life_invalidate(void)
 
 static void nn_life_forget(void)
 {
-	nn_open_done     = 0u;
-	nn_has_container = 0;
-	nn_model_slot    = -1;
+	nn_open_done  = 0u;
+	nn_model_slot = -1;
+	nn_claims_set(NULL);
 }
 
 /* [!] COMMITTED EVEN WHEN THE PLUGIN WAS REFUSED (issue #122 D6): the new model
  * IS open, so it is what `nn info` names and what the lease is now held for.
- * The manifest stays too, and `nn info` reads it as "not loaded" -- which is
- * the fact. */
+ * The claims stay too, and `nn info` reads them as "validated, not loaded" --
+ * which is the fact.  A bare model has none. */
 static void nn_life_commit(struct nn_core_model_job *j)
 {
 	const struct nn_grove_job *g = j->board;
 
-	nn_open_done     = 1u;
-	nn_model_slot    = g->r.slot;
-	nn_has_container = (g->r.src != 0u);
-	if (nn_has_container)
-		nn_container = nn_container_next;
+	nn_open_done  = 1u;
+	nn_model_slot = g->r.slot;
+	nn_claims_set((g->r.src != 0u) ? &nn_claims_next : NULL);
 	/* The name is not copied here: the backend took it with the model
 	 * (nn_life_swap()), and nn_model_name() is its one copy. */
 }
@@ -2365,106 +2393,38 @@ int nn_svc_thresh_set(unsigned milli)
 extern uint8_t __plugin_start[], __plugin_end[];
 
 /*
- * What this board adds: where a loaded plugin would live, and whether one is
- * there.
+ * What this board adds: the open model's container claims, where a plugin
+ * would live, and whether one is running -- svc/plugin/plugin_claims.c's lines,
+ * as on wio-lite-ai and f746g-disco (issue #174).
  *
- * [!] NOTHING IS HELD WHILE THIS PRINTS.  The reservation's bounds are linker
- * constants and need no claim at all; the manifest is SNAPSHOT under the claim,
- * released, and only then written.  A console line takes as long as a UART
- * takes, and holding the inference gate across one would stall the camera
- * producer for exactly that long.
- *
- * [!] AND THE SNAPSHOT IS NOT OPTIONAL SINCE A LOAD CAN REPLACE AN OPEN MODEL
- * (issue #122).  Before that, the manifest only changed while nothing was open;
- * now a load on another console rewrites it under an open model, and a line
- * blocked on the UART would print half of each.  The rule is nn_svc_info()'s:
- * take the gate, or -- when a STREAM holds it, and so no load can run -- copy
- * in the same critical section that saw the stream; an operation holding it may
- * be rewriting exactly this, so that is BUSY.
+ * [!] NOTHING IS HELD WHILE THIS PRINTS.  The claims, the shared order's
+ * transition counter and the loader's state are copied out in ONE masked
+ * section and written afterwards: a console line takes as long as a UART takes.
+ * No gate is asked, so a bench or a `nn run` holding it does not hide the
+ * claims; only a load or an unload between its steps does ("a model load is in
+ * progress").
  */
 void nn_svc_info_extra(nn_svc_write_fn write, void *ctx)
 {
-	uint32_t base = (uint32_t)(uintptr_t)__plugin_start;
-	uint32_t size = (uint32_t)(__plugin_end - __plugin_start);
-	struct plugin_view view;
-	int has = 0, active = 0;
-	uint8_t owner = (uint8_t)NN_OWNER_NONE;
-	TX_INTERRUPT_SAVE_AREA
+	struct plugin_claims c;
+	enum plugin_claims_seen seen;
+	unsigned posture;
+	int running;
 
 	if (write == NULL)
 		return;
-
-	if (nn_try_acquire()) {
-		has = nn_has_container;
-		if (has)
-			view = nn_container;
-		active = plugin_run_active();
-		nn_release();
-	} else {
-		TX_DISABLE
-		owner = nn_owner;
-		if (owner == (uint8_t)NN_OWNER_STREAM) {
-			has = nn_has_container;
-			if (has)
-				view = nn_container;
-			active = plugin_run_active();
-		}
-		TX_RESTORE
-		if (owner != (uint8_t)NN_OWNER_STREAM) {
-			(void)nn_info_line(write, ctx,
-			                   "plugin  : busy (another nn command) -- "
-			                   "reservation %lu B at 0x%08lx\r\n",
-			                   (unsigned long)size, (unsigned long)base);
-			return;
-		}
-	}
-
-	if (!has) {
-		/* Says so rather than leaving the line out: a missing line reads as a
-		 * board with no plugin support at all, which is a different and wrong
-		 * fact. */
-		(void)nn_info_line(write, ctx,
-		                   "plugin  : (none) -- reservation %lu B at 0x%08lx\r\n",
-		                   (unsigned long)size, (unsigned long)base);
-		return;
-	}
-
-	/*
-	 * [!] THE LAST FIELD IS THE ONE TO READ.  The rest come from a validated
-	 * manifest, which says what the container CLAIMS; "loaded" is the only word
-	 * here that means anything branched into the image.  A container can be
-	 * parsed and reported and still not be running -- a load that failed after
-	 * the parse, or one that carries no plugin at all.
-	 *
-	 * And the CRC is the identity that moves.  The build id is a source
-	 * revision stamped at configure time, so editing a plugin and rebuilding
-	 * does not change it, and the image size often does not change either.
-	 */
-	if (nn_info_line(write, ctx, "plugin  : %s (build %s, crc %08lx), %s\r\n",
-	                 view.name, view.build_id,
-	                 (unsigned long)view.digest,
-	                 active ? "loaded" : "not loaded") < 0)
-		return;
-	if (nn_info_line(write, ctx, "  image : %lu B file / %lu B mem, link 0x%08lx\r\n",
-	                 (unsigned long)view.file_size,
-	                 (unsigned long)view.mem_size,
-	                 (unsigned long)view.link_addr) < 0)
-		return;
-	if (nn_info_line(write, ctx, "  where : %lu B reserved at 0x%08lx\r\n",
-	                 (unsigned long)size, (unsigned long)base) < 0)
-		return;
-	if (nn_info_line(write, ctx,
-	                 "  code %lu B  data %lu B  bss %lu B\r\n",
-	                 (unsigned long)view.code_len,
-	                 (unsigned long)view.data_seg_len,
-	                 (unsigned long)view.bss_len) < 0)
-		return;
-	/* What each slot needs at this firmware's c, and what the manifest
-	 * declared (issue #111).  See svc/plugin/plugin_info.h.  A container with no
-	 * plugin section has no stack to describe. */
-	if (view.has_plugin)
-		(void)plugin_info_stack(write, ctx, &view,
-		                        nn_plugin_policy.veneer_cost);
+	/* [!] ONE SECTION FOR THE CLAIMS AND THE LOADER'S STATE (issue #110's
+	 * rule): asked later, a load landing between would print one container's
+	 * manifest beside another's runtime state.  plugin_run_active() reads one
+	 * word. */
+	posture = nn_core_cs_enter();
+	seen = plugin_claims_get(&nn_claims, nn_model_life.seq, &c);
+	running = plugin_run_active();
+	nn_core_cs_exit(posture);
+	plugin_claims_info(write, ctx, seen, &c, running,
+	                   (uint32_t)(uintptr_t)__plugin_start,
+	                   (uint32_t)(__plugin_end - __plugin_start),
+	                   nn_plugin_policy.veneer_cost);
 }
 
 /* The active decoder's own report is no longer a call the shared command makes

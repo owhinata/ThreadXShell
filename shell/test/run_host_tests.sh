@@ -337,7 +337,7 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
 
 # issue #159 -- the open model's container claims and the `nn info` lines around
 # those stack lines (svc/plugin/plugin_claims), shared by wio-lite-ai and
-# f746g-disco: an odd transition counter is "a load is in progress" whatever is
+# f746g-disco, and grove-vision-ai-v2 since issue #174: an odd transition counter is "a load is in progress" whatever is
 # stored, and each state's lines, with the board's own "from" words passed
 # through -- including for a model-only container, whose from-line is where
 # f746g-disco repeats the CRC its load printed.
@@ -346,6 +346,18 @@ gcc $CFLAGS -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
     "$svc/plugin/plugin_info.c" "$svc/fmt.c" \
     $LDFLAGS -o "$out/test_plugin_claims"
 "$out/test_plugin_claims"
+
+# issue #174 -- the same claims under the shared load order (svc/nn/nn_core_model.c
+# + nn_swap.c): after every ending a load or an unload can have (loaded, the
+# previous model restored, nothing left, the plugin refused, bare, the lookup or
+# the lease refused), the claims are the ACTUALLY open model's, and a reader that
+# copies the counter and the store in one critical section at any hook sees
+# either "a load is in progress" or the open model's claims.  A refused swap and
+# a refused plugin cannot be typed.
+gcc $CFLAGS -I "$inc" -I "$svc" -I "$svc/nn" -I "$svc/plugin" -I "$svc/camera" \
+    "$here/test_plugin_claims_order.c" "$svc/nn/nn_core_model.c" "$svc/nn/nn_swap.c" \
+    $LDFLAGS -o "$out/test_plugin_claims_order"
+"$out/test_plugin_claims_order"
 
 # issue #103 -- is the plugin reservation executable?  (svc/plugin/plugin_mpu.c, the
 # Armv8-M verdict grove-vision-ai-v2 links)

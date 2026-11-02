@@ -420,7 +420,7 @@ relative to `svc/`.
 | `plugin/plugin_mpu` | Armv8-M MPU verdict: is the plugin reservation executable (pure function). |
 | `plugin/plugin_mpu_v7m` | The same question for an Armv7-M PMSA, answered by its own rules. |
 | `plugin/plugin_info` | The plugin stack lines of `nn info`. |
-| `plugin/plugin_claims` | The open model's container claims (a board-owned store, read in the board's critical section) and the `nn info` plugin lines around the stack lines (wio-lite-ai, f746g-disco). |
+| `plugin/plugin_claims` | The open model's container claims (a board-owned store, read in the board's critical section) and the `nn info` plugin lines around the stack lines (all three boards; grove-vision-ai-v2 since issue #174). Host-tested (`shell/test/test_plugin_claims.c`, and `test_plugin_claims_order.c` under the shared load order). |
 | `plugin/plugin_lease_api.h` | The plugin lease's API (one lock into the plugin); the board implements it. |
 | `plugin/plugin_lease_miss` | What a refused no-wait lease acquire counts, over state the caller owns. |
 | `plugin/plugin_paint_budget` | What one plugin `draw()` may spend, and the one place it is charged. |

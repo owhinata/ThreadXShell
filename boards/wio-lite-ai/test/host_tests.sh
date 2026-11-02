@@ -359,3 +359,23 @@ for sd in 0 1; do
         $LDFLAGS -o "$out/test_camera_table_wio"
     "$out/test_camera_table_wio"
 done
+
+# issue #175 -- the model I/O check this board's host gate (verify_tflite) compiles from
+# svc/nn/tflm/nn_tflm_model_check.h, the function the backend runs before it plans a
+# model: generated files wrong in exactly one way must be refused as the board would
+# refuse them (an I/O dimension outside 0..65535 -> NN_MODEL_ERR_DIMS, a missing or
+# out-of-range I/O list -> NN_MODEL_ERR_FORMAT), and the 65535 control must pass the
+# walk.  The gate is the one a CONFIGURED tree builds (`verify-model`, host c++ against the
+# tree's TFLM), so it needs that tree: build/wio-lite-ai, or
+# WIO_BUILD_DIR to use another.  No tree, or no gate rule in it: a loud SKIP.
+io_build="${WIO_BUILD_DIR:-$HOST_TEST_REPO/build/wio-lite-ai}"
+if [ ! -f "$io_build/build.ninja" ]; then
+    echo "run_model_io_gate_tests: SKIPPED -- no configured build tree at" \
+         "$io_build (set WIO_BUILD_DIR to use another)" >&2
+elif ! ninja -C "$io_build" -t targets all 2>/dev/null | grep -q "^verify_tflite:"; then
+    echo "run_model_io_gate_tests: SKIPPED -- $io_build has no verify_tflite rule" \
+         "(a tflm backend and a host C++ compiler are needed)" >&2
+else
+    python3 "$HOST_TEST_REPO/cmake/fixtures/run_model_io_gate_tests.py" \
+        --build-dir "$io_build" --gate verify_tflite --style tflite
+fi

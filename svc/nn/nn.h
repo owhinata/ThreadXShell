@@ -128,6 +128,19 @@ enum nn_dtype {
 #define NN_MODEL_ERR_IDENT    (-11) /**< no TFL3 file identifier at offset 4         */
 #define NN_MODEL_ERR_PAYLOAD  (-12) /**< Ethos-U payload is not one final command stream */
 
+/*
+ * Both interpreting backends (tflm, Ethos-U; issue #175): an input or output tensor
+ * of the model has a dimension struct nn_tensor cannot hold -- below 0 or above
+ * NN_TENSOR_DIM_MAX.  The descriptor's dims are 16-bit, and a wider one copied into
+ * them would be published TRUNCATED: `nn info` would print, and every consumer of
+ * the descriptor would size its work by, a shape the model does not have.  So the
+ * model is refused at load, before AllocateTensors(), by svc/nn/tflm/
+ * nn_tflm_model_check.h, which the host gates run too.  Its own code, not _TENSOR
+ * (rank / buffer) or _FORMAT (the bytes do not hold together): this model is well
+ * formed and this API cannot describe it.
+ */
+#define NN_MODEL_ERR_DIMS     (-13) /**< an I/O dimension outside 0..NN_TENSOR_DIM_MAX */
+
 /**
  * The alignment a model handed to nn_model_reload() must start on (issue #108,
  * f746g-disco since issue #159).
@@ -161,6 +174,34 @@ struct nn_tensor {
 	float    scale;                /**< quant scale (0 => not quantized)      */
 	int32_t  zero_point;           /**< quant zero point                      */
 };
+
+/** The largest dimension a descriptor holds: the dims field's own range. */
+#define NN_TENSOR_DIM_MAX  0xFFFFu
+
+/* The bound IS the field's width (issue #175): widen dims and this fails until the
+ * bound moves with it, so the check below and the copy it protects cannot disagree. */
+#ifdef __cplusplus
+static_assert(sizeof(((struct nn_tensor *)0)->dims[0]) == 2u && NN_TENSOR_DIM_MAX == 0xFFFFu,
+              "NN_TENSOR_DIM_MAX must be the range of struct nn_tensor::dims");
+#else
+_Static_assert(sizeof(((struct nn_tensor *)0)->dims[0]) == 2u && NN_TENSOR_DIM_MAX == 0xFFFFu,
+               "NN_TENSOR_DIM_MAX must be the range of struct nn_tensor::dims");
+#endif
+
+/**
+ * Does one int32 dimension fit a descriptor: 0..NN_TENSOR_DIM_MAX?  Pure and
+ * state-free -- the one statement of the rule NN_MODEL_ERR_DIMS refuses on
+ * (issue #175), applied to the model before it is planned
+ * (svc/nn/tflm/nn_tflm_model_check.h, which the host gates run too) and to the
+ * planned tensors before they are published.  Per element, so a caller walks a
+ * flatbuffer vector or a TfLiteIntArray (whose elements are `int`, not int32_t on
+ * every target) without reinterpreting either.  The values only: the rank is
+ * NN_MODEL_ERR_TENSOR's rule, checked there.
+ */
+static inline int nn_tensor_dim_fits(int32_t d)
+{
+	return d >= 0 && d <= (int32_t)NN_TENSOR_DIM_MAX;
+}
 
 /** Opaque model handle (defined in svc/nn/nn_dispatch_state.h, for nn.c only). */
 struct nn_model;

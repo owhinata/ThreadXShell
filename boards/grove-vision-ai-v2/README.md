@@ -2439,10 +2439,20 @@ hold (`svc/nn/nn_bench.c`), and every input is filled with `0x5A`, not only inpu
 classifier (cifar10) min 91,000 / avg 91,200 / max 92,000 us, at the 1 ms
 resolution of the tick the bench counts in.
 
-**Known hole.**  `svc/nn/nn.h`'s tensor dimensions are 16-bit, and the descriptor
-copy truncates a larger one silently -- on all three boards; new here with this
-change.  The firmware does not refuse it yet (the check would cost ITCM this board
-does not have until #170); `verify_vela_model` refuses it on the host.
+**The 16-bit dimension hole is closed (issue #175).**  `svc/nn/nn.h`'s tensor
+dimensions are 16-bit, and the descriptor copy used to truncate a larger one
+silently on all three boards; `verify_vela_model` alone refused it, on the host.
+Now the backend refuses a model whose input or output has a dimension outside
+0..65535 as `NN_MODEL_ERR_DIMS` (-13; `nn model load` prints the shared sentence,
+through `nn_ethosu_strerror()`'s fall-through to `nn_model_strerror()`), on the
+model after the payload walk and before the resolver
+(`svc/nn/tflm/nn_tflm_model_check.h`, which the tflm backend and both
+`verify_tflite`s also run), with the same rule again on the planned tensors as a
+backstop.  `verify_vela_model` runs the same function instead of its own loop,
+right after the schema version.  Cost: ITCM 0 B (the check is forced inline into
+`build_interp()`, which is in `.text_cold`), `.text_cold` +360 B, `.rodata` +64 B.
+`test/host_tests.sh` runs the gate on generated files wrong in exactly one way
+(`cmake/fixtures/run_model_io_gate_tests.py`).
 
 ### The model is a blob, opened by name (#93, #49 Step 4a)
 

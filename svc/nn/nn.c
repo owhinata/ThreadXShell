@@ -289,6 +289,9 @@ int nn_model_release(void)
 _Static_assert(NN_MODEL_ALIGN == 16u,
                "nn_model_strerror() spells NN_MODEL_ALIGN out; keep them together");
 
+_Static_assert(NN_TENSOR_DIM_MAX == 65535u,
+               "nn_model_strerror() spells NN_TENSOR_DIM_MAX out; keep them together");
+
 const char *nn_model_strerror(int rc)
 {
 	switch (rc) {
@@ -305,6 +308,9 @@ const char *nn_model_strerror(int rc)
 	                                                    "handed out");
 	case NN_MODEL_ERR_ALIGN:   return NN_SVC_DETAIL_LIT("model does not start on a 16-byte boundary");
 	/* ^ the sentence names the number; nn.h owns it -- see the assert above */
+	case NN_MODEL_ERR_DIMS:    return NN_SVC_DETAIL_LIT("an input/output tensor dimension does not "
+	                                                    "fit 16 bits (0..65535)");
+	/* ^ names NN_TENSOR_DIM_MAX; nn.h ties it to the dims field -- see the assert above */
 	case NN_ERR_ARG:           return NN_SVC_DETAIL_LIT("bad argument");
 	case NN_ERR_NOSUP:         return NN_SVC_DETAIL_LIT("this backend cannot load a model at run time");
 	case NN_ERR_STATE:         return NN_SVC_DETAIL_LIT("no model session is open");

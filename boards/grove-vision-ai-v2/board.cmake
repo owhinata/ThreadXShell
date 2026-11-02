@@ -1523,6 +1523,10 @@ if(HOST_CXX)
                 # Listed so that changing a limit rebuilds the host gate: the
                 # whole point of sharing it is that the two cannot disagree.
                 "${CMAKE_SOURCE_DIR}/svc/nn/ethosu/npu_verify.h"
+                # The I/O dims rule both backends apply before planning (issue
+                # #175) and the predicate it states.
+                "${CMAKE_SOURCE_DIR}/svc/nn/tflm/nn_tflm_model_check.h"
+                "${CMAKE_SOURCE_DIR}/svc/nn/nn.h"
         COMMENT "host c++ -> verify_vela_model (checks a model before it is flashed)"
         VERBATIM)
 

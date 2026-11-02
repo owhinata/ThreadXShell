@@ -69,6 +69,12 @@
  * firmware refuses with NN_MODEL_ERR_SHAPE / NN_MODEL_ERR_TENSOR. */
 #include "nn_ethosu_io.h"
 
+/* And the I/O dims rule both backends apply to the model before planning it
+ * (svc/nn/tflm/nn_tflm_model_check.h, issue #175): an I/O list that is missing or
+ * names a tensor that does not exist (NN_MODEL_ERR_FORMAT on the board), or a
+ * dimension outside 0..65535 (NN_MODEL_ERR_DIMS). */
+#include "nn_tflm_model_check.h"
+
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -291,13 +297,9 @@ int ethosu_invoke_v3(struct ethosu_driver *drv, const void *cms, size_t cms_byte
  * The backend's I/O rule, on the interpreter planned against the board's arena:
  * the same functions the firmware calls after AllocateTensors() (nn_ethosu_io.h),
  * so a model this passes is not refused on the board as NN_MODEL_ERR_SHAPE or
- * NN_MODEL_ERR_TENSOR after the erase and the transfer.
- *
- * [!] PLUS ONE CHECK THE FIRMWARE DOES NOT MAKE YET: a dimension above 65535.
- * nn_tensor's dims are 16-bit (svc/nn/nn.h) and the descriptor copy truncates a
- * larger one silently on every board.  Refusing it on the board as well is a
- * known follow-up (it needs ITCM room on grove-vision-ai-v2); here it costs
- * nothing, so the host refuses it now.
+ * NN_MODEL_ERR_TENSOR after the erase and the transfer -- and the backend's
+ * backstop on the planned dims (nn_tflm_tensor_dims_fit(), NN_MODEL_ERR_DIMS),
+ * behind the check of the model itself that main() ran before planning.
  */
 static void check_planned_io(tflite::MicroInterpreter &interp)
 {
@@ -321,14 +323,10 @@ static void check_planned_io(tflite::MicroInterpreter &interp)
 			     is_in ? "input" : "output", k, NN_MAX_DIMS);
 			continue;
 		}
-		for (int d = 0; d < t->dims->size; d++) {
-			if (t->dims->data[d] < 0 || t->dims->data[d] > 65535) {
-				fail("%s %zu dimension %d is %d; a tensor descriptor holds "
-				     "16 bits, so the board would report it truncated\n",
-				     is_in ? "input" : "output", k, d, t->dims->data[d]);
-				break;
-			}
-		}
+		if (!nn_tflm_tensor_dims_fit(t))
+			fail("%s %zu has a planned dimension outside 0..65535 "
+			     "(NN_MODEL_ERR_DIMS on the board)\n",
+			     is_in ? "input" : "output", k);
 	}
 	if (g_fail == before)
 		printf("  ok     %zu input(s), %zu output(s), every one describable "
@@ -396,6 +394,30 @@ int main(int argc, char **argv)
 	printf("  ok     flatbuffer verifies within the firmware's limits "
 	       "(depth %u, %u tables), schema version %d\n",
 	       NPU_VERIFY_MAX_DEPTH, NPU_VERIFY_MAX_TABLES, TFLITE_SCHEMA_VERSION);
+
+	/* The firmware runs this after its payload walk and before its resolver; it
+	 * runs here first because everything below follows subgraph 0's I/O lists,
+	 * and this is the check that proves they index real tensors.  A model this
+	 * refuses is refused on the board too -- as NN_MODEL_ERR_PAYLOAD instead, if
+	 * its payload is also one the firmware refuses (that check comes first there). */
+	switch (nn_tflm_model_io_check(model)) {
+	case 0:
+		printf("  ok     every input/output dimension fits 0..65535 "
+		       "(the firmware's I/O dims rule)\n");
+		break;
+	case NN_MODEL_ERR_DIMS:
+		printf("  FAIL   an input/output tensor has a dimension outside 0..65535, "
+		       "which a tensor descriptor cannot hold (NN_MODEL_ERR_DIMS on the "
+		       "board)\n");
+		printf("RESULT   : REJECT\n");
+		return 1;
+	default:
+		printf("  FAIL   subgraph 0 has no tensors or no input/output list, or one "
+		       "names a tensor that does not exist (NN_MODEL_ERR_FORMAT on the "
+		       "board)\n");
+		printf("RESULT   : REJECT\n");
+		return 1;
+	}
 
 	/* Everything past here needs a subgraph, so a bad shape stops the run
 	 * rather than being reported alongside checks that could not be made. */

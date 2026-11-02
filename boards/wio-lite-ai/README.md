@@ -769,6 +769,18 @@ function pointer (`--slot 0`'s 16-op ResNet after BlazeFace froze the console).
 The cost is one memset of `nn_tflm_arena` (524,288 B, PSRAM) per load, the
 restore of a previous model included.
 
+[!] **A model whose input or output has a dimension outside 0..65535 is
+refused** (issue #175, `NN_MODEL_ERR_DIMS`, -13: `an input/output tensor
+dimension does not fit 16 bits (0..65535)`): `nn_tensor`'s dims are 16-bit and
+the descriptor used to be published truncated.  The backend checks the model's
+I/O shapes (`svc/nn/tflm/nn_tflm_model_check.h`) after the schema version and
+before anything is planned, with the I/O list indices bounds-checked first (a
+missing list or an index past the tensors is `NN_MODEL_ERR_FORMAT`) -- this board
+runs no on-board verifier, so that is the only thing between such an index and
+TFLM's own reads.  `verify_tflite` runs the same function, and
+`test/host_tests.sh` runs it on generated files wrong in exactly one way
+(against `build/wio-lite-ai` or `WIO_BUILD_DIR`; a loud SKIP without one).
+
 **[!] The order matters and is not an implementation detail.**  Loading the
 plugin first would destroy the previous one's state at the fixed reservation
 before knowing whether the model that needs it can be built, and a backend that

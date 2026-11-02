@@ -99,6 +99,10 @@ void nn_tflm_fill_tensor(struct nn_tensor *nt, const TfLiteTensor *tt)
 	nt->data  = tt->data.data;
 	nt->bytes = (uint32_t)tt->bytes;
 	nt->ndim  = (uint8_t)(nd <= NN_MAX_DIMS ? nd : NN_MAX_DIMS);
+	/* The narrowing is in range by proof, not by luck (issue #175): the backend
+	 * refused any I/O dimension outside 0..NN_TENSOR_DIM_MAX twice before calling
+	 * this -- on the model (nn_tflm_model_check.h, before planning) and on this
+	 * very tensor (nn_tflm_tensor_dims_fit(), with the rank check). */
 	for (int i = 0; i < NN_MAX_DIMS; i++)
 		nt->dims[i] = (i < nd) ? (uint16_t)tt->dims->data[i] : 1;
 	nt->dtype      = nn_tflm_map_dtype(tt->type);

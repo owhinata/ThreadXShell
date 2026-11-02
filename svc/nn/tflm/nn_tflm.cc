@@ -55,6 +55,7 @@
 #include "nn.h"
 #include "nn_backend.h"
 #include "nn_tflm_fit.h"     /* which slot a model range may be adopted from */
+#include "nn_tflm_model_check.h" /* the I/O dims rule, shared with the host gates */
 #include "nn_tflm_mem.h"     /* the board-placed arena, slots and capacity */
 #include "nn_tflm_ops.h"     /* the op list, shared with verify_tflite */
 #include "nn_tflm_state.h"   /* the board-defined state and facts */
@@ -127,6 +128,16 @@ int build_interp(const void *data, uint32_t len)
 	if (model->version() != TFLITE_SCHEMA_VERSION)
 		return NN_MODEL_ERR_VERSION;
 
+	/* The I/O a descriptor can describe, on the model and before anything is planned
+	 * or destroyed (issue #175, nn_tflm_model_check.h -- the host gate runs the same
+	 * function): FORMAT for an I/O list that is missing or indexes past the tensors,
+	 * DIMS for a dimension outside 0..65535. */
+	{
+		int io = nn_tflm_model_io_check(model);
+		if (io != 0)
+			return io;
+	}
+
 	nn_tflm_op_resolver *resolver = nn_tflm_get_resolver();
 	if (!resolver)
 		return NN_MODEL_ERR_OPS;
@@ -154,12 +165,18 @@ int build_interp(const void *data, uint32_t len)
 		return NN_MODEL_ERR_SHAPE;
 	}
 	/* Every tensor present, with a real buffer and a rank this API can describe.  Fail
-	 * here rather than let a caller's indexing walk off the end of nn_tensor::dims. */
+	 * here rather than let a caller's indexing walk off the end of nn_tensor::dims.
+	 * Then the dims rule again on the PLANNED tensors, the ones published below: the
+	 * backstop behind nn_tflm_model_io_check() above, with the same code (#175). */
 	for (size_t i = 0; i < n_in; i++) {
 		TfLiteTensor *t = s.interp->input(i);
 		if (!t || !t->data.data || !t->dims || t->dims->size > NN_MAX_DIMS) {
 			nn_tflm_destroy_interp();
 			return NN_MODEL_ERR_TENSOR;
+		}
+		if (!nn_tflm_tensor_dims_fit(t)) {
+			nn_tflm_destroy_interp();
+			return NN_MODEL_ERR_DIMS;
 		}
 	}
 	for (size_t i = 0; i < n_out; i++) {
@@ -167,6 +184,10 @@ int build_interp(const void *data, uint32_t len)
 		if (!t || !t->data.data || !t->dims || t->dims->size > NN_MAX_DIMS) {
 			nn_tflm_destroy_interp();
 			return NN_MODEL_ERR_TENSOR;
+		}
+		if (!nn_tflm_tensor_dims_fit(t)) {
+			nn_tflm_destroy_interp();
+			return NN_MODEL_ERR_DIMS;
 		}
 	}
 

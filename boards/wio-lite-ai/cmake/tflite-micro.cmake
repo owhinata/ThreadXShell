@@ -381,6 +381,7 @@ if(HOST_CXX)
                 -I "${TFLM_ROOT}/third_party/gemmlowp"
                 -I "${TFLM_ROOT}/third_party/ruy"
                 -I "${CMAKE_SOURCE_DIR}/svc/nn/tflm"
+                -I "${CMAKE_SOURCE_DIR}/svc/nn"
                 ${_vt_ops_def}
                 "${BOARD_DIR}/scripts/verify_tflite.cc"
                 # GetBuiltinCode() is declared in a header and defined here; it is the
@@ -391,6 +392,11 @@ if(HOST_CXX)
                 -o "${CMAKE_BINARY_DIR}/verify_tflite"
         DEPENDS "${BOARD_DIR}/scripts/verify_tflite.cc"
                 "${CMAKE_SOURCE_DIR}/svc/nn/tflm/nn_tflm_ops.h"
+                # The board's I/O check (issue #175) and the rule it states: a
+                # change to either must rebuild this gate, or it stops agreeing
+                # with the firmware it speaks for.
+                "${CMAKE_SOURCE_DIR}/svc/nn/tflm/nn_tflm_model_check.h"
+                "${CMAKE_SOURCE_DIR}/svc/nn/nn.h"
         COMMENT "host c++ -> verify_tflite (checks a .tflite before you send it)"
         VERBATIM)
     add_custom_target(verify-model DEPENDS "${CMAKE_BINARY_DIR}/verify_tflite")

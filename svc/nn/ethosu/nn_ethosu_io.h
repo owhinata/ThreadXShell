@@ -13,7 +13,9 @@
  * refuses has only moved the failure to the serial line, after the erase.  The
  * backend (nn_ethosu.cc) refuses a model that fails these with NN_MODEL_ERR_SHAPE
  * (the counts) or NN_MODEL_ERR_TENSOR (a tensor), the tflm backend's rule, so
- * `nn` means the same thing by a loaded model on every board.
+ * `nn` means the same thing by a loaded model on every board.  A dimension a
+ * descriptor cannot hold is NN_MODEL_ERR_DIMS, a rule of both backends, so it is
+ * not here: svc/nn/tflm/nn_tflm_model_check.h (issue #175).
  *
  * C++ (TfLiteTensor).  static inline and no state.
  */

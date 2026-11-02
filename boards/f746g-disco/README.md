@@ -440,8 +440,21 @@ is no built-in model) and after `nn model unload`.
 - A refused `nn model load --path` restores the previous model; from empty it
   stays empty and says `nothing is loaded`. The answer comes from the reload
   itself (whether a model is left), not from whether the handle is open.
+- [!] **A model whose input or output has a dimension outside 0..65535 is
+  refused, `the model was refused (-13)`** (`NN_MODEL_ERR_DIMS`, issue #175):
+  `nn_tensor`'s dims are 16-bit, and the descriptor used to be published with
+  the dimension truncated.  The tflm backend checks the model's I/O shapes
+  (`svc/nn/tflm/nn_tflm_model_check.h`) after the on-board verifier and the
+  schema version, before anything is planned, so the refusal restores the
+  previous model like any other; `verify_tflite` runs the same function.
 - `stedgeai_reloc` is the same: it starts empty, and `builtin` used to mean
   "unload" there before #131 (use `nn model unload`).
+- Parity gap: `stedgeai_reloc` does NOT refuse a dimension above 65535 yet.
+  Its own `reloc_map()` (`port/nn/nn_stedgeai_reloc.c`) narrows the runtime's
+  `uint32_t` B/H/W/C to the 16-bit descriptor unchecked, and that backend folds
+  every mapping failure into its own unnamed `-8`, so a distinct answer means
+  reworking its error numbering: issue #176.  (`stedgeai`'s shapes are fixed at
+  build time and `null`'s are constants, so neither can meet one.)
 - `null` and `stedgeai` cannot swap models: `nn model load` is unsupported and
   `nn model unload` answers as before without changing anything.
 
@@ -855,9 +868,14 @@ control stays off.
 
 `scripts/verify_tflite.cc` (`--target verify-model`) is this board's model gate
 for that asset build: the tree's own `VerifyModelBuffer()`, the staging
-capacity (512 KB), and the operators the firmware registers -- read from
+capacity (512 KB), the I/O check the backend runs before planning (issue
+#175: `svc/nn/tflm/nn_tflm_model_check.h` compiled in -- a missing or
+out-of-range I/O list is `NN_MODEL_ERR_FORMAT`, a dimension outside 0..65535
+`NN_MODEL_ERR_DIMS`), and the operators the firmware registers -- read from
 `svc/nn/tflm/nn_tflm_ops.h` under the `extended` profile, the same list
-`svc/nn/tflm/nn_tflm.cc` registers from.
+`svc/nn/tflm/nn_tflm.cc` registers from.  `test/host_tests.sh` runs it on
+generated files wrong in exactly one way (`cmake/fixtures/run_model_io_gate_tests.py`,
+against `build/f746-tflm` or `F746_TFLM_BUILD_DIR`; a loud SKIP without one).
 
 Measured at Step 4a (`build/f746-tflm`): Flash 796,868 B (was 792,100; the
 validator, the CRC and the claims), `RAM` 115,584 B of 224 KB.

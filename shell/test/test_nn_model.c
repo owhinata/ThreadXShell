@@ -23,6 +23,8 @@
  *     wio-lite-ai's dispatcher follows since #161);
  *   - every refusal code -- the backend's and this layer's own -- reaches the
  *     caller exactly as it was returned, never folded into another;
+ *   - the dims rule NN_MODEL_ERR_DIMS refuses on (issue #175) at its edges and
+ *     every rank, and that code's own sentence;
  *   - each critical section restores the mask value it found: a caller that
  *     already had interrupts masked still has them masked afterwards;
  *   - `arena` is the backend's reservation and `used` goes to 0 with no model;
@@ -42,6 +44,7 @@
  */
 #include <assert.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -57,6 +60,55 @@ static void cs_clean(void)
 {
 	assert(nn_host_depth == 0);
 	assert(nn_host_mask == 0u);
+}
+
+/* Issue #175: the rule NN_MODEL_ERR_DIMS refuses on (nn.h), the predicate both
+ * backends and the host gates call through svc/nn/tflm/nn_tflm_model_check.h.  Each
+ * dimension must fit struct nn_tensor's 16-bit dims, 0..NN_TENSOR_DIM_MAX, at every
+ * rank the descriptor holds (rank 0, a scalar, has nothing to refuse); the rank
+ * itself is not this rule's.  And the code has
+ * its own sentence, not "unknown error" and not another code's. */
+static void check_dims_rule(void)
+{
+	static const int32_t edge[] = { -1, 0, 65535, 65536, INT32_MIN, INT32_MAX };
+	static const int edge_fits[] = { 0, 1, 1, 0, 0, 0 };
+
+	assert(NN_TENSOR_DIM_MAX == 65535u);
+	assert(sizeof(((struct nn_tensor *)0)->dims[0]) == 2u);
+	for (unsigned e = 0; e < sizeof edge / sizeof edge[0]; e++)
+		assert(nn_tensor_dim_fits(edge[e]) == edge_fits[e]);
+	/* Every value of every rank 1..NN_MAX_DIMS a descriptor holds is judged by
+	 * itself: one bad dimension at any position is caught, the others fitting
+	 * (the per-element loop the model check runs over a shape). */
+	for (int rank = 1; rank <= NN_MAX_DIMS; rank++)
+		for (int at = 0; at < rank; at++)
+			for (unsigned e = 0; e < sizeof edge / sizeof edge[0]; e++) {
+				int32_t d[NN_MAX_DIMS] = { 1, 1, 1, 1 };
+				int all = 1;
+
+				d[at] = edge[e];
+				for (int i = 0; i < rank; i++)
+					all = all && nn_tensor_dim_fits(d[i]);
+				assert(all == edge_fits[e]);
+			}
+
+	assert(NN_MODEL_ERR_DIMS == -13);
+	assert(strcmp(nn_model_strerror(NN_MODEL_ERR_DIMS), "unknown error") != 0);
+	assert(strstr(nn_model_strerror(NN_MODEL_ERR_DIMS), "65535") != NULL);
+	{
+		static const int others[] = {
+			NN_MODEL_ERR_VERSION, NN_MODEL_ERR_OPS, NN_MODEL_ERR_ARENA,
+			NN_MODEL_ERR_TENSOR, NN_MODEL_ERR_SHAPE, NN_MODEL_ERR_EMPTY,
+			NN_MODEL_ERR_FORMAT, NN_MODEL_ERR_SLOT, NN_MODEL_ERR_ALIGN,
+			NN_ERR_ARG, NN_ERR_NOSUP, NN_ERR_STATE, NN_ERR_SCRATCH_HELD,
+		};
+
+		for (unsigned i = 0; i < sizeof others / sizeof others[0]; i++) {
+			assert(others[i] != NN_MODEL_ERR_DIMS);
+			assert(strcmp(nn_model_strerror(others[i]),
+			              nn_model_strerror(NN_MODEL_ERR_DIMS)) != 0);
+		}
+	}
 }
 
 /* ---- stub backend ------------------------------------------------------- */
@@ -248,6 +300,7 @@ int main(void)
 	assert(nn_run(m) == 0 && nn_last_cycles(m) == 0u);
 	cs_clean();
 
+	check_dims_rule();
 	printf("test_nn_model (first build fails): OK\n");
 	return 0;
 }
@@ -308,6 +361,7 @@ int main(void)
 	assert(nn_model_open(&m2) == 0 && stub.open_calls == 1);
 	cs_clean();
 
+	check_dims_rule();
 	printf("test_nn_model (empty from boot): OK\n");
 	return 0;
 }
@@ -349,6 +403,7 @@ int main(void)
 	assert(strcmp(nn_model_strerror(NN_MODEL_ERR_WINDOW), "unknown error") == 0);
 	assert(strcmp(nn_model_strerror(NN_MODEL_ERR_IDENT), "unknown error") == 0);
 	assert(strcmp(nn_model_strerror(NN_MODEL_ERR_PAYLOAD), "unknown error") == 0);
+	check_dims_rule();
 
 	printf("test_nn_model (no swap): OK\n");
 	return 0;
@@ -373,7 +428,8 @@ static void check_codes_pass_through(struct nn_model *m)
 		NN_MODEL_ERR_TENSOR, NN_MODEL_ERR_SHAPE, NN_MODEL_ERR_EMPTY,
 		NN_MODEL_ERR_FORMAT, NN_MODEL_ERR_SLOT, NN_MODEL_ERR_ALIGN,
 		NN_MODEL_ERR_WINDOW, NN_MODEL_ERR_IDENT, NN_MODEL_ERR_PAYLOAD,
-		-13, -14, -49, -51, -89, -93, -128, INT_MIN,
+		NN_MODEL_ERR_DIMS,
+		-14, -15, -49, -51, -89, -93, -128, INT_MIN,
 	};
 	void *buf;
 	uint32_t cap;
@@ -548,6 +604,7 @@ int main(void)
 	assert(!nn_model_present(m));
 	cs_clean();
 
+	check_dims_rule();
 	printf("test_nn_model: OK\n");
 	return 0;
 }

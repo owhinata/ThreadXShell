@@ -155,7 +155,15 @@ construction and destruction -- are in `nn_tflm_glue.h`, which the Ethos-U backe
 its own translation unit (issue #169).  The construction zeroes the whole arena
 first (issue #167): TFLM does not clear its per-op table, and a model refused
 part-way through it would otherwise leave entries the destructor calls as function
-pointers.  Neither keeps storage of its own; the board supplies everything
+pointers.  What a model's I/O must satisfy before it is planned is in
+`nn_tflm_model_check.h`, which both backends and the three host gates
+(`verify_tflite` on wio-lite-ai and f746g-disco, `verify_vela_model` on
+grove-vision-ai-v2) call (issue #175): subgraph 0's input / output lists present
+and naming tensors that exist (`NN_MODEL_ERR_FORMAT`), and every dimension inside
+0..65535, the range of `struct nn_tensor`'s 16-bit dims (`NN_MODEL_ERR_DIMS`, the
+predicate `nn_tensor_dim_fits()` in `nn.h`, tied to the field's width at compile
+time) -- checked on the model, before `AllocateTensors()`, and again on the
+planned tensors before they are published.  Neither keeps storage of its own; the board supplies everything
 that is a fact about its memory or its core, bound at link time (the callers of
 `nn.h` pass no context to carry it):
 
@@ -181,7 +189,12 @@ model bytes stay valid only because the caller holds its lease on the window
 for as long as the model is loaded.  Its refusals that have no staging
 counterpart have their own codes -- `NN_MODEL_ERR_WINDOW`, `NN_MODEL_ERR_IDENT`
 (kept apart from `NN_MODEL_ERR_FORMAT`) and `NN_MODEL_ERR_PAYLOAD` -- worded by
-that backend rather than by `nn_model_strerror()`.
+that backend rather than by `nn_model_strerror()`.  `NN_MODEL_ERR_DIMS` (issue
+#175) is both backends' and is worded by `nn_model_strerror()`; the reload's
+status and ending do not depend on which code refused, so it needed no table
+change.  [!] It judges the DECLARED shapes, so a model whose
+input or output declares `-1` (a dimension a RESHAPE used to resolve at
+`Prepare()`, loading as before) is now refused as `NN_MODEL_ERR_DIMS`.
 
 ### The Ethos-U backend (issue #169)
 
@@ -194,7 +207,7 @@ that board builds.
 
 | File | What it is |
 |---|---|
-| `nn_ethosu.cc` | The backend (`nn_backend_vt_selected`). A model is interpreted IN PLACE, inside the read window the board declares: no `load_region()`, no staging slot, no second buffer; the caller's lease keeps the bytes in place (`nn.h`). The checks run in one order -- window, length, alignment, identifier, bounded verifier, schema version, payload walk, resolver, AllocateTensors, the I/O rule -- each refusal its own code (`NN_MODEL_ERR_WINDOW` / `_IDENT` / `_PAYLOAD` for the ones only an in-place backend gives). It tells the cache protocol which arena is live and closes out each `Invoke()` with its backstop. Transactional like tflm: a refused model leaves the previous one (rebuilt from the same bytes) or the empty state. Uses `svc/nn/tflm/nn_tflm_glue.h` with its state named. |
+| `nn_ethosu.cc` | The backend (`nn_backend_vt_selected`). A model is interpreted IN PLACE, inside the read window the board declares: no `load_region()`, no staging slot, no second buffer; the caller's lease keeps the bytes in place (`nn.h`). The checks run in one order -- window, length, alignment, identifier, bounded verifier, schema version, payload walk, the model's I/O (`nn_tflm_model_check.h`), resolver, AllocateTensors, the I/O rule -- each refusal its own code (`NN_MODEL_ERR_WINDOW` / `_IDENT` / `_PAYLOAD` for the ones only an in-place backend gives; `_DIMS` as tflm). It tells the cache protocol which arena is live and closes out each `Invoke()` with its backstop. Transactional like tflm: a refused model leaves the previous one (rebuilt from the same bytes) or the empty state. Uses `svc/nn/tflm/nn_tflm_glue.h` with its state named. |
 | `nn_ethosu.h` | C, for the adapter: `nn_ethosu_strerror()`, the sentences for the in-place refusals (every other code goes to `nn_model_strerror()`). |
 | `nn_ethosu_state.h` | The state type and the board facts (name prefix, the read window). Needs `NN_TFLM_OPS_ETHOSU_PROFILE`: the resolver's size is part of the type. |
 | `nn_ethosu_mem.h` | The arena declaration, sized by the board's `NN_ETHOSU_ARENA_KB`. |
@@ -404,7 +417,7 @@ relative to `svc/`.
 | `nn/nn_desc` | `nn_tensor` -> `svc/nn/tensor.h` descriptor, for the boards that use `nn.h`. |
 | `nn/nn_input_contract` | wio-lite-ai's and f746g-disco's camera input (issue #162): `nn_input_admit()`, whether a camera can fill the input tensor (float32 or int8, 1xHxWx1/3, a positive normal int8 scale and an int8 zero point, a 4-byte aligned float32 buffer, the bytes for the shape in 64 bits; each refusal its own reason), and the inline per-element conversion (`nn_input_f32()`, `nn_input_i8()`: one explicit fused multiply-add for the `nn norm` range, then 1/scale, a +-255 limit, +-0.5 toward zero, zero point, saturation). The boards keep only how a pixel is sampled; grove-vision-ai-v2 does not use it. Host-tested against the target's instruction sequence. |
 | `nn/nn_input_codes` | Those reasons as the start codes and sentences both boards report (`NN_INPUT_START_ERR_*`: -3, -11, -18..-25), which each board's `nn_camera.h` takes by name. |
-| `nn/tflm/` | The one tflite-micro backend of wio-lite-ai and f746g-disco (issue #161; built only with `CONFIG_NN_BACKEND=tflm`, into the board's `tflm` library): `nn_tflm.cc` (the vtable), `nn_tflm_state.h` (its state type and facts, defined by the board), `nn_tflm_mem.h` (the buffers the board places; see [The inference layer](#the-inference-layer-is-one-implementation-issue-161)), `nn_tflm_ops.h` (the op profiles, shared with each board's host `verify_tflite`; includes the one-operator `ethosu` profile), `nn_tflm_fit.h` (which slot a model range may be adopted from, never the live one; host-tested), `nn_tflm_glue.h` (the glue that does not depend on staging -- descriptors, name, empty state, op resolver, interpreter destruction -- included into each TFLM-based backend's own translation unit with its state object named by `NN_TFLM_GLUE_STATE` / `NN_TFLM_GLUE_FACTS`; issue #169) and `cxx_runtime.cc` (the C++ runtime shim). One of the two directories under `svc/` that include TFLM headers (the other is `nn/ethosu/`). |
+| `nn/tflm/` | The one tflite-micro backend of wio-lite-ai and f746g-disco (issue #161; built only with `CONFIG_NN_BACKEND=tflm`, into the board's `tflm` library): `nn_tflm.cc` (the vtable), `nn_tflm_state.h` (its state type and facts, defined by the board), `nn_tflm_mem.h` (the buffers the board places; see [The inference layer](#the-inference-layer-is-one-implementation-issue-161)), `nn_tflm_ops.h` (the op profiles, shared with each board's host `verify_tflite`; includes the one-operator `ethosu` profile), `nn_tflm_fit.h` (which slot a model range may be adopted from, never the live one; host-tested), `nn_tflm_model_check.h` (the model's I/O before planning -- lists present, indices in range, every dimension within 0..65535 -- shared with the Ethos-U backend and the three host gates; issue #175), `nn_tflm_glue.h` (the glue that does not depend on staging -- descriptors, name, empty state, op resolver, interpreter destruction -- included into each TFLM-based backend's own translation unit with its state object named by `NN_TFLM_GLUE_STATE` / `NN_TFLM_GLUE_FACTS`; issue #169) and `cxx_runtime.cc` (the C++ runtime shim). One of the two directories under `svc/` that include TFLM headers (the other is `nn/ethosu/`). |
 | `nn/ethosu/` | grove-vision-ai-v2's backend behind `nn/nn.c` (issue #169): `nn_ethosu.cc` (the vtable; models interpreted in place inside the board's read window), its state, facts and arena headers, the bounded verifier and its limits (`npu_verify.h`), the payload locator and model refusal (`npu_model_scan`) and the command-stream walk (`npu_payload`), which the host `verify_vela_model` compiles from the same files, and the arena ownership protocol with the driver's cache hooks (`npu_cache`) (see [The Ethos-U backend](#the-ethos-u-backend-issue-169)). |
 | `nn/nn_svc_adapter.h` | Static-inline helpers every adapter uses to build a result and an `nn info` line. |
 | `nn/nn_detail.h` | The bound on a board's `nn` explanation text and its build-time check. |

@@ -31,9 +31,12 @@
  *   2. the "TFL3" file identifier at offset 4
  *   3. tflite::VerifyModelBuffer() -- the full structural walk
  *   4. the schema version the runtime understands
- *   5. [!] that every operator the model uses is one this FIRMWARE registered
+ *   5. that subgraph 0's input / output lists name tensors that exist and every
+ *      DECLARED dimension of those tensors fits a descriptor (0..65535) -- the FIRMWARE'S
+ *      OWN check, svc/nn/tflm/nn_tflm_model_check.h, compiled in (issue #175)
+ *   6. [!] that every operator the model uses is one this FIRMWARE registered
  *
- * Step 5 is the one the board cannot do well.  TFLM's AllocateTensors() returns a
+ * Step 6 is the one the board cannot do well.  TFLM's AllocateTensors() returns a
  * single kTfLiteError for "an operator is missing" and "the activations do not fit",
  * and with TF_LITE_STRIP_ERROR_STRINGS there is no message to tell them apart -- so
  * `nn model load` has to report both possibilities and let you guess.  Here the
@@ -55,6 +58,10 @@
 #include "tensorflow/lite/micro/micro_interpreter.h"
 
 #include "nn_tflm_ops.h"
+/* The board's own check of the model's I/O (issue #175): the function the tflm
+ * backend calls before it plans a model, so this gate and the board reach the same
+ * verdict on the same bytes. */
+#include "nn_tflm_model_check.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -216,7 +223,25 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	/* 5. operator coverage ------------------------------------------------ */
+	/* 5. the I/O a descriptor can describe (issue #175) ------------------- */
+	switch (nn_tflm_model_io_check(model)) {
+	case 0:
+		break;
+	case NN_MODEL_ERR_DIMS:
+		printf("RESULT  : REJECT -- an input/output tensor has a dimension outside\n"
+		       "          0..65535, which a tensor descriptor (16 bits) cannot hold.\n"
+		       "          The board refuses it as NN_MODEL_ERR_DIMS (%d).\n",
+		       NN_MODEL_ERR_DIMS);
+		return 1;
+	default:
+		printf("RESULT  : REJECT -- subgraph 0 has no tensors or no input/output list,\n"
+		       "          or one names a tensor that does not exist.  The board refuses\n"
+		       "          it as NN_MODEL_ERR_FORMAT (%d).\n", NN_MODEL_ERR_FORMAT);
+		return 1;
+	}
+	printf("io dims : ok -- every declared input/output dimension fits 0..65535\n");
+
+	/* 6. operator coverage ------------------------------------------------ */
 	std::vector<std::string> missing;
 	const auto *codes = model->operator_codes();
 	if (codes) {
@@ -262,7 +287,9 @@ int main(int argc, char **argv)
 
 	/*
 	 * Deliberately narrow wording.  What was established is: the flatbuffer is
-	 * structurally sound, the schema version is one this runtime reads, and every
+	 * structurally sound, the schema version is one this runtime reads, the graph's
+	 * DECLARED I/O shapes pass the board's own pre-planning check (the planned
+	 * ones, which a kernel's Prepare() could change, are not seen here), and every
 	 * BUILTIN OPERATOR CODE it references is in the registered set.  What was NOT
 	 * established, and cannot be from here, is that each kernel's Prepare() accepts
 	 * this model's particular tensor shapes and types, that the operator VERSIONS are
@@ -273,10 +300,11 @@ int main(int argc, char **argv)
 	 * failure this whole tool exists to avoid: a check that reports more confidence
 	 * than it earned.
 	 */
-	printf("RESULT  : PASS -- structurally valid, schema version %d, and no unregistered\n"
-	       "          builtin operators.  Remaining checks happen on the board when\n"
-	       "          `nn model load` calls AllocateTensors(): operator versions, each\n"
-	       "          kernel's shape/type constraints, and whether the activations fit\n"
-	       "          the arena.\n", TFLITE_SCHEMA_VERSION);
+	printf("RESULT  : PASS -- structurally valid, schema version %d, declared I/O\n"
+	       "          shapes fit 0..65535, and no unregistered builtin operators.\n"
+	       "          Remaining checks happen on the board when `nn model load`\n"
+	       "          calls AllocateTensors(): the planned I/O shapes, operator\n"
+	       "          versions, each kernel's shape/type constraints, and whether\n"
+	       "          the activations fit the arena.\n", TFLITE_SCHEMA_VERSION);
 	return 0;
 }

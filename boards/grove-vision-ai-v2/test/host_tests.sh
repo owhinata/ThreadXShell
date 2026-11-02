@@ -733,3 +733,23 @@ gcc $CFLAGS -DCLI_USE_COLOR=0 \
     "$HOST_TEST_BACKEND/cli_backend_dummy.c" "$st/host_glue.c" \
     $LDFLAGS -o "$out/test_camera_table_grove"
 "$out/test_camera_table_grove"
+
+# issue #175 -- the model I/O check this board's host gate (verify_vela_model) compiles from
+# svc/nn/tflm/nn_tflm_model_check.h, the function the backend runs before it plans a
+# model: generated files wrong in exactly one way must be refused as the board would
+# refuse them (an I/O dimension outside 0..65535 -> NN_MODEL_ERR_DIMS, a missing or
+# out-of-range I/O list -> NN_MODEL_ERR_FORMAT), and the 65535 control must pass the
+# walk.  The gate is the one a CONFIGURED tree builds (`model-tools`, host c++ against the
+# tree's TFLM), so it needs that tree: build/grove-vision-ai-v2, or
+# GROVE_BUILD_DIR to use another.  No tree, or no gate rule in it: a loud SKIP.
+io_build="${GROVE_BUILD_DIR:-$HOST_TEST_REPO/build/grove-vision-ai-v2}"
+if [ ! -f "$io_build/build.ninja" ]; then
+    echo "run_model_io_gate_tests: SKIPPED -- no configured build tree at" \
+         "$io_build (set GROVE_BUILD_DIR to use another)" >&2
+elif ! ninja -C "$io_build" -t targets all 2>/dev/null | grep -q "^verify_vela_model:"; then
+    echo "run_model_io_gate_tests: SKIPPED -- $io_build has no verify_vela_model rule" \
+         "(a tflm backend and a host C++ compiler are needed)" >&2
+else
+    python3 "$HOST_TEST_REPO/cmake/fixtures/run_model_io_gate_tests.py" \
+        --build-dir "$io_build" --gate verify_vela_model --style vela
+fi

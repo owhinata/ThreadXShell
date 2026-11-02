@@ -28,9 +28,11 @@
  * the one place its limits are declared -- the host gate runs the same one), and
  * only then is the buffer followed as a model: the schema version, then the
  * Ethos-U payload walk (npu_model_scan / npu_payload: exactly one COMMAND_STREAM,
- * last, in input tensor 0, never a variable tensor), then the op resolver (one
- * operator), then AllocateTensors.  Each refusal is its own code and none is folded
- * into another (nn.h); a refusal before AllocateTensors changes nothing.
+ * last, in input tensor 0, never a variable tensor), then the model's I/O
+ * (nn_tflm_model_check.h, shared with the tflm backend and the host gate), then
+ * the op resolver (one operator), then AllocateTensors.  Each refusal is its own
+ * code and none is folded into another (nn.h); a refusal before AllocateTensors
+ * changes nothing.
  *
  * [!] THE ARENA'S CACHE MAINTENANCE IS NOT HERE AND NOT THE CALLER'S.  The protocol
  * (svc/nn/ethosu/npu_cache.c) maintains the whole arena at the two instants it
@@ -63,6 +65,7 @@
 #define NN_TFLM_GLUE_STATE  nn_ethosu_board_state
 #define NN_TFLM_GLUE_FACTS  nn_ethosu_board_facts
 #include "nn_tflm_glue.h"
+#include "nn_tflm_model_check.h" /* the I/O dims rule, shared with the host gate */
 
 #include <new>
 #include <cstddef>
@@ -152,6 +155,14 @@ int build_interp(const void *data, uint32_t len)
 	if (npu_model_payload_refusal(model) != nullptr)
 		return NN_MODEL_ERR_PAYLOAD;
 
+	/* The I/O a descriptor can describe, on the model and before anything is
+	 * planned or destroyed (issue #175, nn_tflm_model_check.h -- the tflm backend
+	 * and the host gate run the same function): FORMAT for an I/O list that is
+	 * missing or indexes past the tensors, DIMS for a dimension outside 0..65535. */
+	rc = nn_tflm_model_io_check(model);
+	if (rc != 0)
+		return rc;
+
 	nn_ethosu_op_resolver *resolver = nn_tflm_get_resolver();
 	if (!resolver)
 		return NN_MODEL_ERR_OPS;
@@ -190,9 +201,17 @@ int build_interp(const void *data, uint32_t len)
 			goto refused;
 		}
 		for (size_t i = 0; i < n_in + n_out; i++) {
-			if (!nn_ethosu_tensor_ok(i < n_in ? s.interp->input(i)
-			                                  : s.interp->output(i - n_in))) {
+			const TfLiteTensor *t = i < n_in ? s.interp->input(i)
+			                                 : s.interp->output(i - n_in);
+
+			if (!nn_ethosu_tensor_ok(t)) {
 				rc = NN_MODEL_ERR_TENSOR;
+				goto refused;
+			}
+			/* The backstop behind nn_tflm_model_io_check() above, on the
+			 * planned tensor about to be published: same rule, same code. */
+			if (!nn_tflm_tensor_dims_fit(t)) {
+				rc = NN_MODEL_ERR_DIMS;
 				goto refused;
 			}
 		}
